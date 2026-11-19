@@ -5,6 +5,7 @@ import { describe, expect, test } from 'bun:test';
 import { forbiddenMarkers, PRIVATE_MARKER, SECRET_MARKER } from '../scripts/release-check/fixture.ts';
 import {
   buildReport,
+  diagnoseFailures,
   escapeHtml,
   renderHtml,
   scanReport,
@@ -65,6 +66,26 @@ describe('release-check report verdict', () => {
   test('one failed check in a machine or an agent fails the run', () => {
     expect(buildReport(input({ machines: [machine([{ id: 'c1', title: 'x', status: 'fail' }])] })).verdict).toBe('fail');
     expect(buildReport(input({ machines: [machine([], [{ id: 'q.no-leak', title: 'x', status: 'fail' }])] })).verdict).toBe('fail');
+  });
+
+  test('setup failures and candidate failures have separate JSON and HTML summaries across upgrade stages and agents', () => {
+    const m = machine([{ id: 'setup.preflight', title: 'Setup', status: 'fail' }], [{ id: 'candidate.agent', title: 'Agent', status: 'fail' }]);
+    m.upgrade = {
+      from: { id: 'before', label: 'Old', timings: {}, checks: [{ id: 'setup.old-install', title: 'Old install', status: 'fail' }], agents: [], screenshots: [], logs: [] },
+      step: { label: 'Update', checks: [{ id: 'upgrade.installer', title: 'Install', status: 'fail' }], differences: [] },
+      afterLabel: 'After',
+    };
+    const report = buildReport(input({ machines: [m] }));
+    expect(report.verdict).toBe('fail');
+    expect(report.errors).toEqual([]);
+    expect(report.failures.setup.map(check => check.id)).toEqual(['setup.old-install', 'setup.preflight']);
+    expect(report.failures.candidate.map(check => check.id)).toEqual(['upgrade.installer', 'candidate.agent']);
+    const html = renderHtml(report);
+    expect(html).toContain('Setup failures (2)');
+    expect(html).toContain('Candidate failures (2)');
+    // Older v1 reports lack the new summary field and still render.
+    const legacy = { ...report }; delete (legacy as Partial<typeof report>).failures;
+    expect(renderHtml(legacy)).toContain('Setup failures (2)');
   });
 
   test('a run in which every agent was skipped fails: nothing was asked of the product', () => {
@@ -180,4 +201,18 @@ describe('release-check report scan', () => {
     const privateLeak = buildReport(input({ errors: [`note ${PRIVATE_MARKER}`] }));
     expect(scanReport(privateLeak, markers).some((f) => f.markerId === 'private-marker')).toBe(true);
   });
+});
+
+test('diagnosis keeps the first operation, blocked journeys, independent failures and surgical rerun apart', () => {
+  const first = { id: 'journey.fix-one-item', leg: 'journeys', stage: 'install', at: '2026-11-18T12:00:00Z', journey: 'fix-one-item', step: '5. Make it Private', rerun: 'bun ~/rc/agent.js journeys --only fix-one-item --skip-screens' };
+  const other = { id: 'limits.scripted', leg: 'limits', stage: 'install', at: '2026-11-18T12:01:00Z' };
+  const skipped = [{ journey: 'backup-for-restore', leg: 'restore', because: first.id, stage: 'install' }];
+  const diagnosis = diagnoseFailures([other, first], skipped);
+  expect(diagnosis).toEqual({ first, skippedJourneys: skipped, independentFailures: [other], rerunJourney: { journey: first.journey, command: first.rerun } });
+  const html = renderHtml(buildReport(input({ machines: [{ ...machine([]), diagnosis }] })));
+  expect(html).toContain('First failed operation');
+  expect(html).toContain('5. Make it Private');
+  expect(html).toContain('Independent failures');
+  expect(html).toContain('blocked by journey.fix-one-item');
+  expect(html).toContain(first.rerun);
 });

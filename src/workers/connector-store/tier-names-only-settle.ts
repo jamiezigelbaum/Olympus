@@ -19,7 +19,7 @@
 // resumed from the ledger, starting over once the end is reached.
 
 import { CONTENT_NAMES_ONLY_REASON, type TierDecision } from '../classification/tier-classifier.ts';
-import { copyServingLayer, parseTierLedgerIdentity, tierLedgerIdentityOfRecord, type TierLedgerRecord } from '../classification/tier-ledger.ts';
+import { copyServingLayer, parseTierLedgerIdentity, tierLedgerIdentityOfRecord, type TierLedgerIdentity, type TierLedgerRecord } from '../classification/tier-ledger.ts';
 import { CONTAINER_MIME_TYPES } from './local-index.ts';
 import { findInLedger, runPassHere, runPassOffThread, turn, type LoopPass } from './loop-pass.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
@@ -32,6 +32,8 @@ export interface TierNamesOnlySettleReport {
   checked: number;
   /** Of those, the ones a names-only rule covers: settled on their names. */
   settled: number;
+  failed: number;
+  next?: TierLedgerIdentity;
 }
 
 /** The settle on its caller's connection (a direct caller, not the engine's loop). */
@@ -40,18 +42,22 @@ export function settleNamesOnlyItems(options: { set: TieredStoreSet; limit?: num
 }
 
 /** The settle on the engine's loop: its window is read on the ledger's read worker, a turn between rows. */
-export function settleNamesOnlyItemsOffThread(options: { set: TieredStoreSet; limit?: number; turn?: () => Promise<void> | undefined }): Promise<TierNamesOnlySettleReport> {
+export function settleNamesOnlyItemsOffThread(options: {
+  set: TieredStoreSet; limit?: number; turn?: () => Promise<void> | undefined;
+  /** The judge tracks its own lap, independent of the listing's saved cursor. */
+  cursor?: { after?: TierLedgerIdentity };
+}): Promise<TierNamesOnlySettleReport> {
   return runPassOffThread(namesOnlySettlePass(options), { family: 'names-only-settle', ...(options.turn ? { turn: options.turn } : {}) });
 }
 
-function* namesOnlySettlePass(options: { set: TieredStoreSet; limit?: number }): LoopPass<TierNamesOnlySettleReport> {
-  const report: TierNamesOnlySettleReport = { checked: 0, settled: 0 };
+function* namesOnlySettlePass(options: { set: TieredStoreSet; limit?: number; cursor?: { after?: TierLedgerIdentity } }): LoopPass<TierNamesOnlySettleReport> {
+  const report: TierNamesOnlySettleReport = { checked: 0, settled: 0, failed: 0 };
   const { set } = options;
   // Only a lane whose text arrives after listing routes an unread item.
   if (!set.readsContentLater()) return report;
   const ledger = set.ledger;
   const limit = Math.max(1, options.limit ?? DEFAULT_NAMES_ONLY_SETTLE_ROWS);
-  const after = parseTierLedgerIdentity(ledger.readMeta(SETTLE_META_KEY));
+  const after = options.cursor ? options.cursor.after : parseTierLedgerIdentity(ledger.readMeta(SETTLE_META_KEY));
   // A bounded window of the ledger per call, matching or not (listAwaitingTextWindow).
   const { records: rows, resumeAfter } = yield* findInLedger(ledger, () => ledger.listAwaitingTextWindowSteps({ limit, ...(after ? { after } : {}) }));
   for (const found of rows) {
@@ -62,16 +68,20 @@ function* namesOnlySettlePass(options: { set: TieredStoreSet; limit?: number }):
     const record = set.ledger.getCurrent(tierLedgerIdentityOfRecord(found));
     if (!record?.routed || record.contentRead || record.metadataPending || record.state === 'moving') continue;
     try {
-      if (settleOne(set, record)) report.settled += 1;
+      const outcome = settleOne(set, record);
+      if (outcome === 'unreadable') report.failed += 1;
+      else if (outcome) report.settled += 1;
     } catch {
       // Left pending; the item's next listing or a later pass settles it.
+      report.failed += 1;
     }
   }
-  ledger.writeMeta(SETTLE_META_KEY, resumeAfter ? JSON.stringify(resumeAfter) : '');
+  if (resumeAfter) report.next = resumeAfter;
+  if (!options.cursor) ledger.writeSettleProgress(SETTLE_META_KEY, resumeAfter ? JSON.stringify(resumeAfter) : '');
   return report;
 }
 
-function settleOne(set: TieredStoreSet, record: TierLedgerRecord): boolean {
+function settleOne(set: TieredStoreSet, record: TierLedgerRecord): boolean | 'unreadable' {
   if (!record.reasons.includes('content:unread') || record.decidedBy === 'override') return false;
   const identity = tierLedgerIdentityOfRecord(record);
   const current = set.ledger.copies(identity).filter((copy) => copy.state === 'current');
@@ -79,7 +89,7 @@ function settleOne(set: TieredStoreSet, record: TierLedgerRecord): boolean {
   const domain = names ? set.domainForCorpus(names.corpusId) : undefined;
   const store = domain ? set.store(domain) : undefined;
   const exported = store?.exportItemCopy(identity);
-  if (!store || !exported) return false;
+  if (!store || !exported) return names ? 'unreadable' : false;
   const localId = exported.columns['local_item_id'];
   if (typeof localId === 'string' && store.readOnDemand(localId)) return false;
   const locator = exported.columns['locator_uri'];
@@ -90,7 +100,7 @@ function settleOne(set: TieredStoreSet, record: TierLedgerRecord): boolean {
   const path = typeof locator === 'string' ? locator : undefined;
   // A store's own metadata-only rule, or the owner's folder choice for the
   // source (its scope approval), which a store's rules do not carry (#1295).
-  if (!container && store.metadataOnlyRuleForLocator(path) === undefined && !set.ownerKeepsNamesOnly(path)) return false;
+  if (!container && store.metadataOnlyRuleForLocator(path) === undefined && !set.ownerKeepsNamesOnly(path, true)) return false;
   const decision: TierDecision = {
     metadataTier: record.metadataTier,
     contentTier: record.metadataTier,

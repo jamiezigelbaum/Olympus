@@ -1,9 +1,11 @@
 import { Database } from 'bun:sqlite';
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
+import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
+import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { LocalConnectorStore, nextVectorDigestBackfillRows, setVectorDigestBackfillHold, connectorStoreCurrentEmbeddingPageQuery, connectorStoreCurrentEmbeddingRowsIterator, connectorStoreVectorDigestPageQuery, forEachPackedVectorDigest, scanDigestPages, type VectorDigestPackedPage } from '../src/workers/connector-store/local-index.ts';
 import { applyVectorDigestWindow, backfillVectorDigests, createVectorDigestSchema, vectorDigestSourceQuery, vectorDigestState, writeVectorDigest, type VectorDigestSourceRow } from '../src/workers/connector-store/vector-digest.ts';
 import { cosineSimilarity, decodeEmbedding, encodeEmbedding, type SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
@@ -21,8 +23,8 @@ beforeAll(() => { delete process.env.OLYMPUS_VECTOR_DIGEST; });
 afterAll(() => { if (digestSetting !== undefined) process.env.OLYMPUS_VECTOR_DIGEST = digestSetting; });
 const modelId = 'digest-fixture';
 const provider: SourceEmbeddingProvider = { provider: 'built-in', backend: 'local', modelId, dimension: 3, configHash: '1', epochId: '1', async embed(inputs) { return inputs.map(() => [1, 0, 0]); } };
-const open = (dbPath = ':memory:') => {
-  const store = new LocalConnectorStore({ dbPath, corpusId: 'internal.fixture.digest', family: 'file', trustDomain: 'internal', tierLedger: null });
+const open = (dbPath = ':memory:', tierLedger: TierLedger | null = null) => {
+  const store = new LocalConnectorStore({ dbPath, corpusId: 'internal.fixture.digest', family: 'file', trustDomain: 'internal', tierLedger });
   // These disposable fixtures exercise indexing and backfill, not power-loss
   // durability. Hundreds of FULL-synchronous commits otherwise dominate seed
   // time on the runner (with either vacuum mode).
@@ -402,6 +404,128 @@ test('when ledger visibility hides every first-pass candidate, the lane scans wi
   } finally { store.close(); }
 });
 
+function heldVectorStore(count: number, heldCount: number) {
+  const ledger = new TierLedger({ dbPath: ':memory:' });
+  const store = open(':memory:', ledger);
+  const close = () => { store.close(); ledger.close(); };
+  const decision = classifyItemTiers({ signals: {}, text: 'Ordinary harbor notes.' });
+  const copies = [{ corpusId: store.corpusId, trustDomain: 'internal' as const, layers: 'both' as const }];
+  const setHold = (id: number, embedHold: boolean) => ledger.recordRoutedPlacement(
+    { provider: 'fixture', accountScope: 'a', providerItemId: String(id) }, decision, { copies, embedHold },
+  );
+  try {
+    const db = database(store);
+    // Seed the real store directly so no ingest or embedding pass warms its
+    // visibility memo. Equal cosines make the ranked item order explicit.
+    const sequence = 'WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < ?)';
+    const embedding = encodeEmbedding([1, 0, 0], 3);
+    db.transaction(() => {
+      db.query(`INSERT INTO sync_runs (sync_run_id, corpus_id, connector_id, status, started_at)
+        VALUES ('seed', ?, 'fixture', 'completed', '2026-11-01')`).run(store.corpusId);
+      db.query(`${sequence} INSERT INTO items (item_pk, provider, family, account_scope, provider_item_id,
+        local_item_id, title, mime_type, fetched_at, indexed_at, trust_tier, sync_run_id)
+        SELECT n, 'fixture', 'file', 'a', n - 1, 'a:' || (n - 1), 'Note ' || n,
+          'text/plain', '2026-11-01', '2026-11-01', 'S3', 'seed' FROM seq`).run(count);
+      db.query(`${sequence} INSERT INTO chunks (chunk_pk, item_pk, chunk_index, bounded_text, content_hash, embedding_input_hash, indexed_at)
+        SELECT n, n, 0, 'Harbor note ' || n, 'hash', 'hash', '2026-11-01' FROM seq`).run(count);
+      db.query(`${sequence} INSERT INTO chunk_embeddings (chunk_pk, model_id, item_pk, content_hash, embedding, embedded_at)
+        SELECT n, ?, n, 'hash', ?, '2026-11-01' FROM seq`).run(count, modelId, embedding);
+    })();
+    finish(db);
+    const ledgerDb = (ledger as unknown as { db: Database }).db;
+    ledgerDb.transaction(() => { for (let id = 0; id < count; id++) setHold(id, id < heldCount); })();
+    const lane = store as unknown as {
+      vectorScanExcludedItemPks: LocalConnectorStore['vectorScanExcludedItemPks'];
+      visibleVectorItemPks: LocalConnectorStore['visibleVectorItemPks'];
+      searchRowsByItemPks: LocalConnectorStore['searchRowsByItemPks'];
+      chunkMatchForChunkPk: LocalConnectorStore['chunkMatchForChunkPk'];
+    };
+    const scanExclusions = lane.vectorScanExcludedItemPks.bind(store);
+    lane.vectorScanExcludedItemPks = () => {
+      const exclusions = scanExclusions();
+      expect(exclusions).toBeUndefined();
+      return exclusions;
+    };
+    return { store, lane, setHold, close };
+  } catch (error) {
+    close();
+    throw error;
+  }
+}
+
+test('cold vector visibility over 5,000 items and 90% held yields without changing rows or order', async () => {
+  const { store, lane, close } = heldVectorStore(5_000, 4_500);
+  const visible = lane.visibleVectorItemPks.bind(store);
+  const limit = 20;
+  const realNow = performance.now.bind(performance);
+  let elapsed = 0;
+  let turnStarted: number | undefined;
+  const stretches: number[] = [];
+  const batches: number[] = [];
+  // Advance the slice clock deterministically even on a fast runner. Use the
+  // actual clock to measure each synchronous stretch into its next microtask.
+  const clock = spyOn(performance, 'now').mockImplementation(() => realNow() + elapsed);
+  lane.visibleVectorItemPks = (pks, ...scope) => {
+    if (turnStarted === undefined) {
+      const started = turnStarted = realNow();
+      queueMicrotask(() => { stretches.push(realNow() - started); turnStarted = undefined; });
+    }
+    const eligible = visible(pks, ...scope);
+    batches.push(pks.length);
+    elapsed += 20;
+    return eligible;
+  };
+  try {
+    const result = await store.vectorSearchLane('harbor note', provider, limit, 'a');
+    expect(result.skippedReason).toBeUndefined();
+    expect(result.rows.map(row => row.sourceItem.providerItemId)).toEqual(
+      Array.from({ length: limit }, (_, i) => String(4_500 + i)),
+    );
+    expect(batches).toEqual([...Array<number>(23).fill(200), limit]);
+    expect(stretches.length).toBeGreaterThanOrEqual(8);
+    expect(Math.max(...stretches)).toBeLessThan(200);
+
+    // Every cosine is 1 in this fixture. The unsliced reference can check
+    // every candidate in PK order at once and then take the first visible K.
+    const ordered = database(store).query('SELECT item_pk, chunk_pk FROM chunks ORDER BY item_pk').all() as Array<{ item_pk: number; chunk_pk: number }>;
+    const allowed = visible(ordered.map(row => row.item_pk), 'a');
+    const winners = ordered.filter(row => allowed.has(row.item_pk)).slice(0, limit);
+    const unsliced = lane.searchRowsByItemPks(winners.map(row => row.item_pk), 'a').map((row, index) => ({
+      ...row, chunk: lane.chunkMatchForChunkPk(winners[index]!.chunk_pk, 'semantic')!, bestCosine: 1,
+    }));
+    expect(result.rows).toEqual(unsliced);
+  } finally { clock.mockRestore(); close(); }
+});
+
+test('a hold during a vector visibility yield drops provisional winners and refills in rank order', async () => {
+  const { store, lane, setHold, close } = heldVectorStore(400, 197);
+  const visible = lane.visibleVectorItemPks.bind(store);
+  const realNow = performance.now.bind(performance);
+  let elapsed = 0;
+  const clock = spyOn(performance, 'now').mockImplementation(() => realNow() + elapsed);
+  let holdDuringYield: Promise<void> | undefined;
+  const batches: number[] = [];
+  lane.visibleVectorItemPks = (pks, ...scope) => {
+    batches.push(pks.length);
+    const eligible = visible(pks, ...scope);
+    if (batches.length === 1) {
+      // The first batch has three visible items. Hold its two provisional
+      // winners so the refill must use its spare and read the next batch.
+      holdDuringYield = new Promise<void>((resolve) => setImmediate(resolve)).then(() => {
+        setHold(197, true);
+        setHold(198, true);
+      });
+      elapsed += 51;
+    }
+    return eligible;
+  };
+  try {
+    const result = await store.vectorSearchLane('harbor note', provider, 2, 'a');
+    expect(result.rows.map(row => row.sourceItem.providerItemId)).toEqual(['199', '200']);
+    expect(batches).toEqual([200, 2, 200, 2]);
+  } finally { await holdDuringYield; clock.mockRestore(); close(); }
+});
+
 test('a file store backfills on the read pool: the worker thread only writes digests', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'vector-digest-pool-'));
   const store = open(join(dir, 'store.sqlite'));
@@ -434,7 +558,8 @@ test('with OLYMPUS_VECTOR_DIGEST=off, a store with a complete digest runs the ex
     const query = db.query.bind(db);
     db.query = ((sql: string) => { queries.push(sql); return query(sql); }) as typeof db.query;
     const exact = await store.vectorSearchLane('harbor', provider, 10, 'a');
-    expect(queries.some(sql => sql.includes('chunk_vector_digest'))).toBe(false);
+    // The scheduled backfill's own state probe (chunk_vector_digest_meta) can land in this window; the scan reading the digest is what must not happen.
+    expect(queries.filter(sql => sql.includes('chunk_vector_digest') && !sql.includes('chunk_vector_digest_meta'))).toEqual([]);
     expect(exact).toEqual(withDigest);
   } finally {
     if (saved === undefined) delete process.env.OLYMPUS_VECTOR_DIGEST; else process.env.OLYMPUS_VECTOR_DIGEST = saved;
@@ -635,6 +760,25 @@ test('re-scoring stops by score, not count: an item the 256-dimension digest ran
     if ('skippedReason' in result) throw new Error(result.skippedReason);
     expect(result.exhausted).toBe(false);
     expect(rescored).toBeLessThanOrEqual(1200);
+  } finally { db.close(); }
+});
+
+test('a store with fewer related items than the limit is not read back whole: re-scoring stops at the score floor', async () => {
+  const db = numericStore();
+  try {
+    db.transaction(() => {
+      insert(db, 1, [1, 0, 0]);
+      insert(db, 2, [0.9, 0.1, 0]);
+      // Unrelated to the question: exact cosine 0, far under the lane's floor.
+      for (let i = 3; i <= 6000; i++) insert(db, i, [0, 1, 0]);
+    })();
+    finish(db);
+    let rescored = 0;
+    const result = await scanDigestPages(reader(db, (q, rows) => {
+      if (q.sql.includes('FROM json_each(?) pick')) rescored += (rows as unknown[]).length;
+    }), [1, 0, 0], { modelId }, undefined, 5);
+    expect(rank(result, 2)).toEqual([1, 2]);
+    expect(rescored).toBeLessThanOrEqual(400);
   } finally { db.close(); }
 });
 

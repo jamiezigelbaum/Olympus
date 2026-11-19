@@ -1,7 +1,7 @@
 import { readOpenClawPluginRemote } from './openclaw-plugin-remote.ts';
 import { linuxDesktopEntryPaths } from './linux-desktop-entry.ts';
 /** One Linux layout shared by installers, services and consumers. No OpenClaw dependency. */
-import { lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
+import fs, { mkdirSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { writePrivateFileAtomicSync } from './atomic-file.ts';
@@ -35,6 +35,27 @@ export interface LinuxEngineReceipt {
   openHandlerPending?: boolean;
   rotation: { mechanism: 'host-copytruncate'; maxBytes: number; retained: number };
 }
+const layoutMemo = new Map<string, LinuxEngineLayout>();
+const receiptMemo = new Map<string, LinuxEngineReceipt | undefined>();
+/** Only the actual long-running process opts in, never a caller's supplied env.
+ * Installs replace the receipt and restart the engine. CLI/recovery processes
+ * still discover external disk changes on every read, as before. */
+function memoEnabled(): boolean {
+  const role = process.env.OLYMPUS_WORKER_ENGINE_ROLE?.trim();
+  return process.env.OLYMPUS_ENGINE_HOST === '1'
+    || role === 'front' || role === 'background';
+}
+/** Any same-process receipt replacement/removal invalidates discovery too. */
+export function invalidateLinuxEngineLayoutMemo(): void {
+  layoutMemo.clear();
+  receiptMemo.clear();
+}
+/** Recovery can restore the exact prior bytes rather than publishing updates.
+ * Even a failed write may have renamed the receipt before its fsync failed. */
+export function writeLinuxEngineReceiptFile(path: string, text: string): void {
+  try { writePrivateFileAtomicSync(path, text); }
+  finally { invalidateLinuxEngineLayoutMemo(); }
+}
 function absolute(value: string, name: string): string {
   if (!isAbsolute(value) || /[\x00-\x1f\x7f]/.test(value)) throw new Error(`${name} must be an absolute path without control characters.`);
   return resolve(value);
@@ -55,7 +76,7 @@ function rawLayout(env: Env, recordedDataDir?: string): LinuxEngineLayout {
     const info = stat(path);
     if (!info) return false;
     // A non-directory or symlink is not absence; the managed-path preflight refuses it.
-    return !info.isDirectory() || info.isSymbolicLink() || readdirSync(path).some(name => path !== xdgDataDir || name !== 'engine');
+    return !info.isDirectory() || info.isSymbolicLink() || fs.readdirSync(path).some(name => path !== xdgDataDir || name !== 'engine');
   };
   const dataDir = recordedDataDir ?? (hasData(xdgDataDir) ? xdgDataDir : legacyDirs.find(hasData) ?? xdgDataDir);
   const stateDir = join(stateHome, 'olympus/engine'), cacheDir = join(cacheHome, 'olympus/engine');
@@ -73,7 +94,7 @@ function rawLayout(env: Env, recordedDataDir?: string): LinuxEngineLayout {
     launcherPath: join(home, '.local/bin/olympus'), openHandlerPath:join(dataHome,'applications/ai.olympusplugin.open.desktop'),mimeappsPath:join(configHome,'mimeapps.list'),
     receiptPath: join(configDir, 'install-receipt.json'), secretsPath: join(configDir, 'secrets.enc'), secretsKeyPath: join(configDir, 'secrets.key') };
 }
-function stat(path: string) { try { return lstatSync(path); } catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw e; } }
+function stat(path: string) { try { return fs.lstatSync(path); } catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw e; } }
 export function linuxEngineLayoutsEqual(left:unknown,right:LinuxEngineLayout):left is LinuxEngineLayout{
  if(!left||typeof left!=='object'||Array.isArray(left))return false;const record=left as Record<string,unknown>,expected=right as unknown as Record<string,unknown>;
  const keys=Object.keys(record).sort(),expectedKeys=Object.keys(expected).sort();return keys.length===expectedKeys.length&&keys.every((key,index)=>key===expectedKeys[index]&&record[key]===expected[key]);
@@ -96,10 +117,17 @@ export function assertLinuxManagedPath(path: string, uid = process.getuid!(), le
   }
 }
 export function readLinuxEngineReceipt(path: string, uid = process.getuid!()): LinuxEngineReceipt | undefined {
+  if (!memoEnabled()) return readLinuxEngineReceiptFromDisk(path, uid);
+  const key = JSON.stringify([path, uid]);
+  if (!receiptMemo.has(key)) receiptMemo.set(key, readLinuxEngineReceiptFromDisk(path, uid));
+  // Keep callers' mutable return values out of the validated memo.
+  return structuredClone(receiptMemo.get(key));
+}
+function readLinuxEngineReceiptFromDisk(path: string, uid: number): LinuxEngineReceipt | undefined {
   if (!stat(path)) return undefined;
   assertLinuxManagedPath(path, uid);
-  if ((lstatSync(path).mode & 0o077) !== 0) throw new Error(`${path} must be private (0600).`);
-  const receipt = JSON.parse(readFileSync(path, 'utf8')) as LinuxEngineReceipt;
+  if ((fs.lstatSync(path).mode & 0o077) !== 0) throw new Error(`${path} must be private (0600).`);
+  const receipt = JSON.parse(fs.readFileSync(path, 'utf8')) as LinuxEngineReceipt;
   if (receipt.schema !== 'olympus.engine.install.v1' || receipt.uid !== uid || !receipt.layout) throw new Error(`${path} is a foreign or invalid install receipt.`);
   if(!['installed','recovery_pending','data_retained'].includes(receipt.installationState))throw new Error(`${path} has an invalid installation state.`);
   const l = receipt.layout;
@@ -144,11 +172,21 @@ export function resolveLinuxEngineLayout(env: Env = process.env): LinuxEngineLay
   const home = absolute(env.HOME || homedir(), 'HOME');
   const configHome = absolute(env.XDG_CONFIG_HOME || join(home, '.config'), 'XDG_CONFIG_HOME');
   const candidates = [...new Set([join(home, '.config/olympus/install-receipt.json'), join(configHome, 'olympus/install-receipt.json')])];
+  const memo = memoEnabled();
+  const uid = process.getuid?.();
+  const key = JSON.stringify([home, configHome, env.XDG_DATA_HOME || '', env.XDG_STATE_HOME || '', env.XDG_CACHE_HOME || '', env.XDG_RUNTIME_DIR || '', candidates, uid]);
+  const cached = memo ? layoutMemo.get(key) : undefined;
+  if (cached) return { ...cached };
   const present = candidates.filter(p => stat(p));
   if (present.length > 1) throw new Error(`Found multiple Olympus install receipts: ${present.join(', ')}. Select one installation after moving the other aside.`);
   const receipt = present[0] ? readLinuxEngineReceipt(present[0]) : undefined;
   if (receipt && receipt.layout.home !== home) throw new Error(`${present[0]} belongs to another home.`);
-  return receipt?.layout ?? rawLayout(env);
+  const layout = receipt?.layout ?? rawLayout(env);
+  if (memo) {
+    layoutMemo.set(key, { ...layout });
+    for (const path of candidates) if (!present.includes(path)) receiptMemo.set(JSON.stringify([path, uid]), undefined);
+  }
+  return layout;
 }
 export function linuxEngineEnvironment(layout: LinuxEngineLayout): Record<string, string> {
   return { HOME: layout.home, XDG_CONFIG_HOME: layout.configHome, XDG_DATA_HOME: layout.dataHome, XDG_STATE_HOME: layout.stateHome,
@@ -188,10 +226,10 @@ export function legacyLinuxSettings(layout: LinuxEngineLayout): string[] {
   const files: string[] = [];
   const visit = (directory: string) => {
     const path = join(root, directory); assertLinuxManagedPath(path, process.getuid!(), 'directory');
-    if ((lstatSync(path).mode & 0o077) !== 0) throw new Error(`${path} must be private (0700).`);
-    for (const entry of readdirSync(path).sort()) {
+    if ((fs.lstatSync(path).mode & 0o077) !== 0) throw new Error(`${path} must be private (0700).`);
+    for (const entry of fs.readdirSync(path).sort()) {
       const name = directory ? `${directory}/${entry}` : entry;
-      const child = join(root, name), info = lstatSync(child);
+      const child = join(root, name), info = fs.lstatSync(child);
       if (info.isDirectory() && (LEGACY_LINUX_SETTINGS_DIRECTORIES as readonly string[]).includes(name)) visit(name);
       else {
         if (!isLegacyLinuxSetting(name)) throw new Error(`Unrecognized legacy Olympus data: ${child}. Nothing was changed.`);
@@ -231,7 +269,7 @@ export function preflightLinuxEngineLayout(layout: LinuxEngineLayout, options: {
     if (layout.dataDir === join(layout.dataHome, 'olympus')) managed.add(join(layout.dataDir, 'engine'));
     const recoverableEmptyDirectory = (p: string): boolean => {
       const info=stat(p);
-      return managed.has(p)&&Boolean(info?.isDirectory()&&info.uid===uid&&(info.mode&0o077)===0&&readdirSync(p).length===0);
+      return managed.has(p)&&Boolean(info?.isDirectory()&&info.uid===uid&&(info.mode&0o077)===0&&fs.readdirSync(p).length===0);
     };
     const ownedRegistration = (p: string): boolean => {
       if (!owned || p !== join(layout.home, '.config/systemd/user/olympus-engine.service')) return false;
@@ -256,7 +294,7 @@ export function publishLinuxEngineReceipt(layout: LinuxEngineLayout, updates: Pa
   createLinuxPrivateDirectory(layout.configDir);
   const receipt: LinuxEngineReceipt = { schema: 'olympus.engine.install.v1', uid: process.getuid!(), layout, installationState: 'installed', ownedUnitLinks: [], machineArtifacts: [],
     rotation: { mechanism: 'host-copytruncate', maxBytes: 10 * 1024 * 1024, retained: 3 }, ...previous, ...updates };
-  writePrivateFileAtomicSync(layout.receiptPath, `${JSON.stringify(receipt, null, 2)}\n`);
+  writeLinuxEngineReceiptFile(layout.receiptPath, `${JSON.stringify(receipt, null, 2)}\n`);
   return receipt;
 }
 

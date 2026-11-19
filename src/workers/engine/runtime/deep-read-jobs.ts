@@ -19,15 +19,19 @@
  * A long conversation can take hours on the owner's model. Before it starts,
  * the job prices two reads at the pace measured on that model: the whole set,
  * and the days that mention the question (the set's own keyword and vector
- * hits, a day either side; pickRelevantDays). The full read is the default
- * when it fits in an hour, the relevant-days read when it does not, and the
- * owner can pick either. A relevant-days answer says how much it left unread
- * and offers the full read; nothing is skipped silently.
+ * hits, a day either side; pickRelevantDays). The default budget is 15
+ * minutes (the owner's call, 19 Nov 2026): the full read runs when it fits,
+ * else the most relevant days that fit, busiest first. A relevant-days answer
+ * says how much it left unread and offers to keep reading with the full read;
+ * nothing is skipped silently, and the budget only picks what to read first:
+ * no clock stops a read that has started.
  */
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import type { Analyst, EvidenceCandidate } from '../../../core/contracts.ts';
+import type { Analyst, AnalystResult, EvidenceCandidate } from '../../../core/contracts.ts';
+import { DeepReadRefused } from '../../../core/deep-read-refused.ts';
+export { DeepReadRefused } from '../../../core/deep-read-refused.ts';
 import { runDeepRead, planDeepReadSections, type DeepReadProgress } from '../../../core/deep-read.ts';
 import { providerSourceLabel } from '../../../core/remote-result.ts';
 import type { SourceItemIdentity, SourceTrustDomain } from '../../../core/source-index/types.ts';
@@ -55,7 +59,7 @@ export interface DeepReadSet {
   /** For a conversation: only messages authored at or after / before these ISO times. */
   after?: string;
   before?: string;
-  /** Which read: every message, or the days that mention the question. Left out, the one-hour rule picks. */
+  /** Which read: every message, or the days that mention the question. Left out, the 15-minute budget picks. */
   read?: DeepReadMode;
 }
 
@@ -105,11 +109,8 @@ export interface DeepReadJobView {
   choiceSummary: string;
 }
 
-export class DeepReadRefused extends Error {
-  constructor(readonly code: 'no_private_model' | 'model_unavailable' | 'not_found' | 'nothing_readable' | 'invalid_set', message: string) { super(message); }
-}
 
-interface Job { view: DeepReadJobView; controller: AbortController }
+interface Job { view: DeepReadJobView; controller: AbortController; completion?: Promise<AnalystResult | undefined> }
 
 const INBOX_CONNECTION = '@local:You';
 /** How often a read stepping aside looks again whether judging is done. */
@@ -118,7 +119,9 @@ const JUDGE_LOOK_MS = 2_000;
 const JUDGE_STEP_ASIDE_MIN_MS = 5_000;
 const MAX_JOBS_KEPT = 50;
 /** The full read is the default while its estimate is under this; past it, the relevant-days read is. */
-const FULL_READ_DEFAULT_SECONDS = 3_600;
+/** The default deep-read budget: 15 minutes (owner's choice, 19 Nov 2026). It picks what to read, never stops a read. */
+export const DEEP_READ_BUDGET_SECONDS = 900;
+const UNMEASURED_SECTION_LIMIT = 40;
 
 /** Hits a relevant-days read takes from each store of the set: each one adds its day and the day either side. */
 export const DEEP_READ_DAY_HITS = 200;
@@ -194,6 +197,43 @@ export function pickRelevantDays(
   };
 }
 
+/**
+ * The relevant-days pick within a budget: hit days join in order of how many
+ * hits they hold (most first, then earliest), each with the day either side,
+ * until the next day would no longer fit. The first day always joins. Generic:
+ * hit counts only, no question-specific logic.
+ */
+export function pickRelevantDaysWithin(
+  candidates: readonly EvidenceCandidate[],
+  hitProviderItemIds: ReadonlySet<string>,
+  fits: (picked: readonly EvidenceCandidate[]) => boolean,
+  spread = 1,
+): ReturnType<typeof pickRelevantDays> & { capped: boolean } {
+  const whole = pickRelevantDays(candidates, hitProviderItemIds, spread);
+  if (whole.candidates.length === 0 || fits(whole.candidates)) return { ...whole, capped: false };
+  const hitsByDay = new Map<string, Set<string>>();
+  const undated = new Set<string>();
+  for (const candidate of candidates) {
+    const id = candidate.provenance.sourceItem.providerItemId;
+    if (!hitProviderItemIds.has(id)) continue;
+    const day = candidateDay(candidate);
+    if (!day) { undated.add(id); continue; }
+    const ids = hitsByDay.get(day) ?? new Set<string>();
+    ids.add(id);
+    hitsByDay.set(day, ids);
+  }
+  const order = [...hitsByDay.entries()].sort((a, b) => b[1].size - a[1].size || a[0].localeCompare(b[0]));
+  const chosen = new Set(undated);
+  let kept: ReturnType<typeof pickRelevantDays> | undefined;
+  for (const [, ids] of order) {
+    for (const id of ids) chosen.add(id);
+    const next = pickRelevantDays(candidates, chosen, spread);
+    if (kept && !fits(next.candidates)) break;
+    kept = next;
+  }
+  return { ...(kept ?? whole), capped: true };
+}
+
 function aboutDuration(seconds: number): string {
   if (seconds < 90) return 'about a minute';
   const minutes = Math.round(seconds / 60);
@@ -203,8 +243,8 @@ function aboutDuration(seconds: number): string {
 }
 
 /**
- * Which read runs: the one asked for, else the full read when it fits in an
- * hour at the measured pace, else the relevant-days read. Before the model's
+ * Which read runs: the one asked for, else the full read when it fits in
+ * the 15-minute budget at the measured pace, else the relevant-days read. Before the model's
  * pace has been measured the smaller read goes first, and the summary says
  * the estimates come after its first section.
  */
@@ -213,7 +253,7 @@ export function chooseDeepRead(choices: DeepReadJobView['choices'], requested?: 
   if (!relevant || relevant.messageCount >= choices.all.messageCount) return 'all';
   if (requested) return requested;
   if (choices.all.seconds === undefined) return relevant.sections < choices.all.sections ? 'relevant_days' : 'all';
-  return choices.all.seconds < FULL_READ_DEFAULT_SECONDS ? 'all' : 'relevant_days';
+  return choices.all.seconds < DEEP_READ_BUDGET_SECONDS ? 'all' : 'relevant_days';
 }
 
 export function deepReadChoiceSummary(choices: DeepReadJobView['choices'], read: DeepReadMode, requested?: DeepReadMode): string {
@@ -227,8 +267,8 @@ export function deepReadChoiceSummary(choices: DeepReadJobView['choices'], read:
     ? 'as asked'
     : choices.all.seconds === undefined
       ? 'the smaller read first; estimates follow once your model\'s pace is measured'
-      : read === 'all' ? 'the full read fits in an hour' : 'the full read would take over an hour';
-  const next = read === 'relevant_days' ? ' Ask for read: all to read every message.' : '';
+      : read === 'all' ? 'the full read fits in 15 minutes' : 'the full read would take over 15 minutes';
+  const next = read === 'relevant_days' ? ' To keep reading after it, ask for read: all to read every message.' : '';
   return `${all}. ${days}. Reading ${read === 'all' ? 'all of it' : 'the days that mention this'} (${reason}).${next}`;
 }
 
@@ -403,14 +443,14 @@ export function createDeepReadJobs(options: {
     const relevant = view.choices.relevantDays;
     if (view.read === 'relevant_days' && relevant) {
       const left = view.choices.all.messageCount - relevant.messageCount;
-      return `Read the days that mention this in ${view.setLabel} with ${view.model}: ${relevant.days} of ${relevant.totalDays} days, ${relevant.messageCount} of ${view.choices.all.messageCount} messages, ${result.sectionsRead} of ${result.sectionsTotal} sections${unreadable}. ${left} messages on other days were not read; ask for the full read (read: all) to read every message.`;
+      return `Read the days that mention this in ${view.setLabel} with ${view.model}: ${relevant.days} of ${relevant.totalDays} days, ${relevant.messageCount} of ${view.choices.all.messageCount} messages, ${result.sectionsRead} of ${result.sectionsTotal} sections${unreadable}. ${left} messages on other days were not read. To continue, ask for the full read (read: all) to read every message.`;
     }
     return `Read all of ${view.setLabel} with ${view.model}: ${result.sectionsRead} of ${result.sectionsTotal} sections, ${view.items} items${unreadable}.`;
   }
 
   return {
     /** Starts a deep read; resolves once the set is listed and the model chosen, while reading goes on in the background. */
-    async start(question: string, set: DeepReadSet): Promise<DeepReadJobView> {
+    async start(question: string, set: DeepReadSet, { maxSeconds }: { maxSeconds?: number } = {}): Promise<DeepReadJobView> {
       if (!question.trim()) throw new DeepReadRefused('invalid_set', 'A question is required.');
       const model = await options.model();
       if (!model) throw new DeepReadRefused('no_private_model', 'Deep read needs your own private model. Set one up in Settings, Models.');
@@ -426,7 +466,10 @@ export function createDeepReadJobs(options: {
       const choices: DeepReadJobView['choices'] = { all: { sections: fullSections, messageCount: allMessages, ...priced(fullSections) } };
       let relevantCandidates: EvidenceCandidate[] | undefined;
       if (set.whole === 'conversation' && options.relevantItems) {
-        const pick = pickRelevantDays(candidates, await options.relevantItems(question, set, corpusIds));
+        // Within the 15-minute budget at the measured pace (sections scale with the text read); unmeasured, the whole pick.
+        const totalChars = candidates.reduce((n, c) => n + c.chunks.join('').length, 0) || 1;
+        const pick = pickRelevantDaysWithin(candidates, await options.relevantItems(question, set, corpusIds), picked => pace === undefined
+          || fullSections * (picked.reduce((n, c) => n + c.chunks.join('').length, 0) / totalChars) * pace <= DEEP_READ_BUDGET_SECONDS);
         if (pick.candidates.length > 0) {
           relevantCandidates = pick.candidates;
           const sections = sectionsOf(pick.candidates);
@@ -439,6 +482,14 @@ export function createDeepReadJobs(options: {
       const read = chooseDeepRead(choices, set.read);
       const reading = read === 'relevant_days' && relevantCandidates ? relevantCandidates : candidates;
       const sectionsTotal = read === 'relevant_days' ? choices.relevantDays!.sections : fullSections;
+      if (maxSeconds !== undefined) {
+        // With no measured pace, use the section limit as the time budget for the notice.
+        const estimateSeconds = sectionsTotal * (pace ?? maxSeconds / UNMEASURED_SECTION_LIMIT);
+        if (pace === undefined ? sectionsTotal > UNMEASURED_SECTION_LIMIT : estimateSeconds > maxSeconds) {
+          const minutes = Math.max(1, Math.round(estimateSeconds / 60));
+          throw new DeepReadRefused('too_long', `A full read would take about ${minutes} minutes.`, { sectionsTotal, estimateSeconds });
+        }
+      }
       const id = `dr_${randomBytes(9).toString('base64url')}`;
       const view: DeepReadJobView = {
         id, state: 'reading', question, setLabel: label, items, unreadable, sectionsTotal, sectionsDone: 0, notes: 0,
@@ -449,7 +500,8 @@ export function createDeepReadJobs(options: {
         ? [`Only the days that mention this were read: ${choices.relevantDays.days} of ${choices.relevantDays.totalDays} days, ${choices.relevantDays.messageCount} of ${allMessages} messages. ${allMessages - choices.relevantDays.messageCount} messages on other days were not read.`]
         : [];
       const controller = new AbortController();
-      jobs.set(id, { view, controller });
+      const job: Job = { view, controller };
+      jobs.set(id, job);
       while (jobs.size > MAX_JOBS_KEPT) jobs.delete(jobs.keys().next().value!);
       const started = now().getTime();
       let lastCallMs = 0;
@@ -472,7 +524,7 @@ export function createDeepReadJobs(options: {
         waitedMs += callStarted - waitStarted;
       };
       // Background priority on the shared model: the owner's own asks go first.
-      void runBackgroundInference(() => runDeepRead({
+      job.completion = runBackgroundInference(() => runDeepRead({
         question, candidates: reading, corpusIds, analyst: model.analyst, promptBytes: model.promptBytes, evidenceFormat: 'compact',
         signal: controller.signal, coverageNotes,
         beforeModelCall: stepAside,
@@ -491,6 +543,7 @@ export function createDeepReadJobs(options: {
         if (inboxId) view.inboxId = inboxId;
         view.state = 'done'; view.finishedAt = now().toISOString(); delete view.estimateSecondsLeft;
         if (!inboxId) view.failure = 'The answer could not be saved to Private answers.';
+        return result;
       }, (error: unknown) => {
         view.state = controller.signal.aborted ? 'cancelled' : 'failed';
         view.finishedAt = now().toISOString(); delete view.estimateSecondsLeft;
@@ -498,8 +551,13 @@ export function createDeepReadJobs(options: {
           view.failure = 'The private model stopped before the read finished.';
           options.log?.(`[deep-read] ${id} failed: ${error instanceof Error ? error.name : 'error'}`);
         }
+        return undefined;
       });
       return { ...view };
+    },
+    /** In-process consumers can await the same background job without a polling clock. */
+    async wait(id: string): Promise<AnalystResult | undefined> {
+      return jobs.get(id)?.completion;
     },
     status(id?: string): DeepReadJobView[] {
       const all = [...jobs.values()].map(job => ({ ...job.view })).reverse();

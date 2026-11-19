@@ -25,7 +25,7 @@ import {
   type TierSniffer,
   type TierSnifferRequest,
 } from '../src/workers/classification/tier-classifier.ts';
-import { TIER_LEDGER_SQLITE_STORE_ID, TierLedger } from '../src/workers/classification/tier-ledger.ts';
+import { PERSONAL_FIRST_SETTLE_DONE, TIER_LEDGER_SQLITE_STORE_ID, TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import type { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { applyOwnerOverrides } from '../src/workers/connector-store/tier-override-settle.ts';
@@ -281,7 +281,9 @@ test('with no private model at all, a held item stays held', async () => {
 // from Personal search and embedding at once and moves it to Private.
 test('a row recorded Personal-first before #1316 leaves Personal search and embedding and moves to Private', async () => {
   const f = lane({ sniffer: JUDGED_PERSONAL_SNIFFER });
-  await syncOne(f, { id: 'legacy', name: 'Orchard picnic list', text: `${ORDINARY} ${BODY_MARKER}` });
+  await f.set.sync(fixtureConnector(() => [{ id: 'legacy', name: 'Orchard picnic list', text: `${ORDINARY} ${BODY_MARKER}` }]), {
+    fetchContent: true, placement: FIXTURE_PLACEMENT,
+  }, { settle: false });
   const identity = identityOf('legacy');
   expect(f.stores.internal.searchItems(BODY_MARKER, 10).map((row) => row.sourceItem.providerItemId)).toEqual(['legacy']);
   // What a 1.4 install recorded: an open question, text left in Personal.
@@ -327,6 +329,7 @@ test('the upgrade holds every Personal-first row at once, before the bounded set
   ]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
   // What a 1.4 install recorded: open questions, text left in Personal, ledger at schema 12.
   const ledgerPath = tieredStoreSetLedgerPath(f.paths.secure_local);
+  expect(f.ledger.readMeta(PERSONAL_FIRST_SETTLE_DONE)).toBe('1');
   const db = new Database(ledgerPath);
   for (const row of db.query('SELECT provider_item_id, reasons_json FROM tier_items').all() as Array<{ provider_item_id: string; reasons_json: string }>) {
     const reasons = [...(JSON.parse(row.reasons_json) as string[]).filter((reason) => !reason.startsWith('content:sniffer:')), PERSONAL_FIRST_REASON];
@@ -341,6 +344,7 @@ test('the upgrade holds every Personal-first row at once, before the bounded set
 
   // Opening the upgraded ledger holds both rows' copies.
   new TierLedger({ dbPath: ledgerPath }).close();
+  expect(f.ledger.readMeta(PERSONAL_FIRST_SETTLE_DONE)).toBeUndefined();
   for (const id of ['first', 'second']) {
     expect(f.ledger.copies(identityOf(id))).toContainEqual(expect.objectContaining({ trustDomain: 'internal', state: 'current', embedHold: true }));
   }

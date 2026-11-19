@@ -62,6 +62,34 @@ re-runs inside the chosen scope. A search cut short is coverage, not weak. The
 bars are re-calibrated with `bun eval/run-passages.ts --narrow
 source|span|conversation`.
 
+Unanswered long files (1.5 item 7): when the Analyst leaves `unanswered`
+non-empty or cites nothing, Ask tries cut files among the three reserved head
+seats, with cited files first and seat order within each group. It starts the
+first read estimated to fit 15 minutes at the model's measured pace. With no
+measured pace, a read fits if it has at most 40 sections. The ordinary answer
+carries progress and `deep_read: {id, sectionsTotal}`; the full answer lands in
+Private answers. When all candidates exceed the limit, the notice names the
+first file, gives its estimated reading time and offers `source_deep_read`.
+Remote surfaces receive only the handle and counts for started reads.
+`eval/run-passages.ts --deep-read-trigger` enables this same trigger for the
+whole run, waits for each job without a timeout, and records its sections,
+time, expected citation and meaning verdict beside the ordinary answer, plus
+the number of seats skipped for length.
+The subset L proof is owned by the setup thread (ops#151).
+
+Right file onto the shortlist (1.5 item 6): each store offers its 3 nearest
+vector rows, under its relevance bar or not, and 6 extra seats in the reranked
+pool go to the best of them by margin over the bar, at most 2 per store
+(`DEFAULT_RERANK_POOL_SEMANTIC_SEATS` 6, `withSemanticPoolSeats` in
+`src/core/source-index/router.ts`). Stage 3 on the 75 answerable (main
+75f3ce4a3, ops#151 comments 6986245824 and 6987608225): found document 44 to
+47, found paragraph 41 to 43, answered strict 27 to 28 and by meaning 35 to 36;
+held-out equal (6/7 strict, 5/7 meaning). Gains p104, p115, p160. The
+seat-cause check (comment 6995933249) found one gold displaced into a loss,
+p185 (email paragraph), the known cost; the other moves came with the gold at
+seat 1 in both arms. Conversation windows (item 9) measured worse, 42 and 37,
+and are not in 1.5.
+
 Rules for this release:
 
 - Recent requests from AI apps (#1266): the Agents panel and
@@ -877,6 +905,16 @@ and Linux installations, every source's actual limits are documented, and beta
 testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
+
+- **2026-11-18 — 1.5 ships after the default-configuration release check
+  and 24 hours on the owner's install.** Owner decision: 1.5 ships when the
+  full release check is clean in the default configuration on Mac and Linux,
+  both upgrade legs included, and the candidate has then run 24 hours on the
+  owner's install against written pass conditions
+  ([scripts/release-check/owner-run-24h.md](../scripts/release-check/owner-run-24h.md)).
+  This replaces the 48 hours in the 2026-11-11 entry below. The engine split
+  is on by default on Linux and macOS, so the release check runs that
+  configuration without a switch and those runs count.
 
 - **2026-11-11 — Every source holds new text until a judge has checked it.**
   Owner decision (#1316, "Yes, hold on every source", 10:26Z): new text from

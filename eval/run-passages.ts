@@ -1,3 +1,8 @@
+import { resolveLocalAnalystWindow, localAnalystPromptBudget } from '../src/workers/source-index/local-analyst-window.ts';
+import { maxTokensForChars } from '../src/core/analyst-delphi.ts';
+import { DEFAULT_ANALYST_MAX_OUTPUT_CHARS } from '../src/core/analyst.ts';
+import { triggerDeepRead } from '../src/workers/source-index/deep-read-trigger.ts';
+import { createDeepReadJobs, type DeepReadJobs } from '../src/workers/engine/runtime/deep-read-jobs.ts';
 // Passage retrieval eval, with optional deterministic grading of local Analyst answers.
 import { createHash } from 'node:crypto';
 import { Database } from 'bun:sqlite';
@@ -6,7 +11,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { EvidencePackBuildDetail } from '../src/core/evidence-pack.ts';
 import { conversationWindowPerSide } from '../src/core/evidence-pack.ts';
-import { RERANK_POOL_STORE_DEPTH, rerankPoolSemanticSeats, type EvidenceRerankOutcome } from '../src/core/evidence-reranker.ts';
+import { RERANK_POOL_STORE_DEPTH, rerankPoolSemanticSeats, semanticRowsPerStore, type EvidenceRerankOutcome } from '../src/core/evidence-reranker.ts';
 import { loadConfig, parseLane, parseModelProfile } from '../src/core/config.ts';
 import { createAnalyst, withPromptBudget, type AnalystReadingNotes } from '../src/core/analyst.ts';
 import { createDelphiAnalystModel } from '../src/core/analyst-delphi.ts';
@@ -23,7 +28,7 @@ import { parseDataRootArgs } from './data-root-args.ts';
 import { buildEvalPack, createEvalSourceLanes, configuredEvalEmbedding, prepareEvalEmbedding, type EvalStoreSearch } from './retrieval.ts';
 import { passageContainsQuote, passageWords, PASSAGE_MATCH_RULE } from './passage-match.ts';
 import { citationItemChunks, citedCopyOfExpected, resolveCitationCorpusId } from './grade.ts';
-import { validatePassageDataset, type EvalDataset, type EvalQuestion } from './types.ts';
+import { isGoldItem, validatePassageDataset, type EvalDataset, type EvalQuestion } from './types.ts';
 import { localEvalModel, type DraftModel } from './local-model.ts';
 import { answerMeaningJudge } from './answer-judge.ts';
 import { enterStage, failureCode, runEvalCli, type EvalStage } from './cli-failure.ts';
@@ -103,7 +108,15 @@ export interface PassageSummary {
   /** With --narrow: of the questions checked, how many the unnarrowed run would have asked, and how many offered the true scope. */
   followUp?: { checked: number; triggered: number; trueScopeOffered: number; triggeredAndOffered: number };
 }
+export interface PassageDeepRead {
+  triggered: boolean; refused: string | null; sectionsTotal: number; sectionsDone: number;
+  seconds: number; correctByMeaning: boolean | null; citesExpected: boolean | null;
+  skippedTooLong: number;
+  /** The triggered read is of the question's expected item. */
+  readsExpectedItem?: boolean;
+}
 export interface PassageRow {
+  deepRead?: PassageDeepRead;
   questionId: string; shape: string; families: string[]; tiers: string[];
   seatsFilled: number; answerable: boolean; object: HitScore; passage: HitScore;
   funnel?: FunnelRow; judge?: QuestionJudgement;
@@ -179,10 +192,12 @@ export interface PassageReceipt {
   rerankPoolStoreDepth?: number;
   /** Semantic seats added to the reranked pool (OLYMPUS_SEMANTIC_POOL_SEATS); absent with the reranker off. */
   semanticPoolSeats?: number;
+  /** Nearest vector rows each store offers those seats (OLYMPUS_SEMANTIC_ROWS_PER_STORE); absent with the reranker off. */
+  semanticRowsPerStore?: number;
   /** Messages each side of a conversation hit (OLYMPUS_CONVERSATION_WINDOW); absent when 0. */
   conversationWindow?: number;
   storeCounts: readonly EvalStoreCount[]; skippedStores: readonly EvalSkippedStore[];
-  summary: { overall: PassageSummary; byShape: Record<string, PassageSummary>; byFamily: Record<string, PassageSummary>; byTier: Record<string, PassageSummary>;
+  summary: { deepReadStarted?: number; overall: PassageSummary; byShape: Record<string, PassageSummary>; byFamily: Record<string, PassageSummary>; byTier: Record<string, PassageSummary>;
     /** By the expected item's stored chunks (1_chunk, 2-3_chunks, 4+_chunks), when counted. */
     byLength: Record<string, PassageSummary> };
   questions?: PassageRow[];
@@ -319,7 +334,7 @@ function gradePassageAnswer(question: EvalQuestion, result: AnalystResult, detai
   const itself = result.citations.some(citation => {
     const corpusId = corpusOf(citation);
     return expected.some(item => [item, ...(item.alternates ?? [])].some(identity =>
-      identity.corpusId === corpusId && identity.providerItemId === citation.provenance.sourceItem.providerItemId));
+      isGoldItem(identity, corpusId, citation.provenance.sourceItem)));
   });
   const copy = !itself && result.citations.some(citation => expected.some(item =>
     citedCopyOfExpected(item, citation.provenance, corpusOf(citation), citationItemChunks(citation.provenance, detail.pack.candidates))));
@@ -350,11 +365,13 @@ export async function runPassageEval(input: {
   /** The pack, and each store search's returned item ids in order (EvalStoreSearch) when recorded. */
   buildPack: (question: EvalQuestion) => Promise<EvidencePackBuildDetail & { storeSearches?: readonly EvalStoreSearch[] }>;
   /** Best rank of any of the expected items in a deep keyword and vector search of their stores. */
-  probeLanes?: (question: EvalQuestion, items: ReadonlyArray<{ corpusId: string; providerItemId?: string }>) => Promise<LaneProbe>;
+  probeLanes?: (question: EvalQuestion, items: ReadonlyArray<{ corpusId: string; providerItemId?: string; providerConversationId?: string }>) => Promise<LaneProbe>;
   /** Whether a question's pinned quote answers it, and whether it is specific enough to pick its item out. */
   judgeQuestion?: (question: string, quote: string) => Promise<QuestionJudgement>;
   /** Answer the exact fitted pack; only deterministic scores enter the receipt. */
   answer?: AnswerFn;
+  /** Run-level opt-in; the engine and eval share the same trigger and jobs. */
+  deepReadJobs?: DeepReadJobs;
   /**
    * Answer the same fitted pack with each arm, `answerRepeats` times each
    * (default 1), so arms are compared on identical evidence. The first arm is
@@ -419,7 +436,7 @@ export async function runPassageEval(input: {
       const corpusId = detail.candidateCorpusIds[originalIndex];
       for (const expected of question.expectedEvidence ?? []) {
         const identities = [expected, ...(expected.alternates ?? [])];
-        if (!identities.some(item => item.corpusId === corpusId && item.providerItemId === seat.provenance.sourceItem.providerItemId)) continue;
+        if (!identities.some(item => isGoldItem(item, corpusId, seat.provenance.sourceItem))) continue;
         objectRank ??= index + 1;
         if (!seated) {
           const packed = original.candidates[originalIndex];
@@ -436,18 +453,21 @@ export async function runPassageEval(input: {
     const matchingExpected = (candidate: EvidencePack['candidates'][number], index: number) => {
       const expected = needed[index]!;
       const corpus = resolveCitationCorpusId(candidate.provenance, detail.pack.candidates, detail.candidateCorpusIds);
-      return [expected, ...(expected.alternates ?? [])].some(item => item.corpusId === corpus && item.providerItemId === candidate.provenance.sourceItem.providerItemId);
+      return [expected, ...(expected.alternates ?? [])].some(item => isGoldItem(item, corpus, candidate.provenance.sourceItem));
     };
     const packedIds = needed.flatMap((_, index) => original.candidates.some(candidate => matchingExpected(candidate, index)) ? [index + 1] : []);
     const seatedIds = needed.flatMap((_, index) => pack.candidates.some(candidate => matchingExpected(candidate, index)) ? [index + 1] : []);
     const citedByAnswer = new WeakMap<PassageAnswer, number[]>();
     const packKey = input.answerStore ? fittedPackKey(pack) : '';
+    let deepRead: PassageDeepRead | undefined;
+    let ordinaryResult: AnalystResult | undefined;
     const answerWith = async (ask: AnswerFn, arm = 'off', repeat = 0): Promise<PassageAnswer> => {
       const answerStarted = performance.now();
       const storeKey = `${question.id}|${arm}|${repeat}|${packKey}`;
       try {
         const stored = input.answerStore?.get(storeKey);
         const result = stored?.result ?? await ask(question, pack);
+        ordinaryResult ??= result;
         const citedIds = needed.flatMap((_, index) => result.citations.some(citation =>
           pack.candidates.some(candidate => candidate.provenance.sourceItem.providerItemId === citation.provenance.sourceItem.providerItemId
             && resolveCitationCorpusId(citation.provenance, detail.pack.candidates, detail.candidateCorpusIds)
@@ -480,16 +500,50 @@ export async function runPassageEval(input: {
       step('answer');
       answer = await answerWith(input.answer);
     }
+    if (input.deepReadJobs) {
+      const row: PassageDeepRead = { triggered: false, refused: null, sectionsTotal: 0, sectionsDone: 0, seconds: 0, correctByMeaning: null, citesExpected: null, skippedTooLong: 0 };
+      deepRead = row;
+      if (ordinaryResult) {
+        const started = performance.now();
+        const triggered = await triggerDeepRead(detail, ordinaryResult, input.deepReadJobs, sectionsTotal => {
+          row.skippedTooLong += 1;
+          console.error(JSON.stringify({ deepRead: 'skipped', question: question.id, sectionsTotal }));
+        }, { autoStart: true });
+        deepRead.refused = triggered.refused ?? null;
+        if (triggered.job) {
+          deepRead.triggered = true;
+          deepRead.sectionsTotal = triggered.job.sectionsTotal;
+          const triggeredId = triggered.job.providerItemId;
+          deepRead.readsExpectedItem = (question.expectedEvidence ?? []).some(e => e.providerItemId === triggeredId || (e.alternates ?? []).some(a => a.providerItemId === triggeredId));
+          // Ids and numbers only, as each read starts and ends, so a stopped run still shows what it read.
+          console.error(JSON.stringify({ deepRead: 'started', question: question.id, sectionsTotal: deepRead.sectionsTotal, readsExpectedItem: deepRead.readsExpectedItem }));
+          const result = await input.deepReadJobs.wait(triggered.job.id);
+          const view = input.deepReadJobs.status(triggered.job.id)[0]!;
+          deepRead.sectionsDone = view.sectionsDone;
+          deepRead.seconds = (performance.now() - started) / 1000;
+          console.error(JSON.stringify({ deepRead: 'done', question: question.id, sectionsDone: deepRead.sectionsDone, seconds: Math.round(deepRead.seconds) }));
+          if (result) {
+            deepRead.citesExpected = gradePassageAnswer(question, result, detail).cited ?? false;
+            const expectedText = (question.expectedEvidence ?? []).map(item => item.quote).filter(Boolean).join('\n') || (question.expectedAnswerContains ?? []).join('; ');
+            const score = deepRead;
+            if (input.judgeAnswer && expectedText) judgeLater.push(async () => {
+              const verdict = await input.judgeAnswer!(question.question, expectedText, result.answer);
+              score.correctByMeaning = verdict === null ? null : verdict === 'correct';
+            });
+          }
+        }
+      }
+    }
     const citedIds = answer ? citedByAnswer.get(answer) : undefined;
     const expectedStores = (question.expectedEvidence ?? []).map(e => stores.get(e.corpusId));
     const answerable = question.shape !== 'coverage_negative';
     const identities = (question.expectedEvidence ?? []).flatMap(expected => [expected, ...(expected.alternates ?? [])]);
-    const holds = (corpusId: string | undefined, providerItemId: string) => identities.some(item => item.corpusId === corpusId && item.providerItemId === providerItemId);
+    const holds = (corpusId: string | undefined, providerItemId: string, providerConversationId?: string | null) => identities.some(item => isGoldItem(item, corpusId, { providerItemId, providerConversationId: providerConversationId ?? undefined }));
     let funnel: FunnelRow | undefined;
     if (answerable && identities.length) {
       const searches = (detail.storeSearches ?? []).filter(search => identities.some(item => item.corpusId === search.corpusId));
-      const storeRanks = searches.flatMap(search => { const at = search.providerItemIds.findIndex(id => holds(search.corpusId, id)); return at < 0 ? [] : [at + 1]; });
-      const packAt = original.candidates.findIndex((candidate, index) => holds(detail.candidateCorpusIds[index], candidate.provenance.sourceItem.providerItemId));
+      const storeRanks = searches.flatMap(search => { const at = search.providerItemIds.findIndex((id, index) => holds(search.corpusId, id, search.providerConversationIds?.[index])); return at < 0 ? [] : [at + 1]; });
+      const packAt = original.candidates.findIndex((candidate, index) => holds(detail.candidateCorpusIds[index], candidate.provenance.sourceItem.providerItemId, candidate.provenance.sourceItem.providerConversationId));
       if (input.probeLanes) step('probe_lanes');
       const lanes = input.probeLanes ? await input.probeLanes(question, identities) : undefined;
       const storeRank = storeRanks.length ? Math.min(...storeRanks) : null;
@@ -510,7 +564,7 @@ export async function runPassageEval(input: {
       tiers: expectedStores.length ? [...new Set(expectedStores.map((store, i) => store?.tier ?? question.expectedEvidence![i]!.corpusId.split('.')[0]!))] : ['unknown'],
       seatsFilled: pack.candidates.length, answerable, object: score(objectRank, ks), passage: score(passageRank, ks),
       ...(funnel ? { funnel } : {}), ...(judge ? { judge } : {}),
-      ...(answer ? { answer } : {}), ...(arms ? { arms } : {}),
+      ...(answer ? { answer } : {}), ...(deepRead ? { deepRead } : {}), ...(arms ? { arms } : {}),
       ...(needed.length > 1 ? { neededEvidence: { needed: needed.length, packed: packedIds.length, seated: seatedIds.length, packedIds, seatedIds,
         ...(citedIds ? { cited: citedIds.length, citedIds } : {}) } } : {}),
       ...(detail.rerank ? { rerank: { outcome: detail.rerank.outcome, scored: detail.rerank.scored, promoted: detail.rerank.promoted, elapsedMs: detail.rerank.elapsedMs } } : {}),
@@ -527,10 +581,10 @@ export async function runPassageEval(input: {
     // Identity includes only ids and structural labels; never hashes private text.
     setId: createHash('sha256').update(JSON.stringify(questions.map(q => [q.id, q.shape]).sort((a, b) => a[0]!.localeCompare(b[0]!)))).digest('hex'),
     maxResults: input.maxResults, ks, reranker: rerankerId ?? 'off',
-    ...(rerankerId && input.rerankPoolStoreDepth !== undefined ? { rerankPoolStoreDepth: input.rerankPoolStoreDepth, semanticPoolSeats: rerankPoolSemanticSeats() } : {}),
+    ...(rerankerId && input.rerankPoolStoreDepth !== undefined ? { rerankPoolStoreDepth: input.rerankPoolStoreDepth, semanticPoolSeats: rerankPoolSemanticSeats(), semanticRowsPerStore: semanticRowsPerStore() } : {}),
     ...(conversationWindowPerSide() > 0 ? { conversationWindow: conversationWindowPerSide() } : {}),
     storeCounts: input.storeCounts, skippedStores: input.skippedStores ?? [],
-    summary: summaries(rows, ks),
+    summary: { ...summaries(rows, ks), ...(input.deepReadJobs ? { deepReadStarted: rows.filter(row => row.deepRead?.triggered).length } : {}) },
     ...(split === 'open' ? { questions: rows } : {}),
     degradedIds: rows.filter(row => row.degraded).map(row => row.questionId),
   };
@@ -606,26 +660,27 @@ const LANE_PROBE_DEPTH = 50;
  * finds the item at all, and how far down.
  */
 export function laneProbe(stores: readonly LocalConnectorStore[], embeddingFor: (trustDomain: SourceTrustDomain) => SourceEmbeddingProvider | undefined) {
-  return async (question: EvalQuestion, items: ReadonlyArray<{ corpusId: string; providerItemId?: string }>): Promise<LaneProbe> => {
+  return async (question: EvalQuestion, items: ReadonlyArray<{ corpusId: string; providerItemId?: string; providerConversationId?: string }>): Promise<LaneProbe> => {
     const best = (ranks: number[]) => ranks.length ? Math.min(...ranks) : null;
     const keyword: number[] = []; const vector: number[] = []; const exact: number[] = []; const margins: number[] = [];
     for (const store of stores.filter(store => items.some(item => item.corpusId === store.corpusId))) {
-      const wanted = new Set(items.filter(item => item.corpusId === store.corpusId).map(item => item.providerItemId));
-      const rankIn = (ids: string[]) => { const at = ids.findIndex(id => wanted.has(id)); return at < 0 ? [] : [at + 1]; };
-      keyword.push(...rankIn(store.searchItemsDetailed(question.question, LANE_PROBE_DEPTH).rows.map(row => row.sourceItem.providerItemId)));
+      const golds = items.filter(item => item.corpusId === store.corpusId);
+      const isWanted = (sourceItem: { providerItemId: string; providerConversationId?: string }) => golds.some(gold => isGoldItem(gold, store.corpusId, sourceItem));
+      const rankIn = (rows: ReadonlyArray<{ sourceItem: { providerItemId: string; providerConversationId?: string } }>) => { const at = rows.findIndex(row => isWanted(row.sourceItem)); return at < 0 ? [] : [at + 1]; };
+      keyword.push(...rankIn(store.searchItemsDetailed(question.question, LANE_PROBE_DEPTH).rows));
       const provider = embeddingFor(store.trustDomain);
       if (!provider) continue;
       const scored = await store.vectorSearchItemsWithScores(question.question, provider, LANE_PROBE_DEPTH);
-      vector.push(...rankIn(scored.map(row => row.sourceItem.providerItemId)));
+      vector.push(...rankIn(scored));
       const bar = calibratedSemanticRelevanceBar(provider.modelId);
-      const found = scored.find(row => wanted.has(row.sourceItem.providerItemId));
+      const found = scored.find(row => isWanted(row.sourceItem));
       if (found && bar !== undefined) margins.push(Math.round((found.bestCosine - bar) * 1000) / 1000);
       // The same search on the exact full-vector scan: an item it finds that
       // the digest does not is lost to the digest, not to the embedding.
       const digest = process.env.OLYMPUS_VECTOR_DIGEST;
       process.env.OLYMPUS_VECTOR_DIGEST = 'off';
       try {
-        exact.push(...rankIn((await store.vectorSearchItems(question.question, provider, LANE_PROBE_DEPTH)).map(row => row.sourceItem.providerItemId)));
+        exact.push(...rankIn(await store.vectorSearchItems(question.question, provider, LANE_PROBE_DEPTH)));
       } finally {
         if (digest === undefined) delete process.env.OLYMPUS_VECTOR_DIGEST; else process.env.OLYMPUS_VECTOR_DIGEST = digest;
       }
@@ -674,13 +729,13 @@ export function storedChunkCounter(stores: readonly LocalConnectorStore[]) {
       return row?.n ?? undefined;
     },
     /** The item's conversation, sender and authored time, for the oracle narrowing; kept in memory only. */
-    meta(corpusId: string, providerItemId: string): ExpectedItemMeta | undefined {
+    meta(corpusId: string, providerItemId: string, providerConversationId?: string): ExpectedItemMeta | undefined {
       const store = stores.find(candidate => candidate.corpusId === corpusId);
       if (!store) return undefined;
       let db = open.get(corpusId);
       if (!db) { db = new Database(store.dbPath, { readonly: true, create: false }); db.exec('PRAGMA query_only = ON;'); open.set(corpusId, db); }
       const row = db.query(`SELECT provider_conversation_id AS conversation_id, sender_label, authored_at FROM items
-        WHERE provider_item_id = ? AND tombstoned = 0 ORDER BY item_pk LIMIT 1`).get(providerItemId) as { conversation_id: string | null; sender_label: string | null; authored_at: string | null } | null;
+        WHERE provider_item_id = ? AND tombstoned = 0 AND (? IS NULL OR provider_conversation_id = ?) ORDER BY item_pk LIMIT 1`).get(providerItemId, providerConversationId ?? null, providerConversationId ?? null) as { conversation_id: string | null; sender_label: string | null; authored_at: string | null } | null;
       if (!row) return { corpusId };
       return { corpusId, ...(row.conversation_id ? { conversationId: row.conversation_id } : {}),
         ...(row.sender_label ? { senderLabel: row.sender_label } : {}), ...(row.authored_at ? { authoredAt: row.authored_at } : {}) };
@@ -751,7 +806,7 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
     const arg = rest[index]!;
     if (arg.startsWith('--')) {
       const [key, inline] = arg.split('=', 2);
-      if (key === '--trace' || key === '--probe-lanes' || key === '--judge-questions' || key === '--answer' || key === '--judge-answers') { if (inline !== undefined) throw new Error(`${key} takes no value.`); values.set(key, 'yes'); continue; }
+      if (key === '--trace' || key === '--probe-lanes' || key === '--judge-questions' || key === '--answer' || key === '--judge-answers' || key === '--deep-read-trigger') { if (inline !== undefined) throw new Error(`${key} takes no value.`); values.set(key, 'yes'); continue; }
       if (!['--split', '--compare', '--output', '--max-results', '--max-chars-per-candidate', '--analyst-provider', '--prompt-bytes', '--answer-arms', '--answer-repeats', '--only', '--answers', '--narrow', '--keyword-expansion'].includes(key!)) throw new Error('Unsupported passage eval option.');
       const value = inline ?? rest[++index];
       if (!value || value.startsWith('--')) throw new Error('Passage eval option requires a value.');
@@ -771,6 +826,8 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
   if (values.has('--answer-repeats') && !armNames) throw new Error('--answer-repeats needs --answer-arms.');
   const answerRepeats = positiveInteger(values.get('--answer-repeats'), 1);
   const only = values.get('--only')?.split(',').map(id => id.trim()).filter(Boolean);
+  if (values.has('--deep-read-trigger')) values.set('--answer', 'yes');
+  if (values.has('--deep-read-trigger') && armNames && (armNames.length !== 1 || armNames[0] !== 'off')) throw new Error('--deep-read-trigger requires the single off answer arm.');
   if (values.has('--answers') && !values.has('--answer')) throw new Error('--answers needs --answer or --answer-arms.');
   if (values.has('--answer') && provider !== 'local') throw Object.assign(new Error('--answer requires a local Analyst.'), { code: 'LOCAL_MODEL_REQUIRED' });
   const dataset: unknown = JSON.parse(readFileSync(datasetPath ?? 'eval/private/passage-questions.json', 'utf8'));
@@ -793,6 +850,7 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
   try {
     const config = loadConfig();
     let answer: AnswerFn | undefined;
+    let deepReadJobs: DeepReadJobs | undefined;
     let answerArms: Array<{ name: string; answer: AnswerFn }> | undefined;
     const answerCalls: Record<string, { calls: number; wallMs: number; promptTokens: number; cachedTokens: number; promptMs: number; outputTokens: number; outputMs: number }> = {};
     // --answers <file>: answers kept between runs (private text: owner-only file, never in git). An answer is reused
@@ -838,6 +896,17 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
         } }, { auditSuspiciousDrafts: true, evidenceFormat: 'compact', readingNotes });
         return (_question, pack) => analyst.analyze(withPromptBudget(pack, promptBytes!), { localOnly: true });
       };
+      if (values.has('--deep-read-trigger')) {
+        const endpoint = lane ? config.argus.lanes[lane] : config.argus.modelProfiles[profile];
+        const window = await resolveLocalAnalystWindow({ model: endpoint.model, baseUrl: endpoint.baseUrl });
+        const deepBudget = localAnalystPromptBudget(undefined, window, maxTokensForChars(DEFAULT_ANALYST_MAX_OUTPUT_CHARS));
+        deepReadJobs = createDeepReadJobs({
+          stores: () => opened.stores,
+          lanes: () => lanes(''),
+          model: async () => ({ analyst: createAnalyst(delphiModel, { auditSuspiciousDrafts: true, evidenceFormat: 'compact' }), modelId: endpoint.model, promptBytes: deepBudget.bytes }),
+          inbox: () => undefined,
+        });
+      }
       answer = answerBy('off');
       if (armNames) answerArms = armNames.map(name => ({ name, answer: answerBy(name) }));
     }
@@ -887,7 +956,7 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
     const itemChunks = storedChunkCounter(opened.stores);
     cleanups.push(itemChunks.close);
     const expectedMeta = (q: EvalQuestion): ExpectedItemMeta[] => (q.expectedEvidence ?? []).flatMap(item => [item, ...(item.alternates ?? [])])
-      .flatMap(item => item.providerItemId ? [itemChunks.meta(item.corpusId, item.providerItemId) ?? { corpusId: item.corpusId }] : []);
+      .flatMap(item => item.providerItemId ? [itemChunks.meta(item.corpusId, item.providerItemId, item.providerConversationId) ?? { corpusId: item.corpusId }] : []);
     const oracle = (q: EvalQuestion): OracleNarrow => oracleNarrow(narrowMode as NarrowMode, expectedMeta(q)[0]);
     const unnarrowedFollowUp = async (q: EvalQuestion): Promise<FollowUpCheck> => {
       scope = { applied: 'none' };
@@ -918,6 +987,7 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
       ...(probe ? { probeLanes: probe } : {}),
       ...(judge ? { judgeQuestion: judge } : {}),
       ...(judgeAnswer ? { judgeAnswer } : {}),
+      ...(deepReadJobs ? { deepReadJobs } : {}),
       ...(answerArms ? { answerArms, answerRepeats } : answer ? { answer } : {}),
       ...(only ? { only } : {}), ...(answerStore ? { answerStore } : {}),
       itemChunks: itemChunks.count,

@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import type { Analyst, EvidencePack } from '../src/core/contracts.ts';
 import type { SourceItemIdentity } from '../src/core/source-index/types.ts';
 import { openWaitingPrivateQuestionStore, type WaitingQuestionStore } from '../src/core/waiting-private-questions.ts';
-import { chooseDeepRead, createDeepReadJobs, DeepReadRefused, pickRelevantDays, type DeepReadStore } from '../src/workers/engine/runtime/deep-read-jobs.ts';
+import { chooseDeepRead, createDeepReadJobs, DeepReadRefused, pickRelevantDays, pickRelevantDaysWithin, type DeepReadStore } from '../src/workers/engine/runtime/deep-read-jobs.ts';
 import type { AnalystAnswerLanes } from '../src/workers/source-index/analyst-answer.ts';
 
 const dirs: string[] = [];
@@ -132,7 +132,7 @@ describe('deep read jobs', () => {
     dirs.push(dir);
     const make = () => createDeepReadJobs({
       stores: () => deepStores, lanes: () => lanes, inbox: inbox,
-      model: async () => ({ analyst: { analyze: async (pack, options) => { t += 60_000; return timed.analyze(pack, options); } }, promptBytes: 2_000, modelId: 'qwen-35b' }),
+      model: async () => ({ analyst: { analyze: async (pack, options) => { t += 10_000; return timed.analyze(pack, options); } }, promptBytes: 2_000, modelId: 'qwen-35b' }),
       relevantItems: async () => new Set(['m4']),
       paceFile: join(dir, 'pace.json'),
       now: () => new Date(t),
@@ -148,12 +148,12 @@ describe('deep read jobs', () => {
     expect(done.state).toBe('done');
     expect(packs.at(-1)!.coverage.extractionGaps[0]).toContain('13 messages on other days were not read');
     expect(done.inboxId).toBeDefined();
-    // A new engine reads the pace back: both reads are now priced, and the hour rule picks the full read.
+    // A new engine reads the pace back: both reads are now priced, and the 15-minute budget picks the full read.
     const again = await make().start('What was said about heart disease?', set);
     expect(again.choices.all.seconds).toBeGreaterThan(0);
     expect(again.choices.relevantDays!.seconds).toBeLessThan(again.choices.all.seconds!);
     expect(again.read).toBe('all');
-    expect(again.choiceSummary).toContain('the full read fits in an hour');
+    expect(again.choiceSummary).toContain('the full read fits in 15 minutes');
   });
 
   test('waits for the owner\'s own questions before each model call, then resumes', async () => {
@@ -198,9 +198,20 @@ describe('relevant-days picker', () => {
     expect(pick).toMatchObject({ days: 5, totalDays: 6, hitDays: 2, messages: 6, totalMessages: 7 });
     expect(pickRelevantDays(candidates, new Set()).candidates).toEqual([]);
   });
-  test('the hour rule: full under an hour, relevant days over, the owner\'s pick wins', () => {
+  test('within a budget, the busiest hit days join first and the pick stops before it overflows', () => {
+    const candidates = [at('a', '2024-01-01'), at('b', '2024-01-10'), at('c', '2024-01-10'), at('d', '2024-01-20'), at('e', '2024-01-20'), at('f', '2024-01-20')];
+    const hits = new Set(['a', 'b', 'c', 'd', 'e', 'f']);
+    const two = pickRelevantDaysWithin(candidates, hits, picked => picked.length <= 4);
+    expect(two.candidates.map(c => c.chunks[0])).toEqual(['d', 'e', 'f']);
+    expect(two).toMatchObject({ capped: true, days: 1 });
+    expect(pickRelevantDaysWithin(candidates, hits, picked => picked.length <= 5).candidates.map(c => c.chunks[0])).toEqual(['b', 'c', 'd', 'e', 'f']);
+    expect(pickRelevantDaysWithin(candidates, hits, () => true)).toMatchObject({ capped: false, days: 3 });
+    expect(pickRelevantDaysWithin(candidates, hits, () => false).candidates).toHaveLength(3); // the first day always joins
+  });
+  test('the 15-minute budget: full under 15 minutes, relevant days over, the owner\'s pick wins', () => {
     const relevantDays = { sections: 2, messageCount: 50, seconds: 120 };
-    expect(chooseDeepRead({ all: { sections: 10, messageCount: 500, seconds: 3_000 }, relevantDays })).toBe('all');
+    expect(chooseDeepRead({ all: { sections: 10, messageCount: 500, seconds: 800 }, relevantDays })).toBe('all');
+    expect(chooseDeepRead({ all: { sections: 10, messageCount: 500, seconds: 1_000 }, relevantDays })).toBe('relevant_days');
     expect(chooseDeepRead({ all: { sections: 100, messageCount: 5_000, seconds: 30_000 }, relevantDays })).toBe('relevant_days');
     expect(chooseDeepRead({ all: { sections: 100, messageCount: 5_000, seconds: 30_000 }, relevantDays }, 'all')).toBe('all');
     expect(chooseDeepRead({ all: { sections: 10, messageCount: 500 } }, 'relevant_days')).toBe('all');

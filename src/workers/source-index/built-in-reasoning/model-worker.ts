@@ -1,6 +1,7 @@
 // Built-in model thread: installs, native ONNX sessions, tokenizers and inference.
 // LiteRT inference remains in its helper process; the serving thread only sends messages.
 import { parentPort, workerData } from 'node:worker_threads';
+import { publishWorkerMemoryPayloads } from '../../../core/memory-counters.ts';
 import { startLiteRtEmbedder, type LiteRtEmbedder } from '../built-in-embedding/litert-runtime.ts';
 import { installBuiltInEmbedding, installBuiltInReranker } from '../built-in-embedding/assets.ts';
 import { BuiltInSourceEmbeddingProvider } from '../built-in-embedding/provider.ts';
@@ -11,6 +12,7 @@ import { createLlamaServerHandle, type LlamaServerHandle } from './server.ts';
 import type { ModelThreadFailure, ModelThreadReply, ModelThreadRequest } from './off-thread.ts';
 
 const port = parentPort!;
+publishWorkerMemoryPayloads(workerData.payloads);
 const liteRtHelpers = new Map<number, LiteRtEmbedder>();
 const embedders = new Map<number, BuiltInSourceEmbeddingProvider>();
 const rerankers = new Map<number, CrossEncoderReranker>();
@@ -21,7 +23,12 @@ const stopAll = () => Promise.all([
   ...[...liteRtHelpers.values()].map(helper => helper.release()),
 ]);
 const send = (reply: ModelThreadReply) => port.postMessage(reply);
-port.on('message', async (message: { id: number; request: ModelThreadRequest; cancel?: number; shutdown?: boolean }) => {
+port.on('message', async (message: { id: number; request: ModelThreadRequest; cancel?: number; shutdown?: boolean; sampleMemory?: boolean }) => {
+  if (message.sampleMemory) {
+    const { heapUsed, external, arrayBuffers } = process.memoryUsage();
+    send({ id: 0, memory: { at: Date.now(), heapUsed, external, arrayBuffers } });
+    return;
+  }
   if (message.shutdown) {
     try { await stopAll(); }
     finally { Atomics.store(workerData.shutdown, 0, 1); Atomics.notify(workerData.shutdown, 0); }

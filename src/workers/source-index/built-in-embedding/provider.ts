@@ -4,6 +4,7 @@
 // helper. The model and runtime download once into the Olympus data directory
 // (see assets.ts).
 
+import { addMemoryPayloadText, withMemoryPayload } from '../../../core/memory-counters.ts';
 import { isMainThread } from 'node:worker_threads';
 import { modelThread, modelThreadHandleId } from '../built-in-reasoning/off-thread.ts';
 import { modelInstallFailedReason, type ModelInstallFailedReason } from '../../../core/model-install-failure.ts';
@@ -476,10 +477,20 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
       model = this.priorityLoaded;
     }
     if (model.kind === 'litert') return this.embedLiteRt(model.embedder, inputs, taskType);
+    return withMemoryPayload('embed', () => this.embedOnnx(model, inputs, taskType));
+  }
+
+  private async embedOnnx(
+    model: Extract<LoadedModel, { kind: 'onnx' }>,
+    inputs: SourceEmbeddingInput[],
+    taskType: SourceEmbeddingTaskType,
+  ): Promise<number[][]> {
     const windowTokens = this.spec.maxTokens - 2;
     const windows: Window[] = [];
     inputs.forEach((input, index) => {
-      const ids = model.tokenizer.tokenize(promptText(this.spec, input, taskType));
+      const text = promptText(this.spec, input, taskType);
+      addMemoryPayloadText(text);
+      const ids = model.tokenizer.tokenize(text);
       const maxWindows = taskType === 'RETRIEVAL_QUERY' ? 1 : MAX_WINDOWS_PER_DOCUMENT;
       const count = Math.max(1, Math.min(maxWindows, Math.ceil(ids.length / windowTokens)));
       for (let window = 0; window < count; window += 1) {

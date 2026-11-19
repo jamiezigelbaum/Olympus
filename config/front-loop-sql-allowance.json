@@ -34,7 +34,6 @@
       "ledgerId tier-ledger.ts < holdsBoundId local-index.ts",
       "ledgerId tier-ledger.ts < ledgerIdOf local-index.ts",
       "loadPeople people-index.ts < new LocalPeopleIndex people-index.ts",
-      "loadPeople people-index.ts < reload people-index.ts",
       "new LocalConnectorStore local-index.ts < openConnectorStore source-storage.ts",
       "new LocalFileExtractionJobStore job-store.ts < createFileExtractionRuntime file-extraction-runtime.ts",
       "new LocalPeopleIndex people-index.ts < openPeopleIndexOrUndefined boot-storage.ts",

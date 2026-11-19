@@ -693,7 +693,9 @@ bun run eval:deep-read -- --data-root /tmp/olympus-copy \
   with the same Analyst in the compact format, at the budget the engine gives
   a deep read: the model's served window through `localAnalystPromptBudget`
   (13,500 bytes when the window is unknown, at most 27,000).
-  `--deep-prompt-bytes` overrides it. The baseline uses the same budget unless
+  `--window-tokens N` names the window for an endpoint that cannot report
+  it (the Delphi gateway; the same option as `eval:panel`), and
+  `--deep-prompt-bytes` overrides the budget outright. The baseline uses the same budget unless
   `--prompt-bytes` (or `OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_PROMPT_BYTES`)
   names one.
 
@@ -721,6 +723,12 @@ and messages kept against the totals. `--day-picker-only` scores this alone,
 with no model call (minutes, not hours). `--read relevant_days` runs the deep
 arm on the picked days instead of the whole set, so its three numbers can be
 set beside the full read's.
+`--day-budget-sections 54,108,216` also scores the pick capped as the engine
+caps it to its time budget (`pickRelevantDaysWithin`: hit days join busiest
+first until the next would overflow), per budget in sections; sections are
+estimated from the share of text picked, counted at `--deep-prompt-bytes` (the
+engine's 27,000-byte ceiling when not named). `--read relevant_days` reads
+the first budget's pick.
 
 Run length is about the sum of sections times seconds per section, plus one
 baseline Ask per row. Run a couple of rows first (`--only`) to measure seconds

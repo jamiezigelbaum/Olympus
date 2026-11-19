@@ -25,13 +25,15 @@ import { currentSourceIndexReadProgress, noteSourceIndexReadProgress, type Sourc
 import { SQLITE_MMAP_BYTES, sqliteMmapEnabled } from './sqlite-mmap.ts';
 import { errorFromBoundary } from '../../core/log-redaction.ts';
 import { SOURCE_INDEX_LANE_BUSY_CODE } from '../../core/source-index/lane-busy.ts';
-import { beginSourceAnswerPoolRead, poolSqlSite, type SourceAnswerPoolReadOutcome } from '../source-index/answer-latency-trace.ts';
+import { beginSourceAnswerPoolRead, type SourceAnswerPoolReadOutcome } from '../source-index/answer-latency-trace.ts';
 
 /** One query: its SQL, bound values, and whether one row or all are wanted. */
 export interface StoreRead {
   sql: string;
   params: readonly unknown[];
   mode: 'get' | 'all';
+  /** A code-defined name for the statement in diagnostics. */
+  site?: string;
 }
 
 /** Workers per store, including a terminated worker until it has stopped. */
@@ -158,18 +160,50 @@ export function setReadPoolWorkerFactoryForTests(factory?: (url: string) => Work
 // from dropping the source (plugin-bundle-no-bun-sqlite).
 const MMAP_PRAGMA_SLOT = '/*olympus-mmap-pragma*/';
 const mmapPragma = (): string => (sqliteMmapEnabled() ? `try { db.exec('PRAGMA mmap_size = ${SQLITE_MMAP_BYTES}'); } catch {}` : '');
+let benchSqlDir: string | undefined;
+
+/** Enabled by the engine's Ask benchmark gate, before starting any readers. */
+export function setAskBenchReadPoolSqlDir(dir: string): void {
+  benchSqlDir = dir;
+}
+
+function instrumentBenchWorker(source: string, dir: string, store: string): string {
+  const module = new URL('./ask-bench-sql.ts', import.meta.url).href;
+  return source
+    .replace('/*ask-bench-init*/', () => `
+import { createAskBenchSqlRecorder } from ${JSON.stringify(module)};
+const benchStore = ${JSON.stringify(store)};
+const benchSql = createAskBenchSqlRecorder(${JSON.stringify(dir)}, benchStore);
+let benchSample;
+let benchSite;
+`)
+    .replace('/*ask-bench-before*/', "benchSite = event.data.site ?? '(unlabelled pool read)'; benchSample = benchSql.sample();")
+    .replace('/*ask-bench-after*/', 'benchSql.record(benchSample, ms, benchStore, benchSite); benchSample = undefined;');
+}
+
 const WORKER_SOURCE = `
 import { Database } from 'bun:sqlite';
 import { statSync } from 'node:fs';
+/*ask-bench-init*/
 const snapshots = new Map();
 const connections = new Map();
-// [request running, last request finished], read by the request thread.
+const openDatabases = new Map();
+// [request running, last request finished, native connections held], read by the request thread.
 let progress;
+let connectionTotal;
+const noteConnections = (delta) => {
+  if (connectionTotal) {
+    Atomics.add(progress, 2, delta);
+    Atomics.add(connectionTotal, 0, delta);
+  } else postMessage({ diagnostic: 'connections', delta });
+};
 const open = (path) => {
   const started = performance.now();
   const db = new Database(path, { readonly: true });
   db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON');
   /*olympus-mmap-pragma*/
+  openDatabases.set(db, undefined);
+  noteConnections(1);
   postMessage({ diagnostic: 'open', path, ms: performance.now() - started });
   return db;
 };
@@ -179,6 +213,7 @@ const open = (path) => {
 // otherwise open one connection per snapshot.
 const IDLE_SNAPSHOT_CONNECTIONS = 8;
 const idleSnapshots = new Map();
+const close = (db) => { db.close(); openDatabases.delete(db); noteConnections(-1); };
 const snapshotConnection = (path) => {
   const stat = statSync(path);
   const file = stat.dev + ':' + stat.ino;
@@ -190,7 +225,7 @@ const snapshotConnection = (path) => {
       held.db.exec('PRAGMA busy_timeout = 10000');
       return held;
     }
-    try { held.db.close(); } catch {}
+    try { close(held.db); } catch {}
   }
   return { db: open(path), file, path };
 };
@@ -199,31 +234,66 @@ const connection = (path) => {
   const file = stat.dev + ':' + stat.ino;
   const held = connections.get(path);
   if (held && held.file === file) return held.db;
-  if (held) held.db.close();
+  if (held) close(held.db);
   const db = open(path);
   connections.set(path, { db, file });
   return db;
 };
+const statementTiming = (started, cpuStarted) => {
+  if (started === undefined) return {};
+  const ms = performance.now() - started;
+  /*ask-bench-after*/
+  if (cpuStarted === undefined) return { ms };
+  const cpu = process.threadCpuUsage(cpuStarted);
+  return { ms, cpuMs: (cpu.user + cpu.system) / 1000 };
+};
 self.onmessage = (event) => {
-  const { id, op, snapshot, path, sql, params, mode, perRead } = event.data;
-  if (op === 'progress') { progress = new Int32Array(event.data.buffer); return; }
+  const { id, op, snapshot, path, sql, params, mode, perRead, measureCpu } = event.data;
+  if (op === 'progress') { progress = new Int32Array(event.data.buffer); connectionTotal = new Int32Array(event.data.connections); return; }
+  if (op === 'memory') {
+    const at = Date.now();
+    const { heapUsed, external, arrayBuffers } = process.memoryUsage();
+    let cacheBytes = 0;
+    let measured = 0;
+    if (event.data.sampleSqlite) for (const [db, cached] of openDatabases) {
+      let bytes = cached;
+      if (bytes === undefined) {
+        try {
+          using cacheSize = db.prepare('PRAGMA main.cache_size');
+          const size = cacheSize.values()[0][0];
+          if (size < 0) bytes = -size * 1024;
+          else {
+            using pageSize = db.prepare('PRAGMA main.page_size');
+            bytes = size * pageSize.values()[0][0];
+          }
+          openDatabases.set(db, bytes);
+        } catch { continue; } // Coverage in the reply shows a failed probe.
+      }
+      cacheBytes += bytes;
+      measured++;
+    }
+    postMessage({ diagnostic: 'memory', at, heapUsed, external, arrayBuffers, cacheBytes, measured });
+    return;
+  }
   if (op === 'release') {
     const held = connections.get(path);
     connections.delete(path);
-    try { held?.db.close(); } catch {}
-    for (const idle of idleSnapshots.get(path) ?? []) { try { idle.db.close(); } catch {} }
+    try { held && close(held.db); } catch {}
+    for (const idle of idleSnapshots.get(path) ?? []) { try { close(idle.db); } catch {} }
     idleSnapshots.delete(path);
     // A snapshot still open on the released store closes, rather than idles, when it ends.
     for (const open of snapshots.values()) if (open.path === path) open.discard = true;
     return;
   }
   if (progress) Atomics.store(progress, 0, id);
+  let started;
+  let cpuStarted;
   try {
     if (op === 'open') {
       const held = snapshotConnection(path);
       // perRead: no transaction is held between reads, so each read is its
       // own short one and a checkpoint can pass it between reads.
-      if (!perRead) { try { held.db.exec('BEGIN'); } catch (error) { held.db.close(); throw error; } }
+      if (!perRead) { try { held.db.exec('BEGIN'); } catch (error) { close(held.db); throw error; } }
       held.perRead = perRead === true;
       snapshots.set(snapshot, held);
       postMessage({ id, ok: true, rows: null });
@@ -234,21 +304,24 @@ self.onmessage = (event) => {
         let reusable = false;
         try { if (!held.perRead) held.db.exec('COMMIT'); reusable = true; } finally {
           const idle = idleSnapshots.get(held.path) ?? [];
-          if (reusable && !held.discard && idle.length < IDLE_SNAPSHOT_CONNECTIONS) { idle.push(held); idleSnapshots.set(held.path, idle); } else held.db.close();
+          if (reusable && !held.discard && idle.length < IDLE_SNAPSHOT_CONNECTIONS) { idle.push(held); idleSnapshots.set(held.path, idle); } else close(held.db);
         }
       }
       postMessage({ id, ok: true, rows: null });
     } else {
       const db = op === 'query' ? connection(path) : snapshots.get(snapshot)?.db;
       if (!db) throw new Error('unknown snapshot');
-      const started = performance.now();
+      cpuStarted = measureCpu ? process.threadCpuUsage?.() : undefined;
+      /*ask-bench-before*/
+      started = performance.now();
       const query = db.query(sql);
       const rows = mode === 'all' ? query.all(...params) : query.get(...params);
-      postMessage({ id, ok: true, rows, ms: performance.now() - started });
+      postMessage({ id, ok: true, rows, ...statementTiming(started, cpuStarted) });
     }
   } catch (error) {
+    const timing = statementTiming(started, cpuStarted);
     const frame = error instanceof Error && error.stack ? error.stack.split('\\n').map((line) => line.trim()).find((line) => line.startsWith('at ')) : undefined;
-    postMessage({ id, ok: false, error: error instanceof Error ? error.message : String(error), errorName: error instanceof Error ? error.name : undefined, errorFrame: frame ? frame.slice(3) : undefined, op, sqlHead: typeof sql === 'string' ? sql.replace(/\\s+/g, ' ').trim().slice(0, 80) : undefined });
+    postMessage({ id, ok: false, ...timing, error: error instanceof Error ? error.message : String(error), errorName: error instanceof Error ? error.name : undefined, errorFrame: frame ? frame.slice(3) : undefined, op, sqlHead: typeof sql === 'string' ? sql.replace(/\\s+/g, ' ').trim().slice(0, 80) : undefined });
   } finally {
     // After the reply is posted: finished, so a reply missing past here was lost.
     if (progress) { Atomics.store(progress, 1, id); Atomics.store(progress, 0, 0); }
@@ -256,9 +329,10 @@ self.onmessage = (event) => {
 };
 `;
 
-// sqlMs: how long the statement ran on the thread, as the thread measured it.
+// statementTiming: wall and (where available) CPU time measured by the worker.
 // finishedSeen: a check already found the reader finished with it and no reply here.
-type Pending = { resolve: (rows: unknown) => void; reject: (error: Error) => void; sqlMs?: (ms: number) => void; finishedSeen?: boolean };
+type StatementTiming = (ms: number, cpuMs?: number) => void;
+type Pending = { resolve: (rows: unknown) => void; reject: (error: Error) => void; statementTiming?: StatementTiming; finishedSeen?: boolean };
 
 interface ReaderThread {
   store: string;
@@ -266,11 +340,13 @@ interface ReaderThread {
   lane: ReadPoolLane;
   releaseWhenIdle?: boolean;
   worker: Worker;
-  /** What the reader says it is doing: [request running, last request finished]. */
+  /** [request running, last request finished, native connections held]. */
   progress?: Int32Array;
   pending: Map<number, Pending>;
   /** Snapshots open on this thread. */
   snapshots: number;
+  connections: number;
+  memory?: ReaderMemory;
   /** The pool query running here, if any. */
   job?: PoolJob | undefined;
   /** Terminated, and still counted until its "close" event says it stopped. */
@@ -282,6 +358,8 @@ interface ReaderThread {
 interface PoolJob {
   store: string;
   read: StoreRead;
+  /** The benchmark's label for an unlabelled read, captured before it queues. */
+  benchSite?: string;
   deadlineAtMs: number;
   resolve: (rows: unknown) => void;
   reject: (error: Error) => void;
@@ -302,10 +380,51 @@ interface PoolJob {
   // The statement's own time on the thread; runMs less this is the trip back
   // (row copy, and the wait for the request thread to take the reply).
   sqlMs?: number;
+  cpuMs?: number | undefined;
 }
 
 // Every thread the pool started that has not stopped, retired ones included.
 const threads: ReaderThread[] = [];
+interface ReaderMemory {
+  at: number;
+  heapUsed: number;
+  external: number;
+  arrayBuffers: number;
+  cacheBytes: number;
+  measured: number;
+}
+
+/** Poll idle readers only, and use replies from earlier ticks. Never wait behind SQL. */
+export function sampleReadPoolMemory(sampleSqlite = true) {
+  const now = Date.now();
+  let workers = 0, connections = 0, cache = 0, heap = 0, external = 0, arrayBuffers = 0, age = 0;
+  for (const reader of threads) {
+    const measured = reader.memory;
+    if (measured) {
+      workers++;
+      connections += measured.measured;
+      cache += measured.cacheBytes;
+      heap += measured.heapUsed;
+      external += measured.external;
+      arrayBuffers += measured.arrayBuffers;
+      age = Math.max(age, now - measured.at);
+    }
+    if (!reader.retired && reader.pending.size === 0 && !reader.job) reader.worker.postMessage({ op: 'memory', sampleSqlite });
+  }
+  return {
+    read_heap_workers: workers, read_heap_age_ms: age, read_heap_size_mb: heap,
+    read_extra_memory_mb: external, read_array_buffers_mb: arrayBuffers,
+    ...(sampleSqlite && { sqlite_read_connections_sampled: connections, sqlite_read_cache_budget_mb: cache }),
+  };
+}
+let heldConnections = 0;
+// Shared by every reader: logging loads one integer, even if a worker loses its reply.
+// Lazy so the Node plugin entry can drop the pool along with bun:sqlite.
+let connectionTotal: Int32Array | undefined;
+/** Includes retiring workers until their close event; O(1), with no store names. */
+export function readPoolMemoryCounts(): { read_workers: number; read_connections: number } {
+  return { read_workers: threads.length, read_connections: connectionTotal ? Atomics.load(connectionTotal, 0) : heldConnections };
+}
 let nextId = 1;
 // lostReplies: readers retired because a request they finished never got
 // its reply here; retries: requests run again on a fresh reader after one;
@@ -346,22 +465,35 @@ function startThread(store: string, lane: ReadPoolLane = 'shared'): ReaderThread
   const limit = lane === 'shared' ? READ_POOL_SIZE : lane === 'rescore' ? READ_POOL_RESCORE_READERS : 1;
   if (threads.filter(reader => reader.store === store && reader.lane === lane).length >= limit || !runtimeHasWorkers()) return undefined;
   try {
-    const url = URL.createObjectURL(new Blob([WORKER_SOURCE.replace(MMAP_PRAGMA_SLOT, mmapPragma())], { type: 'application/javascript' }));
+    const source = WORKER_SOURCE.replace(MMAP_PRAGMA_SLOT, mmapPragma());
+    const url = URL.createObjectURL(new Blob([benchSqlDir ? instrumentBenchWorker(source, benchSqlDir, store) : source], { type: 'application/javascript' }));
     const worker = workerFactory(url);
     // The reader never keeps a finished command alive.
     (worker as Worker & { unref?: () => void }).unref?.();
     counters.starts += 1;
     if (startedStores.has(store)) counters.restarts += 1;
     startedStores.add(store);
-    const started: ReaderThread = { store, lane, worker, pending: new Map(), snapshots: 0 };
+    const started: ReaderThread = { store, lane, worker, pending: new Map(), snapshots: 0, connections: 0 };
     if (typeof SharedArrayBuffer === 'function') {
-      const buffer = new SharedArrayBuffer(8);
+      const buffer = new SharedArrayBuffer(12);
+      connectionTotal ??= new Int32Array(new SharedArrayBuffer(4));
       started.progress = new Int32Array(buffer);
-      worker.postMessage({ op: 'progress', buffer });
+      worker.postMessage({ op: 'progress', buffer, connections: connectionTotal.buffer });
     }
-    worker.onmessage = (event: MessageEvent<{ id: number; ok: boolean; rows?: unknown; error?: string; errorName?: string; errorFrame?: string; op?: string; sqlHead?: string; ms?: number }>) => {
+    let closed = false;
+    worker.onmessage = (event: MessageEvent<{ id: number; ok: boolean; rows?: unknown; error?: string; errorName?: string; errorFrame?: string; op?: string; sqlHead?: string; ms?: number; cpuMs?: number }>) => {
+      if (closed) return;
       const message = event.data;
-      const diagnostic = message as unknown as { diagnostic?: string; path: string; ms: number };
+      const diagnostic = message as unknown as { diagnostic?: string; path: string; ms: number; delta: number };
+      if (diagnostic.diagnostic === 'memory') {
+        started.memory = message as unknown as ReaderMemory;
+        return;
+      }
+      if (diagnostic.diagnostic === 'connections') {
+        started.connections += diagnostic.delta;
+        heldConnections += diagnostic.delta;
+        return;
+      }
       if (diagnostic.diagnostic === 'open') {
         counters.opens += 1;
         counters.openMs += diagnostic.ms;
@@ -378,7 +510,7 @@ function startThread(store: string, lane: ReadPoolLane = 'shared'): ReaderThread
         return;
       }
       started.pending.delete(message.id);
-      if (typeof message.ms === 'number') waiting.sqlMs?.(message.ms);
+      if (typeof message.ms === 'number') waiting.statementTiming?.(message.ms, message.cpuMs);
       if (message.ok) waiting.resolve(message.rows ?? null);
       // The class and frame from the reader thread, and what it ran (SQL text only, never its values): #1502.
       else waiting.reject(errorFromBoundary(message.error ?? 'off-thread read failed', message.errorName, message.errorFrame, `read pool ${message.op ?? 'read'}${message.sqlHead ? `: ${message.sqlHead}` : ''}`));
@@ -387,9 +519,16 @@ function startThread(store: string, lane: ReadPoolLane = 'shared'): ReaderThread
       retire(started, new Error(event.message || 'off-thread reader stopped'));
     };
     worker.addEventListener('close', () => {
+      closed = true;
       // Stopped: its place in the pool is free.
       const at = threads.indexOf(started);
-      if (at >= 0) threads.splice(at, 1);
+      if (at >= 0) {
+        if (connectionTotal && started.progress) {
+          Atomics.sub(connectionTotal, 0, Atomics.exchange(started.progress, 2, 0));
+        } else heldConnections -= started.connections;
+        started.connections = 0;
+        threads.splice(at, 1);
+      }
       if (!started.retired) retire(started, new Error('off-thread reader stopped'));
       dispatch();
     });
@@ -427,16 +566,16 @@ export function offThreadReadsSupported(dbPath: string): boolean {
 function send(
   reader: ReaderThread,
   message: Record<string, unknown>,
-  sqlMs?: (ms: number) => void,
+  statementTiming?: StatementTiming,
 ): Promise<unknown> {
   // A retired thread answers nothing: fail at once.
   if (reader.retired) return Promise.reject(new Error('off-thread reader stopped'));
   const id = nextId++;
   return new Promise((resolve, reject) => {
-    reader.pending.set(id, { resolve, reject, ...(sqlMs ? { sqlMs } : {}) });
+    reader.pending.set(id, { resolve, reject, ...(statementTiming ? { statementTiming } : {}) });
     armLostReplyCheck();
     try {
-      reader.worker.postMessage({ ...message, id });
+      reader.worker.postMessage({ ...message, id, ...(statementTiming ? { measureCpu: true } : {}) });
     } catch (error) {
       reader.pending.delete(id);
       reject(error instanceof Error ? error : new Error(String(error)));
@@ -543,16 +682,20 @@ export async function withOffThreadSnapshot<T>(
         if (perRead) markRead(dbPath, readId, { atMs: clock.now(), lane, site });
         if (observeSnapshots) observer?.(dbPath, query, { lane, site });
         // A snapshot read made by a traced Ask lane counts in its pool reads.
-        const report = beginSourceAnswerPoolRead(poolSqlSite(query.sql));
+        const report = beginSourceAnswerPoolRead(query.sql, query.site ?? (site === 'unknown' ? undefined : site));
         const sentAtMs = clock.now();
         const queueWaitMs = reserveWaitMs;
         reserveWaitMs = 0;
-        let sqlMs = 0;
+        let sqlMs: number | undefined;
+        let cpuMs: number | undefined;
         const once = async (): Promise<unknown> => {
           if (moving) await moving;
-          return send(reader!, { op: 'read', snapshot, sql: query.sql, params: query.params, mode: query.mode }, (ms) => {
+          return send(reader!, {
+            op: 'read', snapshot, sql: query.sql, params: query.params, mode: query.mode, ...(benchSqlDir && { site: query.site ?? site }),
+          }, report && ((ms, cpu) => {
             sqlMs = ms;
-          });
+            cpuMs = cpu;
+          }));
         };
         const laneProgress = currentSourceIndexReadProgress();
         laneProgress?.began?.();
@@ -566,10 +709,10 @@ export async function withOffThreadSnapshot<T>(
             rows = await once();
           }
           noteSourceIndexReadProgress();
-          report?.({ queueWaitMs, runMs: clock.now() - sentAtMs, sqlMs, outcome: 'rows', snapshot: true });
+          report?.({ queueWaitMs, runMs: clock.now() - sentAtMs, sqlMs, cpuMs, outcome: 'rows', snapshot: true });
           return rows;
         } catch (error) {
-          report?.({ queueWaitMs, runMs: clock.now() - sentAtMs, sqlMs, outcome: 'error', snapshot: true });
+          report?.({ queueWaitMs, runMs: clock.now() - sentAtMs, sqlMs, cpuMs, outcome: 'error', snapshot: true });
           throw error;
         } finally {
           laneProgress?.ended?.();
@@ -703,13 +846,14 @@ export function readOnPool(dbPath: string, read: StoreRead, options: { deadlineA
   // A caller that gives no deadline waits for its rows however long they take.
   const deadlineAtMs = options.deadlineAtMs ?? Number.POSITIVE_INFINITY;
   const waiting = queues.get(dbPath) ?? [];
-  const report = beginSourceAnswerPoolRead(poolSqlSite(read.sql));
+  const report = beginSourceAnswerPoolRead(read.sql, read.site);
   if (waiting.length >= READ_POOL_QUEUE_PER_STORE || clock.now() >= deadlineAtMs) {
-    report?.({ queueWaitMs: 0, runMs: 0, sqlMs: 0, outcome: 'refused' });
+    report?.({ queueWaitMs: 0, runMs: 0, outcome: 'refused' });
     return Promise.reject(new OffThreadReadBusyError());
   }
   return new Promise<unknown>((resolve, reject) => {
     const job: PoolJob = { store: dbPath, read, deadlineAtMs, resolve, reject, timer: undefined, lane: currentSourceIndexReadProgress(), enqueuedAtMs: clock.now(), report };
+    if (benchSqlDir && !read.site) job.benchSite = callerSite();
     if (Number.isFinite(deadlineAtMs)) job.timer = clock.setTimeout(() => missedDeadline(job), deadlineAtMs - clock.now());
     waiting.push(job);
     if (!queues.has(dbPath)) {
@@ -773,7 +917,8 @@ function settle(job: PoolJob, outcome: { rows: unknown } | { error: Error }): vo
     job.report({
       queueWaitMs: (sentAtMs ?? now) - job.enqueuedAtMs,
       runMs: sentAtMs === undefined ? 0 : now - sentAtMs,
-      sqlMs: job.sqlMs ?? 0,
+      sqlMs: job.sqlMs,
+      cpuMs: job.cpuMs,
       outcome: ended,
     });
   }
@@ -830,9 +975,11 @@ function dispatch(): void {
     // SQLite answers. A reply lost on its way back would hold it for good,
     // so a lost one retires the worker (it keeps its slot until it has
     // stopped) and, if the caller still waits, the query runs again once.
-    send(reader, { op: 'query', path: job.store, sql: job.read.sql, params: job.read.params, mode: job.read.mode }, (ms) => {
+    const { sql, params, mode, site } = job.read;
+    send(reader, { op: 'query', path: job.store, sql, params, mode, ...(benchSqlDir && { site: site ?? job.benchSite }) }, job.report && ((ms, cpuMs) => {
       job.sqlMs = ms;
-    })
+      job.cpuMs = cpuMs;
+    }))
       .then(
         (rows) => settle(job, clock.now() >= job.deadlineAtMs ? { error: new OffThreadReadBusyError() } : { rows }),
         (error: Error) => {

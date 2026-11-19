@@ -1,3 +1,4 @@
+import { qualifyAskCheck, qualifyPrivacyCheck, type AskObservation, type PrivacyObservation } from './qualify.ts';
 /**
  * Olympus release check: one candidate build, one throwaway machine per
  * platform, the same synthetic test life, the same agent question suite, one
@@ -43,7 +44,7 @@
  * ARCHIVE_FORMATS in archive-fixtures.ts and nothing here.
  *
  * Opt-in archive scale (`--archive-scale`, or RC_ARCHIVE_SCALE=1 in this harness): after the archive leg, import seeded synthetic
- * mbox, Roam, both Reflect shapes and paginated Readwise at realistic size, then remove them. Forces worker.engineSplit on; adds
+ * mbox, Roam, both Reflect shapes and paginated Readwise at realistic size, then remove them. Adds
  * count/date/gap/held/progress/idempotency checks and wall-time, throughput, engine RSS and front-latency measurements to the report.
  * --skip-archive skips the ordinary archive leg independently. Normal runs never generate scale fixtures or call scale stages.
  *
@@ -60,11 +61,14 @@
  * Exit status: 0 the report passed, 1 the report failed, 2 the run could not
  * start (arguments, config, bundle).
  */
+import { defaultConfig } from '../../src/core/config.ts';
+import { digest, oldInstallBundle } from './preflight.ts';
+import { LEGS } from './impact.ts';
 import { liveChecks, publishFailedCheck } from './live-checks.ts';
 import { cpSync, mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, statSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import {
   FIXTURE_ITEMS, INBOX_ASK, PRIVATE_FACTS, SUITE_QUESTIONS, fixtureDocuments, fixtureItemTiers, forbiddenMarkers, leakyFixture, tierRules,
@@ -74,8 +78,8 @@ import { FAKE_READWISE_PORT, FAKE_READWISE_TOKEN } from './readwise-fake.ts';
 import { redactDeep, redactMarkers, type LeakMarker } from './leak.ts';
 import { CommandDriver, type Machine } from './machine.ts';
 import {
-  buildReport, renderHtml, scanReport,
-  type AgentReport, type AgentUsage, type CheckResult, type MachineReport, type PhaseReport, type ReleaseReport, type ReleaseReportInput, type ReportFile,
+  buildReport, diagnoseFailures, renderHtml, scanReport,
+  type AgentReport, type AgentUsage, type CheckResult, type FailedOperation, type FailureDiagnosis, type MachineReport, type PhaseReport, type ReleaseReport, type ReleaseReportInput, type ReportFile,
 } from './report.ts';
 import {
   describeDifferences, evaluateCounts, evaluateUpgrade, versionFromTarballName,
@@ -90,8 +94,9 @@ import { SOURCE_ANSWER_HANDOFF_MAX_MS, SOURCE_ANSWER_RESULT_WAIT_MAX_MS } from '
 import { evaluateInbox, privateLinkIdsIn, privateNoteIn, type InboxObservation } from './inbox.ts';
 import { commandJudge, judgeCheck, type Judge } from './judge.ts';
 import type { AgentConfig } from './machine-agent.ts';
-import { FRONT_WATCH_S, frontSteadyChecks, type FrontStoreSet, type FrontSteadyObservation, type FrontWatch } from './front-steady.ts';
+import { FRONT_WATCH_S, frontSteadyChecks, type FrontAfterUpdate, type FrontStoreSet, type FrontSteadyObservation, type FrontWatch } from './front-steady.ts';
 import { bundleWhatsAppBridgeName, whatsappBridgeCheck } from './helper-files.ts';
+import { CUTOVER_DONE, CUTOVER_LOG, CUTOVER_READY, CUTOVER_STOP, cutoverChecks, dashboardAvailabilityCheck, type CutoverSummary } from './cutover.ts';
 import { STORES_PUT_BACK, brokenBundle, forcedFailureChecks, storesKeptCheck, type ForcedFailureObservation, type StoreFileCount } from './upgrade-split.ts';
 import { journeyChecks, type JourneyTrace } from './journey.ts';
 import { JOURNEYS, type JourneyMachine } from './journeys.ts';
@@ -149,6 +154,7 @@ export interface RunOptions {
   harnessCommit?: string;
   outDir: string;
   config: RunConfigFile;
+  configFile?: string;
   /** The leak self-test: this tier's marker is also stored in an ordinary Personal item, so it reaches agents; the run must fail. */
   mistier?: 'private' | 'secrets';
   /**
@@ -191,7 +197,7 @@ export interface RunOptions {
   /** Run only these configured agents (by id); omitted runs every enabled one. */
   onlyAgents?: string[];
   /**
-   * Turn `worker.engineSplit` on in the install's engine config before the legs run (the engine split, #1240). The report records it.
+   * Experiment: explicitly write `worker.engineSplit: true` in engine.json. The report records the override.
    * On an upgrade leg the switch goes on just before the update, over a store set, with a forced failed update first (upgrade-split.ts).
    */
   engineSplit?: boolean;
@@ -280,10 +286,16 @@ export interface RunClock {
 }
 const runClock: RunClock = { now: Date.now, setTimeout, clearTimeout };
 
+export const candidateDefaultSplit = (): boolean => defaultConfig().worker.engineSplit === true;
+const checksSplit = (options: RunOptions): boolean => options.engineSplit === true || candidateDefaultSplit();
+
 export class Run {
+  splitSettingWritten = false;
+  watchingCutover = false;
   readonly markers: LeakMarker[] = forbiddenMarkers();
   readonly logLines: string[] = [];
   readonly errors: string[] = [];
+  preflightFailed = false;
   /**
    * When the run's time budget ends (epoch ms). Every in-machine call is cut to what is left of it, so a degraded candidate fails the
    * run inside its budget with the call named, instead of each phase waiting out its own long bound (olympus-ops#156).
@@ -295,8 +307,45 @@ export class Run {
   /** The current phase was given its own budget, which then also bounds its calls in place of the call's named budget. */
   private phaseOwnBudget = false;
 
-  checkList(): CheckResult[] {
-    return liveChecks(check => publishFailedCheck(redactDeep(check, this.markers)));
+  private readonly failures: { check: CheckResult; at: string; stage: string; phase?: string }[] = [];
+  private readonly journeyFailures: FailedOperation[] = [];
+  private readonly skippedJourneys: FailureDiagnosis['skippedJourneys'] = [];
+
+  checkList(stage = this.stage.id): CheckResult[] {
+    return liveChecks(check => {
+      if (check.status === 'fail') this.failures.push({
+        check, at: check.observedAt ?? new Date(this.clock.now()).toISOString(), stage,
+        ...(this.phaseName ? { phase: this.phaseName } : {}),
+      });
+      publishFailedCheck(redactDeep(check, this.markers));
+    });
+  }
+
+  recordJourneyFailures(traces: readonly JourneyTrace[], leg: string, command: (trace: JourneyTrace) => string): void {
+    for (const trace of traces) {
+      if (trace.ok && !trace.error) continue;
+      const step = trace.steps.find(row => !row.ok);
+      const rerunFromCheckout = leg === 'journeys' ? journeyRerunCommand(this.options, trace.id) : undefined;
+      this.journeyFailures.push({
+        id: `journey.${trace.id}`, journey: trace.id, leg, stage: this.stage.id,
+        at: step?.failedAt ?? new Date(this.clock.now()).toISOString(),
+        ...(step ? { step: `${step.n}. ${step.name}` } : { step: 'Open the journey' }),
+        ...(rerunFromCheckout ? { rerunFromCheckout } : {}),
+        rerun: `${BUN_LOCATE}\n"$BUN" --no-env-file ~/rc/agent.js ${command(trace)}`,
+      });
+    }
+  }
+
+  skipJourney(journey: string, leg: string, because: string): void {
+    this.skippedJourneys.push({ journey, leg, because, stage: this.stage.id });
+  }
+
+  diagnosis(): FailureDiagnosis {
+    const checks = this.failures.filter(({check, stage}) => !this.journeyFailures.some(journey => journey.id === check.id && journey.stage === stage));
+    return redactDeep(diagnoseFailures([
+      ...checks.map(({check, at, stage, phase}) => ({ id: check.id, leg: check.leg ?? phase ?? stage, stage, at, step: check.title })),
+      ...this.journeyFailures,
+    ], this.skippedJourneys), this.markers);
   }
 
   phaseTimings(): string {
@@ -332,7 +381,7 @@ export class Run {
   }
 
   addStage(id: string, label: string): Stage {
-    const stage = newStage(id, label, this.checkList());
+    const stage = newStage(id, label, this.checkList(id));
     this.stages.set(id, stage);
     return stage;
   }
@@ -372,7 +421,7 @@ export class Run {
     const fail = () => {
       if (exceeded) return;
       exceeded = true;
-      this.add({ id: `phase.${name}.time-budget`, title: `${name} stays within its wall-clock budget`, status: 'fail',
+      this.add({ id: `${name === 'preflight' || (name === 'provision' && this.options.upgradeFromDir !== undefined) ? 'setup' : 'phase'}.${name}.time-budget`, title: `${name} stays within its wall-clock budget`, status: 'fail',
         detail: `${name} exceeded ${Math.round(budget / 1000)}s; ${this.phaseTimings()}` });
     };
     const timer = this.clock.setTimeout(fail, budget);
@@ -424,11 +473,15 @@ export class Run {
     try { this.add(check); } finally { this.stage = keep; }
   }
 
+  /** First archive stall/removal failure; later archive phases preserve it and report skips. */
+  archiveBlocked?: string;
+  archiveBlockedBy?: string;
+
   async agent(sub: string, args = '', timeoutMs = 120_000): Promise<AgentCall> {
     const phaseBound = Math.max(1, this.phaseDeadline - this.clock.now());
     const allowed = Math.min(agentTimeoutMs(timeoutMs, this.deadline, this.clock.now()), phaseBound, this.phaseOwnBudget ? phaseBound : phaseBudgetMs(sub));
     const exec = await this.machine!.exec(`${BUN_LOCATE}\n"$BUN" --no-env-file ~/rc/agent.js ${sub} ${args}\n`, { timeoutMs: allowed });
-    if (exec.timedOut || exec.code === 124) this.add({ id: `phase.${this.phaseName ?? sub}.time-budget`,
+    if (exec.timedOut || exec.code === 124) this.add({ id: `${this.phaseName === 'preflight' ? 'setup' : 'phase'}.${this.phaseName ?? sub}.time-budget`,
       title: `${this.phaseName ?? sub} finishes within its bound`, status: 'fail',
       detail: `${sub} stopped after ${Math.round(exec.ms / 1000)}s (allowed ${Math.round(allowed / 1000)}s); ${this.phaseTimings()}` });
     if (this.clock.now() >= this.deadline && stoppedByBudget(exec, allowed, timeoutMs)) this.errors.push(`${sub} was stopped when the run's time budget ran out (after ${Math.round(exec.ms / 1000)} s of its ${Math.round(timeoutMs / 1000)} s bound)`);
@@ -482,9 +535,9 @@ export function defaultBudgetMs(upgrading: boolean, skipArchive: boolean, archiv
  * Driver transfers and teardown have their own 2/3-minute bounds. */
 export function phaseBudgetMs(name: string): number {
   const minutes: Record<string, number> = {
-    provision: 25, 'restore-provision': 25, install: 25, 'reranker-ready': 16, 'restore-zig': 5, prepare: 7, 'prepare-source': 7,
+    preflight: 4, provision: 25, 'restore-provision': 25, install: 25, 'reranker-ready': 16, 'restore-zig': 5, prepare: 7, 'prepare-source': 7,
     ingest: 4, 'ingest-earlier-release': 10, settle: 10, 'front-seed': 15, 'front-steady': 10, 'front-watch': 5,
-    'archive-beside-live': 8, 'archive-import': 12, 'archive-changed': 12,
+    'archive-beside-live': 8, 'archive-import': 12, 'archive-changed': 15,
     'archive-drain': 8, 'archive-remove': 5, 'archive-model': 7,
     'archive-scale-mbox': 30, 'archive-scale-readwise': 20,
     'archive-scale-roam': 15, 'archive-scale-reflect-json': 12, 'archive-scale-reflect-markdown': 12,
@@ -632,24 +685,60 @@ async function installedBridges(run: Run): Promise<string[] | undefined> {
   return Array.isArray(files.result?.whatsappBridges) ? (files.result.whatsappBridges as unknown[]).map(String) : undefined;
 }
 
+function skipAfterPreflight(run: Run): void {
+  run.preflightFailed = true;
+  const current = run.stage.id;
+  for (const { id, machine } of JOURNEYS) {
+    if (machine && (run.options.skipRestore || run.options.upgradeFromDir)) continue;
+    if (run.options.skipJourneys || (run.options.onlyJourneys?.length && !run.options.onlyJourneys.includes(id))) continue;
+    run.skipJourney(id, machine ? 'restore' : 'journeys', 'setup.preflight');
+  }
+  for (const stage of run.stages.values()) {
+    run.use(stage.id);
+    for (const id of [...LEGS, 'source.prepare', 'source.connect', 'ingest.settled', 'zkapi.confinement', 'limits', 'server-mode', ...(stage.id === 'upgrade' ? ['upgrade.installer'] : [])]) {
+      run.add({ id, title: id, status: 'skip', detail: 'not attempted: preflight failed' });
+    }
+  }
+  run.use(current);
+}
+
 async function setupMachine(run: Run, workDir: string, bundlePath: string, installTitle = 'The candidate installed and the engine is running', earlierRelease = false): Promise<boolean> {
   const machine = run.machine!;
-  const configPath = join(workDir, 'config.json');
-  writeFileSync(configPath, JSON.stringify(agentConfig(run.options)));
-  await machine.exec('mkdir -p ~/rc && chmod 700 ~/rc\n', { timeoutMs: 30_000 });
-  await machine.put(bundlePath, '~/rc/agent.js');
-  await machine.put(configPath, '~/rc/config.json');
-
-  const build = await run.agent('engine-build', '', 60_000);
-  if (typeof build.result?.build === 'string') run.build = build.result.build;
-  if (typeof build.result?.version === 'string') run.stage.version = build.result.version;
-  run.add({
-    id: 'install.engine',
-    title: installTitle,
-    status: build.result?.ok === true && run.build ? 'pass' : 'fail',
-    detail: installDetail(run.build, build.result),
+  const preflightStarted = Date.now();
+  let preflightDetail = '';
+  const passed = await run.phase('preflight', async () => {
+    try {
+      const configPath = join(workDir, 'config.json');
+      writeFileSync(configPath, JSON.stringify(agentConfig(run.options)));
+      const made = await machine.exec('mkdir -p ~/rc && chmod 700 ~/rc\n', { timeoutMs: 30_000 });
+      if (made.code !== 0) throw new Error('could not prepare the agent directory');
+      await machine.put(bundlePath, '~/rc/agent.js');
+      await machine.put(configPath, '~/rc/config.json');
+      const build = await run.agent('engine-build', earlierRelease ? '--earlier-release' : '', earlierRelease ? 150_000 : 60_000);
+      if (typeof build.result?.build === 'string') run.build = build.result.build;
+      if (typeof build.result?.version === 'string') run.stage.version = build.result.version;
+      run.add({
+        id: earlierRelease ? 'setup.old-install' : 'install.engine', title: installTitle,
+        status: build.result?.ok === true && run.build ? 'pass' : 'fail',
+        detail: installDetail(run.build, build.result),
+      });
+      if (build.result?.ok !== true || !run.build) throw new Error('installed build/status did not answer: ' + agentDetail(build, 'detail'));
+      const archive = join(workDir, 'candidate.tar');
+      const packed = spawnSync('tar', ['-cf', archive, '-C', run.options.candidateDir, '.'], { encoding: 'utf8', timeout: 30_000 });
+      if (packed.status !== 0) throw new Error('could not pack candidate for staging');
+      await machine.put(archive, '~/rc/candidate.tar');
+      const probe = await run.agent('preflight', `--bundle-sha ${digest(archive)}`, 90_000);
+      if (probe.code !== 0 || probe.result?.ok !== true || probe.result.protocol !== 'release-check.preflight.v1') throw new Error(agentDetail(probe, 'detail'));
+      preflightDetail = 'installed build/status answered; staged candidate permissions and checksums verified; dashboard browser loaded; agent protocol replied';
+      return true;
+    } catch (error) {
+      preflightDetail = error instanceof Error ? error.message : String(error);
+      return false;
+    }
   });
-  if (build.result?.ok !== true) return false;
+  const preflightOkay = passed && !run.checks.some(check => check.id.startsWith('setup.preflight.') && check.status === 'fail');
+  run.add({ id: 'setup.preflight', title: 'The leg machine passes its setup self-check', status: preflightOkay ? 'pass' : 'fail', detail: preflightDetail, ms: Date.now() - preflightStarted });
+  if (!preflightOkay) { skipAfterPreflight(run); return false; }
 
   // An earlier release answers the privacy question as it shipped (1.4.4 always recommends local-first), so only the
   // candidate is held to the memory-based recommendation (linux-upgrade 43858223532 on a 12 GB VM, 16 Nov 2026).
@@ -661,8 +750,12 @@ async function setupMachine(run: Run, workDir: string, bundlePath: string, insta
     detail: prepare.result?.ok === true ? `${prepare.result.rules} tier rule(s) pinned, engine ready after ${Math.round(Number(prepare.result.engineReadyMs) / 1000)} s` : agentDetail(prepare, 'detail', 'step'),
     ms: prepare.ms,
   });
+  if (prepare.result?.engineSplitWritten === true) run.splitSettingWritten = true;
   if (prepare.result?.ok !== true) return false;
-  if (run.options.engineSplit && run.options.upgradeFromDir === undefined) run.add(engineSplitCheck(prepare.result.engineSplit));
+  if (!earlierRelease && checksSplit(run.options)) run.add(engineSplitCheck(prepare.result.engineSplit));
+  // The fresh leg's dashboard watch starts once prepare's engine restart is over: the install is READY from here, and the
+  // restart's own gap is start-up, not a 1 s failure after ready (mac 44511577175: a 20 s gap at the restart).
+  if (!earlierRelease) await startCutoverWatch(run, true);
 
   const connect = await run.agent('connect-source', '', 120_000);
   run.add({
@@ -694,7 +787,7 @@ export function installDetail(build: string | null | undefined, result: Record<s
 export function engineSplitCheck(roles: unknown): CheckResult {
   const id = 'engine.split';
   const title = 'The engine split is on (worker.engineSplit): a front and a background are running';
-  if (roles === null) return { id, title, status: 'warn', detail: 'switch set in engine.json; the processes\' roles are not read on this platform' };
+  if (roles === null) return { id, title, status: 'warn', detail: 'This platform did not expose the engine process roles' };
   const r = (roles ?? {}) as { front?: unknown; background?: unknown };
   const front = Number(r.front ?? 0);
   const background = Number(r.background ?? 0);
@@ -953,7 +1046,7 @@ async function runProtocolAgent(run: Run, workDir: string): Promise<void> {
   run.agents.push(agent);
 }
 
-const TEXT_EXT = /\.(log|json|txt|md|err)$/;
+const TEXT_EXT = /\.(log|jsonl?|txt|md|err)$/;
 
 function listFiles(dir: string): string[] {
   if (!existsSync(dir)) return [];
@@ -993,7 +1086,7 @@ async function collectEvidence(run: Run, outDir: string): Promise<void> {
  * The machine's engine logs, status output and engine state files (collect-logs), fetched into `<outDir>/<into>`, scanned for
  * planted Private content under `scanLabel`, redacted and listed in the report.
  */
-async function fetchMachineLogs(run: Run, outDir: string, remoteDir: string, into: string, scanLabel: string): Promise<void> {
+async function fetchMachineLogs(run: Run, outDir: string, remoteDir: string, into: string, scanLabel: string, logs: ReportFile[] = run.logs): Promise<void> {
   const collected = await run.agent('collect-logs', `--out ${remoteDir}`, 120_000);
   if (collected.result?.ok !== true) {
     run.add({ id: `scan.${scanLabel}`, title: `No Private or Secret content in ${scanLabel}`, status: 'fail', detail: 'the machine logs could not be collected' });
@@ -1008,7 +1101,7 @@ async function fetchMachineLogs(run: Run, outDir: string, remoteDir: string, int
   run.add(evaluateArtifactScan(scanLabel, texts, run.markers));
   for (const path of listFiles(local)) {
     if (TEXT_EXT.test(path)) writeFileSync(path, redactMarkers(readFileSync(path, 'utf8'), run.markers));
-    run.logs.push({ label: path.slice(local.length + 1), path: `${into}/${path.slice(local.length + 1)}` });
+    logs.push({ label: path.slice(local.length + 1), path: `${into}/${path.slice(local.length + 1)}` });
   }
 }
 
@@ -1225,6 +1318,26 @@ async function runExploreLeg(run: Run, outDir: string): Promise<void> {
  * the journeys; one archive comes back with a trace (and a picture after each step) per journey and the screens. The screens are
  * compared with the approved pictures where `--baselines` names them; `--update-baselines` writes them as candidates instead.
  */
+/** Provision a fresh machine for this one journey with the same candidate and any setup it needs. */
+export function journeyRerunCommand(options: RunOptions, id: string): string | undefined {
+  const journey = JOURNEYS.find(candidate => candidate.id === id && !candidate.machine);
+  if (!options.configFile || !journey) return undefined;
+  return [
+    'bun scripts/release-check/run.ts', `--config ${sh(options.configFile)}`, `--candidate ${sh(options.candidateDir)}`,
+    `--out ${sh(dirname(options.outDir))}`, `--only-journeys ${sh(id)}`,
+    '--skip-archive --skip-restore --skip-explore --skip-server-mode --skip-screenshots',
+    options.upgradeFromDir && `--upgrade-from ${sh(options.upgradeFromDir)}`,
+    options.engineSplit && '--engine-split',
+    options.mistier && `--mistier ${sh(options.mistier)}`,
+    options.upgradeSelftest && `--upgrade-selftest ${sh(options.upgradeSelftest)}`,
+    options.inboxSelftest && `--inbox-selftest ${sh(options.inboxSelftest)}`,
+    options.onlyAgents?.length && `--agents ${sh(options.onlyAgents.join(','))}`,
+    options.skipRelay && '--skip-relay',
+    !journey.needs?.includes('suite') && '--skip-suite',
+    !journey.needs?.includes('inbox') && !options.inboxSelftest && '--skip-inbox',
+  ].filter(Boolean).join(' ');
+}
+
 async function runJourneyLeg(run: Run, outDir: string): Promise<void> {
   const options = run.options;
   if (options.skipJourneys) return;
@@ -1237,6 +1350,15 @@ async function runJourneyLeg(run: Run, outDir: string): Promise<void> {
   const skip = unmet.length ? ` --skip ${sh(unmet.map((journey) => journey.id).join(','))}` : '';
   const done = await run.phase('journeys', () => run.agent('journeys', `--out ~/rc/journeys${only}${skip}${plants}`, 2_400_000));
   const result = done.result;
+  const traces = Array.isArray(result?.traces) ? result.traces as JourneyTrace[] : [];
+  run.recordJourneyFailures(traces, 'journeys', trace => `journeys --out ~/rc/journey-rerun --skip-screens --only ${sh(trace.id)}`);
+  // Journeys the machine never walked because the leg itself failed are listed as skipped because of journeys.ran.
+  if (result?.ok !== true) {
+    for (const journey of JOURNEYS) {
+      if (!journey.machine && !unmet.includes(journey) && (!options.onlyJourneys?.length || options.onlyJourneys.includes(journey.id))
+        && !traces.some(trace => trace.id === journey.id)) run.skipJourney(journey.id, 'journeys', 'journeys.ran');
+    }
+  }
   if (!result || !Array.isArray(result.traces)) {
     run.add({ id: 'journeys.ran', title: 'The journeys were walked in the owner\'s browser', status: 'fail', detail: agentDetail(done) });
     return;
@@ -1269,7 +1391,6 @@ async function runJourneyLeg(run: Run, outDir: string): Promise<void> {
     run.add(layoutQualificationCheck(layoutScore));
     run.add({ id: 'reviewer.plants', title: 'The pictures with planted bugs were taken for the reviewer\'s qualification', status: planted.some((item: { plant?: unknown }) => item.plant) ? 'pass' : 'fail', detail: `${planted.length} picture(s), ${planted.filter((item: { plant?: unknown }) => item.plant).length} with a planted bug` });
   }
-  const traces = result.traces as JourneyTrace[];
   (run.stage.traces ??= []).push(...traces);
   for (const check of journeyChecks(traces)) run.add(check);
 
@@ -1294,10 +1415,13 @@ async function runJourneyLeg(run: Run, outDir: string): Promise<void> {
  * imported, so the search is cited; then the private model is switched off, an archive is imported with it off, and it is switched back
  * on (always, in the end, whatever failed) so the held messages drain; Remove takes the archives away; the changed-file stage uses
  * its own large archive. Each format besides the stress one (mail) is imported by the agent path right after the mail archive, judged
- * and searched the same way, and removed with the others. Whatever happened, the machine's archives and fixtures are cleaned up last.
+ * and searched the same way, and removed with the others. A blocked leg leaves cleanup to VM teardown, preserving failure evidence.
  */
 async function runArchiveLeg(run: Run, outDir: string, deadline: number): Promise<void> {
-  if (run.options.skipArchive) return;
+  if (run.options.skipArchive) {
+    run.add({ ...qualifyAskCheck(), status: 'skip', detail: 'Archive indexing was skipped by request' });
+    return;
+  }
   const os = run.machine!.os;
   const seed = randomBytes(6).toString('hex');
   const fixture = (role: FixtureRole) => legFixture(role, seed, STRESS_FORMAT);
@@ -1322,19 +1446,45 @@ async function runArchiveLeg(run: Run, outDir: string, deadline: number): Promis
     await fetchMachineLogs(run, outDir, '~/rc/logs-archive-failure', 'logs/archive-first-failure', 'the engine logs at the first failing archive check');
   };
   /** One in-machine verb; its result, or undefined (the checks then say there was none) with the machine's last words in the log. */
+  let pendingBlock: string | undefined;
+  let blockingJourney: string | undefined;
   const call = async <T extends object>(sub: string, args: string, timeoutS: number): Promise<T | undefined> => {
+    const restoring = sub === 'archive-model' && args === '--mode on';
+    if (run.archiveBlocked && !restoring) {
+      if (sub !== 'archive-cleanup') run.skipJourney(`${sub} ${args}`.trim(), 'archive', blockingJourney ?? run.archiveBlockedBy ?? 'archive.blocked');
+      return undefined;
+    }
     await keepStateAtFailure();
-    const done = await run.phase(sub, () => run.agent(sub, args, timeoutS * 1_000));
+    // The in-machine settle owns the idle window. A progressing import gets the remaining leg budget.
+    const importing = sub === 'archive-import' || sub === 'archive-beside-live';
+    const budgetMs = importing ? Math.max(1, deadline - Date.now()) : undefined;
+    const done = await run.phase(sub, () => run.agent(sub, args, budgetMs ?? timeoutS * 1_000), budgetMs);
     if (!done.result) run.log(`${sub}: ${agentDetail(done)}`);
     const result = done.result as T | undefined;
+    const blocked = (result as { blocked?: string } | undefined)?.blocked;
+    if (!restoring && (blocked || (!result && (importing || sub === 'archive-remove' || sub === 'archive-changed')))) pendingBlock = blocked ?? agentDetail(done);
     const own = (result as { traces?: JourneyTrace[] } | undefined)?.traces;
-    if (Array.isArray(own)) traces.push(...own);
+    if (Array.isArray(own)) {
+      traces.push(...own);
+      run.recordJourneyFailures(own, 'archive', () => `${sub} ${args}`);
+      if (pendingBlock) {
+        const failed = own.find(trace => !trace.ok);
+        if (failed) blockingJourney = `journey.${failed.id}`;
+      }
+    }
     return result;
   };
-  const addAll = (checks: CheckResult[]): void => {
-    for (const check of checks) {
+  const addAll = (checks: CheckResult[], restoring = false): void => {
+    for (const original of checks) {
+      const check = run.archiveBlocked && !restoring ? { ...original, status: 'skip' as const, detail: 'Skipped: see archive.blocked' } : original;
       run.add(check);
       if (check.status === 'fail') firstFailure ??= check.id;
+    }
+    if (pendingBlock && !run.archiveBlocked) {
+      run.archiveBlockedBy = checks.find(check => check.status === 'fail')?.id ?? firstFailure ?? 'archive.blocked';
+      run.archiveBlocked = `${run.archiveBlockedBy}: ${pendingBlock}`;
+      run.add({ id: 'archive.blocked', title: 'Remaining archive imports and dependent phases skipped', status: 'skip', detail: run.archiveBlocked });
+      pendingBlock = undefined;
     }
   };
   const flags = (fx: { role: string; format: string }): string => `--role ${fx.role} --format ${fx.format} --seed ${sh(seed)}`;
@@ -1342,6 +1492,10 @@ async function runArchiveLeg(run: Run, outDir: string, deadline: number): Promis
   let modelTouched = false;
   let modelOn: ModelObservation | undefined;
   try {
+    // The privacy journey's owner description changes the judge's prompt, and approval is per prompt.
+    const judge = await run.agent('fixture-judge-reapprove', '', 60_000);
+    const judged = judge.result as { ok?: boolean; reapproved?: boolean; skipped?: string; detail?: string } | undefined;
+    if (!judged?.skipped) run.add({ id: 'setup.fixture-judge-approved', title: 'The fixture judge is approved for the current prompt before the archive imports', status: judged?.ok === true ? 'pass' : 'fail', detail: judged?.ok === true ? (judged.reapproved ? 'approved again after the prompt changed' : 'already approved') : (judged?.detail ?? agentDetail(judge)) });
     // 1. The owner chooses a file in the picker (nothing is listed yet).
     const picker = await call<ImportObservation>('archive-import', `${flags(pickerFx)} --via picker --reset-folder --clean`, stepS);
     addAll(importChecks(picker, pickerFx, os));
@@ -1374,7 +1528,7 @@ async function runArchiveLeg(run: Run, outDir: string, deadline: number): Promis
     for (const format of BESIDE_LIVE_FORMATS) {
       const besideFx = legFixture('beside', seed, format);
       if (!seeded.has(format)) {
-        run.add({ id: `archive.beside.${format}.ran`, title: `The ${format} export was imported beside its source's live input`, status: 'fail', detail: 'not run: the source\'s live input could not be set up' });
+        addAll([{ id: `archive.beside.${format}.ran`, title: `The ${format} export was imported beside its source's live input`, status: 'fail', detail: 'not run: the source\'s live input could not be set up' }]);
         continue;
       }
       if (outOfTime(`the ${format} import beside its live input`)) break;
@@ -1384,27 +1538,27 @@ async function runArchiveLeg(run: Run, outDir: string, deadline: number): Promis
 
     // 3. The private model off: the archive stays held Private and nothing leaves the machine.
     if (!outOfTime('the private-model-off archive import')) {
-      modelTouched = true;
+      modelTouched = !run.archiveBlocked;
       const off = await call<ModelObservation>('archive-model', '--mode off', ARCHIVE_BOUNDS.engineS + 240);
       addAll(modelChecks(off, 'off'));
       if (off?.ok === true) {
         const held = await call<ImportObservation>('archive-import', `${flags(heldFx)} --via request --search --watch-egress`, stepS);
         addAll(heldOffChecks(held, heldFx));
       } else {
-        run.add({ id: `archive.${heldFx.role}.${heldFx.format}.ran`, title: 'The archive was imported with the private model off', status: 'fail', detail: 'not run: the private model could not be turned off' });
+        addAll([{ id: `archive.${heldFx.role}.${heldFx.format}.ran`, title: 'The archive was imported with the private model off', status: 'fail', detail: 'not run: the private model could not be turned off' }]);
       }
     }
   } finally {
     // 4. The private model back on, whatever happened above.
     if (modelTouched) {
       modelOn = await call<ModelObservation>('archive-model', '--mode on', ARCHIVE_BOUNDS.engineS + 240);
-      addAll(modelChecks(modelOn, 'on'));
+      addAll(modelChecks(modelOn, 'on'), true);
     }
   }
 
   try {
     // 5. What was held drains to zero within the leg's own bound, and becomes searchable.
-    if (modelTouched && modelOn?.ok === true && !outOfTime('the held archive drain')) {
+    if ((run.archiveBlocked || (modelTouched && modelOn?.ok === true)) && !outOfTime('the held archive drain')) {
       const drained = await call<ImportObservation>('archive-drain', `${flags(heldFx)} --search --bound-s ${drainS}`, drainS + 300);
       const prefix = `archive.${heldFx.role}.${heldFx.format}.restored`;
       addAll(drainChecks(`${prefix}.drain`, drained?.drain, heldFx, os, 'restored'));
@@ -1417,24 +1571,30 @@ async function runArchiveLeg(run: Run, outDir: string, deadline: number): Promis
     if (!outOfTime('removing the archives')) {
       const targets = [agentFx, ...extraFxs, pickerFx, heldFx];
       const removed = await call<RemoveObservation>('archive-remove', `--targets ${sh(targets.map((fx) => `${fx.role}:${fx.format}`).join(','))} --seed ${sh(seed)}`, targets.length * (ARCHIVE_BOUNDS.removeS + 180) + 120);
-      traces.push(...(removed?.removals ?? []).flatMap((removal) => removal.traces));
+      const removalTraces = (removed?.removals ?? []).flatMap(removal => removal.traces);
+      traces.push(...removalTraces);
+      for (const [index, removal] of (removed?.removals ?? []).entries()) {
+        const target = targets[index];
+        if (target) run.recordJourneyFailures(removal.traces, 'archive', () => `archive-remove --targets ${sh(`${target.role}:${target.format}`)} --seed ${sh(seed)}`);
+      }
       addAll(removeChecks(removed, targets));
     }
 
     // 7. A file that changes while it is imported stops the import, visibly.
     if (!outOfTime('the changed-file check')) {
-      const changed = await call<ChangedObservation>('archive-changed', `--seed ${sh(seed)} --sizes ${BULK_SIZES.join(',')}`, BULK_SIZES.length * (ARCHIVE_BOUNDS.startS + ARCHIVE_BOUNDS.removeS + 120) + ARCHIVE_BOUNDS.stopS + ARCHIVE_BOUNDS.removeS + 300);
+      const changed = await call<ChangedObservation & { qualifyAsk?: AskObservation }>('archive-changed', `--seed ${sh(seed)} --sizes ${BULK_SIZES.join(',')}`, BULK_SIZES.length * (ARCHIVE_BOUNDS.startS + ARCHIVE_BOUNDS.removeS + 120) + ARCHIVE_BOUNDS.stopS + ARCHIVE_BOUNDS.removeS + 480);
       addAll(changedChecks(changed));
+      run.add(run.archiveBlocked && !changed ? { ...qualifyAskCheck(), status: 'skip', detail: `Blocked by ${run.archiveBlockedBy}` } : qualifyAskCheck(changed?.qualifyAsk));
     }
   } finally {
-    // 8. Nothing is left on the machine: every archive off the Archives line, the fixtures folder gone.
+    // 8. Clean a completed leg. A blocked leg preserves its state for evidence, then VM teardown removes it.
     const cleaned = await call<{ ok?: boolean; removed?: string[]; detail?: string }>('archive-cleanup', '', ARCHIVE_BOUNDS.removeS + 300);
-    run.add({
+    addAll([{
       id: 'archive.cleanup',
       title: 'The test archives were removed from the machine at the end of the leg',
       status: cleaned?.ok === true ? 'pass' : 'fail',
       detail: cleaned?.ok === true ? `${cleaned.removed?.length ? `${cleaned.removed.length} left over archive(s) removed; ` : ''}fixtures folder deleted` : String(cleaned?.detail ?? 'no result from the machine'),
-    });
+    }]);
   }
 
   await keepStateAtFailure();
@@ -1466,16 +1626,18 @@ async function collectArchiveTraces(run: Run, outDir: string): Promise<void> {
 
 /** The split front after a restart on a store set with Gmail attachments, Telegram and archives (front-steady.ts). */
 async function runFrontSteady(run: Run): Promise<void> {
+  if (run.archiveBlocked) { run.add({ id: 'front.steady', title: 'Front restart on the archive store set', status: 'skip', detail: 'Skipped: see archive.blocked' }); return; }
   const seed = randomBytes(6).toString('hex');
   const done = await run.phase('front-steady', () => run.agent('front-steady', `--seed ${seed} --watch-s ${FRONT_WATCH_S}`, (FRONT_WATCH_S + 30 * 60) * 1_000));
   if (!done.result) run.log(`front-steady: ${agentDetail(done)}`);
   const obs = done.result as FrontSteadyObservation | undefined;
+  run.recordJourneyFailures(obs?.traces ?? [], 'archive', () => `front-steady --seed ${seed} --watch-s ${FRONT_WATCH_S}`);
   for (const check of [...frontSteadyChecks(obs), ...journeyChecks(obs?.traces ?? [])]) run.add(check);
 }
 
 /**
  * Before the candidate's installer runs with the split on (upgrade-split.ts): the earlier release gets the store set, the owner's
- * switch goes on, and a copy of the candidate whose front cannot start is installed over it first. Returns what the real
+ * switch goes on only for explicit experiments, and a copy of the candidate whose front cannot start is installed over it first. Returns what the real
  * update's checks compare against.
  */
 async function prepareSplitUpdate(run: Run, workDir: string, beforeVersion: string | null | undefined): Promise<{ set?: FrontStoreSet; storeFiles?: number }> {
@@ -1488,14 +1650,24 @@ async function prepareSplitUpdate(run: Run, workDir: string, beforeVersion: stri
   // nor the agent call carries a clock that would cut a progressing import short; the phase reports its time.
   const seeded = await run.phase('front-seed', () => run.agent('front-seed', `--seed ${seed} --settle-s ${seedS - 360} --queue-s 120 --telegram-later`, 120 * 60_000), 120 * 60_000);
   const set = seeded.result as FrontStoreSet | undefined;
+  run.recordJourneyFailures(set?.traces ?? [], 'upgrade', () => `front-seed --seed ${seed} --settle-s ${seedS - 360} --queue-s 120 --telegram-later`);
   run.log(`front-seed: ${set ? `Gmail ${set.gmail.settled ? 'settled' : `not settled (${set.gmail.status ?? 'not listed'})`}, job queue ${set.jobQueue ? 'present' : 'missing'}${set.detail ? `; ${set.detail}` : ''}` : agentDetail(seeded)}`);
-  const on = await run.agent('engine-split-on', '', 60_000);
   run.add({
-    id: 'upgrade.split.switch',
-    title: 'The owner\'s engine.json has worker.engineSplit on before the update, as on the owner\'s machine',
-    status: on.result?.ok === true ? 'pass' : 'fail',
-    detail: on.result?.ok === true ? 'set on the earlier release without a restart; the installer\'s start picks it up' : agentDetail(on),
+    id: 'baseline.front.gmail', title: 'Before the update, the earlier release seeded the Gmail import',
+    status: set?.gmail.settled ? 'pass' : 'warn',
+    detail: set?.gmail.settled ? 'the pre-upgrade seed settled' : `the pre-upgrade seed did not settle (${set?.gmail.status ?? 'not listed'}); baseline observation only; the candidate is checked after the update`,
   });
+  if (!set?.gmail.settled) await fetchMachineLogs(run, run.options.outDir, '~/rc/front-seed-logs', 'logs/front-seed', 'the pre-upgrade front seed diagnostics', run.stages.get('before')!.logs);
+  if (run.options.engineSplit) {
+    const on = await run.agent('engine-split-on', '', 60_000);
+    run.add({
+      id: 'upgrade.split.switch',
+      title: 'The owner\'s engine.json has worker.engineSplit on before the update, as on the owner\'s machine',
+      status: on.result?.ok === true ? 'pass' : 'fail',
+      detail: on.result?.ok === true ? 'set on the earlier release without a restart; the installer\'s start picks it up' : agentDetail(on),
+    });
+    run.splitSettingWritten = on.result?.ok === true;
+  }
   const saved = await run.agent('store-files', '--save before', 60_000);
   const storeFiles = saved.result?.ok === true ? Number(saved.result.count) : undefined;
 
@@ -1543,9 +1715,10 @@ async function checkSplitUpdate(run: Run, prep: { set?: FrontStoreSet; storeFile
   // Telegram is seeded now, by the candidate's own pull: before the update it would write stores the earlier release cannot open.
   const telegram = await run.agent('front-seed-telegram', '', 5 * 60_000);
   if (prep.set && telegram.result?.ok === true) {
-    const after = telegram.result as unknown as Pick<FrontStoreSet, 'telegram' | 'lanes'>;
-    prep.set = { ...prep.set, telegram: after.telegram, lanes: after.lanes };
-  } else if (prep.set) prep.set = { ...prep.set, telegram: { ok: false, detail: `after the update: ${agentDetail(telegram)}` } };
+    const after = telegram.result as unknown as FrontAfterUpdate;
+    const { status: _seedStatus, ...gmail } = prep.set.gmail;
+    prep.set = { ...prep.set, gmail: { ...gmail, ...after.gmail, settled: after.gmail?.settled === true }, telegram: after.telegram, lanes: after.lanes };
+  } else if (prep.set) prep.set = { ...prep.set, gmail: { approved: prep.set.gmail.approved, settled: false }, telegram: { ok: false, detail: `after the update: ${agentDetail(telegram)}` } };
   const watched = await run.phase('front-watch', () => run.agent('front-watch', `--watch-s ${FRONT_WATCH_S}`, (FRONT_WATCH_S + 120) * 1_000));
   const watch = watched.result?.ok === true ? watched.result as unknown as FrontWatch : undefined;
   const obs = prep.set && watch ? { ...prep.set, ...watch, restart: back } as FrontSteadyObservation : undefined;
@@ -1554,8 +1727,50 @@ async function checkSplitUpdate(run: Run, prep: { set?: FrontStoreSet; storeFile
   run.add(storesKeptCheck(prep.storeFiles, compared.result?.ok === true ? compared.result as unknown as StoreFileCount : undefined));
 }
 
+async function startCutoverWatch(run: Run, fresh = false): Promise<void> {
+  const seconds = Math.max(1, Math.ceil((run.deadline - Date.now()) / 1_000)) + 60;
+  run.watchingCutover = true;
+  // The receipt comes after the watcher has attempted the owner mint and sampled the old worker.
+  // Keep this outside a gating phase: a missing receipt means missing observations.
+  const started = await run.machine!.exec(`rm -f ~/rc/${CUTOVER_LOG} ~/rc/${CUTOVER_READY} ~/rc/${CUTOVER_STOP} ~/rc/${CUTOVER_DONE}
+${BUN_LOCATE}
+nohup "$BUN" --no-env-file ~/rc/agent.js cutover-watch --seconds ${seconds}${fresh ? ' --fresh' : checksSplit(run.options) ? ' --split-startup' : ''} </dev/null >/dev/null 2>&1 &
+pid=$!
+while [ ! -f ~/rc/${CUTOVER_READY} ]; do
+  kill -0 "$pid" 2>/dev/null || exit 1
+  sleep 0.25
+done
+`, { timeoutMs: 20_000 }).catch(() => undefined);
+  if (started?.code !== 0) run.log('cutover watcher did not confirm its first sample');
+}
+
+async function finishCutoverWatch(run: Run, archiveReached = false): Promise<void> {
+  if (!run.watchingCutover) return;
+  run.watchingCutover = false;
+  const upgrade = run.options.upgradeFromDir !== undefined;
+  const machine = run.machine!;
+  const result = await machine.exec(`touch ~/rc/${CUTOVER_STOP}
+${BUN_LOCATE}
+"$BUN" --no-env-file ~/rc/agent.js cutover-report
+`, { timeoutMs: 15_000 }).catch(() => undefined);
+  const reply = result?.code === 0 ? parseAgentLine(result.stdout) : undefined;
+  const summary = reply?.ok === true ? reply.summary as CutoverSummary : undefined;
+  if (upgrade) for (const check of cutoverChecks(summary, checksSplit(run.options))) run.addTo('upgrade', check);
+  const availability = dashboardAvailabilityCheck(summary?.qualification);
+  run.add(archiveReached || (summary?.qualification && availability.status === 'fail')
+    ? availability : { ...availability, status: 'skip', detail: 'The run stopped before the archive stage completed' });
+  const path = `logs/${CUTOVER_LOG}`;
+  try {
+    const local = join(run.options.outDir, path);
+    await machine.get(`~/rc/${CUTOVER_LOG}`, local);
+    writeFileSync(local, redactMarkers(readFileSync(local, 'utf8'), run.markers));
+    (upgrade ? run.stages.get('after')!.logs : run.logs).push({ label: CUTOVER_LOG, path });
+  } catch { run.log('cutover samples could not be collected'); }
+}
+
 async function runArchiveScaleLeg(run: Run, outDir: string, deadline: number): Promise<void> {
   if (!run.options.archiveScale) return;
+  if (run.archiveBlocked) { run.add({ id: 'archive.scale', title: 'Archive scale imports', status: 'skip', detail: 'Skipped: see archive.blocked' }); return; }
   const seed = randomBytes(6).toString('hex');
   try {
     for (const format of run.options.archiveScaleFormats ?? SCALE_FORMATS) {
@@ -1628,6 +1843,8 @@ interface RestorePrepared { before: StateSnapshot; local: string }
 async function walkRestore(run: Run, machine: JourneyMachine, label: string, outDir: string): Promise<boolean> {
   const done = await run.phase(`restore-${machine}`, () => run.agent('journeys', `--out ~/rc/journeys-${machine} --machine ${machine} --skip-screens`, 1_800_000));
   const traces = Array.isArray(done.result?.traces) ? done.result!.traces as JourneyTrace[] : [];
+  run.recordJourneyFailures(traces, 'restore', trace =>
+    `journeys --out ~/rc/journey-rerun --machine ${machine} --skip-screens --only ${sh(trace.id)}`);
   if (traces.length === 0) {
     run.add({ id: `restore.${machine}`, title: `The ${label} journey was walked`, status: 'fail', detail: agentDetail(done) });
     return false;
@@ -1650,7 +1867,16 @@ async function prepareRestore(run: Run, workDir: string, outDir: string): Promis
   // Without the whole journeys leg there is no corrected item for the clean machine to find.
   if (legPartial('restore', run.options)) return undefined;
   const first = run.machine!;
-  if (!(await walkRestore(run, 'restore-from', 'backup', outDir))) return undefined;
+  const correction = run.stage.traces?.find(trace => trace.id === 'fix-one-item' && !trace.ok);
+  if (correction) {
+    run.skipJourney('backup-for-restore', 'restore', 'journey.fix-one-item');
+    run.skipJourney('restore-clean-machine', 'restore', 'journey.fix-one-item');
+    return undefined;
+  }
+  if (!(await walkRestore(run, 'restore-from', 'backup', outDir))) {
+    run.skipJourney('restore-clean-machine', 'restore', 'backup-for-restore');
+    return undefined;
+  }
   const before = await takeSnapshot(run, 'when the backup was made');
   if (!before) return undefined;
   const listed = await first.exec(`ls -1 ${RESTORE_BACKUP_FOLDER}/*.olympusbackup | tail -1\n`, { timeoutMs: 30_000 });
@@ -1717,7 +1943,7 @@ async function runUpgradeLeg(run: Run, workDir: string, bundlePath: string, judg
 
   run.use('before');
   const ready = await setupMachine(run, workDir, bundlePath, `The earlier release${expected.from ? ` (${expected.from})` : ''} installed fresh and the engine is running`, true);
-  if (!ready) { run.errors.push('the earlier release did not reach a settled install, so the update was not attempted'); return; }
+  if (!ready) { if (!run.preflightFailed) run.errors.push('the earlier release did not reach a settled install, so the update was not attempted'); return; }
   const bridgesBefore = { expected: bundleWhatsAppBridgeName(options.upgradeFromDir!), installed: await installedBridges(run) };
   if (Date.now() >= deadline) { run.errors.push('the run exceeded its time budget before the earlier release\'s suite'); return; }
   await runSuite(run, workDir, judge, { mintToken: true });
@@ -1739,8 +1965,9 @@ async function runUpgradeLeg(run: Run, workDir: string, bundlePath: string, judg
   }
 
   run.use('upgrade');
-  run.stage.label = `${expected.from ?? 'the earlier release'} -> ${expected.to ?? 'the candidate'}, with the candidate's public Linux installer over the existing install`;
-  const split = options.engineSplit ? await prepareSplitUpdate(run, workDir, before.version) : undefined;
+  run.stage.label = `${expected.from ?? 'the earlier release'} -> ${expected.to ?? 'the candidate'}, with the candidate's public installer over the existing install`;
+  const split = checksSplit(options) ? await prepareSplitUpdate(run, workDir, before.version) : undefined;
+  await startCutoverWatch(run);
   try {
     await run.phase('upgrade', () => machine.upgrade(options.candidateDir));
     run.add({ id: 'upgrade.installer', title: 'The candidate\'s installer ran over the existing install and reported a usable install', status: 'pass', detail: 'the same installer the update instructions give, with the candidate\'s tarball' });
@@ -1776,11 +2003,18 @@ async function runUpgradeLeg(run: Run, workDir: string, bundlePath: string, judg
   if (Date.now() < deadline) await runJourneyLeg(run, options.outDir); else run.errors.push('the run exceeded its time budget before the journeys');
   if (Date.now() < deadline) await runArchiveLeg(run, options.outDir, deadline); else run.errors.push('the run exceeded its time budget before the archive-import leg');
   await runArchiveScaleLeg(run, options.outDir, deadline);
+  await finishCutoverWatch(run, Date.now() < deadline && !options.skipArchive);
+  if (Date.now() < deadline) await runPrivacyQualification(run);
   if (Date.now() < deadline) await runRelayConsentCheck(run);
   if (Date.now() < deadline) await runExploreLeg(run, options.outDir); else run.errors.push('the run exceeded its time budget before the control exploration');
   if (Date.now() < deadline) await runConfinementCheck(run); else run.errors.push('the run exceeded its time budget before the anonymous-answer confinement check');
   await runLimitsLeg(run);
   await collectEvidence(run, options.outDir);
+}
+
+async function runPrivacyQualification(run: Run): Promise<void> {
+  const call = await run.phase('qualify-private', () => run.agent('qualify-private', '', 12 * 60_000), 12 * 60_000);
+  run.add(qualifyPrivacyCheck(call.result as PrivacyObservation | undefined));
 }
 
 // Before the control exploration: it presses Turn off remote access (answering OK), and the approval page and its
@@ -1823,8 +2057,7 @@ async function runServerModeCheck(run: Run): Promise<void> {
 
 export async function runReleaseCheck(options: RunOptions): Promise<ReleaseReport> {
   if (options.archiveScale) {
-    if (options.carry || options.updateBaselines) throw new Error('--archive-scale runs a full split-engine proof; it cannot carry results or update baselines');
-    options = { ...options, engineSplit: true };
+    if (options.carry || options.updateBaselines) throw new Error('--archive-scale cannot carry results or update baselines');
   }
   mkdirSync(join(options.outDir, 'logs'), { recursive: true });
   const workDir = join(tmpdir(), `release-check-${options.runId}`);
@@ -1860,56 +2093,69 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
   let machineInfo = { label: 'machine', os: 'linux', driver: 'driver' };
   try {
     const bundlePath = await bundleAgent(workDir);
-    run.machine = await run.phase('provision', () => driver.provision({ runId: options.runId, candidateDir: upgrading ? options.upgradeFromDir! : options.candidateDir, workdir: workDir, timeoutMs: 25 * 60_000 }));
-    machineInfo = { label: run.machine.label, os: run.machine.os, driver: run.machine.driver };
-    run.add({ id: 'provision', title: upgrading ? 'A fresh machine was created and the earlier release installed' : 'A fresh machine was created and the candidate installed', status: 'pass', detail: `${run.machine.label}` });
-    if (options.failAfterProvision) throw new Error('simulated failure after provision (teardown test)');
-    if (upgrading) {
-      await runUpgradeLeg(run, workDir, bundlePath, judge, deadline, versions);
-    } else {
-      const ready = await setupMachine(run, workDir, bundlePath);
-      if (ready) run.add(whatsappBridgeCheck({ id: 'install.whatsapp-bridge', expected: bundleWhatsAppBridgeName(options.candidateDir), installed: await installedBridges(run) }));
-      if (ready && !options.skipSuite && Date.now() < deadline) {
-        await run.inLeg('suite', () => runSuite(run, workDir, judge, { mintToken: true }));
-      } else if (ready && !options.skipSuite) {
-        run.errors.push('the run exceeded its time budget before the agent suite');
-      }
-      if (ready) {
-        await run.inLeg('screenshots', () => captureScreenshots(run, options.outDir));
-        if (Date.now() < deadline) await run.inLeg('inbox', () => runInboxLeg(run, options.outDir)); else run.errors.push('the run exceeded its time budget before the Ask page and Inbox leg');
-        if (Date.now() < deadline) await run.inLeg('journeys', () => runJourneyLeg(run, options.outDir)); else run.errors.push('the run exceeded its time budget before the journeys');
-        if (Date.now() < deadline) await run.inLeg('archive', () => runArchiveLeg(run, options.outDir, deadline)); else run.errors.push('the run exceeded its time budget before the archive-import leg');
-        if (options.archiveScale) await run.inLeg('archive', () => runArchiveScaleLeg(run, options.outDir, deadline));
-        // With the split on, the front must survive a restart on a store set like a real one (rc.4, ops#151).
-        if (options.engineSplit && !options.skipArchive && Date.now() < deadline) await run.inLeg('archive', () => runFrontSteady(run));
-        // The backup is made before the control exploration, which ends with Readwise disconnected and its data deleted (its
-        // `empty` state): a backup made after it holds no source to restore (#1323, run 42936532388).
-        // The restore leg's second machine comes only after the first is done and gone: both drivers run one machine at a time
-        // on their host (tart: run 42918085215's restore-provision timed out waiting; LXD: run 42960983714's was refused, since
-        // two VMs do not fit in Sparta's memory).
-        let restore: RestorePrepared | undefined;
-        if (Date.now() < deadline) {
-          await run.inLeg('restore', async () => { restore = await prepareRestore(run, workDir, options.outDir); });
-        } else run.errors.push('the run exceeded its time budget before the restore leg');
-        if (Date.now() < deadline) await runRelayConsentCheck(run);
-        if (Date.now() < deadline) await run.inLeg('explore', () => runExploreLeg(run, options.outDir)); else run.errors.push('the run exceeded its time budget before the control exploration');
-        if (Date.now() < deadline) await runConfinementCheck(run); else run.errors.push('the run exceeded its time budget before the anonymous-answer confinement check');
-        if (Date.now() < deadline) await runServerModeCheck(run); else run.errors.push('the run exceeded its time budget before the Mac server-mode leg');
-        await runLimitsLeg(run);
-        await collectEvidence(run, options.outDir);
-        if (restore) {
-          const prepared: RestorePrepared = restore;
-          if (Date.now() >= deadline) { rmSync(prepared.local, { force: true }); run.errors.push('the run exceeded its time budget before the restore leg\'s clean machine'); }
-          else if (options.keepMachine) { rmSync(prepared.local, { force: true }); run.errors.push('the restore leg\'s clean machine was left out: --keep-machine keeps the first machine, and the driver runs one at a time'); }
-          else {
-            await run.inLeg('restore', async () => {
-              // Teardown destroys run.machine again afterwards, which is a no-op for a machine already gone.
-              await run.driver.destroy({ handle: run.machine!.handle });
-              await finishRestore(run, bundlePath, options.outDir, workDir, prepared);
-            });
-          }
+    try {
+      const installBundle = upgrading ? oldInstallBundle(options.upgradeFromDir!, workDir) : options.candidateDir;
+      if (upgrading && installBundle !== options.upgradeFromDir) run.log('setup: historical Linux installer status read retries for up to 120 s (scratch copy; candidate unchanged)');
+      run.machine = await run.phase('provision', () => driver.provision({ runId: options.runId, candidateDir: installBundle, workdir: workDir, timeoutMs: 25 * 60_000 }));
+    } catch (error) {
+      if (!upgrading) throw error;
+      run.add({ id: 'setup.old-install', title: 'The historical release installed and answered status', status: 'fail', detail: error instanceof Error ? error.message : String(error) });
+      run.add({ id: 'setup.preflight', title: 'The leg machine passes its setup self-check', status: 'fail', detail: 'historical release provision failed before the machine became usable', ms: run.timings.provision ?? 0 });
+      skipAfterPreflight(run);
+    }
+    if (run.machine) {
+      machineInfo = { label: run.machine.label, os: run.machine.os, driver: run.machine.driver };
+      run.add({ id: 'provision', title: upgrading ? 'A fresh machine was created and the earlier release installed' : 'A fresh machine was created and the candidate installed', status: 'pass', detail: `${run.machine.label}` });
+      if (options.failAfterProvision) throw new Error('simulated failure after provision (teardown test)');
+      if (upgrading) {
+        await runUpgradeLeg(run, workDir, bundlePath, judge, deadline, versions);
+      } else {
+        const ready = await setupMachine(run, workDir, bundlePath);
+        if (ready) run.add(whatsappBridgeCheck({ id: 'install.whatsapp-bridge', expected: bundleWhatsAppBridgeName(options.candidateDir), installed: await installedBridges(run) }));
+        if (ready && !options.skipSuite && Date.now() < deadline) {
+          await run.inLeg('suite', () => runSuite(run, workDir, judge, { mintToken: true }));
+        } else if (ready && !options.skipSuite) {
+          run.errors.push('the run exceeded its time budget before the agent suite');
         }
-      } else await collectEvidence(run, options.outDir);
+        if (ready) {
+          await run.inLeg('screenshots', () => captureScreenshots(run, options.outDir));
+          if (Date.now() < deadline) await run.inLeg('inbox', () => runInboxLeg(run, options.outDir)); else run.errors.push('the run exceeded its time budget before the Ask page and Inbox leg');
+          if (Date.now() < deadline) await run.inLeg('journeys', () => runJourneyLeg(run, options.outDir)); else run.errors.push('the run exceeded its time budget before the journeys');
+          if (Date.now() < deadline) await run.inLeg('archive', () => runArchiveLeg(run, options.outDir, deadline)); else run.errors.push('the run exceeded its time budget before the archive-import leg');
+          if (options.archiveScale) await run.inLeg('archive', () => runArchiveScaleLeg(run, options.outDir, deadline));
+          await finishCutoverWatch(run, Date.now() < deadline && !options.skipArchive);
+          // With the split on, the front must survive a restart on a store set like a real one (rc.4, ops#151).
+          if (checksSplit(options) && !options.skipArchive && Date.now() < deadline) await run.inLeg('archive', () => runFrontSteady(run));
+          // The backup is made before the control exploration, which ends with Readwise disconnected and its data deleted (its
+          // `empty` state): a backup made after it holds no source to restore (#1323, run 42936532388).
+          // The restore leg's second machine comes only after the first is done and gone: both drivers run one machine at a time
+          // on their host (tart: run 42918085215's restore-provision timed out waiting; LXD: run 42960983714's was refused, since
+          // two VMs do not fit in Sparta's memory).
+          let restore: RestorePrepared | undefined;
+          if (Date.now() < deadline) {
+            await run.inLeg('restore', async () => { restore = await prepareRestore(run, workDir, options.outDir); });
+          } else run.errors.push('the run exceeded its time budget before the restore leg');
+          if (Date.now() < deadline) await runPrivacyQualification(run);
+          if (Date.now() < deadline) await runRelayConsentCheck(run);
+          if (Date.now() < deadline) await run.inLeg('explore', () => runExploreLeg(run, options.outDir)); else run.errors.push('the run exceeded its time budget before the control exploration');
+          if (Date.now() < deadline) await runConfinementCheck(run); else run.errors.push('the run exceeded its time budget before the anonymous-answer confinement check');
+          if (Date.now() < deadline) await runServerModeCheck(run); else run.errors.push('the run exceeded its time budget before the Mac server-mode leg');
+          await runLimitsLeg(run);
+          await collectEvidence(run, options.outDir);
+          if (restore) {
+            const prepared: RestorePrepared = restore;
+            if (Date.now() >= deadline) { rmSync(prepared.local, { force: true }); run.errors.push('the run exceeded its time budget before the restore leg\'s clean machine'); }
+            else if (options.keepMachine) { rmSync(prepared.local, { force: true }); run.errors.push('the restore leg\'s clean machine was left out: --keep-machine keeps the first machine, and the driver runs one at a time'); }
+            else {
+              await run.inLeg('restore', async () => {
+                // Teardown destroys run.machine again afterwards, which is a no-op for a machine already gone.
+                await run.driver.destroy({ handle: run.machine!.handle });
+                await finishRestore(run, bundlePath, options.outDir, workDir, prepared);
+              });
+            }
+          }
+        } else if (!run.preflightFailed) await collectEvidence(run, options.outDir);
+      }
     }
   } catch (error) {
     run.errors.push(error instanceof Error ? error.message : String(error));
@@ -1918,6 +2164,7 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
       try { await collectEvidence(run, options.outDir); } catch { /* evidence is best effort after a failure */ }
     }
   } finally {
+    if (run.machine) await finishCutoverWatch(run);
     // Teardown always runs, and by run id when provision never returned a handle.
     const started = Date.now();
     try {
@@ -1955,6 +2202,7 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
     screenshots: last.screenshots,
     logs: last.logs,
     legs: [...run.legsRan],
+    diagnosis: run.diagnosis(),
     ...(last.traces ? { traces: last.traces } : {}),
     ...(last.visual ? { visual: last.visual } : {}),
     ...(last.explore ? { explore: last.explore } : {}),
@@ -1979,7 +2227,7 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
         ? `a fault was deliberately made in the Inbox leg (${options.inboxSelftest}); this run is expected to FAIL on ${run.inboxSelftestFailsOn && options.inboxSelftest === 'wrong-link-id' ? run.inboxSelftestFailsOn : INBOX_SELFTEST_FAILS[options.inboxSelftest]}`
         : undefined;
   let carry: ReleaseReportInput['carry'];
-  if (options.carry) {
+  if (options.carry && !run.preflightFailed) {
     const { base, path, plan } = options.carry;
     const from = { runId: base.runId, sha: base.candidate.sha! };
     try {
@@ -2000,7 +2248,7 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
     ...(options.harnessCommit ? { harnessCommit: options.harnessCommit } : {}),
     ...(selfTest ? { selfTest } : {}),
     ...(carry ? { carry } : {}),
-    ...(options.engineSplit ? { settings: { engineSplit: true, ...(options.archiveScale ? { archiveScale: true } : {}) } } : {}),
+    settings: { defaultEngineSplit: candidateDefaultSplit(), ...(run.splitSettingWritten ? { engineSplit: true } : {}), ...(options.archiveScale ? { archiveScale: true } : {}) },
   });
   // The report must itself be clean; a hit fails the run without copying the marker.
   const reportLeaks = scanReport(report, run.markers);
@@ -2037,7 +2285,7 @@ export function parseCli(argv: readonly string[]): RunOptions {
   const candidate = get('--candidate');
   const out = get('--out');
   if (!configPath || !candidate || !out) {
-    throw new Error('usage: bun scripts/release-check/run.ts --config <file> --candidate <dir> --out <dir> [--label <name>] [--sha <sha>] [--harness-commit <sha>] [--run-id <id>] [--agents <id,id>] [--mistier private|secrets] [--upgrade-from <earlier bundle dir> [--upgrade-selftest lose-tier-rules|revert-policy]] [--inbox-selftest plant-private-reply|wrong-link-id] [--fail-after-provision] [--keep-machine] [--skip-relay] [--skip-screenshots] [--skip-inbox] [--skip-journeys] [--skip-explore] [--skip-suite] [--skip-archive] [--skip-restore] [--skip-server-mode] [--only-journeys <id,id>] [--baselines <dir> [--update-baselines]] [--reviewer-plants] [--carry-from <tested report.json> --changed-files <list>] [--engine-split] [--archive-scale [--archive-scale-formats <format,format>] [--archive-scale-count <n>] [--archive-scale-bound-s <s>]]');
+    throw new Error('usage: bun scripts/release-check/run.ts --config <file> --candidate <dir> --out <dir> [--label <name>] [--sha <sha>] [--harness-commit <sha>] [--run-id <id>] [--agents <id,id>] [--mistier private|secrets] [--upgrade-from <earlier bundle dir> [--upgrade-selftest lose-tier-rules|revert-policy]] [--inbox-selftest plant-private-reply|wrong-link-id] [--fail-after-provision] [--keep-machine] [--skip-relay] [--skip-screenshots] [--skip-inbox] [--skip-journeys] [--skip-explore] [--skip-suite] [--skip-archive] [--skip-restore] [--skip-server-mode] [--only-journeys <id,id>] [--baselines <dir> [--update-baselines]] [--reviewer-plants] [--carry-from <tested report.json> --changed-files <list>] [--engine-split (explicit override; experimental)] [--archive-scale [--archive-scale-formats <format,format>] [--archive-scale-count <n>] [--archive-scale-bound-s <s>]]');
   }
   const config = JSON.parse(readFileSync(resolve(configPath), 'utf8')) as RunConfigFile;
   if (!Array.isArray(config.driver) || config.driver.length === 0) throw new Error('the config needs a "driver" argv array');
@@ -2069,8 +2317,8 @@ export function parseCli(argv: readonly string[]): RunOptions {
   if (has('--update-baselines') && changesScreens.length > 0) throw new Error(`--update-baselines takes the pictures of a full run; drop ${changesScreens.join(', ')}`);
   if (has('--reviewer-plants') && has('--skip-journeys')) throw new Error('--reviewer-plants takes its pictures with the screens; drop --skip-journeys');
   if (has('--reviewer-plants') && has('--update-baselines')) throw new Error('--reviewer-plants is a qualification run; it never writes baselines');
-  if (has('--engine-split') && has('--update-baselines')) throw new Error('--engine-split tests a setting that is off by default; it never writes baselines');
-  if (archiveScale && has('--update-baselines')) throw new Error('--archive-scale uses the split engine; it never writes baselines');
+  if (has('--engine-split') && has('--update-baselines')) throw new Error('--engine-split explicitly writes worker.engineSplit for an experiment; it never writes baselines');
+  if (archiveScale && has('--update-baselines')) throw new Error('--archive-scale never writes baselines');
   if (archiveScale && has('--carry-from')) throw new Error('--archive-scale cannot carry results');
   const scaleFormats = get('--archive-scale-formats')?.split(',').map((format) => format.trim()).filter(Boolean);
   if (scaleFormats && !archiveScale) throw new Error('--archive-scale-formats needs --archive-scale');
@@ -2095,7 +2343,7 @@ export function parseCli(argv: readonly string[]): RunOptions {
   if (carryFrom !== undefined && changedFiles !== undefined) {
     const conflicts = ['--skip-relay', '--skip-screenshots', '--skip-inbox', '--skip-journeys', '--skip-explore', '--skip-suite', '--skip-archive', '--skip-restore', '--skip-server-mode', '--only-journeys', '--agents',
       '--mistier', '--upgrade-from', '--inbox-selftest', '--update-baselines', '--reviewer-plants', '--fail-after-provision', '--keep-machine',
-      // A tested run's results were taken with the switch off; they say nothing about the split.
+      // Results from an explicit override cannot be carried into a default run.
       '--engine-split'].filter(has);
     if (conflicts.length > 0) throw new Error(`--carry-from lets the change decide what runs; drop ${conflicts.join(', ')}`);
     if (!existsSync(resolve(changedFiles))) throw new Error(`--changed-files ${changedFiles} does not exist`);
@@ -2119,6 +2367,7 @@ export function parseCli(argv: readonly string[]): RunOptions {
     ...(harnessCommit ? { harnessCommit } : {}),
     outDir: resolve(out, runId),
     config,
+    configFile: resolve(configPath),
     ...(mistier ? { mistier } : {}),
     ...(upgradeFrom !== undefined ? { upgradeFromDir: resolve(upgradeFrom) } : {}),
     ...(upgradeSelftest ? { upgradeSelftest: upgradeSelftest as UpgradeSelftest } : {}),
@@ -2139,7 +2388,7 @@ export function parseCli(argv: readonly string[]): RunOptions {
     keepMachine: has('--keep-machine'),
     skipRelay: skip('--skip-relay'),
     skipScreenshots: skip('--skip-screenshots'),
-    ...(has('--engine-split') || archiveScale ? { engineSplit: true } : {}),
+    ...(has('--engine-split') ? { engineSplit: true } : {}),
     ...(archiveScale ? { archiveScale: true } : {}),
     ...(scaleFormats ? { archiveScaleFormats: scaleFormats as ScaleFormat[] } : {}),
     ...(scaleCount !== undefined ? { archiveScaleCount: scaleCount } : {}),
@@ -2157,7 +2406,7 @@ if (import.meta.main) {
     process.exit(2);
   }
   const report = await runReleaseCheck(options);
-  console.log(JSON.stringify({ verdict: report.verdict, counts: report.counts, report: join(options.outDir, 'report.html') }));
+  console.log(JSON.stringify({ verdict: report.verdict, counts: report.counts, failures: report.failures, report: join(options.outDir, 'report.html') }));
   process.exit(report.verdict === 'pass' ? 0 : 1);
 }
 

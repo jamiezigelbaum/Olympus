@@ -2,13 +2,11 @@
  * Imported archives as one scheduler source, `archive.imports`: one task per
  * archive that is importing or being removed, all sharing one concurrency
  * key, so two archives never write their family's stores at once and a
- * removal never runs beside its own archive's import (they are the same
- * task). An archive that finished importing, or stopped, has no task.
+ * removal never runs beside its own archive's import. Import and removal
+ * have separate task ids: a removal must not inherit a failed import's
+ * backoff. An archive that finished importing, or stopped, has no task.
  *
- * Because they are the same task, a removal asked for after the import ended
- * would inherit the import's schedule (its last pass plus the sync interval,
- * 30 minutes by default), and so would a removal resumed after a restart. So
- * the source offers the scheduler a push wake (`subscribeChanges`): the
+ * The source offers the scheduler a push wake (`subscribeChanges`): the
  * dashboard wakes it when a removal is asked for, and it wakes when subscribed
  * with a removal waiting. The scheduler then runs the removal within seconds;
  * the import cadence is untouched.
@@ -50,10 +48,17 @@ import type { ArchiveSourceTargets } from './source-targets.ts';
 export const ARCHIVE_IMPORTS_CONCURRENCY_KEY = 'archive.imports';
 
 /**
- * The task id of one archive's import and removal.
+ * The task id of one archive's import.
  */
 export function archiveImportTaskId(archiveId: string): string {
   return `${SCHEDULER_SOURCE_IDS.archiveImports}_pull.${schedulerScopeHash(archiveId)}`;
+}
+
+/**
+ * A removal starts with its own schedule, regardless of the import's retry state.
+ */
+export function archiveRemovalTaskId(archiveId: string): string {
+  return `${SCHEDULER_SOURCE_IDS.archiveImports}_remove.${schedulerScopeHash(archiveId)}`;
 }
 
 /**
@@ -140,7 +145,7 @@ export function createArchiveImportsSchedulerSource(
     const targets = input.targets ?? input.runtime.targets;
     const sourceKey = record.target ? targets.forSource(record.target.source_id)?.concurrencyKey : undefined;
     tasks.push({
-      id: archiveImportTaskId(archiveId),
+      id: record.status === 'removing' ? archiveRemovalTaskId(archiveId) : archiveImportTaskId(archiveId),
       kind: 'sync',
       writer: true,
       concurrencyKey: sourceKey ?? ARCHIVE_IMPORTS_CONCURRENCY_KEY,

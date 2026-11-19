@@ -14,12 +14,14 @@
  * not know is handed over again, which the ledger makes safe.
  */
 import { createHash } from 'node:crypto';
-import { EngineCommandError, type EngineCommandEnvelope, type EngineCommandReceipt, type EngineCommandRecords } from './commands.ts';
+import { logClickTrace } from './click-trace.ts';
+import { EngineCommandError, isDashboardPrivacyRaise, type EngineCommandEnvelope, type EngineCommandReceipt, type EngineCommandRecords } from './commands.ts';
 
 interface MirrorEntry {
   /** A digest of the command, to refuse a used id for a different one without keeping its body twice. */
   digest: string;
   receipt: EngineCommandReceipt;
+  privacyRaise: boolean;
   /** Kept until the loop settles it, to hand over again. */
   envelope?: EngineCommandEnvelope;
   settled: Promise<void>;
@@ -54,7 +56,7 @@ export class EngineCommandMirror implements EngineCommandRecords {
   get instanceId(): string { return this.options.instanceId; }
 
   /** Record a command and hand it to the loop, or return the record of the same id. */
-  submit(envelope: EngineCommandEnvelope): EngineCommandReceipt {
+  submit(envelope: EngineCommandEnvelope, clickId?: string): EngineCommandReceipt {
     this.prune();
     const digest = createHash('sha256').update(JSON.stringify(envelope.command)).digest('hex');
     const existing = this.entries.get(envelope.id);
@@ -65,10 +67,11 @@ export class EngineCommandMirror implements EngineCommandRecords {
     let settle!: () => void;
     const settled = new Promise<void>((resolve) => { settle = resolve; });
     const entry: MirrorEntry = {
-      digest, envelope, settled, settle,
+      digest, envelope, settled, settle, privacyRaise: isDashboardPrivacyRaise(envelope.command),
       receipt: { id: envelope.id, state: 'received', instance_id: this.options.instanceId },
     };
     this.entries.set(envelope.id, entry);
+    if (clickId) logClickTrace(clickId, envelope.id, 'control_receipt', 'background', 'served_by=control-thread');
     this.options.send(envelope);
     return this.answer(entry);
   }
@@ -76,6 +79,13 @@ export class EngineCommandMirror implements EngineCommandRecords {
   get(id: string): EngineCommandReceipt | undefined {
     const entry = this.entries.get(id);
     return entry ? this.answer(entry) : undefined;
+  }
+
+  hasPendingPrivacyRaise(): boolean {
+    for (const entry of this.entries.values()) {
+      if (entry.privacyRaise && entry.receipt.state === 'received') return true;
+    }
+    return false;
   }
 
   async settled(id: string, wait: Promise<void>): Promise<EngineCommandReceipt | undefined> {

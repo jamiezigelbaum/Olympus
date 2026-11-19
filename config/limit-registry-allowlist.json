@@ -492,6 +492,12 @@
     "retire_when": "Remove when ENGINE_JUDGE_BOOST_MAX_IDS in src/workers/engine-split/commands.ts is removed or registered."
   },
   {
+    "path": "src/workers/engine-split/memory.ts",
+    "symbol": "MEMORY_FLOOR_WINDOW_MAX_SAMPLES",
+    "reason": "internal",
+    "retire_when": "Remove when the bounded sample window for the memory restart floor is retired or registered."
+  },
+  {
     "path": "src/workers/engine-split/rss-restart.ts",
     "symbol": "ENGINE_RSS_RESTART_MAX_WAIT_MS",
     "reason": "pacing",
@@ -964,5 +970,11 @@
     "symbol": "retry:reconcile:retryAt_at",
     "reason": "pending",
     "retire_when": "Schedules another reconciliation when the applied result cannot advance the authoritative watermark; retire when that distinct reconciliation wait is reported as its own stop or removed."
+  },
+  {
+    "path": "src/workers/engine/runtime/deep-read-jobs.ts",
+    "symbol": "DEEP_READ_BUDGET_SECONDS",
+    "reason": "internal",
+    "retire_when": "Remove when DEEP_READ_BUDGET_SECONDS in src/workers/engine/runtime/deep-read-jobs.ts is removed or registered. It picks what a deep read reads first (the owner's 15-minute choice) and never stops a read."
   }
 ]

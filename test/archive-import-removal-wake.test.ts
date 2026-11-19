@@ -1,8 +1,8 @@
 // A removal starts within seconds of being asked for, whatever the archive's
-// import left in the scheduler. Import and removal are one scheduler task, so
-// a removal inherits the import's last pass plus the sync interval (30 minutes
-// by default) unless the source wakes the scheduler: when the dashboard asks
-// for a removal, and when the scheduler starts with one waiting. Tested on a
+// import left in the scheduler. Import and removal share a concurrency key,
+// with separate task ids so a failed import cannot defer its removal. The
+// source wakes the scheduler when the dashboard asks for a removal, and when
+// the scheduler starts with one waiting, rather than waiting for a poll. Tested on a
 // real scheduler with its durable state, an injected clock and injected timers,
 // so a restart is a second scheduler over the same state. Synthetic mail only.
 

@@ -1,18 +1,69 @@
 import { Database } from 'bun:sqlite';
 import { expect, spyOn, test } from 'bun:test';
+import { memoryActivity } from '../src/core/memory-counters.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { TierLedger, type TierLedgerIdentity } from '../src/workers/classification/tier-ledger.ts';
 import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
 import { SecretLocationsIndex } from '../src/workers/classification/secret-locations.ts';
 import { TieredStoreSet } from '../src/workers/connector-store/tiered-store-set.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
-import { CORPORA, FIXTURE_PLACEMENT, fixtureConnector, identityOf, localProvider, localId, tempDir } from './helpers/tier-fixtures.ts';
+import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
+import { createSourceAnswerTrace, runWithSourceAnswerTrace } from '../src/workers/source-index/answer-latency-trace.ts';
+import type { SourceIndexRoutedSearchHit } from '../src/core/source-index/router.ts';
+import { CORPORA, FIXTURE_PLACEMENT, fixtureConnector, identityOf, cloudProvider, localProvider, localId, tempDir } from './helpers/tier-fixtures.ts';
 
 interface StoreProbe {
   db: Database;
   tierLedgerHiddenItemPks(): { hidden: number[]; held: number[]; heldForJudgment: number[]; metadataLayer: number[]; metadataLayerContentUnread: number[]; moving: number };
   itemRowsForIdentities(ids: readonly TierLedgerIdentity[], ...rest: unknown[]): unknown[];
 }
+
+test.each(['deletion', 'secret'] as const)('a pending %s hides an unrouted item from search', async (kind) => {
+  const tmp = tempDir();
+  const ledger = new TierLedger({ dbPath: `${tmp.dir}/ledger.sqlite` });
+  const store = new LocalConnectorStore({ dbPath: `${tmp.dir}/store.sqlite`, corpusId: CORPORA.internal,
+    family: 'file', trustDomain: 'internal', tierLedger: ledger });
+  const probe = store as unknown as StoreProbe & {
+    tierHiddenItemPksInTurns(): Promise<{ hidden: number[] }>;
+    visibleVectorItemPks(pks: readonly number[]): Set<number>;
+  };
+  try {
+    const connector = fixtureConnector(() => [{ id: 'a', name: 'Orchard', text: 'Orchard notes' }]);
+    await store.syncFromConnector(connector, { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    const provider = cloudProvider();
+    await store.embedChunks({ provider });
+    const identity = identityOf('a');
+    expect(ledger.isRouted(identity)).toBe(false);
+    expect(ledger.copies(identity)).toEqual([]);
+    const query = 'orchard';
+    const rows = store.searchItems(query, 5);
+    expect(rows.map(row => row.sourceItem.providerItemId)).toEqual(['a']);
+    const hit = { corpusId: store.corpusId, sourceItem: rows[0]!.sourceItem } as SourceIndexRoutedSearchHit;
+    const gate = createTierVisibilityGate(() => [{ ledger, corpusIds: new Set([store.corpusId]) }]);
+    const { item_pk: pk } = probe.db.query('SELECT item_pk FROM items').get() as { item_pk: number };
+    await runWithSourceAnswerTrace(createSourceAnswerTrace(), async () => {
+      expect(await gate.offThread!([hit])).toEqual([hit]);
+      expect(probe.visibleVectorItemPks([pk])).toEqual(new Set([pk]));
+      expect((await store.vectorSearchLane(query, provider, 5)).rows).toHaveLength(1);
+      expect((await probe.tierHiddenItemPksInTurns()).hidden).toEqual([]);
+
+      ledger.putWriteIntent({ identity, connectorId: connector.id, kind });
+      expect({
+        gate: gate([hit]).length,
+        gateOffThread: (await gate.offThread!([hit])).length,
+        keyword: store.searchItems(query, 5).length,
+        keywordOffThread: (await store.searchItemsDetailedOffThread(query, 5)).rows.length,
+        vectorWinners: probe.visibleVectorItemPks([pk]).size,
+        hiddenPks: (await probe.tierHiddenItemPksInTurns()).hidden,
+      }).toEqual({ gate: 0, gateOffThread: 0, keyword: 0, keywordOffThread: 0, vectorWinners: 0, hiddenPks: [pk] });
+      expect((await store.vectorSearchLane(query, provider, 5)).rows).toEqual([]);
+
+      ledger.clearWriteIntent(identity);
+      expect((await store.searchItemsDetailedOffThread(query, 5)).rows).toHaveLength(1);
+      expect((await probe.tierHiddenItemPksInTurns()).hidden).toEqual([]);
+    });
+  } finally { store.close(); ledger.close(); tmp.cleanup(); }
+});
 
 /** Copy an API-created row's non-generated columns; only its identity changes. */
 function multiply(db: Database, table: string, count: number, changes: Record<string, string>, where: string): void {
@@ -175,6 +226,13 @@ test('a yielded refresh cannot rewind a newer cache or lose held flags when a pk
     state: 'pending' as const, contentPending: true };
   const plan = { copies: [{ corpusId: store.corpusId, trustDomain: 'internal' as const, layers: 'both' as const }], embedHold: true };
   try {
+    const bootstrap = probe.tierLedgerHiddenSteps();
+    try {
+      expect(bootstrap.next().done).toBe(false);
+      expect(memoryActivity(false, false)).toEqual(['visibility_rebuild_bootstrap']);
+      expect(() => bootstrap.throw(new Error('finder failed'))).toThrow('finder failed');
+    } finally { bootstrap.return(undefined); }
+    expect(memoryActivity(false, false)).toEqual(['idle']);
     await store.syncFromConnector(fixtureConnector(() => [{ id: 'a', name: 'Notes', text: 'ordinary' }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
     ledger.recordRoutedPlacement(identityOf('a'), decision, plan);
     expect(probe.tierLedgerHiddenItemPks().held).toEqual([1]);
@@ -183,10 +241,15 @@ test('a yielded refresh cannot rewind a newer cache or lose held flags when a pk
     const ldb = (ledger as unknown as { db: Database }).db;
     ldb.query("UPDATE tier_copies SET embed_hold = 0 WHERE provider_item_id = 'a'").run();
     const refresh = probe.tierLedgerHiddenSteps();
-    expect(refresh.next().done).toBe(false);
-    ledger.putWriteIntent({ identity: identityOf('a'), connectorId: 'fixture', kind: 'secret' });
-    expect(probe.tierLedgerHiddenItemPks().hidden).toEqual([1]);
-    while (!refresh.next().done) { /* resume the earlier reader */ }
+    try {
+      expect(refresh.next().done).toBe(false);
+      expect(memoryActivity(false, false)).toEqual(['visibility_rebuild_incremental']);
+      ledger.putWriteIntent({ identity: identityOf('a'), connectorId: 'fixture', kind: 'secret' });
+      expect(probe.tierLedgerHiddenItemPks().hidden).toEqual([1]);
+      expect(memoryActivity(false, false)).toEqual(['visibility_rebuild_incremental']);
+      while (!refresh.next().done) { /* resume the earlier reader */ }
+    } finally { refresh.return(undefined); }
+    expect(memoryActivity(false, false)).toEqual(['idle']);
     expect(probe.tierLedgerHiddenItemPks().hidden).toEqual([1]);
     // The ledger records the new identity before a store row is reassigned.
     // Removing the old identity's contribution after adding the new one must

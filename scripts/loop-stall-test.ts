@@ -22,10 +22,10 @@
  * empty and may only shrink. Synthetic data and loopback stub HTTP only.
  */
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, writeFileSync, writeSync, mkdtempSync, rmSync } from 'node:fs';
 import { join, resolve, relative } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import type { Database } from 'bun:sqlite';
+import { Database } from 'bun:sqlite';
 import type { AnalystModel } from '../src/core/analyst.ts';
 import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
 import { olympusDataRoot } from '../src/core/olympus-layout.ts';
@@ -43,6 +43,12 @@ import type { SourceEmbeddingProvider } from '../src/workers/source-index/embedd
 import { startPacedStatusRecount } from '../src/workers/engine/status-recount.ts';
 import { createWorkerFetch } from '../src/core/worker-transport.ts';
 import { engineStatusSnapshotPath } from '../src/workers/engine-split/runtime.ts';
+import { LOOP_LAG_BUCKETS_MS } from '../src/core/engine-heartbeat.ts';
+import { controlPathHeadroom, freezeLogLine, summarizeCpuSamples, tracesInStalls } from '../src/workers/control-path-headroom.ts';
+import { ownerTierItemId } from '../src/workers/classification/tier-owner-items.ts';
+import { DASHBOARD_LOCAL_CONTROL_SESSION_PATH } from '../src/workers/http.ts';
+import type { summarizeFreeze } from './front-thread-timeline.ts';
+import { hiddenCopyBuilds, samplePage, type HiddenCopyBuilds } from './release-check/cutover.ts';
 
 // v6: each build keeps a pristine copy and each run starts from it, so every run has judging to do (plan, 16 Nov 2026).
 const VERSION = 6;
@@ -309,17 +315,184 @@ export async function attachEngineFixture(stores: LocalConnectorStore[], role: s
     timers.push(starter);
   }
   let stopRecount = () => {};
-  return { answerModel, stop() { stopped = true; for (const timer of timers) clearInterval(timer); stopRecount(); service?.stop(); installed?.close(); jobs?.close(); ledger.close(); } };
+  return { answerModel, storePaths: mounted.map(store => store.dbPath), stop() { stopped = true; for (const timer of timers) clearInterval(timer); stopRecount(); service?.stop(); installed?.close(); jobs?.close(); ledger.close(); } };
 }
 
 interface Loop { max_ms: number; over_budget: number; beats: number; buckets?: number[] }
-const LAG_EDGES_MS = [10, 25, 50, 100, 200, 300, 500, 1000, 2000, 5000, 10000];
+const ROLES = ['background', 'front'] as const;
+type Role = typeof ROLES[number];
+const READY_LOG: Record<Role, string> = { background: 'engine background ready', front: 'worker listening' };
+const BEAT_MS = 25;
+const CPU_FLUSH_MS = 30_000;
+const FINAL_SAMPLE_WAIT_MS = 2_000;
+type Beat = { startMs: number; endMs: number };
+type SampledBeat = Beat & { site: string };
+type CpuSummary = ReturnType<typeof summarizeCpuSamples>;
+type CpuTraces = Parameters<typeof summarizeCpuSamples>[0];
+type CpuSources = Parameters<typeof summarizeCpuSamples>[2];
+type CpuRow = { at: string; freezes: CpuSummary & { count: number; totalMs: number; maxMs: number }; beat_sites: SampledBeat[] };
+const holdMs = (beat: Beat) => beat.endMs - beat.startMs;
+const beatBudgetMs = (role: Role) => role === 'front' ? 100 : 250;
+const afterReady = (beat: Beat, readyAt: number | undefined) => readyAt !== undefined && beat.startMs >= readyAt;
+const nowMs = () => performance.timeOrigin + performance.now();
+
+function worstBeat(beats: readonly Beat[]): Beat | undefined {
+  return beats.reduce<Beat | undefined>((worst, beat) => !worst || holdMs(beat) > holdMs(worst) ? beat : worst, undefined);
+}
+
+export function sampledBeatSite(beat: Beat, traces: CpuTraces, offset: number, sources?: CpuSources): SampledBeat | undefined {
+  const frames = summarizeCpuSamples(tracesInStalls(traces, [beat], offset), undefined, sources);
+  // A product frame names the caller when the leaf is SQLite or the runtime.
+  const site = frames.total.find(([frame]) => / \S+\.ts:\d+/.test(frame) && !frame.includes('main-thread-sql-trace') && !frame.includes('bun:'))?.[0] ?? frames.self[0]?.[0];
+  return site ? { ...beat, site } : undefined;
+}
+
+export function summarizeBeats(role: Role, beats: readonly Beat[], samples: readonly SampledBeat[], timing: { readyAt?: number; spawnedAt: number; stoppedAt: number }) {
+  const { readyAt, spawnedAt, stoppedAt } = timing;
+  const before = beats.filter(beat => !afterReady(beat, readyAt));
+  const after = beats.filter(beat => afterReady(beat, readyAt));
+  const buckets = Array<number>(LOOP_LAG_BUCKETS_MS.length + 1).fill(0);
+  for (const beat of after) {
+    const bucket = LOOP_LAG_BUCKETS_MS.findIndex(edge => holdMs(beat) < edge);
+    buckets[bucket < 0 ? LOOP_LAG_BUCKETS_MS.length : bucket]!++;
+  }
+  // A process killed while held cannot publish the final tick. Its open beat
+  // contributes to the worst and over-budget counts; the histogram uses completed beats.
+  const openStart = Math.max(beats.at(-1)?.endMs ?? spawnedAt, readyAt ?? spawnedAt) + BEAT_MS;
+  const scoredBeats = [...after];
+  if (openStart < stoppedAt) {
+    const openBeat = { startMs: openStart, endMs: stoppedAt };
+    (afterReady(openBeat, readyAt) ? scoredBeats : before).push(openBeat);
+  }
+  const worst = worstBeat(scoredBeats);
+  const preReady = worstBeat(before);
+  const sites = new Map(samples.map(sample => [sample.startMs, sample]));
+  const siteOf = (beat: Beat | undefined) => {
+    const sample = beat && sites.get(beat.startMs);
+    return sample && sample.endMs === beat?.endMs ? sample.site : 'unsampled';
+  };
+  const over1s = scoredBeats.filter(beat => holdMs(beat) > LOOP_STALL_LIMIT_MS);
+  const table = new Map<string, { site: string; count: number; total_s: number; worst_ms: number }>();
+  for (const beat of over1s) {
+    const site = siteOf(beat);
+    const entry = table.get(site) ?? { site, count: 0, total_s: 0, worst_ms: 0 };
+    entry.count++;
+    entry.total_s += holdMs(beat) / 1000;
+    entry.worst_ms = Math.max(entry.worst_ms, holdMs(beat));
+    table.set(site, entry);
+  }
+  return {
+    loop: {
+      max_ms: worst ? holdMs(worst) : 0,
+      over_budget: scoredBeats.filter(beat => holdMs(beat) >= beatBudgetMs(role)).length,
+      beats: after.length,
+      buckets,
+      over_1s: over1s.length,
+      worst_site: siteOf(worst),
+      pre_ready_ms: preReady ? holdMs(preReady) : 0,
+      pre_ready_site: siteOf(preReady),
+      spawn_to_ready_ms: readyAt === undefined ? null : Math.round(readyAt - spawnedAt),
+    },
+    sites: [...table.values()].map(entry => ({ ...entry, total_s: Math.round(entry.total_s * 10) / 10 })).sort((a, b) => b.total_s - a.total_s),
+  };
+}
+
+/** Preloaded in the engine subprocess so both clocks run during startup. */
+export function measureEngine(role: Role, path: string, cpuPath: string,
+  samplingProfilerStackTraces?: () => { traces?: CpuTraces; sources?: CpuSources },
+) {
+  // The harness drains this profiler itself so it can keep each sample's beat.
+  process.env.OLYMPUS_CPU_SAMPLE_LOG = 'off';
+  const fd = openSync(`${path}.beats.jsonl`, 'w', 0o600);
+  let expected = performance.timeOrigin + BEAT_MS;
+  let lastFlush = nowMs();
+  let readyAt: number | undefined;
+  let pending: Beat[] = [];
+  let flushRequested = false;
+  const record = (now: number) => {
+    const beat = { startMs: Math.min(expected, now), endMs: now };
+    writeSync(fd, JSON.stringify(beat) + '\n');
+    pending.push(beat);
+    expected = now + BEAT_MS;
+  };
+  const flush = (now: number) => {
+    const beats = pending;
+    pending = [];
+    flushRequested = false;
+    if (!samplingProfilerStackTraces) return;
+    // Anchor the profiler's seconds to the beat clock. Spinning briefly gives
+    // even an idle interval a fresh trace before draining the profiler.
+    const spinUntil = performance.now() + 3;
+    while (performance.now() < spinUntil) { /* spin */ }
+    const anchor = nowMs();
+    const { traces = [], sources } = samplingProfilerStackTraces();
+    const newest = traces.reduce((max, trace) => Math.max(max, trace.timestamp ?? -Infinity), -Infinity);
+    const offset = newest - anchor / 1000;
+    const stalled = beats.filter(beat => holdMs(beat) > LOOP_STALL_LIMIT_MS);
+    const selected = new Set([
+      ...stalled,
+      worstBeat(beats.filter(beat => !afterReady(beat, readyAt))),
+      worstBeat(beats.filter(beat => afterReady(beat, readyAt))),
+    ]);
+    const beat_sites: SampledBeat[] = [];
+    for (const beat of selected) {
+      if (!beat || !Number.isFinite(newest)) continue;
+      const sample = sampledBeatSite(beat, traces, offset, sources);
+      if (sample) beat_sites.push(sample);
+    }
+    const worst = worstBeat(stalled);
+    const freezes = {
+      count: stalled.length,
+      totalMs: Math.round(stalled.reduce((sum, beat) => sum + holdMs(beat), 0)),
+      maxMs: worst ? Math.round(holdMs(worst)) : 0,
+      ...summarizeCpuSamples(Number.isFinite(newest) ? tracesInStalls(traces, stalled, offset) : [], undefined, sources),
+    };
+    const at = new Date(now).toISOString();
+    appendFileSync(cpuPath, JSON.stringify({ at, pid: process.pid, role, windowMs: Math.round(now - lastFlush), headroom: controlPathHeadroom.snapshot(),
+      ...summarizeCpuSamples(traces, undefined, sources), freezes, beat_sites }) + '\n', { mode: 0o600 });
+    if (freezes.count) console.error(freezeLogLine(at, role, freezes));
+    lastFlush = now;
+  };
+  const tick = () => {
+    const now = nowMs();
+    record(now);
+    if (flushRequested) {
+      flush(now);
+      // The last measured tick precedes the shutdown-only profiler work.
+      writeFileSync(`${path}.sampled`, String(now), { mode: 0o600 });
+    } else if (now - lastFlush >= CPU_FLUSH_MS) flush(now);
+  };
+  let timer = setInterval(tick, BEAT_MS).unref();
+  process.on('SIGUSR2', () => { flushRequested = true; });
+  const log = console.log;
+  console.log = (...args: unknown[]) => {
+    if (typeof args[0] === 'string' && args[0].includes(READY_LOG[role])) {
+      readyAt = nowMs();
+      // Close any boot hold before the ready line, even if the delayed timer
+      // callback would have run after it. Restart the timer on this boundary.
+      if (readyAt >= expected) record(readyAt);
+      expected = readyAt + BEAT_MS;
+      clearInterval(timer);
+      timer = setInterval(tick, BEAT_MS).unref();
+      writeFileSync(`${path}.ready`, String(readyAt), { mode: 0o600 });
+      console.log = log;
+    }
+    log(...args);
+  };
+}
+
+function readJsonLines<T>(path: string): T[] {
+  if (!existsSync(path)) return [];
+  // Only completed lines survive a child killed in the middle of an append.
+  return readFileSync(path, 'utf8').split('\n').slice(0, -1).map(line => JSON.parse(line) as T);
+}
+
 /** The 95th-percentile loop beat, as the upper edge of its histogram bucket ("<= N ms"); undefined without a histogram. */
 export function beatP95(loop: Loop): number | undefined {
   const buckets = loop.buckets; if (!buckets?.length) return undefined;
   const total = buckets.reduce((sum, n) => sum + n, 0); if (!total) return undefined;
   let seen = 0;
-  for (let i = 0; i < buckets.length; i++) { seen += buckets[i]!; if (seen >= total * 0.95) return LAG_EDGES_MS[i] ?? Infinity; }
+  for (let i = 0; i < buckets.length; i++) { seen += buckets[i]!; if (seen >= total * 0.95) return LOOP_LAG_BUCKETS_MS[i] ?? Infinity; }
   return Infinity;
 }
 export function percentile(values: number[], p: number): number {
@@ -327,22 +500,73 @@ export function percentile(values: number[], p: number): number {
   const sorted = [...values].sort((a, b) => a - b);
   return Math.round(sorted[Math.min(sorted.length - 1, Math.ceil(p * sorted.length) - 1)]!);
 }
-/**
- * The pass bar (owner, 16 Nov 2026: "If the dashboard freezes are extremely short, like less than a second or something,
- * it's not much of a priority"): the worst loop stall under 1 s on both engines, with the workload complete. The 250/100 ms
- * budgets, slow statements and long reads are reported as numbers and no longer fail a run; a WAL over the limit still does.
- */
 export const LOOP_STALL_LIMIT_MS = 1_000;
 // The release bar (owner, 16 Nov 2026, "Finish the boundary in 1.5"): the front never holds its loop 1 s; commands are
 // acknowledged under 1 s; the background gates on progress (no beat over 30 s, the work done, no WAL over 64 MB at any point).
-// Background beats over 1 s are reported by site and do not gate.
+// The loop limits use beats after each engine reported ready.
 const BACKGROUND_PROGRESS_LIMIT_MS = 30_000;
 // Boot after upgrade (owner, 16 Nov 2026 14:35Z: "a 3.7-second freeze after an update is not such a big issue"): the front's
 // beats are reported, with a 30 s sanity limit so a real hang still fails.
 export function frontLimitMs(runCase: string): number { return runCase === 'boot-after-upgrade' ? BACKGROUND_PROGRESS_LIMIT_MS : LOOP_STALL_LIMIT_MS; }
-export function gate(input: { background: Loop; front: Loop; workload_ok: boolean; wal_ok: boolean; ack_ok: boolean; runCase?: string }) {
-  return input.workload_ok && input.wal_ok && input.ack_ok && input.background.beats > 0 && input.front.beats > 0
+type GateLoop = Loop & { pre_ready_ms: number };
+export function gate(input: { background: GateLoop; front: GateLoop; workload_ok: boolean; wal_ok: boolean; ack_ok: boolean; privacy_restart_ok: boolean; runCase?: string }) {
+  return input.workload_ok && input.wal_ok && input.ack_ok && input.privacy_restart_ok && input.background.beats > 0 && input.front.beats > 0
     && input.background.max_ms < BACKGROUND_PROGRESS_LIMIT_MS && input.front.max_ms < frontLimitMs(input.runCase ?? 'steady');
+}
+
+/** Run on one throwaway item so a restart never disturbs the measured workload or reopens its large stores. */
+export async function privacyClickRestartGate(): Promise<{ pass: boolean; outcome: string; ms: number }> {
+  const started = performance.now();
+  const result = (pass: boolean, outcome: string) => ({ pass, outcome, ms: Math.round(performance.now() - started) });
+  let stage = 'fixture startup';
+  try {
+    const { privacyRestartFixture } = await import('../test/helpers/privacy-click-restart.ts');
+    const fixture = await privacyRestartFixture('private');
+    try {
+      stage = 'click receipt';
+      await fixture.pauseBeforeCommit();
+      const ack = await fixture.set();
+      const receipt = await ack.json() as { request_id?: string; state?: string };
+      if (ack.status !== 202 || receipt.state !== 'pending' || !receipt.request_id) return result(false, `set HTTP ${ack.status}, no pending receipt`);
+      const pending = await fixture.status(receipt.request_id);
+      const { state } = await pending.json() as { state?: string };
+      if (pending.status !== 200 || state !== 'pending' || (await fixture.search()).released || (await fixture.answerRelease()).released) {
+        return result(false, `status HTTP ${pending.status}, ${state === 'pending' ? 'pending item released' : 'pending receipt missing'}`);
+      }
+      stage = 'restart before commit';
+      const preCommit = fixture.readStored();
+      await fixture.restartFront();
+      try {
+        const waiting = await fixture.frontWaitingForPrivacyRaise();
+        const status = await fixture.status(receipt.request_id);
+        const search = await fixture.search();
+        const answer = await fixture.answerRelease();
+        if (!waiting || preCommit.contentTier !== 'private' || preCommit.overrideTier !== 'private'
+          || status.status !== 503 || search.status !== 503 || answer.status !== 503 || search.released || answer.released) {
+          return result(false, `pre-commit status HTTP ${status.status}, search HTTP ${search.status}, search released ${search.released}, answer HTTP ${answer.status}, answer released ${answer.released}`);
+        }
+      } finally {
+        fixture.allowCommit();
+        await fixture.waitForFrontReady();
+      }
+      stage = 'reconcile missing receipt';
+      const status = await fixture.status(receipt.request_id);
+      const { unknown } = await status.json() as { unknown?: boolean };
+      const find = await fixture.find();
+      const { items } = await find.json() as { items?: Array<{ item_id: string; tier: string; owner_choice?: string; owner_set: boolean }> };
+      const saved = fixture.readStored().overrideTier === 'secure'
+        && items?.some(item => item.item_id === fixture.itemId && (item.owner_choice || item.tier) === 'Private' && item.owner_set) === true;
+      const search = await fixture.search();
+      const answer = await fixture.answerRelease();
+      const released = search.released || answer.released;
+      return result(status.status === 404 && unknown === true && find.status === 200 && saved && search.status === 200 && answer.status === 200 && !released,
+        `receipt HTTP 202, restart HTTP 503, status HTTP ${status.status}${unknown ? ' unknown' : ''}, find HTTP ${find.status}, ${saved ? 'saved Private' : 'Private choice unconfirmed'}, released ${released}`);
+    } finally {
+      await fixture.close();
+    }
+  } catch (error) {
+    return result(false, `${stage} failed (${error instanceof Error ? error.name : 'unknown error'})`);
+  }
 }
 export function memoryMaxBytes(value: string): number {
   const match = /^(\d+)([KMGT]?)$/i.exec(value);
@@ -380,24 +604,261 @@ function readPressure(): PressureTotals {
   return totals;
 }
 /** One sample a second: milliseconds stalled in that second, per scope and kind. Returns the samples and a stop. */
+/**
+ * The live install beside the fixture, read from its systemd cgroups (world-readable, so no access to its processes is needed):
+ * each Olympus unit outside this run's own scope, with its disk read and write bytes and its swap. Names and numbers only.
+ */
+function readLiveInstall(): Record<string, { rbytes: number; wbytes: number; swap_mib: number | null }> {
+  const out: Record<string, { rbytes: number; wbytes: number; swap_mib: number | null }> = {};
+  const own = /^0::(.*)$/m.exec((() => { try { return readFileSync('/proc/self/cgroup', 'utf8'); } catch { return ''; } })())?.[1] ?? '';
+  const walk = (dir: string, depth: number): void => {
+    if (depth > 8) return;
+    let entries;
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const path = join(dir, entry.name);
+      const relative = path.slice('/sys/fs/cgroup'.length);
+      if (/olympus|openclaw/i.test(entry.name) && !own.startsWith(relative)) {
+        let rbytes = 0, wbytes = 0;
+        try {
+          for (const line of readFileSync(join(path, 'io.stat'), 'utf8').split('\n')) {
+            rbytes += Number(/rbytes=(\d+)/.exec(line)?.[1] ?? 0);
+            wbytes += Number(/wbytes=(\d+)/.exec(line)?.[1] ?? 0);
+          }
+        } catch { /* no io controller */ }
+        let swap: number | null = null;
+        try { swap = Math.round(Number(readFileSync(join(path, 'memory.swap.current'), 'utf8')) / 1024 / 1024); } catch { /* none */ }
+        out[relative] = { rbytes, wbytes, swap_mib: swap };
+      }
+      walk(path, depth + 1);
+    }
+  };
+  walk('/sys/fs/cgroup/user.slice', 0);
+  walk('/sys/fs/cgroup/system.slice', 0);
+  return out;
+}
+
+/** Host memory lines that show how much of RAM the file map and swap hold, in MiB (Linux only). */
+function readMeminfo(): Record<string, number> {
+  const kib: Record<string, number> = {};
+  try { for (const line of readFileSync('/proc/meminfo', 'utf8').split('\n')) { const m = /^(\w+):\s+(\d+) kB/.exec(line); if (m) kib[m[1]!] = Number(m[2]); } } catch { return {}; }
+  const mib = (value: number | undefined) => Math.round((value ?? 0) / 1024);
+  return { mapped_mib: mib(kib.Mapped), cached_mib: mib(kib.Cached), swap_used_mib: mib((kib.SwapTotal ?? 0) - (kib.SwapFree ?? 0)) };
+}
+
+/** The run's own cgroup (the 8 GB scope): swap it holds and its file-mapped, file and anonymous memory, in MiB. */
+function readCgroupMemory(): Record<string, number | string> {
+  try {
+    const path = /^0::(.*)$/m.exec(readFileSync('/proc/self/cgroup', 'utf8'))?.[1];
+    if (!path) return { error: 'no cgroup v2 path' };
+    const base = join('/sys/fs/cgroup', path);
+    const read = (name: string) => { try { return readFileSync(join(base, name), 'utf8').trim(); } catch { return undefined; } };
+    const stat = Object.fromEntries((read('memory.stat') ?? '').split('\n').map(line => line.split(' ')).filter(parts => parts.length === 2).map(([key, value]) => [key!, Number(value)]));
+    const mib = (value: number | string | undefined) => value === undefined || value === 'max' ? value : Math.round(Number(value) / 1024 / 1024);
+    const out: Record<string, number | string> = {};
+    for (const [key, value] of Object.entries({ swap_current_mib: mib(read('memory.swap.current')), current_mib: mib(read('memory.current')), file_mapped_mib: mib(stat.file_mapped), file_mib: mib(stat.file), anon_mib: mib(stat.anon) })) if (value !== undefined) out[key] = value;
+    return out;
+  } catch (error) { return { error: String(error).slice(0, 200) }; }
+}
+
+/**
+ * Per engine role: read() copying (rchar, syscr, read_bytes from /proc/PID/io) from readiness to the end, bytes read from disk
+ * before readiness and in the first 60 s after it (plan, 19 Nov: a number for the start-up bench), and the process's own memory at the end.
+ */
+function sampleProcessIo(pids: () => Array<{ role: string; pid: number }>, ready: (role: string) => boolean) {
+  type Io = Record<string, number>;
+  const readIo = (pid: number): Io | undefined => {
+    try { return Object.fromEntries(readFileSync(`/proc/${pid}/io`, 'utf8').trim().split('\n').map(line => line.split(': ')).map(([key, value]) => [key!, Number(value)])); } catch { return undefined; }
+  };
+  const readStatus = (pid: number) => {
+    try {
+      const text = readFileSync(`/proc/${pid}/status`, 'utf8');
+      const mib = (name: string) => Math.round(Number(new RegExp(`^${name}:\\s+(\\d+) kB`, 'm').exec(text)?.[1] ?? 0) / 1024);
+      return { rss_anon_mib: mib('RssAnon'), rss_file_mib: mib('RssFile'), vm_swap_mib: mib('VmSwap') };
+    } catch { return undefined; }
+  };
+  const state: Record<string, { first?: Io; atReady?: Io; readyMs?: number; after60?: Io; last?: Io; status?: ReturnType<typeof readStatus> }> = {};
+  const tick = () => {
+    for (const { role, pid } of pids()) {
+      const entry = state[role] ??= {};
+      const io = readIo(pid);
+      if (!io) continue;
+      entry.first ??= io;
+      if (!entry.atReady && ready(role)) { entry.atReady = io; entry.readyMs = Date.now(); }
+      if (entry.readyMs !== undefined && !entry.after60 && Date.now() - entry.readyMs >= 60_000) entry.after60 = io;
+      entry.last = io;
+      entry.status = readStatus(pid) ?? entry.status;
+    }
+  };
+  const timer = setInterval(tick, 1000);
+  return {
+    stop: () => { tick(); clearInterval(timer); },
+    summary: () => Object.fromEntries(Object.entries(state).map(([role, entry]) => {
+      const delta = (key: string) => entry.atReady && entry.last ? (entry.last[key] ?? 0) - (entry.atReady[key] ?? 0) : null;
+      const gb = (from?: Io, to?: Io) => from && to ? Math.round(((to.read_bytes ?? 0) - (from.read_bytes ?? 0)) / 1e7) / 100 : null;
+      return [role, { from_ready: Boolean(entry.atReady), read_bytes_gb_before_ready: gb(entry.first, entry.atReady), read_bytes_gb_first_60s_after_ready: gb(entry.atReady, entry.after60), rchar_gb: delta('rchar') === null ? null : Math.round(delta('rchar')! / 1e7) / 100, syscr: delta('syscr'), read_bytes_gb: delta('read_bytes') === null ? null : Math.round(delta('read_bytes')! / 1e7) / 100, at_end: entry.status ?? null }];
+    })),
+  };
+}
+
+/** Host paging counters for the run's delta: pages read in, pages swapped out and in, major faults (Linux only). */
+function readVmstat(): Record<string, number> {
+  const totals: Record<string, number> = {};
+  try {
+    for (const line of readFileSync('/proc/vmstat', 'utf8').split('\n')) {
+      const [key, value] = line.split(' ');
+      if (key && ['pgpgin', 'pgpgout', 'pswpin', 'pswpout', 'pgmajfault'].includes(key)) totals[key] = Number(value);
+    }
+  } catch { /* not Linux */ }
+  return totals;
+}
+
+/**
+ * The background's main loop thread, sampled by scripts/front-thread-timeline.ts for the whole run, then summarized over each
+ * background freeze or held-loop line: time running, waiting for CPU, blocked on page faults, on disk, and the top wait channel.
+ */
+function startThreadTimeline(pid: number, out: string): { stop(): Promise<void> } | undefined {
+  if (process.platform !== 'linux') return undefined;
+  const child = Bun.spawn([process.execPath, join(import.meta.dir, 'front-thread-timeline.ts'), '--pid', String(pid), '--out', out, '--seconds', '14400'], { stdout: 'ignore', stderr: 'ignore' });
+  return { stop: async () => { child.kill('SIGTERM'); await child.exited; } };
+}
+
+function summarizeThreadTimeline(role: Role, timeline: string, freezes: Array<{ at: string; role: string; line: string }>, freezePath: string): unknown[] | string {
+  if (!existsSync(timeline)) return 'no timeline was written';
+  writeFileSync(freezePath, freezes.filter(entry => entry.role === role).map(entry => `${entry.at} ${entry.line}`).join('\n') + '\n');
+  const run = spawnSync(process.execPath, [join(import.meta.dir, 'front-thread-timeline.ts'), '--summarize', timeline, '--freezes', freezePath, '--role', role], { encoding: 'utf8', timeout: 120_000 });
+  if (run.status !== 0) return `summarize exited ${run.status}: ${(run.stderr || '').slice(-300)}`;
+  return run.stdout.split('\n').filter(Boolean).map(line => { try { return JSON.parse(line); } catch { return line; } })
+    .sort((a: any, b: any) => (b?.window_ms ?? 0) - (a?.window_ms ?? 0)).slice(0, 30);
+}
+
+const STARTUP_PAGES = ['Home', 'Sources'] as const;
+const STARTUP_PROBE_MS = 250;
+// Start-up search traffic (start-up freezes thread, 19 Nov): an agent's hybrid search every 5 s, one at a time, from the front's first
+// answer until 2 minutes after READY, cycling fixed fixture queries on the Personal store; a search still running when the next is
+// due is skipped and counted. Post-READY result ids are kept so arms (and commits) can be compared for identical results.
+const STARTUP_SEARCH_MS = 5_000;
+const STARTUP_SEARCH_AFTER_READY_MS = 120_000;
+const STARTUP_QUERIES = ['orchard harbor', 'quarterly invoice', 'policy coverage renewal', 'deductible premium claim', 'travel notes',
+  'meeting draft budget', 'contract clause schedule', 'review letter', 'summary report plan', 'ledger renewal'];
+type StartupSearch = { at: string; query: string; phase: 'before_ready' | 'after_ready'; ms: number; status: number; ids: string[]; outcome: string };
+function resultIds(json: unknown): string[] {
+  const record = json as Record<string, unknown> | null;
+  const list = [record?.results, record?.items, record?.hits].find(Array.isArray) as unknown[] | undefined;
+  return (list ?? []).map(entry => {
+    const item = entry as Record<string, any>;
+    return String(item?.local_item_id ?? item?.item?.local_item_id ?? item?.selected_item?.local_item_id ?? item?.provider_item_id ?? item?.id ?? '?');
+  });
+}
+export function summarizeStartupSearches(searches: readonly StartupSearch[], skipped: number) {
+  const before = searches.filter(entry => entry.phase === 'before_ready');
+  const after = searches.filter(entry => entry.phase === 'after_ready');
+  const outcomes: Record<string, number> = {};
+  for (const entry of before) outcomes[entry.outcome] = (outcomes[entry.outcome] ?? 0) + 1;
+  const sorted = after.map(entry => entry.ms).sort((a, b) => a - b);
+  const results: Record<string, string[]> = {};
+  for (const entry of after) if (entry.status === 200) {
+    const key = entry.ids.join(',');
+    const seen = results[entry.query] ??= [];
+    if (!seen.includes(key)) seen.push(key);
+  }
+  return {
+    sent: searches.length, skipped, before_ready: { count: before.length, outcomes, max_ms: Math.max(0, ...before.map(entry => entry.ms)) },
+    after_ready: { count: after.length, ok: after.filter(entry => entry.status === 200).length, p50_ms: sorted[Math.floor(sorted.length / 2)] ?? null, max_ms: sorted.at(-1) ?? null, over_1s: sorted.filter(ms => ms > 1000).length },
+    // Per query, each distinct ordered list of result ids seen after READY (one entry = stable results).
+    after_ready_results: results,
+  };
+}
+type PageSample = Awaited<ReturnType<typeof samplePage>>;
+type StartupGap = { page: PageSample['page']; start_at: string; end_at: string; ms: number };
+type ThreadSplit = ReturnType<typeof summarizeFreeze>;
+
+export function summarizeStartupGaps(samples: readonly PageSample[], firstAnswerAt: number, readyAt: number) {
+  const pageGaps = (page: PageSample['page']) => {
+    const answers = samples.filter(sample => sample.page === page && sample.answered)
+      .map(sample => sample.at + sample.ms)
+      .filter(at => at >= firstAnswerAt && at <= readyAt)
+      .sort((a, b) => a - b);
+    const over_1s: StartupGap[] = [];
+    let longest: StartupGap | null = null;
+    let previous = firstAnswerAt;
+    for (const end of [...answers, readyAt]) {
+      const ms = end - previous;
+      if (ms > 0) {
+        const gap = { page, start_at: new Date(previous).toISOString(), end_at: new Date(end).toISOString(), ms };
+        if (!longest || ms > longest.ms) longest = gap;
+        if (ms > 1_000) over_1s.push(gap);
+      }
+      previous = end;
+    }
+    return { answers: answers.length, longest, over_1s };
+  };
+  const pages = { Home: pageGaps('Home'), Sources: pageGaps('Sources') };
+  const home = pages.Home.longest;
+  const sources = pages.Sources.longest;
+  return { pages, longest: (home?.ms ?? 0) >= (sources?.ms ?? 0) ? home : sources };
+}
+
+export function coldStartVerdict(longest: StartupGap | null, split: Pick<ThreadSplit,
+  'runningMs' | 'runQueueMs' | 'blockedMajfltMs' | 'blockedBlkioMs' | 'blockedOtherMs'> & { waitChannelsMs?: Record<string, number> } | undefined) {
+  if (!longest || !split || longest.ms <= 10_000) return 'NOT REPRODUCED';
+  // A read() that waits for a page coming off disk sleeps in folio_wait_bit_common without a major fault (map off): disk wait too.
+  const diskOtherMs = Math.min(split.blockedOtherMs, split.waitChannelsMs?.folio_wait_bit_common ?? 0);
+  const ioMs = split.blockedBlkioMs + split.blockedMajfltMs + diskOtherMs;
+  // Idle or unsampled time is unattributed, so it cannot strengthen the IO finding.
+  const otherMs = Math.max(split.blockedOtherMs - diskOtherMs, longest.ms - ioMs - split.runningMs - split.runQueueMs);
+  return ioMs > Math.max(split.runningMs, split.runQueueMs, otherMs) ? 'REPRODUCED' : 'NOT REPRODUCED';
+}
+
+function startupThreadSplit(timeline: string, gap: StartupGap): ThreadSplit | string {
+  if (!existsSync(timeline)) return 'no timeline was written';
+  const run = spawnSync(process.execPath, [join(import.meta.dir, 'front-thread-timeline.ts'), '--summarize', timeline,
+    '--marker', `${gap.end_at},${gap.ms}`, '--role', 'front'], { encoding: 'utf8', timeout: 120_000 });
+  if (run.status !== 0) return `summarize exited ${run.status}: ${(run.stderr || '').slice(-300)}`;
+  return JSON.parse(run.stdout) as ThreadSplit;
+}
+
 function samplePressure(): { samples: Array<{ at: string } & Record<string, number | string>>; stop(): void } {
   const samples: Array<{ at: string } & Record<string, number | string>> = [];
   let last = readPressure();
+  let lastAt = performance.now();
   const timer = setInterval(() => {
     const now = readPressure();
-    const sample: { at: string } & Record<string, number | string> = { at: new Date().toISOString() };
-    for (const [key, total] of Object.entries(now)) if (last[key] !== undefined) sample[key] = Math.round((total - last[key]!) / 1000);
+    const at = performance.now();
+    // The timer runs on the gate's own loop, so a sample can come late: scale each delta to milliseconds per second of the
+    // actual interval, and keep the interval beside it.
+    const intervalMs = Math.max(1, at - lastAt);
+    const sample: { at: string } & Record<string, number | string> = { at: new Date().toISOString(), interval_ms: Math.round(intervalMs) };
+    for (const [key, total] of Object.entries(now)) if (last[key] !== undefined) sample[key] = Math.round((total - last[key]!) / 1000 * 1000 / intervalMs);
     samples.push(sample);
     last = now;
+    lastAt = at;
   }, 1000);
   return { samples, stop: () => clearInterval(timer) };
 }
+/** Peak anonymous memory per engine role, sampled each second from /proc (Linux only), with the second it peaked: a burst and a climb read differently. */
+export function sampleAnonMemory(pids: () => Array<{ role: string; pid: number }>, startedAt: () => number): { peaks: Record<string, { peak_anon_mib: number; at_s: number; last_anon_mib: number }>; stop(): void } {
+  const peaks: Record<string, { peak_anon_mib: number; at_s: number; last_anon_mib: number }> = {};
+  const timer = setInterval(() => {
+    for (const { role, pid } of pids()) {
+      let kib: number | undefined;
+      try { kib = Number(/^RssAnon:\s+(\d+) kB/m.exec(readFileSync(`/proc/${pid}/status`, 'utf8'))?.[1]); } catch { continue; }
+      if (!Number.isFinite(kib)) continue;
+      const mib = Math.round(kib! / 1024);
+      const entry = peaks[role] ??= { peak_anon_mib: 0, at_s: 0, last_anon_mib: 0 };
+      entry.last_anon_mib = mib;
+      if (mib > entry.peak_anon_mib) { entry.peak_anon_mib = mib; entry.at_s = Math.round((Date.now() - startedAt()) / 1000); }
+    }
+  }, 1000);
+  return { peaks, stop: () => clearInterval(timer) };
+}
 /** The worst second and the seconds with any stall at or over 100 ms, per key. */
 function pressureSummary(samples: Array<{ at: string } & Record<string, number | string>>) {
-  const keys = [...new Set(samples.flatMap(sample => Object.keys(sample).filter(key => key !== 'at')))];
+  const keys = [...new Set(samples.flatMap(sample => Object.keys(sample).filter(key => key !== 'at' && key !== 'interval_ms')))];
   const worst = Object.fromEntries(keys.map(key => [key, Math.max(0, ...samples.map(sample => Number(sample[key] ?? 0)))]));
   const stalled = samples.filter(sample => keys.some(key => Number(sample[key] ?? 0) >= 100));
-  return { readable: keys.length > 0, worst_ms_per_second: worst, seconds_sampled: samples.length, seconds_with_stall_100ms: stalled.length, stalled_seconds: stalled.slice(0, 300) };
+  return { readable: keys.length > 0, samples: samples.slice(0, 1200), worst_ms_per_second: worst, worst_interval_ms: Math.max(0, ...samples.map(sample => Number(sample.interval_ms ?? 0))), seconds_sampled: samples.length, seconds_with_stall_100ms: stalled.length, stalled_seconds: stalled.slice(0, 300) };
 }
 /** Each fixture file's WAL size in bytes (0 when it has none), so a WAL the fixture carries in shows apart from one a run builds. */
 function walSizes(dir: string): Record<string, number> {
@@ -462,7 +923,13 @@ async function waitForQuietHost(limitMs: number, maxWaitSeconds: number) {
 /** The WAL guards: no WAL over 64 MB at the end, and no background-lane read held over 2 s. Shared-lane reads are listed. */
 // Boot after upgrade starts with a WAL padded past the limit by design, so there the peak counts from each file's first line at or
 // under the limit (its first rewind); the time that took is reported.
-export function sqliteGuards(walAtEnd: Record<string, number>, walLines: readonly string[], options: { fromFirstLevel?: boolean } = {}) {
+// WAL bar (plan, 16 Nov 2026 17:53Z): after any crossing of 64 MB a file is back at or under it within 60 s; a WAL over 1 GB at any
+// point fails; peak and time over 64 MB are reported per store. Lines carry when they arrived ({ at, line }) so time over can be read.
+const WAL_BACK_WITHIN_MS = 60_000;
+const WAL_HARD_LIMIT_BYTES = 1024 * 1024 * 1024;
+type WalLine = string | { at: string; line: string };
+export function sqliteGuards(walAtEnd: Record<string, number>, entries: readonly WalLine[], options: { fromFirstLevel?: boolean } = {}) {
+  const walLines = entries.map(entry => typeof entry === 'string' ? entry : entry.line);
   const wal_over_limit = Object.entries(walAtEnd).filter(([, bytes]) => bytes > WAL_END_LIMIT_BYTES).map(([file, bytes]) => ({ file, bytes }));
   const reads = walLines.flatMap(line => {
     const match = /sqlite wal: (\S+) .*oldest_read_ms=(\d+) oldest_read_lane=(\S+) oldest_read_site=(\S+)/.exec(line);
@@ -478,15 +945,35 @@ export function sqliteGuards(walAtEnd: Record<string, number>, walLines: readonl
   // The peak, not only the end: closing an engine truncates its WALs, so the end alone can pass a run whose WAL ran away.
   const wal_peak: Record<string, number> = {};
   const level = new Set<string>();
-  for (const line of walLines) {
+  const overSince = new Map<string, number>();
+  const over: Record<string, { crossings: number; over_ms: number; longest_ms: number }> = {};
+  let lastAt = 0;
+  for (const entry of entries) {
+    const line = typeof entry === 'string' ? entry : entry.line;
+    const at = typeof entry === 'string' ? NaN : Date.parse(entry.at);
+    if (!Number.isNaN(at)) lastAt = Math.max(lastAt, at);
     const match = /sqlite (?:wal held|wal|checkpoint): (\S+) .*?wal_bytes=(\d+)/.exec(line);
     if (!match) continue;
-    const bytes = Number(match[2]);
-    if (options.fromFirstLevel && !level.has(match[1]!)) { if (bytes > WAL_END_LIMIT_BYTES) continue; level.add(match[1]!); }
-    wal_peak[match[1]!] = Math.max(wal_peak[match[1]!] ?? 0, bytes);
+    const label = match[1]!, bytes = Number(match[2]);
+    if (options.fromFirstLevel && !level.has(label)) { if (bytes > WAL_END_LIMIT_BYTES) continue; level.add(label); }
+    wal_peak[label] = Math.max(wal_peak[label] ?? 0, bytes);
+    const row = over[label] ??= { crossings: 0, over_ms: 0, longest_ms: 0 };
+    if (bytes > WAL_END_LIMIT_BYTES && !overSince.has(label)) { overSince.set(label, at); row.crossings++; }
+    else if (bytes <= WAL_END_LIMIT_BYTES && overSince.has(label)) {
+      const ms = at - overSince.get(label)!; overSince.delete(label);
+      if (!Number.isNaN(ms)) { row.over_ms += ms; row.longest_ms = Math.max(row.longest_ms, ms); }
+    }
   }
-  const wal_peak_over = Object.entries(wal_peak).filter(([, bytes]) => bytes > WAL_END_LIMIT_BYTES).map(([label, bytes]) => ({ label, bytes }));
-  return { wal_ok: wal_over_limit.length === 0 && wal_peak_over.length === 0, wal_over_limit, wal_peak, wal_peak_over, background_reads_over_2s, other_reads_over_2s };
+  // A crossing still open at the last line has lasted at least until then.
+  for (const [label, since] of overSince) {
+    const ms = lastAt - since;
+    if (!Number.isNaN(ms)) { over[label]!.over_ms += ms; over[label]!.longest_ms = Math.max(over[label]!.longest_ms, ms); }
+  }
+  const wal_peak_over = Object.entries(wal_peak).filter(([, bytes]) => bytes > WAL_END_LIMIT_BYTES)
+    .map(([label, bytes]) => ({ label, bytes, crossings: over[label]?.crossings ?? 0, over_s: Math.round((over[label]?.over_ms ?? 0) / 1000), longest_s: Math.round((over[label]?.longest_ms ?? 0) / 1000) }));
+  const wal_slow_back = wal_peak_over.filter(row => row.longest_s * 1000 > WAL_BACK_WITHIN_MS);
+  const wal_over_1gb = Object.entries(wal_peak).filter(([, bytes]) => bytes > WAL_HARD_LIMIT_BYTES).map(([label, bytes]) => ({ label, bytes }));
+  return { wal_ok: wal_over_limit.length === 0 && wal_slow_back.length === 0 && wal_over_1gb.length === 0, wal_over_limit, wal_peak, wal_peak_over, wal_slow_back, wal_over_1gb, background_reads_over_2s, other_reads_over_2s };
 }
 function coldFiles(dir: string) {
   const files = readdirSync(dataDir(dir)).filter(name => name.endsWith('.sqlite'));
@@ -497,14 +984,51 @@ function coldFiles(dir: string) {
     if (result.status !== 0) throw new Error(`Cannot evict synthetic pages: ${result.stderr}`);
   }
 }
-type RunCase = 'steady' | 'boot-after-upgrade';
-async function run(dir: string, seconds: number, memoryMax: string, options: { runCase: RunCase; walBytes: number; ioFloorMs: number; ioWaitSeconds: number; quick?: boolean }) {
-  const shape = JSON.parse(readFileSync(join(dir, 'shape.json'), 'utf8')) as { shape: { version: number } };
+
+function clearSavedHiddenCopies(dir: string) {
+  // A fresh process can load the saved set and replay its feeds. Clear only the
+  // derived set in the restored working copy to force the ledger bootstrap.
+  for (const domain of DOMAINS) {
+    const store = new Database(storePath(dir, domain), { readwrite: true });
+    try {
+      store.exec('PRAGMA busy_timeout = 10000;');
+      store.exec('BEGIN; DELETE FROM tier_visibility_state; DELETE FROM tier_visibility_members; COMMIT;');
+    } finally { store.close(); }
+  }
+}
+
+function readIoThrottle(): string {
+  const cgroup = /^0::(.*)$/m.exec(readFileSync('/proc/self/cgroup', 'utf8'))?.[1];
+  const path = cgroup && join('/sys/fs/cgroup', cgroup, 'io.max');
+  return (path && existsSync(path) && readFileSync(path, 'utf8').trim()) || 'off';
+}
+
+const RUN_CASES = ['steady', 'boot-after-upgrade', 'cold-start'] as const;
+type RunCase = typeof RUN_CASES[number];
+async function run(dir: string, seconds: number, memoryMax: string, options: { runCase: RunCase; walBytes: number; ioFloorMs: number; ioWaitSeconds: number; quick?: boolean; sqliteMmap?: 'on' | 'off' | 'bounded'; swapReading?: boolean; ioThrottleUnavailable?: boolean; engineEnv?: Record<string, string> }) {
+  const shape = JSON.parse(readFileSync(join(dir, 'shape.json'), 'utf8')) as { shape: { version: number; items: number } };
   if (shape.shape.version !== VERSION) throw new Error('Build the current synthetic fixture shape before running.');
   const isCapped = capped(memoryMaxBytes(memoryMax));
+  const coldStart = options.runCase === 'cold-start' ? {
+    builds: {} as HiddenCopyBuilds['finished'],
+    firstAnswerAt: undefined as number | undefined,
+    readyAt: undefined as number | undefined,
+    samples: [] as PageSample[],
+    searches: [] as StartupSearch[], searchesSkipped: 0,
+    io_throttle: options.ioThrottleUnavailable ? 'unavailable: io controller not delegated' : readIoThrottle(),
+  } : undefined;
   if (!isCapped) console.error(`WARNING: run is not under MemoryMax<=${memoryMax} and MemorySwapMax=0; this is not a qualified receipt. Use: systemd-run --user --scope -p MemoryMax=${memoryMax} -p MemorySwapMax=0 -- bun scripts/loop-stall-test.ts run --dir ${JSON.stringify(dir)} --memory-max ${memoryMax}`);
   const runDir = mkdtempSync('/tmp/ols-'); // Unix socket path must remain short.
   const metrics = join(runDir, 'metrics'); mkdirSync(metrics);
+  const preload = join(runDir, 'profile-engine.mjs');
+  // Start taking samples before loading even the harness module and its imports.
+  writeFileSync(preload, `
+import * as jsc from 'bun:jsc';
+jsc.startSamplingProfiler?.();
+const { measureEngine } = await import(${JSON.stringify(import.meta.path)});
+measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_STALL_PROFILE,
+  process.env.OLYMPUS_CPU_SAMPLE_LOG, jsc.samplingProfilerStackTraces);
+`);
   for (const name of ['start', 'workloads.json']) rmSync(join(dir, name), { force: true });
   const modelCalls = { judge: 0, answer: 0 };
   const stub = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(request) {
@@ -518,6 +1042,8 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
   const portProbe = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: { data() {} } });
   const port = portProbe.port; portProbe.stop(true);
   const env = { PATH: process.env.PATH ?? '', ...environment(dir), HOME: runDir, XDG_CONFIG_HOME: join(runDir, 'c'), XDG_STATE_HOME: join(runDir, 's'), XDG_RUNTIME_DIR: runDir,
+    // The arm's file-map setting for the whole engine (front, background and their read workers inherit it); 'on' is the default.
+    ...(options.sqliteMmap && options.sqliteMmap !== 'on' ? { OLYMPUS_SQLITE_MMAP: options.sqliteMmap } : {}),
     OLYMPUS_EMAIL_SOURCE_PORT: String(port), OLYMPUS_WORKER_AUTH_TOKEN: 'synthetic-loop-stall-token',
     OLYMPUS_ENGINE_BACKGROUND_SOCKET: join(runDir, 'background.sock'), OLYMPUS_WORKER_SCHEDULER_ENABLED: 'false',
     OLYMPUS_TIER_SNIFFER_ENABLED: 'false', OLYMPUS_UPDATE_CHECK: 'off', OLYMPUS_BUILT_IN_ANALYST: 'false',
@@ -527,6 +1053,8 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
     // An untimed count of every statement the loops run (each pays for a stack): never set it on a timed run.
     ...(process.env.OLYMPUS_MAIN_THREAD_SQL_SITES ? { OLYMPUS_MAIN_THREAD_SQL_SITES: process.env.OLYMPUS_MAIN_THREAD_SQL_SITES } : {}),
     OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON: JSON.stringify(DOMAINS.map(domain => ({ dbPath: storePath(dir, domain), corpusId: corpus(domain), family: 'file', trustDomain: domain }))),
+    // An arm's own product switches (--engine-env), for both roles; recorded in the receipt as engine_env.
+    ...options.engineEnv,
   };
   const children: ReturnType<typeof Bun.spawn>[] = [];
   // A stopped job leaves its engines orphaned and still writing the fixture (43847681247, 16 Nov 2026). Kill any a previous
@@ -545,25 +1073,58 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
   for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) process.once(signal, () => killChildren(signal));
   const output: Record<string, string> = { background: '', front: '' };
   // The engine's SQLite settings and WAL lines, kept whole (output keeps only its tail), each with when it arrived.
-  const sqliteLines: Array<{ at: string; role: string; line: string }> = [];
-  const freezeLines: Array<{ at: string; role: string; line: string }> = [];
-  const partial: Record<string, string> = { background: '', front: '' };
-  const keepSqliteLines = (role: string, text: string) => {
-    const lines = (partial[role] + text).split('\n');
-    partial[role] = lines.pop() ?? '';
-    for (const line of lines) {
-      if (line.includes('[olympus] sqlite settings:') || line.includes('[olympus] sqlite wal:') || line.includes('[olympus] sqlite checkpoint:') || line.includes('[olympus] sqlite wal room:') || line.includes('[olympus] sqlite wal held:')) sqliteLines.push({ at: new Date().toISOString(), role, line: line.slice(line.indexOf('[olympus] sqlite')).slice(0, 400) });
-      // Freeze frames and held-loop lines, whole, so a stall's frames are in the receipt and not only on the box.
-      else if (line.includes('[olympus:control-path]') && (line.includes('freeze frames') || line.includes('loop held for'))) freezeLines.push({ at: new Date().toISOString(), role, line: line.slice(line.indexOf('[olympus:control-path]')).slice(0, 4000) });
+  const sqliteLines: Array<{ at: string; role: Role; line: string }> = [];
+  const freezeLines: Array<{ at: string; role: Role; line: string }> = [];
+  // The product's per-click trace (ingress, each command POST attempt, control receipt, answer), joined to clicks by id.
+  const clickTrace = new Map<string, string[]>();
+  // Each role's SQLite file-map line at boot (bounded: per-file size, budget, files), kept whole for the arm's receipt.
+  const fileMapLines: Array<{ role: Role; line: string }> = [];
+  const keepEngineLine = (role: Role, line: string) => {
+    if (coldStart && !coldStart.builds[role] && line.includes("stores' hidden-copy sets")) {
+      const build = hiddenCopyBuilds(line).finished[role];
+      if (build) {
+        coldStart.builds[role] = build;
+        if (ROLES.every(role => coldStart.builds[role])) coldStart.readyAt = Math.round(nowMs());
+      }
     }
+    if (line.includes('[olympus] sqlite settings:') || line.includes('[olympus] sqlite wal:') || line.includes('[olympus] sqlite checkpoint:') || line.includes('[olympus] sqlite wal room:') || line.includes('[olympus] sqlite wal held:')) sqliteLines.push({ at: new Date().toISOString(), role, line: line.slice(line.indexOf('[olympus] sqlite')).slice(0, 400) });
+    // Keep each freeze frame and held-loop line outside the bounded engine log tail.
+    else if (line.includes('SQLite file map') && fileMapLines.length < 10) fileMapLines.push({ role, line: line.slice(line.indexOf('[olympus]')).slice(0, 400) });
+    else if (line.includes('[olympus:click-trace]')) {
+      const id = / id=(\S+)/.exec(line)?.[1];
+      if (id) { const lines = clickTrace.get(id) ?? []; if (lines.length < 20) lines.push(line.slice(0, 400)); clickTrace.set(id, lines); }
+    }
+    else if (line.includes('[olympus:control-path]') && (line.includes('freeze frames') || line.includes('loop held for'))) freezeLines.push({ at: new Date().toISOString(), role, line: line.slice(line.indexOf('[olympus:control-path]')).slice(0, 4000) });
   };
   const pumps: Promise<void>[] = [];
   const requests: Promise<void>[] = [];
   const forwarded: Array<{ ms: number; status: number; error?: unknown }> = [];
   const asks: Array<{ ms: number; status: number; evidence_ms: unknown }> = [];
   const acks: Array<{ at: string; ms: number; status: number; loop_held_ms?: number; error?: string }> = [];
+  // Each click carries its own id (sent as X-Olympus-Click-Id) and send time, so a late acknowledgement can be matched to
+  // the front's ingress, command POST attempts and control receipt in the engine logs (lane 1, 18 Nov).
+  const clicks: Array<{ id: string; sent_at: string; ms: number; status: number; received: boolean; request_id?: string; settled_ms?: number; saved?: boolean; error?: unknown }> = [];
+  const pendingClicks = new Map<string, { started: number; click: typeof clicks[number] }>();
   const statusAges: Array<{ age_ms: number; loop_held_ms?: number }> = [];
   let enginesStartedAt: number | undefined;
+  const timing: Record<Role, { spawnedAt: number; stoppedAt: number; readyAt?: number }> = {
+    background: { spawnedAt: 0, stoppedAt: 0 }, front: { spawnedAt: 0, stoppedAt: 0 },
+  };
+  const readyPath = (role: Role) => join(metrics, `${role}.ready`);
+  const readReady = (role: Role) => {
+    if (coldStart) {
+      if (coldStart.readyAt === undefined) return false;
+      timing[role].readyAt = coldStart.readyAt;
+      return true;
+    }
+    if (timing[role].readyAt !== undefined) return true;
+    const path = readyPath(role);
+    if (!existsSync(path)) return false;
+    const stamp = readFileSync(path, 'utf8');
+    if (!stamp) return false;
+    timing[role].readyAt = Number(stamp);
+    return true;
+  };
   const dashReads: Array<{ path: string; ms: number; status: number; error?: string }> = [];
   type FrontLoopSql = { mode?: string; statements?: number; sites?: number; unlisted?: string[]; unlisted_sites?: Array<{ site: string; statements: number }> };
   // A holder, so the value set inside the run's try block is not narrowed away at its use below.
@@ -578,11 +1139,13 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
   if (restoredOutside) rmSync(restoredMarker, { force: true }); else restorePristine(dir);
   const restore_ms = Date.now() - restoreStarted;
   // Steady: every run starts with the WALs folded in, as on a box in use. Boot after upgrade: one large WAL left on the ledger.
+  if (coldStart) clearSavedHiddenCopies(dir);
   truncateWals(dir);
   if (options.runCase === 'boot-after-upgrade') leaveLargeWal(dir, options.walBytes);
   const host = await waitForQuietHost(options.ioFloorMs, options.ioWaitSeconds);
   if (!host.quiet) {
-    const receipt = { phase: 'run', case: options.runCase, sha: spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim(), pass: false, host_busy: true, host, qualified: isCapped, memory_max: memoryMax };
+    const receipt = { phase: 'run', case: options.runCase, sha: spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim(), pass: false, host_busy: true, host, qualified: isCapped, memory_max: memoryMax,
+      ...(coldStart ? { io_throttle: coldStart.io_throttle, counts_as_gate: false } : {}) };
     console.log(JSON.stringify(receipt));
     console.log(`HOST BUSY: host IO stall ${host.host_io_full_ms_per_s} ms/s over ${host.waited_s} s (floor ${host.limit_ms_per_s} ms/s). Not a product result; run again when the host is quiet.`);
     stub.stop(true); rmSync(runDir, { recursive: true, force: true });
@@ -591,37 +1154,164 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
   const started = Date.now();
   let finished = false;
   const pressureSampler = samplePressure();
+  const vmstatAtStart = readVmstat();
+  const meminfoAtStart = readMeminfo();
+  const liveAtStart = readLiveInstall();
+  // Each role's main thread, sampled for the whole run and summarized over that role's freeze and held-loop lines.
+  const timelines: Partial<Record<Role, ReturnType<typeof startThreadTimeline>>> = {};
+  const timelinePath = (role: Role) => join(metrics, `${role}.timeline.jsonl`);
+  const roles: Array<{ role: string; pid: number }> = [];
+  const anonSampler = sampleAnonMemory(() => roles, () => enginesStartedAt ?? Date.now());
+  const ioSampler = sampleProcessIo(() => roles, role => readReady(role as Role));
+  let cgroupAtEnd: ReturnType<typeof readCgroupMemory> = {};
+  // The scope's memory each minute: with a swap allowance (--swap-reading) this is the swap refill over time.
+  const cgroupSamples: Array<{ at_s: number } & ReturnType<typeof readCgroupMemory>> = [];
+  const cgroupStarted = Date.now();
+  const cgroupTimer = setInterval(() => cgroupSamples.push({ at_s: Math.round((Date.now() - cgroupStarted) / 1000), ...readCgroupMemory() }), 60_000);
+  let meminfoAtEnd: ReturnType<typeof readMeminfo> = {};
+  let liveAtEnd: ReturnType<typeof readLiveInstall> = {};
   let walAtOpen: Record<string, number> = {};
   try {
     walAtOpen = walSizes(dir);
     coldFiles(dir);
-    for (const role of ['background', 'front']) {
-      enginesStartedAt ??= Date.now();
-      const child = Bun.spawn([process.execPath, join(import.meta.dir, '../src/workers/engine/server.ts')], { env: { ...env, OLYMPUS_WORKER_ENGINE_ROLE: role, OLYMPUS_MAIN_THREAD_SQL_LOG: join(metrics, `${role}.sql.jsonl`), OLYMPUS_CPU_SAMPLE_LOG: join(metrics, `${role}.cpu.jsonl`) }, stdout: 'pipe', stderr: 'pipe' });
+    for (const role of ROLES) {
+      const profile = join(metrics, role);
+      timing[role].spawnedAt = nowMs();
+      enginesStartedAt ??= timing[role].spawnedAt;
+      const child = Bun.spawn([process.execPath, '--preload', preload, join(import.meta.dir, '../src/workers/engine/server.ts')], {
+        env: { ...env, OLYMPUS_WORKER_ENGINE_ROLE: role, OLYMPUS_LOOP_STALL_PROFILE: profile, OLYMPUS_MAIN_THREAD_SQL_LOG: `${profile}.sql.jsonl`, OLYMPUS_CPU_SAMPLE_LOG: `${profile}.cpu.jsonl` },
+        stdout: 'pipe', stderr: 'pipe',
+      });
       children.push(child);
+      roles.push({ role, pid: child.pid });
+      timelines[role] = startThreadTimeline(child.pid, timelinePath(role));
+      void child.exited.then(() => { timing[role].stoppedAt ||= nowMs(); });
       writeFileSync(pidFile, JSON.stringify(children.map(entry => entry.pid)));
-      for (const stream of [child.stdout, child.stderr]) pumps.push((async () => { for await (const chunk of stream as ReadableStream<Uint8Array>) { const text = new TextDecoder().decode(chunk); keepSqliteLines(role, text); output[role] = (output[role]! + text).slice(-100_000); } })());
+      for (const stream of [child.stdout, child.stderr]) pumps.push((async () => {
+        const decoder = new TextDecoder();
+        let partial = '';
+        for await (const chunk of stream as ReadableStream<Uint8Array>) {
+          const text = decoder.decode(chunk, { stream: true });
+          const lines = (partial + text).split('\n');
+          partial = lines.pop() ?? '';
+          for (const line of lines) keepEngineLine(role, line);
+          output[role] = (output[role]! + text).slice(-100_000);
+        }
+        if (partial) keepEngineLine(role, partial + decoder.decode());
+      })());
     }
-    const deadline = Date.now() + seconds * 1000;
-    while (!output.background!.includes('engine background ready') || !output.front!.includes('worker listening')) {
-      if (Date.now() >= deadline || children.some(child => child.exitCode !== null)) throw new Error('Engine boot failed or timed out; see last-run.json engine_logs');
-      await Bun.sleep(100);
-    }
-    writeFileSync(join(dir, 'start'), 'start');
     const workerFetch = createWorkerFetch({ platform: 'linux', env });
-    const post = async (path: string, body: object) => {
-      const start = performance.now();
-      const response = await workerFetch(`http://127.0.0.1:${port}${path}`, { method: 'POST', headers: { Authorization: `Bearer ${env.OLYMPUS_WORKER_AUTH_TOKEN}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(Math.min(60_000, Math.max(1, deadline - Date.now()))) });
-      const json = await response.json() as Record<string, unknown>;
-      return { ms: performance.now() - start, status: response.status, json };
+    const origin = `http://127.0.0.1:${port}`;
+    const bearer = { Authorization: `Bearer ${env.OLYMPUS_WORKER_AUTH_TOKEN}` };
+    const fetchPage = async (path: string, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      headers.set('Authorization', bearer.Authorization);
+      const response = await workerFetch(origin + path, { ...init, headers });
+      if (coldStart) coldStart.firstAnswerAt ??= Math.round(nowMs());
+      return response;
     };
+    let searchDriver: Promise<void> | undefined;
+    if (coldStart) searchDriver = (async () => {
+      let inFlight = false, sequence = 0;
+      const pending: Promise<void>[] = [];
+      while (!children.some(child => child.exitCode !== null || child.signalCode !== null)) {
+        if (coldStart.readyAt !== undefined && nowMs() > coldStart.readyAt + STARTUP_SEARCH_AFTER_READY_MS) break;
+        if (coldStart.firstAnswerAt !== undefined) {
+          if (inFlight) coldStart.searchesSkipped++;
+          else {
+            inFlight = true;
+            const query = STARTUP_QUERIES[sequence++ % STARTUP_QUERIES.length]!;
+            const phase = coldStart.readyAt === undefined ? 'before_ready' as const : 'after_ready' as const;
+            const at = new Date().toISOString();
+            const start = performance.now();
+            pending.push(workerFetch(`${origin}/v1/source/index/search`, { method: 'POST', headers: { ...bearer, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ query, corpus_id: corpus('internal'), retrieval_mode: 'hybrid' }), signal: AbortSignal.timeout(120_000) })
+              .then(async response => {
+                const json = await response.json().catch(() => null);
+                const error = (json as Record<string, unknown> | null)?.error;
+                coldStart.searches.push({ at, query, phase, ms: Math.round(performance.now() - start), status: response.status, ids: response.status === 200 ? resultIds(json) : [],
+                  outcome: response.status === 200 ? 'ok' : `http_${response.status}${typeof error === 'string' ? `:${error.slice(0, 60)}` : ''}` });
+              })
+              .catch(error => { coldStart.searches.push({ at, query, phase, ms: Math.round(performance.now() - start), status: 0, ids: [], outcome: `error:${String(error?.message ?? error).slice(0, 60)}` }); })
+              .finally(() => { inFlight = false; }));
+          }
+        }
+        await Bun.sleep(coldStart.firstAnswerAt === undefined ? STARTUP_PROBE_MS : STARTUP_SEARCH_MS);
+      }
+      await Promise.all(pending);
+    })();
+    if (searchDriver) requests.push(searchDriver);
+    const bootDeadline = Date.now() + (coldStart ? 600 : seconds) * 1000;
+    const engineExited = () => children.some(child => child.exitCode !== null || child.signalCode !== null);
+    // The starting server can answer before the regular front is listening.
+    // Wait for the regular listeners before opening controls and starting the steady workload.
+    const bootComplete = () => ROLES.every(readReady) && (!coldStart
+      || (coldStart.firstAnswerAt !== undefined && ROLES.every(role => existsSync(readyPath(role)))));
+    while (!bootComplete()) {
+      if (Date.now() >= bootDeadline || engineExited()) throw new Error('Engine boot failed or timed out; see last-run.json engine_logs');
+      if (coldStart && (coldStart.readyAt === undefined || coldStart.firstAnswerAt === undefined)) {
+        const at = Math.round(nowMs());
+        for (const page of STARTUP_PAGES) requests.push(samplePage(fetchPage, page, at).then(sample => { coldStart.samples.push(sample); }));
+      }
+      await Bun.sleep(coldStart ? STARTUP_PROBE_MS : 100);
+    }
+    const deadline = coldStart ? Date.now() + seconds * 1000 : bootDeadline;
+    const post = async (path: string, body: object, headers: Record<string, string> = bearer) => {
+      const start = performance.now();
+      const response = await workerFetch(origin + path, { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(Math.min(60_000, Math.max(1, deadline - Date.now()))) });
+      const json = await response.json() as Record<string, unknown>;
+      return { ms: performance.now() - start, status: response.status, json, cookie: response.headers.get('Set-Cookie')?.split(';')[0] };
+    };
+    const owner = await post('/dashboard/control/session', {}, { ...bearer, Origin: origin });
+    if (!owner.cookie || typeof owner.json.csrf_token !== 'string') throw new Error(`Cannot open dashboard controls (HTTP ${owner.status}).`);
+    const local = await post(DASHBOARD_LOCAL_CONTROL_SESSION_PATH, {}, { Origin: origin, Cookie: owner.cookie, 'X-Olympus-CSRF': owner.json.csrf_token });
+    if (!local.cookie || typeof local.json.csrf_token !== 'string') throw new Error(`Cannot unlock the local Privacy dashboard (HTTP ${local.status}).`);
+    const privacyHeaders = { Origin: origin, Cookie: local.cookie, 'X-Olympus-CSRF': local.json.csrf_token };
+    let clickSequence = 0;
+    const click = async () => {
+      const started = performance.now();
+      const id = `${options.runCase}-click-${clickSequence + 1}`;
+      const sent_at = new Date().toISOString();
+      // Seeded Personal rows, away from the read probe's item and the judge's held rows.
+      const first = Math.min(13, shape.shape.items - 1);
+      const count = Math.ceil((shape.shape.items - first) / 20);
+      const itemId = ownerTierItemId(identity(first + (clickSequence++ % count) * 20));
+      try {
+        const { ms, status, json } = await post('/dashboard/privacy/items/set', { item_id: itemId, tier: 'private' }, { ...privacyHeaders, 'X-Olympus-Click-Id': id });
+        const received = status === 202 && json.state === 'pending' && typeof json.request_id === 'string';
+        const sample = { id, sent_at, ms, status, received, ...(received ? { request_id: json.request_id as string } : { error: json.error ?? json.message }) };
+        clicks.push(sample);
+        if (received) pendingClicks.set(json.request_id as string, { started, click: sample });
+      } catch (error) {
+        clicks.push({ id, sent_at, ms: performance.now() - started, status: 0, received: false, error: String(error) });
+      }
+    };
+    const pollClicks = async () => {
+      await Promise.all([...pendingClicks].map(async ([id, entry]) => {
+        const result = await post('/dashboard/privacy/items/status', { request_id: id }, privacyHeaders);
+        if (result.json.state === 'pending') return;
+        entry.click.settled_ms = Math.round(performance.now() - entry.started);
+        entry.click.saved = result.status === 200 && result.json.ok === true;
+        if (!entry.click.saved) entry.click.error = result.json.error ?? result.json.message;
+        pendingClicks.delete(id);
+      }));
+    };
+    writeFileSync(join(dir, 'start'), 'start');
+    let pollingClicks = false;
     let nextAsk = Date.now(), nextRead = Date.now(), nextAck = Date.now(), nextDash = Date.now(), askSequence = 0, ackSequence = 0;
     const statusPath = engineStatusSnapshotPath(env);
     while (Date.now() < deadline) {
-      if (children.some(child => child.exitCode !== null)) throw new Error('Engine exited during measurement');
+      if (engineExited()) throw new Error('Engine exited during measurement');
       if (Date.now() >= nextAck) {
         // Command acknowledgement on the background socket, timed to the 202, and the status snapshot's age, once a second.
         nextAck += 1000;
+        requests.push(click());
+        if (pendingClicks.size > 0 && !pollingClicks) {
+          pollingClicks = true;
+          requests.push(pollClicks()
+            .catch(error => { requestErrors.push(`privacy status: ${error.message}`); })
+            .finally(() => { pollingClicks = false; }));
+        }
         const start = performance.now();
         requests.push(fetch('http://localhost/engine/commands', { unix: env.OLYMPUS_ENGINE_BACKGROUND_SOCKET, method: 'POST', headers: { Authorization: `Bearer ${env.OLYMPUS_WORKER_AUTH_TOKEN}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({ id: `loopstall-ack-${ackSequence++}`, command: { kind: 'dashboard_samples', samples: [] } }), signal: AbortSignal.timeout(60_000) } as RequestInit)
@@ -660,20 +1350,56 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
     } catch (error) { requestErrors.push(`front health: ${error instanceof Error ? error.message : String(error)}`); }
     finished = true;
     await Promise.all(requests);
-    // Allow the heartbeat thread to publish the final completed beat.
-    await Bun.sleep(125);
   } catch (error) { errors.push(error instanceof Error ? error.message : String(error)); }
   finally {
+    // A responsive engine can save its last profiler window before shutdown.
+    const sampling = children.flatMap((child, index) => {
+      const path = join(metrics, ROLES[index]!);
+      if (child.exitCode !== null || !existsSync(`${path}.beats.jsonl`)) return [];
+      child.kill('SIGUSR2');
+      return [{ child, path }];
+    });
+    const sampleDeadline = nowMs() + FINAL_SAMPLE_WAIT_MS;
+    while (nowMs() < sampleDeadline && sampling.some(({ child, path }) => child.exitCode === null && !existsSync(`${path}.sampled`))) {
+      await Bun.sleep(BEAT_MS);
+    }
+    for (const role of ROLES) if (timing[role].spawnedAt) timing[role].stoppedAt ||= nowMs();
     pressureSampler.stop();
+    anonSampler.stop();
+    ioSampler.stop();
+    clearInterval(cgroupTimer);
+    cgroupAtEnd = readCgroupMemory();
+    meminfoAtEnd = readMeminfo();
+    liveAtEnd = readLiveInstall();
+    await Promise.all(Object.values(timelines).map(timeline => timeline?.stop()));
     for (const child of children) child.kill('SIGKILL');
     await Promise.all(children.map(child => child.exited)); await Promise.all(pumps);
     await Promise.allSettled(requests);
     stub.stop(true);
   }
-  const read = (name: string, fallback: unknown) => { try { return JSON.parse(readFileSync(join(metrics, name), 'utf8')); } catch { return fallback; } };
-  const empty: Loop = { max_ms: 0, over_budget: 0, beats: 0 };
-  const background = read('background.json', {}).loop_lag ?? empty;
-  const front = read('front.json', {}).loop_lag ?? empty;
+  const readMeasurements = (role: Role) => {
+    const path = join(metrics, role);
+    const rows = readJsonLines<CpuRow>(`${path}.cpu.jsonl`);
+    if (existsSync(`${path}.cpu.jsonl`)) writeFileSync(join(dir, `last-run-${role}.cpu.jsonl`), readFileSync(`${path}.cpu.jsonl`));
+    const sampled = `${path}.sampled`;
+    if (existsSync(sampled)) {
+      const stamp = readFileSync(sampled, 'utf8');
+      if (stamp) timing[role].stoppedAt = Number(stamp);
+    }
+    const beats = readJsonLines<Beat>(`${path}.beats.jsonl`).filter(beat => beat.endMs <= timing[role].stoppedAt);
+    // The process could have emitted readiness just before it exited.
+    readReady(role);
+    return {
+      ...summarizeBeats(role, beats, rows.flatMap(row => row.beat_sites), timing[role]),
+      freezes: rows.filter(row => row.freezes.count).map(row => ({ role, at: row.at, freezes: row.freezes })),
+    };
+  };
+  const backgroundMeasurement = readMeasurements('background');
+  const frontMeasurement = readMeasurements('front');
+  const background = backgroundMeasurement.loop;
+  const front = frontMeasurement.loop;
+  const siteTable = { background: backgroundMeasurement.sites, front: frontMeasurement.sites };
+  const cpuFreezes = [...backgroundMeasurement.freezes, ...frontMeasurement.freezes];
   const slow_sql = ['background', 'front'].flatMap(role => {
     const path = join(metrics, `${role}.sql.jsonl`);
     return existsSync(path) ? readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).map(line => ({ role, ...JSON.parse(line) })) : [];
@@ -682,16 +1408,7 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
   if (existsSync(join(dir, 'workloads.json'))) workloads = JSON.parse(readFileSync(join(dir, 'workloads.json'), 'utf8'));
   const workload_ok = finished && errors.length === 0 && workloads.failures.length === 0 && workloads.sync_items > 0 && workloads.embed_passes_started > 0 && workloads.judge_passes > 0 && workloads.recounts_started > 0
     && modelCalls.judge > 0 && asks.some(ask => ask.status === 200 && typeof ask.evidence_ms === 'number') && forwarded.some(read => read.status === 200);
-  // The engine's own CPU sampler (every 30 s): each loop beat over 1 s, with the frames sampled inside it.
-  const cpuFreezes = ['background', 'front'].flatMap(role => {
-    const path = join(metrics, `${role}.cpu.jsonl`);
-    if (!existsSync(path)) return [];
-    writeFileSync(join(dir, `last-run-${role}.cpu.jsonl`), readFileSync(path));
-    return readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).flatMap(line => {
-      try { const row = JSON.parse(line) as { at: string; freezes?: { count: number } }; return row.freezes?.count ? [{ role, at: row.at, freezes: row.freezes }] : []; } catch { return []; }
-    });
-  });
-  // Command acknowledgement (control thread, 540d012): every ack under 1 s, and the status snapshot never over 10 s old once written.
+  // The socket probe still measures the control thread and the status snapshot.
   const ackOk = acks.filter(ack => ack.status === 202 || ack.status === 200);
   const ackSummary = { count: acks.length, ok: ackOk.length, max_ms: Math.max(0, ...acks.map(ack => ack.ms)), over_1s: acks.filter(ack => ack.ms >= LOOP_STALL_LIMIT_MS || !(ack.status === 202 || ack.status === 200)).slice(0, 50),
     max_loop_held_ms: Math.max(0, ...acks.map(ack => ack.loop_held_ms ?? 0)), status_max_age_ms: Math.max(0, ...statusAges.map(row => row.age_ms)), status_reads: statusAges.length,
@@ -700,55 +1417,93 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
   // Typical case beside the worst (plan, 16 Nov 2026), reported only until two runs show the measurement is steady:
   // click acknowledgement p95 under 100 ms, dashboard reads p95 under 300 ms, both worst under 1 s.
   const dashOk = dashReads.filter(read => read.status === 200);
-  const typical = { ack_p95_ms: percentile(acks.map(ack => ack.ms), 0.95), dashboard_p95_ms: percentile(dashReads.map(read => read.ms), 0.95), dashboard_max_ms: Math.max(0, ...dashReads.map(read => read.ms)),
+  const typical = { ack_p95_ms: percentile(clicks.map(click => click.ms), 0.95), dashboard_p95_ms: percentile(dashReads.map(read => read.ms), 0.95), dashboard_max_ms: Math.max(0, ...dashReads.map(read => read.ms)),
     dashboard_reads: dashReads.length, dashboard_failed: dashReads.length - dashOk.length, dashboard_failures: dashReads.filter(read => read.status !== 200).slice(0, 10),
     front_beat_p95_ms: beatP95(front) ?? null, background_beat_p95_ms: beatP95(background) ?? null };
-  const ack_ok = ackOk.length > 0 && ackSummary.over_1s.length === 0 && ackSummary.status_max_age_ms <= 10_000 && !ackSummary.no_control_thread;
+  const clickSummary = { count: clicks.length, max_ms: Math.round(Math.max(0, ...clicks.map(click => click.ms))),
+    over_1s: clicks.filter(click => !click.received || click.ms >= LOOP_STALL_LIMIT_MS).slice(0, 50).map(click => ({ ...click, trace: clickTrace.get(click.id) ?? [] })),
+    traced: clicks.filter(click => clickTrace.has(click.id)).length,
+    settled: clicks.filter(click => click.settled_ms !== undefined).length, pending: pendingClicks.size,
+    max_settled_ms: Math.max(0, ...clicks.map(click => click.settled_ms ?? 0)),
+    failures: clicks.filter(click => click.saved === false), samples: clicks };
+  const ack_ok = clickSummary.count > 0 && clickSummary.over_1s.length === 0;
+  const privacy_restart = coldStart ? null : await privacyClickRestartGate();
   const walAtEnd = walSizes(dir);
   const walLines = sqliteLines.filter(entry => entry.line.includes('sqlite wal:'));
-  const guards = sqliteGuards(walAtEnd, sqliteLines.map(entry => entry.line), { fromFirstLevel: options.runCase === 'boot-after-upgrade' });
+  const checkpoint = sqliteLines.filter(entry => entry.line.includes('sqlite checkpoint:')).slice(0, 2000);
+  const checkpoint_timing = checkpoint.flatMap(({ at, role, line }) => {
+    const match = /sqlite checkpoint: (\S+) .*?\bms=(\d+)/.exec(line);
+    return match ? [{ at, role, store: match[1], ms: Number(match[2]), since_spawn_ms: Math.round(Date.parse(at) - timing[role].spawnedAt) }] : [];
+  });
+  const guards = sqliteGuards(walAtEnd, sqliteLines, { fromFirstLevel: options.runCase === 'boot-after-upgrade' });
   // Boot after upgrade: how long the padded WAL took to come down to the limit.
   const firstLevel = options.runCase === 'boot-after-upgrade' ? sqliteLines.find(entry => /tier-ledger\S* .*?wal_bytes=(\d+)/.test(entry.line) && Number(/wal_bytes=(\d+)/.exec(entry.line)![1]) <= WAL_END_LIMIT_BYTES) : undefined;
   // From the engines' start (plan, 16 Nov 2026 14:58Z): at or under 64 MB within 5 minutes; longer while making progress is a
   // report to the plan with the reason, not an automatic fail.
   const padded_wal_level_s = firstLevel ? Math.round((Date.parse(firstLevel.at) - (enginesStartedAt ?? started)) / 100) / 10 : null;
   // One bar for the 600k gate and the quick cold test (plan, 16 Nov 2026).
-  const pass = gate({ background, front, workload_ok, wal_ok: guards.wal_ok, ack_ok, runCase: options.runCase });
+  const control_ok = !ackSummary.no_control_thread && (options.runCase === 'boot-after-upgrade' || ackSummary.status_max_age_ms <= 10_000);
+  const pass = coldStart ? null : gate({ background, front, workload_ok, wal_ok: guards.wal_ok, ack_ok: ack_ok && control_ok, privacy_restart_ok: privacy_restart?.pass === true, runCase: options.runCase });
+  const startupGaps = coldStart?.firstAnswerAt !== undefined && coldStart.readyAt !== undefined
+    ? summarizeStartupGaps(coldStart.samples, coldStart.firstAnswerAt, coldStart.readyAt)
+    : null;
+  const split = startupGaps?.longest ? startupThreadSplit(timelinePath('front'), startupGaps.longest) : null;
+  const spawnedAt = enginesStartedAt ?? started;
+  const startup = coldStart ? {
+    first_answer_ms: coldStart.firstAnswerAt === undefined ? null : Math.round(coldStart.firstAnswerAt - spawnedAt),
+    ready_ms: coldStart.readyAt === undefined ? null : Math.round(coldStart.readyAt - spawnedAt),
+    builds: coldStart.builds, gaps: startupGaps, front_thread: split,
+    searches: summarizeStartupSearches(coldStart.searches, coldStart.searchesSkipped), search_log: coldStart.searches.slice(0, 300),
+    verdict: startupGaps ? coldStartVerdict(startupGaps.longest, split && typeof split === 'object' ? split : undefined) : null,
+  } : null;
   // Retired as a bar (owner, 16 Nov 2026); kept in the receipt for comparison with earlier runs.
   const strict_1s = background.beats > 0 && front.beats > 0 && background.max_ms < LOOP_STALL_LIMIT_MS && front.max_ms < LOOP_STALL_LIMIT_MS;
   const sha = spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
-  const receipt = { phase: 'run', case: options.runCase, sha, pass, strict_1s, restore_ms, restored_outside: restoredOutside, padded_wal_level_s, judged: modelCalls.judge, host_busy: false, host, qualified: isCapped, memory_max: memoryMax, elapsed_ms: Date.now() - started, background, front, slow_sql, forwarded, asks, workloads, workload_ok, model_calls: modelCalls, command_ack: ackSummary, ack_ok, typical, front_loop_sql: seen.frontLoopSql, request_errors: requestErrors, errors, cpu_freezes: cpuFreezes.slice(0, 60), pressure: pressureSummary(pressureSampler.samples),
+  const receipt = { phase: 'run', case: options.runCase, sha, pass, strict_1s, restore_ms, restored_outside: restoredOutside, padded_wal_level_s, judged: modelCalls.judge, host_busy: false, host, qualified: isCapped, memory_max: memoryMax, elapsed_ms: Date.now() - started, background, front, slow_sql, forwarded, asks, workloads, workload_ok, model_calls: modelCalls, privacy_click: clickSummary, privacy_restart, command_ack: ackSummary, ack_ok, control_ok, typical, front_loop_sql: seen.frontLoopSql, request_errors: requestErrors, errors, cpu_freezes: cpuFreezes.slice(0, 60), pressure: pressureSummary(pressureSampler.samples), anon_memory: anonSampler.peaks,
+    sqlite_mmap: options.sqliteMmap ?? 'default', engine_env: options.engineEnv ?? {}, sqlite_mmap_boot: fileMapLines, process_io: ioSampler.summary(), meminfo: { start: meminfoAtStart, end: meminfoAtEnd }, cgroup_memory_end: cgroupAtEnd, cgroup_memory_samples: cgroupSamples,
+    ...(options.swapReading ? { swap_reading: true, counts_as_gate: false } : {}),
+    ...(coldStart ? { counts_as_gate: false, cold_start: startup, io_throttle: coldStart.io_throttle } : {}),
+    vmstat: Object.fromEntries(Object.entries(readVmstat()).map(([key, value]) => [key, value - (vmstatAtStart[key] ?? value)])),
+    background_timeline: summarizeThreadTimeline('background', timelinePath('background'), freezeLines, join(metrics, 'background.freezes.log')),
+    front_timeline: summarizeThreadTimeline('front', timelinePath('front'), freezeLines, join(metrics, 'front.freezes.log')),
+    live_install: Object.fromEntries(Object.entries(liveAtEnd).map(([unit, end]) => [unit, {
+      read_mb: Math.round((end.rbytes - (liveAtStart[unit]?.rbytes ?? end.rbytes)) / 1e6), write_mb: Math.round((end.wbytes - (liveAtStart[unit]?.wbytes ?? end.wbytes)) / 1e6),
+      swap_mib_start: liveAtStart[unit]?.swap_mib ?? null, swap_mib_end: end.swap_mib }])),
+    felt_delays: { front_beats_over_1s: front.over_1s, clicks_over_1s: clickSummary.over_1s.length, dashboard_reads_over_1s: dashReads.filter(read => read.ms >= LOOP_STALL_LIMIT_MS || read.status !== 200).length },
     sqlite: { guards, wal_bytes_at_open: walAtOpen, wal_bytes_at_end: walAtEnd, settings: sqliteLines.filter(entry => entry.line.includes('sqlite settings:')).slice(0, 200),
-      checkpoint: sqliteLines.filter(entry => entry.line.includes('sqlite checkpoint:')).slice(0, 2000),
+      checkpoint, checkpoint_timing,
       room: sqliteLines.filter(entry => entry.line.includes('sqlite wal room:') || entry.line.includes('sqlite wal held:')).slice(0, 500), wal: walLines.slice(0, 2000) }, freezes_log: freezeLines.slice(0, 500) };
   writeFileSync(join(dir, 'last-run.json'), JSON.stringify({ ...receipt, engine_logs: output }, null, 2));
   // last-run.json stays on the host and the next run replaces it; an engine that died puts its last words in the job log too.
   if (errors.length) for (const role of ['background', 'front']) console.error(`--- ${role} engine log tail ---\n${output[role]!.slice(-6_000)}`);
   console.log(JSON.stringify(receipt));
-  // One line per engine per run (plan, 16 Nov 2026): worst stall and its site, then pass or fail; then a per-site table.
-  type Freezes = { count?: number; totalMs?: number; maxMs?: number; self?: [string, number][]; total?: [string, number][] };
-  // The leaf ("run", "all") names only SQLite; the first product frame on the stack names the caller.
-  const siteOf = (freezes: Freezes | undefined) => freezes?.total?.find(([frame]) => / \S+\.ts:\d+/.test(frame) && !frame.includes('main-thread-sql-trace') && !frame.includes('bun:'))?.[0]
-    ?? freezes?.self?.[0]?.[0] ?? 'no sample';
-  const sites = (role: string) => {
-    const table = new Map<string, { site: string; count: number; total_s: number; worst_ms: number }>();
-    for (const row of cpuFreezes.filter(entry => entry.role === role)) {
-      const freezes = row.freezes as Freezes;
-      const site = siteOf(freezes);
-      const entry = table.get(site) ?? { site, count: 0, total_s: 0, worst_ms: 0 };
-      entry.count += freezes.count ?? 0; entry.total_s += (freezes.totalMs ?? 0) / 1000; entry.worst_ms = Math.max(entry.worst_ms, freezes.maxMs ?? 0);
-      table.set(site, entry);
+  if (startup) {
+    rmSync(runDir, { recursive: true, force: true });
+    if (!startup.verdict || !finished) {
+      console.log('cold-start: NOT RUN: the startup and after-ready window did not complete.');
+      return 'not_run' as const;
     }
-    return [...table.values()].map(entry => ({ ...entry, total_s: Math.round(entry.total_s * 10) / 10 })).sort((a, b) => b.total_s - a.total_s);
-  };
-  const siteTable = { background: sites('background'), front: sites('front') };
+    const gap = startup.gaps?.longest;
+    const thread = startup.front_thread;
+    const detail = thread && typeof thread === 'object'
+      ? `running ${thread.runningMs} ms, run queue ${thread.runQueueMs} ms, page faults ${thread.blockedMajfltMs} ms, block IO ${thread.blockedBlkioMs} ms, other waits ${thread.blockedOtherMs} ms, wait channels ${JSON.stringify(thread.waitChannelsMs)}`
+      : thread ?? 'no thread window';
+    console.log(`cold-start: ${startup.verdict} — longest ${gap?.ms ?? 0} ms${gap ? ` (${gap.page})` : ''}; ${detail}; READY ${startup.ready_ms} ms from spawn`);
+    const searches = startup.searches;
+    console.log(`cold-start searches: ${searches.sent} sent, ${searches.skipped} skipped; before READY ${JSON.stringify(searches.before_ready.outcomes)} max ${searches.before_ready.max_ms} ms; after READY ${searches.after_ready.ok}/${searches.after_ready.count} ok, p50 ${searches.after_ready.p50_ms} ms, max ${searches.after_ready.max_ms} ms, ${searches.after_ready.over_1s} over 1 s`);
+    return true;
+  }
+  // One line per engine per run (plan, 16 Nov 2026): worst stall and its site, then pass or fail; then a per-site table.
   for (const [role, loop] of [['front', front], ['background', background]] as const) {
-    const worst = siteTable[role].slice().sort((a, b) => b.worst_ms - a.worst_ms)[0];
     const limit = role === 'front' ? frontLimitMs(options.runCase) : BACKGROUND_PROGRESS_LIMIT_MS;
     const p95 = beatP95(loop);
-    console.log(`${options.runCase} ${role}: p95 beat ${p95 === undefined ? 'n/a' : `<= ${p95} ms`}, worst ${Math.round(loop.max_ms)} ms at ${worst?.site ?? 'no sample'}; ${loop.beats > 0 && loop.max_ms < limit ? 'PASS' : 'FAIL'} (bar ${limit / 1000} s${role === 'background' ? `; beats over 1 s, reported not gated: ${siteTable.background.reduce((sum, entry) => sum + entry.count, 0)}` : ''})`);
+    console.log(`${options.runCase} ${role}: after-ready p95 beat ${p95 === undefined ? 'n/a' : `<= ${p95} ms`}, worst ${Math.round(loop.max_ms)} ms at ${loop.worst_site}, beats over 1 s: ${loop.over_1s}; ${loop.beats > 0 && loop.max_ms < limit ? 'PASS' : 'FAIL'} (bar ${limit / 1000} s); pre-ready hold ${Math.round(loop.pre_ready_ms)} ms at ${loop.pre_ready_site} (reported)`);
   }
-  console.log(`${options.runCase} command ack: worst ${ackSummary.max_ms} ms over ${ackSummary.count} posts (${ackSummary.over_1s.length} at or over 1 s or failed), status snapshot oldest ${ackSummary.status_max_age_ms} ms${ackSummary.no_control_thread ? ', NO CONTROL THREAD' : ''}; ${ack_ok ? 'PASS' : 'FAIL'} (bar 1 s)`);
+  console.log(`${options.runCase} felt delays (counts over 1 s): front beats ${receipt.felt_delays.front_beats_over_1s}, clicks ${receipt.felt_delays.clicks_over_1s}, dashboard reads ${receipt.felt_delays.dashboard_reads_over_1s}. A pass needs the front and the click journey both under the bar.`);
+  console.log(`${options.runCase} Make Private receipt: worst ${clickSummary.max_ms} ms over ${clickSummary.count} posts (${clickSummary.over_1s.length} at or over 1 s or failed); ${ack_ok ? 'PASS' : 'FAIL'} (bar 1 s). Settlement (reported): worst ${clickSummary.max_settled_ms} ms across ${clickSummary.settled} settled, ${clickSummary.pending} pending at cutoff.`);
+  if (privacy_restart) console.log(`${options.runCase} Make Private, front restart before commit: ${privacy_restart.pass ? 'PASS' : 'FAIL'} (${privacy_restart.ms} ms), ${privacy_restart.outcome}.`);
+  console.log(`${options.runCase} socket ack (reported): worst ${ackSummary.max_ms} ms over ${ackSummary.count} posts (${ackSummary.over_1s.length} at or over 1 s or failed), status snapshot oldest ${ackSummary.status_max_age_ms} ms${ackSummary.no_control_thread ? ', NO CONTROL THREAD' : ''}.`);
+  console.log(`${options.runCase} anonymous memory (reported): ${Object.entries(anonSampler.peaks).map(([role, entry]) => `${role} peak ${entry.peak_anon_mib} MiB at ${entry.at_s} s, last ${entry.last_anon_mib} MiB`).join('; ') || 'not sampled'}`);
   console.log(`${options.runCase} typical (reported, not gated yet): click ack p95 ${typical.ack_p95_ms} ms (target 100); dashboard reads p95 ${typical.dashboard_p95_ms} ms, worst ${typical.dashboard_max_ms} ms over ${typical.dashboard_reads}${typical.dashboard_failed ? `, ${typical.dashboard_failed} failed` : ''} (target 300, worst 1000); front beat p95 ${typical.front_beat_p95_ms === null ? 'n/a' : `<= ${typical.front_beat_p95_ms} ms`}`);
   // Report only for 1.5 (plan, 16 Nov 2026): the allowance list is incomplete, so an unlisted site is usually one no run had reached.
   // A site matters to the gate only as the named frame of a front beat over 1 s (the per-site table above).
@@ -756,14 +1511,14 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
   const unlistedSites = frontLoopSql?.unlisted_sites ?? frontLoopSql?.unlisted?.map(site => ({ site, statements: NaN })) ?? [];
   console.log(`${options.runCase} front loop SQL (reported, not gated): ${frontLoopSql ? `${frontLoopSql.statements ?? '?'} statements at ${frontLoopSql.sites ?? '?'} sites, ${unlistedSites.length} not on the allowance list${unlistedSites.length ? `:\n${unlistedSites.map(entry => `  ${Number.isNaN(entry.statements) ? '?' : entry.statements} statements  ${entry.site}`).join('\n')}` : ''}` : 'not reported by this build'}`);
   const peaks = Object.entries(guards.wal_peak).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([label, bytes]) => `${label} ${Math.round(bytes / 1048576)} MB`).join(', ') || 'no wal lines';
-  console.log(`${options.runCase} WAL: peak ${peaks}${options.runCase === 'boot-after-upgrade' ? ` (from each file's first rewind; padded ledger at or under 64 MB after ${padded_wal_level_s ?? 'never'} s from the engines' start, bar 300 s, predicted about 60 s${padded_wal_level_s === null || padded_wal_level_s > 300 ? '; OVER 5 MIN: report to the plan with the reason' : ''})` : ''}; over 64 MB at any point ${guards.wal_peak_over.length}, at end ${guards.wal_over_limit.length}; ${guards.wal_ok ? 'PASS' : 'FAIL'}`);
+  console.log(`${options.runCase} WAL: peak ${peaks}${options.runCase === 'boot-after-upgrade' ? ` (from each file's first rewind; padded ledger at or under 64 MB after ${padded_wal_level_s ?? 'never'} s from the engines' start, bar 300 s, predicted about 60 s${padded_wal_level_s === null || padded_wal_level_s > 300 ? '; OVER 5 MIN: report to the plan with the reason' : ''})` : ''}; over 64 MB (reported): ${guards.wal_peak_over.map(row => `${row.label} ${row.crossings}x, ${row.over_s} s over, longest ${row.longest_s} s`).join('; ') || 'none'}; bar: back under 64 MB within 60 s (${guards.wal_slow_back.length} not), none over 1 GB (${guards.wal_over_1gb.length}), none over at end (${guards.wal_over_limit.length}); ${guards.wal_ok ? 'PASS' : 'FAIL'}`);
   console.log(`${options.runCase} work: ${workload_ok ? 'complete' : 'INCOMPLETE'} (sync ${workloads.sync_items}, embed ${workloads.embed_chunks}, judge passes ${workloads.judge_passes}, judge model calls ${modelCalls.judge}); ${workload_ok ? 'PASS' : 'FAIL'}`);
-  console.log(`${options.runCase} release bar (front under ${frontLimitMs(options.runCase) / 1000} s, ack under 1 s, background under 30 s, work done, WAL at most 64 MB throughout): ${pass ? 'PASS' : 'FAIL'}. Retired 1 s-on-both: ${strict_1s ? 'pass' : 'fail'}.`);
+  console.log(`${options.runCase} release bar (front under ${frontLimitMs(options.runCase) / 1000} s, Make Private receipt under 1 s, background under 30 s, work done, WAL back under 64 MB within 60 s and never over 1 GB): ${pass ? 'PASS' : 'FAIL'}. Retired 1 s-on-both: ${strict_1s ? 'pass' : 'fail'}.`);
   console.log(JSON.stringify({ phase: 'sites', case: options.runCase, ...siteTable }));
   rmSync(runDir, { recursive: true, force: true });
   // A run that judged nothing did not exercise the background's long holds (plan, 16 Nov 2026): it counts as not run, not as a pass.
   if (modelCalls.judge === 0) { console.log(`${options.runCase}: NOT RUN: the judge made no model calls, so the background's judging was never measured.`); return 'not_run' as const; }
-  return pass;
+  return pass === true;
 }
 if (import.meta.main) {
   const [command, ...args] = process.argv.slice(2);
@@ -772,13 +1527,20 @@ if (import.meta.main) {
   const number = (name: string, fallback: string) => { const n = Number(flag(name, fallback)); if (!Number.isSafeInteger(n) || n < 1) throw new Error(`Invalid --${name}`); return n; };
   if (dir && command === 'pad-wal') padWal(resolve(dir), number('wal-mb', '2048'));
   if (dir && command === 'restore') { restorePristine(resolve(dir)); writeFileSync(join(resolve(dir), 'restored'), new Date().toISOString()); process.exit(0); }
-  if (!dir || !['build', 'run'].includes(command ?? '')) throw new Error('Usage: loop-stall-test.ts build|restore|run --dir PATH [--items N] [--chunks-per-item N] [--seconds N] [--memory-max 2G] [--case steady|boot-after-upgrade] [--wal-mb 2048] [--io-floor-ms 50] [--io-wait-seconds 600]');
+  if (!dir || !['build', 'run'].includes(command ?? '')) throw new Error(`Usage: loop-stall-test.ts build|restore|run --dir PATH [--items N] [--chunks-per-item N] [--seconds N] [--memory-max 2G] [--case ${RUN_CASES.join('|')}] [--wal-mb 2048] [--io-floor-ms 50] [--io-wait-seconds 600] [--sqlite-mmap on|off|bounded] [--swap-reading] [--io-throttle-unavailable] [--engine-env 'OLYMPUS_X=1 OLYMPUS_Y=2']`);
   const runCase = flag('case', 'steady') as RunCase;
-  if (!['steady', 'boot-after-upgrade'].includes(runCase)) throw new Error('Invalid --case; use steady or boot-after-upgrade');
+  const sqliteMmap = flag('sqlite-mmap') as 'on' | 'off' | 'bounded' | undefined;
+  if (sqliteMmap !== undefined && !['on', 'off', 'bounded'].includes(sqliteMmap)) throw new Error('Invalid --sqlite-mmap; use on, off or bounded');
+  const engineEnv = Object.fromEntries((flag('engine-env') ?? '').split(/\s+/).filter(Boolean).map(pair => {
+    const match = /^(OLYMPUS_[A-Z0-9_]+)=(.*)$/.exec(pair);
+    if (!match) throw new Error(`Invalid --engine-env entry ${pair}; use OLYMPUS_NAME=value`);
+    return [match[1]!, match[2]!];
+  }));
+  if (!RUN_CASES.includes(runCase)) throw new Error(`Invalid --case; use ${RUN_CASES.join(', ')}`);
   if (command === 'build') await build(resolve(dir), number('items', '600000'), number('chunks-per-item', '1'));
   else {
-    const result = await run(resolve(dir), number('seconds', '300'), flag('memory-max', '2G')!, { runCase, walBytes: number('wal-mb', '2048') * 1024 * 1024, ioFloorMs: number('io-floor-ms', '50'), ioWaitSeconds: number('io-wait-seconds', '600'), quick: args.includes('--quick') });
-    // Exit 3 is "host busy" and 4 "not run" (no judging): neither measured the engine.
+    const result = await run(resolve(dir), number('seconds', '300'), flag('memory-max', '2G')!, { runCase, walBytes: number('wal-mb', '2048') * 1024 * 1024, ioFloorMs: number('io-floor-ms', '50'), ioWaitSeconds: number('io-wait-seconds', '600'), quick: args.includes('--quick'), ...(sqliteMmap ? { sqliteMmap } : {}), swapReading: args.includes('--swap-reading'), ioThrottleUnavailable: args.includes('--io-throttle-unavailable'), engineEnv });
+    // Exit 3 is "host busy" and 4 "not run": neither completed measurement.
     process.exitCode = result === 'host_busy' ? 3 : result === 'not_run' ? 4 : result ? 0 : 1;
   }
   process.exit(process.exitCode ?? 0);

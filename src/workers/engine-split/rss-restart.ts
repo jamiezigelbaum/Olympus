@@ -1,11 +1,11 @@
 /**
  * The background's supervised restart on memory (docs/design/engine-split.md,
  * part 3, "Restart"; #957). With `worker.engineSplit` on, the background
- * checks its own RSS every minute. Past the threshold it waits for the
- * judge's pass in flight to end, so the restart falls between batches, and
- * then asks for the same clean reload a model change uses: the scheduler
- * stops and records a pass it cuts short as interrupted, not failed (#803),
- * the process exits 75, and the host's supervision starts it again. A pass
+ * checks its five-minute RSS floor every minute. Past the threshold it waits
+ * for judge and scheduler work in flight to end, then asks for the clean
+ * reload used by model changes. The scheduler records any pass it cuts
+ * short as interrupted (#803), the process exits 75, and the host's
+ * supervision starts it again. A pass
  * that runs past ENGINE_RSS_RESTART_MAX_WAIT_MS does not hold it back: a
  * stopped pass loses nothing it had not committed.
  *
@@ -14,7 +14,7 @@
  * the status snapshot (`rss_restarts`), carried from one background to the
  * next through the snapshot it left.
  */
-import { readFileSync } from 'node:fs';
+import { createMemoryDiagnostic, MEMORY_SAMPLE_INTERVAL_MS, processMemory, type ProcessMemory } from './memory.ts';
 import type { EngineStatusRead } from './snapshot.ts';
 
 export { ENGINE_RSS_RESTART_DEFAULT_MB } from '../../core/config.ts';
@@ -41,7 +41,9 @@ export function startEngineRssRestart(input: {
   /** 0 turns it off. */
   thresholdMb: number;
   rss?: () => number;
-  /** A judge pass is running: the restart waits for it to end. */
+  sample?: () => ProcessMemory;
+  sampleAsync?: () => Promise<ProcessMemory>;
+  /** Judge or scheduler work is running: the restart waits for it to end. */
   batchRunning: () => boolean;
   /** The clean reload; false when nothing supervises this process. */
   restart: () => boolean;
@@ -52,36 +54,92 @@ export function startEngineRssRestart(input: {
   setInterval?: (callback: () => void, ms: number) => unknown;
   clearInterval?: (timer: unknown) => void;
   log?: (line: string) => void;
+  memory?: ReturnType<typeof createMemoryDiagnostic>;
 }): { restarts(): EngineRssRestarts; stop(): void } {
   const now = input.now ?? (() => Date.now());
-  const rss = input.rss ?? engineMemoryRss;
   const log = input.log ?? ((line: string) => console.warn(line));
+  const memory = input.memory ?? createMemoryDiagnostic({ role: 'background', now, log });
   let restarts: EngineRssRestarts = input.previous;
   let overSince: number | undefined;
   let done = false;
-  const check = (): void => {
-    if (done || input.thresholdMb <= 0) return;
-    const rssMb = Math.round(rss() / (1024 * 1024));
-    if (rssMb < input.thresholdMb) { overSince = undefined; return; }
+  const sample = input.sample ?? processMemory;
+  const threshold = input.thresholdMb * 1024 * 1024;
+  let aboveInPreviousSample = false;
+  let burstCandidates = 0;
+  let largestCandidate = 0;
+  let windowMin = Infinity;
+  const check = (sampled: ProcessMemory, rss: number): void => {
+    const floor = memory.floor();
+    const write = (includeBursts: boolean) => {
+      const low = Math.min(floor?.rss ?? Infinity, windowMin);
+      const burst = includeBursts && burstCandidates > 0 && low <= threshold
+        ? { count: burstCandidates, rss: largestCandidate, floor: low, thresholdMb: input.thresholdMb }
+        : undefined;
+      burstCandidates = largestCandidate = 0;
+      aboveInPreviousSample = false;
+      windowMin = Infinity;
+      return memory.write(sampled, burst);
+    };
+    const periodic = () => { if (memory.dueOnMinuteCheck()) write(true); };
+    if (done || input.thresholdMb <= 0) { periodic(); return; }
+    if (!floor?.full || floor.rss <= threshold) {
+      overSince = undefined;
+      periodic();
+      return;
+    }
     overSince ??= now();
     const waited = now() - overSince;
-    if (input.batchRunning() && waited < ENGINE_RSS_RESTART_MAX_WAIT_MS) return;
+    if (input.batchRunning() && waited < ENGINE_RSS_RESTART_MAX_WAIT_MS) { periodic(); return; }
     done = true;
+    const rssMb = Math.round(rss / (1024 * 1024));
     const next = { count: restarts.count + 1, last: { at: new Date(now()).toISOString(), rss_mb: rssMb } };
     const previous = restarts;
     restarts = next;
     input.record(next);
+    const fields = write(false);
     if (!input.restart()) {
       restarts = previous;
       log(`[engine-split] rss_over_threshold rss_mb=${rssMb} threshold_mb=${input.thresholdMb}: nothing supervises this process, so it keeps running.`);
       return;
     }
-    log(`[engine-split] rss_restart rss_mb=${rssMb} threshold_mb=${input.thresholdMb} restarts=${next.count} waited_ms=${waited}`);
+    log(`[engine-split] rss_restart rss_mb=${rssMb} threshold_mb=${input.thresholdMb} restarts=${next.count} waited_ms=${waited} over_threshold_s=${Math.floor(waited / 1000)} ${fields}`);
   };
-  const timer = (input.setInterval ?? ((callback, ms) => { const handle = setInterval(callback, ms); handle.unref?.(); return handle; }))(check, ENGINE_RSS_CHECK_INTERVAL_MS);
+  const setTimer = input.setInterval ?? ((callback, ms) => { const handle = setInterval(callback, ms); handle.unref?.(); return handle; });
+  const clearTimer = input.clearInterval ?? ((handle) => clearInterval(handle as ReturnType<typeof setInterval>));
+  let samplesSinceCheck = 0;
+  // Record the latest sample before checking so the first check at five
+  // minutes sees a complete window, even when both would be due together.
+  const recordSample = (sampled: ProcessMemory) => {
+    const rss = input.rss?.() ?? sampled.anon ?? sampled.rss;
+    memory.sample(sampled, rss);
+    if (input.thresholdMb > 0) {
+      // Track sampled excursions even when they begin and end between restart checks.
+      const above = rss > threshold;
+      if (above) {
+        if (!aboveInPreviousSample) burstCandidates++;
+        largestCandidate = Math.max(largestCandidate, rss);
+      }
+      windowMin = Math.min(windowMin, rss);
+      aboveInPreviousSample = above;
+    }
+    if (++samplesSinceCheck * MEMORY_SAMPLE_INTERVAL_MS < ENGINE_RSS_CHECK_INTERVAL_MS) return;
+    samplesSinceCheck = 0;
+    check(sampled, rss);
+  };
+  const sampleAsync = input.sampleAsync;
+  let reading = false;
+  let stopped = false;
+  const sampler = setTimer(() => {
+    if (!sampleAsync) { recordSample(sample()); return; }
+    if (reading) return;
+    reading = true;
+    void sampleAsync().then((sampled) => {
+      if (!stopped) recordSample(sampled);
+    }).finally(() => { reading = false; });
+  }, MEMORY_SAMPLE_INTERVAL_MS);
   return {
     restarts: () => restarts,
-    stop: () => (input.clearInterval ?? ((handle) => clearInterval(handle as ReturnType<typeof setInterval>)))(timer),
+    stop: () => { stopped = true; clearTimer(sampler); },
   };
 }
 
@@ -92,11 +150,6 @@ export function startEngineRssRestart(input: {
  * RSS, as before (mapping is Linux-only too).
  */
 export function engineMemoryRss(): number {
-  if (process.platform === 'linux') {
-    try {
-      const line = /^RssAnon:\s+(\d+)\s+kB$/m.exec(readFileSync('/proc/self/status', 'utf8'));
-      if (line) return Number(line[1]) * 1024;
-    } catch { /* fall through */ }
-  }
-  return process.memoryUsage.rss();
+  const memory = processMemory();
+  return memory.anon ?? memory.rss;
 }

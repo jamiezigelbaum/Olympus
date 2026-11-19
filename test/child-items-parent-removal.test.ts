@@ -30,6 +30,7 @@ import { SecretLocationsIndex } from '../src/workers/classification/secret-locat
 import { TierLedger, type TierCopy } from '../src/workers/classification/tier-ledger.ts';
 import { secretLocationsPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
+import { parentKey, parentVerdicts } from '../src/workers/connector-store/child-visibility.ts';
 import { createParentLabelResolver } from '../src/workers/connector-store/parent-label.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import {
@@ -159,6 +160,36 @@ function onlyItems(source: SourceConnector, keep: (item: RawItem) => boolean): S
 }
 
 describe('a child is hidden the moment its parent is, on every read path', () => {
+  test('a pending deletion hides a parent and its children before its rows are tombstoned', async () => {
+    const { archiveId, lane, identityOf } = await importAndRead();
+    const identity = identityOf('m1');
+    const ref = { provider: identity.provider, accountScope: archiveId, parentLocalItemId: identity.localItemId, identity };
+    const judge = () => parentVerdicts({ ledger: () => lane.ledger, stores: () => lane.set.openStores() }, [ref]).get(parentKey(ref));
+    const gate = createTierVisibilityGate(() => [scopeOf(lane)]);
+    const hits = [...M1_CHILDREN, M2_CHILD].map(id => hitOf(lane, identityOf(id)));
+    expect(judge()).toEqual({ visible: true, gone: false });
+    expect(lane.ledger.copies(identity).some(copy => copy.state === 'current')).toBe(true);
+    expect(textSearchable(lane, 'thirty-seven months')).toBe(true);
+    expect(await gate.offThread!(hits)).toHaveLength(3);
+
+    lane.ledger.putWriteIntent({ identity, connectorId: 'fixture', kind: 'deletion' });
+    expect({
+      parent: judge(),
+      rejudged: judge(),
+      childSearchable: textSearchable(lane, 'thirty-seven months'),
+      hits: (await gate.offThread!(hits)).map(hit => hit.sourceItem.providerItemId),
+    }).toEqual({
+      parent: { visible: false, gone: false },
+      rejudged: { visible: false, gone: false },
+      childSearchable: false,
+      hits: [M2_CHILD],
+    });
+
+    deleteParent(lane, identity);
+    lane.ledger.clearWriteIntent(identity);
+    expect(judge()).toEqual({ visible: false, gone: true });
+  });
+
   test('a parent tombstoned in every store hides its children at once, before anything is removed, and a sibling parent\'s child is untouched', async () => {
     const { h, archiveId, lane, identityOf } = await importAndRead();
     for (const id of [...M1_CHILDREN, M2_CHILD]) expect(readable(lane, archiveId, id)).toBe(true);

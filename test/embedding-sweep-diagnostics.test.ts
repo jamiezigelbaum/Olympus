@@ -6,7 +6,7 @@ import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { SecretLocationsIndex } from '../src/workers/classification/secret-locations.ts';
 import { TieredStoreSet } from '../src/workers/connector-store/tiered-store-set.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
-import { SourceScheduler, withEmbeddingSweep } from '../src/workers/source-scheduler.ts';
+import { EMBEDDING_SWEEP_IDLE_BACKOFF_ENV, EMBEDDING_SWEEP_IDLE_FULL_PASS_MS, SourceScheduler, withEmbeddingSweep } from '../src/workers/source-scheduler.ts';
 import { TransientSourceEmbeddingError } from '../src/workers/source-index/embeddings.ts';
 import { FileLeaseBusyError } from '../src/core/file-lease.ts';
 import { CORPORA, FIXTURE_PLACEMENT, fixtureConnector, identityOf, localId, localProvider, tempDir } from './helpers/tier-fixtures.ts';
@@ -14,7 +14,7 @@ import { CORPORA, FIXTURE_PLACEMENT, fixtureConnector, identityOf, localId, loca
 const cleanups: Array<() => void> = [];
 afterEach(() => { for (const cleanup of cleanups.splice(0).reverse()) cleanup(); });
 
-async function fixture(options: { accountScope?: string } = {}) {
+async function fixture(options: { accountScope?: string; empty?: boolean } = {}) {
   const tmp = tempDir();
   const ledger = new TierLedger({ dbPath: `${tmp.dir}/tiers.sqlite` });
   const secrets = new SecretLocationsIndex({ dbPath: `${tmp.dir}/secrets.sqlite` });
@@ -29,11 +29,15 @@ async function fixture(options: { accountScope?: string } = {}) {
     ],
   });
   cleanups.push(() => { personal.close(); store.close(); secrets.close(); ledger.close(); tmp.cleanup(); });
-  await set.sync(fixtureConnector(() => [{ id: 'synthetic-id', name: 'synthetic-name.txt', text: 'Synthetic body marker.' }]), { fetchContent: true, placement: FIXTURE_PLACEMENT }, { embed: false });
+  if (!options.empty) {
+    await set.sync(fixtureConnector(() => [{ id: 'synthetic-id', name: 'synthetic-name.txt', text: 'Synthetic body marker.' }]), { fetchContent: true, placement: FIXTURE_PLACEMENT }, { embed: false });
+  }
   const log = spyOn(console, 'info').mockImplementation(() => {});
   cleanups.push(() => log.mockRestore());
   let now = new Date('2026-11-07T15:00:00Z');
-  const sources = withEmbeddingSweep([{ sourceId: 'synthetic-source-id', corpusId: store.corpusId, cadence: 'continuous', intervalMs: 60_000, freshnessThresholdHours: 24, tasks: [] }], () => () => [{ store, provider, wholeStore: true, ...options }]);
+  const sources = withEmbeddingSweep([{ sourceId: 'synthetic-source-id', corpusId: store.corpusId, cadence: 'continuous', intervalMs: 60_000, freshnessThresholdHours: 24, tasks: [] }], () => () => [{
+    store, provider, wholeStore: true, ...(options.accountScope !== undefined ? { accountScope: options.accountScope } : {}),
+  }]);
   const scheduler = new SourceScheduler({ enabled: true, tickMs: 60_000, errorBackoffMs: 1_000, maxTransientRetries: 1, sources, now: () => now });
   const pass = async () => {
     log.mockClear();
@@ -118,4 +122,68 @@ test('provider deferral and lease contention log their backoff and exact next ru
   expect(await f.pass()).toMatchObject({ stores_deferred: 1, backoff_ms: 240_000, skipped_lease_busy_items: 1 });
   f.store.embedChunks = embed;
   expect(await f.pass()).toMatchObject({ chunks_embedded: 1, stores_deferred: 0, backoff_ms: 0 });
+});
+
+test('a caught-up store rests until something changes, and a new item is embedded on the next pass', async () => {
+  const f = await fixture();
+  const walks = spyOn(f.store, 'embeddingSweepInventory');
+  expect(await f.pass()).toMatchObject({ chunks_embedded: 1 });
+  expect(await f.pass()).toMatchObject({ eligible_chunks: 0, pending_chunks: 0, chunks_embedded: 0 });
+  const settled = walks.mock.calls.length;
+  for (let i = 0; i < 3; i++) expect(await f.pass()).toMatchObject({ eligible_chunks: 0, pending_chunks: 0, chunks_embedded: 0, rested: 1 });
+  expect(walks.mock.calls.length).toBe(settled);
+  await f.set.sync(fixtureConnector(() => [
+    { id: 'synthetic-id', name: 'synthetic-name.txt', text: 'Synthetic body marker.' },
+    { id: 'synthetic-id-2', name: 'synthetic-name-2.txt', text: 'A second synthetic body.' },
+  ]), { fetchContent: true, placement: FIXTURE_PLACEMENT }, { embed: false });
+  expect(await f.pass()).toMatchObject({ chunks_embedded: 1, rested: 0 });
+  expect(walks.mock.calls.length).toBeGreaterThan(settled);
+  expect(await f.pass()).toMatchObject({ pending_chunks: 0, chunks_embedded: 0 });
+  const rested = walks.mock.calls.length;
+  await f.pass();
+  expect(walks.mock.calls.length).toBe(rested);
+  const real = Date.now();
+  const clock = spyOn(Date, 'now').mockImplementation(() => real + EMBEDDING_SWEEP_IDLE_FULL_PASS_MS + 1);
+  cleanups.push(() => clock.mockRestore());
+  await f.pass();
+  expect(walks.mock.calls.length).toBeGreaterThan(rested);
+});
+
+test('with the idle back-off switched off, every pass walks the store', async () => {
+  const before = process.env[EMBEDDING_SWEEP_IDLE_BACKOFF_ENV];
+  process.env[EMBEDDING_SWEEP_IDLE_BACKOFF_ENV] = 'off';
+  cleanups.push(() => { if (before === undefined) delete process.env[EMBEDDING_SWEEP_IDLE_BACKOFF_ENV]; else process.env[EMBEDDING_SWEEP_IDLE_BACKOFF_ENV] = before; });
+  const f = await fixture();
+  const walks = spyOn(f.store, 'embeddingSweepInventory');
+  await f.pass(); await f.pass();
+  const settled = walks.mock.calls.length;
+  await f.pass();
+  expect(walks.mock.calls.length).toBeGreaterThan(settled);
+});
+
+test('a brand-new store without a write sequence picks up its first write', async () => {
+  const f = await fixture({ empty: true });
+  expect(f.store.writeSequence()).toBeUndefined();
+  expect(await f.pass()).toMatchObject({ eligible_chunks: 0, rested: 0 });
+  await f.set.sync(fixtureConnector(() => [
+    { id: 'synthetic-id', name: 'synthetic-name.txt', text: 'The first synthetic body.' },
+  ]), { fetchContent: true, placement: FIXTURE_PLACEMENT }, { embed: false });
+  expect(f.store.writeSequence()).toBeGreaterThan(0);
+  expect(await f.pass()).toMatchObject({ chunks_embedded: 1, rested: 0 });
+});
+
+test('an item that failed for good does not keep its store walked, stays reported, and a change wakes the store', async () => {
+  const f = await fixture();
+  f.store.markEmbeddingFailed(localId('synthetic-id'), 'synthetic');
+  const walks = spyOn(f.store, 'embeddingSweepInventory');
+  expect(await f.pass()).toMatchObject({ skipped_failed_chunks: 1, eligible_chunks: 0, rested: 0 });
+  const settled = walks.mock.calls.length;
+  for (let i = 0; i < 2; i++) expect(await f.pass()).toMatchObject({ skipped_failed_chunks: 1, items_failed: 0, rested: 1 });
+  expect(walks.mock.calls.length).toBe(settled);
+  expect(f.store.embeddingFailedItemCount()).toBe(1);
+  await f.set.sync(fixtureConnector(() => [
+    { id: 'synthetic-id', name: 'synthetic-name.txt', text: 'Synthetic body marker.' },
+    { id: 'synthetic-id-3', name: 'synthetic-name-3.txt', text: 'A third synthetic body.' },
+  ]), { fetchContent: true, placement: FIXTURE_PLACEMENT }, { embed: false });
+  expect(await f.pass()).toMatchObject({ chunks_embedded: 1, rested: 0 });
 });

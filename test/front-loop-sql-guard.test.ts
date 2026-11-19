@@ -17,7 +17,7 @@ import { installMainThreadSqlTrace } from '../src/workers/connector-store/main-t
 const ROOT = join(import.meta.dir, '..');
 /** Sites still allowed per family. Lower a number when you delete lines; never raise one. */
 // Seeded 16 Nov 2026 from three measured runs (an installed store, a 40k gate store and a fresh install).
-const CEILINGS = { A: 17, B: 40, C: 16 } as const;
+const CEILINGS = { A: 17, B: 39, C: 16 } as const;
 
 const roots: string[] = [];
 afterEach(() => {

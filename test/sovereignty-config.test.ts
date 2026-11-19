@@ -91,6 +91,23 @@ const INTERNAL = 'internal.test.notes';
 const SECURE = 'secure_local.test.files';
 
 describe('sovereignty config engine', () => {
+  test('reads the served context for a local profile and rejects invalid or cloud values', () => {
+    const config = loadSovereigntyPreset('local-first');
+    const local = config.modelProfiles['local-source-answer']!;
+    local.contextTokens = 32_768;
+    expect(loadSovereigntyEngine({ inlineConfig: config }).config.modelProfiles['local-source-answer']?.contextTokens)
+      .toBe(32_768);
+
+    for (const contextTokens of [0, -1, 1.5, 2 ** 53, '32768', null, true]) {
+      const invalid = { ...config, modelProfiles: { ...config.modelProfiles, 'local-source-answer': { ...local, contextTokens } } };
+      expect(() => loadSovereigntyEngine({ inlineConfig: invalid }))
+        .toThrow('local-source-answer.contextTokens must be a positive safe integer in tokens.');
+    }
+    config.modelProfiles['venice-private']!.contextTokens = 32_768;
+    expect(() => loadSovereigntyEngine({ inlineConfig: config }))
+      .toThrow('contextTokens is only valid on a local OpenAI-compatible profile.');
+  });
+
   test('an explicitly requested missing policy file fails closed before the env bridge', () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-sovereignty-missing-policy-'));
     try {

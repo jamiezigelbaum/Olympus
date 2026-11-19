@@ -54,6 +54,7 @@ import { DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY } fr
 import { CHATGPT_MARKDOWN_CSS, chatgptMarkdownRender } from './markdown.ts';
 import { PRIVATE_ANSWER_META_KEY } from '../../chatgpt/private-answer-contract.ts';
 import { CHATGPT_DASHBOARD_DARK, CHATGPT_DASHBOARD_LIGHT } from './page.ts';
+import { startupWaitingLine } from '../../../core/startup-progress.ts';
 
 export interface ChatGptPrivateAnswerConfig {
   relayOrigin: string;
@@ -114,7 +115,7 @@ export const CHATGPT_PRIVATE_ANSWER_JOB_ID = /^oly2p\.[a-z2-7]{32}\.[A-Za-z0-9_-
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type Any = any;
 
-export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig): void {
+export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig, startupLine: typeof startupWaitingLine): void {
   const doc = document;
   const root = doc.getElementById('panel') as HTMLElement;
   const T = config.copy;
@@ -126,6 +127,7 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
   // idle | working | slow | revealed | hidden | error. A ready job starts
   // collecting as soon as it arrives; idle lasts only until then.
   let phase = 'idle';
+  let startupLineText = '';
   let errorText = '';
   let canRetry = false;
   // The decrypted answer, in memory only, for this job, until the frame unloads.
@@ -570,6 +572,7 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
     }
     const mine = ++run;
     phase = 'working';
+    startupLineText = '';
     errorText = '';
     canRetry = false;
     focusAfter = byUser ? 'status' : '';
@@ -666,7 +669,14 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
         if (!keepWaiting) return fail(T.generic, false, byUser);
         const header = Number(response.headers && response.headers.get ? response.headers.get('retry-after') : NaN);
         const seconds = isFinite(header) && header > 0 ? Math.min(30, header) : 2;
-        if (code === 202) deadline = Date.now() + silenceMs;
+        if (code === 202) {
+          deadline = Date.now() + silenceMs;
+          const nextLine = startupLine(status === 'pending' ? body.startup : undefined);
+          if (nextLine !== startupLineText) {
+            startupLineText = nextLine;
+            render();
+          }
+        }
         if (Date.now() + seconds * config.secondMs > deadline) return slow(byUser);
         await wait(seconds * config.secondMs);
       }
@@ -901,6 +911,7 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
     line.className = 'sub working';
     line.appendChild(el('span', 'spinner'));
     line.appendChild(doc.createTextNode(info && info.full ? T.preparingFull : T.preparing));
+    if (startupLineText) view.text.appendChild(el('p', 'sub', startupLineText));
     return view.card;
   }
 
@@ -1154,7 +1165,7 @@ export function chatgptPrivateAnswerPageHtml(options: ChatGptPrivateAnswerPageOp
     '</head>',
     '<body>',
     '<div id="panel"></div>',
-    `<script>window.olympusMarkdown=(${chatgptMarkdownRender.toString()});(${chatgptPrivateAnswerProgram.toString()})(${scriptJson(config)});</script>`,
+    `<script>window.olympusMarkdown=(${chatgptMarkdownRender.toString()});(${chatgptPrivateAnswerProgram.toString()})(${scriptJson(config)}, ${startupWaitingLine.toString()});</script>`,
     '</body>',
     '</html>',
     '',

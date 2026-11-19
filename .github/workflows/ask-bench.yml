@@ -1,0 +1,90 @@
+name: Ask benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      scale:
+        description: Fraction of the full synthetic population
+        type: string
+        default: '1.0'
+      memory_max:
+        description: 'MemoryMax (bytes or K/M/G suffix). Blank uses 0.5 × store bytes.'
+        type: string
+        default: ''
+      memory_swap_max:
+        description: 'MemorySwapMax (bytes or K/M/G suffix). Blank uses 0.25 × MemoryMax.'
+        type: string
+        default: ''
+      seconds_idle:
+        description: Seconds to let the scheduler idle after both engines are ready
+        type: number
+        default: 300
+      extra_env:
+        description: 'Space-separated engine KEY=VALUE pairs'
+        type: string
+        default: ''
+      ref:
+        description: Branch, tag, or commit to benchmark
+        type: string
+        default: main
+
+permissions:
+  contents: read
+
+jobs:
+  ask-bench:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 80
+    env:
+      SCALE: ${{ inputs.scale }}
+      MEMORY_MAX: ${{ inputs.memory_max }}
+      MEMORY_SWAP_MAX: ${{ inputs.memory_swap_max }}
+      SECONDS_IDLE: ${{ inputs.seconds_idle }}
+      EXTRA_ENV: ${{ inputs.extra_env }}
+      BENCH_DIR: /tmp/olympus-ask-bench
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref || github.sha }}
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.4
+      - run: bun install --frozen-lockfile
+      - name: Build synthetic stores
+        run: |
+          df -h /tmp
+          bun scripts/ask-bench.ts build --dir "$BENCH_DIR" --scale "$SCALE"
+      - name: Check runner swap
+        run: |
+          if [ "$(wc -l < /proc/swaps)" -eq 1 ] && [ "$MEMORY_SWAP_MAX" != 0 ]; then
+            swap_file=/tmp/olympus-ask-bench.swap
+            sudo install -m 600 /dev/null "$swap_file"
+            sudo fallocate -l 2G "$swap_file"
+            sudo mkswap "$swap_file"
+            sudo swapon "$swap_file"
+          fi
+          cat /proc/swaps
+      - name: Time Ask under the memory cap
+        run: |
+          args=(--dir "$BENCH_DIR" --scope system --seconds-idle "$SECONDS_IDLE" --extra-env "$EXTRA_ENV")
+          if [ -n "$MEMORY_MAX" ]; then args+=(--memory-max "$MEMORY_MAX"); fi
+          if [ -n "$MEMORY_SWAP_MAX" ]; then args+=(--memory-swap-max "$MEMORY_SWAP_MAX"); fi
+          bun scripts/ask-bench.ts run "${args[@]}"
+      - name: Publish job summary
+        if: always()
+        run: |
+          if [ -f "$BENCH_DIR/ask-bench.md" ]; then
+            cat "$BENCH_DIR/ask-bench.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'Ask benchmark ended before it could write a run summary. See the build and run logs.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload measurements
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ask-bench-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.BENCH_DIR }}/ask-bench.json
+            ${{ env.BENCH_DIR }}/ask-bench.md
+            ${{ env.BENCH_DIR }}/build.json

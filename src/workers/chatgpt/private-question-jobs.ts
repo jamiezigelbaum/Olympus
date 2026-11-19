@@ -26,6 +26,12 @@ import {
   type SealedPrivateAnswer,
 } from './private-answer-crypto.ts';
 import type { ClaimResponse } from './private-answer-jobs.ts';
+import { startupProgress } from '../../core/startup-progress.ts';
+
+function answeringBody(): ClaimResponse['body'] {
+  const startup = startupProgress();
+  return { status: 'pending', ...(startup ? { startup } : {}) };
+}
 import { chatgptZkapiRefusal, chatgptZkapiRouteLabel } from './zkapi-copy.ts';
 import {
   PRIVATE_QUESTION_JOB_TTL_MS,
@@ -214,7 +220,7 @@ export class PrivateQuestionJobs {
     job.panelKey = panel.key;
     job.state = 'working';
     void this.run(job, plaintext);
-    return { status: 202, body: { status: 'pending' }, retryAfterSeconds: PENDING_RETRY_SECONDS };
+    return { status: 202, body: answeringBody(), retryAfterSeconds: PENDING_RETRY_SECONDS };
   }
 
   /** The panel's collection: pending while the ask runs, then the sealed outcome. */
@@ -265,7 +271,7 @@ export class PrivateQuestionJobs {
 
   private outcome(job: Job): ClaimResponse {
     if (job.state === 'open') return { status: 202, body: { status: 'pending' }, retryAfterSeconds: WAITING_RETRY_SECONDS };
-    if (job.state === 'working' || !job.sealed) return { status: 202, body: { status: 'pending' }, retryAfterSeconds: PENDING_RETRY_SECONDS };
+    if (job.state === 'working' || !job.sealed) return { status: 202, body: answeringBody(), retryAfterSeconds: PENDING_RETRY_SECONDS };
     return { status: 200, body: { status: 'ready', v: 1, ...job.sealed } };
   }
 

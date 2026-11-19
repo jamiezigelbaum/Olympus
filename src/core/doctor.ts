@@ -1032,6 +1032,9 @@ async function emailWorkerCheck(deps: DoctorDeps): Promise<DoctorCheck> {
   }
 
   const health = asRecord(await response.json());
+  const notices = Array.isArray(health.degraded_conditions)
+    ? health.degraded_conditions.filter((notice): notice is string => typeof notice === 'string').join(' ') : '';
+  const noticeDetail = notices ? ` ${notices}` : '';
   const bridge = asRecord(health.desktop_bridge);
   if ((deps.platform ?? process.platform) === 'linux' && ['port_in_use', 'unavailable'].includes(String(bridge.state))) {
     return { name, ok: false, detail: `The owner socket is healthy, but the desktop listener is ${bridge.state}.`,
@@ -1042,7 +1045,7 @@ async function emailWorkerCheck(deps: DoctorDeps): Promise<DoctorCheck> {
     return {
       name,
       ok: false,
-      detail: `Email worker is running in degraded mode: ${degradedCredentials.join('; ')}.`,
+      detail: `Email worker is running in degraded mode: ${degradedCredentials.join('; ')}.${noticeDetail}`,
       hint: 'Fix the listed credential, then restart the Olympus worker or POST /v1/source/credentials/recheck.',
     };
   }
@@ -1059,7 +1062,7 @@ async function emailWorkerCheck(deps: DoctorDeps): Promise<DoctorCheck> {
   return {
     name,
     ok: true,
-    detail: `Source worker at ${address} answered /health; no worker health or credential failures reported.${(deps.platform ?? process.platform) === 'linux' && bridge.listener_owner === 'engine-host' && ['listening', 'restarting'].includes(String(bridge.state)) ? ' The engine host holds the desktop port across worker reloads; releasing it starts a fresh origin.' : ''}`,
+    detail: `Source worker at ${address} answered /health${notices ? `.${noticeDetail}` : '; no worker health or credential failures reported.'}${(deps.platform ?? process.platform) === 'linux' && bridge.listener_owner === 'engine-host' && ['listening', 'restarting'].includes(String(bridge.state)) ? ' The engine host holds the desktop port across worker reloads; releasing it starts a fresh origin.' : ''}`,
   };
 }
 

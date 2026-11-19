@@ -10,6 +10,7 @@ import { chmodSync, mkdirSync, readFileSync, mkdtempSync, rmSync, writeFileSync 
 import { writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
+import { memoryPayloadCounts, withMemoryPayload } from '../src/core/memory-counters.ts';
 import {
   encodeWav16Mono,
   parseWav16Mono,
@@ -308,10 +309,15 @@ describe('the built-in transcriber with a fake model', () => {
     const server = fakeServer();
     const bodies: Array<Record<string, unknown>> = [];
     let chunkNumber = 0;
+    let responseBytes = 0;
     const fetchImpl = (async (_url: RequestInfo | URL, init?: RequestInit) => {
-      bodies.push(JSON.parse(String(init?.body)));
+      const json = String(init?.body);
+      expect(memoryPayloadCounts()).toMatchObject({ extract_payloads: 1, extract_payload_bytes: Buffer.byteLength(json) + responseBytes });
+      bodies.push(JSON.parse(json));
       chunkNumber += 1;
-      return Response.json({ choices: [{ message: { content: `language English<asr_text>part ${chunkNumber}.` } }] });
+      const response = Response.json({ choices: [{ message: { content: `language English<asr_text>part ${chunkNumber}.` } }] });
+      responseBytes += Number(response.headers.get('content-length'));
+      return response;
     }) as typeof fetch;
     // 25 s speech, 1 s silence, 31 s of silence, 10 s speech: the middle chunk is silent.
     const samples = syntheticAudio([{ speech: 25, silence: 1 }, { silence: 31 }, { speech: 10 }]);
@@ -330,7 +336,8 @@ describe('the built-in transcriber with a fake model', () => {
     await installGate;
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(engine.prepare()).toBe('ready');
-    const result = await engine.transcribe({ inputPath: '/audio/note.m4a' });
+    const result = await withMemoryPayload('extract', () => engine.transcribe({ inputPath: '/audio/note.m4a' }));
+    expect(memoryPayloadCounts()).toMatchObject({ extract_payloads: 0, extract_payload_bytes: 0 });
     expect(result).toEqual({ text: 'part 1. part 2.', language: 'English' });
     expect(bodies.length).toBe(2);
     // Audio only, deterministic: no text prompt, temperature 0.

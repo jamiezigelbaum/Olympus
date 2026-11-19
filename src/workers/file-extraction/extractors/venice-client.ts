@@ -31,6 +31,7 @@ import type {
 } from '../types.ts';
 import { IMAGE_MIME_TYPES, normalizeExtractedText } from './bounded-text.ts';
 import { idleClock, readChatCompletion } from './model-stream.ts';
+import { memoryPayloadJson } from '../../../core/memory-counters.ts';
 import {
   classifyRemoteVlmEndpointError,
   requireApprovedRemoteExtractionBaseUrl,
@@ -121,7 +122,7 @@ export class VeniceVlmClient implements VlmClient {
           Authorization: `Bearer ${this.apiKey}`,
         },
         signal: timeout.signal,
-        body: JSON.stringify({
+        body: memoryPayloadJson({
           model: this.model,
           temperature: 0,
           // Streamed so the clock counts only silence, never a long answer still arriving.

@@ -316,11 +316,66 @@ the cause).
 - **Stores the front keeps writing.** Its own files stay its own: remote
   connections, waiting private questions, answer jobs, dashboard
   sessions, settings files. Nothing else writes them.
-- **Restart.** The host restarts the background on exit and, with the
-  switch on, when its RSS passes a threshold between batches (#957). An
-  interrupted pass is not a failure (#803, PR #1096). The owner-busy
-  state for the shared model is re-sent by the front when the background
-  comes back.
+- **Restart.** Once a minute the background compares its memory floor
+  with `worker.engineSplitRssRestartMb` (3072 MB by default, 0 disables
+  the restart). The floor is the minimum of the latest
+  60 five-second samples of anonymous RSS on Linux, or total RSS when
+  anonymous RSS is unavailable. A full window must be collected after
+  startup and the floor must exceed the threshold. The background then
+  waits for current judge and scheduler work to finish, up to ten minutes
+  of checks with the floor still above the threshold. It uses the clean
+  reload and exits with code 75 for the host to restart it (#957). The
+  scheduler records any pass it cuts short as interrupted (#803, PR #1096).
+  The front re-sends the owner-busy state for the shared model when the
+  background comes back. Both roles sample every five seconds even when
+  restarting is disabled and emit an ISO-timestamped `[olympus] memory`
+  line every five minutes. The background also emits it before an RSS
+  restart. Fields include
+  role/pid/uptime_s, rss_total_mb, Linux rss_anon_mb/rss_file_mb/swap_mb, and
+  activity at emission. Activity is a comma-separated list of active labels
+  (judging, embedding, recount, import, extract, visibility_rebuild_bootstrap,
+  visibility_rebuild_incremental, people_refresh), or idle. The largest
+  anonymous sample since the previous line supplies peak_anon_mb, peak_at
+  (ISO time), peak_activity and peak_heap_size_mb. Peak ties keep the first
+  sample. The sliding minimum is logged as floor_anon_mb or floor_rss_mb
+  when the window includes total RSS fallback. Each excursion above the
+  threshold seen by the five-second sampler contributes to
+  bursts_over_threshold when the window includes a reading at or below the
+  threshold. A window with bursts emits one timestamped
+  `[olympus] memory restart not taken: burst` just before its summary, with
+  the largest sample, the floor and the threshold in MB.
+  The lightweight Bun process.memoryUsage counters supply heap_size_mb,
+  heap_capacity_mb and extra_memory_mb at emission, peak and floor. Extra
+  memory can overlap heap size. Bun 1.4.4 reports arrayBuffers as zero even
+  for a live ArrayBuffer, so the separate field is emitted only when the
+  runtime reports bytes.
+  The background requests samples from idle read-pool and built-in model
+  workers and uses their latest replies. The heap report includes coverage
+  and age, since a busy worker may have older data. SQLite memory use and
+  its process high-water mark are reported where the native SQLite memstat
+  module is available. Stock Bun 1.4.4 lacks it. The fallback reports the
+  combined suggested page-cache budget of sampled read-pool and connector
+  store connections, plus logical temp-database pages in connector stores.
+  Coverage fields show how many connections contributed. Cache budgets and
+  temp pages describe capacity and file layout. SQLite heap allocations,
+  including live pager pages, statements and sorters, require memstat.
+  Payload fields count active judge calls, document embedding batches, and
+  extraction jobs and their observed bytes. They account for logical UTF-8
+  text, request JSON, response chunks or declared response lengths, and
+  known extraction input buffers and child output. These sizes can cover
+  multiple representations over the life of a call or job. Unreported
+  native buffers and allocation overhead remain outside these counters.
+  The same fields are preserved with peak_ and floor_ prefixes.
+  Maintained process-local counts size connector_stores,
+  read_workers/read_connections (retiring workers included until close,
+  with one shared connection counter), tier_visibility_items
+  (installed memo's item copies), hidden_child_items (installed memo's distinct
+  child identities), people/identities and embedding_queue; transient build/result copies
+  are excluded. The front adds its local visibility and people labels to
+  the primary background task from its already-polled status snapshot.
+  The existing `[engine-split] rss_restart rss_mb=...` prefix and fields remain,
+  followed by over_threshold_s, at (ISO time) and the identical diagnostic
+  fields, so a restart records its state.
 - **The front restarts behind a socket that stays (14 Nov 2026).** A
   model, judge or policy change restarts both processes: the front builds
   its answer routing, keys and policy at boot, and serving on the old
@@ -382,6 +437,37 @@ the cause).
     at boot and 60 s after ready, both processes stopped and continued
     (standing in for sleep), and a heartbeat paused through a boot step
     (`test/worker-service-split.test.ts`).
+
+### Attribute a loop hold to main-thread activity
+
+On Linux, run `bun scripts/front-thread-timeline.ts --pid PID --out FILE`
+as the target process's user. Use the PID of the front or background you
+want to measure. Then summarize that capture against a timestamped engine log.
+
+```sh
+bun scripts/front-thread-timeline.ts --summarize FILE --freezes LOG --role background
+```
+
+The default role is `front`. `--role any` accepts all logged roles and
+includes the matched role on each row. Choose the role that matches the
+captured PID when the log includes multiple processes.
+
+Each window ends at the log timestamp. A `freeze frames` report uses the
+larger of 30 s and its `max_ms`, the longest individual freeze in the report.
+A heartbeat's `loop held for N s and still held` line uses its reported
+duration, which is rounded to whole seconds by the heartbeat. The background
+status snapshot supplies a millisecond reading via `written_at` and
+`loop_held_ms`, which can be passed as a marker.
+
+Use `--marker END_ISO,MS` for a span you know, with the end timestamp and
+the duration in milliseconds. Repeat the flag for multiple spans. Markers
+work on their own or with `--freezes LOG`. `--window-ms N` overrides every
+window length, including marker lengths. Each JSON row reports `window_ms`
+and `covered_ms`, the portion supported by the capture's summary intervals.
+
+```sh
+bun scripts/front-thread-timeline.ts --summarize FILE --marker 2026-11-18T12:04:10.000Z,250000
+```
 
 The writes the front still needs are listed in the next section; each is
 either kept front-owned or becomes one command.

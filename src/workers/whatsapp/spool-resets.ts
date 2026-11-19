@@ -21,6 +21,7 @@
 import { Database } from 'bun:sqlite';
 import { chmodSync } from 'node:fs';
 import { join } from 'node:path';
+import { closeSqliteStore } from '../../core/sqlite-store.ts';
 
 export const WHATSAPP_SPOOL_RESET_FILE = 'spool-reset.sqlite';
 
@@ -44,13 +45,13 @@ export class WhatsAppSpoolResets {
       `);
       return new WhatsAppSpoolResets(db);
     } catch (error) {
-      try { db?.close(); } catch { /* not open */ }
+      try { if (db) closeSqliteStore(db, { checkpoint: false }); } catch { /* not open */ }
       throw new Error(`The WhatsApp spool's reset counter cannot be opened: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
   close(): void {
-    try { this.db.close(); } catch { /* already closed */ }
+    try { closeSqliteStore(this.db, { checkpoint: false }); } catch { /* already closed */ }
   }
 
   /** The current count: what a cursor handed out now carries. */

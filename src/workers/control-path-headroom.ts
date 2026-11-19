@@ -1,3 +1,4 @@
+import { appendFile } from 'node:fs/promises';
 /**
  * Keeps the worker's control path (health, the dashboard, approvals, pairing)
  * answering while sources import.
@@ -284,6 +285,14 @@ export function freezeLogLine(
   return `${at} [olympus:control-path] freeze frames role=${role} count=${freezes.count} total_ms=${freezes.totalMs} max_ms=${freezes.maxMs} site=${JSON.stringify(site)} leaf=${JSON.stringify(freezes.self[0]?.[0] ?? 'no sample')} frames=${JSON.stringify(frames)}`;
 }
 
+/** Keep each diagnostic stream in the order its entries were collected. */
+export function serializeDiagnosticWrites(onError: (error: unknown) => void) {
+  let tail = Promise.resolve();
+  return (write: () => Promise<void>): void => {
+    tail = tail.then(write).catch(onError);
+  };
+}
+
 /**
  * When OLYMPUS_CPU_SAMPLE_LOG names a file, samples the worker's JavaScript
  * thread and appends a summary every 30 s. `bun --cpu-prof` writes only at a
@@ -294,9 +303,9 @@ export function freezeLogLine(
 export async function startCpuSampleLog(env: Record<string, string | undefined> = process.env): Promise<(() => void) | undefined> {
   const configured = env[CPU_SAMPLE_LOG_ENV]?.trim();
   if (configured === 'off') return undefined;
-  // Without a file, the sampler still runs and writes one line to the engine's
-  // own log for each interval that held a freeze: where a freeze on a real
-  // install was is then in its log, not only in a test run's.
+  // The sampler always runs and writes one line to the engine's own log for
+  // each interval that held a freeze, with or without a file: where a freeze
+  // on a real install was is then in its log, not only in a test run's.
   const path = configured || undefined;
   // Front and background write one file: each line names its process.
   const role = env.OLYMPUS_WORKER_ENGINE_ROLE?.trim() || 'single';
@@ -306,6 +315,10 @@ export async function startCpuSampleLog(env: Record<string, string | undefined> 
   };
   if (!jsc.startSamplingProfiler || !jsc.samplingProfilerStackTraces) return undefined;
   const { appendFileSync } = await import('node:fs');
+  const queue = role === 'front' && path ? serializeDiagnosticWrites(reportWriteFailure) : undefined;
+  function reportWriteFailure(error: unknown): void {
+    console.error(`[olympus:control-path] cpu sample log failed: ${error instanceof Error ? error.name : 'error'}`);
+  }
   jsc.startSamplingProfiler();
   // A tick that arrives late by more than CPU_SAMPLE_STALL_MS marks a freeze:
   // the samples inside it are what held the thread, summarized apart from the rest.
@@ -346,10 +359,16 @@ export async function startCpuSampleLog(env: Record<string, string | undefined> 
         maxMs: Math.round(window.reduce((max, stall) => Math.max(max, stall.endMs - stall.startMs), 0)),
         ...summarizeCpuSamples(stalled, CPU_SAMPLE_TOP, sampled.sources ?? []),
       };
-      if (path) appendFileSync(path, `${JSON.stringify({ at: new Date(now).toISOString(), pid: process.pid, role, windowMs: now - last, headroom: controlPathHeadroom.snapshot(), ...summary, freezes })}\n`, { mode: 0o600 });
-      else if (freezes.count > 0) console.error(freezeLogLine(new Date(now).toISOString(), role, freezes));
+      if (path) {
+        const line = `${JSON.stringify({ at: new Date(now).toISOString(), pid: process.pid, role, windowMs: now - last, headroom: controlPathHeadroom.snapshot(), ...summary, freezes })}\n`;
+        if (queue) queue(() => appendFile(path, line, { mode: 0o600 }));
+        else appendFileSync(path, line, { mode: 0o600 });
+      }
+      // The freeze line goes to the engine's log whether or not a sample file
+      // is set: on the owner's box the file was set, and the log named no frame.
+      if (freezes.count > 0) console.error(freezeLogLine(new Date(now).toISOString(), role, freezes));
     } catch (error) {
-      console.error(`[olympus:control-path] cpu sample log failed: ${error instanceof Error ? error.name : 'error'}`);
+      reportWriteFailure(error);
     }
     last = now;
   };

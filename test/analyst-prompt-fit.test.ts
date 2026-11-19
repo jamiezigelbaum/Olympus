@@ -6,8 +6,9 @@ import { describe, expect, test } from 'bun:test';
 import { analystEvidenceFormat, analystPromptBytes, createAnalyst, withPromptBudget, type AnalystModelRequest } from '../src/core/analyst.ts';
 import { withBuiltInFallback } from '../src/core/analyst-built-in.ts';
 import { defaultConfig } from '../src/core/config.ts';
+import { promptFitCoverageGap } from '../src/core/source-index/partial-search.ts';
 import { createAnalystForSovereigntyProfile } from '../src/workers/engine/runtime/private-analysts.ts';
-import { createAnalystSourceIndexAnswerHandler, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES, fitPackToPromptBytes } from '../src/workers/source-index/analyst-answer.ts';
+import { createAnalystSourceIndexAnswerHandler, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES, fitPackToPromptBytes, releaseAnalystAnswer, withUnfittedCoverage } from '../src/workers/source-index/analyst-answer.ts';
 import { buildSourceIndexCorpusRegistry, defineSourceIndexCorpus } from '../src/core/source-index/corpus.ts';
 import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
 import { analystPromptFixture } from './helpers/analyst-prompt-fixture.ts';
@@ -20,7 +21,7 @@ const bytes = (text: string) => new TextEncoder().encode(text).length;
 
 describe('Ask local compact evidence', () => {
   for (const [localOnly, evidenceFormat] of [[true, 'compact'], [false, 'full']] as const) {
-    test(`fitted ${localOnly ? 'local' : 'cloud'} Coverage keeps only sent seats' gaps without changing seats`, async () => {
+    test(`fitted ${localOnly ? 'local' : 'cloud'} Coverage uses sent seats' gaps to select at least as many seats`, async () => {
       const { pack, corpusIds } = analystPromptFixture();
       const gaps = pack.candidates.map((candidate, index) =>
         `${candidate.provenance.citation!.title} (${corpusIds[index]}) content was truncated for length.`);
@@ -34,17 +35,18 @@ describe('Ask local compact evidence', () => {
       const fitted = fitPackToPromptBytes(pack, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES, corpora, options, 2, evidenceFormat,
         new Map(pack.candidates.map((candidate, index) => [candidate.provenance, [index + 1]])));
       expect(fitted.candidates.length).toBeLessThan(24);
-      expect(fitted.candidates.map((candidate) => candidate.provenance)).toEqual(baseline.candidates.map((candidate) => candidate.provenance));
+      expect(fitted.candidates.length).toBeGreaterThanOrEqual(baseline.candidates.length);
+      expect(fitted.candidates.slice(0, baseline.candidates.length).map((candidate) => candidate.provenance))
+        .toEqual(baseline.candidates.map((candidate) => candidate.provenance));
       const keptIndexes = fitted.candidates.map((candidate) => pack.candidates.findIndex((original) => original.provenance === candidate.provenance));
       const dropped = 24 - keptIndexes.length;
       const expectedGaps = [corpusGap, ...keptIndexes.map((index) => gaps[index]!),
         `${dropped} more matching items were not sent; ${dropped} of them could not be read in full.`];
       expect(fitted.coverage.extractionGaps).toEqual(expectedGaps);
-      expect(fitted.coverage.matchCounts).toEqual(baseline.coverage.matchCounts);
-      for (let index = 0; index < fitted.candidates.length; index += 1) {
-        expect(bytes(fitted.candidates[index]!.chunks.join(''))).toBeGreaterThanOrEqual(bytes(baseline.candidates[index]!.chunks.join('')));
-      }
-      expect(bytes(fitted.candidates[0]!.chunks.join(''))).toBeGreaterThan(bytes(baseline.candidates[0]!.chunks.join('')));
+      expect(fitted.coverage.matchCounts).toEqual(pack.coverage.matchCounts!.map(count => ({
+        ...count, inEvidence: keptIndexes.filter(index => corpusIds[index] === count.corpusId).length,
+      })));
+      for (const candidate of fitted.candidates) expect(bytes(candidate.chunks.join(''))).toBeGreaterThanOrEqual(600);
       expect(analystPromptBytes(fitted, options, evidenceFormat)).toBeLessThanOrEqual(DEFAULT_LOCAL_ANALYST_PROMPT_BYTES);
       const calls: AnalystModelRequest[] = [];
       await createAnalyst({ complete: async (request) => { calls.push(request); return { text: completion, modelId: 'fixture' }; } },
@@ -53,6 +55,69 @@ describe('Ask local compact evidence', () => {
       expect(pack).toEqual(before);
     });
   }
+
+  for (const budget of [13_500, 27_000]) {
+    for (const [noteBytes, oldSeats] of [[0, budget === 13_500 ? 7 : 16], [125, budget === 13_500 ? 1 : 10], [222, budget === 13_500 ? 1 : 5]] as const) {
+      test(`24 Private seats with ${72 * noteBytes} item-gap bytes at ${budget} prompt bytes`, () => {
+        const { pack, corpusIds } = analystPromptFixture();
+        const options = { localOnly: true };
+        const corpora = new Map(pack.candidates.map((candidate, index) => [candidate, corpusIds[index]!]));
+        const withoutItemGaps = fitPackToPromptBytes(pack, budget, corpora, options, 2);
+        const extractionGaps = [...pack.coverage.extractionGaps];
+        const owners = new Map(pack.candidates.map((candidate, seat) => [candidate.provenance, noteBytes === 0 ? [] : [0, 1, 2].map(part => {
+          const index = extractionGaps.length;
+          extractionGaps.push(`Item ${seat} part ${part} could not be read. `.padEnd(noteBytes, 'x'));
+          return index;
+        })]));
+        pack.coverage = { ...pack.coverage, extractionGaps };
+        const before = structuredClone(pack);
+        const full = fitPackToPromptBytes(pack, budget, corpora, options, 2, 'full', owners);
+        for (const format of ['full', 'compact'] as const) {
+          const fitted = format === 'full' ? full : fitPackToPromptBytes(pack, budget, corpora, options, 2, format, owners);
+          const kept = fitted.candidates.length;
+          expect(kept).toBeGreaterThanOrEqual(oldSeats);
+          expect(kept).toBeGreaterThanOrEqual(withoutItemGaps.candidates.length - 1);
+          expect(fitted.candidates.map(candidate => candidate.provenance)).toEqual(withoutItemGaps.candidates.slice(0, kept).map(candidate => candidate.provenance));
+          expect(fitted.candidates.map(candidate => candidate.provenance)).toEqual(full.candidates.map(candidate => candidate.provenance));
+          expect(analystPromptBytes(fitted, options, format)).toBeLessThanOrEqual(budget);
+          if (noteBytes > 0) {
+            expect(fitted.coverage.extractionGaps).toEqual([
+              extractionGaps[0]!,
+              ...fitted.candidates.map((_, index) => `Item [${index + 1}]: 3 parts of this item could not be read.`),
+              `${24 - kept} more matching items were not sent; ${24 - kept} of them could not be read in full.`,
+            ]);
+            const restored = withUnfittedCoverage({ answer: '', citations: [], unanswered: fitted.coverage.extractionGaps }, pack, fitted);
+            expect(restored.unanswered).toEqual(extractionGaps);
+          }
+        }
+        expect(pack).toEqual(before);
+      });
+    }
+  }
+
+  test('large UTF-8 notes on dropped seats cost only one count line', () => {
+    const { pack, corpusIds } = analystPromptFixture();
+    const options = { localOnly: true };
+    const budget = 13_500;
+    const corpora = new Map(pack.candidates.map((candidate, index) => [candidate, corpusIds[index]!]));
+    const baseline = fitPackToPromptBytes(pack, budget, corpora, options, 2);
+    const kept = new Set(baseline.candidates.map(candidate => candidate.provenance));
+    const gaps = [...pack.coverage.extractionGaps];
+    const owners = new Map(pack.candidates.filter(candidate => !kept.has(candidate.provenance)).map(candidate => {
+      const index = gaps.length;
+      gaps.push('未読'.repeat(1_000));
+      return [candidate.provenance, [index]] as const;
+    }));
+    pack.coverage = { ...pack.coverage, extractionGaps: gaps };
+    for (const format of ['full', 'compact'] as const) {
+      const fitted = fitPackToPromptBytes(pack, budget, corpora, options, 2, format, owners);
+      expect(fitted.candidates.map(candidate => candidate.provenance)).toEqual([...kept]);
+      expect(fitted.coverage.extractionGaps).toEqual([
+        gaps[0]!, '17 more matching items were not sent; 17 of them could not be read in full.',
+      ]);
+      expect(analystPromptBytes(fitted, options, format)).toBeLessThanOrEqual(budget);
+    }
+  });
 
   test('a count line longer than the dropped gaps it replaces never pushes the fit over budget', () => {
     for (const evidenceFormat of ['full', 'compact'] as const) {
@@ -79,6 +144,23 @@ describe('Ask local compact evidence', () => {
     expect(fitted).toEqual(before);
   });
 
+  test('when not even one item\'s labels fit, the smallest pack is sent rather than none or an error', () => {
+    const { pack } = analystPromptFixture();
+    const options = { localOnly: true };
+    const budget = 13_500;
+    const original = pack.candidates[0]!;
+    pack.candidates = [{
+      ...original, provenance: { ...original.provenance, citation: { ...original.provenance.citation!, title: '文'.repeat(budget) } },
+    }];
+    for (const format of ['full', 'compact'] as const) {
+      const fitted = fitPackToPromptBytes(pack, budget, new Map(), options, 0, format, new Map());
+      expect(fitted.candidates).toHaveLength(1);
+      expect(fitted.candidates[0]!.chunks).toEqual([]);
+      const oversized = { ...pack, coverage: { ...pack.coverage, extractionGaps: ['文'.repeat(budget)] } };
+      expect(fitPackToPromptBytes(oversized, budget, new Map(), options, 0, format, new Map()).candidates).toHaveLength(1);
+    }
+  });
+
   test("the user's answer still reports every unread item, including those the fit did not send", async () => {
     for (const cloud of [false, true]) {
       const result = await exerciseAsk(createAnalyst({ complete: async () => ({ text: completion, modelId: 'fixture' }) },
@@ -90,18 +172,36 @@ describe('Ask local compact evidence', () => {
   test('Ask threads builder gap ownership into both model legs', async () => {
     for (const cloud of [false, true]) {
       const calls: AnalystModelRequest[] = [];
-      await exerciseAsk(createAnalyst({ complete: async (request) => {
+      const trace = createSourceAnswerTrace();
+      const result = await runWithSourceAnswerTrace(trace, () => exerciseAsk(createAnalyst({ complete: async (request) => {
         calls.push(request);
         return { text: completion, modelId: 'fixture' };
-      } }, { evidenceFormat: cloud ? 'full' : 'compact' }), cloud, true);
+      } }, { evidenceFormat: cloud ? 'full' : 'compact' }), cloud, true));
       const prompt = calls[0]!.prompt;
       const seats = prompt.match(/^\[\d+\] /gm)!.length;
       expect(coverageLine(prompt).match(/content was truncated for length\./g)).toHaveLength(seats);
-      if (!cloud) expect(seats).toBeLessThan(24);
+      const fit = trace.evidenceSeats!.fits[0]!;
+      expect(fit).toMatchObject({
+        packCandidates: 24, keptCandidates: seats, packGapEntries: 24,
+        sentGapBytes: bytes(coverageLine(prompt).split('extraction gaps: ')[1]!),
+        promptBytes: bytes(`${calls[0]!.system}\n\n${prompt}`), evidenceFormat: cloud ? 'full' : 'compact',
+      });
+      expect(fit.overheadBytes).toBeGreaterThan(fit.sentGapBytes);
+      expect(fit.overheadBytes).toBeLessThan(fit.promptBytes);
+      if (cloud) {
+        expect(seats).toBe(24);
+        expect(fit.packGapBytes).toBe(fit.sentGapBytes);
+        expect(result.answer).not.toContain('did not fit in its prompt');
+      } else {
+        expect(seats).toBeLessThan(24);
+        expect(fit.packGapBytes).toBeGreaterThan(fit.sentGapBytes);
+        expect(result.answer.split(promptFitCoverageGap('local', seats, 24))).toHaveLength(2);
+        expect(prompt).not.toContain('did not fit in its prompt');
+      }
     }
   });
 
-  test('escaped passages cannot make the second fit drop a previously selected seat', () => {
+  test('escaped passages fit three usable seats after dropping unsent gaps', () => {
     const { pack, corpusIds } = analystPromptFixture();
     const chunks = [
       ['\\'.repeat(1_662), '"'.repeat(1_224), '\\'.repeat(1_465)],
@@ -111,15 +211,37 @@ describe('Ask local compact evidence', () => {
     pack.coverage = { ...pack.coverage, extractionGaps: ['corpus gap', ...pack.candidates.map((candidate, index) =>
       `${candidate.provenance.citation!.title} (${corpusIds[index]}) content was truncated for length.`)] };
     const corpora = new Map(pack.candidates.map((candidate, index) => [candidate, corpusIds[index]!]));
-    const baseline = fitPackToPromptBytes(pack, 10_144, corpora, { localOnly: true }, 2);
-    const fitted = fitPackToPromptBytes(pack, 10_144, corpora, { localOnly: true }, 2, 'full',
+    const budget = 10_000;
+    const baseline = fitPackToPromptBytes(pack, budget, corpora, { localOnly: true }, 2);
+    const fitted = fitPackToPromptBytes(pack, budget, corpora, { localOnly: true }, 2, 'full',
       new Map(pack.candidates.map((candidate, index) => [candidate.provenance, [index + 1]])));
     expect(baseline.candidates).toHaveLength(2);
-    expect(fitted.candidates.map((candidate) => candidate.provenance)).toEqual(baseline.candidates.map((candidate) => candidate.provenance));
+    expect(fitted.candidates.map((candidate) => candidate.provenance)).toEqual(pack.candidates.slice(0, 3).map((candidate) => candidate.provenance));
     for (const [index, candidate] of fitted.candidates.entries()) {
-      expect(bytes(candidate.chunks.join(''))).toBeGreaterThanOrEqual(bytes(baseline.candidates[index]!.chunks.join('')));
+      expect(bytes(candidate.chunks.join(''))).toBeGreaterThanOrEqual(Math.max(600, bytes(baseline.candidates[index]?.chunks.join('') ?? '')));
     }
-    expect(analystPromptBytes(fitted, { localOnly: true })).toBeLessThanOrEqual(10_144);
+    expect(analystPromptBytes(fitted, { localOnly: true })).toBeLessThanOrEqual(budget);
+  });
+
+  test('the fit note reaches released coverage without changing the release decision', () => {
+    const { pack, corpusIds } = analystPromptFixture();
+    const detail = {
+      pack, candidateCorpusIds: corpusIds, encounteredSecureLocal: true,
+      skippedCorpora: [], laneAudits: [], secureLaneAudits: [], degradations: [],
+    };
+    const result = { answer: 'No citable supporting evidence was found.', citations: [], unanswered: [] };
+    const baseline = releaseAnalystAnswer({ detail, result, releaseSecureContent: true });
+    expect(baseline.decision.decision).toBe('allow');
+    for (const lane of ['local', 'cloud'] as const) {
+      const sent = { ...pack, candidates: pack.candidates.slice(0, 7) };
+      const fittedResult = withUnfittedCoverage(result, pack, sent, lane);
+      const release = releaseAnalystAnswer({ detail, result: fittedResult, releaseSecureContent: true });
+      const note = promptFitCoverageGap(lane, 7, 24);
+      expect(fittedResult.unanswered).toEqual(result.unanswered);
+      expect(release.decision).toEqual(baseline.decision);
+      expect(release.unanswered).toEqual([...baseline.unanswered, note]);
+      expect(release.answer).toBe(`${baseline.answer}\n- ${note}`);
+    }
   });
 
   test('compact uses the full Coverage line and preserves instruction flags, in the audit too', async () => {

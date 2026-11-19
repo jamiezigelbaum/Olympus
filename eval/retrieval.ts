@@ -27,7 +27,12 @@ import type { AnalystQueryPlanner } from '../src/core/query-planner.ts';
 import type { EvidenceReranker } from '../src/core/evidence-reranker.ts';
 const DEFAULT_EMBEDDING_WARM_TIMEOUT_MS = 180_000;
 
-export interface EvalStoreSearch { corpusId: string; providerItemIds: readonly string[] }
+export interface EvalStoreSearch {
+  corpusId: string;
+  providerItemIds: readonly string[];
+  /** Each returned item's conversation, in the same order (null when it has none). */
+  providerConversationIds?: readonly (string | null)[];
+}
 export function resolveEvalDropboxScope(
   account: string | undefined,
   approvedScopeKey: string | undefined,
@@ -199,7 +204,7 @@ function createEvalRequestLanes(input: {
         // The adapter's own preparation hooks ride along unchanged.
         Object.assign(async (...args: Parameters<SourceIndexCorpusSearchAdapter>) => {
           const response = await adapter(...args);
-          onStoreSearch({ corpusId, providerItemIds: response.hits.map((hit) => hit.sourceItem.providerItemId) });
+          onStoreSearch({ corpusId, providerItemIds: response.hits.map((hit) => hit.sourceItem.providerItemId), providerConversationIds: response.hits.map((hit) => hit.sourceItem.providerConversationId ?? null) });
           return response;
         }, adapter) as SourceIndexCorpusSearchAdapter,
       ]] : [])),

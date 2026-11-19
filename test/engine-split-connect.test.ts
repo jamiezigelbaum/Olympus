@@ -138,10 +138,9 @@ describe('the engine split with a source connected after boot', () => {
     const { env, front, mountedCorpora, mounts } = await startSplit({ OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_ENABLED: 'true' });
     const secure = resolvedStorePath(WHATSAPP_PERSONAL_SOURCE_ID, 'secure_local', env);
     const written = new LocalConnectorStore({ dbPath: secure, corpusId: WHATSAPP_LIVE_CORPUS_ID, family: 'chat', trustDomain: 'secure_local' });
-    // The front tries the lane every two seconds while the store stands alone, and fails each time on the missing
-    // ledger; a front that kept the store from the first try never tried again.
-    const tries = () => front.output().split("the front could not open a source's stores yet").length - 1;
-    await waitFor(() => tries() >= 2 || undefined, { timeoutMs: 20_000, intervalMs: 100 });
+    // The first store changes the mount candidates. It must leave no partial
+    // mount behind, and the arrival of its sidecars must trigger another try.
+    await waitFor(() => front.output().includes("the front could not open a source's stores yet"), { timeoutMs: 20_000, intervalMs: 100 });
     expect(await mountedCorpora()).not.toContain(WHATSAPP_LIVE_CORPUS_ID);
 
     // The rest of the lane, as the background's mount creates it.
@@ -164,8 +163,7 @@ describe('the engine split with a source connected after boot', () => {
       { OLYMPUS_SOURCE_INDEX_TELEGRAM_CONNECTOR_STORES_ENABLED: 'true' },
       (env) => { stores = createTelegramConnectorStores(env); },
     );
-    const tries = () => front.output().split("the front could not open a source's stores yet").length - 1;
-    await waitFor(() => tries() >= 2 || undefined, { timeoutMs: 20_000, intervalMs: 100 });
+    await waitFor(() => front.output().includes("the front could not open a source's stores yet"), { timeoutMs: 20_000, intervalMs: 100 });
     expect(await mountedCorpora()).not.toContain(PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID);
 
     const secrets = openSecretLocations({ sourceId: 'telegram.messages' }, { dbPath: secretLocationsPathForStore(stores.secureLocal.dbPath) }, env);

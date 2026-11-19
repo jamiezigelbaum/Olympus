@@ -64,6 +64,26 @@ test('off in environment or worker.env makes zero requests, including after a pr
   }
 });
 
+test('the outbound check follows a fresh worker.env opt-out even with an older display value', async () => {
+  let setting = 'on';
+  let calls = 0;
+  const checker = createUpdateChecker({
+    ...options, fileEnv: () => ({}),
+    freshFileEnv: async () => ({ OLYMPUS_UPDATE_CHECK: setting }),
+    fetchImpl: (async () => { calls++; return new Response(script('1.0.1')); }) as unknown as typeof fetch,
+  });
+  try {
+    await checker.check();
+    expect(checker.available()).toEqual({ version: '1.0.1' });
+    setting = 'off';
+    await checker.check();
+    expect(calls).toBe(1);
+    expect(checker.available()).toBeUndefined();
+  } finally {
+    checker.stop();
+  }
+});
+
 for (const value of ['OFF', '0', 'false', 'FaLsE', 'NO']) test(`update off switch ${value} makes zero requests`, async () => {
   for (const file of [false, true]) {
     let calls = 0;

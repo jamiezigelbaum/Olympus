@@ -340,6 +340,8 @@ and `/chat/completions`. Olympus connects to servers you already run; it does
 not install or maintain them. The shipped `local-first` and `local-only`
 answer profile expects `http://127.0.0.1:28090/v1` and `delphi/source-answer`;
 verify the actual endpoint and ID before applying an approved configuration.
+If the server does not report its running context size, set `contextTokens`
+on the local answer model profile to the window the server was started with.
 
 Search uses built-in local EmbeddingGemma independently of that answer server.
 No new setup needs an OpenAI-compatible embedding endpoint. Existing local
@@ -1036,9 +1038,16 @@ The active email posture is:
 
 ### Local answer prompt size
 
-At engine startup Olympus sizes each local answer route from its served context
-window when the endpoint reports it. Built-in models use the manifest's
-`contextTokens`. The prompt allowance is two bytes per token after reserving the
+Set `contextTokens` to the served context window as a positive safe integer
+in tokens. Use `modelProfiles.<id>.contextTokens` in your Sovereignty policy
+for a local OpenAI-compatible profile. Cloud profiles reject the field.
+For the default Argus answer model, use `argus.modelProfiles.source_answer.contextTokens`
+or `OLYMPUS_ARGUS_SOURCE_ANSWER_CONTEXT_TOKENS`. If selecting an Argus lane with
+`OLYMPUS_SOURCE_INDEX_ANALYST_LANE`, set `argus.lanes.<lane>.contextTokens` or
+`OLYMPUS_ARGUS_FAST_CONTEXT_TOKENS` / `OLYMPUS_ARGUS_DEEP_CONTEXT_TOKENS`.
+
+The configured window takes precedence over discovery. Built-in models use the
+manifest's `contextTokens`. The prompt allowance is two bytes per token after reserving the
 answer's max tokens and 1,024 framing tokens, between 13,500 and 27,000 bytes.
 The ceiling is measured, not derived: on 13 Nov 2026 a 27,000-byte prompt kept
 every passage hit a 54,000-byte prompt kept, and a larger prompt only adds
@@ -1046,17 +1055,18 @@ prefill time.
 Unknown or hidden server windows retain 13,500 bytes. Set
 `OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_PROMPT_BYTES` to override automatic sizing.
 The local fitting audit records `prompt_budget_bytes` and
-`prompt_budget_source` (`env`, `manifest`, `server`, or `fallback`).
+`prompt_budget_source` (`env`, `config`, `manifest`, `server`, or `fallback`).
 
 The startup probe asks the analyst's own host, read-only, within one
-two-second deadline, and caches the result for this process. It asks llama.cpp
+two-second deadline, with the same authorization as a completion. It asks llama.cpp
 `/props` (`n_ctx`), then vLLM `/v1/models` (`max_model_len`), then Ollama
-`/api/ps` (`context_length`), and the first usable reply supplies the window.
-It never reads a training length (`n_ctx_train`). A prefixed router that hides
-these endpoints, a URL with credentials or a query, and a route whose
-authentication the probe does not have all keep the fallback. A failed or slow
-probe never stops engine start.
+`/api/ps` (`context_length`), then LM Studio `/api/v1/models` (the loaded
+instance's `config.context_length`). The first usable reply supplies the window,
+which is cached for the life of the process. Failed probes retry in the
+background at most once every ten minutes per endpoint. While Olympus waits
+for a usable reply, answers use the fallback.
 
 `/health` reports `local_prompt_budget`: for each local answer route, its
-`analyst`, `model`, `source` (`env`, `manifest`, `server` or `fallback`) and,
-when known, `window_tokens`.
+`analyst`, `model`, `source` (`env`, `config`, `manifest`, `server` or
+`fallback`) and, when known, `window_tokens`. Health and doctor also explain
+the effect of a fallback and how to set the window.

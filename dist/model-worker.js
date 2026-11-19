@@ -1,6 +1,76 @@
 // src/workers/source-index/built-in-reasoning/model-worker.ts
 import { parentPort, workerData } from "node:worker_threads";
 
+// src/core/memory-counters.ts
+import { AsyncLocalStorage } from "node:async_hooks";
+var payloads = {
+  judge: { count: 0, bytes: 0 },
+  embed: { count: 0, bytes: 0 },
+  extract: { count: 0, bytes: 0 }
+};
+var payloadScope = new AsyncLocalStorage;
+var payloadSlots = { judge: 0, embed: 2, extract: 4 };
+var workerPayloads;
+function createMemoryPayloadBuffer() {
+  return new SharedArrayBuffer(Object.keys(payloadSlots).length * 2 * BigInt64Array.BYTES_PER_ELEMENT);
+}
+function publishWorkerMemoryPayloads(buffer) {
+  workerPayloads = new BigInt64Array(buffer);
+}
+async function withMemoryPayload(kind, run) {
+  const owner = payloadScope.getStore();
+  if (owner?.active && owner.kind === kind)
+    return run();
+  const counter = payloads[kind];
+  const shared = workerPayloads;
+  const slot = payloadSlots[kind];
+  let bytes = 0;
+  const scope = {
+    kind,
+    active: true,
+    add(delta) {
+      if (!scope.active)
+        return;
+      bytes += delta;
+      counter.bytes += delta;
+      if (shared)
+        Atomics.add(shared, slot + 1, BigInt(delta));
+    }
+  };
+  counter.count++;
+  if (shared)
+    Atomics.add(shared, slot, 1n);
+  try {
+    return await payloadScope.run(scope, run);
+  } finally {
+    scope.active = false;
+    counter.count--;
+    counter.bytes -= bytes;
+    if (shared) {
+      Atomics.sub(shared, slot + 1, BigInt(bytes));
+      Atomics.sub(shared, slot, 1n);
+    }
+  }
+}
+function addMemoryPayloadBytes(bytes) {
+  payloadScope.getStore()?.add(bytes);
+}
+function addMemoryPayloadText(text) {
+  const add = payloadScope.getStore()?.add;
+  if (add)
+    add(Buffer.byteLength(text));
+}
+function memoryPayloadJson(value) {
+  const json = JSON.stringify(value);
+  addMemoryPayloadText(json);
+  return json;
+}
+function noteMemoryPayloadResponse(response) {
+  const bytes = Number(response.headers?.get?.("content-length"));
+  if (Number.isSafeInteger(bytes) && bytes > 0)
+    addMemoryPayloadBytes(bytes);
+}
+
 // src/workers/source-index/built-in-embedding/litert-runtime.ts
 import { isMainThread } from "node:worker_threads";
 
@@ -17,18 +87,24 @@ function modelThreadHandleId() {
 
 class ModelThread {
   worker;
+  payloads = new BigInt64Array(createMemoryPayloadBuffer());
+  memory;
   nextId = 1;
   pending = new Map;
   pids = new Map;
   constructor(path = modelWorkerPath()) {
     const shutdown = new Int32Array(new SharedArrayBuffer(4));
-    this.worker = new Worker(path, { workerData: { shutdown } });
+    this.worker = new Worker(path, { workerData: { shutdown, payloads: this.payloads.buffer } });
     const onExit = () => {
       this.worker.postMessage({ shutdown: true });
       Atomics.wait(shutdown, 0, 0, 15000);
     };
     process.once("exit", onExit);
     this.worker.on("message", (reply) => {
+      if (reply.memory) {
+        this.memory = reply.memory;
+        return;
+      }
       if (reply.handle !== undefined) {
         if (reply.pid === undefined)
           this.pids.delete(reply.handle);
@@ -80,6 +156,20 @@ class ModelThread {
       failed(new Error("The built-in model worker stopped."));
     });
     this.worker.unref();
+  }
+  sampleMemory() {
+    if (this.pending.size === 0)
+      this.worker.postMessage({ sampleMemory: true });
+    const sampled = this.memory;
+    return {
+      model_workers: 1,
+      ...sampled && {
+        model_heap_size_mb: sampled.heapUsed,
+        model_extra_memory_mb: sampled.external,
+        model_heap_age_ms: Math.max(0, Date.now() - sampled.at),
+        ...sampled.arrayBuffers > 0 ? { model_array_buffers_mb: sampled.arrayBuffers } : {}
+      }
+    };
   }
   call(request, options = {}) {
     if (options.signal?.aborted)
@@ -335,7 +425,7 @@ class HelperProcess {
     if (this.exited)
       return Promise.reject(new Error("The built-in search model is not running."));
     const id = this.nextId++;
-    return new Promise((resolve, reject) => {
+    return withMemoryPayload("embed", () => new Promise((resolve, reject) => {
       const pictures = items.filter((item) => typeof item !== "string" && item.image).length;
       this.pending.set(id, {
         resolve,
@@ -349,9 +439,9 @@ class HelperProcess {
         cpuMs: helperCpuMs(this.child.pid)
       });
       const request = items.every((item) => typeof item === "string") ? { id, texts: items } : { id, items: items.map((item) => typeof item === "string" ? { text: item } : item) };
-      this.child.stdin.write(`${JSON.stringify(request)}
+      this.child.stdin.write(`${memoryPayloadJson(request)}
 `);
-    });
+    }));
   }
   settle(message) {
     const pending = message.id === undefined ? undefined : this.pending.get(message.id);
@@ -777,7 +867,7 @@ function linuxDesktopEntryPaths(layout) {
 }
 
 // src/core/linux-engine-layout.ts
-import { lstatSync as lstatSync2, mkdirSync as mkdirSync3, readFileSync as readFileSync4, readdirSync as readdirSync2, realpathSync } from "node:fs";
+import fs, { mkdirSync as mkdirSync3, realpathSync } from "node:fs";
 import { homedir as homedir3 } from "node:os";
 import { dirname as dirname6, isAbsolute as isAbsolute4, join as join5, relative as relative2, resolve as resolve2, sep as sep2 } from "node:path";
 
@@ -959,6 +1049,12 @@ function isNodeErrorWithCode(error, code) {
 }
 
 // src/core/linux-engine-layout.ts
+var layoutMemo = new Map;
+var receiptMemo = new Map;
+function memoEnabled() {
+  const role = process.env.OLYMPUS_WORKER_ENGINE_ROLE?.trim();
+  return process.env.OLYMPUS_ENGINE_HOST === "1" || role === "front" || role === "background";
+}
 function absolute(value, name) {
   if (!isAbsolute4(value) || /[\x00-\x1f\x7f]/.test(value))
     throw new Error(`${name} must be an absolute path without control characters.`);
@@ -982,7 +1078,7 @@ function rawLayout(env, recordedDataDir) {
     const info = stat(path);
     if (!info)
       return false;
-    return !info.isDirectory() || info.isSymbolicLink() || readdirSync2(path).some((name) => path !== xdgDataDir || name !== "engine");
+    return !info.isDirectory() || info.isSymbolicLink() || fs.readdirSync(path).some((name) => path !== xdgDataDir || name !== "engine");
   };
   const dataDir = recordedDataDir ?? (hasData(xdgDataDir) ? xdgDataDir : legacyDirs.find(hasData) ?? xdgDataDir);
   const stateDir = join5(stateHome, "olympus/engine"), cacheDir = join5(cacheHome, "olympus/engine");
@@ -1023,7 +1119,7 @@ function rawLayout(env, recordedDataDir) {
 }
 function stat(path) {
   try {
-    return lstatSync2(path);
+    return fs.lstatSync(path);
   } catch (e) {
     if (e.code === "ENOENT")
       return;
@@ -1064,12 +1160,20 @@ function assertLinuxManagedPath(path, uid = process.getuid(), leaf = "file") {
   }
 }
 function readLinuxEngineReceipt(path, uid = process.getuid()) {
+  if (!memoEnabled())
+    return readLinuxEngineReceiptFromDisk(path, uid);
+  const key = JSON.stringify([path, uid]);
+  if (!receiptMemo.has(key))
+    receiptMemo.set(key, readLinuxEngineReceiptFromDisk(path, uid));
+  return structuredClone(receiptMemo.get(key));
+}
+function readLinuxEngineReceiptFromDisk(path, uid) {
   if (!stat(path))
     return;
   assertLinuxManagedPath(path, uid);
-  if ((lstatSync2(path).mode & 63) !== 0)
+  if ((fs.lstatSync(path).mode & 63) !== 0)
     throw new Error(`${path} must be private (0600).`);
-  const receipt = JSON.parse(readFileSync4(path, "utf8"));
+  const receipt = JSON.parse(fs.readFileSync(path, "utf8"));
   if (receipt.schema !== "olympus.engine.install.v1" || receipt.uid !== uid || !receipt.layout)
     throw new Error(`${path} is a foreign or invalid install receipt.`);
   if (!["installed", "recovery_pending", "data_retained"].includes(receipt.installationState))
@@ -1113,13 +1217,26 @@ function resolveLinuxEngineLayout(env = process.env) {
   const home = absolute(env.HOME || homedir3(), "HOME");
   const configHome = absolute(env.XDG_CONFIG_HOME || join5(home, ".config"), "XDG_CONFIG_HOME");
   const candidates = [...new Set([join5(home, ".config/olympus/install-receipt.json"), join5(configHome, "olympus/install-receipt.json")])];
+  const memo = memoEnabled();
+  const uid = process.getuid?.();
+  const key = JSON.stringify([home, configHome, env.XDG_DATA_HOME || "", env.XDG_STATE_HOME || "", env.XDG_CACHE_HOME || "", env.XDG_RUNTIME_DIR || "", candidates, uid]);
+  const cached = memo ? layoutMemo.get(key) : undefined;
+  if (cached)
+    return { ...cached };
   const present = candidates.filter((p) => stat(p));
   if (present.length > 1)
     throw new Error(`Found multiple Olympus install receipts: ${present.join(", ")}. Select one installation after moving the other aside.`);
   const receipt = present[0] ? readLinuxEngineReceipt(present[0]) : undefined;
   if (receipt && receipt.layout.home !== home)
     throw new Error(`${present[0]} belongs to another home.`);
-  return receipt?.layout ?? rawLayout(env);
+  const layout = receipt?.layout ?? rawLayout(env);
+  if (memo) {
+    layoutMemo.set(key, { ...layout });
+    for (const path of candidates)
+      if (!present.includes(path))
+        receiptMemo.set(JSON.stringify([path, uid]), undefined);
+  }
+  return layout;
 }
 var LEGACY_LINUX_POLICY_FILES = [
   "privacy.json",
@@ -1647,13 +1764,14 @@ import {
   existsSync as existsSync6,
   mkdirSync as mkdirSync4,
   openSync as openSync5,
-  readFileSync as readFileSync5,
+  readFileSync as readFileSync4,
   renameSync as renameSync3,
   rmSync as rmSync3,
   statSync as statSync3,
   writeFileSync as writeFileSync3,
   writeSync as writeSync2
 } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { basename as basename2, dirname as dirname8, isAbsolute as isAbsolute6, join as join7 } from "node:path";
 
 // src/workers/source-index/built-in-embedding/manifest.ts
@@ -1916,6 +2034,33 @@ function installedBuiltInEmbedding(paths, model = BUILT_IN_EMBEDDING_MODEL, plat
 function currentPlatform() {
   return `${process.platform}-${process.arch}`;
 }
+var frontAssetReads = new Map;
+function readAssetState(path) {
+  if (!isMainThread3 || process.env.OLYMPUS_WORKER_ENGINE_ROLE?.trim() !== "front") {
+    return JSON.parse(readFileSync4(path, "utf8"));
+  }
+  let entry = frontAssetReads.get(path);
+  if (!entry) {
+    entry = { checkedAt: -Infinity, pending: false };
+    frontAssetReads.set(path, entry);
+  }
+  const cached = entry;
+  if (!cached.pending && Date.now() - cached.checkedAt >= 2000) {
+    cached.checkedAt = Date.now();
+    cached.pending = true;
+    refreshAssetState(path, cached);
+  }
+  return cached.value;
+}
+async function refreshAssetState(path, entry) {
+  try {
+    entry.value = JSON.parse(await readFile(path, "utf8"));
+  } catch {
+    entry.value = undefined;
+  } finally {
+    entry.pending = false;
+  }
+}
 function readBuiltInEmbeddingStatus(env = process.env, model = BUILT_IN_EMBEDDING_MODEL) {
   const fallback = {
     state: "not_started",
@@ -1927,7 +2072,7 @@ function readBuiltInEmbeddingStatus(env = process.env, model = BUILT_IN_EMBEDDIN
     updatedAt: new Date(0).toISOString()
   };
   try {
-    const parsed = JSON.parse(readFileSync5(builtInEmbeddingPaths(env, model).statusPath, "utf8"));
+    const parsed = readAssetState(builtInEmbeddingPaths(env, model).statusPath);
     return parsed && typeof parsed === "object" && parsed.modelId === model.modelId ? parsed : fallback;
   } catch {
     return fallback;
@@ -2115,7 +2260,7 @@ async function installLiteRt(options, model, paths, platform, reporter, installe
 }
 function readLiteRtMarker(runtimeDir) {
   try {
-    return JSON.parse(readFileSync5(join7(runtimeDir, RUNTIME_MARKER), "utf8"));
+    return JSON.parse(readFileSync4(join7(runtimeDir, RUNTIME_MARKER), "utf8"));
   } catch {
     return;
   }
@@ -2138,7 +2283,7 @@ async function installLiteRtRuntime(fetchImpl, runtimeDir, wheel, reporter, stal
       expected: wheel.sha256
     }, reporter, "Downloading the search runtime", stallMs);
     reporter.set("verifying", "Unpacking the search runtime");
-    const library = readZipEntry(readFileSync5(archivePath), wheel.library);
+    const library = readZipEntry(readFileSync4(archivePath), wheel.library);
     if (!library)
       throw new BuiltInEmbeddingInstallError("runtime_load_failed", `${wheel.name} has no ${wheel.library}.`);
     writeFileSync3(join7(staging, basename2(wheel.library)), library, { mode: 493 });
@@ -2196,7 +2341,7 @@ function builtInOnnxRuntimeInstalled(runtimeDir, runtime = ONNX_RUNTIME_PACK) {
 }
 function runtimeInstalled(runtimeDir, packages) {
   try {
-    const marker = JSON.parse(readFileSync5(join7(runtimeDir, RUNTIME_MARKER), "utf8"));
+    const marker = JSON.parse(readFileSync4(join7(runtimeDir, RUNTIME_MARKER), "utf8"));
     return packages.every((pack) => marker.packages.some((entry) => entry.name === pack.name && entry.integrity === pack.integrity));
   } catch {
     return false;
@@ -2213,7 +2358,7 @@ async function installRuntime(fetchImpl, runtimeDir, packages, platform, reporte
         expected: pack.integrity
       }, reporter, "Downloading the search runtime", stallMs);
       reporter.set("verifying", "Unpacking the search runtime");
-      const archive = readFileSync5(archivePath);
+      const archive = readFileSync4(archivePath);
       const files = readTarGz(archive, (path) => runtimeEntryWanted(pack.name, path, platform));
       if (files.length === 0) {
         throw new BuiltInEmbeddingInstallError("runtime_load_failed", `${pack.name} had no files for ${platform}.`);
@@ -2327,7 +2472,7 @@ function tryAcquireLock(lockPath) {
 }
 function lockIsStale(lockPath) {
   try {
-    const holder = JSON.parse(readFileSync5(lockPath, "utf8"));
+    const holder = JSON.parse(readFileSync4(lockPath, "utf8"));
     if (typeof holder.at === "number" && Date.now() - holder.at > STALE_LOCK_MS)
       return true;
     if (typeof holder.pid === "number" && holder.pid !== process.pid) {
@@ -2370,7 +2515,7 @@ class ProgressReporter {
     this.lastWriteMs = 0;
     let previouslyReady = false;
     try {
-      const previous = JSON.parse(readFileSync5(statusPath, "utf8"));
+      const previous = JSON.parse(readFileSync4(statusPath, "utf8"));
       previouslyReady = previous.modelId === modelId && (previous.state === "ready" || previous.previouslyReady === true);
     } catch {}
     this.status = {
@@ -2432,7 +2577,7 @@ class ProgressReporter {
 // src/workers/source-index/built-in-embedding/provider.ts
 import { isMainThread as isMainThread4 } from "node:worker_threads";
 import { createHash as createHash3 } from "node:crypto";
-import { readFileSync as readFileSync10 } from "node:fs";
+import { readFileSync as readFileSync9 } from "node:fs";
 import { availableParallelism } from "node:os";
 import { dirname as dirname11, join as join11 } from "node:path";
 
@@ -2592,10 +2737,10 @@ import {
   existsSync as existsSync7,
   fsyncSync as fsyncSync2,
   mkdirSync as mkdirSync5,
-  lstatSync as lstatSync3,
+  lstatSync as lstatSync2,
   openSync as openSync6,
-  readFileSync as readFileSync6,
-  readdirSync as readdirSync3,
+  readFileSync as readFileSync5,
+  readdirSync as readdirSync2,
   realpathSync as realpathSync2,
   renameSync as renameSync4,
   rmSync as rmSync4,
@@ -3140,7 +3285,7 @@ function isMediaCachePath(path, sha256, dir) {
   if (dir !== undefined && dirname9(path) !== resolve4(dir))
     return false;
   try {
-    const stat = lstatSync3(path);
+    const stat = lstatSync2(path);
     if (!stat.isFile())
       return false;
   } catch {}
@@ -3148,10 +3293,10 @@ function isMediaCachePath(path, sha256, dir) {
 }
 
 // src/workers/source-index/embeddings.ts
-import { AsyncLocalStorage } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
 
 // src/core/owner-config-read.ts
-import { chmodSync as chmodSync2, linkSync, readFileSync as readFileSync7, statSync as statSync5, lstatSync as lstatSync4 } from "node:fs";
+import { chmodSync as chmodSync2, linkSync, readFileSync as readFileSync6, statSync as statSync5, lstatSync as lstatSync3 } from "node:fs";
 import { randomUUID as randomUUID3 } from "node:crypto";
 import { homedir as homedir5 } from "node:os";
 import { dirname as dirname10, join as join9 } from "node:path";
@@ -3164,20 +3309,20 @@ function linuxOwnerConfigPath(name, env = process.env) {
     return join9(layout.home, ".olympus", name);
   if (!owned)
     migrateHostedSovereignty(join9(layout.home, ".olympus", name), join9(layout.configDir, name));
-  if ((owned ? [name, ...LEGACY_LINUX_POLICY_FILES] : [name]).some((file) => lstatSync4(join9(layout.home, ".olympus", file), { throwIfNoEntry: false }))) {
+  if ((owned ? [name, ...LEGACY_LINUX_POLICY_FILES] : [name]).some((file) => lstatSync3(join9(layout.home, ".olympus", file), { throwIfNoEntry: false }))) {
     throw new Error("Legacy Olympus settings still need migration. Complete the Linux engine upgrade, or back up and migrate an unreceipted installation, before using its settings; existing privacy protections were not ignored.");
   }
   return join9(layout.configDir, name);
 }
 function migrateHostedSovereignty(legacy, target) {
-  if (!lstatSync4(legacy, { throwIfNoEntry: false }))
+  if (!lstatSync3(legacy, { throwIfNoEntry: false }))
     return;
   const backup = `${legacy}.pre-xdg-migration.bak`;
   for (const path of [legacy, target, backup])
     assertLinuxManagedPath(path);
   ensurePrivateRootDirectorySync(dirname10(target));
   withFileLeaseSync(legacy, () => withFileLeaseSync(target, (lease) => {
-    if (!lstatSync4(legacy, { throwIfNoEntry: false }))
+    if (!lstatSync3(legacy, { throwIfNoEntry: false }))
       return;
     for (const path of [legacy, target, backup])
       assertLinuxManagedPath(path);
@@ -3185,7 +3330,7 @@ function migrateHostedSovereignty(legacy, target) {
     if (original.status !== "ok")
       throw new Error("Olympus could not safely move your old privacy settings. Your existing settings were kept. Ask the person who installed Olympus to check the file permissions.");
     for (const path of [target, backup]) {
-      if (lstatSync4(path, { throwIfNoEntry: false }) && readFileSync7(path, "utf8") !== original.text) {
+      if (lstatSync3(path, { throwIfNoEntry: false }) && readFileSync6(path, "utf8") !== original.text) {
         throw new Error(`Olympus found different privacy settings at ${path}. Both copies were kept. Ask the person who installed Olympus to choose which settings to keep before restarting.`);
       }
     }
@@ -3200,9 +3345,9 @@ function migrateHostedSovereignty(legacy, target) {
   }));
 }
 function publishOwnerCopy(path, text) {
-  if (lstatSync4(path, { throwIfNoEntry: false })) {
+  if (lstatSync3(path, { throwIfNoEntry: false })) {
     assertLinuxManagedPath(path);
-    if (readFileSync7(path, "utf8") !== text)
+    if (readFileSync6(path, "utf8") !== text)
       throw new Error(`Olympus found different privacy settings at ${path}. Both copies were kept. Ask the person who installed Olympus to choose which settings to keep before restarting.`);
     chmodSync2(path, 384);
     return;
@@ -3232,7 +3377,7 @@ function readOwnerConfigFile(path) {
   }
   let text;
   try {
-    text = readFileSync7(path, "utf8");
+    text = readFileSync6(path, "utf8");
   } catch {
     return { status: "refused", reason: "unreadable", stamp };
   }
@@ -3256,7 +3401,7 @@ function ownedByThisUser(stat) {
 }
 
 // src/core/zkapi-consult-settings.ts
-import { readFileSync as readFileSync8, statSync as statSync6 } from "node:fs";
+import { readFileSync as readFileSync7, statSync as statSync6 } from "node:fs";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 var ZKAPI_DAEMON_DEFAULT_PORT = 8787;
@@ -3323,7 +3468,7 @@ function refreshZkapiPortsFromPolicyFile(env = process.env) {
   if (policyFile.seen === stamp && policyFile.unreadable === undefined)
     return;
   try {
-    const ports = zkapiPortsInPolicy(JSON.parse(readFileSync8(path, "utf8")));
+    const ports = zkapiPortsInPolicy(JSON.parse(readFileSync7(path, "utf8")));
     for (const port of ports)
       zkapiDaemonPorts.add(port);
     policyFile.seen = stamp;
@@ -3548,7 +3693,7 @@ function isFetchRedirectRefusal(error) {
 }
 
 // src/workers/source-index/embeddings.ts
-var priorityQueryEmbedding = new AsyncLocalStorage;
+var priorityQueryEmbedding = new AsyncLocalStorage2;
 function withPriorityQueryEmbedding(run) {
   return priorityQueryEmbedding.run(true, run);
 }
@@ -3609,7 +3754,7 @@ class TransientSourceEmbeddingError extends OperationError {
 }
 
 // src/workers/source-index/built-in-embedding/remote-litert-runtime.ts
-import { readFileSync as readFileSync9 } from "node:fs";
+import { readFileSync as readFileSync8 } from "node:fs";
 
 class RemoteLiteRtEmbedder {
   options;
@@ -3663,7 +3808,7 @@ class RemoteLiteRtEmbedder {
           this.device = handshake.device;
           this.verified = true;
         }
-        const response = await this.request("/v1/embed", items);
+        const response = await withMemoryPayload("embed", () => this.request("/v1/embed", items));
         const identity = this.options.identity;
         if (typeof response.vectors !== "string" || Object.entries(identity).some(([field, value]) => response[field] !== value)) {
           throw new Error("Remote embedding identity mismatch.");
@@ -3699,7 +3844,7 @@ class RemoteLiteRtEmbedder {
   async request(path, texts) {
     const headers = {};
     if (this.options.tokenFile) {
-      const token = readFileSync9(this.options.tokenFile, "utf8").trim();
+      const token = readFileSync8(this.options.tokenFile, "utf8").trim();
       if (!token)
         throw new Error("Empty remote token file.");
       headers.Authorization = `Bearer ${token}`;
@@ -3709,7 +3854,7 @@ class RemoteLiteRtEmbedder {
     const response = await fetch(new URL(path, this.url), {
       method: texts ? "POST" : "GET",
       headers,
-      ...texts ? { body: JSON.stringify({ texts }) } : {},
+      ...texts ? { body: memoryPayloadJson({ texts }) } : {},
       signal: AbortSignal.timeout(this.options.requestTimeoutMs ?? 30000),
       redirect: "error"
     });
@@ -3717,6 +3862,7 @@ class RemoteLiteRtEmbedder {
       await response.body?.cancel();
       throw new Error("Remote request failed.");
     }
+    noteMemoryPayloadResponse(response);
     return await response.json();
   }
 }
@@ -4268,10 +4414,15 @@ class BuiltInSourceEmbeddingProvider {
     }
     if (model.kind === "litert")
       return this.embedLiteRt(model.embedder, inputs, taskType);
+    return withMemoryPayload("embed", () => this.embedOnnx(model, inputs, taskType));
+  }
+  async embedOnnx(model, inputs, taskType) {
     const windowTokens = this.spec.maxTokens - 2;
     const windows = [];
     inputs.forEach((input, index) => {
-      const ids = model.tokenizer.tokenize(promptText(this.spec, input, taskType));
+      const text = promptText(this.spec, input, taskType);
+      addMemoryPayloadText(text);
+      const ids = model.tokenizer.tokenize(text);
       const maxWindows = taskType === "RETRIEVAL_QUERY" ? 1 : MAX_WINDOWS_PER_DOCUMENT;
       const count = Math.max(1, Math.min(maxWindows, Math.ceil(ids.length / windowTokens)));
       for (let window = 0;window < count; window += 1) {
@@ -4467,7 +4618,7 @@ class BuiltInSourceEmbeddingProvider {
   }
 }
 function loadTokenizer(path) {
-  const tokenizer = new WordPieceTokenizer(readFileSync10(path, "utf8"));
+  const tokenizer = new WordPieceTokenizer(readFileSync9(path, "utf8"));
   return {
     tokenize: (text) => tokenizer.tokenize(text),
     startId: tokenizer.clsId,
@@ -4554,7 +4705,7 @@ function resolveThreads(explicit, env) {
 // src/workers/source-index/built-in-reranker.ts
 import { isMainThread as isMainThread5 } from "node:worker_threads";
 import { availableParallelism as availableParallelism2, totalmem } from "node:os";
-import { existsSync as existsSync8, readFileSync as readFileSync11 } from "node:fs";
+import { existsSync as existsSync8, readFileSync as readFileSync10 } from "node:fs";
 import { isAbsolute as isAbsolute8, join as join12 } from "node:path";
 
 // src/core/evidence-reranker.ts
@@ -7097,7 +7248,7 @@ function builtInRerankerFromEnv(options = {}) {
   return createCrossEncoderReranker({
     id: `cross-encoder:${modelDir.split(/[\\/]/).filter(Boolean).pop() ?? "model"}`,
     session: () => runtime.createSession(modelPath, { threads }),
-    tokenizer: existsSync8(vocabularyPath) ? new WordPieceTokenizer(readFileSync11(vocabularyPath, "utf8")) : new JsonPairTokenizer(readFileSync11(tokenizerPath, "utf8")),
+    tokenizer: existsSync8(vocabularyPath) ? new WordPieceTokenizer(readFileSync10(vocabularyPath, "utf8")) : new JsonPairTokenizer(readFileSync10(tokenizerPath, "utf8")),
     ...poolSize !== undefined ? { poolSize } : {},
     ...maxPairTokens !== undefined ? { maxPairTokens } : {},
     ...env[SOURCE_RERANKER_WINDOWS_ENV]?.trim().toLowerCase() === "all" ? { everyWindow: true } : {}
@@ -7118,8 +7269,8 @@ import {
   existsSync as existsSync9,
   mkdirSync as mkdirSync6,
   openSync as openSync7,
-  readFileSync as readFileSync12,
-  readdirSync as readdirSync4,
+  readFileSync as readFileSync11,
+  readdirSync as readdirSync3,
   renameSync as renameSync5,
   rmSync as rmSync5,
   statSync as statSync7,
@@ -7277,7 +7428,7 @@ function readPinnedModelStatus(statusPath, modelId, noun) {
     updatedAt: new Date(0).toISOString()
   };
   try {
-    const parsed = JSON.parse(readFileSync12(statusPath, "utf8"));
+    const parsed = JSON.parse(readFileSync11(statusPath, "utf8"));
     return parsed && typeof parsed === "object" && parsed.modelId === modelId ? parsed : fallback;
   } catch {
     return fallback;
@@ -7470,7 +7621,7 @@ async function verifyPinnedFile(path, file, noun, reporter, timeoutMs) {
 }
 function readRuntimeMarker(runtimeDir) {
   try {
-    return JSON.parse(readFileSync12(join13(runtimeDir, RUNTIME_MARKER2), "utf8"));
+    return JSON.parse(readFileSync11(join13(runtimeDir, RUNTIME_MARKER2), "utf8"));
   } catch {
     return;
   }
@@ -7556,7 +7707,7 @@ function extractWithTar(archivePath, targetDir) {
 function locateFile(root, name, depth = 0, prefix = "") {
   let entries;
   try {
-    entries = readdirSync4(join13(root, prefix));
+    entries = readdirSync3(join13(root, prefix));
   } catch {
     return;
   }
@@ -7663,7 +7814,7 @@ async function withInstallLock2(lockPath, waitMs, refreshMs, noun, run) {
 }
 function lockHolder(lockPath) {
   try {
-    return JSON.parse(readFileSync12(lockPath, "utf8"));
+    return JSON.parse(readFileSync11(lockPath, "utf8"));
   } catch {
     return;
   }
@@ -7693,7 +7844,7 @@ function tryAcquireLock2(lockPath, token) {
 }
 function lockIsStale2(lockPath) {
   try {
-    const holder = JSON.parse(readFileSync12(lockPath, "utf8"));
+    const holder = JSON.parse(readFileSync11(lockPath, "utf8"));
     if (typeof holder.pid === "number" && holder.pid !== process.pid) {
       try {
         process.kill(holder.pid, 0);
@@ -8303,6 +8454,7 @@ function lastLine(text) {
 
 // src/workers/source-index/built-in-reasoning/model-worker.ts
 var port = parentPort;
+publishWorkerMemoryPayloads(workerData.payloads);
 var liteRtHelpers = new Map;
 var embedders = new Map;
 var rerankers = new Map;
@@ -8314,6 +8466,11 @@ var stopAll = () => Promise.all([
 ]);
 var send = (reply) => port.postMessage(reply);
 port.on("message", async (message) => {
+  if (message.sampleMemory) {
+    const { heapUsed, external, arrayBuffers } = process.memoryUsage();
+    send({ id: 0, memory: { at: Date.now(), heapUsed, external, arrayBuffers } });
+    return;
+  }
   if (message.shutdown) {
     try {
       await stopAll();

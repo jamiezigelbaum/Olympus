@@ -15,9 +15,13 @@ concurrency:
 
 jobs:
   loop-stall-quick:
-    # A quick cold loop-stall test (plan, 16 Nov 2026): a 40k-item fixture under a 400 MB cap, both engines, 120 s; fails on
+    # A quick cold loop-stall test (plan, 16 Nov 2026): a 40k-item fixture under a 2 GB cap (the 600k gate's), both engines, 120 s; fails on
     # any loop beat over 1 s and prints the site. It caught the freeze before 7216b4b4 twice (2.7 s, 1.7 s). Not a required
     # check and not part of verify (plan, 16 Nov 2026): it rejoins verify after three consecutive passes on main.
+    # The cap was 400 MB until 16 Nov: measured peaks (front up to 402 MiB, background 225, harness 88, mapped store pages
+    # counted) OOM-killed it on every commit on the release runner and about half the time on GitHub (cloud-job 43963728903);
+    # at 1 GB a background burst (501 MiB anonymous for a few seconds, cloud-job 43976781516) still could. The run reports
+    # peak anonymous memory per role.
     # Runs only when engine or store code changed, or on dispatch.
     name: loop-stall quick
     runs-on: ubuntu-24.04
@@ -46,9 +50,9 @@ jobs:
           export HOME="$(mktemp -d)"
           bun scripts/loop-stall-test.ts build --dir "$RUNNER_TEMP/ls" --items 40000
           bun scripts/loop-stall-test.ts restore --dir "$RUNNER_TEMP/ls"
-          sudo systemd-run --scope --quiet --uid="$(id -u)" --gid="$(id -g)" -p MemoryMax=400M -p MemorySwapMax=0 -p OOMPolicy=continue \
+          sudo systemd-run --scope --quiet --uid="$(id -u)" --gid="$(id -g)" -p MemoryMax=2G -p MemorySwapMax=0 -p OOMPolicy=continue \
             --setenv=HOME="$HOME" --setenv=PATH="$PATH" -- \
-            "$(command -v bun)" scripts/loop-stall-test.ts run --dir "$RUNNER_TEMP/ls" --seconds 120 --memory-max 400M --io-floor-ms 200 --io-wait-seconds 60 --quick
+            "$(command -v bun)" scripts/loop-stall-test.ts run --dir "$RUNNER_TEMP/ls" --seconds 120 --memory-max 2G --io-floor-ms 200 --io-wait-seconds 60 --quick
 
       - if: failure() && steps.changed.outputs.run == 'true'
         name: Say what killed it

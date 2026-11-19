@@ -46,6 +46,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { OperationError, sourceAnswerJobNotFound } from './operation-error.ts';
+import { startupProgress, startupWaitingLine, type StartupProgress } from './startup-progress.ts';
 import { secretLabelsInText } from './opsec.ts';
 import {
   adoptReleaseManifests,
@@ -128,6 +129,7 @@ export interface SourceAnswerPending {
   elapsed_ms: number;
   next_tool: 'source_answer_result';
   message: string;
+  startup?: StartupProgress;
 }
 
 /**
@@ -927,14 +929,18 @@ export function isSourceAnswerPending(value: unknown): value is SourceAnswerPend
 
 function pendingResult(jobId: string, elapsedMs: number, resultWaitMs: number): SourceAnswerPending {
   const wait = Math.round(resultWaitMs / 1000);
+  const startup = startupProgress();
+  const starting = startupWaitingLine(startup);
   return {
     status: 'working',
     job_id: jobId,
     elapsed_ms: elapsedMs,
     next_tool: 'source_answer_result',
+    ...(startup ? { startup } : {}),
     message: 'Olympus is still preparing this answer and it keeps running. '
       + `Call source_answer_result with this job_id to get it${wait > 0 ? ` (each call waits up to ${wait} s)` : ''}; `
-      + 'repeat while it says working. Do not ask the question again.',
+      + 'repeat while it says working. Do not ask the question again.'
+      + (starting ? `\n${starting}` : ''),
   };
 }
 

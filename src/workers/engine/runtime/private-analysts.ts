@@ -1,5 +1,5 @@
 import { createTinfoilAnalystModel } from '../../../core/analyst-tinfoil.ts';
-import { reportLocalAnalystPromptOverride, resolveLocalAnalystWindow, setLocalAnalystWindow } from '../../source-index/local-analyst-window.ts';
+import { initializeLocalAnalystWindow, reportLocalAnalystPromptOverride } from '../../source-index/local-analyst-window.ts';
 import {
   type SecureLocalAnalystRouteStatus,
   type SovereigntyAnalystRoutePlan,
@@ -25,7 +25,7 @@ import {
   assertVeniceAnalystModelAllowed,
 } from '../../../core/venice-models.ts';
 import { createOpenAICompatibleAnalystModel } from '../../../core/analyst-openai.ts';
-import { loadConfig } from '../../../core/config.ts';
+import { loadConfig, type ArgusLane, type ArgusModelProfile } from '../../../core/config.ts';
 import { DelphiClient } from '../../../core/delphi.ts';
 import {
   isStandaloneEngineProcess,
@@ -56,6 +56,13 @@ export function trustedAnalystAssistTimeoutMs(input: {
   return Math.min(input.veniceAnalystTimeoutMs + 5_000, 20_000);
 }
 
+interface SovereigntyAnalystEntry {
+  profile: SovereigntyResolvedProfile;
+  backend: AnalystBackend;
+  analyst: Analyst;
+  local?: { model: AnalystModel; delphi: DelphiClient; analyst: Analyst };
+}
+
 export async function createSovereigntyAnalystMap(input: {
   engine: SovereigntyEngine;
   olympusConfig: ReturnType<typeof loadConfig>;
@@ -66,16 +73,9 @@ export async function createSovereigntyAnalystMap(input: {
   bootSecretResolver?: WorkerBootSecretResolver;
   builtInAnalyst?: Analyst;
   localModelActivity?: LocalModelActivity;
-}): Promise<Map<string, {
-  profile: SovereigntyResolvedProfile;
-  backend: AnalystBackend;
-  analyst: Analyst;
-}>> {
-  const map = new Map<string, {
-    profile: SovereigntyResolvedProfile;
-    backend: AnalystBackend;
-    analyst: Analyst;
-  }>();
+  discoverLocalWindows?: boolean;
+}): Promise<Map<string, SovereigntyAnalystEntry>> {
+  const map = new Map<string, SovereigntyAnalystEntry>();
   const securePoolMemberIds = (() => {
     try {
       return new Set(
@@ -101,29 +101,29 @@ export async function createSovereigntyAnalystMap(input: {
       if (!apiKey) continue;
       await validateSecureVeniceAnalystProfileAtConstruction({ profile, apiKey });
     }
-    const analyst = input.engine.source === 'env_bridge' && id === 'local-source-answer'
-      ? input.defaultLocal
-      : createAnalystForSovereigntyProfile({
-          profile,
-          profileId: id,
-          ...(input.localModelActivity ? { localModelActivity: input.localModelActivity } : {}),
-          olympusConfig: input.olympusConfig,
-          env: input.env,
-          veniceAnalystTimeoutMs: input.veniceAnalystTimeoutMs,
-          veniceReasoningHeadroomTokens: input.veniceReasoningHeadroomTokens,
-          ...(input.bootSecretResolver ? { bootSecretResolver: input.bootSecretResolver } : {}),
-        });
-    if (!analyst) continue;
-    if (backend === 'local' && !(input.engine.source === 'env_bridge' && id === 'local-source-answer')) {
-      const report = { analyst: id, model: profile.model ?? '' };
-      if (input.env.OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_PROMPT_BYTES === undefined) {
-        setLocalAnalystWindow(analyst, await resolveLocalAnalystWindow({
-          model: profile.model ?? '',
-          ...(profile.provider === 'local-openai-compatible' && !profile.secretRef ? { baseUrl: profile.baseUrl } : {}),
-        }), report);
-      } else reportLocalAnalystPromptOverride(report);
+    if (input.engine.source === 'env_bridge' && id === 'local-source-answer') {
+      map.set(id, { profile: resolved, backend, analyst: input.defaultLocal });
+    } else if (profile.provider === 'local-openai-compatible') {
+      const route = createLocalSovereigntyAnalystRoute({ ...input, profile, profileId: id });
+      if (!route) continue;
+      const analyst = createAnalyst(route.model, { auditSuspiciousDrafts: true, evidenceFormat: 'compact' });
+      const report = { analyst: id, model: profile.model };
+      if (input.env.OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_PROMPT_BYTES?.trim()) {
+        reportLocalAnalystPromptOverride(report);
+      } else if (input.discoverLocalWindows !== false) {
+        await initializeLocalAnalystWindow(analyst, {
+          model: profile.model,
+          baseUrl: profile.baseUrl,
+          contextTokens: profile.contextTokens,
+          secretRef: profile.secretRef,
+          authorize: init => route.delphi.withAuth(init, profile.secretRef),
+        }, report);
+      }
+      map.set(id, { profile: resolved, backend, analyst, local: { ...route, analyst } });
+    } else {
+      const analyst = createRemoteAnalystForSovereigntyProfile({ ...input, profile, profileId: id }, id);
+      if (analyst) map.set(id, { profile: resolved, backend, analyst });
     }
-    map.set(id, { profile: resolved, backend, analyst });
   }
   applyBuiltInPrivateAnalyst(map, securePoolMemberIds, input.builtInAnalyst);
   return map;
@@ -172,9 +172,15 @@ export function builtInBacksPrivateAnalyst(
 }
 
 /** Whether this computer's configured local answer model (or the client given) answers /models within a few seconds. */
-export async function probeLocalAnalystService(olympusConfig: ReturnType<typeof loadConfig>, client = new DelphiClient(olympusConfig)): Promise<boolean> {
+export async function probeLocalAnalystService(
+  olympusConfig: ReturnType<typeof loadConfig>,
+  client = new DelphiClient(olympusConfig),
+  route: { lane: ArgusLane } | { profile: ArgusModelProfile } = { profile: 'source_answer' },
+): Promise<boolean> {
   try {
-    await client.listModelsForProfile('source_answer', AbortSignal.timeout(3_000));
+    const signal = AbortSignal.timeout(3_000);
+    if ('lane' in route) await client.listModels(route.lane, signal);
+    else await client.listModelsForProfile(route.profile, signal);
     return true;
   } catch {
     return false;
@@ -369,50 +375,53 @@ export function createAnalystForSovereigntyProfile(input: {
   const { profile } = input;
   const profileId = input.profileId ?? profile.model ?? profile.provider;
   if (profile.provider === 'local-openai-compatible') {
-    const model = createLocalSovereigntyAnalystModel(input);
-    return model ? createAnalyst(model, { auditSuspiciousDrafts: true, evidenceFormat: 'compact' }) : undefined;
+    const route = createLocalSovereigntyAnalystRoute(input);
+    return route ? createAnalyst(route.model, { auditSuspiciousDrafts: true, evidenceFormat: 'compact' }) : undefined;
   }
   return createRemoteAnalystForSovereigntyProfile(input, profileId);
 }
 
-/** A local (OpenAI-compatible) sovereignty profile's model, tracked as local model activity; undefined when its secret does not resolve. */
-export function createLocalSovereigntyAnalystModel(input: {
+/** A local model and its authenticated client, shared by answers and probes. */
+function createLocalSovereigntyAnalystRoute(input: {
   profile: SovereigntyModelProfile;
   profileId?: string;
   localModelActivity?: LocalModelActivity;
   olympusConfig: ReturnType<typeof loadConfig>;
   env: Record<string, string | undefined>;
   bootSecretResolver?: WorkerBootSecretResolver;
-}): AnalystModel | undefined {
+}): { model: AnalystModel; delphi: DelphiClient } | undefined {
   const { profile } = input;
   const profileId = input.profileId ?? profile.model ?? profile.provider;
-  {
-    if (!profile.baseUrl?.trim()) {
-      throw new Error('Local sovereignty analyst profiles require baseUrl.');
-    }
-    const apiKey = profile.secretRef
-      ? resolveSecretRefSync(
-        profile.secretRef,
-        input.env,
-        'Sovereignty local analyst profile',
-        bootSecretOptions(input.bootSecretResolver, [profileId], ['analyst'], { id: profileId, profile }),
-      )
-      : undefined;
-    if (profile.secretRef && !apiKey) return undefined;
-    const config = structuredClone(input.olympusConfig);
-    config.argus.modelProfiles.source_answer = {
-      ...config.argus.modelProfiles.source_answer,
-      baseUrl: profile.baseUrl as string,
-      model: profile.model as string,
-      ...(profile.secretRef ? { secretRef: profile.secretRef } : {}),
-      purpose: 'text_reasoning',
-    };
-    const model = createDelphiAnalystModel(new DelphiClient(config, undefined, {
-      resolveSecretRef: () => apiKey,
-    }), { profile: 'source_answer', preflightTimeoutMs: 0 });
-    return input.localModelActivity
-      ? input.localModelActivity.track(localModelResourceKey(profile), model, { serialize: false }) : model;
+  if (!profile.baseUrl?.trim()) {
+    throw new Error('Local sovereignty analyst profiles require baseUrl.');
   }
+  const apiKey = profile.secretRef
+    ? resolveSecretRefSync(
+      profile.secretRef,
+      input.env,
+      'Sovereignty local analyst profile',
+      bootSecretOptions(input.bootSecretResolver, [profileId], ['analyst'], { id: profileId, profile }),
+    )
+    : undefined;
+  if (profile.secretRef && !apiKey) return undefined;
+  const config = structuredClone(input.olympusConfig);
+  config.argus.modelProfiles.source_answer = {
+    baseUrl: profile.baseUrl,
+    model: profile.model as string,
+    ...(profile.secretRef ? { secretRef: profile.secretRef } : {}),
+    purpose: 'text_reasoning',
+  };
+  const delphi = new DelphiClient(config, undefined, { resolveSecretRef: () => apiKey });
+  const model = createDelphiAnalystModel(delphi, { profile: 'source_answer', preflightTimeoutMs: 0 });
+  return {
+    delphi,
+    model: input.localModelActivity
+      ? input.localModelActivity.track(localModelResourceKey(profile), model, { serialize: false }) : model,
+  };
+}
+
+export function createLocalSovereigntyAnalystModel(input: Parameters<typeof createLocalSovereigntyAnalystRoute>[0]): AnalystModel | undefined {
+  return createLocalSovereigntyAnalystRoute(input)?.model;
 }
 
 function createRemoteAnalystForSovereigntyProfile(input: {
@@ -544,7 +553,7 @@ export function createLocalPrivateRoute(input: {
   firstMember: () => SovereigntyResolvedProfile | undefined;
   model: (member: SovereigntyResolvedProfile) => { model: AnalystModel; modelId: string; baseUrl?: string } | undefined;
   reachable: (member: SovereigntyResolvedProfile) => Promise<boolean>;
-  window: (modelId: string, baseUrl: string | undefined) => Promise<{ windowTokens: number } | undefined>;
+  window: (modelId: string, baseUrl: string | undefined, member: SovereigntyResolvedProfile) => Promise<{ windowTokens: number } | undefined>;
   /** Whether the built-in model is this member's stand-in (the owner set up no other local model). */
   builtInStandsIn?: (member: SovereigntyResolvedProfile) => boolean;
   now?: () => number;
@@ -553,7 +562,7 @@ export function createLocalPrivateRoute(input: {
 }): () => Promise<LocalPrivateRoute | { unavailable: true; modelId: string } | undefined> {
   const now = input.now ?? Date.now;
   const log = input.log ?? ((line: string) => { console.warn(line); });
-  const models = new Map<string, { model: AnalystModel; modelId: string; baseUrl?: string } | undefined>();
+  const models = new Map<string, ReturnType<typeof input.model>>();
   let checked: { id: string; atMs: number; up: boolean } | undefined;
   // A member that has answered is the owner's real model: once seen up, the
   // built-in model never stands in for it, however long it is down.
@@ -582,7 +591,7 @@ export function createLocalPrivateRoute(input: {
       try { standsIn = !seenUp.has(member.id) && input.builtInStandsIn?.(member) === true; } catch { standsIn = false; }
       return standsIn ? undefined : { unavailable: true, modelId: entry.modelId };
     }
-    const window = await input.window(entry.modelId, entry.baseUrl).catch((error: unknown) => {
+    const window = await input.window(entry.modelId, entry.baseUrl, member).catch((error: unknown) => {
       log(`[private-model] window unknown model=${entry.modelId} reason=${error instanceof Error ? error.name : 'unknown'}; reading within the default budget`);
       return undefined;
     });
@@ -599,7 +608,6 @@ export async function probeLocalSovereigntyProfile(
 ): Promise<boolean> {
   const config = structuredClone(olympusConfig);
   config.argus.modelProfiles.source_answer = {
-    ...config.argus.modelProfiles.source_answer,
     baseUrl: profile.baseUrl as string,
     model: profile.model as string,
     ...(profile.secretRef ? { secretRef: profile.secretRef } : {}),

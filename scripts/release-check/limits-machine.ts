@@ -33,7 +33,10 @@ rc_bun=$(command -v bun 2>/dev/null || { ls -d ~/.local/share/olympus-engine/gen
 printf '%s' ${quote(JSON.stringify({ command, scratch }))} | "$rc_bun" --no-env-file ${quote(remote)}`, { timeoutMs: 240_000 });
     // Neither stderr nor free stdout belongs in a report: the machine may print credentials or paths on failure.
     if (result.code !== 0 || result.timedOut) throw probeFailure(result);
-    return JSON.parse(result.stdout);
+    // The reply is the last line; the runtime may print log lines before it.
+    const lines = result.stdout.trim().split('\n');
+    try { return JSON.parse(lines.pop() ?? ''); }
+    catch { throw new LimitsReason(`limits probe reply was not JSON (${lines.length + 1} lines, ${result.stdout.length} bytes, exit ${result.code})`); }
   };
   try {
     const build = await Bun.build({ entrypoints: [join(import.meta.dir, 'limits-probe.ts')], target: 'bun', outdir: work, naming: 'probe.js' });

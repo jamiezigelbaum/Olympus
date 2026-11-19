@@ -177,11 +177,6 @@
       "reason": "write found by the write plan check (16 Nov): a version step that runs once; to move off the loop with progress (store-open plan item 2)"
     },
     {
-      "site": "rejudgeCandidatePage tier-ledger.ts",
-      "table": "tier_items",
-      "reason": "a test's direct call to the ledger; the engine finds these on the read worker (family 3)"
-    },
-    {
       "site": "relabelUnreadFailSafe tier-ledger.ts",
       "table": "tier_items",
       "reason": "a test's direct call to the ledger; the engine finds these on the read worker (family 3)"

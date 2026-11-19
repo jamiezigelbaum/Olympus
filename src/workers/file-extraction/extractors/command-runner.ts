@@ -29,6 +29,7 @@
  * architecture guard reads a single-line block comment as a regex literal.
  */
 
+import { addMemoryPayloadText, memoryPayloadByteCounter } from '../../../core/memory-counters.ts';
 import { Buffer } from 'node:buffer';
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { readFile, readdir } from 'node:fs/promises';
@@ -332,6 +333,7 @@ export async function runExtractionCommand(
 ): Promise<ExtractionCommandRunResult> {
   const kill = internals.kill ?? process.kill;
   const command = resolveExtractionCommand(request.command);
+  for (const argument of request.args) addMemoryPayloadText(argument);
   return new Promise((resolve, reject) => {
     const child = spawn(command, request.args, {
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -348,6 +350,14 @@ export async function runExtractionCommand(
     }
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
+    const notePipeBytes = memoryPayloadByteCounter();
+    let pipeBytes = 0;
+    const collect = (chunks: Buffer[]) => (chunk: Buffer) => {
+      chunks.push(chunk);
+      pipeBytes += chunk.byteLength;
+      notePipeBytes?.(chunk.byteLength);
+      lastProgress = Date.now();
+    };
     let settled = false;
     // A stall clock: any output, or any CPU time used by the group, counts as progress and restarts it.
     const useTimeout = Number.isFinite(request.timeoutMs) && request.timeoutMs > 0;
@@ -376,8 +386,8 @@ export async function runExtractionCommand(
           }));
         }, stallCheckIntervalMs(request.timeoutMs))
       : undefined;
-    child.stdout.on('data', (chunk: Buffer) => { stdout.push(chunk); lastProgress = Date.now(); });
-    child.stderr.on('data', (chunk: Buffer) => { stderr.push(chunk); lastProgress = Date.now(); });
+    child.stdout.on('data', collect(stdout));
+    child.stderr.on('data', collect(stderr));
     child.on('error', (error) => {
       if (settled) return;
       settled = true;
@@ -386,6 +396,7 @@ export async function runExtractionCommand(
       reject(error);
     });
     child.on('close', (code) => {
+      notePipeBytes?.(-pipeBytes);
       if (settled) return;
       settled = true;
       if (timer) clearInterval(timer);

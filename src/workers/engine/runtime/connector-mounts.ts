@@ -32,6 +32,7 @@ export interface ConnectorStoreMountParsingOptions {
   /** A runtime read declaration waits for ingestion to create its store. */
   existingOnly?: boolean;
   reportFailure?: (message: string) => void;
+  onMountFailure?: (corpusId: string, error: unknown) => void;
   collidingStores?: readonly LocalConnectorStore[];
   /**
    * The corpus registry's corpora: a declaration names no source, so its
@@ -78,7 +79,9 @@ export function createConnectorStoreMountDiscovery(raw: string | undefined, opti
   storeOwner(): StoreFileOwner;
   reportFailure?(message: string): void;
   now?(): number;
-}): () => ConnectorStoreMount[] {
+  /** The front supplies its own retry schedule and selects declarations by corpus id. */
+  onMountFailure?: ConnectorStoreMountParsingOptions['onMountFailure'];
+}): (only?: ReadonlySet<string>) => ConnectorStoreMount[] {
   // Local, not module-level: startup runs this factory while the module is
   // paused at the entrypoint's top-level await, before later bindings exist.
   const retryBaseMs = 5_000;
@@ -96,15 +99,17 @@ export function createConnectorStoreMountDiscovery(raw: string | undefined, opti
   let previousStores: readonly LocalConnectorStore[] | undefined;
   let pending: readonly ValidatedConnectorStoreMountDeclaration[] = declarations;
   const failed = new Map<ValidatedConnectorStoreMountDeclaration, { attempts: number; retryAt: number }>();
-  return () => {
+  return (only) => {
     const stores = options.stores();
     if (!previousStores || previousStores.length !== stores.length || stores.some((store, i) => store !== previousStores![i])) {
       pending = declarations;
       previousStores = [...stores];
     }
     const time = now();
-    const due = [...failed].filter(([declaration, failure]) => failure.retryAt <= time && !pending.includes(declaration));
-    const candidates = due.length ? [...pending, ...due.map(([declaration]) => declaration)] : pending;
+    const due = options.onMountFailure ? [] : [...failed].filter(([declaration, failure]) => failure.retryAt <= time && !pending.includes(declaration));
+    const candidates = only
+      ? declarations.filter(({ corpusId }) => only.has(corpusId))
+      : [...pending.filter((declaration) => !options.onMountFailure || !failed.has(declaration)), ...due.map(([declaration]) => declaration)];
     if (!candidates.length) return [];
     const byCorpus = new Map(stores.map(store => [store.corpusId, store]));
     const ready: ValidatedConnectorStoreMountDeclaration[] = [];
@@ -114,11 +119,12 @@ export function createConnectorStoreMountDiscovery(raw: string | undefined, opti
       if (byCorpus.has(declaration.corpusId) || (!placed && (!declaration.dbPath || existsSync(declaration.dbPath)))) ready.push(declaration);
       else absent.push(declaration);
     }
-    pending = absent;
+    pending = only ? [...pending.filter(({ corpusId }) => !only.has(corpusId)), ...absent] : absent;
     if (!ready.length) return [];
     const mounts = mountConnectorStoreDeclarations(ready, {
       existingOnly: true, collidingStores: stores, registeredCorpora: options.registeredCorpora(),
       storeOwner: options.storeOwner(), reportFailure,
+      ...(options.onMountFailure ? { onMountFailure: options.onMountFailure } : {}),
     });
     const mounted = new Set(mounts.map(mount => mount.store.corpusId));
     for (const declaration of ready) {
@@ -237,8 +243,8 @@ function mountConnectorStoreDeclarations(
         ...(declaration.chatPrincipal ? { chatPrincipal: declaration.chatPrincipal } : {}),
       });
     } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      reportFailure(`Connector-store mount ${declaration.corpusId} skipped: ${detail}`);
+      if (options.onMountFailure) options.onMountFailure(declaration.corpusId, error);
+      else reportFailure(`Connector-store mount ${declaration.corpusId} skipped: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
   return mounts;

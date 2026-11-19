@@ -1,3 +1,4 @@
+import { changeMemoryCounter } from '../core/memory-counters.ts';
 import { SOURCE_RATE_LIMITED } from '../core/provider-rate-limits.ts';
 import { ReadwiseApiError } from './readwise/api.ts';
 import { createHash } from 'node:crypto';
@@ -660,11 +661,14 @@ export class SourceScheduler {
   updateSources(sources: SourceSchedulerSource[], now: Date = this.now()): void {
     const existing = new Map(this.states.map((state) => [schedulerStateKey(state.source, state.task), state]));
     const firstRun = now.getTime();
+    let newWorkDue = false;
     this.sources = this.filterAllowedSources(sources);
     this.states = this.sources.flatMap((source) => source.tasks.map((task) => {
       const previous = existing.get(schedulerStateKey(source, task));
       if (!previous) {
-        return this.createTaskState(source, task, firstRun);
+        const state = this.createTaskState(source, task, firstRun);
+        newWorkDue ||= taskCadence(source, task) === 'continuous' && state.nextRunAt <= firstRun;
+        return state;
       }
       // Preserve object identity while a task is running. The active execution
       // and future ticks must observe one shared `running` bit across refreshes.
@@ -674,6 +678,9 @@ export class SourceScheduler {
     }));
     if (this.timer) this.refreshFastWakeTimers();
     this.syncChangeSubscriptions();
+    // A source admitted after boot is already due. The split front may not
+    // see it in the background's status snapshot when it requests first sync.
+    if (newWorkDue) this.scheduleContinueWake(firstRun);
   }
 
   private filterAllowedSources(sources: SourceSchedulerSource[]): SourceSchedulerSource[] {
@@ -863,15 +870,20 @@ export class SourceScheduler {
    * Brings every task of `kind` forward to run within seconds, for when
    * something those tasks wait on has just become available (a built-in
    * reader finished installing, so extraction can read what it left unread).
-   * Generic: no source is named. A task running right now is marked and runs
+   * A readiness event may name the affected sources. A task running right now is marked and runs
    * again within seconds of completing. A task in a failure backoff keeps its
    * backoff, and a manual-cadence task runs only when the owner runs it.
    * Returns how many tasks were woken.
    */
-  wakeTasksOfKind(kind: SourceSchedulerTaskKind, at: number = this.now().getTime()): number {
+  wakeTasksOfKind(
+    kind: SourceSchedulerTaskKind,
+    at: number = this.now().getTime(),
+    sourceIds?: ReadonlySet<string>,
+  ): number {
     let woke = 0;
     for (const state of this.states) {
       if (state.task.kind !== kind || state.consecutiveFailures > 0) continue;
+      if (sourceIds && !sourceIds.has(state.source.sourceId)) continue;
       if (taskCadence(state.source, state.task) !== 'continuous') continue;
       if ((state.retryNotBeforeAt ?? 0) > at) continue;
       if (state.running) {
@@ -879,8 +891,7 @@ export class SourceScheduler {
         woke += 1;
         continue;
       }
-      if (state.nextRunAt <= at) continue;
-      state.nextRunAt = at;
+      state.nextRunAt = Math.min(state.nextRunAt, at);
       woke += 1;
     }
     if (woke > 0) this.scheduleContinueWake(at);
@@ -1150,10 +1161,12 @@ export class SourceScheduler {
       if (this.stops !== stops) return;
     }
     this.executingStates.add(state);
+    changeMemoryCounter(`tasks_${state.task.kind}`, 1);
     const leave = controlPathHeadroom.enter(`${state.source.sourceId}/${state.task.kind}`);
     try {
       await this.runTask(state, dueAt, provenance);
     } finally {
+      changeMemoryCounter(`tasks_${state.task.kind}`, -1);
       leave();
     }
   }
@@ -2040,6 +2053,10 @@ export const EMBEDDING_SWEEP_INTERVAL_MS = 60_000;
  * failed call to a provider that is down costs next to nothing.
  */
 export const EMBEDDING_SWEEP_MAX_BACKOFF_MS = 5 * 60_000;
+/** Set to `off` to walk every store on every pass again (see embeddingSweepTask); for comparing the two on one build. */
+export const EMBEDDING_SWEEP_IDLE_BACKOFF_ENV = 'OLYMPUS_EMBEDDING_SWEEP_IDLE_BACKOFF';
+/** A resting store is still walked in full this often. */
+export const EMBEDDING_SWEEP_IDLE_FULL_PASS_MS = 30 * 60_000;
 /** Items per store per sweep pass. */
 export const EMBEDDING_SWEEP_MAX_ITEMS = 32;
 /**
@@ -2149,6 +2166,25 @@ function embeddingSweepTask(
   const tricklingTarget = (target: ConnectorStoreEmbeddingTarget): boolean => {
     try { return trickle?.(target) === true; } catch { return false; }
   };
+  // Idle back-off (OLYMPUS_EMBEDDING_SWEEP_IDLE_BACKOFF=off turns it off): a pass over a caught-up store walks
+  // every chunk twice (the inventory, then the search for missing vectors),
+  // once a minute, and finds nothing. A store whose last pass found nothing
+  // to do is not walked again until something that could give it work moved:
+  // a write to its items, chunks or vectors, its tier visibility, its queue,
+  // or the target's model and scope. A new item moves the write sequence, so
+  // it is embedded on the next pass as before. A full pass still runs every
+  // EMBEDDING_SWEEP_IDLE_FULL_PASS_MS for anything the markers do not see.
+  const idleBackoff = process.env[EMBEDDING_SWEEP_IDLE_BACKOFF_ENV]?.trim() !== 'off';
+  // Remembered per store and per target: one store can be swept under two targets.
+  const quiet = new WeakMap<object, Map<string, { key: string; at: number; run: Awaited<ReturnType<typeof embedPendingChunks>>[number] }>>();
+  const quietSlot = (target: ConnectorStoreEmbeddingTarget): string => JSON.stringify([target.provider.modelId, target.provider.epochId ?? null,
+    target.wholeStore === true, target.accountScope ?? null, target.filters ?? null]);
+  const quietKey = (target: ConnectorStoreEmbeddingTarget): string | undefined => {
+    // A store that cannot say whether it was written to never rests.
+    const writes = target.store.writeSequence?.();
+    if (writes === undefined || typeof target.store.visibilityMarker !== 'function') return undefined;
+    return JSON.stringify([writes, target.store.visibilityMarker()]);
+  };
   return {
     id: `${source.sourceId}_embeddings`,
     kind: 'embed',
@@ -2165,9 +2201,20 @@ function embeddingSweepTask(
       const passTargets = targets();
       const runs: Awaited<ReturnType<typeof embedPendingChunks>> = [];
       let trickled = false;
+      const restedRuns = new Set<number>();
       for (const target of passTargets) {
         const paced = tricklingTarget(target);
         trickled ||= paced;
+        const keyBefore = idleBackoff ? quietKey(target) : undefined;
+        const slot = idleBackoff ? quietSlot(target) : '';
+        const rested = keyBefore === undefined ? undefined : quiet.get(target.store)?.get(slot);
+        if (rested && rested.key === keyBefore && Date.now() - rested.at < EMBEDDING_SWEEP_IDLE_FULL_PASS_MS
+          && target.store.queuedEmbeddingItemIds().length === 0 && target.store.embeddingDeferredReason() === undefined) {
+          runs.push(rested.run);
+          restedRuns.add(runs.length - 1);
+          continue;
+        }
+        quiet.get(target.store)?.delete(slot);
         const overran = Symbol('overran');
         let timer: ReturnType<typeof setTimeout> | undefined;
         // The pass stops starting batches at half the deadline, so a store
@@ -2190,6 +2237,18 @@ function embeddingSweepTask(
           const outage = target.store.embeddingDeferredReason();
           runs.push(...result.map((run) => run.busy === true && run.deferredReason === undefined && outage !== undefined
             ? { ...run, deferredReason: outage } : run));
+          // Nothing to do and nothing moved while the pass ran: the store rests until a marker moves.
+          const only = result.length === 1 ? result[0]! : undefined;
+          if (keyBefore !== undefined && only && outage === undefined && only.busy !== true && only.deferredReason === undefined
+            && only.stoppedAtDeadline !== true && only.itemsAttempted === 0 && only.chunksEmbedded === 0 && only.itemsFailed === 0
+            && only.itemsOutOfScope === 0 && only.inventory?.inventory_complete === 1
+            // An item whose embedding failed for good is skipped by every pass and
+            // stays reported as failed: it is not work, so it does not keep the
+            // store walked. A change to it moves the write sequence and wakes the store.
+            && quietKey(target) === keyBefore) {
+            const slots = quiet.get(target.store) ?? new Map();
+            quiet.set(target.store, slots.set(slot, { key: keyBefore, at: Date.now(), run: only }));
+          }
           continue;
         }
         target.store.setEmbeddingDeferral(EMBEDDING_PROVIDER_UNAVAILABLE_REASON);
@@ -2222,6 +2281,7 @@ function embeddingSweepTask(
           skipped_deferred_items: run.deferredReason ? run.itemsAttempted : 0,
           stores_deferred: run.deferredReason ? 1 : 0, stores_lease_busy: run.busy ? 1 : 0,
           stopped_at_deadline: run.stoppedAtDeadline ? 1 : 0,
+          ...(idleBackoff ? { rested: restedRuns.has(index) ? 1 : 0 } : {}),
         },
       }));
       const attemptedAt = Date.parse(context?.attemptedAt ?? '') || Date.now();

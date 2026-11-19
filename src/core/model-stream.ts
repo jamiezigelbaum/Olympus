@@ -1,3 +1,4 @@
+import { addMemoryPayloadBytes, addMemoryPayloadText } from './memory-counters.ts';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { fetchModelEndpoint, type ModelTransportFetch } from './model-transport.ts';
 import { noteSourceAnswerProgress } from './source-answer-jobs.ts';
@@ -53,6 +54,7 @@ export async function fetchStreamingModel(
     }
   };
   try {
+    if (typeof init.body === 'string') addMemoryPayloadText(init.body);
     const response = await Promise.race([fetchModelEndpoint(fetchImpl, url, { ...init, signal: controller.signal }), stopped]);
     if (!response.body) return response;
     reader = response.body.getReader();
@@ -95,6 +97,7 @@ export async function fetchStreamingModel(
         throw error;
       }
       if (next.done) break;
+      addMemoryPayloadBytes(next.value.byteLength);
       if (next.value.byteLength) { arm(); progress.getStore()?.(model); }
       const text = decoder.decode(next.value, { stream: true });
       if (!sse) { raw += text; continue; }

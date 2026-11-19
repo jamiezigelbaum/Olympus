@@ -1,26 +1,31 @@
+import type { MemoryActivity } from '../../core/memory-counters.ts';
 /**
  * The engine split's wiring for the worker's `main()` (server.ts): the
  * background's command socket and status publisher, and the front's command
  * client, owner-busy relay and snapshot reader. Kept here so `main()` only
  * chooses by role (core/engine-split.ts).
  */
-import { readBootProgress, type BootProgress } from '../../core/boot-progress.ts';
+import { readBootProgressAsync, type BootProgress } from '../../core/boot-progress.ts';
 import { engineHeartbeatBeating, engineHeartbeatLine, processAlive, readEngineHeartbeat } from '../../core/engine-heartbeat.ts';
 import { engineStartingAnswer, engineStartingResponse } from '../../core/worker-front-proxy.ts';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
-import { lstatSync, rmSync } from 'node:fs';
-import { ENGINE_BACKGROUND_ORIGIN, ENGINE_BACKGROUND_SOCKET_ENV, ENGINE_MODEL_COMPLETE_PATH, prepareEngineBackgroundSocketDirectory } from '../../core/engine-split.ts';
+import { lstatSync } from 'node:fs';
+import { ENGINE_BACKGROUND_ORIGIN, ENGINE_BACKGROUND_SOCKET_ENV, ENGINE_MODEL_COMPLETE_PATH, prepareEngineBackgroundSocketDirectory, probeEngineBackground } from '../../core/engine-split.ts';
 import type { AnalystModelCompletion, AnalystModelRequest } from '../../core/analyst.ts';
 import { OperationError, type OperationErrorCode } from '../../core/operation-error.ts';
 import { sharedDataPath } from '../../core/olympus-layout.ts';
 import { removeFileDurablySync } from '../../core/atomic-file.ts';
-import { bindWorkerSocket, createUnixSocketFetch, prepareWorkerSocket, releaseSystemdWorkerSocket, workerSocketListenerStopped, workerSocketServe } from '../../core/worker-transport.ts';
+import { bindWorkerSocket, createUnixSocketFetch, prepareWorkerSocket, releaseSystemdWorkerSocket, WORKER_SOCKET_SERVE_OPTIONS, workerSocketListenerStopped, workerSocketServe } from '../../core/worker-transport.ts';
 import { EngineCommandClient, OwnerBusyRelay } from './client.ts';
+import { clickTraces, PRIVACY_ITEM_SET_PATH, type ClickTrace } from './click-trace.ts';
 import { startEngineControlPlane, type EngineControlPlane } from './control-plane.ts';
 import { currentLocalInferencePriority } from '../answer-activity.ts';
-import { createEngineCommandHandler, ENGINE_FORWARDED_ROUTES, EngineCommandLedger, requestToForwarded, type EngineCommandHandlers, type EngineForwardedKind, type EngineForwardedResponse } from './commands.ts';
-import { ENGINE_STATUS_STALE_MS, readEngineStatusSnapshot, startEngineStatusPublisher, type EngineStatusRead, type EngineStatusSnapshot } from './snapshot.ts';
+import { createEngineCommandHandler, ENGINE_FORWARDED_ROUTES, EngineCommandLedger, requestToForwarded, type EngineCommandHandlers, type EngineCommandReceipt, type EngineForwardedKind, type EngineForwardedRequest, type EngineForwardedResponse } from './commands.ts';
+import { engineStatusAge, readEngineStatusSnapshotAsync, startEngineStatusPublisher, type EngineStatusRead, type EngineStatusSnapshot } from './snapshot.ts';
+import { parseOwnerTierItemId } from '../classification/tier-owner-items.ts';
+import type { PendingItemProtection } from '../connector-store/tier-visibility.ts';
+import { DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER } from '../http.ts';
 
 export function engineBackgroundSocketFromEnv(env: Record<string, string | undefined>): string {
   const path = env[ENGINE_BACKGROUND_SOCKET_ENV]?.trim();
@@ -153,7 +158,7 @@ export function startEngineBackgroundStatus(input: {
  * changes nothing.
  */
 export function backgroundBootDone(boot: BootProgress | undefined, alive: (pid: number) => boolean = processAlive): boolean {
-  return boot?.phase === 'done' && alive(boot.pid);
+  return boot?.phase === 'done' && Number.isSafeInteger(boot.pid) && boot.pid > 0 && alive(boot.pid);
 }
 
 /**
@@ -168,55 +173,55 @@ export async function waitForBackgroundBootDone(input: {
   env: Record<string, string | undefined>;
   pollMs?: number;
   sleep?: (ms: number) => Promise<void>;
-  read?: () => BootProgress | undefined;
+  read?: () => BootProgress | undefined | Promise<BootProgress | undefined>;
   alive?: (pid: number) => boolean;
 }): Promise<void> {
   const sleep = input.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
-  const read = input.read ?? (() => readBootProgress(input.env));
-  while (!backgroundBootDone(read(), input.alive)) await sleep(input.pollMs ?? 250);
+  const read = input.read ?? (() => readBootProgressAsync(input.env));
+  while (!backgroundBootDone(await read(), input.alive)) await sleep(input.pollMs ?? 250);
 }
 
 /**
- * What the front answers while it waits for the background's boot: it
- * listens at once, so the upgrade's wait and the dashboard read a real
- * answer ("starting", with what the background says it is doing) rather than
- * a socket that is not there. Stopped just before the front's own server binds.
+ * The front listens at once and answers "starting" with its boot progress.
+ * Once ready it reloads the fetch handler on this same listener.
  */
 export function listenWhileStarting(input: {
   env: Record<string, string | undefined>;
   hostname: string;
   port: number;
   log?: (line: string) => void;
-}): { stop(): void } {
+}): { socketPath: string | undefined; server: Bun.Server<undefined> } | undefined {
   const answer = (request: Request) => engineStartingResponse(request, input.env);
   try {
     if (releaseSystemdWorkerSocket()) (input.log ?? console.warn)('[olympus:worker] removed the socket left by the previous worker run');
     const socketPath = prepareWorkerSocket();
     const server = socketPath
       ? bindWorkerSocket(socketPath, () => Bun.serve(workerSocketServe({ unix: socketPath, fetch: answer })))
-      : Bun.serve({ hostname: input.hostname, port: input.port, fetch: answer });
-    return {
-      stop: () => {
-        void server.stop(true);
-        if (socketPath) rmSync(socketPath, { force: true });
-      },
-    };
+      : Bun.serve({ hostname: input.hostname, port: input.port, ...WORKER_SOCKET_SERVE_OPTIONS, fetch: answer });
+    return { socketPath, server };
   } catch (error) {
     // Not listening yet is what the front did before: its own server reports a bind failure.
     (input.log ?? console.warn)(`[engine-split] the front could not answer while starting: ${error instanceof Error ? error.message : String(error)}`);
-    return { stop: () => {} };
+    return undefined;
   }
 }
 
 export interface EngineFront {
   client: EngineCommandClient;
   ownerBusy: OwnerBusyRelay;
-  /** The background's last status snapshot and its age; read from disk at most once a second. */
+  /** The background's last status snapshot and its age; refreshed asynchronously at most once a second. */
   status(): EngineStatusRead | undefined;
+  refreshStatus(): Promise<void>;
+  /** The last snapshot read, with no disk read and no refresh. */
+  cachedSnapshot(): EngineStatusRead['snapshot'] | undefined;
+  /** The polled activity, with no disk read or status refresh on the log path. */
+  backgroundActivity(): MemoryActivity;
   /** One built-in model completion, run by the background, which holds the model. */
   completeModel(request: AnalystModelRequest): Promise<AnalystModelCompletion>;
   /** Whether the background's boot work is done and its process is alive, busy or not (the front's health reports it). */
   backgroundReady(): Promise<boolean>;
+  /** Keep the starting listener in place while the previous front's Private clicks can still commit. */
+  waitForPendingPrivacyRaises(): Promise<void>;
   stop(): void;
 }
 
@@ -242,35 +247,49 @@ export function createEngineFront(input: {
   });
   relay = new OwnerBusyRelay(client, (line) => console.warn(line));
   const path = engineStatusSnapshotPath(input.env);
-  let cached: { at: number; read: EngineStatusRead | undefined } | undefined;
-  const judged = (read: EngineStatusRead, age: number): EngineStatusRead => {
-    const old = age > ENGINE_STATUS_STALE_MS;
-    if (!old && answering && answering.instance !== read.snapshot.instance_id && Date.parse(read.snapshot.written_at) > answering.at) {
-      answering = { instance: read.snapshot.instance_id, at: Date.parse(read.snapshot.written_at) };
+  let cached: EngineStatusSnapshot | undefined;
+  let lastReadAt = -Infinity;
+  let pending: Promise<void> | undefined;
+  let stopped = false;
+  const judged = (snapshot: EngineStatusSnapshot, at: number): EngineStatusRead => {
+    const read = engineStatusAge(snapshot, at);
+    const written = Date.parse(snapshot.written_at);
+    if (!read.stale && answering && answering.instance !== snapshot.instance_id && written > answering.at) {
+      answering = { instance: snapshot.instance_id, at: written };
     }
-    return {
-      ...read, age_ms: age, state_age_ms: (read.state_age_ms ?? read.age_ms) + (age - read.age_ms),
-      stale: old || (answering !== undefined && answering.instance !== read.snapshot.instance_id),
-    };
+    return { ...read, stale: read.stale || (answering !== undefined && answering.instance !== snapshot.instance_id) };
+  };
+  const refreshStatus = async () => {
+    if (pending) return pending;
+    const at = now();
+    if (stopped || at - lastReadAt < 1_000) return;
+    lastReadAt = at;
+    pending = readEngineStatusSnapshotAsync(path).then((snapshot) => {
+      if (stopped) return;
+      cached = snapshot;
+      if (snapshot && !judged(snapshot, now()).stale) relay?.observeInstance(snapshot.instance_id);
+    }).finally(() => { pending = undefined; });
+    return pending;
   };
   const status = (): EngineStatusRead | undefined => {
-    const at = now();
-    if (cached && at - cached.at < 1_000) {
-      return cached.read ? judged(cached.read, cached.read.age_ms + (at - cached.at)) : undefined;
-    }
-    const read = readEngineStatusSnapshot(path, now);
-    cached = { at, read };
-    if (read) relay?.observeInstance(read.snapshot.instance_id);
-    return read ? judged(read, read.age_ms) : undefined;
+    void refreshStatus();
+    return cached ? judged(cached, now()) : undefined;
   };
   // Notice a background restart even when no page asks for status, so the
   // owner-busy signal reaches the new judge.
-  const poll = setInterval(() => { status(); }, 2_000);
+  const poll = setInterval(() => { void refreshStatus(); }, 2_000);
   poll.unref?.();
   const completeModel = (request: AnalystModelRequest) => completeModelInBackground(fetchBackground, input.authToken, request);
   // Busy is not unreachable: the background's receipt and heartbeat say it is up.
-  const backgroundReady = async () => backgroundBootDone(readBootProgress(input.env));
-  return { client, ownerBusy: relay, status, completeModel, backgroundReady, stop: () => { clearInterval(poll); relay?.stop(); } };
+  const backgroundReady = async () => backgroundBootDone(await readBootProgressAsync(input.env));
+  const waitForPendingPrivacyRaises = async () => {
+    // The control thread can answer even when the background's loop is held.
+    // This only bounds each readiness probe. The writer keeps applying its commands.
+    const probeMs = 250;
+    while (!await probeEngineBackground(fetchBackground, input.authToken, undefined, probeMs, true)) await Bun.sleep(probeMs);
+  };
+  return { client, ownerBusy: relay, status, refreshStatus, cachedSnapshot: () => cached, backgroundActivity: () => cached?.activity ?? 'idle', completeModel, backgroundReady,
+    waitForPendingPrivacyRaises, stop: () => { stopped = true; clearInterval(poll); relay?.stop(); } };
 }
 
 // How long the front waits on a background that has stopped answering. A
@@ -380,6 +399,7 @@ export function createEngineFrontRoutes(input: {
   gate: FrontGate;
   restartFront: () => void;
   timeoutMs?: number;
+  pendingItemProtection?: PendingItemProtection;
   /** This front's process, which the background waits out before it deletes. */
   pid?: number;
   /**
@@ -390,17 +410,14 @@ export function createEngineFrontRoutes(input: {
   afterAnswer?: (kind: EngineForwardedKind) => void;
 }): (request: Request) => Promise<Response | undefined> | undefined {
   const pid = input.pid ?? process.pid;
-  /** The background's answer, or why there is none: the command was not answered, or it failed there. */
-  const exchange = async (kind: EngineForwardedKind, request: Request): Promise<
-    { answer: EngineForwardedResponse } | { unanswered: string } | { failed: string }
-  > => {
-    const forwarded = await requestToForwarded(request);
+  type Outcome = { answer: EngineForwardedResponse } | { unanswered: string } | { failed: string };
+  const exchange = async (kind: EngineForwardedKind, forwarded: EngineForwardedRequest, onReceived?: (receipt: EngineCommandReceipt) => void, clickTrace?: ClickTrace): Promise<Outcome> => {
     let receipt;
     try {
       receipt = await input.client.send(
         { kind, request: forwarded, ...(kind === 'delete_source_data' ? { frontPid: pid } : {}) },
         // Extraction and embedding batches can run for minutes, as they did in the one process.
-        { timeoutMs: input.timeoutMs ?? (kind === 'data_export' ? DATA_EXPORT_WAIT_MS : kind === 'source_sync' ? SOURCE_SYNC_WAIT_MS : kind === 'extraction_queue' || kind === 'embed_chunks' ? 15 * 60_000 : OWNER_ACTION_WAIT_MS) },
+        { timeoutMs: input.timeoutMs ?? (kind === 'data_export' ? DATA_EXPORT_WAIT_MS : kind === 'source_sync' ? SOURCE_SYNC_WAIT_MS : kind === 'extraction_queue' || kind === 'embed_chunks' ? 15 * 60_000 : OWNER_ACTION_WAIT_MS), ...(onReceived ? { onReceived } : {}), ...(clickTrace ? { clickTrace } : {}) },
       );
     } catch (error) {
       return { unanswered: error instanceof Error ? error.message : 'The background engine is not answering.' };
@@ -408,26 +425,87 @@ export function createEngineFrontRoutes(input: {
     if (receipt.state !== 'done') return { failed: receipt.error ?? 'The background could not run this.' };
     return { answer: receipt.result as EngineForwardedResponse };
   };
-  const send = async (kind: EngineForwardedKind, request: Request): Promise<Response> => {
-    const outcome = await exchange(kind, request);
+  const responseFor = (outcome: Outcome): Response => {
     if ('unanswered' in outcome) return Response.json({ error: { code: 'engine_background_unavailable', message: outcome.unanswered } }, { status: 503 });
     if ('failed' in outcome) return Response.json({ error: { code: 'engine_background_failed', message: outcome.failed } }, { status: 502 });
-    try { input.afterAnswer?.(kind); } catch { /* the front's own timer re-reads it */ }
     return new Response(outcome.answer.body, { status: outcome.answer.status, headers: outcome.answer.headers });
+  };
+  const answer = (kind: EngineForwardedKind, outcome: Outcome): Response => {
+    if ('answer' in outcome) {
+      try { input.afterAnswer?.(kind); } catch { /* the front's own timer re-reads it */ }
+    }
+    return responseFor(outcome);
+  };
+  // The dashboard sees the same command status the client receives from the
+  // socket. Keep active ids through a background restart and retain recent
+  // results in memory so a browser poll can still see the outcome.
+  const pendingPrivacyItems = new Set<string>();
+  const settledPrivacyItems = new Map<string, Outcome>();
+  const pending = (id: string, status: number) => Response.json(
+    { ok: true, request_id: id, state: 'pending' }, { status, headers: { 'Cache-Control': 'no-store' } },
+  );
+  const changePrivacyItem = async (request: Request, protection: PendingItemProtection): Promise<Response> => {
+    const forwarded = await requestToForwarded(request);
+    const body = await new Response(forwarded.body).json().then(
+      value => value as { item_id?: unknown; tier?: unknown } | null,
+      () => null, // The background returns the route's validation error.
+    );
+    let identity: ReturnType<typeof parseOwnerTierItemId> | undefined;
+    if (body?.tier === 'private' && typeof body.item_id === 'string' && body.item_id.trim()) {
+      try {
+        identity = parseOwnerTierItemId(body.item_id);
+      } catch (error) {
+        if (!(error instanceof OperationError)) throw error;
+        return Response.json({ error: error.toJSON() }, { status: 400 });
+      }
+    }
+    const received = Promise.withResolvers<Response>();
+    let id: string | undefined;
+    let release: (() => void) | undefined;
+    const settling = exchange('tier_override', forwarded, (receipt) => {
+      id = receipt.id;
+      if (identity) release = protection.hold(identity);
+      pendingPrivacyItems.add(id);
+      received.resolve(pending(id, 202));
+    }, clickTraces.get(request)).then(outcome => {
+      release?.();
+      if (id) {
+        pendingPrivacyItems.delete(id);
+        settledPrivacyItems.set(id, outcome);
+        if (settledPrivacyItems.size > 1_000) settledPrivacyItems.delete(settledPrivacyItems.keys().next().value!);
+      }
+      return outcome;
+    });
+    return Promise.race([received.promise, settling.then(outcome => answer('tier_override', outcome))]);
+  };
+  const privacyItemStatus = async (request: Request): Promise<Response> => {
+    const id = (await request.json().then(value => value as { request_id?: unknown } | null, () => null))?.request_id;
+    if (typeof id === 'string') {
+      if (pendingPrivacyItems.has(id)) return pending(id, 200);
+      const outcome = settledPrivacyItems.get(id);
+      if (outcome) return responseFor(outcome);
+    }
+    // A restart lost the receipt: the page reloads the item's true state and says so.
+    return Response.json({ ok: false, unknown: true, message: 'Not saved. Olympus restarted before this change was saved. Press again.' }, { status: 404 });
   };
   return (request) => {
     if (request.method !== 'POST') return undefined;
     const path = new URL(request.url).pathname;
+    if (input.pendingItemProtection && (path === PRIVACY_ITEM_SET_PATH || path === '/dashboard/privacy/items/status')
+      && request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local') {
+      if (!input.gate.isOpen()) return Promise.resolve(restartingResponse(request));
+      return path.endsWith('/status') ? privacyItemStatus(request) : changePrivacyItem(request, input.pendingItemProtection);
+    }
     const kind = forwardedKindFor(path);
     if (!kind) return undefined;
     return (async (): Promise<Response | undefined> => {
       if (!input.gate.isOpen()) return restartingResponse(request);
       if (path === '/v1/cli/tier' && tierCommandOnlyReads(await request.clone().text())) return undefined;
-      if (kind !== 'delete_source_data') return send(kind, request);
+      if (kind !== 'delete_source_data') return answer(kind, await exchange(kind, await requestToForwarded(request)));
       input.gate.close();
       let outcome: Awaited<ReturnType<typeof exchange>>;
       try {
-        outcome = await exchange(kind, request);
+        outcome = await exchange(kind, await requestToForwarded(request));
       } catch {
         outcome = { unanswered: 'The delete could not be sent.' };
       }

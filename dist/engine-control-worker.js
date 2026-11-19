@@ -1,7 +1,7 @@
 // @bun
 // src/workers/engine-split/control-worker.ts
 import { chmodSync } from "fs";
-import { open, rename } from "fs/promises";
+import { rename, utimes, writeFile } from "fs/promises";
 
 // src/core/operation-error.ts
 class OperationError extends Error {
@@ -81,7 +81,7 @@ function linuxDesktopEntryPaths(layout) {
 }
 
 // src/core/linux-engine-layout.ts
-import { lstatSync, mkdirSync, readFileSync as readFileSync2, readdirSync, realpathSync } from "fs";
+import fs, { mkdirSync, realpathSync } from "fs";
 import { homedir as homedir2 } from "os";
 import { dirname as dirname2, isAbsolute as isAbsolute2, join as join3, relative, resolve, sep } from "path";
 
@@ -111,6 +111,12 @@ function validatedBootId(platform, value) {
 }
 
 // src/core/linux-engine-layout.ts
+var layoutMemo = new Map;
+var receiptMemo = new Map;
+function memoEnabled() {
+  const role = process.env.OLYMPUS_WORKER_ENGINE_ROLE?.trim();
+  return process.env.OLYMPUS_ENGINE_HOST === "1" || role === "front" || role === "background";
+}
 function absolute(value, name) {
   if (!isAbsolute2(value) || /[\x00-\x1f\x7f]/.test(value))
     throw new Error(`${name} must be an absolute path without control characters.`);
@@ -134,7 +140,7 @@ function rawLayout(env, recordedDataDir) {
     const info = stat(path);
     if (!info)
       return false;
-    return !info.isDirectory() || info.isSymbolicLink() || readdirSync(path).some((name) => path !== xdgDataDir || name !== "engine");
+    return !info.isDirectory() || info.isSymbolicLink() || fs.readdirSync(path).some((name) => path !== xdgDataDir || name !== "engine");
   };
   const dataDir = recordedDataDir ?? (hasData(xdgDataDir) ? xdgDataDir : legacyDirs.find(hasData) ?? xdgDataDir);
   const stateDir = join3(stateHome, "olympus/engine"), cacheDir = join3(cacheHome, "olympus/engine");
@@ -175,7 +181,7 @@ function rawLayout(env, recordedDataDir) {
 }
 function stat(path) {
   try {
-    return lstatSync(path);
+    return fs.lstatSync(path);
   } catch (e) {
     if (e.code === "ENOENT")
       return;
@@ -216,12 +222,20 @@ function assertLinuxManagedPath(path, uid = process.getuid(), leaf = "file") {
   }
 }
 function readLinuxEngineReceipt(path, uid = process.getuid()) {
+  if (!memoEnabled())
+    return readLinuxEngineReceiptFromDisk(path, uid);
+  const key = JSON.stringify([path, uid]);
+  if (!receiptMemo.has(key))
+    receiptMemo.set(key, readLinuxEngineReceiptFromDisk(path, uid));
+  return structuredClone(receiptMemo.get(key));
+}
+function readLinuxEngineReceiptFromDisk(path, uid) {
   if (!stat(path))
     return;
   assertLinuxManagedPath(path, uid);
-  if ((lstatSync(path).mode & 63) !== 0)
+  if ((fs.lstatSync(path).mode & 63) !== 0)
     throw new Error(`${path} must be private (0600).`);
-  const receipt = JSON.parse(readFileSync2(path, "utf8"));
+  const receipt = JSON.parse(fs.readFileSync(path, "utf8"));
   if (receipt.schema !== "olympus.engine.install.v1" || receipt.uid !== uid || !receipt.layout)
     throw new Error(`${path} is a foreign or invalid install receipt.`);
   if (!["installed", "recovery_pending", "data_retained"].includes(receipt.installationState))
@@ -265,13 +279,26 @@ function resolveLinuxEngineLayout(env = process.env) {
   const home = absolute(env.HOME || homedir2(), "HOME");
   const configHome = absolute(env.XDG_CONFIG_HOME || join3(home, ".config"), "XDG_CONFIG_HOME");
   const candidates = [...new Set([join3(home, ".config/olympus/install-receipt.json"), join3(configHome, "olympus/install-receipt.json")])];
+  const memo = memoEnabled();
+  const uid = process.getuid?.();
+  const key = JSON.stringify([home, configHome, env.XDG_DATA_HOME || "", env.XDG_STATE_HOME || "", env.XDG_CACHE_HOME || "", env.XDG_RUNTIME_DIR || "", candidates, uid]);
+  const cached = memo ? layoutMemo.get(key) : undefined;
+  if (cached)
+    return { ...cached };
   const present = candidates.filter((p) => stat(p));
   if (present.length > 1)
     throw new Error(`Found multiple Olympus install receipts: ${present.join(", ")}. Select one installation after moving the other aside.`);
   const receipt = present[0] ? readLinuxEngineReceipt(present[0]) : undefined;
   if (receipt && receipt.layout.home !== home)
     throw new Error(`${present[0]} belongs to another home.`);
-  return receipt?.layout ?? rawLayout(env);
+  const layout = receipt?.layout ?? rawLayout(env);
+  if (memo) {
+    layoutMemo.set(key, { ...layout });
+    for (const path of candidates)
+      if (!present.includes(path))
+        receiptMemo.set(JSON.stringify([path, uid]), undefined);
+  }
+  return layout;
 }
 function standaloneLinuxDataDir(env = process.env) {
   if (process.platform !== "linux")
@@ -422,11 +449,24 @@ function whatsappStateDirs() {
 
 // src/core/engine-split.ts
 var ENGINE_READY_PATH = "/engine/ready";
+var ENGINE_PRIVACY_READY_QUERY = "privacy_raises_settled";
 var ENGINE_COMMANDS_PATH = "/engine/commands";
 var ENGINE_MODEL_COMPLETE_PATH = "/engine/model/complete";
 
 // src/workers/http.ts
 import { createHmac, randomBytes, timingSafeEqual } from "crypto";
+
+// src/workers/engine-split/click-trace.ts
+var CLICK_ID_HEADER = "X-Olympus-Click-Id";
+var PRIVACY_ITEM_SET_PATH = "/dashboard/privacy/items/set";
+function readClickId(request) {
+  const id = request.headers.get(CLICK_ID_HEADER);
+  return id && id.length <= 80 && !/[^A-Za-z0-9_-]/.test(id) ? id : undefined;
+}
+var clickTraces = new WeakMap;
+function logClickTrace(id, requestId, point, role, details, at = new Date().toISOString()) {
+  console.log(`${at} [olympus:click-trace] id=${id} request_id=${requestId ?? "none"} point=${point} role=${role} ${details}`);
+}
 
 // src/core/request-peer.ts
 var ownerSockets = new WeakSet;
@@ -769,6 +809,17 @@ var RESOURCE = /^[\x21-\x7e]{1,200}$/;
 function asRecord2(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
+function isDashboardPrivacyRaise(command) {
+  if (command.kind !== "tier_override" || command.request.path !== "/dashboard/privacy/items/set")
+    return false;
+  try {
+    return asRecord2(JSON.parse(command.request.body))?.tier === "private";
+  } catch (error) {
+    if (error instanceof SyntaxError)
+      return false;
+    throw error;
+  }
+}
 function boundedString(value, max = 512) {
   return typeof value === "string" && value.length > 0 && value.length <= max ? value : undefined;
 }
@@ -806,7 +857,7 @@ function forwardedRequest(kind, value) {
   return { path, headers, body };
 }
 var forwardedRecordIds = new WeakMap;
-var HOP_HEADERS = new Set(["host", "content-length", "connection", "transfer-encoding", "keep-alive", "upgrade"]);
+var HOP_HEADERS = new Set(["host", "content-length", "connection", "transfer-encoding", "keep-alive", "upgrade", CLICK_ID_HEADER.toLowerCase()]);
 function parseEngineCommandEnvelope(value) {
   const record = asRecord2(value);
   const id = record?.id;
@@ -965,6 +1016,8 @@ function createEngineCommandHandler(options) {
     if (url.pathname === ENGINE_READY_PATH && request.method === "GET") {
       const ready = options.ready();
       const body = { ready, instance_id: options.ledger.instanceId, schema_current: ready };
+      if (url.searchParams.has(ENGINE_PRIVACY_READY_QUERY))
+        body.privacy_raises_settled = !options.ledger.hasPendingPrivacyRaise();
       return Response.json(body, { status: ready ? 200 : 503 });
     }
     if (url.pathname === ENGINE_COMMANDS_PATH && request.method === "POST") {
@@ -974,7 +1027,8 @@ function createEngineCommandHandler(options) {
         const envelope = parseEngineCommandEnvelope(await request.json().catch(() => {
           return;
         }));
-        let receipt = options.ledger.submit(envelope);
+        const clickId = envelope.command.kind === "tier_override" && envelope.command.request.path === PRIVACY_ITEM_SET_PATH ? readClickId(request) : undefined;
+        let receipt = options.ledger.submit(envelope, clickId);
         if (envelope.command.kind === "judge_now" && receipt.state === "received") {
           const waitMs = envelope.command.budgetMs + 100;
           let timer;
@@ -1079,7 +1133,7 @@ class EngineCommandMirror {
   get instanceId() {
     return this.options.instanceId;
   }
-  submit(envelope) {
+  submit(envelope, clickId) {
     this.prune();
     const digest = createHash("sha256").update(JSON.stringify(envelope.command)).digest("hex");
     const existing = this.entries.get(envelope.id);
@@ -1097,15 +1151,25 @@ class EngineCommandMirror {
       envelope,
       settled,
       settle,
+      privacyRaise: isDashboardPrivacyRaise(envelope.command),
       receipt: { id: envelope.id, state: "received", instance_id: this.options.instanceId }
     };
     this.entries.set(envelope.id, entry);
+    if (clickId)
+      logClickTrace(clickId, envelope.id, "control_receipt", "background", "served_by=control-thread");
     this.options.send(envelope);
     return this.answer(entry);
   }
   get(id) {
     const entry = this.entries.get(id);
     return entry ? this.answer(entry) : undefined;
+  }
+  hasPendingPrivacyRaise() {
+    for (const entry of this.entries.values()) {
+      if (entry.privacyRaise && entry.receipt.state === "received")
+        return true;
+    }
+    return false;
   }
   async settled(id, wait) {
     const entry = this.entries.get(id);
@@ -1250,6 +1314,7 @@ function start(init) {
   let statusPath;
   let writing = false;
   let owed = false;
+  let published;
   let failures = 0;
   let saidAt = 0;
   const EMPTY_STATE = { scheduler: null, judge: { backlog: null, pending: null, spending: null }, captures: null };
@@ -1264,28 +1329,30 @@ function start(init) {
     writing = true;
     const partial = `${path}.control.tmp`;
     try {
-      const text = `${JSON.stringify({
+      const now = new Date;
+      const snapshot = {
         schema: ENGINE_STATUS_SNAPSHOT_SCHEMA,
         instance_id: init.instanceId,
-        written_at: new Date().toISOString(),
+        heartbeat: "mtime",
         ...state ? { state_at: new Date(state.at).toISOString() } : {},
         loop_held_ms: Math.round(loopHeldMs()),
         ...stateError ? { state_error: { attempts: stateError.attempts, error: stateError.error, at: new Date(stateError.at).toISOString() } } : {},
         ...state?.body ?? EMPTY_STATE
-      })}
-`;
-      const file = await open(partial, "w", 384);
-      try {
-        await file.writeFile(text, "utf8");
-        await file.sync();
-      } finally {
-        await file.close();
+      };
+      const content = JSON.stringify(snapshot);
+      if (published?.path === path && published.content === content) {
+        await utimes(path, now, now);
+      } else {
+        await writeFile(partial, `${JSON.stringify({ ...snapshot, written_at: now.toISOString() })}
+`, { mode: 384 });
+        await rename(partial, path);
+        published = { path, content };
       }
-      await rename(partial, path);
       if (failures > 0)
         post({ type: "log", line: `[engine-split] status snapshot written again after ${failures} failed attempt(s)` });
       failures = 0;
     } catch (error) {
+      published = undefined;
       failures += 1;
       if (failures === 1 || performance.now() - saidAt >= 60000) {
         saidAt = performance.now();

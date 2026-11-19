@@ -25,6 +25,8 @@ export interface PanelEvalOptions {
   split?: 'open' | 'sealed';
   /** Score only these question ids (a screen on the questions that matter). */
   only?: readonly string[];
+  /** The served window in tokens, when the endpoint cannot be asked for it (a gateway with no props route). */
+  windowTokens?: number;
 }
 
 interface PanelRow {
@@ -71,8 +73,9 @@ export async function runPanelEval(options: PanelEvalOptions) {
   });
   const chosen = await route();
   if (!chosen || 'unavailable' in chosen) throw new Error('Panel eval model unavailable.');
-  if (options.limits === 'window' && chosen.windowTokens === 0) throw new Error('Panel eval served window unavailable.');
-  const limits = options.limits === 'window' ? panelLimitsForWindow(PANEL_ANSWER_LIMITS, chosen.windowTokens) : PANEL_ANSWER_LIMITS;
+  const windowTokens = options.windowTokens ?? chosen.windowTokens;
+  if (options.limits === 'window' && windowTokens === 0) throw new Error('Panel eval served window unavailable.');
+  const limits = options.limits === 'window' ? panelLimitsForWindow(PANEL_ANSWER_LIMITS, windowTokens) : PANEL_ANSWER_LIMITS;
   const opened = openEvalDataRoot(options.isolation);
   try {
     // An offline copy needs no installed model: without a loaded local embedding
@@ -117,7 +120,7 @@ export async function runPanelEval(options: PanelEvalOptions) {
       opened.checkFileDescriptors();
     }
     const sum = (key: Exclude<keyof typeof rows[number], 'id'>) => rows.reduce((n, row) => n + row[key], 0);
-    return { windowTokens: chosen.windowTokens, maxItems: limits.maxItems, maxPromptBytes: limits.maxPromptBytes, retrievalHybrid: 0,
+    return { windowTokens, maxItems: limits.maxItems, maxPromptBytes: limits.maxPromptBytes, retrievalHybrid: 0,
       minutes: Math.round((Date.now() - startedAt) / 6_000) / 10, answerModelCalls: modelCalls, judgeCalls,
       stores: opened.stores.length, skippedStores: opened.skipped.length, questions: rows.length,
       foundDoc: sum('foundDoc'), foundParagraph: sum('foundParagraph'), answeredCorrectly: sum('answeredCorrectly'),
@@ -136,7 +139,7 @@ export async function main(argv = process.argv.slice(2)) {
     if (!arg.startsWith('--')) { if (datasetPath) throw new Error('One dataset required.'); datasetPath = arg; continue; }
     const separator = arg.indexOf('=');
     const key = separator < 0 ? arg : arg.slice(0, separator);
-    if (!['--limits', '--model-base-url', '--model', '--split', '--only'].includes(key)) throw new Error('Unsupported panel eval option.');
+    if (!['--limits', '--model-base-url', '--model', '--split', '--only', '--window-tokens'].includes(key)) throw new Error('Unsupported panel eval option.');
     const value = separator < 0 ? rest[++i] : arg.slice(separator + 1);
     if (!value || value.startsWith('--')) throw new Error('Option value required.');
     values.set(key, value);
@@ -147,9 +150,14 @@ export async function main(argv = process.argv.slice(2)) {
   const dataset: unknown = JSON.parse(readFileSync(datasetPath, 'utf8'));
   validatePassageDataset(dataset);
   const receipt = await runPanelEval({ isolation, dataset, modelBaseUrl, model, limits: limits as 'today' | 'window', split: split as 'open' | 'sealed',
+    ...(Number(values.get('--window-tokens')) > 0 ? { windowTokens: Number(values.get('--window-tokens')) } : {}),
     ...(values.get('--only') ? { only: values.get('--only')!.split(',').map(id => id.trim()).filter(Boolean) } : {}) });
   console.log(JSON.stringify(receipt));
 }
 
 // Keep failures as numbers too: upstream errors can contain private content.
-if (import.meta.main) main().catch(() => { console.error(JSON.stringify({ errors: 1 })); process.exitCode = 1; }).finally(() => process.exit(process.exitCode ?? 0));
+if (import.meta.main) main().catch((error: unknown) => {
+  // Only this file's own fixed messages are named; anything else stays a number.
+  const reason = error instanceof Error && /^(Panel eval [a-z ]+\.|Offline root required\.|Invalid panel eval arguments\.|Unsupported panel eval option\.|Option value required\.)$/.test(error.message) ? error.message : undefined;
+  console.error(JSON.stringify({ errors: 1, ...(reason ? { reason } : {}) })); process.exitCode = 1;
+}).finally(() => process.exit(process.exitCode ?? 0));

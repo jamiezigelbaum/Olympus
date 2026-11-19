@@ -83,3 +83,33 @@ test('CLI --answer refuses a nonlocal analyst provider', async () => {
     expect(existsSync(input.output)).toBe(false);
   } finally { rmSync(input.root, { recursive: true, force: true }); }
 }, 30_000);
+
+test('CLI --deep-read-trigger runs the shared whole-item job and records only counts', async () => {
+  const input = await fixture();
+  let calls = 0;
+  const server = Bun.serve({ port: 0, hostname: '127.0.0.1', async fetch(request) {
+    const path = new URL(request.url).pathname;
+    if (path === '/props') return Response.json({ n_ctx: 8192 });
+    if (path.endsWith('/models')) return Response.json({ data: [{ id: 'synthetic-answer', max_model_len: 8192 }] });
+    const body = await request.json() as { model: string };
+    const ordinary = calls++ === 0;
+    return Response.json({ model: body.model, choices: [{ message: { content: JSON.stringify({
+      answer: ordinary ? 'Not found.' : quote,
+      citations: ordinary ? [] : [{ evidence: 1, claim: quote }], unanswered: [], sufficient: true,
+    }) } }] });
+  } });
+  try {
+    const result = await run(input, `http://127.0.0.1:${server.port}/v1`, ['--deep-read-trigger', '--prompt-bytes', '5000', '--max-chars-per-candidate', '100']);
+    expect(result.code).toBe(0);
+    const receipt = JSON.parse(readFileSync(input.output, 'utf8')) as PassageReceipt;
+    expect(receipt.summary.deepReadStarted).toBe(1);
+    const deep = receipt.questions![0]!.deepRead!;
+    expect(deep).toMatchObject({ triggered: true, refused: null, citesExpected: true, correctByMeaning: null });
+    expect(deep.sectionsTotal).toBeGreaterThan(0);
+    expect(deep.sectionsDone).toBe(deep.sectionsTotal);
+    expect(calls).toBeGreaterThan(1);
+    expect(JSON.stringify(receipt)).not.toContain(quote);
+    expect(result.stdout).not.toContain(quote);
+    expect(result.stdout).not.toContain('What cafe');
+  } finally { server.stop(true); rmSync(input.root, { recursive: true, force: true }); }
+}, 30_000);

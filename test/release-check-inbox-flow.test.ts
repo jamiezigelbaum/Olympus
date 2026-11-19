@@ -52,7 +52,9 @@ if (verb === 'provision') {
   if (sub === 'helper-files') say({ ok: true, whatsappBridges: ['olympus-whatsapp-bridge-0123456789abcdef'] });
   else if (sub === 'engine-build') say({ ok: true, build: '1.1.0+abc', version: '1.1.0', remoteMode: 'relay', relay: {} });
   else if (sub === 'fixture-judge-stats') say({ ok: true, calls: 3, ms: 1 });
-  else if (sub === 'prepare-source') say({ ok: true, rules: 2, engineReadyMs: 1000 });
+  else if (sub === 'preflight') say({ ok: process.env.FAKE_PREFLIGHT_FAIL !== '1', protocol: 'release-check.preflight.v1', detail: 'browser probe failed' });
+  else if (sub === 'prepare-source') say({ ok: true, rules: 2, engineReadyMs: 1000, engineSplit: { front: 1, background: 1 } });
+  else if (sub === 'qualify-private') say({ ok: true, ackMs: 120, finishMs: 900, withheldAfterAck: true, withheldAfterRestart: true, ownerChoiceAfterRestart: true });
   else if (sub === 'connect-source') say({ ok: true, message: 'Connected' });
   else if (sub === 'settle') say({ ok: true, settled: true, polls: 2, waitedMs: 1000, snapshot: counts });
   else if (sub === 'mcp-token') say({ ok: true, connection: 'conn-1' });

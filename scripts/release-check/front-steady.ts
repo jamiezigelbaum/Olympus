@@ -143,7 +143,7 @@ export function crashLines(text: string): { frontStoreWrite: number; exitedUnexp
   };
 }
 
-function logSince(paths: readonly string[], offsets: readonly number[]): string {
+export function logSince(paths: readonly string[], offsets: readonly number[]): string {
   return paths.map((path, index) => {
     try {
       const all = readFileSync(path);
@@ -222,15 +222,19 @@ export async function seedFrontStoreSet(host: FrontHost, args: { seed: string; s
   return set;
 }
 
-/** An upgrade leg's Telegram seed, once the candidate runs: what the set's Telegram and lanes are then. */
-export async function seedTelegramAfterUpdate(host: FrontHost): Promise<Pick<FrontStoreSet, 'telegram' | 'lanes'>> {
+export type FrontAfterUpdate = Pick<FrontStoreSet, 'telegram' | 'lanes'> & { gmail: Pick<FrontStoreSet['gmail'], 'settled' | 'status'> };
+
+/** Once the candidate runs: seed Telegram and reread Gmail's import and both sources' lanes. */
+export async function seedTelegramAfterUpdate(host: FrontHost): Promise<FrontAfterUpdate> {
   let telegram: FrontStoreSet['telegram'] = { ok: false, detail: 'this machine cannot run a live seed hook' };
   if (host.seedLive) {
     const seeded = await host.seedLive('telegram');
     telegram = { ok: seeded.ok, ...(seeded.detail !== undefined ? { detail: `after the update: ${seeded.detail}` } : {}) };
   }
   const lanes = [GMAIL_SOURCE, TELEGRAM_SOURCE].flatMap((source) => (['internal', 'secure_local'] as const).map((tier) => host.laneItems(source, tier)));
-  return { telegram, lanes };
+  const answer = host.cli(['status']);
+  const status = answer.code === 0 ? archiveStatusOf(answer.json, FRONT_GMAIL_FILE) : undefined;
+  return { telegram, lanes, gmail: { settled: status === 'imported', ...(status !== undefined ? { status } : {}) } };
 }
 
 /** Samples the engine's processes every few seconds for `watchMs`, then counts the crash lines the logs gained since `offsets`. */
@@ -307,6 +311,7 @@ export function frontSteadyChecks(obs: FrontSteadyObservation | undefined, after
     ...(obs.samples.length === 0 ? ['no process sample was taken'] : []),
     ...(churn.fronts > 1 ? [`${churn.fronts} different front processes in ${Math.round(obs.watchMs / 1000)} s (it restarted ${churn.fronts - 1} time(s))`] : []),
     ...(obs.samples.length > 0 && churn.withoutFront > 0 ? [`no front running in ${churn.withoutFront} of ${obs.samples.length} samples`] : []),
+    ...(churn.withoutBackground > 0 ? [`no background running in ${churn.withoutBackground} of ${obs.samples.length} samples`] : []),
     ...(churn.backgrounds > 1 ? [`${churn.backgrounds} different background processes`] : []),
     ...(obs.logHits.frontStoreWrite > 0 ? [`the engine log says front_store_write ${obs.logHits.frontStoreWrite} time(s)`] : []),
     ...(obs.logHits.exitedUnexpectedly > 0 ? [`the engine log says a process exited unexpectedly ${obs.logHits.exitedUnexpectedly} time(s)`] : []),

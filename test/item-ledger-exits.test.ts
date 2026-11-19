@@ -1,6 +1,8 @@
 import { afterEach, expect, spyOn, test } from 'bun:test';
 import { join } from 'node:path';
 import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
+import { PERSONAL_FIRST_REASON } from '../src/workers/classification/tier-classifier.ts';
+import { findOwnerTierItems } from '../src/workers/classification/tier-owner-items.ts';
 import { createFileExtractionRuntime } from '../src/workers/engine/runtime/file-extraction-runtime.ts';
 import type { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { createReleaseTierCheck, createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
@@ -123,7 +125,7 @@ async function search(fx: TierFixture, store: LocalConnectorStore, allTiers = fa
     body: JSON.stringify({ corpus_id: store.corpusId, query: 'orchard', all_tiers: allTiers }),
   }));
   expect(response.status).toBe(200);
-  return await response.json() as { hits: Array<{ title?: string }>; policy: { local_only: boolean } };
+  return await response.json() as { hits: unknown[]; policy: { local_only: boolean } };
 }
 
 for (const change of ['target', 'override', 'held', 'secret'] as const) {
@@ -147,6 +149,38 @@ test('N4: a content-only raise keeps Personal names visible', async () => {
   expect(JSON.stringify((await search(fx, store)).hits)).toContain('orchard-raised');
 });
 
+test('Personal search withholds titles of items still held in a Personal copy', async () => {
+  const { fx, store } = await fixture();
+  const identity = identityOf('raised');
+  const record = fx.ledger.getCurrent(identity)!;
+  store.bindTierSet(fx.ledger);
+  fx.ledger.recordDecision(identity, {
+    ...record, decidedBy: 'default', snifferId: JUDGED_PERSONAL_SNIFFER.id,
+    contentPending: true, state: 'pending', reasons: [PERSONAL_FIRST_REASON],
+  });
+  expect(fx.ledger.getCurrent(identity)).toMatchObject({ metadataPending: false, contentPending: true });
+  expect(store.searchItems('orchard', 10)).toHaveLength(2);
+
+  const personal = await search(fx, store);
+  expect(personal.policy.local_only).toBe(false);
+  expect(personal.hits).toHaveLength(1);
+  expect(JSON.stringify(personal.hits)).toContain('orchard-ordinary.txt');
+  expect(JSON.stringify(personal.hits)).not.toContain('orchard-raised.txt');
+  const privateResult = await search(fx, store, true);
+  expect(privateResult.policy.local_only).toBe(true);
+  expect(JSON.stringify(privateResult.hits)).toContain('orchard-raised.txt');
+});
+
+test('privacy search withholds a held title from the agent and lets the owner preview it', async () => {
+  const { fx, store } = await fixture();
+  store.bindTierSet(fx.ledger);
+  raise(fx, 'held');
+  const context = { storePaths: [store.dbPath] };
+  expect(findOwnerTierItems({ query: 'orchard-raised', personalNamesOnly: true }, context).items).toEqual([]);
+  expect(findOwnerTierItems({ query: 'orchard-raised', withPreview: true }, context).items)
+    .toMatchObject([{ title: 'orchard-raised.txt', preview: specs[0]!.text }]);
+});
+
 test('shared verdict: release check and store agree; no row stays legacy; unreadable ledger holds Private', async () => {
   const { fx, store } = await fixture();
   raise(fx, 'target');
@@ -164,6 +198,7 @@ test('shared verdict: release check and store agree; no row stays legacy; unread
     expect(store.effectiveItemTiers(inputs)).toEqual(['private', 'private', 'private']);
     const personal = await search(fx, store);
     expect(personal.hits).toEqual([]);
+    expect((await search(fx, store, true)).hits).toEqual([]);
   } finally { failed.mockRestore(); }
 });
 

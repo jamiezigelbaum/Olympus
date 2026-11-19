@@ -3,6 +3,7 @@ import { createTinfoilFetch, TINFOIL_JUDGE_MODEL, type TinfoilTransportOptions }
 import { SNIFFER_DECISION_CATEGORY } from './sniffer.ts';
 import type { SnifferModelRequest, SnifferModelCompletion } from './sniffer-decision.ts';
 import type { SnifferPass } from './sniffer-store.ts';
+import { memoryPayloadJson, noteMemoryPayloadResponse } from '../../core/memory-counters.ts';
 
 /**
  * The Decision API's one choice question: the system prompt's rules condensed
@@ -35,7 +36,7 @@ export function createTinfoilJudgeModel(options: TinfoilTransportOptions): { com
       const input = item ? item.material : request.prompt;
       const response = await fetch('https://tinfoil.invalid/v1/decisions', {
         method: 'POST', ...(request.signal ? { signal: request.signal } : {}),
-        body: JSON.stringify({ model: TINFOIL_JUDGE_MODEL, input,
+        body: memoryPayloadJson({ model: TINFOIL_JUDGE_MODEL, input,
           questions: [{ type: 'choice', name: 'tier',
             instructions: tinfoilDecisionInstructions(item?.pass ?? 'content', item?.ownerContext),
             choices: [{ value: 'Personal' }, { value: 'Private' }] }],
@@ -43,6 +44,7 @@ export function createTinfoilJudgeModel(options: TinfoilTransportOptions): { com
       });
       let chance: number | undefined;
       try {
+        noteMemoryPayloadResponse(response);
         const data = await response.json() as { answers?: Array<{ type?: string; name?: string; refusal?: unknown; error?: unknown; probabilities?: Array<{ value?: string; probability?: number }> }> };
         // Exactly one answer, to the one question asked, with no refusal or
         // error: anything else (duplicates, conflicts, extras) holds Private.

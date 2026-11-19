@@ -8,7 +8,7 @@ import { ScopeRoot } from '../src/core/scope-safe-fs.ts';
 import { archiveFileEntries, buildArchiveManifest } from '../src/workers/archive-import/manifest.ts';
 import { identifyGmailExport } from '../src/workers/archive-import/mbox/gmail-account.ts';
 import {
-  archiveStatusOf, crashLines, frontChurn, frontGmailMbox, frontSteadyChecks, type FrontSteadyObservation,
+  FRONT_GMAIL_FILE, seedTelegramAfterUpdate, type FrontHost, archiveStatusOf, crashLines, frontChurn, frontGmailMbox, frontSteadyChecks, type FrontSteadyObservation,
 } from '../scripts/release-check/front-steady.ts';
 import { enginePidsIn, staleAgentOnPort } from '../scripts/release-check/machine-agent.ts';
 import { OWNER_ADDRESS } from './support/archive-fixtures-gmail.ts';
@@ -37,6 +37,17 @@ describe('front steadiness', () => {
   test('a front that keeps one process and logs no crash passes, on a store set with every lane it needs', () => {
     const checks = frontSteadyChecks(steady());
     expect(checks.map((check) => [check.id, check.status])).toEqual([['front.store-set', 'pass'], ['front.steady', 'pass']]);
+  });
+
+  test('a missing background fails with its sample count even if it returns with the same PID', () => {
+    for (const samples of [
+      [{ front: [200], background: [] }],
+      [{ front: [200], background: [100] }, { front: [200], background: [] }, { front: [200], background: [100] }],
+    ]) {
+      const check = status(frontSteadyChecks(steady({ samples })), 'front.steady')!;
+      expect(check.status).toBe('fail');
+      expect(check.detail).toContain(`no background running in 1 of ${samples.length} samples`);
+    }
   });
 
   test('the rc.4 front fails: it answered ready, then crashed and was started again, with front_store_write in the log', () => {
@@ -97,6 +108,23 @@ describe('front steadiness', () => {
   test('the agent\'s status names the archive\'s state', () => {
     expect(archiveStatusOf({ archives: [{ name: 'a.mbox', status: 'imported' }] }, 'a.mbox')).toBe('imported');
     expect(archiveStatusOf({ archives: [] }, 'a.mbox')).toBeUndefined();
+  });
+
+  test('the post-upgrade refresh rereads Gmail even when Telegram cannot seed', async () => {
+    const host = {
+      seedLive: async () => ({ ok: false, detail: 'no Telegram input' }),
+      laneItems: (source: string, tier: string) => ({ source, tier, exists: true, items: 2 }),
+      cli: () => ({ code: 0, json: { archives: [{ name: FRONT_GMAIL_FILE, status: 'imported' }] } }),
+    } as unknown as FrontHost;
+    expect(await seedTelegramAfterUpdate(host)).toMatchObject({ gmail: { settled: true, status: 'imported' }, telegram: { ok: false } });
+    for (const [code, json, gmail] of [
+      [0, { archives: [{ name: FRONT_GMAIL_FILE, status: 'importing' }] }, { settled: false, status: 'importing' }],
+      [0, { archives: [] }, { settled: false }],
+      [1, { archives: [{ name: FRONT_GMAIL_FILE, status: 'imported' }] }, { settled: false }],
+    ] as const) {
+      host.cli = () => ({ code, json, stderr: '' });
+      expect((await seedTelegramAfterUpdate(host)).gmail).toEqual(gmail);
+    }
   });
 
   test('the fixture is a Gmail export the import attributes to one account, with an attachment', () => {

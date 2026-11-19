@@ -9,7 +9,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { OperationError } from './operation-error.ts';
 import { assertLocalModelIdNotCloudForwarding } from './local-model-policy.ts';
-import { parseOptionalBooleanEnv } from './config.ts';
+import { parseContextTokens, parseOptionalBooleanEnv } from './config.ts';
 import { normalizeSecretRef } from './secret-store.ts';
 import { assertModelTrustTierAllowed } from './source-model-policy.ts';
 import { normalizeVeniceAnalystModelId } from './venice-models.ts';
@@ -69,6 +69,8 @@ const SUPPORTED_PROVIDERS: readonly SovereigntyProfileProvider[] = [
 interface SovereigntyModelProfileBase {
   trust: SovereigntyProfileTrust;
   baseUrl?: string;
+  /** Served window in tokens for a local OpenAI-compatible profile. */
+  contextTokens?: number;
   /** Native one-token privacy sniffer; local OpenAI-compatible profiles only. */
   snifferMode?: 'auto' | 'decision' | 'full';
   /**
@@ -921,6 +923,7 @@ function parseProfiles(value: unknown, label: string): Record<string, Sovereignt
       trust,
       ...optionalString(profile, 'baseUrl'),
       ...optionalString(profile, 'secretRef'),
+      ...(profile.contextTokens !== undefined ? { contextTokens: parseContextTokens(profile.contextTokens, `${label}.modelProfiles.${id}.contextTokens`) } : {}),
       ...(profile.snifferMode !== undefined ? { snifferMode: profile.snifferMode as NonNullable<SovereigntyModelProfile['snifferMode']> } : {}),
       ...(profile.snifferDecisionBar !== undefined ? { snifferDecisionBar: profile.snifferDecisionBar as number } : {}),
     };
@@ -1036,6 +1039,12 @@ function validateProfile(id: string, profile: SovereigntyModelProfile, daemonPor
   }
   if (!['local', 'encrypted_cloud', 'standard_cloud'].includes(profile.trust)) {
     throw new OperationError('config_error', `Sovereignty profile "${id}" has unsupported trust "${profile.trust}".`);
+  }
+  if (profile.contextTokens !== undefined) {
+    if (profile.provider !== 'local-openai-compatible' || profile.trust !== 'local') {
+      throw new OperationError('config_error', `Sovereignty profile "${id}" contextTokens is only valid on a local OpenAI-compatible profile.`);
+    }
+    parseContextTokens(profile.contextTokens, `Sovereignty profile "${id}" contextTokens`);
   }
   if (profile.snifferMode !== undefined && (profile.provider !== 'local-openai-compatible'
     || profile.trust !== 'local' || !['auto', 'decision', 'full'].includes(profile.snifferMode))) {

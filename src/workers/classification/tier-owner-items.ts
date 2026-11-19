@@ -28,7 +28,7 @@ import {
   type TierCliContext,
 } from './tier-cli.ts';
 import { CONTENT_NAMES_ONLY_REASON, tierRank, type TierKey } from './tier-classifier.ts';
-import { isFailSafeMissingContentQuestion, tierLedgerIdentityKey, type TierLedgerIdentity, type TierLedgerRecord } from './tier-ledger.ts';
+import { isFailSafeMissingContentQuestion, itemNamesHeldForJudgment, tierLedgerIdentityKey, type TierLedgerIdentity, type TierLedgerRecord } from './tier-ledger.ts';
 import type { ItemExtractionOutcome } from '../file-extraction/job-store.ts';
 import { unreadHoldDisposition, type UnreadableFileReason } from '../file-extraction/unreadable-files.ts';
 import { tierDisplayName } from './tier-rules.ts';
@@ -198,6 +198,7 @@ interface StoredItemRow {
 
 interface ItemState {
   record: TierLedgerRecord | undefined;
+  namesHeld?: boolean;
   ownerSet: boolean;
   /** The owner's tier override, when one is set. */
   ownerTier?: TierKey;
@@ -211,8 +212,7 @@ interface ItemState {
  */
 function namesAbovePersonal(state: ItemState): boolean {
   const { record } = state;
-  // Names still awaiting their verdict are held Private, as everywhere else (createReleaseTierCheck).
-  if (!record || record.metadataPending) return true;
+  if (!record || state.namesHeld) return true;
   return [record.metadataTier, record.targetMetadataTier, state.ownerTier]
     .some((tier) => tier !== null && tier !== undefined && tierRank(tier) > tierRank('private'));
 }
@@ -295,7 +295,7 @@ function recentRows(limit: number, context: TierCliContext, filter?: OwnerTierIt
       records = withLedgerAt(ledger.path, context.now, (opened) => filter === 'changed'
         ? opened.listRoutedOverrides().filter(({ override }) => override.kind === 'tier').map(({ record }) => record)
           .sort((left, right) => right.decidedAt.localeCompare(left.decidedAt)).slice(0, limit)
-        : opened.recentDecisions(limit, filter === 'personal' ? 'private' : filter === 'private' ? 'secure' : undefined, before, beforeItem), ledger.boundLedgerId, true);
+        : opened.recentDecisions(limit, filter === 'personal' ? 'private' : filter === 'private' ? 'secure' : undefined, before, beforeItem), ledger.boundLedgerId, 'read-only-on-front');
     } catch {
       // A ledger that cannot be read lists nothing.
     }
@@ -353,7 +353,7 @@ export function countOwnerTierItems(context: TierCliContext = {}): OwnerTierItem
         counts.personal += byTier.private;
         counts.private += byTier.secure;
         counts.changed += opened.listRoutedOverrides().filter(({ override }) => override.kind === 'tier').length;
-      }, ledger.boundLedgerId, true);
+      }, ledger.boundLedgerId, 'read-only-on-front');
     } catch {
       // A ledger that cannot be read counts nothing.
     }
@@ -397,12 +397,15 @@ function readLocatedState(items: readonly LocatedItem[], context: TierCliContext
       const record = ledger.getCurrent(item.identity);
       const override = ledger.getOverride(item.identity);
       if (record && !state.record) state.record = record;
+      if (record && itemNamesHeldForJudgment(record, record.contentPending ? ledger.copies(item.identity) : [])) {
+        state.namesHeld = true;
+      }
       if (override?.kind === 'tier') {
         state.ownerSet = true;
         state.ownerTier = override.tier;
       }
       if (ledger.itemIsSecret(item.identity)) state.secret = true;
-    }, item.boundLedgerId, true);
+    }, item.boundLedgerId, 'read-only-on-front');
   }
   return state;
 }

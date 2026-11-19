@@ -16,7 +16,7 @@ import { approveClassifier, revokeClassifier } from '../classification-ledger.ts
 // item held by two stores (a twin pair) gets the override in both ledgers.
 // Output is content-free: tiers, reason codes, identities, never a title or text.
 
-import { Database } from 'bun:sqlite';
+import { Database, SQLiteError } from 'bun:sqlite';
 import { existsSync } from 'node:fs';
 import { lifecycleStorePaths, type LifecyclePathContext } from '../../data-lifecycle.ts';
 import { defaultMailSourceScopeStatePath, readMailSourceScopeApproval } from '../../core/mail-source-scope.ts';
@@ -37,7 +37,7 @@ import { privacyOwnerContext } from './privacy-profile.ts';
 import { installedSnifferRuntime } from './installed-sniffer-runtime.ts';
 import { TierSnifferStore } from './sniffer-store.ts';
 import { classifyItemTiers, type ItemTierOverride, type OwnerTierRule } from './tier-classifier.ts';
-import { TierLedger, tierLedgerIdentityKey, type TierLedgerIdentity, type TierRecheckScope } from './tier-ledger.ts';
+import { TierLedger, TierLedgerSchemaError, tierLedgerIdentityKey, type TierLedgerIdentity, type TierRecheckScope } from './tier-ledger.ts';
 import { tierLedgerPathForStore, tierSnifferPathForLedger } from './tier-ledger-path.ts';
 import { findTierSetLedger } from './tier-set-binding.ts';
 import { TIER_SET_BINDING_CONNECTOR_ID, TIER_SET_BINDING_RUN_ID } from '../connector-store/local-index.ts';
@@ -59,6 +59,8 @@ export interface TierCliContext extends LifecyclePathContext {
   /** Override the stores searched (tests). */
   storePaths?: readonly string[];
   now?: () => Date;
+  /** The CLI holds the data owner lock and no engine has prepared the ledgers. */
+  standalone?: boolean;
 }
 
 export const TIER_CLI_USAGE: Readonly<Record<string, string>> = {
@@ -196,7 +198,7 @@ function matchStore(dbPath: string, needle: StoreNeedle): StoreMatch[] {
     // A store without the items table (or unreadable) holds nothing to find.
     return [];
   } finally {
-    closeSqliteStore(db, { checkpoint: false });
+    closeSqliteStore(db, { checkpoint: false, readOnly: true });
   }
 }
 
@@ -249,17 +251,21 @@ function storeBoundLedger(db: Database, dbPath: string): { path: string; id: str
  * when none has one yet.
  */
 export function locateTierItem(locator: string, context: TierCliContext = {}): LocatedItem[] {
+  return locateMatched(discoverTierItem(locator, context));
+}
+
+function discoverTierItem(locator: string, context: TierCliContext) {
   const needle = locator.trim();
   if (!needle) throw new OperationError('invalid_params', 'A locator is required.');
-  return locateMatched({ locator: needle }, context);
+  return discoverTierLookup({ locator: needle }, context);
 }
 
 /** `locateTierItem` for one exact identity (an item id the owner picked from a list, tier-owner-items.ts). */
 export function locateTierItemByIdentity(identity: TierLedgerIdentity, context: TierCliContext = {}): LocatedItem[] {
-  return locateMatched({ identity }, context);
+  return locateMatched(discoverTierLookup({ identity }, context));
 }
 
-function locateMatched(needle: StoreNeedle, context: TierCliContext): LocatedItem[] {
+function discoverTierLookup(needle: StoreNeedle, context: TierCliContext) {
   const stores = knownStorePaths(context);
   const matches = stores.flatMap((dbPath) => matchStore(dbPath, needle));
   const identities = new Map(matches.map((match) => [identityKey(match.identity), match.identity]));
@@ -278,18 +284,43 @@ function locateMatched(needle: StoreNeedle, context: TierCliContext): LocatedIte
   }
   const boundIds = new Map<string, string>();
   for (const match of matches) {
-    if (!match.bound || !existsSync(match.bound.path)) continue;
+    if (!match.bound) continue;
     ledgerPaths.add(match.bound.path);
     boundIds.set(match.bound.path, match.bound.id);
   }
+  return { identity, localItemId, matches, ledgerPaths, boundIds };
+}
+
+function locateMatched({ identity, localItemId, matches, ledgerPaths, boundIds }: ReturnType<typeof discoverTierLookup>): LocatedItem[] {
+  const requiredPaths = new Set(matches.map((match) => match.bound?.path ?? match.ownLedgerPath));
   const located = (ledgerPath: string): LocatedItem => ({
     ledgerPath,
     identity,
     localItemId,
     ...(boundIds.has(ledgerPath) ? { boundLedgerId: boundIds.get(ledgerPath)! } : {}),
   });
-  const deciding = [...ledgerPaths].filter((path) => withLedgerAt(path, undefined, (ledger) => ledger.getCurrent(identity) !== undefined, boundIds.get(path), true));
+  const skipped = new Set<string>();
+  const deciding = [...ledgerPaths].filter((path) => {
+    try {
+      return withLedgerAt(path, undefined, (ledger) => ledger.getCurrent(identity) !== undefined, boundIds.get(path), 'read-only');
+    } catch (error) {
+      const reason = tierLedgerReadProblem(error);
+      if (reason === undefined) throw error;
+      if (requiredPaths.has(path)) {
+        const bound = boundIds.has(path) ? 'bound ' : '';
+        throw new OperationError('source_index_error', `The item's ${bound}tier ledger could not be read (${reason}).`);
+      }
+      skipped.add(reason);
+      return false;
+    }
+  });
   if (deciding.length > 0) return deciding.map(located);
+  if (skipped.size > 0) {
+    throw new OperationError(
+      'source_index_error',
+      `No tier decision was found and at least one tier ledger was skipped (${[...skipped].join(', ')}).`,
+    );
+  }
   const fallback = matches[0]!;
   return [located(fallback.bound?.path ?? fallback.ownLedgerPath)];
 }
@@ -316,7 +347,7 @@ export function withStore<T>(dbPath: string, fallback: T, run: (db: Database, co
     // A store that cannot be read holds nothing to list.
     return fallback;
   } finally {
-    if (db) closeSqliteStore(db, { checkpoint: false });
+    if (db) closeSqliteStore(db, { checkpoint: false, readOnly: true });
   }
 }
 
@@ -334,11 +365,43 @@ export function knownTierLedgers(context: TierCliContext = {}): Array<{ path: st
       // A store that cannot be read, or whose bound ledger is gone, lists nothing.
       bound = undefined;
     } finally {
-      closeSqliteStore(db, { checkpoint: false });
+      closeSqliteStore(db, { checkpoint: false, readOnly: true });
     }
     if (bound && existsSync(bound.path)) ledgers.set(bound.path, bound.id);
   }
   return [...ledgers].map(([path, boundLedgerId]) => ({ path, ...(boundLedgerId ? { boundLedgerId } : {}) }));
+}
+
+function tierLedgerReadProblem(error: unknown): string | undefined {
+  if (error instanceof TierLedgerSchemaError) return error.schema < error.known ? 'schema needs migration' : 'schema is newer than this build';
+  if (error instanceof SQLiteError) return 'SQLite could not read the ledger';
+  return undefined;
+}
+
+/** Prepare only the ledgers the standalone CLI is about to scan under its owner lock. */
+function prepareTierLedgers({ ledgerPaths, boundIds }: ReturnType<typeof discoverTierLookup>): void {
+  for (const path of ledgerPaths) {
+    const boundId = boundIds.get(path);
+    try {
+      withLedgerAt(path, undefined, () => undefined, boundId, 'read-only');
+    } catch (error) {
+      if (tierLedgerReadProblem(error) === undefined) throw error;
+      if (error instanceof TierLedgerSchemaError && error.schema < error.known) {
+        try {
+          new TierLedger({ dbPath: path, ...(boundId !== undefined ? { expectedLedgerId: boundId } : {}) }).close();
+        } catch (migrationError) {
+          if (tierLedgerReadProblem(migrationError) === undefined) throw migrationError;
+          // Locate reports any ledger that still cannot be read.
+        }
+      }
+    }
+  }
+}
+
+function locateForTierCommand(locator: string, context: TierCliContext): LocatedItem[] {
+  const lookup = discoverTierItem(locator, context);
+  if (context.standalone) prepareTierLedgers(lookup);
+  return locateMatched(lookup);
 }
 
 function identityKey(identity: TierLedgerIdentity): string {
@@ -349,12 +412,18 @@ function identityKey(identity: TierLedgerIdentity): string {
  * Run against the ledger at a path. `expectedId` is the id of the set ledger a
  * store is bound to: the path was found by reading that id on a connection of
  * its own, so the handle used here is checked too, because the file can have
- * been replaced in between. (A replacement has had its schema migrated by this
- * open before it is checked; that is accepted, since it is closed unused.)
+ * been replaced in between. A writable open may migrate a replacement's
+ * schema before the check.
  */
-export function withLedgerAt<T>(ledgerPath: string, now: (() => Date) | undefined, run: (ledger: TierLedger) => T, expectedId?: string, readsOnly = false): T {
-  // The engine split's front runs only the reads (`tier explain`), on read-only opens.
-  const ledger = new TierLedger({ dbPath: ledgerPath, ...(now ? { now } : {}), ...(readsOnly && writableStoreOpensForbidden() ? { readOnly: true } : {}) });
+export function withLedgerAt<T>(
+  ledgerPath: string,
+  now: (() => Date) | undefined,
+  run: (ledger: TierLedger) => T,
+  expectedId?: string,
+  mode: 'write' | 'read-only' | 'read-only-on-front' = 'write',
+): T {
+  const readOnly = mode === 'read-only' || (mode === 'read-only-on-front' && writableStoreOpensForbidden());
+  const ledger = new TierLedger({ dbPath: ledgerPath, ...(now ? { now } : {}), readOnly, allowWalLessRead: readOnly });
   try {
     if (expectedId !== undefined && ledger.ledgerId() !== expectedId) {
       throw new OperationError(
@@ -415,7 +484,7 @@ export function runTierSet(args: readonly string[], context: TierCliContext = {}
     }
     override = { kind: 'tier', tier };
   }
-  const items = locateTierItem(locator, context);
+  const items = locateForTierCommand(locator, context);
   if (expected) {
     const identity = items[0]!.identity;
     if (identity.provider !== expected.provider
@@ -514,7 +583,7 @@ export function applyTierSet(
 export function runTierExplain(args: readonly string[], context: TierCliContext = {}): Record<string, unknown> {
   const [locator] = args;
   if (!locator || args.length > 1) throw new OperationError('invalid_params', `Usage: ${TIER_CLI_USAGE['tier explain']}`);
-  const items = locateTierItem(locator, context);
+  const items = locateForTierCommand(locator, context);
   const records = items.map((item) => {
     const recorded = withLedgerAt(item.ledgerPath, context.now, (ledger) => ({
       record: ledger.getCurrent(item.identity),
@@ -522,7 +591,7 @@ export function runTierExplain(args: readonly string[], context: TierCliContext 
       orphaned: orphanedOverride(ledger, item.identity),
       history: ledger.history(item.identity),
       copies: ledger.copies(item.identity),
-    }), item.boundLedgerId, true);
+    }), item.boundLedgerId, 'read-only-on-front');
     const snifferPath = tierSnifferPathForLedger(item.ledgerPath);
     let waitingOn: string[] = [];
     if (existsSync(snifferPath)) {
@@ -660,7 +729,7 @@ function boundLedgerOf(dbPath: string): { path: string; id: string } | undefined
     // A store never bound (or unreadable) has only its own ledger.
     return undefined;
   } finally {
-    closeSqliteStore(db, { checkpoint: false });
+    closeSqliteStore(db, { checkpoint: false, readOnly: true });
   }
 }
 

@@ -120,7 +120,6 @@
     "test/native-transcription-cleanup-service.test.ts": 9,
     "test/native-whatsapp-service.test.ts": 1,
     "test/native-worker-service.test.ts": 7,
-    "test/one-pipeline-spine.test.ts": 2,
     "test/open-on-computer.test.ts": 6,
     "test/private-answers-question-level.test.ts": 1,
     "test/private-inbox-review-regressions.test.ts": 2,

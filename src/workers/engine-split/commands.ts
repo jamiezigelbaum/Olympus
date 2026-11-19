@@ -20,12 +20,13 @@
  */
 import { RELEASE_CHUNK_JUDGE_BUDGET_MS } from '../../core/release-manifest.ts';
 import { randomUUID } from 'node:crypto';
-import { ENGINE_COMMANDS_PATH, ENGINE_MODEL_COMPLETE_PATH, ENGINE_READY_PATH, type EngineReadyBody } from '../../core/engine-split.ts';
+import { ENGINE_COMMANDS_PATH, ENGINE_MODEL_COMPLETE_PATH, ENGINE_PRIVACY_READY_QUERY, ENGINE_READY_PATH, type EngineReadyBody } from '../../core/engine-split.ts';
 import type { AnalystModelCompletion, AnalystModelRequest } from '../../core/analyst.ts';
 import { OperationError } from '../../core/operation-error.ts';
 import { hasValidWorkerBearerToken } from '../http.ts';
 import { boundedLogErrorMessage, logErrorOrigin } from '../../core/log-redaction.ts';
 import { runAtLocalInferencePriority, type LocalInferencePriority } from '../answer-activity.ts';
+import { CLICK_ID_HEADER, logClickTrace, PRIVACY_ITEM_SET_PATH, readClickId } from './click-trace.ts';
 
 /** Config files the front writes and the background re-reads (design, "Writes the front still needs", B). */
 export const ENGINE_RELOAD_KINDS = ['sources', 'scope', 'exclusions', 'embedding', 'models', 'archive', 'extraction', 'pacing'] as const;
@@ -151,6 +152,7 @@ export const ENGINE_FRONT_ONLY_ROUTES: Readonly<Record<string, string>> = {
   '/dashboard/archive-import/remove': 'Archive uploads, requests and state files; archive_changed hands them to the background.',
   '/dashboard/archive-import/stop': 'Archive uploads, requests and state files; archive_changed hands them to the background.',
   '/dashboard/privacy/items/find': 'Reads the tier ledgers read-only.',
+  '/dashboard/privacy/items/status': 'Reads the front’s receipt and the background’s command outcome relayed to it.',
   '/dashboard/agents/pairing-code': 'Remote connections and keys, in the front\'s connection store.',
   '/dashboard/agents/keys': 'Remote connections and keys, in the front\'s connection store.',
   '/dashboard/agents/revoke': 'Remote connections and keys, in the front\'s connection store.',
@@ -273,9 +275,10 @@ export interface EngineCommandReceipt {
  */
 export interface EngineCommandRecords {
   readonly instanceId: string;
-  submit(envelope: EngineCommandEnvelope): EngineCommandReceipt;
+  submit(envelope: EngineCommandEnvelope, clickId?: string): EngineCommandReceipt;
   get(id: string): EngineCommandReceipt | undefined;
   settled(id: string, wait: Promise<void>): Promise<EngineCommandReceipt | undefined>;
+  hasPendingPrivacyRaise(): boolean;
 }
 
 export class EngineCommandError extends Error {
@@ -295,6 +298,17 @@ export function newEngineCommandId(): string {
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+export function isDashboardPrivacyRaise(command: EngineCommand): boolean {
+  if (command.kind !== 'tier_override' || command.request.path !== '/dashboard/privacy/items/set') return false;
+  try {
+    return asRecord(JSON.parse(command.request.body))?.tier === 'private';
+  } catch (error) {
+    // The forwarded route will reject a malformed body before changing an item.
+    if (error instanceof SyntaxError) return false;
+    throw error;
+  }
 }
 
 function boundedString(value: unknown, max = 512): string | undefined {
@@ -355,7 +369,7 @@ export function forwardedRecordId(request: Request): string | undefined {
 }
 
 /** Headers that belong to the hop, not to the request. */
-const HOP_HEADERS = new Set(['host', 'content-length', 'connection', 'transfer-encoding', 'keep-alive', 'upgrade']);
+const HOP_HEADERS = new Set(['host', 'content-length', 'connection', 'transfer-encoding', 'keep-alive', 'upgrade', CLICK_ID_HEADER.toLowerCase()]);
 
 export async function requestToForwarded(request: Request): Promise<EngineForwardedRequest> {
   const headers: Record<string, string> = {};
@@ -518,6 +532,7 @@ export type EngineCommandHandlers = {
 interface LedgerEntry {
   body: string;
   receipt: EngineCommandReceipt;
+  privacyRaise: boolean;
   settled: Promise<void>;
   settledAt?: number;
 }
@@ -552,7 +567,7 @@ export class EngineCommandLedger implements EngineCommandRecords {
   get instanceId(): string { return this.options.instanceId; }
 
   /** Record and queue a command, or return the record of the same id. A different command under a used id is refused. */
-  submit(envelope: EngineCommandEnvelope): EngineCommandReceipt {
+  submit(envelope: EngineCommandEnvelope, clickId?: string): EngineCommandReceipt {
     this.prune();
     const body = JSON.stringify(envelope.command);
     const existing = this.entries.get(envelope.id);
@@ -563,10 +578,11 @@ export class EngineCommandLedger implements EngineCommandRecords {
     const receipt: EngineCommandReceipt = { id: envelope.id, state: 'received', instance_id: this.options.instanceId };
     const key = orderKey(envelope.command);
     const previous = this.chains.get(key) ?? Promise.resolve();
-    const entry: LedgerEntry = { body, receipt, settled: Promise.resolve() };
+    const entry: LedgerEntry = { body, receipt, privacyRaise: isDashboardPrivacyRaise(envelope.command), settled: Promise.resolve() };
     const settled = previous.then(() => this.apply(entry, envelope.command));
     entry.settled = settled;
     this.entries.set(envelope.id, entry);
+    if (clickId) logClickTrace(clickId, envelope.id, 'control_receipt', 'background', 'served_by=loop');
     this.chains.set(key, settled);
     void settled.then(() => { if (this.chains.get(key) === settled) this.chains.delete(key); });
     return { ...receipt };
@@ -575,6 +591,13 @@ export class EngineCommandLedger implements EngineCommandRecords {
   get(id: string): EngineCommandReceipt | undefined {
     const entry = this.entries.get(id);
     return entry ? { ...entry.receipt } : undefined;
+  }
+
+  hasPendingPrivacyRaise(): boolean {
+    for (const entry of this.entries.values()) {
+      if (entry.privacyRaise && entry.receipt.state === 'received') return true;
+    }
+    return false;
   }
 
   /** The record once settled, or as it stands when `wait` resolves first. */
@@ -652,13 +675,17 @@ export function createEngineCommandHandler(options: EngineCommandServerOptions):
     if (url.pathname === ENGINE_READY_PATH && request.method === 'GET') {
       const ready = options.ready();
       const body: EngineReadyBody = { ready, instance_id: options.ledger.instanceId, schema_current: ready };
+      if (url.searchParams.has(ENGINE_PRIVACY_READY_QUERY)) body.privacy_raises_settled = !options.ledger.hasPendingPrivacyRaise();
       return Response.json(body, { status: ready ? 200 : 503 });
     }
     if (url.pathname === ENGINE_COMMANDS_PATH && request.method === 'POST') {
       if (!options.ready()) return Response.json({ error: 'starting', instance_id: options.ledger.instanceId }, { status: 503 });
       try {
         const envelope = parseEngineCommandEnvelope(await request.json().catch(() => undefined));
-        let receipt = options.ledger.submit(envelope);
+        const clickId = envelope.command.kind === 'tier_override' && envelope.command.request.path === PRIVACY_ITEM_SET_PATH
+          ? readClickId(request)
+          : undefined;
+        let receipt = options.ledger.submit(envelope, clickId);
         // Unlike a wake, judge_now returns the verdicts reached in its bounded turn.
         if (envelope.command.kind === 'judge_now' && receipt.state === 'received') {
           const waitMs = envelope.command.budgetMs + 100;

@@ -3,6 +3,7 @@
 // a picture) and reads back vectors. One request is in flight at a time; the
 // provider already runs one forward pass at a time.
 
+import { memoryPayloadJson, withMemoryPayload } from '../../../core/memory-counters.ts';
 import { isMainThread } from 'node:worker_threads';
 import { modelThread, modelThreadHandleId, type ModelThreadFailure } from '../built-in-reasoning/off-thread.ts';
 import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
@@ -321,7 +322,7 @@ class HelperProcess {
   embed(items: readonly LiteRtEmbedItem[]): Promise<Float32Array[]> {
     if (this.exited) return Promise.reject(new Error('The built-in search model is not running.'));
     const id = this.nextId++;
-    return new Promise((resolve, reject) => {
+    return withMemoryPayload('embed', () => new Promise((resolve, reject) => {
       const pictures = items.filter((item) => typeof item !== 'string' && item.image).length;
       this.pending.set(id, {
         resolve, reject, count: items.length, pictures, timer: this.watch(id),
@@ -332,8 +333,8 @@ class HelperProcess {
       const request = items.every((item) => typeof item === 'string')
         ? { id, texts: items }
         : { id, items: items.map((item) => (typeof item === 'string' ? { text: item } : item)) };
-      this.child.stdin.write(`${JSON.stringify(request)}\n`);
-    });
+      this.child.stdin.write(`${memoryPayloadJson(request)}\n`);
+    }));
   }
 
   private settle(message: { id?: number; error?: string; native?: boolean; pictures?: boolean; vectors?: string; dimension?: number; failed?: number[]; unsupported?: number[]; progress?: number; vector?: string; itemFailed?: boolean }): void {

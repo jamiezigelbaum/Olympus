@@ -11,7 +11,7 @@
  *
  * 1. The record is marked `removing`: no pass imports it any more (a pass
  *    already running sees it and stops at the next message). The removal
- *    runs as the archive's own scheduler task, so never beside its import.
+ *    shares the import's scheduler concurrency key, so never runs beside it.
  * 2. The extraction job rows of its items (they carry the names of the files
  *    read), with their artifacts, go through the forget registry's
  *    extraction step, scoped to the archive. Extraction already treats the

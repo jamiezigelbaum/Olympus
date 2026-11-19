@@ -42,7 +42,7 @@ import { namesOnlyCoverageNote } from '../../core/names-only-coverage.ts';
 import { runWithLocalInferenceGuard } from '../answer-activity.ts';
 import type { Analyst, AnalystCitation, AnalystOptions, AnalystResult, EvidenceCandidate, EvidencePack } from '../../core/contracts.ts';
 import { analystEvidenceFormat, analystPromptBytes, currentAnalystAbortSignal, noEvidenceAnalystResult, runWithAnalystAbortSignal, withPromptBudget, type AnalystEvidenceFormat } from '../../core/analyst.ts';
-import { timedOutCoverageNotes } from '../../core/source-index/partial-search.ts';
+import { promptFitCoverageGap, STARTUP_SEARCH_GAP, timedOutCoverageNotes } from '../../core/source-index/partial-search.ts';
 import { OPENCLAW_DEFAULT_MODEL_LABEL, OPENCLAW_INFER_MAX_PROMPT_BYTES } from '../../core/analyst-openclaw-infer.ts';
 import {
   buildEvidencePackDetailed,
@@ -72,7 +72,7 @@ import { parentLabelReleaseInputs, type ParentLabelResolver } from '../../core/p
 import { answerReleaseWithheldReasonOffThread, recordReleaseManifest, checkReleaseChunks, chunkCoverageNote, releaseCandidateHashes, releasedTextDigest, releasePassageHashes, type ChunkReleaseResult, type ReleaseCheck, type ReleaseConstraints, type ReleaseInput } from '../../core/release-manifest.ts';
 import { secretLocationCoverageNote } from '../../core/secret-location-note.ts';
 import { buildFollowUp, searchCutShort, weakSearch, type FollowUpCandidate, type SourceAnswerFollowUp } from '../../core/follow-up.ts';
-import { sourceLabel } from '../../core/remote-result.ts';
+import { sourceLabel, remoteDeepReadFields } from '../../core/remote-result.ts';
 import { canonicalSourceCorpusId } from '../../core/source-corpus-registry.ts';
 import type { SourceIndexCorpusRegistry } from '../../core/source-index/corpus.ts';
 import { withCachedKeywordExpansion, type CachedKeywordExpansion } from '../../core/source-index/keyword-context.ts';
@@ -86,6 +86,8 @@ import {
   type SourceIndexVisibilityGate,
 } from '../../core/source-index/router.ts';
 import { mergeRetrievalDegradations, RESERVED_HEAD_SEATS } from '../../core/source-index/retrieval.ts';
+import { triggerDeepRead } from './deep-read-trigger.ts';
+import type { DeepReadJobs } from '../engine/runtime/deep-read-jobs.ts';
 import {
   assertEvidencePackModelEligible,
   assertModelTrustTierAllowed,
@@ -117,6 +119,7 @@ import type {
   SourceIndexAnswerRetrievalDegradation,
 } from './answer-types.ts';
 import {
+  currentSourceAnswerTrace,
   observeSourceAnswerAnalystLeg,
   observeSourceAnswerRetrievalAttempt,
   recordSourceAnswerAnalystFit,
@@ -174,6 +177,7 @@ export interface AnalystAnswerLanes {
 }
 
 export interface AnalystSourceIndexAnswerHandlerOptions {
+  deepRead?: () => DeepReadJobs | undefined;
   requestOnDemandRead?: RequestOnDemandRead;
   // How long a question waits for the reads it started before it answers.
   onDemandReadWaitMs?: number;
@@ -365,6 +369,7 @@ export function createAnalystSourceIndexAnswerHandler(
     request: SourceIndexAnswerRequest,
     local: Parameters<SourceIndexAnswerHandler['answer']>[1] | undefined,
     readsDone: boolean,
+    searchedDuringStartup = false,
   ): Promise<SourceIndexAnswerResult> => {
       const reranker = typeof options.reranker === 'function' ? options.reranker() : options.reranker;
       const startedAt = Date.now();
@@ -489,7 +494,8 @@ export function createAnalystSourceIndexAnswerHandler(
         activeLanes: AnalystAnswerLanes,
         attempt: 'keyword' | 'hybrid' | 'selected' | 'self_heal_rebuild',
         build: { excludeSecureSensitivity?: true } = {},
-      ) => observeSourceAnswerRetrievalAttempt(attempt, () => buildEvidencePackDetailed({
+      ) => observeSourceAnswerRetrievalAttempt(attempt, async () => {
+        const detail = await buildEvidencePackDetailed({
           question,
           ...build,
           ...(request.query?.trim() ? { searchQuery: request.query.trim() } : {}),
@@ -514,7 +520,15 @@ export function createAnalystSourceIndexAnswerHandler(
           ...(activeLanes.secretLocations ? { secretLocations: activeLanes.secretLocations } : {}),
           ...(activeLanes.classificationCoverage ? { classificationCoverage: activeLanes.classificationCoverage } : {}),
           ...(activeLanes.parentLabels ? { parentLabels: activeLanes.parentLabels } : {}),
-        }));
+        });
+        const { pack } = detail;
+        if (pack.coverage.extractionGaps.includes(STARTUP_SEARCH_GAP)) searchedDuringStartup = true;
+        else if (searchedDuringStartup) return {
+          ...detail,
+          pack: { ...pack, coverage: { ...pack.coverage, extractionGaps: [...pack.coverage.extractionGaps, STARTUP_SEARCH_GAP] } },
+        };
+        return detail;
+      });
       const initialAttempt = request.selected_items?.length
         ? 'selected'
         : retrievalRequest.retrieval_mode ?? 'hybrid';
@@ -566,7 +580,7 @@ export function createAnalystSourceIndexAnswerHandler(
       if (options.requestOnDemandRead && !readsDone) {
         const reads = await readNamesOnlyMatches(detail, options.requestOnDemandRead,
           options.onDemandReadWaitMs ?? DEFAULT_ON_DEMAND_READ_WAIT_MS);
-        if (reads.started > 0 && reads.pending === 0) return answerOnce(request, local, true);
+        if (reads.started > 0 && reads.pending === 0) return answerOnce(request, local, true, searchedDuringStartup);
         stillReading = reads.pending;
         if (stillReading > 0) {
           const corpora = [...new Set([...(detail.namesOnlyCandidateIndexes ?? []), ...(detail.contentPrivateCandidateIndexes ?? [])]
@@ -798,7 +812,7 @@ export function createAnalystSourceIndexAnswerHandler(
       const analystMs = Date.now() - analystStartedAt;
 
       const releaseGateStartedAt = Date.now();
-      const { decision, facts, opsec, answer: releasedAnswer } = releaseAnalystAnswer({
+      const { decision, facts, opsec, answer: releasedAnswer, unanswered: releasedNotes } = releaseAnalystAnswer({
         detail,
         result: analystResult,
         onDemandNotes,
@@ -812,13 +826,21 @@ export function createAnalystSourceIndexAnswerHandler(
       const itemKey = (item: { provider: string; accountScope: string; providerItemId: string }) => JSON.stringify([item.provider, item.accountScope, item.providerItemId]);
       const readContent = new Set(detail.pack.candidates.filter((candidate) => candidate.chunks.length > 0).map((candidate) => itemKey(candidate.provenance.sourceItem)));
       const readingOnly = stillReading > 0 && !analystResult.citations.some((citation) => readContent.has(itemKey(citation.provenance.sourceItem)));
+      const fitNote = promptFitNotes.get(analystResult);
+      const readingNotes = fitNote && releasedNotes.includes(fitNote) ? [...onDemandNotes, fitNote] : onDemandNotes;
       const answer = stillReading === 0
         ? heldAnswer
-        : [onDemandReadingCoverageNote(stillReading), ...(readingOnly ? onDemandNotes : [heldAnswer])].join('\n\n');
+        : [onDemandReadingCoverageNote(stillReading), ...(readingOnly ? readingNotes : [heldAnswer])].join('\n\n');
       const releaseGateMs = Date.now() - releaseGateStartedAt;
       recordSourceAnswerReleaseDecision(decision.decision);
 
       const released = decision.decision === 'allow' || decision.decision === 'redact';
+      const deepRead = await triggerDeepRead(detail, analystResult, options.deepRead?.());
+      // A withheld answer withholds the unread item's title too; the private
+      // job still runs, and its handle and content-free notice can be returned.
+      const deepReadNotice = released ? deepRead.notice : deepRead.notice
+        ? remoteDeepReadFields({ deep_read: deepRead.job, deep_read_notice: deepRead.notice, deep_read_refused: deepRead.refused }, '').remoteNotice.trim()
+        : undefined;
 
       const totalLatencyMs = Date.now() - startedAt;
       const phaseTimings = {
@@ -843,7 +865,10 @@ export function createAnalystSourceIndexAnswerHandler(
         ...(followUp?.names ?? []),
       ], constraints: releaseConstraints });
       return {
-        answer,
+        answer: deepReadNotice ? `${answer}\n\n${deepReadNotice}` : answer,
+        ...(deepRead.job ? { deep_read: deepRead.job } : {}),
+        ...(deepReadNotice ? { deep_read_notice: deepReadNotice } : {}),
+        ...(deepRead.refused ? { deep_read_refused: deepRead.refused } : {}),
         evidence: released && !readingOnly
           ? releasedEvidence(analystResult.citations, detail, releaseSecureContent)
           : [],
@@ -1279,12 +1304,24 @@ function promptBudgetedAnalyst(
       const budget = budgetForOutputChars?.(analyzeOptions.maxAnswerChars ?? DEFAULT_ANALYST_MAX_OUTPUT_CHARS);
       const effectiveBytes = budget?.bytes ?? promptBytes;
       const fitted = fitPackToPromptBytes(pack, effectiveBytes, candidateCorpus, analyzeOptions, recencySeats, evidenceFormat, candidateGaps);
-      recordSourceAnswerAnalystFit(lane, fitted.candidates.flatMap((candidate) => {
-        const seat = seatOf.get(candidate.provenance);
-        return seat === undefined ? [] : [seat];
-      }), analystPromptBytes(fitted, analyzeOptions, evidenceFormat), budget);
+      if (currentSourceAnswerTrace()?.evidenceSeats) {
+        const overhead = { ...fitted, candidates: fitted.candidates.map(candidate => ({ ...candidate, chunks: [] })) };
+        recordSourceAnswerAnalystFit(lane, fitted.candidates.flatMap((candidate) => {
+          const seat = seatOf.get(candidate.provenance);
+          return seat === undefined ? [] : [seat];
+        }), {
+          promptBytes: analystPromptBytes(fitted, analyzeOptions, evidenceFormat),
+          packCandidates: pack.candidates.length,
+          keptCandidates: fitted.candidates.length,
+          packGapEntries: pack.coverage.extractionGaps.length,
+          packGapBytes: utf8ByteLength(pack.coverage.extractionGaps.join('; ')),
+          sentGapBytes: utf8ByteLength(fitted.coverage.extractionGaps.join('; ')),
+          overheadBytes: analystPromptBytes(overhead, analyzeOptions, evidenceFormat),
+          evidenceFormat,
+        }, budget);
+      }
       return analyst.analyze(withPromptBudget(fitted, effectiveBytes), analyzeOptions)
-        .then((result) => withUnfittedCoverage(result, pack, fitted));
+        .then((result) => withUnfittedCoverage(result, pack, fitted, lane));
     },
   };
 }
@@ -1299,6 +1336,10 @@ const MIN_FITTED_BYTES_PER_CANDIDATE = 600;
 // equal shares). A one-passage seat gains nothing from a second share, so
 // it keeps one and the pack keeps its seats.
 const HEAD_SEAT_SHARES = 2;
+// During fitting, keep item-owned notes below half of an ordinary passage share.
+// Count both their UTF-8 text and the separators between notes for that item.
+const MAX_FITTED_ITEM_GAP_BYTES = 256;
+type GapOwners = ReadonlyMap<number, EvidenceCandidate['provenance']>;
 
 /**
  * Fit a pack so the analyst's whole prompt (system rules, every candidate's
@@ -1321,24 +1362,16 @@ export function fitPackToPromptBytes(
   evidenceFormat: AnalystEvidenceFormat = 'full',
   candidateGaps?: ReadonlyMap<EvidenceCandidate['provenance'], readonly number[]>,
 ): EvidencePack {
-  // Select with the original Coverage cost. Removing gaps before this cut
-  // would buy extra seats rather than more passage text for the same seats.
-  const selected = fitPackPassagesToPromptBytes(pack, maxPromptBytes, candidateCorpus, analyzeOptions, recencySeats, evidenceFormat);
-  if (!candidateGaps || selected.candidates.length === pack.candidates.length) return selected;
-  const kept = new Set(selected.candidates.map((candidate) => candidate.provenance));
-  const gapOwners = new Map<number, EvidenceCandidate['provenance']>();
-  for (const [provenance, indexes] of candidateGaps) {
-    for (const index of indexes) gapOwners.set(index, provenance);
+  let gapOwners: Map<number, EvidenceCandidate['provenance']> | undefined;
+  if (candidateGaps) {
+    gapOwners = new Map();
+    for (const [provenance, indexes] of candidateGaps) {
+      for (const index of indexes) {
+        if (pack.coverage.extractionGaps[index] !== undefined) gapOwners.set(index, provenance);
+      }
+    }
   }
-  if (![...gapOwners.values()].some((owner) => !kept.has(owner))) return selected;
-  const seated = restatePack(pack, pack.candidates.filter((candidate) => kept.has(candidate.provenance)), candidateCorpus, gapOwners);
-  const minimumPack = restatePack(pack, [...selected.candidates], candidateCorpus, gapOwners);
-  // The count line can cost more than the gaps it replaces; then the rewrite
-  // saves nothing, and the first fit stands.
-  if (analystPromptBytes(minimumPack, analyzeOptions, evidenceFormat) > analystPromptBytes(selected, analyzeOptions, evidenceFormat)) return selected;
-  // Start from the original passages, so the saved Coverage bytes flow into
-  // the existing equal-share computation. The unfitted pack stays untouched.
-  return fitPackPassagesToPromptBytes(seated, maxPromptBytes, candidateCorpus, analyzeOptions, recencySeats, evidenceFormat, minimumPack);
+  return fitPackPassagesToPromptBytes(pack, maxPromptBytes, candidateCorpus, analyzeOptions, recencySeats, evidenceFormat, gapOwners);
 }
 
 function fitPackPassagesToPromptBytes(
@@ -1348,14 +1381,20 @@ function fitPackPassagesToPromptBytes(
   analyzeOptions: AnalystOptions,
   recencySeats = 0,
   evidenceFormat: AnalystEvidenceFormat = 'full',
-  minimumPack?: EvidencePack,
+  gapOwners?: GapOwners,
 ): EvidencePack {
-  if (evidenceFormat === 'compact' && !minimumPack && !isReadWidePack(pack)) {
-    const selected = fitPackPassagesToPromptBytes(pack, maxPromptBytes, candidateCorpus, analyzeOptions, recencySeats);
-    const kept = new Set(selected.candidates.map((candidate) => candidate.provenance));
-    pack = restatePack(pack, pack.candidates.filter((candidate) => kept.has(candidate.provenance)), candidateCorpus);
-  }
-  if (analystPromptBytes(pack, analyzeOptions, evidenceFormat) <= maxPromptBytes) return pack;
+  const wide = isReadWidePack(pack);
+  const fullFit = evidenceFormat === 'compact' && !wide
+    ? fitPackPassagesToPromptBytes(pack, maxPromptBytes, candidateCorpus, analyzeOptions, recencySeats, 'full', gapOwners)
+    : undefined;
+  const fullSeats = fullFit && new Set(fullFit.candidates.map(candidate => candidate.provenance));
+  const available = fullSeats ? pack.candidates.filter(candidate => fullSeats.has(candidate.provenance)) : pack.candidates;
+  const whole = fullFit
+    ? restatePack(pack, [...available], candidateCorpus, gapOwners ? fullFit.coverage.extractionGaps : undefined)
+    : pack;
+  if (analystPromptBytes(whole, analyzeOptions, evidenceFormat) <= maxPromptBytes) return whole;
+  // Callers without gap ownership retain the original compact fit behavior.
+  if (!gapOwners) pack = whole;
   // The first three seats go first: the router reserves seats 2 and 3 for
   // the strongest keyword and names-only leaders across stores (#1350), and
   // store turn alone would trim them whenever they share seat 1's store.
@@ -1364,56 +1403,59 @@ function fitPackPassagesToPromptBytes(
   // so it outranks another store's first result.
   const headSeats = RESERVED_HEAD_SEATS + recencySeats;
   const order = [
-    ...pack.candidates.slice(0, headSeats),
-    ...roundRobinCandidates(pack.candidates.slice(headSeats), candidateCorpus),
+    ...available.slice(0, headSeats),
+    ...roundRobinCandidates(available.slice(headSeats), candidateCorpus),
   ];
-  let fallback: EvidencePack | undefined;
+  let legacyFallback: EvidencePack | undefined;
   const headSet = new Set(pack.candidates.slice(0, RESERVED_HEAD_SEATS).map((candidate) => candidate.provenance));
   const headShares = (candidate: EvidenceCandidate) =>
     (headSet.has(candidate.provenance) && candidate.chunks.length > 1 ? HEAD_SEAT_SHARES : 1);
   // The extra shares never cost a seat: where they would leave a share under
   // the floor, the same seats are tried at equal shares before one is dropped.
-  const wide = isReadWidePack(pack);
   const modes = wide ? [() => 1] : [headShares, () => 1];
-  for (let keep = order.length; keep >= (minimumPack ? order.length : 1); keep -= 1) {
+  const floor = wide ? READ_WIDE_MIN_PASSAGE_BYTES : MIN_FITTED_BYTES_PER_CANDIDATE;
+  for (let keep = order.length; keep >= 1; keep -= 1) {
     const kept = new Set(order.slice(0, keep));
-    const base = pack.candidates.filter((candidate) => kept.has(candidate));
-    const overhead = analystPromptBytes(
-      restatePack(pack, base.map((candidate) => ({ ...candidate, chunks: [] })), candidateCorpus),
-      analyzeOptions,
-      evidenceFormat,
-    );
-    if (overhead >= maxPromptBytes) continue;
+    const base = available.filter((candidate) => kept.has(candidate));
+    const extractionGaps = gapOwners ? keptSeatGaps(pack, base, gapOwners) : pack.coverage.extractionGaps;
+    const restate = (candidates: EvidenceCandidate[]) => restatePack(pack, candidates, candidateCorpus, extractionGaps);
+    if (!fullFit && keep === pack.candidates.length && extractionGaps !== pack.coverage.extractionGaps) {
+      const capped = restate([...base]);
+      if (analystPromptBytes(capped, analyzeOptions, evidenceFormat) <= maxPromptBytes) return capped;
+    }
+    const overheadPack = restate(base.map((candidate) => ({ ...candidate, chunks: [] })));
+    const overhead = analystPromptBytes(overheadPack, analyzeOptions, evidenceFormat);
+    if (overhead > maxPromptBytes || (!gapOwners && overhead === maxPromptBytes)) continue;
+    const minimumShare = keep > 1 ? floor : 0;
     for (const [mode, shares] of modes.entries()) {
       if (mode > 0 && base.every((candidate) => headShares(candidate) === 1)) break;
-      // The second pass has already selected its seats. The first pass's
-      // clipped passages still fit after removing gaps, even if escaping
-      // makes the ratio correction overshoot; never shrink below their share.
-      const minimumShare = minimumPack
-        ? Math.max(0, ...minimumPack.candidates.map((candidate) =>
-          Math.ceil(candidate.chunks.reduce((sum, chunk) => sum + utf8ByteLength(chunk), 0) / shares(candidate))))
-        : 0;
       const totalShares = base.reduce((sum, candidate) => sum + shares(candidate), 0);
-      let share = Math.max(minimumShare, Math.floor((maxPromptBytes - overhead) / totalShares));
-      for (let attempt = 0; attempt < 6; attempt += 1) {
-        if (!minimumPack && share < (wide ? READ_WIDE_MIN_PASSAGE_BYTES : MIN_FITTED_BYTES_PER_CANDIDATE) && keep > 1) break;
-        const fitted = restatePack(
-          pack,
-          base.map((candidate) => ({ ...candidate, chunks: fitChunks(candidate.chunks, Math.max(0, share * shares(candidate))) })),
-          candidateCorpus,
-        );
+      let share = Math.floor((maxPromptBytes - overhead) / totalShares);
+      for (let attempt = 0; attempt < 6 && share >= minimumShare; attempt += 1) {
+        const fitted = restate(base.map((candidate) => ({ ...candidate, chunks: fitChunks(candidate.chunks, Math.max(0, share * shares(candidate))) })));
         const bytes = analystPromptBytes(fitted, analyzeOptions, evidenceFormat);
         if (bytes <= maxPromptBytes) return fitted;
-        fallback = fitted;
+        if (!gapOwners) legacyFallback = fitted;
         // Escaping made the passages cost more than their raw bytes; shrink by
         // the observed ratio and measure again.
-        share = Math.max(minimumShare, Math.floor(share * (maxPromptBytes - overhead) / Math.max(1, bytes - overhead)) - 1);
+        if (share === minimumShare) break;
+        const corrected = Math.floor(share * (maxPromptBytes - overhead) / Math.max(1, bytes - overhead)) - 1;
+        share = Math.max(gapOwners ? minimumShare : 0, corrected);
       }
     }
+    // Compact spends the difference on passages for the same seats. If
+    // escaping defeated the share estimate, try the full fit's passages.
+    if (gapOwners && fullFit && keep === order.length &&
+        analystPromptBytes(fullFit, analyzeOptions, evidenceFormat) <= maxPromptBytes) return fullFit;
+    if (gapOwners && keep === 1) return overheadPack;
   }
+  // Unowned-gap callers also use the fitter to compare rendering below the
+  // fixed prompt size. Preserve their historical best-effort result.
+  if (!gapOwners) return legacyFallback ?? restatePack(pack, order.slice(0, 1).map(candidate => ({ ...candidate, chunks: [] })), candidateCorpus);
   // Nothing fits even one candidate's labels: send the smallest pack rather
   // than none, and let the transport's own ceiling report it.
-  return minimumPack ?? fallback ?? restatePack(pack, order.slice(0, 1).map((candidate) => ({ ...candidate, chunks: [] })), candidateCorpus);
+  const first = order.slice(0, 1).map(candidate => ({ ...candidate, chunks: [] }));
+  return restatePack(pack, first, candidateCorpus, keptSeatGaps(pack, first, gapOwners));
 }
 
 // The pack's gaps for the seats sent, plus every corpus-level gap. The
@@ -1423,28 +1465,58 @@ function fitPackPassagesToPromptBytes(
 function keptSeatGaps(
   pack: EvidencePack,
   kept: readonly EvidenceCandidate[],
-  gapOwners: ReadonlyMap<number, EvidenceCandidate['provenance']>,
-): string[] {
-  const sent = new Set(kept.map((candidate) => candidate.provenance));
-  const gaps = pack.coverage.extractionGaps.filter((_, index) => {
-    const owner = gapOwners.get(index);
-    return owner === undefined || sent.has(owner);
-  });
-  const dropped = pack.candidates.filter((candidate) => !sent.has(candidate.provenance));
-  const unread = new Set([...gapOwners.values()].filter((owner) => !sent.has(owner))).size;
-  if (unread > 0) {
-    gaps.push(`${dropped.length} more matching item${dropped.length === 1 ? ' was' : 's were'} not sent; ${unread} of them could not be read in full.`);
+  gapOwners: GapOwners,
+): readonly string[] {
+  if (gapOwners.size === 0) return pack.coverage.extractionGaps;
+  const sent = new Map(kept.map((candidate, index) => [candidate.provenance, index + 1]));
+  const parts = new Map<EvidenceCandidate['provenance'], { count: number; bytes: number }>();
+  const unread = new Set<EvidenceCandidate['provenance']>();
+  for (const [index, owner] of gapOwners) {
+    if (!sent.has(owner)) { unread.add(owner); continue; }
+    const part = parts.get(owner) ?? { count: 0, bytes: 0 };
+    part.bytes += utf8ByteLength(pack.coverage.extractionGaps[index]!) + (part.count > 0 ? 2 : 0);
+    part.count += 1;
+    parts.set(owner, part);
   }
-  return gaps;
+  const summarized = new Set<EvidenceCandidate['provenance']>();
+  const gaps = pack.coverage.extractionGaps.flatMap((gap, index) => {
+    const owner = gapOwners.get(index);
+    if (owner === undefined) return [gap];
+    const seat = sent.get(owner);
+    if (seat === undefined || summarized.has(owner)) return [];
+    const part = parts.get(owner)!;
+    if (part.bytes <= MAX_FITTED_ITEM_GAP_BYTES) return [gap];
+    summarized.add(owner);
+    return [`Item [${seat}]: ${part.count} part${part.count === 1 ? '' : 's'} of this item could not be read.`];
+  });
+  if (unread.size > 0) {
+    const dropped = pack.candidates.length - kept.length;
+    gaps.push(`${dropped} more matching item${dropped === 1 ? ' was' : 's were'} not sent; ${unread.size} of them could not be read in full.`);
+  }
+  return unread.size === 0 && summarized.size === 0 ? pack.coverage.extractionGaps : gaps;
 }
+
+const promptFitNotes = new WeakMap<AnalystResult, string>();
 
 /**
  * The result of a fitted call, reporting the unfitted pack's coverage: every
  * gap of the pack as built, without the fit's prompt-only count line, so a
  * fit never shortens what the user is told was left unread.
  */
-export function withUnfittedCoverage(result: AnalystResult, pack: EvidencePack, fitted: EvidencePack): AnalystResult {
-  if (fitted === pack || fitted.coverage.extractionGaps === pack.coverage.extractionGaps) return result;
+export function withUnfittedCoverage(result: AnalystResult, pack: EvidencePack, fitted: EvidencePack, lane: 'local' | 'cloud' = 'local'): AnalystResult {
+  let restored = result;
+  if (fitted.coverage.extractionGaps !== pack.coverage.extractionGaps) {
+    restored = restoreExtractionGaps(result, pack, fitted);
+  }
+  if (fitted.candidates.length >= pack.candidates.length) return restored;
+  // Keep this operational note out of the model's unanswered claims and the
+  // release gate. The release step adds it to the displayed coverage notes.
+  if (restored === result) restored = { ...result };
+  promptFitNotes.set(restored, promptFitCoverageGap(lane, fitted.candidates.length, pack.candidates.length));
+  return restored;
+}
+
+function restoreExtractionGaps(result: AnalystResult, pack: EvidencePack, fitted: EvidencePack): AnalystResult {
   const built = new Set(pack.coverage.extractionGaps.map((gap) => gap.trim()));
   const promptOnly = new Set(fitted.coverage.extractionGaps.map((gap) => gap.trim()).filter((gap) => !built.has(gap)));
   const unanswered = result.unanswered.filter((line) => !promptOnly.has(line.trim()));
@@ -1486,7 +1558,7 @@ function restatePack(
   pack: EvidencePack,
   candidates: EvidenceCandidate[],
   candidateCorpus: ReadonlyMap<EvidenceCandidate, string>,
-  gapOwners?: ReadonlyMap<number, EvidenceCandidate['provenance']>,
+  extractionGaps = pack.coverage.extractionGaps,
 ): EvidencePack {
   const originals = pack.candidates.filter((original) => candidates.some((candidate) => (
     candidate.provenance === original.provenance
@@ -1502,7 +1574,7 @@ function restatePack(
     candidates,
     coverage: {
       ...pack.coverage,
-      ...(gapOwners ? { extractionGaps: keptSeatGaps(pack, originals, gapOwners) } : {}),
+      extractionGaps,
       ...(pack.coverage.matchCounts
         ? {
             matchCounts: pack.coverage.matchCounts.map((count) => ({
@@ -2452,9 +2524,11 @@ export function releaseAnalystAnswer(input: AnalystReleaseInput): AnalystRelease
     && nonPublicPack
     && facts.length === 0
     && originalDraftAnswer.trim().length > 0;
+  const startupNotes = input.detail.pack.coverage.extractionGaps.includes(STARTUP_SEARCH_GAP) ? [STARTUP_SEARCH_GAP] : [];
   const releasedUnanswered = appendUniqueCoverageNotes(
     sanitizeReleasedCoverageNotes(input.result.unanswered, input.detail, nonPublicPack),
     [
+      ...startupNotes,
       ...(input.onDemandNotes ?? []),
       ...unreadableMatchedGaps,
       ...(input.result.unanswered.length === 0 && releasedEvidenceCount === 0
@@ -2479,7 +2553,7 @@ export function releaseAnalystAnswer(input: AnalystReleaseInput): AnalystRelease
   );
   const safeUnsupportedAnswer = WITHHELD_ANSWERS.noAnswerInText;
   const unsupportedNoContent = uncitedNonPublicAnswer && isUnsupportedNoContentAnswer(input.result);
-  const safeUnsupportedGaps = [...safeUnsupportedCoverageGaps(input.detail.pack, nonPublicPack), ...(input.onDemandNotes ?? [])];
+  const safeUnsupportedGaps = [...safeUnsupportedCoverageGaps(input.detail.pack, nonPublicPack), ...startupNotes, ...(input.onDemandNotes ?? [])];
   const safeUnsupportedDraft = composeReleasedAnswer(safeUnsupportedAnswer, safeUnsupportedGaps);
   const finalDraftAnswer = composeReleasedAnswer(
     unsupportedNoContent ? safeUnsupportedDraft : plainTrustWords(input.result.answer),
@@ -2539,7 +2613,7 @@ export function releaseAnalystAnswer(input: AnalystReleaseInput): AnalystRelease
         input.detail,
         input.releaseSecureContent,
       );
-  const answer = answerForReleaseDecision(decision);
+  let answer = answerForReleaseDecision(decision);
   // Each draft the gate may release, with the notes composed into it.
   const draftNotes: ReadonlyArray<readonly [string, readonly string[]]> = [
     [finalDraftAnswer, unsupportedNoContent ? safeUnsupportedGaps : releasedUnanswered],
@@ -2550,6 +2624,11 @@ export function releaseAnalystAnswer(input: AnalystReleaseInput): AnalystRelease
   const unanswered = released
     ? (draftNotes.find(([draft]) => draft === answer)?.[1] ?? []).map((note) => note.trim()).filter(Boolean)
     : [];
+  const fitNote = promptFitNotes.get(input.result);
+  if (released && fitNote && !unanswered.includes(fitNote)) {
+    answer = unanswered.length > 0 ? `${answer}\n- ${fitNote}` : composeReleasedAnswer(answer, [fitNote]);
+    unanswered.push(fitNote);
+  }
   return {
     decision,
     facts,
@@ -2721,7 +2800,7 @@ function sanitizeReleasedCoverageNotes(
   if (unanswered.length === 0) return [];
   if (!nonPublicPack) return [...unanswered];
   const categories = new Set<string>(['coverage']);
-  if (detail.pack.coverage.extractionGaps.some((gap) => gap.trim().length > 0)) {
+  if (detail.pack.coverage.extractionGaps.some((gap) => gap !== STARTUP_SEARCH_GAP && gap.trim().length > 0)) {
     categories.add('extraction/readability');
   }
   if ((detail.corpusReadabilityGaps ?? []).some(
@@ -2738,7 +2817,7 @@ function sanitizeReleasedCoverageNotes(
 }
 
 function safeUnsupportedCoverageGaps(pack: EvidencePack, nonPublicPack: boolean): string[] {
-  const gaps = pack.coverage.extractionGaps.filter((gap) => gap.trim().length > 0);
+  const gaps = pack.coverage.extractionGaps.filter((gap) => gap !== STARTUP_SEARCH_GAP && gap.trim().length > 0);
   if (gaps.length === 0) {
     // The safe-unsupported release factually released zero citable evidence.
     // Carry a mechanical, corpus-ids-only coverage note so the honest
@@ -3015,7 +3094,7 @@ function unreadableMatchedReleaseInputs(detail: EvidencePackBuildDetail, release
 }
 
 function unreadableMatchedCandidateIndexes(detail: EvidencePackBuildDetail): number[] {
-  if (detail.pack.coverage.extractionGaps.length === 0) return [];
+  if (!detail.pack.coverage.extractionGaps.some(gap => gap !== STARTUP_SEARCH_GAP)) return [];
   // Contents tiered Private are not unreadable: they are answered from their
   // Private copy, and a name-only copy adds nothing as evidence.
   const contentPrivate = new Set(detail.contentPrivateCandidateIndexes ?? []);
@@ -3118,6 +3197,7 @@ export interface ReleasedEvidenceCoverage {
   // list. The answer path already names them (#1305); the search tool reads
   // this.
   cut_short?: string[];
+  searched_during_startup?: true;
   // Breadth per family beyond the bounded selection (counts only).
   matches: Array<{ family: string; matched_items: number; in_evidence: number; at_least: boolean }>;
 }
@@ -3308,6 +3388,7 @@ export async function searchReleasedEvidence(input: {
       partially_read_items: (detail.corpusReadabilityGaps ?? []).reduce((sum, gap) => sum + gap.partialDocuments, 0),
       unclassified_items: (detail.classificationCoverage ?? []).reduce((sum, note) => sum + note.pendingClassificationItems, 0),
       ...(cutShort.length > 0 ? { cut_short: cutShort } : {}),
+      ...(coverage.extractionGaps.includes(STARTUP_SEARCH_GAP) ? { searched_during_startup: true } : {}),
       matches: (coverage.matchCounts ?? []).map((count) => ({
         family: count.family,
         matched_items: count.matchedItems,
@@ -3329,6 +3410,7 @@ export async function searchReleasedEvidence(input: {
 export interface PrivateEvidenceResult {
   // Location-only Secret match; no metadata leaves this function.
   secretMatch?: true;
+  searchedDuringStartup?: true;
   // Private items the bounded search matched, readable or not.
   matched: number;
   // Every matched Private candidate, with whatever passages its store could
@@ -3378,6 +3460,7 @@ export async function searchPrivateEvidence(input: {
   };
   const lanes = input.lanes(request, 'private_search');
   let secretMatch = false;
+  let searchedDuringStartup = false;
   const build = async (adapters: SourceIndexRouterAdapterMap): Promise<PrivateEvidenceCandidate[]> => {
     const detail = await buildEvidencePackDetailed({
       question,
@@ -3395,6 +3478,7 @@ export async function searchPrivateEvidence(input: {
       ...(lanes.visibilityGate ? { visibilityGate: lanes.visibilityGate } : {}),
     });
     secretMatch ||= (detail.secretLocations?.length ?? 0) > 0;
+    searchedDuringStartup ||= detail.pack.coverage.extractionGaps.includes(STARTUP_SEARCH_GAP);
     assertEvidencePackModelEligible(detail.pack);
     return detail.pack.candidates
       .map((candidate, index) => ({ ...candidate, corpusId: detail.candidateCorpusIds[index] ?? '' }))
@@ -3441,13 +3525,13 @@ export async function searchPrivateEvidence(input: {
   matches.push(...lowered);
   // Only a question that matched gets neighbours: the count (what leaves this
   // computer) and whether there is a panel at all stay the matches' alone.
-  if (matches.length === 0) return { matched: secretMatch ? 1 : 0, candidates: [], ...(secretMatch ? { secretMatch: true } : {}) };
+  if (matches.length === 0) return { matched: secretMatch ? 1 : 0, candidates: [], ...(secretMatch ? { secretMatch: true } : {}), ...(searchedDuringStartup ? { searchedDuringStartup: true } : {}) };
   // Neighbour hydration selects passages too. Keep it in the same cached-only
   // scope, so a match never queues a translation behind a running analysis.
   const neighbours = matches.some(candidate => candidate.trustDomain === 'secure_local')
     ? await withCachedKeywordExpansion(translation, () => privateNeighbours(lanes.adapters, build, matches))
     : [];
-  return { matched: matches.length, candidates: [...matches, ...neighbours], ...(secretMatch ? { secretMatch: true as const } : {}) };
+  return { matched: matches.length, candidates: [...matches, ...neighbours], ...(secretMatch ? { secretMatch: true } : {}), ...(searchedDuringStartup ? { searchedDuringStartup: true } : {}) };
   });
 }
 

@@ -1,5 +1,9 @@
 {
   "_readme": "One-line catches in src/ that carry on with nothing, per file (test/silent-fallback-allowance.test.ts). Counts only go down: a fix waits while the work progresses, or names what was left out (core/limit-stops.ts).",
+  "logged_fallbacks": {
+    "src/workers/engine-split/front-history.ts": "A failed SQLite history open or read leaves Home's current counts available. Log the SQLite code once per interval and retry history on the next render.",
+    "src/workers/classification/sniffer-service.ts": "Unverifiable walker inputs prevent idle skips. Failed walker reads keep their cursor for retry and appear in backlog health as read_failed."
+  },
   "files": {
     "src/cli.ts": 1,
     "src/control-ui/browser-controller.ts": 3,
@@ -150,7 +154,7 @@
     "src/workers/classification/tier-rules.ts": 1,
     "src/workers/cli-operations.ts": 2,
     "src/workers/connector-store/capture-spool-secrets.ts": 1,
-    "src/workers/connector-store/local-index.ts": 27,
+    "src/workers/connector-store/local-index.ts": 26,
     "src/workers/connector-store/off-thread-reads.ts": 8,
     "src/workers/connector-store/parent-label.ts": 1,
     "src/workers/connector-store/secrets-disposition.ts": 4,
@@ -159,7 +163,7 @@
     "src/workers/connector-store/tier-rejudge.ts": 2,
     "src/workers/connector-store/tier-row-rehome.ts": 4,
     "src/workers/connector-store/tier-secrets-floor-sweep.ts": 1,
-    "src/workers/connector-store/tiered-store-set.ts": 3,
+    "src/workers/connector-store/tiered-store-set.ts": 2,
     "src/workers/credential-broker/index.ts": 5,
     "src/workers/credential-health.ts": 2,
     "src/workers/dashboard/backup-routes.ts": 1,
@@ -178,7 +182,7 @@
     "src/workers/dropbox-files/open-target.ts": 1,
     "src/workers/dropbox-files/provider-client.ts": 2,
     "src/workers/dropbox-files/provider-store-sync.ts": 1,
-    "src/workers/engine-split/client.ts": 2,
+    "src/workers/engine-split/client.ts": 1,
     "src/workers/engine-split/commands.ts": 2,
     "src/workers/engine-split/front-history.ts": 1,
     "src/workers/engine-split/front-scheduler.ts": 2,
@@ -193,7 +197,7 @@
     "src/workers/engine/index.ts": 7,
     "src/workers/engine/runtime/answer-scope.ts": 1,
     "src/workers/engine/runtime/judging-models.ts": 3,
-    "src/workers/engine/runtime/local-private-answers.ts": 7,
+    "src/workers/engine/runtime/local-private-answers.ts": 5,
     "src/workers/engine/runtime/messaging-capture.ts": 1,
     "src/workers/engine/runtime/model-choices-backend.ts": 2,
     "src/workers/engine/runtime/private-analysts.ts": 1,

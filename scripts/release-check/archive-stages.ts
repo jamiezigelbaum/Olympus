@@ -8,7 +8,7 @@
  * not on the page, a wait that ran out) is recorded where it happened, in the journey's trace or the observation, and the stage goes on
  * to whatever can still be observed, so a failure names the first thing that was wrong and not only that the stage ended.
  */
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DASHBOARD_ARCHIVE_COPY as A } from '../../src/workers/dashboard/vocabulary.ts';
 import {
@@ -24,6 +24,7 @@ import {
 import type { LiveSeedResult } from './archive-live-seeds.ts';
 import { requestsOutsideMachine } from './egress.ts';
 import type { EgressView } from './inbox.ts';
+import { OPEN_ALL_SOURCES } from './journeys.ts';
 import { runJourney, type Journey, type JourneyDriver, type JourneyTrace } from './journey.ts';
 
 export interface ArchiveBrowserSession {
@@ -90,9 +91,10 @@ async function statusNow(host: ArchiveHost, token: string, waitMs = 60_000): Pro
 }
 
 /** The Archives rows on the page, or undefined when the page cannot be read: an unreadable page never reads as a page with no archives. */
-async function readPanel(driver: JourneyDriver): Promise<PanelArchives | undefined> {
+async function readPanel(driver: JourneyDriver, keepDir?: string): Promise<PanelArchives | undefined> {
   try {
     const raw = await driver.probe('panel', ARCHIVE_PANEL_PROBE);
+    if (keepDir) appendFileSync(join(keepDir, 'archive-panel-probe.jsonl'), `${JSON.stringify(raw)}\n`, { mode: 0o600 });
     const readable = raw !== null && typeof raw === 'object' && Array.isArray((raw as { rows?: unknown }).rows);
     return readable ? panelArchivesOf(raw) : undefined;
   } catch {
@@ -134,6 +136,27 @@ const stepMs = (trace: JourneyTrace, startsWith: string): { ok: boolean; ms: num
   const step = trace.steps.find((candidate) => candidate.name.startsWith(startsWith));
   return { ok: step?.ok === true, ms: step?.ms ?? 0 };
 };
+
+/** Unreadable status polls retain the last observation: losing the CLI is not import progress. */
+export function importProgress(host: Pick<ArchiveHost, 'cli'>, fx: LegFixture, stallS: number) {
+  let last: StatusView['archives'][number] | undefined;
+  return async () => {
+    const answer = host.cli(['status']);
+    const view = statusViewOf(answer.json, fx.token);
+    if (answer.code === 0 && view.ok) last = view.archives.find(archive => archive.name === fx.fileName) ?? last;
+    return {
+      mark: JSON.stringify([last?.status, last?.messages, last?.progressPercent]),
+      detail: `stopped moving for ${stallS} s at ${last?.status || 'not listed'}, ${last?.messages ?? 'unknown'} items`,
+    };
+  };
+}
+
+class ArchiveBlocked extends Error {}
+
+/** Only a settle timeout blocks later imports; a refused request still has its own ordinary checks. */
+function stalledImport(trace: JourneyTrace): string | undefined {
+  return trace.steps.find(step => step.name.startsWith('The import settles') && !step.ok && step.actual.includes('stopped moving for'))?.actual;
+}
 
 // ---------------------------------------------------------------------------
 // Import
@@ -181,16 +204,20 @@ export async function importStage(host: ArchiveHost, args: ImportArgs): Promise<
           obs.waiting = statusViewOf(waiting.json, fx.token);
         }
         const bounds = {
+          progress: importProgress(host, fx, args.settleS ?? ARCHIVE_BOUNDS.settleS),
           ...(args.startS !== undefined ? { startS: args.startS } : {}),
           ...(args.settleS !== undefined ? { settleS: args.settleS } : {}),
           ...(args.openS !== undefined ? { openS: args.openS } : {}),
         };
         const journey = args.via === 'request' ? agentImportJourney(fx, shownPath(host.home, path), bounds) : pickerImportJourney(fx, path, bounds);
-        const trace = await runJourney(driver, journey);
+        const trace = await runJourney(driver, journey, { now: host.now, sleep: host.sleep });
         obs.traces.push(trace);
         const settle = stepMs(trace, 'The import settles');
         obs.settled = settle.ok;
         obs.settleMs = settle.ms;
+        const blocked = stalledImport(trace);
+        if (blocked) obs.blocked = blocked;
+        if (obs.blocked) { obs.detail = obs.blocked; host.say(obs.blocked); return; }
         host.say(`${journey.id}: ${trace.ok ? 'ok' : 'FAILED'} (${Math.round(trace.ms / 1000)} s)`);
         // The row as the journey left it (See what was not read open, when the fixture has gaps).
         obs.row = await rowNow(host, driver, fx.fileName);
@@ -213,6 +240,7 @@ export async function importStage(host: ArchiveHost, args: ImportArgs): Promise<
     });
     obs.ok = true;
   } catch (error) {
+    if (error instanceof ArchiveBlocked) obs.blocked = error.message;
     obs.detail = error instanceof Error ? error.message.slice(0, 300) : String(error).slice(0, 300);
   }
   return obs;
@@ -257,15 +285,18 @@ export async function besideLiveStage(host: ArchiveHost, args: { format: string;
       obs.start = startViewOf(started.json, fx.token);
       host.say(`start: ${obs.start.code || `exit ${started.code}`}`);
       const journey = besideLiveJourney(fx, shownPath(host.home, path), {
+        progress: importProgress(host, fx, args.settleS ?? ARCHIVE_BOUNDS.settleS),
         ...(args.startS !== undefined ? { startS: args.startS } : {}),
         ...(args.settleS !== undefined ? { settleS: args.settleS } : {}),
         ...(args.openS !== undefined ? { openS: args.openS } : {}),
       });
-      const trace = await runJourney(driver, journey);
+      const trace = await runJourney(driver, journey, { now: host.now, sleep: host.sleep });
       obs.traces.push(trace);
       const settle = stepMs(trace, 'The import settles');
       obs.settled = settle.ok;
       obs.settleMs = settle.ms;
+      const blocked = stalledImport(trace);
+      if (blocked) { obs.blocked = blocked; obs.detail = blocked; host.say(blocked); return; }
       host.say(`${journey.id}: ${trace.ok ? 'ok' : 'FAILED'} (${Math.round(trace.ms / 1000)} s)`);
       obs.row = await rowNow(host, driver, fx.fileName);
       // An imported record is held Private until the private model has judged it, so the search waits for that, within
@@ -336,7 +367,7 @@ export async function afterSourceDelete(host: ArchiveHost, hook: string, token: 
 /** Archives an earlier attempt left on the machine, removed from their rows, so a stage starts from an empty Archives line. */
 async function removeLeftovers(host: ArchiveHost, driver: JourneyDriver, token: string, bounds: ClearBounds = {}): Promise<void> {
   const cleared = await clearArchives(host, driver, token, 'leftover', bounds);
-  if (!clearedOk(cleared)) throw new Error(`archives an earlier attempt left could not be removed: ${clearedProblem(cleared)}`);
+  if (!clearedOk(cleared)) throw new ArchiveBlocked(`archives an earlier attempt left could not be removed: ${clearedProblem(cleared)}`);
 }
 
 async function searchFor(host: ArchiveHost, fx: LegFixture): Promise<SearchView> {
@@ -513,6 +544,10 @@ export async function removeStage(host: ArchiveHost, args: { targets: readonly R
           stores: host.readStores(formatSpec(target.format), archiveId, target.token),
           others,
         });
+        if (!gone.ok || after?.archives.some(archive => archive.name === target.fileName)) {
+          obs.blocked = `Remove did not take ${target.fileName} off the page or out of status`;
+          break;
+        }
       }
     });
     obs.ok = true;
@@ -547,16 +582,32 @@ const clearedProblem = (cleared: Cleared): string => [
   cleared.remaining.length > 0 ? `still listed after the removals: ${cleared.remaining.join(', ')}` : undefined,
 ].filter(Boolean).join('; ');
 
-/** Every archive the agent's status or the dashboard lists, together; the reason when either cannot be read. */
-async function listedArchives(host: ArchiveHost, driver: JourneyDriver, token: string, waitMs: number): Promise<{ names: string[] } | { unreadable: string }> {
+/** Only matched rows offering Remove can be removed; a source import never can. */
+async function listedArchives(host: ArchiveHost, driver: JourneyDriver, token: string, waitMs: number): Promise<{ names: string[]; unmatched: string[] } | { unreadable: string }> {
   const status = await statusNow(host, token, waitMs);
   if (!status) return { unreadable: 'the agent\'s status of the archives could not be read, so what is left is not known' };
-  const panel = await until(host, () => readPanel(driver), waitMs, 500);
+  let panel: PanelArchives | undefined;
+  await until(host, async () => {
+    panel = await readPanel(driver, host.workDir);
+    return panel && status.archives.every(archive => rowNamed(panel, archive.name)) ? panel : undefined;
+  }, waitMs, 500);
   if (!panel) return { unreadable: 'the dashboard could not be read, so what is left is not known' };
-  // An import inside a source's card has no Remove: it goes with the source's Delete, not from here. The agent's status lists it
-  // too, so it is left out by the name the page shows it under (the front check's Gmail import, run 43736059061).
-  const inSource = new Set(panel.rows.filter((row) => row.sourceImport).map((row) => row.name));
-  return { names: [...new Set([...status.archives.map((archive) => archive.name), ...panel.rows.filter((row) => !row.sourceImport).map((row) => row.name)])].filter((name) => !inSource.has(name)) };
+  const names: string[] = [], unmatched: string[] = [], missingRows: string[] = [];
+  for (const archive of status.archives) {
+    const row = rowNamed(panel, archive.name);
+    if (!row) { missingRows.push(archive.name); host.say(`archive list: unmatched status entry ${archive.name}; not removed`); }
+    if (archive.sourceId || row?.sourceImport) continue;
+    if (row?.buttons.includes(A.remove)) names.push(archive.name);
+    else unmatched.push(archive.name);
+  }
+  for (const row of panel.rows) {
+    if (!row.sourceImport && !status.archives.some(archive => archive.name === row.name)) {
+      unmatched.push(row.name);
+      host.say(`archive list: unmatched page row ${row.name}; not removed`);
+    }
+  }
+  appendFileSync(join(host.workDir, 'archive-panel-probe.jsonl'), `${JSON.stringify({ removable: names, unmatchedStatusEntries: missingRows, unresolved: unmatched })}\n`, { mode: 0o600 });
+  return { names: [...new Set(names)], unmatched: [...new Set(unmatched)] };
 }
 
 /**
@@ -565,6 +616,16 @@ async function listedArchives(host: ArchiveHost, driver: JourneyDriver, token: s
  */
 async function clearArchives(host: ArchiveHost, driver: JourneyDriver, token: string, label: string, bounds: ClearBounds = {}): Promise<Cleared> {
   const cleared: Cleared = { removed: [], failed: [], remaining: [] };
+  const opened = await runJourney(driver, {
+    id: 'archive-list', title: 'Open the whole Sources list before choosing archives to remove',
+    source: 'archive cleanup', mutates: false,
+    steps: [
+      { name: 'Open all Sources', do: { go: ALL_SOURCES_PATH }, expect: [], timeoutMs: (bounds.openS ?? 120) * 1_000 },
+      OPEN_ALL_SOURCES,
+      { name: 'The whole Sources list has drawn', do: { observe: true }, expect: [{ present: { css: '.home-sources' }, frame: 'panel' }], timeoutMs: (bounds.openS ?? 120) * 1_000 },
+    ],
+  });
+  if (!opened.ok) return { ...cleared, unreadable: 'the dashboard could not be read: the whole Sources list did not open' };
   const first = await listedArchives(host, driver, token, 20_000);
   if ('unreadable' in first) return { ...cleared, unreadable: first.unreadable };
   for (const name of first.names) {
@@ -572,13 +633,18 @@ async function clearArchives(host: ArchiveHost, driver: JourneyDriver, token: st
     const trace = await runJourney(driver, removeJourney(label, name, bounds.removeS, bounds.openS));
     host.say(`${label} ${name}: ${trace.ok ? 'removed' : 'FAILED'}`);
     (trace.ok ? cleared.removed : cleared.failed).push(name);
+    if (!trace.ok) { cleared.remaining = [...first.names.filter(candidate => !cleared.removed.includes(candidate)), ...first.unmatched]; return cleared; }
   }
   // Nothing may be left: the page can redraw a row a journey saw go, and the engine is the one that knows what it holds.
   const stop = host.now() + (bounds.verifyS ?? 60) * 1_000;
   for (;;) {
     const left = await listedArchives(host, driver, token, 5_000);
     if ('unreadable' in left) { cleared.unreadable = left.unreadable; cleared.remaining = []; }
-    else { delete cleared.unreadable; cleared.remaining = left.names; }
+    else {
+      if (left.unmatched.length) cleared.unreadable = `unmatched or non-removable archive entries (not removed): ${left.unmatched.join(', ')}`;
+      else delete cleared.unreadable;
+      cleared.remaining = [...left.names, ...left.unmatched];
+    }
     if (clearedOk({ ...cleared, failed: [] })) break;
     if (host.now() >= stop) break;
     await host.sleep(3_000);
@@ -602,7 +668,7 @@ export async function removeAllStage(host: ArchiveHost, bounds: ClearBounds = {}
 // ---------------------------------------------------------------------------
 // A file that changes while it is imported
 
-export async function changedStage(host: ArchiveHost, args: { seed: string; sizes: readonly number[]; startS?: number; stopS?: number; removeS?: number }): Promise<ChangedObservation> {
+export async function changedStage(host: ArchiveHost, args: { seed: string; sizes: readonly number[]; onIndexing?: () => void; startS?: number; stopS?: number; removeS?: number }): Promise<ChangedObservation> {
   const obs: ChangedObservation = { ok: false, attempts: [], traces: [] };
   try {
     await host.withBrowser(async (session) => {
@@ -631,6 +697,7 @@ export async function changedStage(host: ArchiveHost, args: { seed: string; size
         }
         const caught = await catchImporting(host, fx, (args.startS ?? ARCHIVE_BOUNDS.startS) * 1_000);
         if (caught.state === 'importing') {
+          args.onIndexing?.();
           changeFixture(path, fx);
           obs.attempts.push({ messages: size, outcome: 'changed', detail: `a message was added to the file while ${caught.items ?? '?'} messages were read` });
           break;
@@ -641,7 +708,9 @@ export async function changedStage(host: ArchiveHost, args: { seed: string; size
           detail: caught.state === 'imported' ? 'the import finished before the file could be changed' : `the archive read "${caught.state}"`,
         });
         // A finished archive is removed before the next, larger one.
-        await runJourney(driver, removeJourney('bulk', fx.fileName, args.removeS));
+        const removal = await runJourney(driver, removeJourney('bulk', fx.fileName, args.removeS));
+        obs.traces.push(removal);
+        if (!removal.ok) { obs.blocked = `Remove did not take ${fx.fileName} off the page`; break; }
         if (caught.state !== 'imported') break;
       }
       const last = obs.attempts[obs.attempts.length - 1];
@@ -656,6 +725,7 @@ export async function changedStage(host: ArchiveHost, args: { seed: string; size
         const archiveId = status?.archives.find((archive) => archive.name === fx.fileName)?.id;
         const removal = await runJourney(driver, removeJourney('bulk', fx.fileName, args.removeS));
         obs.traces.push(removal);
+        if (!removal.ok) obs.blocked = `Remove did not take ${fx.fileName} off the page`;
         const after = await statusNow(host, fx.token, 30_000);
         obs.removed = {
           gone: stepMs(removal, 'Confirm').ok,

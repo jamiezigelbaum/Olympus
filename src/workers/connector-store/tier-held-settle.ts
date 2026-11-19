@@ -15,15 +15,17 @@
 // embedding before the move runs. Nothing is decided and no store is written.
 //
 // Bounded: a page of rows per call from a bounded window of the ledger,
-// resumed from the ledger, starting over once the end is reached.
+// resumed from the ledger. A lap without any legacy rows retires the pass.
 
 import { PERSONAL_FIRST_REASON, type TierDecision } from '../classification/tier-classifier.ts';
-import { parseTierLedgerIdentity, tierLedgerIdentityOfRecord, type TierLedgerRecord } from '../classification/tier-ledger.ts';
+import {
+  PERSONAL_FIRST_SETTLE_CURSOR, PERSONAL_FIRST_SETTLE_DONE,
+  parseTierLedgerIdentity, tierLedgerIdentityOfRecord, type TierLedgerRecord,
+} from '../classification/tier-ledger.ts';
 import { findInLedger, runPassHere, runPassOffThread, turn, type LoopPass } from './loop-pass.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
 
 export const DEFAULT_HELD_SETTLE_ROWS = 500;
-const SETTLE_META_KEY = 'personal_first_settle_after';
 
 export interface TierHeldSettleReport {
   /** Legacy Personal-first rows found. */
@@ -32,11 +34,14 @@ export interface TierHeldSettleReport {
   settled: number;
   /** Of those, the ones whose copies were hidden and a move queued. */
   movesQueued: number;
+  failed: number;
+  retired: boolean;
 }
 
 /** The settle on its caller's connection (a direct caller, not the engine's loop). */
-export function settlePersonalFirstItems(options: { set: TieredStoreSet; limit?: number }): TierHeldSettleReport {
-  return runPassHere(personalFirstSettlePass(options));
+export function settlePersonalFirstItems(options: { set: TieredStoreSet; limit?: number }): Pick<TierHeldSettleReport, 'checked' | 'settled' | 'movesQueued'> {
+  const { checked, settled, movesQueued } = runPassHere(personalFirstSettlePass(options));
+  return { checked, settled, movesQueued };
 }
 
 /** The settle on the engine's loop: its window is read on the ledger's read worker, a turn between rows. */
@@ -45,11 +50,15 @@ export function settlePersonalFirstItemsOffThread(options: { set: TieredStoreSet
 }
 
 function* personalFirstSettlePass(options: { set: TieredStoreSet; limit?: number }): LoopPass<TierHeldSettleReport> {
-  const report: TierHeldSettleReport = { checked: 0, settled: 0, movesQueued: 0 };
+  const report: TierHeldSettleReport = { checked: 0, settled: 0, movesQueued: 0, failed: 0, retired: false };
   const { set } = options;
   const ledger = set.ledger;
+  if (ledger.readMeta(PERSONAL_FIRST_SETTLE_DONE) === '1') return { ...report, retired: true };
   const limit = Math.max(1, options.limit ?? DEFAULT_HELD_SETTLE_ROWS);
-  const after = parseTierLedgerIdentity(ledger.readMeta(SETTLE_META_KEY));
+  const saved = ledger.readMeta(PERSONAL_FIRST_SETTLE_CURSOR) ?? '';
+  // A checkpoint written before retirement was tracked cannot prove the prefix was clean.
+  const tracked = saved.startsWith('0:') || saved.startsWith('1:');
+  const after = tracked ? parseTierLedgerIdentity(saved.slice(2)) : undefined;
   const { records, resumeAfter } = yield* findInLedger(ledger, () => ledger.listPersonalFirstWindowSteps({ limit, ...(after ? { after } : {}) }));
   for (const found of records) {
     yield* turn();
@@ -65,9 +74,15 @@ function* personalFirstSettlePass(options: { set: TieredStoreSet; limit?: number
       if (outcome === 'queued_move' || outcome === 'updated' || outcome === 'unchanged') report.settled += 1;
     } catch {
       // Left as it is; a later pass or the item's next listing places it.
+      report.failed += 1;
     }
   }
-  ledger.writeMeta(SETTLE_META_KEY, resumeAfter ? JSON.stringify(resumeAfter) : '');
+  const matched = (after !== undefined && saved.startsWith('1:')) || report.checked > 0;
+  ledger.writeSettleProgress(PERSONAL_FIRST_SETTLE_CURSOR, resumeAfter ? `${Number(matched)}:${JSON.stringify(resumeAfter)}` : '');
+  if (!resumeAfter && !matched) {
+    ledger.writeSettleProgress(PERSONAL_FIRST_SETTLE_DONE, '1');
+    report.retired = true;
+  }
   return report;
 }
 

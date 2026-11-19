@@ -17,8 +17,9 @@ import {
   privateAnswerFailure,
 } from '../vocabulary.ts';
 import type { AskDestinationStates } from '../../engine/runtime/venice-inbox-answer.ts';
-import type { DashboardPageOptions, DashboardWaitingQuestion } from './local.ts';
+import type { DashboardPageOptions } from './local.ts';
 import { SOURCE_LOGO_CSS } from '../source-logos.ts';
+import { startupWaitingLine } from '../../../core/startup-progress.ts';
 
 /** The fragment the old Anonymous answers address lands on: that section, opened. */
 export const DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT = 'anonymous-setup';
@@ -212,7 +213,8 @@ function renderPrivateAnswersBody(options: DashboardPageOptions | undefined): st
     notes.push(`<p class="pnote" data-pa-unavailable>${escapeHtml(W.unavailable)}</p>`);
   } else {
     ready = true;
-    script = `<script>${privateAnswersClientScript({ csrfToken, unlockOnly: false })}</script>`;
+    const startup = options.privateAnswers.waiting?.startup;
+    script = `<script>${privateAnswersClientScript({ csrfToken, unlockOnly: false, ...(startup ? { startup } : {}) })}</script>`;
   }
   const inbox = ready ? renderWaiting(options?.privateAnswers?.waiting, options?.now ?? new Date()) : '';
   // zkAPI's own settings live on Settings › zkAPI and Privacy rules (#1047); this tab keeps only its card.
@@ -289,7 +291,7 @@ function renderFailureNotice(reason: unknown): string {
   return `<p class="pamsg" data-pa-failure><span data-pa-warning aria-hidden="true"></span>${escapeHtml(failure.message)} ${failure.href ? `<a href="${escapeHtml(failure.href)}">${escapeHtml(failure.action)}</a>` : escapeHtml(failure.action)}</p>`;
 }
 
-function renderWaiting(waiting: { questions: readonly DashboardWaitingQuestion[]; olderRemoved: boolean } | undefined, now: Date): string {
+function renderWaiting(waiting: NonNullable<DashboardPageOptions['privateAnswers']>['waiting'], now: Date): string {
   // Delete all sits top right of the heading, as signed off (final-1, #1047).
   const deleteAll = waiting ? `<button type="button" class="palink" data-pa-delete-all${waiting.questions.length ? '' : ' hidden'}>${escapeHtml(W.deleteAll)}</button>` : '';
   const parts: string[] = [`<section class="pasection" aria-labelledby="waiting"><div class="pawaithead"><h3 class="sect" id="waiting">${escapeHtml(W.waitingTitle)}</h3>${deleteAll}</div>`];
@@ -299,6 +301,7 @@ function renderWaiting(waiting: { questions: readonly DashboardWaitingQuestion[]
   }
   parts.push(`<p class="pnote" data-pa-none${waiting.questions.length ? ' hidden' : ''}>${escapeHtml(W.noneWaiting)}</p>`);
   parts.push(`<p class="pnote">${escapeHtml(W.waitingIntro)}</p>`);
+  const starting = escapeHtml(startupWaitingLine(waiting.startup, now.getTime()));
   const rows = [...waiting.questions].sort((a, b) => Date.parse(b.askedAt) - Date.parse(a.askedAt)).map((question) => {
     const asked = Date.parse(question.askedAt);
     const when = Number.isFinite(asked) ? dashboardRelativeFromMs(now.getTime() - asked) : '';
@@ -306,7 +309,8 @@ function renderWaiting(waiting: { questions: readonly DashboardWaitingQuestion[]
     const status = state === 'failed' ? '' : state === 'changed' ? W.changed : state === 'queued' ? W.queued : state === 'retrying' ? W.retrying : state === 'answering' ? W.answering : state === 'unchecked' ? W.unchecked : '';
     const from = [question.path === 'venice' ? W.veniceName : question.path === 'anonymous' ? W.anonymousPath : W.privatePath, question.from, when, status].filter(Boolean).join(' · ');
     return `<li class="srow nodot${state === 'failed' ? ' pa-failed' : ''}${question.unread ? ' unread' : ''}" id="${escapeHtml(question.id)}" data-pa-question="${escapeHtml(question.id)}">`
-      + `<div class="smain"><button type="button" class="pa-read" data-pa-read><span class="paq">${escapeHtml(question.question)}</span><span class="pafrom" title="${escapeHtml(question.askedAt)}"> · ${escapeHtml(from)}</span></button></div>`
+      + `<div class="smain"><button type="button" class="pa-read" data-pa-read><span class="paq">${escapeHtml(question.question)}</span><span class="pafrom" title="${escapeHtml(question.askedAt)}"> · ${escapeHtml(from)}</span></button>`
+      + (starting && status && state !== 'changed' ? `<p class="pamsg" data-pa-startup>${starting}</p>` : '') + '</div>'
       + `<div class="sact"><button type="button" class="btn" data-pa-delete>${escapeHtml(W.delete)}</button></div>`
       + (state === 'failed' ? renderFailureNotice(question.failureReason) : '')
       + `<div class="paout" data-pa-out aria-live="polite"></div></li>`;
@@ -322,13 +326,14 @@ function renderWaiting(waiting: { questions: readonly DashboardWaitingQuestion[]
  * local unlock carries nothing (the boundary wants a loopback browser). An
  * answer's acknowledgment is posted back only after the answer is on screen.
  */
-function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: boolean }): string {
+function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: boolean; startup?: import('../../../core/startup-progress.ts').StartupProgress }): string {
   const config = {
     csrfToken: input.csrfToken,
     path: POST_PATH,
     failures: PRIVATE_ANSWER_FAILURES,
     unlockPath: DASHBOARD_OUTSIDE_HELP_PATHS.unlock,
     unlockOnly: input.unlockOnly,
+    ...(input.startup ? { startup: input.startup } : {}),
     fragment: DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT,
     copy: {
       answering: W.answering,
@@ -394,6 +399,8 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
     });
   }
   if (config.unlockOnly) return;
+  var startup = config.startup;
+  var startupLine = (${startupWaitingLine.toString()});
   async function send(body) {
     var response;
     try {
@@ -415,6 +422,18 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
     if (text !== undefined) node.textContent = text;
     return node;
   }
+  function startupNotice(parent, progress) {
+    if (!parent) return;
+    var text = startupLine(progress);
+    var notice = parent.querySelector('[data-pa-startup]');
+    if (!text) { if (notice) notice.remove(); return; }
+    if (!notice) {
+      notice = el('p', 'pamsg');
+      notice.setAttribute('data-pa-startup', '');
+      parent.appendChild(notice);
+    }
+    if (notice.textContent !== text) notice.textContent = text;
+  }
   function panel(out, question) {
     out.textContent = '';
     var card = el('div', 'pacard');
@@ -432,6 +451,7 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
     var line = el('p', 'pamsg', text);
     if (bad) line.setAttribute('data-state', 'error');
     card.appendChild(line);
+    return card;
   }
   var failureFor = (${privateAnswerFailure.toString()});
   function failureNotice(reason) {
@@ -513,6 +533,7 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       return;
     } else if (status === 'answering' || status === 'retrying' || status === 'unchecked' || status === 'queued' || status === 'check_unavailable') {
       card.appendChild(el('p', 'pamsg', status === 'check_unavailable' ? config.copy.checkUnavailable : status === 'queued' ? config.copy.queued : status === 'retrying' ? config.copy.retrying : status === 'unchecked' ? config.copy.unchecked : config.copy.answering));
+      startupNotice(card, result.startup);
     } else if (status === 'failed') {
       card.appendChild(failureNotice(result.failureReason));
     } else if (status === 'not_found') {
@@ -528,6 +549,9 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
         : config.copy.failed;
       message(out, words, true, question);
       card = out.firstChild;
+    }
+    if (Array.isArray(result.unanswered) && result.unanswered.length > 0) {
+      card.appendChild(el('p', 'pamsg', config.copy.unanswered.replace('{parts}', result.unanswered.join('; '))));
     }
     if (leftOut.length > 0) card.appendChild(el('p', 'pamsg hint', config.copy.leftOut.replace('{sources}', leftOut.join(', '))));
     if (busy.length > 0) card.appendChild(el('p', 'pamsg hint', config.copy.busy.replace('{sources}', busy.join(', '))));
@@ -571,7 +595,7 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       }
       if (button) { button.disabled = true; button.setAttribute('aria-busy', 'true'); }
       if (reason) reason.textContent = config.copy.destinationBusy;
-      message(out, config.copy.answering, false, question);
+      startupNotice(message(out, config.copy.answering, false, question), startup);
       var body = { action: button.getAttribute('data-pa-action'), question: question };
       var level = body.action === 'ask_anonymous' ? Array.from(ask.querySelectorAll('[data-pa-level] input[name="level"]')).find(function (input) { return input.checked; }) : null;
       if (level) body.level = level.value;
@@ -602,7 +626,8 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
     var out = row.querySelector('[data-pa-out]');
     if (!quiet) {
       rows().forEach(function (other) { if (other !== row) other.querySelector('[data-pa-out]').textContent = ''; });
-      message(out, config.copy.answering, false, question);
+      startupNotice(row.querySelector('.smain'));
+      startupNotice(message(out, config.copy.answering, false, question), startup);
     }
     var outcome = await send({ action: 'read', id: id });
     if (version !== readVersion || selected !== id || !row.isConnected) return;
@@ -691,6 +716,11 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
   async function poll() {
     if (document.hidden) return;
     var outcome = await send({ action: 'list' });
+    if (outcome.ok) {
+      startup = outcome.result.startup;
+      var ask = root.querySelector('form[data-pa-ask]');
+      if (ask && ask.querySelector('[data-pa-ask-button][aria-busy]')) startupNotice(ask.querySelector('[data-pa-out] .pacard'), startup);
+    }
     if (!outcome.ok || !Array.isArray(outcome.result.questions) || !list) {
       var openRow = selected && findRow(selected);
       if (openRow) await read(openRow, true);
@@ -735,6 +765,7 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       var date = new Date(q.askedAt);
       row.querySelector('.pafrom').textContent = ' · ' + [q.path === 'venice' ? config.copy.venicePath : q.path === 'anonymous' ? config.copy.anonymousPath : config.copy.privatePath, q.from, isNaN(date.getTime()) ? '' : relative(Date.now() - date.getTime()), state].filter(Boolean).join(' · ');
       row.querySelector('.pafrom').title = q.askedAt;
+      startupNotice(row.querySelector('.smain'), selected !== q.id && state && q.state !== 'changed' ? startup : undefined);
       list.appendChild(row);
     });
     empty();

@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
-import { engineSplitCheck, installDetail, parseCli } from '../scripts/release-check/run.ts';
+import { candidateDefaultSplit, engineSplitCheck, installDetail, journeyRerunCommand, parseCli } from '../scripts/release-check/run.ts';
 import { engineRolesIn, engineRolesInPs, turnOnEngineSplit } from '../scripts/release-check/machine-agent.ts';
 import { buildReport, renderHtml } from '../scripts/release-check/report.ts';
 
@@ -23,6 +23,18 @@ function withConfig<T>(body: (args: string[]) => T): T {
 }
 
 describe('release-check run command arguments', () => {
+  test('the fresh replay is shell-quoted and selects one journey with only its required setup', () => {
+    withConfig(base => {
+      const options = parseCli(base);
+      const command = journeyRerunCommand({ ...options, candidateDir: "/tmp/Jamie's candidate" }, 'fix-one-item');
+      expect(command).toContain("--candidate '/tmp/Jamie'\\''s candidate'");
+      expect(command).toContain("--only-journeys 'fix-one-item'");
+      expect(command).toContain('--skip-archive --skip-restore --skip-explore');
+      expect(command).toContain('--skip-suite --skip-inbox');
+      expect(journeyRerunCommand(options, 'restore-clean-machine')).toBeUndefined();
+    });
+  });
+
   test('a harness commit is carried into the options; none means an unpinned run', () => {
     withConfig((base) => {
       expect(parseCli([...base, '--sha', A, '--harness-commit', A]).harnessCommit).toBe(A);
@@ -58,18 +70,19 @@ describe('release-check run command arguments', () => {
     });
   });
 
-  test('--archive-scale is opt-in, implies the split, and accepts the repo harness environment input', () => {
+  test('--archive-scale is opt-in, leaves engine.json alone, and accepts the repo harness environment input', () => {
     const previous = process.env.RC_ARCHIVE_SCALE;
     try {
       delete process.env.RC_ARCHIVE_SCALE;
       withConfig(base => {
         expect(parseCli(base).archiveScale).toBeUndefined();
-        expect(parseCli([...base, '--archive-scale'])).toMatchObject({ archiveScale: true, engineSplit: true });
+        expect(parseCli([...base, '--archive-scale'])).toMatchObject({ archiveScale: true });
+        expect(parseCli([...base, '--archive-scale']).engineSplit).toBeUndefined();
         expect(parseCli([...base, '--archive-scale', '--skip-archive']).skipArchive).toBe(true);
         expect(() => parseCli([...base, '--archive-scale', '--baselines', base[3]!, '--update-baselines'])).toThrow('--archive-scale');
         expect(() => parseCli([...base, '--archive-scale', '--carry-from', '/tmp/report.json'])).toThrow('--archive-scale');
         process.env.RC_ARCHIVE_SCALE = '1';
-        expect(parseCli(base)).toMatchObject({ archiveScale: true, engineSplit: true });
+        expect(parseCli(base)).toMatchObject({ archiveScale: true });
         process.env.RC_ARCHIVE_SCALE = '0';
         expect(parseCli(base).archiveScale).toBeUndefined();
       });
@@ -79,8 +92,9 @@ describe('release-check run command arguments', () => {
     }
   });
 
-  test('--engine-split is off unless named, is refused with a kept run or new baselines, and the usage names it', () => {
+  test('the split is the default and --engine-split is an explicit override, refused with a kept run or new baselines, and the usage names it', () => {
     withConfig((base) => {
+      expect(candidateDefaultSplit()).toBe(true);
       expect(parseCli(base).engineSplit).toBeUndefined();
       expect(parseCli([...base, '--engine-split']).engineSplit).toBe(true);
       expect(() => parseCli([...base, '--engine-split', '--baselines', base[3]!, '--update-baselines'])).toThrow('--engine-split');

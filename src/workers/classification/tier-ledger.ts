@@ -25,13 +25,15 @@ import { Database } from 'bun:sqlite';
 import { randomUUID } from 'node:crypto';
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { OperationError } from '../../core/operation-error.ts';
 import type { SourceItemIdentity, SourceTrustDomain, SourceTrustTier } from '../../core/source-index/types.ts';
 import { readSqliteSchemaVersion, runSqliteMigrations, sqliteSchemaUsable, type SqliteMigration } from '../../core/sqlite-migrations.ts';
-import { closeSqliteStore, loopWalAutocheckpointPragma } from '../../core/sqlite-store.ts';
+import { closeSqliteStore, loopWalAutocheckpointPragma, type SqliteCloseOptions } from '../../core/sqlite-store.ts';
 import { assertWritableStoreOpenAllowed } from '../../core/store-write-guard.ts';
 import {
   PERSONAL_FIRST_REASON,
   TIER_KEYS,
+  contentHeldForJudgment,
   contentJudgeVerdictReason,
   maxTier,
   tierRank,
@@ -159,8 +161,9 @@ function identityValues(batch: readonly TierLedgerIdentity[]): { values: string;
 }
 
 /** `copiesForMany`'s reads: each item's copies, a batch at a time, every copy superseded while a deletion or Secret is under way. */
-function* copiesSteps(list: readonly TierLedgerIdentity[]): Generator<LedgerRead, Map<string, TierCopy[]>, unknown> {
-  const result = new Map<string, TierCopy[]>();
+function* copiesSteps(list: readonly TierLedgerIdentity[]): Generator<LedgerRead, Pick<TierVisibilityReads, 'copies' | 'hiddenWithoutCopies'>, unknown> {
+  const copies = new Map<string, TierCopy[]>();
+  const hiddenWithoutCopies = new Set<string>();
   for (let offset = 0; offset < list.length; offset += IDENTITY_BATCH) {
     const { values, params } = identityValues(list.slice(offset, offset + IDENTITY_BATCH));
     const rows = (yield {
@@ -171,24 +174,39 @@ function* copiesSteps(list: readonly TierLedgerIdentity[]): Generator<LedgerRead
     }) as TierCopyRow[];
     for (const row of rows) {
       const key = tierLedgerIdentityKey(identityFromRow(row));
-      const existing = result.get(key);
+      const existing = copies.get(key);
       if (existing) existing.push(copyFromRow(row));
-      else result.set(key, [copyFromRow(row)]);
+      else copies.set(key, [copyFromRow(row)]);
     }
     // An item whose deletion or Secret is under way (an intent not yet cleared) is hidden at once: a read in
     // the same snapshot sees every copy as superseded, whichever legs have been written so far.
-    const pending = (yield {
-      sql: `SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_write_intents
-        WHERE kind IN ('deletion', 'secret')
-          AND (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})`,
-      params, mode: 'all',
-    }) as Array<{ provider: string; account_scope: string; conversation_key: string; provider_item_id: string }>;
+    const pending = yield* hidingIntentsSteps(values, params);
     for (const row of pending) {
-      const hidden = result.get(tierLedgerIdentityKey(identityFromRow(row as never)));
+      const key = tierLedgerIdentityKey(identityFromRow(row));
+      const hidden = copies.get(key);
       if (hidden) for (const copy of hidden) if (copy.state !== 'superseded') copy.state = 'superseded';
+      if (!hidden) hiddenWithoutCopies.add(key);
     }
   }
-  return result;
+  return { copies, hiddenWithoutCopies };
+}
+
+type HidingIntent = 'deletion' | 'secret';
+
+interface TierLedgerItemState {
+  record?: TierLedgerRecord;
+  copies: TierCopy[];
+  override?: ItemTierOverride;
+  hidingIntent?: HidingIntent;
+}
+
+function* hidingIntentsSteps(values: string, params: string[]): Generator<LedgerRead, Array<TierIdentityRow & { kind: HidingIntent }>, unknown> {
+  return (yield {
+    sql: `SELECT provider, account_scope, conversation_key, provider_item_id, kind FROM tier_write_intents
+      WHERE kind IN ('deletion', 'secret')
+        AND (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${values})`,
+    params, mode: 'all',
+  }) as Array<TierIdentityRow & { kind: HidingIntent }>;
 }
 
 /**
@@ -236,7 +254,8 @@ function* routedWithoutCopiesSteps(list: readonly TierLedgerIdentity[]): Generat
 /** What the search's visibility gate reads from one ledger (`visibilityReadSteps`). */
 export interface TierVisibilityReads {
   copies: Map<string, TierCopy[]>;
-  routedWithoutCopies: Set<string>;
+  /** Copyless items that were routed or have a pending deletion or Secret. */
+  hiddenWithoutCopies: Set<string>;
   /** Items still waiting Personal-first (#1316); read only when asked for. */
   personalFirstWaiting: Set<string>;
 }
@@ -327,8 +346,10 @@ const AWAITING_TEXT_WHERE = `routed = 1 AND content_read = 0 AND metadata_pendin
           OR (state = 'current' AND EXISTS (SELECT 1 FROM json_each(reasons_json) r
             WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
               OR r.value GLOB 'content:sniffer:*:fail_safe:unread')))`;
-const PERSONAL_FIRST_WHERE = `routed = 1 AND content_pending = 1 AND state != 'moving'
+const PERSONAL_FIRST_WHERE = `routed = 1 AND content_pending = 1
         AND EXISTS (SELECT 1 FROM json_each(reasons_json) r WHERE r.value = ?)`;
+export const PERSONAL_FIRST_SETTLE_CURSOR = 'personal_first_settle_after';
+export const PERSONAL_FIRST_SETTLE_DONE = 'personal_first_settle_done';
 
 /** Rows a window looks at per read: each read stays short on a cold disk (plan thread, 16 Nov: no background read over 1 s). */
 const WINDOW_SLICE_ROWS = 2_000;
@@ -352,7 +373,9 @@ function* windowSteps(
   let lastEnd: Pick<TierItemRow, 'provider' | 'account_scope' | 'conversation_key' | 'provider_item_id'> | undefined;
   for (let examined = 0; examined < examine;) {
     const slice = Math.min(WINDOW_SLICE_ROWS, examine - examined);
-    const keyAfter = after ? 'WHERE (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?)' : '';
+    const keyAfter = after
+      ? 'WHERE (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?)'
+      : "WHERE provider >= ''";
     const rows = (yield {
       sql: `
         SELECT * FROM (
@@ -507,6 +530,7 @@ const UNSETTLED_SECRET_SIDE_STORES_SQL = `
         ON s.provider = i.provider AND s.account_scope = i.account_scope
         AND s.conversation_key = i.conversation_key AND s.provider_item_id = i.provider_item_id
       WHERE (i.metadata_tier = 'secrets' OR i.content_tier = 'secrets')
+        AND i.provider >= ''
         AND (s.cleared_generation IS NOT i.generation OR s.cleared_revision IS NOT s.revision)
         AND NOT EXISTS (
           SELECT 1 FROM secret_side_store_debt d
@@ -567,6 +591,40 @@ const CORPUS_VISIBILITY_FLAGS_SQL = `c.provider, c.account_scope, c.conversation
       ) AS metadata_unread,
       EXISTS (SELECT 1 FROM tier_items t WHERE t.provider = c.provider AND t.account_scope = c.account_scope
         AND t.conversation_key = c.conversation_key AND t.provider_item_id = c.provider_item_id AND t.state = 'moving') AS moving`;
+
+const CORPUS_COPY_FLAGS_PAGE_SQL = `SELECT c.rowid AS row_id, ${CORPUS_VISIBILITY_FLAGS_SQL} FROM tier_copies c
+  INDEXED BY tier_copies_visibility_walk WHERE c.corpus_id = ? AND c.rowid > ? ORDER BY c.rowid LIMIT 500`;
+
+// An intent hides even a legacy row. A copy in this corpus already carries
+// the hidden flag, so emit a separate entry only when that copy is absent.
+const CORPUS_INTENT_ID_SQL = 'w.provider, w.account_scope, w.conversation_key, w.provider_item_id';
+const CORPUS_INTENT_OTHER_FLAGS_SQL = '0 AS held, 0 AS held_for_judgment, 0 AS metadata_layer, 0 AS metadata_unread, 0 AS moving';
+const CORPUS_INTENT_WITHOUT_COPY_SQL = `w.kind IN ('deletion', 'secret') AND NOT EXISTS (
+  SELECT 1 FROM tier_copies c WHERE c.provider = w.provider AND c.account_scope = w.account_scope
+    AND c.conversation_key = w.conversation_key AND c.provider_item_id = w.provider_item_id AND c.corpus_id = ?)`;
+// Advance the cursor by rows visited even when a page has no hiding intents.
+const CORPUS_INTENT_FLAGS_PAGE_SQL = `SELECT w.rowid AS row_id, ${CORPUS_INTENT_ID_SQL},
+  ${CORPUS_INTENT_WITHOUT_COPY_SQL} AS hidden, ${CORPUS_INTENT_OTHER_FLAGS_SQL}
+  FROM tier_write_intents w WHERE w.rowid > ? ORDER BY w.rowid LIMIT 500`;
+
+function corpusVisibilityBatchRead(corpusId: string, batch: readonly TierLedgerIdentity[]): LedgerRead {
+  // The changed identities drive primary-key probes in both tables.
+  return {
+    sql: `WITH keys AS (
+      SELECT json_extract(value, '$[0]') AS provider, json_extract(value, '$[1]') AS account_scope,
+        json_extract(value, '$[2]') AS conversation_key, json_extract(value, '$[3]') AS provider_item_id
+      FROM json_each(?)
+    )
+    SELECT ${CORPUS_VISIBILITY_FLAGS_SQL} FROM keys k CROSS JOIN tier_copies c
+      USING (provider, account_scope, conversation_key, provider_item_id) WHERE c.corpus_id = ?
+    UNION ALL
+    SELECT ${CORPUS_INTENT_ID_SQL}, 1 AS hidden, ${CORPUS_INTENT_OTHER_FLAGS_SQL}
+      FROM keys k CROSS JOIN tier_write_intents w
+      USING (provider, account_scope, conversation_key, provider_item_id) WHERE ${CORPUS_INTENT_WITHOUT_COPY_SQL}`,
+    params: [JSON.stringify(batch.map(idParams)), corpusId, corpusId],
+    mode: 'all',
+  };
+}
 
 type CorpusVisibilityRow = TierIdentityRow & { hidden: number; held: number; held_for_judgment: number; metadata_layer: number; metadata_unread: number; moving: number };
 
@@ -684,6 +742,10 @@ export interface TierLedgerOptions {
   dbPath: string;
   /** Inspection only: no migrations, repairs, permissions or checkpoint on close. */
   readOnly?: boolean;
+  /** Permit a query-only handle if SQLite cannot read a clean WAL-less file. */
+  allowWalLessRead?: boolean;
+  /** Match the binding on the writer handle before preparing its schema. */
+  expectedLedgerId?: string;
   now?: () => Date;
 }
 
@@ -787,6 +849,7 @@ export class TierLedger {
   private readonly db: Database;
   private readonly readOnly: boolean;
   private readonly now: () => Date;
+  private settleProgressChanges = 0;
 
   constructor(options: TierLedgerOptions) {
     this.dbPath = options.dbPath;
@@ -794,8 +857,8 @@ export class TierLedger {
     this.now = options.now ?? (() => new Date());
     if (!this.readOnly) assertWritableStoreOpenAllowed('tier ledger', this.dbPath);
     const onDisk = this.dbPath !== ':memory:';
-    if (onDisk) TierLedger.assertSchemaCanOpen(this.dbPath, this.readOnly);
-    if (onDisk && !this.readOnly) {
+    if (onDisk) TierLedger.assertSchemaCanOpen(this.dbPath, this.readOnly, options.allowWalLessRead);
+    if (onDisk && !this.readOnly && options.expectedLedgerId === undefined) {
       mkdirSync(dirname(this.dbPath), { recursive: true, mode: 0o700 });
       // Owner-only from the first byte, with an explicit file mode rather than
       // a process-wide umask (which would race every other file this process
@@ -807,7 +870,8 @@ export class TierLedger {
     }
     let db: Database | undefined;
     try {
-      db = new Database(this.dbPath, this.readOnly ? { readonly: true, create: false } : { create: true });
+      db = new Database(this.dbPath, this.readOnly ? { readonly: true, create: false }
+        : options.expectedLedgerId === undefined ? { create: true } : { readwrite: true, create: false });
       if (this.readOnly) {
         db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;');
         applySqliteMmap(db);
@@ -817,9 +881,21 @@ export class TierLedger {
         this.db = db;
         return;
       }
+      if (options.expectedLedgerId !== undefined) {
+        db.exec('PRAGMA busy_timeout = 10000;');
+        const row = db.query(`SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'`).get() as { value?: string } | null;
+        if (row?.value !== options.expectedLedgerId) {
+          throw new OperationError(
+            'source_index_error',
+            'The tier ledger for that item was replaced while it was being read, so nothing was changed.',
+            'Run the command again.',
+          );
+        }
+        if (onDisk) restrictLedgerFiles(this.dbPath);
+      }
       // FULL stays: a decision is never lost to a power cut. The size limit
       // truncates a WAL that grew while reads held it (6 GB, 16 Nov) once it resets.
-      db.exec('PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA journal_size_limit = 67108864;' + loopWalAutocheckpointPragma());
+      db.exec('PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA journal_size_limit = 67108864;' + loopWalAutocheckpointPragma(this.dbPath, 'tier-ledger'));
       applySqliteMmap(db);
       runSqliteMigrations(db, TIER_LEDGER_SQLITE_STORE_ID, tierLedgerMigrations());
       // The owner's overridden items, for the cleared-override search
@@ -829,19 +905,20 @@ export class TierLedger {
         ON tier_items (provider, account_scope, conversation_key, provider_item_id) WHERE decided_by = 'override'`);
       if (onDisk) restrictLedgerFiles(this.dbPath);
     } catch (error) {
-      if (db) closeSqliteStore(db, { checkpoint: !this.readOnly });
+      if (db) closeSqliteStore(db, this.readOnly || options.expectedLedgerId !== undefined
+        ? { checkpoint: false, readOnly: this.readOnly } : undefined);
       throw error;
     }
     this.db = db;
   }
 
   /** Preflight existing files read-only, before chmod, WAL setup or a writable open. */
-  static assertSchemaCanOpen(dbPath: string, readOnly = false): void {
+  static assertSchemaCanOpen(dbPath: string, readOnly = false, allowWalLessRead = false): void {
     if (dbPath === ':memory:' || !existsSync(dbPath)) return;
     const read = readSqliteWithoutWriting(dbPath, 10_000, (db) => ({
       version: readSqliteSchemaVersion(db, TIER_LEDGER_SQLITE_STORE_ID),
       usable: sqliteSchemaUsable(db, TIER_LEDGER_SQLITE_STORE_ID, TIER_LEDGER_SCHEMA_VERSION),
-    }), readOnly);
+    }), readOnly && !allowWalLessRead);
     // Newer is refused unless compatible; a read-only open cannot migrate an older one.
     if (read !== undefined && !read.usable && (read.version > TIER_LEDGER_SCHEMA_VERSION || readOnly)) {
       throw new TierLedgerSchemaError(read.version);
@@ -853,11 +930,9 @@ export class TierLedger {
     return sqliteSchemaUsable(this.db, TIER_LEDGER_SQLITE_STORE_ID, TIER_LEDGER_SCHEMA_VERSION);
   }
 
-  close(): void {
+  close(options?: SqliteCloseOptions): void {
     try {
-      // Checkpointed close, like every Olympus store: the ledger is safe to
-      // hand to another process the moment this returns.
-      closeSqliteStore(this.db, { checkpoint: !this.readOnly });
+      closeSqliteStore(this.db, this.readOnly ? { checkpoint: false, readOnly: true } : options);
     } finally {
       const listeners = this.closeListeners ?? [];
       this.closeListeners = undefined;
@@ -1411,17 +1486,18 @@ export class TierLedger {
   *rejudgeCandidatePageSteps(options: RejudgePageOptions): Generator<LedgerRead, RejudgePage, unknown> {
     const limit = Math.max(1, Math.min(options.limit ?? 100, 5_000));
     const scanLimit = Math.max(limit, Math.min(options.scanLimit ?? DEFAULT_REJUDGE_SCAN_ROWS, 50_000));
-    const after = options.after
-      ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId]
-      : null;
+    const after = options.after ? idParams(options.after) : [];
+    const lowerBound = options.after
+      ? '(provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?)'
+      : "provider >= ''";
     const rows = (yield {
       mode: 'all',
       sql: rejudgeCandidateSql(`
         SELECT * FROM tier_items
-        WHERE (? IS NULL OR (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?))
+        WHERE ${lowerBound}
         ORDER BY provider, account_scope, conversation_key, provider_item_id
         LIMIT ?`),
-      params: [after ? 1 : null, ...(after ?? [null, null, null, null]), scanLimit, ...rejudgeCandidateParams(options)],
+      params: [...after, scanLimit, ...rejudgeCandidateParams(options)],
     }) as RejudgeCandidateRow[];
     const records: TierLedgerRecord[] = [];
     const causes: TierRejudgeCause[] = [];
@@ -2061,13 +2137,17 @@ export class TierLedger {
 
   /** Note the extraction job ledgers this process has open (see `knownJobLedgerPaths`). */
   noteJobLedgerPaths(paths: readonly string[]): void {
+    // Only a path not noted yet is written: noting the same paths each tick leaves an idle ledger untouched.
+    const known = new Set(this.knownJobLedgerPaths());
+    paths = paths.filter((path) => !known.has(path));
+    if (paths.length === 0) return;
     const now = this.now().toISOString();
     this.db.transaction(() => {
       const upsert = this.db.query(`
         INSERT INTO known_job_ledgers (path, seen_at) VALUES (?, ?)
         ON CONFLICT (path) DO UPDATE SET seen_at = excluded.seen_at
       `);
-      for (const path of paths) upsert.run(path, now);
+      for (const path of paths) this.settleProgressChanges += upsert.run(path, now).changes;
     })();
   }
 
@@ -2469,11 +2549,22 @@ export class TierLedger {
   }
 
   writeMeta(key: string, value: string): void {
+    this.setMeta(key, value);
+  }
+
+  /** A walk's own checkpoint does not invalidate a judge's clean lap. */
+  writeSettleProgress(key: string, value: string): void {
+    // An unchanged value takes no write lock: an idle pass leaves the ledger untouched.
+    if ((this.readMeta(key) ?? '') === value) return;
+    this.settleProgressChanges += this.setMeta(key, value);
+  }
+
+  private setMeta(key: string, value: string): number {
     if (key === 'ledger_id') throw new Error('The ledger identity is never rewritten.');
-    this.db.query(`
+    return this.db.query(`
       INSERT INTO tier_ledger_meta (key, value) VALUES (?, ?)
-      ON CONFLICT(key) DO UPDATE SET value = excluded.value
-    `).run(key, value);
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE value <> excluded.value
+    `).run(key, value).changes;
   }
 
   deleteMeta(key: string): void {
@@ -2674,14 +2765,14 @@ export class TierLedger {
    * `tierLedgerIdentityKey`. Items with no rows are absent from the map.
    */
   copiesForMany(identities: readonly TierLedgerIdentity[]): Map<string, TierCopy[]> {
-    return this.readSteps(copiesSteps(uniqueIdentities(identities)));
+    return this.readSteps(copiesSteps(uniqueIdentities(identities))).copies;
   }
 
   /**
    * What the search's visibility gate reads, as reads a caller can make on
    * another connection in one snapshot (#1305): each item's copies
-   * (`copiesForMany`) and, of the items with none, those routed without a
-   * copy (`routedWithoutCopies`), and with `personalFirst`, of the items with
+   * (`copiesForMany`) and, of the items with none, those routed or under a
+   * deletion or Secret intent. With `personalFirst`, of the items with
    * no held copy, those still waiting Personal-first (#1316), for the judge's
    * order. `readSteps` makes them here.
    */
@@ -2690,12 +2781,15 @@ export class TierLedger {
     options: { personalFirst?: boolean } = {},
   ): Generator<LedgerRead, TierVisibilityReads, unknown> {
     const list = uniqueIdentities(identities);
-    const copies = yield* copiesSteps(list);
-    const copyless = list.filter((identity) => (copies.get(tierLedgerIdentityKey(identity))?.length ?? 0) === 0);
-    const routedWithoutCopies = yield* routedWithoutCopiesSteps(copyless);
-    if (!options.personalFirst) return { copies, routedWithoutCopies, personalFirstWaiting: new Set() };
+    const { copies, hiddenWithoutCopies } = yield* copiesSteps(list);
+    const copyless = list.filter((identity) => {
+      const key = tierLedgerIdentityKey(identity);
+      return !copies.has(key) && !hiddenWithoutCopies.has(key);
+    });
+    for (const key of yield* routedWithoutCopiesSteps(copyless)) hiddenWithoutCopies.add(key);
+    if (!options.personalFirst) return { copies, hiddenWithoutCopies, personalFirstWaiting: new Set() };
     const unheld = list.filter((identity) => !copies.get(tierLedgerIdentityKey(identity))?.some((copy) => copy.state === 'current' && copy.embedHold));
-    return { copies, routedWithoutCopies, personalFirstWaiting: yield* personalFirstWaitingSteps(unheld) };
+    return { copies, hiddenWithoutCopies, personalFirstWaiting: yield* personalFirstWaitingSteps(unheld) };
   }
 
   /** Hears this ledger close, once (for a reader of its file elsewhere to let go). */
@@ -3019,13 +3113,13 @@ export class TierLedger {
 
   /**
    * Each item's row and copies, read in ONE transaction so every item is
-   * judged against one ledger snapshot: one batched query for the rows and
-   * one for the copies (per 200 items). Keyed by `tierLedgerIdentityKey`;
-   * an item with no row is absent from the map (never classified).
+   * judged against one ledger snapshot, including pending writes that hide
+   * items. Keyed by `tierLedgerIdentityKey`; an item with neither a decision
+   * nor a hiding intent is absent from the map.
    */
   itemStatesForMany(
     identities: readonly TierLedgerIdentity[],
-  ): Map<string, { record: TierLedgerRecord; copies: TierCopy[]; override?: ItemTierOverride }> {
+  ): Map<string, TierLedgerItemState> {
     return this.readSteps(this.itemStatesSteps(identities));
   }
 
@@ -3033,8 +3127,8 @@ export class TierLedger {
   // must not make the Ask read every governed item on the request thread.
   *itemStatesSteps(
     identities: readonly TierLedgerIdentity[],
-  ): Generator<LedgerRead, Map<string, { record: TierLedgerRecord; copies: TierCopy[]; override?: ItemTierOverride }>, unknown> {
-    const result = new Map<string, { record: TierLedgerRecord; copies: TierCopy[]; override?: ItemTierOverride }>();
+  ): Generator<LedgerRead, Map<string, TierLedgerItemState>, unknown> {
+    const result = new Map<string, TierLedgerItemState>();
     const list = uniqueIdentities(identities);
     for (let offset = 0; offset < list.length; offset += IDENTITY_BATCH) {
       const { values, params } = identityValues(list.slice(offset, offset + IDENTITY_BATCH));
@@ -3062,6 +3156,12 @@ export class TierLedger {
         const state = result.get(tierLedgerIdentityKey(identityFromRow(row)));
         const override = overrideFromJson(row.override_json);
         if (state && override) state.override = override;
+      }
+      for (const row of yield* hidingIntentsSteps(values, params)) {
+        const key = tierLedgerIdentityKey(identityFromRow(row));
+        const state = result.get(key);
+        if (state) state.hidingIntent = row.kind;
+        else result.set(key, { copies: [], hidingIntent: row.kind });
       }
     }
     return result;
@@ -4207,10 +4307,10 @@ export class TierLedger {
    * Changes whenever this ledger's database changes, from this connection or
    * another: lets a reader reuse what it derived from the ledger until then.
    */
-  changeMarker(): string {
+  changeMarker(options: { ignoreSettleProgress?: boolean } = {}): string {
     const row = this.db.query('SELECT total_changes() AS changes').get() as { changes: number };
     const version = this.db.query('PRAGMA data_version').get() as { data_version: number };
-    return `${version.data_version}:${row.changes}`;
+    return `${version.data_version}:${row.changes - (options.ignoreSettleProgress ? this.settleProgressChanges : 0)}`;
   }
 
   /**
@@ -4231,52 +4331,52 @@ export class TierLedger {
     })();
   }
 
-  /** All copy flags in one indexed walk, or just the changed identities. */
+  /** Walk the copy and intent flags in pages, or read only the changed identities. */
   *corpusVisibilityPages(corpusId: string, identities?: readonly TierLedgerIdentity[]): Generator<TierCorpusVisibility[]> {
-    const flags = CORPUS_VISIBILITY_FLAGS_SQL;
-    const convert = corpusVisibilityFromRows;
     if (identities) {
-      for (let offset = 0; offset < identities.length; offset += 200) {
-        const batch = identities.slice(offset, offset + 200);
-        // Identities drive the primary-key probes; a corpus index must never
-        // tempt the planner to walk the held corpus for one changed item.
-        const rows = this.db.query(`SELECT ${flags} FROM json_each(?) j CROSS JOIN tier_copies c
-          WHERE c.provider = json_extract(j.value, '$[0]') AND c.account_scope = json_extract(j.value, '$[1]')
-            AND c.conversation_key = json_extract(j.value, '$[2]') AND c.provider_item_id = json_extract(j.value, '$[3]')
-            AND c.corpus_id = ?`)
-          .all(JSON.stringify(batch.map(identity => [...idParams(identity)])), corpusId) as Parameters<typeof convert>[0];
-        yield convert(rows);
+      for (let offset = 0; offset < identities.length; offset += IDENTITY_BATCH) {
+        const { sql, params } = corpusVisibilityBatchRead(corpusId, identities.slice(offset, offset + IDENTITY_BATCH));
+        yield corpusVisibilityFromRows(this.db.query(sql).all(...params as string[]) as CorpusVisibilityRow[]);
       }
       return;
     }
-    const query = this.db.query(`SELECT c.rowid AS row_id, ${flags} FROM tier_copies c
-      INDEXED BY tier_copies_visibility_walk WHERE c.corpus_id = ? AND c.rowid > ? ORDER BY c.rowid LIMIT 500`);
-    for (let after = 0; ;) {
-      const rows = query.all(corpusId, after) as Array<Parameters<typeof convert>[0][number] & { row_id: number }>;
-      if (rows.length === 0) return;
-      yield convert(rows);
-      after = rows.at(-1)!.row_id;
-      if (rows.length < 500) return;
+    for (const sql of [CORPUS_COPY_FLAGS_PAGE_SQL, CORPUS_INTENT_FLAGS_PAGE_SQL]) {
+      const query = this.db.query(sql);
+      for (let after = 0; ;) {
+        const rows = query.all(corpusId, after) as Array<CorpusVisibilityRow & { row_id: number }>;
+        const flags = sql === CORPUS_INTENT_FLAGS_PAGE_SQL ? rows.filter(row => row.hidden) : rows;
+        if (flags.length > 0) yield corpusVisibilityFromRows(flags);
+        if (rows.length < 500) break;
+        after = rows.at(-1)!.row_id;
+      }
     }
   }
 
   /**
-   * The full walk of `corpusVisibilityPages`, as reads for the read worker,
-   * keeping only the copies some flag marks: a bootstrap applies nothing for
-   * the rest (loop-stall step-back, family 1).
+   * The same reads for the read worker, keeping only items some flag marks.
    */
-  *corpusVisibilityFlaggedSteps(corpusId: string): Generator<LedgerRead, TierCorpusVisibility[], unknown> {
-    const sql = `SELECT c.rowid AS row_id, ${CORPUS_VISIBILITY_FLAGS_SQL} FROM tier_copies c
-      INDEXED BY tier_copies_visibility_walk WHERE c.corpus_id = ? AND c.rowid > ? ORDER BY c.rowid LIMIT 500`;
+  *corpusVisibilityFlaggedSteps(corpusId: string, identities?: readonly TierLedgerIdentity[]): Generator<LedgerRead, TierCorpusVisibility[], unknown> {
     const flagged: TierCorpusVisibility[] = [];
-    for (let after = 0; ;) {
-      const rows = (yield { sql, params: [corpusId, after], mode: 'all' }) as Array<CorpusVisibilityRow & { row_id: number }>;
+    const add = (rows: CorpusVisibilityRow[]) => {
       for (const row of corpusVisibilityFromRows(rows)) {
         if (row.moving || row.hidden || row.held || row.heldForJudgment || row.metadataLayer || row.metadataLayerContentUnread) flagged.push(row);
       }
-      if (rows.length < 500) return flagged;
-      after = rows.at(-1)!.row_id;
+    };
+    if (identities) {
+      for (let offset = 0; offset < identities.length; offset += IDENTITY_BATCH) {
+        add((yield corpusVisibilityBatchRead(corpusId, identities.slice(offset, offset + IDENTITY_BATCH))) as CorpusVisibilityRow[]);
+      }
+      return flagged;
     }
+    for (const sql of [CORPUS_COPY_FLAGS_PAGE_SQL, CORPUS_INTENT_FLAGS_PAGE_SQL]) {
+      for (let after = 0; ;) {
+        const rows = (yield { sql, params: [corpusId, after], mode: 'all' }) as Array<CorpusVisibilityRow & { row_id: number }>;
+        add(rows);
+        if (rows.length < 500) break;
+        after = rows.at(-1)!.row_id;
+      }
+    }
+    return flagged;
   }
 
   /**
@@ -4831,7 +4931,7 @@ function readSqliteWithoutWriting<T>(dbPath: string, busyTimeoutMs: number, read
       if (isSqliteBusy(error)) return undefined;
       // Try the next way of opening it.
     } finally {
-      if (db) closeSqliteStore(db, { checkpoint: false });
+      if (db) closeSqliteStore(db, { checkpoint: false, readOnly: 'readonly' in mode });
     }
   }
   return undefined;
@@ -5205,6 +5305,12 @@ export function copyServingLayer<T extends Pick<TierCopy, 'layers'>>(
   layer: TierSearchLayer,
 ): T | undefined {
   return copies.find((copy) => copy.layers === 'both' || copy.layers === layer);
+}
+
+/** A held item's names can serve separately from its text only from a current names-only copy. */
+export function itemNamesHeldForJudgment(record: TierLedgerRecord, copies: readonly TierCopy[], corpusId?: string): boolean {
+  return record.metadataPending || (contentHeldForJudgment(record) && !copies.some(copy =>
+    copy.state === 'current' && copy.layers === 'metadata' && (corpusId === undefined || copy.corpusId === corpusId)));
 }
 
 function ownerPriorOf(json: string): OwnerPriorDecision | undefined {
@@ -6005,6 +6111,8 @@ function tierLedgerMigrations(): SqliteMigration[] {
       version: 13,
       name: 'hold_personal_first_copies',
       up(db) {
+        db.query('DELETE FROM tier_ledger_meta WHERE key IN (?, ?)')
+          .run(PERSONAL_FIRST_SETTLE_CURSOR, PERSONAL_FIRST_SETTLE_DONE);
         db.query(`
           UPDATE tier_copies SET embed_hold = 1
           WHERE copy_state = 'current' AND embed_hold = 0 AND EXISTS (
