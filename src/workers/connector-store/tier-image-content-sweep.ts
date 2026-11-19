@@ -75,7 +75,7 @@ function* imageContentSweepPass(options: { set: TieredStoreSet; limit?: number }
       else overflow = true;
     }
   };
-  const save = (next: SweepState) => ledger.writeMeta(SWEEP_META_KEY, JSON.stringify(next));
+  const save = (next: SweepState) => ledger.writeSettleProgress(SWEEP_META_KEY, JSON.stringify(next));
   if (state.retry) {
     for (const identity of state.held ?? []) {
       yield* turn();

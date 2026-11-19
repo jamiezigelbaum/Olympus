@@ -219,6 +219,8 @@ export interface EngineFront {
   /** The background's last status snapshot and its age; refreshed asynchronously at most once a second. */
   status(): EngineStatusRead | undefined;
   refreshStatus(): Promise<void>;
+  /** The last snapshot read, with no disk read and no refresh. */
+  cachedSnapshot(): EngineStatusRead['snapshot'] | undefined;
   /** The polled activity, with no disk read or status refresh on the log path. */
   backgroundActivity(): MemoryActivity;
   /** One built-in model completion, run by the background, which holds the model. */
@@ -293,7 +295,7 @@ export function createEngineFront(input: {
     const probeMs = 250;
     while (!await probeEngineBackground(fetchBackground, input.authToken, undefined, probeMs, true)) await Bun.sleep(probeMs);
   };
-  return { client, ownerBusy: relay, status, refreshStatus, backgroundActivity: () => cached?.activity ?? 'idle', completeModel, backgroundReady,
+  return { client, ownerBusy: relay, status, refreshStatus, cachedSnapshot: () => cached, backgroundActivity: () => cached?.activity ?? 'idle', completeModel, backgroundReady,
     waitForPendingPrivacyRaises, stop: () => { stopped = true; clearInterval(poll); relay?.stop(); } };
 }
 

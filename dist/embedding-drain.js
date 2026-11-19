@@ -12429,8 +12429,10 @@ var AWAITING_TEXT_WHERE = `routed = 1 AND content_read = 0 AND metadata_pending 
           OR (state = 'current' AND EXISTS (SELECT 1 FROM json_each(reasons_json) r
             WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
               OR r.value GLOB 'content:sniffer:*:fail_safe:unread')))`;
-var PERSONAL_FIRST_WHERE = `routed = 1 AND content_pending = 1 AND state != 'moving'
+var PERSONAL_FIRST_WHERE = `routed = 1 AND content_pending = 1
         AND EXISTS (SELECT 1 FROM json_each(reasons_json) r WHERE r.value = ?)`;
+var PERSONAL_FIRST_SETTLE_CURSOR = "personal_first_settle_after";
+var PERSONAL_FIRST_SETTLE_DONE = "personal_first_settle_done";
 var WINDOW_SLICE_ROWS = 2000;
 function* windowSteps(where, params, options) {
   const limit = Math.max(1, Math.min(options.limit ?? 500, 5000));
@@ -12441,7 +12443,7 @@ function* windowSteps(where, params, options) {
   let lastEnd;
   for (let examined = 0;examined < examine; ) {
     const slice = Math.min(WINDOW_SLICE_ROWS, examine - examined);
-    const keyAfter = after ? "WHERE (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?)" : "";
+    const keyAfter = after ? "WHERE (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?)" : "WHERE provider >= ''";
     const rows = yield {
       sql: `
         SELECT * FROM (
@@ -12590,6 +12592,7 @@ var UNSETTLED_SECRET_SIDE_STORES_SQL = `
         ON s.provider = i.provider AND s.account_scope = i.account_scope
         AND s.conversation_key = i.conversation_key AND s.provider_item_id = i.provider_item_id
       WHERE (i.metadata_tier = 'secrets' OR i.content_tier = 'secrets')
+        AND i.provider >= ''
         AND (s.cleared_generation IS NOT i.generation OR s.cleared_revision IS NOT s.revision)
         AND NOT EXISTS (
           SELECT 1 FROM secret_side_store_debt d
@@ -12739,6 +12742,7 @@ class TierLedger {
   db;
   readOnly;
   now;
+  settleProgressChanges = 0;
   constructor(options) {
     this.dbPath = options.dbPath;
     this.readOnly = options.readOnly === true;
@@ -13132,15 +13136,16 @@ class TierLedger {
   *rejudgeCandidatePageSteps(options) {
     const limit = Math.max(1, Math.min(options.limit ?? 100, 5000));
     const scanLimit = Math.max(limit, Math.min(options.scanLimit ?? DEFAULT_REJUDGE_SCAN_ROWS, 50000));
-    const after = options.after ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId] : null;
+    const after = options.after ? idParams(options.after) : [];
+    const lowerBound = options.after ? "(provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?)" : "provider >= ''";
     const rows = yield {
       mode: "all",
       sql: rejudgeCandidateSql(`
         SELECT * FROM tier_items
-        WHERE (? IS NULL OR (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?))
+        WHERE ${lowerBound}
         ORDER BY provider, account_scope, conversation_key, provider_item_id
         LIMIT ?`),
-      params: [after ? 1 : null, ...after ?? [null, null, null, null], scanLimit, ...rejudgeCandidateParams(options)]
+      params: [...after, scanLimit, ...rejudgeCandidateParams(options)]
     };
     const records = [];
     const causes = [];
@@ -13559,7 +13564,7 @@ class TierLedger {
         ON CONFLICT (path) DO UPDATE SET seen_at = excluded.seen_at
       `);
       for (const path of paths)
-        upsert.run(path, now);
+        this.settleProgressChanges += upsert.run(path, now).changes;
     })();
   }
   knownJobLedgerPaths() {
@@ -13825,12 +13830,18 @@ class TierLedger {
     return row?.value;
   }
   writeMeta(key, value) {
+    this.setMeta(key, value);
+  }
+  writeSettleProgress(key, value) {
+    this.settleProgressChanges += this.setMeta(key, value);
+  }
+  setMeta(key, value) {
     if (key === "ledger_id")
       throw new Error("The ledger identity is never rewritten.");
-    this.db.query(`
+    return this.db.query(`
       INSERT INTO tier_ledger_meta (key, value) VALUES (?, ?)
-      ON CONFLICT(key) DO UPDATE SET value = excluded.value
-    `).run(key, value);
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE value <> excluded.value
+    `).run(key, value).changes;
   }
   deleteMeta(key) {
     if (key === "ledger_id")
@@ -14927,10 +14938,10 @@ class TierLedger {
   corpusHasCopies(corpusId) {
     return this.db.query("SELECT 1 FROM tier_copies WHERE corpus_id = ? LIMIT 1").get(corpusId) !== null;
   }
-  changeMarker() {
+  changeMarker(options = {}) {
     const row = this.db.query("SELECT total_changes() AS changes").get();
     const version = this.db.query("PRAGMA data_version").get();
-    return `${version.data_version}:${row.changes}`;
+    return `${version.data_version}:${row.changes - (options.ignoreSettleProgress ? this.settleProgressChanges : 0)}`;
   }
   visibilityChangesSince(after) {
     return this.db.transaction(() => {
@@ -16197,6 +16208,7 @@ function tierLedgerMigrations() {
       version: 13,
       name: "hold_personal_first_copies",
       up(db) {
+        db.query("DELETE FROM tier_ledger_meta WHERE key IN (?, ?)").run(PERSONAL_FIRST_SETTLE_CURSOR, PERSONAL_FIRST_SETTLE_DONE);
         db.query(`
           UPDATE tier_copies SET embed_hold = 1
           WHERE copy_state = 'current' AND embed_hold = 0 AND EXISTS (
@@ -18613,6 +18625,9 @@ class TierSnifferStore {
   db;
   now;
   readOnly;
+  workCountMarker;
+  workCounts = new Map;
+  scanProgressChanges = 0;
   trainingReads;
   constructor(options) {
     this.trainingReads = new Map;
@@ -18750,10 +18765,10 @@ class TierSnifferStore {
       ...row.content_hash ? { contentHash: row.content_hash } : {}
     } : undefined;
   }
-  changeMarker() {
+  changeMarker(options = {}) {
     const own = this.db.query("SELECT total_changes() AS changes").get();
     const external = this.db.query("PRAGMA data_version").get();
-    return `${external.data_version}:${own.changes}`;
+    return `${external.data_version}:${own.changes - (options.ignoreScanProgress ? this.scanProgressChanges : 0)}`;
   }
   enqueue(question) {
     const materialHash = question.materialHash ?? snifferMaterialHash(question.pass, question.material);
@@ -18829,7 +18844,7 @@ class TierSnifferStore {
             return [question];
         }
         cursor = null;
-        this.db.query("DELETE FROM sniffer_scan WHERE scan_key = ?").run(key);
+        this.scanProgressChanges += this.db.query("DELETE FROM sniffer_scan WHERE scan_key = ?").run(key).changes;
       }
       const filters = [];
       const params = [];
@@ -18858,13 +18873,13 @@ class TierSnifferStore {
         const last = rows.at(-1);
         if (oldest && found[0]) {
           const candidate = found[0];
-          this.db.query(`INSERT OR REPLACE INTO sniffer_scan
-            (scan_key, conversation_order, priority, queued_at, question_pk, candidate_pk) VALUES (?, ?, ?, ?, ?, ?)`).run(key, candidate.conversationOrder ?? 0, candidate.priority, candidate.queuedAt, candidate.sequence, candidate.sequence);
+          this.scanProgressChanges += this.db.query(`INSERT OR REPLACE INTO sniffer_scan
+            (scan_key, conversation_order, priority, queued_at, question_pk, candidate_pk) VALUES (?, ?, ?, ?, ?, ?)`).run(key, candidate.conversationOrder ?? 0, candidate.priority, candidate.queuedAt, candidate.sequence, candidate.sequence).changes;
         } else if (found.length === 0 && rows.length === scanLimit && last) {
-          this.db.query(`INSERT OR REPLACE INTO sniffer_scan
-            (scan_key, conversation_order, priority, queued_at, question_pk) VALUES (?, ?, ?, ?, ?)`).run(key, last.conversation_order, last.priority, last.queued_at, last.question_pk);
+          this.scanProgressChanges += this.db.query(`INSERT OR REPLACE INTO sniffer_scan
+            (scan_key, conversation_order, priority, queued_at, question_pk) VALUES (?, ?, ?, ?, ?)`).run(key, last.conversation_order, last.priority, last.queued_at, last.question_pk).changes;
         } else
-          this.db.query("DELETE FROM sniffer_scan WHERE scan_key = ?").run(key);
+          this.scanProgressChanges += this.db.query("DELETE FROM sniffer_scan WHERE scan_key = ?").run(key).changes;
       }
       return found;
     };
@@ -18919,10 +18934,21 @@ class TierSnifferStore {
         AND material_hash = ? AND map_revision = ?`).run(snifferId, ...subjectParams(question), question.pass, question.materialHash, question.mapRevision);
   }
   questionWorkCounts(snifferId) {
-    return this.db.query(`SELECT
+    const marker = this.changeMarker({ ignoreScanProgress: true });
+    if (marker !== this.workCountMarker || this.db.inTransaction) {
+      this.workCounts.clear();
+      this.workCountMarker = this.db.inTransaction ? undefined : marker;
+    }
+    const cached = this.workCounts.get(snifferId);
+    if (cached)
+      return { ...cached };
+    const counts = this.db.query(`SELECT
       COUNT(CASE WHEN held_sniffer_id IS NULL OR held_sniffer_id != ? THEN 1 END) AS unanswered,
       COUNT(CASE WHEN held_sniffer_id = ? THEN 1 END) AS heldLowering
       FROM sniffer_questions`).get(snifferId, snifferId);
+    if (this.workCountMarker !== undefined)
+      this.workCounts.set(snifferId, counts);
+    return { ...counts };
   }
   verdictCount() {
     return this.db.query("SELECT COUNT(*) AS n FROM sniffer_verdicts").get().n;
@@ -29812,22 +29838,31 @@ ${parentKey(ref)}`, { ref, origin });
       SELECT media_sha256 FROM media_judgments WHERE tier_applied = 0
       ORDER BY tier_checked_at IS NOT NULL, tier_checked_at, media_sha256 LIMIT ?
     `).all(Math.max(1, limit));
-    return rows.flatMap((row) => {
-      const judgment = this.mediaJudgment(row.media_sha256);
-      if (!judgment)
-        return [];
-      const items = this.db.query(`
-        SELECT DISTINCT i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id
-        FROM chunks c JOIN items i ON i.item_pk = c.item_pk
-        WHERE c.media_sha256 = ? AND i.tombstoned = 0
-      `).all(row.media_sha256).map((item) => ({
-        provider: item.provider,
-        accountScope: item.account_scope,
-        providerItemId: item.provider_item_id,
-        ...item.provider_conversation_id ? { providerConversationId: item.provider_conversation_id } : {}
-      }));
-      return [{ mediaSha256: row.media_sha256, judgment, items }];
-    });
+    return rows.flatMap((row) => this.mediaJudgmentEntry(row.media_sha256) ?? []);
+  }
+  async unappliedMediaJudgmentKeys(after, limit) {
+    if (!this.mediaJudgmentsPresent || !this.chunkMediaColumnsPresent)
+      return [];
+    const sql = `SELECT media_sha256 FROM media_judgments
+      WHERE tier_applied = 0 AND media_sha256 > ? ORDER BY media_sha256 LIMIT ?`;
+    const rows = offThreadReadsSupported(this.dbPath) ? await readInBackground(this.dbPath, { sql, params: [after, limit], mode: "all" }) : this.db.query(sql).all(after, limit);
+    return rows.map((row) => row.media_sha256);
+  }
+  mediaJudgmentEntry(mediaSha256) {
+    const judgment = this.mediaJudgment(mediaSha256);
+    if (!judgment)
+      return;
+    const items = this.db.query(`
+      SELECT DISTINCT i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id
+      FROM chunks c JOIN items i ON i.item_pk = c.item_pk
+      WHERE c.media_sha256 = ? AND i.tombstoned = 0
+    `).all(mediaSha256).map((item) => ({
+      provider: item.provider,
+      accountScope: item.account_scope,
+      providerItemId: item.provider_item_id,
+      ...item.provider_conversation_id ? { providerConversationId: item.provider_conversation_id } : {}
+    }));
+    return { mediaSha256, judgment, items };
   }
   markMediaJudgmentsWaiting(mediaSha256s) {
     if (!this.mediaJudgmentsPresent || mediaSha256s.length === 0)

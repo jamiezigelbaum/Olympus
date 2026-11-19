@@ -24,6 +24,7 @@
 import type { TierLedgerIdentity } from '../classification/tier-ledger.ts';
 import { emptyTierRejudgeReport, rejudgeStoredContent, type TierRejudgeReport } from './tier-rejudge.ts';
 import { runPassHere, runPassOffThread, turn, type LoopPass } from './loop-pass.ts';
+import type { LocalConnectorStore } from './local-index.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
 
 export const DEFAULT_MEDIA_JUDGMENT_SWEEP_LIMIT = 200;
@@ -48,21 +49,50 @@ export function applyMediaJudgments(options: ApplyMediaJudgmentsOptions): MediaJ
 }
 
 /** The sweep on the engine's loop: a turn between the items it re-judges. Its page is read by key. */
-export function applyMediaJudgmentsOffThread(options: ApplyMediaJudgmentsOptions & { turn?: () => Promise<void> | undefined }): Promise<MediaJudgmentSweepReport> {
-  return runPassOffThread(mediaJudgmentsPass(options), { family: 'media-judgments', ...(options.turn ? { turn: options.turn } : {}) });
+export async function applyMediaJudgmentsOffThread(options: ApplyMediaJudgmentsOptions & {
+  turn?: () => Promise<void> | undefined;
+  cursor?: Map<LocalConnectorStore, string | null>;
+}): Promise<MediaJudgmentSweepReport & { complete: boolean }> {
+  const { cursor } = options;
+  const limit = Math.max(1, options.limit ?? DEFAULT_MEDIA_JUDGMENT_SWEEP_LIMIT);
+  const pages = cursor ? new Map<LocalConnectorStore, string[]>() : undefined;
+  if (cursor && pages) {
+    for (const store of options.set.openStores()) {
+      const after = cursor.get(store);
+      if (after !== null) pages.set(store, await store.unappliedMediaJudgmentKeys(after ?? '', limit));
+    }
+  }
+  const report = await runPassOffThread(mediaJudgmentsPass(options, pages), {
+    family: 'media-judgments', ...(options.turn ? { turn: options.turn } : {}),
+  });
+  let complete = true;
+  if (cursor && pages) {
+    for (const [store, keys] of pages) {
+      const next = keys.length === limit ? keys.at(-1)! : null;
+      cursor.set(store, next);
+      if (next !== null) complete = false;
+    }
+  }
+  return { ...report, complete };
 }
 
-function* mediaJudgmentsPass(options: ApplyMediaJudgmentsOptions): LoopPass<MediaJudgmentSweepReport> {
+function* mediaJudgmentsPass(
+  options: ApplyMediaJudgmentsOptions,
+  pages?: Map<LocalConnectorStore, string[]>,
+): LoopPass<MediaJudgmentSweepReport> {
   const report: MediaJudgmentSweepReport = { ...emptyTierRejudgeReport(), applied: 0, waiting: 0 };
   const { set } = options;
   const ledger = set.ledger;
   const classification = set.classification();
   const limit = Math.max(1, options.limit ?? DEFAULT_MEDIA_JUDGMENT_SWEEP_LIMIT);
   for (const store of set.openStores()) {
-    const page = store.unappliedMediaJudgments(limit);
-    const done: typeof page = [];
+    const page = pages ? pages.get(store) ?? [] : store.unappliedMediaJudgments(limit);
+    const done: ReturnType<LocalConnectorStore['unappliedMediaJudgments']> = [];
     const waiting: string[] = [];
-    for (const entry of page) {
+    for (const found of page) {
+      yield* turn();
+      const entry = typeof found === 'string' ? store.mediaJudgmentEntry(found) : found;
+      if (!entry) continue;
       let ready = true;
       for (const identity of entry.items) {
         yield* turn();
@@ -81,6 +111,7 @@ function* mediaJudgmentsPass(options: ApplyMediaJudgmentsOptions): LoopPass<Medi
           continue;
         }
         try {
+          const failed = report.failed;
           rejudgeStoredContent(set, record, {
             ...(classification?.sniffer ? { sniffer: classification.sniffer } : {}),
             ...(classification?.retirePublic ? { retirePublic: true } : {}),
@@ -90,6 +121,7 @@ function* mediaJudgmentsPass(options: ApplyMediaJudgmentsOptions): LoopPass<Medi
             // Private) hides the copies outside Private at once.
             hideRaises: true,
           });
+          if (report.failed !== failed) ready = false;
         } catch {
           report.failed += 1;
           ready = false;
@@ -99,7 +131,7 @@ function* mediaJudgmentsPass(options: ApplyMediaJudgmentsOptions): LoopPass<Medi
       else waiting.push(entry.mediaSha256);
     }
     store.markMediaJudgmentsApplied(done);
-    store.markMediaJudgmentsWaiting(waiting);
+    if (!pages) store.markMediaJudgmentsWaiting(waiting);
     report.waiting += waiting.length;
     report.applied += done.length;
   }

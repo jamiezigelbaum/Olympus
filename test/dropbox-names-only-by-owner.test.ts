@@ -58,3 +58,20 @@ test('a revoked approval answers no at once, inside the lookup window (review of
   clock = 1;
   expect(namesOnly('/Archive/scan.pdf')).toBe(false);
 });
+
+test('a changed folder revision refreshes the matcher inside the lookup window', () => {
+  let current = { ...approved, accountGeneration: 'g1' };
+  const namesOnly = dropboxNamesOnlyByOwner({
+    snapshot: () => current,
+    assertCurrent: (ref: { revision: string }) => {
+      if (ref.revision !== current.revision) throw new Error('scope approval changed');
+      return current;
+    },
+  } as never, () => 0);
+  const before = namesOnly.revision();
+  expect(namesOnly('/Archive/scan.pdf')).toBe(true);
+  current = { ...current, revision: 'r2', selections: [{ key: '/Projects', state: 'metadata_only' }] };
+  expect(namesOnly.revision()).not.toBe(before);
+  expect(namesOnly('/Archive/scan.pdf')).toBe(false);
+  expect(namesOnly('/Projects/plan.pdf')).toBe(true);
+});
