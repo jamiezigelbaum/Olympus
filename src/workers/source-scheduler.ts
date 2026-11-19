@@ -2232,7 +2232,10 @@ function embeddingSweepTask(
           if (keyBefore !== undefined && only && outage === undefined && only.busy !== true && only.deferredReason === undefined
             && only.stoppedAtDeadline !== true && only.itemsAttempted === 0 && only.chunksEmbedded === 0 && only.itemsFailed === 0
             && only.itemsOutOfScope === 0 && only.inventory?.inventory_complete === 1
-            && target.store.embeddingFailedItemCount() === 0 && quietKey(target) === keyBefore) {
+            // An item whose embedding failed for good is skipped by every pass and
+            // stays reported as failed: it is not work, so it does not keep the
+            // store walked. A change to it moves the write sequence and wakes the store.
+            && quietKey(target) === keyBefore) {
             const slots = quiet.get(target.store) ?? new Map();
             quiet.set(target.store, slots.set(slot, { key: keyBefore, at: Date.now(), run: only }));
           }
