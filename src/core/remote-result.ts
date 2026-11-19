@@ -451,6 +451,8 @@ export function remoteDeepReadFields(record: Record<string, unknown>, answer: st
   const reason = typeof record.deep_read_refused === 'string' && Object.hasOwn(refusalReasons, record.deep_read_refused)
     ? refusalReasons[record.deep_read_refused] : 'The full read could not be started.';
   const remoteNotice = job ? '\n\nReading the full item for this question; the answer follows in Private answers. Poll source_deep_read_status with the deep_read id.'
+    : localNotice && record.deep_read_refused === 'read_in_part'
+      ? '\n\nSome items were read only in part. To read one in full for this question, use source_deep_read with its read_handle.'
     : localNotice ? `\n\nThe full item was not read: ${reason} Use source_deep_read to request the full read.` : '';
   return { ordinaryAnswer, remoteNotice, job };
 }

@@ -508,7 +508,7 @@ export async function runPassageEval(input: {
         const triggered = await triggerDeepRead(detail, ordinaryResult, input.deepReadJobs, sectionsTotal => {
           row.skippedTooLong += 1;
           console.error(JSON.stringify({ deepRead: 'skipped', question: question.id, sectionsTotal }));
-        });
+        }, { autoStart: true });
         deepRead.refused = triggered.refused ?? null;
         if (triggered.job) {
           deepRead.triggered = true;

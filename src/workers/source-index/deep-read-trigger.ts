@@ -8,16 +8,26 @@ const AUTOMATIC_READ_MAX_SECONDS = 900;
 
 export interface DeepReadTriggerResult {
   job?: { id: string; sectionsTotal: number; providerItemId: string };
-  refused?: DeepReadRefused['code'];
+  /** Why no read started; 'read_in_part' is the default offer (nothing starts by itself). */
+  refused?: DeepReadRefused['code'] | 'read_in_part';
   notice?: string;
 }
 
-/** Only structured retrieval and Analyst fields decide whether to read further. */
+/**
+ * Only structured retrieval and Analyst fields decide whether to read further.
+ *
+ * By default nothing starts by itself (1.5: the automatic start read the
+ * expected file on 0 of 3 rows, DRP3, olympus-ops#151): an answer with a gap
+ * names every head item that reached the prompt only in part, so the owner
+ * can ask for a full read of the one he means with source_deep_read.
+ * `autoStart` keeps the measured start path for the eval.
+ */
 export async function triggerDeepRead(
   detail: EvidencePackBuildDetail,
   result: AnalystResult,
   jobs: Pick<DeepReadJobs, 'start'> | undefined,
   onSkippedTooLong?: (sectionsTotal: number) => void,
+  options: { autoStart?: boolean } = {},
 ): Promise<DeepReadTriggerResult> {
   if (result.unanswered.length === 0 && result.citations.length > 0) return {};
   const cited = new Set(result.citations.map(citation => citation.provenance.sourceItem.localItemId));
@@ -28,6 +38,11 @@ export async function triggerDeepRead(
     return [{ seat, candidate, corpusId, cited: cited.has(candidate.provenance.sourceItem.localItemId) }];
   }).sort((a, b) => Number(b.cited) - Number(a.cited) || a.seat - b.seat);
 
+  if (!options.autoStart) {
+    const titles = [...new Set(headSeats.sort((a, b) => a.seat - b.seat).map(({ candidate }) => candidate.provenance.citation?.title ?? 'a document'))];
+    if (titles.length === 0) return {};
+    return { refused: 'read_in_part', notice: `Read only in part: ${titles.map(title => `"${title}"`).join(', ')}. To read one in full for this question, ask for source_deep_read on it.` };
+  }
   let firstRefusal: DeepReadTriggerResult | undefined;
   for (const { candidate, corpusId } of headSeats) {
     const item = candidate.provenance.sourceItem;
