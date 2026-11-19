@@ -16,8 +16,10 @@ import {
   type WaitingQuestionStore,
 } from '../../core/waiting-private-questions.ts';
 import type { SourceFamily } from '../../core/source-index/types.ts';
+import { writableStoreOpensForbidden } from '../../core/store-write-guard.ts';
 import type { SecretLocationsIndex } from '../classification/secret-locations.ts';
 import type { LocalConnectorStore } from '../connector-store/index.ts';
+import { tieredStoreSetLedgerPath } from '../connector-store/tiered-store-set.ts';
 import { registerArchiveFormatConnectors } from './format-connectors.ts';
 import { createArchiveTierLane, type ArchiveTierLane } from './lane.ts';
 import {
@@ -29,7 +31,7 @@ import {
 import { archiveSourceTargets, type ArchiveSourceTargets } from './source-targets.ts';
 import { startArchiveImport, type ArchiveImportStart } from './start.ts';
 import { ArchiveImportStateStore, defaultArchiveImportStatePath } from './state.ts';
-import { archiveConnectorStoreDbPaths } from './store.ts';
+import { archiveConnectorStoreDbPath, archiveConnectorStoreDbPaths } from './store.ts';
 
 export interface ArchiveImportRuntime {
   readonly state: ArchiveImportStateStore;
@@ -152,6 +154,10 @@ export function createArchiveImportRuntime(options: ArchiveImportRuntimeOptions 
 
   const hasData = (family: SourceFamily): boolean => {
     if (archiveConnectorStoreDbPaths([family], env).some((path) => existsSync(path))) return true;
+    // A queued record can exist before the writer has made either a ledger
+    // or a store. The front has nothing to open in that case.
+    if (writableStoreOpensForbidden()
+      && !existsSync(tieredStoreSetLedgerPath(archiveConnectorStoreDbPath('secure_local', family, env)))) return false;
     try {
       return state.list().some((record) => record.family === family);
     } catch {

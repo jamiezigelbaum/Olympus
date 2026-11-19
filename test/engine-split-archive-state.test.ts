@@ -9,7 +9,7 @@ import { archiveStateSiblingPath } from '../src/core/olympus-layout.ts';
 import { defaultArchiveImportStatePath } from '../src/workers/archive-import/state.ts';
 import { pullArchiveImport } from '../src/workers/archive-import/sync.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/local-index.ts';
-import { createWhatsAppConnectorStore, createWhatsAppTierLane, WHATSAPP_LIVE_CORPUS_ID } from '../src/workers/whatsapp/index.ts';
+import { createWhatsAppConnectorStore, createWhatsAppTierLane, WHATSAPP_LIVE_CORPUS_ID, WHATSAPP_PERSONAL_SOURCE_ID } from '../src/workers/whatsapp/index.ts';
 import { EngineCommandClient } from '../src/workers/engine-split/client.ts';
 import { ArchiveImportRequestStore, archiveImportRequestsPath } from '../src/workers/archive-import/requests.ts';
 import { engineStatusSnapshotPath } from '../src/workers/engine-split/runtime.ts';
@@ -109,32 +109,104 @@ test('an unchanged timed mount recheck uses no synchronous filesystem calls', as
   }
 }, 120_000);
 
+async function writeWhatsAppStore(env: Record<string, string>, word: string, keepOpen = false) {
+  const store = createWhatsAppConnectorStore(env);
+  const lane = createWhatsAppTierLane({ store, env });
+  const closeStore = () => { store.close(); lane.ledger.close(); };
+  close.push(closeStore);
+  const fixture = fixtureConnector(() => [{ id: word, name: `${word}.txt`, text: `${word} harbour log`, legacyDomain: 'secure_local' }]);
+  const item = await fixture.fetchItem(`personal:${word}`);
+  item.identity = { ...item.identity, family: 'chat', provider: 'whatsapp', providerConversationId: 'synthetic-chat' };
+  await store.syncFromConnector({ ...fixture, family: 'chat', async *listItems() { yield { items: [item], done: true }; }, fetchItem: async () => item }, { fetchContent: true, placement: FIXTURE_PLACEMENT });
+  if (!keepOpen) close.pop()!();
+}
+
+async function searchWhatsApp(f: Awaited<ReturnType<typeof split>>, word: string) {
+  const response = await f.workerFetch(`${f.origin}/v1/source/index/search`, {
+    method: 'POST', headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query: word, corpus_id: WHATSAPP_LIVE_CORPUS_ID, retrieval_mode: 'keyword', max_results: 5 }),
+  });
+  const body = await response.json() as { hits?: Array<{ sourceItem: { providerItemId: string } }> };
+  return response.ok && body.hits?.some((hit) => hit.sourceItem.providerItemId === word) ? body : undefined;
+}
+
 test('a source absent at boot is mounted and searchable without a handle change', async () => {
   const f = await split();
-  const writeStore = async (word: string) => {
-    const store = createWhatsAppConnectorStore(f.env);
-    const lane = createWhatsAppTierLane({ store, env: f.env });
-    const fixture = fixtureConnector(() => [{ id: word, name: `${word}.txt`, text: `${word} harbour log`, legacyDomain: 'secure_local' }]);
-    const item = await fixture.fetchItem(`personal:${word}`);
-    item.identity = { ...item.identity, family: 'chat', provider: 'whatsapp', providerConversationId: 'synthetic-chat' };
-    await store.syncFromConnector({ ...fixture, family: 'chat', async *listItems() { yield { items: [item], done: true }; }, fetchItem: async () => item }, { fetchContent: true, placement: FIXTURE_PLACEMENT });
-    const path = store.dbPath;
-    store.close();
-    lane.ledger.close();
-    return path;
-  };
-  const search = async (word: string) => {
-    const response = await f.workerFetch(`${f.origin}/v1/source/index/search`, {
-      method: 'POST', headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query: word, corpus_id: WHATSAPP_LIVE_CORPUS_ID, retrieval_mode: 'keyword', max_results: 5 }),
-    });
-    const body = await response.json() as { hits?: Array<{ sourceItem: { providerItemId: string } }> };
-    return response.ok && body.hits?.some((hit) => hit.sourceItem.providerItemId === word) ? body : undefined;
-  };
-  await writeStore('orchard');
-  expect(await waitFor(() => search('orchard'), { timeoutMs: 20_000 })).toBeDefined();
+  await writeWhatsAppStore(f.env, 'orchard');
+  expect(await waitFor(() => searchWhatsApp(f, 'orchard'), { timeoutMs: 20_000 })).toBeDefined();
   expect(f.front.output()).not.toContain('FrontStoreWriteError');
 }, 180_000);
+
+test('a failed source mount is reported and retried after five minutes without a file change', async () => {
+  const f = await split(`
+    import { readFileSync, existsSync } from 'node:fs';
+    import { join } from 'node:path';
+    import { AsyncLocalStorage } from 'node:async_hooks';
+    import { mock } from 'bun:test';
+    import * as whatsapp from ${JSON.stringify(import.meta.resolve('../src/workers/whatsapp/index.ts'))};
+    import * as probe from ${JSON.stringify(import.meta.resolve('../src/workers/engine/runtime/front-mount-changes.ts'))};
+    const time = new AsyncLocalStorage();
+    const realNow = Date.now;
+    const start = realNow();
+    const control = join(process.env.HOME, 'mount-clock');
+    const openStore = whatsapp.createWhatsAppConnectorStore;
+    const createProbe = probe.createFrontMountChanges;
+    Date.now = () => time.getStore() ?? realNow();
+    mock.module(${JSON.stringify(import.meta.resolve('../src/workers/whatsapp/index.ts'))}, () => ({
+      ...whatsapp,
+      createWhatsAppConnectorStore: (...args) => {
+        if (time.getStore() === start) throw new Error('Store temporarily busy.');
+        return openStore(...args);
+      },
+    }));
+    mock.module(${JSON.stringify(import.meta.resolve('../src/workers/engine/runtime/front-mount-changes.ts'))}, () => ({
+      createFrontMountChanges: () => {
+        const read = createProbe();
+        return async (...args) => {
+          const changed = await read(...args);
+          if (time.getStore() !== undefined) console.log('source signature changed: ' + changed.has(whatsapp.WHATSAPP_PERSONAL_SOURCE_ID));
+          return changed;
+        };
+      },
+    }));
+    const interval = globalThis.setInterval;
+    let last;
+    globalThis.setInterval = (callback, ms, ...args) => interval(
+      callback.name === 'recheckFrontMounts'
+        ? async () => {
+            if (!existsSync(control)) return;
+            const elapsed = Number(readFileSync(control, 'utf8'));
+            if (elapsed === last) return;
+            last = elapsed;
+            await time.run(start + elapsed, callback);
+            console.log('mount tick completed: ' + elapsed);
+          }
+        : callback,
+      ms,
+      ...args,
+    );
+  `);
+  expect((await f.read('/v1/health')).mount_problems).toBeUndefined();
+  await writeWhatsAppStore(f.env, 'orchard', true);
+  const tick = async (elapsed: number) => {
+    const control = join(f.home, 'mount-clock');
+    writeFileSync(control + '.tmp', String(elapsed));
+    renameSync(control + '.tmp', control);
+    await waitFor(() => f.front.output().includes(`mount tick completed: ${elapsed}\n`), { timeoutMs: 10_000 });
+  };
+  await tick(0);
+  expect((await f.read('/v1/health')).mount_problems).toEqual({ [WHATSAPP_PERSONAL_SOURCE_ID]: 'Store temporarily busy.' });
+  expect(await searchWhatsApp(f, 'orchard')).toBeUndefined();
+
+  await tick(299_999);
+  expect(f.front.output().match(/source signature changed: .*$/gm)).toEqual([
+    'source signature changed: true', 'source signature changed: false',
+  ]);
+  expect((await f.read('/v1/health')).mount_problems?.[WHATSAPP_PERSONAL_SOURCE_ID]).toBe('Store temporarily busy.');
+  await tick(300_000);
+  expect(await searchWhatsApp(f, 'orchard')).toBeDefined();
+  expect((await f.read('/v1/health')).mount_problems).toBeUndefined();
+}, 120_000);
 
 test('snapshot collection and archive resume leave a front upload intact between chunks', async () => {
   const f = await split();

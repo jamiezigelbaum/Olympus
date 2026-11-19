@@ -3707,15 +3707,21 @@ function visibilityStepAwaited(read: VisibilityRead): Promise<unknown> {
  * a store the background may still be creating. Never creates or changes the
  * file.
  */
-export function connectorStoreReadableNow(dbPath: string): boolean {
+export function connectorStoreReadableNow(dbPath: string, onFailure?: (error: unknown) => void): boolean {
   let db: Database | undefined;
   try {
     const stat = lstatSync(dbPath);
-    if (!stat.isFile() || stat.isSymbolicLink()) return false;
+    if (!stat.isFile()) {
+      onFailure?.(new Error('Connector store read-only mode requires a regular non-symlink database file.'));
+      return false;
+    }
     db = new Database(dbPath, { readonly: true, create: false, strict: true });
     db.exec('PRAGMA busy_timeout = 10000;');
-    return readSqliteSchemaVersion(db, SQLITE_STORE_ID) >= READ_ONLY_MIN_SCHEMA_VERSION;
-  } catch {
+    if (readSqliteSchemaVersion(db, SQLITE_STORE_ID) >= READ_ONLY_MIN_SCHEMA_VERSION) return true;
+    onFailure?.(new Error('Connector store read-only mode requires the v7 filter schema or newer.'));
+    return false;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') onFailure?.(error);
     return false;
   } finally {
     db?.close();

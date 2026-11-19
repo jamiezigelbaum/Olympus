@@ -1,3 +1,4 @@
+import { SQLiteError } from 'bun:sqlite';
 import { memoryActivity, statusMemoryActivity } from '../../core/memory-counters.ts';
 import { createMemoryDiagnostic } from '../engine-split/memory.ts';
 import { sampleSqliteStoreMemory } from '../engine-split/sqlite-memory.ts';
@@ -643,6 +644,7 @@ const VISIBILITY_REFRESH_MS = 30_000;
 const FRONT_MOUNT_LOOK_AFTER_CHANGE_MS = 60_000;
 /** With no new store, how often the front looks anyway. */
 const FRONT_MOUNT_LOOK_QUIET_MS = 60_000;
+const FRONT_MOUNT_FAILURE_RETRY_MS = 5 * 60_000;
 /**
  * The longest the front waits on those sets before it listens; the rest
  * finishes after, in turns. Well inside the verified install's 60 s health
@@ -1294,7 +1296,6 @@ export async function main(): Promise<void> {
   // beside the same store.
   let sourceRuntimeClosed = false;
   let sourceLaneGeneration = 0;
-  let mountConfiguredSourceStores = (): void => {};
   const earlySourceStores: LocalConnectorStore[][] = [];
   let sourceLaneMounted = (stores: LocalConnectorStore[]): void => {
     sourceLaneGeneration += 1;
@@ -1305,6 +1306,39 @@ export async function main(): Promise<void> {
       const path = resolvedStorePath(sourceId, domain, process.env);
       return existsSync(path) || existsSync(tieredStoreSetLedgerPath(path)) || existsSync(secretLocationsPathForStore(path));
     });
+  const frontMountProblems = new Map<string, { label: string; reason: string; lastAttemptAt: number }>();
+  const mountFailureReason = (error: unknown): string => {
+    if (!(error instanceof Error)) return 'Store mount failed.';
+    const code = (error as NodeJS.ErrnoException).code;
+    if (error instanceof SQLiteError) {
+      // SQLite can interpolate names from an invalid schema into its message.
+      return `SQLite store mount failed (${error.code}).`;
+    }
+    if (error.message.startsWith('The privacy ledger governing ')) {
+      return 'The privacy ledger governing the store is missing or outside this install.';
+    }
+    if (error.message.startsWith('declaration conflicts with the lane store:')) {
+      return 'Configured declaration conflicts with the lane store.';
+    }
+    if (error.message.startsWith('dbPath ') && error.message.includes(' is already mounted as corpus ')) {
+      return 'The configured database is already mounted under another corpus.';
+    }
+    // Filesystem and configuration diagnostics can contain private paths.
+    if (error.message && !/[/\\"`\r\n]|'[^']*'/.test(error.message)) return error.message;
+    return code && /^[A-Za-z0-9_]+$/.test(code) ? `Store mount failed (${code}).` : 'Store mount failed.';
+  };
+  const recordFrontMountFailure = (id: string, error: unknown, label = id): void => {
+    const reason = mountFailureReason(error);
+    if (frontMountProblems.get(id)?.reason !== reason) console.warn(`[olympus] the front could not open a source's stores yet (${label}): ${reason}`);
+    frontMountProblems.set(id, { label, reason, lastAttemptAt: Date.now() });
+  };
+  const attemptFrontMount = (id: string, attempt: () => boolean, label = id): void => {
+    try {
+      if (attempt()) frontMountProblems.delete(id);
+    } catch (error) {
+      recordFrontMountFailure(id, error, label);
+    }
+  };
   const tierLedgerProblems = new Map<string, string>();
   const sourceTierLedgerReady = (sourceId: string): boolean => {
     const problem = workerTierLedgerProblem(accountStoreNames(sourceId).map((name) => resolvedStorePath(sourceId, name, process.env)), !!engineFront);
@@ -2265,7 +2299,6 @@ export async function main(): Promise<void> {
   // mounts it once every store the lane opens is readable.
   const storeAt = (sourceId: string, domain: 'internal' | 'secure_local'): string =>
     resolvedStorePath(sourceId, domain, process.env);
-  const frontCanMount = (paths: readonly string[]): boolean => paths.every(connectorStoreReadableNow);
   const sourceMounts = [
     { id: GMAIL_SOURCE_ID, pending: () => !gmailInternalConnectorStore && gmailConnectorStoreLane.enabled, provider: 'gmail', capability: 'gmail.email.sync', stores: ['internal', 'secure_local'], open: mountGmail },
     { id: GOOGLE_DRIVE_SOURCE_ID, pending: () => !googleDriveInternalConnectorStore && googleDriveConnectorStoreLane.enabled, provider: 'google_drive', capability: 'google_drive.docs.sync', stores: ['internal', 'secure_local'], open: mountGoogleDrive },
@@ -2285,14 +2318,17 @@ export async function main(): Promise<void> {
         : fileSourceScopeAuthority?.policyRef(LOCAL_FILES_SOURCE_ID) !== undefined;
       if (!sourceHasStores(lane.id) && !connected) continue;
       if (!engineFront) { lane.open(); continue; }
-      // A partial mount while the background builds the schema must leave
-      // the other lanes available and be retried as the files change.
-      if (!frontCanMount(lane.stores.map((domain) => storeAt(lane.id, domain)))) continue;
-      try { lane.open(); } catch (error) {
-        console.warn(`[olympus] the front could not open a source's stores yet: ${error instanceof Error ? error.message : String(error)}`);
-      }
+      attemptFrontMount(lane.id, () => {
+        const readable = lane.stores.every((domain) => connectorStoreReadableNow(
+          storeAt(lane.id, domain), (error) => recordFrontMountFailure(lane.id, error),
+        ));
+        if (!readable) return false;
+        lane.open();
+        const ledgerProblem = tierLedgerProblems.get(lane.id);
+        if (ledgerProblem) recordFrontMountFailure(lane.id, new Error(ledgerProblem));
+        return !lane.pending();
+      });
     }
-    if (!changed || changed.size) mountConfiguredSourceStores();
   };
   const mountChanges = createFrontMountChanges();
   const sqliteMountFiles = (path: string): string[] => [path, `${path}-wal`, `${path}-shm`];
@@ -2315,6 +2351,8 @@ export async function main(): Promise<void> {
   };
   const archiveFamilies = archiveImportFamilies();
   const archiveMountKey = (family: string): string => `${ARCHIVE_IMPORTS_SOURCE_ID}/${family}`;
+  const configuredMountPrefix = 'configured/';
+  const configuredMountKey = (corpusId: string): string => configuredMountPrefix + corpusId;
   const pendingMountFiles = new Map<string, readonly string[]>();
   const configuredMountPaths = engineFront ? declaredConnectorStoreMountPaths(process.env) : [];
   if (engineFront) {
@@ -2335,8 +2373,9 @@ export async function main(): Promise<void> {
         registry, ...mountCandidateFiles(ARCHIVE_IMPORTS_SOURCE_ID, [family]), accountRawPath(archiveAccount, 'archive-imports.json'),
       ]);
     }
-    for (const { dbPath } of configuredMountPaths) {
-      pendingMountFiles.set(dbPath, [registry, ...sqliteMountFiles(dbPath), ...sqliteMountFiles(tieredStoreSetLedgerPath(dbPath))]);
+    pendingMountFiles.set(EVERNOTE_SOURCE_ID, [registry, ...mountCandidateFiles(EVERNOTE_SOURCE_ID)]);
+    for (const { corpusId, dbPath } of configuredMountPaths) {
+      pendingMountFiles.set(configuredMountKey(corpusId), [registry, ...sqliteMountFiles(dbPath), ...sqliteMountFiles(tieredStoreSetLedgerPath(dbPath))]);
     }
     // Take the baseline before the normal boot mount, so a file appearing
     // between startup and the first tick is still a change.
@@ -2368,8 +2407,20 @@ export async function main(): Promise<void> {
     stores: () => configuredMountStores,
     registeredCorpora: () => sourceCorpusRegistry.list(),
     storeOwner: () => lifecycleStoreFileOwner(process.env),
+    ...(engineFront ? {
+      onMountFailure: (corpusId: string, error: unknown) => recordFrontMountFailure(configuredMountKey(corpusId), error),
+    } : {}),
   });
-  const configuredConnectorStoreMounts = discoverConfiguredStores();
+  const configuredMounts = (only?: ReadonlySet<string>): ConnectorStoreMount[] => {
+    const mounts = discoverConfiguredStores(only);
+    for (const { store } of mounts) {
+      const key = configuredMountKey(store.corpusId);
+      frontMountProblems.delete(key);
+      pendingMountFiles.delete(key);
+    }
+    return mounts;
+  };
+  const configuredConnectorStoreMounts = configuredMounts();
   const configuredConnectorStores = configuredConnectorStoreMounts.map((mount) => mount.store);
   // A configured mount (Reflect, Roam, ...) whose store is ledger-backed is
   // governed by that ledger: register it, so the visibility gate and every
@@ -3049,6 +3100,7 @@ export async function main(): Promise<void> {
   // Public store shares its Personal sibling's cloud identity; a lane's new
   // Private or Personal store is handed the identity for its domain.
   registerTierLegStore = (store, siblingCorpusId, embeddingProvider) => {
+    frontMountProblems.delete(store.dbPath);
     if (!connectorStores.includes(store)) {
       connectorStores.push(store);
       // A new store shows on the dashboard at the background's next count: the
@@ -3105,9 +3157,9 @@ export async function main(): Promise<void> {
     }
   };
   for (const stores of earlySourceStores.splice(0)) sourceLaneMounted(stores);
-  mountConfiguredSourceStores = (): void => {
+  const mountConfiguredSourceStores = (only?: ReadonlySet<string>): void => {
     if (sourceRuntimeClosed) return;
-    const mounts = discoverConfiguredStores();
+    const mounts = configuredMounts(only);
     for (const mount of mounts) {
       if (!connectorStores.includes(mount.store)) sourceLaneMounted([mount.store]);
       adoptConfiguredPrincipal(mount);
@@ -3140,20 +3192,34 @@ export async function main(): Promise<void> {
   });
   // Startup and the split front's mount refresh both mount archives here, so a
   // ledger problem is cleared once the background has migrated the ledger.
-  const mountArchiveLanes = (families?: ReadonlySet<string>): void => {
+  const mountArchiveLanes = (changed?: ReadonlySet<string>): void => {
+    const families = changed ? archiveFamilies.filter((family) => changed.has(archiveMountKey(family))) : archiveFamilies;
+    if (!families.length || !sourceAccountMountable({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID })) return;
+    if (engineFront) {
+      for (const family of families) {
+        const key = archiveMountKey(family);
+        attemptFrontMount(key, () => {
+          try {
+            const mounted = archiveImports.existingLanes(new Set([family])).length > 0;
+            tierLedgerProblems.delete(key);
+            return mounted;
+          } catch (error) {
+            if (error instanceof TierLedgerSchemaError) tierLedgerProblems.set(key, error.message);
+            throw error;
+          }
+        });
+      }
+      return;
+    }
     try {
-      if (sourceAccountMountable({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID })) archiveImports.existingLanes(families);
+      archiveImports.existingLanes();
       tierLedgerProblems.delete(ARCHIVE_IMPORTS_SOURCE_ID);
     } catch (error) {
       if (error instanceof TierLedgerSchemaError) tierLedgerProblems.set(ARCHIVE_IMPORTS_SOURCE_ID, error.message);
-      throw error;
+      console.warn(`[archive-import] imported archives are not served this run: ${error instanceof Error ? error.message : 'error'}`);
     }
   };
-  try {
-    mountArchiveLanes();
-  } catch (error) {
-    console.warn(`[archive-import] imported archives are not served this run: ${error instanceof Error ? error.message : 'error'}`);
-  }
+  mountArchiveLanes();
   // Evernote's account, read in passes over its MCP server (workers/evernote/):
   // its lane opens when an account is connected or a previous one left stores,
   // and is adopted like every other lane's.
@@ -3188,11 +3254,27 @@ export async function main(): Promise<void> {
       return evernote.notebooks(handle);
     },
   }));
-  try {
-    if (sourceAccountMountable({ sourceId: EVERNOTE_SOURCE_ID }) && sourceTierLedgerReady(EVERNOTE_SOURCE_ID)) evernote.existingLane();
-  } catch (error) {
-    console.warn(`[evernote] the Evernote stores are not served this run: ${error instanceof Error ? error.message : 'error'}`);
-  }
+  const openExistingEvernoteLane = (): boolean => {
+    if (!sourceAccountMountable({ sourceId: EVERNOTE_SOURCE_ID })) return false;
+    if (sourceTierLedgerReady(EVERNOTE_SOURCE_ID)) return evernote.existingLane(!engineFront) !== undefined;
+    const problem = tierLedgerProblems.get(EVERNOTE_SOURCE_ID);
+    if (engineFront && problem) recordFrontMountFailure(EVERNOTE_SOURCE_ID, new Error(problem));
+    return false;
+  };
+  const mountEvernote = (): void => {
+    if (engineFront) {
+      attemptFrontMount(EVERNOTE_SOURCE_ID, () => {
+        const mounted = openExistingEvernoteLane();
+        if (mounted) pendingMountFiles.delete(EVERNOTE_SOURCE_ID);
+        return mounted;
+      });
+      return;
+    }
+    try { openExistingEvernoteLane(); } catch (error) {
+      console.warn(`[evernote] the Evernote stores are not served this run: ${error instanceof Error ? error.message : 'error'}`);
+    }
+  };
+  mountEvernote();
   // Reading the child items an import listed by name (an attachment, a photo): the shared
   // extraction factory over the archive lanes' stores, built on first use and again when a
   // lane's stores change, with the same extractor configuration as the main runtime.
@@ -3331,7 +3413,15 @@ export async function main(): Promise<void> {
     for (const [index, lane] of tierLanes.entries()) {
       for (const store of lane.onDemand) {
         if (store.current() || (changed && index < existingLanes && !changed.has(store.dbPath))) continue;
-        if (engineFront ? connectorStoreReadableNow(store.dbPath) : store.exists()) store.open();
+        if (!engineFront) {
+          if (store.exists()) store.open();
+          continue;
+        }
+        attemptFrontMount(store.dbPath, () => {
+          if (!connectorStoreReadableNow(store.dbPath, (error) => recordFrontMountFailure(store.dbPath, error, store.corpusId))) return false;
+          store.open();
+          return true;
+        }, store.corpusId);
       }
     }
   };
@@ -3962,7 +4052,10 @@ export async function main(): Promise<void> {
       handles: readActiveConnectedHandles(process.env),
     });
     // The front mounts only stores the background has created (mountSourceLanes).
-    if (handle && (!engineFront || frontCanMount([storeAt(X_BOOKMARKS_SOURCE_ID, 'internal')]))) mountXBookmarks();
+    if (handle) {
+      if (engineFront) mountSourceLanes([handle], new Set([X_BOOKMARKS_SOURCE_ID]));
+      else mountXBookmarks();
+    }
     const runtime = refreshableXBookmarksRuntime?.runtimeForHandle(handle);
     if (!runtime) return undefined;
     connectorStoreAccountScopes.set(
@@ -3976,7 +4069,10 @@ export async function main(): Promise<void> {
   };
   const readwiseSyncForHandle = (handle: ConnectedCredentialHandle | undefined) => {
     // The front mounts only stores the background has created (mountSourceLanes).
-    if (handle && (!engineFront || frontCanMount([storeAt(READWISE_SOURCE_ID, 'internal')]))) mountReadwise();
+    if (handle) {
+      if (engineFront) mountSourceLanes([handle], new Set([READWISE_SOURCE_ID]));
+      else mountReadwise();
+    }
     const sync = refreshableReadwiseRuntime?.syncForHandle(handle);
     if (sync && readwiseConnectorStore) {
       connectorStoreAccountScopes.set(
@@ -4605,16 +4701,20 @@ export async function main(): Promise<void> {
   // first stores in the background after this front started.
   const refreshFrontMounts = (changed?: ReadonlySet<string>): void => {
     const existingLanes = tierLanes.length;
-    const archives = changed && new Set(archiveFamilies.filter((family) => changed.has(archiveMountKey(family))));
+    const existingStores = connectorStores.length;
     const reads = [
       () => {
         if (!changed || sourceMounts.some((lane) => changed.has(lane.id))) {
           mountSourceLanes(readActiveConnectedHandles(process.env), changed);
-        } else if (configuredMountPaths.some(({ dbPath }) => changed.has(dbPath))) {
-          mountConfiguredSourceStores();
         }
+        if (!changed || changed.has(EVERNOTE_SOURCE_ID)) mountEvernote();
+        const configured = changed && new Set([
+          ...[...changed].filter((id) => id.startsWith(configuredMountPrefix)).map((id) => id.slice(configuredMountPrefix.length)),
+          ...connectorStores.slice(existingStores).map(({ corpusId }) => corpusId),
+        ]);
+        mountConfiguredSourceStores(configured);
       },
-      ...(archives && !archives.size ? [] : [() => mountArchiveLanes(archives)]),
+      () => mountArchiveLanes(changed),
       () => openTierStoresThatExist(changed, existingLanes),
     ];
     for (const read of reads) {
@@ -4622,7 +4722,7 @@ export async function main(): Promise<void> {
       catch (error) {
         // A partial schema is ordinary while the background creates a lane.
         // It must not stop an archive/source change from reaching that writer.
-        console.warn(`[olympus] the front could not open a source's stores yet: ${error instanceof Error ? error.message : String(error)}`);
+        console.warn(`[olympus] the front could not open a source's stores yet: ${mountFailureReason(error)}`);
       }
     }
   };
@@ -6498,6 +6598,9 @@ export async function main(): Promise<void> {
           ...(localAnalystWindowNotice(report) ? { note: localAnalystWindowNotice(report) } : {}),
         })) } : {}),
         ...(tierLedgerProblems.size ? { privacy_ledger_problems: Object.fromEntries(tierLedgerProblems) } : {}),
+        ...(frontMountProblems.size ? {
+          mount_problems: Object.fromEntries([...frontMountProblems.values()].map(({ label, reason }) => [label, reason])),
+        } : {}),
         // Background work that stood back for the owner's Ask: never silent.
         ...(standBackSeen ? { stand_back: standBackCounts } : {}),
         // The background's paced recount of what the dashboard shows: how long the last took and how old it is.
@@ -6759,7 +6862,7 @@ export async function main(): Promise<void> {
   // A tier store the background creates later (a lane's Private or Public
   // store, on its first item) is opened here too.
   // Probe every 2 s after the background announces a new store, and
-  // once a minute otherwise. Only changed candidates reach the mount code.
+  // once a minute otherwise. Failed mounts are also due after five minutes.
   let frontMountsSeen: string | undefined;
   let frontMountsLookUntil = 0;
   let frontMountsLastLook = 0;
@@ -6772,20 +6875,32 @@ export async function main(): Promise<void> {
       frontMountsSeen = seen;
       frontMountsLookUntil = now + FRONT_MOUNT_LOOK_AFTER_CHANGE_MS;
     }
-    if (checkingFrontMounts || (now >= frontMountsLookUntil && now - frontMountsLastLook < FRONT_MOUNT_LOOK_QUIET_MS)) return;
-    frontMountsLastLook = now;
+    if (checkingFrontMounts) return;
+    const probeDue = now < frontMountsLookUntil || now - frontMountsLastLook >= FRONT_MOUNT_LOOK_QUIET_MS;
+    const retryDue = ({ lastAttemptAt }: { lastAttemptAt: number }) => now - lastAttemptAt >= FRONT_MOUNT_FAILURE_RETRY_MS;
+    if (!probeDue && ![...frontMountProblems.values()].some(retryDue)) return;
     checkingFrontMounts = true;
     try {
-      const pending = new Map(pendingMountFiles);
-      for (const lane of sourceMounts) if (!lane.pending()) pending.delete(lane.id);
-      for (const family of archiveFamilies) if (archiveImports.laneMounted(family)) pending.delete(archiveMountKey(family));
-      for (const store of connectorStores) pending.delete(store.dbPath);
-      for (const lane of tierLanes) {
-        for (const store of lane.onDemand) {
-          if (!store.current() && !pending.has(store.dbPath)) pending.set(store.dbPath, sqliteMountFiles(store.dbPath));
+      const changed = new Set<string>();
+      if (probeDue) {
+        frontMountsLastLook = now;
+        const pending = new Map(pendingMountFiles);
+        for (const lane of sourceMounts) if (!lane.pending()) pending.delete(lane.id);
+        for (const family of archiveFamilies) if (archiveImports.laneMounted(family)) pending.delete(archiveMountKey(family));
+        for (const store of connectorStores) pending.delete(store.dbPath);
+        for (const lane of tierLanes) {
+          for (const store of lane.onDemand) {
+            if (!store.current() && !pending.has(store.dbPath)) pending.set(store.dbPath, sqliteMountFiles(store.dbPath));
+          }
         }
+        for (const id of await mountChanges(pending)) changed.add(id);
       }
-      const changed = await mountChanges(pending);
+      for (const [id, failure] of frontMountProblems) {
+        if (!retryDue(failure)) continue;
+        // If a failed store has since disappeared, keep its next attempt paced.
+        failure.lastAttemptAt = now;
+        changed.add(id);
+      }
       if (!sourceRuntimeClosed && changed.size) refreshFrontMounts(changed);
     } finally {
       checkingFrontMounts = false;
