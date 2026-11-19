@@ -1,6 +1,7 @@
 import { retiredStateBackupPath } from '../src/core/boot-progress.ts';
 import { embeddingPrefilterDirectory, embeddingPrefilterInstallLedgerPath, resolveClassificationLedgerPath } from '../src/workers/classification/tier-ledger-path.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
+import { EMBEDDING_SWEEP_IDLE_SUFFIX } from '../src/core/embedding-sweep-idle.ts';
 import { lifecycleViews } from './helpers/lifecycle-view.ts';
 import {
   existsSync,
@@ -402,11 +403,13 @@ describe('Olympus data lifecycle', () => {
     const homeDir = join(dir, 'home');
     const stateDir = join(dir, 'external-capture');
     const store = join(stateDir, 'connector-store.db');
+    const idleState = `${store}${EMBEDDING_SWEEP_IDLE_SUFFIX}`;
     try {
       mkdirSync(stateDir, { recursive: true });
       createMarkedSqliteStore(store, 'connector-store');
       writeFileSync(`${store}-wal`, 'wal');
       writeFileSync(`${store}-shm`, 'shm');
+      writeFileSync(idleState, '{}');
 
       const result = deleteOlympusData({ all: true, homeDir, env: { OLYMPUS_WHATSAPP_STATE_DIR: stateDir } });
 
@@ -414,9 +417,11 @@ describe('Olympus data lifecycle', () => {
       expect(result.removed).toContain(store);
       expect(result.removed).toContain(`${store}-wal`);
       expect(result.removed).toContain(`${store}-shm`);
+      expect(result.removed).toContain(idleState);
       expect(existsSync(store)).toBe(false);
       expect(existsSync(`${store}-wal`)).toBe(false);
       expect(existsSync(`${store}-shm`)).toBe(false);
+      expect(existsSync(idleState)).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

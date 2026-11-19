@@ -4,7 +4,8 @@ import { noteSourceIndexReadProgress } from '../../core/source-index/read-progre
 import { sizeHeldItemKey } from '../../core/source-size-limits.ts';
 import { applySqliteMmap } from './sqlite-mmap.ts';
 import {
-  applyStoreTotalsCount, createStoreTotals, readStoreTotals, readStoreWriteSequence, storeTotalsFromRows, storeTotalsInstalled, storeTotalsWalkSteps,
+  applyStoreTotalsCount, createStoreTotals, deferStoreTotalsWalk, readStoreTotals, readStoreWriteSequence,
+  STORE_TOTALS_QUIET_MS, storeTotalsFromRows, storeTotalsInstalled, storeTotalsWalkSteps,
   type StoreTotals,
 } from './store-totals.ts';
 import { createVectorDigestSchema, writeVectorDigest, backfillVectorDigests, vectorDigestState, vectorDigestSourceQuery, applyVectorDigestWindow, type VectorDigestSourceRow } from './vector-digest.ts';
@@ -59,7 +60,7 @@ import { compareProviderAccounts } from '../../core/provider-account-identity.ts
 import { createHash, randomUUID } from 'node:crypto';
 import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, statSync, statfsSync } from 'node:fs';
 import { open as openFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { basename, dirname } from 'node:path';
 import { Database, type SQLQueryBindings } from 'bun:sqlite';
 import type {
   RawItem,
@@ -2191,6 +2192,7 @@ export async function embedPendingChunks(
       itemsOutOfScope: 0,
     };
     runs.push(run);
+    const inventoryWrites = options.diagnostics && target.wholeStore === true ? store.writeSequence() : undefined;
     if (options.diagnostics) run.inventory = await store.embeddingSweepInventory(target.provider, target, options.stopAtMs);
     const groups = store.queuedEmbeddingGroups(options.maxItems).filter((group) => {
       // A store that catches up never replays a queue left under another
@@ -2201,7 +2203,13 @@ export async function embedPendingChunks(
       return false;
     });
     const queued = groups.reduce((sum, group) => sum + group.localItemIds.length, 0);
-    if (target.wholeStore === true && queued < options.maxItems) {
+    // The inventory tests vector currency over a superset of the work list.
+    // A complete zero-pending inventory can stand in for the list's walk
+    // when every window saw the same store. Partial inventories and any
+    // missing vectors still use the work list's own selection and ordering.
+    const noMissingVectors = run.inventory?.inventory_complete === 1 && run.inventory.pending_chunks === 0
+      && inventoryWrites !== undefined && store.writeSequence() === inventoryWrites && !store.fileReplacedOrRemoved();
+    if (target.wholeStore === true && queued < options.maxItems && !noMissingVectors) {
       const queuedIds = new Set(groups.flatMap((group) => group.localItemIds));
       const missing = (await store.missingEmbeddingItemIdsInTurns(target.provider, options.maxItems - queued, target))
         .filter((localItemId) => !queuedIds.has(localItemId));
@@ -3745,13 +3753,18 @@ export function connectorStoreReadableNow(dbPath: string, onFailure?: (error: un
   }
 }
 
-/** The store's own maintenance opener, like its read-pool opener, on an isolated Bun process. */
-const CONNECTOR_RECLAIM_WORKER_SOURCE = `
-import { Database } from 'bun:sqlite';
-import { statSync } from 'node:fs';
 // core/sqlite-store.ts closeSqliteStore, inlined: this source runs in its own
 // process and cannot import it. Checkpoint first so no WAL is left for a reap.
-const closeSqliteStore = (db) => { try { db.exec('PRAGMA wal_checkpoint(TRUNCATE);'); } catch {} db.close(); };
+const INLINE_CLOSE_SQLITE_STORE = "const closeSqliteStore = (db) => { try { db.exec('PRAGMA wal_checkpoint(TRUNCATE);'); } catch {} db.close(); };";
+
+/** The store's own maintenance opener, like its read-pool opener, on an isolated Bun process. */
+// A function, not a constant: an interpolated module-level template stays in every bundle that reaches this module, and the
+// plugin bundle must carry no bun:sqlite text (test/plugin-bundle-no-bun-sqlite.test.ts).
+function connectorReclaimWorkerSource(): string {
+  return `
+import { Database } from 'bun:sqlite';
+import { statSync } from 'node:fs';
+${INLINE_CLOSE_SQLITE_STORE}
 self.onmessage = ({ data: [path, budgetMs, pagesPerStep] }) => {
   // This is the mounted store's own maintenance connection. Never create a missing store.
   const db = new Database(path, { create: false, strict: true });
@@ -3786,10 +3799,12 @@ self.onmessage = ({ data: [path, budgetMs, pagesPerStep] }) => {
     closeSqliteStore(db);
   }
 };`;
+}
 
 function connectorRecencyIndexWorkerSource(): string {
   return `
 import { Database } from 'bun:sqlite';
+${INLINE_CLOSE_SQLITE_STORE}
 self.onmessage = ({ data: [path] }) => {
   const db = new Database(path, { create: false, strict: true });
   let result;
@@ -3800,7 +3815,7 @@ self.onmessage = ({ data: [path] }) => {
   } catch (error) {
     result = { busy: /^SQLITE_(BUSY|LOCKED)(_|$)/.test(error.code) };
   } finally {
-    db.close();
+    closeSqliteStore(db);
   }
   postMessage(result);
 };`;
@@ -3862,7 +3877,7 @@ export interface ImageContentOutsidePrivateRow {
 export class LocalConnectorStore {
   readonly dbPath: string;
   /** The file this store opened, so a later delete or replace of it is seen. */
-  private readonly openedFile: { dev: number; ino: number } | undefined;
+  private readonly openedFile: ReturnType<typeof fileIdentity>;
   readonly corpusId: string;
   readonly family: SourceFamily;
   readonly trustDomain: SourceTrustDomain;
@@ -4127,6 +4142,7 @@ export class LocalConnectorStore {
         // WAL readers keep their snapshots while SQLite builds the index.
         // Existing store maintenance writers stand back from the child.
         assertWritableStoreOpenAllowed('connector store recency index', this.dbPath);
+        const buildStarted = Date.now();
         const child = spawnConnectorStoreMaintenance(this.dbPath, connectorRecencyIndexWorkerSource());
         this.reclaimProcess = child;
         child.unref();
@@ -4136,6 +4152,7 @@ export class LocalConnectorStore {
           if (code !== 0) throw new Error('Recency index worker exited unsuccessfully.');
           const result = JSON.parse(output) as { done?: boolean; busy?: boolean };
           if (!result.done && !result.busy) throw new Error('Recency index build failed.');
+          if (result.done) console.info(`[store-recency-index] built store=${basename(this.dbPath)} ms=${Date.now() - buildStarted}`);
           return result.done === true;
         } finally {
           child.stdin.end();
@@ -4337,7 +4354,7 @@ export class LocalConnectorStore {
     pagesPerStep = Math.max(1, Math.floor(pagesPerStep));
     assertWritableStoreOpenAllowed('connector store reclaim', this.dbPath);
     assertStoreTierLedgerCanOpen(this.dbPath);
-    const child = spawnConnectorStoreMaintenance(this.dbPath, CONNECTOR_RECLAIM_WORKER_SOURCE, [budgetMs, pagesPerStep]);
+    const child = spawnConnectorStoreMaintenance(this.dbPath, connectorReclaimWorkerSource(), [budgetMs, pagesPerStep]);
     this.reclaimProcess = child;
     let preempted = false;
     const preempt = () => { if (!preempted) { preempted = true; child.kill('SIGKILL'); } };
@@ -8175,6 +8192,36 @@ export class LocalConnectorStore {
       : `v${(this.db.query('PRAGMA data_version').get() as { data_version: number }).data_version}`;
     const laneStores = this.childVisibilityLane().stores();
     return JSON.stringify([ledgerCursor, storeCursor, laneStores.map(store => [store.corpusId, store.childVisibilityMarker?.()])]);
+  }
+
+  /** Like visibilityMarker, with file identities for restart-safe sweep receipts. */
+  embeddingSweepVisibilityMarker(provider: SourceEmbeddingProvider, durable: boolean): string | undefined {
+    // A local policy change can release held work without a store write.
+    const allowHeld = this.canEmbedHeld(provider);
+    if (!durable) return JSON.stringify([this.visibilityMarker(), allowHeld]);
+
+    // Connection-local fallbacks (data_version and total_changes) cannot
+    // prove continuity across a reopen. Require the persistent feeds.
+    if (!this.visibilityJournal) return undefined;
+    const stores = [];
+    for (const store of new Set([this, ...(this.childLane?.stores() ?? [])])) {
+      if (!(store instanceof LocalConnectorStore) || !store.visibilityFeedPresent) return undefined;
+      const file = store.openedFile;
+      if (!file?.birthtimeNs || store.fileReplacedOrRemoved()) return undefined;
+      stores.push([store.corpusId, file.dev.toString(), file.ino.toString(), file.birthtimeNs.toString()]);
+    }
+    // A restored ledger can carry the same cursor as the file it replaced.
+    const ledgers = [];
+    for (const ledger of new Set([this.visibilityLedger(), this.childLane?.ledger()])) {
+      if (!ledger) continue;
+      const file = fileIdentity(ledger.dbPath);
+      if (!file?.birthtimeNs) return undefined;
+      ledgers.push([file.dev.toString(), file.ino.toString(), file.birthtimeNs.toString(), ledger.ledgerId()]);
+    }
+    // With every feed present the marker is made of committed cursors only,
+    // so it means the same thing after a reopen. The file identities say the
+    // cursors still belong to the same files.
+    return JSON.stringify([this.visibilityMarker(), stores, ledgers, allowHeld]);
   }
 
   peopleObservations(): PeopleSenderObservation[] {
@@ -13399,11 +13446,14 @@ export class LocalConnectorStore {
       pending_chunks: 0, eligible_chunks: 0, skipped_held_chunks: 0,
       skipped_moving_chunks: 0, skipped_hidden_chunks: 0, skipped_metadata_chunks: 0,
       skipped_failed_chunks: 0, skipped_out_of_scope_chunks: 0,
+      // Of the held and out-of-scope chunks, those whose item was indexed in the
+      // last three days: new items that are not becoming searchable show here.
+      skipped_held_recent_chunks: 0, skipped_out_of_scope_recent_chunks: 0,
       skipped_private_tier_chunks: 0, skipped_retired_chunks: 0, inventory_complete: 0,
     };
     // Only chunks that owe a vector come back: the rest count for nothing.
     const windowSql = `
-      SELECT c.chunk_pk, i.item_pk, i.local_item_id, i.tombstoned, i.trust_tier,
+      SELECT c.chunk_pk, i.item_pk, i.local_item_id, i.tombstoned, i.trust_tier, i.indexed_at,
         CASE WHEN 1 = 1 ${account ? 'AND i.account_scope = ?' : ''} ${scoped.sql} THEN 1 ELSE 0 END AS in_scope
       FROM chunks c JOIN items i ON i.item_pk = c.item_pk
       LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
@@ -13411,6 +13461,7 @@ export class LocalConnectorStore {
         AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
       ORDER BY c.chunk_pk
     `;
+    const recentSince = new Date(started - 3 * 24 * 60 * 60_000).toISOString();
     const read = this.embeddingSweepRead(offThreadReadsSupported(this.dbPath));
     const maxChunkPk = (await read({ sql: 'SELECT COALESCE(MAX(chunk_pk), 0) AS n FROM chunks', params: [], mode: 'get' }) as { n: number }).n;
     let after = 0;
@@ -13419,7 +13470,7 @@ export class LocalConnectorStore {
       if (after > 0) await ingestionTurn();
       const rows = await read({ sql: windowSql, mode: 'all',
         params: [...(account ? [account] : []), ...scoped.params, provider.modelId, after, after + windowChunks] }) as Array<{
-        chunk_pk: number; item_pk: number; local_item_id: string; tombstoned: number; trust_tier: SourceTrustTier; in_scope: number;
+        chunk_pk: number; item_pk: number; local_item_id: string; tombstoned: number; trust_tier: SourceTrustTier; indexed_at: string | null; in_scope: number;
       }>;
       for (const row of rows) {
         counts.pending_chunks! += 1;
@@ -13435,6 +13486,9 @@ export class LocalConnectorStore {
           : this.embeddingFailureState?.has(row.local_item_id) ? 'skipped_failed_chunks'
           : !row.in_scope ? 'skipped_out_of_scope_chunks' : 'eligible_chunks';
         counts[reason]! += 1;
+        if ((reason === 'skipped_held_chunks' || reason === 'skipped_out_of_scope_chunks') && row.indexed_at && row.indexed_at >= recentSince) {
+          counts[reason === 'skipped_held_chunks' ? 'skipped_held_recent_chunks' : 'skipped_out_of_scope_recent_chunks']! += 1;
+        }
       }
       after += windowChunks;
     }
@@ -16618,7 +16672,8 @@ export class LocalConnectorStore {
   fileReplacedOrRemoved(): boolean {
     if (!this.openedFile) return false;
     const current = fileIdentity(this.dbPath);
-    return !current || current.dev !== this.openedFile.dev || current.ino !== this.openedFile.ino;
+    return !current || current.dev !== this.openedFile.dev || current.ino !== this.openedFile.ino
+      || current.birthtimeNs !== this.openedFile.birthtimeNs;
   }
 
   /**
@@ -16946,16 +17001,31 @@ export class LocalConnectorStore {
     try { return readStoreWriteSequence(this.db); } catch { return undefined; }
   }
 
+  private totalsQuiet: { writes: number | undefined; since: number } | undefined;
+
   /**
    * Walk the store's tables a page of keys at a time (store-totals.ts), each
    * page its own read on the read worker where the store allows it, and put
    * right any drift. A walk that saw writes leaves the totals owing another
-   * walk later. Returns the drift, or undefined while maintenance owns the
-   * writer or for a read-only open.
+   * walk later. Returns the drift, or undefined when no walk ran, while
+   * maintenance owns the writer, or for a read-only open.
    */
-  async reconcileTotals(): Promise<number | undefined> {
+  async reconcileTotals({ background = false }: { background?: boolean } = {}): Promise<number | undefined> {
     if (this.readOnly || this.reclaiming) return undefined;
-    if (!storeTotalsInstalled(this.db)) createStoreTotals(this.db, NON_SYNC_RUN_CONNECTORS_SQL);
+    const installed = storeTotalsInstalled(this.db);
+    if (!installed) createStoreTotals(this.db, NON_SYNC_RUN_CONNECTORS_SQL);
+    const totals = this.totals();
+    // In the background, exact totals are never walked: the triggers keep
+    // them exact through every write. A walk that saw writes is retried once
+    // the store's write sequence has held still for a quiet hour, not hourly
+    // while the store stays busy.
+    if (background && totals && totals.walkOwed !== 'now') {
+      if (totals.walkOwed !== 'later') return undefined;
+      const writes = this.writeSequence();
+      const now = this.now().getTime();
+      if (!this.totalsQuiet || this.totalsQuiet.writes !== writes) this.totalsQuiet = { writes, since: now };
+      if (now - this.totalsQuiet.since < STORE_TOTALS_QUIET_MS) return undefined;
+    }
     const pool = offThreadReadsSupported(this.dbPath);
     const steps = storeTotalsWalkSteps(NON_SYNC_RUN_CONNECTORS_SQL);
     let step = steps.next();
@@ -16972,7 +17042,15 @@ export class LocalConnectorStore {
       step = steps.next(rows);
     }
     if (this.reclaiming) return undefined;
-    return applyStoreTotalsCount(this.db, step.value.count, new Date().toISOString(), { exact: step.value.quiet });
+    const { count, quiet } = step.value;
+    const now = this.now();
+    // A mixed snapshot could double-count a write already seen by a page.
+    // Keep filled totals until a quiet walk can replace them exactly.
+    let drift = 0;
+    if (!quiet && totals && totals.walkOwed !== 'now') deferStoreTotalsWalk(this.db);
+    else drift = applyStoreTotalsCount(this.db, count, now.toISOString(), { exact: quiet });
+    this.totalsQuiet = quiet ? undefined : { writes: this.writeSequence(), since: now.getTime() };
+    return drift;
   }
 
   private embeddingInputHashesChecked = false;
@@ -22378,11 +22456,11 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
-function fileIdentity(path: string): { dev: number; ino: number } | undefined {
+function fileIdentity(path: string): { dev: bigint; ino: bigint; birthtimeNs: bigint } | undefined {
   if (path === ':memory:' || path === '') return undefined;
   try {
-    const stat = statSync(path);
-    return { dev: stat.dev, ino: stat.ino };
+    const stat = statSync(path, { bigint: true });
+    return stat.isFile() ? { dev: stat.dev, ino: stat.ino, birthtimeNs: stat.birthtimeNs } : undefined;
   } catch {
     return undefined;
   }

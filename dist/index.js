@@ -16712,7 +16712,7 @@ var init_source_size_limits = __esm(() => {
 });
 
 // src/workers/connector-store/store-totals.ts
-var STORE_TOTALS_TRIGGERS, STORE_TOTALS_REWALK_AFTER_MS;
+var STORE_TOTALS_TRIGGERS, STORE_TOTALS_QUIET_MS;
 var init_store_totals = __esm(() => {
   STORE_TOTALS_TRIGGERS = [
     "connector_store_totals_item_insert",
@@ -16727,7 +16727,7 @@ var init_store_totals = __esm(() => {
     "connector_store_totals_sync_delete",
     ...["items", "chunks", "chunk_embeddings", "sync_runs"].flatMap((table) => ["insert", "update", "delete"].map((op) => `connector_store_totals_writes_${table}_${op}`))
   ];
-  STORE_TOTALS_REWALK_AFTER_MS = 60 * 60000;
+  STORE_TOTALS_QUIET_MS = 60 * 60000;
 });
 
 // src/workers/source-index/embedding-identity.ts
@@ -21467,6 +21467,11 @@ var init_connection_requests = __esm(() => {
   init_request_log();
 });
 
+// src/core/embedding-sweep-idle.ts
+var init_embedding_sweep_idle = __esm(() => {
+  init_atomic_file();
+});
+
 // src/core/pairing-session-paths.ts
 var init_pairing_session_paths = __esm(() => {
   init_olympus_layout();
@@ -21766,6 +21771,7 @@ var init_source_dispositions = __esm(() => {
 var backgroundTrashRemovals;
 var init_data_lifecycle = __esm(() => {
   init_connection_requests();
+  init_embedding_sweep_idle();
   init_boot_progress();
   init_people_index();
   init_mac_engine_daemon();

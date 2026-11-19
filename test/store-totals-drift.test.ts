@@ -3,18 +3,20 @@
 // the triggers alone; and after any drift (a REPLACE, a corrupted row), by
 // the reconcile, which also carries over writes made while it counted.
 
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
 import type { SourceEmbeddingInput, SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
+import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import {
-  applyStoreTotalsCount, createStoreTotals, readStoreTotals, storeTotalsCountSql, storeTotalsReconcileDue, storeTotalsWalkSteps,
-  STORE_TOTALS_REWALK_AFTER_MS, type StoreTotalsCount,
+  applyStoreTotalsCount, createStoreTotals, storeTotalsCountSql, storeTotalsWalkSteps,
+  STORE_TOTALS_QUIET_MS, type StoreTotalsCount,
 } from '../src/workers/connector-store/store-totals.ts';
 import { Database } from 'bun:sqlite';
+import { createTestClock } from './helpers/test-clock.ts';
 
 const CORPUS_ID = 'secure_local.dropbox.files';
 const ACCOUNT = 'dropbox.personal';
@@ -120,31 +122,109 @@ describe('the totals walk', () => {
     } finally { store.close(); }
   });
 
-  test('is owed only when the totals were never filled, a trigger was put back, or an hour after a walk that saw writes', async () => {
-    const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: CORPUS_ID, family: 'file', trustDomain: 'secure_local' });
+  test('runs zero walk statements on exact totals, across writes and ledger changes', async () => {
+    const clock = createTestClock();
+    const ledger = new TierLedger({ dbPath: ':memory:' });
+    const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: CORPUS_ID, family: 'file', trustDomain: 'secure_local', now: clock.date, tierLedger: ledger });
+    const db = (store as unknown as { db: Database }).db;
+    const query = spyOn(db, 'query');
+    const background = () => store.reconcileTotals({ background: true });
     try {
-      const db = (store as unknown as { db: Database }).db;
-      const now = Date.now();
-      expect(storeTotalsReconcileDue(store.totals(), now)).toBe(true);
-      await store.reconcileTotals();
-      // Filled and exact: no walk on a clock.
-      expect(storeTotalsReconcileDue(store.totals(), now + 10 * STORE_TOTALS_REWALK_AFTER_MS)).toBe(false);
-      // A trigger missing at open: owed now.
+      const item = file('a.txt', 'alpha');
+      await store.syncFromConnector(connector([item]), { fetchContent: true });
+      query.mockClear();
+      expect(await background()).toBe(0);
+      const walkStatements = query.mock.calls.map(([sql]) => sql).filter(isWalkStatement);
+      expect(walkStatements).toHaveLength(6); // start, item, chunk, vectors, run, end
+      for (let pass = 0; pass < 4; pass++) {
+        await clock.advance(STORE_TOTALS_QUIET_MS);
+        query.mockClear();
+        expect(await background()).toBeUndefined();
+        expect(query.mock.calls.map(([sql]) => sql).filter(isWalkStatement)).toEqual([]);
+      }
+      // A write keeps the totals exact through the triggers: no walk.
+      db.exec('UPDATE items SET tombstoned = 1 WHERE item_pk = 1');
+      query.mockClear();
+      expect(await background()).toBeUndefined();
+      expect(query.mock.calls.map(([sql]) => sql).filter(isWalkStatement)).toEqual([]);
+      expect(withoutStamp(store.totals())).toEqual(recount(store));
+
+      // A ledger change moves no row the totals count: no walk.
+      const writes = store.writeSequence();
+      ledger.markNewArrival(item.identity);
+      expect(store.writeSequence()).toBe(writes);
+      query.mockClear();
+      expect(await background()).toBeUndefined();
+      expect(query.mock.calls.map(([sql]) => sql).filter(isWalkStatement)).toEqual([]);
+
+      db.exec("UPDATE store_totals SET n = n + 4 WHERE name = 'chunks'");
+      expect(await background()).toBeUndefined();
+      expect(await store.reconcileTotals()).toBe(4);
+      expect(await background()).toBeUndefined();
+
+      db.exec("UPDATE store_totals SET n = n + 3 WHERE name = 'chunks'");
       db.exec('DROP TRIGGER connector_store_totals_chunk_insert;');
       createStoreTotals(db, NON_SYNC_SQL(db));
-      expect(readStoreTotals(db)!.walkOwed).toBe('now');
-      expect(storeTotalsReconcileDue(store.totals(), now)).toBe(true);
-      await store.reconcileTotals();
-      expect(store.totals()!.walkOwed).toBeUndefined();
-      // A walk that saw writes: owed again an hour later.
-      const count = db.query(storeTotalsCountSql(NON_SYNC_SQL(db))).get() as StoreTotalsCount;
-      applyStoreTotalsCount(db, count, new Date(now).toISOString(), { exact: false });
+      expect(store.writeSequence()).toBe(writes);
+      expect(await background()).toBe(3);
+      expect(await background()).toBeUndefined();
+      expect(withoutStamp(store.totals())).toEqual(recount(store));
+    } finally { query.mockRestore(); store.close(); ledger.close(); }
+  });
+
+  test('retries after a quiet hour and repairs a provably wrong total immediately', async () => {
+    const clock = createTestClock();
+    const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: CORPUS_ID, family: 'file', trustDomain: 'secure_local', now: clock.date });
+    const db = (store as unknown as { db: Database }).db;
+    const background = () => store.reconcileTotals({ background: true });
+    const write = () => db.exec('UPDATE items SET tombstoned = 1 - tombstoned WHERE item_pk = 1');
+    const original = db.query.bind(db);
+    let writeDuringWalk = false;
+    const query = spyOn(db, 'query').mockImplementation((sql) => {
+      if (writeDuringWalk && sql.includes('FROM items WHERE item_pk >')) {
+        writeDuringWalk = false;
+        write();
+      }
+      return original(sql);
+    });
+    try {
+      await store.syncFromConnector(connector([file('a.txt', 'alpha')]), { fetchContent: true });
+      expect(await background()).toBe(0);
+      write();
+      writeDuringWalk = true;
+      expect(await store.reconcileTotals()).toBe(0);
+      expect(writeDuringWalk).toBe(false);
       expect(store.totals()!.walkOwed).toBe('later');
-      expect(storeTotalsReconcileDue(store.totals(), now + 1_000)).toBe(false);
-      expect(storeTotalsReconcileDue(store.totals(), now + STORE_TOTALS_REWALK_AFTER_MS)).toBe(true);
-    } finally { store.close(); }
+      expect(store.totals()!.items).toBe(1);
+      for (let hour = 0; hour < 3; hour++) {
+        await clock.advance(STORE_TOTALS_QUIET_MS);
+        write();
+        query.mockClear();
+        expect(await background()).toBeUndefined();
+        expect(query.mock.calls.map(([sql]) => sql).filter(isWalkStatement)).toEqual([]);
+      }
+      await clock.advance(STORE_TOTALS_QUIET_MS - 1);
+      expect(await background()).toBeUndefined();
+      await clock.advance(1);
+      expect(await background()).toBe(0);
+      await clock.advance(STORE_TOTALS_QUIET_MS);
+      expect(await background()).toBeUndefined();
+      expect(withoutStamp(store.totals())).toEqual(recount(store));
+
+      write();
+      writeDuringWalk = true;
+      expect(await store.reconcileTotals()).toBe(0);
+      expect(store.totals()!.walkOwed).toBe('later');
+      db.exec("UPDATE store_totals SET n = -2 WHERE name = 'chunks'");
+      expect(await background()).toBe(3);
+      expect(withoutStamp(store.totals())).toEqual(recount(store));
+    } finally { query.mockRestore(); store.close(); }
   });
 });
+
+function isWalkStatement(sql: string): boolean {
+  return /MAX\(item_pk\)|item_pk > \? AND item_pk <=|chunk_pk > \? AND chunk_pk <=|rowid > \? AND rowid <=|SELECT n AS writes/.test(sql);
+}
 
 /** The same real-sync predicate the store uses, read back from its own trigger. */
 function NON_SYNC_SQL(db: Database): string {
