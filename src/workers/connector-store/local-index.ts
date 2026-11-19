@@ -1249,13 +1249,15 @@ interface TierLedgerHiddenItemPks {
 const PK_SET_SLICE = 20_000;
 
 /** One set of these pk lists, built with a turn every PK_SET_SLICE entries (a list can hold 500k). */
-async function pkSetInTurns(lists: ReadonlyArray<readonly number[]>, keep?: (pk: number) => boolean, set = new Set<number>()): Promise<Set<number>> {
+async function pkSetInTurns(lists: ReadonlyArray<readonly number[]>, {
+  keep, set = new Set<number>(), turn = ingestionTurn,
+}: { keep?: (pk: number) => boolean; set?: Set<number>; turn?: () => Promise<void> | undefined } = {}): Promise<Set<number>> {
   let added = 0;
   for (const list of lists) {
     for (const pk of list) {
       if (keep && !keep(pk)) continue;
       set.add(pk);
-      if (++added % PK_SET_SLICE === 0) await ingestionTurn();
+      if (++added % PK_SET_SLICE === 0) await turn();
     }
   }
   return set;
@@ -1270,7 +1272,7 @@ async function pkSetInTurns(lists: ReadonlyArray<readonly number[]>, keep?: (pk:
 async function embeddingExcludedPksInTurns(tierHidden: TierLedgerHiddenItemPks, allowHeld: boolean): Promise<Set<number>> {
   const eligibleHeld = allowHeld ? await pkSetInTurns([tierHidden.heldForJudgment]) : undefined;
   const excluded = await pkSetInTurns([tierHidden.hidden, tierHidden.metadataLayer]);
-  return pkSetInTurns([tierHidden.held], (pk) => !eligibleHeld?.has(pk), excluded);
+  return pkSetInTurns([tierHidden.held], { keep: (pk) => !eligibleHeld?.has(pk), set: excluded });
 }
 
 /** Unordered pks with constant-work insertion/removal; no held-set copy per verdict. */
@@ -14834,7 +14836,7 @@ export class LocalConnectorStore {
       ...(selectedAccount ? { accountScope: selectedAccount } : {}),
       ...(filters ? { filters } : {}),
     };
-    const excludedItemPks = this.vectorScanExcludedItemPks();
+    const excludedItemPks = await this.vectorScanExcludedItemPks();
     if (excludedItemPks) pageOptions.excludedItemPks = excludedItemPks;
     // One pass. When the hidden set is ready, the scan skips items the store
     // already knows it will not serve. The live ledger check below stays the
@@ -14915,14 +14917,18 @@ export class LocalConnectorStore {
    * from embedding, metadata only). It is the current set (the feed keeps it
    * incremental), never an aged one: an item judged a moment ago must rank
    * at once. Every winner is still checked against the live ledger.
-   * Undefined when nothing is excluded or
-   * the set cannot be read (the scan then ranks everything, as before).
+   * Undefined while the first memo is warming, when nothing is excluded,
+   * or when a complete set cannot be built.
    */
-  private vectorScanExcludedItemPks(): { has(itemPk: number): boolean } | undefined {
-    // No set built yet (the first search after a start): building it here
-    // would run the whole build on the request thread, as vectorLaneServable
-    // also refuses. Build it in turns for the next search; this one ranks
-    // everything and the live check filters.
+  private vectorScanExcludedItemPks(): Promise<{ has(itemPk: number): boolean } | undefined> {
+    return this.vectorScanExclusionBuild ??= this.buildVectorScanExclusion().finally(() => {
+      this.vectorScanExclusionBuild = undefined;
+    });
+  }
+
+  private async buildVectorScanExclusion(): Promise<{ has(itemPk: number): boolean } | undefined> {
+    // A cold search ranks everything while the shared counts refresh warms
+    // the memo. Every winner still goes through the live visibility check.
     if (!this.tierLedgerHiddenMemo && !this.tierHiddenCountsMemo) {
       let ledger: TierLedger | undefined;
       try { ledger = this.visibilityLedger(); } catch { return undefined; }
@@ -14931,32 +14937,40 @@ export class LocalConnectorStore {
         return undefined;
       }
     }
-    let base: TierLedgerHiddenItemPks;
-    let children: number[];
+
     try {
-      base = this.tierLedgerHiddenItemPks();
-      children = this.hiddenChildItemPks();
+      // Keep the unmerged base: only it is the memo's value, backed by lists
+      // that are updated in place. The child walk returns a separate array.
+      const base = await runHiddenStepsInTurns(this.tierLedgerHiddenSteps());
+      const basePks = [base.hidden, base.held, base.metadataLayer];
+      const memo = this.tierLedgerHiddenMemo;
+      // A store without a ledger returns empty base lists and has no memo.
+      if (memo ? memo.value !== base : basePks.some(pks => pks.length > 0)) return undefined;
+      const lists = memo ? [memo.lists.hidden, memo.lists.held, memo.lists.metadataLayer] : [];
+      const generations = lists.map(list => list.generation);
+      const baseCurrent = () => this.tierLedgerHiddenMemo === memo
+        && lists.every((list, at) => list.generation === generations[at]);
+
+      const children = await this.hiddenChildItemPksInTurns();
+      const childMemo = this.hiddenChildMemo;
+      if (!baseCurrent()) return undefined;
+      const cached = this.vectorScanExclusion;
+      const excluded = memo && cached?.lists.every((list, at) => list === lists[at] && cached.generations[at] === generations[at])
+        ? cached.set
+        : await pkSetInTurns(basePks, { turn: yieldConnectorStoreVectorScan });
+      const hiddenChildren = children.length > 0
+        ? await pkSetInTurns([children], { turn: yieldConnectorStoreVectorScan }) : undefined;
+      // Another visibility reader can advance either source during a yield.
+      // Publish only a complete set built from the captured versions.
+      if (!baseCurrent() || this.hiddenChildMemo !== childMemo) return undefined;
+      if (excluded !== cached?.set) this.vectorScanExclusion = memo ? { lists, generations, set: excluded } : undefined;
+      if (hiddenChildren) return { has: (itemPk) => excluded.has(itemPk) || hiddenChildren.has(itemPk) };
+      return excluded.size > 0 ? excluded : undefined;
     } catch { return undefined; }
-    // The set's lists change in place as verdicts land. The copy is kept
-    // between searches while every list is the same one at the same
-    // generation: rebuilt per search it cost up to a few hundred ms per big
-    // store on the front's loop, and every other store's lane waited.
-    const memo = this.tierLedgerHiddenMemo;
-    const lists = memo && memo.value === base ? [memo.lists.hidden, memo.lists.held, memo.lists.metadataLayer] : undefined;
-    const cached = this.vectorScanExclusion;
-    let excluded: Set<number>;
-    if (lists && cached && cached.lists.every((list, at) => list === lists[at] && cached.generations[at] === list.generation)) {
-      excluded = cached.set;
-    } else {
-      excluded = new Set<number>([...base.hidden, ...base.held, ...base.metadataLayer]);
-      this.vectorScanExclusion = lists ? { lists, generations: lists.map(list => list.generation), set: excluded } : undefined;
-    }
-    if (children.length === 0) return excluded.size > 0 ? excluded : undefined;
-    const hiddenChildren = new Set(children);
-    return { has: (itemPk) => excluded.has(itemPk) || hiddenChildren.has(itemPk) };
   }
 
   private vectorScanExclusion: { lists: MutablePkList[]; generations: number[]; set: Set<number> } | undefined;
+  private vectorScanExclusionBuild: ReturnType<LocalConnectorStore['buildVectorScanExclusion']> | undefined;
 
   /**
    * The vector scan for a store the read pool does not serve (an in-memory

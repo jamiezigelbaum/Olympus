@@ -65708,7 +65708,11 @@ async function runStepsInTurns(steps) {
   }
   return step.value;
 }
-async function pkSetInTurns(lists, keep, set = new Set) {
+async function pkSetInTurns(lists, {
+  keep,
+  set = new Set,
+  turn = ingestionTurn
+} = {}) {
   let added = 0;
   for (const list of lists) {
     for (const pk of list) {
@@ -65716,7 +65720,7 @@ async function pkSetInTurns(lists, keep, set = new Set) {
         continue;
       set.add(pk);
       if (++added % PK_SET_SLICE === 0)
-        await ingestionTurn();
+        await turn();
     }
   }
   return set;
@@ -65724,7 +65728,7 @@ async function pkSetInTurns(lists, keep, set = new Set) {
 async function embeddingExcludedPksInTurns(tierHidden, allowHeld) {
   const eligibleHeld = allowHeld ? await pkSetInTurns([tierHidden.heldForJudgment]) : undefined;
   const excluded = await pkSetInTurns([tierHidden.hidden, tierHidden.metadataLayer]);
-  return pkSetInTurns([tierHidden.held], (pk) => !eligibleHeld?.has(pk), excluded);
+  return pkSetInTurns([tierHidden.held], { keep: (pk) => !eligibleHeld?.has(pk), set: excluded });
 }
 
 class MutablePkList {
@@ -76749,7 +76753,7 @@ ${parentKey(ref)}`, { ref, origin });
         ...selectedAccount ? { accountScope: selectedAccount } : {},
         ...filters ? { filters } : {}
       };
-      const excludedItemPks = this.vectorScanExcludedItemPks();
+      const excludedItemPks = await this.vectorScanExcludedItemPks();
       if (excludedItemPks)
         pageOptions.excludedItemPks = excludedItemPks;
       const scanned = offThreadReadsSupported(this.dbPath) ? await scanVectorPagesOnPool(this.dbPath, provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit) : await this.scanVectorPagesInThread(provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit);
@@ -76800,6 +76804,11 @@ ${parentKey(ref)}`, { ref, origin });
       };
     }
     vectorScanExcludedItemPks() {
+      return this.vectorScanExclusionBuild ??= this.buildVectorScanExclusion().finally(() => {
+        this.vectorScanExclusionBuild = undefined;
+      });
+    }
+    async buildVectorScanExclusion() {
       if (!this.tierLedgerHiddenMemo && !this.tierHiddenCountsMemo) {
         let ledger;
         try {
@@ -76812,30 +76821,35 @@ ${parentKey(ref)}`, { ref, origin });
           return;
         }
       }
-      let base;
-      let children;
       try {
-        base = this.tierLedgerHiddenItemPks();
-        children = this.hiddenChildItemPks();
+        const base = await runHiddenStepsInTurns(this.tierLedgerHiddenSteps());
+        const basePks = [base.hidden, base.held, base.metadataLayer];
+        const memo = this.tierLedgerHiddenMemo;
+        if (memo ? memo.value !== base : basePks.some((pks) => pks.length > 0))
+          return;
+        const lists = memo ? [memo.lists.hidden, memo.lists.held, memo.lists.metadataLayer] : [];
+        const generations = lists.map((list) => list.generation);
+        const baseCurrent = () => this.tierLedgerHiddenMemo === memo && lists.every((list, at) => list.generation === generations[at]);
+        const children = await this.hiddenChildItemPksInTurns();
+        const childMemo = this.hiddenChildMemo;
+        if (!baseCurrent())
+          return;
+        const cached = this.vectorScanExclusion;
+        const excluded = memo && cached?.lists.every((list, at) => list === lists[at] && cached.generations[at] === generations[at]) ? cached.set : await pkSetInTurns(basePks, { turn: yieldConnectorStoreVectorScan });
+        const hiddenChildren = children.length > 0 ? await pkSetInTurns([children], { turn: yieldConnectorStoreVectorScan }) : undefined;
+        if (!baseCurrent() || this.hiddenChildMemo !== childMemo)
+          return;
+        if (excluded !== cached?.set)
+          this.vectorScanExclusion = memo ? { lists, generations, set: excluded } : undefined;
+        if (hiddenChildren)
+          return { has: (itemPk) => excluded.has(itemPk) || hiddenChildren.has(itemPk) };
+        return excluded.size > 0 ? excluded : undefined;
       } catch {
         return;
       }
-      const memo = this.tierLedgerHiddenMemo;
-      const lists = memo && memo.value === base ? [memo.lists.hidden, memo.lists.held, memo.lists.metadataLayer] : undefined;
-      const cached = this.vectorScanExclusion;
-      let excluded;
-      if (lists && cached && cached.lists.every((list, at) => list === lists[at] && cached.generations[at] === list.generation)) {
-        excluded = cached.set;
-      } else {
-        excluded = new Set([...base.hidden, ...base.held, ...base.metadataLayer]);
-        this.vectorScanExclusion = lists ? { lists, generations: lists.map((list) => list.generation), set: excluded } : undefined;
-      }
-      if (children.length === 0)
-        return excluded.size > 0 ? excluded : undefined;
-      const hiddenChildren = new Set(children);
-      return { has: (itemPk) => excluded.has(itemPk) || hiddenChildren.has(itemPk) };
     }
     vectorScanExclusion;
+    vectorScanExclusionBuild;
     async scanVectorPagesInThread(provider, beforeToken, queryVector, pageOptions, deadlineAtMs, resultLimit) {
       const scanDb = this.dbPath === ":memory:" ? this.db : new Database9(this.dbPath, { readonly: true, create: false, strict: true });
       const ownsScanDb = scanDb !== this.db;
@@ -246850,7 +246864,7 @@ var init_control_plane = __esm(() => {
 // src/workers/engine-split/runtime.ts
 import { AsyncLocalStorage as AsyncLocalStorage16 } from "node:async_hooks";
 import { randomUUID as randomUUID43 } from "node:crypto";
-import { lstatSync as lstatSync56, rmSync as rmSync50 } from "node:fs";
+import { lstatSync as lstatSync56 } from "node:fs";
 function engineBackgroundSocketFromEnv(env) {
   const path = env[ENGINE_BACKGROUND_SOCKET_ENV]?.trim();
   if (!path)
@@ -246962,17 +246976,11 @@ function listenWhileStarting(input) {
     if (releaseSystemdWorkerSocket())
       (input.log ?? console.warn)("[olympus:worker] removed the socket left by the previous worker run");
     const socketPath = prepareWorkerSocket();
-    const server = socketPath ? bindWorkerSocket(socketPath, () => Bun.serve(workerSocketServe({ unix: socketPath, fetch: answer }))) : Bun.serve({ hostname: input.hostname, port: input.port, fetch: answer });
-    return {
-      stop: () => {
-        server.stop(true);
-        if (socketPath)
-          rmSync50(socketPath, { force: true });
-      }
-    };
+    const server = socketPath ? bindWorkerSocket(socketPath, () => Bun.serve(workerSocketServe({ unix: socketPath, fetch: answer }))) : Bun.serve({ hostname: input.hostname, port: input.port, ...WORKER_SOCKET_SERVE_OPTIONS, fetch: answer });
+    return { socketPath, server };
   } catch (error) {
     (input.log ?? console.warn)(`[engine-split] the front could not answer while starting: ${error instanceof Error ? error.message : String(error)}`);
-    return { stop: () => {} };
+    return;
   }
 }
 function createEngineFront(input) {
@@ -278143,10 +278151,9 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   }) : undefined;
   const frontWorkerFetch = frontRoutes ? async (request) => await frontRoutes(request) ?? worker.fetch(request) : worker.fetch;
   inProcessFetch = frontWorkerFetch;
-  frontStarting?.stop();
-  if (listens && releaseSystemdWorkerSocket())
+  if (!frontStarting && listens && releaseSystemdWorkerSocket())
     console.warn("[olympus:worker] removed the socket left by the previous worker run");
-  const socketPath = listens ? prepareWorkerSocket() : undefined;
+  const socketPath = frontStarting ? frontStarting.socketPath : listens ? prepareWorkerSocket() : undefined;
   const serverOptions = {
     fetch: withRequestPeer(withFirstRunPrivacyGate(withRelaySurfacesRoute(createRelaySurfacesHandler({
       requestLog: (entry) => connectionRequests?.record(entry, "relay"),
@@ -278238,7 +278245,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     serverOptions.fetch = frontGate.wrap(serverOptions.fetch);
   }
   await localFilesInitialCleanup;
-  const startServer = () => socketPath ? Bun.serve(workerSocketServe({ unix: socketPath, fetch(request, server) {
+  const fetchOnWorkerSocket = (request, server) => {
     server.timeout(request, 0);
     if (new URL(request.url).pathname === DESKTOP_OWNER_OPEN_PATH) {
       if (request.method !== "POST" || !authToken || request.headers.get("authorization") !== `Bearer ${authToken}`)
@@ -278274,7 +278281,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         return Response.json({ ...await value.json(), built_in_models: linuxModelReadiness(process.env), desktop_bridge: desktopBridge?.status() }, { status: value.status, headers: value.headers });
       });
     return response;
-  } })) : Bun.serve({ hostname, port: workerListenPort(port), idleTimeout: 0, ...serverOptions });
+  };
+  const startServer = () => socketPath ? Bun.serve(workerSocketServe({ unix: socketPath, fetch: fetchOnWorkerSocket })) : Bun.serve({ hostname, port: workerListenPort(port), idleTimeout: 0, ...serverOptions });
   if (engineFront) {
     const warming = keepVisibilityCurrent("before ready");
     let bound;
@@ -278283,7 +278291,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     })]);
     clearTimeout(bound);
   }
-  const server = !listens ? undefined : socketPath ? bindWorkerSocket(socketPath, startServer) : startServer();
+  const server = frontStarting ? frontStarting.server.reload({ fetch: socketPath ? fetchOnWorkerSocket : serverOptions.fetch }) : !listens ? undefined : socketPath ? bindWorkerSocket(socketPath, startServer) : startServer();
   if (engineRole === "single") {
     finishBootProgress();
     setEngineStep(undefined);
