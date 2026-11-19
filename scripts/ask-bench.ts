@@ -259,6 +259,8 @@ async function buildStore(dir: string, scale: number, index: number) {
     const digests = db(store).query('SELECT count(*) AS n FROM chunk_vector_digest').get() as { n: number };
     digestRows = digests.n;
     if (digestRows !== (spec.vector ? count : 0)) throw new Error(`Incorrect digest row count for ${spec.corpusId}`);
+    // An installed store's totals are present and exact; a fresh one owes a walk on its first start.
+    await store.reconcileTotals();
     for (const handle of [store, ledger]) db(handle).query('PRAGMA wal_checkpoint(TRUNCATE)').all();
   } finally {
     store.close();
