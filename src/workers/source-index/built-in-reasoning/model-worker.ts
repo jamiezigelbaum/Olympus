@@ -1,6 +1,7 @@
 // Built-in model thread: installs, native ONNX sessions, tokenizers and inference.
 // LiteRT inference remains in its helper process; the serving thread only sends messages.
 import { parentPort, workerData } from 'node:worker_threads';
+import { publishWorkerMemoryPayloads } from '../../../core/memory-counters.ts';
 import { startLiteRtEmbedder, type LiteRtEmbedder } from '../built-in-embedding/litert-runtime.ts';
 import { installBuiltInEmbedding, installBuiltInReranker } from '../built-in-embedding/assets.ts';
 import { BuiltInSourceEmbeddingProvider } from '../built-in-embedding/provider.ts';
@@ -11,6 +12,7 @@ import { createLlamaServerHandle, type LlamaServerHandle } from './server.ts';
 import type { ModelThreadFailure, ModelThreadReply, ModelThreadRequest } from './off-thread.ts';
 
 const port = parentPort!;
+publishWorkerMemoryPayloads(workerData.payloads);
 const liteRtHelpers = new Map<number, LiteRtEmbedder>();
 const embedders = new Map<number, BuiltInSourceEmbeddingProvider>();
 const rerankers = new Map<number, CrossEncoderReranker>();

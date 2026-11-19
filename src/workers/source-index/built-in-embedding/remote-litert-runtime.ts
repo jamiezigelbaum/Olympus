@@ -1,6 +1,6 @@
 // Optional transport for the same pinned LiteRT model. No remote error body,
 // URL, credentials or input is included in diagnostics.
-import { memoryPayloadJson, noteMemoryPayloadResponse } from '../../../core/memory-counters.ts';
+import { memoryPayloadJson, noteMemoryPayloadResponse, withMemoryPayload } from '../../../core/memory-counters.ts';
 import { readFileSync } from 'node:fs';
 import type { LiteRtDevice, LiteRtEmbedder, LiteRtEmbedItem } from './litert-runtime.ts';
 
@@ -66,7 +66,7 @@ export class RemoteLiteRtEmbedder implements LiteRtEmbedder {
           this.device = handshake.device;
           this.verified = true;
         }
-        const response = await this.request('/v1/embed', items as readonly string[]);
+        const response = await withMemoryPayload('embed', () => this.request('/v1/embed', items as readonly string[]));
         const identity = this.options.identity;
         if (typeof response.vectors !== 'string'
           || Object.entries(identity).some(([field, value]) => response[field] !== value)) {

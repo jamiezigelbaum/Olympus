@@ -2896,8 +2896,28 @@ var init_built_in_reranker_manifest = __esm(() => {
   MMARCO_MMINILMV2_L12_H384_V1 = candidate("mmarco-mMiniLMv2-L12-H384-v1-int8-1427fd6", "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1", "1427fd652930e4ba29e8149678df786c240d8825", "onnx/model_qint8_arm64.onnx", 118620017, "1825907d6c1a9001ff78124780bbde20a614a8c3df3b63409cf3c72c6fe5c8b4", "tokenizer.json", 17082660, "62c24cdc13d4c9952d63718d6c9fa4c287974249e16b7ade6d5a85e7bbb75626");
 });
 
+// src/core/memory-counters.ts
+import { AsyncLocalStorage } from "node:async_hooks";
+function addMemoryPayloadBytes(bytes) {
+  payloadScope.getStore()?.add(bytes);
+}
+function memoryPayloadByteCounter() {
+  return payloadScope.getStore()?.add;
+}
+function addMemoryPayloadText(text) {
+  const add = payloadScope.getStore()?.add;
+  if (add)
+    add(Buffer.byteLength(text));
+}
+var payloadScope;
+var init_memory_counters = __esm(() => {
+  payloadScope = new AsyncLocalStorage;
+});
+
 // src/workers/source-index/built-in-reasoning/off-thread.ts
-var init_off_thread = () => {};
+var init_off_thread = __esm(() => {
+  init_memory_counters();
+});
 
 // src/core/http-timeout.ts
 function untilAborted(work, signal) {
@@ -7499,24 +7519,6 @@ var init_model_transport = __esm(() => {
       this.status = status;
     }
   };
-});
-
-// src/core/memory-counters.ts
-import { AsyncLocalStorage } from "node:async_hooks";
-function addMemoryPayloadBytes(bytes) {
-  payloadScope.getStore()?.(bytes);
-}
-function memoryPayloadByteCounter() {
-  return payloadScope.getStore();
-}
-function addMemoryPayloadText(text) {
-  const add = payloadScope.getStore();
-  if (add)
-    add(Buffer.byteLength(text));
-}
-var payloadScope;
-var init_memory_counters = __esm(() => {
-  payloadScope = new AsyncLocalStorage;
 });
 
 // src/core/startup-progress.ts
@@ -17318,6 +17320,7 @@ var init_tier_rejudge = __esm(() => {
 // src/workers/source-index/built-in-embedding/litert-runtime.ts
 var REQUEST_TIMEOUT_MS;
 var init_litert_runtime = __esm(() => {
+  init_memory_counters();
   init_off_thread();
   REQUEST_TIMEOUT_MS = 3 * 60000;
 });
@@ -17335,6 +17338,7 @@ var init_wordpiece = () => {};
 // src/workers/source-index/built-in-embedding/provider.ts
 var RETRY_AFTER_FAILURE_MS, PICTURE_HOLD_MS;
 var init_provider = __esm(() => {
+  init_memory_counters();
   init_off_thread();
   init_operation_error();
   init_embedding_identity();
@@ -18981,6 +18985,8 @@ function commandGroupRecorder() {
 async function runExtractionCommand(request, internals = {}) {
   const kill = internals.kill ?? process.kill;
   const command = resolveExtractionCommand(request.command);
+  for (const argument of request.args)
+    addMemoryPayloadText(argument);
   return new Promise((resolve, reject) => {
     const child = spawn4(command, request.args, {
       stdio: ["ignore", "pipe", "pipe"],
@@ -20652,6 +20658,7 @@ var init_audio_wav = () => {};
 // src/workers/file-extraction/extractors/built-in-transcriber.ts
 var DEFAULT_FILE_DEADLINE_MS, DEFAULT_CONVERT_TIMEOUT_MS, DEFAULT_INSTALL_RETRY_MS, DEFAULT_INSTALL_RETRY_CEILING_MS, DEFAULT_VERIFY_WAIT_MS;
 var init_built_in_transcriber = __esm(() => {
+  init_memory_counters();
   init_model_transport();
   init_model_stream2();
   init_install();

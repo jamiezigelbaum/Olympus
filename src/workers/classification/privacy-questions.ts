@@ -1,5 +1,6 @@
 /** Draft-only privacy setup. No store, ledger or verdict-cache writes. */
 import type { AnalystModel, AnalystModelRequest } from '../../core/analyst.ts';
+import { addMemoryPayloadText, withMemoryPayload } from '../../core/memory-counters.ts';
 import { DASHBOARD_PRIVACY_QUESTIONS_COPY } from '../dashboard/vocabulary.ts';
 import { PRIVACY_DESCRIPTION_MAX_CHARS } from './privacy-profile.ts';
 import { assertSnifferProfileAllowed, type SnifferLane } from './sniffer-lane.ts';
@@ -89,7 +90,11 @@ export function createPrivacyQuestionEngine(options: {
           const runtime = await options.runtime();
           if (controller.signal.aborted || !runtime?.approved) throw new Error('private_model_unavailable');
           assertSnifferProfileAllowed(runtime.lane.profileId, runtime.lane.profile);
-          const response = await runtime.model.complete({ ...request, localOnly: true, signal: controller.signal });
+          const response = await withMemoryPayload('judge', () => {
+            addMemoryPayloadText(request.system);
+            addMemoryPayloadText(request.prompt);
+            return runtime.model.complete({ ...request, localOnly: true, signal: controller.signal });
+          });
           return { text: response.text, lane: runtime.lane };
         })(),
         new Promise<never>((_resolve, reject) => { timer = setTimeout(() => {

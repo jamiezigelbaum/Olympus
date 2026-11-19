@@ -1,7 +1,7 @@
 import { memoryActivity, statusMemoryActivity } from '../../core/memory-counters.ts';
 import { createMemoryDiagnostic } from '../engine-split/memory.ts';
 import { sampleSqliteStoreMemory } from '../engine-split/sqlite-memory.ts';
-import { sampleModelWorkerMemory } from '../source-index/built-in-reasoning/off-thread.ts';
+import { modelWorkerMemoryPayloads, sampleModelWorkerMemory } from '../source-index/built-in-reasoning/off-thread.ts';
 import { readTinfoilStatus } from '../../core/analyst-tinfoil.ts';
 import { rerankOutcomeCounts } from '../../core/evidence-reranker.ts';
 import { localAnalystWindowReports, reportLocalAnalystPromptOverride, resolveLocalAnalystWindow, setLocalAnalystWindow } from '../source-index/local-analyst-window.ts';
@@ -6723,17 +6723,17 @@ export async function main(): Promise<void> {
     : memoryActivity(tierSniffer?.passRunning ?? false, statusRecount?.health().counting ?? false);
   const memoryDiagnostic = createMemoryDiagnostic({
     role: engineRole, activity: currentMemoryActivity, readers: readPoolMemoryCounts,
-    ...(engineRole === 'background' && {
-      sampleHolders: () => {
-        const readers = sampleReadPoolMemory();
-        const stores = sampleSqliteStoreMemory();
-        return {
-          ...readers, ...stores, ...sampleModelWorkerMemory(),
-          sqlite_connections_sampled: readers.sqlite_read_connections_sampled + stores.sqlite_store_connections_sampled,
-          sqlite_cache_budget_mb: readers.sqlite_read_cache_budget_mb + stores.sqlite_store_cache_budget_mb,
-        };
-      },
-    }),
+    workerPayloads: modelWorkerMemoryPayloads,
+    sampleHolders: () => {
+      if (engineRole !== 'background') return sampleReadPoolMemory(false);
+      const readers = sampleReadPoolMemory();
+      const stores = sampleSqliteStoreMemory();
+      return {
+        ...readers, ...stores, ...sampleModelWorkerMemory(),
+        sqlite_connections_sampled: (readers.sqlite_read_connections_sampled ?? 0) + stores.sqlite_store_connections_sampled,
+        sqlite_cache_budget_mb: (readers.sqlite_read_cache_budget_mb ?? 0) + stores.sqlite_store_cache_budget_mb,
+      };
+    },
   });
   // Both roles sample peaks even where restarting is disabled.
   const frontMemory = engineRole !== 'background' ? startEngineRssRestart({

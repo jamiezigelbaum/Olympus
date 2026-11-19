@@ -6,6 +6,7 @@ import { Worker } from 'node:worker_threads';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createMemoryPayloadBuffer } from '../../../core/memory-counters.ts';
 import type { BuiltInReasoningStatus, PinnedModelInstallerOptions } from './install.ts';
 import type { BuiltInEmbeddingInstallerOptions, BuiltInEmbeddingStatus, InstalledBuiltInEmbedding } from '../built-in-embedding/assets.ts';
 import type { BuiltInEmbeddingModelSpec } from '../built-in-embedding/manifest.ts';
@@ -50,6 +51,7 @@ export function modelThreadHandleId(): number { return nextHandle++; }
 /** Also accepts a worker path so responsiveness is testable with blocking fixtures. */
 export class ModelThread {
   private worker: Worker;
+  readonly payloads = new BigInt64Array(createMemoryPayloadBuffer());
   private memory: ModelThreadReply['memory'];
   private nextId = 1;
   private pending = new Map<number, {
@@ -63,7 +65,7 @@ export class ModelThread {
 
   constructor(path = modelWorkerPath()) {
     const shutdown = new Int32Array(new SharedArrayBuffer(4));
-    this.worker = new Worker(path, { workerData: { shutdown } });
+    this.worker = new Worker(path, { workerData: { shutdown, payloads: this.payloads.buffer } });
     // process.exit() cannot await a promise. The lifecycle thread can still
     // observe and stop its own ChildProcess objects while the parent waits.
     const onExit = () => {
@@ -169,4 +171,8 @@ export function modelThread(): ModelThread {
 
 export function sampleModelWorkerMemory() {
   return shared?.sampleMemory() ?? { model_workers: 0 };
+}
+
+export function modelWorkerMemoryPayloads(): BigInt64Array | undefined {
+  return shared?.payloads;
 }

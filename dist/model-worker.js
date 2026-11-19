@@ -1,6 +1,76 @@
 // src/workers/source-index/built-in-reasoning/model-worker.ts
 import { parentPort, workerData } from "node:worker_threads";
 
+// src/core/memory-counters.ts
+import { AsyncLocalStorage } from "node:async_hooks";
+var payloads = {
+  judge: { count: 0, bytes: 0 },
+  embed: { count: 0, bytes: 0 },
+  extract: { count: 0, bytes: 0 }
+};
+var payloadScope = new AsyncLocalStorage;
+var payloadSlots = { judge: 0, embed: 2, extract: 4 };
+var workerPayloads;
+function createMemoryPayloadBuffer() {
+  return new SharedArrayBuffer(Object.keys(payloadSlots).length * 2 * BigInt64Array.BYTES_PER_ELEMENT);
+}
+function publishWorkerMemoryPayloads(buffer) {
+  workerPayloads = new BigInt64Array(buffer);
+}
+async function withMemoryPayload(kind, run) {
+  const owner = payloadScope.getStore();
+  if (owner?.active && owner.kind === kind)
+    return run();
+  const counter = payloads[kind];
+  const shared = workerPayloads;
+  const slot = payloadSlots[kind];
+  let bytes = 0;
+  const scope = {
+    kind,
+    active: true,
+    add(delta) {
+      if (!scope.active)
+        return;
+      bytes += delta;
+      counter.bytes += delta;
+      if (shared)
+        Atomics.add(shared, slot + 1, BigInt(delta));
+    }
+  };
+  counter.count++;
+  if (shared)
+    Atomics.add(shared, slot, 1n);
+  try {
+    return await payloadScope.run(scope, run);
+  } finally {
+    scope.active = false;
+    counter.count--;
+    counter.bytes -= bytes;
+    if (shared) {
+      Atomics.sub(shared, slot + 1, BigInt(bytes));
+      Atomics.sub(shared, slot, 1n);
+    }
+  }
+}
+function addMemoryPayloadBytes(bytes) {
+  payloadScope.getStore()?.add(bytes);
+}
+function addMemoryPayloadText(text) {
+  const add = payloadScope.getStore()?.add;
+  if (add)
+    add(Buffer.byteLength(text));
+}
+function memoryPayloadJson(value) {
+  const json = JSON.stringify(value);
+  addMemoryPayloadText(json);
+  return json;
+}
+function noteMemoryPayloadResponse(response) {
+  const bytes = Number(response.headers?.get?.("content-length"));
+  if (Number.isSafeInteger(bytes) && bytes > 0)
+    addMemoryPayloadBytes(bytes);
+}
+
 // src/workers/source-index/built-in-embedding/litert-runtime.ts
 import { isMainThread } from "node:worker_threads";
 
@@ -17,13 +87,14 @@ function modelThreadHandleId() {
 
 class ModelThread {
   worker;
+  payloads = new BigInt64Array(createMemoryPayloadBuffer());
   memory;
   nextId = 1;
   pending = new Map;
   pids = new Map;
   constructor(path = modelWorkerPath()) {
     const shutdown = new Int32Array(new SharedArrayBuffer(4));
-    this.worker = new Worker(path, { workerData: { shutdown } });
+    this.worker = new Worker(path, { workerData: { shutdown, payloads: this.payloads.buffer } });
     const onExit = () => {
       this.worker.postMessage({ shutdown: true });
       Atomics.wait(shutdown, 0, 0, 15000);
@@ -354,7 +425,7 @@ class HelperProcess {
     if (this.exited)
       return Promise.reject(new Error("The built-in search model is not running."));
     const id = this.nextId++;
-    return new Promise((resolve, reject) => {
+    return withMemoryPayload("embed", () => new Promise((resolve, reject) => {
       const pictures = items.filter((item) => typeof item !== "string" && item.image).length;
       this.pending.set(id, {
         resolve,
@@ -368,9 +439,9 @@ class HelperProcess {
         cpuMs: helperCpuMs(this.child.pid)
       });
       const request = items.every((item) => typeof item === "string") ? { id, texts: items } : { id, items: items.map((item) => typeof item === "string" ? { text: item } : item) };
-      this.child.stdin.write(`${JSON.stringify(request)}
+      this.child.stdin.write(`${memoryPayloadJson(request)}
 `);
-    });
+    }));
   }
   settle(message) {
     const pending = message.id === undefined ? undefined : this.pending.get(message.id);
@@ -3193,28 +3264,6 @@ function isMediaCachePath(path, sha256, dir) {
   return true;
 }
 
-// src/core/memory-counters.ts
-import { AsyncLocalStorage } from "node:async_hooks";
-var payloadScope = new AsyncLocalStorage;
-function addMemoryPayloadBytes(bytes) {
-  payloadScope.getStore()?.(bytes);
-}
-function addMemoryPayloadText(text) {
-  const add = payloadScope.getStore();
-  if (add)
-    add(Buffer.byteLength(text));
-}
-function memoryPayloadJson(value) {
-  const json = JSON.stringify(value);
-  addMemoryPayloadText(json);
-  return json;
-}
-function noteMemoryPayloadResponse(response) {
-  const bytes = Number(response.headers?.get?.("content-length"));
-  if (Number.isSafeInteger(bytes) && bytes > 0)
-    addMemoryPayloadBytes(bytes);
-}
-
 // src/workers/source-index/embeddings.ts
 import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
 
@@ -3731,7 +3780,7 @@ class RemoteLiteRtEmbedder {
           this.device = handshake.device;
           this.verified = true;
         }
-        const response = await this.request("/v1/embed", items);
+        const response = await withMemoryPayload("embed", () => this.request("/v1/embed", items));
         const identity = this.options.identity;
         if (typeof response.vectors !== "string" || Object.entries(identity).some(([field, value]) => response[field] !== value)) {
           throw new Error("Remote embedding identity mismatch.");
@@ -4337,10 +4386,15 @@ class BuiltInSourceEmbeddingProvider {
     }
     if (model.kind === "litert")
       return this.embedLiteRt(model.embedder, inputs, taskType);
+    return withMemoryPayload("embed", () => this.embedOnnx(model, inputs, taskType));
+  }
+  async embedOnnx(model, inputs, taskType) {
     const windowTokens = this.spec.maxTokens - 2;
     const windows = [];
     inputs.forEach((input, index) => {
-      const ids = model.tokenizer.tokenize(promptText(this.spec, input, taskType));
+      const text = promptText(this.spec, input, taskType);
+      addMemoryPayloadText(text);
+      const ids = model.tokenizer.tokenize(text);
       const maxWindows = taskType === "RETRIEVAL_QUERY" ? 1 : MAX_WINDOWS_PER_DOCUMENT;
       const count = Math.max(1, Math.min(maxWindows, Math.ceil(ids.length / windowTokens)));
       for (let window = 0;window < count; window += 1) {
@@ -8372,6 +8426,7 @@ function lastLine(text) {
 
 // src/workers/source-index/built-in-reasoning/model-worker.ts
 var port = parentPort;
+publishWorkerMemoryPayloads(workerData.payloads);
 var liteRtHelpers = new Map;
 var embedders = new Map;
 var rerankers = new Map;

@@ -22439,32 +22439,52 @@ function memoryHolderCounts() {
   const { tasks_embed, tasks_sync, tasks_extract, tasks_watch, ...holders } = counts;
   return holders;
 }
+function createMemoryPayloadBuffer() {
+  return new SharedArrayBuffer(Object.keys(payloadSlots).length * 2 * BigInt64Array.BYTES_PER_ELEMENT);
+}
 async function withMemoryPayload(kind, run) {
+  const owner = payloadScope.getStore();
+  if (owner?.active && owner.kind === kind)
+    return run();
   const counter = payloads[kind];
+  const shared = workerPayloads;
+  const slot = payloadSlots[kind];
   let bytes = 0;
-  let active = true;
-  counter.count++;
-  try {
-    return await payloadScope.run((delta) => {
-      if (!active)
+  const scope = {
+    kind,
+    active: true,
+    add(delta) {
+      if (!scope.active)
         return;
       bytes += delta;
       counter.bytes += delta;
-    }, run);
+      if (shared)
+        Atomics.add(shared, slot + 1, BigInt(delta));
+    }
+  };
+  counter.count++;
+  if (shared)
+    Atomics.add(shared, slot, 1n);
+  try {
+    return await payloadScope.run(scope, run);
   } finally {
-    active = false;
+    scope.active = false;
     counter.count--;
     counter.bytes -= bytes;
+    if (shared) {
+      Atomics.sub(shared, slot + 1, BigInt(bytes));
+      Atomics.sub(shared, slot, 1n);
+    }
   }
 }
 function addMemoryPayloadBytes(bytes) {
-  payloadScope.getStore()?.(bytes);
+  payloadScope.getStore()?.add(bytes);
 }
 function memoryPayloadByteCounter() {
-  return payloadScope.getStore();
+  return payloadScope.getStore()?.add;
 }
 function addMemoryPayloadText(text) {
-  const add = payloadScope.getStore();
+  const add = payloadScope.getStore()?.add;
   if (add)
     add(Buffer.byteLength(text));
 }
@@ -22478,14 +22498,15 @@ function noteMemoryPayloadResponse(response) {
   if (Number.isSafeInteger(bytes) && bytes > 0)
     addMemoryPayloadBytes(bytes);
 }
-function memoryPayloadCounts() {
+function memoryPayloadCounts(worker) {
+  const total = (kind, field) => payloads[kind][field] + (worker ? Number(Atomics.load(worker, payloadSlots[kind] + Number(field === "bytes"))) : 0);
   return {
-    judge_payloads: payloads.judge.count,
-    judge_payload_bytes: payloads.judge.bytes,
-    embed_payloads: payloads.embed.count,
-    embed_payload_bytes: payloads.embed.bytes,
-    extract_payloads: payloads.extract.count,
-    extract_payload_bytes: payloads.extract.bytes
+    judge_payloads: total("judge", "count"),
+    judge_payload_bytes: total("judge", "bytes"),
+    embed_payloads: total("embed", "count"),
+    embed_payload_bytes: total("embed", "bytes"),
+    extract_payloads: total("extract", "count"),
+    extract_payload_bytes: total("extract", "bytes")
   };
 }
 function changeMemoryActivity(label, delta) {
@@ -22518,7 +22539,7 @@ function memoryActivity(judging, recount, background) {
     labels.push("people_refresh");
   return labels.length ? labels : ["idle"];
 }
-var counts, payloads, payloadScope, scopedActivity;
+var counts, payloads, payloadScope, payloadSlots, workerPayloads, scopedActivity;
 var init_memory_counters = __esm(() => {
   counts = {
     connector_stores: 0,
@@ -22538,6 +22559,7 @@ var init_memory_counters = __esm(() => {
     extract: { count: 0, bytes: 0 }
   };
   payloadScope = new AsyncLocalStorage;
+  payloadSlots = { judge: 0, embed: 2, extract: 4 };
   scopedActivity = {
     visibility_rebuild_bootstrap: 0,
     visibility_rebuild_incremental: 0,
@@ -35573,13 +35595,14 @@ function modelThreadHandleId() {
 
 class ModelThread {
   worker;
+  payloads = new BigInt64Array(createMemoryPayloadBuffer());
   memory;
   nextId = 1;
   pending = new Map;
   pids = new Map;
   constructor(path = modelWorkerPath()) {
     const shutdown = new Int32Array(new SharedArrayBuffer(4));
-    this.worker = new Worker2(path, { workerData: { shutdown } });
+    this.worker = new Worker2(path, { workerData: { shutdown, payloads: this.payloads.buffer } });
     const onExit = () => {
       this.worker.postMessage({ shutdown: true });
       Atomics.wait(shutdown, 0, 0, 15000);
@@ -35715,8 +35738,13 @@ function modelThread() {
 function sampleModelWorkerMemory() {
   return shared?.sampleMemory() ?? { model_workers: 0 };
 }
+function modelWorkerMemoryPayloads() {
+  return shared?.payloads;
+}
 var shared, nextHandle = 1;
-var init_off_thread = () => {};
+var init_off_thread = __esm(() => {
+  init_memory_counters();
+});
 
 // src/core/engine-split.ts
 import { mkdirSync as mkdirSync11 } from "node:fs";
@@ -47284,6 +47312,9 @@ class GeminiSourceEmbeddingProvider {
   async embed(inputs, options) {
     if (inputs.length === 0)
       return [];
+    return withMemoryPayload("embed", () => this.embedBatch(inputs, options));
+  }
+  async embedBatch(inputs, options) {
     const controller = new AbortController;
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     const budget = { deadlineAtMs: Date.now() + this.timeoutMs, budgetMs: this.timeoutMs };
@@ -47469,6 +47500,9 @@ class OpenAICompatibleSourceEmbeddingProvider {
   async embed(inputs, options) {
     if (inputs.length === 0)
       return [];
+    return withMemoryPayload("embed", () => this.embedBatch(inputs, options));
+  }
+  async embedBatch(inputs, options) {
     const controller = new AbortController;
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     const budget = { deadlineAtMs: Date.now() + this.timeoutMs, budgetMs: this.timeoutMs };
@@ -52917,7 +52951,7 @@ var SOURCE_INDEX_LANE_BUSY_CODE = "source_index_lane_busy";
 function readInBackground(dbPath, query) {
   return withOffThreadSnapshot(dbPath, async (read) => read(query), BACKGROUND_READS);
 }
-function sampleReadPoolMemory() {
+function sampleReadPoolMemory(sampleSqlite = true) {
   const now = Date.now();
   let workers = 0, connections = 0, cache = 0, heap = 0, external = 0, arrayBuffers = 0, age = 0;
   for (const reader of threads) {
@@ -52932,16 +52966,15 @@ function sampleReadPoolMemory() {
       age = Math.max(age, now - measured.at);
     }
     if (!reader.retired && reader.pending.size === 0 && !reader.job)
-      reader.worker.postMessage({ op: "memory" });
+      reader.worker.postMessage({ op: "memory", sampleSqlite });
   }
   return {
     read_heap_workers: workers,
     read_heap_age_ms: age,
     read_heap_size_mb: heap,
     read_extra_memory_mb: external,
-    ...arrayBuffers > 0 ? { read_array_buffers_mb: arrayBuffers } : {},
-    sqlite_read_connections_sampled: connections,
-    sqlite_read_cache_budget_mb: cache
+    read_array_buffers_mb: arrayBuffers,
+    ...sampleSqlite && { sqlite_read_connections_sampled: connections, sqlite_read_cache_budget_mb: cache }
   };
 }
 function readPoolMemoryCounts() {
@@ -53532,7 +53565,7 @@ self.onmessage = (event) => {
     const { heapUsed, external, arrayBuffers } = process.memoryUsage();
     let cacheBytes = 0;
     let measured = 0;
-    for (const [db, cached] of openDatabases) {
+    if (event.data.sampleSqlite) for (const [db, cached] of openDatabases) {
       let bytes = cached;
       if (bytes === undefined) {
         try {
@@ -59972,7 +60005,7 @@ class HelperProcess {
     if (this.exited)
       return Promise.reject(new Error("The built-in search model is not running."));
     const id = this.nextId++;
-    return new Promise((resolve, reject) => {
+    return withMemoryPayload("embed", () => new Promise((resolve, reject) => {
       const pictures = items.filter((item) => typeof item !== "string" && item.image).length;
       this.pending.set(id, {
         resolve,
@@ -59986,9 +60019,9 @@ class HelperProcess {
         cpuMs: helperCpuMs(this.child.pid)
       });
       const request = items.every((item) => typeof item === "string") ? { id, texts: items } : { id, items: items.map((item) => typeof item === "string" ? { text: item } : item) };
-      this.child.stdin.write(`${JSON.stringify(request)}
+      this.child.stdin.write(`${memoryPayloadJson(request)}
 `);
-    });
+    }));
   }
   settle(message) {
     const pending = message.id === undefined ? undefined : this.pending.get(message.id);
@@ -60177,6 +60210,7 @@ function resolveBun() {
 }
 var LiteRtImagesUnavailableError, LiteRtPictureEngineFaultError, LiteRtHelperReplacedError, helperReplacements = 0, REQUEST_TIMEOUT_MS, HELPER_WORKING_CPU_MS = 1000;
 var init_litert_runtime = __esm(() => {
+  init_memory_counters();
   init_off_thread();
   LiteRtImagesUnavailableError = class LiteRtImagesUnavailableError extends Error {
     indexes;
@@ -60260,7 +60294,7 @@ class RemoteLiteRtEmbedder {
           this.device = handshake.device;
           this.verified = true;
         }
-        const response = await this.request("/v1/embed", items);
+        const response = await withMemoryPayload("embed", () => this.request("/v1/embed", items));
         const identity = this.options.identity;
         if (typeof response.vectors !== "string" || Object.entries(identity).some(([field, value]) => response[field] !== value)) {
           throw new Error("Remote embedding identity mismatch.");
@@ -60867,10 +60901,15 @@ class BuiltInSourceEmbeddingProvider {
     }
     if (model.kind === "litert")
       return this.embedLiteRt(model.embedder, inputs, taskType);
+    return withMemoryPayload("embed", () => this.embedOnnx(model, inputs, taskType));
+  }
+  async embedOnnx(model, inputs, taskType) {
     const windowTokens = this.spec.maxTokens - 2;
     const windows = [];
     inputs.forEach((input, index) => {
-      const ids = model.tokenizer.tokenize(promptText(this.spec, input, taskType));
+      const text = promptText(this.spec, input, taskType);
+      addMemoryPayloadText(text);
+      const ids = model.tokenizer.tokenize(text);
       const maxWindows = taskType === "RETRIEVAL_QUERY" ? 1 : MAX_WINDOWS_PER_DOCUMENT;
       const count = Math.max(1, Math.min(maxWindows, Math.ceil(ids.length / windowTokens)));
       for (let window2 = 0;window2 < count; window2 += 1) {
@@ -61173,6 +61212,7 @@ function builtInEmbeddingDashboardState(status) {
 }
 var BUILT_IN_EMBEDDING_PROVIDER = "built-in", BUILT_IN_EMBEDDING_THREADS_ENV = "OLYMPUS_BUILT_IN_EMBEDDING_THREADS", BUILT_IN_EMBEDDING_DEVICE_ENV = "OLYMPUS_BUILT_IN_EMBEDDING_DEVICE", BUILT_IN_EMBEDDING_REMOTE_URL_ENV = "OLYMPUS_BUILT_IN_EMBEDDING_REMOTE_URL", BUILT_IN_EMBEDDING_REMOTE_TOKEN_FILE_ENV = "OLYMPUS_BUILT_IN_EMBEDDING_REMOTE_TOKEN_FILE", MAX_WINDOWS_PER_DOCUMENT = 8, MAX_BATCH_TOKENS = 2048, MAX_BATCH_ROWS = 32, LITERT_BATCH = 8, RETRY_AFTER_FAILURE_MS, PICTURE_ENGINE_FAULT_LIMIT = 2, PICTURE_HOLD_MS, BuiltInEmbeddingNotReadyError, sharedProviders;
 var init_provider = __esm(() => {
+  init_memory_counters();
   init_off_thread();
   init_operation_error();
   init_embedding_identity();
@@ -76052,22 +76092,13 @@ ${parentKey(ref)}`, { ref, origin });
           text: buildConnectorStoreEmbeddingText(row),
           ...row.media_path && row.media_sha256 ? { image: { path: row.media_path, sha256: row.media_sha256, mimeType: "image/jpeg" } } : {}
         }));
-        const embedPayload = (run) => withMemoryPayload("embed", () => {
-          const inputs = inputsFor(batch);
-          for (const input of inputs) {
-            addMemoryPayloadText(input.text);
-            if (input.title)
-              addMemoryPayloadText(input.title);
-          }
-          return run(inputs);
-        });
         let vectors;
         const embedStarted = Date.now();
         const judgeNow = readsImages === true && judging !== undefined && judging.embedWithImageVectors !== undefined && batch.some((row) => row.media_sha256 && !this.mediaJudgmentSettled(row.media_sha256, mediaJudgeId(judging)));
         let judgedBatch;
         try {
           if (judgeNow) {
-            const returned = await embedPayload((inputs) => judging.embedWithImageVectors(inputs));
+            const returned = await judging.embedWithImageVectors(inputsFor(batch));
             vectors = returned.vectors;
             judgedBatch = new Map;
             const currentJudge = mediaJudgeId(judging);
@@ -76081,7 +76112,7 @@ ${parentKey(ref)}`, { ref, origin });
               } catch {}
             }
           } else {
-            vectors = await embedPayload((inputs) => provider.embed(inputs, { taskType: "RETRIEVAL_DOCUMENT" }));
+            vectors = await provider.embed(inputsFor(batch), { taskType: "RETRIEVAL_DOCUMENT" });
           }
         } catch (error) {
           if (!(error instanceof SourceEmbeddingInputsFailedError))
@@ -76108,7 +76139,7 @@ ${parentKey(ref)}`, { ref, origin });
           batch = recheck.kept;
           if (batch.length === 0)
             continue;
-          vectors = await embedPayload((inputs) => provider.embed(inputs, { taskType: "RETRIEVAL_DOCUMENT" }));
+          vectors = await provider.embed(inputsFor(batch), { taskType: "RETRIEVAL_DOCUMENT" });
         }
         const onDemandItems = this.db.query(`SELECT COUNT(*) AS n FROM items i JOIN on_demand_item_reads r ON r.local_item_id = i.local_item_id
         AND r.source_version = COALESCE(i.source_version, '') WHERE i.item_pk IN (SELECT value FROM json_each(?))`).get(JSON.stringify([...new Set(batch.map((row) => row.item_pk))]));
@@ -104841,7 +104872,7 @@ function createDecisionSnifferModel(lane, full, options = {}) {
   const sharedState = state;
   let signal;
   let onAlive;
-  const post = async (path, body) => {
+  const post = (path, body) => withMemoryPayload("judge", async () => {
     const idleMs = options.timeoutMs ?? DECISION_CALL_IDLE_MS;
     const idle = new AbortController;
     let lastAlive = Date.now();
@@ -104886,7 +104917,7 @@ function createDecisionSnifferModel(lane, full, options = {}) {
     } finally {
       clearInterval(probe);
     }
-  };
+  });
   const readWeights = async () => {
     if (sharedState.weightsRead || Date.now() - (sharedState.weightsTriedAt ?? -Infinity) < 60000)
       return;
@@ -116839,6 +116870,8 @@ function commandGroupRecorder() {
 async function runExtractionCommand(request, internals = {}) {
   const kill = internals.kill ?? process.kill;
   const command = resolveExtractionCommand(request.command);
+  for (const argument of request.args)
+    addMemoryPayloadText(argument);
   return new Promise((resolve, reject) => {
     const child = spawn6(command, request.args, {
       stdio: ["ignore", "pipe", "pipe"],
@@ -132524,22 +132557,29 @@ function createBuiltInTranscriber(options = {}) {
 }
 async function transcribeChunk(fetchImpl, endpoint, wav, timeoutMs) {
   const clock = idleClock(timeoutMs);
+  const noteBytes = memoryPayloadByteCounter();
+  let requestBytes = 0;
   try {
+    const body = JSON.stringify({
+      messages: [{
+        role: "user",
+        content: [{ type: "input_audio", input_audio: { data: Buffer.from(wav).toString("base64"), format: "wav" } }]
+      }],
+      temperature: 0,
+      max_tokens: MAX_TOKENS_PER_CHUNK,
+      stream: true
+    });
+    if (noteBytes) {
+      requestBytes = Buffer.byteLength(body);
+      noteBytes(requestBytes);
+    }
     const response = await fetchModelEndpoint(fetchImpl, `${endpoint.baseUrl}/v1/chat/completions`, {
       method: "POST",
       headers: {
         authorization: `Bearer ${endpoint.token}`,
         "content-type": "application/json"
       },
-      body: JSON.stringify({
-        messages: [{
-          role: "user",
-          content: [{ type: "input_audio", input_audio: { data: Buffer.from(wav).toString("base64"), format: "wav" } }]
-        }],
-        temperature: 0,
-        max_tokens: MAX_TOKENS_PER_CHUNK,
-        stream: true
-      }),
+      body,
       signal: clock.signal
     });
     if (!response.ok) {
@@ -132554,6 +132594,7 @@ async function transcribeChunk(fetchImpl, endpoint, wav, timeoutMs) {
       throw new Error("The built-in transcription model returned no text.");
     return content;
   } finally {
+    noteBytes?.(-requestBytes);
     clock.clear();
   }
 }
@@ -132575,6 +132616,7 @@ function sharedBuiltInTranscriber(env = process.env) {
 }
 var TRANSCRIPT_TIME_BUDGET_WARNING = "transcript_time_budget_reached", DEFAULT_IDLE_SHUTDOWN_SECONDS2 = 180, DEFAULT_STARTUP_TIMEOUT_MS2 = 120000, DEFAULT_CHUNK_TIMEOUT_MS = 180000, DEFAULT_FILE_DEADLINE_MS, DEFAULT_CONVERT_TIMEOUT_MS, DEFAULT_INSTALL_RETRY_MS, DEFAULT_INSTALL_RETRY_CEILING_MS, DEFAULT_VERIFY_WAIT_MS, DEFAULT_CHUNK_SECONDS = 30, MAX_TOKENS_PER_CHUNK = 512, SILENCE_LEVEL = 24, ASR_TEXT_MARKER = "<asr_text>", LANGUAGE_PREFIX = "language ", TARGET_SAMPLE_RATE = 16000, TEMP_DIR_PREFIX5 = "olympus-asr-", MACOS_AUDIO_CONVERTER = "/usr/bin/afconvert", TranscriberPendingError, TranscriberUnavailableError, AudioUndecodableError, sharedTranscriber;
 var init_built_in_transcriber = __esm(() => {
+  init_memory_counters();
   init_model_transport();
   init_model_stream2();
   init_install();
@@ -134178,6 +134220,9 @@ async function settleOneJobHeld(input, staged) {
           ...input.spoolAnchor !== undefined ? { spoolAnchor: input.spoolAnchor } : {}
         });
         staged.file = fetchedFile;
+        const bytes = fetchedFile.sizeBytes ?? job.ref.sizeBytes;
+        if (bytes !== undefined && Number.isSafeInteger(bytes) && bytes > 0)
+          addMemoryPayloadBytes(bytes);
       } else {
         fetched = await source.fetch(job.ref, { ...maxBytes !== undefined ? { maxBytes } : {} });
         addMemoryPayloadBytes(fetched.bytes.byteLength);
@@ -185593,7 +185638,7 @@ function createMemoryDiagnostic(input) {
       extra_memory_mb: usage.external,
       ...input.readers?.() ?? { read_workers: 0, read_connections: 0 },
       ...usage.arrayBuffers > 0 ? { array_buffers_mb: usage.arrayBuffers } : {},
-      ...memoryPayloadCounts(),
+      ...memoryPayloadCounts(input.workerPayloads?.()),
       ...input.sampleHolders?.()
     };
   };
@@ -189330,7 +189375,11 @@ function createPrivacyQuestionEngine(options) {
           if (controller.signal.aborted || !runtime?.approved)
             throw new Error("private_model_unavailable");
           assertSnifferProfileAllowed(runtime.lane.profileId, runtime.lane.profile);
-          const response = await runtime.model.complete({ ...request, localOnly: true, signal: controller.signal });
+          const response = await withMemoryPayload("judge", () => {
+            addMemoryPayloadText(request.system);
+            addMemoryPayloadText(request.prompt);
+            return runtime.model.complete({ ...request, localOnly: true, signal: controller.signal });
+          });
           return { text: response.text, lane: runtime.lane };
         })(),
         new Promise((_resolve, reject) => {
@@ -189404,6 +189453,7 @@ function createPrivacyQuestionEngine(options) {
 }
 var baseline, baselineTopics, short = (maxLength) => ({ type: "string", minLength: 1, maxLength }), PRIVACY_QUESTIONS_SCHEMA, PRIVACY_CHECK_SCHEMA, QUESTIONS_PROMPT, CHECK_PROMPT;
 var init_privacy_questions = __esm(() => {
+  init_memory_counters();
   init_vocabulary();
   init_privacy_profile();
   init_sniffer_lane();
@@ -277394,18 +277444,19 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     role: engineRole,
     activity: currentMemoryActivity,
     readers: readPoolMemoryCounts,
-    ...engineRole === "background" && {
-      sampleHolders: () => {
-        const readers = sampleReadPoolMemory();
-        const stores = sampleSqliteStoreMemory();
-        return {
-          ...readers,
-          ...stores,
-          ...sampleModelWorkerMemory(),
-          sqlite_connections_sampled: readers.sqlite_read_connections_sampled + stores.sqlite_store_connections_sampled,
-          sqlite_cache_budget_mb: readers.sqlite_read_cache_budget_mb + stores.sqlite_store_cache_budget_mb
-        };
-      }
+    workerPayloads: modelWorkerMemoryPayloads,
+    sampleHolders: () => {
+      if (engineRole !== "background")
+        return sampleReadPoolMemory(false);
+      const readers = sampleReadPoolMemory();
+      const stores = sampleSqliteStoreMemory();
+      return {
+        ...readers,
+        ...stores,
+        ...sampleModelWorkerMemory(),
+        sqlite_connections_sampled: (readers.sqlite_read_connections_sampled ?? 0) + stores.sqlite_store_connections_sampled,
+        sqlite_cache_budget_mb: (readers.sqlite_read_cache_budget_mb ?? 0) + stores.sqlite_store_cache_budget_mb
+      };
     }
   });
   const frontMemory = engineRole !== "background" ? startEngineRssRestart({

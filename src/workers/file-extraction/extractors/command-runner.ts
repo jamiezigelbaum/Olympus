@@ -29,7 +29,7 @@
  * architecture guard reads a single-line block comment as a regex literal.
  */
 
-import { memoryPayloadByteCounter } from '../../../core/memory-counters.ts';
+import { addMemoryPayloadText, memoryPayloadByteCounter } from '../../../core/memory-counters.ts';
 import { Buffer } from 'node:buffer';
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { readFile, readdir } from 'node:fs/promises';
@@ -333,6 +333,7 @@ export async function runExtractionCommand(
 ): Promise<ExtractionCommandRunResult> {
   const kill = internals.kill ?? process.kill;
   const command = resolveExtractionCommand(request.command);
+  for (const argument of request.args) addMemoryPayloadText(argument);
   return new Promise((resolve, reject) => {
     const child = spawn(command, request.args, {
       stdio: ['ignore', 'pipe', 'pipe'],

@@ -232,7 +232,7 @@ self.onmessage = (event) => {
     const { heapUsed, external, arrayBuffers } = process.memoryUsage();
     let cacheBytes = 0;
     let measured = 0;
-    for (const [db, cached] of openDatabases) {
+    if (event.data.sampleSqlite) for (const [db, cached] of openDatabases) {
       let bytes = cached;
       if (bytes === undefined) {
         try {
@@ -369,7 +369,7 @@ interface ReaderMemory {
 }
 
 /** Poll idle readers only, and use replies from earlier ticks. Never wait behind SQL. */
-export function sampleReadPoolMemory() {
+export function sampleReadPoolMemory(sampleSqlite = true) {
   const now = Date.now();
   let workers = 0, connections = 0, cache = 0, heap = 0, external = 0, arrayBuffers = 0, age = 0;
   for (const reader of threads) {
@@ -383,12 +383,12 @@ export function sampleReadPoolMemory() {
       arrayBuffers += measured.arrayBuffers;
       age = Math.max(age, now - measured.at);
     }
-    if (!reader.retired && reader.pending.size === 0 && !reader.job) reader.worker.postMessage({ op: 'memory' });
+    if (!reader.retired && reader.pending.size === 0 && !reader.job) reader.worker.postMessage({ op: 'memory', sampleSqlite });
   }
   return {
     read_heap_workers: workers, read_heap_age_ms: age, read_heap_size_mb: heap,
-    read_extra_memory_mb: external, ...(arrayBuffers > 0 ? { read_array_buffers_mb: arrayBuffers } : {}),
-    sqlite_read_connections_sampled: connections, sqlite_read_cache_budget_mb: cache,
+    read_extra_memory_mb: external, read_array_buffers_mb: arrayBuffers,
+    ...(sampleSqlite && { sqlite_read_connections_sampled: connections, sqlite_read_cache_budget_mb: cache }),
   };
 }
 let heldConnections = 0;

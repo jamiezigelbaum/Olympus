@@ -1208,6 +1208,8 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
           ...(input.spoolAnchor !== undefined ? { spoolAnchor: input.spoolAnchor } : {}),
         });
         staged.file = fetchedFile;
+        const bytes = fetchedFile.sizeBytes ?? job.ref.sizeBytes;
+        if (bytes !== undefined && Number.isSafeInteger(bytes) && bytes > 0) addMemoryPayloadBytes(bytes);
       } else {
         fetched = await source.fetch(job.ref, { ...(maxBytes !== undefined ? { maxBytes } : {}) });
         addMemoryPayloadBytes(fetched.bytes.byteLength);
