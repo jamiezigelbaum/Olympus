@@ -166,7 +166,17 @@ export function createArchiveImportRuntime(options: ArchiveImportRuntimeOptions 
     targets: options.targets ?? archiveSourceTargets,
     families: () => [...families],
     lane,
-    existingLanes: (only) => families.filter((family) => (!only || only.has(family)) && hasData(family)).map(lane),
+    existingLanes: (only) => {
+      // One family's unfinished ledger must not stop a ready family from mounting.
+      const built: ArchiveTierLane[] = [];
+      let failed: { error: unknown } | undefined;
+      for (const family of families) {
+        if ((only && !only.has(family)) || !hasData(family)) continue;
+        try { built.push(lane(family)); } catch (error) { failed ??= { error }; }
+      }
+      if (failed) throw failed.error;
+      return built;
+    },
     laneMounted: (family) => lanes.has(family),
     openWaitingQuestions: () => {
       const path = options.waitingQuestionsDbPath

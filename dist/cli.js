@@ -238659,7 +238659,22 @@ function createArchiveImportRuntime(options = {}) {
     targets: options.targets ?? archiveSourceTargets,
     families: () => [...families],
     lane,
-    existingLanes: (only) => families.filter((family) => (!only || only.has(family)) && hasData(family)).map(lane),
+    existingLanes: (only) => {
+      const built = [];
+      let failed;
+      for (const family of families) {
+        if (only && !only.has(family) || !hasData(family))
+          continue;
+        try {
+          built.push(lane(family));
+        } catch (error) {
+          failed ??= { error };
+        }
+      }
+      if (failed)
+        throw failed.error;
+      return built;
+    },
     laneMounted: (family) => lanes.has(family),
     openWaitingQuestions: () => {
       const path = options.waitingQuestionsDbPath ?? waitingPrivateQuestionsDbPath(resolveRemoteConnectionsDbPath(env));
