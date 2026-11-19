@@ -2191,6 +2191,7 @@ export async function embedPendingChunks(
       itemsOutOfScope: 0,
     };
     runs.push(run);
+    const inventoryWrites = options.diagnostics && target.wholeStore === true ? store.writeSequence() : undefined;
     if (options.diagnostics) run.inventory = await store.embeddingSweepInventory(target.provider, target, options.stopAtMs);
     const groups = store.queuedEmbeddingGroups(options.maxItems).filter((group) => {
       // A store that catches up never replays a queue left under another
@@ -2201,7 +2202,13 @@ export async function embedPendingChunks(
       return false;
     });
     const queued = groups.reduce((sum, group) => sum + group.localItemIds.length, 0);
-    if (target.wholeStore === true && queued < options.maxItems) {
+    // The inventory tests vector currency over a superset of the work list.
+    // A complete zero-pending inventory can stand in for the list's walk
+    // when every window saw the same store. Partial inventories and any
+    // missing vectors still use the work list's own selection and ordering.
+    const noMissingVectors = run.inventory?.inventory_complete === 1 && run.inventory.pending_chunks === 0
+      && inventoryWrites !== undefined && store.writeSequence() === inventoryWrites && !store.fileReplacedOrRemoved();
+    if (target.wholeStore === true && queued < options.maxItems && !noMissingVectors) {
       const queuedIds = new Set(groups.flatMap((group) => group.localItemIds));
       const missing = (await store.missingEmbeddingItemIdsInTurns(target.provider, options.maxItems - queued, target))
         .filter((localItemId) => !queuedIds.has(localItemId));
@@ -3869,7 +3876,7 @@ export interface ImageContentOutsidePrivateRow {
 export class LocalConnectorStore {
   readonly dbPath: string;
   /** The file this store opened, so a later delete or replace of it is seen. */
-  private readonly openedFile: { dev: number; ino: number } | undefined;
+  private readonly openedFile: ReturnType<typeof fileIdentity>;
   readonly corpusId: string;
   readonly family: SourceFamily;
   readonly trustDomain: SourceTrustDomain;
@@ -8184,6 +8191,36 @@ export class LocalConnectorStore {
       : `v${(this.db.query('PRAGMA data_version').get() as { data_version: number }).data_version}`;
     const laneStores = this.childVisibilityLane().stores();
     return JSON.stringify([ledgerCursor, storeCursor, laneStores.map(store => [store.corpusId, store.childVisibilityMarker?.()])]);
+  }
+
+  /** Like visibilityMarker, with file identities for restart-safe sweep receipts. */
+  embeddingSweepVisibilityMarker(provider: SourceEmbeddingProvider, durable: boolean): string | undefined {
+    // A local policy change can release held work without a store write.
+    const allowHeld = this.canEmbedHeld(provider);
+    if (!durable) return JSON.stringify([this.visibilityMarker(), allowHeld]);
+
+    // Connection-local fallbacks (data_version and total_changes) cannot
+    // prove continuity across a reopen. Require the persistent feeds.
+    if (!this.visibilityJournal) return undefined;
+    const stores = [];
+    for (const store of new Set([this, ...(this.childLane?.stores() ?? [])])) {
+      if (!(store instanceof LocalConnectorStore) || !store.visibilityFeedPresent) return undefined;
+      const file = store.openedFile;
+      if (!file?.birthtimeNs || store.fileReplacedOrRemoved()) return undefined;
+      stores.push([store.corpusId, file.dev.toString(), file.ino.toString(), file.birthtimeNs.toString()]);
+    }
+    // A restored ledger can carry the same cursor as the file it replaced.
+    const ledgers = [];
+    for (const ledger of new Set([this.visibilityLedger(), this.childLane?.ledger()])) {
+      if (!ledger) continue;
+      const file = fileIdentity(ledger.dbPath);
+      if (!file?.birthtimeNs) return undefined;
+      ledgers.push([file.dev.toString(), file.ino.toString(), file.birthtimeNs.toString(), ledger.ledgerId()]);
+    }
+    // With every feed present the marker is made of committed cursors only,
+    // so it means the same thing after a reopen. The file identities say the
+    // cursors still belong to the same files.
+    return JSON.stringify([this.visibilityMarker(), stores, ledgers, allowHeld]);
   }
 
   peopleObservations(): PeopleSenderObservation[] {
@@ -16627,7 +16664,8 @@ export class LocalConnectorStore {
   fileReplacedOrRemoved(): boolean {
     if (!this.openedFile) return false;
     const current = fileIdentity(this.dbPath);
-    return !current || current.dev !== this.openedFile.dev || current.ino !== this.openedFile.ino;
+    return !current || current.dev !== this.openedFile.dev || current.ino !== this.openedFile.ino
+      || current.birthtimeNs !== this.openedFile.birthtimeNs;
   }
 
   /**
@@ -22387,11 +22425,11 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
-function fileIdentity(path: string): { dev: number; ino: number } | undefined {
+function fileIdentity(path: string): { dev: bigint; ino: bigint; birthtimeNs: bigint } | undefined {
   if (path === ':memory:' || path === '') return undefined;
   try {
-    const stat = statSync(path);
-    return { dev: stat.dev, ino: stat.ino };
+    const stat = statSync(path, { bigint: true });
+    return stat.isFile() ? { dev: stat.dev, ino: stat.ino, birthtimeNs: stat.birthtimeNs } : undefined;
   } catch {
     return undefined;
   }

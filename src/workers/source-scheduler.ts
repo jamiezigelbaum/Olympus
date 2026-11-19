@@ -2,6 +2,8 @@ import { changeMemoryCounter } from '../core/memory-counters.ts';
 import { SOURCE_RATE_LIMITED } from '../core/provider-rate-limits.ts';
 import { ReadwiseApiError } from './readwise/api.ts';
 import { createHash } from 'node:crypto';
+import { PUBLIC_RUNTIME_BUILD } from '../core/build-flavor.ts';
+import { runningOlympusVersion } from '../core/update-check.ts';
 import { parseSchedulerSourceIds, type OlympusConfig } from '../core/config.ts';
 import { boundedLogErrorMessage } from '../core/log-redaction.ts';
 import { controlPathHeadroom } from './control-path-headroom.ts';
@@ -90,6 +92,7 @@ import {
 } from './credential-broker/index.ts';
 import { GO_EASY_TRICKLE_EMBED_ITEMS } from './local-pacing.ts';
 import { LIVE_NEW_ITEMS_INTERVAL_MS } from './live-source-cadence.ts';
+import { EMBEDDING_SWEEP_IDLE_SUFFIX, readEmbeddingSweepIdle, writeEmbeddingSweepIdle, type IdleEmbeddingSweep } from './embedding-sweep-idle.ts';
 
 export type SourceSchedulerTaskKind = 'sync' | 'extract' | 'embed' | 'watch';
 export type SourceSchedulerCadence = 'manual' | 'continuous';
@@ -2057,6 +2060,15 @@ export const EMBEDDING_SWEEP_MAX_BACKOFF_MS = 5 * 60_000;
 export const EMBEDDING_SWEEP_IDLE_BACKOFF_ENV = 'OLYMPUS_EMBEDDING_SWEEP_IDLE_BACKOFF';
 /** A resting store is still walked in full this often. */
 export const EMBEDDING_SWEEP_IDLE_FULL_PASS_MS = 30 * 60_000;
+/**
+ * Raise this with any change to what a chunk's vector is made from or to which
+ * chunks a sweep takes, so a remembered idle pass from older rules is not
+ * reused. The running package version is part of the key too: an installed
+ * build walks every store once. A remembered pass is at most
+ * EMBEDDING_SWEEP_IDLE_FULL_PASS_MS old, which bounds a missed bump.
+ */
+const EMBEDDING_SWEEP_RULES_VERSION = 1;
+const EMBEDDING_SWEEP_BUILD = `${EMBEDDING_SWEEP_RULES_VERSION}:${runningOlympusVersion()}`;
 /** Items per store per sweep pass. */
 export const EMBEDDING_SWEEP_MAX_ITEMS = 32;
 /**
@@ -2166,25 +2178,34 @@ function embeddingSweepTask(
   const tricklingTarget = (target: ConnectorStoreEmbeddingTarget): boolean => {
     try { return trickle?.(target) === true; } catch { return false; }
   };
-  // Idle back-off (OLYMPUS_EMBEDDING_SWEEP_IDLE_BACKOFF=off turns it off): a pass over a caught-up store walks
-  // every chunk twice (the inventory, then the search for missing vectors),
-  // once a minute, and finds nothing. A store whose last pass found nothing
-  // to do is not walked again until something that could give it work moved:
-  // a write to its items, chunks or vectors, its tier visibility, its queue,
-  // or the target's model and scope. A new item moves the write sequence, so
-  // it is embedded on the next pass as before. A full pass still runs every
-  // EMBEDDING_SWEEP_IDLE_FULL_PASS_MS for anything the markers do not see.
+  // A caught-up store's inventory still walks every chunk. Reuse its last
+  // complete idle pass until a write, visibility, queue, model or scope
+  // change gives it work. The full-pass interval bounds reuse when the
+  // markers stay steady.
   const idleBackoff = process.env[EMBEDDING_SWEEP_IDLE_BACKOFF_ENV]?.trim() !== 'off';
-  // Remembered per store and per target: one store can be swept under two targets.
-  const quiet = new WeakMap<object, Map<string, { key: string; at: number; run: Awaited<ReturnType<typeof embedPendingChunks>>[number] }>>();
-  const quietSlot = (target: ConnectorStoreEmbeddingTarget): string => JSON.stringify([target.provider.modelId, target.provider.epochId ?? null,
-    target.wholeStore === true, target.accountScope ?? null, target.filters ?? null]);
-  const quietKey = (target: ConnectorStoreEmbeddingTarget): string | undefined => {
-    // A store that cannot say whether it was written to never rests.
-    const writes = target.store.writeSequence?.();
-    if (writes === undefined || typeof target.store.visibilityMarker !== 'function') return undefined;
-    return JSON.stringify([writes, target.store.visibilityMarker()]);
+  // File stores remember the pass beside SQLite. In-memory stores and passes
+  // that relied on process-local failed-item exclusions can rest here only.
+  const quiet = new WeakMap<LocalConnectorStore, Map<string, IdleEmbeddingSweep>>();
+  const quietSlot = (target: ConnectorStoreEmbeddingTarget): string => createHash('sha256').update(JSON.stringify([
+    target.provider.modelId, target.provider.epochId ?? null, target.wholeStore === true,
+    target.accountScope ?? null, target.filters ?? null,
+    target.provider.provider, target.provider.backend, target.provider.dimension, target.provider.configHash,
+  ])).digest('hex');
+  const quietKey = (target: ConnectorStoreEmbeddingTarget, slot: string, durable: boolean): string | undefined => {
+    try {
+      const writes = target.store.writeSequence?.();
+      if (writes === undefined || !Number.isSafeInteger(writes)) return undefined;
+      const visibility = target.store.embeddingSweepVisibilityMarker(target.provider, durable);
+      if (visibility === undefined) return undefined;
+      return createHash('sha256').update(JSON.stringify([
+        EMBEDDING_SWEEP_BUILD, PUBLIC_RUNTIME_BUILD, slot, writes, visibility,
+      ])).digest('hex');
+    } catch {
+      console.warn('[olympus:embedding-sweep] idle markers unreadable; walking store');
+      return undefined;
+    }
   };
+  const fresh = (receipt: IdleEmbeddingSweep, now: number): boolean => now >= receipt.at && now - receipt.at < EMBEDDING_SWEEP_IDLE_FULL_PASS_MS;
   return {
     id: `${source.sourceId}_embeddings`,
     kind: 'embed',
@@ -2205,16 +2226,24 @@ function embeddingSweepTask(
       for (const target of passTargets) {
         const paced = tricklingTarget(target);
         trickled ||= paced;
-        const keyBefore = idleBackoff ? quietKey(target) : undefined;
+        const store = target.store;
+        const path = idleBackoff && store.dbPath && store.dbPath !== ':memory:' && !store.dbPath.startsWith('file::memory:')
+          ? `${store.dbPath}${EMBEDDING_SWEEP_IDLE_SUFFIX}` : undefined;
         const slot = idleBackoff ? quietSlot(target) : '';
-        const rested = keyBefore === undefined ? undefined : quiet.get(target.store)?.get(slot);
-        if (rested && rested.key === keyBefore && Date.now() - rested.at < EMBEDDING_SWEEP_IDLE_FULL_PASS_MS
-          && target.store.queuedEmbeddingItemIds().length === 0 && target.store.embeddingDeferredReason() === undefined) {
-          runs.push(rested.run);
+        const receipts = path ? await readEmbeddingSweepIdle(path) : undefined;
+        const keyBefore = idleBackoff ? quietKey(target, slot, path !== undefined) : undefined;
+        const rested = quiet.get(store)?.get(slot) ?? receipts?.get(slot);
+        if (rested && rested.key === keyBefore && fresh(rested, Date.now())
+          && store.queuedEmbeddingItemIds().length === 0 && store.embeddingDeferredReason() === undefined) {
+          runs.push({ corpusId: store.corpusId, itemsAttempted: 0, chunksEmbedded: 0, itemsFailed: 0, itemsOutOfScope: 0,
+            inventory: rested.inventory });
           restedRuns.add(runs.length - 1);
           continue;
         }
-        quiet.get(target.store)?.delete(slot);
+        quiet.get(store)?.delete(slot);
+        // Invalidate before walking. A failed pass must not revive an older
+        // proof if its in-memory queue or deferral is lost on the next start.
+        if (path && receipts?.delete(slot)) await writeEmbeddingSweepIdle(path, receipts);
         const overran = Symbol('overran');
         let timer: ReturnType<typeof setTimeout> | undefined;
         // The pass stops starting batches at half the deadline, so a store
@@ -2245,9 +2274,20 @@ function embeddingSweepTask(
             // An item whose embedding failed for good is skipped by every pass and
             // stays reported as failed: it is not work, so it does not keep the
             // store walked. A change to it moves the write sequence and wakes the store.
-            && quietKey(target) === keyBefore) {
-            const slots = quiet.get(target.store) ?? new Map();
-            quiet.set(target.store, slots.set(slot, { key: keyBefore, at: Date.now(), run: only }));
+            && store.queuedEmbeddingItemIds().length === 0 && quietKey(target, quietSlot(target), path !== undefined) === keyBefore) {
+            const receipt = { key: keyBefore, at: Date.now(), inventory: only.inventory };
+            // Failed-item exclusions disappear on restart. Walk then so a
+            // failure can be retried under the new process's provider.
+            if (path && receipts && store.embeddingFailedItemCount() === 0) {
+              for (const [otherSlot, other] of receipts) {
+                if (!fresh(other, receipt.at)) receipts.delete(otherSlot);
+              }
+              receipts.set(slot, receipt);
+              await writeEmbeddingSweepIdle(path, receipts);
+            } else {
+              const slots = quiet.get(store) ?? new Map();
+              quiet.set(store, slots.set(slot, receipt));
+            }
           }
           continue;
         }

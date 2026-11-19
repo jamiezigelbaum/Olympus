@@ -2407,7 +2407,7 @@ function withSqliteFiles(path) {
 // scripts/source-embedding-drain.ts
 import { createHash as createHash14 } from "node:crypto";
 import { existsSync as existsSync24, lstatSync as lstatSync11, mkdirSync as mkdirSync14, writeFileSync as writeFileSync7 } from "node:fs";
-import { dirname as dirname25, isAbsolute as isAbsolute15 } from "node:path";
+import { dirname as dirname26, isAbsolute as isAbsolute15 } from "node:path";
 
 // src/core/config.ts
 import { existsSync as existsSync8, readFileSync as readFileSync9 } from "node:fs";
@@ -28672,6 +28672,32 @@ ${parentKey(ref)}`, { ref, origin });
     const laneStores = this.childVisibilityLane().stores();
     return JSON.stringify([ledgerCursor, storeCursor, laneStores.map((store) => [store.corpusId, store.childVisibilityMarker?.()])]);
   }
+  embeddingSweepVisibilityMarker(provider, durable) {
+    const allowHeld = this.canEmbedHeld(provider);
+    if (!durable)
+      return JSON.stringify([this.visibilityMarker(), allowHeld]);
+    if (!this.visibilityJournal)
+      return;
+    const stores = [];
+    for (const store of new Set([this, ...this.childLane?.stores() ?? []])) {
+      if (!(store instanceof LocalConnectorStore) || !store.visibilityFeedPresent)
+        return;
+      const file = store.openedFile;
+      if (!file?.birthtimeNs || store.fileReplacedOrRemoved())
+        return;
+      stores.push([store.corpusId, file.dev.toString(), file.ino.toString(), file.birthtimeNs.toString()]);
+    }
+    const ledgers = [];
+    for (const ledger of new Set([this.visibilityLedger(), this.childLane?.ledger()])) {
+      if (!ledger)
+        continue;
+      const file = fileIdentity(ledger.dbPath);
+      if (!file?.birthtimeNs)
+        return;
+      ledgers.push([file.dev.toString(), file.ino.toString(), file.birthtimeNs.toString(), ledger.ledgerId()]);
+    }
+    return JSON.stringify([this.visibilityMarker(), stores, ledgers, allowHeld]);
+  }
   peopleObservations() {
     changeMemoryActivity("people_refresh", 1);
     try {
@@ -33944,7 +33970,7 @@ ${parentKey(ref)}`, { ref, origin });
     if (!this.openedFile)
       return false;
     const current = fileIdentity(this.dbPath);
-    return !current || current.dev !== this.openedFile.dev || current.ino !== this.openedFile.ino;
+    return !current || current.dev !== this.openedFile.dev || current.ino !== this.openedFile.ino || current.birthtimeNs !== this.openedFile.birthtimeNs;
   }
   async prepareStatusCounts(scope) {
     await this.refreshTierHiddenCountsInTurns();
@@ -36909,8 +36935,8 @@ function fileIdentity(path) {
   if (path === ":memory:" || path === "")
     return;
   try {
-    const stat = statSync13(path);
-    return { dev: stat.dev, ino: stat.ino };
+    const stat = statSync13(path, { bigint: true });
+    return stat.isFile() ? { dev: stat.dev, ino: stat.ino, birthtimeNs: stat.birthtimeNs } : undefined;
   } catch {
     return;
   }
@@ -37011,6 +37037,41 @@ function buildProviderRateLimitReporter(provider) {
         this.success();
     }
   };
+}
+
+// src/core/update-check.ts
+import { readFileSync as readFileSync19 } from "node:fs";
+import { join as join26 } from "node:path";
+
+// src/core/package-root.ts
+import { readFileSync as readFileSync18 } from "node:fs";
+import { dirname as dirname24, join as join25 } from "node:path";
+import { fileURLToPath as fileURLToPath3 } from "node:url";
+function olympusPackageRoot() {
+  let directory = dirname24(fileURLToPath3(import.meta.url));
+  for (let depth = 0;depth < 6; depth++) {
+    try {
+      const manifest = JSON.parse(readFileSync18(join25(directory, "package.json"), "utf8"));
+      if (manifest.name === "olympus" || manifest.name === "olympus-source-checkout")
+        return directory;
+    } catch {}
+    const parent = dirname24(directory);
+    if (parent === directory)
+      break;
+    directory = parent;
+  }
+  throw new Error("The Olympus package root could not be resolved.");
+}
+
+// src/core/update-check.ts
+var UPDATE_MAX_BYTES = 512 * 1024;
+function runningOlympusVersion() {
+  try {
+    const value = JSON.parse(readFileSync19(join26(olympusPackageRoot(), "package.json"), "utf8")).version;
+    return typeof value === "string" ? value : "unknown";
+  } catch {
+    return "unknown";
+  }
 }
 
 // src/core/file-mime.ts
@@ -37250,7 +37311,7 @@ function locatorPathApprovedScopeCodec(sourceLabel) {
 // src/workers/dropbox-files/approved-scope-filter.ts
 var DROPBOX_APPROVED_SCOPE_FILTER_CODEC = locatorPathApprovedScopeCodec("Dropbox");
 // src/workers/dropbox-files/locator-result-projector.ts
-import { join as join25 } from "node:path";
+import { join as join27 } from "node:path";
 import { pathToFileURL } from "node:url";
 
 // src/workers/dropbox-files/local-file-resolver.ts
@@ -37364,7 +37425,7 @@ function finderUrlForDropboxPath(mapping, displayPath) {
   const relativeSegments = localRelativeDropboxPathSegments(displayPath, mapping.dropboxPathPrefix);
   if (!relativeSegments)
     return;
-  return pathToFileURL(join25(mapping.rootPath, ...relativeSegments)).href;
+  return pathToFileURL(join27(mapping.rootPath, ...relativeSegments)).href;
 }
 function localRelativeDropboxPathSegments(displayPath, dropboxPathPrefix) {
   const normalizedPrefix = normalizeOptionalDropboxPrefix(dropboxPathPrefix);
@@ -38630,9 +38691,9 @@ var PROFILE_SCAN_BYTES = 16 * 1024 * 1024;
 var reporter = createLimitStopReporter();
 
 // src/core/notes-app-folders.ts
-import { existsSync as existsSync23, lstatSync as lstatSync10, readdirSync as readdirSync4, readFileSync as readFileSync18 } from "node:fs";
+import { existsSync as existsSync23, lstatSync as lstatSync10, readdirSync as readdirSync4, readFileSync as readFileSync20 } from "node:fs";
 import { homedir as homedir11 } from "node:os";
-import { dirname as dirname24, join as join26, relative as relative6, sep as sep7 } from "node:path";
+import { dirname as dirname25, join as join28, relative as relative6, sep as sep7 } from "node:path";
 var OBSIDIAN_SETTINGS_FOLDER = ".obsidian";
 var REFLECT_SETTINGS_FOLDER = ".reflect";
 var NOTES_APPS = Object.freeze([
@@ -38650,7 +38711,7 @@ function realFolder(path) {
 }
 function readTextFile(path) {
   try {
-    return readFileSync18(path, "utf8");
+    return readFileSync20(path, "utf8");
   } catch {
     return;
   }
@@ -38660,15 +38721,15 @@ function obsidianConfigFiles(lookup = {}) {
   const platform = lookup.platform ?? process.platform;
   const env = lookup.env ?? process.env;
   if (platform === "darwin")
-    return [join26(home, "Library/Application Support/obsidian/obsidian.json")];
+    return [join28(home, "Library/Application Support/obsidian/obsidian.json")];
   if (platform === "win32") {
-    return env.APPDATA ? [join26(env.APPDATA, "obsidian", "obsidian.json")] : [];
+    return env.APPDATA ? [join28(env.APPDATA, "obsidian", "obsidian.json")] : [];
   }
-  const config = env.XDG_CONFIG_HOME?.trim() || join26(home, ".config");
+  const config = env.XDG_CONFIG_HOME?.trim() || join28(home, ".config");
   return [
-    join26(config, "obsidian/obsidian.json"),
-    join26(home, ".var/app/md.obsidian.Obsidian/config/obsidian/obsidian.json"),
-    join26(home, "snap/obsidian/current/.config/obsidian/obsidian.json")
+    join28(config, "obsidian/obsidian.json"),
+    join28(home, ".var/app/md.obsidian.Obsidian/config/obsidian/obsidian.json"),
+    join28(home, "snap/obsidian/current/.config/obsidian/obsidian.json")
   ];
 }
 function obsidianVaultFolders(lookup = {}) {
@@ -38695,7 +38756,7 @@ function obsidianVaultFolders(lookup = {}) {
       const folder = path.length > 1 && path.endsWith("/") ? path.slice(0, -1) : path;
       if (found.includes(folder))
         continue;
-      if (isFolder(folder) && isFolder(join26(folder, OBSIDIAN_SETTINGS_FOLDER)))
+      if (isFolder(folder) && isFolder(join28(folder, OBSIDIAN_SETTINGS_FOLDER)))
         found.push(folder);
     }
   }
@@ -38709,7 +38770,7 @@ function reflectGraphFolders(lookup = {}) {
   const isFolder = lookup.isFolder ?? realFolder;
   const listFolder = lookup.listFolder ?? listChildren;
   const candidates = [];
-  const recent = readText(join26(home, "Library/Application Support/reflect-open/recent-graphs.json"));
+  const recent = readText(join28(home, "Library/Application Support/reflect-open/recent-graphs.json"));
   if (recent) {
     try {
       const parsed = JSON.parse(recent);
@@ -38723,16 +38784,16 @@ function reflectGraphFolders(lookup = {}) {
       }
     } catch {}
   }
-  const icloud = join26(home, "Library/Mobile Documents/iCloud~app~reflect/Documents");
+  const icloud = join28(home, "Library/Mobile Documents/iCloud~app~reflect/Documents");
   for (const name of listFolder(icloud))
     if (!name.startsWith("."))
-      candidates.push(join26(icloud, name));
+      candidates.push(join28(icloud, name));
   const found = [];
   for (const candidate of candidates) {
     const folder = candidate.length > 1 && candidate.endsWith("/") ? candidate.slice(0, -1) : candidate;
     if (found.includes(folder))
       continue;
-    if (isFolder(folder) && isFolder(join26(folder, REFLECT_SETTINGS_FOLDER)))
+    if (isFolder(folder) && isFolder(join28(folder, REFLECT_SETTINGS_FOLDER)))
       found.push(folder);
   }
   return found;
@@ -38856,6 +38917,8 @@ var SCHEDULER_SOURCE_IDS = {
 var SOURCE_ARRIVAL_TARGET_MS = 10 * 60000;
 var EMBEDDING_SWEEP_MAX_BACKOFF_MS = 5 * 60000;
 var EMBEDDING_SWEEP_IDLE_FULL_PASS_MS = 30 * 60000;
+var EMBEDDING_SWEEP_RULES_VERSION = 1;
+var EMBEDDING_SWEEP_BUILD = `${EMBEDDING_SWEEP_RULES_VERSION}:${runningOlympusVersion()}`;
 var EMBEDDING_SWEEP_STORE_DEADLINE_MS = 10 * 60000;
 var EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
 var HONEST_SCHEDULER_ERROR_KINDS = new Set([
@@ -39935,7 +39998,7 @@ function publishNativeEmbeddingDrainReadiness(env = process.env, pid = process.p
   if (!readinessPath || !isAbsolute15(readinessPath)) {
     throw new Error(`${NATIVE_SERVICE_READINESS_PATH_ENV} must be an absolute path for native startup.`);
   }
-  const directory = dirname25(readinessPath);
+  const directory = dirname26(readinessPath);
   mkdirSync14(directory, { recursive: true, mode: 448 });
   const parent = lstatSync11(directory);
   if (!parent.isDirectory() || process.platform !== "win32" && (parent.uid !== process.getuid?.() || (parent.mode & 18) !== 0)) {
@@ -39966,7 +40029,7 @@ if (__require.main == __require.module) {
     }
     const json = JSON.stringify(report, null, 2);
     if (args.reportPath) {
-      mkdirSync14(dirname25(args.reportPath), { recursive: true });
+      mkdirSync14(dirname26(args.reportPath), { recursive: true });
       writeFileSync7(args.reportPath, `${json}
 `);
     }
@@ -39976,7 +40039,7 @@ if (__require.main == __require.module) {
   const options = optionsFromEnv(process.env);
   try {
     if (args.reportPath) {
-      mkdirSync14(dirname25(args.reportPath), { recursive: true });
+      mkdirSync14(dirname26(args.reportPath), { recursive: true });
       options.onProgress = (report) => {
         writeFileSync7(args.reportPath, `${JSON.stringify(report, null, 2)}
 `);

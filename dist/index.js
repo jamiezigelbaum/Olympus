@@ -21467,6 +21467,11 @@ var init_connection_requests = __esm(() => {
   init_request_log();
 });
 
+// src/workers/embedding-sweep-idle.ts
+var init_embedding_sweep_idle = __esm(() => {
+  init_atomic_file();
+});
+
 // src/core/pairing-session-paths.ts
 var init_pairing_session_paths = __esm(() => {
   init_olympus_layout();
@@ -21766,6 +21771,7 @@ var init_source_dispositions = __esm(() => {
 var backgroundTrashRemovals;
 var init_data_lifecycle = __esm(() => {
   init_connection_requests();
+  init_embedding_sweep_idle();
   init_boot_progress();
   init_people_index();
   init_mac_engine_daemon();
