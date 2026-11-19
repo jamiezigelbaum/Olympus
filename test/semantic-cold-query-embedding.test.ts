@@ -144,7 +144,11 @@ async function packWithClock(
     laneTimeoutMs: 0,
   }).finally(() => { settled = true; });
   // A minute of fake time is far past any budget an answer could spend.
-  for (let step = 0; step < 240 && !settled; step += 1) await clock.advance(250);
+  // The vector scan awaits real turns (its exclusion set is built off the loop), so each step also lets one through.
+  for (let step = 0; step < 240 && !settled; step += 1) {
+    await clock.advance(250);
+    await new Promise((resolve) => setImmediate(resolve));
+  }
   expect(settled).toBe(true);
   return pending;
 }

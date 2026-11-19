@@ -335,6 +335,7 @@ if (verb === 'provision') {
     if (script.includes('--save')) say({ ok: true, count: 5 });
     else { const lost = flag('lost-store') ? 1 : 0; say({ ok: true, before: 5, count: 5 - lost, missing: lost, retired: 0, extra: 0, leftovers: 0 }); }
   }
+  else if (sub === 'data-root-compare') say({ ok: true, compared: 3, changed: flag('ledger-not-put-back') ? ['set.tier-ledger.sqlite: {"tier_ledger":12} -> {"tier_ledger":17}'] : [] });
   else if (sub === 'snapshot-state') {
     const migratedNow = upgraded && process.env.FAKE_NO_MIGRATION !== '1' && !flag('revert-policy');
     const policy = migratedNow ? NEW : OLD;

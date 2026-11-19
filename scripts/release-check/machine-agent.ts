@@ -68,7 +68,7 @@ import { FIXTURE_FOLDER, STRESS_FORMAT, legFixture, type FixtureRole } from './a
 import type { StoreView } from './archive-leg.ts';
 import { frontSteadyStage, logMark, logSince, seedFrontStoreSet, seedTelegramAfterUpdate, watchFront, type EnginePids, type FrontHost, type LaneView } from './front-steady.ts';
 import { compareStoreFiles, leftoverFileNames, storeFiles } from './upgrade-split.ts';
-import { cutoverReport, hiddenCopyBuilds, watchCutover, type StartupAsk } from './cutover.ts';
+import { cutoverReport, hiddenCopyBuilds, markPlannedRestart, watchCutover, type StartupAsk } from './cutover.ts';
 import { besideLiveStage, changedStage, drainStage, importStage, modelStage, removeAllStage, removeStage, seedLiveStage, type ArchiveBrowserSession, type ArchiveHost } from './archive-stages.ts';
 import { openingLinkOrThrow } from './opening-link.ts';
 import { liveSeedHook } from './archive-live-seeds.ts';
@@ -427,12 +427,16 @@ async function mintLocalDashboard(workerFetch: Platform['workerFetch'], bearer: 
 /** Restarts the engine the owner's way and waits for it (models included). */
 async function restartEngine(timeoutMs: number): Promise<{ ok: boolean; ms: number; detail?: string }> {
   const started = Date.now();
+  // A restart the leg asks for is start-up again: a running dashboard watch leaves it out of the window after READY.
+  const mark = () => markPlannedRestart(WORKDIR, { start: started, end: Date.now() });
   const restart = olympus(['engine', 'restart'], { timeoutMs: 180_000 });
-  if (restart.code !== 0) return { ok: false, ms: Date.now() - started, detail: `engine restart exited ${restart.code}: ${restart.stderr.slice(0, 200)}` };
+  if (restart.code !== 0) { mark(); return { ok: false, ms: Date.now() - started, detail: `engine restart exited ${restart.code}: ${restart.stderr.slice(0, 200)}` }; }
   try {
     await waitForEngine(timeoutMs);
+    mark();
     return { ok: true, ms: Date.now() - started };
   } catch (error) {
+    mark();
     return { ok: false, ms: Date.now() - started, detail: error instanceof Error ? error.message : String(error) };
   }
 }
@@ -1918,7 +1922,7 @@ async function qualifyPrivacyCommand(): Promise<never> {
     let local = await localSession();
     const find = async () => {
       const response = await local(`${path}/find`, { query: title });
-      const body = await response.json() as { ok?: boolean; items?: { title?: string; item_id?: string; tier?: string; owner_choice?: string }[] };
+      const body = await response.json() as { ok?: boolean; items?: { title?: string; item_id?: string; tier?: string; owner_choice?: string; owner_set?: boolean }[] };
       return response.ok && body.ok ? body.items?.find(item => item.title === title) : undefined;
     };
     const item = await find();
@@ -1945,7 +1949,10 @@ async function qualifyPrivacyCommand(): Promise<never> {
     const restarted = await restartEngine(300_000);
     if (!restarted.ok) throw new Error('The engine did not return ready after restart');
     local = await localSession();
-    obs.ownerChoiceAfterRestart = (await find())?.owner_choice === 'Private';
+    // owner_choice is shown only until the choice has landed; once it has, the item is the owner's (owner_set) and its tier is Private
+    // (classification/tier-owner-items.ts). Mac 44552653847 read the landed choice as lost.
+    const after = await find();
+    obs.ownerChoiceAfterRestart = after?.owner_set === true && (after.owner_choice ?? after.tier) === 'Private';
     obs.withheldAfterRestart = await fixtureVisibility() === false;
   } catch (error) {
     obs.detail = error instanceof Error ? error.message : 'Qualification failed';
@@ -2445,6 +2452,33 @@ function dataRootSnapshotCommand(label: string): never {
   emit({ ok: true });
 }
 
+/**
+ * Whether the put-back restored the data root, not only the package: every store the root had before the forced update reads
+ * the same schema versions after it. A store left at the candidate's schema (a newer ledger the earlier release cannot open)
+ * names itself here. Paths and versions only; no content leaves the machine.
+ */
+function dataRootCompareCommand(beforeLabel: string, afterLabel: string): never {
+  type Sample = { files: Array<{ path: string; schema?: Record<string, number> | string }> };
+  let before: Sample, after: Sample;
+  try {
+    before = JSON.parse(readFileSync(join(WORKDIR, `data-root-${beforeLabel}.json`), 'utf8')) as Sample;
+    after = JSON.parse(readFileSync(join(WORKDIR, `data-root-${afterLabel}.json`), 'utf8')) as Sample;
+  } catch (error) {
+    emit({ ok: false, detail: `no data-root snapshots ${beforeLabel} and ${afterLabel}: ${(error instanceof Error ? error.message : String(error)).slice(0, 120)}` });
+  }
+  const now = new Map(after.files.map((file) => [file.path, file.schema]));
+  const changed: string[] = [];
+  let compared = 0;
+  for (const file of before.files) {
+    if (file.schema === undefined) continue;
+    compared += 1;
+    const was = JSON.stringify(file.schema);
+    const is = JSON.stringify(now.get(file.path) ?? 'gone');
+    if (was !== is) changed.push(`${file.path}: ${was} -> ${is}`);
+  }
+  emit({ ok: true, compared, changed });
+}
+
 /** Samples the data root every 2 s into `data-root-watch.jsonl` while the forced update runs (the mark, the copy and the put-back). */
 async function dataRootWatchCommand(seconds: number): Promise<never> {
   mkdirSync(WORKDIR, { recursive: true });
@@ -2940,6 +2974,7 @@ async function main(): Promise<void> {
     case 'archive-collect': return archiveCollectCommand();
     case 'collect-logs': return collectLogs(flag('--out'));
     case 'data-root-snapshot': return dataRootSnapshotCommand(flag('--label'));
+    case 'data-root-compare': return dataRootCompareCommand(flag('--before'), flag('--after'));
     case 'data-root-watch': return await dataRootWatchCommand(Number(flag('--seconds', '900')));
     case 'cutover-watch': {
       const seconds = Number(flag('--seconds', '2100'));

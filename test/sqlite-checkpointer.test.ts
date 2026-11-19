@@ -53,10 +53,11 @@ test('the background defers a transient ledger close to the worker, and the work
     sampler = startSqliteWalSampler(() => [...sqliteFilesForOffLoopCheckpoints()], {
       intervalMs: 5, log: () => {}, afterSample: (files) => checkpointer.tick(files),
     });
-    await waitFor(() => walBytes() === 0 && checkpointer.roomStats().passes >= 2, {
-      description: 'the worker truncated the unmounted ledger WAL without a subsequent write',
+    // The worker's reply can deliver the log line a moment after the stats move, so the line is part of the wait.
+    await waitFor(() => walBytes() === 0 && checkpointer.roomStats().passes >= 2
+      && lines.some((line) => line.includes('sqlite checkpoint: tier-ledger-open-1 wal_bytes=0 ')), {
+      description: 'the worker truncated the unmounted ledger WAL without a subsequent write and logged it',
     });
-    expect(lines.some((line) => line.includes('sqlite checkpoint: tier-ledger-open-1 wal_bytes=0 '))).toBe(true);
     expect(exec.mock.calls.filter(([sql]) => /wal_checkpoint/i.test(sql))).toEqual([]);
     const reader = new TierLedger({ dbPath: path, readOnly: true });
     try {

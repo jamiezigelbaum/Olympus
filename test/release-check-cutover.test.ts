@@ -85,3 +85,22 @@ test('after ready, any Home or Sources probe over 1 s fails qualify.dashboard; d
   expect(dashboardAvailabilityCheck(window).status).toBe('fail');
   expect(dashboardAvailabilityCheck(window, true, true).status).toBe('pass');
 });
+
+test('a restart the leg asked for is left out of the window after READY; a slow probe outside it still fails', () => {
+  const sample = (page: 'Home' | 'Sources', at: number, ms: number, answered = true) => ({ pageSample: { page, at, ms, answered, timeout: false } });
+  const entries = [
+    { startupStarted: 0 }, { startupEnded: 1_000, bothBuilds: true },
+    ...[1_000, 3_000, 5_000].flatMap(at => [sample('Home', at, 50), sample('Sources', at, 50)]),
+    // The restart: one probe hangs into it and one is refused inside it.
+    sample('Home', 6_900, 3_000, false), sample('Sources', 7_000, 100, false),
+    { plannedRestart: { start: 7_000, end: 12_000 } },
+    ...[13_000, 15_000].flatMap(at => [sample('Home', at, 50), sample('Sources', at, 50)]),
+    { watchEnded: 16_000, stopped: true },
+  ];
+  const log = entries.map(entry => JSON.stringify(entry)).join('\n') + '\n';
+  expect(dashboardAvailabilityCheck(summarizeCutover(log).qualification).status).toBe('pass');
+  const slow = log.replace('{"page":"Home","at":13000,"ms":50', '{"page":"Home","at":13000,"ms":1500');
+  expect(dashboardAvailabilityCheck(summarizeCutover(slow).qualification).status).toBe('fail');
+  const unmarked = log.replace(/.*plannedRestart.*\n/, '');
+  expect(dashboardAvailabilityCheck(summarizeCutover(unmarked).qualification).status).toBe('fail');
+});

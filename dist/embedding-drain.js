@@ -20111,7 +20111,7 @@ function hasImmutableAccountLabel(id) {
 import { createHash as createHash13, randomUUID as randomUUID9 } from "node:crypto";
 import { closeSync as closeSync11, existsSync as existsSync22, fsyncSync as fsyncSync3, lstatSync as lstatSync9, mkdirSync as mkdirSync13, openSync as openSync11, statSync as statSync13, statfsSync } from "node:fs";
 import { open as openFile } from "node:fs/promises";
-import { dirname as dirname23 } from "node:path";
+import { basename as basename7, dirname as dirname23 } from "node:path";
 import { Database as Database6 } from "bun:sqlite";
 
 // src/core/media-cache.ts
@@ -24405,6 +24405,16 @@ var VECTOR_VISIBILITY_SLICE_MS = 50;
 var CONNECTOR_STORE_CONVERSATION_INDEX = "idx_connector_store_items_conversation_time";
 var CONNECTOR_STORE_CONVERSATION_INDEX_SQL = `CREATE INDEX IF NOT EXISTS ${CONNECTOR_STORE_CONVERSATION_INDEX}
   ON items(provider_conversation_id, authored_at) WHERE provider_conversation_id IS NOT NULL`;
+var CONNECTOR_STORE_RECENCY_INDEX = "idx_connector_store_items_recent_live";
+var CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX = "idx_connector_store_items_recent_account_live";
+var RECENCY_LIVE_SQL = "tombstoned IS 0";
+var ACCOUNT_RECENCY_LIVE_SQL = "+tombstoned IS 0";
+var CONNECTOR_STORE_RECENCY_INDEX_SQL = `
+  CREATE INDEX IF NOT EXISTS ${CONNECTOR_STORE_RECENCY_INDEX}
+    ON items(COALESCE(authored_at, updated_at, indexed_at)) WHERE ${RECENCY_LIVE_SQL};
+  CREATE INDEX IF NOT EXISTS ${CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX}
+    ON items(account_scope, COALESCE(authored_at, updated_at, indexed_at)) WHERE ${ACCOUNT_RECENCY_LIVE_SQL};
+`;
 var MAX_REQUIRED_CONCEPTS = 3;
 var RARE_CONCEPT_WEIGHT_SHARE = 0.6;
 var READ_RESULT_PROJECTION_LOCATOR_URI = Symbol("connector-store-result-projection-locator-uri");
@@ -24945,11 +24955,7 @@ async function runStepsInTurns(steps) {
   return step.value;
 }
 var PK_SET_SLICE = 20000;
-async function pkSetInTurns(lists, {
-  keep,
-  set = new Set,
-  turn = ingestionTurn
-} = {}) {
+async function pkSetInTurns(lists, keep, set = new Set) {
   let added = 0;
   for (const list of lists) {
     for (const pk of list) {
@@ -24957,7 +24963,7 @@ async function pkSetInTurns(lists, {
         continue;
       set.add(pk);
       if (++added % PK_SET_SLICE === 0)
-        await turn();
+        await ingestionTurn();
     }
   }
   return set;
@@ -24965,7 +24971,7 @@ async function pkSetInTurns(lists, {
 async function embeddingExcludedPksInTurns(tierHidden, allowHeld) {
   const eligibleHeld = allowHeld ? await pkSetInTurns([tierHidden.heldForJudgment]) : undefined;
   const excluded = await pkSetInTurns([tierHidden.hidden, tierHidden.metadataLayer]);
-  return pkSetInTurns([tierHidden.held], { keep: (pk) => !eligibleHeld?.has(pk), set: excluded });
+  return pkSetInTurns([tierHidden.held], (pk) => !eligibleHeld?.has(pk), excluded);
 }
 
 class MutablePkList {
@@ -25442,12 +25448,12 @@ var READ_ONLY_MIN_SCHEMA_VERSION = 7;
 function visibilityStepAwaited(read) {
   return judgedAwaited(() => read.offThread(), () => read.here());
 }
-var CONNECTOR_RECLAIM_WORKER_SOURCE = `
+var INLINE_CLOSE_SQLITE_STORE = "const closeSqliteStore = (db) => { try { db.exec('PRAGMA wal_checkpoint(TRUNCATE);'); } catch {} db.close(); };";
+function connectorReclaimWorkerSource() {
+  return `
 import { Database } from 'bun:sqlite';
 import { statSync } from 'node:fs';
-// core/sqlite-store.ts closeSqliteStore, inlined: this source runs in its own
-// process and cannot import it. Checkpoint first so no WAL is left for a reap.
-const closeSqliteStore = (db) => { try { db.exec('PRAGMA wal_checkpoint(TRUNCATE);'); } catch {} db.close(); };
+${INLINE_CLOSE_SQLITE_STORE}
 self.onmessage = ({ data: [path, budgetMs, pagesPerStep] }) => {
   // This is the mounted store's own maintenance connection. Never create a missing store.
   const db = new Database(path, { create: false, strict: true });
@@ -25482,6 +25488,49 @@ self.onmessage = ({ data: [path, budgetMs, pagesPerStep] }) => {
     closeSqliteStore(db);
   }
 };`;
+}
+function connectorRecencyIndexWorkerSource() {
+  return `
+import { Database } from 'bun:sqlite';
+${INLINE_CLOSE_SQLITE_STORE}
+self.onmessage = ({ data: [path] }) => {
+  const db = new Database(path, { create: false, strict: true });
+  let result;
+  try {
+    db.exec('PRAGMA busy_timeout = 0; PRAGMA synchronous = NORMAL; PRAGMA wal_autocheckpoint = 0;');
+    db.transaction(() => db.exec(${JSON.stringify(CONNECTOR_STORE_RECENCY_INDEX_SQL)})).immediate();
+    result = { done: true };
+  } catch (error) {
+    result = { busy: /^SQLITE_(BUSY|LOCKED)(_|$)/.test(error.code) };
+  } finally {
+    closeSqliteStore(db);
+  }
+  postMessage(result);
+};`;
+}
+function spawnConnectorStoreMaintenance(dbPath, source, args = []) {
+  const supervisor = `
+    const worker = new Worker(URL.createObjectURL(new Blob([${JSON.stringify(source)}], {type:'text/javascript'})));
+    process.stdin.resume();
+    process.stdin.on('end', () => process.kill(process.pid, 'SIGKILL'));
+    worker.onmessage = ({data}) => {
+      console.log(JSON.stringify(data));
+      if (!data.started) process.exit(0);
+    };
+    worker.onerror = () => process.exit(1);
+    worker.postMessage(JSON.parse(process.argv[1]));`;
+  return Bun.spawn([process.execPath, "-e", supervisor, JSON.stringify([dbPath, ...args])], {
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "ignore",
+    env: { ...process.env, SQLITE_TMPDIR: dirname23(dbPath), TMPDIR: dirname23(dbPath) }
+  });
+}
+var admitRecencyIndexBuild;
+var recencyIndexBuilding = false;
+var RECENCY_INDEX_RETRY_MS = 250;
+var RECENCY_INDEX_BUSY_RETRY_MS = 2000;
+var RECENCY_INDEX_NOT_ADMITTED_RETRY_MS = 30000;
 var RECLAIM_MAX_PAGES_PER_STEP = 128;
 var RECLAIM_CONVERSION_BYTES_PER_MS = 15000;
 var SUPERSEDED_PRUNE_MEDIA_ROWS = 1;
@@ -25587,6 +25636,8 @@ class LocalConnectorStore {
         const current = !migrating && !creatingFile && this.db.query("PRAGMA user_version").get().user_version === connectorStoreOpenStamp(this.db);
         if (!current) {
           applyConnectorStoreOpenSchema(this.db);
+          if (creatingFile)
+            this.db.exec(CONNECTOR_STORE_RECENCY_INDEX_SQL);
           if (this.dbPath !== ":memory:")
             this.db.exec(`PRAGMA user_version = ${connectorStoreOpenStamp(this.db)}`);
         }
@@ -25614,12 +25665,75 @@ class LocalConnectorStore {
         if (model && !vectorDigestState(this.db, model).completed)
           this.scheduleVectorDigestBackfill(model, VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS);
       }
+      if (!this.readOnly && !creatingFile && this.db.query("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name IN (?, ?)").get(CONNECTOR_STORE_RECENCY_INDEX, CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX).n < 2) {
+        if (admitRecencyIndexBuild)
+          this.scheduleRecencyIndexBuild();
+      }
       reportFrontStoreOpened();
       changeMemoryCounter("connector_stores", 1);
       trackSqliteStoreMemory(this.db, this.visibilityJournal);
     } catch (error) {
       closeSqliteStore(this.db, this.readOnly ? { checkpoint: false, readOnly: true } : undefined);
       throw error;
+    }
+  }
+  recencyIndexTimer;
+  scheduleRecencyIndexBuild(delayMs = 0) {
+    this.recencyIndexTimer = setTimeout(() => {
+      this.recencyIndexTimer = undefined;
+      this.buildRecencyIndex();
+    }, delayMs);
+    this.recencyIndexTimer.unref?.();
+  }
+  async buildRecencyIndex() {
+    const admit = admitRecencyIndexBuild;
+    if (!admit || this.closedForPoolReads || this.fileReplacedOrRemoved())
+      return;
+    if (this.db.query("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name IN (?, ?)").get(CONNECTOR_STORE_RECENCY_INDEX, CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX).n >= 2)
+      return;
+    if (recencyIndexBuilding || this.reclaimProcess || this.vectorDigestBackfillReading || this.visibilityPublishing || storeReadHasPriority()) {
+      this.scheduleRecencyIndexBuild(RECENCY_INDEX_BUSY_RETRY_MS);
+      return;
+    }
+    recencyIndexBuilding = true;
+    try {
+      let preempted = false;
+      const complete = await admit(async () => {
+        if (this.closedForPoolReads || this.fileReplacedOrRemoved())
+          return false;
+        assertWritableStoreOpenAllowed("connector store recency index", this.dbPath);
+        const buildStarted = Date.now();
+        const child = spawnConnectorStoreMaintenance(this.dbPath, connectorRecencyIndexWorkerSource());
+        this.reclaimProcess = child;
+        child.unref();
+        try {
+          const [code, output] = await Promise.all([child.exited, new Response(child.stdout).text()]);
+          if (preempted || this.closedForPoolReads)
+            return false;
+          if (code !== 0)
+            throw new Error("Recency index worker exited unsuccessfully.");
+          const result = JSON.parse(output);
+          if (!result.done && !result.busy)
+            throw new Error("Recency index build failed.");
+          if (result.done)
+            console.info(`[store-recency-index] built store=${basename7(this.dbPath)} ms=${Date.now() - buildStarted}`);
+          return result.done === true;
+        } finally {
+          child.stdin.end();
+          this.reclaimProcess = undefined;
+        }
+      }, () => {
+        preempted = true;
+        this.reclaimProcess?.kill("SIGKILL");
+      });
+      if (!complete && !this.closedForPoolReads) {
+        this.scheduleRecencyIndexBuild(complete === undefined ? RECENCY_INDEX_NOT_ADMITTED_RETRY_MS : RECENCY_INDEX_RETRY_MS);
+      }
+    } catch {
+      if (!this.closedForPoolReads)
+        console.warn("Connector store recency index build failed; will retry the build on the next writable open.");
+    } finally {
+      recencyIndexBuilding = false;
     }
   }
   vectorDigestBackfillTimer;
@@ -25725,7 +25839,9 @@ class LocalConnectorStore {
     changeMemoryCounter("embedding_queue", -(this.embeddingQueueState?.size ?? 0));
     this.embeddingQueueState = undefined;
     const reclaiming = this.reclaimProcess !== undefined;
+    const buildingRecencyIndex = reclaiming && this.reclaimPreempt === undefined;
     this.reclaimProcess?.kill("SIGKILL");
+    clearTimeout(this.recencyIndexTimer);
     clearTimeout(this.vectorDigestBackfillTimer);
     this.stopVisibilityPublisher();
     try {
@@ -25740,7 +25856,7 @@ class LocalConnectorStore {
       this.closedForPoolReads = true;
       if (offThreadReadsSupported(this.dbPath))
         releaseOffThreadReads(this.dbPath);
-      closeSqliteStore(this.db, this.readOnly ? { checkpoint: false, readOnly: true } : undefined);
+      closeSqliteStore(this.db, this.readOnly ? { checkpoint: false, readOnly: true } : buildingRecencyIndex ? { checkpoint: false } : undefined);
     }
   }
   reclaimProcess;
@@ -25792,22 +25908,7 @@ class LocalConnectorStore {
     pagesPerStep = Math.max(1, Math.floor(pagesPerStep));
     assertWritableStoreOpenAllowed("connector store reclaim", this.dbPath);
     assertStoreTierLedgerCanOpen(this.dbPath);
-    const supervisor = `
-      const worker = new Worker(URL.createObjectURL(new Blob([${JSON.stringify(CONNECTOR_RECLAIM_WORKER_SOURCE)}], {type:'text/javascript'})));
-      process.stdin.resume();
-      process.stdin.on('end', () => process.kill(process.pid, 'SIGKILL'));
-      worker.onmessage = ({data}) => {
-        console.log(JSON.stringify(data));
-        if (!data.started) process.exit(0);
-      };
-      worker.onerror = () => process.exit(1);
-      worker.postMessage(JSON.parse(process.argv[1]));`;
-    const child = Bun.spawn([process.execPath, "-e", supervisor, JSON.stringify([this.dbPath, budgetMs, pagesPerStep])], {
-      stdin: "pipe",
-      stdout: "pipe",
-      stderr: "ignore",
-      env: { ...process.env, SQLITE_TMPDIR: dirname23(this.dbPath), TMPDIR: dirname23(this.dbPath) }
-    });
+    const child = spawnConnectorStoreMaintenance(this.dbPath, connectorReclaimWorkerSource(), [budgetMs, pagesPerStep]);
     this.reclaimProcess = child;
     let preempted = false;
     const preempt = () => {
@@ -32827,7 +32928,7 @@ ${parentKey(ref)}`, { ref, origin });
       ...selectedAccount ? { accountScope: selectedAccount } : {},
       ...filters ? { filters } : {}
     };
-    const excludedItemPks = await this.vectorScanExcludedItemPks();
+    const excludedItemPks = this.vectorScanExcludedItemPks();
     if (excludedItemPks)
       pageOptions.excludedItemPks = excludedItemPks;
     const scanned = offThreadReadsSupported(this.dbPath) ? await scanVectorPagesOnPool(this.dbPath, provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit) : await this.scanVectorPagesInThread(provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit);
@@ -32878,11 +32979,6 @@ ${parentKey(ref)}`, { ref, origin });
     };
   }
   vectorScanExcludedItemPks() {
-    return this.vectorScanExclusionBuild ??= this.buildVectorScanExclusion().finally(() => {
-      this.vectorScanExclusionBuild = undefined;
-    });
-  }
-  async buildVectorScanExclusion() {
     if (!this.tierLedgerHiddenMemo && !this.tierHiddenCountsMemo) {
       let ledger;
       try {
@@ -32895,35 +32991,30 @@ ${parentKey(ref)}`, { ref, origin });
         return;
       }
     }
+    let base;
+    let children;
     try {
-      const base = await runHiddenStepsInTurns(this.tierLedgerHiddenSteps());
-      const basePks = [base.hidden, base.held, base.metadataLayer];
-      const memo = this.tierLedgerHiddenMemo;
-      if (memo ? memo.value !== base : basePks.some((pks) => pks.length > 0))
-        return;
-      const lists = memo ? [memo.lists.hidden, memo.lists.held, memo.lists.metadataLayer] : [];
-      const generations = lists.map((list) => list.generation);
-      const baseCurrent = () => this.tierLedgerHiddenMemo === memo && lists.every((list, at) => list.generation === generations[at]);
-      const children = await this.hiddenChildItemPksInTurns();
-      const childMemo = this.hiddenChildMemo;
-      if (!baseCurrent())
-        return;
-      const cached = this.vectorScanExclusion;
-      const excluded = memo && cached?.lists.every((list, at) => list === lists[at] && cached.generations[at] === generations[at]) ? cached.set : await pkSetInTurns(basePks, { turn: yieldConnectorStoreVectorScan });
-      const hiddenChildren = children.length > 0 ? await pkSetInTurns([children], { turn: yieldConnectorStoreVectorScan }) : undefined;
-      if (!baseCurrent() || this.hiddenChildMemo !== childMemo)
-        return;
-      if (excluded !== cached?.set)
-        this.vectorScanExclusion = memo ? { lists, generations, set: excluded } : undefined;
-      if (hiddenChildren)
-        return { has: (itemPk) => excluded.has(itemPk) || hiddenChildren.has(itemPk) };
-      return excluded.size > 0 ? excluded : undefined;
+      base = this.tierLedgerHiddenItemPks();
+      children = this.hiddenChildItemPks();
     } catch {
       return;
     }
+    const memo = this.tierLedgerHiddenMemo;
+    const lists = memo && memo.value === base ? [memo.lists.hidden, memo.lists.held, memo.lists.metadataLayer] : undefined;
+    const cached = this.vectorScanExclusion;
+    let excluded;
+    if (lists && cached && cached.lists.every((list, at) => list === lists[at] && cached.generations[at] === list.generation)) {
+      excluded = cached.set;
+    } else {
+      excluded = new Set([...base.hidden, ...base.held, ...base.metadataLayer]);
+      this.vectorScanExclusion = lists ? { lists, generations: lists.map((list) => list.generation), set: excluded } : undefined;
+    }
+    if (children.length === 0)
+      return excluded.size > 0 ? excluded : undefined;
+    const hiddenChildren = new Set(children);
+    return { has: (itemPk) => excluded.has(itemPk) || hiddenChildren.has(itemPk) };
   }
   vectorScanExclusion;
-  vectorScanExclusionBuild;
   async scanVectorPagesInThread(provider, beforeToken, queryVector, pageOptions, deadlineAtMs, resultLimit) {
     const scanDb = this.dbPath === ":memory:" ? this.db : new Database6(this.dbPath, { readonly: true, create: false, strict: true });
     const ownsScanDb = scanDb !== this.db;
@@ -33554,30 +33645,75 @@ ${parentKey(ref)}`, { ref, origin });
     const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
     const selectedAccount = normalizeOptionalAccountScope(accountScope);
     const selectedFilters = connectorStoreFilterSql(filters);
-    return {
-      mode: "all",
-      site: "recentItemsRead",
-      sql: `
-      SELECT
+    const columns = `
         i.item_pk, i.provider, i.family, i.account_scope, i.provider_item_id, i.provider_thread_id,
         i.provider_conversation_id, i.provider_file_id, i.provider_event_id, i.local_item_id,
         i.source_version, i.title, i.sender_id, i.sender_label, i.sender_is_owner,
         i.mime_type, i.authored_at, i.updated_at,
         i.trust_tier, i.sync_run_id,
-        0 AS rank
-      FROM items i
-      WHERE i.tombstoned = 0
-        ${selectedAccount ? "AND i.account_scope = ?" : ""}
-        ${selectedFilters.sql}
-        AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
-      ORDER BY COALESCE(i.authored_at, i.updated_at, i.indexed_at) DESC, i.item_pk DESC
-      LIMIT ?
-    `,
-      params: [
-        ...selectedAccount ? [selectedAccount] : [],
-        ...selectedFilters.params,
-        limit
-      ]
+        0 AS rank`;
+    const time = "COALESCE(i.authored_at, i.updated_at, i.indexed_at)";
+    const hasChunks = "EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)";
+    if (selectedFilters.sql) {
+      return {
+        mode: "all",
+        site: "recentItemsRead",
+        sql: `
+          SELECT ${columns}
+          FROM items i
+          WHERE i.tombstoned = 0
+            ${selectedAccount ? "AND i.account_scope = ?" : ""}
+            ${selectedFilters.sql}
+            AND ${hasChunks}
+          ORDER BY +${time} DESC, i.item_pk DESC
+          LIMIT ?
+        `,
+        params: [...selectedAccount ? [selectedAccount] : [], ...selectedFilters.params, limit]
+      };
+    }
+    const account = selectedAccount ? "AND i.account_scope = ?1" : "";
+    const take = selectedAccount ? "?2" : "?1";
+    const probeLimit = `4 * ${take}`;
+    const index = selectedAccount ? CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX : CONNECTOR_STORE_RECENCY_INDEX;
+    const live = selectedAccount ? ACCOUNT_RECENCY_LIVE_SQL : RECENCY_LIVE_SQL;
+    return {
+      mode: "all",
+      site: "recentItemsRead",
+      sql: `
+        WITH index_state AS MATERIALIZED (
+          SELECT EXISTS (SELECT 1 FROM main.sqlite_master WHERE name = '${index}' AND type = 'index') AS ready
+        ), candidates AS MATERIALIZED (
+          SELECT i.item_pk, ${time} AS recent_at
+          FROM items i
+          WHERE ${live} ${account}
+          ORDER BY ${time} DESC, i.item_pk DESC
+          LIMIT CASE WHEN (SELECT ready FROM index_state) THEN ${probeLimit} ELSE 0 END
+        ), matches AS MATERIALIZED (
+          SELECT i.item_pk, i.recent_at FROM candidates i WHERE ${hasChunks}
+          ORDER BY i.recent_at DESC, i.item_pk DESC
+          LIMIT ${take}
+        ), fallback AS MATERIALIZED (
+          SELECT NOT ready OR (
+            (SELECT COUNT(*) FROM candidates) = ${probeLimit}
+            AND (SELECT COUNT(*) FROM matches) < ${take}
+          ) AS needed FROM index_state
+        ), recent AS (
+          SELECT item_pk, recent_at FROM matches WHERE NOT (SELECT needed FROM fallback)
+          UNION ALL
+          SELECT * FROM (
+            SELECT i.item_pk, ${time} AS recent_at
+            FROM items i
+            WHERE i.tombstoned = 0 ${account} AND ${hasChunks}
+            ORDER BY +${time} DESC, i.item_pk DESC
+            LIMIT CASE WHEN (SELECT needed FROM fallback) THEN ${take} ELSE 0 END
+          )
+        )
+        SELECT ${columns}
+        FROM recent CROSS JOIN items i ON i.item_pk = recent.item_pk
+        ORDER BY recent.recent_at DESC, recent.item_pk DESC
+        LIMIT ${take}
+      `,
+      params: selectedAccount ? [selectedAccount, limit] : [limit]
     };
   }
   conversationNeighbours(localItemId, perSide, accountScope, filters) {
@@ -34151,7 +34287,7 @@ ${parentKey(ref)}`, { ref, origin });
     }
   }
   async reconcileTotals() {
-    if (this.readOnly)
+    if (this.readOnly || this.reclaiming)
       return;
     if (!storeTotalsInstalled(this.db))
       createStoreTotals(this.db, NON_SYNC_RUN_CONNECTORS_SQL);
@@ -34170,12 +34306,14 @@ ${parentKey(ref)}`, { ref, origin });
       }
       step = steps.next(rows);
     }
+    if (this.reclaiming)
+      return;
     return applyStoreTotalsCount(this.db, step.value.count, new Date().toISOString(), { exact: step.value.quiet });
   }
   embeddingInputHashesChecked = false;
   embeddingInputHashWalk;
   async repairEmbeddingInputHashes(pageKeys = 2000, pages = 50) {
-    if (this.readOnly || this.embeddingInputHashesChecked)
+    if (this.readOnly || this.reclaiming || this.embeddingInputHashesChecked)
       return 0;
     const pool = offThreadReadsSupported(this.dbPath);
     const read = async (sql, params) => pool ? readInBackground(this.dbPath, { sql, params, mode: "all" }) : this.db.query(sql).all(...params);
@@ -34189,6 +34327,8 @@ ${parentKey(ref)}`, { ref, origin });
     for (let page = 0;page < pages && walk.after < walk.last; page += 1) {
       const hi = Math.min(walk.after + pageKeys, walk.last);
       const rows = await read("SELECT chunk_pk FROM chunks WHERE chunk_pk > ? AND chunk_pk <= ? AND embedding_input_hash IS NULL", [walk.after, hi]);
+      if (this.reclaiming)
+        break;
       walk.after = hi;
       if (rows.length > 0)
         this.db.transaction(() => {
@@ -36439,6 +36579,8 @@ function connectorStoreOpenStamp(db) {
   const rows = db.query("SELECT type, name, tbl_name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name").all();
   let hash = connectorStoreOpenShape() >>> 0;
   for (const row of rows) {
+    if (row.type === "index" && (row.name === CONNECTOR_STORE_RECENCY_INDEX || row.name === CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX))
+      continue;
     const text = `${row.type}\x00${row.name}\x00${row.tbl_name}\x00${row.sql ?? ""}
 `;
     for (let index = 0;index < text.length; index += 1) {
