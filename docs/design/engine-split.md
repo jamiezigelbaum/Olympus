@@ -316,6 +316,14 @@ the cause).
 - **Stores the front keeps writing.** Its own files stay its own: remote
   connections, waiting private questions, answer jobs, dashboard
   sessions, settings files. Nothing else writes them.
+- **SQLite file mapping.** Linux defaults to SQLite's compiled per-connection
+  ceiling. Set `OLYMPUS_SQLITE_MMAP=off` to disable it or `bounded` to split
+  the smaller of one eighth of machine RAM and 4 GiB among reserved database
+  paths. The front and background reserve the same paths, including lazy stores,
+  and pass the page-aligned per-file size to their read workers. Shares below
+  16 MiB and paths outside the reservation use ordinary reads. Connections to
+  the same file share resident mapped pages even though each mapping counts
+  toward RSS. Each engine process logs the mode and sizes once at boot.
 - **Restart.** Once a minute the background compares its memory floor
   with `worker.engineSplitRssRestartMb` (3072 MB by default, 0 disables
   the restart). The floor is the minimum of the latest

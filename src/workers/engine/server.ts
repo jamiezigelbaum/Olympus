@@ -520,6 +520,7 @@ import {
   deleteMarkedAccountsAtBoot,
   replaceEmptyAccountsAtBoot,
   moveAccountsAtBoot,
+  configureEngineSqliteMmap,
   workerTierLedgerProblem,
   reportRehomedChatOverrides,
   openPeopleIndexOrUndefined,
@@ -744,6 +745,7 @@ export async function main(): Promise<void> {
       + 'Move each file to where Olympus keeps it, or remove the setting if it named the usual place, then start again.',
     );
   }
+  configureEngineSqliteMmap(engineRole, process.env);
   if (engineRole !== 'front') {
   // An account a Delete marked is removed before anything else looks at it.
   reportBootStep(process.env, { phase: 'starting' });

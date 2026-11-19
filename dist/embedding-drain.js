@@ -12257,15 +12257,26 @@ function slug(value) {
 }
 
 // src/workers/connector-store/sqlite-mmap.ts
+import { createRequire as createRequire5 } from "node:module";
+import { resolve as resolve7 } from "node:path";
+var MIB = 1024 * 1024;
+var runtimeRequire3 = createRequire5(import.meta.url);
 var SQLITE_MMAP_BYTES = 2147418112;
-function sqliteMmapEnabled(env = process.env) {
-  return process.platform === "linux" && env.OLYMPUS_SQLITE_MMAP !== "off";
+var bounded;
+function sqliteMmapBytes(dbPath) {
+  const value = process.env.OLYMPUS_SQLITE_MMAP;
+  if (process.platform !== "linux" || value === "off")
+    return 0;
+  if (value !== "bounded")
+    return SQLITE_MMAP_BYTES;
+  return dbPath !== ":memory:" && bounded?.paths.has(resolve7(dbPath)) ? bounded.perFileBytes : 0;
 }
-function applySqliteMmap(db, env = process.env) {
-  if (!sqliteMmapEnabled(env))
+function applySqliteMmap(db, dbPath) {
+  const bytes = sqliteMmapBytes(dbPath);
+  if (!bytes)
     return;
   try {
-    db.exec(`PRAGMA mmap_size = ${SQLITE_MMAP_BYTES}`);
+    db.exec(`PRAGMA mmap_size = ${bytes}`);
   } catch {}
 }
 
@@ -12733,7 +12744,7 @@ class TierLedger {
       db = new Database(this.dbPath, this.readOnly ? { readonly: true, create: false } : { create: true });
       if (this.readOnly) {
         db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
-        applySqliteMmap(db);
+        applySqliteMmap(db, this.dbPath);
         if (!sqliteSchemaUsable(db, TIER_LEDGER_SQLITE_STORE_ID, TIER_LEDGER_SCHEMA_VERSION)) {
           throw new TierLedgerSchemaError(readSqliteSchemaVersion(db, TIER_LEDGER_SQLITE_STORE_ID));
         }
@@ -12741,7 +12752,7 @@ class TierLedger {
         return;
       }
       db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA journal_size_limit = 67108864;" + loopWalAutocheckpointPragma(this.dbPath, "tier-ledger"));
-      applySqliteMmap(db);
+      applySqliteMmap(db, this.dbPath);
       runSqliteMigrations(db, TIER_LEDGER_SQLITE_STORE_ID, tierLedgerMigrations());
       db.exec(`CREATE INDEX IF NOT EXISTS tier_items_override_rows
         ON tier_items (provider, account_scope, conversation_key, provider_item_id) WHERE decided_by = 'override'`);
@@ -19278,7 +19289,7 @@ var observer;
 var observeSnapshots = false;
 var workerFactory = (url) => new Worker(url);
 var MMAP_PRAGMA_SLOT = "/*olympus-mmap-pragma*/";
-var mmapPragma = () => sqliteMmapEnabled() ? `try { db.exec('PRAGMA mmap_size = ${SQLITE_MMAP_BYTES}'); } catch {}` : "";
+var mmapPragma = (bytes) => bytes ? `try { db.exec('PRAGMA mmap_size = ${bytes}'); } catch {}` : "";
 var WORKER_SOURCE = `
 import { Database } from 'bun:sqlite';
 import { statSync } from 'node:fs';
@@ -19446,7 +19457,7 @@ function startThread(store, lane = "shared") {
   if (threads.filter((reader) => reader.store === store && reader.lane === lane).length >= limit || !runtimeHasWorkers())
     return;
   try {
-    const url = URL.createObjectURL(new Blob([WORKER_SOURCE.replace(MMAP_PRAGMA_SLOT, mmapPragma())], { type: "application/javascript" }));
+    const url = URL.createObjectURL(new Blob([WORKER_SOURCE.replace(MMAP_PRAGMA_SLOT, mmapPragma(sqliteMmapBytes(store)))], { type: "application/javascript" }));
     const worker = workerFactory(url);
     worker.unref?.();
     counters.starts += 1;
@@ -20002,7 +20013,7 @@ import {
   statSync as statSync11,
   writeFileSync as writeFileSync6
 } from "node:fs";
-import { basename as basename5, dirname as dirname17, isAbsolute as isAbsolute11, join as join19, resolve as resolve8 } from "node:path";
+import { basename as basename5, dirname as dirname17, isAbsolute as isAbsolute11, join as join19, resolve as resolve9 } from "node:path";
 
 // src/core/remote-access.ts
 import { isAbsolute as raIsAbsolute, join as raJoin } from "node:path";
@@ -20046,7 +20057,7 @@ function olympusDataDir(env = process.env) {
 
 // src/core/store-identity.ts
 import { existsSync as existsSync16, realpathSync as realpathSync5, statSync as statSync10 } from "node:fs";
-import { basename as basename4, dirname as dirname16, isAbsolute as isAbsolute10, join as join18, relative as relative5, resolve as resolve7, sep as sep5 } from "node:path";
+import { basename as basename4, dirname as dirname16, isAbsolute as isAbsolute10, join as join18, relative as relative5, resolve as resolve8, sep as sep5 } from "node:path";
 var LAYOUTS2 = ["folder", "legacy"];
 function layoutPath(identity, layout, env) {
   if (layout === "legacy" && identity.slot !== DEFAULT_ACCOUNT_SLOT)
@@ -20062,7 +20073,7 @@ function storePathKey(path) {
     return realpathSync5(path);
   } catch {}
   const folder = dirname16(path);
-  let real = resolve7(folder);
+  let real = resolve8(folder);
   try {
     real = realpathSync5(folder);
   } catch {}
@@ -20070,7 +20081,7 @@ function storePathKey(path) {
 }
 function registryKey(env = process.env) {
   const path = sourceRegistryPath(env);
-  let folder = resolve7(dirname16(path));
+  let folder = resolve8(dirname16(path));
   try {
     folder = realpathSync5.native(folder);
   } catch {}
@@ -20163,7 +20174,7 @@ function storePlacementView(env = process.env) {
   const folderRoots = () => {
     const roots = new Set;
     try {
-      roots.add(resolve7(accountFoldersRoot(env)));
+      roots.add(resolve8(accountFoldersRoot(env)));
       if (root !== undefined)
         roots.add(join18(realpathSync5(root), ACCOUNT_FOLDERS_DIR));
     } catch {}
@@ -20223,7 +20234,7 @@ function storePlacementView(env = process.env) {
       return "kept";
     try {
       const key = storePathKey(path);
-      const inFolder = folderPlace(key) ?? folderPlace(resolve7(path));
+      const inFolder = folderPlace(key) ?? folderPlace(resolve8(path));
       if (state.kind === "missing")
         return inFolder !== undefined || legacyPlaced(key) ? "kept" : "unplaced";
       const identity = placedAt(state.registry).get(key);
@@ -20285,11 +20296,11 @@ function isSha256(value) {
 }
 var MEDIA_CACHE_DIR_NAMES = new Set(["media-cache", "olympus-media"]);
 function isMediaCachePath(path, sha256, dir) {
-  if (!isAbsolute11(path) || !isSha256(sha256) || resolve8(path) !== path)
+  if (!isAbsolute11(path) || !isSha256(sha256) || resolve9(path) !== path)
     return false;
   if (basename5(path) !== `${sha256}.jpg` || !MEDIA_CACHE_DIR_NAMES.has(basename5(dirname17(path))))
     return false;
-  if (dir !== undefined && dirname17(path) !== resolve8(dir))
+  if (dir !== undefined && dirname17(path) !== resolve9(dir))
     return false;
   try {
     const stat = lstatSync7(path);
@@ -20304,7 +20315,7 @@ function mediaHolderName(holder) {
   try {
     return realpathSync6(holder);
   } catch {
-    return resolve8(holder);
+    return resolve9(holder);
   }
 }
 function mediaHolderKey(holder) {
@@ -21067,9 +21078,9 @@ var STOP_WORDS2 = new Set([
 
 // src/workers/classification/tier-set-binding.ts
 import { existsSync as existsSync18 } from "node:fs";
-import { basename as basename6, dirname as dirname18, join as join20, resolve as resolve9 } from "node:path";
+import { basename as basename6, dirname as dirname18, join as join20, resolve as resolve10 } from "node:path";
 function tierStoreDataRoot(storeDbPath) {
-  const folder = dirname18(resolve9(storeDbPath));
+  const folder = dirname18(resolve10(storeDbPath));
   return accountSiblingStorePath(storeDbPath, "secure_local") ? dirname18(dirname18(dirname18(dirname18(folder)))) : folder;
 }
 var tierLedgerIsWithin = pathResolvesWithin;
@@ -22779,7 +22790,7 @@ class RemoteLiteRtEmbedder {
 
 // src/workers/source-index/built-in-embedding/runtime.ts
 import { realpathSync as realpathSync7 } from "node:fs";
-import { createRequire as createRequire5 } from "node:module";
+import { createRequire as createRequire6 } from "node:module";
 import { join as join23, sep as sep6 } from "node:path";
 function onnxRuntimeFromDirectory(runtimeDir) {
   return {
@@ -22830,7 +22841,7 @@ function requireOnnxRuntimeFromPack(runtimeDir) {
   const missing = () => new Error(`The ONNX Runtime pack is not installed in ${runtimeDir}.`);
   let root;
   let resolved;
-  const requireFromPack = createRequire5(join23(runtimeDir, "olympus-runtime.json"));
+  const requireFromPack = createRequire6(join23(runtimeDir, "olympus-runtime.json"));
   try {
     root = realpathSync7(join23(runtimeDir, "node_modules"));
     resolved = realpathSync7(requireFromPack.resolve("onnxruntime-node"));
@@ -25431,7 +25442,7 @@ class LocalConnectorStore {
     this.openedFile = fileIdentity(this.dbPath);
     try {
       this.db.exec(options.readOnly === true ? "PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; PRAGMA foreign_keys = ON;" : creatingFile ? "PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA auto_vacuum = INCREMENTAL; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA journal_size_limit = 67108864;" + loopWalAutocheckpointPragma(this.dbPath) : "PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA journal_size_limit = 67108864;" + loopWalAutocheckpointPragma(this.dbPath));
-      applySqliteMmap(this.db);
+      applySqliteMmap(this.db, this.dbPath);
       assertSqliteSchemaCanOpen(this.db, SQLITE_STORE_ID, CONNECTOR_STORE_SQLITE_SCHEMA_VERSION);
       const versionAtOpen = readSqliteSchemaVersion(this.db, SQLITE_STORE_ID);
       const migrating = options.readOnly !== true && versionAtOpen < CONNECTOR_STORE_SQLITE_SCHEMA_VERSION;
@@ -37645,8 +37656,8 @@ var SPOOL_IDENTITY_HEAD_BYTES = 4 * 1024;
 var SPOOL_BOUNDARY_WINDOW_BYTES = 4 * 1024;
 
 // src/core/scope-safe-fs.ts
-import { createRequire as createRequire6 } from "node:module";
-var runtimeRequire3 = createRequire6(import.meta.url);
+import { createRequire as createRequire7 } from "node:module";
+var runtimeRequire4 = createRequire7(import.meta.url);
 var SCOPE_FILE_MAX_RANGE_BYTES = 64 * 1024 * 1024;
 
 // src/workers/archive-import/byte-source.ts
