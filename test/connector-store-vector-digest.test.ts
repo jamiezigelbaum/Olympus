@@ -558,7 +558,8 @@ test('with OLYMPUS_VECTOR_DIGEST=off, a store with a complete digest runs the ex
     const query = db.query.bind(db);
     db.query = ((sql: string) => { queries.push(sql); return query(sql); }) as typeof db.query;
     const exact = await store.vectorSearchLane('harbor', provider, 10, 'a');
-    expect(queries.some(sql => sql.includes('chunk_vector_digest'))).toBe(false);
+    // The scheduled backfill's own state probe (chunk_vector_digest_meta) can land in this window; the scan reading the digest is what must not happen.
+    expect(queries.filter(sql => sql.includes('chunk_vector_digest') && !sql.includes('chunk_vector_digest_meta'))).toEqual([]);
     expect(exact).toEqual(withDigest);
   } finally {
     if (saved === undefined) delete process.env.OLYMPUS_VECTOR_DIGEST; else process.env.OLYMPUS_VECTOR_DIGEST = saved;
