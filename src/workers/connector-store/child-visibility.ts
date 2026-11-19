@@ -144,16 +144,24 @@ function askReadMemo(owner: object, kind: string, marker: string) {
   return memo;
 }
 
+// While the owning connection holds uncommitted writes, its marker already
+// counts them, another connection cannot see them, and the commit leaves the
+// marker as it is: a read taken then would be kept for the rest of the Ask
+// under a marker that never changes. So no read is taken on another
+// connection while the owner holds writes (the caller judges on the owner),
+// and one whose owner began holding writes meanwhile is discarded unkept.
 export async function memoVisibilityItems<K, V>(
   owner: object, kind: string, marker: () => string, items: readonly K[], keyOf: (item: K) => string,
   read: (missing: readonly K[]) => Promise<Map<string, V>>,
+  writesHeld?: () => boolean,
 ): Promise<Map<string, V>> {
   const asked = new Map(items.map(item => [keyOf(item), item]));
+  if (writesHeld?.()) throw new VisibilityChangedError();
   const before = marker();
   const memo = askReadMemo(owner, kind, before);
   const missing = [...asked].filter(([key]) => !memo?.rows.has(key)).map(([, item]) => item);
   const fresh = missing.length > 0 ? await read(missing) : new Map<string, V>();
-  if (marker() !== before) throw new VisibilityChangedError();
+  if (marker() !== before || writesHeld?.()) throw new VisibilityChangedError();
   if (memo) for (const item of missing) memo.rows.set(keyOf(item), fresh.get(keyOf(item)));
   const out = new Map<string, V>();
   for (const key of asked.keys()) {
@@ -174,7 +182,7 @@ const ASK_LEDGER_READS = { perRead: true } as const;
 
 export function itemStatesOffThread(ledger: TierLedger, identities: readonly TierLedgerIdentity[]) {
   return memoVisibilityItems(ledger, 'states', () => ledger.changeMarker(), identities, tierLedgerIdentityKey,
-    missing => ledgerReadOffThread(ledger, ledger.itemStatesSteps(missing), ASK_LEDGER_READS));
+    missing => ledgerReadOffThread(ledger, ledger.itemStatesSteps(missing), ASK_LEDGER_READS), () => ledger.writesHeld());
 }
 
 function* itemSecretSteps(ledger: TierLedger, identity: TierLedgerIdentity): Generator<VisibilityRead, boolean, unknown> {
@@ -187,7 +195,7 @@ function* itemSecretSteps(ledger: TierLedger, identity: TierLedgerIdentity): Gen
         const rows = new Map<string, boolean>();
         for (const item of missing) rows.set(tierLedgerIdentityKey(item), await ledgerReadOffThread(ledger, ledger.itemIsSecretSteps(item), ASK_LEDGER_READS));
         return rows;
-      }),
+      }, () => ledger.writesHeld()),
   );
   return rows.get(key) === true;
 }
@@ -226,7 +234,8 @@ export async function ledgerVisibilityOffThread(
   // separate from the release check's raw copies, and invalidate both on writes.
   const rows = await memoVisibilityItems(ledger, options.personalFirst ? 'visibility-personal-first' : 'visibility',
     () => ledger.changeMarker(), identities, tierLedgerIdentityKey,
-    async missing => visibilityRows(missing, await ledgerReadOffThread(ledger, ledger.visibilityReadSteps(missing, options), ASK_LEDGER_READS)));
+    async missing => visibilityRows(missing, await ledgerReadOffThread(ledger, ledger.visibilityReadSteps(missing, options), ASK_LEDGER_READS)),
+    () => ledger.writesHeld());
   return visibilityFromRows(rows);
 }
 
