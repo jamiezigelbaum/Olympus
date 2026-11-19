@@ -4,9 +4,12 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { Database } from 'bun:sqlite';
 import { afterEach, describe, expect, test } from 'bun:test';
 import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
+import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
+import { FIXTURE_PLACEMENT, fixtureConnector, identityOf, openTierFixture, tempDir } from './helpers/tier-fixtures.ts';
 import { setStatusPageKeysForTests } from '../src/workers/connector-store/local-index.ts';
 
 const ACCOUNT = 'personal';
@@ -188,5 +191,113 @@ describe('status handler', () => {
     } finally {
       store.close();
     }
+  });
+});
+
+describe('store visibility marker', () => {
+  async function open() {
+    const tmp = tempDir();
+    roots.push(tmp.dir);
+    const fixture = openTierFixture(tmp.dir, { embed: false });
+    await fixture.set.sync(fixtureConnector(() => [{ id: 'parent', name: 'Parent', text: 'Synthetic parent body.' }]),
+      { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    return fixture;
+  }
+
+  test('a tier move leaves a third store unchanged, and unchanged feed cursors survive reopening', async () => {
+    const fixture = await open();
+    try {
+      const store = fixture.stores.internal!;
+      const quiet = fileStore();
+      const reopenOptions = { dbPath: quiet.dbPath, corpusId: quiet.corpusId, family: 'email' as const,
+        trustDomain: 'internal' as const, tierLedger: fixture.ledger };
+      quiet.close();
+      const idle = new LocalConnectorStore(reopenOptions);
+      try {
+        await idle.syncFromConnector(connector(MAIL), { fetchContent: true });
+        const before = store.visibilityMarker();
+        const unchanged = idle.visibilityMarker();
+        const db = (fixture.ledger as unknown as { db: Database }).db;
+        db.query('UPDATE tier_copies SET embed_hold = embed_hold WHERE corpus_id = ?').run(store.corpusId);
+        expect(store.visibilityMarker()).toBe(before);
+        await moveTieredItem({ set: fixture.set, identity: identityOf('parent'), target: { metadataTier: 'secure', contentTier: 'secure' } });
+        expect(store.visibilityMarker()).not.toBe(before);
+        expect(idle.visibilityMarker()).toBe(unchanged);
+      } finally { idle.close(); }
+      const reopened = new LocalConnectorStore(reopenOptions);
+      const baseline = reopened.visibilityMarker();
+      reopened.close();
+      const { TierLedger } = await import('../src/workers/classification/tier-ledger.ts');
+      const ledger = new TierLedger({ dbPath: fixture.ledger.dbPath });
+      const again = new LocalConnectorStore({ ...reopenOptions, tierLedger: ledger });
+      try { expect(again.visibilityMarker()).toBe(baseline); } finally { again.close(); ledger.close(); }
+    } finally { fixture.close(); }
+  });
+
+  test('an ancestor in another store wakes the child store on ledger and parent-row changes', async () => {
+    const fixture = await open();
+    try {
+      const parent = fixture.stores.internal!;
+      const child = fixture.stores.secure_local!;
+      const identity = identityOf('parent#child:one');
+      const copy = parent.exportItemCopy(identityOf('parent'))!;
+      child.importItemCopy({ ...copy, identity, columns: { ...copy.columns,
+        provider_item_id: identity.providerItemId, local_item_id: identity.localItemId,
+        parent_local_item_id: identityOf('parent').localItemId,
+      } }, { trustTier: 'S4', syncConnectorId: 'marker-test' });
+      expect((await child.statusOffThread()).counts.items).toBe(1);
+      const before = child.visibilityMarker();
+      const ledgerDb = (fixture.ledger as unknown as { db: Database }).db;
+      ledgerDb.query("UPDATE tier_copies SET copy_state = 'superseded' WHERE provider_item_id = ?").run('parent');
+      expect(child.visibilityMarker()).not.toBe(before);
+      expect((await child.statusOffThread()).counts.items).toBe(0);
+      ledgerDb.query("UPDATE tier_copies SET copy_state = 'current' WHERE provider_item_id = ?").run('parent');
+      expect((await child.statusOffThread()).counts.items).toBe(1);
+      const restored = child.visibilityMarker();
+      (parent as unknown as { db: Database }).db.query('DELETE FROM items WHERE provider_item_id = ?').run('parent');
+      expect(child.visibilityMarker()).not.toBe(restored);
+      expect((await child.statusOffThread()).counts.items).toBe(0);
+    } finally { fixture.close(); }
+  });
+
+  test('a ledger retention gap wakes a store even if the only retained identity is unrelated', async () => {
+    const fixture = await open();
+    try {
+      const store = fixture.stores.internal!;
+      const before = store.visibilityMarker();
+      const db = (fixture.ledger as unknown as { db: Database }).db;
+      const note = db.query("INSERT INTO tier_visibility_changes (provider, account_scope, conversation_key, provider_item_id) VALUES ('fixture', 'fixture', '', 'unrelated')");
+      note.run();
+      db.exec('DELETE FROM tier_visibility_changes');
+      note.run();
+      const afterGap = store.visibilityMarker();
+      expect(afterGap).not.toBe(before);
+      note.run();
+      db.exec('DELETE FROM tier_visibility_changes WHERE seq = (SELECT MAX(seq) FROM tier_visibility_changes)');
+      expect(store.visibilityMarker()).not.toBe(afterGap);
+    } finally { fixture.close(); }
+  });
+
+  test('a ledger change during count preparation remains due at the next recount', async () => {
+    const fixture = await open();
+    try {
+      const { createSourceIndexStatusHandler, STORE_STATUS_REUSE_MS } = await import('../src/workers/source-index/status.ts');
+      const store = fixture.stores.internal!;
+      let now = 1_000_000;
+      const handler = createSourceIndexStatusHandler({
+        corpusDefinitions: [{ corpusId: store.corpusId, family: 'file', trustDomain: 'internal' } as never],
+        connectorStores: [store], nowMs: () => now, snapshotRole: 'writer',
+      });
+      const prepare = store.prepareStatusCounts.bind(store);
+      store.prepareStatusCounts = async scope => {
+        await prepare(scope);
+        fixture.ledger.putWriteIntent({ identity: identityOf('parent'), kind: 'deletion', connectorId: 'marker-test' });
+        store.prepareStatusCounts = prepare;
+      };
+      const refresh = () => handler.refreshSnapshot!({}, { countsMaxAgeMs: STORE_STATUS_REUSE_MS, reuseCounts: true });
+      expect((await refresh()).corpora[0]).toMatchObject({ counts: { indexed_items: 1 } });
+      now += STORE_STATUS_REUSE_MS - 1;
+      expect((await refresh()).corpora[0]).toMatchObject({ counts: { indexed_items: 0 } });
+    } finally { fixture.close(); }
   });
 });
