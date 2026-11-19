@@ -4,7 +4,7 @@
  * import run through the real runtime and tier lane. Synthetic data only.
  */
 import { Database } from 'bun:sqlite';
-import { existsSync, mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, realpathSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { RawItem, SourceConnector } from '../../src/core/contracts.ts';
@@ -27,6 +27,10 @@ export function writeExport(cleanups: Array<() => void>, name: string, content: 
   const dir = tempFolder(cleanups);
   const path = join(dir, name);
   writeFileSync(path, content);
+  // A whole-second mtime: tests compare a fresh float stat with the time the product
+  // stored, and a fraction near .5 ms rounds differently on the two paths (main f900b142).
+  const saved = Math.floor(Date.now() / 1000);
+  utimesSync(path, saved, saved);
   return { dir, path };
 }
 
