@@ -345,8 +345,10 @@ const AWAITING_TEXT_WHERE = `routed = 1 AND content_read = 0 AND metadata_pendin
           OR (state = 'current' AND EXISTS (SELECT 1 FROM json_each(reasons_json) r
             WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
               OR r.value GLOB 'content:sniffer:*:fail_safe:unread')))`;
-const PERSONAL_FIRST_WHERE = `routed = 1 AND content_pending = 1 AND state != 'moving'
+const PERSONAL_FIRST_WHERE = `routed = 1 AND content_pending = 1
         AND EXISTS (SELECT 1 FROM json_each(reasons_json) r WHERE r.value = ?)`;
+export const PERSONAL_FIRST_SETTLE_CURSOR = 'personal_first_settle_after';
+export const PERSONAL_FIRST_SETTLE_DONE = 'personal_first_settle_done';
 
 /** Rows a window looks at per read: each read stays short on a cold disk (plan thread, 16 Nov: no background read over 1 s). */
 const WINDOW_SLICE_ROWS = 2_000;
@@ -370,7 +372,9 @@ function* windowSteps(
   let lastEnd: Pick<TierItemRow, 'provider' | 'account_scope' | 'conversation_key' | 'provider_item_id'> | undefined;
   for (let examined = 0; examined < examine;) {
     const slice = Math.min(WINDOW_SLICE_ROWS, examine - examined);
-    const keyAfter = after ? 'WHERE (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?)' : '';
+    const keyAfter = after
+      ? 'WHERE (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?)'
+      : "WHERE provider >= ''";
     const rows = (yield {
       sql: `
         SELECT * FROM (
@@ -525,6 +529,7 @@ const UNSETTLED_SECRET_SIDE_STORES_SQL = `
         ON s.provider = i.provider AND s.account_scope = i.account_scope
         AND s.conversation_key = i.conversation_key AND s.provider_item_id = i.provider_item_id
       WHERE (i.metadata_tier = 'secrets' OR i.content_tier = 'secrets')
+        AND i.provider >= ''
         AND (s.cleared_generation IS NOT i.generation OR s.cleared_revision IS NOT s.revision)
         AND NOT EXISTS (
           SELECT 1 FROM secret_side_store_debt d
@@ -839,6 +844,7 @@ export class TierLedger {
   private readonly db: Database;
   private readonly readOnly: boolean;
   private readonly now: () => Date;
+  private settleProgressChanges = 0;
 
   constructor(options: TierLedgerOptions) {
     this.dbPath = options.dbPath;
@@ -1461,17 +1467,18 @@ export class TierLedger {
   *rejudgeCandidatePageSteps(options: RejudgePageOptions): Generator<LedgerRead, RejudgePage, unknown> {
     const limit = Math.max(1, Math.min(options.limit ?? 100, 5_000));
     const scanLimit = Math.max(limit, Math.min(options.scanLimit ?? DEFAULT_REJUDGE_SCAN_ROWS, 50_000));
-    const after = options.after
-      ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId]
-      : null;
+    const after = options.after ? idParams(options.after) : [];
+    const lowerBound = options.after
+      ? '(provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?)'
+      : "provider >= ''";
     const rows = (yield {
       mode: 'all',
       sql: rejudgeCandidateSql(`
         SELECT * FROM tier_items
-        WHERE (? IS NULL OR (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?))
+        WHERE ${lowerBound}
         ORDER BY provider, account_scope, conversation_key, provider_item_id
         LIMIT ?`),
-      params: [after ? 1 : null, ...(after ?? [null, null, null, null]), scanLimit, ...rejudgeCandidateParams(options)],
+      params: [...after, scanLimit, ...rejudgeCandidateParams(options)],
     }) as RejudgeCandidateRow[];
     const records: TierLedgerRecord[] = [];
     const causes: TierRejudgeCause[] = [];
@@ -2117,7 +2124,7 @@ export class TierLedger {
         INSERT INTO known_job_ledgers (path, seen_at) VALUES (?, ?)
         ON CONFLICT (path) DO UPDATE SET seen_at = excluded.seen_at
       `);
-      for (const path of paths) upsert.run(path, now);
+      for (const path of paths) this.settleProgressChanges += upsert.run(path, now).changes;
     })();
   }
 
@@ -2519,11 +2526,20 @@ export class TierLedger {
   }
 
   writeMeta(key: string, value: string): void {
+    this.setMeta(key, value);
+  }
+
+  /** A walk's own checkpoint does not invalidate a judge's clean lap. */
+  writeSettleProgress(key: string, value: string): void {
+    this.settleProgressChanges += this.setMeta(key, value);
+  }
+
+  private setMeta(key: string, value: string): number {
     if (key === 'ledger_id') throw new Error('The ledger identity is never rewritten.');
-    this.db.query(`
+    return this.db.query(`
       INSERT INTO tier_ledger_meta (key, value) VALUES (?, ?)
-      ON CONFLICT(key) DO UPDATE SET value = excluded.value
-    `).run(key, value);
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE value <> excluded.value
+    `).run(key, value).changes;
   }
 
   deleteMeta(key: string): void {
@@ -4266,10 +4282,10 @@ export class TierLedger {
    * Changes whenever this ledger's database changes, from this connection or
    * another: lets a reader reuse what it derived from the ledger until then.
    */
-  changeMarker(): string {
+  changeMarker(options: { ignoreSettleProgress?: boolean } = {}): string {
     const row = this.db.query('SELECT total_changes() AS changes').get() as { changes: number };
     const version = this.db.query('PRAGMA data_version').get() as { data_version: number };
-    return `${version.data_version}:${row.changes}`;
+    return `${version.data_version}:${row.changes - (options.ignoreSettleProgress ? this.settleProgressChanges : 0)}`;
   }
 
   /**
@@ -6070,6 +6086,8 @@ function tierLedgerMigrations(): SqliteMigration[] {
       version: 13,
       name: 'hold_personal_first_copies',
       up(db) {
+        db.query('DELETE FROM tier_ledger_meta WHERE key IN (?, ?)')
+          .run(PERSONAL_FIRST_SETTLE_CURSOR, PERSONAL_FIRST_SETTLE_DONE);
         db.query(`
           UPDATE tier_copies SET embed_hold = 1
           WHERE copy_state = 'current' AND embed_hold = 0 AND EXISTS (

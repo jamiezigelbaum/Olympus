@@ -10086,33 +10086,47 @@ export class LocalConnectorStore {
    * never-checked judgments first, then those that have waited longest, so
    * judgments whose items are not ready cannot starve the rest.
    */
-  unappliedMediaJudgments(limit = 200): Array<{
-    mediaSha256: string;
-    judgment: MediaJudgment;
-    items: Array<Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>>;
-  }> {
+  unappliedMediaJudgments(limit = 200): Array<NonNullable<ReturnType<LocalConnectorStore['mediaJudgmentEntry']>>> {
     if (!this.mediaJudgmentsPresent || !this.chunkMediaColumnsPresent) return [];
     const rows = this.db.query(`
       SELECT media_sha256 FROM media_judgments WHERE tier_applied = 0
       ORDER BY tier_checked_at IS NOT NULL, tier_checked_at, media_sha256 LIMIT ?
     `).all(Math.max(1, limit)) as Array<{ media_sha256: string }>;
-    return rows.flatMap((row) => {
-      const judgment = this.mediaJudgment(row.media_sha256);
-      if (!judgment) return [];
-      const items = (this.db.query(`
-        SELECT DISTINCT i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id
-        FROM chunks c JOIN items i ON i.item_pk = c.item_pk
-        WHERE c.media_sha256 = ? AND i.tombstoned = 0
-      `).all(row.media_sha256) as Array<{
-        provider: string; account_scope: string; provider_item_id: string; provider_conversation_id: string | null;
-      }>).map((item) => ({
-        provider: item.provider,
-        accountScope: item.account_scope,
-        providerItemId: item.provider_item_id,
-        ...(item.provider_conversation_id ? { providerConversationId: item.provider_conversation_id } : {}),
-      }));
-      return [{ mediaSha256: row.media_sha256, judgment, items }];
-    });
+    return rows.flatMap(row => this.mediaJudgmentEntry(row.media_sha256) ?? []);
+  }
+
+  /** The background walk pages through the unapplied index in digest order. */
+  async unappliedMediaJudgmentKeys(after: string, limit: number): Promise<string[]> {
+    if (!this.mediaJudgmentsPresent || !this.chunkMediaColumnsPresent) return [];
+    const sql = `SELECT media_sha256 FROM media_judgments
+      WHERE tier_applied = 0 AND media_sha256 > ? ORDER BY media_sha256 LIMIT ?`;
+    const rows = (offThreadReadsSupported(this.dbPath)
+      ? await readInBackground(this.dbPath, { sql, params: [after, limit], mode: 'all' })
+      : this.db.query(sql).all(after, limit)) as Array<{ media_sha256: string }>;
+    return rows.map(row => row.media_sha256);
+  }
+
+  /** Read the current verdict and the active items carrying this picture. */
+  mediaJudgmentEntry(mediaSha256: string): {
+    mediaSha256: string;
+    judgment: MediaJudgment;
+    items: Array<Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>>;
+  } | undefined {
+    const judgment = this.mediaJudgment(mediaSha256);
+    if (!judgment) return undefined;
+    const items = (this.db.query(`
+      SELECT DISTINCT i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id
+      FROM chunks c JOIN items i ON i.item_pk = c.item_pk
+      WHERE c.media_sha256 = ? AND i.tombstoned = 0
+    `).all(mediaSha256) as Array<{
+      provider: string; account_scope: string; provider_item_id: string; provider_conversation_id: string | null;
+    }>).map((item) => ({
+      provider: item.provider,
+      accountScope: item.account_scope,
+      providerItemId: item.provider_item_id,
+      ...(item.provider_conversation_id ? { providerConversationId: item.provider_conversation_id } : {}),
+    }));
+    return { mediaSha256, judgment, items };
   }
 
   /**

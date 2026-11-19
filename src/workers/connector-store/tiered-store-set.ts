@@ -239,7 +239,7 @@ export interface TieredStoreSetOptions {
    * them by the names-only pass, exactly like an item under a store's own
    * metadata-only rule. A throw or absent answer is "no" (#1295).
    */
-  namesOnlyByOwner?: (path: string) => boolean;
+  namesOnlyByOwner?: ((path: string, requireReadable?: boolean) => boolean) & { revision?: () => string | undefined };
   /**
    * False for a second set over a lane's stores and ledger that only reads
    * and lands extracted text (it must route exactly as the lane's own set
@@ -310,12 +310,13 @@ export class TieredStoreSet {
   private readonly onLegOpened: TieredStoreSetOptions['onLegOpened'];
   private readonly contentArrivesLater: boolean;
   private readonly contentArrivesLaterFor: ((item: RawItem) => boolean) | undefined;
-  private readonly namesOnlyByOwner: ((path: string) => boolean) | undefined;
+  private readonly namesOnlyByOwner: TieredStoreSetOptions['namesOnlyByOwner'];
   private privateEmbedder: SourceEmbeddingProvider | undefined;
   private privateEmbedWith: (() => SourceEmbeddingProvider | undefined) | undefined;
   private lastRowRehome: TierRowRehomeReport | undefined;
 
   private lastLowerContentRepairAt: number;
+  private lastLowerContentRepairResult?: 'read_failed' | 'more_rows' | 'changed' | 'no_work';
   private lowerContentRepair: Promise<void> | undefined;
 
   constructor(options: TieredStoreSetOptions) {
@@ -604,21 +605,36 @@ export class TieredStoreSet {
     if (now - this.lastLowerContentRepairAt < LOWER_CONTENT_REPAIR_INTERVAL_MS) return Promise.resolve();
     this.lastLowerContentRepairAt = now;
     try {
-      purgeLowerTierContent(this, { maintenance: true,
+      const report = purgeLowerTierContent(this, { maintenance: true,
         ...(options.embeddingLedger ? { embeddingLedger: options.embeddingLedger } : {}),
         log: (corpus, copies, chunks) => {
           if (chunks > 0) console.info(`[tier-content-purge] corpus=${corpus} copies=${copies} chunks=${chunks}`);
         },
       });
+      this.lastLowerContentRepairResult = report.failed > 0 ? 'read_failed'
+        : !report.complete ? 'more_rows' : report.purged + report.resumed > 0 ? 'changed' : 'no_work';
       const pending = flushTierMoveNotes(this.ledger).catch(() => {
         // The flip's durable note obligation stays pending for maintenance.
+        this.lastLowerContentRepairResult = 'read_failed';
       }).finally(() => { this.lowerContentRepair = undefined; });
       this.lowerContentRepair = pending;
       return pending;
     } catch {
       // Startup and sync remain available; maintenance retries the page.
+      this.lastLowerContentRepairResult = 'read_failed';
       return Promise.resolve();
     }
+  }
+
+  /** Historical repair and interrupted move receipts use their maintenance cadence. */
+  lowerContentRepairHealth(): { lastRanAt: string; lastResult: NonNullable<TieredStoreSet['lastLowerContentRepairResult']>; reason: 'working' | 'idle_unchanged' } | undefined {
+    const lastResult = this.lastLowerContentRepairResult;
+    if (!lastResult) return undefined;
+    return {
+      lastRanAt: new Date(this.lastLowerContentRepairAt).toISOString(),
+      lastResult,
+      reason: this.lowerContentRepair || lastResult === 'more_rows' || lastResult === 'read_failed' ? 'working' : 'idle_unchanged',
+    };
   }
 
   /**
@@ -782,13 +798,19 @@ export class TieredStoreSet {
    * @internal Whether the owner's own folder choice keeps this path
    * names-only (options.namesOnlyByOwner). No path, no answer, or a throw: no.
    */
-  ownerKeepsNamesOnly(path: string | undefined): boolean {
+  ownerKeepsNamesOnly(path: string | undefined, requireReadable = false): boolean {
     if (!this.namesOnlyByOwner || !path) return false;
     try {
-      return this.namesOnlyByOwner(path) === true;
-    } catch {
+      return this.namesOnlyByOwner(path, requireReadable) === true;
+    } catch (error) {
+      if (requireReadable) throw error;
       return false;
     }
+  }
+
+  /** An unversioned or unreadable owner policy cannot prove a clean lap. */
+  namesOnlyOwnerRevision(): string | undefined {
+    return this.namesOnlyByOwner ? this.namesOnlyByOwner.revision?.() : '';
   }
 
   /** @internal The tier a routed copy in this domain's leg is stored at. */
@@ -1405,7 +1427,7 @@ export interface TieredLaneSetOptions {
   /** See TieredStoreSetOptions.contentArrivesLaterFor. */
   contentArrivesLaterFor?: (item: RawItem) => boolean;
   /** See TieredStoreSetOptions.namesOnlyByOwner. */
-  namesOnlyByOwner?: (path: string) => boolean;
+  namesOnlyByOwner?: TieredStoreSetOptions['namesOnlyByOwner'];
 }
 
 /**

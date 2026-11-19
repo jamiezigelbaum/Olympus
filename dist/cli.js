@@ -41892,6 +41892,9 @@ class TierSnifferStore {
   db;
   now;
   readOnly;
+  workCountMarker;
+  workCounts = new Map;
+  scanProgressChanges = 0;
   trainingReads;
   constructor(options) {
     this.trainingReads = new Map;
@@ -42029,10 +42032,10 @@ class TierSnifferStore {
       ...row.content_hash ? { contentHash: row.content_hash } : {}
     } : undefined;
   }
-  changeMarker() {
+  changeMarker(options = {}) {
     const own = this.db.query("SELECT total_changes() AS changes").get();
     const external = this.db.query("PRAGMA data_version").get();
-    return `${external.data_version}:${own.changes}`;
+    return `${external.data_version}:${own.changes - (options.ignoreScanProgress ? this.scanProgressChanges : 0)}`;
   }
   enqueue(question) {
     const materialHash = question.materialHash ?? snifferMaterialHash(question.pass, question.material);
@@ -42108,7 +42111,7 @@ class TierSnifferStore {
             return [question];
         }
         cursor = null;
-        this.db.query("DELETE FROM sniffer_scan WHERE scan_key = ?").run(key);
+        this.scanProgressChanges += this.db.query("DELETE FROM sniffer_scan WHERE scan_key = ?").run(key).changes;
       }
       const filters = [];
       const params = [];
@@ -42137,13 +42140,13 @@ class TierSnifferStore {
         const last = rows.at(-1);
         if (oldest && found[0]) {
           const candidate = found[0];
-          this.db.query(`INSERT OR REPLACE INTO sniffer_scan
-            (scan_key, conversation_order, priority, queued_at, question_pk, candidate_pk) VALUES (?, ?, ?, ?, ?, ?)`).run(key, candidate.conversationOrder ?? 0, candidate.priority, candidate.queuedAt, candidate.sequence, candidate.sequence);
+          this.scanProgressChanges += this.db.query(`INSERT OR REPLACE INTO sniffer_scan
+            (scan_key, conversation_order, priority, queued_at, question_pk, candidate_pk) VALUES (?, ?, ?, ?, ?, ?)`).run(key, candidate.conversationOrder ?? 0, candidate.priority, candidate.queuedAt, candidate.sequence, candidate.sequence).changes;
         } else if (found.length === 0 && rows.length === scanLimit && last) {
-          this.db.query(`INSERT OR REPLACE INTO sniffer_scan
-            (scan_key, conversation_order, priority, queued_at, question_pk) VALUES (?, ?, ?, ?, ?)`).run(key, last.conversation_order, last.priority, last.queued_at, last.question_pk);
+          this.scanProgressChanges += this.db.query(`INSERT OR REPLACE INTO sniffer_scan
+            (scan_key, conversation_order, priority, queued_at, question_pk) VALUES (?, ?, ?, ?, ?)`).run(key, last.conversation_order, last.priority, last.queued_at, last.question_pk).changes;
         } else
-          this.db.query("DELETE FROM sniffer_scan WHERE scan_key = ?").run(key);
+          this.scanProgressChanges += this.db.query("DELETE FROM sniffer_scan WHERE scan_key = ?").run(key).changes;
       }
       return found;
     };
@@ -42198,10 +42201,21 @@ class TierSnifferStore {
         AND material_hash = ? AND map_revision = ?`).run(snifferId, ...subjectParams(question), question.pass, question.materialHash, question.mapRevision);
   }
   questionWorkCounts(snifferId) {
-    return this.db.query(`SELECT
+    const marker = this.changeMarker({ ignoreScanProgress: true });
+    if (marker !== this.workCountMarker || this.db.inTransaction) {
+      this.workCounts.clear();
+      this.workCountMarker = this.db.inTransaction ? undefined : marker;
+    }
+    const cached = this.workCounts.get(snifferId);
+    if (cached)
+      return { ...cached };
+    const counts = this.db.query(`SELECT
       COUNT(CASE WHEN held_sniffer_id IS NULL OR held_sniffer_id != ? THEN 1 END) AS unanswered,
       COUNT(CASE WHEN held_sniffer_id = ? THEN 1 END) AS heldLowering
       FROM sniffer_questions`).get(snifferId, snifferId);
+    if (this.workCountMarker !== undefined)
+      this.workCounts.set(snifferId, counts);
+    return { ...counts };
   }
   verdictCount() {
     return this.db.query("SELECT COUNT(*) AS n FROM sniffer_verdicts").get().n;
@@ -42543,7 +42557,7 @@ function* windowSteps(where, params, options) {
   let lastEnd;
   for (let examined = 0;examined < examine; ) {
     const slice = Math.min(WINDOW_SLICE_ROWS, examine - examined);
-    const keyAfter = after ? "WHERE (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?)" : "";
+    const keyAfter = after ? "WHERE (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?)" : "WHERE provider >= ''";
     const rows = yield {
       sql: `
         SELECT * FROM (
@@ -42720,6 +42734,7 @@ class TierLedger {
   db;
   readOnly;
   now;
+  settleProgressChanges = 0;
   constructor(options) {
     this.dbPath = options.dbPath;
     this.readOnly = options.readOnly === true;
@@ -43113,15 +43128,16 @@ class TierLedger {
   *rejudgeCandidatePageSteps(options) {
     const limit = Math.max(1, Math.min(options.limit ?? 100, 5000));
     const scanLimit = Math.max(limit, Math.min(options.scanLimit ?? DEFAULT_REJUDGE_SCAN_ROWS, 50000));
-    const after = options.after ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId] : null;
+    const after = options.after ? idParams(options.after) : [];
+    const lowerBound = options.after ? "(provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?)" : "provider >= ''";
     const rows = yield {
       mode: "all",
       sql: rejudgeCandidateSql(`
         SELECT * FROM tier_items
-        WHERE (? IS NULL OR (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?))
+        WHERE ${lowerBound}
         ORDER BY provider, account_scope, conversation_key, provider_item_id
         LIMIT ?`),
-      params: [after ? 1 : null, ...after ?? [null, null, null, null], scanLimit, ...rejudgeCandidateParams(options)]
+      params: [...after, scanLimit, ...rejudgeCandidateParams(options)]
     };
     const records = [];
     const causes = [];
@@ -43540,7 +43556,7 @@ class TierLedger {
         ON CONFLICT (path) DO UPDATE SET seen_at = excluded.seen_at
       `);
       for (const path of paths)
-        upsert.run(path, now);
+        this.settleProgressChanges += upsert.run(path, now).changes;
     })();
   }
   knownJobLedgerPaths() {
@@ -43806,12 +43822,18 @@ class TierLedger {
     return row?.value;
   }
   writeMeta(key, value) {
+    this.setMeta(key, value);
+  }
+  writeSettleProgress(key, value) {
+    this.settleProgressChanges += this.setMeta(key, value);
+  }
+  setMeta(key, value) {
     if (key === "ledger_id")
       throw new Error("The ledger identity is never rewritten.");
-    this.db.query(`
+    return this.db.query(`
       INSERT INTO tier_ledger_meta (key, value) VALUES (?, ?)
-      ON CONFLICT(key) DO UPDATE SET value = excluded.value
-    `).run(key, value);
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE value <> excluded.value
+    `).run(key, value).changes;
   }
   deleteMeta(key) {
     if (key === "ledger_id")
@@ -44908,10 +44930,10 @@ class TierLedger {
   corpusHasCopies(corpusId) {
     return this.db.query("SELECT 1 FROM tier_copies WHERE corpus_id = ? LIMIT 1").get(corpusId) !== null;
   }
-  changeMarker() {
+  changeMarker(options = {}) {
     const row = this.db.query("SELECT total_changes() AS changes").get();
     const version = this.db.query("PRAGMA data_version").get();
-    return `${version.data_version}:${row.changes}`;
+    return `${version.data_version}:${row.changes - (options.ignoreSettleProgress ? this.settleProgressChanges : 0)}`;
   }
   visibilityChangesSince(after) {
     return this.db.transaction(() => {
@@ -46161,6 +46183,7 @@ function tierLedgerMigrations() {
       version: 13,
       name: "hold_personal_first_copies",
       up(db) {
+        db.query("DELETE FROM tier_ledger_meta WHERE key IN (?, ?)").run(PERSONAL_FIRST_SETTLE_CURSOR, PERSONAL_FIRST_SETTLE_DONE);
         db.query(`
           UPDATE tier_copies SET embed_hold = 1
           WHERE copy_state = 'current' AND embed_hold = 0 AND EXISTS (
@@ -46243,8 +46266,8 @@ var TIER_LEDGER_SCHEMA_VERSION = 16, RETIRED_EMBEDDING_CLEARANCE_REASON = "conte
         AND ((state = 'pending' AND content_pending = 1)
           OR (state = 'current' AND EXISTS (SELECT 1 FROM json_each(reasons_json) r
             WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
-              OR r.value GLOB 'content:sniffer:*:fail_safe:unread')))`, PERSONAL_FIRST_WHERE = `routed = 1 AND content_pending = 1 AND state != 'moving'
-        AND EXISTS (SELECT 1 FROM json_each(reasons_json) r WHERE r.value = ?)`, WINDOW_SLICE_ROWS = 2000, LIST_ROUTED_OVERRIDES_SQL = `
+              OR r.value GLOB 'content:sniffer:*:fail_safe:unread')))`, PERSONAL_FIRST_WHERE = `routed = 1 AND content_pending = 1
+        AND EXISTS (SELECT 1 FROM json_each(reasons_json) r WHERE r.value = ?)`, PERSONAL_FIRST_SETTLE_CURSOR = "personal_first_settle_after", PERSONAL_FIRST_SETTLE_DONE = "personal_first_settle_done", WINDOW_SLICE_ROWS = 2000, LIST_ROUTED_OVERRIDES_SQL = `
       SELECT i.*, o.override_json AS override_json FROM tier_overrides o
       CROSS JOIN tier_items i
         ON i.provider = o.provider AND i.account_scope = o.account_scope
@@ -46271,6 +46294,7 @@ var TIER_LEDGER_SCHEMA_VERSION = 16, RETIRED_EMBEDDING_CLEARANCE_REASON = "conte
         ON s.provider = i.provider AND s.account_scope = i.account_scope
         AND s.conversation_key = i.conversation_key AND s.provider_item_id = i.provider_item_id
       WHERE (i.metadata_tier = 'secrets' OR i.content_tier = 'secrets')
+        AND i.provider >= ''
         AND (s.cleared_generation IS NOT i.generation OR s.cleared_revision IS NOT s.revision)
         AND NOT EXISTS (
           SELECT 1 FROM secret_side_store_debt d
@@ -59503,7 +59527,7 @@ function* rejudgeSteps(options) {
   const { set } = options;
   const classification = set.classification();
   if (!classification?.sniffer || classification.unavailableReason || classification.sniffer.rejudgeReady === false)
-    return { report };
+    return { report, complete: false };
   const ledger = set.ledger;
   const limit = Math.max(1, options.limit ?? DEFAULT_TIER_REJUDGE_PER_PASS);
   const key = { engineVersion: TIER_CLASSIFIER_VERSION, snifferId: classification.sniffer.id };
@@ -59537,7 +59561,7 @@ function* rejudgeSteps(options) {
     ledger.advanceRecheck(request, scoped.next);
   }
   if (budget <= 0)
-    return { report, ...options.after ? { next: options.after } : {} };
+    return { report, complete: false, ...options.after ? { next: options.after } : {} };
   const pageOptions = { ...key, ...options.after ? { after: options.after } : {}, limit: budget };
   const page = yield { find: ledgerFinderAfterHold(ledger, () => ledger.rejudgeCandidatePageSteps(pageOptions)) };
   report.builtinPromptSkipped = page.builtinPromptSkipped;
@@ -59561,7 +59585,7 @@ function* rejudgeSteps(options) {
       report.failed += 1;
     }
   }
-  return { report, ...page.next ? { next: page.next } : {} };
+  return { report, complete: page.next === undefined, ...page.next ? { next: page.next } : {} };
 }
 function rechecks(record) {
   return record.routed && record.contentRead && record.state === "current" && record.contentTier !== "secrets" && record.decidedBy !== "override";
@@ -73797,22 +73821,31 @@ ${parentKey(ref)}`, { ref, origin });
       SELECT media_sha256 FROM media_judgments WHERE tier_applied = 0
       ORDER BY tier_checked_at IS NOT NULL, tier_checked_at, media_sha256 LIMIT ?
     `).all(Math.max(1, limit));
-      return rows.flatMap((row) => {
-        const judgment = this.mediaJudgment(row.media_sha256);
-        if (!judgment)
-          return [];
-        const items = this.db.query(`
-        SELECT DISTINCT i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id
-        FROM chunks c JOIN items i ON i.item_pk = c.item_pk
-        WHERE c.media_sha256 = ? AND i.tombstoned = 0
-      `).all(row.media_sha256).map((item) => ({
-          provider: item.provider,
-          accountScope: item.account_scope,
-          providerItemId: item.provider_item_id,
-          ...item.provider_conversation_id ? { providerConversationId: item.provider_conversation_id } : {}
-        }));
-        return [{ mediaSha256: row.media_sha256, judgment, items }];
-      });
+      return rows.flatMap((row) => this.mediaJudgmentEntry(row.media_sha256) ?? []);
+    }
+    async unappliedMediaJudgmentKeys(after, limit) {
+      if (!this.mediaJudgmentsPresent || !this.chunkMediaColumnsPresent)
+        return [];
+      const sql = `SELECT media_sha256 FROM media_judgments
+      WHERE tier_applied = 0 AND media_sha256 > ? ORDER BY media_sha256 LIMIT ?`;
+      const rows = offThreadReadsSupported(this.dbPath) ? await readInBackground(this.dbPath, { sql, params: [after, limit], mode: "all" }) : this.db.query(sql).all(after, limit);
+      return rows.map((row) => row.media_sha256);
+    }
+    mediaJudgmentEntry(mediaSha256) {
+      const judgment = this.mediaJudgment(mediaSha256);
+      if (!judgment)
+        return;
+      const items = this.db.query(`
+      SELECT DISTINCT i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id
+      FROM chunks c JOIN items i ON i.item_pk = c.item_pk
+      WHERE c.media_sha256 = ? AND i.tombstoned = 0
+    `).all(mediaSha256).map((item) => ({
+        provider: item.provider,
+        accountScope: item.account_scope,
+        providerItemId: item.provider_item_id,
+        ...item.provider_conversation_id ? { providerConversationId: item.provider_conversation_id } : {}
+      }));
+      return { mediaSha256, judgment, items };
     }
     markMediaJudgmentsWaiting(mediaSha256s) {
       if (!this.mediaJudgmentsPresent || mediaSha256s.length === 0)
@@ -100791,13 +100824,13 @@ function settleNamesOnlyItemsOffThread(options) {
   return runPassOffThread(namesOnlySettlePass(options), { family: "names-only-settle", ...options.turn ? { turn: options.turn } : {} });
 }
 function* namesOnlySettlePass(options) {
-  const report = { checked: 0, settled: 0 };
+  const report = { checked: 0, settled: 0, failed: 0 };
   const { set } = options;
   if (!set.readsContentLater())
     return report;
   const ledger = set.ledger;
   const limit = Math.max(1, options.limit ?? DEFAULT_NAMES_ONLY_SETTLE_ROWS);
-  const after = parseTierLedgerIdentity(ledger.readMeta(SETTLE_META_KEY));
+  const after = options.cursor ? options.cursor.after : parseTierLedgerIdentity(ledger.readMeta(SETTLE_META_KEY));
   const { records: rows, resumeAfter } = yield* findInLedger(ledger, () => ledger.listAwaitingTextWindowSteps({ limit, ...after ? { after } : {} }));
   for (const found of rows) {
     yield* turn();
@@ -100806,11 +100839,19 @@ function* namesOnlySettlePass(options) {
     if (!record?.routed || record.contentRead || record.metadataPending || record.state === "moving")
       continue;
     try {
-      if (settleOne(set, record))
+      const outcome = settleOne(set, record);
+      if (outcome === "unreadable")
+        report.failed += 1;
+      else if (outcome)
         report.settled += 1;
-    } catch {}
+    } catch {
+      report.failed += 1;
+    }
   }
-  ledger.writeMeta(SETTLE_META_KEY, resumeAfter ? JSON.stringify(resumeAfter) : "");
+  if (resumeAfter)
+    report.next = resumeAfter;
+  if (!options.cursor)
+    ledger.writeSettleProgress(SETTLE_META_KEY, resumeAfter ? JSON.stringify(resumeAfter) : "");
   return report;
 }
 function settleOne(set, record) {
@@ -100823,7 +100864,7 @@ function settleOne(set, record) {
   const store = domain ? set.store(domain) : undefined;
   const exported = store?.exportItemCopy(identity);
   if (!store || !exported)
-    return false;
+    return names ? "unreadable" : false;
   const localId = exported.columns["local_item_id"];
   if (typeof localId === "string" && store.readOnDemand(localId))
     return false;
@@ -100831,7 +100872,7 @@ function settleOne(set, record) {
   const mimeType = exported.columns["mime_type"];
   const container = typeof mimeType === "string" && CONTAINER_MIME_TYPES.includes(mimeType.trim().toLowerCase());
   const path = typeof locator === "string" ? locator : undefined;
-  if (!container && store.metadataOnlyRuleForLocator(path) === undefined && !set.ownerKeepsNamesOnly(path))
+  if (!container && store.metadataOnlyRuleForLocator(path) === undefined && !set.ownerKeepsNamesOnly(path, true))
     return false;
   const decision = {
     metadataTier: record.metadataTier,
@@ -100867,11 +100908,15 @@ function settlePersonalFirstItemsOffThread(options) {
   return runPassOffThread(personalFirstSettlePass(options), { family: "personal-first-settle", ...options.turn ? { turn: options.turn } : {} });
 }
 function* personalFirstSettlePass(options) {
-  const report = { checked: 0, settled: 0, movesQueued: 0 };
+  const report = { checked: 0, settled: 0, movesQueued: 0, failed: 0, retired: false };
   const { set } = options;
   const ledger = set.ledger;
+  if (ledger.readMeta(PERSONAL_FIRST_SETTLE_DONE) === "1")
+    return { ...report, retired: true };
   const limit = Math.max(1, options.limit ?? DEFAULT_HELD_SETTLE_ROWS);
-  const after = parseTierLedgerIdentity(ledger.readMeta(SETTLE_META_KEY2));
+  const saved = ledger.readMeta(PERSONAL_FIRST_SETTLE_CURSOR) ?? "";
+  const tracked = saved.startsWith("0:") || saved.startsWith("1:");
+  const after = tracked ? parseTierLedgerIdentity(saved.slice(2)) : undefined;
   const { records, resumeAfter } = yield* findInLedger(ledger, () => ledger.listPersonalFirstWindowSteps({ limit, ...after ? { after } : {} }));
   for (const found of records) {
     yield* turn();
@@ -100885,9 +100930,16 @@ function* personalFirstSettlePass(options) {
         report.movesQueued += 1;
       if (outcome === "queued_move" || outcome === "updated" || outcome === "unchanged")
         report.settled += 1;
-    } catch {}
+    } catch {
+      report.failed += 1;
+    }
   }
-  ledger.writeMeta(SETTLE_META_KEY2, resumeAfter ? JSON.stringify(resumeAfter) : "");
+  const matched = after !== undefined && saved.startsWith("1:") || report.checked > 0;
+  ledger.writeSettleProgress(PERSONAL_FIRST_SETTLE_CURSOR, resumeAfter ? `${Number(matched)}:${JSON.stringify(resumeAfter)}` : "");
+  if (!resumeAfter && !matched) {
+    ledger.writeSettleProgress(PERSONAL_FIRST_SETTLE_DONE, "1");
+    report.retired = true;
+  }
   return report;
 }
 function settleOne2(set, record) {
@@ -100912,7 +100964,7 @@ function settleOne2(set, record) {
     guard: { generation: record.generation, override: set.ledger.getOverride(identity) }
   }).outcome;
 }
-var DEFAULT_HELD_SETTLE_ROWS = 500, SETTLE_META_KEY2 = "personal_first_settle_after";
+var DEFAULT_HELD_SETTLE_ROWS = 500;
 var init_tier_held_settle = __esm(() => {
   init_tier_classifier();
   init_tier_ledger();
@@ -100921,7 +100973,7 @@ var init_tier_held_settle = __esm(() => {
 
 // src/workers/connector-store/tier-content-purge.ts
 function purgeLowerTierContent(set, options = {}) {
-  const report = { checked: 0, purged: 0, resumed: 0, failed: 0 };
+  const report = { checked: 0, purged: 0, resumed: 0, failed: 0, complete: false };
   const limit = Math.max(1, Math.min(options.limit ?? LOWER_CONTENT_PURGE_BATCH, LOWER_CONTENT_PURGE_BATCH));
   const note = options.embeddingLedger ?? { path: resolveEmbeddingLedgerPath(), approvedBy: "system-automatic" };
   const resumed = new Set;
@@ -100944,9 +100996,10 @@ function purgeLowerTierContent(set, options = {}) {
       report.failed++;
     }
   }
-  set.ledger.writeMeta(RECEIPT_CURSOR, receipts.at(-1)?.key ?? "");
+  set.ledger.writeSettleProgress(RECEIPT_CURSOR, receipts.at(-1)?.key ?? "");
+  const receiptsComplete = receipts.length < receiptBudget;
   if (options.maintenance && set.ledger.readMeta(DONE) === "1")
-    return report;
+    return { ...report, complete: receiptsComplete };
   const raw = set.ledger.readMeta(CURSOR);
   const after = raw ? JSON.parse(raw) : undefined;
   const stores = ["public_safe", "internal"].flatMap((domain) => {
@@ -101086,19 +101139,21 @@ function purgeLowerTierContent(set, options = {}) {
     }
   }
   if (report.failed)
-    set.ledger.writeMeta(FAILED, "1");
+    set.ledger.writeSettleProgress(FAILED, "1");
   if (remaining > 0) {
     const last = page.at(-1);
     const finished = page.length < remaining || !last;
-    set.ledger.writeMeta(CURSOR, finished ? "" : JSON.stringify({
+    set.ledger.writeSettleProgress(CURSOR, finished ? "" : JSON.stringify({
       provider: last.provider,
       accountScope: last.accountScope,
       providerItemId: last.providerItemId,
       ...last.conversationKey ? { providerConversationId: last.conversationKey } : {}
     }));
     if (finished) {
-      set.ledger.writeMeta(DONE, set.ledger.readMeta(FAILED) === "1" ? "" : "1");
-      set.ledger.writeMeta(FAILED, "");
+      const historyComplete = set.ledger.readMeta(FAILED) !== "1";
+      report.complete = historyComplete && receiptsComplete;
+      set.ledger.writeSettleProgress(DONE, historyComplete ? "1" : "");
+      set.ledger.writeSettleProgress(FAILED, "");
     }
   }
   for (const [corpus, count] of counts)
@@ -101923,14 +101978,15 @@ function applyOwnerOverridesOffThread(options) {
   return run;
 }
 function* applyOwnerOverridesPass(options) {
-  const report = { checked: 0, updated: 0, raised: 0, lowered: 0, secrets: 0, heldMoving: 0, restored: 0 };
+  const report = { checked: 0, updated: 0, raised: 0, lowered: 0, secrets: 0, heldMoving: 0, restored: 0, failed: 0 };
   const { set } = options;
   const ledger = set.ledger;
   let retirePublic = false;
   try {
     retirePublic = set.classification()?.retirePublic === true;
   } catch {}
-  yield* retrySecretSideStoreDebtsPass(ledger);
+  if (options.retrySecrets !== false)
+    yield* retrySecretSideStoreDebtsPass(ledger);
   const overrides = yield* findInLedger(ledger, () => ledger.listRoutedOverridesSteps());
   options.afterRead?.();
   for (const { record, override } of overrides) {
@@ -101940,12 +101996,14 @@ function* applyOwnerOverridesPass(options) {
     report.checked += 1;
     try {
       applyOne(set, record, override.tier, retirePublic, report, { generation: record.generation, override });
-    } catch {}
+    } catch {
+      report.failed += 1;
+    }
   }
   const fingerprint = yield* findInLedger(ledger, () => ledger.clearedOverrideFingerprintSteps());
   const nowMs = (options.nowMs ?? Date.now)();
   const last = clearedChecks.get(ledger);
-  if (!last || last.fingerprint !== fingerprint || nowMs - last.atMs >= CLEARED_RECHECK_MS) {
+  if (options.forceClearedCheck || !last || last.fingerprint !== fingerprint || nowMs - last.atMs >= CLEARED_RECHECK_MS) {
     let failed = false;
     const CLEARED_PAGE = 100;
     for (let after, page;; after = page[page.length - 1]) {
@@ -101958,6 +102016,7 @@ function* applyOwnerOverridesPass(options) {
             report.restored += 1;
         } catch {
           failed = true;
+          report.failed += 1;
         }
       }
       if (page.length < CLEARED_PAGE)
@@ -101968,7 +102027,8 @@ function* applyOwnerOverridesPass(options) {
     else
       clearedChecks.set(ledger, { fingerprint: yield* findInLedger(ledger, () => ledger.clearedOverrideFingerprintSteps()), atMs: nowMs });
   }
-  retireSecretRedactions(ledger);
+  if (options.retrySecrets !== false)
+    retireSecretRedactions(ledger);
   return report;
 }
 function isVerdictReceipt(reason) {
@@ -102518,7 +102578,7 @@ function isIdentity(value) {
   return typeof record === "object" && record !== null && typeof record.provider === "string" && typeof record.accountScope === "string" && typeof record.providerItemId === "string" && (record.providerConversationId === undefined || typeof record.providerConversationId === "string");
 }
 function writeState2(ledger, state) {
-  ledger.writeMeta(SWEEP_META_KEY, JSON.stringify(state));
+  ledger.writeSettleProgress(SWEEP_META_KEY, JSON.stringify(state));
 }
 function sameKeys(left, right) {
   return left.length === right.length && left.every((key, index) => key === right[index]);
@@ -102578,7 +102638,7 @@ function* imageContentSweepPass(options) {
         overflow = true;
     }
   };
-  const save = (next) => ledger.writeMeta(SWEEP_META_KEY2, JSON.stringify(next));
+  const save = (next) => ledger.writeSettleProgress(SWEEP_META_KEY2, JSON.stringify(next));
   if (state.retry) {
     for (const identity of state.held ?? []) {
       yield* turn();
@@ -102691,20 +102751,47 @@ var init_tier_image_content_sweep = __esm(() => {
 });
 
 // src/workers/connector-store/tier-media-judgment-sweep.ts
-function applyMediaJudgmentsOffThread(options) {
-  return runPassOffThread(mediaJudgmentsPass(options), { family: "media-judgments", ...options.turn ? { turn: options.turn } : {} });
+async function applyMediaJudgmentsOffThread(options) {
+  const { cursor } = options;
+  const limit = Math.max(1, options.limit ?? DEFAULT_MEDIA_JUDGMENT_SWEEP_LIMIT);
+  const pages = cursor ? new Map : undefined;
+  if (cursor && pages) {
+    for (const store of options.set.openStores()) {
+      const after = cursor.get(store);
+      if (after !== null)
+        pages.set(store, await store.unappliedMediaJudgmentKeys(after ?? "", limit));
+    }
+  }
+  const report = await runPassOffThread(mediaJudgmentsPass(options, pages), {
+    family: "media-judgments",
+    ...options.turn ? { turn: options.turn } : {}
+  });
+  let complete = true;
+  if (cursor && pages) {
+    for (const [store, keys] of pages) {
+      const next = keys.length === limit ? keys.at(-1) : null;
+      cursor.set(store, next);
+      if (next !== null)
+        complete = false;
+    }
+  }
+  return { ...report, complete };
 }
-function* mediaJudgmentsPass(options) {
+function* mediaJudgmentsPass(options, pages) {
   const report = { ...emptyTierRejudgeReport(), applied: 0, waiting: 0 };
   const { set } = options;
   const ledger = set.ledger;
   const classification = set.classification();
   const limit = Math.max(1, options.limit ?? DEFAULT_MEDIA_JUDGMENT_SWEEP_LIMIT);
   for (const store of set.openStores()) {
-    const page = store.unappliedMediaJudgments(limit);
+    const page = pages ? pages.get(store) ?? [] : store.unappliedMediaJudgments(limit);
     const done = [];
     const waiting = [];
-    for (const entry of page) {
+    for (const found of page) {
+      yield* turn();
+      const entry = typeof found === "string" ? store.mediaJudgmentEntry(found) : found;
+      if (!entry)
+        continue;
       let ready = true;
       for (const identity of entry.items) {
         yield* turn();
@@ -102723,6 +102810,7 @@ function* mediaJudgmentsPass(options) {
           continue;
         }
         try {
+          const failed = report.failed;
           rejudgeStoredContent(set, record, {
             ...classification?.sniffer ? { sniffer: classification.sniffer } : {},
             ...classification?.retirePublic ? { retirePublic: true } : {},
@@ -102730,6 +102818,8 @@ function* mediaJudgmentsPass(options) {
             autoMoves: options.autoMoves === true,
             hideRaises: true
           });
+          if (report.failed !== failed)
+            ready = false;
         } catch {
           report.failed += 1;
           ready = false;
@@ -102741,7 +102831,8 @@ function* mediaJudgmentsPass(options) {
         waiting.push(entry.mediaSha256);
     }
     store.markMediaJudgmentsApplied(done);
-    store.markMediaJudgmentsWaiting(waiting);
+    if (!pages)
+      store.markMediaJudgmentsWaiting(waiting);
     report.waiting += waiting.length;
     report.applied += done.length;
   }
@@ -102961,6 +103052,7 @@ class TieredStoreSet {
   privateEmbedWith;
   lastRowRehome;
   lastLowerContentRepairAt;
+  lastLowerContentRepairResult;
   lowerContentRepair;
   constructor(options) {
     this.lastLowerContentRepairAt = Number.NEGATIVE_INFINITY;
@@ -103176,7 +103268,7 @@ class TieredStoreSet {
       return Promise.resolve();
     this.lastLowerContentRepairAt = now;
     try {
-      purgeLowerTierContent(this, {
+      const report = purgeLowerTierContent(this, {
         maintenance: true,
         ...options.embeddingLedger ? { embeddingLedger: options.embeddingLedger } : {},
         log: (corpus, copies, chunks) => {
@@ -103184,14 +103276,28 @@ class TieredStoreSet {
             console.info(`[tier-content-purge] corpus=${corpus} copies=${copies} chunks=${chunks}`);
         }
       });
-      const pending = flushTierMoveNotes(this.ledger).catch(() => {}).finally(() => {
+      this.lastLowerContentRepairResult = report.failed > 0 ? "read_failed" : !report.complete ? "more_rows" : report.purged + report.resumed > 0 ? "changed" : "no_work";
+      const pending = flushTierMoveNotes(this.ledger).catch(() => {
+        this.lastLowerContentRepairResult = "read_failed";
+      }).finally(() => {
         this.lowerContentRepair = undefined;
       });
       this.lowerContentRepair = pending;
       return pending;
     } catch {
+      this.lastLowerContentRepairResult = "read_failed";
       return Promise.resolve();
     }
+  }
+  lowerContentRepairHealth() {
+    const lastResult = this.lastLowerContentRepairResult;
+    if (!lastResult)
+      return;
+    return {
+      lastRanAt: new Date(this.lastLowerContentRepairAt).toISOString(),
+      lastResult,
+      reason: this.lowerContentRepair || lastResult === "more_rows" || lastResult === "read_failed" ? "working" : "idle_unchanged"
+    };
   }
   sweepSupersededSlice(options = {}) {
     if (writableStoreOpensForbidden())
@@ -103280,14 +103386,19 @@ class TieredStoreSet {
       return false;
     return item === undefined || this.contentArrivesLaterFor(item);
   }
-  ownerKeepsNamesOnly(path) {
+  ownerKeepsNamesOnly(path, requireReadable = false) {
     if (!this.namesOnlyByOwner || !path)
       return false;
     try {
-      return this.namesOnlyByOwner(path) === true;
-    } catch {
+      return this.namesOnlyByOwner(path, requireReadable) === true;
+    } catch (error) {
+      if (requireReadable)
+        throw error;
       return false;
     }
+  }
+  namesOnlyOwnerRevision() {
+    return this.namesOnlyByOwner ? this.namesOnlyByOwner.revision?.() : "";
   }
   restingTierFor(domain) {
     return this.legs.get(domain)?.spec.restingTier ?? defaultStoreTrustTier(domain);
@@ -186555,7 +186666,7 @@ function dropboxScopeAllows(approval, path) {
 }
 function dropboxNamesOnlyByOwner(authority, now = Date.now) {
   let cached;
-  return (path) => {
+  const namesOnly = (path, requireReadable = false) => {
     const at = now();
     if (!cached || at - cached.at >= DROPBOX_NAMES_ONLY_APPROVAL_TTL_MS) {
       cached = { at, ref: authority.policyRef("dropbox.files") };
@@ -186565,8 +186676,10 @@ function dropboxNamesOnlyByOwner(authority, now = Date.now) {
     let approval;
     try {
       approval = authority.assertCurrent(cached.ref);
-    } catch {
+    } catch (error) {
       cached = undefined;
+      if (requireReadable)
+        throw error;
       return false;
     }
     if (approval.status !== "approved")
@@ -186574,6 +186687,14 @@ function dropboxNamesOnlyByOwner(authority, now = Date.now) {
     const allows = dropboxScopeAllows(approval, path);
     return allows.metadata && !allows.content;
   };
+  return Object.assign(namesOnly, {
+    revision: () => {
+      const snapshot = authority.snapshot("dropbox.files");
+      const ref = snapshot.status === "approved" && snapshot.accountGeneration ? { sourceId: snapshot.sourceId, accountGeneration: snapshot.accountGeneration, revision: snapshot.revision } : undefined;
+      cached = { at: now(), ref };
+      return snapshot.reason === "malformed" ? undefined : JSON.stringify([snapshot.status, snapshot.accountGeneration, snapshot.revision]);
+    }
+  });
 }
 function normalizeDropboxScopePath(path) {
   const normalized = path.trim().replace(/\/{2,}/g, "/").toLowerCase();
@@ -244120,7 +244241,8 @@ class TierSnifferService {
   stopped = false;
   ledgers = new Map;
   boundLedgerIds = new Map;
-  rejudgeCursors = new Map;
+  storedWalks = new Map;
+  mediaJudgmentCursors = new WeakMap;
   lastBuiltinPromptSkipLogMs = -Infinity;
   recoveryLedgerOffsets = new Map;
   constructor(options) {
@@ -244294,8 +244416,18 @@ class TierSnifferService {
   }
   backlogFrom(counts) {
     const { checkingItems, remainingQuestions, pendingWithoutQuestion, oldestPendingAgeMs } = counts;
+    const now = this.clockMs();
+    const storedWalks = [...this.storedWalks.values()].map(({ set, walks }) => {
+      const repair = set.lowerContentRepairHealth();
+      const walkers = Object.fromEntries([...walks].map(([name, walk]) => [name, {
+        ...walk.status,
+        ...walk.clean && now - walk.clean.at >= STORED_WALK_BACKSTOP_MS ? { reason: "backstop_due" } : {}
+      }]));
+      return { ledger: set.setId, walkers: { ...walkers, ...repair ? { lowerContentRepair: repair } : {} } };
+    });
     return {
       ...counts,
+      ...storedWalks.length ? { storedWalks } : {},
       summary: checkingItems === 0 ? this.unreadable.size > 0 ? `No items counted as waiting.${this.unreadableNote()}` : "No items waiting for classification." : `Checking ${checkingItems} item${checkingItems === 1 ? "" : "s"}, about ${remainingQuestions} question${remainingQuestions === 1 ? "" : "s"} remaining.` + (pendingWithoutQuestion > 0 ? ` ${pendingWithoutQuestion} pending item(s) have no question.` : "") + (oldestPendingAgeMs >= 3600000 ? ` Oldest pending item: ${Math.floor(oldestPendingAgeMs / 60000)} minutes.` : "") + (this.waiting ? ` Nothing asked now: ${this.waiting.label}.` : "") + this.unreadableNote(),
       ...this.movesRefusedNow.size > 0 ? { movesRefused: this.movesRefused() } : {},
       awaitingOwnerApproval: this.lastTick?.state === "awaiting_owner_approval",
@@ -245091,7 +245223,7 @@ class TierSnifferService {
     if (!preparationStopped)
       await this.recoverMissingQuestions(signal, true);
     phase("recover");
-    const rejudged = preparationStopped ? emptyTierRejudgeReport() : await this.rejudge();
+    const rejudged = preparationStopped ? emptyTierRejudgeReport() : await this.rejudge(snifferId(lane, versions.cache));
     phase("rejudge");
     if (!preparationStopped && this.options.secondRound) {
       try {
@@ -245159,7 +245291,8 @@ class TierSnifferService {
           else
             ledger.relabelUnreadFailSafeRows(relabel);
         }
-        const saved = ledger.readMeta(cursorKey);
+        const cursorLedger = set?.ledger ?? ledger;
+        const saved = cursorLedger.readMeta(cursorKey);
         const after = saved ? JSON.parse(saved) : undefined;
         const rows = ledger.listPending({ limit: 100, ...after ? { after } : {} });
         let settled = 0;
@@ -245225,9 +245358,9 @@ class TierSnifferService {
           } catch {}
         }
         if (lastProcessed)
-          ledger.writeMeta(cursorKey, processed < rows.length || rows.length === 100 ? JSON.stringify(lastProcessed) : "");
-        else if (rows.length === 0)
-          ledger.writeMeta(cursorKey, "");
+          cursorLedger.writeSettleProgress(cursorKey, processed < rows.length || rows.length === 100 ? JSON.stringify(lastProcessed) : "");
+        else if (rows.length === 0 && saved)
+          cursorLedger.writeSettleProgress(cursorKey, "");
         if (settled || retired)
           this.options.log?.(`Olympus tier sniffer: recovered ${settled} pending item(s) as fail-safe Private; retired ${retired} missing item(s).`);
       } catch {}
@@ -245315,72 +245448,171 @@ class TierSnifferService {
       return false;
     }
   }
+  storedWalkInputs(set) {
+    try {
+      const classification = set.classification();
+      if (classification?.unavailableReason)
+        return;
+      const folderRevision = set.namesOnlyOwnerRevision();
+      if (folderRevision === undefined)
+        return;
+      return JSON.stringify([
+        set.ledger.changeMarker({ ignoreSettleProgress: true }),
+        this.options.installed.snifferStoreForLedger(set.ledger.dbPath).changeMarker({ ignoreScanProgress: true }),
+        classification?.rules,
+        classification?.retirePublic,
+        classification?.sniffer?.id,
+        classification?.sniffer?.rejudgeReady,
+        folderRevision,
+        set.openStores().map((store) => [store.corpusId, store.exclusions.criteria, store.changeMarker()])
+      ]);
+    } catch {
+      return;
+    }
+  }
+  async runStoredWalker(set, name, inputs, readPage) {
+    const path = set.ledger.dbPath;
+    let entry = this.storedWalks.get(path);
+    if (entry?.set !== set) {
+      entry = { set, walks: new Map };
+      this.storedWalks.set(path, entry);
+    }
+    const now = this.clockMs();
+    let walk = entry.walks.get(name);
+    if (!walk) {
+      walk = { active: false, status: { lastRanAt: new Date(now).toISOString(), reason: "working" } };
+      entry.walks.set(name, walk);
+    }
+    if (walk.active || walk.status.reason === "retired")
+      return;
+    const unchanged = walk.clean !== undefined && walk.clean.inputs === inputs;
+    const backstop = unchanged && now - walk.clean.at >= STORED_WALK_BACKSTOP_MS;
+    if (unchanged && !backstop)
+      return;
+    walk.clean = undefined;
+    const lap = walk.lap ??= { inputs };
+    if (lap.inputs !== inputs)
+      lap.inputs = undefined;
+    walk.active = true;
+    walk.status.lastRanAt = new Date(now).toISOString();
+    walk.status.reason = backstop ? "backstop_due" : "working";
+    try {
+      const page = await readPage(walk.after);
+      walk.after = page.next;
+      if (page.changed || page.failed)
+        lap.inputs = undefined;
+      walk.status.lastResult = page.retired ? "retired" : page.failed ? "read_failed" : page.blocked ?? (page.changed ? "changed" : page.complete === false ? "more_rows" : inputs === undefined ? "inputs_unavailable" : "no_work");
+      if (page.retired)
+        walk.status.reason = "retired";
+      else if (page.complete !== false && lap.inputs !== undefined) {
+        walk.clean = { inputs: lap.inputs, at: this.clockMs() };
+        walk.status.reason = "idle_unchanged";
+      } else
+        walk.status.reason = "working";
+      if (page.complete !== false)
+        walk.lap = undefined;
+    } catch {
+      lap.inputs = undefined;
+      walk.status = { ...walk.status, reason: "working", lastResult: "read_failed" };
+    } finally {
+      walk.active = false;
+    }
+  }
   async settleStoredItems() {
     await this.applyOwnerOverrides();
-    for (const ledgerPath of this.ledgerPaths()) {
+    const paths = new Set(this.ledgerPaths());
+    for (const path of this.storedWalks.keys())
+      if (!paths.has(path))
+        this.storedWalks.delete(path);
+    for (const ledgerPath of paths) {
       await this.ingestionTurn();
       const set = tierSetForLedger(ledgerPath);
       if (!set)
         continue;
-      const turn = () => this.ingestionTurn();
+      const turn = () => {
+        this.progress();
+        return this.ingestionTurn();
+      };
       set.repairLowerContent({ ...this.options.autoMoves ? {
         embeddingLedger: { path: this.options.autoMoves.embeddingLedgerPath, approvedBy: "system-automatic", why: AUTO_MOVE_WHY }
       } : {} });
-      try {
+      const inputs = this.storedWalkInputs(set);
+      await this.runStoredWalker(set, "ownerRules", inputs, async () => {
         const report = await sweepOwnerRuleRaisesOffThread({ set, turn });
-        if (report.raised > 0 || report.secrets > 0) {
+        const changed = report.raised > 0 || report.secrets > 0;
+        if (changed) {
           this.options.log?.(`Olympus tier rules: ${report.raised} stored item(s) raised by a new owner rule (hidden first)` + `${report.secrets ? `, ${report.secrets} made Secrets` : ""}.`);
         }
-      } catch {}
-      try {
+        return { changed, complete: report.complete };
+      });
+      await this.runStoredWalker(set, "imageContent", inputs, async () => {
         const images = await sweepImageContentToPrivateOffThread({ set, turn });
         if (images.raised > 0 || images.stripped > 0) {
           this.options.log?.(`Olympus photos: ${images.raised} stored photo(s) moved to Private (hidden first), ${images.stripped} photo text(s) removed from a non-Private store.`);
         }
-      } catch {}
-      try {
-        const judged = await applyMediaJudgmentsOffThread({ set, autoMoves: this.autoMovesFor(set), turn });
+        return { retired: images.complete, complete: images.complete };
+      });
+      const autoMoves = this.autoMovesFor(set);
+      await this.runStoredWalker(set, "mediaJudgments", inputs && JSON.stringify([inputs, autoMoves]), async () => {
+        let cursor = this.mediaJudgmentCursors.get(set);
+        if (!cursor)
+          this.mediaJudgmentCursors.set(set, cursor = new Map);
+        const judged = await applyMediaJudgmentsOffThread({ set, autoMoves, turn, cursor });
+        if (judged.complete)
+          this.mediaJudgmentCursors.delete(set);
         if (judged.movesQueued > 0)
           this.forgetLowerMoves();
         if (judged.movesQueued > 0 || judged.updated > 0 || judged.asked > 0) {
           this.options.log?.(`Olympus photos: ${judged.applied} photo judgment(s) applied (${judged.movesQueued} move(s) out of Private queued, ` + `${judged.updated} kept where they were, ${judged.asked} asked about).`);
         }
-      } catch {}
-      try {
-        const settled = await settleNamesOnlyItemsOffThread({ set, turn });
+        return { changed: judged.applied > 0, complete: judged.complete, failed: judged.failed > 0 };
+      });
+      await this.runStoredWalker(set, "namesOnly", inputs, async (after) => {
+        const settled = await settleNamesOnlyItemsOffThread({ set, turn, cursor: after ? { after } : {} });
         if (settled.settled > 0) {
           this.options.log?.(`Olympus tier names-only: ${settled.settled} stored item(s) settled on their names.`);
         }
-      } catch {}
-      try {
+        return {
+          changed: settled.settled > 0,
+          failed: settled.failed > 0,
+          complete: !settled.next,
+          ...settled.next ? { next: settled.next } : {}
+        };
+      });
+      await this.runStoredWalker(set, "personalFirst", undefined, async () => {
         const held = await settlePersonalFirstItemsOffThread({ set, turn });
         if (held.settled > 0) {
           this.options.log?.(`Olympus tier hold: ${held.settled} item(s) recorded before every open question held text are held now (${held.movesQueued} move(s) to Private queued).`);
         }
-      } catch {}
+        return { retired: held.retired, complete: held.retired, changed: held.settled > 0, failed: held.failed > 0 };
+      });
     }
   }
   async applyOwnerOverrides() {
     for (const ledgerPath of this.ledgerPaths()) {
       await this.ingestionTurn();
       const set = tierSetForLedger(ledgerPath);
-      if (!set) {
-        try {
-          const ledger = this.ledgerAt(ledgerPath);
-          await retrySecretSideStoreDebtsOffThread(ledger, { turn: () => this.ingestionTurn() });
-          retireSecretRedactions(ledger);
-        } catch {}
-        continue;
-      }
+      const turn = () => {
+        this.progress();
+        return this.ingestionTurn();
+      };
       try {
-        const report = await applyOwnerOverridesOffThread({ set, turn: () => this.ingestionTurn() });
-        if (report.raised > 0 || report.lowered > 0 || report.secrets > 0 || report.updated > 0) {
-          this.options.log?.(`Olympus tier overrides: ${report.raised + report.lowered + report.secrets + report.updated} stored item(s) set by the owner applied ` + `(${report.raised} raised, hidden first; ${report.lowered} move(s) down queued` + `${report.secrets ? `; ${report.secrets} made Secrets` : ""}).`);
-        }
+        const ledger = set?.ledger ?? this.ledgerAt(ledgerPath);
+        await retrySecretSideStoreDebtsOffThread(ledger, { turn });
+        if (set)
+          await this.runStoredWalker(set, "ownerOverrides", this.storedWalkInputs(set), async () => {
+            const report = await applyOwnerOverridesOffThread({ set, turn, retrySecrets: false, forceClearedCheck: true });
+            const changed = report.raised + report.lowered + report.secrets + report.updated;
+            if (changed > 0) {
+              this.options.log?.(`Olympus tier overrides: ${changed} stored item(s) set by the owner applied ` + `(${report.raised} raised, hidden first; ${report.lowered} move(s) down queued` + `${report.secrets ? `; ${report.secrets} made Secrets` : ""}).`);
+            }
+            return { changed: changed + report.restored > 0, failed: report.failed > 0 };
+          });
+        retireSecretRedactions(ledger);
       } catch {}
     }
   }
-  async rejudge() {
+  async rejudge(id) {
     const total = emptyTierRejudgeReport();
     const perPass = this.options.rejudgePerPass ?? DEFAULT_TIER_REJUDGE_PER_PASS;
     if (perPass <= 0)
@@ -245391,27 +245623,33 @@ class TierSnifferService {
       const set = tierSetForLedger(ledgerPath);
       if (!set)
         continue;
-      try {
-        const id = snifferId(this.options.lane, snifferPromptVersions(this.options.ownerContext?.()).cache);
-        if (this.options.installed.snifferStoreForLedger(ledgerPath).questionWorkCounts(id).unanswered >= maxOpen)
-          continue;
-        const after = this.rejudgeCursors.get(ledgerPath);
-        const { report, next } = await rejudgeRoutedItemsInTurns({
+      const inputs = this.storedWalkInputs(set);
+      const autoMoves = this.autoMovesFor(set);
+      await this.runStoredWalker(set, "rejudge", inputs && JSON.stringify([inputs, id, autoMoves]), async (after) => {
+        if (this.options.installed.snifferStoreForLedger(ledgerPath).questionWorkCounts(id).unanswered >= maxOpen) {
+          return { complete: false, blocked: "queue_full", ...after ? { next: after } : {} };
+        }
+        const { report, next, complete } = await rejudgeRoutedItemsInTurns({
           set,
-          turn: () => this.ingestionTurn(),
+          turn: () => {
+            this.progress();
+            return this.ingestionTurn();
+          },
           limit: perPass,
           ...after ? { after } : {},
-          autoMoves: this.autoMovesFor(set)
+          autoMoves
         });
-        if (next)
-          this.rejudgeCursors.set(ledgerPath, next);
-        else
-          this.rejudgeCursors.delete(ledgerPath);
         for (const key of Object.keys(total))
           total[key] += report[key];
         if (report.movesQueued > 0)
           this.forgetLowerMoves();
-      } catch {}
+        return {
+          complete,
+          ...next ? { next } : {},
+          failed: report.failed > 0,
+          changed: report.updated + report.movesQueued + report.asked + report.secrets + report.rechecked > 0
+        };
+      });
     }
     const logSkipped = total.builtinPromptSkipped > 0 && this.clockMs() - this.lastBuiltinPromptSkipLogMs >= 60000;
     if (total.updated > 0 || total.movesQueued > 0 || total.asked > 0 || total.secrets > 0 || total.heldLowering > 0 || total.rechecked > 0 || logSkipped) {
@@ -245721,7 +245959,7 @@ function runBacklogCountWorker(message) {
     worker.postMessage(message);
   });
 }
-var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000, NOT_ANSWERING_FIRST_BACKOFF_MS = 30000, NOT_ANSWERING_MAX_BACKOFF_MS = 60000, GLOBAL_TIMERS, MISSING_QUESTION_RECOVERY_PHASE_MS = 25, DEFAULT_AUTO_MOVES_PER_PASS = 1000, DEFAULT_LOWER_MOVE_SLICE_MS = 1000, MAX_LOWER_MOVE_SLICE_MS = 1e4, DEFAULT_LOWER_MOVE_BATCH_MS = 25, DEFAULT_TIER_SNIFFER_STALL_MS, ROUTED_ROWS_GRACE_MS, EXTRACTION_ENQUEUE_GRACE_MS, DEFAULT_TIER_SNIFFER_ABANDON_MS, DEFAULT_CLASSIFICATION_FAIR_TURN_MS = 60000, ARRIVAL_STAND_BACK_MS = 15000, DEFAULT_STALE_MOVE_MS, BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing leaves the Mac (owner default 2026-10-01)", MOVES_SCAN_BOUND = 2000, BACKLOG_EXACT_ROWS = 20000, BACKLOG_REFRESH_MS = 60000, BACKLOG_SLICE_ROWS = 5000, BACKLOG_COUNT_WORKER_SOURCE = `
+var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000, NOT_ANSWERING_FIRST_BACKOFF_MS = 30000, NOT_ANSWERING_MAX_BACKOFF_MS = 60000, GLOBAL_TIMERS, MISSING_QUESTION_RECOVERY_PHASE_MS = 25, DEFAULT_AUTO_MOVES_PER_PASS = 1000, DEFAULT_LOWER_MOVE_SLICE_MS = 1000, MAX_LOWER_MOVE_SLICE_MS = 1e4, DEFAULT_LOWER_MOVE_BATCH_MS = 25, DEFAULT_TIER_SNIFFER_STALL_MS, ROUTED_ROWS_GRACE_MS, EXTRACTION_ENQUEUE_GRACE_MS, DEFAULT_TIER_SNIFFER_ABANDON_MS, DEFAULT_CLASSIFICATION_FAIR_TURN_MS = 60000, ARRIVAL_STAND_BACK_MS = 15000, DEFAULT_STALE_MOVE_MS, BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing leaves the Mac (owner default 2026-10-01)", MOVES_SCAN_BOUND = 2000, BACKLOG_EXACT_ROWS = 20000, BACKLOG_REFRESH_MS = 60000, BACKLOG_SLICE_ROWS = 5000, STORED_WALK_BACKSTOP_MS, BACKLOG_COUNT_WORKER_SOURCE = `
 import { Database } from 'bun:sqlite';
 self.onmessage = ({ data }) => {
   const out = [];
@@ -245779,6 +246017,7 @@ var init_sniffer_service = __esm(() => {
   EXTRACTION_ENQUEUE_GRACE_MS = 15 * 60000;
   DEFAULT_TIER_SNIFFER_ABANDON_MS = 2 * 60000;
   DEFAULT_STALE_MOVE_MS = 60 * 60000;
+  STORED_WALK_BACKSTOP_MS = 60 * 60000;
   BACKLOG_COUNT_WORKER_TIMEOUT_MS = 10 * 60000;
 });
 
