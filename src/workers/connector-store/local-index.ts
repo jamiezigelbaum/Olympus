@@ -2769,6 +2769,10 @@ export async function scanDigestPages(
     // score-driven reading past that point.
     if (qualifiedItems >= limit && (candidates >= Math.min(maxCandidates, VECTOR_DIGEST_MAX_CANDIDATES)
       || heap.peekScore() + underestimate < kthBestCosine(bestByItem, limit))) break;
+    // Nothing left can reach the score floor, so no further item can qualify:
+    // without this stop a store with fewer than `limit` related items had
+    // every full vector it holds read back for one question.
+    if (heap.peekScore() + underestimate < MIN_VECTOR_SCORE) break;
     if (expired()) return cutWith();
     if (batches++ > 0) await yieldConnectorStoreVectorScan();
     const digestScores = new Map<number, number>();

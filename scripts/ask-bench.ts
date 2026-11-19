@@ -65,13 +65,27 @@ function random(seed: number): () => number {
   };
 }
 
+const SHARED_WEIGHT = Math.sqrt(0.3 / 0.7);
+const SHARED_DIRECTION = (() => {
+  const next = random(0x51ed270b);
+  const values = Array.from({ length: DIMENSION }, () => next() - 0.5);
+  const norm = Math.hypot(...values);
+  return values.map(value => value / norm);
+})();
+
 function syntheticVector(text: string): number[] {
   // The planted phrase has one reproducible vector across query and document.
   // Filler vectors are dense and vary by item, so the digest heap and rescoring both do work.
   const planted = questions.findIndex(({ phrase }) => text.includes(phrase));
   const seed = planted < 0 ? Bun.hash.crc32(text) : planted + 1;
   const next = random(seed);
-  const values = Array.from({ length: DIMENSION }, () => next() - 0.5);
+  const noise = Array.from({ length: DIMENSION }, () => next() - 0.5);
+  const noiseNorm = Math.hypot(...noise);
+  // Every vector shares one direction, as real text embeddings do: unrelated
+  // texts score about 0.3 against each other, above the lane's score floor.
+  // Uncorrelated filler scored about 0, so no item qualified and the lane
+  // read every full vector in the store, which real stores do not do.
+  const values = noise.map((value, index) => value / noiseNorm + SHARED_DIRECTION[index]! * SHARED_WEIGHT);
   const norm = Math.hypot(...values);
   return values.map(value => value / norm);
 }

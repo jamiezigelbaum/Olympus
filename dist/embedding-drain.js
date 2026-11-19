@@ -25183,6 +25183,8 @@ async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit, 
   while (heap.length > 0) {
     if (qualifiedItems >= limit && (candidates >= Math.min(maxCandidates, VECTOR_DIGEST_MAX_CANDIDATES) || heap.peekScore() + underestimate < kthBestCosine(bestByItem, limit)))
       break;
+    if (heap.peekScore() + underestimate < MIN_VECTOR_SCORE)
+      break;
     if (expired())
       return cutWith();
     if (batches++ > 0)
