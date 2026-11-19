@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir, userInfo } from 'node:os';
 import { mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { Database } from 'bun:sqlite';
-import { beatP95, coldStartVerdict, gate, memoryMaxBytes, sampledBeatSite, sqliteGuards, summarizeBeats, summarizeStartupGaps } from '../scripts/loop-stall-test.ts';
+import { beatP95, coldStartVerdict, gate, memoryMaxBytes, sampledBeatSite, sqliteGuards, summarizeBeats, summarizeStartupGaps, summarizeStartupSearches } from '../scripts/loop-stall-test.ts';
 import { join } from 'node:path';
 import { waitFor } from './helpers/test-clock.ts';
 
@@ -253,3 +253,14 @@ test('heartbeat reports a front that has not resumed from its freeze', async () 
     rmSync(dir, { recursive: true, force: true });
   }
 }, 10_000);
+
+test('start-up searches: outcomes before READY, latency and stable result lists after it', () => {
+  const entry = (phase: 'before_ready' | 'after_ready', query: string, ms: number, status: number, ids: string[], outcome = status === 200 ? 'ok' : `http_${status}`) =>
+    ({ at: '2026-11-19T12:00:00.000Z', query, phase, ms, status, ids, outcome });
+  const summary = summarizeStartupSearches([
+    entry('before_ready', 'a', 300, 503, []), entry('before_ready', 'b', 2_500, 200, ['1']),
+    entry('after_ready', 'a', 200, 200, ['1', '2']), entry('after_ready', 'a', 1_500, 200, ['1', '2']), entry('after_ready', 'b', 400, 200, ['3']), entry('after_ready', 'b', 300, 200, ['4']),
+  ], 2);
+  expect(summary).toMatchObject({ sent: 6, skipped: 2, before_ready: { count: 2, outcomes: { http_503: 1, ok: 1 }, max_ms: 2_500 },
+    after_ready: { count: 4, ok: 4, max_ms: 1_500, over_1s: 1 }, after_ready_results: { a: ['1,2'], b: ['3', '4'] } });
+});

@@ -735,6 +735,41 @@ function summarizeThreadTimeline(role: Role, timeline: string, freezes: Array<{ 
 
 const STARTUP_PAGES = ['Home', 'Sources'] as const;
 const STARTUP_PROBE_MS = 250;
+// Start-up search traffic (start-up freezes thread, 19 Nov): an agent's hybrid search every 5 s, one at a time, from the front's first
+// answer until 2 minutes after READY, cycling fixed fixture queries on the Personal store; a search still running when the next is
+// due is skipped and counted. Post-READY result ids are kept so arms (and commits) can be compared for identical results.
+const STARTUP_SEARCH_MS = 5_000;
+const STARTUP_SEARCH_AFTER_READY_MS = 120_000;
+const STARTUP_QUERIES = ['orchard harbor', 'quarterly invoice', 'policy coverage renewal', 'deductible premium claim', 'travel notes',
+  'meeting draft budget', 'contract clause schedule', 'review letter', 'summary report plan', 'ledger renewal'];
+type StartupSearch = { at: string; query: string; phase: 'before_ready' | 'after_ready'; ms: number; status: number; ids: string[]; outcome: string };
+function resultIds(json: unknown): string[] {
+  const record = json as Record<string, unknown> | null;
+  const list = [record?.results, record?.items, record?.hits].find(Array.isArray) as unknown[] | undefined;
+  return (list ?? []).map(entry => {
+    const item = entry as Record<string, any>;
+    return String(item?.local_item_id ?? item?.item?.local_item_id ?? item?.selected_item?.local_item_id ?? item?.provider_item_id ?? item?.id ?? '?');
+  });
+}
+export function summarizeStartupSearches(searches: readonly StartupSearch[], skipped: number) {
+  const before = searches.filter(entry => entry.phase === 'before_ready');
+  const after = searches.filter(entry => entry.phase === 'after_ready');
+  const outcomes: Record<string, number> = {};
+  for (const entry of before) outcomes[entry.outcome] = (outcomes[entry.outcome] ?? 0) + 1;
+  const sorted = after.map(entry => entry.ms).sort((a, b) => a - b);
+  const results: Record<string, string[]> = {};
+  for (const entry of after) if (entry.status === 200) {
+    const key = entry.ids.join(',');
+    const seen = results[entry.query] ??= [];
+    if (!seen.includes(key)) seen.push(key);
+  }
+  return {
+    sent: searches.length, skipped, before_ready: { count: before.length, outcomes, max_ms: Math.max(0, ...before.map(entry => entry.ms)) },
+    after_ready: { count: after.length, ok: after.filter(entry => entry.status === 200).length, p50_ms: sorted[Math.floor(sorted.length / 2)] ?? null, max_ms: sorted.at(-1) ?? null, over_1s: sorted.filter(ms => ms > 1000).length },
+    // Per query, each distinct ordered list of result ids seen after READY (one entry = stable results).
+    after_ready_results: results,
+  };
+}
 type PageSample = Awaited<ReturnType<typeof samplePage>>;
 type StartupGap = { page: PageSample['page']; start_at: string; end_at: string; ms: number };
 type ThreadSplit = ReturnType<typeof summarizeFreeze>;
@@ -977,6 +1012,7 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
     firstAnswerAt: undefined as number | undefined,
     readyAt: undefined as number | undefined,
     samples: [] as PageSample[],
+    searches: [] as StartupSearch[], searchesSkipped: 0,
     io_throttle: options.ioThrottleUnavailable ? 'unavailable: io controller not delegated' : readIoThrottle(),
   } : undefined;
   if (!isCapped) console.error(`WARNING: run is not under MemoryMax<=${memoryMax} and MemorySwapMax=0; this is not a qualified receipt. Use: systemd-run --user --scope -p MemoryMax=${memoryMax} -p MemorySwapMax=0 -- bun scripts/loop-stall-test.ts run --dir ${JSON.stringify(dir)} --memory-max ${memoryMax}`);
@@ -1172,6 +1208,37 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
       if (coldStart) coldStart.firstAnswerAt ??= Math.round(nowMs());
       return response;
     };
+    let searchDriver: Promise<void> | undefined;
+    if (coldStart) searchDriver = (async () => {
+      let inFlight = false, sequence = 0;
+      const pending: Promise<void>[] = [];
+      while (!children.some(child => child.exitCode !== null || child.signalCode !== null)) {
+        if (coldStart.readyAt !== undefined && nowMs() > coldStart.readyAt + STARTUP_SEARCH_AFTER_READY_MS) break;
+        if (coldStart.firstAnswerAt !== undefined) {
+          if (inFlight) coldStart.searchesSkipped++;
+          else {
+            inFlight = true;
+            const query = STARTUP_QUERIES[sequence++ % STARTUP_QUERIES.length]!;
+            const phase = coldStart.readyAt === undefined ? 'before_ready' as const : 'after_ready' as const;
+            const at = new Date().toISOString();
+            const start = performance.now();
+            pending.push(workerFetch(`${origin}/v1/source/index/search`, { method: 'POST', headers: { ...bearer, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ query, corpus_id: corpus('internal'), retrieval_mode: 'hybrid' }), signal: AbortSignal.timeout(120_000) })
+              .then(async response => {
+                const json = await response.json().catch(() => null);
+                const error = (json as Record<string, unknown> | null)?.error;
+                coldStart.searches.push({ at, query, phase, ms: Math.round(performance.now() - start), status: response.status, ids: response.status === 200 ? resultIds(json) : [],
+                  outcome: response.status === 200 ? 'ok' : `http_${response.status}${typeof error === 'string' ? `:${error.slice(0, 60)}` : ''}` });
+              })
+              .catch(error => { coldStart.searches.push({ at, query, phase, ms: Math.round(performance.now() - start), status: 0, ids: [], outcome: `error:${String(error?.message ?? error).slice(0, 60)}` }); })
+              .finally(() => { inFlight = false; }));
+          }
+        }
+        await Bun.sleep(coldStart.firstAnswerAt === undefined ? STARTUP_PROBE_MS : STARTUP_SEARCH_MS);
+      }
+      await Promise.all(pending);
+    })();
+    if (searchDriver) requests.push(searchDriver);
     const bootDeadline = Date.now() + (coldStart ? 600 : seconds) * 1000;
     const engineExited = () => children.some(child => child.exitCode !== null || child.signalCode !== null);
     // The starting server can answer before the regular front is listening.
@@ -1384,6 +1451,7 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
     first_answer_ms: coldStart.firstAnswerAt === undefined ? null : Math.round(coldStart.firstAnswerAt - spawnedAt),
     ready_ms: coldStart.readyAt === undefined ? null : Math.round(coldStart.readyAt - spawnedAt),
     builds: coldStart.builds, gaps: startupGaps, front_thread: split,
+    searches: summarizeStartupSearches(coldStart.searches, coldStart.searchesSkipped), search_log: coldStart.searches.slice(0, 300),
     verdict: startupGaps ? coldStartVerdict(startupGaps.longest, split && typeof split === 'object' ? split : undefined) : null,
   } : null;
   // Retired as a bar (owner, 16 Nov 2026); kept in the receipt for comparison with earlier runs.
@@ -1419,6 +1487,8 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
       ? `running ${thread.runningMs} ms, run queue ${thread.runQueueMs} ms, page faults ${thread.blockedMajfltMs} ms, block IO ${thread.blockedBlkioMs} ms, other waits ${thread.blockedOtherMs} ms, wait channels ${JSON.stringify(thread.waitChannelsMs)}`
       : thread ?? 'no thread window';
     console.log(`cold-start: ${startup.verdict} — longest ${gap?.ms ?? 0} ms${gap ? ` (${gap.page})` : ''}; ${detail}; READY ${startup.ready_ms} ms from spawn`);
+    const searches = startup.searches;
+    console.log(`cold-start searches: ${searches.sent} sent, ${searches.skipped} skipped; before READY ${JSON.stringify(searches.before_ready.outcomes)} max ${searches.before_ready.max_ms} ms; after READY ${searches.after_ready.ok}/${searches.after_ready.count} ok, p50 ${searches.after_ready.p50_ms} ms, max ${searches.after_ready.max_ms} ms, ${searches.after_ready.over_1s} over 1 s`);
     return true;
   }
   // One line per engine per run (plan, 16 Nov 2026): worst stall and its site, then pass or fail; then a per-site table.
