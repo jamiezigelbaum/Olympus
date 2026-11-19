@@ -15384,6 +15384,13 @@ export class LocalConnectorStore {
     const known = this.keywordPopulation;
     if (this.keywordPopulationRefreshing || this.closedForPoolReads) return;
     if (seed ? known !== undefined : !known || !known.used || Date.now() - known.at < CONCEPT_COUNT_MAX_AGE_MS) return;
+    // The store's own kept total of live items is the same number with no scan;
+    // the scan is only for a store whose totals are not filled or owe a walk.
+    const kept = this.totals();
+    if (kept && kept.walkOwed !== 'now') {
+      this.keywordPopulation = { count: kept.items, at: Date.now(), used: false };
+      return;
+    }
     this.keywordPopulationRefreshing = true;
     try {
       const row = await this.readOffThread((function* (): Generator<StoreRead, { count: number }, unknown> {

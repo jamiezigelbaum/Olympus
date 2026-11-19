@@ -93,12 +93,19 @@ test('the population count is read once and then only off the search path, howev
     const later = await store.searchItemsDetailedOffThread('garden supplies invoice running total spring', 5, undefined, undefined, {});
     expect(later.rows.length).toBeGreaterThan(0);
     expect(counts).toBe(1);
-    // The engine's refresh counts it, once, because a search used it; an unused count is left alone.
+    // The engine's refresh takes the store's kept total when it has one (no scan), else counts once.
+    const kept = store.totals();
+    const scans = kept && kept.walkOwed !== 'now' ? 1 : 2;
     await store.keepKeywordPopulationCurrent();
-    expect(counts).toBe(2);
+    expect(counts).toBe(scans);
+    // An unused count is left alone.
     setSystemTime(Date.now() + 10 * 60_000);
     await store.keepKeywordPopulationCurrent();
-    expect(counts).toBe(2);
+    expect(counts).toBe(scans);
+    // A search after the refresh still finds the answer with the refreshed population.
+    const again = await store.searchItemsDetailedOffThread(QUESTION, 5, undefined, undefined, {});
+    expect(again.rows[0]?.sourceItem.providerItemId).toBe('answer');
+    expect(counts).toBe(scans);
   } finally {
     setSystemTime();
   }

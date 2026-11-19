@@ -76873,6 +76873,11 @@ ${parentKey(ref)}`, { ref, origin });
         return;
       if (seed ? known !== undefined : !known || !known.used || Date.now() - known.at < CONCEPT_COUNT_MAX_AGE_MS)
         return;
+      const kept = this.totals();
+      if (kept && kept.walkOwed !== "now") {
+        this.keywordPopulation = { count: kept.items, at: Date.now(), used: false };
+        return;
+      }
       this.keywordPopulationRefreshing = true;
       try {
         const row = await this.readOffThread(function* () {
