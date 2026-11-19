@@ -70,9 +70,9 @@ describe('Dropbox connector-store approved scope narrowing', () => {
           itemPks: number[],
           accountScope?: string,
           selectedFilters?: ConnectorStoreSearchFilters,
-        ): ConnectorStoreSearchRow[];
+        ): Map<number, ConnectorStoreSearchRow>;
       }).searchRowsByItemPks(pks.map((row) => row.item_pk), 'personal', filters);
-      expect(ids(hydrated).sort()).toEqual([...expected].sort());
+      expect(ids([...hydrated.values()]).sort()).toEqual([...expected].sort());
 
       const adapter = createConnectorStoreCorpusAdapter({
         store,

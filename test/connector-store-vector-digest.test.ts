@@ -67,7 +67,8 @@ function numericStore(path = ':memory:'): Database {
   const db = new Database(path);
   db.exec(`PRAGMA foreign_keys=ON; PRAGMA synchronous=OFF; PRAGMA journal_mode=WAL;
     CREATE TABLE items(item_pk INTEGER PRIMARY KEY, local_item_id TEXT, account_scope TEXT, tombstoned INTEGER DEFAULT 0, provider TEXT, locator_uri TEXT);
-    CREATE TABLE chunks(chunk_pk INTEGER PRIMARY KEY, item_pk INTEGER REFERENCES items(item_pk) ON DELETE CASCADE, embedding_input_hash TEXT);
+    CREATE TABLE chunks(chunk_pk INTEGER PRIMARY KEY, item_pk INTEGER REFERENCES items(item_pk) ON DELETE CASCADE,
+      embedding_input_hash TEXT, content_hash TEXT NOT NULL);
     CREATE TABLE chunk_embeddings(chunk_pk INTEGER REFERENCES chunks(chunk_pk) ON DELETE CASCADE, model_id TEXT, item_pk INTEGER, content_hash TEXT, embedding BLOB, embedded_at TEXT, PRIMARY KEY(chunk_pk, model_id));
     CREATE INDEX embeddings_model ON chunk_embeddings(model_id);`);
   createVectorDigestSchema(db);
@@ -75,7 +76,7 @@ function numericStore(path = ':memory:'): Database {
 }
 function insert(db: Database, chunkPk: number, vector: number[], itemPk = chunkPk, model = modelId): void {
   db.query('INSERT OR IGNORE INTO items VALUES (?, ?, ?, 0, ?, ?)').run(itemPk, String(itemPk), 'a', 'fixture', '/allowed/item');
-  db.query('INSERT OR IGNORE INTO chunks VALUES (?, ?, ?)').run(chunkPk, itemPk, 'hash');
+  db.query('INSERT OR IGNORE INTO chunks VALUES (?, ?, ?, ?)').run(chunkPk, itemPk, 'hash', 'text-hash');
   const embedding = encodeEmbedding(vector, vector.length);
   db.query('INSERT OR REPLACE INTO chunk_embeddings VALUES (?, ?, ?, ?, ?, ?)').run(chunkPk, model, itemPk, 'hash', embedding, 'now');
   writeVectorDigest(db, chunkPk, model, itemPk, embedding);
@@ -404,6 +405,85 @@ test('when ledger visibility hides every first-pass candidate, the lane scans wi
   } finally { store.close(); }
 });
 
+test.each(['grant is revoked', 'source version changes'] as const)(
+  'a names-only item is no longer a semantic winner when its %s after scoring', async (change) => {
+    const ledger = new TierLedger({ dbPath: ':memory:' });
+    const store = open(':memory:', ledger);
+    try {
+      await store.syncFromConnector(connector(1), { fetchContent: true, sourceScopeObservation: () => ({
+        accountGeneration: 'a'.repeat(64), scopeRevision: '00000000-0000-4000-8000-000000000001', folderKeys: ['names'],
+      }) });
+      ledger.recordRoutedPlacement({ provider: 'fixture', accountScope: 'a', providerItemId: '0' },
+        classifyItemTiers({ signals: {}, text: 'harbor note 0' }), {
+          copies: [{ corpusId: store.corpusId, trustDomain: 'internal', layers: 'both' }],
+          embedHold: false,
+        });
+      await store.embedChunks({ provider });
+      const db = database(store);
+      if (change === 'source version changes') db.exec('UPDATE chunk_vector_digest_meta SET completed = 0');
+      const filters = { metadataOnlySourceScopeFolderKeys: ['names'] };
+      const search = () => store.vectorSearchLane('harbor note', provider, 1, 'a', filters);
+      expect((await search()).rows).toEqual([]);
+      store.grantOnDemandRead('a:0', '1');
+      expect((await search()).rows.map(row => row.sourceItem.localItemId)).toEqual(['a:0']);
+
+      const lane = store as unknown as { visibleVectorItemPks: LocalConnectorStore['visibleVectorItemPks'] };
+      const visible = lane.visibleVectorItemPks.bind(store);
+      const beforeValidation = spyOn(lane, 'visibleVectorItemPks').mockImplementationOnce((pks, ...scope) => {
+        expect(pks).toHaveLength(1);
+        if (change === 'grant is revoked') db.query('DELETE FROM on_demand_item_reads WHERE local_item_id = ?').run('a:0');
+        else db.query('UPDATE items SET source_version = ? WHERE local_item_id = ?').run('2', 'a:0');
+        return visible(pks, ...scope);
+      });
+      const result = await search();
+      expect(beforeValidation).toHaveBeenCalled();
+      expect(result.rows).toEqual([]);
+    } finally { store.close(); ledger.close(); }
+  },
+);
+
+test.each(['another item', 'updated text'] as const)(
+  'a semantic winner keeps its rank without a locator when its chunk key is reused for %s', async (replacement) => {
+    const store = open();
+    try {
+      await store.syncFromConnector(connector(2), { fetchContent: true });
+      await store.embedChunks({ provider });
+      const db = database(store);
+      if (replacement === 'updated text') db.exec('UPDATE chunk_vector_digest_meta SET completed = 0');
+      const [other, winner] = db.query(`SELECT i.local_item_id, c.item_pk, c.chunk_pk, c.bounded_text, c.content_hash
+        FROM chunks c JOIN items i ON i.item_pk = c.item_pk ORDER BY c.chunk_pk`).all() as Array<{
+        local_item_id: string; item_pk: number; chunk_pk: number; bounded_text: string; content_hash: string;
+      }>;
+      if (!other || !winner) throw new Error('Expected two indexed chunks');
+      const search = () => store.vectorSearchLane('harbor note', provider, 2, 'a');
+      const before = (await search()).rows;
+      expect(before.map(row => row.sourceItem.localItemId)).toEqual([other.local_item_id, winner.local_item_id]);
+      expect(before[1]?.chunk?.chunkId).toBe(String(winner.chunk_pk));
+
+      const lane = store as unknown as { searchRowsByItemPks: LocalConnectorStore['searchRowsByItemPks'] };
+      const hydrate = lane.searchRowsByItemPks.bind(store);
+      const beforeHydration = spyOn(lane, 'searchRowsByItemPks').mockImplementationOnce((pks, ...scope) => {
+        const moved = replacement === 'another item';
+        const itemPk = moved ? other.item_pk : winner.item_pk;
+        const text = moved ? winner.bounded_text : 'Updated harbor note';
+        const hash = moved ? winner.content_hash : new Bun.CryptoHasher('sha256').update(text).digest('hex');
+        db.transaction(() => {
+          db.query('DELETE FROM chunks WHERE chunk_pk = ?').run(winner.chunk_pk);
+          const inserted = db.query(`INSERT INTO chunks (item_pk, chunk_index, bounded_text, content_hash, indexed_at)
+            VALUES (?, ?, ?, ?, '2026-11-02') RETURNING chunk_pk, item_pk`).get(itemPk, moved ? 1 : 0, text, hash);
+          expect(inserted).toEqual({ chunk_pk: winner.chunk_pk, item_pk: itemPk });
+        })();
+        return hydrate(pks, ...scope);
+      });
+      const result = await search();
+      expect(beforeHydration).toHaveBeenCalled();
+      expect(result.rows.map(row => row.sourceItem.localItemId)).toEqual(before.map(row => row.sourceItem.localItemId));
+      expect(result.rows[0]?.chunk).toEqual(before[0]?.chunk);
+      expect(result.rows[1]?.chunk).toBeUndefined();
+    } finally { store.close(); }
+  },
+);
+
 function heldVectorStore(count: number, heldCount: number) {
   const ledger = new TierLedger({ dbPath: ':memory:' });
   const store = open(':memory:', ledger);
@@ -487,11 +567,14 @@ test('cold vector visibility over 5,000 items and 90% held yields without changi
 
     // Every cosine is 1 in this fixture. The unsliced reference can check
     // every candidate in PK order at once and then take the first visible K.
-    const ordered = database(store).query('SELECT item_pk, chunk_pk FROM chunks ORDER BY item_pk').all() as Array<{ item_pk: number; chunk_pk: number }>;
+    const ordered = database(store).query('SELECT item_pk, chunk_pk, content_hash FROM chunks ORDER BY item_pk').all() as Array<{
+      item_pk: number; chunk_pk: number; content_hash: string;
+    }>;
     const allowed = visible(ordered.map(row => row.item_pk), 'a');
     const winners = ordered.filter(row => allowed.has(row.item_pk)).slice(0, limit);
-    const unsliced = lane.searchRowsByItemPks(winners.map(row => row.item_pk), 'a').map((row, index) => ({
-      ...row, chunk: lane.chunkMatchForChunkPk(winners[index]!.chunk_pk, 'semantic')!, bestCosine: 1,
+    const searchRows = lane.searchRowsByItemPks(winners.map(row => row.item_pk), 'a');
+    const unsliced = winners.map(({ item_pk, chunk_pk, content_hash }) => ({
+      ...searchRows.get(item_pk)!, chunk: lane.chunkMatchForChunkPk(chunk_pk, item_pk, content_hash)!, bestCosine: 1,
     }));
     expect(result.rows).toEqual(unsliced);
   } finally { clock.mockRestore(); close(); }

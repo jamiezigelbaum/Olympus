@@ -25057,10 +25057,11 @@ function connectorStoreCurrentEmbeddingRowsQuery(options, ordered, page) {
   const accountScope = normalizeOptionalAccountScope(options.accountScope);
   const selectedFilters = connectorStoreFilterSql(options.filters);
   const metadataOnly = connectorStoreMetadataOnlySql(options.filters, options.onDemandReadsTablePresent);
+  const chunkContentHash = page ? ", c.content_hash AS chunk_content_hash" : "";
   if (options.chunkPks) {
     return {
       sql: `
-        SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding
+        SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding${chunkContentHash}
         FROM json_each(?) pick
         CROSS JOIN chunk_embeddings emb ON emb.chunk_pk = pick.value AND emb.model_id = ?
         CROSS JOIN chunks c ON c.chunk_pk = emb.chunk_pk
@@ -25086,7 +25087,7 @@ function connectorStoreCurrentEmbeddingRowsQuery(options, ordered, page) {
   }
   return {
     sql: `
-      SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding
+      SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding${chunkContentHash}
       ${CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER}
         -- Unary + avoids the model index + repeated whole-model sort (#1242).
         AND ${page ? "+emb.model_id" : "emb.model_id"} = ?
@@ -25115,7 +25116,12 @@ function foldVectorScore(bestByItem, row, queryVector) {
   let qualified = 0;
   if (!prior || score > prior.bestCosine || score === prior.bestCosine && row.chunk_pk < prior.bestChunkPk) {
     qualified = Number(score >= MIN_VECTOR_SCORE && (!prior || prior.bestCosine < MIN_VECTOR_SCORE));
-    bestByItem.set(row.item_pk, { bestCosine: score, bestChunkPk: row.chunk_pk, localItemId: row.local_item_id });
+    bestByItem.set(row.item_pk, {
+      bestCosine: score,
+      bestChunkPk: row.chunk_pk,
+      bestChunkContentHash: row.chunk_content_hash,
+      localItemId: row.local_item_id
+    });
   }
   return { mismatch: 0, qualified, score };
 }
@@ -25133,16 +25139,19 @@ async function scanVectorPages(read, provider, beforeToken, queryVector, pageOpt
       params: []
     })) };
   }
+  const onDemandReadsTablePresent = pageOptions.onDemandReadsTablePresent ?? false;
   const digestTable = !vectorDigestSearchDisabled() && await read({ mode: "get", sql: "SELECT 1 FROM sqlite_master WHERE name = 'chunk_vector_digest_meta'", params: [] });
   const digestReady = digestTable && await read({ mode: "get", sql: "SELECT 1 FROM chunk_vector_digest_meta WHERE model_id = ? AND completed = 1", params: [pageOptions.modelId] });
-  if (digestReady)
-    return scanDigestPages(read, queryVector, pageOptions, deadlineAtMs, resultLimit, VECTOR_DIGEST_MAX_CANDIDATES, sideReaders);
+  if (digestReady) {
+    const scanned = await scanDigestPages(read, queryVector, pageOptions, deadlineAtMs, resultLimit, VECTOR_DIGEST_MAX_CANDIDATES, sideReaders);
+    return "skippedReason" in scanned ? scanned : { ...scanned, onDemandReadsTablePresent };
+  }
   const bestByItem = new Map;
   let dimensionMismatches = 0;
   let afterChunkPk = 0;
   let pagesScanned = 0;
   const excluded = pageOptions.excludedItemPks;
-  const cutExact = () => bestByItem.size > 0 ? { bestByItem, dimensionMismatches, exhausted: false, cutReason: "vector_scan_deadline_exceeded" } : { skippedReason: "vector_scan_deadline_exceeded" };
+  const cutExact = () => bestByItem.size > 0 ? { bestByItem, dimensionMismatches, onDemandReadsTablePresent, exhausted: false, cutReason: "vector_scan_deadline_exceeded" } : { skippedReason: "vector_scan_deadline_exceeded" };
   while (true) {
     if (connectorStoreVectorDeadlineExpired(deadlineAtMs))
       return cutExact();
@@ -25165,7 +25174,7 @@ async function scanVectorPages(read, provider, beforeToken, queryVector, pageOpt
     if (pagesScanned++ % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0)
       await yieldConnectorStoreVectorScan();
   }
-  return { bestByItem, dimensionMismatches };
+  return { bestByItem, dimensionMismatches, onDemandReadsTablePresent };
 }
 function vectorDigestSearchDisabled(env = process.env) {
   return env.OLYMPUS_VECTOR_DIGEST?.trim().toLowerCase() === "off";
@@ -32877,7 +32886,7 @@ ${parentKey(ref)}`, { ref, origin });
     const scanned = offThreadReadsSupported(this.dbPath) ? await scanVectorPagesOnPool(this.dbPath, provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit) : await this.scanVectorPagesInThread(provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit);
     if ("skippedReason" in scanned)
       return { rows: [], skippedReason: scanned.skippedReason };
-    const { bestByItem, dimensionMismatches } = scanned;
+    const { bestByItem, dimensionMismatches, onDemandReadsTablePresent } = scanned;
     let sliceStarted = performance.now();
     const candidates = Array.from(bestByItem.entries()).filter(([, candidate]) => candidate.bestCosine >= MIN_VECTOR_SCORE).sort((left, right) => right[1].bestCosine - left[1].bestCosine || left[0] - right[0]);
     let rankedItems = [];
@@ -32894,26 +32903,25 @@ ${parentKey(ref)}`, { ref, origin });
         if (visibleInBatch.length === 0) {
           const batch = candidates.slice(candidateOffset, candidateOffset + VECTOR_VISIBILITY_BATCH_SIZE);
           candidateOffset += batch.length;
-          const visible = this.visibleVectorItemPks(batch.map(([itemPk]) => itemPk), selectedAccount, filters);
+          const visible = this.visibleVectorItemPks(batch.map(([itemPk]) => itemPk), selectedAccount, filters, onDemandReadsTablePresent);
           visibleInBatch = batch.filter(([itemPk]) => visible.has(itemPk));
         }
         rankedItems.push(...visibleInBatch.splice(0, limit - rankedItems.length));
         continue;
       }
-      const stillVisible = this.visibleVectorItemPks(rankedItems.map(([itemPk]) => itemPk), selectedAccount, filters);
+      const stillVisible = this.visibleVectorItemPks(rankedItems.map(([itemPk]) => itemPk), selectedAccount, filters, onDemandReadsTablePresent);
       rankedItems = rankedItems.filter(([itemPk]) => stillVisible.has(itemPk));
       if (!canFill())
         break;
     }
     const searchRows = this.searchRowsByItemPks(rankedItems.map(([itemPk]) => itemPk), selectedAccount, filters);
-    const winnersByLocalItemId = new Map(rankedItems.map(([, candidate]) => [candidate.localItemId, candidate]));
-    const laneRows = searchRows.flatMap((row) => {
-      const winner = winnersByLocalItemId.get(row.sourceItem.localItemId);
-      if (winner === undefined)
+    const laneRows = rankedItems.flatMap(([itemPk, winner]) => {
+      const row = searchRows.get(itemPk);
+      if (!row || row.sourceItem.localItemId !== winner.localItemId)
         return [];
       if (!input.locate)
         return [{ ...row, contentMatched: true, bestCosine: winner.bestCosine }];
-      const chunk = this.chunkMatchForChunkPk(winner.bestChunkPk, "semantic");
+      const chunk = this.chunkMatchForChunkPk(winner.bestChunkPk, itemPk, winner.bestChunkContentHash);
       return [{ ...row, ...chunk ? { chunk } : {}, bestCosine: winner.bestCosine }];
     });
     return {
@@ -33105,14 +33113,16 @@ ${parentKey(ref)}`, { ref, origin });
       ORDER BY c.chunk_pk ASC
     `).all(...selectedLocalItemIds ?? [], ...tierExclusion.params, ...selectedAccount ? [selectedAccount] : [], ...selectedFilters.params);
   }
-  visibleVectorItemPks(itemPks, accountScope, filters) {
+  visibleVectorItemPks(itemPks, accountScope, filters, onDemandReadsTablePresent = false) {
     const visible = new Set;
     const selectedFilters = connectorStoreFilterSql(filters);
+    const metadataOnly = connectorStoreMetadataOnlySql(filters, onDemandReadsTablePresent);
     for (let offset = 0;offset < itemPks.length; offset += VECTOR_VISIBILITY_BATCH_SIZE) {
       const batch = itemPks.slice(offset, offset + VECTOR_VISIBILITY_BATCH_SIZE);
       const rows = this.db.query(`SELECT i.item_pk, i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id
         FROM items i WHERE i.item_pk IN (${batch.map(() => "?").join(",")}) AND i.tombstoned = 0
-        ${accountScope ? "AND i.account_scope = ?" : ""} ${selectedFilters.sql}`).all(...batch, ...accountScope ? [accountScope] : [], ...selectedFilters.params);
+        ${accountScope ? "AND i.account_scope = ?" : ""} ${selectedFilters.sql}
+        ${metadataOnly.sql ? `AND NOT ${metadataOnly.sql}` : ""}`).all(...batch, ...accountScope ? [accountScope] : [], ...selectedFilters.params, ...metadataOnly.params);
       for (const row of this.tierVisibleRows(rows, (row) => ({
         provider: row.provider,
         accountScope: row.account_scope,
@@ -33125,7 +33135,7 @@ ${parentKey(ref)}`, { ref, origin });
   }
   searchRowsByItemPks(itemPks, accountScope, filters) {
     if (itemPks.length === 0)
-      return [];
+      return new Map;
     const placeholders = itemPks.map(() => "?").join(", ");
     const selectedAccount = normalizeOptionalAccountScope(accountScope);
     const selectedFilters = connectorStoreFilterSql(filters);
@@ -33143,11 +33153,7 @@ ${parentKey(ref)}`, { ref, origin });
         ${selectedAccount ? "AND i.account_scope = ?" : ""}
         ${selectedFilters.sql}
     `).all(...itemPks, ...selectedAccount ? [selectedAccount] : [], ...selectedFilters.params);
-    const byPk = new Map(rows.map((row) => [row.item_pk, row]));
-    return itemPks.flatMap((itemPk) => {
-      const row = byPk.get(itemPk);
-      return row ? [searchRowFromItemRow(row)] : [];
-    });
+    return new Map(rows.map((row) => [row.item_pk, searchRowFromItemRow(row)]));
   }
   async keywordLanguages() {
     if (!offThreadReadsSupported(this.dbPath))
@@ -33521,13 +33527,13 @@ ${parentKey(ref)}`, { ref, origin });
     const of = counts.map((count) => Math.max(0, Math.log((items + 1) / (count + 0.5))));
     return { of, total: of.reduce((sum, weight) => sum + weight, 0), counts, population: items };
   }
-  chunkMatchForChunkPk(chunkPk, lane, queryTerms) {
-    const row = this.db.query("SELECT item_pk, chunk_index, content_hash, bounded_text FROM chunks WHERE chunk_pk = ?").get(chunkPk);
+  chunkMatchForChunkPk(chunkPk, itemPk, contentHash) {
+    const row = this.db.query("SELECT chunk_index, content_hash, bounded_text FROM chunks WHERE chunk_pk = ? AND item_pk = ? AND content_hash = ?").get(chunkPk, itemPk, contentHash);
     if (!row)
       return;
-    const priorRows = this.db.query("SELECT bounded_text FROM chunks WHERE item_pk = ? AND chunk_index < ? ORDER BY chunk_index").all(row.item_pk, row.chunk_index);
+    const priorRows = this.db.query("SELECT bounded_text FROM chunks WHERE item_pk = ? AND chunk_index < ? ORDER BY chunk_index").all(itemPk, row.chunk_index);
     const itemOffset = priorRows.reduce((sum, prior) => sum + prior.bounded_text.length, 0);
-    return chunkMatchFromRows(chunkPk, row, itemOffset, lane, queryTerms);
+    return chunkMatchFromRows(chunkPk, row, itemOffset, "semantic");
   }
   *keywordChunkMatchesSteps(rows, queryTerms) {
     const wanted = [...rows.entries()].filter(([, row]) => row.chunk_pk !== null && row.chunk_pk !== undefined);
