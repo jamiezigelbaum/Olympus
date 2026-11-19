@@ -1056,6 +1056,7 @@ describe('state the front shows from the snapshot', () => {
         collect: () => ({ activity: 'judging', scheduler: null, judge: { backlog: null, pending: null, spending: null }, captures: {} }),
       });
       await front.client.post({ kind: 'archive_changed' });
+      await front.refreshStatus();
       expect(front.status()).toMatchObject({ stale: false });
       const snapshotPath = engineStatusSnapshotPath(env);
       renameSync(snapshotPath, `${snapshotPath}.held`);
@@ -1075,10 +1076,18 @@ describe('state the front shows from the snapshot', () => {
         collect: () => ({ scheduler: null, judge: { backlog: null, pending: null, spending: null }, captures: {} }),
       });
       await clock.advance(1_000);
+      await front.refreshStatus();
       expect(front.status()).toMatchObject({ stale: false, snapshot: { instance_id: 'background-3' } });
       await clock.advance(3_000);
-      expect(front.status()).toMatchObject({ stale: false });
+      await front.refreshStatus();
+      expect(front.status()).toMatchObject({ stale: false, age_ms: 1_000 });
       successor.stop();
+      renameSync(snapshotPath, `${snapshotPath}.held`);
+      await clock.advance(1_000);
+      expect(front.status()?.age_ms).toBe(2_000);
+      await front.refreshStatus();
+      expect(front.status()).toBeUndefined();
+      expect(front.backgroundActivity()).toBe('idle');
     } finally {
       front.stop();
     }

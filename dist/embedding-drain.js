@@ -2524,6 +2524,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync as readFileSync8, rmSync as rmSync4, writeFileSync as writeFileSync4 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join as join12 } from "node:path";
+import { isMainThread as isMainThread3 } from "node:worker_threads";
 
 // src/workers/file-extraction/extractors/image-preparers.ts
 import { accessSync as accessSync2, constants as fsConstants, existsSync as existsSync4, readFileSync as readFileSync6, statSync as statSync3 } from "node:fs";
@@ -3691,6 +3692,7 @@ import {
   writeFileSync as writeFileSync3,
   writeSync as writeSync2
 } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { basename as basename2, dirname as dirname10, isAbsolute as isAbsolute7, join as join11 } from "node:path";
 
 // src/workers/source-index/built-in-embedding/manifest.ts
@@ -3958,6 +3960,33 @@ function installedBuiltInEmbedding(paths, model = BUILT_IN_EMBEDDING_MODEL, plat
 function currentPlatform() {
   return `${process.platform}-${process.arch}`;
 }
+var frontAssetReads = new Map;
+function readAssetState(path) {
+  if (!isMainThread2 || process.env.OLYMPUS_WORKER_ENGINE_ROLE?.trim() !== "front") {
+    return JSON.parse(readFileSync7(path, "utf8"));
+  }
+  let entry = frontAssetReads.get(path);
+  if (!entry) {
+    entry = { checkedAt: -Infinity, pending: false };
+    frontAssetReads.set(path, entry);
+  }
+  const cached = entry;
+  if (!cached.pending && Date.now() - cached.checkedAt >= 2000) {
+    cached.checkedAt = Date.now();
+    cached.pending = true;
+    refreshAssetState(path, cached);
+  }
+  return cached.value;
+}
+async function refreshAssetState(path, entry) {
+  try {
+    entry.value = JSON.parse(await readFile(path, "utf8"));
+  } catch {
+    entry.value = undefined;
+  } finally {
+    entry.pending = false;
+  }
+}
 function readBuiltInEmbeddingStatus(env = process.env, model = BUILT_IN_EMBEDDING_MODEL) {
   const fallback = {
     state: "not_started",
@@ -3969,7 +3998,7 @@ function readBuiltInEmbeddingStatus(env = process.env, model = BUILT_IN_EMBEDDIN
     updatedAt: new Date(0).toISOString()
   };
   try {
-    const parsed = JSON.parse(readFileSync7(builtInEmbeddingPaths(env, model).statusPath, "utf8"));
+    const parsed = readAssetState(builtInEmbeddingPaths(env, model).statusPath);
     return parsed && typeof parsed === "object" && parsed.modelId === model.modelId ? parsed : fallback;
   } catch {
     return fallback;
@@ -3979,8 +4008,8 @@ function readBuiltInEmbeddingVision(env = process.env, model = BUILT_IN_EMBEDDIN
   if (!model.vision)
     return "unknown";
   try {
-    const parsed = JSON.parse(readFileSync7(join11(builtInEmbeddingPaths(env, model).root, "vision.json"), "utf8"));
-    if (parsed.modelId !== model.modelId || typeof parsed.vision !== "boolean")
+    const parsed = readAssetState(join11(builtInEmbeddingPaths(env, model).root, "vision.json"));
+    if (parsed?.modelId !== model.modelId || typeof parsed.vision !== "boolean")
       return "unknown";
     return parsed.vision ? "ready" : "unavailable";
   } catch {
@@ -4522,7 +4551,8 @@ function withVision(readiness, vision) {
 function stillImageReadiness() {
   if (!current)
     current = { readiness: probeStillImageReadiness({ vision: visionReader() }), pinned: false, checkedAt: clock() };
-  if (!current.pinned && clock() - current.checkedAt >= STILL_IMAGE_VISION_RECHECK_MS) {
+  const front = isMainThread3 && process.env.OLYMPUS_WORKER_ENGINE_ROLE?.trim() === "front";
+  if (!current.pinned && (front || clock() - current.checkedAt >= STILL_IMAGE_VISION_RECHECK_MS)) {
     current.checkedAt = clock();
     const vision = visionReader();
     if (vision !== current.readiness.vision)
@@ -6458,7 +6488,7 @@ function isPromiseLike(value) {
 }
 
 // src/core/worker-auth.ts
-import { readFileSync as readFileSync10, statSync as statSync6 } from "node:fs";
+import { constants as constants4, readFileSync as readFileSync10, statSync as statSync6 } from "node:fs";
 import { homedir as homedir7 } from "node:os";
 import { join as join14 } from "node:path";
 function workerAuthTokenFromConfig(config, options = {}) {
@@ -17665,7 +17695,7 @@ function* iterateRows(db, sql, ...params) {
 
 // src/workers/connector-store/main-thread-sql-trace.ts
 import { Database as Database2 } from "bun:sqlite";
-import { isMainThread as isMainThread3 } from "node:worker_threads";
+import { isMainThread as isMainThread4 } from "node:worker_threads";
 
 // src/core/front-loop-sql-guard.ts
 class FrontLoopSqlError extends Error {
@@ -17903,7 +17933,7 @@ var installed = false;
 var SINGLE_WRITE = /^\s*(UPDATE|DELETE|INSERT)\b[^;]*;?\s*$/i;
 var sliceTiming;
 function installMainThreadSqlTrace() {
-  if (installed || !isMainThread3)
+  if (installed || !isMainThread4)
     return;
   installed = true;
   const exec = Database2.prototype.exec;
@@ -22261,16 +22291,16 @@ function retireSecretRedactions(ledger, options = {}) {
 }
 
 // src/workers/source-index/built-in-embedding/provider.ts
-import { isMainThread as isMainThread5 } from "node:worker_threads";
+import { isMainThread as isMainThread6 } from "node:worker_threads";
 import { createHash as createHash12 } from "node:crypto";
 import { readFileSync as readFileSync17 } from "node:fs";
 import { availableParallelism } from "node:os";
 import { dirname as dirname22, join as join24 } from "node:path";
 
 // src/workers/source-index/built-in-embedding/litert-runtime.ts
-import { isMainThread as isMainThread4 } from "node:worker_threads";
+import { isMainThread as isMainThread5 } from "node:worker_threads";
 import { execFileSync as execFileSync2, spawn } from "node:child_process";
-import { closeSync as closeSync10, constants as constants4, existsSync as existsSync21, fstatSync as fstatSync2, openSync as openSync10, readdirSync as readdirSync3, readFileSync as readFileSync15, statSync as statSync12 } from "node:fs";
+import { closeSync as closeSync10, constants as constants5, existsSync as existsSync21, fstatSync as fstatSync2, openSync as openSync10, readdirSync as readdirSync3, readFileSync as readFileSync15, statSync as statSync12 } from "node:fs";
 import { homedir as homedir10 } from "node:os";
 import { delimiter as delimiter2, dirname as dirname21, isAbsolute as isAbsolute14, join as join22 } from "node:path";
 import { createInterface } from "node:readline";
@@ -22536,7 +22566,7 @@ class HelperProcess {
   }
 }
 async function startLiteRtEmbedder(options) {
-  if (isMainThread4 && !options.gpuAvailable) {
+  if (isMainThread5 && !options.gpuAvailable) {
     const handle = modelThreadHandleId();
     let state = await modelThread().call({ kind: "litert-start", handle, options });
     return {
@@ -22628,7 +22658,7 @@ function linuxGpuAvailable(deviceDirectory = "/dev/dri") {
         return false;
       let fd;
       try {
-        fd = openSync10(join22(deviceDirectory, name), constants4.O_RDWR | constants4.O_NONBLOCK);
+        fd = openSync10(join22(deviceDirectory, name), constants5.O_RDWR | constants5.O_NONBLOCK);
         return fstatSync2(fd).isCharacterDevice();
       } catch {
         return false;
@@ -23080,7 +23110,7 @@ class BuiltInSourceEmbeddingProvider {
     this.dimension = this.spec.dimension;
     this.threads = resolveThreads(options.threads, this.env);
     this.device = resolveDevice(this.env);
-    this.onnxOffThread = isMainThread5 && !options.runtime;
+    this.onnxOffThread = isMainThread6 && !options.runtime;
     this.runtimeFactory = options.runtime ?? ((installed) => onnxRuntimeFromDirectory(installed.runtimeDir));
     this.liteRtFactory = options.liteRt ?? startLiteRtEmbedder;
     this.install = options.install ?? installBuiltInEmbedding;

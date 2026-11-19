@@ -28909,7 +28909,8 @@ var init_openclaw_executable = () => {};
 
 // src/core/worker-auth.ts
 import { createHmac as createHmac2 } from "node:crypto";
-import { readFileSync as readFileSync16, statSync as statSync7 } from "node:fs";
+import { constants as constants4, readFileSync as readFileSync16, statSync as statSync7 } from "node:fs";
+import { open as open2 } from "node:fs/promises";
 import { homedir as homedir12 } from "node:os";
 import { join as join20 } from "node:path";
 function workerAuthTokenFromConfig(config, options = {}) {
@@ -28969,11 +28970,29 @@ function readWorkerSetupEnv(options = {}) {
     return;
   }
 }
+async function readWorkerSetupEnvAsync(options = {}) {
+  const path = workerSetupEnvPath(options);
+  try {
+    const file = await open2(path, constants4.O_RDONLY | constants4.O_NONBLOCK);
+    try {
+      const info = await file.stat({ bigint: true });
+      if (!info.isFile() || (info.mode & 0o077n) !== 0n)
+        return;
+      return parseWorkerSetupEnv(await file.readFile("utf8"));
+    } finally {
+      await file.close();
+    }
+  } catch {
+    return;
+  }
+}
 function environmentWithWorkerSetupEnv(options = {}) {
   const env = options.env ?? process.env;
   if (!options.workerEnvPath && !options.homeDir && !env.HOME?.trim())
     return env;
-  const setupEnv = readWorkerSetupEnv(options);
+  return mergeWorkerSetupEnv(env, readWorkerSetupEnv(options));
+}
+function mergeWorkerSetupEnv(env, setupEnv) {
   if (!setupEnv)
     return env;
   const merged = { ...setupEnv };
@@ -32461,7 +32480,7 @@ var init_connected_handles = __esm(() => {
 });
 
 // src/workers/credential-broker/unpaired-sources.ts
-import { closeSync as closeSync8, constants as constants4, fstatSync as fstatSync3, lstatSync as lstatSync14, openSync as openSync8, readFileSync as readFileSync19 } from "node:fs";
+import { closeSync as closeSync8, constants as constants5, fstatSync as fstatSync3, lstatSync as lstatSync14, openSync as openSync8, readFileSync as readFileSync19 } from "node:fs";
 function unpairedSourcesPath(registryPath) {
   return `${registryPath}.unpaired`;
 }
@@ -32485,7 +32504,7 @@ function readRecordText(path) {
   const node = inspectRecordNode(path);
   if (node.kind !== "file")
     return node;
-  const flags = constants4.O_RDONLY | (constants4.O_NOFOLLOW ?? 0) | (constants4.O_NONBLOCK ?? 0);
+  const flags = constants5.O_RDONLY | (constants5.O_NOFOLLOW ?? 0) | (constants5.O_NONBLOCK ?? 0);
   let fd;
   try {
     fd = openSync8(path, flags);
@@ -34608,7 +34627,7 @@ var init_sqlite_store = __esm(() => {
 });
 
 // src/core/data-owner-lock.ts
-import { closeSync as closeSync9, constants as constants5, existsSync as existsSync14, mkdirSync as mkdirSync10, openSync as openSync9 } from "node:fs";
+import { closeSync as closeSync9, constants as constants6, existsSync as existsSync14, mkdirSync as mkdirSync10, openSync as openSync9 } from "node:fs";
 import { createRequire as createRequire4 } from "node:module";
 import { constants as osConstants } from "node:os";
 import { dirname as dirname22 } from "node:path";
@@ -34645,7 +34664,7 @@ function holdDataOwnerLock(env = process.env, options = {}) {
   }
 }
 function tryFlock(lockPath, mode = LOCK_EX) {
-  const fd = openSync9(lockPath, constants5.O_RDWR | constants5.O_CREAT | O_CLOEXEC, 384);
+  const fd = openSync9(lockPath, constants6.O_RDWR | constants6.O_CREAT | O_CLOEXEC, 384);
   let failure;
   try {
     const kernel = flockLibrary();
@@ -35809,6 +35828,7 @@ var init_engine_split = __esm(() => {
 });
 
 // src/workers/control-path-headroom.ts
+import { appendFile } from "node:fs/promises";
 import { isMainThread } from "node:worker_threads";
 function controlPathFreezeSubject(role, mainThread = true) {
   if (!mainThread)
@@ -35980,6 +36000,12 @@ function freezeLogLine(at, role, freezes) {
   const frames = freezes.total.filter(([frame]) => product(frame)).slice(0, 8).map(([frame, n]) => `${frame} x${n}`).join(" | ");
   return `${at} [olympus:control-path] freeze frames role=${role} count=${freezes.count} total_ms=${freezes.totalMs} max_ms=${freezes.maxMs} site=${JSON.stringify(site)} leaf=${JSON.stringify(freezes.self[0]?.[0] ?? "no sample")} frames=${JSON.stringify(frames)}`;
 }
+function serializeDiagnosticWrites(onError) {
+  let tail = Promise.resolve();
+  return (write) => {
+    tail = tail.then(write).catch(onError);
+  };
+}
 async function startCpuSampleLog(env = process.env) {
   const configured = env[CPU_SAMPLE_LOG_ENV]?.trim();
   if (configured === "off")
@@ -35990,6 +36016,10 @@ async function startCpuSampleLog(env = process.env) {
   if (!jsc.startSamplingProfiler || !jsc.samplingProfilerStackTraces)
     return;
   const { appendFileSync } = await import("node:fs");
+  const queue = role === "front" && path ? serializeDiagnosticWrites(reportWriteFailure) : undefined;
+  function reportWriteFailure(error) {
+    console.error(`[olympus:control-path] cpu sample log failed: ${error instanceof Error ? error.name : "error"}`);
+  }
   jsc.startSamplingProfiler();
   let stalls = [];
   let lastTick = performance.now();
@@ -36025,13 +36055,18 @@ async function startCpuSampleLog(env = process.env) {
         maxMs: Math.round(window2.reduce((max, stall) => Math.max(max, stall.endMs - stall.startMs), 0)),
         ...summarizeCpuSamples(stalled, CPU_SAMPLE_TOP, sampled.sources ?? [])
       };
-      if (path)
-        appendFileSync(path, `${JSON.stringify({ at: new Date(now).toISOString(), pid: process.pid, role, windowMs: now - last, headroom: controlPathHeadroom.snapshot(), ...summary, freezes })}
-`, { mode: 384 });
+      if (path) {
+        const line = `${JSON.stringify({ at: new Date(now).toISOString(), pid: process.pid, role, windowMs: now - last, headroom: controlPathHeadroom.snapshot(), ...summary, freezes })}
+`;
+        if (queue)
+          queue(() => appendFile(path, line, { mode: 384 }));
+        else
+          appendFileSync(path, line, { mode: 384 });
+      }
       if (freezes.count > 0)
         console.error(freezeLogLine(new Date(now).toISOString(), role, freezes));
     } catch (error) {
-      console.error(`[olympus:control-path] cpu sample log failed: ${error instanceof Error ? error.name : "error"}`);
+      reportWriteFailure(error);
     }
     last = now;
   };
@@ -36490,6 +36525,7 @@ import {
   writeFileSync as writeFileSync7,
   writeSync as writeSync3
 } from "node:fs";
+import { readFile as readFile2 } from "node:fs/promises";
 import { basename as basename4, dirname as dirname26, isAbsolute as isAbsolute13, join as join29 } from "node:path";
 function builtInEmbeddingPaths(env = process.env, model = BUILT_IN_EMBEDDING_MODEL, runtime = ONNX_RUNTIME_PACK, platform = currentPlatform(), liteRtRuntime = LITERT_RUNTIME_PACK) {
   const configured = env[BUILT_IN_EMBEDDING_DIR_ENV]?.trim();
@@ -36516,6 +36552,32 @@ function installedBuiltInEmbedding(paths, model = BUILT_IN_EMBEDDING_MODEL, plat
 function currentPlatform() {
   return `${process.platform}-${process.arch}`;
 }
+function readAssetState(path) {
+  if (!isMainThread2 || process.env.OLYMPUS_WORKER_ENGINE_ROLE?.trim() !== "front") {
+    return JSON.parse(readFileSync23(path, "utf8"));
+  }
+  let entry = frontAssetReads.get(path);
+  if (!entry) {
+    entry = { checkedAt: -Infinity, pending: false };
+    frontAssetReads.set(path, entry);
+  }
+  const cached = entry;
+  if (!cached.pending && Date.now() - cached.checkedAt >= 2000) {
+    cached.checkedAt = Date.now();
+    cached.pending = true;
+    refreshAssetState(path, cached);
+  }
+  return cached.value;
+}
+async function refreshAssetState(path, entry) {
+  try {
+    entry.value = JSON.parse(await readFile2(path, "utf8"));
+  } catch {
+    entry.value = undefined;
+  } finally {
+    entry.pending = false;
+  }
+}
 function readBuiltInEmbeddingStatus(env = process.env, model = BUILT_IN_EMBEDDING_MODEL) {
   const fallback = {
     state: "not_started",
@@ -36527,7 +36589,7 @@ function readBuiltInEmbeddingStatus(env = process.env, model = BUILT_IN_EMBEDDIN
     updatedAt: new Date(0).toISOString()
   };
   try {
-    const parsed = JSON.parse(readFileSync23(builtInEmbeddingPaths(env, model).statusPath, "utf8"));
+    const parsed = readAssetState(builtInEmbeddingPaths(env, model).statusPath);
     return parsed && typeof parsed === "object" && parsed.modelId === model.modelId ? parsed : fallback;
   } catch {
     return fallback;
@@ -36535,7 +36597,7 @@ function readBuiltInEmbeddingStatus(env = process.env, model = BUILT_IN_EMBEDDIN
 }
 function readBuiltInRerankerStatus(env = process.env, model = MMARCO_MMINILMV2_L12_H384_V1) {
   try {
-    const parsed = JSON.parse(readFileSync23(join29(builtInEmbeddingPaths(env).root, "reranker-status.json"), "utf8"));
+    const parsed = readAssetState(join29(builtInEmbeddingPaths(env).root, "reranker-status.json"));
     if (parsed && typeof parsed === "object" && parsed.modelId === model.modelId)
       return parsed;
   } catch {}
@@ -36545,8 +36607,8 @@ function readBuiltInEmbeddingVision(env = process.env, model = BUILT_IN_EMBEDDIN
   if (!model.vision)
     return "unknown";
   try {
-    const parsed = JSON.parse(readFileSync23(join29(builtInEmbeddingPaths(env, model).root, "vision.json"), "utf8"));
-    if (parsed.modelId !== model.modelId || typeof parsed.vision !== "boolean")
+    const parsed = readAssetState(join29(builtInEmbeddingPaths(env, model).root, "vision.json"));
+    if (parsed?.modelId !== model.modelId || typeof parsed.vision !== "boolean")
       return "unknown";
     return parsed.vision ? "ready" : "unavailable";
   } catch {
@@ -37046,7 +37108,7 @@ class ProgressReporter {
     } catch {}
   }
 }
-var BUILT_IN_EMBEDDING_DIR_ENV = "OLYMPUS_BUILT_IN_EMBEDDING_DIR", STALE_LOCK_MS, LOCK_POLL_MS = 1000, PROGRESS_WRITE_INTERVAL_MS = 500, DOWNLOAD_STALL_MS, BuiltInEmbeddingInstallError, verifiedThisProcess, RUNTIME_MARKER = "olympus-runtime.json";
+var BUILT_IN_EMBEDDING_DIR_ENV = "OLYMPUS_BUILT_IN_EMBEDDING_DIR", STALE_LOCK_MS, LOCK_POLL_MS = 1000, PROGRESS_WRITE_INTERVAL_MS = 500, DOWNLOAD_STALL_MS, BuiltInEmbeddingInstallError, frontAssetReads, verifiedThisProcess, RUNTIME_MARKER = "olympus-runtime.json";
 var init_assets = __esm(() => {
   init_built_in_reranker_manifest();
   init_off_thread();
@@ -37065,6 +37127,7 @@ var init_assets = __esm(() => {
       this.reason = reason;
     }
   };
+  frontAssetReads = new Map;
 });
 
 // src/core/still-image-readiness.ts
@@ -37072,6 +37135,7 @@ import { spawnSync as spawnSync8 } from "node:child_process";
 import { mkdtempSync, readFileSync as readFileSync24, rmSync as rmSync8, writeFileSync as writeFileSync8 } from "node:fs";
 import { tmpdir as tmpdir2 } from "node:os";
 import { join as join30 } from "node:path";
+import { isMainThread as isMainThread3 } from "node:worker_threads";
 function spawnRun(command, args, timeoutMs) {
   const result = spawnSync8(command, args, { stdio: "ignore", timeout: timeoutMs, killSignal: "SIGKILL" });
   return { ok: !result.error && result.status === 0 };
@@ -37153,7 +37217,8 @@ function withVision(readiness, vision) {
 function stillImageReadiness() {
   if (!current2)
     current2 = { readiness: probeStillImageReadiness({ vision: visionReader() }), pinned: false, checkedAt: clock() };
-  if (!current2.pinned && clock() - current2.checkedAt >= STILL_IMAGE_VISION_RECHECK_MS) {
+  const front = isMainThread3 && process.env.OLYMPUS_WORKER_ENGINE_ROLE?.trim() === "front";
+  if (!current2.pinned && (front || clock() - current2.checkedAt >= STILL_IMAGE_VISION_RECHECK_MS)) {
     current2.checkedAt = clock();
     const vision = visionReader();
     if (vision !== current2.readiness.vision)
@@ -39331,6 +39396,7 @@ var init_store_write_guard = __esm(() => {
 
 // src/core/boot-progress.ts
 import { existsSync as existsSync22, lstatSync as lstatSync16, mkdirSync as mkdirSync13, readdirSync as readdirSync4, readFileSync as readFileSync28, realpathSync as realpathSync9, rmSync as rmSync9 } from "node:fs";
+import { readFile as readFile3 } from "node:fs/promises";
 import { basename as basename5, dirname as dirname27, isAbsolute as isAbsolute14, join as join34, resolve as resolve9 } from "node:path";
 function beginProgress(env, file, now) {
   const at = new Date(now()).toISOString();
@@ -39449,17 +39515,28 @@ function readFrontProgress(env = process.env) {
 }
 function readProgressFile(path) {
   try {
-    const value = JSON.parse(readFileSync28(path, "utf8"));
-    if (value.schema !== BOOT_PROGRESS_SCHEMA || typeof value.pid !== "number" || typeof value.phase !== "string" || typeof value.startedAt !== "string" || typeof value.updatedAt !== "string")
-      return;
-    if (value.failures !== undefined && (!Number.isSafeInteger(value.failures) || value.failures < 0))
-      delete value.failures;
-    if (value.lastFailure !== undefined && typeof value.lastFailure !== "string")
-      delete value.lastFailure;
-    return { completedStores: 0, ...value };
+    return parseProgress(readFileSync28(path, "utf8"));
   } catch {
     return;
   }
+}
+async function readBootProgressAsync(env = process.env) {
+  const path = bootProgressPath(env);
+  try {
+    return parseProgress(await readFile3(path, "utf8"));
+  } catch {
+    return;
+  }
+}
+function parseProgress(text) {
+  const value = JSON.parse(text);
+  if (value.schema !== BOOT_PROGRESS_SCHEMA || typeof value.pid !== "number" || typeof value.phase !== "string" || typeof value.startedAt !== "string" || typeof value.updatedAt !== "string")
+    return;
+  if (value.failures !== undefined && (!Number.isSafeInteger(value.failures) || value.failures < 0))
+    delete value.failures;
+  if (value.lastFailure !== undefined && typeof value.lastFailure !== "string")
+    delete value.lastFailure;
+  return { completedStores: 0, ...value };
 }
 function bootProgressLine(progress, now = Date.now()) {
   const minutes = Math.max(0, Math.floor((now - Date.parse(progress.startedAt)) / 60000));
@@ -49021,7 +49098,7 @@ var init_answer_latency_trace = __esm(() => {
 
 // src/workers/connector-store/main-thread-sql-trace.ts
 import { Database as Database4 } from "bun:sqlite";
-import { isMainThread as isMainThread3 } from "node:worker_threads";
+import { isMainThread as isMainThread4 } from "node:worker_threads";
 function withMainThreadSqlTiming(timing, work) {
   installMainThreadSqlTrace();
   const previous = sliceTiming;
@@ -49033,7 +49110,7 @@ function withMainThreadSqlTiming(timing, work) {
   }
 }
 function installMainThreadSqlTrace() {
-  if (installed || !isMainThread3)
+  if (installed || !isMainThread4)
     return;
   installed = true;
   const exec = Database4.prototype.exec;
@@ -49228,7 +49305,7 @@ function startMainThreadSqlSiteCount(frames = 2) {
 }
 function startSlowMainThreadSqlLog(thresholdMs, log = (line) => console.warn(line)) {
   installMainThreadSqlTrace();
-  if (!isMainThread3)
+  if (!isMainThread4)
     return;
   slowLog = { thresholdMs, count: 0, maxMs: 0, recent: [], log };
 }
@@ -52134,13 +52211,13 @@ var init_sniffer = __esm(() => {
 });
 
 // src/workers/classification-ledger.ts
-import { mkdir as mkdir3, open as open2, readFile as readFile2 } from "node:fs/promises";
+import { mkdir as mkdir3, open as open3, readFile as readFile4 } from "node:fs/promises";
 import { dirname as dirname34 } from "node:path";
 async function appendClassificationLedgerEntry(path, entry) {
   if (!isClassificationLedgerEntry(entry))
     throw new Error("Refusing to append a malformed classification ledger entry.");
   await mkdir3(dirname34(path), { recursive: true, mode: 448 });
-  const handle = await open2(path, "a", 384);
+  const handle = await open3(path, "a", 384);
   try {
     await handle.chmod(384);
     await handle.appendFile(`${JSON.stringify(entry)}
@@ -52163,7 +52240,7 @@ async function appendClassificationLedgerEntryOnce(path, entry) {
 async function readClassificationLedger(path) {
   let raw = "";
   try {
-    raw = await readFile2(path, "utf8");
+    raw = await readFile4(path, "utf8");
   } catch (error) {
     if (error?.code !== "ENOENT")
       throw error;
@@ -59915,9 +59992,9 @@ function formatSpaceToFree(bytes) {
 }
 
 // src/workers/source-index/built-in-embedding/litert-runtime.ts
-import { isMainThread as isMainThread4 } from "node:worker_threads";
+import { isMainThread as isMainThread5 } from "node:worker_threads";
 import { execFileSync as execFileSync2, spawn as spawn3 } from "node:child_process";
-import { closeSync as closeSync16, constants as constants6, existsSync as existsSync37, fstatSync as fstatSync4, openSync as openSync16, readdirSync as readdirSync6, readFileSync as readFileSync34, statSync as statSync17 } from "node:fs";
+import { closeSync as closeSync16, constants as constants7, existsSync as existsSync37, fstatSync as fstatSync4, openSync as openSync16, readdirSync as readdirSync6, readFileSync as readFileSync34, statSync as statSync17 } from "node:fs";
 import { homedir as homedir23 } from "node:os";
 import { delimiter as delimiter3, dirname as dirname42, isAbsolute as isAbsolute20, join as join46 } from "node:path";
 import { createInterface } from "node:readline";
@@ -60153,7 +60230,7 @@ class HelperProcess {
   }
 }
 async function startLiteRtEmbedder(options) {
-  if (isMainThread4 && !options.gpuAvailable) {
+  if (isMainThread5 && !options.gpuAvailable) {
     const handle = modelThreadHandleId();
     let state = await modelThread().call({ kind: "litert-start", handle, options });
     return {
@@ -60245,7 +60322,7 @@ function linuxGpuAvailable(deviceDirectory = "/dev/dri") {
         return false;
       let fd;
       try {
-        fd = openSync16(join46(deviceDirectory, name), constants6.O_RDWR | constants6.O_NONBLOCK);
+        fd = openSync16(join46(deviceDirectory, name), constants7.O_RDWR | constants7.O_NONBLOCK);
         return fstatSync4(fd).isCharacterDevice();
       } catch {
         return false;
@@ -60679,7 +60756,7 @@ var init_wordpiece = __esm(() => {
 });
 
 // src/workers/source-index/built-in-embedding/provider.ts
-import { isMainThread as isMainThread5 } from "node:worker_threads";
+import { isMainThread as isMainThread6 } from "node:worker_threads";
 import { createHash as createHash30 } from "node:crypto";
 import { readFileSync as readFileSync36 } from "node:fs";
 import { availableParallelism } from "node:os";
@@ -60728,7 +60805,7 @@ class BuiltInSourceEmbeddingProvider {
     this.dimension = this.spec.dimension;
     this.threads = resolveThreads(options.threads, this.env);
     this.device = resolveDevice(this.env);
-    this.onnxOffThread = isMainThread5 && !options.runtime;
+    this.onnxOffThread = isMainThread6 && !options.runtime;
     this.runtimeFactory = options.runtime ?? ((installed) => onnxRuntimeFromDirectory(installed.runtimeDir));
     this.liteRtFactory = options.liteRt ?? startLiteRtEmbedder;
     this.install = options.install ?? installBuiltInEmbedding;
@@ -61367,7 +61444,7 @@ var init_tier_auto_move = __esm(() => {
 });
 
 // src/workers/embedding-ledger.ts
-import { mkdir as mkdir4, open as open3, readFile as readFile3, stat as stat2 } from "node:fs/promises";
+import { mkdir as mkdir4, open as open4, readFile as readFile5, stat as stat2 } from "node:fs/promises";
 import { dirname as dirname44 } from "node:path";
 function isOwnerApprovedEmbeddingLedgerEntry(entry) {
   return entry.approved_by === EMBEDDING_LEDGER_OWNER_APPROVAL;
@@ -61385,7 +61462,7 @@ async function appendEmbeddingLedgerEntries(path, entries) {
   const line = entries.map((entry) => `${JSON.stringify(entry)}
 `).join("");
   await mkdir4(dirname44(path), { recursive: true, mode: 448 });
-  const handle = await open3(path, "a+", 384);
+  const handle = await open4(path, "a+", 384);
   try {
     await handle.chmod(384);
     await restoreLineBoundary(handle);
@@ -61451,7 +61528,7 @@ async function recordedEntryIds(path) {
   }
   if (size > cached.bytes) {
     const from = cached.bytes;
-    const handle = await open3(path, "r");
+    const handle = await open4(path, "r");
     try {
       const tail = Buffer.alloc(size - from);
       const { bytesRead } = await handle.read(tail, 0, tail.length, from);
@@ -61473,7 +61550,7 @@ async function recordedEntryIds(path) {
 async function readEmbeddingLedger(path) {
   let raw = "";
   try {
-    raw = await readFile3(path, "utf8");
+    raw = await readFile5(path, "utf8");
   } catch (error) {
     if (error?.code !== "ENOENT")
       throw error;
@@ -105326,7 +105403,7 @@ var init_sniffer_decision = __esm(() => {
 });
 
 // src/workers/source-index/built-in-reasoning/install.ts
-import { isMainThread as isMainThread6 } from "node:worker_threads";
+import { isMainThread as isMainThread7 } from "node:worker_threads";
 import { spawn as spawn4 } from "node:child_process";
 import { createHash as createHash54, randomUUID as randomUUID22 } from "node:crypto";
 import {
@@ -105404,7 +105481,7 @@ async function installBuiltInReasoning(options) {
 }
 async function installPinnedModel(options) {
   const { onProgress, log: installLog, ...serializable } = options;
-  if (isMainThread6 && !Object.values(serializable).some((value) => typeof value === "function")) {
+  if (isMainThread7 && !Object.values(serializable).some((value) => typeof value === "function")) {
     try {
       return await modelThread().call({ kind: "install", options: serializable }, {
         progress: onProgress,
@@ -105944,7 +106021,7 @@ var init_install = __esm(() => {
 });
 
 // src/workers/source-index/built-in-reasoning/server.ts
-import { isMainThread as isMainThread7 } from "node:worker_threads";
+import { isMainThread as isMainThread8 } from "node:worker_threads";
 import { spawn as spawn5 } from "node:child_process";
 import { randomBytes as randomBytes21 } from "node:crypto";
 import { mkdtempSync as mkdtempSync3, rmSync as rmSync20, writeFileSync as writeFileSync15 } from "node:fs";
@@ -106003,7 +106080,7 @@ function llamaServerArguments(launch, port, tokenFile) {
   ];
 }
 function createLlamaServerHandle(launch, options = {}) {
-  if (isMainThread7 && !options.spawnImpl && !options.fetchImpl && !options.onPid) {
+  if (isMainThread8 && !options.spawnImpl && !options.fetchImpl && !options.onPid) {
     const thread = modelThread();
     const handle = modelThreadHandleId();
     const translateError = (error) => {
@@ -107157,7 +107234,7 @@ function onDemandFailedCoverageNote(count) {
 }
 
 // src/core/analyst-openclaw-infer.ts
-import { accessSync as accessSync6, constants as constants8 } from "node:fs";
+import { accessSync as accessSync6, constants as constants9 } from "node:fs";
 import { isAbsolute as isAbsolute25 } from "node:path";
 function resolveOpenClawCommand() {
   return resolveOpenClawExecutable() ?? DEFAULT_COMMAND;
@@ -107166,7 +107243,7 @@ function resolveOpenClawCommand() {
 class SpawnOpenClawRunner {
   async run(command, args, options = {}) {
     if (isAbsolute25(command))
-      accessSync6(command, constants8.X_OK);
+      accessSync6(command, constants9.X_OK);
     const child = Bun.spawn([command, ...args], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
     const timeout = options.timeoutMs ? setTimeout(() => child.kill(), options.timeoutMs) : undefined;
     try {
@@ -117039,7 +117116,7 @@ var init_dropbox = __esm(() => {
 // src/workers/file-extraction/extractors/command-runner.ts
 import { Buffer as Buffer4 } from "node:buffer";
 import { execFile as execFile2, spawn as spawn6 } from "node:child_process";
-import { readFile as readFile4, readdir } from "node:fs/promises";
+import { readFile as readFile6, readdir } from "node:fs/promises";
 import { promisify } from "node:util";
 import { accessSync as accessSync7, constants as fsConstants5, statSync as statSync28 } from "node:fs";
 import { delimiter as delimiter5, join as join76 } from "node:path";
@@ -117092,7 +117169,7 @@ async function linuxGroupCpuMs(pgid) {
       continue;
     let stat;
     try {
-      stat = await readFile4(`/proc/${entry}/stat`, "utf8");
+      stat = await readFile6(`/proc/${entry}/stat`, "utf8");
     } catch {
       continue;
     }
@@ -117318,7 +117395,7 @@ var init_command_runner = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/pdf-render.ts
-import { mkdtemp, readFile as readFile5, readdir as readdir2, rm as rm2, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile as readFile7, readdir as readdir2, rm as rm2, writeFile } from "node:fs/promises";
 import { tmpdir as tmpdir4 } from "node:os";
 import { join as join77 } from "node:path";
 function parsePdfInfoPageCount(stdout) {
@@ -117385,7 +117462,7 @@ async function renderPdfPages(input) {
         return {
           pages: [{
             pageNumber: 1,
-            bytes: new Uint8Array(await readFile5(singleFilePath)),
+            bytes: new Uint8Array(await readFile7(singleFilePath)),
             mimeType: outputFormat === "jpeg" ? "image/jpeg" : "image/png",
             dpi: DEFAULT_PDF_RENDER_DPI
           }],
@@ -117398,7 +117475,7 @@ async function renderPdfPages(input) {
     return {
       pages: await Promise.all(entries.map(async (entry) => ({
         pageNumber: entry.pageNumber,
-        bytes: new Uint8Array(await readFile5(join77(tempDir, entry.name))),
+        bytes: new Uint8Array(await readFile7(join77(tempDir, entry.name))),
         mimeType: outputFormat === "jpeg" ? "image/jpeg" : "image/png",
         dpi: DEFAULT_PDF_RENDER_DPI
       }))),
@@ -117435,7 +117512,7 @@ async function renderSinglePdfPageForVision(input) {
     });
     return {
       pageNumber: input.pageNumber,
-      bytes: new Uint8Array(await readFile5(outputPath)),
+      bytes: new Uint8Array(await readFile7(outputPath)),
       mimeType: "image/jpeg",
       dpi: input.dpi
     };
@@ -117467,7 +117544,7 @@ async function renderPdfFirstPageForVision(input) {
       timeoutMs: input.timeoutMs
     });
     return {
-      bytes: new Uint8Array(await readFile5(outputPath)),
+      bytes: new Uint8Array(await readFile7(outputPath)),
       mimeType: "image/png"
     };
   } finally {
@@ -121098,7 +121175,7 @@ var init_archive_target = __esm(() => {
 });
 
 // src/workers/archive-import/input-media.ts
-import { closeSync as closeSync23, constants as constants9, openSync as openSync23, rmSync as rmSync23, writeSync as writeSync6 } from "node:fs";
+import { closeSync as closeSync23, constants as constants10, openSync as openSync23, rmSync as rmSync23, writeSync as writeSync6 } from "node:fs";
 function archiveInputMediaLocator(ref) {
   if (!ARCHIVE_ID.test(ref.archiveId) || !BINDING_ID.test(ref.bindingId))
     throw new Error("An archive media locator needs a plain archive and binding id.");
@@ -121152,7 +121229,7 @@ function readArchiveInputMedia(locator, deps, options = {}) {
   return out;
 }
 function copyArchiveInputMediaToFile(locator, deps, options, dest) {
-  const out = openSync23(dest, constants9.O_WRONLY | constants9.O_CREAT | constants9.O_EXCL, 384);
+  const out = openSync23(dest, constants10.O_WRONLY | constants10.O_CREAT | constants10.O_EXCL, 384);
   let written = 0;
   try {
     serveArchiveInputMedia(locator, deps, options.maxBytes, {
@@ -121627,7 +121704,7 @@ var init_types4 = __esm(() => {
 });
 
 // src/workers/dropbox-files/extraction-source.ts
-import { readFile as readFile6, realpath, stat as stat3 } from "node:fs/promises";
+import { readFile as readFile8, realpath, stat as stat3 } from "node:fs/promises";
 import { relative as relative12, resolve as resolve20, sep as sep17 } from "node:path";
 
 class DropboxExtractionSource {
@@ -121898,7 +121975,7 @@ async function readVerifiedCandidate(input) {
   if (input.declaredSizeBytes !== undefined && input.declaredSizeBytes !== fileStat.size) {
     return;
   }
-  const bytes = new Uint8Array(await readFile6(input.candidatePath));
+  const bytes = new Uint8Array(await readFile8(input.candidatePath));
   if (input.maxBytes !== undefined && bytes.byteLength > input.maxBytes) {
     throw new FileExtractionSourceError("source_too_large", { sizeBytes: bytes.byteLength });
   }
@@ -122404,7 +122481,7 @@ var init_connector_source = __esm(() => {
 });
 
 // src/workers/whatsapp/child-media.ts
-import { closeSync as closeSync24, constants as constants10, fstatSync as fstatSync6, openSync as openSync24, readSync as readSync7, realpathSync as realpathSync17, rmSync as rmSync26, statSync as statSync31 } from "node:fs";
+import { closeSync as closeSync24, constants as constants11, fstatSync as fstatSync6, openSync as openSync24, readSync as readSync7, realpathSync as realpathSync17, rmSync as rmSync26, statSync as statSync31 } from "node:fs";
 import { isAbsolute as isAbsolute28, join as join84, relative as relative13, resolve as resolve22 } from "node:path";
 function whatsAppMediaFileLocator(path) {
   return `${WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX}${path}`;
@@ -122447,7 +122524,7 @@ function createWhatsAppChildReader(options) {
 function withConfinedFile(path, roots, maxBytes, use) {
   let fd;
   try {
-    fd = openSync24(path, constants10.O_RDONLY | constants10.O_NOFOLLOW);
+    fd = openSync24(path, constants11.O_RDONLY | constants11.O_NOFOLLOW);
   } catch (error) {
     if (error.code === "ELOOP")
       throw new FileExtractionSourceError("source_permission_denied");
@@ -122475,7 +122552,7 @@ function withConfinedFile(path, roots, maxBytes, use) {
   }
 }
 function copyBounded(fd, maxBytes, dest) {
-  const out = openSync24(dest, constants10.O_WRONLY | constants10.O_CREAT | constants10.O_EXCL, 384);
+  const out = openSync24(dest, constants11.O_WRONLY | constants11.O_CREAT | constants11.O_EXCL, 384);
   const chunk = Buffer.allocUnsafe(Math.min(COPY_CHUNK_BYTES, maxBytes + 1));
   let total = 0;
   try {
@@ -122580,8 +122657,8 @@ var init_child_media = __esm(() => {
 });
 
 // src/workers/whatsapp/extraction-source.ts
-import { readFile as readFile7, realpath as realpath2, stat as stat4 } from "node:fs/promises";
-import { closeSync as closeSync25, constants as constants11, openSync as openSync25, readSync as readSync8, rmSync as rmSync27 } from "node:fs";
+import { readFile as readFile9, realpath as realpath2, stat as stat4 } from "node:fs/promises";
+import { closeSync as closeSync25, constants as constants12, openSync as openSync25, readSync as readSync8, rmSync as rmSync27 } from "node:fs";
 import { basename as basename14, join as join85, relative as relative14, resolve as resolve23, sep as sep19 } from "node:path";
 
 class WhatsAppExtractionSource {
@@ -122645,7 +122722,7 @@ class WhatsAppExtractionSource {
         throw new FileExtractionSourceError("source_too_large");
       }
       return {
-        bytes: await readFile7(path),
+        bytes: await readFile9(path),
         ...ref.mimeType ? { mimeType: ref.mimeType } : {},
         sizeBytes: file.size
       };
@@ -122742,7 +122819,7 @@ function nodeErrorCode(error) {
   return typeof code === "string" ? code : undefined;
 }
 function copyDescriptor(fd, size, dest) {
-  const out = openSync25(dest, constants11.O_WRONLY | constants11.O_CREAT | constants11.O_EXCL, 384);
+  const out = openSync25(dest, constants12.O_WRONLY | constants12.O_CREAT | constants12.O_EXCL, 384);
   const chunk = Buffer.allocUnsafe(Math.min(1024 * 1024, Math.max(1, size)));
   let total = 0;
   try {
@@ -131082,7 +131159,7 @@ var init_ocr_probe_fixture = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/ocr-capability.ts
-import { mkdtemp as mkdtemp4, readFile as readFile8, readdir as readdir3, rm as rm5, writeFile as writeFile4 } from "node:fs/promises";
+import { mkdtemp as mkdtemp4, readFile as readFile10, readdir as readdir3, rm as rm5, writeFile as writeFile4 } from "node:fs/promises";
 import { tmpdir as tmpdir7 } from "node:os";
 import { join as join95 } from "node:path";
 function ocrmypdfArguments(input) {
@@ -131222,7 +131299,7 @@ async function probeOcrmypdf(input) {
     return commandMissing(error) ? "missing" : "failed";
   }
   try {
-    return probeWordRead(await readFile8(sidecarPath, "utf8")) ? "ok" : "failed";
+    return probeWordRead(await readFile10(sidecarPath, "utf8")) ? "ok" : "failed";
   } catch {
     return "failed";
   }
@@ -131602,7 +131679,7 @@ var init_pdf_raster_ocr = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/ocr.ts
-import { mkdtemp as mkdtemp6, readFile as readFile9, rm as rm7, writeFile as writeFile5 } from "node:fs/promises";
+import { mkdtemp as mkdtemp6, readFile as readFile11, rm as rm7, writeFile as writeFile5 } from "node:fs/promises";
 import { tmpdir as tmpdir9 } from "node:os";
 import { join as join97 } from "node:path";
 function pdfOcrTimeoutMs(baseMs, _sizeBytes) {
@@ -131790,7 +131867,7 @@ function createImageOcr(options = {}) {
         const vision = await withVision2(engine, (reader) => visionImage(laneInput, reader));
         if (vision)
           return vision;
-        const decoded = preparedImage ? await readFile9(preparedImage.path) : undefined;
+        const decoded = preparedImage ? await readFile11(preparedImage.path) : undefined;
         return commandImageOcr(engine, decoded ? { ...laneInput, bytes: decoded, mimeType: "image/jpeg", sizeBytes: decoded.byteLength } : laneInput);
       });
     } catch (error) {
@@ -131900,7 +131977,7 @@ async function extractPdfOcr(input) {
         throw error;
       return { status: "failed_terminal", errorKind: rejectionKind };
     }
-    const bounded = boundText(normalizeExtractedText(await readFile9(sidecarPath, "utf8")), input.maxBoundedTextChars);
+    const bounded = boundText(normalizeExtractedText(await readFile11(sidecarPath, "utf8")), input.maxBoundedTextChars);
     if (!bounded.text) {
       return mediaDescriptorOutput({
         mimeType: input.mimeType,
@@ -132369,7 +132446,7 @@ var init_model_stream2 = __esm(() => {
 });
 
 // src/workers/source-index/built-in-reasoning/transcription-model.ts
-import { accessSync as accessSync8, constants as constants13, readFileSync as readFileSync58 } from "node:fs";
+import { accessSync as accessSync8, constants as constants14, readFileSync as readFileSync58 } from "node:fs";
 import { delimiter as delimiter6, isAbsolute as isAbsolute31, join as join98 } from "node:path";
 function builtInTranscriptionLayout(model = QWEN3_ASR_06B, env = process.env, runtime = LLAMA_SERVER_RUNTIME, platform = currentPlatform2()) {
   const root = env[BUILT_IN_TRANSCRIPTION_DIR_ENV]?.trim() || sharedDataPath("built-in-transcription", env);
@@ -132445,7 +132522,7 @@ function builtInTranscriptionEnabled(env = process.env, platform = currentPlatfo
 function audioDecoderPresent(platform = currentPlatform2(), env = process.env) {
   const executable = (path) => {
     try {
-      accessSync8(path, constants13.X_OK);
+      accessSync8(path, constants14.X_OK);
       return true;
     } catch {
       return false;
@@ -132610,7 +132687,7 @@ var init_audio_wav = __esm(() => {
 
 // src/workers/file-extraction/extractors/built-in-transcriber.ts
 import { existsSync as existsSync69 } from "node:fs";
-import { mkdtemp as mkdtemp7, readFile as readFile10, rm as rm8 } from "node:fs/promises";
+import { mkdtemp as mkdtemp7, readFile as readFile12, rm as rm8 } from "node:fs/promises";
 import { tmpdir as tmpdir10, totalmem as totalmem2 } from "node:os";
 import { join as join99 } from "node:path";
 function defaultAudioConverter(platform, runner = runExtractionCommand, timeoutMs = DEFAULT_CONVERT_TIMEOUT_MS) {
@@ -132808,7 +132885,7 @@ function createBuiltInTranscriber(options = {}) {
         }
         let audio;
         try {
-          audio = parseWav16Mono(new Uint8Array(await readFile10(wavPath)));
+          audio = parseWav16Mono(new Uint8Array(await readFile12(wavPath)));
         } catch (error) {
           if (error instanceof WavFormatError)
             throw new AudioUndecodableError(error.message);
@@ -132961,7 +133038,7 @@ var init_built_in_transcriber = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/transcription.ts
-import { mkdtemp as mkdtemp8, readFile as readFile11, rm as rm9, writeFile as writeFile6 } from "node:fs/promises";
+import { mkdtemp as mkdtemp8, readFile as readFile13, rm as rm9, writeFile as writeFile6 } from "node:fs/promises";
 import { tmpdir as tmpdir11 } from "node:os";
 import { extname as extname3, join as join100 } from "node:path";
 function parseTranscriberArgvTemplate(command) {
@@ -133172,7 +133249,7 @@ function sidecarPathForInput(inputPath) {
 async function readFirstExisting(paths) {
   for (const path of [...new Set(paths)]) {
     try {
-      return await readFile11(path, "utf8");
+      return await readFile13(path, "utf8");
     } catch {}
   }
   return;
@@ -138592,7 +138669,8 @@ var init_source_ingestion_ledger = __esm(() => {
 });
 
 // src/workers/source-index/status.ts
-import { existsSync as existsSync73, readFileSync as readFileSync60, statSync as statSync35 } from "node:fs";
+import { existsSync as existsSync73, readFileSync as readFileSync60 } from "node:fs";
+import { readFile as readFile14, stat as stat5 } from "node:fs/promises";
 function authorCoverageStatus(store, reused = (read) => read()) {
   try {
     const rows = reused(() => store.authorCoverage());
@@ -138735,22 +138813,33 @@ function createSourceIndexStatusHandler(options = {}) {
   const role = options.snapshotRole;
   const snapshots = new Map(role === "reader" ? [] : readStatusSnapshots(options.snapshotPath));
   let published;
-  const publishedStatus = (key) => {
-    if (role !== "reader" || !options.snapshotPath)
+  const snapshotPath = options.snapshotPath;
+  let readingPublished;
+  const refreshPublished = () => {
+    if (role !== "reader" || !snapshotPath)
       return;
-    try {
-      const file = statSync35(options.snapshotPath);
-      const version = `${file.ino}:${file.mtimeMs}:${file.size}`;
-      if (published?.version !== version)
-        published = { version, entries: new Map(readStatusSnapshots(options.snapshotPath)) };
-    } catch {
-      return published?.entries.get(key);
-    }
-    return published.entries.get(key);
+    if (readingPublished)
+      return readingPublished;
+    const read = async () => {
+      try {
+        const file = await stat5(snapshotPath);
+        const version = `${file.ino}:${file.mtimeMs}:${file.size}`;
+        if (published?.version === version)
+          return;
+        const entries = parseStatusSnapshots(await readFile14(snapshotPath, "utf8"));
+        if (entries)
+          published = { version, entries: new Map(entries) };
+      } catch {}
+    };
+    readingPublished = read().finally(() => {
+      readingPublished = undefined;
+    });
+    return readingPublished;
   };
+  refreshPublished();
   const servedOnFront = (request, countsMaxAgeMs) => {
     const key = snapshotKey(request, countsMaxAgeMs);
-    const exact = publishedStatus(key);
+    const exact = published?.entries.get(key);
     const entries = [...published?.entries ?? new Map];
     const newest = (match) => {
       let found;
@@ -138836,13 +138925,11 @@ function createSourceIndexStatusHandler(options = {}) {
   };
   const snapshotStatus = (compute, request, countsMaxAgeMs) => {
     const key = snapshotKey(request, countsMaxAgeMs);
-    const fromBackground = publishedStatus(key);
-    const last = fromBackground ?? snapshots.get(key);
+    const last = snapshots.get(key);
     if (!last)
       return refreshKept(key, compute);
     const age = Math.max(0, nowMs() - last.atMs);
-    const refreshBehind = role === undefined || role === "reader" && !fromBackground;
-    if (refreshBehind && age >= STATUS_SNAPSHOT_REFRESH_MS)
+    if (role === undefined && age >= STATUS_SNAPSHOT_REFRESH_MS)
       refreshKept(key, compute).catch(() => {
         return;
       });
@@ -138989,7 +139076,7 @@ function createSourceIndexStatusHandler(options = {}) {
       const countsMaxAgeMs = snapshot.countsMaxAgeMs ?? 0;
       if (role === "reader" && !request.include_sender_aggregation) {
         assertSupportedStatusRequest(request);
-        publishedStatus(snapshotKey(request, countsMaxAgeMs));
+        refreshPublished();
         return withLiveTotals(servedOnFront(request, countsMaxAgeMs));
       }
       if (countsMaxAgeMs <= 0 || request.include_sender_aggregation)
@@ -138998,6 +139085,8 @@ function createSourceIndexStatusHandler(options = {}) {
       return withLiveTotals(await snapshotStatus(() => computeStatus(request, snapshot), request, countsMaxAgeMs));
     },
     async settled() {
+      if (readingPublished)
+        await readingPublished;
       while (snapshotRefreshes.size > 0)
         await Promise.allSettled([...snapshotRefreshes.values()]);
     },
@@ -139013,13 +139102,16 @@ function readStatusSnapshots(path) {
   if (!path)
     return [];
   try {
-    const parsed = JSON.parse(readFileSync60(path, "utf8"));
-    if (parsed?.schema !== STATUS_SNAPSHOT_SCHEMA || !Array.isArray(parsed.entries))
-      return [];
-    return parsed.entries.filter((entry) => Array.isArray(entry) && typeof entry[0] === "string" && typeof entry[1]?.atMs === "number" && entry[1]?.result?.kind === "source_index_status");
+    return parseStatusSnapshots(readFileSync60(path, "utf8")) ?? [];
   } catch {
     return [];
   }
+}
+function parseStatusSnapshots(text) {
+  const parsed = JSON.parse(text);
+  if (parsed?.schema !== STATUS_SNAPSHOT_SCHEMA || !Array.isArray(parsed.entries))
+    return;
+  return parsed.entries.filter((entry) => Array.isArray(entry) && typeof entry[0] === "string" && typeof entry[1]?.atMs === "number" && entry[1]?.result?.kind === "source_index_status");
 }
 function normalizedStatusCacheMaxAge(value) {
   if (value === undefined || !Number.isFinite(value) || value <= 0)
@@ -144451,7 +144543,7 @@ import {
   renameSync as renameSync14,
   rmdirSync as rmdirSync6,
   rmSync as rmSync32,
-  statSync as statSync36
+  statSync as statSync35
 } from "node:fs";
 import { homedir as homedir30 } from "node:os";
 import { basename as basename16, dirname as dirname86, join as join108, relative as relative17, resolve as resolve24, sep as sep21 } from "node:path";
@@ -145551,7 +145643,7 @@ function inspectSqliteSnapshot(snapshotPath, sqlitePath, expectedStoreId) {
   }
 }
 function fileArtifact(exportRoot, path, sourceId, role) {
-  const stats = statSync36(path);
+  const stats = statSync35(path);
   return {
     sourceId,
     role,
@@ -145683,7 +145775,7 @@ function globExisting(root, pattern) {
     return [];
   return readdirSync20(root).map((entry) => join108(root, entry)).filter((path) => {
     const name = basename16(path);
-    return pattern.test(name) && statSync36(path).isFile();
+    return pattern.test(name) && statSync35(path).isFile();
   });
 }
 function serviceUnitTarget(path) {
@@ -148049,18 +148141,25 @@ function createUpdateChecker(options) {
   let stopped = false;
   const proxied = () => ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"].some((key) => Boolean(options.env[key]?.trim()));
   const off = (value) => ["off", "0", "false", "no"].includes(value?.trim().toLowerCase() ?? "");
-  const enabled = () => Boolean(installer) && !proxied() && !off(options.env.OLYMPUS_UPDATE_CHECK) && !off(options.fileEnv()?.OLYMPUS_UPDATE_CHECK);
+  const enabledHere = () => Boolean(installer) && !proxied() && !off(options.env.OLYMPUS_UPDATE_CHECK);
+  const enabled = () => enabledHere() && !off(options.fileEnv()?.OLYMPUS_UPDATE_CHECK);
+  const freshFileEnv = options.freshFileEnv;
+  const enabledFresh = async (read) => enabledHere() && !off((await read())?.OLYMPUS_UPDATE_CHECK);
   async function check() {
     if (controller)
       return;
     let reader;
     let timeout;
     try {
-      if (stopped || !enabled()) {
+      if (stopped) {
         result = undefined;
         return;
       }
       controller = new AbortController;
+      if (!(freshFileEnv ? await enabledFresh(freshFileEnv) : enabled()) || stopped) {
+        result = undefined;
+        return;
+      }
       timeout = setTimeout(() => controller?.abort(), options.timeoutMs ?? UPDATE_TIMEOUT_MS);
       const response = await (options.fetchImpl ?? fetch)(installer.url, {
         method: "GET",
@@ -148090,7 +148189,8 @@ function createUpdateChecker(options) {
         offset += chunk.length;
       }
       const version = parseInstallerVersion(new TextDecoder().decode(bytes));
-      result = !stopped && enabled() && version && newerVersion(version, options.runningVersion) ? { version } : undefined;
+      const stillEnabled = !stopped && (freshFileEnv ? await enabledFresh(freshFileEnv) : enabled());
+      result = !stopped && stillEnabled && version && newerVersion(version, options.runningVersion) ? { version } : undefined;
     } catch {
       result = undefined;
       try {
@@ -148146,7 +148246,7 @@ import { execFile as execFile3 } from "node:child_process";
 import { createHash as createHash82, randomUUID as randomUUID30 } from "node:crypto";
 import {
   accessSync as accessSync9,
-  constants as constants14,
+  constants as constants15,
   lstatSync as lstatSync41,
   mkdirSync as mkdirSync55,
   readFileSync as readFileSync69,
@@ -148154,12 +148254,12 @@ import {
   realpathSync as realpathSync20,
   renameSync as renameSync15,
   rmSync as rmSync33,
-  statSync as statSync37,
+  statSync as statSync36,
   symlinkSync,
   writeFileSync as writeFileSync19,
   chmodSync as chmodSync33
 } from "node:fs";
-import { open as open4 } from "node:fs/promises";
+import { open as open5 } from "node:fs/promises";
 import { homedir as homedir31 } from "node:os";
 import { dirname as dirname88, isAbsolute as isAbsolute32, join as join112, posix as posix3, sep as sep22 } from "node:path";
 import { gunzip } from "node:zlib";
@@ -148218,7 +148318,7 @@ function currentUid(host) {
 }
 function privatelyOwned(path, uid, kind) {
   try {
-    const stats = statSync37(path);
+    const stats = statSync36(path);
     if (kind === "dir" ? !stats.isDirectory() : !stats.isFile())
       return false;
     if (uid !== undefined && stats.uid !== uid)
@@ -148275,7 +148375,7 @@ function managedToolExecutable(tool, host = {}) {
     }
     verifyPinnedFiles(versionDir, asset, uid, pin.label, tool);
     const real = realpathSync20(join112(versionDir, asset.executable));
-    accessSync9(real, constants14.X_OK);
+    accessSync9(real, constants15.X_OK);
     return real;
   } catch {
     return;
@@ -148655,7 +148755,7 @@ async function downloadStream(path, asset, fetchImpl, signal, stillArriving, onB
     throw new ManagedToolsError("size_mismatch", `The ${label} download is not the pinned size, so nothing was installed.`, tool);
   }
   const hash = createHash82("sha256");
-  const file = await open4(path, "wx", 384);
+  const file = await open5(path, "wx", 384);
   let received = 0;
   let lastReport = 0;
   try {
@@ -150388,7 +150488,7 @@ main().catch(() => process.exit(1));
 // src/core/zkapi-confinement-linux.ts
 import { execFile as execFile4 } from "node:child_process";
 import { promisify as promisify2 } from "node:util";
-import { readFile as readFile12, stat as fileStat } from "node:fs/promises";
+import { readFile as readFile15, stat as fileStat } from "node:fs/promises";
 import { createHash as createHash83 } from "node:crypto";
 import { lstatSync as lstatSync42, readFileSync as readFileSync71, readlinkSync as readlinkSync4, readdirSync as readdirSync24, realpathSync as realpathSync21 } from "node:fs";
 import { dirname as dirname89, join as join114 } from "node:path";
@@ -150435,7 +150535,7 @@ function parseLinuxStatus(line) {
     return;
   }
 }
-function stat5(pid, proc) {
+function stat6(pid, proc) {
   const s = proc.read(`/proc/${pid}/stat`);
   const f = s.slice(s.lastIndexOf(")") + 1).trim().split(/\s+/);
   if (!/^\d+$/.test(f[19] ?? "") || f[0] === "Z" || f[0] === "X")
@@ -150452,7 +150552,7 @@ function verifyLinuxInstance(e, w, proc = realProc) {
   try {
     if (new Set([w.pid, e.stage0Pid, e.stage1Pid, e.daemonPid]).size !== 4)
       return false;
-    const wd = stat5(w.pid, proc), s0 = stat5(e.stage0Pid, proc), s1 = stat5(e.stage1Pid, proc), d = stat5(e.daemonPid, proc);
+    const wd = stat6(w.pid, proc), s0 = stat6(e.stage0Pid, proc), s1 = stat6(e.stage1Pid, proc), d = stat6(e.daemonPid, proc);
     if (wd.start !== w.startTime || s0.start !== e.stage0Start || s1.start !== e.stage1Start || d.start !== e.daemonStart)
       return false;
     if (s0.parent !== w.pid || s1.parent !== e.stage0Pid || d.parent !== e.stage1Pid)
@@ -150503,7 +150603,7 @@ function inspectLinuxNamespace(e, w, ports, proc = realProc) {
         const visited = new Set;
         while (parent !== e.daemonPid && !visited.has(parent) && parent > 1) {
           visited.add(parent);
-          parent = stat5(parent, proc).parent;
+          parent = stat6(parent, proc).parent;
         }
         if (parent !== e.daemonPid)
           continue;
@@ -150566,7 +150666,7 @@ async function launcherPath(env) {
           break;
         current = dirname89(current);
       }
-      if (!lstatSync42(path).isFile() || createHash83("sha256").update(await readFile12(path)).digest("hex") !== ZKAPI_CONFINE_SHA256)
+      if (!lstatSync42(path).isFile() || createHash83("sha256").update(await readFile15(path)).digest("hex") !== ZKAPI_CONFINE_SHA256)
         continue;
       return path;
     } catch {}
@@ -150577,7 +150677,7 @@ async function launcherIdentity(path) {
   const info = await fileStat(path);
   if (!info.isFile())
     throw new Error("not a launcher");
-  const hash = createHash83("sha256").update(await readFile12(path)).digest("hex");
+  const hash = createHash83("sha256").update(await readFile15(path)).digest("hex");
   return [info.dev, info.ino, info.size, info.mtimeMs, info.ctimeMs, info.mode, hash].join(":");
 }
 function linuxZkapiConfinement(deps = {}) {
@@ -150739,7 +150839,7 @@ var init_zkapi_confinement_linux = __esm(() => {
 // src/core/consult-transport-zkapi.ts
 import { spawn as spawn7, execFileSync as execFileSync5 } from "node:child_process";
 import { createHash as createHash84, randomUUID as randomUUID31 } from "node:crypto";
-import { accessSync as accessSync10, chmodSync as chmodSync35, closeSync as closeSync30, constants as constants15, existsSync as existsSync82, mkdirSync as mkdirSync56, mkdtempSync as mkdtempSync4, readdirSync as readdirSync25, readFileSync as readFileSync72, readlinkSync as readlinkSync5, realpathSync as realpathSync22, rmSync as rmSync35, statSync as statSync38, writeFileSync as writeFileSync21 } from "node:fs";
+import { accessSync as accessSync10, chmodSync as chmodSync35, closeSync as closeSync30, constants as constants16, existsSync as existsSync82, mkdirSync as mkdirSync56, mkdtempSync as mkdtempSync4, readdirSync as readdirSync25, readFileSync as readFileSync72, readlinkSync as readlinkSync5, realpathSync as realpathSync22, rmSync as rmSync35, statSync as statSync37, writeFileSync as writeFileSync21 } from "node:fs";
 import { createConnection as createConnection4, createServer as createServer4 } from "node:net";
 import { homedir as homedir32, tmpdir as tmpdir12 } from "node:os";
 import { delimiter as delimiter7, dirname as dirname90, isAbsolute as isAbsolute33, join as join115, resolve as resolvePath } from "node:path";
@@ -151364,7 +151464,7 @@ function zkapiConsultInFlightOnDisk(statePath) {
 }
 function zkapiRunningSince(statePath) {
   try {
-    return statSync38(statePath).mtime.toISOString();
+    return statSync37(statePath).mtime.toISOString();
   } catch {
     return "an unknown time";
   }
@@ -151499,8 +151599,8 @@ function resolveExecutable(name, explicit, env, platform = process.platform, tru
   const candidates = explicit ? [explicit] : pathDirectories.map((dir) => join115(dir, name));
   for (const candidate of candidates) {
     try {
-      accessSync10(candidate, constants15.X_OK);
-      if (statSync38(candidate).isFile())
+      accessSync10(candidate, constants16.X_OK);
+      if (statSync37(candidate).isFile())
         return candidate;
     } catch {}
   }
@@ -152985,10 +153085,10 @@ setInterval(() => { if (process.ppid !== expectedParent) cleanup(); }, 500);
 `;
   DEFAULT_EXECUTABLE_TRUST = {
     realpath: (path) => realpathSync22(path),
-    stat: (path) => statSync38(path),
+    stat: (path) => statSync37(path),
     executable: (path) => {
       try {
-        accessSync10(path, constants15.X_OK);
+        accessSync10(path, constants16.X_OK);
         return true;
       } catch {
         return false;
@@ -153018,7 +153118,7 @@ setInterval(() => { if (process.ppid !== expectedParent) cleanup(); }, 500);
 // src/core/engine-service.ts
 import { spawn as spawn8, spawnSync as spawnSync14 } from "node:child_process";
 import { createHash as createHash85, randomBytes as randomBytes25 } from "node:crypto";
-import { existsSync as existsSync83, lstatSync as lstatSync43, readdirSync as readdirSync26, readFileSync as readFileSync73, renameSync as renameSync16, rmSync as rmSync36, statSync as statSync39 } from "node:fs";
+import { existsSync as existsSync83, lstatSync as lstatSync43, readdirSync as readdirSync26, readFileSync as readFileSync73, renameSync as renameSync16, rmSync as rmSync36, statSync as statSync38 } from "node:fs";
 import { homedir as homedir33, platform as osPlatform3 } from "node:os";
 import { basename as basename17, dirname as dirname91, isAbsolute as isAbsolute34, join as join116, resolve as resolvePath2 } from "node:path";
 function enginePaths(homeDir) {
@@ -154090,7 +154190,7 @@ function recoverInterruptedHelperSwap(paths, deps = {}) {
       } catch {
         return false;
       }
-    }).sort((a, b) => statSync39(b).mtimeMs - statSync39(a).mtimeMs)[0];
+    }).sort((a, b) => statSync38(b).mtimeMs - statSync38(a).mtimeMs)[0];
     if (aside) {
       try {
         rename(aside, target);
@@ -154330,7 +154430,7 @@ function resolveBun2(explicit) {
     if (!candidate || !isAbsolute34(candidate) || !isBunName(candidate))
       continue;
     try {
-      if (statSync39(candidate).isFile())
+      if (statSync38(candidate).isFile())
         return candidate;
     } catch {}
   }
@@ -154356,7 +154456,7 @@ function assertOlympusPackage(root, label) {
 }
 function assertFile(path, message) {
   try {
-    if (statSync39(path).isFile())
+    if (statSync38(path).isFile())
       return;
   } catch {}
   throw new OperationError("config_error", message);
@@ -154614,7 +154714,7 @@ var init_engine_service = __esm(() => {
 
 // src/core/linux-engine-service.ts
 import { spawnSync as spawnSync15 } from "node:child_process";
-import { chmodSync as chmodSync36, closeSync as closeSync31, constants as constants16, copyFileSync as copyFileSync3, existsSync as existsSync84, fstatSync as fstatSync7, fsyncSync as fsyncSync8, ftruncateSync, lstatSync as lstatSync44, linkSync as linkSync4, mkdirSync as mkdirSync57, openSync as openSync30, readFileSync as readFileSync74, readlinkSync as readlinkSync6, readdirSync as readdirSync27, realpathSync as realpathSync23, renameSync as renameSync17, rmSync as rmSync37, rmdirSync as rmdirSync7, statSync as statSync40, symlinkSync as symlinkSync2, writeFileSync as writeFileSync22 } from "node:fs";
+import { chmodSync as chmodSync36, closeSync as closeSync31, constants as constants17, copyFileSync as copyFileSync3, existsSync as existsSync84, fstatSync as fstatSync7, fsyncSync as fsyncSync8, ftruncateSync, lstatSync as lstatSync44, linkSync as linkSync4, mkdirSync as mkdirSync57, openSync as openSync30, readFileSync as readFileSync74, readlinkSync as readlinkSync6, readdirSync as readdirSync27, realpathSync as realpathSync23, renameSync as renameSync17, rmSync as rmSync37, rmdirSync as rmdirSync7, statSync as statSync39, symlinkSync as symlinkSync2, writeFileSync as writeFileSync22 } from "node:fs";
 import { createRequire as createRequire7 } from "node:module";
 import { basename as basename18, dirname as dirname92, join as join117, relative as relative19, resolve as resolve25, sep as sep23 } from "node:path";
 import { userInfo as userInfo2 } from "node:os";
@@ -154757,7 +154857,7 @@ function rotateEngineLog(path, maxBytes = 10 * 1024 * 1024, retained = 3) {
   assertLinuxManagedPath(path);
   if (!existsSync84(path))
     return;
-  const fd = openSync30(path, constants16.O_RDWR | constants16.O_NOFOLLOW);
+  const fd = openSync30(path, constants17.O_RDWR | constants17.O_NOFOLLOW);
   try {
     const info = fstatSync7(fd);
     if (!info.isFile() || info.nlink !== 1 || (info.mode & 63) !== 0)
@@ -154772,7 +154872,7 @@ function rotateEngineLog(path, maxBytes = 10 * 1024 * 1024, retained = 3) {
       else if (existsSync84(dest))
         renameSync17(dest, `${path}.${i + 1}`);
     }
-    copyFileSync3(path, `${path}.1`, constants16.COPYFILE_EXCL);
+    copyFileSync3(path, `${path}.1`, constants17.COPYFILE_EXCL);
     ftruncateSync(fd, 0);
   } finally {
     closeSync31(fd);
@@ -154791,12 +154891,12 @@ function systemdCgroupEmpty(group, root = "/sys/fs/cgroup") {
       return;
     try {
       readFileSync74(join117(root, "cgroup.controllers"));
-      statSync40(dirname92(join117(root, group)));
+      statSync39(dirname92(join117(root, group)));
     } catch {
       return;
     }
     try {
-      statSync40(join117(root, group));
+      statSync39(join117(root, group));
       return;
     } catch (error) {
       return error.code === "ENOENT" ? true : undefined;
@@ -154866,7 +154966,7 @@ function inheritedUtilLinuxFlock(lockPath) {
   for (let depth = 0;pid > 1 && depth < 16; depth += 1) {
     try {
       const executable = realpathSync23(`/proc/${pid}/exe`);
-      const executableStat = statSync40(executable);
+      const executableStat = statSync39(executable);
       const args = readFileSync74(`/proc/${pid}/cmdline`).toString("utf8").split("\x00").filter(Boolean);
       if (basename18(executable) === "flock" && executableStat.uid === 0 && (executableStat.mode & 18) === 0 && args.slice(1).some((arg) => arg.startsWith("/") && resolve25(arg) === lockPath))
         return true;
@@ -154900,7 +155000,7 @@ function openLifecycleLock(layout) {
   preflightLinuxEngineLayout(layout);
   createLinuxPrivateDirectory(layout.runtimeDir);
   assertLinuxManagedPath(layout.lifecycleLockPath);
-  const fd = openSync30(layout.lifecycleLockPath, constants16.O_RDWR | constants16.O_CREAT | constants16.O_NOFOLLOW, 384);
+  const fd = openSync30(layout.lifecycleLockPath, constants17.O_RDWR | constants17.O_CREAT | constants17.O_NOFOLLOW, 384);
   try {
     const info = fstatSync7(fd);
     if (!info.isFile() || info.uid !== process.getuid() || (info.mode & 511) !== 384 || info.nlink !== 1) {
@@ -155019,7 +155119,7 @@ function linuxMachineArtifactDigest(path, kind) {
   return hash.digest("hex");
 }
 function syncCopiedFile(path) {
-  const fd = openSync30(path, constants16.O_RDONLY | constants16.O_NOFOLLOW);
+  const fd = openSync30(path, constants17.O_RDONLY | constants17.O_NOFOLLOW);
   try {
     fsyncSync8(fd);
   } finally {
@@ -155460,7 +155560,7 @@ function migrateLegacySettings(layout, transaction, options) {
     }
     createLinuxPrivateDirectory(dirname92(target));
     const temporary = legacyMigrationTemporary(layout, transaction, name);
-    const fd = openSync30(temporary, constants16.O_WRONLY | constants16.O_CREAT | constants16.O_EXCL | constants16.O_NOFOLLOW, 384);
+    const fd = openSync30(temporary, constants17.O_WRONLY | constants17.O_CREAT | constants17.O_EXCL | constants17.O_NOFOLLOW, 384);
     try {
       writeFileSync22(fd, snapshotBytes(snapshots[name]));
       fsyncSync8(fd);
@@ -156583,7 +156683,7 @@ var init_credential_degradation = __esm(() => {
 
 // src/core/consult-gate.ts
 import { createHash as createHash88 } from "node:crypto";
-import { existsSync as existsSync86, readFileSync as readFileSync76, statSync as statSync41 } from "node:fs";
+import { existsSync as existsSync86, readFileSync as readFileSync76, statSync as statSync40 } from "node:fs";
 import { homedir as homedir34 } from "node:os";
 import { basename as basename19, dirname as dirname94, join as join119 } from "node:path";
 import { fileURLToPath as fileURLToPath12 } from "node:url";
@@ -157093,7 +157193,7 @@ function verifiedPackFile(path, sha256) {
   try {
     if (!existsSync86(path))
       return "missing";
-    if (statSync41(path).size > CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES)
+    if (statSync40(path).size > CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES)
       return "too_large";
     const gz = readFileSync76(path);
     return createHash88("sha256").update(gz).digest("hex") === sha256 ? gz : "hash_mismatch";
@@ -157188,7 +157288,7 @@ function userManifestEntries(userDir) {
     return [];
   try {
     const path = join119(userDir, "manifest.json");
-    if (!existsSync86(path) || statSync41(path).size > 1024 * 1024)
+    if (!existsSync86(path) || statSync40(path).size > 1024 * 1024)
       return [];
     const manifest = JSON.parse(readFileSync76(path, "utf8"));
     if (!manifest || typeof manifest !== "object" || Array.isArray(manifest))
@@ -159681,7 +159781,7 @@ __export(exports_consult_settings, {
   parseConsultWriterChoice: () => parseConsultWriterChoice,
   readConsultSettings: () => readConsultSettings
 });
-import { closeSync as closeSync32, constants as constants17, fstatSync as fstatSync8, openSync as openSync31, readSync as readSync11 } from "node:fs";
+import { closeSync as closeSync32, constants as constants18, fstatSync as fstatSync8, openSync as openSync31, readSync as readSync11 } from "node:fs";
 import { join as join120 } from "node:path";
 function consultStandardMode(settings) {
   return settings.standardMode ?? CONSULT_STANDARD_MODE_WHEN_UNSET;
@@ -159856,7 +159956,7 @@ function readConsultSettings(location = {}) {
       return { state: "absent", settings: DEFAULT_CONSULT_SETTINGS };
     let descriptor;
     try {
-      descriptor = openSync31(path, constants17.O_RDONLY | constants17.O_NOFOLLOW | constants17.O_NONBLOCK);
+      descriptor = openSync31(path, constants18.O_RDONLY | constants18.O_NOFOLLOW | constants18.O_NONBLOCK);
     } catch (error) {
       const code = errorCode(error);
       if (code === "ENOENT" || code === "ENOTDIR")
@@ -167443,7 +167543,7 @@ var init_owner_limits = __esm(() => {
 });
 
 // src/data-restore.ts
-import { closeSync as closeSync34, copyFileSync as copyFileSync4, existsSync as existsSync97, fsyncSync as fsyncSync10, openSync as openSync33, readFileSync as readFileSync85, renameSync as renameSync20, rmSync as rmSync39, statSync as statSync43, chmodSync as chmodSync39 } from "node:fs";
+import { closeSync as closeSync34, copyFileSync as copyFileSync4, existsSync as existsSync97, fsyncSync as fsyncSync10, openSync as openSync33, readFileSync as readFileSync85, renameSync as renameSync20, rmSync as rmSync39, statSync as statSync42, chmodSync as chmodSync39 } from "node:fs";
 import { dirname as dirname99, join as join126, resolve as resolve26 } from "node:path";
 import { randomUUID as randomUUID35 } from "node:crypto";
 import { Database as Database29 } from "bun:sqlite";
@@ -167546,7 +167646,7 @@ function restoreOlympusData(options) {
   if (manifest.version < 3 || !sawJudgments) {
     notes.push("This backup has no privacy judgments, so Olympus judges the restored items again.");
   }
-  const holds = (path) => existsSync97(path) && statSync43(path).size > 0;
+  const holds = (path) => existsSync97(path) && statSync42(path).size > 0;
   const restoredSources = [...new Set(plan.filter((entry) => entry.kind !== "owner_settings").map((entry) => entry.sourceId))];
   const occupiedSources = restoredSources.filter((sourceId) => storesOf(sourceId).some((store) => [
     store,
@@ -167862,7 +167962,7 @@ var init_data_restore = __esm(() => {
 
 // src/data-backup.ts
 import { createCipheriv as createCipheriv2, createDecipheriv as createDecipheriv2, createHash as createHash94, createHmac as createHmac6, randomBytes as randomBytes27, randomUUID as randomUUID36, scryptSync as scryptSync2, timingSafeEqual as timingSafeEqual8 } from "node:crypto";
-import { closeSync as closeSync35, existsSync as existsSync98, lstatSync as lstatSync48, mkdirSync as mkdirSync62, openSync as openSync34, readdirSync as readdirSync29, readSync as readSync12, renameSync as renameSync21, rmSync as rmSync40, statSync as statSync44, unlinkSync as unlinkSync6, writeSync as writeSync9, chmodSync as chmodSync40, fsyncSync as fsyncSync11 } from "node:fs";
+import { closeSync as closeSync35, existsSync as existsSync98, lstatSync as lstatSync48, mkdirSync as mkdirSync62, openSync as openSync34, readdirSync as readdirSync29, readSync as readSync12, renameSync as renameSync21, rmSync as rmSync40, statSync as statSync43, unlinkSync as unlinkSync6, writeSync as writeSync9, chmodSync as chmodSync40, fsyncSync as fsyncSync11 } from "node:fs";
 import { open as openAsync } from "node:fs/promises";
 import { basename as basename21, dirname as dirname100, join as join127, resolve as resolve27, sep as sep24 } from "node:path";
 function normalizePassphrase(passphrase) {
@@ -168069,7 +168169,7 @@ async function writeBackupFile(options) {
   await handle.close();
   renameSync21(staging, target);
   syncDirectorySync(folder);
-  return { path: target, name, bytes: statSync44(target).size, encrypted: options.key !== undefined, createdAt: now.toISOString() };
+  return { path: target, name, bytes: statSync43(target).size, encrypted: options.key !== undefined, createdAt: now.toISOString() };
 }
 function readExactly(fd, length, position) {
   const out = Buffer.alloc(length);
@@ -168088,7 +168188,7 @@ function notABackup(path) {
 function readBackupHeader(path) {
   const fd = openSync34(path, "r");
   try {
-    const size = statSync44(path).size;
+    const size = statSync43(path).size;
     const lead = readExactly(fd, MAGIC.length + 4, 0);
     if (lead.length < MAGIC.length + 4 || !lead.subarray(0, MAGIC.length).equals(MAGIC))
       throw notABackup(path);
@@ -168392,7 +168492,7 @@ function restoreOlympusBackup(options) {
   };
   if (!existsSync98(input))
     throw new OperationError("invalid_params", `${input} does not exist.`);
-  if (statSync44(input).isDirectory())
+  if (statSync43(input).isDirectory())
     return restoreOlympusData({ input, ...options.dryRun ? { dryRun: true } : {}, ...context });
   const staging = backupStagingDir(lifecycleEnv(context));
   try {
@@ -168765,7 +168865,7 @@ var init_zkapi_recovery = __esm(() => {
 });
 
 // src/core/zkapi-funding-date.ts
-import { readFileSync as readFileSync89, statSync as statSync45 } from "node:fs";
+import { readFileSync as readFileSync89, statSync as statSync44 } from "node:fs";
 function setZkapiFundingDate(input) {
   const date = input.date.trim();
   if (parseIsoDate(date) === undefined) {
@@ -168812,7 +168912,7 @@ function zkapiFundingDateRefresher(path) {
       return;
     let key;
     try {
-      const stat = statSync45(path);
+      const stat = statSync44(path);
       key = `${stat.ino}:${stat.size}:${stat.mtimeMs}`;
     } catch {
       return known;
@@ -184227,7 +184327,7 @@ var init_embedding_runtime = __esm(() => {
 
 // src/core/native-embedding-drain-service.ts
 import { randomUUID as randomUUID37 } from "node:crypto";
-import { readFileSync as readFileSync92, statSync as statSync46 } from "node:fs";
+import { readFileSync as readFileSync92, statSync as statSync45 } from "node:fs";
 import { delimiter as delimiter8, dirname as dirname104, isAbsolute as isAbsolute38, join as join132 } from "node:path";
 import { fileURLToPath as fileURLToPath13 } from "node:url";
 function createNativeEmbeddingDrainService(options) {
@@ -184328,7 +184428,7 @@ function resolveBunRuntimePath2(configured, env) {
     if (!["bun", "bun.exe"].includes(candidate.split(/[\\/]/).at(-1)?.toLowerCase() ?? ""))
       continue;
     try {
-      if (statSync46(candidate).isFile())
+      if (statSync45(candidate).isFile())
         return candidate;
     } catch {}
   }
@@ -184339,14 +184439,14 @@ function assertUsableFile(path, label) {
     throw new NativeProcessConfigurationError(`Olympus source embedding drain ${label} path must be absolute.`);
   }
   try {
-    if (statSync46(path).isFile())
+    if (statSync45(path).isFile())
       return path;
   } catch {}
   throw new NativeProcessConfigurationError(`Olympus source embedding drain ${label} file is missing.`);
 }
 async function embeddingDrainReadinessProbe(readinessPath, instanceId, child) {
   try {
-    const stat = statSync46(readinessPath);
+    const stat = statSync45(readinessPath);
     if (!stat.isFile() || stat.size > 16 * 1024)
       return false;
     const receipt = JSON.parse(readFileSync92(readinessPath, "utf8"));
@@ -185894,6 +185994,7 @@ var init_remote_relay_runtime = __esm(() => {
 
 // src/workers/engine-split/memory.ts
 import { readFileSync as readFileSync94 } from "node:fs";
+import { readFile as readFile16 } from "node:fs/promises";
 function processMemory(status, platform = process.platform) {
   const rss = process.memoryUsage.rss();
   if (platform !== "linux")
@@ -185905,6 +186006,19 @@ function processMemory(status, platform = process.platform) {
       return { rss };
     }
   }
+  return parseProcMemory(rss, status);
+}
+async function processMemoryAsync() {
+  if (process.platform !== "linux")
+    return { rss: process.memoryUsage.rss() };
+  try {
+    const status = await readFile16("/proc/self/status", "utf8");
+    return parseProcMemory(process.memoryUsage.rss(), status);
+  } catch {
+    return { rss: process.memoryUsage.rss() };
+  }
+}
+function parseProcMemory(rss, status) {
   const kb = (key) => {
     const found = new RegExp(`^${key}:\\s+(\\d+)\\s+kB$`, "m").exec(status);
     return found ? Number(found[1]) * 1024 : undefined;
@@ -186390,7 +186504,7 @@ var init_tier_owner_items = __esm(() => {
 });
 
 // src/workers/source-scope-runtime.ts
-import { statSync as statSync47 } from "node:fs";
+import { statSync as statSync46 } from "node:fs";
 function isMailSourceScopePolicyRef(ref) {
   return ref.sourceId === "gmail.email";
 }
@@ -186518,7 +186632,7 @@ class FileSourceScopeAuthority {
       return;
     try {
       const files = [this.registryPath, defaultThisComputerStatePath(this.registryPath), this.statePath].map((path) => {
-        const stat = statSync47(path, { throwIfNoEntry: false });
+        const stat = statSync46(path, { throwIfNoEntry: false });
         return stat ? [stat.ino, stat.mtimeMs, stat.size] : null;
       });
       return JSON.stringify([ref.accountGeneration, ref.revision, files]);
@@ -186996,7 +187110,8 @@ function createJudgeSetup(options) {
         throw new Error("Set up an allowed private model first.");
       if (!(cloud.lane.kind === "tinfoil" ? TINFOIL_PRICES[cloud.lane.modelId] : JUDGE_PRICES[normalizeVeniceAnalystModelId(cloud.lane.modelId)]))
         throw new Error("A listed price is needed before this model can judge in the cloud.");
-      if (!options.credentialReady(cloud.lane))
+      const credential = options.credentialReady(cloud.lane);
+      if (!(typeof credential === "boolean" ? credential : await credential))
         throw new Error(`Add your own ${provider} API key in Keys first.`);
       const fallback = options.local();
       if (choice === "local-then-venice" && fallback.source === "off")
@@ -189342,7 +189457,7 @@ var init_json_tokenizer = __esm(() => {
 });
 
 // src/workers/source-index/built-in-reranker.ts
-import { isMainThread as isMainThread8 } from "node:worker_threads";
+import { isMainThread as isMainThread9 } from "node:worker_threads";
 import { availableParallelism as availableParallelism3, totalmem as totalmem4 } from "node:os";
 import { existsSync as existsSync105, readFileSync as readFileSync95 } from "node:fs";
 import { isAbsolute as isAbsolute39, join as join135 } from "node:path";
@@ -189492,7 +189607,7 @@ function builtInRerankerFromEnv(options = {}) {
   const runtimeDir = runtimeOverride || builtInEmbeddingPaths(env, ARCTIC_EMBED_M_V1_5).runtimeDir;
   if (!options.runtime && !runtimeOverride && !builtInOnnxRuntimeInstalled(runtimeDir))
     return;
-  if (isMainThread8 && !options.runtime) {
+  if (isMainThread9 && !options.runtime) {
     const handle = modelThreadHandleId();
     let loading;
     const prepare = () => loading ??= modelThread().call({ kind: "reranker-load", handle, env }).catch((error) => {
@@ -192224,7 +192339,7 @@ var init_dashboard_messaging_runner = __esm(() => {
 
 // src/workers/engine/dashboard/dashboard-messaging-service.ts
 import { spawn as spawn13 } from "node:child_process";
-import { closeSync as closeSync36, constants as constants18, fstatSync as fstatSync9, openSync as openSync35, readFileSync as readFileSync97 } from "node:fs";
+import { closeSync as closeSync36, constants as constants19, fstatSync as fstatSync9, openSync as openSync35, readFileSync as readFileSync97 } from "node:fs";
 import { arch, platform as platform2, release } from "node:os";
 import { basename as basename22, join as join137 } from "node:path";
 function sourceOf(value) {
@@ -192274,7 +192389,7 @@ function retainApprovedCaptureScope(source, env) {
 function readQr(path) {
   if (basename22(path) !== "qr.png")
     throw new Error("Invalid QR artifact.");
-  const fd = openSync35(path, constants18.O_RDONLY | (constants18.O_NOFOLLOW ?? 0));
+  const fd = openSync35(path, constants19.O_RDONLY | (constants19.O_NOFOLLOW ?? 0));
   try {
     const stat = fstatSync9(fd);
     if (!stat.isFile() || stat.size > 1024 * 1024 || (stat.mode & 63) !== 0 || typeof process.getuid === "function" && stat.uid !== process.getuid())
@@ -206632,8 +206747,8 @@ var init_top_nav = __esm(() => {
 
 // src/workers/archive-import/staging.ts
 import { randomBytes as randomBytes35 } from "node:crypto";
-import { existsSync as existsSync109, mkdirSync as mkdirSync71, readdirSync as readdirSync31, realpathSync as realpathSync24, renameSync as renameSync26, rmSync as rmSync45, statSync as statSync48, statfsSync as statfsSync6, utimesSync } from "node:fs";
-import { open as open5, rm as rm11 } from "node:fs/promises";
+import { existsSync as existsSync109, mkdirSync as mkdirSync71, readdirSync as readdirSync31, realpathSync as realpathSync24, renameSync as renameSync26, rmSync as rmSync45, statSync as statSync47, statfsSync as statfsSync6, utimesSync } from "node:fs";
+import { open as open6, rm as rm11 } from "node:fs/promises";
 import { sep as sep25, join as join140, resolve as resolve30 } from "node:path";
 function sanitizeUploadPath(raw) {
   const bad = () => {
@@ -206785,7 +206900,7 @@ function createArchiveUploads(options) {
         throw new ArchiveUploadError("cancelled", ARCHIVE_UPLOAD_COPY.cancelled, 409);
       }
       try {
-        handle = await open5(target, offset === 0 ? "wx" : "r+", 384);
+        handle = await open6(target, offset === 0 ? "wx" : "r+", 384);
       } catch (error) {
         const code = error?.code;
         throw code === "EEXIST" ? new ArchiveUploadError("duplicate_file", ARCHIVE_UPLOAD_COPY.duplicate_file, 409) : new ArchiveUploadError("write_failed", ARCHIVE_UPLOAD_COPY.write_failed, 500);
@@ -206982,7 +207097,7 @@ function createArchiveUploads(options) {
         if (found && (found.active > 0 || now() - found.lastTouch < ARCHIVE_UPLOAD_IDLE_MS))
           continue;
         try {
-          if (!statSync48(dir).isDirectory())
+          if (!statSync47(dir).isDirectory())
             continue;
         } catch {
           continue;
@@ -213048,7 +213163,7 @@ var init_volume_identity = __esm(() => {
 });
 
 // src/workers/backup-service.ts
-import { existsSync as existsSync111, mkdirSync as mkdirSync72, readFileSync as readFileSync103, readdirSync as readdirSync33, rmSync as rmSync46, statSync as statSync49 } from "node:fs";
+import { existsSync as existsSync111, mkdirSync as mkdirSync72, readFileSync as readFileSync103, readdirSync as readdirSync33, rmSync as rmSync46, statSync as statSync48 } from "node:fs";
 import { dirname as dirname109, join as join141 } from "node:path";
 function defaultBackupServicePaths(env = process.env) {
   return {
@@ -213259,7 +213374,7 @@ function createBackupService(options) {
       let file;
       try {
         file = input.file;
-        if (!statSync49(file).isFile())
+        if (!statSync48(file).isFile())
           throw new Error("not a file");
       } catch {
         throw new OperationError("invalid_params", "That backup file is no longer there. Choose it again.");
@@ -219568,9 +219683,9 @@ var init_file_extraction = __esm(() => {
 import {
   chmod as chmod2,
   mkdir as mkdir5,
-  open as open6,
+  open as open7,
   rename as rename2,
-  stat as stat6,
+  stat as stat7,
   unlink
 } from "node:fs/promises";
 import { dirname as dirname113 } from "node:path";
@@ -219740,7 +219855,7 @@ async function appendSourceAnswerLatencyLine(path, record, options = {}) {
   if (Number.isFinite(maxBytes) && maxBytes > 0) {
     await rotateLatencyLedgerIfNeeded(path, Buffer.byteLength(line), maxBytes);
   }
-  const handle = await open6(path, "a", 384);
+  const handle = await open7(path, "a", 384);
   try {
     await handle.chmod(384);
     await handle.appendFile(line, "utf8");
@@ -219801,7 +219916,7 @@ async function makeExistingLedgerPrivate(path) {
 async function rotateLatencyLedgerIfNeeded(path, incomingBytes, maxBytes) {
   let currentBytes = 0;
   try {
-    currentBytes = (await stat6(path)).size;
+    currentBytes = (await stat7(path)).size;
   } catch (error) {
     if (!isMissingFileError(error))
       throw error;
@@ -220251,7 +220366,7 @@ var init_source_watch_requests = __esm(() => {
 });
 
 // src/workers/engine/http/dashboard-connections.ts
-import { statSync as statSync50 } from "node:fs";
+import { statSync as statSync49 } from "node:fs";
 function dashboardLivePasses(read) {
   if (!read)
     return {};
@@ -220412,7 +220527,7 @@ function assertDashboardSourceMayRead(source, sourceDashboard, disconnected) {
 }
 function dashboardRegistryStamp(registryPath) {
   try {
-    const stat = statSync50(registryPath);
+    const stat = statSync49(registryPath);
     return `${stat.mtimeMs}:${stat.size}`;
   } catch {
     return "absent";
@@ -241113,7 +241228,7 @@ var init_scheduler_source2 = __esm(() => {
 });
 
 // src/workers/local-files/open-target.ts
-import { realpathSync as realpathSync31, statSync as statSync51 } from "node:fs";
+import { realpathSync as realpathSync31, statSync as statSync50 } from "node:fs";
 function localFilesOpenRoots(volumes, approvedScopePaths) {
   const roots = [];
   for (const scopePath of approvedScopePaths()) {
@@ -241122,7 +241237,7 @@ function localFilesOpenRoots(volumes, approvedScopePaths) {
       continue;
     try {
       const real = realpathSync31.native(resolved);
-      if (statSync51(real).isDirectory() && !roots.includes(real))
+      if (statSync50(real).isDirectory() && !roots.includes(real))
         roots.push(real);
     } catch {}
   }
@@ -241144,7 +241259,7 @@ function createLocalFilesOpenTargets(options) {
       return;
     try {
       const real = realpathSync31.native(resolved);
-      return statSync51(real).isFile() ? { localPath: real } : undefined;
+      return statSync50(real).isFile() ? { localPath: real } : undefined;
     } catch {
       return;
     }
@@ -242449,7 +242564,7 @@ var init_unreadable_locators = __esm(() => {
 });
 
 // src/workers/engine/sqlite-wal-sampler.ts
-import { statSync as statSync52 } from "node:fs";
+import { statSync as statSync51 } from "node:fs";
 function sampleSqliteFiles(files, seen, log) {
   for (const file of files) {
     if (!seen.has(file.dbPath)) {
@@ -242466,7 +242581,7 @@ function sampleSqliteFiles(files, seen, log) {
     }
     let walBytes = 0;
     try {
-      walBytes = statSync52(`${file.dbPath}-wal`).size;
+      walBytes = statSync51(`${file.dbPath}-wal`).size;
     } catch {
       walBytes = 0;
     }
@@ -246334,25 +246449,36 @@ var init_client5 = __esm(() => {
 
 // src/workers/engine-split/snapshot.ts
 import { readFileSync as readFileSync111 } from "node:fs";
+import { readFile as readFile17 } from "node:fs/promises";
 function writeEngineStatusSnapshot(path, snapshot) {
   writePrivateFileAtomicSync(path, `${JSON.stringify(snapshot)}
 `);
 }
 function readEngineStatusSnapshot(path, now = () => Date.now()) {
   try {
-    const snapshot = JSON.parse(readFileSync111(path, "utf8"));
-    if (snapshot?.schema !== ENGINE_STATUS_SNAPSHOT_SCHEMA || typeof snapshot.instance_id !== "string")
-      return;
-    const written = Date.parse(snapshot.written_at);
-    if (!Number.isFinite(written))
-      return;
-    const at = now();
-    const age = Math.max(0, at - written);
-    const collected = typeof snapshot.state_at === "string" ? Date.parse(snapshot.state_at) : Number.NaN;
-    return { snapshot, age_ms: age, state_age_ms: Number.isFinite(collected) ? Math.max(0, at - collected) : age, stale: age > ENGINE_STATUS_STALE_MS };
+    const snapshot = parseSnapshot(readFileSync111(path, "utf8"));
+    return snapshot && engineStatusAge(snapshot, now());
   } catch {
     return;
   }
+}
+async function readEngineStatusSnapshotAsync(path) {
+  try {
+    return parseSnapshot(await readFile17(path, "utf8"));
+  } catch {
+    return;
+  }
+}
+function parseSnapshot(text) {
+  const snapshot = JSON.parse(text);
+  if (snapshot?.schema !== ENGINE_STATUS_SNAPSHOT_SCHEMA || typeof snapshot.instance_id !== "string" || !Number.isFinite(Date.parse(snapshot.written_at)))
+    return;
+  return snapshot;
+}
+function engineStatusAge(snapshot, at) {
+  const age = Math.max(0, at - Date.parse(snapshot.written_at));
+  const collected = typeof snapshot.state_at === "string" ? Date.parse(snapshot.state_at) : Number.NaN;
+  return { snapshot, age_ms: age, state_age_ms: Number.isFinite(collected) ? Math.max(0, at - collected) : age, stale: age > ENGINE_STATUS_STALE_MS };
 }
 function describeSnapshotFailure(error) {
   const code = error?.code;
@@ -246689,12 +246815,12 @@ function startEngineBackgroundStatus(input) {
   });
 }
 function backgroundBootDone(boot, alive = processAlive2) {
-  return boot?.phase === "done" && alive(boot.pid);
+  return boot?.phase === "done" && Number.isSafeInteger(boot.pid) && boot.pid > 0 && alive(boot.pid);
 }
 async function waitForBackgroundBootDone(input) {
   const sleep = input.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
-  const read = input.read ?? (() => readBootProgress(input.env));
-  while (!backgroundBootDone(read(), input.alive))
+  const read = input.read ?? (() => readBootProgressAsync(input.env));
+  while (!backgroundBootDone(await read(), input.alive))
     await sleep(input.pollMs ?? 250);
 }
 function listenWhileStarting(input) {
@@ -246732,35 +246858,45 @@ function createEngineFront(input) {
   relay = new OwnerBusyRelay(client, (line) => console.warn(line));
   const path = engineStatusSnapshotPath(input.env);
   let cached;
-  const judged = (read, age) => {
-    const old = age > ENGINE_STATUS_STALE_MS;
-    if (!old && answering && answering.instance !== read.snapshot.instance_id && Date.parse(read.snapshot.written_at) > answering.at) {
-      answering = { instance: read.snapshot.instance_id, at: Date.parse(read.snapshot.written_at) };
+  let lastReadAt = -Infinity;
+  let pending;
+  let stopped = false;
+  const judged = (snapshot, at) => {
+    const read = engineStatusAge(snapshot, at);
+    const written = Date.parse(snapshot.written_at);
+    if (!read.stale && answering && answering.instance !== snapshot.instance_id && written > answering.at) {
+      answering = { instance: snapshot.instance_id, at: written };
     }
-    return {
-      ...read,
-      age_ms: age,
-      state_age_ms: (read.state_age_ms ?? read.age_ms) + (age - read.age_ms),
-      stale: old || answering !== undefined && answering.instance !== read.snapshot.instance_id
-    };
+    return { ...read, stale: read.stale || answering !== undefined && answering.instance !== snapshot.instance_id };
+  };
+  const refreshStatus = async () => {
+    if (pending)
+      return pending;
+    const at = now();
+    if (stopped || at - lastReadAt < 1000)
+      return;
+    lastReadAt = at;
+    pending = readEngineStatusSnapshotAsync(path).then((snapshot) => {
+      if (stopped)
+        return;
+      cached = snapshot;
+      if (snapshot && !judged(snapshot, now()).stale)
+        relay?.observeInstance(snapshot.instance_id);
+    }).finally(() => {
+      pending = undefined;
+    });
+    return pending;
   };
   const status = () => {
-    const at = now();
-    if (cached && at - cached.at < 1000) {
-      return cached.read ? judged(cached.read, cached.read.age_ms + (at - cached.at)) : undefined;
-    }
-    const read = readEngineStatusSnapshot(path, now);
-    cached = { at, read };
-    if (read)
-      relay?.observeInstance(read.snapshot.instance_id);
-    return read ? judged(read, read.age_ms) : undefined;
+    refreshStatus();
+    return cached ? judged(cached, now()) : undefined;
   };
   const poll = setInterval(() => {
-    status();
+    refreshStatus();
   }, 2000);
   poll.unref?.();
   const completeModel = (request) => completeModelInBackground(fetchBackground, input.authToken, request);
-  const backgroundReady = async () => backgroundBootDone(readBootProgress(input.env));
+  const backgroundReady = async () => backgroundBootDone(await readBootProgressAsync(input.env));
   const waitForPendingPrivacyRaises = async () => {
     const probeMs = 250;
     while (!await probeEngineBackground(fetchBackground, input.authToken, undefined, probeMs, true))
@@ -246770,12 +246906,14 @@ function createEngineFront(input) {
     client,
     ownerBusy: relay,
     status,
-    cachedSnapshot: () => cached?.read?.snapshot,
-    backgroundActivity: () => cached?.read?.snapshot.activity ?? "idle",
+    refreshStatus,
+    cachedSnapshot: () => cached,
+    backgroundActivity: () => cached?.activity ?? "idle",
     completeModel,
     backgroundReady,
     waitForPendingPrivacyRaises,
     stop: () => {
+      stopped = true;
       clearInterval(poll);
       relay?.stop();
     }
@@ -247250,8 +247388,7 @@ function startEngineRssRestart(input) {
   });
   const clearTimer = input.clearInterval ?? ((handle) => clearInterval(handle));
   let samplesSinceCheck = 0;
-  const sampler = setTimer(() => {
-    const sampled = sample();
+  const recordSample = (sampled) => {
     const rss = input.rss?.() ?? sampled.anon ?? sampled.rss;
     memory.sample(sampled, rss);
     if (input.thresholdMb > 0) {
@@ -247268,10 +247405,31 @@ function startEngineRssRestart(input) {
       return;
     samplesSinceCheck = 0;
     check(sampled, rss);
+  };
+  const sampleAsync = input.sampleAsync;
+  let reading = false;
+  let stopped = false;
+  const sampler = setTimer(() => {
+    if (!sampleAsync) {
+      recordSample(sample());
+      return;
+    }
+    if (reading)
+      return;
+    reading = true;
+    sampleAsync().then((sampled) => {
+      if (!stopped)
+        recordSample(sampled);
+    }).finally(() => {
+      reading = false;
+    });
   }, MEMORY_SAMPLE_INTERVAL_MS);
   return {
     restarts: () => restarts,
-    stop: () => clearTimer(sampler)
+    stop: () => {
+      stopped = true;
+      clearTimer(sampler);
+    }
   };
 }
 var ENGINE_RSS_CHECK_INTERVAL_MS = 60000, ENGINE_RSS_RESTART_MAX_WAIT_MS;
@@ -247589,7 +247747,7 @@ var init_remote_access_control = __esm(() => {
 });
 
 // src/core/source-account-migration.ts
-import { linkSync as linkSync6, lstatSync as lstatSync57, mkdirSync as mkdirSync75, readdirSync as readdirSync37, realpathSync as realpathSync32, renameSync as renameSync27, rmdirSync as rmdirSync8, statSync as statSync53, unlinkSync as unlinkSync7 } from "node:fs";
+import { linkSync as linkSync6, lstatSync as lstatSync57, mkdirSync as mkdirSync75, readdirSync as readdirSync37, realpathSync as realpathSync32, renameSync as renameSync27, rmdirSync as rmdirSync8, statSync as statSync52, unlinkSync as unlinkSync7 } from "node:fs";
 import { basename as basename25, dirname as dirname119, isAbsolute as isAbsolute42, join as join154, relative as relative20, resolve as resolve33, sep as sep26 } from "node:path";
 function accountFolderMigrationEnabled(env = process.env) {
   const value = env[MIGRATE_ACCOUNT_FOLDERS_ENV]?.trim().toLowerCase() ?? "";
@@ -247754,7 +247912,7 @@ function nearestExisting(path) {
   let near = resolve33(path);
   for (;; ) {
     try {
-      statSync53(near);
+      statSync52(near);
       return near;
     } catch {
       const up = dirname119(near);
@@ -247814,7 +247972,7 @@ function inspect(ctx, sourceId, slot, entry) {
   }
   let folderDevice;
   try {
-    folderDevice = statSync53(nearestExisting(accountFolder({ source_id: sourceId, slot }, env)), { bigint: true }).dev;
+    folderDevice = statSync52(nearestExisting(accountFolder({ source_id: sourceId, slot }, env)), { bigint: true }).dev;
   } catch {
     return skip("unreadable", "The account folder cannot be looked at.");
   }
@@ -271691,9 +271849,11 @@ function createChatGptSetupBackend(options) {
       return result.status === "busy" || result.status === "too_soon" ? result.status : "checking";
     },
     async setModels(choice) {
+      const tinfoil = options.credentialPresent(ANSWER_PROFILE_IDS.tinfoil, policy.modelProfiles[ANSWER_PROFILE_IDS.tinfoil] ?? answerProfile("tinfoil"));
+      const venice = options.credentialPresent(ANSWER_PROFILE_IDS.venice, policy.modelProfiles[ANSWER_PROFILE_IDS.venice] ?? answerProfile("venice"));
       const configured = {
-        tinfoil: options.credentialPresent(ANSWER_PROFILE_IDS.tinfoil, policy.modelProfiles[ANSWER_PROFILE_IDS.tinfoil] ?? answerProfile("tinfoil")),
-        venice: options.credentialPresent(ANSWER_PROFILE_IDS.venice, policy.modelProfiles[ANSWER_PROFILE_IDS.venice] ?? answerProfile("venice")),
+        tinfoil: typeof tinfoil === "boolean" ? tinfoil : await tinfoil,
+        venice: typeof venice === "boolean" ? venice : await venice,
         local: Object.values(policy.modelProfiles).some((profile) => profile.provider === "local-openai-compatible" && profile.purpose !== "embedding")
       };
       const decided = applyModelChoice(policy, choice, configured);
@@ -271790,7 +271950,7 @@ var init_setup_backend = __esm(() => {
 });
 
 // src/core/consult-settings-writer.ts
-import { chmodSync as chmodSync44, lstatSync as lstatSync59, mkdirSync as mkdirSync76, statSync as statSync54 } from "node:fs";
+import { chmodSync as chmodSync44, lstatSync as lstatSync59, mkdirSync as mkdirSync76, statSync as statSync53 } from "node:fs";
 import { dirname as dirname120, isAbsolute as isAbsolute44 } from "node:path";
 function writeConsultSettings(input, location = {}) {
   let path;
@@ -271876,7 +272036,7 @@ function ensureSettingsDirectory(directory) {
     if (error?.code !== "ENOENT")
       return "directory_unavailable";
     try {
-      statSync54(dirname120(directory));
+      statSync53(dirname120(directory));
     } catch {
       return "home_missing";
     }
@@ -273266,6 +273426,7 @@ import { SQLiteError as SQLiteError2 } from "bun:sqlite";
 import { release as release2, totalmem as totalmem8 } from "node:os";
 import { execFile as execFile6 } from "node:child_process";
 import { appendFileSync, existsSync as existsSync128, readFileSync as readFileSync114, writeFileSync as writeFileSync29 } from "node:fs";
+import { appendFile as appendFile2, writeFile as writeFile7 } from "node:fs/promises";
 import { fileURLToPath as fileURLToPath15 } from "node:url";
 import { dirname as dirname122, join as join155 } from "node:path";
 async function startWorkerWithLaunch(launch) {
@@ -273283,15 +273444,47 @@ async function mainRecordingFrontFailure() {
 async function main() {
   dataOwnerLock = takeWorkerDataOwnerLock(process.env, { engineRole: engineRoleFromEnv(process.env) });
   const engineRole = engineRoleFromEnv(process.env);
+  const setupEnvPath = engineRole === "front" ? workerSetupEnvPath() : undefined;
+  const freshSetupEnv = setupEnvPath ? () => readWorkerSetupEnvAsync({ workerEnvPath: setupEnvPath }) : undefined;
+  let frontSetupEnv;
+  let setupEnvRead;
+  let setupEnvCheckedAt = -Infinity;
+  let setupEnvGeneration = 0;
+  const refreshSetupEnv = () => {
+    if (!freshSetupEnv || setupEnvRead || Date.now() - setupEnvCheckedAt < 2000)
+      return;
+    setupEnvCheckedAt = Date.now();
+    const generation = setupEnvGeneration;
+    setupEnvRead = freshSetupEnv().then((env) => {
+      if (generation === setupEnvGeneration)
+        frontSetupEnv = env;
+    }).finally(() => {
+      setupEnvRead = undefined;
+    });
+  };
+  const readSetupEnv = () => {
+    if (!setupEnvPath)
+      return readWorkerSetupEnv();
+    refreshSetupEnv();
+    return frontSetupEnv;
+  };
+  const freshCredentialEnv = async () => mergeWorkerSetupEnv(process.env, process.env.HOME?.trim() ? await freshSetupEnv?.() : undefined);
   const checkpointer = engineRole === "background" ? startSqliteCheckpointer() : undefined;
   setSqliteCheckpointsOffLoop(checkpointer !== undefined, openStoreReadOnlyForClose);
   if (checkpointer)
     controlPathHeadroom.setRoomGate(() => checkpointer.room());
   const slowSqlFile = process.env.OLYMPUS_MAIN_THREAD_SQL_LOG;
+  const queueSlowSql = engineRole === "front" && slowSqlFile ? serializeDiagnosticWrites((error) => {
+    console.warn(`[olympus] slow SQL log write failed: ${error instanceof Error ? error.name : "error"}`);
+  }) : undefined;
   startSlowMainThreadSqlLog(LOOP_SLOW_SQL_MS, slowSqlFile ? (line, entry) => {
     console.warn(line);
-    appendFileSync(slowSqlFile, `${JSON.stringify({ pid: process.pid, ...entry })}
-`);
+    const record = `${JSON.stringify({ pid: process.pid, ...entry })}
+`;
+    if (queueSlowSql)
+      queueSlowSql(() => appendFile2(slowSqlFile, record));
+    else
+      appendFileSync(slowSqlFile, record);
   } : undefined);
   if (engineRole !== "front" || process.env.OLYMPUS_ENGINE_LOOP_METRICS_DIR) {
     startEngineHeartbeat(process.env, engineRole);
@@ -273302,9 +273495,15 @@ async function main() {
   const sqlSitesDir = process.env.OLYMPUS_MAIN_THREAD_SQL_SITES?.trim();
   if (sqlSitesDir) {
     const sqlSites = startMainThreadSqlSiteCount(Number(process.env.OLYMPUS_MAIN_THREAD_SQL_SITE_FRAMES) || 2);
+    const path = join155(sqlSitesDir, `${engineRole}.sql-sites.json`);
+    const queue = engineRole === "front" ? serializeDiagnosticWrites(() => {}) : undefined;
     const writeSqlSites = () => {
       try {
-        writeFileSync29(join155(sqlSitesDir, `${engineRole}.sql-sites.json`), JSON.stringify({ role: engineRole, at: new Date().toISOString(), sites: sqlSites.sites() }));
+        const record = JSON.stringify({ role: engineRole, at: new Date().toISOString(), sites: sqlSites.sites() });
+        if (queue)
+          queue(() => writeFile7(path, record));
+        else
+          writeFileSync29(path, record);
       } catch {}
     };
     setInterval(writeSqlSites, 1e4).unref?.();
@@ -273336,6 +273535,8 @@ async function main() {
     await waitForBackgroundBootDone({ env: process.env });
     reportFrontStep();
     engineFront = createEngineFront({ env: process.env, socketPath: engineSocketPath, authToken: frontToken });
+    engineFront.refreshStatus();
+    refreshSetupEnv();
     await engineFront.waitForPendingPrivacyRaises();
   }
   const retired = retiredPathSettings(process.env);
@@ -273568,10 +273769,10 @@ async function main() {
     }
   };
   const bootModelCredentials = new Map(requiredProfiles.map(({ id, profile }) => [id, safeModelCredential(profile, process.env)]));
-  const modelCredentialState = (id, profile) => {
+  const modelCredentialState = (id, profile, setupEnv = readSetupEnv) => {
     if (!profile.secretRef && profile.provider !== "tinfoil")
       return bootSecretResolver.status().some((failure) => failure.affected_profiles?.includes(id)) ? "missing" : "ready";
-    const storedEnv = { ...process.env, ...readWorkerSetupEnv() ?? {} };
+    const storedEnv = { ...process.env, ...setupEnv() ?? {} };
     const current = safeModelCredential(profile, storedEnv);
     if (!current)
       return "missing";
@@ -273698,7 +273899,14 @@ async function main() {
       await connectGeminiApiKey({ apiKey });
     else
       await connectPublicApiKeySource({ source: provider, apiKey });
-    const credentials = requiredProfiles.map(({ id, profile }) => modelCredentialState(id, profile));
+    const generation = ++setupEnvGeneration;
+    const stored = freshSetupEnv ? await freshSetupEnv() : undefined;
+    if (setupEnvPath && generation === setupEnvGeneration) {
+      setupEnvGeneration++;
+      frontSetupEnv = stored;
+      setupEnvCheckedAt = Date.now();
+    }
+    const credentials = requiredProfiles.map(({ id, profile }) => modelCredentialState(id, profile, setupEnvPath ? () => stored : readWorkerSetupEnv));
     if (!credentials.includes("missing") && credentials.includes("applying")) {
       modelReloadUnavailable = !requestModelReload();
     }
@@ -276606,12 +276814,13 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   };
   let desktopPoll;
   let desktopPollingClosed = false;
-  const agentApprovalHost = () => resolveAgentApprovalHost({ env: process.env, fileEnv: readWorkerSetupEnv(), port, desktopBridgeReady: () => desktopBridge?.status().state === "listening" });
+  const agentApprovalHost = () => resolveAgentApprovalHost({ env: process.env, fileEnv: readSetupEnv(), port, desktopBridgeReady: () => desktopBridge?.status().state === "listening" });
   const updateChecker = createUpdateChecker({
     runningVersion: runningOlympusVersion(),
     platform: process.platform,
     env: process.env,
-    fileEnv: () => readWorkerSetupEnv()
+    fileEnv: readSetupEnv,
+    ...freshSetupEnv ? { freshFileEnv: freshSetupEnv } : {}
   });
   const ownerTierItemsContext = {
     ...loopStallFixture ? { storePaths: loopStallFixture.storePaths } : {},
@@ -276812,7 +277021,10 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
           local: () => resolveJudgeChoiceRuntime(judgeRuntimeInput, { choice: "local", stop: null, remainingDollars: 0 }),
           ledgerPath: resolveClassificationLedgerPath(process.env),
           promptVersion: () => snifferPromptVersions(privacyOwnerWords()).approval,
-          credentialReady: (lane) => Boolean(safeModelCredential(lane.profile, { ...process.env, ...readWorkerSetupEnv() ?? {} })),
+          credentialReady: (lane) => {
+            const ready = (env) => Boolean(safeModelCredential(lane.profile, { ...process.env, ...env }));
+            return freshSetupEnv ? freshSetupEnv().then(ready) : ready(readWorkerSetupEnv());
+          },
           requestReload: () => requestModelReload(),
           observed: () => judgeObservations.observed(),
           secondRoundStatePath: judgeSecondRoundStatePath(process.env)
@@ -277141,7 +277353,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   let chatgptModelProblem;
   const privateAnswers = new PrivateAnswerJobs({
     inboxRemote: () => {
-      const mode = resolveServerMode({ env: process.env, fileEnv: readWorkerSetupEnv(), desktopReady: () => agentApprovalHost().headless === false });
+      const mode = resolveServerMode({ env: process.env, fileEnv: readSetupEnv(), desktopReady: () => agentApprovalHost().headless === false });
       return mode.remote ? remoteOpenInstructions({
         port,
         ...mode.sshTarget ? { sshTarget: mode.sshTarget } : {},
@@ -277248,7 +277460,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       },
       sourceName
     });
-    const destinations = () => {
+    const destinations = (setupEnv = readSetupEnv) => {
       let venice = "not_allowed";
       let veniceModel;
       try {
@@ -277256,9 +277468,9 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         veniceModel = members[0]?.profile.model;
         const bootMembers = privateVeniceMembers(sovereigntyEngine);
         if (members.length) {
-          venice = members.length === bootMembers.length && members.every((member) => bootMembers.some((boot) => boot.id === member.id && JSON.stringify(boot.profile) === JSON.stringify(member.profile)) && modelCredentialState(member.id, member.profile) === "ready") && sourceAnswer ? "ready" : "not_set_up";
+          venice = members.length === bootMembers.length && members.every((member) => bootMembers.some((boot) => boot.id === member.id && JSON.stringify(boot.profile) === JSON.stringify(member.profile)) && modelCredentialState(member.id, member.profile, setupEnv) === "ready") && sourceAnswer ? "ready" : "not_set_up";
         } else {
-          const storedEnv = { ...process.env, ...readWorkerSetupEnv() ?? {} };
+          const storedEnv = { ...process.env, ...setupEnv() ?? {} };
           venice = safeModelCredential({ provider: "venice", trust: "encrypted_cloud", model: "unused", secretRef: "store:venice.api_key" }, storedEnv) ? "not_allowed" : "not_set_up";
         }
       } catch {
@@ -277269,7 +277481,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       return { computer: workerBuiltInModel?.available() ? "ready" : "not_set_up", venice, ...computerModel ? { computerModel } : {}, ...veniceModel ? { veniceModel } : {}, ...["downloading", "verifying", "loading"].includes(modelState ?? "") ? { computerReason: DASHBOARD_PRIVATE_ANSWERS_COPY.downloading } : {} };
     };
     const veniceAnswer = sourceAnswer ? createVeniceInboxAnswer({
-      state: () => destinations().venice,
+      state: () => destinations(readWorkerSetupEnv).venice,
       handler: sourceAnswer,
       sourceName,
       corpusIds: () => sourceAnswerLanes({ question: "scope", retrieval_mode: "keyword" }).registry.list().filter((corpus) => corpus.trustDomain === "internal" || corpus.trustDomain === "secure_local").map((corpus) => corpus.corpusId),
@@ -277370,19 +277582,19 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     const chatgptModel = () => consultChatgptFrontierModel(readConsultSettings2().settings);
     await Promise.resolve().then(() => init_zkapi_funding_date());
     const zkapiProfiles = zkapiFundingDateRefresher(sovereigntyEngine.source === "file" ? sovereigntyEngine.path : undefined);
-    const transport = (model) => resolveZkapiConsultTransport(zkapiProfiles(sovereigntyEngine.config.modelProfiles), (secretRef) => resolveSecretRefValueSync(secretRef, { env: environmentWithWorkerSetupEnv() }), { env: process.env, model });
+    const transport = (model, credentialEnv) => resolveZkapiConsultTransport(zkapiProfiles(sovereigntyEngine.config.modelProfiles), (secretRef) => resolveSecretRefValueSync(secretRef, { env: credentialEnv() }), { env: process.env, model });
     zkapiDailyLimitNow = () => {
       const route = resolveZkapiConsultTransport(zkapiProfiles(sovereigntyEngine.config.modelProfiles), () => {
         return;
       }, { env: process.env });
       return route ? zkapiDailyLimitState(route.settings, route.statePath ?? defaultZkapiStatePath(), new Date) : "unset";
     };
-    const runChosenWriter = (input, control) => {
+    const runChosenWriter = async (input, control) => {
       const choice = control.writer;
       if (choice) {
         let apiKey;
         try {
-          apiKey = choice.secretRef ? resolveSecretRefValueSync(choice.secretRef, { env: environmentWithWorkerSetupEnv() }) : undefined;
+          apiKey = choice.secretRef ? resolveSecretRefValueSync(choice.secretRef, { env: setupEnvPath ? await freshCredentialEnv() : environmentWithWorkerSetupEnv() }) : undefined;
         } catch {
           apiKey = undefined;
         }
@@ -277416,7 +277628,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
             writer
           }),
           send: async (text, authorize, { model, signal }) => {
-            const route = transport(model);
+            const env = setupEnvPath ? await freshCredentialEnv() : undefined;
+            const route = transport(model, () => env ?? environmentWithWorkerSetupEnv());
             if (!route)
               return;
             const opened = await openZkapiConsultSession(route, signal ? { signal } : {});
@@ -277532,7 +277745,12 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       source: sovereigntyEngine.source,
       ...sovereigntyEngine.path ? { path: sovereigntyEngine.path } : {}
     },
-    credentialPresent: (_id, profile) => profile.secretRef === undefined || safeModelCredential(profile, { ...process.env, ...readWorkerSetupEnv() ?? {} }) !== undefined,
+    credentialPresent: (_id, profile) => {
+      if (profile.secretRef === undefined)
+        return true;
+      const present = (env) => safeModelCredential(profile, { ...process.env, ...env }) !== undefined;
+      return freshSetupEnv ? freshSetupEnv().then(present) : present(readWorkerSetupEnv());
+    },
     requestReload: () => requestModelReload(),
     retryModel: (model) => {
       if (model === "transcription") {
@@ -277554,11 +277772,11 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     }
   });
   await Promise.resolve().then(() => init_dashboard_consult());
-  const consultRouteKey = (secretRef) => {
+  const consultRouteKey = (secretRef, env) => {
     if (!secretRef)
       return;
     try {
-      return resolveSecretRefValueSync(secretRef, { env: environmentWithWorkerSetupEnv() })?.trim() || undefined;
+      return resolveSecretRefValueSync(secretRef, { env: env ?? environmentWithWorkerSetupEnv() })?.trim() || undefined;
     } catch {
       return;
     }
@@ -277569,10 +277787,10 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       source: sovereigntyEngine.source,
       ...sovereigntyEngine.path ? { path: sovereigntyEngine.path } : {}
     },
-    secretPresent: (secretRef) => consultRouteKey(secretRef) !== undefined,
+    secretPresent: (secretRef) => consultRouteKey(secretRef, setupEnvPath ? mergeWorkerSetupEnv(process.env, readSetupEnv()) : undefined) !== undefined,
     recoverSession: async (route, secretRef) => {
       await Promise.resolve().then(() => init_consult_transport_zkapi());
-      const apiKey = consultRouteKey(secretRef);
+      const apiKey = consultRouteKey(secretRef, setupEnvPath && secretRef ? await freshCredentialEnv() : undefined);
       return recoverZkapiSession({ ...route, ...apiKey ? { apiKey } : {} });
     },
     requestReload: () => requestModelReload(),
@@ -277585,7 +277803,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       const choice = read.state === "valid" ? read.settings.writer : undefined;
       if (read.state !== "valid" || !choice)
         throw new Error("Choose your model and save it first.");
-      const apiKey = consultRouteKey(choice.secretRef);
+      const apiKey = consultRouteKey(choice.secretRef, setupEnvPath && choice.secretRef ? await freshCredentialEnv() : undefined);
       if (choice.secretRef && !apiKey)
         throw new Error(`The key reference ${choice.secretRef} is not set on this computer.`);
       await Promise.resolve().then(() => init_consult_settings());
@@ -277672,6 +277890,13 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     const model = builtIn?.model ? builtInEmbeddingModel(builtIn.model) : undefined;
     return model ? builtInEmbeddingDashboardState(readBuiltInEmbeddingStatus(process.env, model)) : undefined;
   };
+  if (engineFront) {
+    readBuiltInEmbeddingStatus();
+    chatgptEmbeddingState();
+    readBuiltInEmbeddingVision();
+    if (builtInRerankerMayRun(process.env))
+      readBuiltInRerankerStatus();
+  }
   const chatgptSurface = {
     privateAnswers,
     privateQuestions,
@@ -277691,7 +277916,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     privateModel: chatgptPrivateModelState,
     transcription: dashboardTranscriptionState,
     remote: () => {
-      const mode = resolveServerMode({ env: process.env, fileEnv: readWorkerSetupEnv(), desktopReady: () => agentApprovalHost().headless === false });
+      const mode = resolveServerMode({ env: process.env, fileEnv: readSetupEnv(), desktopReady: () => agentApprovalHost().headless === false });
       const underOpenClaw = !!process.env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim() && remoteAccessHostKind === "openclaw";
       return mode.remote ? { port, ...process.platform === "linux" ? { socketPath: workerSocketPath() } : {}, ...mode.sshTarget ? { sshTarget: mode.sshTarget } : {}, agent: underOpenClaw && mode.agentRoute } : undefined;
     },
@@ -277960,7 +278185,10 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         const desktop = await linuxGraphicalSessionReadinessAsync();
         if (desktopPollingClosed)
           return;
-        ready = desktop.ready && !resolveServerMode({ env: process.env, fileEnv: readWorkerSetupEnv(), desktopReady: () => desktop.ready }).remote;
+        const fileEnv = desktop.ready ? freshSetupEnv ? await freshSetupEnv() : readWorkerSetupEnv() : undefined;
+        if (desktopPollingClosed)
+          return;
+        ready = desktop.ready && !resolveServerMode({ env: process.env, fileEnv, desktopReady: () => desktop.ready }).remote;
       } catch {
         ready = false;
       } finally {
@@ -278185,7 +278413,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     restart: () => false,
     record: () => {},
     previous: { count: 0 },
-    memory: memoryDiagnostic
+    memory: memoryDiagnostic,
+    ...engineRole === "front" ? { sampleAsync: processMemoryAsync } : {}
   }) : undefined;
   let engineBackground;
   if (engineRole === "background") {
@@ -279705,7 +279934,7 @@ import {
   readdirSync as readdirSync28,
   renameSync as renameSync18,
   rmSync as rmSync38,
-  statSync as statSync42,
+  statSync as statSync41,
   writeFileSync as writeFileSync23
 } from "node:fs";
 import { tmpdir as tmpdir13 } from "node:os";
@@ -279947,7 +280176,7 @@ function makeVersionTreeReadOnly(root) {
     }
   }
   chmodSync37(root, 448);
-  const rootStats = statSync42(root);
+  const rootStats = statSync41(root);
   if (!rootStats.isDirectory() || (rootStats.mode & 511) !== 448) {
     throw new OperationError("config_error", "Managed upgrade version root changed during staging.");
   }
