@@ -12,7 +12,10 @@ export function createFrontMountChanges() {
     const current = new Map(await Promise.all(paths.map(async (path) => {
       try {
         const file = await lstat(path, { bigint: true });
-        return [path, `${file.dev}:${file.ino}:${file.size}:${file.mtimeNs}:${file.ctimeNs}`] as const;
+        // No ctime: a mount attempt's own permission or ownership touch on a
+        // sidecar file moves it, and a failed attempt would then call itself
+        // back at every look.
+        return [path, `${file.dev}:${file.ino}:${file.size}:${file.mtimeNs}`] as const;
       } catch (error) {
         return [path, (error as NodeJS.ErrnoException).code ?? 'unreadable'] as const;
       }

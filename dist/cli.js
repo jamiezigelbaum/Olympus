@@ -240506,7 +240506,7 @@ function createFrontMountChanges() {
     const current = new Map(await Promise.all(paths.map(async (path) => {
       try {
         const file = await lstat(path, { bigint: true });
-        return [path, `${file.dev}:${file.ino}:${file.size}:${file.mtimeNs}:${file.ctimeNs}`];
+        return [path, `${file.dev}:${file.ino}:${file.size}:${file.mtimeNs}`];
       } catch (error) {
         return [path, error.code ?? "unreadable"];
       }
