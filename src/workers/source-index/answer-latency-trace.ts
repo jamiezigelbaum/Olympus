@@ -1,4 +1,5 @@
 import type { EvidenceRerankAudit } from '../../core/evidence-reranker.ts';
+import type { AnalystEvidenceFormat } from '../../core/analyst.ts';
 import type { LocalAnalystPromptBudget } from './local-analyst-window.ts';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
@@ -237,10 +238,20 @@ export interface SourceAnswerTraceEvidenceSeats {
   fits: SourceAnswerTraceAnalystFit[];
 }
 
-export interface SourceAnswerTraceAnalystFit {
+interface SourceAnswerAnalystFitMeasurement {
+  promptBytes: number;
+  packCandidates: number;
+  keptCandidates: number;
+  packGapEntries: number;
+  packGapBytes: number;
+  sentGapBytes: number;
+  overheadBytes: number;
+  evidenceFormat: AnalystEvidenceFormat;
+}
+
+export interface SourceAnswerTraceAnalystFit extends SourceAnswerAnalystFitMeasurement {
   lane: 'local' | 'cloud';
   keptSeats: number[];
-  promptBytes?: number;
   promptBudgetBytes?: number;
   promptBudgetSource?: LocalAnalystPromptBudget['source'];
 }
@@ -725,14 +736,26 @@ export function recordSourceAnswerPackSeats(corpusIds: readonly string[], recenc
   };
 }
 
-export function recordSourceAnswerAnalystFit(lane: SourceAnswerTraceAnalystFit['lane'], keptSeats: readonly number[], promptBytes?: number, budget?: LocalAnalystPromptBudget): void {
+export function recordSourceAnswerAnalystFit(
+  lane: SourceAnswerTraceAnalystFit['lane'],
+  keptSeats: readonly number[],
+  measurement: SourceAnswerAnalystFitMeasurement,
+  budget?: LocalAnalystPromptBudget,
+): void {
   const seats = currentSourceAnswerTrace()?.evidenceSeats;
   if (!seats) return;
   seats.fits.push({
     lane,
     keptSeats: keptSeats.map(nonNegativeCount),
     ...(budget ? { promptBudgetBytes: budget.bytes, promptBudgetSource: budget.source } : {}),
-    ...(promptBytes === undefined ? {} : { promptBytes: nonNegativeCount(promptBytes) }),
+    promptBytes: nonNegativeCount(measurement.promptBytes),
+    packCandidates: nonNegativeCount(measurement.packCandidates),
+    keptCandidates: nonNegativeCount(measurement.keptCandidates),
+    packGapEntries: nonNegativeCount(measurement.packGapEntries),
+    packGapBytes: nonNegativeCount(measurement.packGapBytes),
+    sentGapBytes: nonNegativeCount(measurement.sentGapBytes),
+    overheadBytes: nonNegativeCount(measurement.overheadBytes),
+    evidenceFormat: measurement.evidenceFormat,
   });
 }
 

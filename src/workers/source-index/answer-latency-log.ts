@@ -31,6 +31,7 @@ import type {
   SourceAnswerTraceMainThreadSql,
 } from './answer-latency-trace.ts';
 import { copyQueryStages, preciseMs, sourceAnswerTraceErrorClass } from './answer-latency-trace.ts';
+import type { LocalAnalystPromptBudget } from './local-analyst-window.ts';
 import { semanticSearchTimedOut } from '../../core/source-index/partial-search.ts';
 import type { OperationCallerWire } from '../../core/operation-caller.ts';
 
@@ -102,7 +103,20 @@ export interface SourceAnswerLatencyTraceRecord {
     // Short one-way hash of store and item per seat; never the item id.
     item_hashes?: string[];
     recency_seats: number;
-    fits: Array<{ lane: 'local' | 'cloud'; kept_seats: number[]; prompt_bytes?: number; prompt_budget_bytes?: number; prompt_budget_source?: 'env' | 'manifest' | 'server' | 'fallback' }>;
+    fits: Array<{
+      lane: 'local' | 'cloud';
+      kept_seats: number[];
+      prompt_bytes: number;
+      prompt_budget_bytes?: number;
+      prompt_budget_source?: LocalAnalystPromptBudget['source'];
+      pack_candidates: number;
+      kept_candidates: number;
+      pack_gap_entries: number;
+      pack_gap_bytes: number;
+      sent_gap_bytes: number;
+      overhead_bytes: number;
+      evidence_format: 'full' | 'compact';
+    }>;
   };
   // Counts only: a timed_out or failed rerank kept the fused cut (#1583).
   rerank?: { reranker_id: string; outcome: 'applied' | 'failed' | 'timed_out'; scored: number; kept: number; promoted: number; elapsed_ms: number };
@@ -300,7 +314,14 @@ export function buildSourceAnswerLatencyTraceRecord(input: {
             lane: fit.lane,
             ...(fit.promptBudgetBytes === undefined ? {} : { prompt_budget_bytes: fit.promptBudgetBytes, prompt_budget_source: fit.promptBudgetSource }),
             kept_seats: fit.keptSeats.map((seat) => Math.max(0, Math.floor(seat))),
-            ...(fit.promptBytes === undefined ? {} : { prompt_bytes: Math.max(0, Math.floor(fit.promptBytes)) }),
+            prompt_bytes: fit.promptBytes,
+            pack_candidates: fit.packCandidates,
+            kept_candidates: fit.keptCandidates,
+            pack_gap_entries: fit.packGapEntries,
+            pack_gap_bytes: fit.packGapBytes,
+            sent_gap_bytes: fit.sentGapBytes,
+            overhead_bytes: fit.overheadBytes,
+            evidence_format: fit.evidenceFormat,
           })),
         },
       }

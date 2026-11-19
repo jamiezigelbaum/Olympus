@@ -212,7 +212,8 @@ export class DelphiClient {
     };
   }
 
-  private async withAuth(init: RequestInit, secretRef: string | undefined): Promise<RequestInit> {
+  /** Apply the same route credential to completions, preflights and metadata probes. */
+  async withAuth(init: RequestInit, secretRef: string | undefined): Promise<RequestInit> {
     if (!secretRef) return init;
     const token = (await this.resolveSecretRef(secretRef))?.trim();
     if (!token) {

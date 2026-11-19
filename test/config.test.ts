@@ -280,6 +280,37 @@ describe('config', () => {
     });
   });
 
+  test('reads the served context window on an Argus profile or lane, with environment overrides', () => {
+    const config = configFromPluginConfig({
+      argus: { modelProfiles: { source_answer: { contextTokens: 32_768 } }, lanes: { fast: { contextTokens: 16_384 } } },
+    });
+    expect(config.argus.modelProfiles.source_answer.contextTokens).toBe(32_768);
+    expect(config.argus.lanes.fast.contextTokens).toBe(16_384);
+    const overridden = configWithEnvironmentOverrides(config, {
+      OLYMPUS_ARGUS_SOURCE_ANSWER_CONTEXT_TOKENS: '65536',
+      OLYMPUS_ARGUS_FAST_CONTEXT_TOKENS: '32768',
+      OLYMPUS_ARGUS_DEEP_CONTEXT_TOKENS: '16384',
+    });
+    expect(overridden.argus.modelProfiles.source_answer.contextTokens).toBe(65_536);
+    expect(overridden.argus.lanes.fast.contextTokens).toBe(32_768);
+    expect(overridden.argus.lanes.deep.contextTokens).toBe(16_384);
+  });
+
+  test('rejects invalid context windows in files and environment', () => {
+    for (const contextTokens of [0, -1, 1.5, 2 ** 53, '32768', null, true]) {
+      expect(() => configFromPluginConfig({ argus: { modelProfiles: { source_answer: { contextTokens } } } }))
+        .toThrow('argus.modelProfiles.source_answer.contextTokens must be a positive safe integer in tokens.');
+      expect(() => configFromPluginConfig({ argus: { lanes: { fast: { contextTokens } } } }))
+        .toThrow('argus.lanes.fast.contextTokens must be a positive safe integer in tokens.');
+    }
+    for (const value of ['', '0', '-1', '1.5', '32768.000000000000001', '0x8000', '9007199254740992', 'unknown']) {
+      expect(() => configWithEnvironmentOverrides(defaultConfig(), { OLYMPUS_ARGUS_SOURCE_ANSWER_CONTEXT_TOKENS: value }))
+        .toThrow('OLYMPUS_ARGUS_SOURCE_ANSWER_CONTEXT_TOKENS must be a positive safe integer in tokens.');
+      expect(() => configWithEnvironmentOverrides(defaultConfig(), { OLYMPUS_ARGUS_DEEP_CONTEXT_TOKENS: value }))
+        .toThrow('OLYMPUS_ARGUS_DEEP_CONTEXT_TOKENS must be a positive safe integer in tokens.');
+    }
+  });
+
   test('environment overrides lane config', () => {
     const config = loadConfig({
       OLYMPUS_CONFIG: '/tmp/olympus-config-that-does-not-exist.json',

@@ -4,7 +4,7 @@ import { sampleSqliteStoreMemory } from '../engine-split/sqlite-memory.ts';
 import { sampleModelWorkerMemory } from '../source-index/built-in-reasoning/off-thread.ts';
 import { readTinfoilStatus } from '../../core/analyst-tinfoil.ts';
 import { rerankOutcomeCounts } from '../../core/evidence-reranker.ts';
-import { localAnalystWindowReports, reportLocalAnalystPromptOverride, resolveLocalAnalystWindow, setLocalAnalystWindow } from '../source-index/local-analyst-window.ts';
+import { DEFAULT_LOCAL_ANALYST_PROMPT_BYTES, initializeLocalAnalystWindow, localAnalystPromptBytesForWindow, localAnalystWindow, localAnalystWindowNotice, localAnalystWindowReports, reportLocalAnalystPromptOverride, resolveLocalAnalystWindow, setLocalAnalystWindow } from '../source-index/local-analyst-window.ts';
 import { X_CONTENT_RECOVERY_LIMIT_SUBJECT } from '../x-bookmarks/content-recovery.ts';
 import { GMAIL_IMPORT_LIMIT_SUBJECT, withGmailImportRunOnce } from '../google-connectors/gmail-import-allowance.ts';
 import { startVeniceCreditRecovery, fetchVeniceCreditStatus, VENICE_BILLING_BASE_URL } from '../../core/provider-credit-status.ts';
@@ -589,8 +589,6 @@ import {
   builtInBacksPrivateAnalyst,
   probeLocalAnalystService,
   createLocalPrivateRoute,
-  createLocalSovereigntyAnalystModel,
-  probeLocalSovereigntyProfile,
   trustedAnalystAssistTimeoutMs,
   createSovereigntyAnalystMap,
   analystRouteTrustDomain,
@@ -3386,7 +3384,7 @@ export async function main(): Promise<void> {
     process.env.OLYMPUS_SOURCE_INDEX_ANSWER_MAX_RESULTS,
     'OLYMPUS_SOURCE_INDEX_ANSWER_MAX_RESULTS',
   );
-  // Explicit override wins over the served window resolved once at startup.
+  // Explicit override wins over the configured or discovered context window.
   const sourceIndexLocalAnalystPromptBytes = parseOptionalPositiveInteger(
     process.env.OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_PROMPT_BYTES,
     'OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_PROMPT_BYTES',
@@ -3497,31 +3495,37 @@ export async function main(): Promise<void> {
           ? { timeoutMs: veniceAnalystTimeoutMs }
           : {}),
       });
-      const localSourceAnswerModel = localModelActivity.track(localModelResourceKey(process.env.OLYMPUS_SOURCE_INDEX_ANALYST_LANE
-        ? olympusConfig.argus.lanes[analystLane]
-        : olympusConfig.argus.modelProfiles[analystProfile]), createDelphiAnalystModel(
-        new DelphiClient(olympusConfig),
-        process.env.OLYMPUS_SOURCE_INDEX_ANALYST_LANE
-          ? { lane: analystLane, preflightTimeoutMs: sourceIndexAnalystPreflightTimeoutMs }
-          : { profile: analystProfile, preflightTimeoutMs: sourceIndexAnalystPreflightTimeoutMs },
-      ), { serialize: false });
-      const defaultLocal = createAnalyst(loopStallFixture?.answerModel ?? localSourceAnswerModel, { auditSuspiciousDrafts: true, evidenceFormat: 'compact' });
       const localEndpoint = process.env.OLYMPUS_SOURCE_INDEX_ANALYST_LANE
         ? olympusConfig.argus.lanes[analystLane] : olympusConfig.argus.modelProfiles[analystProfile];
+      const localRoute = process.env.OLYMPUS_SOURCE_INDEX_ANALYST_LANE
+        ? { lane: analystLane } : { profile: analystProfile };
+      const localDelphi = new DelphiClient(olympusConfig);
+      const localSourceAnswerModel = localModelActivity.track(localModelResourceKey(localEndpoint), createDelphiAnalystModel(
+        localDelphi, { ...localRoute, preflightTimeoutMs: sourceIndexAnalystPreflightTimeoutMs },
+      ), { serialize: false });
+      const defaultLocal = createAnalyst(loopStallFixture?.answerModel ?? localSourceAnswerModel, { auditSuspiciousDrafts: true, evidenceFormat: 'compact' });
       const localReport = { analyst: 'local-source-answer', model: localEndpoint.model };
-      if (sourceIndexLocalAnalystPromptBytes === undefined) {
-        setLocalAnalystWindow(defaultLocal, await resolveLocalAnalystWindow({
-          model: localEndpoint.model,
-          ...(!localEndpoint.secretRef ? { baseUrl: localEndpoint.baseUrl } : {}),
-        }), localReport);
-      } else reportLocalAnalystPromptOverride(localReport);
+      // The split front owns answers and the retry schedule for their models.
+      const discoverLocalWindows = engineRole !== 'background';
+      if (sourceIndexLocalAnalystPromptBytes !== undefined) {
+        reportLocalAnalystPromptOverride(localReport);
+      } else if (discoverLocalWindows) {
+        await initializeLocalAnalystWindow(defaultLocal, {
+          ...localEndpoint,
+          authorize: init => localDelphi.withAuth(init, localEndpoint.secretRef),
+        }, localReport);
+      }
       const builtInAnalystModel = answerBuiltInModel;
       const builtInAnalyst = builtInAnalystModel
         ? setLocalAnalystWindow(createAnalyst(builtInAnalystModel, { auditSuspiciousDrafts: true, evidenceFormat: 'compact' }),
           await resolveLocalAnalystWindow({ model: builtInAnalystModel.spec.modelId }),
-          { analyst: 'built-in', model: builtInAnalystModel.spec.modelId }) : undefined;
+          sourceIndexLocalAnalystPromptBytes === undefined ? { analyst: 'built-in', model: builtInAnalystModel.spec.modelId } : undefined) : undefined;
+      if (builtInAnalystModel && sourceIndexLocalAnalystPromptBytes !== undefined) {
+        reportLocalAnalystPromptOverride({ analyst: 'built-in', model: builtInAnalystModel.spec.modelId });
+      }
       const sovereigntyAnalysts = await createSovereigntyAnalystMap({
         localModelActivity,
+        discoverLocalWindows,
         engine: sovereigntyEngine,
         olympusConfig,
         env: process.env,
@@ -3537,7 +3541,7 @@ export async function main(): Promise<void> {
         // Start the one-time download at boot when this computer's configured
         // local model service is not answering, so the dashboard shows the
         // install right away instead of at the first Private question.
-        void probeLocalAnalystService(olympusConfig).then((up) => {
+        void probeLocalAnalystService(olympusConfig, localDelphi, localRoute).then((up) => {
           if (!up) void builtInAnalystModel.prepare();
         });
       }
@@ -3547,21 +3551,26 @@ export async function main(): Promise<void> {
       // answers (the first member of the secure_local pool, when local). When
       // it is set up but down they say so; the built-in model answers only
       // where it stands in for the owner's local model.
+      const usesDefaultLocal = (id: string) => sovereigntyEngine.source === 'env_bridge' && id === 'local-source-answer';
       localPrivateRoute = createLocalPrivateRoute({
         firstMember: () => {
           const pool = sovereigntyEngine.resolveAnalystPool({ trustDomain: 'secure_local' });
           return (pool.explicitOrder ?? pool.members)[0];
         },
-        model: (member) => sovereigntyEngine.source === 'env_bridge' && member.id === 'local-source-answer'
-          ? { model: localSourceAnswerModel, modelId: localEndpoint.model, ...(!localEndpoint.secretRef ? { baseUrl: localEndpoint.baseUrl } : {}) }
-          : (() => {
-            const model = createLocalSovereigntyAnalystModel({ profile: member.profile, profileId: member.id, localModelActivity, olympusConfig, env: process.env, bootSecretResolver });
-            return model ? { model, modelId: member.profile.model ?? member.id, ...(!member.profile.secretRef && member.profile.baseUrl ? { baseUrl: member.profile.baseUrl } : {}) } : undefined;
-          })(),
-        reachable: (member) => sovereigntyEngine.source === 'env_bridge' && member.id === 'local-source-answer'
-          ? probeLocalAnalystService(olympusConfig)
-          : probeLocalSovereigntyProfile(olympusConfig, member.profile),
-        window: (model, baseUrl) => resolveLocalAnalystWindow({ model, ...(baseUrl ? { baseUrl } : {}) }),
+        model: (member) => {
+          if (usesDefaultLocal(member.id)) return { model: localSourceAnswerModel, modelId: localEndpoint.model };
+          const local = sovereigntyAnalysts.get(member.id)?.local;
+          return local ? { model: local.model, modelId: member.profile.model ?? member.id } : undefined;
+        },
+        reachable: (member) => {
+          if (usesDefaultLocal(member.id)) return probeLocalAnalystService(olympusConfig, localDelphi, localRoute);
+          const local = sovereigntyAnalysts.get(member.id)?.local;
+          return local ? probeLocalAnalystService(olympusConfig, local.delphi) : Promise.resolve(false);
+        },
+        window: async (_model, _baseUrl, member) => {
+          const analyst = usesDefaultLocal(member.id) ? defaultLocal : sovereigntyAnalysts.get(member.id)?.local?.analyst;
+          return analyst ? localAnalystWindow(analyst) : undefined;
+        },
         builtInStandsIn: (member) => builtInAnswersFor(member.id),
       });
       // Uses the installed default at 16 GiB RAM and above; the owner can opt
@@ -5606,7 +5615,6 @@ export async function main(): Promise<void> {
     // whole document or conversation; never the built-in model (it refuses
     // instead), and the answer lands in Private answers.
     const { createDeepReadJobs, searchSetHits } = await import('./runtime/deep-read-jobs.ts');
-    const { localAnalystPromptBudget, localAnalystWindow } = await import('../source-index/local-analyst-window.ts');
     const { maxTokensForChars } = await import('../../core/analyst-delphi.ts');
     const { DEFAULT_ANALYST_MAX_OUTPUT_CHARS } = await import('../../core/analyst.ts');
     const deepReadLanes = sourceAnswerLanes;
@@ -5619,10 +5627,11 @@ export async function main(): Promise<void> {
         const route = await localPrivateRoute?.();
         if (!route) return undefined;
         if ('unavailable' in route) return route;
-        const analyst = setLocalAnalystWindow(createAnalyst(route.model, { auditSuspiciousDrafts: true, evidenceFormat: 'compact' }),
-          route.windowTokens > 0 ? { windowTokens: route.windowTokens, source: 'server' } : undefined);
-        const budget = localAnalystPromptBudget(undefined, localAnalystWindow(analyst), maxTokensForChars(DEFAULT_ANALYST_MAX_OUTPUT_CHARS));
-        return { analyst, modelId: route.modelId, promptBytes: budget.bytes };
+        const analyst = createAnalyst(route.model, { auditSuspiciousDrafts: true, evidenceFormat: 'compact' });
+        const promptBytes = sourceIndexLocalAnalystPromptBytes ?? (route.windowTokens > 0
+          ? localAnalystPromptBytesForWindow(route.windowTokens, maxTokensForChars(DEFAULT_ANALYST_MAX_OUTPUT_CHARS))
+          : DEFAULT_LOCAL_ANALYST_PROMPT_BYTES);
+        return { analyst, modelId: route.modelId, promptBytes };
       },
       inbox: waitingQuestionStore,
       judgeBusy: () => classificationBusy(),
@@ -6403,8 +6412,10 @@ export async function main(): Promise<void> {
     const backgroundSnapshot = backgroundStatus?.snapshot;
     const backgroundLoopLag = backgroundSnapshot?.loop_lag;
     if ((path === '/v1/health' || path === '/health') && response?.ok) {
+      const windowNotices = localPromptBudgets.map(localAnalystWindowNotice).filter(notice => notice !== undefined);
       return Response.json({
         ...await response.json() as object,
+        ...(windowNotices.length ? { degraded_conditions: windowNotices } : {}),
         ...(rerankOutcomes ? {
           rerank_outcomes: rerankOutcomes,
           // The reranker's own download (runtime pack and model): a failure
@@ -6416,6 +6427,7 @@ export async function main(): Promise<void> {
         ...(localPromptBudgets.length ? { local_prompt_budget: localPromptBudgets.map(report => ({
           analyst: report.analyst, model: report.model, source: report.source,
           ...(report.windowTokens !== undefined ? { window_tokens: report.windowTokens } : {}),
+          ...(localAnalystWindowNotice(report) ? { note: localAnalystWindowNotice(report) } : {}),
         })) } : {}),
         ...(tierLedgerProblems.size ? { privacy_ledger_problems: Object.fromEntries(tierLedgerProblems) } : {}),
         // Background work that stood back for the owner's Ask: never silent.

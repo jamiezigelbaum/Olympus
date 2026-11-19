@@ -5373,6 +5373,11 @@ function applyEnvironmentOverrides(config, env) {
   if (env.OLYMPUS_ARGUS_DEEP_MODEL) {
     config.argus.lanes.deep.model = env.OLYMPUS_ARGUS_DEEP_MODEL;
   }
+  for (const lane of ["fast", "deep"]) {
+    const contextTokens = envContextTokens(env, `OLYMPUS_ARGUS_${lane.toUpperCase()}`);
+    if (contextTokens !== undefined)
+      config.argus.lanes[lane].contextTokens = contextTokens;
+  }
   if (fastLaneEnvChanged) {
     mirrorFastLaneToProfiles(config, ["default_chat", "source_answer"]);
   }
@@ -5888,6 +5893,9 @@ function applyLaneConfig(config, lane, laneConfig) {
   if (typeof laneConfig.secretRef === "string" && laneConfig.secretRef.trim()) {
     config.argus.lanes[lane].secretRef = laneConfig.secretRef.trim();
   }
+  if (laneConfig.contextTokens !== undefined) {
+    config.argus.lanes[lane].contextTokens = parseContextTokens(laneConfig.contextTokens, `argus.lanes.${lane}.contextTokens`);
+  }
 }
 function applyModelProfileConfig(config, profile, profileConfig) {
   if (!profileConfig)
@@ -5901,6 +5909,9 @@ function applyModelProfileConfig(config, profile, profileConfig) {
   if (typeof profileConfig.secretRef === "string" && profileConfig.secretRef.trim()) {
     config.argus.modelProfiles[profile].secretRef = profileConfig.secretRef.trim();
   }
+  if (profileConfig.contextTokens !== undefined) {
+    config.argus.modelProfiles[profile].contextTokens = parseContextTokens(profileConfig.contextTokens, `argus.modelProfiles.${profile}.contextTokens`);
+  }
   if (typeof profileConfig.purpose === "string" && ARGUS_MODEL_PROFILE_PURPOSES.includes(profileConfig.purpose)) {
     config.argus.modelProfiles[profile].purpose = profileConfig.purpose;
   }
@@ -5909,12 +5920,26 @@ function applyModelProfileEnv(config, profile, env, prefix) {
   const baseUrl = env[`${prefix}_BASE_URL`];
   const model = env[`${prefix}_MODEL`];
   const secretRef = env[`${prefix}_SECRET_REF`];
+  const contextTokens = envContextTokens(env, prefix);
   if (baseUrl)
     config.argus.modelProfiles[profile].baseUrl = trimTrailingSlash(baseUrl);
   if (model)
     config.argus.modelProfiles[profile].model = model;
   if (secretRef?.trim())
     config.argus.modelProfiles[profile].secretRef = secretRef.trim();
+  if (contextTokens !== undefined)
+    config.argus.modelProfiles[profile].contextTokens = contextTokens;
+}
+function envContextTokens(env, prefix) {
+  const name = `${prefix}_CONTEXT_TOKENS`;
+  const value = env[name];
+  return value === undefined ? undefined : parseContextTokens(/^\d+$/.test(value.trim()) ? Number(value) : value, name);
+}
+function parseContextTokens(value, name) {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
+    throw new OperationError("config_error", `${name} must be a positive safe integer in tokens.`);
+  }
+  return value;
 }
 function validateConfig(config) {
   assertBoolean(config.worker.engineSplit, "worker.engineSplit");
@@ -6052,6 +6077,8 @@ function validateConfig(config) {
       throw new OperationError("config_error", `${lane} model must be configured.`);
     }
     validateSecretRef(laneConfig.secretRef, `${lane} secretRef`);
+    if (laneConfig.contextTokens !== undefined)
+      parseContextTokens(laneConfig.contextTokens, `argus.lanes.${lane}.contextTokens`);
   }
   for (const profile of ARGUS_MODEL_PROFILES) {
     const profileConfig = config.argus.modelProfiles[profile];
@@ -6063,6 +6090,8 @@ function validateConfig(config) {
       throw new OperationError("config_error", `${profile} model must be configured.`);
     }
     validateSecretRef(profileConfig.secretRef, `${profile} secretRef`);
+    if (profileConfig.contextTokens !== undefined)
+      parseContextTokens(profileConfig.contextTokens, `argus.modelProfiles.${profile}.contextTokens`);
   }
   assertBoolean(config.email.enabled, "email.enabled");
   assertBoolean(config.sourceIndex.enabled, "sourceIndex.enabled");
@@ -37109,6 +37138,7 @@ var CONNECTOR_STORE_SEARCH_REQUEST_FIELDS = new Set([
 // src/workers/source-index/local-analyst-window.ts
 registerLimit({ id: "answer.local_prompt_bytes", kind: "size", scope: "answer", label: "Local analyst prompt clamp", unit: "bytes", continue: "none" });
 var caches2 = new WeakMap;
+var LOCAL_ANALYST_WINDOW_RETRY_INTERVAL_MS = 10 * 60000;
 var windows = new WeakMap;
 var routeFitters = new WeakMap;
 var reports = new Map;
@@ -37331,6 +37361,7 @@ var CUT_SHORT_LANES = new Map([
 ]);
 // src/workers/source-index/analyst-answer.ts
 var CLOUD_ANALYST_PROMPT_BYTES = OPENCLAW_INFER_MAX_PROMPT_BYTES - 1e4;
+var promptFitNotes = new WeakMap;
 // src/workers/file-extraction/extractors/bounded-text.ts
 var DOC_MIME_TYPE = "application/msword";
 var XLS_MIME_TYPE = "application/vnd.ms-excel";

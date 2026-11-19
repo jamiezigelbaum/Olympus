@@ -26640,6 +26640,10 @@ function semanticTimeoutGapCorpus(gap) {
 function laneTimeoutGap(corpusId) {
   return `${corpusId} is still being read; this answer uses only the matches already available, so more may be there. Ask again in a moment.`;
 }
+function promptFitCoverageGap(lane, kept, shortlisted) {
+  const model = lane === "local" ? "private" : "cloud";
+  return `The ${model} model read ${kept} of the ${shortlisted} shortlisted sources. The rest did not fit in its prompt.`;
+}
 function keywordPreparationGap(corpusId) {
   return `${KEYWORDS_PREFIX}${corpusId}; this answer uses the available keyword equivalents, so matches in other languages may be missing.`;
 }
@@ -38131,6 +38135,11 @@ function applyEnvironmentOverrides(config, env) {
   if (env.OLYMPUS_ARGUS_DEEP_MODEL) {
     config.argus.lanes.deep.model = env.OLYMPUS_ARGUS_DEEP_MODEL;
   }
+  for (const lane of ["fast", "deep"]) {
+    const contextTokens = envContextTokens(env, `OLYMPUS_ARGUS_${lane.toUpperCase()}`);
+    if (contextTokens !== undefined)
+      config.argus.lanes[lane].contextTokens = contextTokens;
+  }
   if (fastLaneEnvChanged) {
     mirrorFastLaneToProfiles(config, ["default_chat", "source_answer"]);
   }
@@ -38650,6 +38659,9 @@ function applyLaneConfig(config, lane, laneConfig) {
   if (typeof laneConfig.secretRef === "string" && laneConfig.secretRef.trim()) {
     config.argus.lanes[lane].secretRef = laneConfig.secretRef.trim();
   }
+  if (laneConfig.contextTokens !== undefined) {
+    config.argus.lanes[lane].contextTokens = parseContextTokens(laneConfig.contextTokens, `argus.lanes.${lane}.contextTokens`);
+  }
 }
 function applyModelProfileConfig(config, profile, profileConfig) {
   if (!profileConfig)
@@ -38663,6 +38675,9 @@ function applyModelProfileConfig(config, profile, profileConfig) {
   if (typeof profileConfig.secretRef === "string" && profileConfig.secretRef.trim()) {
     config.argus.modelProfiles[profile].secretRef = profileConfig.secretRef.trim();
   }
+  if (profileConfig.contextTokens !== undefined) {
+    config.argus.modelProfiles[profile].contextTokens = parseContextTokens(profileConfig.contextTokens, `argus.modelProfiles.${profile}.contextTokens`);
+  }
   if (typeof profileConfig.purpose === "string" && ARGUS_MODEL_PROFILE_PURPOSES.includes(profileConfig.purpose)) {
     config.argus.modelProfiles[profile].purpose = profileConfig.purpose;
   }
@@ -38671,12 +38686,26 @@ function applyModelProfileEnv(config, profile, env, prefix) {
   const baseUrl = env[`${prefix}_BASE_URL`];
   const model = env[`${prefix}_MODEL`];
   const secretRef = env[`${prefix}_SECRET_REF`];
+  const contextTokens = envContextTokens(env, prefix);
   if (baseUrl)
     config.argus.modelProfiles[profile].baseUrl = trimTrailingSlash(baseUrl);
   if (model)
     config.argus.modelProfiles[profile].model = model;
   if (secretRef?.trim())
     config.argus.modelProfiles[profile].secretRef = secretRef.trim();
+  if (contextTokens !== undefined)
+    config.argus.modelProfiles[profile].contextTokens = contextTokens;
+}
+function envContextTokens(env, prefix) {
+  const name = `${prefix}_CONTEXT_TOKENS`;
+  const value = env[name];
+  return value === undefined ? undefined : parseContextTokens(/^\d+$/.test(value.trim()) ? Number(value) : value, name);
+}
+function parseContextTokens(value, name) {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
+    throw new OperationError("config_error", `${name} must be a positive safe integer in tokens.`);
+  }
+  return value;
 }
 function validateConfig(config) {
   assertBoolean(config.worker.engineSplit, "worker.engineSplit");
@@ -38814,6 +38843,8 @@ function validateConfig(config) {
       throw new OperationError("config_error", `${lane} model must be configured.`);
     }
     validateSecretRef(laneConfig.secretRef, `${lane} secretRef`);
+    if (laneConfig.contextTokens !== undefined)
+      parseContextTokens(laneConfig.contextTokens, `argus.lanes.${lane}.contextTokens`);
   }
   for (const profile of ARGUS_MODEL_PROFILES) {
     const profileConfig = config.argus.modelProfiles[profile];
@@ -38825,6 +38856,8 @@ function validateConfig(config) {
       throw new OperationError("config_error", `${profile} model must be configured.`);
     }
     validateSecretRef(profileConfig.secretRef, `${profile} secretRef`);
+    if (profileConfig.contextTokens !== undefined)
+      parseContextTokens(profileConfig.contextTokens, `argus.modelProfiles.${profile}.contextTokens`);
   }
   assertBoolean(config.email.enabled, "email.enabled");
   assertBoolean(config.sourceIndex.enabled, "sourceIndex.enabled");
@@ -48763,7 +48796,7 @@ function recordSourceAnswerPackSeats(corpusIds, recencySeats = 0, itemKeys) {
     fits: []
   };
 }
-function recordSourceAnswerAnalystFit(lane, keptSeats, promptBytes, budget) {
+function recordSourceAnswerAnalystFit(lane, keptSeats, measurement, budget) {
   const seats = currentSourceAnswerTrace()?.evidenceSeats;
   if (!seats)
     return;
@@ -48771,7 +48804,14 @@ function recordSourceAnswerAnalystFit(lane, keptSeats, promptBytes, budget) {
     lane,
     keptSeats: keptSeats.map(nonNegativeCount),
     ...budget ? { promptBudgetBytes: budget.bytes, promptBudgetSource: budget.source } : {},
-    ...promptBytes === undefined ? {} : { promptBytes: nonNegativeCount(promptBytes) }
+    promptBytes: nonNegativeCount(measurement.promptBytes),
+    packCandidates: nonNegativeCount(measurement.packCandidates),
+    keptCandidates: nonNegativeCount(measurement.keptCandidates),
+    packGapEntries: nonNegativeCount(measurement.packGapEntries),
+    packGapBytes: nonNegativeCount(measurement.packGapBytes),
+    sentGapBytes: nonNegativeCount(measurement.sentGapBytes),
+    overheadBytes: nonNegativeCount(measurement.overheadBytes),
+    evidenceFormat: measurement.evidenceFormat
   });
 }
 function recordSourceAnswerRerank(audit) {
@@ -50838,6 +50878,7 @@ function parseProfiles(value, label) {
       trust,
       ...optionalString3(profile, "baseUrl"),
       ...optionalString3(profile, "secretRef"),
+      ...profile.contextTokens !== undefined ? { contextTokens: parseContextTokens(profile.contextTokens, `${label}.modelProfiles.${id}.contextTokens`) } : {},
       ...profile.snifferMode !== undefined ? { snifferMode: profile.snifferMode } : {},
       ...profile.snifferDecisionBar !== undefined ? { snifferDecisionBar: profile.snifferDecisionBar } : {}
     };
@@ -50930,6 +50971,12 @@ function validateProfile(id, profile, daemonPorts) {
   }
   if (!["local", "encrypted_cloud", "standard_cloud"].includes(profile.trust)) {
     throw new OperationError("config_error", `Sovereignty profile "${id}" has unsupported trust "${profile.trust}".`);
+  }
+  if (profile.contextTokens !== undefined) {
+    if (profile.provider !== "local-openai-compatible" || profile.trust !== "local") {
+      throw new OperationError("config_error", `Sovereignty profile "${id}" contextTokens is only valid on a local OpenAI-compatible profile.`);
+    }
+    parseContextTokens(profile.contextTokens, `Sovereignty profile "${id}" contextTokens`);
   }
   if (profile.snifferMode !== undefined && (profile.provider !== "local-openai-compatible" || profile.trust !== "local" || !["auto", "decision", "full"].includes(profile.snifferMode))) {
     throw new OperationError("config_error", `Sovereignty profile "${id}" snifferMode requires a local profile and auto, decision or full.`);
@@ -104657,28 +104704,74 @@ function localAnalystPromptBudget(envBytes, window2, outputTokens) {
     return { bytes: envBytes, source: "env" };
   return window2 ? { bytes: localAnalystPromptBytesForWindow(window2.windowTokens, outputTokens), source: window2.source } : { bytes: DEFAULT_LOCAL_ANALYST_PROMPT_BYTES, source: "fallback" };
 }
-function resolveLocalAnalystWindow(options) {
+function resolveLocalAnalystWindow(options, onRefresh) {
+  if (options.contextTokens !== undefined)
+    return Promise.resolve({ windowTokens: options.contextTokens, source: "config" });
   const manifest = BUILT_IN_REASONING_MODELS.find((spec) => spec.modelId === options.model);
   if (manifest)
     return Promise.resolve({ windowTokens: manifest.contextTokens, source: "manifest" });
-  const key = JSON.stringify([options.baseUrl, options.model]);
+  const address = probeAddress(options.baseUrl);
+  if (!address)
+    return Promise.resolve(undefined);
   const transport = options.fetchImpl ?? fetch;
   let cached = caches3.get(transport);
   if (!cached) {
     cached = new Map;
     caches3.set(transport, cached);
   }
-  let result = cached.get(key);
-  if (!result) {
-    result = probe2(options);
-    cached.set(key, result);
+  let endpoint = cached.get(address.base);
+  if (!endpoint) {
+    endpoint = { ...address, probes: new Map, retries: new Set };
+    cached.set(address.base, endpoint);
   }
-  return result;
+  const key = JSON.stringify([options.model, options.secretRef]);
+  let entry = endpoint.probes.get(key);
+  if (!entry) {
+    const current = { options, result: probe2(endpoint, options), listeners: new Set };
+    endpoint.probes.set(key, current);
+    current.result.then((window2) => {
+      if (window2)
+        return;
+      const idle = endpoint.retries.size === 0;
+      endpoint.retries.add(current);
+      if (idle)
+        scheduleEndpointRetry(endpoint);
+    });
+    entry = current;
+  }
+  const { result, listeners } = entry;
+  return onRefresh ? result.then((window2) => {
+    if (!window2)
+      listeners.add(onRefresh);
+    return window2;
+  }) : result;
 }
-async function probe2(options) {
+function scheduleEndpointRetry(endpoint) {
+  const entry = endpoint.retries.values().next().value;
+  if (!entry)
+    return;
+  const schedule = entry.options.scheduleRetry ?? ((callback, delayMs) => {
+    setTimeout(callback, delayMs).unref();
+  });
+  schedule(() => {
+    probe2(endpoint, entry.options).then((window2) => {
+      endpoint.retries.delete(entry);
+      if (window2) {
+        entry.result = Promise.resolve(window2);
+        for (const listener of entry.listeners)
+          listener(window2);
+        entry.listeners.clear();
+      } else {
+        endpoint.retries.add(entry);
+      }
+      scheduleEndpointRetry(endpoint);
+    });
+  }, LOCAL_ANALYST_WINDOW_RETRY_INTERVAL_MS);
+}
+function probeAddress(baseUrl) {
   let url;
   try {
-    url = new URL(options.baseUrl ?? "");
+    url = new URL(baseUrl ?? "");
   } catch {
     return;
   }
@@ -104688,6 +104781,9 @@ async function probe2(options) {
   const root = base.replace(/\/v1$/, "");
   if (new URL(root).pathname !== "/")
     return;
+  return { base, root };
+}
+async function probe2({ base, root }, options) {
   const controller = new AbortController;
   const schedule = options.scheduleTimeout ?? ((callback) => {
     const timer = setTimeout(callback, LOCAL_ANALYST_WINDOW_PROBE_TIMEOUT_MS);
@@ -104701,15 +104797,16 @@ async function probe2(options) {
     });
   });
   const ask = async () => {
+    const init = { method: "GET", signal: controller.signal, ...options.headers ? { headers: options.headers } : {} };
+    const authorized = options.authorize?.(init) ?? init;
     for (const reader of WINDOW_READERS) {
       if (controller.signal.aborted)
         return;
       try {
-        const response = await fetchModelEndpoint(options.fetchImpl ?? fetch, reader.path(base, root), {
-          method: "GET",
-          signal: controller.signal,
-          ...options.headers ? { headers: options.headers } : {}
-        });
+        const request = await authorized;
+        if (controller.signal.aborted)
+          return;
+        const response = await fetchModelEndpoint(options.fetchImpl ?? fetch, reader.path(base, root), request);
         if (!response.ok)
           continue;
         const value = reader.read(object(await response.json()), options.model);
@@ -104738,11 +104835,24 @@ function setLocalAnalystWindow(analyst, window2, report) {
     reports.set(report.analyst, { ...report, source: window2?.source ?? "fallback", ...window2 ? { windowTokens: window2.windowTokens } : {} });
   return analyst;
 }
+async function initializeLocalAnalystWindow(analyst, options, report) {
+  const window2 = await resolveLocalAnalystWindow(options, (refreshed) => {
+    setLocalAnalystWindow(analyst, refreshed, reports.get(report.analyst) === initialReport ? report : undefined);
+  });
+  setLocalAnalystWindow(analyst, window2, report);
+  const initialReport = reports.get(report.analyst);
+}
 function reportLocalAnalystPromptOverride(report) {
   reports.set(report.analyst, { ...report, source: "env" });
 }
 function localAnalystWindowReports() {
   return [...reports.values()];
+}
+function localAnalystWindowNotice(report) {
+  if (report.source === "fallback") {
+    return `The private model's context size is unknown for profile "${report.analyst}", so answers read fewer sources. Set contextTokens on the model profile.`;
+  }
+  return;
 }
 function localAnalystWindow(analyst) {
   return windows.get(analyst);
@@ -104755,17 +104865,25 @@ function fitLocalAnalystRoutes(analyst, fit) {
   const rebuild = routeFitters.get(analyst);
   return rebuild ? rebuild((child) => fitLocalAnalystRoutes(child, fit)) : fit(analyst);
 }
-var DEFAULT_LOCAL_ANALYST_PROMPT_BYTES = 13500, LOCAL_ANALYST_PROMPT_BYTES_CEILING = 27000, caches3, WINDOW_READERS, LOCAL_ANALYST_WINDOW_PROBE_TIMEOUT_MS = 2000, windows, routeFitters, reports;
+var DEFAULT_LOCAL_ANALYST_PROMPT_BYTES = 13500, LOCAL_ANALYST_PROMPT_BYTES_CEILING = 27000, caches3, LOCAL_ANALYST_WINDOW_RETRY_INTERVAL_MS, WINDOW_READERS, LOCAL_ANALYST_WINDOW_PROBE_TIMEOUT_MS = 2000, windows, routeFitters, reports;
 var init_local_analyst_window = __esm(() => {
   init_limit_stops();
   init_model_transport();
   init_manifest2();
   registerLimit({ id: "answer.local_prompt_bytes", kind: "size", scope: "answer", label: "Local analyst prompt clamp", unit: "bytes", continue: "none" });
   caches3 = new WeakMap;
+  LOCAL_ANALYST_WINDOW_RETRY_INTERVAL_MS = 10 * 60000;
   WINDOW_READERS = [
     { path: (_base, root) => `${root}/props`, read: (body) => object(body.default_generation_settings).n_ctx ?? body.n_ctx },
     { path: (base) => `${base}/models`, read: (body, model) => served(body.data, (entry) => entry.id === model).max_model_len },
-    { path: (_base, root) => `${root}/api/ps`, read: (body, model) => served(body.models, (entry) => entry.name === model || entry.model === model).context_length }
+    { path: (_base, root) => `${root}/api/ps`, read: (body, model) => served(body.models, (entry) => entry.name === model || entry.model === model).context_length },
+    { path: (_base, root) => `${root}/api/v1/models`, read: (body, model) => {
+      const instances = Array.isArray(body.models) ? body.models.flatMap((item) => {
+        const loaded = object(item).loaded_instances;
+        return Array.isArray(loaded) ? loaded : [];
+      }) : [];
+      return object(served(instances, (entry) => entry.id === model).config).context_length;
+    } }
   ];
   windows = new WeakMap;
   routeFitters = new WeakMap;
@@ -109033,7 +109151,7 @@ function createAnalystSourceIndexAnswerHandler(options) {
     } = routedAnalysis;
     const analystMs = Date.now() - analystStartedAt;
     const releaseGateStartedAt = Date.now();
-    const { decision, facts, opsec, answer: releasedAnswer } = releaseAnalystAnswer({
+    const { decision, facts, opsec, answer: releasedAnswer, unanswered: releasedNotes } = releaseAnalystAnswer({
       detail,
       result: analystResult,
       onDemandNotes,
@@ -109046,7 +109164,9 @@ function createAnalystSourceIndexAnswerHandler(options) {
     const itemKey = (item) => JSON.stringify([item.provider, item.accountScope, item.providerItemId]);
     const readContent = new Set(detail.pack.candidates.filter((candidate) => candidate.chunks.length > 0).map((candidate) => itemKey(candidate.provenance.sourceItem)));
     const readingOnly = stillReading > 0 && !analystResult.citations.some((citation) => readContent.has(itemKey(citation.provenance.sourceItem)));
-    const answer = stillReading === 0 ? heldAnswer : [onDemandReadingCoverageNote(stillReading), ...readingOnly ? onDemandNotes : [heldAnswer]].join(`
+    const fitNote = promptFitNotes.get(analystResult);
+    const readingNotes = fitNote && releasedNotes.includes(fitNote) ? [...onDemandNotes, fitNote] : onDemandNotes;
+    const answer = stillReading === 0 ? heldAnswer : [onDemandReadingCoverageNote(stillReading), ...readingOnly ? readingNotes : [heldAnswer]].join(`
 
 `);
     const releaseGateMs = Date.now() - releaseGateStartedAt;
@@ -109352,92 +109472,153 @@ function promptBudgetedAnalyst(analyst, promptBytes, candidateCorpus, recencySea
       const budget = budgetForOutputChars?.(analyzeOptions.maxAnswerChars ?? DEFAULT_ANALYST_MAX_OUTPUT_CHARS);
       const effectiveBytes = budget?.bytes ?? promptBytes;
       const fitted = fitPackToPromptBytes(pack, effectiveBytes, candidateCorpus, analyzeOptions, recencySeats, evidenceFormat, candidateGaps);
-      recordSourceAnswerAnalystFit(lane, fitted.candidates.flatMap((candidate) => {
-        const seat = seatOf.get(candidate.provenance);
-        return seat === undefined ? [] : [seat];
-      }), analystPromptBytes(fitted, analyzeOptions, evidenceFormat), budget);
-      return analyst.analyze(withPromptBudget(fitted, effectiveBytes), analyzeOptions).then((result) => withUnfittedCoverage(result, pack, fitted));
+      if (currentSourceAnswerTrace()?.evidenceSeats) {
+        const overhead = { ...fitted, candidates: fitted.candidates.map((candidate) => ({ ...candidate, chunks: [] })) };
+        recordSourceAnswerAnalystFit(lane, fitted.candidates.flatMap((candidate) => {
+          const seat = seatOf.get(candidate.provenance);
+          return seat === undefined ? [] : [seat];
+        }), {
+          promptBytes: analystPromptBytes(fitted, analyzeOptions, evidenceFormat),
+          packCandidates: pack.candidates.length,
+          keptCandidates: fitted.candidates.length,
+          packGapEntries: pack.coverage.extractionGaps.length,
+          packGapBytes: utf8ByteLength(pack.coverage.extractionGaps.join("; ")),
+          sentGapBytes: utf8ByteLength(fitted.coverage.extractionGaps.join("; ")),
+          overheadBytes: analystPromptBytes(overhead, analyzeOptions, evidenceFormat),
+          evidenceFormat
+        }, budget);
+      }
+      return analyst.analyze(withPromptBudget(fitted, effectiveBytes), analyzeOptions).then((result) => withUnfittedCoverage(result, pack, fitted, lane));
     }
   };
 }
 function fitPackToPromptBytes(pack, maxPromptBytes, candidateCorpus, analyzeOptions, recencySeats = 0, evidenceFormat = "full", candidateGaps) {
-  const selected = fitPackPassagesToPromptBytes(pack, maxPromptBytes, candidateCorpus, analyzeOptions, recencySeats, evidenceFormat);
-  if (!candidateGaps || selected.candidates.length === pack.candidates.length)
-    return selected;
-  const kept = new Set(selected.candidates.map((candidate) => candidate.provenance));
-  const gapOwners = new Map;
-  for (const [provenance, indexes] of candidateGaps) {
-    for (const index of indexes)
-      gapOwners.set(index, provenance);
-  }
-  if (![...gapOwners.values()].some((owner) => !kept.has(owner)))
-    return selected;
-  const seated = restatePack(pack, pack.candidates.filter((candidate) => kept.has(candidate.provenance)), candidateCorpus, gapOwners);
-  const minimumPack = restatePack(pack, [...selected.candidates], candidateCorpus, gapOwners);
-  if (analystPromptBytes(minimumPack, analyzeOptions, evidenceFormat) > analystPromptBytes(selected, analyzeOptions, evidenceFormat))
-    return selected;
-  return fitPackPassagesToPromptBytes(seated, maxPromptBytes, candidateCorpus, analyzeOptions, recencySeats, evidenceFormat, minimumPack);
-}
-function fitPackPassagesToPromptBytes(pack, maxPromptBytes, candidateCorpus, analyzeOptions, recencySeats = 0, evidenceFormat = "full", minimumPack) {
-  if (evidenceFormat === "compact" && !minimumPack && !isReadWidePack(pack)) {
-    const selected = fitPackPassagesToPromptBytes(pack, maxPromptBytes, candidateCorpus, analyzeOptions, recencySeats);
-    const kept = new Set(selected.candidates.map((candidate) => candidate.provenance));
-    pack = restatePack(pack, pack.candidates.filter((candidate) => kept.has(candidate.provenance)), candidateCorpus);
-  }
-  if (analystPromptBytes(pack, analyzeOptions, evidenceFormat) <= maxPromptBytes)
-    return pack;
-  const headSeats = RESERVED_HEAD_SEATS + recencySeats;
-  const order = [
-    ...pack.candidates.slice(0, headSeats),
-    ...roundRobinCandidates(pack.candidates.slice(headSeats), candidateCorpus)
-  ];
-  let fallback;
-  const headSet = new Set(pack.candidates.slice(0, RESERVED_HEAD_SEATS).map((candidate) => candidate.provenance));
-  const headShares = (candidate) => headSet.has(candidate.provenance) && candidate.chunks.length > 1 ? HEAD_SEAT_SHARES : 1;
-  const wide = isReadWidePack(pack);
-  const modes = wide ? [() => 1] : [headShares, () => 1];
-  for (let keep = order.length;keep >= (minimumPack ? order.length : 1); keep -= 1) {
-    const kept = new Set(order.slice(0, keep));
-    const base = pack.candidates.filter((candidate) => kept.has(candidate));
-    const overhead = analystPromptBytes(restatePack(pack, base.map((candidate) => ({ ...candidate, chunks: [] })), candidateCorpus), analyzeOptions, evidenceFormat);
-    if (overhead >= maxPromptBytes)
-      continue;
-    for (const [mode, shares] of modes.entries()) {
-      if (mode > 0 && base.every((candidate) => headShares(candidate) === 1))
-        break;
-      const minimumShare = minimumPack ? Math.max(0, ...minimumPack.candidates.map((candidate) => Math.ceil(candidate.chunks.reduce((sum, chunk) => sum + utf8ByteLength(chunk), 0) / shares(candidate)))) : 0;
-      const totalShares = base.reduce((sum, candidate) => sum + shares(candidate), 0);
-      let share = Math.max(minimumShare, Math.floor((maxPromptBytes - overhead) / totalShares));
-      for (let attempt = 0;attempt < 6; attempt += 1) {
-        if (!minimumPack && share < (wide ? READ_WIDE_MIN_PASSAGE_BYTES : MIN_FITTED_BYTES_PER_CANDIDATE) && keep > 1)
-          break;
-        const fitted = restatePack(pack, base.map((candidate) => ({ ...candidate, chunks: fitChunks(candidate.chunks, Math.max(0, share * shares(candidate))) })), candidateCorpus);
-        const bytes = analystPromptBytes(fitted, analyzeOptions, evidenceFormat);
-        if (bytes <= maxPromptBytes)
-          return fitted;
-        fallback = fitted;
-        share = Math.max(minimumShare, Math.floor(share * (maxPromptBytes - overhead) / Math.max(1, bytes - overhead)) - 1);
+  let gapOwners;
+  if (candidateGaps) {
+    gapOwners = new Map;
+    for (const [provenance, indexes] of candidateGaps) {
+      for (const index of indexes) {
+        if (pack.coverage.extractionGaps[index] !== undefined)
+          gapOwners.set(index, provenance);
       }
     }
   }
-  return minimumPack ?? fallback ?? restatePack(pack, order.slice(0, 1).map((candidate) => ({ ...candidate, chunks: [] })), candidateCorpus);
+  return fitPackPassagesToPromptBytes(pack, maxPromptBytes, candidateCorpus, analyzeOptions, recencySeats, evidenceFormat, gapOwners);
+}
+function fitPackPassagesToPromptBytes(pack, maxPromptBytes, candidateCorpus, analyzeOptions, recencySeats = 0, evidenceFormat = "full", gapOwners) {
+  const wide = isReadWidePack(pack);
+  const fullFit = evidenceFormat === "compact" && !wide ? fitPackPassagesToPromptBytes(pack, maxPromptBytes, candidateCorpus, analyzeOptions, recencySeats, "full", gapOwners) : undefined;
+  const fullSeats = fullFit && new Set(fullFit.candidates.map((candidate) => candidate.provenance));
+  const available = fullSeats ? pack.candidates.filter((candidate) => fullSeats.has(candidate.provenance)) : pack.candidates;
+  const whole = fullFit ? restatePack(pack, [...available], candidateCorpus, gapOwners ? fullFit.coverage.extractionGaps : undefined) : pack;
+  if (analystPromptBytes(whole, analyzeOptions, evidenceFormat) <= maxPromptBytes)
+    return whole;
+  if (!gapOwners)
+    pack = whole;
+  const headSeats = RESERVED_HEAD_SEATS + recencySeats;
+  const order = [
+    ...available.slice(0, headSeats),
+    ...roundRobinCandidates(available.slice(headSeats), candidateCorpus)
+  ];
+  let legacyFallback;
+  const headSet = new Set(pack.candidates.slice(0, RESERVED_HEAD_SEATS).map((candidate) => candidate.provenance));
+  const headShares = (candidate) => headSet.has(candidate.provenance) && candidate.chunks.length > 1 ? HEAD_SEAT_SHARES : 1;
+  const modes = wide ? [() => 1] : [headShares, () => 1];
+  const floor = wide ? READ_WIDE_MIN_PASSAGE_BYTES : MIN_FITTED_BYTES_PER_CANDIDATE;
+  for (let keep = order.length;keep >= 1; keep -= 1) {
+    const kept = new Set(order.slice(0, keep));
+    const base = available.filter((candidate) => kept.has(candidate));
+    const extractionGaps = gapOwners ? keptSeatGaps(pack, base, gapOwners) : pack.coverage.extractionGaps;
+    const restate = (candidates) => restatePack(pack, candidates, candidateCorpus, extractionGaps);
+    if (!fullFit && keep === pack.candidates.length && extractionGaps !== pack.coverage.extractionGaps) {
+      const capped = restate([...base]);
+      if (analystPromptBytes(capped, analyzeOptions, evidenceFormat) <= maxPromptBytes)
+        return capped;
+    }
+    const overheadPack = restate(base.map((candidate) => ({ ...candidate, chunks: [] })));
+    const overhead = analystPromptBytes(overheadPack, analyzeOptions, evidenceFormat);
+    if (overhead > maxPromptBytes || !gapOwners && overhead === maxPromptBytes)
+      continue;
+    const minimumShare = keep > 1 ? floor : 0;
+    for (const [mode, shares] of modes.entries()) {
+      if (mode > 0 && base.every((candidate) => headShares(candidate) === 1))
+        break;
+      const totalShares = base.reduce((sum, candidate) => sum + shares(candidate), 0);
+      let share = Math.floor((maxPromptBytes - overhead) / totalShares);
+      for (let attempt = 0;attempt < 6 && share >= minimumShare; attempt += 1) {
+        const fitted = restate(base.map((candidate) => ({ ...candidate, chunks: fitChunks(candidate.chunks, Math.max(0, share * shares(candidate))) })));
+        const bytes = analystPromptBytes(fitted, analyzeOptions, evidenceFormat);
+        if (bytes <= maxPromptBytes)
+          return fitted;
+        if (!gapOwners)
+          legacyFallback = fitted;
+        if (share === minimumShare)
+          break;
+        const corrected = Math.floor(share * (maxPromptBytes - overhead) / Math.max(1, bytes - overhead)) - 1;
+        share = Math.max(gapOwners ? minimumShare : 0, corrected);
+      }
+    }
+    if (gapOwners && fullFit && keep === order.length && analystPromptBytes(fullFit, analyzeOptions, evidenceFormat) <= maxPromptBytes)
+      return fullFit;
+    if (gapOwners && keep === 1)
+      return overheadPack;
+  }
+  if (!gapOwners)
+    return legacyFallback ?? restatePack(pack, order.slice(0, 1).map((candidate) => ({ ...candidate, chunks: [] })), candidateCorpus);
+  const empty = restatePack(pack, [], candidateCorpus, keptSeatGaps(pack, [], gapOwners));
+  if (analystPromptBytes(empty, analyzeOptions, evidenceFormat) <= maxPromptBytes)
+    return empty;
+  throw new OperationError("source_index_error", "The question and its search coverage exceed the model prompt budget.");
 }
 function keptSeatGaps(pack, kept, gapOwners) {
-  const sent = new Set(kept.map((candidate) => candidate.provenance));
-  const gaps = pack.coverage.extractionGaps.filter((_, index) => {
-    const owner = gapOwners.get(index);
-    return owner === undefined || sent.has(owner);
-  });
-  const dropped = pack.candidates.filter((candidate) => !sent.has(candidate.provenance));
-  const unread = new Set([...gapOwners.values()].filter((owner) => !sent.has(owner))).size;
-  if (unread > 0) {
-    gaps.push(`${dropped.length} more matching item${dropped.length === 1 ? " was" : "s were"} not sent; ${unread} of them could not be read in full.`);
+  if (gapOwners.size === 0)
+    return pack.coverage.extractionGaps;
+  const sent = new Map(kept.map((candidate, index) => [candidate.provenance, index + 1]));
+  const parts = new Map;
+  const unread = new Set;
+  for (const [index, owner] of gapOwners) {
+    if (!sent.has(owner)) {
+      unread.add(owner);
+      continue;
+    }
+    const part = parts.get(owner) ?? { count: 0, bytes: 0 };
+    part.bytes += utf8ByteLength(pack.coverage.extractionGaps[index]) + (part.count > 0 ? 2 : 0);
+    part.count += 1;
+    parts.set(owner, part);
   }
-  return gaps;
+  const summarized = new Set;
+  const gaps = pack.coverage.extractionGaps.flatMap((gap, index) => {
+    const owner = gapOwners.get(index);
+    if (owner === undefined)
+      return [gap];
+    const seat = sent.get(owner);
+    if (seat === undefined || summarized.has(owner))
+      return [];
+    const part = parts.get(owner);
+    if (part.bytes <= MAX_FITTED_ITEM_GAP_BYTES)
+      return [gap];
+    summarized.add(owner);
+    return [`Item [${seat}]: ${part.count} part${part.count === 1 ? "" : "s"} of this item could not be read.`];
+  });
+  if (unread.size > 0) {
+    const dropped = pack.candidates.length - kept.length;
+    gaps.push(`${dropped} more matching item${dropped === 1 ? " was" : "s were"} not sent; ${unread.size} of them could not be read in full.`);
+  }
+  return unread.size === 0 && summarized.size === 0 ? pack.coverage.extractionGaps : gaps;
 }
-function withUnfittedCoverage(result, pack, fitted) {
-  if (fitted === pack || fitted.coverage.extractionGaps === pack.coverage.extractionGaps)
-    return result;
+function withUnfittedCoverage(result, pack, fitted, lane = "local") {
+  let restored = result;
+  if (fitted.coverage.extractionGaps !== pack.coverage.extractionGaps) {
+    restored = restoreExtractionGaps(result, pack, fitted);
+  }
+  if (fitted.candidates.length >= pack.candidates.length)
+    return restored;
+  if (restored === result)
+    restored = { ...result };
+  promptFitNotes.set(restored, promptFitCoverageGap(lane, fitted.candidates.length, pack.candidates.length));
+  return restored;
+}
+function restoreExtractionGaps(result, pack, fitted) {
   const built = new Set(pack.coverage.extractionGaps.map((gap) => gap.trim()));
   const promptOnly = new Set(fitted.coverage.extractionGaps.map((gap) => gap.trim()).filter((gap) => !built.has(gap)));
   const unanswered = result.unanswered.filter((line) => !promptOnly.has(line.trim()));
@@ -109471,7 +109652,7 @@ function roundRobinCandidates(candidates, candidateCorpus) {
   }
   return order;
 }
-function restatePack(pack, candidates, candidateCorpus, gapOwners) {
+function restatePack(pack, candidates, candidateCorpus, extractionGaps = pack.coverage.extractionGaps) {
   const originals = pack.candidates.filter((original) => candidates.some((candidate) => candidate.provenance === original.provenance));
   const inEvidence = new Map;
   for (const original of originals) {
@@ -109485,7 +109666,7 @@ function restatePack(pack, candidates, candidateCorpus, gapOwners) {
     candidates,
     coverage: {
       ...pack.coverage,
-      ...gapOwners ? { extractionGaps: keptSeatGaps(pack, originals, gapOwners) } : {},
+      extractionGaps,
       ...pack.coverage.matchCounts ? {
         matchCounts: pack.coverage.matchCounts.map((count) => ({
           ...count,
@@ -110137,7 +110318,7 @@ function releaseAnalystAnswer(input) {
     reasons: ["uncited_non_public_answer"],
     requiredApproval: packHasSecureLocal(input.detail.pack) ? "s4_release" : "user_review"
   } : withSecureLocalContextGate(originalScanDecision && originalScanDecision.decision !== "allow" ? originalScanDecision : finalScanDecision(), facts, input.detail, input.releaseSecureContent);
-  const answer = answerForReleaseDecision(decision);
+  let answer = answerForReleaseDecision(decision);
   const draftNotes = [
     [finalDraftAnswer, unsupportedNoContent ? safeUnsupportedGaps : releasedUnanswered],
     [safeUnsupportedDraft, safeUnsupportedGaps],
@@ -110145,6 +110326,12 @@ function releaseAnalystAnswer(input) {
   ];
   const released = decision.decision === "allow" || decision.decision === "redact";
   const unanswered = released ? (draftNotes.find(([draft]) => draft === answer)?.[1] ?? []).map((note) => note.trim()).filter(Boolean) : [];
+  const fitNote = promptFitNotes.get(input.result);
+  if (released && fitNote && !unanswered.includes(fitNote)) {
+    answer = unanswered.length > 0 ? `${answer}
+- ${fitNote}` : composeReleasedAnswer(answer, [fitNote]);
+    unanswered.push(fitNote);
+  }
   return {
     decision,
     facts,
@@ -110973,7 +111160,7 @@ async function readPrivateEvidenceItem(input) {
     return;
   return content.chunks;
 }
-var DEFAULT_MAX_RESULTS = 24, MAX_EVIDENCE_CANDIDATES = 48, DEFAULT_EVIDENCE_BYTE_BUDGET = 40000, CLOUD_ANALYST_PROMPT_BYTES, TEMPORAL_INTENT_MIN_RESULTS = 8, DEFAULT_MAX_CHARS_PER_CANDIDATE = 3000, DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS = 60000, DEFAULT_LOCAL_ANALYST_TIMEOUT_MS = 60000, DEFAULT_CLOUD_ANALYST_TIMEOUT_MS = 60000, DEFAULT_SELF_HEAL_MAX_MS = 20000, DEFAULT_ON_DEMAND_READ_WAIT_MS = 20000, ON_DEMAND_READ_POLL_MS = 1000, MIN_PROPORTIONAL_PICK_BYTES = 200, MIN_FITTED_BYTES_PER_CANDIDATE = 600, HEAD_SEAT_SHARES = 2, EMPTY_ROUTE_MESSAGE = "Sovereignty analyst route is empty", EXHAUSTED_ROUTE_MESSAGE = "Sovereignty analyst fallback chain exhausted", MAX_SAFE_REASON_CHARS = 300, TrustedAnalystTimeoutError, RELEASED_EVIDENCE_LABEL_FIELDS, RELEASED_EXCERPT_MAX_CHARS = 1500, PRIVATE_EVIDENCE_MAX_RESULTS = 12, PRIVATE_DEPTH_MAX_PASSAGES = 24, PRIVATE_EVIDENCE_BYTE_BUDGET = 20000, PRIVATE_NEIGHBOURS_MAX = 4;
+var DEFAULT_MAX_RESULTS = 24, MAX_EVIDENCE_CANDIDATES = 48, DEFAULT_EVIDENCE_BYTE_BUDGET = 40000, CLOUD_ANALYST_PROMPT_BYTES, TEMPORAL_INTENT_MIN_RESULTS = 8, DEFAULT_MAX_CHARS_PER_CANDIDATE = 3000, DEFAULT_TRUSTED_ANALYST_TIMEOUT_MS = 60000, DEFAULT_LOCAL_ANALYST_TIMEOUT_MS = 60000, DEFAULT_CLOUD_ANALYST_TIMEOUT_MS = 60000, DEFAULT_SELF_HEAL_MAX_MS = 20000, DEFAULT_ON_DEMAND_READ_WAIT_MS = 20000, ON_DEMAND_READ_POLL_MS = 1000, MIN_PROPORTIONAL_PICK_BYTES = 200, MIN_FITTED_BYTES_PER_CANDIDATE = 600, HEAD_SEAT_SHARES = 2, MAX_FITTED_ITEM_GAP_BYTES = 256, promptFitNotes, EMPTY_ROUTE_MESSAGE = "Sovereignty analyst route is empty", EXHAUSTED_ROUTE_MESSAGE = "Sovereignty analyst fallback chain exhausted", MAX_SAFE_REASON_CHARS = 300, TrustedAnalystTimeoutError, RELEASED_EVIDENCE_LABEL_FIELDS, RELEASED_EXCERPT_MAX_CHARS = 1500, PRIVATE_EVIDENCE_MAX_RESULTS = 12, PRIVATE_DEPTH_MAX_PASSAGES = 24, PRIVATE_EVIDENCE_BYTE_BUDGET = 20000, PRIVATE_NEIGHBOURS_MAX = 4;
 var init_analyst_answer = __esm(() => {
   init_model_stream();
   init_read_wide();
@@ -111004,6 +111191,7 @@ var init_analyst_answer = __esm(() => {
   init_answer_latency_trace();
   init_local_analyst_window();
   CLOUD_ANALYST_PROMPT_BYTES = OPENCLAW_INFER_MAX_PROMPT_BYTES - 1e4;
+  promptFitNotes = new WeakMap;
   TrustedAnalystTimeoutError = class TrustedAnalystTimeoutError extends Error {
     timeoutMs;
     elapsedMs;
@@ -160244,6 +160432,8 @@ async function emailWorkerCheck(deps) {
     };
   }
   const health = asRecord16(await response.json());
+  const notices = Array.isArray(health.degraded_conditions) ? health.degraded_conditions.filter((notice) => typeof notice === "string").join(" ") : "";
+  const noticeDetail = notices ? ` ${notices}` : "";
   const bridge = asRecord16(health.desktop_bridge);
   if ((deps.platform ?? process.platform) === "linux" && ["port_in_use", "unavailable"].includes(String(bridge.state))) {
     return {
@@ -160258,7 +160448,7 @@ async function emailWorkerCheck(deps) {
     return {
       name,
       ok: false,
-      detail: `Email worker is running in degraded mode: ${degradedCredentials.join("; ")}.`,
+      detail: `Email worker is running in degraded mode: ${degradedCredentials.join("; ")}.${noticeDetail}`,
       hint: "Fix the listed credential, then restart the Olympus worker or POST /v1/source/credentials/recheck."
     };
   }
@@ -160273,7 +160463,7 @@ async function emailWorkerCheck(deps) {
   return {
     name,
     ok: true,
-    detail: `Source worker at ${address} answered /health; no worker health or credential failures reported.${(deps.platform ?? process.platform) === "linux" && bridge.listener_owner === "engine-host" && ["listening", "restarting"].includes(String(bridge.state)) ? " The engine host holds the desktop port across worker reloads; releasing it starts a fresh origin." : ""}`
+    detail: `Source worker at ${address} answered /health${notices ? `.${noticeDetail}` : "; no worker health or credential failures reported."}${(deps.platform ?? process.platform) === "linux" && bridge.listener_owner === "engine-host" && ["listening", "restarting"].includes(String(bridge.state)) ? " The engine host holds the desktop port across worker reloads; releasing it starts a fresh origin." : ""}`
   };
 }
 async function sourceIndexStatusCheck(deps) {
@@ -219318,7 +219508,14 @@ function buildSourceAnswerLatencyTraceRecord(input) {
           lane: fit.lane,
           ...fit.promptBudgetBytes === undefined ? {} : { prompt_budget_bytes: fit.promptBudgetBytes, prompt_budget_source: fit.promptBudgetSource },
           kept_seats: fit.keptSeats.map((seat) => Math.max(0, Math.floor(seat))),
-          ...fit.promptBytes === undefined ? {} : { prompt_bytes: Math.max(0, Math.floor(fit.promptBytes)) }
+          prompt_bytes: fit.promptBytes,
+          pack_candidates: fit.packCandidates,
+          kept_candidates: fit.keptCandidates,
+          pack_gap_entries: fit.packGapEntries,
+          pack_gap_bytes: fit.packGapBytes,
+          sent_gap_bytes: fit.sentGapBytes,
+          overhead_bytes: fit.overheadBytes,
+          evidence_format: fit.evidenceFormat
         }))
       }
     } : {},
@@ -249705,29 +249902,31 @@ async function createSovereigntyAnalystMap(input) {
         continue;
       await validateSecureVeniceAnalystProfileAtConstruction({ profile, apiKey });
     }
-    const analyst = input.engine.source === "env_bridge" && id === "local-source-answer" ? input.defaultLocal : createAnalystForSovereigntyProfile({
-      profile,
-      profileId: id,
-      ...input.localModelActivity ? { localModelActivity: input.localModelActivity } : {},
-      olympusConfig: input.olympusConfig,
-      env: input.env,
-      veniceAnalystTimeoutMs: input.veniceAnalystTimeoutMs,
-      veniceReasoningHeadroomTokens: input.veniceReasoningHeadroomTokens,
-      ...input.bootSecretResolver ? { bootSecretResolver: input.bootSecretResolver } : {}
-    });
-    if (!analyst)
-      continue;
-    if (backend === "local" && !(input.engine.source === "env_bridge" && id === "local-source-answer")) {
-      const report = { analyst: id, model: profile.model ?? "" };
-      if (input.env.OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_PROMPT_BYTES === undefined) {
-        setLocalAnalystWindow(analyst, await resolveLocalAnalystWindow({
-          model: profile.model ?? "",
-          ...profile.provider === "local-openai-compatible" && !profile.secretRef ? { baseUrl: profile.baseUrl } : {}
-        }), report);
-      } else
+    if (input.engine.source === "env_bridge" && id === "local-source-answer") {
+      map.set(id, { profile: resolved, backend, analyst: input.defaultLocal });
+    } else if (profile.provider === "local-openai-compatible") {
+      const route = createLocalSovereigntyAnalystRoute({ ...input, profile, profileId: id });
+      if (!route)
+        continue;
+      const analyst = createAnalyst(route.model, { auditSuspiciousDrafts: true, evidenceFormat: "compact" });
+      const report = { analyst: id, model: profile.model };
+      if (input.env.OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_PROMPT_BYTES?.trim()) {
         reportLocalAnalystPromptOverride(report);
+      } else if (input.discoverLocalWindows !== false) {
+        await initializeLocalAnalystWindow(analyst, {
+          model: profile.model,
+          baseUrl: profile.baseUrl,
+          contextTokens: profile.contextTokens,
+          secretRef: profile.secretRef,
+          authorize: (init) => route.delphi.withAuth(init, profile.secretRef)
+        }, report);
+      }
+      map.set(id, { profile: resolved, backend, analyst, local: { ...route, analyst } });
+    } else {
+      const analyst = createRemoteAnalystForSovereigntyProfile({ ...input, profile, profileId: id }, id);
+      if (analyst)
+        map.set(id, { profile: resolved, backend, analyst });
     }
-    map.set(id, { profile: resolved, backend, analyst });
   }
   applyBuiltInPrivateAnalyst(map, securePoolMemberIds, input.builtInAnalyst);
   return map;
@@ -249753,9 +249952,13 @@ function builtInBacksPrivateAnalyst(id, state, members, _availableIds) {
     return false;
   return members.some((member) => member.id === id && member.profile.provider === "local-openai-compatible");
 }
-async function probeLocalAnalystService(olympusConfig, client = new DelphiClient(olympusConfig)) {
+async function probeLocalAnalystService(olympusConfig, client = new DelphiClient(olympusConfig), route = { profile: "source_answer" }) {
   try {
-    await client.listModelsForProfile("source_answer", AbortSignal.timeout(3000));
+    const signal = AbortSignal.timeout(3000);
+    if ("lane" in route)
+      await client.listModels(route.lane, signal);
+    else
+      await client.listModelsForProfile(route.profile, signal);
     return true;
   } catch {
     return false;
@@ -249862,38 +250065,28 @@ function analystBackendForSovereigntyProfile(profile) {
     return "cloud";
   return;
 }
-function createAnalystForSovereigntyProfile(input) {
+function createLocalSovereigntyAnalystRoute(input) {
   const { profile } = input;
   const profileId = input.profileId ?? profile.model ?? profile.provider;
-  if (profile.provider === "local-openai-compatible") {
-    const model = createLocalSovereigntyAnalystModel(input);
-    return model ? createAnalyst(model, { auditSuspiciousDrafts: true, evidenceFormat: "compact" }) : undefined;
+  if (!profile.baseUrl?.trim()) {
+    throw new Error("Local sovereignty analyst profiles require baseUrl.");
   }
-  return createRemoteAnalystForSovereigntyProfile(input, profileId);
-}
-function createLocalSovereigntyAnalystModel(input) {
-  const { profile } = input;
-  const profileId = input.profileId ?? profile.model ?? profile.provider;
-  {
-    if (!profile.baseUrl?.trim()) {
-      throw new Error("Local sovereignty analyst profiles require baseUrl.");
-    }
-    const apiKey = profile.secretRef ? resolveSecretRefSync(profile.secretRef, input.env, "Sovereignty local analyst profile", bootSecretOptions(input.bootSecretResolver, [profileId], ["analyst"], { id: profileId, profile })) : undefined;
-    if (profile.secretRef && !apiKey)
-      return;
-    const config = structuredClone(input.olympusConfig);
-    config.argus.modelProfiles.source_answer = {
-      ...config.argus.modelProfiles.source_answer,
-      baseUrl: profile.baseUrl,
-      model: profile.model,
-      ...profile.secretRef ? { secretRef: profile.secretRef } : {},
-      purpose: "text_reasoning"
-    };
-    const model = createDelphiAnalystModel(new DelphiClient(config, undefined, {
-      resolveSecretRef: () => apiKey
-    }), { profile: "source_answer", preflightTimeoutMs: 0 });
-    return input.localModelActivity ? input.localModelActivity.track(localModelResourceKey(profile), model, { serialize: false }) : model;
-  }
+  const apiKey = profile.secretRef ? resolveSecretRefSync(profile.secretRef, input.env, "Sovereignty local analyst profile", bootSecretOptions(input.bootSecretResolver, [profileId], ["analyst"], { id: profileId, profile })) : undefined;
+  if (profile.secretRef && !apiKey)
+    return;
+  const config = structuredClone(input.olympusConfig);
+  config.argus.modelProfiles.source_answer = {
+    baseUrl: profile.baseUrl,
+    model: profile.model,
+    ...profile.secretRef ? { secretRef: profile.secretRef } : {},
+    purpose: "text_reasoning"
+  };
+  const delphi = new DelphiClient(config, undefined, { resolveSecretRef: () => apiKey });
+  const model = createDelphiAnalystModel(delphi, { profile: "source_answer", preflightTimeoutMs: 0 });
+  return {
+    delphi,
+    model: input.localModelActivity ? input.localModelActivity.track(localModelResourceKey(profile), model, { serialize: false }) : model
+  };
 }
 function createRemoteAnalystForSovereigntyProfile(input, profileId) {
   const { profile } = input;
@@ -250010,23 +250203,12 @@ function createLocalPrivateRoute(input) {
       }
       return standsIn ? undefined : { unavailable: true, modelId: entry.modelId };
     }
-    const window2 = await input.window(entry.modelId, entry.baseUrl).catch((error) => {
+    const window2 = await input.window(entry.modelId, entry.baseUrl, member).catch((error) => {
       log(`[private-model] window unknown model=${entry.modelId} reason=${error instanceof Error ? error.name : "unknown"}; reading within the default budget`);
       return;
     });
     return { model: entry.model, modelId: entry.modelId, windowTokens: window2?.windowTokens ?? 0 };
   };
-}
-async function probeLocalSovereigntyProfile(olympusConfig, profile, apiKey) {
-  const config = structuredClone(olympusConfig);
-  config.argus.modelProfiles.source_answer = {
-    ...config.argus.modelProfiles.source_answer,
-    baseUrl: profile.baseUrl,
-    model: profile.model,
-    ...profile.secretRef ? { secretRef: profile.secretRef } : {},
-    purpose: "text_reasoning"
-  };
-  return probeLocalAnalystService(config, new DelphiClient(config, undefined, { resolveSecretRef: () => apiKey }));
 }
 var PRIVATE_ROUTE_REACHABLE_TTL_MS = 30000;
 var init_private_analysts = __esm(() => {
@@ -274850,21 +275032,29 @@ ${key}`;
       ...veniceReasoningHeadroomTokens !== undefined ? { reasoningHeadroomTokens: veniceReasoningHeadroomTokens } : {},
       ...veniceAnalystTimeoutMs !== undefined ? { timeoutMs: veniceAnalystTimeoutMs } : {}
     });
-    const localSourceAnswerModel = localModelActivity.track(localModelResourceKey(process.env.OLYMPUS_SOURCE_INDEX_ANALYST_LANE ? olympusConfig.argus.lanes[analystLane] : olympusConfig.argus.modelProfiles[analystProfile]), createDelphiAnalystModel(new DelphiClient(olympusConfig), process.env.OLYMPUS_SOURCE_INDEX_ANALYST_LANE ? { lane: analystLane, preflightTimeoutMs: sourceIndexAnalystPreflightTimeoutMs } : { profile: analystProfile, preflightTimeoutMs: sourceIndexAnalystPreflightTimeoutMs }), { serialize: false });
-    const defaultLocal = createAnalyst(loopStallFixture?.answerModel ?? localSourceAnswerModel, { auditSuspiciousDrafts: true, evidenceFormat: "compact" });
     const localEndpoint = process.env.OLYMPUS_SOURCE_INDEX_ANALYST_LANE ? olympusConfig.argus.lanes[analystLane] : olympusConfig.argus.modelProfiles[analystProfile];
+    const localRoute = process.env.OLYMPUS_SOURCE_INDEX_ANALYST_LANE ? { lane: analystLane } : { profile: analystProfile };
+    const localDelphi = new DelphiClient(olympusConfig);
+    const localSourceAnswerModel = localModelActivity.track(localModelResourceKey(localEndpoint), createDelphiAnalystModel(localDelphi, { ...localRoute, preflightTimeoutMs: sourceIndexAnalystPreflightTimeoutMs }), { serialize: false });
+    const defaultLocal = createAnalyst(loopStallFixture?.answerModel ?? localSourceAnswerModel, { auditSuspiciousDrafts: true, evidenceFormat: "compact" });
     const localReport = { analyst: "local-source-answer", model: localEndpoint.model };
-    if (sourceIndexLocalAnalystPromptBytes === undefined) {
-      setLocalAnalystWindow(defaultLocal, await resolveLocalAnalystWindow({
-        model: localEndpoint.model,
-        ...!localEndpoint.secretRef ? { baseUrl: localEndpoint.baseUrl } : {}
-      }), localReport);
-    } else
+    const discoverLocalWindows = engineRole !== "background";
+    if (sourceIndexLocalAnalystPromptBytes !== undefined) {
       reportLocalAnalystPromptOverride(localReport);
+    } else if (discoverLocalWindows) {
+      await initializeLocalAnalystWindow(defaultLocal, {
+        ...localEndpoint,
+        authorize: (init) => localDelphi.withAuth(init, localEndpoint.secretRef)
+      }, localReport);
+    }
     const builtInAnalystModel = answerBuiltInModel;
-    const builtInAnalyst = builtInAnalystModel ? setLocalAnalystWindow(createAnalyst(builtInAnalystModel, { auditSuspiciousDrafts: true, evidenceFormat: "compact" }), await resolveLocalAnalystWindow({ model: builtInAnalystModel.spec.modelId }), { analyst: "built-in", model: builtInAnalystModel.spec.modelId }) : undefined;
+    const builtInAnalyst = builtInAnalystModel ? setLocalAnalystWindow(createAnalyst(builtInAnalystModel, { auditSuspiciousDrafts: true, evidenceFormat: "compact" }), await resolveLocalAnalystWindow({ model: builtInAnalystModel.spec.modelId }), sourceIndexLocalAnalystPromptBytes === undefined ? { analyst: "built-in", model: builtInAnalystModel.spec.modelId } : undefined) : undefined;
+    if (builtInAnalystModel && sourceIndexLocalAnalystPromptBytes !== undefined) {
+      reportLocalAnalystPromptOverride({ analyst: "built-in", model: builtInAnalystModel.spec.modelId });
+    }
     const sovereigntyAnalysts = await createSovereigntyAnalystMap({
       localModelActivity,
+      discoverLocalWindows,
       engine: sovereigntyEngine,
       olympusConfig,
       env: process.env,
@@ -274875,23 +275065,34 @@ ${key}`;
       ...builtInAnalyst ? { builtInAnalyst } : {}
     });
     if (builtInAnalystModel) {
-      probeLocalAnalystService(olympusConfig).then((up) => {
+      probeLocalAnalystService(olympusConfig, localDelphi, localRoute).then((up) => {
         if (!up)
           builtInAnalystModel.prepare();
       });
     }
     const defaultLocalAnalyst = sovereigntyAnalysts.get("local-source-answer")?.analyst ?? defaultLocal;
+    const usesDefaultLocal = (id) => sovereigntyEngine.source === "env_bridge" && id === "local-source-answer";
     localPrivateRoute = createLocalPrivateRoute({
       firstMember: () => {
         const pool = sovereigntyEngine.resolveAnalystPool({ trustDomain: "secure_local" });
         return (pool.explicitOrder ?? pool.members)[0];
       },
-      model: (member) => sovereigntyEngine.source === "env_bridge" && member.id === "local-source-answer" ? { model: localSourceAnswerModel, modelId: localEndpoint.model, ...!localEndpoint.secretRef ? { baseUrl: localEndpoint.baseUrl } : {} } : (() => {
-        const model = createLocalSovereigntyAnalystModel({ profile: member.profile, profileId: member.id, localModelActivity, olympusConfig, env: process.env, bootSecretResolver });
-        return model ? { model, modelId: member.profile.model ?? member.id, ...!member.profile.secretRef && member.profile.baseUrl ? { baseUrl: member.profile.baseUrl } : {} } : undefined;
-      })(),
-      reachable: (member) => sovereigntyEngine.source === "env_bridge" && member.id === "local-source-answer" ? probeLocalAnalystService(olympusConfig) : probeLocalSovereigntyProfile(olympusConfig, member.profile),
-      window: (model, baseUrl) => resolveLocalAnalystWindow({ model, ...baseUrl ? { baseUrl } : {} }),
+      model: (member) => {
+        if (usesDefaultLocal(member.id))
+          return { model: localSourceAnswerModel, modelId: localEndpoint.model };
+        const local = sovereigntyAnalysts.get(member.id)?.local;
+        return local ? { model: local.model, modelId: member.profile.model ?? member.id } : undefined;
+      },
+      reachable: (member) => {
+        if (usesDefaultLocal(member.id))
+          return probeLocalAnalystService(olympusConfig, localDelphi, localRoute);
+        const local = sovereigntyAnalysts.get(member.id)?.local;
+        return local ? probeLocalAnalystService(olympusConfig, local.delphi) : Promise.resolve(false);
+      },
+      window: async (_model, _baseUrl, member) => {
+        const analyst = usesDefaultLocal(member.id) ? defaultLocal : sovereigntyAnalysts.get(member.id)?.local?.analyst;
+        return analyst ? localAnalystWindow(analyst) : undefined;
+      },
       builtInStandsIn: (member) => builtInAnswersFor(member.id)
     });
     const sourceReranker = createBuiltInRerankerResolver();
@@ -276448,7 +276649,6 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   const remoteReleaseCheck = createReleaseTierCheck(tierScopes, () => secureDerivativeDefault ?? "allow", chunkReleaseOptions, pendingItemProtection);
   if (sourceAnswerLanes) {
     await Promise.resolve().then(() => init_deep_read_jobs());
-    await Promise.resolve().then(() => init_local_analyst_window());
     await Promise.resolve().then(() => init_analyst_delphi());
     await Promise.resolve().then(() => init_analyst());
     const deepReadLanes = sourceAnswerLanes;
@@ -276467,9 +276667,9 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
           return;
         if ("unavailable" in route)
           return route;
-        const analyst = setLocalAnalystWindow(createAnalyst(route.model, { auditSuspiciousDrafts: true, evidenceFormat: "compact" }), route.windowTokens > 0 ? { windowTokens: route.windowTokens, source: "server" } : undefined);
-        const budget = localAnalystPromptBudget(undefined, localAnalystWindow(analyst), maxTokensForChars2(DEFAULT_ANALYST_MAX_OUTPUT_CHARS));
-        return { analyst, modelId: route.modelId, promptBytes: budget.bytes };
+        const analyst = createAnalyst(route.model, { auditSuspiciousDrafts: true, evidenceFormat: "compact" });
+        const promptBytes = sourceIndexLocalAnalystPromptBytes ?? (route.windowTokens > 0 ? localAnalystPromptBytesForWindow(route.windowTokens, maxTokensForChars2(DEFAULT_ANALYST_MAX_OUTPUT_CHARS)) : DEFAULT_LOCAL_ANALYST_PROMPT_BYTES);
+        return { analyst, modelId: route.modelId, promptBytes };
       },
       inbox: waitingQuestionStore,
       judgeBusy: () => classificationBusy(),
@@ -277107,8 +277307,10 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     const backgroundSnapshot = backgroundStatus?.snapshot;
     const backgroundLoopLag = backgroundSnapshot?.loop_lag;
     if ((path === "/v1/health" || path === "/health") && response?.ok) {
+      const windowNotices = localPromptBudgets.map(localAnalystWindowNotice).filter((notice) => notice !== undefined);
       return Response.json({
         ...await response.json(),
+        ...windowNotices.length ? { degraded_conditions: windowNotices } : {},
         ...rerankOutcomes ? {
           rerank_outcomes: rerankOutcomes,
           reranker_install: (({ state, failure, percent, label }) => ({ state, ...failure ? { reason: failure.reason } : {}, percent, label }))(readBuiltInRerankerStatus(process.env))
@@ -277117,7 +277319,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
           analyst: report.analyst,
           model: report.model,
           source: report.source,
-          ...report.windowTokens !== undefined ? { window_tokens: report.windowTokens } : {}
+          ...report.windowTokens !== undefined ? { window_tokens: report.windowTokens } : {},
+          ...localAnalystWindowNotice(report) ? { note: localAnalystWindowNotice(report) } : {}
         })) } : {},
         ...tierLedgerProblems.size ? { privacy_ledger_problems: Object.fromEntries(tierLedgerProblems) } : {},
         ...standBackSeen ? { stand_back: standBackCounts } : {},

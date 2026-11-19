@@ -4949,6 +4949,11 @@ function applyEnvironmentOverrides(config, env) {
   if (env.OLYMPUS_ARGUS_DEEP_MODEL) {
     config.argus.lanes.deep.model = env.OLYMPUS_ARGUS_DEEP_MODEL;
   }
+  for (const lane of ["fast", "deep"]) {
+    const contextTokens = envContextTokens(env, `OLYMPUS_ARGUS_${lane.toUpperCase()}`);
+    if (contextTokens !== undefined)
+      config.argus.lanes[lane].contextTokens = contextTokens;
+  }
   if (fastLaneEnvChanged) {
     mirrorFastLaneToProfiles(config, ["default_chat", "source_answer"]);
   }
@@ -5462,6 +5467,9 @@ function applyLaneConfig(config, lane, laneConfig) {
   if (typeof laneConfig.secretRef === "string" && laneConfig.secretRef.trim()) {
     config.argus.lanes[lane].secretRef = laneConfig.secretRef.trim();
   }
+  if (laneConfig.contextTokens !== undefined) {
+    config.argus.lanes[lane].contextTokens = parseContextTokens(laneConfig.contextTokens, `argus.lanes.${lane}.contextTokens`);
+  }
 }
 function applyModelProfileConfig(config, profile, profileConfig) {
   if (!profileConfig)
@@ -5475,6 +5483,9 @@ function applyModelProfileConfig(config, profile, profileConfig) {
   if (typeof profileConfig.secretRef === "string" && profileConfig.secretRef.trim()) {
     config.argus.modelProfiles[profile].secretRef = profileConfig.secretRef.trim();
   }
+  if (profileConfig.contextTokens !== undefined) {
+    config.argus.modelProfiles[profile].contextTokens = parseContextTokens(profileConfig.contextTokens, `argus.modelProfiles.${profile}.contextTokens`);
+  }
   if (typeof profileConfig.purpose === "string" && ARGUS_MODEL_PROFILE_PURPOSES.includes(profileConfig.purpose)) {
     config.argus.modelProfiles[profile].purpose = profileConfig.purpose;
   }
@@ -5483,12 +5494,26 @@ function applyModelProfileEnv(config, profile, env, prefix) {
   const baseUrl = env[`${prefix}_BASE_URL`];
   const model = env[`${prefix}_MODEL`];
   const secretRef = env[`${prefix}_SECRET_REF`];
+  const contextTokens = envContextTokens(env, prefix);
   if (baseUrl)
     config.argus.modelProfiles[profile].baseUrl = trimTrailingSlash(baseUrl);
   if (model)
     config.argus.modelProfiles[profile].model = model;
   if (secretRef?.trim())
     config.argus.modelProfiles[profile].secretRef = secretRef.trim();
+  if (contextTokens !== undefined)
+    config.argus.modelProfiles[profile].contextTokens = contextTokens;
+}
+function envContextTokens(env, prefix) {
+  const name = `${prefix}_CONTEXT_TOKENS`;
+  const value = env[name];
+  return value === undefined ? undefined : parseContextTokens(/^\d+$/.test(value.trim()) ? Number(value) : value, name);
+}
+function parseContextTokens(value, name) {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
+    throw new OperationError("config_error", `${name} must be a positive safe integer in tokens.`);
+  }
+  return value;
 }
 function validateConfig(config) {
   assertBoolean(config.worker.engineSplit, "worker.engineSplit");
@@ -5626,6 +5651,8 @@ function validateConfig(config) {
       throw new OperationError("config_error", `${lane} model must be configured.`);
     }
     validateSecretRef(laneConfig.secretRef, `${lane} secretRef`);
+    if (laneConfig.contextTokens !== undefined)
+      parseContextTokens(laneConfig.contextTokens, `argus.lanes.${lane}.contextTokens`);
   }
   for (const profile of ARGUS_MODEL_PROFILES) {
     const profileConfig = config.argus.modelProfiles[profile];
@@ -5637,6 +5664,8 @@ function validateConfig(config) {
       throw new OperationError("config_error", `${profile} model must be configured.`);
     }
     validateSecretRef(profileConfig.secretRef, `${profile} secretRef`);
+    if (profileConfig.contextTokens !== undefined)
+      parseContextTokens(profileConfig.contextTokens, `argus.modelProfiles.${profile}.contextTokens`);
   }
   assertBoolean(config.email.enabled, "email.enabled");
   assertBoolean(config.sourceIndex.enabled, "sourceIndex.enabled");
@@ -10237,6 +10266,7 @@ function parseProfiles(value, label) {
       trust,
       ...optionalString2(profile, "baseUrl"),
       ...optionalString2(profile, "secretRef"),
+      ...profile.contextTokens !== undefined ? { contextTokens: parseContextTokens(profile.contextTokens, `${label}.modelProfiles.${id}.contextTokens`) } : {},
       ...profile.snifferMode !== undefined ? { snifferMode: profile.snifferMode } : {},
       ...profile.snifferDecisionBar !== undefined ? { snifferDecisionBar: profile.snifferDecisionBar } : {}
     };
@@ -10329,6 +10359,12 @@ function validateProfile(id, profile, daemonPorts) {
   }
   if (!["local", "encrypted_cloud", "standard_cloud"].includes(profile.trust)) {
     throw new OperationError("config_error", `Sovereignty profile "${id}" has unsupported trust "${profile.trust}".`);
+  }
+  if (profile.contextTokens !== undefined) {
+    if (profile.provider !== "local-openai-compatible" || profile.trust !== "local") {
+      throw new OperationError("config_error", `Sovereignty profile "${id}" contextTokens is only valid on a local OpenAI-compatible profile.`);
+    }
+    parseContextTokens(profile.contextTokens, `Sovereignty profile "${id}" contextTokens`);
   }
   if (profile.snifferMode !== undefined && (profile.provider !== "local-openai-compatible" || profile.trust !== "local" || !["auto", "decision", "full"].includes(profile.snifferMode))) {
     throw new OperationError("config_error", `Sovereignty profile "${id}" snifferMode requires a local profile and auto, decision or full.`);
@@ -18002,13 +18038,14 @@ var init_connector_store = __esm(() => {
 });
 
 // src/workers/source-index/local-analyst-window.ts
-var caches2, windows, routeFitters, reports;
+var caches2, LOCAL_ANALYST_WINDOW_RETRY_INTERVAL_MS, windows, routeFitters, reports;
 var init_local_analyst_window = __esm(() => {
   init_limit_stops();
   init_model_transport();
   init_manifest2();
   registerLimit({ id: "answer.local_prompt_bytes", kind: "size", scope: "answer", label: "Local analyst prompt clamp", unit: "bytes", continue: "none" });
   caches2 = new WeakMap;
+  LOCAL_ANALYST_WINDOW_RETRY_INTERVAL_MS = 10 * 60000;
   windows = new WeakMap;
   routeFitters = new WeakMap;
   reports = new Map;
@@ -18261,7 +18298,7 @@ var init_deep_read_trigger = __esm(() => {
   init_deep_read_refused();
 });
 // src/workers/source-index/analyst-answer.ts
-var CLOUD_ANALYST_PROMPT_BYTES;
+var CLOUD_ANALYST_PROMPT_BYTES, promptFitNotes;
 var init_analyst_answer = __esm(() => {
   init_model_stream();
   init_read_wide();
@@ -18292,6 +18329,7 @@ var init_analyst_answer = __esm(() => {
   init_answer_latency_trace();
   init_local_analyst_window();
   CLOUD_ANALYST_PROMPT_BYTES = OPENCLAW_INFER_MAX_PROMPT_BYTES - 1e4;
+  promptFitNotes = new WeakMap;
 });
 
 // src/workers/x-bookmarks/corpus-adapter.ts
@@ -30148,6 +30186,8 @@ async function emailWorkerCheck(deps) {
     };
   }
   const health = asRecord15(await response.json());
+  const notices = Array.isArray(health.degraded_conditions) ? health.degraded_conditions.filter((notice) => typeof notice === "string").join(" ") : "";
+  const noticeDetail = notices ? ` ${notices}` : "";
   const bridge = asRecord15(health.desktop_bridge);
   if ((deps.platform ?? process.platform) === "linux" && ["port_in_use", "unavailable"].includes(String(bridge.state))) {
     return {
@@ -30162,7 +30202,7 @@ async function emailWorkerCheck(deps) {
     return {
       name,
       ok: false,
-      detail: `Email worker is running in degraded mode: ${degradedCredentials.join("; ")}.`,
+      detail: `Email worker is running in degraded mode: ${degradedCredentials.join("; ")}.${noticeDetail}`,
       hint: "Fix the listed credential, then restart the Olympus worker or POST /v1/source/credentials/recheck."
     };
   }
@@ -30177,7 +30217,7 @@ async function emailWorkerCheck(deps) {
   return {
     name,
     ok: true,
-    detail: `Source worker at ${address} answered /health; no worker health or credential failures reported.${(deps.platform ?? process.platform) === "linux" && bridge.listener_owner === "engine-host" && ["listening", "restarting"].includes(String(bridge.state)) ? " The engine host holds the desktop port across worker reloads; releasing it starts a fresh origin." : ""}`
+    detail: `Source worker at ${address} answered /health${notices ? `.${noticeDetail}` : "; no worker health or credential failures reported."}${(deps.platform ?? process.platform) === "linux" && bridge.listener_owner === "engine-host" && ["listening", "restarting"].includes(String(bridge.state)) ? " The engine host holds the desktop port across worker reloads; releasing it starts a fresh origin." : ""}`
   };
 }
 async function sourceIndexStatusCheck(deps) {

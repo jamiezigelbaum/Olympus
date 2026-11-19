@@ -29,6 +29,12 @@ export function laneTimeoutGap(corpusId: string): string {
 
 export const KEYWORD_PREPARATION_INCOMPLETE = 'keyword_preparation_incomplete';
 export const STARTUP_SEARCH_GAP = 'Olympus was still starting when you asked, so the search took longer.';
+
+export function promptFitCoverageGap(lane: 'local' | 'cloud', kept: number, shortlisted: number): string {
+  const model = lane === 'local' ? 'private' : 'cloud';
+  return `The ${model} model read ${kept} of the ${shortlisted} shortlisted sources. The rest did not fit in its prompt.`;
+}
+
 const KEYWORDS_PREFIX = 'Keyword preparation unfinished for ';
 export function keywordPreparationGap(corpusId: string): string {
   return `${KEYWORDS_PREFIX}${corpusId}; this answer uses the available keyword equivalents, so matches in other languages may be missing.`;
