@@ -5,7 +5,7 @@
 // serves no HTTP, only its command socket. Spawning tests carry an explicit
 // timeout (test/spawn-timeout-guard.test.ts).
 import { afterEach, describe, expect, test } from 'bun:test';
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { connectThisComputerSource } from '../src/core/this-computer.ts';
 import { resolvedStorePath } from '../src/core/source-placement.ts';
@@ -45,50 +45,6 @@ function spawnWorker(env: Record<string, string>, role: 'background' | 'front', 
     })();
   }
   return { child, messages, output: () => output };
-}
-
-async function spawnGatedFront() {
-  const home = mkdtempSync(join('/tmp', 'oes-'));
-  roots.push(home);
-  mkdirSync(join(home, 'run'), { mode: 0o700 });
-  const port = (() => { const server = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: { data() {} } }); const value = server.port; server.stop(true); return value; })();
-  const registryPath = join(home, 'c', 'olympus', 'handles.json');
-  const env = {
-    HOME: home,
-    XDG_DATA_HOME: join(home, 'd'),
-    XDG_STATE_HOME: join(home, 's'),
-    XDG_CONFIG_HOME: join(home, 'c'),
-    XDG_RUNTIME_DIR: join(home, 'run'),
-    OLYMPUS_EMAIL_SOURCE_PORT: String(port),
-    OLYMPUS_WORKER_SCHEDULER_ENABLED: 'false',
-    OLYMPUS_WORKER_AUTH_TOKEN: TOKEN,
-    OLYMPUS_ENGINE_BACKGROUND_SOCKET: join(home, 'run', 'olympus', 'background.sock'),
-    OLYMPUS_SOURCE_INDEX_LOCAL_FILES_CONNECTOR_STORE_ENABLED: 'true',
-    OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH: registryPath,
-    NODE_ENV: 'test',
-  };
-  // Local files, connected with a folder approved, and its store already holding an item.
-  connectThisComputerSource(registryPath, 'local.files');
-  const folder = join(home, 'notes');
-  mkdirSync(folder);
-  writeFileSync(join(folder, 'orchard.txt'), 'The orchard lab note.');
-  const authority = new FileSourceScopeAuthority({ registryPath });
-  const pending = authority.snapshot('local.files');
-  authority.approve({ sourceId: 'local.files', accountGeneration: pending.accountGeneration!, expectedRevision: pending.revision, selections: [{ key: folder, state: 'ingest' }], wholeAccount: false, explicitWholeAccountConfirmation: false });
-  const storePath = resolvedStorePath('local.files', 'secure_local', env);
-  mkdirSync(dirname(storePath), { recursive: true });
-  const seeded = new LocalConnectorStore({ dbPath: storePath, corpusId: 'secure_local.local.files', family: 'file', trustDomain: 'secure_local' });
-  await seeded.syncFromConnector(fixtureConnector(() => [{ id: 'orchard', name: 'orchard-lab.txt', text: 'The orchard lab note.', legacyDomain: 'secure_local' }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
-  seeded.close();
-
-  const socketPath = workerFrontSocketPath({ env })!;
-  const frontEnv = { ...env, [WORKER_LISTEN_SOCKET_ENV]: socketPath };
-  const front = spawnWorker(frontEnv, 'front', join(import.meta.dir, 'helpers', 'engine-split-boot-preload.ts'));
-  return { env, frontEnv, front, port, socketPath };
-}
-
-function waitForFrontGate(front: ReturnType<typeof spawnWorker>, phase: string) {
-  return waitFor(() => front.messages.has(phase), { description: `front reached ${phase}` });
 }
 
 describe('the engine split boots as two processes', () => {
@@ -166,7 +122,42 @@ describe('the engine split boots as two processes', () => {
   }, 120_000);
 
   test('the front answers through cleanup and visibility warm-up, then serves its read-only stores on the same socket', async () => {
-    const { env, frontEnv, front, port, socketPath } = await spawnGatedFront();
+    const home = mkdtempSync(join('/tmp', 'oes-'));
+    roots.push(home);
+    mkdirSync(join(home, 'run'), { mode: 0o700 });
+    const port = (() => { const server = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: { data() {} } }); const value = server.port; server.stop(true); return value; })();
+    const registryPath = join(home, 'c', 'olympus', 'handles.json');
+    const env = {
+      HOME: home,
+      XDG_DATA_HOME: join(home, 'd'),
+      XDG_STATE_HOME: join(home, 's'),
+      XDG_CONFIG_HOME: join(home, 'c'),
+      XDG_RUNTIME_DIR: join(home, 'run'),
+      OLYMPUS_EMAIL_SOURCE_PORT: String(port),
+      OLYMPUS_WORKER_SCHEDULER_ENABLED: 'false',
+      OLYMPUS_WORKER_AUTH_TOKEN: TOKEN,
+      OLYMPUS_ENGINE_BACKGROUND_SOCKET: join(home, 'run', 'olympus', 'background.sock'),
+      OLYMPUS_SOURCE_INDEX_LOCAL_FILES_CONNECTOR_STORE_ENABLED: 'true',
+      OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH: registryPath,
+      NODE_ENV: 'test',
+    };
+    // Local files, connected with a folder approved, and its store already holding an item.
+    connectThisComputerSource(registryPath, 'local.files');
+    const folder = join(home, 'notes');
+    mkdirSync(folder);
+    writeFileSync(join(folder, 'orchard.txt'), 'The orchard lab note.');
+    const authority = new FileSourceScopeAuthority({ registryPath });
+    const pending = authority.snapshot('local.files');
+    authority.approve({ sourceId: 'local.files', accountGeneration: pending.accountGeneration!, expectedRevision: pending.revision, selections: [{ key: folder, state: 'ingest' }], wholeAccount: false, explicitWholeAccountConfirmation: false });
+    const storePath = resolvedStorePath('local.files', 'secure_local', env);
+    mkdirSync(dirname(storePath), { recursive: true });
+    const seeded = new LocalConnectorStore({ dbPath: storePath, corpusId: 'secure_local.local.files', family: 'file', trustDomain: 'secure_local' });
+    await seeded.syncFromConnector(fixtureConnector(() => [{ id: 'orchard', name: 'orchard-lab.txt', text: 'The orchard lab note.', legacyDomain: 'secure_local' }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    seeded.close();
+
+    const socketPath = workerFrontSocketPath({ env })!;
+    const frontEnv = { ...env, [WORKER_LISTEN_SOCKET_ENV]: socketPath };
+    const front = spawnWorker(frontEnv, 'front', join(import.meta.dir, 'helpers', 'engine-split-boot-preload.ts'));
     await waitFor(() => existsSync(socketPath), { description: 'front starting socket' });
     const initialSocket = lstatSync(socketPath);
     const checkSocket = () => {
@@ -192,7 +183,7 @@ describe('the engine split boots as two processes', () => {
       expect(await response.text()).toContain('Olympus is starting');
       checkSocket();
     };
-    const waitForGate = (name: string) => waitForFrontGate(front, name);
+    const waitForGate = (name: string) => waitFor(() => front.messages.has(name), { description: `front reached ${name}` });
     const dashboardHeaders = { Accept: 'text/html' };
     await expectStarting(get('/dashboard', dashboardHeaders));
 
@@ -254,50 +245,4 @@ describe('the engine split boots as two processes', () => {
     expect(body).toContain('secure_local.local.files');
     expect(front.output()).not.toContain('FrontStoreWriteError');
   }, 180_000);
-
-  async function holdVisibilityWarmUp() {
-    const boot = await spawnGatedFront();
-    spawnWorker(boot.env, 'background');
-    await waitForFrontGate(boot.front, 'cleanup');
-    boot.front.child.send('cleanup');
-    await waitForFrontGate(boot.front, 'visibility');
-    return boot;
-  }
-
-  test.each([
-    ['recreates a missing socket', (path: string) => unlinkSync(path), false],
-    ['restores mode 0600 on the same socket', (path: string) => chmodSync(path, 0o666), true],
-  ] as const)('the front %s before serving real routes', async (_name, changeSocket, sameSocket) => {
-    const { front, port, socketPath } = await holdVisibilityWarmUp();
-    const original = lstatSync(socketPath);
-    changeSocket(socketPath);
-    front.child.send('visibility');
-    await waitFor(() => {
-      if (front.child.exitCode !== null) throw new Error(front.output());
-      return front.output().includes('worker listening');
-    }, { timeoutMs: 60_000, description: 'front serving on its socket after warm-up' });
-
-    const socket = lstatSync(socketPath);
-    expect(socket.isSocket()).toBe(true);
-    expect(socket.mode & 0o777).toBe(0o600);
-    if (sameSocket) {
-      expect(socket.dev).toBe(original.dev);
-      expect(socket.ino).toBe(original.ino);
-    }
-    const health = await createUnixSocketFetch(socketPath)(`http://127.0.0.1:${port}/v1/health`, {
-      headers: { Authorization: `Bearer ${TOKEN}` },
-      signal: AbortSignal.timeout(10_000),
-    });
-    expect(health.status).toBe(200);
-    expect(await health.json()).toMatchObject({ reachable: true, engine_background: 'ready' });
-  }, 120_000);
-
-  test('SIGTERM during visibility warm-up stops the front and removes its socket', async () => {
-    const { front, socketPath } = await holdVisibilityWarmUp();
-    expect(lstatSync(socketPath).isSocket()).toBe(true);
-    front.child.kill('SIGTERM');
-    expect(await front.child.exited).toBe(143);
-    expect(existsSync(socketPath)).toBe(false);
-    expect(front.output()).not.toContain('worker listening');
-  }, 120_000);
 });

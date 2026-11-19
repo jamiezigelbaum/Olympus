@@ -7,33 +7,22 @@ export const WORKER_SHUTDOWN_DEADLINE_MS = 15_000;
  * bridge/client, never a global runtime path or another process's epoch. */
 export function installWorkerShutdownSignals(options: {
   closeOwnerBridge: () => void;
-  stopStartingListener?: () => Promise<void> | undefined;
   exit: (code: number) => void;
   deadlineMs?: number;
 }) {
-  let shutdown: ((signal: NodeJS.Signals, force: boolean) => void) | undefined;
+  let shutdown: ((signal: NodeJS.Signals) => void) | undefined;
   let deadline: ReturnType<typeof setTimeout> | undefined;
   const stop = (signal: NodeJS.Signals, exitAfterDeadline = true) => {
     options.closeOwnerBridge();
     const code = signal === 'SIGINT' ? 130 : 143;
-    if (!shutdown) {
-      const stopped = options.stopStartingListener?.();
-      if (!stopped) return options.exit(code);
-      void stopped.then(() => options.exit(code), (error: unknown) => {
-        console.error('[olympus:worker] could not clean up the starting listener', error);
-        options.exit(code);
-      });
-      return;
-    }
+    if (!shutdown) return options.exit(code);
     if (exitAfterDeadline) {
       // Armed before the handler runs, so a handler that throws or blocks still
       // has a deadline behind it.
       deadline ??= setTimeout(() => options.exit(code), options.deadlineMs ?? WORKER_SHUTDOWN_DEADLINE_MS);
       deadline.unref?.();
     }
-    // A model reload requests the forced listener stop up front. Its drain
-    // can await that same stop after captures finish.
-    shutdown(signal, !exitAfterDeadline);
+    shutdown(signal);
     // The handler closes the listener (which removes the socket) and stops
     // new work, but a pass already running (a first import's page) keeps the
     // process up until it ends. Past the deadline the worker exits rather than
@@ -57,7 +46,7 @@ export function installWorkerShutdownSignals(options: {
   process.on('SIGINT', onInt);
   process.on('SIGTERM', onTerm);
   return {
-    setShutdown(handler: (signal: NodeJS.Signals, force: boolean) => void) { shutdown = handler; },
+    setShutdown(handler: (signal: NodeJS.Signals) => void) { shutdown = handler; },
     modelReload(options: { managed: boolean; drain: () => Promise<void>; exit: (code: number) => void; beforeExit?: () => void | Promise<void> }) {
       return createModelKeyReload({ managed: options.managed, shutdown: async () => {
         // A reload drains and exits with its own code: no signal deadline.

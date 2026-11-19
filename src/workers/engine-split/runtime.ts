@@ -10,15 +10,13 @@ import { engineHeartbeatBeating, engineHeartbeatLine, processAlive, readEngineHe
 import { engineStartingAnswer, engineStartingResponse } from '../../core/worker-front-proxy.ts';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
-import { lstatSync, mkdtempSync, rmSync, symlinkSync, type BigIntStats } from 'node:fs';
-import { chmod, lstat, unlink } from 'node:fs/promises';
-import { basename, dirname, join } from 'node:path';
+import { lstatSync } from 'node:fs';
 import { ENGINE_BACKGROUND_ORIGIN, ENGINE_BACKGROUND_SOCKET_ENV, ENGINE_MODEL_COMPLETE_PATH, prepareEngineBackgroundSocketDirectory, probeEngineBackground } from '../../core/engine-split.ts';
 import type { AnalystModelCompletion, AnalystModelRequest } from '../../core/analyst.ts';
 import { OperationError, type OperationErrorCode } from '../../core/operation-error.ts';
 import { sharedDataPath } from '../../core/olympus-layout.ts';
 import { removeFileDurablySync } from '../../core/atomic-file.ts';
-import { bindWorkerSocket, createUnixSocketFetch, prepareWorkerSocket, releaseSystemdWorkerSocket, validateWorkerListenDirectory, WORKER_SOCKET_SERVE_OPTIONS, workerSocketListenerStopped, workerSocketServe } from '../../core/worker-transport.ts';
+import { bindWorkerSocket, createUnixSocketFetch, prepareWorkerSocket, releaseSystemdWorkerSocket, WORKER_SOCKET_SERVE_OPTIONS, workerSocketListenerStopped, workerSocketServe } from '../../core/worker-transport.ts';
 import { EngineCommandClient, OwnerBusyRelay } from './client.ts';
 import { clickTraces, PRIVACY_ITEM_SET_PATH, type ClickTrace } from './click-trace.ts';
 import { startEngineControlPlane, type EngineControlPlane } from './control-plane.ts';
@@ -183,76 +181,6 @@ export async function waitForBackgroundBootDone(input: {
   while (!backgroundBootDone(await read(), input.alive)) await sleep(input.pollMs ?? 250);
 }
 
-async function frontSocketStat(path: string) {
-  try { return await lstat(path, { bigint: true }); }
-  catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-  }
-}
-
-export function bindFrontUnixListener(socketPath: string, bind: (unix: string) => Bun.Server<undefined>) {
-  // Bun unlinks its bind pathname on stop, even if that name was replaced.
-  // Bind through a short-lived alias so only our inode check can unlink the
-  // public name. The alias stays short even at the Unix path length limit.
-  const temporary = mkdtempSync('/tmp/olympus-front-');
-  let listener: Bun.Server<undefined> | undefined;
-  let bound: BigIntStats | undefined;
-  const owns = (stat: BigIntStats | undefined): stat is BigIntStats =>
-    !!bound && !!stat?.isSocket() && stat.dev === bound.dev && stat.ino === bound.ino;
-  const removeOwnedSocket = async () => {
-    if (!owns(await frontSocketStat(socketPath))) return;
-    try { await unlink(socketPath); }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-    }
-  };
-  try {
-    const directory = join(temporary, 'run');
-    symlinkSync(dirname(socketPath), directory);
-    const server = bindWorkerSocket(socketPath, () => {
-      listener = bind(join(directory, basename(socketPath)));
-      bound = lstatSync(socketPath, { bigint: true });
-      return listener;
-    });
-    return {
-      server,
-      async verifySocket() {
-        // An absent or replaced name goes through the normal late bind, which
-        // can recreate a missing directory and will refuse an occupied path.
-        let stat = await frontSocketStat(socketPath);
-        if (!owns(stat)) return false;
-        try { await validateWorkerListenDirectory(socketPath); }
-        catch (error) {
-          if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
-          throw error;
-        }
-        stat = await frontSocketStat(socketPath);
-        if (!owns(stat)) return false;
-        const uid = BigInt(process.getuid!());
-        if (stat.uid !== uid) throw new Error(`Front socket owner changed during startup: ${socketPath}`);
-        if ((stat.mode & 0o7777n) !== 0o600n) {
-          await chmod(socketPath, 0o600);
-          stat = await frontSocketStat(socketPath);
-          if (!owns(stat)) return false;
-          if (stat.uid !== uid || (stat.mode & 0o7777n) !== 0o600n) {
-            throw new Error(`Front socket must be owned by this user and have mode 0600: ${socketPath}`);
-          }
-        }
-        return true;
-      },
-      async stop(force?: boolean) {
-        await Promise.all([server.stop(force), removeOwnedSocket()]);
-      },
-    };
-  } catch (error) {
-    // The alias is still present, so Bun can clean up a partial bind.
-    void listener?.stop(true);
-    throw error;
-  } finally {
-    rmSync(temporary, { recursive: true, force: true });
-  }
-}
-
 /**
  * The front listens at once and answers "starting" with its boot progress.
  * Once ready it reloads the fetch handler on this same listener.
@@ -262,14 +190,15 @@ export function listenWhileStarting(input: {
   hostname: string;
   port: number;
   log?: (line: string) => void;
-}): { socketPath?: string; server: Bun.Server<undefined>; stop: (force?: boolean) => Promise<void>; verifySocket?: () => Promise<boolean> } | undefined {
+}): { socketPath: string | undefined; server: Bun.Server<undefined> } | undefined {
   const answer = (request: Request) => engineStartingResponse(request, input.env);
   try {
     if (releaseSystemdWorkerSocket()) (input.log ?? console.warn)('[olympus:worker] removed the socket left by the previous worker run');
     const socketPath = prepareWorkerSocket();
-    if (socketPath) return { socketPath, ...bindFrontUnixListener(socketPath, (unix) => Bun.serve(workerSocketServe({ unix, fetch: answer }))) };
-    const server = Bun.serve({ hostname: input.hostname, port: input.port, ...WORKER_SOCKET_SERVE_OPTIONS, fetch: answer });
-    return { server, stop: (force) => server.stop(force) };
+    const server = socketPath
+      ? bindWorkerSocket(socketPath, () => Bun.serve(workerSocketServe({ unix: socketPath, fetch: answer })))
+      : Bun.serve({ hostname: input.hostname, port: input.port, ...WORKER_SOCKET_SERVE_OPTIONS, fetch: answer });
+    return { socketPath, server };
   } catch (error) {
     // Not listening yet is what the front did before: its own server reports a bind failure.
     (input.log ?? console.warn)(`[engine-split] the front could not answer while starting: ${error instanceof Error ? error.message : String(error)}`);
