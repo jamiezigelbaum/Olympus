@@ -30,8 +30,9 @@ import { BackgroundSyncFailedError, createFrontScheduler } from '../src/workers/
 import { frontCaptureRuntime, frontCaptureStop, frontDataExport, frontJudgeBoost, frontJudgeState, frontModelReload, frontSetItemPrivate, frontUnreadableFiles } from '../src/workers/engine-split/front-state.ts';
 import { ENGINE_FORWARDED_ROUTES } from '../src/workers/engine-split/commands.ts';
 import { readFileSync } from 'node:fs';
-import { createFrontDashboardHistory, openReadOnlyDashboardHistory, openWritableDashboardHistory } from '../src/workers/engine-split/front-history.ts';
-import { SqliteSourceDashboardHistory } from '../src/workers/source-dashboard.ts';
+import { createFrontDashboardHistory, openWritableDashboardHistory } from '../src/workers/engine-split/front-history.ts';
+import { releaseOffThreadReads } from '../src/workers/connector-store/off-thread-reads.ts';
+import { readDashboardHistoryOnPool, SqliteSourceDashboardHistory } from '../src/workers/source-dashboard.ts';
 import { SqliteSourceIngestionLedgerStore } from '../src/workers/source-ingestion-ledger.ts';
 import { createTrustedSourceWatchOwnerContext, LocalSourceWatchStore } from '../src/core/source-watch.ts';
 import { LocalPeopleIndex } from '../src/core/people-index.ts';
@@ -61,7 +62,7 @@ import {
 import { runTierCommand } from '../src/workers/classification/tier-cli.ts';
 import { FIXTURE_PLACEMENT, fixtureConnector, tempDir } from './helpers/tier-fixtures.ts';
 import { ENGINE_STATUS_SNAPSHOT_SCHEMA, ENGINE_STATUS_STALE_MS, readEngineStatusSnapshot, startEngineStatusPublisher } from '../src/workers/engine-split/snapshot.ts';
-import { createTestClock, DEFAULT_TEST_CLOCK_START, flushMicrotasks } from './helpers/test-clock.ts';
+import { createTestClock, DEFAULT_TEST_CLOCK_START, flushMicrotasks, waitFor } from './helpers/test-clock.ts';
 
 const TOKEN = 'engine-split-test-token';
 const roots: string[] = [];
@@ -1158,7 +1159,7 @@ describe('the front writes nothing the background owns', () => {
     new TierLedger({ dbPath: ledgerPath, readOnly: true }).close();
   });
 
-  test('the shared files the background owns: writable opens throw in the front, read-only opens work', () => {
+  test('the shared files the background owns: writable opens throw in the front, read-only opens work', async () => {
     const root = tempRoot();
     const dashboard = join(root, 'source-dashboard.sqlite');
     const watches = join(root, 'source-watches.sqlite');
@@ -1171,7 +1172,11 @@ describe('the front writes nothing the background owns', () => {
     expect(() => new SqliteSourceIngestionLedgerStore(dashboard)).toThrow(FrontStoreWriteError);
     expect(() => new LocalSourceWatchStore(watches)).toThrow(FrontStoreWriteError);
     expect(() => new LocalFileExtractionJobStore(jobs)).toThrow(FrontStoreWriteError);
-    openReadOnlyDashboardHistory(dashboard).close();
+    try {
+      expect((await readDashboardHistoryOnPool(dashboard, [], new Date())).sampleCount()).toBe(0);
+    } finally {
+      releaseOffThreadReads(dashboard);
+    }
     new LocalSourceWatchStore(watches, { readOnly: true }).close();
     new LocalFileExtractionJobStore(jobs, { readonly: true }).close();
   });
@@ -1267,13 +1272,26 @@ describe('the front writes nothing the background owns', () => {
     history.record([sample]);
     history.record([sample]);
     expect(sent).toEqual([{ kind: 'dashboard_samples', samples: [sample] }]);
-    expect(history.sampleCount()).toBe(0);
+    writer.record([{
+      ...sample, sampled_at: new Date(clock.now() - 3_600_000).toISOString(),
+      indexed_items: 1, content_ready_items: 1,
+    }]);
     writer.record([sample]);
-    expect(history.sampleCount()).toBe(1);
-    await clock.advance(30_000);
-    history.record([sample]);
-    expect(sent).toHaveLength(2);
-    writer.close();
+    try {
+      const at = clock.date();
+      expect(history.readForDashboard([sample], at).value).toBeUndefined();
+      const read = await waitFor(() => history.readForDashboard([sample], at).value);
+      expect(read.sampleCount()).toBe(writer.sampleCount());
+      expect(read.progressFor(sample, at)).toEqual({ indexed_items_per_hour: 4 });
+      expect(read.progressFor(sample, at)).toEqual(writer.progressFor(sample, at));
+      expect(read.movementFor?.(sample, at)).toEqual(writer.movementFor(sample, at));
+      await clock.advance(30_000);
+      history.record([sample]);
+      expect(sent).toHaveLength(2);
+    } finally {
+      releaseOffThreadReads(path);
+      writer.close();
+    }
     // Text never travels as a sample.
     expect(() => parseEngineCommandEnvelope({ id: 'command-0010', command: { kind: 'dashboard_samples', samples: [{ ...sample, title: 'secret' }] } })).toThrow('count samples');
   });

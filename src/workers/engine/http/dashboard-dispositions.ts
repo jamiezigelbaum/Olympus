@@ -1,3 +1,4 @@
+import { createDashboardHeldRead } from '../../dashboard/held-read.ts';
 import type { SourceDispositionsSource } from '../../source-dispositions.ts';
 import type { SourceDispositionState, SourceDispositionEdit } from '../../../core/source-disposition-tree.ts';
 import type { SourceExclusionCriterionKind } from '../../../core/source-ingestion-exclusions.ts';
@@ -101,7 +102,7 @@ export function parseSourceDispositionsSave(
 export async function dashboardExclusionSources(
   sourceDashboard: NonNullable<EmailSourceWorkerOptions['sourceDashboard']>,
   cache: DashboardExclusionDebtCache,
-): Promise<SourceIngestionLedgerExclusionSource[]> {
+): Promise<Array<SourceIngestionLedgerExclusionSource & { counting?: boolean; ageMs?: number }>> {
   if (!sourceDashboard.ingestionDispositions) return [];
   // Stores open only when a source's debt is counted again, once per reuse window.
   const runtime = await sourceDashboard.ingestionDispositions({ lazyStores: true });
@@ -116,7 +117,9 @@ export async function dashboardExclusionSources(
       // picker's source ids are not the dashboard's card ids.
       sourceId: source.source_id,
       corpusIds: [...source.corpus_ids],
-      ...resolveDashboardExclusionDebt(cache, source, nowMs),
+      ...(source.dashboardDebt
+        ? readFrontExclusionDebt(cache, source, source.dashboardDebt)
+        : resolveDashboardExclusionDebt(cache, source, nowMs)),
     }));
   } finally {
     runtime.close?.();
@@ -156,7 +159,34 @@ interface DashboardExclusionDebtCacheEntry {
   computed_at_ms: number;
 }
 
-export type DashboardExclusionDebtCache = Map<string, DashboardExclusionDebtCacheEntry>;
+const newFrontDebtRead = () => createDashboardHeldRead<DashboardExclusionDebt>(DASHBOARD_EXCLUSION_DEBT_MAX_AGE_MS, () => {
+  console.warn('[engine-split] dashboard exclusion counts unavailable; will retry.');
+});
+
+export interface DashboardExclusionDebtCache {
+  local: Map<string, DashboardExclusionDebtCacheEntry>;
+  front: Map<string, { key: string; read: ReturnType<typeof newFrontDebtRead> }>;
+}
+
+function readFrontExclusionDebt(
+  cache: DashboardExclusionDebtCache,
+  source: SourceDispositionsSource,
+  debt: NonNullable<SourceDispositionsSource['dashboardDebt']>,
+): DashboardExclusionDebt & { counting?: boolean; ageMs?: number } {
+  if (!source.matcher.active) return {};
+  const key = JSON.stringify([dashboardExclusionDebtCacheKey(source), debt.paths]);
+  let entry = cache.front.get(source.source_id);
+  if (entry?.key !== key) {
+    entry = { key, read: newFrontDebtRead() };
+    cache.front.set(source.source_id, entry);
+  }
+  const held = entry.read(async () => {
+    const { excluded, metadataOnlyContent } = await debt.read();
+    return { present: excluded, metadataOnlyContentPresent: metadataOnlyContent };
+  });
+  if (!held.value) return { counting: true };
+  return { ...held.value, ...(held.ageMs !== undefined ? { ageMs: held.ageMs } : {}) };
+}
 
 /**
  * Keyed by the source AND by the gate it was counted under.
@@ -189,7 +219,7 @@ function resolveDashboardExclusionDebt(
   // counts are absent rather than zero, exactly as before.
   if (!source.excludedItemsPresent && !source.metadataOnlyContentPresent) return {};
   const key = dashboardExclusionDebtCacheKey(source);
-  const cached = cache.get(key);
+  const cached = cache.local.get(key);
   const ageMs = cached ? nowMs - cached.computed_at_ms : undefined;
   // A negative age means the clock moved, not that the count is fresh.
   if (cached && ageMs !== undefined && ageMs >= 0 && ageMs <= DASHBOARD_EXCLUSION_DEBT_MAX_AGE_MS) {
@@ -203,6 +233,6 @@ function resolveDashboardExclusionDebt(
     return {};
   }
   if (!debt) return {};
-  cache.set(key, { debt, computed_at_ms: nowMs });
+  cache.local.set(key, { debt, computed_at_ms: nowMs });
   return debt;
 }

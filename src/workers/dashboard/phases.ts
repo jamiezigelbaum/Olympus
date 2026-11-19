@@ -563,6 +563,7 @@ function withState(
   if (dashboardAwaitingFirstSync(source, now)) {
     return { ...phase, state: 'waiting', state_words: 'Waiting for the first sync' };
   }
+  if (source.history_counting) return { ...phase, state: 'waiting', state_words: 'Waiting' };
   return { ...phase, state: 'stalled', state_words: `Stalled · ${stillnessWords(source, phase.id)}` };
 }
 

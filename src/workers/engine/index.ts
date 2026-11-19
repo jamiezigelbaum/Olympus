@@ -495,7 +495,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
   let dashboardGrantMutationTail: Promise<void> = Promise.resolve();
   // Per worker, so it lives exactly as long as the stores it counted and no
   // test inherits another test's counts.
-  const dashboardExclusionDebt: DashboardExclusionDebtCache = new Map();
+  const dashboardExclusionDebt: DashboardExclusionDebtCache = { local: new Map(), front: new Map() };
   const dashboardMessaging = sourceDashboard?.withMessagingCapturePaused ? createDashboardMessagingService({
     ...(sourceDashboard.registryPath ? { registryPath: sourceDashboard.registryPath } : {}),
     secretStore: dashboardSecretStore(sourceDashboard),
@@ -1264,6 +1264,10 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               ...(sourceDashboard.modelSetup ? { modelSetup: sourceDashboard.modelSetup() } : {}),
               ...(sourceDashboard.corpusRegistry ? { sourceCorpusRegistry: sourceDashboard.corpusRegistry } : {}),
               ...(sourceDashboard.history ? { history: sourceDashboard.history } : {}),
+              exclusionDebt: {
+                countingSources: new Set(exclusionSources.filter((source) => source.counting).map((source) => source.sourceId)),
+                ageMs: Math.max(0, ...exclusionSources.map((source) => source.ageMs ?? 0)),
+              },
               connectedHandleRegistry: registry,
               ...(registryRead.unreadable ? { connectedHandleRegistryUnreadable: true } : {}),
               ...dashboardSourceAccountBindings(sourceDashboard.registryPath),

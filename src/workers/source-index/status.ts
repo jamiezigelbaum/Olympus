@@ -1,3 +1,5 @@
+import { createDashboardHeldRead } from '../dashboard/held-read.ts';
+import type { StoreTotals } from '../connector-store/store-totals.ts';
 import type { SovereigntyTrustDomainPolicy } from '../../core/sovereignty.ts';
 import { offThreadReadsSupported, readInBackground } from '../connector-store/off-thread-reads.ts';
 import { buildSourceIndexCorpusRegistry, type SourceIndexCorpusDefinition } from '../../core/source-index/corpus.ts';
@@ -93,6 +95,8 @@ export interface SourceIndexStatusResult {
    * the next one is read behind the request.
    */
   snapshot_age_ms?: number;
+  /** Age of the oldest kept front totals while a refresh is due. */
+  live_totals_age_ms?: number;
   /** The split's front before the background's first count: no numbers yet. */
   counting?: boolean;
   corpora: SourceIndexStatusCorpus[];
@@ -713,15 +717,43 @@ export function createSourceIndexStatusHandler(
     } catch { /* the in-memory snapshot still serves; the next refresh writes again */ }
   };
   const snapshotRefreshes = new Map<string, Promise<SourceIndexStatusResult>>();
-  // The totals are read at every status, on every role: a small read of what
-  // the store's writes left, so they are current however old the counts are.
+  // Overlay maintained totals on the last scoped count. On the front each
+  // store has one pending read, shared across dashboard and status callers.
+  const newTotalsRead = () => createDashboardHeldRead<StoreTotals | undefined>(5_000, () => {
+    console.warn('[engine-split] dashboard store totals unavailable; will retry.');
+  }, nowMs);
+  const frontTotals = new WeakMap<LocalConnectorStore, ReturnType<typeof newTotalsRead>>();
   const withLiveTotals = (result: SourceIndexStatusResult): SourceIndexStatusResult => {
     const totalsStores = new Map((options.connectorStores ?? []).map((store) => [store.corpusId, store]));
     if (totalsStores.size === 0) return result;
     let changed = false;
+    let oldest: number | undefined;
+    const noteAge = (ageMs: number | undefined) => {
+      if (ageMs !== undefined) oldest = Math.max(oldest ?? 0, ageMs);
+    };
     const corpora = result.corpora.map((corpus) => {
       if (corpus.configured !== true) return corpus;
-      const totals = totalsStores.get(corpus.corpus_id)?.totals?.();
+      const store = totalsStores.get(corpus.corpus_id);
+      if (!store) return corpus;
+      let totals: StoreTotals | undefined;
+      if (role === 'reader') {
+        let refresh = frontTotals.get(store);
+        if (!refresh) {
+          refresh = newTotalsRead();
+          frontTotals.set(store, refresh);
+        }
+        const held = refresh(() => store.totalsInBackground());
+        const snapshotAge = result.snapshot_age_ms;
+        // The scoped count can be newer than the front's overlay.
+        if (!held.value || (snapshotAge !== undefined && (held.at ?? 0) < nowMs() - snapshotAge)) {
+          noteAge(snapshotAge);
+          return corpus;
+        }
+        totals = held.value;
+        noteAge(held.ageMs);
+      } else {
+        totals = store.totals?.();
+      }
       if (!totals) return corpus;
       changed = true;
       const live: SourceIndexStoreTotals = {
@@ -730,7 +762,9 @@ export function createSourceIndexStatusHandler(
       };
       return { ...bringCountsForward(corpus, live), totals: live };
     });
-    return changed ? { ...result, corpora } : result;
+    return changed || oldest !== undefined
+      ? { ...result, corpora, ...(oldest !== undefined ? { live_totals_age_ms: oldest } : {}) }
+      : result;
   };
   // Keyed by each store's scope too: a status counted under folders the owner
   // has since taken out is never served (they leave the counts at once).

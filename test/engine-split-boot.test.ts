@@ -9,6 +9,8 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } 
 import { dirname, join } from 'node:path';
 import { connectThisComputerSource } from '../src/core/this-computer.ts';
 import { resolvedStorePath } from '../src/core/source-placement.ts';
+import type { DashboardViewModelV1 } from '../src/workers/chatgpt/dashboard-contract.ts';
+import type { SourceDashboardViewModel } from '../src/workers/source-dashboard.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/local-index.ts';
 import { FileSourceScopeAuthority } from '../src/workers/source-scope-runtime.ts';
 import { FIXTURE_PLACEMENT, fixtureConnector } from './helpers/tier-fixtures.ts';
@@ -153,6 +155,7 @@ describe('the engine split boots as two processes', () => {
     mkdirSync(dirname(storePath), { recursive: true });
     const seeded = new LocalConnectorStore({ dbPath: storePath, corpusId: 'secure_local.local.files', family: 'file', trustDomain: 'secure_local' });
     await seeded.syncFromConnector(fixtureConnector(() => [{ id: 'orchard', name: 'orchard-lab.txt', text: 'The orchard lab note.', legacyDomain: 'secure_local' }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    await seeded.reconcileTotals();
     seeded.close();
 
     const socketPath = workerFrontSocketPath({ env })!;
@@ -171,9 +174,9 @@ describe('the engine split boots as two processes', () => {
 
     const workerFetch = createUnixSocketFetch(socketPath);
     const origin = `http://127.0.0.1:${port}`;
-    const get = (path: string, headers: Record<string, string> = {}) => workerFetch(`${origin}${path}`, {
+    const get = (path: string, headers: Record<string, string> = {}, timeoutMs = 10_000) => workerFetch(`${origin}${path}`, {
       headers: { Authorization: `Bearer ${TOKEN}`, Connection: 'close', ...headers },
-      signal: AbortSignal.timeout(10_000),
+      signal: AbortSignal.timeout(timeoutMs),
     }).catch((error: unknown) => {
       throw new Error(`GET ${path} failed at front boot gates ${[...front.messages].join(', ')}`, { cause: error });
     });
@@ -188,7 +191,8 @@ describe('the engine split boots as two processes', () => {
     await expectStarting(get('/dashboard', dashboardHeaders));
 
     const background = spawnWorker(env, 'background');
-    await waitFor(() => background.output().includes('engine background ready'), { timeoutMs: 60_000, description: 'background boot' });
+    await waitFor(() => background.output().includes('engine background ready'), { timeoutMs: 60_000, description: 'background boot' })
+      .catch((cause: unknown) => { throw new Error(background.output(), { cause }); });
     await waitForGate('cleanup');
     await expectStarting(get('/dashboard', dashboardHeaders));
 
@@ -215,7 +219,7 @@ describe('the engine split boots as two processes', () => {
     try {
       front.child.send('cleanup');
       await Promise.race([waitForGate('visibility'), traffic]);
-      await expectStarting(get('/dashboard', dashboardHeaders));
+      await Promise.all(['home', 'sources'].map((tab) => expectStarting(get(`/dashboard?tab=${tab}`, dashboardHeaders))));
       expect(() => prepareWorkerSocket({ env: frontEnv })).toThrow('Worker socket path is occupied');
       inFlight = expectStarting(get('/dashboard', { ...dashboardHeaders, 'X-Test-Hold-Starting-Response': '1' }));
       void inFlight.catch(() => {});
@@ -244,5 +248,77 @@ describe('the engine split boots as two processes', () => {
     }, { timeoutMs: 60_000, description: 'the front counted its local-files store' });
     expect(body).toContain('secure_local.local.files');
     expect(front.output()).not.toContain('FrontStoreWriteError');
+
+    // Both tabs use the same dashboard tool. The response must be complete
+    // while the pool reads are still held.
+    const tab = async (name: 'home' | 'sources') => {
+      const started = performance.now();
+      const response = await get(`/dashboard?panel-read&tab=${name}`, {}, 1_000);
+      expect(response.status).toBe(200);
+      const tool = await response.json() as { structuredContent: DashboardViewModelV1 };
+      expect(performance.now() - started).toBeLessThan(1_000);
+      expect(tool.structuredContent.sources).toBeArray();
+      return tool.structuredContent;
+    };
+    const history = async () => {
+      const response = await get('/dashboard.json', {}, 1_000);
+      expect(response.status).toBe(200);
+      return (await response.json() as SourceDashboardViewModel).history;
+    };
+    const reads = () => [...front.messages].filter((message): message is { dashboardRead: string; key?: unknown } =>
+      typeof (message as { dashboardRead?: unknown })?.dashboardRead === 'string');
+    const seen = (read: string) => reads().filter(({ dashboardRead }) => dashboardRead === read);
+
+    const initial = await Promise.all([tab('home'), tab('sources')]);
+    for (const view of initial) {
+      expect(view.privacy).toBeDefined();
+      expect(view.privacy!.pendingCount).toBeUndefined();
+    }
+    expect(await history()).toEqual({ counting: true, eta_available: false });
+    for (const value of ['held items', 'history progress', 'totals state']) {
+      await waitFor(() => seen(value).length > 0, { description: `dashboard sent ${value} to the pool` });
+    }
+    expect(seen('held items')).toHaveLength(1);
+    expect(seen('history progress')).toHaveLength(1);
+    expect(seen('totals state')).toHaveLength(1);
+
+    front.child.send('release-dashboard-reads');
+    const counted = await waitFor(async () => {
+      const view = await tab('home');
+      const samples = await history();
+      return view.privacy?.pendingCount !== undefined && (samples.sample_count ?? 0) > 0
+        ? { view, samples } : undefined;
+    }, { description: 'dashboard publishing completed pool reads' });
+    expect(counted.view.privacy!.pendingCount).toBe(0);
+    expect(seen('history count')).toHaveLength(1);
+    const sampledCorpora = seen('history progress').map(({ key }) => key);
+    expect(sampledCorpora.length).toBeGreaterThan(0);
+    expect(new Set(sampledCorpora).size).toBe(sampledCorpora.length);
+    expect(seen('history movement').map(({ key }) => key)).toEqual(sampledCorpora);
+    await waitFor(() => seen('totals rows').length > 0);
+    expect(seen('totals rows')).toHaveLength(1);
+
+    front.child.send('hold-dashboard-refresh');
+    await waitForGate('dashboard-refresh-held');
+    const allSites = [];
+    for (const name of ['home', 'sources'] as const) {
+      front.messages.delete('trace-started');
+      front.child.send('trace-start');
+      await waitForGate('trace-started');
+      const held = await tab(name);
+      expect(held.privacy?.pendingCount).toBe(counted.view.privacy?.pendingCount);
+      expect(held.engine?.stateAgeSeconds).toBeGreaterThanOrEqual(60);
+      const dashboardTrace = `trace-stop:${name}`;
+      front.child.send(dashboardTrace);
+      const trace = await waitFor(() => [...front.messages].find((message): message is {
+        dashboardTrace: string; sites: Array<{ site: string; statements: number }>;
+      } => (message as { dashboardTrace?: string })?.dashboardTrace === dashboardTrace));
+      allSites.push(...trace.sites.filter(({ site }) =>
+        !site.includes('file-lease.ts') && /progressFor|movementFor|sampleCount|openSourceDashboard|heldItemCount|readStoreTotals|dashboard/i.test(site)));
+    }
+    expect((await history()).sample_count).toBe(counted.samples.sample_count);
+    expect(seen('held items')).toHaveLength(2);
+    expect(allSites).toEqual([]);
+    front.child.send('release-dashboard-reads');
   }, 180_000);
 });

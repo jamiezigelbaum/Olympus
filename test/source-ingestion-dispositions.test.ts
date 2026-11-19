@@ -607,6 +607,7 @@ describe('stored-item dispositions', () => {
         const debt = gated.exclusionDebtPresent();
         expect(debt.excluded).toEqual({ items: 2, unevaluable: 0 });
         expect(debt.metadataOnlyContent).toEqual({ items: 1, unevaluable: 0 });
+        expect(await LocalConnectorStore.exclusionDebtInBackground(dbPath, gated.exclusions)).toEqual(debt);
         // The single-fact readers are the same answer, so no caller had to
         // change its question to get the cheaper walk.
         expect(gated.excludedItemsPresent()).toEqual(debt.excluded);
@@ -618,6 +619,7 @@ describe('stored-item dispositions', () => {
         const settled = gated.exclusionDebtPresent();
         expect(settled.metadataOnlyContent).toEqual({ items: 0, unevaluable: 0 });
         expect(settled.excluded).toEqual({ items: 2, unevaluable: 0 });
+        expect(await LocalConnectorStore.exclusionDebtInBackground(dbPath, gated.exclusions)).toEqual(settled);
       } finally {
         gated.close();
       }

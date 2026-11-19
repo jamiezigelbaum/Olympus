@@ -1,3 +1,4 @@
+import { BACKGROUND_READS, withOffThreadSnapshot, type StoreRead } from './connector-store/off-thread-reads.ts';
 import { sharedDataPath } from '../core/olympus-layout.ts';
 import { isRetiredGoogleHandle } from '../core/google-handle-compatibility.ts';
 import { googleDesktopClient } from '../core/publisher-oauth-client.ts';
@@ -349,7 +350,8 @@ export interface SourceDashboardViewModel {
   folder_picker: DashboardFolderPicker;
   sources: DashboardSourceCard[];
   history: {
-    sample_count: number;
+    sample_count?: number;
+    counting?: true;
     eta_available: boolean;
   };
   // `first_run` says no source is connected yet. Derived here rather than
@@ -557,8 +559,9 @@ export interface DashboardUnassignedCorpus {
 export interface DashboardExcludedByConfiguration {
   rules: number;
   prefixes: number;
-  items_present: number;
-  items_unevaluable: number;
+  counting?: true;
+  items_present?: number;
+  items_unevaluable?: number;
   entries: DashboardExcludedRule[];
   /**
    * Of `rules`/`prefixes`, the ones the owner marked metadata-only: indexed,
@@ -615,9 +618,10 @@ export interface DashboardExcludedSource {
   rules: number;
   prefixes: number;
   metadata_only_prefixes: number;
-  items_present: number;
-  items_unevaluable: number;
-  items_metadata_only_content_present: number;
+  counting?: true;
+  items_present?: number;
+  items_unevaluable?: number;
+  items_metadata_only_content_present?: number;
   unenforceable_rule_ids?: readonly string[];
   entries: readonly DashboardExcludedRule[];
 }
@@ -1162,6 +1166,7 @@ export interface DashboardSourceCard {
    * rise for that counter inside its retention window, or no history exists.
    */
   movement?: DashboardPhaseMovement;
+  history_counting?: true;
   last_run?: DashboardSourceRun;
   /** Absolute last sync, from the ingestion ledger. `freshness` carries only relative prose. */
   last_sync_at?: string;
@@ -1410,6 +1415,8 @@ export function dashboardGuidedSessionAgentPrompt(source: 'telegram' | 'whatsapp
 }
 
 export interface SourceDashboardHistoryReader {
+  /** A pooled snapshot may have started before a corpus joined the view. */
+  hasCorpus?(corpusId: string): boolean;
   progressFor(sample: SourceDashboardHistorySample, now: Date): DashboardSourceCard['progress'];
   /** Per-phase last-rise times for this sample's corpus; optional so older fakes keep compiling. */
   movementFor?(sample: SourceDashboardHistorySample, now: Date): DashboardPhaseMovement | undefined;
@@ -1418,8 +1425,10 @@ export interface SourceDashboardHistoryReader {
 
 export interface SourceDashboardHistory extends SourceDashboardHistoryReader {
   record(samples: SourceDashboardHistorySample[]): void;
-  /** Let a reader omit all history for this render if any of its reads fail. */
-  readForDashboard?<T>(read: (reader: SourceDashboardHistoryReader) => T): T | undefined;
+}
+
+export interface FrontSourceDashboardHistory extends Pick<SourceDashboardHistory, 'record'> {
+  readForDashboard(samples: SourceDashboardHistorySample[], now: Date): { value?: SourceDashboardHistoryReader; ageMs?: number };
 }
 
 export interface SourceDashboardHistorySample {
@@ -1460,7 +1469,8 @@ export interface SourceDashboardBuildOptions {
   ingestionLedger?: SourceIngestionLedgerSnapshot;
   schedulerStatus?: SourceSchedulerStatus;
   sovereigntyEngine: SovereigntyEngine;
-  history?: SourceDashboardHistory;
+  history?: SourceDashboardHistory | FrontSourceDashboardHistory;
+  exclusionDebt?: { countingSources: ReadonlySet<string | undefined>; ageMs: number };
   // Authority on which dashboard card owns which corpus. Defaults to the
   // shipped registry so every caller gets the same answer; pass the operator's
   // configured registry when one exists.
@@ -2244,6 +2254,124 @@ function phaseAtParity(sample: SourceDashboardHistorySample, counter: string, va
   return false;
 }
 
+type ProgressRow = { sampled_at?: string; indexed_items?: number } | null;
+type MovementRow = { counter: string; rose_at: string | null; first_seen_at: string | null; settled_value: number | null };
+
+function dashboardProgressRead(sample: SourceDashboardHistorySample, now: Date): StoreRead {
+  const currentAt = now.getTime();
+  const sampledAt = Date.parse(sample.sampled_at);
+  const latestComparable = Math.min(currentAt, Number.isFinite(sampledAt) ? sampledAt : currentAt);
+  // Compare against a sample at least MIN_PROGRESS_WINDOW_MS old. The browser
+  // polls every 5s and each poll records a sample, so the immediately
+  // preceding row is normally 5 seconds old; a single item over 5 seconds
+  // extrapolates to 720 items/hour and the estimate swings by orders of
+  // magnitude between polls on an unchanged backlog.
+  const windowCutoff = new Date(latestComparable - MIN_PROGRESS_WINDOW_MS).toISOString();
+  return { sql: `
+      SELECT sampled_at, indexed_items
+      FROM source_dashboard_samples
+      WHERE corpus_id = ? AND sampled_at <= ?
+      ORDER BY sampled_at DESC
+      LIMIT 1
+    `, params: [sample.corpus_id, windowCutoff], mode: 'get', site: 'dashboardHistoryProgress' };
+}
+
+function dashboardProgress(sample: SourceDashboardHistorySample, now: Date, row: ProgressRow): DashboardSourceCard['progress'] {
+  const currentAt = now.getTime();
+  if (!row?.sampled_at || typeof row.indexed_items !== 'number') return undefined;
+  const previousAt = Date.parse(row.sampled_at);
+  if (!Number.isFinite(previousAt) || currentAt <= previousAt) return undefined;
+  const deltaItems = sample.indexed_items - row.indexed_items;
+  if (deltaItems <= 0) return undefined;
+  const hours = (currentAt - previousAt) / 3_600_000;
+  if (hours <= 0) return undefined;
+  const rate = round1(deltaItems / hours);
+  // round1 truncates to one decimal, so any rate below 0.05 items/hour lands
+  // on exactly 0 and the ETA divides by it. Report no progress rather than a
+  // zero rate and an infinite estimate.
+  if (rate <= 0) return undefined;
+  const remaining = sample.queue_waiting + sample.queue_active;
+  const etaMinutes = Math.max(1, Math.ceil((remaining / rate) * 60));
+  return {
+    indexed_items_per_hour: rate,
+    ...(remaining > 0 && Number.isFinite(etaMinutes) ? { eta_minutes: etaMinutes } : {}),
+  };
+}
+
+// The movement ledger keeps rises and settled baselines independently of the
+// sample series, so sample trimming cannot turn movement into a stall.
+function dashboardMovementRead(corpusId: string): StoreRead & { params: [string] } {
+  return { sql: `
+      SELECT counter, rose_at, first_seen_at, settled_value FROM source_dashboard_movement WHERE corpus_id = ?
+    `, params: [corpusId], mode: 'all', site: 'dashboardHistoryMovement' };
+}
+
+function dashboardMovement(rows: MovementRow[]): DashboardPhaseMovement | undefined {
+  const at = (counter: string): string | undefined => {
+    const value = rows.find((row) => row.counter === counter)?.rose_at;
+    return typeof value === 'string' && Number.isFinite(Date.parse(value)) ? value : undefined;
+  };
+  const settled = (counter: string): number | undefined => {
+    const value = rows.find((row) => row.counter === counter)?.settled_value;
+    return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+  };
+  const metadataSyncAt = at('indexed_items');
+  const extractionAt = at('content_ready_items');
+  const embeddingAt = at('embedded_files');
+  const extractionSettled = settled('content_ready_items');
+  const embeddingSettled = settled('embedded_files');
+  // The oldest first-observation across this corpus's counters: the earliest
+  // moment the dashboard can prove it was looking at this source at all.
+  const firstSeenTimes = rows
+    .map((row) => row.first_seen_at)
+    .filter((value): value is string => typeof value === 'string' && Number.isFinite(Date.parse(value)))
+    .map((value) => Date.parse(value));
+  const firstSeenAt = firstSeenTimes.length > 0
+    ? new Date(Math.min(...firstSeenTimes)).toISOString()
+    : undefined;
+  const movement: DashboardPhaseMovement = {
+    ...(firstSeenAt === undefined ? {} : { first_seen_at: firstSeenAt }),
+    ...(metadataSyncAt === undefined ? {} : { metadata_sync_at: metadataSyncAt }),
+    ...(extractionAt === undefined ? {} : { extraction_at: extractionAt }),
+    ...(embeddingAt === undefined ? {} : { embedding_at: embeddingAt }),
+    ...(extractionSettled === undefined ? {} : { extraction_settled_value: extractionSettled }),
+    ...(embeddingSettled === undefined ? {} : { embedding_settled_value: embeddingSettled }),
+  };
+  // A baseline with no rise beside it is still evidence — a corpus that
+  // settled and has not moved since is exactly that shape — so the emptiness
+  // test covers every field rather than the three times.
+  return Object.keys(movement).length > 0 ? movement : undefined;
+}
+
+const dashboardSampleCountRead: StoreRead = {
+  sql: 'SELECT COUNT(*) AS count FROM source_dashboard_samples', params: [], mode: 'get', site: 'dashboardHistorySampleCount',
+};
+
+function dashboardSampleCount(row: { count?: number } | null): number {
+  return typeof row?.count === 'number' ? row.count : 0;
+}
+
+/** Read the same history as the writer, in one read-only worker snapshot. */
+export function readDashboardHistoryOnPool(path: string, samples: SourceDashboardHistorySample[], now: Date): Promise<SourceDashboardHistoryReader> {
+  return withOffThreadSnapshot(path, async (read) => {
+    const progress = new Map<string, DashboardSourceCard['progress']>();
+    const movement = new Map<string, DashboardPhaseMovement | undefined>();
+    for (const sample of samples) {
+      if (progress.has(sample.corpus_id)) continue;
+      const row = await read(dashboardProgressRead(sample, now)) as ProgressRow;
+      progress.set(sample.corpus_id, dashboardProgress(sample, now, row));
+      movement.set(sample.corpus_id, dashboardMovement(await read(dashboardMovementRead(sample.corpus_id)) as MovementRow[]));
+    }
+    const count = dashboardSampleCount(await read(dashboardSampleCountRead) as { count?: number } | null);
+    return {
+      hasCorpus: (corpusId) => progress.has(corpusId),
+      progressFor: (sample) => progress.get(sample.corpus_id),
+      movementFor: (sample) => movement.get(sample.corpus_id),
+      sampleCount: () => count,
+    };
+  }, { ...BACKGROUND_READS, perRead: false });
+}
+
 export class SqliteSourceDashboardHistory implements SourceDashboardHistory {
   private readonly db: Database;
 
@@ -2386,105 +2514,13 @@ export class SqliteSourceDashboardHistory implements SourceDashboardHistory {
   }
 
   progressFor(sample: SourceDashboardHistorySample, now: Date): DashboardSourceCard['progress'] {
-    const currentAt = now.getTime();
-    const sampledAt = Date.parse(sample.sampled_at);
-    const latestComparable = Math.min(currentAt, Number.isFinite(sampledAt) ? sampledAt : currentAt);
-    // Compare against a sample at least MIN_PROGRESS_WINDOW_MS old. The browser
-    // polls every 5s and each poll records a sample, so the immediately
-    // preceding row is normally 5 seconds old; a single item over 5 seconds
-    // extrapolates to 720 items/hour and the estimate swings by orders of
-    // magnitude between polls on an unchanged backlog.
-    const windowCutoff = new Date(latestComparable - MIN_PROGRESS_WINDOW_MS).toISOString();
-    const row = this.db.query(`
-      SELECT sampled_at, indexed_items
-      FROM source_dashboard_samples
-      WHERE corpus_id = ? AND sampled_at <= ?
-      ORDER BY sampled_at DESC
-      LIMIT 1
-    `).get(sample.corpus_id, windowCutoff) as { sampled_at?: string; indexed_items?: number } | null;
-    if (!row?.sampled_at || typeof row.indexed_items !== 'number') return undefined;
-    const previousAt = Date.parse(row.sampled_at);
-    if (!Number.isFinite(previousAt) || currentAt <= previousAt) return undefined;
-    const deltaItems = sample.indexed_items - row.indexed_items;
-    if (deltaItems <= 0) return undefined;
-    const hours = (currentAt - previousAt) / 3_600_000;
-    if (hours <= 0) return undefined;
-    const rate = round1(deltaItems / hours);
-    // round1 truncates to one decimal, so any rate below 0.05 items/hour lands
-    // on exactly 0 and the ETA divides by it. Report no progress rather than a
-    // zero rate and an infinite estimate.
-    if (rate <= 0) return undefined;
-    const remaining = sample.queue_waiting + sample.queue_active;
-    const etaMinutes = Math.max(1, Math.ceil((remaining / rate) * 60));
-    return {
-      indexed_items_per_hour: rate,
-      ...(remaining > 0 && Number.isFinite(etaMinutes) ? { eta_minutes: etaMinutes } : {}),
-    };
+    const read = dashboardProgressRead(sample, now);
+    return dashboardProgress(sample, now, this.db.query(read.sql).get(...read.params as string[]) as ProgressRow);
   }
 
-  /**
-   * When each phase's counter last rose: the newest retained sample in which
-   * the counter was LOWER than it is now. The rise happened after that moment,
-   * so "moved 40s ago" is a lower bound on recency and never overstates it. A
-   * counter never seen lower inside the retention window yields nothing, which
-   * the page reads as "no movement in the last day", not as "moved at start".
-   */
-  /**
-   * When each phase's counter last ROSE, from a tiny per-counter ledger this
-   * class keeps beside the samples.
-   *
-   * Not derived from the sample series: that series is capped per corpus and
-   * trimmed by request volume, so four open pages polling could erase a rise
-   * from fifty minutes ago and call a moving lane stalled; and a NULL sample
-   * (a store that had not measured yet) sat between two values and got
-   * reported as the movement time. The ledger records, per counter, the last
-   * value seen and the moment a strictly higher value was first observed; a
-   * NULL never touches it, and a counter that drops (re-index) keeps its last
-   * rise rather than inventing one.
-   */
   movementFor(sample: SourceDashboardHistorySample, _now: Date): DashboardPhaseMovement | undefined {
-    const rows = this.db.query(`
-      SELECT counter, rose_at, first_seen_at, settled_value FROM source_dashboard_movement WHERE corpus_id = ?
-    `).all(sample.corpus_id) as Array<{
-      counter: string;
-      rose_at: string | null;
-      first_seen_at: string | null;
-      settled_value: number | null;
-    }>;
-    const at = (counter: string): string | undefined => {
-      const value = rows.find((row) => row.counter === counter)?.rose_at;
-      return typeof value === 'string' && Number.isFinite(Date.parse(value)) ? value : undefined;
-    };
-    const settled = (counter: string): number | undefined => {
-      const value = rows.find((row) => row.counter === counter)?.settled_value;
-      return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
-    };
-    const metadataSyncAt = at('indexed_items');
-    const extractionAt = at('content_ready_items');
-    const embeddingAt = at('embedded_files');
-    const extractionSettled = settled('content_ready_items');
-    const embeddingSettled = settled('embedded_files');
-    // The oldest first-observation across this corpus's counters: the earliest
-    // moment the dashboard can prove it was looking at this source at all.
-    const firstSeenTimes = rows
-      .map((row) => row.first_seen_at)
-      .filter((value): value is string => typeof value === 'string' && Number.isFinite(Date.parse(value)))
-      .map((value) => Date.parse(value));
-    const firstSeenAt = firstSeenTimes.length > 0
-      ? new Date(Math.min(...firstSeenTimes)).toISOString()
-      : undefined;
-    const movement: DashboardPhaseMovement = {
-      ...(firstSeenAt === undefined ? {} : { first_seen_at: firstSeenAt }),
-      ...(metadataSyncAt === undefined ? {} : { metadata_sync_at: metadataSyncAt }),
-      ...(extractionAt === undefined ? {} : { extraction_at: extractionAt }),
-      ...(embeddingAt === undefined ? {} : { embedding_at: embeddingAt }),
-      ...(extractionSettled === undefined ? {} : { extraction_settled_value: extractionSettled }),
-      ...(embeddingSettled === undefined ? {} : { embedding_settled_value: embeddingSettled }),
-    };
-    // A baseline with no rise beside it is still evidence — a corpus that
-    // settled and has not moved since is exactly that shape — so the emptiness
-    // test covers every field rather than the three times.
-    return Object.keys(movement).length > 0 ? movement : undefined;
+    const read = dashboardMovementRead(sample.corpus_id);
+    return dashboardMovement(this.db.query(read.sql).all(...read.params) as MovementRow[]);
   }
 
   /** Advance the per-counter rise and baseline ledger for one sample. Runs inside record()'s transaction. */
@@ -2548,8 +2584,7 @@ export class SqliteSourceDashboardHistory implements SourceDashboardHistory {
   }
 
   sampleCount(): number {
-    const row = this.db.query('SELECT COUNT(*) AS count FROM source_dashboard_samples').get() as { count?: number } | null;
-    return typeof row?.count === 'number' ? row.count : 0;
+    return dashboardSampleCount(this.db.query(dashboardSampleCountRead.sql).get() as { count?: number } | null);
   }
 
   close(): void {
@@ -2708,7 +2743,8 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
   }));
   options.history?.record(samples);
   const readHistory = (reader: SourceDashboardHistoryReader) => ({
-    cards: cards.map((card, index) => {
+    cards: cards.map((card, index): DashboardSourceCard => {
+      if (reader.hasCorpus?.(card.corpus_id) === false) return { ...card, history_counting: true };
       const progress = reader.progressFor(samples[index]!, now);
       const movement = reader.movementFor?.(samples[index]!, now);
       return {
@@ -2719,14 +2755,28 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
     }),
     sampleCount: reader.sampleCount(),
   });
-  const history = options.history?.readForDashboard
-    ? options.history.readForDashboard(readHistory)
-    : options.history && readHistory(options.history);
-  const cardsWithProgress = history?.cards ?? cards;
+  const frontHistory = options.history && 'readForDashboard' in options.history
+    ? options.history.readForDashboard(samples, now)
+    : undefined;
+  const historyReader = options.history && 'sampleCount' in options.history ? options.history : frontHistory?.value;
+  const history = historyReader && readHistory(historyReader);
+  const ageSeconds = Math.max(
+    options.engineState?.state_age_seconds ?? 0,
+    Math.ceil((options.exclusionDebt?.ageMs ?? 0) / 1000),
+    frontHistory?.ageMs === undefined ? 0 : Math.max(1, Math.round(frontHistory.ageMs / 1000)),
+    options.sourceIndexStatus.live_totals_age_ms === undefined ? 0 : Math.max(1, Math.round(options.sourceIndexStatus.live_totals_age_ms / 1000)),
+  );
+  const engineState = options.engineState || ageSeconds > 0
+    ? { ...options.engineState, ...(ageSeconds > 0 ? { state_age_seconds: ageSeconds } : {}) }
+    : undefined;
+  const cardsWithProgress = history?.cards ?? (frontHistory
+    ? cards.map((card): DashboardSourceCard => ({ ...card, history_counting: true }))
+    : cards);
   const summary = summarize(cardsWithProgress, unassignedCorpora);
   const trustCards = trustDomainCards(cardsWithProgress, unassignedCorpora, options.sovereigntyEngine);
   const excludedByConfiguration = excludedByConfigurationFrom(
     options.ingestionLedger?.excluded_by_configuration,
+    options.exclusionDebt?.countingSources,
   );
   const folderPicker: DashboardFolderPicker = {
     available: options.ingestionDispositionsAvailable === true,
@@ -2747,7 +2797,7 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
     kind: 'source_dashboard',
     ...(options.modelSetup ? { model_setup: options.modelSetup } : {}),
     generated_at: now.toISOString(),
-    ...(options.engineState ? { engine_state: { ...options.engineState } } : {}),
+    ...(engineState ? { engine_state: engineState } : {}),
     ...(degradedCredentials.length
       ? { degraded_credentials: degradedCredentials }
       : {}),
@@ -2768,7 +2818,7 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
     folder_picker: folderPicker,
     sources: cardsWithProgress,
     history: {
-      sample_count: history?.sampleCount ?? 0,
+      ...(frontHistory && !history ? { counting: true } : { sample_count: history?.sampleCount ?? 0 }),
       eta_available: cardsWithProgress.some((card) => card.progress?.eta_minutes !== undefined),
     },
     first_run: summary.connected_sources === 0,
@@ -5477,21 +5527,24 @@ function unassignedCorporaFrom(
  */
 function excludedByConfigurationFrom(
   excluded: SourceIngestionExcludedByConfiguration | undefined,
+  countingSources?: ReadonlySet<string | undefined>,
 ): DashboardExcludedByConfiguration {
   return {
     rules: excluded?.rules ?? 0,
     prefixes: excluded?.prefixes ?? 0,
-    items_present: excluded?.items_present ?? 0,
-    items_unevaluable: excluded?.items_unevaluable ?? 0,
+    ...(countingSources?.size ? { counting: true } : {
+      items_present: excluded?.items_present ?? 0,
+      items_unevaluable: excluded?.items_unevaluable ?? 0,
+      items_metadata_only_content_present: excluded?.items_metadata_only_content_present ?? 0,
+    }),
     entries: excludedRulesFrom(excluded?.entries),
     metadata_only_rules: excluded?.metadata_only_rules ?? 0,
     metadata_only_prefixes: excluded?.metadata_only_prefixes ?? 0,
-    items_metadata_only_content_present: excluded?.items_metadata_only_content_present ?? 0,
     ...(excluded?.unenforceable_rule_ids?.length
       ? { unenforceable_rule_ids: [...excluded.unenforceable_rule_ids] }
       : {}),
     ...(excluded?.by_source
-      ? { by_source: excluded.by_source.map(excludedSourceFrom) }
+      ? { by_source: excluded.by_source.map((source) => excludedSourceFrom(source, countingSources?.has(source.source_id))) }
       : {}),
   };
 }
@@ -5527,6 +5580,7 @@ function excludedRulesFrom(
 
 function excludedSourceFrom(
   source: SourceIngestionExcludedBySource,
+  counting?: boolean,
 ): DashboardExcludedSource {
   return {
     corpus_ids: [...source.corpus_ids],
@@ -5534,9 +5588,11 @@ function excludedSourceFrom(
     rules: source.rules,
     prefixes: source.prefixes,
     metadata_only_prefixes: source.metadata_only_prefixes,
-    items_present: source.items_present,
-    items_unevaluable: source.items_unevaluable,
-    items_metadata_only_content_present: source.items_metadata_only_content_present,
+    ...(counting ? { counting: true } : {
+      items_present: source.items_present,
+      items_unevaluable: source.items_unevaluable,
+      items_metadata_only_content_present: source.items_metadata_only_content_present,
+    }),
     ...(source.unenforceable_rule_ids?.length
       ? { unenforceable_rule_ids: [...source.unenforceable_rule_ids] }
       : {}),

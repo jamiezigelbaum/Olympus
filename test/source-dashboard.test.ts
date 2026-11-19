@@ -68,7 +68,8 @@ import type {
   XBookmarksConnectorStoreSyncHandler,
   XBookmarksLiveSyncResult,
 } from '../src/workers/x-bookmarks/index.ts';
-import { createTestClock } from './helpers/test-clock.ts';
+import { createTestClock, waitFor } from './helpers/test-clock.ts';
+import { releaseOffThreadReads } from '../src/workers/connector-store/off-thread-reads.ts';
 
 describe('multi-source source dashboard', () => {
   test('fresh install finishes with two content copies elsewhere and two unread fail-safe items, with a problem route', () => {
@@ -1309,11 +1310,9 @@ describe('multi-source source dashboard', () => {
     const root = mkdtempSync(join(tmpdir(), 'olympus-dashboard-locked-'));
     const path = join(root, 'source-dashboard.sqlite');
     const clock = createTestClock(Date.now());
-    const logs: string[] = [];
     const history = createFrontDashboardHistory({
       path,
       now: clock.now,
-      log: (line) => logs.push(line),
       client: { post: async () => ({ id: 'samples', state: 'received', instance_id: 'background' }) },
     });
     const writer = new SqliteSourceDashboardHistory(path);
@@ -1353,33 +1352,35 @@ describe('multi-source source dashboard', () => {
           lock.exec('PRAGMA journal_mode = DELETE;');
           // Warm the front reader before taking the rollback journal's
           // exclusive lock, as a writer does at commit or cache spill.
-          expect((await refresh()).history).toEqual({ sample_count: 1, eta_available: true });
+          await waitFor(async () => (await refresh()).history.sample_count === 1);
+          await clock.advance(5_000);
         } else {
-          // WAL with normal locking permits concurrent reads. Exclusive
-          // locking mode makes the read fail even after the WAL fix.
           lock.exec('PRAGMA locking_mode = EXCLUSIVE;');
         }
         lock.exec('BEGIN EXCLUSIVE; UPDATE source_dashboard_samples SET indexed_items = 11;');
         for (let poll = 0; poll < 3; poll++) {
           const view = await refresh();
-          expect(view.history).toEqual({ sample_count: 0, eta_available: false });
+          if (mode === 'delete') {
+            expect(view.history).toEqual({ sample_count: 1, eta_available: true });
+            expect(view.engine_state?.state_age_seconds).toBeGreaterThan(0);
+          } else {
+            expect(view.history).toEqual({ counting: true, eta_available: false });
+            expect(view.sources.every(({ progress, movement }) => !progress && !movement)).toBe(true);
+          }
           expect(view.sources.find(({ source_id }) => source_id === 'gmail.email')?.coverage.indexed_items).toBe(40);
-          expect(view.sources.every(({ progress, movement }) => !progress && !movement)).toBe(true);
         }
-        expect(logs).toHaveLength(1);
-        expect(logs[0]).toContain('sqlite_code=SQLITE_BUSY');
-        await clock.advance(30_000);
-        expect((await refresh()).history).toEqual({ sample_count: 0, eta_available: false });
-        expect(logs).toHaveLength(2);
         lock.exec('ROLLBACK;');
       } finally {
         lock.close();
       }
-      const recovered = await refresh();
+      const recovered = await waitFor(async () => {
+        const view = await refresh();
+        return view.history.sample_count === 1 && !view.engine_state ? view : undefined;
+      });
       expect(recovered.history).toEqual({ sample_count: 1, eta_available: true });
       expect(recovered.sources.find(({ source_id }) => source_id === 'gmail.email')?.progress?.indexed_items_per_hour).toBeGreaterThan(0);
-      expect(logs).toHaveLength(2);
     } finally {
+      releaseOffThreadReads(path);
       worker.close();
       rmSync(root, { recursive: true, force: true });
     }

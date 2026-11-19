@@ -20,6 +20,7 @@
 // keys, content-free reason codes and version ids. Never a title, path,
 // sender, text or excerpt. The file is created owner-only (0600).
 
+import { readInBackground, type StoreRead } from '../connector-store/off-thread-reads.ts';
 import { applySqliteMmap } from '../connector-store/sqlite-mmap.ts';
 import { Database } from 'bun:sqlite';
 import { randomUUID } from 'node:crypto';
@@ -842,6 +843,18 @@ export class TierLedgerSchemaError extends Error {
       : `This install's privacy ledger is at schema ${schema}; this build requires ${known}. The writer must migrate it before read-only access.`);
     this.name = 'TierLedgerSchemaError';
   }
+}
+
+function heldItemCountRead(corpusIds: readonly string[]): StoreRead & { params: [string] } {
+  return { sql: `
+      SELECT COUNT(*) AS n FROM tier_items t
+      WHERE t.state IN ('pending', 'moving')
+        AND (t.metadata_pending = 1 OR (t.content_pending = 1 AND t.content_read = 1))
+        AND EXISTS (SELECT 1 FROM tier_copies c
+          WHERE c.provider = t.provider AND c.account_scope = t.account_scope
+            AND c.conversation_key = t.conversation_key AND c.provider_item_id = t.provider_item_id
+            AND c.corpus_id IN (SELECT value FROM json_each(?)))
+    `, params: [JSON.stringify(corpusIds)], mode: 'get', site: 'dashboardPendingClassification' };
 }
 
 export class TierLedger {
@@ -4524,15 +4537,13 @@ export class TierLedger {
    */
   heldItemCount(corpusIds: readonly string[]): number {
     if (corpusIds.length === 0) return 0;
-    return (this.db.query(`
-      SELECT COUNT(*) AS n FROM tier_items t
-      WHERE t.state IN ('pending', 'moving')
-        AND (t.metadata_pending = 1 OR (t.content_pending = 1 AND t.content_read = 1))
-        AND EXISTS (SELECT 1 FROM tier_copies c
-          WHERE c.provider = t.provider AND c.account_scope = t.account_scope
-            AND c.conversation_key = t.conversation_key AND c.provider_item_id = t.provider_item_id
-            AND c.corpus_id IN (SELECT value FROM json_each(?)))
-    `).get(JSON.stringify(corpusIds)) as { n: number }).n;
+    const read = heldItemCountRead(corpusIds);
+    return (this.db.query(read.sql).get(read.params[0]) as { n: number }).n;
+  }
+
+  async heldItemCountInBackground(corpusIds: readonly string[]): Promise<number> {
+    if (corpusIds.length === 0) return 0;
+    return (await readInBackground(this.dbPath, heldItemCountRead(corpusIds)) as { n: number }).n;
   }
 
   /**

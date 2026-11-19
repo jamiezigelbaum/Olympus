@@ -514,6 +514,7 @@ import { frontCaptureRuntime, frontCaptureStop, frontDataExport, frontEngineStat
 import { readEngineStatusSnapshot, type EngineManualSyncRun } from '../engine-split/snapshot.ts';
 import { engineRssRestartsFrom, startEngineRssRestart } from '../engine-split/rss-restart.ts';
 import { createFrontScheduler } from '../engine-split/front-scheduler.ts';
+import { createDashboardHeldRead } from '../dashboard/held-read.ts';
 import { createFrontDashboardHistory, openWritableDashboardHistory } from '../engine-split/front-history.ts';
 import { tierSetForLedger } from '../connector-store/tier-set-registry.ts';
 import { startSupersededSweepTicker } from '../connector-store/tier-auto-prune-sweep.ts';
@@ -5500,7 +5501,9 @@ export async function main(): Promise<void> {
             corpusRegistry: sourceCorpusRegistry,
             registryPath: handleRegistryPathFromEnv(process.env, true)!,
             ...(sourceDashboardHistory ? { history: sourceDashboardHistory } : {}),
-            ingestionDispositions: (options?: { lazyStores?: boolean }) => openIngestionDispositionsRuntime(process.env, options),
+            ingestionDispositions: (options?: { lazyStores?: boolean }) => openIngestionDispositionsRuntime(process.env, {
+              ...options, dashboardPoolReads: !!engineFront && options?.lazyStores === true,
+            }),
             oauthHandback: () => chatgptOAuthHandback(),
             loopbackPort: port,
             ...(fileSourceScopes ? { fileSourceScopes } : {}),
@@ -6237,6 +6240,28 @@ export async function main(): Promise<void> {
     }
     return total;
   };
+  const newPendingClassificationRead = () => createDashboardHeldRead<number>(60_000, () => {
+    console.warn('[engine-split] dashboard privacy count unavailable; will retry.');
+  });
+  let frontPendingClassification = newPendingClassificationRead();
+  let pendingClassificationScope = '';
+  const readPendingClassification = () => {
+    if (!engineFront) return { value: pendingClassificationCount() };
+    const scopes = tierLanes.map(({ ledger, corpusIds }) => ({ ledger, corpusIds: [...corpusIds].sort() }));
+    const key = JSON.stringify(scopes.map(({ ledger, corpusIds }) => [ledger.dbPath, corpusIds]));
+    if (key !== pendingClassificationScope) {
+      pendingClassificationScope = key;
+      frontPendingClassification = newPendingClassificationRead();
+    }
+    if (scopes.length === 0) return { value: 0 };
+    return frontPendingClassification(async () => {
+      const counts = await Promise.allSettled(scopes.map(({ ledger, corpusIds }) => ledger.heldItemCountInBackground(corpusIds)));
+      return counts.reduce((total, count) => {
+        if (count.status === 'rejected') throw count.reason;
+        return total + count.value;
+      }, 0);
+    });
+  };
   const chatgptSetup = createChatGptSetupBackend({
     privacyQuestionEngine: createPrivacyQuestionEngine({ runtime: async () => {
       if (!snifferModel || !snifferLane || !snifferEnv.enabled || snifferRuntime.source === 'off') return undefined;
@@ -6251,7 +6276,7 @@ export async function main(): Promise<void> {
           ? localModelActivity.track(snifferResource, snifferModel) : snifferModel).complete(request)),
       } };
     } }),
-    pendingClassificationCount,
+    pendingClassificationCount: () => readPendingClassification().value ?? 0,
     workerFetch: workerFetchInProcess,
     handoffs: chatgptHandoffs,
     publicUrls: remotePublicUrls,
@@ -6488,7 +6513,8 @@ export async function main(): Promise<void> {
         : undefined;
     },
     privacy: () => {
-      const settings = readChatGptPrivacySettings(process.env, pendingClassificationCount());
+      const pending = readPendingClassification();
+      const settings = readChatGptPrivacySettings(process.env, pending.value ?? 0);
       // The local judge's measured speed, for Home's time left on the waiting items.
       const judgePerMinute = (): number | undefined => {
         const rate = judgeObservations.observed().localItemsPerMinute;
@@ -6497,7 +6523,9 @@ export async function main(): Promise<void> {
       const backlog = tierSnifferBacklog?.();
       const missing = judgeMissing();
       return {
-        configured: settings.configured, pendingCount: settings.pendingCount, ruleCount: settings.rules.length,
+        configured: settings.configured, ruleCount: settings.rules.length,
+        ...(pending.value !== undefined ? { pendingCount: pending.value } : {}),
+        ...(pending.ageMs !== undefined ? { stateAgeSeconds: Math.max(1, Math.round(pending.ageMs / 1000)) } : {}),
         classifierAwaitingApproval: backlog?.awaitingOwnerApproval === true,
         // No judge: every new item waits, held, until one is set up (#1316).
         ...(missing ? { judgeMissing: missing } : {}),

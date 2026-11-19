@@ -32,9 +32,10 @@ import {
 import type { SourceDispositionsSource } from '../../source-dispositions.ts';
 import type { SourceDispositionItem } from '../../../core/source-disposition-tree.ts';
 import {
-  type LocalConnectorStore,
+  LocalConnectorStore,
 } from '../../connector-store/index.ts';
 import {
+  isSourceAccountOpenable,
   openConnectorStore,
   type StorageAccount,
 } from '../../../core/source-storage.ts';
@@ -149,20 +150,23 @@ function storedExclusionDebtReader(handles: readonly LocalConnectorStore[]): () 
   let walked: StoredExclusionDebt | undefined;
   return () => {
     if (walked) return walked;
-    const total: StoredExclusionDebt = {
-      excluded: { items: 0, unevaluable: 0 },
-      metadataOnlyContent: { items: 0, unevaluable: 0 },
-    };
-    for (const handle of handles) {
-      const debt = handle.exclusionDebtPresent();
-      total.excluded.items += debt.excluded.items;
-      total.excluded.unevaluable += debt.excluded.unevaluable;
-      total.metadataOnlyContent.items += debt.metadataOnlyContent.items;
-      total.metadataOnlyContent.unevaluable += debt.metadataOnlyContent.unevaluable;
-    }
-    walked = total;
-    return total;
+    walked = sumStoredExclusionDebts(handles.map((handle) => handle.exclusionDebtPresent()));
+    return walked;
   };
+}
+
+function sumStoredExclusionDebts(debts: readonly StoredExclusionDebt[]): StoredExclusionDebt {
+  const total: StoredExclusionDebt = {
+    excluded: { items: 0, unevaluable: 0 },
+    metadataOnlyContent: { items: 0, unevaluable: 0 },
+  };
+  for (const debt of debts) {
+    total.excluded.items += debt.excluded.items;
+    total.excluded.unevaluable += debt.excluded.unevaluable;
+    total.metadataOnlyContent.items += debt.metadataOnlyContent.items;
+    total.metadataOnlyContent.unevaluable += debt.metadataOnlyContent.unevaluable;
+  }
+  return total;
 }
 
 export function openIngestionDispositionsRuntime(
@@ -176,6 +180,7 @@ export function openIngestionDispositionsRuntime(
      * to open throws from the accessor instead of being carried as an error.
      */
     lazyStores?: boolean;
+    dashboardPoolReads?: boolean;
   } = {},
 ): { sources: SourceDispositionsSource[]; close: () => void } {
   const opened: LocalConnectorStore[] = [];
@@ -187,7 +192,8 @@ export function openIngestionDispositionsRuntime(
     try {
       stores = definition.stores(env);
       const matcher = definition.matcher(env);
-      const present = stores.filter((store) => existsSync(store.dbPath));
+      const present = options.dashboardPoolReads && !isSourceAccountOpenable(definition.account, env)
+        ? [] : stores.filter((store) => existsSync(store.dbPath));
       let openedAll = false;
       const openStores = (): readonly LocalConnectorStore[] => {
         if (openedAll) return handles;
@@ -206,7 +212,7 @@ export function openIngestionDispositionsRuntime(
         openedAll = true;
         return handles;
       };
-      if (options.lazyStores !== true) openStores();
+      if (options.lazyStores !== true && !options.dashboardPoolReads) openStores();
       sources.push({
         source_id: definition.sourceId,
         label: definition.label,
@@ -214,7 +220,18 @@ export function openIngestionDispositionsRuntime(
         enforceable: definition.enforceable,
         matcher,
         store_present: present.length > 0,
-        ...(present.length > 0
+        ...(present.length > 0 && options.dashboardPoolReads ? {
+          dashboardDebt: {
+            paths: present.map(({ dbPath }) => dbPath),
+            read: async () => {
+              const debts = await Promise.allSettled(present.map(({ dbPath }) => LocalConnectorStore.exclusionDebtInBackground(dbPath, matcher)));
+              return sumStoredExclusionDebts(debts.map((debt) => {
+                if (debt.status === 'rejected') throw debt.reason;
+                return debt.value;
+              }));
+            },
+          },
+        } : present.length > 0
           ? {
             items: function* (): Generator<SourceDispositionItem> {
               for (const handle of openStores()) yield* handle.itemLocatorCensus();

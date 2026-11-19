@@ -53,6 +53,7 @@ import type {
 } from '../../../control-ui-contract.ts';
 import type { DashboardAgentConnectionsBackend } from '../../agent-connections.ts';
 import type {
+  FrontSourceDashboardHistory,
   SourceDashboardHistory,
   DashboardCaptureRuntime,
   DashboardSyncSource,
@@ -228,7 +229,7 @@ export interface EmailSourceWorkerOptions {
     sovereigntyEngine: SovereigntyEngine;
     /** Pause the native capture reader while pairing or changing its capture grant. */
     withMessagingCapturePaused?<T>(source: 'telegram' | 'whatsapp', operation: () => Promise<T>): Promise<T>;
-    history?: SourceDashboardHistory;
+    history?: SourceDashboardHistory | FrontSourceDashboardHistory;
     // Authority on which dashboard card owns which corpus. Omitted means the
     // shipped default registry; pass the operator's when one is configured so
     // a corpus they added is claimed by a card rather than listed as orphaned.

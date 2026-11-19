@@ -644,7 +644,7 @@ export async function withOffThreadSnapshot<T>(
     // across a whole walk pinned the WAL: no checkpoint could reset it, and
     // tier-ledger-1's WAL stood at 6 GB through a gate run (16 Nov). A caller
     // that checks for writes across the whole read itself asks for the same.
-    const perRead = lane === 'background' || options.perRead === true;
+    const perRead = options.perRead ?? lane === 'background';
     const open = async (): Promise<void> => {
       await send(reader!, { op: 'open', snapshot, path: dbPath, perRead });
     };
