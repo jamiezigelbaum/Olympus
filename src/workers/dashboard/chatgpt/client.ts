@@ -2534,10 +2534,10 @@ export function chatgptDashboardClient(
     if (!info || !privacy) return null;
     const W = config.privacy.copy;
     const configured = info.configured === true;
-    const pending = typeof info.pendingCount === 'number' && isFinite(info.pendingCount) ? Math.max(0, Math.round(info.pendingCount)) : 0;
+    const pending = typeof info.pendingCount === 'number' && isFinite(info.pendingCount) ? Math.max(0, Math.round(info.pendingCount)) : undefined;
     const asked = (Array.isArray(data.needsYou) ? data.needsYou : [])
       .some((item: Any) => item && item.fix && privacy!.handles(item.fix));
-    if (!configured && (asked || !pending)) return null;
+    if (!configured && pending !== undefined && (asked || pending === 0)) return null;
     const section = add(el('section', 'section privacy-row'), el('h2', '', W.section));
     const row = el('li', 'row');
     const text = el('div', 'row-text');
@@ -2546,7 +2546,10 @@ export function chatgptDashboardClient(
       const words = rules === 0 ? W.row.none : rules === 1 ? W.row.one : W.row.many;
       add(text, el('p', '', rules >= 0 ? fill(words, { n: count(rules) }) : W.rowNoCount));
     }
-    if (pending > 0) add(text, el('p', 'muted', fill(pending === 1 ? W.dashboardPending.one : W.dashboardPending.many, { n: count(pending) })));
+    if (pending === undefined) add(text, el('p', 'muted', H.copy.archives.counting));
+    else if (pending > 0) add(text, el('p', 'muted', fill(pending === 1 ? W.dashboardPending.one : W.dashboardPending.many, { n: count(pending) })));
+    const observed = pending !== undefined ? ago(info.pendingCountObservedAt) : '';
+    if (observed) add(text, el('p', 'muted', fill(P.updated, { when: observed })));
     add(row, text);
     if (configured) {
       const blocked = globalReason();
@@ -2948,14 +2951,17 @@ export function chatgptDashboardClient(
   function privacyPendingRow(data: Any): HTMLElement | null {
     const info = data && data.privacy && typeof data.privacy === 'object' ? data.privacy : null;
     if (!info || !privacy || info.configured !== true) return null;
-    const pending = typeof info.pendingCount === 'number' && isFinite(info.pendingCount) ? Math.max(0, Math.round(info.pendingCount)) : 0;
-    if (pending < 1) return null;
+    const pending = typeof info.pendingCount === 'number' && isFinite(info.pendingCount) ? Math.max(0, Math.round(info.pendingCount)) : undefined;
+    if (pending === 0) return null;
     const W = config.privacy.copy;
-    const facts = [fill(pending === 1 ? W.dashboardPending.one : W.dashboardPending.many, { n: count(pending) })];
+    const facts = [pending === undefined ? H.copy.archives.counting
+      : fill(pending === 1 ? W.dashboardPending.one : W.dashboardPending.many, { n: count(pending) })];
+    const observed = pending !== undefined ? ago(info.pendingCountObservedAt) : '';
+    if (observed) facts.push(fill(P.updated, { when: observed }));
     const rate = typeof info.judgePerMinute === 'number' && isFinite(info.judgePerMinute) && info.judgePerMinute > 0 ? info.judgePerMinute : 0;
-    if (rate > 0) facts.push(fill(P.home.left, { duration: duration(Math.ceil(pending / rate) * 60) }));
+    if (pending !== undefined && rate > 0) facts.push(fill(P.home.left, { duration: duration(Math.ceil(pending / rate) * 60) }));
     const row = add(el('li', 'row home-line'), add(el('div', 'need-body'), el('p', 'row-text', facts.join(' · '))));
-    row.setAttribute('data-privacy-pending', String(pending));
+    row.setAttribute('data-privacy-pending', pending === undefined ? 'unknown' : String(pending));
     return row;
   }
 

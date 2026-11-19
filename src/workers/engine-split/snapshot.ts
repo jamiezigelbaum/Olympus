@@ -1,4 +1,5 @@
 import type { MemoryActivity } from '../../core/memory-counters.ts';
+import type { HeldItemStatus } from '../engine/held-item-status.ts';
 /**
  * State the background publishes for the front (docs/design/engine-split.md,
  * part 3, "State from background to front"): scheduler status, the judge's
@@ -60,6 +61,8 @@ export interface EngineStatusSnapshot {
     /** Whether the judge can take imported archive items now (archive-import/dashboard.ts). */
     archive_private_model?: string;
   };
+  /** Items held for privacy judgment, measured on the background's own pace. */
+  held_items?: HeldItemStatus;
   captures: unknown;
   /** Each corpus's last unreadable count (file-extraction/unreadable-files.ts), counted in the background. */
   unreadable?: Record<string, { unreadable: number; blocked: number }>;

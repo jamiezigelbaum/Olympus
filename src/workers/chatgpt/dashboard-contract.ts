@@ -354,7 +354,7 @@ export interface DashboardViewModelV1 {
    * `olympus_privacy_get`. Counts only; never a description or a rule.
    */
   privacy?: {
-    configured: boolean; pendingCount: number; ruleCount: number;
+    configured: boolean; pendingCount?: number; pendingCountObservedAt?: string; ruleCount: number;
     /**
      * Contract v1 addition (2026-11-15): how many items a minute the private
      * model has been checking, when measured, so Home can say about how long
@@ -1264,7 +1264,8 @@ export interface PrivacySettings {
   /** At most 100. */
   rules: PrivacyRuleView[];
   /** Items waiting for the privacy check (held Private, keyword-searchable, not embedded). */
-  pendingCount: number;
+  pendingCount?: number;
+  pendingCountObservedAt?: string;
   /**
    * olympus_privacy_get only: the panel's confirmation for a save that
    * lowers protection (see PrivacySetInput). In `_meta`, so the model never
@@ -1287,7 +1288,8 @@ export interface PrivacySummary {
   configured: boolean;
   description: string;
   ruleCount: number;
-  pendingCount: number;
+  pendingCount?: number;
+  pendingCountObservedAt?: string;
 }
 
 /**
