@@ -2137,6 +2137,10 @@ export class TierLedger {
 
   /** Note the extraction job ledgers this process has open (see `knownJobLedgerPaths`). */
   noteJobLedgerPaths(paths: readonly string[]): void {
+    // Only a path not noted yet is written: noting the same paths each tick leaves an idle ledger untouched.
+    const known = new Set(this.knownJobLedgerPaths());
+    paths = paths.filter((path) => !known.has(path));
+    if (paths.length === 0) return;
     const now = this.now().toISOString();
     this.db.transaction(() => {
       const upsert = this.db.query(`
@@ -2550,6 +2554,8 @@ export class TierLedger {
 
   /** A walk's own checkpoint does not invalidate a judge's clean lap. */
   writeSettleProgress(key: string, value: string): void {
+    // An unchanged value takes no write lock: an idle pass leaves the ledger untouched.
+    if ((this.readMeta(key) ?? '') === value) return;
     this.settleProgressChanges += this.setMeta(key, value);
   }
 

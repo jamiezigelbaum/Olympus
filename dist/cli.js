@@ -43635,6 +43635,10 @@ class TierLedger {
     `).run(mark.generation, ...idParams(identity), mark.revision, mark.generation, ...idParams(identity));
   }
   noteJobLedgerPaths(paths) {
+    const known = new Set(this.knownJobLedgerPaths());
+    paths = paths.filter((path) => !known.has(path));
+    if (paths.length === 0)
+      return;
     const now = this.now().toISOString();
     this.db.transaction(() => {
       const upsert = this.db.query(`
@@ -43911,6 +43915,8 @@ class TierLedger {
     this.setMeta(key, value);
   }
   writeSettleProgress(key, value) {
+    if ((this.readMeta(key) ?? "") === value)
+      return;
     this.settleProgressChanges += this.setMeta(key, value);
   }
   setMeta(key, value) {
