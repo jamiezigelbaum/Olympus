@@ -109,6 +109,7 @@ import {
   type TierCopy,
   type TierCorpusVisibility,
   type TierLedgerIdentity,
+  type TierLedgerRecord,
   type TierSearchLayer,
 } from '../classification/tier-ledger.ts';
 import { arrivalOrderedSniffer, conversationOrderedSniffer, itemHasNonTextContent, classifyContentTier, heldUntilJudged, isImageMediaType, namesDecidedByOwner, ownerRuleMatches, type OwnerTierRule } from '../classification/tier-classifier.ts';
@@ -128,7 +129,9 @@ import {
 import { effectiveItemVerdicts } from './tier-visibility.ts';
 import { forgetSecretInSideStores, retireSecretRedactions } from './secrets-disposition.ts';
 import {
+  childVisibilityUnchanged,
   hiddenChildKeys,
+  itemStatesOffThread,
   memoVisibilityItems,
   memoVisibilityItemsHere,
   visibilityRead,
@@ -172,6 +175,7 @@ import {
 import {
   boundedSourceIndexChunks,
   compactPassageWhitespace,
+  sourceIndexChunkMatchesAllTermGroups,
   sourceIndexChunkQueryTerms,
   sourceIndexChunkTermScore,
 } from '../../core/source-index/chunk-selection.ts';
@@ -2571,6 +2575,7 @@ type VectorScan =
 
 type VectorScoreRow = { item_pk: number; chunk_pk: number; local_item_id: string; embedding: unknown };
 type VectorWinners = Extract<VectorScan, { bestByItem: unknown }>['bestByItem'];
+type VectorWinner = NonNullable<ReturnType<VectorWinners['get']>>;
 
 /** Shared exact scoring preserves the winning chunk and deterministic ties. */
 function foldVectorScore(bestByItem: VectorWinners, row: VectorScoreRow, queryVector: readonly number[]): { mismatch: number; qualified: number; score?: number } {
@@ -4794,12 +4799,14 @@ export class LocalConnectorStore {
     layerOf: (row: T) => TierSearchLayer,
     throwOnUnavailable = false,
     copiesAllowed?: (copies: readonly TierCopy[]) => boolean,
+    contentGate?: { ledger: TierLedger | undefined; held(row: T): boolean },
   ): Generator<VisibilityRead, T[], unknown> {
-    rows = rows.filter((row) => layerOf(row) !== 'content' || !this.onDemandContentHeld(identityOf(row)));
+    rows = rows.filter((row) => layerOf(row) !== 'content'
+      || !(contentGate ? contentGate.held(row) : this.onDemandContentHeld(identityOf(row))));
     if (rows.length === 0) return [];
     let visibility;
     try {
-      const ledger = this.visibilityLedger();
+      const ledger = contentGate ? contentGate.ledger : this.visibilityLedger();
       if (ledger) {
         const identities = rows.map(identityOf);
         visibility = yield* visibilityRead(() => ledgerVisibilityHere(ledger, identities),
@@ -9126,12 +9133,15 @@ export class LocalConnectorStore {
       .get(identity.provider, identity.accountScope, identity.providerItemId, normalizeConversationId(identity.providerConversationId));
     if (!granted) return false;
     try {
-      const record = this.visibilityLedger()?.getCurrent(identity);
-      return !record || !record.contentRead || record.contentPending || record.metadataPending
-        || record.state !== 'current' || record.contentTier === 'secrets'
-        || (record.contentTier === 'secure' && this.trustDomain !== 'secure_local')
-        || (record.contentTier === 'private' && this.trustDomain === 'public_safe');
+      return this.onDemandLedgerRecordHeld(this.visibilityLedger()?.getCurrent(identity));
     } catch { return true; }
+  }
+
+  private onDemandLedgerRecordHeld(record: TierLedgerRecord | undefined): boolean {
+    return !record || !record.contentRead || record.contentPending || record.metadataPending
+      || record.state !== 'current' || record.contentTier === 'secrets'
+      || (record.contentTier === 'secure' && this.trustDomain !== 'secure_local')
+      || (record.contentTier === 'private' && this.trustDomain === 'public_safe');
   }
 
   onDemandReadForLocator(locator: string): boolean {
@@ -14976,7 +14986,9 @@ export class LocalConnectorStore {
     let rankedItems: typeof candidates = [];
     let visibleInBatch: typeof candidates = [];
     let candidateOffset = 0;
-    const canFill = () => rankedItems.length < limit && (visibleInBatch.length > 0 || candidateOffset < candidates.length);
+    const hasMore = () => visibleInBatch.length > 0 || candidateOffset < candidates.length;
+    const canFill = () => rankedItems.length < limit && hasMore();
+    let laneRows: ConnectorStoreScoredSearchRow[] = [];
     while (true) {
       if (performance.now() - sliceStarted >= VECTOR_VISIBILITY_SLICE_MS) {
         noteSourceIndexReadProgress();
@@ -14987,35 +14999,30 @@ export class LocalConnectorStore {
         if (visibleInBatch.length === 0) {
           const batch = candidates.slice(candidateOffset, candidateOffset + VECTOR_VISIBILITY_BATCH_SIZE);
           candidateOffset += batch.length;
-          const visible = this.visibleVectorItemPks(batch.map(([itemPk]) => itemPk), selectedAccount, filters);
+          const pks = batch.map(([itemPk]) => itemPk);
+          const visible = (await this.readVectorJudgment(
+            (ledger) => this.visibleVectorItemPksSteps(pks, selectedAccount, filters, ledger), new Set<number>(),
+          ))();
           visibleInBatch = batch.filter(([itemPk]) => visible.has(itemPk));
         }
         // Keep the rest of this batch in rank order for a refill after the recheck.
         rankedItems.push(...visibleInBatch.splice(0, limit - rankedItems.length));
         continue;
       }
-      const stillVisible = this.visibleVectorItemPks(rankedItems.map(([itemPk]) => itemPk), selectedAccount, filters);
-      rankedItems = rankedItems.filter(([itemPk]) => stillVisible.has(itemPk));
-      if (!canFill()) break;
+      if (rankedItems.length === 0) break;
+      const result = (await this.readVectorJudgment(
+        (ledger) => this.vectorWinnerRowsSteps(rankedItems, selectedAccount, filters, ledger, {
+          limit, hasMore: hasMore(), locate: input.locate,
+        }),
+        { ranked: [], rows: [] },
+      ))();
+      rankedItems = result.ranked;
+      if (!canFill()) {
+        laneRows = result.rows;
+        break;
+      }
     }
 
-    // No await occurs between the final live visibility recheck and hydration,
-    // chunk location, or returning the rows.
-    const searchRows = this.searchRowsByItemPks(
-      rankedItems.map(([itemPk]) => itemPk),
-      selectedAccount,
-      filters,
-    );
-    const winnersByLocalItemId = new Map(
-      rankedItems.map(([, candidate]) => [candidate.localItemId, candidate]),
-    );
-    const laneRows = searchRows.flatMap((row) => {
-      const winner = winnersByLocalItemId.get(row.sourceItem.localItemId);
-      if (winner === undefined) return [];
-      if (!input.locate) return [{ ...row, contentMatched: true as const, bestCosine: winner.bestCosine }];
-      const chunk = this.chunkMatchForChunkPk(winner.bestChunkPk, 'semantic');
-      return [{ ...row, ...(chunk ? { chunk } : {}), bestCosine: winner.bestCosine }];
-    });
     return {
       rows: laneRows,
       ...(scanned.cutReason !== undefined
@@ -15308,39 +15315,135 @@ export class LocalConnectorStore {
   // Hydrates membrane-safe search rows for ranked item pks, preserving order.
   // Exact item PKs avoid local-id aliases across providers/accounts. Batches
   // keep candidate validation below SQLite's bind-variable ceiling.
-  private visibleVectorItemPks(itemPks: readonly number[], accountScope?: string, filters?: ConnectorStoreSearchFilters): Set<number> {
+  private async readVectorJudgment<T>(
+    make: (ledger: TierLedger | undefined) => Generator<StoreRead | VisibilityRead, T, unknown>,
+    unavailable: T,
+  ): Promise<() => T> {
+    const here = () => {
+      let ledger: TierLedger | undefined;
+      try { ledger = this.visibilityLedger(); } catch { return unavailable; }
+      return this.readHere(make(ledger));
+    };
+    if (!offThreadReadsSupported(this.dbPath)) return here;
+    return judgedAwaited(async () => {
+      let ledger: TierLedger | undefined;
+      let unchanged: () => boolean;
+      try {
+        ledger = this.visibilityLedger();
+        const childLane = this.childLane;
+        const lane = this.childVisibilityLane();
+        const childLedger = lane.ledger();
+        const holdsWrites = () => this.db.inTransaction || ledger?.writesHeld() || childLedger?.writesHeld();
+        if (holdsWrites()) return here;
+        // The item feed used by the child fence does not cover on-demand grants.
+        const storeMarker = this.changeMarker();
+        const ledgerMarker = ledger?.changeMarker();
+        const childrenUnchanged = childVisibilityUnchanged(lane);
+        unchanged = () => {
+          try {
+            return !holdsWrites() && this.changeMarker() === storeMarker && this.visibilityLedger() === ledger
+              && ledger?.changeMarker() === ledgerMarker && this.childLane === childLane && childrenUnchanged();
+          } catch {
+            // A fence that cannot be read must be judged again on the live handles.
+            return false;
+          }
+        };
+      } catch { return here; }
+      const result = await this.readOffThread(make(ledger));
+      if (!unchanged()) throw new VisibilityChangedError();
+      // The caller consumes this after its last await. A write even in that
+      // final handoff needs a fresh judgment before rows can be returned.
+      return () => unchanged() ? result : here();
+    }, () => here);
+  }
+
+  private *visibleVectorItemPksSteps(
+    itemPks: readonly number[], accountScope: string | undefined, filters: ConnectorStoreSearchFilters | undefined,
+    ledger: TierLedger | undefined,
+  ): Generator<StoreRead | VisibilityRead, Set<number>, unknown> {
     const visible = new Set<number>();
+    if (itemPks.length === 0) return visible;
     const selectedFilters = connectorStoreFilterSql(filters);
+    const hasGrants = Boolean(yield {
+      mode: 'get', sql: "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'", params: [],
+    });
     for (let offset = 0; offset < itemPks.length; offset += VECTOR_VISIBILITY_BATCH_SIZE) {
       const batch = itemPks.slice(offset, offset + VECTOR_VISIBILITY_BATCH_SIZE);
-      const rows = this.db.query(`SELECT i.item_pk, i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id
-        FROM items i WHERE i.item_pk IN (${batch.map(() => '?').join(',')}) AND i.tombstoned = 0
-        ${accountScope ? 'AND i.account_scope = ?' : ''} ${selectedFilters.sql}`)
-        .all(...batch, ...(accountScope ? [accountScope] : []), ...selectedFilters.params) as Array<{
-          item_pk: number; provider: string; account_scope: string; provider_item_id: string; provider_conversation_id: string | null;
-        }>;
+      const rows = (yield {
+        mode: 'all',
+        sql: `SELECT i.item_pk, i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id,
+          ${hasGrants ? `EXISTS (SELECT 1 FROM on_demand_item_reads r WHERE r.local_item_id = i.local_item_id
+            AND r.source_version = COALESCE(i.source_version, ''))` : '0'} AS granted
+          FROM items i WHERE i.item_pk IN (${batch.map(() => '?').join(',')}) AND i.tombstoned = 0
+          ${accountScope ? 'AND i.account_scope = ?' : ''} ${selectedFilters.sql}`,
+        params: [...batch, ...(accountScope ? [accountScope] : []), ...selectedFilters.params],
+      }) as Array<{
+        item_pk: number; provider: string; account_scope: string; provider_item_id: string;
+        provider_conversation_id: string | null; granted: number;
+      }>;
+      const identityOf = (row: typeof rows[number]) => ({
+        provider: row.provider, accountScope: row.account_scope, providerItemId: row.provider_item_id,
+        ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
+      });
+      const granted = rows.filter((row) => row.granted).map(identityOf);
+      let states: ReturnType<TierLedger['itemStatesForMany']> | undefined;
+      if (ledger && granted.length > 0) {
+        try {
+          states = yield* visibilityRead(() => ledger.itemStatesForMany(granted), () => itemStatesOffThread(ledger, granted));
+        } catch (error) {
+          if (error instanceof VisibilityChangedError) throw error;
+          // Without a readable decision, no on-demand grant releases content.
+          states = undefined;
+        }
+      }
       // Embedding admission never releases a vector to search: the copy's
       // hold must clear, even though lexical/Private reads may already serve it.
       // One ledger read serves both checks, and an unreadable ledger hides the batch.
-      for (const row of this.tierVisibleRows(rows, row => ({
-        provider: row.provider, accountScope: row.account_scope, providerItemId: row.provider_item_id,
-        ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
-      }), () => 'content', false, copies => !copies.some(copy => copy.corpusId === this.corpusId
-        && copy.state === 'current' && copy.embedHold))) visible.add(row.item_pk);
+      for (const row of yield* this.tierVisibleRowsSteps(rows, identityOf, () => 'content', false,
+        copies => !copies.some(copy => copy.corpusId === this.corpusId && copy.state === 'current' && copy.embedHold),
+        { ledger, held: (row) => Boolean(row.granted) && this.onDemandLedgerRecordHeld(states?.get(tierLedgerIdentityKey(identityOf(row)))?.record) },
+      )) visible.add(row.item_pk);
     }
     return visible;
   }
 
-  private searchRowsByItemPks(
+  private *vectorWinnerRowsSteps(
+    rankedItems: ReadonlyArray<[number, VectorWinner]>,
+    accountScope: string | undefined,
+    filters: ConnectorStoreSearchFilters | undefined,
+    ledger: TierLedger | undefined,
+    options: { limit: number; hasMore: boolean; locate: boolean },
+  ): Generator<StoreRead | VisibilityRead, { ranked: Array<[number, VectorWinner]>; rows: ConnectorStoreScoredSearchRow[] }, unknown> {
+    const stillVisible = yield* this.visibleVectorItemPksSteps(rankedItems.map(([pk]) => pk), accountScope, filters, ledger);
+    const ranked = rankedItems.filter(([pk]) => stillVisible.has(pk));
+    const rows: ConnectorStoreScoredSearchRow[] = [];
+    if (ranked.length < options.limit && options.hasMore) return { ranked, rows };
+
+    const searchRows = yield* this.searchRowsByItemPksSteps(ranked.map(([pk]) => pk), accountScope, filters);
+    const winnersByLocalItemId = new Map(ranked.map(([, candidate]) => [candidate.localItemId, candidate]));
+    for (const row of searchRows) {
+      const winner = winnersByLocalItemId.get(row.sourceItem.localItemId);
+      if (winner === undefined) continue;
+      if (!options.locate) {
+        rows.push({ ...row, contentMatched: true, bestCosine: winner.bestCosine });
+        continue;
+      }
+      const chunk = yield* this.chunkMatchForChunkPkSteps(winner.bestChunkPk, 'semantic');
+      rows.push({ ...row, ...(chunk ? { chunk } : {}), bestCosine: winner.bestCosine });
+    }
+    return { ranked, rows };
+  }
+
+  private *searchRowsByItemPksSteps(
     itemPks: number[],
     accountScope?: string,
     filters?: ConnectorStoreSearchFilters,
-  ): ConnectorStoreSearchRow[] {
+  ): Generator<StoreRead, ConnectorStoreSearchRow[], unknown> {
     if (itemPks.length === 0) return [];
     const placeholders = itemPks.map(() => '?').join(', ');
     const selectedAccount = normalizeOptionalAccountScope(accountScope);
     const selectedFilters = connectorStoreFilterSql(filters);
-    const rows = this.db.query(`
+    const rows = (yield { mode: 'all', sql: `
       SELECT
         i.item_pk, i.provider, i.family, i.account_scope, i.provider_item_id, i.provider_thread_id,
         i.provider_conversation_id, i.provider_file_id, i.provider_event_id, i.local_item_id,
@@ -15353,16 +15456,18 @@ export class LocalConnectorStore {
         AND i.tombstoned = 0
         ${selectedAccount ? 'AND i.account_scope = ?' : ''}
         ${selectedFilters.sql}
-    `).all(
+    `, params: [
       ...itemPks,
       ...(selectedAccount ? [selectedAccount] : []),
       ...selectedFilters.params,
-    ) as ItemRow[];
+    ] }) as ItemRow[];
     const byPk = new Map(rows.map((row) => [row.item_pk, row]));
-    return itemPks.flatMap((itemPk) => {
+    const ordered: ConnectorStoreSearchRow[] = [];
+    for (const itemPk of itemPks) {
       const row = byPk.get(itemPk);
-      return row ? [searchRowFromItemRow(row)] : [];
-    });
+      if (row) ordered.push(searchRowFromItemRow(row));
+    }
+    return ordered;
   }
 
   /**
@@ -15957,21 +16062,22 @@ export class LocalConnectorStore {
    * none: its signal is a whole-chunk cosine, and inventing a tighter span from
    * it would be a claim the score cannot support.
    */
-  private chunkMatchForChunkPk(
+  private *chunkMatchForChunkPkSteps(
     chunkPk: number,
     lane: 'keyword' | 'semantic',
     queryTerms?: readonly string[],
-  ): ConnectorStoreChunkMatch | undefined {
-    const row = this.db.query(
-      'SELECT item_pk, chunk_index, content_hash, bounded_text FROM chunks WHERE chunk_pk = ?',
-    ).get(chunkPk) as
+  ): Generator<StoreRead, ConnectorStoreChunkMatch | undefined, unknown> {
+    const row = (yield {
+      mode: 'get', sql: 'SELECT item_pk, chunk_index, content_hash, bounded_text FROM chunks WHERE chunk_pk = ?', params: [chunkPk],
+    }) as
       | { item_pk: number; chunk_index: number; content_hash: string; bounded_text: string }
       | null;
     if (!row) return undefined;
 
-    const priorRows = this.db.query(
-      'SELECT bounded_text FROM chunks WHERE item_pk = ? AND chunk_index < ? ORDER BY chunk_index',
-    ).all(row.item_pk, row.chunk_index) as Array<{ bounded_text: string }>;
+    const priorRows = (yield {
+      mode: 'all', sql: 'SELECT bounded_text FROM chunks WHERE item_pk = ? AND chunk_index < ? ORDER BY chunk_index',
+      params: [row.item_pk, row.chunk_index],
+    }) as Array<{ bounded_text: string }>;
     const itemOffset = priorRows.reduce((sum, prior) => sum + prior.bounded_text.length, 0);
     return chunkMatchFromRows(chunkPk, row, itemOffset, lane, queryTerms);
   }
@@ -16498,12 +16604,11 @@ export class LocalConnectorStore {
           return vector.length === queryVector.length ? cosineSimilarity(queryVector, vector) : undefined;
         })
       : undefined;
+    // Use the same compacted text for selection and citation hash matching.
+    // Layout padding still comes out before ranking and applying the budget.
+    const compacted = chunkRows.map((chunk) => compactPassageWhitespace(chunk.bounded_text));
     const { chunks, truncated } = selectEvidencePassages(
-      // Layout padding (OCR and PDF text keep column alignment as runs of
-      // spaces) is not evidence; dropping it lets the same budget carry
-      // several times the text (2026-10-02 live Private store: 36% padding
-      // overall, 69% in one scanned report).
-      chunkRows.map((chunk) => compactPassageWhitespace(chunk.bounded_text)),
+      compacted,
       maxChars,
       passageFocus,
       { title: row.title, ...(relevance ? { relevance } : {}) },
@@ -16525,7 +16630,13 @@ export class LocalConnectorStore {
       // chunk when duplicate text makes its origin ambiguous; never guess a hash.
       chunkHashes: [
         ...(reactionLine ? [[]] : []),
-        ...chunks.map(text => chunkRows.filter(chunk => compactPassageWhitespace(chunk.bounded_text).includes(text)).map(chunk => chunk.content_hash)),
+        ...chunks.map((text) => {
+          const hashes: string[] = [];
+          for (let index = 0; index < compacted.length; index++) {
+            if (compacted[index]!.includes(text)) hashes.push(chunkRows[index]!.content_hash);
+          }
+          return hashes;
+        }),
       ],
       truncated,
       storedChunks: chunkRows.length,
@@ -20111,8 +20222,8 @@ function selectEvidencePassages(
   const totalChars = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
   if (totalChars <= maxChars || !focus) return budgetChunks(chunks, maxChars);
   const expandedGroups = focus.query ? sourceIndexChunkQueryTerms(focus.query) : [];
-  const combined = [context.title ?? '', ...chunks].join('\n');
-  const complete = expandedGroups.every(group => sourceIndexChunkTermScore(combined, [group]) > 0);
+  const complete = expandedGroups.length === 0
+    || sourceIndexChunkMatchesAllTermGroups([context.title ?? '', ...chunks].join('\n'), expandedGroups);
   const focusedGroups = complete || !focus.query ? expandedGroups
     : withKeywordAlternatives(focus.query, new Map(), () => sourceIndexChunkQueryTerms(focus.query!));
   const termGroups = withoutNameTerms(focusedGroups, context.title);
