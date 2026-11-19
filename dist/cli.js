@@ -276604,7 +276604,8 @@ ${key}`;
         pending_items: backlog.pendingItems + backlog.lowerMovesQueued,
         summary: backlog.summary,
         awaiting_owner_approval: backlog.awaitingOwnerApproval,
-        ...backlog.waiting ? { waiting_reason: backlog.waiting.reason, waiting_label: backlog.waiting.label, waiting_since: backlog.waiting.since } : {}
+        ...backlog.waiting ? { waiting_reason: backlog.waiting.reason, waiting_label: backlog.waiting.label, waiting_since: backlog.waiting.since } : {},
+        ...backlog.storedWalks?.length ? { stored_walks: backlog.storedWalks } : {}
       } : undefined;
     },
     tierMigration: () => tierMigrationStatusSummary(resolveTierMigrationPaths(process.env, resolveEmbeddingLedgerPath(process.env)).statePath),

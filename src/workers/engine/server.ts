@@ -4081,6 +4081,7 @@ export async function main(): Promise<void> {
               ...(backlog.waiting
                 ? { waiting_reason: backlog.waiting.reason, waiting_label: backlog.waiting.label, waiting_since: backlog.waiting.since }
                 : {}),
+              ...(backlog.storedWalks?.length ? { stored_walks: backlog.storedWalks } : {}),
             }
           : undefined;
       },
