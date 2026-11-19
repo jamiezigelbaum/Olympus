@@ -968,7 +968,7 @@ function readIoThrottle(): string {
 
 const RUN_CASES = ['steady', 'boot-after-upgrade', 'cold-start'] as const;
 type RunCase = typeof RUN_CASES[number];
-async function run(dir: string, seconds: number, memoryMax: string, options: { runCase: RunCase; walBytes: number; ioFloorMs: number; ioWaitSeconds: number; quick?: boolean; sqliteMmap?: 'on' | 'off' | 'bounded'; swapReading?: boolean; ioThrottleUnavailable?: boolean }) {
+async function run(dir: string, seconds: number, memoryMax: string, options: { runCase: RunCase; walBytes: number; ioFloorMs: number; ioWaitSeconds: number; quick?: boolean; sqliteMmap?: 'on' | 'off' | 'bounded'; swapReading?: boolean; ioThrottleUnavailable?: boolean; engineEnv?: Record<string, string> }) {
   const shape = JSON.parse(readFileSync(join(dir, 'shape.json'), 'utf8')) as { shape: { version: number; items: number } };
   if (shape.shape.version !== VERSION) throw new Error('Build the current synthetic fixture shape before running.');
   const isCapped = capped(memoryMaxBytes(memoryMax));
@@ -1015,6 +1015,8 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
     // An untimed count of every statement the loops run (each pays for a stack): never set it on a timed run.
     ...(process.env.OLYMPUS_MAIN_THREAD_SQL_SITES ? { OLYMPUS_MAIN_THREAD_SQL_SITES: process.env.OLYMPUS_MAIN_THREAD_SQL_SITES } : {}),
     OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON: JSON.stringify(DOMAINS.map(domain => ({ dbPath: storePath(dir, domain), corpusId: corpus(domain), family: 'file', trustDomain: domain }))),
+    // An arm's own product switches (--engine-env), for both roles; recorded in the receipt as engine_env.
+    ...options.engineEnv,
   };
   const children: ReturnType<typeof Bun.spawn>[] = [];
   // A stopped job leaves its engines orphaned and still writing the fixture (43847681247, 16 Nov 2026). Kill any a previous
@@ -1388,7 +1390,7 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
   const strict_1s = background.beats > 0 && front.beats > 0 && background.max_ms < LOOP_STALL_LIMIT_MS && front.max_ms < LOOP_STALL_LIMIT_MS;
   const sha = spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
   const receipt = { phase: 'run', case: options.runCase, sha, pass, strict_1s, restore_ms, restored_outside: restoredOutside, padded_wal_level_s, judged: modelCalls.judge, host_busy: false, host, qualified: isCapped, memory_max: memoryMax, elapsed_ms: Date.now() - started, background, front, slow_sql, forwarded, asks, workloads, workload_ok, model_calls: modelCalls, privacy_click: clickSummary, privacy_restart, command_ack: ackSummary, ack_ok, control_ok, typical, front_loop_sql: seen.frontLoopSql, request_errors: requestErrors, errors, cpu_freezes: cpuFreezes.slice(0, 60), pressure: pressureSummary(pressureSampler.samples), anon_memory: anonSampler.peaks,
-    sqlite_mmap: options.sqliteMmap ?? 'default', sqlite_mmap_boot: fileMapLines, process_io: ioSampler.summary(), meminfo: { start: meminfoAtStart, end: meminfoAtEnd }, cgroup_memory_end: cgroupAtEnd, cgroup_memory_samples: cgroupSamples,
+    sqlite_mmap: options.sqliteMmap ?? 'default', engine_env: options.engineEnv ?? {}, sqlite_mmap_boot: fileMapLines, process_io: ioSampler.summary(), meminfo: { start: meminfoAtStart, end: meminfoAtEnd }, cgroup_memory_end: cgroupAtEnd, cgroup_memory_samples: cgroupSamples,
     ...(options.swapReading ? { swap_reading: true, counts_as_gate: false } : {}),
     ...(coldStart ? { counts_as_gate: false, cold_start: startup, io_throttle: coldStart.io_throttle } : {}),
     vmstat: Object.fromEntries(Object.entries(readVmstat()).map(([key, value]) => [key, value - (vmstatAtStart[key] ?? value)])),
@@ -1453,14 +1455,19 @@ if (import.meta.main) {
   const number = (name: string, fallback: string) => { const n = Number(flag(name, fallback)); if (!Number.isSafeInteger(n) || n < 1) throw new Error(`Invalid --${name}`); return n; };
   if (dir && command === 'pad-wal') padWal(resolve(dir), number('wal-mb', '2048'));
   if (dir && command === 'restore') { restorePristine(resolve(dir)); writeFileSync(join(resolve(dir), 'restored'), new Date().toISOString()); process.exit(0); }
-  if (!dir || !['build', 'run'].includes(command ?? '')) throw new Error(`Usage: loop-stall-test.ts build|restore|run --dir PATH [--items N] [--chunks-per-item N] [--seconds N] [--memory-max 2G] [--case ${RUN_CASES.join('|')}] [--wal-mb 2048] [--io-floor-ms 50] [--io-wait-seconds 600] [--sqlite-mmap on|off|bounded] [--swap-reading] [--io-throttle-unavailable]`);
+  if (!dir || !['build', 'run'].includes(command ?? '')) throw new Error(`Usage: loop-stall-test.ts build|restore|run --dir PATH [--items N] [--chunks-per-item N] [--seconds N] [--memory-max 2G] [--case ${RUN_CASES.join('|')}] [--wal-mb 2048] [--io-floor-ms 50] [--io-wait-seconds 600] [--sqlite-mmap on|off|bounded] [--swap-reading] [--io-throttle-unavailable] [--engine-env 'OLYMPUS_X=1 OLYMPUS_Y=2']`);
   const runCase = flag('case', 'steady') as RunCase;
   const sqliteMmap = flag('sqlite-mmap') as 'on' | 'off' | 'bounded' | undefined;
   if (sqliteMmap !== undefined && !['on', 'off', 'bounded'].includes(sqliteMmap)) throw new Error('Invalid --sqlite-mmap; use on, off or bounded');
+  const engineEnv = Object.fromEntries((flag('engine-env') ?? '').split(/\s+/).filter(Boolean).map(pair => {
+    const match = /^(OLYMPUS_[A-Z0-9_]+)=(.*)$/.exec(pair);
+    if (!match) throw new Error(`Invalid --engine-env entry ${pair}; use OLYMPUS_NAME=value`);
+    return [match[1]!, match[2]!];
+  }));
   if (!RUN_CASES.includes(runCase)) throw new Error(`Invalid --case; use ${RUN_CASES.join(', ')}`);
   if (command === 'build') await build(resolve(dir), number('items', '600000'), number('chunks-per-item', '1'));
   else {
-    const result = await run(resolve(dir), number('seconds', '300'), flag('memory-max', '2G')!, { runCase, walBytes: number('wal-mb', '2048') * 1024 * 1024, ioFloorMs: number('io-floor-ms', '50'), ioWaitSeconds: number('io-wait-seconds', '600'), quick: args.includes('--quick'), ...(sqliteMmap ? { sqliteMmap } : {}), swapReading: args.includes('--swap-reading'), ioThrottleUnavailable: args.includes('--io-throttle-unavailable') });
+    const result = await run(resolve(dir), number('seconds', '300'), flag('memory-max', '2G')!, { runCase, walBytes: number('wal-mb', '2048') * 1024 * 1024, ioFloorMs: number('io-floor-ms', '50'), ioWaitSeconds: number('io-wait-seconds', '600'), quick: args.includes('--quick'), ...(sqliteMmap ? { sqliteMmap } : {}), swapReading: args.includes('--swap-reading'), ioThrottleUnavailable: args.includes('--io-throttle-unavailable'), engineEnv });
     // Exit 3 is "host busy" and 4 "not run": neither completed measurement.
     process.exitCode = result === 'host_busy' ? 3 : result === 'not_run' ? 4 : result ? 0 : 1;
   }
