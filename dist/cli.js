@@ -46962,7 +46962,7 @@ function readStoreTotals(db) {
     return;
   const rows = db.query("SELECT name, n FROM store_totals").all();
   const totals = storeTotalsFromRows(rows, state.reconciled_at);
-  if (state.drift === WALK_OWED_NOW)
+  if (state.drift === WALK_OWED_NOW || rows.some(({ name, n }) => name !== STORE_TOTALS_WRITES && n < 0))
     totals.walkOwed = "now";
   else if (state.drift === WALK_OWED_LATER)
     totals.walkOwed = "later";
@@ -47058,13 +47058,8 @@ function applyStoreTotalsCount(db, count, nowIso, options = {}) {
   })();
   return drift;
 }
-function storeTotalsReconcileDue(totals, nowMs) {
-  if (!totals || totals.walkOwed === "now")
-    return true;
-  if (totals.walkOwed !== "later")
-    return false;
-  const at = Date.parse(totals.reconciledAt);
-  return !Number.isFinite(at) || nowMs - at >= STORE_TOTALS_REWALK_AFTER_MS;
+function deferStoreTotalsWalk(db) {
+  db.query("UPDATE store_totals_state SET drift = ? WHERE id = 1").run(WALK_OWED_LATER);
 }
 function readStoreWriteSequence(db) {
   const row = db.query("SELECT n FROM store_totals WHERE name = ?").get(STORE_TOTALS_WRITES);
@@ -47072,7 +47067,7 @@ function readStoreWriteSequence(db) {
 }
 var WALK_OWED_LATER = -1, WALK_OWED_NOW = -2, STORE_TOTALS_TRIGGERS, STORE_TOTALS_WRITES = "writes", bump = (name, by) => `
   INSERT INTO store_totals (name, n) VALUES (${name}, ${by})
-    ON CONFLICT(name) DO UPDATE SET n = n + excluded.n;`, STORE_TOTALS_WALK_KEYS = 20000, STORE_TOTALS_REWALK_AFTER_MS;
+    ON CONFLICT(name) DO UPDATE SET n = n + excluded.n;`, STORE_TOTALS_WALK_KEYS = 20000, STORE_TOTALS_QUIET_MS;
 var init_store_totals = __esm(() => {
   STORE_TOTALS_TRIGGERS = [
     "connector_store_totals_item_insert",
@@ -47087,7 +47082,7 @@ var init_store_totals = __esm(() => {
     "connector_store_totals_sync_delete",
     ...["items", "chunks", "chunk_embeddings", "sync_runs"].flatMap((table) => ["insert", "update", "delete"].map((op) => `connector_store_totals_writes_${table}_${op}`))
   ];
-  STORE_TOTALS_REWALK_AFTER_MS = 60 * 60000;
+  STORE_TOTALS_QUIET_MS = 60 * 60000;
 });
 
 // src/core/local-model-policy.ts
@@ -78248,11 +78243,24 @@ ${parentKey(ref)}`, { ref, origin });
         return;
       }
     }
-    async reconcileTotals() {
+    totalsQuiet;
+    async reconcileTotals({ background = false } = {}) {
       if (this.readOnly || this.reclaiming)
         return;
-      if (!storeTotalsInstalled(this.db))
+      const installed = storeTotalsInstalled(this.db);
+      if (!installed)
         createStoreTotals(this.db, NON_SYNC_RUN_CONNECTORS_SQL);
+      const totals = this.totals();
+      if (background && totals && totals.walkOwed !== "now") {
+        if (totals.walkOwed !== "later")
+          return;
+        const writes = this.writeSequence();
+        const now = this.now().getTime();
+        if (!this.totalsQuiet || this.totalsQuiet.writes !== writes)
+          this.totalsQuiet = { writes, since: now };
+        if (now - this.totalsQuiet.since < STORE_TOTALS_QUIET_MS)
+          return;
+      }
       const pool = offThreadReadsSupported(this.dbPath);
       const steps = storeTotalsWalkSteps(NON_SYNC_RUN_CONNECTORS_SQL);
       let step = steps.next();
@@ -78270,7 +78278,15 @@ ${parentKey(ref)}`, { ref, origin });
       }
       if (this.reclaiming)
         return;
-      return applyStoreTotalsCount(this.db, step.value.count, new Date().toISOString(), { exact: step.value.quiet });
+      const { count, quiet } = step.value;
+      const now = this.now();
+      let drift = 0;
+      if (!quiet && totals && totals.walkOwed !== "now")
+        deferStoreTotalsWalk(this.db);
+      else
+        drift = applyStoreTotalsCount(this.db, count, now.toISOString(), { exact: quiet });
+      this.totalsQuiet = quiet ? undefined : { writes: this.writeSequence(), since: now.getTime() };
+      return drift;
     }
     embeddingInputHashesChecked = false;
     embeddingInputHashWalk;
@@ -279040,12 +279056,10 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         for (const store of connectorStores) {
           if (standBack.holds("status"))
             break;
-          if (!storeTotalsReconcileDue(store.totals(), Date.now()))
-            continue;
           try {
-            const drift = await store.reconcileTotals();
+            const drift = await store.reconcileTotals({ background: true });
             if (drift)
-              console.warn(`[olympus] store totals: ${store.corpusId} was off by ${drift}; put right from an exact count.`);
+              console.warn(`[olympus] store totals: ${store.corpusId} adjusted by ${drift}.`);
           } catch (error) {
             console.warn(`[olympus] store totals: ${store.corpusId} count failed (${error instanceof Error ? error.message : String(error)}); tried again next pass.`);
           }
@@ -279301,7 +279315,6 @@ var init_server5 = __esm(async () => {
   init_analyst_answer();
   init_answer_latency_log();
   init_status();
-  init_store_totals();
   init_main_thread_sql_trace();
   init_http();
   init_analyst();

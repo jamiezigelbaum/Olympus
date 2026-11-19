@@ -4,7 +4,8 @@ import { noteSourceIndexReadProgress } from '../../core/source-index/read-progre
 import { sizeHeldItemKey } from '../../core/source-size-limits.ts';
 import { applySqliteMmap } from './sqlite-mmap.ts';
 import {
-  applyStoreTotalsCount, createStoreTotals, readStoreTotals, readStoreWriteSequence, storeTotalsFromRows, storeTotalsInstalled, storeTotalsWalkSteps,
+  applyStoreTotalsCount, createStoreTotals, deferStoreTotalsWalk, readStoreTotals, readStoreWriteSequence,
+  STORE_TOTALS_QUIET_MS, storeTotalsFromRows, storeTotalsInstalled, storeTotalsWalkSteps,
   type StoreTotals,
 } from './store-totals.ts';
 import { createVectorDigestSchema, writeVectorDigest, backfillVectorDigests, vectorDigestState, vectorDigestSourceQuery, applyVectorDigestWindow, type VectorDigestSourceRow } from './vector-digest.ts';
@@ -16955,16 +16956,31 @@ export class LocalConnectorStore {
     try { return readStoreWriteSequence(this.db); } catch { return undefined; }
   }
 
+  private totalsQuiet: { writes: number | undefined; since: number } | undefined;
+
   /**
    * Walk the store's tables a page of keys at a time (store-totals.ts), each
    * page its own read on the read worker where the store allows it, and put
    * right any drift. A walk that saw writes leaves the totals owing another
-   * walk later. Returns the drift, or undefined while maintenance owns the
-   * writer or for a read-only open.
+   * walk later. Returns the drift, or undefined when no walk ran, while
+   * maintenance owns the writer, or for a read-only open.
    */
-  async reconcileTotals(): Promise<number | undefined> {
+  async reconcileTotals({ background = false }: { background?: boolean } = {}): Promise<number | undefined> {
     if (this.readOnly || this.reclaiming) return undefined;
-    if (!storeTotalsInstalled(this.db)) createStoreTotals(this.db, NON_SYNC_RUN_CONNECTORS_SQL);
+    const installed = storeTotalsInstalled(this.db);
+    if (!installed) createStoreTotals(this.db, NON_SYNC_RUN_CONNECTORS_SQL);
+    const totals = this.totals();
+    // In the background, exact totals are never walked: the triggers keep
+    // them exact through every write. A walk that saw writes is retried once
+    // the store's write sequence has held still for a quiet hour, not hourly
+    // while the store stays busy.
+    if (background && totals && totals.walkOwed !== 'now') {
+      if (totals.walkOwed !== 'later') return undefined;
+      const writes = this.writeSequence();
+      const now = this.now().getTime();
+      if (!this.totalsQuiet || this.totalsQuiet.writes !== writes) this.totalsQuiet = { writes, since: now };
+      if (now - this.totalsQuiet.since < STORE_TOTALS_QUIET_MS) return undefined;
+    }
     const pool = offThreadReadsSupported(this.dbPath);
     const steps = storeTotalsWalkSteps(NON_SYNC_RUN_CONNECTORS_SQL);
     let step = steps.next();
@@ -16981,7 +16997,15 @@ export class LocalConnectorStore {
       step = steps.next(rows);
     }
     if (this.reclaiming) return undefined;
-    return applyStoreTotalsCount(this.db, step.value.count, new Date().toISOString(), { exact: step.value.quiet });
+    const { count, quiet } = step.value;
+    const now = this.now();
+    // A mixed snapshot could double-count a write already seen by a page.
+    // Keep filled totals until a quiet walk can replace them exactly.
+    let drift = 0;
+    if (!quiet && totals && totals.walkOwed !== 'now') deferStoreTotalsWalk(this.db);
+    else drift = applyStoreTotalsCount(this.db, count, now.toISOString(), { exact: quiet });
+    this.totalsQuiet = quiet ? undefined : { writes: this.writeSequence(), since: now.getTime() };
+    return drift;
   }
 
   private embeddingInputHashesChecked = false;
