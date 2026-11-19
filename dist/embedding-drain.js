@@ -16475,7 +16475,7 @@ function readStoreTotals(db) {
     return;
   const rows = db.query("SELECT name, n FROM store_totals").all();
   const totals = storeTotalsFromRows(rows, state.reconciled_at);
-  if (state.drift === WALK_OWED_NOW)
+  if (state.drift === WALK_OWED_NOW || rows.some(({ name, n }) => name !== STORE_TOTALS_WRITES && n < 0))
     totals.walkOwed = "now";
   else if (state.drift === WALK_OWED_LATER)
     totals.walkOwed = "later";
@@ -16572,7 +16572,10 @@ function applyStoreTotalsCount(db, count, nowIso, options = {}) {
   })();
   return drift;
 }
-var STORE_TOTALS_REWALK_AFTER_MS = 60 * 60000;
+var STORE_TOTALS_QUIET_MS = 60 * 60000;
+function deferStoreTotalsWalk(db) {
+  db.query("UPDATE store_totals_state SET drift = ? WHERE id = 1").run(WALK_OWED_LATER);
+}
 function readStoreWriteSequence(db) {
   const row = db.query("SELECT n FROM store_totals WHERE name = ?").get(STORE_TOTALS_WRITES);
   return row ? Number(row.n) : undefined;
@@ -34046,11 +34049,24 @@ ${parentKey(ref)}`, { ref, origin });
       return;
     }
   }
-  async reconcileTotals() {
+  totalsQuiet;
+  async reconcileTotals({ background = false } = {}) {
     if (this.readOnly)
       return;
-    if (!storeTotalsInstalled(this.db))
+    const installed = storeTotalsInstalled(this.db);
+    if (!installed)
       createStoreTotals(this.db, NON_SYNC_RUN_CONNECTORS_SQL);
+    const totals = this.totals();
+    if (background && totals && totals.walkOwed !== "now") {
+      if (totals.walkOwed !== "later")
+        return;
+      const writes = this.writeSequence();
+      const now = this.now().getTime();
+      if (!this.totalsQuiet || this.totalsQuiet.writes !== writes)
+        this.totalsQuiet = { writes, since: now };
+      if (now - this.totalsQuiet.since < STORE_TOTALS_QUIET_MS)
+        return;
+    }
     const pool = offThreadReadsSupported(this.dbPath);
     const steps = storeTotalsWalkSteps(NON_SYNC_RUN_CONNECTORS_SQL);
     let step = steps.next();
@@ -34066,7 +34082,15 @@ ${parentKey(ref)}`, { ref, origin });
       }
       step = steps.next(rows);
     }
-    return applyStoreTotalsCount(this.db, step.value.count, new Date().toISOString(), { exact: step.value.quiet });
+    const { count, quiet } = step.value;
+    const now = this.now();
+    let drift = 0;
+    if (!quiet && totals && totals.walkOwed !== "now")
+      deferStoreTotalsWalk(this.db);
+    else
+      drift = applyStoreTotalsCount(this.db, count, now.toISOString(), { exact: quiet });
+    this.totalsQuiet = quiet ? undefined : { writes: this.writeSequence(), since: now.getTime() };
+    return drift;
   }
   embeddingInputHashesChecked = false;
   embeddingInputHashWalk;

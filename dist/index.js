@@ -16712,7 +16712,7 @@ var init_source_size_limits = __esm(() => {
 });
 
 // src/workers/connector-store/store-totals.ts
-var STORE_TOTALS_TRIGGERS, STORE_TOTALS_REWALK_AFTER_MS;
+var STORE_TOTALS_TRIGGERS, STORE_TOTALS_QUIET_MS;
 var init_store_totals = __esm(() => {
   STORE_TOTALS_TRIGGERS = [
     "connector_store_totals_item_insert",
@@ -16727,7 +16727,7 @@ var init_store_totals = __esm(() => {
     "connector_store_totals_sync_delete",
     ...["items", "chunks", "chunk_embeddings", "sync_runs"].flatMap((table) => ["insert", "update", "delete"].map((op) => `connector_store_totals_writes_${table}_${op}`))
   ];
-  STORE_TOTALS_REWALK_AFTER_MS = 60 * 60000;
+  STORE_TOTALS_QUIET_MS = 60 * 60000;
 });
 
 // src/workers/source-index/embedding-identity.ts
