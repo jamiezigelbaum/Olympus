@@ -66328,6 +66328,45 @@ function connectorStoreReadableNow(dbPath, onFailure) {
     db?.close();
   }
 }
+function connectorRecencyIndexWorkerSource() {
+  return `
+import { Database } from 'bun:sqlite';
+self.onmessage = ({ data: [path] }) => {
+  const db = new Database(path, { create: false, strict: true });
+  let result;
+  try {
+    db.exec('PRAGMA busy_timeout = 0; PRAGMA synchronous = NORMAL; PRAGMA wal_autocheckpoint = 0;');
+    db.transaction(() => db.exec(${JSON.stringify(CONNECTOR_STORE_RECENCY_INDEX_SQL)})).immediate();
+    result = { done: true };
+  } catch (error) {
+    result = { busy: /^SQLITE_(BUSY|LOCKED)(_|$)/.test(error.code) };
+  } finally {
+    db.close();
+  }
+  postMessage(result);
+};`;
+}
+function spawnConnectorStoreMaintenance(dbPath, source, args = []) {
+  const supervisor = `
+    const worker = new Worker(URL.createObjectURL(new Blob([${JSON.stringify(source)}], {type:'text/javascript'})));
+    process.stdin.resume();
+    process.stdin.on('end', () => process.kill(process.pid, 'SIGKILL'));
+    worker.onmessage = ({data}) => {
+      console.log(JSON.stringify(data));
+      if (!data.started) process.exit(0);
+    };
+    worker.onerror = () => process.exit(1);
+    worker.postMessage(JSON.parse(process.argv[1]));`;
+  return Bun.spawn([process.execPath, "-e", supervisor, JSON.stringify([dbPath, ...args])], {
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "ignore",
+    env: { ...process.env, SQLITE_TMPDIR: dirname45(dbPath), TMPDIR: dirname45(dbPath) }
+  });
+}
+function setConnectorStoreRecencyIndexAdmission(admit) {
+  admitRecencyIndexBuild = admit;
+}
 async function syncAndEmbedFromConnector(options) {
   const localItemIds = new Set;
   const connector = {
@@ -68884,6 +68923,8 @@ function connectorStoreOpenStamp(db) {
   const rows = db.query("SELECT type, name, tbl_name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name").all();
   let hash = connectorStoreOpenShape() >>> 0;
   for (const row of rows) {
+    if (row.type === "index" && (row.name === CONNECTOR_STORE_RECENCY_INDEX || row.name === CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX))
+      continue;
     const text = `${row.type}\x00${row.name}\x00${row.tbl_name}\x00${row.sql ?? ""}
 `;
     for (let index = 0;index < text.length; index += 1) {
@@ -69283,7 +69324,7 @@ function sqliteJournalSettingsOf(db) {
     wal_autocheckpoint: db.query("PRAGMA wal_autocheckpoint").get().wal_autocheckpoint
   };
 }
-var TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff", DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, KEYWORD_CANDIDATE_SCAN_CAP = 1000, KEYWORD_RANKED_BOUND_MIN = 256, KEYWORD_RANKED_BOUND_MAX = 8192, KEYWORD_RANKED_BOUND_ROWS_PER_ITEM = 8, CONCEPT_COUNT_MAX_AGE_MS, KEYWORD_POPULATION_SQL = "SELECT COUNT(*) AS count FROM items WHERE tombstoned = 0", CONCEPT_COUNT_MEMO_LIMIT = 512, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, VECTOR_VISIBILITY_BATCH_SIZE = 200, VECTOR_VISIBILITY_SLICE_MS = 50, CONNECTOR_STORE_CONVERSATION_INDEX = "idx_connector_store_items_conversation_time", CONNECTOR_STORE_CONVERSATION_INDEX_SQL, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 16, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, ITEM_VISIBILITY_FEED_RETENTION = 65536, CONNECTOR_STORE_VISIBILITY_TRIGGERS, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, SEARCH_VECTOR_LANE_MEMO_MS = 60000, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, MISSING_EMBEDDING_CHUNK_WINDOW = 20000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 500, EMBEDDING_WORK_PAGE_ROWS = 5000, VISIBILITY_HOLD_WAITS = 100, VISIBILITY_HOLD_WAIT_MS = 10, PK_SET_SLICE = 20000, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, VISIBILITY_MEMBER_BITS, VISIBILITY_PUBLISH_CHUNK = 4096, VISIBILITY_BACKSTOP_MS = 5000, VISIBILITY_LEASE_MS = 30000, VISIBILITY_RETRY_MIN_MS = 1000, VISIBILITY_RETRY_MAX_MS = 60000, LEDGER_VISIBILITY_FEED_RETENTION = 8192, VISIBILITY_TICK_ITEMS = 256, visibilityWritersByLedger, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_RUN_ID = "restored-source-scope", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE = 512, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff", DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, KEYWORD_CANDIDATE_SCAN_CAP = 1000, KEYWORD_RANKED_BOUND_MIN = 256, KEYWORD_RANKED_BOUND_MAX = 8192, KEYWORD_RANKED_BOUND_ROWS_PER_ITEM = 8, CONCEPT_COUNT_MAX_AGE_MS, KEYWORD_POPULATION_SQL = "SELECT COUNT(*) AS count FROM items WHERE tombstoned = 0", CONCEPT_COUNT_MEMO_LIMIT = 512, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, VECTOR_VISIBILITY_BATCH_SIZE = 200, VECTOR_VISIBILITY_SLICE_MS = 50, CONNECTOR_STORE_CONVERSATION_INDEX = "idx_connector_store_items_conversation_time", CONNECTOR_STORE_CONVERSATION_INDEX_SQL, CONNECTOR_STORE_RECENCY_INDEX = "idx_connector_store_items_recent_live", CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX = "idx_connector_store_items_recent_account_live", RECENCY_LIVE_SQL = "tombstoned IS 0", ACCOUNT_RECENCY_LIVE_SQL = "+tombstoned IS 0", CONNECTOR_STORE_RECENCY_INDEX_SQL, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 16, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, ITEM_VISIBILITY_FEED_RETENTION = 65536, CONNECTOR_STORE_VISIBILITY_TRIGGERS, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, SEARCH_VECTOR_LANE_MEMO_MS = 60000, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, MISSING_EMBEDDING_CHUNK_WINDOW = 20000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 500, EMBEDDING_WORK_PAGE_ROWS = 5000, VISIBILITY_HOLD_WAITS = 100, VISIBILITY_HOLD_WAIT_MS = 10, PK_SET_SLICE = 20000, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, VISIBILITY_MEMBER_BITS, VISIBILITY_PUBLISH_CHUNK = 4096, VISIBILITY_BACKSTOP_MS = 5000, VISIBILITY_LEASE_MS = 30000, VISIBILITY_RETRY_MIN_MS = 1000, VISIBILITY_RETRY_MAX_MS = 60000, LEDGER_VISIBILITY_FEED_RETENTION = 8192, VISIBILITY_TICK_ITEMS = 256, visibilityWritersByLedger, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_RUN_ID = "restored-source-scope", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE = 512, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
@@ -69328,7 +69369,7 @@ self.onmessage = ({ data: [path, budgetMs, pagesPerStep] }) => {
   } finally {
     closeSqliteStore(db);
   }
-};`, RECLAIM_MAX_PAGES_PER_STEP = 128, RECLAIM_CONVERSION_BYTES_PER_MS = 15000, SUPERSEDED_PRUNE_MEDIA_ROWS = 1, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_WEIGHT = 0.25, CHAT_RECENCY_PIN_COUNT = 2, CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8, lexicalContentPreference, STORE_LEADER_LATEST_SEAT = 1, LANE_LEADER_SEATS = 3, OWNER_AUTHOR_LABEL = "You", CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", PDF_EXTRACTION_BACKLOG_SQL = `
+};`, admitRecencyIndexBuild, recencyIndexBuilding = false, RECENCY_INDEX_RETRY_MS = 250, RECENCY_INDEX_BUSY_RETRY_MS = 2000, RECENCY_INDEX_NOT_ADMITTED_RETRY_MS = 30000, RECLAIM_MAX_PAGES_PER_STEP = 128, RECLAIM_CONVERSION_BYTES_PER_MS = 15000, SUPERSEDED_PRUNE_MEDIA_ROWS = 1, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_WEIGHT = 0.25, CHAT_RECENCY_PIN_COUNT = 2, CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8, lexicalContentPreference, STORE_LEADER_LATEST_SEAT = 1, LANE_LEADER_SEATS = 3, OWNER_AUTHOR_LABEL = "You", CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", PDF_EXTRACTION_BACKLOG_SQL = `
   SELECT
     SUM(CASE WHEN chars IS NULL THEN 1 ELSE 0 END) AS pending,
     SUM(CASE WHEN chars IS NULL THEN 0 ELSE 1 END) AS extracted,
@@ -69411,6 +69452,12 @@ var init_local_index = __esm(() => {
   CONCEPT_COUNT_MAX_AGE_MS = 5 * 60000;
   CONNECTOR_STORE_CONVERSATION_INDEX_SQL = `CREATE INDEX IF NOT EXISTS ${CONNECTOR_STORE_CONVERSATION_INDEX}
   ON items(provider_conversation_id, authored_at) WHERE provider_conversation_id IS NOT NULL`;
+  CONNECTOR_STORE_RECENCY_INDEX_SQL = `
+  CREATE INDEX IF NOT EXISTS ${CONNECTOR_STORE_RECENCY_INDEX}
+    ON items(COALESCE(authored_at, updated_at, indexed_at)) WHERE ${RECENCY_LIVE_SQL};
+  CREATE INDEX IF NOT EXISTS ${CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX}
+    ON items(account_scope, COALESCE(authored_at, updated_at, indexed_at)) WHERE ${ACCOUNT_RECENCY_LIVE_SQL};
+`;
   READ_RESULT_PROJECTION_LOCATOR_URI = Symbol("connector-store-result-projection-locator-uri");
   CALIBRATED_CONTENT_PREFERENCE_BARS = new Map([
     ["gemini-embedding-2", DEFAULT_SEMANTIC_RELEVANCE_BAR],
@@ -69607,6 +69654,8 @@ var init_local_index = __esm(() => {
           const current = !migrating && !creatingFile && this.db.query("PRAGMA user_version").get().user_version === connectorStoreOpenStamp(this.db);
           if (!current) {
             applyConnectorStoreOpenSchema(this.db);
+            if (creatingFile)
+              this.db.exec(CONNECTOR_STORE_RECENCY_INDEX_SQL);
             if (this.dbPath !== ":memory:")
               this.db.exec(`PRAGMA user_version = ${connectorStoreOpenStamp(this.db)}`);
           }
@@ -69634,12 +69683,72 @@ var init_local_index = __esm(() => {
           if (model && !vectorDigestState(this.db, model).completed)
             this.scheduleVectorDigestBackfill(model, VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS);
         }
+        if (!this.readOnly && !creatingFile && this.db.query("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name IN (?, ?)").get(CONNECTOR_STORE_RECENCY_INDEX, CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX).n < 2) {
+          if (admitRecencyIndexBuild)
+            this.scheduleRecencyIndexBuild();
+        }
         reportFrontStoreOpened();
         changeMemoryCounter("connector_stores", 1);
         trackSqliteStoreMemory(this.db, this.visibilityJournal);
       } catch (error) {
         closeSqliteStore(this.db, this.readOnly ? { checkpoint: false, readOnly: true } : undefined);
         throw error;
+      }
+    }
+    recencyIndexTimer;
+    scheduleRecencyIndexBuild(delayMs = 0) {
+      this.recencyIndexTimer = setTimeout(() => {
+        this.recencyIndexTimer = undefined;
+        this.buildRecencyIndex();
+      }, delayMs);
+      this.recencyIndexTimer.unref?.();
+    }
+    async buildRecencyIndex() {
+      const admit = admitRecencyIndexBuild;
+      if (!admit || this.closedForPoolReads || this.fileReplacedOrRemoved())
+        return;
+      if (this.db.query("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name IN (?, ?)").get(CONNECTOR_STORE_RECENCY_INDEX, CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX).n >= 2)
+        return;
+      if (recencyIndexBuilding || this.reclaimProcess || this.vectorDigestBackfillReading || this.visibilityPublishing || storeReadHasPriority()) {
+        this.scheduleRecencyIndexBuild(RECENCY_INDEX_BUSY_RETRY_MS);
+        return;
+      }
+      recencyIndexBuilding = true;
+      try {
+        let preempted = false;
+        const complete = await admit(async () => {
+          if (this.closedForPoolReads || this.fileReplacedOrRemoved())
+            return false;
+          assertWritableStoreOpenAllowed("connector store recency index", this.dbPath);
+          const child = spawnConnectorStoreMaintenance(this.dbPath, connectorRecencyIndexWorkerSource());
+          this.reclaimProcess = child;
+          child.unref();
+          try {
+            const [code, output] = await Promise.all([child.exited, new Response(child.stdout).text()]);
+            if (preempted || this.closedForPoolReads)
+              return false;
+            if (code !== 0)
+              throw new Error("Recency index worker exited unsuccessfully.");
+            const result = JSON.parse(output);
+            if (!result.done && !result.busy)
+              throw new Error("Recency index build failed.");
+            return result.done === true;
+          } finally {
+            child.stdin.end();
+            this.reclaimProcess = undefined;
+          }
+        }, () => {
+          preempted = true;
+          this.reclaimProcess?.kill("SIGKILL");
+        });
+        if (!complete && !this.closedForPoolReads) {
+          this.scheduleRecencyIndexBuild(complete === undefined ? RECENCY_INDEX_NOT_ADMITTED_RETRY_MS : RECENCY_INDEX_RETRY_MS);
+        }
+      } catch {
+        if (!this.closedForPoolReads)
+          console.warn("Connector store recency index build failed; will retry the build on the next writable open.");
+      } finally {
+        recencyIndexBuilding = false;
       }
     }
     vectorDigestBackfillTimer;
@@ -69745,7 +69854,9 @@ var init_local_index = __esm(() => {
       changeMemoryCounter("embedding_queue", -(this.embeddingQueueState?.size ?? 0));
       this.embeddingQueueState = undefined;
       const reclaiming = this.reclaimProcess !== undefined;
+      const buildingRecencyIndex = reclaiming && this.reclaimPreempt === undefined;
       this.reclaimProcess?.kill("SIGKILL");
+      clearTimeout(this.recencyIndexTimer);
       clearTimeout(this.vectorDigestBackfillTimer);
       this.stopVisibilityPublisher();
       try {
@@ -69760,7 +69871,7 @@ var init_local_index = __esm(() => {
         this.closedForPoolReads = true;
         if (offThreadReadsSupported(this.dbPath))
           releaseOffThreadReads(this.dbPath);
-        closeSqliteStore(this.db, this.readOnly ? { checkpoint: false, readOnly: true } : undefined);
+        closeSqliteStore(this.db, this.readOnly ? { checkpoint: false, readOnly: true } : buildingRecencyIndex ? { checkpoint: false } : undefined);
       }
     }
     reclaimProcess;
@@ -69812,22 +69923,7 @@ var init_local_index = __esm(() => {
       pagesPerStep = Math.max(1, Math.floor(pagesPerStep));
       assertWritableStoreOpenAllowed("connector store reclaim", this.dbPath);
       assertStoreTierLedgerCanOpen(this.dbPath);
-      const supervisor = `
-      const worker = new Worker(URL.createObjectURL(new Blob([${JSON.stringify(CONNECTOR_RECLAIM_WORKER_SOURCE)}], {type:'text/javascript'})));
-      process.stdin.resume();
-      process.stdin.on('end', () => process.kill(process.pid, 'SIGKILL'));
-      worker.onmessage = ({data}) => {
-        console.log(JSON.stringify(data));
-        if (!data.started) process.exit(0);
-      };
-      worker.onerror = () => process.exit(1);
-      worker.postMessage(JSON.parse(process.argv[1]));`;
-      const child = Bun.spawn([process.execPath, "-e", supervisor, JSON.stringify([this.dbPath, budgetMs, pagesPerStep])], {
-        stdin: "pipe",
-        stdout: "pipe",
-        stderr: "ignore",
-        env: { ...process.env, SQLITE_TMPDIR: dirname45(this.dbPath), TMPDIR: dirname45(this.dbPath) }
-      });
+      const child = spawnConnectorStoreMaintenance(this.dbPath, CONNECTOR_RECLAIM_WORKER_SOURCE, [budgetMs, pagesPerStep]);
       this.reclaimProcess = child;
       let preempted = false;
       const preempt = () => {
@@ -77517,30 +77613,75 @@ ${parentKey(ref)}`, { ref, origin });
       const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
       const selectedAccount = normalizeOptionalAccountScope(accountScope);
       const selectedFilters = connectorStoreFilterSql(filters);
-      return {
-        mode: "all",
-        site: "recentItemsRead",
-        sql: `
-      SELECT
+      const columns = `
         i.item_pk, i.provider, i.family, i.account_scope, i.provider_item_id, i.provider_thread_id,
         i.provider_conversation_id, i.provider_file_id, i.provider_event_id, i.local_item_id,
         i.source_version, i.title, i.sender_id, i.sender_label, i.sender_is_owner,
         i.mime_type, i.authored_at, i.updated_at,
         i.trust_tier, i.sync_run_id,
-        0 AS rank
-      FROM items i
-      WHERE i.tombstoned = 0
-        ${selectedAccount ? "AND i.account_scope = ?" : ""}
-        ${selectedFilters.sql}
-        AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
-      ORDER BY COALESCE(i.authored_at, i.updated_at, i.indexed_at) DESC, i.item_pk DESC
-      LIMIT ?
-    `,
-        params: [
-          ...selectedAccount ? [selectedAccount] : [],
-          ...selectedFilters.params,
-          limit
-        ]
+        0 AS rank`;
+      const time = "COALESCE(i.authored_at, i.updated_at, i.indexed_at)";
+      const hasChunks = "EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)";
+      if (selectedFilters.sql) {
+        return {
+          mode: "all",
+          site: "recentItemsRead",
+          sql: `
+          SELECT ${columns}
+          FROM items i
+          WHERE i.tombstoned = 0
+            ${selectedAccount ? "AND i.account_scope = ?" : ""}
+            ${selectedFilters.sql}
+            AND ${hasChunks}
+          ORDER BY +${time} DESC, i.item_pk DESC
+          LIMIT ?
+        `,
+          params: [...selectedAccount ? [selectedAccount] : [], ...selectedFilters.params, limit]
+        };
+      }
+      const account = selectedAccount ? "AND i.account_scope = ?1" : "";
+      const take = selectedAccount ? "?2" : "?1";
+      const probeLimit = `4 * ${take}`;
+      const index = selectedAccount ? CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX : CONNECTOR_STORE_RECENCY_INDEX;
+      const live = selectedAccount ? ACCOUNT_RECENCY_LIVE_SQL : RECENCY_LIVE_SQL;
+      return {
+        mode: "all",
+        site: "recentItemsRead",
+        sql: `
+        WITH index_state AS MATERIALIZED (
+          SELECT EXISTS (SELECT 1 FROM main.sqlite_master WHERE name = '${index}' AND type = 'index') AS ready
+        ), candidates AS MATERIALIZED (
+          SELECT i.item_pk, ${time} AS recent_at
+          FROM items i
+          WHERE ${live} ${account}
+          ORDER BY ${time} DESC, i.item_pk DESC
+          LIMIT CASE WHEN (SELECT ready FROM index_state) THEN ${probeLimit} ELSE 0 END
+        ), matches AS MATERIALIZED (
+          SELECT i.item_pk, i.recent_at FROM candidates i WHERE ${hasChunks}
+          ORDER BY i.recent_at DESC, i.item_pk DESC
+          LIMIT ${take}
+        ), fallback AS MATERIALIZED (
+          SELECT NOT ready OR (
+            (SELECT COUNT(*) FROM candidates) = ${probeLimit}
+            AND (SELECT COUNT(*) FROM matches) < ${take}
+          ) AS needed FROM index_state
+        ), recent AS (
+          SELECT item_pk, recent_at FROM matches WHERE NOT (SELECT needed FROM fallback)
+          UNION ALL
+          SELECT * FROM (
+            SELECT i.item_pk, ${time} AS recent_at
+            FROM items i
+            WHERE i.tombstoned = 0 ${account} AND ${hasChunks}
+            ORDER BY +${time} DESC, i.item_pk DESC
+            LIMIT CASE WHEN (SELECT needed FROM fallback) THEN ${take} ELSE 0 END
+          )
+        )
+        SELECT ${columns}
+        FROM recent CROSS JOIN items i ON i.item_pk = recent.item_pk
+        ORDER BY recent.recent_at DESC, recent.item_pk DESC
+        LIMIT ${take}
+      `,
+        params: selectedAccount ? [selectedAccount, limit] : [limit]
       };
     }
     conversationNeighbours(localItemId, perSide, accountScope, filters) {
@@ -78113,7 +78254,7 @@ ${parentKey(ref)}`, { ref, origin });
     }
     totalsQuiet;
     async reconcileTotals({ background = false } = {}) {
-      if (this.readOnly)
+      if (this.readOnly || this.reclaiming)
         return;
       const installed = storeTotalsInstalled(this.db);
       if (!installed)
@@ -78144,6 +78285,8 @@ ${parentKey(ref)}`, { ref, origin });
         }
         step = steps.next(rows);
       }
+      if (this.reclaiming)
+        return;
       const { count, quiet } = step.value;
       const now = this.now();
       let drift = 0;
@@ -78157,7 +78300,7 @@ ${parentKey(ref)}`, { ref, origin });
     embeddingInputHashesChecked = false;
     embeddingInputHashWalk;
     async repairEmbeddingInputHashes(pageKeys = 2000, pages = 50) {
-      if (this.readOnly || this.embeddingInputHashesChecked)
+      if (this.readOnly || this.reclaiming || this.embeddingInputHashesChecked)
         return 0;
       const pool = offThreadReadsSupported(this.dbPath);
       const read = async (sql, params) => pool ? readInBackground(this.dbPath, { sql, params, mode: "all" }) : this.db.query(sql).all(...params);
@@ -78171,6 +78314,8 @@ ${parentKey(ref)}`, { ref, origin });
       for (let page = 0;page < pages && walk.after < walk.last; page += 1) {
         const hi = Math.min(walk.after + pageKeys, walk.last);
         const rows = await read("SELECT chunk_pk FROM chunks WHERE chunk_pk > ? AND chunk_pk <= ? AND embedding_input_hash IS NULL", [walk.after, hi]);
+        if (this.reclaiming)
+          break;
         walk.after = hi;
         if (rows.length > 0)
           this.db.transaction(() => {
@@ -273946,6 +274091,13 @@ async function main() {
     reason: () => ownerAskReason(ownerQuestions, () => remoteOwnerBusy(OWNER_QUESTION_RESOURCE))
   });
   setVectorDigestBackfillHold(() => standBack.holds("digest"));
+  let recencyIndexMaintenanceReady = false;
+  if (!engineFront)
+    setConnectorStoreRecencyIndexAdmission(async (work, preempt) => {
+      if (!recencyIndexMaintenanceReady || ownerQuestions.busy || remoteOwnerBusy(OWNER_QUESTION_RESOURCE))
+        return;
+      return sourceScheduler ? sourceScheduler.withIdleTasks(work, { preempt }) : work();
+    });
   const answerActivity = createAnswerActivity(() => {
     return;
   }, {
@@ -278994,6 +279146,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     sourceRuntimeClosed = true;
     loopStallFixture?.stop();
     localFilesCleanupRecovery?.close();
+    recencyIndexMaintenanceReady = false;
     sourceScheduler?.stop();
     worker.close();
     updateChecker.stop();
@@ -279083,6 +279236,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   }
   console.log(describeSovereigntyPolicy(sovereigntyEngine));
   console.log(connector ? `Connector: gogcli command adapter with Argus local/private reasoning${parseOptionalBooleanEnv(process.env.OLYMPUS_EMAIL_SOURCE_ENABLE_PLANNER, "OLYMPUS_EMAIL_SOURCE_ENABLE_PLANNER") ? " and retrieval planning" : ""}.` : "Connector: gogcli stub, not configured. Set OLYMPUS_EMAIL_SOURCE_CONNECTOR=gogcli to use the command adapter.");
+  recencyIndexMaintenanceReady = !engineFront;
 }
 function workerListenPort(port) {
   const requested = process.env[WORKER_LISTEN_PORT_ENV]?.trim();

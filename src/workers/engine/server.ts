@@ -276,7 +276,7 @@ import {
 import { canonicalConnectorStoreChatPrincipal } from '../connector-store/principal.ts';
 import { createOwnerQuestionActivity, createSourceAnswerLanes, OWNER_QUESTION_RESOURCE } from './runtime/source-answer-lanes.ts';
 import type { ConnectorStoreStatusScope } from '../connector-store/local-index.ts';
-import { setVectorDigestBackfillHold } from '../connector-store/local-index.ts';
+import { setConnectorStoreRecencyIndexAdmission, setVectorDigestBackfillHold } from '../connector-store/local-index.ts';
 import type { ExtractionUnreadableItem } from '../file-extraction/job-store.ts';
 import { gmailInternalStoreStatusScope, gmailPrivateStoreStatusScope } from '../email-source/gmail-status-scope.ts';
 import {
@@ -966,6 +966,12 @@ export async function main(): Promise<void> {
     reason: () => ownerAskReason(ownerQuestions, () => remoteOwnerBusy(OWNER_QUESTION_RESOURCE)),
   });
   setVectorDigestBackfillHold(() => standBack.holds('digest'));
+  let recencyIndexMaintenanceReady = false;
+  // Only the background role builds: the front never takes a store's write lock for it.
+  if (!engineFront) setConnectorStoreRecencyIndexAdmission(async (work, preempt) => {
+    if (!recencyIndexMaintenanceReady || ownerQuestions.busy || remoteOwnerBusy(OWNER_QUESTION_RESOURCE)) return undefined;
+    return sourceScheduler ? sourceScheduler.withIdleTasks(work, { preempt }) : work();
+  });
   // UI answer leases coordinate owner/background jobs. Actual local model
   // dispatches have separate leases; cloud searches never preempt sorting.
   const answerActivity = createAnswerActivity(() => undefined, {
@@ -7321,6 +7327,7 @@ export async function main(): Promise<void> {
     sourceRuntimeClosed = true;
     loopStallFixture?.stop();
     localFilesCleanupRecovery?.close();
+    recencyIndexMaintenanceReady = false;
     sourceScheduler?.stop();
     worker.close();
     updateChecker.stop();
@@ -7425,6 +7432,7 @@ export async function main(): Promise<void> {
       ? `Connector: gogcli command adapter with Argus local/private reasoning${parseOptionalBooleanEnv(process.env.OLYMPUS_EMAIL_SOURCE_ENABLE_PLANNER, 'OLYMPUS_EMAIL_SOURCE_ENABLE_PLANNER') ? ' and retrieval planning' : ''}.`
       : 'Connector: gogcli stub, not configured. Set OLYMPUS_EMAIL_SOURCE_CONNECTOR=gogcli to use the command adapter.',
   );
+  recencyIndexMaintenanceReady = !engineFront;
 }
 
 /** The port this process binds: the worker's, or the front's own under the engine host's split off Linux. */
