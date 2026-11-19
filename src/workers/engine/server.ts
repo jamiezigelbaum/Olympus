@@ -110,7 +110,6 @@ import {
   PLAIN_STATUS_REQUEST,
 } from '../source-index/status.ts';
 import { startPacedStatusRecount, type PacedStatusRecount } from './status-recount.ts';
-import { storeTotalsReconcileDue } from '../connector-store/store-totals.ts';
 import { LOOP_SLOW_SQL_MS, setAskBenchLoopSqlRecorder, slowMainThreadSqlHealth, startMainThreadSqlSiteCount, startSlowMainThreadSqlLog } from '../connector-store/main-thread-sql-trace.ts';
 import {
   dashboardOwnerSessionCheck,
@@ -968,7 +967,8 @@ export async function main(): Promise<void> {
   });
   setVectorDigestBackfillHold(() => standBack.holds('digest'));
   let recencyIndexMaintenanceReady = false;
-  setConnectorStoreRecencyIndexAdmission(async (work, preempt) => {
+  // Only the background role builds: the front never takes a store's write lock for it.
+  if (!engineFront) setConnectorStoreRecencyIndexAdmission(async (work, preempt) => {
     if (!recencyIndexMaintenanceReady || ownerQuestions.busy || remoteOwnerBusy(OWNER_QUESTION_RESOURCE)) return undefined;
     return sourceScheduler ? sourceScheduler.withIdleTasks(work, { preempt }) : work();
   });
@@ -7252,15 +7252,13 @@ export async function main(): Promise<void> {
       ? startPacedStatusRecount({
           holds: () => standBack.holds('status'),
           recount: async () => {
-            // The kept totals first, walked by key ranges on the read thread only when owed (never
-            // filled, a trigger put back, or an hour after a walk that saw writes), so a fresh install
-            // shows live totals before its first recount ends.
+            // Fill or repair the kept totals first. Changed inputs and quiet
+            // retries are walked by key range on the read thread.
             for (const store of connectorStores) {
               if (standBack.holds('status')) break;
-              if (!storeTotalsReconcileDue(store.totals(), Date.now())) continue;
               try {
-                const drift = await store.reconcileTotals();
-                if (drift) console.warn(`[olympus] store totals: ${store.corpusId} was off by ${drift}; put right from an exact count.`);
+                const drift = await store.reconcileTotals({ background: true });
+                if (drift) console.warn(`[olympus] store totals: ${store.corpusId} adjusted by ${drift}.`);
               } catch (error) {
                 console.warn(`[olympus] store totals: ${store.corpusId} count failed (${error instanceof Error ? error.message : String(error)}); tried again next pass.`);
               }

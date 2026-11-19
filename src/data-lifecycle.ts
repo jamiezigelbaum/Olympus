@@ -1,4 +1,5 @@
 import { connectionRequestsPath } from './core/connection-requests.ts';
+import { EMBEDDING_SWEEP_IDLE_SUFFIX } from './core/embedding-sweep-idle.ts';
 import { preSchemaBackupsOf, retiredStateBackupPath } from './core/boot-progress.ts';
 import { PEOPLE_INDEX_STORE_ID, peopleIndexPath } from './core/people-index.ts';
 import { MAC_ENGINE_DAEMON_PLIST, authorizeMacServerMode, macEngineManager } from './core/mac-engine-daemon.ts';
@@ -1731,6 +1732,14 @@ function sqliteDeleteTargets(
       allowRecursive: false,
       externalSourcePath,
     },
+    ...(sqliteStoreId === CONNECTOR_STORE_SQLITE_STORE_ID ? [{
+      path: `${sqlitePath}${EMBEDDING_SWEEP_IDLE_SUFFIX}`,
+      kind: 'source_sqlite_sidecar' as const,
+      sqliteStoreId,
+      sqlitePrimaryPath: sqlitePath,
+      allowRecursive: false,
+      externalSourcePath,
+    }] : []),
     // The store as it was before a schema update (core/boot-progress.ts):
     // a full copy of what is being deleted.
     ...preSchemaBackupsOf(sqlitePath).map((path) => ({

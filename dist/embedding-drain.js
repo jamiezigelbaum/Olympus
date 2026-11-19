@@ -2407,7 +2407,7 @@ function withSqliteFiles(path) {
 // scripts/source-embedding-drain.ts
 import { createHash as createHash14 } from "node:crypto";
 import { existsSync as existsSync24, lstatSync as lstatSync11, mkdirSync as mkdirSync14, writeFileSync as writeFileSync7 } from "node:fs";
-import { dirname as dirname25, isAbsolute as isAbsolute15 } from "node:path";
+import { dirname as dirname26, isAbsolute as isAbsolute15 } from "node:path";
 
 // src/core/config.ts
 import { existsSync as existsSync8, readFileSync as readFileSync9 } from "node:fs";
@@ -9093,10 +9093,20 @@ function chunkWindowScore(text, termGroups) {
   return { distinctGroups, occurrences };
 }
 function compactPassageWhitespace(text) {
-  return text.replace(/[^\S\n]+\n/g, `
-`).replace(/[^\S\n]{2,}/g, " ").replace(/\n{3,}/g, `
-
+  return text.replace(/\s{2,}/g, (run) => {
+    const firstNewline = run.indexOf(`
 `);
+    if (firstNewline === -1)
+      return " ";
+    const lastNewline = run.lastIndexOf(`
+`);
+    const suffixLength = run.length - lastNewline - 1;
+    const suffix = suffixLength > 1 ? " " : run.slice(lastNewline + 1);
+    return (firstNewline === lastNewline ? `
+` : `
+
+`) + suffix;
+  });
 }
 
 // src/core/source-index/partial-search.ts
@@ -16475,7 +16485,7 @@ function readStoreTotals(db) {
     return;
   const rows = db.query("SELECT name, n FROM store_totals").all();
   const totals = storeTotalsFromRows(rows, state.reconciled_at);
-  if (state.drift === WALK_OWED_NOW)
+  if (state.drift === WALK_OWED_NOW || rows.some(({ name, n }) => name !== STORE_TOTALS_WRITES && n < 0))
     totals.walkOwed = "now";
   else if (state.drift === WALK_OWED_LATER)
     totals.walkOwed = "later";
@@ -16572,7 +16582,10 @@ function applyStoreTotalsCount(db, count, nowIso, options = {}) {
   })();
   return drift;
 }
-var STORE_TOTALS_REWALK_AFTER_MS = 60 * 60000;
+var STORE_TOTALS_QUIET_MS = 60 * 60000;
+function deferStoreTotalsWalk(db) {
+  db.query("UPDATE store_totals_state SET drift = ? WHERE id = 1").run(WALK_OWED_LATER);
+}
 function readStoreWriteSequence(db) {
   const row = db.query("SELECT n FROM store_totals WHERE name = ?").get(STORE_TOTALS_WRITES);
   return row ? Number(row.n) : undefined;
@@ -20066,7 +20079,7 @@ function hasImmutableAccountLabel(id) {
 import { createHash as createHash13, randomUUID as randomUUID9 } from "node:crypto";
 import { closeSync as closeSync11, existsSync as existsSync22, fsyncSync as fsyncSync3, lstatSync as lstatSync9, mkdirSync as mkdirSync13, openSync as openSync11, statSync as statSync13, statfsSync } from "node:fs";
 import { open as openFile } from "node:fs/promises";
-import { dirname as dirname23 } from "node:path";
+import { basename as basename7, dirname as dirname23 } from "node:path";
 import { Database as Database6 } from "bun:sqlite";
 
 // src/core/media-cache.ts
@@ -24910,11 +24923,7 @@ async function runStepsInTurns(steps) {
   return step.value;
 }
 var PK_SET_SLICE = 20000;
-async function pkSetInTurns(lists, {
-  keep,
-  set = new Set,
-  turn = ingestionTurn
-} = {}) {
+async function pkSetInTurns(lists, keep, set = new Set) {
   let added = 0;
   for (const list of lists) {
     for (const pk of list) {
@@ -24922,7 +24931,7 @@ async function pkSetInTurns(lists, {
         continue;
       set.add(pk);
       if (++added % PK_SET_SLICE === 0)
-        await turn();
+        await ingestionTurn();
     }
   }
   return set;
@@ -24930,7 +24939,7 @@ async function pkSetInTurns(lists, {
 async function embeddingExcludedPksInTurns(tierHidden, allowHeld) {
   const eligibleHeld = allowHeld ? await pkSetInTurns([tierHidden.heldForJudgment]) : undefined;
   const excluded = await pkSetInTurns([tierHidden.hidden, tierHidden.metadataLayer]);
-  return pkSetInTurns([tierHidden.held], { keep: (pk) => !eligibleHeld?.has(pk), set: excluded });
+  return pkSetInTurns([tierHidden.held], (pk) => !eligibleHeld?.has(pk), excluded);
 }
 
 class MutablePkList {
@@ -25407,12 +25416,12 @@ var READ_ONLY_MIN_SCHEMA_VERSION = 7;
 function visibilityStepAwaited(read) {
   return judgedAwaited(() => read.offThread(), () => read.here());
 }
-var CONNECTOR_RECLAIM_WORKER_SOURCE = `
+var INLINE_CLOSE_SQLITE_STORE = "const closeSqliteStore = (db) => { try { db.exec('PRAGMA wal_checkpoint(TRUNCATE);'); } catch {} db.close(); };";
+function connectorReclaimWorkerSource() {
+  return `
 import { Database } from 'bun:sqlite';
 import { statSync } from 'node:fs';
-// core/sqlite-store.ts closeSqliteStore, inlined: this source runs in its own
-// process and cannot import it. Checkpoint first so no WAL is left for a reap.
-const closeSqliteStore = (db) => { try { db.exec('PRAGMA wal_checkpoint(TRUNCATE);'); } catch {} db.close(); };
+${INLINE_CLOSE_SQLITE_STORE}
 self.onmessage = ({ data: [path, budgetMs, pagesPerStep] }) => {
   // This is the mounted store's own maintenance connection. Never create a missing store.
   const db = new Database(path, { create: false, strict: true });
@@ -25447,9 +25456,11 @@ self.onmessage = ({ data: [path, budgetMs, pagesPerStep] }) => {
     closeSqliteStore(db);
   }
 };`;
+}
 function connectorRecencyIndexWorkerSource() {
   return `
 import { Database } from 'bun:sqlite';
+${INLINE_CLOSE_SQLITE_STORE}
 self.onmessage = ({ data: [path] }) => {
   const db = new Database(path, { create: false, strict: true });
   let result;
@@ -25460,7 +25471,7 @@ self.onmessage = ({ data: [path] }) => {
   } catch (error) {
     result = { busy: /^SQLITE_(BUSY|LOCKED)(_|$)/.test(error.code) };
   } finally {
-    db.close();
+    closeSqliteStore(db);
   }
   postMessage(result);
 };`;
@@ -25483,9 +25494,11 @@ function spawnConnectorStoreMaintenance(dbPath, source, args = []) {
     env: { ...process.env, SQLITE_TMPDIR: dirname23(dbPath), TMPDIR: dirname23(dbPath) }
   });
 }
-var admitRecencyIndexBuild = (work) => work();
+var admitRecencyIndexBuild;
 var recencyIndexBuilding = false;
 var RECENCY_INDEX_RETRY_MS = 250;
+var RECENCY_INDEX_BUSY_RETRY_MS = 2000;
+var RECENCY_INDEX_NOT_ADMITTED_RETRY_MS = 30000;
 var RECLAIM_MAX_PAGES_PER_STEP = 128;
 var RECLAIM_CONVERSION_BYTES_PER_MS = 15000;
 var SUPERSEDED_PRUNE_MEDIA_ROWS = 1;
@@ -25621,7 +25634,8 @@ class LocalConnectorStore {
           this.scheduleVectorDigestBackfill(model, VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS);
       }
       if (!this.readOnly && !creatingFile && this.db.query("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name IN (?, ?)").get(CONNECTOR_STORE_RECENCY_INDEX, CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX).n < 2) {
-        this.scheduleRecencyIndexBuild();
+        if (admitRecencyIndexBuild)
+          this.scheduleRecencyIndexBuild();
       }
       reportFrontStoreOpened();
       changeMemoryCounter("connector_stores", 1);
@@ -25640,19 +25654,23 @@ class LocalConnectorStore {
     this.recencyIndexTimer.unref?.();
   }
   async buildRecencyIndex() {
-    if (this.closedForPoolReads || this.fileReplacedOrRemoved())
+    const admit = admitRecencyIndexBuild;
+    if (!admit || this.closedForPoolReads || this.fileReplacedOrRemoved())
+      return;
+    if (this.db.query("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name IN (?, ?)").get(CONNECTOR_STORE_RECENCY_INDEX, CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX).n >= 2)
       return;
     if (recencyIndexBuilding || this.reclaimProcess || this.vectorDigestBackfillReading || this.visibilityPublishing || storeReadHasPriority()) {
-      this.scheduleRecencyIndexBuild(RECENCY_INDEX_RETRY_MS);
+      this.scheduleRecencyIndexBuild(RECENCY_INDEX_BUSY_RETRY_MS);
       return;
     }
     recencyIndexBuilding = true;
     try {
       let preempted = false;
-      const complete = await admitRecencyIndexBuild(async () => {
+      const complete = await admit(async () => {
         if (this.closedForPoolReads || this.fileReplacedOrRemoved())
           return false;
         assertWritableStoreOpenAllowed("connector store recency index", this.dbPath);
+        const buildStarted = Date.now();
         const child = spawnConnectorStoreMaintenance(this.dbPath, connectorRecencyIndexWorkerSource());
         this.reclaimProcess = child;
         child.unref();
@@ -25665,6 +25683,8 @@ class LocalConnectorStore {
           const result = JSON.parse(output);
           if (!result.done && !result.busy)
             throw new Error("Recency index build failed.");
+          if (result.done)
+            console.info(`[store-recency-index] built store=${basename7(this.dbPath)} ms=${Date.now() - buildStarted}`);
           return result.done === true;
         } finally {
           child.stdin.end();
@@ -25674,8 +25694,9 @@ class LocalConnectorStore {
         preempted = true;
         this.reclaimProcess?.kill("SIGKILL");
       });
-      if (!complete && !this.closedForPoolReads)
-        this.scheduleRecencyIndexBuild(RECENCY_INDEX_RETRY_MS);
+      if (!complete && !this.closedForPoolReads) {
+        this.scheduleRecencyIndexBuild(complete === undefined ? RECENCY_INDEX_NOT_ADMITTED_RETRY_MS : RECENCY_INDEX_RETRY_MS);
+      }
     } catch {
       if (!this.closedForPoolReads)
         console.warn("Connector store recency index build failed; will retry the build on the next writable open.");
@@ -25855,7 +25876,7 @@ class LocalConnectorStore {
     pagesPerStep = Math.max(1, Math.floor(pagesPerStep));
     assertWritableStoreOpenAllowed("connector store reclaim", this.dbPath);
     assertStoreTierLedgerCanOpen(this.dbPath);
-    const child = spawnConnectorStoreMaintenance(this.dbPath, CONNECTOR_RECLAIM_WORKER_SOURCE, [budgetMs, pagesPerStep]);
+    const child = spawnConnectorStoreMaintenance(this.dbPath, connectorReclaimWorkerSource(), [budgetMs, pagesPerStep]);
     this.reclaimProcess = child;
     let preempted = false;
     const preempt = () => {
@@ -28663,6 +28684,32 @@ ${parentKey(ref)}`, { ref, origin });
     const storeCursor = this.visibilityJournal ? String(this.itemVisibilityChangesSince().cursor) : `v${this.db.query("PRAGMA data_version").get().data_version}`;
     const laneStores = this.childVisibilityLane().stores();
     return JSON.stringify([ledgerCursor, storeCursor, laneStores.map((store) => [store.corpusId, store.childVisibilityMarker?.()])]);
+  }
+  embeddingSweepVisibilityMarker(provider, durable) {
+    const allowHeld = this.canEmbedHeld(provider);
+    if (!durable)
+      return JSON.stringify([this.visibilityMarker(), allowHeld]);
+    if (!this.visibilityJournal)
+      return;
+    const stores = [];
+    for (const store of new Set([this, ...this.childLane?.stores() ?? []])) {
+      if (!(store instanceof LocalConnectorStore) || !store.visibilityFeedPresent)
+        return;
+      const file = store.openedFile;
+      if (!file?.birthtimeNs || store.fileReplacedOrRemoved())
+        return;
+      stores.push([store.corpusId, file.dev.toString(), file.ino.toString(), file.birthtimeNs.toString()]);
+    }
+    const ledgers = [];
+    for (const ledger of new Set([this.visibilityLedger(), this.childLane?.ledger()])) {
+      if (!ledger)
+        continue;
+      const file = fileIdentity(ledger.dbPath);
+      if (!file?.birthtimeNs)
+        return;
+      ledgers.push([file.dev.toString(), file.ino.toString(), file.birthtimeNs.toString(), ledger.ledgerId()]);
+    }
+    return JSON.stringify([this.visibilityMarker(), stores, ledgers, allowHeld]);
   }
   peopleObservations() {
     changeMemoryActivity("people_refresh", 1);
@@ -31908,12 +31955,14 @@ ${parentKey(ref)}`, { ref, origin });
       skipped_metadata_chunks: 0,
       skipped_failed_chunks: 0,
       skipped_out_of_scope_chunks: 0,
+      skipped_held_recent_chunks: 0,
+      skipped_out_of_scope_recent_chunks: 0,
       skipped_private_tier_chunks: 0,
       skipped_retired_chunks: 0,
       inventory_complete: 0
     };
     const windowSql = `
-      SELECT c.chunk_pk, i.item_pk, i.local_item_id, i.tombstoned, i.trust_tier,
+      SELECT c.chunk_pk, i.item_pk, i.local_item_id, i.tombstoned, i.trust_tier, i.indexed_at,
         CASE WHEN 1 = 1 ${account ? "AND i.account_scope = ?" : ""} ${scoped.sql} THEN 1 ELSE 0 END AS in_scope
       FROM chunks c JOIN items i ON i.item_pk = c.item_pk
       LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
@@ -31921,6 +31970,7 @@ ${parentKey(ref)}`, { ref, origin });
         AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
       ORDER BY c.chunk_pk
     `;
+    const recentSince = new Date(started - 3 * 24 * 60 * 60000).toISOString();
     const read = this.embeddingSweepRead(offThreadReadsSupported(this.dbPath));
     const maxChunkPk = (await read({ sql: "SELECT COALESCE(MAX(chunk_pk), 0) AS n FROM chunks", params: [], mode: "get" })).n;
     let after = 0;
@@ -31942,6 +31992,9 @@ ${parentKey(ref)}`, { ref, origin });
         const visibilityExcluded = hidden.has(row.item_pk) || namesOnly.has(row.item_pk) || heldBack;
         const reason = row.tombstoned || row.trust_tier === "S5" ? "skipped_retired_chunks" : moving.has(row.item_pk) && visibilityExcluded ? "skipped_moving_chunks" : hidden.has(row.item_pk) ? "skipped_hidden_chunks" : namesOnly.has(row.item_pk) ? "skipped_metadata_chunks" : heldBack ? "skipped_held_chunks" : tiers && !tiers.includes(row.trust_tier) ? "skipped_private_tier_chunks" : this.embeddingFailureState?.has(row.local_item_id) ? "skipped_failed_chunks" : !row.in_scope ? "skipped_out_of_scope_chunks" : "eligible_chunks";
         counts[reason] += 1;
+        if ((reason === "skipped_held_chunks" || reason === "skipped_out_of_scope_chunks") && row.indexed_at && row.indexed_at >= recentSince) {
+          counts[reason === "skipped_held_chunks" ? "skipped_held_recent_chunks" : "skipped_out_of_scope_recent_chunks"] += 1;
+        }
       }
       after += windowChunks;
     }
@@ -32818,7 +32871,7 @@ ${parentKey(ref)}`, { ref, origin });
       ...selectedAccount ? { accountScope: selectedAccount } : {},
       ...filters ? { filters } : {}
     };
-    const excludedItemPks = await this.vectorScanExcludedItemPks();
+    const excludedItemPks = this.vectorScanExcludedItemPks();
     if (excludedItemPks)
       pageOptions.excludedItemPks = excludedItemPks;
     const scanned = offThreadReadsSupported(this.dbPath) ? await scanVectorPagesOnPool(this.dbPath, provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit) : await this.scanVectorPagesInThread(provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit);
@@ -32869,11 +32922,6 @@ ${parentKey(ref)}`, { ref, origin });
     };
   }
   vectorScanExcludedItemPks() {
-    return this.vectorScanExclusionBuild ??= this.buildVectorScanExclusion().finally(() => {
-      this.vectorScanExclusionBuild = undefined;
-    });
-  }
-  async buildVectorScanExclusion() {
     if (!this.tierLedgerHiddenMemo && !this.tierHiddenCountsMemo) {
       let ledger;
       try {
@@ -32886,35 +32934,30 @@ ${parentKey(ref)}`, { ref, origin });
         return;
       }
     }
+    let base;
+    let children;
     try {
-      const base = await runHiddenStepsInTurns(this.tierLedgerHiddenSteps());
-      const basePks = [base.hidden, base.held, base.metadataLayer];
-      const memo = this.tierLedgerHiddenMemo;
-      if (memo ? memo.value !== base : basePks.some((pks) => pks.length > 0))
-        return;
-      const lists = memo ? [memo.lists.hidden, memo.lists.held, memo.lists.metadataLayer] : [];
-      const generations = lists.map((list) => list.generation);
-      const baseCurrent = () => this.tierLedgerHiddenMemo === memo && lists.every((list, at) => list.generation === generations[at]);
-      const children = await this.hiddenChildItemPksInTurns();
-      const childMemo = this.hiddenChildMemo;
-      if (!baseCurrent())
-        return;
-      const cached = this.vectorScanExclusion;
-      const excluded = memo && cached?.lists.every((list, at) => list === lists[at] && cached.generations[at] === generations[at]) ? cached.set : await pkSetInTurns(basePks, { turn: yieldConnectorStoreVectorScan });
-      const hiddenChildren = children.length > 0 ? await pkSetInTurns([children], { turn: yieldConnectorStoreVectorScan }) : undefined;
-      if (!baseCurrent() || this.hiddenChildMemo !== childMemo)
-        return;
-      if (excluded !== cached?.set)
-        this.vectorScanExclusion = memo ? { lists, generations, set: excluded } : undefined;
-      if (hiddenChildren)
-        return { has: (itemPk) => excluded.has(itemPk) || hiddenChildren.has(itemPk) };
-      return excluded.size > 0 ? excluded : undefined;
+      base = this.tierLedgerHiddenItemPks();
+      children = this.hiddenChildItemPks();
     } catch {
       return;
     }
+    const memo = this.tierLedgerHiddenMemo;
+    const lists = memo && memo.value === base ? [memo.lists.hidden, memo.lists.held, memo.lists.metadataLayer] : undefined;
+    const cached = this.vectorScanExclusion;
+    let excluded;
+    if (lists && cached && cached.lists.every((list, at) => list === lists[at] && cached.generations[at] === list.generation)) {
+      excluded = cached.set;
+    } else {
+      excluded = new Set([...base.hidden, ...base.held, ...base.metadataLayer]);
+      this.vectorScanExclusion = lists ? { lists, generations: lists.map((list) => list.generation), set: excluded } : undefined;
+    }
+    if (children.length === 0)
+      return excluded.size > 0 ? excluded : undefined;
+    const hiddenChildren = new Set(children);
+    return { has: (itemPk) => excluded.has(itemPk) || hiddenChildren.has(itemPk) };
   }
   vectorScanExclusion;
-  vectorScanExclusionBuild;
   async scanVectorPagesInThread(provider, beforeToken, queryVector, pageOptions, deadlineAtMs, resultLimit) {
     const scanDb = this.dbPath === ":memory:" ? this.db : new Database6(this.dbPath, { readonly: true, create: false, strict: true });
     const ownsScanDb = scanDb !== this.db;
@@ -33946,7 +33989,7 @@ ${parentKey(ref)}`, { ref, origin });
     if (!this.openedFile)
       return false;
     const current = fileIdentity(this.dbPath);
-    return !current || current.dev !== this.openedFile.dev || current.ino !== this.openedFile.ino;
+    return !current || current.dev !== this.openedFile.dev || current.ino !== this.openedFile.ino || current.birthtimeNs !== this.openedFile.birthtimeNs;
   }
   async prepareStatusCounts(scope) {
     await this.refreshTierHiddenCountsInTurns();
@@ -34184,11 +34227,24 @@ ${parentKey(ref)}`, { ref, origin });
       return;
     }
   }
-  async reconcileTotals() {
+  totalsQuiet;
+  async reconcileTotals({ background = false } = {}) {
     if (this.readOnly || this.reclaiming)
       return;
-    if (!storeTotalsInstalled(this.db))
+    const installed = storeTotalsInstalled(this.db);
+    if (!installed)
       createStoreTotals(this.db, NON_SYNC_RUN_CONNECTORS_SQL);
+    const totals = this.totals();
+    if (background && totals && totals.walkOwed !== "now") {
+      if (totals.walkOwed !== "later")
+        return;
+      const writes = this.writeSequence();
+      const now = this.now().getTime();
+      if (!this.totalsQuiet || this.totalsQuiet.writes !== writes)
+        this.totalsQuiet = { writes, since: now };
+      if (now - this.totalsQuiet.since < STORE_TOTALS_QUIET_MS)
+        return;
+    }
     const pool = offThreadReadsSupported(this.dbPath);
     const steps = storeTotalsWalkSteps(NON_SYNC_RUN_CONNECTORS_SQL);
     let step = steps.next();
@@ -34206,7 +34262,15 @@ ${parentKey(ref)}`, { ref, origin });
     }
     if (this.reclaiming)
       return;
-    return applyStoreTotalsCount(this.db, step.value.count, new Date().toISOString(), { exact: step.value.quiet });
+    const { count, quiet } = step.value;
+    const now = this.now();
+    let drift = 0;
+    if (!quiet && totals && totals.walkOwed !== "now")
+      deferStoreTotalsWalk(this.db);
+    else
+      drift = applyStoreTotalsCount(this.db, count, now.toISOString(), { exact: quiet });
+    this.totalsQuiet = quiet ? undefined : { writes: this.writeSequence(), since: now.getTime() };
+    return drift;
   }
   embeddingInputHashesChecked = false;
   embeddingInputHashWalk;
@@ -36911,8 +36975,8 @@ function fileIdentity(path) {
   if (path === ":memory:" || path === "")
     return;
   try {
-    const stat = statSync13(path);
-    return { dev: stat.dev, ino: stat.ino };
+    const stat = statSync13(path, { bigint: true });
+    return stat.isFile() ? { dev: stat.dev, ino: stat.ino, birthtimeNs: stat.birthtimeNs } : undefined;
   } catch {
     return;
   }
@@ -37013,6 +37077,41 @@ function buildProviderRateLimitReporter(provider) {
         this.success();
     }
   };
+}
+
+// src/core/update-check.ts
+import { readFileSync as readFileSync19 } from "node:fs";
+import { join as join26 } from "node:path";
+
+// src/core/package-root.ts
+import { readFileSync as readFileSync18 } from "node:fs";
+import { dirname as dirname24, join as join25 } from "node:path";
+import { fileURLToPath as fileURLToPath3 } from "node:url";
+function olympusPackageRoot() {
+  let directory = dirname24(fileURLToPath3(import.meta.url));
+  for (let depth = 0;depth < 6; depth++) {
+    try {
+      const manifest = JSON.parse(readFileSync18(join25(directory, "package.json"), "utf8"));
+      if (manifest.name === "olympus" || manifest.name === "olympus-source-checkout")
+        return directory;
+    } catch {}
+    const parent = dirname24(directory);
+    if (parent === directory)
+      break;
+    directory = parent;
+  }
+  throw new Error("The Olympus package root could not be resolved.");
+}
+
+// src/core/update-check.ts
+var UPDATE_MAX_BYTES = 512 * 1024;
+function runningOlympusVersion() {
+  try {
+    const value = JSON.parse(readFileSync19(join26(olympusPackageRoot(), "package.json"), "utf8")).version;
+    return typeof value === "string" ? value : "unknown";
+  } catch {
+    return "unknown";
+  }
 }
 
 // src/core/file-mime.ts
@@ -37252,7 +37351,7 @@ function locatorPathApprovedScopeCodec(sourceLabel) {
 // src/workers/dropbox-files/approved-scope-filter.ts
 var DROPBOX_APPROVED_SCOPE_FILTER_CODEC = locatorPathApprovedScopeCodec("Dropbox");
 // src/workers/dropbox-files/locator-result-projector.ts
-import { join as join25 } from "node:path";
+import { join as join27 } from "node:path";
 import { pathToFileURL } from "node:url";
 
 // src/workers/dropbox-files/local-file-resolver.ts
@@ -37366,7 +37465,7 @@ function finderUrlForDropboxPath(mapping, displayPath) {
   const relativeSegments = localRelativeDropboxPathSegments(displayPath, mapping.dropboxPathPrefix);
   if (!relativeSegments)
     return;
-  return pathToFileURL(join25(mapping.rootPath, ...relativeSegments)).href;
+  return pathToFileURL(join27(mapping.rootPath, ...relativeSegments)).href;
 }
 function localRelativeDropboxPathSegments(displayPath, dropboxPathPrefix) {
   const normalizedPrefix = normalizeOptionalDropboxPrefix(dropboxPathPrefix);
@@ -38632,9 +38731,9 @@ var PROFILE_SCAN_BYTES = 16 * 1024 * 1024;
 var reporter = createLimitStopReporter();
 
 // src/core/notes-app-folders.ts
-import { existsSync as existsSync23, lstatSync as lstatSync10, readdirSync as readdirSync4, readFileSync as readFileSync18 } from "node:fs";
+import { existsSync as existsSync23, lstatSync as lstatSync10, readdirSync as readdirSync4, readFileSync as readFileSync20 } from "node:fs";
 import { homedir as homedir11 } from "node:os";
-import { dirname as dirname24, join as join26, relative as relative6, sep as sep7 } from "node:path";
+import { dirname as dirname25, join as join28, relative as relative6, sep as sep7 } from "node:path";
 var OBSIDIAN_SETTINGS_FOLDER = ".obsidian";
 var REFLECT_SETTINGS_FOLDER = ".reflect";
 var NOTES_APPS = Object.freeze([
@@ -38652,7 +38751,7 @@ function realFolder(path) {
 }
 function readTextFile(path) {
   try {
-    return readFileSync18(path, "utf8");
+    return readFileSync20(path, "utf8");
   } catch {
     return;
   }
@@ -38662,15 +38761,15 @@ function obsidianConfigFiles(lookup = {}) {
   const platform = lookup.platform ?? process.platform;
   const env = lookup.env ?? process.env;
   if (platform === "darwin")
-    return [join26(home, "Library/Application Support/obsidian/obsidian.json")];
+    return [join28(home, "Library/Application Support/obsidian/obsidian.json")];
   if (platform === "win32") {
-    return env.APPDATA ? [join26(env.APPDATA, "obsidian", "obsidian.json")] : [];
+    return env.APPDATA ? [join28(env.APPDATA, "obsidian", "obsidian.json")] : [];
   }
-  const config = env.XDG_CONFIG_HOME?.trim() || join26(home, ".config");
+  const config = env.XDG_CONFIG_HOME?.trim() || join28(home, ".config");
   return [
-    join26(config, "obsidian/obsidian.json"),
-    join26(home, ".var/app/md.obsidian.Obsidian/config/obsidian/obsidian.json"),
-    join26(home, "snap/obsidian/current/.config/obsidian/obsidian.json")
+    join28(config, "obsidian/obsidian.json"),
+    join28(home, ".var/app/md.obsidian.Obsidian/config/obsidian/obsidian.json"),
+    join28(home, "snap/obsidian/current/.config/obsidian/obsidian.json")
   ];
 }
 function obsidianVaultFolders(lookup = {}) {
@@ -38697,7 +38796,7 @@ function obsidianVaultFolders(lookup = {}) {
       const folder = path.length > 1 && path.endsWith("/") ? path.slice(0, -1) : path;
       if (found.includes(folder))
         continue;
-      if (isFolder(folder) && isFolder(join26(folder, OBSIDIAN_SETTINGS_FOLDER)))
+      if (isFolder(folder) && isFolder(join28(folder, OBSIDIAN_SETTINGS_FOLDER)))
         found.push(folder);
     }
   }
@@ -38711,7 +38810,7 @@ function reflectGraphFolders(lookup = {}) {
   const isFolder = lookup.isFolder ?? realFolder;
   const listFolder = lookup.listFolder ?? listChildren;
   const candidates = [];
-  const recent = readText(join26(home, "Library/Application Support/reflect-open/recent-graphs.json"));
+  const recent = readText(join28(home, "Library/Application Support/reflect-open/recent-graphs.json"));
   if (recent) {
     try {
       const parsed = JSON.parse(recent);
@@ -38725,16 +38824,16 @@ function reflectGraphFolders(lookup = {}) {
       }
     } catch {}
   }
-  const icloud = join26(home, "Library/Mobile Documents/iCloud~app~reflect/Documents");
+  const icloud = join28(home, "Library/Mobile Documents/iCloud~app~reflect/Documents");
   for (const name of listFolder(icloud))
     if (!name.startsWith("."))
-      candidates.push(join26(icloud, name));
+      candidates.push(join28(icloud, name));
   const found = [];
   for (const candidate of candidates) {
     const folder = candidate.length > 1 && candidate.endsWith("/") ? candidate.slice(0, -1) : candidate;
     if (found.includes(folder))
       continue;
-    if (isFolder(folder) && isFolder(join26(folder, REFLECT_SETTINGS_FOLDER)))
+    if (isFolder(folder) && isFolder(join28(folder, REFLECT_SETTINGS_FOLDER)))
       found.push(folder);
   }
   return found;
@@ -38858,6 +38957,8 @@ var SCHEDULER_SOURCE_IDS = {
 var SOURCE_ARRIVAL_TARGET_MS = 10 * 60000;
 var EMBEDDING_SWEEP_MAX_BACKOFF_MS = 5 * 60000;
 var EMBEDDING_SWEEP_IDLE_FULL_PASS_MS = 30 * 60000;
+var EMBEDDING_SWEEP_RULES_VERSION = 1;
+var EMBEDDING_SWEEP_BUILD = `${EMBEDDING_SWEEP_RULES_VERSION}:${runningOlympusVersion()}`;
 var EMBEDDING_SWEEP_STORE_DEADLINE_MS = 10 * 60000;
 var EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
 var HONEST_SCHEDULER_ERROR_KINDS = new Set([
@@ -39937,7 +40038,7 @@ function publishNativeEmbeddingDrainReadiness(env = process.env, pid = process.p
   if (!readinessPath || !isAbsolute15(readinessPath)) {
     throw new Error(`${NATIVE_SERVICE_READINESS_PATH_ENV} must be an absolute path for native startup.`);
   }
-  const directory = dirname25(readinessPath);
+  const directory = dirname26(readinessPath);
   mkdirSync14(directory, { recursive: true, mode: 448 });
   const parent = lstatSync11(directory);
   if (!parent.isDirectory() || process.platform !== "win32" && (parent.uid !== process.getuid?.() || (parent.mode & 18) !== 0)) {
@@ -39968,7 +40069,7 @@ if (__require.main == __require.module) {
     }
     const json = JSON.stringify(report, null, 2);
     if (args.reportPath) {
-      mkdirSync14(dirname25(args.reportPath), { recursive: true });
+      mkdirSync14(dirname26(args.reportPath), { recursive: true });
       writeFileSync7(args.reportPath, `${json}
 `);
     }
@@ -39978,7 +40079,7 @@ if (__require.main == __require.module) {
   const options = optionsFromEnv(process.env);
   try {
     if (args.reportPath) {
-      mkdirSync14(dirname25(args.reportPath), { recursive: true });
+      mkdirSync14(dirname26(args.reportPath), { recursive: true });
       options.onProgress = (report) => {
         writeFileSync7(args.reportPath, `${JSON.stringify(report, null, 2)}
 `);

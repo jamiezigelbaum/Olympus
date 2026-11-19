@@ -39,17 +39,31 @@ export function hiddenCopyBuilds(log: string): HiddenCopyBuilds {
   return evidence;
 }
 
-export function summarizePages(samples: readonly PageSample[], started: number, ended: number): PageWindow {
+/** A restart the leg asks for itself (an archive stage's `olympus engine restart`): start-up again, not a freeze after READY. */
+export type PlannedRestart = { start: number; end: number };
+
+/** Records a planned restart in a running watch's log, so the window after READY leaves it out (Mac 44552653847: a 6 s gap). */
+export function markPlannedRestart(workDir: string, restart: PlannedRestart): void {
+  const log = join(workDir, CUTOVER_LOG);
+  if (existsSync(log)) appendFileSync(log, `${JSON.stringify({ plannedRestart: restart })}\n`);
+}
+
+export function summarizePages(samples: readonly PageSample[], started: number, ended: number, restarts: readonly PlannedRestart[] = []): PageWindow {
+  const inRestart = (at: number) => restarts.some(window => at >= window.start && at <= window.end);
+  // The part of a stretch between two answers that a planned restart covers does not count against the page.
+  const uncovered = (from: number, to: number) => restarts.reduce((left, window) => left - Math.max(0, Math.min(to, window.end) - Math.max(from, window.start)), to - from);
   const pageStats = (page: Page) => {
-    const requests = samples.filter(sample => sample.page === page && sample.at >= started && sample.at <= ended);
+    const requests = samples.filter(sample => sample.page === page && sample.at >= started && sample.at <= ended
+      && !inRestart(sample.at) && !inRestart(sample.at + sample.ms));
     const answers = requests.filter(sample => sample.answered && sample.at + sample.ms <= ended)
       .map(sample => sample.at + sample.ms).sort((a, b) => a - b);
     let previous = started;
     let longestMs = 0;
     let firstGapAt: number | undefined;
     for (const answer of [...answers, ended]) {
-      longestMs = Math.max(longestMs, answer - previous);
-      if (answer - previous > PAGE_BOUND_MS) firstGapAt ??= previous + PAGE_BOUND_MS + 1;
+      const stretch = uncovered(previous, answer);
+      longestMs = Math.max(longestMs, stretch);
+      if (stretch > PAGE_BOUND_MS) firstGapAt ??= previous + PAGE_BOUND_MS + 1;
       previous = answer;
     }
     return {
@@ -117,7 +131,7 @@ type Owner = {
 };
 type WatchEntry = Sample | { pageSample: PageSample } | { startupStarted: number }
   | { startupEnded: number; bothBuilds: boolean } | { hiddenCopy: HiddenCopyBuilds }
-  | { qualifyStarted: number } | { startupAsk: StartupAsk } | { watchEnded: number; stopped: boolean } | { owner_session_minted: boolean } | { owner: Owner } | { owner_session_after_ready_status: number | null };
+  | { qualifyStarted: number } | { plannedRestart: { start: number; end: number } } | { startupAsk: StartupAsk } | { watchEnded: number; stopped: boolean } | { owner_session_minted: boolean } | { owner: Owner } | { owner_session_after_ready_status: number | null };
 
 /** An Ask accepted during start-up: judged only on saying it is still starting and completing by itself; its time is reported. */
 export interface StartupAsk { status: number | null; ms: number; saidStarting: boolean; completed: boolean; error?: string }
@@ -344,6 +358,7 @@ export function summarizeCutover(log: string): CutoverSummary {
   const pageSamples: PageSample[] = [];
   let startupStarted: number | undefined, startupEnded: number | undefined, qualifyStarted: number | undefined, watchEnded: number | undefined;
   let stopped = false;
+  const plannedRestarts: PlannedRestart[] = [];
   for (const line of log.split('\n').slice(0, -1)) {
     const entry = JSON.parse(line) as WatchEntry;
     if ('pageSample' in entry) { pageSamples.push(entry.pageSample); continue; }
@@ -351,6 +366,7 @@ export function summarizeCutover(log: string): CutoverSummary {
     if ('startupEnded' in entry) { startupEnded = entry.startupEnded; summary.bothBuilds = entry.bothBuilds; continue; }
     if ('hiddenCopy' in entry) { summary.hiddenCopy = entry.hiddenCopy; continue; }
     if ('qualifyStarted' in entry) { qualifyStarted = entry.qualifyStarted; continue; }
+    if ('plannedRestart' in entry) { plannedRestarts.push(entry.plannedRestart); continue; }
     if ('startupAsk' in entry) { summary.startupAsk = entry.startupAsk; continue; }
     if ('watchEnded' in entry) { watchEnded = entry.watchEnded; stopped = entry.stopped; continue; }
     if ('owner_session_minted' in entry) { summary.owner_session_minted = entry.owner_session_minted; continue; }
@@ -377,7 +393,7 @@ export function summarizeCutover(log: string): CutoverSummary {
   if (startupStarted !== undefined) summary.startup = summarizePages(pageSamples, startupStarted, startupEnded ?? through);
   // After READY (both hidden-copy builds logged) the 1 s rule applies; without a build receipt, from the first healthy reply.
   const readyAt = startupEnded ?? qualifyStarted;
-  if (readyAt !== undefined && watchEnded !== undefined && stopped) summary.qualification = summarizePages(pageSamples, readyAt, watchEnded);
+  if (readyAt !== undefined && watchEnded !== undefined && stopped) summary.qualification = summarizePages(pageSamples, readyAt, watchEnded, plannedRestarts);
   return summary;
 }
 

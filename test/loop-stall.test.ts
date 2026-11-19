@@ -100,6 +100,14 @@ test.each([
   expect(coldStartVerdict(gaps.longest, { ...split, runQueueMs: 100, blockedOtherMs: 500 })).toBe(verdict);
 });
 
+test('cold-start verdict counts a read() waiting on disk (folio wait without a fault) as IO', () => {
+  const gap = { page: 'Home' as const, start_at: '2026-11-19T12:00:00.000Z', end_at: '2026-11-19T12:00:12.876Z', ms: 12_876 };
+  const split = { runningMs: 1_098, runQueueMs: 34, blockedMajfltMs: 69, blockedBlkioMs: 0, blockedOtherMs: 10_533 };
+  expect(coldStartVerdict(gap, split)).toBe('NOT REPRODUCED');
+  expect(coldStartVerdict(gap, { ...split, waitChannelsMs: { folio_wait_bit_common: 10_148 } })).toBe('REPRODUCED');
+  expect(coldStartVerdict(gap, { ...split, waitChannelsMs: { futex_do_wait: 10_148 } })).toBe('NOT REPRODUCED');
+});
+
 test('memory cap accepts the default and warm-cache sizes and rejects invalid caps', () => {
   expect(memoryMaxBytes('2G')).toBe(2 * 1024 ** 3);
   expect(memoryMaxBytes('8G')).toBe(8 * 1024 ** 3);
