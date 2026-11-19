@@ -6098,7 +6098,7 @@ export class LocalConnectorStore {
   // on the store's pool, including cold lookups on a million-item store.
   parentLinksOfOffThread(identities: readonly ChildProbe[]): Promise<Map<string, ParentRef>> {
     return memoVisibilityItems(this, 'parentLinksOf', () => this.childVisibilityMarker(), identities, tierLedgerIdentityKey,
-      missing => this.readOffThread(this.parentLinksOfSteps(missing)));
+      missing => this.readOffThread(this.parentLinksOfSteps(missing)), () => this.db.inTransaction);
   }
 
   childVisibilityMarker(): string {
@@ -6171,7 +6171,7 @@ export class LocalConnectorStore {
     const rows = await memoVisibilityItems(this, 'parentStandings', () => this.childVisibilityMarker(), parents, parentKey,
       async missing => {
         return this.parentStandingGroups(await this.readOffThread(this.parentStandingsSteps(missing)));
-      });
+      }, () => this.db.inTransaction);
     return [...rows.values()].flat();
   }
 
@@ -6241,7 +6241,7 @@ export class LocalConnectorStore {
   // on the store's pool, including cold lookups on a million-item store.
   itemStandingsOffThread(identities: readonly ChildProbe[]): Promise<Map<string, ParentStandingRow>> {
     return memoVisibilityItems(this, 'itemStandings', () => this.childVisibilityMarker(), identities, tierLedgerIdentityKey,
-      missing => this.readOffThread(this.itemStandingsSteps(missing)));
+      missing => this.readOffThread(this.itemStandingsSteps(missing)), () => this.db.inTransaction);
   }
 
   private *itemStandingsSteps(identities: readonly ChildProbe[]): Generator<StoreRead, Map<string, ParentStandingRow>, unknown> {
