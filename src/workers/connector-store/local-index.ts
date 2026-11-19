@@ -3745,13 +3745,15 @@ export function connectorStoreReadableNow(dbPath: string, onFailure?: (error: un
   }
 }
 
+// core/sqlite-store.ts closeSqliteStore, inlined: this source runs in its own
+// process and cannot import it. Checkpoint first so no WAL is left for a reap.
+const INLINE_CLOSE_SQLITE_STORE = "const closeSqliteStore = (db) => { try { db.exec('PRAGMA wal_checkpoint(TRUNCATE);'); } catch {} db.close(); };";
+
 /** The store's own maintenance opener, like its read-pool opener, on an isolated Bun process. */
 const CONNECTOR_RECLAIM_WORKER_SOURCE = `
 import { Database } from 'bun:sqlite';
 import { statSync } from 'node:fs';
-// core/sqlite-store.ts closeSqliteStore, inlined: this source runs in its own
-// process and cannot import it. Checkpoint first so no WAL is left for a reap.
-const closeSqliteStore = (db) => { try { db.exec('PRAGMA wal_checkpoint(TRUNCATE);'); } catch {} db.close(); };
+${INLINE_CLOSE_SQLITE_STORE}
 self.onmessage = ({ data: [path, budgetMs, pagesPerStep] }) => {
   // This is the mounted store's own maintenance connection. Never create a missing store.
   const db = new Database(path, { create: false, strict: true });
@@ -3790,8 +3792,7 @@ self.onmessage = ({ data: [path, budgetMs, pagesPerStep] }) => {
 function connectorRecencyIndexWorkerSource(): string {
   return `
 import { Database } from 'bun:sqlite';
-// core/sqlite-store.ts closeSqliteStore, inlined as in the reclaim worker above.
-const closeSqliteStore = (db) => { try { db.exec('PRAGMA wal_checkpoint(TRUNCATE);'); } catch {} db.close(); };
+${INLINE_CLOSE_SQLITE_STORE}
 self.onmessage = ({ data: [path] }) => {
   const db = new Database(path, { create: false, strict: true });
   let result;
