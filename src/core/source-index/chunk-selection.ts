@@ -66,6 +66,14 @@ export function sourceIndexChunkTermScore(
   ), 0);
 }
 
+export function sourceIndexChunkMatchesAllTermGroups(
+  text: string,
+  termGroups: ReadonlyArray<readonly string[]>,
+): boolean {
+  const normalized = text.toLowerCase();
+  return termGroups.every((group) => group.some((term) => normalized.includes(term.toLowerCase())));
+}
+
 /**
  * Keep several relevant chunks inside one candidate budget.
  *
@@ -163,8 +171,15 @@ function chunkWindowScore(
  * blank line. Words, numbers and line structure are untouched.
  */
 export function compactPassageWhitespace(text: string): string {
-  return text
-    .replace(/[^\S\n]+\n/g, '\n')
-    .replace(/[^\S\n]{2,}/g, ' ')
-    .replace(/\n{3,}/g, '\n\n');
+  // Match each maximal whitespace run once. All whitespace before its last
+  // LF becomes at most two LFs, and only the suffix after that LF can keep
+  // a horizontal space (or an original single whitespace character).
+  return text.replace(/\s{2,}/g, (run) => {
+    const firstNewline = run.indexOf('\n');
+    if (firstNewline === -1) return ' ';
+    const lastNewline = run.lastIndexOf('\n');
+    const suffixLength = run.length - lastNewline - 1;
+    const suffix = suffixLength > 1 ? ' ' : run.slice(lastNewline + 1);
+    return (firstNewline === lastNewline ? '\n' : '\n\n') + suffix;
+  });
 }

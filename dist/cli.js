@@ -26569,10 +26569,20 @@ function chunkWindowScore(text, termGroups) {
   return { distinctGroups, occurrences };
 }
 function compactPassageWhitespace(text) {
-  return text.replace(/[^\S\n]+\n/g, `
-`).replace(/[^\S\n]{2,}/g, " ").replace(/\n{3,}/g, `
-
+  return text.replace(/\s{2,}/g, (run) => {
+    const firstNewline = run.indexOf(`
 `);
+    if (firstNewline === -1)
+      return " ";
+    const lastNewline = run.lastIndexOf(`
+`);
+    const suffixLength = run.length - lastNewline - 1;
+    const suffix = suffixLength > 1 ? " " : run.slice(lastNewline + 1);
+    return (firstNewline === lastNewline ? `
+` : `
+
+`) + suffix;
+  });
 }
 var CHUNK_WINDOW_PROSE_TERMS;
 var init_chunk_selection = __esm(() => {
