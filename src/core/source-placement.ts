@@ -369,7 +369,7 @@ export function retiredPathSettings(env: LayoutEnv = process.env): string[] {
 }
 
 /** Every mount entry that names a path, with its owner: the raw declarations, before a folder layout drops the path. */
-function declaredConnectorStoreMountPaths(env: LayoutEnv): Array<{ sourceId: string; corpusId: string; trustDomain: string; dbPath: string }> {
+export function declaredConnectorStoreMountPaths(env: LayoutEnv): Array<{ sourceId: string; corpusId: string; trustDomain: string; dbPath: string }> {
   let declared: unknown;
   try {
     declared = JSON.parse(env[MOUNTS_ENV]?.trim() || '[]');

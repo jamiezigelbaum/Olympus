@@ -16,8 +16,10 @@ import {
   type WaitingQuestionStore,
 } from '../../core/waiting-private-questions.ts';
 import type { SourceFamily } from '../../core/source-index/types.ts';
+import { writableStoreOpensForbidden } from '../../core/store-write-guard.ts';
 import type { SecretLocationsIndex } from '../classification/secret-locations.ts';
 import type { LocalConnectorStore } from '../connector-store/index.ts';
+import { tieredStoreSetLedgerPath } from '../connector-store/tiered-store-set.ts';
 import { registerArchiveFormatConnectors } from './format-connectors.ts';
 import { createArchiveTierLane, type ArchiveTierLane } from './lane.ts';
 import {
@@ -29,7 +31,7 @@ import {
 import { archiveSourceTargets, type ArchiveSourceTargets } from './source-targets.ts';
 import { startArchiveImport, type ArchiveImportStart } from './start.ts';
 import { ArchiveImportStateStore, defaultArchiveImportStatePath } from './state.ts';
-import { archiveConnectorStoreDbPaths } from './store.ts';
+import { archiveConnectorStoreDbPath, archiveConnectorStoreDbPaths } from './store.ts';
 
 export interface ArchiveImportRuntime {
   readonly state: ArchiveImportStateStore;
@@ -55,7 +57,8 @@ export interface ArchiveImportRuntime {
   /**
    * The lanes of families that have an archive or a store already (built now).
    */
-  existingLanes(): ArchiveTierLane[];
+  existingLanes(only?: ReadonlySet<string>): ArchiveTierLane[];
+  laneMounted(family: string): boolean;
   /**
    * The private inbox, opened for one removal (the caller closes it); undefined when there is none.
    */
@@ -151,6 +154,10 @@ export function createArchiveImportRuntime(options: ArchiveImportRuntimeOptions 
 
   const hasData = (family: SourceFamily): boolean => {
     if (archiveConnectorStoreDbPaths([family], env).some((path) => existsSync(path))) return true;
+    // A queued record can exist before the writer has made either a ledger
+    // or a store. The front has nothing to open in that case.
+    if (writableStoreOpensForbidden()
+      && !existsSync(tieredStoreSetLedgerPath(archiveConnectorStoreDbPath('secure_local', family, env)))) return false;
     try {
       return state.list().some((record) => record.family === family);
     } catch {
@@ -165,7 +172,18 @@ export function createArchiveImportRuntime(options: ArchiveImportRuntimeOptions 
     targets: options.targets ?? archiveSourceTargets,
     families: () => [...families],
     lane,
-    existingLanes: () => families.filter(hasData).map((family) => lane(family)),
+    existingLanes: (only) => {
+      // One family's unfinished ledger must not stop a ready family from mounting.
+      const built: ArchiveTierLane[] = [];
+      let failed: { error: unknown } | undefined;
+      for (const family of families) {
+        if ((only && !only.has(family)) || !hasData(family)) continue;
+        try { built.push(lane(family)); } catch (error) { failed ??= { error }; }
+      }
+      if (failed) throw failed.error;
+      return built;
+    },
+    laneMounted: (family) => lanes.has(family),
     openWaitingQuestions: () => {
       const path = options.waitingQuestionsDbPath
         ?? waitingPrivateQuestionsDbPath(resolveRemoteConnectionsDbPath(env));
