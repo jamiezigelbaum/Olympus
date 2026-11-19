@@ -65,12 +65,16 @@ export function summarizePages(samples: readonly PageSample[], started: number, 
 export function dashboardAvailabilityCheck(window: PageWindow | undefined, startup = false, bothBuilds = false): CheckResult {
   const detail = window ? Object.entries(window.pages).map(([page, stats]) =>
     `${page}: longest unanswered ${stats.longestMs} ms, ${stats.answers} answers, ${stats.timeouts} timeouts, ${stats.over1s} over 1 s`).join(' · ') : 'No dashboard window observed';
-  const pass = window && Object.values(window.pages).every(stats => (startup || stats.answers > 0) && stats.longestMs <= PAGE_BOUND_MS);
+  // Start-up (first answer until READY): never unanswered over 10 s, a starting page counts. After READY: every probe answered
+  // and none over 1 s (owner-run-24h.md, one definition of ready, 19 Nov 2026).
+  const pass = window && Object.values(window.pages).every(stats => startup
+    ? stats.longestMs <= PAGE_BOUND_MS
+    : stats.answers > 0 && stats.longestMs <= PAGE_BOUND_MS && stats.timeouts === 0 && stats.over1s === 0);
   const gapAt = window && Math.min(...Object.values(window.pages).map(stats => stats.firstGapAt ?? Infinity));
   return {
     ...(gapAt !== undefined && Number.isFinite(gapAt) ? { observedAt: new Date(gapAt).toISOString() } : {}),
     id: startup ? 'upgrade.cutover.startup' : 'qualify.dashboard',
-    title: startup ? 'Home and Sources answer during startup' : 'Home and Sources keep opening through the archive stage',
+    title: startup ? 'Home and Sources never go unanswered over 10 s during start-up' : 'After ready, Home and Sources answer every probe within 1 s through the archive stage',
     status: pass && (!startup || bothBuilds) ? 'pass' : 'fail',
     detail: startup ? `${detail} · ${bothBuilds ? 'both hidden-copy builds finished' : 'both hidden-copy build completions were not observed'}` : detail,
   };
@@ -113,9 +117,22 @@ type Owner = {
 };
 type WatchEntry = Sample | { pageSample: PageSample } | { startupStarted: number }
   | { startupEnded: number; bothBuilds: boolean } | { hiddenCopy: HiddenCopyBuilds }
-  | { qualifyStarted: number } | { watchEnded: number; stopped: boolean } | { owner_session_minted: boolean } | { owner: Owner } | { owner_session_after_ready_status: number | null };
+  | { qualifyStarted: number } | { startupAsk: StartupAsk } | { watchEnded: number; stopped: boolean } | { owner_session_minted: boolean } | { owner: Owner } | { owner_session_after_ready_status: number | null };
+
+/** An Ask accepted during start-up: judged only on saying it is still starting and completing by itself; its time is reported. */
+export interface StartupAsk { status: number | null; ms: number; saidStarting: boolean; completed: boolean; error?: string }
+
+export function startupAskCheck(ask: StartupAsk | undefined): CheckResult {
+  const id = 'qualify.ask-startup';
+  const title = 'An Ask accepted during start-up says Olympus is still starting and completes by itself (time reported)';
+  if (!ask) return { id, title, status: 'skip', detail: 'No Ask was taken during start-up (start-up unobserved or too short)' };
+  const ok = ask.completed && ask.saidStarting;
+  const why = !ask.completed ? (ask.status === null ? `lost or cancelled (${ask.error ?? 'no response'})` : `cancelled (HTTP ${ask.status})`) : !ask.saidStarting ? 'silent: the answer never said Olympus was still starting' : 'completed and said it was still starting';
+  return { id, title, status: ok ? 'pass' : 'fail', ms: ask.ms, detail: `${why} · ${ask.ms} ms` };
+}
 
 export interface CutoverSummary {
+  startupAsk?: StartupAsk;
   startup?: PageWindow;
   bothBuilds?: boolean;
   hiddenCopy?: HiddenCopyBuilds;
@@ -206,7 +223,7 @@ async function checkOwnerSession(session: WorkerFetch): Promise<number | null> {
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-export async function watchCutover(workDir: string, dataDir: string, seconds: number, fetch: WorkerFetch, mint: () => Promise<WorkerFetch | undefined>, options: { fresh?: boolean; newFront?: () => string | undefined; observeBuilds?: () => HiddenCopyBuilds | undefined } = {}): Promise<void> {
+export async function watchCutover(workDir: string, dataDir: string, seconds: number, fetch: WorkerFetch, mint: () => Promise<WorkerFetch | undefined>, options: { fresh?: boolean; newFront?: () => string | undefined; observeBuilds?: () => HiddenCopyBuilds | undefined; startupAsk?: () => Promise<StartupAsk> } = {}): Promise<void> {
   const log = join(workDir, CUTOVER_LOG);
   const stop = join(workDir, CUTOVER_STOP);
   writeFileSync(log, '', { mode: 0o600 });
@@ -231,6 +248,7 @@ export async function watchCutover(workDir: string, dataDir: string, seconds: nu
   };
   if (options.fresh) refreshSession();
   const pages = new Set<Promise<void>>();
+  let startupAsking: Promise<void> | undefined;
   while (performance.now() < end && !existsSync(stop)) {
     const tick = performance.now();
     const at = watchNow();
@@ -264,6 +282,10 @@ export async function watchCutover(workDir: string, dataDir: string, seconds: nu
         }
       });
     }
+    if (candidate && !startupEnded && options.startupAsk && !startupAsking) {
+      // One Ask while starting, in the first minutes; no clock of ours ends it.
+      startupAsking = options.startupAsk().then(ask => append({ startupAsk: ask }), error => append({ startupAsk: { status: null, ms: 0, saidStarting: false, completed: false, error: String(error).slice(0, 200) } }));
+    }
     if (candidate && !startupEnded) {
       const hiddenCopy = options.observeBuilds?.();
       if (hiddenCopy) {
@@ -294,7 +316,7 @@ export async function watchCutover(workDir: string, dataDir: string, seconds: nu
   }
   append({ watchEnded: watchNow(), stopped: existsSync(stop) });
   await samples;
-  await Promise.all([owner, ownerAfterReady, ...pages, minting]);
+  await Promise.all([owner, ownerAfterReady, ...pages, minting, startupAsking]);
   writeFileSync(join(workDir, CUTOVER_DONE), '');
 }
 
@@ -329,6 +351,7 @@ export function summarizeCutover(log: string): CutoverSummary {
     if ('startupEnded' in entry) { startupEnded = entry.startupEnded; summary.bothBuilds = entry.bothBuilds; continue; }
     if ('hiddenCopy' in entry) { summary.hiddenCopy = entry.hiddenCopy; continue; }
     if ('qualifyStarted' in entry) { qualifyStarted = entry.qualifyStarted; continue; }
+    if ('startupAsk' in entry) { summary.startupAsk = entry.startupAsk; continue; }
     if ('watchEnded' in entry) { watchEnded = entry.watchEnded; stopped = entry.stopped; continue; }
     if ('owner_session_minted' in entry) { summary.owner_session_minted = entry.owner_session_minted; continue; }
     if ('owner' in entry) { summary.owner = entry.owner; continue; }
@@ -352,7 +375,9 @@ export function summarizeCutover(log: string): CutoverSummary {
   }));
   const through = watchEnded ?? pageSamples.reduce((last, sample) => Math.max(last, sample.at + sample.ms), Math.max(startupStarted ?? 0, qualifyStarted ?? 0));
   if (startupStarted !== undefined) summary.startup = summarizePages(pageSamples, startupStarted, startupEnded ?? through);
-  if (qualifyStarted !== undefined && watchEnded !== undefined && stopped) summary.qualification = summarizePages(pageSamples, qualifyStarted, watchEnded);
+  // After READY (both hidden-copy builds logged) the 1 s rule applies; without a build receipt, from the first healthy reply.
+  const readyAt = startupEnded ?? qualifyStarted;
+  if (readyAt !== undefined && watchEnded !== undefined && stopped) summary.qualification = summarizePages(pageSamples, readyAt, watchEnded);
   return summary;
 }
 
@@ -387,7 +412,7 @@ export function cutoverChecks(summary: CutoverSummary | undefined, gateStartup =
     if (notes.length) startup.detail += ` · ${notes.join(' · ')}`;
   }
   return [
-    ...(gateStartup ? [startup] : []),
+    ...(gateStartup ? [startup, startupAskCheck(summary?.startupAsk)] : []),
     { id: 'upgrade.cutover.wal', title: 'WAL sizes during the engine cutover', status: overLimit ? 'warn' : 'pass',
       detail: summary?.old_engine_down_at == null && summary ? `Shutdown unobserved · ${walDetail}` : walDetail },
     { id: 'upgrade.cutover.boot', title: 'Time from old engine down to new engine ready', status: 'reported', detail: number(summary?.boot_to_ready_ms, ' ms') },

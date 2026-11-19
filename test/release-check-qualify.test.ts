@@ -5,12 +5,12 @@ test('the Ask must answer with both the known facts and the fixture citation', (
   const body = { ok: true, status: 'answered', answer: QUALIFY_QUESTION.facts.join(', '), citations: [{ title: QUALIFY_QUESTION.citedTitle }] };
   expect(qualifyAskCheck(observeAsk(200, body, 150)).status).toBe('pass');
   expect(qualifyAskCheck(observeAsk(200, { ...body, citations: [] }, 150)).status).toBe('fail');
-  expect(qualifyAskCheck(observeAsk(200, body, 6_000, 5_000)).status).toBe('pass');
-  expect(qualifyAskCheck(observeAsk(200, body, 6_000, 5_001))).toMatchObject({
-    status: 'warn', ms: 6_000, detail: expect.stringContaining('first evidence (engine retrieval) 5001 ms (over 5 s)'),
+  expect(qualifyAskCheck(observeAsk(200, body, 6_000, 10_000)).status).toBe('pass');
+  expect(qualifyAskCheck(observeAsk(200, body, 26_000, 10_001))).toMatchObject({
+    status: 'warn', ms: 26_000, detail: expect.stringContaining('first evidence (engine retrieval) 10001 ms (over 10 s) · whole answer 26000 ms (target about 20 s, over)'),
   });
-  expect(qualifyAskCheck(observeAsk(200, { ...body, citations: [] }, 6_000, 5_001)).status).toBe('fail');
-  expect(qualifyAskCheck(observeAsk(200, body, 150)).detail).toContain('first streamed token unavailable');
+  expect(qualifyAskCheck(observeAsk(200, { ...body, citations: [] }, 6_000, 10_001)).status).toBe('fail');
+  expect(qualifyAskCheck(observeAsk(200, body, 150)).detail).toContain('no streaming in 1.5');
   expect(qualifyAskCheck().status).toBe('fail');
 });
 

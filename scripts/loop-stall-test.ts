@@ -602,6 +602,41 @@ function readPressure(): PressureTotals {
   return totals;
 }
 /** One sample a second: milliseconds stalled in that second, per scope and kind. Returns the samples and a stop. */
+/**
+ * The live install beside the fixture, read from its systemd cgroups (world-readable, so no access to its processes is needed):
+ * each Olympus unit outside this run's own scope, with its disk read and write bytes and its swap. Names and numbers only.
+ */
+function readLiveInstall(): Record<string, { rbytes: number; wbytes: number; swap_mib: number | null }> {
+  const out: Record<string, { rbytes: number; wbytes: number; swap_mib: number | null }> = {};
+  const own = /^0::(.*)$/m.exec((() => { try { return readFileSync('/proc/self/cgroup', 'utf8'); } catch { return ''; } })())?.[1] ?? '';
+  const walk = (dir: string, depth: number): void => {
+    if (depth > 8) return;
+    let entries;
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const path = join(dir, entry.name);
+      const relative = path.slice('/sys/fs/cgroup'.length);
+      if (/olympus|openclaw/i.test(entry.name) && !own.startsWith(relative)) {
+        let rbytes = 0, wbytes = 0;
+        try {
+          for (const line of readFileSync(join(path, 'io.stat'), 'utf8').split('\n')) {
+            rbytes += Number(/rbytes=(\d+)/.exec(line)?.[1] ?? 0);
+            wbytes += Number(/wbytes=(\d+)/.exec(line)?.[1] ?? 0);
+          }
+        } catch { /* no io controller */ }
+        let swap: number | null = null;
+        try { swap = Math.round(Number(readFileSync(join(path, 'memory.swap.current'), 'utf8')) / 1024 / 1024); } catch { /* none */ }
+        out[relative] = { rbytes, wbytes, swap_mib: swap };
+      }
+      walk(path, depth + 1);
+    }
+  };
+  walk('/sys/fs/cgroup/user.slice', 0);
+  walk('/sys/fs/cgroup/system.slice', 0);
+  return out;
+}
+
 /** Host memory lines that show how much of RAM the file map and swap hold, in MiB (Linux only). */
 function readMeminfo(): Record<string, number> {
   const kib: Record<string, number> = {};
@@ -675,16 +710,16 @@ function readVmstat(): Record<string, number> {
  * The background's main loop thread, sampled by scripts/front-thread-timeline.ts for the whole run, then summarized over each
  * background freeze or held-loop line: time running, waiting for CPU, blocked on page faults, on disk, and the top wait channel.
  */
-function startBackgroundTimeline(pid: number, out: string): { stop(): Promise<void> } | undefined {
+function startThreadTimeline(pid: number, out: string): { stop(): Promise<void> } | undefined {
   if (process.platform !== 'linux') return undefined;
   const child = Bun.spawn([process.execPath, join(import.meta.dir, 'front-thread-timeline.ts'), '--pid', String(pid), '--out', out, '--seconds', '14400'], { stdout: 'ignore', stderr: 'ignore' });
   return { stop: async () => { child.kill('SIGTERM'); await child.exited; } };
 }
 
-function summarizeBackgroundTimeline(timeline: string, freezes: Array<{ at: string; role: string; line: string }>, freezePath: string): unknown[] | string {
+function summarizeThreadTimeline(role: Role, timeline: string, freezes: Array<{ at: string; role: string; line: string }>, freezePath: string): unknown[] | string {
   if (!existsSync(timeline)) return 'no timeline was written';
-  writeFileSync(freezePath, freezes.filter(entry => entry.role === 'background').map(entry => `${entry.at} ${entry.line}`).join('\n') + '\n');
-  const run = spawnSync(process.execPath, [join(import.meta.dir, 'front-thread-timeline.ts'), '--summarize', timeline, '--freezes', freezePath, '--role', 'background'], { encoding: 'utf8', timeout: 120_000 });
+  writeFileSync(freezePath, freezes.filter(entry => entry.role === role).map(entry => `${entry.at} ${entry.line}`).join('\n') + '\n');
+  const run = spawnSync(process.execPath, [join(import.meta.dir, 'front-thread-timeline.ts'), '--summarize', timeline, '--freezes', freezePath, '--role', role], { encoding: 'utf8', timeout: 120_000 });
   if (run.status !== 0) return `summarize exited ${run.status}: ${(run.stderr || '').slice(-300)}`;
   return run.stdout.split('\n').filter(Boolean).map(line => { try { return JSON.parse(line); } catch { return line; } })
     .sort((a: any, b: any) => (b?.window_ms ?? 0) - (a?.window_ms ?? 0)).slice(0, 30);
@@ -693,12 +728,18 @@ function summarizeBackgroundTimeline(timeline: string, freezes: Array<{ at: stri
 function samplePressure(): { samples: Array<{ at: string } & Record<string, number | string>>; stop(): void } {
   const samples: Array<{ at: string } & Record<string, number | string>> = [];
   let last = readPressure();
+  let lastAt = performance.now();
   const timer = setInterval(() => {
     const now = readPressure();
-    const sample: { at: string } & Record<string, number | string> = { at: new Date().toISOString() };
-    for (const [key, total] of Object.entries(now)) if (last[key] !== undefined) sample[key] = Math.round((total - last[key]!) / 1000);
+    const at = performance.now();
+    // The timer runs on the gate's own loop, so a sample can come late: scale each delta to milliseconds per second of the
+    // actual interval, and keep the interval beside it.
+    const intervalMs = Math.max(1, at - lastAt);
+    const sample: { at: string } & Record<string, number | string> = { at: new Date().toISOString(), interval_ms: Math.round(intervalMs) };
+    for (const [key, total] of Object.entries(now)) if (last[key] !== undefined) sample[key] = Math.round((total - last[key]!) / 1000 * 1000 / intervalMs);
     samples.push(sample);
     last = now;
+    lastAt = at;
   }, 1000);
   return { samples, stop: () => clearInterval(timer) };
 }
@@ -720,10 +761,10 @@ export function sampleAnonMemory(pids: () => Array<{ role: string; pid: number }
 }
 /** The worst second and the seconds with any stall at or over 100 ms, per key. */
 function pressureSummary(samples: Array<{ at: string } & Record<string, number | string>>) {
-  const keys = [...new Set(samples.flatMap(sample => Object.keys(sample).filter(key => key !== 'at')))];
+  const keys = [...new Set(samples.flatMap(sample => Object.keys(sample).filter(key => key !== 'at' && key !== 'interval_ms')))];
   const worst = Object.fromEntries(keys.map(key => [key, Math.max(0, ...samples.map(sample => Number(sample[key] ?? 0)))]));
   const stalled = samples.filter(sample => keys.some(key => Number(sample[key] ?? 0) >= 100));
-  return { readable: keys.length > 0, worst_ms_per_second: worst, seconds_sampled: samples.length, seconds_with_stall_100ms: stalled.length, stalled_seconds: stalled.slice(0, 300) };
+  return { readable: keys.length > 0, samples: samples.slice(0, 1200), worst_ms_per_second: worst, worst_interval_ms: Math.max(0, ...samples.map(sample => Number(sample.interval_ms ?? 0))), seconds_sampled: samples.length, seconds_with_stall_100ms: stalled.length, stalled_seconds: stalled.slice(0, 300) };
 }
 /** Each fixture file's WAL size in bytes (0 when it has none), so a WAL the fixture carries in shows apart from one a run builds. */
 function walSizes(dir: string): Record<string, number> {
@@ -976,8 +1017,10 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
   const pressureSampler = samplePressure();
   const vmstatAtStart = readVmstat();
   const meminfoAtStart = readMeminfo();
-  let backgroundTimeline: ReturnType<typeof startBackgroundTimeline>;
-  const backgroundTimelinePath = join(metrics, 'background.timeline.jsonl');
+  const liveAtStart = readLiveInstall();
+  // Each role's main thread, sampled for the whole run and summarized over that role's freeze and held-loop lines.
+  const timelines: Partial<Record<Role, ReturnType<typeof startThreadTimeline>>> = {};
+  const timelinePath = (role: Role) => join(metrics, `${role}.timeline.jsonl`);
   const roles: Array<{ role: string; pid: number }> = [];
   const anonSampler = sampleAnonMemory(() => roles, () => enginesStartedAt ?? Date.now());
   const ioSampler = sampleProcessIo(() => roles, role => readReady(role as Role));
@@ -987,6 +1030,7 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
   const cgroupStarted = Date.now();
   const cgroupTimer = setInterval(() => cgroupSamples.push({ at_s: Math.round((Date.now() - cgroupStarted) / 1000), ...readCgroupMemory() }), 60_000);
   let meminfoAtEnd: ReturnType<typeof readMeminfo> = {};
+  let liveAtEnd: ReturnType<typeof readLiveInstall> = {};
   let walAtOpen: Record<string, number> = {};
   try {
     walAtOpen = walSizes(dir);
@@ -1001,7 +1045,7 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
       });
       children.push(child);
       roles.push({ role, pid: child.pid });
-      if (role === 'background') backgroundTimeline = startBackgroundTimeline(child.pid, backgroundTimelinePath);
+      timelines[role] = startThreadTimeline(child.pid, timelinePath(role));
       void child.exited.then(() => { timing[role].stoppedAt ||= nowMs(); });
       writeFileSync(pidFile, JSON.stringify(children.map(entry => entry.pid)));
       for (const stream of [child.stdout, child.stderr]) pumps.push((async () => {
@@ -1139,7 +1183,8 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
     clearInterval(cgroupTimer);
     cgroupAtEnd = readCgroupMemory();
     meminfoAtEnd = readMeminfo();
-    await backgroundTimeline?.stop();
+    liveAtEnd = readLiveInstall();
+    await Promise.all(Object.values(timelines).map(timeline => timeline?.stop()));
     for (const child of children) child.kill('SIGKILL');
     await Promise.all(children.map(child => child.exited)); await Promise.all(pumps);
     await Promise.allSettled(requests);
@@ -1219,7 +1264,12 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
     sqlite_mmap: options.sqliteMmap ?? 'default', sqlite_mmap_boot: fileMapLines, process_io: ioSampler.summary(), meminfo: { start: meminfoAtStart, end: meminfoAtEnd }, cgroup_memory_end: cgroupAtEnd, cgroup_memory_samples: cgroupSamples,
     ...(options.swapReading ? { swap_reading: true, counts_as_gate: false } : {}),
     vmstat: Object.fromEntries(Object.entries(readVmstat()).map(([key, value]) => [key, value - (vmstatAtStart[key] ?? value)])),
-    background_timeline: summarizeBackgroundTimeline(backgroundTimelinePath, freezeLines, join(metrics, 'background.freezes.log')),
+    background_timeline: summarizeThreadTimeline('background', timelinePath('background'), freezeLines, join(metrics, 'background.freezes.log')),
+    front_timeline: summarizeThreadTimeline('front', timelinePath('front'), freezeLines, join(metrics, 'front.freezes.log')),
+    live_install: Object.fromEntries(Object.entries(liveAtEnd).map(([unit, end]) => [unit, {
+      read_mb: Math.round((end.rbytes - (liveAtStart[unit]?.rbytes ?? end.rbytes)) / 1e6), write_mb: Math.round((end.wbytes - (liveAtStart[unit]?.wbytes ?? end.wbytes)) / 1e6),
+      swap_mib_start: liveAtStart[unit]?.swap_mib ?? null, swap_mib_end: end.swap_mib }])),
+    felt_delays: { front_beats_over_1s: front.over_1s, clicks_over_1s: clickSummary.over_1s.length, dashboard_reads_over_1s: dashReads.filter(read => read.ms >= LOOP_STALL_LIMIT_MS || read.status !== 200).length },
     sqlite: { guards, wal_bytes_at_open: walAtOpen, wal_bytes_at_end: walAtEnd, settings: sqliteLines.filter(entry => entry.line.includes('sqlite settings:')).slice(0, 200),
       checkpoint, checkpoint_timing,
       room: sqliteLines.filter(entry => entry.line.includes('sqlite wal room:') || entry.line.includes('sqlite wal held:')).slice(0, 500), wal: walLines.slice(0, 2000) }, freezes_log: freezeLines.slice(0, 500) };
@@ -1233,6 +1283,7 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
     const p95 = beatP95(loop);
     console.log(`${options.runCase} ${role}: after-ready p95 beat ${p95 === undefined ? 'n/a' : `<= ${p95} ms`}, worst ${Math.round(loop.max_ms)} ms at ${loop.worst_site}, beats over 1 s: ${loop.over_1s}; ${loop.beats > 0 && loop.max_ms < limit ? 'PASS' : 'FAIL'} (bar ${limit / 1000} s); pre-ready hold ${Math.round(loop.pre_ready_ms)} ms at ${loop.pre_ready_site} (reported)`);
   }
+  console.log(`${options.runCase} felt delays (counts over 1 s): front beats ${receipt.felt_delays.front_beats_over_1s}, clicks ${receipt.felt_delays.clicks_over_1s}, dashboard reads ${receipt.felt_delays.dashboard_reads_over_1s}. A pass needs the front and the click journey both under the bar.`);
   console.log(`${options.runCase} Make Private receipt: worst ${clickSummary.max_ms} ms over ${clickSummary.count} posts (${clickSummary.over_1s.length} at or over 1 s or failed); ${ack_ok ? 'PASS' : 'FAIL'} (bar 1 s). Settlement (reported): worst ${clickSummary.max_settled_ms} ms across ${clickSummary.settled} settled, ${clickSummary.pending} pending at cutoff.`);
   console.log(`${options.runCase} Make Private, front restart before commit: ${privacy_restart.pass ? 'PASS' : 'FAIL'} (${privacy_restart.ms} ms), ${privacy_restart.outcome}.`);
   console.log(`${options.runCase} socket ack (reported): worst ${ackSummary.max_ms} ms over ${ackSummary.count} posts (${ackSummary.over_1s.length} at or over 1 s or failed), status snapshot oldest ${ackSummary.status_max_age_ms} ms${ackSummary.no_control_thread ? ', NO CONTROL THREAD' : ''}.`);
