@@ -20069,7 +20069,7 @@ function hasImmutableAccountLabel(id) {
 import { createHash as createHash13, randomUUID as randomUUID9 } from "node:crypto";
 import { closeSync as closeSync11, existsSync as existsSync22, fsyncSync as fsyncSync3, lstatSync as lstatSync9, mkdirSync as mkdirSync13, openSync as openSync11, statSync as statSync13, statfsSync } from "node:fs";
 import { open as openFile } from "node:fs/promises";
-import { dirname as dirname23 } from "node:path";
+import { basename as basename7, dirname as dirname23 } from "node:path";
 import { Database as Database6 } from "bun:sqlite";
 
 // src/core/media-cache.ts
@@ -24913,11 +24913,7 @@ async function runStepsInTurns(steps) {
   return step.value;
 }
 var PK_SET_SLICE = 20000;
-async function pkSetInTurns(lists, {
-  keep,
-  set = new Set,
-  turn = ingestionTurn
-} = {}) {
+async function pkSetInTurns(lists, keep, set = new Set) {
   let added = 0;
   for (const list of lists) {
     for (const pk of list) {
@@ -24925,7 +24921,7 @@ async function pkSetInTurns(lists, {
         continue;
       set.add(pk);
       if (++added % PK_SET_SLICE === 0)
-        await turn();
+        await ingestionTurn();
     }
   }
   return set;
@@ -24933,7 +24929,7 @@ async function pkSetInTurns(lists, {
 async function embeddingExcludedPksInTurns(tierHidden, allowHeld) {
   const eligibleHeld = allowHeld ? await pkSetInTurns([tierHidden.heldForJudgment]) : undefined;
   const excluded = await pkSetInTurns([tierHidden.hidden, tierHidden.metadataLayer]);
-  return pkSetInTurns([tierHidden.held], { keep: (pk) => !eligibleHeld?.has(pk), set: excluded });
+  return pkSetInTurns([tierHidden.held], (pk) => !eligibleHeld?.has(pk), excluded);
 }
 
 class MutablePkList {
@@ -25410,12 +25406,12 @@ var READ_ONLY_MIN_SCHEMA_VERSION = 7;
 function visibilityStepAwaited(read) {
   return judgedAwaited(() => read.offThread(), () => read.here());
 }
-var CONNECTOR_RECLAIM_WORKER_SOURCE = `
+var INLINE_CLOSE_SQLITE_STORE = "const closeSqliteStore = (db) => { try { db.exec('PRAGMA wal_checkpoint(TRUNCATE);'); } catch {} db.close(); };";
+function connectorReclaimWorkerSource() {
+  return `
 import { Database } from 'bun:sqlite';
 import { statSync } from 'node:fs';
-// core/sqlite-store.ts closeSqliteStore, inlined: this source runs in its own
-// process and cannot import it. Checkpoint first so no WAL is left for a reap.
-const closeSqliteStore = (db) => { try { db.exec('PRAGMA wal_checkpoint(TRUNCATE);'); } catch {} db.close(); };
+${INLINE_CLOSE_SQLITE_STORE}
 self.onmessage = ({ data: [path, budgetMs, pagesPerStep] }) => {
   // This is the mounted store's own maintenance connection. Never create a missing store.
   const db = new Database(path, { create: false, strict: true });
@@ -25450,9 +25446,11 @@ self.onmessage = ({ data: [path, budgetMs, pagesPerStep] }) => {
     closeSqliteStore(db);
   }
 };`;
+}
 function connectorRecencyIndexWorkerSource() {
   return `
 import { Database } from 'bun:sqlite';
+${INLINE_CLOSE_SQLITE_STORE}
 self.onmessage = ({ data: [path] }) => {
   const db = new Database(path, { create: false, strict: true });
   let result;
@@ -25463,7 +25461,7 @@ self.onmessage = ({ data: [path] }) => {
   } catch (error) {
     result = { busy: /^SQLITE_(BUSY|LOCKED)(_|$)/.test(error.code) };
   } finally {
-    db.close();
+    closeSqliteStore(db);
   }
   postMessage(result);
 };`;
@@ -25662,6 +25660,7 @@ class LocalConnectorStore {
         if (this.closedForPoolReads || this.fileReplacedOrRemoved())
           return false;
         assertWritableStoreOpenAllowed("connector store recency index", this.dbPath);
+        const buildStarted = Date.now();
         const child = spawnConnectorStoreMaintenance(this.dbPath, connectorRecencyIndexWorkerSource());
         this.reclaimProcess = child;
         child.unref();
@@ -25674,6 +25673,8 @@ class LocalConnectorStore {
           const result = JSON.parse(output);
           if (!result.done && !result.busy)
             throw new Error("Recency index build failed.");
+          if (result.done)
+            console.info(`[store-recency-index] built store=${basename7(this.dbPath)} ms=${Date.now() - buildStarted}`);
           return result.done === true;
         } finally {
           child.stdin.end();
@@ -25865,7 +25866,7 @@ class LocalConnectorStore {
     pagesPerStep = Math.max(1, Math.floor(pagesPerStep));
     assertWritableStoreOpenAllowed("connector store reclaim", this.dbPath);
     assertStoreTierLedgerCanOpen(this.dbPath);
-    const child = spawnConnectorStoreMaintenance(this.dbPath, CONNECTOR_RECLAIM_WORKER_SOURCE, [budgetMs, pagesPerStep]);
+    const child = spawnConnectorStoreMaintenance(this.dbPath, connectorReclaimWorkerSource(), [budgetMs, pagesPerStep]);
     this.reclaimProcess = child;
     let preempted = false;
     const preempt = () => {
@@ -32828,7 +32829,7 @@ ${parentKey(ref)}`, { ref, origin });
       ...selectedAccount ? { accountScope: selectedAccount } : {},
       ...filters ? { filters } : {}
     };
-    const excludedItemPks = await this.vectorScanExcludedItemPks();
+    const excludedItemPks = this.vectorScanExcludedItemPks();
     if (excludedItemPks)
       pageOptions.excludedItemPks = excludedItemPks;
     const scanned = offThreadReadsSupported(this.dbPath) ? await scanVectorPagesOnPool(this.dbPath, provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit) : await this.scanVectorPagesInThread(provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit);
@@ -32879,11 +32880,6 @@ ${parentKey(ref)}`, { ref, origin });
     };
   }
   vectorScanExcludedItemPks() {
-    return this.vectorScanExclusionBuild ??= this.buildVectorScanExclusion().finally(() => {
-      this.vectorScanExclusionBuild = undefined;
-    });
-  }
-  async buildVectorScanExclusion() {
     if (!this.tierLedgerHiddenMemo && !this.tierHiddenCountsMemo) {
       let ledger;
       try {
@@ -32896,35 +32892,30 @@ ${parentKey(ref)}`, { ref, origin });
         return;
       }
     }
+    let base;
+    let children;
     try {
-      const base = await runHiddenStepsInTurns(this.tierLedgerHiddenSteps());
-      const basePks = [base.hidden, base.held, base.metadataLayer];
-      const memo = this.tierLedgerHiddenMemo;
-      if (memo ? memo.value !== base : basePks.some((pks) => pks.length > 0))
-        return;
-      const lists = memo ? [memo.lists.hidden, memo.lists.held, memo.lists.metadataLayer] : [];
-      const generations = lists.map((list) => list.generation);
-      const baseCurrent = () => this.tierLedgerHiddenMemo === memo && lists.every((list, at) => list.generation === generations[at]);
-      const children = await this.hiddenChildItemPksInTurns();
-      const childMemo = this.hiddenChildMemo;
-      if (!baseCurrent())
-        return;
-      const cached = this.vectorScanExclusion;
-      const excluded = memo && cached?.lists.every((list, at) => list === lists[at] && cached.generations[at] === generations[at]) ? cached.set : await pkSetInTurns(basePks, { turn: yieldConnectorStoreVectorScan });
-      const hiddenChildren = children.length > 0 ? await pkSetInTurns([children], { turn: yieldConnectorStoreVectorScan }) : undefined;
-      if (!baseCurrent() || this.hiddenChildMemo !== childMemo)
-        return;
-      if (excluded !== cached?.set)
-        this.vectorScanExclusion = memo ? { lists, generations, set: excluded } : undefined;
-      if (hiddenChildren)
-        return { has: (itemPk) => excluded.has(itemPk) || hiddenChildren.has(itemPk) };
-      return excluded.size > 0 ? excluded : undefined;
+      base = this.tierLedgerHiddenItemPks();
+      children = this.hiddenChildItemPks();
     } catch {
       return;
     }
+    const memo = this.tierLedgerHiddenMemo;
+    const lists = memo && memo.value === base ? [memo.lists.hidden, memo.lists.held, memo.lists.metadataLayer] : undefined;
+    const cached = this.vectorScanExclusion;
+    let excluded;
+    if (lists && cached && cached.lists.every((list, at) => list === lists[at] && cached.generations[at] === list.generation)) {
+      excluded = cached.set;
+    } else {
+      excluded = new Set([...base.hidden, ...base.held, ...base.metadataLayer]);
+      this.vectorScanExclusion = lists ? { lists, generations: lists.map((list) => list.generation), set: excluded } : undefined;
+    }
+    if (children.length === 0)
+      return excluded.size > 0 ? excluded : undefined;
+    const hiddenChildren = new Set(children);
+    return { has: (itemPk) => excluded.has(itemPk) || hiddenChildren.has(itemPk) };
   }
   vectorScanExclusion;
-  vectorScanExclusionBuild;
   async scanVectorPagesInThread(provider, beforeToken, queryVector, pageOptions, deadlineAtMs, resultLimit) {
     const scanDb = this.dbPath === ":memory:" ? this.db : new Database6(this.dbPath, { readonly: true, create: false, strict: true });
     const ownsScanDb = scanDb !== this.db;

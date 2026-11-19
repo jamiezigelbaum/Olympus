@@ -441,8 +441,8 @@ function heldVectorStore(count: number, heldCount: number) {
       chunkMatchForChunkPk: LocalConnectorStore['chunkMatchForChunkPk'];
     };
     const scanExclusions = lane.vectorScanExcludedItemPks.bind(store);
-    lane.vectorScanExcludedItemPks = async () => {
-      const exclusions = await scanExclusions();
+    lane.vectorScanExcludedItemPks = () => {
+      const exclusions = scanExclusions();
       expect(exclusions).toBeUndefined();
       return exclusions;
     };
@@ -838,11 +838,11 @@ describe('the vector lane ranks only what it can serve, in one pass', () => {
       // The store's own visibility set and the live ledger agree: the top 90% are held.
       const held = new Set(pks.slice(0, count * 0.9));
       const lane = store as unknown as {
-        vectorScanExcludedItemPks(): Promise<{ has(itemPk: number): boolean } | undefined>;
+        tierLedgerHiddenItemPks(): { hidden: number[]; held: number[]; heldForJudgment: number[]; metadataLayer: number[]; metadataLayerContentUnread: number[]; moving: number };
         visibleVectorItemPks(pks: readonly number[]): Set<number>;
       };
-      // The scan awaits its exclusion set (built off the loop); this test is about the lane, so the set is given.
-      lane.vectorScanExcludedItemPks = async () => held;
+      const value = { hidden: [], held: [...held], heldForJudgment: [...held], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 };
+      lane.tierLedgerHiddenItemPks = () => value;
       lane.visibleVectorItemPks = (candidates) => new Set(candidates.filter((pk) => !held.has(pk)));
       const reads = counted();
       try {

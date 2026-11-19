@@ -639,6 +639,29 @@ async function run(args: Args, build: BuildReceipt, limits: Limits) {
       if (realpathSync(path) !== path) throw new Error(`Expected a fixture file without symlinks: ${path}`);
     }
   }
+  const RECENCY_INDEXES = ['idx_connector_store_items_recent_live', 'idx_connector_store_items_recent_account_live'];
+  // An upgraded store arrives without the recency indexes; the background role builds them.
+  const dropRecencyIndexes = args.extraEnv.ASK_BENCH_DROP_RECENCY_INDEXES === '1';
+  const recencyBuilt: { store: string; ms: number; at_s: number }[] = [];
+  let recencyClock = Date.now();
+  if (dropRecencyIndexes) {
+    const dropEnv = { HOME: dir, XDG_DATA_HOME: join(dir, 'data'), XDG_STATE_HOME: join(dir, 'state'), XDG_CONFIG_HOME: join(dir, 'config') };
+    for (const store of stores) {
+      const dbPath = storePath(dir, store);
+      const account = storageAccountForCorpus(store);
+      const ledger = openTierLedger(account, { dbPath: tierLedgerPathForStore(dbPath) }, dropEnv);
+      const handle = openConnectorStore(account, { ...store, dbPath, tierLedger: ledger }, dropEnv);
+      try {
+        for (const name of RECENCY_INDEXES) db(handle).exec(`DROP INDEX IF EXISTS ${name}`);
+        db(handle).query('PRAGMA wal_checkpoint(TRUNCATE)').all();
+      } finally {
+        handle.close();
+        ledger.close();
+      }
+    }
+    console.log(`Recency indexes dropped from ${stores.length} stores`);
+  }
+  const recencyIndexState = () => ({ stores: stores.length, built: recencyBuilt.length, builds: recencyBuilt });
   const temp = mkdtempSync('/tmp/oab-'); // Keep the Unix socket path short.
   const { server: stub, calls } = fixtureStub();
   const portProbe = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: { data() {} } });
@@ -718,6 +741,8 @@ async function run(args: Args, build: BuildReceipt, limits: Limits) {
           const acceptLine = (line: string) => {
             tails[role] = (tails[role] + line + '\n').slice(-16_000);
             if (role === 'background' && idleLog) idleLog.push(line);
+            const built = /\[store-recency-index\] built store=(\S+) ms=(\d+)/.exec(line);
+            if (built) recencyBuilt.push({ store: built[1]!, ms: Number(built[2]), at_s: Math.round((Date.now() - recencyClock) / 1000) });
             if (line.startsWith('[ask-bench] SQL disk sampling stopped')) console.error(`${role}: ${line}`);
             if (line.includes("a store's hidden-copy set could not be built yet")) error = line;
             if (line.includes(`${role}: built ${stores.length} stores' hidden-copy sets`)) {
@@ -759,6 +784,7 @@ async function run(args: Args, build: BuildReceipt, limits: Limits) {
       }
     };
     const readyAt = Date.now();
+    recencyClock = readyAt;
     const idleStart = takeDiskSamples();
     const idleSites = newSiteTotals();
     idleLog = [];
@@ -770,6 +796,7 @@ async function run(args: Args, build: BuildReceipt, limits: Limits) {
       const sample = idleSample(background.pid, scope, readyAt);
       idle.push(sample);
       console.log(`Idle ${JSON.stringify(sample)}`);
+      if (dropRecencyIndexes) console.log(`Recency indexes +${offset / 1000}s ${JSON.stringify(recencyIndexState())}`);
       if (offset > 0 || offset === idleMs) await reportDisk(`idle +${offset / 1000}s`, idleStart, takeDiskSamples(), idleSites);
       if (offset === idleMs) break;
     }
@@ -816,6 +843,7 @@ async function run(args: Args, build: BuildReceipt, limits: Limits) {
         };
         asks.push(ask);
         console.log(askLines(ask).join('\n'));
+        if (dropRecencyIndexes) console.log(`Recency indexes after ${label} ${JSON.stringify(recencyIndexState())}`);
       }
     } finally {
       await reportDisk('six Asks', askStart, takeDiskSamples(), newSiteTotals());
