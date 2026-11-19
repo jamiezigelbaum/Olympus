@@ -21467,7 +21467,7 @@ var init_connection_requests = __esm(() => {
   init_request_log();
 });
 
-// src/workers/embedding-sweep-idle.ts
+// src/core/embedding-sweep-idle.ts
 var init_embedding_sweep_idle = __esm(() => {
   init_atomic_file();
 });

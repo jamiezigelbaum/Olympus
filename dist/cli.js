@@ -82371,7 +82371,7 @@ var init_dashboard_opening = __esm(() => {
   init_operation_error();
 });
 
-// src/workers/embedding-sweep-idle.ts
+// src/core/embedding-sweep-idle.ts
 import { constants as constants8 } from "node:fs";
 import { open as open5 } from "node:fs/promises";
 async function readEmbeddingSweepIdle(path) {

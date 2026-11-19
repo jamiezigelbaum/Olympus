@@ -1,6 +1,6 @@
 import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
-import { writePrivateFileAtomic } from '../core/atomic-file.ts';
+import { writePrivateFileAtomic } from './atomic-file.ts';
 
 export interface IdleEmbeddingSweep {
   key: string;

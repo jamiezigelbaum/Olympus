@@ -92,7 +92,7 @@ import {
 } from './credential-broker/index.ts';
 import { GO_EASY_TRICKLE_EMBED_ITEMS } from './local-pacing.ts';
 import { LIVE_NEW_ITEMS_INTERVAL_MS } from './live-source-cadence.ts';
-import { EMBEDDING_SWEEP_IDLE_SUFFIX, readEmbeddingSweepIdle, writeEmbeddingSweepIdle, type IdleEmbeddingSweep } from './embedding-sweep-idle.ts';
+import { EMBEDDING_SWEEP_IDLE_SUFFIX, readEmbeddingSweepIdle, writeEmbeddingSweepIdle, type IdleEmbeddingSweep } from '../core/embedding-sweep-idle.ts';
 
 export type SourceSchedulerTaskKind = 'sync' | 'extract' | 'embed' | 'watch';
 export type SourceSchedulerCadence = 'manual' | 'continuous';

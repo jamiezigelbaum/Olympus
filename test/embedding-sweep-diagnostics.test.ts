@@ -11,7 +11,7 @@ import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { EMBEDDING_SWEEP_IDLE_BACKOFF_ENV, EMBEDDING_SWEEP_IDLE_FULL_PASS_MS, SourceScheduler, withEmbeddingSweep } from '../src/workers/source-scheduler.ts';
 import { TransientSourceEmbeddingError } from '../src/workers/source-index/embeddings.ts';
 import { FileLeaseBusyError } from '../src/core/file-lease.ts';
-import { EMBEDDING_SWEEP_IDLE_SUFFIX } from '../src/workers/embedding-sweep-idle.ts';
+import { EMBEDDING_SWEEP_IDLE_SUFFIX } from '../src/core/embedding-sweep-idle.ts';
 import { CORPORA, FIXTURE_PLACEMENT, fixtureConnector, identityOf, localId, localProvider, RecordingProvider, tempDir } from './helpers/tier-fixtures.ts';
 import { createTestClock } from './helpers/test-clock.ts';
 

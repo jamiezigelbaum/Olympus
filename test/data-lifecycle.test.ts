@@ -1,7 +1,7 @@
 import { retiredStateBackupPath } from '../src/core/boot-progress.ts';
 import { embeddingPrefilterDirectory, embeddingPrefilterInstallLedgerPath, resolveClassificationLedgerPath } from '../src/workers/classification/tier-ledger-path.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
-import { EMBEDDING_SWEEP_IDLE_SUFFIX } from '../src/workers/embedding-sweep-idle.ts';
+import { EMBEDDING_SWEEP_IDLE_SUFFIX } from '../src/core/embedding-sweep-idle.ts';
 import { lifecycleViews } from './helpers/lifecycle-view.ts';
 import {
   existsSync,
