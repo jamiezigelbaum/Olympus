@@ -29,6 +29,7 @@ import { expandSourceIndexKeywords, keywordPrepareWaitMs, withExpandedSourceInde
 import { RECENT_ITEMS_CUT_SHORT } from '../../core/source-index/partial-search.ts';
 import { CONTROL_PATH_SLICE_MS, controlPathHeadroom, ingestionTurn, type ControlPathHeadroom } from '../control-path-headroom.ts';
 import { BACKGROUND_READS, OffThreadReadBusyError, offThreadReadsSupported, openOffThreadSnapshot, READ_POOL_RESCORE_READERS, readInBackground, readOnPool, releaseOffThreadReads, withOffThreadSnapshot, type StoreRead } from './off-thread-reads.ts';
+import type { BackgroundWalkPause } from '../engine/stand-back.ts';
 // The shared connector ingest spine: ONE generic local store that turns any
 // Contract 1 SourceConnector into a searchable, analyst-served corpus with
 // zero new storage code.
@@ -2027,11 +2028,8 @@ export interface ConnectorStoreEmbedOptions {
    * first batch always runs, so every pass makes progress. Not with a journal.
    */
   stopAtMs?: number;
-  /**
-   * Polled before each batch after the first, like `stopAtMs`: true stops the
-   * pass the same way (the owner's Ask is running). Not with a journal.
-   */
-  shouldStop?: () => boolean;
+  /** The scheduler measures its budget in active time and observes forward progress. */
+  sweepTiming?: Pick<EmbeddingSweepPacing, 'now' | 'progress'>;
   /** Durable idempotency key for a maintenance page's embedding phase. */
   journalId?: string;
   /** Monotonic owner generation used to fence a superseded maintenance run. */
@@ -2155,6 +2153,12 @@ export interface ConnectorStoreEmbedStoreRun {
   inventory?: Record<string, number>;
 }
 
+type EmbeddingSweepPacing = {
+  now: () => number;
+  checkpoint: BackgroundWalkPause;
+  progress: () => void;
+};
+
 /**
  * The source-neutral embedding sweep, one bounded pass over each target:
  *
@@ -2178,10 +2182,17 @@ export async function embedPendingChunks(
   targets: readonly ConnectorStoreEmbeddingTarget[],
   // stopAtMs: no batch starts after it (the first always runs). Items count
   // badly as work: one long file can hold more chunks than a pass has time for.
-  // shouldStop: polled with stopAtMs, and before the first batch too (the owner's Ask).
-  options: { maxItems: number; stopAtMs?: number; diagnostics?: boolean; shouldStop?: () => boolean },
+  options: {
+    maxItems: number;
+    stopAtMs?: number;
+    diagnostics?: boolean;
+    pacing?: EmbeddingSweepPacing;
+    guard?: <T>(work: () => Promise<T>) => Promise<T>;
+  },
 ): Promise<ConnectorStoreEmbedStoreRun[]> {
   const runs: ConnectorStoreEmbedStoreRun[] = [];
+  const { pacing, guard } = options;
+  const now = pacing?.now ?? Date.now;
   for (const target of targets) {
     const { store } = target;
     const run: ConnectorStoreEmbedStoreRun = {
@@ -2193,8 +2204,9 @@ export async function embedPendingChunks(
     };
     runs.push(run);
     const inventoryWrites = options.diagnostics && target.wholeStore === true ? store.writeSequence() : undefined;
-    if (options.diagnostics) run.inventory = await store.embeddingSweepInventory(target.provider, target, options.stopAtMs);
-    const groups = store.queuedEmbeddingGroups(options.maxItems).filter((group) => {
+    if (options.diagnostics) run.inventory = await store.embeddingSweepInventory(target.provider, target, options.stopAtMs, undefined, pacing);
+    await pacing?.checkpoint();
+    const selectGroups = () => store.queuedEmbeddingGroups(options.maxItems).filter((group) => {
       // A store that catches up never replays a queue left under another
       // identity (the owner changed the tier's model): its items are missing
       // vectors on the current one and are picked up below instead.
@@ -2202,6 +2214,7 @@ export async function embedPendingChunks(
       store.completeQueuedEmbedding(group.localItemIds);
       return false;
     });
+    const groups = guard ? await guard(async () => selectGroups()) : selectGroups();
     const queued = groups.reduce((sum, group) => sum + group.localItemIds.length, 0);
     // The inventory tests vector currency over a superset of the work list.
     // A complete zero-pending inventory can stand in for the list's walk
@@ -2211,29 +2224,38 @@ export async function embedPendingChunks(
       && inventoryWrites !== undefined && store.writeSequence() === inventoryWrites && !store.fileReplacedOrRemoved();
     if (target.wholeStore === true && queued < options.maxItems && !noMissingVectors) {
       const queuedIds = new Set(groups.flatMap((group) => group.localItemIds));
-      const missing = (await store.missingEmbeddingItemIdsInTurns(target.provider, options.maxItems - queued, target))
+      const missing = (await store.missingEmbeddingItemIdsInTurns(target.provider, options.maxItems - queued, target, undefined, pacing?.checkpoint))
         .filter((localItemId) => !queuedIds.has(localItemId));
       if (missing.length > 0) groups.push({ provider: target.provider, localItemIds: missing });
     }
     let answered = false;
     for (const group of groups) {
-      if ((answered && options.stopAtMs !== undefined && Date.now() >= options.stopAtMs) || options.shouldStop?.() === true) {
+      await pacing?.checkpoint();
+      if (answered && options.stopAtMs !== undefined && now() >= options.stopAtMs) {
         run.stoppedAtDeadline = true;
         break;
       }
-      try {
-        group.provider.assertBindingCurrent?.();
-        await target.assertAuthorized?.();
-      } catch {
-        store.completeQueuedEmbedding(group.localItemIds);
+      // Neither the source account guard nor the store's embedding lease is
+      // held while parked. Both serve foreground and forwarded operations.
+      const embed = async () => {
+        try {
+          group.provider.assertBindingCurrent?.();
+          await target.assertAuthorized?.();
+        } catch {
+          store.completeQueuedEmbedding(group.localItemIds);
+          return undefined;
+        }
+        return embedItemsIsolated(store, group.provider, group.localItemIds, {
+          ...target,
+          ...(options.stopAtMs !== undefined ? { stopAtMs: options.stopAtMs } : {}),
+          ...(pacing ? { sweepTiming: pacing } : {}),
+        });
+      };
+      const outcome = guard ? await guard(embed) : await embed();
+      if (!outcome) {
         run.itemsOutOfScope += group.localItemIds.length;
         continue;
       }
-      const outcome = await embedItemsIsolated(store, group.provider, group.localItemIds, {
-        ...target,
-        ...(options.stopAtMs !== undefined ? { stopAtMs: options.stopAtMs } : {}),
-        ...(options.shouldStop ? { shouldStop: options.shouldStop } : {}),
-      });
       run.itemsAttempted += group.localItemIds.length;
       run.chunksEmbedded += outcome.chunksEmbedded;
       run.itemsFailed += outcome.itemsFailed;
@@ -2270,7 +2292,7 @@ async function embedItemsIsolated(
   store: LocalConnectorStore,
   provider: SourceEmbeddingProvider,
   localItemIds: readonly string[],
-  scope: Pick<ConnectorStoreEmbedOptions, 'accountScope' | 'filters' | 'assertAuthorized' | 'stopAtMs' | 'shouldStop'> = {},
+  scope: Pick<ConnectorStoreEmbedOptions, 'accountScope' | 'filters' | 'assertAuthorized' | 'stopAtMs' | 'sweepTiming'> = {},
 ): Promise<{ chunksEmbedded: number; itemsFailed: number; deferredReason?: string; busy?: boolean; stoppedAtDeadline?: boolean }> {
   try {
     const embed = await store.embedChunks({
@@ -2279,7 +2301,7 @@ async function embedItemsIsolated(
       ...(scope.filters ? { filters: scope.filters } : {}),
       ...(scope.assertAuthorized ? { assertAuthorized: scope.assertAuthorized } : {}),
       ...(scope.stopAtMs !== undefined ? { stopAtMs: scope.stopAtMs } : {}),
-      ...(scope.shouldStop ? { shouldStop: scope.shouldStop } : {}),
+      ...(scope.sweepTiming ? { sweepTiming: scope.sweepTiming } : {}),
     });
     // Stopped part-way, the items stay queued: the next pass skips the chunks
     // that already hold a current vector and embeds the rest.
@@ -2303,7 +2325,7 @@ async function embedItemsIsolated(
     for (const [index, localItemId] of localItemIds.entries()) {
       // One budget for the whole retry: each item's first batch always runs,
       // so without this check every item past the deadline would still run.
-      if (index > 0 && ((scope.stopAtMs !== undefined && Date.now() >= scope.stopAtMs) || scope.shouldStop?.() === true)) {
+      if (index > 0 && scope.stopAtMs !== undefined && (scope.sweepTiming?.now() ?? Date.now()) >= scope.stopAtMs) {
         return { chunksEmbedded, itemsFailed, stoppedAtDeadline: true };
       }
       const single = await embedItemsIsolated(store, provider, [localItemId], scope);
@@ -13346,8 +13368,10 @@ export class LocalConnectorStore {
     limit: number,
     scope: Pick<ConnectorStoreEmbedOptions, 'accountScope' | 'filters'> = {},
     windowChunks = MISSING_EMBEDDING_CHUNK_WINDOW,
+    checkpoint?: BackgroundWalkPause,
   ): Promise<string[]> {
     if (limit <= 0) return [];
+    await checkpoint?.();
     const tierHidden = await this.tierHiddenItemPksInTurns();
     // The same list as missingEmbeddingItemIds (items in order of their first
     // chunk), read one window of chunk pks at a time with a turn between.
@@ -13386,6 +13410,7 @@ export class LocalConnectorStore {
     const found: string[] = [];
     for (let after = 0; after < maxChunkPk && found.length < limit; after += windowChunks) {
       if (after > 0) await ingestionTurn();
+      await checkpoint?.();
       const rows = await read({ sql: windowSql, params: [modelId, after, after + windowChunks, ...params], mode: 'all' }) as Array<{ item_pk: number; local_item_id: string }>;
       for (const row of rows) {
         if (excluded?.has(row.item_pk) || seen.has(row.item_pk)) continue;
@@ -13426,8 +13451,11 @@ export class LocalConnectorStore {
     scope: Pick<ConnectorStoreEmbedOptions, 'accountScope' | 'filters'> = {},
     stopAtMs?: number,
     windowChunks = MISSING_EMBEDDING_CHUNK_WINDOW,
+    pacing?: Pick<EmbeddingSweepPacing, 'checkpoint' | 'now'>,
   ): Promise<Record<string, number>> {
-    const started = Date.now();
+    const now = pacing?.now ?? Date.now;
+    const started = now();
+    await pacing?.checkpoint();
     const tier = await this.tierHiddenItemPksInTurns();
     const hidden = await pkSetInTurns([tier.hidden]);
     const held = await pkSetInTurns([tier.held]);
@@ -13465,9 +13493,10 @@ export class LocalConnectorStore {
     const read = this.embeddingSweepRead(offThreadReadsSupported(this.dbPath));
     const maxChunkPk = (await read({ sql: 'SELECT COALESCE(MAX(chunk_pk), 0) AS n FROM chunks', params: [], mode: 'get' }) as { n: number }).n;
     let after = 0;
-    while (stopAtMs === undefined || Date.now() < stopAtMs) {
-      if (after >= maxChunkPk) { counts.inventory_complete = 1; break; }
+    for (; after < maxChunkPk; after += windowChunks) {
       if (after > 0) await ingestionTurn();
+      await pacing?.checkpoint();
+      if (stopAtMs !== undefined && now() >= stopAtMs) break;
       const rows = await read({ sql: windowSql, mode: 'all',
         params: [...(account ? [account] : []), ...scoped.params, provider.modelId, after, after + windowChunks] }) as Array<{
         chunk_pk: number; item_pk: number; local_item_id: string; tombstoned: number; trust_tier: SourceTrustTier; indexed_at: string | null; in_scope: number;
@@ -13490,9 +13519,9 @@ export class LocalConnectorStore {
           counts[reason === 'skipped_held_chunks' ? 'skipped_held_recent_chunks' : 'skipped_out_of_scope_recent_chunks']! += 1;
         }
       }
-      after += windowChunks;
     }
-    counts.inventory_ms = Date.now() - started;
+    if (after >= maxChunkPk) counts.inventory_complete = 1;
+    counts.inventory_ms = now() - started;
     return counts;
   }
 
@@ -13934,6 +13963,7 @@ export class LocalConnectorStore {
       options.filters,
       tierHidden,
       this.canEmbedHeld(provider),
+      options.sweepTiming?.progress,
     );
     // A row that is Private by its own stored tier (or carries a tier the
     // store does not recognise) never reaches an embedder that is not approved
@@ -14123,7 +14153,8 @@ export class LocalConnectorStore {
     const judgedThisPass = new Set<string>();
     let stoppedAtDeadline = false;
     for (let offset = 0; offset < pending.length; offset += EMBEDDING_BATCH_SIZE) {
-      if (offset > 0 && ((options.stopAtMs !== undefined && Date.now() >= options.stopAtMs) || options.shouldStop?.() === true)) {
+      options.sweepTiming?.progress();
+      if (offset > 0 && options.stopAtMs !== undefined && (options.sweepTiming?.now() ?? Date.now()) >= options.stopAtMs) {
         stoppedAtDeadline = true;
         break;
       }
@@ -15203,6 +15234,7 @@ export class LocalConnectorStore {
     filters?: ConnectorStoreSearchFilters,
     tierHidden?: TierLedgerHiddenItemPks,
     allowHeld = false,
+    progress?: () => void,
   ): Promise<EmbeddingWorkRow[]> {
     if (!offThreadReadsSupported(this.dbPath)) {
       return this.embeddingSourceRows(localItemIds, accountScope, filters, tierHidden, allowHeld)
@@ -15251,6 +15283,7 @@ export class LocalConnectorStore {
       media_path: string | null; media_sha256: string | null; current_hash: string | null };
     const rows: WorkRow[] = [];
     for (let after = 0; ;) {
+      progress?.();
       const page = await readInBackground(this.dbPath, { sql, params: [...params, after], mode: 'all' }) as WorkRow[];
       for (const row of page) rows.push(row);
       if (page.length < EMBEDDING_WORK_PAGE_ROWS) break;
@@ -17010,7 +17043,7 @@ export class LocalConnectorStore {
    * walk later. Returns the drift, or undefined when no walk ran, while
    * maintenance owns the writer, or for a read-only open.
    */
-  async reconcileTotals({ background = false }: { background?: boolean } = {}): Promise<number | undefined> {
+  async reconcileTotals({ background = false, pause }: { background?: boolean; pause?: BackgroundWalkPause } = {}): Promise<number | undefined> {
     if (this.readOnly || this.reclaiming) return undefined;
     const installed = storeTotalsInstalled(this.db);
     if (!installed) createStoreTotals(this.db, NON_SYNC_RUN_CONNECTORS_SQL);
@@ -17030,6 +17063,8 @@ export class LocalConnectorStore {
     const steps = storeTotalsWalkSteps(NON_SYNC_RUN_CONNECTORS_SQL);
     let step = steps.next();
     while (!step.done) {
+      await pause?.();
+      if (this.reclaiming || this.closedForPoolReads) return undefined;
       const query = step.value;
       let rows: unknown;
       if (pool) rows = await readInBackground(this.dbPath, query);
@@ -17068,13 +17103,15 @@ export class LocalConnectorStore {
    * held a background read for 10 s on a cold store and its UPDATE held the
    * loop for as many rows (loop-stall gate, 16 Nov), so a page is 2,000.
    */
-  async repairEmbeddingInputHashes(pageKeys = 2_000, pages = 50): Promise<number> {
+  async repairEmbeddingInputHashes(pageKeys = 2_000, pages = 50, pause?: BackgroundWalkPause): Promise<number> {
     if (this.readOnly || this.reclaiming || this.embeddingInputHashesChecked) return 0;
     const pool = offThreadReadsSupported(this.dbPath);
     const read = async (sql: string, params: number[]): Promise<unknown> => (pool
       ? readInBackground(this.dbPath, { sql, params, mode: 'all' })
       : this.db.query(sql).all(...params));
     if (!this.embeddingInputHashWalk) {
+      await pause?.();
+      if (this.reclaiming || this.closedForPoolReads) return 0;
       const [row] = await read('SELECT MAX(chunk_pk) AS last FROM chunks', []) as Array<{ last: number | null }>;
       this.embeddingInputHashWalk = { after: 0, last: Number(row?.last ?? 0) };
     }
@@ -17082,6 +17119,8 @@ export class LocalConnectorStore {
     const set = this.db.query('UPDATE chunks SET embedding_input_hash = content_hash WHERE chunk_pk = ? AND embedding_input_hash IS NULL');
     let changed = 0;
     for (let page = 0; page < pages && walk.after < walk.last; page += 1) {
+      await pause?.();
+      if (this.reclaiming || this.closedForPoolReads) break;
       const hi = Math.min(walk.after + pageKeys, walk.last);
       const rows = await read('SELECT chunk_pk FROM chunks WHERE chunk_pk > ? AND chunk_pk <= ? AND embedding_input_hash IS NULL', [walk.after, hi]) as Array<{ chunk_pk: number }>;
       if (this.reclaiming) break;

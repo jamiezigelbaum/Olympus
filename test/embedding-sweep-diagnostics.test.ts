@@ -12,13 +12,22 @@ import { EMBEDDING_SWEEP_IDLE_BACKOFF_ENV, EMBEDDING_SWEEP_IDLE_FULL_PASS_MS, So
 import { TransientSourceEmbeddingError } from '../src/workers/source-index/embeddings.ts';
 import { FileLeaseBusyError } from '../src/core/file-lease.ts';
 import { EMBEDDING_SWEEP_IDLE_SUFFIX } from '../src/core/embedding-sweep-idle.ts';
+import { createStandBack, STAND_BACK_MAX_MS, STAND_BACK_SHARE_MS, type BackgroundWalkPause } from '../src/workers/engine/stand-back.ts';
+import { createExclusiveRunner, guardAccountBoundLanes } from '../src/workers/source-account-guard.ts';
 import { CORPORA, FIXTURE_PLACEMENT, fixtureConnector, identityOf, localId, localProvider, RecordingProvider, tempDir } from './helpers/tier-fixtures.ts';
-import { createTestClock } from './helpers/test-clock.ts';
+import { createTestClock, waitFor } from './helpers/test-clock.ts';
 
 const cleanups: Array<() => void> = [];
 afterEach(() => { for (const cleanup of cleanups.splice(0).reverse()) cleanup(); });
 
-async function fixture(options: { accountScope?: string; empty?: boolean } = {}) {
+async function fixture(options: {
+  accountScope?: string;
+  empty?: boolean;
+  pauseForAsk?: BackgroundWalkPause;
+  onWindow?: (walk: 'inventory' | 'workList', count: number) => void;
+  guard?: ReturnType<typeof createExclusiveRunner>;
+  onSync?: () => void;
+} = {}) {
   const tmp = tempDir();
   const dbPath = `${tmp.dir}/private.sqlite`;
   const open = (provider: RecordingProvider) => {
@@ -45,9 +54,14 @@ async function fixture(options: { accountScope?: string; empty?: boolean } = {})
   let now = new Date('2026-11-07T15:00:00Z');
   const createScheduler = () => {
     const { store, provider } = runtime;
-    const sources = withEmbeddingSweep([{ sourceId: 'synthetic-source-id', corpusId: store.corpusId, cadence: 'continuous', intervalMs: 60_000, freshnessThresholdHours: 24, tasks: [] }], () => () => [{
+    const tasks = options.onSync ? [{
+      id: 'synthetic_sync', kind: 'sync' as const, writer: true as const,
+      async run() { options.onSync?.(); return { status: 'idle' as const }; },
+    }] : [];
+    let sources = withEmbeddingSweep([{ sourceId: 'synthetic-source-id', corpusId: store.corpusId, cadence: 'continuous', intervalMs: 60_000, freshnessThresholdHours: 24, tasks }], () => () => [{
       store, provider, wholeStore: true, ...(options.accountScope !== undefined ? { accountScope: options.accountScope } : {}),
-    }]);
+    }], options.pauseForAsk ? { pauseForAsk: options.pauseForAsk } : {});
+    if (options.guard) sources = guardAccountBoundLanes(sources, new Map([['synthetic-source-id', { run: options.guard, assertAccount: async () => {} }]]));
     return new SourceScheduler({ enabled: true, tickMs: 60_000, errorBackoffMs: 1_000, maxTransientRetries: 1, sources, now: () => now });
   };
   let scheduler = createScheduler();
@@ -64,8 +78,11 @@ async function fixture(options: { accountScope?: string; empty?: boolean } = {})
     walks.workList = 0;
     setReadPoolObserverForTests((path, read) => {
       if (path !== dbPath || !read.sql.includes('c.chunk_pk > ? AND c.chunk_pk <= ?')) return;
-      if (read.sql.includes('AS in_scope')) walks.inventory++;
-      if (read.sql.includes('AS first_chunk_pk')) walks.workList++;
+      const walk = read.sql.includes('AS in_scope') ? 'inventory' : read.sql.includes('AS first_chunk_pk') ? 'workList' : undefined;
+      if (walk) {
+        walks[walk]++;
+        options.onWindow?.(walk, walks[walk]);
+      }
     }, { snapshots: true });
     const status = await scheduler.runDueTasks().finally(() => setReadPoolObserverForTests());
     const lines = log.mock.calls.map(call => String(call[0])).filter(line => line.startsWith('[olympus:embedding-sweep] '));
@@ -73,7 +90,7 @@ async function fixture(options: { accountScope?: string; empty?: boolean } = {})
     expect(lines[0]).not.toMatch(/synthetic|fixture|personal:|corpus|source_id|item_id/);
     const record = JSON.parse(lines[0]!.slice('[olympus:embedding-sweep] '.length));
     expect(record).toMatchObject({ source_index: 0, store_index: 0 });
-    expect(record.next_run_at).toBe(status.sources[0]!.tasks[0]!.next_run_at);
+    expect(record.next_run_at).toBe(status.sources[0]!.tasks.find(task => task.kind === 'embed')!.next_run_at);
     now = new Date(record.next_run_at);
     return record;
   };
@@ -85,8 +102,74 @@ async function fixture(options: { accountScope?: string; empty?: boolean } = {})
     get set() { return runtime.set; },
     statePath: `${dbPath}${EMBEDDING_SWEEP_IDLE_SUFFIX}`,
     pass, restart, walks,
+    runOperator: () => scheduler.runSource('synthetic-source-id', undefined, 'operator'),
   };
 }
+
+test('the sweep parks both window walks in place, keeps its budget and resumes at the share bound', async () => {
+  const clock = createTestClock(Date.now());
+  const mocked = spyOn(Date, 'now').mockImplementation(clock.now);
+  cleanups.push(() => mocked.mockRestore());
+  const seed = async (f: Awaited<ReturnType<typeof fixture>>) => {
+    await f.set.sync(fixtureConnector(() => ['one', 'two', 'three'].map(id => ({ id, name: `${id}.txt`, text: `Synthetic text ${id}` }))),
+      { fetchContent: true, placement: FIXTURE_PLACEMENT }, { embed: false });
+    const inventory = f.store.embeddingSweepInventory.bind(f.store);
+    f.store.embeddingSweepInventory = (provider, scope, stopAtMs, _window, pacing) => inventory(provider, scope, stopAtMs, 1, pacing);
+    const missing = f.store.missingEmbeddingItemIdsInTurns.bind(f.store);
+    f.store.missingEmbeddingItemIdsInTurns = (provider, limit, scope, _window, checkpoint) => missing(provider, limit, scope, 1, checkpoint);
+  };
+  const reference = await fixture({ empty: true });
+  await seed(reference);
+  const expected = await reference.pass();
+  expect(expected).toMatchObject({ eligible_chunks: 3, chunks_embedded: 3, inventory_complete: 1, stopped_at_deadline: 0 });
+
+  let reason: string | undefined;
+  const standBack = createStandBack({ reason: () => reason, now: clock.now, sleep: clock.sleep, log: () => {} });
+  const guard = createExclusiveRunner();
+  let synced = 0;
+  const f = await fixture({
+    empty: true, guard,
+    pauseForAsk: () => standBack.pause('embed'),
+    onSync: () => { synced++; },
+    onWindow: (_walk, count) => { if (count === 1) reason = 'question in the front'; },
+  });
+  await seed(f);
+  // Leave just enough active budget to run the inventory. The first pause
+  // alone advances the wall past this deadline.
+  const inventory = f.store.embeddingSweepInventory.bind(f.store);
+  f.store.embeddingSweepInventory = (provider, scope, _stopAtMs, window, pacing) =>
+    inventory(provider, scope, clock.now() + 500, window, pacing);
+  const pass = f.pass();
+  try {
+    await waitFor(() => standBack.counts().embed?.holding, { description: 'inventory parked after the first window' });
+    await clock.advance(2_000);
+    expect(f.walks).toEqual({ inventory: 1, workList: 0 });
+    expect(standBack.counts().embed).toMatchObject({ holding: true, reason, held_ms: 2_000 });
+    // The same account runner can serve a foreground operation while parked.
+    expect(synced).toBe(1);
+    await waitFor(() => f.runOperator(), { description: 'foreground sync gets the source turn and account guard' });
+    expect(synced).toBe(2);
+    reason = undefined;
+    await clock.advance(100);
+    await waitFor(() => standBack.counts().embed?.holds === 2, { description: 'missing-vector walk parked after the first window' });
+    expect(f.walks).toEqual({ inventory: 3, workList: 1 });
+    await clock.advance(STAND_BACK_MAX_MS - 1);
+    expect(f.walks.workList).toBe(1);
+    expect(standBack.counts().embed?.holding).toBe(true);
+    await clock.advance(1);
+    const actual = await pass;
+    expect(actual).toEqual(expected);
+    expect(f.walks).toEqual({ inventory: 3, workList: 3 });
+    expect(standBack.counts().embed).toMatchObject({ holding: false, bound_reached: 1 });
+    expect(standBack.holds('embed')).toBe(false);
+    await clock.advance(STAND_BACK_SHARE_MS);
+    expect(standBack.holds('embed')).toBe(true);
+  } finally {
+    reason = undefined;
+    await clock.advance(STAND_BACK_MAX_MS);
+    await pass;
+  }
+}, 25_000);
 
 test('a superseded-only Private backlog is an explained idle pass, never revived or sent', async () => {
   const f = await fixture();

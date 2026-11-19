@@ -31870,9 +31870,10 @@ ${parentKey(ref)}`, { ref, origin });
     `).all(modelId, ...params, limit + (failed?.size ?? 0));
     return rows.map((row) => row.local_item_id).filter((localItemId) => !failed?.has(localItemId)).slice(0, limit);
   }
-  async missingEmbeddingItemIdsInTurns(embedder, limit, scope = {}, windowChunks = MISSING_EMBEDDING_CHUNK_WINDOW) {
+  async missingEmbeddingItemIdsInTurns(embedder, limit, scope = {}, windowChunks = MISSING_EMBEDDING_CHUNK_WINDOW, checkpoint) {
     if (limit <= 0)
       return [];
+    await checkpoint?.();
     const tierHidden = await this.tierHiddenItemPksInTurns();
     const modelId = embedder.modelId;
     const accountScope = normalizeOptionalAccountScope(scope.accountScope);
@@ -31904,6 +31905,7 @@ ${parentKey(ref)}`, { ref, origin });
     for (let after = 0;after < maxChunkPk && found.length < limit; after += windowChunks) {
       if (after > 0)
         await ingestionTurn();
+      await checkpoint?.();
       const rows = await read({ sql: windowSql, params: [modelId, after, after + windowChunks, ...params], mode: "all" });
       for (const row of rows) {
         if (excluded?.has(row.item_pk) || seen.has(row.item_pk))
@@ -31927,8 +31929,10 @@ ${parentKey(ref)}`, { ref, origin });
       return query.mode === "get" ? statement.get(...query.params) : statement.all(...query.params);
     };
   }
-  async embeddingSweepInventory(provider, scope = {}, stopAtMs, windowChunks = MISSING_EMBEDDING_CHUNK_WINDOW) {
-    const started = Date.now();
+  async embeddingSweepInventory(provider, scope = {}, stopAtMs, windowChunks = MISSING_EMBEDDING_CHUNK_WINDOW, pacing) {
+    const now = pacing?.now ?? Date.now;
+    const started = now();
+    await pacing?.checkpoint();
     const tier = await this.tierHiddenItemPksInTurns();
     const hidden = await pkSetInTurns([tier.hidden]);
     const held = await pkSetInTurns([tier.held]);
@@ -31974,13 +31978,12 @@ ${parentKey(ref)}`, { ref, origin });
     const read = this.embeddingSweepRead(offThreadReadsSupported(this.dbPath));
     const maxChunkPk = (await read({ sql: "SELECT COALESCE(MAX(chunk_pk), 0) AS n FROM chunks", params: [], mode: "get" })).n;
     let after = 0;
-    while (stopAtMs === undefined || Date.now() < stopAtMs) {
-      if (after >= maxChunkPk) {
-        counts.inventory_complete = 1;
-        break;
-      }
+    for (;after < maxChunkPk; after += windowChunks) {
       if (after > 0)
         await ingestionTurn();
+      await pacing?.checkpoint();
+      if (stopAtMs !== undefined && now() >= stopAtMs)
+        break;
       const rows = await read({
         sql: windowSql,
         mode: "all",
@@ -31996,9 +31999,10 @@ ${parentKey(ref)}`, { ref, origin });
           counts[reason === "skipped_held_chunks" ? "skipped_held_recent_chunks" : "skipped_out_of_scope_recent_chunks"] += 1;
         }
       }
-      after += windowChunks;
     }
-    counts.inventory_ms = Date.now() - started;
+    if (after >= maxChunkPk)
+      counts.inventory_complete = 1;
+    counts.inventory_ms = now() - started;
     return counts;
   }
   embeddingOwedItemIds(modelId, localItemIds) {
@@ -32252,7 +32256,7 @@ ${parentKey(ref)}`, { ref, origin });
       throw new Error("Connector store embedding journal provider changed.");
     }
     const tierHidden = await this.tierHiddenItemPksInTurns();
-    const selectedRows = await this.embeddingWorkRows(provider.modelId, options.localItemIds, options.accountScope, options.filters, tierHidden, this.canEmbedHeld(provider));
+    const selectedRows = await this.embeddingWorkRows(provider.modelId, options.localItemIds, options.accountScope, options.filters, tierHidden, this.canEmbedHeld(provider), options.sweepTiming?.progress);
     const embeddableTiers = connectorStoreEmbeddableRowTiers(this.trustDomain, provider);
     const rows = embeddableTiers === undefined ? selectedRows : selectedRows.filter((row) => embeddableTiers.includes(row.trust_tier));
     let privateTierWithheldChunks = 0;
@@ -32353,7 +32357,8 @@ ${parentKey(ref)}`, { ref, origin });
     const judgedThisPass = new Set;
     let stoppedAtDeadline = false;
     for (let offset = 0;offset < pending.length; offset += EMBEDDING_BATCH_SIZE) {
-      if (offset > 0 && (options.stopAtMs !== undefined && Date.now() >= options.stopAtMs || options.shouldStop?.() === true)) {
+      options.sweepTiming?.progress();
+      if (offset > 0 && options.stopAtMs !== undefined && (options.sweepTiming?.now() ?? Date.now()) >= options.stopAtMs) {
         stoppedAtDeadline = true;
         break;
       }
@@ -32984,7 +32989,7 @@ ${parentKey(ref)}`, { ref, origin });
     const read = embeddingAuthorityRead(provider);
     return embeddingAuthorityFromRow(db.query(read.sql).get(...read.params), provider);
   }
-  async embeddingWorkRows(modelId, localItemIds, accountScope, filters, tierHidden, allowHeld = false) {
+  async embeddingWorkRows(modelId, localItemIds, accountScope, filters, tierHidden, allowHeld = false, progress) {
     if (!offThreadReadsSupported(this.dbPath)) {
       return this.embeddingSourceRows(localItemIds, accountScope, filters, tierHidden, allowHeld).map((row) => ({ ...row, text_loaded: true }));
     }
@@ -33024,6 +33029,7 @@ ${parentKey(ref)}`, { ref, origin });
     ];
     const rows = [];
     for (let after = 0;; ) {
+      progress?.();
       const page = await readInBackground(this.dbPath, { sql, params: [...params, after], mode: "all" });
       for (const row of page)
         rows.push(row);
@@ -34228,7 +34234,7 @@ ${parentKey(ref)}`, { ref, origin });
     }
   }
   totalsQuiet;
-  async reconcileTotals({ background = false } = {}) {
+  async reconcileTotals({ background = false, pause } = {}) {
     if (this.readOnly || this.reclaiming)
       return;
     const installed = storeTotalsInstalled(this.db);
@@ -34249,6 +34255,9 @@ ${parentKey(ref)}`, { ref, origin });
     const steps = storeTotalsWalkSteps(NON_SYNC_RUN_CONNECTORS_SQL);
     let step = steps.next();
     while (!step.done) {
+      await pause?.();
+      if (this.reclaiming || this.closedForPoolReads)
+        return;
       const query = step.value;
       let rows;
       if (pool)
@@ -34274,12 +34283,15 @@ ${parentKey(ref)}`, { ref, origin });
   }
   embeddingInputHashesChecked = false;
   embeddingInputHashWalk;
-  async repairEmbeddingInputHashes(pageKeys = 2000, pages = 50) {
+  async repairEmbeddingInputHashes(pageKeys = 2000, pages = 50, pause) {
     if (this.readOnly || this.reclaiming || this.embeddingInputHashesChecked)
       return 0;
     const pool = offThreadReadsSupported(this.dbPath);
     const read = async (sql, params) => pool ? readInBackground(this.dbPath, { sql, params, mode: "all" }) : this.db.query(sql).all(...params);
     if (!this.embeddingInputHashWalk) {
+      await pause?.();
+      if (this.reclaiming || this.closedForPoolReads)
+        return 0;
       const [row] = await read("SELECT MAX(chunk_pk) AS last FROM chunks", []);
       this.embeddingInputHashWalk = { after: 0, last: Number(row?.last ?? 0) };
     }
@@ -34287,6 +34299,9 @@ ${parentKey(ref)}`, { ref, origin });
     const set = this.db.query("UPDATE chunks SET embedding_input_hash = content_hash WHERE chunk_pk = ? AND embedding_input_hash IS NULL");
     let changed = 0;
     for (let page = 0;page < pages && walk.after < walk.last; page += 1) {
+      await pause?.();
+      if (this.reclaiming || this.closedForPoolReads)
+        break;
       const hi = Math.min(walk.after + pageKeys, walk.last);
       const rows = await read("SELECT chunk_pk FROM chunks WHERE chunk_pk > ? AND chunk_pk <= ? AND embedding_input_hash IS NULL", [walk.after, hi]);
       if (this.reclaiming)

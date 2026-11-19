@@ -256,7 +256,7 @@
     "src/workers/source-index/pinned-download.ts": 2,
     "src/workers/source-index/status.ts": 7,
     "src/workers/source-scheduler-state.ts": 2,
-    "src/workers/source-scheduler.ts": 4,
+    "src/workers/source-scheduler.ts": 3,
     "src/workers/source-scope-runtime.ts": 2,
     "src/workers/source-watch-runtime.ts": 3,
     "src/workers/telegram-messages/archive-target.ts": 1,

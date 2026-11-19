@@ -1217,6 +1217,7 @@ export class PeopleIndexRefresher {
   private lastFingerprint: string | undefined;
   private lastRefreshAt: number | undefined;
   private readonly now: () => number;
+  private readonly pause: (() => Promise<void> | undefined) | undefined;
   /** Per current store: the fingerprint part its senders were read at. A store that leaves the list leaves this. */
   private observed = new Map<PeopleObservationSource, { part: string; observations: PeopleSenderObservation[] }>();
   private inFlight: Promise<PeoplePerson[]> | undefined;
@@ -1224,9 +1225,10 @@ export class PeopleIndexRefresher {
   constructor(
     private readonly index: LocalPeopleIndex,
     private readonly stores: () => readonly PeopleObservationSource[],
-    options: { now?: () => number } = {},
+    options: { now?: () => number; pause?: () => Promise<void> | undefined } = {},
   ) {
     this.now = options.now ?? (() => Date.now());
+    this.pause = options.pause;
   }
 
   /** Rebuild now, reading every store again. */
@@ -1291,6 +1293,7 @@ export class PeopleIndexRefresher {
         observed.set(store, kept);
         continue;
       }
+      await this.pause?.();
       try {
         observed.set(store, { part, observations: await readStoreObservations(store) });
       } catch {

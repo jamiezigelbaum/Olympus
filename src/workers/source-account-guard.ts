@@ -421,7 +421,9 @@ export function accountBoundSchedulerSource(input: {
     ...input.source,
     tasks: input.source.tasks.map((task) => ({
       ...task,
-      run: (context) => runGuarded(input.guard, () => task.run(context)),
+      run: (context) => task.allowsPausing && context?.provenance !== 'operator'
+        ? task.run(context, (work) => runGuarded(input.guard, work))
+        : runGuarded(input.guard, () => task.run(context)),
     })),
   };
 }

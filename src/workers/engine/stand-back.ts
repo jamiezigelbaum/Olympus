@@ -1,8 +1,8 @@
 // Background work stands back while the owner asks something, and never
 // without a bound. One rule for every kind of background work: imports
-// (the scheduler), embedding, the privacy judge and each store's vector
-// digest backfill stand back for at
-// most STAND_BACK_MAX_MS at a time and then get STAND_BACK_SHARE_MS to run
+// (the scheduler), embedding, the privacy judge, each store's vector digest
+// backfill, and background status work stand back for at most
+// STAND_BACK_MAX_MS at a time and then get STAND_BACK_SHARE_MS to run
 // even while the owner keeps asking, so each keeps a guaranteed share.
 //
 // A hold is never silent: its start, its end (or the bound) and how long it
@@ -10,7 +10,13 @@
 // Lane 6 archive-scale leg, 15 Nov 2026: an unbounded, unlogged stand-back
 // held imports for most of an hour (mbox passes 5 to 20 min apart).
 
+import { setTimeout as sleep } from 'node:timers/promises';
+
 export type StandBackWork = 'import' | 'embed' | 'judge' | 'digest' | 'status';
+/** A checkpoint returns a promise only while a background walk must wait. */
+export type BackgroundWalkPause = () => Promise<void> | undefined;
+
+const STAND_BACK_RECHECK_MS = 100;
 
 /** The longest one kind of work waits for the owner's Ask before it runs anyway. */
 export const STAND_BACK_MAX_MS = 60_000;
@@ -28,13 +34,15 @@ export interface StandBackCounts {
 export interface StandBack {
   /** True while `work` should start nothing new. */
   holds(work: StandBackWork): boolean;
+  /** Wait at a safe boundary, with no deadline or transaction held by the wait itself. */
+  pause(work: StandBackWork): Promise<void> | undefined;
   /** Per kind of work, for health; only kinds that ever stood back. */
   counts(): Partial<Record<StandBackWork, StandBackCounts>>;
 }
 
 /**
  * Why background work stands back now: only the owner's own question, in
- * this process or relayed from the split's front. Never the shared
+ * this process or signalled by the split's front. Never the shared
  * read-priority lease, which background answers and private-match probes
  * hold too.
  */
@@ -50,6 +58,7 @@ export function createStandBack(options: {
   log?: (line: string) => void;
   maxMs?: number;
   shareMs?: number;
+  sleep?: (ms: number) => Promise<void>;
 }): StandBack {
   const now = options.now ?? Date.now;
   const log = options.log ?? ((line: string) => console.log(line));
@@ -57,7 +66,8 @@ export function createStandBack(options: {
   const shareMs = options.shareMs ?? STAND_BACK_SHARE_MS;
   const states = new Map<StandBackWork, { since?: number | undefined; shareUntil?: number | undefined; reason?: string | undefined; counts: Omit<StandBackCounts, 'holding' | 'reason'> }>();
   const seconds = (ms: number) => Math.round(ms / 1_000);
-  return {
+  const wait = options.sleep ?? ((ms: number) => sleep(ms, undefined, { ref: false }));
+  const standBack: StandBack = {
     holds(work) {
       const at = now();
       let reason: string | undefined;
@@ -92,6 +102,15 @@ export function createStandBack(options: {
       }
       return true;
     },
+    pause(work) {
+      if (!standBack.holds(work)) return;
+      return (async () => {
+        do {
+          const remaining = maxMs - (now() - states.get(work)!.since!);
+          await wait(Math.max(0, Math.min(STAND_BACK_RECHECK_MS, remaining)));
+        } while (standBack.holds(work));
+      })();
+    },
     counts() {
       const at = now();
       return Object.fromEntries([...states].map(([work, state]) => [work, {
@@ -102,4 +121,5 @@ export function createStandBack(options: {
       }]));
     },
   };
+  return standBack;
 }

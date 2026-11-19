@@ -148,6 +148,22 @@ export function withFileLeaseSync<T>(
   }
 }
 
+/** Hold a shared lock across an independently scoped lifetime. */
+export function holdSharedFileLeaseSync(targetPath: string): () => void {
+  const owner = acquireFileLeaseSync(targetPath, normalizeOptions({ mode: 'shared' }));
+  return () => owner.release();
+}
+
+/** Probe an existing lease with a single attempt. An unused lease needs no file. */
+export function fileLeaseHeld(targetPath: string): boolean {
+  const path = lockPathFor(targetPath);
+  if (!existsSync(path)) return false;
+  const lock = tryKernelLock(path, 'exclusive');
+  if (!lock) return true;
+  lock.release();
+  return false;
+}
+
 /**
  * True when `name` is one of the files a lease on `target` keeps beside it: the
  * lock database and SQLite's journal for it, the opt-in `.lock` heartbeat, or

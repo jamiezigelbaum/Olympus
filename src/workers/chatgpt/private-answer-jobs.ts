@@ -195,7 +195,7 @@ export interface PrivateAnswerJobsOptions {
    * between, so the answer never waits on it. A `begin` that returns a
    * release is ended through it, so one job never ends another's lease.
    */
-  activity?: { begin(): (() => void) | void; end(): void };
+  activity?: { begin(): (() => void) | void; beginClaim?(): (() => void) | void; end(): void };
   /** The per-claim stage timing line (default: stdout). Counts and milliseconds only. */
   log?: (line: string) => void;
   /**
@@ -1016,7 +1016,7 @@ export class PrivateAnswerJobs {
     const { abort } = analysis;
     analysis.state = 'running';
     analysis.startedAt = this.now();
-    const endActivity = this.beginActivity();
+    const endActivity = this.beginActivity('analysis');
     let freed = false;
     // Frees the slot exactly once, and starts the next analysis.
     const free = () => {
@@ -1130,7 +1130,7 @@ export class PrivateAnswerJobs {
     let settled = false;
     // Answers come first: the sniffer and other background model work yield
     // from the claim until this job settles, however it settles.
-    const endActivity = this.beginActivity();
+    const endActivity = this.beginActivity('claim');
     const settle = (outcome: Job['outcome'], reason?: AnalysisTiming['reason']) => {
       if (settled) return;
       settled = true;
@@ -1322,10 +1322,11 @@ export class PrivateAnswerJobs {
   }
 
   /** Begins one answer activity; the returned function ends exactly that one, once. */
-  private beginActivity(): () => void {
+  private beginActivity(kind: 'analysis' | 'claim'): () => void {
+    const activity = this.options.activity;
     let release: (() => void) | void;
     try {
-      release = this.options.activity?.begin();
+      release = kind === 'claim' && activity?.beginClaim ? activity.beginClaim() : activity?.begin();
     } catch {
       // A hook never fails a job.
       return () => undefined;

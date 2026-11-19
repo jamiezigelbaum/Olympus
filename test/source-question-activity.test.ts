@@ -326,10 +326,11 @@ describe('owner questions pause the superseded-copy sweep', () => {
     expect(server).toContain('ownerQuestions.run(() => answerActivity.run(() => analystSourceAnswer.answer(request, local), kind), kind)');
     expect(server).toContain('ownerQuestions.run(() => answerActivity.run(() => local.answer(input)))');
     expect(server.match(/ownerQuestions.run\(\(\) => searchReleasedEvidence\(/g)).toHaveLength(2);
-    expect(server).toContain('ownerQuestions.run(() => searchPrivateEvidence(');
+    expect(server).toMatch(/ownerQuestions\.run\(\(\) => searchPrivateEvidence\([^\n]+\), 'background'\)/);
     expect(server).toContain('active: () => !engineFront && !ownerQuestions.busy && !remoteOwnerBusy(OWNER_QUESTION_RESOURCE)');
     // A claimed Private panel answer holds a question lease until it settles.
-    expect(server).toMatch(/activity: \{\s*begin: \(\) => \{\s*const releaseAnswer = answerActivity\.begin\(\);\s*const releaseQuestion = ownerQuestions\.begin\(\);/);
+    // Precompute after a match uses only the separate model activity.
+    expect(server).toMatch(/activity: \{\s*begin: \(\) => answerActivity\.begin\(\),\s*beginClaim: \(\) => \{\s*const releaseQuestion = ownerQuestions\.begin\(\);\s*const releaseAnswer = answerActivity\.begin\(\);/);
   });
 
   test('a claimed panel job holds the lease until its release, and a second release does nothing', async () => {

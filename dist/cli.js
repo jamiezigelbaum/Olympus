@@ -662,6 +662,20 @@ function withFileLeaseSync(targetPath, callback, options = {}) {
     owner.release();
   }
 }
+function holdSharedFileLeaseSync(targetPath) {
+  const owner = acquireFileLeaseSync(targetPath, normalizeOptions({ mode: "shared" }));
+  return () => owner.release();
+}
+function fileLeaseHeld(targetPath) {
+  const path = lockPathFor(targetPath);
+  if (!existsSync3(path))
+    return false;
+  const lock = tryKernelLock(path, "exclusive");
+  if (!lock)
+    return true;
+  lock.release();
+  return false;
+}
 function isFileLeaseSidecarName(target, name) {
   if (!name.startsWith(`${target}.lock`))
     return false;
@@ -57175,12 +57189,13 @@ async function ledgerReadOffThread(ledger, steps, options = {}) {
     return next.value;
   }, options);
 }
-async function settleStaleEmbedHolds(ledger, pageSize = 500) {
+async function settleStaleEmbedHolds(ledger, pageSize = 500, pause) {
   if (ledger.staleEmbedHoldsSettled())
     return 0;
   let settled = 0;
   let after;
   for (;; ) {
+    await pause?.();
     const page = await ledgerReadOffThread(ledger, ledger.staleEmbedHoldSteps(after, pageSize), { lane: "background" });
     settled += ledger.settleStaleEmbedHoldRows(page.rowIds);
     if (!page.next)
@@ -65838,6 +65853,8 @@ function connectorStoreEmbeddingDeferredReason(error) {
 }
 async function embedPendingChunks(targets, options) {
   const runs = [];
+  const { pacing, guard } = options;
+  const now = pacing?.now ?? Date.now;
   for (const target of targets) {
     const { store } = target;
     const run = {
@@ -65850,40 +65867,49 @@ async function embedPendingChunks(targets, options) {
     runs.push(run);
     const inventoryWrites = options.diagnostics && target.wholeStore === true ? store.writeSequence() : undefined;
     if (options.diagnostics)
-      run.inventory = await store.embeddingSweepInventory(target.provider, target, options.stopAtMs);
-    const groups = store.queuedEmbeddingGroups(options.maxItems).filter((group) => {
+      run.inventory = await store.embeddingSweepInventory(target.provider, target, options.stopAtMs, undefined, pacing);
+    await pacing?.checkpoint();
+    const selectGroups = () => store.queuedEmbeddingGroups(options.maxItems).filter((group) => {
       if (target.wholeStore !== true || sameEmbeddingIdentity(group.provider, target.provider))
         return true;
       store.completeQueuedEmbedding(group.localItemIds);
       return false;
     });
+    const groups = guard ? await guard(async () => selectGroups()) : selectGroups();
     const queued = groups.reduce((sum, group) => sum + group.localItemIds.length, 0);
     const noMissingVectors = run.inventory?.inventory_complete === 1 && run.inventory.pending_chunks === 0 && inventoryWrites !== undefined && store.writeSequence() === inventoryWrites && !store.fileReplacedOrRemoved();
     if (target.wholeStore === true && queued < options.maxItems && !noMissingVectors) {
       const queuedIds = new Set(groups.flatMap((group) => group.localItemIds));
-      const missing = (await store.missingEmbeddingItemIdsInTurns(target.provider, options.maxItems - queued, target)).filter((localItemId) => !queuedIds.has(localItemId));
+      const missing = (await store.missingEmbeddingItemIdsInTurns(target.provider, options.maxItems - queued, target, undefined, pacing?.checkpoint)).filter((localItemId) => !queuedIds.has(localItemId));
       if (missing.length > 0)
         groups.push({ provider: target.provider, localItemIds: missing });
     }
     let answered = false;
     for (const group of groups) {
-      if (answered && options.stopAtMs !== undefined && Date.now() >= options.stopAtMs || options.shouldStop?.() === true) {
+      await pacing?.checkpoint();
+      if (answered && options.stopAtMs !== undefined && now() >= options.stopAtMs) {
         run.stoppedAtDeadline = true;
         break;
       }
-      try {
-        group.provider.assertBindingCurrent?.();
-        await target.assertAuthorized?.();
-      } catch {
-        store.completeQueuedEmbedding(group.localItemIds);
+      const embed = async () => {
+        try {
+          group.provider.assertBindingCurrent?.();
+          await target.assertAuthorized?.();
+        } catch {
+          store.completeQueuedEmbedding(group.localItemIds);
+          return;
+        }
+        return embedItemsIsolated(store, group.provider, group.localItemIds, {
+          ...target,
+          ...options.stopAtMs !== undefined ? { stopAtMs: options.stopAtMs } : {},
+          ...pacing ? { sweepTiming: pacing } : {}
+        });
+      };
+      const outcome = guard ? await guard(embed) : await embed();
+      if (!outcome) {
         run.itemsOutOfScope += group.localItemIds.length;
         continue;
       }
-      const outcome = await embedItemsIsolated(store, group.provider, group.localItemIds, {
-        ...target,
-        ...options.stopAtMs !== undefined ? { stopAtMs: options.stopAtMs } : {},
-        ...options.shouldStop ? { shouldStop: options.shouldStop } : {}
-      });
       run.itemsAttempted += group.localItemIds.length;
       run.chunksEmbedded += outcome.chunksEmbedded;
       run.itemsFailed += outcome.itemsFailed;
@@ -65920,7 +65946,7 @@ async function embedItemsIsolated(store, provider, localItemIds, scope = {}) {
       ...scope.filters ? { filters: scope.filters } : {},
       ...scope.assertAuthorized ? { assertAuthorized: scope.assertAuthorized } : {},
       ...scope.stopAtMs !== undefined ? { stopAtMs: scope.stopAtMs } : {},
-      ...scope.shouldStop ? { shouldStop: scope.shouldStop } : {}
+      ...scope.sweepTiming ? { sweepTiming: scope.sweepTiming } : {}
     });
     if (embed.stoppedAtDeadline)
       return { chunksEmbedded: embed.chunksEmbedded, itemsFailed: 0, stoppedAtDeadline: true };
@@ -65940,7 +65966,7 @@ async function embedItemsIsolated(store, provider, localItemIds, scope = {}) {
     let chunksEmbedded = 0;
     let itemsFailed = 0;
     for (const [index, localItemId] of localItemIds.entries()) {
-      if (index > 0 && (scope.stopAtMs !== undefined && Date.now() >= scope.stopAtMs || scope.shouldStop?.() === true)) {
+      if (index > 0 && scope.stopAtMs !== undefined && (scope.sweepTiming?.now() ?? Date.now()) >= scope.stopAtMs) {
         return { chunksEmbedded, itemsFailed, stoppedAtDeadline: true };
       }
       const single = await embedItemsIsolated(store, provider, [localItemId], scope);
@@ -75930,9 +75956,10 @@ ${parentKey(ref)}`, { ref, origin });
     `).all(modelId, ...params, limit + (failed?.size ?? 0));
       return rows.map((row) => row.local_item_id).filter((localItemId) => !failed?.has(localItemId)).slice(0, limit);
     }
-    async missingEmbeddingItemIdsInTurns(embedder, limit, scope = {}, windowChunks = MISSING_EMBEDDING_CHUNK_WINDOW) {
+    async missingEmbeddingItemIdsInTurns(embedder, limit, scope = {}, windowChunks = MISSING_EMBEDDING_CHUNK_WINDOW, checkpoint) {
       if (limit <= 0)
         return [];
+      await checkpoint?.();
       const tierHidden = await this.tierHiddenItemPksInTurns();
       const modelId = embedder.modelId;
       const accountScope = normalizeOptionalAccountScope(scope.accountScope);
@@ -75964,6 +75991,7 @@ ${parentKey(ref)}`, { ref, origin });
       for (let after = 0;after < maxChunkPk && found.length < limit; after += windowChunks) {
         if (after > 0)
           await ingestionTurn();
+        await checkpoint?.();
         const rows = await read({ sql: windowSql, params: [modelId, after, after + windowChunks, ...params], mode: "all" });
         for (const row of rows) {
           if (excluded?.has(row.item_pk) || seen.has(row.item_pk))
@@ -75987,8 +76015,10 @@ ${parentKey(ref)}`, { ref, origin });
         return query.mode === "get" ? statement.get(...query.params) : statement.all(...query.params);
       };
     }
-    async embeddingSweepInventory(provider, scope = {}, stopAtMs, windowChunks = MISSING_EMBEDDING_CHUNK_WINDOW) {
-      const started = Date.now();
+    async embeddingSweepInventory(provider, scope = {}, stopAtMs, windowChunks = MISSING_EMBEDDING_CHUNK_WINDOW, pacing) {
+      const now = pacing?.now ?? Date.now;
+      const started = now();
+      await pacing?.checkpoint();
       const tier = await this.tierHiddenItemPksInTurns();
       const hidden = await pkSetInTurns([tier.hidden]);
       const held = await pkSetInTurns([tier.held]);
@@ -76034,13 +76064,12 @@ ${parentKey(ref)}`, { ref, origin });
       const read = this.embeddingSweepRead(offThreadReadsSupported(this.dbPath));
       const maxChunkPk = (await read({ sql: "SELECT COALESCE(MAX(chunk_pk), 0) AS n FROM chunks", params: [], mode: "get" })).n;
       let after = 0;
-      while (stopAtMs === undefined || Date.now() < stopAtMs) {
-        if (after >= maxChunkPk) {
-          counts.inventory_complete = 1;
-          break;
-        }
+      for (;after < maxChunkPk; after += windowChunks) {
         if (after > 0)
           await ingestionTurn();
+        await pacing?.checkpoint();
+        if (stopAtMs !== undefined && now() >= stopAtMs)
+          break;
         const rows = await read({
           sql: windowSql,
           mode: "all",
@@ -76056,9 +76085,10 @@ ${parentKey(ref)}`, { ref, origin });
             counts[reason === "skipped_held_chunks" ? "skipped_held_recent_chunks" : "skipped_out_of_scope_recent_chunks"] += 1;
           }
         }
-        after += windowChunks;
       }
-      counts.inventory_ms = Date.now() - started;
+      if (after >= maxChunkPk)
+        counts.inventory_complete = 1;
+      counts.inventory_ms = now() - started;
       return counts;
     }
     embeddingOwedItemIds(modelId, localItemIds) {
@@ -76312,7 +76342,7 @@ ${parentKey(ref)}`, { ref, origin });
         throw new Error("Connector store embedding journal provider changed.");
       }
       const tierHidden = await this.tierHiddenItemPksInTurns();
-      const selectedRows = await this.embeddingWorkRows(provider.modelId, options.localItemIds, options.accountScope, options.filters, tierHidden, this.canEmbedHeld(provider));
+      const selectedRows = await this.embeddingWorkRows(provider.modelId, options.localItemIds, options.accountScope, options.filters, tierHidden, this.canEmbedHeld(provider), options.sweepTiming?.progress);
       const embeddableTiers = connectorStoreEmbeddableRowTiers(this.trustDomain, provider);
       const rows = embeddableTiers === undefined ? selectedRows : selectedRows.filter((row) => embeddableTiers.includes(row.trust_tier));
       let privateTierWithheldChunks = 0;
@@ -76413,7 +76443,8 @@ ${parentKey(ref)}`, { ref, origin });
       const judgedThisPass = new Set;
       let stoppedAtDeadline = false;
       for (let offset = 0;offset < pending.length; offset += EMBEDDING_BATCH_SIZE) {
-        if (offset > 0 && (options.stopAtMs !== undefined && Date.now() >= options.stopAtMs || options.shouldStop?.() === true)) {
+        options.sweepTiming?.progress();
+        if (offset > 0 && options.stopAtMs !== undefined && (options.sweepTiming?.now() ?? Date.now()) >= options.stopAtMs) {
           stoppedAtDeadline = true;
           break;
         }
@@ -77044,7 +77075,7 @@ ${parentKey(ref)}`, { ref, origin });
       const read = embeddingAuthorityRead(provider);
       return embeddingAuthorityFromRow(db.query(read.sql).get(...read.params), provider);
     }
-    async embeddingWorkRows(modelId, localItemIds, accountScope, filters, tierHidden, allowHeld = false) {
+    async embeddingWorkRows(modelId, localItemIds, accountScope, filters, tierHidden, allowHeld = false, progress) {
       if (!offThreadReadsSupported(this.dbPath)) {
         return this.embeddingSourceRows(localItemIds, accountScope, filters, tierHidden, allowHeld).map((row) => ({ ...row, text_loaded: true }));
       }
@@ -77084,6 +77115,7 @@ ${parentKey(ref)}`, { ref, origin });
       ];
       const rows = [];
       for (let after = 0;; ) {
+        progress?.();
         const page = await readInBackground(this.dbPath, { sql, params: [...params, after], mode: "all" });
         for (const row of page)
           rows.push(row);
@@ -78288,7 +78320,7 @@ ${parentKey(ref)}`, { ref, origin });
       }
     }
     totalsQuiet;
-    async reconcileTotals({ background = false } = {}) {
+    async reconcileTotals({ background = false, pause } = {}) {
       if (this.readOnly || this.reclaiming)
         return;
       const installed = storeTotalsInstalled(this.db);
@@ -78309,6 +78341,9 @@ ${parentKey(ref)}`, { ref, origin });
       const steps = storeTotalsWalkSteps(NON_SYNC_RUN_CONNECTORS_SQL);
       let step = steps.next();
       while (!step.done) {
+        await pause?.();
+        if (this.reclaiming || this.closedForPoolReads)
+          return;
         const query = step.value;
         let rows;
         if (pool)
@@ -78334,12 +78369,15 @@ ${parentKey(ref)}`, { ref, origin });
     }
     embeddingInputHashesChecked = false;
     embeddingInputHashWalk;
-    async repairEmbeddingInputHashes(pageKeys = 2000, pages = 50) {
+    async repairEmbeddingInputHashes(pageKeys = 2000, pages = 50, pause) {
       if (this.readOnly || this.reclaiming || this.embeddingInputHashesChecked)
         return 0;
       const pool = offThreadReadsSupported(this.dbPath);
       const read = async (sql, params) => pool ? readInBackground(this.dbPath, { sql, params, mode: "all" }) : this.db.query(sql).all(...params);
       if (!this.embeddingInputHashWalk) {
+        await pause?.();
+        if (this.reclaiming || this.closedForPoolReads)
+          return 0;
         const [row] = await read("SELECT MAX(chunk_pk) AS last FROM chunks", []);
         this.embeddingInputHashWalk = { after: 0, last: Number(row?.last ?? 0) };
       }
@@ -78347,6 +78385,9 @@ ${parentKey(ref)}`, { ref, origin });
       const set = this.db.query("UPDATE chunks SET embedding_input_hash = content_hash WHERE chunk_pk = ? AND embedding_input_hash IS NULL");
       let changed = 0;
       for (let page = 0;page < pages && walk.after < walk.last; page += 1) {
+        await pause?.();
+        if (this.reclaiming || this.closedForPoolReads)
+          break;
         const hi = Math.min(walk.after + pageKeys, walk.last);
         const rows = await read("SELECT chunk_pk FROM chunks WHERE chunk_pk > ? AND chunk_pk <= ? AND embedding_input_hash IS NULL", [walk.after, hi]);
         if (this.reclaiming)
@@ -83482,12 +83523,14 @@ class PeopleIndexRefresher {
   lastFingerprint;
   lastRefreshAt;
   now;
+  pause;
   observed = new Map;
   inFlight;
   constructor(index, stores, options = {}) {
     this.index = index;
     this.stores = stores;
     this.now = options.now ?? (() => Date.now());
+    this.pause = options.pause;
   }
   refresh() {
     return this.rebuildOnce(true);
@@ -83536,6 +83579,7 @@ class PeopleIndexRefresher {
         observed.set(store, kept);
         continue;
       }
+      await this.pause?.();
       try {
         observed.set(store, { part, observations: await readStoreObservations(store) });
       } catch {
@@ -101938,7 +101982,7 @@ function startSupersededSweepTicker(options = {}) {
       const set = all[nextSet++ % all.length];
       if (finished.has(set) || reclaiming.has(set))
         continue;
-      const complete = set.sweepSupersededSlice();
+      const complete = set.sweepSupersededSlice(options.pause ? { pause: options.pause } : undefined);
       if (typeof complete === "boolean") {
         if (complete)
           reclaim(set);
@@ -103723,7 +103767,11 @@ class TieredStoreSet {
       return true;
     return sweepAutomaticSupersededCopiesInTurns(this, {
       budgetMs: SUPERSEDED_SWEEP_SLICE_MS,
-      ...options.embeddingLedger ? { embeddingLedger: options.embeddingLedger } : {}
+      ...options.embeddingLedger ? { embeddingLedger: options.embeddingLedger } : {},
+      ...options.pause ? { turn: async () => {
+        await ingestionTurn();
+        await options.pause?.();
+      } } : {}
     }).then((report) => report.complete, () => false);
   }
   openStores() {
@@ -139282,7 +139330,7 @@ function createSourceIndexStatusHandler(options = {}) {
       });
     return Promise.resolve({ ...last.result, snapshot_age_ms: age });
   };
-  const computeStatus = async (request, snapshot) => {
+  const computeStatus = async (request, snapshot, pause) => {
     assertSupportedStatusRequest(request);
     const requestedCorpusId = request.corpus_id ? canonicalSourceCorpusId(request.corpus_id) : undefined;
     const storesByCorpusId = new Map((options.connectorStores ?? []).map((store) => [store.corpusId, store]));
@@ -139345,9 +139393,10 @@ function createSourceIndexStatusHandler(options = {}) {
     };
     const statuses = [];
     for (const declaredCorpus of corpora) {
+      await ingestionTurn();
+      await pause?.();
       const corpusStartedMs = nowMs();
       const phaseMs = { prepare: 0, counts: 0, estimates: 0 };
-      await ingestionTurn();
       const store = storesByCorpusId.get(declaredCorpus.corpusId);
       const countsMaxAgeMs = snapshot.countsMaxAgeMs ?? 0;
       if (store && countsMaxAgeMs > 0) {
@@ -139440,9 +139489,9 @@ function createSourceIndexStatusHandler(options = {}) {
         await Promise.allSettled([...snapshotRefreshes.values()]);
     },
     ...role === "writer" ? {
-      refreshSnapshot(request, snapshot) {
+      refreshSnapshot(request, snapshot, pause) {
         assertSupportedStatusRequest(request);
-        return refreshKept(snapshotKey(request, snapshot.countsMaxAgeMs), () => computeStatus(request, snapshot));
+        return refreshKept(snapshotKey(request, snapshot.countsMaxAgeMs), () => computeStatus(request, snapshot, pause));
       }
     } : {}
   };
@@ -227884,21 +227933,30 @@ class SourceScheduler {
       group.push(state);
       groups.set(concurrencyKey, group);
     }
+    const runTask = async (state, at) => {
+      if (state.running)
+        return;
+      state.running = true;
+      try {
+        await this.runTaskSharingThread(state, at, provenance);
+      } finally {
+        state.running = false;
+        this.executingStates.delete(state);
+      }
+    };
     await Promise.all([...groups.entries()].map(async ([concurrencyKey, group]) => {
       if (this.busyConcurrencyKeys.has(concurrencyKey))
         return;
+      const follow = new Map;
+      const defersToOwnKey = (state) => provenance === "scheduled" && state.task.allowsPausing === true && taskConcurrencyKey(state.source, state.task) !== concurrencyKey;
       this.busyConcurrencyKeys.add(concurrencyKey);
       try {
         for (const state of group) {
-          if (state.running)
+          if (defersToOwnKey(state)) {
+            follow.set(state, dueAt);
             continue;
-          state.running = true;
-          try {
-            await this.runTaskSharingThread(state, dueAt, provenance);
-          } finally {
-            state.running = false;
-            this.executingStates.delete(state);
           }
+          await runTask(state, dueAt);
         }
         if (provenance === "scheduled") {
           const ran = new Set(group);
@@ -227906,6 +227964,10 @@ class SourceScheduler {
           const sources = new Set(group.map((state) => state.source));
           const due = this.states.filter((state) => !ran.has(state) && !state.running && taskCadence(state.source, state.task) === "continuous" && (taskConcurrencyKey(state.source, state.task) === concurrencyKey || sources.has(state.source) && state.task.kind === "embed") && state.nextRunAt <= now);
           for (const state of due) {
+            if (defersToOwnKey(state)) {
+              follow.set(state, state.nextRunAt);
+              continue;
+            }
             if (state.running)
               continue;
             const ownKey = taskConcurrencyKey(state.source, state.task);
@@ -227914,12 +227976,9 @@ class SourceScheduler {
                 continue;
               this.busyConcurrencyKeys.add(ownKey);
             }
-            state.running = true;
             try {
-              await this.runTaskSharingThread(state, state.nextRunAt, provenance);
+              await runTask(state, state.nextRunAt);
             } finally {
-              state.running = false;
-              this.executingStates.delete(state);
               if (ownKey !== concurrencyKey)
                 this.busyConcurrencyKeys.delete(ownKey);
             }
@@ -227927,6 +227986,17 @@ class SourceScheduler {
         }
       } finally {
         this.busyConcurrencyKeys.delete(concurrencyKey);
+      }
+      for (const [state, at] of follow) {
+        const ownKey = taskConcurrencyKey(state.source, state.task);
+        if (state.running || this.busyConcurrencyKeys.has(ownKey))
+          continue;
+        this.busyConcurrencyKeys.add(ownKey);
+        try {
+          await runTask(state, at);
+        } finally {
+          this.busyConcurrencyKeys.delete(ownKey);
+        }
       }
     }));
   }
@@ -228631,7 +228701,7 @@ function withEmbeddingSweep(sources, targetsFor, options = {}) {
       return source;
     return {
       ...source,
-      tasks: [...source.tasks, embeddingSweepTask(source, targets, options.storeDeadlineMs, sourceIndex, options.trickle, options.onProgress, options.holdForAsk)],
+      tasks: [...source.tasks, embeddingSweepTask(source, targets, options.storeDeadlineMs, sourceIndex, options.trickle, options.onProgress, options.pauseForAsk)],
       embeddingDeferredReason: () => targets().some((target) => target.store.embeddingDeferredReason() !== undefined) ? EMBEDDING_PROVIDER_UNAVAILABLE_REASON : undefined
     };
   });
@@ -228639,15 +228709,8 @@ function withEmbeddingSweep(sources, targetsFor, options = {}) {
 function embeddingSweepConcurrencyKey(source) {
   return `${source.corpusId}.embeddings`;
 }
-function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_DEADLINE_MS, sourceIndex = 0, trickle, onProgress, holdForAsk) {
+function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_DEADLINE_MS, sourceIndex = 0, trickle, onProgress, pauseForAsk) {
   const maxItems = embeddingSweepMaxItems();
-  const askHolds = () => {
-    try {
-      return holdForAsk?.() === true;
-    } catch {
-      return false;
-    }
-  };
   const tricklingTarget = (target) => {
     try {
       return trickle?.(target) === true;
@@ -228693,15 +228756,22 @@ function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_
     id: `${source.sourceId}_embeddings`,
     kind: "embed",
     writer: true,
+    allowsPausing: pauseForAsk !== undefined,
     concurrencyKey: embeddingSweepConcurrencyKey(source),
     intervalMs: EMBEDDING_SWEEP_INTERVAL_MS,
     freshnessThresholdMs: EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS,
-    run: async (context) => {
+    run: async (context, guard) => {
+      if (guard)
+        await guard(async () => {
+          return;
+        });
+      const pause = context?.provenance === "operator" ? undefined : pauseForAsk;
       const passTargets = targets();
       const runs = [];
       let trickled = false;
       const restedRuns = new Set;
       for (const target of passTargets) {
+        await pause?.();
         const paced = tricklingTarget(target);
         trickled ||= paced;
         const store = target.store;
@@ -228725,16 +228795,51 @@ function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_
         quiet.get(store)?.delete(slot);
         if (path && receipts?.delete(slot))
           await writeEmbeddingSweepIdle(path, receipts);
-        const overran = Symbol("overran");
+        const stalled = Symbol("stalled");
+        let reportStall;
+        const stall = new Promise((resolve) => {
+          reportStall = () => resolve(stalled);
+        });
         let timer;
+        let observing = true;
+        const arm = () => {
+          if (observing)
+            timer = setTimeout(reportStall, deadlineMs);
+        };
+        let pausedMs = 0;
+        const progress = () => {
+          if (observing)
+            timer?.refresh();
+        };
+        const checkpoint = () => {
+          const waiting = pause?.();
+          if (!waiting) {
+            progress();
+            return;
+          }
+          const pausedAt = Date.now();
+          clearTimeout(timer);
+          return waiting.finally(() => {
+            pausedMs += Math.max(0, Date.now() - pausedAt);
+            arm();
+          });
+        };
         const stopAtMs = Date.now() + Math.floor(deadlineMs / 2);
+        arm();
         const result = await Promise.race([
-          embedPendingChunks([target], { maxItems: paced ? GO_EASY_TRICKLE_EMBED_ITEMS : maxItems, stopAtMs, diagnostics: true, ...holdForAsk ? { shouldStop: askHolds } : {} }),
-          new Promise((resolve) => {
-            timer = setTimeout(() => resolve(overran), deadlineMs);
-          })
-        ]).finally(() => clearTimeout(timer));
-        if (result !== overran) {
+          embedPendingChunks([target], {
+            maxItems: paced ? GO_EASY_TRICKLE_EMBED_ITEMS : maxItems,
+            stopAtMs,
+            diagnostics: true,
+            pacing: { now: () => Date.now() - pausedMs, progress, checkpoint },
+            ...guard ? { guard } : {}
+          }),
+          stall
+        ]).finally(() => {
+          observing = false;
+          clearTimeout(timer);
+        });
+        if (result !== stalled) {
           if (result.some((run) => run.chunksEmbedded > 0)) {
             try {
               onProgress?.(target);
@@ -228803,8 +228908,7 @@ function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_
       }));
       const attemptedAt = Date.parse(context?.attemptedAt ?? "") || Date.now();
       if (deferred === 0) {
-        const heldForAsk = holdForAsk !== undefined && runs.some((run) => run.stoppedAtDeadline === true) && askHolds();
-        const more = heldForAsk || !trickled && runs.some((run) => run.busy !== true && run.chunksEmbedded > 0 && (run.itemsAttempted >= maxItems || run.stoppedAtDeadline === true));
+        const more = !trickled && runs.some((run) => run.busy !== true && run.chunksEmbedded > 0 && (run.itemsAttempted >= maxItems || run.stoppedAtDeadline === true));
         if (counts.items_failed === 0)
           return { status, counts, embeddingSweep, ...more ? { continueSoon: true } : {} };
         return {
@@ -241774,17 +241878,53 @@ var init_open_target2 = __esm(() => {
   init_paths();
 });
 
+// src/core/owner-ask-admission.ts
+import { join as join152 } from "node:path";
+function holdOwnerAsk(env) {
+  return holdSharedFileLeaseSync(leasePath(env));
+}
+function ownerAskHeld(env) {
+  return fileLeaseHeld(leasePath(env));
+}
+function createOwnerAskProbe() {
+  let nextProbeAt = 0;
+  let held = false;
+  return () => {
+    const now = performance.now();
+    if (now >= nextProbeAt) {
+      held = ownerAskHeld();
+      nextProbeAt = now + 100;
+    }
+    return held;
+  };
+}
+var leasePath = (env) => join152(sharedDataPath("engine-run", env), "owner-ask");
+var init_owner_ask_admission = __esm(() => {
+  init_file_lease();
+  init_olympus_layout();
+});
+
 // src/workers/engine/runtime/source-answer-lanes.ts
 import { AsyncLocalStorage as AsyncLocalStorage15 } from "node:async_hooks";
 function createOwnerQuestionActivity(relay, now = Date.now) {
   const context = new AsyncLocalStorage15;
   let inFlight = 0;
   let lastEndedAt;
-  const release = () => {
-    if (--inFlight === 0) {
-      lastEndedAt = now();
-      relay?.idle(OWNER_QUESTION_RESOURCE);
-    }
+  const begin = () => {
+    const releaseLease = relay ? holdOwnerAsk() : undefined;
+    if (++inFlight === 1)
+      relay?.busy(OWNER_QUESTION_RESOURCE);
+    let released = false;
+    return () => {
+      if (released)
+        return;
+      released = true;
+      releaseLease?.();
+      if (--inFlight === 0) {
+        lastEndedAt = now();
+        relay?.idle(OWNER_QUESTION_RESOURCE);
+      }
+    };
   };
   return {
     get lastEndedAt() {
@@ -241795,36 +241935,23 @@ function createOwnerQuestionActivity(relay, now = Date.now) {
     },
     retrieving() {
       const scope = context.getStore();
-      if (!scope || scope.active || scope.settled)
+      if (!scope || scope.release || scope.settled)
         return;
-      scope.active = true;
-      if (++inFlight === 1)
-        relay?.busy(OWNER_QUESTION_RESOURCE);
+      scope.release = begin();
     },
-    begin() {
-      if (++inFlight === 1)
-        relay?.busy(OWNER_QUESTION_RESOURCE);
-      let released = false;
-      return () => {
-        if (released)
-          return;
-        released = true;
-        release();
-      };
-    },
+    begin,
     async run(work, kind = "owner") {
       if (kind === "background")
         return context.run(undefined, work);
       const current = context.getStore();
       if (current && !current.settled)
         return work();
-      const scope = { active: false, settled: false };
+      const scope = { settled: false };
       try {
         return await context.run(scope, work);
       } finally {
         scope.settled = true;
-        if (scope.active)
-          release();
+        scope.release?.();
       }
     }
   };
@@ -241934,6 +242061,7 @@ function createSourceAnswerLanes(deps) {
 }
 var OWNER_QUESTION_RESOURCE = "owner_question";
 var init_source_answer_lanes = __esm(() => {
+  init_owner_ask_admission();
   init_analyst_answer();
   init_embeddings();
   init_connector_store();
@@ -244121,12 +244249,12 @@ var init_archive_target2 = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail-scope-browser.ts
-import { dirname as dirname117, join as join152 } from "node:path";
+import { dirname as dirname117, join as join153 } from "node:path";
 function createGmailPickerRequestBudget(options) {
   return new GoogleDailyRequestBudget({
     provider: "Gmail mail picker",
     dailyRequestBudget: GMAIL_PICKER_DAILY_REQUEST_BUDGET,
-    statePath: join152(dirname117(options.laneStatePath), "gmail-picker-daily-request-budget.json"),
+    statePath: join153(dirname117(options.laneStatePath), "gmail-picker-daily-request-budget.json"),
     ...options.now ? { now: options.now } : {}
   });
 }
@@ -244729,7 +244857,7 @@ function accountBoundSchedulerSource(input) {
     ...input.source,
     tasks: input.source.tasks.map((task) => ({
       ...task,
-      run: (context) => runGuarded(input.guard, () => task.run(context))
+      run: (context) => task.allowsPausing && context?.provenance !== "operator" ? task.run(context, (work) => runGuarded(input.guard, work)) : runGuarded(input.guard, () => task.run(context))
     }))
   };
 }
@@ -246863,6 +246991,7 @@ class OwnerBusyRelay {
   client;
   log;
   busyResources = new Set;
+  pendingIdle = new Map;
   front;
   seq = 0;
   instanceId;
@@ -246884,20 +247013,23 @@ class OwnerBusyRelay {
   }
   busy(resource) {
     this.busyResources.add(resource);
-    this.deliver("owner_busy", resource);
+    this.pendingIdle.delete(resource);
+    this.sendBusy(resource);
     if (this.renewal === undefined) {
       this.renewal = this.setTimer(() => {
         for (const busy of this.busyResources)
-          this.deliver("owner_busy", busy);
+          this.sendBusy(busy);
+        for (const idle of this.pendingIdle.values())
+          this.deliver(idle);
       }, this.renewEveryMs);
     }
   }
   idle(resource) {
     if (!this.busyResources.delete(resource))
       return;
-    this.deliver("owner_idle", resource);
-    if (this.busyResources.size === 0)
-      this.stopRenewal();
+    const command = { kind: "owner_idle", resource, front: this.front, seq: ++this.seq };
+    this.pendingIdle.set(resource, command);
+    this.deliver(command);
   }
   observeInstance(instanceId) {
     if (instanceId === this.instanceId)
@@ -246907,7 +247039,7 @@ class OwnerBusyRelay {
     if (!restarted)
       return;
     for (const resource of this.busyResources)
-      this.deliver("owner_busy", resource);
+      this.sendBusy(resource);
   }
   stop() {
     this.stopRenewal();
@@ -246921,9 +247053,17 @@ class OwnerBusyRelay {
   isBusy(resource) {
     return this.busyResources.has(resource);
   }
-  deliver(kind, resource) {
-    const command = { kind, resource, front: this.front, seq: ++this.seq };
-    this.client.post(command, { timeoutMs: 30000 }).catch(() => {
+  sendBusy(resource) {
+    this.deliver({ kind: "owner_busy", resource, front: this.front, seq: ++this.seq });
+  }
+  deliver(command) {
+    this.client.post(command, { timeoutMs: 30000 }).then(() => {
+      if (command.kind === "owner_idle" && this.pendingIdle.get(command.resource) === command) {
+        this.pendingIdle.delete(command.resource);
+        if (this.busyResources.size === 0 && this.pendingIdle.size === 0)
+          this.stopRenewal();
+      }
+    }).catch(() => {
       this.log(`[engine-split] ${command.kind} could not reach the background engine; it is sent again when the background is back.`);
     });
   }
@@ -247063,12 +247203,12 @@ var init_snapshot = () => {};
 
 // src/workers/engine-split/control-plane.ts
 import { existsSync as existsSync122 } from "node:fs";
-import { dirname as dirname118, join as join153 } from "node:path";
+import { dirname as dirname118, join as join154 } from "node:path";
 import { fileURLToPath as fileURLToPath14 } from "node:url";
 function controlWorkerPath() {
   const here = dirname118(fileURLToPath14(import.meta.url));
   for (const name of ["engine-control-worker.js", "control-worker.ts"]) {
-    const candidate = join153(here, name);
+    const candidate = join154(here, name);
     if (existsSync122(candidate))
       return candidate;
   }
@@ -248109,6 +248249,7 @@ var init_front_history = __esm(() => {
 });
 
 // src/workers/engine/stand-back.ts
+import { setTimeout as sleep5 } from "node:timers/promises";
 function ownerAskReason(local, frontBusy) {
   if (local.busy)
     return "question in this process";
@@ -248121,7 +248262,8 @@ function createStandBack(options) {
   const shareMs = options.shareMs ?? STAND_BACK_SHARE_MS;
   const states = new Map;
   const seconds = (ms) => Math.round(ms / 1000);
-  return {
+  const wait = options.sleep ?? ((ms) => sleep5(ms, undefined, { ref: false }));
+  const standBack = {
     holds(work) {
       const at = now();
       let reason;
@@ -248163,6 +248305,16 @@ function createStandBack(options) {
       }
       return true;
     },
+    pause(work) {
+      if (!standBack.holds(work))
+        return;
+      return (async () => {
+        do {
+          const remaining = maxMs - (now() - states.get(work).since);
+          await wait(Math.max(0, Math.min(STAND_BACK_RECHECK_MS, remaining)));
+        } while (standBack.holds(work));
+      })();
+    },
     counts() {
       const at = now();
       return Object.fromEntries([...states].map(([work, state]) => [work, {
@@ -248173,8 +248325,10 @@ function createStandBack(options) {
       }]));
     }
   };
+  return standBack;
 }
-var STAND_BACK_MAX_MS = 60000, STAND_BACK_SHARE_MS = 15000;
+var STAND_BACK_RECHECK_MS = 100, STAND_BACK_MAX_MS = 60000, STAND_BACK_SHARE_MS = 15000;
+var init_stand_back = () => {};
 
 // src/core/remote-access-config.ts
 var REMOTE_ACCESS_CONFIG_ROUTE = "/plugins/olympus/remote-access";
@@ -248273,7 +248427,7 @@ var init_remote_access_control = __esm(() => {
 
 // src/core/source-account-migration.ts
 import { linkSync as linkSync6, lstatSync as lstatSync57, mkdirSync as mkdirSync75, readdirSync as readdirSync37, realpathSync as realpathSync32, renameSync as renameSync28, rmdirSync as rmdirSync8, statSync as statSync52, unlinkSync as unlinkSync7 } from "node:fs";
-import { basename as basename26, dirname as dirname119, isAbsolute as isAbsolute42, join as join154, relative as relative20, resolve as resolve33, sep as sep26 } from "node:path";
+import { basename as basename26, dirname as dirname119, isAbsolute as isAbsolute42, join as join155, relative as relative20, resolve as resolve33, sep as sep26 } from "node:path";
 function accountFolderMigrationEnabled(env = process.env) {
   const value = env[MIGRATE_ACCOUNT_FOLDERS_ENV]?.trim().toLowerCase() ?? "";
   return value === "" || MIGRATION_ON.includes(value);
@@ -248313,7 +248467,7 @@ function candidates(sourceId, slot, env) {
         staged.add(legacyName);
     }
     for (const name of [...staged].sort()) {
-      found.push({ role: "raw", from: join154(legacyDir, name), to: join154(folderDir, folderNameOfStagedTelegramLogin(name, env)), kind: "file", db: false });
+      found.push({ role: "raw", from: join155(legacyDir, name), to: join155(folderDir, folderNameOfStagedTelegramLogin(name, env)), kind: "file", db: false });
     }
   }
   return found;
@@ -248361,13 +248515,13 @@ function relPath(ctx, path) {
 }
 function absPath(ctx, rel) {
   if (!rel.startsWith("@"))
-    return join154(ctx.root, ...rel.split("/"));
+    return join155(ctx.root, ...rel.split("/"));
   const slash = rel.indexOf("/");
   const tag = rel.slice(1, slash < 0 ? undefined : slash);
   const root = ctx.roots.find((candidate) => candidate.tag === tag && tag !== "")?.root;
   if (root === undefined || slash < 0)
     throw new TypeError(`A migration path names a folder this build does not know (${JSON.stringify(tag)}).`);
-  return join154(root, ...rel.slice(slash + 1).split("/"));
+  return join155(root, ...rel.slice(slash + 1).split("/"));
 }
 function moveWithoutReplacing(from, to, kind) {
   if (kind === "dir") {
@@ -248422,7 +248576,7 @@ function nearRealPath(path) {
       return resolve33(path);
     near = up;
     try {
-      return join154(realpathSync32(near), ...rest);
+      return join155(realpathSync32(near), ...rest);
     } catch {}
   }
 }
@@ -248431,7 +248585,7 @@ function destinationIsOurs(ctx, destination) {
   const at = rootOf(ctx, parent);
   if (!at)
     return false;
-  return nearRealPath(parent) === join154(nearRealPath(at.root), at.below);
+  return nearRealPath(parent) === join155(nearRealPath(at.root), at.below);
 }
 function nearestExisting(path) {
   let near = resolve33(path);
@@ -248600,7 +248754,7 @@ function syncFolderChains(ctx, folders) {
     let current = realpathSync32(at.root);
     chain.add(current);
     for (const part of at.below.split(sep26).filter(Boolean)) {
-      current = join154(current, part);
+      current = join155(current, part);
       chain.add(current);
     }
   }
@@ -248620,7 +248774,7 @@ function makeFolders(ctx, moves) {
       destinations.add(destination);
       let current = real;
       for (const part of relative20(ctx.root, destination).split(sep26).filter(Boolean)) {
-        current = join154(current, part);
+        current = join155(current, part);
         const found = lookAt(current);
         if (found.kind === "dir")
           continue;
@@ -248933,7 +249087,7 @@ function holdCaptureLocks(ctx, sourceId, slot) {
       continue;
     let lock;
     try {
-      lock = (__accountMigrationTestHooks.captureLock ?? tryHoldFileFlock)(join154(dir, name));
+      lock = (__accountMigrationTestHooks.captureLock ?? tryHoldFileFlock)(join155(dir, name));
     } catch {
       return giveBack(skip("unreadable", `Its capture lock (${name}) cannot be taken.`));
     }
@@ -251767,7 +251921,7 @@ var init_ingestion_dispositions = __esm(() => {
 
 // src/workers/connector-store/ask-bench-sql.ts
 import { appendFileSync, readFileSync as readFileSync112 } from "node:fs";
-import { join as join155 } from "node:path";
+import { join as join156 } from "node:path";
 function createAskBenchSqlRecorder(dir, dbPath) {
   let file;
   const rows = new Map;
@@ -251777,7 +251931,7 @@ function createAskBenchSqlRecorder(dir, dbPath) {
   };
   try {
     const tid = readFileSync112("/proc/thread-self/stat", "utf8").split(" ", 1)[0];
-    file = join155(dir, `${process.pid}.${tid}.sql.jsonl`);
+    file = join156(dir, `${process.pid}.${tid}.sql.jsonl`);
     const thread = dbPath === undefined ? { tid } : { tid, db_path: dbPath };
     appendFileSync(file, JSON.stringify(thread) + `
 `);
@@ -268258,7 +268412,7 @@ async function runSearch(args, options, authorized, context, signal) {
   const manifests = createReleaseManifestSink();
   let raw;
   try {
-    raw = await runWithReleaseManifestSink(manifests, () => options.evidenceSearch({ question, ...limit ? { limit } : {} }, signal));
+    raw = await runWithReleaseManifestSink(manifests, () => options.evidenceSearch({ question, ...limit ? { limit } : {} }, signal, context.caller));
   } catch (error) {
     return errorResult(remoteErrorOutput(error));
   }
@@ -270538,7 +270692,7 @@ class PrivateAnswerJobs {
     const { abort } = analysis;
     analysis.state = "running";
     analysis.startedAt = this.now();
-    const endActivity = this.beginActivity();
+    const endActivity = this.beginActivity("analysis");
     let freed = false;
     const free = () => {
       if (freed)
@@ -270656,7 +270810,7 @@ class PrivateAnswerJobs {
       job.analysis.claimedAt ??= claimedAt;
     const timing = { outcome: "failed", reason: "error", queuedMs: 0, calls: [] };
     let settled = false;
-    const endActivity = this.beginActivity();
+    const endActivity = this.beginActivity("claim");
     const settle = (outcome, reason) => {
       if (settled)
         return;
@@ -270840,10 +270994,11 @@ ${plaintext.answer}`;
   timeoutFor(detail) {
     return detail === "full" ? Math.max(this.analysisTimeoutMs, this.fullAnalysisTimeoutMs) : this.analysisTimeoutMs;
   }
-  beginActivity() {
+  beginActivity(kind) {
+    const activity = this.options.activity;
     let release;
     try {
-      release = this.options.activity?.begin();
+      release = kind === "claim" && activity?.beginClaim ? activity.beginClaim() : activity?.begin();
     } catch {
       return () => {
         return;
@@ -274021,7 +274176,7 @@ import { execFile as execFile6 } from "node:child_process";
 import { appendFileSync as appendFileSync2, existsSync as existsSync128, readFileSync as readFileSync115, writeFileSync as writeFileSync30 } from "node:fs";
 import { appendFile as appendFile2, writeFile as writeFile7 } from "node:fs/promises";
 import { fileURLToPath as fileURLToPath15 } from "node:url";
-import { dirname as dirname122, join as join156 } from "node:path";
+import { dirname as dirname122, join as join157 } from "node:path";
 async function startWorkerWithLaunch(launch) {
   workerLaunch = { ...launch };
   await mainRecordingFrontFailure();
@@ -274095,7 +274250,7 @@ async function main() {
   const sqlSitesDir = process.env.OLYMPUS_MAIN_THREAD_SQL_SITES?.trim();
   if (sqlSitesDir) {
     const sqlSites = startMainThreadSqlSiteCount(Number(process.env.OLYMPUS_MAIN_THREAD_SQL_SITE_FRAMES) || 2);
-    const path = join156(sqlSitesDir, `${engineRole}.sql-sites.json`);
+    const path = join157(sqlSitesDir, `${engineRole}.sql-sites.json`);
     const queue = engineRole === "front" ? serializeDiagnosticWrites(() => {}) : undefined;
     const writeSqlSites = () => {
       try {
@@ -274207,7 +274362,7 @@ async function main() {
   let localWorkPending = () => false;
   const localPacer = new LocalWorkPacer({
     probe: systemIdlePowerProbe(),
-    settingPath: join156(dirname122(resolveClassificationLedgerPath(process.env)), "go-easy.json"),
+    settingPath: join157(dirname122(resolveClassificationLedgerPath(process.env)), "go-easy.json"),
     pendingLocalWork: () => localWorkPending(),
     log: (line) => console.log(line)
   });
@@ -274254,10 +274409,12 @@ async function main() {
   const ownerQuestions = createOwnerQuestionActivity(engineFront?.ownerBusy);
   const remoteOwnerMarks = new OwnerBusyMarks;
   const remoteOwnerBusy = (resource) => remoteOwnerMarks.busy(resource);
+  const frontOwnerAskHeld = createOwnerAskProbe();
   let statusRecount;
   const standBack = createStandBack({
-    reason: () => ownerAskReason(ownerQuestions, () => remoteOwnerBusy(OWNER_QUESTION_RESOURCE))
+    reason: () => ownerAskReason(ownerQuestions, () => remoteOwnerBusy(OWNER_QUESTION_RESOURCE) || engineRole === "background" && frontOwnerAskHeld())
   });
+  const pauseStatusWalk = () => standBack.pause("status");
   setVectorDigestBackfillHold(() => standBack.holds("digest"));
   let recencyIndexMaintenanceReady = false;
   if (!engineFront)
@@ -275497,7 +275654,7 @@ ${key}`;
     }
   }
   let peopleIndex = openPeopleIndexOrUndefined(engineFront ? { readOnly: true } : {});
-  const peopleRefresher = !engineFront && peopleIndex ? new PeopleIndexRefresher(peopleIndex, () => connectorStores) : undefined;
+  const peopleRefresher = !engineFront && peopleIndex ? new PeopleIndexRefresher(peopleIndex, () => connectorStores, { pause: pauseStatusWalk }) : undefined;
   const refreshPeople = (force = false) => {
     if (engineFront) {
       peopleIndex ??= openPeopleIndexOrUndefined({ readOnly: true });
@@ -277050,7 +277207,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         if (embedsOnThisComputer(target.provider))
           localPacer.noteLocalWork();
       },
-      holdForAsk: () => standBack.holds("embed")
+      pauseForAsk: () => standBack.pause("embed")
     });
     const guardedSources = guardAccountBoundLanes(sweptSources, laneGuards);
     return {
@@ -277465,7 +277622,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   const selfUpdater = createSelfUpdater({
     platform: process.platform,
     runningVersion: runningOlympusVersion(),
-    stateDir: join156(engineServicePaths().logDir, "updates"),
+    stateDir: join157(engineServicePaths().logDir, "updates"),
     standaloneEngine: isStandaloneEngineProcess(process.env),
     available: () => updateChecker.available()
   });
@@ -277986,9 +278143,10 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     eligible: privateEvidenceEligible,
     installId: () => remotePublicUrls()?.installId,
     activity: {
-      begin: () => {
-        const releaseAnswer = answerActivity.begin();
+      begin: () => answerActivity.begin(),
+      beginClaim: () => {
         const releaseQuestion = ownerQuestions.begin();
+        const releaseAnswer = answerActivity.begin();
         return () => {
           releaseQuestion();
           releaseAnswer();
@@ -278034,7 +278192,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       inbox: waitingQuestionStore,
       judgeBusy: () => classificationBusy(),
       interactiveBusy: () => answerActivity.interactiveInFlight > 0,
-      paceFile: join156(dirname122(resolveClassificationLedgerPath(process.env)), "deep-read-pace.json"),
+      paceFile: join157(dirname122(resolveClassificationLedgerPath(process.env)), "deep-read-pace.json"),
       relevantItems: async (question, set, corpusIds) => {
         const conversationId = set.selected_item.provider_conversation_id;
         if (!conversationId)
@@ -278282,7 +278440,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   }
   await Promise.resolve().then(() => init_remote_private_part());
   const remotePrivateParts = createRemotePrivateParts({
-    probe: (request, timeoutMs) => withStoreReadPriority(() => sourceAnswerLanes ? probePrivateMatch({ lanes: sourceAnswerLanes, request, timeoutMs, distinguishSecret: true }) : Promise.resolve("unknown")),
+    probe: (request, timeoutMs) => withStoreReadPriority(() => ownerQuestions.run(() => sourceAnswerLanes ? probePrivateMatch({ lanes: sourceAnswerLanes, request, timeoutMs, distinguishSecret: true }) : Promise.resolve("unknown"), "background")),
     store: waitingQuestionStore,
     isActive: connectionActive,
     interactiveBusy: () => answerActivity.interactiveInFlight > 0
@@ -278467,14 +278625,14 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       releaseCheck: remoteReleaseCheck
     })));
   } : undefined;
-  const remoteEvidenceSearch = sourceAnswerLanes ? async (input) => withStoreReadPriority(() => ownerQuestions.run(() => searchReleasedEvidence({
+  const remoteEvidenceSearch = sourceAnswerLanes ? async (input, _signal, caller) => withStoreReadPriority(() => ownerQuestions.run(() => searchReleasedEvidence({
     lanes: sourceAnswerLanes,
     question: input.question,
     ...input.limit ? { maxResults: input.limit } : {},
     releaseCheck: remoteReleaseCheck
-  }))) : undefined;
+  }), isBackgroundConnection(caller?.connectionId) ? "background" : "owner")) : undefined;
   const chatgptPrivateMatchProbe = sourceAnswerLanes ? async (question, _ctx, originalMatches) => {
-    const result = await withStoreReadPriority(() => ownerQuestions.run(() => searchPrivateEvidence({ lanes: sourceAnswerLanes, question, ...originalMatches ? { originalMatches } : {} })));
+    const result = await withStoreReadPriority(() => ownerQuestions.run(() => searchPrivateEvidence({ lanes: sourceAnswerLanes, question, ...originalMatches ? { originalMatches } : {} }), "background"));
     const { matched, candidates, ...coverage } = result;
     return { count: matched, evidence: candidates, ...coverage };
   } : undefined;
@@ -278671,14 +278829,13 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     const path = new URL(request.url).pathname;
     const rerankOutcomes = builtInRerankerMayRun(process.env) ? rerankOutcomeCounts() : undefined;
     const localPromptBudgets = localAnalystWindowReports();
-    const standBackCounts = standBack.counts();
-    const standBackSeen = Object.keys(standBackCounts).length > 0;
     const statusRecountHealth = statusRecount?.health();
     const loopLag = (({ lagMs, maxLagMs, overBudget }) => ({ last_ms: lagMs, max_ms: maxLagMs, over_budget: overBudget }))(controlPathHeadroom.snapshot());
     const backgroundStatus = engineFront?.status();
     const backgroundSnapshot = backgroundStatus?.snapshot;
     const backgroundLoopLag = backgroundSnapshot?.loop_lag;
     if ((path === "/v1/health" || path === "/health") && response?.ok) {
+      const standBackCounts = engineFront ? backgroundSnapshot?.stand_back : standBack.counts();
       const windowNotices = localPromptBudgets.map(localAnalystWindowNotice).filter((notice) => notice !== undefined);
       return Response.json({
         ...await response.json(),
@@ -278698,7 +278855,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         ...frontMountProblems.size ? {
           mount_problems: Object.fromEntries([...frontMountProblems.values()].map(({ label, reason }) => [label, reason]))
         } : {},
-        ...standBackSeen ? { stand_back: standBackCounts } : {},
+        ...standBackCounts && Object.keys(standBackCounts).length > 0 ? { stand_back: standBackCounts } : {},
         ...statusRecountHealth ?? backgroundSnapshot?.status_recount ? { status_recount: statusRecountHealth ?? backgroundSnapshot?.status_recount } : {},
         loop_lag: loopLag,
         ...backgroundLoopLag ? { background_loop_lag: backgroundLoopLag } : {},
@@ -278858,7 +279015,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   }, 1e4);
   captureTick.unref?.();
   const stopSupersededSweep = startSupersededSweepTicker({
-    active: () => !engineFront && !ownerQuestions.busy && !remoteOwnerBusy(OWNER_QUESTION_RESOURCE),
+    active: () => !engineFront && !ownerQuestions.busy && !remoteOwnerBusy(OWNER_QUESTION_RESOURCE) && (engineRole !== "background" || !frontOwnerAskHeld()),
+    pause: pauseStatusWalk,
     ownerQuestionEndedAt: () => Math.max(ownerQuestions.lastEndedAt ?? 0, remoteOwnerMarks.lastEndedAt(OWNER_QUESTION_RESOURCE) ?? 0),
     reclaimStore: (store, work) => sourceScheduler ? sourceScheduler.withIdleTasks(work, { quietForMs: store.reclaimQuietWindowMs(), preempt: () => store.preemptReclaim() }) : work()
   });
@@ -278914,7 +279072,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     } : {},
     ...fileExtractionRuntime ? { extractionState: (identity) => fileExtractionRuntime.jobs.itemExtractionState(identity) } : {},
     ownerContext: privacyOwnerWords,
-    budgetStatePath: join156(dirname122(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
+    budgetStatePath: join157(dirname122(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
     intervalMs: snifferEnv.intervalMs,
     ...snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {},
     ...snifferEnv.concurrentCalls !== undefined ? { concurrentCalls: snifferEnv.concurrentCalls } : snifferLane.kind === "tinfoil" ? { concurrentCalls: 4 } : snifferLane.kind === "venice" ? { concurrentCalls: DEFAULT_VENICE_JUDGE_CONCURRENT_CALLS } : {},
@@ -279136,7 +279294,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         owner_busy: (change) => {
           if (!remoteOwnerMarks.apply(change))
             return { busy: remoteOwnerMarks.busy(change.resource), stale: true };
-          if (change.resource === snifferResource || change.resource === OWNER_QUESTION_RESOURCE && standBack.holds("judge"))
+          if (change.resource === snifferResource)
             tierSniffer?.preempt();
           return { busy: true };
         },
@@ -279209,6 +279367,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         loop_lag: (({ lagMs, maxLagMs, overBudget }) => ({ last_ms: lagMs, max_ms: maxLagMs, over_budget: overBudget }))(controlPathHeadroom.snapshot()),
         stores_opened: storeOpensSoFar(),
         ...statusRecount ? { status_recount: statusRecount.health() } : {},
+        stand_back: standBack.counts(),
         ...((slow) => slow ? { loop_slow_sql: slow } : {})(slowMainThreadSqlHealth()),
         ...((files) => files ? { sqlite_files: files } : {})(sqliteFilesHealth()),
         read_pool: (({ lostReplies, retries, lateReplies, terminations }) => ({ lost_replies: lostReplies, retries, late_replies: lateReplies, retired: terminations }))(readPoolDiagnostics())
@@ -279231,10 +279390,9 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       holds: () => standBack.holds("status"),
       recount: async () => {
         for (const store of connectorStores) {
-          if (standBack.holds("status"))
-            break;
+          await pauseStatusWalk();
           try {
-            const drift = await store.reconcileTotals({ background: true });
+            const drift = await store.reconcileTotals({ background: true, pause: pauseStatusWalk });
             if (drift)
               console.warn(`[olympus] store totals: ${store.corpusId} adjusted by ${drift}.`);
           } catch (error) {
@@ -279242,11 +279400,10 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
           }
         }
         for (const store of connectorStores) {
-          if (standBack.holds("status"))
-            break;
+          await pauseStatusWalk();
           changeMemoryActivity("embedding_repair", 1);
           try {
-            const set = await store.repairEmbeddingInputHashes();
+            const set = await store.repairEmbeddingInputHashes(undefined, undefined, pauseStatusWalk);
             if (set)
               console.warn(`[olympus] ${store.corpusId}: set the embedding input hash on ${set} chunks that had none.`);
           } catch (error) {
@@ -279256,11 +279413,10 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
           }
         }
         for (const ledger of new Set(tierLanes.map((lane) => lane.ledger))) {
-          if (standBack.holds("status"))
-            break;
+          await pauseStatusWalk();
           changeMemoryActivity("embedding_settlement", 1);
           try {
-            const settled = await settleStaleEmbedHolds(ledger);
+            const settled = await settleStaleEmbedHolds(ledger, undefined, pauseStatusWalk);
             if (settled)
               console.warn(`[olympus] tier ledger: released ${settled} decided copies an older build left held.`);
           } catch (error) {
@@ -279270,7 +279426,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
           }
         }
         for (const request of [PLAIN_STATUS_REQUEST, DASHBOARD_STATUS_REQUEST]) {
-          await refreshSnapshot({ ...request }, { countsMaxAgeMs: STATUS_COUNTS_MAX_AGE_MS });
+          await pauseStatusWalk();
+          await refreshSnapshot({ ...request }, { countsMaxAgeMs: STATUS_COUNTS_MAX_AGE_MS }, pauseStatusWalk);
         }
       },
       log: (line) => console.warn(line)
@@ -279639,6 +279796,8 @@ var init_server5 = __esm(async () => {
   init_front_history();
   init_tier_auto_prune_sweep();
   init_store_reclaim_admission();
+  init_owner_ask_admission();
+  init_stand_back();
   init_agent_connections();
   init_backup_service();
   init_remote_access_control();

@@ -1,4 +1,5 @@
 import type { MemoryActivity } from '../../core/memory-counters.ts';
+import type { StandBackCounts, StandBackWork } from '../engine/stand-back.ts';
 /**
  * State the background publishes for the front (docs/design/engine-split.md,
  * part 3, "State from background to front"): scheduler status, the judge's
@@ -77,6 +78,8 @@ export interface EngineStatusSnapshot {
   stores_opened?: number;
   /** The background's paced status recount (status-recount.ts). */
   status_recount?: { runs: number; failures: number; last_ms?: number; age_ms?: number; counting: boolean };
+  /** The background's bounded pauses for the owner's Ask. */
+  stand_back?: Partial<Record<StandBackWork, StandBackCounts>>;
 }
 
 export interface EngineManualSyncRun {

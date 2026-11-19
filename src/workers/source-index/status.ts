@@ -1,4 +1,5 @@
 import type { SovereigntyTrustDomainPolicy } from '../../core/sovereignty.ts';
+import type { BackgroundWalkPause } from '../engine/stand-back.ts';
 import { offThreadReadsSupported, readInBackground } from '../connector-store/off-thread-reads.ts';
 import { buildSourceIndexCorpusRegistry, type SourceIndexCorpusDefinition } from '../../core/source-index/corpus.ts';
 import { embeddingModelEstimate, estimatedEmbeddingCostUsd } from '../../core/embedding-cost-estimates.ts';
@@ -323,7 +324,7 @@ export interface SourceIndexStatusHandler {
    * a snapshot caller with this request gets, and keep it for the front. The
    * background's paced recount calls it; no request does.
    */
-  refreshSnapshot?(request: SourceIndexStatusRequest, snapshot: { countsMaxAgeMs: number }): Promise<SourceIndexStatusResult>;
+  refreshSnapshot?(request: SourceIndexStatusRequest, snapshot: { countsMaxAgeMs: number }, pause?: BackgroundWalkPause): Promise<SourceIndexStatusResult>;
 }
 
 export interface SourceIndexStatusHandlerOptions {
@@ -766,7 +767,7 @@ export function createSourceIndexStatusHandler(
     return Promise.resolve({ ...last.result, snapshot_age_ms: age });
   };
 
-  const computeStatus = async (request: SourceIndexStatusRequest, snapshot: { countsMaxAgeMs?: number }): Promise<SourceIndexStatusResult> => {
+  const computeStatus = async (request: SourceIndexStatusRequest, snapshot: { countsMaxAgeMs?: number }, pause?: BackgroundWalkPause): Promise<SourceIndexStatusResult> => {
       assertSupportedStatusRequest(request);
       const requestedCorpusId = request.corpus_id
         ? canonicalSourceCorpusId(request.corpus_id)
@@ -876,9 +877,10 @@ export function createSourceIndexStatusHandler(
       // time). A turn between corpora lets requests answer in between.
       const statuses: SourceIndexStatusCorpus[] = [];
       for (const declaredCorpus of corpora) {
+        await ingestionTurn();
+        await pause?.();
         const corpusStartedMs = nowMs();
         const phaseMs = { prepare: 0, counts: 0, estimates: 0 };
-        await ingestionTurn();
         // A snapshot builds the store's reused sets in turns first, so its
         // count below does not build them in one go.
         const store = storesByCorpusId.get(declaredCorpus.corpusId);
@@ -981,9 +983,9 @@ export function createSourceIndexStatusHandler(
       while (snapshotRefreshes.size > 0) await Promise.allSettled([...snapshotRefreshes.values()]);
     },
     ...(role === 'writer' ? {
-      refreshSnapshot(request: SourceIndexStatusRequest, snapshot: { countsMaxAgeMs: number }) {
+      refreshSnapshot(request: SourceIndexStatusRequest, snapshot: { countsMaxAgeMs: number }, pause?: BackgroundWalkPause) {
         assertSupportedStatusRequest(request);
-        return refreshKept(snapshotKey(request, snapshot.countsMaxAgeMs), () => computeStatus(request, snapshot));
+        return refreshKept(snapshotKey(request, snapshot.countsMaxAgeMs), () => computeStatus(request, snapshot, pause));
       },
     } : {}),
   };

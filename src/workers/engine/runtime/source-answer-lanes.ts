@@ -13,6 +13,7 @@
 // keyword retry only for Private stores. Neither mode changes a model or epoch.
 
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { holdOwnerAsk } from '../../../core/owner-ask-admission.ts';
 import type { ClassificationCoverageNote, SecretLocationNote, SavedSecretLocation } from '../../../core/evidence-pack.ts';
 import type { ParentLabelResolver } from '../../../core/parent-label.ts';
 import type { SourceIndexAnswerRequest } from '../../source-index/answer-types.ts';
@@ -43,41 +44,40 @@ export const OWNER_QUESTION_RESOURCE = 'owner_question';
  * Watches and eligibility reads outside a question scope acquire no lease.
  */
 export function createOwnerQuestionActivity(relay?: { busy(resource: string): void; idle(resource: string): void }, now: () => number = Date.now) {
-  const context = new AsyncLocalStorage<{ active: boolean; settled: boolean } | undefined>();
+  const context = new AsyncLocalStorage<{ release?: () => void; settled: boolean } | undefined>();
   let inFlight = 0;
   let lastEndedAt: number | undefined;
-  const release = () => {
-    if (--inFlight === 0) { lastEndedAt = now(); relay?.idle(OWNER_QUESTION_RESOURCE); }
+  const begin = () => {
+    const releaseLease = relay ? holdOwnerAsk() : undefined;
+    if (++inFlight === 1) relay?.busy(OWNER_QUESTION_RESOURCE);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      releaseLease?.();
+      if (--inFlight === 0) { lastEndedAt = now(); relay?.idle(OWNER_QUESTION_RESOURCE); }
+    };
   };
   return {
     get lastEndedAt(): number | undefined { return lastEndedAt; },
     get busy(): boolean { return inFlight > 0; },
     retrieving(): void {
       const scope = context.getStore();
-      if (!scope || scope.active || scope.settled) return;
-      scope.active = true;
-      if (++inFlight === 1) relay?.busy(OWNER_QUESTION_RESOURCE);
+      if (!scope || scope.release || scope.settled) return;
+      scope.release = begin();
     },
     /** A lease held outside an async scope (a claimed panel job), released exactly once. */
-    begin(): () => void {
-      if (++inFlight === 1) relay?.busy(OWNER_QUESTION_RESOURCE);
-      let released = false;
-      return () => {
-        if (released) return;
-        released = true;
-        release();
-      };
-    },
+    begin,
     async run<T>(work: () => Promise<T>, kind: 'owner' | 'background' = 'owner'): Promise<T> {
       if (kind === 'background') return context.run(undefined, work);
       const current = context.getStore();
       if (current && !current.settled) return work();
-      const scope = { active: false, settled: false };
+      const scope: NonNullable<ReturnType<typeof context.getStore>> = { settled: false };
       try {
         return await context.run(scope, work);
       } finally {
         scope.settled = true;
-        if (scope.active) release();
+        scope.release?.();
       }
     },
   };

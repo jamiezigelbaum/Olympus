@@ -10,6 +10,7 @@ import { registeredTierSets } from './tier-set-registry.ts';
 import { withMainThreadSqlTiming } from './main-thread-sql-trace.ts';
 import { find, ledgerFinderAfterHold, runPassHere, runPassOffThread, turn, type LoopPass, type LoopPassWrap } from './loop-pass.ts';
 import { ingestionTurn } from '../control-path-headroom.ts';
+import type { BackgroundWalkPause } from '../engine/stand-back.ts';
 import { withIdleStoreReclaim } from '../../core/store-reclaim-admission.ts';
 import { SUPERSEDED_SWEEP_SLICE_MS, TIER_DOMAIN_ORDER } from './tiered-store-set.ts';
 
@@ -401,6 +402,7 @@ function* sweepPage(set: TieredStoreSet, options: {
  */
 export function startSupersededSweepTicker(options: {
   active?: () => boolean;
+  pause?: BackgroundWalkPause;
   reclaimStore?: ReclaimStore;
   intervalMs?: number;
   ownerQuestionEndedAt?: () => number | undefined;
@@ -446,7 +448,7 @@ export function startSupersededSweepTicker(options: {
     for (let checked = 0; checked < all.length; checked++) {
       const set = all[nextSet++ % all.length]!;
       if (finished.has(set) || reclaiming.has(set)) continue;
-      const complete = set.sweepSupersededSlice();
+      const complete = set.sweepSupersededSlice(options.pause ? { pause: options.pause } : undefined);
       if (typeof complete === 'boolean') {
         if (complete) reclaim(set);
         return;
