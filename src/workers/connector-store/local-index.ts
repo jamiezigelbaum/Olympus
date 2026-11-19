@@ -137,6 +137,7 @@ import {
   visibilityAwaited,
   judgedAwaited,
   VisibilityChangedError,
+  parentVerdictsInBackground,
   parentVerdictsSteps,
   CHILD_PARENT_CHAIN_LIMIT,
   hiddenChildKeysSteps,
@@ -1343,6 +1344,17 @@ interface TierVisibilityMemo {
   lists: Record<(typeof VISIBILITY_PK_FLAGS)[number], MutablePkList>;
   members: Map<string, { pks: number[]; flags: TierCorpusVisibility }>;
   value: TierLedgerHiddenItemPks;
+}
+
+const VECTOR_EXCLUSION_FLAGS = ['hidden', 'held', 'metadataLayer'] as const;
+
+interface VectorScanExclusionStamp {
+  baseLedger: TierLedger | undefined;
+  childLedger: TierLedger | undefined;
+  childStores: readonly LocalConnectorStore[];
+  ledgers: ReadonlyArray<{ ledger: TierLedger; marker: string; cursor: number }>;
+  stores: ReadonlyArray<{ store: LocalConnectorStore; marker: string; cursor: number | undefined }>;
+  baseLists: ReadonlyArray<{ list: MutablePkList; generation: number }>;
 }
 
 export class TierLedgerUnavailableError extends Error {
@@ -15081,53 +15093,180 @@ export class LocalConnectorStore {
   }
 
   /**
-   * The items the vector scan skips before ranking: those the store's own
-   * visibility set already keeps out of content search (hidden, held back
-   * from embedding, metadata only). It is the current set (the feed keeps it
-   * incremental), never an aged one: an item judged a moment ago must rank
-   * at once. Every winner is still checked against the live ledger.
-   * Undefined when nothing is excluded or
-   * the set cannot be read (the scan then ranks everything, as before).
+   * A scan only borrows a completed, current prefilter. On a miss the live
+   * winner check does all the filtering while the next prefilter is built.
    */
   private vectorScanExcludedItemPks(): { has(itemPk: number): boolean } | undefined {
-    // No set built yet (the first search after a start): building it here
-    // would run the whole build on the request thread, as vectorLaneServable
-    // also refuses. Build it in turns for the next search; this one ranks
-    // everything and the live check filters.
-    if (!this.tierLedgerHiddenMemo && !this.tierHiddenCountsMemo) {
-      let ledger: TierLedger | undefined;
-      try { ledger = this.visibilityLedger(); } catch { return undefined; }
-      if (ledger) {
-        void this.refreshTierHiddenCountsInTurns();
-        return undefined;
-      }
-    }
-    let base: TierLedgerHiddenItemPks;
-    let children: number[];
-    try {
-      base = this.tierLedgerHiddenItemPks();
-      children = this.hiddenChildItemPks();
-    } catch { return undefined; }
-    // The set's lists change in place as verdicts land. The copy is kept
-    // between searches while every list is the same one at the same
-    // generation: rebuilt per search it cost up to a few hundred ms per big
-    // store on the front's loop, and every other store's lane waited.
-    const memo = this.tierLedgerHiddenMemo;
-    const lists = memo && memo.value === base ? [memo.lists.hidden, memo.lists.held, memo.lists.metadataLayer] : undefined;
     const cached = this.vectorScanExclusion;
-    let excluded: Set<number>;
-    if (lists && cached && cached.lists.every((list, at) => list === lists[at] && cached.generations[at] === list.generation)) {
-      excluded = cached.set;
-    } else {
-      excluded = new Set<number>([...base.hidden, ...base.held, ...base.metadataLayer]);
-      this.vectorScanExclusion = lists ? { lists, generations: lists.map(list => list.generation), set: excluded } : undefined;
+    if (cached && this.vectorScanExclusionCurrent(cached.stamp)) {
+      return cached.set.size > 0 ? this.vectorScanExclusionForScan(cached) : undefined;
     }
-    if (children.length === 0) return excluded.size > 0 ? excluded : undefined;
-    const hiddenChildren = new Set(children);
-    return { has: (itemPk) => excluded.has(itemPk) || hiddenChildren.has(itemPk) };
+    this.vectorScanExclusion = undefined;
+    if (offThreadReadsSupported(this.dbPath)) this.vectorScanExclusionBuild ??= this.buildVectorScanExclusion();
+    return undefined;
   }
 
-  private vectorScanExclusion: { lists: MutablePkList[]; generations: number[]; set: Set<number> } | undefined;
+  private vectorScanExclusion: { stamp: VectorScanExclusionStamp; set: Set<number> } | undefined;
+  private vectorScanExclusionBuild: Promise<void> | undefined;
+
+  private vectorScanExclusionForScan({ stamp, set }: NonNullable<LocalConnectorStore['vectorScanExclusion']>): { has(itemPk: number): boolean } {
+    let current = true;
+    let checked = false;
+    return { has: itemPk => {
+      if (!current || !set.has(itemPk)) return false;
+      // The scan may have awaited a pool page since borrowing the set.
+      // Certify its first exclusion in each synchronous scoring slice.
+      if (!checked) {
+        current = this.vectorScanExclusionCurrent(stamp);
+        checked = true;
+        queueMicrotask(() => { checked = false; });
+      }
+      return current;
+    } };
+  }
+
+  private vectorScanExclusionStamp(): VectorScanExclusionStamp | undefined {
+    if (this.closedForPoolReads || this.db.inTransaction) return undefined;
+    const lane = this.childVisibilityLane();
+    const members = lane.stores();
+    if (!members.every(member => member instanceof LocalConnectorStore)) return undefined;
+    const childStores = [...members];
+    const stores = childStores.includes(this) ? childStores : [this, ...childStores];
+    if (stores.some(store => store.closedForPoolReads || store.db.inTransaction
+      || !offThreadReadsSupported(store.dbPath))) return undefined;
+    const baseLedger = this.visibilityLedger();
+    const childLedger = lane.ledger();
+    const ledgers = [...new Set([baseLedger, childLedger])].filter(ledger => ledger !== undefined);
+    if (ledgers.some(ledger => ledger.writesHeld() || !offThreadReadsSupported(ledger.dbPath))) return undefined;
+    const lists = this.tierLedgerHiddenMemo?.lists;
+    return {
+      baseLedger, childLedger, childStores,
+      ledgers: ledgers.map(ledger => ({ ledger, marker: ledger.changeMarker(), cursor: ledger.visibilityChangesSince().cursor })),
+      stores: stores.map(store => ({
+        store,
+        marker: store.changeMarker(),
+        cursor: store.visibilityFeedPresent ? store.itemVisibilityChangesSince().cursor : undefined,
+      })),
+      baseLists: lists ? VECTOR_EXCLUSION_FLAGS.map(flag => ({ list: lists[flag], generation: lists[flag].generation })) : [],
+    };
+  }
+
+  private vectorScanExclusionCurrent(stamp: VectorScanExclusionStamp): boolean {
+    let current: VectorScanExclusionStamp | undefined;
+    try { current = this.vectorScanExclusionStamp(); }
+    catch { return false; }
+    return current !== undefined && current.baseLedger === stamp.baseLedger && current.childLedger === stamp.childLedger
+      && current.childStores.length === stamp.childStores.length
+      && current.childStores.every((store, index) => store === stamp.childStores[index])
+      && current.ledgers.every(({ ledger, marker, cursor }, index) => {
+        const prior = stamp.ledgers[index];
+        return prior?.ledger === ledger && prior.marker === marker && prior.cursor === cursor;
+      })
+      && current.stores.length === stamp.stores.length
+      && current.stores.every(({ store, marker, cursor }, index) => {
+        const prior = stamp.stores[index];
+        return prior?.store === store && prior.marker === marker && prior.cursor === cursor;
+      })
+      && current.baseLists.length === stamp.baseLists.length
+      && current.baseLists.every(({ list, generation }, index) => {
+        const prior = stamp.baseLists[index];
+        return prior?.list === list && prior.generation === generation;
+      });
+  }
+
+  private async buildVectorScanExclusion(): Promise<void> {
+    try {
+      await yieldConnectorStoreVectorScan();
+      const stamp = this.vectorScanExclusionStamp();
+      if (!stamp) return;
+      // Read a private base and child result. Even a failure partway through
+      // cannot seed the Ask memo or advance the shared hidden-set cursors.
+      const set = new Set<number>();
+      let added = 0;
+      for await (const pks of this.vectorScanExclusionPkLists(stamp)) {
+        for (const pk of pks) {
+          set.add(pk);
+          if (++added % PK_SET_SLICE === 0) {
+            await yieldConnectorStoreVectorScan();
+            if (!this.vectorScanExclusionCurrent(stamp)) return;
+          }
+        }
+      }
+      // Capture the complete result with the version that preceded all its
+      // reads. No later cursor can certify a result read at the old version.
+      if (this.vectorScanExclusionCurrent(stamp)) this.vectorScanExclusion = { stamp, set };
+    } catch { return undefined; }
+    finally { this.vectorScanExclusionBuild = undefined; }
+  }
+
+  private async *vectorScanExclusionPkLists(stamp: VectorScanExclusionStamp): AsyncGenerator<Iterable<number>> {
+    const ledger = stamp.baseLedger;
+    if (ledger) {
+      const flagged = await ledgerReadOffThread(ledger, ledger.corpusVisibilityFlaggedSteps(this.corpusId), BACKGROUND_READS);
+      for (let offset = 0; offset < flagged.length; offset += IDENTITY_LOOKUP_SLICE) {
+        if (!this.vectorScanExclusionCurrent(stamp)) throw new VisibilityChangedError();
+        const batch = flagged.slice(offset, offset + IDENTITY_LOOKUP_SLICE)
+          .filter(row => VECTOR_EXCLUSION_FLAGS.some(flag => row[flag]));
+        if (batch.length === 0) continue;
+        const rows = await this.itemRowsForIdentitiesOffThread(batch, identity => normalizeConversationId(identity.providerConversationId));
+        yield (function* () { for (const row of rows) yield row.item_pk; })();
+      }
+    }
+    if (!this.childItemColumnsPresent) return;
+    if (!this.vectorScanExclusionCurrent(stamp)) throw new VisibilityChangedError();
+    // Use these exact members throughout the walk. The owning store may be
+    // stamped for the local rows even if a custom lane omits it as a parent leg.
+    const stores = stamp.childStores.map(store => ({
+      corpusId: store.corpusId,
+      parentStandings: (parents: readonly ParentRef[]) => store.parentStandings(parents),
+      parentStandingsOffThread: (parents: readonly ParentRef[]) => store.parentStandingsInBackground(parents),
+    }));
+    const lane = { ledger: () => stamp.childLedger, stores: () => stores };
+    const checkHolds = () => {
+      if (stamp.ledgers.some(({ ledger }) => ledger.writesHeld())
+        || stamp.stores.some(({ store }) => store.db.inTransaction)) throw new VisibilityChangedError();
+    };
+    let after: ParentRef | undefined;
+    do {
+      const parents = await this.readStepsInBackground(this.activeChildParentsSteps(after, HIDDEN_CHILD_PARENT_SLICE));
+      if (parents.length === 0) break;
+      const verdicts = await parentVerdictsInBackground(lane, parents, checkHolds);
+      if (!this.vectorScanExclusionCurrent(stamp)) throw new VisibilityChangedError();
+      const hidden = parents.filter(parent => verdicts.get(parentKey(parent))?.visible === false);
+      if (hidden.length > 0) yield* this.vectorScanHiddenChildPkLists(hidden);
+      after = parents.at(-1);
+    } while (after);
+  }
+
+  private async *vectorScanHiddenChildPkLists(parents: readonly ParentRef[]): AsyncGenerator<number[]> {
+    const parentIds = JSON.stringify([...new Set(parents.map(parent => parent.parentLocalItemId))]);
+    const wanted = new Set(parents.map(parentKey));
+    let afterParent = parents[0]!.parentLocalItemId;
+    let afterPk: number | undefined;
+    while (true) {
+      const rows = await readInBackground(this.dbPath, { sql: `
+        SELECT item_pk, provider, account_scope, parent_local_item_id FROM items
+        WHERE parent_local_item_id IS NOT NULL AND parent_local_item_id IN (SELECT value FROM json_each(?))
+          AND tombstoned = 0
+          AND ${afterPk === undefined ? 'parent_local_item_id >= ?' : '(parent_local_item_id, item_pk) > (?, ?)'}
+        ORDER BY parent_local_item_id, item_pk LIMIT ?
+      `, params: [parentIds, afterParent, ...(afterPk === undefined ? [] : [afterPk]), PK_SET_SLICE], mode: 'all' }) as Array<{
+        item_pk: number; provider: string; account_scope: string; parent_local_item_id: string;
+      }>;
+      const lists = new Map<string, number[]>();
+      for (const row of rows) {
+        const key = parentKey({ provider: row.provider, accountScope: row.account_scope, parentLocalItemId: row.parent_local_item_id });
+        if (!wanted.has(key)) continue;
+        const pks = lists.get(key);
+        if (pks) pks.push(row.item_pk); else lists.set(key, [row.item_pk]);
+      }
+      yield* lists.values();
+      if (rows.length < PK_SET_SLICE) break;
+      const last = rows.at(-1)!;
+      afterParent = last.parent_local_item_id;
+      afterPk = last.item_pk;
+    }
+  }
 
   /**
    * The vector scan for a store the read pool does not serve (an in-memory

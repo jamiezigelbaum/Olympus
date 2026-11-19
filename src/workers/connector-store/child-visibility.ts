@@ -44,7 +44,7 @@
 
 import { tierLedgerIdentityKey, type TierLedger, type TierLedgerIdentity, type LedgerRead, type TierVisibilityReads, type TierCopy } from '../classification/tier-ledger.ts';
 import { currentSourceAnswerTrace } from '../source-index/answer-latency-trace.ts';
-import { offThreadReadsSupported, releaseOffThreadReads, withOffThreadSnapshot, type ReadPoolLane } from './off-thread-reads.ts';
+import { BACKGROUND_READS, offThreadReadsSupported, releaseOffThreadReads, withOffThreadSnapshot, type ReadPoolLane } from './off-thread-reads.ts';
 
 /** One visibility read, shared by synchronous readers and the awaiting Ask path. */
 export interface VisibilityRead { here(): unknown; offThread(): Promise<unknown> }
@@ -177,7 +177,9 @@ export function itemStatesOffThread(ledger: TierLedger, identities: readonly Tie
     missing => ledgerReadOffThread(ledger, ledger.itemStatesSteps(missing), ASK_LEDGER_READS));
 }
 
-function* itemSecretSteps(ledger: TierLedger, identity: TierLedgerIdentity): Generator<VisibilityRead, boolean, unknown> {
+function* itemSecretSteps(ledger: TierLedger, identity: TierLedgerIdentity, background?: typeof BACKGROUND_READS): Generator<VisibilityRead, boolean, unknown> {
+  if (background) return yield* visibilityRead(() => ledger.itemIsSecret(identity),
+    () => ledgerReadOffThread(ledger, ledger.itemIsSecretSteps(identity), background));
   const key = tierLedgerIdentityKey(identity);
   const rows = yield* visibilityRead(
     () => memoVisibilityItemsHere(ledger, 'secret', () => ledger.changeMarker(), [identity], tierLedgerIdentityKey,
@@ -402,7 +404,31 @@ export function* parentVerdictsSteps(lane: ChildVisibilityLane, parents: readonl
   }
 }
 
-function* judge(lane: ChildVisibilityLane, parents: readonly ParentRef[], depth: number): Generator<VisibilityRead, Map<string, ParentVerdict>, unknown> {
+/**
+ * Speculative prefilters need a determinate verdict. The caller supplies
+ * uncached background parent reads and fences all connections around the
+ * walk. A read failure rejects the entire result.
+ */
+export async function parentVerdictsInBackground(
+  lane: ParentJudgmentLane, parents: readonly ParentRef[], checkHolds: () => void,
+): Promise<Map<string, ParentVerdict>> {
+  const steps = judge(lane, parents, 0, BACKGROUND_READS);
+  let next = steps.next();
+  while (!next.done) {
+    checkHolds();
+    next = steps.next(await next.value.offThread());
+  }
+  return next.value;
+}
+
+interface ParentJudgmentLane {
+  ledger(): TierLedger | undefined;
+  stores(): readonly Pick<ChildVisibilityStore, 'corpusId' | 'parentStandings' | 'parentStandingsOffThread'>[];
+}
+
+function* judge(
+  lane: ParentJudgmentLane, parents: readonly ParentRef[], depth: number, background?: typeof BACKGROUND_READS,
+): Generator<VisibilityRead, Map<string, ParentVerdict>, unknown> {
   const verdicts = new Map<string, ParentVerdict>();
   if (parents.length === 0) return verdicts;
   if (depth >= CHILD_PARENT_CHAIN_LIMIT) {
@@ -431,9 +457,10 @@ function* judge(lane: ChildVisibilityLane, parents: readonly ParentRef[], depth:
   }
   const states = ledger && identities.size > 0 ? yield* visibilityRead(
     () => memoVisibilityItemsHere(ledger, 'states', () => ledger.changeMarker(), [...identities.values()], tierLedgerIdentityKey, missing => ledger.itemStatesForMany(missing)),
-    () => itemStatesOffThread(ledger, [...identities.values()]),
+    () => background
+      ? ledgerReadOffThread(ledger, ledger.itemStatesSteps([...identities.values()]), background)
+      : itemStatesOffThread(ledger, [...identities.values()]),
   ) : undefined;
-
   const climbing = new Map<string, ParentRef>();
   for (const parent of parents) {
     const key = parentKey(parent);
@@ -463,7 +490,7 @@ function* judge(lane: ChildVisibilityLane, parents: readonly ParentRef[], depth:
       // Secret from before rows were kept. It is not present (nothing says it is listed), and
       // it is not gone either (a classification alone is no deletion): hidden, nothing removed,
       // until its next listing writes the row.
-      if (state?.hidingIntent === 'secret' || (ledger && parent.identity && (yield* itemSecretSteps(ledger, parent.identity)))) {
+      if (state?.hidingIntent === 'secret' || (ledger && parent.identity && (yield* itemSecretSteps(ledger, parent.identity, background)))) {
         verdicts.set(key, HIDDEN);
       } else {
         verdicts.set(key, { visible: false, gone: true });
@@ -484,7 +511,7 @@ function* judge(lane: ChildVisibilityLane, parents: readonly ParentRef[], depth:
       // item's. Once every row is a tombstone and none is a location, the provider deleted it:
       // the ledger's record of what it was says nothing about whether it is there.
       if (!visible && active.length > 0
-        && (state?.hidingIntent === 'secret' || (yield* itemSecretSteps(ledger, identity)))) visible = true;
+        && (state?.hidingIntent === 'secret' || (yield* itemSecretSteps(ledger, identity, background)))) visible = true;
     }
     if (visible) {
       const above = active.find((row) => row.grandparentLocalItemId !== undefined);
@@ -497,7 +524,7 @@ function* judge(lane: ChildVisibilityLane, parents: readonly ParentRef[], depth:
 
   // A parent that is itself a child is visible only while its own parent is.
   if (climbing.size > 0) {
-    const above = yield* judge(lane, [...climbing.values()], depth + 1);
+    const above = yield* judge(lane, [...climbing.values()], depth + 1, background);
     for (const [key, grandparent] of climbing) {
       if (above.get(parentKey(grandparent))?.visible !== true) verdicts.set(key, HIDDEN);
     }
