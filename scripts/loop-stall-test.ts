@@ -801,11 +801,13 @@ export function summarizeStartupGaps(samples: readonly PageSample[], firstAnswer
 }
 
 export function coldStartVerdict(longest: StartupGap | null, split: Pick<ThreadSplit,
-  'runningMs' | 'runQueueMs' | 'blockedMajfltMs' | 'blockedBlkioMs' | 'blockedOtherMs'> | undefined) {
+  'runningMs' | 'runQueueMs' | 'blockedMajfltMs' | 'blockedBlkioMs' | 'blockedOtherMs'> & { waitChannelsMs?: Record<string, number> } | undefined) {
   if (!longest || !split || longest.ms <= 10_000) return 'NOT REPRODUCED';
-  const ioMs = split.blockedBlkioMs + split.blockedMajfltMs;
+  // A read() that waits for a page coming off disk sleeps in folio_wait_bit_common without a major fault (map off): disk wait too.
+  const diskOtherMs = Math.min(split.blockedOtherMs, split.waitChannelsMs?.folio_wait_bit_common ?? 0);
+  const ioMs = split.blockedBlkioMs + split.blockedMajfltMs + diskOtherMs;
   // Idle or unsampled time is unattributed, so it cannot strengthen the IO finding.
-  const otherMs = Math.max(split.blockedOtherMs, longest.ms - ioMs - split.runningMs - split.runQueueMs);
+  const otherMs = Math.max(split.blockedOtherMs - diskOtherMs, longest.ms - ioMs - split.runningMs - split.runQueueMs);
   return ioMs > Math.max(split.runningMs, split.runQueueMs, otherMs) ? 'REPRODUCED' : 'NOT REPRODUCED';
 }
 
