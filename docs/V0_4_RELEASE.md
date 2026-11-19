@@ -77,6 +77,19 @@ time, expected citation and meaning verdict beside the ordinary answer, plus
 the number of seats skipped for length.
 The subset L proof is owned by the setup thread (ops#151).
 
+Right file onto the shortlist (1.5 item 6): each store offers its 3 nearest
+vector rows, under its relevance bar or not, and 6 extra seats in the reranked
+pool go to the best of them by margin over the bar, at most 2 per store
+(`DEFAULT_RERANK_POOL_SEMANTIC_SEATS` 6, `withSemanticPoolSeats` in
+`src/core/source-index/router.ts`). Stage 3 on the 75 answerable (main
+75f3ce4a3, ops#151 comments 6986245824 and 6987608225): found document 44 to
+47, found paragraph 41 to 43, answered strict 27 to 28 and by meaning 35 to 36;
+held-out equal (6/7 strict, 5/7 meaning). Gains p104, p115, p160. The
+seat-cause check (comment 6995933249) found one gold displaced into a loss,
+p185 (email paragraph), the known cost; the other moves came with the gold at
+seat 1 in both arms. Conversation windows (item 9) measured worse, 42 and 37,
+and are not in 1.5.
+
 Rules for this release:
 
 - Recent requests from AI apps (#1266): the Agents panel and

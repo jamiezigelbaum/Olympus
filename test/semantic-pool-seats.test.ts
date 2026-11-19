@@ -41,10 +41,11 @@ describe('withSemanticPoolSeats', () => {
 
 describe('rerankPoolSemanticSeats', () => {
   test('reads the eval switch and ignores nonsense', () => {
-    expect(rerankPoolSemanticSeats({})).toBe(0);
+    expect(rerankPoolSemanticSeats({})).toBe(6);
+    expect(rerankPoolSemanticSeats({ OLYMPUS_SEMANTIC_POOL_SEATS: '0' })).toBe(0);
     expect(rerankPoolSemanticSeats({ OLYMPUS_SEMANTIC_POOL_SEATS: '6' })).toBe(6);
-    expect(rerankPoolSemanticSeats({ OLYMPUS_SEMANTIC_POOL_SEATS: '-1' })).toBe(0);
-    expect(rerankPoolSemanticSeats({ OLYMPUS_SEMANTIC_POOL_SEATS: 'x' })).toBe(0);
+    expect(rerankPoolSemanticSeats({ OLYMPUS_SEMANTIC_POOL_SEATS: '-1' })).toBe(6);
+    expect(rerankPoolSemanticSeats({ OLYMPUS_SEMANTIC_POOL_SEATS: 'x' })).toBe(6);
   });
 
   test('rows offered per store: 3 by default, the eval switch from 1 to 50', () => {
