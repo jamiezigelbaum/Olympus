@@ -62,8 +62,16 @@ async function page(items: Item[], options: {
   const gate = new Promise<void>((resolve) => { release = resolve; });
   let received: Record<string, unknown> | undefined;
   let settled = false;
+  const clickIds = new Set<string>();
   const fetchStub = async (path: string, init: { body: string; headers: Record<string, string> }) => {
     expect(init.headers['X-Olympus-CSRF']).toBe('csrf-token');
+    // Each save carries a fresh click id the engine's trace accepts; nothing else is tagged.
+    const clickId = init.headers['X-Olympus-Click-Id'];
+    if (path === DASHBOARD_PRIVACY_ITEMS_PATHS.set) {
+      expect(clickId).toMatch(/^[A-Za-z0-9_-]{1,80}$/);
+      expect(clickIds.has(clickId!)).toBe(false);
+      clickIds.add(clickId!);
+    } else expect(clickId).toBeUndefined();
     let request = JSON.parse(init.body) as Record<string, unknown>;
     posts.push({ path, body: request });
     if (options.fetch) return options.fetch(path, request);
