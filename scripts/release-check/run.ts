@@ -292,6 +292,8 @@ const checksSplit = (options: RunOptions): boolean => options.engineSplit === tr
 export class Run {
   splitSettingWritten = false;
   watchingCutover = false;
+  /** The fixture judge's counters before the late legs (server mode, explore) that can end its process (Mac 44552653847). */
+  fixtureJudgeEarly?: AgentCall;
   readonly markers: LeakMarker[] = forbiddenMarkers();
   readonly logLines: string[] = [];
   readonly errors: string[] = [];
@@ -1059,10 +1061,12 @@ function listFiles(dir: string): string[] {
 }
 
 async function collectEvidence(run: Run, outDir: string): Promise<void> {
-  const stats = await run.agent('fixture-judge-stats', '', 15_000);
+  const late = await run.agent('fixture-judge-stats', '', 15_000);
+  // The judge's counters live in its process; a late leg can end it, so the reading taken before those legs stands in.
+  const stats = late.result?.ok ? late : run.fixtureJudgeEarly?.result?.ok ? run.fixtureJudgeEarly : late;
   run.add({ id: 'judge.fixture-used', title: 'The VM classified through the loopback fixture judge',
     status: Number(stats.result?.calls) > 0 ? 'pass' : 'fail',
-    detail: stats.result?.ok ? `${stats.result.calls} calls, ${stats.result.ms} ms server time; answer model unchanged` : agentDetail(stats) });
+    detail: stats.result?.ok ? `${stats.result.calls} calls, ${stats.result.ms} ms server time; answer model unchanged${stats === late ? '' : ` (read before the late legs; at the end: ${agentDetail(late)})`}` : agentDetail(stats) });
   const answers = stats.result?.answers;
   if (answers) run.add({ id: 'model.answer-time', title: 'Recorded answer model time (product latency ledger)',
     status: Number(answers.recordedCalls) > 0 ? 'pass' : 'warn',
@@ -2024,6 +2028,7 @@ async function runUpgradeLeg(run: Run, workDir: string, bundlePath: string, judg
 }
 
 async function runPrivacyQualification(run: Run): Promise<void> {
+  run.fixtureJudgeEarly = await run.agent('fixture-judge-stats', '', 15_000);
   const call = await run.phase('qualify-private', () => run.agent('qualify-private', '', 12 * 60_000), 12 * 60_000);
   run.add(qualifyPrivacyCheck(call.result as PrivacyObservation | undefined));
 }
