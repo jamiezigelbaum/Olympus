@@ -1,7 +1,10 @@
+import type { Database } from 'bun:sqlite';
 import { describe, expect, test } from 'bun:test';
 import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
 import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
+import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
+import { FIXTURE_PLACEMENT, fixtureConnector, identityOf, openTierFixture, tempDir } from './helpers/tier-fixtures.ts';
 import { defineDropboxFilesCorpus } from '../src/workers/dropbox-files/index.ts';
 import { dropboxCanonicalIngestionMatcher } from '../src/workers/dropbox-files/connector-store.ts';
 import { defaultDropboxIngestionPolicy } from '../src/core/source-ingestion-policy.ts';
@@ -12,7 +15,6 @@ import {
 } from '../src/workers/source-scope-runtime.ts';
 import {
   DASHBOARD_READINESS_LEDGER_MAX_AGE_MS,
-  STORE_STATUS_CHANGED_REUSE_MS,
   STORE_STATUS_REUSE_MS, STORE_UNCHANGED_REUSE_MS,
   createSourceIndexStatusHandler,
   resolveStatusRetrievalAvailability,
@@ -63,6 +65,7 @@ describe('connector-store status readiness', () => {
     store.prepareStatusCounts = async (...args: Parameters<typeof store.prepareStatusCounts>) => { prepared += 1; await prepare(...args); };
     let now = 1_000_000;
     try {
+      await store.syncFromConnector(connector([]), { fetchContent: true });
       const handler = createSourceIndexStatusHandler({ corpusDefinitions: [defineDropboxFilesCorpus()], connectorStores: [store], nowMs: () => now });
       await handler.status({ include_items: false }, { countsMaxAgeMs: 300_000 });
       await handler.status({ include_items: false, include_readiness_ledger: true, readiness_ledger_max_age_ms: 120_000 }, { countsMaxAgeMs: 300_000 });
@@ -134,20 +137,92 @@ describe('connector-store status readiness', () => {
         return (shown.corpora[0] as { counts: Record<string, number> }).counts.indexed_items;
       };
       expect(await indexed()).toBe(1);
-      now += STORE_STATUS_CHANGED_REUSE_MS + 1;
+      now += 30_000;
       expect(await indexed()).toBe(1);
       expect(reads).toBe(1);
       await store.syncFromConnector(connector([file('first.txt', 'synthetic text'), file('second.txt', 'more synthetic text')]), { fetchContent: true });
       expect(await indexed()).toBe(2);
       expect(reads).toBe(2);
-      // Within the short window a change waits, so a busy store is not counted on every poll.
+      // A scoped write wakes the next recount even inside the former debounce window.
       await store.syncFromConnector(connector([file('first.txt', 'synthetic text'), file('second.txt', 'more synthetic text'), file('third.txt', 'still synthetic')]), { fetchContent: true });
       now += 1_000;
-      expect(await indexed()).toBe(2);
-      now += STORE_STATUS_CHANGED_REUSE_MS;
+      expect(await indexed()).toBe(3);
       expect(await indexed()).toBe(3);
       expect(reads).toBe(3);
     } finally { store.close(); }
+  });
+
+  test('paced recounts read only stores woken by a write, move, ledger-only change or the safety deadline', async () => {
+    const tmp = tempDir();
+    const fixture = openTierFixture(tmp.dir, { embed: false });
+    const quiet = new LocalConnectorStore({ dbPath: ':memory:', corpusId: CORPUS_ID, family: 'file', trustDomain: 'secure_local', tierLedger: fixture.ledger });
+    try {
+      const item = { id: 'moving', name: 'moving.txt', text: 'Synthetic body.' };
+      await fixture.set.sync(fixtureConnector(() => [item]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+      const source = fixture.stores.internal!;
+      const target = fixture.stores.secure_local!;
+      await target.syncFromConnector(fixtureConnector(() => []), { fetchContent: true });
+      await quiet.syncFromConnector(connector([file('quiet.txt', 'Synthetic quiet body.')]), { fetchContent: true });
+      const stores = [source, target, quiet];
+      const reads = [0, 0, 0];
+      stores.forEach((store, index) => {
+        const original = store.statusOffThread.bind(store);
+        store.statusOffThread = (...args) => { reads[index] = reads[index]! + 1; return original(...args); };
+      });
+      const db = (quiet as unknown as { db: Database }).db;
+      const query = db.query.bind(db);
+      let quietCountStatements = 0;
+      db.query = ((sql: string) => {
+        if (sql.includes('WITH flags AS MATERIALIZED')) quietCountStatements += 1;
+        return query(sql);
+      }) as typeof db.query;
+      let now = 1_000_000;
+      const handler = createSourceIndexStatusHandler({
+        corpusDefinitions: stores.map(store => ({ ...defineDropboxFilesCorpus(), corpusId: store.corpusId, trustDomain: store.trustDomain })),
+        connectorStores: stores, nowMs: () => now, snapshotRole: 'writer',
+      });
+      const snapshot = { countsMaxAgeMs: STORE_STATUS_REUSE_MS, reuseCounts: true };
+      const recount = () => handler.refreshSnapshot!({}, snapshot);
+      const expectItems = (status: Awaited<ReturnType<typeof recount>>, store: LocalConnectorStore, count: number) =>
+        expect(status.corpora.find(corpus => corpus.corpus_id === store.corpusId)).toMatchObject({ counts: { indexed_items: count } });
+      const first = await recount();
+      expectItems(first, source, 1);
+      expectItems(first, quiet, 1);
+      expect(reads).toEqual([1, 1, 1]);
+      const baseline = quietCountStatements;
+      expect(baseline).toBeGreaterThan(0);
+      for (let pass = 0; pass < 3; pass++) {
+        now += STORE_STATUS_REUSE_MS;
+        await recount();
+      }
+      expect(reads).toEqual([1, 1, 1]);
+
+      await source.syncFromConnector(fixtureConnector(() => [{ id: 'new', name: 'new.txt', text: 'Synthetic new body.' }], { id: 'different-sync' }), { fetchContent: true });
+      expectItems(await recount(), source, 2);
+      expect(reads).toEqual([2, 1, 1]);
+      await moveTieredItem({ set: fixture.set, identity: identityOf(item.id), target: { metadataTier: 'secure', contentTier: 'secure' } });
+      const moved = await recount();
+      expectItems(moved, source, 1);
+      expectItems(moved, target, 1);
+      expect(reads).toEqual([3, 2, 1]);
+
+      fixture.ledger.putWriteIntent({ identity: identityOf('new'), kind: 'deletion', connectorId: 'synthetic-sync' });
+      expectItems(await recount(), source, 0);
+      expect(reads).toEqual([4, 2, 1]);
+      await recount();
+      expect(reads).toEqual([4, 2, 1]);
+      expect(quietCountStatements).toBe(baseline);
+
+      now = 1_000_000 + STORE_UNCHANGED_REUSE_MS;
+      expectItems(await recount(), quiet, 1);
+      expect(reads).toEqual([4, 2, 2]);
+      expect(quietCountStatements).toBe(baseline * 2);
+      await handler.refreshSnapshot!({}, { countsMaxAgeMs: STORE_STATUS_REUSE_MS });
+      expect(reads).toEqual([5, 3, 3]);
+      const beforeLive = quietCountStatements;
+      await handler.status({}, { countsMaxAgeMs: 0 });
+      expect(quietCountStatements).toBe(beforeLive + baseline);
+    } finally { quiet.close(); fixture.close(); tmp.cleanup(); }
   });
 
   test('snapshot callers share one read of the embedding and PDF backlogs within the reuse window; current callers always read', async () => {
