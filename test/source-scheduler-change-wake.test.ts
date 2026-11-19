@@ -131,6 +131,43 @@ describe('messaging scheduler wake wiring', () => {
 });
 
 describe('scheduler push wake', () => {
+  test('a newly connected source starts before the next scheduler tick', async () => {
+    let runs = 0;
+    const connected = watchedSource({ run: async () => { runs += 1; return { status: 'idle' }; } });
+    const h = harness([]);
+    h.scheduler.start();
+    try {
+      h.scheduler.updateSources([connected.source]);
+      await h.fireOther();
+      expect(runs).toBe(1);
+      h.scheduler.updateSources([connected.source]);
+      await h.fireOther();
+      expect(runs).toBe(1);
+    } finally {
+      h.scheduler.stop();
+    }
+  });
+
+  test('an embedding wake runs only the source whose destination changed', async () => {
+    const runs: string[] = [];
+    const sources: SourceSchedulerSource[] = ['files.changed', 'files.other'].map(sourceId => ({
+      sourceId, corpusId: `secure_local.${sourceId}`, cadence: 'continuous', intervalMs: 60_000, freshnessThresholdHours: 26,
+      tasks: [{ id: 'embed', kind: 'embed', writer: true, run: async () => { runs.push(sourceId); return { status: 'idle' }; } }],
+    }));
+    const h = harness(sources);
+    h.scheduler.start();
+    try {
+      await settle();
+      expect(runs.sort()).toEqual(['files.changed', 'files.other']);
+      runs.length = 0;
+      expect(h.scheduler.wakeTasksOfKind('embed', undefined, new Set(['files.changed']))).toBe(1);
+      await h.fireOther();
+      expect(runs).toEqual(['files.changed']);
+    } finally {
+      h.scheduler.stop();
+    }
+  });
+
   test('subscribes on start, never before, and unsubscribes on stop', () => {
     const watched = watchedSource({ run: async () => ({ status: 'idle' }) });
     const h = harness([watched.source]);

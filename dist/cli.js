@@ -138909,8 +138909,8 @@ function createSourceIndexStatusHandler(options = {}) {
     } catch {}
   };
   const snapshotRefreshes = new Map;
-  const totalsStores = new Map((options.connectorStores ?? []).map((store) => [store.corpusId, store]));
   const withLiveTotals = (result) => {
+    const totalsStores = new Map((options.connectorStores ?? []).map((store) => [store.corpusId, store]));
     if (totalsStores.size === 0)
       return result;
     let changed = false;
@@ -138995,11 +138995,13 @@ function createSourceIndexStatusHandler(options = {}) {
         ],
         statusScope ?? null
       ]);
+      const countsMaxAgeMs = snapshot.countsMaxAgeMs ?? 0;
+      const counted = store && countsMaxAgeMs > 0 ? storeStatus(store, statusScope, countsMaxAgeMs) : undefined;
       const cached = maxAgeMs > 0 ? cache.get(cacheKey) : undefined;
-      if (cached && nowMs() - cached.recordedAtMs <= maxAgeMs)
+      if (cached && cached.counted === counted && nowMs() - cached.recordedAtMs <= maxAgeMs)
         return cached.status;
       const readiness = store && request.include_readiness_ledger === true ? options.readinessLedger?.snapshotForCorpus(corpus.corpusId, maxAgeMs > 0 ? { maxAgeMs } : {}) : undefined;
-      const status = store ? connectorStoreStatus(corpus, storeStatus(store, statusScope, snapshot.countsMaxAgeMs ?? 0), readiness?.counts, readiness?.contentExtractionThroughput, availability?.modelId, secretLocationCount(store, (read, offThread) => reusedRead(snapshot.countsMaxAgeMs ?? 0, ["secrets", store.corpusId], read, offThread))) : configuredCorpusStatus(corpus);
+      const status = store ? connectorStoreStatus(corpus, counted ?? storeStatus(store, statusScope, countsMaxAgeMs), readiness?.counts, readiness?.contentExtractionThroughput, availability?.modelId, secretLocationCount(store, (read, offThread) => reusedRead(snapshot.countsMaxAgeMs ?? 0, ["secrets", store.corpusId], read, offThread))) : configuredCorpusStatus(corpus);
       if (status.configured && readiness?.counts[UNSUPPORTED_KIND_COUNT_KEY] !== undefined) {
         status.counts[UNSUPPORTED_KIND_COUNT_KEY] = readiness.counts[UNSUPPORTED_KIND_COUNT_KEY];
       }
@@ -139020,7 +139022,7 @@ function createSourceIndexStatusHandler(options = {}) {
       const withBacklog = store && availability?.modelId ? withEmbeddingBacklogEstimate(enforced, store, availability.modelId, availability, statusScope, snapshot.countsMaxAgeMs ?? 0, reusedRead) : enforced;
       const resolved = store && corpus.family === "file" ? withPdfExtractionBacklog(withBacklog, store, withBacklog.embedding_parity?.required === true ? availability?.modelId : undefined, (read) => reusedRead(snapshot.countsMaxAgeMs ?? 0, ["pdf", store.corpusId], read, typeof store.pdfExtractionBacklogOffThread === "function" ? { read: () => store.pdfExtractionBacklogOffThread(), empty: { pendingPdfs: 0, extractedPdfs: 0, extractedChars: 0 } } : undefined)) : withBacklog;
       if (maxAgeMs > 0 && pending.length === pendingBefore)
-        cache.set(cacheKey, { recordedAtMs: nowMs(), status: resolved });
+        cache.set(cacheKey, { recordedAtMs: nowMs(), counted, status: resolved });
       return resolved;
     };
     const statuses = [];
@@ -227202,11 +227204,14 @@ class SourceScheduler {
   updateSources(sources, now = this.now()) {
     const existing = new Map(this.states.map((state) => [schedulerStateKey(state.source, state.task), state]));
     const firstRun = now.getTime();
+    let newWorkDue = false;
     this.sources = this.filterAllowedSources(sources);
     this.states = this.sources.flatMap((source) => source.tasks.map((task) => {
       const previous = existing.get(schedulerStateKey(source, task));
       if (!previous) {
-        return this.createTaskState(source, task, firstRun);
+        const state = this.createTaskState(source, task, firstRun);
+        newWorkDue ||= taskCadence(source, task) === "continuous" && state.nextRunAt <= firstRun;
+        return state;
       }
       previous.task = task;
       previous.source = source;
@@ -227215,6 +227220,8 @@ class SourceScheduler {
     if (this.timer)
       this.refreshFastWakeTimers();
     this.syncChangeSubscriptions();
+    if (newWorkDue)
+      this.scheduleContinueWake(firstRun);
   }
   filterAllowedSources(sources) {
     if (this.allowedSourceIds === undefined)
@@ -227376,10 +227383,12 @@ class SourceScheduler {
     if (woke)
       this.scheduleContinueWake(at);
   }
-  wakeTasksOfKind(kind, at = this.now().getTime()) {
+  wakeTasksOfKind(kind, at = this.now().getTime(), sourceIds) {
     let woke = 0;
     for (const state of this.states) {
       if (state.task.kind !== kind || state.consecutiveFailures > 0)
+        continue;
+      if (sourceIds && !sourceIds.has(state.source.sourceId))
         continue;
       if (taskCadence(state.source, state.task) !== "continuous")
         continue;
@@ -227390,9 +227399,7 @@ class SourceScheduler {
         woke += 1;
         continue;
       }
-      if (state.nextRunAt <= at)
-        continue;
-      state.nextRunAt = at;
+      state.nextRunAt = Math.min(state.nextRunAt, at);
       woke += 1;
     }
     if (woke > 0)
@@ -245990,6 +245997,7 @@ class TierSnifferService {
     const deadline = started + sliceMs;
     const shouldStop = () => signal.aborted || direction === "lower" && (this.monotonicNow() >= deadline || this.lowerMovePreempted || this.yieldNow());
     const report = { moved: 0, failed: 0, notEligible: 0, timings };
+    const embeddingCorpora = new Set;
     const staleAfterMs = Math.max(0, options.staleAfterMs ?? DEFAULT_STALE_MOVE_MS);
     const now = (this.options.now ?? (() => new Date))().getTime();
     let budget = Math.max(0, options.maxPerPass ?? (direction === "raise" ? 25 : DEFAULT_AUTO_MOVES_PER_PASS));
@@ -246052,8 +246060,12 @@ class TierSnifferService {
           this.moveFailures.delete(failureKey);
         }
       };
-      const succeeded = (record) => {
+      const succeeded = (record, result) => {
         report.moved++;
+        for (const destination of result.destinations) {
+          if (destination.chunksToEmbed > 0)
+            embeddingCorpora.add(destination.corpusId);
+        }
         const key = `${ledgerPath}\x00${tierLedgerIdentityKey(recordIdentity2(record))}\x00${record.generation}`;
         this.moveFailures.delete(key);
         this.movesRefusedNow.delete(`${ledgerPath}\x00${tierLedgerIdentityKey(recordIdentity2(record))}`);
@@ -246078,8 +246090,7 @@ class TierSnifferService {
         if (direction === "raise") {
           for (const { record, move } of pending) {
             try {
-              await moveTieredItem(move);
-              succeeded(record);
+              succeeded(record, await moveTieredItem(move));
             } catch (error) {
               failure(record, error);
             }
@@ -246093,7 +246104,7 @@ class TierSnifferService {
             for (const [index, result] of results.entries()) {
               const entry = pending[index];
               if (!("error" in result)) {
-                succeeded(entry.record);
+                succeeded(entry.record, result.result);
                 continue;
               }
               failure(entry.record, result.error);
@@ -246110,6 +246121,8 @@ class TierSnifferService {
       }
       await flushTierMoveNotes(set.ledger, { timings, shouldStop });
     }
+    if (embeddingCorpora.size > 0)
+      options.onEmbeddingNeeded?.(embeddingCorpora);
     report.elapsedMs = this.monotonicNow() - started;
     const didWork = report.moved > 0 || report.failed > 0 || (report.abandoned ?? 0) > 0 || (report.staleRaises ?? 0) > 0 || (report.retiredAbsent ?? 0) > 0;
     const idleLowerDue = direction === "lower" && this.clockMs() - this.lastIdleLowerLogMs >= 60000;
@@ -278447,7 +278460,13 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     breakerOpen: () => secureAnalystPoolState.isBreakerOpen("secure_local", snifferLane.profileId),
     log: (line) => console.log(line),
     ...snifferRuntime.source === "built_in" ? { autoApproveBuiltIn: true } : {},
-    autoMoves: automaticMoveContext
+    autoMoves: {
+      ...automaticMoveContext,
+      onEmbeddingNeeded: (corpora) => {
+        const sourceIds = new Set(sourceCorpusRegistry.list().filter(({ corpusId }) => corpora.has(corpusId)).map(({ sourceId }) => sourceId));
+        sourceScheduler?.wakeTasksOfKind("embed", undefined, sourceIds);
+      }
+    }
   }) : undefined;
   if (tierSniffer && snifferResource) {
     localModelActivity.onBusy(snifferResource, () => tierSniffer.preempt());

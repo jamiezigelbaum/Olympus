@@ -14,7 +14,7 @@ import { CORPORA, FIXTURE_PLACEMENT, fixtureConnector, identityOf, localId, loca
 const cleanups: Array<() => void> = [];
 afterEach(() => { for (const cleanup of cleanups.splice(0).reverse()) cleanup(); });
 
-async function fixture(options: { accountScope?: string } = {}) {
+async function fixture(options: { accountScope?: string; empty?: boolean } = {}) {
   const tmp = tempDir();
   const ledger = new TierLedger({ dbPath: `${tmp.dir}/tiers.sqlite` });
   const secrets = new SecretLocationsIndex({ dbPath: `${tmp.dir}/secrets.sqlite` });
@@ -29,11 +29,15 @@ async function fixture(options: { accountScope?: string } = {}) {
     ],
   });
   cleanups.push(() => { personal.close(); store.close(); secrets.close(); ledger.close(); tmp.cleanup(); });
-  await set.sync(fixtureConnector(() => [{ id: 'synthetic-id', name: 'synthetic-name.txt', text: 'Synthetic body marker.' }]), { fetchContent: true, placement: FIXTURE_PLACEMENT }, { embed: false });
+  if (!options.empty) {
+    await set.sync(fixtureConnector(() => [{ id: 'synthetic-id', name: 'synthetic-name.txt', text: 'Synthetic body marker.' }]), { fetchContent: true, placement: FIXTURE_PLACEMENT }, { embed: false });
+  }
   const log = spyOn(console, 'info').mockImplementation(() => {});
   cleanups.push(() => log.mockRestore());
   let now = new Date('2026-11-07T15:00:00Z');
-  const sources = withEmbeddingSweep([{ sourceId: 'synthetic-source-id', corpusId: store.corpusId, cadence: 'continuous', intervalMs: 60_000, freshnessThresholdHours: 24, tasks: [] }], () => () => [{ store, provider, wholeStore: true, ...options }]);
+  const sources = withEmbeddingSweep([{ sourceId: 'synthetic-source-id', corpusId: store.corpusId, cadence: 'continuous', intervalMs: 60_000, freshnessThresholdHours: 24, tasks: [] }], () => () => [{
+    store, provider, wholeStore: true, ...(options.accountScope !== undefined ? { accountScope: options.accountScope } : {}),
+  }]);
   const scheduler = new SourceScheduler({ enabled: true, tickMs: 60_000, errorBackoffMs: 1_000, maxTransientRetries: 1, sources, now: () => now });
   const pass = async () => {
     log.mockClear();
@@ -155,6 +159,17 @@ test('with the idle back-off switched off, every pass walks the store', async ()
   const settled = walks.mock.calls.length;
   await f.pass();
   expect(walks.mock.calls.length).toBeGreaterThan(settled);
+});
+
+test('a brand-new store without a write sequence picks up its first write', async () => {
+  const f = await fixture({ empty: true });
+  expect(f.store.writeSequence()).toBeUndefined();
+  expect(await f.pass()).toMatchObject({ eligible_chunks: 0, rested: 0 });
+  await f.set.sync(fixtureConnector(() => [
+    { id: 'synthetic-id', name: 'synthetic-name.txt', text: 'The first synthetic body.' },
+  ]), { fetchContent: true, placement: FIXTURE_PLACEMENT }, { embed: false });
+  expect(f.store.writeSequence()).toBeGreaterThan(0);
+  expect(await f.pass()).toMatchObject({ chunks_embedded: 1, rested: 0 });
 });
 
 test('an item that failed for good does not keep its store walked, stays reported, and a change wakes the store', async () => {
