@@ -233,11 +233,15 @@ describe('the engine split boots as two processes', () => {
       await Promise.allSettled([traffic, inFlight]);
     }
 
-    const status = await workerFetch(`http://127.0.0.1:${port}/v1/source/index/status`, {
-      method: 'POST', headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' }, body: '{}',
-    });
-    const body = JSON.stringify(await status.json());
-    expect(status.status, body).toBe(200);
+    // The first status after the switch can still be counting (no corpora yet); wait for the counted one.
+    const body = await waitFor(async () => {
+      const status = await workerFetch(`http://127.0.0.1:${port}/v1/source/index/status`, {
+        method: 'POST', headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' }, body: '{}',
+      });
+      const text = JSON.stringify(await status.json());
+      expect(status.status, text).toBe(200);
+      return text.includes('secure_local.local.files') ? text : undefined;
+    }, { timeoutMs: 60_000, description: 'the front counted its local-files store' });
     expect(body).toContain('secure_local.local.files');
     expect(front.output()).not.toContain('FrontStoreWriteError');
   }, 180_000);
