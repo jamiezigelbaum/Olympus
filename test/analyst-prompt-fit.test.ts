@@ -144,7 +144,7 @@ describe('Ask local compact evidence', () => {
     expect(fitted).toEqual(before);
   });
 
-  test('oversized labels leave an empty fit and oversized fixed coverage fails before dispatch', () => {
+  test('when not even one item\'s labels fit, the smallest pack is sent rather than none or an error', () => {
     const { pack } = analystPromptFixture();
     const options = { localOnly: true };
     const budget = 13_500;
@@ -154,11 +154,10 @@ describe('Ask local compact evidence', () => {
     }];
     for (const format of ['full', 'compact'] as const) {
       const fitted = fitPackToPromptBytes(pack, budget, new Map(), options, 0, format, new Map());
-      expect(fitted.candidates).toHaveLength(0);
-      expect(analystPromptBytes(fitted, options, format)).toBeLessThanOrEqual(budget);
+      expect(fitted.candidates).toHaveLength(1);
+      expect(fitted.candidates[0]!.chunks).toEqual([]);
       const oversized = { ...pack, coverage: { ...pack.coverage, extractionGaps: ['文'.repeat(budget)] } };
-      expect(() => fitPackToPromptBytes(oversized, budget, new Map(), options, 0, format, new Map()))
-        .toThrow('The question and its search coverage exceed the model prompt budget.');
+      expect(fitPackToPromptBytes(oversized, budget, new Map(), options, 0, format, new Map()).candidates).toHaveLength(1);
     }
   });
 

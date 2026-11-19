@@ -109565,10 +109565,8 @@ function fitPackPassagesToPromptBytes(pack, maxPromptBytes, candidateCorpus, ana
   }
   if (!gapOwners)
     return legacyFallback ?? restatePack(pack, order.slice(0, 1).map((candidate) => ({ ...candidate, chunks: [] })), candidateCorpus);
-  const empty = restatePack(pack, [], candidateCorpus, keptSeatGaps(pack, [], gapOwners));
-  if (analystPromptBytes(empty, analyzeOptions, evidenceFormat) <= maxPromptBytes)
-    return empty;
-  throw new OperationError("source_index_error", "The question and its search coverage exceed the model prompt budget.");
+  const first = order.slice(0, 1).map((candidate) => ({ ...candidate, chunks: [] }));
+  return restatePack(pack, first, candidateCorpus, keptSeatGaps(pack, first, gapOwners));
 }
 function keptSeatGaps(pack, kept, gapOwners) {
   if (gapOwners.size === 0)

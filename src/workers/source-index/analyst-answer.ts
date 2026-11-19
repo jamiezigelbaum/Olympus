@@ -1452,9 +1452,10 @@ function fitPackPassagesToPromptBytes(
   // Unowned-gap callers also use the fitter to compare rendering below the
   // fixed prompt size. Preserve their historical best-effort result.
   if (!gapOwners) return legacyFallback ?? restatePack(pack, order.slice(0, 1).map(candidate => ({ ...candidate, chunks: [] })), candidateCorpus);
-  const empty = restatePack(pack, [], candidateCorpus, keptSeatGaps(pack, [], gapOwners));
-  if (analystPromptBytes(empty, analyzeOptions, evidenceFormat) <= maxPromptBytes) return empty;
-  throw new OperationError('source_index_error', 'The question and its search coverage exceed the model prompt budget.');
+  // Nothing fits even one candidate's labels: send the smallest pack rather
+  // than none, and let the transport's own ceiling report it.
+  const first = order.slice(0, 1).map(candidate => ({ ...candidate, chunks: [] }));
+  return restatePack(pack, first, candidateCorpus, keptSeatGaps(pack, first, gapOwners));
 }
 
 // The pack's gaps for the seats sent, plus every corpus-level gap. The
