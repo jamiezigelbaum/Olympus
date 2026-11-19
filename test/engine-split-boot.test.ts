@@ -9,6 +9,7 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } 
 import { dirname, join } from 'node:path';
 import { connectThisComputerSource } from '../src/core/this-computer.ts';
 import { resolvedStorePath } from '../src/core/source-placement.ts';
+import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/local-index.ts';
 import { FileSourceScopeAuthority } from '../src/workers/source-scope-runtime.ts';
 import { FIXTURE_PLACEMENT, fixtureConnector } from './helpers/tier-fixtures.ts';
@@ -79,7 +80,9 @@ describe('the engine split boots as two processes', () => {
     const health = await workerFetch(`http://127.0.0.1:${port}/v1/health`, { headers: { Authorization: `Bearer ${TOKEN}` } });
     expect(health.status).toBe(200);
     // The front reports its background, so an upgrade or rollback never calls a crash-looping background healthy (#1563 review).
-    expect(await health.json()).toMatchObject({ reachable: true, engine_background: 'ready' });
+    expect(await health.json()).toMatchObject({
+      reachable: true, engine_background: 'ready', tier_classification: { over_private: { state: 'counting' } },
+    });
     // Source watches are the background's: a create is answered by its route, not refused.
     const watch = await workerFetch(`http://127.0.0.1:${port}/v1/source/watch/create`, { method: 'POST', headers: { Authorization: `Bearer ${TOKEN}` }, body: '{}' });
     expect(watch.status).not.toBe(503);
@@ -138,6 +141,7 @@ describe('the engine split boots as two processes', () => {
       OLYMPUS_WORKER_AUTH_TOKEN: TOKEN,
       OLYMPUS_ENGINE_BACKGROUND_SOCKET: join(home, 'run', 'olympus', 'background.sock'),
       OLYMPUS_SOURCE_INDEX_LOCAL_FILES_CONNECTOR_STORE_ENABLED: 'true',
+      OLYMPUS_TIER_SNIFFER_ENABLED: 'false',
       OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH: registryPath,
       NODE_ENV: 'test',
     };
@@ -153,6 +157,16 @@ describe('the engine split boots as two processes', () => {
     mkdirSync(dirname(storePath), { recursive: true });
     const seeded = new LocalConnectorStore({ dbPath: storePath, corpusId: 'secure_local.local.files', family: 'file', trustDomain: 'secure_local' });
     await seeded.syncFromConnector(fixtureConnector(() => [{ id: 'orchard', name: 'orchard-lab.txt', text: 'The orchard lab note.', legacyDomain: 'secure_local' }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    const ledger = seeded.tierLedger()!;
+    const item = { provider: 'local.files', accountScope: 'test', providerItemId: 'over-private', family: 'file' as const };
+    const personal = classifyItemTiers({ signals: { title: 'Orchard plan' }, text: 'Order seeds.' });
+    expect(personal).toMatchObject({ metadataTier: 'private', contentTier: 'private' });
+    const secure = { copies: [{ corpusId: seeded.corpusId, trustDomain: 'secure_local', layers: 'both' }], embedHold: false } as const;
+    const { record } = ledger.recordRoutedPlacement(item, personal, secure);
+    ledger.recordRoutedPlacement({ ...item, providerItemId: 'correct' }, personal, {
+      copies: [{ corpusId: 'internal.local.files', trustDomain: 'internal', layers: 'both' }], embedHold: false,
+    });
+    ledger.recordRoutedPlacement({ ...item, providerItemId: 'pending' }, { ...personal, state: 'pending', contentPending: true }, secure);
     seeded.close();
 
     const socketPath = workerFrontSocketPath({ env })!;
@@ -243,6 +257,16 @@ describe('the engine split boots as two processes', () => {
       return text.includes('secure_local.local.files') ? text : undefined;
     }, { timeoutMs: 60_000, description: 'the front counted its local-files store' });
     expect(body).toContain('secure_local.local.files');
+    const measured = await waitFor(async () => {
+      const response = await get('/v1/health');
+      const health = await response.json();
+      const count = health.tier_classification?.over_private;
+      return count?.state === 'measured' ? count : undefined;
+    }, { description: 'the front received the measured privacy count' });
+    expect(measured).toEqual({
+      state: 'measured', items: 1, by_provider: { 'local.files': 1 },
+      oldest_since: record.decidedAt, measured_at: expect.any(String),
+    });
     expect(front.output()).not.toContain('FrontStoreWriteError');
   }, 180_000);
 });

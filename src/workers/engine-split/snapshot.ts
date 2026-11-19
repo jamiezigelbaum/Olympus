@@ -1,4 +1,5 @@
 import type { MemoryActivity } from '../../core/memory-counters.ts';
+import type { TierOverPrivateStatus } from '../classification/tier-over-private.ts';
 /**
  * State the background publishes for the front (docs/design/engine-split.md,
  * part 3, "State from background to front"): scheduler status, the judge's
@@ -53,6 +54,7 @@ export interface EngineStatusSnapshot {
   scheduler: unknown;
   judge: {
     backlog: unknown;
+    over_private?: TierOverPrivateStatus;
     pending: number | null;
     spending: unknown;
     /** The judge is ahead of the lanes (it has priority): the front's "busy classifying". */

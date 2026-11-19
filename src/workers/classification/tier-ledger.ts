@@ -57,6 +57,12 @@ export interface SecretScrubMark {
 
 export type TierLedgerState = 'pending' | 'current' | 'moving';
 
+export interface TierLedgerOverPrivateCount {
+  provider: string;
+  items: number;
+  oldest_since: string;
+}
+
 /**
  * An item's ledger identity. The conversation is part of it: chat providers
  * reuse message ids across chats, so provider + account + item id alone would
@@ -2033,6 +2039,43 @@ export class TierLedger {
         WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?`).run(...idParams(identity));
       return true;
     })();
+  }
+
+  /** Count each item once even if several of its current copies qualify. */
+  *overPrivateCountSteps(): Generator<LedgerRead, TierLedgerOverPrivateCount[], unknown> {
+    return (yield { mode: 'all', params: [], sql: `
+      WITH verdicts AS (
+        SELECT provider, account_scope, conversation_key, provider_item_id, decided_at,
+          CASE WHEN state = 'moving' THEN target_metadata_tier ELSE metadata_tier END AS vm,
+          CASE WHEN state = 'moving' THEN target_content_tier ELSE content_tier END AS vc
+        FROM tier_items
+        -- A pending item is held at least Private, regardless of either layer's verdict.
+        WHERE state <> 'pending' AND metadata_pending = 0 AND content_pending = 0
+      ), needs AS (
+        SELECT *,
+          CASE vm WHEN 'secrets' THEN 3 WHEN 'secure' THEN 2 WHEN 'private' THEN 1 ELSE 0 END AS need_m,
+          CASE WHEN vc = 'secrets' OR vm = 'secrets' THEN 3
+               WHEN vc = 'secure' OR vm = 'secure' THEN 2
+               WHEN vc = 'private' OR vm = 'private' THEN 1 ELSE 0 END AS need_c
+        FROM verdicts
+      )
+      SELECT n.provider, COUNT(*) AS items, MIN(n.decided_at) AS oldest_since
+      FROM needs n
+      WHERE EXISTS (
+        SELECT 1 FROM tier_copies c
+        WHERE c.provider = n.provider AND c.account_scope = n.account_scope
+          AND c.conversation_key = n.conversation_key AND c.provider_item_id = n.provider_item_id
+          AND c.copy_state = 'current'
+          AND (
+            (c.layers IN ('metadata', 'both') AND
+              (CASE c.trust_domain WHEN 'secure_local' THEN 2 WHEN 'internal' THEN 1 ELSE 0 END) > n.need_m)
+            OR (c.layers IN ('content', 'both') AND
+              (CASE c.trust_domain WHEN 'secure_local' THEN 2 WHEN 'internal' THEN 1 ELSE 0 END) > n.need_c)
+          )
+      )
+      GROUP BY n.provider
+      ORDER BY n.provider
+    ` }) as TierLedgerOverPrivateCount[];
   }
 
   /** Content-free counts for status surfaces. */

@@ -43584,6 +43584,41 @@ class TierLedger {
       return true;
     })();
   }
+  *overPrivateCountSteps() {
+    return yield { mode: "all", params: [], sql: `
+      WITH verdicts AS (
+        SELECT provider, account_scope, conversation_key, provider_item_id, decided_at,
+          CASE WHEN state = 'moving' THEN target_metadata_tier ELSE metadata_tier END AS vm,
+          CASE WHEN state = 'moving' THEN target_content_tier ELSE content_tier END AS vc
+        FROM tier_items
+        -- A pending item is held at least Private, regardless of either layer's verdict.
+        WHERE state <> 'pending' AND metadata_pending = 0 AND content_pending = 0
+      ), needs AS (
+        SELECT *,
+          CASE vm WHEN 'secrets' THEN 3 WHEN 'secure' THEN 2 WHEN 'private' THEN 1 ELSE 0 END AS need_m,
+          CASE WHEN vc = 'secrets' OR vm = 'secrets' THEN 3
+               WHEN vc = 'secure' OR vm = 'secure' THEN 2
+               WHEN vc = 'private' OR vm = 'private' THEN 1 ELSE 0 END AS need_c
+        FROM verdicts
+      )
+      SELECT n.provider, COUNT(*) AS items, MIN(n.decided_at) AS oldest_since
+      FROM needs n
+      WHERE EXISTS (
+        SELECT 1 FROM tier_copies c
+        WHERE c.provider = n.provider AND c.account_scope = n.account_scope
+          AND c.conversation_key = n.conversation_key AND c.provider_item_id = n.provider_item_id
+          AND c.copy_state = 'current'
+          AND (
+            (c.layers IN ('metadata', 'both') AND
+              (CASE c.trust_domain WHEN 'secure_local' THEN 2 WHEN 'internal' THEN 1 ELSE 0 END) > n.need_m)
+            OR (c.layers IN ('content', 'both') AND
+              (CASE c.trust_domain WHEN 'secure_local' THEN 2 WHEN 'internal' THEN 1 ELSE 0 END) > n.need_c)
+          )
+      )
+      GROUP BY n.provider
+      ORDER BY n.provider
+    ` };
+  }
   counts() {
     const byState = { pending: 0, current: 0, moving: 0 };
     const byContentTier = { public: 0, private: 0, secure: 0, secrets: 0 };
@@ -246275,9 +246310,13 @@ class TierSnifferService {
         this.movingDirection = direction;
         if (direction === "lower")
           this.lowerMovePreempted = false;
-        this.moving = this.runAutoMoves(this.options.autoMoves, this.moveAbort.signal, direction).finally(() => {
+        const changedPaths = new Set;
+        const options = this.options.autoMoves;
+        this.moving = this.runAutoMoves(options, this.moveAbort.signal, direction, changedPaths).finally(() => {
           this.moving = undefined;
           this.movingDirection = undefined;
+          if (!this.stopped && changedPaths.size > 0)
+            options.onPlacementChecked?.(changedPaths);
         });
       }
       return await this.moving;
@@ -246515,7 +246554,7 @@ class TierSnifferService {
     const options = this.options.autoMoves;
     return automaticTierMovesAllowed(set, options);
   }
-  async runAutoMoves(options, signal, direction) {
+  async runAutoMoves(options, signal, direction, changedPaths) {
     const timings = emptyTierMoveTimings();
     const started = this.monotonicNow();
     const paths = this.ledgerPaths();
@@ -246563,6 +246602,7 @@ class TierSnifferService {
         report.failedBy = { ...report.failedBy, [why]: (report.failedBy?.[why] ?? 0) + 1 };
         const refusedKey = `${ledgerPath}\x00${tierLedgerIdentityKey(identity)}`;
         if (error instanceof TierMoveRefusedError) {
+          changedPaths.add(ledgerPath);
           this.moveRefusalAttempts += 1;
           this.movesRefusedNow.set(refusedKey, why);
         } else
@@ -246599,6 +246639,7 @@ class TierSnifferService {
         }
       };
       const succeeded = (record, result) => {
+        changedPaths.add(ledgerPath);
         report.moved++;
         for (const destination of result.destinations) {
           if (destination.chunksToEmbed > 0)
@@ -246877,6 +246918,91 @@ var init_sniffer_service = __esm(() => {
   DEFAULT_STALE_MOVE_MS = 60 * 60000;
   STORED_WALK_BACKSTOP_MS = 60 * 60000;
   BACKLOG_COUNT_WORKER_TIMEOUT_MS = 10 * 60000;
+});
+
+// src/workers/classification/tier-over-private.ts
+class TierOverPrivateMonitor {
+  ledgers;
+  log;
+  now;
+  counts = new Map;
+  changed = new Set;
+  running = false;
+  published = { state: "counting" };
+  constructor(ledgers, log, now = Date.now) {
+    this.ledgers = ledgers;
+    this.log = log;
+    this.now = now;
+  }
+  status() {
+    return this.published;
+  }
+  async refresh(changedPaths) {
+    for (const path of changedPaths ?? [])
+      this.changed.add(path);
+    if (this.running)
+      return;
+    this.running = true;
+    try {
+      do {
+        const changed = this.changed;
+        this.changed = new Set;
+        const ledgers = new Set(new Map(this.ledgers().map((ledger) => [ledger.dbPath, ledger])).values());
+        for (const ledger of this.counts.keys())
+          if (!ledgers.has(ledger))
+            this.counts.delete(ledger);
+        for (const ledger of ledgers) {
+          const previous = this.counts.get(ledger);
+          const attemptedAt = this.now();
+          const marker = ledger.changeMarker();
+          if (previous && !changed.has(ledger.dbPath) && (attemptedAt - previous.attemptedAt < OVER_PRIVATE_REFRESH_MS || previous.rows && previous.marker === marker))
+            continue;
+          this.counts.set(ledger, { ...previous, attemptedAt });
+          try {
+            const rows = await ledgerReadOffThread(ledger, ledger.overPrivateCountSteps(), BACKGROUND_READS);
+            this.counts.set(ledger, { attemptedAt, measuredAt: this.now(), marker, rows });
+          } catch (error) {
+            this.log(`Olympus tier status: could not count over-private items (${error instanceof Error ? error.name : "error"}).`);
+          }
+        }
+        this.publish();
+      } while (this.changed.size > 0);
+    } finally {
+      this.running = false;
+    }
+  }
+  publish() {
+    let measuredAt = Infinity;
+    let oldest = null;
+    let items = 0;
+    const byProvider = new Map;
+    for (const count of this.counts.values()) {
+      if (!count.rows || count.measuredAt === undefined) {
+        this.published = { state: "counting" };
+        return;
+      }
+      measuredAt = Math.min(measuredAt, count.measuredAt);
+      for (const row of count.rows) {
+        items += row.items;
+        byProvider.set(row.provider, (byProvider.get(row.provider) ?? 0) + row.items);
+        if (oldest === null || row.oldest_since < oldest)
+          oldest = row.oldest_since;
+      }
+    }
+    this.published = this.counts.size === 0 ? { state: "counting" } : {
+      state: "measured",
+      items,
+      by_provider: Object.fromEntries(byProvider),
+      oldest_since: oldest,
+      measured_at: new Date(measuredAt).toISOString()
+    };
+  }
+}
+var OVER_PRIVATE_REFRESH_MS;
+var init_tier_over_private = __esm(() => {
+  init_child_visibility();
+  init_off_thread_reads();
+  OVER_PRIVATE_REFRESH_MS = 3 * 60000;
 });
 
 // src/workers/engine-split/client.ts
@@ -247925,6 +248051,7 @@ function frontJudgeState(snapshot) {
       const backlog = current4(snapshot)?.snapshot.judge.backlog;
       return isBacklog(backlog) ? backlog : undefined;
     },
+    overPrivate: () => current4(snapshot)?.snapshot.judge.over_private ?? { state: "counting" },
     busy: () => current4(snapshot)?.snapshot.judge.busy === true,
     archivePrivateModel: () => current4(snapshot)?.snapshot.judge.archive_private_model ?? "waiting"
   };
@@ -274440,6 +274567,7 @@ async function main() {
   });
   let classificationBusy = () => false;
   let tierSnifferBacklog;
+  let tierOverPrivate = () => ({ state: "counting" });
   let archivePrivateModelState = () => "waiting";
   const connector = createEmailSourceConnectorFromEnv();
   const sourceIndexAnswerEnabled = parseOptionalBooleanEnv(process.env.OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED, "OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED");
@@ -274890,6 +275018,7 @@ async function main() {
     corpusIds: lane.corpusIds,
     stores: () => connectorStores.filter((store) => lane.corpusIds.has(store.corpusId))
   }));
+  const overPrivate = engineFront ? undefined : new TierOverPrivateMonitor(() => tierScopes().map((scope) => scope.ledger), (line) => console.warn(line));
   const raiseJudgeBoosts = engineFront ? frontJudgeBoost(engineFront.client) : (identities) => judgeBoosts.raise(identities);
   let chunkJudgmentsInFlight = 0;
   const runChunkJudgment = async (items, budgetMs) => {
@@ -276792,7 +276921,8 @@ ${key}`;
         summary: backlog.summary,
         awaiting_owner_approval: backlog.awaitingOwnerApproval,
         ...backlog.waiting ? { waiting_reason: backlog.waiting.reason, waiting_label: backlog.waiting.label, waiting_since: backlog.waiting.since } : {},
-        ...backlog.storedWalks?.length ? { stored_walks: backlog.storedWalks } : {}
+        ...backlog.storedWalks?.length ? { stored_walks: backlog.storedWalks } : {},
+        over_private: tierOverPrivate()
       } : undefined;
     },
     tierMigration: () => tierMigrationStatusSummary(resolveTierMigrationPaths(process.env, resolveEmbeddingLedgerPath(process.env)).statePath),
@@ -278850,6 +278980,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       const windowNotices = localPromptBudgets.map(localAnalystWindowNotice).filter((notice) => notice !== undefined);
       return Response.json({
         ...await response.json(),
+        tier_classification: { over_private: tierOverPrivate() },
         ...windowNotices.length ? { degraded_conditions: windowNotices } : {},
         ...rerankOutcomes ? {
           rerank_outcomes: rerankOutcomes,
@@ -279096,6 +279227,9 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     ...snifferRuntime.source === "built_in" ? { autoApproveBuiltIn: true } : {},
     autoMoves: {
       ...automaticMoveContext,
+      onPlacementChecked: (paths) => {
+        overPrivate?.refresh(paths);
+      },
       onEmbeddingNeeded: (corpora) => {
         const sourceIds = new Set(sourceCorpusRegistry.list().filter(({ corpusId }) => corpora.has(corpusId)).map(({ sourceId }) => sourceId));
         sourceScheduler?.wakeTasksOfKind("embed", undefined, sourceIds);
@@ -279165,20 +279299,26 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     }
   }, 2000) : undefined;
   frontMountRetry?.unref?.();
-  if (!engineFront)
+  if (!engineFront) {
     keepVisibilityCurrent("after start");
+    overPrivate?.refresh();
+  }
   const visibilityRefresh = setInterval(() => {
     keepVisibilityCurrent("refresh");
+    overPrivate?.refresh();
   }, VISIBILITY_REFRESH_MS);
   visibilityRefresh.unref?.();
   if (engineFront) {
     const judge = frontJudgeState(() => engineFront.status());
     classificationBusy = judge.busy;
     tierSnifferBacklog = judge.backlog;
+    tierOverPrivate = judge.overPrivate;
     archivePrivateModelState = judge.archivePrivateModel;
   } else {
     classificationBusy = () => tierSniffer?.hasPriority ?? false;
     tierSnifferBacklog = tierSniffer ? () => tierSniffer.backlog() : undefined;
+    if (overPrivate)
+      tierOverPrivate = () => overPrivate.status();
     archivePrivateModelState = () => archivePrivateModelFromSniffer(tierSniffer);
   }
   tierSniffer?.start();
@@ -279359,6 +279499,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
           const backlog = tierSniffer?.backlog();
           return {
             backlog: backlog ?? null,
+            over_private: tierOverPrivate(),
             pending: backlog?.pendingItems ?? null,
             spending: judgeSpending.status(),
             busy: tierSniffer?.hasPriority ?? false,
@@ -279787,6 +279928,7 @@ var init_server5 = __esm(async () => {
   init_answer_activity();
   init_privacy_profile();
   init_sniffer_service();
+  init_tier_over_private();
   init_sniffer_resolver();
   init_classification_ledger();
   init_tier_migration();

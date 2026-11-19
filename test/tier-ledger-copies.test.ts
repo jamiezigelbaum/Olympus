@@ -40,6 +40,30 @@ function whole(target: { corpusId: string; trustDomain: 'public_safe' | 'interna
 }
 
 describe('tier ledger copies (P1b)', () => {
+  test('over-private counts use moving targets, respect layers, and count each item once', () => {
+    const store = ledger();
+    try {
+      const moving = { ...ITEM, providerItemId: 'moving' };
+      store.recordRoutedPlacement(moving, decision({ metadataTier: 'secure', contentTier: 'secure' }), whole(SECURE));
+      const { record } = store.recordRoutedPlacement(moving, decision(), whole(INTERNAL));
+      expect(record.state).toBe('moving');
+      const split = { ...ITEM, providerItemId: 'split', provider: 'other' };
+      const older = store.recordRoutedPlacement(split, decision(), {
+        copies: [{ ...SECURE, layers: 'metadata' }, { ...SECURE, corpusId: 'another.secure', layers: 'content' }], embedHold: false,
+      }).record;
+      store.recordRoutedPlacement({ ...split, providerConversationId: 'another' }, decision(), whole(SECURE));
+      store.recordRoutedPlacement({ ...ITEM, providerItemId: 'content-only' }, decision({ contentTier: 'secure' }), {
+        copies: [{ ...INTERNAL, layers: 'metadata' }, { ...SECURE, layers: 'content' }], embedHold: false,
+      });
+      expect(store.readSteps(store.overPrivateCountSteps())).toEqual([
+        { provider: ITEM.provider, items: 1, oldest_since: record.decidedAt },
+        { provider: split.provider, items: 2, oldest_since: older.decidedAt },
+      ]);
+    } finally {
+      store.close();
+    }
+  });
+
   test('undo carries the original verdict past a replanned landing, isolated by conversation', () => {
     const store = ledger();
     try {

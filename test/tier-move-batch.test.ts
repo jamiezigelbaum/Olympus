@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
 import { InstalledTierClassification } from '../src/workers/classification/installed-tier-classification.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
+import { TierOverPrivateMonitor } from '../src/workers/classification/tier-over-private.ts';
 import { BUILT_IN_SNIFFER_LANE } from '../src/workers/classification/built-in-sniffer.ts';
 import * as resolver from '../src/workers/classification/sniffer-resolver.ts';
 import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
@@ -628,6 +629,53 @@ test('the backlog counts queued lowerings that automatic moves will run, never r
   for (const spec of f.specs) f.f.ledger.recordRoutedPlacement(identityOf(spec.id), high, f.f.set.placementFor(high));
   expect(f.f.ledger.listMoving({ direction: 'raise' })).toHaveLength(3);
   expect(serviceFor(f.f).service.backlog().lowerMovesQueued).toBe(0);
+});
+
+test('over-private measurements are paced and refresh after a drain moves an item', async () => {
+  const f = await fixture(1, true);
+  const clock = createTestClock();
+  const read = spyOn(f.f.ledger, 'overPrivateCountSteps');
+  const monitor = new TierOverPrivateMonitor(() => [f.f.ledger], () => {}, clock.now);
+  expect(monitor.status()).toEqual({ state: 'counting' });
+  expect(read).not.toHaveBeenCalled();
+  await monitor.refresh();
+  expect(monitor.status()).toMatchObject({ state: 'measured', items: 1 });
+  await clock.advance(60_000);
+  await monitor.refresh();
+  expect(read).toHaveBeenCalledTimes(1);
+
+  let refresh: Promise<void> | undefined;
+  const { service } = serviceFor(f.f, { onPlacementChecked: paths => { refresh = monitor.refresh(paths); } });
+  await service.runOnce();
+  expect(refresh).toBeDefined();
+  await refresh;
+  expect(read).toHaveBeenCalledTimes(2);
+  expect(monitor.status()).toEqual({
+    state: 'measured', items: 0, by_provider: {}, oldest_since: null, measured_at: clock.date().toISOString(),
+  });
+  // An unchanged ledger is not read again, however long it rests.
+  await clock.advance(30 * 60_000);
+  await monitor.refresh();
+  expect(read).toHaveBeenCalledTimes(2);
+  // A change is counted once the pacing interval has passed.
+  f.f.ledger.recordDecision(identityOf('over-private-later'), classifyItemTiers({ signals: { title: 'Later' }, text: 'Ordinary notes.' }));
+  await monitor.refresh();
+  expect(read).toHaveBeenCalledTimes(3);
+});
+
+test('a drain that only refuses a lowering requests a new over-private measurement', async () => {
+  const f = await fixture(1, true);
+  const id = identityOf(f.specs[0]!.id);
+  const store = f.f.stores.secure_local!;
+  const copy = store.exportItemCopy(id)!;
+  store.importItemCopy({ ...copy, chunks: copy.chunks.map(chunk => ({ ...chunk, boundedText: 'Synthetic changed body.' })) },
+    { trustTier: 'S4', syncConnectorId: 'synthetic-edit' });
+
+  const refreshed: string[] = [];
+  const { service } = serviceFor(f.f, { onPlacementChecked: paths => refreshed.push(...paths) });
+  await service.runOnce();
+  expect(service.backlog().movesRefused?.items).toBe(1);
+  expect(refreshed).toEqual([f.f.ledger.dbPath]);
 });
 
 test('reads within a minute reuse the lowering count instead of counting again', async () => {
