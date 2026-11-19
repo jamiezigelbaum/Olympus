@@ -753,7 +753,7 @@ export async function main(): Promise<void> {
   }
   const engineSocketPath = engineRole === 'single' ? undefined : engineBackgroundSocketFromEnv(process.env);
   let engineFront: EngineFront | undefined;
-  let frontStarting: { stop(): void } | undefined;
+  let frontStarting: ReturnType<typeof listenWhileStarting>;
   if (engineRole === 'front') {
     // The front does none of the boot work that needs the data root to
     // itself: it waits until the background has done it, and from then on
@@ -6578,10 +6578,8 @@ export async function main(): Promise<void> {
     ? async (request: Request): Promise<Response> => (await frontRoutes(request)) ?? worker.fetch(request)
     : worker.fetch;
   inProcessFetch = frontWorkerFetch;
-  // The front's "starting" answer gives way to its own server here.
-  frontStarting?.stop();
-  if (listens && releaseSystemdWorkerSocket()) console.warn('[olympus:worker] removed the socket left by the previous worker run');
-  const socketPath = listens ? prepareWorkerSocket() : undefined;
+  if (!frontStarting && listens && releaseSystemdWorkerSocket()) console.warn('[olympus:worker] removed the socket left by the previous worker run');
+  const socketPath = frontStarting ? frontStarting.socketPath : listens ? prepareWorkerSocket() : undefined;
   const serverOptions = {
     // Remote agent routes authenticate connection credentials only (bearer
     // connection tokens, or OAuth access tokens bound to this resource); the
@@ -6720,35 +6718,36 @@ export async function main(): Promise<void> {
   // Nothing is answered from the local files index before what an earlier version
   // indexed inside Olympus's own folders is gone (own-roots-cleanup.ts).
   await localFilesInitialCleanup;
+  const fetchOnWorkerSocket = (request: Request, server: Bun.Server<undefined>) => {
+    server.timeout(request, 0);
+    if (new URL(request.url).pathname === DESKTOP_OWNER_OPEN_PATH) {
+      if (request.method !== 'POST' || !authToken || request.headers.get('authorization') !== `Bearer ${authToken}`) return new Response(null, { status: 403 });
+      return (async () => {
+        const status = desktopBridge?.status();
+        if (!status || status.state === 'headless') return Response.json({ state: 'headless' });
+        if (status.state !== 'listening') return Response.json(status, { status: 503 });
+        try {
+          const base = `http://127.0.0.1:${port}`;
+          const open = new URL(await mintDashboardOpeningUrl(base, authToken));
+          const requestedTarget = new URL(request.url).searchParams.get('target');
+          const target = requestedTarget ? parseOlympusOpenUrl(`olympus://open/${requestedTarget}`) : undefined;
+          if (requestedTarget && !target) return new Response(null, { status: 400 });
+          if (target) open.hash += `&olympus_open=${openTargetToken(target)}`;
+          const origin = await desktopBridge!.open(open.pathname + open.search + open.hash);
+          return Response.json({ state: 'listening', opened: true, url: origin + '/dashboard', hint: 'A private owner ticket was opened in your desktop browser. If *.localhost resolution fails, use the owner SSH socket forward; never use the fixed origin.' });
+        } catch { return Response.json({ error: 'Owner ticket could not open. Wait ten seconds and retry, or use the owner SSH socket forward.' }, { status: 503 }); }
+      })();
+    }
+    const response = serverOptions.fetch(request, server);
+    const path = new URL(request.url).pathname;
+    if (path === '/v1/health' || path === '/health') return Promise.resolve(response).then(async value => {
+      if (!value.ok) return value;
+      return Response.json({ ...await value.json() as object, built_in_models: linuxModelReadiness(process.env), desktop_bridge: desktopBridge?.status() }, { status: value.status, headers: value.headers });
+    });
+    return response;
+  };
   const startServer = () => socketPath
-    ? Bun.serve(workerSocketServe({ unix: socketPath, fetch(request, server) {
-        server.timeout(request, 0);
-        if (new URL(request.url).pathname === DESKTOP_OWNER_OPEN_PATH) {
-          if (request.method !== 'POST' || !authToken || request.headers.get('authorization') !== `Bearer ${authToken}`) return new Response(null, { status: 403 });
-          return (async () => {
-            const status = desktopBridge?.status();
-            if (!status || status.state === 'headless') return Response.json({ state: 'headless' });
-            if (status.state !== 'listening') return Response.json(status, { status: 503 });
-            try {
-              const base = `http://127.0.0.1:${port}`;
-              const open = new URL(await mintDashboardOpeningUrl(base, authToken));
-              const requestedTarget = new URL(request.url).searchParams.get('target');
-              const target = requestedTarget ? parseOlympusOpenUrl(`olympus://open/${requestedTarget}`) : undefined;
-              if (requestedTarget && !target) return new Response(null, { status: 400 });
-              if (target) open.hash += `&olympus_open=${openTargetToken(target)}`;
-              const origin = await desktopBridge!.open(open.pathname + open.search + open.hash);
-              return Response.json({ state: 'listening', opened: true, url: origin + '/dashboard', hint: 'A private owner ticket was opened in your desktop browser. If *.localhost resolution fails, use the owner SSH socket forward; never use the fixed origin.' });
-            } catch { return Response.json({ error: 'Owner ticket could not open. Wait ten seconds and retry, or use the owner SSH socket forward.' }, { status: 503 }); }
-          })();
-        }
-        const response = serverOptions.fetch(request, server);
-        const path = new URL(request.url).pathname;
-        if (path === '/v1/health' || path === '/health') return Promise.resolve(response).then(async value => {
-          if (!value.ok) return value;
-          return Response.json({ ...await value.json() as object, built_in_models: linuxModelReadiness(process.env), desktop_bridge: desktopBridge?.status() }, { status: value.status, headers: value.headers });
-        });
-        return response;
-      } }))
+    ? Bun.serve(workerSocketServe({ unix: socketPath, fetch: fetchOnWorkerSocket }))
     : Bun.serve({ hostname, port: workerListenPort(port), idleTimeout: 0, ...serverOptions });
   // Only the wait is bounded: Promise.race does not cancel `warming`. A set
   // rebuilt from the ledger keeps building after the front listens, in turns.
@@ -6758,7 +6757,11 @@ export async function main(): Promise<void> {
     await Promise.race([warming, new Promise<void>((resolve) => { bound = setTimeout(resolve, FRONT_VISIBILITY_READY_BOUND_MS); })]);
     clearTimeout(bound);
   }
-  const server = !listens ? undefined : socketPath ? bindWorkerSocket(socketPath, startServer) : startServer();
+  // Keep the front's listener and in-flight starting responses. Both transports
+  // already have the real server's bind options; only the fetch handler changes.
+  const server = frontStarting
+    ? frontStarting.server.reload({ fetch: socketPath ? fetchOnWorkerSocket : serverOptions.fetch })
+    : !listens ? undefined : socketPath ? bindWorkerSocket(socketPath, startServer) : startServer();
   // The single worker's boot work ends when it listens; the background's when it is ready on its socket.
   if (engineRole === 'single') { finishBootProgress(); setEngineStep(undefined); }
   if (engineFront) finishFrontProgress();

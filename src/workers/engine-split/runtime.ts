@@ -10,13 +10,13 @@ import { engineHeartbeatBeating, engineHeartbeatLine, processAlive, readEngineHe
 import { engineStartingAnswer, engineStartingResponse } from '../../core/worker-front-proxy.ts';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
-import { lstatSync, rmSync } from 'node:fs';
+import { lstatSync } from 'node:fs';
 import { ENGINE_BACKGROUND_ORIGIN, ENGINE_BACKGROUND_SOCKET_ENV, ENGINE_MODEL_COMPLETE_PATH, prepareEngineBackgroundSocketDirectory, probeEngineBackground } from '../../core/engine-split.ts';
 import type { AnalystModelCompletion, AnalystModelRequest } from '../../core/analyst.ts';
 import { OperationError, type OperationErrorCode } from '../../core/operation-error.ts';
 import { sharedDataPath } from '../../core/olympus-layout.ts';
 import { removeFileDurablySync } from '../../core/atomic-file.ts';
-import { bindWorkerSocket, createUnixSocketFetch, prepareWorkerSocket, releaseSystemdWorkerSocket, workerSocketListenerStopped, workerSocketServe } from '../../core/worker-transport.ts';
+import { bindWorkerSocket, createUnixSocketFetch, prepareWorkerSocket, releaseSystemdWorkerSocket, WORKER_SOCKET_SERVE_OPTIONS, workerSocketListenerStopped, workerSocketServe } from '../../core/worker-transport.ts';
 import { EngineCommandClient, OwnerBusyRelay } from './client.ts';
 import { clickTraces, PRIVACY_ITEM_SET_PATH, type ClickTrace } from './click-trace.ts';
 import { startEngineControlPlane, type EngineControlPlane } from './control-plane.ts';
@@ -182,34 +182,27 @@ export async function waitForBackgroundBootDone(input: {
 }
 
 /**
- * What the front answers while it waits for the background's boot: it
- * listens at once, so the upgrade's wait and the dashboard read a real
- * answer ("starting", with what the background says it is doing) rather than
- * a socket that is not there. Stopped just before the front's own server binds.
+ * The front listens at once and answers "starting" with its boot progress.
+ * Once ready it reloads the fetch handler on this same listener.
  */
 export function listenWhileStarting(input: {
   env: Record<string, string | undefined>;
   hostname: string;
   port: number;
   log?: (line: string) => void;
-}): { stop(): void } {
+}): { socketPath: string | undefined; server: Bun.Server<undefined> } | undefined {
   const answer = (request: Request) => engineStartingResponse(request, input.env);
   try {
     if (releaseSystemdWorkerSocket()) (input.log ?? console.warn)('[olympus:worker] removed the socket left by the previous worker run');
     const socketPath = prepareWorkerSocket();
     const server = socketPath
       ? bindWorkerSocket(socketPath, () => Bun.serve(workerSocketServe({ unix: socketPath, fetch: answer })))
-      : Bun.serve({ hostname: input.hostname, port: input.port, fetch: answer });
-    return {
-      stop: () => {
-        void server.stop(true);
-        if (socketPath) rmSync(socketPath, { force: true });
-      },
-    };
+      : Bun.serve({ hostname: input.hostname, port: input.port, ...WORKER_SOCKET_SERVE_OPTIONS, fetch: answer });
+    return { socketPath, server };
   } catch (error) {
     // Not listening yet is what the front did before: its own server reports a bind failure.
     (input.log ?? console.warn)(`[engine-split] the front could not answer while starting: ${error instanceof Error ? error.message : String(error)}`);
-    return { stop: () => {} };
+    return undefined;
   }
 }
 
