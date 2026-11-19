@@ -77,6 +77,8 @@ const ALLOWED: Record<string, string> = {
   // and opens nothing else.
   'scripts/engine-split-bench.ts':
     'a disposable benchmark on a store set it builds itself in a temp directory (seed, then a copy per run); never opens a live store',
+  'scripts/loop-stall-test.ts':
+    'the loop-stall gate: its cold-start case clears the derived hidden-copy set in the restored working copy of its own synthetic fixture before the engine starts; never a live store',
   'scripts/search-contention-bench.ts':
     'the #1305 busy-Ask gate: opens, read-only, only the synthetic stores its own seed step wrote (seed refuses an existing manifest); never a live store',
   'scripts/whatsapp-identity-backfill.ts':

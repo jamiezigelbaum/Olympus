@@ -948,6 +948,7 @@ function clearSavedHiddenCopies(dir: string) {
   for (const domain of DOMAINS) {
     const store = new Database(storePath(dir, domain), { readwrite: true });
     try {
+      store.exec('PRAGMA busy_timeout = 10000;');
       store.exec('BEGIN; DELETE FROM tier_visibility_state; DELETE FROM tier_visibility_members; COMMIT;');
     } finally { store.close(); }
   }
