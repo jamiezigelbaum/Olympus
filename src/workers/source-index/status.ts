@@ -494,7 +494,7 @@ export function createSourceIndexStatusHandler(
     : buildSourceIndexCorpusRegistry(options.corpusDefinitions ?? defaultCorpusDefinitions());
   const currentRegistry = () => staticRegistry
     ?? buildSourceIndexCorpusRegistry((options.corpusDefinitions as () => SourceIndexCorpusDefinition[])());
-  const cache = new Map<string, { recordedAtMs: number; status: SourceIndexStatusCorpus }>();
+  const cache = new Map<string, { recordedAtMs: number; counted: ConnectorStoreStatus | undefined; status: SourceIndexStatusCorpus }>();
   // A store's own counts, shared by every snapshot caller (the dashboard and
   // the scheduler's status publish) for up to STORE_STATUS_REUSE_MS: each read is a
   // synchronous pass over the whole store, and the two callers' separate
@@ -715,8 +715,8 @@ export function createSourceIndexStatusHandler(
   const snapshotRefreshes = new Map<string, Promise<SourceIndexStatusResult>>();
   // The totals are read at every status, on every role: a small read of what
   // the store's writes left, so they are current however old the counts are.
-  const totalsStores = new Map((options.connectorStores ?? []).map((store) => [store.corpusId, store]));
   const withLiveTotals = (result: SourceIndexStatusResult): SourceIndexStatusResult => {
+    const totalsStores = new Map((options.connectorStores ?? []).map((store) => [store.corpusId, store]));
     if (totalsStores.size === 0) return result;
     let changed = false;
     const corpora = result.corpora.map((corpus) => {
@@ -816,8 +816,13 @@ export function createSourceIndexStatusHandler(
           ],
           statusScope ?? null,
         ]);
+        // The readiness cache and the store recount have separate lifetimes.
+        // A newer store count must reach the dashboard even while its
+        // readiness data is still within its reuse window.
+        const countsMaxAgeMs = snapshot.countsMaxAgeMs ?? 0;
+        const counted = store && countsMaxAgeMs > 0 ? storeStatus(store, statusScope, countsMaxAgeMs) : undefined;
         const cached = maxAgeMs > 0 ? cache.get(cacheKey) : undefined;
-        if (cached && nowMs() - cached.recordedAtMs <= maxAgeMs) return cached.status;
+        if (cached && cached.counted === counted && nowMs() - cached.recordedAtMs <= maxAgeMs) return cached.status;
         // Gated because a readiness ledger is the expensive half of this
         // payload: the public status operation documents the flag and defaults
         // it off for cheap polling, while the dashboard — whose one headline
@@ -828,7 +833,7 @@ export function createSourceIndexStatusHandler(
         const status = store
           ? connectorStoreStatus(
             corpus,
-            storeStatus(store, statusScope, snapshot.countsMaxAgeMs ?? 0),
+            counted ?? storeStatus(store, statusScope, countsMaxAgeMs),
             readiness?.counts,
             readiness?.contentExtractionThroughput,
             availability?.modelId,
@@ -862,7 +867,7 @@ export function createSourceIndexStatusHandler(
                 ? { read: () => store.pdfExtractionBacklogOffThread(), empty: { pendingPdfs: 0, extractedPdfs: 0, extractedChars: 0 } } : undefined))
           : withBacklog;
         // Not kept while an off-thread read it shows a stand-in for is still running.
-        if (maxAgeMs > 0 && pending.length === pendingBefore) cache.set(cacheKey, { recordedAtMs: nowMs(), status: resolved });
+        if (maxAgeMs > 0 && pending.length === pendingBefore) cache.set(cacheKey, { recordedAtMs: nowMs(), counted, status: resolved });
         return resolved;
       };
       // Each corpus's counts are synchronous SQLite reads over its whole store;

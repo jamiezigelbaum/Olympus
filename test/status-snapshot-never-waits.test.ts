@@ -12,7 +12,7 @@ import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { defineDropboxFilesCorpus } from '../src/workers/dropbox-files/index.ts';
 import { flushMicrotasks } from './helpers/test-clock.ts';
-import { DASHBOARD_STATUS_REQUEST, STORE_STATUS_REUSE_MS, bringCountsForward, createSourceIndexStatusHandler, type SourceIndexConnectorStoreStatus } from '../src/workers/source-index/status.ts';
+import { DASHBOARD_STATUS_REQUEST, STORE_STATUS_CHANGED_REUSE_MS, STORE_STATUS_REUSE_MS, bringCountsForward, createSourceIndexStatusHandler, type SourceIndexConnectorStoreStatus } from '../src/workers/source-index/status.ts';
 import { STATUS_RECOUNT_MIN_GAP_MS, STATUS_RECOUNT_PACE_FACTOR, startPacedStatusRecount } from '../src/workers/engine/status-recount.ts';
 import { createTestClock, waitFor } from './helpers/test-clock.ts';
 
@@ -216,7 +216,7 @@ describe('a busy read pool', () => {
 });
 
 describe('live totals beside kept counts', () => {
-  test("the front's dashboard shows a write in the totals at once, while the counts keep their age", async () => {
+  test("the front's dashboard shows live totals when the store mounted after startup", async () => {
     const dir = mkdtempSync(join(tmpdir(), 'status-totals-'));
     const snapshotPath = join(dir, 'source-status-snapshot.json');
     const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: CORPUS_ID, family: 'file', trustDomain: 'secure_local' });
@@ -226,8 +226,10 @@ describe('live totals beside kept counts', () => {
       await store.syncFromConnector(connector([file('a.txt', 'alpha')]), { fetchContent: true });
       const background = createSourceIndexStatusHandler({ corpusDefinitions: [defineDropboxFilesCorpus()], connectorStores: [store], nowMs: () => now, snapshotPath, snapshotRole: 'writer' });
       await background.refreshSnapshot!({ ...DASHBOARD_STATUS_REQUEST }, SNAPSHOT);
-      const front = createSourceIndexStatusHandler({ corpusDefinitions: [defineDropboxFilesCorpus()], connectorStores: [store], nowMs: () => now, snapshotPath, snapshotRole: 'reader' });
+      const mounted: LocalConnectorStore[] = [];
+      const front = createSourceIndexStatusHandler({ corpusDefinitions: [defineDropboxFilesCorpus()], connectorStores: mounted, nowMs: () => now, snapshotPath, snapshotRole: 'reader' });
       await front.settled!();
+      mounted.push(store);
       const before = (await front.status({ ...DASHBOARD_STATUS_REQUEST }, SNAPSHOT)).corpora[0] as { counts: Record<string, number>; totals?: { items: number; sync_runs: number } };
       expect(before.totals).toMatchObject({ items: 1, sync_runs: 1 });
       await store.syncFromConnector(connector([file('a.txt', 'alpha'), file('b.txt', 'beta')]), { fetchContent: true });
@@ -245,6 +247,23 @@ describe('live totals beside kept counts', () => {
     } finally {
       store.close();
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a newer store recount replaces dashboard counts during the readiness cache window', async () => {
+    const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: CORPUS_ID, family: 'file', trustDomain: 'secure_local' });
+    let now = 1_000_000;
+    try {
+      await store.reconcileTotals();
+      const background = createSourceIndexStatusHandler({ corpusDefinitions: [defineDropboxFilesCorpus()], connectorStores: [store], nowMs: () => now, snapshotRole: 'writer' });
+      const first = await background.refreshSnapshot!({ ...DASHBOARD_STATUS_REQUEST }, SNAPSHOT);
+      expect(first.corpora.find(corpus => corpus.corpus_id === CORPUS_ID)).toMatchObject({ counts: { items_with_text: 0 } });
+      await store.syncFromConnector(connector([file('a.txt', 'alpha')]), { fetchContent: true });
+      now += STORE_STATUS_CHANGED_REUSE_MS + 1;
+      const updated = await background.refreshSnapshot!({ ...DASHBOARD_STATUS_REQUEST }, SNAPSHOT);
+      expect(updated.corpora.find(corpus => corpus.corpus_id === CORPUS_ID)).toMatchObject({ counts: { items_with_text: 1 } });
+    } finally {
+      store.close();
     }
   });
 });

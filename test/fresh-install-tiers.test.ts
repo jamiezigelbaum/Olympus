@@ -401,6 +401,7 @@ describe('owner defaults (2026-10-01): the registered built-in model is approved
     now?: () => Date;
     staleAfterMs?: number;
     rejudgePerPass?: number;
+    onEmbeddingNeeded?: (corpora: ReadonlySet<string>) => void;
   } = {}) {
     const service = new TierSnifferService({
       installed: install.installed,
@@ -417,6 +418,7 @@ describe('owner defaults (2026-10-01): the registered built-in model is approved
         localEmbeddingsOnly: () => options.localEmbeddingsOnly ?? true,
         embeddingLedgerPath: join(root, 'embedding-ledger.jsonl'),
         maxPerPass: 5,
+        ...(options.onEmbeddingNeeded ? { onEmbeddingNeeded: options.onEmbeddingNeeded } : {}),
         ...(options.staleAfterMs !== undefined ? { staleAfterMs: options.staleAfterMs } : {}),
       },
     });
@@ -510,13 +512,18 @@ describe('owner defaults (2026-10-01): the registered built-in model is approved
     const { builtIn, runtime, prompts } = registeredBuiltIn(PERSONAL_VERDICT);
     const install = await freshInstall(runtime.source === 'built_in' ? { lane: runtime.lane, bankStructuredName: false } : {});
     expect(install.lane.ledger.getCurrent(identity('id:bank'))).toMatchObject({ state: 'pending' });
-    const service = snifferFor(install, builtIn, { localEmbeddingsOnly: true });
+    const embeddingWakes: string[][] = [];
+    const service = snifferFor(install, builtIn, {
+      localEmbeddingsOnly: true,
+      onEmbeddingNeeded: (corpora) => embeddingWakes.push([...corpora]),
+    });
     const tick = await service.runOnce();
     // Both held items move: the one held for its names, and the ordinary one whose text waited for its verdict (#1316).
     expect(tick).toMatchObject({ state: 'ran', report: { movesQueued: 2 }, autoMoves: { moved: 2, failed: 0, notEligible: 0 } });
     // Moved: current in Personal, and its text now reaches olympus_search.
     expect(install.lane.ledger.getCurrent(identity('id:bank'))).toMatchObject({ state: 'current', contentTier: 'private' });
     expect(install.lane.ledger.getCurrent(identity('id:garden'))).toMatchObject({ state: 'current', contentTier: 'private', contentPending: false });
+    expect(embeddingWakes).toEqual([[install.lane.internal.current()!.corpusId]]);
     const { result } = await olympusSearch(install, 'lender');
     expect(JSON.stringify(result)).toContain('loan terms');
     expect(JSON.stringify((await olympusSearch(install, 'orchard')).result)).toContain('pruning plan');
@@ -526,6 +533,7 @@ describe('owner defaults (2026-10-01): the registered built-in model is approved
     // finds nothing to re-read under this classifier and sniffer.
     const calls = prompts.length;
     for (let pass = 0; pass < 2; pass += 1) expect(await service.runOnce()).not.toHaveProperty('rejudged');
+    expect(embeddingWakes).toHaveLength(1);
     expect(prompts.length).toBe(calls);
     const id = snifferId(runtime.source === 'built_in' ? runtime.lane : BUILT_IN_SNIFFER_LANE, snifferPromptVersions(undefined).cache);
     expect(install.lane.ledger.listRejudgeCandidates({ engineVersion: TIER_CLASSIFIER_VERSION, snifferId: id })).toEqual([]);

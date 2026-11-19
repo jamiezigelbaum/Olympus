@@ -1,5 +1,5 @@
 import type { SnifferQuestion } from './sniffer-store.ts';
-import { emptyTierMoveTimings, moveTieredItemsLowering, flushTierMoveNotes, type TierMoveOptions } from '../connector-store/tier-move.ts';
+import { emptyTierMoveTimings, moveTieredItemsLowering, flushTierMoveNotes, type TierMoveOptions, type TierMoveResult } from '../connector-store/tier-move.ts';
 import { controlPathHeadroom, ingestionTurn } from '../control-path-headroom.ts';
 // The worker's background tick for the privacy-safe sniffer: a bounded
 // `runSnifferPass` over every connector store, continuously while work remains.
@@ -250,6 +250,8 @@ export interface TierSnifferServiceOptions {
    */
   autoMoves?: AutomaticTierMoveContext & {
     maxPerPass?: number;
+    /** Destinations with newly visible chunks that still need vectors. */
+    onEmbeddingNeeded?: (corpora: ReadonlySet<string>) => void;
     /** Fixed lowering slice override; still capped at 25% of judge + moves. Default adapts to backlog. */
     lowerSliceMs?: number;
     /** Maximum synchronous copy batch. Default 25 items / 25 ms. */
@@ -2171,6 +2173,7 @@ export class TierSnifferService {
     const shouldStop = () => signal.aborted || (direction === 'lower'
       && (this.monotonicNow() >= deadline || this.lowerMovePreempted || this.yieldNow()));
     const report: TierAutoMoveReport = { moved: 0, failed: 0, notEligible: 0, timings };
+    const embeddingCorpora = new Set<string>();
     const staleAfterMs = Math.max(0, options.staleAfterMs ?? DEFAULT_STALE_MOVE_MS);
     const now = (this.options.now ?? (() => new Date()))().getTime();
     let budget = Math.max(0, options.maxPerPass ?? (direction === 'raise' ? 25 : DEFAULT_AUTO_MOVES_PER_PASS));
@@ -2239,8 +2242,11 @@ export class TierSnifferService {
           this.moveFailures.delete(failureKey);
         }
       };
-      const succeeded = (record: TierLedgerRecord) => {
+      const succeeded = (record: TierLedgerRecord, result: TierMoveResult) => {
         report.moved++;
+        for (const destination of result.destinations) {
+          if (destination.chunksToEmbed > 0) embeddingCorpora.add(destination.corpusId);
+        }
         const key = `${ledgerPath}\u0000${tierLedgerIdentityKey(recordIdentity(record))}\u0000${record.generation}`;
         this.moveFailures.delete(key);
         this.movesRefusedNow.delete(`${ledgerPath}\u0000${tierLedgerIdentityKey(recordIdentity(record))}`);
@@ -2261,7 +2267,7 @@ export class TierSnifferService {
         }
         if (direction === 'raise') {
           for (const { record, move } of pending) {
-            try { await moveTieredItem(move); succeeded(record); }
+            try { succeeded(record, await moveTieredItem(move)); }
             catch (error) { failure(record, error); }
           }
         } else if (pending.length) {
@@ -2273,7 +2279,7 @@ export class TierSnifferService {
             });
             for (const [index, result] of results.entries()) {
               const entry = pending[index]!;
-              if (!('error' in result)) { succeeded(entry.record); continue; }
+              if (!('error' in result)) { succeeded(entry.record, result.result); continue; }
               failure(entry.record, result.error);
             }
             // Unstarted candidates still belong to the queue; use the rest of
@@ -2289,6 +2295,7 @@ export class TierSnifferService {
       // every move, leaving no queued row to trigger a write.
       await flushTierMoveNotes(set.ledger, { timings, shouldStop });
     }
+    if (embeddingCorpora.size > 0) options.onEmbeddingNeeded?.(embeddingCorpora);
     report.elapsedMs = this.monotonicNow() - started;
     const didWork = report.moved > 0 || report.failed > 0 || (report.abandoned ?? 0) > 0
       || (report.staleRaises ?? 0) > 0 || (report.retiredAbsent ?? 0) > 0;

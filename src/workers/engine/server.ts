@@ -6925,7 +6925,16 @@ export async function main(): Promise<void> {
         // for the sniffer by default, and a Personal verdict's queued move
         // runs at once while every embedding is the built-in local model.
         ...(snifferRuntime.source === 'built_in' ? { autoApproveBuiltIn: true } : {}),
-        autoMoves: automaticMoveContext,
+        autoMoves: {
+          ...automaticMoveContext,
+          // A sweep may have visited the destination while the item was held
+          // or moving. Wake its source once the new copy is visible.
+          onEmbeddingNeeded: (corpora) => {
+            const sourceIds = new Set(sourceCorpusRegistry.list()
+              .filter(({ corpusId }) => corpora.has(corpusId)).map(({ sourceId }) => sourceId));
+            sourceScheduler?.wakeTasksOfKind('embed', undefined, sourceIds);
+          },
+        },
       })
     : undefined;
   if (tierSniffer && snifferResource) {

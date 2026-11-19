@@ -661,11 +661,14 @@ export class SourceScheduler {
   updateSources(sources: SourceSchedulerSource[], now: Date = this.now()): void {
     const existing = new Map(this.states.map((state) => [schedulerStateKey(state.source, state.task), state]));
     const firstRun = now.getTime();
+    let newWorkDue = false;
     this.sources = this.filterAllowedSources(sources);
     this.states = this.sources.flatMap((source) => source.tasks.map((task) => {
       const previous = existing.get(schedulerStateKey(source, task));
       if (!previous) {
-        return this.createTaskState(source, task, firstRun);
+        const state = this.createTaskState(source, task, firstRun);
+        newWorkDue ||= taskCadence(source, task) === 'continuous' && state.nextRunAt <= firstRun;
+        return state;
       }
       // Preserve object identity while a task is running. The active execution
       // and future ticks must observe one shared `running` bit across refreshes.
@@ -675,6 +678,9 @@ export class SourceScheduler {
     }));
     if (this.timer) this.refreshFastWakeTimers();
     this.syncChangeSubscriptions();
+    // A source admitted after boot is already due. The split front may not
+    // see it in the background's status snapshot when it requests first sync.
+    if (newWorkDue) this.scheduleContinueWake(firstRun);
   }
 
   private filterAllowedSources(sources: SourceSchedulerSource[]): SourceSchedulerSource[] {
@@ -864,15 +870,20 @@ export class SourceScheduler {
    * Brings every task of `kind` forward to run within seconds, for when
    * something those tasks wait on has just become available (a built-in
    * reader finished installing, so extraction can read what it left unread).
-   * Generic: no source is named. A task running right now is marked and runs
+   * A readiness event may name the affected sources. A task running right now is marked and runs
    * again within seconds of completing. A task in a failure backoff keeps its
    * backoff, and a manual-cadence task runs only when the owner runs it.
    * Returns how many tasks were woken.
    */
-  wakeTasksOfKind(kind: SourceSchedulerTaskKind, at: number = this.now().getTime()): number {
+  wakeTasksOfKind(
+    kind: SourceSchedulerTaskKind,
+    at: number = this.now().getTime(),
+    sourceIds?: ReadonlySet<string>,
+  ): number {
     let woke = 0;
     for (const state of this.states) {
       if (state.task.kind !== kind || state.consecutiveFailures > 0) continue;
+      if (sourceIds && !sourceIds.has(state.source.sourceId)) continue;
       if (taskCadence(state.source, state.task) !== 'continuous') continue;
       if ((state.retryNotBeforeAt ?? 0) > at) continue;
       if (state.running) {
@@ -880,8 +891,7 @@ export class SourceScheduler {
         woke += 1;
         continue;
       }
-      if (state.nextRunAt <= at) continue;
-      state.nextRunAt = at;
+      state.nextRunAt = Math.min(state.nextRunAt, at);
       woke += 1;
     }
     if (woke > 0) this.scheduleContinueWake(at);
