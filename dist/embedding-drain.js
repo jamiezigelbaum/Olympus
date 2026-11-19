@@ -3029,7 +3029,10 @@ function noteMemoryPayloadResponse(response) {
 var scopedActivity = {
   visibility_rebuild_bootstrap: 0,
   visibility_rebuild_incremental: 0,
-  people_refresh: 0
+  people_refresh: 0,
+  visibility_refresh: 0,
+  embedding_repair: 0,
+  embedding_settlement: 0
 };
 function changeMemoryActivity(label, delta) {
   scopedActivity[label] += delta;
@@ -26682,10 +26685,12 @@ class LocalConnectorStore {
     }
     let refreshing;
     refreshing = (async () => {
+      changeMemoryActivity("visibility_refresh", 1);
       try {
         await runHiddenStepsInTurns(this.tierLedgerHiddenSteps());
         await this.publishVisibility();
       } catch {} finally {
+        changeMemoryActivity("visibility_refresh", -1);
         if (this.visibilityRefreshing === refreshing)
           this.visibilityRefreshing = undefined;
       }

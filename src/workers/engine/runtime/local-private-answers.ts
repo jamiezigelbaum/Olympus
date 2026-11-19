@@ -264,13 +264,22 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
   let running = false;
   let runningDestination: 'computer' | 'venice' = 'computer';
   let closed = false;
+  let started = false;
+  // A write arrived during a pass, a question still needs a turn, or the store needs to recover.
+  let pending = false;
   let pass: Promise<void> | undefined;
-  let timer: ReturnType<typeof setInterval> | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   let unsubscribe: (() => void) | undefined;
   const abort = new AbortController();
   // An automatic answer in progress: classification keeps yielding between its model calls.
   let autoAnswering = false;
-  const store = () => { try { return options.store(); } catch { return undefined; } };
+  const store = () => {
+    try {
+      const current = options.store();
+      if (started && !closed && !unsubscribe) unsubscribe = current?.subscribe?.(wake);
+      return current;
+    } catch { return undefined; }
+  };
   const refOf = (q: WaitingQuestion): WaitingQuestionRef => ({ id: q.id, generation: q.generation, connectionId: q.connectionId });
   const active = (q: WaitingQuestion) => {
     try { return !closed && (!options.isActive || options.isActive(q.connectionId)); } catch { return false; }
@@ -278,8 +287,9 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
   const hidden = (q: WaitingQuestion) => q.surface === 'chatgpt' && options.panelSecretNotice?.(refOf(q)) !== true && (
     now() < Date.parse(q.askedAt) + CHATGPT_INBOX_GRACE_MS || options.panelClaimed?.(refOf(q)) === true
   );
-  const autoAnswerable = (q: WaitingQuestion) => q.path !== 'anonymous' && q.path !== 'venice' && !q.hasResult && !q.result
-    && q.state === 'waiting' && q.nextAttemptAt <= now() && !hidden(q) && active(q)
+  const pendingAnswer = (q: WaitingQuestion) => q.path !== 'anonymous' && q.path !== 'venice' && !q.hasResult && !q.result
+    && q.state === 'waiting' && active(q);
+  const readyAnswer = (q: WaitingQuestion) => q.nextAttemptAt <= now() && !hidden(q)
     // Showing a mixed Secret notice must not start inference ahead of its panel.
     && (q.surface !== 'chatgpt' || now() >= Date.parse(q.askedAt) + CHATGPT_INBOX_GRACE_MS || options.panelSecretOnlyNotice?.(refOf(q)) === true);
   const current = (q: WaitingQuestion) => {
@@ -301,7 +311,16 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
     try { return await (background ? options.backgroundAnswer ?? options.answer : options.answer)(input); }
     catch { return { status: 'failed' }; }
   };
-  const wake = () => { if (!closed) void api.tick().catch(() => undefined); };
+  const recheck = () => {
+    if (!started || closed || !pending || timer) return;
+    timer = setTimeout(() => { timer = undefined; wake(); }, 1_000);
+    timer.unref?.();
+  };
+  const wake = () => {
+    if (closed) return;
+    pending = true;
+    void api.tick();
+  };
   const invalidate = (q: WaitingQuestion) => {
     store()?.invalidate?.(refOf(q));
     for (const [id, entry] of opens) if (entry.ref?.id === q.id) opens.delete(id);
@@ -337,42 +356,52 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
   };
   const api: LocalPrivateAnswers = {
     start() {
-      if (timer || closed) return;
-      unsubscribe = store()?.subscribe?.(wake);
-      timer = setInterval(wake, 1_000);
-      timer.unref?.();
+      if (started || closed) return;
+      started = true;
       wake();
     },
     tick() {
       if (pass) return pass;
-      if (closed || running || options.interactiveBusy?.()) return Promise.resolve();
+      if (closed) return Promise.resolve();
+      if (running || options.interactiveBusy?.()) {
+        recheck();
+        return Promise.resolve();
+      }
+      clearTimeout(timer);
+      timer = undefined;
+      pending = false;
       pass = (async () => {
         const currentStore = store();
-        if (!currentStore) return;
+        if (!currentStore) { pending = true; return; }
         if (options.isActive) currentStore.reconcileConnections?.(options.isActive);
         // Oldest first avoids starving a retry behind a busy connection.
         for (const q of [...currentStore.list({ includeResults: false }).questions].reverse()) {
-          if (closed || running || options.interactiveBusy?.()) break;
-          if (!autoAnswerable(q)) continue;
+          if (!pendingAnswer(q)) continue;
+          if (closed || running || options.interactiveBusy?.()) { pending = true; break; }
+          if (!readyAnswer(q)) { pending = true; continue; }
           // No allowance per connection (Jamie, 2026-10-29): every question an agent asks is answered.
           // Ready answers queue immediately; classification yields at its next model boundary.
           autoAnswering = true;
           const result = await answerFor({ question: q.question, selectors: q.selectors, detail: q.detail, signal: abort.signal }, true)
             .finally(() => { autoAnswering = false; });
-          if (!current(q)) continue;
+          if (!current(q)) { pending = true; continue; }
           let check = result.status === 'answered' ? await eligible(result.read) : undefined;
           if (result.status === 'answered' && (result.secretLocations?.length ?? 0) > 0 && options.eligibleSecrets?.({ question: q.question, selectors: q.selectors }, result.secretLocations!) !== true) check = 'ineligible';
           if ((result.status === 'answered' && check === 'eligible') || result.status === 'not_found') {
-            if (!current(q)) continue;
+            if (!current(q)) { pending = true; continue; }
             const saved: StoredPrivateAnswer = result.status === 'answered'
               ? { status: 'answered', answer: result.answer, citations: result.citations.map(c => ({ ...(c.title ? { title: c.title } : {}), ...(c.source ? { source: c.source } : {}), ...(c.date ? { date: c.date } : {}), ...(c.url ? { url: c.url } : {}), ...(c.localPath ? { localPath: c.localPath } : {}) })), ...(result.sentItems ? { sentItems: result.sentItems } : {}), unanswered: result.unanswered, leftOut: storedLeftOut(result), read: result.read.map(inboxEvidenceIdentity), secretLocations: result.secretLocations ?? [] }
               : { status: 'not_found', citations: [], unanswered: result.unanswered ?? [], leftOut: storedLeftOut(result), read: [] };
-            if (!currentStore.saveAnswer?.(refOf(q), saved)) currentStore.retry?.(refOf(q), 'save_refused');
-          } else currentStore.retry?.(refOf(q), check === 'unknown' ? 'eligibility_unavailable'
-            : check === 'ineligible' || result.status === 'changed' ? 'evidence_changed'
-            : result.status === 'no_model' || result.status === 'model_downloading' ? result.status : 'answer_failed');
+            if (currentStore.saveAnswer?.(refOf(q), saved)) continue;
+            currentStore.retry?.(refOf(q), 'save_refused');
+          } else {
+            currentStore.retry?.(refOf(q), check === 'unknown' ? 'eligibility_unavailable'
+              : check === 'ineligible' || result.status === 'changed' ? 'evidence_changed'
+              : result.status === 'no_model' || result.status === 'model_downloading' ? result.status : 'answer_failed');
+          }
+          pending = true;
         }
-      })().catch(() => undefined).finally(() => { pass = undefined; });
+      })().catch(() => { pending = true; }).finally(() => { pass = undefined; recheck(); });
       return pass;
     },
     overdue() {
@@ -380,13 +409,13 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
       if (autoAnswering) return true;
       try {
         const questions = store()?.list({ includeResults: false }).questions ?? [];
-        return questions.some(autoAnswerable);
+        return questions.some(q => pendingAnswer(q) && readyAnswer(q));
       } catch { return false; }
     },
     close() {
       closed = true;
       abort.abort();
-      if (timer) clearInterval(timer);
+      clearTimeout(timer);
       unsubscribe?.();
       opens.clear();
     },

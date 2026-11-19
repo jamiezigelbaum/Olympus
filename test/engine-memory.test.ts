@@ -194,7 +194,7 @@ test('visibility counts follow in-place updates, replacement, invalidation and c
 });
 
 test('activity shows overlapping task and scoped labels while status retains its primary task', () => {
-  for (const [key, activity] of [['tasks_embed', 'embedding'], ['tasks_sync', 'import'], ['tasks_extract', 'extract']] as const) {
+  for (const [key, activity] of [['tasks_embed', 'embedding'], ['tasks_sync', 'import'], ['tasks_watch', 'import'], ['tasks_extract', 'extract']] as const) {
     changeMemoryCounter(key, 1);
     try {
       expect(memoryActivity(false, false)).toEqual([activity]);
@@ -214,6 +214,15 @@ test('activity shows overlapping task and scoped labels while status retains its
   } finally {
     changeMemoryActivity('people_refresh', -1);
     changeMemoryActivity('visibility_rebuild_incremental', -1);
+  }
+  for (const label of ['visibility_refresh', 'embedding_repair', 'embedding_settlement'] as const) {
+    changeMemoryActivity(label, 1);
+    try {
+      expect(memoryActivity(false, false)).toEqual([label]);
+      expect(memoryActivity(false, true)).toEqual(['recount', label]);
+    } finally {
+      changeMemoryActivity(label, -1);
+    }
   }
   expect(memoryActivity(false, false)).toEqual(['idle']);
 });

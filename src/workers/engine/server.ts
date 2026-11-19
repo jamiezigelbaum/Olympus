@@ -1,5 +1,5 @@
 import { SQLiteError } from 'bun:sqlite';
-import { memoryActivity, statusMemoryActivity } from '../../core/memory-counters.ts';
+import { changeMemoryActivity, memoryActivity, statusMemoryActivity } from '../../core/memory-counters.ts';
 import { createMemoryDiagnostic, processMemoryAsync } from '../engine-split/memory.ts';
 import { sampleSqliteStoreMemory } from '../engine-split/sqlite-memory.ts';
 import { modelWorkerMemoryPayloads, sampleModelWorkerMemory } from '../source-index/built-in-reasoning/off-thread.ts';
@@ -7234,20 +7234,26 @@ export async function main(): Promise<void> {
             }
             for (const store of connectorStores) {
               if (standBack.holds('status')) break;
+              changeMemoryActivity('embedding_repair', 1);
               try {
                 const set = await store.repairEmbeddingInputHashes();
                 if (set) console.warn(`[olympus] ${store.corpusId}: set the embedding input hash on ${set} chunks that had none.`);
               } catch (error) {
                 console.warn(`[olympus] ${store.corpusId}: embedding input hash repair failed (${error instanceof Error ? error.message : String(error)}); tried again next pass.`);
+              } finally {
+                changeMemoryActivity('embedding_repair', -1);
               }
             }
             for (const ledger of new Set(tierLanes.map((lane) => lane.ledger))) {
               if (standBack.holds('status')) break;
+              changeMemoryActivity('embedding_settlement', 1);
               try {
                 const settled = await settleStaleEmbedHolds(ledger);
                 if (settled) console.warn(`[olympus] tier ledger: released ${settled} decided copies an older build left held.`);
               } catch (error) {
                 console.warn(`[olympus] tier ledger: settling held copies failed (${error instanceof Error ? error.message : String(error)}); tried again next pass.`);
+              } finally {
+                changeMemoryActivity('embedding_settlement', -1);
               }
             }
             for (const request of [PLAIN_STATUS_REQUEST, DASHBOARD_STATUS_REQUEST]) {

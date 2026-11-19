@@ -115,6 +115,9 @@ const scopedActivity = {
   visibility_rebuild_bootstrap: 0,
   visibility_rebuild_incremental: 0,
   people_refresh: 0,
+  visibility_refresh: 0,
+  embedding_repair: 0,
+  embedding_settlement: 0,
 };
 type ScopedMemoryActivity = keyof typeof scopedActivity;
 export type MemoryActivityLabel = MemoryActivity | ScopedMemoryActivity;
@@ -142,8 +145,8 @@ export function statusMemoryActivity(judging: boolean, recount: boolean): Memory
 export function memoryActivity(judging: boolean, recount: boolean, background?: MemoryActivity): MemoryActivityLabel[] {
   const labels: MemoryActivityLabel[] = background === undefined ? taskActivities(judging, recount)
     : background === 'idle' ? [] : [background];
-  if (scopedActivity.visibility_rebuild_bootstrap > 0) labels.push('visibility_rebuild_bootstrap');
-  if (scopedActivity.visibility_rebuild_incremental > 0) labels.push('visibility_rebuild_incremental');
-  if (scopedActivity.people_refresh > 0) labels.push('people_refresh');
+  for (const label of Object.keys(scopedActivity) as ScopedMemoryActivity[]) {
+    if (scopedActivity[label] > 0) labels.push(label);
+  }
   return labels.length ? labels : ['idle'];
 }

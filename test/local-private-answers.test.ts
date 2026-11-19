@@ -19,7 +19,7 @@ import { Database } from 'bun:sqlite';
 import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
 import { initializeLimitStops, listOpenLimitStops, registerLimit, reportLimitStop } from '../src/core/limit-stops.ts';
 import * as poolReads from '../src/workers/connector-store/off-thread-reads.ts';
-import { waitFor } from './helpers/test-clock.ts';
+import { flushMicrotasks, waitFor } from './helpers/test-clock.ts';
 import type { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { searchPrivateEvidence, probePrivateMatch, type AnalystAnswerLanes } from '../src/workers/source-index/analyst-answer.ts';
 import { ownerLocalMint, ownerUnlockKey } from './helpers/owner-local-mint.ts';
@@ -2177,6 +2177,54 @@ describe('anonymous answers in the local inbox', () => {
 });
 
 const A = (answer: string) => ({ status: 'answered' as const, answer, citations: [], unanswered: [], leftOut: [], read: [] });
+
+test('an idle inbox does not poll and a new question wakes its answer pass', async () => {
+  const { dir, cleanup } = tempDir('olympus-idle-inbox-');
+  cleanups.push(cleanup);
+  const store = openWaitingPrivateQuestionStore(join(dir, 'state', 'waiting.sqlite'));
+  const list = spyOn(store, 'list');
+  const reconcile = spyOn(store, 'reconcileConnections');
+  let busy = false;
+  const answer = async () => ({ status: 'not_found' as const, leftOut: [] });
+  const inbox = createLocalPrivateAnswers({ store: () => store, isActive: () => true, interactiveBusy: () => busy, answer });
+  try {
+    inbox.start();
+    await flushMicrotasks();
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(reconcile).toHaveBeenCalledTimes(1);
+    const idleUntil = performance.now() + 3_100;
+    await waitFor(() => performance.now() >= idleUntil);
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(reconcile).toHaveBeenCalledTimes(1);
+
+    const question = store.record(store.ticket('connection'), {
+      question: 'A synthetic inbox question', surface: 'remote', state: 'waiting',
+    });
+    expect(question).toBeDefined();
+    // The notification and answer settle in microtasks, before any timer can fire.
+    await flushMicrotasks();
+    expect(store.get(question!.id)?.result?.status).toBe('not_found');
+    expect(list).toHaveBeenCalledTimes(2);
+
+    const settledUntil = performance.now() + 1_100;
+    await waitFor(() => performance.now() >= settledUntil);
+    expect(list).toHaveBeenCalledTimes(2);
+    expect(reconcile).toHaveBeenCalledTimes(2);
+
+    busy = true;
+    const queued = store.record(store.ticket('connection'), {
+      question: 'A second synthetic inbox question', surface: 'remote', state: 'waiting',
+    });
+    expect(queued).toBeDefined();
+    await flushMicrotasks();
+    expect(list).toHaveBeenCalledTimes(2);
+    busy = false;
+    await waitFor(() => store.get(queued!.id)?.result?.status === 'not_found');
+  } finally {
+    inbox.close();
+    store.close();
+  }
+}, 15_000);
 
 test('re-ask retains answered rows and restarts not-found rows', () => {
   const store = waitingStore();

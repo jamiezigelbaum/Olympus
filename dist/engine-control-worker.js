@@ -1,7 +1,7 @@
 // @bun
 // src/workers/engine-split/control-worker.ts
 import { chmodSync } from "fs";
-import { open, rename } from "fs/promises";
+import { rename, utimes, writeFile } from "fs/promises";
 
 // src/core/operation-error.ts
 class OperationError extends Error {
@@ -1314,6 +1314,7 @@ function start(init) {
   let statusPath;
   let writing = false;
   let owed = false;
+  let published;
   let failures = 0;
   let saidAt = 0;
   const EMPTY_STATE = { scheduler: null, judge: { backlog: null, pending: null, spending: null }, captures: null };
@@ -1328,28 +1329,30 @@ function start(init) {
     writing = true;
     const partial = `${path}.control.tmp`;
     try {
-      const text = `${JSON.stringify({
+      const now = new Date;
+      const snapshot = {
         schema: ENGINE_STATUS_SNAPSHOT_SCHEMA,
         instance_id: init.instanceId,
-        written_at: new Date().toISOString(),
+        heartbeat: "mtime",
         ...state ? { state_at: new Date(state.at).toISOString() } : {},
         loop_held_ms: Math.round(loopHeldMs()),
         ...stateError ? { state_error: { attempts: stateError.attempts, error: stateError.error, at: new Date(stateError.at).toISOString() } } : {},
         ...state?.body ?? EMPTY_STATE
-      })}
-`;
-      const file = await open(partial, "w", 384);
-      try {
-        await file.writeFile(text, "utf8");
-        await file.sync();
-      } finally {
-        await file.close();
+      };
+      const content = JSON.stringify(snapshot);
+      if (published?.path === path && published.content === content) {
+        await utimes(path, now, now);
+      } else {
+        await writeFile(partial, `${JSON.stringify({ ...snapshot, written_at: now.toISOString() })}
+`, { mode: 384 });
+        await rename(partial, path);
+        published = { path, content };
       }
-      await rename(partial, path);
       if (failures > 0)
         post({ type: "log", line: `[engine-split] status snapshot written again after ${failures} failed attempt(s)` });
       failures = 0;
     } catch (error) {
+      published = undefined;
       failures += 1;
       if (failures === 1 || performance.now() - saidAt >= 60000) {
         saidAt = performance.now();

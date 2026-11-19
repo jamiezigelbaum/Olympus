@@ -3,14 +3,14 @@ import type { MemoryActivity } from '../../core/memory-counters.ts';
  * State the background publishes for the front (docs/design/engine-split.md,
  * part 3, "State from background to front"): scheduler status, the judge's
  * backlog, pending count, rate and spending, capture status, unreadable-file
- * counts and Sync now runs. The background writes the whole snapshot
- * atomically every few seconds; the
- * front reads the last one and shows how old it is. No front request waits
+ * counts and Sync now runs. The background publishes changed snapshots
+ * atomically and updates their heartbeat every few seconds. The front
+ * reads the last one and shows how old it is. No front request waits
  * on the background for status.
  */
-import { readFileSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
-import { writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
+import { randomUUID } from 'node:crypto';
+import { closeSync, fstatSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { open } from 'node:fs/promises';
 
 export const ENGINE_STATUS_SNAPSHOT_SCHEMA = 'olympus.engine.background-status.v1';
 export const ENGINE_STATUS_PUBLISH_INTERVAL_MS = 3_000;
@@ -27,10 +27,12 @@ export interface EngineStatusSnapshot {
   /** The background instance that wrote it; a new one means it restarted. */
   instance_id: string;
   written_at: string;
+  /** For control-thread snapshots, the file's mtime advances even when the JSON is unchanged. */
+  heartbeat?: 'mtime';
   /**
    * When the engine's loop collected this state. The control thread
-   * (control-worker.ts) writes the snapshot again every interval whether the
-   * loop turns or not, so `written_at` says the background is alive and this
+   * (control-worker.ts) renews the heartbeat every interval whether the
+   * loop turns or not, so the heartbeat says the background is alive and this
    * says how old what it shows is. Absent when the loop wrote the file itself.
    */
   state_at?: string;
@@ -105,14 +107,27 @@ export interface EngineStatusRead {
 }
 
 export function writeEngineStatusSnapshot(path: string, snapshot: EngineStatusSnapshot): void {
-  writePrivateFileAtomicSync(path, `${JSON.stringify(snapshot)}\n`);
+  const partial = `${path}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(partial, `${JSON.stringify(snapshot)}\n`, { flag: 'wx', mode: 0o600 });
+    renameSync(partial, path);
+  } catch (error) {
+    rmSync(partial, { force: true });
+    throw error;
+  }
 }
 
 /** The last snapshot, or undefined when there is none or it cannot be read. Never throws. */
 export function readEngineStatusSnapshot(path: string, now: () => number = () => Date.now()): EngineStatusRead | undefined {
   try {
-    const snapshot = parseSnapshot(readFileSync(path, 'utf8'));
-    return snapshot && engineStatusAge(snapshot, now());
+    const fd = openSync(path, 'r');
+    try {
+      const snapshot = parseSnapshot(readFileSync(fd, 'utf8'));
+      if (snapshot?.heartbeat === 'mtime') snapshot.written_at = fstatSync(fd).mtime.toISOString();
+      return snapshot && engineStatusAge(snapshot, now());
+    } finally {
+      closeSync(fd);
+    }
   } catch {
     return undefined;
   }
@@ -120,7 +135,15 @@ export function readEngineStatusSnapshot(path: string, now: () => number = () =>
 
 export async function readEngineStatusSnapshotAsync(path: string): Promise<EngineStatusSnapshot | undefined> {
   try {
-    return parseSnapshot(await readFile(path, 'utf8'));
+    // Read the contents and heartbeat from the same file across atomic renames.
+    const file = await open(path, 'r');
+    try {
+      const snapshot = parseSnapshot(await file.readFile('utf8'));
+      if (snapshot?.heartbeat === 'mtime') snapshot.written_at = (await file.stat()).mtime.toISOString();
+      return snapshot;
+    } finally {
+      await file.close();
+    }
   } catch {
     // Missing, unreadable and malformed snapshots offer no current status.
     return undefined;
