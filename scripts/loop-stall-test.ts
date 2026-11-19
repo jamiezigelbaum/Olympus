@@ -662,7 +662,10 @@ function readCgroupMemory(): Record<string, number | string> {
   } catch (error) { return { error: String(error).slice(0, 200) }; }
 }
 
-/** Per engine role: read() copying (rchar, syscr, read_bytes from /proc/PID/io) from readiness to the end, and the process's own memory at the end. */
+/**
+ * Per engine role: read() copying (rchar, syscr, read_bytes from /proc/PID/io) from readiness to the end, bytes read from disk
+ * before readiness and in the first 60 s after it (plan, 19 Nov: a number for the start-up bench), and the process's own memory at the end.
+ */
 function sampleProcessIo(pids: () => Array<{ role: string; pid: number }>, ready: (role: string) => boolean) {
   type Io = Record<string, number>;
   const readIo = (pid: number): Io | undefined => {
@@ -675,13 +678,15 @@ function sampleProcessIo(pids: () => Array<{ role: string; pid: number }>, ready
       return { rss_anon_mib: mib('RssAnon'), rss_file_mib: mib('RssFile'), vm_swap_mib: mib('VmSwap') };
     } catch { return undefined; }
   };
-  const state: Record<string, { atReady?: Io; last?: Io; status?: ReturnType<typeof readStatus> }> = {};
+  const state: Record<string, { first?: Io; atReady?: Io; readyMs?: number; after60?: Io; last?: Io; status?: ReturnType<typeof readStatus> }> = {};
   const tick = () => {
     for (const { role, pid } of pids()) {
       const entry = state[role] ??= {};
       const io = readIo(pid);
       if (!io) continue;
-      if (!entry.atReady && ready(role)) entry.atReady = io;
+      entry.first ??= io;
+      if (!entry.atReady && ready(role)) { entry.atReady = io; entry.readyMs = Date.now(); }
+      if (entry.readyMs !== undefined && !entry.after60 && Date.now() - entry.readyMs >= 60_000) entry.after60 = io;
       entry.last = io;
       entry.status = readStatus(pid) ?? entry.status;
     }
@@ -691,7 +696,8 @@ function sampleProcessIo(pids: () => Array<{ role: string; pid: number }>, ready
     stop: () => { tick(); clearInterval(timer); },
     summary: () => Object.fromEntries(Object.entries(state).map(([role, entry]) => {
       const delta = (key: string) => entry.atReady && entry.last ? (entry.last[key] ?? 0) - (entry.atReady[key] ?? 0) : null;
-      return [role, { from_ready: Boolean(entry.atReady), rchar_gb: delta('rchar') === null ? null : Math.round(delta('rchar')! / 1e7) / 100, syscr: delta('syscr'), read_bytes_gb: delta('read_bytes') === null ? null : Math.round(delta('read_bytes')! / 1e7) / 100, at_end: entry.status ?? null }];
+      const gb = (from?: Io, to?: Io) => from && to ? Math.round(((to.read_bytes ?? 0) - (from.read_bytes ?? 0)) / 1e7) / 100 : null;
+      return [role, { from_ready: Boolean(entry.atReady), read_bytes_gb_before_ready: gb(entry.first, entry.atReady), read_bytes_gb_first_60s_after_ready: gb(entry.atReady, entry.after60), rchar_gb: delta('rchar') === null ? null : Math.round(delta('rchar')! / 1e7) / 100, syscr: delta('syscr'), read_bytes_gb: delta('read_bytes') === null ? null : Math.round(delta('read_bytes')! / 1e7) / 100, at_end: entry.status ?? null }];
     })),
   };
 }
