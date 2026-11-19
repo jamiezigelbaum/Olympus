@@ -55445,7 +55445,7 @@ function remoteToolSchema(operation, schema) {
         whole: { type: "string", enum: ["item", "conversation"], description: `"conversation" for the hit's whole chat, group or channel; "item" (default) for that document.` },
         after: { type: "string", description: "For a conversation: only messages on or after this ISO date." },
         before: { type: "string", description: "For a conversation: only messages before this ISO date." },
-        read: { type: "string", enum: ["all", "relevant_days"], description: "For a conversation: every message, or only the days that mention the question. Left out, the full read runs when it fits in an hour." }
+        read: { type: "string", enum: ["all", "relevant_days"], description: "For a conversation: every message, or only the days that mention the question. Left out, the full read runs when it fits in 15 minutes." }
       }
     };
   const withheld = withheldParams(operation);
@@ -56124,7 +56124,7 @@ var init_remote_result = __esm(() => {
       "Read ALL of one document, or one whole group, channel or chat, with the owner's private model on their computer, then answer the question from it.",
       "For a topic discussed over many messages, days or years, or facts spread through a long file, when a search alone answers poorly.",
       'Pass the read_handle of a hit from olympus_search or source_answer, whole="conversation" for its whole chat (optionally after/before as ISO dates) or whole="item" for that document.',
-      'A long chat is priced two ways before it starts (job.choices): every message, or only the days that mention the question. The full read runs when it fits in an hour, else the relevant-days read (job.read); read="all" or read="relevant_days" picks one. Tell the user both estimates and which read runs.',
+      'A long chat is priced two ways before it starts (job.choices): every message, or only the days that mention the question. The full read runs when it fits in 15 minutes, else the relevant-days read (job.read); read="all" or read="relevant_days" picks one. Tell the user both estimates and which read runs.',
       "It runs in the background; the answer lands in Olympus Private answers on the owner's computer, not here. Tell the user the estimate and where to look; check progress with source_deep_read_status."
     ].join(" "),
     source_deep_read_status: "Progress of deep reads: sections read, time left, what it is waiting on. Pass cancel=true with an id to stop one. Answers are only in Olympus Private answers on the owner's computer.",
@@ -162721,7 +162721,7 @@ var init_operations = __esm(() => {
         "Read ALL of one document, or one whole group, channel or chat, with the owner's private model, then answer the question from what it read.",
         "For questions a search alone answers poorly: a topic discussed over many messages, days or years, or facts spread through a long file.",
         'Pass the selected_item of a search hit from source_index_search, whole="conversation" for its whole chat (optionally after/before as ISO dates) or whole="item" for that document.',
-        `A long chat is priced two ways before it starts: every message, or only the days that mention the question (a day either side). The full read runs when it fits in an hour, else the relevant-days read; read="all" or read="relevant_days" picks one. Show the owner the job's choiceSummary as is.`,
+        `A long chat is priced two ways before it starts: every message, or only the days that mention the question (a day either side). The full read runs when it fits in 15 minutes, else the relevant-days read; read="all" or read="relevant_days" picks one. Show the owner the job's choiceSummary as is.`,
         "Runs in the background on the owner's computer and lands in Private answers; this returns the job with its progress. Check it with source_deep_read_status."
       ].join(" "),
       params: {
@@ -162730,7 +162730,7 @@ var init_operations = __esm(() => {
         whole: { type: "string", description: `"conversation" (the hit's whole chat, group or channel) or "item" (that document; default).` },
         after: { type: "string", description: "For a conversation: only messages authored on or after this ISO date." },
         before: { type: "string", description: "For a conversation: only messages authored before this ISO date." },
-        read: { type: "string", description: 'For a conversation: "all" (every message) or "relevant_days" (the days that mention the question). Left out, the full read runs when it fits in an hour.' }
+        read: { type: "string", description: 'For a conversation: "all" (every message) or "relevant_days" (the days that mention the question). Left out, the full read runs when it fits in 15 minutes.' }
       },
       mutating: false,
       nativeExposure: "sourceIndexEnabledOnly",
@@ -193987,7 +193987,7 @@ function chooseDeepRead(choices, requested) {
     return requested;
   if (choices.all.seconds === undefined)
     return relevant.sections < choices.all.sections ? "relevant_days" : "all";
-  return choices.all.seconds < FULL_READ_DEFAULT_SECONDS ? "all" : "relevant_days";
+  return choices.all.seconds < DEEP_READ_BUDGET_SECONDS ? "all" : "relevant_days";
 }
 function deepReadChoiceSummary(choices, read, requested) {
   const n = (value) => value.toLocaleString("en-US");
@@ -193997,8 +193997,8 @@ function deepReadChoiceSummary(choices, read, requested) {
   if (!relevant)
     return `${all}. Reading all of it.`;
   const days = `The days that mention this${time(relevant)}: ${n(relevant.days ?? 0)} days of ${n(relevant.totalDays ?? 0)}, ${n(relevant.messageCount)} messages`;
-  const reason = requested ? "as asked" : choices.all.seconds === undefined ? "the smaller read first; estimates follow once your model's pace is measured" : read === "all" ? "the full read fits in an hour" : "the full read would take over an hour";
-  const next = read === "relevant_days" ? " Ask for read: all to read every message." : "";
+  const reason = requested ? "as asked" : choices.all.seconds === undefined ? "the smaller read first; estimates follow once your model's pace is measured" : read === "all" ? "the full read fits in 15 minutes" : "the full read would take over 15 minutes";
+  const next = read === "relevant_days" ? " To keep reading after it, ask for read: all to read every message." : "";
   return `${all}. ${days}. Reading ${read === "all" ? "all of it" : "the days that mention this"} (${reason}).${next}`;
 }
 function paceBook(file) {
@@ -194151,7 +194151,7 @@ ${readFooter(view, result)}` } : {},
     const relevant = view.choices.relevantDays;
     if (view.read === "relevant_days" && relevant) {
       const left = view.choices.all.messageCount - relevant.messageCount;
-      return `Read the days that mention this in ${view.setLabel} with ${view.model}: ${relevant.days} of ${relevant.totalDays} days, ${relevant.messageCount} of ${view.choices.all.messageCount} messages, ${result.sectionsRead} of ${result.sectionsTotal} sections${unreadable}. ${left} messages on other days were not read; ask for the full read (read: all) to read every message.`;
+      return `Read the days that mention this in ${view.setLabel} with ${view.model}: ${relevant.days} of ${relevant.totalDays} days, ${relevant.messageCount} of ${view.choices.all.messageCount} messages, ${result.sectionsRead} of ${result.sectionsTotal} sections${unreadable}. ${left} messages on other days were not read. To continue, ask for the full read (read: all) to read every message.`;
     }
     return `Read all of ${view.setLabel} with ${view.model}: ${result.sectionsRead} of ${result.sectionsTotal} sections, ${view.items} items${unreadable}.`;
   }
@@ -194178,7 +194178,7 @@ ${readFooter(view, result)}` } : {},
       let relevantCandidates;
       if (set.whole === "conversation" && options.relevantItems) {
         const totalChars = candidates.reduce((n, c) => n + c.chunks.join("").length, 0) || 1;
-        const pick = pickRelevantDaysWithin(candidates, await options.relevantItems(question, set, corpusIds), (picked) => pace === undefined || fullSections * (picked.reduce((n, c) => n + c.chunks.join("").length, 0) / totalChars) * pace <= FULL_READ_DEFAULT_SECONDS);
+        const pick = pickRelevantDaysWithin(candidates, await options.relevantItems(question, set, corpusIds), (picked) => pace === undefined || fullSections * (picked.reduce((n, c) => n + c.chunks.join("").length, 0) / totalChars) * pace <= DEEP_READ_BUDGET_SECONDS);
         if (pick.candidates.length > 0) {
           relevantCandidates = pick.candidates;
           const sections = sectionsOf(pick.candidates);
@@ -194304,7 +194304,7 @@ ${readFooter(view, result)}` } : {},
     }
   };
 }
-var INBOX_CONNECTION = "@local:You", JUDGE_LOOK_MS = 2000, JUDGE_STEP_ASIDE_MIN_MS = 5000, MAX_JOBS_KEPT = 50, FULL_READ_DEFAULT_SECONDS = 3600, UNMEASURED_SECTION_LIMIT = 40, DEEP_READ_DAY_HITS = 200;
+var INBOX_CONNECTION = "@local:You", JUDGE_LOOK_MS = 2000, JUDGE_STEP_ASIDE_MIN_MS = 5000, MAX_JOBS_KEPT = 50, DEEP_READ_BUDGET_SECONDS = 900, UNMEASURED_SECTION_LIMIT = 40, DEEP_READ_DAY_HITS = 200;
 var init_deep_read_jobs = __esm(() => {
   init_deep_read_refused();
   init_deep_read_refused();

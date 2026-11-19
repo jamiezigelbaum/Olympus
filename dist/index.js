@@ -9425,7 +9425,7 @@ var init_remote_result = __esm(() => {
       "Read ALL of one document, or one whole group, channel or chat, with the owner's private model on their computer, then answer the question from it.",
       "For a topic discussed over many messages, days or years, or facts spread through a long file, when a search alone answers poorly.",
       'Pass the read_handle of a hit from olympus_search or source_answer, whole="conversation" for its whole chat (optionally after/before as ISO dates) or whole="item" for that document.',
-      'A long chat is priced two ways before it starts (job.choices): every message, or only the days that mention the question. The full read runs when it fits in an hour, else the relevant-days read (job.read); read="all" or read="relevant_days" picks one. Tell the user both estimates and which read runs.',
+      'A long chat is priced two ways before it starts (job.choices): every message, or only the days that mention the question. The full read runs when it fits in 15 minutes, else the relevant-days read (job.read); read="all" or read="relevant_days" picks one. Tell the user both estimates and which read runs.',
       "It runs in the background; the answer lands in Olympus Private answers on the owner's computer, not here. Tell the user the estimate and where to look; check progress with source_deep_read_status."
     ].join(" "),
     source_deep_read_status: "Progress of deep reads: sections read, time left, what it is waiting on. Pass cancel=true with an id to stop one. Answers are only in Olympus Private answers on the owner's computer.",
@@ -31894,7 +31894,7 @@ var operations = [
       "Read ALL of one document, or one whole group, channel or chat, with the owner's private model, then answer the question from what it read.",
       "For questions a search alone answers poorly: a topic discussed over many messages, days or years, or facts spread through a long file.",
       'Pass the selected_item of a search hit from source_index_search, whole="conversation" for its whole chat (optionally after/before as ISO dates) or whole="item" for that document.',
-      `A long chat is priced two ways before it starts: every message, or only the days that mention the question (a day either side). The full read runs when it fits in an hour, else the relevant-days read; read="all" or read="relevant_days" picks one. Show the owner the job's choiceSummary as is.`,
+      `A long chat is priced two ways before it starts: every message, or only the days that mention the question (a day either side). The full read runs when it fits in 15 minutes, else the relevant-days read; read="all" or read="relevant_days" picks one. Show the owner the job's choiceSummary as is.`,
       "Runs in the background on the owner's computer and lands in Private answers; this returns the job with its progress. Check it with source_deep_read_status."
     ].join(" "),
     params: {
@@ -31903,7 +31903,7 @@ var operations = [
       whole: { type: "string", description: `"conversation" (the hit's whole chat, group or channel) or "item" (that document; default).` },
       after: { type: "string", description: "For a conversation: only messages authored on or after this ISO date." },
       before: { type: "string", description: "For a conversation: only messages authored before this ISO date." },
-      read: { type: "string", description: 'For a conversation: "all" (every message) or "relevant_days" (the days that mention the question). Left out, the full read runs when it fits in an hour.' }
+      read: { type: "string", description: 'For a conversation: "all" (every message) or "relevant_days" (the days that mention the question). Left out, the full read runs when it fits in 15 minutes.' }
     },
     mutating: false,
     nativeExposure: "sourceIndexEnabledOnly",

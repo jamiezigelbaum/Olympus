@@ -970,5 +970,11 @@
     "symbol": "retry:reconcile:retryAt_at",
     "reason": "pending",
     "retire_when": "Schedules another reconciliation when the applied result cannot advance the authoritative watermark; retire when that distinct reconciliation wait is reported as its own stop or removed."
+  },
+  {
+    "path": "src/workers/engine/runtime/deep-read-jobs.ts",
+    "symbol": "DEEP_READ_BUDGET_SECONDS",
+    "reason": "internal",
+    "retire_when": "Remove when DEEP_READ_BUDGET_SECONDS in src/workers/engine/runtime/deep-read-jobs.ts is removed or registered. It picks what a deep read reads first (the owner's 15-minute choice) and never stops a read."
   }
 ]

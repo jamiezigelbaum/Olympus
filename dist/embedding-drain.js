@@ -20672,7 +20672,7 @@ var REMOTE_DESCRIPTIONS = {
     "Read ALL of one document, or one whole group, channel or chat, with the owner's private model on their computer, then answer the question from it.",
     "For a topic discussed over many messages, days or years, or facts spread through a long file, when a search alone answers poorly.",
     'Pass the read_handle of a hit from olympus_search or source_answer, whole="conversation" for its whole chat (optionally after/before as ISO dates) or whole="item" for that document.',
-    'A long chat is priced two ways before it starts (job.choices): every message, or only the days that mention the question. The full read runs when it fits in an hour, else the relevant-days read (job.read); read="all" or read="relevant_days" picks one. Tell the user both estimates and which read runs.',
+    'A long chat is priced two ways before it starts (job.choices): every message, or only the days that mention the question. The full read runs when it fits in 15 minutes, else the relevant-days read (job.read); read="all" or read="relevant_days" picks one. Tell the user both estimates and which read runs.',
     "It runs in the background; the answer lands in Olympus Private answers on the owner's computer, not here. Tell the user the estimate and where to look; check progress with source_deep_read_status."
   ].join(" "),
   source_deep_read_status: "Progress of deep reads: sections read, time left, what it is waiting on. Pass cancel=true with an id to stop one. Answers are only in Olympus Private answers on the owner's computer.",
