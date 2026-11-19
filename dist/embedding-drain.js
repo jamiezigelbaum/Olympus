@@ -12717,8 +12717,8 @@ class TierLedger {
       assertWritableStoreOpenAllowed("tier ledger", this.dbPath);
     const onDisk = this.dbPath !== ":memory:";
     if (onDisk)
-      TierLedger.assertSchemaCanOpen(this.dbPath, this.readOnly);
-    if (onDisk && !this.readOnly) {
+      TierLedger.assertSchemaCanOpen(this.dbPath, this.readOnly, options.allowWalLessRead);
+    if (onDisk && !this.readOnly && options.expectedLedgerId === undefined) {
       mkdirSync9(dirname14(this.dbPath), { recursive: true, mode: 448 });
       if (!existsSync13(this.dbPath))
         closeSync7(openSync7(this.dbPath, "a", 384));
@@ -12726,7 +12726,7 @@ class TierLedger {
     }
     let db;
     try {
-      db = new Database(this.dbPath, this.readOnly ? { readonly: true, create: false } : { create: true });
+      db = new Database(this.dbPath, this.readOnly ? { readonly: true, create: false } : options.expectedLedgerId === undefined ? { create: true } : { readwrite: true, create: false });
       if (this.readOnly) {
         db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
         applySqliteMmap(db);
@@ -12735,6 +12735,15 @@ class TierLedger {
         }
         this.db = db;
         return;
+      }
+      if (options.expectedLedgerId !== undefined) {
+        db.exec("PRAGMA busy_timeout = 10000;");
+        const row = db.query(`SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'`).get();
+        if (row?.value !== options.expectedLedgerId) {
+          throw new OperationError("source_index_error", "The tier ledger for that item was replaced while it was being read, so nothing was changed.", "Run the command again.");
+        }
+        if (onDisk)
+          restrictLedgerFiles(this.dbPath);
       }
       db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA journal_size_limit = 67108864;" + loopWalAutocheckpointPragma(this.dbPath, "tier-ledger"));
       applySqliteMmap(db);
@@ -12745,18 +12754,18 @@ class TierLedger {
         restrictLedgerFiles(this.dbPath);
     } catch (error) {
       if (db)
-        closeSqliteStore(db, this.readOnly ? { checkpoint: false, readOnly: true } : undefined);
+        closeSqliteStore(db, this.readOnly || options.expectedLedgerId !== undefined ? { checkpoint: false, readOnly: this.readOnly } : undefined);
       throw error;
     }
     this.db = db;
   }
-  static assertSchemaCanOpen(dbPath, readOnly = false) {
+  static assertSchemaCanOpen(dbPath, readOnly = false, allowWalLessRead = false) {
     if (dbPath === ":memory:" || !existsSync13(dbPath))
       return;
     const read = readSqliteWithoutWriting(dbPath, 1e4, (db) => ({
       version: readSqliteSchemaVersion(db, TIER_LEDGER_SQLITE_STORE_ID),
       usable: sqliteSchemaUsable(db, TIER_LEDGER_SQLITE_STORE_ID, TIER_LEDGER_SCHEMA_VERSION)
-    }), readOnly);
+    }), readOnly && !allowWalLessRead);
     if (read !== undefined && !read.usable && (read.version > TIER_LEDGER_SCHEMA_VERSION || readOnly)) {
       throw new TierLedgerSchemaError(read.version);
     }
@@ -13773,7 +13782,7 @@ class TierLedger {
     return readSqliteWithoutWriting(dbPath, busyTimeoutMs, (db) => {
       const row = db.query(`SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'`).get();
       return typeof row?.value === "string" && row.value !== "" ? row.value : undefined;
-    }, options.readOnly);
+    });
   }
   writesHeld() {
     return this.db.inTransaction;
@@ -21075,11 +21084,11 @@ function tierSetLedgerCandidates(storeDbPath, recordedLedgerPath) {
   candidates.push(recordedLedgerPath);
   return [...new Set(candidates)].filter((path) => tierLedgerIsWithin(tierStoreDataRoot(storeDbPath), path));
 }
-function findTierSetLedger(storeDbPath, binding, options) {
+function findTierSetLedger(storeDbPath, binding) {
   for (const candidate of tierSetLedgerCandidates(storeDbPath, binding.ledgerPath)) {
     if (candidate === ":memory:" || !existsSync18(candidate))
       continue;
-    if (TierLedger.readLedgerId(candidate, options) === binding.ledgerId)
+    if (TierLedger.readLedgerId(candidate) === binding.ledgerId)
       return candidate;
   }
   return;

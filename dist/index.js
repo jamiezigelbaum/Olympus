@@ -16629,6 +16629,7 @@ var RELABEL_UNREAD_WHERE = `content_read = 0 AND instr(reasons_json, ':fail_safe
   SELECT 1 FROM tier_copies c WHERE c.provider = w.provider AND c.account_scope = w.account_scope
     AND c.conversation_key = w.conversation_key AND c.provider_item_id = w.provider_item_id AND c.corpus_id = ?)`, CORPUS_INTENT_FLAGS_PAGE_SQL, REJUDGE_UNAVAILABLE_RETRY_MS, REJUDGE_UNAVAILABLE_MAX_RETRY_MS;
 var init_tier_ledger = __esm(() => {
+  init_operation_error();
   init_sqlite_migrations();
   init_sqlite_store();
   init_store_write_guard();

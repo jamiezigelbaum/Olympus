@@ -59,7 +59,7 @@ interface World {
   legacy: string;
 }
 
-function world(): World {
+function world(migrateLedgers = true): World {
   const root = mkdtempSync(join(tmpdir(), 'olympus-tier-set-rename-'));
   cleanups.push(() => rmSync(root, { recursive: true, force: true }));
   const legacy = olympusDataRoot({ HOME: root });
@@ -70,8 +70,10 @@ function world(): World {
     writeFileSync(`${path}-wal`, '');
   }
   // Schema migration belongs to the writer, before relocation/read-only assertions.
-  for (const file of readdirSync(legacy).filter((name) => name.endsWith('.tier-ledger.sqlite'))) {
-    new TierLedger({ dbPath: join(legacy, file) }).close();
+  if (migrateLedgers) {
+    for (const file of readdirSync(legacy).filter((name) => name.endsWith('.tier-ledger.sqlite'))) {
+      new TierLedger({ dbPath: join(legacy, file) }).close();
+    }
   }
   return { root, env: { HOME: root }, legacy };
 }
@@ -575,9 +577,55 @@ describe('the readers that look for a bound ledger by path', () => {
   test('the tier command finds the set ledger from one renamed store, not at the recorded place', () => {
     const w = world();
     renameIntoAccountFolder(w);
-    const located = locateTierItem('garden', { storePaths: [folderPath(w, 'internal')] });
-    expect(located.map((item) => item.ledgerPath)).toEqual([tierLedgerPathForStore(folderPath(w, 'secure_local'))]);
+    const ledgerPath = tierLedgerPathForStore(folderPath(w, 'secure_local'));
+    for (const suffix of ['-wal', '-shm']) rmSync(`${ledgerPath}${suffix}`, { force: true });
+    const before = readFileSync(ledgerPath);
+    const storePaths = [folderPath(w, 'internal')];
+    const located = locateTierItem('garden', { storePaths });
+    expect(located.map((item) => item.ledgerPath)).toEqual([ledgerPath]);
+    expect(readFileSync(ledgerPath)).toEqual(before);
     expect(existsSync(LEGACY_DATA_DIR)).toBe(false);
+  });
+
+  test('an old ledger for another store does not block locate or migrate during it', () => {
+    const w = world();
+    renameIntoAccountFolder(w);
+    const old = world(false);
+    const oldLedgerPath = tierLedgerPathForStore(legacyPath(old, 'secure_local'));
+    const otherStore = join(old.legacy, 'other.sqlite');
+    new Database(otherStore).close();
+    const otherLedger = tierLedgerPathForStore(otherStore);
+    writeFileSync(otherLedger, readFileSync(oldLedgerPath));
+    writeFileSync(`${otherLedger}-wal`, '');
+    const before = readFileSync(otherLedger);
+    const internal = folderPath(w, 'internal');
+    const located = locateTierItem('garden', { storePaths: [otherStore, internal] });
+    expect(located.map((item) => item.ledgerPath)).toEqual([tierLedgerPathForStore(folderPath(w, 'secure_local'))]);
+    expect(readFileSync(otherLedger)).toEqual(before);
+    expect(() => locateTierItem('garden', { storePaths: [otherStore, legacyPath(old, 'internal')] }))
+      .toThrow(/bound tier ledger could not be read \(schema needs migration\)/);
+    const db = new Database(internal);
+    try {
+      db.query(`DELETE FROM sync_runs WHERE connector_id = 'tiered_store_set_binding'`).run();
+    } finally {
+      db.close();
+    }
+    expect(() => locateTierItem('garden', { storePaths: [otherStore, internal] }))
+      .toThrow(/tier ledger was skipped \(schema needs migration\)/);
+  });
+
+  test('the standalone tier command migrates an old bound ledger before looking up the item', () => {
+    const w = world(false);
+    const ledgerPath = tierLedgerPathForStore(legacyPath(w, 'secure_local'));
+    const storePaths = [legacyPath(w, 'internal')];
+    expect(() => locateTierItem('garden', { storePaths })).toThrow(/schema needs migration/);
+    expect(runTierExplain(['garden'], { storePaths, standalone: true }).stores).toMatchObject([{ recorded: true }]);
+    const ledger = new TierLedger({ dbPath: ledgerPath, readOnly: true });
+    try {
+      expect(ledger.hasCurrentSchema()).toBe(true);
+    } finally {
+      ledger.close();
+    }
   });
 
   test('the sniffer pass reads the set ledger of a renamed store, even when it is the only store it knows', () => {

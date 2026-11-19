@@ -77,15 +77,14 @@ export function tierSetLedgerCandidates(storeDbPath: string, recordedLedgerPath:
  * The path of the ledger a store is bound to, or undefined when none of the
  * candidates holds a ledger with the bound identity. It reads only each
  * candidate's identity (`TierLedger.readLedgerId`): no ledger is created,
- * migrated or changed, though SQLite may leave sidecars. `readOnly` requires
- * a read-only connection even if opening the file that way fails. The answer
- * is about the moment of the read, so whoever opens the path must check the id
- * of the handle it keeps.
+ * migrated or changed, though SQLite may leave an empty -wal or an -shm beside
+ * one. The answer is about the moment of the read, so whoever opens the path
+ * must check the id of the handle it keeps.
  */
-export function findTierSetLedger(storeDbPath: string, binding: TierSetBindingRecord, options?: { readOnly?: boolean }): string | undefined {
+export function findTierSetLedger(storeDbPath: string, binding: TierSetBindingRecord): string | undefined {
   for (const candidate of tierSetLedgerCandidates(storeDbPath, binding.ledgerPath)) {
     if (candidate === ':memory:' || !existsSync(candidate)) continue;
-    if (TierLedger.readLedgerId(candidate, options) === binding.ledgerId) return candidate;
+    if (TierLedger.readLedgerId(candidate) === binding.ledgerId) return candidate;
   }
   return undefined;
 }
