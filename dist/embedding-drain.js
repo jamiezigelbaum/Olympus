@@ -17944,6 +17944,7 @@ var SITE_FRAMES = 3;
 var installed = false;
 var SINGLE_WRITE = /^\s*(UPDATE|DELETE|INSERT)\b[^;]*;?\s*$/i;
 var sliceTiming;
+var benchSql;
 function installMainThreadSqlTrace() {
   if (installed || !isMainThread4)
     return;
@@ -17959,11 +17960,14 @@ function installMainThreadSqlTrace() {
       countSite();
     if (!sliceTiming && !slowLog)
       return exec.apply(this, args);
+    const before = benchSql?.sample();
     const started = performance.now();
     try {
       return exec.apply(this, args);
     } finally {
       const ms = performance.now() - started;
+      if (before)
+        benchSql?.record(before, ms, this.filename, slowSite);
       if (sliceTiming)
         sliceTiming.maxStatementMs = Math.max(sliceTiming.maxStatementMs, ms);
       if (slowLog && ms >= slowLog.thresholdMs)
@@ -18001,11 +18005,14 @@ function timeStatement(statement) {
       const answer = sourceAnswerTraceActive();
       if (!answer && !sliceTiming && !slowLog)
         return call.apply(this, args);
+      const before = benchSql?.sample();
       const started = performance.now();
       try {
         return call.apply(this, args);
       } finally {
         const ms = performance.now() - started;
+        if (before)
+          benchSql?.record(before, ms, held[DB]?.filename ?? "", slowSite);
         if (sliceTiming)
           sliceTiming.maxStatementMs = Math.max(sliceTiming.maxStatementMs, ms);
         if (answer)
@@ -18022,14 +18029,20 @@ function timeStatement(statement) {
       if (!sliceTiming && !slowLog)
         return iterator;
       return function* () {
+        let count = 1;
         try {
           for (;; ) {
+            const before = benchSql?.sample();
             const started = performance.now();
             let next;
             try {
               next = iterator.next();
             } finally {
               const ms = performance.now() - started;
+              if (before) {
+                benchSql?.record(before, ms, held[DB]?.filename ?? "", slowSite, count);
+                count = 0;
+              }
               if (sliceTiming)
                 sliceTiming.maxStatementMs = Math.max(sliceTiming.maxStatementMs, ms);
               if (slowLog && ms >= slowLog.thresholdMs)
@@ -18146,7 +18159,7 @@ function noteSlowStatement(ms, sql) {
 }
 function slowSite() {
   const frames = (new Error().stack ?? "").split(`
-`).slice(1).map((line) => line.trim().replace(/^at /, "")).filter((frame) => frame.length > 0 && !frame.includes("main-thread-sql-trace"));
+`).slice(1).map((line) => line.trim().replace(/^at /, "")).filter((frame) => frame.length > 0 && !frame.includes("main-thread-sql-trace") && !frame.includes("ask-bench-sql"));
   return frames.slice(0, SITE_FRAMES).map(shortFrame).join(" < ");
 }
 function shortHash(text) {
@@ -19327,9 +19340,21 @@ var observeSnapshots = false;
 var workerFactory = (url) => new Worker(url);
 var MMAP_PRAGMA_SLOT = "/*olympus-mmap-pragma*/";
 var mmapPragma = () => sqliteMmapEnabled() ? `try { db.exec('PRAGMA mmap_size = ${SQLITE_MMAP_BYTES}'); } catch {}` : "";
+var benchSqlDir;
+function instrumentBenchWorker(source, dir, store) {
+  const module = new URL("./ask-bench-sql.ts", import.meta.url).href;
+  return source.replace("/*ask-bench-init*/", () => `
+import { createAskBenchSqlRecorder } from ${JSON.stringify(module)};
+const benchStore = ${JSON.stringify(store)};
+const benchSql = createAskBenchSqlRecorder(${JSON.stringify(dir)}, benchStore);
+let benchSample;
+let benchSite;
+`).replace("/*ask-bench-before*/", "benchSite = event.data.site ?? '(unlabelled pool read)'; benchSample = benchSql.sample();").replace("/*ask-bench-after*/", "benchSql.record(benchSample, ms, benchStore, benchSite); benchSample = undefined;");
+}
 var WORKER_SOURCE = `
 import { Database } from 'bun:sqlite';
 import { statSync } from 'node:fs';
+/*ask-bench-init*/
 const snapshots = new Map();
 const connections = new Map();
 const openDatabases = new Map();
@@ -19387,6 +19412,7 @@ const connection = (path) => {
 const statementTiming = (started, cpuStarted) => {
   if (started === undefined) return {};
   const ms = performance.now() - started;
+  /*ask-bench-after*/
   if (cpuStarted === undefined) return { ms };
   const cpu = process.threadCpuUsage(cpuStarted);
   return { ms, cpuMs: (cpu.user + cpu.system) / 1000 };
@@ -19456,6 +19482,7 @@ self.onmessage = (event) => {
       const db = op === 'query' ? connection(path) : snapshots.get(snapshot)?.db;
       if (!db) throw new Error('unknown snapshot');
       cpuStarted = measureCpu ? process.threadCpuUsage?.() : undefined;
+      /*ask-bench-before*/
       started = performance.now();
       const query = db.query(sql);
       const rows = mode === 'all' ? query.all(...params) : query.get(...params);
@@ -19494,7 +19521,8 @@ function startThread(store, lane = "shared") {
   if (threads.filter((reader) => reader.store === store && reader.lane === lane).length >= limit || !runtimeHasWorkers())
     return;
   try {
-    const url = URL.createObjectURL(new Blob([WORKER_SOURCE.replace(MMAP_PRAGMA_SLOT, mmapPragma())], { type: "application/javascript" }));
+    const source = WORKER_SOURCE.replace(MMAP_PRAGMA_SLOT, mmapPragma());
+    const url = URL.createObjectURL(new Blob([benchSqlDir ? instrumentBenchWorker(source, benchSqlDir, store) : source], { type: "application/javascript" }));
     const worker = workerFactory(url);
     worker.unref?.();
     counters.starts += 1;
@@ -19693,7 +19721,14 @@ async function withOffThreadSnapshot(dbPath, work, options = {}) {
         const once = async () => {
           if (moving)
             await moving;
-          return send(reader, { op: "read", snapshot, sql: query.sql, params: query.params, mode: query.mode }, report && ((ms, cpu) => {
+          return send(reader, {
+            op: "read",
+            snapshot,
+            sql: query.sql,
+            params: query.params,
+            mode: query.mode,
+            ...benchSqlDir && { site: query.site ?? site }
+          }, report && ((ms, cpu) => {
             sqlMs = ms;
             cpuMs = cpu;
           }));
@@ -19823,6 +19858,8 @@ function readOnPool(dbPath, read, options = {}) {
   }
   return new Promise((resolve, reject) => {
     const job = { store: dbPath, read, deadlineAtMs, resolve, reject, timer: undefined, lane: currentSourceIndexReadProgress(), enqueuedAtMs: clock2.now(), report };
+    if (benchSqlDir && !read.site)
+      job.benchSite = callerSite();
     if (Number.isFinite(deadlineAtMs))
       job.timer = clock2.setTimeout(() => missedDeadline(job), deadlineAtMs - clock2.now());
     waiting.push(job);
@@ -19944,7 +19981,8 @@ function dispatch() {
     reader.job = job;
     reader.executingStore = job.store;
     observer?.(job.store, job.read);
-    send(reader, { op: "query", path: job.store, sql: job.read.sql, params: job.read.params, mode: job.read.mode }, job.report && ((ms, cpuMs) => {
+    const { sql, params, mode, site } = job.read;
+    send(reader, { op: "query", path: job.store, sql, params, mode, ...benchSqlDir && { site: site ?? job.benchSite } }, job.report && ((ms, cpuMs) => {
       job.sqlMs = ms;
       job.cpuMs = cpuMs;
     })).then((rows) => settle(job, clock2.now() >= job.deadlineAtMs ? { error: new OffThreadReadBusyError } : { rows }), (error) => {

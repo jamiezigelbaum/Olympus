@@ -49110,6 +49110,9 @@ var init_answer_latency_trace = __esm(() => {
 // src/workers/connector-store/main-thread-sql-trace.ts
 import { Database as Database4 } from "bun:sqlite";
 import { isMainThread as isMainThread4 } from "node:worker_threads";
+function setAskBenchLoopSqlRecorder(recorder) {
+  benchSql = recorder;
+}
 function withMainThreadSqlTiming(timing, work) {
   installMainThreadSqlTrace();
   const previous = sliceTiming;
@@ -49135,11 +49138,14 @@ function installMainThreadSqlTrace() {
       countSite();
     if (!sliceTiming && !slowLog)
       return exec.apply(this, args);
+    const before = benchSql?.sample();
     const started = performance.now();
     try {
       return exec.apply(this, args);
     } finally {
       const ms = performance.now() - started;
+      if (before)
+        benchSql?.record(before, ms, this.filename, slowSite);
       if (sliceTiming)
         sliceTiming.maxStatementMs = Math.max(sliceTiming.maxStatementMs, ms);
       if (slowLog && ms >= slowLog.thresholdMs)
@@ -49177,11 +49183,14 @@ function timeStatement(statement) {
       const answer = sourceAnswerTraceActive();
       if (!answer && !sliceTiming && !slowLog)
         return call.apply(this, args);
+      const before = benchSql?.sample();
       const started = performance.now();
       try {
         return call.apply(this, args);
       } finally {
         const ms = performance.now() - started;
+        if (before)
+          benchSql?.record(before, ms, held[DB]?.filename ?? "", slowSite);
         if (sliceTiming)
           sliceTiming.maxStatementMs = Math.max(sliceTiming.maxStatementMs, ms);
         if (answer)
@@ -49198,14 +49207,20 @@ function timeStatement(statement) {
       if (!sliceTiming && !slowLog)
         return iterator;
       return function* () {
+        let count = 1;
         try {
           for (;; ) {
+            const before = benchSql?.sample();
             const started = performance.now();
             let next;
             try {
               next = iterator.next();
             } finally {
               const ms = performance.now() - started;
+              if (before) {
+                benchSql?.record(before, ms, held[DB]?.filename ?? "", slowSite, count);
+                count = 0;
+              }
               if (sliceTiming)
                 sliceTiming.maxStatementMs = Math.max(sliceTiming.maxStatementMs, ms);
               if (slowLog && ms >= slowLog.thresholdMs)
@@ -49339,7 +49354,7 @@ function noteSlowStatement(ms, sql) {
 }
 function slowSite() {
   const frames = (new Error().stack ?? "").split(`
-`).slice(1).map((line) => line.trim().replace(/^at /, "")).filter((frame) => frame.length > 0 && !frame.includes("main-thread-sql-trace"));
+`).slice(1).map((line) => line.trim().replace(/^at /, "")).filter((frame) => frame.length > 0 && !frame.includes("main-thread-sql-trace") && !frame.includes("ask-bench-sql"));
   return frames.slice(0, SITE_FRAMES).map(shortFrame).join(" < ");
 }
 function shortHash(text) {
@@ -49364,7 +49379,7 @@ function shortFrame(frame) {
   const [file, line] = where.split(":");
   return `${name} ${file}${line ? `:${line}` : ""}`;
 }
-var TIMED = "__olympusMainThreadSqlTimed", STATEMENT_METHODS, SITE_FRAMES = 3, installed = false, SINGLE_WRITE, sliceTiming, SQL = "__olympusMainThreadSql", DB = "__olympusMainThreadSqlDb", planRecorder, siteCounts, siteDepth = 2, LOOP_SLOW_SQL_MS = 100, slowLog, SLOW_RECENT = 10;
+var TIMED = "__olympusMainThreadSqlTimed", STATEMENT_METHODS, SITE_FRAMES = 3, installed = false, SINGLE_WRITE, sliceTiming, benchSql, SQL = "__olympusMainThreadSql", DB = "__olympusMainThreadSqlDb", planRecorder, siteCounts, siteDepth = 2, LOOP_SLOW_SQL_MS = 100, slowLog, SLOW_RECENT = 10;
 var init_main_thread_sql_trace = __esm(() => {
   init_front_loop_sql_guard();
   init_answer_latency_trace();
@@ -53116,6 +53131,19 @@ var SOURCE_INDEX_LANE_BUSY_CODE = "source_index_lane_busy";
 function readInBackground(dbPath, query) {
   return withOffThreadSnapshot(dbPath, async (read) => read(query), BACKGROUND_READS);
 }
+function setAskBenchReadPoolSqlDir(dir) {
+  benchSqlDir = dir;
+}
+function instrumentBenchWorker(source, dir, store) {
+  const module = new URL("./ask-bench-sql.ts", import.meta.url).href;
+  return source.replace("/*ask-bench-init*/", () => `
+import { createAskBenchSqlRecorder } from ${JSON.stringify(module)};
+const benchStore = ${JSON.stringify(store)};
+const benchSql = createAskBenchSqlRecorder(${JSON.stringify(dir)}, benchStore);
+let benchSample;
+let benchSite;
+`).replace("/*ask-bench-before*/", "benchSite = event.data.site ?? '(unlabelled pool read)'; benchSample = benchSql.sample();").replace("/*ask-bench-after*/", "benchSql.record(benchSample, ms, benchStore, benchSite); benchSample = undefined;");
+}
 function sampleReadPoolMemory(sampleSqlite = true) {
   const now = Date.now();
   let workers = 0, connections = 0, cache = 0, heap = 0, external = 0, arrayBuffers = 0, age = 0;
@@ -53173,7 +53201,8 @@ function startThread(store, lane = "shared") {
   if (threads.filter((reader) => reader.store === store && reader.lane === lane).length >= limit || !runtimeHasWorkers())
     return;
   try {
-    const url = URL.createObjectURL(new Blob([WORKER_SOURCE.replace(MMAP_PRAGMA_SLOT, mmapPragma())], { type: "application/javascript" }));
+    const source = WORKER_SOURCE.replace(MMAP_PRAGMA_SLOT, mmapPragma());
+    const url = URL.createObjectURL(new Blob([benchSqlDir ? instrumentBenchWorker(source, benchSqlDir, store) : source], { type: "application/javascript" }));
     const worker = workerFactory(url);
     worker.unref?.();
     counters.starts += 1;
@@ -53371,7 +53400,14 @@ async function withOffThreadSnapshot(dbPath, work, options = {}) {
         const once = async () => {
           if (moving)
             await moving;
-          return send(reader, { op: "read", snapshot, sql: query.sql, params: query.params, mode: query.mode }, report && ((ms, cpu) => {
+          return send(reader, {
+            op: "read",
+            snapshot,
+            sql: query.sql,
+            params: query.params,
+            mode: query.mode,
+            ...benchSqlDir && { site: query.site ?? site }
+          }, report && ((ms, cpu) => {
             sqlMs = ms;
             cpuMs = cpu;
           }));
@@ -53508,6 +53544,8 @@ function readOnPool(dbPath, read, options = {}) {
   }
   return new Promise((resolve, reject) => {
     const job = { store: dbPath, read, deadlineAtMs, resolve, reject, timer: undefined, lane: currentSourceIndexReadProgress(), enqueuedAtMs: clock2.now(), report };
+    if (benchSqlDir && !read.site)
+      job.benchSite = callerSite();
     if (Number.isFinite(deadlineAtMs))
       job.timer = clock2.setTimeout(() => missedDeadline(job), deadlineAtMs - clock2.now());
     waiting.push(job);
@@ -53629,7 +53667,8 @@ function dispatch() {
     reader.job = job;
     reader.executingStore = job.store;
     observer?.(job.store, job.read);
-    send(reader, { op: "query", path: job.store, sql: job.read.sql, params: job.read.params, mode: job.read.mode }, job.report && ((ms, cpuMs) => {
+    const { sql, params, mode, site } = job.read;
+    send(reader, { op: "query", path: job.store, sql, params, mode, ...benchSqlDir && { site: site ?? job.benchSite } }, job.report && ((ms, cpuMs) => {
       job.sqlMs = ms;
       job.cpuMs = cpuMs;
     })).then((rows) => settle(job, clock2.now() >= job.deadlineAtMs ? { error: new OffThreadReadBusyError } : { rows }), (error) => {
@@ -53658,9 +53697,10 @@ function dispatch() {
     });
   }
 }
-var READ_POOL_SIZE = 1, BACKGROUND_READS, READ_POOL_RESCORE_READERS = 3, READ_POOL_QUEUE_PER_STORE = 8, lostReplyCheckMs = 2000, OffThreadReadLostError, OffThreadReadBusyError, REAL_CLOCK, clock2, observer, observeSnapshots = false, workerFactory = (url) => new Worker(url), MMAP_PRAGMA_SLOT = "/*olympus-mmap-pragma*/", mmapPragma = () => sqliteMmapEnabled() ? `try { db.exec('PRAGMA mmap_size = ${SQLITE_MMAP_BYTES}'); } catch {}` : "", WORKER_SOURCE = `
+var READ_POOL_SIZE = 1, BACKGROUND_READS, READ_POOL_RESCORE_READERS = 3, READ_POOL_QUEUE_PER_STORE = 8, lostReplyCheckMs = 2000, OffThreadReadLostError, OffThreadReadBusyError, REAL_CLOCK, clock2, observer, observeSnapshots = false, workerFactory = (url) => new Worker(url), MMAP_PRAGMA_SLOT = "/*olympus-mmap-pragma*/", mmapPragma = () => sqliteMmapEnabled() ? `try { db.exec('PRAGMA mmap_size = ${SQLITE_MMAP_BYTES}'); } catch {}` : "", benchSqlDir, WORKER_SOURCE = `
 import { Database } from 'bun:sqlite';
 import { statSync } from 'node:fs';
+/*ask-bench-init*/
 const snapshots = new Map();
 const connections = new Map();
 const openDatabases = new Map();
@@ -53718,6 +53758,7 @@ const connection = (path) => {
 const statementTiming = (started, cpuStarted) => {
   if (started === undefined) return {};
   const ms = performance.now() - started;
+  /*ask-bench-after*/
   if (cpuStarted === undefined) return { ms };
   const cpu = process.threadCpuUsage(cpuStarted);
   return { ms, cpuMs: (cpu.user + cpu.system) / 1000 };
@@ -53787,6 +53828,7 @@ self.onmessage = (event) => {
       const db = op === 'query' ? connection(path) : snapshots.get(snapshot)?.db;
       if (!db) throw new Error('unknown snapshot');
       cpuStarted = measureCpu ? process.threadCpuUsage?.() : undefined;
+      /*ask-bench-before*/
       started = performance.now();
       const query = db.query(sql);
       const rows = mode === 'all' ? query.all(...params) : query.get(...params);
@@ -251394,6 +251436,74 @@ var init_ingestion_dispositions = __esm(() => {
   ];
 });
 
+// src/workers/connector-store/ask-bench-sql.ts
+import { appendFileSync, readFileSync as readFileSync112 } from "node:fs";
+import { join as join155 } from "node:path";
+function createAskBenchSqlRecorder(dir, dbPath) {
+  let file;
+  const rows = new Map;
+  const fail = (error) => {
+    console.error("[ask-bench] SQL disk sampling stopped on this thread:", error);
+    file = undefined;
+  };
+  try {
+    const tid = readFileSync112("/proc/thread-self/stat", "utf8").split(" ", 1)[0];
+    file = join155(dir, `${process.pid}.${tid}.sql.jsonl`);
+    const thread = dbPath === undefined ? { tid } : { tid, db_path: dbPath };
+    appendFileSync(file, JSON.stringify(thread) + `
+`);
+  } catch (error) {
+    fail(error);
+  }
+  function sample() {
+    if (!file)
+      return;
+    try {
+      const io = readFileSync112("/proc/thread-self/io", "utf8");
+      const stat = readFileSync112("/proc/thread-self/stat", "utf8");
+      const read_bytes = Number(/^read_bytes: (\d+)$/m.exec(io)?.[1]);
+      const majflt = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[9]);
+      if (!Number.isFinite(read_bytes) || !Number.isFinite(majflt))
+        throw new Error("Missing read_bytes or majflt in procfs.");
+      return { read_bytes, majflt };
+    } catch (error) {
+      fail(error);
+      return;
+    }
+  }
+  function flush() {
+    if (file) {
+      try {
+        appendFileSync(file, [...rows.values()].map((row) => JSON.stringify(row) + `
+`).join(""));
+      } catch (error) {
+        fail(error);
+      }
+    }
+    rows.clear();
+  }
+  function record(before, ms, path, getSite, count = 1) {
+    if (!before)
+      return;
+    const after = sample();
+    if (!after)
+      return;
+    const at = Date.now();
+    const site = typeof getSite === "string" ? getSite : getSite();
+    const key = JSON.stringify([at, path, site]);
+    if (rows.size === 0)
+      queueMicrotask(flush);
+    const row = rows.get(key) ?? { at, db_path: path, site, count: 0, ms: 0, read_bytes: 0, majflt: 0 };
+    row.count += count;
+    row.ms += ms;
+    row.read_bytes += after.read_bytes - before.read_bytes;
+    row.majflt += after.majflt - before.majflt;
+    rows.set(key, row);
+  }
+  return { sample, record };
+}
+var init_ask_bench_sql = () => {};
+
 // src/core/remote-read-handles.ts
 import { randomBytes as randomBytes39 } from "node:crypto";
 
@@ -271837,7 +271947,7 @@ var init_handoff = __esm(() => {
 });
 
 // src/workers/chatgpt/setup-backend.ts
-import { readFileSync as readFileSync112 } from "node:fs";
+import { readFileSync as readFileSync113 } from "node:fs";
 import { totalmem as totalmem7 } from "node:os";
 import { createHash as createHash120 } from "node:crypto";
 function privacyRuleView(rule) {
@@ -271872,7 +271982,7 @@ function privacyRevision(profile) {
 function createChatGptSetupBackend(options) {
   let policy = options.sovereignty.config;
   const privacySettings = () => {
-    const current = options.sovereignty.source === "file" && options.sovereignty.path ? validateSovereigntyConfig(JSON.parse(readFileSync112(options.sovereignty.path, "utf8"))) : policy;
+    const current = options.sovereignty.source === "file" && options.sovereignty.path ? validateSovereigntyConfig(JSON.parse(readFileSync113(options.sovereignty.path, "utf8"))) : policy;
     policy = current;
     const policyRevision = createHash120("sha256").update(JSON.stringify(current)).digest("hex").slice(0, 16);
     if (isPendingPrivacyPolicy(current))
@@ -273344,7 +273454,7 @@ var init_dashboard_panel_tools = __esm(() => {
 });
 
 // src/workers/setup-status.ts
-import { readFileSync as readFileSync113 } from "node:fs";
+import { readFileSync as readFileSync114 } from "node:fs";
 function sourceState(card) {
   if (card.connection.state === "reauth_required")
     return "needs_you";
@@ -273380,7 +273490,7 @@ function currentPolicy(policy) {
   if (!policy.path)
     return policy.config;
   try {
-    return validateSovereigntyConfig(JSON.parse(readFileSync113(policy.path, "utf8")));
+    return validateSovereigntyConfig(JSON.parse(readFileSync114(policy.path, "utf8")));
   } catch {
     return policy.config;
   }
@@ -273579,10 +273689,10 @@ __export(exports_server, {
 import { SQLiteError as SQLiteError3 } from "bun:sqlite";
 import { release as release2, totalmem as totalmem8 } from "node:os";
 import { execFile as execFile6 } from "node:child_process";
-import { appendFileSync, existsSync as existsSync128, readFileSync as readFileSync114, writeFileSync as writeFileSync30 } from "node:fs";
+import { appendFileSync as appendFileSync2, existsSync as existsSync128, readFileSync as readFileSync115, writeFileSync as writeFileSync30 } from "node:fs";
 import { appendFile as appendFile2, writeFile as writeFile7 } from "node:fs/promises";
 import { fileURLToPath as fileURLToPath15 } from "node:url";
-import { dirname as dirname122, join as join155 } from "node:path";
+import { dirname as dirname122, join as join156 } from "node:path";
 async function startWorkerWithLaunch(launch) {
   workerLaunch = { ...launch };
   await mainRecordingFrontFailure();
@@ -273598,6 +273708,13 @@ async function mainRecordingFrontFailure() {
 async function main() {
   dataOwnerLock = takeWorkerDataOwnerLock(process.env, { engineRole: engineRoleFromEnv(process.env) });
   const engineRole = engineRoleFromEnv(process.env);
+  const askBench = false;
+  if (askBench && process.env.OLYMPUS_ASK_BENCH_SQL_DIR) {
+    const dir = process.env.OLYMPUS_ASK_BENCH_SQL_DIR;
+    await Promise.resolve().then(() => init_ask_bench_sql());
+    setAskBenchLoopSqlRecorder(createAskBenchSqlRecorder(dir));
+    setAskBenchReadPoolSqlDir(dir);
+  }
   const setupEnvPath = engineRole === "front" ? workerSetupEnvPath() : undefined;
   const freshSetupEnv = setupEnvPath ? () => readWorkerSetupEnvAsync({ workerEnvPath: setupEnvPath }) : undefined;
   let frontSetupEnv;
@@ -273638,7 +273755,7 @@ async function main() {
     if (queueSlowSql)
       queueSlowSql(() => appendFile2(slowSqlFile, record));
     else
-      appendFileSync(slowSqlFile, record);
+      appendFileSync2(slowSqlFile, record);
   } : undefined);
   if (engineRole !== "front" || process.env.OLYMPUS_ENGINE_LOOP_METRICS_DIR) {
     startEngineHeartbeat(process.env, engineRole);
@@ -273649,7 +273766,7 @@ async function main() {
   const sqlSitesDir = process.env.OLYMPUS_MAIN_THREAD_SQL_SITES?.trim();
   if (sqlSitesDir) {
     const sqlSites = startMainThreadSqlSiteCount(Number(process.env.OLYMPUS_MAIN_THREAD_SQL_SITE_FRAMES) || 2);
-    const path = join155(sqlSitesDir, `${engineRole}.sql-sites.json`);
+    const path = join156(sqlSitesDir, `${engineRole}.sql-sites.json`);
     const queue = engineRole === "front" ? serializeDiagnosticWrites(() => {}) : undefined;
     const writeSqlSites = () => {
       try {
@@ -273695,7 +273812,7 @@ async function main() {
   }
   const retired = retiredPathSettings(process.env);
   if (retired.length > 0) {
-    throw new Error(`[storage] These path settings are no longer read (source storage step 6): ${retired.join("; ")}. ` + "Move each file to where Olympus keeps it, or remove the setting if it named the usual place, then start again.");
+    throw new Error(`[storage] These path settings are no longer read (source storage step 6): ${retired.join("; ")}. Move each file to where Olympus keeps it, or remove the setting if it named the usual place, then start again.`);
   }
   if (engineRole !== "front") {
     reportBootStep(process.env, { phase: "starting" });
@@ -273761,7 +273878,7 @@ async function main() {
   let localWorkPending = () => false;
   const localPacer = new LocalWorkPacer({
     probe: systemIdlePowerProbe(),
-    settingPath: join155(dirname122(resolveClassificationLedgerPath(process.env)), "go-easy.json"),
+    settingPath: join156(dirname122(resolveClassificationLedgerPath(process.env)), "go-easy.json"),
     pendingLocalWork: () => localWorkPending(),
     log: (line) => console.log(line)
   });
@@ -276506,7 +276623,20 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         });
       })
     ].filter((source) => source !== undefined);
-    if (false) {}
+    if (askBench) {
+      for (const { corpusId, sourceId } of sourceCorpusRegistry.list("search")) {
+        if (!sourceId.startsWith("ask-bench."))
+          continue;
+        sources.push({
+          corpusId,
+          sourceId,
+          cadence: "continuous",
+          intervalMs: olympusConfig.worker.scheduler.syncIntervalSeconds * 1000,
+          freshnessThresholdHours: olympusConfig.worker.scheduler.freshnessThresholdHours,
+          tasks: []
+        });
+      }
+    }
     let gmailImportedHistory;
     if (!sources.some((source) => source.sourceId === SCHEDULER_SOURCE_IDS.gmail) && gmailInternalConnectorStore && gmailSecureConnectorStore && gmailHoldsImportedHistory([gmailInternalConnectorStore, gmailSecureConnectorStore, gmailTierLane?.publicStore?.current()])) {
       gmailImportedHistory = createGmailImportedHistorySchedulerSource({ config: olympusConfig });
@@ -276999,7 +277129,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   const selfUpdater = createSelfUpdater({
     platform: process.platform,
     runningVersion: runningOlympusVersion(),
-    stateDir: join155(engineServicePaths().logDir, "updates"),
+    stateDir: join156(engineServicePaths().logDir, "updates"),
     standaloneEngine: isStandaloneEngineProcess(process.env),
     available: () => updateChecker.available()
   });
@@ -277224,7 +277354,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
             return { ok: false, message: "This Olympus has no policy file to change." };
           let current;
           try {
-            current = validateSovereigntyConfig(JSON.parse(readFileSync114(sovereigntyEngine.path, "utf8")));
+            current = validateSovereigntyConfig(JSON.parse(readFileSync115(sovereigntyEngine.path, "utf8")));
           } catch {
             return { ok: false, message: "The privacy policy file cannot be read." };
           }
@@ -277568,7 +277698,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       inbox: waitingQuestionStore,
       judgeBusy: () => classificationBusy(),
       interactiveBusy: () => answerActivity.interactiveInFlight > 0,
-      paceFile: join155(dirname122(resolveClassificationLedgerPath(process.env)), "deep-read-pace.json"),
+      paceFile: join156(dirname122(resolveClassificationLedgerPath(process.env)), "deep-read-pace.json"),
       relevantItems: async (question, set, corpusIds) => {
         const conversationId = set.selected_item.provider_conversation_id;
         if (!conversationId)
@@ -278448,7 +278578,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     } : {},
     ...fileExtractionRuntime ? { extractionState: (identity) => fileExtractionRuntime.jobs.itemExtractionState(identity) } : {},
     ownerContext: privacyOwnerWords,
-    budgetStatePath: join155(dirname122(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
+    budgetStatePath: join156(dirname122(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
     intervalMs: snifferEnv.intervalMs,
     ...snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {},
     ...snifferEnv.concurrentCalls !== undefined ? { concurrentCalls: snifferEnv.concurrentCalls } : snifferLane.kind === "tinfoil" ? { concurrentCalls: 4 } : snifferLane.kind === "venice" ? { concurrentCalls: DEFAULT_VENICE_JUDGE_CONCURRENT_CALLS } : {},
@@ -278953,7 +279083,7 @@ function frontLoopSqlAllowance() {
   const path = fileURLToPath15(new URL("../../../config/front-loop-sql-allowance.json", import.meta.url));
   if (!existsSync128(path))
     return {};
-  const sections = JSON.parse(readFileSync114(path, "utf8")).sites;
+  const sections = JSON.parse(readFileSync115(path, "utf8")).sites;
   return { allowed: Object.values(sections).flat() };
 }
 var workerLaunch, dataOwnerLock, VISIBILITY_REFRESH_MS = 30000, FRONT_MOUNT_LOOK_AFTER_CHANGE_MS = 60000, FRONT_MOUNT_LOOK_QUIET_MS = 60000, FRONT_MOUNT_FAILURE_RETRY_MS, FRONT_VISIBILITY_READY_BOUND_MS = 15000;
@@ -279615,7 +279745,7 @@ init_messaging_capture();
 init_config2();
 import { randomBytes as randomBytes43 } from "node:crypto";
 import { spawnSync as spawnSync23 } from "node:child_process";
-import { existsSync as existsSync129, readFileSync as readFileSync115, openSync as openSync37, closeSync as closeSync38, writeSync as writeSync10 } from "node:fs";
+import { existsSync as existsSync129, readFileSync as readFileSync116, openSync as openSync37, closeSync as closeSync38, writeSync as writeSync10 } from "node:fs";
 import { createInterface as createInterface3 } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { resolve as resolve34 } from "node:path";
@@ -283270,7 +283400,7 @@ function parseArgs(operation, args) {
     }
   }
   if (operation.cliHints.stdin && params[operation.cliHints.stdin] === undefined && !process.stdin.isTTY) {
-    params[operation.cliHints.stdin] = readFileSync115("/dev/stdin", "utf8");
+    params[operation.cliHints.stdin] = readFileSync116("/dev/stdin", "utf8");
   }
   return params;
 }
@@ -283625,7 +283755,7 @@ function parseOwnerTierOverrideArgs(args) {
     throw new OperationError("invalid_params", "Owner tier override requires --reason <string>.");
   let raw;
   try {
-    raw = readFileSync115(resolve34(input2), "utf8");
+    raw = readFileSync116(resolve34(input2), "utf8");
   } catch (error) {
     throw new OperationError("invalid_params", `Owner tier override --input file could not be read: ${error.message}`);
   }
@@ -285263,7 +285393,7 @@ async function runSettingsPropose(args, env, options) {
     throw new OperationError("invalid_params", SETTINGS_USAGE);
   let text;
   try {
-    text = file === "-" ? (options.readStdin ?? (() => readFileSync115(0, "utf8")))() : readFileSync115(file, "utf8");
+    text = file === "-" ? (options.readStdin ?? (() => readFileSync116(0, "utf8")))() : readFileSync116(file, "utf8");
   } catch (error) {
     throw new OperationError("invalid_params", `Could not read ${file === "-" ? "the proposal from standard input" : file}: ${error instanceof Error ? error.message : String(error)}`);
   }

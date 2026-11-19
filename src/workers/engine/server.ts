@@ -111,7 +111,7 @@ import {
 } from '../source-index/status.ts';
 import { startPacedStatusRecount, type PacedStatusRecount } from './status-recount.ts';
 import { storeTotalsReconcileDue } from '../connector-store/store-totals.ts';
-import { LOOP_SLOW_SQL_MS, slowMainThreadSqlHealth, startMainThreadSqlSiteCount, startSlowMainThreadSqlLog } from '../connector-store/main-thread-sql-trace.ts';
+import { LOOP_SLOW_SQL_MS, setAskBenchLoopSqlRecorder, slowMainThreadSqlHealth, startMainThreadSqlSiteCount, startSlowMainThreadSqlLog } from '../connector-store/main-thread-sql-trace.ts';
 import {
   dashboardOwnerSessionCheck,
   resolveWorkerBindHost,
@@ -305,7 +305,7 @@ import { createParentLabelResolver } from '../connector-store/parent-label.ts';
 import { createUnreadableLocators } from '../connector-store/unreadable-locators.ts';
 import { hiddenProbesByParentIdentity, settleStaleEmbedHolds } from '../connector-store/child-visibility.ts';
 import { sqliteFilesHealth, startSqliteWalSampler } from './sqlite-wal-sampler.ts';
-import { readPoolDiagnostics, readPoolMemoryCounts, sampleReadPoolMemory } from '../connector-store/off-thread-reads.ts';
+import { readPoolDiagnostics, readPoolMemoryCounts, sampleReadPoolMemory, setAskBenchReadPoolSqlDir } from '../connector-store/off-thread-reads.ts';
 import { startSqliteCheckpointer } from './sqlite-checkpointer.ts';
 import { setSqliteCheckpointsOffLoop, sqliteFilesForOffLoopCheckpoints } from '../../core/sqlite-store.ts';
 import { tierSnifferPathForLedger } from '../classification/tier-ledger-path.ts';
@@ -665,6 +665,13 @@ export async function main(): Promise<void> {
   // split's front (core/engine-split.ts) takes no lock: its background holds it.
   dataOwnerLock = takeWorkerDataOwnerLock(process.env, { engineRole: engineRoleFromEnv(process.env) });
   const engineRole = engineRoleFromEnv(process.env);
+  const askBench = process.env.NODE_ENV === 'test' && process.env.OLYMPUS_ASK_BENCH === '1';
+  if (askBench && process.env.OLYMPUS_ASK_BENCH_SQL_DIR) {
+    const dir = process.env.OLYMPUS_ASK_BENCH_SQL_DIR;
+    const { createAskBenchSqlRecorder } = await import('../connector-store/ask-bench-sql.ts');
+    setAskBenchLoopSqlRecorder(createAskBenchSqlRecorder(dir));
+    setAskBenchReadPoolSqlDir(dir);
+  }
   const setupEnvPath = engineRole === 'front' ? workerSetupEnvPath() : undefined;
   const freshSetupEnv = setupEnvPath ? () => readWorkerSetupEnvAsync({ workerEnvPath: setupEnvPath }) : undefined;
   let frontSetupEnv: Record<string, string> | undefined;
@@ -4606,7 +4613,7 @@ export async function main(): Promise<void> {
     ].filter((source): source is SourceSchedulerSource => source !== undefined);
     // The Ask benchmark mounts completed synthetic stores without connecting
     // accounts. Give those stores the same idle embedding sweep as live lanes.
-    if (process.env.NODE_ENV === 'test' && process.env.OLYMPUS_ASK_BENCH === '1') {
+    if (askBench) {
       for (const { corpusId, sourceId } of sourceCorpusRegistry.list('search')) {
         if (!sourceId.startsWith('ask-bench.')) continue;
         sources.push({ corpusId, sourceId, cadence: 'continuous', intervalMs: olympusConfig.worker.scheduler.syncIntervalSeconds * 1_000,
