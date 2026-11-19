@@ -259,6 +259,8 @@ async function buildStore(dir: string, scale: number, index: number) {
     const digests = db(store).query('SELECT count(*) AS n FROM chunk_vector_digest').get() as { n: number };
     digestRows = digests.n;
     if (digestRows !== (spec.vector ? count : 0)) throw new Error(`Incorrect digest row count for ${spec.corpusId}`);
+    // An installed store's totals are present and exact; a fresh one owes a walk on its first start.
+    await store.reconcileTotals();
     for (const handle of [store, ledger]) db(handle).query('PRAGMA wal_checkpoint(TRUNCATE)').all();
   } finally {
     store.close();
@@ -809,6 +811,12 @@ async function run(args: Args, build: BuildReceipt, limits: Limits) {
     idleLog = undefined;
     for (const { n, last } of [...shapes.values()].sort((left, right) => right.n - left.n).slice(0, 60)) console.log(`Idle log x${n} ${last.slice(0, 600)}`);
     const workerFetch = createWorkerFetch({ platform: 'linux', env });
+    // The same Asks with the background stopped: what the Ask costs on its own.
+    const holdBackground = args.extraEnv.ASK_BENCH_HOLD_BACKGROUND === '1';
+    if (holdBackground) {
+      process.kill(background.pid, 'SIGSTOP');
+      console.log('Background held (SIGSTOP) for the six Asks');
+    }
     const askStart = takeDiskSamples();
     try {
       for (const [label, index] of [['q1-new', 0], ['q1-repeat', 0], ['q2-new', 1], ['q3-new', 2], ['q4-new', 3], ['q5-new', 4]] as const) {
@@ -846,6 +854,7 @@ async function run(args: Args, build: BuildReceipt, limits: Limits) {
         if (dropRecencyIndexes) console.log(`Recency indexes after ${label} ${JSON.stringify(recencyIndexState())}`);
       }
     } finally {
+      if (holdBackground) process.kill(background.pid, 'SIGCONT');
       await reportDisk('six Asks', askStart, takeDiskSamples(), newSiteTotals());
     }
     frontThreads = procNumber(optionalText(`/proc/${front.pid}/status`), 'Threads');

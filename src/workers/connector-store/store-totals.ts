@@ -9,13 +9,11 @@
 // still moves the totals. What can leave them wrong is a trigger missing (an
 // older build's table rebuild drops them until the next open; nothing here
 // writes with REPLACE, which fires no delete trigger). So the totals are
-// walked again only when they were never filled or a trigger had to be put
-// back, not on a clock (plan thread, 16 Nov: a reconcile that must visit
-// everything walks by key ranges, paced, and only when needed). The walk
-// reads each table a range of keys at a time, each page its own read on the
-// read worker, and carries over what the triggers added since it began; a
-// walk that saw no write at all is exact, and one that did is walked again an
-// hour later.
+// walked in the background when missing, suspect, or when their inputs
+// change. The walk reads each table a range of keys at a time, each page its
+// own read on the read worker, and carries over what the triggers added since it began; a
+// walk that saw no write at all is exact, and one that did is retried after a
+// quiet hour.
 //
 // A new table and triggers, created on open with IF NOT EXISTS like the
 // visibility feed: no schema version change, so an older build still opens
@@ -150,7 +148,8 @@ export function readStoreTotals(db: Database): StoreTotals | undefined {
   if (!state) return undefined;
   const rows = db.query('SELECT name, n FROM store_totals').all() as Array<{ name: string; n: number }>;
   const totals = storeTotalsFromRows(rows, state.reconciled_at);
-  if (state.drift === WALK_OWED_NOW) totals.walkOwed = 'now';
+  // A negative aggregate proves drift without scanning the underlying rows.
+  if (state.drift === WALK_OWED_NOW || rows.some(({ name, n }) => name !== STORE_TOTALS_WRITES && n < 0)) totals.walkOwed = 'now';
   else if (state.drift === WALK_OWED_LATER) totals.walkOwed = 'later';
   return totals;
 }
@@ -279,15 +278,12 @@ export function applyStoreTotalsCount(db: Database, count: StoreTotalsCount, now
   return drift;
 }
 
-/** How long after a walk that saw writes the totals are walked again. */
-export const STORE_TOTALS_REWALK_AFTER_MS = 60 * 60_000;
+/** How long the store's write sequence must hold still before retrying an interrupted walk. */
+export const STORE_TOTALS_QUIET_MS = 60 * 60_000;
 
-/** True when the totals were never filled, a trigger was put back, or the last walk saw writes over an hour ago. */
-export function storeTotalsReconcileDue(totals: StoreTotals | undefined, nowMs: number): boolean {
-  if (!totals || totals.walkOwed === 'now') return true;
-  if (totals.walkOwed !== 'later') return false;
-  const at = Date.parse(totals.reconciledAt);
-  return !Number.isFinite(at) || nowMs - at >= STORE_TOTALS_REWALK_AFTER_MS;
+/** Keep the trigger-maintained counts when a walk of already-filled totals saw writes. */
+export function deferStoreTotalsWalk(db: Database): void {
+  db.query('UPDATE store_totals_state SET drift = ? WHERE id = 1').run(WALK_OWED_LATER);
 }
 
 /** The write sequence (STORE_TOTALS_WRITES), or undefined where the store has none. One small read. */
