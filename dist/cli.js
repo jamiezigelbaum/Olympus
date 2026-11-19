@@ -55495,7 +55495,9 @@ ${localNotice}`) ? answer.slice(0, -localNotice.length - 2) : answer;
   const reason = typeof record.deep_read_refused === "string" && Object.hasOwn(refusalReasons, record.deep_read_refused) ? refusalReasons[record.deep_read_refused] : "The full read could not be started.";
   const remoteNotice = job ? `
 
-Reading the full item for this question; the answer follows in Private answers. Poll source_deep_read_status with the deep_read id.` : localNotice ? `
+Reading the full item for this question; the answer follows in Private answers. Poll source_deep_read_status with the deep_read id.` : localNotice && record.deep_read_refused === "read_in_part" ? `
+
+Some items were read only in part. To read one in full for this question, use source_deep_read with its read_handle.` : localNotice ? `
 
 The full item was not read: ${reason} Use source_deep_read to request the full read.` : "";
   return { ordinaryAnswer, remoteNotice, job };
@@ -108439,7 +108441,7 @@ var init_deep_read_refused = __esm(() => {
 });
 
 // src/workers/source-index/deep-read-trigger.ts
-async function triggerDeepRead(detail, result, jobs, onSkippedTooLong) {
+async function triggerDeepRead(detail, result, jobs, onSkippedTooLong, options = {}) {
   if (result.unanswered.length === 0 && result.citations.length > 0)
     return {};
   const cited = new Set(result.citations.map((citation) => citation.provenance.sourceItem.localItemId));
@@ -108450,6 +108452,12 @@ async function triggerDeepRead(detail, result, jobs, onSkippedTooLong) {
       return [];
     return [{ seat, candidate, corpusId, cited: cited.has(candidate.provenance.sourceItem.localItemId) }];
   }).sort((a, b) => Number(b.cited) - Number(a.cited) || a.seat - b.seat);
+  if (!options.autoStart) {
+    const titles = [...new Set(headSeats.sort((a, b) => a.seat - b.seat).map(({ candidate }) => candidate.provenance.citation?.title ?? "a document"))];
+    if (titles.length === 0)
+      return {};
+    return { refused: "read_in_part", notice: `Read only in part: ${titles.map((title) => `"${title}"`).join(", ")}. To read one in full for this question, ask for source_deep_read on it.` };
+  }
   let firstRefusal;
   for (const { candidate, corpusId } of headSeats) {
     const item = candidate.provenance.sourceItem;

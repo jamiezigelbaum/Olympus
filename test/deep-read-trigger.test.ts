@@ -54,7 +54,7 @@ test('an unanswered long fixture item starts exactly one whole-item job and read
   try {
     expect(f.detail.truncatedCandidateIndexes?.length).toBeGreaterThan(0);
     expect(f.detail.pack.candidates[0]!.chunks.join('')).not.toContain(conclusion);
-    const result = await triggerDeepRead(f.detail, missing, f.jobs);
+    const result = await triggerDeepRead(f.detail, missing, f.jobs, undefined, { autoStart: true });
     expect(result.job).toBeDefined();
     expect(f.jobs.status()).toHaveLength(1);
     expect(f.jobs.status()[0]!.items).toBe(1);
@@ -66,11 +66,22 @@ test('an unanswered long fixture item starts exactly one whole-item job and read
   } finally { f.store.close(); }
 });
 
+test('by default nothing starts: a gap names every head item read only in part', async () => {
+  const f = await fixture(true);
+  try {
+    const result = await triggerDeepRead(f.detail, missing, f.jobs);
+    expect(result.job).toBeUndefined();
+    expect(f.jobs.status()).toHaveLength(0);
+    expect(result.notice).toContain('Read only in part: "');
+    expect(result.notice).toContain('source_deep_read');
+  } finally { f.store.close(); }
+});
+
 test('a short item read whole does not start a job', async () => {
   const f = await fixture(false);
   try {
     expect(f.detail.truncatedCandidateIndexes).toEqual([]);
-    expect(await triggerDeepRead(f.detail, missing, f.jobs)).toEqual({});
+    expect(await triggerDeepRead(f.detail, missing, f.jobs, undefined, { autoStart: true })).toEqual({});
     expect(f.jobs.status()).toHaveLength(0);
   } finally { f.store.close(); }
 });
@@ -81,7 +92,7 @@ test('an over-limit first seat is skipped and the second flagged seat is read', 
     expect(f.detail.truncatedCandidateIndexes).toEqual([0, 1]);
     expect(f.detail.pack.candidates.map(candidate => candidate.provenance.sourceItem.providerItemId)).toEqual(['first', 'second']);
     const skipped: number[] = [];
-    const result = await triggerDeepRead(f.detail, missing, f.jobs, sectionsTotal => skipped.push(sectionsTotal));
+    const result = await triggerDeepRead(f.detail, missing, f.jobs, sectionsTotal => skipped.push(sectionsTotal), { autoStart: true });
     expect(skipped).toHaveLength(1);
     expect(skipped[0]).toBeGreaterThan(40);
     expect(result.job?.providerItemId).toBe('second');
@@ -95,7 +106,7 @@ test('a cited flagged second seat is preferred even when the first fits', async 
   try {
     expect(f.detail.truncatedCandidateIndexes).toEqual([0, 1]);
     const provenance = f.detail.pack.candidates[1]!.provenance;
-    const result = await triggerDeepRead(f.detail, { ...missing, citations: [{ provenance, claim: 'Project background.' }] }, f.jobs);
+    const result = await triggerDeepRead(f.detail, { ...missing, citations: [{ provenance, claim: 'Project background.' }] }, f.jobs, undefined, { autoStart: true });
     expect(result.job?.providerItemId).toBe(provenance.sourceItem.providerItemId);
     expect(f.jobs.status()).toHaveLength(1);
     await f.jobs.wait(result.job!.id);
@@ -110,7 +121,7 @@ test('when measured pace puts both seats over the limit, the first file and its 
     writeFileSync(paceFile, JSON.stringify({ fixture: 960 }));
     const jobs = f.makeJobs(paceFile);
     const skipped: number[] = [];
-    const result = await triggerDeepRead(f.detail, missing, jobs, sectionsTotal => skipped.push(sectionsTotal));
+    const result = await triggerDeepRead(f.detail, missing, jobs, sectionsTotal => skipped.push(sectionsTotal), { autoStart: true });
     expect(skipped).toHaveLength(2);
     expect(skipped[0]).toBeLessThanOrEqual(40);
     expect(result.refused).toBe('too_long');
@@ -130,7 +141,7 @@ test('when measured pace puts both seats over the limit, the first file and its 
 test('an answered question does not start a job even with cut head seats', async () => {
   const f = await fixture(true);
   try {
-    expect(await triggerDeepRead(f.detail, { answer: conclusion, citations: [{ provenance: f.detail.pack.candidates[0]!.provenance, claim: conclusion }], unanswered: [] }, f.jobs)).toEqual({});
+    expect(await triggerDeepRead(f.detail, { answer: conclusion, citations: [{ provenance: f.detail.pack.candidates[0]!.provenance, claim: conclusion }], unanswered: [] }, f.jobs, undefined, { autoStart: true })).toEqual({});
     expect(f.jobs.status()).toHaveLength(0);
   } finally { f.store.close(); }
 });
@@ -138,27 +149,25 @@ test('an answered question does not start a job even with cut head seats', async
 test('only reserved head seats qualify, and a refusal names the file and offers the existing tool', async () => {
   const f = await fixture(true);
   try {
-    expect(await triggerDeepRead({ ...f.detail, truncatedCandidateIndexes: [3] }, missing, f.jobs)).toEqual({});
-    const result = await triggerDeepRead(f.detail, missing, { start: async () => { throw new DeepReadRefused('model_unavailable', 'Your private model is unavailable.'); } });
+    expect(await triggerDeepRead({ ...f.detail, truncatedCandidateIndexes: [3] }, missing, f.jobs, undefined, { autoStart: true })).toEqual({});
+    const result = await triggerDeepRead(f.detail, missing, { start: async () => { throw new DeepReadRefused('model_unavailable', 'Your private model is unavailable.'); } }, undefined, { autoStart: true });
     expect(result.refused).toBe('model_unavailable');
     expect(result.notice).toContain(f.detail.pack.candidates[0]!.provenance.citation!.title!);
     expect(result.notice).toContain('source_deep_read');
   } finally { f.store.close(); }
 });
 
-test('Ask returns the ordinary answer with its background handle and notice', async () => {
+test('Ask returns the ordinary answer, starts nothing by itself, and keeps a withheld answer\'s titles out', async () => {
   const f = await fixture(true);
   try {
     const result = await createAnalystSourceIndexAnswerHandler({ analyst: { analyze: async () => missing }, lanes: () => f.lanes,
       maxCharsPerCandidate: 100, deepRead: () => f.jobs,
     }).answer({ question, retrieval_mode: 'keyword' });
     expect(result.answer).toStartWith(WITHHELD_ANSWERS.private);
-    expect(result.answer).toContain('the answer follows in Private answers');
     expect(JSON.stringify(result)).not.toContain('first.txt');
     expect(JSON.stringify(result)).not.toContain('second.txt');
-    expect(result.deep_read).toBeDefined();
-    expect(f.jobs.status()).toHaveLength(1);
-    await f.jobs.wait(result.deep_read!.id);
+    expect(result.deep_read).toBeUndefined();
+    expect(f.jobs.status()).toHaveLength(0);
   } finally { f.store.close(); }
 });
 
