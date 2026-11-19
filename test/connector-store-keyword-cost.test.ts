@@ -80,27 +80,30 @@ test('store-wide concept counts are read once, not on every search', async () =>
   for (const run of [first[1]!, ...second]) expect(run.statements.concept_weight_count).toBeUndefined();
 });
 
-test('the population count is read once and then only off the search path, however long the store sat idle', async () => {
+test('the population is never counted inside a search: an estimate first, then counts only off the search path', async () => {
   const store = await openStore();
   let counts = 0;
   setReadPoolObserverForTests((_dbPath, read) => { if (read.sql.includes('COUNT(*) AS count FROM items WHERE tombstoned')) counts += 1; }, { snapshots: true });
   cleanups.push(() => setReadPoolObserverForTests(undefined));
   try {
-    await store.searchItemsDetailedOffThread(QUESTION, 5, undefined, undefined, {});
-    expect(counts).toBe(1);
+    // A store that has never counted answers from an estimate, with no scan.
+    const first = await store.searchItemsDetailedOffThread(QUESTION, 5, undefined, undefined, {});
+    expect(first.rows[0]?.sourceItem.providerItemId).toBe('answer');
+    expect(counts).toBe(0);
     // Ten idle minutes later a different question does not count the store again.
     setSystemTime(Date.now() + 10 * 60_000);
     const later = await store.searchItemsDetailedOffThread('garden supplies invoice running total spring', 5, undefined, undefined, {});
     expect(later.rows.length).toBeGreaterThan(0);
-    expect(counts).toBe(1);
-    // The engine's refresh takes the store's kept total when it has one (no scan), else counts once.
+    expect(counts).toBe(0);
+    // The engine's refresh replaces the estimate at once: the store's kept total when it has one (no scan), else one count.
     const kept = store.totals();
-    const scans = kept && kept.walkOwed !== 'now' ? 1 : 2;
+    const scans = kept && kept.walkOwed !== 'now' ? 0 : 1;
     await store.keepKeywordPopulationCurrent();
     expect(counts).toBe(scans);
     // An unused count is left alone.
     setSystemTime(Date.now() + 10 * 60_000);
     await store.keepKeywordPopulationCurrent();
+    await store.keepKeywordPopulationCurrent(true);
     expect(counts).toBe(scans);
     // A search after the refresh still finds the answer with the refreshed population.
     const again = await store.searchItemsDetailedOffThread(QUESTION, 5, undefined, undefined, {});

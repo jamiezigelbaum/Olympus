@@ -15369,9 +15369,12 @@ export class LocalConnectorStore {
   // (LANEAB2, 19 Nov 2026), and it used to expire with the concept counts, so
   // the first new question after five idle minutes paid it on every store. A
   // search now uses the remembered count however old; the engine refreshes it
-  // off the search's path (keepKeywordPopulationCurrent), and only a store
-  // that has never counted reads it inline.
-  private keywordPopulation?: { count: number; at: number; used: boolean };
+  // off the search's path (keepKeywordPopulationCurrent). A store that has
+  // never counted does not scan inside the search either (26 and 45 s on the
+  // two largest stores for an Ask in the first minute after a start, 19 Nov
+  // 2026): it takes the store's kept total, or the highest item key, as an
+  // estimate. The weights are logarithms of it, and the count replaces it.
+  private keywordPopulation?: { count: number; at: number; used: boolean; estimate?: boolean };
   private keywordPopulationRefreshing = false;
 
   /**
@@ -15383,7 +15386,8 @@ export class LocalConnectorStore {
   async keepKeywordPopulationCurrent(seed = false): Promise<void> {
     const known = this.keywordPopulation;
     if (this.keywordPopulationRefreshing || this.closedForPoolReads) return;
-    if (seed ? known !== undefined : !known || !known.used || Date.now() - known.at < CONCEPT_COUNT_MAX_AGE_MS) return;
+    const counted = known !== undefined && known.estimate !== true;
+    if (seed ? counted : !known || (counted && (!known.used || Date.now() - known.at < CONCEPT_COUNT_MAX_AGE_MS))) return;
     // The store's own kept total of live items is the same number with no scan;
     // the scan is only for a store whose totals are not filled or owe a walk.
     const kept = this.totals();
@@ -15769,8 +15773,10 @@ export class LocalConnectorStore {
     };
     let population = this.keywordPopulation;
     if (!population) {
-      const counted = ((yield { mode: 'get', site: 'keyword_population_count', sql: KEYWORD_POPULATION_SQL, params: [] }) as { count: number }).count;
-      population = this.keywordPopulation ??= { count: counted, at: Date.now(), used: true };
+      const kept = this.totals();
+      const estimate = kept ? kept.items
+        : ((yield { mode: 'get', site: 'keyword_population_estimate', sql: 'SELECT MAX(item_pk) AS count FROM items', params: [] }) as { count: number | null }).count ?? 0;
+      population = this.keywordPopulation ??= { count: estimate, at: Date.now(), used: true, estimate: true };
     }
     population.used = true;
     const items = population.count;

@@ -76871,7 +76871,8 @@ ${parentKey(ref)}`, { ref, origin });
       const known = this.keywordPopulation;
       if (this.keywordPopulationRefreshing || this.closedForPoolReads)
         return;
-      if (seed ? known !== undefined : !known || !known.used || Date.now() - known.at < CONCEPT_COUNT_MAX_AGE_MS)
+      const counted = known !== undefined && known.estimate !== true;
+      if (seed ? counted : !known || counted && (!known.used || Date.now() - known.at < CONCEPT_COUNT_MAX_AGE_MS))
         return;
       const kept = this.totals();
       if (kept && kept.walkOwed !== "now") {
@@ -77155,8 +77156,9 @@ ${parentKey(ref)}`, { ref, origin });
       };
       let population = this.keywordPopulation;
       if (!population) {
-        const counted = (yield { mode: "get", site: "keyword_population_count", sql: KEYWORD_POPULATION_SQL, params: [] }).count;
-        population = this.keywordPopulation ??= { count: counted, at: Date.now(), used: true };
+        const kept = this.totals();
+        const estimate = kept ? kept.items : (yield { mode: "get", site: "keyword_population_estimate", sql: "SELECT MAX(item_pk) AS count FROM items", params: [] }).count ?? 0;
+        population = this.keywordPopulation ??= { count: estimate, at: Date.now(), used: true, estimate: true };
       }
       population.used = true;
       const items = population.count;
