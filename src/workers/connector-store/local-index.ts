@@ -288,6 +288,19 @@ const VECTOR_VISIBILITY_SLICE_MS = 50;
 export const CONNECTOR_STORE_CONVERSATION_INDEX = 'idx_connector_store_items_conversation_time';
 export const CONNECTOR_STORE_CONVERSATION_INDEX_SQL = `CREATE INDEX IF NOT EXISTS ${CONNECTOR_STORE_CONVERSATION_INDEX}
   ON items(provider_conversation_id, authored_at) WHERE provider_conversation_id IS NOT NULL`;
+const CONNECTOR_STORE_RECENCY_INDEX = 'idx_connector_store_items_recent_live';
+const CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX = 'idx_connector_store_items_recent_account_live';
+// Distinct partial predicates let each bounded read use just its own index.
+// The ordinary tombstoned = 0 queries can use neither. A reverse scan also
+// reverses the implicit rowid (item_pk), so the index keys need no extra column.
+const RECENCY_LIVE_SQL = 'tombstoned IS 0';
+const ACCOUNT_RECENCY_LIVE_SQL = '+tombstoned IS 0';
+const CONNECTOR_STORE_RECENCY_INDEX_SQL = `
+  CREATE INDEX IF NOT EXISTS ${CONNECTOR_STORE_RECENCY_INDEX}
+    ON items(COALESCE(authored_at, updated_at, indexed_at)) WHERE ${RECENCY_LIVE_SQL};
+  CREATE INDEX IF NOT EXISTS ${CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX}
+    ON items(account_scope, COALESCE(authored_at, updated_at, indexed_at)) WHERE ${ACCOUNT_RECENCY_LIVE_SQL};
+`;
 // The most query concepts a keyword match must contain (see searchItemsDetailed).
 const MAX_REQUIRED_CONCEPTS = 3;
 // Or the share of the query's concept weight (IDF) a keyword match must carry.
@@ -3776,6 +3789,62 @@ self.onmessage = ({ data: [path, budgetMs, pagesPerStep] }) => {
   }
 };`;
 
+function connectorRecencyIndexWorkerSource(): string {
+  return `
+import { Database } from 'bun:sqlite';
+self.onmessage = ({ data: [path] }) => {
+  const db = new Database(path, { create: false, strict: true });
+  let result;
+  try {
+    db.exec('PRAGMA busy_timeout = 0; PRAGMA synchronous = NORMAL; PRAGMA wal_autocheckpoint = 0;');
+    db.transaction(() => db.exec(${JSON.stringify(CONNECTOR_STORE_RECENCY_INDEX_SQL)})).immediate();
+    result = { done: true };
+  } catch (error) {
+    result = { busy: /^SQLITE_(BUSY|LOCKED)(_|$)/.test(error.code) };
+  } finally {
+    db.close();
+  }
+  postMessage(result);
+};`;
+}
+
+// A separate process makes a long SQLite write interruptible. Its main thread
+// watches stdin even while SQLite runs, so parent death also releases the lock.
+function spawnConnectorStoreMaintenance(dbPath: string, source: string, args: readonly number[] = []) {
+  const supervisor = `
+    const worker = new Worker(URL.createObjectURL(new Blob([${JSON.stringify(source)}], {type:'text/javascript'})));
+    process.stdin.resume();
+    process.stdin.on('end', () => process.kill(process.pid, 'SIGKILL'));
+    worker.onmessage = ({data}) => {
+      console.log(JSON.stringify(data));
+      if (!data.started) process.exit(0);
+    };
+    worker.onerror = () => process.exit(1);
+    worker.postMessage(JSON.parse(process.argv[1]));`;
+  return Bun.spawn([process.execPath, '-e', supervisor, JSON.stringify([dbPath, ...args])], {
+    stdin: 'pipe', stdout: 'pipe', stderr: 'ignore',
+    env: { ...process.env, SQLITE_TMPDIR: dirname(dbPath), TMPDIR: dirname(dbPath) },
+  });
+}
+
+type RecencyIndexAdmission = (work: () => Promise<boolean>, preempt: () => void) => Promise<boolean | undefined>;
+// No admission, no build: only the engine's background role installs one, so a
+// command-line open or a test never starts a child that takes a live store's
+// write lock outside the engine's coordination.
+let admitRecencyIndexBuild: RecencyIndexAdmission | undefined;
+let recencyIndexBuilding = false;
+/** After a build that lost the write lock or was stopped for ingest. */
+const RECENCY_INDEX_RETRY_MS = 250;
+/** While something in this process is in the way (another build, reclaim, an owner read). */
+const RECENCY_INDEX_BUSY_RETRY_MS = 2_000;
+/** While the engine does not admit the build (an Ask or ingest is running, or this role never builds). */
+const RECENCY_INDEX_NOT_ADMITTED_RETRY_MS = 30_000;
+
+/** The engine uses the same ingest admission as store reclaim for this write lock. */
+export function setConnectorStoreRecencyIndexAdmission(admit?: RecencyIndexAdmission): void {
+  admitRecencyIndexBuild = admit;
+}
+
 /** Pages per statement; the worker also stops at the existing sweep slice budget. */
 const RECLAIM_MAX_PAGES_PER_STEP = 128;
 /** Effective conversion throughput, about 3x the file in I/O at ~45 MB/s; replace with a measurement. */
@@ -3968,17 +4037,17 @@ export class LocalConnectorStore {
         // Fast path: a store this build's schema code already brought fully
         // up to date runs no DDL and no backfill at open. Its user_version
         // holds a hash of that code's fingerprint and of the file's own
-        // schema (every table, index and trigger in sqlite_master), taken
-        // after the step finished. A code change, or a store whose schema
-        // moved since (an older build rebuilt a trigger, an object went
-        // missing in a copy or a restore), hashes differently and runs the
-        // step once. A step killed part way never wrote the hash and reruns.
+        // synchronous open schema, taken after the step finished. A code
+        // change, or a store whose schema moved since (an older build rebuilt
+        // a trigger, an object went missing in a restore), hashes differently
+        // and runs the step once. A step killed part way never wrote the hash.
         // (Store-open step-back, 16 Nov: open-time DDL waited 11 to 20 s on
         // locks, and a backfill read 600k chunks at every open.)
         const current = !migrating && !creatingFile
           && (this.db.query('PRAGMA user_version').get() as { user_version: number }).user_version === connectorStoreOpenStamp(this.db);
         if (!current) {
           applyConnectorStoreOpenSchema(this.db);
+          if (creatingFile) this.db.exec(CONNECTOR_STORE_RECENCY_INDEX_SQL);
           if (this.dbPath !== ':memory:') this.db.exec(`PRAGMA user_version = ${connectorStoreOpenStamp(this.db)}`);
         }
         if (migrating) {
@@ -4017,6 +4086,11 @@ export class LocalConnectorStore {
         const model = (this.db.query('SELECT model_id FROM chunk_embeddings ORDER BY rowid DESC LIMIT 1').get() as { model_id: string } | null)?.model_id;
         if (model && !vectorDigestState(this.db, model).completed) this.scheduleVectorDigestBackfill(model, VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS);
       }
+      if (!this.readOnly && !creatingFile && (this.db.query(
+        "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name IN (?, ?)",
+      ).get(CONNECTOR_STORE_RECENCY_INDEX, CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX) as { n: number }).n < 2) {
+        if (admitRecencyIndexBuild) this.scheduleRecencyIndexBuild();
+      }
       // The split front's start moves one store at a time; the upgrade's wait reads it (#1563).
       reportFrontStoreOpened();
       changeMemoryCounter('connector_stores', 1);
@@ -4024,6 +4098,62 @@ export class LocalConnectorStore {
     } catch (error) {
       closeSqliteStore(this.db, this.readOnly ? { checkpoint: false, readOnly: true } : undefined);
       throw error;
+    }
+  }
+
+  private recencyIndexTimer: ReturnType<typeof setTimeout> | undefined;
+
+  private scheduleRecencyIndexBuild(delayMs = 0): void {
+    this.recencyIndexTimer = setTimeout(() => {
+      this.recencyIndexTimer = undefined;
+      void this.buildRecencyIndex();
+    }, delayMs);
+    this.recencyIndexTimer.unref?.();
+  }
+
+  private async buildRecencyIndex(): Promise<void> {
+    const admit = admitRecencyIndexBuild;
+    if (!admit || this.closedForPoolReads || this.fileReplacedOrRemoved()) return;
+    // Another process (the background role, seen from the front) may have built them since.
+    if ((this.db.query("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name IN (?, ?)")
+      .get(CONNECTOR_STORE_RECENCY_INDEX, CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX) as { n: number }).n >= 2) return;
+    if (recencyIndexBuilding || this.reclaimProcess || this.vectorDigestBackfillReading || this.visibilityPublishing || storeReadHasPriority()) {
+      this.scheduleRecencyIndexBuild(RECENCY_INDEX_BUSY_RETRY_MS);
+      return;
+    }
+    recencyIndexBuilding = true;
+    try {
+      let preempted = false;
+      const complete = await admit(async () => {
+        if (this.closedForPoolReads || this.fileReplacedOrRemoved()) return false;
+        // WAL readers keep their snapshots while SQLite builds the index.
+        // Existing store maintenance writers stand back from the child.
+        assertWritableStoreOpenAllowed('connector store recency index', this.dbPath);
+        const child = spawnConnectorStoreMaintenance(this.dbPath, connectorRecencyIndexWorkerSource());
+        this.reclaimProcess = child;
+        child.unref();
+        try {
+          const [code, output] = await Promise.all([child.exited, new Response(child.stdout).text()]);
+          if (preempted || this.closedForPoolReads) return false;
+          if (code !== 0) throw new Error('Recency index worker exited unsuccessfully.');
+          const result = JSON.parse(output) as { done?: boolean; busy?: boolean };
+          if (!result.done && !result.busy) throw new Error('Recency index build failed.');
+          return result.done === true;
+        } finally {
+          child.stdin.end();
+          this.reclaimProcess = undefined;
+        }
+      }, () => {
+        preempted = true;
+        this.reclaimProcess?.kill('SIGKILL');
+      });
+      if (!complete && !this.closedForPoolReads) {
+        this.scheduleRecencyIndexBuild(complete === undefined ? RECENCY_INDEX_NOT_ADMITTED_RETRY_MS : RECENCY_INDEX_RETRY_MS);
+      }
+    } catch {
+      if (!this.closedForPoolReads) console.warn('Connector store recency index build failed; will retry the build on the next writable open.');
+    } finally {
+      recencyIndexBuilding = false;
     }
   }
 
@@ -4130,7 +4260,9 @@ export class LocalConnectorStore {
     changeMemoryCounter('embedding_queue', -(this.embeddingQueueState?.size ?? 0));
     this.embeddingQueueState = undefined;
     const reclaiming = this.reclaimProcess !== undefined;
+    const buildingRecencyIndex = reclaiming && this.reclaimPreempt === undefined;
     this.reclaimProcess?.kill('SIGKILL');
+    clearTimeout(this.recencyIndexTimer);
     clearTimeout(this.vectorDigestBackfillTimer);
     this.stopVisibilityPublisher();
     try {
@@ -4146,14 +4278,15 @@ export class LocalConnectorStore {
       // do its waiting queries.
       this.closedForPoolReads = true;
       if (offThreadReadsSupported(this.dbPath)) releaseOffThreadReads(this.dbPath);
-      closeSqliteStore(this.db, this.readOnly ? { checkpoint: false, readOnly: true } : undefined);
+      closeSqliteStore(this.db, this.readOnly ? { checkpoint: false, readOnly: true }
+        : buildingRecencyIndex ? { checkpoint: false } : undefined);
     }
   }
 
   private reclaimProcess: ReturnType<typeof Bun.spawn> | undefined;
   private reclaimKilledAttempts = 0;
 
-  /** A conversion child holds this store's write lock; other writers defer instead of blocking. */
+  /** A maintenance child can hold this store's write lock; other writers defer. */
   get reclaiming(): boolean { return this.reclaimProcess !== undefined; }
 
   private reclaimPreempt: (() => void) | undefined;
@@ -4206,23 +4339,7 @@ export class LocalConnectorStore {
     pagesPerStep = Math.max(1, Math.floor(pagesPerStep));
     assertWritableStoreOpenAllowed('connector store reclaim', this.dbPath);
     assertStoreTierLedgerCanOpen(this.dbPath);
-    // A separate process is essential: Bun Worker.terminate() cannot interrupt
-    // an executing SQLite statement. SIGKILL can, and SQLite rolls it back.
-    // Its main thread watches our stdin even while its worker runs VACUUM:
-    // parent death closes the pipe and kills the child, releasing every lock.
-    const supervisor = `
-      const worker = new Worker(URL.createObjectURL(new Blob([${JSON.stringify(CONNECTOR_RECLAIM_WORKER_SOURCE)}], {type:'text/javascript'})));
-      process.stdin.resume();
-      process.stdin.on('end', () => process.kill(process.pid, 'SIGKILL'));
-      worker.onmessage = ({data}) => {
-        console.log(JSON.stringify(data));
-        if (!data.started) process.exit(0);
-      };
-      worker.onerror = () => process.exit(1);
-      worker.postMessage(JSON.parse(process.argv[1]));`;
-    const child = Bun.spawn([process.execPath, '-e', supervisor, JSON.stringify([this.dbPath, budgetMs, pagesPerStep])],
-      { stdin: 'pipe', stdout: 'pipe', stderr: 'ignore',
-        env: { ...process.env, SQLITE_TMPDIR: dirname(this.dbPath), TMPDIR: dirname(this.dbPath) } });
+    const child = spawnConnectorStoreMaintenance(this.dbPath, CONNECTOR_RECLAIM_WORKER_SOURCE, [budgetMs, pagesPerStep]);
     this.reclaimProcess = child;
     let preempted = false;
     const preempt = () => { if (!preempted) { preempted = true; child.kill('SIGKILL'); } };
@@ -15938,10 +16055,8 @@ export class LocalConnectorStore {
   }
 
   /**
-   * recentItems with its read on the store's read-pool thread (#1305): the
-   * newest-first order has no index, so on a large chat store the read sorts
-   * every item, seconds of the request thread. The lane is optional: a busy
-   * store gives no recency rows, and says it was cut short (#1460).
+   * Run the recency SQL on the read pool. An explicit adapter deadline can
+   * cut short the optional lane's wait and report it (#1460).
    */
   async recentItemsOffThread(
     maxResults: number,
@@ -15974,30 +16089,80 @@ export class LocalConnectorStore {
     const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
     const selectedAccount = normalizeOptionalAccountScope(accountScope);
     const selectedFilters = connectorStoreFilterSql(filters);
-    return {
-      mode: 'all',
-      site: 'recentItemsRead',
-      sql: `
-      SELECT
+    const columns = `
         i.item_pk, i.provider, i.family, i.account_scope, i.provider_item_id, i.provider_thread_id,
         i.provider_conversation_id, i.provider_file_id, i.provider_event_id, i.local_item_id,
         i.source_version, i.title, i.sender_id, i.sender_label, i.sender_is_owner,
         i.mime_type, i.authored_at, i.updated_at,
         i.trust_tier, i.sync_run_id,
-        0 AS rank
-      FROM items i
-      WHERE i.tombstoned = 0
-        ${selectedAccount ? 'AND i.account_scope = ?' : ''}
-        ${selectedFilters.sql}
-        AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
-      ORDER BY COALESCE(i.authored_at, i.updated_at, i.indexed_at) DESC, i.item_pk DESC
-      LIMIT ?
-    `,
-      params: [
-        ...(selectedAccount ? [selectedAccount] : []),
-        ...selectedFilters.params,
-        limit,
-      ],
+        0 AS rank`;
+    const time = 'COALESCE(i.authored_at, i.updated_at, i.indexed_at)';
+    const hasChunks = 'EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)';
+    if (selectedFilters.sql) {
+      return {
+        mode: 'all',
+        site: 'recentItemsRead',
+        sql: `
+          SELECT ${columns}
+          FROM items i
+          WHERE i.tombstoned = 0
+            ${selectedAccount ? 'AND i.account_scope = ?' : ''}
+            ${selectedFilters.sql}
+            AND ${hasChunks}
+          ORDER BY +${time} DESC, i.item_pk DESC
+          LIMIT ?
+        `,
+        params: [...(selectedAccount ? [selectedAccount] : []), ...selectedFilters.params, limit],
+      };
+    }
+
+    const account = selectedAccount ? 'AND i.account_scope = ?1' : '';
+    const take = selectedAccount ? '?2' : '?1';
+    const probeLimit = `4 * ${take}`;
+    const index = selectedAccount ? CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX : CONNECTOR_STORE_RECENCY_INDEX;
+    const live = selectedAccount ? ACCOUNT_RECENCY_LIVE_SQL : RECENCY_LIVE_SQL;
+    // Bound chunk probes even when many of the newest items lack chunks.
+    // A short candidate page exhausted the index. A full page with too few
+    // matches runs the original sort. Both paths see the same SQLite snapshot.
+    // Gate both scans in LIMIT: a WHERE guard can run after the scan starts.
+    return {
+      mode: 'all',
+      site: 'recentItemsRead',
+      sql: `
+        WITH index_state AS MATERIALIZED (
+          SELECT EXISTS (SELECT 1 FROM main.sqlite_master WHERE name = '${index}' AND type = 'index') AS ready
+        ), candidates AS MATERIALIZED (
+          SELECT i.item_pk, ${time} AS recent_at
+          FROM items i
+          WHERE ${live} ${account}
+          ORDER BY ${time} DESC, i.item_pk DESC
+          LIMIT CASE WHEN (SELECT ready FROM index_state) THEN ${probeLimit} ELSE 0 END
+        ), matches AS MATERIALIZED (
+          SELECT i.item_pk, i.recent_at FROM candidates i WHERE ${hasChunks}
+          ORDER BY i.recent_at DESC, i.item_pk DESC
+          LIMIT ${take}
+        ), fallback AS MATERIALIZED (
+          SELECT NOT ready OR (
+            (SELECT COUNT(*) FROM candidates) = ${probeLimit}
+            AND (SELECT COUNT(*) FROM matches) < ${take}
+          ) AS needed FROM index_state
+        ), recent AS (
+          SELECT item_pk, recent_at FROM matches WHERE NOT (SELECT needed FROM fallback)
+          UNION ALL
+          SELECT * FROM (
+            SELECT i.item_pk, ${time} AS recent_at
+            FROM items i
+            WHERE i.tombstoned = 0 ${account} AND ${hasChunks}
+            ORDER BY +${time} DESC, i.item_pk DESC
+            LIMIT CASE WHEN (SELECT needed FROM fallback) THEN ${take} ELSE 0 END
+          )
+        )
+        SELECT ${columns}
+        FROM recent CROSS JOIN items i ON i.item_pk = recent.item_pk
+        ORDER BY recent.recent_at DESC, recent.item_pk DESC
+        LIMIT ${take}
+      `,
+      params: selectedAccount ? [selectedAccount, limit] : [limit],
     };
   }
 
@@ -16799,10 +16964,11 @@ export class LocalConnectorStore {
    * Walk the store's tables a page of keys at a time (store-totals.ts), each
    * page its own read on the read worker where the store allows it, and put
    * right any drift. A walk that saw writes leaves the totals owing another
-   * walk later. Returns the drift, or undefined for a read-only open.
+   * walk later. Returns the drift, or undefined while maintenance owns the
+   * writer or for a read-only open.
    */
   async reconcileTotals(): Promise<number | undefined> {
-    if (this.readOnly) return undefined;
+    if (this.readOnly || this.reclaiming) return undefined;
     if (!storeTotalsInstalled(this.db)) createStoreTotals(this.db, NON_SYNC_RUN_CONNECTORS_SQL);
     const pool = offThreadReadsSupported(this.dbPath);
     const steps = storeTotalsWalkSteps(NON_SYNC_RUN_CONNECTORS_SQL);
@@ -16819,6 +16985,7 @@ export class LocalConnectorStore {
       }
       step = steps.next(rows);
     }
+    if (this.reclaiming) return undefined;
     return applyStoreTotalsCount(this.db, step.value.count, new Date().toISOString(), { exact: step.value.quiet });
   }
 
@@ -16838,7 +17005,7 @@ export class LocalConnectorStore {
    * loop for as many rows (loop-stall gate, 16 Nov), so a page is 2,000.
    */
   async repairEmbeddingInputHashes(pageKeys = 2_000, pages = 50): Promise<number> {
-    if (this.readOnly || this.embeddingInputHashesChecked) return 0;
+    if (this.readOnly || this.reclaiming || this.embeddingInputHashesChecked) return 0;
     const pool = offThreadReadsSupported(this.dbPath);
     const read = async (sql: string, params: number[]): Promise<unknown> => (pool
       ? readInBackground(this.dbPath, { sql, params, mode: 'all' })
@@ -16853,6 +17020,7 @@ export class LocalConnectorStore {
     for (let page = 0; page < pages && walk.after < walk.last; page += 1) {
       const hi = Math.min(walk.after + pageKeys, walk.last);
       const rows = await read('SELECT chunk_pk FROM chunks WHERE chunk_pk > ? AND chunk_pk <= ? AND embedding_input_hash IS NULL', [walk.after, hi]) as Array<{ chunk_pk: number }>;
+      if (this.reclaiming) break;
       walk.after = hi;
       if (rows.length > 0) this.db.transaction(() => { for (const row of rows) changed += set.run(row.chunk_pk).changes; })();
     }
@@ -21709,6 +21877,8 @@ export function connectorStoreOpenStamp(db: Database): number {
     .all() as Array<{ type: string; name: string; tbl_name: string; sql: string | null }>;
   let hash = connectorStoreOpenShape() >>> 0;
   for (const row of rows) {
+    // These optional indexes commit off-thread, independently of open.
+    if (row.type === 'index' && (row.name === CONNECTOR_STORE_RECENCY_INDEX || row.name === CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX)) continue;
     const text = `${row.type}\u0000${row.name}\u0000${row.tbl_name}\u0000${row.sql ?? ''}\n`;
     for (let index = 0; index < text.length; index += 1) {
       hash ^= text.charCodeAt(index);
