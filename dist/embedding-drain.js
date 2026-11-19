@@ -25483,9 +25483,11 @@ function spawnConnectorStoreMaintenance(dbPath, source, args = []) {
     env: { ...process.env, SQLITE_TMPDIR: dirname23(dbPath), TMPDIR: dirname23(dbPath) }
   });
 }
-var admitRecencyIndexBuild = (work) => work();
+var admitRecencyIndexBuild;
 var recencyIndexBuilding = false;
 var RECENCY_INDEX_RETRY_MS = 250;
+var RECENCY_INDEX_BUSY_RETRY_MS = 2000;
+var RECENCY_INDEX_NOT_ADMITTED_RETRY_MS = 30000;
 var RECLAIM_MAX_PAGES_PER_STEP = 128;
 var RECLAIM_CONVERSION_BYTES_PER_MS = 15000;
 var SUPERSEDED_PRUNE_MEDIA_ROWS = 1;
@@ -25621,7 +25623,8 @@ class LocalConnectorStore {
           this.scheduleVectorDigestBackfill(model, VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS);
       }
       if (!this.readOnly && !creatingFile && this.db.query("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name IN (?, ?)").get(CONNECTOR_STORE_RECENCY_INDEX, CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX).n < 2) {
-        this.scheduleRecencyIndexBuild();
+        if (admitRecencyIndexBuild)
+          this.scheduleRecencyIndexBuild();
       }
       reportFrontStoreOpened();
       changeMemoryCounter("connector_stores", 1);
@@ -25640,16 +25643,19 @@ class LocalConnectorStore {
     this.recencyIndexTimer.unref?.();
   }
   async buildRecencyIndex() {
-    if (this.closedForPoolReads || this.fileReplacedOrRemoved())
+    const admit = admitRecencyIndexBuild;
+    if (!admit || this.closedForPoolReads || this.fileReplacedOrRemoved())
+      return;
+    if (this.db.query("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name IN (?, ?)").get(CONNECTOR_STORE_RECENCY_INDEX, CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX).n >= 2)
       return;
     if (recencyIndexBuilding || this.reclaimProcess || this.vectorDigestBackfillReading || this.visibilityPublishing || storeReadHasPriority()) {
-      this.scheduleRecencyIndexBuild(RECENCY_INDEX_RETRY_MS);
+      this.scheduleRecencyIndexBuild(RECENCY_INDEX_BUSY_RETRY_MS);
       return;
     }
     recencyIndexBuilding = true;
     try {
       let preempted = false;
-      const complete = await admitRecencyIndexBuild(async () => {
+      const complete = await admit(async () => {
         if (this.closedForPoolReads || this.fileReplacedOrRemoved())
           return false;
         assertWritableStoreOpenAllowed("connector store recency index", this.dbPath);
@@ -25674,8 +25680,9 @@ class LocalConnectorStore {
         preempted = true;
         this.reclaimProcess?.kill("SIGKILL");
       });
-      if (!complete && !this.closedForPoolReads)
-        this.scheduleRecencyIndexBuild(RECENCY_INDEX_RETRY_MS);
+      if (!complete && !this.closedForPoolReads) {
+        this.scheduleRecencyIndexBuild(complete === undefined ? RECENCY_INDEX_NOT_ADMITTED_RETRY_MS : RECENCY_INDEX_RETRY_MS);
+      }
     } catch {
       if (!this.closedForPoolReads)
         console.warn("Connector store recency index build failed; will retry the build on the next writable open.");

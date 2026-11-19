@@ -3828,13 +3828,21 @@ function spawnConnectorStoreMaintenance(dbPath: string, source: string, args: re
 }
 
 type RecencyIndexAdmission = (work: () => Promise<boolean>, preempt: () => void) => Promise<boolean | undefined>;
-let admitRecencyIndexBuild: RecencyIndexAdmission = (work) => work();
+// No admission, no build: only the engine's background role installs one, so a
+// command-line open or a test never starts a child that takes a live store's
+// write lock outside the engine's coordination.
+let admitRecencyIndexBuild: RecencyIndexAdmission | undefined;
 let recencyIndexBuilding = false;
+/** After a build that lost the write lock or was stopped for ingest. */
 const RECENCY_INDEX_RETRY_MS = 250;
+/** While something in this process is in the way (another build, reclaim, an owner read). */
+const RECENCY_INDEX_BUSY_RETRY_MS = 2_000;
+/** While the engine does not admit the build (an Ask or ingest is running, or this role never builds). */
+const RECENCY_INDEX_NOT_ADMITTED_RETRY_MS = 30_000;
 
 /** The engine uses the same ingest admission as store reclaim for this write lock. */
 export function setConnectorStoreRecencyIndexAdmission(admit?: RecencyIndexAdmission): void {
-  admitRecencyIndexBuild = admit ?? ((work) => work());
+  admitRecencyIndexBuild = admit;
 }
 
 /** Pages per statement; the worker also stops at the existing sweep slice budget. */
@@ -4081,7 +4089,7 @@ export class LocalConnectorStore {
       if (!this.readOnly && !creatingFile && (this.db.query(
         "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name IN (?, ?)",
       ).get(CONNECTOR_STORE_RECENCY_INDEX, CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX) as { n: number }).n < 2) {
-        this.scheduleRecencyIndexBuild();
+        if (admitRecencyIndexBuild) this.scheduleRecencyIndexBuild();
       }
       // The split front's start moves one store at a time; the upgrade's wait reads it (#1563).
       reportFrontStoreOpened();
@@ -4104,15 +4112,19 @@ export class LocalConnectorStore {
   }
 
   private async buildRecencyIndex(): Promise<void> {
-    if (this.closedForPoolReads || this.fileReplacedOrRemoved()) return;
+    const admit = admitRecencyIndexBuild;
+    if (!admit || this.closedForPoolReads || this.fileReplacedOrRemoved()) return;
+    // Another process (the background role, seen from the front) may have built them since.
+    if ((this.db.query("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name IN (?, ?)")
+      .get(CONNECTOR_STORE_RECENCY_INDEX, CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX) as { n: number }).n >= 2) return;
     if (recencyIndexBuilding || this.reclaimProcess || this.vectorDigestBackfillReading || this.visibilityPublishing || storeReadHasPriority()) {
-      this.scheduleRecencyIndexBuild(RECENCY_INDEX_RETRY_MS);
+      this.scheduleRecencyIndexBuild(RECENCY_INDEX_BUSY_RETRY_MS);
       return;
     }
     recencyIndexBuilding = true;
     try {
       let preempted = false;
-      const complete = await admitRecencyIndexBuild(async () => {
+      const complete = await admit(async () => {
         if (this.closedForPoolReads || this.fileReplacedOrRemoved()) return false;
         // WAL readers keep their snapshots while SQLite builds the index.
         // Existing store maintenance writers stand back from the child.
@@ -4135,7 +4147,9 @@ export class LocalConnectorStore {
         preempted = true;
         this.reclaimProcess?.kill('SIGKILL');
       });
-      if (!complete && !this.closedForPoolReads) this.scheduleRecencyIndexBuild(RECENCY_INDEX_RETRY_MS);
+      if (!complete && !this.closedForPoolReads) {
+        this.scheduleRecencyIndexBuild(complete === undefined ? RECENCY_INDEX_NOT_ADMITTED_RETRY_MS : RECENCY_INDEX_RETRY_MS);
+      }
     } catch {
       if (!this.closedForPoolReads) console.warn('Connector store recency index build failed; will retry the build on the next writable open.');
     } finally {

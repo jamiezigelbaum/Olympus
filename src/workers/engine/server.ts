@@ -968,7 +968,8 @@ export async function main(): Promise<void> {
   });
   setVectorDigestBackfillHold(() => standBack.holds('digest'));
   let recencyIndexMaintenanceReady = false;
-  setConnectorStoreRecencyIndexAdmission(async (work, preempt) => {
+  // Only the background role builds: the front never takes a store's write lock for it.
+  if (!engineFront) setConnectorStoreRecencyIndexAdmission(async (work, preempt) => {
     if (!recencyIndexMaintenanceReady || ownerQuestions.busy || remoteOwnerBusy(OWNER_QUESTION_RESOURCE)) return undefined;
     return sourceScheduler ? sourceScheduler.withIdleTasks(work, { preempt }) : work();
   });

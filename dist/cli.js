@@ -66370,7 +66370,7 @@ function spawnConnectorStoreMaintenance(dbPath, source, args = []) {
   });
 }
 function setConnectorStoreRecencyIndexAdmission(admit) {
-  admitRecencyIndexBuild = admit ?? ((work) => work());
+  admitRecencyIndexBuild = admit;
 }
 async function syncAndEmbedFromConnector(options) {
   const localItemIds = new Set;
@@ -69374,7 +69374,7 @@ self.onmessage = ({ data: [path, budgetMs, pagesPerStep] }) => {
   } finally {
     closeSqliteStore(db);
   }
-};`, admitRecencyIndexBuild = (work) => work(), recencyIndexBuilding = false, RECENCY_INDEX_RETRY_MS = 250, RECLAIM_MAX_PAGES_PER_STEP = 128, RECLAIM_CONVERSION_BYTES_PER_MS = 15000, SUPERSEDED_PRUNE_MEDIA_ROWS = 1, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_WEIGHT = 0.25, CHAT_RECENCY_PIN_COUNT = 2, CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8, lexicalContentPreference, STORE_LEADER_LATEST_SEAT = 1, LANE_LEADER_SEATS = 3, OWNER_AUTHOR_LABEL = "You", CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", PDF_EXTRACTION_BACKLOG_SQL = `
+};`, admitRecencyIndexBuild, recencyIndexBuilding = false, RECENCY_INDEX_RETRY_MS = 250, RECENCY_INDEX_BUSY_RETRY_MS = 2000, RECENCY_INDEX_NOT_ADMITTED_RETRY_MS = 30000, RECLAIM_MAX_PAGES_PER_STEP = 128, RECLAIM_CONVERSION_BYTES_PER_MS = 15000, SUPERSEDED_PRUNE_MEDIA_ROWS = 1, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_WEIGHT = 0.25, CHAT_RECENCY_PIN_COUNT = 2, CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8, lexicalContentPreference, STORE_LEADER_LATEST_SEAT = 1, LANE_LEADER_SEATS = 3, OWNER_AUTHOR_LABEL = "You", CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", PDF_EXTRACTION_BACKLOG_SQL = `
   SELECT
     SUM(CASE WHEN chars IS NULL THEN 1 ELSE 0 END) AS pending,
     SUM(CASE WHEN chars IS NULL THEN 0 ELSE 1 END) AS extracted,
@@ -69689,7 +69689,8 @@ var init_local_index = __esm(() => {
             this.scheduleVectorDigestBackfill(model, VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS);
         }
         if (!this.readOnly && !creatingFile && this.db.query("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name IN (?, ?)").get(CONNECTOR_STORE_RECENCY_INDEX, CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX).n < 2) {
-          this.scheduleRecencyIndexBuild();
+          if (admitRecencyIndexBuild)
+            this.scheduleRecencyIndexBuild();
         }
         reportFrontStoreOpened();
         changeMemoryCounter("connector_stores", 1);
@@ -69708,16 +69709,19 @@ var init_local_index = __esm(() => {
       this.recencyIndexTimer.unref?.();
     }
     async buildRecencyIndex() {
-      if (this.closedForPoolReads || this.fileReplacedOrRemoved())
+      const admit = admitRecencyIndexBuild;
+      if (!admit || this.closedForPoolReads || this.fileReplacedOrRemoved())
+        return;
+      if (this.db.query("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name IN (?, ?)").get(CONNECTOR_STORE_RECENCY_INDEX, CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX).n >= 2)
         return;
       if (recencyIndexBuilding || this.reclaimProcess || this.vectorDigestBackfillReading || this.visibilityPublishing || storeReadHasPriority()) {
-        this.scheduleRecencyIndexBuild(RECENCY_INDEX_RETRY_MS);
+        this.scheduleRecencyIndexBuild(RECENCY_INDEX_BUSY_RETRY_MS);
         return;
       }
       recencyIndexBuilding = true;
       try {
         let preempted = false;
-        const complete = await admitRecencyIndexBuild(async () => {
+        const complete = await admit(async () => {
           if (this.closedForPoolReads || this.fileReplacedOrRemoved())
             return false;
           assertWritableStoreOpenAllowed("connector store recency index", this.dbPath);
@@ -69742,8 +69746,9 @@ var init_local_index = __esm(() => {
           preempted = true;
           this.reclaimProcess?.kill("SIGKILL");
         });
-        if (!complete && !this.closedForPoolReads)
-          this.scheduleRecencyIndexBuild(RECENCY_INDEX_RETRY_MS);
+        if (!complete && !this.closedForPoolReads) {
+          this.scheduleRecencyIndexBuild(complete === undefined ? RECENCY_INDEX_NOT_ADMITTED_RETRY_MS : RECENCY_INDEX_RETRY_MS);
+        }
       } catch {
         if (!this.closedForPoolReads)
           console.warn("Connector store recency index build failed; will retry the build on the next writable open.");
@@ -274071,11 +274076,12 @@ async function main() {
   });
   setVectorDigestBackfillHold(() => standBack.holds("digest"));
   let recencyIndexMaintenanceReady = false;
-  setConnectorStoreRecencyIndexAdmission(async (work, preempt) => {
-    if (!recencyIndexMaintenanceReady || ownerQuestions.busy || remoteOwnerBusy(OWNER_QUESTION_RESOURCE))
-      return;
-    return sourceScheduler ? sourceScheduler.withIdleTasks(work, { preempt }) : work();
-  });
+  if (!engineFront)
+    setConnectorStoreRecencyIndexAdmission(async (work, preempt) => {
+      if (!recencyIndexMaintenanceReady || ownerQuestions.busy || remoteOwnerBusy(OWNER_QUESTION_RESOURCE))
+        return;
+      return sourceScheduler ? sourceScheduler.withIdleTasks(work, { preempt }) : work();
+    });
   const answerActivity = createAnswerActivity(() => {
     return;
   }, {
