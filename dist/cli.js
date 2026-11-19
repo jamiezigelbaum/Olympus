@@ -98907,14 +98907,16 @@ class GoogleGmailSourceConnector {
             scopeConfirmationsFetched += 1;
             messagesFetched += 1;
             this.providerRequests += 1;
+            this.beforeEachRequest?.();
             const metadata = await client.getMessage(message.id, { format: "metadata", metadataHeaders: GMAIL_METADATA_HEADERS });
-            const received = internalDateNumber({ internalDate: metadata.internalDate });
-            const item = gmailMessageItem(gmailMailRecordFromMessage(metadata, { metadataOnly: true }), this.account);
-            const subject = metadataString2(item.metadata, "subject");
-            const from = metadataString2(item.metadata, "from");
-            const skipped = this.scope.skipSenders?.some((rule) => senderMatchesRule(from, rule)) || classifyEmailIngestSkip({ ...subject ? { subject } : {}, ...from ? { from } : {}, labels: metadataStringArray2(item.metadata, "labels") }, this.ingestFilterOptions);
-            if (!skipped && (cutoffMs === undefined || received !== undefined && received >= cutoffMs))
-              this.scope.storedItemObserved(item);
+            if (gmailMessageInScope(metadata, this.scope)) {
+              const item = gmailMessageItem(gmailMailRecordFromMessage(metadata, { metadataOnly: true }), this.account);
+              const subject = metadataString2(item.metadata, "subject");
+              const from = metadataString2(item.metadata, "from");
+              const skipped = classifyEmailIngestSkip({ ...subject ? { subject } : {}, ...from ? { from } : {}, labels: metadataStringArray2(item.metadata, "labels") }, this.ingestFilterOptions);
+              if (!skipped)
+                this.scope.storedItemObserved(item);
+            }
           }
           this.itemsSkippedStored += 1;
           continue;
@@ -137266,14 +137268,19 @@ function createGmailConnectorStoreSyncHandler(options) {
   const tierClassification = {
     ...ownerRules.length > 0 ? { rules: ownerRules } : {}
   };
+  const stores = [options.internalStore, options.secureStore];
+  const lacksCurrentOwner = (store, identity) => !store.itemOwnerPresent(identity, connectorId, "observed");
   const storedItem = (providerItemId) => {
     const identity = { family: "email", provider: GMAIL_PROVIDER, accountScope: account, providerItemId, localItemId: `${account}:${providerItemId}` };
-    const copies = [options.internalStore.itemStoredContent(identity), options.secureStore.itemStoredContent(identity)].filter((copy) => copy !== undefined);
+    const copies = stores.flatMap((store) => {
+      const content = store.itemStoredContent(identity);
+      return content ? [{ store, content }] : [];
+    });
     if (copies.length === 0)
       return;
     return {
-      hasContent: copies.some((copy) => copy.chunkCount > 0),
-      ...options.confirmStoredPrivateScope && options.scopeApproval && options.secureStore.itemStoredContent(identity)?.chunkCount && !options.secureStore.itemOwnerPresent(identity, connectorId, "observed") ? { needsScopeObservation: true } : {}
+      hasContent: copies.some(({ content }) => content.chunkCount > 0),
+      ...options.confirmStoredPrivateScope && options.scopeApproval && copies.some(({ store, content }) => content.chunkCount > 0 && lacksCurrentOwner(store, identity)) ? { needsScopeObservation: true } : {}
     };
   };
   const scope = options.scope ? {
@@ -137282,13 +137289,27 @@ function createGmailConnectorStoreSyncHandler(options) {
     ...options.confirmStoredPrivateScope && options.scopeApproval ? {
       storedItemObserved: (item) => {
         options.assertScopeCurrent?.();
-        options.secureStore.observeStoredItemOwner(item.identity, connectorId);
+        let confirmed = false;
+        for (const store of stores) {
+          if (!store.itemStoredContent(item.identity)?.chunkCount || !lacksCurrentOwner(store, item.identity))
+            continue;
+          store.observeStoredItemOwner(item.identity, connectorId);
+          if (!lacksCurrentOwner(store, item.identity))
+            confirmed = true;
+        }
+        return confirmed;
       }
     } : {}
   } : undefined;
   const buildConnector = (overrides = {}) => new GoogleGmailSourceConnector({
     ...options,
     ...overrides.scope ? { scope: overrides.scope } : scope ? { scope } : {},
+    ...scope?.storedItemObserved && options.assertScopeCurrent ? {
+      beforeEachRequest: () => {
+        options.assertScopeCurrent?.();
+        options.beforeEachRequest?.();
+      }
+    } : {},
     ...overrides.maxMessages !== undefined ? { maxMessages: overrides.maxMessages } : {},
     ...overrides.query ? { query: overrides.query } : {},
     provenance: sourceInvocationProvenance(overrides.provenance)
@@ -137356,7 +137377,7 @@ function createGmailConnectorStoreSyncHandler(options) {
   return {
     ...options.confirmStoredPrivateScope && options.scopeApproval && scope ? {
       confirmPrivateScope: async (request = {}) => {
-        const confirmationScope = `private-confirmation-v1:${connectorId}`;
+        const confirmationScope = `private-confirmation-v2:${connectorId}`;
         const complete = `${confirmationScope}:done`;
         if (request.checkpoint === complete)
           return { confirmed: 0, done: true, checkpoint: complete };
@@ -137367,8 +137388,7 @@ function createGmailConnectorStoreSyncHandler(options) {
         const connector = buildConnector({
           maxMessages: maxItems,
           scope: { ...scope, confirmationOnly: true, storedItemObserved: (item) => {
-            scope.storedItemObserved?.(item);
-            if (options.secureStore.itemOwnerPresent(item.identity, connectorId, "observed"))
+            if (scope.storedItemObserved?.(item))
               confirmed++;
           } }
         });

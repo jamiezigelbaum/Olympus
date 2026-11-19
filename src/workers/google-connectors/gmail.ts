@@ -129,13 +129,12 @@ export interface GoogleGmailSourceConnectorOptions {
   /** How mail is built into items (gmail-mail-record.ts): attachments as children of their message. */
   build?: GmailMailBuild;
   /**
-   * Asked before every provider request an attachment read makes: throws when
-   * the mail approval is no longer current, so nothing more is asked.
+   * Rechecks the approval before a provider request (including retries).
    */
   beforeEachRequest?: () => void;
 }
 
-/** Metadata reads for retained Private scope confirmation per connector pass. */
+/** Metadata reads for retained mail scope confirmation per connector pass. */
 export const GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS = 32;
 
 /**
@@ -166,7 +165,7 @@ export interface GmailConnectorScope {
    * mail is never re-observed under a scope; see listItems.
    */
   storedItem?: (providerItemId: string) => GmailStoredItem | undefined;
-  /** A metadata-only scope confirmation for an already-stored Private body; never a body re-read. */
+  /** A metadata-only scope confirmation for an already-stored body. */
   storedItemObserved?: (item: RawItem) => void;
   /** One resumable scope-confirmation walk: no new items or bodies are fetched. */
   confirmationOnly?: boolean;
@@ -472,30 +471,28 @@ export class GoogleGmailSourceConnector implements SourceConnector {
         if (messagesFetched >= remaining || items.length >= itemRoom) break;
         messagesExamined += 1;
         examinedIds.push(message.id);
-        // Mail Olympus already holds is never observed again under a scope.
-        // Gmail messages are immutable, so a re-read could only replace a
-        // stored body with a body-less metadata row (the window moved) or
-        // re-classify an item whose vectors already exist; either would throw
-        // away existing chunks and embeddings. The one exception is mail
-        // stored metadata-only that the content leg may now store in full.
+        // Keep immutable stored bodies and their vectors. The content leg
+        // can read a previously names-only message in full, or confirm an
+        // existing body's scope using metadata alone.
         const stored = this.scope?.storedItem?.(message.id);
         if (this.scope?.confirmationOnly && (!stored || !stored.hasContent)) continue;
         if (stored && (metadataLeg || stored.hasContent)) {
           if (!metadataLeg && stored.needsScopeObservation && this.scope?.storedItemObserved
             && scopeConfirmationsFetched < GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS) {
-            // Only unconfirmed Private copies need this request, once per
+            // Only unconfirmed stored bodies need this request, once per
             // approval. It consumes the same bounded message/request budget.
             scopeConfirmationsFetched += 1;
             messagesFetched += 1;
             this.providerRequests += 1;
+            this.beforeEachRequest?.();
             const metadata = await client.getMessage(message.id, { format: 'metadata', metadataHeaders: GMAIL_METADATA_HEADERS });
-            const received = internalDateNumber({ internalDate: metadata.internalDate });
-            const item = gmailMessageItem(gmailMailRecordFromMessage(metadata, { metadataOnly: true }), this.account);
-            const subject = metadataString(item.metadata, 'subject');
-            const from = metadataString(item.metadata, 'from');
-            const skipped = this.scope.skipSenders?.some(rule => senderMatchesRule(from, rule))
-              || classifyEmailIngestSkip({ ...(subject ? { subject } : {}), ...(from ? { from } : {}), labels: metadataStringArray(item.metadata, 'labels') }, this.ingestFilterOptions);
-            if (!skipped && (cutoffMs === undefined || (received !== undefined && received >= cutoffMs))) this.scope.storedItemObserved(item);
+            if (gmailMessageInScope(metadata, this.scope)) {
+              const item = gmailMessageItem(gmailMailRecordFromMessage(metadata, { metadataOnly: true }), this.account);
+              const subject = metadataString(item.metadata, 'subject');
+              const from = metadataString(item.metadata, 'from');
+              const skipped = classifyEmailIngestSkip({ ...(subject ? { subject } : {}), ...(from ? { from } : {}), labels: metadataStringArray(item.metadata, 'labels') }, this.ingestFilterOptions);
+              if (!skipped) this.scope.storedItemObserved(item);
+            }
           }
           // Held mail never moves the high-water mark: its stored date is the
           // sender's Date header, which can say anything (a spam dated 2036

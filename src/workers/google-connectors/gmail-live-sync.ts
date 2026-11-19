@@ -221,7 +221,7 @@ export interface GmailConnectorStoreSyncOptions extends GoogleGmailSourceConnect
    * one's watermark. The compiled query itself rides `scope`.
    */
   scopeApproval?: { generation: string; revision: string };
-  /** Confirm current scope membership of immutable Private bodies needed by local meaning backfill. */
+  /** Confirm current scope membership of retained mail for Private meaning backfill. */
   confirmStoredPrivateScope?: boolean;
   /**
    * Re-check that approval against the live registry. Called after every
@@ -294,20 +294,23 @@ export function createGmailConnectorStoreSyncHandler(
   const tierClassification = {
     ...(ownerRules.length > 0 ? { rules: ownerRules } : {}),
   };
-  // Under a scope, mail either store already holds is never re-observed: a
-  // re-read could only swap a stored body for a metadata-only row or re-tier
-  // an item whose vectors exist, and both would discard existing chunks and
-  // embeddings (owner rule: nothing throws away existing embeddings).
+  // Keep stored bodies as they are. A metadata confirmation can add the
+  // current approval's owner to retained content in either tier. Confirming
+  // Personal mail lets that owner travel with the body if the judge raises it.
+  const stores = [options.internalStore, options.secureStore];
+  const lacksCurrentOwner = (store: LocalConnectorStore, identity: RawItem['identity']) =>
+    !store.itemOwnerPresent(identity, connectorId, 'observed');
   const storedItem = (providerItemId: string) => {
     const identity = { family: 'email' as const, provider: GMAIL_PROVIDER, accountScope: account, providerItemId, localItemId: `${account}:${providerItemId}` };
-    const copies = [options.internalStore.itemStoredContent(identity), options.secureStore.itemStoredContent(identity)]
-      .filter((copy): copy is NonNullable<typeof copy> => copy !== undefined);
+    const copies = stores.flatMap(store => {
+      const content = store.itemStoredContent(identity);
+      return content ? [{ store, content }] : [];
+    });
     if (copies.length === 0) return undefined;
     return {
-      hasContent: copies.some(copy => copy.chunkCount > 0),
+      hasContent: copies.some(({ content }) => content.chunkCount > 0),
       ...(options.confirmStoredPrivateScope && options.scopeApproval
-        && options.secureStore.itemStoredContent(identity)?.chunkCount
-        && !options.secureStore.itemOwnerPresent(identity, connectorId, 'observed')
+        && copies.some(({ store, content }) => content.chunkCount > 0 && lacksCurrentOwner(store, identity))
         ? { needsScopeObservation: true } : {}),
     };
   };
@@ -316,7 +319,15 @@ export function createGmailConnectorStoreSyncHandler(
     ...(options.confirmStoredPrivateScope && options.scopeApproval ? {
       storedItemObserved: (item: RawItem) => {
         options.assertScopeCurrent?.();
-        options.secureStore.observeStoredItemOwner(item.identity, connectorId);
+        let confirmed = false;
+        // Recheck the copies after the provider request. A move may have
+        // changed which store holds the body while the request was in flight.
+        for (const store of stores) {
+          if (!store.itemStoredContent(item.identity)?.chunkCount || !lacksCurrentOwner(store, item.identity)) continue;
+          store.observeStoredItemOwner(item.identity, connectorId);
+          if (!lacksCurrentOwner(store, item.identity)) confirmed = true;
+        }
+        return confirmed;
       },
     } : {}),
   } : undefined;
@@ -329,6 +340,12 @@ export function createGmailConnectorStoreSyncHandler(
     new GoogleGmailSourceConnector({
       ...options,
       ...(overrides.scope ? { scope: overrides.scope } : scope ? { scope } : {}),
+      ...(scope?.storedItemObserved && options.assertScopeCurrent ? {
+        beforeEachRequest: () => {
+          options.assertScopeCurrent?.();
+          options.beforeEachRequest?.();
+        },
+      } : {}),
       ...(overrides.maxMessages !== undefined ? { maxMessages: overrides.maxMessages } : {}),
       ...(overrides.query ? { query: overrides.query } : {}),
       // Stated last and unconditionally, so it is a property of THIS run and
@@ -430,7 +447,8 @@ export function createGmailConnectorStoreSyncHandler(
   return {
     ...(options.confirmStoredPrivateScope && options.scopeApproval && scope ? {
       confirmPrivateScope: async (request: { max_items?: number; checkpoint?: string } = {}) => {
-        const confirmationScope = `private-confirmation-v1:${connectorId}`;
+        // Replay the old Private-only walk once to confirm retained Personal mail too.
+        const confirmationScope = `private-confirmation-v2:${connectorId}`;
         const complete = `${confirmationScope}:done`;
         if (request.checkpoint === complete) return { confirmed: 0, done: true, checkpoint: complete };
         const resume = decodeCheckpoint(request.checkpoint, confirmationScope).head;
@@ -440,8 +458,7 @@ export function createGmailConnectorStoreSyncHandler(
         const connector = buildConnector({
           maxMessages: maxItems,
           scope: { ...scope, confirmationOnly: true, storedItemObserved: item => {
-            scope.storedItemObserved?.(item);
-            if (options.secureStore.itemOwnerPresent(item.identity, connectorId, 'observed')) confirmed++;
+            if (scope.storedItemObserved?.(item)) confirmed++;
           } },
         });
         let done = false;

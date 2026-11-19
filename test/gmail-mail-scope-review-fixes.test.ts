@@ -10,6 +10,7 @@ import {
   approveMailSourceScope,
   compileGmailMailScope,
   defaultMailScopeSelection,
+  forgetMailSourceScopeApproval,
   mailScopeContentAfter,
   readMailSourceScopeApproval,
   type MailScopeSelection,
@@ -17,6 +18,11 @@ import {
 import type { CredentialBroker } from '../src/workers/credential-broker/index.ts';
 import type { SourceConnectorListPage, RawItem } from '../src/core/contracts.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
+import { planStoreEmbedding } from '../src/workers/connector-store/embedding-plan.ts';
+import { automaticTierMoveOptions, automaticTierMovesAllowed } from '../src/workers/connector-store/tier-auto-move.ts';
+import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
+import { createLaneTieredStoreSet } from '../src/workers/connector-store/tiered-store-set.ts';
+import { storeEmbeddingScope } from '../src/workers/engine/runtime/embedding-providers.ts';
 import {
   GMAIL_INTERNAL_CONNECTOR_CORPUS_ID,
   GMAIL_SECURE_CONNECTOR_CORPUS_ID,
@@ -37,7 +43,7 @@ import {
   GMAIL_PICKER_DAILY_REQUEST_BUDGET,
 } from '../src/workers/google-connectors/gmail-scope-browser.ts';
 import { GoogleDailyRequestBudget } from '../src/workers/google-connectors/request-budget.ts';
-import { gmailConnectorScopeFromApproval } from '../src/workers/source-scope-runtime.ts';
+import { FileSourceScopeAuthority, gmailConnectorScopeFromApproval, type MailSourceScopePolicyRef } from '../src/workers/source-scope-runtime.ts';
 import { promotedWatermark } from '../src/workers/google-connectors/gmail.ts';
 import { MAX_FROM_HEADER_CHARS, ownerSenderRuleMatches, senderAddress, senderMatchesRule } from '../src/core/sender-rules.ts';
 import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
@@ -147,7 +153,7 @@ describe('no existing embeddings are thrown away by a scope', () => {
       return { messages: eligible.slice(offset, offset + 1).map(mail => ({ id: mail.id })), ...(offset + 1 < eligible.length ? { nextPageToken: String(offset + 1) } : {}) };
     };
     const scope = gmailConnectorScopeFromApproval({ mailScope: withCutoff({ alwaysPrivateSenders: ['@clinic.example'] }) });
-    const common = { ...stores, account: 'personal', apiClient: client, env: {}, scope, now: () => NOW.getTime() };
+    const common = { ...stores, account: 'personal', apiClient: client, credentialBroker: OFFLINE_BROKER, env: {}, scope, now: () => NOW.getTime() };
     const finish = async (lane: ReturnType<typeof createGmailConnectorStoreSyncHandler>) => {
       let checkpoint: string | null = null;
       for (let pass = 0; pass < 200; pass++) {
@@ -233,13 +239,13 @@ describe('no existing embeddings are thrown away by a scope', () => {
     const client = fakeClient(mails);
     const baseScope = gmailConnectorScopeFromApproval({ mailScope: withCutoff({ alwaysPrivateSenders: ['@clinic.example'] }) });
     const oldScope = { ...baseScope, contentAfterMs: NOW.getTime() - 5 * 365 * DAY };
-    const old = createGmailConnectorStoreSyncHandler({ ...stores, account: 'personal', apiClient: client, env: {}, scope: oldScope, scopeApproval: { generation: 'old-generation', revision: 'old-revision' } });
+    const old = createGmailConnectorStoreSyncHandler({ ...stores, account: 'personal', apiClient: client, credentialBroker: OFFLINE_BROKER, env: {}, scope: oldScope, scopeApproval: { generation: 'old-generation', revision: 'old-revision' } });
     let pulled = await old.pull({ max_items: 50 });
     if (pulled.checkpoint) await old.pull({ max_items: 50, checkpoint: pulled.checkpoint });
     const before = stores.secureStore.exportItemCopy(identity('allowed'))!;
     mails[2]!.labelIds = ['Label_renamed'];
     const scopeApproval = { generation: 'new-generation', revision: 'new-revision' };
-    const current = createGmailConnectorStoreSyncHandler({ ...stores, account: 'personal', apiClient: client, env: {}, scope: { ...baseScope, skipSenders: ['skip-sender@clinic.example'], skippedLabelIds: ['Label_renamed'] }, scopeApproval, confirmStoredPrivateScope: true });
+    const current = createGmailConnectorStoreSyncHandler({ ...stores, account: 'personal', apiClient: client, credentialBroker: OFFLINE_BROKER, env: {}, scope: { ...baseScope, skipSenders: ['skip-sender@clinic.example'], skippedLabelIds: ['Label_renamed'] }, scopeApproval, confirmStoredPrivateScope: true });
     const getsBefore = client.formats.length;
     pulled = await current.pull({ max_items: 50 });
     if (pulled.checkpoint) await current.pull({ max_items: 50, checkpoint: pulled.checkpoint });
@@ -317,6 +323,137 @@ describe('no existing embeddings are thrown away by a scope', () => {
       .pull({ max_items: 50 });
     expect(stores.internalStore.itemStoredContent(identity('old'))).toMatchObject({ chunkCount: 1 });
   });
+});
+
+async function retainedPersonalMail(options: { sameIdentity?: boolean; legacyUnscoped?: boolean } = {}) {
+  const dir = tempDir();
+  const stores = fileStores(dir);
+  const authority = new FileSourceScopeAuthority({
+    registryPath: join(dir, 'handles.json'),
+    readRegistry: () => ({ version: 1, handles: [{
+      handle: 'gmail.personal', provider: 'gmail', accountRole: 'personal', scopes: [],
+      allowedCapabilities: ['gmail.email.sync'], connectedAt: NOW.toISOString(),
+    }] }),
+  });
+  const approve = (skippedLabels: MailScopeSelection['skippedLabels'] = []) => {
+    const state = authority.mailSnapshot();
+    authority.approveMail({ accountGeneration: state.accountGeneration!, expectedRevision: state.revision,
+      scope: { ...defaultMailScopeSelection(), window: 'all', skippedLabels } });
+    return authority.mailPolicyRef()!;
+  };
+  const mail = message('retained', NOW.getTime() - DAY);
+  const client = fakeClient([mail]);
+  const inputs: string[] = [];
+  const personal = { ...recordingProvider('local'), provider: 'built-in', modelId: 'fixture-personal',
+    async embed(batch) { return batch.map(() => [1, 0]); },
+  } satisfies SourceEmbeddingProvider;
+  const privateProvider = { ...personal, modelId: options.sameIdentity ? personal.modelId : 'fixture-private',
+    async embed(batch) { inputs.push(...batch.map(input => input.text)); return batch.map(() => [1, 0]); },
+  } satisfies SourceEmbeddingProvider;
+  const tierSet = createLaneTieredStoreSet({ ...stores, setId: 'gmail', internalEmbeddingProvider: personal, secureEmbeddingProvider: privateProvider });
+  const lane = (ref?: MailSourceScopePolicyRef) => createGmailConnectorStoreSyncHandler({
+    ...stores, tierSet, account: 'personal', apiClient: client, credentialBroker: OFFLINE_BROKER, env: {},
+    ...(ref ? {
+      scope: gmailConnectorScopeFromApproval(authority.assertCurrentMail(ref)),
+      scopeApproval: { generation: ref.accountGeneration, revision: ref.revision },
+      assertScopeCurrent: () => { authority.assertCurrentMail(ref); },
+      confirmStoredPrivateScope: true,
+    } : {}),
+  });
+  await lane(options.legacyUnscoped ? undefined : approve()).pull({ max_items: 50 });
+  expect(stores.internalStore.copyContentState(identity(mail.id))).toMatchObject({ chunks: 1, vectors: 1 });
+  const scope = (store: LocalConnectorStore, ref: MailSourceScopePolicyRef | undefined) => storeEmbeddingScope({
+    store, sourceId: 'gmail.email', scopeRef: ref, authority,
+    readScope: () => ({ allowed: true, contentAllowed: true }),
+    gmailAccountScope: 'personal', gmailImportAccountScope: 'personal',
+  });
+  const privateSweep = (ref: MailSourceScopePolicyRef | undefined) => {
+    const store = stores.secureStore;
+    const target = planStoreEmbedding({ store, provider: privateProvider, servedByMeaning: true, scope: scope(store, ref) })!;
+    return withEmbeddingSweep([{
+      sourceId: 'gmail.email', corpusId: store.corpusId, cadence: 'continuous', intervalMs: 1_000, freshnessThresholdHours: 1, tasks: [],
+    }], () => () => [target])[0]!.tasks[0]!;
+  };
+  const move = async () => {
+    const context = { localEmbeddingsOnly: () => true, embeddingLedgerPath: join(dir, 'embedding.jsonl') };
+    expect(automaticTierMovesAllowed(tierSet, context)).toBe(true);
+    const target = { metadataTier: 'secure', contentTier: 'secure' } as const;
+    const item = identity(mail.id);
+    const row = tierSet.ledger.beginMove(item, target, tierSet.ledger.getCurrent(item)!.generation);
+    const result = await moveTieredItem({ set: tierSet, identity: item, target,
+      ...automaticTierMoveOptions(tierSet, context), expectedGeneration: row.generation });
+    expect(result).toMatchObject({ outcome: 'moved', raise: true });
+    expect(stores.internalStore.copyContentState(item)).toMatchObject({ chunks: 0, vectors: 0 });
+    expect(stores.secureStore.searchItems('retained', 5).map(row => row.sourceItem.providerItemId)).toEqual([mail.id]);
+    return result.destinations.find(copy => copy.corpusId === stores.secureStore.corpusId);
+  };
+  const meaning = () => stores.secureStore.vectorSearchLane('semantically related query', privateProvider, 5);
+  return { authority, approve, lane, client, mail, inputs, move, meaning, privateSweep };
+}
+
+test('current Gmail approval follows confirmed Personal mail into Private and the Private provider restores meaning', async () => {
+  const f = await retainedPersonalMail();
+  const current = f.approve([{ id: 'Label_1', name: 'Family' }]);
+  const connectorId = gmailCursorConnectorId('personal', { generation: current.accountGeneration, revision: current.revision });
+  const formatsBefore = f.client.formats.length;
+  // A deployment may already have completed the Private-only walk for this approval.
+  const confirmed = await f.lane(current).confirmPrivateScope!({ checkpoint: `private-confirmation-v1:${connectorId}:done` });
+  expect(await f.move()).toMatchObject({ vectorsCopied: 0, chunksToEmbed: 1 });
+  expect((await f.meaning()).rows).toEqual([]);
+  expect(await f.privateSweep(current).run()).toMatchObject({ counts: { chunks_embedded: 1 } });
+  expect(confirmed).toMatchObject({ confirmed: 1, done: true });
+  expect(f.client.formats.slice(formatsBefore)).toEqual(['metadata']);
+  expect(f.inputs.join('')).toContain('Body of retained');
+  expect((await f.meaning()).rows.map(row => row.sourceItem.providerItemId)).toEqual(['retained']);
+});
+
+test('a matching automatic-move vector remains searchable even before current Gmail confirmation', async () => {
+  const f = await retainedPersonalMail({ sameIdentity: true });
+  const current = f.approve([{ id: 'Label_1', name: 'Family' }]);
+  expect(await f.move()).toMatchObject({ vectorsCopied: 1, chunksToEmbed: 0 });
+  expect(await f.privateSweep(current).run()).toMatchObject({ counts: { chunks_embedded: 0 } });
+  expect(f.inputs).toEqual([]);
+  expect((await f.meaning()).rows.map(row => row.sourceItem.providerItemId)).toEqual(['retained']);
+});
+
+test('legacy Personal mail never covered by a Gmail approval gains no embedding permission from a move', async () => {
+  const f = await retainedPersonalMail({ legacyUnscoped: true });
+  f.mail.labelIds = ['Label_1'];
+  const current = f.approve([{ id: 'Label_1', name: 'Family' }]);
+  expect(await f.lane(current).confirmPrivateScope!()).toMatchObject({ confirmed: 0, done: true });
+  expect(await f.move()).toMatchObject({ vectorsCopied: 0, chunksToEmbed: 1 });
+  expect(await f.privateSweep(current).run()).toMatchObject({ counts: { chunks_embedded: 0 },
+    embeddingSweep: [{ counts: { skipped_out_of_scope_chunks: 1 } }] });
+  expect(f.inputs).toEqual([]);
+});
+
+test('superseding or revoking the confirming Gmail approval stops the Private sweep', async () => {
+  const f = await retainedPersonalMail();
+  const confirming = f.approve([{ id: 'Label_1', name: 'Family' }]);
+  expect(await f.lane(confirming).confirmPrivateScope!()).toMatchObject({ confirmed: 1, done: true });
+  await f.move();
+  // Even a target planned before the save must recheck the binding at dispatch.
+  const planned = f.privateSweep(confirming);
+  const current = f.approve([{ id: 'Label_2', name: 'Work' }]);
+  await planned.run();
+  expect(await f.privateSweep(current).run()).toMatchObject({ counts: { chunks_embedded: 0 } });
+  expect(forgetMailSourceScopeApproval(f.authority.mailStatePath, ['gmail.email'])).toBe(1);
+  expect(await f.privateSweep(undefined).run()).toMatchObject({ counts: { chunks_embedded: 0 } });
+  expect(f.inputs).toEqual([]);
+});
+
+test('superseding the Gmail approval after listing stops retained Personal metadata confirmation', async () => {
+  const f = await retainedPersonalMail();
+  const current = f.approve([{ id: 'Label_1', name: 'Family' }]);
+  const formatsBefore = f.client.formats.length;
+  const list = f.client.listMessages;
+  f.client.listMessages = async request => {
+    const page = await list(request);
+    f.approve([{ id: 'Label_2', name: 'Work' }]);
+    return page;
+  };
+  await expect(f.lane(current).confirmPrivateScope!()).rejects.toThrow('Mail scope approval is required');
+  expect(f.client.formats).toHaveLength(formatsBefore);
 });
 
 describe('a dormant mailbox is not re-read forever', () => {
