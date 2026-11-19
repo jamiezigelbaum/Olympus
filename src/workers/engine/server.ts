@@ -493,7 +493,7 @@ import { resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
 import { controlPathHeadroom, ingestionTurn, serializeDiagnosticWrites, startCpuSampleLog } from '../control-path-headroom.ts';
 import { setEngineStep, startEngineHeartbeat } from '../../core/engine-heartbeat.ts';
 import { withdrawBootProgress, beginBootProgress, beginFrontProgress, failFrontProgress, finishBootProgress, finishFrontProgress, reportBootStep, reportFrontStep } from '../../core/boot-progress.ts';
-import { beginStartupProgress } from '../../core/startup-progress.ts';
+import { beginStartupProgress, startupProgress } from '../../core/startup-progress.ts';
 import { ENGINE_BACKGROUND_INSTANCE_ENV, engineRoleFromEnv } from '../../core/engine-split.ts';
 import { forbidWritableStoreOpens } from '../../core/store-write-guard.ts';
 import { frontLoopSqlHealth, watchFrontLoopSql } from '../../core/front-loop-sql-guard.ts';
@@ -2517,6 +2517,7 @@ export async function main(): Promise<void> {
     ...configuredConnectorStores,
     ...laneConnectorStores,
   ]);
+  if (engineFront) for (const store of connectorStores) store.deferVectorSearchUntilVisibilityBuilt();
   configuredMountStores = connectorStores;
   const readConnectorStores = connectorStores;
   // The background's SQLite files, sampled for the loop-stall receipt
@@ -2543,8 +2544,8 @@ export async function main(): Promise<void> {
     ? await ((await import(loopStallModule)) as typeof import('../../../scripts/loop-stall-test.ts')).attachEngineFixture(connectorStores, engineRole)
     : undefined;
   // Every store's hidden-copy set, built and then kept current on a timer.
-  // The front does it before it reports ready, so an Ask (the first included)
-  // applies a small delta at most instead of building a set on its thread.
+  // The front starts it before serving and admits each store to vector search
+  // as its own build succeeds, even if the listener started serving earlier.
   // The background (or the single worker) does it after it starts and saves
   // each set, so the front's start reads from a saved set inside the ledger's
   // feed. A store mounted later is built on the next tick.
@@ -3193,6 +3194,7 @@ export async function main(): Promise<void> {
     rememberHeldStore(store);
     frontMountProblems.delete(store.dbPath);
     if (!connectorStores.includes(store)) {
+      if (engineFront) store.deferVectorSearchUntilVisibilityBuilt();
       connectorStores.push(store);
       // A new store shows on the dashboard at the background's next count: the
       // split's front serves that count and never counts a store itself.
@@ -5982,6 +5984,14 @@ export async function main(): Promise<void> {
     }) : undefined;
     localPrivateAnswers = createLocalPrivateAnswers({
       destinations, ...(veniceAnswer ? { veniceAnswer } : {}),
+      ...(engineFront ? { startup: () => {
+        const total = connectorStores.length;
+        const done = connectorStores.filter(store => !store.vectorSearchStartup).length;
+        if (done === total) return undefined;
+        const progress = startupProgress();
+        return progress?.stores_total === total && progress.stores_done === done
+          ? progress : { stores_done: done, stores_total: total };
+      } } : {}),
       localConnectionId: '@local:You',
       anonymousAsk: localAnonymousAsk,
       // The built-in model serves one question at once: an answer preempts the sniffer.

@@ -49,6 +49,9 @@ import type { AnalystModelRequest } from '../src/core/analyst.ts';
 import { createRemotePrivateParts } from '../src/core/remote-private-part.ts';
 import { buildSourceIndexCorpusRegistry, defineSourceIndexCorpus } from '../src/core/source-index/corpus.ts';
 import { routeSourceIndexSearch } from '../src/core/source-index/router.ts';
+import { buildEvidencePackDetailed, semanticLaneSkippedGap } from '../src/core/evidence-pack.ts';
+import { SEMANTIC_SEARCH_STARTING, STARTUP_SEARCH_GAP } from '../src/core/source-index/partial-search.ts';
+import { beginStartupProgress, startupWaitingLine, type StartupProgress } from '../src/core/startup-progress.ts';
 import { createSovereigntyEngine, loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 import { openWaitingPrivateQuestionStore, type WaitingQuestionStore } from '../src/core/waiting-private-questions.ts';
 import { buildDashboardPreviewView, DASHBOARD_PREVIEW_NOW } from '../scripts/dashboard-preview.ts';
@@ -59,7 +62,7 @@ import { NoPrivateEvidenceError, type PrivateAnswerModel, type PrivateEvidenceIt
 import { generatePanelKeyPair, openPrivateAnswer, type SealedPrivateAnswer } from '../src/workers/chatgpt/private-answer-crypto.ts';
 import { PrivateAnswerJobs } from '../src/workers/chatgpt/private-answer-jobs.ts';
 import { VERSIONED_FIXTURE_ITEMS, versionedFixtureHits } from '../eval/fixtures/versioned-documents.ts';
-import { defineConnectorCorpus } from '../src/workers/connector-store/index.ts';
+import { createConnectorStoreContentProvider, createConnectorStoreCorpusAdapter, defineConnectorCorpus, LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { createReleaseTierCheck, createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
 import { DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT, DASHBOARD_SETTINGS_ZKAPI_ID, renderDashboardPrivateAnswersPage } from '../src/workers/dashboard/pages/private-answers.ts';
@@ -384,6 +387,134 @@ function waitingStore(): WaitingQuestionStore {
   });
   return store;
 }
+
+describe('split front vector admission', () => {
+  function openReader(source: LocalConnectorStore): LocalConnectorStore {
+    const { dbPath, corpusId, trustDomain, family } = source;
+    const reader = new LocalConnectorStore({ dbPath, corpusId, trustDomain, family, readOnly: true });
+    cleanups.push(() => reader.close());
+    return reader;
+  }
+
+  test('deferred search keeps keyword hits, reports the semantic coverage gap, and issues no vector SQL', async () => {
+    const local = await localFixture({ meaningEmbeddings: true });
+    const source = local.fixture.stores.secure_local!;
+    const reader = openReader(source);
+    reader.deferVectorSearchUntilVisibilityBuilt();
+    const corpus = defineConnectorCorpus({
+      corpusId: reader.corpusId, family: reader.family, trustDomain: reader.trustDomain, activationMode: 'hybrid_primary',
+    });
+    const registry = buildSourceIndexCorpusRegistry([corpus]);
+    const embeddingProvider = local.builtIn.provider;
+    const adapter = createConnectorStoreCorpusAdapter({ store: reader, embeddingProvider });
+    const keyword = createConnectorStoreCorpusAdapter({ store: reader, retrievalMode: 'keyword' });
+    const query = 'paid';
+    const context = { allowedTrustDomains: ['secure_local' as const], allowCloudQueries: false };
+    const request = { query, maxResults: 10, context, corpus };
+    const db = (reader as unknown as { db: Database }).db;
+    const storeQuery = spyOn(db, 'query');
+    const currency = spyOn(reader as unknown as { embeddingCurrencyRebuildPending(modelId: string): boolean }, 'embeddingCurrencyRebuildPending');
+    const authority = spyOn(reader as unknown as { embeddingReadAuthority(provider: SourceEmbeddingProvider): unknown }, 'embeddingReadAuthority');
+    const availability = spyOn(reader, 'vectorLaneServable');
+    const embed = spyOn(embeddingProvider, 'embed');
+    try {
+      const response = await adapter(request);
+      expect(response.hits).toEqual((await keyword(request)).hits);
+      expect(response.hits.map(hit => hit.sourceItem.providerItemId)).toEqual(['deposit']);
+      expect(await reader.vectorSearchLane(query, embeddingProvider, 10)).toEqual({ rows: [], skippedReason: SEMANTIC_SEARCH_STARTING });
+      expect(await adapter.metadataMatches!({ ...request, context: { ...context, metadataOnly: true } })).toMatchObject({ incomplete: true });
+      expect((await adapter.semanticNeighbours!(request)).hits).toEqual([]);
+      const detail = await buildEvidencePackDetailed({
+        question: query, maxResults: 10, searchContext: context, registry, adapters: { [corpus.corpusId]: adapter },
+        contentProviders: { [corpus.corpusId]: createConnectorStoreContentProvider({ store: reader, embeddingProvider }) },
+      });
+      expect(detail.pack.coverage).toMatchObject({
+        searchedCorpora: [corpus.corpusId], skippedCorpora: [],
+        extractionGaps: [semanticLaneSkippedGap(corpus.corpusId, SEMANTIC_SEARCH_STARTING)],
+      });
+      expect(detail.pack.candidates.map(candidate => candidate.provenance.sourceItem.providerItemId)).toEqual(['deposit']);
+      expect(storeQuery.mock.calls.filter(([sql]) => /chunk_embeddings|chunk_vector_digest/i.test(sql))).toEqual([]);
+      expect(currency).not.toHaveBeenCalled();
+      expect(authority).not.toHaveBeenCalled();
+      // The direct call for semantic neighbours hits the servability guard but does not query.
+      expect(availability.mock.results).toEqual([{ type: 'return', value: false }]);
+      expect(embed).not.toHaveBeenCalled();
+    } finally {
+      storeQuery.mockRestore();
+      currency.mockRestore();
+      authority.mockRestore();
+      availability.mockRestore();
+      embed.mockRestore();
+    }
+
+    const main = openReader(source);
+    await main.keepVisibilityCurrentInTurns();
+    await reader.keepVisibilityCurrentInTurns();
+    const expected = await createConnectorStoreCorpusAdapter({ store: main, embeddingProvider })(request);
+    const actual = await adapter(request);
+    expect(actual.hits).toEqual(expected.hits);
+    expect(actual.laneAudits?.map(({ elapsedMs: _elapsed, ...audit }) => audit))
+      .toEqual(expected.laneAudits?.map(({ elapsedMs: _elapsed, ...audit }) => audit));
+    expect(actual.matchCount).toEqual(expected.matchCount);
+    expect(actual.laneAudits).toContainEqual(expect.objectContaining({ laneType: 'semantic', returnedCount: 2 }));
+  });
+
+  test('a failed first build defers only its own handle and a new mount needs its own success', async () => {
+    const local = await localFixture();
+    const privateStore = openReader(local.fixture.stores.secure_local!);
+    const personalStore = openReader(local.fixture.stores.internal!);
+    privateStore.deferVectorSearchUntilVisibilityBuilt();
+    personalStore.deferVectorSearchUntilVisibilityBuilt();
+    const failure = spyOn(privateStore as unknown as { hiddenChildItemPksInTurns(): Promise<number[]> }, 'hiddenChildItemPksInTurns')
+      .mockRejectedValueOnce(new Error('fixture build failed'));
+    try {
+      await expect(privateStore.keepVisibilityCurrentInTurns()).rejects.toThrow('fixture build failed');
+      await personalStore.keepVisibilityCurrentInTurns();
+      expect(privateStore.vectorSearchStartup).toBeDefined();
+      expect(privateStore.vectorLaneServable(local.builtIn.provider.modelId)).toBe(false);
+      expect(personalStore.vectorSearchStartup).toBeUndefined();
+      expect(personalStore.vectorLaneServable(local.fixture.cloud.modelId)).toBe(true);
+    } finally { failure.mockRestore(); }
+    await privateStore.keepVisibilityCurrentInTurns();
+    expect(privateStore.vectorSearchStartup).toBeUndefined();
+
+    const remounted = openReader(privateStore);
+    remounted.deferVectorSearchUntilVisibilityBuilt();
+    expect(remounted.vectorLaneServable(local.builtIn.provider.modelId)).toBe(false);
+    await remounted.keepVisibilityCurrentInTurns();
+    expect(remounted.vectorLaneServable(local.builtIn.provider.modelId)).toBe(true);
+  });
+
+  test('an accepted Ask shows startup progress and finishes the same request after admission', async () => {
+    const local = await localFixture();
+    const source = local.fixture.stores.secure_local!;
+    source.deferVectorSearchUntilVisibilityBuilt();
+    const store = waitingStore();
+    const controller = createLocalPrivateAnswers({
+      localConnectionId: '@local:You', answer: local.answer, eligible: local.eligible, store: () => store,
+      startup: () => source.vectorSearchStartup ? { stores_done: 0, stores_total: 1 } : undefined,
+    });
+    cleanups.push(() => controller.close());
+
+    // The loop's progress flag can be cleared after a failed build attempt.
+    const progress = beginStartupProgress([source.dbPath]);
+    progress.finish();
+    const pending = controller.handle({ action: 'ask', question: 'When does the orchard flat lease end?' }, 'session:owner');
+    const listed = await controller.handle({ action: 'list' }, 'session:owner');
+    expect(listed.body).toMatchObject({ startup: { stores_done: 0, stores_total: 1 }, questions: [{ state: 'answering' }] });
+    expect(startupWaitingLine(listed.body.startup as StartupProgress)).toContain('Olympus is still starting');
+    expect(local.stub.requests).toEqual([]);
+    await source.keepVisibilityCurrentInTurns();
+    expect(await pending).toMatchObject({
+      status: 200,
+      body: {
+        ok: true, status: 'answered', answer: 'The orchard flat lease ends on 31 May 2027.',
+        unanswered: [STARTUP_SEARCH_GAP],
+      },
+    });
+    expect(store.list().questions).toHaveLength(1);
+  });
+});
 
 // ---- zero egress -----------------------------------------------------------------
 
