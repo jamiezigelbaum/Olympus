@@ -31945,12 +31945,14 @@ ${parentKey(ref)}`, { ref, origin });
       skipped_metadata_chunks: 0,
       skipped_failed_chunks: 0,
       skipped_out_of_scope_chunks: 0,
+      skipped_held_recent_chunks: 0,
+      skipped_out_of_scope_recent_chunks: 0,
       skipped_private_tier_chunks: 0,
       skipped_retired_chunks: 0,
       inventory_complete: 0
     };
     const windowSql = `
-      SELECT c.chunk_pk, i.item_pk, i.local_item_id, i.tombstoned, i.trust_tier,
+      SELECT c.chunk_pk, i.item_pk, i.local_item_id, i.tombstoned, i.trust_tier, i.indexed_at,
         CASE WHEN 1 = 1 ${account ? "AND i.account_scope = ?" : ""} ${scoped.sql} THEN 1 ELSE 0 END AS in_scope
       FROM chunks c JOIN items i ON i.item_pk = c.item_pk
       LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
@@ -31958,6 +31960,7 @@ ${parentKey(ref)}`, { ref, origin });
         AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
       ORDER BY c.chunk_pk
     `;
+    const recentSince = new Date(started - 3 * 24 * 60 * 60000).toISOString();
     const read = this.embeddingSweepRead(offThreadReadsSupported(this.dbPath));
     const maxChunkPk = (await read({ sql: "SELECT COALESCE(MAX(chunk_pk), 0) AS n FROM chunks", params: [], mode: "get" })).n;
     let after = 0;
@@ -31979,6 +31982,9 @@ ${parentKey(ref)}`, { ref, origin });
         const visibilityExcluded = hidden.has(row.item_pk) || namesOnly.has(row.item_pk) || heldBack;
         const reason = row.tombstoned || row.trust_tier === "S5" ? "skipped_retired_chunks" : moving.has(row.item_pk) && visibilityExcluded ? "skipped_moving_chunks" : hidden.has(row.item_pk) ? "skipped_hidden_chunks" : namesOnly.has(row.item_pk) ? "skipped_metadata_chunks" : heldBack ? "skipped_held_chunks" : tiers && !tiers.includes(row.trust_tier) ? "skipped_private_tier_chunks" : this.embeddingFailureState?.has(row.local_item_id) ? "skipped_failed_chunks" : !row.in_scope ? "skipped_out_of_scope_chunks" : "eligible_chunks";
         counts[reason] += 1;
+        if ((reason === "skipped_held_chunks" || reason === "skipped_out_of_scope_chunks") && row.indexed_at && row.indexed_at >= recentSince) {
+          counts[reason === "skipped_held_chunks" ? "skipped_held_recent_chunks" : "skipped_out_of_scope_recent_chunks"] += 1;
+        }
       }
       after += windowChunks;
     }

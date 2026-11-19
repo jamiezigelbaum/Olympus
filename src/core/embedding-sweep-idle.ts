@@ -16,6 +16,7 @@ export const EMBEDDING_SWEEP_IDLE_SUFFIX = '.embedding-sweep-idle.json';
 const INVENTORY_FIELDS = [
   'pending_chunks', 'eligible_chunks', 'skipped_held_chunks', 'skipped_moving_chunks',
   'skipped_hidden_chunks', 'skipped_metadata_chunks', 'skipped_failed_chunks', 'skipped_out_of_scope_chunks',
+  'skipped_held_recent_chunks', 'skipped_out_of_scope_recent_chunks',
   'skipped_private_tier_chunks', 'skipped_retired_chunks', 'inventory_complete', 'inventory_ms',
 ] as const;
 

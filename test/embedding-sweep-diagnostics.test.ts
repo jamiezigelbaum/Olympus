@@ -127,7 +127,7 @@ test('held, moving and failed reasons remain distinct', async () => {
 
 test('a scope exclusion is counted without widening the embedding scope', async () => {
   const f = await fixture({ accountScope: 'outside-synthetic-scope' });
-  expect(await f.pass()).toMatchObject({ skipped_out_of_scope_chunks: 1, eligible_chunks: 0, chunks_embedded: 0 });
+  expect(await f.pass()).toMatchObject({ skipped_out_of_scope_chunks: 1, skipped_out_of_scope_recent_chunks: 1, eligible_chunks: 0, chunks_embedded: 0 });
   expect(f.provider.inputs).toHaveLength(0);
 });
 
