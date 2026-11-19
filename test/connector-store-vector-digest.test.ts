@@ -838,10 +838,11 @@ describe('the vector lane ranks only what it can serve, in one pass', () => {
       // The store's own visibility set and the live ledger agree: the top 90% are held.
       const held = new Set(pks.slice(0, count * 0.9));
       const lane = store as unknown as {
-        vectorScanExcludedItemPks(): { has(itemPk: number): boolean };
+        tierLedgerHiddenItemPks(): { hidden: number[]; held: number[]; heldForJudgment: number[]; metadataLayer: number[]; metadataLayerContentUnread: number[]; moving: number };
         visibleVectorItemPks(pks: readonly number[]): Set<number>;
       };
-      lane.vectorScanExcludedItemPks = () => held;
+      const value = { hidden: [], held: [...held], heldForJudgment: [...held], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 };
+      lane.tierLedgerHiddenItemPks = () => value;
       lane.visibleVectorItemPks = (candidates) => new Set(candidates.filter((pk) => !held.has(pk)));
       const reads = counted();
       try {
