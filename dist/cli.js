@@ -43784,7 +43784,7 @@ class TierLedger {
     return readSqliteWithoutWriting(dbPath, busyTimeoutMs, (db) => {
       const row = db.query(`SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'`).get();
       return typeof row?.value === "string" && row.value !== "" ? row.value : undefined;
-    });
+    }, options.readOnly);
   }
   writesHeld() {
     return this.db.inTransaction;
@@ -46405,11 +46405,11 @@ function tierSetLedgerCandidates(storeDbPath, recordedLedgerPath) {
   candidates.push(recordedLedgerPath);
   return [...new Set(candidates)].filter((path) => tierLedgerIsWithin(tierStoreDataRoot(storeDbPath), path));
 }
-function findTierSetLedger(storeDbPath, binding) {
+function findTierSetLedger(storeDbPath, binding, options) {
   for (const candidate of tierSetLedgerCandidates(storeDbPath, binding.ledgerPath)) {
     if (candidate === ":memory:" || !existsSync26(candidate))
       continue;
-    if (TierLedger.readLedgerId(candidate) === binding.ledgerId)
+    if (TierLedger.readLedgerId(candidate, options) === binding.ledgerId)
       return candidate;
   }
   return;
@@ -165293,7 +165293,7 @@ function matchStore2(dbPath, needle) {
       `).all(needle.identity.provider, needle.identity.accountScope, needle.identity.providerItemId, needle.identity.providerConversationId ?? "");
     if (rows.length === 0)
       return [];
-    const bound = storeBoundLedger(db, dbPath);
+    const bound = storeBoundLedger(db, dbPath, true);
     return rows.map((row) => ({
       identity: {
         provider: row.provider,
@@ -165314,7 +165314,7 @@ function matchStore2(dbPath, needle) {
     closeSqliteStore(db, { checkpoint: false, readOnly: true });
   }
 }
-function storeBoundLedger(db, dbPath) {
+function storeBoundLedger(db, dbPath, readOnly = false) {
   let cursor;
   try {
     cursor = db.query("SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?").get(TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID)?.cursor;
@@ -165326,7 +165326,7 @@ function storeBoundLedger(db, dbPath) {
     } catch {
       record = undefined;
     }
-    const found = typeof record?.ledgerId === "string" && typeof record.ledgerPath === "string" ? findTierSetLedger(dbPath, { ledgerId: record.ledgerId, ledgerPath: record.ledgerPath }) : undefined;
+    const found = typeof record?.ledgerId === "string" && typeof record.ledgerPath === "string" ? findTierSetLedger(dbPath, { ledgerId: record.ledgerId, ledgerPath: record.ledgerPath }, { readOnly }) : undefined;
     if (found === undefined || typeof record?.ledgerId !== "string") {
       throw new OperationError("source_index_error", "The tier ledger this item's store is bound to cannot be found, so its tier cannot be read or changed.", "Restore the set ledger (beside the source's secure_local store), then run the command again.");
     }
@@ -165374,7 +165374,7 @@ function locateMatched(needle, context) {
     localItemId,
     ...boundIds.has(ledgerPath) ? { boundLedgerId: boundIds.get(ledgerPath) } : {}
   });
-  const deciding = [...ledgerPaths].filter((path) => withLedgerAt(path, undefined, (ledger) => ledger.getCurrent(identity) !== undefined, boundIds.get(path), true));
+  const deciding = [...ledgerPaths].filter((path) => withLedgerAt(path, undefined, (ledger) => ledger.getCurrent(identity) !== undefined, boundIds.get(path), "read-only"));
   if (deciding.length > 0)
     return deciding.map(located);
   const fallback = matches[0];
@@ -165420,8 +165420,9 @@ function knownTierLedgers(context = {}) {
 function identityKey2(identity) {
   return tierLedgerIdentityKey(identity);
 }
-function withLedgerAt(ledgerPath, now, run, expectedId, readsOnly = false) {
-  const ledger = new TierLedger({ dbPath: ledgerPath, ...now ? { now } : {}, ...readsOnly && writableStoreOpensForbidden() ? { readOnly: true } : {} });
+function withLedgerAt(ledgerPath, now, run, expectedId, mode = "write") {
+  const readOnly = mode === "read-only" || mode === "read-only-on-front" && writableStoreOpensForbidden();
+  const ledger = new TierLedger({ dbPath: ledgerPath, ...now ? { now } : {}, readOnly });
   try {
     if (expectedId !== undefined && ledger.ledgerId() !== expectedId) {
       throw new OperationError("source_index_error", "The tier ledger for that item was replaced while it was being read, so nothing was changed.", "Run the command again.");
@@ -165538,7 +165539,7 @@ function runTierExplain(args, context = {}) {
       orphaned: orphanedOverride(ledger, item.identity),
       history: ledger.history(item.identity),
       copies: ledger.copies(item.identity)
-    }), item.boundLedgerId, true);
+    }), item.boundLedgerId, "read-only-on-front");
     const snifferPath = tierSnifferPathForLedger(item.ledgerPath);
     let waitingOn = [];
     if (existsSync94(snifferPath)) {
@@ -186010,7 +186011,7 @@ function recentRows(limit, context, filter, before, beforeItem) {
   for (const ledger of knownTierLedgers(context)) {
     let records = [];
     try {
-      records = withLedgerAt(ledger.path, context.now, (opened) => filter === "changed" ? opened.listRoutedOverrides().filter(({ override }) => override.kind === "tier").map(({ record }) => record).sort((left, right) => right.decidedAt.localeCompare(left.decidedAt)).slice(0, limit) : opened.recentDecisions(limit, filter === "personal" ? "private" : filter === "private" ? "secure" : undefined, before, beforeItem), ledger.boundLedgerId, true);
+      records = withLedgerAt(ledger.path, context.now, (opened) => filter === "changed" ? opened.listRoutedOverrides().filter(({ override }) => override.kind === "tier").map(({ record }) => record).sort((left, right) => right.decidedAt.localeCompare(left.decidedAt)).slice(0, limit) : opened.recentDecisions(limit, filter === "personal" ? "private" : filter === "private" ? "secure" : undefined, before, beforeItem), ledger.boundLedgerId, "read-only-on-front");
     } catch {}
     for (const record of records) {
       const key = tierLedgerIdentityKey(identityOfRecord2(record));
@@ -186063,7 +186064,7 @@ function countOwnerTierItems(context = {}) {
         counts.personal += byTier.private;
         counts.private += byTier.secure;
         counts.changed += opened.listRoutedOverrides().filter(({ override }) => override.kind === "tier").length;
-      }, ledger.boundLedgerId, true);
+      }, ledger.boundLedgerId, "read-only-on-front");
     } catch {}
   }
   return counts;
@@ -186112,7 +186113,7 @@ function readLocatedState(items, context) {
       }
       if (ledger.itemIsSecret(item.identity))
         state.secret = true;
-    }, item.boundLedgerId, true);
+    }, item.boundLedgerId, "read-only-on-front");
   }
   return state;
 }

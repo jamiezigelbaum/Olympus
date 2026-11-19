@@ -2479,13 +2479,13 @@ export class TierLedger {
    * Read without writing (readSqliteWithoutWriting). An unreadable ledger
    * fails closed.
    */
-  static readLedgerId(dbPath: string, options: { busyTimeoutMs?: number } = {}): string | undefined {
+  static readLedgerId(dbPath: string, options: { busyTimeoutMs?: number; readOnly?: boolean } = {}): string | undefined {
     if (dbPath === ':memory:' || !existsSync(dbPath)) return undefined;
     const busyTimeoutMs = Math.max(0, Math.trunc(options.busyTimeoutMs ?? 10_000));
     return readSqliteWithoutWriting(dbPath, busyTimeoutMs, (db) => {
       const row = db.query(`SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'`).get() as { value?: unknown } | null;
       return typeof row?.value === 'string' && row.value !== '' ? row.value : undefined;
-    });
+    }, options.readOnly);
   }
 
   /**

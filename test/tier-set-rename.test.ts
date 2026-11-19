@@ -15,7 +15,7 @@
 
 import { createHash } from 'node:crypto';
 import { Database } from 'bun:sqlite';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { gunzipSync } from 'node:zlib';
@@ -24,7 +24,7 @@ import { OperationError } from '../src/core/operation-error.ts';
 import { accountStorePath, olympusDataRoot, type LayoutEnv } from '../src/core/olympus-layout.ts';
 import { openConnectorStore } from '../src/core/source-storage.ts';
 import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
-import { locateTierItem, runTierExplain, runTierSet } from '../src/workers/classification/tier-cli.ts';
+import { locateTierItem, locateTierItemByIdentity, runTierExplain, runTierSet } from '../src/workers/classification/tier-cli.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { tierLedgerPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
 import { TierLedgerUnavailableError, type LocalConnectorStore } from '../src/workers/connector-store/index.ts';
@@ -554,6 +554,24 @@ describe('a ledger replaced between the id check and the open is not used', () =
 });
 
 describe('the readers that look for a bound ledger by path', () => {
+  test('Make Private locate preserves a read-only bound ledger', () => {
+    const w = world();
+    renameIntoAccountFolder(w);
+    const internal = folderPath(w, 'internal');
+    const ledgerPath = tierLedgerPathForStore(folderPath(w, 'secure_local'));
+    const walPath = `${ledgerPath}-wal`;
+    if (!existsSync(walPath)) writeFileSync(walPath, '');
+    chmodSync(ledgerPath, 0o400);
+    const before = readFileSync(ledgerPath);
+
+    const located = locateTierItemByIdentity(identityOf('garden'), { storePaths: [internal] });
+
+    expect(located).toHaveLength(1);
+    expect(located[0]).toMatchObject({ ledgerPath, boundLedgerId: SET_LEDGER_ID });
+    expect(statSync(ledgerPath).mode & 0o777).toBe(0o400);
+    expect(readFileSync(ledgerPath)).toEqual(before);
+  });
+
   test('the tier command finds the set ledger from one renamed store, not at the recorded place', () => {
     const w = world();
     renameIntoAccountFolder(w);

@@ -13773,7 +13773,7 @@ class TierLedger {
     return readSqliteWithoutWriting(dbPath, busyTimeoutMs, (db) => {
       const row = db.query(`SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'`).get();
       return typeof row?.value === "string" && row.value !== "" ? row.value : undefined;
-    });
+    }, options.readOnly);
   }
   writesHeld() {
     return this.db.inTransaction;
@@ -21075,11 +21075,11 @@ function tierSetLedgerCandidates(storeDbPath, recordedLedgerPath) {
   candidates.push(recordedLedgerPath);
   return [...new Set(candidates)].filter((path) => tierLedgerIsWithin(tierStoreDataRoot(storeDbPath), path));
 }
-function findTierSetLedger(storeDbPath, binding) {
+function findTierSetLedger(storeDbPath, binding, options) {
   for (const candidate of tierSetLedgerCandidates(storeDbPath, binding.ledgerPath)) {
     if (candidate === ":memory:" || !existsSync18(candidate))
       continue;
-    if (TierLedger.readLedgerId(candidate) === binding.ledgerId)
+    if (TierLedger.readLedgerId(candidate, options) === binding.ledgerId)
       return candidate;
   }
   return;

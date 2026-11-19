@@ -178,7 +178,7 @@ function matchStore(dbPath: string, needle: StoreNeedle): StoreMatch[] {
       local_item_id: string;
     }>;
     if (rows.length === 0) return [];
-    const bound = storeBoundLedger(db, dbPath);
+    const bound = storeBoundLedger(db, dbPath, true);
     return rows.map((row) => ({
       identity: {
         provider: row.provider,
@@ -205,7 +205,7 @@ function matchStore(dbPath: string, needle: StoreNeedle): StoreMatch[] {
  * was never bound, and its own ledger is the candidate). A store whose bound
  * ledger cannot be found is refused, never read against another ledger.
  */
-function storeBoundLedger(db: Database, dbPath: string): { path: string; id: string } | undefined {
+function storeBoundLedger(db: Database, dbPath: string, readOnly = false): { path: string; id: string } | undefined {
   let cursor: string | null | undefined;
   try {
     cursor = (db.query('SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?')
@@ -226,7 +226,7 @@ function storeBoundLedger(db: Database, dbPath: string): { path: string; id: str
       record = undefined;
     }
     const found = typeof record?.ledgerId === 'string' && typeof record.ledgerPath === 'string'
-      ? findTierSetLedger(dbPath, { ledgerId: record.ledgerId, ledgerPath: record.ledgerPath })
+      ? findTierSetLedger(dbPath, { ledgerId: record.ledgerId, ledgerPath: record.ledgerPath }, { readOnly })
       : undefined;
     if (found === undefined || typeof record?.ledgerId !== 'string') {
       throw new OperationError(
@@ -288,7 +288,8 @@ function locateMatched(needle: StoreNeedle, context: TierCliContext): LocatedIte
     localItemId,
     ...(boundIds.has(ledgerPath) ? { boundLedgerId: boundIds.get(ledgerPath)! } : {}),
   });
-  const deciding = [...ledgerPaths].filter((path) => withLedgerAt(path, undefined, (ledger) => ledger.getCurrent(identity) !== undefined, boundIds.get(path), true));
+  const deciding = [...ledgerPaths].filter((path) =>
+    withLedgerAt(path, undefined, (ledger) => ledger.getCurrent(identity) !== undefined, boundIds.get(path), 'read-only'));
   if (deciding.length > 0) return deciding.map(located);
   const fallback = matches[0]!;
   return [located(fallback.bound?.path ?? fallback.ownLedgerPath)];
@@ -349,12 +350,18 @@ function identityKey(identity: TierLedgerIdentity): string {
  * Run against the ledger at a path. `expectedId` is the id of the set ledger a
  * store is bound to: the path was found by reading that id on a connection of
  * its own, so the handle used here is checked too, because the file can have
- * been replaced in between. (A replacement has had its schema migrated by this
- * open before it is checked; that is accepted, since it is closed unused.)
+ * been replaced in between. A writable open may migrate a replacement's
+ * schema before the check.
  */
-export function withLedgerAt<T>(ledgerPath: string, now: (() => Date) | undefined, run: (ledger: TierLedger) => T, expectedId?: string, readsOnly = false): T {
-  // The engine split's front runs only the reads (`tier explain`), on read-only opens.
-  const ledger = new TierLedger({ dbPath: ledgerPath, ...(now ? { now } : {}), ...(readsOnly && writableStoreOpensForbidden() ? { readOnly: true } : {}) });
+export function withLedgerAt<T>(
+  ledgerPath: string,
+  now: (() => Date) | undefined,
+  run: (ledger: TierLedger) => T,
+  expectedId?: string,
+  mode: 'write' | 'read-only' | 'read-only-on-front' = 'write',
+): T {
+  const readOnly = mode === 'read-only' || (mode === 'read-only-on-front' && writableStoreOpensForbidden());
+  const ledger = new TierLedger({ dbPath: ledgerPath, ...(now ? { now } : {}), readOnly });
   try {
     if (expectedId !== undefined && ledger.ledgerId() !== expectedId) {
       throw new OperationError(
@@ -522,7 +529,7 @@ export function runTierExplain(args: readonly string[], context: TierCliContext 
       orphaned: orphanedOverride(ledger, item.identity),
       history: ledger.history(item.identity),
       copies: ledger.copies(item.identity),
-    }), item.boundLedgerId, true);
+    }), item.boundLedgerId, 'read-only-on-front');
     const snifferPath = tierSnifferPathForLedger(item.ledgerPath);
     let waitingOn: string[] = [];
     if (existsSync(snifferPath)) {
