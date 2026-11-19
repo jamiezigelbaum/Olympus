@@ -17619,7 +17619,7 @@ var init_reactions = () => {};
 function connectorStoreContentPreference(vettedVectorItemIds) {
   return (candidate) => candidate.item.chunk?.lane === "keyword" || candidate.laneRanks.has("recency") || candidate.laneRanks.has("vector") && vettedVectorItemIds.has(candidate.item.sourceItem.localItemId);
 }
-var CONCEPT_COUNT_MAX_AGE_MS, CONNECTOR_STORE_CONVERSATION_INDEX = "idx_connector_store_items_conversation_time", CONNECTOR_STORE_CONVERSATION_INDEX_SQL, CONNECTOR_STORE_RECENCY_INDEX = "idx_connector_store_items_recent_live", CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX = "idx_connector_store_items_recent_account_live", RECENCY_LIVE_SQL = "tombstoned IS 0", ACCOUNT_RECENCY_LIVE_SQL = "+tombstoned IS 0", CONNECTOR_STORE_RECENCY_INDEX_SQL, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, CHUNK_MEDIA_RETRY_BASE_MS, CONNECTOR_STORE_FTS_MIGRATION, STATUS_COUNTS_MAX_AGE_MS, TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, INLINE_CLOSE_SQLITE_STORE = "const closeSqliteStore = (db) => { try { db.exec('PRAGMA wal_checkpoint(TRUNCATE);'); } catch {} db.close(); };", CONNECTOR_RECLAIM_WORKER_SOURCE, lexicalContentPreference, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, LOCAL_RELAXED_STOPWORDS;
+var CONCEPT_COUNT_MAX_AGE_MS, CONNECTOR_STORE_CONVERSATION_INDEX = "idx_connector_store_items_conversation_time", CONNECTOR_STORE_CONVERSATION_INDEX_SQL, CONNECTOR_STORE_RECENCY_INDEX = "idx_connector_store_items_recent_live", CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX = "idx_connector_store_items_recent_account_live", RECENCY_LIVE_SQL = "tombstoned IS 0", ACCOUNT_RECENCY_LIVE_SQL = "+tombstoned IS 0", CONNECTOR_STORE_RECENCY_INDEX_SQL, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, CHUNK_MEDIA_RETRY_BASE_MS, CONNECTOR_STORE_FTS_MIGRATION, STATUS_COUNTS_MAX_AGE_MS, TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, lexicalContentPreference, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, LOCAL_RELAXED_STOPWORDS;
 var init_local_index = __esm(() => {
   init_memory_counters();
   init_sqlite_memory();
@@ -17728,44 +17728,6 @@ var init_local_index = __esm(() => {
   LAST_SYNC_RUN_SQL = `SELECT * FROM sync_runs
   WHERE connector_id NOT IN ${NON_SYNC_RUN_CONNECTORS_SQL}
   ORDER BY started_at DESC, rowid DESC LIMIT 1`;
-  CONNECTOR_RECLAIM_WORKER_SOURCE = `
-import { Database } from 'bun:sqlite';
-import { statSync } from 'node:fs';
-${INLINE_CLOSE_SQLITE_STORE}
-self.onmessage = ({ data: [path, budgetMs, pagesPerStep] }) => {
-  // This is the mounted store's own maintenance connection. Never create a missing store.
-  const db = new Database(path, { create: false, strict: true });
-  db.exec('PRAGMA busy_timeout = 0; PRAGMA foreign_keys = ON;');
-  try {
-    postMessage({ started: true });
-    const mode = db.query('PRAGMA auto_vacuum').get().auto_vacuum;
-    if (mode !== 2) {
-      db.exec('PRAGMA auto_vacuum = INCREMENTAL;');
-      // NONE needs one transactional rebuild. A killed conversion leaves the
-      // original database usable; there is no rename or half-swapped file.
-      if (mode === 0) {
-        // VACUUM may renumber rowids in the composite-key embedding table.
-        // Restart unfinished physical backfills before that can happen.
-        db.exec('UPDATE chunk_vector_digest_meta SET cursor_rowid = 0 WHERE completed = 0;');
-        db.exec('VACUUM;');
-      }
-    }
-    const started = performance.now();
-    let free = db.query('PRAGMA freelist_count').get().freelist_count;
-    while (free > 0 && performance.now() - started < budgetMs) {
-      db.exec('PRAGMA incremental_vacuum(' + pagesPerStep + ')');
-      free = db.query('PRAGMA freelist_count').get().freelist_count;
-    }
-    // WAL truncation is part of reclaim, not a blocking close-time courtesy.
-    // A status snapshot may still own old pages: retry on the next tick.
-    const checkpoint = db.query('PRAGMA wal_checkpoint(TRUNCATE)').get();
-    postMessage({ done: free === 0 && checkpoint.busy === 0, bytes: statSync(path).size });
-  } catch {
-    postMessage({ failed: true });
-  } finally {
-    closeSqliteStore(db);
-  }
-};`;
   lexicalContentPreference = connectorStoreContentPreference(new Set);
   CONNECTOR_STORE_V4_ITEM_COLUMNS = [
     "item_pk",

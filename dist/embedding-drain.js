@@ -25404,7 +25404,8 @@ function visibilityStepAwaited(read) {
   return judgedAwaited(() => read.offThread(), () => read.here());
 }
 var INLINE_CLOSE_SQLITE_STORE = "const closeSqliteStore = (db) => { try { db.exec('PRAGMA wal_checkpoint(TRUNCATE);'); } catch {} db.close(); };";
-var CONNECTOR_RECLAIM_WORKER_SOURCE = `
+function connectorReclaimWorkerSource() {
+  return `
 import { Database } from 'bun:sqlite';
 import { statSync } from 'node:fs';
 ${INLINE_CLOSE_SQLITE_STORE}
@@ -25442,6 +25443,7 @@ self.onmessage = ({ data: [path, budgetMs, pagesPerStep] }) => {
     closeSqliteStore(db);
   }
 };`;
+}
 function connectorRecencyIndexWorkerSource() {
   return `
 import { Database } from 'bun:sqlite';
@@ -25861,7 +25863,7 @@ class LocalConnectorStore {
     pagesPerStep = Math.max(1, Math.floor(pagesPerStep));
     assertWritableStoreOpenAllowed("connector store reclaim", this.dbPath);
     assertStoreTierLedgerCanOpen(this.dbPath);
-    const child = spawnConnectorStoreMaintenance(this.dbPath, CONNECTOR_RECLAIM_WORKER_SOURCE, [budgetMs, pagesPerStep]);
+    const child = spawnConnectorStoreMaintenance(this.dbPath, connectorReclaimWorkerSource(), [budgetMs, pagesPerStep]);
     this.reclaimProcess = child;
     let preempted = false;
     const preempt = () => {

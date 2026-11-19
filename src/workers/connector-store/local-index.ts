@@ -3750,7 +3750,10 @@ export function connectorStoreReadableNow(dbPath: string, onFailure?: (error: un
 const INLINE_CLOSE_SQLITE_STORE = "const closeSqliteStore = (db) => { try { db.exec('PRAGMA wal_checkpoint(TRUNCATE);'); } catch {} db.close(); };";
 
 /** The store's own maintenance opener, like its read-pool opener, on an isolated Bun process. */
-const CONNECTOR_RECLAIM_WORKER_SOURCE = `
+// A function, not a constant: an interpolated module-level template stays in every bundle that reaches this module, and the
+// plugin bundle must carry no bun:sqlite text (test/plugin-bundle-no-bun-sqlite.test.ts).
+function connectorReclaimWorkerSource(): string {
+  return `
 import { Database } from 'bun:sqlite';
 import { statSync } from 'node:fs';
 ${INLINE_CLOSE_SQLITE_STORE}
@@ -3788,6 +3791,7 @@ self.onmessage = ({ data: [path, budgetMs, pagesPerStep] }) => {
     closeSqliteStore(db);
   }
 };`;
+}
 
 function connectorRecencyIndexWorkerSource(): string {
   return `
@@ -4342,7 +4346,7 @@ export class LocalConnectorStore {
     pagesPerStep = Math.max(1, Math.floor(pagesPerStep));
     assertWritableStoreOpenAllowed('connector store reclaim', this.dbPath);
     assertStoreTierLedgerCanOpen(this.dbPath);
-    const child = spawnConnectorStoreMaintenance(this.dbPath, CONNECTOR_RECLAIM_WORKER_SOURCE, [budgetMs, pagesPerStep]);
+    const child = spawnConnectorStoreMaintenance(this.dbPath, connectorReclaimWorkerSource(), [budgetMs, pagesPerStep]);
     this.reclaimProcess = child;
     let preempted = false;
     const preempt = () => { if (!preempted) { preempted = true; child.kill('SIGKILL'); } };
