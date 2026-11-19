@@ -539,6 +539,8 @@ export function summarizeFreeze(rows: readonly Observation[], freeze: Freeze) {
     runningMs: rounded(runningMs), runQueueMs: rounded(runQueueMs),
     blockedMajfltMs: rounded(blockedMajfltMs), blockedBlkioMs: rounded(blockedBlkioMs),
     blockedOtherMs: rounded(blockedOtherMs), topWchan, topWchanMs: rounded(topMs),
+    // Every wait channel's milliseconds in the window, largest first (journal waits read as jbd2_log_wait_commit).
+    waitChannelsMs: Object.fromEntries([...waitChannels].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([name, ms]) => [name, rounded(ms)])),
     coveredMs, covered_ms: coveredMs, lateTicks, lateMs: rounded(lateMs),
   };
 }

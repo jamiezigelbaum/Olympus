@@ -120,10 +120,7 @@ test('provider deferral and lease contention log their backoff and exact next ru
   expect(await f.pass()).toMatchObject({ chunks_embedded: 1, stores_deferred: 0, backoff_ms: 0 });
 });
 
-test('with the idle back-off on, a caught-up store rests until something changes, and a new item is embedded on the next pass', async () => {
-  const before = process.env[EMBEDDING_SWEEP_IDLE_BACKOFF_ENV];
-  process.env[EMBEDDING_SWEEP_IDLE_BACKOFF_ENV] = 'on';
-  cleanups.push(() => { if (before === undefined) delete process.env[EMBEDDING_SWEEP_IDLE_BACKOFF_ENV]; else process.env[EMBEDDING_SWEEP_IDLE_BACKOFF_ENV] = before; });
+test('a caught-up store rests until something changes, and a new item is embedded on the next pass', async () => {
   const f = await fixture();
   const walks = spyOn(f.store, 'embeddingSweepInventory');
   expect(await f.pass()).toMatchObject({ chunks_embedded: 1 });
@@ -148,7 +145,10 @@ test('with the idle back-off on, a caught-up store rests until something changes
   expect(walks.mock.calls.length).toBeGreaterThan(rested);
 });
 
-test('with the idle back-off off, every pass walks the store as before', async () => {
+test('with the idle back-off switched off, every pass walks the store', async () => {
+  const before = process.env[EMBEDDING_SWEEP_IDLE_BACKOFF_ENV];
+  process.env[EMBEDDING_SWEEP_IDLE_BACKOFF_ENV] = 'off';
+  cleanups.push(() => { if (before === undefined) delete process.env[EMBEDDING_SWEEP_IDLE_BACKOFF_ENV]; else process.env[EMBEDDING_SWEEP_IDLE_BACKOFF_ENV] = before; });
   const f = await fixture();
   const walks = spyOn(f.store, 'embeddingSweepInventory');
   await f.pass(); await f.pass();

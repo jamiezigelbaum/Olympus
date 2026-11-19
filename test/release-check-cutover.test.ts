@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { cutoverChecks, dashboardAvailabilityCheck, hiddenCopyBuilds, samplePage, summarizeCutover, summarizePages } from '../scripts/release-check/cutover.ts';
+import { cutoverChecks, dashboardAvailabilityCheck, startupAskCheck, hiddenCopyBuilds, samplePage, summarizeCutover, summarizePages } from '../scripts/release-check/cutover.ts';
 
 test('startup uses the first complete receipt per role and records the background wait and warnings', () => {
   const partial = [
@@ -68,4 +68,20 @@ test('Home requires the panel response and both pages accept the front’s start
     expect((await samplePage(async () => html('Olympus is starting:', 503), page, Date.now())).answered).toBe(true);
     expect((await samplePage(async () => html('sign in'), page, Date.now())).answered).toBe(false);
   }
+});
+
+test('an Ask taken during start-up fails only if it is cancelled, lost or silent, and reports its time', () => {
+  expect(startupAskCheck(undefined).status).toBe('skip');
+  expect(startupAskCheck({ status: 200, ms: 190_600, saidStarting: true, completed: true })).toMatchObject({ id: 'qualify.ask-startup', status: 'pass', ms: 190_600 });
+  expect(startupAskCheck({ status: 200, ms: 40_000, saidStarting: false, completed: true }).status).toBe('fail');
+  expect(startupAskCheck({ status: 503, ms: 1_000, saidStarting: true, completed: false }).detail).toContain('cancelled');
+  expect(startupAskCheck({ status: null, ms: 0, saidStarting: false, completed: false, error: 'timeout' }).detail).toContain('lost or cancelled');
+});
+
+test('after ready, any Home or Sources probe over 1 s fails qualify.dashboard; during start-up only a 10 s gap does', () => {
+  const at = 1_000_000;
+  const samples = [0, 2, 4, 6].flatMap(s => (['Home', 'Sources'] as const).map(page => ({ page, at: at + s * 1000, ms: s === 4 && page === 'Home' ? 1_500 : 50, answered: true, timeout: false })));
+  const window = summarizePages(samples, at, at + 8_000);
+  expect(dashboardAvailabilityCheck(window).status).toBe('fail');
+  expect(dashboardAvailabilityCheck(window, true, true).status).toBe('pass');
 });
