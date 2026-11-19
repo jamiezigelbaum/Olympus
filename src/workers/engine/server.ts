@@ -4087,6 +4087,7 @@ export async function main(): Promise<void> {
               ...(backlog.waiting
                 ? { waiting_reason: backlog.waiting.reason, waiting_label: backlog.waiting.label, waiting_since: backlog.waiting.since }
                 : {}),
+              ...(backlog.storedWalks?.length ? { stored_walks: backlog.storedWalks } : {}),
             }
           : undefined;
       },
@@ -7297,7 +7298,7 @@ export async function main(): Promise<void> {
             }
             for (const request of [PLAIN_STATUS_REQUEST, DASHBOARD_STATUS_REQUEST]) {
               await pauseStatusWalk();
-              await refreshSnapshot({ ...request }, { countsMaxAgeMs: STATUS_COUNTS_MAX_AGE_MS }, pauseStatusWalk);
+              await refreshSnapshot({ ...request }, { countsMaxAgeMs: STATUS_COUNTS_MAX_AGE_MS, reuseCounts: true }, pauseStatusWalk);
             }
           },
           log: (line) => console.warn(line),

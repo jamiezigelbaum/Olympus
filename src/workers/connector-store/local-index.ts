@@ -150,6 +150,7 @@ import {
   parentVerdicts,
   type ChildProbe,
   type ChildVisibilityLane,
+  type ChildVisibilityStore,
   type ParentRef,
   type ParentStandingRow,
 } from './child-visibility.ts';
@@ -1156,16 +1157,15 @@ function* hiddenVisibilityFeedReads(
 ): Generator<StoreRead, VisibilityChanges, unknown> {
   const store = table === 'main.item_visibility_feed';
   const bounds = (yield { sql: `SELECT (SELECT MIN(seq) FROM ${table}) AS first,
-    (SELECT MAX(seq) FROM ${table}) AS last${store
-      ? ", (SELECT seq FROM main.sqlite_sequence WHERE name = 'item_visibility_feed') AS issued" : ''}`,
-    params: [], mode: 'get' }) as { first: number | null; last: number | null; issued?: number | null };
-  const latest = bounds.last ?? bounds.issued ?? 0;
+    (SELECT seq FROM main.sqlite_sequence WHERE name = '${store ? 'item_visibility_feed' : 'tier_visibility_changes'}') AS issued`,
+    params: [], mode: 'get' }) as { first: number | null; issued: number | null };
+  const latest = bounds.issued ?? 0;
   // The calling connection took this cursor before yielding. A worker that
   // cannot see it (an uncommitted hold, for example) cannot certify this set.
   if (startCursor !== undefined && latest < startCursor) throw new VisibilityChangedError();
   const cursor = startCursor ?? latest;
   if (after === undefined || after > cursor || (bounds.first !== null && after < bounds.first - 1)
-    || (store && bounds.first === null && after < latest)) return { cursor };
+    || (bounds.first === null && after < latest)) return { cursor };
   const identities = new Map<string, TierLedgerIdentity>();
   for (let seq = after; seq < cursor;) {
     const rows = (yield { sql: `SELECT seq, provider, account_scope, conversation_key, provider_item_id
@@ -4899,10 +4899,11 @@ export class LocalConnectorStore {
 
   /** Rebuilds the counts' hidden set with a turn between lookups; a failed rebuild keeps the older set. */
   private refreshTierHiddenCountsInTurns(): Promise<void> {
+    const prior = this.tierHiddenCountsMemo;
     this.tierHiddenCountsRefresh ??= (async () => {
       try {
         const value = await this.tierHiddenItemPksInTurns();
-        this.tierHiddenCountsMemo = { at: Date.now(), value };
+        if (this.tierHiddenCountsMemo === prior) this.tierHiddenCountsMemo = { at: Date.now(), value };
       } catch {
         // A closed or busy store: the older set stands until the next ask.
       } finally {
@@ -5043,21 +5044,23 @@ export class LocalConnectorStore {
    * `after` (or `after` is unknown or ahead of it): the caller must not treat
    * an older set as current.
    */
-  private itemVisibilityChangesSince(after?: number): { cursor: number; identities?: TierLedgerIdentity[] } {
+  private itemVisibilityChangesSince(after?: number, maxEntries = Infinity): { cursor: number; identities?: TierLedgerIdentity[] } {
     if (!this.visibilityFeedPresent) return { cursor: 0, identities: [] }; // older read-only schema: external writes use data_version
     return this.db.transaction(() => {
       const bounds = this.db.query(`SELECT (SELECT MIN(seq) FROM main.item_visibility_feed) AS first,
-        (SELECT MAX(seq) FROM main.item_visibility_feed) AS last,
         (SELECT seq FROM main.sqlite_sequence WHERE name = 'item_visibility_feed') AS issued`)
-        .get() as { first: number | null; last: number | null; issued: number | null };
+        .get() as { first: number | null; issued: number | null };
       // AUTOINCREMENT never reuses a number, so an emptied feed still knows its last one.
-      const cursor = bounds.last ?? bounds.issued ?? 0;
+      const cursor = bounds.issued ?? 0;
       if (after === undefined || after > cursor || (bounds.first !== null && after < bounds.first - 1)
-        || (bounds.first === null && after < cursor)) return { cursor };
-      const rows = this.db.query(`SELECT DISTINCT provider, account_scope, conversation_key, provider_item_id
+        || (bounds.first === null && after < cursor) || cursor - after > maxEntries) return { cursor };
+      if (after === cursor) return { cursor, identities: [] };
+      const bounded = Number.isFinite(maxEntries);
+      const rows = this.db.query(`SELECT DISTINCT provider, account_scope, conversation_key, provider_item_id, ${bounded ? 'seq' : 'NULL'}
         FROM main.item_visibility_feed WHERE seq > ?`).all(after) as Array<{
           provider: string; account_scope: string; conversation_key: string; provider_item_id: string;
         }>;
+      if (bounded && rows.length !== cursor - after) return { cursor };
       return { cursor, identities: rows.map(row => ({ provider: row.provider, accountScope: row.account_scope,
         providerItemId: row.provider_item_id, providerConversationId: row.conversation_key })) };
     })();
@@ -5316,8 +5319,8 @@ export class LocalConnectorStore {
   private ledgerIdOf(ledger: TierLedger): string | undefined {
     try {
       const id = ledger.ledgerId();
-      // Saved sets built before intent-only items were included must be rebuilt.
-      return id === undefined ? undefined : `v2:${id}`;
+      // Saved sets from before the feed covered pending flags and overrides may be stale.
+      return id === undefined ? undefined : `v3:${id}`;
     } catch { return undefined; }
   }
 
@@ -8199,21 +8202,81 @@ export class LocalConnectorStore {
 
   private peopleNames: ConnectorStorePeopleNames | undefined;
 
-  /**
-   * Moves when this store's tier visibility may have changed: the tier
-   * ledger's visibility feed and the item markers across its child-visibility
-   * lane. Feed cursors are cheap to read and do not move for embedding,
-   * status or other bookkeeping writes.
-   */
+  private visibilityStamp: {
+    ledger: TierLedger | undefined; ledgerId: string | undefined; cursor: number; relevant: number; own: string;
+    siblings: Map<ChildVisibilityStore, string>; relevantSiblings: string[];
+  } | undefined;
+  private visibilityEpoch?: string;
+
+  /** A stamp for this store's item feed, relevant ledger entries and parent dependencies. */
   visibilityMarker(): string {
+    try {
+      return this.readVisibilityMarker();
+    } catch {
+      // No proof of an unchanged view. Neither the sweep nor status may reuse it.
+      this.visibilityStamp = undefined;
+      return this.visibilityEpoch = randomUUID();
+    }
+  }
+
+  private readVisibilityMarker(): string {
+    const prior = this.visibilityStamp;
     const ledger = this.visibilityLedger();
-    const ledgerCursor = ledger ? ledger.visibilityChangesSince().cursor : 0;
-    // A handle without the journal (read-only) sees other connections' writes by data_version.
-    const storeCursor = this.visibilityJournal
-      ? String(this.itemVisibilityChangesSince().cursor)
-      : `v${(this.db.query('PRAGMA data_version').get() as { data_version: number }).data_version}`;
-    const laneStores = this.childVisibilityLane().stores();
-    return JSON.stringify([ledgerCursor, storeCursor, laneStores.map(store => [store.corpusId, store.childVisibilityMarker?.()])]);
+    const ledgerId = ledger?.ledgerId();
+    const limit = 128; // Keep the synchronous probes small; a burst conservatively wakes the store.
+    const delta = ledger?.visibilityChangesSince(prior?.ledger === ledger ? prior?.cursor : undefined,
+      { corpusId: this.corpusId, maxEntries: limit }) ?? { cursor: 0, identities: [] };
+    const own = this.childVisibilityMarker();
+    const lane = this.childVisibilityLane();
+    const children = this.hasChildItems();
+    if (children && lane.ledger() !== ledger) {
+      this.visibilityStamp = undefined;
+      return this.visibilityEpoch = randomUUID();
+    }
+    const siblings = new Map(children ? lane.stores().filter(store => store !== this)
+      .map(store => {
+        const marker = store.childVisibilityMarker?.() ?? randomUUID();
+        return [store, store instanceof LocalConnectorStore && !store.visibilityFeedPresent
+          ? `${store.visibilityOwner}:${marker}` : marker] as const;
+      }) : []);
+    const memo = this.hiddenChildMemo;
+    const knownParents = memo && memo.ledger === ledger && memo.storeCursors.size === siblings.size + 1
+      && String(memo.storeCursors.get(this)) === own && [...siblings].every(([store]) =>
+        store instanceof LocalConnectorStore && String(memo.storeCursors.get(store)) === prior?.siblings.get(store))
+      ? memo.dependents : undefined;
+    const sameLane = prior !== undefined && prior.siblings.size === siblings.size
+      && [...siblings.keys()].every(store => prior.siblings.has(store));
+    const movedSiblings = !sameLane || [...siblings].some(([store, marker]) => {
+      const before = prior.siblings.get(store)!;
+      if (marker === before) return false;
+      if (!knownParents || !(store instanceof LocalConnectorStore) || !store.visibilityFeedPresent) return true;
+      const changed = store.itemVisibilityChangesSince(Number(before), limit).identities;
+      if (changed === undefined) return true;
+      const standings = store.itemStandings(changed);
+      return changed.some(id => {
+        const key = tierLedgerIdentityKey(id);
+        const row = standings.get(key);
+        return !row || knownParents.has(`i:${key}`) || knownParents.has(`p:${parentKey(row)}`);
+      });
+    });
+    const ids = delta.identities;
+    const ledgerMoved = !prior || prior.ledger !== ledger || (prior.cursor !== delta.cursor && (
+      ids === undefined || delta.corpusChanged === true || (ids.length > 0 && children && (!knownParents || movedSiblings))
+      || ids.some(id => knownParents?.has(`i:${tierLedgerIdentityKey(id)}`))
+      || this.itemRowsForIdentities(ids, id => normalizeConversationId(id.providerConversationId)).length > 0
+      || [...ledger!.copiesForMany(ids).values()].some(copies => copies.some(copy => copy.corpusId === this.corpusId))
+    ));
+    const replaced = prior && (prior.ledger !== ledger && prior.ledgerId === ledgerId
+      || delta.cursor < prior.cursor || (this.visibilityFeedPresent && Number(own) < Number(prior.own))
+      || [...siblings].some(([store, marker]) => Number(marker) < Number(prior.siblings.get(store))));
+    if (replaced || (prior && !sameLane)) this.visibilityEpoch = randomUUID();
+    if (!this.visibilityFeedPresent) this.visibilityEpoch ??= this.visibilityOwner;
+    const relevant = ledgerMoved ? delta.cursor : prior!.relevant;
+    const relevantSiblings = movedSiblings
+      ? [...siblings].map(([store, marker]) => JSON.stringify([store.corpusId, marker])).sort()
+      : prior!.relevantSiblings;
+    this.visibilityStamp = { ledger, ledgerId, cursor: delta.cursor, relevant, own, siblings, relevantSiblings };
+    return JSON.stringify([ledgerId, relevant, own, relevantSiblings, this.visibilityEpoch]);
   }
 
   /** Like visibilityMarker, with file identities for restart-safe sweep receipts. */
@@ -8279,10 +8342,6 @@ export class LocalConnectorStore {
     try {
       if (!offThreadReadsSupported(this.dbPath)) return this.peopleObservations();
       for (let attempt = 0; attempt < PEOPLE_OFF_THREAD_READ_ATTEMPTS; attempt += 1) {
-        // The marker covers the ledger's visibility feed and every lane store's
-        // item feed. Never the ledger's whole change marker: the sweep and the
-        // judge write the ledger every few seconds, and every attempt would then
-        // fall back to the synchronous walk on this thread (gate 1, ops#168).
         const marker = this.visibilityMarker();
         const tierHidden = await this.tierHiddenItemPksInTurns();
         const steps = this.peopleObservationSteps(tierHidden);
@@ -16720,16 +16779,13 @@ export class LocalConnectorStore {
     // Called when the enclosing status snapshot needs new counts. Reusing an
     // expired projection here lets statusSteps return it while its refresh
     // runs, then caches that old result for another complete status window.
-    await this.refreshTierHiddenCountsInTurns();
+    const value = await this.tierHiddenItemPksInTurns();
+    this.tierHiddenCountsMemo = { at: Date.now(), value };
     const key = JSON.stringify(scope ?? null);
-    try {
-      const counts = this.unreadHoldCounts(await runHiddenStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
-      const memos = this.settledUnreadableCountMemo ??= new Map();
-      if (memos.size > 32) memos.clear();
-      memos.set(key, { at: Date.now(), ...counts });
-    } catch {
-      // A closed or busy store: the status read counts it itself.
-    }
+    const counts = this.unreadHoldCounts(await runHiddenStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
+    const memos = this.settledUnreadableCountMemo ??= new Map();
+    if (memos.size > 32) memos.clear();
+    memos.set(key, { at: Date.now(), ...counts });
   }
 
   /** How many settled unreadable items the counts show, reused up to `maxAgeMs` per scope. */
@@ -16763,10 +16819,12 @@ export class LocalConnectorStore {
     const running = this.settledUnreadableCountRefresh ??= new Set();
     if (running.has(key)) return;
     running.add(key);
+    const prior = this.settledUnreadableCountMemo?.get(key);
     void (async () => {
       try {
         const counts = this.unreadHoldCounts(await runHiddenStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
         const memos = this.settledUnreadableCountMemo ??= new Map();
+        if (memos.get(key) !== prior) return;
         if (memos.size > 32) memos.clear();
         memos.set(key, { at: Date.now(), ...counts });
       } catch {

@@ -271,6 +271,21 @@ test('a caught-up store rests until something changes, and a new item is embedde
   expect(walks.mock.calls.length).toBeGreaterThan(rested);
 });
 
+test('the quiet sweep ignores another leg but wakes for a local ledger-only visibility change', async () => {
+  const f = await fixture();
+  await f.pass();
+  await f.pass();
+  const walks = spyOn(f.store, 'embeddingSweepInventory');
+  const db = (f.ledger as unknown as { db: Database }).db;
+  db.query("INSERT INTO tier_visibility_changes (provider, account_scope, conversation_key, provider_item_id) VALUES ('fixture', 'fixture', '', 'unrelated')").run();
+  expect(await f.pass()).toMatchObject({ rested: 1 });
+  expect(walks).not.toHaveBeenCalled();
+
+  db.query("UPDATE tier_copies SET copy_state = 'superseded' WHERE corpus_id = ?").run(f.store.corpusId);
+  expect(await f.pass()).toMatchObject({ rested: 0 });
+  expect(walks).toHaveBeenCalledTimes(1);
+});
+
 async function catchUp(f: Awaited<ReturnType<typeof fixture>>): Promise<void> {
   expect(await f.pass()).toMatchObject({ chunks_embedded: 1, rested: 0 });
   expect(f.walks).toEqual({ inventory: 1, workList: 1 });
