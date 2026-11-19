@@ -29,7 +29,7 @@ afterEach(async () => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-async function split() {
+async function split(preload?: string) {
   const home = mkdtempSync('/tmp/oas-');
   roots.push(home);
   mkdirSync(join(home, 'run'), { mode: 0o700 });
@@ -41,8 +41,10 @@ async function split() {
     OLYMPUS_ENGINE_BACKGROUND_SOCKET: join(home, 'run', 'olympus', 'background.sock'),
     NODE_ENV: 'test',
   };
+  const preloadPath = join(home, 'preload.mjs');
+  if (preload) writeFileSync(preloadPath, preload);
   const spawn = (role: 'front' | 'background') => {
-    const child = Bun.spawn([process.execPath, join(import.meta.dir, '../src/workers/engine/server.ts')], {
+    const child = Bun.spawn([process.execPath, ...(preload && role === 'front' ? ['--preload', preloadPath] : []), join(import.meta.dir, '../src/workers/engine/server.ts')], {
       env: { ...env, OLYMPUS_WORKER_ENGINE_ROLE: role }, stdout: 'pipe', stderr: 'pipe',
     });
     children.push(child);
@@ -69,6 +71,43 @@ async function split() {
   const computer = async (): Promise<ComputerDashboardMeta> => (await read('/dashboard?panel-read'))._meta[COMPUTER_META_KEY];
   return { home, env, background, front, workerFetch, origin, fetcher, read, computer };
 }
+
+test('an unchanged timed mount recheck uses no synchronous filesystem calls', async () => {
+  const f = await split(`
+    import * as fs from 'node:fs';
+    import { mock } from 'bun:test';
+    import { AsyncLocalStorage } from 'node:async_hooks';
+    const scope = new AsyncLocalStorage();
+    const calls = [];
+    const wrapped = {};
+    const spy = (name, original) => (...args) => {
+      if (scope.getStore()) calls.push(name);
+      return original(...args);
+    };
+    for (const name of ['lstatSync', 'statSync', 'existsSync', 'readFileSync', 'readdirSync', 'realpathSync']) {
+      wrapped[name] = spy(name, fs[name]);
+    }
+    wrapped.realpathSync.native = spy('realpathSync', fs.realpathSync.native);
+    mock.module('node:fs', () => ({ ...fs, ...wrapped, default: { ...fs.default, ...wrapped } }));
+    scope.run(true, () => fs.existsSync('/'));
+    if (calls.pop() !== 'existsSync') throw new Error('Filesystem spy did not intercept named imports');
+    const interval = globalThis.setInterval;
+    globalThis.setInterval = (callback, ms, ...args) => interval(
+      callback.name === 'recheckFrontMounts'
+        ? () => scope.run(true, async () => {
+            await callback();
+            console.log('mount tick fs calls: ' + JSON.stringify(calls));
+          })
+        : callback,
+      ms,
+      ...args,
+    );
+  `);
+  await waitFor(() => (f.front.output().match(/mount tick fs calls:/g)?.length ?? 0) >= 2, { timeoutMs: 10_000 });
+  for (const tick of f.front.output().match(/mount tick fs calls: .*$/gm) ?? []) {
+    expect(tick).toBe('mount tick fs calls: []');
+  }
+}, 120_000);
 
 test('a source absent at boot is mounted and searchable without a handle change', async () => {
   const f = await split();

@@ -238659,7 +238659,8 @@ function createArchiveImportRuntime(options = {}) {
     targets: options.targets ?? archiveSourceTargets,
     families: () => [...families],
     lane,
-    existingLanes: () => families.filter(hasData).map((family) => lane(family)),
+    existingLanes: (only) => families.filter((family) => (!only || only.has(family)) && hasData(family)).map(lane),
+    laneMounted: (family) => lanes.has(family),
     openWaitingQuestions: () => {
       const path = options.waitingQuestionsDbPath ?? waitingPrivateQuestionsDbPath(resolveRemoteConnectionsDbPath(env));
       return existsSync117(path) ? openWaitingPrivateQuestionStore(path) : undefined;
@@ -240101,6 +240102,37 @@ var init_dashboard2 = __esm(() => {
     not_selected: "Background syncing in Olympus's settings leaves out archives, so imports and removals can't run. The setting is worker.scheduler.sourceIds: add archive.imports to it, or empty it, and restart Olympus after changing it."
   };
 });
+
+// src/workers/engine/runtime/front-mount-changes.ts
+import { lstat } from "node:fs/promises";
+function createFrontMountChanges() {
+  let previous = new Map;
+  return async (groups, addBaseline = false) => {
+    const paths = [...new Set([...groups.values()].flat())];
+    const current = new Map(await Promise.all(paths.map(async (path) => {
+      try {
+        const file = await lstat(path, { bigint: true });
+        return [path, `${file.dev}:${file.ino}:${file.size}:${file.mtimeNs}:${file.ctimeNs}`];
+      } catch (error) {
+        return [path, error.code ?? "unreadable"];
+      }
+    })));
+    const changed = new Set;
+    for (const [group, candidates] of groups) {
+      if (candidates.some((path) => (previous.get(path) ?? "ENOENT") !== current.get(path)))
+        changed.add(group);
+    }
+    if (addBaseline) {
+      for (const [path, signature] of current)
+        if (!previous.has(path))
+          previous.set(path, signature);
+    } else {
+      previous = current;
+    }
+    return changed;
+  };
+}
+var init_front_mount_changes = () => {};
 
 // src/workers/archive-import/extraction-source.ts
 function archiveServed(state, archiveId, family) {
@@ -246465,6 +246497,7 @@ function createEngineFront(input) {
     client,
     ownerBusy: relay,
     status,
+    cachedSnapshot: () => cached?.read?.snapshot,
     backgroundActivity: () => cached?.read?.snapshot.activity ?? "idle",
     completeModel,
     backgroundReady,
@@ -274155,45 +274188,88 @@ ${key}`;
   const telegramCaptureMaxItems = parseOptionalPositiveInteger(process.env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_MAX_ITEMS, "OLYMPUS_TELEGRAM_SPOOL_DRAIN_MAX_ITEMS");
   const storeAt = (sourceId, domain) => resolvedStorePath(sourceId, domain, process.env);
   const frontCanMount = (paths) => paths.every(connectorStoreReadableNow);
-  const mountSourceLanes = (handles) => {
+  const sourceMounts = [
+    { id: GMAIL_SOURCE_ID, pending: () => !gmailInternalConnectorStore && gmailConnectorStoreLane.enabled, provider: "gmail", capability: "gmail.email.sync", stores: ["internal", "secure_local"], open: mountGmail },
+    { id: GOOGLE_DRIVE_SOURCE_ID, pending: () => !googleDriveInternalConnectorStore && googleDriveConnectorStoreLane.enabled, provider: "google_drive", capability: "google_drive.docs.sync", stores: ["internal", "secure_local"], open: mountGoogleDrive },
+    { id: DROPBOX_FILES_SOURCE_ID, pending: () => !dropboxConnectorStore && dropboxConnectorStoreLane.enabled, provider: "dropbox", capability: "dropbox.files.sync", stores: ["secure_local"], open: mountDropbox },
+    { id: LOCAL_FILES_SOURCE_ID, pending: () => !localFilesConnectorStore && localFilesConnectorStoreLane.enabled, stores: ["secure_local"], open: mountLocalFiles },
+    { id: WHATSAPP_PERSONAL_SOURCE_ID, pending: () => !whatsappConnectorStore && whatsappConnectorStoreLane.enabled, provider: "whatsapp_personal", capability: "whatsapp.personal.messages.sync", stores: ["secure_local"], open: mountWhatsApp },
+    { id: TELEGRAM_MESSAGES_SOURCE_ID, pending: () => !telegramConnectorStores && telegramConnectorStoreLane.enabled, provider: "telegram", capability: "telegram.messages.sync", stores: ["internal", "secure_local"], open: mountTelegram },
+    { id: READWISE_SOURCE_ID, pending: () => !readwiseConnectorStore && readwiseConnectorStoreLane.enabled, provider: "readwise", capability: "readwise.sync", stores: ["internal"], open: mountReadwise },
+    { id: X_BOOKMARKS_SOURCE_ID, pending: () => !xBookmarksConnectorStore && xBookmarksConnectorStoreLane.enabled, provider: "x", capability: "x.bookmarks.sync", stores: ["internal"], open: mountXBookmarks }
+  ];
+  const mountSourceLanes = (handles, changed) => {
     if (sourceRuntimeClosed)
       return;
-    const connected = (provider, capability) => activeCredentialHandle(handles, { provider, capability }) !== undefined;
-    const wanted = (sourceId, connectedNow, paths) => {
-      if (!sourceHasStores(sourceId) && !connectedNow)
-        return false;
-      return !engineFront || frontCanMount(paths);
-    };
-    const both = (sourceId) => [storeAt(sourceId, "internal"), storeAt(sourceId, "secure_local")];
-    const mount = (open) => {
+    for (const lane of sourceMounts) {
+      if (!lane.pending() || changed && !changed.has(lane.id))
+        continue;
+      const connected = "provider" in lane ? activeCredentialHandle(handles, lane) !== undefined : fileSourceScopeAuthority?.policyRef(LOCAL_FILES_SOURCE_ID) !== undefined;
+      if (!sourceHasStores(lane.id) && !connected)
+        continue;
       if (!engineFront) {
-        open();
-        return;
+        lane.open();
+        continue;
       }
+      if (!frontCanMount(lane.stores.map((domain) => storeAt(lane.id, domain))))
+        continue;
       try {
-        open();
+        lane.open();
       } catch (error) {
         console.warn(`[olympus] the front could not open a source's stores yet: ${error instanceof Error ? error.message : String(error)}`);
       }
-    };
-    if (!gmailInternalConnectorStore && gmailConnectorStoreLane.enabled && wanted(GMAIL_SOURCE_ID, connected("gmail", "gmail.email.sync"), both(GMAIL_SOURCE_ID)))
-      mount(mountGmail);
-    if (!googleDriveInternalConnectorStore && googleDriveConnectorStoreLane.enabled && wanted(GOOGLE_DRIVE_SOURCE_ID, connected("google_drive", "google_drive.docs.sync"), both(GOOGLE_DRIVE_SOURCE_ID)))
-      mount(mountGoogleDrive);
-    if (!dropboxConnectorStore && dropboxConnectorStoreLane.enabled && wanted(DROPBOX_FILES_SOURCE_ID, connected("dropbox", "dropbox.files.sync"), [storeAt(DROPBOX_FILES_SOURCE_ID, "secure_local")]))
-      mount(mountDropbox);
-    if (!localFilesConnectorStore && localFilesConnectorStoreLane.enabled && wanted(LOCAL_FILES_SOURCE_ID, fileSourceScopeAuthority?.policyRef(LOCAL_FILES_SOURCE_ID) !== undefined, [storeAt(LOCAL_FILES_SOURCE_ID, "secure_local")]))
-      mount(mountLocalFiles);
-    if (!whatsappConnectorStore && whatsappConnectorStoreLane.enabled && wanted(WHATSAPP_PERSONAL_SOURCE_ID, connected("whatsapp_personal", "whatsapp.personal.messages.sync"), [storeAt(WHATSAPP_PERSONAL_SOURCE_ID, "secure_local")]))
-      mount(mountWhatsApp);
-    if (!telegramConnectorStores && telegramConnectorStoreLane.enabled && wanted(TELEGRAM_MESSAGES_SOURCE_ID, connected("telegram", "telegram.messages.sync"), both(TELEGRAM_MESSAGES_SOURCE_ID)))
-      mount(mountTelegram);
-    if (!readwiseConnectorStore && readwiseConnectorStoreLane.enabled && wanted(READWISE_SOURCE_ID, connected("readwise", "readwise.sync"), [storeAt(READWISE_SOURCE_ID, "internal")]))
-      mount(mountReadwise);
-    if (!xBookmarksConnectorStore && xBookmarksConnectorStoreLane.enabled && wanted(X_BOOKMARKS_SOURCE_ID, connected("x", "x.bookmarks.sync"), [storeAt(X_BOOKMARKS_SOURCE_ID, "internal")]))
-      mount(mountXBookmarks);
-    mountConfiguredSourceStores();
+    }
+    if (!changed || changed.size)
+      mountConfiguredSourceStores();
   };
+  const mountChanges = createFrontMountChanges();
+  const sqliteMountFiles = (path) => [path, `${path}-wal`, `${path}-shm`];
+  const mountCandidateFiles = (id, families = []) => {
+    const account = { source_id: id, slot: DEFAULT_ACCOUNT_SLOT, layout: "folder" };
+    const stores = accountStoreNames(id, families).flatMap((name) => [
+      accountStorePath(account, name),
+      ...hasLegacyLayout(id) ? [accountStorePath({ ...account, layout: "legacy" }, name)] : []
+    ]);
+    const legacy = legacyAccountPaths(id, process.env, families);
+    return [
+      ...[...stores, ...legacy.stores].flatMap((path) => [
+        path,
+        tieredStoreSetLedgerPath(path),
+        secretLocationsPathForStore(path)
+      ].flatMap(sqliteMountFiles)),
+      ...legacy.raw.flatMap(sqliteMountFiles)
+    ];
+  };
+  const archiveFamilies = archiveImportFamilies();
+  const archiveMountKey = (family) => `${ARCHIVE_IMPORTS_SOURCE_ID2}/${family}`;
+  const pendingMountFiles = new Map;
+  const configuredMountPaths = engineFront ? declaredConnectorStoreMountPaths(process.env) : [];
+  if (engineFront) {
+    const registry = sourceRegistryPath();
+    for (const lane of sourceMounts) {
+      if (!lane.pending())
+        continue;
+      pendingMountFiles.set(lane.id, [
+        registry,
+        ...mountCandidateFiles(lane.id),
+        ...connectedHandleRegistryPath ? [connectedHandleRegistryPath, unpairedSourcesPath(connectedHandleRegistryPath), defaultFileSourceScopeStatePath(connectedHandleRegistryPath)] : [],
+        ...lane.id === TELEGRAM_MESSAGES_SOURCE_ID ? [captureGrantPathFromEnv("telegram", process.env)] : [],
+        ...lane.id === WHATSAPP_PERSONAL_SOURCE_ID ? [captureGrantPathFromEnv("whatsapp", process.env)] : []
+      ]);
+    }
+    const archiveAccount = { source_id: ARCHIVE_IMPORTS_SOURCE_ID2, slot: DEFAULT_ACCOUNT_SLOT, layout: "folder" };
+    for (const family of archiveFamilies) {
+      pendingMountFiles.set(archiveMountKey(family), [
+        registry,
+        ...mountCandidateFiles(ARCHIVE_IMPORTS_SOURCE_ID2, [family]),
+        accountRawPath(archiveAccount, "archive-imports.json")
+      ]);
+    }
+    for (const { dbPath } of configuredMountPaths) {
+      pendingMountFiles.set(dbPath, [registry, ...sqliteMountFiles(dbPath), ...sqliteMountFiles(tieredStoreSetLedgerPath(dbPath))]);
+    }
+    await mountChanges(pendingMountFiles);
+  }
   mountSourceLanes(connectedHandles);
   const laneConnectorStores = [
     ...dropboxConnectorStore ? [dropboxConnectorStore] : [],
@@ -274823,10 +274899,10 @@ ${key}`;
     },
     onStoreOpened: (store) => registerTierLegStore(store, store.corpusId, store.trustDomain === "secure_local" ? tierSecureEmbeddingProvider ?? null : sourceIndexEmbeddingProvider ?? null)
   });
-  const mountArchiveLanes = () => {
+  const mountArchiveLanes = (families) => {
     try {
       if (sourceAccountMountable({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID2 }))
-        archiveImports.existingLanes();
+        archiveImports.existingLanes(families);
       tierLedgerProblems.delete(ARCHIVE_IMPORTS_SOURCE_ID2);
     } catch (error) {
       if (error instanceof TierLedgerSchemaError)
@@ -274991,16 +275067,26 @@ ${key}`;
   if (readwiseConnectorStore) {
     connectorStoreAccountScopes.set(readwiseConnectorStore.corpusId, sourceIndexAccount?.trim() || "personal");
   }
-  const openTierStoresThatExist = () => {
-    for (const lane of tierLanes) {
+  const openTierStoresThatExist = (changed, existingLanes = tierLanes.length) => {
+    for (const [index, lane] of tierLanes.entries()) {
       for (const store of lane.onDemand) {
-        if (store.current())
+        if (store.current() || changed && index < existingLanes && !changed.has(store.dbPath))
           continue;
         if (engineFront ? connectorStoreReadableNow(store.dbPath) : store.exists())
           store.open();
       }
     }
   };
+  if (engineFront) {
+    const baseline = new Map(pendingMountFiles);
+    for (const lane of tierLanes) {
+      for (const store of lane.onDemand) {
+        if (!store.current())
+          baseline.set(store.dbPath, sqliteMountFiles(store.dbPath));
+      }
+    }
+    await mountChanges(baseline, true);
+  }
   openTierStoresThatExist();
   const createGmailConnectorStoreSyncForHandle = (handle) => {
     const scopeRef = handle && fileSourceScopeAuthority ? fileSourceScopeAuthority.mailPolicyRef() : undefined;
@@ -275792,11 +275878,19 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       }
     } : {}
   }) : undefined;
-  const refreshFrontMounts = () => {
+  const refreshFrontMounts = (changed) => {
+    const existingLanes = tierLanes.length;
+    const archives = changed && new Set(archiveFamilies.filter((family) => changed.has(archiveMountKey(family))));
     const reads = [
-      () => mountSourceLanes(activeLaneHandles(readActiveConnectedHandles(process.env), process.env)),
-      mountArchiveLanes,
-      openTierStoresThatExist
+      () => {
+        if (!changed || sourceMounts.some((lane) => changed.has(lane.id))) {
+          mountSourceLanes(readActiveConnectedHandles(process.env), changed);
+        } else if (configuredMountPaths.some(({ dbPath }) => changed.has(dbPath))) {
+          mountConfiguredSourceStores();
+        }
+      },
+      ...archives && !archives.size ? [] : [() => mountArchiveLanes(archives)],
+      () => openTierStoresThatExist(changed, existingLanes)
     ];
     for (const read of reads) {
       try {
@@ -277609,18 +277703,41 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   let frontMountsSeen;
   let frontMountsLookUntil = 0;
   let frontMountsLastLook = 0;
-  const frontMountRetry = engineFront ? setInterval(() => {
-    const snapshot = engineFront.status()?.snapshot;
+  let checkingFrontMounts = false;
+  const frontMountRetry = engineFront ? setInterval(async function recheckFrontMounts() {
+    const snapshot = engineFront.cachedSnapshot();
     const seen = `${snapshot?.instance_id ?? ""}:${snapshot?.stores_opened ?? ""}`;
     const now = Date.now();
     if (seen !== frontMountsSeen) {
       frontMountsSeen = seen;
       frontMountsLookUntil = now + FRONT_MOUNT_LOOK_AFTER_CHANGE_MS;
     }
-    if (now >= frontMountsLookUntil && now - frontMountsLastLook < FRONT_MOUNT_LOOK_QUIET_MS)
+    if (checkingFrontMounts || now >= frontMountsLookUntil && now - frontMountsLastLook < FRONT_MOUNT_LOOK_QUIET_MS)
       return;
     frontMountsLastLook = now;
-    refreshFrontMounts();
+    checkingFrontMounts = true;
+    try {
+      const pending = new Map(pendingMountFiles);
+      for (const lane of sourceMounts)
+        if (!lane.pending())
+          pending.delete(lane.id);
+      for (const family of archiveFamilies)
+        if (archiveImports.laneMounted(family))
+          pending.delete(archiveMountKey(family));
+      for (const store of connectorStores)
+        pending.delete(store.dbPath);
+      for (const lane of tierLanes) {
+        for (const store of lane.onDemand) {
+          if (!store.current() && !pending.has(store.dbPath))
+            pending.set(store.dbPath, sqliteMountFiles(store.dbPath));
+        }
+      }
+      const changed = await mountChanges(pending);
+      if (!sourceRuntimeClosed && changed.size)
+        refreshFrontMounts(changed);
+    } finally {
+      checkingFrontMounts = false;
+    }
   }, 2000) : undefined;
   frontMountRetry?.unref?.();
   if (!engineFront)
@@ -278151,6 +278268,10 @@ var init_server5 = __esm(async () => {
   init_store();
   init_olympus_layout();
   init_state();
+  init_archive_formats();
+  init_messaging_capture_grant_file();
+  init_unpaired_sources();
+  init_front_mount_changes();
   init_extraction_runtime();
   init_scheduler_source2();
   init_connector6();

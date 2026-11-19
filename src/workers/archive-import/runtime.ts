@@ -55,7 +55,8 @@ export interface ArchiveImportRuntime {
   /**
    * The lanes of families that have an archive or a store already (built now).
    */
-  existingLanes(): ArchiveTierLane[];
+  existingLanes(only?: ReadonlySet<string>): ArchiveTierLane[];
+  laneMounted(family: string): boolean;
   /**
    * The private inbox, opened for one removal (the caller closes it); undefined when there is none.
    */
@@ -165,7 +166,8 @@ export function createArchiveImportRuntime(options: ArchiveImportRuntimeOptions 
     targets: options.targets ?? archiveSourceTargets,
     families: () => [...families],
     lane,
-    existingLanes: () => families.filter(hasData).map((family) => lane(family)),
+    existingLanes: (only) => families.filter((family) => (!only || only.has(family)) && hasData(family)).map(lane),
+    laneMounted: (family) => lanes.has(family),
     openWaitingQuestions: () => {
       const path = options.waitingQuestionsDbPath
         ?? waitingPrivateQuestionsDbPath(resolveRemoteConnectionsDbPath(env));
