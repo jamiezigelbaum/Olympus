@@ -25,6 +25,7 @@ import { Database } from 'bun:sqlite';
 import { randomUUID } from 'node:crypto';
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { OperationError } from '../../core/operation-error.ts';
 import type { SourceItemIdentity, SourceTrustDomain, SourceTrustTier } from '../../core/source-index/types.ts';
 import { readSqliteSchemaVersion, runSqliteMigrations, sqliteSchemaUsable, type SqliteMigration } from '../../core/sqlite-migrations.ts';
 import { closeSqliteStore, loopWalAutocheckpointPragma, type SqliteCloseOptions } from '../../core/sqlite-store.ts';
@@ -741,6 +742,10 @@ export interface TierLedgerOptions {
   dbPath: string;
   /** Inspection only: no migrations, repairs, permissions or checkpoint on close. */
   readOnly?: boolean;
+  /** Permit a query-only handle if SQLite cannot read a clean WAL-less file. */
+  allowWalLessRead?: boolean;
+  /** Match the binding on the writer handle before preparing its schema. */
+  expectedLedgerId?: string;
   now?: () => Date;
 }
 
@@ -852,8 +857,8 @@ export class TierLedger {
     this.now = options.now ?? (() => new Date());
     if (!this.readOnly) assertWritableStoreOpenAllowed('tier ledger', this.dbPath);
     const onDisk = this.dbPath !== ':memory:';
-    if (onDisk) TierLedger.assertSchemaCanOpen(this.dbPath, this.readOnly);
-    if (onDisk && !this.readOnly) {
+    if (onDisk) TierLedger.assertSchemaCanOpen(this.dbPath, this.readOnly, options.allowWalLessRead);
+    if (onDisk && !this.readOnly && options.expectedLedgerId === undefined) {
       mkdirSync(dirname(this.dbPath), { recursive: true, mode: 0o700 });
       // Owner-only from the first byte, with an explicit file mode rather than
       // a process-wide umask (which would race every other file this process
@@ -865,7 +870,8 @@ export class TierLedger {
     }
     let db: Database | undefined;
     try {
-      db = new Database(this.dbPath, this.readOnly ? { readonly: true, create: false } : { create: true });
+      db = new Database(this.dbPath, this.readOnly ? { readonly: true, create: false }
+        : options.expectedLedgerId === undefined ? { create: true } : { readwrite: true, create: false });
       if (this.readOnly) {
         db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;');
         applySqliteMmap(db);
@@ -874,6 +880,18 @@ export class TierLedger {
         }
         this.db = db;
         return;
+      }
+      if (options.expectedLedgerId !== undefined) {
+        db.exec('PRAGMA busy_timeout = 10000;');
+        const row = db.query(`SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'`).get() as { value?: string } | null;
+        if (row?.value !== options.expectedLedgerId) {
+          throw new OperationError(
+            'source_index_error',
+            'The tier ledger for that item was replaced while it was being read, so nothing was changed.',
+            'Run the command again.',
+          );
+        }
+        if (onDisk) restrictLedgerFiles(this.dbPath);
       }
       // FULL stays: a decision is never lost to a power cut. The size limit
       // truncates a WAL that grew while reads held it (6 GB, 16 Nov) once it resets.
@@ -887,19 +905,20 @@ export class TierLedger {
         ON tier_items (provider, account_scope, conversation_key, provider_item_id) WHERE decided_by = 'override'`);
       if (onDisk) restrictLedgerFiles(this.dbPath);
     } catch (error) {
-      if (db) closeSqliteStore(db, this.readOnly ? { checkpoint: false, readOnly: true } : undefined);
+      if (db) closeSqliteStore(db, this.readOnly || options.expectedLedgerId !== undefined
+        ? { checkpoint: false, readOnly: this.readOnly } : undefined);
       throw error;
     }
     this.db = db;
   }
 
   /** Preflight existing files read-only, before chmod, WAL setup or a writable open. */
-  static assertSchemaCanOpen(dbPath: string, readOnly = false): void {
+  static assertSchemaCanOpen(dbPath: string, readOnly = false, allowWalLessRead = false): void {
     if (dbPath === ':memory:' || !existsSync(dbPath)) return;
     const read = readSqliteWithoutWriting(dbPath, 10_000, (db) => ({
       version: readSqliteSchemaVersion(db, TIER_LEDGER_SQLITE_STORE_ID),
       usable: sqliteSchemaUsable(db, TIER_LEDGER_SQLITE_STORE_ID, TIER_LEDGER_SCHEMA_VERSION),
-    }), readOnly);
+    }), readOnly && !allowWalLessRead);
     // Newer is refused unless compatible; a read-only open cannot migrate an older one.
     if (read !== undefined && !read.usable && (read.version > TIER_LEDGER_SCHEMA_VERSION || readOnly)) {
       throw new TierLedgerSchemaError(read.version);

@@ -868,7 +868,7 @@ async function main(): Promise<void> {
   if (args[0] === 'tier') {
     try {
       const tierArgs = args.slice(1);
-      const run = () => runTierCommand(tierArgs);
+      const run = () => runTierCommand(tierArgs, { standalone: true });
       // A command that opens stores runs here when Olympus is stopped, and in
       // the running worker otherwise; one that rewrites the stores the worker
       // writes does not run beside it.
