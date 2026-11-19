@@ -2043,7 +2043,7 @@ export const EMBEDDING_SWEEP_INTERVAL_MS = 60_000;
  * failed call to a provider that is down costs next to nothing.
  */
 export const EMBEDDING_SWEEP_MAX_BACKOFF_MS = 5 * 60_000;
-/** Set to `on` to rest a caught-up store between passes (see embeddingSweepTask). */
+/** Set to `off` to walk every store on every pass again (see embeddingSweepTask); for comparing the two on one build. */
 export const EMBEDDING_SWEEP_IDLE_BACKOFF_ENV = 'OLYMPUS_EMBEDDING_SWEEP_IDLE_BACKOFF';
 /** A resting store is still walked in full this often. */
 export const EMBEDDING_SWEEP_IDLE_FULL_PASS_MS = 30 * 60_000;
@@ -2156,8 +2156,7 @@ function embeddingSweepTask(
   const tricklingTarget = (target: ConnectorStoreEmbeddingTarget): boolean => {
     try { return trickle?.(target) === true; } catch { return false; }
   };
-  // Idle back-off (off unless OLYMPUS_EMBEDDING_SWEEP_IDLE_BACKOFF=on, until
-  // its proof on a large install is in): a pass over a caught-up store walks
+  // Idle back-off (OLYMPUS_EMBEDDING_SWEEP_IDLE_BACKOFF=off turns it off): a pass over a caught-up store walks
   // every chunk twice (the inventory, then the search for missing vectors),
   // once a minute, and finds nothing. A store whose last pass found nothing
   // to do is not walked again until something that could give it work moved:
@@ -2165,14 +2164,15 @@ function embeddingSweepTask(
   // or the target's model and scope. A new item moves the write sequence, so
   // it is embedded on the next pass as before. A full pass still runs every
   // EMBEDDING_SWEEP_IDLE_FULL_PASS_MS for anything the markers do not see.
-  const idleBackoff = process.env[EMBEDDING_SWEEP_IDLE_BACKOFF_ENV]?.trim() === 'on';
+  const idleBackoff = process.env[EMBEDDING_SWEEP_IDLE_BACKOFF_ENV]?.trim() !== 'off';
   // Remembered per store and per target: one store can be swept under two targets.
   const quiet = new WeakMap<object, Map<string, { key: string; at: number; run: Awaited<ReturnType<typeof embedPendingChunks>>[number] }>>();
   const quietSlot = (target: ConnectorStoreEmbeddingTarget): string => JSON.stringify([target.provider.modelId, target.provider.epochId ?? null,
     target.wholeStore === true, target.accountScope ?? null, target.filters ?? null]);
   const quietKey = (target: ConnectorStoreEmbeddingTarget): string | undefined => {
-    const writes = target.store.writeSequence();
-    if (writes === undefined) return undefined;
+    // A store that cannot say whether it was written to never rests.
+    const writes = target.store.writeSequence?.();
+    if (writes === undefined || typeof target.store.visibilityMarker !== 'function') return undefined;
     return JSON.stringify([writes, target.store.visibilityMarker()]);
   };
   return {

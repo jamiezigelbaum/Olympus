@@ -227946,7 +227946,7 @@ function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_
       return false;
     }
   };
-  const idleBackoff = process.env[EMBEDDING_SWEEP_IDLE_BACKOFF_ENV]?.trim() === "on";
+  const idleBackoff = process.env[EMBEDDING_SWEEP_IDLE_BACKOFF_ENV]?.trim() !== "off";
   const quiet = new WeakMap;
   const quietSlot = (target) => JSON.stringify([
     target.provider.modelId,
@@ -227956,8 +227956,8 @@ function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_
     target.filters ?? null
   ]);
   const quietKey = (target) => {
-    const writes = target.store.writeSequence();
-    if (writes === undefined)
+    const writes = target.store.writeSequence?.();
+    if (writes === undefined || typeof target.store.visibilityMarker !== "function")
       return;
     return JSON.stringify([writes, target.store.visibilityMarker()]);
   };
