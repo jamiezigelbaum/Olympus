@@ -65,11 +65,13 @@ describe('Dropbox connector-store approved scope narrowing', () => {
       const pks = storeDb(store).query(
         'SELECT item_pk FROM items WHERE provider = ? ORDER BY item_pk',
       ).all('dropbox') as Array<{ item_pk: number }>;
-      const probe = store as unknown as {
-        readHere: LocalConnectorStore['readHere'];
-        searchRowsByItemPksSteps: LocalConnectorStore['searchRowsByItemPksSteps'];
-      };
-      const hydrated = probe.readHere(probe.searchRowsByItemPksSteps(pks.map((row) => row.item_pk), 'personal', filters));
+      const hydrated = (store as unknown as {
+        searchRowsByItemPks(
+          itemPks: number[],
+          accountScope?: string,
+          selectedFilters?: ConnectorStoreSearchFilters,
+        ): ConnectorStoreSearchRow[];
+      }).searchRowsByItemPks(pks.map((row) => row.item_pk), 'personal', filters);
       expect(ids(hydrated).sort()).toEqual([...expected].sort());
 
       const adapter = createConnectorStoreCorpusAdapter({

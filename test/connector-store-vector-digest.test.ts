@@ -397,8 +397,8 @@ test('when ledger visibility hides every first-pass candidate, the lane scans wi
     const db = database(store);
     expect(vectorDigestState(db, modelId).completed).toBe(true);
     const hidden = new Set((db.query('SELECT item_pk FROM items ORDER BY item_pk LIMIT 500').all() as Array<{ item_pk: number }>).map((row) => row.item_pk));
-    const lane = store as unknown as { visibleVectorItemPksSteps: LocalConnectorStore['visibleVectorItemPksSteps'] };
-    lane.visibleVectorItemPksSteps = function* (pks) { return new Set(pks.filter((pk) => !hidden.has(pk))); };
+    const lane = store as unknown as { visibleVectorItemPks(pks: readonly number[]): Set<number> };
+    lane.visibleVectorItemPks = (pks) => new Set(pks.filter((pk) => !hidden.has(pk)));
     const result = await store.vectorSearchLane('harbor note', provider, 2);
     expect(result.rows).toHaveLength(2);
   } finally { store.close(); }
@@ -436,10 +436,9 @@ function heldVectorStore(count: number, heldCount: number) {
     ledgerDb.transaction(() => { for (let id = 0; id < count; id++) setHold(id, id < heldCount); })();
     const lane = store as unknown as {
       vectorScanExcludedItemPks: LocalConnectorStore['vectorScanExcludedItemPks'];
-      visibleVectorItemPksSteps: LocalConnectorStore['visibleVectorItemPksSteps'];
-      searchRowsByItemPksSteps: LocalConnectorStore['searchRowsByItemPksSteps'];
-      chunkMatchForChunkPkSteps: LocalConnectorStore['chunkMatchForChunkPkSteps'];
-      readHere: LocalConnectorStore['readHere'];
+      visibleVectorItemPks: LocalConnectorStore['visibleVectorItemPks'];
+      searchRowsByItemPks: LocalConnectorStore['searchRowsByItemPks'];
+      chunkMatchForChunkPk: LocalConnectorStore['chunkMatchForChunkPk'];
     };
     const scanExclusions = lane.vectorScanExcludedItemPks.bind(store);
     lane.vectorScanExcludedItemPks = () => {
@@ -447,7 +446,7 @@ function heldVectorStore(count: number, heldCount: number) {
       expect(exclusions).toBeUndefined();
       return exclusions;
     };
-    return { store, lane, ledger, setHold, close };
+    return { store, lane, setHold, close };
   } catch (error) {
     close();
     throw error;
@@ -455,8 +454,8 @@ function heldVectorStore(count: number, heldCount: number) {
 }
 
 test('cold vector visibility over 5,000 items and 90% held yields without changing rows or order', async () => {
-  const { store, lane, ledger, close } = heldVectorStore(5_000, 4_500);
-  const visible = lane.visibleVectorItemPksSteps.bind(store);
+  const { store, lane, close } = heldVectorStore(5_000, 4_500);
+  const visible = lane.visibleVectorItemPks.bind(store);
   const limit = 20;
   const realNow = performance.now.bind(performance);
   let elapsed = 0;
@@ -466,12 +465,12 @@ test('cold vector visibility over 5,000 items and 90% held yields without changi
   // Advance the slice clock deterministically even on a fast runner. Use the
   // actual clock to measure each synchronous stretch into its next microtask.
   const clock = spyOn(performance, 'now').mockImplementation(() => realNow() + elapsed);
-  lane.visibleVectorItemPksSteps = function* (pks, ...scope) {
+  lane.visibleVectorItemPks = (pks, ...scope) => {
     if (turnStarted === undefined) {
       const started = turnStarted = realNow();
       queueMicrotask(() => { stretches.push(realNow() - started); turnStarted = undefined; });
     }
-    const eligible = yield* visible(pks, ...scope);
+    const eligible = visible(pks, ...scope);
     batches.push(pks.length);
     elapsed += 20;
     return eligible;
@@ -489,10 +488,10 @@ test('cold vector visibility over 5,000 items and 90% held yields without changi
     // Every cosine is 1 in this fixture. The unsliced reference can check
     // every candidate in PK order at once and then take the first visible K.
     const ordered = database(store).query('SELECT item_pk, chunk_pk FROM chunks ORDER BY item_pk').all() as Array<{ item_pk: number; chunk_pk: number }>;
-    const allowed = lane.readHere(visible(ordered.map(row => row.item_pk), 'a', undefined, ledger));
+    const allowed = visible(ordered.map(row => row.item_pk), 'a');
     const winners = ordered.filter(row => allowed.has(row.item_pk)).slice(0, limit);
-    const unsliced = lane.readHere(lane.searchRowsByItemPksSteps(winners.map(row => row.item_pk), 'a')).map((row, index) => ({
-      ...row, chunk: lane.readHere(lane.chunkMatchForChunkPkSteps(winners[index]!.chunk_pk, 'semantic'))!, bestCosine: 1,
+    const unsliced = lane.searchRowsByItemPks(winners.map(row => row.item_pk), 'a').map((row, index) => ({
+      ...row, chunk: lane.chunkMatchForChunkPk(winners[index]!.chunk_pk, 'semantic')!, bestCosine: 1,
     }));
     expect(result.rows).toEqual(unsliced);
   } finally { clock.mockRestore(); close(); }
@@ -500,15 +499,15 @@ test('cold vector visibility over 5,000 items and 90% held yields without changi
 
 test('a hold during a vector visibility yield drops provisional winners and refills in rank order', async () => {
   const { store, lane, setHold, close } = heldVectorStore(400, 197);
-  const visible = lane.visibleVectorItemPksSteps.bind(store);
+  const visible = lane.visibleVectorItemPks.bind(store);
   const realNow = performance.now.bind(performance);
   let elapsed = 0;
   const clock = spyOn(performance, 'now').mockImplementation(() => realNow() + elapsed);
   let holdDuringYield: Promise<void> | undefined;
   const batches: number[] = [];
-  lane.visibleVectorItemPksSteps = function* (pks, ...scope) {
+  lane.visibleVectorItemPks = (pks, ...scope) => {
     batches.push(pks.length);
-    const eligible = yield* visible(pks, ...scope);
+    const eligible = visible(pks, ...scope);
     if (batches.length === 1) {
       // The first batch has three visible items. Hold its two provisional
       // winners so the refill must use its spare and read the next batch.
@@ -817,17 +816,10 @@ describe('the vector lane ranks only what it can serve, in one pass', () => {
   } };
   async function seeded(): Promise<{ store: LocalConnectorStore; dir: string; pks: number[] }> {
     const dir = mkdtempSync(join(tmpdir(), 'vector-digest-workcount-'));
-    const path = join(dir, 'store.sqlite');
-    const seed = open();
-    try {
-      await seed.syncFromConnector(connector(count), { fetchContent: true });
-      await seed.embedChunks({ provider: graded });
-      await seed.ensureVectorDigestReady(modelId, 4_096);
-      // Only the measured scans need a file and the read pool. Write the
-      // disposable fixture once so seed I/O cannot eat the scan test's budget.
-      writeFileSync(path, database(seed).serialize());
-    } finally { seed.close(); }
-    const store = open(path);
+    const store = open(join(dir, 'store.sqlite'));
+    await store.syncFromConnector(connector(count), { fetchContent: true });
+    await store.embedChunks({ provider: graded });
+    await store.ensureVectorDigestReady(modelId, 4_096);
     const pks = (database(store).query('SELECT item_pk FROM items ORDER BY CAST(provider_item_id AS INTEGER)').all() as Array<{ item_pk: number }>).map((row) => row.item_pk);
     return { store, dir, pks };
   }
@@ -847,11 +839,11 @@ describe('the vector lane ranks only what it can serve, in one pass', () => {
       const held = new Set(pks.slice(0, count * 0.9));
       const lane = store as unknown as {
         tierLedgerHiddenItemPks(): { hidden: number[]; held: number[]; heldForJudgment: number[]; metadataLayer: number[]; metadataLayerContentUnread: number[]; moving: number };
-        visibleVectorItemPksSteps: LocalConnectorStore['visibleVectorItemPksSteps'];
+        visibleVectorItemPks(pks: readonly number[]): Set<number>;
       };
       const value = { hidden: [], held: [...held], heldForJudgment: [...held], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 };
       lane.tierLedgerHiddenItemPks = () => value;
-      lane.visibleVectorItemPksSteps = function* (candidates) { return new Set(candidates.filter((pk) => !held.has(pk))); };
+      lane.visibleVectorItemPks = (candidates) => new Set(candidates.filter((pk) => !held.has(pk)));
       const reads = counted();
       try {
         const result = await store.vectorSearchLane('harbor note', graded, 20);

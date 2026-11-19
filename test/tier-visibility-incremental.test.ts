@@ -25,8 +25,7 @@ test.each(['deletion', 'secret'] as const)('a pending %s hides an unrouted item 
     family: 'file', trustDomain: 'internal', tierLedger: ledger });
   const probe = store as unknown as StoreProbe & {
     tierHiddenItemPksInTurns(): Promise<{ hidden: number[] }>;
-    readHere: LocalConnectorStore['readHere'];
-    visibleVectorItemPksSteps: LocalConnectorStore['visibleVectorItemPksSteps'];
+    visibleVectorItemPks(pks: readonly number[]): Set<number>;
   };
   try {
     const connector = fixtureConnector(() => [{ id: 'a', name: 'Orchard', text: 'Orchard notes' }]);
@@ -42,10 +41,9 @@ test.each(['deletion', 'secret'] as const)('a pending %s hides an unrouted item 
     const hit = { corpusId: store.corpusId, sourceItem: rows[0]!.sourceItem } as SourceIndexRoutedSearchHit;
     const gate = createTierVisibilityGate(() => [{ ledger, corpusIds: new Set([store.corpusId]) }]);
     const { item_pk: pk } = probe.db.query('SELECT item_pk FROM items').get() as { item_pk: number };
-    const visible = () => probe.readHere(probe.visibleVectorItemPksSteps([pk], undefined, undefined, ledger));
     await runWithSourceAnswerTrace(createSourceAnswerTrace(), async () => {
       expect(await gate.offThread!([hit])).toEqual([hit]);
-      expect(visible()).toEqual(new Set([pk]));
+      expect(probe.visibleVectorItemPks([pk])).toEqual(new Set([pk]));
       expect((await store.vectorSearchLane(query, provider, 5)).rows).toHaveLength(1);
       expect((await probe.tierHiddenItemPksInTurns()).hidden).toEqual([]);
 
@@ -55,7 +53,7 @@ test.each(['deletion', 'secret'] as const)('a pending %s hides an unrouted item 
         gateOffThread: (await gate.offThread!([hit])).length,
         keyword: store.searchItems(query, 5).length,
         keywordOffThread: (await store.searchItemsDetailedOffThread(query, 5)).rows.length,
-        vectorWinners: visible().size,
+        vectorWinners: probe.visibleVectorItemPks([pk]).size,
         hiddenPks: (await probe.tierHiddenItemPksInTurns()).hidden,
       }).toEqual({ gate: 0, gateOffThread: 0, keyword: 0, keywordOffThread: 0, vectorWinners: 0, hiddenPks: [pk] });
       expect((await store.vectorSearchLane(query, provider, 5)).rows).toEqual([]);
