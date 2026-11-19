@@ -72,7 +72,7 @@ export interface EvernoteRuntimeOptions {
 
 export interface EvernoteRuntime {
   /** The lane, when its stores already exist; never creates one. */
-  existingLane(): EvernoteTierLane | undefined;
+  existingLane(openStores?: boolean): EvernoteTierLane | undefined;
   /** The live pass for this handle (the same one while the handle is). */
   liveSync(handle: ConnectedCredentialHandle): EvernoteLiveSync;
   /**
@@ -108,12 +108,12 @@ export function createEvernoteRuntime(options: EvernoteRuntimeOptions): Evernote
     options.onLane?.(lane);
     return lane;
   };
-  const existingLane = (): EvernoteTierLane | undefined => {
+  const existingLane = (openStores = true): EvernoteTierLane | undefined => {
     if (lane) return lane;
     // A previous connection left its stores: serve them, connected or not.
     if (!existsSync(resolvedStorePath(EVERNOTE_SOURCE_ID, 'secure_local', env))) return undefined;
     const opened = openLane();
-    for (const leg of [opened.secure, opened.internal]) if (leg.exists()) leg.open();
+    if (openStores) for (const leg of [opened.secure, opened.internal]) if (leg.exists()) leg.open();
     return opened;
   };
 

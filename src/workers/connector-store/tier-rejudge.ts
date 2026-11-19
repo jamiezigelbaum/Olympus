@@ -163,7 +163,13 @@ export function emptyTierRejudgeReport(): TierRejudgeReport {
   };
 }
 
-export function rejudgeRoutedItems(options: TierRejudgeOptions): { report: TierRejudgeReport; next?: TierLedgerIdentity } {
+interface RejudgeWalkResult {
+  report: TierRejudgeReport;
+  next?: TierLedgerIdentity;
+  complete: boolean;
+}
+
+export function rejudgeRoutedItems(options: TierRejudgeOptions): RejudgeWalkResult {
   const steps = rejudgeSteps(options);
   let step = steps.next();
   while (!step.done) step = steps.next(isFinder(step.value) ? step.value.find.here() : undefined);
@@ -185,7 +191,7 @@ function isFinder(step: RejudgeStep): step is { find: LoopFinder<RejudgePage> } 
  */
 export async function rejudgeRoutedItemsInTurns(
   options: TierRejudgeOptions & { turn: () => Promise<void> | undefined },
-): Promise<{ report: TierRejudgeReport; next?: TierLedgerIdentity }> {
+): Promise<RejudgeWalkResult> {
   const steps = rejudgeSteps(options);
   let step = steps.next();
   while (!step.done) {
@@ -222,12 +228,12 @@ function storedContentText(set: TieredStoreSet, record: TierLedgerRecord): strin
 
 // Yields each candidate before it is re-judged (a turn point for the caller),
 // and the candidate page as a finder (loop-stall step-back, family 5).
-function* rejudgeSteps(options: TierRejudgeOptions): Generator<RejudgeStep, { report: TierRejudgeReport; next?: TierLedgerIdentity }, unknown> {
+function* rejudgeSteps(options: TierRejudgeOptions): Generator<RejudgeStep, RejudgeWalkResult, unknown> {
   const report = emptyTierRejudgeReport();
   const { set } = options;
   const classification = set.classification();
   // No sniffer, or inputs that cannot be trusted: recorded decisions stand.
-  if (!classification?.sniffer || classification.unavailableReason || classification.sniffer.rejudgeReady === false) return { report };
+  if (!classification?.sniffer || classification.unavailableReason || classification.sniffer.rejudgeReady === false) return { report, complete: false };
   const ledger = set.ledger;
   const limit = Math.max(1, options.limit ?? DEFAULT_TIER_REJUDGE_PER_PASS);
   const key = { engineVersion: TIER_CLASSIFIER_VERSION, snifferId: classification.sniffer.id };
@@ -261,7 +267,7 @@ function* rejudgeSteps(options: TierRejudgeOptions): Generator<RejudgeStep, { re
     }
     ledger.advanceRecheck(request, scoped.next);
   }
-  if (budget <= 0) return { report, ...(options.after ? { next: options.after } : {}) };
+  if (budget <= 0) return { report, complete: false, ...(options.after ? { next: options.after } : {}) };
   const pageOptions = { ...key, ...(options.after ? { after: options.after } : {}), limit: budget };
   const page = (yield { find: ledgerFinderAfterHold(ledger, () => ledger.rejudgeCandidatePageSteps(pageOptions)) }) as RejudgePage;
   report.builtinPromptSkipped = page.builtinPromptSkipped;
@@ -287,7 +293,7 @@ function* rejudgeSteps(options: TierRejudgeOptions): Generator<RejudgeStep, { re
       report.failed += 1;
     }
   }
-  return { report, ...(page.next ? { next: page.next } : {}) };
+  return { report, complete: page.next === undefined, ...(page.next ? { next: page.next } : {}) };
 }
 
 /**

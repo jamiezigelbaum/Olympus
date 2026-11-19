@@ -27,6 +27,7 @@ import {
   tieredStoreSetLedgerPath,
   type OnDemandTierStore,
   type TieredStoreSet,
+  type TieredStoreSetOptions,
 } from '../connector-store/tiered-store-set.ts';
 import {
   DROPBOX_TIER_CORPUS_IDS,
@@ -50,7 +51,7 @@ export function createDropboxTierLane(options: {
   /** Told once when the Personal or Public store opens, so a runtime can serve it. */
   onStoreOpened?: (store: LocalConnectorStore) => void;
   /** The owner's folder choice keeps this Dropbox path names-only (TieredStoreSetOptions.namesOnlyByOwner). */
-  namesOnlyByOwner?: (path: string) => boolean;
+  namesOnlyByOwner?: TieredStoreSetOptions['namesOnlyByOwner'];
 }): DropboxTierLane {
   const env = options.env ?? process.env;
   const ledger = options.secureStore.tierLedger()

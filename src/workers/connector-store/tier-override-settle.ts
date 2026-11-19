@@ -67,6 +67,7 @@ export interface TierOverrideSettleReport {
   heldMoving: number;
   /** Items whose override the owner cleared ("undo"), put back to the decision it took over from. */
   restored: number;
+  failed: number;
 }
 
 /** How often the cleared-override search runs when nothing it reads has changed. */
@@ -79,6 +80,10 @@ export interface ApplyOwnerOverridesOptions {
   nowMs?: () => number;
   /** @internal Test hook: runs after the overrides are read, before any is applied (another process's write). */
   afterRead?: () => void;
+  /** The judge retries Secret side stores independently of this walk. */
+  retrySecrets?: boolean;
+  /** The judge's backstop includes a fresh cleared-override walk. */
+  forceClearedCheck?: boolean;
 }
 
 /** The override pass on its caller's connection (a direct caller, not the engine's loop). */
@@ -107,7 +112,7 @@ export function applyOwnerOverridesOffThread(
 const running = new WeakMap<object, Promise<void>>();
 
 function* applyOwnerOverridesPass(options: ApplyOwnerOverridesOptions): LoopPass<TierOverrideSettleReport> {
-  const report: TierOverrideSettleReport = { checked: 0, updated: 0, raised: 0, lowered: 0, secrets: 0, heldMoving: 0, restored: 0 };
+  const report: TierOverrideSettleReport = { checked: 0, updated: 0, raised: 0, lowered: 0, secrets: 0, heldMoving: 0, restored: 0, failed: 0 };
   const { set } = options;
   const ledger = set.ledger;
   let retirePublic = false;
@@ -118,7 +123,7 @@ function* applyOwnerOverridesPass(options: ApplyOwnerOverridesOptions): LoopPass
   }
   // Secrets whose side stores could not be cleared before: every tick tries
   // again, listed or not.
-  yield* retrySecretSideStoreDebtsPass(ledger);
+  if (options.retrySecrets !== false) yield* retrySecretSideStoreDebtsPass(ledger);
   const overrides = yield* findInLedger(ledger, () => ledger.listRoutedOverridesSteps());
   options.afterRead?.();
   for (const { record, override } of overrides) {
@@ -132,6 +137,7 @@ function* applyOwnerOverridesPass(options: ApplyOwnerOverridesOptions): LoopPass
       applyOne(set, record, override.tier, retirePublic, report, { generation: record.generation, override });
     } catch {
       // Left as it was; the next pass (or the item's next listing) applies it.
+      report.failed += 1;
     }
   }
   // Overrides the owner cleared ("undo", tier-owner-items.ts): the item goes
@@ -146,7 +152,7 @@ function* applyOwnerOverridesPass(options: ApplyOwnerOverridesOptions): LoopPass
   const fingerprint = yield* findInLedger(ledger, () => ledger.clearedOverrideFingerprintSteps());
   const nowMs = (options.nowMs ?? Date.now)();
   const last = clearedChecks.get(ledger);
-  if (!last || last.fingerprint !== fingerprint || nowMs - last.atMs >= CLEARED_RECHECK_MS) {
+  if (options.forceClearedCheck || !last || last.fingerprint !== fingerprint || nowMs - last.atMs >= CLEARED_RECHECK_MS) {
     let failed = false;
     const CLEARED_PAGE = 100;
     for (let after: TierLedgerRecord | undefined, page: TierLedgerRecord[]; ; after = page[page.length - 1]) {
@@ -159,6 +165,7 @@ function* applyOwnerOverridesPass(options: ApplyOwnerOverridesOptions): LoopPass
         } catch {
           // Left as it was; the next pass tries again.
           failed = true;
+          report.failed += 1;
         }
       }
       if (page.length < CLEARED_PAGE) break;
@@ -168,7 +175,7 @@ function* applyOwnerOverridesPass(options: ApplyOwnerOverridesOptions): LoopPass
   }
   // Items that left Secrets since the last tick (here, in a listing, a move
   // landing or another process): their job names come back.
-  retireSecretRedactions(ledger);
+  if (options.retrySecrets !== false) retireSecretRedactions(ledger);
   return report;
 }
 

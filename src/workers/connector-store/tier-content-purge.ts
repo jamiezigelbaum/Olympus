@@ -21,8 +21,8 @@ export function purgeLowerTierContent(set: TieredStoreSet, options: {
   /** @internal Race injection before the authoritative generation fence. */
   beforeDelete?: () => void;
   log?: (corpus: string, copies: number, chunks: number) => void;
-} = {}): { checked: number; purged: number; resumed: number; failed: number } {
-  const report = { checked: 0, purged: 0, resumed: 0, failed: 0 };
+} = {}): { checked: number; purged: number; resumed: number; failed: number; complete: boolean } {
+  const report = { checked: 0, purged: 0, resumed: 0, failed: 0, complete: false };
   const limit = Math.max(1, Math.min(options.limit ?? LOWER_CONTENT_PURGE_BATCH, LOWER_CONTENT_PURGE_BATCH));
   const note = options.embeddingLedger ?? { path: resolveEmbeddingLedgerPath(), approvedBy: 'system-automatic' as const };
   // Interrupted NEW moves are obligations even after the historical sweep is done.
@@ -43,8 +43,9 @@ export function purgeLowerTierContent(set: TieredStoreSet, options: {
       resumed.add(tierLedgerIdentityKey(identity));
     } catch { report.failed++; }
   }
-  set.ledger.writeMeta(RECEIPT_CURSOR, receipts.at(-1)?.key ?? '');
-  if (options.maintenance && set.ledger.readMeta(DONE) === '1') return report;
+  set.ledger.writeSettleProgress(RECEIPT_CURSOR, receipts.at(-1)?.key ?? '');
+  const receiptsComplete = receipts.length < receiptBudget;
+  if (options.maintenance && set.ledger.readMeta(DONE) === '1') return { ...report, complete: receiptsComplete };
   const raw = set.ledger.readMeta(CURSOR);
   const after = raw ? JSON.parse(raw) as TierLedgerIdentity : undefined;
   const stores = (['public_safe', 'internal'] as const).flatMap(domain => {
@@ -157,17 +158,19 @@ export function purgeLowerTierContent(set: TieredStoreSet, options: {
       }
     } catch { report.failed++; }
   }
-  if (report.failed) set.ledger.writeMeta(FAILED, '1');
+  if (report.failed) set.ledger.writeSettleProgress(FAILED, '1');
   if (remaining > 0) {
     const last = page.at(-1);
     const finished = page.length < remaining || !last;
-    set.ledger.writeMeta(CURSOR, finished ? '' : JSON.stringify({
+    set.ledger.writeSettleProgress(CURSOR, finished ? '' : JSON.stringify({
       provider: last.provider, accountScope: last.accountScope, providerItemId: last.providerItemId,
       ...(last.conversationKey ? { providerConversationId: last.conversationKey } : {}),
     }));
     if (finished) {
-      set.ledger.writeMeta(DONE, set.ledger.readMeta(FAILED) === '1' ? '' : '1');
-      set.ledger.writeMeta(FAILED, '');
+      const historyComplete = set.ledger.readMeta(FAILED) !== '1';
+      report.complete = historyComplete && receiptsComplete;
+      set.ledger.writeSettleProgress(DONE, historyComplete ? '1' : '');
+      set.ledger.writeSettleProgress(FAILED, '');
     }
   }
   for (const [corpus, count] of counts) options.log?.(corpus, count.copies, count.chunks);
