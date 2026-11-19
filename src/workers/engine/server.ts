@@ -4604,6 +4604,15 @@ export async function main(): Promise<void> {
         },
       ),
     ].filter((source): source is SourceSchedulerSource => source !== undefined);
+    // The Ask benchmark mounts completed synthetic stores without connecting
+    // accounts. Give those stores the same idle embedding sweep as live lanes.
+    if (process.env.NODE_ENV === 'test' && process.env.OLYMPUS_ASK_BENCH === '1') {
+      for (const { corpusId, sourceId } of sourceCorpusRegistry.list('search')) {
+        if (!sourceId.startsWith('ask-bench.')) continue;
+        sources.push({ corpusId, sourceId, cadence: 'continuous', intervalMs: olympusConfig.worker.scheduler.syncIntervalSeconds * 1_000,
+          freshnessThresholdHours: olympusConfig.worker.scheduler.freshnessThresholdHours, tasks: [] });
+      }
+    }
     // Gmail with no live lane (not connected, or no mail approval) whose stores hold mail an import brought in: a
     // source with no sync of its own, so the embedding sweep and the private meaning backfill below still drain
     // the imported history. Live approval governs live reads, not the account's own stores.
