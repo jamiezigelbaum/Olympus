@@ -13,7 +13,7 @@
 import { Database } from 'bun:sqlite';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { spawn as spawnProcess } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createUnixSocketFetch } from '../src/core/worker-transport.ts';
@@ -28,8 +28,9 @@ import { EngineCommandClient } from '../src/workers/engine-split/client.ts';
 import { frontEngineState } from '../src/workers/engine-split/front-state.ts';
 import { EngineCommandError, type EngineCommandEnvelope, type EngineForwardedRequest, type EngineForwardedResponse } from '../src/workers/engine-split/commands.ts';
 import { EngineCommandMirror } from '../src/workers/engine-split/control-mirror.ts';
+import { CONTROL_BIND, CONTROL_BIND_BOUND, CONTROL_INTS, CONTROL_MESSAGE_BYTES, type ControlToThread } from '../src/workers/engine-split/control-plane.ts';
 import { createEngineFront, createEngineFrontRoutes, createFrontGate, engineStatusSnapshotPath, startEngineBackgroundServer, startEngineBackgroundStatus } from '../src/workers/engine-split/runtime.ts';
-import { readEngineStatusSnapshot, type EngineStatusRead } from '../src/workers/engine-split/snapshot.ts';
+import { ENGINE_STATUS_STALE_MS, readEngineStatusSnapshot, readEngineStatusSnapshotAsync, type EngineStatusRead } from '../src/workers/engine-split/snapshot.ts';
 import { waitFor } from './helpers/test-clock.ts';
 import { ownerLocalMint } from './helpers/owner-local-mint.ts';
 import { CORPORA, FIXTURE_PLACEMENT, fixtureConnector, identityOf, openTierFixture } from './helpers/tier-fixtures.ts';
@@ -55,6 +56,53 @@ function home(): { root: string; env: Record<string, string>; socketPath: string
 const override = (note: string): EngineCommandEnvelope['command'] => ({
   kind: 'tier_override', request: { path: '/v1/cli/tier', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ note }) },
 });
+
+test('unchanged status stays fresh over several publishes without replacing or flushing the file', async () => {
+  const { env, socketPath } = home();
+  mkdirSync(dirname(socketPath), { recursive: true });
+  const path = engineStatusSnapshotPath(env);
+  const worker = new Worker(join(import.meta.dir, 'fixtures', 'engine-control-no-sync-worker.ts'));
+  stops.push(() => worker.terminate());
+  await new Promise<void>((resolve, reject) => {
+    worker.addEventListener('message', () => resolve(), { once: true });
+    worker.addEventListener('error', (error) => reject(error), { once: true });
+  });
+  const send = (message: ControlToThread) => worker.postMessage(message);
+  const shared = new SharedArrayBuffer(CONTROL_INTS * 4 + CONTROL_MESSAGE_BYTES);
+  const ints = new Int32Array(shared, 0, CONTROL_INTS);
+  // No new collection or held-loop reading should change the payload in this test.
+  send({ type: 'init', socketPath, authToken: TOKEN, instanceId: 'fixture', shared, tickMs: 60_000, publishMs: 75, model: false });
+  await waitFor(() => Atomics.load(ints, CONTROL_BIND) === CONTROL_BIND_BOUND, { description: 'control socket bind' });
+  const at = Date.now();
+  const state = { scheduler: null, judge: { backlog: null, pending: 1, spending: null }, captures: null };
+  send({ type: 'state', state, at, path });
+  const first = await waitFor(() => readEngineStatusSnapshot(path));
+  const original = readFileSync(path, 'utf8');
+  const inode = statSync(path).ino;
+  let last = Date.parse(first.snapshot.written_at);
+  for (let period = 0; period < 3; period++) {
+    const read = await waitFor(() => {
+      const status = readEngineStatusSnapshot(path);
+      return status && Date.parse(status.snapshot.written_at) > last ? status : undefined;
+    });
+    expect(read.stale).toBe(false);
+    expect(read.snapshot.state_at).toBe(first.snapshot.state_at);
+    expect(statSync(path).ino).toBe(inode);
+    expect(readFileSync(path, 'utf8')).toBe(original);
+    last = Date.parse(read.snapshot.written_at);
+  }
+  const asyncRead = await readEngineStatusSnapshotAsync(path);
+  expect(Date.parse(asyncRead!.written_at)).toBeGreaterThan(Date.parse(first.snapshot.written_at));
+
+  send({ type: 'state', state: { ...state, judge: { ...state.judge, pending: 2 } }, at, path });
+  const changed = await waitFor(() => {
+    const read = readEngineStatusSnapshot(path);
+    return read?.snapshot.judge.pending === 2 ? read : undefined;
+  });
+  expect(statSync(path).ino).not.toBe(inode);
+  worker.terminate();
+  expect(readEngineStatusSnapshot(path, () => Date.parse(changed.snapshot.written_at) + ENGINE_STATUS_STALE_MS + 1_000)?.stale).toBe(true);
+}, 30_000);
 
 test('Make Private returns a receipt during a held background, protects one item, and reports settlement', async () => {
   const { root, env, socketPath } = home();

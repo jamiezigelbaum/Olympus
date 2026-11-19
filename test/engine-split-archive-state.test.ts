@@ -360,7 +360,7 @@ test('the idle front uses no synchronous filesystem calls on the moved timer pat
   // No HTTP requests during this window. Require proof each timer fired,
   // including the desktop probe against a synthetic ready session.
   const timers = [
-    'fs readFile engine-background-status.json', 'fs readFile proc-status', 'fs open worker.env',
+    'fs open engine-background-status.json', 'fs readFile proc-status', 'fs open worker.env',
     'fs writeFile front.sql-sites.json', 'fs appendFile cpu.jsonl',
   ];
   await waitFor(() => timers.every(line => count(line) >= 3), { timeoutMs: 25_000 }).catch((error) => {

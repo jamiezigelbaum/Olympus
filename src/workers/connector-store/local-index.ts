@@ -5507,12 +5507,14 @@ export class LocalConnectorStore {
     }
     let refreshing: Promise<void> | undefined;
     refreshing = (async () => {
+      changeMemoryActivity('visibility_refresh', 1);
       try {
         await runHiddenStepsInTurns(this.tierLedgerHiddenSteps());
         await this.publishVisibility();
       } catch {
         // The next movement or the backstop asks again.
       } finally {
+        changeMemoryActivity('visibility_refresh', -1);
         if (this.visibilityRefreshing === refreshing) this.visibilityRefreshing = undefined;
       }
     })();

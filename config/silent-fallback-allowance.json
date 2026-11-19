@@ -197,7 +197,7 @@
     "src/workers/engine/index.ts": 7,
     "src/workers/engine/runtime/answer-scope.ts": 1,
     "src/workers/engine/runtime/judging-models.ts": 3,
-    "src/workers/engine/runtime/local-private-answers.ts": 7,
+    "src/workers/engine/runtime/local-private-answers.ts": 5,
     "src/workers/engine/runtime/messaging-capture.ts": 1,
     "src/workers/engine/runtime/model-choices-backend.ts": 2,
     "src/workers/engine/runtime/private-analysts.ts": 1,

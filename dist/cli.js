@@ -22531,12 +22531,10 @@ function statusMemoryActivity(judging, recount) {
 }
 function memoryActivity(judging, recount, background) {
   const labels = background === undefined ? taskActivities(judging, recount) : background === "idle" ? [] : [background];
-  if (scopedActivity.visibility_rebuild_bootstrap > 0)
-    labels.push("visibility_rebuild_bootstrap");
-  if (scopedActivity.visibility_rebuild_incremental > 0)
-    labels.push("visibility_rebuild_incremental");
-  if (scopedActivity.people_refresh > 0)
-    labels.push("people_refresh");
+  for (const label of Object.keys(scopedActivity)) {
+    if (scopedActivity[label] > 0)
+      labels.push(label);
+  }
   return labels.length ? labels : ["idle"];
 }
 var counts, payloads, payloadScope, payloadSlots, workerPayloads, scopedActivity;
@@ -22563,7 +22561,10 @@ var init_memory_counters = __esm(() => {
   scopedActivity = {
     visibility_rebuild_bootstrap: 0,
     visibility_rebuild_incremental: 0,
-    people_refresh: 0
+    people_refresh: 0,
+    visibility_refresh: 0,
+    embedding_repair: 0,
+    embedding_settlement: 0
   };
 });
 
@@ -70765,10 +70766,12 @@ var init_local_index = __esm(() => {
       }
       let refreshing;
       refreshing = (async () => {
+        changeMemoryActivity("visibility_refresh", 1);
         try {
           await runHiddenStepsInTurns(this.tierLedgerHiddenSteps());
           await this.publishVisibility();
         } catch {} finally {
+          changeMemoryActivity("visibility_refresh", -1);
           if (this.visibilityRefreshing === refreshing)
             this.visibilityRefreshing = undefined;
         }
@@ -191242,6 +191245,8 @@ function createLocalPrivateAnswers(options) {
   let running = false;
   let runningDestination = "computer";
   let closed = false;
+  let started = false;
+  let pending = false;
   let pass;
   let timer;
   let unsubscribe;
@@ -191249,7 +191254,10 @@ function createLocalPrivateAnswers(options) {
   let autoAnswering = false;
   const store = () => {
     try {
-      return options.store();
+      const current = options.store();
+      if (started && !closed && !unsubscribe)
+        unsubscribe = current?.subscribe?.(wake);
+      return current;
     } catch {
       return;
     }
@@ -191263,7 +191271,8 @@ function createLocalPrivateAnswers(options) {
     }
   };
   const hidden = (q) => q.surface === "chatgpt" && options.panelSecretNotice?.(refOf(q)) !== true && (now() < Date.parse(q.askedAt) + CHATGPT_INBOX_GRACE_MS || options.panelClaimed?.(refOf(q)) === true);
-  const autoAnswerable = (q) => q.path !== "anonymous" && q.path !== "venice" && !q.hasResult && !q.result && q.state === "waiting" && q.nextAttemptAt <= now() && !hidden(q) && active(q) && (q.surface !== "chatgpt" || now() >= Date.parse(q.askedAt) + CHATGPT_INBOX_GRACE_MS || options.panelSecretOnlyNotice?.(refOf(q)) === true);
+  const pendingAnswer = (q) => q.path !== "anonymous" && q.path !== "venice" && !q.hasResult && !q.result && q.state === "waiting" && active(q);
+  const readyAnswer = (q) => q.nextAttemptAt <= now() && !hidden(q) && (q.surface !== "chatgpt" || now() >= Date.parse(q.askedAt) + CHATGPT_INBOX_GRACE_MS || options.panelSecretOnlyNotice?.(refOf(q)) === true);
   const current = (q) => {
     const fresh = store()?.get(q.id);
     return fresh && fresh.generation === q.generation && active(fresh) && !hidden(fresh) ? fresh : undefined;
@@ -191292,11 +191301,20 @@ function createLocalPrivateAnswers(options) {
       return { status: "failed" };
     }
   };
+  const recheck = () => {
+    if (!started || closed || !pending || timer)
+      return;
+    timer = setTimeout(() => {
+      timer = undefined;
+      wake();
+    }, 1000);
+    timer.unref?.();
+  };
   const wake = () => {
-    if (!closed)
-      api.tick().catch(() => {
-        return;
-      });
+    if (closed)
+      return;
+    pending = true;
+    api.tick();
   };
   const invalidate = (q) => {
     store()?.invalidate?.(refOf(q));
@@ -191337,51 +191355,72 @@ function createLocalPrivateAnswers(options) {
   };
   const api = {
     start() {
-      if (timer || closed)
+      if (started || closed)
         return;
-      unsubscribe = store()?.subscribe?.(wake);
-      timer = setInterval(wake, 1000);
-      timer.unref?.();
+      started = true;
       wake();
     },
     tick() {
       if (pass)
         return pass;
-      if (closed || running || options.interactiveBusy?.())
+      if (closed)
         return Promise.resolve();
+      if (running || options.interactiveBusy?.()) {
+        recheck();
+        return Promise.resolve();
+      }
+      clearTimeout(timer);
+      timer = undefined;
+      pending = false;
       pass = (async () => {
         const currentStore = store();
-        if (!currentStore)
+        if (!currentStore) {
+          pending = true;
           return;
+        }
         if (options.isActive)
           currentStore.reconcileConnections?.(options.isActive);
         for (const q of [...currentStore.list({ includeResults: false }).questions].reverse()) {
-          if (closed || running || options.interactiveBusy?.())
-            break;
-          if (!autoAnswerable(q))
+          if (!pendingAnswer(q))
             continue;
+          if (closed || running || options.interactiveBusy?.()) {
+            pending = true;
+            break;
+          }
+          if (!readyAnswer(q)) {
+            pending = true;
+            continue;
+          }
           autoAnswering = true;
           const result = await answerFor({ question: q.question, selectors: q.selectors, detail: q.detail, signal: abort.signal }, true).finally(() => {
             autoAnswering = false;
           });
-          if (!current(q))
+          if (!current(q)) {
+            pending = true;
             continue;
+          }
           let check = result.status === "answered" ? await eligible(result.read) : undefined;
           if (result.status === "answered" && (result.secretLocations?.length ?? 0) > 0 && options.eligibleSecrets?.({ question: q.question, selectors: q.selectors }, result.secretLocations) !== true)
             check = "ineligible";
           if (result.status === "answered" && check === "eligible" || result.status === "not_found") {
-            if (!current(q))
+            if (!current(q)) {
+              pending = true;
               continue;
+            }
             const saved = result.status === "answered" ? { status: "answered", answer: result.answer, citations: result.citations.map((c) => ({ ...c.title ? { title: c.title } : {}, ...c.source ? { source: c.source } : {}, ...c.date ? { date: c.date } : {}, ...c.url ? { url: c.url } : {}, ...c.localPath ? { localPath: c.localPath } : {} })), ...result.sentItems ? { sentItems: result.sentItems } : {}, unanswered: result.unanswered, leftOut: storedLeftOut(result), read: result.read.map(inboxEvidenceIdentity), secretLocations: result.secretLocations ?? [] } : { status: "not_found", citations: [], unanswered: result.unanswered ?? [], leftOut: storedLeftOut(result), read: [] };
-            if (!currentStore.saveAnswer?.(refOf(q), saved))
-              currentStore.retry?.(refOf(q), "save_refused");
-          } else
+            if (currentStore.saveAnswer?.(refOf(q), saved))
+              continue;
+            currentStore.retry?.(refOf(q), "save_refused");
+          } else {
             currentStore.retry?.(refOf(q), check === "unknown" ? "eligibility_unavailable" : check === "ineligible" || result.status === "changed" ? "evidence_changed" : result.status === "no_model" || result.status === "model_downloading" ? result.status : "answer_failed");
+          }
+          pending = true;
         }
       })().catch(() => {
-        return;
+        pending = true;
       }).finally(() => {
         pass = undefined;
+        recheck();
       });
       return pass;
     },
@@ -191392,7 +191431,7 @@ function createLocalPrivateAnswers(options) {
         return true;
       try {
         const questions = store()?.list({ includeResults: false }).questions ?? [];
-        return questions.some(autoAnswerable);
+        return questions.some((q) => pendingAnswer(q) && readyAnswer(q));
       } catch {
         return false;
       }
@@ -191400,8 +191439,7 @@ function createLocalPrivateAnswers(options) {
     close() {
       closed = true;
       abort.abort();
-      if (timer)
-        clearInterval(timer);
+      clearTimeout(timer);
       unsubscribe?.();
       opens.clear();
     },
@@ -246515,23 +246553,46 @@ var init_client5 = __esm(() => {
 });
 
 // src/workers/engine-split/snapshot.ts
-import { readFileSync as readFileSync111 } from "node:fs";
-import { readFile as readFile17 } from "node:fs/promises";
+import { randomUUID as randomUUID42 } from "node:crypto";
+import { closeSync as closeSync37, fstatSync as fstatSync10, openSync as openSync36, readFileSync as readFileSync111, renameSync as renameSync27, rmSync as rmSync49, writeFileSync as writeFileSync29 } from "node:fs";
+import { open as open8 } from "node:fs/promises";
 function writeEngineStatusSnapshot(path, snapshot) {
-  writePrivateFileAtomicSync(path, `${JSON.stringify(snapshot)}
-`);
+  const partial = `${path}.${randomUUID42()}.tmp`;
+  try {
+    writeFileSync29(partial, `${JSON.stringify(snapshot)}
+`, { flag: "wx", mode: 384 });
+    renameSync27(partial, path);
+  } catch (error) {
+    rmSync49(partial, { force: true });
+    throw error;
+  }
 }
 function readEngineStatusSnapshot(path, now = () => Date.now()) {
   try {
-    const snapshot = parseSnapshot(readFileSync111(path, "utf8"));
-    return snapshot && engineStatusAge(snapshot, now());
+    const fd = openSync36(path, "r");
+    try {
+      const snapshot = parseSnapshot(readFileSync111(fd, "utf8"));
+      if (snapshot?.heartbeat === "mtime")
+        snapshot.written_at = fstatSync10(fd).mtime.toISOString();
+      return snapshot && engineStatusAge(snapshot, now());
+    } finally {
+      closeSync37(fd);
+    }
   } catch {
     return;
   }
 }
 async function readEngineStatusSnapshotAsync(path) {
   try {
-    return parseSnapshot(await readFile17(path, "utf8"));
+    const file = await open8(path, "r");
+    try {
+      const snapshot = parseSnapshot(await file.readFile("utf8"));
+      if (snapshot?.heartbeat === "mtime")
+        snapshot.written_at = (await file.stat()).mtime.toISOString();
+      return snapshot;
+    } finally {
+      await file.close();
+    }
   } catch {
     return;
   }
@@ -246593,9 +246654,7 @@ function startEngineStatusPublisher(options) {
   return { publish, stop: () => clearTimer(timer) };
 }
 var ENGINE_STATUS_SNAPSHOT_SCHEMA = "olympus.engine.background-status.v1", ENGINE_STATUS_PUBLISH_INTERVAL_MS = 3000, ENGINE_STATUS_STALE_MS = 30000;
-var init_snapshot = __esm(() => {
-  init_atomic_file();
-});
+var init_snapshot = () => {};
 
 // src/workers/engine-split/control-plane.ts
 import { existsSync as existsSync122 } from "node:fs";
@@ -246783,8 +246842,8 @@ var init_control_plane = __esm(() => {
 
 // src/workers/engine-split/runtime.ts
 import { AsyncLocalStorage as AsyncLocalStorage16 } from "node:async_hooks";
-import { randomUUID as randomUUID42 } from "node:crypto";
-import { lstatSync as lstatSync56, rmSync as rmSync49 } from "node:fs";
+import { randomUUID as randomUUID43 } from "node:crypto";
+import { lstatSync as lstatSync56, rmSync as rmSync50 } from "node:fs";
 function engineBackgroundSocketFromEnv(env) {
   const path = env[ENGINE_BACKGROUND_SOCKET_ENV]?.trim();
   if (!path)
@@ -246795,7 +246854,7 @@ function engineStatusSnapshotPath(env) {
   return sharedDataPath("engine-status", env);
 }
 function startEngineBackgroundServer(input) {
-  const instanceId = input.instanceId ?? randomUUID42();
+  const instanceId = input.instanceId ?? randomUUID43();
   prepareEngineBackgroundSocketDirectory(input.socketPath);
   let present = false;
   try {
@@ -246901,7 +246960,7 @@ function listenWhileStarting(input) {
       stop: () => {
         server.stop(true);
         if (socketPath)
-          rmSync49(socketPath, { force: true });
+          rmSync50(socketPath, { force: true });
       }
     };
   } catch (error) {
@@ -247814,7 +247873,7 @@ var init_remote_access_control = __esm(() => {
 });
 
 // src/core/source-account-migration.ts
-import { linkSync as linkSync6, lstatSync as lstatSync57, mkdirSync as mkdirSync75, readdirSync as readdirSync37, realpathSync as realpathSync32, renameSync as renameSync27, rmdirSync as rmdirSync8, statSync as statSync52, unlinkSync as unlinkSync7 } from "node:fs";
+import { linkSync as linkSync6, lstatSync as lstatSync57, mkdirSync as mkdirSync75, readdirSync as readdirSync37, realpathSync as realpathSync32, renameSync as renameSync28, rmdirSync as rmdirSync8, statSync as statSync52, unlinkSync as unlinkSync7 } from "node:fs";
 import { basename as basename25, dirname as dirname119, isAbsolute as isAbsolute42, join as join154, relative as relative20, resolve as resolve33, sep as sep26 } from "node:path";
 function accountFolderMigrationEnabled(env = process.env) {
   const value = env[MIGRATE_ACCOUNT_FOLDERS_ENV]?.trim().toLowerCase() ?? "";
@@ -247913,7 +247972,7 @@ function absPath(ctx, rel) {
 }
 function moveWithoutReplacing(from, to, kind) {
   if (kind === "dir") {
-    renameSync27(from, to);
+    renameSync28(from, to);
     syncFolder(dirname119(to));
     syncFolder(dirname119(from));
     return;
@@ -273492,7 +273551,7 @@ __export(exports_server, {
 import { SQLiteError as SQLiteError3 } from "bun:sqlite";
 import { release as release2, totalmem as totalmem8 } from "node:os";
 import { execFile as execFile6 } from "node:child_process";
-import { appendFileSync, existsSync as existsSync128, readFileSync as readFileSync114, writeFileSync as writeFileSync29 } from "node:fs";
+import { appendFileSync, existsSync as existsSync128, readFileSync as readFileSync114, writeFileSync as writeFileSync30 } from "node:fs";
 import { appendFile as appendFile2, writeFile as writeFile7 } from "node:fs/promises";
 import { fileURLToPath as fileURLToPath15 } from "node:url";
 import { dirname as dirname122, join as join155 } from "node:path";
@@ -273570,7 +273629,7 @@ async function main() {
         if (queue)
           queue(() => writeFile7(path, record));
         else
-          writeFileSync29(path, record);
+          writeFileSync30(path, record);
       } catch {}
     };
     setInterval(writeSqlSites, 1e4).unref?.();
@@ -278687,23 +278746,29 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         for (const store of connectorStores) {
           if (standBack.holds("status"))
             break;
+          changeMemoryActivity("embedding_repair", 1);
           try {
             const set = await store.repairEmbeddingInputHashes();
             if (set)
               console.warn(`[olympus] ${store.corpusId}: set the embedding input hash on ${set} chunks that had none.`);
           } catch (error) {
             console.warn(`[olympus] ${store.corpusId}: embedding input hash repair failed (${error instanceof Error ? error.message : String(error)}); tried again next pass.`);
+          } finally {
+            changeMemoryActivity("embedding_repair", -1);
           }
         }
         for (const ledger of new Set(tierLanes.map((lane) => lane.ledger))) {
           if (standBack.holds("status"))
             break;
+          changeMemoryActivity("embedding_settlement", 1);
           try {
             const settled = await settleStaleEmbedHolds(ledger);
             if (settled)
               console.warn(`[olympus] tier ledger: released ${settled} decided copies an older build left held.`);
           } catch (error) {
             console.warn(`[olympus] tier ledger: settling held copies failed (${error instanceof Error ? error.message : String(error)}); tried again next pass.`);
+          } finally {
+            changeMemoryActivity("embedding_settlement", -1);
           }
         }
         for (const request of [PLAIN_STATUS_REQUEST, DASHBOARD_STATUS_REQUEST]) {
@@ -279516,7 +279581,7 @@ init_messaging_capture();
 init_config2();
 import { randomBytes as randomBytes43 } from "node:crypto";
 import { spawnSync as spawnSync23 } from "node:child_process";
-import { existsSync as existsSync129, readFileSync as readFileSync115, openSync as openSync36, closeSync as closeSync37, writeSync as writeSync10 } from "node:fs";
+import { existsSync as existsSync129, readFileSync as readFileSync115, openSync as openSync37, closeSync as closeSync38, writeSync as writeSync10 } from "node:fs";
 import { createInterface as createInterface3 } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { resolve as resolve34 } from "node:path";
@@ -284705,7 +284770,7 @@ function formatMessagingPairingResult(source, result) {
 async function runMessagingPairing(source, secretStore, registryPath) {
   let terminal;
   try {
-    terminal = openSync36("/dev/tty", "r+");
+    terminal = openSync37("/dev/tty", "r+");
   } catch {
     throw new OperationError("invalid_params", "Run this pairing command in your own terminal on the Olympus host. Login codes and passwords must never be entered in chat.");
   }
@@ -284732,7 +284797,7 @@ async function runMessagingPairing(source, secretStore, registryPath) {
     const activation = restartCaptureWorker();
     return { ...paired, captureStarted: false, captureActivation: activation.ok ? "requested" : "needs_attention", next: activation.ok ? "Open this source in the Olympus dashboard to monitor capture and initial indexing." : `Pairing is saved. Capture starts once the worker restarts: ${activation.next}` };
   } finally {
-    closeSync37(terminal);
+    closeSync38(terminal);
   }
 }
 function parseConnectOptions(args) {
