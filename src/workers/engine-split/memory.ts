@@ -94,6 +94,7 @@ export function createMemoryDiagnostic(input: {
   uptime?: () => number;
   heap?: () => Pick<NodeJS.MemoryUsage, 'heapUsed' | 'heapTotal' | 'external' | 'arrayBuffers'>;
   sampleHolders?: () => MemoryAttribution;
+  workerPayloads?: () => BigInt64Array | undefined;
   log?: (line: string) => void;
 }) {
   const now = input.now ?? Date.now;
@@ -106,7 +107,7 @@ export function createMemoryDiagnostic(input: {
       heap_size_mb: usage.heapUsed, heap_capacity_mb: usage.heapTotal, extra_memory_mb: usage.external,
       ...(input.readers?.() ?? { read_workers: 0, read_connections: 0 }),
       ...(usage.arrayBuffers > 0 ? { array_buffers_mb: usage.arrayBuffers } : {}),
-      ...memoryPayloadCounts(), ...input.sampleHolders?.(),
+      ...memoryPayloadCounts(input.workerPayloads?.()), ...input.sampleHolders?.(),
     };
   };
   let lastLineAt = now();

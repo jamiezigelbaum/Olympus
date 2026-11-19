@@ -1,6 +1,6 @@
 // Native llama.cpp decision transport. The full adapter remains the fallback.
 // Endpoint state serializes every probe, prime and decision across clients.
-import { addMemoryPayloadText, noteMemoryPayloadResponse } from '../../core/memory-counters.ts';
+import { addMemoryPayloadText, noteMemoryPayloadResponse, withMemoryPayload } from '../../core/memory-counters.ts';
 import type { AnalystModel, AnalystModelCompletion, AnalystModelRequest } from '../../core/analyst.ts';
 import { fetchModelEndpoint } from '../../core/model-transport.ts';
 import { assertSnifferProfileAllowed, initialSnifferMode, snifferLaneOffersDecision, snifferLaneUsesUnion, type SnifferLane } from './sniffer-lane.ts';
@@ -120,7 +120,7 @@ export function createDecisionSnifferModel(lane: SnifferLane, full: AnalystModel
   const sharedState = state;
   let signal: AbortSignal | undefined;
   let onAlive: (() => void) | undefined;
-  const post: DecisionPost = async <T>(path: string, body: unknown): Promise<T> => {
+  const post: DecisionPost = <T>(path: string, body: unknown): Promise<T> => withMemoryPayload('judge', async () => {
     // Idle, not total: any answer from the server (even an error status) is
     // proof it is up and working on the call.
     const idleMs = options.timeoutMs ?? DECISION_CALL_IDLE_MS;
@@ -156,7 +156,7 @@ export function createDecisionSnifferModel(lane: SnifferLane, full: AnalystModel
     } finally {
       clearInterval(probe);
     }
-  };
+  });
   // A server that answers `/props` settles the weights for good; a timeout or
   // error is retried a minute later, so one slow start never pins the default bar.
   const readWeights = async (): Promise<void> => {

@@ -1,4 +1,4 @@
-import { addMemoryPayloadText, changeMemoryActivity, changeMemoryCounter, withMemoryPayload } from '../../core/memory-counters.ts';
+import { changeMemoryActivity, changeMemoryCounter } from '../../core/memory-counters.ts';
 import { trackSqliteStoreMemory, untrackSqliteStoreMemory } from '../engine-split/sqlite-memory.ts';
 import { noteSourceIndexReadProgress } from '../../core/source-index/read-progress.ts';
 import { sizeHeldItemKey } from '../../core/source-size-limits.ts';
@@ -13987,15 +13987,6 @@ export class LocalConnectorStore {
           ? { image: { path: row.media_path, sha256: row.media_sha256, mimeType: 'image/jpeg' } }
           : {}),
       }));
-      const embedPayload = <T>(run: (inputs: ReturnType<typeof inputsFor>) => Promise<T>) =>
-        withMemoryPayload('embed', () => {
-          const inputs = inputsFor(batch);
-          for (const input of inputs) {
-            addMemoryPayloadText(input.text);
-            if (input.title) addMemoryPayloadText(input.title);
-          }
-          return run(inputs);
-        });
       let vectors: number[][];
       const embedStarted = Date.now();
       // Pictures not yet judged are judged from the same model call: the
@@ -14005,7 +13996,7 @@ export class LocalConnectorStore {
       let judgedBatch: Map<number, MediaJudgment> | undefined;
       try {
         if (judgeNow) {
-          const returned = await embedPayload(inputs => judging!.embedWithImageVectors!(inputs));
+          const returned = await judging!.embedWithImageVectors!(inputsFor(batch));
           vectors = returned.vectors;
           judgedBatch = new Map();
           // Only pictures that need judging now: a settled verdict, or an
@@ -14026,7 +14017,7 @@ export class LocalConnectorStore {
             }
           }
         } else {
-          vectors = await embedPayload(inputs => provider.embed(inputs, { taskType: 'RETRIEVAL_DOCUMENT' }));
+          vectors = await provider.embed(inputsFor(batch), { taskType: 'RETRIEVAL_DOCUMENT' });
         }
       } catch (error) {
         if (!(error instanceof SourceEmbeddingInputsFailedError)) throw error;
@@ -14049,7 +14040,7 @@ export class LocalConnectorStore {
         staleSkipped += recheck.notVisible + recheck.privateTier;
         batch = recheck.kept;
         if (batch.length === 0) continue;
-        vectors = await embedPayload(inputs => provider.embed(inputs, { taskType: 'RETRIEVAL_DOCUMENT' }));
+        vectors = await provider.embed(inputsFor(batch), { taskType: 'RETRIEVAL_DOCUMENT' });
       }
       const onDemandItems = this.db.query(`SELECT COUNT(*) AS n FROM items i JOIN on_demand_item_reads r ON r.local_item_id = i.local_item_id
         AND r.source_version = COALESCE(i.source_version, '') WHERE i.item_pk IN (SELECT value FROM json_each(?))`)

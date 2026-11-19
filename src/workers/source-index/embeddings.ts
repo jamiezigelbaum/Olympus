@@ -1,4 +1,4 @@
-import { addMemoryPayloadText, noteMemoryPayloadResponse } from '../../core/memory-counters.ts';
+import { addMemoryPayloadText, noteMemoryPayloadResponse, withMemoryPayload } from '../../core/memory-counters.ts';
 import { Buffer } from 'node:buffer';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
@@ -516,6 +516,10 @@ export class GeminiSourceEmbeddingProvider implements SourceEmbeddingProvider {
 
   async embed(inputs: SourceEmbeddingInput[], options: { taskType: SourceEmbeddingTaskType }): Promise<number[][]> {
     if (inputs.length === 0) return [];
+    return withMemoryPayload('embed', () => this.embedBatch(inputs, options));
+  }
+
+  private async embedBatch(inputs: SourceEmbeddingInput[], options: { taskType: SourceEmbeddingTaskType }): Promise<number[][]> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     const budget = { deadlineAtMs: Date.now() + this.timeoutMs, budgetMs: this.timeoutMs };
@@ -708,6 +712,10 @@ export class OpenAICompatibleSourceEmbeddingProvider implements SourceEmbeddingP
 
   async embed(inputs: SourceEmbeddingInput[], options: { taskType: SourceEmbeddingTaskType }): Promise<number[][]> {
     if (inputs.length === 0) return [];
+    return withMemoryPayload('embed', () => this.embedBatch(inputs, options));
+  }
+
+  private async embedBatch(inputs: SourceEmbeddingInput[], options: { taskType: SourceEmbeddingTaskType }): Promise<number[][]> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     const budget = { deadlineAtMs: Date.now() + this.timeoutMs, budgetMs: this.timeoutMs };

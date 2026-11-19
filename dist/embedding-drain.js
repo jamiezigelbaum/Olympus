@@ -2943,6 +2943,98 @@ import { Worker as Worker2 } from "node:worker_threads";
 import { existsSync as existsSync5 } from "node:fs";
 import { dirname as dirname8, join as join9 } from "node:path";
 import { fileURLToPath } from "node:url";
+
+// src/core/memory-counters.ts
+import { AsyncLocalStorage } from "node:async_hooks";
+var counts = {
+  connector_stores: 0,
+  tier_visibility_items: 0,
+  hidden_child_items: 0,
+  embedding_queue: 0,
+  people: 0,
+  identities: 0,
+  tasks_embed: 0,
+  tasks_sync: 0,
+  tasks_extract: 0,
+  tasks_watch: 0
+};
+function changeMemoryCounter(key, delta) {
+  counts[key] += delta;
+}
+var payloads = {
+  judge: { count: 0, bytes: 0 },
+  embed: { count: 0, bytes: 0 },
+  extract: { count: 0, bytes: 0 }
+};
+var payloadScope = new AsyncLocalStorage;
+var payloadSlots = { judge: 0, embed: 2, extract: 4 };
+var workerPayloads;
+function createMemoryPayloadBuffer() {
+  return new SharedArrayBuffer(Object.keys(payloadSlots).length * 2 * BigInt64Array.BYTES_PER_ELEMENT);
+}
+async function withMemoryPayload(kind, run) {
+  const owner = payloadScope.getStore();
+  if (owner?.active && owner.kind === kind)
+    return run();
+  const counter = payloads[kind];
+  const shared = workerPayloads;
+  const slot = payloadSlots[kind];
+  let bytes = 0;
+  const scope = {
+    kind,
+    active: true,
+    add(delta) {
+      if (!scope.active)
+        return;
+      bytes += delta;
+      counter.bytes += delta;
+      if (shared)
+        Atomics.add(shared, slot + 1, BigInt(delta));
+    }
+  };
+  counter.count++;
+  if (shared)
+    Atomics.add(shared, slot, 1n);
+  try {
+    return await payloadScope.run(scope, run);
+  } finally {
+    scope.active = false;
+    counter.count--;
+    counter.bytes -= bytes;
+    if (shared) {
+      Atomics.sub(shared, slot + 1, BigInt(bytes));
+      Atomics.sub(shared, slot, 1n);
+    }
+  }
+}
+function addMemoryPayloadBytes(bytes) {
+  payloadScope.getStore()?.add(bytes);
+}
+function addMemoryPayloadText(text) {
+  const add = payloadScope.getStore()?.add;
+  if (add)
+    add(Buffer.byteLength(text));
+}
+function memoryPayloadJson(value) {
+  const json = JSON.stringify(value);
+  addMemoryPayloadText(json);
+  return json;
+}
+function noteMemoryPayloadResponse(response) {
+  const bytes = Number(response.headers?.get?.("content-length"));
+  if (Number.isSafeInteger(bytes) && bytes > 0)
+    addMemoryPayloadBytes(bytes);
+}
+var scopedActivity = {
+  visibility_rebuild_bootstrap: 0,
+  visibility_rebuild_incremental: 0,
+  people_refresh: 0
+};
+function changeMemoryActivity(label, delta) {
+  scopedActivity[label] += delta;
+}
+
+// src/workers/source-index/built-in-reasoning/off-thread.ts
 var shared;
 var nextHandle = 1;
 function modelThreadHandleId() {
@@ -2951,13 +3043,14 @@ function modelThreadHandleId() {
 
 class ModelThread {
   worker;
+  payloads = new BigInt64Array(createMemoryPayloadBuffer());
   memory;
   nextId = 1;
   pending = new Map;
   pids = new Map;
   constructor(path = modelWorkerPath()) {
     const shutdown = new Int32Array(new SharedArrayBuffer(4));
-    this.worker = new Worker2(path, { workerData: { shutdown } });
+    this.worker = new Worker2(path, { workerData: { shutdown, payloads: this.payloads.buffer } });
     const onExit = () => {
       this.worker.postMessage({ shutdown: true });
       Atomics.wait(shutdown, 0, 0, 15000);
@@ -6438,74 +6531,6 @@ function unquoteEnvValue(value) {
     return trimmed.slice(1, -1);
   }
   return trimmed;
-}
-
-// src/core/memory-counters.ts
-import { AsyncLocalStorage } from "node:async_hooks";
-var counts = {
-  connector_stores: 0,
-  tier_visibility_items: 0,
-  hidden_child_items: 0,
-  embedding_queue: 0,
-  people: 0,
-  identities: 0,
-  tasks_embed: 0,
-  tasks_sync: 0,
-  tasks_extract: 0,
-  tasks_watch: 0
-};
-function changeMemoryCounter(key, delta) {
-  counts[key] += delta;
-}
-var payloads = {
-  judge: { count: 0, bytes: 0 },
-  embed: { count: 0, bytes: 0 },
-  extract: { count: 0, bytes: 0 }
-};
-var payloadScope = new AsyncLocalStorage;
-async function withMemoryPayload(kind, run) {
-  const counter = payloads[kind];
-  let bytes = 0;
-  let active = true;
-  counter.count++;
-  try {
-    return await payloadScope.run((delta) => {
-      if (!active)
-        return;
-      bytes += delta;
-      counter.bytes += delta;
-    }, run);
-  } finally {
-    active = false;
-    counter.count--;
-    counter.bytes -= bytes;
-  }
-}
-function addMemoryPayloadBytes(bytes) {
-  payloadScope.getStore()?.(bytes);
-}
-function addMemoryPayloadText(text) {
-  const add = payloadScope.getStore();
-  if (add)
-    add(Buffer.byteLength(text));
-}
-function memoryPayloadJson(value) {
-  const json = JSON.stringify(value);
-  addMemoryPayloadText(json);
-  return json;
-}
-function noteMemoryPayloadResponse(response) {
-  const bytes = Number(response.headers?.get?.("content-length"));
-  if (Number.isSafeInteger(bytes) && bytes > 0)
-    addMemoryPayloadBytes(bytes);
-}
-var scopedActivity = {
-  visibility_rebuild_bootstrap: 0,
-  visibility_rebuild_incremental: 0,
-  people_refresh: 0
-};
-function changeMemoryActivity(label, delta) {
-  scopedActivity[label] += delta;
 }
 
 // src/core/model-stream.ts
@@ -16846,6 +16871,9 @@ class GeminiSourceEmbeddingProvider {
   async embed(inputs, options) {
     if (inputs.length === 0)
       return [];
+    return withMemoryPayload("embed", () => this.embedBatch(inputs, options));
+  }
+  async embedBatch(inputs, options) {
     const controller = new AbortController;
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     const budget = { deadlineAtMs: Date.now() + this.timeoutMs, budgetMs: this.timeoutMs };
@@ -17031,6 +17059,9 @@ class OpenAICompatibleSourceEmbeddingProvider {
   async embed(inputs, options) {
     if (inputs.length === 0)
       return [];
+    return withMemoryPayload("embed", () => this.embedBatch(inputs, options));
+  }
+  async embedBatch(inputs, options) {
     const controller = new AbortController;
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     const budget = { deadlineAtMs: Date.now() + this.timeoutMs, budgetMs: this.timeoutMs };
@@ -19294,7 +19325,7 @@ self.onmessage = (event) => {
     const { heapUsed, external, arrayBuffers } = process.memoryUsage();
     let cacheBytes = 0;
     let measured = 0;
-    for (const [db, cached] of openDatabases) {
+    if (event.data.sampleSqlite) for (const [db, cached] of openDatabases) {
       let bytes = cached;
       if (bytes === undefined) {
         try {
@@ -22402,7 +22433,7 @@ class HelperProcess {
     if (this.exited)
       return Promise.reject(new Error("The built-in search model is not running."));
     const id = this.nextId++;
-    return new Promise((resolve, reject) => {
+    return withMemoryPayload("embed", () => new Promise((resolve, reject) => {
       const pictures = items.filter((item) => typeof item !== "string" && item.image).length;
       this.pending.set(id, {
         resolve,
@@ -22416,9 +22447,9 @@ class HelperProcess {
         cpuMs: helperCpuMs(this.child.pid)
       });
       const request = items.every((item) => typeof item === "string") ? { id, texts: items } : { id, items: items.map((item) => typeof item === "string" ? { text: item } : item) };
-      this.child.stdin.write(`${JSON.stringify(request)}
+      this.child.stdin.write(`${memoryPayloadJson(request)}
 `);
-    });
+    }));
   }
   settle(message) {
     const pending = message.id === undefined ? undefined : this.pending.get(message.id);
@@ -22661,7 +22692,7 @@ class RemoteLiteRtEmbedder {
           this.device = handshake.device;
           this.verified = true;
         }
-        const response = await this.request("/v1/embed", items);
+        const response = await withMemoryPayload("embed", () => this.request("/v1/embed", items));
         const identity = this.options.identity;
         if (typeof response.vectors !== "string" || Object.entries(identity).some(([field, value]) => response[field] !== value)) {
           throw new Error("Remote embedding identity mismatch.");
@@ -23267,10 +23298,15 @@ class BuiltInSourceEmbeddingProvider {
     }
     if (model.kind === "litert")
       return this.embedLiteRt(model.embedder, inputs, taskType);
+    return withMemoryPayload("embed", () => this.embedOnnx(model, inputs, taskType));
+  }
+  async embedOnnx(model, inputs, taskType) {
     const windowTokens = this.spec.maxTokens - 2;
     const windows = [];
     inputs.forEach((input, index) => {
-      const ids = model.tokenizer.tokenize(promptText(this.spec, input, taskType));
+      const text = promptText(this.spec, input, taskType);
+      addMemoryPayloadText(text);
+      const ids = model.tokenizer.tokenize(text);
       const maxWindows = taskType === "RETRIEVAL_QUERY" ? 1 : MAX_WINDOWS_PER_DOCUMENT;
       const count = Math.max(1, Math.min(maxWindows, Math.ceil(ids.length / windowTokens)));
       for (let window = 0;window < count; window += 1) {
@@ -32088,22 +32124,13 @@ ${parentKey(ref)}`, { ref, origin });
         text: buildConnectorStoreEmbeddingText(row),
         ...row.media_path && row.media_sha256 ? { image: { path: row.media_path, sha256: row.media_sha256, mimeType: "image/jpeg" } } : {}
       }));
-      const embedPayload = (run) => withMemoryPayload("embed", () => {
-        const inputs = inputsFor(batch);
-        for (const input of inputs) {
-          addMemoryPayloadText(input.text);
-          if (input.title)
-            addMemoryPayloadText(input.title);
-        }
-        return run(inputs);
-      });
       let vectors;
       const embedStarted = Date.now();
       const judgeNow = readsImages === true && judging !== undefined && judging.embedWithImageVectors !== undefined && batch.some((row) => row.media_sha256 && !this.mediaJudgmentSettled(row.media_sha256, mediaJudgeId(judging)));
       let judgedBatch;
       try {
         if (judgeNow) {
-          const returned = await embedPayload((inputs) => judging.embedWithImageVectors(inputs));
+          const returned = await judging.embedWithImageVectors(inputsFor(batch));
           vectors = returned.vectors;
           judgedBatch = new Map;
           const currentJudge = mediaJudgeId(judging);
@@ -32117,7 +32144,7 @@ ${parentKey(ref)}`, { ref, origin });
             } catch {}
           }
         } else {
-          vectors = await embedPayload((inputs) => provider.embed(inputs, { taskType: "RETRIEVAL_DOCUMENT" }));
+          vectors = await provider.embed(inputsFor(batch), { taskType: "RETRIEVAL_DOCUMENT" });
         }
       } catch (error) {
         if (!(error instanceof SourceEmbeddingInputsFailedError))
@@ -32144,7 +32171,7 @@ ${parentKey(ref)}`, { ref, origin });
         batch = recheck.kept;
         if (batch.length === 0)
           continue;
-        vectors = await embedPayload((inputs) => provider.embed(inputs, { taskType: "RETRIEVAL_DOCUMENT" }));
+        vectors = await provider.embed(inputsFor(batch), { taskType: "RETRIEVAL_DOCUMENT" });
       }
       const onDemandItems = this.db.query(`SELECT COUNT(*) AS n FROM items i JOIN on_demand_item_reads r ON r.local_item_id = i.local_item_id
         AND r.source_version = COALESCE(i.source_version, '') WHERE i.item_pk IN (SELECT value FROM json_each(?))`).get(JSON.stringify([...new Set(batch.map((row) => row.item_pk))]));
