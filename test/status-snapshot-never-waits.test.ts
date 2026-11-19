@@ -369,6 +369,29 @@ describe("the background's paced status recount", () => {
     } finally { recount.stop(); }
   });
 
+  test('time parked during a recount contributes neither to work time nor to the next rest', async () => {
+    const clock = createTestClock();
+    const starts: number[] = [];
+    const recount = startPacedStatusRecount({
+      holds: () => false,
+      pause: () => clock.sleep(60_000),
+      recount: async (checkpoint) => {
+        starts.push(clock.now());
+        await clock.sleep(2_000);
+        await checkpoint();
+        await clock.sleep(2_000);
+      },
+      now: clock.now,
+      sleep: clock.sleep,
+    });
+    try {
+      await clock.advance(64_000);
+      expect(recount.health()).toMatchObject({ runs: 1, last_ms: 4_000, age_ms: 0 });
+      await clock.advance(STATUS_RECOUNT_MIN_GAP_MS);
+      expect(starts).toHaveLength(2);
+    } finally { recount.stop(); }
+  });
+
   test('a change counts again without the idle floor, but never sooner than the pace allows', async () => {
     const clock = createTestClock();
     let took = 1_000;

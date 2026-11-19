@@ -1,5 +1,4 @@
 import type { SovereigntyTrustDomainPolicy } from '../../core/sovereignty.ts';
-import type { BackgroundWalkPause } from '../engine/stand-back.ts';
 import { offThreadReadsSupported, readInBackground } from '../connector-store/off-thread-reads.ts';
 import { buildSourceIndexCorpusRegistry, type SourceIndexCorpusDefinition } from '../../core/source-index/corpus.ts';
 import { embeddingModelEstimate, estimatedEmbeddingCostUsd } from '../../core/embedding-cost-estimates.ts';
@@ -324,7 +323,7 @@ export interface SourceIndexStatusHandler {
    * a snapshot caller with this request gets, and keep it for the front. The
    * background's paced recount opts into unchanged-count reuse.
    */
-  refreshSnapshot?(request: SourceIndexStatusRequest, snapshot: { countsMaxAgeMs: number; reuseCounts?: boolean }, pause?: BackgroundWalkPause): Promise<SourceIndexStatusResult>;
+  refreshSnapshot?(request: SourceIndexStatusRequest, snapshot: { countsMaxAgeMs: number; reuseCounts?: boolean }): Promise<SourceIndexStatusResult>;
 }
 
 export interface SourceIndexStatusHandlerOptions {
@@ -515,10 +514,11 @@ export function createSourceIndexStatusHandler(
     if (!refresh) {
       refresh = countTurn.then(async () => {
         // A change while preparing the projection or counting stays due.
+        const atMs = nowMs();
         const countSignal = unchangedMarker(store);
         await store.prepareStatusCounts?.(scope);
         const status = await (store.statusOffThread?.(scope, { countsMaxAgeMs }) ?? store.status(scope, { countsMaxAgeMs }));
-        const count = { atMs: nowMs(), signal: countSignal, status, store };
+        const count = { atMs, signal: countSignal, status, store };
         storeStatusCache.set(key, count);
         return count;
       }).finally(() => storeStatusRefreshing.delete(key));
@@ -723,7 +723,7 @@ export function createSourceIndexStatusHandler(
     return Promise.resolve({ ...last.result, snapshot_age_ms: snapshotAge(last) });
   };
 
-  const computeStatus = async (request: SourceIndexStatusRequest, snapshot: { countsMaxAgeMs?: number }, force = false, pause?: BackgroundWalkPause): Promise<KeptStatus> => {
+  const computeStatus = async (request: SourceIndexStatusRequest, snapshot: { countsMaxAgeMs?: number }, force = false): Promise<KeptStatus> => {
       assertSupportedStatusRequest(request);
       const requestedCorpusId = request.corpus_id
         ? canonicalSourceCorpusId(request.corpus_id)
@@ -831,7 +831,6 @@ export function createSourceIndexStatusHandler(
       const countedAt: Record<string, number> = {};
       for (const declaredCorpus of corpora) {
         await ingestionTurn();
-        await pause?.();
         const corpusStartedMs = nowMs();
         const phaseMs = { counts: 0, estimates: 0 };
         const store = storesByCorpusId.get(declaredCorpus.corpusId);
@@ -927,14 +926,14 @@ export function createSourceIndexStatusHandler(
       }
     },
     ...(role === 'writer' ? {
-      refreshSnapshot(request: SourceIndexStatusRequest, snapshot: { countsMaxAgeMs: number; reuseCounts?: boolean }, pause?: BackgroundWalkPause) {
+      refreshSnapshot(request: SourceIndexStatusRequest, snapshot: { countsMaxAgeMs: number; reuseCounts?: boolean }) {
         assertSupportedStatusRequest(request);
         const key = snapshotKey(request, snapshot.countsMaxAgeMs);
         const forced = forcedSnapshotRefreshes.get(key);
         if (forced) return forced;
-        if (snapshot.reuseCounts === true) return refreshKept(key, () => computeStatus(request, snapshot, false, pause));
+        if (snapshot.reuseCounts === true) return refreshKept(key, () => computeStatus(request, snapshot));
         const pending = Promise.allSettled([snapshotRefreshes.get(key)])
-          .then(() => refreshKept(key, () => computeStatus(request, snapshot, true, pause)))
+          .then(() => refreshKept(key, () => computeStatus(request, snapshot, true)))
           .finally(() => forcedSnapshotRefreshes.delete(key));
         forcedSnapshotRefreshes.set(key, pending);
         return pending;

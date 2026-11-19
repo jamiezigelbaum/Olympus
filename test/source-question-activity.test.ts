@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
+import { defaultConfig } from '../src/core/config.ts';
+import type { OperationContext } from '../src/core/operations.ts';
+import { callChatGptTool } from '../src/workers/chatgpt/mcp-surface.ts';
+import { createStandBack, STAND_BACK_MAX_MS } from '../src/workers/engine/stand-back.ts';
 import { buildSourceIndexCorpusRegistry, defineSourceIndexCorpus } from '../src/core/source-index/corpus.ts';
 import { createOwnerQuestionActivity, createSourceAnswerLanes, OWNER_QUESTION_RESOURCE } from '../src/workers/engine/runtime/source-answer-lanes.ts';
 import { OwnerBusyRelay } from '../src/workers/engine-split/client.ts';
@@ -9,7 +13,7 @@ import { startSupersededSweepTicker, SUPERSEDED_SWEEP_TICK_MS, SUPERSEDED_SWEEP_
 import type { TieredStoreSet } from '../src/workers/connector-store/tiered-store-set.ts';
 import { createAnalystSourceIndexAnswerHandler, searchReleasedEvidence } from '../src/workers/source-index/analyst-answer.ts';
 import { createAnalyst } from '../src/core/analyst.ts';
-import { createTestClock } from './helpers/test-clock.ts';
+import { createTestClock, flushMicrotasks } from './helpers/test-clock.ts';
 import { provedReleaseCheck } from './helpers/scripted-search-release.ts';
 
 function deferred() {
@@ -326,8 +330,7 @@ describe('owner questions pause the superseded-copy sweep', () => {
     expect(server).toContain('ownerQuestions.run(() => answerActivity.run(() => analystSourceAnswer.answer(request, local), kind), kind)');
     expect(server).toContain('ownerQuestions.run(() => answerActivity.run(() => local.answer(input)))');
     expect(server.match(/ownerQuestions.run\(\(\) => searchReleasedEvidence\(/g)).toHaveLength(2);
-    expect(server).toMatch(/ownerQuestions\.run\(\(\) => searchPrivateEvidence\([^\n]+\), 'background'\)/);
-    expect(server).toContain('active: () => !engineFront && !ownerQuestions.busy && !remoteOwnerBusy(OWNER_QUESTION_RESOURCE)');
+    expect(server).toContain("holds: () => standBack.holds('prune')");
     // A claimed Private panel answer holds a question lease until it settles.
     // Precompute after a match uses only the separate model activity.
     expect(server).toMatch(/activity: \{\s*begin: \(\) => answerActivity\.begin\(\),\s*beginClaim: \(\) => \{\s*const releaseQuestion = ownerQuestions\.begin\(\);\s*const releaseAnswer = answerActivity\.begin\(\);/);
@@ -352,4 +355,74 @@ describe('owner questions pause the superseded-copy sweep', () => {
       expect(kinds(w.sent)).toEqual(['owner_busy', 'owner_idle']);
     } finally { w.close(); }
   });
+});
+
+for (const tool of ['olympus_search', 'source_answer'] as const) {
+  test(`${tool} stays busy while the owner is waiting for the Private probe`, async () => {
+    const w = world();
+    const checked = deferred();
+    const personalDone = deferred();
+    const late = deferred();
+    const finishPersonal = () => w.questions.run(async () => {
+      w.factory({ question: 'Personal retrieval' });
+      personalDone.resolve();
+      return { status: 'working', job_id: 'saj_fixture', elapsed_ms: 0 };
+    });
+    const config = defaultConfig();
+    config.sourceIndex.enabled = true;
+    const ctx = { config, email: { sourceAnswer: finishPersonal } } as unknown as OperationContext;
+    let detached: Promise<void> | undefined;
+    try {
+      const response = callChatGptTool(tool, { question: 'What do my sources say?' }, ctx, {
+        withOwnerQuestion: w.questions.runVisible,
+        evidenceSearch: async () => { await finishPersonal(); return { evidence: [] }; },
+        dashboardView: async () => ({ sources: [] }) as never,
+        privateMatchProbe: async () => {
+          detached = late.promise.then(() => w.questions.run(async () => { w.factory({ question: 'Detached continuation' }); }));
+          await checked.promise;
+          return 0;
+        },
+      });
+      await personalDone.promise;
+      await flushMicrotasks();
+      expect(w.questions.busy).toBe(true);
+      expect(w.marks.busy(OWNER_QUESTION_RESOURCE)).toBe(true);
+      expect(kinds(w.sent)).toEqual(['owner_busy']);
+      checked.resolve();
+      const result = await response;
+      expect(result.isError).not.toBe(true);
+      if (tool === 'source_answer') expect(result.structuredContent).toMatchObject({ status: 'working' });
+      expect(w.questions.busy).toBe(false);
+      expect(kinds(w.sent)).toEqual(['owner_busy', 'owner_idle']);
+      late.resolve();
+      await detached;
+      expect(kinds(w.sent)).toEqual(['owner_busy', 'owner_idle']);
+    } finally {
+      checked.resolve();
+      late.resolve();
+      w.close();
+    }
+  });
+}
+
+test('the prune ticker gets a slice while the front continues to signal an Ask', async () => {
+  const clock = createTestClock();
+  const standBack = createStandBack({ reason: () => 'question in the front', now: clock.now, log: () => {} });
+  let slices = 0;
+  const stop = startSupersededSweepTicker({
+    now: clock.now,
+    holds: () => standBack.holds('prune'),
+    canReclaim: () => false,
+    sets: () => [{ sweepSupersededSlice: () => { slices++; return true; } } as TieredStoreSet],
+    every: (tick, ms) => {
+      const timer = clock.setInterval(tick, ms);
+      return () => clock.clearInterval(timer);
+    },
+  });
+  try {
+    await clock.advance(SUPERSEDED_SWEEP_TICK_MS + STAND_BACK_MAX_MS - 1);
+    expect(slices).toBe(0);
+    await clock.advance(1);
+    expect(slices).toBe(1);
+  } finally { stop(); }
 });

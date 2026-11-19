@@ -402,6 +402,8 @@ function* sweepPage(set: TieredStoreSet, options: {
  */
 export function startSupersededSweepTicker(options: {
   active?: () => boolean;
+  holds?: () => boolean;
+  canReclaim?: () => boolean;
   pause?: BackgroundWalkPause;
   reclaimStore?: ReclaimStore;
   intervalMs?: number;
@@ -418,6 +420,7 @@ export function startSupersededSweepTicker(options: {
   let stopped = false;
   let slicing = false;
   const finished = new WeakSet<TieredStoreSet>();
+  const pruned = new WeakSet<TieredStoreSet>();
   const reclaiming = new WeakSet<TieredStoreSet>();
   const sets = options.sets ?? registeredTierSets;
   const every = options.every ?? ((tick, ms) => {
@@ -429,8 +432,10 @@ export function startSupersededSweepTicker(options: {
   const tick = () => {
     if (stopped) return;
     const active = !options.active || options.active();
+    const held = active && options.holds?.() === true;
+    const idle = active && (options.canReclaim?.() ?? !held);
     const idleSince = Math.max(started, options.ownerQuestionEndedAt?.() ?? started);
-    const cadence = options.intervalMs ?? (active && now() - idleSince >= SUPERSEDED_SWEEP_IDLE_AFTER_MS
+    const cadence = options.intervalMs ?? (idle && now() - idleSince >= SUPERSEDED_SWEEP_IDLE_AFTER_MS
       ? SUPERSEDED_SWEEP_IDLE_TICK_MS : SUPERSEDED_SWEEP_TICK_MS);
     if (cadence !== interval) {
       cancel();
@@ -441,24 +446,33 @@ export function startSupersededSweepTicker(options: {
       if (cadence === SUPERSEDED_SWEEP_TICK_MS) return;
     }
     // A slice still finding or pruning (it gives turns): the next waits for it.
-    if (!active || slicing) return;
+    if (!active || held || slicing) return;
     const all = sets();
     // One set per callback: several slices must not stack up in front of an
     // Ask queued on the event loop. Round-robin prevents starvation.
     for (let checked = 0; checked < all.length; checked++) {
       const set = all[nextSet++ % all.length]!;
       if (finished.has(set) || reclaiming.has(set)) continue;
+      if (pruned.has(set)) {
+        if (!idle) continue;
+        reclaim(set);
+        return;
+      }
       const complete = set.sweepSupersededSlice(options.pause ? { pause: options.pause } : undefined);
       if (typeof complete === 'boolean') {
-        if (complete) reclaim(set);
+        if (complete) afterPrune(set);
         return;
       }
       slicing = true;
-      void complete.then((done) => { if (done && !stopped) reclaim(set); }, () => {
+      void complete.then((done) => { if (done && !stopped) afterPrune(set); }, () => {
         // The sweep keeps its own cursor; a later tick retries.
       }).finally(() => { slicing = false; });
       return;
     }
+  };
+  const afterPrune = (set: TieredStoreSet) => {
+    pruned.add(set);
+    if (options.canReclaim?.() ?? true) reclaim(set);
   };
   const reclaim = (set: TieredStoreSet) => {
     reclaiming.add(set);

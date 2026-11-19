@@ -49,6 +49,30 @@ import type {
 import { XBookmarksLiveSyncError } from '../src/workers/x-bookmarks/index.ts';
 
 describe('source worker scheduler', () => {
+  test('owner activity leaves live discovery and extraction due while metadata maintenance stands back', async () => {
+    const clock = createTestClock();
+    const ran: string[] = [];
+    let asking = true;
+    const task = (id: string, kind: 'sync' | 'extract', metadataWalkRole?: 'primary' | 'maintenance') => ({
+      id, kind, ...(metadataWalkRole ? { metadataWalkRole } : {}), writer: true as const,
+      async run() { ran.push(id); return { status: 'idle' as const }; },
+    });
+    const scheduler = new SourceScheduler({
+      enabled: true, tickMs: 1_000, errorBackoffMs: 1_000, maxTransientRetries: 1,
+      now: clock.date, holdForAsk: () => asking,
+      sources: [{
+        sourceId: 'fixture.files', corpusId: 'internal.fixture.files', cadence: 'continuous',
+        intervalMs: 60_000, freshnessThresholdHours: 1,
+        tasks: [task('discover', 'sync', 'primary'), task('extract', 'extract'), task('reconcile', 'sync', 'maintenance')],
+      }],
+    });
+    await scheduler.runDueTasks();
+    expect(ran).toEqual(['discover', 'extract']);
+    asking = false;
+    await scheduler.runDueTasks();
+    expect(ran).toEqual(['discover', 'extract', 'reconcile']);
+  });
+
   for (const durable of [false, true]) {
     test(`X usage guards park both tasks without a failure streak (durable=${durable})`, async () => {
       const clock = createTestClock(Date.parse('2026-11-12T12:00:00.000Z'));

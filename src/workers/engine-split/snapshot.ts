@@ -78,6 +78,8 @@ export interface EngineStatusSnapshot {
   stores_opened?: number;
   /** The background's paced status recount (status-recount.ts). */
   status_recount?: { runs: number; failures: number; last_ms?: number; age_ms?: number; counting: boolean };
+  /** Failed reads of the front's kernel lease. */
+  owner_ask_probe_failures?: number;
   /** The background's bounded pauses for the owner's Ask. */
   stand_back?: Partial<Record<StandBackWork, StandBackCounts>>;
 }

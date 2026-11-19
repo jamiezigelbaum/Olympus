@@ -436,10 +436,9 @@ export interface SourceSchedulerOptions {
   /** Window over which change signals from `subscribeChanges` coalesce into one run. Defaults to SOURCE_SCHEDULER_CHANGE_DEBOUNCE_MS. */
   changeDebounceMs?: number;
   /**
-   * True while the owner's Ask runs (in this process or the split's front):
-   * no scheduled task starts until it is answered, and the tick after it
-   * ends starts them. A task already running finishes. An operator's own
-   * run (runSource) is never held.
+   * Holds scheduled metadata maintenance and watches while the owner's Ask has priority.
+   * Live discovery and extraction keep their cadence, as do operator runs.
+   * A maintenance pass already running finishes.
    */
   holdForAsk?: () => boolean;
 }
@@ -930,10 +929,6 @@ export class SourceScheduler {
     if (!this.enabled) return this.status(now);
     const dueAt = now.getTime();
     this.applyPendingUnparks(dueAt);
-    if (this.askHolds()) {
-      this.scheduleContinueWake(dueAt + SOURCE_SCHEDULER_ASK_RECHECK_MS);
-      return this.status(now);
-    }
     await this.runStates(this.states.filter((state) =>
       taskCadence(state.source, state.task) === 'continuous'
       && !state.running
@@ -1096,6 +1091,11 @@ export class SourceScheduler {
 
     const runTask = async (state: SchedulerTaskState, at: number): Promise<void> => {
       if (state.running) return;
+      if (provenance === 'scheduled'
+        && (state.task.metadataWalkRole === 'maintenance' || state.task.kind === 'watch') && this.askHolds()) {
+        this.scheduleContinueWake(this.now().getTime() + SOURCE_SCHEDULER_ASK_RECHECK_MS);
+        return;
+      }
       state.running = true;
       try {
         await this.runTaskSharingThread(state, at, provenance);
@@ -2051,6 +2051,7 @@ export function createReadwiseSchedulerSource(input: {
       {
             id: 'readwise.library_store_reconcile',
             kind: 'sync' as const,
+            metadataWalkRole: 'maintenance' as const,
             writer: true as const,
             intervalMs: liveConfig.storeReconcileIntervalMs,
             freshnessThresholdMs: liveConfig.storeReconcileFreshnessThresholdMs,
@@ -2112,8 +2113,7 @@ export function embeddingSweepMaxItems(env: Record<string, string | undefined> =
 }
 /**
  * The silence limit for one store in a sweep. A store that stops reporting
- * progress is deferred so the scheduler can move on. The store's embedding
- * lease still keeps a second embedder off work that has not returned.
+ * progress is cancelled and deferred so the scheduler can move on.
  * Half this interval is the active-time budget for starting new batches.
  */
 export const EMBEDDING_SWEEP_STORE_DEADLINE_MS = 10 * 60_000;
@@ -2165,6 +2165,8 @@ export function withEmbeddingSweep(
     onProgress?: (target: ConnectorStoreEmbeddingTarget) => void;
     /** Parks scheduled sweeps at read-only checkpoints and before guarded embedding groups. */
     pauseForAsk?: BackgroundWalkPause;
+    /** Releases the embedding lease and account guard before parking between batches. */
+    holdForAsk?: () => boolean;
   } = {},
 ): SourceSchedulerSource[] {
   return sources.map((source, sourceIndex) => {
@@ -2172,7 +2174,7 @@ export function withEmbeddingSweep(
     if (!targets) return source;
     return {
       ...source,
-      tasks: [...source.tasks, embeddingSweepTask(source, targets, options.storeDeadlineMs, sourceIndex, options.trickle, options.onProgress, options.pauseForAsk)],
+      tasks: [...source.tasks, embeddingSweepTask(source, targets, options.storeDeadlineMs, sourceIndex, options.trickle, options.onProgress, options.pauseForAsk, options.holdForAsk)],
       embeddingDeferredReason: () => targets().some((target) => target.store.embeddingDeferredReason() !== undefined)
         ? EMBEDDING_PROVIDER_UNAVAILABLE_REASON
         : undefined,
@@ -2192,6 +2194,7 @@ function embeddingSweepTask(
   trickle?: (target: ConnectorStoreEmbeddingTarget) => boolean,
   onProgress?: (target: ConnectorStoreEmbeddingTarget) => void,
   pauseForAsk?: BackgroundWalkPause,
+  holdForAsk?: () => boolean,
 ): SourceSchedulerTask {
   const maxItems = embeddingSweepMaxItems();
   const tricklingTarget = (target: ConnectorStoreEmbeddingTarget): boolean => {
@@ -2239,8 +2242,9 @@ function embeddingSweepTask(
     intervalMs: EMBEDDING_SWEEP_INTERVAL_MS,
     freshnessThresholdMs: EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS,
     run: async (context?: SourceSchedulerTaskRunContext, guard?: <T>(work: () => Promise<T>) => Promise<T>) => {
-      if (guard) await guard(async () => undefined);
-      const pause = context?.provenance === 'operator' ? undefined : pauseForAsk;
+      const operator = context?.provenance === 'operator';
+      const pause = operator ? undefined : pauseForAsk;
+      const holds = pause ? holdForAsk : undefined;
       const passTargets = targets();
       const runs: Awaited<ReturnType<typeof embedPendingChunks>> = [];
       let trickled = false;
@@ -2256,32 +2260,29 @@ function embeddingSweepTask(
         const receipts = path ? await readEmbeddingSweepIdle(path) : undefined;
         const keyBefore = idleBackoff ? quietKey(target, slot, path !== undefined) : undefined;
         const rested = quiet.get(store)?.get(slot) ?? receipts?.get(slot);
-        if (rested && rested.key === keyBefore && fresh(rested, Date.now())
-          && store.queuedEmbeddingItemIds().length === 0 && store.embeddingDeferredReason() === undefined) {
-          runs.push({ corpusId: store.corpusId, itemsAttempted: 0, chunksEmbedded: 0, itemsFailed: 0, itemsOutOfScope: 0,
-            inventory: rested.inventory });
-          restedRuns.add(runs.length - 1);
-          continue;
-        }
-        quiet.get(store)?.delete(slot);
-        // Invalidate before walking. A failed pass must not revive an older
-        // proof if its in-memory queue or deferral is lost on the next start.
-        if (path && receipts?.delete(slot)) await writeEmbeddingSweepIdle(path, receipts);
         const stalled = Symbol('stalled');
+        const controller = new AbortController();
         let reportStall!: () => void;
-        const stall = new Promise<typeof stalled>((resolve) => { reportStall = () => resolve(stalled); });
+        const stall = new Promise<typeof stalled>((resolve) => {
+          reportStall = () => {
+            resolve(stalled);
+            controller.abort(new Error('Embedding sweep stopped reporting progress'));
+          };
+        });
         let timer: ReturnType<typeof setTimeout> | undefined;
         let observing = true;
         const arm = () => { if (observing) timer = setTimeout(reportStall, deadlineMs); };
         let pausedMs = 0;
         const progress = () => { if (observing) timer?.refresh(); };
         const checkpoint = () => {
+          controller.signal.throwIfAborted();
           const waiting = pause?.();
           if (!waiting) { progress(); return; }
           const pausedAt = Date.now();
           clearTimeout(timer);
           return waiting.finally(() => {
             pausedMs += Math.max(0, Date.now() - pausedAt);
+            controller.signal.throwIfAborted();
             arm();
           });
         };
@@ -2290,28 +2291,47 @@ function embeddingSweepTask(
         // stand-back, so neither a long progressing walk nor an Ask is an
         // outage. A silent provider still gives the scheduler its turn back.
         const stopAtMs = Date.now() + Math.floor(deadlineMs / 2);
-        arm();
-        const result = await Promise.race([
-          embedPendingChunks([target], {
+        const work = async () => {
+          // Even an idle receipt requires a current account binding. Waiting
+          // for the account runner is itself covered by the watchdog.
+          if (guard) await guard(async () => controller.signal.throwIfAborted());
+          if (rested && rested.key === keyBefore && fresh(rested, Date.now())
+            && (!guard || quietKey(target, slot, path !== undefined) === keyBefore)
+            && store.queuedEmbeddingItemIds().length === 0 && store.embeddingDeferredReason() === undefined) {
+            return { kind: 'rested', rested } as const;
+          }
+          quiet.get(store)?.delete(slot);
+          // Invalidate before walking. A failed pass must not revive an older
+          // proof if its in-memory queue or deferral is lost on the next start.
+          if (path && receipts?.delete(slot)) await writeEmbeddingSweepIdle(path, receipts);
+          controller.signal.throwIfAborted();
+          const embedded = await embedPendingChunks([target], {
             maxItems: paced ? GO_EASY_TRICKLE_EMBED_ITEMS : maxItems,
             stopAtMs, diagnostics: true,
-            pacing: { now: () => Date.now() - pausedMs, progress, checkpoint },
+            pacing: { now: () => Date.now() - pausedMs, progress, checkpoint, signal: controller.signal, ...(holds ? { holds } : {}) },
             ...(guard ? { guard } : {}),
-          }),
-          stall,
-        ]).finally(() => { observing = false; clearTimeout(timer); });
+          });
+          return { kind: 'embedded', embedded } as const;
+        };
+        arm();
+        const result = await Promise.race([work(), stall]).finally(() => { observing = false; clearTimeout(timer); });
+        if (result !== stalled && result.kind === 'rested') {
+          runs.push({ corpusId: store.corpusId, itemsAttempted: 0, chunksEmbedded: 0, itemsFailed: 0, itemsOutOfScope: 0,
+            inventory: result.rested.inventory });
+          restedRuns.add(runs.length - 1);
+          continue;
+        }
         if (result !== stalled) {
-          // The abandoned call of an earlier overrun still holds the store's
-          // lease, so this pass answers busy: the store's outage stands until
-          // an embedding pass answers (embedPendingChunks clears it then).
-          if (result.some((run) => run.chunksEmbedded > 0)) {
+          const { embedded } = result;
+          // A busy store keeps its prior outage until an embedding pass answers.
+          if (embedded.some((run) => run.chunksEmbedded > 0)) {
             try { onProgress?.(target); } catch { /* best effort */ }
           }
           const outage = target.store.embeddingDeferredReason();
-          runs.push(...result.map((run) => run.busy === true && run.deferredReason === undefined && outage !== undefined
+          runs.push(...embedded.map((run) => run.busy === true && run.deferredReason === undefined && outage !== undefined
             ? { ...run, deferredReason: outage } : run));
           // Nothing to do and nothing moved while the pass ran: the store rests until a marker moves.
-          const only = result.length === 1 ? result[0]! : undefined;
+          const only = embedded.length === 1 ? embedded[0]! : undefined;
           if (keyBefore !== undefined && only && outage === undefined && only.busy !== true && only.deferredReason === undefined
             && only.stoppedAtDeadline !== true && only.itemsAttempted === 0 && only.chunksEmbedded === 0 && only.itemsFailed === 0
             && only.itemsOutOfScope === 0 && only.inventory?.inventory_complete === 1
@@ -2580,6 +2600,7 @@ export function createXBookmarksSchedulerSource(input: {
       {
         id: 'x.bookmarks_reconcile',
         kind: 'sync',
+        metadataWalkRole: 'maintenance',
         writer: true,
         intervalMs: liveConfig.reconcileIntervalMs,
         freshnessThresholdMs: liveConfig.reconcileFreshnessThresholdMs,
@@ -2788,6 +2809,7 @@ export function createGoogleDriveConnectorStoreSchedulerSource(input: {
       {
         id: 'google_drive.docs_store_reconcile',
         kind: 'sync',
+        metadataWalkRole: 'maintenance',
         writer: true,
         intervalMs: liveConfig.storeReconcileIntervalMs,
         freshnessThresholdMs: liveConfig.storeReconcileFreshnessThresholdMs,

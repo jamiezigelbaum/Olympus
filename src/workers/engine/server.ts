@@ -952,7 +952,10 @@ export async function main(): Promise<void> {
   // Busy marks from the split's front lapse after ten minutes without renewal.
   const remoteOwnerMarks = new OwnerBusyMarks();
   const remoteOwnerBusy = (resource: string): boolean => remoteOwnerMarks.busy(resource);
-  const frontOwnerAskHeld = createOwnerAskProbe();
+  let ownerAskProbeFailures = 0;
+  const frontOwnerAskHeld = createOwnerAskProbe({ onFailure: () => { ownerAskProbeFailures += 1; } });
+  const frontOwnerBusy = () => remoteOwnerBusy(OWNER_QUESTION_RESOURCE)
+    || (engineRole === 'background' && frontOwnerAskHeld());
   // The owner's Ask, wherever it runs: this process, or the split's front
   // (its kernel lease or owner_busy mark). Background work stands back from it, bounded and
   // logged, by one rule (stand-back.ts; ops#151, 14 Nov 2026: Sparta's Asks
@@ -965,8 +968,7 @@ export async function main(): Promise<void> {
   // The split background's paced status recount, once it starts (health shows it).
   let statusRecount: PacedStatusRecount | undefined;
   const standBack = createStandBack({
-    reason: () => ownerAskReason(ownerQuestions, () =>
-      remoteOwnerBusy(OWNER_QUESTION_RESOURCE) || (engineRole === 'background' && frontOwnerAskHeld())),
+    reason: () => ownerAskReason(ownerQuestions, frontOwnerBusy),
   });
   const pauseStatusWalk = () => standBack.pause('status');
   setVectorDigestBackfillHold(() => standBack.holds('digest'));
@@ -4719,6 +4721,7 @@ export async function main(): Promise<void> {
       trickle: (target) => embedsOnThisComputer(target.provider) && localPacer.trickle(),
       onProgress: (target) => { if (embedsOnThisComputer(target.provider)) localPacer.noteLocalWork(); },
       pauseForAsk: () => standBack.pause('embed'),
+      holdForAsk: () => standBack.holds('embed'),
     });
     // Guarded with its sweep; the watch task attached next rides on one host
     // lane but serves every source, so it stays outside any one lane's guard.
@@ -6463,6 +6466,7 @@ export async function main(): Promise<void> {
   const chatgptSurface = {
     privateAnswers,
     privateQuestions,
+    withOwnerQuestion: ownerQuestions.runVisible,
     limitStops: () => sourceScheduler?.status().limit_stops ?? [],
     dashboardView: async (signal?: AbortSignal) => {
       const response = await worker.fetch(new Request(
@@ -6675,6 +6679,7 @@ export async function main(): Promise<void> {
     const backgroundLoopLag = backgroundSnapshot?.loop_lag;
     if ((path === '/v1/health' || path === '/health') && response?.ok) {
       const standBackCounts = engineFront ? backgroundSnapshot?.stand_back : standBack.counts();
+      const leaseProbeFailures = engineFront ? backgroundSnapshot?.owner_ask_probe_failures ?? 0 : ownerAskProbeFailures;
       const windowNotices = localPromptBudgets.map(localAnalystWindowNotice).filter(notice => notice !== undefined);
       return Response.json({
         ...await response.json() as object,
@@ -6696,6 +6701,8 @@ export async function main(): Promise<void> {
         ...(frontMountProblems.size ? {
           mount_problems: Object.fromEntries([...frontMountProblems.values()].map(({ label, reason }) => [label, reason])),
         } : {}),
+        owner_ask_lease_failures: ownerQuestions.leaseFailures,
+        owner_ask_probe_failures: leaseProbeFailures,
         // Background work that stood back for the owner's Ask: never silent.
         ...(standBackCounts && Object.keys(standBackCounts).length > 0 ? { stand_back: standBackCounts } : {}),
         // The background's paced recount of what the dashboard shows: how long the last took and how old it is.
@@ -6845,9 +6852,10 @@ export async function main(): Promise<void> {
   // A running prune slice parks between items. Reclaim has its own reader
   // priority and starts only when the owner is idle.
   const stopSupersededSweep = startSupersededSweepTicker({
-    active: () => !engineFront && !ownerQuestions.busy && !remoteOwnerBusy(OWNER_QUESTION_RESOURCE)
-      && (engineRole !== 'background' || !frontOwnerAskHeld()),
-    pause: pauseStatusWalk,
+    active: () => !engineFront,
+    holds: () => standBack.holds('prune'),
+    pause: () => standBack.pause('prune'),
+    canReclaim: () => !ownerQuestions.busy && !frontOwnerBusy(),
     ownerQuestionEndedAt: () => Math.max(ownerQuestions.lastEndedAt ?? 0, remoteOwnerMarks.lastEndedAt(OWNER_QUESTION_RESOURCE) ?? 0),
     // Ingest first: a conversion starts only in a quiet window and stops when a task comes due.
     reclaimStore: (store, work) => sourceScheduler
@@ -7236,6 +7244,7 @@ export async function main(): Promise<void> {
         stores_opened: storeOpensSoFar(),
         ...(statusRecount ? { status_recount: statusRecount.health() } : {}),
         stand_back: standBack.counts(),
+        owner_ask_probe_failures: ownerAskProbeFailures,
         ...((slow) => (slow ? { loop_slow_sql: slow } : {}))(slowMainThreadSqlHealth()),
         ...((files) => (files ? { sqlite_files: files } : {}))(sqliteFilesHealth()),
         // Read workers retired for a reply they finished and never delivered, requests run again on a fresh one, and replies that came for nothing.
@@ -7260,23 +7269,24 @@ export async function main(): Promise<void> {
     statusRecount = refreshSnapshot
       ? startPacedStatusRecount({
           holds: () => standBack.holds('status'),
-          recount: async () => {
+          pause: pauseStatusWalk,
+          recount: async (pause) => {
             // Fill or repair the kept totals first. Changed inputs and quiet
             // retries are walked by key range on the read thread.
             for (const store of connectorStores) {
-              await pauseStatusWalk();
+              await pause();
               try {
-                const drift = await store.reconcileTotals({ background: true, pause: pauseStatusWalk });
+                const drift = await store.reconcileTotals({ background: true, pause });
                 if (drift) console.warn(`[olympus] store totals: ${store.corpusId} adjusted by ${drift}.`);
               } catch (error) {
                 console.warn(`[olympus] store totals: ${store.corpusId} count failed (${error instanceof Error ? error.message : String(error)}); tried again next pass.`);
               }
             }
             for (const store of connectorStores) {
-              await pauseStatusWalk();
+              await pause();
               changeMemoryActivity('embedding_repair', 1);
               try {
-                const set = await store.repairEmbeddingInputHashes(undefined, undefined, pauseStatusWalk);
+                const set = await store.repairEmbeddingInputHashes(undefined, undefined, pause);
                 if (set) console.warn(`[olympus] ${store.corpusId}: set the embedding input hash on ${set} chunks that had none.`);
               } catch (error) {
                 console.warn(`[olympus] ${store.corpusId}: embedding input hash repair failed (${error instanceof Error ? error.message : String(error)}); tried again next pass.`);
@@ -7285,10 +7295,10 @@ export async function main(): Promise<void> {
               }
             }
             for (const ledger of new Set(tierLanes.map((lane) => lane.ledger))) {
-              await pauseStatusWalk();
+              await pause();
               changeMemoryActivity('embedding_settlement', 1);
               try {
-                const settled = await settleStaleEmbedHolds(ledger, undefined, pauseStatusWalk);
+                const settled = await settleStaleEmbedHolds(ledger, undefined, pause);
                 if (settled) console.warn(`[olympus] tier ledger: released ${settled} decided copies an older build left held.`);
               } catch (error) {
                 console.warn(`[olympus] tier ledger: settling held copies failed (${error instanceof Error ? error.message : String(error)}); tried again next pass.`);
@@ -7297,8 +7307,8 @@ export async function main(): Promise<void> {
               }
             }
             for (const request of [PLAIN_STATUS_REQUEST, DASHBOARD_STATUS_REQUEST]) {
-              await pauseStatusWalk();
-              await refreshSnapshot({ ...request }, { countsMaxAgeMs: STATUS_COUNTS_MAX_AGE_MS, reuseCounts: true }, pauseStatusWalk);
+              await pause();
+              await refreshSnapshot({ ...request }, { countsMaxAgeMs: STATUS_COUNTS_MAX_AGE_MS, reuseCounts: true });
             }
           },
           log: (line) => console.warn(line),

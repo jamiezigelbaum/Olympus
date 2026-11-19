@@ -1,3 +1,5 @@
+import type { BackgroundWalkPause } from './stand-back.ts';
+
 /**
  * The split's background recounts what the dashboard and status show on its
  * own pace, never on a request (docs/design/engine-split.md, part 3). Each
@@ -33,14 +35,15 @@ export interface PacedStatusRecount {
 }
 
 export function startPacedStatusRecount(options: {
-  recount: () => Promise<void>;
+  recount: (pause: BackgroundWalkPause) => Promise<void>;
+  pause?: BackgroundWalkPause;
   /** True while the owner's own question holds background work (stand-back.ts). */
   holds: () => boolean;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
   log?: (line: string) => void;
 }): PacedStatusRecount {
-  const now = options.now ?? (() => Date.now());
+  const now = options.now ?? (() => performance.now());
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => { const timer = setTimeout(resolve, ms); timer.unref?.(); }));
   let stopped = false;
   let runs = 0;
@@ -58,9 +61,16 @@ export function startPacedStatusRecount(options: {
     while (!stopped) {
       if (options.holds()) { await sleep(STATUS_RECOUNT_HELD_RETRY_MS); continue; }
       const started = now();
+      let parkedMs = 0;
+      const pause = () => {
+        const waiting = options.pause?.();
+        if (!waiting) return;
+        const at = now();
+        return waiting.finally(() => { parkedMs += now() - at; });
+      };
       counting = true;
       try {
-        await options.recount();
+        await options.recount(pause);
       } catch (error) {
         failures += 1;
         options.log?.(`[olympus] status recount failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -68,7 +78,7 @@ export function startPacedStatusRecount(options: {
         counting = false;
       }
       runs += 1;
-      lastMs = Math.max(0, now() - started);
+      lastMs = Math.max(0, now() - started - parkedMs);
       lastAt = now();
       const gap = Math.max(STATUS_RECOUNT_MIN_GAP_MS, STATUS_RECOUNT_PACE_FACTOR * lastMs);
       options.log?.(`[olympus] status recount took ${lastMs} ms; next in ${Math.round(gap / 1000)} s`);

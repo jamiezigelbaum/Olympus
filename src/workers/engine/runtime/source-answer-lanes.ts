@@ -47,31 +47,58 @@ export function createOwnerQuestionActivity(relay?: { busy(resource: string): vo
   const context = new AsyncLocalStorage<{ release?: () => void; settled: boolean } | undefined>();
   let inFlight = 0;
   let lastEndedAt: number | undefined;
+  let leaseFailures = 0;
+  let acquiring: AbortController | undefined;
+  let releaseLease: (() => void) | undefined;
   const begin = () => {
-    const releaseLease = relay ? holdOwnerAsk() : undefined;
-    if (++inFlight === 1) relay?.busy(OWNER_QUESTION_RESOURCE);
+    if (++inFlight === 1 && relay) {
+      relay.busy(OWNER_QUESTION_RESOURCE);
+      const controller = new AbortController();
+      acquiring = controller;
+      void holdOwnerAsk(undefined, controller.signal).then((release) => {
+        if (controller.signal.aborted) release();
+        else releaseLease = release;
+      }, () => {
+        if (!controller.signal.aborted) leaseFailures += 1;
+      });
+    }
     let released = false;
     return () => {
       if (released) return;
       released = true;
-      releaseLease?.();
-      if (--inFlight === 0) { lastEndedAt = now(); relay?.idle(OWNER_QUESTION_RESOURCE); }
+      if (--inFlight === 0) {
+        lastEndedAt = now();
+        acquiring?.abort();
+        acquiring = undefined;
+        releaseLease?.();
+        releaseLease = undefined;
+        relay?.idle(OWNER_QUESTION_RESOURCE);
+      }
     };
   };
-  return {
+  const activity = {
     get lastEndedAt(): number | undefined { return lastEndedAt; },
     get busy(): boolean { return inFlight > 0; },
+    get leaseFailures(): number { return leaseFailures; },
     retrieving(): void {
       const scope = context.getStore();
       if (!scope || scope.release || scope.settled) return;
       scope.release = begin();
+    },
+    /** Keep activity through all work the interactive caller is waiting for. */
+    runVisible<T>(work: () => Promise<T>): Promise<T> {
+      return activity.run(() => {
+        activity.retrieving();
+        return work();
+      });
     },
     /** A lease held outside an async scope (a claimed panel job), released exactly once. */
     begin,
     async run<T>(work: () => Promise<T>, kind: 'owner' | 'background' = 'owner'): Promise<T> {
       if (kind === 'background') return context.run(undefined, work);
       const current = context.getStore();
-      if (current && !current.settled) return work();
+      // A detached continuation of a settled request must not start a new lease.
+      if (current) return work();
       const scope: NonNullable<ReturnType<typeof context.getStore>> = { settled: false };
       try {
         return await context.run(scope, work);
@@ -81,6 +108,7 @@ export function createOwnerQuestionActivity(relay?: { busy(resource: string): vo
       }
     },
   };
+  return activity;
 }
 
 /** The owner's read scope for a store, as server.ts decides it. */

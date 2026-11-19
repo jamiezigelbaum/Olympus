@@ -1,7 +1,7 @@
 // Background work stands back while the owner asks something, and never
 // without a bound. One rule for every kind of background work: imports
 // (the scheduler), embedding, the privacy judge, each store's vector digest
-// backfill, and background status work stand back for at most
+// backfill, background status work, and pruning stand back for at most
 // STAND_BACK_MAX_MS at a time and then get STAND_BACK_SHARE_MS to run
 // even while the owner keeps asking, so each keeps a guaranteed share.
 //
@@ -12,7 +12,7 @@
 
 import { setTimeout as sleep } from 'node:timers/promises';
 
-export type StandBackWork = 'import' | 'embed' | 'judge' | 'digest' | 'status';
+export type StandBackWork = 'import' | 'embed' | 'judge' | 'digest' | 'status' | 'prune';
 /** A checkpoint returns a promise only while a background walk must wait. */
 export type BackgroundWalkPause = () => Promise<void> | undefined;
 
@@ -60,55 +60,57 @@ export function createStandBack(options: {
   shareMs?: number;
   sleep?: (ms: number) => Promise<void>;
 }): StandBack {
-  const now = options.now ?? Date.now;
+  const now = options.now ?? (() => performance.now());
   const log = options.log ?? ((line: string) => console.log(line));
   const maxMs = options.maxMs ?? STAND_BACK_MAX_MS;
   const shareMs = options.shareMs ?? STAND_BACK_SHARE_MS;
   const states = new Map<StandBackWork, { since?: number | undefined; shareUntil?: number | undefined; reason?: string | undefined; counts: Omit<StandBackCounts, 'holding' | 'reason'> }>();
   const seconds = (ms: number) => Math.round(ms / 1_000);
   const wait = options.sleep ?? ((ms: number) => sleep(ms, undefined, { ref: false }));
-  const standBack: StandBack = {
-    holds(work) {
-      const at = now();
-      let reason: string | undefined;
-      try { reason = options.reason(); } catch { reason = undefined; }
-      let state = states.get(work);
-      if (!reason) {
-        if (state?.since !== undefined) {
-          state.counts.held_ms += at - state.since;
-          log(`Olympus engine: ${work} resumes after standing back ${seconds(at - state.since)} s (${state.reason}).`);
-          state.since = undefined;
-        }
-        if (state) state.shareUntil = undefined;
-        return false;
-      }
-      if (!state) states.set(work, state = { counts: { holds: 0, held_ms: 0, bound_reached: 0 } });
-      if (state.shareUntil !== undefined && at < state.shareUntil) return false;
-      state.shareUntil = undefined;
-      if (state.since === undefined) {
-        state.since = at;
-        state.reason = reason;
-        state.counts.holds += 1;
-        log(`Olympus engine: ${work} stands back for the owner's Ask (${reason}).`);
-        return true;
-      }
-      if (at - state.since >= maxMs) {
+  const holds = (work: StandBackWork, deadline = Infinity): boolean => {
+    const at = now();
+    let reason: string | undefined;
+    try { reason = options.reason(); } catch { reason = undefined; }
+    let state = states.get(work);
+    if (!reason) {
+      if (state?.since !== undefined) {
         state.counts.held_ms += at - state.since;
-        state.counts.bound_reached += 1;
-        log(`Olympus engine: ${work} stood back ${seconds(at - state.since)} s (${state.reason}); runs ${seconds(shareMs)} s before standing back again.`);
+        log(`Olympus engine: ${work} resumes after standing back ${seconds(at - state.since)} s (${state.reason}).`);
         state.since = undefined;
-        state.shareUntil = at + shareMs;
-        return false;
       }
-      return true;
-    },
+      if (state) state.shareUntil = undefined;
+      return false;
+    }
+    if (!state) states.set(work, state = { counts: { holds: 0, held_ms: 0, bound_reached: 0 } });
+    if (state.shareUntil !== undefined && at < state.shareUntil) return false;
+    state.shareUntil = undefined;
+    if (state.since === undefined) {
+      state.since = at;
+      state.reason = reason;
+      state.counts.holds += 1;
+      log(`Olympus engine: ${work} stands back for the owner's Ask (${reason}).`);
+    }
+    if (at >= deadline || at - state.since >= maxMs) {
+      state.counts.held_ms += at - state.since;
+      state.counts.bound_reached += 1;
+      log(`Olympus engine: ${work} stood back ${seconds(at - state.since)} s (${state.reason}); runs ${seconds(shareMs)} s before standing back again.`);
+      state.since = undefined;
+      state.shareUntil = at + shareMs;
+      return false;
+    }
+    return true;
+  };
+  return {
+    holds: (work) => holds(work),
     pause(work) {
-      if (!standBack.holds(work)) return;
+      if (!holds(work)) return;
+      const deadline = now() + maxMs;
       return (async () => {
         do {
-          const remaining = maxMs - (now() - states.get(work)!.since!);
-          await wait(Math.max(0, Math.min(STAND_BACK_RECHECK_MS, remaining)));
-        } while (standBack.holds(work));
+          const at = now();
+          const sharedDeadline = (states.get(work)?.since ?? at) + maxMs;
+          await wait(Math.max(0, Math.min(STAND_BACK_RECHECK_MS, deadline - at, sharedDeadline - at)));
+        } while (holds(work, deadline));
       })();
     },
     counts() {
@@ -121,5 +123,4 @@ export function createStandBack(options: {
       }]));
     },
   };
-  return standBack;
 }

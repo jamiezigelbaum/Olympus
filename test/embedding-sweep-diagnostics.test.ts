@@ -3,6 +3,7 @@ import { afterEach, expect, spyOn, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { copyFileSync, existsSync, renameSync, writeFileSync } from 'node:fs';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
+import { CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX } from '../src/workers/connector-store/local-index.ts';
 import { setReadPoolObserverForTests } from '../src/workers/connector-store/off-thread-reads.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { SecretLocationsIndex } from '../src/workers/classification/secret-locations.ts';
@@ -10,7 +11,7 @@ import { TieredStoreSet } from '../src/workers/connector-store/tiered-store-set.
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { EMBEDDING_SWEEP_IDLE_BACKOFF_ENV, EMBEDDING_SWEEP_IDLE_FULL_PASS_MS, SourceScheduler, withEmbeddingSweep } from '../src/workers/source-scheduler.ts';
 import { TransientSourceEmbeddingError } from '../src/workers/source-index/embeddings.ts';
-import { FileLeaseBusyError } from '../src/core/file-lease.ts';
+import { fileLeaseHeld, FileLeaseBusyError } from '../src/core/file-lease.ts';
 import { EMBEDDING_SWEEP_IDLE_SUFFIX } from '../src/core/embedding-sweep-idle.ts';
 import { createStandBack, STAND_BACK_MAX_MS, STAND_BACK_SHARE_MS, type BackgroundWalkPause } from '../src/workers/engine/stand-back.ts';
 import { createExclusiveRunner, guardAccountBoundLanes } from '../src/workers/source-account-guard.ts';
@@ -24,6 +25,8 @@ async function fixture(options: {
   accountScope?: string;
   empty?: boolean;
   pauseForAsk?: BackgroundWalkPause;
+  holdForAsk?: () => boolean;
+  storeDeadlineMs?: number;
   onWindow?: (walk: 'inventory' | 'workList', count: number) => void;
   guard?: ReturnType<typeof createExclusiveRunner>;
   onSync?: () => void;
@@ -60,7 +63,11 @@ async function fixture(options: {
     }] : [];
     let sources = withEmbeddingSweep([{ sourceId: 'synthetic-source-id', corpusId: store.corpusId, cadence: 'continuous', intervalMs: 60_000, freshnessThresholdHours: 24, tasks }], () => () => [{
       store, provider, wholeStore: true, ...(options.accountScope !== undefined ? { accountScope: options.accountScope } : {}),
-    }], options.pauseForAsk ? { pauseForAsk: options.pauseForAsk } : {});
+    }], {
+      ...(options.pauseForAsk ? { pauseForAsk: options.pauseForAsk } : {}),
+      ...(options.holdForAsk ? { holdForAsk: options.holdForAsk } : {}),
+      ...(options.storeDeadlineMs ? { storeDeadlineMs: options.storeDeadlineMs } : {}),
+    });
     if (options.guard) sources = guardAccountBoundLanes(sources, new Map([['synthetic-source-id', { run: options.guard, assertAccount: async () => {} }]]));
     return new SourceScheduler({ enabled: true, tickMs: 60_000, errorBackoffMs: 1_000, maxTransientRetries: 1, sources, now: () => now });
   };
@@ -481,3 +488,114 @@ test('an item that failed for good does not keep its store walked, stays reporte
   ]), { fetchContent: true, placement: FIXTURE_PLACEMENT }, { embed: false });
   expect(await f.pass()).toMatchObject({ chunks_embedded: 1, rested: 0 });
 });
+
+test('a ledger change during an inventory park invalidates the first window as well as the rest', async () => {
+  const f = await fixture({ empty: true });
+  await f.set.sync(fixtureConnector(() => ['one', 'two'].map(id => ({ id, name: `${id}.txt`, text: `Synthetic text ${id}` }))),
+    { fetchContent: true, placement: FIXTURE_PLACEMENT }, { embed: false });
+  let checkpoints = 0;
+  const counts = await f.store.embeddingSweepInventory(f.provider, {}, undefined, 1, {
+    now: Date.now,
+    checkpoint: () => {
+      if (++checkpoints !== 3) return;
+      return (async () => {
+        const identity = identityOf('one');
+        for (const pass of ['metadata', 'content'] as const) f.ledger.applySnifferVerdict(identity, {
+          pass, tier: 'private', reason: 'synthetic', modelId: 'synthetic',
+        }, { placementFor: decision => f.set.placementFor(decision) });
+        await moveTieredItem({ set: f.set, identity, target: { metadataTier: 'private', contentTier: 'private' }, vectorIdentities: { internal: f.provider } });
+      })();
+    },
+  });
+  expect(counts).toMatchObject({ pending_chunks: 2, skipped_hidden_chunks: 1, eligible_chunks: 1, inventory_complete: 1 });
+});
+
+test('the watchdog releases the guarded account and store after an unresponsive embedder', async () => {
+  let syncs = 0;
+  const f = await fixture({
+    guard: createExclusiveRunner(), pauseForAsk: () => undefined,
+    storeDeadlineMs: 1_000, onSync: () => { syncs++; },
+  });
+  let sent = false;
+  let releaseLate!: (vectors: number[][]) => void;
+  const stuck = new Promise<number[][]>(resolve => { releaseLate = resolve; });
+  const embed = spyOn(f.provider, 'embed').mockImplementationOnce(() => { sent = true; return stuck; });
+  const sweep = f.pass();
+  let operator: ReturnType<typeof f.runOperator> | undefined;
+  try {
+    await waitFor(() => sent, { description: 'the guarded pass entered the stalled provider' });
+    expect(await sweep).toMatchObject({ pass_overran: 1, stores_deferred: 1 });
+    operator = f.runOperator();
+    await waitFor(() => syncs === 2, { description: 'operator sync acquired the released account guard', timeoutMs: 3_000 });
+    await operator;
+    expect(f.provider.inputs).toHaveLength(1);
+    const current = f.store.exportItemCopy(identityOf('synthetic-id'))!.vectors;
+    expect(current).toHaveLength(1);
+    releaseLate([[10, 10, 10, 10]]);
+    await stuck;
+    expect(f.store.exportItemCopy(identityOf('synthetic-id'))!.vectors).toEqual(current);
+  } finally {
+    releaseLate([[10, 10, 10, 10]]);
+    await Promise.allSettled([sweep, operator]);
+    embed.mockRestore();
+  }
+}, 15_000);
+
+test('the watchdog covers a sweep waiting to enter the account runner', async () => {
+  const guard = createExclusiveRunner();
+  const f = await fixture({ guard, pauseForAsk: () => undefined, storeDeadlineMs: 1_000 });
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const exclusive = guard(() => gate);
+  let completed = false;
+  const sweep = f.pass().then(result => { completed = true; return result; });
+  try {
+    await waitFor(() => completed, { description: 'the watchdog returned while the account runner was occupied', timeoutMs: 5_000 });
+    expect(await sweep).toMatchObject({ pass_overran: 1, stores_deferred: 1 });
+    expect(f.provider.inputs).toEqual([]);
+  } finally {
+    release();
+    await Promise.allSettled([sweep, exclusive]);
+  }
+}, 15_000);
+
+test('an Ask between batches releases the account and embedding lease before parking the pass', async () => {
+  const clock = createTestClock();
+  let asking = false;
+  let entered = 0;
+  const standBack = createStandBack({
+    reason: () => asking ? 'question in the front' : undefined,
+    now: clock.now, sleep: clock.sleep, log: () => {},
+  });
+  const guard = createExclusiveRunner();
+  const f = await fixture({
+    empty: true, guard,
+    pauseForAsk: () => standBack.pause('embed'),
+    holdForAsk: () => standBack.holds('embed'),
+  });
+  const original = f.provider.embed.bind(f.provider);
+  const embed = spyOn(f.provider, 'embed').mockImplementation(async inputs => {
+    if (++entered === 1) asking = true;
+    return original(inputs);
+  });
+  // One item with enough chunks for two batches stays queued when the first ends.
+  await f.set.sync(fixtureConnector(() => [{ id: 'long', name: 'long.txt', text: Array.from({ length: 100 }, () => 'word '.repeat(790)).join('\n\n') }]),
+    { fetchContent: true, placement: FIXTURE_PLACEMENT }, { embed: false });
+  const pass = f.pass();
+  try {
+    await waitFor(() => standBack.counts().embed?.holding, { description: 'the sweep parked between batches' });
+    expect(entered).toBe(1);
+    expect(f.store.exportItemCopy(identityOf('long'))!.vectors).toHaveLength(32);
+    expect(fileLeaseHeld(`${f.store.dbPath}${CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX}`)).toBe(false);
+    await waitFor(() => guard(async () => true), { description: 'the account runner is free while parked' });
+    asking = false;
+    await clock.advance(100);
+    expect((await pass).chunks_embedded).toBeGreaterThan(32);
+    expect(entered).toBeGreaterThan(1);
+  } finally {
+    asking = false;
+    await clock.advance(100);
+    await pass;
+    embed.mockRestore();
+  }
+}, 15_000);
