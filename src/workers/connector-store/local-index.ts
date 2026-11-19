@@ -10,6 +10,7 @@ import {
 } from './store-totals.ts';
 import { createVectorDigestSchema, writeVectorDigest, backfillVectorDigests, vectorDigestState, vectorDigestSourceQuery, applyVectorDigestWindow, type VectorDigestSourceRow } from './vector-digest.ts';
 import { encodeVectorDigest, scoreVectorDigest, VectorDigestHeap } from '../source-index/vector-digest.ts';
+import { STORE_UNCHANGED_REUSE_MS } from '../source-index/status-count-reuse.ts';
 import { reportFrontStoreOpened } from '../../core/boot-progress.ts';
 import { semanticRowsPerStore } from '../../core/evidence-reranker.ts';
 import { setEngineStep } from '../../core/engine-heartbeat.ts';
@@ -1106,10 +1107,9 @@ class ConnectorStoreTierWriteRefusedError extends Error {
  * so the operation is refused rather than treating routed copies as legacy.
  */
 /**
- * How old the hidden-copy set and the settled-unreadable count behind a
- * status snapshot's counts may be. Snapshots are published every two
- * minutes; at five, a busy store rebuilds them about every third snapshot
- * instead of on every one. Only the snapshot passes it.
+ * The age-based reuse window for status snapshot counts. Only snapshots
+ * pass it, so a store without a change stamp can reuse its counts between
+ * snapshot builds.
  */
 export const STATUS_COUNTS_MAX_AGE_MS = 5 * 60_000;
 /** How long a search keeps a store's "has vectors" answer (vectorLaneServable). */
@@ -1134,6 +1134,14 @@ export const MISSING_EMBEDDING_CHUNK_WINDOW = 20_000;
 
 /** Ledger lookups per step when the settled-unreadable list is built in turns. */
 const SETTLED_UNREADABLE_ITEMS_SLICE = 500;
+type SettledUnreadableStamp = readonly [visibility: string, writes: number];
+type SettledUnreadableMemo = {
+  at: number;
+  stamp: SettledUnreadableStamp | undefined;
+  count: number;
+  waitingPks: number[];
+  policyPks: number[];
+};
 
 /**
  * Parents judged per step when the hidden-children set is built in turns.
@@ -16743,27 +16751,49 @@ export class LocalConnectorStore {
    * about a tenth of the sampled freezes on Sparta (2026-11-05, b826b19).
    */
   async prepareStatusCounts(scope?: ConnectorStoreStatusScope): Promise<void> {
-    // Called when the enclosing status snapshot needs new counts. Reusing an
-    // expired projection here lets statusSteps return it while its refresh
-    // runs, then caches that old result for another complete status window.
+    // Finish any needed refresh before statusSteps takes the counts for the
+    // next snapshot, which would otherwise reuse the old result.
     const value = await this.tierHiddenItemPksInTurns();
     this.tierHiddenCountsMemo = { at: Date.now(), value };
     const key = JSON.stringify(scope ?? null);
-    const counts = this.unreadHoldCounts(await runHiddenStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
     const memos = this.settledUnreadableCountMemo ??= new Map();
+    const stamp = this.settledUnreadableStamp();
+    if (this.reusesSettledUnreadableCount(memos.get(key), stamp)) return;
+    const counts = this.unreadHoldCounts(await runHiddenStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
+    if (this.settledUnreadableCountMemo !== memos) return;
     if (memos.size > 32) memos.clear();
-    memos.set(key, { at: Date.now(), ...counts });
+    memos.set(key, { at: Date.now(), stamp, ...counts });
   }
 
-  /** How many settled unreadable items the counts show, reused up to `maxAgeMs` per scope. */
+  private settledUnreadableStamp(): SettledUnreadableStamp | undefined {
+    try {
+      const visibility = this.visibilityMarker();
+      const writes = this.writeSequence();
+      return visibility === undefined || writes === undefined ? undefined : [visibility, writes];
+    } catch {
+      // Without a stamp, the existing age-based refresh still applies.
+      return undefined;
+    }
+  }
+
+  private reusesSettledUnreadableCount(memo: SettledUnreadableMemo | undefined, stamp: SettledUnreadableStamp | undefined): boolean {
+    // The per-item extraction outcome probe can change outside both feeds.
+    return memo?.stamp !== undefined && stamp !== undefined
+      && memo.stamp[0] === stamp[0] && memo.stamp[1] === stamp[1]
+      && Date.now() - memo.at < STORE_UNCHANGED_REUSE_MS;
+  }
+
+  /** The settled unreadable count per scope, with age-based reuse when no stamp is available. */
   private settledUnreadableCount(scope: ConnectorStoreStatusScope | undefined, maxAgeMs: number): { count: number; waitingPks: number[]; policyPks: number[] } {
     const key = JSON.stringify(scope ?? null);
     const memos = this.settledUnreadableCountMemo ??= new Map();
     const memo = memos.get(key);
+    const stamp = this.settledUnreadableStamp();
+    if (memo && this.reusesSettledUnreadableCount(memo, stamp)) return memo;
     if (maxAgeMs > 0 && memo) {
       // As the hidden-copy set: an older count is served while a new one is
       // counted in turns (refreshTierHiddenCountsInTurns).
-      if (Date.now() - memo.at >= maxAgeMs) this.refreshSettledUnreadableCountInTurns(key, scope);
+      if (stamp !== undefined || Date.now() - memo.at >= maxAgeMs) this.refreshSettledUnreadableCountInTurns(key, scope, stamp);
       return memo;
     }
     // A store the pool reads never walks the ledger here: on the loop that
@@ -16771,29 +16801,29 @@ export class LocalConnectorStore {
     // last count, or none yet, is served while a new one is counted in turns
     // on the read worker; prepareStatusCounts waits for one.
     if (offThreadReadsSupported(this.dbPath)) {
-      this.refreshSettledUnreadableCountInTurns(key, scope);
+      this.refreshSettledUnreadableCountInTurns(key, scope, stamp);
       return memo ?? { count: 0, waitingPks: [], policyPks: [] };
     }
     const counts = this.unreadHoldCounts(runHiddenStepsHere(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
     if (memos.size > 32) memos.clear();
-    memos.set(key, { at: Date.now(), ...counts });
+    memos.set(key, { at: Date.now(), stamp, ...counts });
     return counts;
   }
 
   private settledUnreadableCountRefresh: Set<string> | undefined;
 
-  private refreshSettledUnreadableCountInTurns(key: string, scope: ConnectorStoreStatusScope | undefined): void {
+  private refreshSettledUnreadableCountInTurns(key: string, scope: ConnectorStoreStatusScope | undefined, stamp: SettledUnreadableStamp | undefined): void {
     const running = this.settledUnreadableCountRefresh ??= new Set();
     if (running.has(key)) return;
     running.add(key);
-    const prior = this.settledUnreadableCountMemo?.get(key);
+    const memos = this.settledUnreadableCountMemo ??= new Map();
+    const prior = memos.get(key);
     void (async () => {
       try {
         const counts = this.unreadHoldCounts(await runHiddenStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
-        const memos = this.settledUnreadableCountMemo ??= new Map();
-        if (memos.get(key) !== prior) return;
+        if (this.settledUnreadableCountMemo !== memos || memos.get(key) !== prior) return;
         if (memos.size > 32) memos.clear();
-        memos.set(key, { at: Date.now(), ...counts });
+        memos.set(key, { at: Date.now(), stamp, ...counts });
       } catch {
         // A closed or busy store: the older count stands until the next ask.
       } finally {
@@ -16804,7 +16834,7 @@ export class LocalConnectorStore {
 
   // Made on first use: a class-field initializer is a load-time side effect
   // that pulls this module into the plugin bundle (plugin-bundle-no-bun-sqlite).
-  private settledUnreadableCountMemo: Map<string, { at: number; count: number; waitingPks: number[]; policyPks: number[] }> | undefined;
+  private settledUnreadableCountMemo: Map<string, SettledUnreadableMemo> | undefined;
 
   private extractionOutcome: ((identity: TierLedgerIdentity, localItemId: string) => ItemExtractionOutcome | undefined) | undefined;
 
@@ -16990,9 +17020,9 @@ export class LocalConnectorStore {
   }
 
   /**
-   * `countsMaxAgeMs`: for a status snapshot only, the hidden-copy set and the
-   * settled-unreadable count behind these counts may be reused up to this old
-   * (see STATUS_COUNTS_MAX_AGE_MS). Left out, every count is current.
+   * `countsMaxAgeMs` allows age-based reuse of status projections (see
+   * STATUS_COUNTS_MAX_AGE_MS). A stamped unreadable count reuses the store's
+   * unchanged window instead.
    */
   /**
    * The store's plain totals as its writes left them (store-totals.ts): one

@@ -48359,6 +48359,12 @@ var init_vector_digest = __esm(() => {
   init_embeddings();
 });
 
+// src/workers/source-index/status-count-reuse.ts
+var STORE_UNCHANGED_REUSE_MS;
+var init_status_count_reuse = __esm(() => {
+  STORE_UNCHANGED_REUSE_MS = 30 * 60000;
+});
+
 // src/core/evidence-reranker.ts
 function rerankPoolSemanticSeats(env = process.env) {
   const raw = env[SEMANTIC_POOL_SEATS_ENV]?.trim();
@@ -69459,6 +69465,7 @@ var init_local_index = __esm(() => {
   init_source_size_limits();
   init_store_totals();
   init_vector_digest();
+  init_status_count_reuse();
   init_boot_progress();
   init_evidence_reranker();
   init_engine_heartbeat();
@@ -78157,47 +78164,67 @@ ${parentKey(ref)}`, { ref, origin });
       const value = await this.tierHiddenItemPksInTurns();
       this.tierHiddenCountsMemo = { at: Date.now(), value };
       const key = JSON.stringify(scope ?? null);
-      const counts = this.unreadHoldCounts(await runHiddenStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
       const memos = this.settledUnreadableCountMemo ??= new Map;
+      const stamp = this.settledUnreadableStamp();
+      if (this.reusesSettledUnreadableCount(memos.get(key), stamp))
+        return;
+      const counts = this.unreadHoldCounts(await runHiddenStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
+      if (this.settledUnreadableCountMemo !== memos)
+        return;
       if (memos.size > 32)
         memos.clear();
-      memos.set(key, { at: Date.now(), ...counts });
+      memos.set(key, { at: Date.now(), stamp, ...counts });
+    }
+    settledUnreadableStamp() {
+      try {
+        const visibility = this.visibilityMarker();
+        const writes = this.writeSequence();
+        return visibility === undefined || writes === undefined ? undefined : [visibility, writes];
+      } catch {
+        return;
+      }
+    }
+    reusesSettledUnreadableCount(memo, stamp) {
+      return memo?.stamp !== undefined && stamp !== undefined && memo.stamp[0] === stamp[0] && memo.stamp[1] === stamp[1] && Date.now() - memo.at < STORE_UNCHANGED_REUSE_MS;
     }
     settledUnreadableCount(scope, maxAgeMs) {
       const key = JSON.stringify(scope ?? null);
       const memos = this.settledUnreadableCountMemo ??= new Map;
       const memo = memos.get(key);
+      const stamp = this.settledUnreadableStamp();
+      if (memo && this.reusesSettledUnreadableCount(memo, stamp))
+        return memo;
       if (maxAgeMs > 0 && memo) {
-        if (Date.now() - memo.at >= maxAgeMs)
-          this.refreshSettledUnreadableCountInTurns(key, scope);
+        if (stamp !== undefined || Date.now() - memo.at >= maxAgeMs)
+          this.refreshSettledUnreadableCountInTurns(key, scope, stamp);
         return memo;
       }
       if (offThreadReadsSupported(this.dbPath)) {
-        this.refreshSettledUnreadableCountInTurns(key, scope);
+        this.refreshSettledUnreadableCountInTurns(key, scope, stamp);
         return memo ?? { count: 0, waitingPks: [], policyPks: [] };
       }
       const counts = this.unreadHoldCounts(runHiddenStepsHere(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
       if (memos.size > 32)
         memos.clear();
-      memos.set(key, { at: Date.now(), ...counts });
+      memos.set(key, { at: Date.now(), stamp, ...counts });
       return counts;
     }
     settledUnreadableCountRefresh;
-    refreshSettledUnreadableCountInTurns(key, scope) {
+    refreshSettledUnreadableCountInTurns(key, scope, stamp) {
       const running = this.settledUnreadableCountRefresh ??= new Set;
       if (running.has(key))
         return;
       running.add(key);
-      const prior = this.settledUnreadableCountMemo?.get(key);
+      const memos = this.settledUnreadableCountMemo ??= new Map;
+      const prior = memos.get(key);
       (async () => {
         try {
           const counts = this.unreadHoldCounts(await runHiddenStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
-          const memos = this.settledUnreadableCountMemo ??= new Map;
-          if (memos.get(key) !== prior)
+          if (this.settledUnreadableCountMemo !== memos || memos.get(key) !== prior)
             return;
           if (memos.size > 32)
             memos.clear();
-          memos.set(key, { at: Date.now(), ...counts });
+          memos.set(key, { at: Date.now(), stamp, ...counts });
         } catch {} finally {
           running.delete(key);
         }
@@ -139838,13 +139865,14 @@ function providerFromCorpusId(corpusId) {
   }
   return parts[0] || "unknown";
 }
-var ITEMS_EMBEDDED_COUNT_KEY = "items_embedded", DASHBOARD_READINESS_LEDGER_MAX_AGE_MS = 120000, PLAIN_STATUS_REQUEST, DASHBOARD_STATUS_REQUEST, STORE_STATUS_REUSE_MS, STATUS_SNAPSHOT_REFRESH_MS = 0, STORE_UNCHANGED_REUSE_MS, STATUS_RECOUNT_CORPUS_LOG_MS = 2000, STATUS_SNAPSHOT_SCHEMA = "olympus.source-status-snapshot.v1", FALLBACK_PDF_EXTRACTED_CHARS = 50000;
+var ITEMS_EMBEDDED_COUNT_KEY = "items_embedded", DASHBOARD_READINESS_LEDGER_MAX_AGE_MS = 120000, PLAIN_STATUS_REQUEST, DASHBOARD_STATUS_REQUEST, STORE_STATUS_REUSE_MS, STATUS_SNAPSHOT_REFRESH_MS = 0, STATUS_RECOUNT_CORPUS_LOG_MS = 2000, STATUS_SNAPSHOT_SCHEMA = "olympus.source-status-snapshot.v1", FALLBACK_PDF_EXTRACTED_CHARS = 50000;
 var init_status = __esm(() => {
   init_off_thread_reads();
   init_corpus();
   init_embedding_cost_estimates();
   init_source_corpus_registry();
   init_answer_ready_coverage();
+  init_status_count_reuse();
   init_corpora();
   init_readwise();
   init_x_bookmarks();
@@ -139863,7 +139891,6 @@ var init_status = __esm(() => {
     readiness_ledger_max_age_ms: DASHBOARD_READINESS_LEDGER_MAX_AGE_MS
   });
   STORE_STATUS_REUSE_MS = 5 * 60000;
-  STORE_UNCHANGED_REUSE_MS = 30 * 60000;
 });
 
 // src/core/public-source-capabilities.ts

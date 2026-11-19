@@ -17753,6 +17753,9 @@ function backfillVectorDigests(db, modelId, maxRows = 128) {
   return applyVectorDigestWindow(db, modelId, state.cursorRowid, rows, maxRows);
 }
 
+// src/workers/source-index/status-count-reuse.ts
+var STORE_UNCHANGED_REUSE_MS = 30 * 60000;
+
 // src/core/sqlite-rows.ts
 function* iterateRows(db, sql, ...params) {
   const statement = db.prepare(sql);
@@ -34097,47 +34100,67 @@ ${parentKey(ref)}`, { ref, origin });
     const value = await this.tierHiddenItemPksInTurns();
     this.tierHiddenCountsMemo = { at: Date.now(), value };
     const key = JSON.stringify(scope ?? null);
-    const counts = this.unreadHoldCounts(await runHiddenStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
     const memos = this.settledUnreadableCountMemo ??= new Map;
+    const stamp = this.settledUnreadableStamp();
+    if (this.reusesSettledUnreadableCount(memos.get(key), stamp))
+      return;
+    const counts = this.unreadHoldCounts(await runHiddenStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
+    if (this.settledUnreadableCountMemo !== memos)
+      return;
     if (memos.size > 32)
       memos.clear();
-    memos.set(key, { at: Date.now(), ...counts });
+    memos.set(key, { at: Date.now(), stamp, ...counts });
+  }
+  settledUnreadableStamp() {
+    try {
+      const visibility = this.visibilityMarker();
+      const writes = this.writeSequence();
+      return visibility === undefined || writes === undefined ? undefined : [visibility, writes];
+    } catch {
+      return;
+    }
+  }
+  reusesSettledUnreadableCount(memo, stamp) {
+    return memo?.stamp !== undefined && stamp !== undefined && memo.stamp[0] === stamp[0] && memo.stamp[1] === stamp[1] && Date.now() - memo.at < STORE_UNCHANGED_REUSE_MS;
   }
   settledUnreadableCount(scope, maxAgeMs) {
     const key = JSON.stringify(scope ?? null);
     const memos = this.settledUnreadableCountMemo ??= new Map;
     const memo = memos.get(key);
+    const stamp = this.settledUnreadableStamp();
+    if (memo && this.reusesSettledUnreadableCount(memo, stamp))
+      return memo;
     if (maxAgeMs > 0 && memo) {
-      if (Date.now() - memo.at >= maxAgeMs)
-        this.refreshSettledUnreadableCountInTurns(key, scope);
+      if (stamp !== undefined || Date.now() - memo.at >= maxAgeMs)
+        this.refreshSettledUnreadableCountInTurns(key, scope, stamp);
       return memo;
     }
     if (offThreadReadsSupported(this.dbPath)) {
-      this.refreshSettledUnreadableCountInTurns(key, scope);
+      this.refreshSettledUnreadableCountInTurns(key, scope, stamp);
       return memo ?? { count: 0, waitingPks: [], policyPks: [] };
     }
     const counts = this.unreadHoldCounts(runHiddenStepsHere(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
     if (memos.size > 32)
       memos.clear();
-    memos.set(key, { at: Date.now(), ...counts });
+    memos.set(key, { at: Date.now(), stamp, ...counts });
     return counts;
   }
   settledUnreadableCountRefresh;
-  refreshSettledUnreadableCountInTurns(key, scope) {
+  refreshSettledUnreadableCountInTurns(key, scope, stamp) {
     const running = this.settledUnreadableCountRefresh ??= new Set;
     if (running.has(key))
       return;
     running.add(key);
-    const prior = this.settledUnreadableCountMemo?.get(key);
+    const memos = this.settledUnreadableCountMemo ??= new Map;
+    const prior = memos.get(key);
     (async () => {
       try {
         const counts = this.unreadHoldCounts(await runHiddenStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
-        const memos = this.settledUnreadableCountMemo ??= new Map;
-        if (memos.get(key) !== prior)
+        if (this.settledUnreadableCountMemo !== memos || memos.get(key) !== prior)
           return;
         if (memos.size > 32)
           memos.clear();
-        memos.set(key, { at: Date.now(), ...counts });
+        memos.set(key, { at: Date.now(), stamp, ...counts });
       } catch {} finally {
         running.delete(key);
       }
