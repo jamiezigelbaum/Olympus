@@ -1,4 +1,4 @@
-import { addMemoryPayloadText, changeMemoryActivity, changeMemoryCounter, withMemoryPayload } from '../../core/memory-counters.ts';
+import { changeMemoryActivity, changeMemoryCounter } from '../../core/memory-counters.ts';
 import { trackSqliteStoreMemory, untrackSqliteStoreMemory } from '../engine-split/sqlite-memory.ts';
 import { noteSourceIndexReadProgress } from '../../core/source-index/read-progress.ts';
 import { sizeHeldItemKey } from '../../core/source-size-limits.ts';
@@ -10,9 +10,11 @@ import {
 import { createVectorDigestSchema, writeVectorDigest, backfillVectorDigests, vectorDigestState, vectorDigestSourceQuery, applyVectorDigestWindow, type VectorDigestSourceRow } from './vector-digest.ts';
 import { encodeVectorDigest, scoreVectorDigest, VectorDigestHeap } from '../source-index/vector-digest.ts';
 import { reportFrontStoreOpened } from '../../core/boot-progress.ts';
+import { semanticRowsPerStore } from '../../core/evidence-reranker.ts';
 import { setEngineStep } from '../../core/engine-heartbeat.ts';
 import { iterateRows } from '../../core/sqlite-rows.ts';
 import { installMainThreadSqlTrace } from './main-thread-sql-trace.ts';
+import { beginSourceAnswerConceptCounts, beginSourceAnswerStoreTiming, sourceAnswerVectorWork, type SourceAnswerTraceAdapterStages } from '../source-index/answer-latency-trace.ts';
 import { storeOwnerIdleMs, storeReadHasPriority } from '../../core/store-reclaim-admission.ts';
 import { assertWritableStoreOpenAllowed, writableStoreOpensForbidden } from '../../core/store-write-guard.ts';
 import type { PeopleCitationName, PeopleSenderIdentity, PeopleSenderObservation } from '../../core/people-index.ts';
@@ -262,6 +264,7 @@ const KEYWORD_RANKED_BOUND_ROWS_PER_ITEM = 8;
 // minimum-signal filter, so a recent count serves: every search of a
 // question (plain, content, relaxed) and the next question reuse it.
 const CONCEPT_COUNT_MAX_AGE_MS = 5 * 60_000;
+const KEYWORD_POPULATION_SQL = 'SELECT COUNT(*) AS count FROM items WHERE tombstoned = 0';
 const CONCEPT_COUNT_MEMO_LIMIT = 512;
 // Titles are compact, user-assigned metadata. A small source-neutral boost
 // keeps an exact title match inside the bounded keyword lane when longer body
@@ -285,9 +288,6 @@ const VECTOR_VISIBILITY_SLICE_MS = 50;
 export const CONNECTOR_STORE_CONVERSATION_INDEX = 'idx_connector_store_items_conversation_time';
 export const CONNECTOR_STORE_CONVERSATION_INDEX_SQL = `CREATE INDEX IF NOT EXISTS ${CONNECTOR_STORE_CONVERSATION_INDEX}
   ON items(provider_conversation_id, authored_at) WHERE provider_conversation_id IS NOT NULL`;
-// How many of its nearest vector rows a store offers a reranked pool's
-// semantic seats (router withSemanticPoolSeats), whatever the bar.
-const CONNECTOR_STORE_SEMANTIC_ROWS = 3;
 // The most query concepts a keyword match must contain (see searchItemsDetailed).
 const MAX_REQUIRED_CONCEPTS = 3;
 // Or the share of the query's concept weight (IDF) a keyword match must carry.
@@ -2670,12 +2670,6 @@ let vectorDigestBackfillHold: () => boolean = () => false;
 export function setVectorDigestBackfillHold(hold?: () => boolean): void {
   vectorDigestBackfillHold = hold ?? (() => false);
 }
-
-/** The split background's boot gate. Per-item ledger reads and writes bypass it. */
-let visibilityBootPending: (() => Promise<void> | undefined) | undefined;
-export function setVisibilityBootWait(wait: () => Promise<void> | undefined): void {
-  visibilityBootPending = wait;
-}
 /**
  * A store that opens with an incomplete digest waits this long before its
  * first turn: on upgrade every store opens at once, and the backfills must
@@ -2708,6 +2702,7 @@ export async function scanDigestPages(
    */
   sideReaders?: () => Promise<ReadonlyArray<(query: StoreRead) => Promise<unknown>>>,
 ): Promise<VectorScan> {
+  const work = sourceAnswerVectorWork();
   const heap = new VectorDigestHeap();
   const query = encodeVectorDigest(queryVector);
   let afterChunkPk = 0;
@@ -2717,15 +2712,25 @@ export async function scanDigestPages(
   while (true) {
     if (expired()) return cut;
     const page = connectorStoreVectorDigestPageQuery(options, afterChunkPk);
-    const packed = await read({ mode: 'get', ...page }) as VectorDigestPackedPage;
+    const packed = await read({ mode: 'get', site: 'vector_digest_page', ...page }) as VectorDigestPackedPage;
     const excluded = options.excludedItemPks;
+    let scanned = packed.n;
+    const unpackStartedAt = work && performance.now();
     const finished = forEachPackedVectorDigest(packed, (chunkPk, digest, index, itemPk) => {
-      if ((index & 31) === 0 && expired()) return false;
+      if ((index & 31) === 0 && expired()) {
+        scanned = index;
+        return false;
+      }
       if (excluded && itemPk !== undefined && excluded.has(itemPk)) return true;
       if ((index & 31) === 0) noteSourceIndexReadProgress();
       heap.append(chunkPk, scoreVectorDigest(query, digest));
       return true;
     });
+    if (work) {
+      work.digest_unpack_score_ms += performance.now() - unpackStartedAt!;
+      work.digest_pages_read += 1;
+      work.digest_rows_scanned += scanned;
+    }
     if (!finished) return cut;
     if (packed.n < VECTOR_DIGEST_PAGE_ROWS) break;
     afterChunkPk = packed.last_pk;
@@ -2764,6 +2769,10 @@ export async function scanDigestPages(
     // score-driven reading past that point.
     if (qualifiedItems >= limit && (candidates >= Math.min(maxCandidates, VECTOR_DIGEST_MAX_CANDIDATES)
       || heap.peekScore() + underestimate < kthBestCosine(bestByItem, limit))) break;
+    // Nothing left can reach the score floor, so no further item can qualify:
+    // without this stop a store with fewer than `limit` related items had
+    // every full vector it holds read back for one question.
+    if (heap.peekScore() + underestimate < MIN_VECTOR_SCORE) break;
     if (expired()) return cutWith();
     if (batches++ > 0) await yieldConnectorStoreVectorScan();
     const digestScores = new Map<number, number>();
@@ -2784,17 +2793,22 @@ export async function scanDigestPages(
         const pagePks = chunkPks.slice(at + lane * CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE, at + (lane + 1) * CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE);
         if (pagePks.length === 0) return [] as VectorScoreRow[];
         const page = connectorStoreCurrentEmbeddingPageQuery({ ...options, chunkPks: pagePks }, 0, pagePks.length);
-        return (readers?.[lane] ?? read)({ mode: 'all', ...page }) as Promise<VectorScoreRow[]>;
+        return (readers?.[lane] ?? read)({ mode: 'all', site: 'vector_digest_rescore', ...page }) as Promise<VectorScoreRow[]>;
       }));
       const rows = pages.flat();
+      const mismatchesBeforePage = dimensionMismatches;
       for (const [index, row] of rows.entries()) {
-        if ((index & 31) === 0 && expired()) return cutWith();
+        if ((index & 31) === 0 && expired()) {
+          if (work) work.full_vectors_rescored += index - (dimensionMismatches - mismatchesBeforePage);
+          return cutWith();
+        }
         const folded = foldVectorScore(bestByItem, row, queryVector);
         dimensionMismatches += folded.mismatch;
         qualifiedItems += folded.qualified;
         const digestScore = digestScores.get(row.chunk_pk);
         if (folded.score !== undefined && digestScore !== undefined) underestimate = Math.max(underestimate, folded.score - digestScore);
       }
+      if (work) work.full_vectors_rescored += rows.length - (dimensionMismatches - mismatchesBeforePage);
       if (at + CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE * width < chunkPks.length && rePages % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0) await yieldConnectorStoreVectorScan();
     }
   }
@@ -3697,15 +3711,21 @@ function visibilityStepAwaited(read: VisibilityRead): Promise<unknown> {
  * a store the background may still be creating. Never creates or changes the
  * file.
  */
-export function connectorStoreReadableNow(dbPath: string): boolean {
+export function connectorStoreReadableNow(dbPath: string, onFailure?: (error: unknown) => void): boolean {
   let db: Database | undefined;
   try {
     const stat = lstatSync(dbPath);
-    if (!stat.isFile() || stat.isSymbolicLink()) return false;
+    if (!stat.isFile()) {
+      onFailure?.(new Error('Connector store read-only mode requires a regular non-symlink database file.'));
+      return false;
+    }
     db = new Database(dbPath, { readonly: true, create: false, strict: true });
     db.exec('PRAGMA busy_timeout = 10000;');
-    return readSqliteSchemaVersion(db, SQLITE_STORE_ID) >= READ_ONLY_MIN_SCHEMA_VERSION;
-  } catch {
+    if (readSqliteSchemaVersion(db, SQLITE_STORE_ID) >= READ_ONLY_MIN_SCHEMA_VERSION) return true;
+    onFailure?.(new Error('Connector store read-only mode requires the v7 filter schema or newer.'));
+    return false;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') onFailure?.(error);
     return false;
   } finally {
     db?.close();
@@ -4745,9 +4765,7 @@ export class LocalConnectorStore {
    * set is current as of the start of the build; a copy hidden after that is
    * caught by the embedding batch recheck right before dispatch.
    */
-  private async tierHiddenItemPksInTurns(bootBuild = false): Promise<TierLedgerHiddenItemPks> {
-    const boot = bootBuild ? undefined : visibilityBootPending?.();
-    if (boot) await boot;
+  private async tierHiddenItemPksInTurns(): Promise<TierLedgerHiddenItemPks> {
     const base = await runHiddenStepsInTurns(this.tierLedgerHiddenSteps());
     // Keep the counts' start-of-build semantics during continuous intake.
     // Search and embedding recheck served rows; requiring the whole lane to
@@ -4801,7 +4819,7 @@ export class LocalConnectorStore {
    * front start rebuilt it from the ledger (gate 1, ops#151: about 59 s).
    */
   async keepVisibilityCurrentInTurns(): Promise<void> {
-    await this.tierHiddenItemPksInTurns(true);
+    await this.tierHiddenItemPksInTurns();
     if (!this.readOnly) await this.publishVisibility();
   }
 
@@ -5474,7 +5492,7 @@ export class LocalConnectorStore {
 
   /** Called as feeds move: refreshes and saves this writer's set before a feed drops what the saved stamp needs. */
   private refreshVisibilityIfBehind(options: { anyMovement?: boolean; ledgerCursor?: number } = {}): void {
-    if (this.visibilityClosed || this.readOnly || !this.visibilityFeedPresent || this.visibilityRefreshing || visibilityBootPending?.()) return;
+    if (this.visibilityClosed || this.readOnly || !this.visibilityFeedPresent || this.visibilityRefreshing) return;
     try {
       const ledger = this.visibilityRegisteredLedger;
       const state = this.readVisibilityState();
@@ -5493,12 +5511,14 @@ export class LocalConnectorStore {
     }
     let refreshing: Promise<void> | undefined;
     refreshing = (async () => {
+      changeMemoryActivity('visibility_refresh', 1);
       try {
         await runHiddenStepsInTurns(this.tierLedgerHiddenSteps());
         await this.publishVisibility();
       } catch {
         // The next movement or the backstop asks again.
       } finally {
+        changeMemoryActivity('visibility_refresh', -1);
         if (this.visibilityRefreshing === refreshing) this.visibilityRefreshing = undefined;
       }
     })();
@@ -8069,8 +8089,6 @@ export class LocalConnectorStore {
    * this read once took (#1305).
    */
   async peopleObservationsOffThread(): Promise<PeopleSenderObservation[]> {
-    const boot = visibilityBootPending?.();
-    if (boot) await boot;
     changeMemoryActivity('people_refresh', 1);
     try {
       if (!offThreadReadsSupported(this.dbPath)) return this.peopleObservations();
@@ -10080,33 +10098,47 @@ export class LocalConnectorStore {
    * never-checked judgments first, then those that have waited longest, so
    * judgments whose items are not ready cannot starve the rest.
    */
-  unappliedMediaJudgments(limit = 200): Array<{
-    mediaSha256: string;
-    judgment: MediaJudgment;
-    items: Array<Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>>;
-  }> {
+  unappliedMediaJudgments(limit = 200): Array<NonNullable<ReturnType<LocalConnectorStore['mediaJudgmentEntry']>>> {
     if (!this.mediaJudgmentsPresent || !this.chunkMediaColumnsPresent) return [];
     const rows = this.db.query(`
       SELECT media_sha256 FROM media_judgments WHERE tier_applied = 0
       ORDER BY tier_checked_at IS NOT NULL, tier_checked_at, media_sha256 LIMIT ?
     `).all(Math.max(1, limit)) as Array<{ media_sha256: string }>;
-    return rows.flatMap((row) => {
-      const judgment = this.mediaJudgment(row.media_sha256);
-      if (!judgment) return [];
-      const items = (this.db.query(`
-        SELECT DISTINCT i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id
-        FROM chunks c JOIN items i ON i.item_pk = c.item_pk
-        WHERE c.media_sha256 = ? AND i.tombstoned = 0
-      `).all(row.media_sha256) as Array<{
-        provider: string; account_scope: string; provider_item_id: string; provider_conversation_id: string | null;
-      }>).map((item) => ({
-        provider: item.provider,
-        accountScope: item.account_scope,
-        providerItemId: item.provider_item_id,
-        ...(item.provider_conversation_id ? { providerConversationId: item.provider_conversation_id } : {}),
-      }));
-      return [{ mediaSha256: row.media_sha256, judgment, items }];
-    });
+    return rows.flatMap(row => this.mediaJudgmentEntry(row.media_sha256) ?? []);
+  }
+
+  /** The background walk pages through the unapplied index in digest order. */
+  async unappliedMediaJudgmentKeys(after: string, limit: number): Promise<string[]> {
+    if (!this.mediaJudgmentsPresent || !this.chunkMediaColumnsPresent) return [];
+    const sql = `SELECT media_sha256 FROM media_judgments
+      WHERE tier_applied = 0 AND media_sha256 > ? ORDER BY media_sha256 LIMIT ?`;
+    const rows = (offThreadReadsSupported(this.dbPath)
+      ? await readInBackground(this.dbPath, { sql, params: [after, limit], mode: 'all' })
+      : this.db.query(sql).all(after, limit)) as Array<{ media_sha256: string }>;
+    return rows.map(row => row.media_sha256);
+  }
+
+  /** Read the current verdict and the active items carrying this picture. */
+  mediaJudgmentEntry(mediaSha256: string): {
+    mediaSha256: string;
+    judgment: MediaJudgment;
+    items: Array<Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>>;
+  } | undefined {
+    const judgment = this.mediaJudgment(mediaSha256);
+    if (!judgment) return undefined;
+    const items = (this.db.query(`
+      SELECT DISTINCT i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id
+      FROM chunks c JOIN items i ON i.item_pk = c.item_pk
+      WHERE c.media_sha256 = ? AND i.tombstoned = 0
+    `).all(mediaSha256) as Array<{
+      provider: string; account_scope: string; provider_item_id: string; provider_conversation_id: string | null;
+    }>).map((item) => ({
+      provider: item.provider,
+      accountScope: item.account_scope,
+      providerItemId: item.provider_item_id,
+      ...(item.provider_conversation_id ? { providerConversationId: item.provider_conversation_id } : {}),
+    }));
+    return { mediaSha256, judgment, items };
   }
 
   /**
@@ -13628,8 +13660,6 @@ export class LocalConnectorStore {
    * a live but stalled holder keeps its lock, so it cannot race a takeover.
    */
   async embedChunks(options: ConnectorStoreEmbedOptions): Promise<ConnectorStoreEmbedSummary> {
-    const boot = visibilityBootPending?.();
-    if (boot) await boot;
     if (this.dbPath === ':memory:') return this.embedChunksUnderLease(options);
     return withFileLease(
       `${this.dbPath}${CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX}`,
@@ -13983,15 +14013,6 @@ export class LocalConnectorStore {
           ? { image: { path: row.media_path, sha256: row.media_sha256, mimeType: 'image/jpeg' } }
           : {}),
       }));
-      const embedPayload = <T>(run: (inputs: ReturnType<typeof inputsFor>) => Promise<T>) =>
-        withMemoryPayload('embed', () => {
-          const inputs = inputsFor(batch);
-          for (const input of inputs) {
-            addMemoryPayloadText(input.text);
-            if (input.title) addMemoryPayloadText(input.title);
-          }
-          return run(inputs);
-        });
       let vectors: number[][];
       const embedStarted = Date.now();
       // Pictures not yet judged are judged from the same model call: the
@@ -14001,7 +14022,7 @@ export class LocalConnectorStore {
       let judgedBatch: Map<number, MediaJudgment> | undefined;
       try {
         if (judgeNow) {
-          const returned = await embedPayload(inputs => judging!.embedWithImageVectors!(inputs));
+          const returned = await judging!.embedWithImageVectors!(inputsFor(batch));
           vectors = returned.vectors;
           judgedBatch = new Map();
           // Only pictures that need judging now: a settled verdict, or an
@@ -14022,7 +14043,7 @@ export class LocalConnectorStore {
             }
           }
         } else {
-          vectors = await embedPayload(inputs => provider.embed(inputs, { taskType: 'RETRIEVAL_DOCUMENT' }));
+          vectors = await provider.embed(inputsFor(batch), { taskType: 'RETRIEVAL_DOCUMENT' });
         }
       } catch (error) {
         if (!(error instanceof SourceEmbeddingInputsFailedError)) throw error;
@@ -14045,7 +14066,7 @@ export class LocalConnectorStore {
         staleSkipped += recheck.notVisible + recheck.privateTier;
         batch = recheck.kept;
         if (batch.length === 0) continue;
-        vectors = await embedPayload(inputs => provider.embed(inputs, { taskType: 'RETRIEVAL_DOCUMENT' }));
+        vectors = await provider.embed(inputsFor(batch), { taskType: 'RETRIEVAL_DOCUMENT' });
       }
       const onDemandItems = this.db.query(`SELECT COUNT(*) AS n FROM items i JOIN on_demand_item_reads r ON r.local_item_id = i.local_item_id
         AND r.source_version = COALESCE(i.source_version, '') WHERE i.item_pk IN (SELECT value FROM json_each(?))`)
@@ -14736,6 +14757,7 @@ export class LocalConnectorStore {
     laneOptions: { locate?: boolean } = {},
   ): Promise<{ rows: ConnectorStoreScoredSearchRow[]; skippedReason?: string }> {
     assertConnectorStoreEmbeddingProvider(this.trustDomain, provider);
+    sourceAnswerVectorWork();
     const vectorFilters = normalizeConnectorStoreSearchFilters(filters);
     const trimmed = query.trim();
     if (!trimmed) return { rows: [] };
@@ -15359,6 +15381,47 @@ export class LocalConnectorStore {
   // Created on first use: a field initializer that constructs an object
   // keeps this class in bundles that never use it (dist/index.js).
   private conceptCountMemo?: Map<string, { count: number; at: number }>;
+  // The keyword lane's population (live items) for concept weights. Counting
+  // it scans items: 9 to 10 s on a large store whose pages are not in memory
+  // (LANEAB2, 19 Nov 2026), and it used to expire with the concept counts, so
+  // the first new question after five idle minutes paid it on every store. A
+  // search now uses the remembered count however old; the engine refreshes it
+  // off the search's path (keepKeywordPopulationCurrent). A store that has
+  // never counted does not scan inside the search either (26 and 45 s on the
+  // two largest stores for an Ask in the first minute after a start, 19 Nov
+  // 2026): it takes the store's kept total, or the highest item key, as an
+  // estimate. The weights are logarithms of it, and the count replaces it.
+  private keywordPopulation?: { count: number; at: number; used: boolean; estimate?: boolean };
+  private keywordPopulationRefreshing = false;
+
+  /**
+   * Counts the keyword population off any search's path. `seed`: count even
+   * if no search has asked yet (once after start). Otherwise only when the
+   * count is older than the concept counts' age and a search has used it
+   * since, so an idle store is not scanned on a timer.
+   */
+  async keepKeywordPopulationCurrent(seed = false): Promise<void> {
+    const known = this.keywordPopulation;
+    if (this.keywordPopulationRefreshing || this.closedForPoolReads) return;
+    const counted = known !== undefined && known.estimate !== true;
+    if (seed ? counted : !known || (counted && (!known.used || Date.now() - known.at < CONCEPT_COUNT_MAX_AGE_MS))) return;
+    // The store's own kept total of live items is the same number with no scan;
+    // the scan is only for a store whose totals are not filled or owe a walk.
+    const kept = this.totals();
+    if (kept && kept.walkOwed !== 'now') {
+      this.keywordPopulation = { count: kept.items, at: Date.now(), used: false };
+      return;
+    }
+    this.keywordPopulationRefreshing = true;
+    try {
+      const row = await this.readOffThread((function* (): Generator<StoreRead, { count: number }, unknown> {
+        return (yield { mode: 'get', site: 'keyword_population_count', sql: KEYWORD_POPULATION_SQL, params: [] }) as { count: number };
+      })());
+      this.keywordPopulation = { count: row.count, at: Date.now(), used: false };
+    } finally {
+      this.keywordPopulationRefreshing = false;
+    }
+  }
 
   /** Drives a read generator on this store's own connection. */
   private readHere<T>(steps: Generator<StoreRead | VisibilityRead, T, unknown>): T {
@@ -15460,7 +15523,8 @@ export class LocalConnectorStore {
         const bound = from === undefined ? undefined : 'bound' in from ? from.bound : undefined;
         const atOrAbove = from === undefined ? undefined : 'atOrAbove' in from ? from.atOrAbove : undefined;
         const top = from === undefined ? undefined : bound !== undefined ? 'top' : 'tied';
-        return { mode: 'all', sql: `
+        const site = top === 'top' ? 'ranked_match_page_bounded' : top === 'tied' ? 'ranked_match_page_tied' : 'ranked_match_page';
+        return { mode: 'all', site, sql: `
         ${top === undefined ? '' : `WITH ${top} AS MATERIALIZED (
           SELECT rowid AS fts_rowid, rank FROM connector_store_fts
           WHERE connector_store_fts MATCH ?
@@ -15724,25 +15788,32 @@ export class LocalConnectorStore {
       if (memo.size >= CONCEPT_COUNT_MEMO_LIMIT) memo.clear();
       memo.set(key, { count, at: Date.now() });
     };
-    const POPULATION = '\u0000items';
-    let items = remembered(POPULATION);
-    if (items === undefined) {
-      items = ((yield { mode: 'get', sql: 'SELECT COUNT(*) AS count FROM items WHERE tombstoned = 0', params: [] }) as { count: number }).count;
-      remember(POPULATION, items);
+    let population = this.keywordPopulation;
+    if (!population) {
+      const kept = this.totals();
+      const estimate = kept ? kept.items
+        : ((yield { mode: 'get', site: 'keyword_population_estimate', sql: 'SELECT MAX(item_pk) AS count FROM items', params: [] }) as { count: number | null }).count ?? 0;
+      population = this.keywordPopulation ??= { count: estimate, at: Date.now(), used: true, estimate: true };
     }
+    population.used = true;
+    const items = population.count;
     const counts: number[] = [];
+    const traceCounts = beginSourceAnswerConceptCounts();
     for (const group of groups) {
       const groupQuery = sourceIndexFtsGroupQuery(group, exact);
       let count = remembered(groupQuery);
+      const memoHit = count !== undefined;
       if (count === undefined) {
         count = ((yield {
           mode: 'get',
+          site: 'concept_weight_count',
           sql: 'SELECT COUNT(DISTINCT r.item_pk) AS count FROM connector_store_fts_rows r WHERE r.fts_rowid IN (SELECT rowid FROM connector_store_fts WHERE connector_store_fts MATCH ?)',
           params: [groupQuery],
         }) as { count: number }).count;
         remember(groupQuery, count);
       }
       counts.push(count);
+      traceCounts?.push({ matched_items: count, memo_hit: memoHit });
     }
     const of = counts.map((count) => Math.max(0, Math.log((items + 1) / (count + 0.5))));
     return { of, total: of.reduce((sum, weight) => sum + weight, 0), counts, population: items };
@@ -15891,6 +15962,7 @@ export class LocalConnectorStore {
     const selectedFilters = connectorStoreFilterSql(filters);
     return {
       mode: 'all',
+      site: 'recentItemsRead',
       sql: `
       SELECT
         i.item_pk, i.provider, i.family, i.account_scope, i.provider_item_id, i.provider_thread_id,
@@ -16796,8 +16868,6 @@ export class LocalConnectorStore {
     scope?: ConnectorStoreStatusScope,
     options: { countsMaxAgeMs?: number } = {},
   ): Promise<ConnectorStoreStatus> {
-    const boot = visibilityBootPending?.();
-    if (boot) await boot;
     // A pool that is full for now (threads still stopping after a missed
     // deadline) is waited for: only a store the pool never reads is counted
     // on this thread.
@@ -17305,10 +17375,6 @@ export async function syncAndEmbedFromConnector(
     options.store.queueEmbedding(selectedIds, options.embeddingProvider);
     return { sync, embed: emptyEmbed() };
   }
-  if (visibilityBootPending?.()) {
-    options.store.queueEmbedding(selectedIds, options.embeddingProvider);
-    return { sync, embed: { ...emptyEmbed(), deferredReason: 'waiting_for_boot_visibility' } };
-  }
   const selectedBatches = selectedIds.length === 0
     ? [[]]
     : [...batched(selectedIds, MAX_SELECTED_EMBED_ITEM_IDS)];
@@ -17478,8 +17544,12 @@ export function createConnectorStoreCorpusAdapter(
   const { store, embeddingProvider } = options;
   const filters = normalizeConnectorStoreSearchFilters(options.filters);
   const semanticRelevanceBar = normalizeSemanticRelevanceBar(options.semanticRelevanceBar);
-  const adapter: SourceIndexCorpusSearchAdapter = (
+  const adapter: SourceIndexCorpusSearchAdapter & ((
     request: SourceIndexCorpusSearchRequest,
+    stages?: SourceAnswerTraceAdapterStages,
+  ) => SourceIndexCorpusSearchResponse | Promise<SourceIndexCorpusSearchResponse>) = (
+    request: SourceIndexCorpusSearchRequest,
+    stages?: SourceAnswerTraceAdapterStages,
   ): SourceIndexCorpusSearchResponse | Promise<SourceIndexCorpusSearchResponse> => {
     assertConnectorStoreCorpusRequest(store, request);
     const startedAt = Date.now();
@@ -17495,12 +17565,19 @@ export function createConnectorStoreCorpusAdapter(
     }
 
     if (!embeddingProvider || useHybrid !== 'hybrid' || semanticSkippedReason) return (async (): Promise<SourceIndexCorpusSearchResponse> => {
-      const keywordLane = await revalidateKeywordLane(store, await relaxEmptyLocalKeywordLane(store, request.query, request.maxResults, options.accountScope, filters,
-        await connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters, { onPartialRows: partialKeywordRows(store, request, options.resultProjector, filters?.locatorPathScope) }, request.deadlineAtMs),
-        options.localKeywordFallback, {}, request.deadlineAtMs));
+      const markStage = startStoreStageClock(stages);
+      let keywordLane = await connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters,
+        { onPartialRows: partialKeywordRows(store, request, options.resultProjector, filters?.locatorPathScope) }, request.deadlineAtMs);
+      markStage?.('keyword_lane_ms');
+      keywordLane = await relaxEmptyLocalKeywordLane(store, request.query, request.maxResults, options.accountScope, filters,
+        keywordLane, options.localKeywordFallback, {}, request.deadlineAtMs);
+      markStage?.('keyword_relaxation_ms');
+      keywordLane = await revalidateKeywordLane(store, keywordLane);
+      markStage?.('keyword_revalidation_ms');
       const rows = keywordLane.rows;
       let recencyCut = false;
       const recencyRows = await chatRecencyLaneRows(store, options.accountScope, filters, request.deadlineAtMs, () => { recencyCut = true; });
+      markStage?.('recency_read_ms');
       if (recencyRows.length === 0) {
         const hits = withKeywordLeaderSignals(rows.map((row) => connectorStoreHitFromRow(
           store,
@@ -17509,7 +17586,8 @@ export function createConnectorStoreCorpusAdapter(
           options.resultProjector,
           filters?.locatorPathScope,
         )), keywordLane);
-        return {
+        markStage?.('fusion_ms');
+        const response: SourceIndexCorpusSearchResponse = {
           hits,
           storeRelevance: connectorStoreRelevance(keywordLane),
           latencyMs: Date.now() - startedAt,
@@ -17522,6 +17600,8 @@ export function createConnectorStoreCorpusAdapter(
           matchCount: keywordLane.matchCount,
           rawExposed: false,
         };
+        markStage?.('finalize_ms');
+        return response;
       }
       const lanes = [
         { name: 'keyword', items: rows },
@@ -17552,7 +17632,8 @@ export function createConnectorStoreCorpusAdapter(
         ...(options.resultProjector ? { resultProjector: options.resultProjector } : {}),
         ...(filters?.locatorPathScope ? { locatorPathScope: filters.locatorPathScope } : {}),
       }), keywordLane);
-      return {
+      markStage?.('fusion_ms');
+      const response: SourceIndexCorpusSearchResponse = {
         hits,
         storeRelevance: connectorStoreRelevance(keywordLane),
         latencyMs: Date.now() - startedAt,
@@ -17568,6 +17649,8 @@ export function createConnectorStoreCorpusAdapter(
         matchCount: keywordLane.matchCount,
         rawExposed: false,
       };
+      markStage?.('finalize_ms');
+      return response;
     })();
 
     return hybridConnectorStoreSearch(
@@ -17575,6 +17658,7 @@ export function createConnectorStoreCorpusAdapter(
       embeddingProvider,
       request,
       startedAt,
+      stages,
       options.accountScope,
       filters,
       semanticRelevanceBar,
@@ -17717,8 +17801,13 @@ export function createConnectorStoreCorpusAdapter(
     };
   };
   const expanded: SourceIndexCorpusSearchAdapter = (request) => {
+    const timing = beginSourceAnswerStoreTiming();
     assertConnectorStoreCorpusRequest(store, request);
-    return withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), () => adapter(request), store);
+    const response = withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), () => adapter(request, timing?.stages), store);
+    return timing ? response.then((result) => {
+      timing.finish();
+      return result;
+    }) : response;
   };
   expanded.metadataMatches = (request) => {
     assertConnectorStoreCorpusRequest(store, request);
@@ -17871,11 +17960,25 @@ function connectorStoreRecencyLaneAudit(corpusId: string, candidateCount: number
   };
 }
 
+type StoreStage = Exclude<keyof SourceAnswerTraceAdapterStages, 'adapter_elapsed_ms' | 'unattributed_ms' | 'vector_lane_ms'>;
+
+// Marks consecutive wall intervals. The parallel lanes keep their own start points.
+function startStoreStageClock(stages?: SourceAnswerTraceAdapterStages): ((stage: StoreStage) => void) | undefined {
+  if (!stages) return undefined;
+  let startedAt = performance.now();
+  return (stage) => {
+    const now = performance.now();
+    stages[stage] = now - startedAt;
+    startedAt = now;
+  };
+}
+
 async function hybridConnectorStoreSearch(
   store: LocalConnectorStore,
   provider: SourceEmbeddingProvider,
   request: SourceIndexCorpusSearchRequest,
   startedAt: number,
+  stages: SourceAnswerTraceAdapterStages | undefined,
   accountScope?: string,
   filters?: ConnectorStoreSearchFilters,
   semanticRelevanceBar?: number,
@@ -17891,16 +17994,20 @@ async function hybridConnectorStoreSearch(
   // embeddings. Run one after the other, a slow keyword lane left the vector
   // lane the remainder of the budget, and it missed the deadline on every
   // question (Sparta 2026-11-10, #1242).
+  const markStage = startStoreStageClock(stages);
   const keywordWork = (async () => {
+    const laneStartedAt = stages ? performance.now() : 0;
     const keywordStartedAt = Date.now();
     const lane = await connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false, onPartialRows: partialKeywordRows(store, request, resultProjector, filters?.locatorPathScope) }, request.deadlineAtMs);
     const baseline = keywordAlternatives(request.query)?.size
       ? lane.baseline ?? await withKeywordExpansionDisabled(() => connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, {prefix:false}, request.deadlineAtMs))
       : undefined;
     partialKeywordRows(store, request, resultProjector, filters?.locatorPathScope)(lane.rows);
+    if (stages) stages.keyword_lane_ms = performance.now() - laneStartedAt;
     return { lane, baseline, elapsedMs: Date.now() - keywordStartedAt };
   })();
   const vectorWork = (async () => {
+    const laneStartedAt = stages ? performance.now() : 0;
     const vectorStartedAt = Date.now();
     const lane = await store.vectorSearchLane(
       request.query,
@@ -17916,9 +18023,11 @@ async function hybridConnectorStoreSearch(
       hits: rows.slice(0, maxResults).map(row => connectorStoreHitFromRow(store, row, row.bestCosine, resultProjector, filters?.locatorPathScope)),
       latencyMs: Date.now() - startedAt, incomplete: true, rawExposed: false,
     });
+    if (stages) stages.vector_lane_ms = performance.now() - laneStartedAt;
     return { lane, elapsedMs: Date.now() - vectorStartedAt };
   })();
   const [keywordResult, vectorResult] = await Promise.all([keywordWork, vectorWork]);
+  markStage?.('join_wait_ms');
   let keywordLane = keywordResult.lane;
   const baselineKeywordLane = keywordResult.baseline;
   let keywordElapsedMs = keywordResult.elapsedMs;
@@ -17948,21 +18057,27 @@ async function hybridConnectorStoreSearch(
       saturated:keywordLane.matchCount.saturated || baselineKeywordLane.matchCount.saturated,
     }};
   }
-  // The relaxed retry is keyword work too, so it counts toward the keyword lane's time.
+  markStage?.('post_join_setup_ms');
+  // The relaxed retry also counts toward the existing keyword lane audit.
   const relaxStartedAt = Date.now();
   keywordLane = await relaxEmptyLocalKeywordLane(store, request.query, laneLimit, accountScope, filters, keywordLane, localKeywordFallback, {}, request.deadlineAtMs);
   keywordElapsedMs += Date.now() - relaxStartedAt;
+  markStage?.('keyword_relaxation_ms');
   // Every candidate is checked again after the last read, right before fusion emits hits and counts (#1079).
   keywordLane = await revalidateKeywordLane(store, keywordLane);
+  markStage?.('keyword_revalidation_ms');
   scoredVectorRows = await store.stillVisibleSearchRowsOffThread(scoredVectorRows);
   vectorRows = await store.stillVisibleSearchRowsOffThread(vectorRows);
+  markStage?.('vector_revalidation_ms');
   const keywordRows = keywordLane.rows;
   const suppressedBelowBar = scoredVectorRows.length - vectorRows.length;
   const bestCosine = scoredVectorRows.length > 0
     ? roundCosine(Math.max(...scoredVectorRows.map((row) => row.bestCosine)))
     : undefined;
   let recencyCut = false;
+  markStage?.('vector_summary_ms');
   const recencyRows = await chatRecencyLaneRows(store, accountScope, filters, request.deadlineAtMs, () => { recencyCut = true; });
+  markStage?.('recency_read_ms');
   const contentBar = relevanceBar ?? CALIBRATED_CONTENT_PREFERENCE_BARS.get(provider.modelId);
   const vettedVectorItemIds = new Set(contentBar === undefined
     ? []
@@ -18010,6 +18125,7 @@ async function hybridConnectorStoreSearch(
     ...(resultProjector ? { resultProjector } : {}),
     ...(filters?.locatorPathScope ? { locatorPathScope: filters.locatorPathScope } : {}),
   }), keywordLane);
+  markStage?.('fusion_ms');
 
   const vettedRows = new Set(vectorRows.map((row) => row.sourceItem.localItemId));
   const semanticNeighbourHits = scoredVectorRows
@@ -18018,11 +18134,11 @@ async function hybridConnectorStoreSearch(
   // The nearest rows, over the bar or not, for a reranked pool's semantic
   // seats.
   const semanticRows = contentBar === undefined || scoredVectorRows.length === 0 ? undefined : {
-    hits: [...scoredVectorRows].sort((left, right) => right.bestCosine - left.bestCosine).slice(0, CONNECTOR_STORE_SEMANTIC_ROWS)
+    hits: [...scoredVectorRows].sort((left, right) => right.bestCosine - left.bestCosine).slice(0, semanticRowsPerStore())
       .map((row) => connectorStoreHitFromRow(store, row, row.bestCosine, resultProjector, filters?.locatorPathScope)),
     bar: contentBar,
   };
-  return {
+  const response: SourceIndexCorpusSearchResponse = {
     hits,
     storeRelevance: connectorStoreRelevance(keywordLane, vettedMargin),
     ...(semanticNeighbourHits.length > 0 ? { semanticNeighbourHits } : {}),
@@ -18072,6 +18188,8 @@ async function hybridConnectorStoreSearch(
     matchCount: hybridMatchCount(keywordLane.matchCount, keywordLane.matchedItemIds, vectorRows, gateArmed),
     rawExposed: false,
   };
+  markStage?.('finalize_ms');
+  return response;
 }
 
 // Lexical matches always count. A vector row counts only when a relevance

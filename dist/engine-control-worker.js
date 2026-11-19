@@ -1,7 +1,7 @@
 // @bun
 // src/workers/engine-split/control-worker.ts
 import { chmodSync } from "fs";
-import { open, rename } from "fs/promises";
+import { rename, utimes, writeFile } from "fs/promises";
 
 // src/core/operation-error.ts
 class OperationError extends Error {
@@ -456,6 +456,18 @@ var ENGINE_MODEL_COMPLETE_PATH = "/engine/model/complete";
 // src/workers/http.ts
 import { createHmac, randomBytes, timingSafeEqual } from "crypto";
 
+// src/workers/engine-split/click-trace.ts
+var CLICK_ID_HEADER = "X-Olympus-Click-Id";
+var PRIVACY_ITEM_SET_PATH = "/dashboard/privacy/items/set";
+function readClickId(request) {
+  const id = request.headers.get(CLICK_ID_HEADER);
+  return id && id.length <= 80 && !/[^A-Za-z0-9_-]/.test(id) ? id : undefined;
+}
+var clickTraces = new WeakMap;
+function logClickTrace(id, requestId, point, role, details, at = new Date().toISOString()) {
+  console.log(`${at} [olympus:click-trace] id=${id} request_id=${requestId ?? "none"} point=${point} role=${role} ${details}`);
+}
+
 // src/core/request-peer.ts
 var ownerSockets = new WeakSet;
 var peers = new WeakMap;
@@ -845,7 +857,7 @@ function forwardedRequest(kind, value) {
   return { path, headers, body };
 }
 var forwardedRecordIds = new WeakMap;
-var HOP_HEADERS = new Set(["host", "content-length", "connection", "transfer-encoding", "keep-alive", "upgrade"]);
+var HOP_HEADERS = new Set(["host", "content-length", "connection", "transfer-encoding", "keep-alive", "upgrade", CLICK_ID_HEADER.toLowerCase()]);
 function parseEngineCommandEnvelope(value) {
   const record = asRecord2(value);
   const id = record?.id;
@@ -878,12 +890,6 @@ function parseEngineCommandEnvelope(value) {
     case "archive_changed":
     case "model_prepare":
       return { id, command: { kind } };
-    case "front_visibility_finished": {
-      const frontPid = command.frontPid;
-      if (typeof frontPid !== "number" || !Number.isSafeInteger(frontPid) || frontPid <= 0)
-        fail("front_visibility_finished needs a front process id.");
-      return { id, command: { kind, frontPid } };
-    }
     case "dashboard_samples": {
       const samples = command.samples;
       if (!Array.isArray(samples) || samples.length > ENGINE_DASHBOARD_SAMPLES_MAX || samples.some((sample) => !dashboardSample(sample))) {
@@ -1021,7 +1027,8 @@ function createEngineCommandHandler(options) {
         const envelope = parseEngineCommandEnvelope(await request.json().catch(() => {
           return;
         }));
-        let receipt = options.ledger.submit(envelope);
+        const clickId = envelope.command.kind === "tier_override" && envelope.command.request.path === PRIVACY_ITEM_SET_PATH ? readClickId(request) : undefined;
+        let receipt = options.ledger.submit(envelope, clickId);
         if (envelope.command.kind === "judge_now" && receipt.state === "received") {
           const waitMs = envelope.command.budgetMs + 100;
           let timer;
@@ -1126,7 +1133,7 @@ class EngineCommandMirror {
   get instanceId() {
     return this.options.instanceId;
   }
-  submit(envelope) {
+  submit(envelope, clickId) {
     this.prune();
     const digest = createHash("sha256").update(JSON.stringify(envelope.command)).digest("hex");
     const existing = this.entries.get(envelope.id);
@@ -1148,6 +1155,8 @@ class EngineCommandMirror {
       receipt: { id: envelope.id, state: "received", instance_id: this.options.instanceId }
     };
     this.entries.set(envelope.id, entry);
+    if (clickId)
+      logClickTrace(clickId, envelope.id, "control_receipt", "background", "served_by=control-thread");
     this.options.send(envelope);
     return this.answer(entry);
   }
@@ -1305,6 +1314,7 @@ function start(init) {
   let statusPath;
   let writing = false;
   let owed = false;
+  let published;
   let failures = 0;
   let saidAt = 0;
   const EMPTY_STATE = { scheduler: null, judge: { backlog: null, pending: null, spending: null }, captures: null };
@@ -1319,28 +1329,30 @@ function start(init) {
     writing = true;
     const partial = `${path}.control.tmp`;
     try {
-      const text = `${JSON.stringify({
+      const now = new Date;
+      const snapshot = {
         schema: ENGINE_STATUS_SNAPSHOT_SCHEMA,
         instance_id: init.instanceId,
-        written_at: new Date().toISOString(),
+        heartbeat: "mtime",
         ...state ? { state_at: new Date(state.at).toISOString() } : {},
         loop_held_ms: Math.round(loopHeldMs()),
         ...stateError ? { state_error: { attempts: stateError.attempts, error: stateError.error, at: new Date(stateError.at).toISOString() } } : {},
         ...state?.body ?? EMPTY_STATE
-      })}
-`;
-      const file = await open(partial, "w", 384);
-      try {
-        await file.writeFile(text, "utf8");
-        await file.sync();
-      } finally {
-        await file.close();
+      };
+      const content = JSON.stringify(snapshot);
+      if (published?.path === path && published.content === content) {
+        await utimes(path, now, now);
+      } else {
+        await writeFile(partial, `${JSON.stringify({ ...snapshot, written_at: now.toISOString() })}
+`, { mode: 384 });
+        await rename(partial, path);
+        published = { path, content };
       }
-      await rename(partial, path);
       if (failures > 0)
         post({ type: "log", line: `[engine-split] status snapshot written again after ${failures} failed attempt(s)` });
       failures = 0;
     } catch (error) {
+      published = undefined;
       failures += 1;
       if (failures === 1 || performance.now() - saidAt >= 60000) {
         saidAt = performance.now();

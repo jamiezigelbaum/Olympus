@@ -14,6 +14,7 @@
 // failed upgrade can put them back before the previous version starts.
 
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { writePrivateFileAtomicSync } from './atomic-file.ts';
 import { olympusDataRoot, sharedDataPath, type LayoutEnv } from './olympus-layout.ts';
@@ -148,7 +149,7 @@ function stepFront(storeOpened: boolean, now: () => number): void {
   }
 }
 
-/** The front is listening and its initial visibility build has finished. */
+/** The front listens. */
 export function finishFrontProgress(now: () => number = Date.now): void {
   if (!front) return;
   delete front.progress.failures;
@@ -212,15 +213,29 @@ export function readFrontProgress(env: LayoutEnv = process.env): BootProgress | 
 
 function readProgressFile(path: string): BootProgress | undefined {
   try {
-    const value = JSON.parse(readFileSync(path, 'utf8')) as Partial<BootProgress>;
-    if (value.schema !== BOOT_PROGRESS_SCHEMA || typeof value.pid !== 'number' || typeof value.phase !== 'string'
-      || typeof value.startedAt !== 'string' || typeof value.updatedAt !== 'string') return undefined;
-    if (value.failures !== undefined && (!Number.isSafeInteger(value.failures) || value.failures < 0)) delete value.failures;
-    if (value.lastFailure !== undefined && typeof value.lastFailure !== 'string') delete value.lastFailure;
-    return { completedStores: 0, ...value } as BootProgress;
+    return parseProgress(readFileSync(path, 'utf8'));
   } catch {
     return undefined;
   }
+}
+
+export async function readBootProgressAsync(env: LayoutEnv = process.env): Promise<BootProgress | undefined> {
+  const path = bootProgressPath(env);
+  try {
+    return parseProgress(await readFile(path, 'utf8'));
+  } catch {
+    // Missing, unreadable and malformed receipts do not establish readiness.
+    return undefined;
+  }
+}
+
+function parseProgress(text: string): BootProgress | undefined {
+  const value = JSON.parse(text) as Partial<BootProgress>;
+  if (value.schema !== BOOT_PROGRESS_SCHEMA || typeof value.pid !== 'number' || typeof value.phase !== 'string'
+    || typeof value.startedAt !== 'string' || typeof value.updatedAt !== 'string') return undefined;
+  if (value.failures !== undefined && (!Number.isSafeInteger(value.failures) || value.failures < 0)) delete value.failures;
+  if (value.lastFailure !== undefined && typeof value.lastFailure !== 'string') delete value.lastFailure;
+  return { completedStores: 0, ...value } as BootProgress;
 }
 
 /** One line for a person waiting: "Updating your data: N stores done, now <storeId> (Xm)". */

@@ -3,21 +3,15 @@
   "entries": [
     {
       "lane": "background",
-      "site": "runPassOffThread@loop-pass.ts<settleStoredItems@sniffer-service.ts",
-      "table": "tier_items",
-      "reason": "to page by key (SCAN tier_items USING INDEX sqlite_autoindex_tier_items_1: SELECT * FROM ( SELECT * FROM tier_items ORDER BY provider, account_scope, conversation_key, provider_item_id LIMIT ? ) WHERE routed = 1 AND content_read = 0 AN)"
-    },
-    {
-      "lane": "background",
       "site": "runPassOffThread@loop-pass.ts<settleStoredItems@tiered-store-set.ts",
       "table": "tier_items",
-      "reason": "to page by key (SCAN tier_items USING INDEX sqlite_autoindex_tier_items_1: SELECT * FROM ( SELECT * FROM tier_items ORDER BY provider, account_scope, conversation_key, provider_item_id LIMIT ? ) WHERE routed = 1 AND content_pending = 1)"
+      "reason": "to page by key (SCAN tier_items USING INDEX sqlite_autoindex_tier_items_1: SELECT * FROM tier_items WHERE routed = 1 ORDER BY provider, account_scope, conversation_key, provider_item_id LIMIT ?)"
     },
     {
       "lane": "background",
       "site": "runPassOffThread@loop-pass.ts",
       "table": "tier_items",
-      "reason": "to page by key (SCAN i USING INDEX tier_items_secrets: SELECT i.provider, i.account_scope, i.conversation_key, i.provider_item_id, EXISTS ( SELECT 1 FROM tier_copies c WHERE c.provider = i.provider AND c.account_sco)"
+      "reason": "to page by key (SCAN i USING INDEX tier_items_override_rows: SELECT * FROM ( SELECT i.* FROM tier_items i INDEXED BY tier_items_override_rows WHERE i.decided_by = 'override' UNION)"
     },
     {
       "lane": "background",

@@ -11,6 +11,7 @@
  */
 import { DASHBOARD_CONTROL_GATE_ID, escapeHtml, escapeScriptJson, pageShell } from '../components.ts';
 import { dashboardLocalPageHref } from '../host-page.ts';
+import { CLICK_ID_HEADER } from '../../engine-split/click-trace.ts';
 import { DASHBOARD_OUTSIDE_HELP_PATHS } from '../outside-help.ts';
 import { SOURCE_LOGO_CSS, sourceLogoTilesByProvider } from '../source-logos.ts';
 import { LOCAL_PAGE_CSS } from '../static-styles.ts';
@@ -198,6 +199,7 @@ export function privacyItemsClientScript(input: { csrfToken: string; unlockOnly:
     unlockOnly: input.unlockOnly,
     unlockPath: DASHBOARD_OUTSIDE_HELP_PATHS.unlock,
     paths: DASHBOARD_PRIVACY_ITEMS_PATHS,
+    clickIdHeader: CLICK_ID_HEADER,
     toastMs: PRIVACY_ITEMS_TOAST_MS,
     debounceMs: PRIVACY_ITEMS_SEARCH_DEBOUNCE_MS,
     logos: input.unlockOnly ? {} : sourceLogoTilesByProvider(),
@@ -257,10 +259,13 @@ export function privacyItemsClientScript(input: { csrfToken: string; unlockOnly:
 
   async function post(path, body) {
     var response;
+    var headers = { 'X-Olympus-CSRF': config.csrfToken, 'Content-Type': 'application/json' };
+    // A save carries a fresh click id so the engine's click trace can follow it; status polls stay untagged.
+    if (path === config.paths.set && typeof crypto !== 'undefined' && crypto.randomUUID) headers[config.clickIdHeader] = crypto.randomUUID();
     try {
       response = await fetch(path, {
         method: 'POST', credentials: 'same-origin', cache: 'no-store',
-        headers: { 'X-Olympus-CSRF': config.csrfToken, 'Content-Type': 'application/json' },
+        headers: headers,
         body: JSON.stringify(body),
       });
     } catch (error) {

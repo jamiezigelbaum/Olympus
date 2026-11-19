@@ -41,6 +41,8 @@ import {
 } from '../src/workers/chatgpt/private-answer-jobs.ts';
 import { recordReleaseManifest, type ReleaseCheck } from '../src/core/release-manifest.ts';
 import { SourceAnswerJobRegistry } from '../src/core/source-answer-jobs.ts';
+import { beginStartupProgress } from '../src/core/startup-progress.ts';
+import { STARTUP_SEARCH_GAP } from '../src/core/source-index/partial-search.ts';
 import { PRIVATE_ANSWER_RESOURCE_VERSIONED_URI, privateAnswerResourceMeta } from '../src/workers/chatgpt/private-answer-resource.ts';
 import {
   answerToolResult,
@@ -58,7 +60,7 @@ import { CHATGPT_TOOLS } from '../src/workers/chatgpt/mcp-surface.ts';
 import { DASHBOARD_CHATGPT_VOCABULARY } from '../src/workers/dashboard/vocabulary.ts';
 import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { createInProcessOperationContext, createRemoteMcpHandler } from '../src/workers/remote-mcp.ts';
-import { waitFor } from './helpers/test-clock.ts';
+import { createTestClock, waitFor } from './helpers/test-clock.ts';
 import { CLAUDE_CLIENT_ID } from '../src/workers/remote-oauth/pinned-clients.ts';
 import { parseRemotePublicBaseUrl, remoteMcpResource, type RemotePublicUrls } from '../src/core/remote-public-url.ts';
 
@@ -1100,31 +1102,42 @@ describe('end to end through a real relay', () => {
       onStatus: (status) => statuses.push(status),
     });
     client.start();
+    const clock = createTestClock();
+    const startup = beginStartupProgress(['/tmp/olympus-panel-a.db', '/tmp/olympus-panel-b.db'], clock.now);
     try {
       const deadline = Date.now() + 5_000;
       while (statuses.at(-1)?.state !== 'online') {
         if (Date.now() > deadline) throw new Error('install never came online');
         await Bun.sleep(10);
       }
-      const { jobId } = jobs.begin({ question: 'When does the lease end?', count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE });
+      const { jobId } = jobs.begin({ question: 'When does the lease end?', count: 1, evidence: EVIDENCE, refresh: async () => EVIDENCE, searchedDuringStartup: true });
       const panel = await generatePanelKeyPair();
       const collect = () => fetch(`${relay.url}/private/${jobId}`, {
         method: 'POST',
         headers: { origin: PANEL_ORIGIN, 'content-type': 'application/json' },
         body: JSON.stringify({ v: 1, publicKey: panel.publicKey }),
       });
+      await clock.advance(60_000);
+      startup.storeReady(0);
       const pending = await collect();
       expect(pending.status).toBe(202);
       expect(pending.headers.get('retry-after')).toBe('2');
       expect(pending.headers.get('access-control-allow-origin')).toBe(PANEL_ORIGIN);
-      expect(await pending.json()).toEqual({ status: 'pending' });
+      expect(await pending.json()).toEqual({
+        status: 'pending',
+        startup: { stores_done: 1, stores_total: 2, estimated_ready_at: new Date(clock.now() + 60_000).toISOString() },
+      });
+      startup.finish();
+      expect(await (await collect()).json()).toEqual({ status: 'pending' });
       release();
       await settled(jobs);
       const ready = await collect();
       expect(ready.status).toBe(200);
       const text = await ready.text();
       expect(text).not.toMatch(SENTINEL_PATTERN);
-      expect(JSON.parse(await openPrivateAnswer(jobId!, panel.privateKey, JSON.parse(text))).answer).toBe(SECRET_ANSWER);
+      expect(JSON.parse(await openPrivateAnswer(jobId!, panel.privateKey, JSON.parse(text)))).toMatchObject({
+        answer: SECRET_ANSWER, unanswered: [STARTUP_SEARCH_GAP],
+      });
       const replay = await collect();
       expect(replay.status).toBe(200);
       expect(await replay.text()).toBe(text);
@@ -1132,6 +1145,7 @@ describe('end to end through a real relay', () => {
       expect(logs).not.toContain(jobId!);
       expect(logs).not.toContain(identity.installId);
     } finally {
+      startup.finish();
       client.stop();
       engine.stop(true);
       await relay.close();

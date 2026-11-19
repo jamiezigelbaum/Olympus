@@ -18,6 +18,7 @@ import {
 import { credentialConfigFingerprint } from '../src/workers/credential-degradation.ts';
 import { buildSourceIngestionLedgerSnapshot } from '../src/workers/source-ingestion-ledger.ts';
 import type { SourceIndexStatusResult } from '../src/workers/source-index/status.ts';
+import { localAnalystWindowNotice } from '../src/workers/source-index/local-analyst-window.ts';
 import type { ContentExtractionThroughputSignal } from '../src/core/ingestion-throughput.ts';
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -426,6 +427,21 @@ describe('runDoctor', () => {
     // this line as item counts (owner-reported, 2026-09-24).
     expect(checkByName(result.checks, 'source_index_status').detail)
       .toContain('secure_local.dropbox.files: connector store, 100 chunks, 100 embedded (lag 0), 100 items indexed');
+  });
+
+  test('reports the worker’s local prompt fallback in doctor output', async () => {
+    const notice = localAnalystWindowNotice({ analyst: 'local-source-answer', model: 'answer', source: 'fallback' })!;
+    const { fetchImpl } = fakeWorkerFetch({
+      '/v1/health': { status: 'ok', degraded_conditions: [notice] },
+      '/v1/source/index/status': { kind: 'source_index_status', corpora: [dropboxCorpusReport()] },
+    });
+    const result = await runDoctor(doctorDeps({
+      config: enabledEmailConfig(), delphi: healthyDelphi(), fetchImpl,
+      handleRegistry: { version: 1, handles: [connectedHandle('dropbox')] },
+    }));
+    const check = checkByName(result.checks, 'email_worker');
+    expect(check.ok).toBe(true);
+    expect(check.detail).toContain(notice);
   });
 
   test('flags a down Argus model pool with the rehydration runbook hint and never throws', async () => {

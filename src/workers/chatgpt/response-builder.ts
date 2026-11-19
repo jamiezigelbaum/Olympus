@@ -36,6 +36,8 @@ import { OperationError, type OperationErrorCode } from '../../core/operation-er
 import { boundedLogErrorMessage, logErrorOrigin } from '../../core/log-redaction.ts';
 import { namesOnlyCoverageNote } from '../../core/names-only-coverage.ts';
 import { privacyBacklogCoverageNote } from '../../core/privacy-backlog-coverage.ts';
+import { startupProgress, startupWaitingLine } from '../../core/startup-progress.ts';
+import { STARTUP_SEARCH_GAP } from '../../core/source-index/partial-search.ts';
 import { citationTitleWithParent } from '../../core/parent-label.ts';
 import { DASHBOARD_SUPPORTED_SOURCES } from '../source-dashboard.ts';
 import { archiveFormatForProvider } from '../../core/archive-formats.ts';
@@ -732,10 +734,7 @@ const ASK_PENDING_TEXT = 'Olympus is still waiting for the anonymous answer. Cal
 export function askAnonymouslyToolResult(raw: unknown): ChatGptToolResult {
   const record = asRecord(raw);
   if (record?.status === 'working' && typeof record.job_id === 'string' && /^saj_[A-Za-z0-9_-]{1,64}$/.test(record.job_id)) {
-    return {
-      content: [{ type: 'text', text: ASK_PENDING_TEXT }],
-      structuredContent: { status: 'working', job_id: record.job_id, next_tool: 'source_answer_result' },
-    };
+    return pendingAnswerToolResult(record.job_id, ASK_PENDING_TEXT);
   }
   if (!record || typeof record.ok !== 'boolean') {
     return errorToolResult(new OperationError('email_error', 'unexpected anonymous answer shape'));
@@ -820,13 +819,19 @@ export function askAnonymouslyToolResult(raw: unknown): ChatGptToolResult {
   };
 }
 
+function pendingAnswerToolResult(jobId: string, text: string): ChatGptToolResult {
+  const startup = startupProgress();
+  const starting = startupWaitingLine(startup);
+  return {
+    content: [{ type: 'text', text: text + (starting ? `\n${starting}` : '') }],
+    structuredContent: { status: 'working', job_id: jobId, next_tool: 'source_answer_result', ...(startup ? { startup } : {}) },
+  };
+}
+
 export function answerToolResult(raw: unknown, options: AnswerResultOptions = {}): ChatGptToolResult {
   const record = asRecord(raw);
   if (record?.status === 'working' && typeof record.job_id === 'string' && /^saj_[A-Za-z0-9_-]{1,64}$/.test(record.job_id)) {
-    return {
-      content: [{ type: 'text', text: PENDING_TEXT }],
-      structuredContent: { status: 'working', job_id: record.job_id, next_tool: 'source_answer_result' },
-    };
+    return pendingAnswerToolResult(record.job_id, PENDING_TEXT);
   }
   if (!record || typeof record.answer !== 'string') {
     return errorToolResult(new OperationError('source_index_error', 'unexpected answer shape'));
@@ -1008,6 +1013,7 @@ export function searchToolResult(raw: unknown, options: AnswerResultOptions & {
   if (Array.isArray(coverageRecord.cut_short)) {
     for (const note of coverageRecord.cut_short) if (typeof note === 'string' && note.trim()) notes.push(text(note));
   }
+  if (coverageRecord.searched_during_startup === true) notes.push(STARTUP_SEARCH_GAP);
   // Readable Public or Personal evidence: the model answers from it as well (not only "see the panel").
   const privateNote = privateMatchNote(options.privateMatch, whole(coverageRecord.content_private_items), !nothingRead);
   if (privateNote) notes.push(privateNote);

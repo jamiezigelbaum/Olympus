@@ -114,6 +114,8 @@ import {
 } from './private-answer-contract.ts';
 import { importPanelPublicKey, padPrivateAnswerPlaintext, sealPrivateAnswer, type SealedPrivateAnswer } from './private-answer-crypto.ts';
 import type { PrivateQuestionJobs } from './private-question-jobs.ts';
+import { startupProgress } from '../../core/startup-progress.ts';
+import { STARTUP_SEARCH_GAP } from '../../core/source-index/partial-search.ts';
 import {
   PRIVATE_ANSWER_PAYLOAD_LIMITS,
   preparePrivateAnswer,
@@ -278,7 +280,7 @@ export function formatAnalysisTiming(timing: AnalysisTiming): string {
 }
 
 /** Re-reads the job's evidence at claim time, at the items' current tiers. */
-export type PrivateEvidenceRefresh = (signal: AbortSignal, originalMatches: readonly PrivateEvidenceItem[]) => Promise<readonly PrivateEvidenceItem[] & { secretMatch?: true }>;
+export type PrivateEvidenceRefresh = (signal: AbortSignal, originalMatches: readonly PrivateEvidenceItem[]) => Promise<readonly PrivateEvidenceItem[] & { secretMatch?: true; searchedDuringStartup?: true }>;
 
 /**
  * One run of the private model over one question's eligible evidence: a
@@ -313,6 +315,7 @@ interface Analysis {
 }
 
 interface Job {
+  searchedDuringStartup?: true;
   inboxHandle?: string;
   secretMatch?: () => Promise<boolean>;
   preserveWaiting?: boolean;
@@ -549,6 +552,7 @@ export class PrivateAnswerJobs {
     count: number;
     evidence: readonly PrivateEvidenceItem[];
     refresh: PrivateEvidenceRefresh;
+    searchedDuringStartup?: true;
     caller?: string;
     /** `full` reads the leading items in depth (slower); `summary` by default. */
     detail?: PrivateAnswerDetail;
@@ -595,6 +599,7 @@ export class PrivateAnswerJobs {
     const at = this.now();
     const job: Job = {
       id,
+      ...(input.searchedDuringStartup ? { searchedDuringStartup: true } : {}),
       ...(input.secretMatch ? { secretMatch: input.secretMatch } : {}),
       preserveWaiting: input.preserveWaiting === true || input.secretMatch !== undefined,
       createdAt: at,
@@ -672,7 +677,8 @@ export class PrivateAnswerJobs {
     const outcome = job.outcome;
     if (!outcome) {
       if (!this.takePoll(job)) return { status: 429, body: { status: 'rate_limited' }, retryAfterSeconds: PENDING_RETRY_SECONDS };
-      return { status: 202, body: { status: 'pending' }, retryAfterSeconds: PENDING_RETRY_SECONDS };
+      const startup = startupProgress();
+      return { status: 202, body: { status: 'pending', ...(startup ? { startup } : {}) }, retryAfterSeconds: PENDING_RETRY_SECONDS };
     }
     if (outcome.kind === 'failed') return { status: 200, body: { status: 'failed' } };
     // Every hand-out of the sealed bytes, not only the first: an item the
@@ -1186,7 +1192,9 @@ export class PrivateAnswerJobs {
         const check = job.secretMatch;
         if (!await check() || settled) { settle({ kind: 'failed' }, 'no_evidence'); return; }
         const ack = randomBytes(32).toString('base64url');
-        const plaintext = { v: 1 as const, answer: REMOTE_SECRET_NOTE, citations: [], ack, secretInbox: this.secretInbox(job) };
+        const plaintext = { v: 1 as const, answer: REMOTE_SECRET_NOTE, citations: [], ack, secretInbox: this.secretInbox(job),
+          ...(job.searchedDuringStartup ? { unanswered: [STARTUP_SEARCH_GAP] } : {}),
+        };
         const sealed = await sealPrivateAnswer(job.id, panelKey, padPrivateAnswerPlaintext(serializePrivateAnswerPlaintext(plaintext)));
         if (settled) return;
         if (!await check() || settled) { settle({ kind: 'failed' }, 'no_evidence'); return; }
@@ -1259,6 +1267,9 @@ export class PrivateAnswerJobs {
           // A fresh acknowledgment capability for this job's sealed answer only.
           const ack = randomBytes(32).toString('base64url');
           const plaintext = { ...this.withOpenTokens(job, result.plaintext, result.localPaths), ack };
+          if (job.searchedDuringStartup || found.searchedDuringStartup) {
+            plaintext.unanswered = [STARTUP_SEARCH_GAP, ...(plaintext.unanswered ?? []).filter(gap => gap !== STARTUP_SEARCH_GAP)];
+          }
           // The pointer leads so payload fitting cannot truncate it away.
           if (job.preserveWaiting) {
             plaintext.answer = `${REMOTE_SECRET_NOTE}\n\n${plaintext.answer}`;

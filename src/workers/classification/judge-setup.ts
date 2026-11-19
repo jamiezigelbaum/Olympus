@@ -51,7 +51,7 @@ export function createJudgeSetup(options: {
   local: () => TierSnifferRuntime;
   ledgerPath: string;
   promptVersion: () => string;
-  credentialReady: (lane: SnifferLane) => boolean;
+  credentialReady: (lane: SnifferLane) => boolean | Promise<boolean>;
   requestReload: () => boolean;
   /** What the local judge measured on this install, for the estimates (judge-second-round.ts). */
   observed?: () => JudgeObserved;
@@ -98,7 +98,8 @@ export function createJudgeSetup(options: {
       if (judgeChoiceUsesCloud(current.choice) && capDollars < current.capDollars) options.spending.lowerCap(capDollars);
       if (cloud.source === 'off') throw new Error('Set up an allowed private model first.');
       if (!(cloud.lane.kind === 'tinfoil' ? TINFOIL_PRICES[cloud.lane.modelId] : JUDGE_PRICES[normalizeVeniceAnalystModelId(cloud.lane.modelId)])) throw new Error('A listed price is needed before this model can judge in the cloud.');
-      if (!options.credentialReady(cloud.lane)) throw new Error(`Add your own ${provider} API key in Keys first.`);
+      const credential = options.credentialReady(cloud.lane);
+      if (!(typeof credential === 'boolean' ? credential : await credential)) throw new Error(`Add your own ${provider} API key in Keys first.`);
       const fallback = options.local();
       if (choice === 'local-then-venice' && fallback.source === 'off') throw new Error('The double-check needs the judge on this computer first. Choose Venice sorts everything instead.');
       await approveClassifier(options.ledgerPath, cloud.lane, options.promptVersion(), choice === 'tinfoil' ? 'Owner chose the experimental Tinfoil Decision medium judge, reading each item through verified attestation and encrypted requests.' : choice === 'local-then-venice'

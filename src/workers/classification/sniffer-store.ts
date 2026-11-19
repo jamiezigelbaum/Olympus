@@ -102,6 +102,9 @@ export class TierSnifferStore {
   private readonly db: Database;
   private readonly now: () => Date;
   private readonly readOnly: boolean;
+  private workCountMarker: string | undefined;
+  private readonly workCounts = new Map<string, { unanswered: number; heldLowering: number }>();
+  private scanProgressChanges = 0;
   // Keep construction inside the constructor so Bun can drop this SQLite class
   // from the Node-loaded plugin bundle when only its pure helpers are used.
   private readonly trainingReads: Map<string, Map<string, TrainingSnifferVerdict>>;
@@ -278,10 +281,10 @@ export class TierSnifferStore {
   }
 
   /** Fence sliced training against verdict writes on this or another connection. */
-  changeMarker(): string {
+  changeMarker(options: { ignoreScanProgress?: boolean } = {}): string {
     const own = this.db.query('SELECT total_changes() AS changes').get() as { changes: number };
     const external = this.db.query('PRAGMA data_version').get() as { data_version: number };
-    return `${external.data_version}:${own.changes}`;
+    return `${external.data_version}:${own.changes - (options.ignoreScanProgress ? this.scanProgressChanges : 0)}`;
   }
 
   /**
@@ -411,7 +414,7 @@ export class TierSnifferStore {
         }
         // Consumed, stale, or blocked: restart to find the next oldest eligible.
         cursor = null;
-        this.db.query('DELETE FROM sniffer_scan WHERE scan_key = ?').run(key);
+        this.scanProgressChanges += this.db.query('DELETE FROM sniffer_scan WHERE scan_key = ?').run(key).changes;
       }
       const filters: string[] = [];
       const params: Array<string | number> = [];
@@ -441,14 +444,14 @@ export class TierSnifferStore {
           // Discovery may precede the reserved fifth dispatch. Keep this
           // candidate across passes/restarts until it is consumed or blocked.
           const candidate = found[0];
-          this.db.query(`INSERT OR REPLACE INTO sniffer_scan
+          this.scanProgressChanges += this.db.query(`INSERT OR REPLACE INTO sniffer_scan
             (scan_key, conversation_order, priority, queued_at, question_pk, candidate_pk) VALUES (?, ?, ?, ?, ?, ?)`)
-            .run(key, candidate.conversationOrder ?? 0, candidate.priority, candidate.queuedAt, candidate.sequence, candidate.sequence);
+            .run(key, candidate.conversationOrder ?? 0, candidate.priority, candidate.queuedAt, candidate.sequence, candidate.sequence).changes;
         } else if (found.length === 0 && rows.length === scanLimit && last) {
-          this.db.query(`INSERT OR REPLACE INTO sniffer_scan
+          this.scanProgressChanges += this.db.query(`INSERT OR REPLACE INTO sniffer_scan
             (scan_key, conversation_order, priority, queued_at, question_pk) VALUES (?, ?, ?, ?, ?)`)
-            .run(key, last.conversation_order, last.priority, last.queued_at, last.question_pk);
-        } else this.db.query('DELETE FROM sniffer_scan WHERE scan_key = ?').run(key);
+            .run(key, last.conversation_order, last.priority, last.queued_at, last.question_pk).changes;
+        } else this.scanProgressChanges += this.db.query('DELETE FROM sniffer_scan WHERE scan_key = ?').run(key).changes;
       }
       return found;
     };
@@ -531,10 +534,19 @@ export class TierSnifferStore {
 
   /** Backpressure covers unanswered work under this classifier, not held answers. */
   questionWorkCounts(snifferId: string): { unanswered: number; heldLowering: number } {
-    return this.db.query(`SELECT
+    const marker = this.changeMarker({ ignoreScanProgress: true });
+    if (marker !== this.workCountMarker || this.db.inTransaction) {
+      this.workCounts.clear();
+      this.workCountMarker = this.db.inTransaction ? undefined : marker;
+    }
+    const cached = this.workCounts.get(snifferId);
+    if (cached) return { ...cached };
+    const counts = this.db.query(`SELECT
       COUNT(CASE WHEN held_sniffer_id IS NULL OR held_sniffer_id != ? THEN 1 END) AS unanswered,
       COUNT(CASE WHEN held_sniffer_id = ? THEN 1 END) AS heldLowering
       FROM sniffer_questions`).get(snifferId, snifferId) as { unanswered: number; heldLowering: number };
+    if (this.workCountMarker !== undefined) this.workCounts.set(snifferId, counts);
+    return { ...counts };
   }
 
   /** Training's growth watermark; do not scan/group the question queue for it. */

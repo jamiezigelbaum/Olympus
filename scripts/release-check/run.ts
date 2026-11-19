@@ -714,7 +714,6 @@ async function setupMachine(run: Run, workDir: string, bundlePath: string, insta
       if (made.code !== 0) throw new Error('could not prepare the agent directory');
       await machine.put(bundlePath, '~/rc/agent.js');
       await machine.put(configPath, '~/rc/config.json');
-      if (!earlierRelease) await startCutoverWatch(run, true);
       const build = await run.agent('engine-build', earlierRelease ? '--earlier-release' : '', earlierRelease ? 150_000 : 60_000);
       if (typeof build.result?.build === 'string') run.build = build.result.build;
       if (typeof build.result?.version === 'string') run.stage.version = build.result.version;
@@ -754,6 +753,9 @@ async function setupMachine(run: Run, workDir: string, bundlePath: string, insta
   if (prepare.result?.engineSplitWritten === true) run.splitSettingWritten = true;
   if (prepare.result?.ok !== true) return false;
   if (!earlierRelease && checksSplit(run.options)) run.add(engineSplitCheck(prepare.result.engineSplit));
+  // The fresh leg's dashboard watch starts once prepare's engine restart is over: the install is READY from here, and the
+  // restart's own gap is start-up, not a 1 s failure after ready (mac 44511577175: a 20 s gap at the restart).
+  if (!earlierRelease) await startCutoverWatch(run, true);
 
   const connect = await run.agent('connect-source', '', 120_000);
   run.add({

@@ -5,7 +5,7 @@ import type { MemoryActivity } from '../../core/memory-counters.ts';
  * client, owner-busy relay and snapshot reader. Kept here so `main()` only
  * chooses by role (core/engine-split.ts).
  */
-import { readBootProgress, readFrontProgress, type BootProgress } from '../../core/boot-progress.ts';
+import { readBootProgressAsync, type BootProgress } from '../../core/boot-progress.ts';
 import { engineHeartbeatBeating, engineHeartbeatLine, processAlive, readEngineHeartbeat } from '../../core/engine-heartbeat.ts';
 import { engineStartingAnswer, engineStartingResponse } from '../../core/worker-front-proxy.ts';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -18,10 +18,11 @@ import { sharedDataPath } from '../../core/olympus-layout.ts';
 import { removeFileDurablySync } from '../../core/atomic-file.ts';
 import { bindWorkerSocket, createUnixSocketFetch, prepareWorkerSocket, releaseSystemdWorkerSocket, workerSocketListenerStopped, workerSocketServe } from '../../core/worker-transport.ts';
 import { EngineCommandClient, OwnerBusyRelay } from './client.ts';
+import { clickTraces, PRIVACY_ITEM_SET_PATH, type ClickTrace } from './click-trace.ts';
 import { startEngineControlPlane, type EngineControlPlane } from './control-plane.ts';
 import { currentLocalInferencePriority } from '../answer-activity.ts';
 import { createEngineCommandHandler, ENGINE_FORWARDED_ROUTES, EngineCommandLedger, requestToForwarded, type EngineCommandHandlers, type EngineCommandReceipt, type EngineForwardedKind, type EngineForwardedRequest, type EngineForwardedResponse } from './commands.ts';
-import { ENGINE_STATUS_STALE_MS, readEngineStatusSnapshot, startEngineStatusPublisher, type EngineStatusRead, type EngineStatusSnapshot } from './snapshot.ts';
+import { engineStatusAge, readEngineStatusSnapshotAsync, startEngineStatusPublisher, type EngineStatusRead, type EngineStatusSnapshot } from './snapshot.ts';
 import { parseOwnerTierItemId } from '../classification/tier-owner-items.ts';
 import type { PendingItemProtection } from '../connector-store/tier-visibility.ts';
 import { DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER } from '../http.ts';
@@ -157,7 +158,7 @@ export function startEngineBackgroundStatus(input: {
  * changes nothing.
  */
 export function backgroundBootDone(boot: BootProgress | undefined, alive: (pid: number) => boolean = processAlive): boolean {
-  return boot?.phase === 'done' && alive(boot.pid);
+  return boot?.phase === 'done' && Number.isSafeInteger(boot.pid) && boot.pid > 0 && alive(boot.pid);
 }
 
 /**
@@ -172,57 +173,12 @@ export async function waitForBackgroundBootDone(input: {
   env: Record<string, string | undefined>;
   pollMs?: number;
   sleep?: (ms: number) => Promise<void>;
-  read?: () => BootProgress | undefined;
+  read?: () => BootProgress | undefined | Promise<BootProgress | undefined>;
   alive?: (pid: number) => boolean;
 }): Promise<void> {
   const sleep = input.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
-  const read = input.read ?? (() => readBootProgress(input.env));
-  while (!backgroundBootDone(read(), input.alive)) await sleep(input.pollMs ?? 250);
-}
-
-/** The front can announce its presence before the background has bound its socket. */
-export function createBackgroundVisibilityBoot(input: {
-  env: Record<string, string | undefined>;
-  step: (step: string | undefined) => void;
-  log?: (line: string) => void;
-}) {
-  const log = input.log ?? console.log;
-  const ready = Promise.withResolvers<void>();
-  const watching = new AbortController();
-  let pending = true;
-  let frontPid: number | undefined;
-  let releaseFront: ((reason: string) => void) | undefined;
-  const waitForFront = (pid: number) => {
-    frontPid = pid;
-    const signal = Promise.withResolvers<string>();
-    releaseFront = signal.resolve;
-    void waitForProcessExit(pid, { timeoutMs: Infinity, signal: watching.signal }).then((exited) => {
-      if (exited) signal.resolve('front exited');
-    });
-    return signal.promise;
-  };
-  const complete = () => { pending = false; ready.resolve(); };
-  return {
-    pending: () => pending ? ready.promise : undefined,
-    frontFinished: (pid: number) => { if (pid === frontPid) releaseFront?.('front build finished'); },
-    async start(build: () => Promise<void>): Promise<void> {
-      const started = performance.now();
-      const front = readFrontProgress(input.env);
-      let reason = 'no front build in progress';
-      if (front?.phase === 'starting' && Number.isSafeInteger(front.pid) && front.pid > 0 && processAlive(front.pid)) {
-        input.step('waiting for the front to finish building hidden-copy sets');
-        log('[olympus] background: waiting for the front to finish building hidden-copy sets');
-        reason = await waitForFront(front.pid);
-      }
-      if (watching.signal.aborted) return;
-      watching.abort();
-      input.step('building hidden-copy sets');
-      log(`[olympus] background: starting hidden-copy build after waiting ${Math.round(performance.now() - started)} ms (${reason})`);
-      try { await build(); }
-      finally { input.step(undefined); complete(); }
-    },
-    stop() { watching.abort(); releaseFront?.('background stopping'); },
-  };
+  const read = input.read ?? (() => readBootProgressAsync(input.env));
+  while (!backgroundBootDone(await read(), input.alive)) await sleep(input.pollMs ?? 250);
 }
 
 /**
@@ -260,8 +216,11 @@ export function listenWhileStarting(input: {
 export interface EngineFront {
   client: EngineCommandClient;
   ownerBusy: OwnerBusyRelay;
-  /** The background's last status snapshot and its age; read from disk at most once a second. */
+  /** The background's last status snapshot and its age; refreshed asynchronously at most once a second. */
   status(): EngineStatusRead | undefined;
+  refreshStatus(): Promise<void>;
+  /** The last snapshot read, with no disk read and no refresh. */
+  cachedSnapshot(): EngineStatusRead['snapshot'] | undefined;
   /** The polled activity, with no disk read or status refresh on the log path. */
   backgroundActivity(): MemoryActivity;
   /** One built-in model completion, run by the background, which holds the model. */
@@ -270,7 +229,6 @@ export interface EngineFront {
   backgroundReady(): Promise<boolean>;
   /** Keep the starting listener in place while the previous front's Private clicks can still commit. */
   waitForPendingPrivacyRaises(): Promise<void>;
-  visibilityFinished(): void;
   stop(): void;
 }
 
@@ -296,58 +254,49 @@ export function createEngineFront(input: {
   });
   relay = new OwnerBusyRelay(client, (line) => console.warn(line));
   const path = engineStatusSnapshotPath(input.env);
-  let cached: { at: number; read: EngineStatusRead | undefined } | undefined;
-  const judged = (read: EngineStatusRead, age: number): EngineStatusRead => {
-    const old = age > ENGINE_STATUS_STALE_MS;
-    if (!old && answering && answering.instance !== read.snapshot.instance_id && Date.parse(read.snapshot.written_at) > answering.at) {
-      answering = { instance: read.snapshot.instance_id, at: Date.parse(read.snapshot.written_at) };
+  let cached: EngineStatusSnapshot | undefined;
+  let lastReadAt = -Infinity;
+  let pending: Promise<void> | undefined;
+  let stopped = false;
+  const judged = (snapshot: EngineStatusSnapshot, at: number): EngineStatusRead => {
+    const read = engineStatusAge(snapshot, at);
+    const written = Date.parse(snapshot.written_at);
+    if (!read.stale && answering && answering.instance !== snapshot.instance_id && written > answering.at) {
+      answering = { instance: snapshot.instance_id, at: written };
     }
-    return {
-      ...read, age_ms: age, state_age_ms: (read.state_age_ms ?? read.age_ms) + (age - read.age_ms),
-      stale: old || (answering !== undefined && answering.instance !== read.snapshot.instance_id),
-    };
+    return { ...read, stale: read.stale || (answering !== undefined && answering.instance !== snapshot.instance_id) };
+  };
+  const refreshStatus = async () => {
+    if (pending) return pending;
+    const at = now();
+    if (stopped || at - lastReadAt < 1_000) return;
+    lastReadAt = at;
+    pending = readEngineStatusSnapshotAsync(path).then((snapshot) => {
+      if (stopped) return;
+      cached = snapshot;
+      if (snapshot && !judged(snapshot, now()).stale) relay?.observeInstance(snapshot.instance_id);
+    }).finally(() => { pending = undefined; });
+    return pending;
   };
   const status = (): EngineStatusRead | undefined => {
-    const at = now();
-    if (cached && at - cached.at < 1_000) {
-      return cached.read ? judged(cached.read, cached.read.age_ms + (at - cached.at)) : undefined;
-    }
-    const read = readEngineStatusSnapshot(path, now);
-    cached = { at, read };
-    if (read) relay?.observeInstance(read.snapshot.instance_id);
-    return read ? judged(read, read.age_ms) : undefined;
+    void refreshStatus();
+    return cached ? judged(cached, now()) : undefined;
   };
   // Notice a background restart even when no page asks for status, so the
   // owner-busy signal reaches the new judge.
-  let oweVisibility = false;
-  let sendingVisibility = false;
-  const reportVisibility = async () => {
-    if (!oweVisibility || sendingVisibility) return;
-    sendingVisibility = true;
-    try {
-      const receipt = await client.send({ kind: 'front_visibility_finished', frontPid: process.pid });
-      oweVisibility = receipt.state !== 'done';
-    } catch {
-      console.warn('[engine-split] the front could not report that its hidden-copy build finished; it will retry.');
-    } finally {
-      sendingVisibility = false;
-    }
-  };
-  const poll = setInterval(() => { status(); void reportVisibility(); }, 2_000);
+  const poll = setInterval(() => { void refreshStatus(); }, 2_000);
   poll.unref?.();
   const completeModel = (request: AnalystModelRequest) => completeModelInBackground(fetchBackground, input.authToken, request);
   // Busy is not unreachable: the background's receipt and heartbeat say it is up.
-  const backgroundReady = async () => backgroundBootDone(readBootProgress(input.env));
+  const backgroundReady = async () => backgroundBootDone(await readBootProgressAsync(input.env));
   const waitForPendingPrivacyRaises = async () => {
     // The control thread can answer even when the background's loop is held.
     // This only bounds each readiness probe. The writer keeps applying its commands.
     const probeMs = 250;
     while (!await probeEngineBackground(fetchBackground, input.authToken, undefined, probeMs, true)) await Bun.sleep(probeMs);
   };
-  return { client, ownerBusy: relay, status, backgroundActivity: () => cached?.read?.snapshot.activity ?? 'idle', completeModel, backgroundReady,
-    waitForPendingPrivacyRaises,
-    visibilityFinished: () => { oweVisibility = true; void reportVisibility(); },
-    stop: () => { clearInterval(poll); relay?.stop(); } };
+  return { client, ownerBusy: relay, status, refreshStatus, cachedSnapshot: () => cached, backgroundActivity: () => cached?.activity ?? 'idle', completeModel, backgroundReady,
+    waitForPendingPrivacyRaises, stop: () => { stopped = true; clearInterval(poll); relay?.stop(); } };
 }
 
 // How long the front waits on a background that has stopped answering. A
@@ -469,13 +418,13 @@ export function createEngineFrontRoutes(input: {
 }): (request: Request) => Promise<Response | undefined> | undefined {
   const pid = input.pid ?? process.pid;
   type Outcome = { answer: EngineForwardedResponse } | { unanswered: string } | { failed: string };
-  const exchange = async (kind: EngineForwardedKind, forwarded: EngineForwardedRequest, onReceived?: (receipt: EngineCommandReceipt) => void): Promise<Outcome> => {
+  const exchange = async (kind: EngineForwardedKind, forwarded: EngineForwardedRequest, onReceived?: (receipt: EngineCommandReceipt) => void, clickTrace?: ClickTrace): Promise<Outcome> => {
     let receipt;
     try {
       receipt = await input.client.send(
         { kind, request: forwarded, ...(kind === 'delete_source_data' ? { frontPid: pid } : {}) },
         // Extraction and embedding batches can run for minutes, as they did in the one process.
-        { timeoutMs: input.timeoutMs ?? (kind === 'data_export' ? DATA_EXPORT_WAIT_MS : kind === 'source_sync' ? SOURCE_SYNC_WAIT_MS : kind === 'extraction_queue' || kind === 'embed_chunks' ? 15 * 60_000 : OWNER_ACTION_WAIT_MS), ...(onReceived ? { onReceived } : {}) },
+        { timeoutMs: input.timeoutMs ?? (kind === 'data_export' ? DATA_EXPORT_WAIT_MS : kind === 'source_sync' ? SOURCE_SYNC_WAIT_MS : kind === 'extraction_queue' || kind === 'embed_chunks' ? 15 * 60_000 : OWNER_ACTION_WAIT_MS), ...(onReceived ? { onReceived } : {}), ...(clickTrace ? { clickTrace } : {}) },
       );
     } catch (error) {
       return { unanswered: error instanceof Error ? error.message : 'The background engine is not answering.' };
@@ -525,7 +474,7 @@ export function createEngineFrontRoutes(input: {
       if (identity) release = protection.hold(identity);
       pendingPrivacyItems.add(id);
       received.resolve(pending(id, 202));
-    }).then(outcome => {
+    }, clickTraces.get(request)).then(outcome => {
       release?.();
       if (id) {
         pendingPrivacyItems.delete(id);
@@ -549,7 +498,7 @@ export function createEngineFrontRoutes(input: {
   return (request) => {
     if (request.method !== 'POST') return undefined;
     const path = new URL(request.url).pathname;
-    if (input.pendingItemProtection && (path === '/dashboard/privacy/items/set' || path === '/dashboard/privacy/items/status')
+    if (input.pendingItemProtection && (path === PRIVACY_ITEM_SET_PATH || path === '/dashboard/privacy/items/status')
       && request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local') {
       if (!input.gate.isOpen()) return Promise.resolve(restartingResponse(request));
       return path.endsWith('/status') ? privacyItemStatus(request) : changePrivacyItem(request, input.pendingItemProtection);
@@ -597,7 +546,6 @@ export async function waitForProcessExit(pid: number, options: {
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
   alive?: (pid: number) => boolean;
-  signal?: AbortSignal;
 } = {}): Promise<boolean> {
   const now = options.now ?? (() => Date.now());
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
@@ -607,7 +555,7 @@ export async function waitForProcessExit(pid: number, options: {
   });
   const deadline = now() + (options.timeoutMs ?? 60_000);
   while (alive(pid)) {
-    if (options.signal?.aborted || now() >= deadline) return false;
+    if (now() >= deadline) return false;
     await sleep(options.intervalMs ?? 250);
   }
   return true;

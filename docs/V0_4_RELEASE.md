@@ -63,16 +63,32 @@ bars are re-calibrated with `bun eval/run-passages.ts --narrow
 source|span|conversation`.
 
 Unanswered long files (1.5 item 7): when the Analyst leaves `unanswered`
-non-empty or cites nothing, Ask starts one existing deep-read job for the
-first cut file among the three reserved head seats. Cut-seat indexes ride the
-build detail; no question or answer text decides the trigger. The ordinary
-answer carries progress and `deep_read: {id, sectionsTotal}`; the full answer
-lands in Private answers. Refusals name the unread file and offer
-`source_deep_read`. Remote surfaces receive only the handle and counts.
+non-empty or cites nothing, Ask tries cut files among the three reserved head
+seats, with cited files first and seat order within each group. It starts the
+first read estimated to fit 15 minutes at the model's measured pace. With no
+measured pace, a read fits if it has at most 40 sections. The ordinary answer
+carries progress and `deep_read: {id, sectionsTotal}`; the full answer lands in
+Private answers. When all candidates exceed the limit, the notice names the
+first file, gives its estimated reading time and offers `source_deep_read`.
+Remote surfaces receive only the handle and counts for started reads.
 `eval/run-passages.ts --deep-read-trigger` enables this same trigger for the
 whole run, waits for each job without a timeout, and records its sections,
-time, expected citation and meaning verdict beside the ordinary answer.
+time, expected citation and meaning verdict beside the ordinary answer, plus
+the number of seats skipped for length.
 The subset L proof is owned by the setup thread (ops#151).
+
+Right file onto the shortlist (1.5 item 6): each store offers its 3 nearest
+vector rows, under its relevance bar or not, and 6 extra seats in the reranked
+pool go to the best of them by margin over the bar, at most 2 per store
+(`DEFAULT_RERANK_POOL_SEMANTIC_SEATS` 6, `withSemanticPoolSeats` in
+`src/core/source-index/router.ts`). Stage 3 on the 75 answerable (main
+75f3ce4a3, ops#151 comments 6986245824 and 6987608225): found document 44 to
+47, found paragraph 41 to 43, answered strict 27 to 28 and by meaning 35 to 36;
+held-out equal (6/7 strict, 5/7 meaning). Gains p104, p115, p160. The
+seat-cause check (comment 6995933249) found one gold displaced into a loss,
+p185 (email paragraph), the known cost; the other moves came with the gold at
+seat 1 in both arms. Conversation windows (item 9) measured worse, 42 and 37,
+and are not in 1.5.
 
 Rules for this release:
 

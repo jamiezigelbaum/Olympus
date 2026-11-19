@@ -568,7 +568,7 @@ function isIdentity(value: unknown): value is TierLedgerIdentity {
 }
 
 function writeState(ledger: TieredStoreSet['ledger'], state: SweepState): void {
-  ledger.writeMeta(SWEEP_META_KEY, JSON.stringify(state));
+  ledger.writeSettleProgress(SWEEP_META_KEY, JSON.stringify(state));
 }
 
 function sameKeys(left: readonly string[], right: readonly string[]): boolean {

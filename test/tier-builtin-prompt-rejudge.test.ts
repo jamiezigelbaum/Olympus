@@ -190,10 +190,12 @@ for (const ownerChanged of [false, true]) test(`service reports counts for owner
   expect(picked[0]).not.toContain('Picnic');
   expect(picked[0]).not.toContain('apples');
   if (!ownerChanged) {
-    expect(await service.runOnce()).toMatchObject({ state: 'ran', rejudged: { builtinPromptSkipped: 1 } });
-    expect(logs.filter(line => line.includes('; picked for:'))).toHaveLength(1);
+    // Nothing changed since the clean lap: the re-judge walk rests and logs nothing more.
+    const rested = await service.runOnce() as { state: string; rejudged?: { seen: number; builtinPromptSkipped: number } };
+    expect(rested.state).toBe('ran');
+    expect([rested.rejudged?.seen ?? 0, rested.rejudged?.builtinPromptSkipped ?? 0]).toEqual([0, 0]);
     nowMs += 60_000;
     await service.runOnce();
-    expect(logs.filter(line => line.includes('; picked for:'))).toHaveLength(2);
+    expect(logs.filter(line => line.includes('; picked for:'))).toHaveLength(1);
   }
 });

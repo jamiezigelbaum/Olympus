@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import type { EngineRole } from '../../core/engine-split.ts';
 import { memoryHolderCounts, memoryPayloadCounts, type MemoryActivityLabel } from '../../core/memory-counters.ts';
 
@@ -23,6 +24,21 @@ export function processMemory(status?: string, platform: string = process.platfo
     try { status = readFileSync('/proc/self/status', 'utf8'); }
     catch { return { rss }; }
   }
+  return parseProcMemory(rss, status);
+}
+
+export async function processMemoryAsync(): Promise<ProcessMemory> {
+  if (process.platform !== 'linux') return { rss: process.memoryUsage.rss() };
+  try {
+    const status = await readFile('/proc/self/status', 'utf8');
+    return parseProcMemory(process.memoryUsage.rss(), status);
+  } catch {
+    // An unavailable proc mount leaves only the correctly named total.
+    return { rss: process.memoryUsage.rss() };
+  }
+}
+
+function parseProcMemory(rss: number, status: string): ProcessMemory {
   const kb = (key: string): number | undefined => {
     const found = new RegExp(`^${key}:\\s+(\\d+)\\s+kB$`, 'm').exec(status);
     return found ? Number(found[1]) * 1024 : undefined;
@@ -94,6 +110,7 @@ export function createMemoryDiagnostic(input: {
   uptime?: () => number;
   heap?: () => Pick<NodeJS.MemoryUsage, 'heapUsed' | 'heapTotal' | 'external' | 'arrayBuffers'>;
   sampleHolders?: () => MemoryAttribution;
+  workerPayloads?: () => BigInt64Array | undefined;
   log?: (line: string) => void;
 }) {
   const now = input.now ?? Date.now;
@@ -106,7 +123,7 @@ export function createMemoryDiagnostic(input: {
       heap_size_mb: usage.heapUsed, heap_capacity_mb: usage.heapTotal, extra_memory_mb: usage.external,
       ...(input.readers?.() ?? { read_workers: 0, read_connections: 0 }),
       ...(usage.arrayBuffers > 0 ? { array_buffers_mb: usage.arrayBuffers } : {}),
-      ...memoryPayloadCounts(), ...input.sampleHolders?.(),
+      ...memoryPayloadCounts(input.workerPayloads?.()), ...input.sampleHolders?.(),
     };
   };
   let lastLineAt = now();

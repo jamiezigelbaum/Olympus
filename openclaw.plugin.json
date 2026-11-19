@@ -567,6 +567,12 @@
                     "type": "string",
                     "description": "FAST lane model id."
                   },
+                  "contextTokens": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9007199254740991,
+                    "description": "Served context window in tokens when this route answers source questions."
+                  },
                   "secretRef": {
                     "type": "string",
                     "description": "SecretRef for the FAST lane model provider credential."
@@ -584,6 +590,12 @@
                   "model": {
                     "type": "string",
                     "description": "DEEP lane model id."
+                  },
+                  "contextTokens": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9007199254740991,
+                    "description": "Served context window in tokens when this route answers source questions."
                   },
                   "secretRef": {
                     "type": "string",
@@ -608,6 +620,12 @@
                   "model": {
                     "type": "string",
                     "description": "Served model id for this model profile."
+                  },
+                  "contextTokens": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9007199254740991,
+                    "description": "Served context window in tokens when this route answers source questions."
                   },
                   "secretRef": {
                     "type": "string",
@@ -638,6 +656,12 @@
                     "type": "string",
                     "description": "Served model id for this model profile."
                   },
+                  "contextTokens": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9007199254740991,
+                    "description": "Served context window in tokens when this route answers source questions."
+                  },
                   "secretRef": {
                     "type": "string",
                     "description": "SecretRef for this model profile provider credential."
@@ -666,6 +690,12 @@
                   "model": {
                     "type": "string",
                     "description": "Served model id for this model profile."
+                  },
+                  "contextTokens": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9007199254740991,
+                    "description": "Served context window in tokens when this route answers source questions."
                   },
                   "secretRef": {
                     "type": "string",
@@ -696,6 +726,12 @@
                     "type": "string",
                     "description": "Served model id for this model profile."
                   },
+                  "contextTokens": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9007199254740991,
+                    "description": "Served context window in tokens when this route answers source questions."
+                  },
                   "secretRef": {
                     "type": "string",
                     "description": "SecretRef for this model profile provider credential."
@@ -724,6 +760,12 @@
                   "model": {
                     "type": "string",
                     "description": "Served model id for this model profile."
+                  },
+                  "contextTokens": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9007199254740991,
+                    "description": "Served context window in tokens when this route answers source questions."
                   },
                   "secretRef": {
                     "type": "string",
@@ -754,6 +796,12 @@
                     "type": "string",
                     "description": "Served model id for this model profile."
                   },
+                  "contextTokens": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9007199254740991,
+                    "description": "Served context window in tokens when this route answers source questions."
+                  },
                   "secretRef": {
                     "type": "string",
                     "description": "SecretRef for this model profile provider credential."
@@ -783,6 +831,12 @@
                     "type": "string",
                     "description": "Served model id for this model profile."
                   },
+                  "contextTokens": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9007199254740991,
+                    "description": "Served context window in tokens when this route answers source questions."
+                  },
                   "secretRef": {
                     "type": "string",
                     "description": "SecretRef for this model profile provider credential."
@@ -811,6 +865,12 @@
                   "model": {
                     "type": "string",
                     "description": "Served model id for this model profile."
+                  },
+                  "contextTokens": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9007199254740991,
+                    "description": "Served context window in tokens when this route answers source questions."
                   },
                   "secretRef": {
                     "type": "string",

@@ -52,12 +52,14 @@ export interface ArgusLaneConfig {
   baseUrl: string;
   model: string;
   secretRef?: string;
+  contextTokens?: number;
 }
 
 export interface ArgusModelProfileConfig {
   baseUrl: string;
   model: string;
   secretRef?: string;
+  contextTokens?: number;
   purpose: 'chat' | 'text_reasoning' | 'classification' | 'embedding' | 'vision';
 }
 
@@ -561,6 +563,10 @@ function applyEnvironmentOverrides(config: OlympusConfig, env: Record<string, st
   }
   if (env.OLYMPUS_ARGUS_DEEP_MODEL) {
     config.argus.lanes.deep.model = env.OLYMPUS_ARGUS_DEEP_MODEL;
+  }
+  for (const lane of ['fast', 'deep'] as const) {
+    const contextTokens = envContextTokens(env, `OLYMPUS_ARGUS_${lane.toUpperCase()}`);
+    if (contextTokens !== undefined) config.argus.lanes[lane].contextTokens = contextTokens;
   }
   if (fastLaneEnvChanged) {
     mirrorFastLaneToProfiles(config, ['default_chat', 'source_answer']);
@@ -1216,6 +1222,9 @@ function applyLaneConfig(
   if (typeof laneConfig.secretRef === 'string' && laneConfig.secretRef.trim()) {
     config.argus.lanes[lane].secretRef = laneConfig.secretRef.trim();
   }
+  if (laneConfig.contextTokens !== undefined) {
+    config.argus.lanes[lane].contextTokens = parseContextTokens(laneConfig.contextTokens, `argus.lanes.${lane}.contextTokens`);
+  }
 }
 
 function applyModelProfileConfig(
@@ -1232,6 +1241,9 @@ function applyModelProfileConfig(
   }
   if (typeof profileConfig.secretRef === 'string' && profileConfig.secretRef.trim()) {
     config.argus.modelProfiles[profile].secretRef = profileConfig.secretRef.trim();
+  }
+  if (profileConfig.contextTokens !== undefined) {
+    config.argus.modelProfiles[profile].contextTokens = parseContextTokens(profileConfig.contextTokens, `argus.modelProfiles.${profile}.contextTokens`);
   }
   if (
     typeof profileConfig.purpose === 'string'
@@ -1250,9 +1262,24 @@ function applyModelProfileEnv(
   const baseUrl = env[`${prefix}_BASE_URL`];
   const model = env[`${prefix}_MODEL`];
   const secretRef = env[`${prefix}_SECRET_REF`];
+  const contextTokens = envContextTokens(env, prefix);
   if (baseUrl) config.argus.modelProfiles[profile].baseUrl = trimTrailingSlash(baseUrl);
   if (model) config.argus.modelProfiles[profile].model = model;
   if (secretRef?.trim()) config.argus.modelProfiles[profile].secretRef = secretRef.trim();
+  if (contextTokens !== undefined) config.argus.modelProfiles[profile].contextTokens = contextTokens;
+}
+
+function envContextTokens(env: Record<string, string | undefined>, prefix: string): number | undefined {
+  const name = `${prefix}_CONTEXT_TOKENS`;
+  const value = env[name];
+  return value === undefined ? undefined : parseContextTokens(/^\d+$/.test(value.trim()) ? Number(value) : value, name);
+}
+
+export function parseContextTokens(value: unknown, name: string): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0) {
+    throw new OperationError('config_error', `${name} must be a positive safe integer in tokens.`);
+  }
+  return value;
 }
 
 function validateConfig(config: OlympusConfig): void {
@@ -1409,6 +1436,7 @@ function validateConfig(config: OlympusConfig): void {
       throw new OperationError('config_error', `${lane} model must be configured.`);
     }
     validateSecretRef(laneConfig.secretRef, `${lane} secretRef`);
+    if (laneConfig.contextTokens !== undefined) parseContextTokens(laneConfig.contextTokens, `argus.lanes.${lane}.contextTokens`);
   }
   for (const profile of ARGUS_MODEL_PROFILES) {
     const profileConfig = config.argus.modelProfiles[profile];
@@ -1423,6 +1451,7 @@ function validateConfig(config: OlympusConfig): void {
       throw new OperationError('config_error', `${profile} model must be configured.`);
     }
     validateSecretRef(profileConfig.secretRef, `${profile} secretRef`);
+    if (profileConfig.contextTokens !== undefined) parseContextTokens(profileConfig.contextTokens, `argus.modelProfiles.${profile}.contextTokens`);
   }
   assertBoolean(config.email.enabled, 'email.enabled');
   assertBoolean(config.sourceIndex.enabled, 'sourceIndex.enabled');

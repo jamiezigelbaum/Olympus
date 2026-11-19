@@ -762,6 +762,25 @@ test('re-scoring stops by score, not count: an item the 256-dimension digest ran
   } finally { db.close(); }
 });
 
+test('a store with fewer related items than the limit is not read back whole: re-scoring stops at the score floor', async () => {
+  const db = numericStore();
+  try {
+    db.transaction(() => {
+      insert(db, 1, [1, 0, 0]);
+      insert(db, 2, [0.9, 0.1, 0]);
+      // Unrelated to the question: exact cosine 0, far under the lane's floor.
+      for (let i = 3; i <= 6000; i++) insert(db, i, [0, 1, 0]);
+    })();
+    finish(db);
+    let rescored = 0;
+    const result = await scanDigestPages(reader(db, (q, rows) => {
+      if (q.sql.includes('FROM json_each(?) pick')) rescored += (rows as unknown[]).length;
+    }), [1, 0, 0], { modelId }, undefined, 5);
+    expect(rank(result, 2)).toEqual([1, 2]);
+    expect(rescored).toBeLessThanOrEqual(400);
+  } finally { db.close(); }
+});
+
 test('the candidate cap never cuts a pass short of the limit: rejected top candidates drain to the eligible tail in one pass', async () => {
   const db = numericStore();
   try {

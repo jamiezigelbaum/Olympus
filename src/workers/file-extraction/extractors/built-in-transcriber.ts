@@ -35,6 +35,7 @@ import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir, totalmem } from 'node:os';
 import { join } from 'node:path';
+import { memoryPayloadByteCounter } from '../../../core/memory-counters.ts';
 import { fetchModelEndpoint } from '../../../core/model-transport.ts';
 import { idleClock, readChatCompletion } from './model-stream.ts';
 import {
@@ -443,24 +444,31 @@ async function transcribeChunk(
 ): Promise<string> {
   // A stall clock: it restarts on the headers and on every streamed token.
   const clock = idleClock(timeoutMs);
+  const noteBytes = memoryPayloadByteCounter();
+  let requestBytes = 0;
   try {
     // The audio and the server's bearer token ride this request to loopback
     // only; a redirect is refused, never followed.
+    const body = JSON.stringify({
+      messages: [{
+        role: 'user',
+        content: [{ type: 'input_audio', input_audio: { data: Buffer.from(wav).toString('base64'), format: 'wav' } }],
+      }],
+      temperature: 0,
+      max_tokens: MAX_TOKENS_PER_CHUNK,
+      stream: true,
+    });
+    if (noteBytes) {
+      requestBytes = Buffer.byteLength(body);
+      noteBytes(requestBytes);
+    }
     const response = await fetchModelEndpoint(fetchImpl, `${endpoint.baseUrl}/v1/chat/completions`, {
       method: 'POST',
       headers: {
         authorization: `Bearer ${endpoint.token}`,
         'content-type': 'application/json',
       },
-      body: JSON.stringify({
-        messages: [{
-          role: 'user',
-          content: [{ type: 'input_audio', input_audio: { data: Buffer.from(wav).toString('base64'), format: 'wav' } }],
-        }],
-        temperature: 0,
-        max_tokens: MAX_TOKENS_PER_CHUNK,
-        stream: true,
-      }),
+      body,
       signal: clock.signal,
     });
     if (!response.ok) {
@@ -472,6 +480,7 @@ async function transcribeChunk(
     if (typeof content !== 'string') throw new Error('The built-in transcription model returned no text.');
     return content;
   } finally {
+    noteBytes?.(-requestBytes);
     clock.clear();
   }
 }

@@ -12,7 +12,7 @@
 // written with the asynchronous file calls.
 
 import { chmodSync } from 'node:fs';
-import { open, rename } from 'node:fs/promises';
+import { rename, utimes, writeFile } from 'node:fs/promises';
 import type { AnalystModelCompletion, AnalystModelRequest } from '../../core/analyst.ts';
 import { OperationError, type OperationErrorCode } from '../../core/operation-error.ts';
 import { workerSocketServe } from '../../core/worker-transport.ts';
@@ -87,15 +87,14 @@ function start(init: ControlInit): void {
     ...(init.model ? { modelComplete } : {}),
   });
 
-  // The status snapshot: the loop's last state, written again every interval
-  // with the time of this write, the time of that state, and how long the
-  // loop has been held. One write at a time; none waits on the disk here.
+  // Publish changed state atomically and refresh the heartbeat on unchanged state.
   let state: { at: number; body: Record<string, unknown> } | undefined;
   // The loop's collect threw: said in the snapshot until a collect succeeds.
   let stateError: { attempts: number; error: string; at: number } | undefined;
   let statusPath: string | undefined;
   let writing = false;
   let owed = false;
+  let published: { path: string; content: string } | undefined;
   // A snapshot that cannot be written is said at once, then once a minute
   // with the count, and once when it is written again (as the loop's publisher does).
   let failures = 0;
@@ -110,26 +109,28 @@ function start(init: ControlInit): void {
     // One name, written over each time: a write that failed leaves nothing to clean up.
     const partial = `${path}.control.tmp`;
     try {
-      const text = `${JSON.stringify({
+      const now = new Date();
+      const snapshot = {
         schema: ENGINE_STATUS_SNAPSHOT_SCHEMA,
         instance_id: init.instanceId,
-        written_at: new Date().toISOString(),
+        heartbeat: 'mtime',
         ...(state ? { state_at: new Date(state.at).toISOString() } : {}),
         loop_held_ms: Math.round(loopHeldMs()),
         ...(stateError ? { state_error: { attempts: stateError.attempts, error: stateError.error, at: new Date(stateError.at).toISOString() } } : {}),
         ...(state?.body ?? EMPTY_STATE),
-      })}\n`;
-      const file = await open(partial, 'w', 0o600);
-      try {
-        await file.writeFile(text, 'utf8');
-        await file.sync();
-      } finally {
-        await file.close();
+      };
+      const content = JSON.stringify(snapshot);
+      if (published?.path === path && published.content === content) {
+        await utimes(path, now, now);
+      } else {
+        await writeFile(partial, `${JSON.stringify({ ...snapshot, written_at: now.toISOString() })}\n`, { mode: 0o600 });
+        await rename(partial, path);
+        published = { path, content };
       }
-      await rename(partial, path);
       if (failures > 0) post({ type: 'log', line: `[engine-split] status snapshot written again after ${failures} failed attempt(s)` });
       failures = 0;
     } catch (error) {
+      published = undefined;
       failures += 1;
       if (failures === 1 || performance.now() - saidAt >= 60_000) {
         saidAt = performance.now();

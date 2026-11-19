@@ -102,6 +102,12 @@ describe('read pool', () => {
     expect(readPoolMemoryCounts()).toEqual({ read_workers: 1, read_connections: 3 });
     await first.close(); await second.close();
     expect(readPoolMemoryCounts()).toEqual({ read_workers: 1, read_connections: 3 });
+    await waitFor(() => sampleReadPoolMemory(false).read_heap_workers === 1, { description: 'idle reader heap report' });
+    const front = sampleReadPoolMemory(false);
+    expect(front.read_heap_size_mb).toBeGreaterThan(0);
+    expect(front.read_extra_memory_mb).toBeGreaterThanOrEqual(0);
+    expect(front.read_array_buffers_mb).toBeGreaterThanOrEqual(0);
+    expect(front).not.toHaveProperty('sqlite_read_connections_sampled');
     await waitFor(() => sampleReadPoolMemory().sqlite_read_connections_sampled === 3, { description: 'idle reader memory report' });
     const memory = sampleReadPoolMemory();
     expect(memory.read_heap_workers).toBe(1);

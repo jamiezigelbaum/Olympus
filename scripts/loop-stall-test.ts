@@ -25,7 +25,7 @@ import { createHash } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, writeFileSync, writeSync, mkdtempSync, rmSync } from 'node:fs';
 import { join, resolve, relative } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import type { Database } from 'bun:sqlite';
+import { Database } from 'bun:sqlite';
 import type { AnalystModel } from '../src/core/analyst.ts';
 import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
 import { olympusDataRoot } from '../src/core/olympus-layout.ts';
@@ -47,6 +47,8 @@ import { LOOP_LAG_BUCKETS_MS } from '../src/core/engine-heartbeat.ts';
 import { controlPathHeadroom, freezeLogLine, summarizeCpuSamples, tracesInStalls } from '../src/workers/control-path-headroom.ts';
 import { ownerTierItemId } from '../src/workers/classification/tier-owner-items.ts';
 import { DASHBOARD_LOCAL_CONTROL_SESSION_PATH } from '../src/workers/http.ts';
+import type { summarizeFreeze } from './front-thread-timeline.ts';
+import { hiddenCopyBuilds, samplePage, type HiddenCopyBuilds } from './release-check/cutover.ts';
 
 // v6: each build keeps a pristine copy and each run starts from it, so every run has judging to do (plan, 16 Nov 2026).
 const VERSION = 6;
@@ -602,15 +604,193 @@ function readPressure(): PressureTotals {
   return totals;
 }
 /** One sample a second: milliseconds stalled in that second, per scope and kind. Returns the samples and a stop. */
+/**
+ * The live install beside the fixture, read from its systemd cgroups (world-readable, so no access to its processes is needed):
+ * each Olympus unit outside this run's own scope, with its disk read and write bytes and its swap. Names and numbers only.
+ */
+function readLiveInstall(): Record<string, { rbytes: number; wbytes: number; swap_mib: number | null }> {
+  const out: Record<string, { rbytes: number; wbytes: number; swap_mib: number | null }> = {};
+  const own = /^0::(.*)$/m.exec((() => { try { return readFileSync('/proc/self/cgroup', 'utf8'); } catch { return ''; } })())?.[1] ?? '';
+  const walk = (dir: string, depth: number): void => {
+    if (depth > 8) return;
+    let entries;
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const path = join(dir, entry.name);
+      const relative = path.slice('/sys/fs/cgroup'.length);
+      if (/olympus|openclaw/i.test(entry.name) && !own.startsWith(relative)) {
+        let rbytes = 0, wbytes = 0;
+        try {
+          for (const line of readFileSync(join(path, 'io.stat'), 'utf8').split('\n')) {
+            rbytes += Number(/rbytes=(\d+)/.exec(line)?.[1] ?? 0);
+            wbytes += Number(/wbytes=(\d+)/.exec(line)?.[1] ?? 0);
+          }
+        } catch { /* no io controller */ }
+        let swap: number | null = null;
+        try { swap = Math.round(Number(readFileSync(join(path, 'memory.swap.current'), 'utf8')) / 1024 / 1024); } catch { /* none */ }
+        out[relative] = { rbytes, wbytes, swap_mib: swap };
+      }
+      walk(path, depth + 1);
+    }
+  };
+  walk('/sys/fs/cgroup/user.slice', 0);
+  walk('/sys/fs/cgroup/system.slice', 0);
+  return out;
+}
+
+/** Host memory lines that show how much of RAM the file map and swap hold, in MiB (Linux only). */
+function readMeminfo(): Record<string, number> {
+  const kib: Record<string, number> = {};
+  try { for (const line of readFileSync('/proc/meminfo', 'utf8').split('\n')) { const m = /^(\w+):\s+(\d+) kB/.exec(line); if (m) kib[m[1]!] = Number(m[2]); } } catch { return {}; }
+  const mib = (value: number | undefined) => Math.round((value ?? 0) / 1024);
+  return { mapped_mib: mib(kib.Mapped), cached_mib: mib(kib.Cached), swap_used_mib: mib((kib.SwapTotal ?? 0) - (kib.SwapFree ?? 0)) };
+}
+
+/** The run's own cgroup (the 8 GB scope): swap it holds and its file-mapped, file and anonymous memory, in MiB. */
+function readCgroupMemory(): Record<string, number | string> {
+  try {
+    const path = /^0::(.*)$/m.exec(readFileSync('/proc/self/cgroup', 'utf8'))?.[1];
+    if (!path) return { error: 'no cgroup v2 path' };
+    const base = join('/sys/fs/cgroup', path);
+    const read = (name: string) => { try { return readFileSync(join(base, name), 'utf8').trim(); } catch { return undefined; } };
+    const stat = Object.fromEntries((read('memory.stat') ?? '').split('\n').map(line => line.split(' ')).filter(parts => parts.length === 2).map(([key, value]) => [key!, Number(value)]));
+    const mib = (value: number | string | undefined) => value === undefined || value === 'max' ? value : Math.round(Number(value) / 1024 / 1024);
+    const out: Record<string, number | string> = {};
+    for (const [key, value] of Object.entries({ swap_current_mib: mib(read('memory.swap.current')), current_mib: mib(read('memory.current')), file_mapped_mib: mib(stat.file_mapped), file_mib: mib(stat.file), anon_mib: mib(stat.anon) })) if (value !== undefined) out[key] = value;
+    return out;
+  } catch (error) { return { error: String(error).slice(0, 200) }; }
+}
+
+/** Per engine role: read() copying (rchar, syscr, read_bytes from /proc/PID/io) from readiness to the end, and the process's own memory at the end. */
+function sampleProcessIo(pids: () => Array<{ role: string; pid: number }>, ready: (role: string) => boolean) {
+  type Io = Record<string, number>;
+  const readIo = (pid: number): Io | undefined => {
+    try { return Object.fromEntries(readFileSync(`/proc/${pid}/io`, 'utf8').trim().split('\n').map(line => line.split(': ')).map(([key, value]) => [key!, Number(value)])); } catch { return undefined; }
+  };
+  const readStatus = (pid: number) => {
+    try {
+      const text = readFileSync(`/proc/${pid}/status`, 'utf8');
+      const mib = (name: string) => Math.round(Number(new RegExp(`^${name}:\\s+(\\d+) kB`, 'm').exec(text)?.[1] ?? 0) / 1024);
+      return { rss_anon_mib: mib('RssAnon'), rss_file_mib: mib('RssFile'), vm_swap_mib: mib('VmSwap') };
+    } catch { return undefined; }
+  };
+  const state: Record<string, { atReady?: Io; last?: Io; status?: ReturnType<typeof readStatus> }> = {};
+  const tick = () => {
+    for (const { role, pid } of pids()) {
+      const entry = state[role] ??= {};
+      const io = readIo(pid);
+      if (!io) continue;
+      if (!entry.atReady && ready(role)) entry.atReady = io;
+      entry.last = io;
+      entry.status = readStatus(pid) ?? entry.status;
+    }
+  };
+  const timer = setInterval(tick, 1000);
+  return {
+    stop: () => { tick(); clearInterval(timer); },
+    summary: () => Object.fromEntries(Object.entries(state).map(([role, entry]) => {
+      const delta = (key: string) => entry.atReady && entry.last ? (entry.last[key] ?? 0) - (entry.atReady[key] ?? 0) : null;
+      return [role, { from_ready: Boolean(entry.atReady), rchar_gb: delta('rchar') === null ? null : Math.round(delta('rchar')! / 1e7) / 100, syscr: delta('syscr'), read_bytes_gb: delta('read_bytes') === null ? null : Math.round(delta('read_bytes')! / 1e7) / 100, at_end: entry.status ?? null }];
+    })),
+  };
+}
+
+/** Host paging counters for the run's delta: pages read in, pages swapped out and in, major faults (Linux only). */
+function readVmstat(): Record<string, number> {
+  const totals: Record<string, number> = {};
+  try {
+    for (const line of readFileSync('/proc/vmstat', 'utf8').split('\n')) {
+      const [key, value] = line.split(' ');
+      if (key && ['pgpgin', 'pgpgout', 'pswpin', 'pswpout', 'pgmajfault'].includes(key)) totals[key] = Number(value);
+    }
+  } catch { /* not Linux */ }
+  return totals;
+}
+
+/**
+ * The background's main loop thread, sampled by scripts/front-thread-timeline.ts for the whole run, then summarized over each
+ * background freeze or held-loop line: time running, waiting for CPU, blocked on page faults, on disk, and the top wait channel.
+ */
+function startThreadTimeline(pid: number, out: string): { stop(): Promise<void> } | undefined {
+  if (process.platform !== 'linux') return undefined;
+  const child = Bun.spawn([process.execPath, join(import.meta.dir, 'front-thread-timeline.ts'), '--pid', String(pid), '--out', out, '--seconds', '14400'], { stdout: 'ignore', stderr: 'ignore' });
+  return { stop: async () => { child.kill('SIGTERM'); await child.exited; } };
+}
+
+function summarizeThreadTimeline(role: Role, timeline: string, freezes: Array<{ at: string; role: string; line: string }>, freezePath: string): unknown[] | string {
+  if (!existsSync(timeline)) return 'no timeline was written';
+  writeFileSync(freezePath, freezes.filter(entry => entry.role === role).map(entry => `${entry.at} ${entry.line}`).join('\n') + '\n');
+  const run = spawnSync(process.execPath, [join(import.meta.dir, 'front-thread-timeline.ts'), '--summarize', timeline, '--freezes', freezePath, '--role', role], { encoding: 'utf8', timeout: 120_000 });
+  if (run.status !== 0) return `summarize exited ${run.status}: ${(run.stderr || '').slice(-300)}`;
+  return run.stdout.split('\n').filter(Boolean).map(line => { try { return JSON.parse(line); } catch { return line; } })
+    .sort((a: any, b: any) => (b?.window_ms ?? 0) - (a?.window_ms ?? 0)).slice(0, 30);
+}
+
+const STARTUP_PAGES = ['Home', 'Sources'] as const;
+const STARTUP_PROBE_MS = 250;
+type PageSample = Awaited<ReturnType<typeof samplePage>>;
+type StartupGap = { page: PageSample['page']; start_at: string; end_at: string; ms: number };
+type ThreadSplit = ReturnType<typeof summarizeFreeze>;
+
+export function summarizeStartupGaps(samples: readonly PageSample[], firstAnswerAt: number, readyAt: number) {
+  const pageGaps = (page: PageSample['page']) => {
+    const answers = samples.filter(sample => sample.page === page && sample.answered)
+      .map(sample => sample.at + sample.ms)
+      .filter(at => at >= firstAnswerAt && at <= readyAt)
+      .sort((a, b) => a - b);
+    const over_1s: StartupGap[] = [];
+    let longest: StartupGap | null = null;
+    let previous = firstAnswerAt;
+    for (const end of [...answers, readyAt]) {
+      const ms = end - previous;
+      if (ms > 0) {
+        const gap = { page, start_at: new Date(previous).toISOString(), end_at: new Date(end).toISOString(), ms };
+        if (!longest || ms > longest.ms) longest = gap;
+        if (ms > 1_000) over_1s.push(gap);
+      }
+      previous = end;
+    }
+    return { answers: answers.length, longest, over_1s };
+  };
+  const pages = { Home: pageGaps('Home'), Sources: pageGaps('Sources') };
+  const home = pages.Home.longest;
+  const sources = pages.Sources.longest;
+  return { pages, longest: (home?.ms ?? 0) >= (sources?.ms ?? 0) ? home : sources };
+}
+
+export function coldStartVerdict(longest: StartupGap | null, split: Pick<ThreadSplit,
+  'runningMs' | 'runQueueMs' | 'blockedMajfltMs' | 'blockedBlkioMs' | 'blockedOtherMs'> | undefined) {
+  if (!longest || !split || longest.ms <= 10_000) return 'NOT REPRODUCED';
+  const ioMs = split.blockedBlkioMs + split.blockedMajfltMs;
+  // Idle or unsampled time is unattributed, so it cannot strengthen the IO finding.
+  const otherMs = Math.max(split.blockedOtherMs, longest.ms - ioMs - split.runningMs - split.runQueueMs);
+  return ioMs > Math.max(split.runningMs, split.runQueueMs, otherMs) ? 'REPRODUCED' : 'NOT REPRODUCED';
+}
+
+function startupThreadSplit(timeline: string, gap: StartupGap): ThreadSplit | string {
+  if (!existsSync(timeline)) return 'no timeline was written';
+  const run = spawnSync(process.execPath, [join(import.meta.dir, 'front-thread-timeline.ts'), '--summarize', timeline,
+    '--marker', `${gap.end_at},${gap.ms}`, '--role', 'front'], { encoding: 'utf8', timeout: 120_000 });
+  if (run.status !== 0) return `summarize exited ${run.status}: ${(run.stderr || '').slice(-300)}`;
+  return JSON.parse(run.stdout) as ThreadSplit;
+}
+
 function samplePressure(): { samples: Array<{ at: string } & Record<string, number | string>>; stop(): void } {
   const samples: Array<{ at: string } & Record<string, number | string>> = [];
   let last = readPressure();
+  let lastAt = performance.now();
   const timer = setInterval(() => {
     const now = readPressure();
-    const sample: { at: string } & Record<string, number | string> = { at: new Date().toISOString() };
-    for (const [key, total] of Object.entries(now)) if (last[key] !== undefined) sample[key] = Math.round((total - last[key]!) / 1000);
+    const at = performance.now();
+    // The timer runs on the gate's own loop, so a sample can come late: scale each delta to milliseconds per second of the
+    // actual interval, and keep the interval beside it.
+    const intervalMs = Math.max(1, at - lastAt);
+    const sample: { at: string } & Record<string, number | string> = { at: new Date().toISOString(), interval_ms: Math.round(intervalMs) };
+    for (const [key, total] of Object.entries(now)) if (last[key] !== undefined) sample[key] = Math.round((total - last[key]!) / 1000 * 1000 / intervalMs);
     samples.push(sample);
     last = now;
+    lastAt = at;
   }, 1000);
   return { samples, stop: () => clearInterval(timer) };
 }
@@ -632,10 +812,10 @@ export function sampleAnonMemory(pids: () => Array<{ role: string; pid: number }
 }
 /** The worst second and the seconds with any stall at or over 100 ms, per key. */
 function pressureSummary(samples: Array<{ at: string } & Record<string, number | string>>) {
-  const keys = [...new Set(samples.flatMap(sample => Object.keys(sample).filter(key => key !== 'at')))];
+  const keys = [...new Set(samples.flatMap(sample => Object.keys(sample).filter(key => key !== 'at' && key !== 'interval_ms')))];
   const worst = Object.fromEntries(keys.map(key => [key, Math.max(0, ...samples.map(sample => Number(sample[key] ?? 0)))]));
   const stalled = samples.filter(sample => keys.some(key => Number(sample[key] ?? 0) >= 100));
-  return { readable: keys.length > 0, worst_ms_per_second: worst, seconds_sampled: samples.length, seconds_with_stall_100ms: stalled.length, stalled_seconds: stalled.slice(0, 300) };
+  return { readable: keys.length > 0, samples: samples.slice(0, 1200), worst_ms_per_second: worst, worst_interval_ms: Math.max(0, ...samples.map(sample => Number(sample.interval_ms ?? 0))), seconds_sampled: samples.length, seconds_with_stall_100ms: stalled.length, stalled_seconds: stalled.slice(0, 300) };
 }
 /** Each fixture file's WAL size in bytes (0 when it has none), so a WAL the fixture carries in shows apart from one a run builds. */
 function walSizes(dir: string): Record<string, number> {
@@ -761,11 +941,38 @@ function coldFiles(dir: string) {
     if (result.status !== 0) throw new Error(`Cannot evict synthetic pages: ${result.stderr}`);
   }
 }
-type RunCase = 'steady' | 'boot-after-upgrade';
-async function run(dir: string, seconds: number, memoryMax: string, options: { runCase: RunCase; walBytes: number; ioFloorMs: number; ioWaitSeconds: number; quick?: boolean }) {
+
+function clearSavedHiddenCopies(dir: string) {
+  // A fresh process can load the saved set and replay its feeds. Clear only the
+  // derived set in the restored working copy to force the ledger bootstrap.
+  for (const domain of DOMAINS) {
+    const store = new Database(storePath(dir, domain), { readwrite: true });
+    try {
+      store.exec('PRAGMA busy_timeout = 10000;');
+      store.exec('BEGIN; DELETE FROM tier_visibility_state; DELETE FROM tier_visibility_members; COMMIT;');
+    } finally { store.close(); }
+  }
+}
+
+function readIoThrottle(): string {
+  const cgroup = /^0::(.*)$/m.exec(readFileSync('/proc/self/cgroup', 'utf8'))?.[1];
+  const path = cgroup && join('/sys/fs/cgroup', cgroup, 'io.max');
+  return (path && existsSync(path) && readFileSync(path, 'utf8').trim()) || 'off';
+}
+
+const RUN_CASES = ['steady', 'boot-after-upgrade', 'cold-start'] as const;
+type RunCase = typeof RUN_CASES[number];
+async function run(dir: string, seconds: number, memoryMax: string, options: { runCase: RunCase; walBytes: number; ioFloorMs: number; ioWaitSeconds: number; quick?: boolean; sqliteMmap?: 'on' | 'off' | 'bounded'; swapReading?: boolean; ioThrottleUnavailable?: boolean }) {
   const shape = JSON.parse(readFileSync(join(dir, 'shape.json'), 'utf8')) as { shape: { version: number; items: number } };
   if (shape.shape.version !== VERSION) throw new Error('Build the current synthetic fixture shape before running.');
   const isCapped = capped(memoryMaxBytes(memoryMax));
+  const coldStart = options.runCase === 'cold-start' ? {
+    builds: {} as HiddenCopyBuilds['finished'],
+    firstAnswerAt: undefined as number | undefined,
+    readyAt: undefined as number | undefined,
+    samples: [] as PageSample[],
+    io_throttle: options.ioThrottleUnavailable ? 'unavailable: io controller not delegated' : readIoThrottle(),
+  } : undefined;
   if (!isCapped) console.error(`WARNING: run is not under MemoryMax<=${memoryMax} and MemorySwapMax=0; this is not a qualified receipt. Use: systemd-run --user --scope -p MemoryMax=${memoryMax} -p MemorySwapMax=0 -- bun scripts/loop-stall-test.ts run --dir ${JSON.stringify(dir)} --memory-max ${memoryMax}`);
   const runDir = mkdtempSync('/tmp/ols-'); // Unix socket path must remain short.
   const metrics = join(runDir, 'metrics'); mkdirSync(metrics);
@@ -791,6 +998,8 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
   const portProbe = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: { data() {} } });
   const port = portProbe.port; portProbe.stop(true);
   const env = { PATH: process.env.PATH ?? '', ...environment(dir), HOME: runDir, XDG_CONFIG_HOME: join(runDir, 'c'), XDG_STATE_HOME: join(runDir, 's'), XDG_RUNTIME_DIR: runDir,
+    // The arm's file-map setting for the whole engine (front, background and their read workers inherit it); 'on' is the default.
+    ...(options.sqliteMmap && options.sqliteMmap !== 'on' ? { OLYMPUS_SQLITE_MMAP: options.sqliteMmap } : {}),
     OLYMPUS_EMAIL_SOURCE_PORT: String(port), OLYMPUS_WORKER_AUTH_TOKEN: 'synthetic-loop-stall-token',
     OLYMPUS_ENGINE_BACKGROUND_SOCKET: join(runDir, 'background.sock'), OLYMPUS_WORKER_SCHEDULER_ENABLED: 'false',
     OLYMPUS_TIER_SNIFFER_ENABLED: 'false', OLYMPUS_UPDATE_CHECK: 'off', OLYMPUS_BUILT_IN_ANALYST: 'false',
@@ -820,9 +1029,25 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
   // The engine's SQLite settings and WAL lines, kept whole (output keeps only its tail), each with when it arrived.
   const sqliteLines: Array<{ at: string; role: Role; line: string }> = [];
   const freezeLines: Array<{ at: string; role: Role; line: string }> = [];
+  // The product's per-click trace (ingress, each command POST attempt, control receipt, answer), joined to clicks by id.
+  const clickTrace = new Map<string, string[]>();
+  // Each role's SQLite file-map line at boot (bounded: per-file size, budget, files), kept whole for the arm's receipt.
+  const fileMapLines: Array<{ role: Role; line: string }> = [];
   const keepEngineLine = (role: Role, line: string) => {
+    if (coldStart && !coldStart.builds[role] && line.includes("stores' hidden-copy sets")) {
+      const build = hiddenCopyBuilds(line).finished[role];
+      if (build) {
+        coldStart.builds[role] = build;
+        if (ROLES.every(role => coldStart.builds[role])) coldStart.readyAt = Math.round(nowMs());
+      }
+    }
     if (line.includes('[olympus] sqlite settings:') || line.includes('[olympus] sqlite wal:') || line.includes('[olympus] sqlite checkpoint:') || line.includes('[olympus] sqlite wal room:') || line.includes('[olympus] sqlite wal held:')) sqliteLines.push({ at: new Date().toISOString(), role, line: line.slice(line.indexOf('[olympus] sqlite')).slice(0, 400) });
     // Keep each freeze frame and held-loop line outside the bounded engine log tail.
+    else if (line.includes('SQLite file map') && fileMapLines.length < 10) fileMapLines.push({ role, line: line.slice(line.indexOf('[olympus]')).slice(0, 400) });
+    else if (line.includes('[olympus:click-trace]')) {
+      const id = / id=(\S+)/.exec(line)?.[1];
+      if (id) { const lines = clickTrace.get(id) ?? []; if (lines.length < 20) lines.push(line.slice(0, 400)); clickTrace.set(id, lines); }
+    }
     else if (line.includes('[olympus:control-path]') && (line.includes('freeze frames') || line.includes('loop held for'))) freezeLines.push({ at: new Date().toISOString(), role, line: line.slice(line.indexOf('[olympus:control-path]')).slice(0, 4000) });
   };
   const pumps: Promise<void>[] = [];
@@ -830,16 +1055,24 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
   const forwarded: Array<{ ms: number; status: number; error?: unknown }> = [];
   const asks: Array<{ ms: number; status: number; evidence_ms: unknown }> = [];
   const acks: Array<{ at: string; ms: number; status: number; loop_held_ms?: number; error?: string }> = [];
-  const clicks: Array<{ ms: number; status: number; received: boolean; settled_ms?: number; saved?: boolean; error?: unknown }> = [];
+  // Each click carries its own id (sent as X-Olympus-Click-Id) and send time, so a late acknowledgement can be matched to
+  // the front's ingress, command POST attempts and control receipt in the engine logs (lane 1, 18 Nov).
+  const clicks: Array<{ id: string; sent_at: string; ms: number; status: number; received: boolean; request_id?: string; settled_ms?: number; saved?: boolean; error?: unknown }> = [];
   const pendingClicks = new Map<string, { started: number; click: typeof clicks[number] }>();
   const statusAges: Array<{ age_ms: number; loop_held_ms?: number }> = [];
   let enginesStartedAt: number | undefined;
   const timing: Record<Role, { spawnedAt: number; stoppedAt: number; readyAt?: number }> = {
     background: { spawnedAt: 0, stoppedAt: 0 }, front: { spawnedAt: 0, stoppedAt: 0 },
   };
+  const readyPath = (role: Role) => join(metrics, `${role}.ready`);
   const readReady = (role: Role) => {
+    if (coldStart) {
+      if (coldStart.readyAt === undefined) return false;
+      timing[role].readyAt = coldStart.readyAt;
+      return true;
+    }
     if (timing[role].readyAt !== undefined) return true;
-    const path = join(metrics, `${role}.ready`);
+    const path = readyPath(role);
     if (!existsSync(path)) return false;
     const stamp = readFileSync(path, 'utf8');
     if (!stamp) return false;
@@ -860,11 +1093,13 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
   if (restoredOutside) rmSync(restoredMarker, { force: true }); else restorePristine(dir);
   const restore_ms = Date.now() - restoreStarted;
   // Steady: every run starts with the WALs folded in, as on a box in use. Boot after upgrade: one large WAL left on the ledger.
+  if (coldStart) clearSavedHiddenCopies(dir);
   truncateWals(dir);
   if (options.runCase === 'boot-after-upgrade') leaveLargeWal(dir, options.walBytes);
   const host = await waitForQuietHost(options.ioFloorMs, options.ioWaitSeconds);
   if (!host.quiet) {
-    const receipt = { phase: 'run', case: options.runCase, sha: spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim(), pass: false, host_busy: true, host, qualified: isCapped, memory_max: memoryMax };
+    const receipt = { phase: 'run', case: options.runCase, sha: spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim(), pass: false, host_busy: true, host, qualified: isCapped, memory_max: memoryMax,
+      ...(coldStart ? { io_throttle: coldStart.io_throttle, counts_as_gate: false } : {}) };
     console.log(JSON.stringify(receipt));
     console.log(`HOST BUSY: host IO stall ${host.host_io_full_ms_per_s} ms/s over ${host.waited_s} s (floor ${host.limit_ms_per_s} ms/s). Not a product result; run again when the host is quiet.`);
     stub.stop(true); rmSync(runDir, { recursive: true, force: true });
@@ -873,8 +1108,22 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
   const started = Date.now();
   let finished = false;
   const pressureSampler = samplePressure();
+  const vmstatAtStart = readVmstat();
+  const meminfoAtStart = readMeminfo();
+  const liveAtStart = readLiveInstall();
+  // Each role's main thread, sampled for the whole run and summarized over that role's freeze and held-loop lines.
+  const timelines: Partial<Record<Role, ReturnType<typeof startThreadTimeline>>> = {};
+  const timelinePath = (role: Role) => join(metrics, `${role}.timeline.jsonl`);
   const roles: Array<{ role: string; pid: number }> = [];
   const anonSampler = sampleAnonMemory(() => roles, () => enginesStartedAt ?? Date.now());
+  const ioSampler = sampleProcessIo(() => roles, role => readReady(role as Role));
+  let cgroupAtEnd: ReturnType<typeof readCgroupMemory> = {};
+  // The scope's memory each minute: with a swap allowance (--swap-reading) this is the swap refill over time.
+  const cgroupSamples: Array<{ at_s: number } & ReturnType<typeof readCgroupMemory>> = [];
+  const cgroupStarted = Date.now();
+  const cgroupTimer = setInterval(() => cgroupSamples.push({ at_s: Math.round((Date.now() - cgroupStarted) / 1000), ...readCgroupMemory() }), 60_000);
+  let meminfoAtEnd: ReturnType<typeof readMeminfo> = {};
+  let liveAtEnd: ReturnType<typeof readLiveInstall> = {};
   let walAtOpen: Record<string, number> = {};
   try {
     walAtOpen = walSizes(dir);
@@ -889,6 +1138,7 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
       });
       children.push(child);
       roles.push({ role, pid: child.pid });
+      timelines[role] = startThreadTimeline(child.pid, timelinePath(role));
       void child.exited.then(() => { timing[role].stoppedAt ||= nowMs(); });
       writeFileSync(pidFile, JSON.stringify(children.map(entry => entry.pid)));
       for (const stream of [child.stdout, child.stderr]) pumps.push((async () => {
@@ -904,14 +1154,31 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
         if (partial) keepEngineLine(role, partial + decoder.decode());
       })());
     }
-    const deadline = Date.now() + seconds * 1000;
-    while (!ROLES.every(readReady)) {
-      if (Date.now() >= deadline || children.some(child => child.exitCode !== null)) throw new Error('Engine boot failed or timed out; see last-run.json engine_logs');
-      await Bun.sleep(100);
-    }
     const workerFetch = createWorkerFetch({ platform: 'linux', env });
     const origin = `http://127.0.0.1:${port}`;
     const bearer = { Authorization: `Bearer ${env.OLYMPUS_WORKER_AUTH_TOKEN}` };
+    const fetchPage = async (path: string, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      headers.set('Authorization', bearer.Authorization);
+      const response = await workerFetch(origin + path, { ...init, headers });
+      if (coldStart) coldStart.firstAnswerAt ??= Math.round(nowMs());
+      return response;
+    };
+    const bootDeadline = Date.now() + (coldStart ? 600 : seconds) * 1000;
+    const engineExited = () => children.some(child => child.exitCode !== null || child.signalCode !== null);
+    // The starting server can answer before the regular front is listening.
+    // Wait for the regular listeners before opening controls and starting the steady workload.
+    const bootComplete = () => ROLES.every(readReady) && (!coldStart
+      || (coldStart.firstAnswerAt !== undefined && ROLES.every(role => existsSync(readyPath(role)))));
+    while (!bootComplete()) {
+      if (Date.now() >= bootDeadline || engineExited()) throw new Error('Engine boot failed or timed out; see last-run.json engine_logs');
+      if (coldStart && (coldStart.readyAt === undefined || coldStart.firstAnswerAt === undefined)) {
+        const at = Math.round(nowMs());
+        for (const page of STARTUP_PAGES) requests.push(samplePage(fetchPage, page, at).then(sample => { coldStart.samples.push(sample); }));
+      }
+      await Bun.sleep(coldStart ? STARTUP_PROBE_MS : 100);
+    }
+    const deadline = coldStart ? Date.now() + seconds * 1000 : bootDeadline;
     const post = async (path: string, body: object, headers: Record<string, string> = bearer) => {
       const start = performance.now();
       const response = await workerFetch(origin + path, { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(Math.min(60_000, Math.max(1, deadline - Date.now()))) });
@@ -926,18 +1193,20 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
     let clickSequence = 0;
     const click = async () => {
       const started = performance.now();
+      const id = `${options.runCase}-click-${clickSequence + 1}`;
+      const sent_at = new Date().toISOString();
       // Seeded Personal rows, away from the read probe's item and the judge's held rows.
       const first = Math.min(13, shape.shape.items - 1);
       const count = Math.ceil((shape.shape.items - first) / 20);
       const itemId = ownerTierItemId(identity(first + (clickSequence++ % count) * 20));
       try {
-        const { ms, status, json } = await post('/dashboard/privacy/items/set', { item_id: itemId, tier: 'private' }, privacyHeaders);
+        const { ms, status, json } = await post('/dashboard/privacy/items/set', { item_id: itemId, tier: 'private' }, { ...privacyHeaders, 'X-Olympus-Click-Id': id });
         const received = status === 202 && json.state === 'pending' && typeof json.request_id === 'string';
-        const sample = { ms, status, received, ...(received ? {} : { error: json.error ?? json.message }) };
+        const sample = { id, sent_at, ms, status, received, ...(received ? { request_id: json.request_id as string } : { error: json.error ?? json.message }) };
         clicks.push(sample);
         if (received) pendingClicks.set(json.request_id as string, { started, click: sample });
       } catch (error) {
-        clicks.push({ ms: performance.now() - started, status: 0, received: false, error: String(error) });
+        clicks.push({ id, sent_at, ms: performance.now() - started, status: 0, received: false, error: String(error) });
       }
     };
     const pollClicks = async () => {
@@ -955,7 +1224,7 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
     let nextAsk = Date.now(), nextRead = Date.now(), nextAck = Date.now(), nextDash = Date.now(), askSequence = 0, ackSequence = 0;
     const statusPath = engineStatusSnapshotPath(env);
     while (Date.now() < deadline) {
-      if (children.some(child => child.exitCode !== null)) throw new Error('Engine exited during measurement');
+      if (engineExited()) throw new Error('Engine exited during measurement');
       if (Date.now() >= nextAck) {
         // Command acknowledgement on the background socket, timed to the 202, and the status snapshot's age, once a second.
         nextAck += 1000;
@@ -1020,6 +1289,12 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
     for (const role of ROLES) if (timing[role].spawnedAt) timing[role].stoppedAt ||= nowMs();
     pressureSampler.stop();
     anonSampler.stop();
+    ioSampler.stop();
+    clearInterval(cgroupTimer);
+    cgroupAtEnd = readCgroupMemory();
+    meminfoAtEnd = readMeminfo();
+    liveAtEnd = readLiveInstall();
+    await Promise.all(Object.values(timelines).map(timeline => timeline?.stop()));
     for (const child of children) child.kill('SIGKILL');
     await Promise.all(children.map(child => child.exited)); await Promise.all(pumps);
     await Promise.allSettled(requests);
@@ -1069,12 +1344,13 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
     dashboard_reads: dashReads.length, dashboard_failed: dashReads.length - dashOk.length, dashboard_failures: dashReads.filter(read => read.status !== 200).slice(0, 10),
     front_beat_p95_ms: beatP95(front) ?? null, background_beat_p95_ms: beatP95(background) ?? null };
   const clickSummary = { count: clicks.length, max_ms: Math.round(Math.max(0, ...clicks.map(click => click.ms))),
-    over_1s: clicks.filter(click => !click.received || click.ms >= LOOP_STALL_LIMIT_MS).slice(0, 50),
+    over_1s: clicks.filter(click => !click.received || click.ms >= LOOP_STALL_LIMIT_MS).slice(0, 50).map(click => ({ ...click, trace: clickTrace.get(click.id) ?? [] })),
+    traced: clicks.filter(click => clickTrace.has(click.id)).length,
     settled: clicks.filter(click => click.settled_ms !== undefined).length, pending: pendingClicks.size,
     max_settled_ms: Math.max(0, ...clicks.map(click => click.settled_ms ?? 0)),
     failures: clicks.filter(click => click.saved === false), samples: clicks };
   const ack_ok = clickSummary.count > 0 && clickSummary.over_1s.length === 0;
-  const privacy_restart = await privacyClickRestartGate();
+  const privacy_restart = coldStart ? null : await privacyClickRestartGate();
   const walAtEnd = walSizes(dir);
   const walLines = sqliteLines.filter(entry => entry.line.includes('sqlite wal:'));
   const checkpoint = sqliteLines.filter(entry => entry.line.includes('sqlite checkpoint:')).slice(0, 2000);
@@ -1090,11 +1366,32 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
   const padded_wal_level_s = firstLevel ? Math.round((Date.parse(firstLevel.at) - (enginesStartedAt ?? started)) / 100) / 10 : null;
   // One bar for the 600k gate and the quick cold test (plan, 16 Nov 2026).
   const control_ok = !ackSummary.no_control_thread && (options.runCase === 'boot-after-upgrade' || ackSummary.status_max_age_ms <= 10_000);
-  const pass = gate({ background, front, workload_ok, wal_ok: guards.wal_ok, ack_ok: ack_ok && control_ok, privacy_restart_ok: privacy_restart.pass, runCase: options.runCase });
+  const pass = coldStart ? null : gate({ background, front, workload_ok, wal_ok: guards.wal_ok, ack_ok: ack_ok && control_ok, privacy_restart_ok: privacy_restart?.pass === true, runCase: options.runCase });
+  const startupGaps = coldStart?.firstAnswerAt !== undefined && coldStart.readyAt !== undefined
+    ? summarizeStartupGaps(coldStart.samples, coldStart.firstAnswerAt, coldStart.readyAt)
+    : null;
+  const split = startupGaps?.longest ? startupThreadSplit(timelinePath('front'), startupGaps.longest) : null;
+  const spawnedAt = enginesStartedAt ?? started;
+  const startup = coldStart ? {
+    first_answer_ms: coldStart.firstAnswerAt === undefined ? null : Math.round(coldStart.firstAnswerAt - spawnedAt),
+    ready_ms: coldStart.readyAt === undefined ? null : Math.round(coldStart.readyAt - spawnedAt),
+    builds: coldStart.builds, gaps: startupGaps, front_thread: split,
+    verdict: startupGaps ? coldStartVerdict(startupGaps.longest, split && typeof split === 'object' ? split : undefined) : null,
+  } : null;
   // Retired as a bar (owner, 16 Nov 2026); kept in the receipt for comparison with earlier runs.
   const strict_1s = background.beats > 0 && front.beats > 0 && background.max_ms < LOOP_STALL_LIMIT_MS && front.max_ms < LOOP_STALL_LIMIT_MS;
   const sha = spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
   const receipt = { phase: 'run', case: options.runCase, sha, pass, strict_1s, restore_ms, restored_outside: restoredOutside, padded_wal_level_s, judged: modelCalls.judge, host_busy: false, host, qualified: isCapped, memory_max: memoryMax, elapsed_ms: Date.now() - started, background, front, slow_sql, forwarded, asks, workloads, workload_ok, model_calls: modelCalls, privacy_click: clickSummary, privacy_restart, command_ack: ackSummary, ack_ok, control_ok, typical, front_loop_sql: seen.frontLoopSql, request_errors: requestErrors, errors, cpu_freezes: cpuFreezes.slice(0, 60), pressure: pressureSummary(pressureSampler.samples), anon_memory: anonSampler.peaks,
+    sqlite_mmap: options.sqliteMmap ?? 'default', sqlite_mmap_boot: fileMapLines, process_io: ioSampler.summary(), meminfo: { start: meminfoAtStart, end: meminfoAtEnd }, cgroup_memory_end: cgroupAtEnd, cgroup_memory_samples: cgroupSamples,
+    ...(options.swapReading ? { swap_reading: true, counts_as_gate: false } : {}),
+    ...(coldStart ? { counts_as_gate: false, cold_start: startup, io_throttle: coldStart.io_throttle } : {}),
+    vmstat: Object.fromEntries(Object.entries(readVmstat()).map(([key, value]) => [key, value - (vmstatAtStart[key] ?? value)])),
+    background_timeline: summarizeThreadTimeline('background', timelinePath('background'), freezeLines, join(metrics, 'background.freezes.log')),
+    front_timeline: summarizeThreadTimeline('front', timelinePath('front'), freezeLines, join(metrics, 'front.freezes.log')),
+    live_install: Object.fromEntries(Object.entries(liveAtEnd).map(([unit, end]) => [unit, {
+      read_mb: Math.round((end.rbytes - (liveAtStart[unit]?.rbytes ?? end.rbytes)) / 1e6), write_mb: Math.round((end.wbytes - (liveAtStart[unit]?.wbytes ?? end.wbytes)) / 1e6),
+      swap_mib_start: liveAtStart[unit]?.swap_mib ?? null, swap_mib_end: end.swap_mib }])),
+    felt_delays: { front_beats_over_1s: front.over_1s, clicks_over_1s: clickSummary.over_1s.length, dashboard_reads_over_1s: dashReads.filter(read => read.ms >= LOOP_STALL_LIMIT_MS || read.status !== 200).length },
     sqlite: { guards, wal_bytes_at_open: walAtOpen, wal_bytes_at_end: walAtEnd, settings: sqliteLines.filter(entry => entry.line.includes('sqlite settings:')).slice(0, 200),
       checkpoint, checkpoint_timing,
       room: sqliteLines.filter(entry => entry.line.includes('sqlite wal room:') || entry.line.includes('sqlite wal held:')).slice(0, 500), wal: walLines.slice(0, 2000) }, freezes_log: freezeLines.slice(0, 500) };
@@ -1102,14 +1399,29 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
   // last-run.json stays on the host and the next run replaces it; an engine that died puts its last words in the job log too.
   if (errors.length) for (const role of ['background', 'front']) console.error(`--- ${role} engine log tail ---\n${output[role]!.slice(-6_000)}`);
   console.log(JSON.stringify(receipt));
+  if (startup) {
+    rmSync(runDir, { recursive: true, force: true });
+    if (!startup.verdict || !finished) {
+      console.log('cold-start: NOT RUN: the startup and after-ready window did not complete.');
+      return 'not_run' as const;
+    }
+    const gap = startup.gaps?.longest;
+    const thread = startup.front_thread;
+    const detail = thread && typeof thread === 'object'
+      ? `running ${thread.runningMs} ms, run queue ${thread.runQueueMs} ms, page faults ${thread.blockedMajfltMs} ms, block IO ${thread.blockedBlkioMs} ms, other waits ${thread.blockedOtherMs} ms, wait channels ${JSON.stringify(thread.waitChannelsMs)}`
+      : thread ?? 'no thread window';
+    console.log(`cold-start: ${startup.verdict} — longest ${gap?.ms ?? 0} ms${gap ? ` (${gap.page})` : ''}; ${detail}; READY ${startup.ready_ms} ms from spawn`);
+    return true;
+  }
   // One line per engine per run (plan, 16 Nov 2026): worst stall and its site, then pass or fail; then a per-site table.
   for (const [role, loop] of [['front', front], ['background', background]] as const) {
     const limit = role === 'front' ? frontLimitMs(options.runCase) : BACKGROUND_PROGRESS_LIMIT_MS;
     const p95 = beatP95(loop);
     console.log(`${options.runCase} ${role}: after-ready p95 beat ${p95 === undefined ? 'n/a' : `<= ${p95} ms`}, worst ${Math.round(loop.max_ms)} ms at ${loop.worst_site}, beats over 1 s: ${loop.over_1s}; ${loop.beats > 0 && loop.max_ms < limit ? 'PASS' : 'FAIL'} (bar ${limit / 1000} s); pre-ready hold ${Math.round(loop.pre_ready_ms)} ms at ${loop.pre_ready_site} (reported)`);
   }
+  console.log(`${options.runCase} felt delays (counts over 1 s): front beats ${receipt.felt_delays.front_beats_over_1s}, clicks ${receipt.felt_delays.clicks_over_1s}, dashboard reads ${receipt.felt_delays.dashboard_reads_over_1s}. A pass needs the front and the click journey both under the bar.`);
   console.log(`${options.runCase} Make Private receipt: worst ${clickSummary.max_ms} ms over ${clickSummary.count} posts (${clickSummary.over_1s.length} at or over 1 s or failed); ${ack_ok ? 'PASS' : 'FAIL'} (bar 1 s). Settlement (reported): worst ${clickSummary.max_settled_ms} ms across ${clickSummary.settled} settled, ${clickSummary.pending} pending at cutoff.`);
-  console.log(`${options.runCase} Make Private, front restart before commit: ${privacy_restart.pass ? 'PASS' : 'FAIL'} (${privacy_restart.ms} ms), ${privacy_restart.outcome}.`);
+  if (privacy_restart) console.log(`${options.runCase} Make Private, front restart before commit: ${privacy_restart.pass ? 'PASS' : 'FAIL'} (${privacy_restart.ms} ms), ${privacy_restart.outcome}.`);
   console.log(`${options.runCase} socket ack (reported): worst ${ackSummary.max_ms} ms over ${ackSummary.count} posts (${ackSummary.over_1s.length} at or over 1 s or failed), status snapshot oldest ${ackSummary.status_max_age_ms} ms${ackSummary.no_control_thread ? ', NO CONTROL THREAD' : ''}.`);
   console.log(`${options.runCase} anonymous memory (reported): ${Object.entries(anonSampler.peaks).map(([role, entry]) => `${role} peak ${entry.peak_anon_mib} MiB at ${entry.at_s} s, last ${entry.last_anon_mib} MiB`).join('; ') || 'not sampled'}`);
   console.log(`${options.runCase} typical (reported, not gated yet): click ack p95 ${typical.ack_p95_ms} ms (target 100); dashboard reads p95 ${typical.dashboard_p95_ms} ms, worst ${typical.dashboard_max_ms} ms over ${typical.dashboard_reads}${typical.dashboard_failed ? `, ${typical.dashboard_failed} failed` : ''} (target 300, worst 1000); front beat p95 ${typical.front_beat_p95_ms === null ? 'n/a' : `<= ${typical.front_beat_p95_ms} ms`}`);
@@ -1126,7 +1438,7 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
   rmSync(runDir, { recursive: true, force: true });
   // A run that judged nothing did not exercise the background's long holds (plan, 16 Nov 2026): it counts as not run, not as a pass.
   if (modelCalls.judge === 0) { console.log(`${options.runCase}: NOT RUN: the judge made no model calls, so the background's judging was never measured.`); return 'not_run' as const; }
-  return pass;
+  return pass === true;
 }
 if (import.meta.main) {
   const [command, ...args] = process.argv.slice(2);
@@ -1135,13 +1447,15 @@ if (import.meta.main) {
   const number = (name: string, fallback: string) => { const n = Number(flag(name, fallback)); if (!Number.isSafeInteger(n) || n < 1) throw new Error(`Invalid --${name}`); return n; };
   if (dir && command === 'pad-wal') padWal(resolve(dir), number('wal-mb', '2048'));
   if (dir && command === 'restore') { restorePristine(resolve(dir)); writeFileSync(join(resolve(dir), 'restored'), new Date().toISOString()); process.exit(0); }
-  if (!dir || !['build', 'run'].includes(command ?? '')) throw new Error('Usage: loop-stall-test.ts build|restore|run --dir PATH [--items N] [--chunks-per-item N] [--seconds N] [--memory-max 2G] [--case steady|boot-after-upgrade] [--wal-mb 2048] [--io-floor-ms 50] [--io-wait-seconds 600]');
+  if (!dir || !['build', 'run'].includes(command ?? '')) throw new Error(`Usage: loop-stall-test.ts build|restore|run --dir PATH [--items N] [--chunks-per-item N] [--seconds N] [--memory-max 2G] [--case ${RUN_CASES.join('|')}] [--wal-mb 2048] [--io-floor-ms 50] [--io-wait-seconds 600] [--sqlite-mmap on|off|bounded] [--swap-reading] [--io-throttle-unavailable]`);
   const runCase = flag('case', 'steady') as RunCase;
-  if (!['steady', 'boot-after-upgrade'].includes(runCase)) throw new Error('Invalid --case; use steady or boot-after-upgrade');
+  const sqliteMmap = flag('sqlite-mmap') as 'on' | 'off' | 'bounded' | undefined;
+  if (sqliteMmap !== undefined && !['on', 'off', 'bounded'].includes(sqliteMmap)) throw new Error('Invalid --sqlite-mmap; use on, off or bounded');
+  if (!RUN_CASES.includes(runCase)) throw new Error(`Invalid --case; use ${RUN_CASES.join(', ')}`);
   if (command === 'build') await build(resolve(dir), number('items', '600000'), number('chunks-per-item', '1'));
   else {
-    const result = await run(resolve(dir), number('seconds', '300'), flag('memory-max', '2G')!, { runCase, walBytes: number('wal-mb', '2048') * 1024 * 1024, ioFloorMs: number('io-floor-ms', '50'), ioWaitSeconds: number('io-wait-seconds', '600'), quick: args.includes('--quick') });
-    // Exit 3 is "host busy" and 4 "not run" (no judging): neither measured the engine.
+    const result = await run(resolve(dir), number('seconds', '300'), flag('memory-max', '2G')!, { runCase, walBytes: number('wal-mb', '2048') * 1024 * 1024, ioFloorMs: number('io-floor-ms', '50'), ioWaitSeconds: number('io-wait-seconds', '600'), quick: args.includes('--quick'), ...(sqliteMmap ? { sqliteMmap } : {}), swapReading: args.includes('--swap-reading'), ioThrottleUnavailable: args.includes('--io-throttle-unavailable') });
+    // Exit 3 is "host busy" and 4 "not run": neither completed measurement.
     process.exitCode = result === 'host_busy' ? 3 : result === 'not_run' ? 4 : result ? 0 : 1;
   }
   process.exit(process.exitCode ?? 0);

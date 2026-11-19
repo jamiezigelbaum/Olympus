@@ -32,7 +32,7 @@
  * can reach the output: the items read and the other versions the answer's
  * version note names (the model's `used`).
  */
-import { RECENT_ITEMS_CUT_SHORT, semanticSearchTimedOut } from '../../core/source-index/partial-search.ts';
+import { RECENT_ITEMS_CUT_SHORT, semanticSearchTimedOut, STARTUP_SEARCH_GAP } from '../../core/source-index/partial-search.ts';
 import { buildEvidencePackDetailed, type LocalContentProvider, type SecretLocationNote } from '../../core/evidence-pack.ts';
 import { providerSourceLabel } from '../../core/remote-result.ts';
 import { secretLocationAnswer } from '../../core/secret-location-note.ts';
@@ -87,12 +87,12 @@ export type LocalAnswerResult =
       secretLocations?: readonly import('../../core/evidence-pack.ts').SavedSecretLocation[];
     }
   /** Nothing on this computer matched (or nothing that matched may be read now). */
-  | { status: 'not_found'; leftOut: string[]; busy?: string[] }
+  | { status: 'not_found'; leftOut: string[]; busy?: string[]; unanswered?: string[] }
   /**
    * No source was searched at all: each one timed out (`busy`) or cannot be
    * searched here (`leftOut`). Not "not found": nothing was looked at.
    */
-  | { status: 'not_searched'; leftOut: string[]; busy: string[] }
+  | { status: 'not_searched'; leftOut: string[]; busy: string[]; unanswered?: string[] }
   /** The built-in private model is not on this computer, or still downloading. */
   | { status: 'no_model' }
   | { status: 'model_downloading'; percent?: number }
@@ -227,11 +227,13 @@ export async function answerOnThisComputer(
   // Matching Secrets, by location only (no model sees them): said beside the answer, or as the answer.
   const secrets = secretLocationAnswer((detail.secretLocations ?? []).map((location) => ({ where: secretWhere(location) })));
   const secretLocations = (detail.secretLocations ?? []).map(({ source, ref, locator, title }) => ({ source, ref, fingerprint: secretLocationFingerprint({ locator, title }) }));
+  const startupNotes = detail.pack.coverage.extractionGaps.filter(gap => gap === STARTUP_SEARCH_GAP);
+  const coverage = startupNotes.length > 0 ? { unanswered: startupNotes } : {};
   const notFound = (): LocalAnswerResult => (secrets
-    ? { status: 'answered', answer: secrets, citations: [], unanswered: [], leftOut, ...busyField, read: [], secretLocations }
+    ? { status: 'answered', answer: secrets, citations: [], unanswered: startupNotes, leftOut, ...busyField, read: [], secretLocations }
     : searchedCorpora.length === 0 && leftOut.length + busy.length > 0
-      ? { status: 'not_searched', leftOut, busy }
-      : { status: 'not_found', leftOut, ...busyField });
+      ? { status: 'not_searched', leftOut, busy, ...coverage }
+      : { status: 'not_found', leftOut, ...busyField, ...coverage });
   // Items kept as names only, and Personal names whose contents are Private
   // (read from their Private copy instead), carry no text to answer from.
   const skip = new Set([...(detail.namesOnlyCandidateIndexes ?? []), ...(detail.contentPrivateCandidateIndexes ?? [])]);
@@ -288,7 +290,7 @@ export async function answerOnThisComputer(
     answer: secrets ? `${result.answer}\n\n${secrets}` : result.answer,
     citations: result.citations,
     // A source a limit stopped may be missing new items: said beside the answer.
-    unanswered: [...(result.unanswered ?? []), ...(detail.limitStopGaps ?? [])],
+    unanswered: [...startupNotes, ...(result.unanswered ?? []), ...(detail.limitStopGaps ?? [])],
     leftOut,
     ...busyField,
     read,

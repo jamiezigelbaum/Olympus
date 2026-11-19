@@ -41,6 +41,7 @@ import { checkReleaseChunks, passagesWithheldAtReleasableTiers, privateInputRele
 import { withoutSecretLocationCoverageNotes } from './secret-location-note.ts';
 import { privacyBacklogCoverageNote } from './privacy-backlog-coverage.ts';
 import { parseFollowUp } from './follow-up.ts';
+import { startupProgress, startupWaitingLine } from './startup-progress.ts';
 
 /** The operations the remote surface serves (core/public-surface.ts V0_4_PUBLIC_REMOTE_MCP_TOOLS). */
 export type RemoteOperationName = 'source_answer' | 'source_answer_result' | 'source_index_status' | 'ask_anonymously' | 'source_item_read'
@@ -248,7 +249,7 @@ const REMOTE_DESCRIPTIONS: Readonly<Partial<Record<RemoteOperationName, string>>
     'Read ALL of one document, or one whole group, channel or chat, with the owner\'s private model on their computer, then answer the question from it.',
     'For a topic discussed over many messages, days or years, or facts spread through a long file, when a search alone answers poorly.',
     'Pass the read_handle of a hit from olympus_search or source_answer, whole="conversation" for its whole chat (optionally after/before as ISO dates) or whole="item" for that document.',
-    'A long chat is priced two ways before it starts (job.choices): every message, or only the days that mention the question. The full read runs when it fits in an hour, else the relevant-days read (job.read); read="all" or read="relevant_days" picks one. Tell the user both estimates and which read runs.',
+    'A long chat is priced two ways before it starts (job.choices): every message, or only the days that mention the question. The full read runs when it fits in 15 minutes, else the relevant-days read (job.read); read="all" or read="relevant_days" picks one. Tell the user both estimates and which read runs.',
     'It runs in the background; the answer lands in Olympus Private answers on the owner\'s computer, not here. Tell the user the estimate and where to look; check progress with source_deep_read_status.',
   ].join(' '),
   source_deep_read_status: 'Progress of deep reads: sections read, time left, what it is waiting on. Pass cancel=true with an id to stop one. Answers are only in Olympus Private answers on the owner\'s computer.',
@@ -299,7 +300,7 @@ export function remoteToolSchema(operation: string, schema: Record<string, unkno
       whole: { type: 'string', enum: ['item', 'conversation'], description: '"conversation" for the hit\'s whole chat, group or channel; "item" (default) for that document.' },
       after: { type: 'string', description: 'For a conversation: only messages on or after this ISO date.' },
       before: { type: 'string', description: 'For a conversation: only messages before this ISO date.' },
-      read: { type: 'string', enum: ['all', 'relevant_days'], description: 'For a conversation: every message, or only the days that mention the question. Left out, the full read runs when it fits in an hour.' },
+      read: { type: 'string', enum: ['all', 'relevant_days'], description: 'For a conversation: every message, or only the days that mention the question. Left out, the full read runs when it fits in 15 minutes.' },
     },
   };
   const withheld = withheldParams(operation);
@@ -419,12 +420,15 @@ function pendingOutput(raw: unknown): Record<string, unknown> | undefined {
   if (typeof record.job_id !== 'string' || !JOB_ID.test(record.job_id) || isSecretLike(record.job_id)) {
     throw new OperationError('source_index_error', 'unexpected pending shape');
   }
+  const startup = startupProgress();
+  const starting = startupWaitingLine(startup);
   return {
     status: 'working',
     job_id: record.job_id,
     elapsed_ms: wholeNumber(record.elapsed_ms),
     next_tool: 'source_answer_result',
-    message: REMOTE_PENDING_MESSAGE,
+    message: REMOTE_PENDING_MESSAGE + (starting ? `\n${starting}` : ''),
+    ...(startup ? { startup } : {}),
   };
 }
 
@@ -442,10 +446,13 @@ export function remoteDeepReadFields(record: Record<string, unknown>, answer: st
   const refusalReasons: Record<string, string> = {
     no_private_model: 'No private model is configured.', model_unavailable: 'The private model is unavailable.',
     not_found: 'The item is no longer available here.', nothing_readable: 'The item has no readable content here.', invalid_set: 'The item could not be selected.',
+    too_long: 'The full read would exceed the 15-minute automatic reading limit.',
   };
   const reason = typeof record.deep_read_refused === 'string' && Object.hasOwn(refusalReasons, record.deep_read_refused)
     ? refusalReasons[record.deep_read_refused] : 'The full read could not be started.';
   const remoteNotice = job ? '\n\nReading the full item for this question; the answer follows in Private answers. Poll source_deep_read_status with the deep_read id.'
+    : localNotice && record.deep_read_refused === 'read_in_part'
+      ? '\n\nSome items were read only in part. To read one in full for this question, use source_deep_read with its read_handle.'
     : localNotice ? `\n\nThe full item was not read: ${reason} Use source_deep_read to request the full read.` : '';
   return { ordinaryAnswer, remoteNotice, job };
 }
@@ -913,6 +920,16 @@ const PENDING_SCHEMA = {
     elapsed_ms: { type: 'integer', minimum: 0 },
     next_tool: { const: 'source_answer_result' },
     message: { type: 'string' },
+    startup: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['stores_done', 'stores_total'],
+      properties: {
+        stores_done: { type: 'integer', minimum: 0 },
+        stores_total: { type: 'integer', minimum: 1 },
+        estimated_ready_at: { type: 'string', format: 'date-time' },
+      },
+    },
   },
 } as const;
 

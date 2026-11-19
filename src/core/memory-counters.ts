@@ -25,38 +25,64 @@ const payloads = {
   embed: { count: 0, bytes: 0 },
   extract: { count: 0, bytes: 0 },
 };
-const payloadScope = new AsyncLocalStorage<(bytes: number) => void>();
+const payloadScope = new AsyncLocalStorage<{ kind: keyof typeof payloads; add: (bytes: number) => void; active: boolean }>();
+
+const payloadSlots = { judge: 0, embed: 2, extract: 4 };
+let workerPayloads: BigInt64Array | undefined;
+
+export function createMemoryPayloadBuffer(): SharedArrayBuffer {
+  return new SharedArrayBuffer(Object.keys(payloadSlots).length * 2 * BigInt64Array.BYTES_PER_ELEMENT);
+}
+
+/** Give the process sampler live totals even when the model worker is busy. */
+export function publishWorkerMemoryPayloads(buffer: SharedArrayBuffer): void {
+  workerPayloads = new BigInt64Array(buffer);
+}
 
 /** Count logical payload sizes at their existing materialization points. */
 export async function withMemoryPayload<T>(kind: keyof typeof payloads, run: () => Promise<T>): Promise<T> {
+  const owner = payloadScope.getStore();
+  if (owner?.active && owner.kind === kind) return run();
   const counter = payloads[kind];
+  const shared = workerPayloads;
+  const slot = payloadSlots[kind];
   let bytes = 0;
-  let active = true;
-  counter.count++;
-  try {
-    return await payloadScope.run(delta => {
-      if (!active) return;
+  const scope = {
+    kind,
+    active: true,
+    add(delta: number) {
+      if (!scope.active) return;
       bytes += delta;
       counter.bytes += delta;
-    }, run);
+      if (shared) Atomics.add(shared, slot + 1, BigInt(delta));
+    },
+  };
+  counter.count++;
+  if (shared) Atomics.add(shared, slot, 1n);
+  try {
+    return await payloadScope.run(scope, run);
   } finally {
-    active = false;
+    scope.active = false;
     counter.count--;
     counter.bytes -= bytes;
+    if (shared) {
+      Atomics.sub(shared, slot + 1, BigInt(bytes));
+      Atomics.sub(shared, slot, 1n);
+    }
   }
 }
 
 export function addMemoryPayloadBytes(bytes: number): void {
-  payloadScope.getStore()?.(bytes);
+  payloadScope.getStore()?.add(bytes);
 }
 
 /** Capture the owner before subscribing to callbacks dispatched by an external handle. */
 export function memoryPayloadByteCounter() {
-  return payloadScope.getStore();
+  return payloadScope.getStore()?.add;
 }
 
 export function addMemoryPayloadText(text: string): void {
-  const add = payloadScope.getStore();
+  const add = payloadScope.getStore()?.add;
   if (add) add(Buffer.byteLength(text));
 }
 
@@ -75,11 +101,13 @@ export function noteMemoryPayloadResponse(response: Response): void {
   if (Number.isSafeInteger(bytes) && bytes > 0) addMemoryPayloadBytes(bytes);
 }
 
-export function memoryPayloadCounts() {
+export function memoryPayloadCounts(worker?: BigInt64Array) {
+  const total = (kind: keyof typeof payloads, field: 'count' | 'bytes') =>
+    payloads[kind][field] + (worker ? Number(Atomics.load(worker, payloadSlots[kind] + Number(field === 'bytes'))) : 0);
   return {
-    judge_payloads: payloads.judge.count, judge_payload_bytes: payloads.judge.bytes,
-    embed_payloads: payloads.embed.count, embed_payload_bytes: payloads.embed.bytes,
-    extract_payloads: payloads.extract.count, extract_payload_bytes: payloads.extract.bytes,
+    judge_payloads: total('judge', 'count'), judge_payload_bytes: total('judge', 'bytes'),
+    embed_payloads: total('embed', 'count'), embed_payload_bytes: total('embed', 'bytes'),
+    extract_payloads: total('extract', 'count'), extract_payload_bytes: total('extract', 'bytes'),
   };
 }
 export type MemoryActivity = 'judging' | 'embedding' | 'recount' | 'import' | 'extract' | 'idle';
@@ -87,6 +115,9 @@ const scopedActivity = {
   visibility_rebuild_bootstrap: 0,
   visibility_rebuild_incremental: 0,
   people_refresh: 0,
+  visibility_refresh: 0,
+  embedding_repair: 0,
+  embedding_settlement: 0,
 };
 type ScopedMemoryActivity = keyof typeof scopedActivity;
 export type MemoryActivityLabel = MemoryActivity | ScopedMemoryActivity;
@@ -114,8 +145,8 @@ export function statusMemoryActivity(judging: boolean, recount: boolean): Memory
 export function memoryActivity(judging: boolean, recount: boolean, background?: MemoryActivity): MemoryActivityLabel[] {
   const labels: MemoryActivityLabel[] = background === undefined ? taskActivities(judging, recount)
     : background === 'idle' ? [] : [background];
-  if (scopedActivity.visibility_rebuild_bootstrap > 0) labels.push('visibility_rebuild_bootstrap');
-  if (scopedActivity.visibility_rebuild_incremental > 0) labels.push('visibility_rebuild_incremental');
-  if (scopedActivity.people_refresh > 0) labels.push('people_refresh');
+  for (const label of Object.keys(scopedActivity) as ScopedMemoryActivity[]) {
+    if (scopedActivity[label] > 0) labels.push(label);
+  }
   return labels.length ? labels : ['idle'];
 }

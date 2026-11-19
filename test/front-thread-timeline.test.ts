@@ -68,6 +68,7 @@ test('reports the observed split over the 30 s before a front freeze', () => {
     at: '2026-11-17T12:00:30.000Z', role: 'front', count: 3, totalMs: 3_700, maxMs: 1_400, window_ms: 30_000,
     runningMs: 47, runQueueMs: 94, blockedMajfltMs: 45, blockedBlkioMs: 20, blockedOtherMs: 20,
     topWchan: 'folio_wait_bit_common', topWchanMs: 45, coveredMs: 1_000, covered_ms: 1_000, lateTicks: 2, lateMs: 380,
+    waitChannelsMs: { folio_wait_bit_common: 45, futex_wait_queue: 20, io_schedule: 20 },
   });
 });
 

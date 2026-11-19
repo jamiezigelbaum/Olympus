@@ -499,13 +499,13 @@ const DROPBOX_NAMES_ONLY_APPROVAL_TTL_MS = 5_000;
 export function dropboxNamesOnlyByOwner(
   authority: FileSourceScopeAuthority,
   now: () => number = Date.now,
-): (path: string) => boolean {
+): ((path: string, requireReadable?: boolean) => boolean) & { revision: () => string | undefined } {
   // Only the reference is kept between calls. The approval itself is checked
   // on every call (assertCurrent reuses a pass while its files are unchanged,
   // so that is a few stats), so a revoked, changed or unreadable approval
   // answers no at once, never a stale names-only.
   let cached: { at: number; ref: FileSourceScopePolicyRef | undefined } | undefined;
-  return (path) => {
+  const namesOnly = (path: string, requireReadable = false) => {
     const at = now();
     if (!cached || at - cached.at >= DROPBOX_NAMES_ONLY_APPROVAL_TTL_MS) {
       cached = { at, ref: authority.policyRef('dropbox.files') };
@@ -514,14 +514,25 @@ export function dropboxNamesOnlyByOwner(
     let approval: FileSourceScopeApprovalSnapshot;
     try {
       approval = authority.assertCurrent(cached.ref);
-    } catch {
+    } catch (error) {
       cached = undefined;
+      if (requireReadable) throw error;
       return false;
     }
     if (approval.status !== 'approved') return false;
     const allows = dropboxScopeAllows(approval, path);
     return allows.metadata && !allows.content;
   };
+  return Object.assign(namesOnly, {
+    revision: () => {
+      const snapshot = authority.snapshot('dropbox.files');
+      const ref = snapshot.status === 'approved' && snapshot.accountGeneration
+        ? { sourceId: snapshot.sourceId, accountGeneration: snapshot.accountGeneration, revision: snapshot.revision }
+        : undefined;
+      cached = { at: now(), ref };
+      return snapshot.reason === 'malformed' ? undefined : JSON.stringify([snapshot.status, snapshot.accountGeneration, snapshot.revision]);
+    },
+  });
 }
 
 function normalizeDropboxScopePath(path: string): string {

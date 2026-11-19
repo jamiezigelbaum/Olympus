@@ -1,6 +1,7 @@
 {
   "_readme": "Every timeout in src/ and connect-relay/, by kind (test/timeout-allowance.test.ts). a = a clock that cancels work that may still be progressing (goes; owner lane after the slash); b = an outside client's hard limit (returns \"still working\" with a handle); c = dead-peer or stall detection (stays, on a heartbeat or progress where it guards long work); d = retry, backoff or fairness pace (stays; a foreground wait names unfinished work); n = not a clock (a bound, a display or freshness grace). Inline entries count the timeout sites per file by kind. A clock never cancels work that is still progressing; the kind (a) count can only shrink.",
   "constants": {
+    "src/workers/engine/runtime/deep-read-jobs.ts#DEEP_READ_BUDGET_SECONDS": "n",
     "connect-relay/deploy/reviewer-check.ts#STEP_TIMEOUT_MS": "c",
     "connect-relay/server/surface-map.ts#CLAUDE_APP_PANEL_GRACE_MS": "n",
     "src/cli.ts#WORKER_STATUS_TIMEOUT_MS": "c",
@@ -50,6 +51,7 @@
     "src/core/native-process-service.ts#DEFAULT_STOP_GRACE_MS": "c",
     "src/core/native-relay-service.ts#DEFAULT_STARTUP_TIMEOUT_MS": "c",
     "src/core/native-telegram-service.ts#DEFAULT_STARTUP_TIMEOUT_MS": "c",
+    "src/core/native-worker-service.ts#DEFAULT_ENGINE_BACKGROUND_WAIT_MS": "c",
     "src/core/native-worker-service.ts#DEFAULT_WORKER_STARTUP_TIMEOUT_MS": "c",
     "src/core/native-worker-service.ts#ENDPOINT_OCCUPANCY_TIMEOUT_MS": "c",
     "src/core/native-worker-service.ts#READINESS_PROBE_TIMEOUT_MS": "c",

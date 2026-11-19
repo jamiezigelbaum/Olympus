@@ -1,4 +1,5 @@
 import type { EvidenceRerankAudit } from '../../core/evidence-reranker.ts';
+import type { AnalystEvidenceFormat } from '../../core/analyst.ts';
 import type { LocalAnalystPromptBudget } from './local-analyst-window.ts';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
@@ -39,10 +40,38 @@ export interface SourceAnswerTraceCorpusTiming {
   adapter_reported_ms?: number;
   outcome: 'success' | 'timeout' | 'error';
   error_class?: string;
-  // The lane's reads on the store read pool (#1305), present only when it
-  // made any: how many, how long they waited for a pool thread and ran on
-  // one, and how many ended without rows, by cause. Counts and times only.
+  adapter_stages?: SourceAnswerTraceAdapterStages;
+  // Store read-pool timings, outcomes and retrieval work counts.
   pool?: SourceAnswerTracePoolReads;
+}
+
+export interface SourceAnswerTraceAdapterStages {
+  adapter_elapsed_ms: number;
+  keyword_lane_ms: number;
+  vector_lane_ms?: number;
+  // Includes the concurrent lanes. Count this once in the adapter's wall time.
+  join_wait_ms?: number;
+  post_join_setup_ms?: number;
+  keyword_relaxation_ms: number;
+  keyword_revalidation_ms: number;
+  vector_revalidation_ms?: number;
+  vector_summary_ms?: number;
+  recency_read_ms: number;
+  fusion_ms: number;
+  finalize_ms: number;
+  unattributed_ms: number;
+}
+
+interface SourceAnswerTraceVectorWork {
+  digest_pages_read: number;
+  digest_rows_scanned: number;
+  full_vectors_rescored: number;
+  digest_unpack_score_ms: number;
+}
+
+interface SourceAnswerTraceConceptCount {
+  matched_items: number;
+  memo_hit: boolean;
 }
 
 export interface SourceAnswerTracePoolReads {
@@ -66,42 +95,67 @@ export interface SourceAnswerTracePoolReads {
   // Still running at the deadline (result abandoned) or back too late.
   past_deadline_running: number;
   errors: number;
+  thread_cpu_available?: boolean;
+  vector_work?: SourceAnswerTraceVectorWork;
+  // One array per concept-weighting pass, in concept order.
+  keyword_concept_counts?: SourceAnswerTraceConceptCount[][];
   // The statements that took the most SQL time, by statement shape (the SQL
-  // text with whitespace collapsed, cut short; never its parameters), slowest
-  // first. Code only, no item content.
+  // prefix and a hash of the full normalized shape), slowest first.
   slowest_sql?: SourceAnswerTracePoolSqlSite[];
 }
 
 export interface SourceAnswerTracePoolSqlSite {
   site: string;
+  label?: string;
   reads: number;
   sql_ms: number;
   sql_max_ms: number;
+  sql_cpu_ms?: number;
+  sql_cpu_max_ms?: number;
 }
 
 const POOL_SQL_SITE_CHARS = 120;
 const POOL_SQL_SITES_KEPT = 5;
 const poolSqlSites = new WeakMap<SourceAnswerTracePoolReads, Map<string, SourceAnswerTracePoolSqlSite>>();
 
-/** A statement's shape for the trace: its SQL text, whitespace collapsed and cut short. */
+/** A readable prefix and a stable hash of the full redacted SQL shape. */
 export function poolSqlSite(sql: string): string {
   // Literals go: a statement that inlined a value (a quoted term, an id list)
   // must not carry it into the trace, which holds counts and code only.
-  return sql
-    .replace(/'(?:[^']|'')*'|"(?:[^"]|"")*"/g, '?')
-    .replace(/\b\d+(?:\.\d+)?\b/g, 'N')
-    .replace(/\(\s*(?:\?|N)(?:\s*,\s*(?:\?|N))+\s*\)/g, '(…)')
+  const shape = sql
+    .replace(/'(?:[^']|'')*'|"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]*\]|--[^\r\n]*|\/\*[\s\S]*?\*\//g, (token) =>
+      token.startsWith('--') || token.startsWith('/*') ? ' ' : '?')
+    .replace(/\b(?:0x[\da-f]+|\d+(?:\.\d+)?(?:e[+-]?\d+)?)\b/gi, 'N')
     .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, POOL_SQL_SITE_CHARS);
+    .trim();
+  const hash = createHash('sha256').update(shape).digest('hex').slice(0, 16);
+  const prefix = shape.replace(/\(\s*(?:\?|N)(?:\s*,\s*(?:\?|N))+\s*\)/g, '(…)');
+  return `${prefix.slice(0, POOL_SQL_SITE_CHARS)} #${hash}`;
 }
 
 function withSlowestSql(reads: SourceAnswerTracePoolReads): SourceAnswerTracePoolReads {
   const sites = poolSqlSites.get(reads);
-  if (!sites?.size) return { ...reads };
-  const slowest = [...sites.values()].sort((left, right) => right.sql_ms - left.sql_ms).slice(0, POOL_SQL_SITES_KEPT)
-    .map((site) => ({ ...site, sql_ms: Math.round(site.sql_ms), sql_max_ms: Math.round(site.sql_max_ms) }));
-  return { ...reads, slowest_sql: slowest };
+  const slowest = sites?.size ? [...sites.values()].sort((left, right) => right.sql_ms - left.sql_ms).slice(0, POOL_SQL_SITES_KEPT)
+    .map((site) => ({
+      ...site,
+      sql_ms: preciseMs(site.sql_ms),
+      sql_max_ms: preciseMs(site.sql_max_ms),
+      ...(site.sql_cpu_ms !== undefined ? { sql_cpu_ms: preciseMs(site.sql_cpu_ms), sql_cpu_max_ms: preciseMs(site.sql_cpu_max_ms!) } : {}),
+    })) : undefined;
+  return copyPoolDetail({ ...reads, ...(slowest ? { slowest_sql: slowest } : {}) });
+}
+
+function copyPoolDetail(pool: SourceAnswerTracePoolReads): SourceAnswerTracePoolReads {
+  return {
+    ...pool,
+    ...(pool.slowest_sql ? { slowest_sql: pool.slowest_sql.map((site) => ({ ...site })) } : {}),
+    ...(pool.vector_work ? { vector_work: { ...pool.vector_work, digest_unpack_score_ms: preciseMs(pool.vector_work.digest_unpack_score_ms) } } : {}),
+    ...(pool.keyword_concept_counts ? { keyword_concept_counts: pool.keyword_concept_counts.map((pass) => pass.map((count) => ({ ...count }))) } : {}),
+  };
+}
+
+export function preciseMs(ms: number): number {
+  return Math.round(unroundedMs(ms) * 1000) / 1000;
 }
 
 /** How one pool read ended, for the trace. */
@@ -184,10 +238,20 @@ export interface SourceAnswerTraceEvidenceSeats {
   fits: SourceAnswerTraceAnalystFit[];
 }
 
-export interface SourceAnswerTraceAnalystFit {
+interface SourceAnswerAnalystFitMeasurement {
+  promptBytes: number;
+  packCandidates: number;
+  keptCandidates: number;
+  packGapEntries: number;
+  packGapBytes: number;
+  sentGapBytes: number;
+  overheadBytes: number;
+  evidenceFormat: AnalystEvidenceFormat;
+}
+
+export interface SourceAnswerTraceAnalystFit extends SourceAnswerAnalystFitMeasurement {
   lane: 'local' | 'cloud';
   keptSeats: number[];
-  promptBytes?: number;
   promptBudgetBytes?: number;
   promptBudgetSource?: LocalAnalystPromptBudget['source'];
 }
@@ -236,7 +300,6 @@ interface MutableTrace extends SourceAnswerTraceSnapshot {
     hydrationMs: number;
     queries: SourceAnswerTraceQueryTiming[];
   };
-  activeQuery?: ActiveQuery;
 }
 
 interface ActiveQuery {
@@ -244,10 +307,13 @@ interface ActiveQuery {
   startedAtMs: number;
   corpusTimings: SourceAnswerTraceCorpusTiming[];
   poolByCorpus: Map<string, SourceAnswerTracePoolReads>;
+  adapterStages: Map<string, SourceAnswerTraceAdapterStages>;
+  sqlShapes: Map<string, string>;
   stages?: SourceAnswerTraceQueryStages;
 }
 
 const storage = new AsyncLocalStorage<MutableTrace>();
+const queryStorage = new AsyncLocalStorage<ActiveQuery>();
 // The corpus lane a search adapter is running for, so a pool read made deep
 // inside the adapter is counted against its lane.
 const laneStorage = new AsyncLocalStorage<string>();
@@ -257,36 +323,91 @@ export function runInSourceAnswerLane<T>(corpusId: string, run: () => T): T {
   return laneStorage.run(corpusId, run);
 }
 
+function poolReads(query: ActiveQuery, corpusId: string): SourceAnswerTracePoolReads {
+  let reads = query.poolByCorpus.get(corpusId);
+  if (!reads) {
+    reads = {
+      reads: 0,
+      queue_wait_ms: 0,
+      queue_wait_max_ms: 0,
+      run_ms: 0,
+      run_max_ms: 0,
+      sql_ms: 0,
+      sql_max_ms: 0,
+      snapshot_reads: 0,
+      snapshot_sql_ms: 0,
+      refused: 0,
+      dropped_queued: 0,
+      past_deadline_running: 0,
+      errors: 0,
+    };
+    query.poolByCorpus.set(corpusId, reads);
+  }
+  return reads;
+}
+
+export function sourceAnswerVectorWork(): SourceAnswerTraceVectorWork | undefined {
+  const query = queryStorage.getStore();
+  const corpusId = laneStorage.getStore();
+  if (!query || corpusId === undefined) return undefined;
+  return poolReads(query, corpusId).vector_work ??= {
+    digest_pages_read: 0, digest_rows_scanned: 0, full_vectors_rescored: 0, digest_unpack_score_ms: 0,
+  };
+}
+
+export function beginSourceAnswerConceptCounts(): SourceAnswerTraceConceptCount[] | undefined {
+  const query = queryStorage.getStore();
+  const corpusId = laneStorage.getStore();
+  if (!query || corpusId === undefined) return undefined;
+  const passes = poolReads(query, corpusId).keyword_concept_counts ??= [];
+  const pass: SourceAnswerTraceConceptCount[] = [];
+  passes.push(pass);
+  return pass;
+}
+
+export function beginSourceAnswerStoreTiming(): {
+  stages: SourceAnswerTraceAdapterStages;
+  finish: () => void;
+} | undefined {
+  const query = queryStorage.getStore();
+  const corpusId = laneStorage.getStore();
+  if (!query || corpusId === undefined) return undefined;
+  const startedAt = performance.now();
+  const stages: SourceAnswerTraceAdapterStages = {
+    adapter_elapsed_ms: 0, keyword_lane_ms: 0, keyword_relaxation_ms: 0, keyword_revalidation_ms: 0,
+    recency_read_ms: 0, fusion_ms: 0, finalize_ms: 0, unattributed_ms: 0,
+  };
+  return { stages, finish: () => {
+    stages.adapter_elapsed_ms = performance.now() - startedAt;
+    const attributed = (stages.join_wait_ms ?? stages.keyword_lane_ms) + (stages.post_join_setup_ms ?? 0)
+      + stages.keyword_relaxation_ms + stages.keyword_revalidation_ms + (stages.vector_revalidation_ms ?? 0) + (stages.vector_summary_ms ?? 0)
+      + stages.recency_read_ms + stages.fusion_ms + stages.finalize_ms;
+    stages.unattributed_ms = Math.max(0, stages.adapter_elapsed_ms - attributed);
+    query.adapterStages.set(corpusId, stages);
+  } };
+}
+
 /**
  * Called by the read pool when a read is asked for. Returns how to report
  * its end, or undefined when no traced Ask lane made it. The lane and query
  * are captured now: the read ends in a pool callback outside their context.
  */
-export function beginSourceAnswerPoolRead(site?: string):
-  | ((report: { queueWaitMs: number; runMs: number; sqlMs: number; outcome: SourceAnswerPoolReadOutcome; snapshot?: boolean }) => void)
+export function beginSourceAnswerPoolRead(statement: string, label?: string):
+  | ((report: { queueWaitMs: number; runMs: number; sqlMs?: number | undefined; cpuMs?: number | undefined; outcome: SourceAnswerPoolReadOutcome; snapshot?: boolean }) => void)
   | undefined {
-  const query = currentSourceAnswerTrace()?.activeQuery;
+  const query = queryStorage.getStore();
   const corpusId = laneStorage.getStore();
   if (!query || corpusId === undefined) return undefined;
-  return ({ queueWaitMs, runMs, sqlMs, outcome, snapshot }) => {
-    let reads = query.poolByCorpus.get(corpusId);
-    if (!reads) {
-      reads = {
-        reads: 0,
-        queue_wait_ms: 0,
-        queue_wait_max_ms: 0,
-        run_ms: 0,
-        run_max_ms: 0,
-        sql_ms: 0,
-        sql_max_ms: 0,
-        snapshot_reads: 0,
-        snapshot_sql_ms: 0,
-        refused: 0,
-        dropped_queued: 0,
-        past_deadline_running: 0,
-        errors: 0,
-      };
-      query.poolByCorpus.set(corpusId, reads);
+  let site = query.sqlShapes.get(statement);
+  if (site === undefined) {
+    site = poolSqlSite(statement);
+    query.sqlShapes.set(statement, site);
+  }
+  const key = label ? `${label}\0${site}` : site;
+  return ({ queueWaitMs, runMs, sqlMs, cpuMs, outcome, snapshot }) => {
+    const reads = poolReads(query, corpusId);
+    if (sqlMs !== undefined) {
+      reads.thread_cpu_available = reads.thread_cpu_available === true || cpuMs !== undefined;
     }
     // Summed unrounded: most reads take under a millisecond, and rounding
     // each one first would report a lane of a thousand of them as zero.
@@ -297,22 +418,25 @@ export function beginSourceAnswerPoolRead(site?: string):
     reads.queue_wait_max_ms = Math.max(reads.queue_wait_max_ms, wait);
     reads.run_ms += ran;
     reads.run_max_ms = Math.max(reads.run_max_ms, ran);
-    const sql = unroundedMs(sqlMs);
+    const sql = unroundedMs(sqlMs ?? 0);
     reads.sql_ms += sql;
     reads.sql_max_ms = Math.max(reads.sql_max_ms, sql);
     if (snapshot) {
       reads.snapshot_reads += 1;
       reads.snapshot_sql_ms += sql;
     }
-    if (site !== undefined) {
-      let sites = poolSqlSites.get(reads);
-      if (!sites) poolSqlSites.set(reads, sites = new Map());
-      const entry = sites.get(site) ?? { site, reads: 0, sql_ms: 0, sql_max_ms: 0 };
-      entry.reads += 1;
-      entry.sql_ms += sql;
-      entry.sql_max_ms = Math.max(entry.sql_max_ms, sql);
-      sites.set(site, entry);
+    let sites = poolSqlSites.get(reads);
+    if (!sites) poolSqlSites.set(reads, sites = new Map());
+    const entry = sites.get(key) ?? { site, ...(label ? { label } : {}), reads: 0, sql_ms: 0, sql_max_ms: 0 };
+    entry.reads += 1;
+    entry.sql_ms += sql;
+    entry.sql_max_ms = Math.max(entry.sql_max_ms, sql);
+    if (cpuMs !== undefined) {
+      const cpu = unroundedMs(cpuMs);
+      entry.sql_cpu_ms = (entry.sql_cpu_ms ?? 0) + cpu;
+      entry.sql_cpu_max_ms = Math.max(entry.sql_cpu_max_ms ?? 0, cpu);
     }
+    sites.set(key, entry);
     if (outcome === 'refused') reads.refused += 1;
     else if (outcome === 'dropped_queued') reads.dropped_queued += 1;
     else if (outcome === 'past_deadline_running') reads.past_deadline_running += 1;
@@ -481,16 +605,16 @@ export async function observeSourceAnswerRoutedQuery<T>(
   const trace = currentSourceAnswerTrace();
   const attempt = trace?.activeAttempt;
   if (!trace || !attempt) return run();
-  const previous = trace.activeQuery;
   const query: ActiveQuery = {
     ordinal: Math.max(1, Math.floor(ordinal)),
     startedAtMs: Date.now(),
     corpusTimings: [],
     poolByCorpus: new Map(),
+    adapterStages: new Map(),
+    sqlShapes: new Map(),
   };
-  trace.activeQuery = query;
   try {
-    return await run();
+    return await queryStorage.run(query, run);
   } finally {
     attempt.queries.push({
       ordinal: query.ordinal,
@@ -503,18 +627,17 @@ export async function observeSourceAnswerRoutedQuery<T>(
           : {}),
         outcome: timing.outcome,
         ...(timing.error_class ? { error_class: sanitizeErrorClass(timing.error_class) } : {}),
+        ...(query.adapterStages.has(timing.corpus_id) ? { adapter_stages: query.adapterStages.get(timing.corpus_id)! } : {}),
         ...(query.poolByCorpus.has(timing.corpus_id) ? { pool: withSlowestSql(query.poolByCorpus.get(timing.corpus_id)!) } : {}),
       })),
       ...(query.stages ? { stages: { ...query.stages } } : {}),
     });
-    if (previous) trace.activeQuery = previous;
-    else delete trace.activeQuery;
   }
 }
 
 /** The active routed query's stage times; the router reports them once per query. */
 export function recordSourceAnswerQueryStages(stages: SourceAnswerTraceQueryStages): void {
-  const query = currentSourceAnswerTrace()?.activeQuery;
+  const query = queryStorage.getStore();
   if (!query) return;
   query.stages = copyQueryStages(stages);
 }
@@ -531,7 +654,7 @@ export function copyQueryStages(stages: SourceAnswerTraceQueryStages): SourceAns
 
 export function recordSourceAnswerCorpusTiming(timing: SourceAnswerTraceCorpusTiming): void {
   noteSourceAnswerProgress('searching');
-  const query = currentSourceAnswerTrace()?.activeQuery;
+  const query = queryStorage.getStore();
   if (!query) return;
   query.corpusTimings.push({
       corpus_id: timing.corpus_id,
@@ -613,14 +736,26 @@ export function recordSourceAnswerPackSeats(corpusIds: readonly string[], recenc
   };
 }
 
-export function recordSourceAnswerAnalystFit(lane: SourceAnswerTraceAnalystFit['lane'], keptSeats: readonly number[], promptBytes?: number, budget?: LocalAnalystPromptBudget): void {
+export function recordSourceAnswerAnalystFit(
+  lane: SourceAnswerTraceAnalystFit['lane'],
+  keptSeats: readonly number[],
+  measurement: SourceAnswerAnalystFitMeasurement,
+  budget?: LocalAnalystPromptBudget,
+): void {
   const seats = currentSourceAnswerTrace()?.evidenceSeats;
   if (!seats) return;
   seats.fits.push({
     lane,
     keptSeats: keptSeats.map(nonNegativeCount),
     ...(budget ? { promptBudgetBytes: budget.bytes, promptBudgetSource: budget.source } : {}),
-    ...(promptBytes === undefined ? {} : { promptBytes: nonNegativeCount(promptBytes) }),
+    promptBytes: nonNegativeCount(measurement.promptBytes),
+    packCandidates: nonNegativeCount(measurement.packCandidates),
+    keptCandidates: nonNegativeCount(measurement.keptCandidates),
+    packGapEntries: nonNegativeCount(measurement.packGapEntries),
+    packGapBytes: nonNegativeCount(measurement.packGapBytes),
+    sentGapBytes: nonNegativeCount(measurement.sentGapBytes),
+    overheadBytes: nonNegativeCount(measurement.overheadBytes),
+    evidenceFormat: measurement.evidenceFormat,
   });
 }
 
@@ -666,7 +801,11 @@ export function snapshotSourceAnswerTrace(trace: MutableTrace): SourceAnswerTrac
       ...attempt,
       queries: attempt.queries.map((query) => ({
         ...query,
-        corpus_timings: query.corpus_timings.map((timing) => ({ ...timing, ...(timing.pool ? { pool: { ...timing.pool, ...(timing.pool.slowest_sql ? { slowest_sql: timing.pool.slowest_sql.map((site) => ({ ...site })) } : {}) } } : {}) })),
+        corpus_timings: query.corpus_timings.map((timing) => ({
+          ...timing,
+          ...(timing.adapter_stages ? { adapter_stages: { ...timing.adapter_stages } } : {}),
+          ...(timing.pool ? { pool: copyPoolDetail(timing.pool) } : {}),
+        })),
       })),
     })),
     routeResolutionMs: trace.routeResolutionMs,

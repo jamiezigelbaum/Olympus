@@ -1,5 +1,8 @@
 import { WITHHELD_ANSWERS } from '../src/core/opsec.ts';
 import { expect, test } from 'bun:test';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { Analyst, AnalystResult, RawItem, SourceConnector } from '../src/core/contracts.ts';
 import { buildEvidencePackDetailed } from '../src/core/evidence-pack.ts';
 import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
@@ -15,11 +18,11 @@ const question = 'What is the project conclusion?';
 const conclusion = 'The project conclusion is to plant an orchard.';
 const missing: AnalystResult = { answer: 'I could not find the conclusion.', citations: [], unanswered: ['conclusion'] };
 
-async function fixture(long: boolean) {
+async function fixture(long: boolean, repeats = [1500, 1500]) {
   const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId, family: 'file', trustDomain: 'internal' });
-  const items: RawItem[] = ['first', 'second'].map(id => ({
+  const items: RawItem[] = ['first', 'second'].map((id, index) => ({
     identity: { family: 'file', provider: 'fixture', accountScope: 'me', providerItemId: id, localItemId: id },
-    mimeType: 'text/plain', content: { kind: 'text', text: `${long ? 'Project background. '.repeat(1500) : ''}${conclusion}` },
+    mimeType: 'text/plain', content: { kind: 'text', text: `${long ? 'Project background. '.repeat(repeats[index]!) : ''}${conclusion}` },
     metadata: { name: `${id}.txt` }, fetchedAt: '2026-11-17T00:00:00Z',
   }));
   const connector: SourceConnector = {
@@ -41,9 +44,9 @@ async function fixture(long: boolean) {
     packs.push(pack.candidates.flatMap(c => c.chunks).join('\n'));
     return { answer: conclusion, citations: pack.candidates.map(c => ({ provenance: c.provenance, claim: conclusion })), unanswered: [] };
   } };
-  const jobs = createDeepReadJobs({ stores: () => [store], lanes: () => lanes, inbox: () => undefined,
-    model: async () => ({ analyst, promptBytes: 13_500, modelId: 'fixture' }) });
-  return { store, lanes, detail, jobs, packs };
+  const makeJobs = (paceFile?: string) => createDeepReadJobs({ stores: () => [store], lanes: () => lanes, inbox: () => undefined,
+    model: async () => ({ analyst, promptBytes: 13_500, modelId: 'fixture' }), ...(paceFile ? { paceFile } : {}) });
+  return { store, lanes, detail, jobs: makeJobs(), makeJobs, packs };
 }
 
 test('an unanswered long fixture item starts exactly one whole-item job and reads the answer past the cut', async () => {
@@ -51,7 +54,7 @@ test('an unanswered long fixture item starts exactly one whole-item job and read
   try {
     expect(f.detail.truncatedCandidateIndexes?.length).toBeGreaterThan(0);
     expect(f.detail.pack.candidates[0]!.chunks.join('')).not.toContain(conclusion);
-    const result = await triggerDeepRead(f.detail, missing, f.jobs);
+    const result = await triggerDeepRead(f.detail, missing, f.jobs, undefined, { autoStart: true });
     expect(result.job).toBeDefined();
     expect(f.jobs.status()).toHaveLength(1);
     expect(f.jobs.status()[0]!.items).toBe(1);
@@ -63,19 +66,82 @@ test('an unanswered long fixture item starts exactly one whole-item job and read
   } finally { f.store.close(); }
 });
 
+test('by default nothing starts: a gap names every head item read only in part', async () => {
+  const f = await fixture(true);
+  try {
+    const result = await triggerDeepRead(f.detail, missing, f.jobs);
+    expect(result.job).toBeUndefined();
+    expect(f.jobs.status()).toHaveLength(0);
+    expect(result.notice).toContain('Read only in part: "');
+    expect(result.notice).toContain('source_deep_read');
+  } finally { f.store.close(); }
+});
+
 test('a short item read whole does not start a job', async () => {
   const f = await fixture(false);
   try {
     expect(f.detail.truncatedCandidateIndexes).toEqual([]);
-    expect(await triggerDeepRead(f.detail, missing, f.jobs)).toEqual({});
+    expect(await triggerDeepRead(f.detail, missing, f.jobs, undefined, { autoStart: true })).toEqual({});
     expect(f.jobs.status()).toHaveLength(0);
   } finally { f.store.close(); }
+});
+
+test('an over-limit first seat is skipped and the second flagged seat is read', async () => {
+  const f = await fixture(true, [30_000, 1500]);
+  try {
+    expect(f.detail.truncatedCandidateIndexes).toEqual([0, 1]);
+    expect(f.detail.pack.candidates.map(candidate => candidate.provenance.sourceItem.providerItemId)).toEqual(['first', 'second']);
+    const skipped: number[] = [];
+    const result = await triggerDeepRead(f.detail, missing, f.jobs, sectionsTotal => skipped.push(sectionsTotal), { autoStart: true });
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]).toBeGreaterThan(40);
+    expect(result.job?.providerItemId).toBe('second');
+    expect(f.jobs.status()).toHaveLength(1);
+    await f.jobs.wait(result.job!.id);
+  } finally { f.store.close(); }
+});
+
+test('a cited flagged second seat is preferred even when the first fits', async () => {
+  const f = await fixture(true);
+  try {
+    expect(f.detail.truncatedCandidateIndexes).toEqual([0, 1]);
+    const provenance = f.detail.pack.candidates[1]!.provenance;
+    const result = await triggerDeepRead(f.detail, { ...missing, citations: [{ provenance, claim: 'Project background.' }] }, f.jobs, undefined, { autoStart: true });
+    expect(result.job?.providerItemId).toBe(provenance.sourceItem.providerItemId);
+    expect(f.jobs.status()).toHaveLength(1);
+    await f.jobs.wait(result.job!.id);
+  } finally { f.store.close(); }
+});
+
+test('when measured pace puts both seats over the limit, the first file and its minutes are reported', async () => {
+  const f = await fixture(true);
+  const dir = mkdtempSync(join(tmpdir(), 'deep-read-pace-'));
+  try {
+    const paceFile = join(dir, 'pace.json');
+    writeFileSync(paceFile, JSON.stringify({ fixture: 960 }));
+    const jobs = f.makeJobs(paceFile);
+    const skipped: number[] = [];
+    const result = await triggerDeepRead(f.detail, missing, jobs, sectionsTotal => skipped.push(sectionsTotal), { autoStart: true });
+    expect(skipped).toHaveLength(2);
+    expect(skipped[0]).toBeLessThanOrEqual(40);
+    expect(result.refused).toBe('too_long');
+    const title = f.detail.pack.candidates[0]!.provenance.citation!.title!;
+    expect(result.notice).toContain(`"${title}" was read only in part.`);
+    expect(result.notice).toContain(`about ${skipped[0]! * 16} minutes`);
+    expect(result.notice).toContain('source_deep_read');
+    expect(result.job).toBeUndefined();
+    expect(jobs.status()).toHaveLength(0);
+    expect(f.packs).toHaveLength(0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    f.store.close();
+  }
 });
 
 test('an answered question does not start a job even with cut head seats', async () => {
   const f = await fixture(true);
   try {
-    expect(await triggerDeepRead(f.detail, { answer: conclusion, citations: [{ provenance: f.detail.pack.candidates[0]!.provenance, claim: conclusion }], unanswered: [] }, f.jobs)).toEqual({});
+    expect(await triggerDeepRead(f.detail, { answer: conclusion, citations: [{ provenance: f.detail.pack.candidates[0]!.provenance, claim: conclusion }], unanswered: [] }, f.jobs, undefined, { autoStart: true })).toEqual({});
     expect(f.jobs.status()).toHaveLength(0);
   } finally { f.store.close(); }
 });
@@ -83,41 +149,39 @@ test('an answered question does not start a job even with cut head seats', async
 test('only reserved head seats qualify, and a refusal names the file and offers the existing tool', async () => {
   const f = await fixture(true);
   try {
-    expect(await triggerDeepRead({ ...f.detail, truncatedCandidateIndexes: [3] }, missing, f.jobs)).toEqual({});
-    const result = await triggerDeepRead(f.detail, missing, { start: async () => { throw new DeepReadRefused('model_unavailable', 'Your private model is unavailable.'); } });
+    expect(await triggerDeepRead({ ...f.detail, truncatedCandidateIndexes: [3] }, missing, f.jobs, undefined, { autoStart: true })).toEqual({});
+    const result = await triggerDeepRead(f.detail, missing, { start: async () => { throw new DeepReadRefused('model_unavailable', 'Your private model is unavailable.'); } }, undefined, { autoStart: true });
     expect(result.refused).toBe('model_unavailable');
     expect(result.notice).toContain(f.detail.pack.candidates[0]!.provenance.citation!.title!);
     expect(result.notice).toContain('source_deep_read');
   } finally { f.store.close(); }
 });
 
-test('Ask returns the ordinary answer with its background handle and notice', async () => {
+test('Ask returns the ordinary answer, starts nothing by itself, and keeps a withheld answer\'s titles out', async () => {
   const f = await fixture(true);
   try {
     const result = await createAnalystSourceIndexAnswerHandler({ analyst: { analyze: async () => missing }, lanes: () => f.lanes,
       maxCharsPerCandidate: 100, deepRead: () => f.jobs,
     }).answer({ question, retrieval_mode: 'keyword' });
     expect(result.answer).toStartWith(WITHHELD_ANSWERS.private);
-    expect(result.answer).toContain('the answer follows in Private answers');
     expect(JSON.stringify(result)).not.toContain('first.txt');
     expect(JSON.stringify(result)).not.toContain('second.txt');
-    expect(result.deep_read).toBeDefined();
-    expect(f.jobs.status()).toHaveLength(1);
-    await f.jobs.wait(result.deep_read!.id);
+    expect(result.deep_read).toBeUndefined();
+    expect(f.jobs.status()).toHaveLength(0);
   } finally { f.store.close(); }
 });
 
 test('eval waits for the same jobs, judges the deep answer and keeps text out of the receipt', async () => {
-  const f = await fixture(true);
+  const f = await fixture(true, [30_000, 1500]);
   try {
-    const item = f.detail.pack.candidates[0]!.provenance.sourceItem;
+    const item = f.detail.pack.candidates[1]!.provenance.sourceItem;
     const receipt = await runPassageEval({ dataset: { version: '2', description: 'fixture', questions: [{
       id: 'p001', question, split: 'open', shape: 'value_lookup', expectedEvidence: [{ corpusId, providerItemId: item.providerItemId, quote: conclusion, hint: '' }],
     }] }, maxResults: 12, storeCounts: [], gitSha: 'fixture', buildPack: async () => f.detail,
       answer: async () => missing, deepReadJobs: f.jobs, judgeAnswer: async (_q, _expected, answer) => answer === conclusion ? 'correct' : 'wrong',
     });
     expect(receipt.summary.deepReadStarted).toBe(1);
-    expect(receipt.questions![0]!.deepRead).toMatchObject({ triggered: true, refused: null, correctByMeaning: true, citesExpected: true });
+    expect(receipt.questions![0]!.deepRead).toMatchObject({ triggered: true, refused: null, correctByMeaning: true, citesExpected: true, readsExpectedItem: true, skippedTooLong: 1 });
     expect(receipt.questions![0]!.deepRead!.sectionsDone).toBe(receipt.questions![0]!.deepRead!.sectionsTotal);
     expect(JSON.stringify(receipt)).not.toContain(conclusion);
     expect(JSON.stringify(receipt)).not.toContain(question);

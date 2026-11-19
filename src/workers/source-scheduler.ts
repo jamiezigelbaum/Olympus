@@ -270,8 +270,6 @@ export interface SourceSchedulerTask {
   freshnessThresholdMs?: number;
   /** Tasks sharing a key are serialized; different keys may run concurrently. */
   concurrencyKey?: string;
-  /** An embedding sweep awaiting boot visibility keeps its own turn. */
-  visibilityBoot?: () => Promise<void> | undefined;
   /** Seeds restart-safe scheduling before this task has durable scheduler state. */
   bootstrapLastSuccessAt?(): string | undefined;
   /** Seeds a counts-only proof for externally completed work after restart. */
@@ -497,8 +495,8 @@ export interface SourceChangeWatchStatus {
 export interface SourceSchedulerTaskStatus {
   /** Computer dashboard only; never persisted in scheduler state. */
   missing_scope_path?: string;
-  /** Internal wait, never persisted as a failure or provider deferral. */
-  wait_reason?: 'store_reclaim' | 'boot_visibility';
+  /** Short maintenance hold, never persisted as a failure or provider deferral. */
+  wait_reason?: 'store_reclaim';
   id: string;
   kind: SourceSchedulerTaskKind;
   metadata_walk_role?: SourceSchedulerTask['metadataWalkRole'];
@@ -523,7 +521,7 @@ export interface SourceSchedulerTaskStatus {
 }
 
 interface SchedulerTaskState {
-  waitReason?: SourceSchedulerTaskStatus['wait_reason'];
+  waitReason?: 'store_reclaim';
   task: SourceSchedulerTask;
   source: SourceSchedulerSource;
   running: boolean;
@@ -1059,7 +1057,7 @@ export class SourceScheduler {
     const groups = new Map<string, SchedulerTaskState[]>();
     const keyOf = (state: SchedulerTaskState): string => {
       const own = taskConcurrencyKey(state.source, state.task);
-      if (state.task.kind !== 'embed' || state.task.visibilityBoot?.()) return own;
+      if (state.task.kind !== 'embed') return own;
       // An embedding sweep due with its source's other work joins that turn
       // and runs after it, so it embeds what the listing just wrote. Only
       // while that turn is held by a run already under way does it take a
@@ -1106,7 +1104,7 @@ export class SourceScheduler {
             && !state.running
             && taskCadence(state.source, state.task) === 'continuous'
             && (taskConcurrencyKey(state.source, state.task) === concurrencyKey
-              || (sources.has(state.source) && state.task.kind === 'embed' && !state.task.visibilityBoot?.()))
+              || (sources.has(state.source) && state.task.kind === 'embed'))
             && state.nextRunAt <= now);
           for (const state of due) {
             if (state.running) continue;
@@ -1142,13 +1140,6 @@ export class SourceScheduler {
     provenance: SourceSchedulerRunProvenance,
   ): Promise<void> {
     const stops = this.stops;
-    const visibility = state.task.visibilityBoot?.();
-    if (visibility) {
-      state.waitReason = 'boot_visibility';
-      try { await visibility; }
-      finally { delete state.waitReason; }
-      if (this.stops !== stops) return;
-    }
     for (;;) {
       const holds = [...this.storeReclaims];
       if (holds.length === 0) break;
@@ -2052,6 +2043,10 @@ export const EMBEDDING_SWEEP_INTERVAL_MS = 60_000;
  * failed call to a provider that is down costs next to nothing.
  */
 export const EMBEDDING_SWEEP_MAX_BACKOFF_MS = 5 * 60_000;
+/** Set to `off` to walk every store on every pass again (see embeddingSweepTask); for comparing the two on one build. */
+export const EMBEDDING_SWEEP_IDLE_BACKOFF_ENV = 'OLYMPUS_EMBEDDING_SWEEP_IDLE_BACKOFF';
+/** A resting store is still walked in full this often. */
+export const EMBEDDING_SWEEP_IDLE_FULL_PASS_MS = 30 * 60_000;
 /** Items per store per sweep pass. */
 export const EMBEDDING_SWEEP_MAX_ITEMS = 32;
 /**
@@ -2126,8 +2121,6 @@ export function withEmbeddingSweep(
     onProgress?: (target: ConnectorStoreEmbeddingTarget) => void;
     /** True while the owner's Ask runs: a pass starts no new batch, and continues soon after. */
     holdForAsk?: () => boolean;
-    /** Waits before the embedding budget begins, without holding the source's fetch lane. */
-    visibilityBoot?: () => Promise<void> | undefined;
   } = {},
 ): SourceSchedulerSource[] {
   return sources.map((source, sourceIndex) => {
@@ -2135,7 +2128,7 @@ export function withEmbeddingSweep(
     if (!targets) return source;
     return {
       ...source,
-      tasks: [...source.tasks, embeddingSweepTask(source, targets, options.storeDeadlineMs, sourceIndex, options.trickle, options.onProgress, options.holdForAsk, options.visibilityBoot)],
+      tasks: [...source.tasks, embeddingSweepTask(source, targets, options.storeDeadlineMs, sourceIndex, options.trickle, options.onProgress, options.holdForAsk)],
       embeddingDeferredReason: () => targets().some((target) => target.store.embeddingDeferredReason() !== undefined)
         ? EMBEDDING_PROVIDER_UNAVAILABLE_REASON
         : undefined,
@@ -2155,7 +2148,6 @@ function embeddingSweepTask(
   trickle?: (target: ConnectorStoreEmbeddingTarget) => boolean,
   onProgress?: (target: ConnectorStoreEmbeddingTarget) => void,
   holdForAsk?: () => boolean,
-  visibilityBoot?: () => Promise<void> | undefined,
 ): SourceSchedulerTask {
   const maxItems = embeddingSweepMaxItems();
   const askHolds = (): boolean => {
@@ -2163,6 +2155,25 @@ function embeddingSweepTask(
   };
   const tricklingTarget = (target: ConnectorStoreEmbeddingTarget): boolean => {
     try { return trickle?.(target) === true; } catch { return false; }
+  };
+  // Idle back-off (OLYMPUS_EMBEDDING_SWEEP_IDLE_BACKOFF=off turns it off): a pass over a caught-up store walks
+  // every chunk twice (the inventory, then the search for missing vectors),
+  // once a minute, and finds nothing. A store whose last pass found nothing
+  // to do is not walked again until something that could give it work moved:
+  // a write to its items, chunks or vectors, its tier visibility, its queue,
+  // or the target's model and scope. A new item moves the write sequence, so
+  // it is embedded on the next pass as before. A full pass still runs every
+  // EMBEDDING_SWEEP_IDLE_FULL_PASS_MS for anything the markers do not see.
+  const idleBackoff = process.env[EMBEDDING_SWEEP_IDLE_BACKOFF_ENV]?.trim() !== 'off';
+  // Remembered per store and per target: one store can be swept under two targets.
+  const quiet = new WeakMap<object, Map<string, { key: string; at: number; run: Awaited<ReturnType<typeof embedPendingChunks>>[number] }>>();
+  const quietSlot = (target: ConnectorStoreEmbeddingTarget): string => JSON.stringify([target.provider.modelId, target.provider.epochId ?? null,
+    target.wholeStore === true, target.accountScope ?? null, target.filters ?? null]);
+  const quietKey = (target: ConnectorStoreEmbeddingTarget): string | undefined => {
+    // A store that cannot say whether it was written to never rests.
+    const writes = target.store.writeSequence?.();
+    if (writes === undefined || typeof target.store.visibilityMarker !== 'function') return undefined;
+    return JSON.stringify([writes, target.store.visibilityMarker()]);
   };
   return {
     id: `${source.sourceId}_embeddings`,
@@ -2174,16 +2185,26 @@ function embeddingSweepTask(
     // waited out every listing; on Sparta (2026-11-04) Gmail's half-hour
     // reconcile left new mail unsearchable for as long.
     concurrencyKey: embeddingSweepConcurrencyKey(source),
-    ...(visibilityBoot ? { visibilityBoot } : {}),
     intervalMs: EMBEDDING_SWEEP_INTERVAL_MS,
     freshnessThresholdMs: EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS,
     run: async (context?: SourceSchedulerTaskRunContext) => {
       const passTargets = targets();
       const runs: Awaited<ReturnType<typeof embedPendingChunks>> = [];
       let trickled = false;
+      const restedRuns = new Set<number>();
       for (const target of passTargets) {
         const paced = tricklingTarget(target);
         trickled ||= paced;
+        const keyBefore = idleBackoff ? quietKey(target) : undefined;
+        const slot = idleBackoff ? quietSlot(target) : '';
+        const rested = keyBefore === undefined ? undefined : quiet.get(target.store)?.get(slot);
+        if (rested && rested.key === keyBefore && Date.now() - rested.at < EMBEDDING_SWEEP_IDLE_FULL_PASS_MS
+          && target.store.queuedEmbeddingItemIds().length === 0 && target.store.embeddingDeferredReason() === undefined) {
+          runs.push(rested.run);
+          restedRuns.add(runs.length - 1);
+          continue;
+        }
+        quiet.get(target.store)?.delete(slot);
         const overran = Symbol('overran');
         let timer: ReturnType<typeof setTimeout> | undefined;
         // The pass stops starting batches at half the deadline, so a store
@@ -2206,6 +2227,18 @@ function embeddingSweepTask(
           const outage = target.store.embeddingDeferredReason();
           runs.push(...result.map((run) => run.busy === true && run.deferredReason === undefined && outage !== undefined
             ? { ...run, deferredReason: outage } : run));
+          // Nothing to do and nothing moved while the pass ran: the store rests until a marker moves.
+          const only = result.length === 1 ? result[0]! : undefined;
+          if (keyBefore !== undefined && only && outage === undefined && only.busy !== true && only.deferredReason === undefined
+            && only.stoppedAtDeadline !== true && only.itemsAttempted === 0 && only.chunksEmbedded === 0 && only.itemsFailed === 0
+            && only.itemsOutOfScope === 0 && only.inventory?.inventory_complete === 1
+            // An item whose embedding failed for good is skipped by every pass and
+            // stays reported as failed: it is not work, so it does not keep the
+            // store walked. A change to it moves the write sequence and wakes the store.
+            && quietKey(target) === keyBefore) {
+            const slots = quiet.get(target.store) ?? new Map();
+            quiet.set(target.store, slots.set(slot, { key: keyBefore, at: Date.now(), run: only }));
+          }
           continue;
         }
         target.store.setEmbeddingDeferral(EMBEDDING_PROVIDER_UNAVAILABLE_REASON);
@@ -2238,6 +2271,7 @@ function embeddingSweepTask(
           skipped_deferred_items: run.deferredReason ? run.itemsAttempted : 0,
           stores_deferred: run.deferredReason ? 1 : 0, stores_lease_busy: run.busy ? 1 : 0,
           stopped_at_deadline: run.stoppedAtDeadline ? 1 : 0,
+          ...(idleBackoff ? { rested: restedRuns.has(index) ? 1 : 0 } : {}),
         },
       }));
       const attemptedAt = Date.parse(context?.attemptedAt ?? '') || Date.now();

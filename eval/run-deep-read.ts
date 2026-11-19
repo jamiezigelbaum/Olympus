@@ -52,7 +52,7 @@ export interface DeepOutcome extends ArmOutcome {
   setSeconds: number; readingSeconds: number; answerSeconds: number; secondsPerSection: number | null;
   /** Conversations: whether the relevant-days pick kept the answer-bearing message, and how much it kept. */
   dayPicker?: { kept: boolean; days: number; totalDays: number; messageCount: number; totalMessages: number; sections: number; totalSections: number };
-  /** The same pick within each section budget (--day-budget-sections), as the engine caps it to the hour. */
+  /** The same pick within each section budget (--day-budget-sections), as the engine caps it to its budget. */
   dayPickerBudgets?: Array<{ budget: number; kept: boolean; days: number; messageCount: number; sections: number }>;
   /** Which read the deep arm ran. */
   readMode?: DeepReadMode;

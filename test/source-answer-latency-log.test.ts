@@ -301,12 +301,22 @@ describe('source_answer v2 trace allowlist', () => {
 });
 
 describe('source_answer latency trace seat order (#1354)', () => {
+  const fit = {
+    promptBytes: 4321.9, packCandidates: 3, keptCandidates: 2,
+    packGapEntries: 7, packGapBytes: 820, sentGapBytes: 274, overheadBytes: 3100,
+    evidenceFormat: 'compact' as const,
+  };
+  const wireFit = {
+    prompt_bytes: 4321, pack_candidates: 3, kept_candidates: 2,
+    pack_gap_entries: 7, pack_gap_bytes: 820, sent_gap_bytes: 274, overhead_bytes: 3100,
+    evidence_format: 'compact' as const,
+  };
   test('carries the pack\'s store per seat and the seats each fit kept, ids and counts only', async () => {
     const trace = createSourceAnswerTrace(() => new Date('2026-07-23T12:00:00.000Z'));
     await runWithSourceAnswerTrace(trace, async () => {
       recordSourceAnswerPackSeats(['internal.telegram.messages', 'public_safe.docs', 'internal.telegram.messages'], 1);
-      recordSourceAnswerAnalystFit('local', [1, 3]);
-      recordSourceAnswerAnalystFit('cloud', [1, 2, 3]);
+      recordSourceAnswerAnalystFit('local', [1, 3], fit, { bytes: 13_500, source: 'fallback' });
+      recordSourceAnswerAnalystFit('cloud', [1, 2, 3], { ...fit, keptCandidates: 3, evidenceFormat: 'full' });
     });
 
     const record = buildSourceAnswerLatencyTraceRecord({
@@ -318,8 +328,8 @@ describe('source_answer latency trace seat order (#1354)', () => {
       pack_corpora: ['internal.telegram.messages', 'public_safe.docs', 'internal.telegram.messages'],
       recency_seats: 1,
       fits: [
-        { lane: 'local', kept_seats: [1, 3] },
-        { lane: 'cloud', kept_seats: [1, 2, 3] },
+        { ...wireFit, lane: 'local', kept_seats: [1, 3], prompt_budget_bytes: 13_500, prompt_budget_source: 'fallback' },
+        { ...wireFit, lane: 'cloud', kept_seats: [1, 2, 3], kept_candidates: 3, evidence_format: 'full' },
       ],
     });
     expect(contentBearingKeys(record)).toEqual([]);
@@ -329,7 +339,7 @@ describe('source_answer latency trace seat order (#1354)', () => {
     const trace = createSourceAnswerTrace(() => new Date('2026-07-23T12:00:00.000Z'));
     await runWithSourceAnswerTrace(trace, async () => {
       recordSourceAnswerPackSeats(['a.store', 'b.store', 'a.store'], 0, ['local-item-17', 'local-item-17', 'local-item-17']);
-      recordSourceAnswerAnalystFit('local', [1, 2], 4321.9);
+      recordSourceAnswerAnalystFit('local', [1, 2], fit);
     });
     const record = buildSourceAnswerLatencyTraceRecord({ trace: snapshotSourceAnswerTrace(trace), outcome: 'success' });
     const hashes = record.evidence_seats?.item_hashes ?? [];
@@ -338,7 +348,7 @@ describe('source_answer latency trace seat order (#1354)', () => {
     // The same item in the same store hashes alike; the same id in another store does not.
     expect(hashes[0]).toBe(hashes[2]);
     expect(hashes[0]).not.toBe(hashes[1]);
-    expect(record.evidence_seats?.fits).toEqual([{ lane: 'local', kept_seats: [1, 2], prompt_bytes: 4321 }]);
+    expect(record.evidence_seats?.fits).toEqual([{ ...wireFit, lane: 'local', kept_seats: [1, 2] }]);
     expect(JSON.stringify(record)).not.toContain('local-item-17');
   });
 
@@ -348,12 +358,15 @@ describe('source_answer latency trace seat order (#1354)', () => {
     expect(empty.evidence_seats).toBeUndefined();
     await runWithSourceAnswerTrace(trace, async () => {
       recordSourceAnswerPackSeats(['a.store', 'b.store'], 0);
-      recordSourceAnswerAnalystFit('local', [1]);
+      recordSourceAnswerAnalystFit('local', [1], { ...fit, packCandidates: 2, keptCandidates: 1 });
       recordSourceAnswerPackSeats(['b.store'], 0);
-      recordSourceAnswerAnalystFit('local', [1]);
+      recordSourceAnswerAnalystFit('local', [1], { ...fit, packCandidates: 1, keptCandidates: 1 });
     });
     const record = buildSourceAnswerLatencyTraceRecord({ trace: snapshotSourceAnswerTrace(trace), outcome: 'success' });
-    expect(record.evidence_seats).toEqual({ pack_corpora: ['b.store'], recency_seats: 0, fits: [{ lane: 'local', kept_seats: [1] }] });
+    expect(record.evidence_seats).toEqual({
+      pack_corpora: ['b.store'], recency_seats: 0,
+      fits: [{ ...wireFit, lane: 'local', kept_seats: [1], pack_candidates: 1, kept_candidates: 1 }],
+    });
   });
 });
 
@@ -558,17 +571,25 @@ describe('pool reads name their slowest statements without their values', () => 
   test('literals and id lists never reach the trace', async () => {
     const { poolSqlSite, createSourceAnswerTrace, runWithSourceAnswerTrace, observeSourceAnswerRetrievalAttempt, observeSourceAnswerRoutedQuery,
       runInSourceAnswerLane, beginSourceAnswerPoolRead, recordSourceAnswerCorpusTiming, snapshotSourceAnswerTrace } = await import('../src/workers/source-index/answer-latency-trace.ts');
-    const site = poolSqlSite(`SELECT x FROM chunks_fts WHERE chunks_fts MATCH 'blood work 2026' AND pk IN (12, 13)\n LIMIT 40`);
-    expect(site).toBe('SELECT x FROM chunks_fts WHERE chunks_fts MATCH ? AND pk IN (…) LIMIT N');
+    const statement = `SELECT x FROM chunks_fts WHERE chunks_fts MATCH 'blood work 2026' AND pk IN (12, 13)\n LIMIT 40 -- private note`;
+    const site = poolSqlSite(statement);
+    expect(site).toMatch(/^SELECT x FROM chunks_fts WHERE chunks_fts MATCH \? AND pk IN \(…\) LIMIT N #[a-f0-9]{16}$/);
+    expect(poolSqlSite(`SELECT x FROM chunks_fts WHERE chunks_fts MATCH 'other text' AND pk IN (14, 15) LIMIT 90`)).toBe(site);
     const trace = createSourceAnswerTrace();
     await runWithSourceAnswerTrace(trace, () => observeSourceAnswerRetrievalAttempt('hybrid', () => observeSourceAnswerRoutedQuery(1, async () => {
       runInSourceAnswerLane('internal.a', () => {
-        for (const ms of [5, 30]) beginSourceAnswerPoolRead(site)?.({ queueWaitMs: 0, runMs: ms, sqlMs: ms, outcome: 'rows' });
-        beginSourceAnswerPoolRead('SELECT N')?.({ queueWaitMs: 0, runMs: 1, sqlMs: 1, outcome: 'rows' });
+        for (const ms of [5, 30]) beginSourceAnswerPoolRead(statement, 'fts')?.({ queueWaitMs: 0, runMs: ms, sqlMs: ms, cpuMs: ms / 2, outcome: 'rows' });
+      });
+      runInSourceAnswerLane('internal.b', () => {
+        beginSourceAnswerPoolRead('SELECT 1')?.({ queueWaitMs: 0, runMs: 1, sqlMs: 1, outcome: 'rows' });
       });
       recordSourceAnswerCorpusTiming({ corpus_id: 'internal.a', elapsed_ms: 40, outcome: 'success' });
+      recordSourceAnswerCorpusTiming({ corpus_id: 'internal.b', elapsed_ms: 1, outcome: 'success' });
     })));
-    const pool = snapshotSourceAnswerTrace(trace).retrievalAttempts[0]!.queries[0]!.corpus_timings[0]!.pool!;
-    expect(pool.slowest_sql).toEqual([{ site, reads: 2, sql_ms: 35, sql_max_ms: 30 }, { site: 'SELECT N', reads: 1, sql_ms: 1, sql_max_ms: 1 }]);
+    const record = buildSourceAnswerLatencyTraceRecord({ trace: snapshotSourceAnswerTrace(trace), outcome: 'success' });
+    const [measured, unsupported] = record.retrieval_attempts[0]!.queries[0]!.corpus_timings;
+    expect(measured!.pool).toMatchObject({ thread_cpu_available: true, slowest_sql: [{ site, label: 'fts', reads: 2, sql_ms: 35, sql_max_ms: 30, sql_cpu_ms: 17.5, sql_cpu_max_ms: 15 }] });
+    expect(unsupported!.pool?.thread_cpu_available).toBe(false);
+    expect(unsupported!.pool?.slowest_sql).toEqual([{ site: poolSqlSite('SELECT 1'), reads: 1, sql_ms: 1, sql_max_ms: 1 }]);
   });
 });

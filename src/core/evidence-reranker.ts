@@ -77,15 +77,28 @@ export const RERANK_POOL_STORE_DEPTH = 10;
 // Seats added to a reranked pool for the best vector rows across stores, by
 // margin over each store's relevance bar, below the bar included: a store's
 // nearest item that its keyword matches crowd out of its own list can still be
-// the answer, and the reranker decides. 0 keeps the pool as the strength draw
-// leaves it. OLYMPUS_SEMANTIC_POOL_SEATS sets it for eval arms.
-export const DEFAULT_RERANK_POOL_SEMANTIC_SEATS = 0;
+// the answer, and the reranker decides. 6 on the 75-question stage 3 eval
+// (19 Nov 2026): found document 44 to 47, answered by meaning 35 to 36,
+// held-out equal. OLYMPUS_SEMANTIC_POOL_SEATS overrides it (0 turns it off).
+export const DEFAULT_RERANK_POOL_SEMANTIC_SEATS = 6;
 export const SEMANTIC_POOL_SEATS_ENV = 'OLYMPUS_SEMANTIC_POOL_SEATS';
 export function rerankPoolSemanticSeats(env: Readonly<Record<string, string | undefined>> = process.env): number {
   const raw = env[SEMANTIC_POOL_SEATS_ENV]?.trim();
   if (!raw) return DEFAULT_RERANK_POOL_SEMANTIC_SEATS;
   const seats = Number(raw);
   return Number.isInteger(seats) && seats >= 0 && seats <= 48 ? seats : DEFAULT_RERANK_POOL_SEMANTIC_SEATS;
+}
+
+// How many of its nearest vector rows each store offers those seats, whatever
+// its bar. A row below this rank is never offered, however many seats there
+// are. OLYMPUS_SEMANTIC_ROWS_PER_STORE sets it for eval arms.
+export const DEFAULT_SEMANTIC_ROWS_PER_STORE = 3;
+export const SEMANTIC_ROWS_PER_STORE_ENV = 'OLYMPUS_SEMANTIC_ROWS_PER_STORE';
+export function semanticRowsPerStore(env: Readonly<Record<string, string | undefined>> = process.env): number {
+  const raw = env[SEMANTIC_ROWS_PER_STORE_ENV]?.trim();
+  if (!raw) return DEFAULT_SEMANTIC_ROWS_PER_STORE;
+  const rows = Number(raw);
+  return Number.isInteger(rows) && rows >= 1 && rows <= 50 ? rows : DEFAULT_SEMANTIC_ROWS_PER_STORE;
 }
 
 // Every rerank outcome since this process started, for health: a timeout

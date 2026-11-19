@@ -1,10 +1,11 @@
-import { memoryActivity, statusMemoryActivity } from '../../core/memory-counters.ts';
-import { createMemoryDiagnostic } from '../engine-split/memory.ts';
+import { SQLiteError } from 'bun:sqlite';
+import { changeMemoryActivity, memoryActivity, statusMemoryActivity } from '../../core/memory-counters.ts';
+import { createMemoryDiagnostic, processMemoryAsync } from '../engine-split/memory.ts';
 import { sampleSqliteStoreMemory } from '../engine-split/sqlite-memory.ts';
-import { sampleModelWorkerMemory } from '../source-index/built-in-reasoning/off-thread.ts';
+import { modelWorkerMemoryPayloads, sampleModelWorkerMemory } from '../source-index/built-in-reasoning/off-thread.ts';
 import { readTinfoilStatus } from '../../core/analyst-tinfoil.ts';
 import { rerankOutcomeCounts } from '../../core/evidence-reranker.ts';
-import { localAnalystWindowReports, reportLocalAnalystPromptOverride, resolveLocalAnalystWindow, setLocalAnalystWindow } from '../source-index/local-analyst-window.ts';
+import { DEFAULT_LOCAL_ANALYST_PROMPT_BYTES, initializeLocalAnalystWindow, localAnalystPromptBytesForWindow, localAnalystWindow, localAnalystWindowNotice, localAnalystWindowReports, reportLocalAnalystPromptOverride, resolveLocalAnalystWindow, setLocalAnalystWindow } from '../source-index/local-analyst-window.ts';
 import { X_CONTENT_RECOVERY_LIMIT_SUBJECT } from '../x-bookmarks/content-recovery.ts';
 import { GMAIL_IMPORT_LIMIT_SUBJECT, withGmailImportRunOnce } from '../google-connectors/gmail-import-allowance.ts';
 import { startVeniceCreditRecovery, fetchVeniceCreditStatus, VENICE_BILLING_BASE_URL } from '../../core/provider-credit-status.ts';
@@ -34,7 +35,7 @@ import { privacyChoicePending } from '../../core/first-run-privacy.ts';
 import { LocalModelDiscovery, saveLocalAnswerModel } from '../../core/local-model-discovery.ts';
 import { saveFirstRunPrivacyChoice, savePrivateAnswerMode } from '../../core/first-run-privacy.ts';
 import { createSpoolChangeSubscription } from '../messaging-spool-wake.ts';
-import { resolvedStorePath, retiredPathSettings } from '../../core/source-placement.ts';
+import { declaredConnectorStoreMountPaths, resolvedStorePath, retiredPathSettings } from '../../core/source-placement.ts';
 import { DASHBOARD_PRIVATE_ANSWERS_COPY as PRIVATE_ANSWERS_COPY } from '../dashboard/vocabulary.ts';
 import { anonymousInboxConnectionId, localInboxLabel, askWithAnonymousInbox } from './runtime/local-private-answers.ts';
 import { installWorkerShutdownSignals } from '../../core/worker-shutdown.ts';
@@ -61,11 +62,12 @@ import { unlinkHelper } from './dashboard/dashboard-messaging-service.ts';
 import { ModelSetupService, requiredModelProfiles, type ModelCredentialState } from '../../core/model-setup.ts';
 import { workerRestartsItself, type ModelKeyReloadRequest, type WorkerLaunch } from '../../core/model-key-reload.ts';
 import { connectGeminiApiKey, connectPublicApiKeySource } from '../../core/connect.ts';
-import { environmentWithWorkerSetupEnv, readWorkerSetupEnv } from '../../core/worker-auth.ts';
+import { environmentWithWorkerSetupEnv, mergeWorkerSetupEnv, readWorkerSetupEnv, readWorkerSetupEnvAsync, workerSetupEnvPath } from '../../core/worker-auth.ts';
 import { remoteOpenInstructions, resolveServerMode, resolveAgentApprovalHost } from '../../core/remote-open.ts';
 import { loadOrCreateDashboardSessionSecret } from '../../core/dashboard-session-secret.ts';
 import { execFile } from 'node:child_process';
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import {
@@ -234,8 +236,12 @@ import {
 } from '../archive-import/dashboard.ts';
 import { archiveLaneLegs } from '../archive-import/lane.ts';
 import { withArchiveImportCorpora } from '../archive-import/store.ts';
-import { accountStoreNames, sharedDataPath } from '../../core/olympus-layout.ts';
+import { accountRawPath, accountStoreNames, accountStorePath, hasLegacyLayout, legacyAccountPaths, sharedDataPath } from '../../core/olympus-layout.ts';
 import { ARCHIVE_IMPORTS_SOURCE_ID } from '../archive-import/state.ts';
+import { archiveImportFamilies } from '../../core/archive-formats.ts';
+import { captureGrantPathFromEnv } from '../../core/messaging-capture-grant-file.ts';
+import { unpairedSourcesPath } from '../credential-broker/unpaired-sources.ts';
+import { createFrontMountChanges } from './runtime/front-mount-changes.ts';
 import { createArchiveExtractionRuntime } from '../archive-import/extraction-runtime.ts';
 import { createArchiveImportsSchedulerSource } from '../archive-import/scheduler-source.ts';
 import type { ExtractionItemRef, ExtractorRegistryConfig } from '../file-extraction/types.ts';
@@ -271,7 +277,7 @@ import {
 import { canonicalConnectorStoreChatPrincipal } from '../connector-store/principal.ts';
 import { createOwnerQuestionActivity, createSourceAnswerLanes, OWNER_QUESTION_RESOURCE } from './runtime/source-answer-lanes.ts';
 import type { ConnectorStoreStatusScope } from '../connector-store/local-index.ts';
-import { setVectorDigestBackfillHold, setVisibilityBootWait } from '../connector-store/local-index.ts';
+import { setVectorDigestBackfillHold } from '../connector-store/local-index.ts';
 import type { ExtractionUnreadableItem } from '../file-extraction/job-store.ts';
 import { gmailInternalStoreStatusScope, gmailPrivateStoreStatusScope } from '../email-source/gmail-status-scope.ts';
 import {
@@ -334,7 +340,7 @@ import {
   builtInEmbeddingDashboardState,
   loadedBuiltInEmbedding,
 } from '../source-index/built-in-embedding/provider.ts';
-import { installBuiltInReranker, readBuiltInEmbeddingStatus, readBuiltInRerankerStatus } from '../source-index/built-in-embedding/assets.ts';
+import { installBuiltInReranker, readBuiltInEmbeddingStatus, readBuiltInEmbeddingVision, readBuiltInRerankerStatus } from '../source-index/built-in-embedding/assets.ts';
 import { LocalWorkPacer, embedsOnThisComputer, systemIdlePowerProbe } from '../local-pacing.ts';
 import { builtInEmbeddingModel } from '../source-index/built-in-embedding/manifest.ts';
 import {
@@ -415,7 +421,7 @@ import {
   requireFileScopeSource,
   type FileScopeSourceDefinition,
 } from '../../core/file-scope-sources.ts';
-import { fileSourceScopeAllowsContent, fileSourceScopeAllowsMetadata, fileSourceScopeIdForProvider } from '../../core/source-scope-approval.ts';
+import { defaultFileSourceScopeStatePath, fileSourceScopeAllowsContent, fileSourceScopeAllowsMetadata, fileSourceScopeIdForProvider } from '../../core/source-scope-approval.ts';
 import { createGmailMailScopeBrowser, createGmailPickerRequestBudget } from '../google-connectors/gmail-scope-browser.ts';
 import {
   gmailArchiveTarget,
@@ -433,7 +439,7 @@ import {
   gmailImportWait,
 } from '../google-connectors/gmail-import-allowance.ts';
 import type { GmailApiClient } from '../google-connectors/gmail.ts';
-import { readSourceRegistry } from '../../core/source-registry.ts';
+import { DEFAULT_ACCOUNT_SLOT, readSourceRegistry, sourceRegistryPath } from '../../core/source-registry.ts';
 import { gmailContentArrivesLater, gmailLaneSyncOptions } from '../google-connectors/gmail-live-sync.ts';
 import {
   GMAIL_ATTACHMENT_EXTRACTION_BATCH_SIZE,
@@ -481,14 +487,14 @@ import { SNIFFER_MAX_CONCURRENT_CALLS, completeAfterSlot } from '../classificati
 import { approveClassifier, resolveClassificationLedgerPath, readClassificationLedger, isClassifierApproved } from '../classification-ledger.ts';
 import { resolveTierMigrationPaths, tierMigrationStatusSummary } from '../classification/tier-migration.ts';
 import { resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
-import { controlPathHeadroom, ingestionTurn, startCpuSampleLog } from '../control-path-headroom.ts';
+import { controlPathHeadroom, ingestionTurn, serializeDiagnosticWrites, startCpuSampleLog } from '../control-path-headroom.ts';
 import { setEngineStep, startEngineHeartbeat } from '../../core/engine-heartbeat.ts';
 import { withdrawBootProgress, beginBootProgress, beginFrontProgress, failFrontProgress, finishBootProgress, finishFrontProgress, reportBootStep, reportFrontStep } from '../../core/boot-progress.ts';
+import { beginStartupProgress } from '../../core/startup-progress.ts';
 import { ENGINE_BACKGROUND_INSTANCE_ENV, engineRoleFromEnv } from '../../core/engine-split.ts';
 import { forbidWritableStoreOpens } from '../../core/store-write-guard.ts';
 import { frontLoopSqlHealth, watchFrontLoopSql } from '../../core/front-loop-sql-guard.ts';
 import {
-  createBackgroundVisibilityBoot,
   createEngineFront,
   createEngineFrontRoutes,
   createFrontGate,
@@ -590,8 +596,6 @@ import {
   builtInBacksPrivateAnalyst,
   probeLocalAnalystService,
   createLocalPrivateRoute,
-  createLocalSovereigntyAnalystModel,
-  probeLocalSovereigntyProfile,
   trustedAnalystAssistTimeoutMs,
   createSovereigntyAnalystMap,
   analystRouteTrustDomain,
@@ -642,6 +646,7 @@ const VISIBILITY_REFRESH_MS = 30_000;
 const FRONT_MOUNT_LOOK_AFTER_CHANGE_MS = 60_000;
 /** With no new store, how often the front looks anyway. */
 const FRONT_MOUNT_LOOK_QUIET_MS = 60_000;
+const FRONT_MOUNT_FAILURE_RETRY_MS = 5 * 60_000;
 /**
  * The longest the front waits on those sets before it listens; the rest
  * finishes after, in turns. Well inside the verified install's 60 s health
@@ -665,8 +670,30 @@ export async function main(): Promise<void> {
     const { enabled, reason } = sqliteMmapPolicy();
     console.log(`[olympus] engine background SQLite file map ${enabled ? 'on' : 'off'} (${reason})`);
   }
-  const visibilityBoot = engineRole === 'background' ? createBackgroundVisibilityBoot({ env: process.env, step: setEngineStep }) : undefined;
-  setVisibilityBootWait(() => visibilityBoot?.pending());
+  const setupEnvPath = engineRole === 'front' ? workerSetupEnvPath() : undefined;
+  const freshSetupEnv = setupEnvPath ? () => readWorkerSetupEnvAsync({ workerEnvPath: setupEnvPath }) : undefined;
+  let frontSetupEnv: Record<string, string> | undefined;
+  let setupEnvRead: Promise<void> | undefined;
+  let setupEnvCheckedAt = -Infinity;
+  let setupEnvGeneration = 0;
+  const refreshSetupEnv = () => {
+    if (!freshSetupEnv || setupEnvRead || Date.now() - setupEnvCheckedAt < 2_000) return;
+    setupEnvCheckedAt = Date.now();
+    const generation = setupEnvGeneration;
+    setupEnvRead = freshSetupEnv()
+      .then((env) => { if (generation === setupEnvGeneration) frontSetupEnv = env; })
+      .finally(() => { setupEnvRead = undefined; });
+  };
+  // Synchronous display callbacks use the last completed probe. Credential
+  // changes and provider calls read through the fresh path below.
+  const readSetupEnv = () => {
+    if (!setupEnvPath) return readWorkerSetupEnv();
+    refreshSetupEnv();
+    return frontSetupEnv;
+  };
+  const freshCredentialEnv = async () => mergeWorkerSetupEnv(
+    process.env, process.env.HOME?.trim() ? await freshSetupEnv?.() : undefined,
+  );
   // The background's loop connections leave checkpoints to a worker of their
   // own (sqlite-checkpointer.ts), from before the first store opens.
   const checkpointer = engineRole === 'background' ? startSqliteCheckpointer() : undefined;
@@ -678,8 +705,16 @@ export async function main(): Promise<void> {
   // (loop-stall step-back, 15 Nov 2026): the next stall names itself.
   // The loop-stall test also collects them as JSON lines (site and text id, never values).
   const slowSqlFile = process.env.OLYMPUS_MAIN_THREAD_SQL_LOG;
+  const queueSlowSql = engineRole === 'front' && slowSqlFile ? serializeDiagnosticWrites((error) => {
+    console.warn(`[olympus] slow SQL log write failed: ${error instanceof Error ? error.name : 'error'}`);
+  }) : undefined;
   startSlowMainThreadSqlLog(LOOP_SLOW_SQL_MS, slowSqlFile
-    ? (line, entry) => { console.warn(line); appendFileSync(slowSqlFile, `${JSON.stringify({ pid: process.pid, ...entry })}\n`); }
+    ? (line, entry) => {
+      console.warn(line);
+      const record = `${JSON.stringify({ pid: process.pid, ...entry })}\n`;
+      if (queueSlowSql) queueSlowSql(() => appendFile(slowSqlFile, record));
+      else appendFileSync(slowSqlFile, record);
+    }
     : undefined);
   // The waits on this boot read its progress, not a fixed ceiling (#1494). The
   // front does not own the data root's boot work and never writes that file;
@@ -695,9 +730,16 @@ export async function main(): Promise<void> {
   const sqlSitesDir = process.env.OLYMPUS_MAIN_THREAD_SQL_SITES?.trim();
   if (sqlSitesDir) {
     const sqlSites = startMainThreadSqlSiteCount(Number(process.env.OLYMPUS_MAIN_THREAD_SQL_SITE_FRAMES) || 2);
+    const path = join(sqlSitesDir, `${engineRole}.sql-sites.json`);
+    const queue = engineRole === 'front' ? serializeDiagnosticWrites(() => {
+      // A measuring aid: the engine runs on without it.
+    }) : undefined;
     const writeSqlSites = () => {
-      try { writeFileSync(join(sqlSitesDir, `${engineRole}.sql-sites.json`), JSON.stringify({ role: engineRole, at: new Date().toISOString(), sites: sqlSites.sites() })); }
-      catch { /* a measuring aid: the engine runs on without it */ }
+      try {
+        const record = JSON.stringify({ role: engineRole, at: new Date().toISOString(), sites: sqlSites.sites() });
+        if (queue) queue(() => writeFile(path, record));
+        else writeFileSync(path, record);
+      } catch { /* a measuring aid: the engine runs on without it */ }
     };
     setInterval(writeSqlSites, 10_000).unref?.();
   }
@@ -739,6 +781,8 @@ export async function main(): Promise<void> {
     await waitForBackgroundBootDone({ env: process.env });
     reportFrontStep();
     engineFront = createEngineFront({ env: process.env, socketPath: engineSocketPath!, authToken: frontToken });
+    void engineFront.refreshStatus();
+    refreshSetupEnv();
     // The previous front's hold died with it. Let its accepted Private
     // commands settle before this front opens stores or starts answer work.
     await engineFront.waitForPendingPrivacyRaises();
@@ -1094,9 +1138,11 @@ export async function main(): Promise<void> {
   };
   // Only used inside this process to distinguish stored from applied keys.
   const bootModelCredentials = new Map(requiredProfiles.map(({ id, profile }) => [id, safeModelCredential(profile, process.env)]));
-  const modelCredentialState = (id: string, profile: typeof requiredProfiles[number]['profile']): ModelCredentialState => {
+  const modelCredentialState = (
+    id: string, profile: typeof requiredProfiles[number]['profile'], setupEnv: () => Record<string, string> | undefined = readSetupEnv,
+  ): ModelCredentialState => {
     if (!profile.secretRef && profile.provider !== 'tinfoil') return bootSecretResolver.status().some((failure) => failure.affected_profiles?.includes(id)) ? 'missing' : 'ready';
-    const storedEnv = { ...process.env, ...(readWorkerSetupEnv() ?? {}) };
+    const storedEnv = { ...process.env, ...(setupEnv() ?? {}) };
     const current = safeModelCredential(profile, storedEnv);
     if (!current) return 'missing';
     if (current !== bootModelCredentials.get(id)
@@ -1220,7 +1266,15 @@ export async function main(): Promise<void> {
   const connectModelKey = async (provider: 'gemini' | 'venice' | 'tinfoil', apiKey: string): Promise<void> => {
     if (provider === 'gemini') await connectGeminiApiKey({ apiKey });
     else await connectPublicApiKeySource({ source: provider, apiKey });
-    const credentials = requiredProfiles.map(({ id, profile }) => modelCredentialState(id, profile));
+    const generation = ++setupEnvGeneration;
+    const stored = freshSetupEnv ? await freshSetupEnv() : undefined;
+    if (setupEnvPath && generation === setupEnvGeneration) {
+      // Discard display reads that began before the post-write reading completed.
+      setupEnvGeneration++;
+      frontSetupEnv = stored;
+      setupEnvCheckedAt = Date.now();
+    }
+    const credentials = requiredProfiles.map(({ id, profile }) => modelCredentialState(id, profile, setupEnvPath ? () => stored : readWorkerSetupEnv));
     if (!credentials.includes('missing') && credentials.includes('applying')) {
       modelReloadUnavailable = !requestModelReload();
     }
@@ -1299,7 +1353,6 @@ export async function main(): Promise<void> {
   // beside the same store.
   let sourceRuntimeClosed = false;
   let sourceLaneGeneration = 0;
-  let mountConfiguredSourceStores = (): void => {};
   const earlySourceStores: LocalConnectorStore[][] = [];
   let sourceLaneMounted = (stores: LocalConnectorStore[]): void => {
     sourceLaneGeneration += 1;
@@ -1310,6 +1363,39 @@ export async function main(): Promise<void> {
       const path = resolvedStorePath(sourceId, domain, process.env);
       return existsSync(path) || existsSync(tieredStoreSetLedgerPath(path)) || existsSync(secretLocationsPathForStore(path));
     });
+  const frontMountProblems = new Map<string, { label: string; reason: string; lastAttemptAt: number }>();
+  const mountFailureReason = (error: unknown): string => {
+    if (!(error instanceof Error)) return 'Store mount failed.';
+    const code = (error as NodeJS.ErrnoException).code;
+    if (error instanceof SQLiteError) {
+      // SQLite can interpolate names from an invalid schema into its message.
+      return `SQLite store mount failed (${error.code}).`;
+    }
+    if (error.message.startsWith('The privacy ledger governing ')) {
+      return 'The privacy ledger governing the store is missing or outside this install.';
+    }
+    if (error.message.startsWith('declaration conflicts with the lane store:')) {
+      return 'Configured declaration conflicts with the lane store.';
+    }
+    if (error.message.startsWith('dbPath ') && error.message.includes(' is already mounted as corpus ')) {
+      return 'The configured database is already mounted under another corpus.';
+    }
+    // Filesystem and configuration diagnostics can contain private paths.
+    if (error.message && !/[/\\"`\r\n]|'[^']*'/.test(error.message)) return error.message;
+    return code && /^[A-Za-z0-9_]+$/.test(code) ? `Store mount failed (${code}).` : 'Store mount failed.';
+  };
+  const recordFrontMountFailure = (id: string, error: unknown, label = id): void => {
+    const reason = mountFailureReason(error);
+    if (frontMountProblems.get(id)?.reason !== reason) console.warn(`[olympus] the front could not open a source's stores yet (${label}): ${reason}`);
+    frontMountProblems.set(id, { label, reason, lastAttemptAt: Date.now() });
+  };
+  const attemptFrontMount = (id: string, attempt: () => boolean, label = id): void => {
+    try {
+      if (attempt()) frontMountProblems.delete(id);
+    } catch (error) {
+      recordFrontMountFailure(id, error, label);
+    }
+  };
   const tierLedgerProblems = new Map<string, string>();
   const sourceTierLedgerReady = (sourceId: string): boolean => {
     const problem = workerTierLedgerProblem(accountStoreNames(sourceId).map((name) => resolvedStorePath(sourceId, name, process.env)), !!engineFront);
@@ -2270,36 +2356,88 @@ export async function main(): Promise<void> {
   // mounts it once every store the lane opens is readable.
   const storeAt = (sourceId: string, domain: 'internal' | 'secure_local'): string =>
     resolvedStorePath(sourceId, domain, process.env);
-  const frontCanMount = (paths: readonly string[]): boolean => paths.every(connectorStoreReadableNow);
-  const mountSourceLanes = (handles: readonly ConnectedCredentialHandle[]): void => {
+  const sourceMounts = [
+    { id: GMAIL_SOURCE_ID, pending: () => !gmailInternalConnectorStore && gmailConnectorStoreLane.enabled, provider: 'gmail', capability: 'gmail.email.sync', stores: ['internal', 'secure_local'], open: mountGmail },
+    { id: GOOGLE_DRIVE_SOURCE_ID, pending: () => !googleDriveInternalConnectorStore && googleDriveConnectorStoreLane.enabled, provider: 'google_drive', capability: 'google_drive.docs.sync', stores: ['internal', 'secure_local'], open: mountGoogleDrive },
+    { id: DROPBOX_FILES_SOURCE_ID, pending: () => !dropboxConnectorStore && dropboxConnectorStoreLane.enabled, provider: 'dropbox', capability: 'dropbox.files.sync', stores: ['secure_local'], open: mountDropbox },
+    { id: LOCAL_FILES_SOURCE_ID, pending: () => !localFilesConnectorStore && localFilesConnectorStoreLane.enabled, stores: ['secure_local'], open: mountLocalFiles },
+    { id: WHATSAPP_PERSONAL_SOURCE_ID, pending: () => !whatsappConnectorStore && whatsappConnectorStoreLane.enabled, provider: 'whatsapp_personal', capability: 'whatsapp.personal.messages.sync', stores: ['secure_local'], open: mountWhatsApp },
+    { id: TELEGRAM_MESSAGES_SOURCE_ID, pending: () => !telegramConnectorStores && telegramConnectorStoreLane.enabled, provider: 'telegram', capability: 'telegram.messages.sync', stores: ['internal', 'secure_local'], open: mountTelegram },
+    { id: READWISE_SOURCE_ID, pending: () => !readwiseConnectorStore && readwiseConnectorStoreLane.enabled, provider: 'readwise', capability: 'readwise.sync', stores: ['internal'], open: mountReadwise },
+    { id: X_BOOKMARKS_SOURCE_ID, pending: () => !xBookmarksConnectorStore && xBookmarksConnectorStoreLane.enabled, provider: 'x', capability: 'x.bookmarks.sync', stores: ['internal'], open: mountXBookmarks },
+  ] as const;
+  const mountSourceLanes = (handles: readonly ConnectedCredentialHandle[], changed?: ReadonlySet<string>): void => {
     if (sourceRuntimeClosed) return;
-    const connected = (provider: ConnectedCredentialHandle['provider'], capability: string): boolean =>
-      activeCredentialHandle(handles, { provider, capability }) !== undefined;
-    // `paths`: the stores the lane's mount opens. The background (or a worker
-    // without the split) creates them; the front mounts only readable ones.
-    const wanted = (sourceId: string, connectedNow: boolean, paths: readonly string[]): boolean => {
-      if (!sourceHasStores(sourceId) && !connectedNow) return false;
-      return !engineFront || frontCanMount(paths);
-    };
-    const both = (sourceId: string): string[] => [storeAt(sourceId, 'internal'), storeAt(sourceId, 'secure_local')];
-    // In the front a lane the background is still creating fails to mount (its ledger or index is not there yet).
-    // That lane waits for frontMountRetry; it never stops the other lanes, or the front's own start.
-    const mount = (open: () => void): void => {
-      if (!engineFront) { open(); return; }
-      try { open(); } catch (error) {
-        console.warn(`[olympus] the front could not open a source's stores yet: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    };
-    if (!gmailInternalConnectorStore && gmailConnectorStoreLane.enabled && wanted(GMAIL_SOURCE_ID, connected('gmail', 'gmail.email.sync'), both(GMAIL_SOURCE_ID))) mount(mountGmail);
-    if (!googleDriveInternalConnectorStore && googleDriveConnectorStoreLane.enabled && wanted(GOOGLE_DRIVE_SOURCE_ID, connected('google_drive', 'google_drive.docs.sync'), both(GOOGLE_DRIVE_SOURCE_ID))) mount(mountGoogleDrive);
-    if (!dropboxConnectorStore && dropboxConnectorStoreLane.enabled && wanted(DROPBOX_FILES_SOURCE_ID, connected('dropbox', 'dropbox.files.sync'), [storeAt(DROPBOX_FILES_SOURCE_ID, 'secure_local')])) mount(mountDropbox);
-    if (!localFilesConnectorStore && localFilesConnectorStoreLane.enabled && wanted(LOCAL_FILES_SOURCE_ID, fileSourceScopeAuthority?.policyRef(LOCAL_FILES_SOURCE_ID) !== undefined, [storeAt(LOCAL_FILES_SOURCE_ID, 'secure_local')])) mount(mountLocalFiles);
-    if (!whatsappConnectorStore && whatsappConnectorStoreLane.enabled && wanted(WHATSAPP_PERSONAL_SOURCE_ID, connected('whatsapp_personal', 'whatsapp.personal.messages.sync'), [storeAt(WHATSAPP_PERSONAL_SOURCE_ID, 'secure_local')])) mount(mountWhatsApp);
-    if (!telegramConnectorStores && telegramConnectorStoreLane.enabled && wanted(TELEGRAM_MESSAGES_SOURCE_ID, connected('telegram', 'telegram.messages.sync'), both(TELEGRAM_MESSAGES_SOURCE_ID))) mount(mountTelegram);
-    if (!readwiseConnectorStore && readwiseConnectorStoreLane.enabled && wanted(READWISE_SOURCE_ID, connected('readwise', 'readwise.sync'), [storeAt(READWISE_SOURCE_ID, 'internal')])) mount(mountReadwise);
-    if (!xBookmarksConnectorStore && xBookmarksConnectorStoreLane.enabled && wanted(X_BOOKMARKS_SOURCE_ID, connected('x', 'x.bookmarks.sync'), [storeAt(X_BOOKMARKS_SOURCE_ID, 'internal')])) mount(mountXBookmarks);
-    mountConfiguredSourceStores();
+    for (const lane of sourceMounts) {
+      if (!lane.pending() || (changed && !changed.has(lane.id))) continue;
+      const connected = 'provider' in lane
+        ? activeCredentialHandle(handles, lane) !== undefined
+        : fileSourceScopeAuthority?.policyRef(LOCAL_FILES_SOURCE_ID) !== undefined;
+      if (!sourceHasStores(lane.id) && !connected) continue;
+      if (!engineFront) { lane.open(); continue; }
+      attemptFrontMount(lane.id, () => {
+        const readable = lane.stores.every((domain) => connectorStoreReadableNow(
+          storeAt(lane.id, domain), (error) => recordFrontMountFailure(lane.id, error),
+        ));
+        if (!readable) return false;
+        lane.open();
+        const ledgerProblem = tierLedgerProblems.get(lane.id);
+        if (ledgerProblem) recordFrontMountFailure(lane.id, new Error(ledgerProblem));
+        return !lane.pending();
+      });
+    }
   };
+  const mountChanges = createFrontMountChanges();
+  const sqliteMountFiles = (path: string): string[] => [path, `${path}-wal`, `${path}-shm`];
+  // Precompute candidates for BOTH layouts. Re-running the placement decision
+  // to build the probe list would put its synchronous registry and legacy-file
+  // checks back on the timer. The mount itself still uses current placement.
+  const mountCandidateFiles = (id: string, families: readonly string[] = []): string[] => {
+    const account = { source_id: id, slot: DEFAULT_ACCOUNT_SLOT, layout: 'folder' } as const;
+    const stores = accountStoreNames(id, families).flatMap((name) => [
+      accountStorePath(account, name),
+      ...(hasLegacyLayout(id) ? [accountStorePath({ ...account, layout: 'legacy' }, name)] : []),
+    ]);
+    const legacy = legacyAccountPaths(id, process.env, families);
+    return [
+      ...[...stores, ...legacy.stores].flatMap((path) => [
+        path, tieredStoreSetLedgerPath(path), secretLocationsPathForStore(path),
+      ].flatMap(sqliteMountFiles)),
+      ...legacy.raw.flatMap(sqliteMountFiles),
+    ];
+  };
+  const archiveFamilies = archiveImportFamilies();
+  const archiveMountKey = (family: string): string => `${ARCHIVE_IMPORTS_SOURCE_ID}/${family}`;
+  const configuredMountPrefix = 'configured/';
+  const configuredMountKey = (corpusId: string): string => configuredMountPrefix + corpusId;
+  const pendingMountFiles = new Map<string, readonly string[]>();
+  const configuredMountPaths = engineFront ? declaredConnectorStoreMountPaths(process.env) : [];
+  if (engineFront) {
+    const registry = sourceRegistryPath();
+    for (const lane of sourceMounts) {
+      if (!lane.pending()) continue;
+      pendingMountFiles.set(lane.id, [
+        registry,
+        ...mountCandidateFiles(lane.id),
+        ...(connectedHandleRegistryPath ? [connectedHandleRegistryPath, unpairedSourcesPath(connectedHandleRegistryPath), defaultFileSourceScopeStatePath(connectedHandleRegistryPath)] : []),
+        ...(lane.id === TELEGRAM_MESSAGES_SOURCE_ID ? [captureGrantPathFromEnv('telegram', process.env)] : []),
+        ...(lane.id === WHATSAPP_PERSONAL_SOURCE_ID ? [captureGrantPathFromEnv('whatsapp', process.env)] : []),
+      ]);
+    }
+    const archiveAccount = { source_id: ARCHIVE_IMPORTS_SOURCE_ID, slot: DEFAULT_ACCOUNT_SLOT, layout: 'folder' } as const;
+    for (const family of archiveFamilies) {
+      pendingMountFiles.set(archiveMountKey(family), [
+        registry, ...mountCandidateFiles(ARCHIVE_IMPORTS_SOURCE_ID, [family]), accountRawPath(archiveAccount, 'archive-imports.json'),
+      ]);
+    }
+    pendingMountFiles.set(EVERNOTE_SOURCE_ID, [registry, ...mountCandidateFiles(EVERNOTE_SOURCE_ID)]);
+    for (const { corpusId, dbPath } of configuredMountPaths) {
+      pendingMountFiles.set(configuredMountKey(corpusId), [registry, ...sqliteMountFiles(dbPath), ...sqliteMountFiles(tieredStoreSetLedgerPath(dbPath))]);
+    }
+    // Take the baseline before the normal boot mount, so a file appearing
+    // between startup and the first tick is still a change.
+    await mountChanges(pendingMountFiles);
+  }
   mountSourceLanes(connectedHandles);
   const laneConnectorStores = [
     ...(dropboxConnectorStore ? [dropboxConnectorStore] : []),
@@ -2326,8 +2464,20 @@ export async function main(): Promise<void> {
     stores: () => configuredMountStores,
     registeredCorpora: () => sourceCorpusRegistry.list(),
     storeOwner: () => lifecycleStoreFileOwner(process.env),
+    ...(engineFront ? {
+      onMountFailure: (corpusId: string, error: unknown) => recordFrontMountFailure(configuredMountKey(corpusId), error),
+    } : {}),
   });
-  const configuredConnectorStoreMounts = discoverConfiguredStores();
+  const configuredMounts = (only?: ReadonlySet<string>): ConnectorStoreMount[] => {
+    const mounts = discoverConfiguredStores(only);
+    for (const { store } of mounts) {
+      const key = configuredMountKey(store.corpusId);
+      frontMountProblems.delete(key);
+      pendingMountFiles.delete(key);
+    }
+    return mounts;
+  };
+  const configuredConnectorStoreMounts = configuredMounts();
   const configuredConnectorStores = configuredConnectorStoreMounts.map((mount) => mount.store);
   // A configured mount (Reflect, Roam, ...) whose store is ledger-backed is
   // governed by that ledger: register it, so the visibility gate and every
@@ -2366,22 +2516,42 @@ export async function main(): Promise<void> {
     ? await ((await import(loopStallModule)) as typeof import('../../../scripts/loop-stall-test.ts')).attachEngineFixture(connectorStores, engineRole)
     : undefined;
   // Every store's hidden-copy set, built and then kept current on a timer.
-  // The front starts before listening and reports completion separately. The
-  // background saves each set after that build (or at once without a front),
-  // so a future front can read a saved set inside the ledger's feed.
+  // The front does it before it reports ready, so an Ask (the first included)
+  // applies a small delta at most instead of building a set on its thread.
+  // The background (or the single worker) does it after it starts and saves
+  // each set, so the front's start reads from a saved set inside the ledger's
+  // feed. A store mounted later is built on the next tick.
   let visibilityKeeping = false;
-  async function keepVisibilityCurrent(when: string): Promise<void> {
+  async function keepVisibilityCurrent(when: 'before ready' | 'after start' | 'refresh'): Promise<void> {
     if (visibilityKeeping || sourceRuntimeClosed) return;
     visibilityKeeping = true;
     const started = performance.now();
+    const stores = [...connectorStores];
+    const progress = when === 'refresh' ? undefined : beginStartupProgress(stores.map(store => store.dbPath));
     try {
-      for (const store of [...connectorStores]) {
-        try { await store.keepVisibilityCurrentInTurns(); }
-        catch (error) { console.warn(`[olympus] ${engineRole}: a store's hidden-copy set could not be built yet: ${error instanceof Error ? error.message : String(error)}`); }
+      for (const [index, store] of stores.entries()) {
+        try {
+          await store.keepVisibilityCurrentInTurns();
+        } catch (error) {
+          console.warn(`[olympus] ${engineRole}: a store's hidden-copy set could not be built yet: ${error instanceof Error ? error.message : String(error)}`);
+          continue;
+        }
+        progress?.storeReady(index);
       }
     } finally {
+      progress?.finish();
       visibilityKeeping = false;
     }
+    // The keyword lane's population count, off any search's path: seeded once
+    // after a start where searches are served, then refreshed for stores a
+    // search has used. One store at a time, never awaited by this build.
+    if (engineRole !== 'background') void (async () => {
+      for (const store of stores) {
+        if (sourceRuntimeClosed) return;
+        try { await store.keepKeywordPopulationCurrent(when !== 'refresh'); }
+        catch (error) { console.warn(`[olympus] ${engineRole}: a store's keyword population could not be counted: ${error instanceof Error ? error.message : String(error)}`); }
+      }
+    })();
     if (when !== 'refresh') {
       console.log(`[olympus] ${engineRole}: built ${connectorStores.length} stores' hidden-copy sets in ${Math.round(performance.now() - started)} ms`);
     }
@@ -2987,6 +3157,7 @@ export async function main(): Promise<void> {
   // Public store shares its Personal sibling's cloud identity; a lane's new
   // Private or Personal store is handed the identity for its domain.
   registerTierLegStore = (store, siblingCorpusId, embeddingProvider) => {
+    frontMountProblems.delete(store.dbPath);
     if (!connectorStores.includes(store)) {
       connectorStores.push(store);
       // A new store shows on the dashboard at the background's next count: the
@@ -3043,9 +3214,9 @@ export async function main(): Promise<void> {
     }
   };
   for (const stores of earlySourceStores.splice(0)) sourceLaneMounted(stores);
-  mountConfiguredSourceStores = (): void => {
+  const mountConfiguredSourceStores = (only?: ReadonlySet<string>): void => {
     if (sourceRuntimeClosed) return;
-    const mounts = discoverConfiguredStores();
+    const mounts = configuredMounts(only);
     for (const mount of mounts) {
       if (!connectorStores.includes(mount.store)) sourceLaneMounted([mount.store]);
       adoptConfiguredPrincipal(mount);
@@ -3078,20 +3249,34 @@ export async function main(): Promise<void> {
   });
   // Startup and the split front's mount refresh both mount archives here, so a
   // ledger problem is cleared once the background has migrated the ledger.
-  const mountArchiveLanes = (): void => {
+  const mountArchiveLanes = (changed?: ReadonlySet<string>): void => {
+    const families = changed ? archiveFamilies.filter((family) => changed.has(archiveMountKey(family))) : archiveFamilies;
+    if (!families.length || !sourceAccountMountable({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID })) return;
+    if (engineFront) {
+      for (const family of families) {
+        const key = archiveMountKey(family);
+        attemptFrontMount(key, () => {
+          try {
+            const mounted = archiveImports.existingLanes(new Set([family])).length > 0;
+            tierLedgerProblems.delete(key);
+            return mounted;
+          } catch (error) {
+            if (error instanceof TierLedgerSchemaError) tierLedgerProblems.set(key, error.message);
+            throw error;
+          }
+        });
+      }
+      return;
+    }
     try {
-      if (sourceAccountMountable({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID })) archiveImports.existingLanes();
+      archiveImports.existingLanes();
       tierLedgerProblems.delete(ARCHIVE_IMPORTS_SOURCE_ID);
     } catch (error) {
       if (error instanceof TierLedgerSchemaError) tierLedgerProblems.set(ARCHIVE_IMPORTS_SOURCE_ID, error.message);
-      throw error;
+      console.warn(`[archive-import] imported archives are not served this run: ${error instanceof Error ? error.message : 'error'}`);
     }
   };
-  try {
-    mountArchiveLanes();
-  } catch (error) {
-    console.warn(`[archive-import] imported archives are not served this run: ${error instanceof Error ? error.message : 'error'}`);
-  }
+  mountArchiveLanes();
   // Evernote's account, read in passes over its MCP server (workers/evernote/):
   // its lane opens when an account is connected or a previous one left stores,
   // and is adopted like every other lane's.
@@ -3126,11 +3311,27 @@ export async function main(): Promise<void> {
       return evernote.notebooks(handle);
     },
   }));
-  try {
-    if (sourceAccountMountable({ sourceId: EVERNOTE_SOURCE_ID }) && sourceTierLedgerReady(EVERNOTE_SOURCE_ID)) evernote.existingLane();
-  } catch (error) {
-    console.warn(`[evernote] the Evernote stores are not served this run: ${error instanceof Error ? error.message : 'error'}`);
-  }
+  const openExistingEvernoteLane = (): boolean => {
+    if (!sourceAccountMountable({ sourceId: EVERNOTE_SOURCE_ID })) return false;
+    if (sourceTierLedgerReady(EVERNOTE_SOURCE_ID)) return evernote.existingLane(!engineFront) !== undefined;
+    const problem = tierLedgerProblems.get(EVERNOTE_SOURCE_ID);
+    if (engineFront && problem) recordFrontMountFailure(EVERNOTE_SOURCE_ID, new Error(problem));
+    return false;
+  };
+  const mountEvernote = (): void => {
+    if (engineFront) {
+      attemptFrontMount(EVERNOTE_SOURCE_ID, () => {
+        const mounted = openExistingEvernoteLane();
+        if (mounted) pendingMountFiles.delete(EVERNOTE_SOURCE_ID);
+        return mounted;
+      });
+      return;
+    }
+    try { openExistingEvernoteLane(); } catch (error) {
+      console.warn(`[evernote] the Evernote stores are not served this run: ${error instanceof Error ? error.message : 'error'}`);
+    }
+  };
+  mountEvernote();
   // Reading the child items an import listed by name (an attachment, a photo): the shared
   // extraction factory over the archive lanes' stores, built on first use and again when a
   // lane's stores change, with the same extractor configuration as the main runtime.
@@ -3265,14 +3466,31 @@ export async function main(): Promise<void> {
   // boot; one that does not is created by its tier set on first need. The
   // front never creates one: it opens each store once the background has
   // (frontMountRetry), and until then reads the tier as empty.
-  const openTierStoresThatExist = (): void => {
-    for (const lane of tierLanes) {
+  const openTierStoresThatExist = (changed?: ReadonlySet<string>, existingLanes = tierLanes.length): void => {
+    for (const [index, lane] of tierLanes.entries()) {
       for (const store of lane.onDemand) {
-        if (store.current()) continue;
-        if (engineFront ? connectorStoreReadableNow(store.dbPath) : store.exists()) store.open();
+        if (store.current() || (changed && index < existingLanes && !changed.has(store.dbPath))) continue;
+        if (!engineFront) {
+          if (store.exists()) store.open();
+          continue;
+        }
+        attemptFrontMount(store.dbPath, () => {
+          if (!connectorStoreReadableNow(store.dbPath, (error) => recordFrontMountFailure(store.dbPath, error, store.corpusId))) return false;
+          store.open();
+          return true;
+        }, store.corpusId);
       }
     }
   };
+  if (engineFront) {
+    const baseline = new Map(pendingMountFiles);
+    for (const lane of tierLanes) {
+      for (const store of lane.onDemand) {
+        if (!store.current()) baseline.set(store.dbPath, sqliteMountFiles(store.dbPath));
+      }
+    }
+    await mountChanges(baseline, true);
+  }
   openTierStoresThatExist();
   // No handle, no handler. The stores and the budget exist at boot whatever the
   // registry says, so without this guard an enabled lane would build a sync
@@ -3373,7 +3591,7 @@ export async function main(): Promise<void> {
     process.env.OLYMPUS_SOURCE_INDEX_ANSWER_MAX_RESULTS,
     'OLYMPUS_SOURCE_INDEX_ANSWER_MAX_RESULTS',
   );
-  // Explicit override wins over the served window resolved once at startup.
+  // Explicit override wins over the configured or discovered context window.
   const sourceIndexLocalAnalystPromptBytes = parseOptionalPositiveInteger(
     process.env.OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_PROMPT_BYTES,
     'OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_PROMPT_BYTES',
@@ -3484,31 +3702,37 @@ export async function main(): Promise<void> {
           ? { timeoutMs: veniceAnalystTimeoutMs }
           : {}),
       });
-      const localSourceAnswerModel = localModelActivity.track(localModelResourceKey(process.env.OLYMPUS_SOURCE_INDEX_ANALYST_LANE
-        ? olympusConfig.argus.lanes[analystLane]
-        : olympusConfig.argus.modelProfiles[analystProfile]), createDelphiAnalystModel(
-        new DelphiClient(olympusConfig),
-        process.env.OLYMPUS_SOURCE_INDEX_ANALYST_LANE
-          ? { lane: analystLane, preflightTimeoutMs: sourceIndexAnalystPreflightTimeoutMs }
-          : { profile: analystProfile, preflightTimeoutMs: sourceIndexAnalystPreflightTimeoutMs },
-      ), { serialize: false });
-      const defaultLocal = createAnalyst(loopStallFixture?.answerModel ?? localSourceAnswerModel, { auditSuspiciousDrafts: true, evidenceFormat: 'compact' });
       const localEndpoint = process.env.OLYMPUS_SOURCE_INDEX_ANALYST_LANE
         ? olympusConfig.argus.lanes[analystLane] : olympusConfig.argus.modelProfiles[analystProfile];
+      const localRoute = process.env.OLYMPUS_SOURCE_INDEX_ANALYST_LANE
+        ? { lane: analystLane } : { profile: analystProfile };
+      const localDelphi = new DelphiClient(olympusConfig);
+      const localSourceAnswerModel = localModelActivity.track(localModelResourceKey(localEndpoint), createDelphiAnalystModel(
+        localDelphi, { ...localRoute, preflightTimeoutMs: sourceIndexAnalystPreflightTimeoutMs },
+      ), { serialize: false });
+      const defaultLocal = createAnalyst(loopStallFixture?.answerModel ?? localSourceAnswerModel, { auditSuspiciousDrafts: true, evidenceFormat: 'compact' });
       const localReport = { analyst: 'local-source-answer', model: localEndpoint.model };
-      if (sourceIndexLocalAnalystPromptBytes === undefined) {
-        setLocalAnalystWindow(defaultLocal, await resolveLocalAnalystWindow({
-          model: localEndpoint.model,
-          ...(!localEndpoint.secretRef ? { baseUrl: localEndpoint.baseUrl } : {}),
-        }), localReport);
-      } else reportLocalAnalystPromptOverride(localReport);
+      // The split front owns answers and the retry schedule for their models.
+      const discoverLocalWindows = engineRole !== 'background';
+      if (sourceIndexLocalAnalystPromptBytes !== undefined) {
+        reportLocalAnalystPromptOverride(localReport);
+      } else if (discoverLocalWindows) {
+        await initializeLocalAnalystWindow(defaultLocal, {
+          ...localEndpoint,
+          authorize: init => localDelphi.withAuth(init, localEndpoint.secretRef),
+        }, localReport);
+      }
       const builtInAnalystModel = answerBuiltInModel;
       const builtInAnalyst = builtInAnalystModel
         ? setLocalAnalystWindow(createAnalyst(builtInAnalystModel, { auditSuspiciousDrafts: true, evidenceFormat: 'compact' }),
           await resolveLocalAnalystWindow({ model: builtInAnalystModel.spec.modelId }),
-          { analyst: 'built-in', model: builtInAnalystModel.spec.modelId }) : undefined;
+          sourceIndexLocalAnalystPromptBytes === undefined ? { analyst: 'built-in', model: builtInAnalystModel.spec.modelId } : undefined) : undefined;
+      if (builtInAnalystModel && sourceIndexLocalAnalystPromptBytes !== undefined) {
+        reportLocalAnalystPromptOverride({ analyst: 'built-in', model: builtInAnalystModel.spec.modelId });
+      }
       const sovereigntyAnalysts = await createSovereigntyAnalystMap({
         localModelActivity,
+        discoverLocalWindows,
         engine: sovereigntyEngine,
         olympusConfig,
         env: process.env,
@@ -3524,7 +3748,7 @@ export async function main(): Promise<void> {
         // Start the one-time download at boot when this computer's configured
         // local model service is not answering, so the dashboard shows the
         // install right away instead of at the first Private question.
-        void probeLocalAnalystService(olympusConfig).then((up) => {
+        void probeLocalAnalystService(olympusConfig, localDelphi, localRoute).then((up) => {
           if (!up) void builtInAnalystModel.prepare();
         });
       }
@@ -3534,21 +3758,26 @@ export async function main(): Promise<void> {
       // answers (the first member of the secure_local pool, when local). When
       // it is set up but down they say so; the built-in model answers only
       // where it stands in for the owner's local model.
+      const usesDefaultLocal = (id: string) => sovereigntyEngine.source === 'env_bridge' && id === 'local-source-answer';
       localPrivateRoute = createLocalPrivateRoute({
         firstMember: () => {
           const pool = sovereigntyEngine.resolveAnalystPool({ trustDomain: 'secure_local' });
           return (pool.explicitOrder ?? pool.members)[0];
         },
-        model: (member) => sovereigntyEngine.source === 'env_bridge' && member.id === 'local-source-answer'
-          ? { model: localSourceAnswerModel, modelId: localEndpoint.model, ...(!localEndpoint.secretRef ? { baseUrl: localEndpoint.baseUrl } : {}) }
-          : (() => {
-            const model = createLocalSovereigntyAnalystModel({ profile: member.profile, profileId: member.id, localModelActivity, olympusConfig, env: process.env, bootSecretResolver });
-            return model ? { model, modelId: member.profile.model ?? member.id, ...(!member.profile.secretRef && member.profile.baseUrl ? { baseUrl: member.profile.baseUrl } : {}) } : undefined;
-          })(),
-        reachable: (member) => sovereigntyEngine.source === 'env_bridge' && member.id === 'local-source-answer'
-          ? probeLocalAnalystService(olympusConfig)
-          : probeLocalSovereigntyProfile(olympusConfig, member.profile),
-        window: (model, baseUrl) => resolveLocalAnalystWindow({ model, ...(baseUrl ? { baseUrl } : {}) }),
+        model: (member) => {
+          if (usesDefaultLocal(member.id)) return { model: localSourceAnswerModel, modelId: localEndpoint.model };
+          const local = sovereigntyAnalysts.get(member.id)?.local;
+          return local ? { model: local.model, modelId: member.profile.model ?? member.id } : undefined;
+        },
+        reachable: (member) => {
+          if (usesDefaultLocal(member.id)) return probeLocalAnalystService(olympusConfig, localDelphi, localRoute);
+          const local = sovereigntyAnalysts.get(member.id)?.local;
+          return local ? probeLocalAnalystService(olympusConfig, local.delphi) : Promise.resolve(false);
+        },
+        window: async (_model, _baseUrl, member) => {
+          const analyst = usesDefaultLocal(member.id) ? defaultLocal : sovereigntyAnalysts.get(member.id)?.local?.analyst;
+          return analyst ? localAnalystWindow(analyst) : undefined;
+        },
         builtInStandsIn: (member) => builtInAnswersFor(member.id),
       });
       // Uses the installed default at 16 GiB RAM and above; the owner can opt
@@ -3880,7 +4109,10 @@ export async function main(): Promise<void> {
       handles: readActiveConnectedHandles(process.env),
     });
     // The front mounts only stores the background has created (mountSourceLanes).
-    if (handle && (!engineFront || frontCanMount([storeAt(X_BOOKMARKS_SOURCE_ID, 'internal')]))) mountXBookmarks();
+    if (handle) {
+      if (engineFront) mountSourceLanes([handle], new Set([X_BOOKMARKS_SOURCE_ID]));
+      else mountXBookmarks();
+    }
     const runtime = refreshableXBookmarksRuntime?.runtimeForHandle(handle);
     if (!runtime) return undefined;
     connectorStoreAccountScopes.set(
@@ -3894,7 +4126,10 @@ export async function main(): Promise<void> {
   };
   const readwiseSyncForHandle = (handle: ConnectedCredentialHandle | undefined) => {
     // The front mounts only stores the background has created (mountSourceLanes).
-    if (handle && (!engineFront || frontCanMount([storeAt(READWISE_SOURCE_ID, 'internal')]))) mountReadwise();
+    if (handle) {
+      if (engineFront) mountSourceLanes([handle], new Set([READWISE_SOURCE_ID]));
+      else mountReadwise();
+    }
     const sync = refreshableReadwiseRuntime?.syncForHandle(handle);
     if (sync && readwiseConnectorStore) {
       connectorStoreAccountScopes.set(
@@ -4374,6 +4609,15 @@ export async function main(): Promise<void> {
         },
       ),
     ].filter((source): source is SourceSchedulerSource => source !== undefined);
+    // The Ask benchmark mounts completed synthetic stores without connecting
+    // accounts. Give those stores the same idle embedding sweep as live lanes.
+    if (process.env.NODE_ENV === 'test' && process.env.OLYMPUS_ASK_BENCH === '1') {
+      for (const { corpusId, sourceId } of sourceCorpusRegistry.list('search')) {
+        if (!sourceId.startsWith('ask-bench.')) continue;
+        sources.push({ corpusId, sourceId, cadence: 'continuous', intervalMs: olympusConfig.worker.scheduler.syncIntervalSeconds * 1_000,
+          freshnessThresholdHours: olympusConfig.worker.scheduler.freshnessThresholdHours, tasks: [] });
+      }
+    }
     // Gmail with no live lane (not connected, or no mail approval) whose stores hold mail an import brought in: a
     // source with no sync of its own, so the embedding sweep and the private meaning backfill below still drain
     // the imported history. Live approval governs live reads, not the account's own stores.
@@ -4461,7 +4705,6 @@ export async function main(): Promise<void> {
       trickle: (target) => embedsOnThisComputer(target.provider) && localPacer.trickle(),
       onProgress: (target) => { if (embedsOnThisComputer(target.provider)) localPacer.noteLocalWork(); },
       holdForAsk: () => standBack.holds('embed'),
-      ...(visibilityBoot ? { visibilityBoot: visibilityBoot.pending } : {}),
     });
     // Guarded with its sweep; the watch task attached next rides on one host
     // lane but serves every source, so it stays outside any one lane's guard.
@@ -4522,18 +4765,30 @@ export async function main(): Promise<void> {
   // sniffer, bound once it runs further down.
   // Re-read disk even with no credential change: an archive can create a source's
   // first stores in the background after this front started.
-  const refreshFrontMounts = (): void => {
+  const refreshFrontMounts = (changed?: ReadonlySet<string>): void => {
+    const existingLanes = tierLanes.length;
+    const existingStores = connectorStores.length;
     const reads = [
-      () => mountSourceLanes(activeLaneHandles(readActiveConnectedHandles(process.env), process.env)),
-      mountArchiveLanes,
-      openTierStoresThatExist,
+      () => {
+        if (!changed || sourceMounts.some((lane) => changed.has(lane.id))) {
+          mountSourceLanes(readActiveConnectedHandles(process.env), changed);
+        }
+        if (!changed || changed.has(EVERNOTE_SOURCE_ID)) mountEvernote();
+        const configured = changed && new Set([
+          ...[...changed].filter((id) => id.startsWith(configuredMountPrefix)).map((id) => id.slice(configuredMountPrefix.length)),
+          ...connectorStores.slice(existingStores).map(({ corpusId }) => corpusId),
+        ]);
+        mountConfiguredSourceStores(configured);
+      },
+      () => mountArchiveLanes(changed),
+      () => openTierStoresThatExist(changed, existingLanes),
     ];
     for (const read of reads) {
       try { read(); }
       catch (error) {
         // A partial schema is ordinary while the background creates a lane.
         // It must not stop an archive/source change from reaching that writer.
-        console.warn(`[olympus] the front could not open a source's stores yet: ${error instanceof Error ? error.message : String(error)}`);
+        console.warn(`[olympus] the front could not open a source's stores yet: ${mountFailureReason(error)}`);
       }
     }
   };
@@ -4919,10 +5174,11 @@ export async function main(): Promise<void> {
   closeDesktopBridge = () => { desktopBridge?.close(); privateAgentListeners?.close(); };
   let desktopPoll: ReturnType<typeof setInterval> | undefined;
   let desktopPollingClosed = false;
-  const agentApprovalHost = () => resolveAgentApprovalHost({ env: process.env, fileEnv: readWorkerSetupEnv(), port, desktopBridgeReady: () => desktopBridge?.status().state === 'listening' });
+  const agentApprovalHost = () => resolveAgentApprovalHost({ env: process.env, fileEnv: readSetupEnv(), port, desktopBridgeReady: () => desktopBridge?.status().state === 'listening' });
   const updateChecker = createUpdateChecker({
     runningVersion: runningOlympusVersion(), platform: process.platform,
-    env: process.env, fileEnv: () => readWorkerSetupEnv(),
+    env: process.env, fileEnv: readSetupEnv,
+    ...(freshSetupEnv ? { freshFileEnv: freshSetupEnv } : {}),
   });
   // One item's privacy label (issue #1060): the same stores and ledgers `olympus tier set` reaches in this worker.
   const ownerTierItemsContext: OwnerTierItemsContext = {
@@ -5125,7 +5381,10 @@ export async function main(): Promise<void> {
               spending: judgeSpending, cloud: cloudJudgeRuntime, tinfoil: tinfoilJudgeRuntime,
               local: () => resolveJudgeChoiceRuntime(judgeRuntimeInput, { choice: 'local', stop: null, remainingDollars: 0 }),
               ledgerPath: resolveClassificationLedgerPath(process.env), promptVersion: () => snifferPromptVersions(privacyOwnerWords()).approval,
-              credentialReady: lane => Boolean(safeModelCredential(lane.profile, { ...process.env, ...(readWorkerSetupEnv() ?? {}) })),
+              credentialReady: lane => {
+                const ready = (env: Record<string, string> | undefined) => Boolean(safeModelCredential(lane.profile, { ...process.env, ...env }));
+                return freshSetupEnv ? freshSetupEnv().then(ready) : ready(readWorkerSetupEnv());
+              },
               requestReload: () => requestModelReload(),
               observed: () => judgeObservations.observed(),
               secondRoundStatePath: judgeSecondRoundStatePath(process.env),
@@ -5541,7 +5800,7 @@ export async function main(): Promise<void> {
   let chatgptModelProblem: { at: string; message: string } | undefined;
   const privateAnswers = new PrivateAnswerJobs({
     inboxRemote: () => {
-      const mode = resolveServerMode({ env: process.env, fileEnv: readWorkerSetupEnv(), desktopReady: () => agentApprovalHost().headless === false });
+      const mode = resolveServerMode({ env: process.env, fileEnv: readSetupEnv(), desktopReady: () => agentApprovalHost().headless === false });
       return mode.remote ? remoteOpenInstructions({ port, ...(mode.sshTarget ? { sshTarget: mode.sshTarget } : {}),
         ...(process.platform === 'linux' ? { socketPath: workerSocketPath()! } : {}), target: { kind: 'private_answers' } }) : undefined;
     },
@@ -5594,7 +5853,6 @@ export async function main(): Promise<void> {
     // whole document or conversation; never the built-in model (it refuses
     // instead), and the answer lands in Private answers.
     const { createDeepReadJobs, searchSetHits } = await import('./runtime/deep-read-jobs.ts');
-    const { localAnalystPromptBudget, localAnalystWindow } = await import('../source-index/local-analyst-window.ts');
     const { maxTokensForChars } = await import('../../core/analyst-delphi.ts');
     const { DEFAULT_ANALYST_MAX_OUTPUT_CHARS } = await import('../../core/analyst.ts');
     const deepReadLanes = sourceAnswerLanes;
@@ -5607,10 +5865,11 @@ export async function main(): Promise<void> {
         const route = await localPrivateRoute?.();
         if (!route) return undefined;
         if ('unavailable' in route) return route;
-        const analyst = setLocalAnalystWindow(createAnalyst(route.model, { auditSuspiciousDrafts: true, evidenceFormat: 'compact' }),
-          route.windowTokens > 0 ? { windowTokens: route.windowTokens, source: 'server' } : undefined);
-        const budget = localAnalystPromptBudget(undefined, localAnalystWindow(analyst), maxTokensForChars(DEFAULT_ANALYST_MAX_OUTPUT_CHARS));
-        return { analyst, modelId: route.modelId, promptBytes: budget.bytes };
+        const analyst = createAnalyst(route.model, { auditSuspiciousDrafts: true, evidenceFormat: 'compact' });
+        const promptBytes = sourceIndexLocalAnalystPromptBytes ?? (route.windowTokens > 0
+          ? localAnalystPromptBytesForWindow(route.windowTokens, maxTokensForChars(DEFAULT_ANALYST_MAX_OUTPUT_CHARS))
+          : DEFAULT_LOCAL_ANALYST_PROMPT_BYTES);
+        return { analyst, modelId: route.modelId, promptBytes };
       },
       inbox: waitingQuestionStore,
       judgeBusy: () => classificationBusy(),
@@ -5656,7 +5915,7 @@ export async function main(): Promise<void> {
       },
       sourceName,
     });
-    const destinations = (): import('./runtime/venice-inbox-answer.ts').AskDestinationStates => {
+    const destinations = (setupEnv = readSetupEnv): import('./runtime/venice-inbox-answer.ts').AskDestinationStates => {
       let venice: import('./runtime/venice-inbox-answer.ts').AskDestinationState = 'not_allowed';
       let veniceModel: string | undefined;
       try {
@@ -5664,10 +5923,10 @@ export async function main(): Promise<void> {
         veniceModel = members[0]?.profile.model;
         const bootMembers = privateVeniceMembers(sovereigntyEngine);
         if (members.length) {
-          venice = members.length === bootMembers.length && members.every(member => bootMembers.some(boot => boot.id === member.id && JSON.stringify(boot.profile) === JSON.stringify(member.profile)) && modelCredentialState(member.id, member.profile) === 'ready') && sourceAnswer ? 'ready' : 'not_set_up';
+          venice = members.length === bootMembers.length && members.every(member => bootMembers.some(boot => boot.id === member.id && JSON.stringify(boot.profile) === JSON.stringify(member.profile)) && modelCredentialState(member.id, member.profile, setupEnv) === 'ready') && sourceAnswer ? 'ready' : 'not_set_up';
         } else {
           // A saved key does not grant permission for Private: policy stays explicit.
-          const storedEnv = { ...process.env, ...(readWorkerSetupEnv() ?? {}) };
+          const storedEnv = { ...process.env, ...(setupEnv() ?? {}) };
           venice = safeModelCredential({ provider: 'venice', trust: 'encrypted_cloud', model: 'unused', secretRef: 'store:venice.api_key' }, storedEnv) ? 'not_allowed' : 'not_set_up';
         }
       } catch { venice = 'not_allowed'; }
@@ -5676,7 +5935,9 @@ export async function main(): Promise<void> {
       return { computer: workerBuiltInModel?.available() ? 'ready' : 'not_set_up', venice, ...(computerModel ? { computerModel } : {}), ...(veniceModel ? { veniceModel } : {}), ...(['downloading', 'verifying', 'loading'].includes(modelState ?? '') ? { computerReason: PRIVATE_ANSWERS_COPY.downloading } : {}) };
     };
     const veniceAnswer = sourceAnswer ? createVeniceInboxAnswer({
-      state: () => destinations().venice, handler: sourceAnswer, sourceName,
+      // This runs after the final live release checks. Keep the credential
+      // decision fresh and synchronous so there is no new yield before dispatch.
+      state: () => destinations(readWorkerSetupEnv).venice, handler: sourceAnswer, sourceName,
       corpusIds: () => sourceAnswerLanes!({ question: 'scope', retrieval_mode: 'keyword' }).registry.list().filter(corpus => corpus.trustDomain === 'internal' || corpus.trustDomain === 'secure_local').map(corpus => corpus.corpusId),
       eligible: local.eligible,
     }) : undefined;
@@ -5790,9 +6051,9 @@ export async function main(): Promise<void> {
     // The funding date follows the policy file (`olympus zkapi funding-date`) without a restart.
     const { zkapiFundingDateRefresher } = await import('../../core/zkapi-funding-date.ts');
     const zkapiProfiles = zkapiFundingDateRefresher(sovereigntyEngine.source === 'file' ? sovereigntyEngine.path : undefined);
-    const transport = (model: string) => resolveZkapiConsultTransport(
+    const transport = (model: string, credentialEnv: () => NodeJS.ProcessEnv) => resolveZkapiConsultTransport(
       zkapiProfiles(sovereigntyEngine.config.modelProfiles),
-      (secretRef) => resolveSecretRefValueSync(secretRef, { env: environmentWithWorkerSetupEnv() }),
+      (secretRef) => resolveSecretRefValueSync(secretRef, { env: credentialEnv() }),
       { env: process.env, model },
     );
     // The route's settings and today's record only: no key is resolved for this check.
@@ -5806,12 +6067,12 @@ export async function main(): Promise<void> {
     // is resolved per call from the same environment as the route's and
     // never logged.
     type WriterControl = { kill: AbortSignal; deadlineMs: number; level: import('../../core/consult-settings.ts').ConsultLevel; writer: import('../../core/consult-settings.ts').ConsultWriterChoice | null };
-    const runChosenWriter = (input: import('../../core/consult-writer.ts').ConsultWriterInput, control: WriterControl) => {
+    const runChosenWriter = async (input: import('../../core/consult-writer.ts').ConsultWriterInput, control: WriterControl) => {
       const choice = control.writer;
       if (choice) {
         let apiKey: string | undefined;
         try {
-          apiKey = choice.secretRef ? resolveSecretRefValueSync(choice.secretRef, { env: environmentWithWorkerSetupEnv() }) : undefined;
+          apiKey = choice.secretRef ? resolveSecretRefValueSync(choice.secretRef, { env: setupEnvPath ? await freshCredentialEnv() : environmentWithWorkerSetupEnv() }) : undefined;
         } catch {
           apiKey = undefined;
         }
@@ -5852,7 +6113,8 @@ export async function main(): Promise<void> {
           // resolved, so the same-provider rule is checked on the model that
           // is actually sent.
           send: async (text, authorize, { model, signal }) => {
-            const route = transport(model);
+            const env = setupEnvPath ? await freshCredentialEnv() : undefined;
+            const route = transport(model, () => env ?? environmentWithWorkerSetupEnv());
             if (!route) return undefined;
             const opened = await openZkapiConsultSession(route, signal ? { signal } : {});
             if (!opened.ok) return { ok: false, error: opened.error };
@@ -5991,8 +6253,11 @@ export async function main(): Promise<void> {
       source: sovereigntyEngine.source,
       ...(sovereigntyEngine.path ? { path: sovereigntyEngine.path } : {}),
     },
-    credentialPresent: (_id, profile) => profile.secretRef === undefined
-      || safeModelCredential(profile, { ...process.env, ...(readWorkerSetupEnv() ?? {}) }) !== undefined,
+    credentialPresent: (_id, profile) => {
+      if (profile.secretRef === undefined) return true;
+      const present = (env: Record<string, string> | undefined) => safeModelCredential(profile, { ...process.env, ...env }) !== undefined;
+      return freshSetupEnv ? freshSetupEnv().then(present) : present(readWorkerSetupEnv());
+    },
     requestReload: () => requestModelReload(),
     retryModel: (model) => {
       if (model === 'transcription') {
@@ -6018,10 +6283,10 @@ export async function main(): Promise<void> {
   // worker module itself never imports the writer; its routes are served
   // only inside an authenticated local control session (workers/http.ts).
   const { createDashboardConsultAdapter } = await import('./dashboard/dashboard-consult.ts');
-  const consultRouteKey = (secretRef: string | undefined): string | undefined => {
+  const consultRouteKey = (secretRef: string | undefined, env?: NodeJS.ProcessEnv): string | undefined => {
     if (!secretRef) return undefined;
     try {
-      return resolveSecretRefValueSync(secretRef, { env: environmentWithWorkerSetupEnv() })?.trim() || undefined;
+      return resolveSecretRefValueSync(secretRef, { env: env ?? environmentWithWorkerSetupEnv() })?.trim() || undefined;
     } catch {
       return undefined;
     }
@@ -6036,10 +6301,10 @@ export async function main(): Promise<void> {
     // written to worker.env reads as present before the restart applies it.
     // The adapter gets a yes/no; the key itself is resolved only here, for
     // the recovery session, and handed straight to the transport.
-    secretPresent: (secretRef) => consultRouteKey(secretRef) !== undefined,
+    secretPresent: (secretRef) => consultRouteKey(secretRef, setupEnvPath ? mergeWorkerSetupEnv(process.env, readSetupEnv()) : undefined) !== undefined,
     recoverSession: async (route, secretRef) => {
       const { recoverZkapiSession } = await import('../../core/consult-transport-zkapi.ts');
-      const apiKey = consultRouteKey(secretRef);
+      const apiKey = consultRouteKey(secretRef, setupEnvPath && secretRef ? await freshCredentialEnv() : undefined);
       return recoverZkapiSession({ ...route, ...(apiKey ? { apiKey } : {}) });
     },
     requestReload: () => requestModelReload(),
@@ -6054,7 +6319,7 @@ export async function main(): Promise<void> {
       const read = readConsultSettings();
       const choice = read.state === 'valid' ? read.settings.writer : undefined;
       if (read.state !== 'valid' || !choice) throw new Error('Choose your model and save it first.');
-      const apiKey = consultRouteKey(choice.secretRef);
+      const apiKey = consultRouteKey(choice.secretRef, setupEnvPath && choice.secretRef ? await freshCredentialEnv() : undefined);
       if (choice.secretRef && !apiKey) throw new Error(`The key reference ${choice.secretRef} is not set on this computer.`);
       const { consultStandardInstruction } = await import('../../core/consult-settings.ts');
       // Standard: the instruction the user chose (as written has no model step to test: light cleanup is tested).
@@ -6126,7 +6391,8 @@ export async function main(): Promise<void> {
   const chatgptPrivateMatchProbe = sourceAnswerLanes
     ? async (question: string, _ctx: import('../../core/operations.ts').OperationContext, originalMatches?: readonly Readonly<Record<string, unknown>>[]) => {
         const result = await withStoreReadPriority(() => ownerQuestions.run(() => searchPrivateEvidence({ lanes: sourceAnswerLanes!, question, ...(originalMatches ? { originalMatches } : {}) })));
-        return { count: result.matched, evidence: result.candidates as unknown as readonly Record<string, unknown>[], ...(result.secretMatch ? { secretMatch: true as const } : {}) };
+        const { matched, candidates, ...coverage } = result;
+        return { count: matched, evidence: candidates as unknown as readonly Record<string, unknown>[], ...coverage };
       }
     : undefined;
   // The dashboard's install progress follows the built-in model's download.
@@ -6169,6 +6435,14 @@ export async function main(): Promise<void> {
     return model ? builtInEmbeddingDashboardState(readBuiltInEmbeddingStatus(process.env, model)) : undefined;
   };
 
+  if (engineFront) {
+    // Start the reads before the listener serves the first dashboard or health request.
+    readBuiltInEmbeddingStatus();
+    chatgptEmbeddingState();
+    readBuiltInEmbeddingVision();
+    if (builtInRerankerMayRun(process.env)) readBuiltInRerankerStatus();
+  }
+
   // ChatGPT's dashboard and setup tools, as /mcp runs them. The same options
   // serve the panel on Olympus's own hosts (dashboard-panel-tools.ts): the
   // computer's /dashboard and the OpenClaw Control UI tab.
@@ -6199,7 +6473,7 @@ export async function main(): Promise<void> {
     // computer for them; anywhere else (a hand-run worker, or a Hermes
     // install that turned the route off) the panel shows the by-hand lines only.
     remote: () => {
-      const mode = resolveServerMode({ env: process.env, fileEnv: readWorkerSetupEnv(), desktopReady: () => agentApprovalHost().headless === false });
+      const mode = resolveServerMode({ env: process.env, fileEnv: readSetupEnv(), desktopReady: () => agentApprovalHost().headless === false });
       const underOpenClaw = !!process.env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim() && remoteAccessHostKind === 'openclaw';
       return mode.remote
         ? { port, ...(process.platform === 'linux' ? { socketPath: workerSocketPath()! } : {}), ...(mode.sshTarget ? { sshTarget: mode.sshTarget } : {}), agent: underOpenClaw && mode.agentRoute }
@@ -6369,7 +6643,7 @@ export async function main(): Promise<void> {
           },
         })),
         // The brief route must pass both bearer and owner-socket authorization.
-        withWorkerBearerAuth(withEngineBriefRoute(frontWorkerFetch, { view: (signal) => engineBriefView(chatgptSurface, signal) }), { authToken, requireOwnerSocket: !!socketPath, sessionSecret: dashboardSessionSecret.secret }),
+        withWorkerBearerAuth(withEngineBriefRoute(frontWorkerFetch, { view: (signal) => engineBriefView(chatgptSurface, signal) }), { authToken, requireOwnerSocket: !!socketPath, sessionSecret: dashboardSessionSecret.secret, tracePrivacyClicks: !!frontRoutes }),
       )),
     )))), { pending: () => privacyChoicePending(sovereigntyEngine), isRelayed: carriesRelayMarker }), !!socketPath),
   };
@@ -6390,8 +6664,10 @@ export async function main(): Promise<void> {
     const backgroundSnapshot = backgroundStatus?.snapshot;
     const backgroundLoopLag = backgroundSnapshot?.loop_lag;
     if ((path === '/v1/health' || path === '/health') && response?.ok) {
+      const windowNotices = localPromptBudgets.map(localAnalystWindowNotice).filter(notice => notice !== undefined);
       return Response.json({
         ...await response.json() as object,
+        ...(windowNotices.length ? { degraded_conditions: windowNotices } : {}),
         ...(rerankOutcomes ? {
           rerank_outcomes: rerankOutcomes,
           // The reranker's own download (runtime pack and model): a failure
@@ -6403,8 +6679,12 @@ export async function main(): Promise<void> {
         ...(localPromptBudgets.length ? { local_prompt_budget: localPromptBudgets.map(report => ({
           analyst: report.analyst, model: report.model, source: report.source,
           ...(report.windowTokens !== undefined ? { window_tokens: report.windowTokens } : {}),
+          ...(localAnalystWindowNotice(report) ? { note: localAnalystWindowNotice(report) } : {}),
         })) } : {}),
         ...(tierLedgerProblems.size ? { privacy_ledger_problems: Object.fromEntries(tierLedgerProblems) } : {}),
+        ...(frontMountProblems.size ? {
+          mount_problems: Object.fromEntries([...frontMountProblems.values()].map(({ label, reason }) => [label, reason])),
+        } : {}),
         // Background work that stood back for the owner's Ask: never silent.
         ...(standBackSeen ? { stand_back: standBackCounts } : {}),
         // The background's paced recount of what the dashboard shows: how long the last took and how old it is.
@@ -6477,19 +6757,16 @@ export async function main(): Promise<void> {
     : Bun.serve({ hostname, port: workerListenPort(port), idleTimeout: 0, ...serverOptions });
   // Only the wait is bounded: Promise.race does not cancel `warming`. A set
   // rebuilt from the ledger keeps building after the front listens, in turns.
-  const frontVisibility = engineFront ? keepVisibilityCurrent('before ready') : undefined;
-  if (frontVisibility) {
+  if (engineFront) {
+    const warming = keepVisibilityCurrent('before ready');
     let bound: ReturnType<typeof setTimeout> | undefined;
-    await Promise.race([frontVisibility, new Promise<void>((resolve) => { bound = setTimeout(resolve, FRONT_VISIBILITY_READY_BOUND_MS); })]);
+    await Promise.race([warming, new Promise<void>((resolve) => { bound = setTimeout(resolve, FRONT_VISIBILITY_READY_BOUND_MS); })]);
     clearTimeout(bound);
   }
   const server = !listens ? undefined : socketPath ? bindWorkerSocket(socketPath, startServer) : startServer();
   // The single worker's boot work ends when it listens; the background's when it is ready on its socket.
   if (engineRole === 'single') { finishBootProgress(); setEngineStep(undefined); }
-  void frontVisibility?.then(() => {
-    finishFrontProgress();
-    engineFront!.visibilityFinished();
-  });
+  if (engineFront) finishFrontProgress();
   if (listens) {
   // This Bun worker owns listener lifecycle on standalone Mac/Linux and
   // OpenClaw-hosted installs alike. Dashboard-only backends without this
@@ -6519,7 +6796,9 @@ export async function main(): Promise<void> {
         // only reads the current snapshot and cannot spawn systemctl.
         const desktop = await linuxGraphicalSessionReadinessAsync();
         if (desktopPollingClosed) return;
-        ready = desktop.ready && !resolveServerMode({ env: process.env, fileEnv: readWorkerSetupEnv(), desktopReady: () => desktop.ready }).remote;
+        const fileEnv = desktop.ready ? (freshSetupEnv ? await freshSetupEnv() : readWorkerSetupEnv()) : undefined;
+        if (desktopPollingClosed) return;
+        ready = desktop.ready && !resolveServerMode({ env: process.env, fileEnv, desktopReady: () => desktop.ready }).remote;
       } catch { ready = false; }
       finally { probing = false; if (!desktopPollingClosed) desktopBridge?.refresh(); }
     };
@@ -6668,33 +6947,55 @@ export async function main(): Promise<void> {
   // as soon as they exist, including sources with no handle or stores at boot.
   // A tier store the background creates later (a lane's Private or Public
   // store, on its first item) is opened here too.
-  // Looking costs a walk of the data root's layout on this loop (2.5 s on a
-  // busy disk, lane 6 gate, 16 Nov), so it runs every 2 s only for a while
-  // after the background opened a store (its snapshot's count changed, or a
-  // new background), while the store may still be getting its schema, and
-  // once a minute otherwise. A change the front makes itself (an archive, a
-  // source) refreshes at once.
+  // Probe every 2 s after the background announces a new store, and
+  // once a minute otherwise. Failed mounts are also due after five minutes.
   let frontMountsSeen: string | undefined;
   let frontMountsLookUntil = 0;
   let frontMountsLastLook = 0;
-  const frontMountRetry = engineFront ? setInterval(() => {
-    const snapshot = engineFront!.status()?.snapshot;
+  let checkingFrontMounts = false;
+  const frontMountRetry = engineFront ? setInterval(async function recheckFrontMounts() {
+    const snapshot = engineFront!.cachedSnapshot();
     const seen = `${snapshot?.instance_id ?? ''}:${snapshot?.stores_opened ?? ''}`;
     const now = Date.now();
     if (seen !== frontMountsSeen) {
       frontMountsSeen = seen;
       frontMountsLookUntil = now + FRONT_MOUNT_LOOK_AFTER_CHANGE_MS;
     }
-    if (now >= frontMountsLookUntil && now - frontMountsLastLook < FRONT_MOUNT_LOOK_QUIET_MS) return;
-    frontMountsLastLook = now;
-    refreshFrontMounts();
+    if (checkingFrontMounts) return;
+    const probeDue = now < frontMountsLookUntil || now - frontMountsLastLook >= FRONT_MOUNT_LOOK_QUIET_MS;
+    const retryDue = ({ lastAttemptAt }: { lastAttemptAt: number }) => now - lastAttemptAt >= FRONT_MOUNT_FAILURE_RETRY_MS;
+    if (!probeDue && ![...frontMountProblems.values()].some(retryDue)) return;
+    checkingFrontMounts = true;
+    try {
+      const changed = new Set<string>();
+      if (probeDue) {
+        frontMountsLastLook = now;
+        const pending = new Map(pendingMountFiles);
+        for (const lane of sourceMounts) if (!lane.pending()) pending.delete(lane.id);
+        for (const family of archiveFamilies) if (archiveImports.laneMounted(family)) pending.delete(archiveMountKey(family));
+        for (const store of connectorStores) pending.delete(store.dbPath);
+        for (const lane of tierLanes) {
+          for (const store of lane.onDemand) {
+            if (!store.current() && !pending.has(store.dbPath)) pending.set(store.dbPath, sqliteMountFiles(store.dbPath));
+          }
+        }
+        for (const id of await mountChanges(pending)) changed.add(id);
+      }
+      for (const [id, failure] of frontMountProblems) {
+        if (!retryDue(failure)) continue;
+        // If a failed store has since disappeared, keep its next attempt paced.
+        failure.lastAttemptAt = now;
+        changed.add(id);
+      }
+      if (!sourceRuntimeClosed && changed.size) refreshFrontMounts(changed);
+    } finally {
+      checkingFrontMounts = false;
+    }
   }, 2_000) : undefined;
   frontMountRetry?.unref?.();
   // Keeps each store's set current, and saved by a writer; see keepVisibilityCurrent.
-  if (engineRole === 'single') void keepVisibilityCurrent('after start');
-  const visibilityRefresh = setInterval(() => {
-    if (!visibilityBoot?.pending()) void keepVisibilityCurrent('refresh');
-  }, VISIBILITY_REFRESH_MS);
+  if (!engineFront) void keepVisibilityCurrent('after start');
+  const visibilityRefresh = setInterval(() => { void keepVisibilityCurrent('refresh'); }, VISIBILITY_REFRESH_MS);
   visibilityRefresh.unref?.();
   if (engineFront) {
     // The judge runs in the background: the front shows what it last published.
@@ -6715,25 +7016,26 @@ export async function main(): Promise<void> {
     : memoryActivity(tierSniffer?.passRunning ?? false, statusRecount?.health().counting ?? false);
   const memoryDiagnostic = createMemoryDiagnostic({
     role: engineRole, activity: currentMemoryActivity, readers: readPoolMemoryCounts,
-    ...(engineRole === 'background' && {
-      sampleHolders: () => {
-        const readers = sampleReadPoolMemory();
-        const stores = sampleSqliteStoreMemory();
-        return {
-          ...readers, ...stores, ...sampleModelWorkerMemory(),
-          sqlite_connections_sampled: readers.sqlite_read_connections_sampled + stores.sqlite_store_connections_sampled,
-          sqlite_cache_budget_mb: readers.sqlite_read_cache_budget_mb + stores.sqlite_store_cache_budget_mb,
-        };
-      },
-    }),
+    workerPayloads: modelWorkerMemoryPayloads,
+    sampleHolders: () => {
+      if (engineRole !== 'background') return sampleReadPoolMemory(false);
+      const readers = sampleReadPoolMemory();
+      const stores = sampleSqliteStoreMemory();
+      return {
+        ...readers, ...stores, ...sampleModelWorkerMemory(),
+        sqlite_connections_sampled: (readers.sqlite_read_connections_sampled ?? 0) + stores.sqlite_store_connections_sampled,
+        sqlite_cache_budget_mb: (readers.sqlite_read_cache_budget_mb ?? 0) + stores.sqlite_store_cache_budget_mb,
+      };
+    },
   });
   // Both roles sample peaks even where restarting is disabled.
   const frontMemory = engineRole !== 'background' ? startEngineRssRestart({
     thresholdMb: 0, batchRunning: () => false, restart: () => false, record: () => {},
     previous: { count: 0 }, memory: memoryDiagnostic,
+    ...(engineRole === 'front' ? { sampleAsync: processMemoryAsync } : {}),
   }) : undefined;
   let engineBackground: { stop(): void } | undefined;
-  if (engineRole === 'background' && visibilityBoot) {
+  if (engineRole === 'background') {
     if (!authToken) throw new Error('The engine background needs the worker auth token.');
     const refreshSchedulerSources = () => {
       sourceScheduler?.updateSources(schedulerSourcesForHandles(
@@ -6761,7 +7063,6 @@ export async function main(): Promise<void> {
       // own answers so the judge steps aside for them on the one server.
       ...(answerBuiltInModel ? { modelComplete: (request: AnalystModelRequest) => answerBuiltInModel.complete(request) } : {}),
       handlers: {
-        front_visibility_finished: ({ frontPid }) => { visibilityBoot.frontFinished(frontPid); },
         model_prepare: () => {
           if (workerBuiltInModel) void workerBuiltInModel.model.prepare();
           return { preparing: workerBuiltInModel !== undefined };
@@ -6924,7 +7225,7 @@ export async function main(): Promise<void> {
     };
     commands.markReady();
     finishBootProgress();
-    void visibilityBoot.start(() => keepVisibilityCurrent('after start'));
+    setEngineStep(undefined);
     // What the dashboard and status show, recounted here on its own pace and
     // kept for the front, which never counts (status-recount.ts).
     const refreshSnapshot = sourceIndexStatus?.refreshSnapshot;
@@ -6947,20 +7248,26 @@ export async function main(): Promise<void> {
             }
             for (const store of connectorStores) {
               if (standBack.holds('status')) break;
+              changeMemoryActivity('embedding_repair', 1);
               try {
                 const set = await store.repairEmbeddingInputHashes();
                 if (set) console.warn(`[olympus] ${store.corpusId}: set the embedding input hash on ${set} chunks that had none.`);
               } catch (error) {
                 console.warn(`[olympus] ${store.corpusId}: embedding input hash repair failed (${error instanceof Error ? error.message : String(error)}); tried again next pass.`);
+              } finally {
+                changeMemoryActivity('embedding_repair', -1);
               }
             }
             for (const ledger of new Set(tierLanes.map((lane) => lane.ledger))) {
               if (standBack.holds('status')) break;
+              changeMemoryActivity('embedding_settlement', 1);
               try {
                 const settled = await settleStaleEmbedHolds(ledger);
                 if (settled) console.warn(`[olympus] tier ledger: released ${settled} decided copies an older build left held.`);
               } catch (error) {
                 console.warn(`[olympus] tier ledger: settling held copies failed (${error instanceof Error ? error.message : String(error)}); tried again next pass.`);
+              } finally {
+                changeMemoryActivity('embedding_settlement', -1);
               }
             }
             for (const request of [PLAIN_STATUS_REQUEST, DASHBOARD_STATUS_REQUEST]) {
@@ -7001,7 +7308,6 @@ export async function main(): Promise<void> {
     shuttingDown = true;
     privateAgentListeners?.close();
     sourceRuntimeClosed = true;
-    visibilityBoot?.stop();
     loopStallFixture?.stop();
     localFilesCleanupRecovery?.close();
     sourceScheduler?.stop();
