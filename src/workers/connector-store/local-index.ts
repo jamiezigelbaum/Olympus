@@ -59,7 +59,7 @@ import { compareProviderAccounts } from '../../core/provider-account-identity.ts
 import { createHash, randomUUID } from 'node:crypto';
 import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, statSync, statfsSync } from 'node:fs';
 import { open as openFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { basename, dirname } from 'node:path';
 import { Database, type SQLQueryBindings } from 'bun:sqlite';
 import type {
   RawItem,
@@ -4129,6 +4129,7 @@ export class LocalConnectorStore {
         // WAL readers keep their snapshots while SQLite builds the index.
         // Existing store maintenance writers stand back from the child.
         assertWritableStoreOpenAllowed('connector store recency index', this.dbPath);
+        const buildStarted = Date.now();
         const child = spawnConnectorStoreMaintenance(this.dbPath, connectorRecencyIndexWorkerSource());
         this.reclaimProcess = child;
         child.unref();
@@ -4138,6 +4139,7 @@ export class LocalConnectorStore {
           if (code !== 0) throw new Error('Recency index worker exited unsuccessfully.');
           const result = JSON.parse(output) as { done?: boolean; busy?: boolean };
           if (!result.done && !result.busy) throw new Error('Recency index build failed.');
+          if (result.done) console.info(`[store-recency-index] built store=${basename(this.dbPath)} ms=${Date.now() - buildStarted}`);
           return result.done === true;
         } finally {
           child.stdin.end();

@@ -20066,7 +20066,7 @@ function hasImmutableAccountLabel(id) {
 import { createHash as createHash13, randomUUID as randomUUID9 } from "node:crypto";
 import { closeSync as closeSync11, existsSync as existsSync22, fsyncSync as fsyncSync3, lstatSync as lstatSync9, mkdirSync as mkdirSync13, openSync as openSync11, statSync as statSync13, statfsSync } from "node:fs";
 import { open as openFile } from "node:fs/promises";
-import { dirname as dirname23 } from "node:path";
+import { basename as basename7, dirname as dirname23 } from "node:path";
 import { Database as Database6 } from "bun:sqlite";
 
 // src/core/media-cache.ts
@@ -25659,6 +25659,7 @@ class LocalConnectorStore {
         if (this.closedForPoolReads || this.fileReplacedOrRemoved())
           return false;
         assertWritableStoreOpenAllowed("connector store recency index", this.dbPath);
+        const buildStarted = Date.now();
         const child = spawnConnectorStoreMaintenance(this.dbPath, connectorRecencyIndexWorkerSource());
         this.reclaimProcess = child;
         child.unref();
@@ -25671,6 +25672,8 @@ class LocalConnectorStore {
           const result = JSON.parse(output);
           if (!result.done && !result.busy)
             throw new Error("Recency index build failed.");
+          if (result.done)
+            console.info(`[store-recency-index] built store=${basename7(this.dbPath)} ms=${Date.now() - buildStarted}`);
           return result.done === true;
         } finally {
           child.stdin.end();

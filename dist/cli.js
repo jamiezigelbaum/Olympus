@@ -65300,7 +65300,7 @@ var init_reactions = __esm(() => {
 import { createHash as createHash33, randomUUID as randomUUID12 } from "node:crypto";
 import { closeSync as closeSync17, existsSync as existsSync38, fsyncSync as fsyncSync3, lstatSync as lstatSync21, mkdirSync as mkdirSync23, openSync as openSync17, statSync as statSync18, statfsSync } from "node:fs";
 import { open as openFile } from "node:fs/promises";
-import { dirname as dirname45 } from "node:path";
+import { basename as basename9, dirname as dirname45 } from "node:path";
 import { Database as Database9 } from "bun:sqlite";
 function semanticRelevanceBarFor(modelId, adapterBar) {
   return adapterBar ?? CALIBRATED_SEMANTIC_RELEVANCE_BARS.get(modelId);
@@ -69725,6 +69725,7 @@ var init_local_index = __esm(() => {
           if (this.closedForPoolReads || this.fileReplacedOrRemoved())
             return false;
           assertWritableStoreOpenAllowed("connector store recency index", this.dbPath);
+          const buildStarted = Date.now();
           const child = spawnConnectorStoreMaintenance(this.dbPath, connectorRecencyIndexWorkerSource());
           this.reclaimProcess = child;
           child.unref();
@@ -69737,6 +69738,8 @@ var init_local_index = __esm(() => {
             const result = JSON.parse(output);
             if (!result.done && !result.busy)
               throw new Error("Recency index build failed.");
+            if (result.done)
+              console.info(`[store-recency-index] built store=${basename9(this.dbPath)} ms=${Date.now() - buildStarted}`);
             return result.done === true;
           } finally {
             child.stdin.end();
@@ -78922,7 +78925,7 @@ ${parentKey(ref)}`, { ref, origin });
 // src/core/source-storage.ts
 import { Database as Database10 } from "bun:sqlite";
 import { existsSync as existsSync39, lstatSync as lstatSync22, mkdtempSync as mkdtempSync2, readdirSync as readdirSync7, rmSync as rmSync11, rmdirSync as rmdirSync2, statSync as statSync19 } from "node:fs";
-import { basename as basename9, join as join50, resolve as resolve14, sep as sep12 } from "node:path";
+import { basename as basename10, join as join50, resolve as resolve14, sep as sep12 } from "node:path";
 function enableSourceRegistryAdoption() {
   adoptionEnabled = true;
 }
@@ -79031,7 +79034,7 @@ function reclaimEmptyCaptureClaims(env = process.env) {
     }
     if (!stat.isDirectory() || Date.now() - stat.mtimeMs < CAPTURE_CLAIM_RECLAIM_AGE_MS)
       continue;
-    const leaseTarget = sourceId === TELEGRAM_SOURCE_ID ? `${basename9(legacyTelegramSessionBase(env))}.pairing` : undefined;
+    const leaseTarget = sourceId === TELEGRAM_SOURCE_ID ? `${basename10(legacyTelegramSessionBase(env))}.pairing` : undefined;
     let names;
     try {
       names = readdirSync7(claim);
@@ -81660,7 +81663,7 @@ import { homedir as homedir25 } from "node:os";
 import { randomUUID as randomUUID13 } from "node:crypto";
 import { statSync as statSync22 } from "node:fs";
 import { createServer as createNetServer2 } from "node:net";
-import { basename as basename10, delimiter as delimiter4, isAbsolute as isAbsolute21, join as join56 } from "node:path";
+import { basename as basename11, delimiter as delimiter4, isAbsolute as isAbsolute21, join as join56 } from "node:path";
 import { fileURLToPath as fileURLToPath9 } from "node:url";
 async function holdWorkerEndpoint(input) {
   const log = input.log ?? (() => {});
@@ -81987,7 +81990,7 @@ function assertExecutableFile(path, label) {
   throw new Error(`Olympus ${label} is unavailable.`);
 }
 function isBunExecutableName2(path) {
-  const name = basename10(path).toLowerCase();
+  const name = basename11(path).toLowerCase();
   return name === "bun" || name === "bun.exe";
 }
 async function authenticatedReadinessProbe(fetchWorker, url, authToken, instanceId, timeoutMs) {
@@ -91524,9 +91527,9 @@ var init_engine_children = __esm(() => {
 // src/core/data-root-snapshot.ts
 import { spawnSync as spawnSync11 } from "node:child_process";
 import { chmodSync as chmodSync17, existsSync as existsSync51, lstatSync as lstatSync29, mkdirSync as mkdirSync35, readdirSync as readdirSync10, readFileSync as readFileSync45, readlinkSync, realpathSync as realpathSync14, renameSync as renameSync8, rmSync as rmSync17, statfsSync as statfsSync2, statSync as statSync25, writeFileSync as writeFileSync12 } from "node:fs";
-import { basename as basename11, dirname as dirname57, join as join64, relative as relative9, resolve as resolve16, sep as sep13 } from "node:path";
+import { basename as basename12, dirname as dirname57, join as join64, relative as relative9, resolve as resolve16, sep as sep13 } from "node:path";
 function samePlace(a, b) {
-  return a === b || join64(realOrSelf(dirname57(a)), basename11(a)) === join64(realOrSelf(dirname57(b)), basename11(b));
+  return a === b || join64(realOrSelf(dirname57(a)), basename12(a)) === join64(realOrSelf(dirname57(b)), basename12(b));
 }
 function keptWithLive(folder, env) {
   if (samePlace(folder, olympusDataRoot(env)))
@@ -91584,7 +91587,7 @@ function isOwnCopyPath(path) {
     return false;
   if (path.endsWith(".before-update") || path.endsWith(".before-update.partial"))
     return true;
-  return /^.+\.failed-update-\d+$/.test(basename11(path));
+  return /^.+\.failed-update-\d+$/.test(basename12(path));
 }
 function readRecord2(env) {
   const path = updateRecordPath(env);
@@ -91807,7 +91810,7 @@ function proveNoHolders(roots, what, deps) {
   }
 }
 function lockNames(env) {
-  return [basename11(sharedDataPath("data-owner-lock", env)), basename11(sharedDataPath("engine-process-lock", env))];
+  return [basename12(sharedDataPath("data-owner-lock", env)), basename12(sharedDataPath("engine-process-lock", env))];
 }
 function holdsOnlyLocks(path, env) {
   let names;
@@ -117848,7 +117851,7 @@ var init_dropbox_files = __esm(() => {
 // src/workers/local-files/paths.ts
 import { realpathSync as realpathSync16 } from "node:fs";
 import { homedir as homedir29 } from "node:os";
-import { basename as basename12, dirname as dirname69, join as join78 } from "node:path";
+import { basename as basename13, dirname as dirname69, join as join78 } from "node:path";
 function normalizeScopePath(value) {
   const composed = value.trim().normalize("NFC");
   if (!composed.startsWith("/") || composed.length > MAX_SCOPE_PATH_LENGTH || UNSAFE_PATH_CHARACTERS.test(composed))
@@ -117970,7 +117973,7 @@ function realPathThroughExisting(path) {
     const parent = dirname69(existing);
     if (parent === existing)
       return path;
-    rest.push(basename12(existing));
+    rest.push(basename13(existing));
     existing = parent;
   }
 }
@@ -122428,7 +122431,7 @@ var init_drive_extraction_source = __esm(() => {
 
 // src/workers/file-extraction/connector-source.ts
 import { rmSync as rmSync25, writeFileSync as writeFileSync18 } from "node:fs";
-import { basename as basename13, join as join83, resolve as resolve21, sep as sep18 } from "node:path";
+import { basename as basename14, join as join83, resolve as resolve21, sep as sep18 } from "node:path";
 function isBoundedFetchConnector(connector) {
   return typeof connector.fetchItemWithin === "function";
 }
@@ -122682,7 +122685,7 @@ function fileHandOver(path, spooled, spoolDir, tidy) {
         return;
       const root = resolve21(spoolDir) + sep18;
       const target = resolve21(path);
-      if (!target.startsWith(root) || basename13(target) === "")
+      if (!target.startsWith(root) || basename14(target) === "")
         return;
       rmSync25(target, { force: true });
       tidy();
@@ -122875,7 +122878,7 @@ var init_child_media = __esm(() => {
 // src/workers/whatsapp/extraction-source.ts
 import { readFile as readFile9, realpath as realpath2, stat as stat4 } from "node:fs/promises";
 import { closeSync as closeSync25, constants as constants12, openSync as openSync25, readSync as readSync8, rmSync as rmSync27 } from "node:fs";
-import { basename as basename14, join as join85, relative as relative14, resolve as resolve23, sep as sep19 } from "node:path";
+import { basename as basename15, join as join85, relative as relative14, resolve as resolve23, sep as sep19 } from "node:path";
 
 class WhatsAppExtractionSource {
   id;
@@ -123001,7 +123004,7 @@ class WhatsAppExtractionSource {
       localItemId: row.localItemId,
       ...row.sourceVersion ? { sourceVersion: row.sourceVersion } : {},
       ...row.mimeType ? { mimeType: row.mimeType } : {},
-      name: row.locatorUri ? basename14(row.locatorUri) : row.name ?? "media"
+      name: row.locatorUri ? basename15(row.locatorUri) : row.name ?? "media"
     };
   }
   async pathIsInsideMediaRoot(path) {
@@ -123900,7 +123903,7 @@ var init_spool_reader = __esm(() => {
 import { execFileSync as execFileSync4 } from "node:child_process";
 import { createHash as createHash72 } from "node:crypto";
 import { closeSync as closeSync27, existsSync as existsSync67, fsyncSync as fsyncSync5, lstatSync as lstatSync35, openSync as openSync27, readFileSync as readFileSync56, readdirSync as readdirSync15, realpathSync as realpathSync18, rmSync as rmSync28, statSync as statSync33 } from "node:fs";
-import { basename as basename15, dirname as dirname72, isAbsolute as isAbsolute29, join as join89, relative as relative15 } from "node:path";
+import { basename as basename16, dirname as dirname72, isAbsolute as isAbsolute29, join as join89, relative as relative15 } from "node:path";
 function emptyWhatsAppSpoolPassFindings() {
   return {
     malformedLines: 0,
@@ -124096,7 +124099,7 @@ function childrenOf2(record) {
   if (record.mediaPath !== undefined) {
     return [{
       key: "media",
-      name: basename15(record.mediaPath),
+      name: basename16(record.mediaPath),
       mimeType,
       locator: whatsAppMediaFileLocator(record.mediaPath),
       available: record.downloadStatus === undefined || record.downloadStatus === "ok",
@@ -144764,7 +144767,7 @@ import {
   statSync as statSync35
 } from "node:fs";
 import { homedir as homedir30 } from "node:os";
-import { basename as basename16, dirname as dirname86, join as join108, relative as relative17, resolve as resolve24, sep as sep21 } from "node:path";
+import { basename as basename17, dirname as dirname86, join as join108, relative as relative17, resolve as resolve24, sep as sep21 } from "node:path";
 import { rm as rm10 } from "node:fs/promises";
 import { Database as Database27 } from "bun:sqlite";
 function lifecycleStoreFileOwner(env) {
@@ -144880,7 +144883,7 @@ function exportOlympusData(options) {
       }
     });
     for (const policyPath of source.files.settings) {
-      const destinationPath = join108(sourceRoot, basename16(policyPath));
+      const destinationPath = join108(sourceRoot, basename17(policyPath));
       if (copySanitizedJsonIfPresent(policyPath, destinationPath, files, skipped)) {
         artifacts.push(fileArtifact(destination, destinationPath, source.sourceId, "sanitized_config"));
       }
@@ -144996,7 +144999,7 @@ function exportReferencedMedia(refs, destination, durabilityBoundary, files, art
       counts.missing += 1;
       continue;
     }
-    const target = join108(mediaRoot, basename16(path));
+    const target = join108(mediaRoot, basename17(path));
     const staging = `${target}.${randomUUID29()}.partial`;
     try {
       copyFileSync2(path, staging);
@@ -145791,7 +145794,7 @@ function exportSqliteStore(options) {
       skipped.push(path);
     return;
   }
-  const destination = join108(destinationRoot, basename16(sqlitePath));
+  const destination = join108(destinationRoot, basename17(sqlitePath));
   const staging = `${destination}.${randomUUID29()}.partial`;
   if (snapshotSqliteStore(sqlitePath, staging)) {
     let sqlite;
@@ -145992,7 +145995,7 @@ function globExisting(root, pattern) {
   if (!existsSync80(root))
     return [];
   return readdirSync20(root).map((entry) => join108(root, entry)).filter((path) => {
-    const name = basename16(path);
+    const name = basename17(path);
     return pattern.test(name) && statSync35(path).isFile();
   });
 }
@@ -146088,7 +146091,7 @@ function canonicalPath2(path) {
       const parent = dirname86(existing);
       if (parent === existing)
         return absolute;
-      rest.push(basename16(existing));
+      rest.push(basename17(existing));
       existing = parent;
     }
   }
@@ -153338,7 +153341,7 @@ import { spawn as spawn8, spawnSync as spawnSync14 } from "node:child_process";
 import { createHash as createHash85, randomBytes as randomBytes25 } from "node:crypto";
 import { existsSync as existsSync83, lstatSync as lstatSync43, readdirSync as readdirSync26, readFileSync as readFileSync73, renameSync as renameSync16, rmSync as rmSync36, statSync as statSync38 } from "node:fs";
 import { homedir as homedir33, platform as osPlatform3 } from "node:os";
-import { basename as basename17, dirname as dirname91, isAbsolute as isAbsolute34, join as join116, resolve as resolvePath2 } from "node:path";
+import { basename as basename18, dirname as dirname91, isAbsolute as isAbsolute34, join as join116, resolve as resolvePath2 } from "node:path";
 function enginePaths(homeDir) {
   const home = absolute2(homeDir, "home directory");
   const logDir = join116(home, "Library", "Logs", "Olympus");
@@ -154450,7 +154453,7 @@ function installedProgram(plistPath) {
   if (!block)
     return;
   const strings = [...block.matchAll(/<string>([\s\S]*?)<\/string>/g)].map((match) => unxml(match[1]));
-  const helperPath = basename17(strings[0] ?? "") === ENGINE_HELPER_EXECUTABLE ? strings[0] : undefined;
+  const helperPath = basename18(strings[0] ?? "") === ENGINE_HELPER_EXECUTABLE ? strings[0] : undefined;
   const args = helperPath ? strings.slice(1) : strings;
   const runtimePath = args[0];
   const entryPath = args.find((value, index) => index > 0 && !value.startsWith("--"));
@@ -154662,7 +154665,7 @@ function isSymlink(path) {
   }
 }
 function isBunName(path) {
-  return basename17(path).toLowerCase() === "bun";
+  return basename18(path).toLowerCase() === "bun";
 }
 function assertOlympusPackage(root, label) {
   try {
@@ -154934,7 +154937,7 @@ var init_engine_service = __esm(() => {
 import { spawnSync as spawnSync15 } from "node:child_process";
 import { chmodSync as chmodSync36, closeSync as closeSync31, constants as constants17, copyFileSync as copyFileSync3, existsSync as existsSync84, fstatSync as fstatSync7, fsyncSync as fsyncSync8, ftruncateSync, lstatSync as lstatSync44, linkSync as linkSync4, mkdirSync as mkdirSync57, openSync as openSync30, readFileSync as readFileSync74, readlinkSync as readlinkSync6, readdirSync as readdirSync27, realpathSync as realpathSync23, renameSync as renameSync17, rmSync as rmSync37, rmdirSync as rmdirSync7, statSync as statSync39, symlinkSync as symlinkSync2, writeFileSync as writeFileSync22 } from "node:fs";
 import { createRequire as createRequire7 } from "node:module";
-import { basename as basename18, dirname as dirname92, join as join117, relative as relative19, resolve as resolve25, sep as sep23 } from "node:path";
+import { basename as basename19, dirname as dirname92, join as join117, relative as relative19, resolve as resolve25, sep as sep23 } from "node:path";
 import { userInfo as userInfo2 } from "node:os";
 import { randomBytes as randomBytes26, createHash as createHash86, randomUUID as randomUUID32 } from "node:crypto";
 function linuxEngineExec(command, args) {
@@ -155186,7 +155189,7 @@ function inheritedUtilLinuxFlock(lockPath) {
       const executable = realpathSync23(`/proc/${pid}/exe`);
       const executableStat = statSync39(executable);
       const args = readFileSync74(`/proc/${pid}/cmdline`).toString("utf8").split("\x00").filter(Boolean);
-      if (basename18(executable) === "flock" && executableStat.uid === 0 && (executableStat.mode & 18) === 0 && args.slice(1).some((arg) => arg.startsWith("/") && resolve25(arg) === lockPath))
+      if (basename19(executable) === "flock" && executableStat.uid === 0 && (executableStat.mode & 18) === 0 && args.slice(1).some((arg) => arg.startsWith("/") && resolve25(arg) === lockPath))
         return true;
     } catch {}
     const parent = processParent(pid);
@@ -155524,7 +155527,7 @@ function readInstallTransaction(layout) {
   const hasDesktop = Object.hasOwn(value?.before?.files ?? {}, linuxDesktopEntryPaths(layout).desktop);
   const allowedFiles = transactionManagedFiles(layout, hasDesktop), actualFiles = value?.before?.files && typeof value.before.files === "object" ? Object.keys(value.before.files) : [];
   const backupDir = typeof value?.backupDir === "string" ? resolve25(value.backupDir) : "";
-  const snapshotValid = (snapshot) => Boolean(snapshot && typeof snapshot.present === "boolean" && (!snapshot.present ? snapshot.backupPath === undefined && snapshot.sha256 === undefined && snapshot.mode === undefined : typeof snapshot.backupPath === "string" && dirname92(resolve25(snapshot.backupPath)) === backupDir && /^file-[0-9]+[.]backup$/.test(basename18(snapshot.backupPath)) && /^[0-9a-f]{64}$/.test(snapshot.sha256 ?? "") && Number.isInteger(snapshot.mode) && snapshot.mode >= 0 && snapshot.mode <= 511));
+  const snapshotValid = (snapshot) => Boolean(snapshot && typeof snapshot.present === "boolean" && (!snapshot.present ? snapshot.backupPath === undefined && snapshot.sha256 === undefined && snapshot.mode === undefined : typeof snapshot.backupPath === "string" && dirname92(resolve25(snapshot.backupPath)) === backupDir && /^file-[0-9]+[.]backup$/.test(basename19(snapshot.backupPath)) && /^[0-9a-f]{64}$/.test(snapshot.sha256 ?? "") && Number.isInteger(snapshot.mode) && snapshot.mode >= 0 && snapshot.mode <= 511));
   const legacy = value.legacySettings;
   if (legacy !== undefined && (!legacy || typeof legacy !== "object" || Array.isArray(legacy) || Object.entries(legacy).some(([name, snapshot], index) => !isLegacyLinuxSetting(name) || !snapshotValid(snapshot) || snapshot.present && snapshot.backupPath !== join117(backupDir, `file-${1e4 + index}.backup`))))
     throw new Error("Invalid legacy settings recovery journal.");
@@ -155533,7 +155536,7 @@ function readInstallTransaction(layout) {
     throw new Error("Invalid legacy settings restore journal.");
   const createdAllowed = new Set(transactionCreatedFiles(layout));
   const absent = value?.before?.absentCreatedFiles;
-  if (value.schema !== "olympus.engine.install-transaction.v1" || !["install", "rollback"].includes(value.action) || !["preparing", "activating", "rollback_required", "qualified", "recovered"].includes(value.phase) || value.priorUnitLinks !== undefined && (!Array.isArray(value.priorUnitLinks) || new Set(value.priorUnitLinks.map((entry) => entry?.path)).size !== value.priorUnitLinks.length || value.priorUnitLinks.some((entry) => !entry || !unitLinkCandidates(layout).includes(entry.path) || typeof entry.target !== "string" || /[\x00-\x1f\x7f]/.test(entry.target) || resolve25(dirname92(entry.path), entry.target) !== layout.unitPath)) || value.newUnitLinks !== undefined && (!Array.isArray(value.newUnitLinks) || new Set(value.newUnitLinks).size !== value.newUnitLinks.length || value.newUnitLinks.some((path) => !unitLinkCandidates(layout).includes(path))) || value.desktopIconSha256 !== undefined && (!hasDesktop || !/^[0-9a-f]{64}$/.test(value.desktopIconSha256)) || value.before?.enabledRuntime !== undefined && (typeof value.before.enabledRuntime !== "boolean" || value.before.enabledRuntime && !value.before.enabled) || typeof value.before?.active !== "boolean" || typeof value.before?.enabled !== "boolean" || !snapshotValid(value.before?.receipt) || dirname92(backupDir) !== layout.stateDir || !/^\.install-backup-[0-9a-f-]{36}$/.test(basename18(backupDir)) || !Number.isSafeInteger(value.backupDevice) || value.backupDevice < 0 || !Number.isSafeInteger(value.backupInode) || value.backupInode <= 0 || !Array.isArray(absent) || new Set(absent).size !== absent.length || absent.some((item) => typeof item !== "string" || !createdAllowed.has(item)) || actualFiles.length !== allowedFiles.length || allowedFiles.some((file, index) => !Object.hasOwn(value.before.files, file) || !snapshotValid(value.before.files[file]) || value.before.files[file].present && value.before.files[file].backupPath !== join117(backupDir, `file-${index}.backup`)) || !snapshotValid(value.before.receipt) || value.before.receipt.present && value.before.receipt.backupPath !== join117(backupDir, `file-${allowedFiles.length}.backup`) || dirname92(resolve25(value.stagingPath)) !== layout.packageDir || !/^[.]prepare-[0-9]+-[0-9a-f-]{36}$/.test(basename18(value.stagingPath)) || value.generationPath !== undefined && (dirname92(resolve25(value.generationPath)) !== join117(layout.packageDir, "generations") || !/^[0-9a-f]{64}$/.test(basename18(value.generationPath))) || value.generationCreated !== undefined && typeof value.generationCreated !== "boolean" || (value.stagingDevice !== undefined || value.stagingInode !== undefined) && (!Number.isSafeInteger(value.stagingDevice) || value.stagingDevice < 0 || !Number.isSafeInteger(value.stagingInode) || value.stagingInode <= 0) || value.generationArtifact !== undefined && (value.generationArtifact.kind !== "tree" || value.generationArtifact.path !== value.generationPath || value.generationArtifact.sha256 !== basename18(value.generationArtifact.path) || !Number.isSafeInteger(value.generationArtifact.rootDevice) || value.generationArtifact.rootDevice < 0 || !Number.isSafeInteger(value.generationArtifact.rootInode) || value.generationArtifact.rootInode <= 0 || value.generationArtifact.markerPath !== join117(value.generationArtifact.path, ".olympus-generation.json") || !/^[0-9a-f]{64}$/.test(value.generationArtifact.markerSha256 ?? ""))) {
+  if (value.schema !== "olympus.engine.install-transaction.v1" || !["install", "rollback"].includes(value.action) || !["preparing", "activating", "rollback_required", "qualified", "recovered"].includes(value.phase) || value.priorUnitLinks !== undefined && (!Array.isArray(value.priorUnitLinks) || new Set(value.priorUnitLinks.map((entry) => entry?.path)).size !== value.priorUnitLinks.length || value.priorUnitLinks.some((entry) => !entry || !unitLinkCandidates(layout).includes(entry.path) || typeof entry.target !== "string" || /[\x00-\x1f\x7f]/.test(entry.target) || resolve25(dirname92(entry.path), entry.target) !== layout.unitPath)) || value.newUnitLinks !== undefined && (!Array.isArray(value.newUnitLinks) || new Set(value.newUnitLinks).size !== value.newUnitLinks.length || value.newUnitLinks.some((path) => !unitLinkCandidates(layout).includes(path))) || value.desktopIconSha256 !== undefined && (!hasDesktop || !/^[0-9a-f]{64}$/.test(value.desktopIconSha256)) || value.before?.enabledRuntime !== undefined && (typeof value.before.enabledRuntime !== "boolean" || value.before.enabledRuntime && !value.before.enabled) || typeof value.before?.active !== "boolean" || typeof value.before?.enabled !== "boolean" || !snapshotValid(value.before?.receipt) || dirname92(backupDir) !== layout.stateDir || !/^\.install-backup-[0-9a-f-]{36}$/.test(basename19(backupDir)) || !Number.isSafeInteger(value.backupDevice) || value.backupDevice < 0 || !Number.isSafeInteger(value.backupInode) || value.backupInode <= 0 || !Array.isArray(absent) || new Set(absent).size !== absent.length || absent.some((item) => typeof item !== "string" || !createdAllowed.has(item)) || actualFiles.length !== allowedFiles.length || allowedFiles.some((file, index) => !Object.hasOwn(value.before.files, file) || !snapshotValid(value.before.files[file]) || value.before.files[file].present && value.before.files[file].backupPath !== join117(backupDir, `file-${index}.backup`)) || !snapshotValid(value.before.receipt) || value.before.receipt.present && value.before.receipt.backupPath !== join117(backupDir, `file-${allowedFiles.length}.backup`) || dirname92(resolve25(value.stagingPath)) !== layout.packageDir || !/^[.]prepare-[0-9]+-[0-9a-f-]{36}$/.test(basename19(value.stagingPath)) || value.generationPath !== undefined && (dirname92(resolve25(value.generationPath)) !== join117(layout.packageDir, "generations") || !/^[0-9a-f]{64}$/.test(basename19(value.generationPath))) || value.generationCreated !== undefined && typeof value.generationCreated !== "boolean" || (value.stagingDevice !== undefined || value.stagingInode !== undefined) && (!Number.isSafeInteger(value.stagingDevice) || value.stagingDevice < 0 || !Number.isSafeInteger(value.stagingInode) || value.stagingInode <= 0) || value.generationArtifact !== undefined && (value.generationArtifact.kind !== "tree" || value.generationArtifact.path !== value.generationPath || value.generationArtifact.sha256 !== basename19(value.generationArtifact.path) || !Number.isSafeInteger(value.generationArtifact.rootDevice) || value.generationArtifact.rootDevice < 0 || !Number.isSafeInteger(value.generationArtifact.rootInode) || value.generationArtifact.rootInode <= 0 || value.generationArtifact.markerPath !== join117(value.generationArtifact.path, ".olympus-generation.json") || !/^[0-9a-f]{64}$/.test(value.generationArtifact.markerSha256 ?? ""))) {
     throw new Error("The Linux install recovery journal is invalid; recovery refused.");
   }
   if (value.phase === "qualified" || value.phase === "recovered") {
@@ -155800,7 +155803,7 @@ function assertLegacySettingUnchanged(source, before, snapshot) {
     throw new Error("Legacy Olympus settings changed during migration.");
 }
 function legacyMigrationTemporary(layout, transaction, name) {
-  return `${legacySettingTarget(layout, name)}.${basename18(transaction.backupDir)}.migration`;
+  return `${legacySettingTarget(layout, name)}.${basename19(transaction.backupDir)}.migration`;
 }
 function recoverLegacyMigrationTemporary(layout, transaction, name, original) {
   const temporary = legacyMigrationTemporary(layout, transaction, name), target = legacySettingTarget(layout, name);
@@ -156903,7 +156906,7 @@ var init_credential_degradation = __esm(() => {
 import { createHash as createHash88 } from "node:crypto";
 import { existsSync as existsSync86, readFileSync as readFileSync76, statSync as statSync40 } from "node:fs";
 import { homedir as homedir34 } from "node:os";
-import { basename as basename19, dirname as dirname94, join as join119 } from "node:path";
+import { basename as basename20, dirname as dirname94, join as join119 } from "node:path";
 import { fileURLToPath as fileURLToPath12 } from "node:url";
 import { gunzipSync as gunzipSync2 } from "node:zlib";
 function classifyPath(path, isNumber) {
@@ -157437,7 +157440,7 @@ function readPack(path, sha256) {
 }
 function consultVocabularyRoot(moduleUrl = import.meta.url) {
   const here = dirname94(fileURLToPath12(moduleUrl));
-  const root = basename19(here) === "core" && basename19(dirname94(here)) === "src" ? dirname94(dirname94(here)) : basename19(here) === "dist" ? dirname94(here) : undefined;
+  const root = basename20(here) === "core" && basename20(dirname94(here)) === "src" ? dirname94(dirname94(here)) : basename20(here) === "dist" ? dirname94(here) : undefined;
   return root !== undefined && existsSync86(join119(root, ...VOCABULARY_DIR)) ? root : undefined;
 }
 function consultVocabularyFileStatus(options = {}, env = process.env) {
@@ -168239,7 +168242,7 @@ var init_data_restore = __esm(() => {
 import { createCipheriv as createCipheriv2, createDecipheriv as createDecipheriv2, createHash as createHash94, createHmac as createHmac6, randomBytes as randomBytes27, randomUUID as randomUUID36, scryptSync as scryptSync2, timingSafeEqual as timingSafeEqual8 } from "node:crypto";
 import { closeSync as closeSync35, existsSync as existsSync98, lstatSync as lstatSync48, mkdirSync as mkdirSync62, openSync as openSync34, readdirSync as readdirSync29, readSync as readSync12, renameSync as renameSync21, rmSync as rmSync40, statSync as statSync43, unlinkSync as unlinkSync6, writeSync as writeSync9, chmodSync as chmodSync40, fsyncSync as fsyncSync11 } from "node:fs";
 import { open as openAsync } from "node:fs/promises";
-import { basename as basename21, dirname as dirname100, join as join127, resolve as resolve27, sep as sep24 } from "node:path";
+import { basename as basename22, dirname as dirname100, join as join127, resolve as resolve27, sep as sep24 } from "node:path";
 function normalizePassphrase(passphrase) {
   const value = passphrase.normalize("NFC");
   if (value.trim().length === 0)
@@ -168458,7 +168461,7 @@ function readExactly(fd, length, position) {
   return out.subarray(0, done);
 }
 function notABackup(path) {
-  return new OperationError("invalid_params", `${basename21(path)} is not an Olympus backup.`, "Choose a file whose name ends in .olympusbackup, or a folder made by olympus data export.");
+  return new OperationError("invalid_params", `${basename22(path)} is not an Olympus backup.`, "Choose a file whose name ends in .olympusbackup, or a folder made by olympus data export.");
 }
 function readBackupHeader(path) {
   const fd = openSync34(path, "r");
@@ -192651,7 +192654,7 @@ var init_dashboard_messaging_runner = __esm(() => {
 import { spawn as spawn13 } from "node:child_process";
 import { closeSync as closeSync36, constants as constants19, fstatSync as fstatSync9, openSync as openSync35, readFileSync as readFileSync97 } from "node:fs";
 import { arch, platform as platform2, release } from "node:os";
-import { basename as basename22, join as join137 } from "node:path";
+import { basename as basename23, join as join137 } from "node:path";
 function sourceOf(value) {
   if (value !== "telegram" && value !== "whatsapp")
     throw new Error("Invalid messaging source.");
@@ -192697,7 +192700,7 @@ function retainApprovedCaptureScope(source, env) {
   return source === "telegram" ? { OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES: raw, OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES: raw } : { OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS: raw };
 }
 function readQr(path) {
-  if (basename22(path) !== "qr.png")
+  if (basename23(path) !== "qr.png")
     throw new Error("Invalid QR artifact.");
   const fd = openSync35(path, constants19.O_RDONLY | (constants19.O_NOFOLLOW ?? 0));
   try {
@@ -222130,7 +222133,7 @@ var init_x_bookmarks_admin = __esm(() => {
 
 // src/workers/engine/index.ts
 import { randomBytes as randomBytes38 } from "node:crypto";
-import { basename as basename23, dirname as dirname114 } from "node:path";
+import { basename as basename24, dirname as dirname114 } from "node:path";
 function createEmailSourceWorker(options = {}) {
   const deepReadJobsOrFail = () => {
     const jobs = options.deepRead?.();
@@ -223809,7 +223812,7 @@ function createEmailSourceWorker(options = {}) {
                 }
               }
               let phoneUnlinked;
-              const whatsappSessionDb = sourceId === "telegram.messages" ? undefined : session.paths.find((path) => basename23(path) === WHATSAPP_SESSION_FILE && artifactPresence(path) !== "gone");
+              const whatsappSessionDb = sourceId === "telegram.messages" ? undefined : session.paths.find((path) => basename24(path) === WHATSAPP_SESSION_FILE && artifactPresence(path) !== "gone");
               if (whatsappSessionDb && sourceDashboard.unlinkWhatsAppDevice) {
                 phoneUnlinked = await sourceDashboard.unlinkWhatsAppDevice(dirname114(whatsappSessionDb)).catch(() => "failed");
               }
@@ -244678,7 +244681,7 @@ var init_installed_tier_classification = __esm(() => {
 // src/workers/classification/sniffer-service.ts
 import { Database as Database30 } from "bun:sqlite";
 import { existsSync as existsSync121, rmSync as rmSync48 } from "node:fs";
-import { basename as basename24 } from "node:path";
+import { basename as basename25 } from "node:path";
 function unrefTimer(timer) {
   timer?.unref?.();
 }
@@ -244969,7 +244972,7 @@ class TierSnifferService {
       if (corpora.length > 0)
         return corpora.sort().join(", ");
     } catch {}
-    return basename24(path);
+    return basename25(path);
   }
   ledgerPathsNamedBy(store) {
     const named = [];
@@ -248089,7 +248092,7 @@ var init_remote_access_control = __esm(() => {
 
 // src/core/source-account-migration.ts
 import { linkSync as linkSync6, lstatSync as lstatSync57, mkdirSync as mkdirSync75, readdirSync as readdirSync37, realpathSync as realpathSync32, renameSync as renameSync28, rmdirSync as rmdirSync8, statSync as statSync52, unlinkSync as unlinkSync7 } from "node:fs";
-import { basename as basename25, dirname as dirname119, isAbsolute as isAbsolute42, join as join154, relative as relative20, resolve as resolve33, sep as sep26 } from "node:path";
+import { basename as basename26, dirname as dirname119, isAbsolute as isAbsolute42, join as join154, relative as relative20, resolve as resolve33, sep as sep26 } from "node:path";
 function accountFolderMigrationEnabled(env = process.env) {
   const value = env[MIGRATE_ACCOUNT_FOLDERS_ENV]?.trim().toLowerCase() ?? "";
   return value === "" || MIGRATION_ON.includes(value);
@@ -248118,7 +248121,7 @@ function candidates(sourceId, slot, env) {
   if (sourceId === TELEGRAM_SOURCE_ID) {
     const legacyDir = dirname119(legacyTelegramSessionBase(env));
     const folderDir = dirname119(accountSessionPath(account, env));
-    const own = basename25(legacyTelegramSessionBase(env));
+    const own = basename26(legacyTelegramSessionBase(env));
     const staged = new Set;
     for (const name of listNames3(legacyDir))
       if (folderNameOfStagedTelegramLogin(name, env))
@@ -248232,7 +248235,7 @@ function nearRealPath(path) {
   const rest = [];
   let near = resolve33(path);
   for (;; ) {
-    rest.unshift(basename25(near));
+    rest.unshift(basename26(near));
     const up = dirname119(near);
     if (up === near)
       return resolve33(path);
@@ -248300,7 +248303,7 @@ function inspect(ctx, sourceId, slot, entry) {
     const found = look(candidate.from);
     if (found.kind === "absent")
       continue;
-    const name = basename25(candidate.from);
+    const name = basename26(candidate.from);
     if (found.kind === "unreadable")
       return skip("unreadable", `${name} cannot be looked at.`);
     if (found.kind === "link" || found.kind === "other" || found.kind !== candidate.kind) {
@@ -248318,7 +248321,7 @@ function inspect(ctx, sourceId, slot, entry) {
     return skip("unreadable", "The account folder cannot be looked at.");
   }
   for (const { candidate, found } of present) {
-    const name = basename25(candidate.from);
+    const name = basename26(candidate.from);
     if (!destinationIsOurs(ctx, candidate.to))
       return skip("unexpected_file", `A folder on the way to ${name}'s place in the account folder is a link.`);
     const destination = look(candidate.to);
@@ -248367,7 +248370,7 @@ function checkDatabases(ctx, moves) {
     const path = absPath(ctx, move.from);
     const reads = storeFileReads(path, waitMs(ctx));
     if (reads === "busy")
-      return { busy: `${basename25(move.from)} is in use by another program, so the account stays where it is for now.` };
+      return { busy: `${basename26(move.from)} is in use by another program, so the account stays where it is for now.` };
     if (reads === "damaged") {
       checked.push({ file: move.to, result: "damaged" });
       continue;
@@ -248383,7 +248386,7 @@ function checkDatabases(ctx, moves) {
     ctx.quickCheckSpentMs += ctx.now() - started;
     ctx.quickCheckBytes += bytes;
     if (result === "busy")
-      return { busy: `${basename25(move.from)} is in use by another program, so the account stays where it is for now.` };
+      return { busy: `${basename26(move.from)} is in use by another program, so the account stays where it is for now.` };
     checked.push({ file: move.to, result });
   }
   return { checked };
@@ -248487,7 +248490,7 @@ function moveOne(ctx, move, direction) {
   const [from, to] = direction === "forward" ? [absPath(ctx, move.from), absPath(ctx, move.to)] : [absPath(ctx, move.to), absPath(ctx, move.from)];
   const source = look(from);
   const target = look(to);
-  const name = basename25(move.from);
+  const name = basename26(move.from);
   if (source.kind === "absent") {
     if (target.kind !== "absent")
       return "there";
@@ -248536,13 +248539,13 @@ function verifyIdentity(ctx, moves) {
     if (found.kind === "absent" && isDisposable(move))
       continue;
     if (found.kind !== "file" && found.kind !== "dir" || found.kind !== move.kind) {
-      throw new MoveFault("failed", "verify_failed", `${basename25(move.from)} is not there after the move.`);
+      throw new MoveFault("failed", "verify_failed", `${basename26(move.from)} is not there after the move.`);
     }
     if (String(found.dev) !== move.dev || String(found.ino) !== move.ino) {
-      throw new MoveFault("failed", "verify_failed", `${basename25(move.from)} is not the same file after the move.`);
+      throw new MoveFault("failed", "verify_failed", `${basename26(move.from)} is not the same file after the move.`);
     }
     if (move.kind === "file" && !move.from.endsWith("-shm") && Number(found.size) !== move.size) {
-      throw new MoveFault("failed", "verify_failed", `${basename25(move.from)} changed size in the move (${move.size} bytes, now ${Number(found.size)}).`);
+      throw new MoveFault("failed", "verify_failed", `${basename26(move.from)} changed size in the move (${move.size} bytes, now ${Number(found.size)}).`);
     }
   }
 }
@@ -248550,12 +248553,12 @@ function verifyRestored(ctx, moves) {
   for (const move of moves) {
     const back = look(absPath(ctx, move.from));
     if (isPlanned(look(absPath(ctx, move.to)), move)) {
-      throw new MoveFault("failed", "move_failed", `${basename25(move.from)} is still in the account folder.`);
+      throw new MoveFault("failed", "move_failed", `${basename26(move.from)} is still in the account folder.`);
     }
     if (back.kind === "absent" && isDisposable(move))
       continue;
     if (back.kind !== "file" && back.kind !== "dir" || back.kind !== move.kind) {
-      throw new MoveFault("failed", "move_failed", `${basename25(move.from)} is not back at its old place.`);
+      throw new MoveFault("failed", "move_failed", `${basename26(move.from)} is not back at its old place.`);
     }
   }
 }
@@ -248567,7 +248570,7 @@ function forward(ctx, sourceId, slot, migration) {
   makeFolders(ctx, moves);
   moves.forEach((move, index) => {
     if (moveOne(ctx, move, "forward") === "lost") {
-      throw new MoveFault("failed", "move_failed", `${basename25(move.from)} is in neither place.`);
+      throw new MoveFault("failed", "move_failed", `${basename26(move.from)} is in neither place.`);
     }
     checkpoint(`rename:${index}`);
   });
@@ -248578,9 +248581,9 @@ function forward(ctx, sourceId, slot, migration) {
       continue;
     const reads = storeFileReads(absPath(ctx, move.to), waitMs(ctx));
     if (reads === "busy")
-      throw new MoveFault("skipped", "busy", `${basename25(move.from)} is in use by another program, so the account stays where it is for now.`);
+      throw new MoveFault("skipped", "busy", `${basename26(move.from)} is in use by another program, so the account stays where it is for now.`);
     if (reads !== "reads") {
-      throw new MoveFault("failed", "verify_failed", `${basename25(move.from)} does not open after the move.`);
+      throw new MoveFault("failed", "verify_failed", `${basename26(move.from)} does not open after the move.`);
     }
   }
   checkpoint("verified");
@@ -248618,7 +248621,7 @@ function revert(ctx, sourceId, slot, migration, fault) {
   const lost = [];
   back.forEach((move, index) => {
     if (moveOne(ctx, move, "back") === "lost")
-      lost.push(basename25(move.from));
+      lost.push(basename26(move.from));
     checkpoint(`unrename:${index}`);
   });
   for (const move of moves) {
@@ -248721,12 +248724,12 @@ function foldLogs(ctx, moves) {
       const logs = moves.filter((other) => other.from === `${move.from}-wal` || other.from === `${move.from}-journal`);
       if (logs.every((log) => log.size === 0))
         continue;
-      return notFolded(`${basename25(move.from)} is not a database, and it has a log that would be lost, so the account stays where it is.`);
+      return notFolded(`${basename26(move.from)} is not a database, and it has a log that would be lost, so the account stays where it is.`);
     }
     if (result === "busy") {
-      return { kind: "skip", reason: "busy", detail: `${basename25(move.from)} is in use by another program, so its write-ahead log could not be folded into it; the account stays where it is for now.` };
+      return { kind: "skip", reason: "busy", detail: `${basename26(move.from)} is in use by another program, so its write-ahead log could not be folded into it; the account stays where it is for now.` };
     }
-    return notFolded(`${basename25(move.from)}'s write-ahead log could not be folded into it, so the account stays where it is.`);
+    return notFolded(`${basename26(move.from)}'s write-ahead log could not be folded into it, so the account stays where it is.`);
   }
   return;
 }
@@ -280389,7 +280392,7 @@ import {
   writeFileSync as writeFileSync23
 } from "node:fs";
 import { tmpdir as tmpdir13 } from "node:os";
-import { basename as basename20, isAbsolute as isAbsolute35, join as join122 } from "node:path";
+import { basename as basename21, isAbsolute as isAbsolute35, join as join122 } from "node:path";
 var MAX_UPGRADE_ARTIFACT_BYTES = 256 * 1024 * 1024;
 var MAX_UPGRADE_ARCHIVE_ENTRIES = 20000;
 var MAX_UPGRADE_EXPANDED_BYTES = 64 * 1024 * 1024;
@@ -280592,7 +280595,7 @@ function validateExtractedPackage(root, bunBin, executePreflight) {
 }
 function assertManagedVersionRoot(root, artifactSha256) {
   const stats = lstatSync45(root);
-  if (!stats.isDirectory() || stats.isSymbolicLink() || basename20(root) !== artifactSha256) {
+  if (!stats.isDirectory() || stats.isSymbolicLink() || basename21(root) !== artifactSha256) {
     throw new OperationError("config_error", "Managed upgrade version path is unsafe.");
   }
   assertRegularTree(root);
@@ -280676,7 +280679,7 @@ function publishVersionTree(staging, workingDirectory, versionsDir, syncDirector
   let published = false;
   try {
     if (existsSync89(workingDirectory)) {
-      replacedPath = join122(versionsDir, `.olympus-replaced-${basename20(workingDirectory)}-${randomUUID33()}`);
+      replacedPath = join122(versionsDir, `.olympus-replaced-${basename21(workingDirectory)}-${randomUUID33()}`);
       renameSync18(workingDirectory, replacedPath);
       syncDirectory(versionsDir);
     }
