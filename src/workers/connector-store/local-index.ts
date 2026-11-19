@@ -6,7 +6,7 @@ import { sizeHeldItemKey } from '../../core/source-size-limits.ts';
 import { applySqliteMmap } from './sqlite-mmap.ts';
 import {
   applyStoreTotalsCount, createStoreTotals, deferStoreTotalsWalk, readStoreTotals, readStoreWriteSequence,
-  STORE_TOTALS_QUIET_MS, storeTotalsFromRows, storeTotalsInstalled, storeTotalsWalkSteps,
+  STORE_TOTALS_QUIET_MS, STORE_TOTALS_WRITES, storeTotalsFromRows, storeTotalsInstalled, storeTotalsWalkSteps,
   type StoreTotals,
 } from './store-totals.ts';
 import { createVectorDigestSchema, writeVectorDigest, backfillVectorDigests, vectorDigestState, vectorDigestSourceQuery, applyVectorDigestWindow, type VectorDigestSourceRow } from './vector-digest.ts';
@@ -6761,7 +6761,11 @@ export class LocalConnectorStore {
         SELECT item_pk, sync_run_id FROM items
         WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ? AND tombstoned = 0
       `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId) as { item_pk: number; sync_run_id: string } | null;
-      if (row) this.rememberItemOwner(row.item_pk, connectorId, 'observed', row.sync_run_id, nowIso(), 'provider_listing');
+      if (row) {
+        this.rememberItemOwner(row.item_pk, connectorId, 'observed', row.sync_run_id, nowIso(), 'provider_listing');
+        // Ownership changes sweep eligibility, so move the store write sequence.
+        this.db.query('INSERT INTO store_totals (name, n) VALUES (?, 1) ON CONFLICT(name) DO UPDATE SET n = n + 1').run(STORE_TOTALS_WRITES);
+      }
     })();
   }
 
@@ -8650,6 +8654,20 @@ export class LocalConnectorStore {
     ) as { authored_at: string | null; tombstoned: number; chunk_count: number } | null;
     if (!row || row.tombstoned === 1) return undefined;
     return { chunkCount: row.chunk_count, ...(row.authored_at ? { authoredAt: row.authored_at } : {}) };
+  }
+
+  /** Counts retained parent copies still lacking a listing observation, for a paused confirmation walk. */
+  async unobservedContentCount(provider: string, account: string, connectorId: string): Promise<number> {
+    const sql = `SELECT COUNT(*) AS n FROM items i
+      WHERE i.provider = ? AND i.account_scope = ? AND i.tombstoned = 0 AND i.parent_local_item_id IS NULL
+        AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
+        AND NOT EXISTS (SELECT 1 FROM item_owners o
+          WHERE o.item_pk = i.item_pk AND o.connector_id = ? AND o.ownership_kind = 'observed')`;
+    const params = [provider, account, connectorId];
+    const row = (offThreadReadsSupported(this.dbPath)
+      ? await readInBackground(this.dbPath, { sql, params, mode: 'get' })
+      : this.db.query(sql).get(...params)) as { n: number };
+    return row.n;
   }
 
   /**

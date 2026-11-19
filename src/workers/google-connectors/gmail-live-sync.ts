@@ -10,6 +10,7 @@
 // has no migration source or fallback index.
 
 import { createHash } from 'node:crypto';
+import { readSourceAccountBindings, sourceAccountBindingsPath } from '../../core/source-account-binding.ts';
 import type {
   RawItem,
   SourceConnector,
@@ -47,7 +48,6 @@ import {
   GMAIL_PROVIDER,
   GMAIL_PUBLIC_CONNECTOR_CORPUS_ID,
   GmailPageTokenRejectedError,
-  GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS,
   GoogleGmailSourceConnector,
   gmailConnectorStoreClassification,
   gmailCursorHasBacklog,
@@ -64,7 +64,7 @@ import {
   defaultGmailLiveSyncConfig,
   type GmailLiveSyncConfig,
 } from './gmail-live-control.ts';
-import type { GoogleDailyRequestBudget, GoogleRequestBudgetStatus } from './request-budget.ts';
+import { GoogleRequestBudgetError, type GoogleDailyRequestBudget, type GoogleRequestBudgetStatus } from './request-budget.ts';
 
 export const GMAIL_STORE_PULL_RECEIPT_KIND = 'gmail_connector_store_pull_receipt';
 export const GMAIL_STORE_RECONCILE_RECEIPT_KIND = 'gmail_connector_store_reconcile_receipt';
@@ -73,9 +73,18 @@ export const GMAIL_ATTACHMENTS_NOT_INGESTED_WARNING = 'gmail_attachments_not_ing
 export const GMAIL_INGEST_FILTERED_WARNING = 'gmail_ingest_filtered_items';
 /** An always-Private label has not yet been applied to every message already stored; the next run retries. */
 export const GMAIL_LABEL_RULES_PENDING_WARNING = 'gmail_label_rules_pending';
+export const GMAIL_CONFIRMATION_RESERVE_REASON = 'gmail_confirmation_live_request_reserve';
+
+// Leave room for two ordinary 200-message live pulls, list pages and retries.
+// A smaller daily limit keeps 10% for live work instead of parking all backlog.
+function gmailConfirmationReserve(dailyLimit: number): number {
+  return Math.min(500, Math.ceil(dailyLimit / 10));
+}
 
 const CHECKPOINT_PREFIX = 'gmp1:';
 const MAX_CHECKPOINT_CHARS = 16_384;
+// The older Private-only walk must replay from the head to see Personal copies.
+const CONFIRMATION_SCOPE_PREFIX = 'private-confirmation-v2:';
 /**
  * The connector's own hard ceiling. The reconcile task passes no maxItems to
  * the spine — that is what makes the traversal a snapshot candidate — but the
@@ -192,7 +201,7 @@ export interface GmailConnectorStoreSyncHandler {
   reconcile(request?: GmailStoreReconcileRequest): Promise<GmailConnectorStoreTaskOutcome>;
   lastStoreRunCompletedAt(): string | undefined;
   requestBudgetStatus(): GoogleRequestBudgetStatus | undefined;
-  confirmPrivateScope?(request?: { max_items?: number; checkpoint?: string }): Promise<{ confirmed: number; done: boolean; checkpoint: string | null }>;
+  confirmPrivateScope?(request?: GmailConfirmationRequest): Promise<GmailConfirmationResult>;
   /**
    * Once, for mail stored before attachments were children: lists the
    * attachments of messages whose stored text names one and that no child row
@@ -200,6 +209,21 @@ export interface GmailConnectorStoreSyncHandler {
    * the current mail scope. Done once the stores hold no such message.
    */
   backfillChildren?(request?: { max_items?: number; provenance?: SourceInvocationProvenance }): Promise<{ listed: number; examined: number; done: boolean }>;
+}
+
+interface GmailConfirmationRequest {
+  max_items?: number;
+  checkpoint?: string;
+  shouldYield?: () => boolean;
+}
+
+interface GmailConfirmationResult {
+  confirmed: number;
+  confirmedTotal: number;
+  done: boolean;
+  checkpoint: string | null;
+  hold?: { error: GoogleRequestBudgetError; remaining: number };
+  cursorRejected?: true;
 }
 
 export interface GmailConnectorStoreSyncOptions extends GoogleGmailSourceConnectorOptions {
@@ -221,8 +245,9 @@ export interface GmailConnectorStoreSyncOptions extends GoogleGmailSourceConnect
    * one's watermark. The compiled query itself rides `scope`.
    */
   scopeApproval?: { generation: string; revision: string };
-  /** Confirm current scope membership of retained mail for Private meaning backfill. */
-  confirmStoredPrivateScope?: boolean;
+  requestBudget?: GoogleDailyRequestBudget;
+  /** Registry path used by the scheduler's source account guard. */
+  confirmationRegistryPath?: string;
   /**
    * Re-check that approval against the live registry. Called after every
    * provider answer and before it reaches a store, as the Dropbox and Drive
@@ -300,7 +325,7 @@ export function createGmailConnectorStoreSyncHandler(
   const stores = [options.internalStore, options.secureStore];
   const lacksCurrentOwner = (store: LocalConnectorStore, identity: RawItem['identity']) =>
     !store.itemOwnerPresent(identity, connectorId, 'observed');
-  const storedItem = (providerItemId: string) => {
+  const storedItem = (providerItemId: string, confirming = false) => {
     const identity = { family: 'email' as const, provider: GMAIL_PROVIDER, accountScope: account, providerItemId, localItemId: `${account}:${providerItemId}` };
     const copies = stores.flatMap(store => {
       const content = store.itemStoredContent(identity);
@@ -309,38 +334,31 @@ export function createGmailConnectorStoreSyncHandler(
     if (copies.length === 0) return undefined;
     return {
       hasContent: copies.some(({ content }) => content.chunkCount > 0),
-      ...(options.confirmStoredPrivateScope && options.scopeApproval
+      ...(confirming
         && copies.some(({ store, content }) => content.chunkCount > 0 && lacksCurrentOwner(store, identity))
         ? { needsScopeObservation: true } : {}),
     };
   };
-  const scope = options.scope ? {
-    ...options.scope, storedItem,
-    ...(options.confirmStoredPrivateScope && options.scopeApproval ? {
-      storedItemObserved: (item: RawItem) => {
-        options.assertScopeCurrent?.();
-        let confirmed = false;
-        // Recheck the copies after the provider request. A move may have
-        // changed which store holds the body while the request was in flight.
-        for (const store of stores) {
-          if (!store.itemStoredContent(item.identity)?.chunkCount || !lacksCurrentOwner(store, item.identity)) continue;
-          store.observeStoredItemOwner(item.identity, connectorId);
-          if (!lacksCurrentOwner(store, item.identity)) confirmed = true;
-        }
-        return confirmed;
-      },
-    } : {}),
-  } : undefined;
+  const scope = options.scope ? { ...options.scope, storedItem } : undefined;
   const buildConnector = (overrides: {
     maxMessages?: number;
     query?: string;
     provenance?: SourceInvocationProvenance;
     scope?: GmailConnectorScope;
+    requestBudget?: GoogleGmailSourceConnectorOptions['requestBudget'];
   } = {}) =>
     new GoogleGmailSourceConnector({
       ...options,
+      ...(options.confirmationRegistryPath ? {
+        confirmationAccountId: () => {
+          const read = readSourceAccountBindings(sourceAccountBindingsPath(options.confirmationRegistryPath!));
+          const binding = read.kind === 'ok' ? read.bindings.sources['gmail.email'] : undefined;
+          return binding && !binding.purge_required && !binding.reconnected_at ? binding.provider_account_id : undefined;
+        },
+      } : {}),
       ...(overrides.scope ? { scope: overrides.scope } : scope ? { scope } : {}),
-      ...(scope?.storedItemObserved && options.assertScopeCurrent ? {
+      ...(overrides.requestBudget ? { requestBudget: overrides.requestBudget } : {}),
+      ...(options.assertScopeCurrent ? {
         beforeEachRequest: () => {
           options.assertScopeCurrent?.();
           options.beforeEachRequest?.();
@@ -445,37 +463,78 @@ export function createGmailConnectorStoreSyncHandler(
   };
 
   return {
-    ...(options.confirmStoredPrivateScope && options.scopeApproval && scope ? {
-      confirmPrivateScope: async (request: { max_items?: number; checkpoint?: string } = {}) => {
-        // Replay the old Private-only walk once to confirm retained Personal mail too.
-        const confirmationScope = `private-confirmation-v2:${connectorId}`;
+    ...(options.scopeApproval && scope ? {
+      confirmPrivateScope: async (request: GmailConfirmationRequest = {}): Promise<GmailConfirmationResult> => {
+        const confirmationScope = `${CONFIRMATION_SCOPE_PREFIX}${connectorId}`;
         const complete = `${confirmationScope}:done`;
-        if (request.checkpoint === complete) return { confirmed: 0, done: true, checkpoint: complete };
-        const resume = decodeCheckpoint(request.checkpoint, confirmationScope).head;
+        const saved = decodeCheckpoint(request.checkpoint, confirmationScope);
+        const confirmedBefore = saved.confirmed ?? 0;
+        if (request.checkpoint === complete || saved.head === complete) {
+          return { confirmed: 0, confirmedTotal: confirmedBefore, done: true, checkpoint: request.checkpoint! };
+        }
+        let head = saved.head;
         options.assertScopeCurrent?.();
+        if (request.shouldYield?.()) {
+          return { confirmed: 0, confirmedTotal: confirmedBefore, done: false, checkpoint: request.checkpoint ?? null };
+        }
         let confirmed = 0;
-        const maxItems = Math.min(request.max_items ?? config.storePullMaxItems, GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS);
+        const maxItems = boundedMaxItems(request.max_items, config.storePullMaxItems);
+        const budget = options.requestBudget;
         const connector = buildConnector({
           maxMessages: maxItems,
-          scope: { ...scope, confirmationOnly: true, storedItemObserved: item => {
-            if (scope.storedItemObserved?.(item)) confirmed++;
-          } },
+          ...(budget ? { requestBudget: {
+            reserve: () => budget.reserve('scheduled', gmailConfirmationReserve),
+            status: () => budget.status(),
+          } } : {}),
+          scope: {
+            ...scope,
+            storedItem: id => storedItem(id, true),
+            confirmStoredItem: (item, passesIngestFilter) => {
+              let observed = false;
+              // A tier move may have changed which copy holds the text while the GET was in flight.
+              for (const store of stores) {
+                if (!lacksCurrentOwner(store, item.identity)) continue;
+                const text = store.releaseItemChunks(item.identity)?.chunks.map(chunk => chunk.text).join('');
+                if (!text?.trim() || !passesIngestFilter(text)) continue;
+                options.assertScopeCurrent?.();
+                store.observeStoredItemOwner(item.identity, connectorId);
+                if (!lacksCurrentOwner(store, item.identity)) observed = true;
+              }
+              if (observed) confirmed++;
+            },
+          },
         });
         let done = false;
-        let checkpoint: string | null = resume ? encodeCheckpoint({ head: resume, scope: confirmationScope }) : null;
+        let refusal: GoogleRequestBudgetError | undefined;
+        let cursorRejected: true | undefined;
         try {
-          for await (const page of connector.listItems({ limit: maxItems, ...(resume ? { cursor: resume } : {}) })) {
+          for await (const page of connector.listItems({ limit: maxItems, ...(head ? { cursor: head } : {}) })) {
             done = page.done;
-            checkpoint = done ? complete : page.nextCursor ? encodeCheckpoint({ head: page.nextCursor, scope: confirmationScope }) : checkpoint;
+            head = done ? complete : page.nextCursor ?? head;
+            if (!done && request.shouldYield?.()) break;
           }
         } catch (error) {
-          if (!resume || !isRejectedCursorError(error)) throw error;
-          // Provider continuation tokens can expire. Replay starts fresh;
-          // confirmed ownership is durable, so metadata is not fetched twice.
-          checkpoint = null;
+          if (error instanceof GoogleRequestBudgetError) {
+            refusal = error;
+            head = connector.interruptedConfirmationCursor() ?? head;
+          }
+          else if (head && isRejectedCursorError(error)) {
+            // Replay skips durable confirmations. Keep the cumulative count.
+            head = undefined;
+            cursorRejected = true;
+          } else throw error;
         }
+        const remaining = refusal
+          ? (await Promise.all(stores.map(store => store.unobservedContentCount(GMAIL_PROVIDER, account, connectorId))))
+            .reduce((sum, count) => sum + count, 0)
+          : undefined;
         options.assertScopeCurrent?.();
-        return { confirmed, done, checkpoint };
+        const confirmedTotal = confirmedBefore + confirmed;
+        const checkpoint = encodeCheckpoint({ ...(head ? { head } : {}), scope: confirmationScope, confirmed: confirmedTotal });
+        return { confirmed, confirmedTotal, done, checkpoint,
+          ...(refusal && remaining !== undefined ? { hold: { error: refusal, remaining } } : {}),
+          ...(cursorRejected ? { cursorRejected } : {}),
+        };
       },
     } : {}),
     async sync(request: GmailConnectorStoreSyncRequest = {}): Promise<GmailConnectorStoreSyncResult> {
@@ -717,6 +776,8 @@ interface GmailCheckpointEnvelope {
   head?: string;
   /** Digest of the mail scope approval the head cursor was walked under. */
   scope?: string;
+  /** Cumulative new observations made by the confirmation walk. */
+  confirmed?: number;
 }
 
 const GMAIL_SCOPED_CONNECTOR_PREFIX = `${GMAIL_PROVIDER}.scope.`;
@@ -748,7 +809,7 @@ export function encodeGmailStoreCheckpoint(envelope: GmailCheckpointEnvelope): s
 }
 
 function encodeCheckpoint(envelope: GmailCheckpointEnvelope): string | null {
-  if (!envelope.head) return null;
+  if (!envelope.head && envelope.confirmed === undefined) return null;
   return `${CHECKPOINT_PREFIX}${Buffer.from(JSON.stringify(envelope)).toString('base64url')}`;
 }
 
@@ -765,7 +826,7 @@ function decodeCheckpoint(value: string | undefined, scopeTag?: string): Decoded
     if (isGmailConnectorCursor(trimmed)) return scopeTag ? {} : { head: trimmed };
     return { headRejected: true };
   }
-  let parsed: { head?: unknown; scope?: unknown };
+  let parsed: { head?: unknown; scope?: unknown; confirmed?: unknown };
   try {
     parsed = JSON.parse(
       Buffer.from(trimmed.slice(CHECKPOINT_PREFIX.length), 'base64url').toString('utf8'),
@@ -779,9 +840,13 @@ function decodeCheckpoint(value: string | undefined, scopeTag?: string): Decoded
   const checkpointScope = typeof parsed.scope === 'string' ? parsed.scope : undefined;
   if (checkpointScope !== scopeTag) return {};
   const head = typeof parsed.head === 'string' ? parsed.head : undefined;
+  const confirmation = scopeTag?.startsWith(CONFIRMATION_SCOPE_PREFIX) === true;
+  const validHead = head !== undefined && (isGmailConnectorCursor(head) || (confirmation && head === `${scopeTag}:done`));
   return {
-    ...(head !== undefined && isGmailConnectorCursor(head) ? { head } : {}),
-    ...(head !== undefined && !isGmailConnectorCursor(head) ? { headRejected: true } : {}),
+    ...(validHead ? { head } : {}),
+    ...(head !== undefined && !validHead ? { headRejected: true } : {}),
+    ...(confirmation && typeof parsed.confirmed === 'number' && Number.isSafeInteger(parsed.confirmed) && parsed.confirmed >= 0
+      ? { confirmed: parsed.confirmed } : {}),
   };
 }
 
@@ -881,14 +946,7 @@ export function gmailReceiptDigest(
 
 function isRejectedCursorError(error: unknown): boolean {
   if (error instanceof TypeError) return /cursor is invalid/i.test(error.message);
-  if (!(error instanceof Error)) return false;
-  // A stale Gmail page token comes back as a 400/404 on messages.list. 401/403
-  // are credential problems and 429 is the rate limiter; neither is the
-  // cursor's fault and neither may be papered over by traversing from scratch.
-  const match = /Gmail API request failed \((\d{3})\)/.exec(error.message);
-  const status = match?.[1] ? Number(match[1]) : undefined;
-  return status !== undefined && status >= 400 && status < 500
-    && status !== 401 && status !== 403 && status !== 429;
+  return error instanceof GmailPageTokenRejectedError;
 }
 
 function boundedMaxItems(value: number | undefined, fallback: number): number {

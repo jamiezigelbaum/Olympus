@@ -31,9 +31,10 @@ import {
   type ConnectorStoreEmbeddingTarget,
   type LocalConnectorStore,
 } from './connector-store/index.ts';
+import { GMAIL_CONFIRMATION_RESERVE_REASON } from './google-connectors/gmail-live-sync.ts';
 import {
   GMAIL_DAILY_REQUEST_GUARD_REASON,
-  GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS,
+  GMAIL_RESUME_REJECTED_WARNING,
   GMAIL_INTERNAL_CONNECTOR_CORPUS_ID,
   GOOGLE_DRIVE_DAILY_REQUEST_GUARD_REASON,
   GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID,
@@ -250,6 +251,8 @@ export interface SourceSchedulerTaskRunContext {
   effectiveIntervalMs: number;
   degradedReason?: string;
   provenance?: SourceSchedulerRunProvenance;
+  /** Gmail confirmation checks this at provider page boundaries. */
+  yieldGmailConfirmation?: () => boolean;
 }
 
 export interface SourceSchedulerTask {
@@ -1127,7 +1130,11 @@ export class SourceScheduler {
           // waits out a listing), but when the listing ends it still follows
           // at once, as it did when the two shared the key.
           const sources = new Set(group.map((state) => state.source));
-          const due = this.states.filter((state) => !ran.has(state)
+          const ranGmailConfirmation = group.some(state => isGmailConfirmationTask(state.task));
+          // A live pull can come due again while confirmation holds the lane,
+          // even if the same tick already ran it before confirmation started.
+          const due = this.states.filter((state) => (!ran.has(state)
+              || (ranGmailConfirmation && state.task.metadataWalkRole === 'primary'))
             && !state.running
             && taskCadence(state.source, state.task) === 'continuous'
             && (taskConcurrencyKey(state.source, state.task) === concurrencyKey
@@ -1330,7 +1337,7 @@ export class SourceScheduler {
       // A retry due before the next regular tick gets its own wake, or the tick
       // would round it up (an embedding backlog asking for 5 s waited 60 s).
       else if (retryAt && nextRunAt - Date.parse(completedAt) < this.tickMs) this.scheduleContinueWake(nextRunAt);
-      if (result.status === 'progress' && !retryAt) this.wakeDownstream(state, continueAt);
+      if (result.status === 'progress' && (!retryAt || isGmailConfirmationTask(runningTask))) this.wakeDownstream(state, continueAt);
     } catch (error) {
       delete state.wakeAfterRun;
       if (this.stops !== stopsAtStart) {
@@ -1462,6 +1469,10 @@ export class SourceScheduler {
           // byte-identical to what tasks received before provenance existed,
           // and the X adapter reads a missing marker as scheduled (R62).
           ...(provenance === 'operator' ? { provenance } : {}),
+          ...(isGmailConfirmationTask(task) ? { yieldGmailConfirmation: () => this.askHolds()
+            || this.states.some(sibling => sibling.source.sourceId === state.source.sourceId
+              && sibling.source.corpusId === state.source.corpusId
+              && sibling.task.metadataWalkRole === 'primary' && sibling.nextRunAt <= this.now().getTime()) } : {}),
           ...(state.checkpoint ? { checkpoint: state.checkpoint } : {}),
           ...(state.lastSuccessAt ? { lastSuccessAt: state.lastSuccessAt } : {}),
           effectiveIntervalMs: state.effectiveIntervalMs ?? taskIntervalMs(state.source, task),
@@ -2626,6 +2637,12 @@ export function createXBookmarksSchedulerSource(input: {
   };
 }
 
+const GMAIL_CONFIRMATION_TASK_ID = 'gmail.email_private_scope_confirmation_v1';
+
+function isGmailConfirmationTask(task: SourceSchedulerTask): boolean {
+  return task.id === GMAIL_CONFIRMATION_TASK_ID || task.id.startsWith(`${GMAIL_CONFIRMATION_TASK_ID}:scope:`);
+}
+
 export function createGmailConnectorStoreSchedulerSource(input: {
   config: OlympusConfig;
   sync?: GmailConnectorStoreSyncHandler;
@@ -2696,17 +2713,35 @@ export function createGmailConnectorStoreSchedulerSource(input: {
         },
       },
       ...(input.sync.confirmPrivateScope ? [{
-        id: 'gmail.email_private_scope_confirmation_v1', kind: 'sync' as const, writer: true as const,
+        id: GMAIL_CONFIRMATION_TASK_ID, kind: 'sync' as const, writer: true as const,
         intervalMs: liveConfig.storePullIntervalMs,
         freshnessThresholdMs: liveConfig.storePullFreshnessThresholdMs,
         run: async (context?: SourceSchedulerTaskRunContext): Promise<SourceSchedulerTaskRunResult> => {
           try {
-            const result = await input.sync!.confirmPrivateScope!({ max_items: Math.min(liveConfig.storePullMaxItems, GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS), ...(context?.checkpoint ? { checkpoint: context.checkpoint } : {}) });
+            const result = await input.sync!.confirmPrivateScope!({
+              max_items: liveConfig.storePullMaxItems,
+              ...(context?.checkpoint ? { checkpoint: context.checkpoint } : {}),
+              ...(context?.yieldGmailConfirmation ? { shouldYield: context.yieldGmailConfirmation } : {}),
+            });
+            const hold = result.hold;
             return {
               status: result.confirmed > 0 ? 'progress' : 'idle',
-              counts: { private_scope_confirmed: result.confirmed, items_seen: result.confirmed, items_changed: result.confirmed },
+              counts: {
+                private_scope_confirmed: result.confirmed,
+                private_scope_confirmed_total: result.confirmedTotal,
+                items_seen: result.confirmed,
+                items_changed: result.confirmed,
+                traversal_complete: Number(result.done),
+                ...(hold ? { private_scope_remaining: hold.remaining } : {}),
+                ...(hold?.error.amounts ? {
+                  limit_stop_limit: hold.error.amounts.limit,
+                  ...(hold.error.amounts.used !== undefined ? { limit_stop_used: hold.error.amounts.used } : {}),
+                } : {}),
+              },
               checkpoint: result.checkpoint,
-              ...(!result.done ? { continueSoon: true } : {}),
+              ...(result.cursorRejected ? { warnings: [GMAIL_RESUME_REJECTED_WARNING] } : {}),
+              ...(hold ? { retryAt: { at: hold.error.retryAt, degradedReason: gmailConfirmationHoldReason(hold.error) } }
+                : !result.done ? { continueSoon: true } : {}),
             };
           } catch (error) { throw gmailSchedulerFailure(error); }
         },
@@ -2935,6 +2970,15 @@ function gmailStoreProgress(
     // A walk in progress continues within seconds, not at the next interval.
     ...(outcome.backlog ? { continueSoon: true } : {}),
   };
+}
+
+function gmailConfirmationHoldReason(error: GoogleRequestBudgetError): string {
+  switch (error.reason) {
+    case 'request_reserve': return GMAIL_CONFIRMATION_RESERVE_REASON;
+    case 'future_utc_day': return GMAIL_REQUEST_BUDGET_CLOCK_REGRESSION;
+    case 'ledger_busy': return GMAIL_REQUEST_BUDGET_LEDGER_BUSY;
+    case 'daily_api_request_guard': return GMAIL_DAILY_REQUEST_GUARD_REASON;
+  }
 }
 
 /**
@@ -3307,6 +3351,7 @@ const UTC_DAY_SCOPED_DEGRADED_REASONS: ReadonlySet<string> = new Set([
   'reconcile_cost_to_finish_guard',
   READWISE_DAILY_REQUEST_GUARD_REASON,
   GMAIL_DAILY_REQUEST_GUARD_REASON,
+  GMAIL_CONFIRMATION_RESERVE_REASON,
   GOOGLE_DRIVE_DAILY_REQUEST_GUARD_REASON,
 ]);
 

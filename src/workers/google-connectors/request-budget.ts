@@ -30,6 +30,7 @@ const SAFE_RECOVERY_REASON = /^[a-z0-9][a-z0-9._:-]{0,127}$/;
 
 export type GoogleRequestBudgetErrorReason =
   | 'daily_api_request_guard'
+  | 'request_reserve'
   | 'future_utc_day'
   | 'ledger_busy';
 
@@ -105,7 +106,7 @@ export class GoogleRequestBudgetError extends Error {
           + '`olympus source request-budget recover-future` using the observed day.'
         : reason === 'ledger_busy'
           ? `${provider} request budget ledger remained busy; the provider request was refused before dispatch.`
-          : `${provider} request deferred by daily_api_request_guard.`,
+          : `${provider} request deferred by ${reason}.`,
     );
     this.name = 'GoogleRequestBudgetError';
     this.provider = provider;
@@ -169,17 +170,22 @@ export class GoogleDailyRequestBudget {
    * at all, and neither is a budget the owner ruled on. The count itself is
    * never waived either — an operator request increments past the line so the
    * next scheduled run is guarded against what the operator actually spent.
+   * A scheduled backlog can reserve live capacity by lowering its ceiling
+   * within the same ledger transaction that charges the request.
    */
-  reserve(provenance?: SourceInvocationProvenance): void {
+  reserve(provenance?: SourceInvocationProvenance, reserveForLive?: (dailyLimit: number) => number): void {
     const routine = sourceInvocationProvenance(provenance) === 'scheduled';
     const now = validDate(this.now(), this.provider);
     const utcDay = now.toISOString().slice(0, 10);
+    const dailyLimit = this.dailyRequestBudget;
+    const limit = routine ? dailyLimit - (reserveForLive?.(dailyLimit) ?? 0) : dailyLimit;
     if (this.ledgerPath) {
       reservePersistentRequest({
         ledgerPath: this.ledgerPath,
         provider: this.provider,
         utcDay,
-        dailyRequestBudget: this.dailyRequestBudget,
+        dailyRequestBudget: dailyLimit,
+        limit,
         routine,
         now,
       });
@@ -201,8 +207,8 @@ export class GoogleDailyRequestBudget {
       this.utcDay = utcDay;
       this.requests = 0;
     }
-    if (routine && this.requests >= this.dailyRequestBudget) {
-      throw new GoogleRequestBudgetError(this.provider, nextUtcDay(now), 'daily_api_request_guard', { limit: this.dailyRequestBudget, used: this.requests });
+    if (routine && this.requests >= limit) {
+      throw limitRefusal(this.provider, now, dailyLimit, limit, this.requests);
     }
     this.requests += 1;
   }
@@ -294,6 +300,7 @@ function reservePersistentRequest(input: {
   provider: string;
   utcDay: string;
   dailyRequestBudget: number;
+  limit: number;
   /** False for an operator run: the daily line does not refuse it. */
   routine: boolean;
   now: Date;
@@ -334,9 +341,9 @@ function reservePersistentRequest(input: {
           return;
         }
 
-        const reserved = db.query(`
+        const reserved = input.limit > 0 && db.query(`
           INSERT INTO ${GOOGLE_REQUEST_BUDGET_LEDGER_TABLE} (
-            provider, utc_day, requests
+              provider, utc_day, requests
           ) VALUES (?, ?, 1)
           ON CONFLICT(provider, utc_day) DO UPDATE SET
             requests = requests + 1
@@ -345,16 +352,27 @@ function reservePersistentRequest(input: {
         `).get(
           input.provider,
           input.utcDay,
-          input.dailyRequestBudget,
+          input.limit,
         ) as { requests?: number } | null;
         if (!reserved) {
-          throw new GoogleRequestBudgetError(input.provider, nextUtcDay(input.now), 'daily_api_request_guard', { limit: input.dailyRequestBudget });
+          if (input.limit === input.dailyRequestBudget) {
+            throw new GoogleRequestBudgetError(input.provider, nextUtcDay(input.now), 'daily_api_request_guard', { limit: input.dailyRequestBudget });
+          }
+          const row = db.query(`SELECT requests FROM ${GOOGLE_REQUEST_BUDGET_LEDGER_TABLE} WHERE provider = ? AND utc_day = ?`)
+            .get(input.provider, input.utcDay) as { requests: number } | null;
+          throw limitRefusal(input.provider, input.now, input.dailyRequestBudget, input.limit, row?.requests ?? 0);
         }
       });
       reserve.immediate();
     }),
     RESERVATION_BUSY_RETRY_DELAYS_MS,
   );
+}
+
+function limitRefusal(provider: string, now: Date, dailyLimit: number, limit: number, used: number): GoogleRequestBudgetError {
+  return used >= dailyLimit
+    ? new GoogleRequestBudgetError(provider, nextUtcDay(now), 'daily_api_request_guard', { limit: dailyLimit, used })
+    : new GoogleRequestBudgetError(provider, nextUtcDay(now), 'request_reserve', { limit, used });
 }
 
 function persistentRequestsForDay(
