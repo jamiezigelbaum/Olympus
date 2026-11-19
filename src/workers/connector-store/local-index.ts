@@ -3792,6 +3792,8 @@ self.onmessage = ({ data: [path, budgetMs, pagesPerStep] }) => {
 function connectorRecencyIndexWorkerSource(): string {
   return `
 import { Database } from 'bun:sqlite';
+// core/sqlite-store.ts closeSqliteStore, inlined as in the reclaim worker above.
+const closeSqliteStore = (db) => { try { db.exec('PRAGMA wal_checkpoint(TRUNCATE);'); } catch {} db.close(); };
 self.onmessage = ({ data: [path] }) => {
   const db = new Database(path, { create: false, strict: true });
   let result;
@@ -3802,7 +3804,7 @@ self.onmessage = ({ data: [path] }) => {
   } catch (error) {
     result = { busy: /^SQLITE_(BUSY|LOCKED)(_|$)/.test(error.code) };
   } finally {
-    db.close();
+    closeSqliteStore(db);
   }
   postMessage(result);
 };`;
