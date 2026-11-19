@@ -1705,6 +1705,17 @@ async function prepareSplitUpdate(run: Run, workDir: string, beforeVersion: stri
   const compared = await run.agent('store-files', '--compare before', 60_000);
   if (storeFiles !== undefined) obs.storeFiles = { before: storeFiles, ...(compared.result?.ok === true ? { after: compared.result as unknown as StoreFileCount } : {}) };
   for (const check of forcedFailureChecks(obs)) run.add(check);
+  // The put-back restored the root, not only the package (plan, 19 Nov: ledger 17 cannot be opened by an earlier build).
+  const root = await run.agent('data-root-compare', '--before before-forced-update --after after-put-back', 60_000);
+  const changed = Array.isArray(root.result?.changed) ? root.result.changed as string[] : undefined;
+  run.add({
+    id: 'upgrade.forced-failure.schema',
+    title: 'After the failed update, every store reads the schema versions it had before the update: the data root was put back, not only the package',
+    status: root.result?.ok === true && changed !== undefined && changed.length === 0 && Number(root.result.compared) > 0 ? 'pass' : 'fail',
+    detail: root.result?.ok !== true ? agentDetail(root)
+      : changed!.length ? `${changed!.length} store(s) not put back: ${changed!.slice(0, 5).join('; ')}`
+      : `${root.result.compared} store(s) read the same schema versions as before the update`,
+  });
   // The real update's watch reads only what the logs gain from here.
   await run.agent('front-mark', '', 60_000);
   return { ...(set ? { set } : {}), ...(storeFiles !== undefined ? { storeFiles } : {}) };

@@ -2445,6 +2445,33 @@ function dataRootSnapshotCommand(label: string): never {
   emit({ ok: true });
 }
 
+/**
+ * Whether the put-back restored the data root, not only the package: every store the root had before the forced update reads
+ * the same schema versions after it. A store left at the candidate's schema (a newer ledger the earlier release cannot open)
+ * names itself here. Paths and versions only; no content leaves the machine.
+ */
+function dataRootCompareCommand(beforeLabel: string, afterLabel: string): never {
+  type Sample = { files: Array<{ path: string; schema?: Record<string, number> | string }> };
+  let before: Sample, after: Sample;
+  try {
+    before = JSON.parse(readFileSync(join(WORKDIR, `data-root-${beforeLabel}.json`), 'utf8')) as Sample;
+    after = JSON.parse(readFileSync(join(WORKDIR, `data-root-${afterLabel}.json`), 'utf8')) as Sample;
+  } catch (error) {
+    emit({ ok: false, detail: `no data-root snapshots ${beforeLabel} and ${afterLabel}: ${(error instanceof Error ? error.message : String(error)).slice(0, 120)}` });
+  }
+  const now = new Map(after.files.map((file) => [file.path, file.schema]));
+  const changed: string[] = [];
+  let compared = 0;
+  for (const file of before.files) {
+    if (file.schema === undefined) continue;
+    compared += 1;
+    const was = JSON.stringify(file.schema);
+    const is = JSON.stringify(now.get(file.path) ?? 'gone');
+    if (was !== is) changed.push(`${file.path}: ${was} -> ${is}`);
+  }
+  emit({ ok: true, compared, changed });
+}
+
 /** Samples the data root every 2 s into `data-root-watch.jsonl` while the forced update runs (the mark, the copy and the put-back). */
 async function dataRootWatchCommand(seconds: number): Promise<never> {
   mkdirSync(WORKDIR, { recursive: true });
@@ -2940,6 +2967,7 @@ async function main(): Promise<void> {
     case 'archive-collect': return archiveCollectCommand();
     case 'collect-logs': return collectLogs(flag('--out'));
     case 'data-root-snapshot': return dataRootSnapshotCommand(flag('--label'));
+    case 'data-root-compare': return dataRootCompareCommand(flag('--before'), flag('--after'));
     case 'data-root-watch': return await dataRootWatchCommand(Number(flag('--seconds', '900')));
     case 'cutover-watch': {
       const seconds = Number(flag('--seconds', '2100'));
