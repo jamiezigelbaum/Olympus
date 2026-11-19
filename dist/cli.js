@@ -26702,17 +26702,18 @@ function timedOutCorpora(coverage) {
     unchecked: named((gap) => gapCorpus(UNCHECKED_PREFIX, gap))
   };
 }
-function timedOutCoverageNotes(coverage) {
+function partialSearchCoverageNotes(coverage) {
   const { stillSearching, partlySearched, newestMissed, unchecked } = timedOutCorpora(coverage);
   return [
     ...stillSearching.map(laneTimeoutGap),
     ...partlySearched.map(semanticTimeoutGap),
     ...newestMissed.map(recentItemsTimeoutGap),
     ...unchecked.map(visibilityCheckTimeoutGap),
-    ...[...new Set(coverage.extractionGaps.map((gap) => gapCorpus(KEYWORDS_PREFIX, gap)).filter((id) => id !== undefined))].map(keywordPreparationGap)
+    ...[...new Set(coverage.extractionGaps.map((gap) => gapCorpus(KEYWORDS_PREFIX, gap)).filter((id) => id !== undefined))].map(keywordPreparationGap),
+    ...coverage.extractionGaps.includes(RERANK_FALLBACK_GAP) ? [RERANK_FALLBACK_GAP] : []
   ];
 }
-var SEMANTIC_TIMEOUT_REASONS, PREFIX = "Ran out of time searching by meaning: ", KEYWORD_PREPARATION_INCOMPLETE = "keyword_preparation_incomplete", STARTUP_SEARCH_GAP = "Olympus was still starting when you asked, so the search took longer.", KEYWORDS_PREFIX = "Keyword preparation unfinished for ", RECENT_ITEMS_CUT_SHORT = "recent_items_cut_short", RECENT_PREFIX = "Ran out of time reading the newest items in ", VISIBILITY_CHECK_CUT_SHORT = "visibility_check_cut_short", UNCHECKED_PREFIX = "Ran out of time checking the privacy of matches in ";
+var SEMANTIC_TIMEOUT_REASONS, PREFIX = "Ran out of time searching by meaning: ", KEYWORD_PREPARATION_INCOMPLETE = "keyword_preparation_incomplete", STARTUP_SEARCH_GAP = "Olympus was still starting when you asked, so the search took longer.", RERANK_FALLBACK_GAP = "The search could not reorder results by relevance this time because that step did not finish. The best source may be missing, and asking again may help.", KEYWORDS_PREFIX = "Keyword preparation unfinished for ", RECENT_ITEMS_CUT_SHORT = "recent_items_cut_short", RECENT_PREFIX = "Ran out of time reading the newest items in ", VISIBILITY_CHECK_CUT_SHORT = "visibility_check_cut_short", UNCHECKED_PREFIX = "Ran out of time checking the privacy of matches in ";
 var init_partial_search = __esm(() => {
   SEMANTIC_TIMEOUT_REASONS = new Set(["vector_scan_deadline_exceeded", "vector_scan_store_busy"]);
 });
@@ -82560,8 +82561,8 @@ async function readEmbeddingSweepIdle(path) {
 function isIdleSweep(value) {
   if (!value || typeof value !== "object")
     return false;
-  const { key, at, inventory } = value;
-  return typeof key === "string" && /^[a-f0-9]{64}$/.test(key) && typeof at === "number" && Number.isSafeInteger(at) && at > 0 && inventory?.inventory_complete === 1 && inventory.skipped_failed_chunks === 0 && Object.keys(inventory).length === INVENTORY_FIELDS.length && INVENTORY_FIELDS.every((field) => {
+  const { key, writes, visibilityHash, at, inventory } = value;
+  return typeof key === "string" && /^[a-f0-9]{64}$/.test(key) && (writes === undefined || Number.isSafeInteger(writes)) && (visibilityHash === undefined || typeof visibilityHash === "string" && /^[a-f0-9]{16}$/.test(visibilityHash)) && typeof at === "number" && Number.isSafeInteger(at) && at > 0 && inventory?.inventory_complete === 1 && inventory.skipped_failed_chunks === 0 && Object.keys(inventory).length === INVENTORY_FIELDS.length && INVENTORY_FIELDS.every((field) => {
     const count = inventory[field];
     return count !== undefined && Number.isSafeInteger(count) && count >= 0;
   });
@@ -108723,6 +108724,8 @@ async function buildPreparedEvidencePackDetailed(input) {
       kept: hydrated.length - denied.length,
       promoted: reranked.audit.outcome === "applied" ? hydrated.filter((entry) => !entry.policyDenied && scorable.indexOf(entry) >= hydrated.length - denied.length).length : 0
     } : reranked.audit;
+    if (rerank.outcome === "timed_out" || rerank.outcome === "failed")
+      extractionGaps.push(RERANK_FALLBACK_GAP);
   }
   const windowSide = conversationWindowPerSide();
   if (windowSide > 0 && !input.selectedItems?.length) {
@@ -109855,7 +109858,7 @@ function createAnalystSourceIndexAnswerHandler(options) {
     const readContent = new Set(detail.pack.candidates.filter((candidate) => candidate.chunks.length > 0).map((candidate) => itemKey(candidate.provenance.sourceItem)));
     const readingOnly = stillReading > 0 && !analystResult.citations.some((citation) => readContent.has(itemKey(citation.provenance.sourceItem)));
     const fitNote = promptFitNotes.get(analystResult);
-    const readingNotes = fitNote && releasedNotes.includes(fitNote) ? [...onDemandNotes, fitNote] : onDemandNotes;
+    const readingNotes = [...onDemandNotes, ...releasedNotes.filter((note) => note === fitNote || note === RERANK_FALLBACK_GAP)];
     const answer = stillReading === 0 ? heldAnswer : [onDemandReadingCoverageNote(stillReading), ...readingOnly ? readingNotes : [heldAnswer]].join(`
 
 `);
@@ -110964,13 +110967,18 @@ function releaseAnalystAnswer(input) {
     ...input.result.unanswered.length === 0 && releasedEvidenceCount === 0 ? zeroEvidenceCoverageNotes(input.detail.pack) : [],
     ...releasedEvidenceCount === 0 ? corpusReadabilityCoverageNotes(input.detail) : [],
     ...secureLocalExclusionCoverageNotes(input.detail),
-    ...timedOutCoverageNotes(input.detail.pack.coverage),
+    ...partialSearchCoverageNotes(input.detail.pack.coverage),
     ...classificationCoverageNotes(input.detail),
     ...secretLocationCoverageNotes(input.detail)
   ]);
   const safeUnsupportedAnswer = WITHHELD_ANSWERS.noAnswerInText;
   const unsupportedNoContent = uncitedNonPublicAnswer && isUnsupportedNoContentAnswer2(input.result);
-  const safeUnsupportedGaps = [...safeUnsupportedCoverageGaps(input.detail.pack, nonPublicPack), ...startupNotes, ...input.onDemandNotes ?? []];
+  const safeUnsupportedGaps = [
+    ...safeUnsupportedCoverageGaps(input.detail.pack, nonPublicPack),
+    ...startupNotes,
+    ...input.onDemandNotes ?? [],
+    ...input.detail.pack.coverage.extractionGaps.includes(RERANK_FALLBACK_GAP) ? [RERANK_FALLBACK_GAP] : []
+  ];
   const safeUnsupportedDraft = composeReleasedAnswer(safeUnsupportedAnswer, safeUnsupportedGaps);
   const finalDraftAnswer = composeReleasedAnswer(unsupportedNoContent ? safeUnsupportedDraft : plainTrustWords(input.result.answer), unsupportedNoContent ? [] : releasedUnanswered);
   const originalScanDecision = finalDraftAnswer === originalDraftAnswer ? undefined : evaluateReleaseGate({
@@ -111130,8 +111138,11 @@ function sanitizeReleasedCoverageNotes(unanswered, detail, nonPublicPack) {
     return [];
   if (!nonPublicPack)
     return [...unanswered];
+  const contentGaps = unanswered.filter((gap) => gap.trim() !== RERANK_FALLBACK_GAP);
+  if (contentGaps.length === 0)
+    return [];
   const categories = new Set(["coverage"]);
-  if (detail.pack.coverage.extractionGaps.some((gap) => gap !== STARTUP_SEARCH_GAP && gap.trim().length > 0)) {
+  if (detail.pack.coverage.extractionGaps.some(isSourceExtractionGap)) {
     categories.add("extraction/readability");
   }
   if ((detail.corpusReadabilityGaps ?? []).some((gap) => gap.partialDocuments > 0 || gap.unreadDocuments > 0)) {
@@ -111139,11 +111150,14 @@ function sanitizeReleasedCoverageNotes(unanswered, detail, nonPublicPack) {
   }
   const categoryText = [...categories].sort().join(" and ");
   return [
-    `${unanswered.length} non-public ${categoryText} gap${unanswered.length === 1 ? "" : "s"} ` + "affected this answer; " + "raw filenames, paths, and source content were withheld."
+    `${contentGaps.length} non-public ${categoryText} gap${contentGaps.length === 1 ? "" : "s"} ` + "affected this answer; " + "raw filenames, paths, and source content were withheld."
   ];
 }
+function isSourceExtractionGap(gap) {
+  return gap !== STARTUP_SEARCH_GAP && gap !== RERANK_FALLBACK_GAP && gap.trim().length > 0;
+}
 function safeUnsupportedCoverageGaps(pack, nonPublicPack) {
-  const gaps = pack.coverage.extractionGaps.filter((gap) => gap !== STARTUP_SEARCH_GAP && gap.trim().length > 0);
+  const gaps = pack.coverage.extractionGaps.filter(isSourceExtractionGap);
   if (gaps.length === 0) {
     const corpusIds = [...new Set(pack.coverage.searchedCorpora.map((corpusId) => corpusId.trim()).filter(Boolean))].sort();
     if (corpusIds.length === 0)
@@ -111340,7 +111354,7 @@ function unreadableMatchedReleaseInputs(detail, releaseSecureContent) {
   });
 }
 function unreadableMatchedCandidateIndexes(detail) {
-  if (!detail.pack.coverage.extractionGaps.some((gap) => gap !== STARTUP_SEARCH_GAP))
+  if (!detail.pack.coverage.extractionGaps.some(isSourceExtractionGap))
     return [];
   const contentPrivate = new Set(detail.contentPrivateCandidateIndexes ?? []);
   return detail.pack.candidates.map((candidate, index) => ({ candidate, index })).filter(({ index }) => !contentPrivate.has(index)).filter(({ candidate }) => candidate.provenance.sourceItem.family === "file").filter(({ candidate }) => {
@@ -111502,7 +111516,7 @@ async function searchReleasedEvidence(input) {
   });
   withheld += released.withheld;
   const coverage = detail.pack.coverage;
-  const cutShort = timedOutCoverageNotes(coverage);
+  const cutShort = partialSearchCoverageNotes(coverage);
   const heldPassages = chunkCoverageNote(remotePack.report);
   if (heldPassages)
     cutShort.push(heldPassages);
@@ -228732,6 +228746,31 @@ function withEmbeddingSweep(sources, targetsFor, options = {}) {
 function embeddingSweepConcurrencyKey(source) {
   return `${source.corpusId}.embeddings`;
 }
+function freshEmbeddingSweep(receipt, now) {
+  return now >= receipt.at && now - receipt.at < EMBEDDING_SWEEP_IDLE_FULL_PASS_MS;
+}
+function embeddingSweepWake(store, receipt, current) {
+  if (!current)
+    return "marker_unavailable";
+  if (!receipt)
+    return "none_remembered";
+  if (receipt.key !== current.key) {
+    if (receipt.writes === undefined || receipt.visibilityHash === undefined)
+      return "key_changed";
+    if (receipt.writes !== current.writes)
+      return "writes";
+    if (receipt.visibilityHash !== current.visibilityHash)
+      return "visibility";
+    return "build";
+  }
+  if (!freshEmbeddingSweep(receipt, Date.now()))
+    return "expired";
+  if (store.queuedEmbeddingItemIds().length > 0)
+    return "queued";
+  if (store.embeddingDeferredReason() !== undefined)
+    return "deferred";
+  return;
+}
 function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_DEADLINE_MS, sourceIndex = 0, trickle, onProgress, holdForAsk) {
   const maxItems = embeddingSweepMaxItems();
   const askHolds = () => {
@@ -228769,19 +228808,60 @@ function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_
       const visibility = target.store.embeddingSweepVisibilityMarker(target.provider, durable);
       if (visibility === undefined)
         return;
-      return createHash110("sha256").update(JSON.stringify([
+      const key = createHash110("sha256").update(JSON.stringify([
         EMBEDDING_SWEEP_BUILD,
         PUBLIC_RUNTIME_BUILD,
         slot,
         writes,
         visibility
       ])).digest("hex");
+      return { key, writes, visibilityHash: createHash110("sha256").update(visibility).digest("hex").slice(0, 16) };
     } catch {
       console.warn("[olympus:embedding-sweep] idle markers unreadable; walking store");
       return;
     }
   };
-  const fresh = (receipt, now) => now >= receipt.at && now - receipt.at < EMBEDDING_SWEEP_IDLE_FULL_PASS_MS;
+  const remember = async (target, slot, before, run, deferred, path, receipts) => {
+    if (run?.busy)
+      return "busy";
+    if (deferred || run?.deferredReason !== undefined)
+      return "deferred";
+    if (run?.stoppedAtDeadline)
+      return "stopped_at_deadline";
+    if (run && run.itemsAttempted !== 0)
+      return "items_attempted";
+    if (run && run.chunksEmbedded !== 0)
+      return "chunks_embedded";
+    if (run && run.itemsFailed !== 0)
+      return "items_failed";
+    if (run && run.itemsOutOfScope !== 0)
+      return "items_out_of_scope";
+    if (run?.inventory?.inventory_complete !== 1)
+      return "inventory_incomplete";
+    const { store } = target;
+    if (store.queuedEmbeddingItemIds().length > 0)
+      return "queued";
+    if (!before)
+      return "marker_unavailable";
+    const after = quietKey(target, quietSlot(target), path !== undefined);
+    if (!after)
+      return "marker_unavailable";
+    if (after.key !== before.key)
+      return "marker_moved_during_pass";
+    const receipt = { ...before, at: Date.now(), inventory: run.inventory };
+    if (path && receipts && store.embeddingFailedItemCount() === 0) {
+      for (const [otherSlot, other] of receipts) {
+        if (!freshEmbeddingSweep(other, receipt.at))
+          receipts.delete(otherSlot);
+      }
+      receipts.set(slot, receipt);
+      await writeEmbeddingSweepIdle(path, receipts);
+    } else {
+      const slots = quiet.get(store) ?? new Map;
+      quiet.set(store, slots.set(slot, receipt));
+    }
+    return;
+  };
   return {
     id: `${source.sourceId}_embeddings`,
     kind: "embed",
@@ -228793,7 +228873,7 @@ function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_
       const passTargets = targets();
       const runs = [];
       let trickled = false;
-      const restedRuns = new Set;
+      const walks = new Map;
       for (const target of passTargets) {
         const paced = tricklingTarget(target);
         trickled ||= paced;
@@ -228803,7 +228883,8 @@ function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_
         const receipts = path ? await readEmbeddingSweepIdle(path) : undefined;
         const keyBefore = idleBackoff ? quietKey(target, slot, path !== undefined) : undefined;
         const rested = quiet.get(store)?.get(slot) ?? receipts?.get(slot);
-        if (rested && rested.key === keyBefore && fresh(rested, Date.now()) && store.queuedEmbeddingItemIds().length === 0 && store.embeddingDeferredReason() === undefined) {
+        const wake = idleBackoff ? embeddingSweepWake(store, rested, keyBefore) : undefined;
+        if (rested && wake === undefined) {
           runs.push({
             corpusId: store.corpusId,
             itemsAttempted: 0,
@@ -228812,9 +228893,9 @@ function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_
             itemsOutOfScope: 0,
             inventory: rested.inventory
           });
-          restedRuns.add(runs.length - 1);
           continue;
         }
+        const runIndex = runs.length;
         quiet.get(store)?.delete(slot);
         if (path && receipts?.delete(slot))
           await writeEmbeddingSweepIdle(path, receipts);
@@ -228835,20 +228916,10 @@ function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_
           }
           const outage = target.store.embeddingDeferredReason();
           runs.push(...result.map((run) => run.busy === true && run.deferredReason === undefined && outage !== undefined ? { ...run, deferredReason: outage } : run));
-          const only = result.length === 1 ? result[0] : undefined;
-          if (keyBefore !== undefined && only && outage === undefined && only.busy !== true && only.deferredReason === undefined && only.stoppedAtDeadline !== true && only.itemsAttempted === 0 && only.chunksEmbedded === 0 && only.itemsFailed === 0 && only.itemsOutOfScope === 0 && only.inventory?.inventory_complete === 1 && store.queuedEmbeddingItemIds().length === 0 && quietKey(target, quietSlot(target), path !== undefined) === keyBefore) {
-            const receipt = { key: keyBefore, at: Date.now(), inventory: only.inventory };
-            if (path && receipts && store.embeddingFailedItemCount() === 0) {
-              for (const [otherSlot, other] of receipts) {
-                if (!fresh(other, receipt.at))
-                  receipts.delete(otherSlot);
-              }
-              receipts.set(slot, receipt);
-              await writeEmbeddingSweepIdle(path, receipts);
-            } else {
-              const slots = quiet.get(store) ?? new Map;
-              quiet.set(store, slots.set(slot, receipt));
-            }
+          if (wake) {
+            const only = result.length === 1 ? result[0] : undefined;
+            const blocker = await remember(target, slot, keyBefore, only, outage !== undefined, path, receipts);
+            walks.set(runIndex, { wake, ...blocker ? { not_resting: blocker } : {} });
           }
           continue;
         }
@@ -228862,6 +228933,8 @@ function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_
           inventory: { inventory_complete: 0, pass_overran: 1 },
           deferredReason: EMBEDDING_PROVIDER_UNAVAILABLE_REASON
         });
+        if (wake)
+          walks.set(runIndex, { wake, not_resting: "deferred" });
       }
       const deferred = runs.filter((run) => run.deferredReason !== undefined).length;
       const counts = {
@@ -228878,6 +228951,7 @@ function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_
         store_index: index,
         trust_domain: passTargets[index].store.trustDomain,
         family: passTargets[index].store.family,
+        ...walks.get(index),
         counts: {
           ...run.inventory,
           whole_store: passTargets[index].wholeStore ? 1 : 0,
@@ -228891,7 +228965,7 @@ function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_
           stores_deferred: run.deferredReason ? 1 : 0,
           stores_lease_busy: run.busy ? 1 : 0,
           stopped_at_deadline: run.stoppedAtDeadline ? 1 : 0,
-          ...idleBackoff ? { rested: restedRuns.has(index) ? 1 : 0 } : {}
+          ...idleBackoff ? { rested: walks.has(index) ? 0 : 1 } : {}
         }
       }));
       const attemptedAt = Date.parse(context?.attemptedAt ?? "") || Date.now();

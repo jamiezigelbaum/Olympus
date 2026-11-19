@@ -29,6 +29,7 @@ export function laneTimeoutGap(corpusId: string): string {
 
 export const KEYWORD_PREPARATION_INCOMPLETE = 'keyword_preparation_incomplete';
 export const STARTUP_SEARCH_GAP = 'Olympus was still starting when you asked, so the search took longer.';
+export const RERANK_FALLBACK_GAP = 'The search could not reorder results by relevance this time because that step did not finish. The best source may be missing, and asking again may help.';
 
 export function promptFitCoverageGap(lane: 'local' | 'cloud', kept: number, shortlisted: number): string {
   const model = lane === 'local' ? 'private' : 'cloud';
@@ -101,8 +102,8 @@ export function timedOutCorpora(coverage: {
   };
 }
 
-/** One coverage note per source a search cut short, naming it by corpus. */
-export function timedOutCoverageNotes(coverage: Parameters<typeof timedOutCorpora>[0]): string[] {
+/** Coverage notes for search steps that did not finish, naming affected corpora where applicable. */
+export function partialSearchCoverageNotes(coverage: Parameters<typeof timedOutCorpora>[0]): string[] {
   const { stillSearching, partlySearched, newestMissed, unchecked } = timedOutCorpora(coverage);
   return [
     ...stillSearching.map(laneTimeoutGap),
@@ -110,5 +111,6 @@ export function timedOutCoverageNotes(coverage: Parameters<typeof timedOutCorpor
     ...newestMissed.map(recentItemsTimeoutGap),
     ...unchecked.map(visibilityCheckTimeoutGap),
     ...[...new Set(coverage.extractionGaps.map(gap => gapCorpus(KEYWORDS_PREFIX, gap)).filter((id): id is string => id !== undefined))].map(keywordPreparationGap),
+    ...(coverage.extractionGaps.includes(RERANK_FALLBACK_GAP) ? [RERANK_FALLBACK_GAP] : []),
   ];
 }
