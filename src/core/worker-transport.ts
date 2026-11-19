@@ -1,6 +1,7 @@
 /** Linux's owner-only worker transport. HTTP origins remain stable for browser
  * cookies/CSRF; they are not listening TCP endpoints on the engine host. */
-import { lstatSync, mkdirSync, realpathSync, chmodSync } from 'node:fs';
+import { lstatSync, mkdirSync, realpathSync, chmodSync, type Stats } from 'node:fs';
+import { lstat, realpath } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { request as httpRequest } from 'node:http';
 import { Readable } from 'node:stream';
@@ -20,20 +21,40 @@ function ownerId(options: WorkerTransportOptions): number {
   return uid;
 }
 
-/** No aliases, symlinks, foreign owners or replaceable ancestors. Root-owned
- * sticky ancestors (e.g. /tmp in isolated tests) cannot replace our directory. */
-function validateDirectory(path: string, uid: number, privateMode: boolean): void {
+function* directoryAncestors(path: string): Iterable<string> {
   if (!isAbsolute(path) || normalize(path) !== path || /[\x00-\x1f\x7f]/.test(path)) throw new Error('Unsafe worker socket directory.');
   let current = parse(path).root;
   for (const part of path.slice(current.length).split('/').filter(Boolean)) {
     current = join(current, part);
-    const stat = lstatSync(current);
-    if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.uid !== uid && stat.uid !== 0)) throw new Error('Unsafe worker socket ancestor.');
-    if ((stat.mode & 0o022) && !(stat.uid === 0 && (stat.mode & 0o1000))) throw new Error('Writable worker socket ancestor.');
+    yield current;
   }
-  const stat = lstatSync(path);
+}
+
+/** No aliases, symlinks, foreign owners or replaceable ancestors. Root-owned
+ * sticky ancestors (e.g. /tmp in isolated tests) cannot replace our directory. */
+function validateDirectoryEntry(stat: Stats, uid: number, privateMode: boolean): void {
+  if (!stat.isDirectory() || (stat.uid !== uid && stat.uid !== 0)) throw new Error('Unsafe worker socket ancestor.');
+  if ((stat.mode & 0o022) && !(stat.uid === 0 && (stat.mode & 0o1000))) throw new Error('Writable worker socket ancestor.');
   if (privateMode && (stat.uid !== uid || (stat.mode & 0o777) !== 0o700)) throw new Error('Worker runtime directory must be owner-owned and 0700.');
+}
+
+function validateDirectory(path: string, uid: number): void {
+  for (const ancestor of directoryAncestors(path)) {
+    validateDirectoryEntry(lstatSync(ancestor), uid, ancestor === path);
+  }
+  if (path === parse(path).root) validateDirectoryEntry(lstatSync(path), uid, true);
   if (realpathSync(path) !== path) throw new Error('Worker socket directory must not contain symlinks.');
+}
+
+/** Recheck the actual listen path, including both private directories above it. */
+export async function validateWorkerListenDirectory(path: string): Promise<void> {
+  const uid = ownerId({});
+  const directory = dirname(path);
+  const runtime = dirname(directory);
+  for (const ancestor of directoryAncestors(directory)) {
+    validateDirectoryEntry(await lstat(ancestor), uid, ancestor === runtime || ancestor === directory);
+  }
+  if (await realpath(directory) !== directory) throw new Error('Worker socket directory must not contain symlinks.');
 }
 
 export function workerSocketPath(options: WorkerTransportOptions = {}): string | undefined {
@@ -41,7 +62,7 @@ export function workerSocketPath(options: WorkerTransportOptions = {}): string |
   const layout = resolveLinuxEngineLayout(options.env ?? process.env);
   const runtime = layout.runtimeHome;
   if (!runtime) throw new Error('Linux requires an owner-owned 0700 XDG_RUNTIME_DIR from the user session.');
-  validateDirectory(runtime, ownerId(options), true);
+  validateDirectory(runtime, ownerId(options));
   if (!/^\/[A-Za-z0-9_./-]+$/.test(runtime)) throw new Error('XDG_RUNTIME_DIR must be a shell-safe absolute path for SSH socket forwarding.');
   const path = layout.workerSocketPath;
   if (Buffer.byteLength(path) > 107) throw new Error('Worker Unix socket path exceeds the Linux limit.');
@@ -52,7 +73,7 @@ export function workerSocketPath(options: WorkerTransportOptions = {}): string |
 export function validateWorkerSocketDirectory(options: WorkerTransportOptions = {}): string | undefined {
   const path = workerSocketPath(options);
   if (!path) return undefined;
-  validateDirectory(dirname(path), ownerId(options), true);
+  validateDirectory(dirname(path), ownerId(options));
   return path;
 }
 
@@ -111,7 +132,7 @@ export function prepareWorkerSocket(options: WorkerTransportOptions = {}): strin
   if (!path) return undefined;
   try { mkdirSync(dirname(path), { mode: 0o700 }); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
-  validateDirectory(dirname(path), ownerId(options), true);
+  validateDirectory(dirname(path), ownerId(options));
   try { lstatSync(path); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return path; throw error; }
   throw new Error('Worker socket path is occupied; stop its owner and resolve the path before starting Olympus.');

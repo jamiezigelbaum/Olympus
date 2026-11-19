@@ -505,6 +505,7 @@ import {
   restartAfterFront,
   startEngineBackgroundStatus,
   listenWhileStarting,
+  bindFrontUnixListener,
   waitForBackgroundBootDone,
   type EngineFront,
 } from '../engine-split/runtime.ts';
@@ -760,6 +761,22 @@ export async function main(): Promise<void> {
   const engineSocketPath = engineRole === 'single' ? undefined : engineBackgroundSocketFromEnv(process.env);
   let engineFront: EngineFront | undefined;
   let frontStarting: ReturnType<typeof listenWhileStarting>;
+  let closeDesktopBridge = () => {};
+  let shutdownSignals: ReturnType<typeof installWorkerShutdownSignals> | undefined;
+  let startupInterrupted = false;
+  let stopListener: ((force?: boolean) => Promise<void>) | undefined;
+  const registerListenerStop = (stop: (force?: boolean) => Promise<void>) => {
+    let stopped: Promise<void> | undefined;
+    stopListener = (force) => stopped ??= stop(force);
+  };
+  const installShutdownSignals = () => installWorkerShutdownSignals({
+    closeOwnerBridge: () => closeDesktopBridge(),
+    stopStartingListener: () => {
+      startupInterrupted = true;
+      return stopListener?.(true);
+    },
+    exit: code => process.exit(code),
+  });
   if (engineRole === 'front') {
     // The front does none of the boot work that needs the data root to
     // itself: it waits until the background has done it, and from then on
@@ -779,6 +796,8 @@ export async function main(): Promise<void> {
       hostname: resolveEmailSourceBindHostFromEnv(process.env),
       port: workerListenPort(parsePort(process.env.OLYMPUS_EMAIL_SOURCE_PORT ?? '8010')),
     });
+    if (frontStarting) registerListenerStop(frontStarting.stop);
+    shutdownSignals = installShutdownSignals();
     await waitForBackgroundBootDone({ env: process.env });
     reportFrontStep();
     engineFront = createEngineFront({ env: process.env, socketPath: engineSocketPath!, authToken: frontToken });
@@ -817,8 +836,7 @@ export async function main(): Promise<void> {
   }
   // Startup signals can close only this instance's listener/client. A second
   // foreground worker never revokes the engine host's epoch or runtime path.
-  let closeDesktopBridge = () => {};
-  const shutdownSignals = installWorkerShutdownSignals({ closeOwnerBridge: () => closeDesktopBridge(), exit: code => process.exit(code) });
+  shutdownSignals ??= installShutdownSignals();
   const port = parsePort(process.env.OLYMPUS_EMAIL_SOURCE_PORT ?? '8010');
   const xBookmarksSemanticRelevanceBar = sourceIndexSemanticRelevanceBarFromEnv(process.env);
   const hostname = resolveEmailSourceBindHostFromEnv(process.env);
@@ -6590,8 +6608,11 @@ export async function main(): Promise<void> {
     ? async (request: Request): Promise<Response> => (await frontRoutes(request)) ?? worker.fetch(request)
     : worker.fetch;
   inProcessFetch = frontWorkerFetch;
-  if (!frontStarting && listens && releaseSystemdWorkerSocket()) console.warn('[olympus:worker] removed the socket left by the previous worker run');
-  const socketPath = frontStarting ? frontStarting.socketPath : listens ? prepareWorkerSocket() : undefined;
+  const prepareListenSocket = () => {
+    if (releaseSystemdWorkerSocket()) console.warn('[olympus:worker] removed the socket left by the previous worker run');
+    return prepareWorkerSocket();
+  };
+  let socketPath = frontStarting ? frontStarting.socketPath : listens ? prepareListenSocket() : undefined;
   const serverOptions = {
     // Remote agent routes authenticate connection credentials only (bearer
     // connection tokens, or OAuth access tokens bound to this resource); the
@@ -6758,8 +6779,8 @@ export async function main(): Promise<void> {
     });
     return response;
   };
-  const startServer = () => socketPath
-    ? Bun.serve(workerSocketServe({ unix: socketPath, fetch: fetchOnWorkerSocket }))
+  const startServer = (unix = socketPath) => unix
+    ? Bun.serve(workerSocketServe({ unix, fetch: fetchOnWorkerSocket }))
     : Bun.serve({ hostname, port: workerListenPort(port), idleTimeout: 0, ...serverOptions });
   // Only the wait is bounded: Promise.race does not cancel `warming`. A set
   // rebuilt from the ledger keeps building after the front listens, in turns.
@@ -6769,11 +6790,31 @@ export async function main(): Promise<void> {
     await Promise.race([warming, new Promise<void>((resolve) => { bound = setTimeout(resolve, FRONT_VISIBILITY_READY_BOUND_MS); })]);
     clearTimeout(bound);
   }
-  // Keep the front's listener and in-flight starting responses. Both transports
-  // already have the real server's bind options; only the fetch handler changes.
-  const server = frontStarting
-    ? frontStarting.server.reload({ fetch: socketPath ? fetchOnWorkerSocket : serverOptions.fetch })
-    : !listens ? undefined : socketPath ? bindWorkerSocket(socketPath, startServer) : startServer();
+  if (startupInterrupted) return;
+  if (frontStarting?.verifySocket) {
+    const reachable = await frontStarting.verifySocket().catch(async (error: unknown) => {
+      await stopListener?.(true);
+      throw error;
+    });
+    if (startupInterrupted) return;
+    if (!reachable) {
+      await stopListener?.(true);
+      if (startupInterrupted) return;
+      frontStarting = undefined;
+      socketPath = prepareListenSocket();
+    }
+  }
+  if (frontStarting) {
+    // Keep the listener and its in-flight starting responses.
+    frontStarting.server.reload({ fetch: socketPath ? fetchOnWorkerSocket : serverOptions.fetch });
+  } else if (listens) {
+    if (engineFront && socketPath) {
+      registerListenerStop(bindFrontUnixListener(socketPath, startServer).stop);
+    } else {
+      const server = socketPath ? bindWorkerSocket(socketPath, startServer) : startServer();
+      registerListenerStop((force) => server.stop(force));
+    }
+  }
   // The single worker's boot work ends when it listens; the background's when it is ready on its socket.
   if (engineRole === 'single') { finishBootProgress(); setEngineStep(undefined); }
   if (engineFront) finishFrontProgress();
@@ -7318,7 +7359,7 @@ export async function main(): Promise<void> {
   // needs a way to put it down. Without this the only shutdown was the process
   // dying, which is not a shutdown so much as an interruption.
   let shuttingDown = false;
-  const shutdown = (signal: NodeJS.Signals): void => {
+  const shutdown = (signal: NodeJS.Signals, force: boolean): void => {
     // The host keeps its listener; a foreground worker closes only its own.
     closeDesktopBridge();
     if (shuttingDown) return;
@@ -7360,14 +7401,14 @@ export async function main(): Promise<void> {
     if (frontMountRetry) clearInterval(frontMountRetry);
     clearInterval(visibilityRefresh);
     engineFront?.stop();
-    void server?.stop();
+    void stopListener?.(force);
     // The data owner lock stays held: the teardown above is still running, and
     // the kernel releases the lock when this process exits.
   };
   shutdownSignals.setShutdown(shutdown);
   const reloadNow = shutdownSignals.modelReload({
     managed: workerRestartsItself(workerLaunch, process.env),
-    drain: async () => { await Promise.all(Object.values(captures).map((capture) => capture.stop())); await server?.stop(true); },
+    drain: async () => { await Promise.all(Object.values(captures).map((capture) => capture.stop())); await stopListener?.(true); },
     // Last before the exit, even when the drain failed: a pass still running
     // is recorded as interrupted, not left pending for the next process to
     // back off on (#803).
