@@ -1,17 +1,18 @@
 // Regressions for #1324: stores and archive files written after a split front
 // boots must be visible there, and the background must leave its uploads alone.
 import { afterEach, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { createWorkerFetch, createUnixSocketFetch } from '../src/core/worker-transport.ts';
 import { createArchiveImportRuntime } from '../src/workers/archive-import/runtime.ts';
-import { archiveStateSiblingPath } from '../src/core/olympus-layout.ts';
+import { archiveStateSiblingPath, sharedDataPath } from '../src/core/olympus-layout.ts';
 import { defaultArchiveImportStatePath } from '../src/workers/archive-import/state.ts';
 import { pullArchiveImport } from '../src/workers/archive-import/sync.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/local-index.ts';
 import { createWhatsAppConnectorStore, createWhatsAppTierLane, WHATSAPP_LIVE_CORPUS_ID } from '../src/workers/whatsapp/index.ts';
 import { EngineCommandClient } from '../src/workers/engine-split/client.ts';
 import { ArchiveImportRequestStore, archiveImportRequestsPath } from '../src/workers/archive-import/requests.ts';
+import { workerSetupEnvPath } from '../src/core/worker-auth.ts';
 import { engineStatusSnapshotPath } from '../src/workers/engine-split/runtime.ts';
 import { readEngineStatusSnapshot, writeEngineStatusSnapshot } from '../src/workers/engine-split/snapshot.ts';
 import { COMPUTER_META_KEY, type ComputerDashboardMeta } from '../src/workers/chatgpt/dashboard-contract.ts';
@@ -29,7 +30,7 @@ afterEach(async () => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-async function split() {
+async function split(options: { observeFilesystem?: boolean } = {}) {
   const home = mkdtempSync('/tmp/oas-');
   roots.push(home);
   mkdirSync(join(home, 'run'), { mode: 0o700 });
@@ -41,9 +42,84 @@ async function split() {
     OLYMPUS_ENGINE_BACKGROUND_SOCKET: join(home, 'run', 'olympus', 'background.sock'),
     NODE_ENV: 'test',
   };
+  const preload = options.observeFilesystem ? join(home, 'observe-fs.ts') : undefined;
+  if (preload) {
+    const setupEnv = workerSetupEnvPath({ env });
+    mkdirSync(dirname(setupEnv), { recursive: true, mode: 0o700 });
+    writeFileSync(setupEnv, 'OLYMPUS_SERVER_MODE=on\n', { mode: 0o600 });
+    const desktop = JSON.stringify(join(import.meta.dir, '../src/core/linux-desktop-opener.ts'));
+    const sqlTrace = JSON.stringify(join(import.meta.dir, '../src/workers/connector-store/main-thread-sql-trace.ts'));
+    writeFileSync(preload, `
+      import { mock, spyOn } from 'bun:test';
+      import * as sync from 'node:fs';
+      import * as asyncFs from 'node:fs/promises';
+      import * as desktop from ${desktop};
+      import * as sqlTrace from ${sqlTrace};
+      import { isMainThread } from 'node:worker_threads';
+      if (isMainThread) {
+        const desktopExports = { ...desktop };
+        mock.module(${desktop}, () => ({
+          ...desktopExports, linuxGraphicalSessionReadinessAsync: async () => ({ ready: true }),
+        }));
+        const trace = { ...sqlTrace };
+        mock.module(${sqlTrace}, () => ({
+          ...trace,
+          startSlowMainThreadSqlLog(threshold, log) {
+            trace.startSlowMainThreadSqlLog(threshold, log);
+            log('fixture slow SQL', { sample: 1 });
+            log('fixture slow SQL', { sample: 2 });
+          },
+        }));
+        const filenames = new Set([
+          'engine-background-status.json', 'boot-progress.json', 'source-status-snapshot.json',
+          'worker.env', 'reranker-status.json', 'vision.json', 'front.sql-sites.json',
+          'cpu.jsonl', 'slow.jsonl',
+        ]);
+        function note(api, path) {
+          if (typeof path !== 'string') return;
+          const name = path.split('/').pop();
+          if (path === '/proc/self/status') console.log('fs ' + api + ' proc-status');
+          else if (name === 'status.json' && path.includes('/built-in-embedding/')) console.log('fs ' + api + ' embedding-status');
+          else if (filenames.has(name)) console.log('fs ' + api + ' ' + name);
+        }
+        for (const api of ['readFileSync', 'statSync', 'lstatSync', 'existsSync', 'openSync', 'appendFileSync', 'writeFileSync']) {
+          const original = sync[api];
+          spyOn(sync, api).mockImplementation((...args) => {
+            note(api, args[0]);
+            return original(...args);
+          });
+        }
+        for (const api of ['readFile', 'stat', 'open', 'appendFile', 'writeFile']) {
+          const original = asyncFs[api];
+          spyOn(asyncFs, api).mockImplementation(async (...args) => {
+            if (api === 'readFile' || api === 'stat' || api === 'open') note(api, args[0]);
+            const result = await original(...args);
+            if (api === 'appendFile' || api === 'writeFile') note(api, args[0]);
+            return result;
+          });
+        }
+        // Let the long diagnostic intervals turn several times during the
+        // three regular memory intervals. Keep every other timer untouched.
+        const setTimer = globalThis.setInterval;
+        globalThis.setInterval = (callback, ms, ...args) => {
+          const caller = new Error().stack?.split('\\n')[2] ?? '';
+          const cpuSamples = ms === 30000 && caller.includes('control-path-headroom.ts');
+          const sqlSites = ms === 10000 && caller.includes('engine/server.ts') && String(callback).includes('sqlSites.sites()');
+          return setTimer(callback, cpuSamples || sqlSites ? 2000 : ms, ...args);
+        };
+      }
+    `);
+  }
   const spawn = (role: 'front' | 'background') => {
-    const child = Bun.spawn([process.execPath, join(import.meta.dir, '../src/workers/engine/server.ts')], {
-      env: { ...env, OLYMPUS_WORKER_ENGINE_ROLE: role }, stdout: 'pipe', stderr: 'pipe',
+    const instrument = role === 'front' && preload;
+    const child = Bun.spawn([process.execPath, ...(instrument ? ['--preload', instrument] : []), join(import.meta.dir, '../src/workers/engine/server.ts')], {
+      env: { ...env, OLYMPUS_WORKER_ENGINE_ROLE: role, ...(instrument ? {
+        OLYMPUS_CPU_SAMPLE_LOG: join(home, 'cpu.jsonl'),
+        OLYMPUS_MAIN_THREAD_SQL_LOG: join(home, 'slow.jsonl'),
+        OLYMPUS_MAIN_THREAD_SQL_SITES: home,
+        OLYMPUS_UPDATE_CHECK: 'off',
+        OLYMPUS_SOURCE_RERANKER: 'built-in',
+      } : {}) }, stdout: 'pipe', stderr: 'pipe',
     });
     children.push(child);
     let output = '';
@@ -163,3 +239,42 @@ test('the front reads changed archive state, requests and ledger counts while a 
   expect(await counted(1)).toMatchObject({ items: 1, judged: 1, held: 0 });
   expect(readEngineStatusSnapshot(snapshotPath)!.snapshot.written_at).toBe(fixed);
 }, 120_000);
+
+test('the idle front uses no synchronous filesystem calls on the moved timer paths', async () => {
+  const f = await split({ observeFilesystem: true });
+  const start = f.front.output().length;
+  const idleLog = () => f.front.output().slice(start);
+  const count = (line: string, log = idleLog()) => log.split('\n').filter(entry => entry === line).length;
+  // No HTTP requests during this window. Require proof each timer fired,
+  // including the desktop probe against a synthetic ready session.
+  const timers = [
+    'fs readFile engine-background-status.json', 'fs readFile proc-status', 'fs open worker.env',
+    'fs writeFile front.sql-sites.json', 'fs appendFile cpu.jsonl',
+  ];
+  await waitFor(() => timers.every(line => count(line) >= 3), { timeoutMs: 25_000 }).catch((error) => {
+    const calls = idleLog().split('\n').filter(line => line.startsWith('fs '));
+    throw new Error(JSON.stringify(Object.fromEntries([...new Set([...timers, ...calls])].map(line => [line, count(line)]))), { cause: error });
+  });
+  expect(idleLog()).not.toMatch(/^fs \w+Sync /m);
+
+  expect(count('fs appendFile slow.jsonl', f.front.output())).toBeGreaterThanOrEqual(2);
+  expect(f.front.output()).not.toMatch(/^fs appendFileSync slow\.jsonl$/m);
+  const slow = readFileSync(join(f.home, 'slow.jsonl'), 'utf8').trimEnd().split('\n');
+  expect(slow.slice(0, 2).map(line => JSON.parse(line).sample)).toEqual([1, 2]);
+
+  const requestStart = f.front.output().length;
+  expect(await f.read('/v1/health')).toMatchObject({ engine_background: 'ready' });
+  await f.computer();
+  const requestLog = () => f.front.output().slice(requestStart);
+  await waitFor(() => requestLog().includes('fs readFile boot-progress.json')
+    && requestLog().includes('fs stat source-status-snapshot.json')
+    && requestLog().includes('fs readFile reranker-status.json')
+    && requestLog().includes('fs readFile embedding-status'));
+  const progressPath = sharedDataPath('boot-progress', f.env);
+  const boot = JSON.parse(readFileSync(progressPath, 'utf8'));
+  writeFileSync(progressPath, JSON.stringify({ ...boot, pid: 2_147_483_647 }));
+  expect(await f.read('/v1/health')).toMatchObject({ engine_background: 'unreachable' });
+  writeFileSync(progressPath, '{');
+  expect(await f.read('/v1/health')).toMatchObject({ engine_background: 'unreachable' });
+  expect(requestLog()).not.toMatch(/^fs \w+Sync /m);
+}, 90_000);

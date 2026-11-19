@@ -5,7 +5,7 @@ import type { MemoryActivity } from '../../core/memory-counters.ts';
  * client, owner-busy relay and snapshot reader. Kept here so `main()` only
  * chooses by role (core/engine-split.ts).
  */
-import { readBootProgress, type BootProgress } from '../../core/boot-progress.ts';
+import { readBootProgressAsync, type BootProgress } from '../../core/boot-progress.ts';
 import { engineHeartbeatBeating, engineHeartbeatLine, processAlive, readEngineHeartbeat } from '../../core/engine-heartbeat.ts';
 import { engineStartingAnswer, engineStartingResponse } from '../../core/worker-front-proxy.ts';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -22,7 +22,7 @@ import { clickTraces, PRIVACY_ITEM_SET_PATH, type ClickTrace } from './click-tra
 import { startEngineControlPlane, type EngineControlPlane } from './control-plane.ts';
 import { currentLocalInferencePriority } from '../answer-activity.ts';
 import { createEngineCommandHandler, ENGINE_FORWARDED_ROUTES, EngineCommandLedger, requestToForwarded, type EngineCommandHandlers, type EngineCommandReceipt, type EngineForwardedKind, type EngineForwardedRequest, type EngineForwardedResponse } from './commands.ts';
-import { ENGINE_STATUS_STALE_MS, readEngineStatusSnapshot, startEngineStatusPublisher, type EngineStatusRead, type EngineStatusSnapshot } from './snapshot.ts';
+import { engineStatusAge, readEngineStatusSnapshotAsync, startEngineStatusPublisher, type EngineStatusRead, type EngineStatusSnapshot } from './snapshot.ts';
 import { parseOwnerTierItemId } from '../classification/tier-owner-items.ts';
 import type { PendingItemProtection } from '../connector-store/tier-visibility.ts';
 import { DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER } from '../http.ts';
@@ -158,7 +158,7 @@ export function startEngineBackgroundStatus(input: {
  * changes nothing.
  */
 export function backgroundBootDone(boot: BootProgress | undefined, alive: (pid: number) => boolean = processAlive): boolean {
-  return boot?.phase === 'done' && alive(boot.pid);
+  return boot?.phase === 'done' && Number.isSafeInteger(boot.pid) && boot.pid > 0 && alive(boot.pid);
 }
 
 /**
@@ -173,12 +173,12 @@ export async function waitForBackgroundBootDone(input: {
   env: Record<string, string | undefined>;
   pollMs?: number;
   sleep?: (ms: number) => Promise<void>;
-  read?: () => BootProgress | undefined;
+  read?: () => BootProgress | undefined | Promise<BootProgress | undefined>;
   alive?: (pid: number) => boolean;
 }): Promise<void> {
   const sleep = input.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
-  const read = input.read ?? (() => readBootProgress(input.env));
-  while (!backgroundBootDone(read(), input.alive)) await sleep(input.pollMs ?? 250);
+  const read = input.read ?? (() => readBootProgressAsync(input.env));
+  while (!backgroundBootDone(await read(), input.alive)) await sleep(input.pollMs ?? 250);
 }
 
 /**
@@ -216,8 +216,9 @@ export function listenWhileStarting(input: {
 export interface EngineFront {
   client: EngineCommandClient;
   ownerBusy: OwnerBusyRelay;
-  /** The background's last status snapshot and its age; read from disk at most once a second. */
+  /** The background's last status snapshot and its age; refreshed asynchronously at most once a second. */
   status(): EngineStatusRead | undefined;
+  refreshStatus(): Promise<void>;
   /** The polled activity, with no disk read or status refresh on the log path. */
   backgroundActivity(): MemoryActivity;
   /** One built-in model completion, run by the background, which holds the model. */
@@ -251,42 +252,49 @@ export function createEngineFront(input: {
   });
   relay = new OwnerBusyRelay(client, (line) => console.warn(line));
   const path = engineStatusSnapshotPath(input.env);
-  let cached: { at: number; read: EngineStatusRead | undefined } | undefined;
-  const judged = (read: EngineStatusRead, age: number): EngineStatusRead => {
-    const old = age > ENGINE_STATUS_STALE_MS;
-    if (!old && answering && answering.instance !== read.snapshot.instance_id && Date.parse(read.snapshot.written_at) > answering.at) {
-      answering = { instance: read.snapshot.instance_id, at: Date.parse(read.snapshot.written_at) };
+  let cached: EngineStatusSnapshot | undefined;
+  let lastReadAt = -Infinity;
+  let pending: Promise<void> | undefined;
+  let stopped = false;
+  const judged = (snapshot: EngineStatusSnapshot, at: number): EngineStatusRead => {
+    const read = engineStatusAge(snapshot, at);
+    const written = Date.parse(snapshot.written_at);
+    if (!read.stale && answering && answering.instance !== snapshot.instance_id && written > answering.at) {
+      answering = { instance: snapshot.instance_id, at: written };
     }
-    return {
-      ...read, age_ms: age, state_age_ms: (read.state_age_ms ?? read.age_ms) + (age - read.age_ms),
-      stale: old || (answering !== undefined && answering.instance !== read.snapshot.instance_id),
-    };
+    return { ...read, stale: read.stale || (answering !== undefined && answering.instance !== snapshot.instance_id) };
+  };
+  const refreshStatus = async () => {
+    if (pending) return pending;
+    const at = now();
+    if (stopped || at - lastReadAt < 1_000) return;
+    lastReadAt = at;
+    pending = readEngineStatusSnapshotAsync(path).then((snapshot) => {
+      if (stopped) return;
+      cached = snapshot;
+      if (snapshot && !judged(snapshot, now()).stale) relay?.observeInstance(snapshot.instance_id);
+    }).finally(() => { pending = undefined; });
+    return pending;
   };
   const status = (): EngineStatusRead | undefined => {
-    const at = now();
-    if (cached && at - cached.at < 1_000) {
-      return cached.read ? judged(cached.read, cached.read.age_ms + (at - cached.at)) : undefined;
-    }
-    const read = readEngineStatusSnapshot(path, now);
-    cached = { at, read };
-    if (read) relay?.observeInstance(read.snapshot.instance_id);
-    return read ? judged(read, read.age_ms) : undefined;
+    void refreshStatus();
+    return cached ? judged(cached, now()) : undefined;
   };
   // Notice a background restart even when no page asks for status, so the
   // owner-busy signal reaches the new judge.
-  const poll = setInterval(() => { status(); }, 2_000);
+  const poll = setInterval(() => { void refreshStatus(); }, 2_000);
   poll.unref?.();
   const completeModel = (request: AnalystModelRequest) => completeModelInBackground(fetchBackground, input.authToken, request);
   // Busy is not unreachable: the background's receipt and heartbeat say it is up.
-  const backgroundReady = async () => backgroundBootDone(readBootProgress(input.env));
+  const backgroundReady = async () => backgroundBootDone(await readBootProgressAsync(input.env));
   const waitForPendingPrivacyRaises = async () => {
     // The control thread can answer even when the background's loop is held.
     // This only bounds each readiness probe. The writer keeps applying its commands.
     const probeMs = 250;
     while (!await probeEngineBackground(fetchBackground, input.authToken, undefined, probeMs, true)) await Bun.sleep(probeMs);
   };
-  return { client, ownerBusy: relay, status, backgroundActivity: () => cached?.read?.snapshot.activity ?? 'idle', completeModel, backgroundReady,
-    waitForPendingPrivacyRaises, stop: () => { clearInterval(poll); relay?.stop(); } };
+  return { client, ownerBusy: relay, status, refreshStatus, backgroundActivity: () => cached?.activity ?? 'idle', completeModel, backgroundReady,
+    waitForPendingPrivacyRaises, stop: () => { stopped = true; clearInterval(poll); relay?.stop(); } };
 }
 
 // How long the front waits on a background that has stopped answering. A

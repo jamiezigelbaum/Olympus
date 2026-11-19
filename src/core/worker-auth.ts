@@ -1,6 +1,7 @@
 import { resolveLinuxEngineLayout } from './linux-engine-layout.ts';
 import { createHmac } from 'node:crypto';
-import { readFileSync, statSync } from 'node:fs';
+import { constants, readFileSync, statSync } from 'node:fs';
+import { open } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { OlympusConfig } from './config.ts';
@@ -123,6 +124,26 @@ export function readWorkerSetupEnv(options: WorkerAuthTokenLookupOptions = {}): 
   }
 }
 
+/** A fresh read for asynchronous checks, with the same private-file requirement. */
+export async function readWorkerSetupEnvAsync(options: WorkerAuthTokenLookupOptions = {}): Promise<Record<string, string> | undefined> {
+  const path = workerSetupEnvPath(options);
+  try {
+    // Inspect and read the same inode. A FIFO is rejected without waiting
+    // for a writer, and a replacement cannot bypass the mode check.
+    const file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
+    try {
+      const info = await file.stat({ bigint: true });
+      if (!info.isFile() || (info.mode & 0o077n) !== 0n) return undefined;
+      return parseWorkerSetupEnv(await file.readFile('utf8'));
+    } finally {
+      await file.close();
+    }
+  } catch {
+    // An unreadable setup file contributes no environment values.
+    return undefined;
+  }
+}
+
 /**
  * The environment a managed Olympus install actually runs with: the process
  * environment layered over the values in worker.env.
@@ -143,7 +164,12 @@ export function environmentWithWorkerSetupEnv(
 ): Record<string, string | undefined> {
   const env = options.env ?? process.env;
   if (!options.workerEnvPath && !options.homeDir && !env.HOME?.trim()) return env;
-  const setupEnv = readWorkerSetupEnv(options);
+  return mergeWorkerSetupEnv(env, readWorkerSetupEnv(options));
+}
+
+export function mergeWorkerSetupEnv(
+  env: Record<string, string | undefined>, setupEnv: Record<string, string> | undefined,
+): Record<string, string | undefined> {
   if (!setupEnv) return env;
   const merged: Record<string, string | undefined> = { ...setupEnv };
   for (const [key, value] of Object.entries(env)) {

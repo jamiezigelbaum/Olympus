@@ -24,6 +24,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { isMainThread } from 'node:worker_threads';
 import {
   IMAGE_PREPARE_MAX_PIXEL_EDGE,
   createStillImagePreparer,
@@ -239,7 +240,9 @@ function withVision(readiness: StillImageReadiness, vision: StillImageVisionStat
  */
 export function stillImageReadiness(): StillImageReadiness {
   if (!current) current = { readiness: probeStillImageReadiness({ vision: visionReader() }), pinned: false, checkedAt: clock() };
-  if (!current.pinned && clock() - current.checkedAt >= STILL_IMAGE_VISION_RECHECK_MS) {
+  // The front's asset reader is already rate-limited and asynchronous.
+  const front = isMainThread && process.env.OLYMPUS_WORKER_ENGINE_ROLE?.trim() === 'front';
+  if (!current.pinned && (front || clock() - current.checkedAt >= STILL_IMAGE_VISION_RECHECK_MS)) {
     current.checkedAt = clock();
     const vision = visionReader();
     if (vision !== current.readiness.vision) current.readiness = withVision(current.readiness, vision);

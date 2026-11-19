@@ -43,7 +43,8 @@ import type { WorkerCredentialDegradation } from '../credential-degradation.ts';
 import type { ContentExtractionThroughputSignal } from '../../core/ingestion-throughput.ts';
 import { OperationError } from '../../core/operation-error.ts';
 import { PEOPLE_AUTHORED_FAMILIES } from '../../core/people-index.ts';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { readFile, stat } from 'node:fs/promises';
 import { writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
 import { ingestionTurn } from '../control-path-headroom.ts';
 import { SecretLocationsIndex, secretLocationsPathForStore } from '../classification/secret-locations.ts';
@@ -640,17 +641,26 @@ export function createSourceIndexStatusHandler(
   // The front re-reads the background's file only when it changed.
   // Each write is atomic (a new file renamed in), so a new inode is a new write.
   let published: { version: string; entries: Map<string, KeptStatus> } | undefined;
-  const publishedStatus = (key: string): KeptStatus | undefined => {
-    if (role !== 'reader' || !options.snapshotPath) return undefined;
-    try {
-      const file = statSync(options.snapshotPath);
-      const version = `${file.ino}:${file.mtimeMs}:${file.size}`;
-      if (published?.version !== version) published = { version, entries: new Map(readStatusSnapshots(options.snapshotPath)) };
-    } catch {
-      return published?.entries.get(key);
-    }
-    return published.entries.get(key);
+  const snapshotPath = options.snapshotPath;
+  let readingPublished: Promise<void> | undefined;
+  const refreshPublished = (): Promise<void> | undefined => {
+    if (role !== 'reader' || !snapshotPath) return;
+    if (readingPublished) return readingPublished;
+    const read = async () => {
+      try {
+        const file = await stat(snapshotPath);
+        const version = `${file.ino}:${file.mtimeMs}:${file.size}`;
+        if (published?.version === version) return;
+        const entries = parseStatusSnapshots(await readFile(snapshotPath, 'utf8'));
+        if (entries) published = { version, entries: new Map(entries) };
+      } catch {
+        // Keep the last usable snapshot when the file disappears or cannot be read.
+      }
+    };
+    readingPublished = read().finally(() => { readingPublished = undefined; });
+    return readingPublished;
   };
+  void refreshPublished();
   // The split's front never counts a store, whatever the reason the
   // background has no entry for this exact read: a store the front mounted
   // first, a scope that moved, a front started before the background's first
@@ -662,7 +672,7 @@ export function createSourceIndexStatusHandler(
   // with no numbers.
   const servedOnFront = (request: SourceIndexStatusRequest, countsMaxAgeMs: number): SourceIndexStatusResult => {
     const key = snapshotKey(request, countsMaxAgeMs);
-    const exact = publishedStatus(key);
+    const exact = published?.entries.get(key);
     const entries = [...(published?.entries ?? new Map<string, KeptStatus>())];
     const newest = (match: (other: Record<string, unknown>) => boolean): KeptStatus | undefined => {
       let found: KeptStatus | undefined;
@@ -747,16 +757,12 @@ export function createSourceIndexStatusHandler(
     countsMaxAgeMs: number,
   ): Promise<SourceIndexStatusResult> => {
     const key = snapshotKey(request, countsMaxAgeMs);
-    const fromBackground = publishedStatus(key);
-    const last = fromBackground ?? snapshots.get(key);
+    const last = snapshots.get(key);
     if (!last) return refreshKept(key, compute);
     const age = Math.max(0, nowMs() - last.atMs);
-    // The split's background recounts on its own pace and never behind a
-    // read; its front never counts what the background counts. A request the
-    // background does not count (a filtered status command) is refreshed
-    // behind the read, as in a single engine.
-    const refreshBehind = role === undefined || (role === 'reader' && !fromBackground);
-    if (refreshBehind && age >= STATUS_SNAPSHOT_REFRESH_MS) void refreshKept(key, compute).catch(() => undefined);
+    // The split's background recounts on its own pace. In a single engine,
+    // a request with a reusable count refreshes behind the read.
+    if (role === undefined && age >= STATUS_SNAPSHOT_REFRESH_MS) void refreshKept(key, compute).catch(() => undefined);
     return Promise.resolve({ ...last.result, snapshot_age_ms: age });
   };
 
@@ -956,7 +962,7 @@ export function createSourceIndexStatusHandler(
       // owner's question about one chat's senders is not a count, and is read).
       if (role === 'reader' && !request.include_sender_aggregation) {
         assertSupportedStatusRequest(request);
-        publishedStatus(snapshotKey(request, countsMaxAgeMs));
+        void refreshPublished();
         return withLiveTotals(servedOnFront(request, countsMaxAgeMs));
       }
       // A live read (no allowance), or one that asks for a conversation's
@@ -966,6 +972,7 @@ export function createSourceIndexStatusHandler(
       return withLiveTotals(await snapshotStatus(() => computeStatus(request, snapshot), request, countsMaxAgeMs));
     },
     async settled() {
+      if (readingPublished) await readingPublished;
       while (snapshotRefreshes.size > 0) await Promise.allSettled([...snapshotRefreshes.values()]);
     },
     ...(role === 'writer' ? {
@@ -983,13 +990,17 @@ const STATUS_SNAPSHOT_SCHEMA = 'olympus.source-status-snapshot.v1';
 function readStatusSnapshots(path: string | undefined): Array<[string, { atMs: number; result: SourceIndexStatusResult }]> {
   if (!path) return [];
   try {
-    const parsed = JSON.parse(readFileSync(path, 'utf8')) as { schema?: string; entries?: unknown };
-    if (parsed?.schema !== STATUS_SNAPSHOT_SCHEMA || !Array.isArray(parsed.entries)) return [];
-    return parsed.entries.filter((entry): entry is [string, { atMs: number; result: SourceIndexStatusResult }] =>
-      Array.isArray(entry) && typeof entry[0] === 'string' && typeof entry[1]?.atMs === 'number' && entry[1]?.result?.kind === 'source_index_status');
+    return parseStatusSnapshots(readFileSync(path, 'utf8')) ?? [];
   } catch {
     return [];
   }
+}
+
+function parseStatusSnapshots(text: string): Array<[string, { atMs: number; result: SourceIndexStatusResult }]> | undefined {
+  const parsed = JSON.parse(text) as { schema?: string; entries?: unknown };
+  if (parsed?.schema !== STATUS_SNAPSHOT_SCHEMA || !Array.isArray(parsed.entries)) return undefined;
+  return parsed.entries.filter((entry): entry is [string, { atMs: number; result: SourceIndexStatusResult }] =>
+    Array.isArray(entry) && typeof entry[0] === 'string' && typeof entry[1]?.atMs === 'number' && entry[1]?.result?.kind === 'source_index_status');
 }
 
 function normalizedStatusCacheMaxAge(value: number | undefined): number {

@@ -5,7 +5,7 @@
 // running, every dashboard poll recounted the expired stores inline (30-69 s).
 
 import { describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
@@ -96,6 +96,7 @@ describe('status snapshot for the dashboard', () => {
       // The front: its store is stuck, and it is never asked.
       store.prepareStatusCounts = () => { counts += 1; return new Promise<void>(() => {}); };
       const front = createSourceIndexStatusHandler({ corpusDefinitions: [defineDropboxFilesCorpus()], connectorStores: [store], nowMs: () => now, snapshotPath, snapshotRole: 'reader' });
+      await front.settled!();
       for (let poll = 0; poll < 3; poll += 1) {
         now += 2_000;
         const shown = await within(front.status({ ...DASHBOARD_STATUS_REQUEST }, SNAPSHOT));
@@ -109,7 +110,15 @@ describe('status snapshot for the dashboard', () => {
       store.prepareStatusCounts = realPrepare;
       await background.refreshSnapshot!({ ...DASHBOARD_STATUS_REQUEST }, SNAPSHOT);
       now += 1_000;
+      await front.status({ ...DASHBOARD_STATUS_REQUEST }, SNAPSHOT);
+      await front.settled!();
       expect((await front.status({ ...DASHBOARD_STATUS_REQUEST }, SNAPSHOT)).snapshot_age_ms).toBe(1_000);
+      await front.settled!();
+      writeFileSync(snapshotPath, '{');
+      await front.status({ ...DASHBOARD_STATUS_REQUEST }, SNAPSHOT);
+      await front.settled!();
+      expect((await front.status({ ...DASHBOARD_STATUS_REQUEST }, SNAPSHOT)).corpora).toEqual(counted.corpora);
+      await front.settled!();
     } finally {
       store.close();
       rmSync(dir, { recursive: true, force: true });
@@ -129,6 +138,7 @@ describe('status snapshot for the dashboard', () => {
       let counts = 0;
       for (const each of [store, fresh]) each.prepareStatusCounts = () => { counts += 1; return new Promise<void>(() => {}); };
       const front = createSourceIndexStatusHandler({ corpusDefinitions: [defineDropboxFilesCorpus()], connectorStores: [store, fresh], nowMs: () => now, snapshotPath, snapshotRole: 'reader' });
+      await front.settled!();
       now += 3_000;
       const shown = await within(front.status({ ...DASHBOARD_STATUS_REQUEST }, SNAPSHOT));
       expect(shown).not.toBe('waited');
@@ -217,6 +227,7 @@ describe('live totals beside kept counts', () => {
       const background = createSourceIndexStatusHandler({ corpusDefinitions: [defineDropboxFilesCorpus()], connectorStores: [store], nowMs: () => now, snapshotPath, snapshotRole: 'writer' });
       await background.refreshSnapshot!({ ...DASHBOARD_STATUS_REQUEST }, SNAPSHOT);
       const front = createSourceIndexStatusHandler({ corpusDefinitions: [defineDropboxFilesCorpus()], connectorStores: [store], nowMs: () => now, snapshotPath, snapshotRole: 'reader' });
+      await front.settled!();
       const before = (await front.status({ ...DASHBOARD_STATUS_REQUEST }, SNAPSHOT)).corpora[0] as { counts: Record<string, number>; totals?: { items: number; sync_runs: number } };
       expect(before.totals).toMatchObject({ items: 1, sync_runs: 1 });
       await store.syncFromConnector(connector([file('a.txt', 'alpha'), file('b.txt', 'beta')]), { fetchContent: true });
