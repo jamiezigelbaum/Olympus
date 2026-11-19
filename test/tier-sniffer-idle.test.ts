@@ -82,8 +82,11 @@ test('settled ledgers read no background tier item windows on idle ticks', async
   await f.tick();
   await f.tick();
   const reads = f.readWindows();
+  const marker = f.ledger.changeMarker();
   for (let tick = 0; tick < 5; tick++) await f.tick();
   expect(reads.map(read => read.mock.calls.length)).toEqual([0, 0, 0, 0, 0, 0]);
+  // Idle ticks write nothing to the ledger either, progress meta included.
+  expect(f.ledger.changeMarker()).toBe(marker);
   expect(f.service.backlog().storedWalks?.[0]).toMatchObject({
     ledger: 'idle-fixture',
     walkers: {

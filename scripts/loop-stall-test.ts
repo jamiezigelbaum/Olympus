@@ -25,7 +25,7 @@ import { createHash } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, writeFileSync, writeSync, mkdtempSync, rmSync } from 'node:fs';
 import { join, resolve, relative } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import type { Database } from 'bun:sqlite';
+import { Database } from 'bun:sqlite';
 import type { AnalystModel } from '../src/core/analyst.ts';
 import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
 import { olympusDataRoot } from '../src/core/olympus-layout.ts';
@@ -47,6 +47,8 @@ import { LOOP_LAG_BUCKETS_MS } from '../src/core/engine-heartbeat.ts';
 import { controlPathHeadroom, freezeLogLine, summarizeCpuSamples, tracesInStalls } from '../src/workers/control-path-headroom.ts';
 import { ownerTierItemId } from '../src/workers/classification/tier-owner-items.ts';
 import { DASHBOARD_LOCAL_CONTROL_SESSION_PATH } from '../src/workers/http.ts';
+import type { summarizeFreeze } from './front-thread-timeline.ts';
+import { hiddenCopyBuilds, samplePage, type HiddenCopyBuilds } from './release-check/cutover.ts';
 
 // v6: each build keeps a pristine copy and each run starts from it, so every run has judging to do (plan, 16 Nov 2026).
 const VERSION = 6;
@@ -725,6 +727,55 @@ function summarizeThreadTimeline(role: Role, timeline: string, freezes: Array<{ 
     .sort((a: any, b: any) => (b?.window_ms ?? 0) - (a?.window_ms ?? 0)).slice(0, 30);
 }
 
+const STARTUP_PAGES = ['Home', 'Sources'] as const;
+const STARTUP_PROBE_MS = 250;
+type PageSample = Awaited<ReturnType<typeof samplePage>>;
+type StartupGap = { page: PageSample['page']; start_at: string; end_at: string; ms: number };
+type ThreadSplit = ReturnType<typeof summarizeFreeze>;
+
+export function summarizeStartupGaps(samples: readonly PageSample[], firstAnswerAt: number, readyAt: number) {
+  const pageGaps = (page: PageSample['page']) => {
+    const answers = samples.filter(sample => sample.page === page && sample.answered)
+      .map(sample => sample.at + sample.ms)
+      .filter(at => at >= firstAnswerAt && at <= readyAt)
+      .sort((a, b) => a - b);
+    const over_1s: StartupGap[] = [];
+    let longest: StartupGap | null = null;
+    let previous = firstAnswerAt;
+    for (const end of [...answers, readyAt]) {
+      const ms = end - previous;
+      if (ms > 0) {
+        const gap = { page, start_at: new Date(previous).toISOString(), end_at: new Date(end).toISOString(), ms };
+        if (!longest || ms > longest.ms) longest = gap;
+        if (ms > 1_000) over_1s.push(gap);
+      }
+      previous = end;
+    }
+    return { answers: answers.length, longest, over_1s };
+  };
+  const pages = { Home: pageGaps('Home'), Sources: pageGaps('Sources') };
+  const home = pages.Home.longest;
+  const sources = pages.Sources.longest;
+  return { pages, longest: (home?.ms ?? 0) >= (sources?.ms ?? 0) ? home : sources };
+}
+
+export function coldStartVerdict(longest: StartupGap | null, split: Pick<ThreadSplit,
+  'runningMs' | 'runQueueMs' | 'blockedMajfltMs' | 'blockedBlkioMs' | 'blockedOtherMs'> | undefined) {
+  if (!longest || !split || longest.ms <= 10_000) return 'NOT REPRODUCED';
+  const ioMs = split.blockedBlkioMs + split.blockedMajfltMs;
+  // Idle or unsampled time is unattributed, so it cannot strengthen the IO finding.
+  const otherMs = Math.max(split.blockedOtherMs, longest.ms - ioMs - split.runningMs - split.runQueueMs);
+  return ioMs > Math.max(split.runningMs, split.runQueueMs, otherMs) ? 'REPRODUCED' : 'NOT REPRODUCED';
+}
+
+function startupThreadSplit(timeline: string, gap: StartupGap): ThreadSplit | string {
+  if (!existsSync(timeline)) return 'no timeline was written';
+  const run = spawnSync(process.execPath, [join(import.meta.dir, 'front-thread-timeline.ts'), '--summarize', timeline,
+    '--marker', `${gap.end_at},${gap.ms}`, '--role', 'front'], { encoding: 'utf8', timeout: 120_000 });
+  if (run.status !== 0) return `summarize exited ${run.status}: ${(run.stderr || '').slice(-300)}`;
+  return JSON.parse(run.stdout) as ThreadSplit;
+}
+
 function samplePressure(): { samples: Array<{ at: string } & Record<string, number | string>>; stop(): void } {
   const samples: Array<{ at: string } & Record<string, number | string>> = [];
   let last = readPressure();
@@ -890,11 +941,38 @@ function coldFiles(dir: string) {
     if (result.status !== 0) throw new Error(`Cannot evict synthetic pages: ${result.stderr}`);
   }
 }
-type RunCase = 'steady' | 'boot-after-upgrade';
-async function run(dir: string, seconds: number, memoryMax: string, options: { runCase: RunCase; walBytes: number; ioFloorMs: number; ioWaitSeconds: number; quick?: boolean; sqliteMmap?: 'on' | 'off' | 'bounded'; swapReading?: boolean }) {
+
+function clearSavedHiddenCopies(dir: string) {
+  // A fresh process can load the saved set and replay its feeds. Clear only the
+  // derived set in the restored working copy to force the ledger bootstrap.
+  for (const domain of DOMAINS) {
+    const store = new Database(storePath(dir, domain), { readwrite: true });
+    try {
+      store.exec('PRAGMA busy_timeout = 10000;');
+      store.exec('BEGIN; DELETE FROM tier_visibility_state; DELETE FROM tier_visibility_members; COMMIT;');
+    } finally { store.close(); }
+  }
+}
+
+function readIoThrottle(): string {
+  const cgroup = /^0::(.*)$/m.exec(readFileSync('/proc/self/cgroup', 'utf8'))?.[1];
+  const path = cgroup && join('/sys/fs/cgroup', cgroup, 'io.max');
+  return (path && existsSync(path) && readFileSync(path, 'utf8').trim()) || 'off';
+}
+
+const RUN_CASES = ['steady', 'boot-after-upgrade', 'cold-start'] as const;
+type RunCase = typeof RUN_CASES[number];
+async function run(dir: string, seconds: number, memoryMax: string, options: { runCase: RunCase; walBytes: number; ioFloorMs: number; ioWaitSeconds: number; quick?: boolean; sqliteMmap?: 'on' | 'off' | 'bounded'; swapReading?: boolean; ioThrottleUnavailable?: boolean }) {
   const shape = JSON.parse(readFileSync(join(dir, 'shape.json'), 'utf8')) as { shape: { version: number; items: number } };
   if (shape.shape.version !== VERSION) throw new Error('Build the current synthetic fixture shape before running.');
   const isCapped = capped(memoryMaxBytes(memoryMax));
+  const coldStart = options.runCase === 'cold-start' ? {
+    builds: {} as HiddenCopyBuilds['finished'],
+    firstAnswerAt: undefined as number | undefined,
+    readyAt: undefined as number | undefined,
+    samples: [] as PageSample[],
+    io_throttle: options.ioThrottleUnavailable ? 'unavailable: io controller not delegated' : readIoThrottle(),
+  } : undefined;
   if (!isCapped) console.error(`WARNING: run is not under MemoryMax<=${memoryMax} and MemorySwapMax=0; this is not a qualified receipt. Use: systemd-run --user --scope -p MemoryMax=${memoryMax} -p MemorySwapMax=0 -- bun scripts/loop-stall-test.ts run --dir ${JSON.stringify(dir)} --memory-max ${memoryMax}`);
   const runDir = mkdtempSync('/tmp/ols-'); // Unix socket path must remain short.
   const metrics = join(runDir, 'metrics'); mkdirSync(metrics);
@@ -956,6 +1034,13 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
   // Each role's SQLite file-map line at boot (bounded: per-file size, budget, files), kept whole for the arm's receipt.
   const fileMapLines: Array<{ role: Role; line: string }> = [];
   const keepEngineLine = (role: Role, line: string) => {
+    if (coldStart && !coldStart.builds[role] && line.includes("stores' hidden-copy sets")) {
+      const build = hiddenCopyBuilds(line).finished[role];
+      if (build) {
+        coldStart.builds[role] = build;
+        if (ROLES.every(role => coldStart.builds[role])) coldStart.readyAt = Math.round(nowMs());
+      }
+    }
     if (line.includes('[olympus] sqlite settings:') || line.includes('[olympus] sqlite wal:') || line.includes('[olympus] sqlite checkpoint:') || line.includes('[olympus] sqlite wal room:') || line.includes('[olympus] sqlite wal held:')) sqliteLines.push({ at: new Date().toISOString(), role, line: line.slice(line.indexOf('[olympus] sqlite')).slice(0, 400) });
     // Keep each freeze frame and held-loop line outside the bounded engine log tail.
     else if (line.includes('SQLite file map') && fileMapLines.length < 10) fileMapLines.push({ role, line: line.slice(line.indexOf('[olympus]')).slice(0, 400) });
@@ -979,9 +1064,15 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
   const timing: Record<Role, { spawnedAt: number; stoppedAt: number; readyAt?: number }> = {
     background: { spawnedAt: 0, stoppedAt: 0 }, front: { spawnedAt: 0, stoppedAt: 0 },
   };
+  const readyPath = (role: Role) => join(metrics, `${role}.ready`);
   const readReady = (role: Role) => {
+    if (coldStart) {
+      if (coldStart.readyAt === undefined) return false;
+      timing[role].readyAt = coldStart.readyAt;
+      return true;
+    }
     if (timing[role].readyAt !== undefined) return true;
-    const path = join(metrics, `${role}.ready`);
+    const path = readyPath(role);
     if (!existsSync(path)) return false;
     const stamp = readFileSync(path, 'utf8');
     if (!stamp) return false;
@@ -1002,11 +1093,13 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
   if (restoredOutside) rmSync(restoredMarker, { force: true }); else restorePristine(dir);
   const restore_ms = Date.now() - restoreStarted;
   // Steady: every run starts with the WALs folded in, as on a box in use. Boot after upgrade: one large WAL left on the ledger.
+  if (coldStart) clearSavedHiddenCopies(dir);
   truncateWals(dir);
   if (options.runCase === 'boot-after-upgrade') leaveLargeWal(dir, options.walBytes);
   const host = await waitForQuietHost(options.ioFloorMs, options.ioWaitSeconds);
   if (!host.quiet) {
-    const receipt = { phase: 'run', case: options.runCase, sha: spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim(), pass: false, host_busy: true, host, qualified: isCapped, memory_max: memoryMax };
+    const receipt = { phase: 'run', case: options.runCase, sha: spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim(), pass: false, host_busy: true, host, qualified: isCapped, memory_max: memoryMax,
+      ...(coldStart ? { io_throttle: coldStart.io_throttle, counts_as_gate: false } : {}) };
     console.log(JSON.stringify(receipt));
     console.log(`HOST BUSY: host IO stall ${host.host_io_full_ms_per_s} ms/s over ${host.waited_s} s (floor ${host.limit_ms_per_s} ms/s). Not a product result; run again when the host is quiet.`);
     stub.stop(true); rmSync(runDir, { recursive: true, force: true });
@@ -1061,14 +1154,31 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
         if (partial) keepEngineLine(role, partial + decoder.decode());
       })());
     }
-    const deadline = Date.now() + seconds * 1000;
-    while (!ROLES.every(readReady)) {
-      if (Date.now() >= deadline || children.some(child => child.exitCode !== null)) throw new Error('Engine boot failed or timed out; see last-run.json engine_logs');
-      await Bun.sleep(100);
-    }
     const workerFetch = createWorkerFetch({ platform: 'linux', env });
     const origin = `http://127.0.0.1:${port}`;
     const bearer = { Authorization: `Bearer ${env.OLYMPUS_WORKER_AUTH_TOKEN}` };
+    const fetchPage = async (path: string, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      headers.set('Authorization', bearer.Authorization);
+      const response = await workerFetch(origin + path, { ...init, headers });
+      if (coldStart) coldStart.firstAnswerAt ??= Math.round(nowMs());
+      return response;
+    };
+    const bootDeadline = Date.now() + (coldStart ? 600 : seconds) * 1000;
+    const engineExited = () => children.some(child => child.exitCode !== null || child.signalCode !== null);
+    // The starting server can answer before the regular front is listening.
+    // Wait for the regular listeners before opening controls and starting the steady workload.
+    const bootComplete = () => ROLES.every(readReady) && (!coldStart
+      || (coldStart.firstAnswerAt !== undefined && ROLES.every(role => existsSync(readyPath(role)))));
+    while (!bootComplete()) {
+      if (Date.now() >= bootDeadline || engineExited()) throw new Error('Engine boot failed or timed out; see last-run.json engine_logs');
+      if (coldStart && (coldStart.readyAt === undefined || coldStart.firstAnswerAt === undefined)) {
+        const at = Math.round(nowMs());
+        for (const page of STARTUP_PAGES) requests.push(samplePage(fetchPage, page, at).then(sample => { coldStart.samples.push(sample); }));
+      }
+      await Bun.sleep(coldStart ? STARTUP_PROBE_MS : 100);
+    }
+    const deadline = coldStart ? Date.now() + seconds * 1000 : bootDeadline;
     const post = async (path: string, body: object, headers: Record<string, string> = bearer) => {
       const start = performance.now();
       const response = await workerFetch(origin + path, { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(Math.min(60_000, Math.max(1, deadline - Date.now()))) });
@@ -1114,7 +1224,7 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
     let nextAsk = Date.now(), nextRead = Date.now(), nextAck = Date.now(), nextDash = Date.now(), askSequence = 0, ackSequence = 0;
     const statusPath = engineStatusSnapshotPath(env);
     while (Date.now() < deadline) {
-      if (children.some(child => child.exitCode !== null)) throw new Error('Engine exited during measurement');
+      if (engineExited()) throw new Error('Engine exited during measurement');
       if (Date.now() >= nextAck) {
         // Command acknowledgement on the background socket, timed to the 202, and the status snapshot's age, once a second.
         nextAck += 1000;
@@ -1240,7 +1350,7 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
     max_settled_ms: Math.max(0, ...clicks.map(click => click.settled_ms ?? 0)),
     failures: clicks.filter(click => click.saved === false), samples: clicks };
   const ack_ok = clickSummary.count > 0 && clickSummary.over_1s.length === 0;
-  const privacy_restart = await privacyClickRestartGate();
+  const privacy_restart = coldStart ? null : await privacyClickRestartGate();
   const walAtEnd = walSizes(dir);
   const walLines = sqliteLines.filter(entry => entry.line.includes('sqlite wal:'));
   const checkpoint = sqliteLines.filter(entry => entry.line.includes('sqlite checkpoint:')).slice(0, 2000);
@@ -1256,13 +1366,25 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
   const padded_wal_level_s = firstLevel ? Math.round((Date.parse(firstLevel.at) - (enginesStartedAt ?? started)) / 100) / 10 : null;
   // One bar for the 600k gate and the quick cold test (plan, 16 Nov 2026).
   const control_ok = !ackSummary.no_control_thread && (options.runCase === 'boot-after-upgrade' || ackSummary.status_max_age_ms <= 10_000);
-  const pass = gate({ background, front, workload_ok, wal_ok: guards.wal_ok, ack_ok: ack_ok && control_ok, privacy_restart_ok: privacy_restart.pass, runCase: options.runCase });
+  const pass = coldStart ? null : gate({ background, front, workload_ok, wal_ok: guards.wal_ok, ack_ok: ack_ok && control_ok, privacy_restart_ok: privacy_restart?.pass === true, runCase: options.runCase });
+  const startupGaps = coldStart?.firstAnswerAt !== undefined && coldStart.readyAt !== undefined
+    ? summarizeStartupGaps(coldStart.samples, coldStart.firstAnswerAt, coldStart.readyAt)
+    : null;
+  const split = startupGaps?.longest ? startupThreadSplit(timelinePath('front'), startupGaps.longest) : null;
+  const spawnedAt = enginesStartedAt ?? started;
+  const startup = coldStart ? {
+    first_answer_ms: coldStart.firstAnswerAt === undefined ? null : Math.round(coldStart.firstAnswerAt - spawnedAt),
+    ready_ms: coldStart.readyAt === undefined ? null : Math.round(coldStart.readyAt - spawnedAt),
+    builds: coldStart.builds, gaps: startupGaps, front_thread: split,
+    verdict: startupGaps ? coldStartVerdict(startupGaps.longest, split && typeof split === 'object' ? split : undefined) : null,
+  } : null;
   // Retired as a bar (owner, 16 Nov 2026); kept in the receipt for comparison with earlier runs.
   const strict_1s = background.beats > 0 && front.beats > 0 && background.max_ms < LOOP_STALL_LIMIT_MS && front.max_ms < LOOP_STALL_LIMIT_MS;
   const sha = spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
   const receipt = { phase: 'run', case: options.runCase, sha, pass, strict_1s, restore_ms, restored_outside: restoredOutside, padded_wal_level_s, judged: modelCalls.judge, host_busy: false, host, qualified: isCapped, memory_max: memoryMax, elapsed_ms: Date.now() - started, background, front, slow_sql, forwarded, asks, workloads, workload_ok, model_calls: modelCalls, privacy_click: clickSummary, privacy_restart, command_ack: ackSummary, ack_ok, control_ok, typical, front_loop_sql: seen.frontLoopSql, request_errors: requestErrors, errors, cpu_freezes: cpuFreezes.slice(0, 60), pressure: pressureSummary(pressureSampler.samples), anon_memory: anonSampler.peaks,
     sqlite_mmap: options.sqliteMmap ?? 'default', sqlite_mmap_boot: fileMapLines, process_io: ioSampler.summary(), meminfo: { start: meminfoAtStart, end: meminfoAtEnd }, cgroup_memory_end: cgroupAtEnd, cgroup_memory_samples: cgroupSamples,
     ...(options.swapReading ? { swap_reading: true, counts_as_gate: false } : {}),
+    ...(coldStart ? { counts_as_gate: false, cold_start: startup, io_throttle: coldStart.io_throttle } : {}),
     vmstat: Object.fromEntries(Object.entries(readVmstat()).map(([key, value]) => [key, value - (vmstatAtStart[key] ?? value)])),
     background_timeline: summarizeThreadTimeline('background', timelinePath('background'), freezeLines, join(metrics, 'background.freezes.log')),
     front_timeline: summarizeThreadTimeline('front', timelinePath('front'), freezeLines, join(metrics, 'front.freezes.log')),
@@ -1277,6 +1399,20 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
   // last-run.json stays on the host and the next run replaces it; an engine that died puts its last words in the job log too.
   if (errors.length) for (const role of ['background', 'front']) console.error(`--- ${role} engine log tail ---\n${output[role]!.slice(-6_000)}`);
   console.log(JSON.stringify(receipt));
+  if (startup) {
+    rmSync(runDir, { recursive: true, force: true });
+    if (!startup.verdict || !finished) {
+      console.log('cold-start: NOT RUN: the startup and after-ready window did not complete.');
+      return 'not_run' as const;
+    }
+    const gap = startup.gaps?.longest;
+    const thread = startup.front_thread;
+    const detail = thread && typeof thread === 'object'
+      ? `running ${thread.runningMs} ms, run queue ${thread.runQueueMs} ms, page faults ${thread.blockedMajfltMs} ms, block IO ${thread.blockedBlkioMs} ms, other waits ${thread.blockedOtherMs} ms, wait channels ${JSON.stringify(thread.waitChannelsMs)}`
+      : thread ?? 'no thread window';
+    console.log(`cold-start: ${startup.verdict} — longest ${gap?.ms ?? 0} ms${gap ? ` (${gap.page})` : ''}; ${detail}; READY ${startup.ready_ms} ms from spawn`);
+    return true;
+  }
   // One line per engine per run (plan, 16 Nov 2026): worst stall and its site, then pass or fail; then a per-site table.
   for (const [role, loop] of [['front', front], ['background', background]] as const) {
     const limit = role === 'front' ? frontLimitMs(options.runCase) : BACKGROUND_PROGRESS_LIMIT_MS;
@@ -1285,7 +1421,7 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
   }
   console.log(`${options.runCase} felt delays (counts over 1 s): front beats ${receipt.felt_delays.front_beats_over_1s}, clicks ${receipt.felt_delays.clicks_over_1s}, dashboard reads ${receipt.felt_delays.dashboard_reads_over_1s}. A pass needs the front and the click journey both under the bar.`);
   console.log(`${options.runCase} Make Private receipt: worst ${clickSummary.max_ms} ms over ${clickSummary.count} posts (${clickSummary.over_1s.length} at or over 1 s or failed); ${ack_ok ? 'PASS' : 'FAIL'} (bar 1 s). Settlement (reported): worst ${clickSummary.max_settled_ms} ms across ${clickSummary.settled} settled, ${clickSummary.pending} pending at cutoff.`);
-  console.log(`${options.runCase} Make Private, front restart before commit: ${privacy_restart.pass ? 'PASS' : 'FAIL'} (${privacy_restart.ms} ms), ${privacy_restart.outcome}.`);
+  if (privacy_restart) console.log(`${options.runCase} Make Private, front restart before commit: ${privacy_restart.pass ? 'PASS' : 'FAIL'} (${privacy_restart.ms} ms), ${privacy_restart.outcome}.`);
   console.log(`${options.runCase} socket ack (reported): worst ${ackSummary.max_ms} ms over ${ackSummary.count} posts (${ackSummary.over_1s.length} at or over 1 s or failed), status snapshot oldest ${ackSummary.status_max_age_ms} ms${ackSummary.no_control_thread ? ', NO CONTROL THREAD' : ''}.`);
   console.log(`${options.runCase} anonymous memory (reported): ${Object.entries(anonSampler.peaks).map(([role, entry]) => `${role} peak ${entry.peak_anon_mib} MiB at ${entry.at_s} s, last ${entry.last_anon_mib} MiB`).join('; ') || 'not sampled'}`);
   console.log(`${options.runCase} typical (reported, not gated yet): click ack p95 ${typical.ack_p95_ms} ms (target 100); dashboard reads p95 ${typical.dashboard_p95_ms} ms, worst ${typical.dashboard_max_ms} ms over ${typical.dashboard_reads}${typical.dashboard_failed ? `, ${typical.dashboard_failed} failed` : ''} (target 300, worst 1000); front beat p95 ${typical.front_beat_p95_ms === null ? 'n/a' : `<= ${typical.front_beat_p95_ms} ms`}`);
@@ -1302,7 +1438,7 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
   rmSync(runDir, { recursive: true, force: true });
   // A run that judged nothing did not exercise the background's long holds (plan, 16 Nov 2026): it counts as not run, not as a pass.
   if (modelCalls.judge === 0) { console.log(`${options.runCase}: NOT RUN: the judge made no model calls, so the background's judging was never measured.`); return 'not_run' as const; }
-  return pass;
+  return pass === true;
 }
 if (import.meta.main) {
   const [command, ...args] = process.argv.slice(2);
@@ -1311,15 +1447,15 @@ if (import.meta.main) {
   const number = (name: string, fallback: string) => { const n = Number(flag(name, fallback)); if (!Number.isSafeInteger(n) || n < 1) throw new Error(`Invalid --${name}`); return n; };
   if (dir && command === 'pad-wal') padWal(resolve(dir), number('wal-mb', '2048'));
   if (dir && command === 'restore') { restorePristine(resolve(dir)); writeFileSync(join(resolve(dir), 'restored'), new Date().toISOString()); process.exit(0); }
-  if (!dir || !['build', 'run'].includes(command ?? '')) throw new Error('Usage: loop-stall-test.ts build|restore|run --dir PATH [--items N] [--chunks-per-item N] [--seconds N] [--memory-max 2G] [--case steady|boot-after-upgrade] [--wal-mb 2048] [--io-floor-ms 50] [--io-wait-seconds 600] [--sqlite-mmap on|off|bounded] [--swap-reading]');
+  if (!dir || !['build', 'run'].includes(command ?? '')) throw new Error(`Usage: loop-stall-test.ts build|restore|run --dir PATH [--items N] [--chunks-per-item N] [--seconds N] [--memory-max 2G] [--case ${RUN_CASES.join('|')}] [--wal-mb 2048] [--io-floor-ms 50] [--io-wait-seconds 600] [--sqlite-mmap on|off|bounded] [--swap-reading] [--io-throttle-unavailable]`);
   const runCase = flag('case', 'steady') as RunCase;
   const sqliteMmap = flag('sqlite-mmap') as 'on' | 'off' | 'bounded' | undefined;
   if (sqliteMmap !== undefined && !['on', 'off', 'bounded'].includes(sqliteMmap)) throw new Error('Invalid --sqlite-mmap; use on, off or bounded');
-  if (!['steady', 'boot-after-upgrade'].includes(runCase)) throw new Error('Invalid --case; use steady or boot-after-upgrade');
+  if (!RUN_CASES.includes(runCase)) throw new Error(`Invalid --case; use ${RUN_CASES.join(', ')}`);
   if (command === 'build') await build(resolve(dir), number('items', '600000'), number('chunks-per-item', '1'));
   else {
-    const result = await run(resolve(dir), number('seconds', '300'), flag('memory-max', '2G')!, { runCase, walBytes: number('wal-mb', '2048') * 1024 * 1024, ioFloorMs: number('io-floor-ms', '50'), ioWaitSeconds: number('io-wait-seconds', '600'), quick: args.includes('--quick'), ...(sqliteMmap ? { sqliteMmap } : {}), swapReading: args.includes('--swap-reading') });
-    // Exit 3 is "host busy" and 4 "not run" (no judging): neither measured the engine.
+    const result = await run(resolve(dir), number('seconds', '300'), flag('memory-max', '2G')!, { runCase, walBytes: number('wal-mb', '2048') * 1024 * 1024, ioFloorMs: number('io-floor-ms', '50'), ioWaitSeconds: number('io-wait-seconds', '600'), quick: args.includes('--quick'), ...(sqliteMmap ? { sqliteMmap } : {}), swapReading: args.includes('--swap-reading'), ioThrottleUnavailable: args.includes('--io-throttle-unavailable') });
+    // Exit 3 is "host busy" and 4 "not run": neither completed measurement.
     process.exitCode = result === 'host_busy' ? 3 : result === 'not_run' ? 4 : result ? 0 : 1;
   }
   process.exit(process.exitCode ?? 0);

@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir, userInfo } from 'node:os';
 import { mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { Database } from 'bun:sqlite';
-import { beatP95, gate, memoryMaxBytes, sampledBeatSite, sqliteGuards, summarizeBeats } from '../scripts/loop-stall-test.ts';
+import { beatP95, coldStartVerdict, gate, memoryMaxBytes, sampledBeatSite, sqliteGuards, summarizeBeats, summarizeStartupGaps } from '../scripts/loop-stall-test.ts';
 import { join } from 'node:path';
 import { waitFor } from './helpers/test-clock.ts';
 
@@ -24,13 +24,27 @@ function invoke(args: string[], timeout = 10 * 60_000, env: NodeJS.ProcessEnv = 
   const result = spawnSync(args[0]!, args.slice(1), { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, timeout, env, stdio: ['ignore', 'pipe', 'inherit'] });
   console.log(result.stdout);
   if (result.error) throw result.error;
-  return result.status;
+  return result;
+}
+
+function coldStartThrottle(arm: string | undefined) {
+  if (arm !== 'cold-start-throttled') return { scope: [], bench: [] };
+  const uid = process.getuid!();
+  const controllers = `/sys/fs/cgroup/user.slice/user-${uid}.slice/user@${uid}.service/cgroup.subtree_control`;
+  if (!existsSync(controllers) || !readFileSync(controllers, 'utf8').split(/\s+/).includes('io')) {
+    console.log('Cold-start disk throttle could not be applied: io controller not delegated.');
+    return { scope: [], bench: ['--io-throttle-unavailable'] };
+  }
+  const mount = spawnSync('findmnt', ['-n', '--nofsroot', '-o', 'SOURCE', '--target', dir], { encoding: 'utf8' });
+  const device = mount.stdout?.trim();
+  if (mount.status !== 0 || !device) throw new Error(`Cannot resolve fixture device: ${mount.error ?? mount.stderr}`);
+  return { scope: ['-p', `IOReadBandwidthMax=${device} 40M`, '-p', `IOWriteBandwidthMax=${device} 40M`], bench: [] };
 }
 test.skipIf(!enabled)('split engine with an 8G cap stays within loop and main-thread SQLite budgets', () => {
   expect(dir.startsWith('/dev/shm') || dir.startsWith(tmpdir())).toBe(false);
   mkdirSync(diskTmp, { recursive: true });
   const onDisk = { ...process.env, TMPDIR: diskTmp, SQLITE_TMPDIR: diskTmp };
-  expect(invoke(['bun', script, 'build', '--dir', dir], 180 * 60_000, onDisk)).toBe(0);
+  expect(invoke(['bun', script, 'build', '--dir', dir], 180 * 60_000, onDisk).status).toBe(0);
   // More RAM must not hide repeated scans through SQLite's small connection caches.
   // Two cases, each scored on its own line: a box in use, and the first boot after an upgrade left a large WAL.
   // Exit 3 is "host busy" (the IO floor was never reached): not a product result.
@@ -38,18 +52,53 @@ test.skipIf(!enabled)('split engine with an 8G cap stays within loop and main-th
   // A file-map arm (cloud-job loop_stall_arm: on, off or bounded) runs the steady case only, with that setting for the whole engine.
   // With a -swap suffix (on-swap, off-swap, bounded-swap) the scope gets a 4G swap allowance: a swap reading, not a gate pass.
   const armInput = process.env.CJ_LOOP_STALL_ARM?.trim() || undefined;
+  const coldStart = armInput === 'cold-start' || armInput === 'cold-start-throttled';
   const armMatch = armInput === undefined ? undefined : /^(on|off|bounded)(-swap)?$/.exec(armInput);
-  if (armInput !== undefined && !armMatch) throw new Error(`CJ_LOOP_STALL_ARM is on, off or bounded, optionally with -swap, not ${armInput}`);
+  if (armInput !== undefined && !coldStart && !armMatch) throw new Error(`Invalid CJ_LOOP_STALL_ARM ${armInput}; use on, off or bounded (optionally with -swap), cold-start or cold-start-throttled`);
   const arm = armMatch?.[1];
   const swapReading = Boolean(armMatch?.[2]);
-  const cases = arm ? ['steady'] as const : ['steady', 'boot-after-upgrade'] as const;
-  const results = Object.fromEntries(cases.map(runCase => [runCase,
-    invoke(['bun', script, 'restore', '--dir', dir], 30 * 60_000, onDisk) || invoke(['systemd-run', '--user', '--scope', '--quiet', '-p', 'MemoryMax=8G', '-p', `MemorySwapMax=${swapReading ? '4G' : '0'}`, '--', 'bun', script, 'run', '--dir', dir, '--seconds', '300', '--memory-max', '8G', '--case', runCase, ...(arm ? ['--sqlite-mmap', arm] : []), ...(swapReading ? ['--swap-reading'] : [])], 25 * 60_000, onDisk)]));
+  const cases = coldStart ? ['cold-start'] : arm ? ['steady'] : ['steady', 'boot-after-upgrade'];
+  const throttle = coldStartThrottle(armInput);
+  const results = Object.fromEntries(cases.map(runCase => {
+    expect(invoke(['bun', script, 'restore', '--dir', dir], 30 * 60_000, onDisk).status).toBe(0);
+    const result = invoke(['systemd-run', '--user', '--scope', '--quiet', '-p', 'MemoryMax=8G', '-p', `MemorySwapMax=${swapReading ? '4G' : '0'}`, ...throttle.scope,
+      '--', 'bun', script, 'run', '--dir', dir, '--seconds', '300', '--memory-max', '8G', '--case', runCase,
+      ...(arm ? ['--sqlite-mmap', arm] : []), ...(swapReading ? ['--swap-reading'] : []), ...throttle.bench], (coldStart ? 30 : 25) * 60_000, onDisk);
+    if (coldStart) expect(result.stdout).toMatch(/^cold-start: (?:REPRODUCED|NOT REPRODUCED)\b/m);
+    return [runCase, result.status];
+  }));
   console.log(JSON.stringify({ phase: 'cases', arm: armInput ?? 'default', swap_reading: swapReading, results }));
-  // A swap reading measures; its gate verdict (0 or 1) is reported, not required.
-  if (swapReading) expect(Object.values(results).every(code => code === 0 || code === 1)).toBe(true);
+  // Bench arms accept either measured result. Missing measurements still fail.
+  if (swapReading || coldStart) expect(Object.values(results).every(code => code === 0 || code === 1)).toBe(true);
   else expect(results).toEqual(Object.fromEntries(cases.map(runCase => [runCase, 0])));
-}, 235 * 60_000);
+}, 240 * 60_000);
+
+test.each([
+  [11_000, { runningMs: 2_000, blockedMajfltMs: 2_000, blockedBlkioMs: 5_000 }, 'REPRODUCED'],
+  [10_000, { runningMs: 2_000, blockedMajfltMs: 2_000, blockedBlkioMs: 5_000 }, 'NOT REPRODUCED'],
+  [11_000, { runningMs: 7_000, blockedMajfltMs: 500, blockedBlkioMs: 2_500 }, 'NOT REPRODUCED'],
+] as const)('cold-start gap verdict for %i ms with split %j is %s', (gapMs, split, verdict) => {
+  const firstAnswerAt = Date.parse('2026-11-19T12:00:00Z');
+  const readyAt = firstAnswerAt + gapMs + 500;
+  const sample = (page: 'Home' | 'Sources', start: number, ms = 0, answered = true) =>
+    ({ page, at: firstAnswerAt + start, ms, answered, timeout: !answered });
+  const samples = [
+    // Order by answer time. A request already in flight at the first answer can still reply in the window.
+    sample('Home', gapMs, 250), sample('Home', -250, 500),
+    sample('Home', 250, 500, false), sample('Home', gapMs + 500, 250),
+    sample('Sources', 3_000), sample('Sources', 6_000), sample('Sources', 9_000),
+  ];
+  const gaps = summarizeStartupGaps(samples, firstAnswerAt, readyAt);
+  const expectedGap = {
+    page: 'Home' as const, start_at: new Date(firstAnswerAt + 250).toISOString(),
+    end_at: new Date(firstAnswerAt + gapMs + 250).toISOString(), ms: gapMs,
+  };
+  expect(gaps.longest).toEqual(expectedGap);
+  expect(gaps.pages.Home.over_1s).toEqual([expectedGap]);
+  expect(gaps.pages.Sources.longest?.ms).toBe(3_000);
+  expect(gaps.pages.Sources.over_1s.at(-1)?.end_at).toBe(new Date(readyAt).toISOString());
+  expect(coldStartVerdict(gaps.longest, { ...split, runQueueMs: 100, blockedOtherMs: 500 })).toBe(verdict);
+});
 
 test('memory cap accepts the default and warm-cache sizes and rejects invalid caps', () => {
   expect(memoryMaxBytes('2G')).toBe(2 * 1024 ** 3);
@@ -68,7 +117,7 @@ test('fixture rebuilds an old shape with substantial embedded Personal and Priva
     writeFileSync(old, 'previous fixture');
     writeFileSync(join(fixture, 'shape.json'), JSON.stringify({ shape: { version: 4 } }));
     const args = ['bun', script, 'build', '--dir', fixture, '--items', '200'];
-    expect(invoke(args)).toBe(0);
+    expect(invoke(args).status).toBe(0);
     const receipt = JSON.parse(readFileSync(join(fixture, 'shape.json'), 'utf8'));
     expect(receipt.shape.version).toBeGreaterThan(4);
     expect(receipt.shape.chunksPerItem).toBe(1);
@@ -93,7 +142,7 @@ test('fixture rebuilds an old shape with substantial embedded Personal and Priva
       expect((ledger.query('SELECT length(reasons_json) AS n FROM tier_items WHERE provider_item_id = ?').get('6') as { n: number }).n).toBeGreaterThan(1024);
     } finally { ledger.close(); }
     // Same-version builds reuse their complete seed rather than duplicating it.
-    expect(invoke(args)).toBe(0);
+    expect(invoke(args).status).toBe(0);
     expect(JSON.parse(readFileSync(join(fixture, 'shape.json'), 'utf8'))).toEqual(receipt);
   } finally { rmSync(fixture, { recursive: true, force: true }); }
 }, 60_000);

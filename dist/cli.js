@@ -42821,8 +42821,8 @@ class TierLedger {
       assertWritableStoreOpenAllowed("tier ledger", this.dbPath);
     const onDisk = this.dbPath !== ":memory:";
     if (onDisk)
-      TierLedger.assertSchemaCanOpen(this.dbPath, this.readOnly);
-    if (onDisk && !this.readOnly) {
+      TierLedger.assertSchemaCanOpen(this.dbPath, this.readOnly, options.allowWalLessRead);
+    if (onDisk && !this.readOnly && options.expectedLedgerId === undefined) {
       mkdirSync16(dirname30(this.dbPath), { recursive: true, mode: 448 });
       if (!existsSync25(this.dbPath))
         closeSync13(openSync13(this.dbPath, "a", 384));
@@ -42830,7 +42830,7 @@ class TierLedger {
     }
     let db;
     try {
-      db = new Database3(this.dbPath, this.readOnly ? { readonly: true, create: false } : { create: true });
+      db = new Database3(this.dbPath, this.readOnly ? { readonly: true, create: false } : options.expectedLedgerId === undefined ? { create: true } : { readwrite: true, create: false });
       if (this.readOnly) {
         db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
         applySqliteMmap(db);
@@ -42839,6 +42839,15 @@ class TierLedger {
         }
         this.db = db;
         return;
+      }
+      if (options.expectedLedgerId !== undefined) {
+        db.exec("PRAGMA busy_timeout = 10000;");
+        const row = db.query(`SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'`).get();
+        if (row?.value !== options.expectedLedgerId) {
+          throw new OperationError("source_index_error", "The tier ledger for that item was replaced while it was being read, so nothing was changed.", "Run the command again.");
+        }
+        if (onDisk)
+          restrictLedgerFiles(this.dbPath);
       }
       db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA journal_size_limit = 67108864;" + loopWalAutocheckpointPragma(this.dbPath, "tier-ledger"));
       applySqliteMmap(db);
@@ -42849,18 +42858,18 @@ class TierLedger {
         restrictLedgerFiles(this.dbPath);
     } catch (error) {
       if (db)
-        closeSqliteStore(db, this.readOnly ? { checkpoint: false, readOnly: true } : undefined);
+        closeSqliteStore(db, this.readOnly || options.expectedLedgerId !== undefined ? { checkpoint: false, readOnly: this.readOnly } : undefined);
       throw error;
     }
     this.db = db;
   }
-  static assertSchemaCanOpen(dbPath, readOnly = false) {
+  static assertSchemaCanOpen(dbPath, readOnly = false, allowWalLessRead = false) {
     if (dbPath === ":memory:" || !existsSync25(dbPath))
       return;
     const read = readSqliteWithoutWriting(dbPath, 1e4, (db) => ({
       version: readSqliteSchemaVersion(db, TIER_LEDGER_SQLITE_STORE_ID),
       usable: sqliteSchemaUsable(db, TIER_LEDGER_SQLITE_STORE_ID, TIER_LEDGER_SCHEMA_VERSION)
-    }), readOnly);
+    }), readOnly && !allowWalLessRead);
     if (read !== undefined && !read.usable && (read.version > TIER_LEDGER_SCHEMA_VERSION || readOnly)) {
       throw new TierLedgerSchemaError(read.version);
     }
@@ -43627,6 +43636,10 @@ class TierLedger {
     `).run(mark.generation, ...idParams(identity), mark.revision, mark.generation, ...idParams(identity));
   }
   noteJobLedgerPaths(paths) {
+    const known = new Set(this.knownJobLedgerPaths());
+    paths = paths.filter((path) => !known.has(path));
+    if (paths.length === 0)
+      return;
     const now = this.now().toISOString();
     this.db.transaction(() => {
       const upsert = this.db.query(`
@@ -43903,6 +43916,8 @@ class TierLedger {
     this.setMeta(key, value);
   }
   writeSettleProgress(key, value) {
+    if ((this.readMeta(key) ?? "") === value)
+      return;
     this.settleProgressChanges += this.setMeta(key, value);
   }
   setMeta(key, value) {
@@ -46417,6 +46432,7 @@ var TIER_LEDGER_SCHEMA_VERSION = 16, RETIRED_EMBEDDING_CLEARANCE_REASON = "conte
           AND t.state = 'current' AND t.metadata_pending = 0 AND t.content_pending = 0
       )`, TIER_RECHECK_META_PREFIX = "recheck:", STORED_NAMES_REASON = "metadata:names_from_store", STORED_NAMES_ASKED_REASON = "metadata:names_from_store:asked", TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
+  init_operation_error();
   init_sqlite_migrations();
   init_sqlite_store();
   init_store_write_guard();
@@ -165462,7 +165478,7 @@ var init_tier_migration_cli = __esm(() => {
 });
 
 // src/workers/classification/tier-cli.ts
-import { Database as Database28 } from "bun:sqlite";
+import { Database as Database28, SQLiteError } from "bun:sqlite";
 import { existsSync as existsSync94 } from "node:fs";
 function tierCommandOpensStores(args) {
   return args[0] === "set" || args[0] === "explain" || args[0] === "recheck" || args[0] === "migrate";
@@ -165555,16 +165571,16 @@ function storeBoundLedger(db, dbPath) {
   }
   return;
 }
-function locateTierItem(locator, context = {}) {
+function discoverTierItem(locator, context) {
   const needle = locator.trim();
   if (!needle)
     throw new OperationError("invalid_params", "A locator is required.");
-  return locateMatched({ locator: needle }, context);
+  return discoverTierLookup({ locator: needle }, context);
 }
 function locateTierItemByIdentity(identity, context = {}) {
-  return locateMatched({ identity }, context);
+  return locateMatched(discoverTierLookup({ identity }, context));
 }
-function locateMatched(needle, context) {
+function discoverTierLookup(needle, context) {
   const stores = knownStorePaths(context);
   const matches = stores.flatMap((dbPath) => matchStore2(dbPath, needle));
   const identities = new Map(matches.map((match) => [identityKey2(match.identity), match.identity]));
@@ -165584,20 +165600,42 @@ function locateMatched(needle, context) {
   }
   const boundIds = new Map;
   for (const match of matches) {
-    if (!match.bound || !existsSync94(match.bound.path))
+    if (!match.bound)
       continue;
     ledgerPaths.add(match.bound.path);
     boundIds.set(match.bound.path, match.bound.id);
   }
+  return { identity, localItemId, matches, ledgerPaths, boundIds };
+}
+function locateMatched({ identity, localItemId, matches, ledgerPaths, boundIds }) {
+  const requiredPaths = new Set(matches.map((match) => match.bound?.path ?? match.ownLedgerPath));
   const located = (ledgerPath) => ({
     ledgerPath,
     identity,
     localItemId,
     ...boundIds.has(ledgerPath) ? { boundLedgerId: boundIds.get(ledgerPath) } : {}
   });
-  const deciding = [...ledgerPaths].filter((path) => withLedgerAt(path, undefined, (ledger) => ledger.getCurrent(identity) !== undefined, boundIds.get(path), true));
+  const skipped = new Set;
+  const deciding = [...ledgerPaths].filter((path) => {
+    try {
+      return withLedgerAt(path, undefined, (ledger) => ledger.getCurrent(identity) !== undefined, boundIds.get(path), "read-only");
+    } catch (error) {
+      const reason = tierLedgerReadProblem(error);
+      if (reason === undefined)
+        throw error;
+      if (requiredPaths.has(path)) {
+        const bound = boundIds.has(path) ? "bound " : "";
+        throw new OperationError("source_index_error", `The item's ${bound}tier ledger could not be read (${reason}).`);
+      }
+      skipped.add(reason);
+      return false;
+    }
+  });
   if (deciding.length > 0)
     return deciding.map(located);
+  if (skipped.size > 0) {
+    throw new OperationError("source_index_error", `No tier decision was found and at least one tier ledger was skipped (${[...skipped].join(", ")}).`);
+  }
   const fallback = matches[0];
   return [located(fallback.bound?.path ?? fallback.ownLedgerPath)];
 }
@@ -165638,11 +165676,46 @@ function knownTierLedgers(context = {}) {
   }
   return [...ledgers].map(([path, boundLedgerId]) => ({ path, ...boundLedgerId ? { boundLedgerId } : {} }));
 }
+function tierLedgerReadProblem(error) {
+  if (error instanceof TierLedgerSchemaError)
+    return error.schema < error.known ? "schema needs migration" : "schema is newer than this build";
+  if (error instanceof SQLiteError)
+    return "SQLite could not read the ledger";
+  return;
+}
+function prepareTierLedgers({ ledgerPaths, boundIds }) {
+  for (const path of ledgerPaths) {
+    const boundId = boundIds.get(path);
+    try {
+      withLedgerAt(path, undefined, () => {
+        return;
+      }, boundId, "read-only");
+    } catch (error) {
+      if (tierLedgerReadProblem(error) === undefined)
+        throw error;
+      if (error instanceof TierLedgerSchemaError && error.schema < error.known) {
+        try {
+          new TierLedger({ dbPath: path, ...boundId !== undefined ? { expectedLedgerId: boundId } : {} }).close();
+        } catch (migrationError) {
+          if (tierLedgerReadProblem(migrationError) === undefined)
+            throw migrationError;
+        }
+      }
+    }
+  }
+}
+function locateForTierCommand(locator, context) {
+  const lookup = discoverTierItem(locator, context);
+  if (context.standalone)
+    prepareTierLedgers(lookup);
+  return locateMatched(lookup);
+}
 function identityKey2(identity) {
   return tierLedgerIdentityKey(identity);
 }
-function withLedgerAt(ledgerPath, now, run, expectedId, readsOnly = false) {
-  const ledger = new TierLedger({ dbPath: ledgerPath, ...now ? { now } : {}, ...readsOnly && writableStoreOpensForbidden() ? { readOnly: true } : {} });
+function withLedgerAt(ledgerPath, now, run, expectedId, mode = "write") {
+  const readOnly = mode === "read-only" || mode === "read-only-on-front" && writableStoreOpensForbidden();
+  const ledger = new TierLedger({ dbPath: ledgerPath, ...now ? { now } : {}, readOnly, allowWalLessRead: readOnly });
   try {
     if (expectedId !== undefined && ledger.ledgerId() !== expectedId) {
       throw new OperationError("source_index_error", "The tier ledger for that item was replaced while it was being read, so nothing was changed.", "Run the command again.");
@@ -165679,7 +165752,7 @@ function runTierSet(args, context = {}, expected) {
     }
     override = { kind: "tier", tier };
   }
-  const items = locateTierItem(locator, context);
+  const items = locateForTierCommand(locator, context);
   if (expected) {
     const identity = items[0].identity;
     if (identity.provider !== expected.provider || identity.providerItemId !== expected.providerItemId || (identity.providerConversationId ?? undefined) !== (expected.providerConversationId ?? undefined)) {
@@ -165751,7 +165824,7 @@ function runTierExplain(args, context = {}) {
   const [locator] = args;
   if (!locator || args.length > 1)
     throw new OperationError("invalid_params", `Usage: ${TIER_CLI_USAGE["tier explain"]}`);
-  const items = locateTierItem(locator, context);
+  const items = locateForTierCommand(locator, context);
   const records = items.map((item) => {
     const recorded = withLedgerAt(item.ledgerPath, context.now, (ledger) => ({
       record: ledger.getCurrent(item.identity),
@@ -165759,7 +165832,7 @@ function runTierExplain(args, context = {}) {
       orphaned: orphanedOverride(ledger, item.identity),
       history: ledger.history(item.identity),
       copies: ledger.copies(item.identity)
-    }), item.boundLedgerId, true);
+    }), item.boundLedgerId, "read-only-on-front");
     const snifferPath = tierSnifferPathForLedger(item.ledgerPath);
     let waitingOn = [];
     if (existsSync94(snifferPath)) {
@@ -186245,7 +186318,7 @@ function recentRows(limit, context, filter, before, beforeItem) {
   for (const ledger of knownTierLedgers(context)) {
     let records = [];
     try {
-      records = withLedgerAt(ledger.path, context.now, (opened) => filter === "changed" ? opened.listRoutedOverrides().filter(({ override }) => override.kind === "tier").map(({ record }) => record).sort((left, right) => right.decidedAt.localeCompare(left.decidedAt)).slice(0, limit) : opened.recentDecisions(limit, filter === "personal" ? "private" : filter === "private" ? "secure" : undefined, before, beforeItem), ledger.boundLedgerId, true);
+      records = withLedgerAt(ledger.path, context.now, (opened) => filter === "changed" ? opened.listRoutedOverrides().filter(({ override }) => override.kind === "tier").map(({ record }) => record).sort((left, right) => right.decidedAt.localeCompare(left.decidedAt)).slice(0, limit) : opened.recentDecisions(limit, filter === "personal" ? "private" : filter === "private" ? "secure" : undefined, before, beforeItem), ledger.boundLedgerId, "read-only-on-front");
     } catch {}
     for (const record of records) {
       const key = tierLedgerIdentityKey(identityOfRecord2(record));
@@ -186298,7 +186371,7 @@ function countOwnerTierItems(context = {}) {
         counts.personal += byTier.private;
         counts.private += byTier.secure;
         counts.changed += opened.listRoutedOverrides().filter(({ override }) => override.kind === "tier").length;
-      }, ledger.boundLedgerId, true);
+      }, ledger.boundLedgerId, "read-only-on-front");
     } catch {}
   }
   return counts;
@@ -186347,7 +186420,7 @@ function readLocatedState(items, context) {
       }
       if (ledger.itemIsSecret(item.identity))
         state.secret = true;
-    }, item.boundLedgerId, true);
+    }, item.boundLedgerId, "read-only-on-front");
   }
   return state;
 }
@@ -228284,7 +228357,7 @@ function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_
           const outage = target.store.embeddingDeferredReason();
           runs.push(...result.map((run) => run.busy === true && run.deferredReason === undefined && outage !== undefined ? { ...run, deferredReason: outage } : run));
           const only = result.length === 1 ? result[0] : undefined;
-          if (keyBefore !== undefined && only && outage === undefined && only.busy !== true && only.deferredReason === undefined && only.stoppedAtDeadline !== true && only.itemsAttempted === 0 && only.chunksEmbedded === 0 && only.itemsFailed === 0 && only.itemsOutOfScope === 0 && only.inventory?.inventory_complete === 1 && target.store.embeddingFailedItemCount() === 0 && quietKey(target) === keyBefore) {
+          if (keyBefore !== undefined && only && outage === undefined && only.busy !== true && only.deferredReason === undefined && only.stoppedAtDeadline !== true && only.itemsAttempted === 0 && only.chunksEmbedded === 0 && only.itemsFailed === 0 && only.itemsOutOfScope === 0 && only.inventory?.inventory_complete === 1 && quietKey(target) === keyBefore) {
             const slots = quiet.get(target.store) ?? new Map;
             quiet.set(target.store, slots.set(slot, { key: keyBefore, at: Date.now(), run: only }));
           }
@@ -247574,7 +247647,7 @@ var init_front_scheduler = __esm(() => {
 });
 
 // src/workers/engine-split/front-history.ts
-import { SQLiteError } from "bun:sqlite";
+import { SQLiteError as SQLiteError2 } from "bun:sqlite";
 import { existsSync as existsSync123 } from "node:fs";
 function openWritableDashboardHistory(path = defaultSourceDashboardHistoryDbPath()) {
   assertWritableStoreOpenAllowed("dashboard history", path);
@@ -247604,7 +247677,7 @@ function createFrontDashboardHistory(input) {
         reader = openReadOnlyDashboardHistory(input.path);
       return reader && query(reader);
     } catch (error) {
-      if (!(error instanceof SQLiteError))
+      if (!(error instanceof SQLiteError2))
         throw error;
       const at = now();
       if (at - lastReadWarning >= minIntervalMs) {
@@ -273475,7 +273548,7 @@ var exports_server = {};
 __export(exports_server, {
   startWorkerWithLaunch: () => startWorkerWithLaunch
 });
-import { SQLiteError as SQLiteError2 } from "bun:sqlite";
+import { SQLiteError as SQLiteError3 } from "bun:sqlite";
 import { release as release2, totalmem as totalmem8 } from "node:os";
 import { execFile as execFile6 } from "node:child_process";
 import { appendFileSync, existsSync as existsSync128, readFileSync as readFileSync114, writeFileSync as writeFileSync30 } from "node:fs";
@@ -274007,7 +274080,7 @@ async function main() {
     if (!(error instanceof Error))
       return "Store mount failed.";
     const code = error.code;
-    if (error instanceof SQLiteError2) {
+    if (error instanceof SQLiteError3) {
       return `SQLite store mount failed (${error.code}).`;
     }
     if (error.message.startsWith("The privacy ledger governing ")) {
@@ -276405,6 +276478,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         });
       })
     ].filter((source) => source !== undefined);
+    if (false) {}
     let gmailImportedHistory;
     if (!sources.some((source) => source.sourceId === SCHEDULER_SOURCE_IDS.gmail) && gmailInternalConnectorStore && gmailSecureConnectorStore && gmailHoldsImportedHistory([gmailInternalConnectorStore, gmailSecureConnectorStore, gmailTierLane?.publicStore?.current()])) {
       gmailImportedHistory = createGmailImportedHistorySchedulerSource({ config: olympusConfig });
@@ -283022,7 +283096,7 @@ Run: ${ocr.repairHint}`);
   if (args[0] === "tier") {
     try {
       const tierArgs = args.slice(1);
-      const run = () => runTierCommand(tierArgs);
+      const run = () => runTierCommand(tierArgs, { standalone: true });
       const result = tierCommandOpensStores(tierArgs) ? await runLocallyOrThroughWorker(run, tierCommandRewritesStores(tierArgs) ? undefined : () => callWorkerCli("tier", { args: tierArgs })) : await run();
       console.log(JSON.stringify(result, null, 2));
     } catch (error) {

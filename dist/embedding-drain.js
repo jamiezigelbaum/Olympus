@@ -12754,8 +12754,8 @@ class TierLedger {
       assertWritableStoreOpenAllowed("tier ledger", this.dbPath);
     const onDisk = this.dbPath !== ":memory:";
     if (onDisk)
-      TierLedger.assertSchemaCanOpen(this.dbPath, this.readOnly);
-    if (onDisk && !this.readOnly) {
+      TierLedger.assertSchemaCanOpen(this.dbPath, this.readOnly, options.allowWalLessRead);
+    if (onDisk && !this.readOnly && options.expectedLedgerId === undefined) {
       mkdirSync9(dirname14(this.dbPath), { recursive: true, mode: 448 });
       if (!existsSync13(this.dbPath))
         closeSync7(openSync7(this.dbPath, "a", 384));
@@ -12763,7 +12763,7 @@ class TierLedger {
     }
     let db;
     try {
-      db = new Database(this.dbPath, this.readOnly ? { readonly: true, create: false } : { create: true });
+      db = new Database(this.dbPath, this.readOnly ? { readonly: true, create: false } : options.expectedLedgerId === undefined ? { create: true } : { readwrite: true, create: false });
       if (this.readOnly) {
         db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
         applySqliteMmap(db);
@@ -12772,6 +12772,15 @@ class TierLedger {
         }
         this.db = db;
         return;
+      }
+      if (options.expectedLedgerId !== undefined) {
+        db.exec("PRAGMA busy_timeout = 10000;");
+        const row = db.query(`SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'`).get();
+        if (row?.value !== options.expectedLedgerId) {
+          throw new OperationError("source_index_error", "The tier ledger for that item was replaced while it was being read, so nothing was changed.", "Run the command again.");
+        }
+        if (onDisk)
+          restrictLedgerFiles(this.dbPath);
       }
       db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA journal_size_limit = 67108864;" + loopWalAutocheckpointPragma(this.dbPath, "tier-ledger"));
       applySqliteMmap(db);
@@ -12782,18 +12791,18 @@ class TierLedger {
         restrictLedgerFiles(this.dbPath);
     } catch (error) {
       if (db)
-        closeSqliteStore(db, this.readOnly ? { checkpoint: false, readOnly: true } : undefined);
+        closeSqliteStore(db, this.readOnly || options.expectedLedgerId !== undefined ? { checkpoint: false, readOnly: this.readOnly } : undefined);
       throw error;
     }
     this.db = db;
   }
-  static assertSchemaCanOpen(dbPath, readOnly = false) {
+  static assertSchemaCanOpen(dbPath, readOnly = false, allowWalLessRead = false) {
     if (dbPath === ":memory:" || !existsSync13(dbPath))
       return;
     const read = readSqliteWithoutWriting(dbPath, 1e4, (db) => ({
       version: readSqliteSchemaVersion(db, TIER_LEDGER_SQLITE_STORE_ID),
       usable: sqliteSchemaUsable(db, TIER_LEDGER_SQLITE_STORE_ID, TIER_LEDGER_SCHEMA_VERSION)
-    }), readOnly);
+    }), readOnly && !allowWalLessRead);
     if (read !== undefined && !read.usable && (read.version > TIER_LEDGER_SCHEMA_VERSION || readOnly)) {
       throw new TierLedgerSchemaError(read.version);
     }
@@ -13560,6 +13569,10 @@ class TierLedger {
     `).run(mark.generation, ...idParams(identity), mark.revision, mark.generation, ...idParams(identity));
   }
   noteJobLedgerPaths(paths) {
+    const known = new Set(this.knownJobLedgerPaths());
+    paths = paths.filter((path) => !known.has(path));
+    if (paths.length === 0)
+      return;
     const now = this.now().toISOString();
     this.db.transaction(() => {
       const upsert = this.db.query(`
@@ -13836,6 +13849,8 @@ class TierLedger {
     this.setMeta(key, value);
   }
   writeSettleProgress(key, value) {
+    if ((this.readMeta(key) ?? "") === value)
+      return;
     this.settleProgressChanges += this.setMeta(key, value);
   }
   setMeta(key, value) {
