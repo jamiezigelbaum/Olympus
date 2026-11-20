@@ -108056,7 +108056,7 @@ class TieredRoutingRun {
     const replacingLowerBody = !routed && contentRead && toContent && toContent.trustDomain !== "secure_local" && (this.set.store(toContent.trustDomain)?.storedItemState(identity)?.chunkCount ?? 0) > 0;
     const firstPrivateWrite = legacyRaise || replacingLowerBody;
     const priorIntent = before?.state === "moving" ? ledger.writeIntent(identity) : undefined;
-    const holdsReplacement = (routed || hasRow) && contentRead && (firstPrivateWrite || item.holdContentUntilJudged === true || heldUntilJudged(decision.reasons) || contentHeldForJudgment(decision)) && decision.contentTier !== "secrets" && before?.state !== "moving";
+    const holdsReplacement = (routed || hasRow) && contentRead && (firstPrivateWrite || item.holdContentUntilJudged === true || contentHeldForJudgment(decision)) && decision.contentTier !== "secrets" && before?.state !== "moving";
     const restoresChangedSecret = before?.contentTier === "secrets" && decision.reasons.includes(OWNER_OVERRIDE_SECRET_REVIEW_REASON);
     const replacesInPlace = holdsReplacement && (restoresChangedSecret || currentCopies.length > 0 && (!routed || placementIsRaise(currentCopies, placement.copies)));
     const legacyLanding = firstPrivateWrite && !contentHeldForJudgment(decision) ? this.set.placementFor({ ...decision, metadataPending: true }) : undefined;
