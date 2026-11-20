@@ -231,7 +231,7 @@ function raiseRoutedItem(
   }
   if (matched.length === 0) return 'unchanged';
   const ruleTier = matched.reduce<TierKey>((tier, rule) => maxTier(tier, rule.tier), 'public');
-  const metadataTier = maxTier(record.metadataTier, ruleTier);
+  const metadataTier = maxTier(maxTier(record.metadataTier, record.targetMetadataTier ?? record.metadataTier), ruleTier);
   const moving = record.state === 'moving';
   // Only a raise acts here; content is never below the names. A move in
   // flight is judged by where it is going and what is served meanwhile.
@@ -245,7 +245,7 @@ function raiseRoutedItem(
     },
   );
   const ruleReasons = classified.reasons.filter((reason) => reason.startsWith('metadata:owner_rule:'));
-  const contentTier = maxTier(record.contentTier, metadataTier);
+  const contentTier = maxTier(maxTier(record.contentTier, record.targetContentTier ?? record.contentTier), metadataTier);
   const contentPending = record.contentPending && tierRank(contentTier) < tierRank('secure');
   const decision: TierDecision = {
     metadataTier,

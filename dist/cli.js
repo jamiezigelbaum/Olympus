@@ -46126,6 +46126,8 @@ function observationSupersedesMove(existing, next, sources, planner) {
   if (existing.targetMetadataTier === null || existing.targetContentTier === null || existing.targetMetadataTier === "secrets" || existing.targetContentTier === "secrets")
     return false;
   const queued = queuedDecisionRecord(existing);
+  if (tierRank(next.metadataTier) > tierRank(queued.metadataTier) || tierRank(next.contentTier) > tierRank(queued.contentTier) || next.metadataPending && !queued.metadataPending || next.contentPending && !queued.contentPending)
+    return true;
   const placement = planner?.(decisionOfRow(rowOf(queued)));
   const lowers = tierRank(queued.metadataTier) < tierRank(existing.metadataTier) || tierRank(queued.contentTier) < tierRank(existing.contentTier) || ["metadata", "content"].some((layer) => {
     const from = copyServingLayer(sources, layer);
@@ -46134,7 +46136,7 @@ function observationSupersedesMove(existing, next, sources, planner) {
   });
   if (!lowers)
     return false;
-  if (tierRank(next.metadataTier) > tierRank(queued.metadataTier) || tierRank(next.contentTier) > tierRank(queued.contentTier) || next.metadataPending && !queued.metadataPending || next.contentPending && !queued.contentPending || next.engineVersion !== queued.engineVersion || next.mapRevision !== queued.mapRevision || next.metadataForced !== queued.metadataForced || next.metadataFlagged !== queued.metadataFlagged)
+  if (next.engineVersion !== queued.engineVersion || next.mapRevision !== queued.mapRevision || next.metadataForced !== queued.metadataForced || next.metadataFlagged !== queued.metadataFlagged)
     return true;
   return observationMaterialChanged(queued, next);
 }
@@ -62477,14 +62479,19 @@ function writeRulesAt(path, rules) {
 `);
   return path;
 }
+function withOwnerTierRulesWriter(options, work) {
+  const path = resolveTierRulesPath(options);
+  return withOwnerConfigLease(path, "exclusive", () => work(loadOwnerTierRules({ path, allowMissing: true }), (rules) => {
+    writeRulesAt(path, rules);
+  }));
+}
 function updateOwnerTierRules(update, options = {}) {
   const path = resolveTierRulesPath(options);
-  return withOwnerConfigLease(path, "exclusive", () => {
-    const previous = loadOwnerTierRules({ path, allowMissing: true });
+  return withOwnerTierRulesWriter({ path }, (previous, save) => {
     const rules = update(previous);
     const changed = rules !== previous;
     if (changed)
-      writeRulesAt(path, rules);
+      save(rules);
     return { path, rules, changed };
   });
 }
@@ -62940,6 +62947,7 @@ function stageTieredMove(options, repairSource, loweringOnly = false) {
   const contentDestination = copyServingLayer(placement.copies, "content");
   const loweredLayers = loweredCopyLayers(sources, placement.copies);
   const lowering = loweredLayers.length > 0 || tiersLower(record, target) || hasNewLowerLayer(sources, placement.copies);
+  assertLoweringPolicyAvailable(set, lowering);
   const imports = plannedLowerImports(record.generation, target, sources, placement.copies);
   if (contentSource && contentDestination && trustDomainRank(contentDestination.trustDomain) < trustDomainRank(contentSource.trustDomain)) {
     const exported = exportFrom(contentSource);
@@ -63033,6 +63041,7 @@ function stageTieredMove(options, repairSource, loweringOnly = false) {
             throw new Error("Source store unavailable.");
           return store.withItemCopyWriteFence(identity, () => copyWithLockedSources(index + 1));
         }
+        assertLoweringPolicyAvailable(set, lowering);
         const ruleRevision = tierMoveRuleAuthorization(set, now, target, sources, placement.copies);
         if (ruleRevision === undefined) {
           retainAuthorizedRaise(set, identity, now, target, sources, placement.copies);
@@ -63157,6 +63166,11 @@ function resumeVerifiedTierMove(set, identity, embeddingLedger) {
     return true;
   } finally {
     settleDiscardedTierMoveImports(set, identity);
+  }
+}
+function assertLoweringPolicyAvailable(set, lowering) {
+  if (lowering && currentTierRulePolicy(set).unavailable) {
+    throw new TierMoveRefusedError("The owner policy is pending resolution.", "rule_policy_unavailable");
   }
 }
 function authorityRefusal(set, record, target, sources, destination) {
@@ -63337,7 +63351,7 @@ function settleDiscardedTierMoveImports(set, identity) {
       const retargeted = current.state === "moving" && (current.targetMetadataTier !== imports.target.metadataTier || current.targetContentTier !== imports.target.contentTier);
       if (imports.revoked || !sameGeneration || retargeted)
         return true;
-      if (tierMoveRuleAuthorization(set, current, imports.target, imports.sources, imports.destination) !== undefined)
+      if (currentTierRulePolicy(set).unavailable || tierMoveRuleAuthorization(set, current, imports.target, imports.sources, imports.destination) !== undefined)
         return false;
       retainAuthorizedRaise(set, identity, current, imports.target, imports.sources, imports.destination, receipt);
       discardTierMoveImports(ledger, identity, imports);
@@ -63523,6 +63537,7 @@ function flipVerifiedMove(options, receipt) {
     return store.withItemCopyWriteFence(identity, () => withCopyFences(index + 1, work));
   };
   const outcome = withTierRuleFence(set, () => withCopyFences(0, () => {
+    assertLoweringPolicyAvailable(set, lowering);
     const destinationValid = timed(options.timings, "verifyMs", () => {
       for (const copy of receipt.placement)
         set.store(copy.trustDomain)?.durabilityBarrier();
@@ -67142,11 +67157,11 @@ function connectorStoreCurrentEmbeddingRowsQuery(options, ordered, page) {
   const accountScope = normalizeOptionalAccountScope(options.accountScope);
   const selectedFilters = connectorStoreFilterSql(options.filters);
   const metadataOnly = connectorStoreMetadataOnlySql(options.filters, options.onDemandReadsTablePresent);
-  const chunkContentHash = page ? ", c.content_hash AS chunk_content_hash" : "";
+  const winnerIdentity = page ? ", c.content_hash AS chunk_content_hash, i.source_version" : "";
   if (options.chunkPks) {
     return {
       sql: `
-        SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding${chunkContentHash}
+        SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding${winnerIdentity}
         FROM json_each(?) pick
         CROSS JOIN chunk_embeddings emb ON emb.chunk_pk = pick.value AND emb.model_id = ?
         CROSS JOIN chunks c ON c.chunk_pk = emb.chunk_pk
@@ -67172,7 +67187,7 @@ function connectorStoreCurrentEmbeddingRowsQuery(options, ordered, page) {
   }
   return {
     sql: `
-      SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding${chunkContentHash}
+      SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding${winnerIdentity}
       ${CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER}
         -- Unary + avoids the model index + repeated whole-model sort (#1242).
         AND ${page ? "+emb.model_id" : "emb.model_id"} = ?
@@ -67205,7 +67220,8 @@ function foldVectorScore(bestByItem, row, queryVector) {
       bestCosine: score,
       bestChunkPk: row.chunk_pk,
       bestChunkContentHash: row.chunk_content_hash,
-      localItemId: row.local_item_id
+      localItemId: row.local_item_id,
+      sourceVersion: row.source_version
     });
   }
   return { mismatch: 0, qualified, score };
@@ -67674,13 +67690,16 @@ function defineConnectorCorpus(options) {
     description: "Shared connector-store corpus: generic local index over a Contract 1 SourceConnector."
   });
 }
-function partialKeywordRows(store, request, projector, locatorPathScope) {
-  return (rows) => request.onPartialResponse?.({
-    hits: rows.slice(0, request.maxResults).map((row) => connectorStoreHitFromRow(store, row, -row.rank, projector, locatorPathScope)),
-    latencyMs: 0,
-    incomplete: true,
-    rawExposed: false
-  });
+function publishPartialRows(store, request, rows, filters, score, projector) {
+  if (!request.onPartialResponse)
+    return;
+  const prefix = rows.slice(0, request.maxResults);
+  const hits = (current) => current.map((row) => connectorStoreHitFromRow(store, row, score(row), projector, filters?.locatorPathScope));
+  const currentHits = filters?.metadataOnlyLocatorPathScopes?.length || filters?.metadataOnlySourceScopeFolderKeys?.length ? () => hits(store.grantedPartialRows(prefix, filters)) : undefined;
+  request.onPartialResponse({ hits: hits(prefix), latencyMs: 0, incomplete: true, rawExposed: false }, currentHits);
+}
+function partialKeywordRows(store, request, filters, projector) {
+  return request.onPartialResponse ? (rows) => publishPartialRows(store, request, rows, filters, (row) => -row.rank, projector) : undefined;
 }
 function createConnectorStoreCorpusAdapter(options) {
   const { store, embeddingProvider } = options;
@@ -67701,18 +67720,18 @@ function createConnectorStoreCorpusAdapter(options) {
     if (!embeddingProvider || useHybrid !== "hybrid" || semanticSkippedReason)
       return (async () => {
         const markStage = startStoreStageClock(stages);
-        let keywordLane = await connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters, { onPartialRows: partialKeywordRows(store, request, options.resultProjector, filters?.locatorPathScope) }, request.deadlineAtMs);
+        let keywordLane = await connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters, { onPartialRows: partialKeywordRows(store, request, filters, options.resultProjector) }, request.deadlineAtMs);
         markStage?.("keyword_lane_ms");
         keywordLane = await relaxEmptyLocalKeywordLane(store, request.query, request.maxResults, options.accountScope, filters, keywordLane, options.localKeywordFallback, {}, request.deadlineAtMs);
         markStage?.("keyword_relaxation_ms");
-        keywordLane = await revalidateKeywordLane(store, keywordLane);
-        markStage?.("keyword_revalidation_ms");
-        const rows = keywordLane.rows;
         let recencyCut = false;
         const recencyRows = await chatRecencyLaneRows(store, options.accountScope, filters, request.deadlineAtMs, () => {
           recencyCut = true;
         });
         markStage?.("recency_read_ms");
+        keywordLane = (await revalidateSearchLanes(store, keywordLane, [], filters)).keyword;
+        markStage?.("keyword_revalidation_ms");
+        const rows = keywordLane.rows;
         if (recencyRows.length === 0) {
           const hits = withKeywordLeaderSignals(rows.map((row) => connectorStoreHitFromRow(store, row, -row.rank, options.resultProjector, filters?.locatorPathScope)), keywordLane);
           markStage?.("fusion_ms");
@@ -67825,7 +67844,7 @@ function createConnectorStoreCorpusAdapter(options) {
     const startedAt = Date.now();
     const maxResults = Math.max(1, Math.min(Math.floor(request.maxResults), MAX_SEARCH_RESULTS));
     const hybrid = embeddingProvider !== undefined && (options.retrievalMode ?? "hybrid") === "hybrid" && (store.trustDomain !== "secure_local" || isApprovedSecureSourceEmbeddingProvider(embeddingProvider)) && store.vectorLaneServable(embeddingProvider.modelId);
-    const ftsOptions = { ...hybrid ? { prefix: false } : {}, locate: false, onPartialRows: partialKeywordRows(store, request) };
+    const ftsOptions = { ...hybrid ? { prefix: false } : {}, locate: false, onPartialRows: partialKeywordRows(store, request, filters) };
     const meaningLane = hybrid && request.context.lexicalOnly !== true;
     const readKeywordLane = await relaxEmptyLocalKeywordLane(store, request.query, maxResults, options.accountScope, filters, await connectorStoreKeywordLaneRows(store, request.query, maxResults, options.accountScope, filters, ftsOptions, request.deadlineAtMs), options.localKeywordFallback, ftsOptions, request.deadlineAtMs);
     const semanticRows = [];
@@ -67837,14 +67856,14 @@ function createConnectorStoreCorpusAdapter(options) {
         if (lane.skippedReason !== undefined)
           incomplete = true;
         for (const row of lane.rows) {
-          if (row.bestCosine < bar || readKeywordLane.matchedItemIds.has(row.sourceItem.localItemId))
+          if (row.bestCosine < bar)
             continue;
           semanticRows.push(row);
         }
       }
     }
-    const keywordLane = await revalidateKeywordLane(store, readKeywordLane);
-    const visibleSemanticRows = await store.stillVisibleSearchRowsOffThread(semanticRows);
+    const { keyword: keywordLane, vectors } = await revalidateSearchLanes(store, readKeywordLane, semanticRows, filters);
+    const visibleSemanticRows = vectors.filter((row) => !keywordLane.matchedItemIds.has(row.sourceItem.localItemId));
     const rows = [...keywordLane.rows, ...visibleSemanticRows];
     const semanticOnly = visibleSemanticRows.length;
     return {
@@ -67970,9 +67989,11 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, s
   const keywordWork = (async () => {
     const laneStartedAt = stages ? performance.now() : 0;
     const keywordStartedAt = Date.now();
-    const lane = await connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false, onPartialRows: partialKeywordRows(store, request, resultProjector, filters?.locatorPathScope) }, request.deadlineAtMs);
+    const emitPartial = partialKeywordRows(store, request, filters, resultProjector);
+    const lane = await connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false, onPartialRows: emitPartial }, request.deadlineAtMs);
     const baseline = keywordAlternatives(request.query)?.size ? lane.baseline ?? await withKeywordExpansionDisabled(() => connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false }, request.deadlineAtMs)) : undefined;
-    partialKeywordRows(store, request, resultProjector, filters?.locatorPathScope)(lane.rows);
+    if (emitPartial)
+      emitPartial(await store.stillVisibleSearchRowsOffThread(lane.rows, filters));
     if (stages)
       stages.keyword_lane_ms = performance.now() - laneStartedAt;
     return { lane, baseline, elapsedMs: Date.now() - keywordStartedAt };
@@ -67983,12 +68004,10 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, s
     const lane = await store.vectorSearchLane(request.query, provider, laneLimit, accountScope, filters, request.deadlineAtMs);
     const bar = semanticRelevanceBarFor(provider.modelId, semanticRelevanceBar);
     const rows = bar === undefined ? lane.rows : lane.rows.filter((row) => row.bestCosine >= bar);
-    request.onPartialResponse?.({
-      hits: rows.slice(0, maxResults).map((row) => connectorStoreHitFromRow(store, row, row.bestCosine, resultProjector, filters?.locatorPathScope)),
-      latencyMs: Date.now() - startedAt,
-      incomplete: true,
-      rawExposed: false
-    });
+    if (request.onPartialResponse) {
+      const visible = await store.stillVisibleSearchRowsOffThread(rows, filters);
+      publishPartialRows(store, request, visible, filters, (row) => row.bestCosine, resultProjector);
+    }
     if (stages)
       stages.vector_lane_ms = performance.now() - laneStartedAt;
     return { lane, elapsedMs: Date.now() - vectorStartedAt };
@@ -68000,10 +68019,8 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, s
   let keywordElapsedMs = keywordResult.elapsedMs;
   const vectorLane = vectorResult.lane;
   const vectorElapsedMs = vectorResult.elapsedMs;
-  let scoredVectorRows = vectorLane.rows;
   const relevanceBar = semanticRelevanceBarFor(provider.modelId, semanticRelevanceBar);
   const gateArmed = relevanceBar !== undefined;
-  let vectorRows = gateArmed ? scoredVectorRows.filter((row) => row.bestCosine >= relevanceBar) : scoredVectorRows;
   if (baselineKeywordLane && gateArmed) {
     const extra = keywordLane.allRows.filter((row) => !baselineKeywordLane.matchedItemIds.has(row.sourceItem.localItemId) && keywordLane.completeItemIds.has(row.sourceItem.localItemId));
     const improved = new Map(keywordLane.allRows.map((row) => [row.sourceItem.localItemId, row]));
@@ -68020,20 +68037,21 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, s
   keywordLane = await relaxEmptyLocalKeywordLane(store, request.query, laneLimit, accountScope, filters, keywordLane, localKeywordFallback, {}, request.deadlineAtMs);
   keywordElapsedMs += Date.now() - relaxStartedAt;
   markStage?.("keyword_relaxation_ms");
-  keywordLane = await revalidateKeywordLane(store, keywordLane);
-  markStage?.("keyword_revalidation_ms");
-  scoredVectorRows = await store.stillVisibleSearchRowsOffThread(scoredVectorRows);
-  vectorRows = await store.stillVisibleSearchRowsOffThread(vectorRows);
-  markStage?.("vector_revalidation_ms");
-  const keywordRows = keywordLane.rows;
-  const suppressedBelowBar = scoredVectorRows.length - vectorRows.length;
-  const bestCosine = scoredVectorRows.length > 0 ? roundCosine(Math.max(...scoredVectorRows.map((row) => row.bestCosine))) : undefined;
   let recencyCut = false;
-  markStage?.("vector_summary_ms");
   const recencyRows = await chatRecencyLaneRows(store, accountScope, filters, request.deadlineAtMs, () => {
     recencyCut = true;
   });
   markStage?.("recency_read_ms");
+  const checked = await revalidateSearchLanes(store, keywordLane, vectorLane.rows, filters);
+  keywordLane = checked.keyword;
+  markStage?.("keyword_revalidation_ms");
+  const scoredVectorRows = checked.vectors;
+  const vectorRows = gateArmed ? scoredVectorRows.filter((row) => row.bestCosine >= relevanceBar) : scoredVectorRows;
+  markStage?.("vector_revalidation_ms");
+  const suppressedBelowBar = scoredVectorRows.length - vectorRows.length;
+  const bestCosine = scoredVectorRows.length > 0 ? roundCosine(Math.max(...scoredVectorRows.map((row) => row.bestCosine))) : undefined;
+  markStage?.("vector_summary_ms");
+  const keywordRows = keywordLane.rows;
   const contentBar = relevanceBar ?? CALIBRATED_CONTENT_PREFERENCE_BARS.get(provider.modelId);
   const vettedVectorItemIds = new Set(contentBar === undefined ? [] : vectorRows.filter((row) => row.bestCosine >= contentBar).map((row) => row.sourceItem.localItemId));
   const contentPreference = connectorStoreContentPreference(vettedVectorItemIds);
@@ -68197,6 +68215,9 @@ async function connectorStoreKeywordLaneRows(store, query, limit, accountScope, 
       saturated: plain.saturated || content.saturated || (baseline?.matchCount.saturated ?? false),
       secureMatchedItems: allRows.filter(connectorStoreRowIsSecureTier).length
     },
+    ...filters?.metadataOnlyLocatorPathScopes?.length || filters?.metadataOnlySourceScopeFolderKeys?.length ? {
+      readMetadataMatches: (items) => store.searchItemsDetailedOffThread(query, MAX_SEARCH_RESULTS, accountScope, filters, { ...ftsOptions, locate: false, metadataCandidates: items, onPartialRows: undefined }, pool)
+    } : {},
     matchedItemIds: allIds,
     completeItemIds: new Set([...complete, ...baseline?.completeItemIds ?? []]),
     ...(baseline?.nameLeaderItemId ?? nameLeader) !== undefined ? { nameLeaderItemId: baseline?.nameLeaderItemId ?? nameLeader } : {},
@@ -68229,23 +68250,52 @@ function keywordExpansionChangesSearch(query, ftsOptions) {
   const shape = () => JSON.stringify([toFtsQuery(query, ftsOptions), sourceIndexFtsTermGroups(query), sourceIndexTopicTokens(query)]);
   return shape() !== withKeywordExpansionDisabled(shape);
 }
-async function revalidateKeywordLane(store, lane) {
-  const allRows = await store.stillVisibleSearchRowsOffThread(lane.allRows);
-  if (allRows.length === lane.allRows.length)
-    return lane;
-  const served = new Set(allRows.map((row) => row.sourceItem.localItemId));
+async function revalidateSearchLanes(store, lane, vectors, filters) {
+  const candidates = [...lane.allRows, ...vectors];
+  let visible = new Set(await store.stillVisibleSearchRowsOffThread(candidates, filters));
+  if (visible.size === candidates.length)
+    return { keyword: lane, vectors: [...vectors] };
+  const withdrawn = lane.allRows.filter((row) => !visible.has(row) && connectorStoreRowHasContent(row));
+  const metadata = withdrawn.length ? await lane.readMetadataMatches?.(withdrawn.map((row) => row.sourceItem)) : undefined;
+  if (metadata) {
+    visible = new Set(await store.stillVisibleSearchRowsOffThread([...candidates, ...metadata.rows], filters));
+  }
+  const retained = lane.allRows.filter((row) => visible.has(row));
+  const served = new Set(retained.map((row) => row.sourceItem.localItemId));
+  const complete = new Set([...lane.completeItemIds].filter((id) => served.has(id)));
+  const shares = new Map([...lane.conceptShare ?? []].filter(([id]) => served.has(id)));
+  if (metadata) {
+    const { rows, concepts } = metadata;
+    for (const row of rows) {
+      const id = row.sourceItem.localItemId;
+      if (!visible.has(row) || served.has(id))
+        continue;
+      retained.push(row);
+      served.add(id);
+      const total = concepts.total;
+      const matched = concepts.matched.get(id) ?? 0;
+      if (total > 0) {
+        shares.set(id, matched / total);
+        if (matched >= total)
+          complete.add(id);
+      }
+    }
+  }
   return {
-    rows: lane.rows.filter((row) => served.has(row.sourceItem.localItemId)),
-    allRows,
-    matchedItemIds: served,
-    completeItemIds: new Set([...lane.completeItemIds].filter((id) => served.has(id))),
-    ...lane.nameLeaderItemId !== undefined && served.has(lane.nameLeaderItemId) ? { nameLeaderItemId: lane.nameLeaderItemId } : {},
-    ...lane.conceptShare ? { conceptShare: new Map([...lane.conceptShare].filter(([id]) => served.has(id))) } : {},
-    matchCount: {
-      matchedItems: allRows.length,
-      contentMatchedItems: allRows.filter(connectorStoreRowHasContent).length,
-      saturated: lane.matchCount.saturated,
-      secureMatchedItems: allRows.filter(connectorStoreRowIsSecureTier).length
+    vectors: vectors.filter((row) => visible.has(row)),
+    keyword: {
+      rows: retained.slice(0, lane.rows.length),
+      allRows: retained,
+      matchedItemIds: served,
+      completeItemIds: complete,
+      ...lane.nameLeaderItemId !== undefined && served.has(lane.nameLeaderItemId) ? { nameLeaderItemId: lane.nameLeaderItemId } : {},
+      conceptShare: shares,
+      matchCount: {
+        matchedItems: retained.length,
+        contentMatchedItems: retained.filter(connectorStoreRowHasContent).length,
+        saturated: lane.matchCount.saturated,
+        secureMatchedItems: retained.filter(connectorStoreRowIsSecureTier).length
+      }
     }
   };
 }
@@ -70615,7 +70665,12 @@ var TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff", DEFAULT_
   FROM items
   WHERE item_pk > ? AND item_pk <= ? AND tombstoned = 0 AND parent_local_item_id IS NULL
   GROUP BY provider
-`, CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, IMAGE_CONTENT_PAGE_KEYS = 20000, STATUS_PAGE_KEYS = 20000, statusPageKeys, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, VERIFIED_OBSERVATION_PREFIX = "verified-observation.v1:", MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, openShape, PEOPLE_SENDER_PREDICATE = `((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))`, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
+`, CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, IMAGE_CONTENT_PAGE_KEYS = 20000, STATUS_PAGE_KEYS = 20000, statusPageKeys, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, VERIFIED_OBSERVATION_PREFIX = "verified-observation.v1:", FTS_CANDIDATE_IDENTITY_SQL = `i.local_item_id = json_extract(candidate.value, '$.localItemId')
+          AND i.provider = json_extract(candidate.value, '$.provider')
+          AND i.account_scope = json_extract(candidate.value, '$.accountScope')
+          AND i.provider_item_id = json_extract(candidate.value, '$.providerItemId')
+          AND i.normalized_conversation = COALESCE(json_extract(candidate.value, '$.providerConversationId'), '')
+          AND COALESCE(i.source_version, '') = COALESCE(json_extract(candidate.value, '$.sourceVersion'), '')`, MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, openShape, PEOPLE_SENDER_PREDICATE = `((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))`, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_memory_counters();
   init_embedding_sweep_idle();
@@ -70793,6 +70848,7 @@ var init_local_index = __esm(() => {
     childLane;
     chunkMediaColumnsPresent = false;
     imageMediaReadsPresent = false;
+    onDemandReadsTablePresent;
     itemTextVersionsPresent = false;
     mediaJudgmentsPresent = false;
     mediaHolder;
@@ -70896,6 +70952,7 @@ var init_local_index = __esm(() => {
         this.childItemColumnsPresent = tableColumns(this.db, "items", false).includes("parent_local_item_id");
         this.chunkMediaColumnsPresent = tableColumns(this.db, "chunks", false).includes("media_sha256");
         this.imageMediaReadsPresent = this.db.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'image_media_reads'").get() !== null;
+        this.onDemandReadsTablePresent = !this.readOnly || this.db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'").get() !== null;
         this.itemTextVersionsPresent = this.db.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'item_text_versions'").get() !== null;
         const judgmentColumns = this.db.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'media_judgments'").get() !== null ? tableColumns(this.db, "media_judgments", false) : [];
         this.mediaJudgmentsPresent = CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS.every((column) => judgmentColumns.includes(column));
@@ -78290,12 +78347,12 @@ ${parentKey(ref)}`, { ref, origin });
       const searchRows = this.searchRowsByItemPks(rankedItems.map(([itemPk]) => itemPk), selectedAccount, filters);
       const laneRows = rankedItems.flatMap(([itemPk, winner]) => {
         const row = searchRows.get(itemPk);
-        if (!row || row.sourceItem.localItemId !== winner.localItemId)
+        if (!row || row.sourceItem.localItemId !== winner.localItemId || (row.sourceItem.sourceVersion ?? "") !== (winner.sourceVersion ?? ""))
           return [];
         if (!input.locate)
           return [{ ...row, contentMatched: true, bestCosine: winner.bestCosine }];
         const chunk = this.chunkMatchForChunkPk(winner.bestChunkPk, itemPk, winner.bestChunkContentHash);
-        return [{ ...row, ...chunk ? { chunk } : {}, bestCosine: winner.bestCosine }];
+        return [{ ...row, ...chunk ? { chunk } : { contentMatched: true }, bestCosine: winner.bestCosine }];
       });
       return {
         rows: laneRows,
@@ -78565,20 +78622,36 @@ ${parentKey(ref)}`, { ref, origin });
       return step.value;
     }
     stillVisibleSearchRows(rows) {
-      return this.tierVisibleRows(rows, (row) => ({
-        provider: row.sourceItem.provider,
-        accountScope: row.sourceItem.accountScope,
-        providerItemId: row.sourceItem.providerItemId,
-        ...row.sourceItem.providerConversationId ? { providerConversationId: row.sourceItem.providerConversationId } : {}
-      }), (row) => row.chunk !== undefined || row.contentMatched === true ? "content" : "metadata");
+      return visibilityHere(this.stillVisibleSearchRowsSteps(rows));
     }
-    async stillVisibleSearchRowsOffThread(rows) {
-      return visibilityAwaited(() => this.tierVisibleRowsSteps(rows, (row) => ({
-        provider: row.sourceItem.provider,
-        accountScope: row.sourceItem.accountScope,
-        providerItemId: row.sourceItem.providerItemId,
-        ...row.sourceItem.providerConversationId ? { providerConversationId: row.sourceItem.providerConversationId } : {}
-      }), (row) => row.chunk !== undefined || row.contentMatched === true ? "content" : "metadata"), this.childVisibilityLane());
+    async stillVisibleSearchRowsOffThread(rows, filters) {
+      return visibilityAwaited(() => this.stillVisibleSearchRowsSteps(rows, filters), this.childVisibilityLane());
+    }
+    *stillVisibleSearchRowsSteps(rows, filters) {
+      const visible = yield* this.tierVisibleRowsSteps(rows, (row) => row.sourceItem, (row) => connectorStoreRowHasContent(row) ? "content" : "metadata");
+      return yield* this.keywordGrantVisibleRowsSteps(visible, filters);
+    }
+    grantedPartialRows(rows, filters) {
+      return this.closedForPoolReads ? [] : visibilityHere(this.keywordGrantVisibleRowsSteps(rows, filters));
+    }
+    *keywordGrantVisibleRowsSteps(rows, filters) {
+      if (!filters?.metadataOnlyLocatorPathScopes?.length && !filters?.metadataOnlySourceScopeFolderKeys?.length)
+        return rows;
+      const content = rows.filter(connectorStoreRowHasContent);
+      if (content.length === 0)
+        return rows;
+      const metadataOnly = connectorStoreMetadataOnlySql(filters, this.onDemandReadsTablePresent);
+      if (!metadataOnly.sql)
+        return rows;
+      const allowed = yield* this.visibilityStoreRead({
+        mode: "all",
+        sql: `SELECT candidate.key AS idx FROM json_each(?) candidate CROSS JOIN items i
+        WHERE ${FTS_CANDIDATE_IDENTITY_SQL}
+          AND i.tombstoned = 0 AND NOT ${metadataOnly.sql}`,
+        params: [JSON.stringify(content.map((row) => row.sourceItem)), ...metadataOnly.params]
+      });
+      const served = new Set(allowed.map((row) => content[row.idx]));
+      return rows.filter((row) => !connectorStoreRowHasContent(row) || served.has(row));
     }
     closedForPoolReads = false;
     conceptCountMemo;
@@ -78648,9 +78721,20 @@ ${parentKey(ref)}`, { ref, origin });
     }
     *searchItemsSteps(query, maxResults, accountScope, filters, ftsOptions) {
       const selectedFilters = connectorStoreFilterSql(filters);
-      const onDemandReadsTablePresent = Boolean((filters?.metadataOnlyLocatorPathScopes?.length || filters?.metadataOnlySourceScopeFolderKeys?.length) && (yield { mode: "get", sql: "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'", params: [] }));
-      const selectedFtsScope = connectorStoreFtsScopeSql(filters, onDemandReadsTablePresent);
-      const conceptScope = connectorStoreFtsScopeSql(filters, onDemandReadsTablePresent, "r.chunk_pk");
+      if (!this.onDemandReadsTablePresent && (filters?.metadataOnlyLocatorPathScopes?.length || filters?.metadataOnlySourceScopeFolderKeys?.length)) {
+        this.onDemandReadsTablePresent = Boolean(yield {
+          mode: "get",
+          sql: "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'",
+          params: []
+        });
+      }
+      const metadataCandidates = ftsOptions.metadataCandidates;
+      const selectedFtsScope = metadataCandidates ? {
+        sql: `AND connector_store_fts.chunk_pk IS NULL
+        AND i.item_pk IN (SELECT i.item_pk FROM json_each(?) candidate CROSS JOIN items i WHERE ${FTS_CANDIDATE_IDENTITY_SQL})`,
+        params: [JSON.stringify(metadataCandidates)]
+      } : connectorStoreFtsScopeSql(filters, this.onDemandReadsTablePresent);
+      const conceptScope = metadataCandidates ? { sql: "AND r.chunk_pk IS NULL", params: [] } : connectorStoreFtsScopeSql(filters, this.onDemandReadsTablePresent, "r.chunk_pk");
       const terms = ftsOptions.relaxed ? ftsOptions.privatePrecision ? yield* this.privateRelaxedFtsQuerySteps(query) : toRelaxedLocalFtsQuery(query) : toFtsQuery(query, ftsOptions);
       if (!terms)
         return { rows: [], saturated: false, concepts: { total: 0, matched: new Map } };
@@ -78770,8 +78854,13 @@ ${parentKey(ref)}`, { ref, origin });
           ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
         }), (row) => row.chunk_pk === null || row.chunk_pk === undefined ? "metadata" : "content");
         selected.push(...visible);
-        if (visible.length > 0)
-          ftsOptions.onPartialRows?.(selected.slice(0, limit).map(searchRowFromItemRow));
+        if (visible.length > 0 && ftsOptions.onPartialRows) {
+          const partial = selected.slice(0, limit).map((row) => ({
+            ...searchRowFromItemRow(row),
+            ...row.chunk_pk != null ? { contentMatched: true } : {}
+          }));
+          ftsOptions.onPartialRows(yield* this.keywordGrantVisibleRowsSteps(partial, filters));
+        }
         if (exhausted || selected.length >= limit || visible.length === signalled.length || scanned >= KEYWORD_CANDIDATE_SCAN_CAP)
           break;
         pageSize = Math.min(pageSize * 4, KEYWORD_CANDIDATE_SCAN_CAP - scanned);
@@ -95248,8 +95337,10 @@ function readMailSourceScopeApproval(input) {
     ...pendingSnapshot2(revision, account?.generation, reason),
     ...carried && carried.length > 0 ? { carriedAlwaysPrivateSenders: [...carried] } : {}
   });
-  if (!account)
-    return pending("not-connected", "not_connected");
+  if (!account) {
+    const unresolved = read.kind === "malformed" || read.kind === "valid" && read.state.approvals.some((approval) => approval.owner_tier_rules.length > 0);
+    return { ...pending("not-connected", "not_connected"), ...unresolved ? { senderPolicyUnresolved: true } : {} };
+  }
   if (read.kind === "missing")
     return pending(`missing:${account.generation}`, "missing");
   if (read.kind === "malformed")
@@ -103854,6 +103945,11 @@ async function runQueuedMoves(options, report, found) {
       moved.push(exported.identity.localItemId);
       addPendingEmbeddings(set, [exported.identity.localItemId]);
     } catch (error) {
+      if (error instanceof TierMoveRefusedError && error.code === "rule_policy_unavailable") {
+        waiting++;
+        report.skipped++;
+        continue;
+      }
       if (error instanceof TierLedgerGenerationConflictError) {
         continue;
       }
@@ -104366,7 +104462,7 @@ function raiseRoutedItem(set, record, rules, inputs, extraSignals = {}) {
   if (matched.length === 0)
     return "unchanged";
   const ruleTier = matched.reduce((tier, rule) => maxTier(tier, rule.tier), "public");
-  const metadataTier = maxTier(record.metadataTier, ruleTier);
+  const metadataTier = maxTier(maxTier(record.metadataTier, record.targetMetadataTier ?? record.metadataTier), ruleTier);
   const moving = record.state === "moving";
   if (!moving && tierRank(metadataTier) <= tierRank(record.metadataTier))
     return "unchanged";
@@ -104375,7 +104471,7 @@ function raiseRoutedItem(set, record, rules, inputs, extraSignals = {}) {
     ...inputs.retirePublic ? { retirePublic: true } : {}
   });
   const ruleReasons = classified.reasons.filter((reason) => reason.startsWith("metadata:owner_rule:"));
-  const contentTier = maxTier(record.contentTier, metadataTier);
+  const contentTier = maxTier(maxTier(record.contentTier, record.targetContentTier ?? record.contentTier), metadataTier);
   const contentPending = record.contentPending && tierRank(contentTier) < tierRank("secure");
   const decision = {
     metadataTier,
@@ -109502,35 +109598,27 @@ async function routePreparedSourceIndexSearch(options) {
       corpus,
       context: request.context,
       onProgress: () => progress(),
-      onPartialResponse: (response) => {
+      onPartialResponse: (response, currentHits) => {
         assertSafeCorpusSearchResponse(response);
-        const key = (hit) => `${hit.sourceItem.providerItemId}\x00${hit.sourceItem.localItemId}`;
-        const hits = new Map((partial?.hits ?? []).map((hit) => [key(hit), hit]));
-        for (const hit of response.hits) {
-          hits.set(key(hit), hit);
-          if (request.readWide)
-            matchingIds.add(routedHitCandidateId({ ...hit, corpusId: corpus.corpusId, trustDomain: corpus.trustDomain }));
-        }
-        partial = { hits: [...hits.values()].slice(0, corpusRequest.maxResults), latencyMs: response.latencyMs, incomplete: true, rawExposed: false };
+        partial = () => {
+          const hits = (currentHits?.() ?? response.hits).slice(0, corpusRequest.maxResults);
+          const prefix = { hits, latencyMs: response.latencyMs, incomplete: true, rawExposed: false };
+          assertSafeCorpusSearchResponse(prefix);
+          return prefix;
+        };
       }
     };
+    let finalMatches = [];
     const retrievalState = retrievalStates.get(corpus.corpusId).state;
     const metadataMatches = request.context.metadataOnly === true ? adapter.metadataMatches : undefined;
     const outcome = await runCorpusLaneUntilIdle((report) => {
       progress = report;
       return withSourceIndexReadProgress(report, () => runInSourceAnswerLane(corpus.corpusId, async () => {
-        if (metadataMatches) {
-          const response = await metadataMatches(corpusRequest);
-          if (request.readWide)
-            for (const hit of response.hits)
-              matchingIds.add(routedHitCandidateId({ ...hit, corpusId: corpus.corpusId, trustDomain: corpus.trustDomain }));
-          return response;
-        }
-        const response = await adapter(corpusRequest);
+        const response = await (metadataMatches ?? adapter)(corpusRequest);
         if (request.readWide)
-          for (const hit of response.hits) {
-            matchingIds.add(routedHitCandidateId({ ...hit, corpusId: corpus.corpusId, trustDomain: corpus.trustDomain }));
-          }
+          finalMatches = response.hits;
+        if (metadataMatches)
+          return response;
         const depth = request.poolAllocation?.storeDepth;
         const neighbours = response.semanticNeighbourHits;
         if (depth === undefined || !neighbours?.length || response.hits.length >= depth)
@@ -109541,9 +109629,9 @@ async function routePreparedSourceIndexSearch(options) {
         return added.length === 0 ? response : { ...response, hits: [...response.hits, ...added] };
       }));
     }, laneTimeoutMs, corpus.corpusId, options.laneClock ?? REAL_LANE_CLOCK);
-    return { corpus, outcome, retrievalState, partial };
+    return { corpus, outcome, retrievalState, partial, finalMatches };
   }));
-  for (const { corpus, outcome, retrievalState, partial } of laneOutcomes) {
+  for (const { corpus, outcome, retrievalState, partial, finalMatches } of laneOutcomes) {
     if (outcome.kind === "timeout") {
       skippedCorpora.push({ corpusId: corpus.corpusId, trustDomain: corpus.trustDomain, reason: "lane_timeout" });
       degradations.push({
@@ -109561,7 +109649,12 @@ async function routePreparedSourceIndexSearch(options) {
         continue;
       incompleteCorpora.push(corpus.corpusId);
     }
-    const response = outcome.kind === "response" ? outcome.response : partial;
+    const response = outcome.kind === "response" ? outcome.response : partial();
+    if (request.readWide) {
+      for (const hit of outcome.kind === "response" ? finalMatches : response.hits) {
+        matchingIds.add(routedHitCandidateId({ ...hit, corpusId: corpus.corpusId, trustDomain: corpus.trustDomain }));
+      }
+    }
     if (outcome.kind === "response")
       corpusTimings.push({
         corpusId: corpus.corpusId,
@@ -109632,7 +109725,13 @@ async function routePreparedSourceIndexSearch(options) {
       }
     }));
     for (const lane of lanes) {
-      lane.items = lane.items.filter((hit) => kept.has(hit));
+      lane.items = lane.items.filter((hit) => {
+        if (kept.has(hit))
+          return true;
+        if (request.readWide)
+          matchingIds.delete(routedHitCandidateId(hit));
+        return false;
+      });
       if (lane.semantic)
         lane.semantic = lane.semantic.filter((seat) => kept.has(seat.hit));
     }
@@ -152205,24 +152304,25 @@ function privacyRuleId(rule) {
   return `${PRIVACY_RULE_ID_PREFIX}${rule.kind}-${digest}`;
 }
 function writePrivacyProfile(update, options = {}) {
-  const current = readPrivacyProfile(options);
-  const next = {
-    description: update.description ?? current?.description ?? "",
-    rules: update.rules ?? current?.rules ?? [],
-    updatedAt: (options.now?.() ?? new Date).toISOString()
-  };
   const rulesOptions = { ...options.tierRulesPath ? { path: options.tierRulesPath } : {}, ...options.env ? { env: options.env } : {} };
-  const owned = next.rules.map(privacyRuleToTierRule);
-  updateOwnerTierRules((existing) => {
+  return withOwnerTierRulesWriter(rulesOptions, (existing, save) => {
+    const current = readPrivacyProfile(options);
+    const next = {
+      description: update.description ?? current?.description ?? "",
+      rules: update.rules ?? current?.rules ?? [],
+      updatedAt: (options.now?.() ?? new Date).toISOString()
+    };
+    const owned = next.rules.map(privacyRuleToTierRule);
     const kept = existing.filter((rule) => !rule.id.startsWith(PRIVACY_RULE_ID_PREFIX));
     const unchanged = existing.length === kept.length + owned.length && owned.every((rule) => existing.some((candidate) => candidate.id === rule.id));
-    return unchanged ? existing : [...kept, ...owned];
-  }, rulesOptions);
-  const path = resolvePrivacyProfilePath(options);
-  mkdirSync52(dirname84(path), { recursive: true, mode: 448 });
-  writePrivateFileAtomicSync(path, `${JSON.stringify({ schemaVersion: PRIVACY_PROFILE_SCHEMA_VERSION, ...next }, null, 2)}
+    if (!unchanged)
+      save([...kept, ...owned]);
+    const path = resolvePrivacyProfilePath(options);
+    mkdirSync52(dirname84(path), { recursive: true, mode: 448 });
+    writePrivateFileAtomicSync(path, `${JSON.stringify({ schemaVersion: PRIVACY_PROFILE_SCHEMA_VERSION, ...next }, null, 2)}
 `);
-  return next;
+    return next;
+  });
 }
 function invalid2(message) {
   return new OperationError("invalid_params", message);
@@ -173284,7 +173384,7 @@ function mailScopeTierOwnerRuleSource(authority) {
     read: () => {
       const scope = authority.mailSnapshot();
       const rules = scope.ownerTierRules ?? mailScopeOwnerTierRules({ alwaysPrivateSenders: scope.carriedAlwaysPrivateSenders ?? [] });
-      const unavailable = scope.reason === "malformed" || scope.reason === "account_changed";
+      const unavailable = scope.senderPolicyUnresolved === true || scope.reason === "malformed" || scope.reason === "account_changed";
       return { rules, revision: scope.revision, unavailable };
     }
   };
@@ -247878,6 +247978,11 @@ class TierSnifferService {
       const failure = (record, error) => {
         const identity = recordIdentity2(record);
         const failureKey = `${ledgerPath}\x00${tierLedgerIdentityKey(identity)}\x00${record.generation}`;
+        if (error instanceof TierMoveRefusedError && error.code === "rule_policy_unavailable") {
+          this.moveFailures.delete(failureKey);
+          report.notEligible++;
+          return;
+        }
         report.failed += 1;
         const why = moveFailureName(error);
         report.failedBy = { ...report.failedBy, [why]: (report.failedBy?.[why] ?? 0) + 1 };

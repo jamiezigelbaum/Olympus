@@ -148,6 +148,8 @@ export interface MailSourceScopeApprovalSnapshot {
    * Nothing syncs before an approval, which then holds them.
    */
   carriedAlwaysPrivateSenders?: string[];
+  /** A saved approval cannot be bound to a connected account. */
+  senderPolicyUnresolved?: true;
 }
 
 interface PersistedMailSourceScopeApproval {
@@ -249,7 +251,11 @@ export function readMailSourceScopeApproval(input: {
     ...pendingSnapshot(revision, account?.generation, reason),
     ...(carried && carried.length > 0 ? { carriedAlwaysPrivateSenders: [...carried] } : {}),
   });
-  if (!account) return pending('not-connected', 'not_connected');
+  if (!account) {
+    const unresolved = read.kind === 'malformed' || (read.kind === 'valid'
+      && read.state.approvals.some(approval => approval.owner_tier_rules.length > 0));
+    return { ...pending('not-connected', 'not_connected'), ...(unresolved ? { senderPolicyUnresolved: true } : {}) };
+  }
   if (read.kind === 'missing') return pending(`missing:${account.generation}`, 'missing');
   if (read.kind === 'malformed') return pending(`malformed:${read.digest}`, 'malformed');
   const approval = read.state.approvals.find((candidate) => candidate.source_id === MAIL_SOURCE_SCOPE_ID);

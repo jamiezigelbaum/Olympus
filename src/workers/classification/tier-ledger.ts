@@ -5864,6 +5864,8 @@ function observationSupersedesMove(
   if (existing.targetMetadataTier === null || existing.targetContentTier === null
     || existing.targetMetadataTier === 'secrets' || existing.targetContentTier === 'secrets') return false;
   const queued = queuedDecisionRecord(existing);
+  if (tierRank(next.metadataTier) > tierRank(queued.metadataTier) || tierRank(next.contentTier) > tierRank(queued.contentTier)
+    || (next.metadataPending && !queued.metadataPending) || (next.contentPending && !queued.contentPending)) return true;
   const placement = planner?.(decisionOfRow(rowOf(queued)));
   const lowers = tierRank(queued.metadataTier) < tierRank(existing.metadataTier)
     || tierRank(queued.contentTier) < tierRank(existing.contentTier)
@@ -5873,9 +5875,7 @@ function observationSupersedesMove(
       return from !== undefined && (to ? trustDomainRank(to.trustDomain) : decisionLayerRank(queued, layer)) < trustDomainRank(from.trustDomain);
     });
   if (!lowers) return false;
-  if (tierRank(next.metadataTier) > tierRank(queued.metadataTier) || tierRank(next.contentTier) > tierRank(queued.contentTier)
-    || (next.metadataPending && !queued.metadataPending) || (next.contentPending && !queued.contentPending)
-    || next.engineVersion !== queued.engineVersion || next.mapRevision !== queued.mapRevision
+  if (next.engineVersion !== queued.engineVersion || next.mapRevision !== queued.mapRevision
     || next.metadataForced !== queued.metadataForced || next.metadataFlagged !== queued.metadataFlagged) return true;
   return observationMaterialChanged(queued, next);
 }

@@ -2418,6 +2418,8 @@ export interface ConnectorStoreScoredSearchRow extends ConnectorStoreSearchRow {
 export interface ConnectorStoreKeywordFtsOptions {
   prefix?: boolean;
   contentOnly?: boolean;
+  /** Match only the metadata FTS rows of these candidate versions. */
+  metadataCandidates?: SourceItemIdentity[];
   locate?: boolean;
   relaxed?: boolean;
   privatePrecision?: boolean;
@@ -2506,7 +2508,7 @@ function connectorStoreCurrentEmbeddingRowsQuery(
   const accountScope = normalizeOptionalAccountScope(options.accountScope);
   const selectedFilters = connectorStoreFilterSql(options.filters);
   const metadataOnly = connectorStoreMetadataOnlySql(options.filters, options.onDemandReadsTablePresent);
-  const chunkContentHash = page ? ', c.content_hash AS chunk_content_hash' : '';
+  const winnerIdentity = page ? ', c.content_hash AS chunk_content_hash, i.source_version' : '';
   if (options.chunkPks) {
     // A re-score names its chunks: the plan must start from that list and
     // seek each chunk's vector by key. Left to the planner, an account scope
@@ -2516,7 +2518,7 @@ function connectorStoreCurrentEmbeddingRowsQuery(
     // 15 Nov). CROSS JOIN fixes SQLite's join order to the order written.
     return {
       sql: `
-        SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding${chunkContentHash}
+        SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding${winnerIdentity}
         FROM json_each(?) pick
         CROSS JOIN chunk_embeddings emb ON emb.chunk_pk = pick.value AND emb.model_id = ?
         CROSS JOIN chunks c ON c.chunk_pk = emb.chunk_pk
@@ -2542,7 +2544,7 @@ function connectorStoreCurrentEmbeddingRowsQuery(
   }
   return {
     sql: `
-      SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding${chunkContentHash}
+      SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding${winnerIdentity}
       ${CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER}
         -- Unary + avoids the model index + repeated whole-model sort (#1242).
         AND ${page ? '+emb.model_id' : 'emb.model_id'} = ?
@@ -2596,7 +2598,7 @@ export function* connectorStoreCurrentEmbeddingRowsIterator(
   }
 }
 
-type VectorWinners = Map<number, { bestCosine: number; bestChunkPk: number; bestChunkContentHash: string; localItemId: string }>;
+type VectorWinners = Map<number, { bestCosine: number; bestChunkPk: number; bestChunkContentHash: string; localItemId: string; sourceVersion: string | null }>;
 type VectorScan =
   | {
     bestByItem: VectorWinners;
@@ -2610,7 +2612,7 @@ type VectorScan =
   }
   | { skippedReason: string };
 
-type VectorScoreRow = { item_pk: number; chunk_pk: number; local_item_id: string; embedding: unknown; chunk_content_hash: string };
+type VectorScoreRow = { item_pk: number; chunk_pk: number; local_item_id: string; embedding: unknown; chunk_content_hash: string; source_version: string | null };
 
 /** Shared exact scoring preserves the winning chunk and deterministic ties. */
 function foldVectorScore(bestByItem: VectorWinners, row: VectorScoreRow, queryVector: readonly number[]): { mismatch: number; qualified: number; score?: number } {
@@ -2622,7 +2624,8 @@ function foldVectorScore(bestByItem: VectorWinners, row: VectorScoreRow, queryVe
   if (!prior || score > prior.bestCosine || (score === prior.bestCosine && row.chunk_pk < prior.bestChunkPk)) {
     qualified = Number(score >= MIN_VECTOR_SCORE && (!prior || prior.bestCosine < MIN_VECTOR_SCORE));
     bestByItem.set(row.item_pk, {
-      bestCosine: score, bestChunkPk: row.chunk_pk, bestChunkContentHash: row.chunk_content_hash, localItemId: row.local_item_id,
+      bestCosine: score, bestChunkPk: row.chunk_pk, bestChunkContentHash: row.chunk_content_hash,
+      localItemId: row.local_item_id, sourceVersion: row.source_version,
     });
   }
   return { mismatch: 0, qualified, score };
@@ -15219,10 +15222,10 @@ export class LocalConnectorStore {
     );
     const laneRows = rankedItems.flatMap(([itemPk, winner]) => {
       const row = searchRows.get(itemPk);
-      if (!row || row.sourceItem.localItemId !== winner.localItemId) return [];
+      if (!row || row.sourceItem.localItemId !== winner.localItemId || (row.sourceItem.sourceVersion ?? '') !== (winner.sourceVersion ?? '')) return [];
       if (!input.locate) return [{ ...row, contentMatched: true as const, bestCosine: winner.bestCosine }];
       const chunk = this.chunkMatchForChunkPk(winner.bestChunkPk, itemPk, winner.bestChunkContentHash);
-      return [{ ...row, ...(chunk ? { chunk } : {}), bestCosine: winner.bestCosine }];
+      return [{ ...row, ...(chunk ? { chunk } : { contentMatched: true as const }), bestCosine: winner.bestCosine }];
     });
     return {
       rows: laneRows,
@@ -15693,6 +15696,11 @@ export class LocalConnectorStore {
     return yield* this.keywordGrantVisibleRowsSteps(visible, filters);
   }
 
+  /** Recheck the bounded prefix on this connection when an idle read worker cannot finish its lane. */
+  grantedPartialRows<T extends ConnectorStoreSearchRow>(rows: T[], filters: ConnectorStoreSearchFilters): T[] {
+    return this.closedForPoolReads ? [] : visibilityHere(this.keywordGrantVisibleRowsSteps(rows, filters));
+  }
+
   /** A body match in a metadata-only scope needs a current grant when its row is emitted. */
   private *keywordGrantVisibleRowsSteps<T extends Pick<ConnectorStoreSearchRow, 'sourceItem' | 'chunk' | 'contentMatched'>>(
     rows: T[], filters: ConnectorStoreSearchFilters | undefined,
@@ -15705,11 +15713,7 @@ export class LocalConnectorStore {
     const allowed = (yield* this.visibilityStoreRead({
       mode: 'all',
       sql: `SELECT candidate.key AS idx FROM json_each(?) candidate CROSS JOIN items i
-        WHERE i.local_item_id = json_extract(candidate.value, '$.localItemId')
-          AND i.provider = json_extract(candidate.value, '$.provider')
-          AND i.account_scope = json_extract(candidate.value, '$.accountScope')
-          AND i.provider_item_id = json_extract(candidate.value, '$.providerItemId')
-          AND i.normalized_conversation = COALESCE(json_extract(candidate.value, '$.providerConversationId'), '')
+        WHERE ${FTS_CANDIDATE_IDENTITY_SQL}
           AND i.tombstoned = 0 AND NOT ${metadataOnly.sql}`,
       params: [JSON.stringify(content.map(row => row.sourceItem)), ...metadataOnly.params],
     })) as Array<{ idx: number }>;
@@ -15813,8 +15817,14 @@ export class LocalConnectorStore {
         mode: 'get', sql: "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'", params: [],
       });
     }
-    const selectedFtsScope = connectorStoreFtsScopeSql(filters, this.onDemandReadsTablePresent);
-    const conceptScope = connectorStoreFtsScopeSql(filters, this.onDemandReadsTablePresent, 'r.chunk_pk');
+    const metadataCandidates = ftsOptions.metadataCandidates;
+    const selectedFtsScope = metadataCandidates ? {
+      sql: `AND connector_store_fts.chunk_pk IS NULL
+        AND i.item_pk IN (SELECT i.item_pk FROM json_each(?) candidate CROSS JOIN items i WHERE ${FTS_CANDIDATE_IDENTITY_SQL})`,
+      params: [JSON.stringify(metadataCandidates)],
+    } : connectorStoreFtsScopeSql(filters, this.onDemandReadsTablePresent);
+    const conceptScope = metadataCandidates ? { sql: 'AND r.chunk_pk IS NULL', params: [] }
+      : connectorStoreFtsScopeSql(filters, this.onDemandReadsTablePresent, 'r.chunk_pk');
     const terms = ftsOptions.relaxed ? (ftsOptions.privatePrecision ? yield* this.privateRelaxedFtsQuerySteps(query) : toRelaxedLocalFtsQuery(query)) : toFtsQuery(query, ftsOptions);
     if (!terms) return { rows: [], saturated: false, concepts: { total: 0, matched: new Map() } };
     const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
@@ -17971,17 +17981,24 @@ export interface ConnectorStoreCorpusAdapterOptions {
 // Otherwise the keyword lane serves alone (with an honest skip reason when a
 // provider was configured but could not run). secure_local stores never run
 // the vector lane with a non-local provider — fail closed to keyword.
+function publishPartialRows<T extends ConnectorStoreSearchRow>(
+  store: LocalConnectorStore, request: SourceIndexCorpusSearchRequest, rows: readonly T[],
+  filters: ConnectorStoreSearchFilters | undefined, score: (row: T) => number, projector?: ConnectorStoreResultProjector,
+): void {
+  if (!request.onPartialResponse) return;
+  const prefix = rows.slice(0, request.maxResults);
+  const hits = (current: T[]) => current.map(row => connectorStoreHitFromRow(store, row, score(row), projector, filters?.locatorPathScope));
+  const currentHits = filters?.metadataOnlyLocatorPathScopes?.length || filters?.metadataOnlySourceScopeFolderKeys?.length
+    ? () => hits(store.grantedPartialRows(prefix, filters)) : undefined;
+  request.onPartialResponse({ hits: hits(prefix), latencyMs: 0, incomplete: true, rawExposed: false }, currentHits);
+}
+
 function partialKeywordRows(
-  store: LocalConnectorStore,
-  request: SourceIndexCorpusSearchRequest,
+  store: LocalConnectorStore, request: SourceIndexCorpusSearchRequest, filters?: ConnectorStoreSearchFilters,
   projector?: ConnectorStoreResultProjector,
-  locatorPathScope?: ConnectorStoreSearchFilters['locatorPathScope'],
 ): ConnectorStoreKeywordFtsOptions['onPartialRows'] {
-  if (!request.onPartialResponse) return undefined;
-  return rows => request.onPartialResponse?.({
-    hits: rows.slice(0, request.maxResults).map(row => connectorStoreHitFromRow(store, row, -row.rank, projector, locatorPathScope)),
-    latencyMs: 0, incomplete: true, rawExposed: false,
-  });
+  return request.onPartialResponse
+    ? rows => publishPartialRows(store, request, rows, filters, row => -row.rank, projector) : undefined;
 }
 
 export function createConnectorStoreCorpusAdapter(
@@ -18013,7 +18030,7 @@ export function createConnectorStoreCorpusAdapter(
     if (!embeddingProvider || useHybrid !== 'hybrid' || semanticSkippedReason) return (async (): Promise<SourceIndexCorpusSearchResponse> => {
       const markStage = startStoreStageClock(stages);
       let keywordLane = await connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters,
-        { onPartialRows: partialKeywordRows(store, request, options.resultProjector, filters?.locatorPathScope) }, request.deadlineAtMs);
+        { onPartialRows: partialKeywordRows(store, request, filters, options.resultProjector) }, request.deadlineAtMs);
       markStage?.('keyword_lane_ms');
       keywordLane = await relaxEmptyLocalKeywordLane(store, request.query, request.maxResults, options.accountScope, filters,
         keywordLane, options.localKeywordFallback, {}, request.deadlineAtMs);
@@ -18021,7 +18038,7 @@ export function createConnectorStoreCorpusAdapter(
       let recencyCut = false;
       const recencyRows = await chatRecencyLaneRows(store, options.accountScope, filters, request.deadlineAtMs, () => { recencyCut = true; });
       markStage?.('recency_read_ms');
-      keywordLane = await revalidateKeywordLane(store, keywordLane, filters);
+      keywordLane = (await revalidateSearchLanes(store, keywordLane, [], filters)).keyword;
       markStage?.('keyword_revalidation_ms');
       const rows = keywordLane.rows;
       if (recencyRows.length === 0) {
@@ -18197,7 +18214,7 @@ export function createConnectorStoreCorpusAdapter(
       && (options.retrievalMode ?? 'hybrid') === 'hybrid'
       && (store.trustDomain !== 'secure_local' || isApprovedSecureSourceEmbeddingProvider(embeddingProvider))
       && store.vectorLaneServable(embeddingProvider.modelId);
-    const ftsOptions = { ...(hybrid ? { prefix: false } : {}), locate: false, onPartialRows: partialKeywordRows(store, request) };
+    const ftsOptions = { ...(hybrid ? { prefix: false } : {}), locate: false, onPartialRows: partialKeywordRows(store, request, filters) };
     // The words alone: the same keyword lane a hybrid match runs, without the query embedding.
     const meaningLane = hybrid && request.context.lexicalOnly !== true;
     const readKeywordLane = await relaxEmptyLocalKeywordLane(
@@ -18224,14 +18241,14 @@ export function createConnectorStoreCorpusAdapter(
         );
         if (lane.skippedReason !== undefined) incomplete = true;
         for (const row of lane.rows) {
-          if (row.bestCosine < bar || readKeywordLane.matchedItemIds.has(row.sourceItem.localItemId)) continue;
+          if (row.bestCosine < bar) continue;
           semanticRows.push(row);
         }
       }
     }
     // Checked again after the last read, right before the hits and counts go out.
-    const visibleSemanticRows = await store.stillVisibleSearchRowsOffThread(semanticRows);
-    const keywordLane = await revalidateKeywordLane(store, readKeywordLane, filters);
+    const { keyword: keywordLane, vectors } = await revalidateSearchLanes(store, readKeywordLane, semanticRows, filters);
+    const visibleSemanticRows = vectors.filter(row => !keywordLane.matchedItemIds.has(row.sourceItem.localItemId));
     const rows: ConnectorStoreSearchRow[] = [...keywordLane.rows, ...visibleSemanticRows];
     const semanticOnly = visibleSemanticRows.length;
     return {
@@ -18444,7 +18461,7 @@ async function hybridConnectorStoreSearch(
   const keywordWork = (async () => {
     const laneStartedAt = stages ? performance.now() : 0;
     const keywordStartedAt = Date.now();
-    const emitPartial = partialKeywordRows(store, request, resultProjector, filters?.locatorPathScope);
+    const emitPartial = partialKeywordRows(store, request, filters, resultProjector);
     const lane = await connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false, onPartialRows: emitPartial }, request.deadlineAtMs);
     const baseline = keywordAlternatives(request.query)?.size
       ? lane.baseline ?? await withKeywordExpansionDisabled(() => connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, {prefix:false}, request.deadlineAtMs))
@@ -18466,10 +18483,10 @@ async function hybridConnectorStoreSearch(
     );
     const bar = semanticRelevanceBarFor(provider.modelId, semanticRelevanceBar);
     const rows = bar === undefined ? lane.rows : lane.rows.filter(row => row.bestCosine >= bar);
-    request.onPartialResponse?.({
-      hits: rows.slice(0, maxResults).map(row => connectorStoreHitFromRow(store, row, row.bestCosine, resultProjector, filters?.locatorPathScope)),
-      latencyMs: Date.now() - startedAt, incomplete: true, rawExposed: false,
-    });
+    if (request.onPartialResponse) {
+      const visible = await store.stillVisibleSearchRowsOffThread(rows, filters);
+      publishPartialRows(store, request, visible, filters, row => row.bestCosine, resultProjector);
+    }
     if (stages) stages.vector_lane_ms = performance.now() - laneStartedAt;
     return { lane, elapsedMs: Date.now() - vectorStartedAt };
   })();
@@ -18480,7 +18497,7 @@ async function hybridConnectorStoreSearch(
   let keywordElapsedMs = keywordResult.elapsedMs;
   const vectorLane = vectorResult.lane;
   const vectorElapsedMs = vectorResult.elapsedMs;
-  let scoredVectorRows = vectorLane.rows;
+
   // The bar applies to the vector lane unconditionally: sub-bar semantic
   // similarity is not evidence, whatever the keyword lane returned. Keyword
   // hits stand on their own lexical merit (live calibration 2026-07-25:
@@ -18489,9 +18506,6 @@ async function hybridConnectorStoreSearch(
   // questions the bar exists for).
   const relevanceBar = semanticRelevanceBarFor(provider.modelId, semanticRelevanceBar);
   const gateArmed = relevanceBar !== undefined;
-  let vectorRows = gateArmed
-    ? scoredVectorRows.filter((row) => row.bestCosine >= relevanceBar)
-    : scoredVectorRows;
   if (baselineKeywordLane && gateArmed) {
     const extra = keywordLane.allRows.filter(row => !baselineKeywordLane.matchedItemIds.has(row.sourceItem.localItemId)
       && keywordLane.completeItemIds.has(row.sourceItem.localItemId));
@@ -18510,20 +18524,22 @@ async function hybridConnectorStoreSearch(
   keywordLane = await relaxEmptyLocalKeywordLane(store, request.query, laneLimit, accountScope, filters, keywordLane, localKeywordFallback, {}, request.deadlineAtMs);
   keywordElapsedMs += Date.now() - relaxStartedAt;
   markStage?.('keyword_relaxation_ms');
-  // Every candidate is checked again after the last read, right before fusion emits hits and counts (#1079).
-  scoredVectorRows = await store.stillVisibleSearchRowsOffThread(scoredVectorRows);
-  vectorRows = await store.stillVisibleSearchRowsOffThread(vectorRows);
+  let recencyCut = false;
+  const recencyRows = await chatRecencyLaneRows(store, accountScope, filters, request.deadlineAtMs, () => { recencyCut = true; });
+  markStage?.('recency_read_ms');
+  const checked = await revalidateSearchLanes(store, keywordLane, vectorLane.rows, filters);
+  keywordLane = checked.keyword;
+  markStage?.('keyword_revalidation_ms');
+  const scoredVectorRows = checked.vectors;
+  const vectorRows = gateArmed
+    ? scoredVectorRows.filter((row) => row.bestCosine >= relevanceBar)
+    : scoredVectorRows;
   markStage?.('vector_revalidation_ms');
   const suppressedBelowBar = scoredVectorRows.length - vectorRows.length;
   const bestCosine = scoredVectorRows.length > 0
     ? roundCosine(Math.max(...scoredVectorRows.map((row) => row.bestCosine)))
     : undefined;
-  let recencyCut = false;
   markStage?.('vector_summary_ms');
-  const recencyRows = await chatRecencyLaneRows(store, accountScope, filters, request.deadlineAtMs, () => { recencyCut = true; });
-  markStage?.('recency_read_ms');
-  keywordLane = await revalidateKeywordLane(store, keywordLane, filters);
-  markStage?.('keyword_revalidation_ms');
   const keywordRows = keywordLane.rows;
   const contentBar = relevanceBar ?? CALIBRATED_CONTENT_PREFERENCE_BARS.get(provider.modelId);
   const vettedVectorItemIds = new Set(contentBar === undefined
@@ -18708,6 +18724,7 @@ function normalizeSemanticRelevanceBar(value: number | undefined): number | unde
 type ConnectorStoreKeywordLane = {
   rows: ConnectorStoreSearchRow[];
   matchCount: SourceIndexCorpusMatchCount;
+  readMetadataMatches?: (items: SourceItemIdentity[]) => Promise<ConnectorStoreKeywordSearch>;
   matchedItemIds: ReadonlySet<string>;
   completeItemIds: ReadonlySet<string>;
   /** The plain search's bm25 leader when it is a partial, title-only match: it keeps the lead among partial matches. */
@@ -18810,6 +18827,10 @@ async function connectorStoreKeywordLaneRows(
       saturated: plain.saturated || content.saturated || (baseline?.matchCount.saturated ?? false),
       secureMatchedItems: allRows.filter(connectorStoreRowIsSecureTier).length,
     },
+    ...(filters?.metadataOnlyLocatorPathScopes?.length || filters?.metadataOnlySourceScopeFolderKeys?.length ? {
+      readMetadataMatches: (items: SourceItemIdentity[]) => store.searchItemsDetailedOffThread(query, MAX_SEARCH_RESULTS, accountScope, filters,
+        { ...ftsOptions, locate: false, metadataCandidates: items, onPartialRows: undefined }, pool),
+    } : {}),
     matchedItemIds: allIds,
     completeItemIds: new Set([...complete, ...(baseline?.completeItemIds ?? [])]),
     ...((baseline?.nameLeaderItemId ?? nameLeader) !== undefined ? { nameLeaderItemId: (baseline?.nameLeaderItemId ?? nameLeader)! } : {}),
@@ -18857,31 +18878,53 @@ function keywordExpansionChangesSearch(query: string, ftsOptions: ConnectorStore
   return shape() !== withKeywordExpansionDisabled(shape);
 }
 
-/**
- * A keyword lane with every row this store no longer serves taken out, and
- * its counts recounted (stillVisibleSearchRows). Unchanged when every row is
- * still served.
- */
-async function revalidateKeywordLane(
-  store: LocalConnectorStore, lane: ConnectorStoreKeywordLane, filters: ConnectorStoreSearchFilters | undefined,
-): Promise<ConnectorStoreKeywordLane> {
-  const allRows = await store.stillVisibleSearchRowsOffThread(lane.allRows, filters);
-  if (allRows.length === lane.allRows.length) return lane;
-  const served = new Set(allRows.map((row) => row.sourceItem.localItemId));
+/** Check both lanes in one visibility pass. A withdrawn keyword candidate can still match on its metadata row. */
+async function revalidateSearchLanes<V extends ConnectorStoreSearchRow>(
+  store: LocalConnectorStore, lane: ConnectorStoreKeywordLane, vectors: readonly V[], filters: ConnectorStoreSearchFilters | undefined,
+): Promise<{ keyword: ConnectorStoreKeywordLane; vectors: V[] }> {
+  const candidates = [...lane.allRows, ...vectors];
+  let visible = new Set(await store.stillVisibleSearchRowsOffThread(candidates, filters));
+  if (visible.size === candidates.length) return { keyword: lane, vectors: [...vectors] };
+
+  const withdrawn = lane.allRows.filter(row => !visible.has(row) && connectorStoreRowHasContent(row));
+  const metadata = withdrawn.length ? await lane.readMetadataMatches?.(withdrawn.map(row => row.sourceItem)) : undefined;
+  if (metadata) {
+    visible = new Set(await store.stillVisibleSearchRowsOffThread([...candidates, ...metadata.rows], filters));
+  }
+  const retained = lane.allRows.filter(row => visible.has(row));
+  const served = new Set(retained.map(row => row.sourceItem.localItemId));
+  const complete = new Set([...lane.completeItemIds].filter(id => served.has(id)));
+  const shares = new Map([...(lane.conceptShare ?? [])].filter(([id]) => served.has(id)));
+  if (metadata) {
+    const { rows, concepts } = metadata;
+    for (const row of rows) {
+      const id = row.sourceItem.localItemId;
+      if (!visible.has(row) || served.has(id)) continue;
+      retained.push(row);
+      served.add(id);
+      const total = concepts.total;
+      const matched = concepts.matched.get(id) ?? 0;
+      if (total > 0) {
+        shares.set(id, matched / total);
+        if (matched >= total) complete.add(id);
+      }
+    }
+  }
   return {
-    rows: lane.rows.filter((row) => served.has(row.sourceItem.localItemId)),
-    allRows,
-    matchedItemIds: served,
-    completeItemIds: new Set([...lane.completeItemIds].filter((id) => served.has(id))),
-    // The leaders and concept shares the router reads stay with the rows
-    // still served (#1350, #1354).
-    ...(lane.nameLeaderItemId !== undefined && served.has(lane.nameLeaderItemId) ? { nameLeaderItemId: lane.nameLeaderItemId } : {}),
-    ...(lane.conceptShare ? { conceptShare: new Map([...lane.conceptShare].filter(([id]) => served.has(id))) } : {}),
-    matchCount: {
-      matchedItems: allRows.length,
-      contentMatchedItems: allRows.filter(connectorStoreRowHasContent).length,
-      saturated: lane.matchCount.saturated,
-      secureMatchedItems: allRows.filter(connectorStoreRowIsSecureTier).length,
+    vectors: vectors.filter(row => visible.has(row)),
+    keyword: {
+      rows: retained.slice(0, lane.rows.length),
+      allRows: retained,
+      matchedItemIds: served,
+      completeItemIds: complete,
+      ...(lane.nameLeaderItemId !== undefined && served.has(lane.nameLeaderItemId) ? { nameLeaderItemId: lane.nameLeaderItemId } : {}),
+      conceptShare: shares,
+      matchCount: {
+        matchedItems: retained.length,
+        contentMatchedItems: retained.filter(connectorStoreRowHasContent).length,
+        saturated: lane.matchCount.saturated,
+        secureMatchedItems: retained.filter(connectorStoreRowIsSecureTier).length,
+      },
     },
   };
 }
@@ -21104,6 +21147,13 @@ function connectorStoreConceptHitRead(
     params: [...pks, groupQuery, ...scope.params],
   };
 }
+
+const FTS_CANDIDATE_IDENTITY_SQL = `i.local_item_id = json_extract(candidate.value, '$.localItemId')
+          AND i.provider = json_extract(candidate.value, '$.provider')
+          AND i.account_scope = json_extract(candidate.value, '$.accountScope')
+          AND i.provider_item_id = json_extract(candidate.value, '$.providerItemId')
+          AND i.normalized_conversation = COALESCE(json_extract(candidate.value, '$.providerConversationId'), '')
+          AND COALESCE(i.source_version, '') = COALESCE(json_extract(candidate.value, '$.sourceVersion'), '')`;
 
 /** A folder's names-only restriction lifts only for a grant to this item version. */
 function connectorStoreMetadataOnlySql(

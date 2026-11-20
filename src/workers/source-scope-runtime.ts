@@ -583,7 +583,7 @@ export function mailScopeTierOwnerRuleSource(authority: FileSourceScopeAuthority
     read: () => {
       const scope = authority.mailSnapshot();
       const rules = scope.ownerTierRules ?? mailScopeOwnerTierRules({ alwaysPrivateSenders: scope.carriedAlwaysPrivateSenders ?? [] });
-      const unavailable = scope.reason === 'malformed' || scope.reason === 'account_changed';
+      const unavailable = scope.senderPolicyUnresolved === true || scope.reason === 'malformed' || scope.reason === 'account_changed';
       return { rules, revision: scope.revision, unavailable };
     },
   };

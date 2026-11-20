@@ -2,7 +2,7 @@ import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { classifyContentTier } from '../src/workers/classification/tier-classifier.ts';
 import { approveFileSourceScope, readFileSourceScopeApproval, connectedFileSourceAccountGeneration, fileSourceScopeAllowsMetadata, fileSourceScopeAllowsContent } from '../src/core/source-scope-approval.ts';
 import { createFileExtractionRuntime, fileExtractionCorporaRoster } from '../src/workers/engine/runtime/file-extraction-runtime.ts';
-import { waitFor } from './helpers/test-clock.ts';
+import { createTestClock, waitFor } from './helpers/test-clock.ts';
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -14,6 +14,7 @@ import type { Extractor } from '../src/workers/file-extraction/types.ts';
 import { requestOnDemandRead, type OnDemandReadRequest } from '../src/workers/file-extraction/on-demand-read.ts';
 import { defaultDropboxIngestionPolicy, parseSourceIngestionPolicy, dropboxPolicyApprovedScopeKeys, dropboxPolicyFullExtractionScopeKeys, dropboxPolicyExcludedPathPrefixes } from '../src/core/source-ingestion-policy.ts';
 import { createSourceExclusionMatcher, parseSourceIngestionExclusions } from '../src/core/source-ingestion-exclusions.ts';
+import { routeSourceIndexSearch } from '../src/core/source-index/router.ts';
 import { buildSourceIndexCorpusRegistry, defineSourceIndexCorpus } from '../src/core/source-index/corpus.ts';
 import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
 import { createAnalystSourceIndexAnswerHandler } from '../src/workers/source-index/analyst-answer.ts';
@@ -509,6 +510,105 @@ describe('read on demand', () => {
     expect(partialIds).not.toContain('body');
     expect(response.hits.map(hit => hit.sourceItem.providerItemId)).toEqual(['name']);
     expect(response.matchCount).toMatchObject({ matchedItems: 1, contentMatchedItems: 0 });
+  });
+
+  async function searchableGrantFixture() {
+    const dir = mkdtempSync(join(tmpdir(), 'on-demand-emission-'));
+    const dbPath = join(dir, 'store.sqlite');
+    const store = new LocalConnectorStore({ dbPath, corpusId: 'internal.fixture.files', family: 'file', trustDomain: 'internal' });
+    const db = new Database(dbPath);
+    cleanup.push(() => { db.close(); store.close(); rmSync(dir, { recursive: true, force: true }); });
+    const sync = (version: string, body: string) => store.syncFromConnector(fixtureConnector(() => [
+      { id: 'report', name: 'orchard.txt', text: body, version },
+    ]), { fetchContent: true, tierClassification: { sniffer: JUDGED_PERSONAL_SNIFFER } });
+    await sync('v1', 'quartzneedle');
+    store.grantOnDemandRead('personal:report', 'v1');
+    return { store, sync, revoke: () => db.run('DELETE FROM on_demand_item_reads'),
+      filters: { metadataOnlyLocatorPathScopes: ['/Files'] },
+      request: { corpus: defineConnectorCorpus(store), context: { allowedTrustDomains: [store.trustDomain] },
+        query: 'quartzneedle', maxResults: 10 },
+    };
+  }
+
+  test.each(['hybrid', 'metadata probe'] as const)('%s drops a vector body match revoked after the vector read', async mode => {
+    const { store, filters, request, revoke } = await searchableGrantFixture();
+    const provider: SourceEmbeddingProvider = { provider: 'built-in', backend: 'local', modelId: 'test-emission', dimension: 2,
+      configHash: '1', epochId: '1', async embed(inputs) { return inputs.map(() => [1, 0]); } };
+    await store.embedChunks({ provider });
+    const adapter = createConnectorStoreCorpusAdapter({ store, filters, embeddingProvider: provider, semanticRelevanceBar: 0.5 });
+    const search = mode === 'hybrid' ? adapter : adapter.metadataMatches!;
+    const query = { ...request, query: 'unrelatedquery' };
+    expect((await search(query)).matchCount?.contentMatchedItems).toBe(1);
+    const read = store.vectorSearchLane.bind(store);
+    const vector = spyOn(store, 'vectorSearchLane').mockImplementationOnce(async (...args) => {
+      const lane = await read(...args);
+      expect(lane.rows).toHaveLength(1);
+      revoke();
+      return lane;
+    });
+    const response = await search(query);
+    expect(vector).toHaveBeenCalled();
+    expect(response.hits).toEqual([]);
+    expect(response.semanticRows?.hits ?? []).toEqual([]);
+    expect(response.matchCount).toMatchObject({ matchedItems: 0, contentMatchedItems: 0 });
+  });
+
+  test('a timeout rechecks a granted partial when the store publishes no further rows', async () => {
+    const { store, filters, request, revoke } = await searchableGrantFixture();
+    const read = store.searchItemsDetailedOffThread.bind(store);
+    let stalled = false;
+    spyOn(store, 'searchItemsDetailedOffThread').mockImplementationOnce(async (...args) => {
+      const page = await read(...args);
+      expect(page.rows).toHaveLength(1);
+      revoke();
+      stalled = true;
+      return new Promise(() => {});
+    });
+    const clock = createTestClock();
+    const routed = routeSourceIndexSearch({
+      registry: buildSourceIndexCorpusRegistry([request.corpus]),
+      adapters: { [store.corpusId]: createConnectorStoreCorpusAdapter({ store, filters }) },
+      laneClock: clock, request: { ...request, readWide: true },
+    });
+    await waitFor(() => stalled);
+    await clock.advance(20_000);
+    const response = await routed;
+    expect(response.skippedCorpora[0]?.reason).toBe('lane_timeout');
+    expect(response.hits).toEqual([]);
+    expect(response.matchingCandidateIds).toEqual([]);
+  });
+
+  test('a replacement version grant cannot release an earlier body match', async () => {
+    const { store, filters, request, sync } = await searchableGrantFixture();
+    const adapter = createConnectorStoreCorpusAdapter({ store, filters });
+    const read = store.searchItemsDetailedOffThread.bind(store);
+    spyOn(store, 'searchItemsDetailedOffThread').mockImplementationOnce(async (...args) => {
+      const found = await read(...args);
+      expect(found.rows[0]?.sourceItem.sourceVersion).toBe('v1');
+      await sync('v2', 'different contents');
+      store.grantOnDemandRead('personal:report', 'v2');
+      return found;
+    });
+    const response = await adapter(request);
+    expect(response.hits).toEqual([]);
+    expect(response.matchCount).toMatchObject({ matchedItems: 0, contentMatchedItems: 0 });
+  });
+
+  test('revocation keeps an independent title match as metadata only', async () => {
+    const { store, filters, request, revoke } = await searchableGrantFixture();
+    const adapter = createConnectorStoreCorpusAdapter({ store, filters });
+    const read = store.searchItemsDetailedOffThread.bind(store);
+    spyOn(store, 'searchItemsDetailedOffThread').mockImplementationOnce(async (...args) => {
+      const found = await read(...args);
+      expect(found.rows[0]?.chunk).toBeDefined();
+      revoke();
+      return found;
+    });
+    const response = await adapter({ ...request, query: 'orchard' });
+    expect(response.hits.map(hit => hit.sourceItem.providerItemId)).toEqual(['report']);
+    expect(response.hits[0]?.provenance?.chunk).toBeUndefined();
+    expect(response.matchCount).toMatchObject({ matchedItems: 1, contentMatchedItems: 0 });
+    expect((await adapter(request)).hits).toEqual([]);
   });
 
   test.each(['path', 'folder'] as const)('metadata-only %s scopes allow body search only with a current-version grant', async scope => {

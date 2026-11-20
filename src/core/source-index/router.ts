@@ -89,8 +89,8 @@ export interface SourceIndexCorpusSearchRequest {
   // lanes use batch progress instead of imposing a total deadline.
   deadlineAtMs?: number;
   onProgress?: () => void;
-  // Latest usable prefix, rechecked by the router's normal visibility gate.
-  onPartialResponse?: (response: SourceIndexCorpusSearchResponse) => void;
+  // Each prefix replaces the preceding one. On timeout, currentHits rechecks its grants before routing.
+  onPartialResponse?: (response: SourceIndexCorpusSearchResponse, currentHits?: () => readonly SourceIndexSearchHit[]) => void;
 }
 
 export interface SourceIndexSearchHit {
@@ -572,37 +572,31 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
   const laneOutcomes = await Promise.all(searchableCorpora.map(async (corpus) => {
     const adapter = options.adapters[corpus.corpusId]!;
     let progress: SourceIndexReadProgress = () => {};
-    let partial: SourceIndexCorpusSearchResponse | undefined;
+    let partial: (() => SourceIndexCorpusSearchResponse) | undefined;
     const corpusRequest: SourceIndexCorpusSearchRequest = {
       query: request.query,
       maxResults: options.storeSearchDepth ?? request.maxResults,
       corpus,
       context: request.context,
       onProgress: () => progress(),
-      onPartialResponse: (response) => {
+      onPartialResponse: (response, currentHits) => {
         assertSafeCorpusSearchResponse(response);
-        const key = (hit: SourceIndexSearchHit) => `${hit.sourceItem.providerItemId}\u0000${hit.sourceItem.localItemId}`;
-        const hits = new Map((partial?.hits ?? []).map(hit => [key(hit), hit]));
-        for (const hit of response.hits) {
-          hits.set(key(hit), hit);
-          if (request.readWide) matchingIds.add(routedHitCandidateId({ ...hit, corpusId: corpus.corpusId, trustDomain: corpus.trustDomain }));
-        }
-        partial = { hits: [...hits.values()].slice(0, corpusRequest.maxResults), latencyMs: response.latencyMs, incomplete: true, rawExposed: false };
+        partial = () => {
+          const hits = (currentHits?.() ?? response.hits).slice(0, corpusRequest.maxResults);
+          const prefix = { hits, latencyMs: response.latencyMs, incomplete: true, rawExposed: false as const };
+          assertSafeCorpusSearchResponse(prefix);
+          return prefix;
+        };
       },
     };
+    let finalMatches: readonly SourceIndexSearchHit[] = [];
     const retrievalState = retrievalStates.get(corpus.corpusId)!.state;
     const metadataMatches = request.context.metadataOnly === true ? adapter.metadataMatches : undefined;
     const outcome = await runCorpusLaneUntilIdle(
       (report) => { progress = report; return withSourceIndexReadProgress(report, () => runInSourceAnswerLane(corpus.corpusId, async () => {
-        if (metadataMatches) {
-          const response = await metadataMatches(corpusRequest);
-          if (request.readWide) for (const hit of response.hits) matchingIds.add(routedHitCandidateId({ ...hit, corpusId: corpus.corpusId, trustDomain: corpus.trustDomain }));
-          return response;
-        }
-        const response = await adapter(corpusRequest);
-        if (request.readWide) for (const hit of response.hits) {
-          matchingIds.add(routedHitCandidateId({ ...hit, corpusId: corpus.corpusId, trustDomain: corpus.trustDomain }));
-        }
+        const response = await (metadataMatches ?? adapter)(corpusRequest);
+        if (request.readWide) finalMatches = response.hits;
+        if (metadataMatches) return response;
         // A reranked pool draws each store's share from its matches first,
         // then its nearest semantic neighbours from the same search: a
         // below-bar vector hit can still be the answer, and the reranker
@@ -620,10 +614,10 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
       corpus.corpusId,
       options.laneClock ?? REAL_LANE_CLOCK,
     );
-    return { corpus, outcome, retrievalState, partial };
+    return { corpus, outcome, retrievalState, partial, finalMatches };
   }));
 
-  for (const { corpus, outcome, retrievalState, partial } of laneOutcomes) {
+  for (const { corpus, outcome, retrievalState, partial, finalMatches } of laneOutcomes) {
     if (outcome.kind === 'timeout') {
       // An idle read keeps its available prefix and names the unfinished store.
       skippedCorpora.push({ corpusId: corpus.corpusId, trustDomain: corpus.trustDomain, reason: 'lane_timeout' });
@@ -641,7 +635,12 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
       if (!partial) continue;
       incompleteCorpora.push(corpus.corpusId);
     }
-    const response = outcome.kind === 'response' ? outcome.response : partial!;
+    const response = outcome.kind === 'response' ? outcome.response : partial!();
+    if (request.readWide) {
+      for (const hit of outcome.kind === 'response' ? finalMatches : response.hits) {
+        matchingIds.add(routedHitCandidateId({ ...hit, corpusId: corpus.corpusId, trustDomain: corpus.trustDomain }));
+      }
+    }
     if (outcome.kind === 'response') corpusTimings.push({
       corpusId: corpus.corpusId,
       elapsedMs: outcome.elapsedMs,
@@ -708,7 +707,11 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
       onUnchecked: (corpusIds) => { for (const corpusId of corpusIds) unchecked.add(corpusId); },
     }));
     for (const lane of lanes) {
-      lane.items = lane.items.filter((hit) => kept.has(hit));
+      lane.items = lane.items.filter((hit) => {
+        if (kept.has(hit)) return true;
+        if (request.readWide) matchingIds.delete(routedHitCandidateId(hit));
+        return false;
+      });
       if (lane.semantic) lane.semantic = lane.semantic.filter((seat) => kept.has(seat.hit));
     }
     // A source whose hits the gate could not judge is named, never thinner in silence (#1460).

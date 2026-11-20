@@ -55,7 +55,7 @@ import { settleSecretsCopies, type SecretsDisposition } from './secrets-disposit
 import { jobLedgerPathsToVisit, oweExtractionRereadAfterTierMove } from '../file-extraction/job-names.ts';
 import { defaultStoreTrustTier } from './tier-placement.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
-import { tierMoveRuleAuthorization, withTierRuleFence } from './tier-move-rule-policy.ts';
+import { currentTierRulePolicy, tierMoveRuleAuthorization, withTierRuleFence } from './tier-move-rule-policy.ts';
 
 export { TIER_MOVE_CONNECTOR_ID };
 
@@ -86,7 +86,7 @@ export class TierMoveRefusedError extends Error {
 export type TierMoveRefusal = 'refused' | 'mixed_sets' | 'secrets_in_lowering' | 'raise_in_lowering' | 'resumed_raise_in_lowering'
   | 'repair_not_settled_private' | 'secrets_in_repair' | 'repair_lower_destination' | 'superseded_copy_kept'
   | 'secrets_identity' | 'content_changed' | 'content_no_copy' | 'content_no_receipt' | 'content_several_receipts'
-  | 'content_receipt_mismatch' | 'content_still_pending' | 'rule_authority';
+  | 'content_receipt_mismatch' | 'content_still_pending' | 'rule_authority' | 'rule_policy_unavailable';
 
 /** The lowering verdict does not authorize the stored content. */
 export class TierMoveContentChangedError extends TierMoveRefusedError {
@@ -417,6 +417,7 @@ function stageTieredMove(options: TierMoveOptions, repairSource?: TierCopy, lowe
   const contentDestination = copyServingLayer(placement.copies, 'content');
   const loweredLayers = loweredCopyLayers(sources, placement.copies);
   const lowering = loweredLayers.length > 0 || tiersLower(record, target) || hasNewLowerLayer(sources, placement.copies);
+  assertLoweringPolicyAvailable(set, lowering);
   const imports = plannedLowerImports(record.generation, target, sources, placement.copies);
   if (contentSource && contentDestination
     && trustDomainRank(contentDestination.trustDomain) < trustDomainRank(contentSource.trustDomain)) {
@@ -517,6 +518,7 @@ function stageTieredMove(options: TierMoveOptions, repairSource?: TierCopy, lowe
           if (!store) throw new Error('Source store unavailable.');
           return store.withItemCopyWriteFence(identity, () => copyWithLockedSources(index + 1));
         }
+        assertLoweringPolicyAvailable(set, lowering);
         const ruleRevision = tierMoveRuleAuthorization(set, now, target, sources, placement.copies);
         if (ruleRevision === undefined) {
           retainAuthorizedRaise(set, identity, now, target, sources, placement.copies);
@@ -669,6 +671,12 @@ interface VerifiedMove {
 type VerifiedMoveOptions = Pick<TierMoveOptions, 'set' | 'embeddingLedger' | 'afterPurge' | 'timings'> & { identity: TierLedgerIdentity };
 
 type MoveAuthorityRefusal = TierMoveRefusedError | TierLedgerGenerationConflictError;
+
+function assertLoweringPolicyAvailable(set: TieredStoreSet, lowering: boolean): void {
+  if (lowering && currentTierRulePolicy(set).unavailable) {
+    throw new TierMoveRefusedError('The owner policy is pending resolution.', 'rule_policy_unavailable');
+  }
+}
 
 function authorityRefusal(
   set: TieredStoreSet,
@@ -895,7 +903,8 @@ export function settleDiscardedTierMoveImports(set: TieredStoreSet, identity: Ti
       const retargeted = current.state === 'moving' && (current.targetMetadataTier !== imports.target.metadataTier
         || current.targetContentTier !== imports.target.contentTier);
       if (imports.revoked || !sameGeneration || retargeted) return true;
-      if (tierMoveRuleAuthorization(set, current, imports.target, imports.sources, imports.destination) !== undefined) return false;
+      if (currentTierRulePolicy(set).unavailable
+        || tierMoveRuleAuthorization(set, current, imports.target, imports.sources, imports.destination) !== undefined) return false;
       retainAuthorizedRaise(set, identity, current, imports.target, imports.sources, imports.destination, receipt);
       discardTierMoveImports(ledger, identity, imports);
       return true;
@@ -1112,6 +1121,7 @@ function flipVerifiedMove(options: VerifiedMoveOptions, receipt: VerifiedMove): 
     return store.withItemCopyWriteFence(identity, () => withCopyFences(index + 1, work));
   };
   const outcome = withTierRuleFence(set, () => withCopyFences(0, () => {
+    assertLoweringPolicyAvailable(set, lowering);
     // The stores are fenced while the proof is read, then through the flip.
     const destinationValid = timed(options.timings, 'verifyMs', () => {
       // The destination's writes are durable before the ledger (FULL) can

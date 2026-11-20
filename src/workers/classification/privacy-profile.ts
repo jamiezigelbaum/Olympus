@@ -35,7 +35,7 @@ import { writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
 import { OperationError } from '../../core/operation-error.ts';
 import { defaultOwnerConfigPath, ownerConfigStamp, readOwnerConfigFile } from '../../core/owner-config-read.ts';
 import type { OwnerTierRule } from './tier-classifier.ts';
-import { updateOwnerTierRules } from './tier-rules.ts';
+import { withOwnerTierRulesWriter } from './tier-rules.ts';
 
 export const PRIVACY_PROFILE_SCHEMA_VERSION = 1;
 export const OLYMPUS_PRIVACY_PROFILE_ENV = 'OLYMPUS_PRIVACY_PROFILE_PATH';
@@ -286,25 +286,25 @@ export function writePrivacyProfile(
   update: { description?: string; rules?: PrivacyRule[] },
   options: PrivacyProfileWriteOptions = {},
 ): PrivacyProfile {
-  const current = readPrivacyProfile(options);
-  const next: PrivacyProfile = {
-    description: update.description ?? current?.description ?? '',
-    rules: update.rules ?? current?.rules ?? [],
-    updatedAt: (options.now?.() ?? new Date()).toISOString(),
-  };
   const rulesOptions = { ...(options.tierRulesPath ? { path: options.tierRulesPath } : {}), ...(options.env ? { env: options.env } : {}) };
-  const owned = next.rules.map(privacyRuleToTierRule);
-  updateOwnerTierRules((existing) => {
+  return withOwnerTierRulesWriter(rulesOptions, (existing, save) => {
+    const current = readPrivacyProfile(options);
+    const next: PrivacyProfile = {
+      description: update.description ?? current?.description ?? '',
+      rules: update.rules ?? current?.rules ?? [],
+      updatedAt: (options.now?.() ?? new Date()).toISOString(),
+    };
+    const owned = next.rules.map(privacyRuleToTierRule);
     const kept = existing.filter((rule) => !rule.id.startsWith(PRIVACY_RULE_ID_PREFIX));
     const unchanged = existing.length === kept.length + owned.length
       && owned.every((rule) => existing.some((candidate) => candidate.id === rule.id));
-    return unchanged ? existing : [...kept, ...owned];
-  }, rulesOptions);
+    if (!unchanged) save([...kept, ...owned]);
 
-  const path = resolvePrivacyProfilePath(options);
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  writePrivateFileAtomicSync(path, `${JSON.stringify({ schemaVersion: PRIVACY_PROFILE_SCHEMA_VERSION, ...next }, null, 2)}\n`);
-  return next;
+    const path = resolvePrivacyProfilePath(options);
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    writePrivateFileAtomicSync(path, `${JSON.stringify({ schemaVersion: PRIVACY_PROFILE_SCHEMA_VERSION, ...next }, null, 2)}\n`);
+    return next;
+  });
 }
 
 function invalid(message: string): OperationError {

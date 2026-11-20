@@ -386,3 +386,25 @@ describe('installed inputs, stickiness across re-sync, and the CLI', () => {
     await expect(runTierCommand(['classifier', 'decline'], { env: withPolicy })).rejects.toThrow('nothing to decline');
   });
 });
+
+test('a description save preserves a folder rule saved before it takes the rules lease', async () => {
+  const { writePrivacyProfile, readPrivacyProfile, privacyRuleToTierRule } = await import('../src/workers/classification/privacy-profile.ts');
+  const dir = tempDir();
+  const path = join(dir, 'privacy.json');
+  const tierRulesPath = join(dir, 'rules.json');
+  const folder = { kind: 'folder', source_id: 'dropbox.files', key: '/clinic' } as const;
+  writePrivacyProfile({ description: 'first' }, { path, tierRulesPath });
+  let saved = false;
+  writePrivacyProfile({ description: 'second' }, {
+    path,
+    get tierRulesPath() {
+      if (!saved) {
+        saved = true;
+        writePrivacyProfile({ rules: [folder] }, { path, tierRulesPath });
+      }
+      return tierRulesPath;
+    },
+  });
+  expect(readPrivacyProfile({ path })).toMatchObject({ description: 'second', rules: [folder] });
+  expect(loadOwnerTierRules({ path: tierRulesPath })).toEqual([privacyRuleToTierRule(folder)]);
+});

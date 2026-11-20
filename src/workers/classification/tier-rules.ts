@@ -237,17 +237,27 @@ function writeRulesAt(path: string, rules: readonly OwnerTierRule[]): string {
   return path;
 }
 
-/** Edit the validated list under the same lease used for a full replacement. */
+type TierRulesEditOptions = Pick<TierRulesLoadOptions, 'path' | 'env'>;
+
+/** Read the current rules and serialize the caller's writes under their exclusive lease. */
+export function withOwnerTierRulesWriter<T>(
+  options: TierRulesEditOptions,
+  work: (existing: OwnerTierRule[], save: (rules: OwnerTierRule[]) => void) => T,
+): T {
+  const path = resolveTierRulesPath(options);
+  return withOwnerConfigLease(path, 'exclusive', () =>
+    work(loadOwnerTierRules({ path, allowMissing: true }), rules => { writeRulesAt(path, rules); }));
+}
+
 export function updateOwnerTierRules(
   update: (rules: OwnerTierRule[]) => OwnerTierRule[],
-  options: Pick<TierRulesLoadOptions, 'path' | 'env'> = {},
+  options: TierRulesEditOptions = {},
 ): { path: string; rules: OwnerTierRule[]; changed: boolean } {
   const path = resolveTierRulesPath(options);
-  return withOwnerConfigLease(path, 'exclusive', () => {
-    const previous = loadOwnerTierRules({ path, allowMissing: true });
+  return withOwnerTierRulesWriter({ path }, (previous, save) => {
     const rules = update(previous);
     const changed = rules !== previous;
-    if (changed) writeRulesAt(path, rules);
+    if (changed) save(rules);
     return { path, rules, changed };
   });
 }

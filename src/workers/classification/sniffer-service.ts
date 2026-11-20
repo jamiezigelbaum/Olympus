@@ -2240,6 +2240,11 @@ export class TierSnifferService {
       const failure = (record: TierLedgerRecord, error: unknown) => {
         const identity = recordIdentity(record);
         const failureKey = `${ledgerPath}\u0000${tierLedgerIdentityKey(identity)}\u0000${record.generation}`;
+        if (error instanceof TierMoveRefusedError && error.code === 'rule_policy_unavailable') {
+          this.moveFailures.delete(failureKey);
+          report.notEligible++;
+          return;
+        }
         // The move stays queued (held, never shown twice); the next pass or
         // the owner-approved migration picks it up.
         report.failed += 1;

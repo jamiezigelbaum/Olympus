@@ -20381,6 +20381,8 @@ function observationSupersedesMove(existing, next, sources, planner) {
   if (existing.targetMetadataTier === null || existing.targetContentTier === null || existing.targetMetadataTier === "secrets" || existing.targetContentTier === "secrets")
     return false;
   const queued = queuedDecisionRecord(existing);
+  if (tierRank(next.metadataTier) > tierRank(queued.metadataTier) || tierRank(next.contentTier) > tierRank(queued.contentTier) || next.metadataPending && !queued.metadataPending || next.contentPending && !queued.contentPending)
+    return true;
   const placement = planner?.(decisionOfRow(rowOf(queued)));
   const lowers = tierRank(queued.metadataTier) < tierRank(existing.metadataTier) || tierRank(queued.contentTier) < tierRank(existing.contentTier) || ["metadata", "content"].some((layer) => {
     const from = copyServingLayer(sources, layer);
@@ -20389,7 +20391,7 @@ function observationSupersedesMove(existing, next, sources, planner) {
   });
   if (!lowers)
     return false;
-  if (tierRank(next.metadataTier) > tierRank(queued.metadataTier) || tierRank(next.contentTier) > tierRank(queued.contentTier) || next.metadataPending && !queued.metadataPending || next.contentPending && !queued.contentPending || next.engineVersion !== queued.engineVersion || next.mapRevision !== queued.mapRevision || next.metadataForced !== queued.metadataForced || next.metadataFlagged !== queued.metadataFlagged)
+  if (next.engineVersion !== queued.engineVersion || next.mapRevision !== queued.mapRevision || next.metadataForced !== queued.metadataForced || next.metadataFlagged !== queued.metadataFlagged)
     return true;
   return observationMaterialChanged(queued, next);
 }
@@ -25500,11 +25502,11 @@ function connectorStoreCurrentEmbeddingRowsQuery(options, ordered, page) {
   const accountScope = normalizeOptionalAccountScope(options.accountScope);
   const selectedFilters = connectorStoreFilterSql(options.filters);
   const metadataOnly = connectorStoreMetadataOnlySql(options.filters, options.onDemandReadsTablePresent);
-  const chunkContentHash = page ? ", c.content_hash AS chunk_content_hash" : "";
+  const winnerIdentity = page ? ", c.content_hash AS chunk_content_hash, i.source_version" : "";
   if (options.chunkPks) {
     return {
       sql: `
-        SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding${chunkContentHash}
+        SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding${winnerIdentity}
         FROM json_each(?) pick
         CROSS JOIN chunk_embeddings emb ON emb.chunk_pk = pick.value AND emb.model_id = ?
         CROSS JOIN chunks c ON c.chunk_pk = emb.chunk_pk
@@ -25530,7 +25532,7 @@ function connectorStoreCurrentEmbeddingRowsQuery(options, ordered, page) {
   }
   return {
     sql: `
-      SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding${chunkContentHash}
+      SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding${winnerIdentity}
       ${CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER}
         -- Unary + avoids the model index + repeated whole-model sort (#1242).
         AND ${page ? "+emb.model_id" : "emb.model_id"} = ?
@@ -25563,7 +25565,8 @@ function foldVectorScore(bestByItem, row, queryVector) {
       bestCosine: score,
       bestChunkPk: row.chunk_pk,
       bestChunkContentHash: row.chunk_content_hash,
-      localItemId: row.local_item_id
+      localItemId: row.local_item_id,
+      sourceVersion: row.source_version
     });
   }
   return { mismatch: 0, qualified, score };
@@ -25974,6 +25977,7 @@ class LocalConnectorStore {
   childLane;
   chunkMediaColumnsPresent = false;
   imageMediaReadsPresent = false;
+  onDemandReadsTablePresent;
   itemTextVersionsPresent = false;
   mediaJudgmentsPresent = false;
   mediaHolder;
@@ -26077,6 +26081,7 @@ class LocalConnectorStore {
       this.childItemColumnsPresent = tableColumns(this.db, "items", false).includes("parent_local_item_id");
       this.chunkMediaColumnsPresent = tableColumns(this.db, "chunks", false).includes("media_sha256");
       this.imageMediaReadsPresent = this.db.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'image_media_reads'").get() !== null;
+      this.onDemandReadsTablePresent = !this.readOnly || this.db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'").get() !== null;
       this.itemTextVersionsPresent = this.db.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'item_text_versions'").get() !== null;
       const judgmentColumns = this.db.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'media_judgments'").get() !== null ? tableColumns(this.db, "media_judgments", false) : [];
       this.mediaJudgmentsPresent = CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS.every((column) => judgmentColumns.includes(column));
@@ -33471,12 +33476,12 @@ ${parentKey(ref)}`, { ref, origin });
     const searchRows = this.searchRowsByItemPks(rankedItems.map(([itemPk]) => itemPk), selectedAccount, filters);
     const laneRows = rankedItems.flatMap(([itemPk, winner]) => {
       const row = searchRows.get(itemPk);
-      if (!row || row.sourceItem.localItemId !== winner.localItemId)
+      if (!row || row.sourceItem.localItemId !== winner.localItemId || (row.sourceItem.sourceVersion ?? "") !== (winner.sourceVersion ?? ""))
         return [];
       if (!input.locate)
         return [{ ...row, contentMatched: true, bestCosine: winner.bestCosine }];
       const chunk = this.chunkMatchForChunkPk(winner.bestChunkPk, itemPk, winner.bestChunkContentHash);
-      return [{ ...row, ...chunk ? { chunk } : {}, bestCosine: winner.bestCosine }];
+      return [{ ...row, ...chunk ? { chunk } : { contentMatched: true }, bestCosine: winner.bestCosine }];
     });
     return {
       rows: laneRows,
@@ -33746,20 +33751,36 @@ ${parentKey(ref)}`, { ref, origin });
     return step.value;
   }
   stillVisibleSearchRows(rows) {
-    return this.tierVisibleRows(rows, (row) => ({
-      provider: row.sourceItem.provider,
-      accountScope: row.sourceItem.accountScope,
-      providerItemId: row.sourceItem.providerItemId,
-      ...row.sourceItem.providerConversationId ? { providerConversationId: row.sourceItem.providerConversationId } : {}
-    }), (row) => row.chunk !== undefined || row.contentMatched === true ? "content" : "metadata");
+    return visibilityHere(this.stillVisibleSearchRowsSteps(rows));
   }
-  async stillVisibleSearchRowsOffThread(rows) {
-    return visibilityAwaited(() => this.tierVisibleRowsSteps(rows, (row) => ({
-      provider: row.sourceItem.provider,
-      accountScope: row.sourceItem.accountScope,
-      providerItemId: row.sourceItem.providerItemId,
-      ...row.sourceItem.providerConversationId ? { providerConversationId: row.sourceItem.providerConversationId } : {}
-    }), (row) => row.chunk !== undefined || row.contentMatched === true ? "content" : "metadata"), this.childVisibilityLane());
+  async stillVisibleSearchRowsOffThread(rows, filters) {
+    return visibilityAwaited(() => this.stillVisibleSearchRowsSteps(rows, filters), this.childVisibilityLane());
+  }
+  *stillVisibleSearchRowsSteps(rows, filters) {
+    const visible = yield* this.tierVisibleRowsSteps(rows, (row) => row.sourceItem, (row) => connectorStoreRowHasContent(row) ? "content" : "metadata");
+    return yield* this.keywordGrantVisibleRowsSteps(visible, filters);
+  }
+  grantedPartialRows(rows, filters) {
+    return this.closedForPoolReads ? [] : visibilityHere(this.keywordGrantVisibleRowsSteps(rows, filters));
+  }
+  *keywordGrantVisibleRowsSteps(rows, filters) {
+    if (!filters?.metadataOnlyLocatorPathScopes?.length && !filters?.metadataOnlySourceScopeFolderKeys?.length)
+      return rows;
+    const content = rows.filter(connectorStoreRowHasContent);
+    if (content.length === 0)
+      return rows;
+    const metadataOnly = connectorStoreMetadataOnlySql(filters, this.onDemandReadsTablePresent);
+    if (!metadataOnly.sql)
+      return rows;
+    const allowed = yield* this.visibilityStoreRead({
+      mode: "all",
+      sql: `SELECT candidate.key AS idx FROM json_each(?) candidate CROSS JOIN items i
+        WHERE ${FTS_CANDIDATE_IDENTITY_SQL}
+          AND i.tombstoned = 0 AND NOT ${metadataOnly.sql}`,
+      params: [JSON.stringify(content.map((row) => row.sourceItem)), ...metadataOnly.params]
+    });
+    const served = new Set(allowed.map((row) => content[row.idx]));
+    return rows.filter((row) => !connectorStoreRowHasContent(row) || served.has(row));
   }
   closedForPoolReads = false;
   conceptCountMemo;
@@ -33829,9 +33850,20 @@ ${parentKey(ref)}`, { ref, origin });
   }
   *searchItemsSteps(query, maxResults, accountScope, filters, ftsOptions) {
     const selectedFilters = connectorStoreFilterSql(filters);
-    const onDemandReadsTablePresent = Boolean((filters?.metadataOnlyLocatorPathScopes?.length || filters?.metadataOnlySourceScopeFolderKeys?.length) && (yield { mode: "get", sql: "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'", params: [] }));
-    const selectedFtsScope = connectorStoreFtsScopeSql(filters, onDemandReadsTablePresent);
-    const conceptScope = connectorStoreFtsScopeSql(filters, onDemandReadsTablePresent, "r.chunk_pk");
+    if (!this.onDemandReadsTablePresent && (filters?.metadataOnlyLocatorPathScopes?.length || filters?.metadataOnlySourceScopeFolderKeys?.length)) {
+      this.onDemandReadsTablePresent = Boolean(yield {
+        mode: "get",
+        sql: "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'",
+        params: []
+      });
+    }
+    const metadataCandidates = ftsOptions.metadataCandidates;
+    const selectedFtsScope = metadataCandidates ? {
+      sql: `AND connector_store_fts.chunk_pk IS NULL
+        AND i.item_pk IN (SELECT i.item_pk FROM json_each(?) candidate CROSS JOIN items i WHERE ${FTS_CANDIDATE_IDENTITY_SQL})`,
+      params: [JSON.stringify(metadataCandidates)]
+    } : connectorStoreFtsScopeSql(filters, this.onDemandReadsTablePresent);
+    const conceptScope = metadataCandidates ? { sql: "AND r.chunk_pk IS NULL", params: [] } : connectorStoreFtsScopeSql(filters, this.onDemandReadsTablePresent, "r.chunk_pk");
     const terms = ftsOptions.relaxed ? ftsOptions.privatePrecision ? yield* this.privateRelaxedFtsQuerySteps(query) : toRelaxedLocalFtsQuery(query) : toFtsQuery(query, ftsOptions);
     if (!terms)
       return { rows: [], saturated: false, concepts: { total: 0, matched: new Map } };
@@ -33951,8 +33983,13 @@ ${parentKey(ref)}`, { ref, origin });
         ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
       }), (row) => row.chunk_pk === null || row.chunk_pk === undefined ? "metadata" : "content");
       selected.push(...visible);
-      if (visible.length > 0)
-        ftsOptions.onPartialRows?.(selected.slice(0, limit).map(searchRowFromItemRow));
+      if (visible.length > 0 && ftsOptions.onPartialRows) {
+        const partial = selected.slice(0, limit).map((row) => ({
+          ...searchRowFromItemRow(row),
+          ...row.chunk_pk != null ? { contentMatched: true } : {}
+        }));
+        ftsOptions.onPartialRows(yield* this.keywordGrantVisibleRowsSteps(partial, filters));
+      }
       if (exhausted || selected.length >= limit || visible.length === signalled.length || scanned >= KEYWORD_CANDIDATE_SCAN_CAP)
         break;
       pageSize = Math.min(pageSize * 4, KEYWORD_CANDIDATE_SCAN_CAP - scanned);
@@ -35238,6 +35275,9 @@ function yieldConnectorStoreVectorScan() {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 var CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8;
+function connectorStoreRowHasContent(row) {
+  return row.chunk !== undefined || row.contentMatched === true;
+}
 function connectorStoreContentPreference(vettedVectorItemIds) {
   return (candidate) => candidate.item.chunk?.lane === "keyword" || candidate.laneRanks.has("recency") || candidate.laneRanks.has("vector") && vettedVectorItemIds.has(candidate.item.sourceItem.localItemId);
 }
@@ -36258,6 +36298,12 @@ function connectorStoreConceptHitRead(pks, groupQuery, scope) {
     params: [...pks, groupQuery, ...scope.params]
   };
 }
+var FTS_CANDIDATE_IDENTITY_SQL = `i.local_item_id = json_extract(candidate.value, '$.localItemId')
+          AND i.provider = json_extract(candidate.value, '$.provider')
+          AND i.account_scope = json_extract(candidate.value, '$.accountScope')
+          AND i.provider_item_id = json_extract(candidate.value, '$.providerItemId')
+          AND i.normalized_conversation = COALESCE(json_extract(candidate.value, '$.providerConversationId'), '')
+          AND COALESCE(i.source_version, '') = COALESCE(json_extract(candidate.value, '$.sourceVersion'), '')`;
 function connectorStoreMetadataOnlySql(filters, onDemandReadsTablePresent = false) {
   const normalized = normalizeConnectorStoreSearchFilters(filters);
   if (!normalized)

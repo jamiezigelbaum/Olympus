@@ -455,6 +455,11 @@ async function runQueuedMoves(
       // Remembered at once, not after the loop: the next call re-queues it.
       addPendingEmbeddings(set, [exported.identity.localItemId]);
     } catch (error) {
+      if (error instanceof TierMoveRefusedError && error.code === 'rule_policy_unavailable') {
+        waiting++;
+        report.skipped++;
+        continue;
+      }
       if (error instanceof TierLedgerGenerationConflictError) {
         // Decided again, or settled by someone else (the sniffer's automatic move) first.
         continue;

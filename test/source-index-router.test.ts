@@ -388,6 +388,30 @@ describe('source-index router per-lane retrieval deadline', () => {
     expect(result.degradations).toContainEqual({ laneName: 'public_safe.fast', laneType: 'keyword', reason: 'lane_timeout', occurrences: 1 });
   });
 
+  test.each(['timeout', 'final'] as const)('a withdrawn partial is absent from %s hits and readWide matches', async outcome => {
+    const clock = createTestClock();
+    let published = false;
+    const routed = routeSourceIndexSearch({
+      registry: buildSourceIndexCorpusRegistry(twoPublicCorpora().slice(0, 1)), laneClock: clock,
+      adapters: { 'public_safe.fast': async request => {
+        const first = await adapterFor([], 'public_safe.fast', 'file', 'withdrawn')(request);
+        request.onPartialResponse?.(first);
+        const empty = { hits: [], latencyMs: 0, rawExposed: false as const };
+        if (outcome === 'final') return empty;
+        request.onPartialResponse?.(empty);
+        published = true;
+        return new Promise<SourceIndexCorpusSearchResponse>(() => {});
+      } }, request: { query: 'q', maxResults: 5, readWide: true, context },
+    });
+    if (outcome === 'timeout') {
+      await waitFor(() => published);
+      await clock.advance(20_000);
+    }
+    const result = await routed;
+    expect(result.hits).toEqual([]);
+    expect(result.matchingCandidateIds).toEqual([]);
+  });
+
   test('a lane still unfinished when its grace fires on time is dropped', async () => {
     const clock = createTestClock();
     const registry = buildSourceIndexCorpusRegistry(twoPublicCorpora().slice(0, 1));

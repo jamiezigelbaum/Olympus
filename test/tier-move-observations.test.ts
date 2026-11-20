@@ -165,3 +165,17 @@ test('an edited body retains the queued upper floor until the new body can land'
   expect(f.ledger.writeIntent(identity)).toBeUndefined();
   expect(f.stores.secure_local!.localContent(localId('orchard'))?.chunks.join('')).toBe(editedBody);
 });
+
+test('a stricter detector observation supersedes a queued raise from Public', () => {
+  const f = lane();
+  const personal = classifyItemTiers({ signals: { title: 'Notes' }, text: body });
+  const first = { ...personal, metadataTier: 'public', contentTier: 'public' } as const;
+  f.ledger.recordRoutedPlacement(identity, first, f.set.placementFor(first));
+  const queued = f.ledger.recordRoutedPlacement(identity, personal, f.set.placementFor(personal));
+  expect(queued.outcome).toBe('queued_move');
+  const observed = { ...personal, contentTier: 'secure', decidedBy: 'sensitive_detector' } as const;
+  f.ledger.recordRoutedPlacement(identity, observed, f.set.placementFor(observed));
+  expect(f.ledger.getCurrent(identity)).toMatchObject({
+    generation: queued.record.generation + 1, targetMetadataTier: 'private', targetContentTier: 'secure',
+  });
+});
