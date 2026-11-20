@@ -65837,6 +65837,7 @@ function parseEngineCommandEnvelope(value) {
       }
       return { id, command: { kind, samples } };
     }
+    case "archive_remove":
     case "delete_source_data":
     case "tier_override":
     case "storage_registry":
@@ -65853,6 +65854,13 @@ function parseEngineCommandEnvelope(value) {
       if (frontPid !== undefined && (kind !== "delete_source_data" || !Number.isSafeInteger(frontPid) || frontPid <= 0))
         fail("frontPid is a process id, carried by a delete.");
       return { id, command: { kind, request: forwardedRequest(kind, command.request), ...frontPid !== undefined ? { frontPid } : {} } };
+    }
+    case "revoke_reads": {
+      const { source, reason } = command;
+      if (typeof source === "string" && SOURCE.test(source) && (reason === "disconnect" || reason === "scope" || reason === "exclusions")) {
+        return { id, command: { kind, source, reason } };
+      }
+      throw new EngineCommandError(400, "revoke_reads needs a source and a revocation reason.");
     }
     case "sync_now":
     case "start_approved": {
@@ -66161,6 +66169,7 @@ var init_commands = __esm(() => {
   ENGINE_JUDGE_BOOST_TTL_MS = 15 * 60000;
   ENGINE_JUDGE_NOW_MAX_BUDGET_MS = RELEASE_CHUNK_JUDGE_BUDGET_MS;
   ENGINE_FORWARDED_ROUTES = {
+    archive_remove: ["/dashboard/archive-import/remove"],
     delete_source_data: ["/dashboard/delete-source-data", "/v1/cli/data-delete"],
     tier_override: ["/v1/cli/tier", "/dashboard/privacy/items/set", "/v1/privacy-item/raise", "/dashboard/privacy/judge-check"],
     people: ["/dashboard/people"],
@@ -71769,6 +71778,16 @@ function sameStrings(actual, expected) {
 function sameStringSet(actual, expected) {
   return actual.length === expected.length && expected.every((value) => actual.includes(value));
 }
+function deleteOnDemandGrant(db, localItemId) {
+  const previous = db.query("PRAGMA busy_timeout").get().timeout;
+  db.exec(`PRAGMA busy_timeout = ${Math.min(previous, REVOCATION_WRITE_LIMIT.milliseconds)}`);
+  try {
+    const removed = db.query("DELETE FROM on_demand_item_reads WHERE local_item_id = ?").run(localItemId);
+    return removed.changes > 0;
+  } finally {
+    db.exec(`PRAGMA busy_timeout = ${previous}`);
+  }
+}
 function createOnDemandReads(db) {
   db.exec(`CREATE TABLE IF NOT EXISTS on_demand_item_reads (
     local_item_id TEXT PRIMARY KEY, source_version TEXT NOT NULL, read_on_demand INTEGER NOT NULL DEFAULT 1
@@ -76388,16 +76407,12 @@ ${parentKey(ref)}`, { ref, origin });
       ON CONFLICT(local_item_id) DO UPDATE SET source_version = excluded.source_version`).run(localItemId, sourceVersion);
       this.notifyOnDemandGrantChange();
     }
+    onDemandGrantIds() {
+      return this.db.query("SELECT local_item_id FROM on_demand_item_reads").all().map((row) => row.local_item_id);
+    }
     revokeOnDemandRead(localItemId) {
-      const previous = this.db.query("PRAGMA busy_timeout").get().timeout;
-      this.db.exec(`PRAGMA busy_timeout = ${Math.min(previous, REVOCATION_WRITE_LIMIT.milliseconds)}`);
-      try {
-        const removed = this.db.query("DELETE FROM on_demand_item_reads WHERE local_item_id = ?").run(localItemId);
-        if (removed.changes > 0)
-          this.notifyOnDemandGrantChange();
-      } finally {
-        this.db.exec(`PRAGMA busy_timeout = ${previous}`);
-      }
+      if (deleteOnDemandGrant(this.db, localItemId))
+        this.notifyOnDemandGrantChange();
     }
     onDemandGrantEpoch() {
       if (this.closedForPoolReads || !this.onDemandReadsTablePresent)
@@ -125516,6 +125531,20 @@ var init_size_limit_stops = __esm(() => {
 
 // src/workers/file-extraction/on-demand-read.ts
 import { createHash as createHash69, randomUUID as randomUUID28 } from "node:crypto";
+function revokeOnDemandReads(stores, ids = new Set(stores.flatMap((store) => store.onDemandGrantIds())), keep) {
+  let revoked = 0;
+  for (const id of ids) {
+    if (keep) {
+      const choices = stores.map((store) => keep(store, id));
+      if (choices.includes(true) && !choices.includes(false))
+        continue;
+    }
+    for (const store of stores)
+      store.revokeOnDemandRead(id);
+    revoked++;
+  }
+  return revoked;
+}
 async function requestOnDemandRead(request, context) {
   if (!["owner", "remote_app", "analyst"].includes(request.requester))
     return { state: "refused", reason: "invalid_requester" };
@@ -169796,8 +169825,42 @@ function runTierSet(args, context = {}, expected) {
     results: applyTierSet(items, override, context)
   };
 }
+function revokeLocatedRead(item, context) {
+  if (!item.localItemId)
+    return;
+  const set = context.standalone ? undefined : tierSetForLedger(item.ledgerPath);
+  if (set) {
+    revokeOnDemandReads(set.openStores(), [item.localItemId]);
+    return;
+  }
+  const paths = new Set(item.storePaths);
+  const owner = lifecycleStoreFileOwner(lifecycleEnv(context));
+  for (const path of item.storePaths ?? []) {
+    const source = owner(path);
+    if (source)
+      for (const sibling of lifecycleAccountFiles(source, context).stores)
+        paths.add(sibling);
+  }
+  for (const path of paths) {
+    if (!existsSync96(path))
+      continue;
+    assertWritableStoreOpenAllowed("on-demand read revocation", path);
+    const db = new Database28(path, { readwrite: true, create: false });
+    try {
+      db.exec(`PRAGMA busy_timeout = ${REVOCATION_WRITE_LIMIT.milliseconds}`);
+      if (db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='on_demand_item_reads'").get()) {
+        deleteOnDemandGrant(db, item.localItemId);
+      }
+    } finally {
+      closeSqliteStore(db, { checkpoint: false });
+    }
+  }
+}
 function applyTierSet(items, override, context = {}) {
   return items.map((item) => withLedgerAt(item.ledgerPath, context.now, (ledger) => {
+    if (override !== "clear" && override.kind === "tier" && (override.tier === "secure" || override.tier === "secrets")) {
+      revokeLocatedRead(item, context);
+    }
     if (override === "clear") {
       const cleared = ledger.clearOverride(item.identity);
       return { cleared, note: "The next sync re-decides this item without the override." };
@@ -170184,6 +170247,7 @@ var init_tier_cli = __esm(() => {
   init_connected_handles();
   init_operation_error();
   init_store_write_guard();
+  init_waiting_private_questions();
   init_sqlite_store();
   init_classification_ledger();
   init_sniffer();
@@ -170195,6 +170259,7 @@ var init_tier_cli = __esm(() => {
   init_tier_ledger_path();
   init_tier_set_binding();
   init_local_index();
+  init_on_demand_read();
   init_secrets_disposition();
   init_tiered_store_set();
   init_tier_rules();
@@ -197769,6 +197834,44 @@ var init_worker_responses = __esm(() => {
   };
 });
 
+// src/workers/engine/runtime/on-demand-revocation.ts
+function revokeSourceOnDemandReads(sourceStores, reason, approval, matcher) {
+  const stores = [...new Set(sourceStores.flatMap((store) => {
+    const set = tierSetForLedger(store.tierLedgerPathInUse());
+    return set?.store(store.trustDomain) === store ? set.openStores() : [store];
+  }))];
+  if (reason === "disconnect")
+    return revokeOnDemandReads(stores);
+  if (reason === "exclusions") {
+    if (!matcher?.active)
+      return 0;
+    return revokeOnDemandReads(stores, undefined, (store, id) => {
+      const row = store.activeLocalItemRow(id);
+      if (!row)
+        return;
+      const metadata = store.itemMetadataSnapshot({ ...row.identity, family: store.family, localItemId: id });
+      const decision = matcher.evaluateItem({ ...metadata, path: row.locatorUri, folderAncestorIds: row.sourceScope?.folderKeys });
+      return decision.disposition === "admit" || decision.readOnDemand === true;
+    });
+  }
+  const allowed = approval ? [fileSourceScopeContentFilters(approval), fileSourceScopeOnDemandFilters(approval)] : [];
+  const filters = allowed.flatMap((scope) => {
+    if (!scope.allowed)
+      return [];
+    const { sourceScopeRevision: _revision, ...folders } = scope.filters ?? {};
+    return [folders];
+  });
+  return revokeOnDemandReads(stores, undefined, (store, id) => {
+    if (!store.activeLocalItemRow(id))
+      return;
+    return filters.some((filter) => store.itemMatchesSearchFilters(id, undefined, filter));
+  });
+}
+var init_on_demand_revocation = __esm(() => {
+  init_on_demand_read();
+  init_source_scope_runtime();
+});
+
 // src/workers/connector-store/embedding-plan.ts
 function storeEmbeddingCatchesUp(corpusId, provider) {
   if (provider.provider === "built-in" && provider.backend === "local")
@@ -207019,6 +207122,7 @@ function chatgptPickerProgram(kit) {
       add(summary, el("p", "reason strong", fill(Q.capReached, { max: kit.count(MAX_RULES) })));
     add(footer, summary);
     add(footer, saveRow(canSaveFolders(), p.whole || anyChosen() ? Q.saveFolders : Q.saveNoStart, saveFolders, p.whole && !p.wholeConfirmed ? wholeWord("needConfirm") : !anyChosen() && !p.edited ? Q.needChoice : ""));
+    add(footer, el("p", "reason", "Searches already started may still send evidence to their configured model and return an answer."));
     return footer;
   }
   function foldersView(page) {
@@ -225782,6 +225886,13 @@ function createEmailSourceWorker(options = {}) {
   const sourceScheduler = options.sourceScheduler;
   const sourceWatch = options.sourceWatch;
   const sourceDashboard = options.sourceDashboard;
+  const revokeSourceReads = (source, reason, matcher) => {
+    if (options.revokeSourceReads)
+      return options.revokeSourceReads(source, reason);
+    const stores = connectorStores.filter((store) => storageAccountForCorpus(store).sourceId === source);
+    const approval = reason === "scope" ? new FileSourceScopeAuthority({ registryPath: sourceDashboard?.registryPath ?? defaultHandleRegistryPath() }).snapshot(source) : undefined;
+    return revokeSourceOnDemandReads(stores, reason, approval, matcher);
+  };
   const settingsProposal = sourceDashboard ? settingsProposalHolderFor(sourceDashboard) : undefined;
   const credentialDegradations = options.credentialDegradations;
   const credentialReadiness = options.credentialReadiness;
@@ -226222,19 +226333,33 @@ function createEmailSourceWorker(options = {}) {
             if (!accountGeneration || !expectedRevision) {
               throw new EmailSourceWorkerError(400, "invalid_request", "account_generation and expected_scope_revision are required.");
             }
-            return json(await sourceDashboard.fileSourceScopes.approveAndStart({
-              sourceId,
-              accountGeneration,
-              expectedRevision,
-              selections: parseSourceScopeSelections(postBody.selections),
-              wholeAccount: postBody.whole_account === true,
-              explicitWholeAccountConfirmation: postBody.explicit_whole_account_confirmation === true
-            }));
+            const scopes = sourceDashboard.fileSourceScopes;
+            return await withDashboardGrantMutation(async () => {
+              const result = await scopes.approveAndStart({
+                sourceId,
+                accountGeneration,
+                expectedRevision,
+                selections: parseSourceScopeSelections(postBody.selections),
+                wholeAccount: postBody.whole_account === true,
+                explicitWholeAccountConfirmation: postBody.explicit_whole_account_confirmation === true
+              });
+              await revokeSourceReads(sourceId, "scope");
+              return json(result);
+            });
           }
           const runtime = await sourceDashboard.ingestionDispositions();
           try {
             const rulesPath = resolveSourceIngestionExclusionsPath(process.env, runtime.rulesPath);
-            const save = saveSourceDispositions(rulesPath, parseSourceDispositionsSave(postBody, runtime.sources));
+            const edits = parseSourceDispositionsSave(postBody, runtime.sources);
+            const save = saveSourceDispositions(rulesPath, edits);
+            let revoked = 0;
+            for (const source of runtime.sources) {
+              if (edits.document === undefined && edits.source && edits.source !== source.source_id)
+                continue;
+              const id = listFileScopeSources().find((entry) => entry.dispositionSourceId === source.source_id)?.sourceId ?? source.source_id;
+              const matcher = createSourceExclusionMatcher(save.rules, source.source_id, { enforceable: source.enforceable });
+              revoked += await revokeSourceReads(id, "exclusions", matcher);
+            }
             return json({
               ok: true,
               kind: "source_dispositions_save",
@@ -226247,7 +226372,7 @@ function createEmailSourceWorker(options = {}) {
                 ...save.write ? { write: save.write } : {}
               },
               policy: {
-                writes_config_only: true,
+                writes_config_only: revoked === 0,
                 deletes_store_content: false,
                 runs_purge_or_strip: false
               }
@@ -227196,6 +227321,7 @@ function createEmailSourceWorker(options = {}) {
               if (localFilesBusy())
                 throw busyError();
               const registryPath = sourceDashboard.registryPath ?? defaultHandleRegistryPath();
+              await revokeSourceReads("local.files", "disconnect");
               const wasConnected = disconnectThisComputerSource(registryPath, "local.files");
               if (!wasConnected) {
                 throw new EmailSourceWorkerError(409, "source_not_connected", "This source is not connected.");
@@ -227262,6 +227388,8 @@ function createEmailSourceWorker(options = {}) {
                   }
                 }
               }
+              for (const id of plan.sourceIds)
+                await revokeSourceReads(id, "disconnect");
               const secretStore = dashboardSecretStore(sourceDashboard);
               try {
                 for (const key of plan.credentialKeys)
@@ -227374,6 +227502,8 @@ function createEmailSourceWorker(options = {}) {
                 }
                 sourceScheduler.updateSources(nextSources);
               }
+              for (const id of selectedSourceIds)
+                await revokeSourceReads(id, "disconnect");
               const plannedPaths = removalPlan.plan.targets.map((target) => target.path);
               const leasedRecord = readUnpairedSources(registryPath);
               if (leasedRecord.status === "unreadable") {
@@ -228640,6 +228770,11 @@ function readBusySentence(action, engineState) {
   return `This source is finishing a read. Retry ${action} after the current read completes.` + (age !== undefined && age > 0 ? ` Olympus is busy: it last reported ${age} s ago.` : "");
 }
 var init_engine2 = __esm(() => {
+  init_on_demand_revocation();
+  init_source_ingestion_exclusions();
+  init_source_placement();
+  init_source_scope_runtime();
+  init_file_scope_sources();
   init_router();
   init_embedding_plan();
   init_tier_visibility();
@@ -243072,6 +243207,12 @@ function deleteJudgeQuestions(lane, provider, accountScope) {
     sniffer.close();
   }
 }
+function revokeArchiveReads(lane, archiveId) {
+  const stores = archiveLaneStores(lane);
+  const prefix = archiveId + ":";
+  const ids = new Set(stores.flatMap((store) => store.onDemandGrantIds().filter((id) => id.startsWith(prefix))));
+  revokeOnDemandReads(stores, ids);
+}
 async function runArchiveRemoval(options) {
   const record = options.state.get(options.archiveId);
   if (!record || record.status !== "removing") {
@@ -243084,6 +243225,7 @@ async function runArchiveRemoval(options) {
   const lane = options.lane;
   const corpusIds = archiveLaneLegs(lane).map((leg) => leg.corpusId);
   const counts = emptyCounts2();
+  revokeArchiveReads(lane, accountScope);
   archiveContinuations.dropArchive(record.archive_id);
   counts.extraction_ledgers_cleared += runForgetAccountScopeSteps({ source_id: ARCHIVE_IMPORTS_SOURCE_ID2, slot: "1", corpus_ids: corpusIds }, [accountScope], { env: lane.env }, { dryRun: false }).length;
   counts.media_bindings_removed += options.media?.forgetArchive(accountScope) ?? 0;
@@ -243123,6 +243265,7 @@ var init_removal = __esm(() => {
   init_source_storage();
   init_tier_ledger_path();
   init_continuation_cache();
+  init_on_demand_read();
   init_lane();
   init_state();
   init_store();
@@ -243752,6 +243895,8 @@ function createArchiveImportDashboard(options) {
       return { ok: false, code: "already_removing", message: ARCHIVE_APPROVE_COPY.already_removing };
     if (record.target)
       return { ok: false, code: "part_of_source", message: ARCHIVE_APPROVE_COPY.part_of_source };
+    for (const lane of options.runtime.existingLanes(new Set([record.family])))
+      revokeArchiveReads(lane, archiveId);
     requestArchiveRemoval(state, archiveId, options.now);
     for (const request of requests.list()) {
       if (request.archive_id === archiveId)
@@ -250437,6 +250582,8 @@ var init_client5 = __esm(() => {
     "people",
     "capture",
     "capture_stop",
+    "revoke_reads",
+    "archive_remove",
     "delete_source_data",
     "storage_registry",
     "owner_limits",
@@ -255153,6 +255300,9 @@ var init_answer_scope = __esm(() => {
 
 // src/workers/engine/runtime/ingestion-dispositions.ts
 import { existsSync as existsSync127 } from "node:fs";
+function dispositionMatcher(sourceId, env) {
+  return INGESTION_DISPOSITION_SOURCES.find((source) => source.account.sourceId === sourceId)?.matcher(env);
+}
 function storedExclusionDebtReader(handles) {
   let walked;
   return () => {
@@ -280779,6 +280929,34 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       ...googleDriveRequestBudget ? { googleDriveRequestBudget } : {}
     });
   };
+  const applySourceReadRevocation = (source, reason) => {
+    const stores = connectorStores.filter((store) => sourceIdForStore(store) === source);
+    const opened = [];
+    try {
+      const names = accountStoreNames(source);
+      for (const corpus of defaultSourceCorpusRegistryConfig().corpora) {
+        if (corpus.sourceId !== source || !names.includes(corpus.trustDomain))
+          continue;
+        const dbPath = resolvedStorePath(source, corpus.trustDomain, process.env);
+        if (stores.some((store) => store.dbPath === dbPath) || !existsSync129(dbPath))
+          continue;
+        opened.push(openConnectorStore({ sourceId: source }, { ...corpus, dbPath }));
+      }
+      return revokeSourceOnDemandReads([...stores, ...opened], reason, reason === "scope" ? fileSourceScopeAuthority?.snapshot(source) : undefined, reason === "exclusions" ? dispositionMatcher(source, process.env) : undefined);
+    } finally {
+      for (const store of opened)
+        store.close();
+    }
+  };
+  const revokeSourceReads = async (source, reason) => {
+    if (!engineFront)
+      return applySourceReadRevocation(source, reason);
+    const receipt = await engineFront.client.send({ kind: "revoke_reads", source, reason }, { timeoutMs: OWNER_ACTION_WAIT_MS });
+    if (receipt.state !== "done" || typeof receipt.result !== "number") {
+      throw new OperationError("source_index_error", "The background engine could not finish revoking on-demand reads. Retry the action.");
+    }
+    return receipt.result;
+  };
   const fileSourceScopes = fileSourceScopeAuthority ? {
     summaries: () => [...listFileScopeSources().map(({ sourceId, dispositionSourceId, label }) => {
       const snapshot = fileSourceScopeAuthority.snapshot(sourceId);
@@ -281161,6 +281339,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     } : {},
     connectorStores,
     refreshConnectorStores: () => mountConfiguredSourceStores(),
+    revokeSourceReads,
     connectorStoreTierSiblings: (corpusId) => [
       ...tierLanes.find((lane) => lane.corpusIds.has(corpusId))?.corpusIds ?? []
     ].filter((sibling) => sibling !== corpusId),
@@ -282655,6 +282834,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         built_in_serving_pid: servingModelPid?.()
       }) } : {},
       handlers: {
+        revoke_reads: ({ source, reason }) => applySourceReadRevocation(source, reason),
         model_prepare: () => {
           if (workerBuiltInModel)
             workerBuiltInModel.model.prepare();
@@ -282746,6 +282926,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
             deleteFromFront = undefined;
           }
         },
+        archive_remove: ({ request }) => runForwarded(request),
         tier_override: ({ request }) => runForwarded(request),
         storage_registry: ({ request }) => runForwarded(request),
         capture: ({ request }) => runForwarded(request),
@@ -283244,6 +283425,7 @@ var init_server5 = __esm(async () => {
   init_private_analysts();
   init_connector_mounts();
   init_answer_scope();
+  init_on_demand_revocation();
   init_ingestion_dispositions();
   workerLaunch = {};
   FRONT_MOUNT_FAILURE_RETRY_MS = 5 * 60000;

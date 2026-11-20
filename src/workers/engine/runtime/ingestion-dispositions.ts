@@ -120,6 +120,10 @@ const INGESTION_DISPOSITION_SOURCES: ReadonlyArray<{
   },
 ];
 
+export function dispositionMatcher(sourceId: string, env: Record<string, string | undefined>): SourceExclusionMatcher | undefined {
+  return INGESTION_DISPOSITION_SOURCES.find(source => source.account.sourceId === sourceId)?.matcher(env);
+}
+
 /**
  * Open the picker's inputs for one request, read-only, and hand back the way to
  * close them.

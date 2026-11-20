@@ -41,6 +41,7 @@ import { resolveRemoteConnectionsDbPath } from '../../core/remote-connections.ts
 import { openTierSniffer } from '../../core/source-storage.ts';
 import { tierSnifferPathForLedger } from '../classification/tier-ledger-path.ts';
 import { archiveContinuations } from './continuation-cache.ts';
+import { revokeOnDemandReads } from '../file-extraction/on-demand-read.ts';
 import { archiveLaneLegs, archiveLaneStores, type ArchiveTierLane } from './lane.ts';
 import type { ArchiveMediaBindings } from './media-bindings.ts';
 import { ARCHIVE_IMPORTS_SOURCE_ID, archiveConnectorId, type ArchiveImportRecord, type ArchiveImportStateStore } from './state.ts';
@@ -153,6 +154,13 @@ function deleteJudgeQuestions(lane: ArchiveTierLane, provider: string, accountSc
   }
 }
 
+export function revokeArchiveReads(lane: ArchiveTierLane, archiveId: string): void {
+  const stores = archiveLaneStores(lane);
+  const prefix = archiveId + ':';
+  const ids = new Set(stores.flatMap(store => store.onDemandGrantIds().filter(id => id.startsWith(prefix))));
+  revokeOnDemandReads(stores, ids);
+}
+
 export async function runArchiveRemoval(options: ArchiveRemovalOptions): Promise<ArchiveRemovalOutcome> {
   const record = options.state.get(options.archiveId);
   if (!record || record.status !== 'removing') {
@@ -165,6 +173,7 @@ export async function runArchiveRemoval(options: ArchiveRemovalOptions): Promise
   const lane = options.lane;
   const corpusIds = archiveLaneLegs(lane).map((leg) => leg.corpusId);
   const counts = emptyCounts();
+  revokeArchiveReads(lane, accountScope);
 
   // An inflater parked for a member of this archive has nothing left to serve.
   archiveContinuations.dropArchive(record.archive_id);

@@ -1046,8 +1046,11 @@ describe('one archive from the picker to a cited answer and back out', () => {
     });
     expect((cited.structuredContent as { evidence: Array<{ source: string }> }).evidence[0]!.source).toBe('Imported mail');
 
-    // Remove: everything derived from it goes, the file stays.
+    // Removal acknowledges revocation even before the scheduler purges the rows.
+    const id = hit!.sourceItem.localItemId as string;
+    for (const store of lane.set.openStores()) store.grantOnDemandRead(id, 'v1');
     expect(f.dashboard.remove(started.archive_id)).toEqual({ ok: true });
+    for (const store of lane.set.openStores()) expect(store.readOnDemand(id, 'v1')).toBe(false);
     let removal = await runArchiveRemoval({ state: f.runtime.state, lane, archiveId: started.archive_id });
     for (let run = 0; run < 20 && removal.kind === 'progress'; run += 1) {
       removal = await runArchiveRemoval({ state: f.runtime.state, lane, archiveId: started.archive_id });

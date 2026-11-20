@@ -1,4 +1,4 @@
-import type { RequestOnDemandRead, OnDemandReadResult } from '../../file-extraction/on-demand-read.ts';
+import type { RequestOnDemandRead, OnDemandReadResult, SourceReadRevocation } from '../../file-extraction/on-demand-read.ts';
 import type { JudgeChoice } from '../../classification/judge-spending.ts';
 import type { DashboardPeopleBackend } from '../dashboard/dashboard-people.ts';
 import type {
@@ -163,6 +163,7 @@ export interface EmailSourceWorkerOptions {
    */
   fileExtraction?: FileExtractionRunner;
   requestOnDemandRead?: RequestOnDemandRead;
+  revokeSourceReads?: (sourceId: string, reason: SourceReadRevocation) => Promise<number>;
   /** Deep read jobs (runtime/deep-read-jobs.ts), once the engine has built them. */
   deepRead?: () => import('../runtime/deep-read-jobs.ts').DeepReadJobs | undefined;
   readOwnerItem?: (itemId: string) => Promise<OnDemandReadResult>;

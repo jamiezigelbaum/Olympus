@@ -9386,15 +9386,13 @@ export class LocalConnectorStore {
     this.notifyOnDemandGrantChange();
   }
 
+  onDemandGrantIds(): string[] {
+    return this.db.query<{ local_item_id: string }, []>('SELECT local_item_id FROM on_demand_item_reads')
+      .all().map(row => row.local_item_id);
+  }
+
   revokeOnDemandRead(localItemId: string): void {
-    const previous = (this.db.query('PRAGMA busy_timeout').get() as { timeout: number }).timeout;
-    this.db.exec(`PRAGMA busy_timeout = ${Math.min(previous, REVOCATION_WRITE_LIMIT.milliseconds)}`);
-    try {
-      const removed = this.db.query('DELETE FROM on_demand_item_reads WHERE local_item_id = ?').run(localItemId);
-      if (removed.changes > 0) this.notifyOnDemandGrantChange();
-    } finally {
-      this.db.exec(`PRAGMA busy_timeout = ${previous}`);
-    }
+    if (deleteOnDemandGrant(this.db, localItemId)) this.notifyOnDemandGrantChange();
   }
 
   onDemandGrantEpoch(): number | undefined {
@@ -22579,6 +22577,17 @@ function sameStringSet(actual: readonly string[], expected: readonly string[]): 
 const ON_DEMAND_GRANT_EPOCH_TRIGGERS = [
   'on_demand_grant_delete', 'on_demand_grant_update', 'on_demand_item_delete', 'on_demand_item_update', 'on_demand_grant_insert',
 ] as const;
+
+export function deleteOnDemandGrant(db: Database, localItemId: string): boolean {
+  const previous = (db.query('PRAGMA busy_timeout').get() as { timeout: number }).timeout;
+  db.exec(`PRAGMA busy_timeout = ${Math.min(previous, REVOCATION_WRITE_LIMIT.milliseconds)}`);
+  try {
+    const removed = db.query('DELETE FROM on_demand_item_reads WHERE local_item_id = ?').run(localItemId);
+    return removed.changes > 0;
+  } finally {
+    db.exec(`PRAGMA busy_timeout = ${previous}`);
+  }
+}
 
 function createOnDemandReads(db: Database): void {
   db.exec(`CREATE TABLE IF NOT EXISTS on_demand_item_reads (

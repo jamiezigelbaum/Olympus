@@ -30119,16 +30119,12 @@ ${parentKey(ref)}`, { ref, origin });
       ON CONFLICT(local_item_id) DO UPDATE SET source_version = excluded.source_version`).run(localItemId, sourceVersion);
     this.notifyOnDemandGrantChange();
   }
+  onDemandGrantIds() {
+    return this.db.query("SELECT local_item_id FROM on_demand_item_reads").all().map((row) => row.local_item_id);
+  }
   revokeOnDemandRead(localItemId) {
-    const previous = this.db.query("PRAGMA busy_timeout").get().timeout;
-    this.db.exec(`PRAGMA busy_timeout = ${Math.min(previous, REVOCATION_WRITE_LIMIT.milliseconds)}`);
-    try {
-      const removed = this.db.query("DELETE FROM on_demand_item_reads WHERE local_item_id = ?").run(localItemId);
-      if (removed.changes > 0)
-        this.notifyOnDemandGrantChange();
-    } finally {
-      this.db.exec(`PRAGMA busy_timeout = ${previous}`);
-    }
+    if (deleteOnDemandGrant(this.db, localItemId))
+      this.notifyOnDemandGrantChange();
   }
   onDemandGrantEpoch() {
     if (this.closedForPoolReads || !this.onDemandReadsTablePresent)
@@ -37644,6 +37640,16 @@ var ON_DEMAND_GRANT_EPOCH_TRIGGERS = [
   "on_demand_item_update",
   "on_demand_grant_insert"
 ];
+function deleteOnDemandGrant(db, localItemId) {
+  const previous = db.query("PRAGMA busy_timeout").get().timeout;
+  db.exec(`PRAGMA busy_timeout = ${Math.min(previous, REVOCATION_WRITE_LIMIT.milliseconds)}`);
+  try {
+    const removed = db.query("DELETE FROM on_demand_item_reads WHERE local_item_id = ?").run(localItemId);
+    return removed.changes > 0;
+  } finally {
+    db.exec(`PRAGMA busy_timeout = ${previous}`);
+  }
+}
 function createOnDemandReads(db) {
   db.exec(`CREATE TABLE IF NOT EXISTS on_demand_item_reads (
     local_item_id TEXT PRIMARY KEY, source_version TEXT NOT NULL, read_on_demand INTEGER NOT NULL DEFAULT 1

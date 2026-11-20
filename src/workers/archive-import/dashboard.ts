@@ -38,7 +38,7 @@ import type { ArchiveSourceTarget } from './source-targets.ts';
 import { createArchiveImportAgent, type ArchiveImportAgent } from './agent.ts';
 import { SCHEDULER_SOURCE_IDS } from '../source-scheduler.ts';
 import { archiveFileDigestSteps, findProbableCopies, verifyArchiveManifest } from './manifest.ts';
-import { requestArchiveRemoval } from './removal.ts';
+import { requestArchiveRemoval, revokeArchiveReads } from './removal.ts';
 import { archiveStateSiblingPath } from '../../core/olympus-layout.ts';
 import { ArchiveUploadError, createArchiveUploads, type ArchiveUploads, type ArchiveUploadStatus } from './staging.ts';
 import type { ArchiveImportRuntime } from './runtime.ts';
@@ -1025,6 +1025,7 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
     if (record.status === 'removing') return { ok: false, code: 'already_removing', message: ARCHIVE_APPROVE_COPY.already_removing };
     // An input of a source has no Remove of its own: its items are the source's, deleted with the source.
     if (record.target) return { ok: false, code: 'part_of_source', message: ARCHIVE_APPROVE_COPY.part_of_source };
+    for (const lane of options.runtime.existingLanes(new Set([record.family]))) revokeArchiveReads(lane, archiveId);
     requestArchiveRemoval(state, archiveId, options.now);
     // A finished check pointing at it, and any request to remove it, say nothing true any more.
     for (const request of requests.list()) {

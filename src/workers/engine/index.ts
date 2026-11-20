@@ -1,3 +1,9 @@
+import { revokeSourceOnDemandReads } from './runtime/on-demand-revocation.ts';
+import { createSourceExclusionMatcher, type SourceExclusionMatcher } from '../../core/source-ingestion-exclusions.ts';
+import type { SourceReadRevocation } from '../file-extraction/on-demand-read.ts';
+import { storageAccountForCorpus } from '../../core/source-placement.ts';
+import { FileSourceScopeAuthority } from '../source-scope-runtime.ts';
+import { listFileScopeSources } from '../../core/file-scope-sources.ts';
 import { deliverCorpusSearch, DEFER_SEARCH_DELIVERY, SEARCH_GRANT_MATCH } from '../../core/source-index/router.ts';
 import { scopedEmbeddingOptions } from '../connector-store/embedding-plan.ts';
 import { effectiveItemVerdicts, type TierVisibilityScope } from '../connector-store/tier-visibility.ts';
@@ -418,6 +424,14 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
   const sourceScheduler = options.sourceScheduler;
   const sourceWatch = options.sourceWatch;
   const sourceDashboard = options.sourceDashboard;
+  const revokeSourceReads = (source: string, reason: SourceReadRevocation, matcher?: SourceExclusionMatcher) => {
+    if (options.revokeSourceReads) return options.revokeSourceReads(source, reason);
+    const stores = connectorStores.filter(store => storageAccountForCorpus(store).sourceId === source);
+    const approval = reason === 'scope'
+      ? new FileSourceScopeAuthority({ registryPath: sourceDashboard?.registryPath ?? defaultHandleRegistryPath() }).snapshot(source)
+      : undefined;
+    return revokeSourceOnDemandReads(stores, reason, approval, matcher);
+  };
   const settingsProposal = sourceDashboard ? settingsProposalHolderFor(sourceDashboard) : undefined;
   const credentialDegradations = options.credentialDegradations;
   const credentialReadiness = options.credentialReadiness;
@@ -1005,19 +1019,30 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             if (!accountGeneration || !expectedRevision) {
               throw new EmailSourceWorkerError(400, 'invalid_request', 'account_generation and expected_scope_revision are required.');
             }
-            return json(await sourceDashboard.fileSourceScopes.approveAndStart({
-              sourceId,
-              accountGeneration,
-              expectedRevision,
-              selections: parseSourceScopeSelections(postBody.selections),
-              wholeAccount: postBody.whole_account === true,
-              explicitWholeAccountConfirmation: postBody.explicit_whole_account_confirmation === true,
-            }));
+            const scopes = sourceDashboard.fileSourceScopes;
+            return await withDashboardGrantMutation(async () => {
+              const result = await scopes.approveAndStart({
+                sourceId, accountGeneration, expectedRevision,
+                selections: parseSourceScopeSelections(postBody.selections),
+                wholeAccount: postBody.whole_account === true,
+                explicitWholeAccountConfirmation: postBody.explicit_whole_account_confirmation === true,
+              });
+              await revokeSourceReads(sourceId, 'scope');
+              return json(result);
+            });
           }
           const runtime = await sourceDashboard.ingestionDispositions();
           try {
             const rulesPath = resolveSourceIngestionExclusionsPath(process.env, runtime.rulesPath);
-            const save = saveSourceDispositions(rulesPath, parseSourceDispositionsSave(postBody, runtime.sources));
+            const edits = parseSourceDispositionsSave(postBody, runtime.sources);
+            const save = saveSourceDispositions(rulesPath, edits);
+            let revoked = 0;
+            for (const source of runtime.sources) {
+              if (edits.document === undefined && edits.source && edits.source !== source.source_id) continue;
+              const id = listFileScopeSources().find(entry => entry.dispositionSourceId === source.source_id)?.sourceId ?? source.source_id;
+              const matcher = createSourceExclusionMatcher(save.rules, source.source_id, { enforceable: source.enforceable });
+              revoked += await revokeSourceReads(id, 'exclusions', matcher);
+            }
             return json({
               ok: true,
               kind: 'source_dispositions_save',
@@ -1030,7 +1055,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 ...(save.write ? { write: save.write } : {}),
               },
               policy: {
-                writes_config_only: true,
+                writes_config_only: revoked === 0,
                 deletes_store_content: false,
                 runs_purge_or_strip: false,
               },
@@ -2326,6 +2351,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             );
             if (localFilesBusy()) throw busyError();
             const registryPath = sourceDashboard.registryPath ?? defaultHandleRegistryPath();
+            await revokeSourceReads('local.files', 'disconnect');
             const wasConnected = disconnectThisComputerSource(registryPath, 'local.files');
             if (!wasConnected) {
               throw new EmailSourceWorkerError(409, 'source_not_connected', 'This source is not connected.');
@@ -2416,6 +2442,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                   catch { throw new EmailSourceWorkerError(409, 'capture_stop_unconfirmed', 'Capture has not confirmed it stopped. Credentials were retained; retry Disconnect.'); }
                 }
               }
+              for (const id of plan.sourceIds) await revokeSourceReads(id, 'disconnect');
               const secretStore = dashboardSecretStore(sourceDashboard);
               try {
                 for (const key of plan.credentialKeys) await secretStore.delete(key);
@@ -2633,6 +2660,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 // reader over a half-removed login.
                 sourceScheduler.updateSources(nextSources);
               }
+              for (const id of selectedSourceIds) await revokeSourceReads(id, 'disconnect');
               const plannedPaths = removalPlan.plan.targets.map((target) => target.path);
               // COMMITTED BEFORE ANY mutation, pessimistically and
               // UNCONDITIONALLY: at this instant every planned artifact is
