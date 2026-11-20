@@ -1,6 +1,7 @@
 # Source definitions: one declaration per source, one gate for every read
 
-Status: DRAFT v1 for review (20 Nov 2026). Not approved. Written by the 1.5
+Status: DRAFT v2 (20 Nov 2026), revised after independent reviews by Codex
+Astra and Gemini Neon. Awaiting Jamie's approval. Written by the 1.5
 plan owner at Jamie's request after the source-specific audit of main
 `d9cf10eb` (olympus-ops run 44736179620). Reviewers: Gemini Neon and Codex
 Astra, independently. Code read at `d9cf10eb`.
@@ -88,199 +89,171 @@ So there are two defects, and the draft treats them separately:
   is exactly this; this draft makes it the gate's rule for every stage, not a
   privacy-batch special case.
 
-## Design
+## Design (v2, after both reviews)
 
-### Part 1. One admission gate (fixes defect 1)
+Both reviews (olympus-ops#237: Codex Astra, run 44742587961; Gemini Neon,
+run 44742592720) verified the diagnosis against the code and returned
+"adopt with changes". They agreed on every main change; v2 takes them all.
+The biggest change is in what gets built before 1.5 (see Sequence).
 
-One module, `src/core/admission.ts`, owns the decision "may this content be
-used at this stage". Nothing else decides it.
+### Part 1. One admission policy, enforced at every boundary
+
+v1 proposed one gate that callers consult. Both reviews said that is not
+enough: callers forget, and several reads already bypass the store's checks
+(owner item browser `tier-owner-items.ts:269`, deep read
+`deep-read-jobs.ts:319`, people index `local-index.ts:8343`, conversation
+titles and `localContent`, Secret locations, parent labels, manual embed,
+source watch). v2 separates **one policy** (defined once) from **its
+enforcement points** (where the work actually crosses a boundary).
+
+**The policy** (`src/core/admission.ts`) is a pure function of declared
+facts, never of a source id:
 
 ```ts
-type AdmissionStage =
-  | 'fetch'        // read content from the provider
-  | 'extract'      // read text from bytes (local or remote extractor)
-  | 'embed'        // write vectors (scheduled sweep AND manual embed)
-  | 'search'       // return as a hit (keyword, meaning, recency, people)
-  | 'answer'       // put into an EvidencePack
-  | 'count';       // show in backlog and status counts
-
 interface AdmissionContext {
-  stage: AdmissionStage;
-  epoch: AdmissionEpoch;          // grants + approvals + account bindings, snapshotted at start
-  egress: 'device' | 'private_cloud' | 'cloud';  // where the content goes at this stage
-  scope?: AnswerScope;            // the folder, chat or account the request is limited to
-}
-
-interface AdmissionPolicy {       // compiled once per (store, stage, epoch)
-  storeFilter: ConnectorStoreItemFilter;   // SQL-side predicate, set-based, no per-row calls
-  admits(item: AdmissionFacts): AdmissionVerdict;  // for the single-item paths (fetch, manual embed)
+  caller: 'owner' | 'remote_grant' | 'watch' | 'internal_judge' | 'migrate' | 'backup';
+  purpose: AdmissionStage;          // see below
+  layer: 'names' | 'content';       // a folder may show names but not text
+  destination: 'device' | 'private_cloud' | 'cloud' | 'recipient';
+  account: AccountRef;              // durable owner of the items
+  requestScope?: RequestScope;      // folder, chat or account the request is limited to
+  authority: AuthoritySnapshot;     // grants and approvals, with their epoch
 }
 ```
 
-The verdict is computed only from facts every source can supply, never from
-a source id:
+Stages: `acquire` (provider I/O, including reads inside a listing pass and
+deferred child bytes), `place` (writes, only through tier placement),
+`extract`, `embed`, `search`, `answer`, `deep_read`, `people_index`,
+`preview` (owner item browser), `watch`, `count` (counts the population the
+counter names: backlog = missing vectors; search counts = visible results),
+`deliver` (an answer, relay response or item handle leaving the engine),
+plus privileged `judge`/`migrate`/`backup` that bypass owner scope by
+design and say so.
 
-- **Owner approval**: the item's scope keys (below) against the approved
-  scope set for its account. "Approval decides what is fetched; held mail
-  stays searchable" (Jamie's 12:18Z choice) becomes a rule on stage, not a
-  Gmail branch: `fetch` requires current approval; `search`/`answer` of
-  already-held content requires only that the account binding is current.
-- **Account binding**: the item's account generation equals the bound
-  account's. A different account reconnected under the same slot fails
-  `search` and `answer` for the old items (lane 2's must-fix 2) for every
-  source, not just Gmail.
-- **Tier and hold**: tier ledger state, hold-until-judged, Secret floor. The
-  gate reads these; it never writes them. The judge stays as it is.
-- **Egress**: stage plus tier decides whether content may leave the device
-  (remote extraction cap, A8; cloud embedding). One rule for all sources.
-- **Answer scope**: a folder- or chat-scoped answer admits only corpora whose
-  scope model can enforce that scope; others are excluded, not trusted (A6).
-- **Epoch**: the policy is compiled under the epoch the request started in.
-  Revoking a grant bumps the epoch and returns only after in-flight work on
-  the older epoch drains. The six per-path rechecks are deleted.
+**Enforcement is sealed, not conventional.** The policy is the only
+factory for a `ScopedStoreView` (search, answer, preview, deep read, people
+index, counts) or a `PrivilegedStoreView` (judge, migrate, backup). The raw
+`LocalConnectorStore` read methods become package-private, so an un-gated
+read is a compile error, not a guard catch. Writes go only through tier
+placement, which closes A4 and A5 (a read gate cannot).
 
-Every stage calls the gate: scheduled and manual embed (A2), backlog and
-status counts (A3), extraction including remote (A8), search, answers,
-fetch. A count that uses a different rule than search is the failure we are
-removing, so `count` uses the same compiled filter as `search`.
+**Hot path.** The policy compiles to a parameterised SQL shape cached per
+`(store, stage, layer)`, with caller, account, scope and authority bound
+per use (v1's `(store, stage, epoch)` key could reuse one folder's filter for
+another). Per-row `json_each` over folder keys (`local-index.ts:20985`) is
+replaced by an indexed `item_scope_keys(scope_key, item_pk)` table. The
+existing synchronous live recheck before hydration (`stillVisibleSearchRows`,
+`local-index.ts:15702`) stays and becomes the policy's single-item
+evaluator. Before switching search over: prove SQL and single-item verdicts
+agree on the same fixtures, and compare query plans, p95 latency and
+eligible top-k on the owner-scale 24-store workload, narrow scopes and
+heavily held stores included.
 
-**Children**: hold-until-judged for a child item is set once, at tier
-placement, for every child of every source (A9), from the child identity in
-`RawItem`. Connectors stop setting it.
+**Account identity.** Durable item ownership (the provider account the
+item came from: a mailbox address, a Dropbox account id) is separate from
+the grant generation. Today's approval generation includes `connectedAt`
+(`source-scope-approval.ts:171`), so a same-account reconnect changes it;
+using it as ownership would hide legitimate history. Specified cases:
+same-account reconnect (history kept), different account (old history not
+served under the new binding), unproven account (held), disconnected with
+retained history, archive-only accounts, legacy rows.
 
-**One write path**: content reaches a store only through tier placement
-(classify, Secret check, hold). Recovery, extraction sinks and repairs call
-placement; they never write chunks directly (A4, A5, already in lane 3's
-batch). A guard enforces it.
+**Provenance** is its own fact: `live` or `owner_import`. An imported
+archive stays searchable without live approval, for every source. This is
+the real shape of today's Gmail special case (live plus `archive.` mail).
 
-### Part 2. One declaration per source (fixes defect 2)
+**Revocation.** Publish the new epoch at once across front, background and
+queued jobs; cancel long work (deep read, extraction) through its abort
+signal; drain only the short commit or hand-off that is already under way,
+within a bound; re-acquire authority when a job resumes or a result is
+collected; and check the epoch synchronously at `deliver`, so nothing is
+released under a stale grant. Tier and hold checks stay independent of the
+epoch (an item can turn Secret while a grant stays valid). The existing
+release manifest (`release-manifest.ts`) already models what an answer
+depended on and is kept.
 
-Each connector folder exports one `SourceDefinition`, the only place the
-source's facts live. `src/core/source-catalog.ts` imports the list of
-definitions (the only file that names every source) and builds every roster
-from it.
+### Part 2. One declaration per source
 
-```ts
-interface SourceDefinition {
-  id: string;                         // 'gmail.email'
-  family: SourceFamily;
-  display: { name: string; logo: string };
-  credential: SourceCredentialKind;   // drives setup and reconnect UI
-  inputs: { live?: LiveInputSpec; archive?: ArchiveInputSpec[] };
-  connector(ctx: ConnectorContext): SourceConnector;     // the existing contract
-  stores: StoreLayoutSpec;            // tier stores via the source-storage registry
-  scope: ScopeModel;                  // what the owner approves and rules on
-  children?: { kinds: ChildKind[] };  // attachments, media
-  cadence: 'live_cheap' | 'sweep' | 'manual';
-  search: { fields: SearchFieldSpec[]; recency?: true; people?: PeopleSpec };
-  limits?: { maxItemBytes?: number }; // declared, enforced by shared ingest
-  status?: { counters: StatusCounterSpec[] };
-}
+Each connector folder exports a `SourceDefinition`: pure data plus lazy
+factories, so the CLI, dashboard, tests and the front/background split can
+read the catalog without loading provider runtimes or opening SQLite. It
+says what a source **supports**. The account registry
+(`docs/design/source-storage.md`) says what is **mounted, connected and
+approved**; a tier store may appear after start-up and an external mount may
+add a principal to an existing lane, and both keep working.
 
-type ScopeModel =
-  | { kind: 'paths' }                 // Dropbox, Drive, local files, Evernote notebooks
-  | { kind: 'labels'; senders: true } // mail
-  | { kind: 'conversations' }         // Telegram, WhatsApp, Apple Messages
-  | { kind: 'account' };              // Readwise, X: all or nothing
-```
+Capabilities are **independent**, never inferred from a category (v1's
+`labels ⇒ sender rules`, `family ⇒ searchable`, `children ⇒ extractable`
+were per-source branches in disguise). A source declares each one it has:
 
-Shared code reads `scope.kind`, `cadence`, `children`, `search` and so on;
-it never compares a source id. From the catalog the shared code builds:
+- scope matchers: `path_prefix` (Dropbox, local files), `container_key`
+  (Drive folders, Evernote notebooks, X lists, Apple Notes folders: opaque
+  ids that survive renames), `label`, `sender`, `conversation`, `account`;
+  and separately which of them can constrain acquisition, owner rules and
+  queries;
+- `searchable`, `extractable` (a childless PDF is extractable), `children`;
+- typed search facets (instead of newline-packed `search_text`);
+- tasks with their own cadence (pull, reconcile, confirm), not one cadence
+  per source;
+- `readiness()`: a generic hook for start-up gates such as local files'
+  cleanup recovery (`server.ts:2912`), which stays fail-closed;
+- limits, display, status counters.
 
-| Roster today (audit) | Built from |
-|---|---|
-| corpus registry, engine overlay, `server.ts` lane list | `stores`, `family` |
-| extraction roster, tier-set map | `stores`, `children` |
-| embedding scope (A1) | Part 1 gate, `scope` |
-| scheduler tasks per source | `inputs`, `cadence` |
-| owner-rule kinds by provider (`RULE_SOURCES`) | `scope.kind` (folder rules for `paths`, label and sender rules for `labels`, chat rules for `conversations`) |
-| search fields, recency lane, people index, all-sources search (A7) | `search`, `family` |
-| status counts, Doctor checks, display names and logos | `status`, `display` |
-| delete, export, uninstall | already built from the storage registry (`docs/design/source-storage.md`, approved 24 Oct); joins the catalog |
+An answer limited to a folder or chat skips any corpus that cannot enforce
+that scope (A6); a search facet alone is never an authorisation fact.
 
-Shared work currently inside connectors moves out: spool Secret loops,
-HTML-to-text (Gmail, mbox, Readwise), Drive's own read cap, per-connector
-progress maths, Dropbox extraction-readiness SQL, the Secret detector's home
-in the Dropbox folder. Target remains the contract's ~300-line connector;
-today's connector folders run 1,700 to 10,000 lines.
+### Part 3. Spine first, kits only for record shaping
 
-`CONTRACTS.md` gets a minor version: `SourceDefinition` wraps
-`SourceConnector` without changing it, so this is additive. It follows the
-versioned change gate (change log, eval, critical review).
+Both reviews moved work from kits into the spine. **The spine owns:** HTML
+and MIME extraction, byte limits, Secret disposition (spool loops
+included), request budgets and quota accounting (`request-budget.ts`),
+cursor and checkpoint persistence, tombstones and reconciliation,
+parent-child relations (scope exclusion, tier ceiling, hold-until-judged
+and delete cascade follow the parent automatically, replacing per-connector
+holds (A9), `parentLabels` and `child-visibility.ts`), and a dead-letter
+queue with retry and backoff for poison items.
 
-### Part 3. Kits (connector types)
+**Kits hold only domain record shaping:**
 
-Kits live in `src/workers/kits/<kind>/` and hold what two or more connectors
-of a type would otherwise each write. Starting inventory from the audit and
-the connector folders (1,700 to 10,000 lines today against a ~300 target):
+- **files**: tree walking and change feeds for path and container sources.
+- **messaging**: chat, thread, reaction and media-record normalisation.
+- **mail**: RFC 822 threading, labels, senders.
+- **library**: only once Readwise and X show a real shared operation.
 
-- **files**: folder walk and change cursor, path scope keys, deferred bytes
-  for large files, provider read caps, extraction readiness. Users: Dropbox,
-  Drive, local files, Evernote (notebooks as folders), archive imports of
-  file trees.
-- **messaging**: chat and message records, media children, capture spools
-  and their Secret loops, conversation scope keys, group/direct kind.
-  Users: Telegram, WhatsApp, Apple Messages, chat archive imports.
-- **mail**: MIME parsing, HTML to text, threading, label and sender scope
-  keys, attachment children. Users: Gmail, mbox import.
-- **library**: saved items with highlights and source URLs, account-level
-  scope. Users: Readwise, X bookmarks.
+Evernote reuses the container and attachment helpers; it is not forced into
+`files`. Archive imports are **input drivers** (`forInput`, already in the
+contract) feeding the same connector's record parser with `owner_import`
+provenance, not a kit. OS-specific concerns (macOS permissions, volume
+identity) stay in their connector. A kit never decides visibility, tier or
+searchability, and the spine never branches on kit.
 
-A kit may supply defaults for a `SourceDefinition` (scope model, search
-fields, children), so a connector built on a kit declares little. What a kit
-must never do is decide visibility, tier or searchability: those stay in
-the spine's gate and judge. HTML to text and MIME extraction belong to the
-spine's shared extractor, not the mail kit, because files and messages carry
-HTML too.
+### Enforcement (mechanical)
 
-### Enforcement (mechanical, survives any thread)
-
-1. **Synthetic source test**: a fake source defined only by a
-   `SourceDefinition` in a test folder is fetched, judged, extracted,
-   embedded, searched, answered, counted, shown and deleted with no other
-   edit. If adding a source needs an edit anywhere else, this fails.
-2. **Source-literal guard** (like `public-surface-guard`): no source id or
-   provider string outside its connector folder and `source-catalog.ts`.
-   Today's ~930 literals go into an allowlist with a reason each; the list
-   only shrinks.
-3. **Gate guard**: no stage reads chunks, vectors or content without a
-   compiled `AdmissionPolicy` (static check on the store read APIs, plus a
-   runtime assertion in tests). Existing `embedding-path-guard`,
-   `tier-path-guard` and `tier-hold-until-judged-guard` fold into it.
+1. **Sealed views** (Part 1): un-gated reads do not compile.
+2. **Connector conformance suite**, run on every real connector and on a
+   synthetic one: idempotent resync, tombstone propagation, scope revoked
+   mid-sync, split-tier visibility, interrupted replay with verified
+   output, a denied operation, a mixed-capability source. Adding a source
+   needs no edit outside its folder and the catalog list.
+3. **Guards on raw-store access and provider I/O**, not on name literals
+   (counting literals would flag display names and aliases). A shrinking
+   allowlist like `public-surface-guard`.
 4. **Placement guard**: chunk writes only from tier placement.
 
-## Sequence
+## Sequence (v2: both reviews said not to cut over before 1.5)
 
-Ordered by risk. Each step is one Gemini build with its guard, one Codex
-read, then main.
+| Step | What | When |
+|---|---|---|
+| 1.5 fixes | Small, surgical fixes for the real bugs: A1 (Evernote in embedding scope), A2 (manual embed scope for every family), A3, A6 (scoped answer skips corpora that can't enforce scope), A7 (Readwise registered as searchable), A8, A9; lane 3's privacy batch with A4/A5 and its revocation design; lane 2's Gmail redesign; mismatched-mailbox deny keyed on the mailbox address, not `connectedAt` | before the 1.5 candidate |
+| G0 | `admission.ts` in **shadow**: computes verdicts beside today's checks and logs disagreements; parity tests against `connectorStoreReadScope`, `storeEmbeddingScope`, `connectorStoreStatusScope` across every corpus, Gmail imports and local-files cleanup included | in parallel, ships dark in 1.5 if green |
+| G1 | Sealed views; cut search, answer, preview, deep read, people index and counts over to the policy; `item_scope_keys` index; parity and latency proof first | right after 1.5 |
+| G2 | Acquisition, placement and delivery boundaries; revocation across processes; provenance and account identity | after G1 |
+| D1 to D4 | `SourceDefinition` catalog with independent capabilities; derive rosters in batches (stores and extraction; scheduler tasks; owner-rule kinds; search, status, display) | after G1, in parallel with G2 |
+| S1, K1 to K3 | Move shared machinery into the spine; then files, messaging and mail kits, one demonstrated duplication at a time | after D1 |
 
-| Step | What | Fixes | When |
-|---|---|---|---|
-| G1 | Admission gate for `embed` (scheduled and manual), `count`, `search`, `answer`; account binding; answer scope | A1, A2, A3, A6, A7 (search capability from family), lane 2 must-fix 2 | before the 1.5 candidate |
-| G2 | Gate for `extract` and `fetch`, egress rule; child hold at placement; epoch revocation | A8, A9, lane 3 grant revocation (replaces round 3's per-path rechecks) | before the 1.5 candidate |
-| D1 | `SourceDefinition` + catalog; synthetic source test; literal guard with allowlist frozen | stops new drift | right after 1.5 |
-| D2 to D5 | Derive rosters in batches: stores and extraction; scheduler; owner-rule kinds; search and status and display | the remaining ~70 findings | after 1.5, allowlist shrinks each batch |
-| K1 to K4 | One kit at a time (files, messaging, mail, library): move duplicated connector code into the kit, connectors shrink toward ~300 lines | duplication | after D1, in parallel with D2 to D5 |
+## Still open
 
-G1 and G2 replace the point fixes A1 to A9 and lane 2's Part C. The work
-is about the same size as nine point fixes, but it removes the cause, so
-none of it is thrown away by D1 to D5. Lane 3's round 3 keeps its five
-non-revocation fixes; its revocation design becomes G2's epoch.
-
-## Open questions for reviewers
-
-1. Is one gate compiled to a set-based store filter fast enough on the
-   search hot path (24 stores, ~1M items on the owner's box), or must
-   `search` keep a separate pre-compiled filter that the gate merely owns?
-2. Is the stage list complete? Anything that reads content and is not
-   fetch, extract, embed, search, answer or count (export? the deep read?
-   people index? relay?)
-3. Does draining in-flight work on revoke risk a stall (a long deep read
-   holding an old epoch)? Should revoke cancel instead of wait past a bound?
-4. Is four scope kinds enough (Evernote notebooks as paths; Apple Notes?
-   X lists?), or does `ScopeModel` need a fifth?
-5. Should G1 and G2 really precede the candidate, or is the risk of a new
-   gate on every path in the last days larger than the nine point fixes'?
-6. Are the four kits the right cut? Where should Evernote and archive imports sit? Is anything placed in a kit that belongs in the spine, or vice versa?
-7. Anything in this draft that re-creates a per-source branch under another
-   name (for example `scope.kind` becoming a proxy for "is Gmail")?
+1. Cost: the reviews give no size for G1 to K3; each step is sized when it
+   is briefed.
+2. Whether G0 shadow verdicts ship in 1.5 depends on the parity tests being
+   green with no hot-path cost; otherwise G0 lands right after.
