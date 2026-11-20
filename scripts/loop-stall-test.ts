@@ -22,7 +22,7 @@
  * empty and may only shrink. Synthetic data and loopback stub HTTP only.
  */
 import { createHash } from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, writeFileSync, writeSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, write, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { join, resolve, relative } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { Database } from 'bun:sqlite';
@@ -397,13 +397,45 @@ export function summarizeBeats(role: Role, beats: readonly Beat[], samples: read
   };
 }
 
+/**
+ * Appends lines to a file off the event loop: each write runs on the thread pool, one at a time, in order. The probe's
+ * own beat log was a synchronous write on the measured loop, and on a journal under fsync pressure that write parked
+ * the front for 1 to 3 s (GitHub runner, 40M throttle, 20 Nov 2026: "write front.beats.jsonl" was the whole wait in
+ * every front hold), so the gate measured its own probe. `drainSync` writes what is left once nothing is in flight.
+ */
+export class OffLoopAppender {
+  private queue: string[] = [];
+  private writing = false;
+  private onIdle: (() => void) | undefined;
+  constructor(private readonly fd: number) {}
+  append(line: string): void { this.queue.push(line); this.pump(); }
+  private pump(): void {
+    if (this.writing) return;
+    if (!this.queue.length) { const idle = this.onIdle; this.onIdle = undefined; idle?.(); return; }
+    const data = Buffer.from(this.queue.join('')); this.queue = [];
+    this.writing = true;
+    const writeAll = (offset: number) => write(this.fd, data, offset, data.length - offset, null, (error, written) => {
+      if (!error && offset + written < data.length) return writeAll(offset + written);
+      this.writing = false;
+      this.pump();
+    });
+    writeAll(0);
+  }
+  /** Runs `then` once every queued line is in the file. */
+  whenIdle(then: () => void): void {
+    if (!this.writing && !this.queue.length) return then();
+    this.onIdle = then;
+  }
+}
+
 /** Preloaded in the engine subprocess so both clocks run during startup. */
 export function measureEngine(role: Role, path: string, cpuPath: string,
   samplingProfilerStackTraces?: () => { traces?: CpuTraces; sources?: CpuSources },
 ) {
   // The harness drains this profiler itself so it can keep each sample's beat.
   process.env.OLYMPUS_CPU_SAMPLE_LOG = 'off';
-  const fd = openSync(`${path}.beats.jsonl`, 'w', 0o600);
+  const beatLog = new OffLoopAppender(openSync(`${path}.beats.jsonl`, 'a', 0o600));
+  const cpuLog = new OffLoopAppender(openSync(cpuPath, 'a', 0o600));
   let expected = performance.timeOrigin + BEAT_MS;
   let lastFlush = nowMs();
   let readyAt: number | undefined;
@@ -411,7 +443,7 @@ export function measureEngine(role: Role, path: string, cpuPath: string,
   let flushRequested = false;
   const record = (now: number) => {
     const beat = { startMs: Math.min(expected, now), endMs: now };
-    writeSync(fd, JSON.stringify(beat) + '\n');
+    beatLog.append(JSON.stringify(beat) + '\n');
     pending.push(beat);
     expected = now + BEAT_MS;
   };
@@ -448,8 +480,8 @@ export function measureEngine(role: Role, path: string, cpuPath: string,
       ...summarizeCpuSamples(Number.isFinite(newest) ? tracesInStalls(traces, stalled, offset) : [], undefined, sources),
     };
     const at = new Date(now).toISOString();
-    appendFileSync(cpuPath, JSON.stringify({ at, pid: process.pid, role, windowMs: Math.round(now - lastFlush), headroom: controlPathHeadroom.snapshot(),
-      ...summarizeCpuSamples(traces, undefined, sources), freezes, beat_sites }) + '\n', { mode: 0o600 });
+    cpuLog.append(JSON.stringify({ at, pid: process.pid, role, windowMs: Math.round(now - lastFlush), headroom: controlPathHeadroom.snapshot(),
+      ...summarizeCpuSamples(traces, undefined, sources), freezes, beat_sites }) + '\n');
     if (freezes.count) console.error(freezeLogLine(at, role, freezes));
     lastFlush = now;
   };
@@ -458,8 +490,11 @@ export function measureEngine(role: Role, path: string, cpuPath: string,
     record(now);
     if (flushRequested) {
       flush(now);
-      // The last measured tick precedes the shutdown-only profiler work.
-      writeFileSync(`${path}.sampled`, String(now), { mode: 0o600 });
+      // The last measured tick precedes the shutdown-only profiler work. The harness kills the engine once this file
+      // exists, so it is written only after both logs hold every line.
+      // No beat after this one is read (stoppedAt is this tick), and new beats would keep the log from going idle.
+      clearInterval(timer);
+      beatLog.whenIdle(() => cpuLog.whenIdle(() => writeFileSync(`${path}.sampled`, String(now), { mode: 0o600 })));
     } else if (now - lastFlush >= CPU_FLUSH_MS) flush(now);
   };
   let timer = setInterval(tick, BEAT_MS).unref();
