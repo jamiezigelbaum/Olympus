@@ -228,8 +228,7 @@ export interface SourceIndexCorpusSearchAdapter {
    */
   prepareSemantic?: (query: string, budgetMs: number) => Promise<void>;
   hybridAvailability?: (request: SourceIndexCorpusSearchRequest) => SourceIndexHybridAvailability;
-  // A first visibility build worth waiting for. Settles on success, failure, or retirement.
-  visibilityStartup?: () => Promise<void> | undefined;
+  pinVectorSearchReadiness?: () => void;
   /**
    * The corpus's nearest semantic neighbours of the query, nearest first,
    * whatever their similarity: no relevance bar vets them, so they are never
@@ -1243,9 +1242,19 @@ export function resolveLaneTimeoutMs(explicit: number | undefined): number {
   return parsed;
 }
 
+export function pinSourceIndexSearchReadiness(
+  registry: SourceIndexCorpusRegistry,
+  adapters: SourceIndexRouterAdapterMap,
+  request: Pick<SourceIndexSearchRequest, 'context' | 'corpusIds' | 'families'>,
+): void {
+  for (const corpus of registry.list()) {
+    if (!skipReasonForCorpus(corpus, request)) adapters[corpus.corpusId]?.pinVectorSearchReadiness?.();
+  }
+}
+
 function skipReasonForCorpus(
   corpus: SourceIndexCorpusDefinition,
-  request: SourceIndexSearchRequest,
+  request: Pick<SourceIndexSearchRequest, 'context' | 'corpusIds' | 'families'>,
 ): SourceIndexSkippedCorpusReason | undefined {
   if (!corpusMatchesRequestedSelection(corpus, request)) return 'not_requested';
   if (!request.context.allowedTrustDomains.includes(corpus.trustDomain)) return 'trust_domain_not_allowed';

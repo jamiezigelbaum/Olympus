@@ -103,7 +103,6 @@ export interface LocalPrivateAnswersOptions {
   /** Opens a local file (macOS `open`, checked by the caller). Absent: local files do not open. */
   openFile?: (path: string, eligible: () => Promise<boolean>) => Promise<void>;
   now?: () => number;
-  startup?: () => StartupProgress | undefined;
   /** A live panel claim suppresses the fallback until that panel's job expires. */
   panelClaimed?: (ref: WaitingQuestionRef) => boolean;
   interactiveBusy?: () => boolean;
@@ -261,7 +260,6 @@ export function inboxEvidenceIdentity(item: PrivateEvidenceItem): PrivateEvidenc
 
 export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): LocalPrivateAnswers {
   const now = options.now ?? Date.now;
-  const startupStatus = options.startup ?? startupProgress;
   const opens = new Map<string, OpenEntry>();
   let running = false;
   let runningDestination: 'computer' | 'venice' = 'computer';
@@ -425,7 +423,7 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
       try {
         const listed = store()?.list({ includeResults: false });
         if (!listed) return undefined;
-        const startup = startupStatus();
+        const startup = startupProgress();
         return { questions: listed.questions.filter(q => active(q) && !hidden(q) && (q.path !== 'anonymous' || q.hasResult || q.result)).map(q => ({
           id: q.id, path: q.path ?? 'private', question: q.question, from: options.connectionName?.(q.connectionId)?.trim() || (q.surface === 'chatgpt' ? 'ChatGPT' : 'An agent'),
           askedAt: q.askedAt, unchecked: q.state === 'unchecked', unread: !q.seen, ...failureReason(q),
@@ -474,11 +472,7 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
           try {
             const request = { question, stillAuthorized: () => !closed && (!ref || !!currentStore?.get(ref.id) && currentStore.get(ref.id)?.generation === ref.generation), detail: body.detail === 'full' ? 'full' as const : 'summary' as const };
             let result: LocalAnswerResult;
-            try {
-              result = venice
-                ? await options.veniceAnswer!(request)
-                : await answerFor({ ...request, ...(options.startup ? { signal: abort.signal } : {}) });
-            } catch { result = { status: 'failed' }; }
+            try { result = venice ? await options.veniceAnswer!(request) : await answerFor(request); } catch { result = { status: 'failed' }; }
             if (result.status === 'answered') {
               const check = await eligible(result.read);
               if (check !== 'eligible' || (!venice && (result.secretLocations?.length ?? 0) > 0 && options.eligibleSecrets?.(request, result.secretLocations!) !== true)) {
@@ -501,7 +495,7 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
         if (!q || !current(q)) return refused(410, 'gone', 'That answer was deleted');
         if (!q.result) {
           const status = q.path === 'venice' && q.answeredAt ? 'changed' : q.state === 'unchecked' ? 'unchecked' : q.attempts ? 'retrying' : q.nextAttemptAt > now() || options.backgroundBusy?.() ? 'queued' : 'answering';
-          const startup = status === 'changed' ? undefined : startupStatus();
+          const startup = status === 'changed' ? undefined : startupProgress();
           return { status: 200, body: { ok: true, status, ...(startup ? { startup } : {}) } };
         }
         if (q.result.status === 'withdrawn' || q.result.status === 'failed') return { status: 200, body: { ok: true, generation: q.generation, ...answerBody(q.result, session, q) } };
@@ -514,7 +508,7 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
           const fresh = store()?.get(q.id);
           const withdrawn = fresh?.result;
           if (withdrawn?.status === 'withdrawn') return { status: 200, body: { ok: true, generation: fresh!.generation, ...answerBody(withdrawn, session) } };
-          const startup = q.path === 'venice' ? undefined : startupStatus();
+          const startup = q.path === 'venice' ? undefined : startupProgress();
           return { status: 200, body: { ok: true, status: q.path === 'venice' ? 'changed' : 'answering', ...(startup ? { startup } : {}) } };
         }
         return { status: 200, body: { ok: true, generation: q.generation, ...answerBody(q.result, session, q), ...(q.path === 'anonymous' ? { sent: q.question } : {}) } };

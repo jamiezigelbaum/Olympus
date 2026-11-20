@@ -936,7 +936,11 @@ export class TierLedger {
     return sqliteSchemaUsable(this.db, TIER_LEDGER_SQLITE_STORE_ID, TIER_LEDGER_SCHEMA_VERSION);
   }
 
+  private closed = false;
+  get isClosed(): boolean { return this.closed; }
+
   close(options?: SqliteCloseOptions): void {
+    this.closed = true;
     try {
       closeSqliteStore(this.db, this.readOnly ? { checkpoint: false, readOnly: true } : options);
     } finally {

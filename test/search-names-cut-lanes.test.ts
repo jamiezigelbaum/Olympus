@@ -12,10 +12,12 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
+import type { OperationContext } from '../src/core/operations.ts';
 import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';
 import { laneTimeoutGap, recentItemsTimeoutGap, SEMANTIC_SEARCH_STARTING, semanticStartupGap, semanticTimeoutGap, visibilityCheckTimeoutGap } from '../src/core/source-index/partial-search.ts';
 import { LocalConnectorStore, createConnectorStoreContentProvider, createConnectorStoreCorpusAdapter, defineConnectorCorpus } from '../src/workers/connector-store/index.ts';
 import { OffThreadReadBusyError, setReadPoolClockForTests, setReadPoolObserverForTests } from '../src/workers/connector-store/off-thread-reads.ts';
+import { callChatGptTool } from '../src/workers/chatgpt/mcp-surface.ts';
 import { searchToolResult } from '../src/workers/chatgpt/response-builder.ts';
 import { searchReleasedEvidence } from '../src/workers/source-index/analyst-answer.ts';
 import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
@@ -150,11 +152,11 @@ describe('olympus_search names every lane it cut short', () => {
     expect(notes(full).join(' ')).not.toContain('Ran out of time');
   });
 
-  test('released evidence search and the ChatGPT result name a deferred vector lane', async () => {
+  test('released evidence search and the ChatGPT and Claude tools name a deferred vector lane', async () => {
     const store = await noteStore();
     store.deferVectorSearchUntilVisibilityBuilt();
     try {
-      const raw = await searchReleasedEvidence({
+      const evidenceSearch = () => searchReleasedEvidence({
         releaseCheck: provedReleaseCheck, question: 'orchard', maxResults: 10,
         lanes: () => ({
           registry: buildSourceIndexCorpusRegistry([defineConnectorCorpus({ corpusId: READ, family: 'file', trustDomain: 'internal' })]),
@@ -162,13 +164,23 @@ describe('olympus_search names every lane it cut short', () => {
           contentProviders: { [READ]: createConnectorStoreContentProvider({ store }) },
         }),
       });
+      const raw = await evidenceSearch();
       const note = semanticStartupGap(READ);
       expect(raw.evidence.length).toBeGreaterThan(0);
       expect(raw.coverage.cut_short).toEqual([note]);
-      const result = searchToolResult(raw);
-      expect(notes(result)).toContain(note);
-      expect(result.content[0]!.text).toContain(note);
-      expect(JSON.stringify(result)).not.toContain(SEMANTIC_SEARCH_STARTING);
+      for (const host of ['chatgpt', 'claude'] as const) {
+        const result = await callChatGptTool('olympus_search', { question: 'orchard' },
+          { releaseCheck: provedReleaseCheck } as OperationContext, {
+            evidenceSearch,
+            privateMatchProbe: async () => false,
+            dashboardView: async () => { throw new Error('a search with hits needs no dashboard'); },
+            ...(host === 'claude' ? { appClient: { host, connectorUrl: 'https://olympus.example/mcp' } } : {}),
+          });
+        expect(result.isError).toBeFalsy();
+        expect(notes(result).filter(line => line === note)).toHaveLength(1);
+        expect(result.content[0]!.text.split(note)).toHaveLength(2);
+        expect(JSON.stringify(result)).not.toContain(SEMANTIC_SEARCH_STARTING);
+      }
     } finally { store.close(); }
   });
 });

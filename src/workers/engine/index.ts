@@ -278,6 +278,7 @@ import {
   logSourceWorkerInternalError,
   scrubSourceWorkerLogMessage,
 } from './http/source-answer-runtime.ts';
+import { withVectorSearchRequestScope } from '../../core/source-index/keyword-context.ts';
 import { parseDropboxSourceExportRequest, parseDropboxEvalShardExportRequest } from './http/dropbox-export-requests.ts';
 import {
   sourceWatchNotSupported,
@@ -3565,7 +3566,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           assertSourceIndexSearchQuery(record.query);
           const corpusId = canonicalRequestCorpusId(record);
           const connectorStore = corpusId ? connectorStoresByCorpusId.get(corpusId) : undefined;
-          if (connectorStore) {
+          if (connectorStore) return await withVectorSearchRequestScope(async () => {
             const searchConnectorStore = async (store: LocalConnectorStore) => {
               const mandatoryScope = connectorStoreReadScope?.(store);
               if (mandatoryScope?.allowed === false) return undefined;
@@ -3640,15 +3641,6 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 },
               };
             };
-            const primary = await searchConnectorStore(connectorStore);
-            if (!primary) {
-              throw new EmailSourceWorkerError(
-                403,
-                'source_index_policy_violation',
-                'This file source is unavailable until its folder scope is approved for the connected account.',
-              );
-            }
-            const searchRequest = primary.searchRequest;
             // Every tier of the named source (design section 5), unless the
             // caller pinned this one corpus with `all_tiers: false`. A sibling
             // that does not exist yet (an on-demand Public store) or whose
@@ -3662,6 +3654,18 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                   const sibling = connectorStoresByCorpusId.get(siblingCorpusId);
                   return sibling && sibling !== connectorStore ? [sibling] : [];
                 });
+            for (const store of [connectorStore, ...siblings]) {
+              if (connectorStoreReadScope?.(store)?.allowed !== false) void store.vectorSearchDeferred;
+            }
+            const primary = await searchConnectorStore(connectorStore);
+            if (!primary) {
+              throw new EmailSourceWorkerError(
+                403,
+                'source_index_policy_violation',
+                'This file source is unavailable until its folder scope is approved for the connected account.',
+              );
+            }
+            const searchRequest = primary.searchRequest;
             const siblingRuns: Array<NonNullable<Awaited<ReturnType<typeof searchConnectorStore>>>> = [];
             for (const sibling of siblings) {
               const run = await searchConnectorStore(sibling);
@@ -3810,7 +3814,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             };
             assertNoRawEmailFields(safeResult);
             return json(safeResult);
-          }
+          });
           if (!corpusId) {
             throw new EmailSourceWorkerError(
               400,

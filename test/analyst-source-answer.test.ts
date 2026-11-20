@@ -3808,10 +3808,10 @@ test('unfinished keyword preparation is named in the released answer and coverag
   expect(result.audit.retrieval_degradations).toContainEqual(expect.objectContaining({ lane_name: `${INTERNAL}:keywords`, detail: 'keyword_preparation_incomplete' }));
 });
 
-test.each([true, false])('a non-public Analyst answer keeps the startup coverage note (cites evidence: %s)', async (cited) => {
-  const lanes = lanesFixture({ internal: ['ready'] });
+test.each([true, false])('a non-public Analyst answer keeps coverage from a keyword expansion after the literal times out (cites evidence: %s)', async (cited) => {
+  const lanes = lanesFixture({ internal: ['ready', 'second'] });
   const adapter = lanes.adapters[INTERNAL]!;
-  lanes.adapters = { ...lanes.adapters, [INTERNAL]: async request => ({
+  lanes.adapters = { ...lanes.adapters, [INTERNAL]: async request => request.query === 'fixture' ? new Promise(() => {}) : ({
     ...await adapter(request),
     laneAudits: [{
       laneName: `${INTERNAL}:connector_store_vector`, laneType: 'semantic',
@@ -3821,14 +3821,19 @@ test.each([true, false])('a non-public Analyst answer keeps the startup coverage
   const { analyst, calls } = scriptedAnalyst(cited
     ? citingFirstCandidate('Available evidence.', 'Available evidence.')
     : () => ({ answer: 'No evidence supports an answer.', citations: [], unanswered: [] }));
-  const result = await createAnalystSourceIndexAnswerHandler({ analyst, lanes: () => lanes })
+  const result = await createAnalystSourceIndexAnswerHandler({
+    analyst, lanes: () => lanes, laneTimeoutMs: 20, queryPlanner: async () => ['expansion'],
+    reranker: { id: 'fixture', localOnly: true, poolSize: 4, score: async () => { throw new Error('rerank failed'); } },
+  })
     .answer({ question: 'fixture', include_internal: true, corpus_id: INTERNAL });
   const note = semanticStartupGap(INTERNAL);
   expect(calls[0]?.pack.coverage.extractionGaps).toContain(note);
   expect(result.answer.split(note)).toHaveLength(2);
-  expect(result.answer).not.toContain(SEMANTIC_SEARCH_STARTING);
+  expect(result.answer.split(RERANK_FALLBACK_GAP)).toHaveLength(2);
+  expect(result.answer).not.toContain('raw filenames, paths, and source content were withheld');
+  expect(JSON.stringify(result)).not.toContain(SEMANTIC_SEARCH_STARTING);
   expect(result.audit.retrieval_degradations).toContainEqual(expect.objectContaining({
-    lane_name: `${INTERNAL}:semantic`, reason: 'semantic_lane_skipped', detail: SEMANTIC_SEARCH_STARTING,
+    lane_name: INTERNAL, reason: 'lane_timeout',
   }));
 });
 

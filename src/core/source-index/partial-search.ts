@@ -32,8 +32,14 @@ export const SEMANTIC_SEARCH_STARTING = 'search_starting';
 export const STARTUP_SEARCH_GAP = 'Olympus was still starting when you asked, so the search took longer.';
 export const RERANK_FALLBACK_GAP = 'The search could not reorder results by relevance this time because that step did not finish. The best source may be missing, and asking again may help.';
 
+const SEMANTIC_STARTUP_SUFFIX = ': search by meaning is still starting; only keyword matches were searched, so related items may be missing.';
+
 export function semanticStartupGap(corpusId: string): string {
-  return `${corpusId}: search by meaning is still starting; only keyword matches were searched, so related items may be missing.`;
+  return corpusId + SEMANTIC_STARTUP_SUFFIX;
+}
+
+export function isSemanticStartupGap(gap: string): boolean {
+  return gap.endsWith(SEMANTIC_STARTUP_SUFFIX);
 }
 
 /** Preserve the fixed note even when a keyword timeout also left this corpus incomplete. */

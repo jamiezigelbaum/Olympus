@@ -25,7 +25,7 @@ import { unreadHoldDisposition, type UnreadHoldDisposition } from '../file-extra
 import type { ItemExtractionOutcome, ExtractionUnreadableItem } from '../file-extraction/job-store.ts';
 import { jobLedgerPathsToVisit, oweExtractionRereadAfterRevive } from '../file-extraction/job-names.ts';
 import { CHILD_ITEM_ID_SEPARATOR } from '../../core/child-item-id.ts';
-import { keywordAlternatives, withKeywordAlternatives, keywordExpansionDisabled, withKeywordExpansionDisabled } from '../../core/source-index/keyword-context.ts';
+import { keywordAlternatives, withKeywordAlternatives, keywordExpansionDisabled, withKeywordExpansionDisabled, requestVectorSearchDeferred, withVectorSearchRequestScope } from '../../core/source-index/keyword-context.ts';
 import { lastKeywordLanguages, storeKeywordLanguages, storeKeywordLanguagesWith } from '../../core/source-index/keyword-languages.ts';
 import { expandSourceIndexKeywords, keywordPrepareWaitMs, withExpandedSourceIndexKeywords } from '../../core/source-index/keyword-expansion.ts';
 import { RECENT_ITEMS_CUT_SHORT, SEMANTIC_SEARCH_STARTING } from '../../core/source-index/partial-search.ts';
@@ -1331,8 +1331,8 @@ interface HiddenChildParent {
 }
 
 interface HiddenChildBuild {
-  current?: () => boolean;
-  unavailable?: boolean;
+  lane?: ChildVisibilityLane;
+  memo?: HiddenChildMemo;
 }
 
 interface HiddenChildMemo {
@@ -4330,7 +4330,6 @@ export class LocalConnectorStore {
       // The read pool's connections to this file go with the store, and so
       // do its waiting queries.
       this.closedForPoolReads = true;
-      this.finishVectorSearchWait();
       if (offThreadReadsSupported(this.dbPath)) releaseOffThreadReads(this.dbPath);
       closeSqliteStore(this.db, this.readOnly ? { checkpoint: false, readOnly: true }
         : buildingRecencyIndex ? { checkpoint: false } : undefined);
@@ -4993,46 +4992,49 @@ export class LocalConnectorStore {
    * front start rebuilt it from the ledger (gate 1, ops#151: about 59 s).
    */
   async keepVisibilityCurrentInTurns(): Promise<void> {
-    const admission = this.vectorSearchAdmission;
-    const childBuild: HiddenChildBuild | undefined = admission ? {} : undefined;
-    let completed = false;
+    const build: HiddenChildBuild | undefined = this.frontVectorSearch ? {} : undefined;
     try {
-      await this.tierHiddenItemPksInTurns(childBuild);
+      await this.tierHiddenItemPksInTurns(build);
       if (!this.readOnly) await this.publishVisibility();
-      if (admission && admission === this.vectorSearchAdmission && !this.closedForPoolReads) {
-        if (childBuild?.current?.()) {
-          this.finishVectorSearchWait();
-          this.vectorSearchAdmission = undefined;
-        } else if (childBuild?.unavailable) {
-          this.finishVectorSearchWait();
-        }
-      }
-      completed = true;
-    } finally {
-      if (!completed && admission === this.vectorSearchAdmission) this.finishVectorSearchWait();
+      if (this.frontVectorSearch) this.frontVectorSearch.built =
+        build?.memo && this.visibilityBuildCurrent(build) ? build : undefined;
+    } catch (error) {
+      if (this.frontVectorSearch) this.frontVectorSearch.built = undefined;
+      throw error;
     }
   }
 
-  private vectorSearchAdmission: { waiter?: ReturnType<typeof Promise.withResolvers<void>> } | undefined;
-
-  private finishVectorSearchWait(): void {
-    const admission = this.vectorSearchAdmission;
-    admission?.waiter?.resolve();
-    if (admission) delete admission.waiter;
-  }
+  private frontVectorSearch?: { built?: HiddenChildBuild | undefined };
 
   /** Called by the split front when it mounts this handle. */
   deferVectorSearchUntilVisibilityBuilt(): void {
-    this.vectorSearchAdmission ??= { waiter: Promise.withResolvers<void>() };
+    this.frontVectorSearch ??= {};
+  }
+
+  private visibilityBuildCurrent(build: HiddenChildBuild): boolean {
+    const { memo, lane } = build;
+    const installed = this.hiddenChildMemo;
+    if (!memo || this.closedForPoolReads || this.childLane !== lane
+      || installed?.ledger !== memo.ledger || installed.storeCursors.size !== memo.storeCursors.size
+      || this.tierLedgerHiddenMemo?.ledger !== memo.ledger) return false;
+    const current = this.childVisibilityLane();
+    const members = current.mountedStores?.() ?? current.stores();
+    return !memo.ledger.isClosed && current.ledger() === memo.ledger && this.visibilityLedger() === memo.ledger
+      && members.length === memo.storeCursors.size
+      && members.every(store => store instanceof LocalConnectorStore && !store.closedForPoolReads
+        && memo.storeCursors.has(store) && installed.storeCursors.has(store));
   }
 
   get vectorSearchDeferred(): boolean {
-    return this.vectorSearchAdmission !== undefined;
-  }
-
-  /** A failed build leaves vectors deferred but clears the wait for Ask. */
-  get vectorSearchStartup(): Promise<void> | undefined {
-    return this.vectorSearchAdmission?.waiter?.promise;
+    const front = this.frontVectorSearch;
+    if (!front) return false;
+    return requestVectorSearchDeferred(this, () => {
+      try {
+        if (front.built && this.visibilityBuildCurrent(front.built)) return false;
+      } catch { /* An unavailable lane needs a new successful build. */ }
+      front.built = undefined;
+      return true;
+    });
   }
 
   private tierLedgerHiddenState: TierVisibilityMemo | undefined;
@@ -6407,10 +6409,7 @@ export class LocalConnectorStore {
    * the original parent walk; a yielded build never publishes a stale stamp.
    */
   private *hiddenChildReadSteps(build?: HiddenChildBuild): Generator<VisibilityRead, number[], unknown> {
-    if (!this.childItemColumnsPresent) {
-      if (build) build.current = () => true;
-      return [];
-    }
+    if (!this.childItemColumnsPresent) return [];
     const configuredLane = this.childLane;
     const lane = this.childVisibilityLane();
     const prior = this.hiddenChildMemo;
@@ -6423,7 +6422,6 @@ export class LocalConnectorStore {
       const members = lane.stores();
       if (!ledger || this.visibilityLedger() !== ledger
         || !members.includes(this) || !members.every(store => store instanceof LocalConnectorStore && store.visibilityFeedPresent)) {
-        if (build) build.unavailable = true;
         this.hiddenChildMemo = undefined;
         return yield* this.hiddenChildFullReadSteps();
       }
@@ -6443,8 +6441,8 @@ export class LocalConnectorStore {
         ledgerChanges = ledger.visibilityChangesSince(same ? prior.ledgerCursor : undefined);
         for (const store of stores) storeChanges.set(store, store.itemVisibilityChangesSince(same ? prior.storeCursors.get(store) : undefined));
       }
-    } catch {
-      if (build) build.unavailable = true;
+    } catch (error) {
+      if (build) throw error;
       this.hiddenChildMemo = undefined;
       return yield* this.hiddenChildFullReadSteps();
     }
@@ -6511,7 +6509,10 @@ export class LocalConnectorStore {
       stable = lane.ledger() === ledger && this.visibilityLedger() === ledger
         && current.length === stores.length && stores.every(store => current.includes(store)
           && store.visibilityFeedPresent);
-    } catch { /* An unverifiable build is never installed. */ }
+    } catch (error) {
+      if (build) throw error;
+      // An unverifiable build is never installed.
+    }
     if (!stable) {
       // Counts retain their start-of-build semantics. The next read consumes
       // every intervening change; off-thread people reads check the lane marker.
@@ -6552,18 +6553,11 @@ export class LocalConnectorStore {
       }
       if (entry.hidden) memo.hiddenParents.set(key, [...entry.children.values()].flat());
     }
-    const installed = { ...memo, ledgerCursor: ledgerChanges.cursor,
+    this.hiddenChildMemo = { ...memo, ledgerCursor: ledgerChanges.cursor,
       storeCursors: new Map(stores.map(store => [store, storeChanges.get(store)!.cursor])) };
-    this.hiddenChildMemo = installed;
     if (build) {
-      const tierLedger = this.tierLedgerHandle;
-      const boundLedger = this.boundLedgerHandle;
-      build.current = () => {
-        if (this.childLane !== configuredLane || this.tierLedgerHandle !== tierLedger || this.boundLedgerHandle !== boundLedger) return false;
-        const current = lane.stores();
-        return this.hiddenChildMemo === installed && current.length === stores.length
-          && stores.every(store => current.includes(store) && !store.closedForPoolReads);
-      };
+      build.memo = this.hiddenChildMemo;
+      if (configuredLane) build.lane = configuredLane;
     }
     return [...memo.hiddenParents.values()].flat();
   }
@@ -18301,19 +18295,23 @@ export function createConnectorStoreCorpusAdapter(
       rawExposed: false,
     };
   };
-  const expanded: SourceIndexCorpusSearchAdapter = (request) => {
+  const pinVectorSearchReadiness = () => { if (embeddingProvider) void store.vectorSearchDeferred; };
+  const expanded: SourceIndexCorpusSearchAdapter = (request) => withVectorSearchRequestScope(() => {
     const timing = beginSourceAnswerStoreTiming();
     assertConnectorStoreCorpusRequest(store, request);
+    pinVectorSearchReadiness();
     const response = withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), () => adapter(request, timing?.stages), store);
     return timing ? response.then((result) => {
       timing.finish();
       return result;
     }) : response;
-  };
-  expanded.metadataMatches = (request) => {
+  });
+  expanded.metadataMatches = (request) => withVectorSearchRequestScope(() => {
     assertConnectorStoreCorpusRequest(store, request);
+    pinVectorSearchReadiness();
     return withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), () => metadataMatches(request), store);
-  };
+  });
+  expanded.pinVectorSearchReadiness = pinVectorSearchReadiness;
   expanded.selectedItemServable = (sourceItem) => store.selectedItemServable(sourceItem, options.accountScope, filters);
   expanded.prepareKeywords = async (query) => {
     const status = { incomplete: false };
@@ -18322,10 +18320,6 @@ export function createConnectorStoreCorpusAdapter(
   };
   expanded.hybridAvailability = adapter.hybridAvailability;
   expanded.semanticNeighbours = adapter.semanticNeighbours;
-  if (embeddingProvider?.backend === 'local' && options.retrievalMode !== 'keyword'
-    && (store.trustDomain !== 'secure_local' || isApprovedSecureSourceEmbeddingProvider(embeddingProvider))) {
-    expanded.visibilityStartup = () => store.vectorSearchStartup;
-  }
   // A local model that is still starting gets the router's preparation budget
   // to finish before the vector lane runs (#1172). Only when this adapter will
   // run the vector lane for the request, and without reading the store: the
@@ -19293,7 +19287,7 @@ export function createConnectorStoreContentProvider(
   let storeHasVectors: boolean | undefined;
   const queryVector = async (query: string | undefined): Promise<readonly number[] | undefined> => {
     const text = query?.trim();
-    if (!embeddingProvider || !text || store.vectorSearchDeferred) return undefined;
+    if (!embeddingProvider || !text) return undefined;
     try {
       storeHasVectors ??= store.vectorLaneServable(embeddingProvider.modelId);
       if (!storeHasVectors) return undefined;
@@ -19327,6 +19321,7 @@ export function createConnectorStoreContentProvider(
           + `refused a ${request.trustDomain} content request.`,
         );
       }
+      const deferred = embeddingProvider && store.vectorSearchDeferred;
       return withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), async () => {
       const localItemId = request.provenance.sourceItem.localItemId.trim();
       if (!localItemId) return undefined;
@@ -19361,7 +19356,7 @@ export function createConnectorStoreContentProvider(
       }
       const anchorChunkIndex = request.provenance.chunk?.chunkIndex;
       const anchorLane = request.provenance.chunk?.span?.lane;
-      const vector = await queryVector(request.query);
+      const vector = deferred ? undefined : await queryVector(request.query);
       const content = store.localContent(localItemId, request.maxChars, {
         ...(request.query?.trim() ? { query: request.query } : {}),
         ...(request.maxPassages !== undefined ? { maxPassages: request.maxPassages } : {}),

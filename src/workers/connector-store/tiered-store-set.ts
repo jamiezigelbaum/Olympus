@@ -376,6 +376,7 @@ export class TieredStoreSet {
   private readonly childLane: ChildVisibilityLane = {
     ledger: () => this.ledger,
     stores: () => this.openStores(),
+    mountedStores: () => [...this.legs.values()].flatMap(leg => leg.store ? [leg.store] : []),
   };
 
   /** Syncs in flight: the sweep never works while one is. */

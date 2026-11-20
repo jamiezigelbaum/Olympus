@@ -360,6 +360,8 @@ export interface ChildVisibilityStore {
 export interface ChildVisibilityLane {
   ledger(): TierLedger | undefined;
   stores(): readonly ChildVisibilityStore[];
+  /** Checks membership without opening any new legs. */
+  mountedStores?(): readonly ChildVisibilityStore[];
 }
 
 // An awaited judgment spans store and ledger reads. Prove nothing changed

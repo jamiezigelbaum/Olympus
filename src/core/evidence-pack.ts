@@ -57,6 +57,7 @@ import {
   withReservedRecencySeats,
 } from './source-index/retrieval.ts';
 import {
+  pinSourceIndexSearchReadiness,
   resolveLaneTimeoutMs,
   routeSourceIndexSearch,
   routedHitCandidateId,
@@ -858,9 +859,7 @@ const MAX_SEARCH_QUERIES = 3;
 // Routed-search slice the pack builder consumes. With a single query this IS
 // the router response (byte-identical to the pre-planner path); with planned
 // queries the hits are RRF-fused across one lane per query, lane audits are
-// concatenated across runs, and coverage comes from the first run (corpus
-// eligibility depends on the context, not the query text, so run 1 is
-// representative).
+// concatenated across runs, and coverage includes corpora searched by any run.
 type RoutedSearchSlice = Pick<
   SourceIndexRoutedSearchResponse,
   'hits' | 'searchedCorpora' | 'skippedCorpora' | 'laneAudits' | 'degradations' | 'matchCounts'
@@ -911,6 +910,7 @@ function selectedItemsToRoutedSlice(input: BuildEvidencePackInput): RoutedSearch
 
   const secureLaneAudits: RetrievalLaneAudit[] = [];
   for (const corpusId of searched) {
+    input.adapters[corpusId]?.pinVectorSearchReadiness?.();
     const audit: RetrievalLaneAudit = {
       laneName: `${corpusId}:selected_evidence`,
       laneType: 'metadata',
@@ -960,7 +960,11 @@ async function runRoutedSearches(
   poolAllocation?: { storeDepth: number; semanticSeats?: number },
 ): Promise<RoutedSearchSlice> {
   const literalQuery = literalSearchQuery(input);
-  // Kicked off BEFORE the literal search so the two overlap rather than queue.
+  // A planner can yield before routing. Pin the same in-scope stores first.
+  if (input.queryPlanner) pinSourceIndexSearchReadiness(input.registry, input.adapters, {
+    context: input.searchContext,
+    ...(input.corpusIds ? { corpusIds: input.corpusIds } : {}),
+  });
   const pendingPlan = input.queryPlanner
     ? startQueryPlanner(input.queryPlanner, input.question)
     : undefined;
@@ -1001,7 +1005,7 @@ async function runRoutedSearches(
   return {
     hits: fused,
     ...(readWideEnabled() ? { matchingCandidateIds: [...new Set(runs.flatMap(run => run.matchingCandidateIds ?? []))] } : {}),
-    searchedCorpora: literalRun.searchedCorpora,
+    searchedCorpora: [...new Set(runs.flatMap(run => run.searchedCorpora))],
     // Coverage of WHICH corpora were eligible comes from run 1 (eligibility
     // depends on the context, not the query text). What each run LOST does
     // not: an expansion query that blew a corpus's deadline lost that corpus

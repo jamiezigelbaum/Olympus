@@ -42,7 +42,8 @@ import { namesOnlyCoverageNote } from '../../core/names-only-coverage.ts';
 import { runWithLocalInferenceGuard } from '../answer-activity.ts';
 import type { Analyst, AnalystCitation, AnalystOptions, AnalystResult, EvidenceCandidate, EvidencePack } from '../../core/contracts.ts';
 import { analystEvidenceFormat, analystPromptBytes, currentAnalystAbortSignal, noEvidenceAnalystResult, runWithAnalystAbortSignal, withPromptBudget, type AnalystEvidenceFormat } from '../../core/analyst.ts';
-import { partialSearchCoverageNotes, promptFitCoverageGap, RERANK_FALLBACK_GAP, semanticStartupCoverageNotes, STARTUP_SEARCH_GAP } from '../../core/source-index/partial-search.ts';
+import { withVectorSearchRequestScope } from '../../core/source-index/keyword-context.ts';
+import { isSemanticStartupGap, partialSearchCoverageNotes, promptFitCoverageGap, RERANK_FALLBACK_GAP, SEMANTIC_SEARCH_STARTING, semanticStartupCoverageNotes, STARTUP_SEARCH_GAP } from '../../core/source-index/partial-search.ts';
 import { OPENCLAW_DEFAULT_MODEL_LABEL, OPENCLAW_INFER_MAX_PROMPT_BYTES } from '../../core/analyst-openclaw-infer.ts';
 import {
   buildEvidencePackDetailed,
@@ -827,7 +828,7 @@ export function createAnalystSourceIndexAnswerHandler(
       const readContent = new Set(detail.pack.candidates.filter((candidate) => candidate.chunks.length > 0).map((candidate) => itemKey(candidate.provenance.sourceItem)));
       const readingOnly = stillReading > 0 && !analystResult.citations.some((citation) => readContent.has(itemKey(citation.provenance.sourceItem)));
       const fitNote = promptFitNotes.get(analystResult);
-      const readingNotes = [...onDemandNotes, ...releasedNotes.filter((note) => note === fitNote || note === RERANK_FALLBACK_GAP)];
+      const readingNotes = [...onDemandNotes, ...releasedNotes.filter((note) => note === fitNote || note === RERANK_FALLBACK_GAP || isSemanticStartupGap(note))];
       const answer = stillReading === 0
         ? heldAnswer
         : [onDemandReadingCoverageNote(stillReading), ...(readingOnly ? readingNotes : [heldAnswer])].join('\n\n');
@@ -864,6 +865,7 @@ export function createAnalystSourceIndexAnswerHandler(
         ...parentLabelReleaseInputs(detail.parentLabelDependencies ?? []),
         ...(followUp?.names ?? []),
       ], constraints: releaseConstraints });
+      const retrievalDegradations = detail.degradations.filter(gap => gap.detail !== SEMANTIC_SEARCH_STARTING);
       return {
         answer: deepReadNotice ? `${answer}\n\n${deepReadNotice}` : answer,
         ...(deepRead.job ? { deep_read: deepRead.job } : {}),
@@ -900,11 +902,12 @@ export function createAnalystSourceIndexAnswerHandler(
           // policy-denied empty pack, which no analyst route ever saw (its
           // audits are the content-free policy_filtered rewrite). The detail
           // keeps them all.
-          lane_audits: localOnly || policyDeniedEmptyPack
-            ? [...detail.laneAudits]
-            : withoutSecureLaneAudits(detail.laneAudits, detail.secureLaneAudits),
-          ...(detail.degradations.length > 0
-            ? { retrieval_degradations: detail.degradations.map(answerRetrievalDegradation) }
+          lane_audits: (localOnly || policyDeniedEmptyPack
+            ? detail.laneAudits
+            : withoutSecureLaneAudits(detail.laneAudits, detail.secureLaneAudits))
+            .filter(audit => !audit.skippedReason?.endsWith(SEMANTIC_SEARCH_STARTING)),
+          ...(retrievalDegradations.length > 0
+            ? { retrieval_degradations: retrievalDegradations.map(answerRetrievalDegradation) }
             : {}),
           ...((detail.corpusReadabilityGaps ?? []).length > 0
             ? {
@@ -961,7 +964,7 @@ export function createAnalystSourceIndexAnswerHandler(
         opsec,
       };
   };
-  return { answer: (request, local) => answerOnce(request, local, false) };
+  return { answer: (request, local) => withVectorSearchRequestScope(() => answerOnce(request, local, false)) };
 }
 
 // Whether the ask already names a scope: a narrowed ask gets no follow-up.
@@ -2804,7 +2807,7 @@ function sanitizeReleasedCoverageNotes(
 ): string[] {
   if (unanswered.length === 0) return [];
   if (!nonPublicPack) return [...unanswered];
-  const contentGaps = unanswered.filter((gap) => gap.trim() !== RERANK_FALLBACK_GAP);
+  const contentGaps = unanswered.filter((gap) => gap.trim() !== RERANK_FALLBACK_GAP && !isSemanticStartupGap(gap.trim()));
   if (contentGaps.length === 0) return [];
   const categories = new Set<string>(['coverage']);
   if (detail.pack.coverage.extractionGaps.some(isSourceExtractionGap)) {
@@ -2824,12 +2827,11 @@ function sanitizeReleasedCoverageNotes(
 }
 
 function isSourceExtractionGap(gap: string): boolean {
-  return gap !== STARTUP_SEARCH_GAP && gap !== RERANK_FALLBACK_GAP && gap.trim().length > 0;
+  return gap !== STARTUP_SEARCH_GAP && gap !== RERANK_FALLBACK_GAP && !isSemanticStartupGap(gap) && gap.trim().length > 0;
 }
 
 function safeUnsupportedCoverageGaps(pack: EvidencePack, nonPublicPack: boolean): string[] {
-  const fixedStartupNotes = new Set(semanticStartupCoverageNotes(pack.coverage));
-  const gaps = pack.coverage.extractionGaps.filter((gap) => isSourceExtractionGap(gap) && !fixedStartupNotes.has(gap));
+  const gaps = pack.coverage.extractionGaps.filter(isSourceExtractionGap);
   if (gaps.length === 0) {
     // The safe-unsupported release factually released zero citable evidence.
     // Carry a mechanical, corpus-ids-only coverage note so the honest
@@ -3458,7 +3460,7 @@ export async function searchPrivateEvidence(input: {
   evidenceByteBudget?: number;
   laneTimeoutMs?: number;
 }): Promise<PrivateEvidenceResult> {
-  return withPriorityQueryEmbedding(async () => {
+  return withPriorityQueryEmbedding(() => withVectorSearchRequestScope(async () => {
   const question = input.question.trim();
   if (!question) throw new OperationError('invalid_params', 'A question is required.');
   const maxResults = Math.max(1, Math.min(MAX_EVIDENCE_CANDIDATES, input.maxResults ?? PRIVATE_EVIDENCE_MAX_RESULTS));
@@ -3544,7 +3546,7 @@ export async function searchPrivateEvidence(input: {
     ? await withCachedKeywordExpansion(translation, () => privateNeighbours(lanes.adapters, build, matches))
     : [];
   return { matched: matches.length, candidates: [...matches, ...neighbours], ...(secretMatch ? { secretMatch: true } : {}), ...(searchedDuringStartup ? { searchedDuringStartup: true } : {}) };
-  });
+  }));
 }
 
 /**
@@ -3721,7 +3723,7 @@ export async function probePrivateMatch(input: {
   };
   try {
     return await Promise.race([
-      withPriorityQueryEmbedding(run),
+      withPriorityQueryEmbedding(() => withVectorSearchRequestScope(run)),
       new Promise<'unknown'>((resolve) => {
         timer = setTimeout(() => resolve('unknown'), input.timeoutMs);
         timer.unref?.();
