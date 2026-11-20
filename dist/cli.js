@@ -41827,7 +41827,7 @@ function secretLocationWithinScope(location, scope) {
   const filters = scope.filters;
   if (!filters)
     return true;
-  if (filters.senderId || filters.senderLabel || filters.authoredAfter || filters.authoredBefore || (filters.searchTextExactLines?.length ?? 0) > 0) {
+  if (filters.observedConnectorId !== undefined || filters.previousObservedConnectorId !== undefined || filters.observedConnectorIdPrefix !== undefined || filters.senderId || filters.senderLabel || filters.authoredAfter || filters.authoredBefore || (filters.searchTextExactLines?.length ?? 0) > 0) {
     return false;
   }
   if (filters.provider && location.source !== filters.provider)
@@ -216703,22 +216703,6 @@ var init_source_index_requests = __esm(() => {
 });
 
 // src/workers/engine/http/connector-store-search-request.ts
-function requireCurrentFileEmbeddingScope(store, resolver) {
-  const current = resolver?.(store);
-  if (current?.allowed !== true || current.contentAllowed !== true) {
-    throw new EmailSourceWorkerError(403, "source_index_policy_violation", "This file source has no currently approved full-content scope for embedding.");
-  }
-  const accountScope = current.accountScope?.trim();
-  const filters = normalizeConnectorStoreSearchFilters(current.contentFilters);
-  if (!accountScope || !filters) {
-    throw new EmailSourceWorkerError(403, "source_index_policy_violation", "This file source embedding lane is missing its current account-bound content scope.");
-  }
-  return {
-    accountScope,
-    filters,
-    signature: JSON.stringify({ accountScope, filters })
-  };
-}
 function assertSourceIndexSearchQuery(value) {
   if (typeof value !== "string" || value.trim().length === 0) {
     throw new EmailSourceWorkerError(400, "invalid_request", "query must be a non-empty string.");
@@ -225470,6 +225454,7 @@ function createEmailSourceWorker(options = {}) {
               const mandatoryScope = connectorStoreReadScope?.(store);
               if (mandatoryScope?.allowed === false)
                 return;
+              const readScopeSignature = JSON.stringify(mandatoryScope);
               const searchRequest = parseConnectorStoreIndexSearchRequestRecord(store === connectorStore ? record : { ...record, corpus_id: store.corpusId }, store, connectorStoreAccountScopes.get(store.corpusId), store.family === "chat" ? connectorStorePrincipals.get(store.corpusId) : undefined, connectorStorePrincipals.get(store.corpusId), connectorStoreFilterCapabilities);
               const connectorStoreEmbeddingProvider = connectorStoreEmbeddingProviders.get(store.corpusId) ?? sourceIndexEmbeddingProvider;
               const searchEmbeddingProvider = connectorStoreEmbeddingProvider && (store.trustDomain !== "secure_local" || isApprovedSecureSourceEmbeddingProvider(connectorStoreEmbeddingProvider)) ? connectorStoreEmbeddingProvider : undefined;
@@ -225504,6 +225489,7 @@ function createEmailSourceWorker(options = {}) {
                 store,
                 searchRequest,
                 result,
+                readScopeSignature,
                 scope: {
                   corpusId: store.corpusId,
                   ...accountScope ? { accountScope } : {},
@@ -225638,6 +225624,9 @@ function createEmailSourceWorker(options = {}) {
               }
             };
             assertNoRawEmailFields(safeResult);
+            if (runs.some((run) => JSON.stringify(connectorStoreReadScope?.(run.store)) !== run.readScopeSignature)) {
+              throw new EmailSourceWorkerError(403, "source_index_policy_violation", "The source read scope changed during search. Retry under the current scope.");
+            }
             return json(safeResult);
           }
           if (!corpusId) {
@@ -225653,31 +225642,20 @@ function createEmailSourceWorker(options = {}) {
           }
           const connectorStore = connectorStoresByCorpusId.get(corpusId);
           if (connectorStore) {
-            const embeddingScope = connectorStore.family === "file" ? requireCurrentFileEmbeddingScope(connectorStore, connectorStoreReadScope) : undefined;
-            const assertEmbeddingScopeCurrent = embeddingScope ? () => {
-              const current = requireCurrentFileEmbeddingScope(connectorStore, connectorStoreReadScope);
-              if (current.signature !== embeddingScope.signature) {
-                throw new EmailSourceWorkerError(403, "source_index_policy_violation", "The approved file-content scope changed before embedding dispatch; retry under the current approval.");
-              }
-            } : undefined;
             const embeddingProvider = connectorStoreEmbeddingProviders.get(connectorStore.corpusId) ?? sourceIndexEmbeddingProvider;
             if (!embeddingProvider) {
               throw new EmailSourceWorkerError(501, "source_index_embedding_not_configured", `Private source worker does not have an embedding provider configured for ${connectorStore.corpusId}.`);
             }
-            const isGmail = storageAccountForCorpus(connectorStore, options.sourceDashboard?.corpusRegistry?.list()).sourceId === "gmail.email";
-            const mailScope = isGmail ? options.gmailEmbeddingScope?.(connectorStore, embeddingProvider) : undefined;
-            if (isGmail && !mailScope?.allowed) {
-              throw new EmailSourceWorkerError(403, "source_index_policy_violation", "The retained mail account could not be verified for embedding.");
+            const scope = options.embeddingScopeFor?.(connectorStore, embeddingProvider);
+            if (!scope?.allowed) {
+              throw new EmailSourceWorkerError(403, "source_index_policy_violation", "This store has no current content scope for embedding.");
             }
             const modelId = asOptionalString(record.model_id);
             const maxPendingChunks = asOptionalNumber(record.max_pending_chunks);
             let result;
             try {
               result = await connectorStore.embedChunks({
-                ...mailScope?.allowed ? scopedEmbeddingOptions(mailScope, embeddingProvider) : { provider: embeddingProvider },
-                ...embeddingScope?.accountScope ? { accountScope: embeddingScope.accountScope } : {},
-                ...embeddingScope?.filters ? { filters: embeddingScope.filters } : {},
-                ...assertEmbeddingScopeCurrent ? { assertAuthorized: assertEmbeddingScopeCurrent } : {},
+                ...scopedEmbeddingOptions(scope, embeddingProvider),
                 ...modelId ? { modelId } : {},
                 ...maxPendingChunks !== undefined ? { limit: maxPendingChunks } : {}
               });
@@ -226005,7 +225983,6 @@ function readBusySentence(action, engineState) {
   return `This source is finishing a read. Retry ${action} after the current read completes.` + (age !== undefined && age > 0 ? ` Olympus is busy: it last reported ${age} s ago.` : "");
 }
 var init_engine2 = __esm(() => {
-  init_source_placement();
   init_embedding_plan();
   init_tier_visibility();
   init_child_visibility();
@@ -243285,6 +243262,27 @@ function gmailRetainedAccountMatches(input) {
     return true;
   return (!observed || namesAccountByAddressOnly(observed)) && binding?.bound_grant === handle.connectedAt && input.currentGrantVerified?.() === true;
 }
+function gmailStoreReadScope(input) {
+  const open = { allowed: true, contentAllowed: true };
+  const imports = { ...open, filters: GMAIL_IMPORTED_FILTERS, contentFilters: GMAIL_IMPORTED_FILTERS };
+  try {
+    const registry = readConnectedHandleRegistry(input.registryPath);
+    const handles = registry.handles.filter((handle) => handle.provider === "gmail");
+    if (registry.dropped?.length || handles.length > 1)
+      return imports;
+    if (handles.length === 0)
+      return open;
+    const observed = handles[0]?.providerAccountId;
+    const record = readSourceAccountBindings(sourceAccountBindingsPath(input.registryPath));
+    if (!observed || record.kind !== "ok")
+      return imports;
+    const binding = record.bindings.sources["gmail.email"];
+    const owners = [binding?.provider_account_id, input.historyAccountId()].filter((id) => Boolean(id));
+    return owners.length > 0 && owners.every((id) => compareProviderAccounts(id, observed) === "same") ? open : imports;
+  } catch {
+    return imports;
+  }
+}
 function readGmailRetainedAccountScope(input) {
   try {
     const registry = readConnectedHandleRegistry(input.registryPath);
@@ -243339,6 +243337,40 @@ function gmailPrivateStoreStatusScope(input) {
     ...contentWindow(approval?.mailScope.contentAfter)
   };
 }
+function gmailStoreEmbeddingScope(deps) {
+  return (input) => {
+    const { store, scopeRef: ref, authority } = input;
+    const account = deps.gmailRetainedAccountScope;
+    const accountScope = account?.();
+    if (!account || !accountScope)
+      return { allowed: false, skipQueue: true };
+    if (ref && (!isMailSourceScopePolicyRef(ref) || !authority))
+      return { allowed: false, skipQueue: true };
+    const population = gmailEmbeddingPopulation({
+      provider: input.provider,
+      accountScope,
+      ref,
+      privateStore: store.trustDomain === "secure_local"
+    });
+    return {
+      ...population,
+      allowed: true,
+      bind(provider) {
+        if (provider !== input.provider)
+          throw new SourceScopeApprovalRequiredError("The selected mail processor changed before embedding.");
+        return checkedEmbeddingProvider(provider, () => {
+          if (account() !== accountScope)
+            throw new SourceScopeApprovalRequiredError("The retained mail belongs to another or unverified account.");
+          if (!ref || population.excludeAllEmbeddingHolds)
+            return;
+          authority.assertCurrentMail(ref);
+          if (!deps.gmailLiveProcessorVerified?.())
+            throw new SourceScopeApprovalRequiredError("The connected Gmail credential is awaiting account verification.");
+        });
+      }
+    };
+  };
+}
 var init_gmail_status_scope = __esm(() => {
   init_connected_handles();
   init_google_connectors();
@@ -243346,6 +243378,8 @@ var init_gmail_status_scope = __esm(() => {
   init_source_account_binding();
   init_provider_account_identity();
   init_local_pacing();
+  init_operation_error();
+  init_source_scope_runtime();
 });
 
 // src/workers/evernote/runtime.ts
@@ -250636,54 +250670,6 @@ function storeServedByMeaning(input) {
 function sourceStoresCouldEmbed(input) {
   return input.sourceCorpusRegistry.list().some((corpus) => input.corpusIds.has(corpus.corpusId) && input.providerFor(corpus.trustDomain) !== undefined && storeServedByMeaning({ ...input, store: corpus }));
 }
-function storeEmbeddingScope(input) {
-  const { store, sourceId, scopeRef: ref, authority } = input;
-  if (!SCOPE_APPROVED_SOURCE_IDS.has(sourceId))
-    return { allowed: true };
-  if (sourceId === SCHEDULER_SOURCE_IDS.gmail) {
-    const account = input.gmailRetainedAccountScope;
-    const accountScope = account?.();
-    if (!account || !accountScope)
-      return { allowed: false, skipQueue: true };
-    if (ref && (!isMailSourceScopePolicyRef(ref) || !authority))
-      return { allowed: false, skipQueue: true };
-    const population = gmailEmbeddingPopulation({
-      provider: input.provider,
-      accountScope,
-      ref,
-      privateStore: store.trustDomain === "secure_local"
-    });
-    return {
-      ...population,
-      allowed: true,
-      bind(provider) {
-        if (provider !== input.provider)
-          throw new SourceScopeApprovalRequiredError("The selected mail processor changed before embedding.");
-        return checkedEmbeddingProvider(provider, () => {
-          if (account() !== accountScope)
-            throw new SourceScopeApprovalRequiredError("The retained mail belongs to another or unverified account.");
-          if (!ref || population.excludeAllEmbeddingHolds)
-            return;
-          authority.assertCurrentMail(ref);
-          if (!input.gmailLiveProcessorVerified?.())
-            throw new SourceScopeApprovalRequiredError("The connected Gmail credential is awaiting account verification.");
-        });
-      }
-    };
-  }
-  if (!ref || !authority)
-    return { allowed: false };
-  const bind = (provider) => scopeBoundEmbeddingProvider(provider, authority, ref);
-  const scope = input.readScope(store);
-  if (!scope.allowed || !scope.contentAllowed)
-    return { allowed: false };
-  return {
-    allowed: true,
-    bind,
-    ...scope.accountScope ? { accountScope: scope.accountScope } : {},
-    ...scope.contentFilters ? { filters: scope.contentFilters } : {}
-  };
-}
 function loadSourceWorkerSovereignty(config, env) {
   const options = {
     env,
@@ -250812,27 +250798,226 @@ function createCloudSourceIndexEmbeddingProviderFromEnv(env = process.env, envPr
     ...epochId ? { epochId } : {}
   });
 }
-var SCOPE_APPROVED_SOURCE_IDS;
 var init_embedding_providers = __esm(() => {
   init_analyst_venice();
   init_venice_model_catalog();
   init_venice_models();
   init_sovereignty();
   init_operation_error();
-  init_gmail_status_scope();
   init_embeddings();
   init_embedding_identity();
   init_provider();
   init_manifest();
-  init_source_scheduler();
-  init_source_scope_runtime();
   init_environment();
-  SCOPE_APPROVED_SOURCE_IDS = new Set([
-    SCHEDULER_SOURCE_IDS.gmail,
-    SCHEDULER_SOURCE_IDS.googleDrive,
-    SCHEDULER_SOURCE_IDS.dropbox,
-    SCHEDULER_SOURCE_IDS.localFiles
-  ]);
+});
+
+// src/workers/connector-store/embedding-scope.ts
+function approvedContentScope(store, readScope) {
+  const current = readScope(store);
+  if (!current.allowed || !current.contentAllowed)
+    return;
+  const accountScope = current.accountScope?.trim();
+  const filters = normalizeConnectorStoreSearchFilters(current.contentFilters);
+  return accountScope && filters ? { accountScope, filters } : undefined;
+}
+function storeEmbeddingScope(input) {
+  const { policy, store, authority, scopeRef, readScope } = input;
+  if (policy === "open")
+    return { allowed: true };
+  if (typeof policy === "function") {
+    const scope = policy(input);
+    return scope.allowed ? scope : { allowed: false, skipQueue: true };
+  }
+  if (!scopeRef || !authority)
+    return { allowed: false, skipQueue: true };
+  const content = approvedContentScope(store, readScope);
+  if (!content)
+    return { allowed: false, skipQueue: true };
+  const signature = JSON.stringify(content);
+  return {
+    allowed: true,
+    ...content,
+    bind: (provider) => scopeBoundEmbeddingProvider(provider, authority, scopeRef),
+    assertAuthorized() {
+      if (JSON.stringify(approvedContentScope(store, readScope)) !== signature) {
+        throw new SourceScopeApprovalRequiredError("The approved content scope changed before embedding.");
+      }
+    }
+  };
+}
+var init_embedding_scope = __esm(() => {
+  init_operation_error();
+  init_source_scope_runtime();
+  init_local_index();
+});
+
+// src/workers/engine/runtime/source-lanes.ts
+function sourceIndexLaneEnabled(env, envName, handlePresent) {
+  return sourceIndexLaneDecision(env, envName, handlePresent).enabled;
+}
+function sourceIndexLaneDecision(env, envName, handlePresent) {
+  if (env[envName]?.trim()) {
+    return {
+      enabled: parseOptionalBooleanEnv(env[envName], envName),
+      envName,
+      decidedBy: envName
+    };
+  }
+  return {
+    enabled: handlePresent,
+    envName,
+    decidedBy: handlePresent ? "connected handle fallback" : "no connected handle"
+  };
+}
+function sourceIndexLaneStorageDecision(env, envName, sourceIndexReadEnabled) {
+  if (env[envName]?.trim()) {
+    return {
+      enabled: parseOptionalBooleanEnv(env[envName], envName),
+      envName,
+      decidedBy: envName
+    };
+  }
+  return {
+    enabled: sourceIndexReadEnabled,
+    envName,
+    decidedBy: "source-index read surface fallback"
+  };
+}
+function sourceAccountMountable(account, env = process.env, log = console.warn) {
+  const reason = sourceAccountUnavailableReason(account, env);
+  if (reason === undefined)
+    return true;
+  log(`[storage] ${account.sourceId} is not mounted: ${reason.endsWith(".") ? reason.slice(0, -1) : reason}.`);
+  return false;
+}
+function sourceIndexLaneAccountDecision(decision, account, env = process.env, log = console.warn) {
+  if (!decision.enabled || sourceAccountMountable(account, env, log))
+    return decision;
+  return { ...decision, enabled: false, decidedBy: "the source registry" };
+}
+function sourceIndexLaneStartupLog(label, decision) {
+  return `${label}: ${decision.enabled ? "enabled" : "disabled"} (decided by ${decision.decidedBy}).`;
+}
+function activeCredentialHandle(handles, match) {
+  return handles.find((handle) => handle.provider === match.provider && handle.allowedCapabilities.includes(match.capability) && handle.backendState?.status !== "reauth_required");
+}
+function selectCredentialHandle(handles, match) {
+  const eligible = handles.filter((handle) => handle.provider === match.provider && handle.allowedCapabilities.includes(match.capability) && handle.backendState?.status !== "reauth_required");
+  const candidates = eligible.map((handle) => handle.handle);
+  const pinnedHandle = match.pinnedHandle?.trim();
+  if (pinnedHandle) {
+    const pinned = eligible.find((handle) => handle.handle === pinnedHandle);
+    return pinned ? { handle: pinned, reason: "selected", candidates } : { reason: "pinned_missing", candidates };
+  }
+  if (eligible.length === 0)
+    return { reason: "none", candidates };
+  if (eligible.length > 1)
+    return { reason: "ambiguous", candidates };
+  return { handle: eligible[0], reason: "selected", candidates };
+}
+function connectorStoreLaneHandle(input) {
+  const handle = selectedSourceCredentialHandle(input);
+  const laneEnabled = sourceIndexLaneEnabled(input.env, input.laneEnvName, handle !== undefined);
+  return handle && laneEnabled ? handle : undefined;
+}
+function startApprovedSourceRun(scheduler, sourceId) {
+  scheduler.runSource(sourceId, undefined, "operator").catch(() => {
+    console.warn(`[source-scheduler] source=${sourceId} first run after scope approval failed; the next scheduled pass retries.`);
+  });
+}
+function selectedSourceCredentialHandle(input) {
+  const selection = selectCredentialHandle(input.handles, {
+    provider: input.provider,
+    capability: input.capability,
+    ...input.env[input.pinEnvName]?.trim() ? { pinnedHandle: input.env[input.pinEnvName].trim() } : {}
+  });
+  const warn = input.warn ?? ((message) => console.warn(message));
+  if (selection.reason === "ambiguous") {
+    warn(`${input.provider} lane refused to construct: ${selection.candidates.length} handles carry ${input.capability} ` + `(${selection.candidates.join(", ")}). Set ${input.pinEnvName} to the handle this lane must read.`);
+  }
+  if (selection.reason === "pinned_missing") {
+    warn(`${input.provider} lane refused to construct: ${input.pinEnvName} names a handle that is not registered with ` + `${input.capability} (registered: ${selection.candidates.join(", ") || "none"}).`);
+  }
+  return selection.handle;
+}
+function activeLaneHandles(handles, env) {
+  const registryPath = handleRegistryPathFromEnv(env, true);
+  if (!registryPath)
+    return [...handles];
+  try {
+    return withoutUnpairedLaneHandles(handles, registryPath);
+  } catch (error) {
+    console.warn(`Could not read the Olympus unpaired-source record: ${error instanceof Error ? error.message : String(error)}`);
+    return [...handles];
+  }
+}
+function readActiveConnectedHandles(env) {
+  const registryPath = handleRegistryPathFromEnv(env, true);
+  if (!registryPath)
+    return [];
+  try {
+    return activeLaneHandles(readConnectedHandleRegistry(registryPath).handles.filter((handle) => handle.backendState?.status !== "reauth_required"), env);
+  } catch (error) {
+    console.warn(`Could not read Olympus handle registry for source activation: ${error instanceof Error ? error.message : String(error)}`);
+    return [];
+  }
+}
+var init_source_lanes = __esm(() => {
+  init_config2();
+  init_source_storage();
+  init_connected_handles();
+  init_unpaired_sources();
+});
+
+// src/workers/engine/runtime/store-scope-policies.ts
+function fileScopeCredentialHandle(definition) {
+  return definition.account === "this_computer" ? undefined : selectedSourceCredentialHandle({
+    env: process.env,
+    pinEnvName: definition.pinEnvName ?? "",
+    provider: definition.provider,
+    capability: definition.credentialCapability,
+    handles: readActiveConnectedHandles(process.env)
+  });
+}
+function registeredStoreReadScope(sourceId, authority) {
+  const definition = getFileScopeSource(sourceId);
+  if (!definition)
+    return { allowed: true, contentAllowed: true };
+  const approval = authority?.snapshot(sourceId);
+  if (approval?.status !== "approved")
+    return { allowed: false };
+  const metadata = fileSourceScopeMetadataFilters(approval);
+  if (!metadata.allowed)
+    return { allowed: false };
+  const handle = fileScopeCredentialHandle(definition);
+  const accountScope = definition.account === "this_computer" ? "this_computer" : handle ? handle.accountRole?.trim() || "personal" : undefined;
+  if (!accountScope)
+    return { allowed: false };
+  const content = fileSourceScopeContentFilters(approval);
+  return {
+    allowed: true,
+    accountScope,
+    filters: metadata.filters,
+    contentAllowed: content.allowed,
+    ...content.allowed && content.filters ? { contentFilters: content.filters } : {}
+  };
+}
+function createStoreEmbeddingScopeFor(input) {
+  const policies = new Map([[GMAIL_SOURCE_ID, gmailStoreEmbeddingScope(input)]]);
+  return (store, provider) => {
+    const sourceId = input.sourceIdForStore(store);
+    const policy = policies.get(sourceId) ?? (getFileScopeSource(sourceId) ? "approval" : "open");
+    const scopeRef = policy === "approval" ? input.authority?.policyRef(sourceId) : sourceId === GMAIL_SOURCE_ID ? input.authority?.mailPolicyRef() : undefined;
+    return storeEmbeddingScope({ store, provider, policy, scopeRef, authority: input.authority, readScope: input.readScope });
+  };
+}
+var init_store_scope_policies = __esm(() => {
+  init_file_scope_sources();
+  init_google_connectors();
+  init_gmail_status_scope();
+  init_embedding_scope();
+  init_source_scope_runtime();
+  init_source_lanes();
 });
 
 // src/workers/classification/sniffer-tinfoil.ts
@@ -251369,124 +251554,6 @@ var init_source_runtimes = __esm(() => {
   init_x_bookmarks();
   init_credential_broker();
   init_source_account_guard();
-});
-
-// src/workers/engine/runtime/source-lanes.ts
-function sourceIndexLaneEnabled(env, envName, handlePresent) {
-  return sourceIndexLaneDecision(env, envName, handlePresent).enabled;
-}
-function sourceIndexLaneDecision(env, envName, handlePresent) {
-  if (env[envName]?.trim()) {
-    return {
-      enabled: parseOptionalBooleanEnv(env[envName], envName),
-      envName,
-      decidedBy: envName
-    };
-  }
-  return {
-    enabled: handlePresent,
-    envName,
-    decidedBy: handlePresent ? "connected handle fallback" : "no connected handle"
-  };
-}
-function sourceIndexLaneStorageDecision(env, envName, sourceIndexReadEnabled) {
-  if (env[envName]?.trim()) {
-    return {
-      enabled: parseOptionalBooleanEnv(env[envName], envName),
-      envName,
-      decidedBy: envName
-    };
-  }
-  return {
-    enabled: sourceIndexReadEnabled,
-    envName,
-    decidedBy: "source-index read surface fallback"
-  };
-}
-function sourceAccountMountable(account, env = process.env, log = console.warn) {
-  const reason = sourceAccountUnavailableReason(account, env);
-  if (reason === undefined)
-    return true;
-  log(`[storage] ${account.sourceId} is not mounted: ${reason.endsWith(".") ? reason.slice(0, -1) : reason}.`);
-  return false;
-}
-function sourceIndexLaneAccountDecision(decision, account, env = process.env, log = console.warn) {
-  if (!decision.enabled || sourceAccountMountable(account, env, log))
-    return decision;
-  return { ...decision, enabled: false, decidedBy: "the source registry" };
-}
-function sourceIndexLaneStartupLog(label, decision) {
-  return `${label}: ${decision.enabled ? "enabled" : "disabled"} (decided by ${decision.decidedBy}).`;
-}
-function activeCredentialHandle(handles, match) {
-  return handles.find((handle) => handle.provider === match.provider && handle.allowedCapabilities.includes(match.capability) && handle.backendState?.status !== "reauth_required");
-}
-function selectCredentialHandle(handles, match) {
-  const eligible = handles.filter((handle) => handle.provider === match.provider && handle.allowedCapabilities.includes(match.capability) && handle.backendState?.status !== "reauth_required");
-  const candidates = eligible.map((handle) => handle.handle);
-  const pinnedHandle = match.pinnedHandle?.trim();
-  if (pinnedHandle) {
-    const pinned = eligible.find((handle) => handle.handle === pinnedHandle);
-    return pinned ? { handle: pinned, reason: "selected", candidates } : { reason: "pinned_missing", candidates };
-  }
-  if (eligible.length === 0)
-    return { reason: "none", candidates };
-  if (eligible.length > 1)
-    return { reason: "ambiguous", candidates };
-  return { handle: eligible[0], reason: "selected", candidates };
-}
-function connectorStoreLaneHandle(input) {
-  const handle = selectedSourceCredentialHandle(input);
-  const laneEnabled = sourceIndexLaneEnabled(input.env, input.laneEnvName, handle !== undefined);
-  return handle && laneEnabled ? handle : undefined;
-}
-function startApprovedSourceRun(scheduler, sourceId) {
-  scheduler.runSource(sourceId, undefined, "operator").catch(() => {
-    console.warn(`[source-scheduler] source=${sourceId} first run after scope approval failed; the next scheduled pass retries.`);
-  });
-}
-function selectedSourceCredentialHandle(input) {
-  const selection = selectCredentialHandle(input.handles, {
-    provider: input.provider,
-    capability: input.capability,
-    ...input.env[input.pinEnvName]?.trim() ? { pinnedHandle: input.env[input.pinEnvName].trim() } : {}
-  });
-  const warn = input.warn ?? ((message) => console.warn(message));
-  if (selection.reason === "ambiguous") {
-    warn(`${input.provider} lane refused to construct: ${selection.candidates.length} handles carry ${input.capability} ` + `(${selection.candidates.join(", ")}). Set ${input.pinEnvName} to the handle this lane must read.`);
-  }
-  if (selection.reason === "pinned_missing") {
-    warn(`${input.provider} lane refused to construct: ${input.pinEnvName} names a handle that is not registered with ` + `${input.capability} (registered: ${selection.candidates.join(", ") || "none"}).`);
-  }
-  return selection.handle;
-}
-function activeLaneHandles(handles, env) {
-  const registryPath = handleRegistryPathFromEnv(env, true);
-  if (!registryPath)
-    return [...handles];
-  try {
-    return withoutUnpairedLaneHandles(handles, registryPath);
-  } catch (error) {
-    console.warn(`Could not read the Olympus unpaired-source record: ${error instanceof Error ? error.message : String(error)}`);
-    return [...handles];
-  }
-}
-function readActiveConnectedHandles(env) {
-  const registryPath = handleRegistryPathFromEnv(env, true);
-  if (!registryPath)
-    return [];
-  try {
-    return activeLaneHandles(readConnectedHandleRegistry(registryPath).handles.filter((handle) => handle.backendState?.status !== "reauth_required"), env);
-  } catch (error) {
-    console.warn(`Could not read Olympus handle registry for source activation: ${error instanceof Error ? error.message : String(error)}`);
-    return [];
-  }
-}
-var init_source_lanes = __esm(() => {
-  init_config2();
-  init_source_storage();
-  init_connected_handles();
-  init_unpaired_sources();
 });
 
 // src/workers/engine/runtime/messaging-capture.ts
@@ -274983,6 +275050,7 @@ async function main() {
     }
   }
   const sourceCorpusRegistry = createSourceCorpusRegistry(withArchiveImportCorpora(olympusConfig.sourceIndex.corpusRegistry));
+  const storeSourceIds = new Map(olympusConfig.sourceIndex.corpusRegistry.corpora.map(({ corpusId, sourceId }) => [corpusId, sourceId]));
   const dropboxIngestionPolicy = loadDropboxIngestionPolicy({
     inlinePolicy: olympusConfig.sourceIndex.ingestionPolicies.dropboxPersonal?.policy,
     policyPath: olympusConfig.sourceIndex.ingestionPolicies.dropboxPersonal?.policyPath,
@@ -275703,6 +275771,15 @@ async function main() {
     const role = handle?.accountRole?.trim() || accountFromGoogleHandle(handle?.handle);
     return gmailInternalConnectorStore && gmailSecureConnectorStore ? gmailItemAccountScope([gmailInternalConnectorStore, gmailSecureConnectorStore], role) : role;
   };
+  function connectorStoreReadScope(store) {
+    if (sourceIdForStore(store) === GMAIL_SOURCE_ID) {
+      return gmailStoreReadScope({
+        registryPath: connectedHandleRegistryPath,
+        historyAccountId: () => recordedProviderAccount({ sourceId: GMAIL_SOURCE_ID })
+      });
+    }
+    return registeredConnectorStoreReadScope(store);
+  }
   const gmailRetainedAccountScope = () => {
     if (!connectedHandleRegistryPath || gmailInternalConnectorStore?.fileReplacedOrRemoved() || gmailSecureConnectorStore?.fileReplacedOrRemoved() || gmailTierLane?.publicStore?.current()?.fileReplacedOrRemoved())
       return;
@@ -275917,7 +275994,6 @@ ${key}`;
     if (dropboxConnectorStore)
       sourceLaneMounted([dropboxConnectorStore]);
   };
-  const isDropboxTierStore = (store) => store === dropboxConnectorStore || dropboxTierLane !== undefined && (store === dropboxTierLane.internal.current() || store === dropboxTierLane.public.current());
   const localFilesConnectorStoreLane = sourceIndexLaneAccountDecision(sourceIndexLaneStorageDecision(process.env, "OLYMPUS_SOURCE_INDEX_LOCAL_FILES_CONNECTOR_STORE_ENABLED", sourceIndexReadEnabled), { sourceId: LOCAL_FILES_SOURCE_ID });
   const localFilesIngestionPolicy = defaultLocalFilesIngestionPolicy();
   const localFilesScopeRef = fileSourceScopeAuthority ? fileSourceScopeAuthority.policyRef(LOCAL_FILES_SOURCE_ID) : undefined;
@@ -275973,6 +276049,7 @@ ${key}`;
       sourceLaneMounted([localFilesConnectorStore]);
   };
   const isLocalFilesTierStore = (store) => store === localFilesConnectorStore || localFilesTierLane !== undefined && (store === localFilesTierLane.internal.current() || store === localFilesTierLane.public.current());
+  const sourceIdForStore = (store) => isLocalFilesTierStore(store) ? LOCAL_FILES_SOURCE_ID : storeSourceIds.get(store.corpusId) ?? storageAccountForCorpus(store).sourceId;
   const localFilesWatchHub = new WatchHub;
   const localFilesVolumes = new VolumeResolver;
   const localFilesExclusionContext = {
@@ -276536,30 +276613,19 @@ ${key}`;
       }
     } : {}
   };
-  const connectorStoreReadScope = (store) => {
-    const sourceId = isDropboxTierStore(store) ? "dropbox.files" : isLocalFilesTierStore(store) ? LOCAL_FILES_SOURCE_ID : store === googleDriveInternalConnectorStore || store === googleDriveSecureConnectorStore || store.corpusId === GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID && store === googleDriveTierLane?.publicStore?.current() ? "google_drive.docs" : Object.values(EVERNOTE_TIER_CORPUS_IDS).includes(store.corpusId) ? EVERNOTE_SOURCE_ID : undefined;
+  const registeredConnectorStoreReadScope = (store) => {
+    const sourceId = sourceIdForStore(store);
     if (sourceId === LOCAL_FILES_SOURCE_ID && !localFilesCleanupRecovery?.ready())
       return { allowed: false };
-    if (!sourceId)
-      return { allowed: true, contentAllowed: true };
-    const approval = fileSourceScopeAuthority?.snapshot(sourceId);
-    if (!approval || approval.status !== "approved")
-      return { allowed: false };
-    const metadataScope = fileSourceScopeMetadataFilters(approval);
-    if (!metadataScope.allowed)
-      return { allowed: false };
-    const contentScope = fileSourceScopeContentFilters(approval);
-    const scopeAccount = fileScopeAccount(sourceId);
-    if (!scopeAccount)
-      return { allowed: false };
-    return {
-      allowed: true,
-      accountScope: scopeAccount.accountScope,
-      filters: metadataScope.filters,
-      contentAllowed: contentScope.allowed,
-      ...contentScope.allowed && contentScope.filters ? { contentFilters: contentScope.filters } : {}
-    };
+    return registeredStoreReadScope(sourceId, fileSourceScopeAuthority);
   };
+  const embeddingScopeFor = createStoreEmbeddingScopeFor({
+    sourceIdForStore,
+    authority: fileSourceScopeAuthority,
+    readScope: connectorStoreReadScope,
+    gmailRetainedAccountScope,
+    gmailLiveProcessorVerified
+  });
   const currentExtractionItems = (refs) => {
     const answers = refs.map(() => false);
     const check = (corpusId, store, view) => {
@@ -277846,31 +277912,18 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         }))]
       };
     }
-    const scopeRefs = new Map;
-    for (const ref of [currentGmailScopeRef, currentGoogleDriveScopeRef, currentDropboxScopeRef, currentLocalFilesScopeRef]) {
-      if (ref)
-        scopeRefs.set(ref.sourceId, ref);
-    }
     const sweptSources = withEmbeddingSweep(sources, (source) => {
       const corpusIds = new Set(sourceCorpusRegistry.list().filter((corpus) => corpus.sourceId === source.sourceId).map((corpus) => corpus.corpusId));
       corpusIds.add(source.corpusId);
       const targets = () => connectorStores.flatMap((store) => {
         if (!corpusIds.has(store.corpusId))
           return [];
+        const provider = connectorStoreEmbeddingProviders.get(store.corpusId);
         const target = planStoreEmbedding({
           store,
-          provider: connectorStoreEmbeddingProviders.get(store.corpusId),
+          provider,
           servedByMeaning: storeServedByMeaning({ store, sovereigntyEngine, sourceCorpusRegistry, fullCorpusDefinitions }),
-          scope: storeEmbeddingScope({
-            store,
-            sourceId: source.sourceId,
-            scopeRef: scopeRefs.get(source.sourceId),
-            authority: fileSourceScopeAuthority,
-            readScope: connectorStoreReadScope,
-            provider: connectorStoreEmbeddingProviders.get(store.corpusId),
-            gmailRetainedAccountScope,
-            gmailLiveProcessorVerified
-          })
+          scope: embeddingScopeFor(store, provider)
         });
         return target ? [target] : [];
       });
@@ -278015,24 +278068,6 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       ...snapshot.reason === "malformed" ? { error: "Saved mail scope is unreadable. Review and save the scope again." } : {}
     };
   };
-  function fileScopeCredentialHandle(definition) {
-    return definition.account === "this_computer" ? undefined : selectedSourceCredentialHandle({
-      env: process.env,
-      pinEnvName: definition.pinEnvName ?? "",
-      provider: definition.provider,
-      capability: definition.credentialCapability,
-      handles: readActiveConnectedHandles(process.env)
-    });
-  }
-  function fileScopeAccount(sourceId) {
-    const definition = getFileScopeSource(sourceId);
-    if (!definition)
-      return;
-    if (definition.account === "this_computer")
-      return { accountScope: "this_computer" };
-    const handle = fileScopeCredentialHandle(definition);
-    return handle ? { accountScope: handle.accountRole?.trim() || "personal" } : undefined;
-  }
   const fileScopeBrowserFor = (sourceId) => {
     const definition = requireFileScopeSource(sourceId);
     const handle = fileScopeCredentialHandle(definition);
@@ -278436,16 +278471,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     connectorStoreAccountScopes,
     connectorStorePrincipals,
     connectorStoreReadScope,
-    gmailEmbeddingScope: (store, provider) => storeEmbeddingScope({
-      store,
-      provider,
-      sourceId: GMAIL_SOURCE_ID,
-      scopeRef: fileSourceScopeAuthority?.mailPolicyRef(),
-      authority: fileSourceScopeAuthority,
-      gmailRetainedAccountScope,
-      gmailLiveProcessorVerified,
-      readScope: connectorStoreReadScope
-    }),
+    embeddingScopeFor,
     ...sourceScheduler ? { sourceScheduler } : {},
     ...sourceWatchPass ? {
       sourceWatch: {
@@ -280413,6 +280439,7 @@ var init_server5 = __esm(async () => {
   init_source_answer_lanes();
   init_local_index();
   init_gmail_status_scope();
+  init_gmail_status_scope();
   init_tiered_store_set();
   init_archive_target();
   init_connector5();
@@ -280506,6 +280533,7 @@ var init_server5 = __esm(async () => {
   init_boot_storage();
   init_environment();
   init_embedding_providers();
+  init_store_scope_policies();
   init_judging_models();
   init_source_runtimes();
   init_source_lanes();
