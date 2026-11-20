@@ -645,6 +645,15 @@ describe('the panel on the computer', () => {
       .toContain('Held for a privacy check from earlier builds: 12 · Checked so far: 12');
   });
 
+  test('Home shows items waiting for an embedding choice before any legacy body is held', async () => {
+    const data = model({
+      sources: [TELEGRAM],
+      privacy: { configured: true, ruleCount: 0, pendingCount: 0, legacyPersonalBodies: { held: 0, judged: 0, waiting: 3 } },
+    });
+    const page = await onHost(COMPUTER, data);
+    expect(page.win.document.querySelector('[data-home-status]')?.textContent).toContain('Waiting for your embedding choice: 3');
+  });
+
   test('a transcription model not needed yet is not Needs you: its optional Download now stays in Settings, and Home stays up to date (#1163 review)', async () => {
     const calm = model({
       sources: [TELEGRAM],

@@ -164,6 +164,26 @@ test('the installed tier service hides old Personal text and judges it without a
   expect(f.service.backlog().legacyPersonalBodies).toEqual({ held: 1, judged: 1 });
 });
 
+test('an interrupted hold finishes privately after the embedding choice changes, while new items stay searchable', async () => {
+  const tmp = tempDir('olympus-legacy-personal-');
+  const rows = [
+    { id: 'first', name: 'Shopping list', text: 'Fresh tomatoes for the salad.' },
+    { id: 'second', name: 'Picnic notes', text: BODY },
+  ];
+  await seedLegacy(tmp.dir, rows);
+  const settings = { localEmbeddingsOnly: true };
+  const f = fixture(tmp, settings);
+  const queue = f.installed.snifferStoreForLedger(f.ledger.dbPath);
+  expect(await settleLegacyPersonalBodiesOffThread({ set: f.set, queue, limit: 1 })).toMatchObject({ held: 1 });
+  settings.localEmbeddingsOnly = false;
+  await f.service.runOnce();
+  expect(f.stores.internal!.searchItems('tomatoes', 10).map(hit => hit.sourceItem.providerItemId)).toEqual(['first']);
+  expect(f.ledger.getCurrent(identityOf('first'))).toBeUndefined();
+  expect(f.ledger.getCurrent(identityOf('second'))).toMatchObject({ state: 'pending', contentPending: true });
+  expect(f.service.backlog().legacyPersonalBodies).toEqual({ held: 1, judged: 0, waiting: 1 });
+  await answerPrivately(f);
+});
+
 test('a Secret in legacy text takes the Secrets path instead of reaching the judge', async () => {
   const tmp = tempDir('olympus-legacy-personal-');
   const identity = identityOf('secret');
@@ -181,6 +201,24 @@ test('a Secret in legacy text takes the Secrets path instead of reaching the jud
     expect(store.exportItemCopy(identity)).toBeUndefined();
   }
   expect(f.installed.snifferStoreForLedger(f.ledger.dbPath).questionFor(identity, 'content')).toBeUndefined();
+});
+
+test('a paused walk only counts Secret candidates and resumes at the saved page without double counting', async () => {
+  const tmp = tempDir('olympus-legacy-personal-');
+  const text = 'Legacysecretmarker contains ' + '-----BEGIN ' + 'PRIVATE KEY-----';
+  await seedLegacy(tmp.dir, ['a', 'b'].map(id => ({ id, name: 'Deployment notes', text })));
+  const f = fixture(tmp);
+  const queue = f.installed.snifferStoreForLedger(f.ledger.dbPath);
+  const step = () => settleLegacyPersonalBodiesOffThread({ set: f.set, queue, movesAvailable: () => false, limit: 1 });
+  for (const waiting of [1, 2, 2, 2]) {
+    expect(await step()).toMatchObject({ held: 0, secrets: 0, failed: 0 });
+    expect(f.service.backlog().legacyPersonalBodies).toEqual({ held: 0, judged: 0, waiting });
+  }
+  expect(f.stores.internal!.searchItems('Legacysecretmarker', 10)).toHaveLength(2);
+  for (const id of ['a', 'b']) {
+    expect(f.ledger.getCurrent(identityOf(id))).toBeUndefined();
+    expect(f.secrets.get(identityOf(id))).toBeUndefined();
+  }
 });
 
 test('a legacy Personal verdict for the exact text leaves the stored row alone', async () => {
@@ -240,7 +278,8 @@ test.each(['local', 'historical cloud', 'configured cloud'] as const)('the old r
   const embedder = new RecordingProvider(backend === 'local' ? BUILT_IN_EMBEDDING_PROVIDER : 'historical-x-embedder', 'old-embedder', backend === 'local' ? 'local' : 'cloud');
   expect((await legacy.embedChunks({ provider: embedder })).chunksEmbedded).toBe(1);
   expect(await legacy.vectorSearchItems('recoveryorchardmarker', embedder, 10)).toHaveLength(1);
-  const f = fixture(tmp, { localEmbeddingsOnly: backend !== 'configured cloud' });
+  const settings = { localEmbeddingsOnly: backend !== 'configured cloud' };
+  const f = fixture(tmp, settings);
   const personal = new LocalConnectorStore({ ...personalOptions, tierLedger: f.ledger });
   const secure = new LocalConnectorStore({
     dbPath: join(f.dir, 'x-private.sqlite'), family: 'x', trustDomain: 'secure_local',
@@ -257,6 +296,22 @@ test.each(['local', 'historical cloud', 'configured cloud'] as const)('the old r
       { trustDomain: 'secure_local', corpusId: secure.corpusId, store: secure, embeddingProvider: f.local },
     ],
   });
+  if (backend === 'configured cloud') {
+    for (let pass = 0; pass < 2; pass++) {
+      expect((await f.service.runOnce()).state).toBe('model_unavailable');
+      expect(f.service.backlog().legacyPersonalBodies).toEqual({ held: 0, judged: 0, waiting: 1 });
+      expect(f.ledger.getCurrent(raw.identity)).toBeUndefined();
+      expect(personal.searchItems('recoveryorchardmarker', 10)).toHaveLength(1);
+      expect(await personal.vectorSearchItems('recoveryorchardmarker', embedder, 10)).toHaveLength(1);
+      expect(secure.exportItemCopy(raw.identity)).toBeUndefined();
+    }
+    settings.localEmbeddingsOnly = true;
+    await f.service.runOnce();
+    expect(f.service.backlog().legacyPersonalBodies).toEqual({ held: 1, judged: 0 });
+    expect(secure.exportItemCopy(raw.identity)?.chunks.map(chunk => chunk.boundedText).join('')).toBe(text);
+    expect(snapshotStore(secure.dbPath).vectors).toEqual([]);
+    return;
+  }
   const queue = f.installed.snifferStoreForLedger(f.ledger.dbPath);
   expect(await settleLegacyPersonalBodiesOffThread({ set, queue })).toMatchObject({ held: 1 });
   // At the end of the walker the old copy is hidden, with the mover still to run.
@@ -416,14 +471,14 @@ test('the judge takes a newer legacy hold first even when the older question was
   expect(f.ledger.getCurrent(identityOf('z-old'))?.contentPending).toBe(true);
 });
 
-test('a walker cannot adopt a Personal store already bound to another ledger', async () => {
+test.each(['internal', 'secure_local'] as const)('the walker refuses a set whose %s store is bound to another ledger', async domain => {
   const tmp = tempDir('olympus-legacy-personal-');
   await seedLegacy(tmp.dir, [{ id: 'different-set', name: 'Picnic plan', text: BODY }]);
   const f = fixture(tmp);
   const personal = f.stores.internal!;
   const other = new TierLedger({ dbPath: join(tmp.dir, 'other-tier.sqlite') });
   try {
-    personal.bindTierSet(other);
+    f.stores[domain]!.bindTierSet(other);
     const report = await settleLegacyPersonalBodiesOffThread({ set: f.set, queue: f.installed.snifferStoreForLedger(f.ledger.dbPath) });
     expect(report).toMatchObject({ checked: 0, held: 0, failed: 1, retired: false });
     expect(f.ledger.getCurrent(identityOf('different-set'))).toBeUndefined();

@@ -2904,9 +2904,15 @@ export function chatgptDashboardClient(
 
   function legacyPersonalProgressText(info: Any): string | undefined {
     const progress = info?.legacyPersonalBodies;
-    if (!progress || typeof progress.held !== 'number' || !isFinite(progress.held) || progress.held <= 0
-      || typeof progress.judged !== 'number' || !isFinite(progress.judged)) return undefined;
-    return fill(config.privacy.copy.legacyPersonalBodies, { held: count(progress.held), judged: count(progress.judged) });
+    if (!progress) return undefined;
+    const parts = [];
+    if (progress.held > 0 && isFinite(progress.held) && isFinite(progress.judged)) {
+      parts.push(fill(config.privacy.copy.legacyPersonalBodies, { held: count(progress.held), judged: count(progress.judged) }));
+    }
+    if (progress.waiting > 0 && isFinite(progress.waiting)) {
+      parts.push(fill(config.privacy.copy.legacyPersonalWaiting, { waiting: count(progress.waiting) }));
+    }
+    return parts.join(' · ') || undefined;
   }
 
   /**

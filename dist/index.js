@@ -11060,7 +11060,7 @@ var init_sniffer_store = __esm(() => {
   init_tier_ledger_path();
 });
 // src/workers/classification/tier-ledger.ts
-var LEGACY_PERSONAL_BODIES_HELD = "legacy-personal-bodies:held", LEGACY_PERSONAL_BODIES_JUDGED = "legacy-personal-bodies:judged", LEGACY_PERSONAL_BODY_PROGRESS_SQL, PERSONAL_LOWERING_UNCLAIMED = `rejudge_json IS NULL AND metadata_forced = 0
+var LEGACY_PERSONAL_BODIES_HELD = "legacy-personal-bodies:held", LEGACY_PERSONAL_BODIES_JUDGED = "legacy-personal-bodies:judged", LEGACY_PERSONAL_BODIES_CURSOR = "legacy_personal_bodies_cursor_v2", LEGACY_PERSONAL_BODIES_WAITING = "legacy-personal-bodies:waiting", LEGACY_PERSONAL_BODY_PROGRESS_SQL, PERSONAL_LOWERING_UNCLAIMED = `rejudge_json IS NULL AND metadata_forced = 0
   AND metadata_tier <> 'secrets' AND content_tier <> 'secrets'
   AND decided_by NOT IN ('override', 'owner_rule')
   AND instr(reasons_json, '"override:') = 0 AND instr(reasons_json, '"metadata:owner_rule:') = 0
@@ -11107,7 +11107,9 @@ var init_tier_ledger = __esm(() => {
   init_tier_ledger_path();
   LEGACY_PERSONAL_BODY_PROGRESS_SQL = `SELECT
   CAST(COALESCE((SELECT value FROM tier_ledger_meta WHERE key = '${LEGACY_PERSONAL_BODIES_HELD}'), 0) AS INTEGER) AS held,
-  CAST(COALESCE((SELECT value FROM tier_ledger_meta WHERE key = '${LEGACY_PERSONAL_BODIES_JUDGED}'), 0) AS INTEGER) AS judged`;
+  CAST(COALESCE((SELECT value FROM tier_ledger_meta WHERE key = '${LEGACY_PERSONAL_BODIES_JUDGED}'), 0) AS INTEGER) AS judged,
+  MAX(CAST(COALESCE((SELECT value FROM tier_ledger_meta WHERE key = '${LEGACY_PERSONAL_BODIES_WAITING}'), 0) AS INTEGER),
+    COALESCE((SELECT json_extract(NULLIF(value, ''), '$.waiting') FROM tier_ledger_meta WHERE key = '${LEGACY_PERSONAL_BODIES_CURSOR}'), 0)) AS waiting`;
   STORED_PERSONAL_LOWERING = `routed = 1 AND state = 'current' AND content_read = 1
   AND metadata_pending = 0 AND content_pending = 0 AND move_attempts = 0
   AND target_metadata_tier IS NULL AND target_content_tier IS NULL
@@ -20399,6 +20401,7 @@ var init_vocabulary = __esm(() => {
       one: "{n} item waiting for the private model",
       many: "{n} items waiting for the private model"
     },
+    legacyPersonalWaiting: "Waiting for your embedding choice: {waiting}",
     legacyPersonalBodies: "Held for a privacy check from earlier builds: {held} · Checked so far: {judged}"
   };
   DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY = {

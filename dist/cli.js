@@ -42890,7 +42890,11 @@ function listMovingRead(options) {
       SELECT * FROM tier_items INDEXED BY tier_items_move_order WHERE state = 'moving'
       ${tierMovingDirectionClause(options.direction)}
       ${options.legacyHoldsOnly ? `AND instr(reasons_json, '"${LEGACY_PERSONAL_BODY_REASON}"') > 0
-        AND (content_pending = 1 OR instr(reasons_json, '"${OWNER_OVERRIDE_SECRET_REVIEW_REASON}"') > 0)` : ""}
+        AND (content_pending = 1 OR instr(reasons_json, '"${OWNER_OVERRIDE_SECRET_REVIEW_REASON}"') > 0)
+        AND EXISTS (SELECT 1 FROM tier_copies c WHERE c.provider = tier_items.provider
+          AND c.account_scope = tier_items.account_scope AND c.conversation_key = tier_items.conversation_key
+          AND c.provider_item_id = tier_items.provider_item_id AND c.trust_domain = 'internal' AND c.layers <> 'metadata'
+          AND c.copy_state = 'superseded' AND c.superseded_by_generation = tier_items.generation + 1)` : ""}
       ORDER BY move_attempts, decided_at, provider, account_scope, provider_item_id, conversation_key
       LIMIT ?
     `,
@@ -47117,7 +47121,7 @@ function overrideFromJson(json) {
     return parsed;
   return;
 }
-var TIER_LEDGER_SCHEMA_VERSION = 18, RETIRED_EMBEDDING_CLEARANCE_REASON = "content:sniffer:retired_embedding_clearance:undecided", RETAINED_MOVE_SOURCE_REASON = "content:retained_move_source", LEGACY_PERSONAL_BODIES_HELD = "legacy-personal-bodies:held", LEGACY_PERSONAL_BODIES_JUDGED = "legacy-personal-bodies:judged", LEGACY_PERSONAL_BODY_PROGRESS_SQL, TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_safe_unread_relabel_v1", IDENTITY_BATCH = 200, AWAITING_TEXT_WHERE = `routed = 1 AND content_read = 0 AND metadata_pending = 0
+var TIER_LEDGER_SCHEMA_VERSION = 18, RETIRED_EMBEDDING_CLEARANCE_REASON = "content:sniffer:retired_embedding_clearance:undecided", RETAINED_MOVE_SOURCE_REASON = "content:retained_move_source", LEGACY_PERSONAL_BODIES_HELD = "legacy-personal-bodies:held", LEGACY_PERSONAL_BODIES_JUDGED = "legacy-personal-bodies:judged", LEGACY_PERSONAL_BODIES_CURSOR = "legacy_personal_bodies_cursor_v2", LEGACY_PERSONAL_BODIES_WAITING = "legacy-personal-bodies:waiting", LEGACY_PERSONAL_BODY_PROGRESS_SQL, TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_safe_unread_relabel_v1", IDENTITY_BATCH = 200, AWAITING_TEXT_WHERE = `routed = 1 AND content_read = 0 AND metadata_pending = 0
         AND ((state = 'pending' AND content_pending = 1)
           OR (state = 'current' AND EXISTS (SELECT 1 FROM json_each(reasons_json) r
             WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
@@ -47212,7 +47216,9 @@ var init_tier_ledger = __esm(() => {
   init_tier_ledger_path();
   LEGACY_PERSONAL_BODY_PROGRESS_SQL = `SELECT
   CAST(COALESCE((SELECT value FROM tier_ledger_meta WHERE key = '${LEGACY_PERSONAL_BODIES_HELD}'), 0) AS INTEGER) AS held,
-  CAST(COALESCE((SELECT value FROM tier_ledger_meta WHERE key = '${LEGACY_PERSONAL_BODIES_JUDGED}'), 0) AS INTEGER) AS judged`;
+  CAST(COALESCE((SELECT value FROM tier_ledger_meta WHERE key = '${LEGACY_PERSONAL_BODIES_JUDGED}'), 0) AS INTEGER) AS judged,
+  MAX(CAST(COALESCE((SELECT value FROM tier_ledger_meta WHERE key = '${LEGACY_PERSONAL_BODIES_WAITING}'), 0) AS INTEGER),
+    COALESCE((SELECT json_extract(NULLIF(value, ''), '$.waiting') FROM tier_ledger_meta WHERE key = '${LEGACY_PERSONAL_BODIES_CURSOR}'), 0)) AS waiting`;
   STORED_PERSONAL_LOWERING = `routed = 1 AND state = 'current' AND content_read = 1
   AND metadata_pending = 0 AND content_pending = 0 AND move_attempts = 0
   AND target_metadata_tier IS NULL AND target_content_tier IS NULL
@@ -75465,7 +75471,7 @@ ${parentKey(ref)}`, { ref, origin });
           BEGIN DELETE FROM legacy_body_watch WHERE item_pk IN (${keys}); END`);
         }
         this.db.exec("DELETE FROM legacy_body_watch");
-        this.db.query("INSERT INTO legacy_body_watch VALUES (?, ?)").run(itemPk, token);
+        this.db.query("INSERT INTO legacy_body_watch (item_pk, token) VALUES (?, ?)").run(itemPk, token);
         return token;
       }).immediate();
     }
@@ -100426,6 +100432,7 @@ var init_vocabulary = __esm(() => {
       one: "{n} item waiting for the private model",
       many: "{n} items waiting for the private model"
     },
+    legacyPersonalWaiting: "Waiting for your embedding choice: {waiting}",
     legacyPersonalBodies: "Held for a privacy check from earlier builds: {held} · Checked so far: {judged}"
   };
   DASHBOARD_CHATGPT_PRIVACY_JUDGE_STOPPED_COPY = {
@@ -107695,12 +107702,17 @@ class TieredStoreSet {
     } catch {}
   }
   assertLedgerGovernsLegs() {
+    const foreign = this.foreignBoundLeg();
+    if (foreign)
+      throw new TierLedgerUnavailableError(foreign.corpusId);
+  }
+  foreignBoundLeg() {
     const ledgerId = this.ledger.ledgerId();
     for (const domain of TIER_DOMAIN_ORDER) {
       const store = this.store(domain);
       const binding = store?.tierSetBinding();
-      if (store && binding && binding.ledgerId !== ledgerId)
-        throw new TierLedgerUnavailableError(store.corpusId);
+      if (binding && binding.ledgerId !== ledgerId)
+        return store;
     }
   }
   domainAtLeast(domain) {
@@ -152388,8 +152400,9 @@ function placePersonalBody(set, personal, item, queue, mode, walk) {
   const previousLedger = walk?.previousLedger;
   const movesAvailable = walk?.movesAvailable ?? true;
   const previous = previousLedger?.getCurrent(identity);
-  const override = ledger.observeOverrideText(identity);
-  const effectiveOverride = override ?? (!current?.routed ? previousLedger?.observeOverrideText(identity) : undefined);
+  const readOverride = (source) => movesAvailable ? source.observeOverrideText(identity) : source.getOverride(identity);
+  const override = readOverride(ledger);
+  const effectiveOverride = override ?? (!current?.routed && previousLedger ? readOverride(previousLedger) : undefined);
   const copies = ledger.copies(identity);
   const copy = copies.find((copy) => copy.corpusId === personal.corpusId && (mode === "walk" || copy.layers !== "metadata"));
   if (effectiveOverride?.kind !== "not_secret" && (effectiveOverride?.tier === "secrets" || [current, current?.routed ? undefined : previous].some((record) => record && [
@@ -152398,6 +152411,8 @@ function placePersonalBody(set, personal, item, queue, mode, walk) {
     record.targetMetadataTier,
     record.targetContentTier
   ].includes("secrets")))) {
+    if (!movesAvailable)
+      return "waiting";
     const record = set.adoptLegacyItem(identity);
     const { copies: hidden } = ledger.flipToSecrets(identity, {
       expectedGeneration: record.generation,
@@ -152435,6 +152450,8 @@ function placePersonalBody(set, personal, item, queue, mode, walk) {
   const currentAllowsPersonal = !current || current.state !== "moving" && !current.metadataPending && (current.contentTier === "private" || current.contentTier === "public") && (current.metadataTier === "private" || current.metadataTier === "public");
   if (currentAllowsPersonal && ownerTier !== "secure" && [current, previous].some((record) => record && exactPersonalReceipt(record, text, effectiveOverride, image)))
     return "unchanged";
+  if (!movesAvailable)
+    return "waiting";
   const conflict = () => ledger.copies(identity).some((other) => {
     if (other.corpusId === personal.corpusId || other.state !== "current" || mode === "restore" && (other.trustDomain !== "secure_local" || other.layers === "metadata"))
       return false;
@@ -152451,7 +152468,7 @@ function placePersonalBody(set, personal, item, queue, mode, walk) {
   const needsNames = mode === "walk" || ownerTier === "private" || ownerTier === "public";
   const names = needsNames ? personal.exportItemNames(identity) : undefined;
   const scanned = names ? classifyItemTiers({ signals: storedSignals(names), text }, effectiveOverride ? { override: effectiveOverride } : {}) : undefined;
-  if (mode === "walk" && (!names || !movesAvailable && scanned?.contentTier !== "secrets"))
+  if (mode === "walk" && !names)
     return "retry";
   record ??= set.adoptLegacyItem(identity);
   if (mode === "walk" && names && scanned?.contentTier === "secrets" && !conflict()) {
@@ -152461,8 +152478,6 @@ function placePersonalBody(set, personal, item, queue, mode, walk) {
     }, { guard: { generation: record.generation, override } });
     return settled ? "secrets" : "retry";
   }
-  if (mode === "walk" && !movesAvailable)
-    return "retry";
   if (mode === "walk")
     queue?.deleteItemQuestions(identity);
   const floor = ownerTier === "secure" ? "secure" : "public";
@@ -204978,9 +204993,16 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
   }
   function legacyPersonalProgressText(info) {
     const progress = info?.legacyPersonalBodies;
-    if (!progress || typeof progress.held !== "number" || !isFinite(progress.held) || progress.held <= 0 || typeof progress.judged !== "number" || !isFinite(progress.judged))
+    if (!progress)
       return;
-    return fill(config.privacy.copy.legacyPersonalBodies, { held: count(progress.held), judged: count(progress.judged) });
+    const parts = [];
+    if (progress.held > 0 && isFinite(progress.held) && isFinite(progress.judged)) {
+      parts.push(fill(config.privacy.copy.legacyPersonalBodies, { held: count(progress.held), judged: count(progress.judged) }));
+    }
+    if (progress.waiting > 0 && isFinite(progress.waiting)) {
+      parts.push(fill(config.privacy.copy.legacyPersonalWaiting, { waiting: count(progress.waiting) }));
+    }
+    return parts.join(" · ") || undefined;
   }
   function openModels(inPlace) {
     const href = onComputer() ? state.hostLinks.keys : "";
@@ -249014,33 +249036,37 @@ var init_installed_tier_classification = __esm(() => {
 function settleLegacyPersonalBodiesOffThread(options) {
   return runPassOffThread(walk(options), { family: "legacy-personal-bodies", ...options.turn ? { turn: options.turn } : {} });
 }
-function* walk({ set, queue, limit = LEGACY_PERSONAL_BODY_PAGE_SIZE, chunkLimit = PERSONAL_BODY_CHUNKS_PER_PAGE, movesAvailable = true }) {
+function* walk({ set, queue, limit = LEGACY_PERSONAL_BODY_PAGE_SIZE, chunkLimit = PERSONAL_BODY_CHUNKS_PER_PAGE, movesAvailable = () => true }) {
   const { ledger } = set;
-  const report = { checked: 0, held: 0, secrets: 0, failed: 0, retired: false };
+  const report = { checked: 0, held: 0, secrets: 0, failed: 0, retired: false, waitingForMoves: false };
   if (ledger.readMeta(DONE2) === "1")
     return { ...report, retired: true };
   const personal = set.store("internal");
-  const saved = ledger.readMeta(CURSOR3);
-  const checkpoint = saved ? JSON.parse(saved) : undefined;
+  const saved = ledger.readMeta(LEGACY_PERSONAL_BODIES_CURSOR);
+  const canMove = movesAvailable();
+  const last = saved ? JSON.parse(saved) : undefined;
+  const checkpoint = (last?.canMove ?? true) === canMove ? last : undefined;
+  let waiting = checkpoint?.waiting ?? 0;
   let dirty = checkpoint?.dirty ?? false;
   if (personal) {
-    const binding = personal.tierSetBinding();
-    if (binding && binding.ledgerId !== ledger.ledgerId())
+    if (set.foreignBoundLeg())
       return { ...report, failed: 1 };
     const marker = personal.changeMarker();
     const page = yield* find(personal.personalBodyPageFinder(checkpoint?.after, Math.min(limit, LEGACY_PERSONAL_BODY_PAGE_SIZE), chunkLimit));
     if (!page)
       return report;
     const previousLedger = page.items.length ? personal.preRoutingLedgerFor(ledger) : undefined;
-    const placement = { movesAvailable, ...previousLedger ? { previousLedger } : {} };
+    const placement = { movesAvailable: canMove, ...previousLedger ? { previousLedger } : {} };
     for (const item of page.items) {
       yield* turn();
       report.checked++;
-      if (secretScanReusable(item.text)) {
+      if (canMove && secretScanReusable(item.text)) {
         yield* find({ here: () => {
           return;
         }, offThread: () => scanSecretsAhead(item.text) });
       }
+      if (movesAvailable() !== canMove)
+        return report;
       const current = item.watch ? personal.personalBodyWatchCurrent(item.watch) : personal.changeMarker() === marker || personal.itemMigrationFingerprint(item.identity, item.chunkCount + 1) === item.fingerprint;
       if (!current) {
         dirty = true;
@@ -249048,7 +249074,10 @@ function* walk({ set, queue, limit = LEGACY_PERSONAL_BODY_PAGE_SIZE, chunkLimit 
       }
       try {
         if (item.chunkCount === 0) {
-          personal.clearOrphanPersonalVectors(item.identity);
+          if (canMove)
+            personal.clearOrphanPersonalVectors(item.identity);
+          else
+            waiting++;
           continue;
         }
         const disposition = placePersonalBody(set, personal, item, queue, "walk", placement);
@@ -249056,6 +249085,8 @@ function* walk({ set, queue, limit = LEGACY_PERSONAL_BODY_PAGE_SIZE, chunkLimit 
           report.held++;
         if (disposition === "secrets")
           report.secrets++;
+        if (disposition === "waiting")
+          waiting++;
         if (disposition === "retry")
           report.failed++;
       } catch {
@@ -249064,20 +249095,26 @@ function* walk({ set, queue, limit = LEGACY_PERSONAL_BODY_PAGE_SIZE, chunkLimit 
     }
     dirty ||= report.held + report.secrets + report.failed > 0;
     if (page.next || page.partial) {
-      ledger.writeSettleProgress(CURSOR3, JSON.stringify({ after: page.next, dirty }));
+      ledger.writeSettleProgress(LEGACY_PERSONAL_BODIES_CURSOR, JSON.stringify({ after: page.next, dirty, canMove, waiting }));
       return report;
     }
   }
-  ledger.writeSettleProgress(CURSOR3, "");
+  ledger.writeSettleProgress(LEGACY_PERSONAL_BODIES_WAITING, String(waiting));
+  ledger.writeSettleProgress(LEGACY_PERSONAL_BODIES_CURSOR, "");
   if (!dirty) {
     personal?.finishPersonalBodyWalk();
-    ledger.writeSettleProgress(DONE2, "1");
-    report.retired = true;
+    if (waiting)
+      report.waitingForMoves = true;
+    else {
+      ledger.writeSettleProgress(DONE2, "1");
+      report.retired = true;
+    }
   }
   return report;
 }
-var CURSOR3 = "legacy_personal_bodies_cursor_v2", DONE2 = "legacy_personal_bodies_done_v2", LEGACY_PERSONAL_BODY_PAGE_SIZE = 25;
+var DONE2 = "legacy_personal_bodies_done_v2", LEGACY_PERSONAL_BODY_PAGE_SIZE = 25;
 var init_legacy_personal_bodies = __esm(() => {
+  init_tier_ledger();
   init_engine();
   init_secret_scan_off_thread();
   init_loop_pass();
@@ -249096,11 +249133,13 @@ function emptyBacklogCounts() {
   return { checkingItems: 0, remainingQuestions: 0, pendingItems: 0, pendingWithoutQuestion: 0, oldestPendingAgeMs: 0 };
 }
 function addLegacyPersonalProgress(counts, progress) {
-  if (progress.held === 0)
+  if (!progress.held && !progress.waiting)
     return;
   const total = counts.legacyPersonalBodies ??= { held: 0, judged: 0 };
   total.held += progress.held;
   total.judged += progress.judged;
+  if (progress.waiting)
+    total.waiting = (total.waiting ?? 0) + progress.waiting;
 }
 function newStoredWalk(now) {
   return { active: false, status: { lastRanAt: new Date(now).toISOString(), reason: "working" } };
@@ -250572,16 +250611,17 @@ class TierSnifferService {
         }
         return { retired: held.retired, complete: held.retired, changed: held.settled > 0, failed: held.failed > 0 };
       });
-      await this.runStoredWalker(set, "legacyPersonalBodies", undefined, async () => {
+      const movesAvailable = () => !!this.options.autoMoves?.localEmbeddingsOnly() && (this.options.autoMoves.maxPerPass ?? 25) > 0;
+      await this.runStoredWalker(set, "legacyPersonalBodies", movesAvailable() ? undefined : this.storedWalkInputs(set, true), async () => {
         const page = await settleLegacyPersonalBodiesOffThread({
           set,
           queue: this.options.installed.snifferStoreForLedger(ledgerPath),
           turn,
-          movesAvailable: !!this.options.autoMoves && (this.options.autoMoves.maxPerPass ?? 25) > 0
+          movesAvailable
         });
         if (page.held > 0)
           this.options.log?.(`Olympus tier hold: ${page.held} item(s) from earlier builds held for judgment, moves to Private queued.`);
-        return { retired: page.retired, complete: page.retired, changed: page.held + page.secrets > 0, failed: page.failed > 0 };
+        return { retired: page.retired, complete: page.retired || page.waitingForMoves, changed: page.held + page.secrets > 0, failed: page.failed > 0 };
       });
       await this.runStoredWalker(set, "personalLowerings", this.storedWalkInputs(set, true), async (after) => {
         const page = await storedPersonalLoweringLap(set, after, turn);
@@ -250668,6 +250708,7 @@ class TierSnifferService {
     return automaticTierMovesAllowed(set, options);
   }
   async runAutoMoves(options, signal, direction, changedPaths) {
+    const recoveryOnly = !options.localEmbeddingsOnly();
     const timings = emptyTierMoveTimings();
     const started = this.monotonicNow();
     const paths = this.ledgerPaths();
@@ -250685,7 +250726,7 @@ class TierSnifferService {
     const requestedMs = options.lowerSliceMs ?? adaptiveMs;
     const sliceMs = Math.min(capMs, Math.max(0, Number.isFinite(requestedMs) ? requestedMs : adaptiveMs));
     const deadline = started + sliceMs;
-    const shouldStop = () => signal.aborted || direction === "lower" && (this.monotonicNow() >= deadline || this.lowerMovePreempted || this.yieldNow());
+    const shouldStop = () => signal.aborted || !recoveryOnly && !options.localEmbeddingsOnly() || direction === "lower" && (this.monotonicNow() >= deadline || this.lowerMovePreempted || this.yieldNow());
     const report = { moved: 0, failed: 0, notEligible: 0, timings };
     const embeddingCorpora = new Set;
     const staleAfterMs = Math.max(0, options.staleAfterMs ?? DEFAULT_STALE_MOVE_MS);
@@ -250700,20 +250741,17 @@ class TierSnifferService {
         continue;
       if (set.openStores().some((store) => store.reclaiming))
         continue;
-      const page = (legacyHoldsOnly = false) => ledgerReadOffThread(set.ledger, set.ledger.listMovingSteps({ limit: budget, direction, legacyHoldsOnly }));
-      let queued = (await page()).filter(isAutoMoveCandidate);
+      const builtInOnly = !recoveryOnly && setEmbedsWithBuiltInOnly(set);
+      const legacyHoldsOnly = direction === "raise" && !builtInOnly;
+      const queued = (await ledgerReadOffThread(set.ledger, set.ledger.listMovingSteps({ limit: budget, direction, legacyHoldsOnly }))).filter(isAutoMoveCandidate);
       if (set.openStores().some((store) => store.reclaiming))
         continue;
-      const builtInOnly = options.localEmbeddingsOnly() && setEmbedsWithBuiltInOnly(set);
-      if (!builtInOnly && queued.length) {
-        if (direction === "lower") {
-          report.notEligible += queued.length;
-          continue;
-        }
-        queued = (await page(true)).filter(isAutoMoveCandidate);
-        if (set.openStores().some((store) => store.reclaiming))
-          continue;
+      if (!builtInOnly && direction === "lower") {
+        report.notEligible += queued.length;
+        continue;
       }
+      if (recoveryOnly && (!queued.length || set.foreignBoundLeg()))
+        continue;
       const deferRetry = (identity, generation) => {
         try {
           set.ledger.recordMoveFailure(identity, { expectedGeneration: generation });
@@ -250772,7 +250810,7 @@ class TierSnifferService {
         changedPaths.add(ledgerPath);
         report.moved++;
         for (const destination of result.destinations) {
-          if (destination.chunksToEmbed > 0)
+          if (!recoveryOnly && destination.chunksToEmbed > 0)
             embeddingCorpora.add(destination.corpusId);
         }
         const key = `${ledgerPath}\x00${tierLedgerIdentityKey(recordIdentity2(record))}\x00${record.generation}`;
@@ -250846,7 +250884,7 @@ class TierSnifferService {
         this.lastIdleLowerLogMs = this.clockMs();
       this.options.log?.(`Olympus tier sniffer: ${report.moved} automatic tier move(s), ${report.failed} failed` + `${report.failedBy ? ` (${Object.entries(report.failedBy).map(([why, n]) => `${why} ×${n}`).join(", ")})` : ""}` + `${report.abandoned ? `, ${report.abandoned} stale move(s) given up (back where they were)` : ""}` + `${report.staleRaises ? `, ${report.staleRaises} stale raise(s) kept hidden and queued` : ""}` + `${report.retiredAbsent ? `, ${report.retiredAbsent} stale raise(s) of items no store holds forgotten` : ""}; direction=${direction} elapsed_ms=${Math.round(report.elapsedMs)} ` + (direction === "lower" ? `backlog=${backlog} slice_ms=${Math.round(sliceMs)} ` : "") + Object.entries(timings).map(([step, ms]) => `${step.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`)}=${Math.round(ms)}`).join(" ") + ".");
     }
-    return report;
+    return recoveryOnly && !didWork ? undefined : report;
   }
   settleStaleMove(set, record, report) {
     try {
@@ -260387,7 +260425,8 @@ function copyDashboardViewModel(view) {
       ...view.privacy.legacyPersonalBodies ? {
         legacyPersonalBodies: {
           held: whole(view.privacy.legacyPersonalBodies.held),
-          judged: whole(view.privacy.legacyPersonalBodies.judged)
+          judged: whole(view.privacy.legacyPersonalBodies.judged),
+          ...view.privacy.legacyPersonalBodies.waiting ? { waiting: whole(view.privacy.legacyPersonalBodies.waiting) } : {}
         }
       } : {},
       ...typeof view.privacy.judgePerMinute === "number" && Number.isFinite(view.privacy.judgePerMinute) && view.privacy.judgePerMinute > 0 ? { judgePerMinute: Math.round(view.privacy.judgePerMinute * 10) / 10 } : {}

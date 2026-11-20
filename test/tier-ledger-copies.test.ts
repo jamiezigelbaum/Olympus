@@ -57,12 +57,12 @@ describe('tier ledger copies (P1b)', () => {
       finally { db.close(); }
     };
     try {
-      expect(progress()).toEqual({ held: 0, judged: 0 });
+      expect(progress()).toEqual({ held: 0, judged: 0, waiting: 0 });
       const placed = store.recordRoutedPlacement(ITEM, decision(), whole(INTERNAL)).record;
       const moving = store.recordLegacyPersonalHold(ITEM, held, whole(SECURE, true), digest, { generation: placed.generation, override: undefined });
       expect(moving).toMatchObject({ outcome: 'queued_move', raise: true });
       store.recordLegacyPersonalHold(ITEM, held, whole(SECURE, true), digest, { generation: moving.record.generation, override: undefined });
-      expect(progress()).toEqual({ held: 1, judged: 0 });
+      expect(progress()).toEqual({ held: 1, judged: 0, waiting: 0 });
       const queued = store.getCurrent(ITEM)!;
       const expectedGeneration = queued.generation;
       const destination = whole(SECURE, true).copies;
@@ -72,12 +72,12 @@ describe('tier ledger copies (P1b)', () => {
       // Simulate a verdict settled directly by the classifier's cache, which
       // does not run the asynchronous question callback.
       store.recordRoutedPlacement(ITEM, cached('The picnic starts at noon on Sunday.'), whole(SECURE));
-      expect(progress()).toEqual({ held: 1, judged: 0 });
+      expect(progress()).toEqual({ held: 1, judged: 0, waiting: 0 });
       const judged = cached(text);
       expect(hasContentJudgeVerdict(judged.reasons, 'private', digest)).toBe(true);
       store.recordRoutedPlacement(ITEM, judged, whole(SECURE));
       store.recordRoutedPlacement(ITEM, judged, whole(SECURE));
-      expect(progress()).toEqual({ held: 1, judged: 1 });
+      expect(progress()).toEqual({ held: 1, judged: 1, waiting: 0 });
     } finally {
       store.close();
       rmSync(root, { recursive: true, force: true });

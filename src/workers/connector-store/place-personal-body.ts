@@ -20,7 +20,7 @@ import type { TieredStoreSet } from './tiered-store-set.ts';
 export function placePersonalBody(set: TieredStoreSet, personal: LocalConnectorStore,
   item: { identity: SourceItemIdentity; mimeType?: string; text: string },
   queue: TierSnifferStore | undefined, mode: 'restore' | 'walk',
-  walk?: { previousLedger?: TierLedger; movesAvailable: boolean }): 'unchanged' | 'held' | 'secrets' | 'retry' {
+  walk?: { previousLedger?: TierLedger; movesAvailable: boolean }): 'unchanged' | 'held' | 'secrets' | 'retry' | 'waiting' {
   const { ledger } = set;
   const { identity, text } = item;
   if (mode === 'restore' && !text.trim()) return 'unchanged';
@@ -29,13 +29,15 @@ export function placePersonalBody(set: TieredStoreSet, personal: LocalConnectorS
   const movesAvailable = walk?.movesAvailable ?? true;
   const previous = previousLedger?.getCurrent(identity);
   // Stored text cannot supply the original digest of a legacy override.
-  const override = ledger.observeOverrideText(identity);
-  const effectiveOverride = override ?? (!current?.routed ? previousLedger?.observeOverrideText(identity) : undefined);
+  const readOverride = (source: TierLedger) => movesAvailable ? source.observeOverrideText(identity) : source.getOverride(identity);
+  const override = readOverride(ledger);
+  const effectiveOverride = override ?? (!current?.routed && previousLedger ? readOverride(previousLedger) : undefined);
   const copies = ledger.copies(identity);
   const copy = copies.find(copy => copy.corpusId === personal.corpusId && (mode === 'walk' || copy.layers !== 'metadata'));
   if (effectiveOverride?.kind !== 'not_secret' && (effectiveOverride?.tier === 'secrets'
     || [current, current?.routed ? undefined : previous].some(record => record && [record.metadataTier, record.contentTier, record.targetMetadataTier,
       record.targetContentTier].includes('secrets')))) {
+    if (!movesAvailable) return 'waiting';
     const record = set.adoptLegacyItem(identity)!;
     const { copies: hidden } = ledger.flipToSecrets(identity, {
       expectedGeneration: record.generation, ...(mode === 'walk' ? { guard: { generation: record.generation, override } } : {}),
@@ -70,6 +72,7 @@ export function placePersonalBody(set: TieredStoreSet, personal: LocalConnectorS
     && (current.metadataTier === 'private' || current.metadataTier === 'public'));
   if (currentAllowsPersonal && ownerTier !== 'secure'
     && [current, previous].some(record => record && exactPersonalReceipt(record, text, effectiveOverride, image))) return 'unchanged';
+  if (!movesAvailable) return 'waiting';
   // Put-back rejects a conflict before replacing the old question. A live
   // Secret disposition also needs to know that no other version would be
   // lost. The ordinary live move checks all copies under its writer locks.
@@ -88,7 +91,7 @@ export function placePersonalBody(set: TieredStoreSet, personal: LocalConnectorS
   const needsNames = mode === 'walk' || ownerTier === 'private' || ownerTier === 'public';
   const names = needsNames ? personal.exportItemNames(identity) : undefined;
   const scanned = names ? classifyItemTiers({ signals: storedSignals(names), text }, effectiveOverride ? { override: effectiveOverride } : {}) : undefined;
-  if (mode === 'walk' && (!names || (!movesAvailable && scanned?.contentTier !== 'secrets'))) return 'retry';
+  if (mode === 'walk' && !names) return 'retry';
   record ??= set.adoptLegacyItem(identity)!;
   if (mode === 'walk' && names && scanned?.contentTier === 'secrets' && !conflict()) {
     const settled = settleRoutedSecrets(set, identity, { ...scanned, metadataTier: maxTier(record.metadataTier, scanned.metadataTier) }, names, {
@@ -96,7 +99,6 @@ export function placePersonalBody(set: TieredStoreSet, personal: LocalConnectorS
     }, { guard: { generation: record.generation, override } });
     return settled ? 'secrets' : 'retry';
   }
-  if (mode === 'walk' && !movesAvailable) return 'retry';
   // A question about earlier bytes cannot authorize this body.
   if (mode === 'walk') queue?.deleteItemQuestions(identity);
   const floor = ownerTier === 'secure' ? 'secure' : 'public';

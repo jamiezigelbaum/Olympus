@@ -1,5 +1,6 @@
 // A one-time walk of Personal bodies that may predate routed writes. A page
 // can contain only already-cleared items. Checkpoint its position even then.
+import { LEGACY_PERSONAL_BODIES_CURSOR, LEGACY_PERSONAL_BODIES_WAITING } from '../classification/tier-ledger.ts';
 import type { TierSnifferStore } from '../classification/sniffer-store.ts';
 import { secretScanReusable } from '../classification/engine.ts';
 import { scanSecretsAhead } from '../classification/secret-scan-off-thread.ts';
@@ -9,7 +10,6 @@ import { placePersonalBody } from './place-personal-body.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
 
 // Earlier passes could retire after skipping retained metadata-layer bodies.
-const CURSOR = 'legacy_personal_bodies_cursor_v2';
 const DONE = 'legacy_personal_bodies_done_v2';
 // Match the default raise-drain page. Each candidate carries its complete text.
 export const LEGACY_PERSONAL_BODY_PAGE_SIZE = 25;
@@ -19,7 +19,7 @@ interface WalkOptions {
   queue: TierSnifferStore;
   limit?: number;
   chunkLimit?: number;
-  movesAvailable?: boolean;
+  movesAvailable?: () => boolean;
   turn?: () => Promise<void> | undefined;
 }
 
@@ -29,34 +29,38 @@ interface WalkReport {
   secrets: number;
   failed: number;
   retired: boolean;
+  waitingForMoves: boolean;
 }
 
 export function settleLegacyPersonalBodiesOffThread(options: WalkOptions): Promise<WalkReport> {
   return runPassOffThread(walk(options), { family: 'legacy-personal-bodies', ...(options.turn ? { turn: options.turn } : {}) });
 }
 
-function* walk({ set, queue, limit = LEGACY_PERSONAL_BODY_PAGE_SIZE, chunkLimit = PERSONAL_BODY_CHUNKS_PER_PAGE, movesAvailable = true }: WalkOptions): LoopPass<WalkReport> {
+function* walk({ set, queue, limit = LEGACY_PERSONAL_BODY_PAGE_SIZE, chunkLimit = PERSONAL_BODY_CHUNKS_PER_PAGE, movesAvailable = () => true }: WalkOptions): LoopPass<WalkReport> {
   const { ledger } = set;
-  const report = { checked: 0, held: 0, secrets: 0, failed: 0, retired: false };
+  const report = { checked: 0, held: 0, secrets: 0, failed: 0, retired: false, waitingForMoves: false };
   if (ledger.readMeta(DONE) === '1') return { ...report, retired: true };
   const personal = set.store('internal');
-  const saved = ledger.readMeta(CURSOR);
-  const checkpoint = saved ? JSON.parse(saved) as { after?: PersonalBodyCursor; dirty: boolean } : undefined;
+  const saved = ledger.readMeta(LEGACY_PERSONAL_BODIES_CURSOR);
+  const canMove = movesAvailable();
+  const last = saved ? JSON.parse(saved) as { after?: PersonalBodyCursor; dirty: boolean; waiting?: number; canMove?: boolean } : undefined;
+  const checkpoint = (last?.canMove ?? true) === canMove ? last : undefined;
+  let waiting = checkpoint?.waiting ?? 0;
   let dirty = checkpoint?.dirty ?? false;
   if (personal) {
-    const binding = personal.tierSetBinding();
-    if (binding && binding.ledgerId !== ledger.ledgerId()) return { ...report, failed: 1 };
+    if (set.foreignBoundLeg()) return { ...report, failed: 1 };
     const marker = personal.changeMarker();
     const page = yield* find(personal.personalBodyPageFinder(checkpoint?.after, Math.min(limit, LEGACY_PERSONAL_BODY_PAGE_SIZE), chunkLimit));
     if (!page) return report; // The ordered index is still being built.
     const previousLedger = page.items.length ? personal.preRoutingLedgerFor(ledger) : undefined;
-    const placement = { movesAvailable, ...(previousLedger ? { previousLedger } : {}) };
+    const placement = { movesAvailable: canMove, ...(previousLedger ? { previousLedger } : {}) };
     for (const item of page.items) {
       yield* turn();
       report.checked++;
-      if (secretScanReusable(item.text)) {
+      if (canMove && secretScanReusable(item.text)) {
         yield* find({ here: () => undefined, offThread: () => scanSecretsAhead(item.text) });
       }
+      if (movesAvailable() !== canMove) return report;
       // The page was read on another connection, before the last turn.
       // Never screen, tombstone or authorize a different version of a body.
       const current = item.watch ? personal.personalBodyWatchCurrent(item.watch) : personal.changeMarker() === marker
@@ -67,12 +71,14 @@ function* walk({ set, queue, limit = LEGACY_PERSONAL_BODY_PAGE_SIZE, chunkLimit 
       }
       try {
         if (item.chunkCount === 0) {
-          personal.clearOrphanPersonalVectors(item.identity);
+          if (canMove) personal.clearOrphanPersonalVectors(item.identity);
+          else waiting++;
           continue;
         }
         const disposition = placePersonalBody(set, personal, item, queue, 'walk', placement);
         if (disposition === 'held') report.held++;
         if (disposition === 'secrets') report.secrets++;
+        if (disposition === 'waiting') waiting++;
         if (disposition === 'retry') report.failed++;
       } catch {
         // A failed item keeps this lap dirty. The rest of its page can proceed.
@@ -81,15 +87,20 @@ function* walk({ set, queue, limit = LEGACY_PERSONAL_BODY_PAGE_SIZE, chunkLimit 
     }
     dirty ||= report.held + report.secrets + report.failed > 0;
     if (page.next || page.partial) {
-      ledger.writeSettleProgress(CURSOR, JSON.stringify({ after: page.next, dirty }));
+      ledger.writeSettleProgress(LEGACY_PERSONAL_BODIES_CURSOR, JSON.stringify({ after: page.next, dirty, canMove, waiting }));
       return report;
     }
   }
-  ledger.writeSettleProgress(CURSOR, '');
+  // Publish the completed lap. Retrying a page or restarting halfway cannot double-count it.
+  ledger.writeSettleProgress(LEGACY_PERSONAL_BODIES_WAITING, String(waiting));
+  ledger.writeSettleProgress(LEGACY_PERSONAL_BODIES_CURSOR, '');
   if (!dirty) {
     personal?.finishPersonalBodyWalk();
-    ledger.writeSettleProgress(DONE, '1');
-    report.retired = true;
+    if (waiting) report.waitingForMoves = true;
+    else {
+      ledger.writeSettleProgress(DONE, '1');
+      report.retired = true;
+    }
   }
   return report;
 }

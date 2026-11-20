@@ -339,10 +339,11 @@ function emptyBacklogCounts(): BacklogCounts {
 }
 
 function addLegacyPersonalProgress(counts: BacklogCounts, progress: LegacyPersonalBodyProgress): void {
-  if (progress.held === 0) return;
+  if (!progress.held && !progress.waiting) return;
   const total = counts.legacyPersonalBodies ??= { held: 0, judged: 0 };
   total.held += progress.held;
   total.judged += progress.judged;
+  if (progress.waiting) total.waiting = (total.waiting ?? 0) + progress.waiting;
 }
 
 /**
@@ -609,7 +610,7 @@ export class TierSnifferService {
   private lastCycle: TierSnifferThroughput | undefined;
   private readonly cycleTotals = emptyThroughput();
   private readonly moveAbort = new AbortController();
-  private moving: Promise<TierAutoMoveReport> | undefined;
+  private moving: Promise<TierAutoMoveReport | undefined> | undefined;
   private readonly moveLedgerOffsets = { raise: 0, lower: 0 };
   private movingDirection: 'raise' | 'lower' | undefined;
   private lowerMovePreempted = false;
@@ -2156,13 +2157,14 @@ export class TierSnifferService {
         }
         return { retired: held.retired, complete: held.retired, changed: held.settled > 0, failed: held.failed > 0 };
       });
-      await this.runStoredWalker(set, 'legacyPersonalBodies', undefined, async () => {
+      const movesAvailable = () => !!this.options.autoMoves?.localEmbeddingsOnly() && (this.options.autoMoves.maxPerPass ?? 25) > 0;
+      await this.runStoredWalker(set, 'legacyPersonalBodies', movesAvailable() ? undefined : this.storedWalkInputs(set, true), async () => {
         const page = await settleLegacyPersonalBodiesOffThread({
           set, queue: this.options.installed.snifferStoreForLedger(ledgerPath), turn,
-          movesAvailable: !!this.options.autoMoves && (this.options.autoMoves.maxPerPass ?? 25) > 0,
+          movesAvailable,
         });
         if (page.held > 0) this.options.log?.(`Olympus tier hold: ${page.held} item(s) from earlier builds held for judgment, moves to Private queued.`);
-        return { retired: page.retired, complete: page.retired, changed: page.held + page.secrets > 0, failed: page.failed > 0 };
+        return { retired: page.retired, complete: page.retired || page.waitingForMoves, changed: page.held + page.secrets > 0, failed: page.failed > 0 };
       });
       await this.runStoredWalker(set, 'personalLowerings', this.storedWalkInputs(set, true), async after => {
         const page = await storedPersonalLoweringLap(set, after, turn);
@@ -2259,7 +2261,8 @@ export class TierSnifferService {
     signal: AbortSignal,
     direction: 'raise' | 'lower',
     changedPaths: Set<string>,
-  ): Promise<TierAutoMoveReport> {
+  ): Promise<TierAutoMoveReport | undefined> {
+    const recoveryOnly = !options.localEmbeddingsOnly();
     const timings = emptyTierMoveTimings();
     const started = this.monotonicNow();
     const paths = this.ledgerPaths();
@@ -2280,7 +2283,7 @@ export class TierSnifferService {
     const requestedMs = options.lowerSliceMs ?? adaptiveMs;
     const sliceMs = Math.min(capMs, Math.max(0, Number.isFinite(requestedMs) ? requestedMs : adaptiveMs));
     const deadline = started + sliceMs;
-    const shouldStop = () => signal.aborted || (direction === 'lower'
+    const shouldStop = () => signal.aborted || (!recoveryOnly && !options.localEmbeddingsOnly()) || (direction === 'lower'
       && (this.monotonicNow() >= deadline || this.lowerMovePreempted || this.yieldNow()));
     const report: TierAutoMoveReport = { moved: 0, failed: 0, notEligible: 0, timings };
     const embeddingCorpora = new Set<string>();
@@ -2298,17 +2301,15 @@ export class TierSnifferService {
       // queued for the next pass.
       if (set.openStores().some(store => store.reclaiming)) continue;
       // Found on the ledger's read worker; each move re-checks its generation as it lands.
-      const page = (legacyHoldsOnly = false) => ledgerReadOffThread(set.ledger,
-        set.ledger.listMovingSteps({ limit: budget, direction, legacyHoldsOnly }));
-      let queued = (await page()).filter(isAutoMoveCandidate);
+      const builtInOnly = !recoveryOnly && setEmbedsWithBuiltInOnly(set);
+      const legacyHoldsOnly = direction === 'raise' && !builtInOnly;
+      const queued = (await ledgerReadOffThread(set.ledger,
+        set.ledger.listMovingSteps({ limit: budget, direction, legacyHoldsOnly }))).filter(isAutoMoveCandidate);
       if (set.openStores().some(store => store.reclaiming)) continue;
-      const builtInOnly = options.localEmbeddingsOnly() && setEmbedsWithBuiltInOnly(set);
-      if (!builtInOnly && queued.length) {
-        if (direction === 'lower') { report.notEligible += queued.length; continue; }
-        // Filter before LIMIT so an unrelated ineligible raise cannot strand a hold.
-        queued = (await page(true)).filter(isAutoMoveCandidate);
-        if (set.openStores().some(store => store.reclaiming)) continue;
-      }
+      if (!builtInOnly && direction === 'lower') { report.notEligible += queued.length; continue; }
+      // A stopped installation may have hidden the source of an authorized raise
+      // before the mover copied it. Finish only that transfer, without embedding.
+      if (recoveryOnly && (!queued.length || set.foreignBoundLeg())) continue;
       // Reorder retries within a bounded page while their generation is queued.
       const deferRetry = (identity: TierLedgerIdentity, generation: number) => {
         try {
@@ -2372,7 +2373,7 @@ export class TierSnifferService {
         changedPaths.add(ledgerPath);
         report.moved++;
         for (const destination of result.destinations) {
-          if (destination.chunksToEmbed > 0) embeddingCorpora.add(destination.corpusId);
+          if (!recoveryOnly && destination.chunksToEmbed > 0) embeddingCorpora.add(destination.corpusId);
         }
         const key = `${ledgerPath}\u0000${tierLedgerIdentityKey(recordIdentity(record))}\u0000${record.generation}`;
         this.moveFailures.delete(key);
@@ -2443,7 +2444,7 @@ export class TierSnifferService {
         + Object.entries(timings).map(([step, ms]) => `${step.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`)}=${Math.round(ms)}`).join(' ') + '.',
       );
     }
-    return report;
+    return recoveryOnly && !didWork ? undefined : report;
   }
 
   /**

@@ -35,7 +35,7 @@ describe('dashboard tier counts and migration state', () => {
   });
 
   test('shows progress judging items held from earlier builds on the dashboard', async () => {
-    const progress = { held: 12, judged: 7 };
+    const progress = { held: 12, judged: 7, waiting: 3 };
     const status = createSourceIndexStatusHandler({
       corpusDefinitions: [],
       tierClassification: () => ({

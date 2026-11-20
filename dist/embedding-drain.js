@@ -18046,9 +18046,13 @@ var RETIRED_EMBEDDING_CLEARANCE_REASON = "content:sniffer:retired_embedding_clea
 var RETAINED_MOVE_SOURCE_REASON = "content:retained_move_source";
 var LEGACY_PERSONAL_BODIES_HELD = "legacy-personal-bodies:held";
 var LEGACY_PERSONAL_BODIES_JUDGED = "legacy-personal-bodies:judged";
+var LEGACY_PERSONAL_BODIES_CURSOR = "legacy_personal_bodies_cursor_v2";
+var LEGACY_PERSONAL_BODIES_WAITING = "legacy-personal-bodies:waiting";
 var LEGACY_PERSONAL_BODY_PROGRESS_SQL = `SELECT
   CAST(COALESCE((SELECT value FROM tier_ledger_meta WHERE key = '${LEGACY_PERSONAL_BODIES_HELD}'), 0) AS INTEGER) AS held,
-  CAST(COALESCE((SELECT value FROM tier_ledger_meta WHERE key = '${LEGACY_PERSONAL_BODIES_JUDGED}'), 0) AS INTEGER) AS judged`;
+  CAST(COALESCE((SELECT value FROM tier_ledger_meta WHERE key = '${LEGACY_PERSONAL_BODIES_JUDGED}'), 0) AS INTEGER) AS judged,
+  MAX(CAST(COALESCE((SELECT value FROM tier_ledger_meta WHERE key = '${LEGACY_PERSONAL_BODIES_WAITING}'), 0) AS INTEGER),
+    COALESCE((SELECT json_extract(NULLIF(value, ''), '$.waiting') FROM tier_ledger_meta WHERE key = '${LEGACY_PERSONAL_BODIES_CURSOR}'), 0)) AS waiting`;
 function isFailSafeMissingContentQuestion(reason) {
   return reason.startsWith("content:sniffer:") && (reason.endsWith(":fail_safe:missing_question") || reason.endsWith(":fail_safe:unread"));
 }
@@ -18262,7 +18266,11 @@ function listMovingRead(options) {
       SELECT * FROM tier_items INDEXED BY tier_items_move_order WHERE state = 'moving'
       ${tierMovingDirectionClause(options.direction)}
       ${options.legacyHoldsOnly ? `AND instr(reasons_json, '"${LEGACY_PERSONAL_BODY_REASON}"') > 0
-        AND (content_pending = 1 OR instr(reasons_json, '"${OWNER_OVERRIDE_SECRET_REVIEW_REASON}"') > 0)` : ""}
+        AND (content_pending = 1 OR instr(reasons_json, '"${OWNER_OVERRIDE_SECRET_REVIEW_REASON}"') > 0)
+        AND EXISTS (SELECT 1 FROM tier_copies c WHERE c.provider = tier_items.provider
+          AND c.account_scope = tier_items.account_scope AND c.conversation_key = tier_items.conversation_key
+          AND c.provider_item_id = tier_items.provider_item_id AND c.trust_domain = 'internal' AND c.layers <> 'metadata'
+          AND c.copy_state = 'superseded' AND c.superseded_by_generation = tier_items.generation + 1)` : ""}
       ORDER BY move_attempts, decided_at, provider, account_scope, provider_item_id, conversation_key
       LIMIT ?
     `,
@@ -29163,7 +29171,7 @@ ${parentKey(ref)}`, { ref, origin });
           BEGIN DELETE FROM legacy_body_watch WHERE item_pk IN (${keys}); END`);
       }
       this.db.exec("DELETE FROM legacy_body_watch");
-      this.db.query("INSERT INTO legacy_body_watch VALUES (?, ?)").run(itemPk, token);
+      this.db.query("INSERT INTO legacy_body_watch (item_pk, token) VALUES (?, ?)").run(itemPk, token);
       return token;
     }).immediate();
   }

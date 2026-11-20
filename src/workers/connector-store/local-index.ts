@@ -7863,7 +7863,7 @@ export class LocalConnectorStore {
           BEGIN DELETE FROM legacy_body_watch WHERE item_pk IN (${keys}); END`);
       }
       this.db.exec('DELETE FROM legacy_body_watch');
-      this.db.query('INSERT INTO legacy_body_watch VALUES (?, ?)').run(itemPk, token);
+      this.db.query('INSERT INTO legacy_body_watch (item_pk, token) VALUES (?, ?)').run(itemPk, token);
       return token;
     }).immediate();
   }

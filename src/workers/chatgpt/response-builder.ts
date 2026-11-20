@@ -329,6 +329,7 @@ export function copyDashboardViewModel(view: DashboardViewModelV1): DashboardVie
         legacyPersonalBodies: {
           held: whole(view.privacy.legacyPersonalBodies.held),
           judged: whole(view.privacy.legacyPersonalBodies.judged),
+          ...(view.privacy.legacyPersonalBodies.waiting ? { waiting: whole(view.privacy.legacyPersonalBodies.waiting) } : {}),
         },
       } : {}),
       ...(typeof view.privacy.judgePerMinute === 'number' && Number.isFinite(view.privacy.judgePerMinute) && view.privacy.judgePerMinute > 0
