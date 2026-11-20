@@ -520,18 +520,19 @@ export function createGmailConnectorStoreSyncHandler(
         const children: RawItem[] = [];
         let examined = 0;
         let exhausted = 0;
+        let retryPending = false;
         let stopped: unknown;
         const stores = [['internal', options.internalStore, options.secureStore], ['secure', options.secureStore, options.internalStore]] as const;
         for (const [name, store, other] of stores) {
           let storeDone = false;
-          while (examined < max && stopped === undefined) {
+          while (examined < max && stopped === undefined && !retryPending) {
             const rows = store.parentsAwaitingChildren(GMAIL_PROVIDER, GMAIL_ATTACHMENT_LINE, saved[name], max - examined);
             if (rows.length === 0) {
               storeDone = true;
               break;
             }
             for (const row of rows) {
-              if (examined >= max || stopped !== undefined) break;
+              if (examined >= max || stopped !== undefined || retryPending) break;
               // Only this account's Gmail messages; a copy whose other store already holds its children is done.
               if (row.accountScope === account && !row.providerItemId.startsWith(GMAIL_OWN_ID_PREFIX) && !other.hasChildRowsOf(row.localItemId)) {
                 examined += 1;
@@ -539,7 +540,11 @@ export function createGmailConnectorStoreSyncHandler(
                   options.assertScopeCurrent?.();
                   const admitted = await connector.backfillAttachmentsOf(row.providerItemId);
                   options.assertScopeCurrent?.();
-                  children.push(...admitted);
+                  if (admitted.status === 'retry') {
+                    retryPending = true;
+                    break;
+                  }
+                  children.push(...admitted.items);
                 } catch (error) {
                   // Gone from Gmail: nothing to list. A spent budget, a changed scope or anything else stops the
                   // pass before this message, keeping what it listed so far; the next pass resumes here.
@@ -555,7 +560,7 @@ export function createGmailConnectorStoreSyncHandler(
             }
           }
           if (storeDone) exhausted += 1;
-          if (stopped !== undefined) break;
+          if (stopped !== undefined || retryPending) break;
         }
         if (children.length > 0) {
           // Stored as the live lane stores them (its own observation, so its approved scope counts them).
@@ -571,7 +576,7 @@ export function createGmailConnectorStoreSyncHandler(
           await tierSet.sync(scopedTraversal(listing, connectorId, options.assertScopeCurrent),
             { fetchContent: true, classification, tierClassification }, { commitCursor: false });
         }
-        const done = stopped === undefined && exhausted === stores.length;
+        const done = stopped === undefined && !retryPending && exhausted === stores.length;
         tierSet.ledger.commitSetCursor(GMAIL_CHILDREN_BACKFILL_SET, GMAIL_CHILDREN_BACKFILL_CONNECTOR, JSON.stringify({ ...saved, ...(done ? { done: true } : {}) }));
         if (stopped !== undefined) throw stopped;
         return { listed: children.length, examined, done };
