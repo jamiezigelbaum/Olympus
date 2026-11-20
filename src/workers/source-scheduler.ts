@@ -31,9 +31,10 @@ import {
   type ConnectorStoreEmbeddingTarget,
   type LocalConnectorStore,
 } from './connector-store/index.ts';
+import { GMAIL_CONFIRMATION_RESERVE_REASON, type GmailConfirmationYieldReason } from './google-connectors/gmail-live-sync.ts';
 import {
   GMAIL_DAILY_REQUEST_GUARD_REASON,
-  GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS,
+  GMAIL_RESUME_REJECTED_WARNING,
   GMAIL_INTERNAL_CONNECTOR_CORPUS_ID,
   GOOGLE_DRIVE_DAILY_REQUEST_GUARD_REASON,
   GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID,
@@ -250,6 +251,8 @@ export interface SourceSchedulerTaskRunContext {
   effectiveIntervalMs: number;
   degradedReason?: string;
   provenance?: SourceSchedulerRunProvenance;
+  /** Gmail confirmation checks this at provider page boundaries. */
+  yieldGmailConfirmation?: () => GmailConfirmationYieldReason | undefined;
 }
 
 export interface SourceSchedulerTask {
@@ -288,6 +291,7 @@ export interface SourceSchedulerTask {
 }
 
 export interface SourceSchedulerTaskRunResult {
+  gmailConfirmationWaitReason?: GmailConfirmationYieldReason;
   status: 'progress' | 'idle';
   counts?: Record<string, number>;
   warnings?: string[];
@@ -502,7 +506,7 @@ export interface SourceSchedulerTaskStatus {
   /** Computer dashboard only; never persisted in scheduler state. */
   missing_scope_path?: string;
   /** Short maintenance hold, never persisted as a failure or provider deferral. */
-  wait_reason?: 'store_reclaim';
+  wait_reason?: 'store_reclaim' | GmailConfirmationYieldReason;
   id: string;
   kind: SourceSchedulerTaskKind;
   metadata_walk_role?: SourceSchedulerTask['metadataWalkRole'];
@@ -528,7 +532,7 @@ export interface SourceSchedulerTaskStatus {
 }
 
 interface SchedulerTaskState {
-  waitReason?: 'store_reclaim';
+  waitReason?: SourceSchedulerTaskStatus['wait_reason'];
   task: SourceSchedulerTask;
   source: SourceSchedulerSource;
   running: boolean;
@@ -930,6 +934,10 @@ export class SourceScheduler {
     const dueAt = now.getTime();
     this.applyPendingUnparks(dueAt);
     if (this.askHolds()) {
+      for (const state of this.states) {
+        if (isGmailConfirmationTask(state.task) && !state.running && state.nextRunAt <= dueAt
+          && taskCadence(state.source, state.task) === 'continuous') state.waitReason = 'owner_ask';
+      }
       this.scheduleContinueWake(dueAt + SOURCE_SCHEDULER_ASK_RECHECK_MS);
       return this.status(now);
     }
@@ -1118,7 +1126,11 @@ export class SourceScheduler {
           // waits out a listing), but when the listing ends it still follows
           // at once, as it did when the two shared the key.
           const sources = new Set(group.map((state) => state.source));
-          const due = this.states.filter((state) => !ran.has(state)
+          const ranGmailConfirmation = group.some(state => isGmailConfirmationTask(state.task));
+          // A live pull can come due again while confirmation holds the lane,
+          // even if the same tick already ran it before confirmation started.
+          const due = this.states.filter((state) => (!ran.has(state)
+              || (ranGmailConfirmation && state.task.metadataWalkRole === 'primary'))
             && !state.running
             && taskCadence(state.source, state.task) === 'continuous'
             && (taskConcurrencyKey(state.source, state.task) === concurrencyKey
@@ -1167,6 +1179,14 @@ export class SourceScheduler {
       try { await Promise.all(holds.map(hold => hold.done)); }
       finally { delete state.waitReason; }
       if (this.stops !== stops) return;
+    }
+    if (isGmailConfirmationTask(state.task)) {
+      if (provenance === 'scheduled' && this.askHolds()) {
+        state.waitReason = 'owner_ask';
+        this.scheduleContinueWake(this.now().getTime() + SOURCE_SCHEDULER_ASK_RECHECK_MS);
+        return;
+      }
+      delete state.waitReason;
     }
     this.executingStates.add(state);
     changeMemoryCounter(`tasks_${state.task.kind}`, 1);
@@ -1299,6 +1319,7 @@ export class SourceScheduler {
       }
       state.nextRunAt = nextRunAt;
       state.retryNotBeforeAt = retryAt ? nextRunAt : undefined;
+      if (result.gmailConfirmationWaitReason) state.waitReason = result.gmailConfirmationWaitReason;
       state.embeddingSweep = result.embeddingSweep;
       for (const { counts, ...store } of result.embeddingSweep ?? []) {
         console.info(`[olympus:embedding-sweep] ${JSON.stringify({
@@ -1312,7 +1333,7 @@ export class SourceScheduler {
       // A retry due before the next regular tick gets its own wake, or the tick
       // would round it up (an embedding backlog asking for 5 s waited 60 s).
       else if (retryAt && nextRunAt - Date.parse(completedAt) < this.tickMs) this.scheduleContinueWake(nextRunAt);
-      if (result.status === 'progress' && !retryAt) this.wakeDownstream(state, continueAt);
+      if (result.status === 'progress' && (!retryAt || isGmailConfirmationTask(runningTask))) this.wakeDownstream(state, continueAt);
     } catch (error) {
       delete state.wakeAfterRun;
       if (this.stops !== stopsAtStart) {
@@ -1444,6 +1465,13 @@ export class SourceScheduler {
           // byte-identical to what tasks received before provenance existed,
           // and the X adapter reads a missing marker as scheduled (R62).
           ...(provenance === 'operator' ? { provenance } : {}),
+          ...(isGmailConfirmationTask(task) ? { yieldGmailConfirmation: () => {
+            if (this.askHolds()) return 'owner_ask';
+            const liveDue = this.states.some(sibling => sibling.source.sourceId === state.source.sourceId
+              && sibling.source.corpusId === state.source.corpusId
+              && sibling.task.metadataWalkRole === 'primary' && sibling.nextRunAt <= this.now().getTime());
+            return liveDue ? 'live_pull_due' : undefined;
+          } } : {}),
           ...(state.checkpoint ? { checkpoint: state.checkpoint } : {}),
           ...(state.lastSuccessAt ? { lastSuccessAt: state.lastSuccessAt } : {}),
           effectiveIntervalMs: state.effectiveIntervalMs ?? taskIntervalMs(state.source, task),
@@ -2311,7 +2339,7 @@ function embeddingSweepTask(
         const rested = quiet.get(store)?.get(slot) ?? receipts?.get(slot);
         const wake = idleBackoff ? embeddingSweepWake(store, rested, keyBefore) : undefined;
         if (rested && wake === undefined) {
-          runs.push({ corpusId: store.corpusId, itemsAttempted: 0, chunksEmbedded: 0, itemsFailed: 0, itemsOutOfScope: 0,
+          runs.push({ corpusId: store.corpusId, itemsAttempted: 0, queued_first_items: 0, chunksEmbedded: 0, itemsFailed: 0, itemsOutOfScope: 0,
             inventory: rested.inventory });
           continue;
         }
@@ -2328,8 +2356,10 @@ function embeddingSweepTask(
         // provider were down (Sparta, 2026-11-06: 94 overruns, 70 of them
         // Dropbox, whose Private store then embedded nothing for an hour).
         const stopAtMs = Date.now() + Math.floor(deadlineMs / 2);
+        let queuedFirstItems = 0;
         const result = await Promise.race([
-          embedPendingChunks([target], { maxItems: paced ? GO_EASY_TRICKLE_EMBED_ITEMS : maxItems, stopAtMs, diagnostics: true, ...(holdForAsk ? { shouldStop: askHolds } : {}) }),
+          embedPendingChunks([target], { maxItems: paced ? GO_EASY_TRICKLE_EMBED_ITEMS : maxItems, stopAtMs, diagnostics: true,
+            onQueuedFirstItems: (count) => { queuedFirstItems = count; }, ...(holdForAsk ? { shouldStop: askHolds } : {}) }),
           new Promise<typeof overran>((resolve) => { timer = setTimeout(() => resolve(overran), deadlineMs); }),
         ]).finally(() => clearTimeout(timer));
         if (result !== overran) {
@@ -2350,13 +2380,14 @@ function embeddingSweepTask(
           continue;
         }
         target.store.setEmbeddingDeferral(EMBEDDING_PROVIDER_UNAVAILABLE_REASON);
-        runs.push({ corpusId: target.store.corpusId, itemsAttempted: 0, chunksEmbedded: 0, itemsFailed: 0, itemsOutOfScope: 0,
+        runs.push({ corpusId: target.store.corpusId, itemsAttempted: 0, queued_first_items: queuedFirstItems, chunksEmbedded: 0, itemsFailed: 0, itemsOutOfScope: 0,
           inventory: { inventory_complete: 0, pass_overran: 1 },
           deferredReason: EMBEDDING_PROVIDER_UNAVAILABLE_REASON });
         if (wake) walks.set(runIndex, { wake, not_resting: 'deferred' });
       }
       const deferred = runs.filter((run) => run.deferredReason !== undefined).length;
       const counts = {
+        queued_first_items: runs.reduce((sum, run) => sum + run.queued_first_items, 0),
         chunks_embedded: runs.reduce((sum, run) => sum + run.chunksEmbedded, 0),
         items_queued: passTargets.reduce((sum, target) => sum + target.store.queuedEmbeddingItemIds().length, 0),
         items_failed: passTargets.reduce((sum, target) => sum + target.store.embeddingFailedItemCount(), 0),
@@ -2375,6 +2406,7 @@ function embeddingSweepTask(
           ...run.inventory,
           whole_store: passTargets[index]!.wholeStore ? 1 : 0,
           queued_items: passTargets[index]!.store.queuedEmbeddingItemIds().length,
+          queued_first_items: run.queued_first_items,
           items_attempted: run.itemsAttempted, chunks_embedded: run.chunksEmbedded,
           items_failed: run.itemsFailed, skipped_out_of_scope_items: run.itemsOutOfScope,
           skipped_lease_busy_items: run.busy ? run.itemsAttempted : 0,
@@ -2624,6 +2656,12 @@ export function createXBookmarksSchedulerSource(input: {
   };
 }
 
+const GMAIL_CONFIRMATION_TASK_ID = 'gmail.email_private_scope_confirmation_v1';
+
+function isGmailConfirmationTask(task: SourceSchedulerTask): boolean {
+  return task.id === GMAIL_CONFIRMATION_TASK_ID || task.id.startsWith(`${GMAIL_CONFIRMATION_TASK_ID}:scope:`);
+}
+
 export function createGmailConnectorStoreSchedulerSource(input: {
   config: OlympusConfig;
   sync?: GmailConnectorStoreSyncHandler;
@@ -2694,17 +2732,36 @@ export function createGmailConnectorStoreSchedulerSource(input: {
         },
       },
       ...(input.sync.confirmPrivateScope ? [{
-        id: 'gmail.email_private_scope_confirmation_v1', kind: 'sync' as const, writer: true as const,
+        id: GMAIL_CONFIRMATION_TASK_ID, kind: 'sync' as const, writer: true as const,
         intervalMs: liveConfig.storePullIntervalMs,
         freshnessThresholdMs: liveConfig.storePullFreshnessThresholdMs,
         run: async (context?: SourceSchedulerTaskRunContext): Promise<SourceSchedulerTaskRunResult> => {
           try {
-            const result = await input.sync!.confirmPrivateScope!({ max_items: Math.min(liveConfig.storePullMaxItems, GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS), ...(context?.checkpoint ? { checkpoint: context.checkpoint } : {}) });
+            const result = await input.sync!.confirmPrivateScope!({
+              max_items: liveConfig.storePullMaxItems,
+              ...(context?.checkpoint ? { checkpoint: context.checkpoint } : {}),
+              ...(context?.yieldGmailConfirmation ? { yieldReason: context.yieldGmailConfirmation } : {}),
+            });
+            const hold = result.hold;
             return {
               status: result.confirmed > 0 ? 'progress' : 'idle',
-              counts: { private_scope_confirmed: result.confirmed, items_seen: result.confirmed, items_changed: result.confirmed },
+              counts: {
+                private_scope_confirmed: result.confirmed,
+                private_scope_confirmed_total: result.confirmedTotal,
+                items_seen: result.confirmed,
+                items_changed: result.confirmed,
+                traversal_complete: Number(result.done),
+                ...(hold ? { private_scope_remaining: hold.remaining } : {}),
+                ...(hold?.error.amounts ? {
+                  limit_stop_limit: hold.error.amounts.limit,
+                  ...(hold.error.amounts.used !== undefined ? { limit_stop_used: hold.error.amounts.used } : {}),
+                } : {}),
+              },
               checkpoint: result.checkpoint,
-              ...(!result.done ? { continueSoon: true } : {}),
+              ...(result.waitReason ? { gmailConfirmationWaitReason: result.waitReason } : {}),
+              ...(result.cursorRejected ? { warnings: [GMAIL_RESUME_REJECTED_WARNING] } : {}),
+              ...(hold ? { retryAt: { at: hold.error.retryAt, degradedReason: gmailConfirmationHoldReason(hold.error) } }
+                : !result.done ? { continueSoon: true } : {}),
             };
           } catch (error) { throw gmailSchedulerFailure(error); }
         },
@@ -2932,6 +2989,15 @@ function gmailStoreProgress(
     // A walk in progress continues within seconds, not at the next interval.
     ...(outcome.backlog ? { continueSoon: true } : {}),
   };
+}
+
+function gmailConfirmationHoldReason(error: GoogleRequestBudgetError): string {
+  switch (error.reason) {
+    case 'request_reserve': return GMAIL_CONFIRMATION_RESERVE_REASON;
+    case 'future_utc_day': return GMAIL_REQUEST_BUDGET_CLOCK_REGRESSION;
+    case 'ledger_busy': return GMAIL_REQUEST_BUDGET_LEDGER_BUSY;
+    case 'daily_api_request_guard': return GMAIL_DAILY_REQUEST_GUARD_REASON;
+  }
 }
 
 /**
@@ -3304,6 +3370,7 @@ const UTC_DAY_SCOPED_DEGRADED_REASONS: ReadonlySet<string> = new Set([
   'reconcile_cost_to_finish_guard',
   READWISE_DAILY_REQUEST_GUARD_REASON,
   GMAIL_DAILY_REQUEST_GUARD_REASON,
+  GMAIL_CONFIRMATION_RESERVE_REASON,
   GOOGLE_DRIVE_DAILY_REQUEST_GUARD_REASON,
 ]);
 

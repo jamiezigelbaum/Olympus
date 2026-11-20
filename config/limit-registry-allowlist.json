@@ -828,6 +828,18 @@
     "retire_when": "the existing provider, storage or transport retry is reported as a resumes-at stop or removed"
   },
   {
+    "path": "src/workers/source-scheduler.ts",
+    "symbol": "reason:gmail_request_budget_clock_regression",
+    "reason": "internal",
+    "retire_when": "the Gmail confirmation hold reports a registered stop for an inconsistent UTC ledger day"
+  },
+  {
+    "path": "src/workers/source-scheduler.ts",
+    "symbol": "reason:gmail_request_budget_ledger_busy",
+    "reason": "internal",
+    "retire_when": "the Gmail confirmation hold reports a registered stop for a busy request ledger"
+  },
+  {
     "path": "src/workers/local-files/scheduler-source.ts",
     "symbol": "retry:createLocalFilesSchedulerSource:retryAt",
     "reason": "pacing",

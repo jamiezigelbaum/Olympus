@@ -122,6 +122,7 @@ function gmailLane(client: GmailApiClient, maxMessages: number): GmailConnectorS
     secureStore,
     account: 'personal',
     apiClient: client,
+    credentialBroker: { async issueSession() { throw new Error('Unexpected credential request for the injected Gmail client'); } },
     maxMessages,
     internalEmbeddingProvider: provider,
     secureEmbeddingProvider: provider,
