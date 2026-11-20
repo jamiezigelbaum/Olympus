@@ -1027,6 +1027,24 @@ function tierSnifferPathForStore(storeDbPath) {
   return `${base}${TIER_SNIFFER_FILE_SUFFIX}`;
 }
 
+// src/core/source-connector-labels.ts
+var NOTE_TAGS_METADATA_KEY = "tags";
+var GMAIL_LABEL_CAPABILITY = { provider: "gmail", metadataKey: "labels" };
+var MBOX_LABEL_CAPABILITY = { provider: "mbox", metadataKey: "labels" };
+var EVERNOTE_LABEL_CAPABILITY = { provider: "evernote", metadataKey: NOTE_TAGS_METADATA_KEY };
+var READWISE_LABEL_CAPABILITY = { provider: "readwise", metadataKey: NOTE_TAGS_METADATA_KEY };
+var REFLECT_LABEL_CAPABILITY = { provider: "reflect", metadataKey: NOTE_TAGS_METADATA_KEY };
+var TELEGRAM_LABEL_CAPABILITY = { provider: "telegram" };
+var capabilities = [
+  GMAIL_LABEL_CAPABILITY,
+  MBOX_LABEL_CAPABILITY,
+  EVERNOTE_LABEL_CAPABILITY,
+  READWISE_LABEL_CAPABILITY,
+  REFLECT_LABEL_CAPABILITY,
+  TELEGRAM_LABEL_CAPABILITY
+];
+var byProvider = new Map(capabilities.map((capability) => [capability.provider, capability]));
+
 // src/core/archive-formats.ts
 var FROM_LINE = [70, 114, 111, 109, 32];
 function startsWithFromLine(head) {
@@ -1038,7 +1056,7 @@ var MBOX_ARCHIVE_FORMAT = Object.freeze({
   id: "mbox",
   label: "Mail (mbox)",
   family: "email",
-  provider: "mbox",
+  provider: MBOX_LABEL_CAPABILITY.provider,
   chooseHint: "a mail export (an .mbox file from Google Takeout or Thunderbird, or an .mbox folder from Apple Mail)",
   citationLabel: "Imported mail",
   exportGuide: Object.freeze({
@@ -1305,7 +1323,7 @@ var REFLECT_JSON_ARCHIVE_FORMAT = Object.freeze({
   id: "reflect-json",
   label: "Reflect notes (JSON)",
   family: "note",
-  provider: "reflect",
+  provider: REFLECT_LABEL_CAPABILITY.provider,
   chooseHint: "a Reflect export in JSON (the .json file, or the .zip that holds it)",
   citationLabel: "Reflect",
   sourceCard: Object.freeze({ id: "reflect.archive", label: "Reflect" }),
@@ -1324,7 +1342,7 @@ var REFLECT_MARKDOWN_ARCHIVE_FORMAT = Object.freeze({
   id: "reflect-markdown",
   label: "Reflect notes (Markdown zip)",
   family: "note",
-  provider: "reflect",
+  provider: REFLECT_LABEL_CAPABILITY.provider,
   chooseHint: "a Reflect export as Markdown (the .zip file)",
   citationLabel: "Reflect",
   sourceCard: Object.freeze({ id: "reflect.archive", label: "Reflect" }),
@@ -1398,7 +1416,7 @@ var EVERNOTE_ENEX_ARCHIVE_FORMAT = Object.freeze({
   id: "evernote-enex",
   label: "Evernote export (.enex)",
   family: "note",
-  provider: "evernote",
+  provider: EVERNOTE_LABEL_CAPABILITY.provider,
   chooseHint: "an Evernote export (the .enex file, or a folder of them)",
   citationLabel: "Evernote",
   sourceCard: Object.freeze({ id: "evernote.notes", label: "Evernote" }),
@@ -12734,8 +12752,10 @@ var GENERIC_MIME_TYPES = new Set([
 ]);
 
 // src/workers/file-extraction/extractors/command-runner.ts
+import { AsyncLocalStorage as AsyncLocalStorage8 } from "node:async_hooks";
 import { execFile, spawn as spawn2 } from "node:child_process";
 import { promisify } from "node:util";
+var activeExtraction = new AsyncLocalStorage8;
 var execFileAsync = promisify(execFile);
 var resolvedCommands = new Map;
 
@@ -13778,8 +13798,8 @@ function untrackSqliteStoreMemory(db) {
 }
 
 // src/core/source-index/read-progress.ts
-import { AsyncLocalStorage as AsyncLocalStorage8 } from "node:async_hooks";
-var progress2 = new AsyncLocalStorage8;
+import { AsyncLocalStorage as AsyncLocalStorage9 } from "node:async_hooks";
+var progress2 = new AsyncLocalStorage9;
 function noteSourceIndexReadProgress() {
   const report = progress2.getStore();
   if (!report)
@@ -13921,6 +13941,32 @@ var NAME = "[A-Za-z_][A-Za-z0-9_]*";
 var NEW_TABLE = new RegExp(`^CREATE\\s+TABLE\\s+(IF\\s+NOT\\s+EXISTS\\s+)?${NAME}\\s*\\(`, "i");
 var NEW_INDEX = new RegExp(`^CREATE\\s+INDEX\\s+(IF\\s+NOT\\s+EXISTS\\s+)?${NAME}\\s+ON\\s+${NAME}\\s*\\(\\s*${NAME}(\\s+(ASC|DESC))?(\\s*,\\s*${NAME}(\\s+(ASC|DESC))?)*\\s*\\)$`, "i");
 var NEW_COLUMN = new RegExp(`^ALTER\\s+TABLE\\s+${NAME}\\s+ADD\\s+(COLUMN\\s+)?${NAME}(\\s+(TEXT|INTEGER|REAL|BLOB|NUMERIC))?(\\s+DEFAULT\\s+(NULL|-?[0-9]+(\\.[0-9]+)?|'[^']*'))?$`, "i");
+var NOT_ADDITIVE = /\b(DROP|RENAME|UPDATE|DELETE|INSERT|REPLACE|SELECT|TRIGGER|UNIQUE|VACUUM|PRAGMA|ATTACH|DETACH|REFERENCES)\b/i;
+function additiveStatement(body) {
+  if (body.includes(";") || NOT_ADDITIVE.test(body))
+    return false;
+  return NEW_TABLE.test(body) || NEW_INDEX.test(body) || NEW_COLUMN.test(body);
+}
+function additiveMigration(version, name, statements) {
+  if (statements.length === 0)
+    throw new OperationError("config_error", `Additive migration "${name}" has no statements.`);
+  for (const statement of statements) {
+    const body = statement.trim().replace(/;$/, "").trim();
+    if (!additiveStatement(body)) {
+      throw new OperationError("config_error", `Additive migration "${name}" has a statement that is not additive: ${body.slice(0, 80)}`);
+    }
+  }
+  const migration = {
+    version,
+    name,
+    up(db) {
+      for (const statement of statements)
+        db.exec(statement);
+    }
+  };
+  ADDITIVE_MIGRATIONS.add(migration);
+  return migration;
+}
 function isAdditiveMigration(migration) {
   return ADDITIVE_MIGRATIONS.has(migration);
 }
@@ -14539,7 +14585,7 @@ function noteFrontLoopStatement(dbPath, site) {
 }
 
 // src/workers/source-index/answer-latency-trace.ts
-import { AsyncLocalStorage as AsyncLocalStorage9 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage10 } from "node:async_hooks";
 import { createHash as createHash9, randomUUID as randomUUID7 } from "node:crypto";
 
 // src/core/store-reclaim-admission.ts
@@ -14578,9 +14624,9 @@ function poolSqlSite(sql) {
 var SLOW_MAIN_THREAD_SQL_MS = 250;
 var SLOW_MAIN_THREAD_SQL_KEPT = 20;
 var SITE_TALLY_MS = 25;
-var storage2 = new AsyncLocalStorage9;
-var queryStorage = new AsyncLocalStorage9;
-var laneStorage = new AsyncLocalStorage9;
+var storage2 = new AsyncLocalStorage10;
+var queryStorage = new AsyncLocalStorage10;
+var laneStorage = new AsyncLocalStorage10;
 function poolReads(query, corpusId) {
   let reads = query.poolByCorpus.get(corpusId);
   if (!reads) {
@@ -15790,7 +15836,7 @@ var SNIFFER_EXCERPT_MAX_CHARS = 1200;
 var CONTENT_READ_SNIFFER_FLAG = "content:read";
 var PERSONAL_FIRST_REASON = "content:personal_first";
 function contentHeldForJudgment(decision) {
-  return decision.contentPending;
+  return decision.contentPending || decision.reasons?.includes(OWNER_OVERRIDE_SECRET_REVIEW_REASON) === true;
 }
 var HELD_UNTIL_JUDGED_REASON = "content:held_until_judged";
 function heldUntilJudged(reasons) {
@@ -15799,8 +15845,30 @@ function heldUntilJudged(reasons) {
 function contentDigestReason(text) {
   return `content:sha256:${createHash10("sha256").update(text.trim()).digest("hex")}`;
 }
+var OWNER_OVERRIDE_SECRET_REVIEW_REASON = "content:owner_override_secret_review";
+var OWNER_OVERRIDE_SECRET_CONFIRMED_REASON = "content:owner_override_secret_confirmed";
+function ownerOverrideMatchesDigest(override, digest) {
+  return override?.kind === "tier" && (override.tier === "private" || override.tier === "public") && (override.setDigest === digest || override.confirmedDigest === digest);
+}
+function contentSecretFindingKinds(reasons) {
+  const prefix = "content:secret:";
+  return reasons.filter((reason) => reason.startsWith(prefix)).map((reason) => reason.slice(prefix.length));
+}
+function ownerOverrideSecretReview(reasons) {
+  if (!reasons.includes(OWNER_OVERRIDE_SECRET_REVIEW_REASON))
+    return;
+  const digest = reasons.find((reason) => reason.startsWith("content:sha256:"));
+  const kinds = contentSecretFindingKinds(reasons);
+  return digest && kinds.length > 0 ? { digest, kinds } : undefined;
+}
 function contentJudgeVerdictReason(reason, tier, digest) {
   return `content:judge_verdict:${tier}:${createHash10("sha256").update(JSON.stringify([reason, digest])).digest("hex")}`;
+}
+function isContentJudgeReason(reason) {
+  return reason.startsWith("content:sniffer:") && (!reason.includes(":rule:") || reason.includes(":rule:duplicate_model:")) && !reason.includes(":fail_safe:") && !reason.endsWith(":fail_safe") && !reason.includes(":injection:") && !reason.endsWith(":undecided") && !reason.endsWith(":unresolved:0.00") && !reason.endsWith(":union:decision:failed");
+}
+function hasContentJudgeVerdict(reasons, tier, digest) {
+  return reasons.some((reason) => isContentJudgeReason(reason) && reasons.includes(contentJudgeVerdictReason(reason, tier, digest)));
 }
 function contentNamesReason(names, parentContext) {
   const parts = [names.title, names.path, names.sender, parentContext].map((part) => part?.trim() ?? "");
@@ -15932,16 +16000,23 @@ function classifyItemTiersWithPublic(input, options) {
   const text = input.text;
   const holdUntilJudged = input.holdUntilJudged === true;
   if (options.override?.kind === "tier") {
+    const tier = options.override.tier;
+    const personal = tier === "private" || tier === "public";
+    const findings = text !== undefined && personal ? contentSecretReasons(text) : [];
+    const stillUnread = personal && input.heldSecret === true && !text?.trim();
+    const confirmed = text !== undefined && ownerOverrideMatchesDigest(options.override, contentDigestReason(text));
+    const review = findings.length > 0 && !confirmed;
+    const staysSecret = review && input.heldSecret === true;
     return {
       ...base,
-      metadataTier: options.override.tier,
-      contentTier: options.override.tier,
-      decidedBy: "override",
-      reasons: [`override:item:${options.override.tier}`, ...heldMark(holdUntilJudged, options.override.tier)],
-      state: "current",
-      contentRead: true,
+      metadataTier: review && !staysSecret ? "secure" : tier,
+      contentTier: staysSecret ? "secrets" : review ? "secure" : tier,
+      decidedBy: staysSecret ? "secret_detector" : "override",
+      reasons: staysSecret ? findings : ownerOverrideReasons(tier, holdUntilJudged, findings, confirmed),
+      state: stillUnread ? "pending" : "current",
+      contentRead: !stillUnread,
       metadataPending: false,
-      contentPending: false,
+      contentPending: stillUnread,
       metadataForced: true,
       metadataFlagged: false
     };
@@ -16010,18 +16085,23 @@ function classifyContentTier(input, options = {}) {
   const holdUntilJudged = input.holdUntilJudged === true;
   if (options.override?.kind === "tier") {
     const tier = options.retirePublic && options.override.tier === "public" ? "private" : options.override.tier;
+    const lower = tier === "private" || tier === "public";
+    const findings = lower ? contentSecretReasons(input.text) : [];
+    const confirmed = ownerOverrideMatchesDigest(options.override, contentDigestReason(input.text));
+    const review = findings.length > 0 && !confirmed;
+    if (review && input.heldSecret)
+      return { ...base, contentTier: "secrets", decidedBy: "secret_detector", reasons: findings, contentPending: false };
     return {
       ...base,
-      contentTier: tier,
+      contentTier: review ? "secure" : tier,
       decidedBy: "override",
       reasons: [
-        `override:item:${options.override.tier}`,
+        ...ownerOverrideReasons(options.override.tier, holdUntilJudged, findings, confirmed),
         ...tier !== options.override.tier ? [PUBLIC_RETIRED_REASON] : [],
-        ...heldMark(holdUntilJudged, tier),
         contentDigestReason(input.text),
         contentNamesReason(input, input.parentContext)
       ],
-      contentPending: false
+      contentPending: lower && input.heldSecret === true && !input.text.trim()
     };
   }
   const text = input.text;
@@ -16078,6 +16158,10 @@ function classifyContentTier(input, options = {}) {
     ],
     contentPending: content.pending || content.tier !== "secrets" && !text.trim() && (input.hasNonTextContent === true || !textOnlyMime(input.mimeType))
   };
+}
+var RETIRED_SOURCE_PRIOR_REASON = "metadata:prior:source_";
+function restsOnRetiredSourcePrior(reasons) {
+  return reasons.some((reason) => reason.startsWith(RETIRED_SOURCE_PRIOR_REASON));
 }
 function namesDecidedByOwner(reasons) {
   return reasons.some((reason) => reason.startsWith("metadata:owner_rule:"));
@@ -16184,6 +16268,7 @@ function contentPass(args) {
     return { tier: "secrets", decidedBy: metadata.decidedBy, reasons: [], pending: false };
   }
   const mark = heldMark(args.holdUntilJudged === true, metadata.tier);
+  const held = args.holdUntilJudged === true && metadata.ownerDecided !== true && metadata.ownerRule === undefined;
   if (text === undefined || !text.trim() && (!args.textOnly || args.heldSecret)) {
     return {
       tier: metadata.tier,
@@ -16193,14 +16278,12 @@ function contentPass(args) {
     };
   }
   if (!args.secretsCleared) {
-    const secretKinds = detectSecretFindingKinds(text);
-    if (hasCredentialUrl(text) && !secretKinds.includes("credential_assignment"))
-      secretKinds.push("credential_assignment");
-    if (secretKinds.length > 0) {
+    const reasons = contentSecretReasons(text);
+    if (reasons.length > 0) {
       return {
         tier: "secrets",
         decidedBy: "secret_detector",
-        reasons: secretKinds.map((kind) => `content:secret:${kind}`),
+        reasons,
         pending: false
       };
     }
@@ -16218,7 +16301,7 @@ function contentPass(args) {
   if (args.image && !imageOrdinary) {
     return { tier: maxTier(metadata.tier, "secure"), decidedBy: "default", reasons: [IMAGE_PRIVATE_DEFAULT_REASON, ...mark], pending: false };
   }
-  if (metadata.forced) {
+  if (metadata.forced && (!held || tierRank(metadata.tier) >= tierRank("secure"))) {
     return { tier: metadata.tier, decidedBy: metadata.decidedBy, reasons: [...mark], pending: false };
   }
   let decided = { tier: metadata.tier, decidedBy: metadata.decidedBy, reasons: [] };
@@ -16233,7 +16316,14 @@ function contentPass(args) {
   if (isBareShareLink(text)) {
     const recorded = args.sniffer.recordedContentVerdict;
     if (recorded && recorded.mapRevision === args.mapRevision) {
-      const verdict = withSnifferVerdict(decided, recorded.tier, `content:sniffer:${args.sniffer.id}:${recorded.code}`);
+      const reason = `content:sniffer:${args.sniffer.id}:${recorded.code}`;
+      const verdict = withSnifferVerdict(decided, recorded.tier, reason);
+      if (recorded.origin === "model")
+        verdict.reasons.push("content:provenance:model");
+      if (isContentJudgeReason(reason) && (recorded.origin !== "rule" || recorded.rule === "duplicate_model"))
+        verdict.reasons.push(contentJudgeVerdictReason(reason, recorded.tier, contentDigestReason(text)));
+      if (recorded.rule)
+        verdict.reasons.push(`content:rule:${recorded.rule}`);
       return { ...verdict, reasons: [...verdict.reasons, ...mark], pending: false };
     }
     return {
@@ -16259,6 +16349,7 @@ function contentPass(args) {
     ...args.matchInput.path ? { path: args.matchInput.path } : {}
   });
   const canAskSniffer = args.sniffer.id !== UNDECIDED_TIER_SNIFFER.id;
+  const retiredPrior = metadata.decidedBy === "source_prior" && restsOnRetiredSourcePrior(metadata.reasons) && metadata.flags.length === 0 && !metadata.reasons.some((reason) => reason.startsWith("metadata:floor:"));
   if (detection.signals.length > 0) {
     decided = maxVerdict(decided, {
       tier: "secure",
@@ -16267,7 +16358,6 @@ function contentPass(args) {
     });
   }
   const recordFlags = [...ownRecordSignals(text, args.matchInput), ...textDecides ? ["image_document"] : []];
-  const held = args.holdUntilJudged === true && metadata.ownerDecided !== true;
   let pending = false;
   const flags = [
     ...metadata.flags,
@@ -16278,22 +16368,27 @@ function contentPass(args) {
   if (canAskSniffer && flags.length === 0 && metadata.ownerDecided !== true)
     flags.push(CONTENT_READ_SNIFFER_FLAG);
   const reasons = [...decided.reasons];
-  if (flags.length > 0 && tierRank(decided.tier) < tierRank("secure")) {
+  if (flags.length > 0 && (tierRank(decided.tier) < tierRank("secure") || retiredPrior && canAskSniffer && detection.signals.length === 0)) {
+    const digest = contentDigestReason(text);
     const verdict = args.sniffer.judge({
       pass: "content",
       priority: args.holdUntilJudged === true ? HELD_UNTIL_JUDGED_PRIORITY : recordFlags.length > 0 || metadata.pending ? HELD_RECORD_PRIORITY : 0,
-      flags: args.textOnly && !args.parentContext?.trim() ? [...flags, contentDigestReason(text), contentNamesReason(args.signals, args.parentContext)] : flags,
+      flags: [...flags, digest, contentNamesReason(args.signals, args.parentContext)],
       material: snifferContentMaterial(args.names, snifferExcerpt(text, vocabularyTerms(detection.vocabulary)), args.parentContext),
       materialHash: tierSnifferInputHash("content", args.signals, text, args.parentContext),
       ...args.textOnly && !args.parentContext?.trim() ? { contentHash: normalizedContentHash(text) } : {},
       mapRevision: args.mapRevision,
       ...args.subject ? { subject: args.subject } : {}
     });
-    if (verdict.verdict === "decided") {
-      decided = withSnifferVerdict(decided, verdict.tier, `content:sniffer:${args.sniffer.id}:${verdict.code}`);
+    const reason = verdict.verdict === "decided" ? `content:sniffer:${args.sniffer.id}:${verdict.code}` : undefined;
+    const judged = verdict.verdict === "decided" && reason !== undefined && isContentJudgeReason(reason) && (verdict.origin !== "rule" || verdict.rule === "duplicate_model");
+    if (verdict.verdict === "decided" && reason !== undefined && (!held || verdict.tier !== "private" || judged)) {
+      decided = withSnifferVerdict(decided, verdict.tier, reason);
       reasons.splice(0, reasons.length, ...decided.reasons);
       if (verdict.origin === "model")
-        reasons.push("content:provenance:model", contentJudgeVerdictReason(`content:sniffer:${args.sniffer.id}:${verdict.code}`, verdict.tier, contentDigestReason(text)));
+        reasons.push("content:provenance:model");
+      if (judged)
+        reasons.push(contentJudgeVerdictReason(reason, verdict.tier, digest));
       if (verdict.origin === "rule" && verdict.rule)
         reasons.push(`content:rule:${verdict.rule}`);
     } else {
@@ -16312,6 +16407,19 @@ function contentPass(args) {
   }
   reasons.push(...mark);
   return { tier: decided.tier, decidedBy: decided.decidedBy, reasons: [...new Set(reasons)], pending };
+}
+function contentSecretReasons(text) {
+  const kinds = detectSecretFindingKinds(text);
+  if (hasCredentialUrl(text) && !kinds.includes("credential_assignment"))
+    kinds.push("credential_assignment");
+  return kinds.map((kind) => `content:secret:${kind}`);
+}
+function ownerOverrideReasons(tier, holdUntilJudged, findings, confirmed) {
+  return [
+    `override:item:${tier}`,
+    ...heldMark(holdUntilJudged, tier),
+    ...findings.length > 0 ? [confirmed ? OWNER_OVERRIDE_SECRET_CONFIRMED_REASON : OWNER_OVERRIDE_SECRET_REVIEW_REASON, ...findings] : []
+  ];
 }
 function heldMark(holdUntilJudged, tier) {
   return holdUntilJudged && tier !== "secrets" ? [HELD_UNTIL_JUDGED_REASON] : [];
@@ -16507,9 +16615,11 @@ class TierSnifferStore {
     const previousUmask = onDisk ? process.umask(63) : undefined;
     let db;
     try {
-      db = new Database3(this.dbPath, { create: true });
-      db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA journal_size_limit = 67108864;" + loopWalAutocheckpointPragma(this.dbPath));
-      runSqliteMigrations(db, TIER_SNIFFER_SQLITE_STORE_ID, snifferMigrations());
+      db = new Database3(this.dbPath, options.restoreQueue ? { readwrite: true, create: false } : { create: true });
+      const synchronous = options.restoreQueue ? "FULL" : "NORMAL";
+      db.exec(`PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA synchronous = ${synchronous}; PRAGMA journal_size_limit = 67108864;` + loopWalAutocheckpointPragma(this.dbPath));
+      if (!options.restoreQueue)
+        runSqliteMigrations(db, TIER_SNIFFER_SQLITE_STORE_ID, snifferMigrations());
       if (onDisk)
         restrictFiles(this.dbPath);
     } catch (error) {
@@ -17440,7 +17550,7 @@ function retire(stopped, error) {
 function offThreadReadsSupported(dbPath) {
   return dbPath !== ":memory:" && !dbPath.startsWith("file::memory:") && runtimeHasWorkers();
 }
-function send(reader, message, statementTiming) {
+function send(reader, message, statementTiming, job) {
   if (reader.retired)
     return Promise.reject(new Error("off-thread reader stopped"));
   const id = nextId++;
@@ -17448,7 +17558,11 @@ function send(reader, message, statementTiming) {
     reader.pending.set(id, { resolve, reject, ...statementTiming ? { statementTiming } : {} });
     armLostReplyCheck();
     try {
+      if (job)
+        observer?.(job.store, job.read);
       reader.worker.postMessage({ ...message, id, ...statementTiming ? { measureCpu: true } : {} });
+      if (job)
+        reader.executingStore = job.store;
     } catch (error) {
       reader.pending.delete(id);
       reject(error instanceof Error ? error : new Error(String(error)));
@@ -17806,13 +17920,11 @@ function dispatch() {
       job.running = true;
     }
     reader.job = job;
-    reader.executingStore = job.store;
-    observer?.(job.store, job.read);
     const { sql, params, mode, site } = job.read;
     send(reader, { op: "query", path: job.store, sql, params, mode, ...benchSqlDir && { site: site ?? job.benchSite } }, job.report && ((ms, cpuMs) => {
       job.sqlMs = ms;
       job.cpuMs = cpuMs;
-    })).then((rows) => settle(job, clock2.now() >= job.deadlineAtMs ? { error: new OffThreadReadBusyError } : { rows }), (error) => {
+    }), job).then((rows) => settle(job, clock2.now() >= job.deadlineAtMs ? { error: new OffThreadReadBusyError } : { rows }), (error) => {
       if (error instanceof OffThreadReadLostError && !job.settled && !job.retried) {
         job.retried = true;
         counters.retries += 1;
@@ -17893,7 +18005,7 @@ function hasImmutableAccountLabel(id) {
 import { createHash as createHash13, randomUUID as randomUUID9 } from "node:crypto";
 import { closeSync as closeSync11, existsSync as existsSync22, fsyncSync as fsyncSync3, lstatSync as lstatSync9, mkdirSync as mkdirSync13, openSync as openSync11, statSync as statSync13, statfsSync } from "node:fs";
 import { open as openFile } from "node:fs/promises";
-import { basename as basename7, dirname as dirname23 } from "node:path";
+import { basename as basename7, dirname as dirname23, resolve as resolve10 } from "node:path";
 import { Database as Database6 } from "bun:sqlite";
 
 // src/core/classification-signals.ts
@@ -17908,13 +18020,29 @@ import { Database as Database4 } from "bun:sqlite";
 import { randomUUID as randomUUID8 } from "node:crypto";
 import { chmodSync as chmodSync5, closeSync as closeSync10, existsSync as existsSync18, mkdirSync as mkdirSync11, openSync as openSync10, statSync as statSync12 } from "node:fs";
 import { dirname as dirname19 } from "node:path";
-var TIER_LEDGER_SCHEMA_VERSION = 17;
+
+// src/workers/classification/installed-tier-classification-registry.ts
+var registered;
+function registeredInstalledTierClassification() {
+  return registered;
+}
+var tierSetPlanners;
+function tierSetPlannerForLedger(ledgerPath) {
+  return tierSetPlanners?.get(ledgerPath);
+}
+
+// src/workers/classification/tier-ledger.ts
+var TIER_LEDGER_SCHEMA_VERSION = 18;
 var RETIRED_EMBEDDING_CLEARANCE_REASON = "content:sniffer:retired_embedding_clearance:undecided";
+var RETAINED_MOVE_SOURCE_REASON = "content:retained_move_source";
 function isFailSafeMissingContentQuestion(reason) {
   return reason.startsWith("content:sniffer:") && (reason.endsWith(":fail_safe:missing_question") || reason.endsWith(":fail_safe:unread"));
 }
 function tierLedgerConversationKey(identity) {
   return identity.providerConversationId ?? "";
+}
+function labelSweepMetaKey(provider, accountScope) {
+  return `owner_rules_label_sweep:${provider}:${accountScope}`;
 }
 function writeIntentFromRow(row) {
   return {
@@ -18028,6 +18156,14 @@ function* routedWithoutCopiesSteps(list) {
   }
   return result;
 }
+function tierLedgerIdentityOfRecord(record) {
+  return {
+    provider: record.provider,
+    accountScope: record.accountScope,
+    providerItemId: record.providerItemId,
+    ...record.conversationKey ? { providerConversationId: record.conversationKey } : {}
+  };
+}
 var AWAITING_TEXT_WHERE = `routed = 1 AND content_read = 0 AND metadata_pending = 0
         AND ((state = 'pending' AND content_pending = 1)
           OR (state = 'current' AND EXISTS (SELECT 1 FROM json_each(reasons_json) r
@@ -18117,6 +18253,20 @@ var LIST_ROUTED_OVERRIDES_SQL = `
         AND i.conversation_key = o.conversation_key AND i.provider_item_id = o.provider_item_id
       WHERE i.routed = 1
       ORDER BY o.provider, o.account_scope, o.conversation_key, o.provider_item_id
+    `;
+function pendingOverrideReview(record, override) {
+  if (record?.state !== "current" || !record.contentRead || override?.kind !== "tier" || override.tier !== "private" && override.tier !== "public")
+    return;
+  const review = ownerOverrideSecretReview(record.reasons);
+  return review && !ownerOverrideMatchesDigest(override, review.digest) ? review : undefined;
+}
+var WRITE_INTENT_SQL = `
+      SELECT * FROM tier_write_intents
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `;
+var ITEM_OVERRIDE_SQL = `
+      SELECT override_json, set_at FROM tier_overrides
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
     `;
 function routedOverridesFromRows(rows) {
   const result = [];
@@ -18385,7 +18535,14 @@ class TierLedger {
       }
       db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA journal_size_limit = 67108864;" + loopWalAutocheckpointPragma(this.dbPath, "tier-ledger"));
       applySqliteMmap(db);
-      runSqliteMigrations(db, TIER_LEDGER_SQLITE_STORE_ID, tierLedgerMigrations());
+      const restoredVersion = options.restoreSchemaVersion;
+      if (restoredVersion !== undefined) {
+        const actual = readSqliteSchemaVersion(db, TIER_LEDGER_SQLITE_STORE_ID);
+        if (restoredVersion < 12 || restoredVersion > TIER_LEDGER_SCHEMA_VERSION || actual !== 0 && actual !== restoredVersion) {
+          throw new Error("The tier ledger cannot be written at its restored schema.");
+        }
+      }
+      runSqliteMigrations(db, TIER_LEDGER_SQLITE_STORE_ID, tierLedgerMigrations().filter((migration) => restoredVersion === undefined || migration.version <= restoredVersion));
       db.exec(`CREATE INDEX IF NOT EXISTS tier_items_override_rows
         ON tier_items (provider, account_scope, conversation_key, provider_item_id) WHERE decided_by = 'override'`);
       if (onDisk)
@@ -18426,16 +18583,17 @@ class TierLedger {
         restrictLedgerFiles(this.dbPath);
     }
   }
-  recordDecision(identity, decision, stored) {
+  recordDecision(identity, decision, stored, options = {}) {
     let outcome = "unchanged";
     this.db.transaction(() => {
       const existing = this.readRow(identity);
+      const next = existing?.state === "moving" ? rowOfDecision(movingObservation(existing, decision, options)) : effectiveRow(existing, decision);
       if (existing?.state === "moving") {
-        outcome = "held_moving";
+        outcome = this.recordMovingDecision(identity, existing, next);
         return;
       }
-      outcome = this.writeRow(identity, effectiveRow(existing, decision), stored, existing);
-    })();
+      outcome = this.writeRow(identity, next, stored, existing);
+    }).immediate();
     return { outcome, record: this.getCurrent(identity) };
   }
   recordContentDecision(identity, content, stored) {
@@ -18444,18 +18602,15 @@ class TierLedger {
       const existing = this.readRow(identity);
       if (!existing)
         return;
-      if (existing.state === "moving") {
-        outcome = "held_moving";
-        return;
-      }
       if (existing.decidedBy === "override" || this.getOverride(identity)?.kind === "tier") {
         outcome = "unchanged";
         return;
       }
-      const metadataReasons = existing.reasons.filter((reason) => !reason.startsWith("content:"));
-      const contentTier = maxTier(content.contentTier, existing.metadataTier);
+      const names = queuedDecisionRecord(existing);
+      const metadataReasons = names.reasons.filter((reason) => !reason.startsWith("content:"));
+      const contentTier = maxTier(content.contentTier, names.metadataTier);
       const next = {
-        metadataTier: existing.metadataTier,
+        metadataTier: names.metadataTier,
         contentTier,
         decidedBy: content.decidedBy,
         reasons: [...metadataReasons, ...content.reasons],
@@ -18467,22 +18622,51 @@ class TierLedger {
         metadataForced: existing.metadataForced,
         metadataFlagged: existing.metadataFlagged
       };
-      outcome = this.writeRow(identity, next, stored, existing);
-    })();
+      outcome = existing.state === "moving" ? this.recordMovingDecision(identity, existing, next) : this.writeRow(identity, next, stored, existing);
+    }).immediate();
     return outcome === undefined ? undefined : { outcome, record: this.getCurrent(identity) };
   }
-  applySnifferVerdict(identity, verdict, options = {}) {
-    assertTier(verdict.tier);
+  recordMovingDecision(identity, existing, next) {
+    const sources = this.moveSources(identity, existing.generation + 1);
+    const planner = tierSetPlannerForLedger(this.dbPath);
+    let decision = decisionOfRow(next);
+    if (!observationSupersedesMove(existing, decision, sources, planner))
+      return "held_moving";
+    if (existing.routed && (planner || next.contentTier === "secrets")) {
+      const placement = planner?.(decision) ?? { copies: [], embedHold: false };
+      const { outcome } = this.recordRoutedPlacement(identity, decision, placement);
+      return outcome === "held_moving" ? outcome : "updated";
+    }
+    const decidedAt = this.now().toISOString();
+    const advanced = this.advanceMoveGeneration(identity, existing, decidedAt);
+    decision = retainHiddenRaise(existing, decision, sources, undefined, undefined);
+    if (existing.routed && placementRaisesSource(decision, sources)) {
+      this.queueMoveRow(identity, advanced, decision, { hide: true, decidedAt });
+      return "updated";
+    }
+    this.cancelSupersededMove(identity, advanced, decidedAt);
+    this.writeRow(identity, rowOfDecision(decision), undefined, this.readRow(identity));
+    return "updated";
+  }
+  applySnifferVerdict(identity, answer, options = {}) {
+    assertTier(answer.tier);
     let outcome;
     this.db.transaction(() => {
       const existing = this.readRow(identity);
       if (!existing)
         return;
+      const reason = answer.pass === "content" && !answer.reason.startsWith("content:sniffer:") ? `content:sniffer:${answer.modelId}:${answer.reason}` : answer.reason;
+      const failSafe = answer.failSafe === true || answer.pass === "content" && !isContentJudgeReason(reason);
+      const verdict = { ...answer, reason, failSafe, tier: failSafe ? "secure" : answer.tier };
       if (options.questionStillCurrent && !options.questionStillCurrent()) {
         outcome = "stale_question";
         return;
       }
       const question = this.rejudgeQuestion(identity);
+      if (verdict.contentDigest !== undefined && !(question?.decision ?? existing).reasons.includes(verdict.contentDigest)) {
+        outcome = "stale_question";
+        return;
+      }
       if (question) {
         outcome = this.answerRejudgeQuestion(identity, question, verdict, options);
         return;
@@ -18536,8 +18720,8 @@ class TierLedger {
           reasons: [
             ...metadataReasons,
             ...contentReasons.filter((reason) => !isOpenSnifferReason(reason, "content") && !reason.startsWith("content:judge_verdict:")),
-            verdict.reason,
-            ...contentVerdictReceipts(contentReasons, verdict.reason, verdict.tier)
+            reason,
+            ...!verdict.failSafe ? contentVerdictReceipts(contentReasons, reason, verdict.tier) : []
           ],
           contentPending: false
         };
@@ -18587,7 +18771,7 @@ class TierLedger {
       reasons: [
         ...verdict.pass === "metadata" ? settleStoredNamesMark(kept, base.metadataTier, metadataTier) : kept,
         verdict.reason,
-        ...verdict.pass === "content" ? contentVerdictReceipts(kept, verdict.reason, verdict.tier) : []
+        ...verdict.pass === "content" && !verdict.failSafe ? contentVerdictReceipts(kept, verdict.reason, verdict.tier) : []
       ],
       metadataPending,
       contentPending,
@@ -19172,22 +19356,97 @@ class TierLedger {
     if (override.kind === "tier")
       assertTier(override.tier);
     this.db.transaction(() => {
+      const setAt = this.now().toISOString();
+      if (override.kind === "tier" && (override.tier === "private" || override.tier === "public") && override.setDigest === undefined) {
+        const current = this.getCurrent(identity);
+        const setDigest = override.confirmedDigest ?? (current?.contentRead && current.state !== "moving" ? current.reasons.find((reason) => reason.startsWith("content:sha256:")) : undefined) ?? this.overrideHistoryDigest(identity, setAt);
+        if (setDigest)
+          override = { ...override, setDigest };
+        else if (this.itemIsSecret(identity))
+          override = { ...override, setDigest: null };
+      }
       this.writeMeta(overrideRestoreKey(identity), "");
       this.db.query(`
         INSERT INTO tier_overrides (provider, account_scope, conversation_key, provider_item_id, override_json, set_at)
         VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT (provider, account_scope, conversation_key, provider_item_id)
         DO UPDATE SET override_json = excluded.override_json, set_at = excluded.set_at
-      `).run(...idParams(identity), JSON.stringify(override), this.now().toISOString());
+      `).run(...idParams(identity), JSON.stringify(override), setAt);
       this.settleRevokedOwnerMove(identity);
     })();
   }
-  classificationRead(identity) {
-    return this.db.transaction(() => ({
-      override: this.getOverride(identity),
-      secret: this.itemIsSecret(identity),
-      scrubRevision: this.secretScrubRevision(identity)
-    }))();
+  overrideHistoryDigest(identity, setAt) {
+    const row = this.db.query(`
+      SELECT reason.value AS digest FROM tier_history h
+      CROSS JOIN json_each(h.reasons_json) reason
+      WHERE h.provider = ? AND h.account_scope = ? AND h.conversation_key = ? AND h.provider_item_id = ?
+        AND h.decided_at <= ? AND reason.value GLOB 'content:sha256:*'
+      ORDER BY h.decided_at DESC, h.history_pk DESC LIMIT 1
+    `).get(...idParams(identity), setAt);
+    return row?.digest;
+  }
+  observeOverrideText(identity, text) {
+    const row = this.db.query(ITEM_OVERRIDE_SQL).get(...idParams(identity));
+    if (!row)
+      return;
+    const override = overrideFromJson(row.override_json);
+    if (override?.kind !== "tier" || override.tier !== "private" && override.tier !== "public" || override.setDigest !== undefined)
+      return override;
+    const setDigest = this.overrideHistoryDigest(identity, row.set_at) ?? override.confirmedDigest ?? (!this.readOnly && text?.trim() ? contentDigestReason(text) : undefined);
+    if (!setDigest)
+      return override;
+    const bound = { ...override, setDigest };
+    if (this.readOnly)
+      return bound;
+    const updated = this.db.query(`
+      UPDATE tier_overrides SET override_json = ?
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+        AND override_json = ? AND set_at = ?
+    `).run(JSON.stringify(bound), ...idParams(identity), row.override_json, row.set_at);
+    return updated.changes === 1 ? bound : this.getOverride(identity);
+  }
+  ownerOverrideReview(identity, record = this.getCurrent(identity), override = this.getOverride(identity)) {
+    const review = pendingOverrideReview(record, override);
+    return review && !this.writeIntent(identity) ? review : undefined;
+  }
+  *ownerOverrideReviewKindsSteps() {
+    const kinds = new Set;
+    for (const { record, override } of yield* this.listRoutedOverridesSteps()) {
+      const review = pendingOverrideReview(record, override);
+      if (!review)
+        continue;
+      const intent = yield { sql: WRITE_INTENT_SQL, params: idParams(tierLedgerIdentityOfRecord(record)), mode: "get" };
+      if (!intent)
+        for (const kind of review.kinds)
+          kinds.add(kind);
+    }
+    return [...kinds];
+  }
+  resolveOwnerOverrideReview(identity, digest, choice) {
+    return this.db.transaction(() => {
+      const override = this.getOverride(identity);
+      if (override?.kind !== "tier" || this.ownerOverrideReview(identity)?.digest !== digest)
+        return false;
+      if (choice === "judge")
+        return this.clearOverride(identity);
+      this.setOverride(identity, { ...override, confirmedDigest: digest });
+      return true;
+    }).immediate();
+  }
+  classificationRead(identity, text) {
+    const snapshot = this.db.transaction((observe) => {
+      const secret = this.itemIsSecret(identity);
+      return {
+        override: observe && text !== undefined ? this.observeOverrideText(identity, text) : this.getOverride(identity),
+        secret,
+        scrubRevision: this.secretScrubRevision(identity)
+      };
+    });
+    const read = snapshot(false);
+    const override = read.override;
+    if (text === undefined || override?.kind !== "tier" || override.tier !== "private" && override.tier !== "public" || override.setDigest !== undefined)
+      return read;
+    return this.readOnly ? snapshot(true) : snapshot.immediate(true);
   }
   unsettledSecretSideStores(limit = 100) {
     return unsettledSecretRows(this.db.query(UNSETTLED_SECRET_SIDE_STORES_SQL).all(Math.max(1, Math.min(limit, 1000))));
@@ -19265,12 +19524,15 @@ class TierLedger {
     const record = item ? recordFromRow(item) : undefined;
     return record !== undefined && [record.metadataTier, record.contentTier, record.targetMetadataTier, record.targetContentTier].includes("secrets");
   }
-  getOverride(identity) {
-    const row = this.db.query(`
-      SELECT override_json FROM tier_overrides
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-    `).get(...idParams(identity));
-    return row ? overrideFromJson(row.override_json) : undefined;
+  getOverride(identity, options = {}) {
+    const row = this.db.query(ITEM_OVERRIDE_SQL).get(...idParams(identity));
+    if (!row)
+      return;
+    const override = overrideFromJson(row.override_json);
+    if (!options.withHistory || override?.kind !== "tier" || override.tier !== "private" && override.tier !== "public" || override.setDigest !== undefined)
+      return override;
+    const setDigest = this.overrideHistoryDigest(identity, row.set_at) ?? override.confirmedDigest;
+    return setDigest ? { ...override, setDigest } : override;
   }
   conversationlessOverrides(provider) {
     return this.db.query(`
@@ -19347,14 +19609,16 @@ class TierLedger {
     const rawReceipt = this.readMeta(`tier-move-verified:${tierLedgerIdentityKey(identity)}`);
     const receipt = rawReceipt ? JSON.parse(rawReceipt) : undefined;
     const verified = receipt?.generation === existing.generation && receipt.raise && receipt.target.metadataTier === targetMetadata && receipt.target.contentTier === targetContent;
+    const staleFlip = existing.generation + 1;
+    const copies = this.copies(identity);
+    const original = copies.filter((copy) => copy.state === "current" || copy.state === "superseded" && copy.supersededByGeneration === staleFlip);
+    const mixed = verified && loweredCopyLayers(original, receipt.placement).length > 0;
     const override = this.getOverride(identity);
-    if (verified && tierRank(targetMetadata) >= tierRank(existing.metadataTier) && tierRank(targetContent) >= tierRank(existing.contentTier) && (override?.kind !== "tier" || tierRank(targetMetadata) >= tierRank(override.tier) && tierRank(targetContent) >= tierRank(override.tier))) {
+    if (verified && !mixed && tierRank(targetMetadata) >= tierRank(existing.metadataTier) && tierRank(targetContent) >= tierRank(existing.contentTier) && (override?.kind !== "tier" || tierRank(targetMetadata) >= tierRank(override.tier) && tierRank(targetContent) >= tierRank(override.tier))) {
       return "none";
     }
     const decidedAt = this.now().toISOString();
     const prior = this.decisionBeforeOverride(identity, existing);
-    const staleFlip = existing.generation + 1;
-    const copies = this.copies(identity);
     const hidden = copies.some((copy) => copy.state === "superseded" && copy.supersededByGeneration === staleFlip);
     if (!hidden) {
       this.db.query(`
@@ -19376,36 +19640,19 @@ class TierLedger {
       this.appendHistory(identity, staleFlip, existing.metadataTier, existing.contentTier, prior.decidedBy, reasonsJson, state, decidedAt);
       return "cancelled";
     }
-    const nextFlip = existing.generation + 2;
-    this.db.query(`
-      UPDATE tier_copies SET superseded_by_generation = ?, updated_at = ?
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-        AND copy_state = 'superseded' AND superseded_by_generation = ?
-    `).run(nextFlip, decidedAt, ...idParams(identity), staleFlip);
-    this.db.query(`
-      UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = ?, updated_at = ?
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'staged'
-    `).run(staleFlip, decidedAt, ...idParams(identity));
-    this.db.query(`
-      UPDATE tier_items SET generation = ?
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-    `).run(staleFlip, ...idParams(identity));
-    if (verified) {
-      for (const copy of receipt.placement) {
-        this.db.query(`
-          UPDATE tier_copies SET copy_state = 'superseded', layers = ?, superseded_by_generation = ?, updated_at = ?
-          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
-        `).run(copy.layers, nextFlip, decidedAt, ...idParams(identity), copy.corpusId);
-      }
-      for (const copy of copies.filter((copy) => !receipt.placement.some((dest) => dest.corpusId === copy.corpusId))) {
-        this.db.query(`
-          UPDATE tier_copies SET superseded_by_generation = ?
-          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
-        `).run(staleFlip, ...idParams(identity), copy.corpusId);
+    const advanced = this.advanceMoveGeneration(identity, existing, decidedAt);
+    if (verified && (!mixed || receipt.ruleRevision === undefined)) {
+      for (const layer of ["metadata", "content"]) {
+        const from = copyServingLayer(original, layer);
+        const to = copyServingLayer(receipt.placement, layer);
+        if (from && to && trustDomainRank(to.trustDomain) > trustDomainRank(from.trustDomain)) {
+          this.carryVerifiedLayer(identity, advanced.generation, layer, from.corpusId, to.corpusId, decidedAt);
+        }
       }
     }
-    this.writeMeta(`tier-move-verified:${tierLedgerIdentityKey(identity)}`, "");
-    this.queueMoveRow(identity, { ...existing, generation: staleFlip }, {
+    if (verified && !mixed)
+      this.writeMeta(`tier-move-verified:${tierLedgerIdentityKey(identity)}`, "");
+    this.queueMoveRow(identity, advanced, {
       ...prior,
       metadataTier: maxTier(existing.metadataTier, targetMetadata),
       contentTier: maxTier(existing.contentTier, targetContent)
@@ -19486,6 +19733,26 @@ class TierLedger {
   }
   writeMeta(key, value) {
     this.setMeta(key, value);
+  }
+  recordLabelRuleMatches(provider, accountScope, ruleKey, walkId, itemKeys) {
+    if (itemKeys.length === 0)
+      return;
+    this.db.query(`
+      INSERT INTO tier_label_rule_matches (provider, account_scope, rule_key, item_key, walk_id)
+      SELECT ?, ?, ?, value, ? FROM json_each(?) WHERE true
+      ON CONFLICT(provider, account_scope, rule_key, item_key) DO UPDATE SET walk_id = excluded.walk_id
+    `).run(provider, accountScope, ruleKey, walkId, JSON.stringify(itemKeys));
+  }
+  labelRuleMatched(provider, accountScope, ruleKey, walkId, itemKey) {
+    return this.db.query(`
+      SELECT 1 FROM tier_label_rule_matches
+      WHERE provider = ? AND account_scope = ? AND rule_key = ? AND item_key = ? AND walk_id = ?
+    `).get(provider, accountScope, ruleKey, itemKey, walkId) !== null;
+  }
+  retirePreviousLabelRuleMatches(provider, accountScope, ruleKey, walkId) {
+    this.db.query(`
+      DELETE FROM tier_label_rule_matches WHERE provider = ? AND account_scope = ? AND rule_key = ? AND walk_id <> ?
+    `).run(provider, accountScope, ruleKey, walkId);
   }
   writeSettleProgress(key, value) {
     if ((this.readMeta(key) ?? "") === value)
@@ -19674,7 +19941,7 @@ class TierLedger {
   }
   recordRoutedPlacement(identity, decision, plan, options = {}) {
     const decidedAt = this.now().toISOString();
-    const reasonsJson = JSON.stringify(decision.reasons);
+    let reasonsJson = JSON.stringify(decision.reasons);
     for (const copy of plan.copies)
       assertCopyPlan(copy);
     if (new Set(plan.copies.map((copy) => copy.corpusId)).size !== plan.copies.length) {
@@ -19684,7 +19951,7 @@ class TierLedger {
     let raise = false;
     let previousCopies = [];
     this.db.transaction(() => {
-      const existing = this.readRow(identity);
+      let existing = this.readRow(identity);
       if (options.guard)
         this.assertOverrideGuard(identity, existing, options.guard);
       previousCopies = this.copies(identity);
@@ -19726,17 +19993,42 @@ class TierLedger {
         return;
       }
       const emptyMove = existing.state === "moving" && options.staleCopiesGone === true && previousCopies.length === 0;
+      let superseded = false;
       if (existing.state === "moving" && !emptyMove) {
-        outcome = "held_moving";
-        return;
+        const sources = this.moveSources(identity, existing.generation + 1);
+        const planner = tierSetPlannerForLedger(this.dbPath);
+        if (!observationSupersedesMove(existing, decision, sources, planner)) {
+          outcome = "held_moving";
+          return;
+        }
+        const safeDecision = retainHiddenRaise(existing, decision, sources, planner, plan);
+        const safePlan = safeDecision === decision ? plan : planner?.(safeDecision);
+        existing = this.advanceMoveGeneration(identity, existing, decidedAt);
+        if (!safePlan || placementIsRaise(sources, safePlan.copies)) {
+          raise = true;
+          this.queueMoveRow(identity, existing, safeDecision, {
+            hide: true,
+            ...safePlan ? { placement: safePlan.copies } : {},
+            decidedAt
+          });
+          outcome = "queued_move";
+          return;
+        }
+        decision = safeDecision;
+        plan = safePlan;
+        reasonsJson = JSON.stringify(decision.reasons);
+        this.cancelSupersededMove(identity, existing, decidedAt);
+        existing = this.readRow(identity);
+        superseded = true;
       }
       const tiersChanged = existing.metadataTier !== decision.metadataTier || existing.contentTier !== decision.contentTier;
-      const current = previousCopies.filter((copy) => copy.state === "current");
-      const staged = previousCopies.some((copy) => copy.state === "staged") && !(options.stagedLandingAllowed === true && !existing.contentRead);
+      const copies = superseded ? this.copies(identity) : previousCopies;
+      const current = copies.filter((copy) => copy.state === "current");
+      const staged = copies.some((copy) => copy.state === "staged") && !(options.stagedLandingAllowed === true && !existing.contentRead);
       const firstPlacement = !existing.routed || options.staleCopiesGone === true;
       if (secrets || firstPlacement || samePlan(current, plan.copies) && !staged) {
-        const generation = tiersChanged || emptyMove ? existing.generation + 1 : existing.generation;
-        const detailChanged = tiersChanged || firstPlacement || JSON.stringify(existing.reasons) !== reasonsJson || existing.decidedBy !== decision.decidedBy || existing.state !== decision.state || existing.engineVersion !== decision.engineVersion || existing.mapRevision !== decision.mapRevision;
+        const generation = tiersChanged && !superseded || emptyMove ? existing.generation + 1 : existing.generation;
+        const detailChanged = tiersChanged || superseded || firstPlacement || JSON.stringify(existing.reasons) !== reasonsJson || existing.decidedBy !== decision.decidedBy || existing.state !== decision.state || existing.engineVersion !== decision.engineVersion || existing.mapRevision !== decision.mapRevision || existing.contentRead !== decision.contentRead || existing.metadataPending !== decision.metadataPending || existing.contentPending !== decision.contentPending || existing.metadataForced !== decision.metadataForced || existing.metadataFlagged !== decision.metadataFlagged;
         if (detailChanged) {
           this.db.query(`
             UPDATE tier_items SET
@@ -19774,9 +20066,9 @@ class TierLedger {
         return;
       }
       raise = placementIsRaise(current, plan.copies);
-      this.queueMoveRow(identity, existing, decision, { hide: raise && options.queueWithoutHiding !== true, decidedAt });
+      this.queueMoveRow(identity, existing, decision, { hide: raise && options.queueWithoutHiding !== true, placement: plan.copies, decidedAt });
       outcome = "queued_move";
-    })();
+    }).immediate();
     return { outcome, record: this.getCurrent(identity), previousCopies, raise };
   }
   queueOwnerRaise(identity, decision, trustDomain, options = {}) {
@@ -19811,25 +20103,39 @@ class TierLedger {
         result = "hidden";
         return;
       }
-      const staleFlip = existing.generation + 1;
-      const nextFlip = existing.generation + 2;
-      this.db.query(`
-        UPDATE tier_copies SET superseded_by_generation = ?, updated_at = ?
-        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-          AND copy_state = 'superseded' AND superseded_by_generation = ?
-      `).run(nextFlip, decidedAt, ...idParams(identity), staleFlip);
-      this.db.query(`
-        UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = ?, updated_at = ?
-        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'staged'
-      `).run(staleFlip, decidedAt, ...idParams(identity));
-      this.db.query(`
-        UPDATE tier_items SET generation = ?
-        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-      `).run(staleFlip, ...idParams(identity));
-      this.queueMoveRow(identity, { ...existing, generation: staleFlip }, decision, { hide: unsafe, decidedAt });
+      const advanced = this.advanceMoveGeneration(identity, existing, decidedAt);
+      this.queueMoveRow(identity, advanced, decision, { hide: unsafe, decidedAt });
       result = unsafe ? "hidden" : "retargeted";
     })();
     return result;
+  }
+  advanceMoveGeneration(identity, existing, decidedAt) {
+    const generation = existing.generation + 1;
+    this.db.query(`
+        UPDATE tier_copies SET superseded_by_generation = ?, updated_at = ?
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+          AND copy_state = 'superseded' AND superseded_by_generation = ?
+    `).run(generation + 1, decidedAt, ...idParams(identity), generation);
+    this.db.query(`
+        UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = ?, updated_at = ?
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'staged'
+    `).run(existing.generation, decidedAt, ...idParams(identity));
+    this.db.query(`
+        UPDATE tier_items SET generation = ?
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).run(generation, ...idParams(identity));
+    return { ...existing, generation };
+  }
+  cancelSupersededMove(identity, existing, decidedAt) {
+    this.db.query(`
+      UPDATE tier_copies SET copy_state = 'current', superseded_by_generation = NULL, updated_at = ?
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+        AND copy_state = 'superseded' AND superseded_by_generation = ?
+    `).run(decidedAt, ...idParams(identity), existing.generation + 1);
+    this.db.query(`
+      UPDATE tier_items SET state = 'current', target_metadata_tier = NULL, target_content_tier = NULL, move_attempts = 0
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).run(...idParams(identity));
   }
   assertOverrideGuard(identity, existing, guard) {
     if (!existing || existing.generation !== guard.generation)
@@ -20035,8 +20341,12 @@ class TierLedger {
       `).run(JSON.stringify(prior), ...idParams(identity));
     }
     this.appendHistory(identity, existing.generation, decision.metadataTier, decision.contentTier, decision.decidedBy, reasonsJson, "moving", options.decidedAt);
-    if (options.hide)
-      this.supersedeCurrentCopies(identity, existing.generation + 1, options.decidedAt);
+    if (options.hide) {
+      if (options.placement && decision.decidedBy !== "override")
+        this.hideMoveSources(identity, existing.generation + 1, options.placement, options.decidedAt);
+      else
+        this.supersedeCurrentCopies(identity, existing.generation + 1, options.decidedAt);
+    }
   }
   stageLandingCopy(identity, copy, options) {
     assertCopyPlan(copy);
@@ -20178,7 +20488,7 @@ class TierLedger {
         WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
       `).run(options.target.metadataTier, options.target.contentTier, ...idParams(identity));
       if (options.hideSource)
-        this.supersedeCurrentCopies(identity, nextGeneration, now);
+        this.hideMoveSources(identity, nextGeneration, options.destination, now);
       const staged = options.destination.filter((copy) => !sources.some((source) => source.corpusId === copy.corpusId));
       for (const destination of staged) {
         this.db.query(`
@@ -20192,6 +20502,50 @@ class TierLedger {
   }
   moveSources(identity, moveGeneration) {
     return this.copies(identity).filter((copy) => copy.state === "current" || copy.state === "superseded" && copy.supersededByGeneration === moveGeneration);
+  }
+  hideMoveSources(identity, generation, destination, now) {
+    const sources = this.moveSources(identity, generation);
+    if (loweredCopyLayers(sources, destination).length === 0) {
+      this.supersedeCurrentCopies(identity, generation, now);
+      return;
+    }
+    for (const copy of sources) {
+      if (copy.state !== "current" || !placementIsRaise([copy], destination))
+        continue;
+      this.db.query(`
+        UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = ?, updated_at = ?
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
+      `).run(generation, now, ...idParams(identity), copy.corpusId);
+    }
+  }
+  retainMoveRaise(identity, options) {
+    this.withGenerationFence(identity, options.expectedGeneration, () => {
+      const record = this.readRow(identity);
+      if (!record || record.state !== "moving")
+        return;
+      const decidedAt = this.now().toISOString();
+      const advanced = this.advanceMoveGeneration(identity, record, decidedAt);
+      for (const { layer, from, to } of options.recoverLayers ?? []) {
+        this.carryVerifiedLayer(identity, advanced.generation, layer, from, to, decidedAt);
+      }
+      this.queueMoveRow(identity, advanced, { ...record, ...options.target }, { hide: false, decidedAt });
+    });
+  }
+  carryVerifiedLayer(identity, generation, layer, from, to, now) {
+    this.db.query(`
+      UPDATE tier_copies SET
+        layers = CASE WHEN layers = 'both' THEN ? ELSE layers END,
+        copy_state = CASE WHEN layers = 'both' THEN copy_state ELSE 'superseded' END,
+        superseded_by_generation = CASE WHEN layers = 'both' THEN superseded_by_generation ELSE ? END,
+        updated_at = ?
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
+    `).run(layer === "content" ? "metadata" : "content", generation - 1, now, ...idParams(identity), from);
+    this.db.query(`
+      UPDATE tier_copies SET
+        layers = CASE WHEN (copy_state = 'current' OR superseded_by_generation = ?) AND layers <> ? THEN 'both' ELSE ? END,
+        copy_state = 'superseded', superseded_by_generation = ?, updated_at = ?
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
+    `).run(generation + 1, layer, layer, generation + 1, now, ...idParams(identity), to);
   }
   completeMove(identity, options) {
     for (const copy of options.destination)
@@ -20208,11 +20562,11 @@ class TierLedger {
       const override = this.getOverride(identity);
       const targetMetadataTier = existing.targetMetadataTier;
       const targetContentTier = existing.targetContentTier;
-      if (override?.kind === "tier" && (tierRank(targetMetadataTier) < tierRank(override.tier) || tierRank(targetContentTier) < tierRank(override.tier)) && !overrideAuthorizes(override, targetMetadataTier, targetContentTier)) {
+      const conflict = tierMoveOverrideConflict(override, existing, { metadataTier: targetMetadataTier, contentTier: targetContentTier }, sources, options.destination);
+      if (conflict === "tier_floor") {
         throw new TierLedgerGenerationConflictError("The owner has since set this item more private; the move may not land below it.");
       }
-      const lowersLayer = tierRank(targetMetadataTier) < tierRank(existing.metadataTier) || tierRank(targetContentTier) < tierRank(existing.contentTier);
-      if (existing.decidedBy === "override" && lowersLayer && !overrideAuthorizes(override, targetMetadataTier, targetContentTier)) {
+      if (conflict === "override_changed") {
         throw new TierLedgerGenerationConflictError("The owner override behind this move changed; re-read it before landing.");
       }
       for (const planned of options.destination) {
@@ -20294,6 +20648,16 @@ class TierLedger {
       const relayered = copies.filter((copy) => copy.state === "current" && copy.generation === flipGeneration && copy.previousLayers !== null);
       if (restore.length === 0 && relayered.length === 0) {
         throw new Error("Nothing to roll back to: the last flip superseded or re-layered no copy.");
+      }
+      const sources = copies.filter((copy) => copy.state === "current");
+      const destination = [
+        ...restore,
+        ...sources.filter((copy) => copy.generation !== flipGeneration),
+        ...relayered.map((copy) => ({ ...copy, layers: copy.previousLayers }))
+      ];
+      const target = { metadataTier: existing.previousMetadataTier, contentTier: existing.previousContentTier };
+      if (tierMoveOverrideConflict(this.getOverride(identity), existing, target, sources, destination) || options.authorize && !options.authorize(existing, target, sources, destination)) {
+        throw new TierLedgerGenerationConflictError;
       }
       const generation = flipGeneration + 1;
       for (const copy of copies) {
@@ -20504,10 +20868,7 @@ class TierLedger {
     `).run(...idParams(intent.identity), intent.identity.localItemId ?? "", intent.version ?? null, intent.kind, intent.location === true ? 1 : 0, intent.connectorId, this.now().toISOString(), intent.bodyVersion ?? null, intent.itemFamily ?? null);
   }
   writeIntent(identity) {
-    const row = this.db.query(`
-      SELECT * FROM tier_write_intents
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-    `).get(...idParams(identity));
+    const row = this.db.query(WRITE_INTENT_SQL).get(...idParams(identity));
     return row ? writeIntentFromRow(row) : undefined;
   }
   markUnseenDeletion(identity) {
@@ -20916,10 +21277,12 @@ class TierLedger {
         "tier_migration_proposals",
         "secret_side_store_debt",
         "secret_side_store_scrubs",
-        "secret_redaction_retirement"
+        "secret_redaction_retirement",
+        "tier_label_rule_matches"
       ]) {
         this.db.query(`DELETE FROM ${table} WHERE provider = ? AND account_scope = ?`).run(provider, accountScope);
       }
+      this.db.query("DELETE FROM tier_ledger_meta WHERE key = ?").run(labelSweepMetaKey(provider, accountScope));
       return { items, copies };
     })();
   }
@@ -21278,6 +21641,18 @@ function overrideAuthorizes(override, metadataTier, contentTier) {
   const allowed = (tier) => tier === override.tier || override.tier === "public" && tier === "private";
   return allowed(metadataTier) && allowed(contentTier);
 }
+function tierMoveOverrideConflict(override, record, target, sources, destination) {
+  const authorized = overrideAuthorizes(override, target.metadataTier, target.contentTier);
+  if (override?.kind === "tier") {
+    const floor = tierRank(override.tier);
+    const belowTier = tierRank(target.metadataTier) < floor || tierRank(target.contentTier) < floor;
+    if (belowTier && !authorized || destination.some((copy) => trustDomainRank(copy.trustDomain) < floor))
+      return "tier_floor";
+  }
+  if (record.decidedBy !== "override" || authorized)
+    return;
+  return tierRank(target.metadataTier) < tierRank(record.metadataTier) || tierRank(target.contentTier) < tierRank(record.contentTier) || loweredCopyLayers(sources, destination).length > 0 ? "override_changed" : undefined;
+}
 function samePlan(current, planned) {
   if (current.length !== planned.length)
     return false;
@@ -21293,6 +21668,13 @@ function placementIsRaise(current, planned) {
       return true;
   }
   return false;
+}
+function loweredCopyLayers(sources, destination) {
+  return ["metadata", "content"].filter((layer) => {
+    const from = copyServingLayer(sources, layer);
+    const to = copyServingLayer(destination, layer);
+    return from && to && trustDomainRank(to.trustDomain) < trustDomainRank(from.trustDomain);
+  });
 }
 function assertCopyPlan(copy) {
   if (!copy.corpusId?.trim())
@@ -21412,6 +21794,87 @@ function rowOf(record) {
     metadataFlagged: record.metadataFlagged
   };
 }
+function queuedDecisionRecord(record) {
+  return {
+    ...record,
+    metadataTier: record.targetMetadataTier ?? record.metadataTier,
+    contentTier: record.targetContentTier ?? record.contentTier
+  };
+}
+function movingObservation(record, observed, options = {}) {
+  if (record.state !== "moving" || observed.contentRead || observed.contentTier === "secrets")
+    return observed;
+  const queued = queuedDecisionRecord(record);
+  const next = effectiveRow(queued, observed);
+  const body = observed.reasons.find((reason) => reason.startsWith("content:sha256:"));
+  if (body && !queued.reasons.includes(body)) {
+    next.reasons = next.reasons.filter((reason) => !reason.startsWith("content:sha256:"));
+    next.reasons.push(body);
+  }
+  if (queued.contentRead && (options.contentFetchOwed || tierRank(queued.contentTier) < tierRank("secure") && tierRank(next.contentTier) < tierRank("secure") && observationMaterialChanged(queued, observed))) {
+    next.contentPending = true;
+    next.reasons = next.reasons.filter((reason) => !reason.startsWith("content:sniffer:") && !reason.startsWith("content:judge_verdict:"));
+    next.reasons.push(`content:sniffer:${observed.snifferId}:undecided`);
+  }
+  return { ...observed, ...decisionOfRow(next), snifferId: observed.snifferId };
+}
+function retainHiddenRaise(existing, next, sources, planner, nextPlacement) {
+  if (!sources.some((copy) => copy.state === "superseded"))
+    return next;
+  const queued = queuedDecisionRecord(existing);
+  const previousPlacement = planner?.(decisionOfRow(rowOf(queued)));
+  const floor = (layer) => {
+    const source = copyServingLayer(sources, layer);
+    if (!source || source.state !== "superseded")
+      return "public";
+    const raised = previousPlacement && copyServingLayer(previousPlacement.copies, layer);
+    const raisedRank = raised ? trustDomainRank(raised.trustDomain) : decisionLayerRank(queued, layer);
+    if (raisedRank <= trustDomainRank(source.trustDomain))
+      return "public";
+    const planned = nextPlacement && copyServingLayer(nextPlacement.copies, layer);
+    const plannedRank = planned ? trustDomainRank(planned.trustDomain) : decisionLayerRank(next, layer);
+    if (plannedRank < raisedRank)
+      return TIER_KEYS[raisedRank];
+    return layer === "content" ? queued.contentTier : queued.metadataTier;
+  };
+  const metadataTier = maxTier(next.metadataTier, floor("metadata"));
+  const contentTier = maxTier(maxTier(next.contentTier, floor("content")), metadataTier);
+  if (metadataTier === next.metadataTier && contentTier === next.contentTier)
+    return next;
+  return { ...next, metadataTier, contentTier, reasons: [...next.reasons, RETAINED_MOVE_SOURCE_REASON] };
+}
+function decisionLayerRank(decision, layer) {
+  if (decision.metadataPending || layer === "content" && contentHeldForJudgment(decision))
+    return tierRank("secure");
+  return tierRank(layer === "metadata" ? decision.metadataTier : decision.contentTier);
+}
+function placementRaisesSource(decision, sources) {
+  return ["metadata", "content"].some((layer) => {
+    const source = copyServingLayer(sources, layer);
+    return source !== undefined && decisionLayerRank(decision, layer) > trustDomainRank(source.trustDomain);
+  });
+}
+function observationSupersedesMove(existing, next, sources, planner) {
+  if (existing.targetMetadataTier === null || existing.targetContentTier === null || existing.targetMetadataTier === "secrets" || existing.targetContentTier === "secrets")
+    return false;
+  const queued = queuedDecisionRecord(existing);
+  if (tierRank(next.metadataTier) > tierRank(queued.metadataTier) || tierRank(next.contentTier) > tierRank(queued.contentTier) || next.metadataPending && !queued.metadataPending || next.contentPending && !queued.contentPending)
+    return true;
+  const placement = planner?.(decisionOfRow(rowOf(queued)));
+  const lowers = tierRank(queued.metadataTier) < tierRank(existing.metadataTier) || tierRank(queued.contentTier) < tierRank(existing.contentTier) || ["metadata", "content"].some((layer) => {
+    const from = copyServingLayer(sources, layer);
+    const to = placement && copyServingLayer(placement.copies, layer);
+    return from !== undefined && (to ? trustDomainRank(to.trustDomain) : decisionLayerRank(queued, layer)) < trustDomainRank(from.trustDomain);
+  });
+  if (!lowers)
+    return false;
+  if (next.engineVersion !== queued.engineVersion || next.mapRevision !== queued.mapRevision || next.metadataForced !== queued.metadataForced || next.metadataFlagged !== queued.metadataFlagged)
+    return true;
+  return observationMaterialChanged(queued, next);
+}
+function observationMaterialChanged(queued, next) {
+  return [NAMES_INPUT_REASON_PREFIX, "content:sha256:", "content:names:"].some((prefix) => next.reasons.some((reason) => reason.startsWith(prefix) && !queued.reasons.includes(reason)));
+}
 var STALE_EMBED_HOLD_DECIDED = `EXISTS (
         SELECT 1 FROM tier_items t
         WHERE t.provider = tier_copies.provider AND t.account_scope = tier_copies.account_scope
@@ -21419,6 +21882,7 @@ var STALE_EMBED_HOLD_DECIDED = `EXISTS (
           AND t.state = 'current' AND t.metadata_pending = 0 AND t.content_pending = 0
           AND t.metadata_tier <> 'secrets' AND t.content_tier <> 'secrets'
           AND t.target_metadata_tier IS NULL AND t.target_content_tier IS NULL
+          AND instr(t.reasons_json, '"${OWNER_OVERRIDE_SECRET_REVIEW_REASON}"') = 0
           -- A re-judgment still open on this decision keeps the hold.
           AND NOT (t.rejudge_json IS NOT NULL
             AND json_extract(t.rejudge_json, '$.generation') = t.generation
@@ -21468,19 +21932,7 @@ function isOpenSnifferReason(reason, pass) {
   return reason.startsWith("content:sniffer:") && reason.endsWith(":undecided");
 }
 function effectiveRow(existing, decision) {
-  const fresh = {
-    metadataTier: decision.metadataTier,
-    contentTier: decision.contentTier,
-    decidedBy: decision.decidedBy,
-    reasons: decision.reasons,
-    engineVersion: decision.engineVersion,
-    mapRevision: decision.mapRevision,
-    contentRead: decision.contentRead,
-    metadataPending: decision.metadataPending,
-    contentPending: decision.contentPending,
-    metadataForced: decision.metadataForced,
-    metadataFlagged: decision.metadataFlagged
-  };
+  const fresh = rowOfDecision(decision);
   if (!existing || decision.contentRead)
     return fresh;
   if (existing.contentRead) {
@@ -21496,6 +21948,21 @@ function effectiveRow(existing, decision) {
     };
   }
   return { ...fresh, contentTier: maxTier(existing.contentTier, decision.contentTier) };
+}
+function rowOfDecision(decision) {
+  return {
+    metadataTier: decision.metadataTier,
+    contentTier: decision.contentTier,
+    decidedBy: decision.decidedBy,
+    reasons: decision.reasons,
+    engineVersion: decision.engineVersion,
+    mapRevision: decision.mapRevision,
+    contentRead: decision.contentRead,
+    metadataPending: decision.metadataPending,
+    contentPending: decision.contentPending,
+    metadataForced: decision.metadataForced,
+    metadataFlagged: decision.metadataFlagged
+  };
 }
 function decisionFlags(decision) {
   return [
@@ -22001,7 +22468,7 @@ function tierLedgerMigrations() {
       }
     },
     {
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 17,
       name: "visibility_feed_copy_corpus",
       up(db) {
         if (!db.query("SELECT 1 FROM pragma_table_info('tier_visibility_changes') WHERE name = 'corpus_id'").get()) {
@@ -22033,6 +22500,22 @@ function tierLedgerMigrations() {
           `);
         }
       }
+    },
+    {
+      version: TIER_LEDGER_SCHEMA_VERSION,
+      name: "provider_label_rule_matches",
+      up(db) {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS tier_label_rule_matches (
+            provider TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            rule_key TEXT NOT NULL,
+            item_key TEXT NOT NULL,
+            walk_id TEXT NOT NULL,
+            PRIMARY KEY (provider, account_scope, rule_key, item_key)
+          ) WITHOUT ROWID
+        `);
+      }
     }
   ];
 }
@@ -22046,7 +22529,7 @@ function overrideFromJson(json) {
 }
 
 // src/workers/remote-access-recheck.ts
-import { AsyncLocalStorage as AsyncLocalStorage11 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage12 } from "node:async_hooks";
 
 // src/core/source-item-read.ts
 var SOURCE_ITEM_READ_REFUSALS = [
@@ -22062,8 +22545,8 @@ var SOURCE_ITEM_READ_REFUSALS = [
 ];
 
 // src/core/app-release-capture.ts
-import { AsyncLocalStorage as AsyncLocalStorage10 } from "node:async_hooks";
-var storage3 = new AsyncLocalStorage10;
+import { AsyncLocalStorage as AsyncLocalStorage11 } from "node:async_hooks";
+var storage3 = new AsyncLocalStorage11;
 var completedPrivateAnswers = new Set;
 var JOB_QUESTION_TTL_MS = 30 * 60000;
 var jobQuestions = new Map;
@@ -22554,7 +23037,7 @@ function currentAccess(authorized) {
     return "unavailable";
   }
 }
-var readAuthorization = new AsyncLocalStorage11;
+var readAuthorization = new AsyncLocalStorage12;
 function currentRemoteReadAccess() {
   const authorized = readAuthorization.getStore();
   return authorized ? currentAccess(authorized) : "active";
@@ -22649,12 +23132,6 @@ function findTierSetLedger(storeDbPath, binding) {
   return;
 }
 
-// src/workers/classification/installed-tier-classification-registry.ts
-var registered;
-function registeredInstalledTierClassification() {
-  return registered;
-}
-
 // src/workers/connector-store/tier-placement.ts
 function resolveStoreTierClassification(explicit, ledgerPath) {
   const installed = registeredInstalledTierClassification()?.forLedger(ledgerPath);
@@ -22708,13 +23185,13 @@ function isTextualMimeType(mimeType) {
   return normalized.startsWith("text/") || normalized === "application/json" || normalized === "application/xml" || normalized.endsWith("+json") || normalized.endsWith("+xml");
 }
 function decideItemTiers(connector, item, text, options, ledger, extra = {}) {
-  const read = ledger?.classificationRead(item.identity);
+  const read = extra.classificationRead ?? ledger?.classificationRead(item.identity, extra.contentFetchFailed ? undefined : text);
   const override = read?.override;
   const fresh = text?.trim() ? extra.contentFetchFailed !== true : false;
   const recorded = ledger?.getCurrent(item.identity);
   const fenced = options?.sniffer && ledger && read ? secretFencedSniffer(options.sniffer, ledger, item.identity, read, { mayAskSecret: fresh }) : options?.sniffer;
   const signals = connector.classificationSignals(item);
-  const parentContext = item.identity.parent ? options?.parentNamesContext?.(item.identity, item.identity.parent.localItemId) : undefined;
+  const parentContext = extra.parentContext ?? (item.identity.parent ? options?.parentNamesContext?.(item.identity, item.identity.parent.localItemId) : undefined);
   const namesReceipt = contentNamesReason(signals, parentContext);
   const cacheAware = fenced && {
     id: fenced.id,
@@ -22739,9 +23216,9 @@ function decideItemTiers(connector, item, text, options, ledger, extra = {}) {
   const newArrival = extra.afterFirstImport === true && recorded === undefined;
   if (newArrival && text === undefined)
     ledger?.markNewArrival(item.identity);
-  const sniffer = cacheAware && arrivalOrderedSniffer(conversationOrderedSniffer(recordedContentVerdictSniffer(cacheAware, recorded, text, namesReceipt), item.metadata), newArrival);
-  const holdUntilJudged = options?.holdContentUntilJudged === true || item.identity.parent !== undefined || item.holdContentUntilJudged === true || heldUntilJudged(recorded?.reasons);
-  return classifyItemTiers({
+  const sniffer = cacheAware && arrivalOrderedSniffer(conversationOrderedSniffer(recordedContentVerdictSniffer(cacheAware, recorded, text, namesReceipt, namesInputReason(signals, parentContext)), item.metadata), newArrival);
+  const holdUntilJudged = extra.requireContentVerdict === true || item.identity.parent !== undefined || options?.holdContentUntilJudged === true || item.holdContentUntilJudged === true || heldUntilJudged(recorded?.reasons);
+  const decision = classifyItemTiers({
     signals,
     locators: ["locatorUri", "url", "pathDisplay"].map((key) => item.metadata[key]).filter((value) => typeof value === "string"),
     provider: item.identity.provider,
@@ -22749,10 +23226,11 @@ function decideItemTiers(connector, item, text, options, ledger, extra = {}) {
     ...extra.namesOnly ? { namesOnly: true } : {},
     ...holdUntilJudged ? { holdUntilJudged: true } : {},
     ...parentContext ? { parentContext } : {},
+    ...extra.imageJudgment ? { imageJudgment: extra.imageJudgment } : {},
     mimeType: item.mimeType,
     hasNonTextContent: itemHasNonTextContent(item),
     titleIsConversation: item.metadata.titleIsConversation === true,
-    ...read?.secret ? { heldSecret: true } : {},
+    ...read?.secret && !extra.freshSecretReplacement ? { heldSecret: true } : {},
     subject: item.identity
   }, {
     ...options?.rules ? { rules: options.rules } : {},
@@ -22760,21 +23238,44 @@ function decideItemTiers(connector, item, text, options, ledger, extra = {}) {
     ...override ? { override } : {},
     ...options?.retirePublic ? { retirePublic: true } : {}
   });
+  const unread = text === undefined || extra.contentFetchFailed === true;
+  if (unread && override?.kind === "tier" && recorded?.reasons.includes(OWNER_OVERRIDE_SECRET_REVIEW_REASON)) {
+    return { ...decision, metadataTier: recorded.metadataTier, contentTier: recorded.contentTier, contentRead: false };
+  }
+  if (unread && override?.kind === "tier" && recorded?.reasons.includes(OWNER_OVERRIDE_SECRET_CONFIRMED_REASON)) {
+    return { ...decision, contentRead: false };
+  }
+  return decision;
 }
-function recordedContentVerdictSniffer(sniffer, recorded, text, names) {
-  if (!recorded || !text?.trim() || recorded.state !== "current" || recorded.contentPending || !recorded.contentRead)
+function recordedContentVerdictSniffer(sniffer, recorded, text, names, namesInput) {
+  if (!recorded || !text?.trim() || recorded.contentPending || !recorded.contentRead || recorded.reasons.includes(RETAINED_MOVE_SOURCE_REASON))
+    return sniffer;
+  if (recorded.state !== "current" && (recorded.state !== "moving" || !namesInput || !recorded.reasons.includes(namesInput)))
     return sniffer;
   if (recorded.engineVersion !== TIER_CLASSIFIER_VERSION || !recorded.reasons.includes(contentDigestReason(text)) || !recorded.reasons.includes(names))
     return sniffer;
-  const tier = recorded.contentTier;
+  const tier = recorded.targetContentTier ?? recorded.contentTier;
   const prefix = `content:sniffer:${sniffer.id}:`;
   const code = recorded.reasons.find((reason) => reason.startsWith(prefix))?.slice(prefix.length);
   if (tier !== "private" && tier !== "secure" || !code || code === "undecided" || isFailSafeMissingContentQuestion(`${prefix}${code}`))
     return sniffer;
+  const digest = contentDigestReason(text);
+  const reason = prefix + code;
+  const legacyVerdict = recorded.state === "current" && recorded.decidedBy === "sniffer" && recorded.reasons.filter((r) => r.startsWith("content:sha256:")).length === 1 && recorded.reasons.filter((r) => r.startsWith("content:names:")).length === 1 && recorded.reasons.filter((r) => r.startsWith("content:sniffer:")).length === 1 && !recorded.reasons.some((r) => r.startsWith("content:judge_verdict:")) && isContentJudgeReason(reason);
+  const judgeBacked = legacyVerdict || hasContentJudgeVerdict(recorded.reasons, tier, digest);
+  if (tier === "private" && !judgeBacked)
+    return sniffer;
+  const duplicate = judgeBacked && code.startsWith("rule:duplicate_model:");
+  const verdict = {
+    tier,
+    code,
+    ...duplicate ? { rule: "duplicate_model" } : {},
+    ...judgeBacked ? { origin: duplicate ? "rule" : "model" } : {}
+  };
   return {
     id: sniffer.id,
-    recordedContentVerdict: { tier, code, mapRevision: recorded.mapRevision },
-    judge: (request) => request.pass === "content" && (request.mapRevision ?? "none") === recorded.mapRevision ? { verdict: "decided", tier, code } : sniffer.judge(request)
+    recordedContentVerdict: { ...verdict, mapRevision: recorded.mapRevision },
+    judge: (request) => request.pass === "content" && (request.mapRevision ?? "none") === recorded.mapRevision ? { verdict: "decided", ...verdict } : sniffer.judge(request)
   };
 }
 function secretFencedSniffer(sniffer, ledger, identity, read, options = {}) {
@@ -23352,6 +23853,17 @@ var WAITING_QUESTION_LIMITS = Object.freeze({
   ttlMs: 7 * 24 * 60 * 60000,
   reanswerAfterMs: 10 * 60000
 });
+var REVOKE_BUSY_TIMEOUT_MS = 1000;
+var REVOCATION_WRITE_LIMIT = Object.freeze({
+  id: "privacy.revocation_write",
+  kind: "time",
+  scope: "source",
+  label: "Wait for a privacy revocation to acquire the write lock",
+  unit: "ms",
+  continue: "none",
+  milliseconds: REVOKE_BUSY_TIMEOUT_MS
+});
+registerLimit(REVOCATION_WRITE_LIMIT);
 
 // src/core/remote-connections.ts
 function resolveRemoteConnectionsDbPath(env = process.env) {
@@ -23668,7 +24180,7 @@ function forgetSecretInSideStores(options) {
   const snifferPath = tierSnifferPathForLedger(ledger.dbPath);
   if (snifferPath !== ":memory:" && existsSync21(snifferPath)) {
     try {
-      const sniffer = new TierSnifferStore({ dbPath: snifferPath });
+      const sniffer = new TierSnifferStore({ dbPath: snifferPath, ...options.restoreQueue ? { restoreQueue: true } : {} });
       try {
         result.snifferQuestions = sniffer.deleteItemQuestions({
           provider: identity.provider,
@@ -23921,6 +24433,9 @@ var EMBEDDING_LEDGER_BACKFILL = PUBLIC_RUNTIME_BUILD ? [] : [
     status: "complete"
   }
 ];
+
+// src/workers/connector-store/tier-move-rule-policy.ts
+var heldPolicyFences = new WeakMap;
 
 // src/workers/answer-activity.ts
 var DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
@@ -24421,6 +24936,46 @@ function compareStrings(left, right) {
   return left < right ? -1 : 1;
 }
 
+// src/core/source-index/router.ts
+var DEFER_SEARCH_DELIVERY = Symbol("defer search delivery");
+var SEARCH_GRANT_MATCH = Symbol("search grant match");
+var SEARCH_GRANT_DELIVERY = Symbol("search grant delivery");
+var FORBIDDEN_ROUTER_RESULT_KEYS = new Set([
+  "body",
+  "bodies",
+  "content",
+  "contents",
+  "message",
+  "messages",
+  "raw",
+  "raw_packet",
+  "rawPacket",
+  "raw_source",
+  "rawSource",
+  "sanitized_text",
+  "sanitizedText",
+  "snippet",
+  "snippets",
+  "source_text",
+  "sourceText",
+  "raw_source_text",
+  "rawSourceText",
+  "text",
+  "access_token",
+  "accessToken",
+  "api_key",
+  "apiKey",
+  "approved_scope_key",
+  "approvedScopeKey",
+  "refresh_token",
+  "refreshToken",
+  "token"
+]);
+var NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS = new Set([...FORBIDDEN_ROUTER_RESULT_KEYS].map(normalizeRouterResultKey));
+function normalizeRouterResultKey(key) {
+  return key.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
 // src/workers/connector-store/local-index.ts
 var TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff";
 var DEFAULT_MAX_CHUNK_CHARS = 4000;
@@ -24472,7 +25027,7 @@ var CONTAINER_MIME_TYPES = Object.freeze([
 ]);
 var CONTAINER_MIME_TYPES_SQL = CONTAINER_MIME_TYPES.map((type) => `'${type}'`).join(", ");
 var SQLITE_STORE_ID = "connector-store";
-var CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 16;
+var CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 17;
 var IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only";
 var CHUNK_MEDIA_RETRY_BASE_MS = 60 * 60000;
 var CHUNK_MEDIA_MAX_ATTEMPTS = 3;
@@ -24621,7 +25176,11 @@ function connectorStoreMigrations() {
       version: 16,
       name: "connector_store_vector_digest",
       up: createVectorDigestSchema
-    }
+    },
+    additiveMigration(17, "connector_store_on_demand_grant_epoch", [
+      "CREATE TABLE IF NOT EXISTS on_demand_grant_epoch (id INTEGER PRIMARY KEY CHECK (id = 1), epoch INTEGER NOT NULL)",
+      "CREATE TABLE IF NOT EXISTS on_demand_grant_acquisitions (local_item_id TEXT PRIMARY KEY, epoch INTEGER NOT NULL)"
+    ])
   ];
 }
 var ITEM_VISIBILITY_FEED_RETENTION = 65536;
@@ -25137,11 +25696,12 @@ function connectorStoreCurrentEmbeddingRowsQuery(options, ordered, page) {
   const accountScope = normalizeOptionalAccountScope(options.accountScope);
   const selectedFilters = connectorStoreFilterSql(options.filters);
   const metadataOnly = connectorStoreMetadataOnlySql(options.filters, options.onDemandReadsTablePresent);
-  const chunkContentHash = page ? ", c.content_hash AS chunk_content_hash" : "";
+  const winnerIdentity = page ? ", c.content_hash AS chunk_content_hash" : "";
+  const sourceVersion = options.includeSourceVersion ? ", i.source_version" : "";
   if (options.chunkPks) {
     return {
       sql: `
-        SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding${chunkContentHash}
+        SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding${winnerIdentity}${sourceVersion}
         FROM json_each(?) pick
         CROSS JOIN chunk_embeddings emb ON emb.chunk_pk = pick.value AND emb.model_id = ?
         CROSS JOIN chunks c ON c.chunk_pk = emb.chunk_pk
@@ -25167,7 +25727,7 @@ function connectorStoreCurrentEmbeddingRowsQuery(options, ordered, page) {
   }
   return {
     sql: `
-      SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding${chunkContentHash}
+      SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding${winnerIdentity}${sourceVersion}
       ${CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER}
         -- Unary + avoids the model index + repeated whole-model sort (#1242).
         AND ${page ? "+emb.model_id" : "emb.model_id"} = ?
@@ -25200,7 +25760,8 @@ function foldVectorScore(bestByItem, row, queryVector) {
       bestCosine: score,
       bestChunkPk: row.chunk_pk,
       bestChunkContentHash: row.chunk_content_hash,
-      localItemId: row.local_item_id
+      localItemId: row.local_item_id,
+      sourceVersion: row.source_version ?? null
     });
   }
   return { mismatch: 0, qualified, score };
@@ -25212,6 +25773,7 @@ async function scanVectorPages(read, provider, beforeToken, queryVector, pageOpt
     return { skippedReason: after.skippedReason };
   if (after.token !== beforeToken)
     return { skippedReason: "embedding_authority_changed_during_query" };
+  pageOptions = { ...pageOptions, includeSourceVersion: true };
   if (pageOptions.filters?.metadataOnlyLocatorPathScopes?.length || pageOptions.filters?.metadataOnlySourceScopeFolderKeys?.length) {
     pageOptions = { ...pageOptions, onDemandReadsTablePresent: Boolean(await read({
       mode: "get",
@@ -25593,6 +26155,8 @@ var RECENCY_INDEX_NOT_ADMITTED_RETRY_MS = 30000;
 var RECLAIM_MAX_PAGES_PER_STEP = 128;
 var RECLAIM_CONVERSION_BYTES_PER_MS = 15000;
 var SUPERSEDED_PRUNE_MEDIA_ROWS = 1;
+var grantNotifications;
+var ON_DEMAND_GRANT_EPOCH_CHECK_MS = 250;
 
 class LocalConnectorStore {
   dbPath;
@@ -25613,6 +26177,11 @@ class LocalConnectorStore {
   childLane;
   chunkMediaColumnsPresent = false;
   imageMediaReadsPresent = false;
+  onDemandReadsTablePresent;
+  onDemandGrantEpochPresent = false;
+  onDemandGrantChecks;
+  onDemandGrantTimer;
+  onDemandGrantCheckedEpoch;
   itemTextVersionsPresent = false;
   mediaJudgmentsPresent = false;
   mediaHolder;
@@ -25679,7 +26248,8 @@ class LocalConnectorStore {
       applySqliteMmap(this.db);
       assertSqliteSchemaCanOpen(this.db, SQLITE_STORE_ID, CONNECTOR_STORE_SQLITE_SCHEMA_VERSION);
       const versionAtOpen = readSqliteSchemaVersion(this.db, SQLITE_STORE_ID);
-      const migrating = options.readOnly !== true && versionAtOpen < CONNECTOR_STORE_SQLITE_SCHEMA_VERSION;
+      const schemaTarget = options.restoreSchemaVersion ?? CONNECTOR_STORE_SQLITE_SCHEMA_VERSION;
+      const migrating = options.readOnly !== true && versionAtOpen < schemaTarget;
       validateCurrentConnectorStoreSchemaBeforeMigration(this.db);
       if (migrating) {
         setEngineStep(`checking ${SQLITE_STORE_ID} rows`);
@@ -25691,6 +26261,12 @@ class LocalConnectorStore {
         if (version < READ_ONLY_MIN_SCHEMA_VERSION) {
           throw new Error("Connector store read-only mode requires the v7 filter schema or newer.");
         }
+      } else if (options.restoreSchemaVersion !== undefined) {
+        if (schemaTarget < 15 || schemaTarget > CONNECTOR_STORE_SQLITE_SCHEMA_VERSION || !creatingFile && versionAtOpen !== schemaTarget) {
+          throw new Error("The connector store cannot be written at its restored schema.");
+        }
+        if (creatingFile)
+          applyConnectorStoreOpenSchema(this.db, schemaTarget);
       } else {
         const current = !migrating && !creatingFile && this.db.query("PRAGMA user_version").get().user_version === connectorStoreOpenStamp(this.db);
         if (!current) {
@@ -25716,15 +26292,17 @@ class LocalConnectorStore {
       this.childItemColumnsPresent = tableColumns(this.db, "items", false).includes("parent_local_item_id");
       this.chunkMediaColumnsPresent = tableColumns(this.db, "chunks", false).includes("media_sha256");
       this.imageMediaReadsPresent = this.db.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'image_media_reads'").get() !== null;
+      this.onDemandReadsTablePresent = !this.readOnly || this.db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'").get() !== null;
+      this.onDemandGrantEpochPresent = this.onDemandReadsTablePresent && this.db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_grant_epoch'").get() !== null;
       this.itemTextVersionsPresent = this.db.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'item_text_versions'").get() !== null;
       const judgmentColumns = this.db.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'media_judgments'").get() !== null ? tableColumns(this.db, "media_judgments", false) : [];
       this.mediaJudgmentsPresent = CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS.every((column) => judgmentColumns.includes(column));
-      if (!this.readOnly) {
+      if (!this.readOnly && options.restoreSchemaVersion === undefined) {
         const model = this.db.query("SELECT model_id FROM chunk_embeddings ORDER BY rowid DESC LIMIT 1").get()?.model_id;
         if (model && !vectorDigestState(this.db, model).completed)
           this.scheduleVectorDigestBackfill(model, VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS);
       }
-      if (!this.readOnly && !creatingFile && this.db.query("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name IN (?, ?)").get(CONNECTOR_STORE_RECENCY_INDEX, CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX).n < 2) {
+      if (!this.readOnly && options.restoreSchemaVersion === undefined && !creatingFile && this.db.query("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name IN (?, ?)").get(CONNECTOR_STORE_RECENCY_INDEX, CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX).n < 2) {
         if (admitRecencyIndexBuild)
           this.scheduleRecencyIndexBuild();
       }
@@ -25890,6 +26468,7 @@ class LocalConnectorStore {
   close() {
     if (this.closedForPoolReads)
       return;
+    this.stopOnDemandGrantChecks();
     changeMemoryCounter("connector_stores", -1);
     untrackSqliteStoreMemory(this.db);
     this.tierLedgerHiddenMemo = undefined;
@@ -25913,6 +26492,7 @@ class LocalConnectorStore {
     } finally {
       this.tierLedgerHandle = undefined;
       this.closedForPoolReads = true;
+      this.checkOnDemandGrantWork();
       if (offThreadReadsSupported(this.dbPath))
         releaseOffThreadReads(this.dbPath);
       closeSqliteStore(this.db, this.readOnly ? { checkpoint: false, readOnly: true } : buildingRecencyIndex ? { checkpoint: false } : undefined);
@@ -26072,10 +26652,10 @@ class LocalConnectorStore {
       const ledger = this.tierLedger();
       if (!ledger)
         return false;
-      const read = ledger.classificationRead(item.identity);
       const existing = ledger.getCurrent(item.identity);
       if (!existing)
         return false;
+      const read = ledger.classificationRead(item.identity, text);
       const override = read.override;
       const metadataString = (keys) => {
         for (const key of keys) {
@@ -27822,7 +28402,7 @@ ${parentKey(ref)}`, { ref, origin });
     `).get(item.identity.provider, item.identity.accountScope, normalizeConversationId(item.identity.providerConversationId), item.identity.providerItemId);
     if (!row)
       return;
-    this.rememberItemOwner(row.item_pk, connectorId, ownershipKind, syncRunId, nowIso(), "provider_listing");
+    this.rememberItemOwner(row.item_pk, connectorId, ownershipKind, syncRunId, this.now().toISOString(), "provider_listing");
   }
   tombstoneCopy(identity, options) {
     const syncRunId = `connector-tier-copy-${randomUUID9()}`;
@@ -29138,6 +29718,23 @@ ${parentKey(ref)}`, { ref, origin });
       tombstoned: row.tombstoned === 1
     };
   }
+  repeatsListedCopy(item, text, connectorId) {
+    if (!this.childItemColumnsPresent)
+      return false;
+    const { identity, metadata } = item;
+    const title = itemTitle(item);
+    const sender = senderMetadataFromRawItem(item);
+    const locator = metadataString(metadata, "locatorUri") ?? metadataString(metadata, "pathDisplay") ?? metadataString(metadata, "url");
+    const chunks = this.db.query(`SELECT c.bounded_text FROM items i JOIN chunks c USING (item_pk)
+      WHERE i.provider = ? AND i.account_scope = ? AND i.normalized_conversation = ? AND i.provider_item_id = ?
+        AND i.tombstoned = 0 AND i.source_version IS ? AND i.title IS ? AND i.search_text IS ?
+        AND i.sender_label IS ? AND i.sender_id IS ? AND i.locator_uri IS ? AND i.mime_type IS ?
+        AND i.parent_local_item_id IS ?
+        AND (i.source_version IS NOT NULL OR EXISTS (
+          SELECT 1 FROM item_owners o WHERE o.item_pk = i.item_pk AND o.connector_id <> ?
+        )) ORDER BY c.chunk_index`).all(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId, identity.sourceVersion ?? null, title ?? null, itemSearchText(item, title) ?? null, sender.senderLabel ?? null, sender.senderId ?? null, locator ?? null, item.mimeType, identity.parent?.localItemId ?? null, connectorId);
+    return chunks.length > 0 && chunks.map((chunk) => chunk.bounded_text).join("") === text.trim();
+  }
   itemPresence(identity) {
     const row = this.db.query(`
       SELECT source_version, content_hash, tombstoned
@@ -29507,6 +30104,108 @@ ${parentKey(ref)}`, { ref, origin });
   grantOnDemandRead(localItemId, sourceVersion = "") {
     this.db.query(`INSERT INTO on_demand_item_reads(local_item_id, source_version) VALUES (?, ?)
       ON CONFLICT(local_item_id) DO UPDATE SET source_version = excluded.source_version`).run(localItemId, sourceVersion);
+    this.notifyOnDemandGrantChange();
+  }
+  revokeOnDemandRead(localItemId) {
+    const previous = this.db.query("PRAGMA busy_timeout").get().timeout;
+    this.db.exec(`PRAGMA busy_timeout = ${Math.min(previous, REVOCATION_WRITE_LIMIT.milliseconds)}`);
+    try {
+      const removed = this.db.query("DELETE FROM on_demand_item_reads WHERE local_item_id = ?").run(localItemId);
+      if (removed.changes > 0)
+        this.notifyOnDemandGrantChange();
+    } finally {
+      this.db.exec(`PRAGMA busy_timeout = ${previous}`);
+    }
+  }
+  onDemandGrantEpoch() {
+    if (this.closedForPoolReads || !this.onDemandReadsTablePresent)
+      return;
+    if (!this.onDemandGrantEpochPresent) {
+      this.onDemandGrantEpochPresent = !!this.db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_grant_epoch'").get();
+      if (!this.onDemandGrantEpochPresent)
+        return;
+    }
+    return this.db.query("SELECT epoch FROM on_demand_grant_epoch WHERE id = 1").get()?.epoch;
+  }
+  currentOnDemandRead(localItemId, sourceVersion) {
+    const current = this.currentOnDemandGrant(localItemId);
+    return current !== undefined && (sourceVersion === undefined || current.source_version === sourceVersion);
+  }
+  currentOnDemandGrant(localItemId) {
+    if (!this.onDemandReadsTablePresent || this.closedForPoolReads)
+      return;
+    const acquisition = this.onDemandGrantEpochPresent ? "COALESCE((SELECT epoch FROM on_demand_grant_acquisitions WHERE local_item_id = r.local_item_id), 0)" : "(SELECT -(data_version + total_changes()) FROM pragma_data_version)";
+    return this.db.query(`SELECT r.source_version, ${acquisition} AS acquired_epoch
+      FROM on_demand_item_reads r JOIN items i ON i.local_item_id = r.local_item_id
+      AND COALESCE(i.source_version, '') = r.source_version
+      WHERE r.local_item_id = ? AND i.tombstoned = 0 LIMIT 1`).get(localItemId) ?? undefined;
+  }
+  observeOnDemandRead(localItemId, sourceVersion, controller) {
+    const epoch = this.onDemandGrantEpoch();
+    const grant = this.currentOnDemandGrant(localItemId);
+    if (!grant || sourceVersion !== undefined && sourceVersion !== grant.source_version)
+      return;
+    let checkedEpoch = epoch;
+    let valid = true;
+    const checkAtEpoch = (currentEpoch) => {
+      if (!valid)
+        return false;
+      if (currentEpoch === undefined || currentEpoch !== checkedEpoch) {
+        const current = this.currentOnDemandGrant(localItemId);
+        valid = current?.source_version === grant.source_version && current.acquired_epoch === grant.acquired_epoch;
+        if (!valid)
+          controller.abort();
+        checkedEpoch = currentEpoch;
+      }
+      return valid;
+    };
+    const check = () => checkAtEpoch(this.onDemandGrantEpoch());
+    const checks = this.onDemandGrantChecks ??= new Set;
+    checks.add(checkAtEpoch);
+    if (checks.size === 1 && this.dbPath !== ":memory:") {
+      this.onDemandGrantTimer = setInterval(this.checkOnDemandGrantWork, ON_DEMAND_GRANT_EPOCH_CHECK_MS);
+      this.onDemandGrantTimer.unref?.();
+      const paths = grantNotifications ??= new Map;
+      const path = resolve10(this.dbPath);
+      const listeners = paths.get(path) ?? new Set;
+      listeners.add(this.checkOnDemandGrantWork);
+      paths.set(path, listeners);
+    }
+    check();
+    return { check, release: () => {
+      checks.delete(checkAtEpoch);
+      if (checks.size === 0)
+        this.stopOnDemandGrantChecks();
+    } };
+  }
+  checkOnDemandGrantWork = () => {
+    const checks = this.onDemandGrantChecks;
+    if (!checks?.size)
+      return;
+    const epoch = this.onDemandGrantEpoch();
+    if (epoch !== undefined && epoch === this.onDemandGrantCheckedEpoch)
+      return;
+    this.onDemandGrantCheckedEpoch = epoch;
+    for (const notify of checks)
+      notify(epoch);
+  };
+  notifyOnDemandGrantChange() {
+    if (this.dbPath === ":memory:")
+      this.checkOnDemandGrantWork();
+    else
+      for (const notify of grantNotifications?.get(resolve10(this.dbPath)) ?? [])
+        notify();
+  }
+  stopOnDemandGrantChecks() {
+    clearInterval(this.onDemandGrantTimer);
+    this.onDemandGrantTimer = undefined;
+    if (this.dbPath === ":memory:")
+      return;
+    const path = resolve10(this.dbPath);
+    const listeners = grantNotifications?.get(path);
+    listeners?.delete(this.checkOnDemandGrantWork);
+    if (listeners?.size === 0)
+      grantNotifications?.delete(path);
   }
   onDemandContentHeld(identity) {
     if (!this.db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'").get())
@@ -29950,6 +30649,7 @@ ${parentKey(ref)}`, { ref, origin });
       seenIdentities.add(key);
     }
     const tierLedgerForWrite = this.visibilityLedger();
+    const landed = [];
     const summary = this.db.transaction(() => {
       const syncRunId = `connector-representation-restore-${randomUUID9()}`;
       const startedAt = this.now().toISOString();
@@ -29972,7 +30672,7 @@ ${parentKey(ref)}`, { ref, origin });
       const skippedProviderItemIds = [];
       for (const record of options.items) {
         const item = record.item;
-        if (!this.tierWriteAllowed(item.identity, "content", tierLedgerForWrite)) {
+        if (!this.tierWriteAllowed(item.identity, options.route ? "metadata" : "content", tierLedgerForWrite)) {
           itemsMetadataOnly += 1;
           skippedProviderItemIds.push(item.identity.providerItemId);
           continue;
@@ -29993,10 +30693,11 @@ ${parentKey(ref)}`, { ref, origin });
             COUNT(*) AS matching_provider_id_rows,
             SUM(CASE WHEN normalized_conversation = ? THEN 1 ELSE 0 END) AS exact_identity_rows,
             MIN(CASE WHEN normalized_conversation = ? THEN item_pk END) AS item_pk,
-            MIN(CASE WHEN normalized_conversation = ? THEN tombstoned END) AS tombstoned
+            MIN(CASE WHEN normalized_conversation = ? THEN tombstoned END) AS tombstoned,
+            MIN(CASE WHEN normalized_conversation = ? THEN source_version END) AS source_version
           FROM items
           WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
-        `).get(normalizeConversationId(item.identity.providerConversationId), normalizeConversationId(item.identity.providerConversationId), normalizeConversationId(item.identity.providerConversationId), item.identity.provider, item.identity.accountScope, item.identity.providerItemId);
+        `).get(normalizeConversationId(item.identity.providerConversationId), normalizeConversationId(item.identity.providerConversationId), normalizeConversationId(item.identity.providerConversationId), normalizeConversationId(item.identity.providerConversationId), item.identity.provider, item.identity.accountScope, item.identity.providerItemId);
         if (identityAmbiguous(item.identity, existing)) {
           throw new Error("Representation restore refused because a targeted identity matches multiple store rows.");
         }
@@ -30026,16 +30727,70 @@ ${parentKey(ref)}`, { ref, origin });
           skippedProviderItemIds.push(item.identity.providerItemId);
           continue;
         }
+        const expectedVersion = record.expectedStoredSourceVersion !== undefined ? record.expectedStoredSourceVersion : item.identity.sourceVersion;
+        const route = options.route && (expectedVersion === undefined || existing.source_version === expectedVersion) ? options.route(record) : undefined;
+        if (options.route && (!route || ("refused" in route))) {
+          if (route && "refused" in route)
+            landed.push(route.refused);
+          itemsMetadataOnly += 1;
+          skippedProviderItemIds.push(item.identity.providerItemId);
+          continue;
+        }
+        const landing = route && "store" in route ? route : undefined;
+        if (landing && landing.store !== this) {
+          const placed = landing.store.withItemCopyWriteFence(item.identity, () => {
+            if (!landing.prepare())
+              return;
+            return landing.store.restoreItemRepresentations({
+              items: [record],
+              syncConnectorId,
+              ownerConnectorId,
+              ownershipKind: options.ownershipKind,
+              classify: () => landing.sensitivity,
+              ...writeClaim ? { writeClaim } : {},
+              ...options.maxChunkChars !== undefined ? { maxChunkChars: options.maxChunkChars } : {},
+              ...options.preserveStoredSearchText ? { preserveStoredSearchText: true } : {},
+              ...options.preserveStoredSearchTextOwnedFacets ? { preserveStoredSearchTextOwnedFacets: true } : {}
+            });
+          });
+          if (!placed) {
+            itemsMetadataOnly += 1;
+            skippedProviderItemIds.push(item.identity.providerItemId);
+            continue;
+          }
+          const { counts } = placed;
+          itemsRestored += counts.itemsRestored;
+          itemsUnchanged += counts.itemsUnchanged;
+          itemsExcluded += counts.itemsExcluded;
+          itemsMetadataOnly += counts.itemsMetadataOnly;
+          itemsSkippedTombstoned += counts.itemsSkippedTombstoned;
+          itemsSkippedStaleClaim += counts.itemsSkippedStaleClaim;
+          chunksAwaitingEmbedding += counts.chunksAwaitingEmbedding;
+          if (counts.itemsRestored > 0)
+            restoredProviderItemIds.push(item.identity.providerItemId);
+          if (counts.itemsRestored + counts.itemsUnchanged > 0)
+            landed.push(landing.landed);
+          else
+            skippedProviderItemIds.push(item.identity.providerItemId);
+          continue;
+        }
+        if (landing && !landing.prepare()) {
+          itemsMetadataOnly += 1;
+          skippedProviderItemIds.push(item.identity.providerItemId);
+          continue;
+        }
         if (this.itemRepresentationCoverage(record.expectation).complete) {
           if (this.imageMediaReadsPresent && isImageMediaType(item.mimeType) && this.imageFormatReadsPictures(item.mimeType)) {
             this.db.query("INSERT OR REPLACE INTO image_media_reads (item_pk, read_at) VALUES (?, ?)").run(existing.item_pk, this.now().toISOString());
           }
           this.clearItemTextVersion(existing.item_pk);
           itemsUnchanged += 1;
+          if (landing)
+            landed.push(landing.landed);
           continue;
         }
-        const sensitivity = options.classify(item);
-        if (sensitivity.trustDomain !== this.trustDomain || sensitivity.trustTier === "S5") {
+        const sensitivity = landing?.sensitivity ?? options.classify?.(item);
+        if (!sensitivity || sensitivity.trustDomain !== this.trustDomain || sensitivity.trustTier === "S5") {
           throw new Error("Representation restore item classification is not eligible for this store.");
         }
         const upsert = this.upsertItemWithOwner(item, sensitivity, ownerConnectorId, options.ownershipKind, syncRunId, "local_write", options.preserveStoredSearchText === true, options.preserveStoredSearchTextOwnedFacets === true);
@@ -30057,6 +30812,8 @@ ${parentKey(ref)}`, { ref, origin });
         `).get(upsert.itemPk).count;
         itemsRestored += 1;
         restoredProviderItemIds.push(item.identity.providerItemId);
+        if (landing)
+          landed.push(landing.landed);
       }
       const completedAt = this.now().toISOString();
       this.db.query(`
@@ -30081,6 +30838,8 @@ ${parentKey(ref)}`, { ref, origin });
         skippedProviderItemIds: skippedProviderItemIds.sort()
       };
     }).immediate();
+    for (const commit of landed)
+      commit();
     for (const record of options.items) {
       if (record.media && summary.restoredProviderItemIds.includes(record.item.identity.providerItemId)) {
         retainMediaCacheFile(record.media.path, record.media.sha256, this.mediaHolder);
@@ -30478,6 +31237,14 @@ ${parentKey(ref)}`, { ref, origin });
         accepted_at = excluded.accepted_at
     `).run(itemPk, claim.scope, claim.authority, claim.ordinal, claim.holder, claim.generation, this.now().toISOString());
     return true;
+  }
+  hasNewerItemWriteClaim(identity, claim) {
+    return this.db.query(`
+      SELECT 1 FROM item_write_claims w
+      JOIN items i ON i.item_pk = w.item_pk
+      WHERE i.provider = ? AND i.account_scope = ? AND i.normalized_conversation = ?
+        AND i.provider_item_id = ? AND w.claim_scope = ? AND w.claim_authority = ? AND w.claim_ordinal > ?
+    `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId, claim.scope, claim.authority, claim.ordinal) !== null;
   }
   purgeExcludedItems(options) {
     try {
@@ -31209,7 +31976,7 @@ ${parentKey(ref)}`, { ref, origin });
             tallyExclusion(metadataOnlyTally, exclusion);
           let itemForStorage = item;
           let contentFetchFailed = false;
-          if (!metadataOnly && !deferMetadataOnlyContent && item.deferredBytes === undefined && classification && fetchContent && item.content.kind === "metadata_only") {
+          if (!metadataOnly && !deferMetadataOnlyContent && item.deferredBytes === undefined && (classification || tierRouting) && fetchContent && item.content.kind === "metadata_only") {
             try {
               itemForStorage = carryHold(item, await connector.fetchItem(item.identity.localItemId));
               consecutiveContentFetchFailures = 0;
@@ -31316,7 +32083,7 @@ ${parentKey(ref)}`, { ref, origin });
           itemsIndexed += 1;
           let itemChanged = upsert.contentChanged;
           let ftsContentChanged = false;
-          if (fetchContent && !contentFetchFailed && !metadataOnly && routedLayer !== "metadata" && (!(deferMetadataOnlyContent || itemForStorage.deferredBytes !== undefined) || itemForStorage.content.kind !== "metadata_only")) {
+          if ((fetchContent || route.kind === "store" && route.writeListedBody && itemForStorage.content.kind !== "metadata_only") && !contentFetchFailed && !metadataOnly && routedLayer !== "metadata" && !(tierRouting && itemForStorage.content.kind === "metadata_only") && (!(deferMetadataOnlyContent || itemForStorage.deferredBytes !== undefined) || itemForStorage.content.kind !== "metadata_only")) {
             const indexed = await this.indexItemContent(connector, (fetched) => routedLayer !== undefined ? sensitivity : classifyConnectorStoreItem(fetched, classification, placement, this.trustDomain), (fetched, fetchedSensitivity) => routedLayer !== undefined ? undefined : this.recordTierDecision(connector, fetched, fetchedSensitivity, tierClassification, tierRun, itemContentKeptNamesOnly(fetched)), itemForStorage, upsert.itemPk, maxChunkChars, gaps, () => {
               consecutiveContentFetchFailures += 1;
               assertContentFetchFailureBudget(consecutiveContentFetchFailures);
@@ -33183,12 +33950,12 @@ ${parentKey(ref)}`, { ref, origin });
     const searchRows = this.searchRowsByItemPks(rankedItems.map(([itemPk]) => itemPk), selectedAccount, filters);
     const laneRows = rankedItems.flatMap(([itemPk, winner]) => {
       const row = searchRows.get(itemPk);
-      if (!row || row.sourceItem.localItemId !== winner.localItemId)
+      if (!row || row.sourceItem.localItemId !== winner.localItemId || (row.sourceItem.sourceVersion ?? "") !== (winner.sourceVersion ?? ""))
         return [];
       if (!input.locate)
         return [{ ...row, contentMatched: true, bestCosine: winner.bestCosine }];
       const chunk = this.chunkMatchForChunkPk(winner.bestChunkPk, itemPk, winner.bestChunkContentHash);
-      return [{ ...row, ...chunk ? { chunk } : {}, bestCosine: winner.bestCosine }];
+      return [{ ...row, ...chunk ? { chunk } : { contentMatched: true }, bestCosine: winner.bestCosine }];
     });
     return {
       rows: laneRows,
@@ -33463,20 +34230,28 @@ ${parentKey(ref)}`, { ref, origin });
     return step.value;
   }
   stillVisibleSearchRows(rows) {
-    return this.tierVisibleRows(rows, (row) => ({
-      provider: row.sourceItem.provider,
-      accountScope: row.sourceItem.accountScope,
-      providerItemId: row.sourceItem.providerItemId,
-      ...row.sourceItem.providerConversationId ? { providerConversationId: row.sourceItem.providerConversationId } : {}
-    }), (row) => row.chunk !== undefined || row.contentMatched === true ? "content" : "metadata");
+    return visibilityHere(this.stillVisibleSearchRowsSteps(rows));
   }
   async stillVisibleSearchRowsOffThread(rows) {
-    return visibilityAwaited(() => this.tierVisibleRowsSteps(rows, (row) => ({
-      provider: row.sourceItem.provider,
-      accountScope: row.sourceItem.accountScope,
-      providerItemId: row.sourceItem.providerItemId,
-      ...row.sourceItem.providerConversationId ? { providerConversationId: row.sourceItem.providerConversationId } : {}
-    }), (row) => row.chunk !== undefined || row.contentMatched === true ? "content" : "metadata"), this.childVisibilityLane());
+    return visibilityAwaited(() => this.stillVisibleSearchRowsSteps(rows), this.childVisibilityLane());
+  }
+  *stillVisibleSearchRowsSteps(rows) {
+    return yield* this.tierVisibleRowsSteps(rows, (row) => row.sourceItem, (row) => connectorStoreRowHasContent(row) ? "content" : "metadata");
+  }
+  searchGrantLayers(hits, filters) {
+    if (this.closedForPoolReads)
+      return new Map;
+    const metadataOnly = connectorStoreMetadataOnlySql(filters, this.onDemandReadsTablePresent);
+    const read = {
+      mode: "all",
+      sql: `SELECT candidate.key AS idx, ${metadataOnly.sql} AS names_only
+        FROM json_each(?) candidate CROSS JOIN items i
+        WHERE ${FTS_CANDIDATE_IDENTITY_SQL}
+          AND i.tombstoned = 0`,
+      params: [...metadataOnly.params, JSON.stringify(hits.map((hit) => hit.sourceItem))]
+    };
+    const allowed = visibilityHere(this.visibilityStoreRead(read));
+    return new Map(allowed.map((row) => [hits[row.idx], row.names_only ? "metadata" : "content"]));
   }
   closedForPoolReads = false;
   conceptCountMemo;
@@ -33546,9 +34321,20 @@ ${parentKey(ref)}`, { ref, origin });
   }
   *searchItemsSteps(query, maxResults, accountScope, filters, ftsOptions) {
     const selectedFilters = connectorStoreFilterSql(filters);
-    const onDemandReadsTablePresent = Boolean((filters?.metadataOnlyLocatorPathScopes?.length || filters?.metadataOnlySourceScopeFolderKeys?.length) && (yield { mode: "get", sql: "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'", params: [] }));
-    const selectedFtsScope = connectorStoreFtsScopeSql(filters, onDemandReadsTablePresent);
-    const conceptScope = connectorStoreFtsScopeSql(filters, onDemandReadsTablePresent, "r.chunk_pk");
+    if (!this.onDemandReadsTablePresent && (filters?.metadataOnlyLocatorPathScopes?.length || filters?.metadataOnlySourceScopeFolderKeys?.length)) {
+      this.onDemandReadsTablePresent = Boolean(yield {
+        mode: "get",
+        sql: "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'",
+        params: []
+      });
+    }
+    const metadataCandidates = ftsOptions.metadataCandidates;
+    const selectedFtsScope = metadataCandidates ? {
+      sql: `AND connector_store_fts.chunk_pk IS NULL
+        AND i.item_pk IN (SELECT i.item_pk FROM json_each(?) candidate CROSS JOIN items i WHERE ${FTS_CANDIDATE_IDENTITY_SQL})`,
+      params: [JSON.stringify(metadataCandidates)]
+    } : connectorStoreFtsScopeSql(filters, this.onDemandReadsTablePresent);
+    const conceptScope = metadataCandidates ? { sql: "AND r.chunk_pk IS NULL", params: [] } : connectorStoreFtsScopeSql(filters, this.onDemandReadsTablePresent, "r.chunk_pk");
     const terms = ftsOptions.relaxed ? ftsOptions.privatePrecision ? yield* this.privateRelaxedFtsQuerySteps(query) : toRelaxedLocalFtsQuery(query) : toFtsQuery(query, ftsOptions);
     if (!terms)
       return { rows: [], saturated: false, concepts: { total: 0, matched: new Map } };
@@ -33563,6 +34349,7 @@ ${parentKey(ref)}`, { ref, origin });
     const matchedGroupIndexes = new Map;
     let conceptWeights;
     const selected = [];
+    const fallbackRows = new Map;
     const seen = new Set;
     let scanned = 0;
     let pageSize = fetchLimit;
@@ -33673,8 +34460,34 @@ ${parentKey(ref)}`, { ref, origin });
       })));
       const visible = eligible ? current.filter((_, index) => eligible[index]) : current;
       selected.push(...visible);
-      if (visible.length > 0)
-        ftsOptions.onPartialRows?.(selected.slice(0, limit).map(searchRowFromItemRow));
+      if (ftsOptions.prepareGrantFallbacks && visible.length > 0) {
+        const pageBodies = visible.filter((row) => row.chunk_pk != null);
+        if (pageBodies.length > 0) {
+          const metadataCandidates = pageBodies.map((row) => searchRowFromItemRow(row).sourceItem);
+          const metadata = yield* this.searchItemsSteps(query, MAX_SEARCH_RESULTS, accountScope, filters, {
+            ...ftsOptions,
+            contentOnly: false,
+            locate: false,
+            onPartialRows: undefined,
+            prepareGrantFallbacks: false,
+            metadataCandidates
+          });
+          const byVersion = new Map(metadata.rows.map((row) => [searchGrantIdentityKey(row.sourceItem), row]));
+          for (const [index, candidate] of metadataCandidates.entries()) {
+            const fallback = byVersion.get(searchGrantIdentityKey(candidate));
+            if (fallback)
+              fallbackRows.set(pageBodies[index].item_pk, fallback);
+          }
+        }
+      }
+      if (visible.length > 0 && ftsOptions.onPartialRows) {
+        const partial = selected.slice(0, limit).map((row) => ({
+          ...searchRowFromItemRow(row),
+          ...row.chunk_pk != null ? { contentMatched: true } : {},
+          ...fallbackRows.has(row.item_pk) ? { metadataFallback: fallbackRows.get(row.item_pk) } : {}
+        }));
+        ftsOptions.onPartialRows(partial, ftsOptions.contentOnly);
+      }
       if (exhausted || selected.length >= limit || visible.length === signalled.length || scanned >= KEYWORD_CANDIDATE_SCAN_CAP)
         break;
       pageSize = Math.min(pageSize * 4, KEYWORD_CANDIDATE_SCAN_CAP - scanned);
@@ -33685,7 +34498,8 @@ ${parentKey(ref)}`, { ref, origin });
     const locatedRows = [];
     const chunks = ftsOptions.locate === false ? new Map : yield* this.keywordChunkMatchesSteps(kept, spanTerms);
     for (const [index, row] of kept.entries()) {
-      const base = searchRowFromItemRow(row);
+      const fallback = fallbackRows.get(row.item_pk);
+      const base = { ...searchRowFromItemRow(row), ...fallback ? { metadataFallback: fallback } : {} };
       if (ftsOptions.locate === false || row.chunk_pk === null || row.chunk_pk === undefined) {
         located.push(row.chunk_pk === null || row.chunk_pk === undefined || ftsOptions.locate !== false ? base : { ...base, contentMatched: true });
         locatedRows.push(row);
@@ -34966,6 +35780,16 @@ ${parentKey(ref)}`, { ref, origin });
     return row ? syncRunFromRow(row) : undefined;
   }
 }
+function searchGrantIdentityKey(identity) {
+  return JSON.stringify([
+    identity.provider,
+    identity.accountScope,
+    identity.providerItemId,
+    identity.providerConversationId,
+    identity.localItemId,
+    identity.sourceVersion
+  ]);
+}
 function connectorStoreVectorDeadlineExpired(deadlineAtMs) {
   return deadlineAtMs !== undefined && Number.isFinite(deadlineAtMs) && Date.now() >= deadlineAtMs;
 }
@@ -34973,6 +35797,9 @@ function yieldConnectorStoreVectorScan() {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 var CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8;
+function connectorStoreRowHasContent(row) {
+  return row.chunk !== undefined || row.contentMatched === true;
+}
 function connectorStoreContentPreference(vettedVectorItemIds) {
   return (candidate) => candidate.item.chunk?.lane === "keyword" || candidate.laneRanks.has("recency") || candidate.laneRanks.has("vector") && vettedVectorItemIds.has(candidate.item.sourceItem.localItemId);
 }
@@ -35993,6 +36820,12 @@ function connectorStoreConceptHitRead(pks, groupQuery, scope) {
     params: [...pks, groupQuery, ...scope.params]
   };
 }
+var FTS_CANDIDATE_IDENTITY_SQL = `i.local_item_id = json_extract(candidate.value, '$.localItemId')
+          AND i.provider = json_extract(candidate.value, '$.provider')
+          AND i.account_scope = json_extract(candidate.value, '$.accountScope')
+          AND i.provider_item_id = json_extract(candidate.value, '$.providerItemId')
+          AND i.normalized_conversation = COALESCE(json_extract(candidate.value, '$.providerConversationId'), '')
+          AND COALESCE(i.source_version, '') = COALESCE(json_extract(candidate.value, '$.sourceVersion'), '')`;
 function connectorStoreMetadataOnlySql(filters, onDemandReadsTablePresent = false) {
   const normalized = normalizeConnectorStoreSearchFilters(filters);
   if (!normalized)
@@ -36650,7 +37483,7 @@ function validateCurrentConnectorStoreSchemaBeforeMigration(db) {
     validateConnectorStoreV12Schema(db, "v15", CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS);
     assertIndexColumns(db, "idx_connector_store_items_parent", ["parent_local_item_id"], "v15");
   }
-  if (version === 16)
+  if (version >= 16)
     validateVectorDigestSchema(db);
 }
 function validateConnectorStoreVisibilitySchema(db, versionLabel) {
@@ -36680,9 +37513,16 @@ function validateVectorDigestSchema(db) {
   assertTriggerExists(db, "connector_store_vector_digest_delete", "v16");
   assertTriggerExists(db, "connector_store_vector_digest_account", "v16");
 }
-function validateConnectorStoreSchema(db) {
+function validateConnectorStoreSchema(db, version = CONNECTOR_STORE_SQLITE_SCHEMA_VERSION) {
   validateConnectorStoreV12Schema(db, "v15", CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS);
-  validateVectorDigestSchema(db);
+  if (version >= 16)
+    validateVectorDigestSchema(db);
+  if (version >= 17) {
+    assertExactTableColumns(db, "on_demand_grant_epoch", ["id", "epoch"], false, "v17");
+    assertExactTableColumns(db, "on_demand_grant_acquisitions", ["local_item_id", "epoch"], false, "v17");
+    for (const trigger of ON_DEMAND_GRANT_EPOCH_TRIGGERS)
+      assertTriggerExists(db, trigger, "v17");
+  }
   assertIndexColumns(db, "idx_connector_store_items_parent", ["parent_local_item_id"], "v15");
   assertExactTableColumns(db, "chunk_media_releases", ["media_sha256", "media_path"], false, "v13");
   assertExactTableColumns(db, "chunk_media_failures", ["media_sha256", "reason", "failed_at", "attempts"], false, "v13");
@@ -36816,20 +37656,82 @@ function sameStrings(actual, expected) {
 function sameStringSet(actual, expected) {
   return actual.length === expected.length && expected.every((value) => actual.includes(value));
 }
-function applyConnectorStoreOpenSchema(db) {
+var ON_DEMAND_GRANT_EPOCH_TRIGGERS = [
+  "on_demand_grant_delete",
+  "on_demand_grant_update",
+  "on_demand_item_delete",
+  "on_demand_item_update",
+  "on_demand_grant_insert"
+];
+function createOnDemandReads(db) {
+  db.exec(`CREATE TABLE IF NOT EXISTS on_demand_item_reads (
+    local_item_id TEXT PRIMARY KEY, source_version TEXT NOT NULL, read_on_demand INTEGER NOT NULL DEFAULT 1
+  );`);
+}
+function createOnDemandGrantEpoch(db) {
+  db.transaction(() => db.exec(`
+    INSERT OR IGNORE INTO on_demand_grant_epoch (id, epoch) VALUES (1, 0);
+    CREATE TRIGGER IF NOT EXISTS ${ON_DEMAND_GRANT_EPOCH_TRIGGERS[4]} AFTER INSERT ON on_demand_item_reads
+    BEGIN
+      UPDATE on_demand_grant_epoch SET epoch = epoch + 1 WHERE id = 1;
+      INSERT INTO on_demand_grant_acquisitions (local_item_id, epoch)
+        SELECT NEW.local_item_id, epoch FROM on_demand_grant_epoch WHERE id = 1
+        ON CONFLICT(local_item_id) DO UPDATE SET epoch = excluded.epoch;
+    END;
+    CREATE TRIGGER IF NOT EXISTS ${ON_DEMAND_GRANT_EPOCH_TRIGGERS[0]} AFTER DELETE ON on_demand_item_reads
+    BEGIN
+      UPDATE on_demand_grant_epoch SET epoch = epoch + 1 WHERE id = 1;
+      DELETE FROM on_demand_grant_acquisitions WHERE local_item_id = OLD.local_item_id;
+    END;
+    CREATE TRIGGER IF NOT EXISTS ${ON_DEMAND_GRANT_EPOCH_TRIGGERS[1]} AFTER UPDATE OF source_version, local_item_id ON on_demand_item_reads
+    WHEN OLD.source_version IS NOT NEW.source_version OR OLD.local_item_id IS NOT NEW.local_item_id
+    BEGIN
+      UPDATE on_demand_grant_epoch SET epoch = epoch + 1 WHERE id = 1;
+      DELETE FROM on_demand_grant_acquisitions WHERE local_item_id = OLD.local_item_id;
+      INSERT INTO on_demand_grant_acquisitions (local_item_id, epoch)
+        SELECT NEW.local_item_id, epoch FROM on_demand_grant_epoch WHERE id = 1
+        ON CONFLICT(local_item_id) DO UPDATE SET epoch = excluded.epoch;
+    END;
+    CREATE TRIGGER IF NOT EXISTS ${ON_DEMAND_GRANT_EPOCH_TRIGGERS[2]} AFTER DELETE ON items
+    WHEN OLD.tombstoned = 0
+    BEGIN
+      UPDATE on_demand_grant_epoch SET epoch = epoch + 1 WHERE id = 1;
+      INSERT INTO on_demand_grant_acquisitions (local_item_id, epoch)
+        SELECT r.local_item_id, e.epoch FROM on_demand_item_reads r CROSS JOIN on_demand_grant_epoch e
+        WHERE r.local_item_id = OLD.local_item_id AND r.source_version = COALESCE(OLD.source_version, '') AND e.id = 1
+        ON CONFLICT(local_item_id) DO UPDATE SET epoch = excluded.epoch;
+    END;
+    CREATE TRIGGER IF NOT EXISTS ${ON_DEMAND_GRANT_EPOCH_TRIGGERS[3]} AFTER UPDATE OF source_version, local_item_id, tombstoned,
+      provider, account_scope, provider_item_id, normalized_conversation, locator_uri, source_scope_folder_keys_json ON items
+    WHEN OLD.tombstoned = 0 AND (NEW.tombstoned <> 0 OR OLD.source_version IS NOT NEW.source_version
+      OR OLD.local_item_id IS NOT NEW.local_item_id OR OLD.provider IS NOT NEW.provider
+      OR OLD.account_scope IS NOT NEW.account_scope OR OLD.provider_item_id IS NOT NEW.provider_item_id
+      OR OLD.normalized_conversation IS NOT NEW.normalized_conversation OR OLD.locator_uri IS NOT NEW.locator_uri
+      OR OLD.source_scope_folder_keys_json IS NOT NEW.source_scope_folder_keys_json)
+    BEGIN
+      UPDATE on_demand_grant_epoch SET epoch = epoch + 1 WHERE id = 1;
+      INSERT INTO on_demand_grant_acquisitions (local_item_id, epoch)
+        SELECT r.local_item_id, e.epoch FROM on_demand_item_reads r CROSS JOIN on_demand_grant_epoch e
+        WHERE r.local_item_id = OLD.local_item_id AND r.source_version = COALESCE(OLD.source_version, '') AND e.id = 1
+          AND (NEW.tombstoned <> 0 OR OLD.source_version IS NOT NEW.source_version OR OLD.local_item_id IS NOT NEW.local_item_id)
+        ON CONFLICT(local_item_id) DO UPDATE SET epoch = excluded.epoch;
+    END;
+  `))();
+}
+function applyConnectorStoreOpenSchema(db, version = CONNECTOR_STORE_SQLITE_SCHEMA_VERSION) {
   refuseUnversionedConnectorStoreSchema(db);
   LocalConnectorStore.migrateSchema(db);
-  runSqliteMigrations(db, SQLITE_STORE_ID, connectorStoreMigrations());
+  runSqliteMigrations(db, SQLITE_STORE_ID, connectorStoreMigrations().filter((migration) => migration.version <= version));
   createConnectorStoreChunkMediaReleases(db);
   createConnectorStoreMediaJudgments(db);
   createConnectorStoreItemTextVersions(db);
   createConnectorStoreVisibilityTables(db);
   createStoreTotals(db, NON_SYNC_RUN_CONNECTORS_SQL);
   createConnectorStorePeopleIndex(db);
-  db.exec(`CREATE TABLE IF NOT EXISTS on_demand_item_reads (
-    local_item_id TEXT PRIMARY KEY, source_version TEXT NOT NULL, read_on_demand INTEGER NOT NULL DEFAULT 1
-  );`);
-  validateConnectorStoreSchema(db);
+  createOnDemandReads(db);
+  if (version >= 17)
+    createOnDemandGrantEpoch(db);
+  validateConnectorStoreSchema(db, version);
 }
 var openShape;
 function connectorStoreOpenShape() {
@@ -38168,6 +39070,9 @@ var PEOPLE_LINK_REASON_TEXT = Object.freeze({
   merged_by_owner: "Merged by you"
 });
 var PEOPLE_AUTHORED_FAMILIES = new Set(["chat", "email"]);
+
+// src/workers/google-connectors/gmail-mail-record.ts
+var GMAIL_MAIL_PROVIDER = GMAIL_LABEL_CAPABILITY.provider;
 
 // src/workers/google-connectors/gmail.ts
 var GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private";

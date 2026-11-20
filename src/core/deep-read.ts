@@ -19,7 +19,7 @@
  * the answer's coverage, never dropped silently.
  */
 import type { AnalystCitation, AnalystResult, Analyst, EvidenceCandidate, EvidencePack } from './contracts.ts';
-import { analystPromptBytes, type AnalystEvidenceFormat } from './analyst.ts';
+import { analystPromptBytes, runWithAnalystAbortSignal, type AnalystEvidenceFormat } from './analyst.ts';
 
 export interface DeepReadNote {
   /** Index of the set candidate the claim cites (into the job's candidate list). */
@@ -157,7 +157,10 @@ export async function runDeepRead(input: DeepReadInput): Promise<DeepReadResult>
     input.signal?.throwIfAborted();
     await input.beforeModelCall?.();
     input.signal?.throwIfAborted();
-    return input.analyst.analyze(pack, { localOnly: true });
+    const analyze = () => input.analyst.analyze(pack, { localOnly: true });
+    const result = input.signal ? await runWithAnalystAbortSignal(input.signal, analyze) : await analyze();
+    input.signal?.throwIfAborted();
+    return result;
   };
 
   await progress('reading');

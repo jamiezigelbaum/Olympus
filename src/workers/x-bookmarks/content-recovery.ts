@@ -12,7 +12,6 @@ import {
 } from 'node:fs';
 import { resolve } from 'node:path';
 import type { RawItem } from '../../core/contracts.ts';
-import { buildSourceSensitivity } from '../../core/source-index/types.ts';
 import {
   CONNECTOR_STORE_DEFAULT_MAX_CHUNK_CHARS,
   LocalConnectorStore,
@@ -26,7 +25,8 @@ import {
   type CredentialBroker,
 } from '../credential-broker/index.ts';
 import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
-import type { TierLedger } from '../classification/tier-ledger.ts';
+import type { TieredStoreSet } from '../connector-store/tiered-store-set.ts';
+import { representationLandingDue, tieredRepresentationLanding } from '../file-extraction/tiered-store-sink.ts';
 import {
   XApiClient,
   XApiError,
@@ -38,6 +38,7 @@ import {
 import {
   X_BOOKMARKS_LIVE_CONNECTOR_ID,
   X_BOOKMARKS_PROVIDER,
+  createXBookmarksSourceConnector,
   xBookmarkRawItemFromPost,
 } from './connector.ts';
 import { X_BOOKMARKS_FOLDER_FACET_AUTHORITY_VERSION } from './folder-facets.ts';
@@ -108,7 +109,7 @@ export interface XBookmarksContentRecoveryOptions {
    * placed by its tiers: this repair never writes text into its store copy,
    * which may serve only its names while its text is Private elsewhere.
    */
-  tierLedger?: Pick<TierLedger, 'isRouted'>;
+  tierSet: TieredStoreSet;
   usageStore: LocalXBookmarksApiUsageStore;
   reconcileStateStore?: LocalXBookmarksReconcileStateStore;
   embeddingProvider?: SourceEmbeddingProvider;
@@ -165,12 +166,15 @@ export function createXBookmarksContentRecoveryHandler(
         // One page, never followed: read the whole store.
         maxExamined: Number.POSITIVE_INFINITY,
       }).candidates;
-      const routed = options.tierLedger
-        ? candidates.filter((candidate) => options.tierLedger!.isRouted(candidate.identity)).length
-        : 0;
-      const recoverable = candidates
-        .filter((candidate) => !options.tierLedger?.isRouted(candidate.identity))
-        .filter(isRecoverableXBookmarkCandidate);
+      let routed = 0;
+      const recoverable = candidates.filter((candidate) => {
+        const record = options.tierSet.ledger.getCurrent(candidate.identity);
+        if (record?.routed && !representationLandingDue(record)) {
+          routed += 1;
+          return false;
+        }
+        return isRecoverableXBookmarkCandidate(candidate);
+      });
       const counts = emptyCounts();
       if (routed > 0) counts.candidates_tier_routed = routed;
       counts.candidates_scanned = candidates.length;
@@ -331,9 +335,14 @@ export function createXBookmarksContentRecoveryHandler(
         const restoreItems = postsWithText.flatMap((post) => {
           const candidate = candidatesById.get(post.id);
           if (!candidate) return [];
-          const item = recoveryRawItem(post, account, attemptedAt.toISOString());
+          const item = recoveryRawItem({
+            ...post,
+            ...(post.sourceVersion === undefined && candidate.identity.sourceVersion !== undefined
+              ? { sourceVersion: candidate.identity.sourceVersion } : {}),
+          }, account, attemptedAt.toISOString());
           return [{
             item,
+            expectedStoredSourceVersion: candidate.identity.sourceVersion ?? null,
             expectation: {
               sourceItem: item.identity,
               ...(item.identity.sourceVersion ? { sourceVersion: item.identity.sourceVersion } : {}),
@@ -361,6 +370,9 @@ export function createXBookmarksContentRecoveryHandler(
         const completedFacetAuthority = facetAuthorityAtRestore?.status === 'completed'
           ? facetAuthorityAtRestore
           : undefined;
+        const connector = createXBookmarksSourceConnector({
+          account, posts: postsWithText, fetchedAt: attemptedAt.toISOString(),
+        });
         const restored = options.store.restoreItemRepresentations({
           items: restoreItems,
           syncConnectorId: RECOVERY_CONNECTOR_ID,
@@ -377,7 +389,7 @@ export function createXBookmarksContentRecoveryHandler(
           // doing it to whichever items happen to pass through recovery is not
           // a control, only collateral damage.
           preserveStoredSearchTextOwnedFacets: true,
-          classify: () => buildSourceSensitivity({ trustTier: 'S1', trustDomain: 'internal' }),
+          route: tieredRepresentationLanding({ set: options.tierSet, anchor: options.store, connector }),
         });
         counts.items_recovered = restored.counts.itemsRestored;
         counts.items_unchanged_at_execute = restored.counts.itemsUnchanged;
@@ -389,8 +401,11 @@ export function createXBookmarksContentRecoveryHandler(
           const restoredIds = new Set(restored.restoredProviderItemIds);
           const localItemIds = restoreItems
             .filter((record) => restoredIds.has(record.item.identity.providerItemId))
+            .filter(({ item }) => options.tierSet.ledger.copies(item.identity).some((copy) =>
+              copy.corpusId === options.store.corpusId && copy.state === 'current'
+              && copy.layers !== 'metadata' && !copy.embedHold))
             .map((record) => record.item.identity.localItemId);
-          const embedded = await options.store.embedChunks({
+          const embedded = localItemIds.length > 0 ? await options.store.embedChunks({
             provider: options.embeddingProvider,
             localItemIds,
             ...(completedFacetAuthority && completedFacetAuthority.leaseGeneration > 0
@@ -399,7 +414,7 @@ export function createXBookmarksContentRecoveryHandler(
                   journalLeaseGeneration: completedFacetAuthority.leaseGeneration,
                 }
               : {}),
-          });
+          }) : { chunksEmbedded: 0 };
           counts.chunks_embedded = embedded.chunksEmbedded;
           counts.chunks_awaiting_embedding = Math.max(
             0,

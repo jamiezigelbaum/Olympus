@@ -109,7 +109,13 @@ export class TierSnifferStore {
   // from the Node-loaded plugin bundle when only its pure helpers are used.
   private readonly trainingReads: Map<string, Map<string, TrainingSnifferVerdict>>;
 
-  constructor(options: { dbPath: string; now?: () => Date; readOnly?: boolean }) {
+  constructor(options: {
+    dbPath: string;
+    now?: () => Date;
+    readOnly?: boolean;
+    /** Before rollback finishes, retire questions at the previous engine's schema. */
+    restoreQueue?: true;
+  }) {
     this.trainingReads = new Map();
     this.dbPath = options.dbPath;
     this.now = options.now ?? (() => new Date());
@@ -127,9 +133,10 @@ export class TierSnifferStore {
     const previousUmask = onDisk ? process.umask(0o077) : undefined;
     let db: Database | undefined;
     try {
-      db = new Database(this.dbPath, { create: true });
-      db.exec('PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA journal_size_limit = 67108864;' + loopWalAutocheckpointPragma(this.dbPath));
-      runSqliteMigrations(db, TIER_SNIFFER_SQLITE_STORE_ID, snifferMigrations());
+      db = new Database(this.dbPath, options.restoreQueue ? { readwrite: true, create: false } : { create: true });
+      const synchronous = options.restoreQueue ? 'FULL' : 'NORMAL';
+      db.exec(`PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA synchronous = ${synchronous}; PRAGMA journal_size_limit = 67108864;` + loopWalAutocheckpointPragma(this.dbPath));
+      if (!options.restoreQueue) runSqliteMigrations(db, TIER_SNIFFER_SQLITE_STORE_ID, snifferMigrations());
       if (onDisk) restrictFiles(this.dbPath);
     } catch (error) {
       if (db) closeSqliteStore(db);
@@ -482,8 +489,7 @@ export class TierSnifferStore {
 
   /**
    * Drop every queued question for one item, both passes, with the material
-   * they hold. An item that becomes Secrets is never asked about again, and
-   * its names or excerpt do not wait here for the resolver's next pass.
+   * they hold. The next decision starts with the item's current text.
    */
   deleteItemQuestions(subject: TierSnifferSubject): number {
     return this.db.query(`

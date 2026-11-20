@@ -28,10 +28,13 @@
 import type { ConnectorStoreTierClassification } from '../connector-store/tier-placement.ts';
 import type { RawItem } from '../../core/contracts.ts';
 import { detectSecretFindingKinds } from '../classification/engine.ts';
-import { isImageMediaType, type ItemTierOverride } from '../classification/tier-classifier.ts';
+import { hasCredentialUrl, isImageMediaType, type ItemTierOverride } from '../classification/tier-classifier.ts';
 import { settleUntrackedSecretsCopy } from '../connector-store/secrets-disposition.ts';
-import type { ConnectorStoreItemWriteClaim } from '../connector-store/local-index.ts';
-import type { MediaJudgment } from '../source-index/media-judge.ts';
+import type { ConnectorStoreItemWriteClaim, ConnectorStoreRepresentationRestoreOptions } from '../connector-store/local-index.ts';
+import { tierSetForLedger } from '../connector-store/tier-set-registry.ts';
+import { TieredStoreSet } from '../connector-store/tiered-store-set.ts';
+import { tieredRepresentationLanding } from './tiered-store-sink.ts';
+import { imageJudgmentSignal, type MediaJudgment } from '../source-index/media-judge.ts';
 import { SOURCE_EXCLUSION_PATH_METADATA_KEYS } from '../../core/source-ingestion-exclusions.ts';
 import type {
   SourceItemIdentity,
@@ -173,6 +176,8 @@ export interface ConnectorStoreExtractionSinkOptions {
    * content copy, so it turns this off.
    */
   recordContentTier?: boolean;
+  // Tier placement for text arriving at an unrouted copy.
+  route?: ConnectorStoreRepresentationRestoreOptions['route'];
   /**
    * The photo judge's verdict on a picture, by its digest. Supplied only by a
    * sink that has already run the content rules (account and card numbers)
@@ -313,9 +318,13 @@ export function createConnectorStoreExtractionSink(
   options: ConnectorStoreExtractionSinkOptions,
 ): ExtractionSink {
   const store = options.store;
+  let standaloneRoute: ConnectorStoreRepresentationRestoreOptions['route'];
 
   return {
     async accept(request: ExtractionSinkRequest): Promise<ExtractionSinkResult> {
+      if (request.onDemandGrantCurrent?.() === false) {
+        return { accepted: false, chunksIndexed: 0, chunksAwaitingEmbedding: 0, skippedReason: EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE };
+      }
       const plan = planExtractionSinkWrite(store, request);
       if ('skippedReason' in plan) {
         return {
@@ -340,8 +349,9 @@ export function createConnectorStoreExtractionSink(
       // verdict is never taken for ordinary.
       const judgment = plan.media ? (options.mediaJudgment ?? ((sha: string) => store.mediaJudgment(sha)))(plan.media.sha256) : undefined;
       if (plan.media && judgment) plan.media = { ...plan.media, judgment };
+      const checkedPicture = !!options.mediaJudgment && !!plan.media && judgment?.verdict === 'ordinary';
       if ((plan.media || isImageMediaType(plan.item.mimeType)) && store.trustDomain !== 'secure_local'
-        && !(options.mediaJudgment && plan.media && judgment?.verdict === 'ordinary')) {
+        && !checkedPicture && !(options.route && options.mediaJudgment)) {
         return {
           accepted: false,
           chunksIndexed: 0,
@@ -388,16 +398,33 @@ export function createConnectorStoreExtractionSink(
       // THE DECIDING HALF of the fence (extractionWriteClaim).
       const writeClaim = extractionWriteClaim(request);
 
+      if (!options.route && options.recordContentTier !== false && !standaloneRoute) {
+        const ledger = store.tierLedger();
+        if (ledger) {
+          const registered = tierSetForLedger(ledger.dbPath);
+          const set = registered?.store(store.trustDomain) === store ? registered
+            : store.trustDomain === 'secure_local' ? new TieredStoreSet({
+                setId: store.corpusId, ledger, registerWithLedger: false,
+                legs: [{ trustDomain: 'secure_local', corpusId: store.corpusId, store, legacy: true }],
+                ...(options.tierClassification ? { tierClassification: options.tierClassification } : {}),
+              }) : undefined;
+          if (set) standaloneRoute = tieredRepresentationLanding({
+            set, anchor: store, replaceStoredContent: !registered,
+          });
+        }
+      }
+      const route = options.route ?? standaloneRoute;
+
       // THE SECRETS FLOOR, before anything is written. A Secret is stored
       // nowhere: the copy this store already holds (an earlier version's text)
       // goes, and only the location is kept, per the one Secrets policy
-      // (connector-store/secrets-disposition.ts). An explicit per-item owner
-      // override outranks the detector, as it does in the shared classifier.
+      // (connector-store/secrets-disposition.ts). Classified landings handle an
+      // owner's Personal choice and review of changed text in the classifier.
       // The tombstone is fenced inside the store exactly as the write it
       // replaces: an item another owner claims is left alone, and a superseded
       // worker changes nothing.
       if (options.secretsFloor !== false && plan.item.content.kind === 'text'
-        && secretsFloorHolds(store, plan.item, plan.item.content.text)) {
+        && secretsFloorHolds(store, plan.item, plan.item.content.text, route !== undefined)) {
         const settled = settleUntrackedSecretsCopy({
           store,
           identity: plan.item.identity,
@@ -427,12 +454,13 @@ export function createConnectorStoreExtractionSink(
         };
       }
 
-      // An on-demand item's names verdict never authorizes its new text. The
-      // content decision (or pending hold) is durable before any chunk is written.
-      if (options.recordContentTier !== false && store.readOnDemand?.(plan.item.identity.localItemId, plan.item.identity.sourceVersion ?? '')
-        && !store.recordExtractedContentTier(plan.item, request.text, options.tierClassification)) {
+      if (!route && options.recordContentTier !== false && store.trustDomain !== 'secure_local'
+        && (!checkedPicture || imageJudgmentSignal(judgment).textDecides
+          || store.readOnDemand(plan.item.identity.localItemId, plan.item.identity.sourceVersion ?? ''))) {
         return { accepted: false, chunksIndexed: 0, chunksAwaitingEmbedding: 0, skippedReason: EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE };
       }
+      let landingStore = store;
+      let refusedSecrets = false;
       let summary;
       try {
         summary = store.restoreItemRepresentations({
@@ -441,6 +469,12 @@ export function createConnectorStoreExtractionSink(
           ownerConnectorId: options.ownerConnectorId,
           ownershipKind: options.ownershipKind,
           classify: options.classify,
+          ...(route ? { route: (record) => {
+            const landing = route(record);
+            if (landing && 'store' in landing) landingStore = landing.store;
+            if (landing && 'refused' in landing) refusedSecrets = true;
+            return landing;
+          } } : {}),
           ...(options.skipOwner ? { skipOwner: options.skipOwner } : {}),
           // The deciding half of the lease fence (above).
           ...(writeClaim ? { writeClaim } : {}),
@@ -504,7 +538,7 @@ export function createConnectorStoreExtractionSink(
           accepted: false,
           chunksIndexed: 0,
           chunksAwaitingEmbedding: 0,
-          skippedReason: EXTRACTION_SINK_SKIPPED_METADATA_ONLY,
+          skippedReason: refusedSecrets ? EXTRACTION_SINK_SKIPPED_SECRETS : EXTRACTION_SINK_SKIPPED_METADATA_ONLY,
         };
       }
 
@@ -512,12 +546,7 @@ export function createConnectorStoreExtractionSink(
       // unchanged item wrote nothing this pass but still holds the chunks the
       // expectation describes, and reporting zero for it would understate the
       // representation that is actually there.
-      const coverage = store.itemRepresentationCoverage(plan.expectation);
-      // The text was read at last: record the content half of the item's
-      // four-tier decision. Best-effort and storage-neutral (phase P1a).
-      if (options.recordContentTier !== false && plan.item.content.kind === 'text') {
-        store.recordExtractedContentTier(plan.item, plan.item.content.text, options.tierClassification);
-      }
+      const coverage = landingStore.itemRepresentationCoverage(plan.expectation);
       return {
         accepted: true,
         chunksIndexed: coverage.chunksIndexed,
@@ -551,21 +580,23 @@ export function extractionWriteClaim(request: ExtractionSinkRequest): ConnectorS
 }
 
 /**
- * Whether the item's text is Secrets: an owner's tier override decides
- * outright, an owner's not-secret override clears the detector, and otherwise
- * any secret finding in the text holds. An unreadable ledger reads as no
- * override, so the detector still decides.
+ * Whether the extraction sink must settle Secrets before a classified landing.
+ * The landing screens text under a Personal override. An unreadable ledger
+ * supplies no override to this check.
  */
-function secretsFloorHolds(store: LocalConnectorStore, item: RawItem, text: string): boolean {
+function secretsFloorHolds(store: LocalConnectorStore, item: RawItem, text: string, routed: boolean): boolean {
   let override: ItemTierOverride | undefined;
   try {
     override = store.tierLedger()?.getOverride(item.identity);
   } catch {
     override = undefined;
   }
-  if (override?.kind === 'tier') return override.tier === 'secrets';
+  if (override?.kind === 'tier') {
+    if (override.tier === 'secrets') return true;
+    if (override.tier === 'secure' || routed) return false;
+  }
   if (override?.kind === 'not_secret') return false;
-  return detectSecretFindingKinds(text).length > 0;
+  return detectSecretFindingKinds(text).length > 0 || hasCredentialUrl(text);
 }
 
 /**

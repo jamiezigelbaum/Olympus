@@ -1,6 +1,6 @@
 /** The single chunk gate: windows prove reading, and only item tiers decide privacy. */
 import { isUnprovedPassageMarker, RELEASE_CHUNK_JUDGE_BUDGET_MS, type ChunkReleaseResult, type ReleaseCheck, type ReleaseInput } from '../../core/release-manifest.ts';
-import { classifyContentTier, contentDigestReason, SNIFFER_EXCERPT_MAX_CHARS, TIER_CLASSIFIER_VERSION, type TierSnifferRequest, type TierSnifferVerdict } from './tier-classifier.ts';
+import { classifyContentTier, contentDigestReason, personalOverrideAllowsText, SNIFFER_EXCERPT_MAX_CHARS, TIER_CLASSIFIER_VERSION, type TierSnifferRequest, type TierSnifferVerdict } from './tier-classifier.ts';
 import { DEFAULT_EXCERPT_LIMIT } from './delphi-scorer.ts';
 import { registeredInstalledTierClassification } from './installed-tier-classification-registry.ts';
 import { tierLedgerIdentityKey } from './tier-ledger.ts';
@@ -111,9 +111,10 @@ async function inspectChunks(
     const record = scope.ledger.getCurrent(input);
     if (!snapshot || !record) continue;
     // The owner's own word on this item (a per-item choice or a rule they set) decides all of its text.
-    const override = scope.ledger.getOverride(input);
+    const override = scope.ledger.getOverride(input, { withHistory: true });
     const overrideKey = JSON.stringify(override);
-    const ownerRead = (override?.kind === 'tier' && (override.tier === 'public' || override.tier === 'private'))
+    const fullText = snapshot.chunks.map(chunk => chunk.text).join('');
+    const ownerRead = personalOverrideAllowsText(override, fullText)
       || (record.decidedBy === 'owner_rule' && record.reasons.some(reason => reason.startsWith('metadata:owner_rule:')));
     const names = JSON.stringify([snapshot.title, snapshot.path, snapshot.sender]);
     const parentContext = set ? parentNamesContext(set, input) : undefined;
@@ -125,13 +126,12 @@ async function inspectChunks(
       return scopesNow().find(now => now.corpusIds.has(input.corpusId))?.ledger === scope.ledger
         && !!current && JSON.stringify([current.title, current.path, current.sender]) === names
         // An owner choice or a new decision made while the release waited withholds what was read before it.
-        && JSON.stringify(scope.ledger.getOverride(input)) === overrideKey
+        && JSON.stringify(scope.ledger.getOverride(input, { withHistory: true })) === overrideKey
         && scope.ledger.getCurrent(input)?.generation === record.generation
         && (!set || parentNamesContext(set, input) === parentContext)
         && currentReader?.modelId === reader?.modelId && currentReader?.promptVersion === reader?.promptVersion
         && allowed[index]!.every(hash => current.chunks.some(chunk => chunk.contentHash === hash));
     });
-    const fullText = snapshot.chunks.map(chunk => chunk.text).join('');
     // An existing whole-item model verdict covers short text without new records or calls.
     const shortRead = normalize(fullText).length <= SNIFFER_EXCERPT_MAX_CHARS
       && record.reasons.includes(contentDigestReason(fullText))

@@ -34,8 +34,9 @@ import { dirname } from 'node:path';
 import { writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
 import { OperationError } from '../../core/operation-error.ts';
 import { defaultOwnerConfigPath, ownerConfigStamp, readOwnerConfigFile } from '../../core/owner-config-read.ts';
+import { GMAIL_LABEL_CAPABILITY } from '../../core/source-connector-labels.ts';
 import type { OwnerTierRule } from './tier-classifier.ts';
-import { loadOwnerTierRules, writeOwnerTierRules } from './tier-rules.ts';
+import { withOwnerTierRulesWriter } from './tier-rules.ts';
 
 export const PRIVACY_PROFILE_SCHEMA_VERSION = 1;
 export const OLYMPUS_PRIVACY_PROFILE_ENV = 'OLYMPUS_PRIVACY_PROFILE_PATH';
@@ -62,7 +63,7 @@ const RULE_SOURCES: Readonly<Record<PrivacyRuleKind, Readonly<Record<string, { p
     'evernote.notes': { provider: 'evernote', match: 'folderKey' },
   },
   label: {
-    'gmail.email': { provider: 'gmail', match: 'label' },
+    'gmail.email': { provider: GMAIL_LABEL_CAPABILITY.provider, match: 'label' },
   },
   sender: {
     'gmail.email': { provider: 'gmail', match: 'sender' },
@@ -273,6 +274,8 @@ export function privacyRuleId(rule: Pick<PrivacyRule, 'kind' | 'source_id' | 'ke
 export interface PrivacyProfileWriteOptions extends PrivacyProfilePathOptions {
   /** Where the owner tier rules live (tier-rules.ts); defaults from `env`. */
   tierRulesPath?: string;
+  /** Runs under the shared profile/rules write lease, before either file changes. */
+  checkRevision?: () => void;
   now?: () => Date;
 }
 
@@ -286,24 +289,26 @@ export function writePrivacyProfile(
   update: { description?: string; rules?: PrivacyRule[] },
   options: PrivacyProfileWriteOptions = {},
 ): PrivacyProfile {
-  const current = readPrivacyProfile(options);
-  const next: PrivacyProfile = {
-    description: update.description ?? current?.description ?? '',
-    rules: update.rules ?? current?.rules ?? [],
-    updatedAt: (options.now?.() ?? new Date()).toISOString(),
-  };
   const rulesOptions = { ...(options.tierRulesPath ? { path: options.tierRulesPath } : {}), ...(options.env ? { env: options.env } : {}) };
-  const existing = loadOwnerTierRules({ ...rulesOptions, allowMissing: true });
-  const kept = existing.filter((rule) => !rule.id.startsWith(PRIVACY_RULE_ID_PREFIX));
-  const owned = next.rules.map(privacyRuleToTierRule);
-  const unchanged = existing.length === kept.length + owned.length
-    && owned.every((rule) => existing.some((candidate) => candidate.id === rule.id));
-  if (!unchanged) writeOwnerTierRules([...kept, ...owned], rulesOptions);
+  return withOwnerTierRulesWriter(rulesOptions, (existing, save) => {
+    options.checkRevision?.();
+    const current = readPrivacyProfile(options);
+    const next: PrivacyProfile = {
+      description: update.description ?? current?.description ?? '',
+      rules: update.rules ?? current?.rules ?? [],
+      updatedAt: (options.now?.() ?? new Date()).toISOString(),
+    };
+    const owned = next.rules.map(privacyRuleToTierRule);
+    const kept = existing.filter((rule) => !rule.id.startsWith(PRIVACY_RULE_ID_PREFIX));
+    const unchanged = existing.length === kept.length + owned.length
+      && owned.every((rule) => existing.some((candidate) => candidate.id === rule.id));
+    if (!unchanged) save([...kept, ...owned]);
 
-  const path = resolvePrivacyProfilePath(options);
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  writePrivateFileAtomicSync(path, `${JSON.stringify({ schemaVersion: PRIVACY_PROFILE_SCHEMA_VERSION, ...next }, null, 2)}\n`);
-  return next;
+    const path = resolvePrivacyProfilePath(options);
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    writePrivateFileAtomicSync(path, `${JSON.stringify({ schemaVersion: PRIVACY_PROFILE_SCHEMA_VERSION, ...next }, null, 2)}\n`);
+    return next;
+  });
 }
 
 function invalid(message: string): OperationError {

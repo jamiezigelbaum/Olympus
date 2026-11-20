@@ -390,7 +390,9 @@ describe('one item, Private -> Personal -> Private', () => {
     clearInstalledTierClassification();
     install = await start({ extract: false });
     await install.service.runOnce();
-    expect(install.lane.ledger.getOverride(bankIdentity)).toEqual({ kind: 'tier', tier: 'private' });
+    expect(install.lane.ledger.getOverride(bankIdentity)).toMatchObject({
+      kind: 'tier', tier: 'private', setDigest: expect.stringMatching(/^content:sha256:[a-f0-9]{64}$/),
+    });
     expect(install.lane.ledger.getCurrent(bankIdentity)).toMatchObject({ state: 'current', contentTier: 'private', decidedBy: 'override' });
     expect(await search(install, 'loan terms')).toContain(LOAN_TEXT);
 

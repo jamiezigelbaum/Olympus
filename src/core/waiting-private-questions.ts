@@ -21,6 +21,7 @@
  * control route. delete --all removes the database and sidecars.
  * Plain factory closures: class-field initializers inflate native dist.
  */
+import { registerLimit } from './limit-stops.ts';
 import { notePrivateAnswerCompleted } from './app-release-capture.ts';
 import { Database } from 'bun:sqlite';
 import { createHash, randomBytes } from 'node:crypto';
@@ -51,6 +52,14 @@ export const WAITING_QUESTION_LIMITS = Object.freeze({
 const STORE_BUSY_TIMEOUT_MS = 5_000;
 /** The revoking process's cleanup waits at most this long for the lock; the worker retries it. */
 const REVOKE_BUSY_TIMEOUT_MS = 1_000;
+// Both privacy revocations share the same SQLite writer-lock bound.
+export const REVOCATION_WRITE_LIMIT = Object.freeze({
+  id: 'privacy.revocation_write', kind: 'time', scope: 'source',
+  label: 'Wait for a privacy revocation to acquire the write lock',
+  unit: 'ms', continue: 'none', milliseconds: REVOKE_BUSY_TIMEOUT_MS,
+} as const);
+registerLimit(REVOCATION_WRITE_LIMIT);
+
 const OLDER_REMOVED_KEY = 'older_removed_at';
 
 /** `waiting`: Private items matched. `unchecked`: the local probe could not tell yet. */
@@ -697,7 +706,7 @@ export function revokeWaitingPrivateQuestions(
   options: { busyTimeoutMs?: number } = {},
 ): void {
   const store = openWaitingPrivateQuestionStore(waitingPrivateQuestionsDbPath(remoteConnectionsDbPath), {
-    busyTimeoutMs: options.busyTimeoutMs ?? REVOKE_BUSY_TIMEOUT_MS,
+    busyTimeoutMs: options.busyTimeoutMs ?? REVOCATION_WRITE_LIMIT.milliseconds,
   });
   try {
     store.revokeConnection(connectionId);

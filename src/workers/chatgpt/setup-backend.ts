@@ -39,7 +39,7 @@ import {
   embeddingIsBuiltIn,
 } from './model-choice.ts';
 import { loadSecretLocations } from './scope-privacy.ts';
-import { SetupBackendError, type ChatGptSetupBackend } from './setup-tools.ts';
+import { PrivacySettingsConflict, SetupBackendError, type ChatGptSetupBackend } from './setup-tools.ts';
 
 const WORKER_ORIGIN = 'http://olympus-worker.internal';
 
@@ -341,12 +341,18 @@ export function createChatGptSetupBackend(options: ChatGptSetupBackendOptions): 
       return privacySettings();
     },
 
-    savePrivacy(update) {
-      if (privacySettings().privateAnswerChoice?.pending) throw new SetupBackendError('privacy_choice_required');
+    savePrivacy(update, expectedRevision) {
       writePrivacyProfile({
         ...(update.description !== undefined ? { description: update.description } : {}),
         ...(update.rules ? { rules: update.rules as PrivacyRule[] } : {}),
-      }, { env: options.env ?? process.env });
+      }, {
+        env: options.env ?? process.env,
+        checkRevision() {
+          const current = privacySettings();
+          if (expectedRevision !== undefined && current.revision !== expectedRevision) throw new PrivacySettingsConflict(current);
+          if (current.privateAnswerChoice?.pending) throw new SetupBackendError('privacy_choice_required');
+        },
+      });
       return privacySettings();
     },
   };

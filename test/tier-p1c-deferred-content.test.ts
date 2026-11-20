@@ -38,6 +38,7 @@ import {
   PROVIDER,
   CORPORA,
   cloudProvider,
+  expectHeldThenPersonal,
   fixtureConnector,
   identityOf,
   localId,
@@ -108,6 +109,7 @@ async function populateLegacy(dir: string): Promise<void> {
     await secure.syncFromConnector(fixtureConnector(() => listing(LEGACY)), { fetchContent: false, placement: SECURE_PLACEMENT });
     const sink = createConnectorStoreExtractionSink({
       store: secure,
+      recordContentTier: false,
       classify: () => buildSourceSensitivity({ trustTier: 'S4', trustDomain: 'secure_local' }),
       syncConnectorId: 'extraction',
       ownerConnectorId: 'fixture-connector',
@@ -199,6 +201,24 @@ function searchIds(store: LocalConnectorStore | undefined, term: string): string
 }
 
 describe('P1c: content that lands after listing', () => {
+  test('replacement extraction under a Personal override lands the body in Private for review', async () => {
+    const lane = openLane(workspace());
+    cleanups.push(() => lane.close());
+    const spec = NEW[0]!;
+    const identity = identityOf(spec.id);
+    lane.ledger.setOverride(identity, { kind: 'tier', tier: 'private' });
+    await listAll(lane, [spec]);
+    expect((await lane.sink.accept(request(spec.id, spec.body))).accepted).toBe(true);
+    expect(lane.ledger.getCurrent(identity)?.contentTier).toBe('private');
+
+    const text = `The replacement report includes ${FAKE_AWS_KEY}.`;
+    expect((await lane.sink.accept(request(spec.id, text))).accepted).toBe(true);
+    expect(lane.ledger.getCurrent(identity)).toMatchObject({ state: 'current', contentTier: 'secure' });
+    expect(lane.ledger.ownerOverrideReview(identity)?.kinds).toEqual(['aws_access_key_id']);
+    expect(lane.stores.secure_local?.exportItemCopy(identity)?.chunks.map(chunk => chunk.boundedText).join('')).toBe(text);
+    expect(searchIds(lane.stores.internal, 'replacement')).toEqual([]);
+  });
+
   test('existing items stay byte-identical, keep the legacy path, and are never routed', async () => {
     const dir = workspace();
     await populateLegacy(dir);
@@ -251,6 +271,7 @@ describe('P1c: content that lands after listing', () => {
 
     for (const spec of NEW) await lane.sink.accept(request(spec.id, spec.body));
 
+    await expectHeldThenPersonal(lane.set, identityOf('new-integral'), 'quadrants');
     // Reference material: one Personal copy serving names and content.
     expect(lane.ledger.copies(identityOf('new-integral'))).toEqual([
       expect.objectContaining({ corpusId: CORPORA.internal, layers: 'both', state: 'current' }),
@@ -350,6 +371,7 @@ describe('P1c: content that lands after listing', () => {
       expect.objectContaining({ corpusId: CORPORA.secure_local, layers: 'both', state: 'current', embedHold: true }),
     ]);
 
+    await expectHeldThenPersonal(lane.set, identityOf('new-integral'), 'quadrants');
     const cloud = cloudProvider();
     const local = localProvider();
     await lane.stores.internal!.embedChunks({ provider: cloud });
@@ -415,6 +437,7 @@ describe('P1c: status counts a names copy awaiting its text as a file to read', 
 
     for (const spec of NEW) await lane.sink.accept(request(spec.id, spec.body));
 
+    await expectHeldThenPersonal(lane.set, identityOf('new-integral'), 'quadrants');
     // new-scan's text lives in Private now: its names copy here is kept as
     // names only and counted where its text is.
     const after = lane.stores.internal!.status({}).counts;

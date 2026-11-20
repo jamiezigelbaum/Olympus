@@ -34,6 +34,7 @@ import { existsSync, lstatSync, mkdtempSync, readdirSync, rmSync, rmdirSync, sta
 import { basename, join, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { closeSqliteStore } from './sqlite-store.ts';
+import { readSqliteSchemaVersion } from './sqlite-migrations.ts';
 import { writableStoreOpensForbidden } from './store-write-guard.ts';
 import { SecretLocationsIndex } from '../workers/classification/secret-locations.ts';
 import { TierSnifferStore } from '../workers/classification/sniffer-store.ts';
@@ -746,6 +747,27 @@ export function storeFileReads(path: string, busyTimeoutMs = 2_000): StoreFileLo
     return isBusyError(error) ? 'busy' : 'damaged';
   } finally {
     if (db) closeSqliteStore(db, { checkpoint: false });
+  }
+}
+
+/** The schema stamp before a put-back opens a store for writing. */
+export function storeFileSchemaVersion(path: string, storeId: string): number {
+  const db = openToLookAt(path, 0);
+  try {
+    return readSqliteSchemaVersion(db, storeId);
+  } finally {
+    closeSqliteStore(db, { checkpoint: false });
+  }
+}
+
+/** A restored connector store with body rows needs its placement checked. */
+export function restoredConnectorStoreHasBody(path: string): boolean {
+  const db = openToLookAt(path, 0);
+  try {
+    const chunks = db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'chunks'").get();
+    return !!chunks && !!db.query("SELECT 1 FROM chunks WHERE length(bounded_text) > 0 LIMIT 1").get();
+  } finally {
+    closeSqliteStore(db, { checkpoint: false });
   }
 }
 

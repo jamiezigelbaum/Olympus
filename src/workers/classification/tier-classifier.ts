@@ -141,7 +141,7 @@ export interface OwnerTierRule {
  *   through normal classification. It never jumps straight to a tier.
  */
 export type ItemTierOverride =
-  | { kind: 'tier'; tier: TierKey }
+  | { kind: 'tier'; tier: TierKey; setDigest?: string | null; confirmedDigest?: string }
   | { kind: 'not_secret' };
 
 // --- Sniffer seam -------------------------------------------------------------
@@ -229,7 +229,13 @@ export interface TierSniffer {
   readonly id: string;
   readonly rejudgeReady?: boolean;
   /** An eligible final verdict for this item's unchanged content and names. */
-  readonly recordedContentVerdict?: { readonly tier: 'private' | 'secure'; readonly code: string; readonly mapRevision: string };
+  readonly recordedContentVerdict?: {
+    readonly tier: 'private' | 'secure';
+    readonly code: string;
+    readonly origin?: 'model' | 'rule';
+    readonly rule?: string;
+    readonly mapRevision: string;
+  };
   /** Same checks as judge, but a cache miss never queues a question. */
   cachedVerdict?(request: TierSnifferRequest): TierSnifferVerdict;
   judge(request: TierSnifferRequest): TierSnifferVerdict;
@@ -280,17 +286,14 @@ export const CONTENT_READ_SNIFFER_FLAG = 'content:read';
 export const PERSONAL_FIRST_REASON = 'content:personal_first';
 
 /**
- * Whether a decision's content waits, held Private, for its model question:
- * placement keeps the copy in Private and release treats it as Private, even
- * though the recorded content tier is the Personal default. Every open
- * question holds it (#1316): a decision recorded Personal-first before that
- * (`content:personal_first`) is held too, so an answer read from it is
- * Private and its next placement moves its text into Private.
+ * Whether content waits in Private for a model answer or the owner's review.
+ * Placement and release use the hold even while the recorded tier is the
+ * Personal default of an unanswered model question.
  */
 export function contentHeldForJudgment(
   decision: Pick<TierDecision, 'contentPending'> & { readonly reasons?: readonly string[] },
 ): boolean {
-  return decision.contentPending;
+  return decision.contentPending || decision.reasons?.includes(OWNER_OVERRIDE_SECRET_REVIEW_REASON) === true;
 }
 /**
  * Recorded with the content reasons of every non-Secrets decision about an
@@ -316,10 +319,84 @@ export function contentDigestReason(text: string): string {
   return `content:sha256:${createHash('sha256').update(text.trim()).digest('hex')}`;
 }
 
+export const OWNER_OVERRIDE_SECRET_REVIEW_REASON = 'content:owner_override_secret_review';
+export const OWNER_OVERRIDE_SECRET_CONFIRMED_REASON = 'content:owner_override_secret_confirmed';
+
+export function ownerOverrideMatchesDigest(override: ItemTierOverride | undefined, digest: string): boolean {
+  return override?.kind === 'tier' && (override.tier === 'private' || override.tier === 'public')
+    && (override.setDigest === digest || override.confirmedDigest === digest);
+}
+
+/** A Personal override covers clean text and text the owner set or confirmed. */
+export function personalOverrideAllowsText(override: ItemTierOverride | undefined, text: string): boolean {
+  return override?.kind === 'tier' && (override.tier === 'private' || override.tier === 'public')
+    && (ownerOverrideMatchesDigest(override, contentDigestReason(text)) || contentSecretReasons(text).length === 0);
+}
+
+export function contentSecretFindingKinds(reasons: readonly string[]): string[] {
+  const prefix = 'content:secret:';
+  return reasons.filter(reason => reason.startsWith(prefix)).map(reason => reason.slice(prefix.length));
+}
+
+/** The owner question carries the body receipt and finding kinds. */
+export function ownerOverrideSecretReview(reasons: readonly string[]): { kinds: string[]; digest: string } | undefined {
+  if (!reasons.includes(OWNER_OVERRIDE_SECRET_REVIEW_REASON)) return undefined;
+  const digest = reasons.find(reason => reason.startsWith('content:sha256:'));
+  const kinds = contentSecretFindingKinds(reasons);
+  return digest && kinds.length > 0 ? { digest, kinds } : undefined;
+}
+
 /** The judge's own tier, bound to its verdict reason and the complete-text digest.
  * Metadata can raise the stored tier later; it cannot rewrite this receipt. */
 export function contentJudgeVerdictReason(reason: string, tier: TierKey, digest: string): string {
   return `content:judge_verdict:${tier}:${createHash('sha256').update(JSON.stringify([reason, digest])).digest('hex')}`;
+}
+
+/** A content verdict reason, excluding open questions and fail-safe settlements. */
+export function isContentJudgeReason(reason: string): boolean {
+  return reason.startsWith('content:sniffer:')
+    && (!reason.includes(':rule:') || reason.includes(':rule:duplicate_model:'))
+    && !reason.includes(':fail_safe:')
+    && !reason.endsWith(':fail_safe')
+    && !reason.includes(':injection:')
+    && !reason.endsWith(':undecided')
+    && !reason.endsWith(':unresolved:0.00')
+    && !reason.endsWith(':union:decision:failed');
+}
+
+/** Whether the recorded model answer is bound to this complete-text digest. */
+export function hasContentJudgeVerdict(reasons: readonly string[], tier: TierKey, digest: string): boolean {
+  return reasons.some(reason => isContentJudgeReason(reason)
+    && reasons.includes(contentJudgeVerdictReason(reason, tier, digest)));
+}
+
+/** Check the complete stored body against Personal placement's authority. */
+export function personalContentAuthorized(
+  evidence: Pick<TierDecision, 'contentRead' | 'contentPending'> & { decidedBy: string; reasons: readonly string[] },
+  text: string,
+  notSecret: boolean,
+  override?: ItemTierOverride,
+  imageJudgment?: ImageJudgmentSignal,
+): boolean {
+  if (!evidence.contentRead || evidence.contentPending) return false;
+  const { reasons } = evidence;
+  const digest = contentDigestReason(text);
+  const receipts = reasons.filter(reason => reason.startsWith('content:sha256:'));
+  if (receipts.length !== 1 || receipts[0] !== digest) return false;
+  const ownerDecided = (evidence.decidedBy === 'override'
+    && (reasons.includes('override:item:private') || reasons.includes('override:item:public'))) || namesDecidedByOwner(reasons);
+  const trivial = reasons.includes('content:text_only') ? trivialContentRule(text) : undefined;
+  const trivialSettled = trivial !== undefined && reasons.includes(`content:rule:${trivial}`);
+  const photoReason = reasons.find(reason => reason === IMAGE_ORDINARY_REASON || reason.startsWith(IMAGE_TEXT_DECIDES_REASON_PREFIX));
+  const judgedPersonal = hasContentJudgeVerdict(reasons, 'private', digest);
+  const photoSettled = imageJudgment?.verdict === 'ordinary' && (imageJudgment.textDecides
+    ? photoReason === `${IMAGE_TEXT_DECIDES_REASON_PREFIX}${imageCategoryCode(imageJudgment.category)}` && judgedPersonal
+    : photoReason === IMAGE_ORDINARY_REASON);
+  if (!ownerDecided && !trivialSettled && !(photoReason ? photoSettled : judgedPersonal)) return false;
+  const ownerConfirmed = override?.kind === 'tier' && evidence.decidedBy === 'override'
+    && reasons.includes(`override:item:${override.tier}`) && ownerOverrideMatchesDigest(override, digest);
+  return ownerConfirmed
+    || (notSecret && reasons.includes('override:item:not_secret')) || contentSecretReasons(text).length === 0;
 }
 
 /**
@@ -703,20 +780,25 @@ function classifyItemTiersWithPublic(
   const text = input.text;
   const holdUntilJudged = input.holdUntilJudged === true;
 
-  // [1] Per-item owner override (sticky). A tier override is final for both
-  // layers — including over Secrets, which is the one thing that may.
+  // [1] A Personal override fixes placement after the full-text Secret check.
   if (options.override?.kind === 'tier') {
+    const tier = options.override.tier;
+    const personal = tier === 'private' || tier === 'public';
+    const findings = text !== undefined && personal ? contentSecretReasons(text) : [];
+    const stillUnread = personal && input.heldSecret === true && !text?.trim();
+    const confirmed = text !== undefined && ownerOverrideMatchesDigest(options.override, contentDigestReason(text));
+    const review = findings.length > 0 && !confirmed;
+    const staysSecret = review && input.heldSecret === true;
     return {
       ...base,
-      metadataTier: options.override.tier,
-      contentTier: options.override.tier,
-      decidedBy: 'override',
-      reasons: [`override:item:${options.override.tier}`, ...heldMark(holdUntilJudged, options.override.tier)],
-      state: 'current',
-      // The owner decided the content; nothing about the text can change it.
-      contentRead: true,
+      metadataTier: review && !staysSecret ? 'secure' : tier,
+      contentTier: staysSecret ? 'secrets' : review ? 'secure' : tier,
+      decidedBy: staysSecret ? 'secret_detector' : 'override',
+      reasons: staysSecret ? findings : ownerOverrideReasons(tier, holdUntilJudged, findings, confirmed),
+      state: stillUnread ? 'pending' : 'current',
+      contentRead: !stillUnread,
       metadataPending: false,
-      contentPending: false,
+      contentPending: stillUnread,
       metadataForced: true,
       metadataFlagged: false,
     };
@@ -855,13 +937,19 @@ export function classifyContentTier(
   const holdUntilJudged = input.holdUntilJudged === true;
   if (options.override?.kind === 'tier') {
     const tier = options.retirePublic && options.override.tier === 'public' ? 'private' : options.override.tier;
+    const lower = tier === 'private' || tier === 'public';
+    const findings = lower ? contentSecretReasons(input.text) : [];
+    const confirmed = ownerOverrideMatchesDigest(options.override, contentDigestReason(input.text));
+    const review = findings.length > 0 && !confirmed;
+    if (review && input.heldSecret) return { ...base, contentTier: 'secrets', decidedBy: 'secret_detector', reasons: findings, contentPending: false };
     return {
       ...base,
-      contentTier: tier,
+      contentTier: review ? 'secure' : tier,
       decidedBy: 'override',
-      reasons: [`override:item:${options.override.tier}`, ...(tier !== options.override.tier ? [PUBLIC_RETIRED_REASON] : []),
-        ...heldMark(holdUntilJudged, tier), contentDigestReason(input.text), contentNamesReason(input, input.parentContext)],
-      contentPending: false,
+      reasons: [...ownerOverrideReasons(options.override.tier, holdUntilJudged, findings, confirmed),
+        ...(tier !== options.override.tier ? [PUBLIC_RETIRED_REASON] : []),
+        contentDigestReason(input.text), contentNamesReason(input, input.parentContext)],
+      contentPending: lower && input.heldSecret === true && !input.text.trim(),
     };
   }
   const text = input.text;
@@ -1139,6 +1227,7 @@ function contentPass(args: {
   // The lane's hold travels with every decision but a Secrets one, so a later
   // pass over the stored decision holds the same way (HELD_UNTIL_JUDGED_REASON).
   const mark = heldMark(args.holdUntilJudged === true, metadata.tier);
+  const held = args.holdUntilJudged === true && metadata.ownerDecided !== true && metadata.ownerRule === undefined;
   // A held Secret's stored text reads as empty, which isn't an empty item.
   if (text === undefined || (!text.trim() && (!args.textOnly || args.heldSecret))) {
     return {
@@ -1153,13 +1242,12 @@ function contentPass(args: {
 
   // [9] Secret detector on the full text.
   if (!args.secretsCleared) {
-    const secretKinds = detectSecretFindingKinds(text);
-    if (hasCredentialUrl(text) && !secretKinds.includes('credential_assignment')) secretKinds.push('credential_assignment');
-    if (secretKinds.length > 0) {
+    const reasons = contentSecretReasons(text);
+    if (reasons.length > 0) {
       return {
         tier: 'secrets',
         decidedBy: 'secret_detector',
-        reasons: secretKinds.map((kind) => `content:secret:${kind}`),
+        reasons,
         pending: false,
       };
     }
@@ -1189,8 +1277,8 @@ function contentPass(args: {
     return { tier: maxTier(metadata.tier, 'secure'), decidedBy: 'default', reasons: [IMAGE_PRIVATE_DEFAULT_REASON, ...mark], pending: false };
   }
 
-  // A force rule fixes the tier; only Secrets (above) may still raise it.
-  if (metadata.forced) {
+  // Owner force rules fix the tier. A lane's forced prior can set the floor for held text.
+  if (metadata.forced && (!held || tierRank(metadata.tier) >= tierRank('secure'))) {
     return { tier: metadata.tier, decidedBy: metadata.decidedBy, reasons: [...mark], pending: false };
   }
 
@@ -1216,7 +1304,12 @@ function contentPass(args: {
     // store wrapper supplies this only after checking the verdict's receipts.
     const recorded = args.sniffer.recordedContentVerdict;
     if (recorded && recorded.mapRevision === args.mapRevision) {
-      const verdict = withSnifferVerdict(decided, recorded.tier, `content:sniffer:${args.sniffer.id}:${recorded.code}`);
+      const reason = `content:sniffer:${args.sniffer.id}:${recorded.code}`;
+      const verdict = withSnifferVerdict(decided, recorded.tier, reason);
+      if (recorded.origin === 'model') verdict.reasons.push('content:provenance:model');
+      if (isContentJudgeReason(reason) && (recorded.origin !== 'rule' || recorded.rule === 'duplicate_model')) verdict.reasons.push(
+        contentJudgeVerdictReason(reason, recorded.tier, contentDigestReason(text)));
+      if (recorded.rule) verdict.reasons.push(`content:rule:${recorded.rule}`);
       return { ...verdict, reasons: [...verdict.reasons, ...mark], pending: false };
     }
     return {
@@ -1249,6 +1342,10 @@ function contentPass(args: {
     ...(args.matchInput.path ? { path: args.matchInput.path } : {}),
   });
   const canAskSniffer = args.sniffer.id !== UNDECIDED_TIER_SNIFFER.id;
+  // A historical source-wide prior can still hold placement while the
+  // sniffer decides the item's own text independently.
+  const retiredPrior = metadata.decidedBy === 'source_prior' && restsOnRetiredSourcePrior(metadata.reasons)
+    && metadata.flags.length === 0 && !metadata.reasons.some(reason => reason.startsWith('metadata:floor:'));
   if (detection.signals.length > 0) {
     decided = maxVerdict(decided, {
       tier: 'secure',
@@ -1265,7 +1362,6 @@ function contentPass(args: {
   // (asked even with no model, so it stays pending until one answers),
   // unless an owner rule settled its names: the owner said where it belongs.
   const recordFlags = [...ownRecordSignals(text, args.matchInput), ...(textDecides ? ['image_document'] : [])];
-  const held = args.holdUntilJudged === true && metadata.ownerDecided !== true;
   let pending = false;
   const flags = [
     ...metadata.flags,
@@ -1275,24 +1371,29 @@ function contentPass(args: {
   ];
   if (canAskSniffer && flags.length === 0 && metadata.ownerDecided !== true) flags.push(CONTENT_READ_SNIFFER_FLAG);
   const reasons = [...decided.reasons];
-  if (flags.length > 0 && tierRank(decided.tier) < tierRank('secure')) {
+  if (flags.length > 0 && (tierRank(decided.tier) < tierRank('secure')
+    || (retiredPrior && canAskSniffer && detection.signals.length === 0))) {
+    const digest = contentDigestReason(text);
     const verdict = args.sniffer.judge({
       pass: 'content',
       priority: args.holdUntilJudged === true ? HELD_UNTIL_JUDGED_PRIORITY
         : recordFlags.length > 0 || metadata.pending ? HELD_RECORD_PRIORITY : 0,
-      flags: args.textOnly && !args.parentContext?.trim()
-        ? [...flags, contentDigestReason(text), contentNamesReason(args.signals, args.parentContext)] : flags,
+      flags: [...flags, digest, contentNamesReason(args.signals, args.parentContext)],
       material: snifferContentMaterial(args.names, snifferExcerpt(text, vocabularyTerms(detection.vocabulary)), args.parentContext),
       materialHash: tierSnifferInputHash('content', args.signals, text, args.parentContext),
       ...(args.textOnly && !args.parentContext?.trim() ? { contentHash: normalizedContentHash(text) } : {}),
       mapRevision: args.mapRevision,
       ...(args.subject ? { subject: args.subject } : {}),
     });
-    if (verdict.verdict === 'decided') {
-      decided = withSnifferVerdict(decided, verdict.tier, `content:sniffer:${args.sniffer.id}:${verdict.code}`);
+    const reason = verdict.verdict === 'decided' ? `content:sniffer:${args.sniffer.id}:${verdict.code}` : undefined;
+    // The sniffer interface also accepts direct decisions without provenance.
+    const judged = verdict.verdict === 'decided' && reason !== undefined && isContentJudgeReason(reason)
+      && (verdict.origin !== 'rule' || verdict.rule === 'duplicate_model');
+    if (verdict.verdict === 'decided' && reason !== undefined && (!held || verdict.tier !== 'private' || judged)) {
+      decided = withSnifferVerdict(decided, verdict.tier, reason);
       reasons.splice(0, reasons.length, ...decided.reasons);
-      if (verdict.origin === 'model') reasons.push('content:provenance:model',
-        contentJudgeVerdictReason(`content:sniffer:${args.sniffer.id}:${verdict.code}`, verdict.tier, contentDigestReason(text)));
+      if (verdict.origin === 'model') reasons.push('content:provenance:model');
+      if (judged) reasons.push(contentJudgeVerdictReason(reason, verdict.tier, digest));
       if (verdict.origin === 'rule' && verdict.rule) reasons.push(`content:rule:${verdict.rule}`);
     } else {
       pending = true;
@@ -1311,6 +1412,17 @@ function contentPass(args: {
   }
   reasons.push(...mark);
   return { tier: decided.tier, decidedBy: decided.decidedBy, reasons: [...new Set(reasons)], pending };
+}
+
+function contentSecretReasons(text: string): string[] {
+  const kinds = detectSecretFindingKinds(text);
+  if (hasCredentialUrl(text) && !kinds.includes('credential_assignment')) kinds.push('credential_assignment');
+  return kinds.map(kind => `content:secret:${kind}`);
+}
+
+function ownerOverrideReasons(tier: TierKey, holdUntilJudged: boolean, findings: string[], confirmed: boolean): string[] {
+  return [`override:item:${tier}`, ...heldMark(holdUntilJudged, tier),
+    ...(findings.length > 0 ? [confirmed ? OWNER_OVERRIDE_SECRET_CONFIRMED_REASON : OWNER_OVERRIDE_SECRET_REVIEW_REASON, ...findings] : [])];
 }
 
 /** The lane-hold reason for a decision at `tier`: none for Secrets, which outrank it. */

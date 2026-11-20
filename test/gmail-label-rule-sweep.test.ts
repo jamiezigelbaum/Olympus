@@ -7,10 +7,16 @@ import { laneReleaseCheck } from './helpers/lane-release-check.ts';
 // messages carry the label and raises the stored ones (hidden first), and the
 // rule counts as applied only after Gmail answered every page.
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
+import { defaultMailScopeSelection } from '../src/core/mail-source-scope.ts';
+import { FileSourceScopeAuthority, mailScopeTierOwnerRuleSource } from '../src/workers/source-scope-runtime.ts';
+import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
+import { BUILT_IN_SNIFFER_LANE } from '../src/workers/classification/built-in-sniffer.ts';
+import { installedTierClassification } from '../src/workers/classification/installed-tier-classification.ts';
+import { FileLeaseBusyError, withFileLeaseSync } from '../src/core/file-lease.ts';
 import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';
 import { searchToolResult } from '../src/workers/chatgpt/response-builder.ts';
 import {
@@ -18,7 +24,7 @@ import {
   configureInstalledTierClassification,
 } from '../src/workers/classification/installed-tier-classification.ts';
 import { writePrivacyProfile } from '../src/workers/classification/privacy-profile.ts';
-import { classifyItemTiers, type OwnerTierRule, type TierDecision } from '../src/workers/classification/tier-classifier.ts';
+import { classifyItemTiers, type OwnerTierRule, type TierDecision, type TierSniffer } from '../src/workers/classification/tier-classifier.ts';
 import { writeOwnerTierRules } from '../src/workers/classification/tier-rules.ts';
 import {
   createConnectorStoreContentProvider,
@@ -27,12 +33,15 @@ import {
   LocalConnectorStore,
 } from '../src/workers/connector-store/index.ts';
 import { sweepOwnerRuleRaises, sweepLabelRuleRaises, LabelPageRejectedError, reopenLabelRuleSweep } from '../src/workers/connector-store/tier-rules-sweep.ts';
+import { moveTieredItem, moveTieredItemsLowering, resumeVerifiedTierMove } from '../src/workers/connector-store/tier-move.ts';
+import { applyOwnerOverrides } from '../src/workers/connector-store/tier-override-settle.ts';
 import { createLaneTieredStoreSet } from '../src/workers/connector-store/tiered-store-set.ts';
 import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
 import type { CredentialBroker } from '../src/workers/credential-broker/index.ts';
 import { searchReleasedEvidence } from '../src/workers/source-index/analyst-answer.ts';
 import {
   GMAIL_INTERNAL_CONNECTOR_CORPUS_ID,
+  GMAIL_PUBLIC_CONNECTOR_CORPUS_ID,
   GMAIL_LABEL_RULES_PENDING_WARNING,
   GMAIL_SECURE_CONNECTOR_CORPUS_ID,
   createGmailConnectorStoreSyncHandler,
@@ -149,7 +158,7 @@ function fakeGmail(messages: GmailMessage[]): FakeGmail {
 const identity = (id: string) => ({ provider: 'gmail', accountScope: ACCOUNT, providerItemId: id });
 const itemIdentity = (id: string) => ({ family: 'email' as const, ...identity(id), localItemId: `${ACCOUNT}:${id}` });
 
-function openLane(client: FakeGmail, options: { ownerRules?: OwnerTierRule[] } = {}) {
+function openLane(client: FakeGmail, options: { ownerRules?: OwnerTierRule[]; sniffer?: TierSniffer; authority?: FileSourceScopeAuthority } = {}) {
   const internalStore = new LocalConnectorStore({
     dbPath: join(root, 'internal.sqlite'), corpusId: GMAIL_INTERNAL_CONNECTOR_CORPUS_ID, family: 'email', trustDomain: 'internal',
   });
@@ -162,8 +171,19 @@ function openLane(client: FakeGmail, options: { ownerRules?: OwnerTierRule[] } =
     setId: 'gmail.label-sweep-test',
     internalStore,
     secureStore,
+    publicLeg: {
+      corpusId: GMAIL_PUBLIC_CONNECTOR_CORPUS_ID,
+      exists: () => existsSync(join(root, 'public.sqlite')),
+      open: () => {
+        const store = new LocalConnectorStore({ dbPath: join(root, 'public.sqlite'), corpusId: GMAIL_PUBLIC_CONNECTOR_CORPUS_ID,
+          family: 'email', trustDomain: 'public_safe' });
+        closers.push(() => store.close());
+        return store;
+      },
+    },
+    ...(options.authority ? { ownerRuleSource: mailScopeTierOwnerRuleSource(options.authority) } : {}),
     // The judge has cleared this mail as Personal: these tests are about the label rule, not judging.
-    tierClassification: { sniffer: JUDGED_PERSONAL_SNIFFER, ...(ownerRules.length > 0 ? { rules: ownerRules } : {}) },
+    tierClassification: { sniffer: options.sniffer ?? JUDGED_PERSONAL_SNIFFER, ...(ownerRules.length > 0 ? { rules: ownerRules } : {}) },
   });
   const handler = createGmailConnectorStoreSyncHandler({
     internalStore,
@@ -219,6 +239,204 @@ async function ingestTwo(client = fakeGmail([
   expect(await olympusSearch(lane, 'apple pruning cellar')).toContain('Pruning the apple trees');
   return { client, lane };
 }
+
+describe('owner rules on a queued Personal verdict', () => {
+  const body = 'Water the orchard on Tuesday.';
+  const held = { sniffer: { id: 'orchard', judge: () => ({ verdict: 'undecided' as const }) } };
+  const id = itemIdentity('orchard');
+  const target = { metadataTier: 'private' as const, contentTier: 'private' as const };
+  const saveSenderRule = () => writeOwnerTierRules([{
+    id: 'orchard-sender', source: 'gmail', match: { kind: 'sender', value: 'alex@example.com' }, tier: 'secure', strength: 'force',
+  }], { env });
+
+  async function queued(authority?: FileSourceScopeAuthority) {
+    const client = fakeGmail([message(id.providerItemId, { subject: 'Tuesday rota', body, labels: ['INBOX', 'Label_7'] })]);
+    const lane = openLane(client, { ...held, ...(authority ? { authority } : {}) });
+    await lane.handler.pull({ max_items: 50 });
+    const verdict = lane.ledger.applySnifferVerdict(id, {
+      pass: 'content', tier: 'private', reason: 'content:sniffer:orchard:personal', modelId: 'orchard',
+    }, { placementFor: decision => lane.tierSet.placementFor(decision) });
+    expect(verdict?.outcome).toBe('queued_move');
+    expect(lane.ledger.getCurrent(id)).toMatchObject({ state: 'moving' });
+    return { lane, client };
+  }
+
+  function checkHeld(lane: Lane) {
+    expect(lane.internalStore.localContent(id.localItemId)?.chunks ?? []).toEqual([]);
+    expect(lane.secureStore.exportItemCopy(id)?.chunks.map(chunk => chunk.boundedText).join('')).toContain(body);
+  }
+
+  for (const kind of ['sender', 'label'] as const) {
+    test(`a saved ${kind} rule is effective before the lowering drain`, async () => {
+      const { lane } = await queued();
+      if (kind === 'sender') saveSenderRule();
+      else saveLabelRule();
+      const results = moveTieredItemsLowering([{ set: lane.tierSet, identity: id, target }]);
+      expect(results[0]).toHaveProperty('error');
+      checkHeld(lane);
+      expect(lane.internalStore.exportItemCopy(id)?.chunks ?? []).toEqual([]);
+    });
+  }
+
+  test('Gmail reauthentication keeps a lowering queued until the sender policy is resolved', async () => {
+    let reauth = false;
+    const authority = new FileSourceScopeAuthority({
+      mailStatePath: join(root, 'mail.json'),
+      readRegistry: () => ({ version: 1, handles: [{
+        handle: 'gmail.personal', provider: 'gmail', allowedCapabilities: ['gmail.email.sync'], scopes: [],
+        connectedAt: NOW.toISOString(), providerAccountId: 'gmail-account',
+        ...(reauth ? { backendState: { kind: 'oauth2_refresh', status: 'reauth_required' } as const } : {}),
+      }] }),
+    });
+    const { lane } = await queued(authority);
+    const scope = authority.mailSnapshot();
+    authority.approveMail({ expectedRevision: scope.revision, accountGeneration: scope.accountGeneration!,
+      scope: { ...defaultMailScopeSelection(), alwaysPrivateSenders: ['alex@example.com'] } });
+    reauth = true;
+    expect(authority.mailSnapshot().reason).toBe('not_connected');
+    const service = new TierSnifferService({
+      installed: installedTierClassification()!, lane: BUILT_IN_SNIFFER_LANE, modelAvailable: () => false,
+      model: { async complete() { throw new Error('No model expected'); } }, stores: () => lane.tierSet.openStores(),
+      classificationLedgerPath: join(root, 'classification.jsonl'),
+      autoMoves: { localEmbeddingsOnly: () => true, embeddingLedgerPath: join(root, 'notes.jsonl'), staleAfterMs: 0 },
+    });
+    closers.push(() => service.stop());
+    const drain = () => (service as unknown as { drainMoves(direction: 'lower'): Promise<unknown> }).drainMoves('lower');
+    expect(await drain()).toMatchObject({ failed: 0, moved: 0, notEligible: 1 });
+    expect(lane.ledger.getCurrent(id)).toMatchObject({ state: 'moving', targetContentTier: 'private' });
+    expect(lane.ledger.moveAttempts(id)).toBe(0);
+    checkHeld(lane);
+    reauth = false;
+    expect(moveTieredItemsLowering([{ set: lane.tierSet, identity: id, target }])[0]).toMatchObject({
+      error: { code: 'rule_authority' },
+    });
+    checkHeld(lane);
+    const current = authority.mailSnapshot();
+    authority.approveMail({ expectedRevision: current.revision, accountGeneration: current.accountGeneration!,
+      scope: defaultMailScopeSelection() });
+    expect(await drain()).toMatchObject({ failed: 0, moved: 1 });
+    expect(lane.internalStore.localContent(id.localItemId)?.chunks.join('')).toContain(body);
+  });
+
+  test('a waiting lowering on the raise page gives the next raise a turn', async () => {
+    let reauth = false;
+    const authority = new FileSourceScopeAuthority({
+      mailStatePath: join(root, 'mail.json'),
+      readRegistry: () => ({ version: 1, handles: [{
+        handle: 'gmail.personal', provider: 'gmail', allowedCapabilities: ['gmail.email.sync'], scopes: [],
+        connectedAt: NOW.toISOString(), providerAccountId: 'gmail-account',
+        ...(reauth ? { backendState: { kind: 'oauth2_refresh', status: 'reauth_required' } as const } : {}),
+      }] }),
+    });
+    const next = itemIdentity('raised');
+    const lane = openLane(fakeGmail([id, next].map(item => message(item.providerItemId, {
+      subject: 'Tuesday rota', body, labels: ['INBOX'],
+    }))), {
+      authority,
+      sniffer: {
+        id: 'orchard',
+        judge: request => request.subject?.providerItemId === id.providerItemId
+          ? { verdict: 'undecided' }
+          : JUDGED_PERSONAL_SNIFFER.judge(request),
+      },
+    });
+    await lane.handler.pull({ max_items: 50 });
+    const scope = authority.mailSnapshot();
+    authority.approveMail({ expectedRevision: scope.revision, accountGeneration: scope.accountGeneration!,
+      scope: { ...defaultMailScopeSelection(), alwaysPrivateSenders: ['alex@example.com'] } });
+    reauth = true;
+    expect(authority.mailSnapshot().senderPolicyUnresolved).toBe(true);
+
+    // The held body already lives in Private. This move raises its recorded
+    // tier and would move only the names, from Personal to Public.
+    expect(lane.ledger.getCurrent(id)).toMatchObject({ metadataTier: 'private', contentTier: 'private', contentPending: true });
+    expect(lane.ledger.copies(id)).toMatchObject([
+      { trustDomain: 'internal', layers: 'metadata' }, { trustDomain: 'secure_local', layers: 'content' },
+    ]);
+    const namesLower = { ...movingTo('secure'), metadataTier: 'public' as const };
+    expect(lane.ledger.recordRoutedPlacement(id, namesLower, lane.tierSet.placementFor(namesLower)).outcome).toBe('queued_move');
+    const bodyRaise = { ...movingTo('secure'), metadataTier: 'private' as const };
+    expect(lane.ledger.recordRoutedPlacement(next, bodyRaise, lane.tierSet.placementFor(bodyRaise)).outcome).toBe('queued_move');
+    expect(lane.ledger.listMoving({ limit: 1, direction: 'raise' })[0]?.providerItemId).toBe(id.providerItemId);
+    const service = new TierSnifferService({
+      installed: installedTierClassification()!, lane: BUILT_IN_SNIFFER_LANE, modelAvailable: () => false,
+      model: { async complete() { throw new Error('No model expected'); } }, stores: () => lane.tierSet.openStores(),
+      classificationLedgerPath: join(root, 'classification.jsonl'),
+      autoMoves: { localEmbeddingsOnly: () => true, embeddingLedgerPath: join(root, 'notes.jsonl'), maxPerPass: 1 },
+    });
+    closers.push(() => service.stop());
+    const drain = () => (service as unknown as { drainMoves(direction: 'raise'): Promise<unknown> }).drainMoves('raise');
+    expect(await drain()).toMatchObject({ failed: 0, moved: 0, notEligible: 1 });
+    expect(lane.ledger.getCurrent(id)).toMatchObject({ state: 'moving', targetMetadataTier: 'public' });
+    expect(await drain()).toMatchObject({ failed: 0, moved: 1 });
+    expect(lane.secureStore.localContent(next.localItemId)?.chunks.join('')).toContain(body);
+  });
+
+  test('rule writers serialize with destination import and publication', async () => {
+    const { lane } = await queued();
+    const checkWriter = () => expect(() =>
+      withFileLeaseSync(env.OLYMPUS_TIER_RULES_PATH!, () => undefined, { acquireTimeoutMs: 1 })
+    ).toThrow(FileLeaseBusyError);
+    const importCopy = lane.internalStore.importItemCopy.bind(lane.internalStore);
+    const flip = lane.ledger.completeMove.bind(lane.ledger);
+    const imported = spyOn(lane.internalStore, 'importItemCopy').mockImplementation((...args) => {
+      checkWriter();
+      return importCopy(...args);
+    });
+    const flipped = spyOn(lane.ledger, 'completeMove').mockImplementation((...args) => {
+      checkWriter();
+      return flip(...args);
+    });
+    try {
+      expect(moveTieredItemsLowering([{ set: lane.tierSet, identity: id, target }])[0]).toHaveProperty('result');
+      expect(imported).toHaveBeenCalled();
+      expect(flipped).toHaveBeenCalled();
+    } finally {
+      imported.mockRestore();
+      flipped.mockRestore();
+    }
+    saveSenderRule();
+  });
+
+  test('a saved per-item tier takes effect before the override pass queues its placement', async () => {
+    const { lane } = await queued();
+    lane.ledger.setOverride(id, { kind: 'tier', tier: 'secure' });
+    expect(lane.ledger.getCurrent(id)).toMatchObject({ state: 'moving', targetContentTier: 'private' });
+    expect(moveTieredItemsLowering([{ set: lane.tierSet, identity: id, target }])[0]).toHaveProperty('error');
+    checkHeld(lane);
+    expect(lane.internalStore.exportItemCopy(id)?.chunks ?? []).toEqual([]);
+  });
+
+  test('a saved per-item tier retires a staged destination from an earlier verdict', async () => {
+    const { lane } = await queued();
+    await expect(moveTieredItem({
+      set: lane.tierSet, identity: id, target, afterVerified() { throw new Error('checkpoint'); },
+    })).rejects.toThrow('checkpoint');
+    expect(lane.internalStore.exportItemCopy(id)?.chunks.length).toBeGreaterThan(0);
+    lane.ledger.setOverride(id, { kind: 'tier', tier: 'secure' });
+    expect(resumeVerifiedTierMove(lane.tierSet, id)).toBe(false);
+    checkHeld(lane);
+    expect(lane.internalStore.exportItemCopy(id)?.chunks ?? []).toEqual([]);
+  });
+
+  test('a verified lowering rechecks the current rules after reopen', async () => {
+    const { lane, client } = await queued();
+    await expect(moveTieredItem({
+      set: lane.tierSet, identity: id, target, afterVerified() { throw new Error('checkpoint'); },
+    })).rejects.toThrow('checkpoint');
+    expect(lane.internalStore.exportItemCopy(id)?.chunks.map(chunk => chunk.boundedText).join('')).toContain(body);
+    checkHeld(lane);
+    for (const close of closers.splice(0).reverse()) close();
+    lane.ledger.close();
+    clearInstalledTierClassification();
+    saveSenderRule();
+    configureInstalledTierClassification({ env });
+    const reopened = openLane(client, held);
+    await reopened.tierSet.repairLowerContent();
+    checkHeld(reopened);
+    expect(reopened.internalStore.exportItemCopy(id)?.chunks ?? []).toEqual([]);
+  });
+});
 
 describe('a Gmail label saved as always Private after the mail was stored', () => {
   test('raises the stored mail under the label, hidden at once, and leaves unlabelled mail alone', async () => {
@@ -505,6 +723,21 @@ const orchardMail = (id: string, subject: string, body: string, labels = ['INBOX
   message(id, { subject, body, labels, from: 'Pat <pat@orchard.example>' });
 
 describe('a move in flight does not exempt an item from a rule', () => {
+  test('a Personal label floor preserves the queued Private content raise', async () => {
+    const { lane } = await ingestTwo();
+    const id = identity('pruning');
+    const mixed = { ...movingTo('secure'), metadataTier: 'public' } as const;
+    const placement = lane.tierSet.placementFor(mixed);
+    expect(placement.copies.map(copy => copy.trustDomain)).toEqual(['public_safe', 'secure_local']);
+    lane.ledger.recordRoutedPlacement(id, mixed, placement);
+    expect(lane.ledger.getCurrent(id)).toMatchObject({ state: 'moving', targetMetadataTier: 'public', targetContentTier: 'secure' });
+    writeOwnerTierRules([{ id: 'orchard', source: 'gmail', match: { kind: 'label', value: 'Label_7' }, tier: 'private', strength: 'force' }], { env });
+    const result = await sweepLabelRuleRaises({ set: lane.tierSet, provider: 'gmail', accountScope: ACCOUNT,
+      source: { async listLabelled() { return { ids: ['pruning'] }; } } });
+    expect(result.raised).toBe(1);
+    expect(lane.ledger.getCurrent(id)).toMatchObject({ targetMetadataTier: 'private', targetContentTier: 'secure' });
+  });
+
   test('a raise queued without hiding is hidden by the label rule, not left served', async () => {
     const { lane } = await ingestTwo();
     // A re-judge on an install whose moves wait for the migration: heading to Private, the Personal copy still served.
@@ -535,6 +768,29 @@ describe('a move in flight does not exempt an item from a rule', () => {
     await lane.handler.pull({ max_items: 50 });
 
     expect(lane.ledger.getCurrent(identity('fence'))).toMatchObject({ state: 'moving', targetMetadataTier: 'secure', targetContentTier: 'secure', decidedBy: 'owner_rule' });
+  });
+
+  test('a Personal label floor leaves an authorized Private-to-Personal move queued', async () => {
+    const id = identity('fence');
+    const client = fakeGmail([orchardMail('fence', 'Orchard fence', 'Fence quote for the orchard.', ['INBOX', 'Label_7'])]);
+    const lane = openLane(client);
+    await lane.handler.pull({ max_items: 50 });
+    const personal = lane.ledger.getCurrent(id)!;
+    expect(personal).toMatchObject({ state: 'current', metadataTier: 'private', contentTier: 'private' });
+    await moveTieredItem({ set: lane.tierSet, identity: id, target: movingTo('secure') });
+    expect(lane.ledger.getCurrent(id)).toMatchObject({ state: 'current', metadataTier: 'secure', contentTier: 'secure' });
+    const lowering = { ...movingTo('private'), reasons: personal.reasons };
+    expect(lane.ledger.recordRoutedPlacement(id, lowering, lane.tierSet.placementFor(lowering)).outcome).toBe('queued_move');
+    const queued = lane.ledger.getCurrent(id)!;
+
+    writeOwnerTierRules([{ id: 'orchard', source: 'gmail', match: { kind: 'label', value: 'Label_7' }, tier: 'private', strength: 'force' }], { env });
+    const result = await sweepLabelRuleRaises({ set: lane.tierSet, provider: 'gmail', accountScope: ACCOUNT,
+      source: { async listLabelled() { return { ids: ['fence'] }; } } });
+
+    expect(result).toMatchObject({ scanned: 1, raised: 0, pending: 0 });
+    expect(lane.ledger.getCurrent(id)).toEqual(queued);
+    expect(moveTieredItemsLowering([{ set: lane.tierSet, identity: id, target: lowering }])[0]).toHaveProperty('result');
+    expect(lane.internalStore.exportItemCopy(id)?.chunks.map(chunk => chunk.boundedText).join('')).toContain('Fence quote');
   });
 
   test('a stored-names rule reads the names of a hidden item, so a Secrets rule still reaches mail on its way to Private', async () => {
@@ -691,4 +947,76 @@ describe('rechecking a rule that was already applied', () => {
     expect(recovered.receipt.warnings ?? []).not.toContain(GMAIL_LABEL_RULES_PENDING_WARNING);
     expect(JSON.parse(lane.ledger.readMeta(LABEL_STATE_KEY)!).done).toHaveLength(1);
   });
+});
+
+test('a completed label walk distinguishes a match that was already Private from a nonmatch', async () => {
+  writeOwnerTierRules([orchardSender], { env });
+  const lane = openLane(fakeGmail([
+    orchardMail('matched', 'Orchard fence', 'Check the fence on Tuesday.', ['INBOX', 'Label_7']),
+    orchardMail('unmatched', 'Orchard rota', 'Water the orchard on Tuesday.'),
+  ]));
+  await lane.handler.pull({ max_items: 50 });
+  const matched = itemIdentity('matched');
+  const unmatched = itemIdentity('unmatched');
+  for (const item of [matched, unmatched]) {
+    expect(lane.ledger.getCurrent(item)).toMatchObject({ state: 'current', metadataTier: 'secure', contentTier: 'secure' });
+  }
+  writeOwnerTierRules([], { env });
+  saveLabelRule();
+  const sweep = (accountScope = ACCOUNT, ids = [matched.providerItemId]) => sweepLabelRuleRaises({
+    set: lane.tierSet, provider: 'gmail', accountScope, source: { listLabelled: async () => ({ ids }) },
+  });
+  expect(await sweep()).toMatchObject({ scanned: 1, raised: 0, pending: 0 });
+
+  const decision = movingTo('private');
+  const target = { metadataTier: decision.metadataTier, contentTier: decision.contentTier };
+  const move = (item: typeof matched) => ({ set: lane.tierSet, identity: item, target });
+  for (const item of [matched, unmatched]) {
+    const body = lane.secureStore.exportItemCopy(item)!.chunks.map((chunk) => chunk.boundedText).join('');
+    const judged = classifyItemTiers({ signals: {}, text: body }, { sniffer: JUDGED_PERSONAL_SNIFFER });
+    expect(lane.ledger.recordRoutedPlacement(item, judged, lane.tierSet.placementFor(judged)).outcome).toBe('queued_move');
+  }
+  const [kept, lowered] = moveTieredItemsLowering([move(matched), move(unmatched)]);
+  expect(kept).toHaveProperty('error');
+  expect(lowered).toHaveProperty('result');
+  expect(lane.internalStore.exportItemCopy(matched)?.chunks ?? []).toEqual([]);
+  expect(lane.internalStore.exportItemCopy(unmatched)?.chunks.length).toBeGreaterThan(0);
+
+  // Removing and adding back the same rule requires a walk for the new revision.
+  // A walk of a different mailbox cannot provide that account's evidence.
+  writeOwnerTierRules([], { env });
+  saveLabelRule();
+  expect(await sweep('other-account', [])).toMatchObject({ pending: 0 });
+  expect(moveTieredItemsLowering([move(matched)])[0]).toHaveProperty('error');
+  expect(await sweep(ACCOUNT, [])).toMatchObject({ pending: 0 });
+  expect(moveTieredItemsLowering([move(matched)])[0]).toHaveProperty('result');
+});
+
+test('an override undo uses the completed label walk for a known nonmatch', async () => {
+  const { lane } = await ingestTwo();
+  const matched = itemIdentity('pruning');
+  const unmatched = itemIdentity('rota');
+  const privateTiers = { metadataTier: 'secure', contentTier: 'secure' } as const;
+  for (const item of [matched, unmatched]) {
+    lane.ledger.setOverride(item, { kind: 'tier', tier: 'secure' });
+  }
+  applyOwnerOverrides({ set: lane.tierSet });
+  for (const item of [matched, unmatched]) {
+    await moveTieredItem({ set: lane.tierSet, identity: item, target: privateTiers });
+  }
+  saveLabelRule();
+  expect(await sweepLabelRuleRaises({
+    set: lane.tierSet, provider: 'gmail', accountScope: ACCOUNT,
+    source: { listLabelled: async () => ({ ids: [matched.providerItemId] }) },
+  })).toMatchObject({ scanned: 1, pending: 0 });
+
+  lane.ledger.clearOverride(unmatched);
+  applyOwnerOverrides({ set: lane.tierSet });
+  expect(lane.ledger.getCurrent(unmatched)).toMatchObject({ state: 'moving', targetMetadataTier: 'private', targetContentTier: 'private' });
+  await moveTieredItem({ set: lane.tierSet, identity: unmatched, target: { metadataTier: 'private', contentTier: 'private' } });
+  expect(lane.internalStore.exportItemCopy(unmatched)?.chunks.length).toBeGreaterThan(0);
+
+  lane.ledger.clearOverride(matched);
+  applyOwnerOverrides({ set: lane.tierSet });
+  expect(lane.ledger.getCurrent(matched)).toMatchObject({ state: 'current', ...privateTiers });
 });

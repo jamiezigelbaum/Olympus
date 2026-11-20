@@ -147,7 +147,7 @@ export interface GoogleDriveFileBytes {
 
 export interface GoogleDriveApiClient {
   listFiles(request: GoogleDriveListFilesRequest): Promise<GoogleDriveListFilesResponse>;
-  exportGoogleDocText(fileId: string, maxBytes: number): Promise<string>;
+  exportGoogleDocText(fileId: string, maxBytes: number, signal?: AbortSignal): Promise<string>;
   downloadTextFile(fileId: string, maxBytes: number): Promise<string>;
   /**
    * Byte-exact download for the file-extraction lane.
@@ -162,7 +162,7 @@ export interface GoogleDriveApiClient {
    * PDF, and an extractor handed one would report a corrupt file rather than
    * an oversized one.
    */
-  downloadFileBytes(fileId: string, maxBytes?: number): Promise<GoogleDriveFileBytes>;
+  downloadFileBytes(fileId: string, maxBytes?: number, signal?: AbortSignal): Promise<GoogleDriveFileBytes>;
   /**
    * One folder's own id, name and parents — the single step of an ancestry
    * walk.
@@ -738,17 +738,17 @@ export function budgetedDriveApiClient(
       budget.reserve(runProvenance);
       return inner.listFiles(request);
     },
-    exportGoogleDocText(fileId, maxBytes) {
+    exportGoogleDocText(fileId, maxBytes, signal) {
       budget.reserve(runProvenance);
-      return inner.exportGoogleDocText(fileId, maxBytes);
+      return inner.exportGoogleDocText(fileId, maxBytes, signal);
     },
     downloadTextFile(fileId, maxBytes) {
       budget.reserve(runProvenance);
       return inner.downloadTextFile(fileId, maxBytes);
     },
-    downloadFileBytes(fileId, maxBytes) {
+    downloadFileBytes(fileId, maxBytes, signal) {
       budget.reserve(runProvenance);
-      return inner.downloadFileBytes(fileId, maxBytes);
+      return inner.downloadFileBytes(fileId, maxBytes, signal);
     },
     // Spread rather than declared, so a client without the method stays without
     // it. Declaring it unconditionally would make every client claim it can
@@ -1072,20 +1072,21 @@ class RestGoogleDriveApiClient implements GoogleDriveApiClient {
     };
   }
 
-  async exportGoogleDocText(fileId: string, maxBytes: number): Promise<string> {
+  async exportGoogleDocText(fileId: string, maxBytes: number, signal?: AbortSignal): Promise<string> {
     const params = new URLSearchParams({ mimeType: 'text/plain' });
-    return this.getText(`files/${encodeURIComponent(fileId)}/export?${params.toString()}`, maxBytes);
+    return this.getText(`files/${encodeURIComponent(fileId)}/export?${params.toString()}`, maxBytes, signal);
   }
 
   async downloadTextFile(fileId: string, maxBytes: number): Promise<string> {
     return this.getText(`files/${encodeURIComponent(fileId)}?alt=media&supportsAllDrives=true`, maxBytes);
   }
 
-  async downloadFileBytes(fileId: string, maxBytes?: number): Promise<GoogleDriveFileBytes> {
+  async downloadFileBytes(fileId: string, maxBytes?: number, signal?: AbortSignal): Promise<GoogleDriveFileBytes> {
     const response = await this.send(
       `files/${encodeURIComponent(fileId)}?alt=media&supportsAllDrives=true`,
       'application/octet-stream',
       'Google Drive content request',
+      signal,
     );
     // The declared length first, so an oversized file is refused before its
     // body is pulled across the wire, and the read length second, because a
@@ -1111,8 +1112,8 @@ class RestGoogleDriveApiClient implements GoogleDriveApiClient {
     return text ? JSON.parse(text) as unknown : {};
   }
 
-  private async getText(path: string, maxBytes: number): Promise<string> {
-    const text = await this.get(path, 'text/plain,application/octet-stream', 'Google Drive content request');
+  private async getText(path: string, maxBytes: number, signal?: AbortSignal): Promise<string> {
+    const text = await this.get(path, 'text/plain,application/octet-stream', 'Google Drive content request', signal);
     return text.slice(0, maxBytes);
   }
 
@@ -1122,8 +1123,8 @@ class RestGoogleDriveApiClient implements GoogleDriveApiClient {
    * and the scheduler fail-looped the lane at its error backoff — the exact
    * shape the Readwise T3 guard was written to stop.
    */
-  private async get(path: string, accept: string, context: string): Promise<string> {
-    return (await this.send(path, accept, context)).text();
+  private async get(path: string, accept: string, context: string, signal?: AbortSignal): Promise<string> {
+    return (await this.send(path, accept, context, signal)).text();
   }
 
   /**
@@ -1134,15 +1135,17 @@ class RestGoogleDriveApiClient implements GoogleDriveApiClient {
    * response is returned unread: only the caller knows whether these bytes are
    * text.
    */
-  private async send(path: string, accept: string, context: string): Promise<Response> {
+  private async send(path: string, accept: string, context: string, signal?: AbortSignal): Promise<Response> {
     let attempt = 0;
     while (true) {
+      signal?.throwIfAborted();
       // The retry loop is the request boundary. Reserving here makes one
       // ledger increment correspond to one real provider request. Drive's own
       // 429 is handled below and binds every provenance: the budget exemption
       // waives Olympus's line, never the provider's.
       this.requestBudget?.reserve(this.provenance);
       const response = await this.fetchImpl(`${this.baseUrl}/${path}`, {
+        ...(signal ? { signal } : {}),
         headers: {
           Accept: accept,
           Authorization: `Bearer ${this.token}`,

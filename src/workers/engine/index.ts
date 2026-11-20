@@ -1,3 +1,4 @@
+import { deliverCorpusSearch, DEFER_SEARCH_DELIVERY, SEARCH_GRANT_MATCH } from '../../core/source-index/router.ts';
 import { scopedEmbeddingOptions } from '../connector-store/embedding-plan.ts';
 import { effectiveItemVerdicts, type TierVisibilityScope } from '../connector-store/tier-visibility.ts';
 import { visibilityHere } from '../connector-store/child-visibility.ts';
@@ -3040,8 +3041,8 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             const recent = asOptionalBoolean(record.recent);
             const limit = asOptionalNumber(record.limit, 'limit');
             const filter = asOptionalString(record.filter);
-            if (filter !== undefined && filter !== 'personal' && filter !== 'private' && filter !== 'changed') {
-              throw new EmailSourceWorkerError(400, 'invalid_request', 'filter must be "personal", "private" or "changed".');
+            if (filter !== undefined && filter !== 'personal' && filter !== 'private' && filter !== 'changed' && filter !== 'override_review') {
+              throw new EmailSourceWorkerError(400, 'invalid_request', 'filter must be "personal", "private", "changed" or "override_review".');
             }
             return json({ ok: true, ...ownerTierItems.find({
               ...(query !== undefined ? { query } : {}),
@@ -3065,7 +3066,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             if (tier !== 'personal' && tier !== 'private' && tier !== 'judge') {
               throw new EmailSourceWorkerError(400, 'invalid_request', 'tier must be "personal", "private" or "judge".');
             }
-            return json(ownerTierItems.set({ itemId, choice: tier satisfies OwnerItemChoice, allowLower: true }));
+            const reviewDigest = asOptionalString(record.review_digest);
+            return json(ownerTierItems.set({ itemId, choice: tier satisfies OwnerItemChoice, allowLower: true,
+              ...(reviewDigest !== undefined ? { reviewDigest } : {}) }));
           }
           throw new EmailSourceWorkerError(404, 'not_found', 'No such privacy item route.');
         }
@@ -3651,6 +3654,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 ...(searchEmbeddingProvider ? { embeddingProvider: searchEmbeddingProvider } : {}),
               });
               const result = await retrySqliteBusy(() => adapter({
+                [DEFER_SEARCH_DELIVERY]: true,
                 query: searchRequest.query,
                 maxResults: searchRequest.maxResults,
                 corpus: defineConnectorCorpus({
@@ -3708,12 +3712,15 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             }
             const runs = [primary, ...siblingRuns];
             const tiered = siblingRuns.length > 0;
-            const tagged = runs.flatMap((run) => run.result.hits.map((hit) => ({
-              ...hit,
-              corpusId: run.store.corpusId,
-              trustDomain: run.store.trustDomain,
+            // The body and its independent title match may have different visibility.
+            const taggedByHit = new Map(runs.flatMap(run => run.result.hits.flatMap(hit => {
+              const fallback = hit[SEARCH_GRANT_MATCH]?.metadataFallback;
+              return (fallback ? [hit, fallback] : [hit]).map(candidate => [candidate, {
+                ...candidate, corpusId: run.store.corpusId, trustDomain: run.store.trustDomain,
+              }] as const);
             })));
-            // A cross-source search defers every names and scope check until all ranked reads settle.
+            const tagged = [...taggedByHit.values()];
+            // A cross-source search defers every names, grant and scope check until all ranked reads settle.
             return () => {
               // One tier-ledger snapshot judges every tier's hits together, and
               // a single pinned corpus (`all_tiers: false`) too: an item whose
@@ -3761,18 +3768,23 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 }
               }
               const searchedSecureLocal = runs.some((run) => run.store.trustDomain === 'secure_local');
+              const secretLocations = tiered
+                ? options.secretLocationSearch?.(searchRequest.query, runs.map((run) => run.scope)) ?? []
+                : [];
+              const pendingPrivacy = readPendingPrivacyItems(options);
+              const released = runs.map(run => deliverCorpusSearch([run.result]));
               const withheld = new Set(runs.flatMap(run => [...run.privateMatches]));
-              for (const hit of hiddenNames) visible.delete(hit);
-              if (personalNamesOnly || !searchedSecureLocal) {
-                for (const hit of visible) {
-                  if (!privateNames.has(hit)) continue;
-                  visible.delete(hit);
-                  withheld.add(tierLedgerIdentityKey(hit.sourceItem));
+              const perRun = released.map(result => result.hits.flatMap(hit => {
+                const taggedHit = taggedByHit.get(hit)!;
+                if (!visible.has(taggedHit) || hiddenNames.has(taggedHit)) return [];
+                if ((personalNamesOnly || !searchedSecureLocal) && privateNames.has(taggedHit)) {
+                  withheld.add(tierLedgerIdentityKey(taggedHit.sourceItem));
+                  return [];
                 }
-              }
+                return [taggedHit];
+              }));
               // Round-robin across tiers, so a full page from one tier cannot
               // starve another, then the request's own bound.
-              const perRun = runs.map((run) => tagged.filter((hit) => hit.corpusId === run.store.corpusId && visible.has(hit)));
               const merged: typeof tagged = [];
               for (let rank = 0; merged.length < searchRequest.maxResults && perRun.some((hits) => hits.length > rank); rank += 1) {
                 for (const hits of perRun) {
@@ -3781,9 +3793,6 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 }
               }
               const hits = merged;
-              const secretLocations = tiered
-                ? options.secretLocationSearch?.(searchRequest.query, runs.map((run) => run.scope)) ?? []
-                : [];
               const withheldChildIdentifiers = new Set<typeof hits[number]>();
               for (const { store } of runs) {
                 const governed = hits.filter(hit => hit.corpusId === store.corpusId);
@@ -3814,7 +3823,6 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               const locatorsExposed = releasedHits.some((hit) => (
                 Object.prototype.hasOwnProperty.call(hit, 'locator')
               ));
-              const pendingPrivacy = readPendingPrivacyItems(options);
               const safeResult = {
                 kind: 'source_index_search',
                 corpus_id: connectorStore.corpusId,
@@ -3843,7 +3851,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                   ...(tiered ? { searched_corpora: runs.map((run) => run.store.corpusId) } : {}),
                   ...(searchRequest.explicitEmptyChatScope
                     ? {}
-                    : { lane_audits: runs.flatMap((run) => run.result.laneAudits ?? []) }),
+                    : { lane_audits: released.flatMap(result => result.laneAudits ?? []) }),
                   raw_source_exposed: false,
                   source_text_returned: false,
                   ...(searchRequest.locatorsRequested ? { locators_requested: true } : {}),

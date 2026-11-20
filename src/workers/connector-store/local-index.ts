@@ -63,7 +63,7 @@ import { compareProviderAccounts } from '../../core/provider-account-identity.ts
 import { createHash, randomUUID } from 'node:crypto';
 import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, statSync, statfsSync } from 'node:fs';
 import { open as openFile } from 'node:fs/promises';
-import { basename, dirname } from 'node:path';
+import { basename, dirname, resolve } from 'node:path';
 import { Database, type SQLQueryBindings } from 'bun:sqlite';
 import type {
   RawItem,
@@ -99,6 +99,7 @@ import {
 } from '../../core/still-image-formats.ts';
 import { resolveStillImageFormats, type StillImagesRead } from '../../core/source-ingestion-policy.ts';
 import {
+  additiveMigration,
   assertSqliteSchemaCanOpen,
   currentStoreMigrations,
   readSqliteSchemaVersion,
@@ -218,13 +219,17 @@ import {
   mediaJudgeId,
   type MediaJudgment,
 } from '../source-index/media-judge.ts';
-import type {
-  SourceIndexCorpusSearchAdapter,
-  SourceIndexCorpusSearchRequest,
-  SourceIndexCorpusMatchCount,
-  SourceIndexCorpusSearchResponse,
-  SourceIndexSearchHit,
-  SourceIndexStoreRelevance,
+import {
+  deliverCorpusSearch,
+  DEFER_SEARCH_DELIVERY,
+  SEARCH_GRANT_DELIVERY,
+  SEARCH_GRANT_MATCH,
+  type SourceIndexCorpusSearchAdapter,
+  type SourceIndexCorpusSearchRequest,
+  type SourceIndexCorpusMatchCount,
+  type SourceIndexCorpusSearchResponse,
+  type SourceIndexSearchHit,
+  type SourceIndexStoreRelevance,
 } from '../../core/source-index/router.ts';
 import {
   buildSourceIndexStorageProfile,
@@ -241,6 +246,7 @@ import {
   type SourceTrustDomain,
   type SourceTrustTier,
 } from '../../core/source-index/types.ts';
+import { REVOCATION_WRITE_LIMIT } from '../../core/waiting-private-questions.ts';
 import { closeSqliteStore, loopWalAutocheckpointPragma } from '../../core/sqlite-store.ts';
 import type { ConnectorStoreResultProjector } from './filter-capabilities.ts';
 
@@ -388,7 +394,8 @@ export const CONTAINER_MIME_TYPES: readonly string[] = Object.freeze([
 const CONTAINER_MIME_TYPES_SQL = CONTAINER_MIME_TYPES.map((type) => `'${type}'`).join(', ');
 const VECTOR_BACKEND = 'exact_scan';
 const SQLITE_STORE_ID = 'connector-store';
-const CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 16;
+export { SQLITE_STORE_ID as CONNECTOR_STORE_SQLITE_STORE_ID };
+const CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 17;
 /** The `sync_runs` connector id of a strip of picture content outside Private stores. */
 export const IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = 'olympus_image_content_private_only';
 /** A picture the image encoder fails on is retried after 1 h, 2 h, ... */
@@ -569,6 +576,10 @@ export function connectorStoreMigrations() {
       name: 'connector_store_vector_digest',
       up: createVectorDigestSchema,
     },
+    additiveMigration(17, 'connector_store_on_demand_grant_epoch', [
+      'CREATE TABLE IF NOT EXISTS on_demand_grant_epoch (id INTEGER PRIMARY KEY CHECK (id = 1), epoch INTEGER NOT NULL)',
+      'CREATE TABLE IF NOT EXISTS on_demand_grant_acquisitions (local_item_id TEXT PRIMARY KEY, epoch INTEGER NOT NULL)',
+    ]),
   ];
 }
 
@@ -844,6 +855,8 @@ export interface LocalConnectorStoreOptions {
   trustDomain: SourceTrustDomain;
   /** Opens an existing store without migrations, WAL changes, or writes. */
   readOnly?: boolean;
+  /** An offline put-back writes copies at the schema the previous engine knows. */
+  restoreSchemaVersion?: number;
   /**
    * Which still-image formats this machine reads for media search: a yes or
    * no for every format, or a list. Defaults to the machine's own per-format
@@ -1572,8 +1585,7 @@ export type ConnectorStoreOwnershipKind = 'observed' | 'preservation';
  * What one leg of a tiered store set does with one listed item (design
  * docs/design/per-item-four-tier-classification.md, sections 2 and 3.2).
  *
- * - `legacy`: the lane's own placement, byte-for-byte the P1a path. Every item
- *   stored before P1b, and every item whose content was not read, takes it.
+ * - `legacy`: the lane's existing placement for an unrouted item observed without its body.
  * - `store`: this store holds the item for `layer`, at `sensitivity`. A
  *   `metadata` layer is stored without content.
  * - `elsewhere`: another store holds it (or nothing does: Secrets). This store
@@ -1587,7 +1599,7 @@ export type ConnectorStoreOwnershipKind = 'observed' | 'preservation';
  */
 export type ConnectorStoreTierRoute =
   | { kind: 'legacy' }
-  | { kind: 'store'; sensitivity: SourceSensitivity; layer: 'both' | 'metadata' | 'content' }
+  | { kind: 'store'; sensitivity: SourceSensitivity; layer: 'both' | 'metadata' | 'content'; writeListedBody?: true }
   | { kind: 'elsewhere'; reason: 'routed_to_other_tier' | 'secrets' | 'move_queued' | 'content_unread' }
   | { kind: 'delete'; reason: 'provider_deleted' | 'secrets'; keepLocation?: true };
 
@@ -2458,6 +2470,8 @@ export interface ConnectorStoreSearchRow {
    * text, and no chunk was read to say where.
    */
   contentMatched?: true;
+  /** The independently matching metadata row of this candidate version. */
+  metadataFallback?: ConnectorStoreSearchRow;
 }
 
 export interface ConnectorStoreScoredSearchRow extends ConnectorStoreSearchRow {
@@ -2478,6 +2492,9 @@ export type ConnectorStoreSearchEligibility = (
 export interface ConnectorStoreKeywordFtsOptions {
   prefix?: boolean;
   contentOnly?: boolean;
+  /** Match only the metadata FTS rows of these candidate versions. */
+  metadataCandidates?: SourceItemIdentity[];
+  prepareGrantFallbacks?: boolean;
   locate?: boolean;
   relaxed?: boolean;
   privatePrecision?: boolean;
@@ -2485,7 +2502,7 @@ export interface ConnectorStoreKeywordFtsOptions {
   /** One lane's item-level group answers; stays on this thread, never sent to the read pool. */
   conceptHitMemo?: ConnectorStoreConceptHitMemo;
   // A tier-checked prefix, before remaining reads or chunk location finish.
-  onPartialRows?: (rows: readonly ConnectorStoreSearchRow[]) => void;
+  onPartialRows?: ((rows: readonly ConnectorStoreSearchRow[], contentOnly?: boolean) => void) | undefined;
 }
 
 type ConnectorStoreConceptHitMemo = Map<string, Map<number, {
@@ -2528,6 +2545,8 @@ interface ConnectorStoreCurrentEmbeddingRowsOptions {
   accountScope?: string;
   filters?: ConnectorStoreSearchFilters;
   chunkPks?: readonly number[];
+  /** Bind runtime winners to the item version observed while scoring. */
+  includeSourceVersion?: boolean;
   /** Set only after checking sqlite_master on the scan's read snapshot. */
   onDemandReadsTablePresent?: boolean;
   /**
@@ -2567,7 +2586,8 @@ function connectorStoreCurrentEmbeddingRowsQuery(
   const accountScope = normalizeOptionalAccountScope(options.accountScope);
   const selectedFilters = connectorStoreFilterSql(options.filters);
   const metadataOnly = connectorStoreMetadataOnlySql(options.filters, options.onDemandReadsTablePresent);
-  const chunkContentHash = page ? ', c.content_hash AS chunk_content_hash' : '';
+  const winnerIdentity = page ? ', c.content_hash AS chunk_content_hash' : '';
+  const sourceVersion = options.includeSourceVersion ? ', i.source_version' : '';
   if (options.chunkPks) {
     // A re-score names its chunks: the plan must start from that list and
     // seek each chunk's vector by key. Left to the planner, an account scope
@@ -2577,7 +2597,7 @@ function connectorStoreCurrentEmbeddingRowsQuery(
     // 15 Nov). CROSS JOIN fixes SQLite's join order to the order written.
     return {
       sql: `
-        SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding${chunkContentHash}
+        SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding${winnerIdentity}${sourceVersion}
         FROM json_each(?) pick
         CROSS JOIN chunk_embeddings emb ON emb.chunk_pk = pick.value AND emb.model_id = ?
         CROSS JOIN chunks c ON c.chunk_pk = emb.chunk_pk
@@ -2603,7 +2623,7 @@ function connectorStoreCurrentEmbeddingRowsQuery(
   }
   return {
     sql: `
-      SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding${chunkContentHash}
+      SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding${winnerIdentity}${sourceVersion}
       ${CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER}
         -- Unary + avoids the model index + repeated whole-model sort (#1242).
         AND ${page ? '+emb.model_id' : 'emb.model_id'} = ?
@@ -2657,7 +2677,7 @@ export function* connectorStoreCurrentEmbeddingRowsIterator(
   }
 }
 
-type VectorWinners = Map<number, { bestCosine: number; bestChunkPk: number; bestChunkContentHash: string; localItemId: string }>;
+type VectorWinners = Map<number, { bestCosine: number; bestChunkPk: number; bestChunkContentHash: string; localItemId: string; sourceVersion: string | null }>;
 type VectorScan =
   | {
     bestByItem: VectorWinners;
@@ -2671,7 +2691,7 @@ type VectorScan =
   }
   | { skippedReason: string };
 
-type VectorScoreRow = { item_pk: number; chunk_pk: number; local_item_id: string; embedding: unknown; chunk_content_hash: string };
+type VectorScoreRow = { item_pk: number; chunk_pk: number; local_item_id: string; embedding: unknown; chunk_content_hash: string; source_version?: string | null };
 
 /** Shared exact scoring preserves the winning chunk and deterministic ties. */
 function foldVectorScore(bestByItem: VectorWinners, row: VectorScoreRow, queryVector: readonly number[]): { mismatch: number; qualified: number; score?: number } {
@@ -2683,7 +2703,8 @@ function foldVectorScore(bestByItem: VectorWinners, row: VectorScoreRow, queryVe
   if (!prior || score > prior.bestCosine || (score === prior.bestCosine && row.chunk_pk < prior.bestChunkPk)) {
     qualified = Number(score >= MIN_VECTOR_SCORE && (!prior || prior.bestCosine < MIN_VECTOR_SCORE));
     bestByItem.set(row.item_pk, {
-      bestCosine: score, bestChunkPk: row.chunk_pk, bestChunkContentHash: row.chunk_content_hash, localItemId: row.local_item_id,
+      bestCosine: score, bestChunkPk: row.chunk_pk, bestChunkContentHash: row.chunk_content_hash,
+      localItemId: row.local_item_id, sourceVersion: row.source_version ?? null,
     });
   }
   return { mismatch: 0, qualified, score };
@@ -2717,6 +2738,7 @@ async function scanVectorPages(
   const after = embeddingAuthorityFromRow(await read(authority) as EmbeddingAuthorityRow | null, provider);
   if (after.skippedReason) return { skippedReason: after.skippedReason };
   if (after.token !== beforeToken) return { skippedReason: 'embedding_authority_changed_during_query' };
+  pageOptions = { ...pageOptions, includeSourceVersion: true };
   if (pageOptions.filters?.metadataOnlyLocatorPathScopes?.length || pageOptions.filters?.metadataOnlySourceScopeFolderKeys?.length) {
     pageOptions = { ...pageOptions, onDemandReadsTablePresent: Boolean(await read({ mode: 'get',
       sql: "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'", params: [] })) };
@@ -3336,6 +3358,8 @@ export interface ConnectorStoreItemRepresentationCoverage {
 export interface ConnectorStoreRepresentationRestoreItem {
   item: RawItem;
   expectation: ConnectorStoreItemRepresentationExpectation;
+  /** Source row version when preparing the restore, including a missing version. */
+  expectedStoredSourceVersion?: string | null;
   /**
    * Media the item's content is also searched by, attached to its first
    * chunk (docs/design/photo-embeddings.md). Its digest must match the
@@ -3398,7 +3422,7 @@ export interface ConnectorStoreRepresentationRestoreOptions {
   syncConnectorId: string;
   ownerConnectorId: string;
   ownershipKind: ConnectorStoreOwnershipKind;
-  classify: (item: RawItem) => SourceSensitivity;
+  classify?: (item: RawItem) => SourceSensitivity;
   skipOwner?: {
     connectorId: string;
     ownershipKind: ConnectorStoreOwnershipKind;
@@ -3410,6 +3434,8 @@ export interface ConnectorStoreRepresentationRestoreOptions {
    * write exactly as they were.
    */
   writeClaim?: ConnectorStoreItemWriteClaim;
+  /** Select a landing after the existing row, policy and claim are checked. */
+  route?: (record: ConnectorStoreRepresentationRestoreItem) => ConnectorStoreRepresentationLanding | undefined;
   maxChunkChars?: number;
   /**
    * Keep existing newline-delimited search facets while merging metadata
@@ -3425,6 +3451,13 @@ export interface ConnectorStoreRepresentationRestoreOptions {
    */
   preserveStoredSearchTextOwnedFacets?: boolean;
 }
+
+export type ConnectorStoreRepresentationLanding = {
+  store: LocalConnectorStore;
+  sensitivity: SourceSensitivity;
+  prepare: () => boolean;
+  landed: () => void;
+} | { refused: () => void };
 
 export interface ConnectorStoreRepresentationRestoreSummary {
   syncRunId: string;
@@ -3977,6 +4010,16 @@ export interface ImageContentOutsidePrivateRow {
   provider_conversation_id: string | null;
 }
 
+export interface OnDemandGrantWork {
+  check(): boolean;
+  release(): void;
+}
+
+// Separate handles to one file share synchronous revocation notifications.
+let grantNotifications: Map<string, Set<() => void>> | undefined;
+// Active work also observes commits made by another engine process.
+const ON_DEMAND_GRANT_EPOCH_CHECK_MS = 250;
+
 export class LocalConnectorStore {
   readonly dbPath: string;
   /** The file this store opened, so a later delete or replace of it is seen. */
@@ -4020,6 +4063,11 @@ export class LocalConnectorStore {
   private chunkMediaColumnsPresent = false;
   /** Whether the v13 `image_media_reads` table is here (a read-only open of an older store has none). */
   private imageMediaReadsPresent = false;
+  private onDemandReadsTablePresent: boolean;
+  private onDemandGrantEpochPresent = false;
+  private onDemandGrantChecks?: Set<(epoch: number | undefined) => void>;
+  private onDemandGrantTimer: ReturnType<typeof setInterval> | undefined;
+  private onDemandGrantCheckedEpoch: number | undefined;
   /** Whether the `item_text_versions` table is here (a read-only open of an older store has none). */
   private itemTextVersionsPresent = false;
   /** Whether the v14 `media_judgments` table is here (a read-only open of an older store has none). */
@@ -4133,7 +4181,8 @@ export class LocalConnectorStore {
       // foreign key) run only when this open migrates: on Sparta they read
       // about 22 GB per plain restart across both engine processes, most of
       // each one's 6 minutes to ready (ops#151, 2026-11-12).
-      const migrating = options.readOnly !== true && versionAtOpen < CONNECTOR_STORE_SQLITE_SCHEMA_VERSION;
+      const schemaTarget = options.restoreSchemaVersion ?? CONNECTOR_STORE_SQLITE_SCHEMA_VERSION;
+      const migrating = options.readOnly !== true && versionAtOpen < schemaTarget;
       validateCurrentConnectorStoreSchemaBeforeMigration(this.db);
       // The checks that read every row are part of the update; the heartbeat
       // says so while they hold the loop.
@@ -4149,6 +4198,12 @@ export class LocalConnectorStore {
         if (version < READ_ONLY_MIN_SCHEMA_VERSION) {
           throw new Error('Connector store read-only mode requires the v7 filter schema or newer.');
         }
+      } else if (options.restoreSchemaVersion !== undefined) {
+        if (schemaTarget < 15 || schemaTarget > CONNECTOR_STORE_SQLITE_SCHEMA_VERSION
+          || (!creatingFile && versionAtOpen !== schemaTarget)) {
+          throw new Error('The connector store cannot be written at its restored schema.');
+        }
+        if (creatingFile) applyConnectorStoreOpenSchema(this.db, schemaTarget);
       } else {
         // Fast path: a store this build's schema code already brought fully
         // up to date runs no DDL and no backfill at open. Its user_version
@@ -4187,6 +4242,12 @@ export class LocalConnectorStore {
       this.imageMediaReadsPresent = this.db.query(
         "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'image_media_reads'",
       ).get() !== null;
+      this.onDemandReadsTablePresent = !this.readOnly || this.db.query(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'",
+      ).get() !== null;
+      this.onDemandGrantEpochPresent = this.onDemandReadsTablePresent && this.db.query(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_grant_epoch'",
+      ).get() !== null;
       this.itemTextVersionsPresent = this.db.query(
         "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'item_text_versions'",
       ).get() !== null;
@@ -4198,11 +4259,11 @@ export class LocalConnectorStore {
       this.mediaJudgmentsPresent = CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS.every((column) => judgmentColumns.includes(column));
       // Only a store that holds vectors without a complete digest starts a
       // backfill timer at open; an empty or finished store keeps none pending.
-      if (!this.readOnly) {
+      if (!this.readOnly && options.restoreSchemaVersion === undefined) {
         const model = (this.db.query('SELECT model_id FROM chunk_embeddings ORDER BY rowid DESC LIMIT 1').get() as { model_id: string } | null)?.model_id;
         if (model && !vectorDigestState(this.db, model).completed) this.scheduleVectorDigestBackfill(model, VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS);
       }
-      if (!this.readOnly && !creatingFile && (this.db.query(
+      if (!this.readOnly && options.restoreSchemaVersion === undefined && !creatingFile && (this.db.query(
         "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name IN (?, ?)",
       ).get(CONNECTOR_STORE_RECENCY_INDEX, CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX) as { n: number }).n < 2) {
         if (admitRecencyIndexBuild) this.scheduleRecencyIndexBuild();
@@ -4370,6 +4431,7 @@ export class LocalConnectorStore {
 
   close(): void {
     if (this.closedForPoolReads) return;
+    this.stopOnDemandGrantChecks();
     changeMemoryCounter('connector_stores', -1);
     untrackSqliteStoreMemory(this.db);
     this.tierLedgerHiddenMemo = undefined;
@@ -4395,6 +4457,7 @@ export class LocalConnectorStore {
       // The read pool's connections to this file go with the store, and so
       // do its waiting queries.
       this.closedForPoolReads = true;
+      this.checkOnDemandGrantWork();
       if (offThreadReadsSupported(this.dbPath)) releaseOffThreadReads(this.dbPath);
       closeSqliteStore(this.db, this.readOnly ? { checkpoint: false, readOnly: true }
         : buildingRecencyIndex ? { checkpoint: false } : undefined);
@@ -4576,9 +4639,9 @@ export class LocalConnectorStore {
       if (inputs?.unavailableReason) return false;
       const ledger = this.tierLedger();
       if (!ledger) return false;
-      const read = ledger.classificationRead(item.identity);
       const existing = ledger.getCurrent(item.identity);
       if (!existing) return false;
+      const read = ledger.classificationRead(item.identity, text);
       const override = read.override;
       // The item's names travel with the text, as they do in the tiered
       // sink: the detectors' origin hint and the sniffer read them too.
@@ -6861,7 +6924,7 @@ export class LocalConnectorStore {
       item.identity.providerItemId,
     ) as { item_pk: number } | null;
     if (!row) return;
-    this.rememberItemOwner(row.item_pk, connectorId, ownershipKind, syncRunId, nowIso(), 'provider_listing');
+    this.rememberItemOwner(row.item_pk, connectorId, ownershipKind, syncRunId, this.now().toISOString(), 'provider_listing');
   }
 
   /**
@@ -8753,6 +8816,29 @@ export class LocalConnectorStore {
     };
   }
 
+  /** Same-version replay or an identical body already kept by another input.
+   * An unversioned listing by its sole owner is a fresh body observation. */
+  repeatsListedCopy(item: RawItem, text: string, connectorId: string): boolean {
+    if (!this.childItemColumnsPresent) return false;
+    const { identity, metadata } = item;
+    const title = itemTitle(item);
+    const sender = senderMetadataFromRawItem(item);
+    const locator = metadataString(metadata, 'locatorUri') ?? metadataString(metadata, 'pathDisplay') ?? metadataString(metadata, 'url');
+    const chunks = this.db.query(`SELECT c.bounded_text FROM items i JOIN chunks c USING (item_pk)
+      WHERE i.provider = ? AND i.account_scope = ? AND i.normalized_conversation = ? AND i.provider_item_id = ?
+        AND i.tombstoned = 0 AND i.source_version IS ? AND i.title IS ? AND i.search_text IS ?
+        AND i.sender_label IS ? AND i.sender_id IS ? AND i.locator_uri IS ? AND i.mime_type IS ?
+        AND i.parent_local_item_id IS ?
+        AND (i.source_version IS NOT NULL OR EXISTS (
+          SELECT 1 FROM item_owners o WHERE o.item_pk = i.item_pk AND o.connector_id <> ?
+        )) ORDER BY c.chunk_index`)
+      .all(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId),
+        identity.providerItemId, identity.sourceVersion ?? null, title ?? null, itemSearchText(item, title) ?? null,
+        sender.senderLabel ?? null, sender.senderId ?? null, locator ?? null, item.mimeType,
+        identity.parent?.localItemId ?? null, connectorId) as Array<{ bounded_text: string }>;
+    return chunks.length > 0 && chunks.map(chunk => chunk.bounded_text).join('') === text.trim();
+  }
+
   itemPresence(identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>): ConnectorStoreItemPresence {
     const row = this.db.query(`
       SELECT source_version, content_hash, tombstoned
@@ -9360,6 +9446,108 @@ export class LocalConnectorStore {
   grantOnDemandRead(localItemId: string, sourceVersion = ''): void {
     this.db.query(`INSERT INTO on_demand_item_reads(local_item_id, source_version) VALUES (?, ?)
       ON CONFLICT(local_item_id) DO UPDATE SET source_version = excluded.source_version`).run(localItemId, sourceVersion);
+    this.notifyOnDemandGrantChange();
+  }
+
+  revokeOnDemandRead(localItemId: string): void {
+    const previous = (this.db.query('PRAGMA busy_timeout').get() as { timeout: number }).timeout;
+    this.db.exec(`PRAGMA busy_timeout = ${Math.min(previous, REVOCATION_WRITE_LIMIT.milliseconds)}`);
+    try {
+      const removed = this.db.query('DELETE FROM on_demand_item_reads WHERE local_item_id = ?').run(localItemId);
+      if (removed.changes > 0) this.notifyOnDemandGrantChange();
+    } finally {
+      this.db.exec(`PRAGMA busy_timeout = ${previous}`);
+    }
+  }
+
+  onDemandGrantEpoch(): number | undefined {
+    if (this.closedForPoolReads || !this.onDemandReadsTablePresent) return undefined;
+    if (!this.onDemandGrantEpochPresent) {
+      // A split reader can stay open while the writer installs the epoch tables.
+      this.onDemandGrantEpochPresent = !!this.db.query(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_grant_epoch'",
+      ).get();
+      if (!this.onDemandGrantEpochPresent) return undefined;
+    }
+    return (this.db.query('SELECT epoch FROM on_demand_grant_epoch WHERE id = 1').get() as { epoch: number } | null)?.epoch;
+  }
+
+  /** A read's grant and the active item must agree on the same version. */
+  currentOnDemandRead(localItemId: string, sourceVersion?: string): boolean {
+    const current = this.currentOnDemandGrant(localItemId);
+    return current !== undefined && (sourceVersion === undefined || current.source_version === sourceVersion);
+  }
+
+  private currentOnDemandGrant(localItemId: string): { source_version: string; acquired_epoch: number } | undefined {
+    if (!this.onDemandReadsTablePresent || this.closedForPoolReads) return undefined;
+    // A legacy reader can prove continuity only across an unchanged database.
+    const acquisition = this.onDemandGrantEpochPresent
+      ? 'COALESCE((SELECT epoch FROM on_demand_grant_acquisitions WHERE local_item_id = r.local_item_id), 0)'
+      : '(SELECT -(data_version + total_changes()) FROM pragma_data_version)';
+    return (this.db.query(`SELECT r.source_version, ${acquisition} AS acquired_epoch
+      FROM on_demand_item_reads r JOIN items i ON i.local_item_id = r.local_item_id
+      AND COALESCE(i.source_version, '') = r.source_version
+      WHERE r.local_item_id = ? AND i.tombstoned = 0 LIMIT 1`)
+      .get(localItemId) as { source_version: string; acquired_epoch: number } | null) ?? undefined;
+  }
+
+  observeOnDemandRead(localItemId: string, sourceVersion: string | undefined, controller: AbortController): OnDemandGrantWork | undefined {
+    const epoch = this.onDemandGrantEpoch();
+    const grant = this.currentOnDemandGrant(localItemId);
+    if (!grant || (sourceVersion !== undefined && sourceVersion !== grant.source_version)) return undefined;
+    let checkedEpoch = epoch;
+    let valid = true;
+    const checkAtEpoch = (currentEpoch: number | undefined): boolean => {
+      if (!valid) return false;
+      if (currentEpoch === undefined || currentEpoch !== checkedEpoch) {
+        const current = this.currentOnDemandGrant(localItemId);
+        valid = current?.source_version === grant.source_version && current.acquired_epoch === grant.acquired_epoch;
+        if (!valid) controller.abort();
+        checkedEpoch = currentEpoch;
+      }
+      return valid;
+    };
+    const check = () => checkAtEpoch(this.onDemandGrantEpoch());
+    const checks = this.onDemandGrantChecks ??= new Set();
+    checks.add(checkAtEpoch);
+    if (checks.size === 1 && this.dbPath !== ':memory:') {
+      this.onDemandGrantTimer = setInterval(this.checkOnDemandGrantWork, ON_DEMAND_GRANT_EPOCH_CHECK_MS);
+      this.onDemandGrantTimer.unref?.();
+      const paths = grantNotifications ??= new Map();
+      const path = resolve(this.dbPath);
+      const listeners = paths.get(path) ?? new Set();
+      listeners.add(this.checkOnDemandGrantWork);
+      paths.set(path, listeners);
+    }
+    check();
+    return { check, release: () => {
+      checks.delete(checkAtEpoch);
+      if (checks.size === 0) this.stopOnDemandGrantChecks();
+    } };
+  }
+
+  private checkOnDemandGrantWork = (): void => {
+    const checks = this.onDemandGrantChecks;
+    if (!checks?.size) return;
+    const epoch = this.onDemandGrantEpoch();
+    if (epoch !== undefined && epoch === this.onDemandGrantCheckedEpoch) return;
+    this.onDemandGrantCheckedEpoch = epoch;
+    for (const notify of checks) notify(epoch);
+  };
+
+  private notifyOnDemandGrantChange(): void {
+    if (this.dbPath === ':memory:') this.checkOnDemandGrantWork();
+    else for (const notify of grantNotifications?.get(resolve(this.dbPath)) ?? []) notify();
+  }
+
+  private stopOnDemandGrantChecks(): void {
+    clearInterval(this.onDemandGrantTimer);
+    this.onDemandGrantTimer = undefined;
+    if (this.dbPath === ':memory:') return;
+    const path = resolve(this.dbPath);
+    const listeners = grantNotifications?.get(path);
+    listeners?.delete(this.checkOnDemandGrantWork);
+    if (listeners?.size === 0) grantNotifications?.delete(path);
   }
 
   onDemandContentHeld(identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>): boolean {
@@ -10048,6 +10236,7 @@ export class LocalConnectorStore {
     // Opening a ledger can settle its schema/holds: do that before acquiring
     // the source writer, then only read the captured ledger under the lock.
     const tierLedgerForWrite = this.visibilityLedger();
+    const landed: Array<() => void> = [];
     const summary = this.db.transaction((): ConnectorStoreRepresentationRestoreSummary => {
       const syncRunId = `connector-representation-restore-${randomUUID()}`;
       const startedAt = this.now().toISOString();
@@ -10080,7 +10269,7 @@ export class LocalConnectorStore {
 
       for (const record of options.items) {
         const item = record.item;
-        if (!this.tierWriteAllowed(item.identity, 'content', tierLedgerForWrite)) {
+        if (!this.tierWriteAllowed(item.identity, options.route ? 'metadata' : 'content', tierLedgerForWrite)) {
           itemsMetadataOnly += 1;
           skippedProviderItemIds.push(item.identity.providerItemId);
           continue;
@@ -10111,10 +10300,12 @@ export class LocalConnectorStore {
             COUNT(*) AS matching_provider_id_rows,
             SUM(CASE WHEN normalized_conversation = ? THEN 1 ELSE 0 END) AS exact_identity_rows,
             MIN(CASE WHEN normalized_conversation = ? THEN item_pk END) AS item_pk,
-            MIN(CASE WHEN normalized_conversation = ? THEN tombstoned END) AS tombstoned
+            MIN(CASE WHEN normalized_conversation = ? THEN tombstoned END) AS tombstoned,
+            MIN(CASE WHEN normalized_conversation = ? THEN source_version END) AS source_version
           FROM items
           WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
         `).get(
+          normalizeConversationId(item.identity.providerConversationId),
           normalizeConversationId(item.identity.providerConversationId),
           normalizeConversationId(item.identity.providerConversationId),
           normalizeConversationId(item.identity.providerConversationId),
@@ -10126,6 +10317,7 @@ export class LocalConnectorStore {
           exact_identity_rows: number;
           item_pk: number | null;
           tombstoned: number | null;
+          source_version: string | null;
         };
         if (identityAmbiguous(item.identity, existing)) {
           throw new Error(
@@ -10177,6 +10369,55 @@ export class LocalConnectorStore {
           continue;
         }
 
+        const expectedVersion = record.expectedStoredSourceVersion !== undefined
+          ? record.expectedStoredSourceVersion : item.identity.sourceVersion;
+        const route = options.route && (expectedVersion === undefined || existing.source_version === expectedVersion)
+          ? options.route(record) : undefined;
+        if (options.route && (!route || 'refused' in route)) {
+          if (route && 'refused' in route) landed.push(route.refused);
+          itemsMetadataOnly += 1;
+          skippedProviderItemIds.push(item.identity.providerItemId);
+          continue;
+        }
+        const landing = route && 'store' in route ? route : undefined;
+        if (landing && landing.store !== this) {
+          const placed = landing.store.withItemCopyWriteFence(item.identity, () => {
+            if (!landing.prepare()) return undefined;
+            return landing.store.restoreItemRepresentations({
+              items: [record],
+              syncConnectorId,
+              ownerConnectorId,
+              ownershipKind: options.ownershipKind,
+              classify: () => landing.sensitivity,
+              ...(writeClaim ? { writeClaim } : {}),
+              ...(options.maxChunkChars !== undefined ? { maxChunkChars: options.maxChunkChars } : {}),
+              ...(options.preserveStoredSearchText ? { preserveStoredSearchText: true } : {}),
+              ...(options.preserveStoredSearchTextOwnedFacets ? { preserveStoredSearchTextOwnedFacets: true } : {}),
+            });
+          });
+          if (!placed) {
+            itemsMetadataOnly += 1;
+            skippedProviderItemIds.push(item.identity.providerItemId);
+            continue;
+          }
+          const { counts } = placed;
+          itemsRestored += counts.itemsRestored;
+          itemsUnchanged += counts.itemsUnchanged;
+          itemsExcluded += counts.itemsExcluded;
+          itemsMetadataOnly += counts.itemsMetadataOnly;
+          itemsSkippedTombstoned += counts.itemsSkippedTombstoned;
+          itemsSkippedStaleClaim += counts.itemsSkippedStaleClaim;
+          chunksAwaitingEmbedding += counts.chunksAwaitingEmbedding;
+          if (counts.itemsRestored > 0) restoredProviderItemIds.push(item.identity.providerItemId);
+          if (counts.itemsRestored + counts.itemsUnchanged > 0) landed.push(landing.landed);
+          else skippedProviderItemIds.push(item.identity.providerItemId);
+          continue;
+        }
+        if (landing && !landing.prepare()) {
+          itemsMetadataOnly += 1;
+          skippedProviderItemIds.push(item.identity.providerItemId);
+          continue;
+        }
         if (this.itemRepresentationCoverage(record.expectation).complete) {
           // Read again with nothing new (a tiny picture's same text): still a
           // reading, so the image is not listed for one more.
@@ -10187,11 +10428,12 @@ export class LocalConnectorStore {
           // Complete means the stored chunks already are this version's.
           this.clearItemTextVersion(existing.item_pk);
           itemsUnchanged += 1;
+          if (landing) landed.push(landing.landed);
           continue;
         }
 
-        const sensitivity = options.classify(item);
-        if (sensitivity.trustDomain !== this.trustDomain || sensitivity.trustTier === 'S5') {
+        const sensitivity = landing?.sensitivity ?? options.classify?.(item);
+        if (!sensitivity || sensitivity.trustDomain !== this.trustDomain || sensitivity.trustTier === 'S5') {
           throw new Error('Representation restore item classification is not eligible for this store.');
         }
         const upsert = this.upsertItemWithOwner(
@@ -10226,6 +10468,7 @@ export class LocalConnectorStore {
         `).get(upsert.itemPk) as { count: number }).count;
         itemsRestored += 1;
         restoredProviderItemIds.push(item.identity.providerItemId);
+        if (landing) landed.push(landing.landed);
       }
 
       const completedAt = this.now().toISOString();
@@ -10252,6 +10495,7 @@ export class LocalConnectorStore {
         skippedProviderItemIds: skippedProviderItemIds.sort(),
       };
     }).immediate();
+    for (const commit of landed) commit();
     // References are taken once the content is committed: a rolled-back
     // restore leaves no marker behind. The extraction's own staging hold
     // keeps the file until then.
@@ -10894,6 +11138,17 @@ export class LocalConnectorStore {
       this.now().toISOString(),
     );
     return true;
+  }
+
+  /** Check a deciding sink against the grant that wrote an item's current representation. */
+  hasNewerItemWriteClaim(identity: SourceItemIdentity, claim: ConnectorStoreItemWriteClaim): boolean {
+    return this.db.query(`
+      SELECT 1 FROM item_write_claims w
+      JOIN items i ON i.item_pk = w.item_pk
+      WHERE i.provider = ? AND i.account_scope = ? AND i.normalized_conversation = ?
+        AND i.provider_item_id = ? AND w.claim_scope = ? AND w.claim_authority = ? AND w.claim_ordinal > ?
+    `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId),
+      identity.providerItemId, claim.scope, claim.authority, claim.ordinal) !== null;
   }
 
   /**
@@ -11958,7 +12213,7 @@ export class LocalConnectorStore {
           if (
             !metadataOnly
             && !deferMetadataOnlyContent && item.deferredBytes === undefined
-            && classification
+            && (classification || tierRouting)
             && fetchContent
             && item.content.kind === 'metadata_only'
           ) {
@@ -11980,8 +12235,7 @@ export class LocalConnectorStore {
           // storing or embedding content. The four-tier decision is recorded
           // beside it and does not change it (phase P1a).
           const legacySensitivity = classifyConnectorStoreItem(itemForStorage, classification, placement, this.trustDomain);
-          // A tiered store set routes NEW items by their recorded tiers; every
-          // other item gets `legacy` and takes exactly the P1a path below.
+          // Route the body that will be indexed, including a body fetched from a listing stub.
           const route: ConnectorStoreTierRoute = tierRouting
             ? await tierRouting.route({
               store: this,
@@ -12171,10 +12425,11 @@ export class LocalConnectorStore {
 
           let ftsContentChanged = false;
           if (
-            fetchContent
+            (fetchContent || (route.kind === 'store' && route.writeListedBody && itemForStorage.content.kind !== 'metadata_only'))
             && !contentFetchFailed
             && !metadataOnly
             && routedLayer !== 'metadata'
+            && !(tierRouting && itemForStorage.content.kind === 'metadata_only')
             && (!(deferMetadataOnlyContent || itemForStorage.deferredBytes !== undefined) || itemForStorage.content.kind !== 'metadata_only')
           ) {
             const indexed = await this.indexItemContent(
@@ -15362,10 +15617,10 @@ export class LocalConnectorStore {
     );
     const laneRows = rankedItems.flatMap(([itemPk, winner]) => {
       const row = searchRows.get(itemPk);
-      if (!row || row.sourceItem.localItemId !== winner.localItemId) return [];
+      if (!row || row.sourceItem.localItemId !== winner.localItemId || (row.sourceItem.sourceVersion ?? '') !== (winner.sourceVersion ?? '')) return [];
       if (!input.locate) return [{ ...row, contentMatched: true as const, bestCosine: winner.bestCosine }];
       const chunk = this.chunkMatchForChunkPk(winner.bestChunkPk, itemPk, winner.bestChunkContentHash);
-      return [{ ...row, ...(chunk ? { chunk } : {}), bestCosine: winner.bestCosine }];
+      return [{ ...row, ...(chunk ? { chunk } : { contentMatched: true as const }), bestCosine: winner.bestCosine }];
     });
     return {
       rows: laneRows,
@@ -15824,29 +16079,38 @@ export class LocalConnectorStore {
    * layer, as the search did.
    */
   stillVisibleSearchRows<T extends Pick<ConnectorStoreSearchRow, 'sourceItem' | 'chunk' | 'contentMatched'>>(rows: readonly T[]): T[] {
-    return this.tierVisibleRows(
-      rows,
-      (row) => ({
-        provider: row.sourceItem.provider,
-        accountScope: row.sourceItem.accountScope,
-        providerItemId: row.sourceItem.providerItemId,
-        ...(row.sourceItem.providerConversationId ? { providerConversationId: row.sourceItem.providerConversationId } : {}),
-      }),
-      (row) => (row.chunk !== undefined || row.contentMatched === true ? 'content' : 'metadata'),
-    );
+    return visibilityHere(this.stillVisibleSearchRowsSteps(rows));
   }
 
-  async stillVisibleSearchRowsOffThread<T extends Pick<ConnectorStoreSearchRow, 'sourceItem' | 'chunk' | 'contentMatched'>>(rows: readonly T[]): Promise<T[]> {
-    return visibilityAwaited(() => this.tierVisibleRowsSteps(
-      rows,
-      (row) => ({
-        provider: row.sourceItem.provider,
-        accountScope: row.sourceItem.accountScope,
-        providerItemId: row.sourceItem.providerItemId,
-        ...(row.sourceItem.providerConversationId ? { providerConversationId: row.sourceItem.providerConversationId } : {}),
-      }),
-      (row) => (row.chunk !== undefined || row.contentMatched === true ? 'content' : 'metadata'),
-    ), this.childVisibilityLane());
+  async stillVisibleSearchRowsOffThread<T extends Pick<ConnectorStoreSearchRow, 'sourceItem' | 'chunk' | 'contentMatched'>>(
+    rows: readonly T[],
+  ): Promise<T[]> {
+    return visibilityAwaited(() => this.stillVisibleSearchRowsSteps(rows), this.childVisibilityLane());
+  }
+
+  private *stillVisibleSearchRowsSteps<T extends Pick<ConnectorStoreSearchRow, 'sourceItem' | 'chunk' | 'contentMatched'>>(
+    rows: readonly T[],
+  ): Generator<VisibilityRead, T[], unknown> {
+    return yield* this.tierVisibleRowsSteps(rows, row => row.sourceItem,
+      row => connectorStoreRowHasContent(row) ? 'content' : 'metadata');
+  }
+
+  /** Resolve the serving layer for the bounded set of matched item versions. */
+  searchGrantLayers(
+    hits: readonly SourceIndexSearchHit[], filters: ConnectorStoreSearchFilters | undefined,
+  ): ReadonlyMap<SourceIndexSearchHit, 'metadata' | 'content'> {
+    if (this.closedForPoolReads) return new Map();
+    const metadataOnly = connectorStoreMetadataOnlySql(filters, this.onDemandReadsTablePresent);
+    const read: StoreRead = {
+      mode: 'all',
+      sql: `SELECT candidate.key AS idx, ${metadataOnly.sql} AS names_only
+        FROM json_each(?) candidate CROSS JOIN items i
+        WHERE ${FTS_CANDIDATE_IDENTITY_SQL}
+          AND i.tombstoned = 0`,
+      params: [...metadataOnly.params, JSON.stringify(hits.map(hit => hit.sourceItem))],
+    };
+    const allowed = visibilityHere(this.visibilityStoreRead(read)) as Array<{ idx: number; names_only: number }>;
+    return new Map(allowed.map(row => [hits[row.idx]!, row.names_only ? 'metadata' : 'content']));
   }
 
   private closedForPoolReads = false;
@@ -15939,10 +16203,20 @@ export class LocalConnectorStore {
     ftsOptions: ConnectorStoreKeywordFtsOptions,
   ): Generator<StoreRead | VisibilityRead, ConnectorStoreKeywordSearch, unknown> {
     const selectedFilters = connectorStoreFilterSql(filters);
-    const onDemandReadsTablePresent = Boolean((filters?.metadataOnlyLocatorPathScopes?.length || filters?.metadataOnlySourceScopeFolderKeys?.length)
-      && (yield { mode: 'get', sql: "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'", params: [] }));
-    const selectedFtsScope = connectorStoreFtsScopeSql(filters, onDemandReadsTablePresent);
-    const conceptScope = connectorStoreFtsScopeSql(filters, onDemandReadsTablePresent, 'r.chunk_pk');
+    // A writer may have upgraded an older store since this reader opened it.
+    if (!this.onDemandReadsTablePresent && (filters?.metadataOnlyLocatorPathScopes?.length || filters?.metadataOnlySourceScopeFolderKeys?.length)) {
+      this.onDemandReadsTablePresent = Boolean(yield {
+        mode: 'get', sql: "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'", params: [],
+      });
+    }
+    const metadataCandidates = ftsOptions.metadataCandidates;
+    const selectedFtsScope = metadataCandidates ? {
+      sql: `AND connector_store_fts.chunk_pk IS NULL
+        AND i.item_pk IN (SELECT i.item_pk FROM json_each(?) candidate CROSS JOIN items i WHERE ${FTS_CANDIDATE_IDENTITY_SQL})`,
+      params: [JSON.stringify(metadataCandidates)],
+    } : connectorStoreFtsScopeSql(filters, this.onDemandReadsTablePresent);
+    const conceptScope = metadataCandidates ? { sql: 'AND r.chunk_pk IS NULL', params: [] }
+      : connectorStoreFtsScopeSql(filters, this.onDemandReadsTablePresent, 'r.chunk_pk');
     const terms = ftsOptions.relaxed ? (ftsOptions.privatePrecision ? yield* this.privateRelaxedFtsQuerySteps(query) : toRelaxedLocalFtsQuery(query)) : toFtsQuery(query, ftsOptions);
     if (!terms) return { rows: [], saturated: false, concepts: { total: 0, matched: new Map() } };
     const limit = Math.max(1, Math.min(Math.floor(maxResults), MAX_SEARCH_RESULTS));
@@ -15980,6 +16254,7 @@ export class LocalConnectorStore {
     // filters themselves are unchanged: this decides how many candidates are
     // looked at, never which of them may be served.
     const selected: ItemRow[] = [];
+    const fallbackRows = new Map<number, ConnectorStoreSearchRow>();
     const seen = new Set<number>();
     let scanned = 0;
     let pageSize = fetchLimit;
@@ -16129,7 +16404,29 @@ export class LocalConnectorStore {
       })));
       const visible = eligible ? current.filter((_, index) => eligible[index]) : current;
       selected.push(...visible);
-      if (visible.length > 0) ftsOptions.onPartialRows?.(selected.slice(0, limit).map(searchRowFromItemRow));
+      if (ftsOptions.prepareGrantFallbacks && visible.length > 0) {
+        const pageBodies = visible.filter(row => row.chunk_pk != null);
+        if (pageBodies.length > 0) {
+          const metadataCandidates = pageBodies.map(row => searchRowFromItemRow(row).sourceItem);
+          const metadata = yield* this.searchItemsSteps(query, MAX_SEARCH_RESULTS, accountScope, filters, {
+            ...ftsOptions, contentOnly: false, locate: false, onPartialRows: undefined,
+            prepareGrantFallbacks: false, metadataCandidates,
+          });
+          const byVersion = new Map(metadata.rows.map(row => [searchGrantIdentityKey(row.sourceItem), row]));
+          for (const [index, candidate] of metadataCandidates.entries()) {
+            const fallback = byVersion.get(searchGrantIdentityKey(candidate));
+            if (fallback) fallbackRows.set(pageBodies[index]!.item_pk, fallback);
+          }
+        }
+      }
+      if (visible.length > 0 && ftsOptions.onPartialRows) {
+        const partial = selected.slice(0, limit).map(row => ({
+          ...searchRowFromItemRow(row),
+          ...(row.chunk_pk != null ? { contentMatched: true as const } : {}),
+          ...(fallbackRows.has(row.item_pk) ? { metadataFallback: fallbackRows.get(row.item_pk)! } : {}),
+        }));
+        ftsOptions.onPartialRows(partial, ftsOptions.contentOnly);
+      }
       // Only rows the tier filter hid earn another page. A page it hid nothing
       // from was cut by the minimum-signal filter alone, which has always
       // stopped at one page, and the cost of that common case stays as it was.
@@ -16148,7 +16445,8 @@ export class LocalConnectorStore {
       ? new Map<number, ConnectorStoreChunkMatch | undefined>()
       : yield* this.keywordChunkMatchesSteps(kept, spanTerms);
     for (const [index, row] of kept.entries()) {
-      const base = searchRowFromItemRow(row);
+      const fallback = fallbackRows.get(row.item_pk);
+      const base = { ...searchRowFromItemRow(row), ...(fallback ? { metadataFallback: fallback } : {}) };
       if (ftsOptions.locate === false || row.chunk_pk === null || row.chunk_pk === undefined) {
         located.push(row.chunk_pk === null || row.chunk_pk === undefined || ftsOptions.locate !== false ? base : { ...base, contentMatched: true as const });
         locatedRows.push(row);
@@ -18111,15 +18409,97 @@ export interface ConnectorStoreCorpusAdapterOptions {
 // Otherwise the keyword lane serves alone (with an honest skip reason when a
 // provider was configured but could not run). secure_local stores never run
 // the vector lane with a non-local provider — fail closed to keyword.
+type GrantSearchRequest = SourceIndexCorpusSearchRequest & { startGrantEpoch?: number | undefined };
+
+function publishPartialRows<T extends ConnectorStoreSearchRow>(
+  store: LocalConnectorStore, request: GrantSearchRequest, rows: readonly T[],
+  filters: ConnectorStoreSearchFilters | undefined, score: (row: T) => number, projector?: ConnectorStoreResultProjector,
+  lane: NonNullable<Parameters<NonNullable<SourceIndexCorpusSearchRequest['onPartialResponse']>>[1]> = 'keyword',
+): void {
+  if (!request.onPartialResponse) return;
+  const prefix = rows.slice(0, request.maxResults);
+  const hits = prefix.map(row => connectorStoreHitFromRow(store, row, score(row), projector, filters?.locatorPathScope));
+  const response = withSearchGrantDelivery(store, filters, request,
+    { hits, latencyMs: 0, incomplete: true, rawExposed: false }, prefix);
+  request.onPartialResponse(response, lane);
+}
+
 function partialKeywordRows(
-  store: LocalConnectorStore,
-  request: SourceIndexCorpusSearchRequest,
+  store: LocalConnectorStore, request: GrantSearchRequest, filters?: ConnectorStoreSearchFilters,
   projector?: ConnectorStoreResultProjector,
-  locatorPathScope?: ConnectorStoreSearchFilters['locatorPathScope'],
-): (rows: readonly ConnectorStoreSearchRow[]) => void {
-  return rows => request.onPartialResponse?.({
-    hits: rows.slice(0, request.maxResults).map(row => connectorStoreHitFromRow(store, row, -row.rank, projector, locatorPathScope)),
-    latencyMs: 0, incomplete: true, rawExposed: false,
+): ConnectorStoreKeywordFtsOptions['onPartialRows'] {
+  return request.onPartialResponse
+    ? (rows, contentOnly) => publishPartialRows(store, request, rows, filters, row => -row.rank, projector,
+      contentOnly ? 'keyword_content' : 'keyword') : undefined;
+}
+
+function publishKeywordLane(
+  emit: ConnectorStoreKeywordFtsOptions['onPartialRows'], rows: readonly ConnectorStoreSearchRow[],
+): void {
+  if (!emit) return;
+  emit(rows);
+  emit([], true);
+}
+
+function usesSearchGrants(filters: ConnectorStoreSearchFilters | undefined): boolean {
+  return Boolean(filters?.metadataOnlyLocatorPathScopes?.length || filters?.metadataOnlySourceScopeFolderKeys?.length);
+}
+
+function withSearchGrantDelivery(
+  store: LocalConnectorStore,
+  filters: ConnectorStoreSearchFilters | undefined,
+  request: GrantSearchRequest,
+  response: SourceIndexCorpusSearchResponse,
+  matches: readonly ConnectorStoreSearchRow[],
+): SourceIndexCorpusSearchResponse {
+  if (!usesSearchGrants(filters)) return response;
+  return {
+    ...response,
+    [SEARCH_GRANT_DELIVERY]: {
+      checkIfChanged: hits => request.startGrantEpoch !== undefined && request.startGrantEpoch === store.onDemandGrantEpoch()
+        ? undefined : store.searchGrantLayers(hits, filters),
+      matches: matches.map(row => ({
+        sourceItem: row.sourceItem,
+        candidateId: `${store.corpusId}:${row.sourceItem.localItemId}`,
+        trustTier: row.trustTier,
+        ...searchGrantMatch(store, row),
+        rawExposed: false,
+      })),
+    },
+  };
+}
+
+function searchGrantMatch(
+  store: LocalConnectorStore,
+  row: ConnectorStoreSearchRow,
+  projection?: Readonly<Record<string, unknown>>,
+): Pick<SourceIndexSearchHit, typeof SEARCH_GRANT_MATCH> {
+  if (!connectorStoreRowHasContent(row)) return {};
+  return {
+    [SEARCH_GRANT_MATCH]: row.metadataFallback
+      ? { metadataFallback: { ...projection, ...connectorStoreHitFromRow(store, row.metadataFallback, -row.metadataFallback.rank) } }
+      : {},
+  };
+}
+
+function searchGrantIdentityKey(identity: SourceItemIdentity): string {
+  return JSON.stringify([identity.provider, identity.accountScope, identity.providerItemId,
+    identity.providerConversationId, identity.localItemId, identity.sourceVersion]);
+}
+
+async function withVectorMetadataFallbacks<T extends ConnectorStoreSearchRow>(
+  store: LocalConnectorStore, request: GrantSearchRequest, rows: readonly T[],
+  accountScope: string | undefined, filters: ConnectorStoreSearchFilters | undefined,
+  searchEligibility?: ConnectorStoreSearchEligibility,
+): Promise<T[]> {
+  if (!usesSearchGrants(filters) || rows.length === 0) return [...rows];
+  const metadata = await store.searchItemsDetailedOffThread(request.query, MAX_SEARCH_RESULTS, accountScope, filters, {
+    prefix: false, locate: false, searchEligibility, metadataCandidates: rows.map(row => row.sourceItem),
+  }, request.deadlineAtMs !== undefined ? { deadlineAtMs: request.deadlineAtMs } : {});
+  const byVersion = new Map(metadata.rows.map(row => [searchGrantIdentityKey(row.sourceItem), row]));
+  return rows.map(row => {
+    const metadataFallback = byVersion.get(searchGrantIdentityKey(row.sourceItem));
+    return metadataFallback ? { ...row, metadataFallback } : row;
   });
 }
 
@@ -18128,12 +18508,29 @@ export function createConnectorStoreCorpusAdapter(
 ): SourceIndexCorpusSearchAdapter {
   const { store, embeddingProvider } = options;
   const filters = normalizeConnectorStoreSearchFilters(options.filters);
+  // A composite search retains the grant receipt until its last store settles.
+  // Standalone adapter calls release their results and prefixes to their own caller.
+  const scopedSearch = (
+    search: (request: GrantSearchRequest) => Promise<SourceIndexCorpusSearchResponse>,
+  ): NonNullable<SourceIndexCorpusSearchAdapter['metadataMatches']> => async input => {
+    assertConnectorStoreCorpusRequest(store, input);
+    const publish = input.onPartialResponse;
+    const request: GrantSearchRequest = {
+      ...input,
+      ...(usesSearchGrants(filters) ? { startGrantEpoch: store.onDemandGrantEpoch() } : {}),
+      ...(publish && !input[DEFER_SEARCH_DELIVERY] ? {
+        onPartialResponse: (response, lane) => publish(deliverCorpusSearch([response], input.maxResults), lane),
+      } : {}),
+    };
+    const result = await search(request);
+    return input[DEFER_SEARCH_DELIVERY] ? result : deliverCorpusSearch([result]);
+  };
   const semanticRelevanceBar = normalizeSemanticRelevanceBar(options.semanticRelevanceBar);
   const adapter: SourceIndexCorpusSearchAdapter & ((
-    request: SourceIndexCorpusSearchRequest,
+    request: GrantSearchRequest,
     stages?: SourceAnswerTraceAdapterStages,
   ) => SourceIndexCorpusSearchResponse | Promise<SourceIndexCorpusSearchResponse>) = (
-    request: SourceIndexCorpusSearchRequest,
+    request: GrantSearchRequest,
     stages?: SourceAnswerTraceAdapterStages,
   ): SourceIndexCorpusSearchResponse | Promise<SourceIndexCorpusSearchResponse> => {
     assertConnectorStoreCorpusRequest(store, request);
@@ -18152,18 +18549,20 @@ export function createConnectorStoreCorpusAdapter(
     if (!embeddingProvider || useHybrid !== 'hybrid' || semanticSkippedReason) return (async (): Promise<SourceIndexCorpusSearchResponse> => {
       const markStage = startStoreStageClock(stages);
       const { searchEligibility } = options;
+      const emitPartial = partialKeywordRows(store, request, filters, options.resultProjector);
       let keywordLane = await connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters,
-        { searchEligibility, onPartialRows: partialKeywordRows(store, request, options.resultProjector, filters?.locatorPathScope) }, request.deadlineAtMs);
+        { searchEligibility, onPartialRows: emitPartial }, request.deadlineAtMs);
       markStage?.('keyword_lane_ms');
       keywordLane = await relaxEmptyLocalKeywordLane(store, request.query, request.maxResults, options.accountScope, filters,
         keywordLane, options.localKeywordFallback, { searchEligibility }, request.deadlineAtMs);
+      publishKeywordLane(emitPartial, keywordLane.rows);
       markStage?.('keyword_relaxation_ms');
-      keywordLane = await revalidateKeywordLane(store, keywordLane);
-      markStage?.('keyword_revalidation_ms');
-      const rows = keywordLane.rows;
       let recencyCut = false;
       const recencyRows = await chatRecencyLaneRows(store, options.accountScope, filters, request.deadlineAtMs, () => { recencyCut = true; }, searchEligibility);
       markStage?.('recency_read_ms');
+      keywordLane = (await refreshSearchTierVisibility(store, keywordLane, [], searchEligibility)).keyword;
+      markStage?.('keyword_revalidation_ms');
+      const rows = keywordLane.rows;
       if (recencyRows.length === 0) {
         const hits = withKeywordLeaderSignals(rows.map((row) => connectorStoreHitFromRow(
           store,
@@ -18187,7 +18586,7 @@ export function createConnectorStoreCorpusAdapter(
           rawExposed: false,
         };
         markStage?.('finalize_ms');
-        return response;
+        return withSearchGrantDelivery(store, filters, request, response, keywordLane.allRows);
       }
       const lanes = [
         { name: 'keyword', items: rows },
@@ -18236,7 +18635,7 @@ export function createConnectorStoreCorpusAdapter(
         rawExposed: false,
       };
       markStage?.('finalize_ms');
-      return response;
+      return withSearchGrantDelivery(store, filters, request, response, keywordLane.allRows);
     })();
 
     return hybridConnectorStoreSearch(
@@ -18282,8 +18681,7 @@ export function createConnectorStoreCorpusAdapter(
   // another (2026-10-10: "Letter of Intent notary" peaked at 0.725 under
   // EmbeddingGemma 2's 0.73, so no vector row entered and the Spanish letter
   // was never found), so a consumer that ranks on its own reads them too.
-  adapter.semanticNeighbours = async (request) => {
-    assertConnectorStoreCorpusRequest(store, request);
+  adapter.semanticNeighbours = scopedSearch(async request => {
     const startedAt = Date.now();
     const none = { matchedItems: 0, contentMatchedItems: 0, saturated: false };
     if (
@@ -18302,8 +18700,9 @@ export function createConnectorStoreCorpusAdapter(
       options.accountScope,
       filters,
       request.deadlineAtMs,
+      { searchEligibility: options.searchEligibility },
     );
-    return {
+    const response: SourceIndexCorpusSearchResponse = {
       hits: lane.rows.map((row) => connectorStoreHitFromRow(
         store,
         row,
@@ -18326,19 +18725,22 @@ export function createConnectorStoreCorpusAdapter(
       matchCount: none,
       rawExposed: false,
     };
-  };
+    return withSearchGrantDelivery(store, filters, request, response, []);
+  });
   // Metadata-only matching (router.ts metadataMatches): the items that match
   // the query, lexically or above the semantic relevance bar, as identity-only
   // hits. No chunk text is read (both lanes run with locate: false), no
   // recency lane or pin (they are not matches), and no result projection.
-  const metadataMatches = async (request: SourceIndexCorpusSearchRequest): Promise<SourceIndexCorpusSearchResponse> => {
+  const metadataMatches = async (request: GrantSearchRequest): Promise<SourceIndexCorpusSearchResponse> => {
     const startedAt = Date.now();
     const maxResults = Math.max(1, Math.min(Math.floor(request.maxResults), MAX_SEARCH_RESULTS));
     const hybrid = embeddingProvider !== undefined
       && (options.retrievalMode ?? 'hybrid') === 'hybrid'
       && (store.trustDomain !== 'secure_local' || isApprovedSecureSourceEmbeddingProvider(embeddingProvider))
       && store.vectorLaneServable(embeddingProvider.modelId);
-    const ftsOptions = { ...(hybrid ? { prefix: false } : {}), locate: false, onPartialRows: partialKeywordRows(store, request) };
+    const { searchEligibility } = options;
+    const emitPartial = partialKeywordRows(store, request, filters);
+    const ftsOptions = { ...(hybrid ? { prefix: false } : {}), locate: false, searchEligibility, onPartialRows: emitPartial };
     // The words alone: the same keyword lane a hybrid match runs, without the query embedding.
     const meaningLane = hybrid && request.context.lexicalOnly !== true;
     const readKeywordLane = await relaxEmptyLocalKeywordLane(
@@ -18346,6 +18748,7 @@ export function createConnectorStoreCorpusAdapter(
       await connectorStoreKeywordLaneRows(store, request.query, maxResults, options.accountScope, filters, ftsOptions, request.deadlineAtMs),
       options.localKeywordFallback, ftsOptions, request.deadlineAtMs,
     );
+    publishKeywordLane(emitPartial, readKeywordLane.rows);
     const semanticRows: ConnectorStoreSearchRow[] = [];
     // A semantic lane that should have run and did not (query embedding
     // outage, vectors unreadable or of the wrong width, the deadline): what
@@ -18361,21 +18764,20 @@ export function createConnectorStoreCorpusAdapter(
           options.accountScope,
           filters,
           request.deadlineAtMs,
-          { locate: false },
+          { locate: false, searchEligibility },
         );
         if (lane.skippedReason !== undefined) incomplete = true;
-        for (const row of lane.rows) {
-          if (row.bestCosine < bar || readKeywordLane.matchedItemIds.has(row.sourceItem.localItemId)) continue;
-          semanticRows.push(row);
-        }
+        const rows = lane.rows.filter(row => row.bestCosine >= bar);
+        const matches = await withVectorMetadataFallbacks(store, request, rows, options.accountScope, filters, searchEligibility);
+        semanticRows.push(...matches);
+        publishPartialRows(store, request, matches, filters, row => -row.rank, undefined, 'vector');
       }
     }
-    // Checked again after the last read, right before the hits and counts go out.
-    const keywordLane = await revalidateKeywordLane(store, readKeywordLane);
-    const visibleSemanticRows = await store.stillVisibleSearchRowsOffThread(semanticRows);
+    const { keyword: keywordLane, vectors } = await refreshSearchTierVisibility(store, readKeywordLane, semanticRows, searchEligibility);
+    const visibleSemanticRows = vectors.filter(row => !keywordLane.matchedItemIds.has(row.sourceItem.localItemId));
     const rows: ConnectorStoreSearchRow[] = [...keywordLane.rows, ...visibleSemanticRows];
     const semanticOnly = visibleSemanticRows.length;
-    return {
+    return withSearchGrantDelivery(store, filters, request, {
       hits: rows.slice(0, maxResults).map((row) => connectorStoreHitFromRow(store, row, -row.rank)),
       latencyMs: Date.now() - startedAt,
       matchCount: {
@@ -18385,21 +18787,16 @@ export function createConnectorStoreCorpusAdapter(
       },
       ...(incomplete ? { incomplete: true } : {}),
       rawExposed: false,
-    };
+    }, [...keywordLane.allRows, ...visibleSemanticRows]);
   };
-  const expanded: SourceIndexCorpusSearchAdapter = (request) => {
+  const expanded: SourceIndexCorpusSearchAdapter = scopedSearch(async request => {
     const timing = beginSourceAnswerStoreTiming();
-    assertConnectorStoreCorpusRequest(store, request);
-    const response = withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), () => adapter(request, timing?.stages), store);
-    return timing ? response.then((result) => {
-      timing.finish();
-      return result;
-    }) : response;
-  };
-  expanded.metadataMatches = (request) => {
-    assertConnectorStoreCorpusRequest(store, request);
-    return withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), () => metadataMatches(request), store);
-  };
+    const response = await withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), () => adapter(request, timing?.stages), store);
+    timing?.finish();
+    return response;
+  });
+  expanded.metadataMatches = scopedSearch(request =>
+    withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), () => metadataMatches(request), store));
   expanded.selectedItemServable = (sourceItem, layer) => store.selectedItemServable(sourceItem, options.accountScope, filters, layer);
   expanded.prepareKeywords = async (query) => {
     const status = { incomplete: false };
@@ -18456,7 +18853,7 @@ async function chatRecencyLaneRows(
   // its audit says so, so the answer names the source (#1460).
   const rows = await store.recentItemsOffThread(CHAT_RECENCY_LANE_LIMIT, accountScope, filters, deadlineAtMs, onCutShort);
   const eligible = searchEligibility?.(rows);
-  return eligible ? rows.filter((_, index) => eligible[index]) : rows;
+  return (eligible ? rows.filter((_, index) => eligible[index]) : rows).map(row => ({ ...row, contentMatched: true }));
 }
 
 function connectorStoreHitFromRow(
@@ -18480,6 +18877,7 @@ function connectorStoreHitFromRow(
   });
   return {
     ...(projection ?? {}),
+    ...searchGrantMatch(store, row, projection),
     sourceItem: row.sourceItem,
     provenance: provenanceFromSearchRow(store.corpusId, row, store.personCitationName(row)),
     candidateId: `${store.corpusId}:${row.sourceItem.localItemId}`,
@@ -18566,7 +18964,7 @@ function startStoreStageClock(stages?: SourceAnswerTraceAdapterStages): ((stage:
 async function hybridConnectorStoreSearch(
   store: LocalConnectorStore,
   provider: SourceEmbeddingProvider,
-  request: SourceIndexCorpusSearchRequest,
+  request: GrantSearchRequest,
   startedAt: number,
   stages: SourceAnswerTraceAdapterStages | undefined,
   accountScope?: string,
@@ -18586,14 +18984,15 @@ async function hybridConnectorStoreSearch(
   // lane the remainder of the budget, and it missed the deadline on every
   // question (Sparta 2026-11-10, #1242).
   const markStage = startStoreStageClock(stages);
+  const emitPartial = partialKeywordRows(store, request, filters, resultProjector);
   const keywordWork = (async () => {
     const laneStartedAt = stages ? performance.now() : 0;
     const keywordStartedAt = Date.now();
-    const lane = await connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false, searchEligibility, onPartialRows: partialKeywordRows(store, request, resultProjector, filters?.locatorPathScope) }, request.deadlineAtMs);
+    const lane = await connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false, searchEligibility, onPartialRows: emitPartial }, request.deadlineAtMs);
     const baseline = keywordAlternatives(request.query)?.size
       ? lane.baseline ?? await withKeywordExpansionDisabled(() => connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false, searchEligibility }, request.deadlineAtMs))
       : undefined;
-    partialKeywordRows(store, request, resultProjector, filters?.locatorPathScope)(lane.rows);
+    publishKeywordLane(emitPartial, lane.rows);
     if (stages) stages.keyword_lane_ms = performance.now() - laneStartedAt;
     return { lane, baseline, elapsedMs: Date.now() - keywordStartedAt };
   })();
@@ -18610,13 +19009,13 @@ async function hybridConnectorStoreSearch(
       { searchEligibility },
     );
     const bar = semanticRelevanceBarFor(provider.modelId, semanticRelevanceBar);
-    const rows = bar === undefined ? lane.rows : lane.rows.filter(row => row.bestCosine >= bar);
-    request.onPartialResponse?.({
-      hits: rows.slice(0, maxResults).map(row => connectorStoreHitFromRow(store, row, row.bestCosine, resultProjector, filters?.locatorPathScope)),
-      latencyMs: Date.now() - startedAt, incomplete: true, rawExposed: false,
-    });
+    const vetted = bar === undefined ? [] : lane.rows.filter(row => row.bestCosine >= bar);
+    const rows = await withVectorMetadataFallbacks(store, request, vetted, accountScope, filters, searchEligibility);
+    publishPartialRows(store, request, rows, filters, row => row.bestCosine, resultProjector, 'vector');
+    const byVersion = new Map(rows.map(row => [searchGrantIdentityKey(row.sourceItem), row]));
     if (stages) stages.vector_lane_ms = performance.now() - laneStartedAt;
-    return { lane, elapsedMs: Date.now() - vectorStartedAt };
+    return { lane: { ...lane, rows: lane.rows.map(row => byVersion.get(searchGrantIdentityKey(row.sourceItem)) ?? row) },
+      elapsedMs: Date.now() - vectorStartedAt };
   })();
   const [keywordResult, vectorResult] = await Promise.all([keywordWork, vectorWork]);
   markStage?.('join_wait_ms');
@@ -18625,7 +19024,7 @@ async function hybridConnectorStoreSearch(
   let keywordElapsedMs = keywordResult.elapsedMs;
   const vectorLane = vectorResult.lane;
   const vectorElapsedMs = vectorResult.elapsedMs;
-  let scoredVectorRows = vectorLane.rows;
+
   // The bar applies to the vector lane unconditionally: sub-bar semantic
   // similarity is not evidence, whatever the keyword lane returned. Keyword
   // hits stand on their own lexical merit (live calibration 2026-07-25:
@@ -18634,9 +19033,6 @@ async function hybridConnectorStoreSearch(
   // questions the bar exists for).
   const relevanceBar = semanticRelevanceBarFor(provider.modelId, semanticRelevanceBar);
   const gateArmed = relevanceBar !== undefined;
-  let vectorRows = gateArmed
-    ? scoredVectorRows.filter((row) => row.bestCosine >= relevanceBar)
-    : scoredVectorRows;
   if (baselineKeywordLane && gateArmed) {
     const extra = keywordLane.allRows.filter(row => !baselineKeywordLane.matchedItemIds.has(row.sourceItem.localItemId)
       && keywordLane.completeItemIds.has(row.sourceItem.localItemId));
@@ -18653,23 +19049,26 @@ async function hybridConnectorStoreSearch(
   // The relaxed retry also counts toward the existing keyword lane audit.
   const relaxStartedAt = Date.now();
   keywordLane = await relaxEmptyLocalKeywordLane(store, request.query, laneLimit, accountScope, filters, keywordLane, localKeywordFallback, { searchEligibility }, request.deadlineAtMs);
+  if (keywordLane !== keywordResult.lane) publishKeywordLane(emitPartial, keywordLane.rows);
   keywordElapsedMs += Date.now() - relaxStartedAt;
   markStage?.('keyword_relaxation_ms');
-  // Every candidate is checked again after the last read, right before fusion emits hits and counts (#1079).
-  keywordLane = await revalidateKeywordLane(store, keywordLane);
+  let recencyCut = false;
+  const recencyRows = await chatRecencyLaneRows(store, accountScope, filters, request.deadlineAtMs, () => { recencyCut = true; }, searchEligibility);
+  markStage?.('recency_read_ms');
+  const checked = await refreshSearchTierVisibility(store, keywordLane, vectorLane.rows, searchEligibility);
+  keywordLane = checked.keyword;
   markStage?.('keyword_revalidation_ms');
-  scoredVectorRows = await store.stillVisibleSearchRowsOffThread(scoredVectorRows);
-  vectorRows = await store.stillVisibleSearchRowsOffThread(vectorRows);
+  const scoredVectorRows = checked.vectors;
+  const vectorRows = gateArmed
+    ? scoredVectorRows.filter((row) => row.bestCosine >= relevanceBar)
+    : scoredVectorRows;
   markStage?.('vector_revalidation_ms');
-  const keywordRows = keywordLane.rows;
   const suppressedBelowBar = scoredVectorRows.length - vectorRows.length;
   const bestCosine = scoredVectorRows.length > 0
     ? roundCosine(Math.max(...scoredVectorRows.map((row) => row.bestCosine)))
     : undefined;
-  let recencyCut = false;
   markStage?.('vector_summary_ms');
-  const recencyRows = await chatRecencyLaneRows(store, accountScope, filters, request.deadlineAtMs, () => { recencyCut = true; }, searchEligibility);
-  markStage?.('recency_read_ms');
+  const keywordRows = keywordLane.rows;
   const contentBar = relevanceBar ?? CALIBRATED_CONTENT_PREFERENCE_BARS.get(provider.modelId);
   const vettedVectorItemIds = new Set(contentBar === undefined
     ? []
@@ -18781,7 +19180,8 @@ async function hybridConnectorStoreSearch(
     rawExposed: false,
   };
   markStage?.('finalize_ms');
-  return response;
+  return withSearchGrantDelivery(store, filters, request, response,
+    gateArmed ? [...keywordLane.allRows, ...vectorRows] : keywordLane.allRows);
 }
 
 // Lexical matches always count. A vector row counts only when a relevance
@@ -18877,7 +19277,11 @@ async function connectorStoreKeywordLaneRows(
   ftsOptions: ConnectorStoreKeywordFtsOptions = {},
   deadlineAtMs?: number,
 ): Promise<ConnectorStoreKeywordLane> {
-  ftsOptions = { ...ftsOptions, conceptHitMemo: ftsOptions.conceptHitMemo ?? new Map() };
+  ftsOptions = {
+    ...ftsOptions,
+    conceptHitMemo: ftsOptions.conceptHitMemo ?? new Map(),
+    prepareGrantFallbacks: usesSearchGrants(filters),
+  };
   const pool = deadlineAtMs !== undefined ? { deadlineAtMs } : {};
   const plain = await store.searchItemsDetailedOffThread(query, MAX_SEARCH_RESULTS, accountScope, filters, ftsOptions, pool);
   const rows = plain.rows;
@@ -18938,7 +19342,7 @@ async function connectorStoreKeywordLaneRows(
   const baseline = keywordExpansionDisabled() || ftsOptions.relaxed || !keywordExpansionChangesSearch(query, ftsOptions)
     ? undefined
     : await withKeywordExpansionDisabled(
-      () => connectorStoreKeywordLaneRows(store,query,limit,accountScope,filters,ftsOptions,deadlineAtMs),
+      () => connectorStoreKeywordLaneRows(store,query,limit,accountScope,filters,{ ...ftsOptions, onPartialRows: undefined },deadlineAtMs),
     );
   const enriched = new Map(ordered.map(row=>[row.sourceItem.localItemId,row]));
   const allRows = baseline
@@ -19002,29 +19406,33 @@ function keywordExpansionChangesSearch(query: string, ftsOptions: ConnectorStore
   return shape() !== withKeywordExpansionDisabled(shape);
 }
 
-/**
- * A keyword lane with every row this store no longer serves taken out, and
- * its counts recounted (stillVisibleSearchRows). Unchanged when every row is
- * still served.
- */
-async function revalidateKeywordLane(store: LocalConnectorStore, lane: ConnectorStoreKeywordLane): Promise<ConnectorStoreKeywordLane> {
-  const allRows = await store.stillVisibleSearchRowsOffThread(lane.allRows);
-  if (allRows.length === lane.allRows.length) return lane;
-  const served = new Set(allRows.map((row) => row.sourceItem.localItemId));
+/** Refresh tier and child visibility after the lane's store reads. */
+async function refreshSearchTierVisibility<V extends ConnectorStoreSearchRow>(
+  store: LocalConnectorStore, lane: ConnectorStoreKeywordLane, vectors: readonly V[],
+  searchEligibility?: ConnectorStoreSearchEligibility,
+): Promise<{ keyword: ConnectorStoreKeywordLane; vectors: V[] }> {
+  const candidates = [...lane.allRows, ...vectors];
+  const current = await store.stillVisibleSearchRowsOffThread(candidates);
+  const eligible = searchEligibility?.(current);
+  const visible = new Set(eligible ? current.filter((_, index) => eligible[index]) : current);
+  if (visible.size === candidates.length) return { keyword: lane, vectors: [...vectors] };
+  const retained = lane.allRows.filter(row => visible.has(row));
+  const served = new Set(retained.map(row => row.sourceItem.localItemId));
   return {
-    rows: lane.rows.filter((row) => served.has(row.sourceItem.localItemId)),
-    allRows,
-    matchedItemIds: served,
-    completeItemIds: new Set([...lane.completeItemIds].filter((id) => served.has(id))),
-    // The leaders and concept shares the router reads stay with the rows
-    // still served (#1350, #1354).
-    ...(lane.nameLeaderItemId !== undefined && served.has(lane.nameLeaderItemId) ? { nameLeaderItemId: lane.nameLeaderItemId } : {}),
-    ...(lane.conceptShare ? { conceptShare: new Map([...lane.conceptShare].filter(([id]) => served.has(id))) } : {}),
-    matchCount: {
-      matchedItems: allRows.length,
-      contentMatchedItems: allRows.filter(connectorStoreRowHasContent).length,
-      saturated: lane.matchCount.saturated,
-      secureMatchedItems: allRows.filter(connectorStoreRowIsSecureTier).length,
+    vectors: vectors.filter(row => visible.has(row)),
+    keyword: {
+      rows: retained.slice(0, lane.rows.length),
+      allRows: retained,
+      matchedItemIds: served,
+      completeItemIds: new Set([...lane.completeItemIds].filter(id => served.has(id))),
+      ...(lane.nameLeaderItemId !== undefined && served.has(lane.nameLeaderItemId) ? { nameLeaderItemId: lane.nameLeaderItemId } : {}),
+      conceptShare: new Map([...(lane.conceptShare ?? [])].filter(([id]) => served.has(id))),
+      matchCount: {
+        matchedItems: retained.length,
+        contentMatchedItems: retained.filter(connectorStoreRowHasContent).length,
+        saturated: lane.matchCount.saturated,
+        secureMatchedItems: retained.filter(connectorStoreRowIsSecureTier).length,
+      },
     },
   };
 }
@@ -19051,7 +19459,7 @@ async function relaxEmptyLocalKeywordLane(
 // scope admits an item's metadata-only row only when the item has no chunks
 // (or its scope is metadata-only), so a chunk-less keyword row is a title-only
 // or metadata-only item.
-function connectorStoreRowHasContent(row: ConnectorStoreSearchRow): boolean {
+function connectorStoreRowHasContent(row: Pick<ConnectorStoreSearchRow, 'chunk' | 'contentMatched'>): boolean {
   return row.chunk !== undefined || row.contentMatched === true;
 }
 
@@ -19396,7 +19804,7 @@ export function createConnectorStoreContentProvider(
       const localItemId = request.provenance.sourceItem.localItemId.trim();
       if (!localItemId) return false;
       if (!(options.contentAllowed !== false && store.itemMatchesSearchFilters(localItemId, options.accountScope, options.filters))
-        && !(options.metadataFilters !== undefined && store.readOnDemand(localItemId) && store.itemMatchesSearchFilters(localItemId, options.accountScope, options.metadataFilters))) return false;
+        && !(options.metadataFilters !== undefined && store.currentOnDemandRead(localItemId, request.provenance.sourceItem.sourceVersion) && store.itemMatchesSearchFilters(localItemId, options.accountScope, options.metadataFilters))) return false;
       return store.contentServedNow(localItemId, request.throwOnUnavailable);
     },
     conversationNeighbours(request) {
@@ -19414,13 +19822,18 @@ export function createConnectorStoreContentProvider(
           + `refused a ${request.trustDomain} content request.`,
         );
       }
-      return withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), async () => {
+      let releaseGranted: (() => boolean) | undefined;
+      const result: LocalContentBlock | undefined = await withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), async () => {
       const localItemId = request.provenance.sourceItem.localItemId.trim();
       if (!localItemId) return undefined;
-      const contentInScope = (options.contentAllowed !== false
-        && store.itemMatchesSearchFilters(localItemId, options.accountScope, options.filters))
-        || (options.metadataFilters !== undefined && store.readOnDemand(localItemId) && store.itemMatchesSearchFilters(localItemId, options.accountScope, options.metadataFilters));
-      if (!contentInScope) {
+      const contentInScope = options.contentAllowed !== false
+        && store.itemMatchesSearchFilters(localItemId, options.accountScope, options.filters);
+      const needsGrant = !contentInScope && options.metadataFilters !== undefined;
+      const startEpoch = needsGrant ? store.onDemandGrantEpoch() : undefined;
+      const sourceVersion = request.provenance.sourceItem.sourceVersion;
+      const granted = needsGrant && store.currentOnDemandRead(localItemId, sourceVersion)
+        && store.itemMatchesSearchFilters(localItemId, options.accountScope, options.metadataFilters);
+      if (!contentInScope && !granted) {
         if (!options.metadataFilters
           || !store.itemMatchesSearchFilters(localItemId, options.accountScope, options.metadataFilters)) {
           return undefined;
@@ -19445,6 +19858,10 @@ export function createConnectorStoreContentProvider(
           coverageGaps: [CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP],
           ...(names.locatorUri ? { locatorUri: names.locatorUri } : {}),
         };
+      }
+      if (granted) {
+        releaseGranted = () => (startEpoch !== undefined && startEpoch === store.onDemandGrantEpoch())
+          || store.currentOnDemandRead(localItemId, sourceVersion ?? '');
       }
       const anchorChunkIndex = request.provenance.chunk?.chunkIndex;
       const anchorLane = request.provenance.chunk?.span?.lane;
@@ -19487,6 +19904,7 @@ export function createConnectorStoreContentProvider(
         ...(content.locatorUri ? { locatorUri: content.locatorUri } : {}),
       };
       }, store);
+      return releaseGranted && !releaseGranted() ? undefined : result;
     },
   };
 }
@@ -21247,6 +21665,13 @@ function connectorStoreConceptHitRead(
   };
 }
 
+const FTS_CANDIDATE_IDENTITY_SQL = `i.local_item_id = json_extract(candidate.value, '$.localItemId')
+          AND i.provider = json_extract(candidate.value, '$.provider')
+          AND i.account_scope = json_extract(candidate.value, '$.accountScope')
+          AND i.provider_item_id = json_extract(candidate.value, '$.providerItemId')
+          AND i.normalized_conversation = COALESCE(json_extract(candidate.value, '$.providerConversationId'), '')
+          AND COALESCE(i.source_version, '') = COALESCE(json_extract(candidate.value, '$.sourceVersion'), '')`;
+
 /** A folder's names-only restriction lifts only for a grant to this item version. */
 function connectorStoreMetadataOnlySql(
   filters: ConnectorStoreSearchFilters | undefined,
@@ -21963,7 +22388,7 @@ function validateCurrentConnectorStoreSchemaBeforeMigration(db: Database): void 
     validateConnectorStoreV12Schema(db, 'v15', CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS);
     assertIndexColumns(db, 'idx_connector_store_items_parent', ['parent_local_item_id'], 'v15');
   }
-  if (version === 16) validateVectorDigestSchema(db);
+  if (version >= 16) validateVectorDigestSchema(db);
 }
 
 function validateConnectorStoreVisibilitySchema(db: Database, versionLabel: string): void {
@@ -22004,9 +22429,14 @@ function validateVectorDigestSchema(db: Database): void {
   assertTriggerExists(db, 'connector_store_vector_digest_account', 'v16');
 }
 
-function validateConnectorStoreSchema(db: Database): void {
+function validateConnectorStoreSchema(db: Database, version = CONNECTOR_STORE_SQLITE_SCHEMA_VERSION): void {
   validateConnectorStoreV12Schema(db, 'v15', CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS);
-  validateVectorDigestSchema(db);
+  if (version >= 16) validateVectorDigestSchema(db);
+  if (version >= 17) {
+    assertExactTableColumns(db, 'on_demand_grant_epoch', ['id', 'epoch'], false, 'v17');
+    assertExactTableColumns(db, 'on_demand_grant_acquisitions', ['local_item_id', 'epoch'], false, 'v17');
+    for (const trigger of ON_DEMAND_GRANT_EPOCH_TRIGGERS) assertTriggerExists(db, trigger, 'v17');
+  }
   assertIndexColumns(db, 'idx_connector_store_items_parent', ['parent_local_item_id'], 'v15');
   assertExactTableColumns(db, 'chunk_media_releases', ['media_sha256', 'media_path'], false, 'v13');
   assertExactTableColumns(db, 'chunk_media_failures', ['media_sha256', 'reason', 'failed_at', 'attempts'], false, 'v13');
@@ -22257,21 +22687,81 @@ function sameStringSet(actual: readonly string[], expected: readonly string[]): 
   return actual.length === expected.length && expected.every((value) => actual.includes(value));
 }
 
+const ON_DEMAND_GRANT_EPOCH_TRIGGERS = [
+  'on_demand_grant_delete', 'on_demand_grant_update', 'on_demand_item_delete', 'on_demand_item_update', 'on_demand_grant_insert',
+] as const;
+
+function createOnDemandReads(db: Database): void {
+  db.exec(`CREATE TABLE IF NOT EXISTS on_demand_item_reads (
+    local_item_id TEXT PRIMARY KEY, source_version TEXT NOT NULL, read_on_demand INTEGER NOT NULL DEFAULT 1
+  );`);
+}
+
+function createOnDemandGrantEpoch(db: Database): void {
+  db.transaction(() => db.exec(`
+    INSERT OR IGNORE INTO on_demand_grant_epoch (id, epoch) VALUES (1, 0);
+    CREATE TRIGGER IF NOT EXISTS ${ON_DEMAND_GRANT_EPOCH_TRIGGERS[4]} AFTER INSERT ON on_demand_item_reads
+    BEGIN
+      UPDATE on_demand_grant_epoch SET epoch = epoch + 1 WHERE id = 1;
+      INSERT INTO on_demand_grant_acquisitions (local_item_id, epoch)
+        SELECT NEW.local_item_id, epoch FROM on_demand_grant_epoch WHERE id = 1
+        ON CONFLICT(local_item_id) DO UPDATE SET epoch = excluded.epoch;
+    END;
+    CREATE TRIGGER IF NOT EXISTS ${ON_DEMAND_GRANT_EPOCH_TRIGGERS[0]} AFTER DELETE ON on_demand_item_reads
+    BEGIN
+      UPDATE on_demand_grant_epoch SET epoch = epoch + 1 WHERE id = 1;
+      DELETE FROM on_demand_grant_acquisitions WHERE local_item_id = OLD.local_item_id;
+    END;
+    CREATE TRIGGER IF NOT EXISTS ${ON_DEMAND_GRANT_EPOCH_TRIGGERS[1]} AFTER UPDATE OF source_version, local_item_id ON on_demand_item_reads
+    WHEN OLD.source_version IS NOT NEW.source_version OR OLD.local_item_id IS NOT NEW.local_item_id
+    BEGIN
+      UPDATE on_demand_grant_epoch SET epoch = epoch + 1 WHERE id = 1;
+      DELETE FROM on_demand_grant_acquisitions WHERE local_item_id = OLD.local_item_id;
+      INSERT INTO on_demand_grant_acquisitions (local_item_id, epoch)
+        SELECT NEW.local_item_id, epoch FROM on_demand_grant_epoch WHERE id = 1
+        ON CONFLICT(local_item_id) DO UPDATE SET epoch = excluded.epoch;
+    END;
+    CREATE TRIGGER IF NOT EXISTS ${ON_DEMAND_GRANT_EPOCH_TRIGGERS[2]} AFTER DELETE ON items
+    WHEN OLD.tombstoned = 0
+    BEGIN
+      UPDATE on_demand_grant_epoch SET epoch = epoch + 1 WHERE id = 1;
+      INSERT INTO on_demand_grant_acquisitions (local_item_id, epoch)
+        SELECT r.local_item_id, e.epoch FROM on_demand_item_reads r CROSS JOIN on_demand_grant_epoch e
+        WHERE r.local_item_id = OLD.local_item_id AND r.source_version = COALESCE(OLD.source_version, '') AND e.id = 1
+        ON CONFLICT(local_item_id) DO UPDATE SET epoch = excluded.epoch;
+    END;
+    CREATE TRIGGER IF NOT EXISTS ${ON_DEMAND_GRANT_EPOCH_TRIGGERS[3]} AFTER UPDATE OF source_version, local_item_id, tombstoned,
+      provider, account_scope, provider_item_id, normalized_conversation, locator_uri, source_scope_folder_keys_json ON items
+    WHEN OLD.tombstoned = 0 AND (NEW.tombstoned <> 0 OR OLD.source_version IS NOT NEW.source_version
+      OR OLD.local_item_id IS NOT NEW.local_item_id OR OLD.provider IS NOT NEW.provider
+      OR OLD.account_scope IS NOT NEW.account_scope OR OLD.provider_item_id IS NOT NEW.provider_item_id
+      OR OLD.normalized_conversation IS NOT NEW.normalized_conversation OR OLD.locator_uri IS NOT NEW.locator_uri
+      OR OLD.source_scope_folder_keys_json IS NOT NEW.source_scope_folder_keys_json)
+    BEGIN
+      UPDATE on_demand_grant_epoch SET epoch = epoch + 1 WHERE id = 1;
+      INSERT INTO on_demand_grant_acquisitions (local_item_id, epoch)
+        SELECT r.local_item_id, e.epoch FROM on_demand_item_reads r CROSS JOIN on_demand_grant_epoch e
+        WHERE r.local_item_id = OLD.local_item_id AND r.source_version = COALESCE(OLD.source_version, '') AND e.id = 1
+          AND (NEW.tombstoned <> 0 OR OLD.source_version IS NOT NEW.source_version OR OLD.local_item_id IS NOT NEW.local_item_id)
+        ON CONFLICT(local_item_id) DO UPDATE SET epoch = excluded.epoch;
+    END;
+  `))();
+}
+
 /** Everything an open that is not on the fast path runs to bring a store to this build's schema, idempotently. */
-function applyConnectorStoreOpenSchema(db: Database): void {
+function applyConnectorStoreOpenSchema(db: Database, version = CONNECTOR_STORE_SQLITE_SCHEMA_VERSION): void {
   refuseUnversionedConnectorStoreSchema(db);
   LocalConnectorStore.migrateSchema(db);
-  runSqliteMigrations(db, SQLITE_STORE_ID, connectorStoreMigrations());
+  runSqliteMigrations(db, SQLITE_STORE_ID, connectorStoreMigrations().filter(migration => migration.version <= version));
   createConnectorStoreChunkMediaReleases(db);
   createConnectorStoreMediaJudgments(db);
   createConnectorStoreItemTextVersions(db);
   createConnectorStoreVisibilityTables(db);
   createStoreTotals(db, NON_SYNC_RUN_CONNECTORS_SQL);
   createConnectorStorePeopleIndex(db);
-  db.exec(`CREATE TABLE IF NOT EXISTS on_demand_item_reads (
-    local_item_id TEXT PRIMARY KEY, source_version TEXT NOT NULL, read_on_demand INTEGER NOT NULL DEFAULT 1
-  );`);
-  validateConnectorStoreSchema(db);
+  createOnDemandReads(db);
+  if (version >= 17) createOnDemandGrantEpoch(db);
+  validateConnectorStoreSchema(db, version);
 }
 
 let openShape: number | undefined;

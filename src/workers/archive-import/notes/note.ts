@@ -21,6 +21,7 @@ import { createHash } from 'node:crypto';
 import type { RawItem, SourceClassificationSignals } from '../../../core/contracts.ts';
 import type { ArchiveConnectorInput } from '../../../core/archive-formats.ts';
 import { compactClassificationSignals, signalText, signalTexts } from '../../../core/classification-signals.ts';
+import { NOTE_TAGS_METADATA_KEY } from '../../../core/source-connector-labels.ts';
 
 /** One record of a JSON export is read whole up to this size; a bigger one is reported and passed over. */
 export const NOTE_MAX_RECORD_BYTES = 16 * 1024 * 1024;
@@ -238,6 +239,6 @@ export function buildNoteItem(
 export function noteClassificationSignals(item: RawItem): SourceClassificationSignals {
   return compactClassificationSignals({
     title: signalText(item.metadata, 'title'),
-    labels: signalTexts(item.metadata, 'tags'),
+    labels: signalTexts(item.metadata, NOTE_TAGS_METADATA_KEY),
   });
 }

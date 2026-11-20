@@ -12,7 +12,7 @@ import { ledgerReadOffThread } from '../src/workers/connector-store/child-visibi
 import { setReadPoolObserverForTests, shutdownReadPool } from '../src/workers/connector-store/off-thread-reads.ts';
 import { sweepAutomaticSupersededCopies, sweepAutomaticSupersededCopiesInTurns } from '../src/workers/connector-store/tier-auto-prune-sweep.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
-import { FIXTURE_PLACEMENT, fixtureConnector, identityOf, openTierFixture, tempDir } from './helpers/tier-fixtures.ts';
+import { FIXTURE_PLACEMENT, JUDGED_PERSONAL_SNIFFER, fixtureConnector, identityOf, openTierFixture, tempDir } from './helpers/tier-fixtures.ts';
 import { createTestClock } from './helpers/test-clock.ts';
 
 const cleanup: Array<() => void> = [];
@@ -22,7 +22,7 @@ afterEach(() => {
   shutdownReadPool();
 });
 const text = 'Orchard inventory for winter.';
-const low = classifyItemTiers({ signals: { title: 'Orchard' }, text });
+const low = classifyItemTiers({ signals: { title: 'Orchard' }, text }, { sniffer: JUDGED_PERSONAL_SNIFFER });
 const high = { ...low, metadataTier: 'secure' as const, contentTier: 'secure' as const };
 const STATE = 'automatic-superseded-prune-v1';
 

@@ -52,6 +52,7 @@ import {
 import {
   CORPORA,
   FIXTURE_PLACEMENT,
+  JUDGED_PERSONAL_SNIFFER,
   cloudProvider,
   fixtureConnector,
   identityOf as identityOfFixture,
@@ -269,7 +270,13 @@ async function rehearsal(extraLibrary: readonly Spec[] = []): Promise<Rehearsal>
     },
     cloud,
     local,
-    inputs: { revision: 'map:none;rules:none' },
+    inputs: {
+      revision: 'map:none;rules:none',
+      sniffer: {
+        ...JUDGED_PERSONAL_SNIFFER,
+        judge: request => request.pass === 'content' ? JUDGED_PERSONAL_SNIFFER.judge(request) : { verdict: 'undecided' },
+      },
+    },
     domainIdentity: (domain) => identities[domain],
     fileSpecs,
   };
@@ -328,6 +335,22 @@ async function planAndApprove(context: Rehearsal) {
 }
 
 describe('tier migration M0 (dry run)', () => {
+  test('the migration CLI holds legacy text without a content judge or owner rule', async () => {
+    const context = await rehearsal();
+    const planned = await runTierMigrateCommand(['plan'], {
+      laneSpecs: context.specs,
+      env: { OLYMPUS_TIER_RULES_PATH: join(context.dir, 'rules.json') },
+      domainIdentity: context.domainIdentity,
+      paths: context.paths,
+    });
+    const planId = String(planned['plan_id']);
+    const read = lanes(context, 'read');
+    const garden = read.lanes[0]!.set.ledger.migrationProposals(planId)
+      .find(proposal => proposal.identity.providerItemId === 'garden');
+    expect(garden?.decision.contentPending).toBe(true);
+    expect(read.lanes[0]!.set.placementFor(garden!.decision)).toMatchObject({ embedHold: true });
+  });
+
   test('classifies from stored text, records proposals only, and touches no store or vector', async () => {
     const context = await rehearsal();
     const before = allStoreSnapshots(context);

@@ -55,6 +55,24 @@ test('a stale ChatGPT choice never overwrites a dashboard choice', async () => {
   expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual(loadSovereigntyPreset('local-only'));
 });
 
+test('concurrent full-profile saves from the same revision retain the first writer’s rule', async () => {
+  const { backend, path, dir } = setup();
+  saveFirstRunPrivacyChoice(path, 'local-only');
+  const opened = meta(await callSetupTool('olympus_privacy_get', {}, backend));
+  const firstRule = { kind: 'sender', source_id: 'gmail.email', value: '@first.example' } as const;
+  const secondRule = { ...firstRule, value: '@second.example' };
+  const save = backend.savePrivacy.bind(backend);
+  backend.savePrivacy = (...args) => {
+    writePrivacyProfile({ rules: [firstRule] }, { env: { HOME: dir,
+      OLYMPUS_PRIVACY_PROFILE_PATH: join(dir, 'privacy.json'), OLYMPUS_TIER_RULES_PATH: join(dir, 'rules.json') } });
+    return save(...args);
+  };
+  const result = await callSetupTool('olympus_privacy_set', { revision: opened.revision, rules: [secondRule] }, backend);
+  expect(result.structuredContent?.status).toBe('conflict');
+  expect(meta(result).rules).toEqual([firstRule]);
+  expect(backend.privacySettings().rules).toEqual([firstRule]);
+});
+
 test('the dashboard status stops asking after the ChatGPT panel saves a choice', async () => {
   const { backend, path } = setup();
   const dashboardPending = () => new ModelSetupService({ config: JSON.parse(readFileSync(path, 'utf8')), credentialState: () => 'ready', autoCheck: false }).getStatus().privacy_choice_pending;

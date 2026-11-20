@@ -111,7 +111,13 @@ async function setup(count = 260) {
   f.stores.internal!.tombstoneCopy(identityOf('parent'), { connectorId: 'fixture-deletion' });
 
   const change = async (round: number) => {
-    for (let i = 0; i < Math.min(count, 12); i++) await move(`row-${i}`, round === 1 ? 'secure' : 'private');
+    for (const spec of specs.slice(0, Math.min(count, 12))) {
+      if (round === 1) await move(spec.id, 'secure');
+      else {
+        const decision = classifyItemTiers({ signals: { title: spec.name }, text: spec.text! }, { sniffer: JUDGED_PERSONAL_SNIFFER });
+        await moveTieredItem({ set: f.set, identity: identityOf(spec.id), decision });
+      }
+    }
     // Title edits leave visibility unchanged.
     db.transaction(() => {
       db.query('UPDATE items SET title = title || ? WHERE provider_item_id LIKE ?').run(` r${round}`, 'row-%');

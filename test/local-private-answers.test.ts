@@ -1365,6 +1365,7 @@ describe('the waiting count reaches only the computer\'s control session', () =>
       makeContext: () => ({}) as never,
       indexFasterState: async () => undefined,
       waitingPrivateQuestions: () => waiting,
+      overrideReviewKinds: async () => waiting ? ['aws_access_key_id'] : [],
     });
   }
   const metaOf = (result: unknown) => ((result as { _meta?: unknown })._meta as Record<string, Record<string, unknown>> | undefined)?.[COMPUTER_META_KEY];
@@ -1378,6 +1379,15 @@ describe('the waiting count reaches only the computer\'s control session', () =>
     expect(metaOf(await panel.call(DASHBOARD_TOOL_NAME, {}, { origin: ORIGIN }))?.waitingPrivateQuestions).toBeUndefined();
     // Nothing waiting: no count at all.
     expect(metaOf(await tools(0).call(DASHBOARD_TOOL_NAME, {}, { origin: ORIGIN, opener: 'session:owner', localSession: true }))?.waitingPrivateQuestions).toBeUndefined();
+  });
+
+  test('only a local owner session receives the override review reason', async () => {
+    const panel = tools(1);
+    const read = (localSession: boolean) => panel.call(DASHBOARD_TOOL_NAME, {}, { origin: ORIGIN, localSession });
+    const owner = await read(true);
+    expect(metaOf(owner)?.overrideReviewKinds).toEqual(['aws_access_key_id']);
+    expect(JSON.stringify(owner.structuredContent)).not.toContain('aws_access_key_id');
+    expect(metaOf(await read(false))?.overrideReviewKinds).toBeUndefined();
   });
 
   test('through the HTTP boundary: only a local session\'s tool call carries the count; a bearer-minted or launch-ticket session, the bearer, and a forged grade header get nothing', async () => {

@@ -27,15 +27,21 @@ import {
   itemHasNonTextContent,
   contentDigestReason,
   contentNamesReason,
+  hasContentJudgeVerdict,
+  isContentJudgeReason,
+  namesInputReason,
+  OWNER_OVERRIDE_SECRET_REVIEW_REASON,
+  OWNER_OVERRIDE_SECRET_CONFIRMED_REASON,
   tierSnifferInputHash,
   arrivalOrderedSniffer,
   conversationOrderedSniffer,
   heldUntilJudged,
+  type ImageJudgmentSignal,
   type OwnerTierRule,
   type TierDecision,
   type TierSniffer,
 } from '../classification/tier-classifier.ts';
-import { isFailSafeMissingContentQuestion, type TierLedger, type TierLedgerIdentity, type TierLedgerRecord } from '../classification/tier-ledger.ts';
+import { RETAINED_MOVE_SOURCE_REASON, isFailSafeMissingContentQuestion, type TierLedger, type TierLedgerIdentity, type TierLedgerRecord } from '../classification/tier-ledger.ts';
 import { registeredInstalledTierClassification } from '../classification/installed-tier-classification-registry.ts';
 
 /**
@@ -95,6 +101,12 @@ export interface ConnectorStoreTierClassification {
    * Supplied by the tiered store set, which can see the parent's stored names.
    */
   parentNamesContext?: (child: TierLedgerIdentity, parentLink?: string) => string | undefined;
+}
+
+/** Live lane rules read while holding the same lease as their writer. */
+export interface TierOwnerRuleSource {
+  path: string;
+  read(): { rules: readonly OwnerTierRule[]; revision: string; unavailable?: boolean };
 }
 
 /**
@@ -198,7 +210,14 @@ export function decideItemTiers(
   ledger: TierLedger | undefined,
   extra: {
     namesOnly?: boolean;
+    requireContentVerdict?: boolean;
+    parentContext?: string;
+    imageJudgment?: ImageJudgmentSignal;
     contentFetchFailed?: boolean;
+    /** The source read a replacement for the Secret body recorded previously. */
+    freshSecretReplacement?: true;
+    /** The caller's classification snapshot, reused by its write fence. */
+    classificationRead?: ReturnType<TierLedger['classificationRead']>;
     /** The names the current content copy gives a re-judge, read only on a cache miss. */
     storedContentNames?: () => { title?: string; path?: string; sender?: string } | undefined;
     /**
@@ -208,7 +227,9 @@ export function decideItemTiers(
     afterFirstImport?: boolean;
   } = {},
 ): TierDecision {
-  const read = ledger?.classificationRead(item.identity);
+  const read = extra.classificationRead ?? ledger?.classificationRead(
+    item.identity, extra.contentFetchFailed ? undefined : text,
+  );
   const override = read?.override;
   // Only a listing that read the item's text is fresh enough to ask about an
   // item recorded Secrets (an unread one keeps the recorded content tier).
@@ -219,9 +240,9 @@ export function decideItemTiers(
     ? secretFencedSniffer(options.sniffer, ledger, item.identity, read, { mayAskSecret: fresh })
     : options?.sniffer;
   const signals = connector.classificationSignals(item);
-  const parentContext = item.identity.parent
+  const parentContext = extra.parentContext ?? (item.identity.parent
     ? options?.parentNamesContext?.(item.identity, item.identity.parent.localItemId)
-    : undefined;
+    : undefined);
   const namesReceipt = contentNamesReason(signals, parentContext);
   // A re-judge can have cached the new body with the store's representation
   // of the names. That verdict is eligible only for this same item with
@@ -248,15 +269,19 @@ export function decideItemTiers(
   // Its text, read later, is judged ahead as well (tiered-store-sink.ts, local-index.ts).
   if (newArrival && text === undefined) ledger?.markNewArrival(item.identity);
   const sniffer = cacheAware && arrivalOrderedSniffer(conversationOrderedSniffer(
-    recordedContentVerdictSniffer(cacheAware, recorded, text, namesReceipt), item.metadata,
+    recordedContentVerdictSniffer(cacheAware, recorded, text, namesReceipt, namesInputReason(signals, parentContext)), item.metadata,
   ), newArrival);
-  // Every child waits for its own judgment. Record the same hold as an
-  // archive item so later extraction and re-judging inherit it.
-  const holdUntilJudged = options?.holdContentUntilJudged === true
+  // The lane's hold, the item's own (an item built from an archive record
+  // carries it: contracts.ts, 2.2.0), or the one its stored decision carries
+  // (a store whose recording did not bring the lane's option still holds the
+  // same way, and a later version of a held item stays held until judged).
+  // Every child waits for its own judgment as well.
+  const holdUntilJudged = extra.requireContentVerdict === true
     || item.identity.parent !== undefined
+    || options?.holdContentUntilJudged === true
     || item.holdContentUntilJudged === true
     || heldUntilJudged(recorded?.reasons);
-  return classifyItemTiers(
+  const decision = classifyItemTiers(
     {
       signals,
       locators: ['locatorUri', 'url', 'pathDisplay'].map(key => item.metadata[key])
@@ -266,10 +291,11 @@ export function decideItemTiers(
       ...(extra.namesOnly ? { namesOnly: true } : {}),
       ...(holdUntilJudged ? { holdUntilJudged: true } : {}),
       ...(parentContext ? { parentContext } : {}),
+      ...(extra.imageJudgment ? { imageJudgment: extra.imageJudgment } : {}),
       mimeType: item.mimeType,
       hasNonTextContent: itemHasNonTextContent(item),
       titleIsConversation: item.metadata.titleIsConversation === true,
-      ...(read?.secret ? { heldSecret: true } : {}),
+      ...(read?.secret && !extra.freshSecretReplacement ? { heldSecret: true } : {}),
       subject: item.identity,
     },
     {
@@ -279,6 +305,16 @@ export function decideItemTiers(
       ...(options?.retirePublic ? { retirePublic: true } : {}),
     },
   );
+  // A names-only observation cannot answer a question about the stored body.
+  const unread = text === undefined || extra.contentFetchFailed === true;
+  if (unread && override?.kind === 'tier' && recorded?.reasons.includes(OWNER_OVERRIDE_SECRET_REVIEW_REASON)) {
+    return { ...decision, metadataTier: recorded.metadataTier, contentTier: recorded.contentTier, contentRead: false };
+  }
+  // A names-only observation retains the confirmation receipt with the body.
+  if (unread && override?.kind === 'tier' && recorded?.reasons.includes(OWNER_OVERRIDE_SECRET_CONFIRMED_REASON)) {
+    return { ...decision, contentRead: false };
+  }
+  return decision;
 }
 
 /**
@@ -296,21 +332,39 @@ export function recordedContentVerdictSniffer(
   recorded: TierLedgerRecord | undefined,
   text: string | undefined,
   names: string,
+  namesInput?: string,
 ): TierSniffer {
-  if (!recorded || !text?.trim() || recorded.state !== 'current' || recorded.contentPending || !recorded.contentRead) return sniffer;
+  if (!recorded || !text?.trim() || recorded.contentPending || !recorded.contentRead
+    || recorded.reasons.includes(RETAINED_MOVE_SOURCE_REASON)) return sniffer;
+  if (recorded.state !== 'current' && (recorded.state !== 'moving'
+    || !namesInput || !recorded.reasons.includes(namesInput))) return sniffer;
   if (recorded.engineVersion !== TIER_CLASSIFIER_VERSION || !recorded.reasons.includes(contentDigestReason(text))
     || !recorded.reasons.includes(names)) return sniffer;
   // The sniffer's verdict is the content tier, unless something else raised it: kept as recorded, never lower.
-  const tier = recorded.contentTier;
+  const tier = recorded.targetContentTier ?? recorded.contentTier;
   const prefix = `content:sniffer:${sniffer.id}:`;
   const code = recorded.reasons.find((reason) => reason.startsWith(prefix))?.slice(prefix.length);
   if ((tier !== 'private' && tier !== 'secure') || !code || code === 'undecided'
     || isFailSafeMissingContentQuestion(`${prefix}${code}`)) return sniffer;
+  const digest = contentDigestReason(text);
+  const reason = prefix + code;
+  // Pre-binding ledgers stored the decided tier, model reason, names and digest together.
+  const legacyVerdict = recorded.state === 'current' && recorded.decidedBy === 'sniffer'
+    && recorded.reasons.filter(r => r.startsWith('content:sha256:')).length === 1
+    && recorded.reasons.filter(r => r.startsWith('content:names:')).length === 1
+    && recorded.reasons.filter(r => r.startsWith('content:sniffer:')).length === 1
+    && !recorded.reasons.some(r => r.startsWith('content:judge_verdict:'))
+    && isContentJudgeReason(reason);
+  const judgeBacked = legacyVerdict || hasContentJudgeVerdict(recorded.reasons, tier, digest);
+  if (tier === 'private' && !judgeBacked) return sniffer;
+  const duplicate = judgeBacked && code.startsWith('rule:duplicate_model:');
+  const verdict = { tier, code, ...(duplicate ? { rule: 'duplicate_model' } : {}),
+    ...(judgeBacked ? { origin: duplicate ? 'rule' as const : 'model' as const } : {}) };
   return {
     id: sniffer.id,
-    recordedContentVerdict: { tier, code, mapRevision: recorded.mapRevision },
+    recordedContentVerdict: { ...verdict, mapRevision: recorded.mapRevision },
     judge: (request) => request.pass === 'content' && (request.mapRevision ?? 'none') === recorded.mapRevision
-      ? { verdict: 'decided', tier, code }
+      ? { verdict: 'decided', ...verdict }
       : sniffer.judge(request),
   };
 }

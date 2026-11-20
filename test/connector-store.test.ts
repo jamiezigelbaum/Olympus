@@ -2251,7 +2251,7 @@ describe('LocalConnectorStore reactions', () => {
     await store.syncFromConnector(createChatConnector([reactedChatItem(THUMBS_UP_BY_TWO)]), { fetchContent: true });
     store.close();
 
-    expect(connectorStoreQualificationFingerprint(dbPath).schemaVersion).toBe(16);
+    expect(connectorStoreQualificationFingerprint(dbPath).schemaVersion).toBe(17);
 
     const db = new Database(dbPath, { readonly: true });
     try {
@@ -2285,6 +2285,13 @@ describe('LocalConnectorStore reactions', () => {
     // serve would take the answer path down for a purely additive column.
     const rewind = rawStore(dbPath);
     try {
+      rewind.exec(`
+        DROP TRIGGER on_demand_item_update;
+        DROP TRIGGER on_demand_item_delete;
+        DROP TABLE on_demand_item_reads;
+        DROP TABLE on_demand_grant_epoch;
+        DROP TABLE on_demand_grant_acquisitions;
+      `);
       rewind.exec('DROP INDEX IF EXISTS idx_connector_store_items_parent;');
       rewind.exec('ALTER TABLE items DROP COLUMN parent_local_item_id;');
       rewind.exec('ALTER TABLE items DROP COLUMN deferred_locator;');

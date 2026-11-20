@@ -771,6 +771,7 @@ export function renderComputerHostPage(input: ComputerHostPageInput): string {
   for (const page of Object.keys(DASHBOARD_LOCAL_PAGES) as DashboardLocalPage[]) {
     links[page] = `${input.origin}${dashboardLocalPageHref(page, token)}`;
   }
+  links.overrideReviews = `${links.privacyItems}#override-review`;
   const bridge: DashboardHostBridgeConfig = {
     contextKey: OLYMPUS_HOST_CONTEXT_KEY,
     kind: 'computer',

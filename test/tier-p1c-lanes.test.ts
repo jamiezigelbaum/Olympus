@@ -34,7 +34,7 @@ import {
 } from '../src/workers/readwise/tier-set.ts';
 import { createWhatsAppTierLane, WHATSAPP_STORE_PLACEMENT } from '../src/workers/whatsapp/store-sync.ts';
 import { X_BOOKMARKS_SECURE_CORPUS_ID, createXBookmarksTierLane } from '../src/workers/x-bookmarks/tier-set.ts';
-import { cloudProvider, localProvider, snapshotStore } from './helpers/tier-fixtures.ts';
+import { cloudProvider, expectHeldThenPersonal, localProvider, snapshotStore } from './helpers/tier-fixtures.ts';
 import { privacyRuleToTierRule } from '../src/workers/classification/privacy-profile.ts';
 import {
   LocalXBookmarksApiUsageStore,
@@ -231,6 +231,8 @@ describe('P1c Dropbox lane', () => {
     });
     expect((await land('id:integral', 'Integral theory maps quadrants, levels and lines of development.')).accepted).toBe(true);
     expect((await land('id:scan', 'The lab results confirm the diagnosis; patient SSN 123-45-6789 is on file.')).accepted).toBe(true);
+    await expectHeldThenPersonal(lane.set, { family: 'file', provider: 'dropbox', accountScope: 'personal',
+      providerItemId: 'id:integral', localItemId: 'personal:id:integral' }, 'quadrants');
     // Reference material is Personal: searchable (and cloud-embeddable) in the Personal store.
     expect(ids(internal, 'quadrants')).toEqual(['id:integral']);
     // Private content stays Private; its names stay Personal.
@@ -316,6 +318,8 @@ describe('P1c: the owner\'s privacy rules and the shared detectors judge every n
     expect(ids(secure, 'sleep')).toEqual(['id:session']);
     expect(ids(secure, 'board')).toEqual(['id:memo']);
     expect(ids(lane.internal.current(), 'board')).toEqual([]);
+    await expectHeldThenPersonal(lane.set, { family: 'file', provider: 'dropbox', accountScope: 'personal',
+      providerItemId: 'id:book', localItemId: 'personal:id:book' }, 'cartography');
     expect(ids(lane.internal.current(), 'cartography')).toEqual(['id:book']);
 
     const cloud = cloudProvider();
@@ -373,17 +377,15 @@ describe('P1c X content recovery', () => {
       ['internal.x.bookmarks', 'metadata'],
       ['secure_local.x.bookmarks', 'content'],
     ]);
-    const recovery = (withLedger: boolean) => createXBookmarksContentRecoveryHandler({
+    const recovery = createXBookmarksContentRecoveryHandler({
       store,
+      tierSet: lane.set,
       usageStore: usage,
       account: 'personal',
       userId: 'provider-user-1',
-      ...(withLedger ? { tierLedger: lane.ledger } : {}),
       sourceClient: { async fetchPostsByIds() { throw new Error('no provider call expected'); } },
     });
-    // Without the ledger the repair would take the names copy as recoverable.
-    expect((await recovery(false).recover({ limit: 10 })).status).toBe('planned');
-    const guarded = await recovery(true).recover({ execute: true, limit: 10 });
+    const guarded = await recovery.recover({ execute: true, limit: 10 });
     expect(guarded.status).toBe('nothing_to_recover');
     expect(guarded.counts.candidates_tier_routed).toBe(1);
     expect(ids(store, 'diagnosis')).toEqual([]);
@@ -391,7 +393,7 @@ describe('P1c X content recovery', () => {
 });
 
 describe('P1c Readwise and X lanes', () => {
-  test('existing items stay byte-identical; a new item rests Personal at the lane tier, is raised to Private by its text, or is Secrets', async () => {
+  test('re-listed text waits for judgment; new text is placed by its classification', async () => {
     const root = workspace();
     const env = { HOME: join(root, 'home') };
     const internalPath = join(root, 'readwise.sqlite');
@@ -427,7 +429,12 @@ describe('P1c Readwise and X lanes', () => {
     await lane.set.sync(laneConnector('readwise', 'readwise', () => specs), { fetchContent: true, placement: READWISE_STORE_PLACEMENT });
     await lane.set.sync(laneConnector('readwise', 'readwise', () => specs), { fetchContent: true, placement: READWISE_STORE_PLACEMENT });
 
-    expect(snapshotStore(internalPath, ['personal:hl-old'])).toEqual(before);
+    const relisted = snapshotStore(internalPath, ['personal:hl-old']);
+    expect(relisted.chunks).toEqual([]);
+    expect(relisted.vectors).toEqual([]);
+    expect(relisted.authority).toEqual(before.authority);
+    expect(lane.ledger.copies({ provider: 'readwise', accountScope: 'personal', providerItemId: 'hl-old' }))
+      .toContainEqual(expect.objectContaining({ trustDomain: 'secure_local', embedHold: true }));
     expect(invalidate).not.toHaveBeenCalled();
     expect(cloud.inputs.some((input) => input.includes('attention and practice'))).toBe(false);
 
@@ -522,7 +529,7 @@ describe('P1c WhatsApp lane: each message tiered by its content', () => {
       .toMatchObject({ metadataTier: 'secure' });
   });
 
-  test('existing messages stay byte-identical and are never routed', async () => {
+  test('an owner rule queues re-listed messages for lowering and preserves their source until the move', async () => {
     const root = workspace();
     const legacy: Spec[] = [{ id: 'old', conversation: 'chat-a', title: 'Garden club', text: 'Old message about seedlings.' }];
     {
@@ -535,7 +542,8 @@ describe('P1c WhatsApp lane: each message tiered by its content', () => {
     const { sync, lane, internal } = openLane(root, rules);
     await sync(legacy);
     expect(snapshotStore(join(root, 'whatsapp.db'))).toEqual(before);
-    expect(lane.ledger.isRouted({ provider: 'whatsapp', accountScope: 'personal', providerItemId: 'old', providerConversationId: 'chat-a' })).toBe(false);
+    expect(lane.ledger.getCurrent({ provider: 'whatsapp', accountScope: 'personal', providerItemId: 'old', providerConversationId: 'chat-a' }))
+      .toMatchObject({ routed: true, state: 'moving', targetContentTier: 'private' });
     expect(internal()).toBeUndefined();
   });
 

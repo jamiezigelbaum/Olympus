@@ -21,6 +21,8 @@ const URL_ITEMS = new URL('http://127.0.0.1:8010/dashboard?privacy-items');
 interface Item {
   item_id: string; source: string; family: string; title: string | null; sender: string | null; location: string | null;
   tier: string | null; names_tier: string | null; decided_by: string | null; owner_set: boolean; judge_reason: string | null;
+  override_review?: { kinds: string[]; digest: string };
+  override_finding_kinds?: string[];
   decided_at: string | null; preview?: string | null; owner_choice?: string; waiting_for_judge?: true; names_only?: true; not_read?: { kind: 'by_choice' } | { kind: 'cannot_read'; reason: string };
 }
 
@@ -44,11 +46,11 @@ function render(options: NonNullable<Parameters<typeof renderDashboardLocalPage>
 
 /** The page on a local session, its script run against a stubbed engine, on the shared test clock. */
 async function page(items: Item[], options: {
-  narrow?: boolean; refuse?: boolean; hold?: boolean; pending?: boolean;
+  hash?: string; narrow?: boolean; refuse?: boolean; hold?: boolean; pending?: boolean;
   fetch?: (path: string, body: Record<string, unknown>) => Promise<Response>;
 } = {}) {
   const html = render({ controlSessionCsrfToken: 'csrf-token', outsideHelpLocalSession: true });
-  const window = new Window({ url: URL_ITEMS.href });
+  const window = new Window({ url: URL_ITEMS.href + (options.hash ?? '') });
   windows.push(window);
   const document = window.document;
   const body = html.slice(html.indexOf('<body'), html.lastIndexOf('</body>'));
@@ -92,7 +94,7 @@ async function page(items: Item[], options: {
       result = {
         ok: true,
         items: state.filter((item) => (!words || (item.title ?? '').toLowerCase().includes(words))
-          && (filter === undefined || (filter === 'changed' ? item.owner_set : item.tier === (filter === 'personal' ? 'Personal' : 'Private'))))
+          && (filter === undefined || (filter === 'override_review' ? !!item.override_review : filter === 'changed' ? item.owner_set : item.tier === (filter === 'personal' ? 'Personal' : 'Private'))))
           .map(({ judge: _judge, ...item }) => item),
         counts: { personal: 47_006, private: 1_204, changed: state.filter((item) => item.owner_set).length },
       };
@@ -102,6 +104,7 @@ async function page(items: Item[], options: {
       const item = state.find((candidate) => candidate.item_id === request.item_id)!;
       if (request.tier === 'judge') Object.assign(item, { tier: item.judge, owner_set: false });
       else Object.assign(item, { tier: request.tier === 'personal' ? 'Personal' : 'Private', owner_set: true, judge_reason: null });
+      delete item.override_review;
       const { judge: _judge, preview: _preview, ...shown } = item;
       result = { ok: true, item: shown, changed: request.tier === 'judge' ? 'cleared' : 'set', applies: 'now', results: [] };
     }
@@ -362,6 +365,38 @@ describe('finding an item', () => {
     await flushMicrotasks();
     expect(p.text('[data-pi-msg]')).toBe(C.noMatch);
   });
+});
+
+describe('reviewing a changed Personal override', () => {
+  test('an unchanged Personal item shows the finding with the ordinary item controls', async () => {
+    const item = { ...invoice(), tier: 'Personal', owner_set: true, override_finding_kinds: ['api_key'] };
+    const p = await page([item]);
+    await p.click('[data-pi-item="oti_inv"]');
+    expect(p.text('[data-pi-detail]')).toContain('Olympus found a possible secret (api key) in text you marked Personal.');
+    expect(p.text('[data-pi-detail]')).not.toContain(C.confirmReview);
+    expect(p.text('[data-pi-detail]')).not.toContain(C.liftOverride);
+    expect(p.text('[data-pi-item] .pipill')).toBe('Personal');
+  });
+
+  for (const choice of ['personal', 'judge'] as const) {
+    test(`the review opens the held item and binds ${choice} to the displayed text`, async () => {
+      const item = { ...invoice(), owner_set: true, owner_choice: 'Personal', override_review: { kinds: ['api_key'], digest: 'a'.repeat(64) } };
+      const p = await page([item], { hash: '#override-review' });
+      expect(p.posts[0]?.body).toEqual({ recent: true, filter: 'override_review' });
+      await p.click('[data-pi-item="oti_inv"]');
+      expect(p.text('[data-pi-detail]')).toContain('api key');
+      expect(p.text('[data-pi-detail]')).not.toContain(item.preview!);
+      expect(p.text('[data-pi-item] .pipill')).toBe('Private');
+      if (choice === 'personal') {
+        await p.click('[data-pi-choose="Personal"]');
+        expect(p.dialogOpen()).toBe(true);
+        await p.click('[data-pi-confirm-ok]');
+      } else {
+        await p.click('[data-pi-undo]');
+      }
+      expect(p.sets()).toEqual([{ item_id: item.item_id, tier: choice, review_digest: item.override_review.digest }]);
+    });
+  }
 });
 
 describe('the filters', () => {

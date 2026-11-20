@@ -8,12 +8,9 @@
 // is classified once, and the set routes it.
 //
 // Routing (phase P1b):
-// - NEW items only. An item is new when no store of the set has ever held a
-//   row for it and the ledger has never routed it. Everything else is
-//   "legacy" and takes the lane's own placement, byte-for-byte the P1a path:
-//   nothing stored before P1b moves, is re-embedded or is deleted.
-// - A new item is routed only from a decision made on text the set actually
-//   read. Unread content stays where the lane places it today.
+// - A legacy row joins the set when the lane reads its body. Its physical
+//   copies are adopted as the sources of any change in placement.
+// - A lane that reads its content later can route its names separately.
 // - A names question holds the whole item. Every open content question holds
 //   its text in Private until judged (#1316).
 // - Otherwise the metadata row goes to the metadata tier's store and the
@@ -67,16 +64,20 @@ import type { SecretLocationsIndex } from '../classification/secret-locations.ts
 import {
   CONTENT_NAMES_ONLY_LIFTED_REASON,
   CONTENT_NAMES_ONLY_REASON,
+  OWNER_OVERRIDE_SECRET_REVIEW_REASON,
+  contentDigestReason,
   maxTier,
   hasCredentialUrl,
   contentHeldForJudgment,
-  heldUntilJudged,
+  personalContentAuthorized,
+  type ImageJudgmentSignal,
   type TierDecidedBy,
   type TierDecision,
   type TierKey,
 } from '../classification/tier-classifier.ts';
 import {
   copyServingLayer,
+  movingObservation,
   placementIsRaise,
   tierLedgerIdentityKey,
   tierLedgerPathForStore,
@@ -111,6 +112,7 @@ import {
   defaultStoreTrustTier,
   resolveStoreTierClassification,
   type ConnectorStoreTierClassification,
+  type TierOwnerRuleSource,
 } from './tier-placement.ts';
 import { registerTierSetPlanner, registeredInstalledTierClassification, type AutomaticTierMoveContext } from '../classification/installed-tier-classification-registry.ts';
 import { registerTierSetForLedger } from './tier-set-registry.ts';
@@ -210,6 +212,8 @@ export interface TieredStoreSetOptions {
   /** Whether an item's names and body may live in different stores. Default true. */
   splitLayers?: boolean;
   tierClassification?: ConnectorStoreTierClassification;
+  ownerRulesPath?: string;
+  ownerRuleSource?: TierOwnerRuleSource;
   secretLocations?: SecretLocationsIndex;
   /** Told once when a lazily created leg opens, so a runtime can serve it. */
   onLegOpened?: (store: LocalConnectorStore, leg: TieredStoreLegSpec) => void;
@@ -248,6 +252,8 @@ export interface TieredStoreSetOptions {
    * (the sniffer, moves) find. Default true.
    */
   registerWithLedger?: boolean;
+  /** A stopped-engine rollback only opens the stores needed for its synchronous moves. */
+  skipOpeningMaintenance?: true;
 }
 
 export interface TieredStoreLegRun {
@@ -289,8 +295,8 @@ export interface TieredStoreSetRun {
 }
 
 type Plan =
-  | { kind: 'legacy' }
-  | { kind: 'routed'; copies: ReadonlyMap<string, TierCopyLayers>; sensitivity: ReadonlyMap<string, SourceSensitivity> }
+  | { kind: 'legacy'; reobserveOnly?: true }
+  | { kind: 'routed'; writeListedBody?: true; copies: ReadonlyMap<string, TierCopyLayers>; sensitivity: ReadonlyMap<string, SourceSensitivity> }
   | { kind: 'hold'; reason: 'move_queued' | 'content_unread' | 'secrets'; location?: true }
   | { kind: 'delete'; corpora: ReadonlySet<string>; reason: 'provider_deleted' | 'secrets'; location?: true };
 
@@ -304,6 +310,8 @@ export class TieredStoreSet {
   readonly setId: string;
   readonly automaticMoveContext: AutomaticTierMoveContext | undefined;
   readonly ledger: TierLedger;
+  readonly ownerRulesPath: string | undefined;
+  readonly ownerRuleSource: TierOwnerRuleSource | undefined;
   private readonly legs: Map<SourceTrustDomain, { spec: TieredStoreLegSpec; store: LocalConnectorStore | undefined }>;
   private readonly splitLayers: boolean;
   private readonly tierClassification: ConnectorStoreTierClassification | undefined;
@@ -326,6 +334,8 @@ export class TieredStoreSet {
     this.setId = options.setId;
     this.automaticMoveContext = options.automaticMoveContext ?? registeredInstalledTierClassification()?.automaticMoveContext;
     this.ledger = options.ledger;
+    this.ownerRulesPath = options.ownerRulesPath;
+    this.ownerRuleSource = options.ownerRuleSource;
     this.splitLayers = options.splitLayers !== false;
     this.tierClassification = options.tierClassification;
     this.secretLocations = options.secretLocations;
@@ -354,7 +364,7 @@ export class TieredStoreSet {
       registerTierSetForLedger(this.ledger.dbPath, this);
     }
     // Repairs and sweeps write; in the engine split's front the background does them.
-    if (!writableStoreOpensForbidden()) {
+    if (!writableStoreOpensForbidden() && !options.skipOpeningMaintenance) {
       void this.repairLowerContent();
       // Orphans left by a parent that went while the worker was down.
       void this.sweepOrphanedChildren();
@@ -732,6 +742,16 @@ export class TieredStoreSet {
     };
   }
 
+  /** Accept a Personal content placement only with authority for the supplied body. */
+  checkedBodyDecision(identity: SourceItemIdentity, decision: TierDecision, text: string, imageJudgment?: ImageJudgmentSignal): TierDecision {
+    if (decision.contentPending) return decision;
+    const destination = copyServingLayer(this.placementFor(decision).copies, 'content');
+    const override = this.ledger.getOverride(identity);
+    return destination?.trustDomain === 'internal'
+      && !personalContentAuthorized(decision, text, override?.kind === 'not_secret', override, imageJudgment)
+      ? { ...decision, state: 'pending', contentPending: true } : decision;
+  }
+
   /**
    * Tell the set which embedder the Private store really uses when its leg
    * declares none (a lane whose embedder is chosen at runtime and handed to a
@@ -1075,6 +1095,29 @@ export class TieredStoreSet {
     return TIER_DOMAIN_ORDER.every((domain) => this.store(domain)?.itemPresence(identity).active !== true);
   }
 
+  /** Adopt the active physical copies as the source of the item's first routed decision. */
+  adoptLegacyItem(identity: SourceItemIdentity) {
+    const current = this.ledger.getCurrent(identity);
+    if (current?.routed) return current;
+    const copies: TierCopyPlan[] = [];
+    for (const domain of TIER_DOMAIN_ORDER) {
+      const store = this.store(domain);
+      const row = store?.storedItemState(identity);
+      if (!store || !row || row.tombstoned) continue;
+      store.bindTierSet(this.ledger);
+      copies.push({ corpusId: store.corpusId, trustDomain: domain, layers: row.chunkCount > 0 ? 'both' : 'metadata' });
+    }
+    // With only stubs, the most private existing row is the landing for incoming text before a lowering.
+    const last = copies.at(-1);
+    if (last && !copyServingLayer(copies, 'content')) last.layers = 'both';
+    const domain = last?.trustDomain;
+    if (!domain) return current;
+    const tier = domain === 'secure_local' ? 'secure' : domain === 'internal' ? 'private' : 'public';
+    return this.ledger.adoptLegacyPlacement(identity, copies, {
+      whenMissing: { family: identity.family, metadataTier: tier, contentTier: tier },
+    });
+  }
+
   /** @internal Whether any store of the set has ever held a row for this item. */
   anyLegHasRow(identity: SourceItemIdentity): boolean {
     return TIER_DOMAIN_ORDER.some((domain) => this.store(domain)?.hasItemRow(identity) === true);
@@ -1283,12 +1326,19 @@ export class TieredStoreSet {
   }
 
   /** @internal */
-  classification(): ConnectorStoreTierClassification | undefined {
+  classification(ownerRules = this.ownerRuleSource?.read()): ConnectorStoreTierClassification | undefined {
     // The lane's own inputs merged with the owner's installed ones (the map
     // and rules file re-read when edited, the sniffer), keyed by the set
     // ledger the sniffer's queue sits beside. Resolved per call, so an edited
     // map or rules file applies at the next pass.
-    const resolved = resolveStoreTierClassification(this.tierClassification, this.ledger.dbPath);
+    const installed = resolveStoreTierClassification(this.tierClassification, this.ledger.dbPath);
+    const resolved = ownerRules && (ownerRules.rules.length > 0 || ownerRules.unavailable)
+      ? {
+        ...installed,
+        rules: [...(installed?.rules ?? []), ...ownerRules.rules],
+        ...(ownerRules.unavailable ? { unavailableReason: 'owner_rules_unavailable' } : {}),
+      }
+      : installed;
     // A child item is judged with its parent's names as context: only this
     // set can see the parent's stored names (parent-context.ts).
     return resolved
@@ -1344,6 +1394,8 @@ export interface LaneTieredStoreSetOptions {
   secureEmbeddingProvider?: SourceEmbeddingProvider;
   splitLayers?: boolean;
   tierClassification?: ConnectorStoreTierClassification;
+  ownerRulesPath?: string;
+  ownerRuleSource?: TierOwnerRuleSource;
   secretLocations?: SecretLocationsIndex;
   /** Default: the secure store's own co-located ledger (tieredStoreSetLedgerPath). */
   ledger?: TierLedger;
@@ -1369,6 +1421,8 @@ export function createLaneTieredStoreSet(options: LaneTieredStoreSetOptions): Ti
     ledger,
     ...(options.splitLayers === false ? { splitLayers: false } : {}),
     ...(options.tierClassification ? { tierClassification: options.tierClassification } : {}),
+    ...(options.ownerRulesPath ? { ownerRulesPath: options.ownerRulesPath } : {}),
+    ...(options.ownerRuleSource ? { ownerRuleSource: options.ownerRuleSource } : {}),
     ...(options.secretLocations ? { secretLocations: options.secretLocations } : {}),
     ...(options.onLegOpened ? { onLegOpened: options.onLegOpened } : {}),
     ...(options.contentArrivesLaterFor ? { contentArrivesLaterFor: options.contentArrivesLaterFor } : {}),
@@ -1416,6 +1470,8 @@ export interface TieredLaneSetOptions {
   legs: Partial<Record<SourceTrustDomain, TieredLaneLeg>> & { secure_local: TieredLaneLeg };
   splitLayers?: boolean;
   tierClassification?: ConnectorStoreTierClassification;
+  ownerRulesPath?: string;
+  ownerRuleSource?: TierOwnerRuleSource;
   secretLocations?: SecretLocationsIndex;
   /**
    * Default: the ledger co-located with the secure_local store's path (its own
@@ -1467,6 +1523,8 @@ export function createTieredLaneSet(options: TieredLaneSetOptions): TieredStoreS
     legs,
     ...(options.splitLayers === false ? { splitLayers: false } : {}),
     ...(options.tierClassification ? { tierClassification: options.tierClassification } : {}),
+    ...(options.ownerRulesPath ? { ownerRulesPath: options.ownerRulesPath } : {}),
+    ...(options.ownerRuleSource ? { ownerRuleSource: options.ownerRuleSource } : {}),
     ...(options.secretLocations ? { secretLocations: options.secretLocations } : {}),
     ...(options.onLegOpened ? { onLegOpened: options.onLegOpened } : {}),
     ...(options.contentArrivesLater === true ? { contentArrivesLater: true } : {}),
@@ -1791,7 +1849,7 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     const key = planKey(input.item);
     let entry = this.plans.get(key);
     if (!entry) {
-      entry = { plan: this.planFor(input), identity: input.item.identity, handedOff: false };
+      entry = { plan: this.classifyAndPlan(input), identity: input.item.identity, handedOff: false };
       this.plans.set(key, entry);
     }
     this.versionPlans.set(versionKey(input.item), entry.plan.kind);
@@ -1846,17 +1904,6 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
       for (const domain of text) this.set.store(domain)?.stripCopyContent(item.identity);
     }
     this.pendingWithdrawals.clear();
-    for (const move of this.cachedLowerings.values()) {
-      await ingestionTurn();
-      // Without automatic-move authority, leave this queued for the executor.
-      const context = this.set.automaticMoveContext;
-      if (!context || !automaticTierMovesAllowed(this.set, context)) continue;
-      // The normal mover checks the complete stored-text digest again under
-      // its generation fence, then verifies the destination before release.
-      await moveTieredItem({ set: this.set, identity: move.identity, target: move.target,
-        ...automaticTierMoveOptions(this.set, context), expectedGeneration: move.generation });
-    }
-    this.cachedLowerings.clear();
     // Every store write this flush made is durable before the ledger (FULL)
     // removes copy rows or clears write intents on it: a store (NORMAL) that
     // a power cut rolls back is then still owed its write by the ledger.
@@ -1886,6 +1933,15 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     }
     if (cleared.length > 0) await barrier();
     for (const identity of cleared) this.set.ledger.clearWriteIntent(identity);
+    for (const move of this.cachedLowerings.values()) {
+      await ingestionTurn();
+      const context = this.set.automaticMoveContext;
+      if (!context || !automaticTierMovesAllowed(this.set, context)
+        || this.set.ledger.getCurrent(move.identity)?.generation !== move.generation) continue;
+      await moveTieredItem({ set: this.set, identity: move.identity, target: move.target,
+        ...automaticTierMoveOptions(this.set, context), expectedGeneration: move.generation });
+    }
+    this.cachedLowerings.clear();
     this.intents.clear();
     this.namesAdvance.clear();
     this.emptied.clear();
@@ -1894,6 +1950,7 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
   private routeFor(plan: Plan, corpusId: string, domain: SourceTrustDomain): ConnectorStoreTierRoute {
     switch (plan.kind) {
       case 'legacy':
+        if (plan.reobserveOnly) return { kind: 'elsewhere', reason: 'routed_to_other_tier' };
         return this.set.legSpec(domain)?.legacy === true
           ? { kind: 'legacy' }
           : { kind: 'elsewhere', reason: 'routed_to_other_tier' };
@@ -1901,7 +1958,7 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
         const layers = plan.copies.get(corpusId);
         const sensitivity = plan.sensitivity.get(corpusId);
         return layers && sensitivity
-          ? { kind: 'store', sensitivity, layer: layers }
+          ? { kind: 'store', sensitivity, layer: layers, ...(plan.writeListedBody ? { writeListedBody: true } : {}) }
           : { kind: 'elsewhere', reason: 'routed_to_other_tier' };
       }
       case 'hold':
@@ -1919,15 +1976,13 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     }
   }
 
-  private planFor(input: ConnectorStoreTierRouteInput): Plan {
+  private classifyAndPlan(input: ConnectorStoreTierRouteInput): Plan {
     const { item, connector } = input;
     const identity = item.identity;
     const ledger = this.set.ledger;
-    // Legacy first: an item any store already holds a row for, that this
-    // set's ledger never routed, is the lane's — whatever else the ledger
-    // says about other items.
     const hasRow = this.set.anyLegHasRow(identity);
-    const routed = ledger.isRouted(identity);
+    const before = ledger.getCurrent(identity);
+    const routed = before?.routed === true;
     if (item.metadata['deleted'] === true) {
       this.cachedLowerings.delete(identityKey(identity));
       this.set.secrets()?.remove(identity);
@@ -1963,14 +2018,32 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
       && (input.metadataOnly || CONTAINER_MIME_TYPES.includes(item.mimeType?.trim().toLowerCase() ?? '')
         || this.set.ownerKeepsNamesOnly(pathOf(sourceExclusionFactsFromMetadata(item.metadata).path)));
     const text = namesOnly ? undefined : connectorStoreItemText(item);
+    const override = before?.contentTier === 'secrets' && text?.trim() && !input.contentFetchFailed
+      ? ledger.getOverride(identity) : undefined;
+    let freshSecretReplacement = false;
+    if (override?.kind === 'tier' && (override.tier === 'private' || override.tier === 'public') && text !== undefined) {
+      const oldHash = this.set.secrets()?.get(identity)?.contentHash;
+      const sourceVersion = typeof item.metadata.contentVersion === 'string' ? item.metadata.contentVersion : identity.sourceVersion;
+      freshSecretReplacement = oldHash !== undefined && oldHash !== null
+        ? oldHash !== createHash('sha256').update(text).digest('hex')
+        : sourceVersion === undefined || !TIER_DOMAIN_ORDER.some(domain => this.set.store(domain)?.storedItemState(identity)?.version === sourceVersion);
+    }
     // The owner's installed inputs (map, rules file, sniffer) merged with the
     // set's own (TieredStoreSet.classification()), resolved once per run.
     const classification = this.classification;
     // Names-only by the owner's choice: the text never arrives, so the names
     // are the whole decision and the item never waits on it.
+    // Re-observing an existing copy can refresh its owner without writing body bytes.
+    const repeatedLegacyBody = !routed && hasRow && text !== undefined && !input.contentFetchFailed && !input.sourceScope
+      && this.set.store(input.legacy.trustDomain)?.repeatsListedCopy(item, text, connector.id);
+    const arrivingBody = text !== undefined && (routed
+      ? !before.reasons.includes(contentDigestReason(text)) && ledger.copies(identity).length > 0
+      : hasRow && !repeatedLegacyBody);
     let decision = decideItemTiers(connector, item, text, classification, ledger, {
       namesOnly,
+      requireContentVerdict: arrivingBody,
       afterFirstImport: ledger.listingCaughtUp(connector.id),
+      ...(freshSecretReplacement ? { freshSecretReplacement: true } : {}),
       ...(input.contentFetchFailed ? { contentFetchFailed: true } : {}),
       storedContentNames: () => {
         const serving = copyServingLayer(ledger.copies(identity).filter(copy => copy.state === 'current'), 'content');
@@ -1987,20 +2060,25 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     }
     this.recordSecretLocation(input, text, decision);
     const contentRead = decision.contentRead && !input.contentFetchFailed;
+    if (repeatedLegacyBody && decision.state === 'current' && decision.decidedBy === 'default'
+      && decision.metadataTier === 'private' && decision.contentTier === 'private'
+      && decision.reasons.includes('content:no_raise') && !ledger.writeIntent(identity)) {
+      this.counts.itemsLegacy += 1;
+      return { kind: 'legacy', reobserveOnly: true };
+    }
+    if ((arrivingBody || (!routed && hasRow)) && contentRead && text !== undefined) {
+      decision = this.set.checkedBodyDecision(identity, decision, text);
+    }
     if (!routed) {
-      // Only a NEW item is routed. In P1b lanes it must also be judged from
-      // text actually read; metadata-only dispositions and unread content keep
-      // the lane's placement. A lane whose text arrives later routes a new
-      // item by its names now and its content when the text lands.
-      // Rows that are all tombstones (a deletion recorded for an item no store held) are not a lane's item: a newer
-      // record routes it afresh.
-      const laneRow = hasRow && (TIER_DOMAIN_ORDER.some((domain) => this.set.store(domain)?.itemPresence(identity).active === true) || !ledger.isUnseenDeletion(identity));
-      if (laneRow || (!deferred && (!contentRead || input.metadataOnly))) {
+      // An unread legacy row keeps its placement. A re-listed body enters
+      // routing against the copies that actually hold the item.
+      const laneRow = hasRow && (!ledger.isUnseenDeletion(identity) || !this.set.routedWithoutAnyCopyRow(identity));
+      if ((laneRow && text === undefined) || ((laneRow || !deferred) && (!contentRead || input.metadataOnly))) {
         this.counts.itemsLegacy += 1;
         return { kind: 'legacy' };
       }
     } else if (!contentRead) {
-      if (!deferred) {
+      if (!deferred && !(before?.state === 'moving' && decision.contentTier === 'secrets')) {
         // A routed item seen without its text: nothing proves its content
         // tier, so its copies are left exactly as they are.
         this.counts.contentUnreadHeld += 1;
@@ -2015,7 +2093,9 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
         // classifier) replaces the stored text, unlike a record that has no body to give.
         const emptied = text !== undefined && text.trim() === '' && item.content.kind !== 'metadata_only' && !input.contentFetchFailed;
         if (emptied && !((owed?.kind === 'content' || owed?.kind === 'names') && !this.intents.has(key) && owed.version !== identity.sourceVersion)) {
-          this.writeIntent(connector.id, identity, 'content', () => undefined, undefined,
+          this.writeIntent(connector.id, identity, 'content', () => {
+            if (before?.state === 'moving') ledger.recordDecision(identity, decision);
+          }, undefined,
             typeof item.metadata['contentVersion'] === 'string' && item.metadata['contentVersion'] !== identity.sourceVersion ? item.metadata['contentVersion'] : undefined);
           this.emptied.set(key, identity);
           this.namesAdvance.set(key, identity);
@@ -2029,16 +2109,51 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
           else if (owed.version === identity.sourceVersion) this.owedAlready.add(key);
           return { kind: 'hold', reason: 'content_unread' };
         }
-        this.writeIntent(connector.id, identity, 'advance', () => undefined);
+        const observed = this.writeIntent(connector.id, identity, 'advance',
+          () => before?.state === 'moving' ? ledger.recordDecision(identity, decision, undefined,
+            input.contentFetchFailed ? { contentFetchOwed: true } : undefined) : undefined,
+          result => result?.outcome === 'updated' && input.contentFetchFailed ? { kind: 'content' } : undefined);
+        if (observed?.outcome === 'updated') {
+          this.cachedLowerings.delete(key);
+          if (input.contentFetchFailed) this.intents.delete(key);
+        }
         return { kind: 'hold', reason: 'content_unread' };
       }
       // Re-listed without text in a lane whose text arrives later: the names
       // are judged afresh, the content half stays what its text decided. Not
       // for an item back after a deletion: that removed its copies and its
       // text, so its text is read and judged again like a new item's.
-      if (ledger.copies(identity).length > 0) decision = withRecordedContent(decision, ledger.getCurrent(identity));
+      if (ledger.copies(identity).length > 0 && before) decision = before.state === 'moving'
+        ? movingObservation(before, decision, input.contentFetchFailed ? { contentFetchOwed: true } : undefined)
+        : withRecordedContent(decision, before);
     }
 
+    if (!routed && hasRow && contentRead && text !== undefined && !input.metadataOnly) {
+      return ledger.withMoveBatch(() => {
+        this.set.adoptLegacyItem(identity);
+        const plan = this.planFor(input, decision, contentRead, deferred, before, hasRow);
+        return plan.kind === 'routed' ? { ...plan, writeListedBody: true } : plan;
+      });
+    }
+    return this.planFor(input, decision, contentRead, deferred, before, hasRow);
+  }
+
+  private planFor(input: ConnectorStoreTierRouteInput, decision: TierDecision, contentRead: boolean,
+    deferred: boolean, before: ReturnType<TierLedger['getCurrent']>, hasRow: boolean): Plan {
+    const { item, connector } = input;
+    const { identity } = item;
+    const { ledger } = this.set;
+    const routed = before?.routed === true;
+    // A held input can retry its new body once the old body's move completes.
+    // Leave that move intact only when the names agree and the new body has no higher verdict.
+    if (before?.state === 'moving' && item.holdContentUntilJudged && decision.contentPending && !decision.metadataPending
+      && before.targetMetadataTier === decision.metadataTier && before.targetContentTier === decision.contentTier
+      && decision.reasons.some(reason => reason.startsWith('content:names:') && before.reasons.includes(reason))
+      && decision.reasons.some(reason => reason.startsWith('metadata:names_input:') && before.reasons.includes(reason))
+      && decision.reasons.some(reason => reason.startsWith('content:sha256:') && !before.reasons.includes(reason))) {
+      this.counts.movesQueued += 1;
+      return { kind: 'hold', reason: 'move_queued' };
+    }
     let placement = this.set.placementFor(decision, { contentArrivesLater: deferred });
     const currentCopies = ledger.copies(identity).filter(copy => copy.state === 'current');
     const fromContent = copyServingLayer(currentCopies, 'content');
@@ -2059,26 +2174,51 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     // a crash at any point leaves a body: the old one before the write, both after it (the old one unserved),
     // and the stale lower row makes the item incomplete, so the same record is read again and finishes the
     // withdrawal. Queuing a move instead would hide the old body and later copy it, never the newer one.
-    const holdsReplacement = routed && contentRead && (heldUntilJudged(decision.reasons) || contentHeldForJudgment(decision))
+    // A settled raise of a re-listed legacy item must move from the incoming body.
+    // Land it in Private; any lower names or content placement is then queued from that copy.
+    const legacyRaise = !routed && hasRow && contentRead && decision.contentTier !== 'secrets'
+      && placementIsRaise(currentCopies, placement.copies);
+    const replacingLowerBody = !routed && contentRead && toContent && toContent.trustDomain !== 'secure_local'
+      && (this.set.store(toContent.trustDomain)?.storedItemState(identity)?.chunkCount ?? 0) > 0;
+    const firstPrivateWrite = legacyRaise || replacingLowerBody;
+    const priorIntent = before?.state === 'moving' ? ledger.writeIntent(identity) : undefined;
+    const holdsReplacement = (routed || hasRow) && contentRead
+      && (firstPrivateWrite || item.holdContentUntilJudged === true || contentHeldForJudgment(decision))
       && decision.contentTier !== 'secrets'
-      && ledger.getCurrent(identity)?.state !== 'moving';
-    const replacesInPlace = holdsReplacement && currentCopies.length > 0 && placementIsRaise(currentCopies, placement.copies);
-    const placedDomains = new Set(placement.copies.map(copy => copy.trustDomain));
+      && before?.state !== 'moving';
+    // A legacy source can already be in Private with embedding enabled.
+    // Publishing its held placement installs the embedding hold before writing its replacement text.
+    const restoresChangedSecret = before?.contentTier === 'secrets' && decision.reasons.includes(OWNER_OVERRIDE_SECRET_REVIEW_REASON);
+    const replacesInPlace = holdsReplacement && (restoresChangedSecret || (currentCopies.length > 0
+      && (!routed || placementIsRaise(currentCopies, placement.copies))));
+    const legacyLanding = firstPrivateWrite && !contentHeldForJudgment(decision)
+      ? this.set.placementFor({ ...decision, metadataPending: true }) : undefined;
+    const writes = legacyLanding ?? placement;
+    const placedDomains = new Set(writes.copies.map(copy => copy.trustDomain));
     const staleDomains = holdsReplacement
       ? TIER_DOMAIN_ORDER.filter(domain => !placedDomains.has(domain) && this.set.store(domain)?.itemPresence(identity).active === true)
       : [];
     // A store that stays in the placement for the names alone (the held body lives in the Private store) may
     // still carry the old body's chunks: they go too, after the replacement landed.
     const staleText = holdsReplacement
-      ? placement.copies.filter(copy => copy.layers === 'metadata'
+      ? writes.copies.filter(copy => copy.layers === 'metadata'
         && (this.set.store(copy.trustDomain)?.storedItemState(identity)?.chunkCount ?? 0) > 0).map(copy => copy.trustDomain)
       : [];
-    const recorded = this.writeIntent(connector.id, identity, decision.contentTier === 'secrets' ? 'secret' : item.content.kind === 'metadata_only' ? 'names' : 'content', () => ledger.recordRoutedPlacement(identity, decision, placement, {
-      // A deletion or Secret this run already planned for the item removes its copies in every leg before the run ends:
-      // a newer version planned after it replaces them in place, as it would one run later.
-      staleCopiesGone: replacesInPlace || (routed && (this.copyRemovals.has(identityKey(identity)) || this.set.routedCopiesGone(identity))),
-      ...(deferred ? { stagedLandingAllowed: true } : {}),
-    }), (result) => (result.outcome === 'secrets'
+    const recorded = this.writeIntent(connector.id, identity, decision.contentTier === 'secrets' ? 'secret' : item.content.kind === 'metadata_only' ? 'names' : 'content', () => {
+      if (legacyLanding) {
+        ledger.recordRoutedPlacement(identity, decision, legacyLanding, { staleCopiesGone: true });
+        for (const copy of legacyLanding.copies) {
+          this.set.store(copy.trustDomain, { create: true })!.bindTierSet(ledger);
+          this.routedDomains.add(copy.trustDomain);
+        }
+        return ledger.recordRoutedPlacement(identity, decision, placement);
+      }
+      return ledger.recordRoutedPlacement(identity, decision, placement, {
+        // A deletion or Secret already planned in this run removes the item's copies before the run ends.
+        staleCopiesGone: replacesInPlace || (routed && (this.copyRemovals.has(identityKey(identity)) || this.set.routedCopiesGone(identity))),
+        ...(deferred ? { stagedLandingAllowed: true } : {}),
+      });
+    }, (result) => (result.outcome === 'secrets'
       ? { kind: 'secret' as const, ...(!hasRow && this.set.legSpec(SECRET_LOCATION_DOMAIN) !== undefined ? { location: true as const } : {}) }
       : { kind: item.content.kind === 'metadata_only' ? 'names' as const : 'content' as const }),
     // The version of the record that brought the body, when a newer names-only record carries it: replaying that
@@ -2091,6 +2231,19 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
       // The newest plan of an item decides its copy rows: an earlier Secret or deletion of this run no longer
       // owes their removal once a later version is placed.
       this.copyRemovals.delete(identityKey(identity));
+    }
+    if (before?.state === 'moving' && before.generation !== recorded.record.generation) {
+      this.cachedLowerings.delete(identityKey(identity));
+      // A replacement raise uses the existing sources. Keep an edited body
+      // owed until its record can write into the new placement.
+      const text = connectorStoreItemText(item);
+      if (recorded.outcome === 'queued_move' && recorded.raise && contentRead
+        && text !== undefined && !before.reasons.includes(contentDigestReason(text))) {
+        this.intents.delete(identityKey(identity));
+      }
+    }
+    if (staleDomains.length > 0 || staleText.length > 0) {
+      this.pendingWithdrawals.set(identityKey(identity), { item, domains: staleDomains, text: staleText });
     }
     switch (recorded.outcome) {
       case 'secrets':
@@ -2120,6 +2273,7 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
       case 'queued_move':
         this.counts.movesQueued += 1;
         if (contentRead && !recorded.raise) {
+          const classification = this.classification;
           if (classification?.sniffer?.cachedVerdict
             && decision.reasons.some(reason => reason.startsWith(`content:sniffer:${classification.sniffer!.id}:`))
             && !decision.contentPending && !decision.metadataPending) {
@@ -2129,15 +2283,25 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
           // Retain the body that produced this lowering verdict in the
           // existing stores. Until this write lands the move's digest check
           // refuses the old body; a crash therefore cannot release it.
-          return this.storedPlan(currentCopies);
+          return this.storedPlan(ledger.copies(identity).filter(copy => copy.state === 'current'));
         }
         return { kind: 'hold', reason: 'move_queued' };
       case 'held_moving':
         this.counts.movesQueued += 1;
+        // The move may have been queued before its source received these bytes.
+        // Replaying its owed version can finish the Private write under the same decision.
+        if (priorIntent?.kind === 'content' && priorIntent.version === identity.sourceVersion
+          && contentRead && fromContent?.trustDomain === 'secure_local'
+          && currentCopies.every(copy => copy.trustDomain === 'secure_local')
+          && before?.targetContentTier === decision.contentTier && before.targetMetadataTier === decision.metadataTier
+          && before.reasons.includes(contentDigestReason(connectorStoreItemText(item) ?? ''))) {
+          this.set.store('secure_local', { create: true })!.bindTierSet(ledger);
+          this.routedDomains.add('secure_local');
+          return { ...this.storedPlan(currentCopies), writeListedBody: true };
+        }
         return { kind: 'hold', reason: 'move_queued' };
       default: {
         this.counts.itemsRouted += 1;
-        if (staleDomains.length > 0 || staleText.length > 0) this.pendingWithdrawals.set(identityKey(identity), { item, domains: staleDomains, text: staleText });
         if (placement.embedHold) this.counts.itemsPendingHeld += 1;
         const copies = new Map<string, TierCopyLayers>();
         const sensitivity = new Map<string, SourceSensitivity>();
@@ -2157,7 +2321,7 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     }
   }
 
-  private storedPlan(copies: readonly TierCopyPlan[]): Plan {
+  private storedPlan(copies: readonly TierCopyPlan[]): Extract<Plan, { kind: 'routed' }> {
     return {
       kind: 'routed',
       copies: new Map(copies.map(copy => [copy.corpusId, copy.layers])),

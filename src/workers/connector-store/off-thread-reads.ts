@@ -562,6 +562,7 @@ function send(
   reader: ReaderThread,
   message: Record<string, unknown>,
   statementTiming?: StatementTiming,
+  job?: PoolJob,
 ): Promise<unknown> {
   // A retired thread answers nothing: fail at once.
   if (reader.retired) return Promise.reject(new Error('off-thread reader stopped'));
@@ -570,7 +571,9 @@ function send(
     reader.pending.set(id, { resolve, reject, ...(statementTiming ? { statementTiming } : {}) });
     armLostReplyCheck();
     try {
+      if (job) observer?.(job.store, job.read);
       reader.worker.postMessage({ ...message, id, ...(statementTiming ? { measureCpu: true } : {}) });
+      if (job) reader.executingStore = job.store;
     } catch (error) {
       reader.pending.delete(id);
       reject(error instanceof Error ? error : new Error(String(error)));
@@ -964,8 +967,6 @@ function dispatch(): void {
     job.sentAtMs = clock.now();
     if (job.lane) { job.lane(); job.lane.began?.(); job.running = true; }
     reader.job = job;
-    reader.executingStore = job.store;
-    observer?.(job.store, job.read);
     // The caller gives up at its own deadline; the executor is kept until
     // SQLite answers. A reply lost on its way back would hold it for good,
     // so a lost one retires the worker (it keeps its slot until it has
@@ -974,7 +975,7 @@ function dispatch(): void {
     send(reader, { op: 'query', path: job.store, sql, params, mode, ...(benchSqlDir && { site: site ?? job.benchSite }) }, job.report && ((ms, cpuMs) => {
       job.sqlMs = ms;
       job.cpuMs = cpuMs;
-    }))
+    }), job)
       .then(
         (rows) => settle(job, clock.now() >= job.deadlineAtMs ? { error: new OffThreadReadBusyError() } : { rows }),
         (error: Error) => {

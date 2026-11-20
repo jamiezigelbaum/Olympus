@@ -10,6 +10,7 @@ import { DataOwnerBusyError, withNoEngineProcess } from './data-owner-lock.ts';
 import { OperationError } from './operation-error.ts';
 import type { LayoutEnv } from './olympus-layout.ts';
 import { putBackManifest } from './put-back-manifest.ts';
+import { holdRestoredPersonalContent } from './restore-held-content.ts';
 
 /**
  * How long the copy and the put-back wait for the engine that was stopped to let go of its data. A stop the service
@@ -32,7 +33,7 @@ export function withStoppedEngine<T>(env: LayoutEnv, what: string, step: () => T
 /** With the engine stopped: set the whole data root aside (core/data-root-snapshot.ts). Throws, changing nothing that stays, when it cannot. */
 export function copyEngineStores(env: LayoutEnv, options: { log?: (line: string) => void; ownerWaitMs?: number; deps?: DataRootDeps } = {}): void {
   withStoppedEngine(env, 'copied', () => {
-    snapshotDataRoot(env, { ...(options.log ? { log: options.log } : {}), ...(options.deps ? { deps: options.deps } : {}) });
+    snapshotDataRoot(env, { ...options, afterRestore: () => holdRestoredPersonalContent(env) });
   }, options.ownerWaitMs ?? ENGINE_STORES_OWNER_WAIT_MS);
 }
 
@@ -43,7 +44,7 @@ export function restoreEngineStores(env: LayoutEnv, options: { ownerWaitMs?: num
   const log = options.log ?? ((line: string) => process.stderr.write(`${line}\n`));
   return withStoppedEngine(env, 'put back', () => {
     log(putBackManifest(env, 'before put-back'));
-    const told = putDataRootBack(env, options.deps ? { deps: options.deps } : {});
+    const told = putDataRootBack(env, { ...options, afterRestore: () => holdRestoredPersonalContent(env) });
     log(putBackManifest(env, 'after put-back'));
     return told;
   }, options.ownerWaitMs ?? ENGINE_STORES_OWNER_WAIT_MS);

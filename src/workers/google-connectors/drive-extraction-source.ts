@@ -26,7 +26,7 @@ import {
 import {
   GoogleDriveApiError,
   GoogleDriveContentTooLargeError,
-  type GoogleDriveFileBytes,
+  type GoogleDriveApiClient,
 } from './drive.ts';
 import { GoogleRequestBudgetError } from './request-budget.ts';
 import type {
@@ -63,10 +63,7 @@ export const GOOGLE_DRIVE_EXTRACTION_SCOPE_KEY = 'google_drive.docs';
  * The provider reads this source makes. Narrow on purpose: this source has
  * no business listing files, and a port that could would invite it to.
  */
-export interface GoogleDriveFileBytesClient {
-  downloadFileBytes(fileId: string, maxBytes?: number): Promise<GoogleDriveFileBytes>;
-  exportGoogleDocText(fileId: string, maxBytes: number): Promise<string>;
-}
+export type GoogleDriveFileBytesClient = Pick<GoogleDriveApiClient, 'downloadFileBytes' | 'exportGoogleDocText'>;
 
 export interface GoogleDriveExtractionSourceOptions {
   id: string;
@@ -137,12 +134,12 @@ export class GoogleDriveExtractionSource implements FileExtractionSource {
       if (this.onDemandReadFormat(ref)) {
         // The connector export path truncates by characters. Ask for one
         // extra, then enforce the byte bound rather than indexing a prefix.
-        const text = await this.client.exportGoogleDocText(fileId, maxBytes === undefined ? Number.MAX_SAFE_INTEGER : maxBytes + 1);
+        const text = await this.client.exportGoogleDocText(fileId, maxBytes === undefined ? Number.MAX_SAFE_INTEGER : maxBytes + 1, options.signal);
         const bytes = new TextEncoder().encode(text);
         if (maxBytes !== undefined && bytes.byteLength > maxBytes) throw new GoogleDriveContentTooLargeError();
         return { bytes, mimeType: 'text/plain', sizeBytes: bytes.byteLength };
       }
-      const result = await this.client.downloadFileBytes(fileId, maxBytes);
+      const result = await this.client.downloadFileBytes(fileId, maxBytes, options.signal);
       return {
         bytes: result.bytes,
         ...(result.mimeType ? { mimeType: result.mimeType } : {}),

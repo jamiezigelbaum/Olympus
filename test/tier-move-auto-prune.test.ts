@@ -10,12 +10,12 @@ import { moveTieredItem, moveTieredItemsLowering } from '../src/workers/connecto
 import { purgeLowerTierContent } from '../src/workers/connector-store/tier-content-purge.ts';
 import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
 import { createTestClock } from './helpers/test-clock.ts';
-import { CORPORA, FIXTURE_PLACEMENT, fixtureConnector, identityOf, localId, openTierFixture, tempDir } from './helpers/tier-fixtures.ts';
+import { CORPORA, FIXTURE_PLACEMENT, JUDGED_PERSONAL_SNIFFER, fixtureConnector, identityOf, localId, openTierFixture, tempDir } from './helpers/tier-fixtures.ts';
 
 const cleanup: Array<() => void> = [];
 afterEach(() => { for (const close of cleanup.splice(0).reverse()) close(); });
 const body = 'Orchard pruning plan for the apple trees this winter.';
-const low = classifyItemTiers({ signals: { title: 'Orchard' }, text: body });
+const low = classifyItemTiers({ signals: { title: 'Orchard' }, text: body }, { sniffer: JUDGED_PERSONAL_SNIFFER });
 const high = { ...low, metadataTier: 'secure' as const, contentTier: 'secure' as const };
 
 async function fixture() {

@@ -27,10 +27,14 @@
 
 import {
   classifyItemTiers,
-  contentDigestReason,
   contentNamesReason,
+  contentSecretFindingKinds,
   heldUntilJudged,
   maxTier,
+  ownerOverrideMatchesDigest,
+  ownerOverrideSecretReview,
+  contentDigestReason,
+  OWNER_OVERRIDE_SECRET_CONFIRMED_REASON,
   ownerRuleMatches,
   tierRank,
   type TierDecision,
@@ -48,6 +52,7 @@ import { forgetSecretInSideStores, retireSecretRedactions, retrySecretSideStoreD
 import { findInLedger, runPassHere, runPassOffThread, turn, type LoopPass } from './loop-pass.ts';
 import { parentNamesContext } from './parent-context.ts';
 import { storedCopyOf, storedSignals } from './stored-names.ts';
+import { applicableProviderLabelRules, currentTierRulePolicy, labelRulesWithoutNonmatch, withTierRuleFence } from './tier-move-rule-policy.ts';
 import { emptyTierRejudgeReport, rejudgeStoredContent, settleRoutedSecrets } from './tier-rejudge.ts';
 import { reopenLabelRuleSweep } from './tier-rules-sweep.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
@@ -185,8 +190,8 @@ function* applyOwnerOverridesPass(options: ApplyOwnerOverridesOptions): LoopPass
  * what the owner's current rules ask for. A rule added while the override
  * stood skipped the item (tier-rules-sweep.ts leaves overridden items alone
  * and still counts itself done), so it is applied here, in the same write;
- * rules only raise. A label rule cannot be checked from what a store keeps:
- * wherever a raising label rule could apply to the item, it keeps the
+ * rules only raise. A completed label sweep can rule out a match. Wherever
+ * a raising label rule could still apply to the item, it keeps the
  * protection it has now, up to that rule's tier, so it is never exposed before
  * the provider has answered; and the provider account's label rules are made
  * pending again, so the next label sweep asks the provider which stored items
@@ -214,6 +219,17 @@ function restoreClearedOverride(set: TieredStoreSet, record: TierLedgerRecord): 
     return false;
   }
   if (ledger.rejudgeQuestion(identity)) return false;
+  if (ownerOverrideSecretReview(record.reasons) || record.reasons.includes(OWNER_OVERRIDE_SECRET_CONFIRMED_REASON)) {
+    // The current body is the subject of the undo, so judge it with the override lifted.
+    if (ledger.writeIntent(identity)) return false;
+    const report = emptyTierRejudgeReport();
+    rejudgeStoredContent(set, record, { report, autoMoves: true, preserveMetadata: true });
+    if (report.secrets > 0 || report.updated > 0 || report.movesQueued > 0) {
+      if (request) ledger.completeOverrideRestore(identity, request.receipt);
+      return true;
+    }
+    return false;
+  }
   const before = ledger.settledDecisionBeforeOverride(identity);
   if (!before || before.metadataTier === 'secrets' || before.contentTier === 'secrets') return false;
   // Rules that cannot be trusted now: wait, rather than restore without them.
@@ -233,10 +249,9 @@ function restoreClearedOverride(set: TieredStoreSet, record: TierLedgerRecord): 
   const namesChanged = namesReceipt !== undefined && (!exported
     || namesReceipt !== contentNamesReason(stored, parentNamesContext(set, identity)));
   const matched = raising.filter((rule) => rule.match.kind !== 'label' && ownerRuleMatches(rule, stored, record.provider));
-  // Label rules for this item's source: whether the item carries the label is not known here,
-  // so it keeps the protection it has now (up to the rule's tier) and the provider is asked again (below).
-  const labelRules = raising.filter((rule) => rule.match.kind === 'label'
-    && ownerRuleMatches(rule, { labels: [rule.match.value] }, record.provider));
+  const applicableLabels = applicableProviderLabelRules(raising, record.provider);
+  const labelRules = applicableLabels.length > 0 ? withTierRuleFence(set,
+    () => labelRulesWithoutNonmatch(set, record, currentTierRulePolicy(set), applicableLabels)) : applicableLabels;
   const heldNow = maxTier(record.metadataTier, record.contentTier);
   let ruleTier: TierKey = matched.reduce<TierKey>((tier, rule) => maxTier(tier, rule.tier), 'public');
   for (const rule of labelRules) ruleTier = maxTier(ruleTier, minTier(rule.tier, heldNow));
@@ -333,12 +348,29 @@ function applyOne(
 ): void {
   const ledger = set.ledger;
   const identity = identityOf(record);
-  // Exactly the decision a listing makes for an overridden item. The owner's
-  // tier wins; a lane hold is kept in the reasons for the passes after it.
+  const lowerOverride = tier === 'private' || tier === 'public';
+  const review = ownerOverrideSecretReview(record.reasons);
+  const source = copyServingLayer(ledger.copies(identity).filter(copy => copy.state === 'current'), 'content');
+  const stored = lowerOverride && source ? set.store(source.trustDomain)?.exportItemCopy(identity) : undefined;
+  const text = stored?.chunks.length ? stored.chunks.map(chunk => chunk.boundedText).join('') : undefined;
+  let override = guard.override;
+  if (lowerOverride && text !== undefined && override?.kind === 'tier' && override.setDigest === undefined) {
+    if (ledger.writeIntent(identity) || JSON.stringify(ledger.getOverride(identity)) !== JSON.stringify(override)) return;
+    const observed = ledger.observeOverrideText(identity, text);
+    if (observed?.kind !== 'tier' || observed.tier !== override.tier) return;
+    override = observed;
+    guard = { ...guard, override };
+  }
+  // Only let a review settle from the exact body that opened it.
+  if (lowerOverride && review && (!ownerOverrideMatchesDigest(override, review.digest)
+    || text === undefined || review.digest !== contentDigestReason(text) || ledger.writeIntent(identity))) return;
+  if (lowerOverride && record.contentTier === 'secrets' && !text?.trim()) return;
   const holdUntilJudged = set.holdsContentUntilJudged() || heldUntilJudged(record.reasons);
   const decision: TierDecision = classifyItemTiers(
-    { signals: {}, provider: record.provider, subject: identity, ...(holdUntilJudged ? { holdUntilJudged: true } : {}) },
-    { override: { kind: 'tier', tier }, ...(retirePublic ? { retirePublic: true } : {}) },
+    { signals: {}, provider: record.provider, subject: identity, ...(text !== undefined ? { text } : {}),
+      ...(record.contentTier === 'secrets' ? { heldSecret: true } : {}),
+      ...(holdUntilJudged ? { holdUntilJudged: true } : {}) },
+    { ...(override ? { override } : {}), ...(retirePublic ? { retirePublic: true } : {}) },
   );
   const secrets = decision.contentTier === 'secrets';
   if (record.state === 'moving' && !secrets) {
@@ -353,13 +385,18 @@ function applyOne(
   }
   const atTiers = record.metadataTier === decision.metadataTier && record.contentTier === decision.contentTier;
   if (atTiers && record.state !== 'moving') {
-    if (!secrets && record.decidedBy === 'override') return;
+    const findings = contentSecretFindingKinds(decision.reasons);
+    if (!secrets && record.decidedBy === 'override' && !record.contentPending && !review
+      && (text === undefined || (record.reasons.includes(contentDigestReason(text))
+        && JSON.stringify(contentSecretFindingKinds(record.reasons)) === JSON.stringify(findings)))) return;
     if (secrets && !secretsCopiesLeft(set, identity)) return;
   }
   if (secrets) {
-    const exported = storedCopy(set, identity);
+    const exported = stored ?? storedCopy(set, identity);
     if (exported) {
-      if (settleRoutedSecrets(set, identity, decision, exported, { findingKinds: ['owner_marked_secret'] }, { guard })) report.secrets += 1;
+      const findingKinds = decision.reasons.filter(reason => reason.startsWith('content:secret:'))
+        .map(reason => reason.slice('content:secret:'.length));
+      if (settleRoutedSecrets(set, identity, decision, exported, { findingKinds, ...(text !== undefined ? { text } : {}) }, { guard })) report.secrets += 1;
       return;
     }
     // No stored copy to read the location from: hidden all the same, and
@@ -374,14 +411,6 @@ function applyOne(
     return;
   }
   const placement = set.placementFor(decision);
-  const source = copyServingLayer(ledger.copies(identity).filter(copy => copy.state === 'current'), 'content');
-  const destination = copyServingLayer(placement.copies, 'content');
-  if (source && destination && trustDomainRank(destination.trustDomain) < trustDomainRank(source.trustDomain)) {
-    // The owner authorizes this item's stored body. Bind that exact snapshot
-    // too: no re-list is needed, and a later changed body cannot borrow it.
-    const exported = set.store(source.trustDomain)?.exportItemCopy(identity);
-    if (exported) decision.reasons.push(contentDigestReason(exported.chunks.map(chunk => chunk.boundedText).join('')));
-  }
   // A Secret whose copies were tombstoned has nothing to move: its new
   // placement is recorded afresh (served once its next listing writes it).
   const recorded = ledger.recordRoutedPlacement(identity, decision, placement, {

@@ -48,6 +48,8 @@ import type {
   ConnectorStoreMigrationItem,
   LocalConnectorStore,
 } from '../connector-store/local-index.ts';
+import { storedSignals } from '../connector-store/stored-names.ts';
+import { tierMoveRuleAuthorization, withTierRuleFence } from '../connector-store/tier-move-rule-policy.ts';
 import { moveTieredItem, sameText, type TierMoveEmbeddingIdentity } from '../connector-store/tier-move.ts';
 import { secretsDisposition, settleSecretsCopies, type SecretsDisposition } from '../connector-store/secrets-disposition.ts';
 import { secretFencedSniffer } from '../connector-store/tier-placement.ts';
@@ -63,7 +65,6 @@ import { detectSecretFindingKinds } from './engine.ts';
 import {
   TIER_CLASSIFIER_VERSION,
   classifyItemTiers,
-  heldUntilJudged,
   type OwnerTierRule,
   type TierDecision,
   type TierKey,
@@ -75,6 +76,8 @@ import {
   TierLedgerSecretsRollbackRefusedError,
   copyServingLayer,
   tierLedgerIdentityKey,
+  trustDomainRank,
+  type TierLedgerIdentity,
   type TierCopy,
   type TierCopyPlan,
   type TierLedgerRecord,
@@ -707,10 +710,6 @@ export async function planTierMigration(options: TierMigrationPlanOptions): Prom
           const sniffer = laneSniffer ? secretFencedSniffer(laneSniffer, ledger, item.identity, read) : undefined;
           // A photo's picture judgment, when the photo judge made one here.
           const imageJudgment = item.mimeType ? store.imageJudgmentForItem(item.identity) : undefined;
-          // A lane that holds content until judged holds a legacy item's too:
-          // the plan never proposes its unjudged body for a less private store.
-          const holdUntilJudged = set.holdsContentUntilJudged()
-            || heldUntilJudged(ledger.getCurrent(item.identity)?.reasons);
           const decision = classifyItemTiers(
             {
               signals: signalsFromStoredItem(item),
@@ -722,7 +721,7 @@ export async function planTierMigration(options: TierMigrationPlanOptions): Prom
               hasNonTextContent: true,
               ...(read.secret ? { heldSecret: true } : {}),
               ...(item.mimeType ? { mimeType: item.mimeType } : {}),
-              ...(holdUntilJudged ? { holdUntilJudged: true } : {}),
+              holdUntilJudged: true,
               ...(imageJudgment ? { imageJudgment: imageJudgmentSignal(imageJudgment) } : {}),
               subject: item.identity,
             },
@@ -1915,6 +1914,41 @@ export interface TierMigrationRollbackResult {
   entryId: string;
 }
 
+/** A rollback publishes retained rows. Inspect their layers while the stores and rules are stable. */
+function rollbackRetainedCopies(set: TieredStoreSet, identity: TierLedgerIdentity, expectedGeneration: number): TierLedgerRecord {
+  const stores = set.openStores().sort((a, b) => a.corpusId.localeCompare(b.corpusId));
+  const restore = (index: number): TierLedgerRecord => {
+    const store = stores[index];
+    if (store) return store.withItemCopyWriteFence(identity, () => restore(index + 1));
+    return set.ledger.rollbackMove(identity, {
+      expectedGeneration,
+      authorize(current, target, sources, destination) {
+        if (tierMoveRuleAuthorization(set, current, target, sources, destination) === undefined) return false;
+        for (const layer of ['metadata', 'content'] as const) {
+          const to = copyServingLayer(destination, layer);
+          if (!to) continue;
+          const from = copyServingLayer(sources, layer);
+          if (!from) return false;
+          if (trustDomainRank(to.trustDomain) >= trustDomainRank(from.trustDomain)) continue;
+          if (set.ledger.writeIntent(identity)) return false;
+          const original = set.store(from.trustDomain);
+          const retained = set.store(to.trustDomain);
+          if (layer === 'content') {
+            if (!sameText(original?.exportItemCopy(identity), retained?.exportItemCopy(identity))) return false;
+          } else {
+            const currentNames = original?.exportItemNames(identity);
+            const restoredNames = retained?.exportItemNames(identity);
+            if (!currentNames || !restoredNames
+              || JSON.stringify(storedSignals(currentNames)) !== JSON.stringify(storedSignals(restoredNames))) return false;
+          }
+        }
+        return true;
+      },
+    });
+  };
+  return withTierRuleFence(set, () => restore(0));
+}
+
 export async function rollbackTierMigrationBatch(options: {
   batchId: string;
   lanes: readonly TierMigrationLane[];
@@ -1958,7 +1992,7 @@ export async function rollbackTierMigrationBatch(options: {
         continue;
       }
       try {
-        const restored = lane.set.ledger.rollbackMove(proposal.identity, { expectedGeneration: record.generation });
+        const restored = rollbackRetainedCopies(lane.set, proposal.identity, record.generation);
         lane.set.ledger.markMigrationProposal(plan.planId, proposal.identity, {
           status: 'rolled_back',
           movedGeneration: restored.generation,
@@ -1989,7 +2023,7 @@ export async function rollbackTierMigrationBatch(options: {
     recorded_at: now().toISOString(),
     kind: 'note',
     what: `Tier migration batch ${batch.batchId} of plan ${plan.planId} was rolled back by a ledger flip: ${rolledBack} item(s) `
-      + `serve from their previous copies again${skipped > purgedKept ? ` (${skipped - purgedKept} left alone because a later sync changed them)` : ''}`
+      + `serve from their previous copies again${skipped > purgedKept ? ` (${skipped - purgedKept} left alone under their current decision or rules)` : ''}`
       + `${secretsKept > 0 ? `; ${secretsKept} Secret(s) stay Secrets and are never exposed again` : ''}`
       + `${purgedKept > 0 ? `; ${purgedKept} item(s) skipped: ${purgedKeptReason}` : ''}. `
       + 'Nothing was re-embedded or deleted; the copies the batch wrote are kept, hidden.',

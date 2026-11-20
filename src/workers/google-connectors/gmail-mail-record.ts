@@ -26,12 +26,13 @@ import { strongKeysFromText } from '../../core/people-index.ts';
 import { createHash } from 'node:crypto';
 import type { RawItem, SourceClassificationSignals } from '../../core/contracts.ts';
 import { namesOnlyContentScopeMetadata } from '../../core/classification-signals.ts';
+import { GMAIL_LABEL_CAPABILITY } from '../../core/source-connector-labels.ts';
 import { MAX_FROM_HEADER_CHARS } from '../../core/sender-rules.ts';
 import type { SourceRecordEntry } from '../../core/source-inputs.ts';
 import { childProviderItemId } from '../../core/child-item-id.ts';
 import { metadataString, metadataStringArray } from './classification.ts';
 
-export const GMAIL_MAIL_PROVIDER = 'gmail';
+export const GMAIL_MAIL_PROVIDER = GMAIL_LABEL_CAPABILITY.provider;
 const MAX_ATTACHMENT_NAME_CHARS = 256;
 /** The prefix of an id that is not Gmail's: a message an import could not match to a Gmail message. */
 export const GMAIL_OWN_ID_PREFIX = 'mbox-';
@@ -351,7 +352,7 @@ export const compareGmailMailVersions = (_a: string, _b: string): number => 0;
 export function gmailClassificationSignals(item: RawItem): SourceClassificationSignals {
   const subject = metadataString(item.metadata, 'subject') ?? metadataString(item.metadata, 'title');
   const sender = metadataString(item.metadata, 'from');
-  const labels = metadataStringArray(item.metadata, 'labels');
+  const labels = metadataStringArray(item.metadata, GMAIL_LABEL_CAPABILITY.metadataKey);
   return {
     ...(subject ? { title: subject } : {}),
     ...(sender ? { sender } : {}),

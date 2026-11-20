@@ -59,6 +59,7 @@ import {
 import { isFileExtractionSourceError } from '../../core/file-extraction-source.ts';
 import {
   ExtractionCommandTimeoutError,
+  runWithExtractionAbortSignal,
 } from './extractors/command-runner.ts';
 import { isImageMediaType } from '../classification/tier-classifier.ts';
 import { isGenericMimeType, resolveExtractionMimeType } from './extractors/bounded-text.ts';
@@ -282,6 +283,7 @@ export interface ExtractionRunnerCorpus {
   authorization?: {
     assertCurrent(ref: ExtractionItemRef): void | Promise<void>;
   };
+  holdOnDemandRead?: (ref: ExtractionItemRef, controller: AbortController) => { check(): boolean; release(): void } | undefined;
   /**
    * Whether the sink would refuse this item's picture content (a still image
    * whose content can only land in a store that is not Private). Such an item
@@ -1089,8 +1091,17 @@ async function settleOneJob(input: SettleOneJobInput): Promise<JobOutcome> {
   // A file that keeps being read keeps its lease: no whole-file clock cuts it (owner rule, 16 Nov 2026).
   const renewal = setInterval(() => renewJobLease(input), input.leaseRenewMs ?? EXTRACTION_LEASE_RENEW_MS);
   renewal.unref?.();
+  let grant: { check(): boolean; release(): void } | undefined;
   try {
-    outcome = await withMemoryPayload('extract', () => settleOneJobHeld(input, staged));
+    const onDemand = input.jobs.onDemandJob(input.job.jobId);
+    const hold = onDemand ? input.corpus.holdOnDemandRead : undefined;
+    const controller = hold ? new AbortController() : undefined;
+    grant = controller ? hold?.(input.job.ref, controller) : undefined;
+    outcome = hold && !grant
+      ? supersededExtractionAuthorization()
+      : await withMemoryPayload('extract', () => settleOneJobHeld(input, staged, {
+        onDemand, ...(controller && grant ? { signal: controller.signal, current: grant.check } : {}),
+      }));
   } catch (error) {
     // Every expected failure above already settles as a value. A throw that
     // still escapes is a defect in this job's path, and it settles THIS job
@@ -1101,6 +1112,7 @@ async function settleOneJob(input: SettleOneJobInput): Promise<JobOutcome> {
     );
     outcome = retryable(EXTRACTION_ERROR_KIND_INTERNAL_ERROR, error);
   } finally {
+    grant?.release();
     clearInterval(renewal);
   }
   try {
@@ -1140,17 +1152,24 @@ function renewJobLease(input: SettleOneJobInput): void {
   }
 }
 
-async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: ExtractedMedia; file?: FetchedFile }): Promise<JobOutcome> {
+function supersededExtractionAuthorization(): JobOutcome {
+  return { status: 'blocked_policy', errorKind: EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED };
+}
+
+async function settleOneJobHeld(
+  input: SettleOneJobInput,
+  staged: { media?: ExtractedMedia; file?: FetchedFile },
+  { onDemand, signal, current }: { onDemand: boolean; signal?: AbortSignal; current?: () => boolean },
+): Promise<JobOutcome> {
   const { job, extractor, corpus } = input;
-  const onDemand = input.jobs.onDemandJob(job.jobId);
   const timing = (step: string, started: number) => {
     if (onDemand) console.info(`[olympus:on-demand] step=${step} count=1 ms=${Math.max(0, Date.now() - started)}`);
   };
   if (!extractor) {
     return { status: 'failed_terminal', errorKind: EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR };
   }
-  if (!(await extractionAuthorizationCurrent(corpus, job.ref))) {
-    return { status: 'blocked_policy', errorKind: EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED };
+  if (!(await extractionAuthorizationCurrent(corpus, job.ref)) || current?.() === false) {
+    return supersededExtractionAuthorization();
   }
 
   // Refuse before fetching, then use the same live gate after local reading
@@ -1194,6 +1213,7 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
     } catch (error) {
       return retryable(EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED, error);
     }
+    if (current?.() === false) return supersededExtractionAuthorization();
     // The reader's own bound and the job's, whichever is smaller; a source enforces it while reading.
     const sourceMax = corpus.sizeLimit && (!corpus.sizeLimit.bytesOnly || extractor.input.kind !== 'file')
       ? sourceSizeBytes(corpus.sizeLimit, job.ref, input.now()) : undefined;
@@ -1203,6 +1223,7 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
     try {
       if (extractor.input.kind === 'file' && source.fetchFile && input.spoolDir !== undefined) {
         fetchedFile = await source.fetchFile(job.ref, {
+          ...(signal ? { signal } : {}),
           ...(maxBytes !== undefined ? { maxBytes } : {}),
           spoolDir: input.spoolDir,
           ...(input.spoolAnchor !== undefined ? { spoolAnchor: input.spoolAnchor } : {}),
@@ -1211,7 +1232,7 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
         const bytes = fetchedFile.sizeBytes ?? job.ref.sizeBytes;
         if (bytes !== undefined && Number.isSafeInteger(bytes) && bytes > 0) addMemoryPayloadBytes(bytes);
       } else {
-        fetched = await source.fetch(job.ref, { ...(maxBytes !== undefined ? { maxBytes } : {}) });
+        fetched = await source.fetch(job.ref, { ...(maxBytes !== undefined ? { maxBytes } : {}), ...(signal ? { signal } : {}) });
         addMemoryPayloadBytes(fetched.bytes.byteLength);
         // Defence in depth: a source that ignored the bound still cannot hand a reader more than it allows.
         if (maxBytes !== undefined && fetched.bytes.byteLength > maxBytes) {
@@ -1220,6 +1241,7 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
         }
       }
     } catch (error) {
+      if (current?.() === false) return supersededExtractionAuthorization();
       // The settlement is the SOURCE'S, read off the typed rejection, never
       // re-derived here from a status code this module never saw. That is the
       // whole reason the seam carries a precomputed disposition.
@@ -1239,6 +1261,7 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
     } finally {
       timing('fetch', fetchStarted);
     }
+    if (current?.() === false) return supersededExtractionAuthorization();
     if (onDemand) {
       const bytes = fetched?.bytes.byteLength ?? fetchedFile?.sizeBytes;
       if (bytes !== undefined) input.jobs.recordOnDemandFetchedBytes(job.jobId, bytes);
@@ -1260,13 +1283,15 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
   const resolvedSizeBytes = fetched?.sizeBytes ?? fetchedFile?.sizeBytes ?? job.ref.sizeBytes;
   const extractorInput: ExtractorInput = {
     ref: job.ref,
+    ...(signal ? { signal } : {}),
     ...(extractor.egress === 'approved_remote' ? {
       assertRemoteEgressAllowed: async () => {
-        if (!(await extractionAuthorizationCurrent(corpus, job.ref))) {
+        if (!(await extractionAuthorizationCurrent(corpus, job.ref)) || current?.() === false) {
           throw new ExtractionEgressRefusedError(EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED);
         }
-        const current = await checkEgress();
-        if (!current.allowed) throw new ExtractionEgressRefusedError(current.errorKind);
+        const egressCurrent = await checkEgress();
+        if (current?.() === false) throw new ExtractionEgressRefusedError(EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED);
+        if (!egressCurrent.allowed) throw new ExtractionEgressRefusedError(egressCurrent.errorKind);
       },
     } : {}),
     job: {
@@ -1289,14 +1314,16 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
   // it is deliberate rather than an oversight. This is the catch that turns
   // those into settled jobs.
   let output: ExtractorOutput;
-  if (!(await extractionAuthorizationCurrent(corpus, job.ref))) {
-    return { status: 'blocked_policy', errorKind: EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED };
+  if (!(await extractionAuthorizationCurrent(corpus, job.ref)) || current?.() === false) {
+    return supersededExtractionAuthorization();
   }
   const extractStarted = Date.now();
   try {
-    output = await extractor.extract(extractorInput);
+    const extract = () => extractor.extract(extractorInput);
+    output = await (signal ? runWithExtractionAbortSignal(signal, extract) : extract());
     if (output.status === 'indexed' && output.media) staged.media = output.media;
   } catch (error) {
+    if (current?.() === false) return supersededExtractionAuthorization();
     if (error instanceof ExtractionEgressRefusedError) {
       return egressRefusalOutcome(error.errorKind);
     }
@@ -1310,6 +1337,7 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
   } finally {
     timing('extract', extractStarted);
   }
+  if (current?.() === false) return supersededExtractionAuthorization();
 
   if (output.status !== 'indexed') {
     if (output.status === 'empty_output') {
@@ -1361,12 +1389,13 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
   // that check still comes right before the write.
   await scanSecretsAhead(output.text);
   let accepted;
-  if (!(await extractionAuthorizationCurrent(corpus, job.ref))) {
-    return { status: 'blocked_policy', errorKind: EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED };
+  if (!(await extractionAuthorizationCurrent(corpus, job.ref)) || current?.() === false) {
+    return supersededExtractionAuthorization();
   }
   try {
     accepted = await corpus.sink.accept({
       ref: job.ref,
+      ...(current ? { onDemandGrantCurrent: current } : {}),
       text: output.text,
       extractorKind: job.extractorKind,
       extractorVersion: job.extractorVersion,
@@ -1387,6 +1416,7 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
       ...(output.media ? { media: output.media } : {}),
     });
   } catch (error) {
+    if (current?.() === false) return supersededExtractionAuthorization();
     // The sink rethrows programming errors on purpose, and they are worth
     // surfacing — but not by abandoning a batch. Settling this job retryable
     // both preserves the work already recorded and walks the lane toward its
@@ -1396,6 +1426,7 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
       ...(output.egressDestination ? { egressDestination: output.egressDestination } : {}),
     };
   }
+  if (current?.() === false) return supersededExtractionAuthorization();
 
   if (!accepted.accepted) {
     const reason = accepted.skippedReason;

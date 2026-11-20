@@ -36,8 +36,8 @@ import { snifferPromptVersions } from './sniffer.ts';
 import { privacyOwnerContext } from './privacy-profile.ts';
 import { installedSnifferRuntime } from './installed-sniffer-runtime.ts';
 import { TierSnifferStore } from './sniffer-store.ts';
-import { classifyItemTiers, type ItemTierOverride, type OwnerTierRule } from './tier-classifier.ts';
-import { TierLedger, TierLedgerSchemaError, tierLedgerIdentityKey, type TierLedgerIdentity, type TierRecheckScope } from './tier-ledger.ts';
+import { classifyItemTiers, contentDigestReason, type ItemTierOverride, type OwnerTierRule } from './tier-classifier.ts';
+import { TierLedger, TierLedgerSchemaError, copyServingLayer, tierLedgerIdentityKey, type TierLedgerIdentity, type TierRecheckScope } from './tier-ledger.ts';
 import { tierLedgerPathForStore, tierSnifferPathForLedger } from './tier-ledger-path.ts';
 import { findTierSetLedger } from './tier-set-binding.ts';
 import { normalizeConversationId, TIER_SET_BINDING_CONNECTOR_ID, TIER_SET_BINDING_RUN_ID } from '../connector-store/local-index.ts';
@@ -132,6 +132,8 @@ export interface LocatedItem {
   identity: TierLedgerIdentity & { family: SourceFamily };
   /** The stores' local id for the item, when a store row named it. */
   localItemId?: string;
+  /** Stores bound to this ledger that matched the item. */
+  storePaths?: readonly string[];
 }
 
 export function knownStorePaths(context: TierCliContext): string[] {
@@ -143,6 +145,7 @@ export function knownStorePaths(context: TierCliContext): string[] {
 interface StoreMatch {
   identity: TierLedgerIdentity & { family: SourceFamily };
   localItemId: string;
+  dbPath: string;
   /** The set ledger this store is bound to, found by its id, when a tiered store set routed into it. */
   bound?: { path: string; id: string };
   ownLedgerPath: string;
@@ -204,6 +207,7 @@ function matchStore(dbPath: string, needle: StoreNeedle): StoreMatch[] {
         ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
       },
       localItemId: row.local_item_id,
+      dbPath,
       ...(bound ? { bound } : {}),
       ownLedgerPath: tierLedgerPathForStore(dbPath),
     }));
@@ -311,6 +315,7 @@ function locateMatched({ identity, localItemId, matches, ledgerPaths, boundIds }
     ledgerPath,
     identity,
     localItemId,
+    storePaths: matches.filter(match => (match.bound?.path ?? match.ownLedgerPath) === ledgerPath).map(match => match.dbPath),
     ...(boundIds.has(ledgerPath) ? { boundLedgerId: boundIds.get(ledgerPath)! } : {}),
   });
   const skipped = new Set<string>();
@@ -531,7 +536,19 @@ export function applyTierSet(
       const cleared = ledger.clearOverride(item.identity);
       return { cleared, note: 'The next sync re-decides this item without the override.' };
     }
-    ledger.setOverride(item.identity, override);
+    let setDigest: string | undefined;
+    if (override.kind === 'tier' && (override.tier === 'private' || override.tier === 'public') && override.setDigest === undefined
+      && !ledger.itemIsSecret(item.identity) && !ledger.writeIntent(item.identity)) {
+      const current = ledger.getCurrent(item.identity);
+      const hasReceipt = current?.contentRead && current.state !== 'moving'
+        && current.reasons.some(reason => reason.startsWith('content:sha256:'));
+      if (!hasReceipt) {
+        const serving = current?.routed
+          ? copyServingLayer(ledger.copies(item.identity).filter(copy => copy.state === 'current'), 'content') : undefined;
+        if (!current?.routed || serving) setDigest = storedOverrideDigest(item, serving?.corpusId);
+      }
+    }
+    ledger.setOverride(item.identity, override.kind === 'tier' && setDigest ? { ...override, setDigest } : override);
     if (override.kind === 'tier' && override.tier === 'secrets') {
       // A routed item's copies are hidden first (one ledger write), then the
       // side stores forget its names and excerpt (a queued sniffer question,
@@ -592,6 +609,24 @@ export function applyTierSet(
       generation: record.generation,
     };
   }, item.boundLedgerId));
+}
+
+function storedOverrideDigest(item: LocatedItem, corpusId: string | undefined): string | undefined {
+  const digests = new Set<string>();
+  for (const path of item.storePaths ?? []) {
+    const text = withStore(path, undefined, (db, columns) => {
+      if (corpusId && !db.query(`SELECT 1 FROM sync_runs WHERE sync_run_id = ? AND connector_id = ? AND corpus_id = ?`)
+        .get(TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID, corpusId)) return undefined;
+      const predicate = storeItemIdentityPredicate(item.identity, columns, 'i.');
+      return db.query<{ text: string }, string[]>(`
+        SELECT c.bounded_text AS text FROM items i JOIN chunks c ON c.item_pk = i.item_pk
+        WHERE ${predicate.sql}
+        ORDER BY c.chunk_index
+      `).all(...predicate.params).map(chunk => chunk.text).join('');
+    });
+    if (text?.trim()) digests.add(contentDigestReason(text));
+  }
+  return digests.size === 1 ? digests.values().next().value : undefined;
 }
 
 export function runTierExplain(args: readonly string[], context: TierCliContext = {}): Record<string, unknown> {

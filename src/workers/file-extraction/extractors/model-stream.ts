@@ -14,6 +14,7 @@
 
 import { addMemoryPayloadBytes, noteMemoryPayloadResponse } from '../../../core/memory-counters.ts';
 import { untilAborted } from '../../../core/http-timeout.ts';
+import { currentExtractionAbortSignal } from './command-runner.ts';
 
 export interface IdleClock {
   /**
@@ -26,10 +27,12 @@ export interface IdleClock {
 
 export function idleClock(windowMs: number): IdleClock {
   const controller = new AbortController();
+  const upstream = currentExtractionAbortSignal();
+  const signal = upstream ? AbortSignal.any([upstream, controller.signal]) : controller.signal;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const usable = Number.isFinite(windowMs) && windowMs > 0;
   const arm = (): void => {
-    if (!usable || controller.signal.aborted) return;
+    if (!usable || signal.aborted) return;
     if (timer !== undefined) clearTimeout(timer);
     timer = setTimeout(() => {
       const error = new Error(`The model sent nothing for ${Math.round(windowMs / 1000)} s.`);
@@ -40,7 +43,7 @@ export function idleClock(windowMs: number): IdleClock {
   };
   arm();
   return {
-    signal: controller.signal,
+    signal,
     touch: arm,
     clear: () => {
       if (timer !== undefined) clearTimeout(timer);

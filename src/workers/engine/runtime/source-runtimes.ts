@@ -376,7 +376,7 @@ function bindXBookmarksConnectorStoreRuntime(options: {
   });
   const contentRecovery = createXBookmarksContentRecoveryHandler({
     store: options.store,
-    tierLedger: options.tierSet.ledger,
+    tierSet: options.tierSet,
     usageStore: options.usageStore,
     reconcileStateStore: options.reconcileStateStore,
     embeddingProvider: options.embeddingProvider,

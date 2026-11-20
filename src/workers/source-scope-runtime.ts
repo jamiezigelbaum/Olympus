@@ -24,6 +24,7 @@ import {
   type ConnectedHandleRegistry,
 } from './credential-broker/connected-handles.ts';
 import type { ConnectorStoreSearchFilters } from './connector-store/index.ts';
+import type { TierOwnerRuleSource } from './connector-store/tier-placement.ts';
 import type { GoogleDriveContentScope } from './google-connectors/drive.ts';
 import type { DropboxContentScope } from './dropbox-files/connector.ts';
 import type { SourceEmbeddingProvider } from './source-index/embeddings.ts';
@@ -581,6 +582,19 @@ export function checkedEmbeddingProvider(provider: SourceEmbeddingProvider, chec
     } : {}),
     ...(provider.embedPromptTexts ? { embedPromptTexts: (texts: string[]) => provider.embedPromptTexts!(texts) } : {}),
     ...(provider.runsOnThisComputer ? { runsOnThisComputer: () => provider.runsOnThisComputer!() } : {}),
+  };
+}
+
+/** Read the current sender rules under the mail scope's existing write lease. */
+export function mailScopeTierOwnerRuleSource(authority: FileSourceScopeAuthority): TierOwnerRuleSource {
+  return {
+    path: authority.mailStatePath,
+    read: () => {
+      const scope = authority.mailSnapshot();
+      const rules = scope.ownerTierRules ?? mailScopeOwnerTierRules({ alwaysPrivateSenders: scope.carriedAlwaysPrivateSenders ?? [] });
+      const unavailable = scope.senderPolicyUnresolved === true || scope.reason === 'malformed' || scope.reason === 'account_changed';
+      return { rules, revision: scope.revision, unavailable };
+    },
   };
 }
 

@@ -18,6 +18,7 @@ import {
 import { createTieredStoreExtractionSink } from '../src/workers/file-extraction/tiered-store-sink.ts';
 import { resolvedStorePath } from '../src/core/source-placement.ts';
 import { dropboxTestTierSet } from './helpers/lane-tier-sets.ts';
+import { expectHeldThenPersonal } from './helpers/tier-fixtures.ts';
 
 // A deleted Dropbox folder arrives as ONE entry for its whole subtree: the
 // descendants' own paths are never listed. These tests pin that the entry is
@@ -791,7 +792,10 @@ describe('a deleted folder through the per-tier stores', () => {
     expect(copiesIn(lane, identityFor('id:new-top')).length).toBeGreaterThan(1);
     expect(lane.ledger.isRouted(identityFor('id:new-top'))).toBe(true);
     expect(secure.searchItems('diagnosis', 10).map((row) => row.sourceItem.providerItemId)).toEqual(['id:new-top']);
+    expect(internal.searchItems('cartography', 10)).toEqual([]);
+    await expectHeldThenPersonal(lane.set, identityFor('id:new-deep'), 'Chapter three covers the history of cartography.');
     expect(internal.searchItems('cartography', 10).map((row) => row.sourceItem.providerItemId)).toEqual(['id:new-deep']);
+    await expectHeldThenPersonal(lane.set, identityFor('id:new-sibling'), 'Chapter four covers the history of lighthouses.');
     return { root, lane, sync, secure, internal, publicStore };
   }
 

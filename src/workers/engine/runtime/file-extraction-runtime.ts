@@ -94,6 +94,7 @@ import { createTieredStoreExtractionSink } from '../../file-extraction/tiered-st
 import { connectorStoreExtractionCandidateReader } from '../../connector-store/extraction-candidate-reader.ts';
 import { tieredExtractionView, type TieredExtractionView } from '../../connector-store/tiered-extraction.ts';
 import { TIER_DOMAIN_ORDER, type TieredStoreSet } from '../../connector-store/tiered-store-set.ts';
+import { tierSetForLedger } from '../../connector-store/tier-set-registry.ts';
 import type {
   ExtractionItemRef,
   ExtractorRegistryConfig,
@@ -193,8 +194,7 @@ export interface FileExtractionRuntimeOptions {
    * listing (TieredStoreSetOptions.contentArrivesLater or
    * contentArrivesLaterFor), keyed by the lane's own corpus. Such a corpus
    * reads candidates, locators and egress tiers across the set, and its sink
-   * lands each routed item's text in the store its content tier decides. Its
-   * existing items take the plain path. A lane with several stores of its own
+   * lands each item's text in the store its content tier decides. A lane with several stores of its own
    * maps each of their corpora to the same set; each lists its own store
    * (tieredExtractionView `home`).
    */
@@ -326,6 +326,11 @@ export function createFileExtractionRuntime(
 
   const warn = options.warn ?? ((message: string) => console.warn(message));
   const storesByCorpusId = new Map(options.connectorStores.map((store) => [store.corpusId, store]));
+  const registeredTierSetForStore = (store: LocalConnectorStore): TieredStoreSet | undefined => {
+    const registered = tierSetForLedger(store.tierLedgerPathInUse());
+    return registered?.legSpec(store.trustDomain)?.legacy && registered.store(store.trustDomain) === store
+      ? registered : undefined;
+  };
   const sourceFactories = options.sourceFactories ?? new Map([
     ...defaultSourceFactories(
       env,
@@ -399,12 +404,15 @@ export function createFileExtractionRuntime(
       warn(fileExtractionCorpusDropped(config, 'no_source_factory'));
       continue;
     }
-    const tierSet = options.tierSets?.get(config.corpusId);
+    const configuredTierSet = options.tierSets?.get(config.corpusId);
+    const tierSet = configuredTierSet ?? registeredTierSetForStore(store);
     // The set's own store for the domain: a leg opened on demand has no store in its spec.
     if (tierSet && tierSet.store(store.trustDomain) !== store) {
       throw new Error(`[file-extraction] corpus=${config.corpusId} tier set does not hold its store.`);
     }
-    const view = tierSet ? tieredExtractionView(tierSet, { home: store.trustDomain }) : undefined;
+    // A set found by ledger is the authority for landing newly extracted text.
+    // The configured corpus still governs candidate discovery and remote reads.
+    const view = configuredTierSet ? tieredExtractionView(configuredTierSet, { home: store.trustDomain }) : undefined;
     itemStores.set(config.corpusId, tierSet
       ? () => TIER_DOMAIN_ORDER.flatMap((domain) => {
           const leg = tierSet.store(domain);
@@ -456,6 +464,14 @@ export function createFileExtractionRuntime(
       } } : {}) } : {}),
       corpusId: config.corpusId,
       trustDomain: store.trustDomain,
+      holdOnDemandRead(ref, controller) {
+        const held = (itemStores.get(config.corpusId)?.() ?? []).flatMap(holder => {
+          const grant = holder.observeOnDemandRead(ref.localItemId, ref.sourceVersion ?? '', controller);
+          return grant ? [grant] : [];
+        });
+        if (held.length === 0) return undefined;
+        return { check: () => held.every(grant => grant.check()), release: () => held.forEach(grant => grant.release()) };
+      },
       ...(spoolDir ? { spoolDir } : {}),
       ...(spoolDir && placement.anchor !== undefined ? { spoolAnchor: placement.anchor } : {}),
       source: async () => {

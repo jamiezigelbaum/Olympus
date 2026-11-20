@@ -1,13 +1,3 @@
-// P1b routing (design docs/design/per-item-four-tier-classification.md,
-// sections 2, 3.2, 4.2): a tiered store set routes NEW items by their
-// recorded tiers, and nothing stored before P1b moves.
-//
-// The core guarantee under test: an existing store that a set adopts ends with
-// its existing items byte-identical (rows, chunks, vectors, vector authority),
-// with zero provider calls for them, never reaching the whole-corpus
-// invalidation path, and with no copy rows in the ledger (so their visibility
-// is exactly what it was).
-
 import { existsSync } from 'node:fs';
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
@@ -17,6 +7,7 @@ import {
   FIXTURE_PLACEMENT,
   cloudProvider,
   fixtureConnector,
+  fixtureItem,
   identityOf,
   localId,
   localProvider,
@@ -77,8 +68,8 @@ async function populateLegacy(dir: string, specs: readonly FixtureSpec[]): Promi
 
 const LEGACY_IDS = LEGACY.map((spec) => localId(spec.id));
 
-describe('P1b: existing data does not move', () => {
-  test('a set adopting existing stores leaves every existing item byte-identical, re-embeds nothing and never invalidates', async () => {
+describe('legacy rows without a new body observation', () => {
+  test('routing other items preserves existing rows, vectors and embedding authority', async () => {
     const dir = workspace();
     await populateLegacy(dir, LEGACY);
     const paths = storePaths(dir);
@@ -95,7 +86,7 @@ describe('P1b: existing data does not move', () => {
     );
     const fixture = openTierFixture(dir);
     try {
-      const specs = [...LEGACY, ...NEW];
+      const specs = NEW;
       await fixture.set.sync(fixtureConnector(() => specs), { fetchContent: true, placement: FIXTURE_PLACEMENT });
       await fixture.set.sync(fixtureConnector(() => specs), { fetchContent: true, placement: FIXTURE_PLACEMENT });
 
@@ -129,18 +120,136 @@ describe('P1b: existing data does not move', () => {
     ]));
   });
 
-  test('without any new item the set creates no store and writes no copy row', async () => {
+  test('a names-only re-list leaves the existing copies under legacy placement', async () => {
     const dir = workspace();
     await populateLegacy(dir, LEGACY);
     const fixture = openTierFixture(dir);
     try {
-      await fixture.set.sync(fixtureConnector(() => LEGACY), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+      await fixture.set.sync(fixtureConnector(() => LEGACY.map(({ text: _text, ...names }) => names)), { deferMetadataOnlyContent: true, placement: FIXTURE_PLACEMENT });
       expect(existsSync(fixture.paths.public_safe)).toBe(false);
       expect(fixture.ledger.corpusHasCopies(CORPORA.internal)).toBe(false);
       expect(fixture.ledger.corpusHasCopies(CORPORA.secure_local)).toBe(false);
     } finally {
       fixture.close();
     }
+  });
+});
+
+describe('legacy body placement', () => {
+  test('a replacement body waits in Private even when its legacy version did not change', async () => {
+    const dir = workspace();
+    const original = { id: 'edited', name: 'orchard.txt', text: 'Last year we planted hazelnuts.' };
+    await populateLegacy(dir, [original]);
+    const fixture = openTierFixture(dir);
+    cleanups.unshift(() => fixture.close());
+    const replacement = { ...original, text: 'The orchard crew planted elderberries this year.' };
+    await fixture.set.sync(fixtureConnector(() => [replacement]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+
+    expect(fixture.ledger.getCurrent(identityOf(original.id))).toMatchObject({ routed: true, contentPending: true });
+    expect(fixture.ledger.copies(identityOf(original.id))).toContainEqual(expect.objectContaining({
+      trustDomain: 'secure_local', state: 'current', embedHold: true,
+    }));
+    expect(snapshotStore(fixture.paths.internal).chunks).toHaveLength(0);
+    expect(snapshotStore(fixture.paths.secure_local).chunks.map(chunk => chunk.bounded_text)).toEqual([replacement.text]);
+    expect([...fixture.cloud.inputs, ...fixture.local.inputs]).toEqual([]);
+  });
+
+  test('a re-listed Private legacy copy holds its new chunks out of embedding', async () => {
+    const dir = workspace();
+    const original = { id: 'secure-edit', name: 'garden.txt', text: 'A prior entry.', legacyDomain: 'secure_local' as const };
+    await populateLegacy(dir, [original]);
+    const fixture = openTierFixture(dir);
+    cleanups.unshift(() => fixture.close());
+    const edited = { ...original, text: 'Our new entry describes lavender seeds.' };
+    await fixture.set.sync(fixtureConnector(() => [edited]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    expect(fixture.ledger.copies(identityOf(original.id))).toContainEqual(expect.objectContaining({
+      trustDomain: 'secure_local', state: 'current', embedHold: true,
+    }));
+    expect(snapshotStore(fixture.paths.secure_local).chunks.map(chunk => chunk.bounded_text)).toEqual([edited.text]);
+    expect(fixture.local.inputs).toEqual([]);
+  });
+
+  test('a held legacy edit keeps the supplied body when the lane requests no fetch', async () => {
+    const dir = workspace();
+    const original = { id: 'listed', name: 'notes.txt', text: 'Previous entry.' };
+    await populateLegacy(dir, [original]);
+    const fixture = openTierFixture(dir);
+    cleanups.unshift(() => fixture.close());
+    const listed = { ...original, text: 'A new entry about blueberries.' };
+    await fixture.set.sync(fixtureConnector(() => [listed]), { placement: FIXTURE_PLACEMENT, fetchContent: false });
+    expect(snapshotStore(fixture.paths.secure_local).chunks.map(chunk => chunk.bounded_text)).toEqual([listed.text]);
+    expect(snapshotStore(fixture.paths.internal).chunks).toBeEmpty();
+  });
+
+  test('a body fetched from a legacy listing stub passes through placement before indexing', async () => {
+    const dir = workspace();
+    const stub = { id: 'fetched', name: 'garden.txt' };
+    await populateLegacy(dir, [stub]);
+    const fixture = openTierFixture(dir);
+    cleanups.unshift(() => fixture.close());
+    const connector = fixtureConnector(() => [stub]);
+    const text = 'Our spring inventory includes seven heather plants.';
+    connector.fetchItem = async () => fixtureItem({ ...stub, text });
+    await fixture.set.sync(connector, { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    expect(snapshotStore(fixture.paths.internal).chunks).toBeEmpty();
+    expect(snapshotStore(fixture.paths.secure_local).chunks.map(chunk => chunk.bounded_text)).toEqual([text]);
+    expect(fixture.ledger.copies(identityOf(stub.id))).toContainEqual(expect.objectContaining({
+      trustDomain: 'secure_local', embedHold: true,
+    }));
+  });
+
+  test('a settled raise queues from the new Private body when the legacy source held only names', async () => {
+    const dir = workspace();
+    const stub = { id: 'record', name: 'scan.txt' };
+    await populateLegacy(dir, [stub]);
+    const fixture = openTierFixture(dir);
+    cleanups.unshift(() => fixture.close());
+    const filled = { ...stub, version: 'v2', text: 'Invoice total and IBAN GB82WEST12345698765432.' };
+    const run = await fixture.set.sync(fixtureConnector(() => [filled]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+
+    expect(run.routing.movesQueued).toBe(1);
+    expect(snapshotStore(fixture.paths.internal).chunks).toBeEmpty();
+    expect(snapshotStore(fixture.paths.secure_local).chunks.map(chunk => chunk.bounded_text)).toEqual([filled.text]);
+  });
+
+  test('an interrupted approved legacy edit cannot serve the old Personal body under the new verdict', async () => {
+    const dir = workspace();
+    const original = { id: 'orchard', name: 'orchard.txt', text: 'Old kumquats inventory.' };
+    await populateLegacy(dir, [original]);
+    const fixture = openTierFixture(dir);
+    cleanups.unshift(() => fixture.close());
+    fixture.ledger.setOverride(identityOf(original.id), { kind: 'tier', tier: 'private' });
+    const revised = { ...original, version: 'v2', text: 'New berries inventory.' };
+    const connector = fixtureConnector(() => [revised]);
+    let observations = 0;
+    await expect(fixture.set.sync(connector, {
+      fetchContent: true, placement: FIXTURE_PLACEMENT,
+      sourceScopeObservation: () => {
+        if (++observations === 2) throw new Error('interrupt item write');
+        return { accountGeneration: 'a'.repeat(64), scopeRevision: '00000000-0000-4000-8000-000000000001', folderKeys: [] };
+      },
+    }, { settle: false })).rejects.toThrow('interrupt item write');
+    expect(fixture.stores.internal!.searchItems('kumquats', 5)).toBeEmpty();
+    await fixture.set.sync(connector, { fetchContent: true, placement: FIXTURE_PLACEMENT }, { settle: false });
+    expect(snapshotStore(fixture.paths.secure_local).chunks.map(c => c.bounded_text)).toEqual([revised.text]);
+    expect(fixture.stores.internal!.searchItems('kumquats', 5)).toBeEmpty();
+  });
+
+  test('a verdict that lowers a newly read legacy body queues a move from its physical copy', async () => {
+    const dir = workspace();
+    const stub = { id: 'new-body', name: 'orchard.txt', legacyDomain: 'secure_local' as const };
+    await populateLegacy(dir, [stub]);
+    const fixture = openTierFixture(dir);
+    cleanups.unshift(() => fixture.close());
+    fixture.ledger.setOverride(identityOf(stub.id), { kind: 'tier', tier: 'private' });
+    const filled = { ...stub, text: 'The orchard crew planted apricots.' };
+    await fixture.set.sync(fixtureConnector(() => [filled]), { fetchContent: true, placement: FIXTURE_PLACEMENT }, { settle: false });
+
+    expect(fixture.ledger.getCurrent(identityOf(stub.id))).toMatchObject({
+      routed: true, state: 'moving', targetContentTier: 'private',
+    });
+    expect(snapshotStore(fixture.paths.secure_local).chunks.map(chunk => chunk.bounded_text)).toEqual([filled.text]);
+    expect(snapshotStore(fixture.paths.internal).chunks).toHaveLength(0);
   });
 });
 

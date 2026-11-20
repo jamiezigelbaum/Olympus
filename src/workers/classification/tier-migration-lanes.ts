@@ -13,6 +13,8 @@
 import { resolvedStorePath } from '../../core/source-placement.ts';
 import { existsSync } from 'node:fs';
 import type { SourceFamily, SourceTrustDomain, SourceTrustTier } from '../../core/source-index/types.ts';
+import { FileSourceScopeAuthority, mailScopeTierOwnerRuleSource } from '../source-scope-runtime.ts';
+import { handleRegistryPathFromEnv } from '../credential-broker/connected-handles.ts';
 import { READWISE_LIBRARY_CORPUS_ID } from '../../core/source-corpus-registry.ts';
 import type { LocalConnectorStore } from '../connector-store/local-index.ts';
 import { openConnectorStore, openSecretLocations, openTierLedger } from '../../core/source-storage.ts';
@@ -86,6 +88,7 @@ export interface TierMigrationLaneSpec {
   legs: Partial<Record<SourceTrustDomain, TierMigrationLegSpec>> & { secure_local: TierMigrationLegSpec };
   /** The lane's own classification input, as its runtime sets it; the run's shared inputs are added to it. */
   tierClassification?: TieredLaneSetOptions['tierClassification'];
+  ownerRuleSource?: TieredLaneSetOptions['ownerRuleSource'];
   splitLayers?: boolean;
   contentArrivesLater?: boolean;
   /** The lane's per-item form of `contentArrivesLater`, as its runtime sets it. */
@@ -96,9 +99,15 @@ export interface TierMigrationLaneSpec {
 export function installedTierMigrationLaneSpecs(
   env: Record<string, string | undefined> = process.env,
 ): TierMigrationLaneSpec[] {
+  const registryPath = handleRegistryPathFromEnv(env, true);
+  const mailAuthority = new FileSourceScopeAuthority({
+    ...(registryPath ? { registryPath } : {}),
+    mailPinnedHandle: () => env.OLYMPUS_SOURCE_INDEX_GMAIL_CREDENTIAL_HANDLE,
+  });
   return [
     {
       sourceId: 'gmail.email',
+      ownerRuleSource: mailScopeTierOwnerRuleSource(mailAuthority),
       setId: 'gmail.email',
       legs: {
         public_safe: { corpusId: GMAIL_PUBLIC_CONNECTOR_CORPUS_ID, dbPath: resolvedStorePath('gmail.email', 'public_safe', env), family: 'email' },
@@ -230,6 +239,7 @@ export function openTierMigrationLanes(
   specs: readonly TierMigrationLaneSpec[],
   options: {
     mode: TierMigrationLaneMode;
+    ownerRulesPath?: string;
     tierClassification?: TieredLaneSetOptions['tierClassification'];
   },
 ): OpenedTierMigrationLanes {
@@ -283,6 +293,8 @@ export function openTierMigrationLanes(
         ...(spec.contentArrivesLater ? { contentArrivesLater: true } : {}),
         ...(spec.contentArrivesLaterFor ? { contentArrivesLaterFor: spec.contentArrivesLaterFor } : {}),
         ...(tierClassification ? { tierClassification } : {}),
+        ...(options.ownerRulesPath ? { ownerRulesPath: options.ownerRulesPath } : {}),
+        ...(spec.ownerRuleSource ? { ownerRuleSource: spec.ownerRuleSource } : {}),
         ...(secretLocations ? { secretLocations } : {}),
       });
       lanes.push({ sourceId: spec.sourceId, set });

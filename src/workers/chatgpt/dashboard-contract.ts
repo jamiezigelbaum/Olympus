@@ -521,7 +521,7 @@ export interface OlympusHostContext {
   /** The local dashboard controls are locked: every control is disabled with the locked reason. */
   readOnly?: boolean;
   /** Computer only: the local pages the "On this computer" section opens. */
-  links?: Partial<Record<'keys' | 'agents' | 'privateAnswers' | 'connector' | 'help', string>>;
+  links?: Partial<Record<'keys' | 'agents' | 'privateAnswers' | 'overrideReviews' | 'connector' | 'help', string>>;
   /**
    * Computer only, in the first `ui/initialize` answer only: the source an
    * open link asked to land on (core/open-targets.ts `unreadable/<source>`).
@@ -570,6 +570,8 @@ export interface ComputerDashboardMeta {
    * never the Gateway bearer; absent when none wait.
    */
   waitingPrivateQuestions?: number;
+  /** Detector kinds on changed Personal overrides awaiting this local owner. */
+  overrideReviewKinds?: string[];
   /**
    * How many items Olympus has indexed across every source, for Home's
    * status line (dashboard redesign, owner 2026-11-07, final-6). A count

@@ -55,7 +55,7 @@ export interface BoundedFetchConnector extends SourceConnector {
    */
   fetchItemWithin(
     localItemId: string,
-    options: { maxBytes?: number; expectedVersion?: string; deferredBytes?: { locator: string } },
+    options: { maxBytes?: number; expectedVersion?: string; deferredBytes?: { locator: string }; signal?: AbortSignal },
   ): Promise<RawItem>;
 }
 
@@ -81,6 +81,7 @@ export interface FileFetchConnector extends SourceConnector {
       spoolDir: string;
       spoolAnchor?: string;
       stillServed?: () => boolean;
+      signal?: AbortSignal;
     },
   ): Promise<{ item: RawItem; path: string; spooled: boolean; sizeBytes?: number }>;
 }
@@ -99,13 +100,15 @@ function isFileFetchConnector(connector: SourceConnector): connector is FileFetc
 export async function readItemWithin(
   connector: SourceConnector,
   localItemId: string,
-  options: { maxBytes?: number; expectedVersion?: string; deferredBytes?: { locator: string } },
+  options: { maxBytes?: number; expectedVersion?: string; deferredBytes?: { locator: string }; signal?: AbortSignal },
 ): Promise<RawItem> {
+  options.signal?.throwIfAborted();
   const deferred = options.deferredBytes ? { deferredBytes: options.deferredBytes } : {};
   if (isBoundedFetchConnector(connector)) {
     return connector.fetchItemWithin(localItemId, {
       ...(options.maxBytes !== undefined ? { maxBytes: options.maxBytes } : {}),
       ...(options.expectedVersion ? { expectedVersion: options.expectedVersion } : {}),
+      ...(options.signal ? { signal: options.signal } : {}),
       ...deferred,
     });
   }
@@ -120,6 +123,7 @@ export async function readItemToFile(
   connector: SourceConnector,
   localItemId: string,
   options: {
+    signal?: AbortSignal;
     maxBytes?: number;
     expectedVersion?: string;
     deferredBytes?: { locator: string };
@@ -143,8 +147,10 @@ export async function readItemToFile(
     stillServed?: () => boolean;
   },
 ): Promise<{ item: RawItem; path: string; spooled: boolean; sizeBytes?: number }> {
+  options.signal?.throwIfAborted();
   if (isFileFetchConnector(connector)) return connector.fetchItemToFile(localItemId, options);
   const item = await readItemWithin(connector, localItemId, options);
+  options.signal?.throwIfAborted();
   const content = item.content;
   if (content.kind === 'metadata_only') throw refusalFor(item);
   const bytes = content.kind === 'bytes' ? content.bytes : new TextEncoder().encode(content.text);
@@ -321,6 +327,7 @@ export function createConnectorFileExtractionSource(
 
     async fetch(ref: ExtractionItemRef, fetchOptions: ExtractionFetchOptions): Promise<FetchedBytes> {
       const item = await readItem(ref, fetchOptions);
+      fetchOptions.signal?.throwIfAborted();
       const content = item.content;
       if (content.kind === 'metadata_only') throw refusalFor(item);
       const bytes = content.kind === 'bytes' ? content.bytes : new TextEncoder().encode(content.text);
@@ -340,6 +347,7 @@ export function createConnectorFileExtractionSource(
       let handed: { item: RawItem; path: string; spooled: boolean; sizeBytes?: number };
       try {
         handed = await readItemToFile(connector, ref.localItemId, {
+          ...(fileOptions.signal ? { signal: fileOptions.signal, stillServed: () => !fileOptions.signal?.aborted } : {}),
           ...(fileOptions.maxBytes !== undefined ? { maxBytes: fileOptions.maxBytes } : {}),
           ...(ref.sourceVersion ? { expectedVersion: ref.sourceVersion } : {}),
           ...(deferred ? { deferredBytes: { locator: deferred.locator } } : {}),
@@ -383,11 +391,12 @@ export function createConnectorFileExtractionSource(
 
   async function readItem(
     ref: ExtractionItemRef,
-    fetchOptions: { maxBytes?: number },
+    fetchOptions: ExtractionFetchOptions,
   ): Promise<RawItem> {
     const { connector, deferred } = resolve_(ref, fetchOptions.maxBytes);
     try {
       return await readItemWithin(connector, ref.localItemId, {
+        ...(fetchOptions.signal ? { signal: fetchOptions.signal } : {}),
         ...(fetchOptions.maxBytes !== undefined ? { maxBytes: fetchOptions.maxBytes } : {}),
         ...(ref.sourceVersion ? { expectedVersion: ref.sourceVersion } : {}),
         ...(deferred ? { deferredBytes: { locator: deferred.locator } } : {}),

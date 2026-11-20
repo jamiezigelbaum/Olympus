@@ -36,7 +36,7 @@ const LANE = { corpusId: CORPORA.secure_local!, provider: PROVIDER, accountScope
 const REF = { ...LANE, providerItemId: 'budget', localItemId: localId('budget'), sourceVersion: 'r1', mimeType: 'text/plain', name: 'Budget 2026.txt' };
 
 // The judge reads the text and finds it ordinary.
-const PERSONAL: TierSniffer = { id: 'fixture-sniffer', judge: () => ({ verdict: 'decided', tier: 'private', code: 'ordinary' }) };
+const PERSONAL: TierSniffer = { id: 'fixture-sniffer', judge: () => ({ verdict: 'decided', tier: 'private', code: 'ordinary', origin: 'model' }) };
 
 async function failSafeUnreadLane(options: { folder?: boolean } = {}) {
   const { dir, cleanup } = tempDir('olympus-fail-safe-landing-');

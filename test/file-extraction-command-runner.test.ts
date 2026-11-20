@@ -20,6 +20,7 @@ import {
   killExtractionProcessGroup,
   resolveExtractionCommand,
   runExtractionCommand,
+  runWithExtractionAbortSignal,
   type ExtractionKillFn,
 } from '../src/workers/file-extraction/extractors/command-runner.ts';
 
@@ -62,6 +63,25 @@ async function waitUntilGone(pid: number, budgetMs: number): Promise<boolean> {
 }
 
 describe('runExtractionCommand: normal completion', () => {
+  test('the active extraction abort signal stops a reader subprocess', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'extraction-abort-'));
+    const controller = new AbortController();
+    const pidFile = join(dir, 'pid');
+    const command = runWithExtractionAbortSignal(controller.signal, () => runExtractionCommand({
+      command: 'bash', args: ['-c', 'printf "%s" "$$" > "$1"; exec sleep 4', 'fixture', pidFile], timeoutMs: 0,
+    }));
+    try {
+      const pid = await waitForPidFile(pidFile, 2_000);
+      const reason = new Error('grant revoked');
+      controller.abort(reason);
+      await expect(command).rejects.toBe(reason);
+      expect(await waitUntilGone(pid, 2_000)).toBe(true);
+    } finally {
+      controller.abort();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test('collects both streams and resolves on exit 0', async () => {
     const result = await runExtractionCommand({
       command: 'bash',

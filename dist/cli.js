@@ -2173,6 +2173,29 @@ var init_tier_ledger_path = __esm(() => {
   init_olympus_layout();
 });
 
+// src/core/source-connector-labels.ts
+function connectorLabelCapability(provider) {
+  return byProvider.get(provider);
+}
+var NOTE_TAGS_METADATA_KEY = "tags", GMAIL_LABEL_CAPABILITY, MBOX_LABEL_CAPABILITY, EVERNOTE_LABEL_CAPABILITY, READWISE_LABEL_CAPABILITY, REFLECT_LABEL_CAPABILITY, TELEGRAM_LABEL_CAPABILITY, capabilities, byProvider;
+var init_source_connector_labels = __esm(() => {
+  GMAIL_LABEL_CAPABILITY = { provider: "gmail", metadataKey: "labels" };
+  MBOX_LABEL_CAPABILITY = { provider: "mbox", metadataKey: "labels" };
+  EVERNOTE_LABEL_CAPABILITY = { provider: "evernote", metadataKey: NOTE_TAGS_METADATA_KEY };
+  READWISE_LABEL_CAPABILITY = { provider: "readwise", metadataKey: NOTE_TAGS_METADATA_KEY };
+  REFLECT_LABEL_CAPABILITY = { provider: "reflect", metadataKey: NOTE_TAGS_METADATA_KEY };
+  TELEGRAM_LABEL_CAPABILITY = { provider: "telegram" };
+  capabilities = [
+    GMAIL_LABEL_CAPABILITY,
+    MBOX_LABEL_CAPABILITY,
+    EVERNOTE_LABEL_CAPABILITY,
+    READWISE_LABEL_CAPABILITY,
+    REFLECT_LABEL_CAPABILITY,
+    TELEGRAM_LABEL_CAPABILITY
+  ];
+  byProvider = new Map(capabilities.map((capability) => [capability.provider, capability]));
+});
+
 // src/core/archive-formats.ts
 function startsWithFromLine(head) {
   if (!head || head.length < FROM_LINE.length)
@@ -2572,12 +2595,13 @@ function archiveFormatConnector(formatId) {
 }
 var ARCHIVE_PROBE_HEAD_BYTES = 4096, ARCHIVE_PROBE_MAX_CHILDREN = 256, ARCHIVE_PROBE_MAX_NAMED = 1024, FROM_LINE, MBOX_ARCHIVE_FORMAT, WHATSAPP_DATE, WHATSAPP_TIME, WHATSAPP_FIRST_LINE, WHATSAPP_LINE_NOISE, WHATSAPP_NARROW_SPACES, WHATSAPP_TEXT_NAME, WHATSAPP_ARCHIVE_FORMAT, leniencyDecoder, WEEKDAYS, MONTHS, DAILY_NOTE_FILE, REFLECT_NOTES_LIST_KEY = "notes", REFLECT_BODY_KEYS, REFLECT_NOTE_KEYS, ROAM_TIME_KEYS, JSON_EXPORT_RECORDS, SCANNED, REFLECT_JSON_ARCHIVE_FORMAT, REFLECT_MARKDOWN_ARCHIVE_FORMAT, ROAM_JSON_ARCHIVE_FORMAT, AI_CONVERSATION_NAMES, CHATGPT_ARCHIVE_FORMAT, CLAUDE_ARCHIVE_FORMAT, EVERNOTE_ENEX_ARCHIVE_FORMAT, JSON_STRING, TELEGRAM_EXPORT_SECTIONS, TELEGRAM_FULL_HEAD, TELEGRAM_CHAT_HEAD, TELEGRAM_HTML_NAME, TELEGRAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, ARCHIVE_NEUTRAL_PROVIDER = "archive", ARCHIVE_LOOK_INCOMPLETE_ADVICE = "Olympus could not look through everything you chose to see which parts are exports, because there is a lot of it or some parts are very large. Choose just the export file, or a folder or zip that holds only the export.", ARCHIVE_COMMON_FINDINGS, ArchiveImportStoppedError, CONNECTOR_FACTORIES;
 var init_archive_formats = __esm(() => {
+  init_source_connector_labels();
   FROM_LINE = [70, 114, 111, 109, 32];
   MBOX_ARCHIVE_FORMAT = Object.freeze({
     id: "mbox",
     label: "Mail (mbox)",
     family: "email",
-    provider: "mbox",
+    provider: MBOX_LABEL_CAPABILITY.provider,
     chooseHint: "a mail export (an .mbox file from Google Takeout or Thunderbird, or an .mbox folder from Apple Mail)",
     citationLabel: "Imported mail",
     exportGuide: Object.freeze({
@@ -2652,7 +2676,7 @@ var init_archive_formats = __esm(() => {
     id: "reflect-json",
     label: "Reflect notes (JSON)",
     family: "note",
-    provider: "reflect",
+    provider: REFLECT_LABEL_CAPABILITY.provider,
     chooseHint: "a Reflect export in JSON (the .json file, or the .zip that holds it)",
     citationLabel: "Reflect",
     sourceCard: Object.freeze({ id: "reflect.archive", label: "Reflect" }),
@@ -2671,7 +2695,7 @@ var init_archive_formats = __esm(() => {
     id: "reflect-markdown",
     label: "Reflect notes (Markdown zip)",
     family: "note",
-    provider: "reflect",
+    provider: REFLECT_LABEL_CAPABILITY.provider,
     chooseHint: "a Reflect export as Markdown (the .zip file)",
     citationLabel: "Reflect",
     sourceCard: Object.freeze({ id: "reflect.archive", label: "Reflect" }),
@@ -2734,7 +2758,7 @@ var init_archive_formats = __esm(() => {
     id: "evernote-enex",
     label: "Evernote export (.enex)",
     family: "note",
-    provider: "evernote",
+    provider: EVERNOTE_LABEL_CAPABILITY.provider,
     chooseHint: "an Evernote export (the .enex file, or a folder of them)",
     citationLabel: "Evernote",
     sourceCard: Object.freeze({ id: "evernote.notes", label: "Evernote" }),
@@ -22645,6 +22669,9 @@ function defaultOwnerConfigPath(name, env = process.env) {
 function defaultSovereigntyConfigPath(env = process.env) {
   return linuxOwnerConfigPath("sovereignty.json", env) ?? join17(env.HOME?.trim() || homedir10(), ".olympus", "sovereignty.json");
 }
+function withOwnerConfigLease(path, mode, work) {
+  return withFileLeaseSync(path, (lease) => lease.commit(work), { mode });
+}
 function ownerConfigStamp(path) {
   try {
     return stampOf(statSync3(path));
@@ -39416,28 +39443,6 @@ var init_cli_via_worker = __esm(() => {
   };
 });
 
-// src/core/store-write-guard.ts
-function forbidWritableStoreOpens() {
-  forbidden = true;
-}
-function writableStoreOpensForbidden() {
-  return forbidden;
-}
-function assertWritableStoreOpenAllowed(kind, dbPath) {
-  if (forbidden && dbPath !== ":memory:")
-    throw new FrontStoreWriteError(kind);
-}
-var FrontStoreWriteError, forbidden = false;
-var init_store_write_guard = __esm(() => {
-  FrontStoreWriteError = class FrontStoreWriteError extends Error {
-    code = "front_store_write";
-    constructor(kind) {
-      super(`The engine front opened a ${kind} for writing; only the background process writes it.`);
-      this.name = "FrontStoreWriteError";
-    }
-  };
-});
-
 // src/core/boot-progress.ts
 import { existsSync as existsSync22, lstatSync as lstatSync16, mkdirSync as mkdirSync13, readdirSync as readdirSync4, readFileSync as readFileSync28, realpathSync as realpathSync9, rmSync as rmSync9 } from "node:fs";
 import { readFile as readFile3 } from "node:fs/promises";
@@ -39952,6 +39957,31 @@ self.onmessage = ({ data }) => {
 });
 
 // src/core/sqlite-migrations.ts
+function additiveStatement(body) {
+  if (body.includes(";") || NOT_ADDITIVE.test(body))
+    return false;
+  return NEW_TABLE.test(body) || NEW_INDEX.test(body) || NEW_COLUMN.test(body);
+}
+function additiveMigration(version, name, statements) {
+  if (statements.length === 0)
+    throw new OperationError("config_error", `Additive migration "${name}" has no statements.`);
+  for (const statement of statements) {
+    const body = statement.trim().replace(/;$/, "").trim();
+    if (!additiveStatement(body)) {
+      throw new OperationError("config_error", `Additive migration "${name}" has a statement that is not additive: ${body.slice(0, 80)}`);
+    }
+  }
+  const migration = {
+    version,
+    name,
+    up(db) {
+      for (const statement of statements)
+        db.exec(statement);
+    }
+  };
+  ADDITIVE_MIGRATIONS.add(migration);
+  return migration;
+}
 function isAdditiveMigration(migration) {
   return ADDITIVE_MIGRATIONS.has(migration);
 }
@@ -40106,7 +40136,7 @@ function validateMigrations(migrations) {
   }
   return ordered;
 }
-var SQLITE_SCHEMA_VERSION_TABLE = "schema_version", CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION = 1, ADDITIVE_MIGRATIONS, NAME = "[A-Za-z_][A-Za-z0-9_]*", NEW_TABLE, NEW_INDEX, NEW_COLUMN;
+var SQLITE_SCHEMA_VERSION_TABLE = "schema_version", CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION = 1, ADDITIVE_MIGRATIONS, NAME = "[A-Za-z_][A-Za-z0-9_]*", NEW_TABLE, NEW_INDEX, NEW_COLUMN, NOT_ADDITIVE;
 var init_sqlite_migrations = __esm(() => {
   init_boot_progress();
   init_engine_heartbeat();
@@ -40115,6 +40145,29 @@ var init_sqlite_migrations = __esm(() => {
   NEW_TABLE = new RegExp(`^CREATE\\s+TABLE\\s+(IF\\s+NOT\\s+EXISTS\\s+)?${NAME}\\s*\\(`, "i");
   NEW_INDEX = new RegExp(`^CREATE\\s+INDEX\\s+(IF\\s+NOT\\s+EXISTS\\s+)?${NAME}\\s+ON\\s+${NAME}\\s*\\(\\s*${NAME}(\\s+(ASC|DESC))?(\\s*,\\s*${NAME}(\\s+(ASC|DESC))?)*\\s*\\)$`, "i");
   NEW_COLUMN = new RegExp(`^ALTER\\s+TABLE\\s+${NAME}\\s+ADD\\s+(COLUMN\\s+)?${NAME}(\\s+(TEXT|INTEGER|REAL|BLOB|NUMERIC))?(\\s+DEFAULT\\s+(NULL|-?[0-9]+(\\.[0-9]+)?|'[^']*'))?$`, "i");
+  NOT_ADDITIVE = /\b(DROP|RENAME|UPDATE|DELETE|INSERT|REPLACE|SELECT|TRIGGER|UNIQUE|VACUUM|PRAGMA|ATTACH|DETACH|REFERENCES)\b/i;
+});
+
+// src/core/store-write-guard.ts
+function forbidWritableStoreOpens() {
+  forbidden = true;
+}
+function writableStoreOpensForbidden() {
+  return forbidden;
+}
+function assertWritableStoreOpenAllowed(kind, dbPath) {
+  if (forbidden && dbPath !== ":memory:")
+    throw new FrontStoreWriteError(kind);
+}
+var FrontStoreWriteError, forbidden = false;
+var init_store_write_guard = __esm(() => {
+  FrontStoreWriteError = class FrontStoreWriteError extends Error {
+    code = "front_store_write";
+    constructor(kind) {
+      super(`The engine front opened a ${kind} for writing; only the background process writes it.`);
+      this.name = "FrontStoreWriteError";
+    }
+  };
 });
 
 // src/workers/dropbox-files/content-policy.ts
@@ -40939,7 +40992,7 @@ function arrivalOrderedSniffer(sniffer, newArrival) {
   };
 }
 function contentHeldForJudgment(decision) {
-  return decision.contentPending;
+  return decision.contentPending || decision.reasons?.includes(OWNER_OVERRIDE_SECRET_REVIEW_REASON) === true;
 }
 function heldUntilJudged(reasons) {
   return reasons?.includes(HELD_UNTIL_JUDGED_REASON) === true;
@@ -40947,8 +41000,50 @@ function heldUntilJudged(reasons) {
 function contentDigestReason(text) {
   return `content:sha256:${createHash15("sha256").update(text.trim()).digest("hex")}`;
 }
+function ownerOverrideMatchesDigest(override, digest) {
+  return override?.kind === "tier" && (override.tier === "private" || override.tier === "public") && (override.setDigest === digest || override.confirmedDigest === digest);
+}
+function personalOverrideAllowsText(override, text) {
+  return override?.kind === "tier" && (override.tier === "private" || override.tier === "public") && (ownerOverrideMatchesDigest(override, contentDigestReason(text)) || contentSecretReasons(text).length === 0);
+}
+function contentSecretFindingKinds(reasons) {
+  const prefix = "content:secret:";
+  return reasons.filter((reason) => reason.startsWith(prefix)).map((reason) => reason.slice(prefix.length));
+}
+function ownerOverrideSecretReview(reasons) {
+  if (!reasons.includes(OWNER_OVERRIDE_SECRET_REVIEW_REASON))
+    return;
+  const digest = reasons.find((reason) => reason.startsWith("content:sha256:"));
+  const kinds = contentSecretFindingKinds(reasons);
+  return digest && kinds.length > 0 ? { digest, kinds } : undefined;
+}
 function contentJudgeVerdictReason(reason, tier, digest) {
   return `content:judge_verdict:${tier}:${createHash15("sha256").update(JSON.stringify([reason, digest])).digest("hex")}`;
+}
+function isContentJudgeReason(reason) {
+  return reason.startsWith("content:sniffer:") && (!reason.includes(":rule:") || reason.includes(":rule:duplicate_model:")) && !reason.includes(":fail_safe:") && !reason.endsWith(":fail_safe") && !reason.includes(":injection:") && !reason.endsWith(":undecided") && !reason.endsWith(":unresolved:0.00") && !reason.endsWith(":union:decision:failed");
+}
+function hasContentJudgeVerdict(reasons, tier, digest) {
+  return reasons.some((reason) => isContentJudgeReason(reason) && reasons.includes(contentJudgeVerdictReason(reason, tier, digest)));
+}
+function personalContentAuthorized(evidence, text, notSecret, override, imageJudgment) {
+  if (!evidence.contentRead || evidence.contentPending)
+    return false;
+  const { reasons } = evidence;
+  const digest = contentDigestReason(text);
+  const receipts = reasons.filter((reason) => reason.startsWith("content:sha256:"));
+  if (receipts.length !== 1 || receipts[0] !== digest)
+    return false;
+  const ownerDecided = evidence.decidedBy === "override" && (reasons.includes("override:item:private") || reasons.includes("override:item:public")) || namesDecidedByOwner(reasons);
+  const trivial = reasons.includes("content:text_only") ? trivialContentRule(text) : undefined;
+  const trivialSettled = trivial !== undefined && reasons.includes(`content:rule:${trivial}`);
+  const photoReason = reasons.find((reason) => reason === IMAGE_ORDINARY_REASON || reason.startsWith(IMAGE_TEXT_DECIDES_REASON_PREFIX));
+  const judgedPersonal = hasContentJudgeVerdict(reasons, "private", digest);
+  const photoSettled = imageJudgment?.verdict === "ordinary" && (imageJudgment.textDecides ? photoReason === `${IMAGE_TEXT_DECIDES_REASON_PREFIX}${imageCategoryCode(imageJudgment.category)}` && judgedPersonal : photoReason === IMAGE_ORDINARY_REASON);
+  if (!ownerDecided && !trivialSettled && !(photoReason ? photoSettled : judgedPersonal))
+    return false;
+  const ownerConfirmed = override?.kind === "tier" && evidence.decidedBy === "override" && reasons.includes(`override:item:${override.tier}`) && ownerOverrideMatchesDigest(override, digest);
+  return ownerConfirmed || notSecret && reasons.includes("override:item:not_secret") || contentSecretReasons(text).length === 0;
 }
 function contentNamesReason(names, parentContext) {
   const parts = [names.title, names.path, names.sender, parentContext].map((part) => part?.trim() ?? "");
@@ -41087,16 +41182,23 @@ function classifyItemTiersWithPublic(input, options) {
   const text = input.text;
   const holdUntilJudged = input.holdUntilJudged === true;
   if (options.override?.kind === "tier") {
+    const tier = options.override.tier;
+    const personal = tier === "private" || tier === "public";
+    const findings = text !== undefined && personal ? contentSecretReasons(text) : [];
+    const stillUnread = personal && input.heldSecret === true && !text?.trim();
+    const confirmed = text !== undefined && ownerOverrideMatchesDigest(options.override, contentDigestReason(text));
+    const review = findings.length > 0 && !confirmed;
+    const staysSecret = review && input.heldSecret === true;
     return {
       ...base,
-      metadataTier: options.override.tier,
-      contentTier: options.override.tier,
-      decidedBy: "override",
-      reasons: [`override:item:${options.override.tier}`, ...heldMark(holdUntilJudged, options.override.tier)],
-      state: "current",
-      contentRead: true,
+      metadataTier: review && !staysSecret ? "secure" : tier,
+      contentTier: staysSecret ? "secrets" : review ? "secure" : tier,
+      decidedBy: staysSecret ? "secret_detector" : "override",
+      reasons: staysSecret ? findings : ownerOverrideReasons(tier, holdUntilJudged, findings, confirmed),
+      state: stillUnread ? "pending" : "current",
+      contentRead: !stillUnread,
       metadataPending: false,
-      contentPending: false,
+      contentPending: stillUnread,
       metadataForced: true,
       metadataFlagged: false
     };
@@ -41165,18 +41267,23 @@ function classifyContentTier(input, options = {}) {
   const holdUntilJudged = input.holdUntilJudged === true;
   if (options.override?.kind === "tier") {
     const tier = options.retirePublic && options.override.tier === "public" ? "private" : options.override.tier;
+    const lower = tier === "private" || tier === "public";
+    const findings = lower ? contentSecretReasons(input.text) : [];
+    const confirmed = ownerOverrideMatchesDigest(options.override, contentDigestReason(input.text));
+    const review = findings.length > 0 && !confirmed;
+    if (review && input.heldSecret)
+      return { ...base, contentTier: "secrets", decidedBy: "secret_detector", reasons: findings, contentPending: false };
     return {
       ...base,
-      contentTier: tier,
+      contentTier: review ? "secure" : tier,
       decidedBy: "override",
       reasons: [
-        `override:item:${options.override.tier}`,
+        ...ownerOverrideReasons(options.override.tier, holdUntilJudged, findings, confirmed),
         ...tier !== options.override.tier ? [PUBLIC_RETIRED_REASON] : [],
-        ...heldMark(holdUntilJudged, tier),
         contentDigestReason(input.text),
         contentNamesReason(input, input.parentContext)
       ],
-      contentPending: false
+      contentPending: lower && input.heldSecret === true && !input.text.trim()
     };
   }
   const text = input.text;
@@ -41342,6 +41449,7 @@ function contentPass(args) {
     return { tier: "secrets", decidedBy: metadata.decidedBy, reasons: [], pending: false };
   }
   const mark = heldMark(args.holdUntilJudged === true, metadata.tier);
+  const held = args.holdUntilJudged === true && metadata.ownerDecided !== true && metadata.ownerRule === undefined;
   if (text === undefined || !text.trim() && (!args.textOnly || args.heldSecret)) {
     return {
       tier: metadata.tier,
@@ -41351,14 +41459,12 @@ function contentPass(args) {
     };
   }
   if (!args.secretsCleared) {
-    const secretKinds = detectSecretFindingKinds(text);
-    if (hasCredentialUrl(text) && !secretKinds.includes("credential_assignment"))
-      secretKinds.push("credential_assignment");
-    if (secretKinds.length > 0) {
+    const reasons = contentSecretReasons(text);
+    if (reasons.length > 0) {
       return {
         tier: "secrets",
         decidedBy: "secret_detector",
-        reasons: secretKinds.map((kind) => `content:secret:${kind}`),
+        reasons,
         pending: false
       };
     }
@@ -41376,7 +41482,7 @@ function contentPass(args) {
   if (args.image && !imageOrdinary) {
     return { tier: maxTier(metadata.tier, "secure"), decidedBy: "default", reasons: [IMAGE_PRIVATE_DEFAULT_REASON, ...mark], pending: false };
   }
-  if (metadata.forced) {
+  if (metadata.forced && (!held || tierRank(metadata.tier) >= tierRank("secure"))) {
     return { tier: metadata.tier, decidedBy: metadata.decidedBy, reasons: [...mark], pending: false };
   }
   let decided = { tier: metadata.tier, decidedBy: metadata.decidedBy, reasons: [] };
@@ -41391,7 +41497,14 @@ function contentPass(args) {
   if (isBareShareLink(text)) {
     const recorded = args.sniffer.recordedContentVerdict;
     if (recorded && recorded.mapRevision === args.mapRevision) {
-      const verdict = withSnifferVerdict(decided, recorded.tier, `content:sniffer:${args.sniffer.id}:${recorded.code}`);
+      const reason = `content:sniffer:${args.sniffer.id}:${recorded.code}`;
+      const verdict = withSnifferVerdict(decided, recorded.tier, reason);
+      if (recorded.origin === "model")
+        verdict.reasons.push("content:provenance:model");
+      if (isContentJudgeReason(reason) && (recorded.origin !== "rule" || recorded.rule === "duplicate_model"))
+        verdict.reasons.push(contentJudgeVerdictReason(reason, recorded.tier, contentDigestReason(text)));
+      if (recorded.rule)
+        verdict.reasons.push(`content:rule:${recorded.rule}`);
       return { ...verdict, reasons: [...verdict.reasons, ...mark], pending: false };
     }
     return {
@@ -41417,6 +41530,7 @@ function contentPass(args) {
     ...args.matchInput.path ? { path: args.matchInput.path } : {}
   });
   const canAskSniffer = args.sniffer.id !== UNDECIDED_TIER_SNIFFER.id;
+  const retiredPrior = metadata.decidedBy === "source_prior" && restsOnRetiredSourcePrior(metadata.reasons) && metadata.flags.length === 0 && !metadata.reasons.some((reason) => reason.startsWith("metadata:floor:"));
   if (detection.signals.length > 0) {
     decided = maxVerdict(decided, {
       tier: "secure",
@@ -41425,7 +41539,6 @@ function contentPass(args) {
     });
   }
   const recordFlags = [...ownRecordSignals(text, args.matchInput), ...textDecides ? ["image_document"] : []];
-  const held = args.holdUntilJudged === true && metadata.ownerDecided !== true;
   let pending = false;
   const flags = [
     ...metadata.flags,
@@ -41436,22 +41549,27 @@ function contentPass(args) {
   if (canAskSniffer && flags.length === 0 && metadata.ownerDecided !== true)
     flags.push(CONTENT_READ_SNIFFER_FLAG);
   const reasons = [...decided.reasons];
-  if (flags.length > 0 && tierRank(decided.tier) < tierRank("secure")) {
+  if (flags.length > 0 && (tierRank(decided.tier) < tierRank("secure") || retiredPrior && canAskSniffer && detection.signals.length === 0)) {
+    const digest = contentDigestReason(text);
     const verdict = args.sniffer.judge({
       pass: "content",
       priority: args.holdUntilJudged === true ? HELD_UNTIL_JUDGED_PRIORITY : recordFlags.length > 0 || metadata.pending ? HELD_RECORD_PRIORITY : 0,
-      flags: args.textOnly && !args.parentContext?.trim() ? [...flags, contentDigestReason(text), contentNamesReason(args.signals, args.parentContext)] : flags,
+      flags: [...flags, digest, contentNamesReason(args.signals, args.parentContext)],
       material: snifferContentMaterial(args.names, snifferExcerpt(text, vocabularyTerms(detection.vocabulary)), args.parentContext),
       materialHash: tierSnifferInputHash("content", args.signals, text, args.parentContext),
       ...args.textOnly && !args.parentContext?.trim() ? { contentHash: normalizedContentHash(text) } : {},
       mapRevision: args.mapRevision,
       ...args.subject ? { subject: args.subject } : {}
     });
-    if (verdict.verdict === "decided") {
-      decided = withSnifferVerdict(decided, verdict.tier, `content:sniffer:${args.sniffer.id}:${verdict.code}`);
+    const reason = verdict.verdict === "decided" ? `content:sniffer:${args.sniffer.id}:${verdict.code}` : undefined;
+    const judged = verdict.verdict === "decided" && reason !== undefined && isContentJudgeReason(reason) && (verdict.origin !== "rule" || verdict.rule === "duplicate_model");
+    if (verdict.verdict === "decided" && reason !== undefined && (!held || verdict.tier !== "private" || judged)) {
+      decided = withSnifferVerdict(decided, verdict.tier, reason);
       reasons.splice(0, reasons.length, ...decided.reasons);
       if (verdict.origin === "model")
-        reasons.push("content:provenance:model", contentJudgeVerdictReason(`content:sniffer:${args.sniffer.id}:${verdict.code}`, verdict.tier, contentDigestReason(text)));
+        reasons.push("content:provenance:model");
+      if (judged)
+        reasons.push(contentJudgeVerdictReason(reason, verdict.tier, digest));
       if (verdict.origin === "rule" && verdict.rule)
         reasons.push(`content:rule:${verdict.rule}`);
     } else {
@@ -41470,6 +41588,19 @@ function contentPass(args) {
   }
   reasons.push(...mark);
   return { tier: decided.tier, decidedBy: decided.decidedBy, reasons: [...new Set(reasons)], pending };
+}
+function contentSecretReasons(text) {
+  const kinds = detectSecretFindingKinds(text);
+  if (hasCredentialUrl(text) && !kinds.includes("credential_assignment"))
+    kinds.push("credential_assignment");
+  return kinds.map((kind) => `content:secret:${kind}`);
+}
+function ownerOverrideReasons(tier, holdUntilJudged, findings, confirmed) {
+  return [
+    `override:item:${tier}`,
+    ...heldMark(holdUntilJudged, tier),
+    ...findings.length > 0 ? [confirmed ? OWNER_OVERRIDE_SECRET_CONFIRMED_REASON : OWNER_OVERRIDE_SECRET_REVIEW_REASON, ...findings] : []
+  ];
 }
 function heldMark(holdUntilJudged, tier) {
   return holdUntilJudged && tier !== "secrets" ? [HELD_UNTIL_JUDGED_REASON] : [];
@@ -41625,7 +41756,7 @@ function namesOf(signals) {
 function slug(value) {
   return SLUG.test(value) ? value : "invalid";
 }
-var CONTENT_NAMES_ONLY_REASON = "content:names_only", CONTENT_NAMES_ONLY_LIFTED_REASON = "content:names_only_lifted", TIER_CLASSIFIER_VERSION = "2026-10-29.p8", TIER_MAP_REVISION = "none", TIER_KEYS, TIER_RANK, HELD_RECORD_PRIORITY = 10, HELD_UNTIL_JUDGED_PRIORITY = -1, NEW_ARRIVAL_PRIORITY = 50, UNDECIDED_TIER_SNIFFER, SNIFFER_NAMES_MAX_CHARS = 400, SNIFFER_EXCERPT_MAX_CHARS = 1200, CONTENT_READ_SNIFFER_FLAG = "content:read", PERSONAL_FIRST_REASON = "content:personal_first", HELD_UNTIL_JUDGED_REASON = "content:held_until_judged", PARENT_CONTEXT_MARKER = `
+var CONTENT_NAMES_ONLY_REASON = "content:names_only", CONTENT_NAMES_ONLY_LIFTED_REASON = "content:names_only_lifted", TIER_CLASSIFIER_VERSION = "2026-10-29.p8", TIER_MAP_REVISION = "none", TIER_KEYS, TIER_RANK, HELD_RECORD_PRIORITY = 10, HELD_UNTIL_JUDGED_PRIORITY = -1, NEW_ARRIVAL_PRIORITY = 50, UNDECIDED_TIER_SNIFFER, SNIFFER_NAMES_MAX_CHARS = 400, SNIFFER_EXCERPT_MAX_CHARS = 1200, CONTENT_READ_SNIFFER_FLAG = "content:read", PERSONAL_FIRST_REASON = "content:personal_first", HELD_UNTIL_JUDGED_REASON = "content:held_until_judged", OWNER_OVERRIDE_SECRET_REVIEW_REASON = "content:owner_override_secret_review", OWNER_OVERRIDE_SECRET_CONFIRMED_REASON = "content:owner_override_secret_confirmed", PARENT_CONTEXT_MARKER = `
 Parent names (context only): `, PARENT_CONTEXT_MAX_CHARS = 200, NAMES_INPUT_REASON_PREFIX = "metadata:names_input:", NAMES_INPUT_KEYS, FRONT_MATTER_PRIVATE_REASON = "content:rule:front_matter_private", FRONT_MATTER_MAX_LINES = 100, IMAGE_PRIVATE_DEFAULT_REASON = "content:image_private_default", IMAGE_SENSITIVE_REASON_PREFIX = "content:image_sensitive:", IMAGE_ORDINARY_REASON = "content:image_ordinary", IMAGE_TEXT_DECIDES_REASON_PREFIX = "content:image_text_decides:", IMAGE_TEXT_DECIDES_MIN_WORDS = 8, PUBLIC_RETIRED_REASON = "tier:public_retired", RETIRED_SOURCE_PRIOR_REASON = "metadata:prior:source_", SNIFFER_EXCERPT_HEAD_CHARS = 600, SNIFFER_EXCERPT_MAX_FOCUS = 2, SNIFFER_EXCERPT_GAP = " … ", SLUG;
 var init_tier_classifier = __esm(() => {
   init_secret_patterns();
@@ -42035,9 +42166,11 @@ class TierSnifferStore {
     const previousUmask = onDisk ? process.umask(63) : undefined;
     let db;
     try {
-      db = new Database2(this.dbPath, { create: true });
-      db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA journal_size_limit = 67108864;" + loopWalAutocheckpointPragma(this.dbPath));
-      runSqliteMigrations(db, TIER_SNIFFER_SQLITE_STORE_ID, snifferMigrations());
+      db = new Database2(this.dbPath, options.restoreQueue ? { readwrite: true, create: false } : { create: true });
+      const synchronous = options.restoreQueue ? "FULL" : "NORMAL";
+      db.exec(`PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA synchronous = ${synchronous}; PRAGMA journal_size_limit = 67108864;` + loopWalAutocheckpointPragma(this.dbPath));
+      if (!options.restoreQueue)
+        runSqliteMigrations(db, TIER_SNIFFER_SQLITE_STORE_ID, snifferMigrations());
       if (onDisk)
         restrictFiles(this.dbPath);
     } catch (error) {
@@ -42537,6 +42670,21 @@ function applySqliteMmap(db, env = process.env) {
 }
 var SQLITE_MMAP_BYTES = 2147418112;
 
+// src/workers/classification/installed-tier-classification-registry.ts
+function registerInstalledTierClassification(provider) {
+  registered = provider;
+}
+function registeredInstalledTierClassification() {
+  return registered;
+}
+function registerTierSetPlanner(ledgerPath, planner) {
+  (tierSetPlanners ??= new Map).set(ledgerPath, planner);
+}
+function tierSetPlannerForLedger(ledgerPath) {
+  return tierSetPlanners?.get(ledgerPath);
+}
+var registered, tierSetPlanners;
+
 // src/workers/classification/tier-ledger.ts
 import { Database as Database3 } from "bun:sqlite";
 import { randomUUID as randomUUID7 } from "node:crypto";
@@ -42547,6 +42695,9 @@ function isFailSafeMissingContentQuestion(reason) {
 }
 function tierLedgerConversationKey(identity) {
   return identity.providerConversationId ?? "";
+}
+function labelSweepMetaKey(provider, accountScope) {
+  return `owner_rules_label_sweep:${provider}:${accountScope}`;
 }
 function writeIntentFromRow(row) {
   return {
@@ -42758,6 +42909,12 @@ function listRoutedRead(options) {
     mode: "all"
   };
 }
+function pendingOverrideReview(record, override) {
+  if (record?.state !== "current" || !record.contentRead || override?.kind !== "tier" || override.tier !== "private" && override.tier !== "public")
+    return;
+  const review = ownerOverrideSecretReview(record.reasons);
+  return review && !ownerOverrideMatchesDigest(override, review.digest) ? review : undefined;
+}
 function routedOverridesFromRows(rows) {
   const result = [];
   for (const row of rows) {
@@ -42911,7 +43068,14 @@ class TierLedger {
       }
       db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA journal_size_limit = 67108864;" + loopWalAutocheckpointPragma(this.dbPath, "tier-ledger"));
       applySqliteMmap(db);
-      runSqliteMigrations(db, TIER_LEDGER_SQLITE_STORE_ID, tierLedgerMigrations());
+      const restoredVersion = options.restoreSchemaVersion;
+      if (restoredVersion !== undefined) {
+        const actual = readSqliteSchemaVersion(db, TIER_LEDGER_SQLITE_STORE_ID);
+        if (restoredVersion < 12 || restoredVersion > TIER_LEDGER_SCHEMA_VERSION || actual !== 0 && actual !== restoredVersion) {
+          throw new Error("The tier ledger cannot be written at its restored schema.");
+        }
+      }
+      runSqliteMigrations(db, TIER_LEDGER_SQLITE_STORE_ID, tierLedgerMigrations().filter((migration) => restoredVersion === undefined || migration.version <= restoredVersion));
       db.exec(`CREATE INDEX IF NOT EXISTS tier_items_override_rows
         ON tier_items (provider, account_scope, conversation_key, provider_item_id) WHERE decided_by = 'override'`);
       if (onDisk)
@@ -42952,16 +43116,17 @@ class TierLedger {
         restrictLedgerFiles(this.dbPath);
     }
   }
-  recordDecision(identity, decision, stored) {
+  recordDecision(identity, decision, stored, options = {}) {
     let outcome = "unchanged";
     this.db.transaction(() => {
       const existing = this.readRow(identity);
+      const next = existing?.state === "moving" ? rowOfDecision(movingObservation(existing, decision, options)) : effectiveRow(existing, decision);
       if (existing?.state === "moving") {
-        outcome = "held_moving";
+        outcome = this.recordMovingDecision(identity, existing, next);
         return;
       }
-      outcome = this.writeRow(identity, effectiveRow(existing, decision), stored, existing);
-    })();
+      outcome = this.writeRow(identity, next, stored, existing);
+    }).immediate();
     return { outcome, record: this.getCurrent(identity) };
   }
   recordContentDecision(identity, content, stored) {
@@ -42970,18 +43135,15 @@ class TierLedger {
       const existing = this.readRow(identity);
       if (!existing)
         return;
-      if (existing.state === "moving") {
-        outcome = "held_moving";
-        return;
-      }
       if (existing.decidedBy === "override" || this.getOverride(identity)?.kind === "tier") {
         outcome = "unchanged";
         return;
       }
-      const metadataReasons = existing.reasons.filter((reason) => !reason.startsWith("content:"));
-      const contentTier = maxTier(content.contentTier, existing.metadataTier);
+      const names = queuedDecisionRecord(existing);
+      const metadataReasons = names.reasons.filter((reason) => !reason.startsWith("content:"));
+      const contentTier = maxTier(content.contentTier, names.metadataTier);
       const next = {
-        metadataTier: existing.metadataTier,
+        metadataTier: names.metadataTier,
         contentTier,
         decidedBy: content.decidedBy,
         reasons: [...metadataReasons, ...content.reasons],
@@ -42993,22 +43155,51 @@ class TierLedger {
         metadataForced: existing.metadataForced,
         metadataFlagged: existing.metadataFlagged
       };
-      outcome = this.writeRow(identity, next, stored, existing);
-    })();
+      outcome = existing.state === "moving" ? this.recordMovingDecision(identity, existing, next) : this.writeRow(identity, next, stored, existing);
+    }).immediate();
     return outcome === undefined ? undefined : { outcome, record: this.getCurrent(identity) };
   }
-  applySnifferVerdict(identity, verdict, options = {}) {
-    assertTier(verdict.tier);
+  recordMovingDecision(identity, existing, next) {
+    const sources = this.moveSources(identity, existing.generation + 1);
+    const planner = tierSetPlannerForLedger(this.dbPath);
+    let decision = decisionOfRow(next);
+    if (!observationSupersedesMove(existing, decision, sources, planner))
+      return "held_moving";
+    if (existing.routed && (planner || next.contentTier === "secrets")) {
+      const placement = planner?.(decision) ?? { copies: [], embedHold: false };
+      const { outcome } = this.recordRoutedPlacement(identity, decision, placement);
+      return outcome === "held_moving" ? outcome : "updated";
+    }
+    const decidedAt = this.now().toISOString();
+    const advanced = this.advanceMoveGeneration(identity, existing, decidedAt);
+    decision = retainHiddenRaise(existing, decision, sources, undefined, undefined);
+    if (existing.routed && placementRaisesSource(decision, sources)) {
+      this.queueMoveRow(identity, advanced, decision, { hide: true, decidedAt });
+      return "updated";
+    }
+    this.cancelSupersededMove(identity, advanced, decidedAt);
+    this.writeRow(identity, rowOfDecision(decision), undefined, this.readRow(identity));
+    return "updated";
+  }
+  applySnifferVerdict(identity, answer, options = {}) {
+    assertTier(answer.tier);
     let outcome;
     this.db.transaction(() => {
       const existing = this.readRow(identity);
       if (!existing)
         return;
+      const reason = answer.pass === "content" && !answer.reason.startsWith("content:sniffer:") ? `content:sniffer:${answer.modelId}:${answer.reason}` : answer.reason;
+      const failSafe = answer.failSafe === true || answer.pass === "content" && !isContentJudgeReason(reason);
+      const verdict = { ...answer, reason, failSafe, tier: failSafe ? "secure" : answer.tier };
       if (options.questionStillCurrent && !options.questionStillCurrent()) {
         outcome = "stale_question";
         return;
       }
       const question = this.rejudgeQuestion(identity);
+      if (verdict.contentDigest !== undefined && !(question?.decision ?? existing).reasons.includes(verdict.contentDigest)) {
+        outcome = "stale_question";
+        return;
+      }
       if (question) {
         outcome = this.answerRejudgeQuestion(identity, question, verdict, options);
         return;
@@ -43062,8 +43253,8 @@ class TierLedger {
           reasons: [
             ...metadataReasons,
             ...contentReasons.filter((reason) => !isOpenSnifferReason(reason, "content") && !reason.startsWith("content:judge_verdict:")),
-            verdict.reason,
-            ...contentVerdictReceipts(contentReasons, verdict.reason, verdict.tier)
+            reason,
+            ...!verdict.failSafe ? contentVerdictReceipts(contentReasons, reason, verdict.tier) : []
           ],
           contentPending: false
         };
@@ -43113,7 +43304,7 @@ class TierLedger {
       reasons: [
         ...verdict.pass === "metadata" ? settleStoredNamesMark(kept, base.metadataTier, metadataTier) : kept,
         verdict.reason,
-        ...verdict.pass === "content" ? contentVerdictReceipts(kept, verdict.reason, verdict.tier) : []
+        ...verdict.pass === "content" && !verdict.failSafe ? contentVerdictReceipts(kept, verdict.reason, verdict.tier) : []
       ],
       metadataPending,
       contentPending,
@@ -43698,22 +43889,97 @@ class TierLedger {
     if (override.kind === "tier")
       assertTier(override.tier);
     this.db.transaction(() => {
+      const setAt = this.now().toISOString();
+      if (override.kind === "tier" && (override.tier === "private" || override.tier === "public") && override.setDigest === undefined) {
+        const current = this.getCurrent(identity);
+        const setDigest = override.confirmedDigest ?? (current?.contentRead && current.state !== "moving" ? current.reasons.find((reason) => reason.startsWith("content:sha256:")) : undefined) ?? this.overrideHistoryDigest(identity, setAt);
+        if (setDigest)
+          override = { ...override, setDigest };
+        else if (this.itemIsSecret(identity))
+          override = { ...override, setDigest: null };
+      }
       this.writeMeta(overrideRestoreKey(identity), "");
       this.db.query(`
         INSERT INTO tier_overrides (provider, account_scope, conversation_key, provider_item_id, override_json, set_at)
         VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT (provider, account_scope, conversation_key, provider_item_id)
         DO UPDATE SET override_json = excluded.override_json, set_at = excluded.set_at
-      `).run(...idParams(identity), JSON.stringify(override), this.now().toISOString());
+      `).run(...idParams(identity), JSON.stringify(override), setAt);
       this.settleRevokedOwnerMove(identity);
     })();
   }
-  classificationRead(identity) {
-    return this.db.transaction(() => ({
-      override: this.getOverride(identity),
-      secret: this.itemIsSecret(identity),
-      scrubRevision: this.secretScrubRevision(identity)
-    }))();
+  overrideHistoryDigest(identity, setAt) {
+    const row = this.db.query(`
+      SELECT reason.value AS digest FROM tier_history h
+      CROSS JOIN json_each(h.reasons_json) reason
+      WHERE h.provider = ? AND h.account_scope = ? AND h.conversation_key = ? AND h.provider_item_id = ?
+        AND h.decided_at <= ? AND reason.value GLOB 'content:sha256:*'
+      ORDER BY h.decided_at DESC, h.history_pk DESC LIMIT 1
+    `).get(...idParams(identity), setAt);
+    return row?.digest;
+  }
+  observeOverrideText(identity, text) {
+    const row = this.db.query(ITEM_OVERRIDE_SQL).get(...idParams(identity));
+    if (!row)
+      return;
+    const override = overrideFromJson(row.override_json);
+    if (override?.kind !== "tier" || override.tier !== "private" && override.tier !== "public" || override.setDigest !== undefined)
+      return override;
+    const setDigest = this.overrideHistoryDigest(identity, row.set_at) ?? override.confirmedDigest ?? (!this.readOnly && text?.trim() ? contentDigestReason(text) : undefined);
+    if (!setDigest)
+      return override;
+    const bound = { ...override, setDigest };
+    if (this.readOnly)
+      return bound;
+    const updated = this.db.query(`
+      UPDATE tier_overrides SET override_json = ?
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+        AND override_json = ? AND set_at = ?
+    `).run(JSON.stringify(bound), ...idParams(identity), row.override_json, row.set_at);
+    return updated.changes === 1 ? bound : this.getOverride(identity);
+  }
+  ownerOverrideReview(identity, record = this.getCurrent(identity), override = this.getOverride(identity)) {
+    const review = pendingOverrideReview(record, override);
+    return review && !this.writeIntent(identity) ? review : undefined;
+  }
+  *ownerOverrideReviewKindsSteps() {
+    const kinds = new Set;
+    for (const { record, override } of yield* this.listRoutedOverridesSteps()) {
+      const review = pendingOverrideReview(record, override);
+      if (!review)
+        continue;
+      const intent = yield { sql: WRITE_INTENT_SQL, params: idParams(tierLedgerIdentityOfRecord(record)), mode: "get" };
+      if (!intent)
+        for (const kind of review.kinds)
+          kinds.add(kind);
+    }
+    return [...kinds];
+  }
+  resolveOwnerOverrideReview(identity, digest, choice) {
+    return this.db.transaction(() => {
+      const override = this.getOverride(identity);
+      if (override?.kind !== "tier" || this.ownerOverrideReview(identity)?.digest !== digest)
+        return false;
+      if (choice === "judge")
+        return this.clearOverride(identity);
+      this.setOverride(identity, { ...override, confirmedDigest: digest });
+      return true;
+    }).immediate();
+  }
+  classificationRead(identity, text) {
+    const snapshot = this.db.transaction((observe) => {
+      const secret = this.itemIsSecret(identity);
+      return {
+        override: observe && text !== undefined ? this.observeOverrideText(identity, text) : this.getOverride(identity),
+        secret,
+        scrubRevision: this.secretScrubRevision(identity)
+      };
+    });
+    const read = snapshot(false);
+    const override = read.override;
+    if (text === undefined || override?.kind !== "tier" || override.tier !== "private" && override.tier !== "public" || override.setDigest !== undefined)
+      return read;
+    return this.readOnly ? snapshot(true) : snapshot.immediate(true);
   }
   unsettledSecretSideStores(limit = 100) {
     return unsettledSecretRows(this.db.query(UNSETTLED_SECRET_SIDE_STORES_SQL).all(Math.max(1, Math.min(limit, 1000))));
@@ -43791,12 +44057,15 @@ class TierLedger {
     const record = item ? recordFromRow(item) : undefined;
     return record !== undefined && [record.metadataTier, record.contentTier, record.targetMetadataTier, record.targetContentTier].includes("secrets");
   }
-  getOverride(identity) {
-    const row = this.db.query(`
-      SELECT override_json FROM tier_overrides
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-    `).get(...idParams(identity));
-    return row ? overrideFromJson(row.override_json) : undefined;
+  getOverride(identity, options = {}) {
+    const row = this.db.query(ITEM_OVERRIDE_SQL).get(...idParams(identity));
+    if (!row)
+      return;
+    const override = overrideFromJson(row.override_json);
+    if (!options.withHistory || override?.kind !== "tier" || override.tier !== "private" && override.tier !== "public" || override.setDigest !== undefined)
+      return override;
+    const setDigest = this.overrideHistoryDigest(identity, row.set_at) ?? override.confirmedDigest;
+    return setDigest ? { ...override, setDigest } : override;
   }
   conversationlessOverrides(provider) {
     return this.db.query(`
@@ -43873,14 +44142,16 @@ class TierLedger {
     const rawReceipt = this.readMeta(`tier-move-verified:${tierLedgerIdentityKey(identity)}`);
     const receipt = rawReceipt ? JSON.parse(rawReceipt) : undefined;
     const verified = receipt?.generation === existing.generation && receipt.raise && receipt.target.metadataTier === targetMetadata && receipt.target.contentTier === targetContent;
+    const staleFlip = existing.generation + 1;
+    const copies = this.copies(identity);
+    const original = copies.filter((copy) => copy.state === "current" || copy.state === "superseded" && copy.supersededByGeneration === staleFlip);
+    const mixed = verified && loweredCopyLayers(original, receipt.placement).length > 0;
     const override = this.getOverride(identity);
-    if (verified && tierRank(targetMetadata) >= tierRank(existing.metadataTier) && tierRank(targetContent) >= tierRank(existing.contentTier) && (override?.kind !== "tier" || tierRank(targetMetadata) >= tierRank(override.tier) && tierRank(targetContent) >= tierRank(override.tier))) {
+    if (verified && !mixed && tierRank(targetMetadata) >= tierRank(existing.metadataTier) && tierRank(targetContent) >= tierRank(existing.contentTier) && (override?.kind !== "tier" || tierRank(targetMetadata) >= tierRank(override.tier) && tierRank(targetContent) >= tierRank(override.tier))) {
       return "none";
     }
     const decidedAt = this.now().toISOString();
     const prior = this.decisionBeforeOverride(identity, existing);
-    const staleFlip = existing.generation + 1;
-    const copies = this.copies(identity);
     const hidden = copies.some((copy) => copy.state === "superseded" && copy.supersededByGeneration === staleFlip);
     if (!hidden) {
       this.db.query(`
@@ -43902,36 +44173,19 @@ class TierLedger {
       this.appendHistory(identity, staleFlip, existing.metadataTier, existing.contentTier, prior.decidedBy, reasonsJson, state, decidedAt);
       return "cancelled";
     }
-    const nextFlip = existing.generation + 2;
-    this.db.query(`
-      UPDATE tier_copies SET superseded_by_generation = ?, updated_at = ?
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-        AND copy_state = 'superseded' AND superseded_by_generation = ?
-    `).run(nextFlip, decidedAt, ...idParams(identity), staleFlip);
-    this.db.query(`
-      UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = ?, updated_at = ?
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'staged'
-    `).run(staleFlip, decidedAt, ...idParams(identity));
-    this.db.query(`
-      UPDATE tier_items SET generation = ?
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-    `).run(staleFlip, ...idParams(identity));
-    if (verified) {
-      for (const copy of receipt.placement) {
-        this.db.query(`
-          UPDATE tier_copies SET copy_state = 'superseded', layers = ?, superseded_by_generation = ?, updated_at = ?
-          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
-        `).run(copy.layers, nextFlip, decidedAt, ...idParams(identity), copy.corpusId);
-      }
-      for (const copy of copies.filter((copy) => !receipt.placement.some((dest) => dest.corpusId === copy.corpusId))) {
-        this.db.query(`
-          UPDATE tier_copies SET superseded_by_generation = ?
-          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
-        `).run(staleFlip, ...idParams(identity), copy.corpusId);
+    const advanced = this.advanceMoveGeneration(identity, existing, decidedAt);
+    if (verified && (!mixed || receipt.ruleRevision === undefined)) {
+      for (const layer of ["metadata", "content"]) {
+        const from = copyServingLayer(original, layer);
+        const to = copyServingLayer(receipt.placement, layer);
+        if (from && to && trustDomainRank(to.trustDomain) > trustDomainRank(from.trustDomain)) {
+          this.carryVerifiedLayer(identity, advanced.generation, layer, from.corpusId, to.corpusId, decidedAt);
+        }
       }
     }
-    this.writeMeta(`tier-move-verified:${tierLedgerIdentityKey(identity)}`, "");
-    this.queueMoveRow(identity, { ...existing, generation: staleFlip }, {
+    if (verified && !mixed)
+      this.writeMeta(`tier-move-verified:${tierLedgerIdentityKey(identity)}`, "");
+    this.queueMoveRow(identity, advanced, {
       ...prior,
       metadataTier: maxTier(existing.metadataTier, targetMetadata),
       contentTier: maxTier(existing.contentTier, targetContent)
@@ -44012,6 +44266,26 @@ class TierLedger {
   }
   writeMeta(key, value) {
     this.setMeta(key, value);
+  }
+  recordLabelRuleMatches(provider, accountScope, ruleKey, walkId, itemKeys) {
+    if (itemKeys.length === 0)
+      return;
+    this.db.query(`
+      INSERT INTO tier_label_rule_matches (provider, account_scope, rule_key, item_key, walk_id)
+      SELECT ?, ?, ?, value, ? FROM json_each(?) WHERE true
+      ON CONFLICT(provider, account_scope, rule_key, item_key) DO UPDATE SET walk_id = excluded.walk_id
+    `).run(provider, accountScope, ruleKey, walkId, JSON.stringify(itemKeys));
+  }
+  labelRuleMatched(provider, accountScope, ruleKey, walkId, itemKey) {
+    return this.db.query(`
+      SELECT 1 FROM tier_label_rule_matches
+      WHERE provider = ? AND account_scope = ? AND rule_key = ? AND item_key = ? AND walk_id = ?
+    `).get(provider, accountScope, ruleKey, itemKey, walkId) !== null;
+  }
+  retirePreviousLabelRuleMatches(provider, accountScope, ruleKey, walkId) {
+    this.db.query(`
+      DELETE FROM tier_label_rule_matches WHERE provider = ? AND account_scope = ? AND rule_key = ? AND walk_id <> ?
+    `).run(provider, accountScope, ruleKey, walkId);
   }
   writeSettleProgress(key, value) {
     if ((this.readMeta(key) ?? "") === value)
@@ -44200,7 +44474,7 @@ class TierLedger {
   }
   recordRoutedPlacement(identity, decision, plan, options = {}) {
     const decidedAt = this.now().toISOString();
-    const reasonsJson = JSON.stringify(decision.reasons);
+    let reasonsJson = JSON.stringify(decision.reasons);
     for (const copy of plan.copies)
       assertCopyPlan(copy);
     if (new Set(plan.copies.map((copy) => copy.corpusId)).size !== plan.copies.length) {
@@ -44210,7 +44484,7 @@ class TierLedger {
     let raise = false;
     let previousCopies = [];
     this.db.transaction(() => {
-      const existing = this.readRow(identity);
+      let existing = this.readRow(identity);
       if (options.guard)
         this.assertOverrideGuard(identity, existing, options.guard);
       previousCopies = this.copies(identity);
@@ -44252,17 +44526,42 @@ class TierLedger {
         return;
       }
       const emptyMove = existing.state === "moving" && options.staleCopiesGone === true && previousCopies.length === 0;
+      let superseded = false;
       if (existing.state === "moving" && !emptyMove) {
-        outcome = "held_moving";
-        return;
+        const sources = this.moveSources(identity, existing.generation + 1);
+        const planner = tierSetPlannerForLedger(this.dbPath);
+        if (!observationSupersedesMove(existing, decision, sources, planner)) {
+          outcome = "held_moving";
+          return;
+        }
+        const safeDecision = retainHiddenRaise(existing, decision, sources, planner, plan);
+        const safePlan = safeDecision === decision ? plan : planner?.(safeDecision);
+        existing = this.advanceMoveGeneration(identity, existing, decidedAt);
+        if (!safePlan || placementIsRaise(sources, safePlan.copies)) {
+          raise = true;
+          this.queueMoveRow(identity, existing, safeDecision, {
+            hide: true,
+            ...safePlan ? { placement: safePlan.copies } : {},
+            decidedAt
+          });
+          outcome = "queued_move";
+          return;
+        }
+        decision = safeDecision;
+        plan = safePlan;
+        reasonsJson = JSON.stringify(decision.reasons);
+        this.cancelSupersededMove(identity, existing, decidedAt);
+        existing = this.readRow(identity);
+        superseded = true;
       }
       const tiersChanged = existing.metadataTier !== decision.metadataTier || existing.contentTier !== decision.contentTier;
-      const current = previousCopies.filter((copy) => copy.state === "current");
-      const staged = previousCopies.some((copy) => copy.state === "staged") && !(options.stagedLandingAllowed === true && !existing.contentRead);
+      const copies = superseded ? this.copies(identity) : previousCopies;
+      const current = copies.filter((copy) => copy.state === "current");
+      const staged = copies.some((copy) => copy.state === "staged") && !(options.stagedLandingAllowed === true && !existing.contentRead);
       const firstPlacement = !existing.routed || options.staleCopiesGone === true;
       if (secrets || firstPlacement || samePlan(current, plan.copies) && !staged) {
-        const generation = tiersChanged || emptyMove ? existing.generation + 1 : existing.generation;
-        const detailChanged = tiersChanged || firstPlacement || JSON.stringify(existing.reasons) !== reasonsJson || existing.decidedBy !== decision.decidedBy || existing.state !== decision.state || existing.engineVersion !== decision.engineVersion || existing.mapRevision !== decision.mapRevision;
+        const generation = tiersChanged && !superseded || emptyMove ? existing.generation + 1 : existing.generation;
+        const detailChanged = tiersChanged || superseded || firstPlacement || JSON.stringify(existing.reasons) !== reasonsJson || existing.decidedBy !== decision.decidedBy || existing.state !== decision.state || existing.engineVersion !== decision.engineVersion || existing.mapRevision !== decision.mapRevision || existing.contentRead !== decision.contentRead || existing.metadataPending !== decision.metadataPending || existing.contentPending !== decision.contentPending || existing.metadataForced !== decision.metadataForced || existing.metadataFlagged !== decision.metadataFlagged;
         if (detailChanged) {
           this.db.query(`
             UPDATE tier_items SET
@@ -44300,9 +44599,9 @@ class TierLedger {
         return;
       }
       raise = placementIsRaise(current, plan.copies);
-      this.queueMoveRow(identity, existing, decision, { hide: raise && options.queueWithoutHiding !== true, decidedAt });
+      this.queueMoveRow(identity, existing, decision, { hide: raise && options.queueWithoutHiding !== true, placement: plan.copies, decidedAt });
       outcome = "queued_move";
-    })();
+    }).immediate();
     return { outcome, record: this.getCurrent(identity), previousCopies, raise };
   }
   queueOwnerRaise(identity, decision, trustDomain, options = {}) {
@@ -44337,25 +44636,39 @@ class TierLedger {
         result = "hidden";
         return;
       }
-      const staleFlip = existing.generation + 1;
-      const nextFlip = existing.generation + 2;
-      this.db.query(`
-        UPDATE tier_copies SET superseded_by_generation = ?, updated_at = ?
-        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-          AND copy_state = 'superseded' AND superseded_by_generation = ?
-      `).run(nextFlip, decidedAt, ...idParams(identity), staleFlip);
-      this.db.query(`
-        UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = ?, updated_at = ?
-        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'staged'
-      `).run(staleFlip, decidedAt, ...idParams(identity));
-      this.db.query(`
-        UPDATE tier_items SET generation = ?
-        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-      `).run(staleFlip, ...idParams(identity));
-      this.queueMoveRow(identity, { ...existing, generation: staleFlip }, decision, { hide: unsafe, decidedAt });
+      const advanced = this.advanceMoveGeneration(identity, existing, decidedAt);
+      this.queueMoveRow(identity, advanced, decision, { hide: unsafe, decidedAt });
       result = unsafe ? "hidden" : "retargeted";
     })();
     return result;
+  }
+  advanceMoveGeneration(identity, existing, decidedAt) {
+    const generation = existing.generation + 1;
+    this.db.query(`
+        UPDATE tier_copies SET superseded_by_generation = ?, updated_at = ?
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+          AND copy_state = 'superseded' AND superseded_by_generation = ?
+    `).run(generation + 1, decidedAt, ...idParams(identity), generation);
+    this.db.query(`
+        UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = ?, updated_at = ?
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'staged'
+    `).run(existing.generation, decidedAt, ...idParams(identity));
+    this.db.query(`
+        UPDATE tier_items SET generation = ?
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).run(generation, ...idParams(identity));
+    return { ...existing, generation };
+  }
+  cancelSupersededMove(identity, existing, decidedAt) {
+    this.db.query(`
+      UPDATE tier_copies SET copy_state = 'current', superseded_by_generation = NULL, updated_at = ?
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+        AND copy_state = 'superseded' AND superseded_by_generation = ?
+    `).run(decidedAt, ...idParams(identity), existing.generation + 1);
+    this.db.query(`
+      UPDATE tier_items SET state = 'current', target_metadata_tier = NULL, target_content_tier = NULL, move_attempts = 0
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).run(...idParams(identity));
   }
   assertOverrideGuard(identity, existing, guard) {
     if (!existing || existing.generation !== guard.generation)
@@ -44561,8 +44874,12 @@ class TierLedger {
       `).run(JSON.stringify(prior), ...idParams(identity));
     }
     this.appendHistory(identity, existing.generation, decision.metadataTier, decision.contentTier, decision.decidedBy, reasonsJson, "moving", options.decidedAt);
-    if (options.hide)
-      this.supersedeCurrentCopies(identity, existing.generation + 1, options.decidedAt);
+    if (options.hide) {
+      if (options.placement && decision.decidedBy !== "override")
+        this.hideMoveSources(identity, existing.generation + 1, options.placement, options.decidedAt);
+      else
+        this.supersedeCurrentCopies(identity, existing.generation + 1, options.decidedAt);
+    }
   }
   stageLandingCopy(identity, copy, options) {
     assertCopyPlan(copy);
@@ -44704,7 +45021,7 @@ class TierLedger {
         WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
       `).run(options.target.metadataTier, options.target.contentTier, ...idParams(identity));
       if (options.hideSource)
-        this.supersedeCurrentCopies(identity, nextGeneration, now);
+        this.hideMoveSources(identity, nextGeneration, options.destination, now);
       const staged = options.destination.filter((copy) => !sources.some((source) => source.corpusId === copy.corpusId));
       for (const destination of staged) {
         this.db.query(`
@@ -44718,6 +45035,50 @@ class TierLedger {
   }
   moveSources(identity, moveGeneration) {
     return this.copies(identity).filter((copy) => copy.state === "current" || copy.state === "superseded" && copy.supersededByGeneration === moveGeneration);
+  }
+  hideMoveSources(identity, generation, destination, now) {
+    const sources = this.moveSources(identity, generation);
+    if (loweredCopyLayers(sources, destination).length === 0) {
+      this.supersedeCurrentCopies(identity, generation, now);
+      return;
+    }
+    for (const copy of sources) {
+      if (copy.state !== "current" || !placementIsRaise([copy], destination))
+        continue;
+      this.db.query(`
+        UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = ?, updated_at = ?
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
+      `).run(generation, now, ...idParams(identity), copy.corpusId);
+    }
+  }
+  retainMoveRaise(identity, options) {
+    this.withGenerationFence(identity, options.expectedGeneration, () => {
+      const record = this.readRow(identity);
+      if (!record || record.state !== "moving")
+        return;
+      const decidedAt = this.now().toISOString();
+      const advanced = this.advanceMoveGeneration(identity, record, decidedAt);
+      for (const { layer, from, to } of options.recoverLayers ?? []) {
+        this.carryVerifiedLayer(identity, advanced.generation, layer, from, to, decidedAt);
+      }
+      this.queueMoveRow(identity, advanced, { ...record, ...options.target }, { hide: false, decidedAt });
+    });
+  }
+  carryVerifiedLayer(identity, generation, layer, from, to, now) {
+    this.db.query(`
+      UPDATE tier_copies SET
+        layers = CASE WHEN layers = 'both' THEN ? ELSE layers END,
+        copy_state = CASE WHEN layers = 'both' THEN copy_state ELSE 'superseded' END,
+        superseded_by_generation = CASE WHEN layers = 'both' THEN superseded_by_generation ELSE ? END,
+        updated_at = ?
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
+    `).run(layer === "content" ? "metadata" : "content", generation - 1, now, ...idParams(identity), from);
+    this.db.query(`
+      UPDATE tier_copies SET
+        layers = CASE WHEN (copy_state = 'current' OR superseded_by_generation = ?) AND layers <> ? THEN 'both' ELSE ? END,
+        copy_state = 'superseded', superseded_by_generation = ?, updated_at = ?
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
+    `).run(generation + 1, layer, layer, generation + 1, now, ...idParams(identity), to);
   }
   completeMove(identity, options) {
     for (const copy of options.destination)
@@ -44734,11 +45095,11 @@ class TierLedger {
       const override = this.getOverride(identity);
       const targetMetadataTier = existing.targetMetadataTier;
       const targetContentTier = existing.targetContentTier;
-      if (override?.kind === "tier" && (tierRank(targetMetadataTier) < tierRank(override.tier) || tierRank(targetContentTier) < tierRank(override.tier)) && !overrideAuthorizes(override, targetMetadataTier, targetContentTier)) {
+      const conflict = tierMoveOverrideConflict(override, existing, { metadataTier: targetMetadataTier, contentTier: targetContentTier }, sources, options.destination);
+      if (conflict === "tier_floor") {
         throw new TierLedgerGenerationConflictError("The owner has since set this item more private; the move may not land below it.");
       }
-      const lowersLayer = tierRank(targetMetadataTier) < tierRank(existing.metadataTier) || tierRank(targetContentTier) < tierRank(existing.contentTier);
-      if (existing.decidedBy === "override" && lowersLayer && !overrideAuthorizes(override, targetMetadataTier, targetContentTier)) {
+      if (conflict === "override_changed") {
         throw new TierLedgerGenerationConflictError("The owner override behind this move changed; re-read it before landing.");
       }
       for (const planned of options.destination) {
@@ -44820,6 +45181,16 @@ class TierLedger {
       const relayered = copies.filter((copy) => copy.state === "current" && copy.generation === flipGeneration && copy.previousLayers !== null);
       if (restore.length === 0 && relayered.length === 0) {
         throw new Error("Nothing to roll back to: the last flip superseded or re-layered no copy.");
+      }
+      const sources = copies.filter((copy) => copy.state === "current");
+      const destination = [
+        ...restore,
+        ...sources.filter((copy) => copy.generation !== flipGeneration),
+        ...relayered.map((copy) => ({ ...copy, layers: copy.previousLayers }))
+      ];
+      const target = { metadataTier: existing.previousMetadataTier, contentTier: existing.previousContentTier };
+      if (tierMoveOverrideConflict(this.getOverride(identity), existing, target, sources, destination) || options.authorize && !options.authorize(existing, target, sources, destination)) {
+        throw new TierLedgerGenerationConflictError;
       }
       const generation = flipGeneration + 1;
       for (const copy of copies) {
@@ -45030,10 +45401,7 @@ class TierLedger {
     `).run(...idParams(intent.identity), intent.identity.localItemId ?? "", intent.version ?? null, intent.kind, intent.location === true ? 1 : 0, intent.connectorId, this.now().toISOString(), intent.bodyVersion ?? null, intent.itemFamily ?? null);
   }
   writeIntent(identity) {
-    const row = this.db.query(`
-      SELECT * FROM tier_write_intents
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-    `).get(...idParams(identity));
+    const row = this.db.query(WRITE_INTENT_SQL).get(...idParams(identity));
     return row ? writeIntentFromRow(row) : undefined;
   }
   markUnseenDeletion(identity) {
@@ -45442,10 +45810,12 @@ class TierLedger {
         "tier_migration_proposals",
         "secret_side_store_debt",
         "secret_side_store_scrubs",
-        "secret_redaction_retirement"
+        "secret_redaction_retirement",
+        "tier_label_rule_matches"
       ]) {
         this.db.query(`DELETE FROM ${table} WHERE provider = ? AND account_scope = ?`).run(provider, accountScope);
       }
+      this.db.query("DELETE FROM tier_ledger_meta WHERE key = ?").run(labelSweepMetaKey(provider, accountScope));
       return { items, copies };
     })();
   }
@@ -45798,6 +46168,18 @@ function overrideAuthorizes(override, metadataTier, contentTier) {
   const allowed = (tier) => tier === override.tier || override.tier === "public" && tier === "private";
   return allowed(metadataTier) && allowed(contentTier);
 }
+function tierMoveOverrideConflict(override, record, target, sources, destination) {
+  const authorized = overrideAuthorizes(override, target.metadataTier, target.contentTier);
+  if (override?.kind === "tier") {
+    const floor = tierRank(override.tier);
+    const belowTier = tierRank(target.metadataTier) < floor || tierRank(target.contentTier) < floor;
+    if (belowTier && !authorized || destination.some((copy) => trustDomainRank(copy.trustDomain) < floor))
+      return "tier_floor";
+  }
+  if (record.decidedBy !== "override" || authorized)
+    return;
+  return tierRank(target.metadataTier) < tierRank(record.metadataTier) || tierRank(target.contentTier) < tierRank(record.contentTier) || loweredCopyLayers(sources, destination).length > 0 ? "override_changed" : undefined;
+}
 function samePlan(current, planned) {
   if (current.length !== planned.length)
     return false;
@@ -45813,6 +46195,13 @@ function placementIsRaise(current, planned) {
       return true;
   }
   return false;
+}
+function loweredCopyLayers(sources, destination) {
+  return ["metadata", "content"].filter((layer) => {
+    const from = copyServingLayer(sources, layer);
+    const to = copyServingLayer(destination, layer);
+    return from && to && trustDomainRank(to.trustDomain) < trustDomainRank(from.trustDomain);
+  });
 }
 function assertCopyPlan(copy) {
   if (!copy.corpusId?.trim())
@@ -45932,6 +46321,87 @@ function rowOf(record) {
     metadataFlagged: record.metadataFlagged
   };
 }
+function queuedDecisionRecord(record) {
+  return {
+    ...record,
+    metadataTier: record.targetMetadataTier ?? record.metadataTier,
+    contentTier: record.targetContentTier ?? record.contentTier
+  };
+}
+function movingObservation(record, observed, options = {}) {
+  if (record.state !== "moving" || observed.contentRead || observed.contentTier === "secrets")
+    return observed;
+  const queued = queuedDecisionRecord(record);
+  const next = effectiveRow(queued, observed);
+  const body = observed.reasons.find((reason) => reason.startsWith("content:sha256:"));
+  if (body && !queued.reasons.includes(body)) {
+    next.reasons = next.reasons.filter((reason) => !reason.startsWith("content:sha256:"));
+    next.reasons.push(body);
+  }
+  if (queued.contentRead && (options.contentFetchOwed || tierRank(queued.contentTier) < tierRank("secure") && tierRank(next.contentTier) < tierRank("secure") && observationMaterialChanged(queued, observed))) {
+    next.contentPending = true;
+    next.reasons = next.reasons.filter((reason) => !reason.startsWith("content:sniffer:") && !reason.startsWith("content:judge_verdict:"));
+    next.reasons.push(`content:sniffer:${observed.snifferId}:undecided`);
+  }
+  return { ...observed, ...decisionOfRow(next), snifferId: observed.snifferId };
+}
+function retainHiddenRaise(existing, next, sources, planner, nextPlacement) {
+  if (!sources.some((copy) => copy.state === "superseded"))
+    return next;
+  const queued = queuedDecisionRecord(existing);
+  const previousPlacement = planner?.(decisionOfRow(rowOf(queued)));
+  const floor = (layer) => {
+    const source = copyServingLayer(sources, layer);
+    if (!source || source.state !== "superseded")
+      return "public";
+    const raised = previousPlacement && copyServingLayer(previousPlacement.copies, layer);
+    const raisedRank = raised ? trustDomainRank(raised.trustDomain) : decisionLayerRank(queued, layer);
+    if (raisedRank <= trustDomainRank(source.trustDomain))
+      return "public";
+    const planned = nextPlacement && copyServingLayer(nextPlacement.copies, layer);
+    const plannedRank = planned ? trustDomainRank(planned.trustDomain) : decisionLayerRank(next, layer);
+    if (plannedRank < raisedRank)
+      return TIER_KEYS[raisedRank];
+    return layer === "content" ? queued.contentTier : queued.metadataTier;
+  };
+  const metadataTier = maxTier(next.metadataTier, floor("metadata"));
+  const contentTier = maxTier(maxTier(next.contentTier, floor("content")), metadataTier);
+  if (metadataTier === next.metadataTier && contentTier === next.contentTier)
+    return next;
+  return { ...next, metadataTier, contentTier, reasons: [...next.reasons, RETAINED_MOVE_SOURCE_REASON] };
+}
+function decisionLayerRank(decision, layer) {
+  if (decision.metadataPending || layer === "content" && contentHeldForJudgment(decision))
+    return tierRank("secure");
+  return tierRank(layer === "metadata" ? decision.metadataTier : decision.contentTier);
+}
+function placementRaisesSource(decision, sources) {
+  return ["metadata", "content"].some((layer) => {
+    const source = copyServingLayer(sources, layer);
+    return source !== undefined && decisionLayerRank(decision, layer) > trustDomainRank(source.trustDomain);
+  });
+}
+function observationSupersedesMove(existing, next, sources, planner) {
+  if (existing.targetMetadataTier === null || existing.targetContentTier === null || existing.targetMetadataTier === "secrets" || existing.targetContentTier === "secrets")
+    return false;
+  const queued = queuedDecisionRecord(existing);
+  if (tierRank(next.metadataTier) > tierRank(queued.metadataTier) || tierRank(next.contentTier) > tierRank(queued.contentTier) || next.metadataPending && !queued.metadataPending || next.contentPending && !queued.contentPending)
+    return true;
+  const placement = planner?.(decisionOfRow(rowOf(queued)));
+  const lowers = tierRank(queued.metadataTier) < tierRank(existing.metadataTier) || tierRank(queued.contentTier) < tierRank(existing.contentTier) || ["metadata", "content"].some((layer) => {
+    const from = copyServingLayer(sources, layer);
+    const to = placement && copyServingLayer(placement.copies, layer);
+    return from !== undefined && (to ? trustDomainRank(to.trustDomain) : decisionLayerRank(queued, layer)) < trustDomainRank(from.trustDomain);
+  });
+  if (!lowers)
+    return false;
+  if (next.engineVersion !== queued.engineVersion || next.mapRevision !== queued.mapRevision || next.metadataForced !== queued.metadataForced || next.metadataFlagged !== queued.metadataFlagged)
+    return true;
+  return observationMaterialChanged(queued, next);
+}
+function observationMaterialChanged(queued, next) {
+  return [NAMES_INPUT_REASON_PREFIX, "content:sha256:", "content:names:"].some((prefix) => next.reasons.some((reason) => reason.startsWith(prefix) && !queued.reasons.includes(reason)));
+}
 function recheckRequestKey(scope) {
   return `${TIER_RECHECK_META_PREFIX}${JSON.stringify([scope.provider ?? null, scope.accountScope ?? null, scope.conversationKey ?? null])}`;
 }
@@ -45952,19 +46422,7 @@ function isOpenSnifferReason(reason, pass) {
   return reason.startsWith("content:sniffer:") && reason.endsWith(":undecided");
 }
 function effectiveRow(existing, decision) {
-  const fresh = {
-    metadataTier: decision.metadataTier,
-    contentTier: decision.contentTier,
-    decidedBy: decision.decidedBy,
-    reasons: decision.reasons,
-    engineVersion: decision.engineVersion,
-    mapRevision: decision.mapRevision,
-    contentRead: decision.contentRead,
-    metadataPending: decision.metadataPending,
-    contentPending: decision.contentPending,
-    metadataForced: decision.metadataForced,
-    metadataFlagged: decision.metadataFlagged
-  };
+  const fresh = rowOfDecision(decision);
   if (!existing || decision.contentRead)
     return fresh;
   if (existing.contentRead) {
@@ -45980,6 +46438,21 @@ function effectiveRow(existing, decision) {
     };
   }
   return { ...fresh, contentTier: maxTier(existing.contentTier, decision.contentTier) };
+}
+function rowOfDecision(decision) {
+  return {
+    metadataTier: decision.metadataTier,
+    contentTier: decision.contentTier,
+    decidedBy: decision.decidedBy,
+    reasons: decision.reasons,
+    engineVersion: decision.engineVersion,
+    mapRevision: decision.mapRevision,
+    contentRead: decision.contentRead,
+    metadataPending: decision.metadataPending,
+    contentPending: decision.contentPending,
+    metadataForced: decision.metadataForced,
+    metadataFlagged: decision.metadataFlagged
+  };
 }
 function decisionFlags(decision) {
   return [
@@ -46484,7 +46957,7 @@ function tierLedgerMigrations() {
       }
     },
     {
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 17,
       name: "visibility_feed_copy_corpus",
       up(db) {
         if (!db.query("SELECT 1 FROM pragma_table_info('tier_visibility_changes') WHERE name = 'corpus_id'").get()) {
@@ -46516,6 +46989,22 @@ function tierLedgerMigrations() {
           `);
         }
       }
+    },
+    {
+      version: TIER_LEDGER_SCHEMA_VERSION,
+      name: "provider_label_rule_matches",
+      up(db) {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS tier_label_rule_matches (
+            provider TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            rule_key TEXT NOT NULL,
+            item_key TEXT NOT NULL,
+            walk_id TEXT NOT NULL,
+            PRIMARY KEY (provider, account_scope, rule_key, item_key)
+          ) WITHOUT ROWID
+        `);
+      }
     }
   ];
 }
@@ -46527,7 +47016,7 @@ function overrideFromJson(json) {
     return parsed;
   return;
 }
-var TIER_LEDGER_SCHEMA_VERSION = 17, RETIRED_EMBEDDING_CLEARANCE_REASON = "content:sniffer:retired_embedding_clearance:undecided", TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_safe_unread_relabel_v1", IDENTITY_BATCH = 200, AWAITING_TEXT_WHERE = `routed = 1 AND content_read = 0 AND metadata_pending = 0
+var TIER_LEDGER_SCHEMA_VERSION = 18, RETIRED_EMBEDDING_CLEARANCE_REASON = "content:sniffer:retired_embedding_clearance:undecided", RETAINED_MOVE_SOURCE_REASON = "content:retained_move_source", TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_safe_unread_relabel_v1", IDENTITY_BATCH = 200, AWAITING_TEXT_WHERE = `routed = 1 AND content_read = 0 AND metadata_pending = 0
         AND ((state = 'pending' AND content_pending = 1)
           OR (state = 'current' AND EXISTS (SELECT 1 FROM json_each(reasons_json) r
             WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
@@ -46539,6 +47028,12 @@ var TIER_LEDGER_SCHEMA_VERSION = 17, RETIRED_EMBEDDING_CLEARANCE_REASON = "conte
         AND i.conversation_key = o.conversation_key AND i.provider_item_id = o.provider_item_id
       WHERE i.routed = 1
       ORDER BY o.provider, o.account_scope, o.conversation_key, o.provider_item_id
+    `, WRITE_INTENT_SQL = `
+      SELECT * FROM tier_write_intents
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `, ITEM_OVERRIDE_SQL = `
+      SELECT override_json, set_at FROM tier_overrides
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
     `, CLEARED_OVERRIDE_FINGERPRINT_SQL = `
       SELECT (SELECT count(*) || ':' || ifnull(sum(rowid), 0) FROM tier_overrides)
         || '|' || (SELECT count(*) || ':' || ifnull(sum(rowid), 0) || ':' || ifnull(sum(length(value)), 0)
@@ -46597,39 +47092,7 @@ var TIER_LEDGER_SCHEMA_VERSION = 17, RETIRED_EMBEDDING_CLEARANCE_REASON = "conte
       EXISTS (SELECT 1 FROM tier_items t WHERE t.provider = c.provider AND t.account_scope = c.account_scope
         AND t.conversation_key = c.conversation_key AND t.provider_item_id = c.provider_item_id AND t.state = 'moving') AS moving`, CORPUS_COPY_FLAGS_PAGE_SQL, CORPUS_INTENT_ID_SQL = "w.provider, w.account_scope, w.conversation_key, w.provider_item_id", CORPUS_INTENT_OTHER_FLAGS_SQL = "0 AS held, 0 AS held_for_judgment, 0 AS metadata_layer, 0 AS metadata_unread, 0 AS moving", CORPUS_INTENT_WITHOUT_COPY_SQL = `w.kind IN ('deletion', 'secret') AND NOT EXISTS (
   SELECT 1 FROM tier_copies c WHERE c.provider = w.provider AND c.account_scope = w.account_scope
-    AND c.conversation_key = w.conversation_key AND c.provider_item_id = w.provider_item_id AND c.corpus_id = ?)`, CORPUS_INTENT_FLAGS_PAGE_SQL, DEFAULT_REJUDGE_SCAN_ROWS = 2000, REJUDGE_UNAVAILABLE_RETRY_MS, REJUDGE_UNAVAILABLE_MAX_RETRY_MS, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TierLedgerSchemaError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, STALE_EMBED_HOLD_DECIDED = `EXISTS (
-        SELECT 1 FROM tier_items t
-        WHERE t.provider = tier_copies.provider AND t.account_scope = tier_copies.account_scope
-          AND t.conversation_key = tier_copies.conversation_key AND t.provider_item_id = tier_copies.provider_item_id
-          AND t.state = 'current' AND t.metadata_pending = 0 AND t.content_pending = 0
-          AND t.metadata_tier <> 'secrets' AND t.content_tier <> 'secrets'
-          AND t.target_metadata_tier IS NULL AND t.target_content_tier IS NULL
-          -- A re-judgment still open on this decision keeps the hold.
-          AND NOT (t.rejudge_json IS NOT NULL
-            AND json_extract(t.rejudge_json, '$.generation') = t.generation
-            AND json_extract(t.rejudge_json, '$.decidedAt') = t.decided_at
-            AND json_extract(t.rejudge_json, '$.reasonsJson') = t.reasons_json
-            AND json_extract(t.rejudge_json, '$.decidedBy') = t.decided_by)
-          -- The store must be at least as private as the verdict for each layer
-          -- the copy serves (same ranks as the tier exposure count).
-          AND (tier_copies.layers NOT IN ('content', 'both')
-            OR (CASE tier_copies.trust_domain WHEN 'secure_local' THEN 2 WHEN 'internal' THEN 1 ELSE 0 END)
-              >= (CASE WHEN t.content_tier = 'secure' OR t.metadata_tier = 'secure' THEN 2
-                       WHEN t.content_tier = 'private' OR t.metadata_tier = 'private' THEN 1 ELSE 0 END))
-          AND (tier_copies.layers NOT IN ('metadata', 'both')
-            OR (CASE tier_copies.trust_domain WHEN 'secure_local' THEN 2 WHEN 'internal' THEN 1 ELSE 0 END)
-              >= (CASE t.metadata_tier WHEN 'secure' THEN 2 WHEN 'private' THEN 1 ELSE 0 END))
-      ) AND NOT EXISTS (
-        SELECT 1 FROM tier_overrides o
-        WHERE o.provider = tier_copies.provider AND o.account_scope = tier_copies.account_scope
-          AND o.conversation_key = tier_copies.conversation_key AND o.provider_item_id = tier_copies.provider_item_id
-          AND json_extract(o.override_json, '$.kind') = 'tier' AND json_extract(o.override_json, '$.tier') = 'secrets'
-      ) AND NOT EXISTS (
-        SELECT 1 FROM tier_write_intents w
-        WHERE w.provider = tier_copies.provider AND w.account_scope = tier_copies.account_scope
-          AND w.conversation_key = tier_copies.conversation_key AND w.provider_item_id = tier_copies.provider_item_id
-          AND w.kind IN ('secret', 'deletion')
-      )`, TIER_RECHECK_META_PREFIX = "recheck:", STORED_NAMES_REASON = "metadata:names_from_store", STORED_NAMES_ASKED_REASON = "metadata:names_from_store:asked", TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
+    AND c.conversation_key = w.conversation_key AND c.provider_item_id = w.provider_item_id AND c.corpus_id = ?)`, CORPUS_INTENT_FLAGS_PAGE_SQL, DEFAULT_REJUDGE_SCAN_ROWS = 2000, REJUDGE_UNAVAILABLE_RETRY_MS, REJUDGE_UNAVAILABLE_MAX_RETRY_MS, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TierLedgerSchemaError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, STALE_EMBED_HOLD_DECIDED, TIER_RECHECK_META_PREFIX = "recheck:", STORED_NAMES_REASON = "metadata:names_from_store", STORED_NAMES_ASKED_REASON = "metadata:names_from_store:asked", TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
   init_operation_error();
   init_sqlite_migrations();
@@ -46685,6 +47148,40 @@ var init_tier_ledger = __esm(() => {
     internal: 1,
     secure_local: 2
   };
+  STALE_EMBED_HOLD_DECIDED = `EXISTS (
+        SELECT 1 FROM tier_items t
+        WHERE t.provider = tier_copies.provider AND t.account_scope = tier_copies.account_scope
+          AND t.conversation_key = tier_copies.conversation_key AND t.provider_item_id = tier_copies.provider_item_id
+          AND t.state = 'current' AND t.metadata_pending = 0 AND t.content_pending = 0
+          AND t.metadata_tier <> 'secrets' AND t.content_tier <> 'secrets'
+          AND t.target_metadata_tier IS NULL AND t.target_content_tier IS NULL
+          AND instr(t.reasons_json, '"${OWNER_OVERRIDE_SECRET_REVIEW_REASON}"') = 0
+          -- A re-judgment still open on this decision keeps the hold.
+          AND NOT (t.rejudge_json IS NOT NULL
+            AND json_extract(t.rejudge_json, '$.generation') = t.generation
+            AND json_extract(t.rejudge_json, '$.decidedAt') = t.decided_at
+            AND json_extract(t.rejudge_json, '$.reasonsJson') = t.reasons_json
+            AND json_extract(t.rejudge_json, '$.decidedBy') = t.decided_by)
+          -- The store must be at least as private as the verdict for each layer
+          -- the copy serves (same ranks as the tier exposure count).
+          AND (tier_copies.layers NOT IN ('content', 'both')
+            OR (CASE tier_copies.trust_domain WHEN 'secure_local' THEN 2 WHEN 'internal' THEN 1 ELSE 0 END)
+              >= (CASE WHEN t.content_tier = 'secure' OR t.metadata_tier = 'secure' THEN 2
+                       WHEN t.content_tier = 'private' OR t.metadata_tier = 'private' THEN 1 ELSE 0 END))
+          AND (tier_copies.layers NOT IN ('metadata', 'both')
+            OR (CASE tier_copies.trust_domain WHEN 'secure_local' THEN 2 WHEN 'internal' THEN 1 ELSE 0 END)
+              >= (CASE t.metadata_tier WHEN 'secure' THEN 2 WHEN 'private' THEN 1 ELSE 0 END))
+      ) AND NOT EXISTS (
+        SELECT 1 FROM tier_overrides o
+        WHERE o.provider = tier_copies.provider AND o.account_scope = tier_copies.account_scope
+          AND o.conversation_key = tier_copies.conversation_key AND o.provider_item_id = tier_copies.provider_item_id
+          AND json_extract(o.override_json, '$.kind') = 'tier' AND json_extract(o.override_json, '$.tier') = 'secrets'
+      ) AND NOT EXISTS (
+        SELECT 1 FROM tier_write_intents w
+        WHERE w.provider = tier_copies.provider AND w.account_scope = tier_copies.account_scope
+          AND w.conversation_key = tier_copies.conversation_key AND w.provider_item_id = tier_copies.provider_item_id
+          AND w.kind IN ('secret', 'deletion')
+      )`;
 });
 
 // src/workers/classification/tier-set-binding.ts
@@ -53286,10 +53783,10 @@ var init_judge_spending = __esm(() => {
 
 // src/workers/classification/built-in-sniffer.ts
 function registerBuiltInPrivateModel(model) {
-  registered = model;
+  registered2 = model;
 }
 function registeredBuiltInPrivateModel() {
-  return registered;
+  return registered2;
 }
 function resolveTierSnifferRuntime(input) {
   const builtInLane = (builtIn) => ({ source: "built_in", lane: {
@@ -53362,7 +53859,7 @@ function withDefaultTinfoilJudge(profiles, engine) {
   }
   return [...profiles, ["tinfoil-judge", { provider: "tinfoil", trust: "encrypted_cloud", model: "decision-medium", purpose: "classification", secretRef: member?.profile.secretRef ?? "store:tinfoil.api_key" }]];
 }
-var BUILT_IN_SNIFFER_PROFILE_ID = "built_in", BUILT_IN_SNIFFER_LANE, registered;
+var BUILT_IN_SNIFFER_PROFILE_ID = "built_in", BUILT_IN_SNIFFER_LANE, registered2;
 var init_built_in_sniffer = __esm(() => {
   init_judge_spending();
   init_sniffer_lane();
@@ -53882,7 +54379,7 @@ function retire(stopped, error) {
 function offThreadReadsSupported(dbPath) {
   return dbPath !== ":memory:" && !dbPath.startsWith("file::memory:") && runtimeHasWorkers();
 }
-function send(reader, message, statementTiming) {
+function send(reader, message, statementTiming, job) {
   if (reader.retired)
     return Promise.reject(new Error("off-thread reader stopped"));
   const id = nextId++;
@@ -53890,7 +54387,11 @@ function send(reader, message, statementTiming) {
     reader.pending.set(id, { resolve, reject, ...statementTiming ? { statementTiming } : {} });
     armLostReplyCheck();
     try {
+      if (job)
+        observer?.(job.store, job.read);
       reader.worker.postMessage({ ...message, id, ...statementTiming ? { measureCpu: true } : {} });
+      if (job)
+        reader.executingStore = job.store;
     } catch (error) {
       reader.pending.delete(id);
       reject(error instanceof Error ? error : new Error(String(error)));
@@ -54254,13 +54755,11 @@ function dispatch() {
       job.running = true;
     }
     reader.job = job;
-    reader.executingStore = job.store;
-    observer?.(job.store, job.read);
     const { sql, params, mode, site } = job.read;
     send(reader, { op: "query", path: job.store, sql, params, mode, ...benchSqlDir && { site: site ?? job.benchSite } }, job.report && ((ms, cpuMs) => {
       job.sqlMs = ms;
       job.cpuMs = cpuMs;
-    })).then((rows) => settle(job, clock2.now() >= job.deadlineAtMs ? { error: new OffThreadReadBusyError } : { rows }), (error) => {
+    }), job).then((rows) => settle(job, clock2.now() >= job.deadlineAtMs ? { error: new OffThreadReadBusyError } : { rows }), (error) => {
       if (error instanceof OffThreadReadLostError && !job.settled && !job.retried) {
         job.retried = true;
         counters.retries += 1;
@@ -57213,21 +57712,6 @@ var init_remote_access_recheck = __esm(() => {
   readAuthorization = new AsyncLocalStorage11;
 });
 
-// src/workers/classification/installed-tier-classification-registry.ts
-function registerInstalledTierClassification(provider) {
-  registered2 = provider;
-}
-function registeredInstalledTierClassification() {
-  return registered2;
-}
-function registerTierSetPlanner(ledgerPath, planner) {
-  (tierSetPlanners ??= new Map).set(ledgerPath, planner);
-}
-function tierSetPlannerForLedger(ledgerPath) {
-  return tierSetPlanners?.get(ledgerPath);
-}
-var registered2, tierSetPlanners;
-
 // src/workers/connector-store/tier-placement.ts
 function resolveStoreTierClassification(explicit, ledgerPath) {
   const installed = registeredInstalledTierClassification()?.forLedger(ledgerPath);
@@ -57276,13 +57760,13 @@ function isTextualMimeType(mimeType) {
   return normalized.startsWith("text/") || normalized === "application/json" || normalized === "application/xml" || normalized.endsWith("+json") || normalized.endsWith("+xml");
 }
 function decideItemTiers(connector, item, text, options, ledger, extra = {}) {
-  const read = ledger?.classificationRead(item.identity);
+  const read = extra.classificationRead ?? ledger?.classificationRead(item.identity, extra.contentFetchFailed ? undefined : text);
   const override = read?.override;
   const fresh = text?.trim() ? extra.contentFetchFailed !== true : false;
   const recorded = ledger?.getCurrent(item.identity);
   const fenced = options?.sniffer && ledger && read ? secretFencedSniffer(options.sniffer, ledger, item.identity, read, { mayAskSecret: fresh }) : options?.sniffer;
   const signals = connector.classificationSignals(item);
-  const parentContext = item.identity.parent ? options?.parentNamesContext?.(item.identity, item.identity.parent.localItemId) : undefined;
+  const parentContext = extra.parentContext ?? (item.identity.parent ? options?.parentNamesContext?.(item.identity, item.identity.parent.localItemId) : undefined);
   const namesReceipt = contentNamesReason(signals, parentContext);
   const cacheAware = fenced && {
     id: fenced.id,
@@ -57307,9 +57791,9 @@ function decideItemTiers(connector, item, text, options, ledger, extra = {}) {
   const newArrival = extra.afterFirstImport === true && recorded === undefined;
   if (newArrival && text === undefined)
     ledger?.markNewArrival(item.identity);
-  const sniffer = cacheAware && arrivalOrderedSniffer(conversationOrderedSniffer(recordedContentVerdictSniffer(cacheAware, recorded, text, namesReceipt), item.metadata), newArrival);
-  const holdUntilJudged = options?.holdContentUntilJudged === true || item.identity.parent !== undefined || item.holdContentUntilJudged === true || heldUntilJudged(recorded?.reasons);
-  return classifyItemTiers({
+  const sniffer = cacheAware && arrivalOrderedSniffer(conversationOrderedSniffer(recordedContentVerdictSniffer(cacheAware, recorded, text, namesReceipt, namesInputReason(signals, parentContext)), item.metadata), newArrival);
+  const holdUntilJudged = extra.requireContentVerdict === true || item.identity.parent !== undefined || options?.holdContentUntilJudged === true || item.holdContentUntilJudged === true || heldUntilJudged(recorded?.reasons);
+  const decision = classifyItemTiers({
     signals,
     locators: ["locatorUri", "url", "pathDisplay"].map((key) => item.metadata[key]).filter((value) => typeof value === "string"),
     provider: item.identity.provider,
@@ -57317,10 +57801,11 @@ function decideItemTiers(connector, item, text, options, ledger, extra = {}) {
     ...extra.namesOnly ? { namesOnly: true } : {},
     ...holdUntilJudged ? { holdUntilJudged: true } : {},
     ...parentContext ? { parentContext } : {},
+    ...extra.imageJudgment ? { imageJudgment: extra.imageJudgment } : {},
     mimeType: item.mimeType,
     hasNonTextContent: itemHasNonTextContent(item),
     titleIsConversation: item.metadata.titleIsConversation === true,
-    ...read?.secret ? { heldSecret: true } : {},
+    ...read?.secret && !extra.freshSecretReplacement ? { heldSecret: true } : {},
     subject: item.identity
   }, {
     ...options?.rules ? { rules: options.rules } : {},
@@ -57328,21 +57813,44 @@ function decideItemTiers(connector, item, text, options, ledger, extra = {}) {
     ...override ? { override } : {},
     ...options?.retirePublic ? { retirePublic: true } : {}
   });
+  const unread = text === undefined || extra.contentFetchFailed === true;
+  if (unread && override?.kind === "tier" && recorded?.reasons.includes(OWNER_OVERRIDE_SECRET_REVIEW_REASON)) {
+    return { ...decision, metadataTier: recorded.metadataTier, contentTier: recorded.contentTier, contentRead: false };
+  }
+  if (unread && override?.kind === "tier" && recorded?.reasons.includes(OWNER_OVERRIDE_SECRET_CONFIRMED_REASON)) {
+    return { ...decision, contentRead: false };
+  }
+  return decision;
 }
-function recordedContentVerdictSniffer(sniffer, recorded, text, names) {
-  if (!recorded || !text?.trim() || recorded.state !== "current" || recorded.contentPending || !recorded.contentRead)
+function recordedContentVerdictSniffer(sniffer, recorded, text, names, namesInput) {
+  if (!recorded || !text?.trim() || recorded.contentPending || !recorded.contentRead || recorded.reasons.includes(RETAINED_MOVE_SOURCE_REASON))
+    return sniffer;
+  if (recorded.state !== "current" && (recorded.state !== "moving" || !namesInput || !recorded.reasons.includes(namesInput)))
     return sniffer;
   if (recorded.engineVersion !== TIER_CLASSIFIER_VERSION || !recorded.reasons.includes(contentDigestReason(text)) || !recorded.reasons.includes(names))
     return sniffer;
-  const tier = recorded.contentTier;
+  const tier = recorded.targetContentTier ?? recorded.contentTier;
   const prefix = `content:sniffer:${sniffer.id}:`;
   const code = recorded.reasons.find((reason) => reason.startsWith(prefix))?.slice(prefix.length);
   if (tier !== "private" && tier !== "secure" || !code || code === "undecided" || isFailSafeMissingContentQuestion(`${prefix}${code}`))
     return sniffer;
+  const digest = contentDigestReason(text);
+  const reason = prefix + code;
+  const legacyVerdict = recorded.state === "current" && recorded.decidedBy === "sniffer" && recorded.reasons.filter((r) => r.startsWith("content:sha256:")).length === 1 && recorded.reasons.filter((r) => r.startsWith("content:names:")).length === 1 && recorded.reasons.filter((r) => r.startsWith("content:sniffer:")).length === 1 && !recorded.reasons.some((r) => r.startsWith("content:judge_verdict:")) && isContentJudgeReason(reason);
+  const judgeBacked = legacyVerdict || hasContentJudgeVerdict(recorded.reasons, tier, digest);
+  if (tier === "private" && !judgeBacked)
+    return sniffer;
+  const duplicate = judgeBacked && code.startsWith("rule:duplicate_model:");
+  const verdict = {
+    tier,
+    code,
+    ...duplicate ? { rule: "duplicate_model" } : {},
+    ...judgeBacked ? { origin: duplicate ? "rule" : "model" } : {}
+  };
   return {
     id: sniffer.id,
-    recordedContentVerdict: { tier, code, mapRevision: recorded.mapRevision },
-    judge: (request) => request.pass === "content" && (request.mapRevision ?? "none") === recorded.mapRevision ? { verdict: "decided", tier, code } : sniffer.judge(request)
+    recordedContentVerdict: { ...verdict, mapRevision: recorded.mapRevision },
+    judge: (request) => request.pass === "content" && (request.mapRevision ?? "none") === recorded.mapRevision ? { verdict: "decided", ...verdict } : sniffer.judge(request)
   };
 }
 function secretFencedSniffer(sniffer, ledger, identity, read, options = {}) {
@@ -59015,7 +59523,7 @@ function forgetWaitingPrivateQuestions(dbPath, input, options = {}) {
 }
 function revokeWaitingPrivateQuestions(remoteConnectionsDbPath, connectionId, options = {}) {
   const store = openWaitingPrivateQuestionStore(waitingPrivateQuestionsDbPath(remoteConnectionsDbPath), {
-    busyTimeoutMs: options.busyTimeoutMs ?? REVOKE_BUSY_TIMEOUT_MS
+    busyTimeoutMs: options.busyTimeoutMs ?? REVOCATION_WRITE_LIMIT.milliseconds
   });
   try {
     store.revokeConnection(connectionId);
@@ -59146,8 +59654,9 @@ function hardenPrivatePath(dbPath) {
     }
   }
 }
-var WAITING_PRIVATE_QUESTIONS_STORE_ID = "waiting-private-questions", WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION = 7, WAITING_QUESTION_LIMITS, STORE_BUSY_TIMEOUT_MS = 5000, REVOKE_BUSY_TIMEOUT_MS = 1000, OLDER_REMOVED_KEY = "older_removed_at", SELECTOR_TEXT_FIELDS, SELECTED_ITEM_FIELDS, WAITING_QUESTION_RETRY_LIMIT = 8, WAITING_QUESTION_RETRY_REASONS, CHATGPT_INBOX_GRACE_MS = 30000;
+var WAITING_PRIVATE_QUESTIONS_STORE_ID = "waiting-private-questions", WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION = 7, WAITING_QUESTION_LIMITS, STORE_BUSY_TIMEOUT_MS = 5000, REVOKE_BUSY_TIMEOUT_MS = 1000, REVOCATION_WRITE_LIMIT, OLDER_REMOVED_KEY = "older_removed_at", SELECTOR_TEXT_FIELDS, SELECTED_ITEM_FIELDS, WAITING_QUESTION_RETRY_LIMIT = 8, WAITING_QUESTION_RETRY_REASONS, CHATGPT_INBOX_GRACE_MS = 30000;
 var init_waiting_private_questions = __esm(() => {
+  init_limit_stops();
   init_app_release_capture();
   init_sqlite_migrations();
   init_sqlite_store();
@@ -59160,6 +59669,16 @@ var init_waiting_private_questions = __esm(() => {
     ttlMs: 7 * 24 * 60 * 60000,
     reanswerAfterMs: 10 * 60000
   });
+  REVOCATION_WRITE_LIMIT = Object.freeze({
+    id: "privacy.revocation_write",
+    kind: "time",
+    scope: "source",
+    label: "Wait for a privacy revocation to acquire the write lock",
+    unit: "ms",
+    continue: "none",
+    milliseconds: REVOKE_BUSY_TIMEOUT_MS
+  });
+  registerLimit(REVOCATION_WRITE_LIMIT);
   SELECTOR_TEXT_FIELDS = [
     "query",
     "account",
@@ -59791,7 +60310,11 @@ function settleSecretsCopies(options) {
       store.tombstoneCopy(identity, { connectorId: options.connectorId, trustTier });
     }
   }
-  const sideStores = forgetSecretInSideStores({ ledger: options.ledger, identity });
+  const sideStores = forgetSecretInSideStores({
+    ledger: options.ledger,
+    identity,
+    ...options.restoreQueue ? { restoreQueue: true } : {}
+  });
   if (disposition === "tombstone_now") {
     for (const copy of options.copies)
       options.storeFor(copy.corpusId)?.durabilityBarrier();
@@ -59826,7 +60349,7 @@ function forgetSecretInSideStores(options) {
   const snifferPath = tierSnifferPathForLedger(ledger.dbPath);
   if (snifferPath !== ":memory:" && existsSync36(snifferPath)) {
     try {
-      const sniffer = new TierSnifferStore({ dbPath: snifferPath });
+      const sniffer = new TierSnifferStore({ dbPath: snifferPath, ...options.restoreQueue ? { restoreQueue: true } : {} });
       try {
         result.snifferQuestions = sniffer.deleteItemQuestions({
           provider: identity.provider,
@@ -60403,11 +60926,12 @@ function rejudgeStoredContent(set, record, options) {
     snifferId: content.snifferId
   };
   if (content.contentTier === "secrets") {
-    settleRoutedSecrets(set, identity, decision, exported, {
+    const settled = settleRoutedSecrets(set, identity, decision, exported, {
       text,
       findingKinds: content.reasons.filter((reason) => reason.startsWith("content:secret:")).map((reason) => reason.slice("content:secret:".length))
-    });
-    report.secrets += 1;
+    }, { guard: { generation: record.generation, override: undefined } });
+    if (settled)
+      report.secrets += 1;
     return;
   }
   if (questionNotQueued) {
@@ -62433,8 +62957,396 @@ var init_embedding_ledger = __esm(() => {
   ];
 });
 
-// src/workers/connector-store/tier-move.ts
+// src/workers/classification/tier-rules.ts
+import { chmodSync as chmodSync13, lstatSync as lstatSync21, mkdirSync as mkdirSync23 } from "node:fs";
+import { dirname as dirname45 } from "node:path";
+function defaultTierRulesPath(env = process.env) {
+  return defaultOwnerConfigPath("tier-rules.json", env);
+}
+function resolveTierRulesPath(options = {}) {
+  const env = options.env ?? process.env;
+  return options.path?.trim() || env[OLYMPUS_TIER_RULES_ENV]?.trim() || defaultTierRulesPath(env);
+}
+function loadOwnerTierRules(options = {}) {
+  const path = resolveTierRulesPath(options);
+  const read = readOwnerConfigFile(path);
+  if (read.status === "missing") {
+    if (options.allowMissing)
+      return [];
+    throw new OperationError("config_error", `Tier rules not found at ${path}.`, tierRulesRemedy(path));
+  }
+  if (read.status === "refused") {
+    throw new OperationError("config_error", read.reason === "unsafe_permissions" ? `Tier rules at ${path} are writable by someone other than their owner.` : `Tier rules at ${path} could not be read consistently (${read.reason}).`, read.reason === "unsafe_permissions" ? `chmod 600 ${path}` : tierRulesRemedy(path));
+  }
+  let raw;
+  try {
+    raw = JSON.parse(read.text);
+  } catch {
+    throw new OperationError("config_error", `Tier rules at ${path} are not valid JSON.`, tierRulesRemedy(path));
+  }
+  return parseOwnerTierRules(raw, path);
+}
+function readDecisionRules(path) {
+  try {
+    return { rules: loadOwnerTierRules({ path, allowMissing: true }), unavailable: false };
+  } catch {
+    return { rules: [], unavailable: true };
+  }
+}
+function tierRulesFileStamp(options = {}) {
+  return ownerConfigStamp(resolveTierRulesPath(options));
+}
+function validateTierRulesFile(options = {}) {
+  const path = resolveTierRulesPath(options);
+  const rules = loadOwnerTierRules({ ...options, path, allowMissing: false });
+  return {
+    ok: true,
+    path,
+    schemaVersion: TIER_RULES_SCHEMA_VERSION,
+    rules: rules.length,
+    ruleIds: rules.map((rule) => rule.id),
+    ...tightenPermissions(path)
+  };
+}
+function parseOwnerTierRules(raw, label = "tier rules") {
+  const root = asRecord8(raw);
+  if (!root)
+    throw new OperationError("config_error", `${label} must be a JSON object.`);
+  if (root.schemaVersion !== TIER_RULES_SCHEMA_VERSION) {
+    throw new OperationError("config_error", `${label}.schemaVersion must be ${TIER_RULES_SCHEMA_VERSION}.`);
+  }
+  if (!Array.isArray(root.rules))
+    throw new OperationError("config_error", `${label}.rules must be an array.`);
+  if (root.rules.length > MAX_RULES) {
+    throw new OperationError("config_error", `${label}.rules may hold at most ${MAX_RULES} rules.`);
+  }
+  const unknownKeys = Object.keys(root).filter((key) => key !== "schemaVersion" && key !== "rules");
+  if (unknownKeys.length > 0) {
+    throw new OperationError("config_error", `${label} has unknown field(s): ${unknownKeys.join(", ")}.`);
+  }
+  const seen = new Set;
+  return root.rules.map((entry, index) => {
+    const rule = parseOwnerTierRule(entry, `${label}.rules[${index}]`);
+    if (seen.has(rule.id))
+      throw new OperationError("config_error", `${label}: duplicate rule id "${rule.id}".`);
+    seen.add(rule.id);
+    return rule;
+  });
+}
+function parseOwnerTierRule(raw, label = "tier rule") {
+  const record = asRecord8(raw);
+  if (!record)
+    throw new OperationError("config_error", `${label} must be an object.`);
+  const unknownKeys = Object.keys(record).filter((key) => !["id", "source", "match", "tier", "strength"].includes(key));
+  if (unknownKeys.length > 0) {
+    throw new OperationError("config_error", `${label} has unknown field(s): ${unknownKeys.join(", ")}.`);
+  }
+  const id = typeof record.id === "string" ? record.id.trim() : "";
+  if (!RULE_ID_PATTERN.test(id)) {
+    throw new OperationError("config_error", `${label}.id must be a short lower-case slug (a-z, 0-9, _ . : -).`);
+  }
+  let source;
+  if (record.source !== undefined) {
+    if (typeof record.source !== "string" || !SOURCE_PATTERN.test(record.source.trim())) {
+      throw new OperationError("config_error", `${label}.source must be a provider id (letters, digits, _ . : -).`);
+    }
+    source = record.source.trim();
+  }
+  const match = parseMatch(record.match, `${label}.match`);
+  const tier = record.tier;
+  if (typeof tier !== "string" || !TIER_KEYS.includes(tier)) {
+    throw new OperationError("config_error", `${label}.tier must be one of ${TIER_KEYS.join(", ")} (schema-v1 keys).`);
+  }
+  const strength = record.strength ?? "prior";
+  if (strength !== "prior" && strength !== "force") {
+    throw new OperationError("config_error", `${label}.strength must be prior or force.`);
+  }
+  return { id, ...source ? { source } : {}, match, tier, strength };
+}
+function parseMatch(raw, label) {
+  const record = asRecord8(raw);
+  if (!record)
+    throw new OperationError("config_error", `${label} must be an object.`);
+  const keys = Object.keys(record);
+  if (keys.length !== 1 || !OWNER_TIER_RULE_MATCH_KINDS.includes(keys[0])) {
+    throw new OperationError("config_error", `${label} must hold exactly one of ${OWNER_TIER_RULE_MATCH_KINDS.join(", ")}.`);
+  }
+  const kind = keys[0];
+  const value = record[kind];
+  if (typeof value !== "string" || !value.trim() || value.length > MAX_VALUE_LENGTH) {
+    throw new OperationError("config_error", `${label}.${kind} must be a non-empty string of at most ${MAX_VALUE_LENGTH} characters.`);
+  }
+  if (kind === "sender" && !SENDER_PATTERN.test(value.trim())) {
+    throw new OperationError("config_error", `${label}.sender must be an address (name@example.com) or a whole domain (@example.com).`);
+  }
+  return { kind, value: value.trim() };
+}
+function serializeOwnerTierRule(rule) {
+  return {
+    id: rule.id,
+    ...rule.source ? { source: rule.source } : {},
+    match: { [rule.match.kind]: rule.match.value },
+    tier: rule.tier,
+    strength: rule.strength
+  };
+}
+function writeRulesAt(path, rules) {
+  const document2 = { schemaVersion: TIER_RULES_SCHEMA_VERSION, rules: rules.map(serializeOwnerTierRule) };
+  parseOwnerTierRules(document2, "tier rules");
+  mkdirSync23(dirname45(path), { recursive: true, mode: 448 });
+  writePrivateFileAtomicSync(path, `${JSON.stringify(document2, null, 2)}
+`);
+  return path;
+}
+function withOwnerTierRulesWriter(options, work) {
+  const path = resolveTierRulesPath(options);
+  return withOwnerConfigLease(path, "exclusive", () => work(loadOwnerTierRules({ path, allowMissing: true }), (rules) => {
+    writeRulesAt(path, rules);
+  }));
+}
+function updateOwnerTierRules(update, options = {}) {
+  const path = resolveTierRulesPath(options);
+  return withOwnerTierRulesWriter({ path }, (previous, save) => {
+    const rules = update(previous);
+    const changed = rules !== previous;
+    if (changed)
+      save(rules);
+    return { path, rules, changed };
+  });
+}
+function addOwnerTierRule(rule, options = {}) {
+  const { path, rules } = updateOwnerTierRules((existing) => {
+    if (existing.some((candidate) => candidate.id === rule.id)) {
+      throw new OperationError("invalid_params", `A tier rule with id "${rule.id}" already exists.`, "Remove it first or choose another id.");
+    }
+    return [...existing, rule];
+  }, options);
+  return { path, rules };
+}
+function removeOwnerTierRule(id, options = {}) {
+  const { path, rules, changed: removed } = updateOwnerTierRules((existing) => {
+    const kept = existing.filter((rule) => rule.id !== id);
+    return kept.length === existing.length ? existing : kept;
+  }, options);
+  return { path, removed, rules };
+}
+function tierKeyFromDisplayName(value) {
+  switch (value.trim().toLowerCase()) {
+    case "public":
+      return "public";
+    case "personal":
+      return "private";
+    case "private":
+      return "secure";
+    case "secrets":
+    case "secret":
+      return "secrets";
+    default:
+      return;
+  }
+}
+function tierDisplayName(tier) {
+  switch (tier) {
+    case "public":
+      return "Public";
+    case "private":
+      return "Personal";
+    case "secure":
+      return "Private";
+    case "secrets":
+      return "Secrets";
+  }
+}
+function tightenPermissions(path) {
+  try {
+    const stat = lstatSync21(path);
+    if (!stat.isFile())
+      return {};
+    const mode = stat.mode & 511;
+    if ((mode & 63) === 0)
+      return { permissions: `0${mode.toString(8).padStart(3, "0")}` };
+    chmodSync13(path, 384);
+    return { permissions: "0600", permissionsTightened: true };
+  } catch {
+    return {};
+  }
+}
+function tierRulesRemedy(path) {
+  return `Write the rules to ${path} (schemaVersion 1), or add them with \`olympus tier rules add\`.`;
+}
+function asRecord8(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
+}
+var TIER_RULES_SCHEMA_VERSION = 1, OLYMPUS_TIER_RULES_ENV = "OLYMPUS_TIER_RULES_PATH", OWNER_TIER_RULE_MATCH_KINDS, MAX_RULES = 500, MAX_VALUE_LENGTH = 240, RULE_ID_PATTERN, SOURCE_PATTERN, SENDER_PATTERN;
+var init_tier_rules = __esm(() => {
+  init_atomic_file();
+  init_operation_error();
+  init_owner_config_read();
+  init_tier_classifier();
+  OWNER_TIER_RULE_MATCH_KINDS = ["pathPrefix", "folderKey", "label", "sender", "chat"];
+  RULE_ID_PATTERN = /^[a-z0-9][a-z0-9_.:-]{0,63}$/;
+  SOURCE_PATTERN = /^[a-z0-9][a-z0-9_.:-]{0,63}$/i;
+  SENDER_PATTERN = /^(?:[^\s<>"(),;:@]+)?@[a-z0-9-]+(?:\.[a-z0-9-]+)+$/i;
+});
+
+// src/workers/connector-store/tier-move-rule-policy.ts
 import { createHash as createHash31 } from "node:crypto";
+import { resolve as resolve14 } from "node:path";
+function withTierRuleFence(set, work) {
+  if (heldPolicyFences.has(set))
+    return work();
+  const rulesPath = set.ownerRulesPath ?? registeredInstalledTierClassification()?.ownerTierRulesPath ?? (process.env[OLYMPUS_TIER_RULES_ENV] ? resolveTierRulesPath() : undefined);
+  const paths = [...new Set([rulesPath, set.ownerRuleSource?.path].filter((path) => !!path).map((path) => resolve14(path)))].sort();
+  const take = (index) => {
+    const path = paths[index];
+    if (path)
+      return withOwnerConfigLease(path, "shared", () => take(index + 1));
+    heldPolicyFences.set(set, rulesPath ? { rulesPath } : {});
+    try {
+      return work();
+    } finally {
+      heldPolicyFences.delete(set);
+    }
+  };
+  return take(0);
+}
+function currentTierRulePolicy(set) {
+  const fence = heldPolicyFences.get(set);
+  if (!fence)
+    throw new Error("Tier rule policy requires the rule fence.");
+  if (fence.policy)
+    return fence.policy;
+  const source = set.ownerRuleSource?.read();
+  const classification = set.classification(source);
+  const stamp = fence.rulesPath ? tierRulesFileStamp({ path: fence.rulesPath }) : "";
+  const direct = fence.rulesPath && fence.rulesPath !== registeredInstalledTierClassification()?.ownerTierRulesPath ? readDecisionRules(fence.rulesPath) : undefined;
+  const unavailable = !!(classification?.unavailableReason || source?.unavailable || direct?.unavailable);
+  const keyedRules = new Map;
+  for (const rule of [...classification?.rules ?? [], ...direct?.rules ?? []])
+    keyedRules.set(ruleKey(rule), rule);
+  const keys = [...keyedRules.keys()].sort();
+  const rules = keys.map((key) => keyedRules.get(key));
+  const retirePublic = classification?.retirePublic === true;
+  const revision = digest4([stamp, source?.revision, keys]);
+  fence.policy = { revision, rules, retirePublic, unavailable };
+  return fence.policy;
+}
+function tierMoveRuleAuthorization(set, record, target, sources, destination) {
+  const policy = currentTierRulePolicy(set);
+  const identity = tierLedgerIdentityOfRecord(record);
+  const override = set.ledger.getOverride(identity);
+  if (tierMoveOverrideConflict(override, record, target, sources, destination))
+    return;
+  let ceiling = Number.POSITIVE_INFINITY;
+  for (const layer of ["metadata", "content"]) {
+    const from = copyServingLayer(sources, layer);
+    const to = copyServingLayer(destination, layer);
+    const fromTier = layer === "metadata" ? record.metadataTier : record.contentTier;
+    const toTier = layer === "metadata" ? target.metadataTier : target.contentTier;
+    if (to && (tierRank(toTier) < tierRank(fromTier) || (from ? trustDomainRank(to.trustDomain) < trustDomainRank(from.trustDomain) : trustDomainRank(to.trustDomain) < tierRank("secure")))) {
+      ceiling = Math.min(ceiling, tierRank(toTier), trustDomainRank(to.trustDomain));
+    }
+  }
+  if (!Number.isFinite(ceiling))
+    return policy.revision;
+  if (policy.unavailable || policy.retirePublic && ceiling < tierRank("private"))
+    return;
+  const rules = policy.rules.filter((rule) => tierRank(rule.tier) > ceiling && (rule.source === undefined || rule.source === record.provider) && (override?.kind !== "tier" || rule.tier === "secrets"));
+  if (rules.length === 0)
+    return policy.revision;
+  const storedRules = rules.filter((rule) => rule.match.kind !== "label");
+  if (storedRules.length > 0) {
+    const copies = set.ledger.copies(identity);
+    const source = copyServingLayer(copies.filter((copy) => copy.state === "current"), "metadata") ?? (record.state === "moving" ? copyServingLayer(copies.filter((copy) => copy.state === "superseded" && copy.supersededByGeneration === record.generation + 1), "metadata") : undefined);
+    const names = source && set.store(source.trustDomain)?.exportItemNames(identity);
+    if (!names)
+      return;
+    const signals = storedSignals(names);
+    if (storedRules.some((rule) => ownerRuleMatches(rule, signals, record.provider)))
+      return;
+  }
+  const labelRules = applicableProviderLabelRules(rules, record.provider);
+  if (labelRulesWithoutNonmatch(set, record, policy, labelRules).length > 0)
+    return;
+  return policy.revision;
+}
+function applicableProviderLabelRules(rules, provider) {
+  if (!connectorLabelCapability(provider))
+    return [];
+  return rules.filter((rule) => rule.match.kind === "label" && ownerRuleMatches(rule, { labels: [rule.match.value] }, provider));
+}
+function labelRulesWithoutNonmatch(set, record, policy, rules) {
+  if (rules.length === 0 || policy.unavailable)
+    return rules;
+  const { provider, accountScope, providerItemId } = record;
+  const progress = readLabelState(set.ledger.readMeta(labelSweepMetaKey(provider, accountScope)));
+  if (!labelSweepHasPolicy(progress, policy, provider, accountScope))
+    return rules;
+  const itemKey = labelEvidenceItemKey(providerItemId);
+  return rules.filter((rule) => {
+    const key = ruleKey(rule);
+    const walkId = progress.completed?.[key];
+    return !walkId || !progress.done.includes(key) || !!progress.walks?.[key] || set.ledger.labelRuleMatched(provider, accountScope, key, walkId, itemKey);
+  });
+}
+function labelSweepHasPolicy(state, policy, provider, accountScope) {
+  return state.revision === policy.revision && state.provider === provider && state.accountScope === accountScope;
+}
+function readLabelState(raw) {
+  if (!raw)
+    return { done: [] };
+  try {
+    const parsed = JSON.parse(raw);
+    const walks = {};
+    for (const [key, walk] of Object.entries(parsed.walks ?? {})) {
+      if (walk && isWalkId(walk.id)) {
+        walks[key] = {
+          id: walk.id,
+          ...typeof walk.pageToken === "string" && walk.pageToken ? { pageToken: walk.pageToken } : {},
+          ...walk.deferred === true ? { deferred: true } : {}
+        };
+      }
+    }
+    const completed = Object.fromEntries(Object.entries(parsed.completed ?? {}).filter(([, id]) => isWalkId(id)));
+    const strings = (value) => Array.isArray(value) ? value.filter((key) => typeof key === "string") : [];
+    return {
+      ...typeof parsed.revision === "string" ? { revision: parsed.revision } : {},
+      ...typeof parsed.provider === "string" ? { provider: parsed.provider } : {},
+      ...typeof parsed.accountScope === "string" ? { accountScope: parsed.accountScope } : {},
+      done: strings(parsed.done),
+      completed,
+      walks,
+      order: strings(parsed.order)
+    };
+  } catch {
+    return { done: [] };
+  }
+}
+function isWalkId(value) {
+  return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
+}
+function ruleKey(rule) {
+  return digest4([rule.id, rule.source ?? "", rule.match.kind, rule.match.value, rule.tier, rule.strength]).slice(0, 24);
+}
+function labelEvidenceItemKey(providerItemId) {
+  return digest4(providerItemId);
+}
+function digest4(value) {
+  return createHash31("sha256").update(JSON.stringify(value)).digest("hex");
+}
+var heldPolicyFences;
+var init_tier_move_rule_policy = __esm(() => {
+  init_owner_config_read();
+  init_source_connector_labels();
+  init_tier_classifier();
+  init_tier_ledger();
+  init_tier_rules();
+  init_stored_names();
+  heldPolicyFences = new WeakMap;
+});
+
+// src/workers/connector-store/tier-move.ts
+import { createHash as createHash32 } from "node:crypto";
 function rowRehomeReceiptId(ledger, identity, generation) {
   return `row-rehome:${ledger.ledgerId()}:${tierLedgerIdentityKey(identity)}:${generation}`;
 }
@@ -62483,6 +63395,8 @@ function moveTieredItemsLowering(moves, options = {}) {
   if (moves.some((move) => move.set !== set))
     throw new TierMoveRefusedError("A lowering batch belongs to one set.", "mixed_sets");
   const timings = moves[0].timings;
+  for (const move of moves)
+    settleDiscardedTierMoveImports(set, move.identity);
   for (const move of moves) {
     const target = move.decision ?? move.target;
     if (!target || target.metadataTier === "secrets" || target.contentTier === "secrets") {
@@ -62501,7 +63415,7 @@ function moveTieredItemsLowering(moves, options = {}) {
     }) : work();
   };
   const staged = [];
-  set.ledger.withMoveBatch(() => {
+  withTierRuleFence(set, () => set.ledger.withMoveBatch(() => {
     for (const move of moves) {
       if (options.shouldStop?.())
         break;
@@ -62515,9 +63429,9 @@ function moveTieredItemsLowering(moves, options = {}) {
   }, (ms) => {
     if (timings)
       timings.ledgerCommitMs += ms;
-  });
+  }));
   const prepared = [];
-  set.ledger.withMoveBatch(() => {
+  withTierRuleFence(set, () => set.ledger.withMoveBatch(() => {
     inStores(0, () => {
       for (const entry of staged) {
         if (prepared.length > 0 && options.shouldStop?.())
@@ -62538,9 +63452,9 @@ function moveTieredItemsLowering(moves, options = {}) {
   }, (ms) => {
     if (timings)
       timings.ledgerCommitMs += ms;
-  });
+  }));
   const results = [];
-  inStores(0, () => set.ledger.withMoveBatch(() => {
+  withTierRuleFence(set, () => inStores(0, () => set.ledger.withMoveBatch(() => {
     for (const entry of prepared) {
       if ("error" in entry) {
         results.push(entry);
@@ -62557,7 +63471,9 @@ function moveTieredItemsLowering(moves, options = {}) {
   }, (ms) => {
     if (timings)
       timings.ledgerCommitMs += ms;
-  }));
+  })));
+  for (const move of moves)
+    settleDiscardedTierMoveImports(set, move.identity);
   prepared.forEach((entry, index) => {
     if ("error" in entry || !("result" in results[index]))
       return;
@@ -62580,14 +63496,25 @@ function promoteLowerTierContent(options, source) {
   }
   return moveTieredItemNow({ ...options, target: { metadataTier: record.metadataTier, contentTier: record.contentTier } }, source);
 }
+function moveRestoredItemToHold(options) {
+  if (!contentHeldForJudgment(options.decision))
+    throw new Error("A restored body must remain held.");
+  return moveTieredItemNow(options);
+}
 function moveTieredItemNow(options, repairSource) {
-  const receipt = prepareTieredMove(options, repairSource);
-  options.beforeFlip?.();
-  options.afterVerified?.();
-  return finishVerifiedMove(options, receipt);
+  settleDiscardedTierMoveImports(options.set, options.identity);
+  try {
+    const receipt = prepareTieredMove(options, repairSource);
+    options.beforeFlip?.();
+    options.afterVerified?.();
+    return finishVerifiedMove(options, receipt);
+  } finally {
+    settleDiscardedTierMoveImports(options.set, options.identity);
+  }
 }
 function prepareTieredMove(options, repairSource, loweringOnly = false) {
-  return stageTieredMove(options, repairSource, loweringOnly)();
+  const copy = withTierRuleFence(options.set, () => stageTieredMove(options, repairSource, loweringOnly));
+  return copy();
 }
 function stageTieredMove(options, repairSource, loweringOnly = false) {
   const { set, identity, decision } = options;
@@ -62627,6 +63554,7 @@ function stageTieredMove(options, repairSource, loweringOnly = false) {
     metadataPending: record.metadataPending,
     contentPending: record.contentPending,
     contentRead: record.contentRead,
+    reasons: record.reasons,
     ...ownerOverride ? { decidedBy: "override" } : {}
   });
   const moveGeneration = record.generation + 1;
@@ -62651,16 +63579,35 @@ function stageTieredMove(options, repairSource, loweringOnly = false) {
   };
   const contentSource = repairSource ?? copyServingLayer(sources, "content");
   const contentDestination = copyServingLayer(placement.copies, "content");
-  if (contentSource && contentDestination && trustDomainRank(contentDestination.trustDomain) < trustDomainRank(contentSource.trustDomain)) {
-    const exported = exportFrom(contentSource);
-    const evidence = decision ?? record;
-    const digest = exported && contentDigestReason(exported.chunks.map((chunk) => chunk.boundedText).join(""));
-    const receipts = evidence.reasons.filter((reason) => reason.startsWith("content:sha256:"));
-    if (!digest || receipts.length !== 1 || receipts[0] !== digest || evidence.contentPending) {
-      if (!raise && record.state === "moving") {
-        ledger.abandonMove(identity, { expectedGeneration: record.generation });
-      }
-      throw new TierMoveContentChangedError("Stored content does not match a settled lowering verdict; re-fetch or re-judge before moving.", !digest ? "content_no_copy" : evidence.contentPending ? "content_still_pending" : receipts.length === 0 ? "content_no_receipt" : receipts.length > 1 ? "content_several_receipts" : "content_receipt_mismatch");
+  const loweredLayers = loweredCopyLayers(sources, placement.copies);
+  const lowering = loweredLayers.length > 0 || tiersLower(record, target) || hasNewLowerLayer(sources, placement.copies);
+  const policyRefusal = unavailableLoweringPolicy(set, lowering);
+  if (policyRefusal) {
+    if (record.targetMetadataTier === target.metadataTier && record.targetContentTier === target.contentTier) {
+      retainAuthorizedRaise(set, identity, record, target, sources, placement.copies);
+    }
+    return () => {
+      throw policyRefusal;
+    };
+  }
+  const imports = plannedLowerImports(record.generation, target, sources, placement.copies);
+  if (contentDestination && needsContentMoveAuthority(contentSource, contentDestination)) {
+    const refusal = contentMoveRefusal(decision ?? record, exportFrom(contentSource ?? sources[0]), contentDestination.trustDomain, ledger.getOverride(identity));
+    if (refusal) {
+      if (record.state === "moving")
+        ledger.withGenerationFence(identity, record.generation, () => {
+          const pending = ledger.readMeta(moveImportsKey(identity));
+          const staged = pending ? JSON.parse(pending) : undefined;
+          if (staged?.generation === record.generation)
+            discardTierMoveImports(ledger, identity, staged);
+          if (raise)
+            retainAuthorizedRaise(set, identity, record, target, sources, placement.copies);
+          else
+            ledger.abandonMove(identity, { expectedGeneration: record.generation });
+        });
+      return () => {
+        throw refusal;
+      };
     }
   }
   const kept = ledger.copies(identity);
@@ -62681,17 +63628,34 @@ function stageTieredMove(options, repairSource, loweringOnly = false) {
     }
     throw new TierMoveRefusedError("The destination store keeps a superseded copy of this item; purge it (owner-approved) before moving there.", "superseded_copy_kept");
   }
-  timed(options.timings, "stageMs", () => ledger.stageMove(identity, {
-    expectedGeneration: record.generation,
-    target,
-    destination: placement.copies,
-    hideSource: raise,
-    ...placement.embedHold ? { embedHold: true } : {}
+  const staged = timed(options.timings, "stageMs", () => ledger.withGenerationFence(identity, record.generation, () => {
+    const now = ledger.getCurrent(identity);
+    if (now.state === "moving" && (now.targetMetadataTier !== target.metadataTier || now.targetContentTier !== target.contentTier)) {
+      throw new TierLedgerGenerationConflictError;
+    }
+    if (lowering && ledger.writeIntent(identity))
+      throw new TierLedgerGenerationConflictError;
+    if (tierMoveRuleAuthorization(set, now, target, sources, placement.copies) === undefined) {
+      retainAuthorizedRaise(set, identity, now, target, sources, placement.copies);
+      return authorityRefusal(set, now, target, sources, placement.copies);
+    }
+    ledger.stageMove(identity, {
+      expectedGeneration: record.generation,
+      target,
+      destination: placement.copies,
+      hideSource: raise,
+      ...placement.embedHold ? { embedHold: true } : {}
+    });
+    if (imports.copies.length)
+      ledger.writeMeta(moveImportsKey(identity), JSON.stringify(imports));
+    return true;
   }));
+  if (staged instanceof Error)
+    throw staged;
   return () => {
     let destinations = [];
     options.beforeCopy?.();
-    const receipt = ledger.withGenerationFence(identity, record.generation, () => {
+    const receipt = withTierRuleFence(set, () => ledger.withGenerationFence(identity, record.generation, () => {
       const alreadyVerified = readVerifiedMove(ledger, identity);
       if (alreadyVerified) {
         if (alreadyVerified.target.metadataTier !== target.metadataTier || alreadyVerified.target.contentTier !== target.contentTier) {
@@ -62703,8 +63667,11 @@ function stageTieredMove(options, repairSource, loweringOnly = false) {
       if (now.state !== "moving" || now.targetMetadataTier !== target.metadataTier || now.targetContentTier !== target.contentTier) {
         throw new TierLedgerGenerationConflictError;
       }
+      if (lowering && ledger.writeIntent(identity))
+        throw new TierLedgerGenerationConflictError;
+      const lockOrder = [...sources].sort((a, b) => a.corpusId.localeCompare(b.corpusId));
       const copyWithLockedSources = (index) => {
-        const source = sources[index];
+        const source = lockOrder[index];
         if (source) {
           const domain = set.domainForCorpus(source.corpusId);
           const store = domain ? set.store(domain) : undefined;
@@ -62712,14 +63679,22 @@ function stageTieredMove(options, repairSource, loweringOnly = false) {
             throw new Error("Source store unavailable.");
           return store.withItemCopyWriteFence(identity, () => copyWithLockedSources(index + 1));
         }
+        const policyRefusal = unavailableLoweringPolicy(set, lowering);
+        if (policyRefusal && !raise)
+          return policyRefusal;
+        const ruleRevision = policyRefusal ? undefined : tierMoveRuleAuthorization(set, now, target, sources, placement.copies);
+        if (ruleRevision === undefined) {
+          retainAuthorizedRaise(set, identity, now, target, sources, placement.copies);
+          discardTierMoveImports(ledger, identity, imports);
+          return policyRefusal ?? authorityRefusal(set, now, target, sources, placement.copies);
+        }
         exports.clear();
-        if (contentSource && contentDestination && trustDomainRank(contentDestination.trustDomain) < trustDomainRank(contentSource.trustDomain)) {
-          const exported = exportFrom(contentSource);
-          const evidence = decision ?? now;
-          const digest = exported && contentDigestReason(exported.chunks.map((chunk) => chunk.boundedText).join(""));
-          const receipts = evidence.reasons.filter((reason) => reason.startsWith("content:sha256:"));
-          if (!digest || receipts.length !== 1 || receipts[0] !== digest || evidence.contentPending) {
-            throw new TierMoveContentChangedError("Stored content changed before the fenced copy.");
+        if (contentDestination && needsContentMoveAuthority(contentSource, contentDestination)) {
+          const refusal = contentMoveRefusal(decision ?? now, exportFrom(contentSource ?? sources[0]), contentDestination.trustDomain, ledger.getOverride(identity));
+          if (refusal) {
+            retainAuthorizedRaise(set, identity, now, target, sources, placement.copies);
+            discardTierMoveImports(ledger, identity, imports);
+            return refusal;
           }
         }
         for (const planned of placement.copies) {
@@ -62743,7 +63718,9 @@ function stageTieredMove(options, repairSource, loweringOnly = false) {
           const exported = exportFrom(from);
           if (!exported)
             throw new Error("The source store no longer holds an active copy of the item.");
-          const payload = wantsContent ? exported : { ...exported, chunks: [], vectors: [], vectorAuthorities: [] };
+          const names = planned.layers === "both" ? copyServingLayer(sources, "metadata") : undefined;
+          const namesCopy = names && names.corpusId !== from.corpusId ? exportFrom(names) : undefined;
+          const payload = wantsContent ? namesCopy ? { ...exported, columns: { ...namesCopy.columns, content_hash: exported.columns.content_hash } } : exported : { ...exported, chunks: [], vectors: [], vectorAuthorities: [] };
           const store = set.store(planned.trustDomain, { create: true });
           store.bindTierSet(ledger);
           const vectorIdentity = wantsContent ? (options.vectorIdentitiesFor?.(exported) ?? options.vectorIdentities)?.[planned.trustDomain] : undefined;
@@ -62782,6 +63759,14 @@ function stageTieredMove(options, repairSource, loweringOnly = false) {
           raise,
           sources,
           destinations,
+          ruleRevision,
+          sourceFingerprints: Object.fromEntries(loweredLayers.map((layer) => {
+            const source = copyServingLayer(sources, layer);
+            const current = exportFrom(source);
+            if (!current)
+              throw new Error("A source no longer holds its layer.");
+            return [layer, layerFingerprint(current, layer)];
+          })),
           ...options.replaceOwnSupersededCopy && !raise ? { pruneSuperseded: true } : {},
           ...options.embeddingLedger ? { embeddingLedger: options.embeddingLedger } : {},
           rehomeTagged,
@@ -62802,16 +63787,118 @@ function stageTieredMove(options, repairSource, loweringOnly = false) {
         return verified;
       };
       return copyWithLockedSources(0);
-    });
+    }));
+    if (receipt instanceof Error)
+      throw receipt;
     return receipt;
   };
 }
 function resumeVerifiedTierMove(set, identity, embeddingLedger) {
+  settleDiscardedTierMoveImports(set, identity);
   const receipt = readVerifiedMove(set.ledger, identity);
   if (!receipt)
     return false;
-  finishVerifiedMove({ set, identity, ...embeddingLedger ? { embeddingLedger } : {} }, receipt);
-  return true;
+  try {
+    finishVerifiedMove({ set, identity, ...embeddingLedger ? { embeddingLedger } : {} }, receipt);
+    return true;
+  } finally {
+    settleDiscardedTierMoveImports(set, identity);
+  }
+}
+function retireRestoredTierLowerings(set) {
+  const { ledger } = set;
+  const receipts = new Map(ledger.metaEntries(TIER_MOVE_VERIFIED_PREFIX).map(({ key, value }) => [key.slice(TIER_MOVE_VERIFIED_PREFIX.length), JSON.parse(value)]));
+  const markers = new Map(ledger.metaEntries(TIER_MOVE_IMPORTS_PREFIX).map(({ key, value }) => [key.slice(TIER_MOVE_IMPORTS_PREFIX.length), JSON.parse(value)]));
+  for (const key of new Set([...receipts.keys(), ...markers.keys()])) {
+    const [provider, accountScope, conversation, providerItemId] = key.split("\x00");
+    if (!provider || !accountScope || !providerItemId)
+      throw new Error("Invalid tier move identity.");
+    const identity = { provider, accountScope, providerItemId, ...conversation ? { providerConversationId: conversation } : {} };
+    const current = ledger.getCurrent(identity);
+    if (!current)
+      continue;
+    const receipt = receipts.get(key);
+    const verifiedPlan = receipt && !receipt.result && receipt.generation === current.generation ? plannedLowerImports(receipt.generation, receipt.target, receipt.sources, receipt.placement) : undefined;
+    const imports = markers.get(key) ?? verifiedPlan;
+    if (!imports || imports.copies.length === 0 && !tiersLower(current, imports.target) && loweredCopyLayers(imports.sources, imports.destination).length === 0)
+      continue;
+    withTierRuleFence(set, () => ledger.withGenerationFence(identity, current.generation, () => {
+      if (current.state === "moving" && current.generation === imports.generation && current.targetMetadataTier === imports.target.metadataTier && current.targetContentTier === imports.target.contentTier) {
+        if (placementIsRaise(imports.sources, imports.destination)) {
+          retainAuthorizedRaise(set, identity, current, imports.target, imports.sources, imports.destination, verifiedPlan ? receipt : undefined);
+        } else {
+          ledger.abandonMove(identity, { expectedGeneration: current.generation });
+        }
+        if (verifiedPlan)
+          ledger.writeMeta(purgeReceiptKey(identity), "");
+      }
+      discardTierMoveImports(ledger, identity, imports);
+      settleDiscardedTierMoveImports(set, identity);
+    }));
+  }
+}
+function needsContentMoveAuthority(source, destination) {
+  return destination.trustDomain === "internal" && source?.corpusId !== destination.corpusId || source !== undefined && trustDomainRank(destination.trustDomain) < trustDomainRank(source.trustDomain);
+}
+function contentMoveRefusal(evidence, copy, destination, override) {
+  if (destination === "internal" && copy?.chunks.length === 0)
+    return;
+  const text = copy?.chunks.map((chunk) => chunk.boundedText).join("");
+  const image = copy?.chunks.find((chunk) => chunk.mediaJudgment)?.mediaJudgment;
+  const receipts = evidence.reasons.filter((reason) => reason.startsWith("content:sha256:"));
+  const code = text === undefined ? "content_no_copy" : evidence.contentPending ? "content_still_pending" : receipts.length === 0 ? "content_no_receipt" : receipts.length > 1 ? "content_several_receipts" : receipts[0] !== contentDigestReason(text) ? "content_receipt_mismatch" : destination === "internal" && !personalContentAuthorized(evidence, text, override?.kind === "not_secret", override, image && imageJudgmentSignal(image)) ? "content_no_authority" : undefined;
+  return code && new TierMoveContentChangedError("Stored content requires a matching settled verdict before moving.", code);
+}
+function unavailableLoweringPolicy(set, lowering) {
+  return lowering && currentTierRulePolicy(set).unavailable ? new TierMoveRefusedError("The owner policy is pending resolution.", "rule_policy_unavailable") : undefined;
+}
+function authorityRefusal(set, record, target, sources, destination) {
+  const override = set.ledger.getOverride(tierLedgerIdentityOfRecord(record));
+  if (tierMoveOverrideConflict(override, record, target, sources, destination)) {
+    return new TierLedgerGenerationConflictError("The current item override does not authorize the planned placement.");
+  }
+  return new TierMoveRefusedError("Current owner rules do not authorize the planned placement.", "rule_authority");
+}
+function tiersLower(record, target) {
+  return tierRank(target.metadataTier) < tierRank(record.metadataTier) || tierRank(target.contentTier) < tierRank(record.contentTier);
+}
+function hasNewLowerLayer(sources, destination) {
+  return ["metadata", "content"].some((layer) => {
+    const to = copyServingLayer(destination, layer);
+    return to && to.trustDomain !== "secure_local" && !copyServingLayer(sources, layer);
+  });
+}
+function retainAuthorizedRaise(set, identity, record, target, sources, destination, receipt) {
+  if (record.state !== "moving" || !placementIsRaise(sources, destination))
+    return;
+  const floorFor = (layer, before, after) => {
+    const from = copyServingLayer(sources, layer);
+    return maxTier(maxTier(before, after), (from && STORE_TIER[from.trustDomain]) ?? before);
+  };
+  const recoverLayers = [];
+  if (receipt && receipt.ruleRevision === undefined) {
+    for (const layer of ["metadata", "content"]) {
+      const from = copyServingLayer(sources, layer);
+      const to = copyServingLayer(destination, layer);
+      if (!from || !to || trustDomainRank(from.trustDomain) >= trustDomainRank(to.trustDomain))
+        continue;
+      const old = set.store(from.trustDomain)?.copyContentState(identity);
+      if (layer === "metadata" ? old?.names : old?.chunks)
+        continue;
+      const verified = set.store(to.trustDomain)?.exportItemCopy(identity);
+      if (verified && copyFingerprint(verified, to.layers) === receipt.fingerprints[to.corpusId]) {
+        recoverLayers.push({ layer, from: from.corpusId, to: to.corpusId });
+      }
+    }
+  }
+  set.ledger.retainMoveRaise(identity, {
+    expectedGeneration: record.generation,
+    target: {
+      metadataTier: floorFor("metadata", record.metadataTier, target.metadataTier),
+      contentTier: floorFor("content", record.contentTier, target.contentTier)
+    },
+    recoverLayers
+  });
 }
 function queueMoveNote(options, receipt, result) {
   const config = receipt.embeddingLedger ?? options.embeddingLedger;
@@ -62891,7 +63978,113 @@ async function flushTierMoveNotes(ledger, options = {}) {
   }
 }
 function purgeReceiptKey(identity) {
-  return `tier-move-verified:${tierLedgerIdentityKey(identity)}`;
+  return `${TIER_MOVE_VERIFIED_PREFIX}${tierLedgerIdentityKey(identity)}`;
+}
+function moveImportsKey(identity) {
+  return `${TIER_MOVE_IMPORTS_PREFIX}${tierLedgerIdentityKey(identity)}`;
+}
+function plannedLowerImports(generation, target, sources, destination) {
+  const copies = new Map;
+  const lowered = loweredCopyLayers(sources, destination);
+  for (const layer of ["metadata", "content"]) {
+    const to = copyServingLayer(destination, layer);
+    if (to && to.trustDomain !== "secure_local" && !copyServingLayer(sources, layer) && !sources.some((source) => source.corpusId === to.corpusId))
+      lowered.push(layer);
+  }
+  for (const layer of lowered) {
+    const copy = copyServingLayer(destination, layer);
+    const sourceHere = sources.find((source) => source.corpusId === copy.corpusId);
+    if (sourceHere && layersCover(sourceHere.layers, layer))
+      continue;
+    copies.set(copy.corpusId, {
+      corpusId: copy.corpusId,
+      trustDomain: copy.trustDomain,
+      retainMetadata: sourceHere?.layers === "metadata" || layer === "content" && copy.layers === "both" && !lowered.includes("metadata")
+    });
+  }
+  return { generation, target, sources: [...sources], destination, copies: [...copies.values()] };
+}
+function discardTierMoveImports(ledger, identity, imports) {
+  if (imports.copies.length)
+    ledger.writeMeta(moveImportsKey(identity), JSON.stringify({ ...imports, revoked: true }));
+}
+function settleDiscardedTierMoveImports(set, identity) {
+  const { ledger } = set;
+  const key = moveImportsKey(identity);
+  const receiptKey = purgeReceiptKey(identity);
+  const raw = ledger.readMeta(key);
+  const rawReceipt = raw ? undefined : ledger.readMeta(receiptKey);
+  const receipt = rawReceipt ? JSON.parse(rawReceipt) : undefined;
+  const imports = raw ? JSON.parse(raw) : receipt && !receipt.result ? plannedLowerImports(receipt.generation, receipt.target, receipt.sources, receipt.placement) : undefined;
+  if (!imports?.copies.length)
+    return false;
+  const current = ledger.getCurrent(identity);
+  if (!current)
+    return false;
+  const sameImport = () => ledger.readMeta(key) === raw && (!rawReceipt || ledger.readMeta(receiptKey) === rawReceipt);
+  return withTierRuleFence(set, () => {
+    const discard = ledger.withGenerationFence(identity, current.generation, () => {
+      if (!sameImport())
+        return false;
+      const sameGeneration = current.generation === imports.generation;
+      const retargeted = current.state === "moving" && (current.targetMetadataTier !== imports.target.metadataTier || current.targetContentTier !== imports.target.contentTier);
+      if (imports.revoked || !sameGeneration || retargeted)
+        return true;
+      if (currentTierRulePolicy(set).unavailable || tierMoveRuleAuthorization(set, current, imports.target, imports.sources, imports.destination) !== undefined)
+        return false;
+      retainAuthorizedRaise(set, identity, current, imports.target, imports.sources, imports.destination, receipt);
+      discardTierMoveImports(ledger, identity, imports);
+      return true;
+    });
+    if (!discard)
+      return false;
+    const generation = ledger.getCurrent(identity)?.generation;
+    if (generation === undefined)
+      return false;
+    return ledger.withGenerationFence(identity, generation, () => {
+      const pending = ledger.readMeta(key);
+      const marked = pending === JSON.stringify({ ...imports, revoked: true });
+      if (!sameImport() && !marked)
+        return false;
+      const revoked = imports.revoked || marked;
+      const current = ledger.getCurrent(identity);
+      if (current.metadataTier !== "secrets" && current.contentTier !== "secrets") {
+        const copies = ledger.copies(identity);
+        for (const discarded of imports.copies) {
+          const copy = copies.find((candidate) => candidate.corpusId === discarded.corpusId);
+          if (!copy || copy.generation > imports.generation + 1)
+            continue;
+          const retainedNames = copy.layers === "metadata" && copy.generation <= imports.generation;
+          const stagedDestination = copy.generation === imports.generation + 1 && (copy.state === "staged" || copy.state === "superseded" && (revoked || copy.supersededByGeneration !== null));
+          if (!retainedNames && !stagedDestination)
+            continue;
+          const store = set.store(copy.trustDomain);
+          const leg = set.legSpec(copy.trustDomain);
+          if (!store && stagedDestination && copy.state === "superseded" && leg?.corpusId === copy.corpusId && leg.exists?.() === false) {
+            ledger.removeSupersededCopy(identity, copy.corpusId);
+            continue;
+          }
+          if (!store)
+            throw new Error("Move destination unavailable; staged import cleanup remains pending.");
+          store.bindTierSet(ledger);
+          if (discarded.retainMetadata)
+            store.stripCopyContent(identity, { keepMetadata: true });
+          else
+            pruneSupersededStoreCopy(store, identity);
+          store.durabilityBarrier();
+        }
+      }
+      const rawCurrentReceipt = ledger.readMeta(receiptKey);
+      if (rawCurrentReceipt) {
+        const verified = JSON.parse(rawCurrentReceipt);
+        if (!verified.result && verified.generation === imports.generation)
+          ledger.writeMeta(receiptKey, "");
+      }
+      if (pending)
+        ledger.writeMeta(key, "");
+      return true;
+    });
+  });
 }
 function readVerifiedMove(ledger, identity) {
   const raw = ledger.readMeta(purgeReceiptKey(identity));
@@ -62901,7 +64094,7 @@ function readVerifiedMove(ledger, identity) {
   const current = ledger.getCurrent(identity);
   if (!current)
     throw new TierLedgerGenerationConflictError;
-  if (receipt.pruneSuperseded && receipt.result && current.generation >= receipt.result.generation)
+  if ((receipt.pruneSuperseded || receipt.raisePurge) && receipt.result && current.generation >= receipt.result.generation)
     return receipt;
   if (receipt.generation < current.generation || receipt.generation === current.generation && current.state !== "moving") {
     ledger.withGenerationFence(identity, current.generation, () => {
@@ -62916,11 +64109,16 @@ function readVerifiedMove(ledger, identity) {
   return receipt;
 }
 function copyFingerprint(copy, layers) {
-  return createHash31("sha256").update(JSON.stringify({
+  return createHash32("sha256").update(JSON.stringify({
     identity: copy.identity,
     columns: copy.columns,
     chunks: layers === "metadata" ? [] : copy.chunks
   })).digest("hex");
+}
+function layerFingerprint(copy, layer) {
+  if (layer === "metadata")
+    return copyFingerprint(copy, "metadata");
+  return createHash32("sha256").update(JSON.stringify(copy.chunks)).digest("hex");
 }
 function finishVerifiedMove(options, receipt) {
   const result = receipt.result ?? flipVerifiedMove(options, receipt);
@@ -62940,13 +64138,17 @@ function pruneSupersededStoreCopy(store, identity, options) {
   return chunks;
 }
 function pruneAutomaticMove(options, receipt) {
-  if (!receipt.pruneSuperseded)
+  if (!receipt.pruneSuperseded && !receipt.raisePurge && !receipt.raise)
     return;
   const { set, identity } = options;
   const raw = set.ledger.readMeta(purgeReceiptKey(identity));
   if (!raw)
     return;
   const committed = JSON.parse(raw);
+  if (!committed.pruneSuperseded && !committed.raisePurge)
+    return;
+  if (committed.generation !== receipt.generation)
+    return;
   if (!committed.result)
     throw new TierLedgerGenerationConflictError;
   const current = set.ledger.getCurrent(identity);
@@ -62955,7 +64157,8 @@ function pruneAutomaticMove(options, receipt) {
   set.ledger.withGenerationFence(identity, current.generation, () => {
     if (set.ledger.readMeta(purgeReceiptKey(identity)) !== raw)
       throw new TierLedgerGenerationConflictError;
-    for (const copy of set.ledger.copies(identity)) {
+    const copies = set.ledger.copies(identity);
+    for (const copy of committed.pruneSuperseded ? copies : []) {
       if (copy.state !== "superseded" || copy.supersededByGeneration !== committed.result.generation)
         continue;
       const store = set.store(copy.trustDomain);
@@ -62965,9 +64168,26 @@ function pruneAutomaticMove(options, receipt) {
       timed(options.timings, "purgeMs", () => pruneSupersededStoreCopy(store, identity));
       set.ledger.removeSupersededCopy(identity, copy.corpusId);
     }
+    for (const planned of committed.raisePurge ?? []) {
+      const copy = copies.find((candidate) => candidate.corpusId === planned.corpusId);
+      if (!copy || copy.generation > committed.result.generation || copy.state === "staged" || copy.state === "current" && copy.layers !== "metadata")
+        continue;
+      stripRaiseStoreCopy(options, planned);
+    }
     options.afterPurge?.();
     set.ledger.writeMeta(purgeReceiptKey(identity), "");
     queueMoveNote(options, committed, committed.result);
+  });
+}
+function stripRaiseStoreCopy(options, copy) {
+  const { set, identity } = options;
+  const store = set.store(copy.trustDomain);
+  if (!store || store.tierSetBinding()?.ledgerId !== set.ledger.ledgerId()) {
+    throw new Error("Lower store unavailable or ledger binding changed; move purge remains pending.");
+  }
+  timed(options.timings, "purgeMs", () => {
+    store.stripCopyContent(identity, { keepMetadata: copy.keepMetadata });
+    store.durabilityBarrier();
   });
 }
 function oweExtractionRereads(ledger, identity) {
@@ -62985,27 +64205,77 @@ function oweExtractionRereads(ledger, identity) {
 function flipVerifiedMove(options, receipt) {
   const { set, identity } = options;
   const ledger = set.ledger;
+  const loweredLayers = loweredCopyLayers(receipt.sources, receipt.placement);
+  const queued = ledger.getCurrent(identity);
+  const lowering = loweredLayers.length > 0 || !!queued && tiersLower(queued, receipt.target) || hasNewLowerLayer(receipt.sources, receipt.placement);
   const contentDestination = copyServingLayer(receipt.placement, "content");
-  const stableStore = set.store((contentDestination ?? receipt.placement[0]).trustDomain);
-  if (!stableStore)
-    throw new Error("Verified destination unavailable.");
-  return stableStore.withItemCopyWriteFence(identity, () => {
-    timed(options.timings, "verifyMs", () => {
+  const stable = lowering ? [...receipt.placement, ...receipt.sources] : [contentDestination ?? receipt.placement[0]];
+  const stableCopies = [...new Map(stable.map((copy) => [copy.corpusId, copy])).values()].sort((a, b) => a.corpusId.localeCompare(b.corpusId));
+  const withCopyFences = (index, work) => {
+    const copy = stableCopies[index];
+    if (!copy)
+      return work();
+    const store = set.store(copy.trustDomain);
+    if (!store)
+      throw new Error("Verified move store unavailable.");
+    return store.withItemCopyWriteFence(identity, () => withCopyFences(index + 1, work));
+  };
+  const outcome = withTierRuleFence(set, () => withCopyFences(0, () => {
+    const policyRefusal = unavailableLoweringPolicy(set, lowering);
+    if (policyRefusal && !receipt.raise)
+      return policyRefusal;
+    const destinationValid = !policyRefusal && timed(options.timings, "verifyMs", () => {
       for (const copy of receipt.placement)
         set.store(copy.trustDomain)?.durabilityBarrier();
-      for (const copy of receipt.placement) {
+      return receipt.placement.every((copy) => {
         const stored = set.store(copy.trustDomain)?.exportItemCopy(identity);
-        if (!stored || copyFingerprint(stored, copy.layers) !== receipt.fingerprints[copy.corpusId]) {
-          throw new Error("Verified move destination changed; source remains held.");
-        }
-      }
+        return stored && copyFingerprint(stored, copy.layers) === receipt.fingerprints[copy.corpusId];
+      });
     });
+    const sourceValid = !policyRefusal && timed(options.timings, "verifyMs", () => loweredLayers.every((layer) => {
+      const source = copyServingLayer(receipt.sources, layer);
+      const exported = set.store(source.trustDomain)?.exportItemCopy(identity);
+      if (!exported)
+        return false;
+      const fingerprint = receipt.sourceFingerprints?.[layer];
+      if (fingerprint !== undefined)
+        return layerFingerprint(exported, layer) === fingerprint;
+      const destination = copyServingLayer(receipt.placement, layer);
+      const copied = set.store(destination.trustDomain)?.exportItemCopy(identity);
+      return copied && layerFingerprint(exported, layer) === layerFingerprint(copied, layer);
+    }));
+    const imports = plannedLowerImports(receipt.generation, receipt.target, receipt.sources, receipt.placement);
     return timed(options.timings, "flipMs", () => ledger.withGenerationFence(identity, receipt.generation, () => {
       const record = ledger.getCurrent(identity);
       if (ledger.readMeta(purgeReceiptKey(identity)) !== JSON.stringify(receipt))
         throw new TierLedgerGenerationConflictError;
       if (record.state !== "moving" || record.targetMetadataTier !== receipt.target.metadataTier || record.targetContentTier !== receipt.target.contentTier)
         throw new TierLedgerGenerationConflictError;
+      if (lowering && ledger.writeIntent(identity))
+        throw new TierLedgerGenerationConflictError;
+      const revision = policyRefusal ? undefined : tierMoveRuleAuthorization(set, record, receipt.target, receipt.sources, receipt.placement);
+      if (revision === undefined) {
+        retainAuthorizedRaise(set, identity, record, receipt.target, receipt.sources, receipt.placement, receipt);
+        discardTierMoveImports(ledger, identity, imports);
+        return policyRefusal ?? authorityRefusal(set, record, receipt.target, receipt.sources, receipt.placement);
+      }
+      if (!sourceValid) {
+        retainAuthorizedRaise(set, identity, record, receipt.target, receipt.sources, receipt.placement, receipt);
+        discardTierMoveImports(ledger, identity, imports);
+        return new TierMoveContentChangedError("The source layer changed after copy verification.");
+      }
+      if (!destinationValid)
+        throw new Error("Verified move destination changed; source remains held.");
+      if (contentDestination && needsContentMoveAuthority(copyServingLayer(receipt.sources, "content"), contentDestination)) {
+        const { decision, decidedBy, reasons } = receipt.flipOptions;
+        const evidence = { ...record, ...decision, reasons: reasons ?? record.reasons, decidedBy: decidedBy ?? record.decidedBy };
+        const refusal = contentMoveRefusal(evidence, set.store(contentDestination.trustDomain)?.exportItemCopy(identity), contentDestination.trustDomain, ledger.getOverride(identity));
+        if (refusal) {
+          retainAuthorizedRaise(set, identity, record, receipt.target, receipt.sources, receipt.placement);
+          discardTierMoveImports(ledger, identity, imports);
+          return refusal;
+        }
+      }
       const contentCopy = copyServingLayer(receipt.placement, "content");
       const content = contentCopy ?? copyServingLayer(set.placementFor({
         ...receipt.target,
@@ -63019,24 +64289,22 @@ function flipVerifiedMove(options, receipt) {
         throw new Error("A lower body has no verified destination; move remains pending.");
       }
       const flipped = ledger.completeMove(identity, receipt.flipOptions);
+      if (imports.copies.length)
+        ledger.writeMeta(moveImportsKey(identity), "");
       const metadata = copyServingLayer(receipt.placement, "metadata");
-      if (receipt.raise && content) {
-        for (const copy of ledger.copies(identity)) {
-          if (trustDomainRank(copy.trustDomain) >= trustDomainRank(content.trustDomain))
-            continue;
-          const store = set.store(copy.trustDomain);
-          if (!store || store.tierSetBinding()?.ledgerId !== ledger.ledgerId()) {
-            throw new Error("Lower store unavailable or ledger binding changed; move purge remains pending.");
-          }
-          timed(options.timings, "purgeMs", () => {
-            store.stripCopyContent(identity, { keepMetadata: !!metadata && trustDomainRank(copy.trustDomain) >= trustDomainRank(metadata.trustDomain) });
-            store.durabilityBarrier();
-          });
-        }
+      const raisePurge = receipt.raise && content ? ledger.copies(identity).filter((copy) => trustDomainRank(copy.trustDomain) < trustDomainRank(content.trustDomain)).map(({ corpusId, trustDomain }) => ({
+        corpusId,
+        trustDomain,
+        keepMetadata: !!metadata && trustDomainRank(trustDomain) >= trustDomainRank(metadata.trustDomain)
+      })) : [];
+      const deferRaisePurge = lowering && raisePurge.length > 0;
+      if (!deferRaisePurge) {
+        for (const copy of raisePurge)
+          stripRaiseStoreCopy(options, copy);
       }
       if (receipt.raise && content)
         ledger.writeMeta(`tier-content-purged:${tierLedgerIdentityKey(identity)}`, String(flipped.generation));
-      if (!receipt.pruneSuperseded)
+      if (!receipt.pruneSuperseded && !deferRaisePurge)
         options.afterPurge?.();
       const result = {
         outcome: "moved",
@@ -63046,17 +64314,25 @@ function flipVerifiedMove(options, receipt) {
         supersededCorpora: ledger.copies(identity).filter((copy) => copy.state === "superseded" && copy.supersededByGeneration === flipped.generation).map((copy) => copy.corpusId),
         chunkCount: receipt.destinations.reduce((sum, copy) => sum + copy.chunksWritten + copy.chunksKept, 0)
       };
-      if (receipt.pruneSuperseded) {
+      if (receipt.pruneSuperseded || deferRaisePurge) {
         if (result.supersededCorpora.length)
           ledger.writeMeta(`tier-content-purged:${tierLedgerIdentityKey(identity)}`, String(flipped.generation));
-        ledger.writeMeta(purgeReceiptKey(identity), JSON.stringify({ ...receipt, result }));
+        ledger.writeMeta(purgeReceiptKey(identity), JSON.stringify({
+          ...receipt,
+          ruleRevision: revision,
+          result,
+          ...deferRaisePurge ? { raisePurge } : {}
+        }));
       } else {
         ledger.writeMeta(purgeReceiptKey(identity), "");
         queueMoveNote(options, receipt, result);
       }
       return result;
     }));
-  });
+  }));
+  if (outcome instanceof Error)
+    throw outcome;
+  return outcome;
 }
 async function moveToSecrets(options, expectedGeneration) {
   fullIdentity(options.identity);
@@ -63147,16 +64423,18 @@ function fullIdentity(identity) {
     ...identity.providerConversationId ? { providerConversationId: identity.providerConversationId } : {}
   };
 }
-var ROW_REHOME_REASON = "row_tier:private_rehome", TierMoveRefusedError, TierMoveContentChangedError, MOVE_NOTE_PREFIX = "tier-move-note:", SUPERSEDED_PRUNE_STEP_ROWS = 128;
+var ROW_REHOME_REASON = "row_tier:private_rehome", TierMoveRefusedError, TierMoveContentChangedError, STORE_TIER, MOVE_NOTE_PREFIX = "tier-move-note:", TIER_MOVE_VERIFIED_PREFIX = "tier-move-verified:", TIER_MOVE_IMPORTS_PREFIX = "tier-move-imports:", SUPERSEDED_PRUNE_STEP_ROWS = 128;
 var init_tier_move = __esm(() => {
   init_engine();
   init_tier_classifier();
   init_tier_ledger();
   init_embedding_ledger();
+  init_media_judge();
   init_local_index();
   init_secrets_disposition();
   init_job_names();
   init_tier_placement();
+  init_tier_move_rule_policy();
   TierMoveRefusedError = class TierMoveRefusedError extends Error {
     code;
     constructor(message, code = "refused") {
@@ -63169,6 +64447,11 @@ var init_tier_move = __esm(() => {
     constructor(message, code = "content_changed") {
       super(message, code);
     }
+  };
+  STORE_TIER = {
+    public_safe: "public",
+    internal: "private",
+    secure_local: "secure"
   };
 });
 
@@ -63435,9 +64718,9 @@ var init_backup_paths = __esm(() => {
 });
 
 // src/workers/dashboard/session-marker.ts
-import { createHash as createHash32 } from "node:crypto";
+import { createHash as createHash33 } from "node:crypto";
 function dashboardSessionMarker(csrfToken) {
-  return createHash32("sha256").update("olympus-dashboard-session-marker\x00").update(csrfToken).digest("hex").slice(0, 24);
+  return createHash33("sha256").update("olympus-dashboard-session-marker\x00").update(csrfToken).digest("hex").slice(0, 24);
 }
 var init_session_marker = () => {};
 
@@ -64379,14 +65662,14 @@ import { randomUUID as randomUUID11 } from "node:crypto";
 function newEngineCommandId() {
   return randomUUID11();
 }
-function asRecord8(value) {
+function asRecord9(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 function isDashboardPrivacyRaise(command) {
   if (command.kind !== "tier_override" || command.request.path !== "/dashboard/privacy/items/set")
     return false;
   try {
-    return asRecord8(JSON.parse(command.request.body))?.tier === "private";
+    return asRecord9(JSON.parse(command.request.body))?.tier === "private";
   } catch (error) {
     if (error instanceof SyntaxError)
       return false;
@@ -64397,7 +65680,7 @@ function boundedString2(value, max = 512) {
   return typeof value === "string" && value.length > 0 && value.length <= max ? value : undefined;
 }
 function dashboardSample(value) {
-  const sample = asRecord8(value);
+  const sample = asRecord9(value);
   if (!sample)
     return false;
   for (const [key, entry] of Object.entries(sample)) {
@@ -64414,12 +65697,12 @@ function dashboardSample(value) {
   return typeof sample.corpus_id === "string" && typeof sample.source_id === "string";
 }
 function forwardedRequest(kind, value) {
-  const request = asRecord8(value);
+  const request = asRecord9(value);
   const path = request?.path;
   if (typeof path !== "string" || !ENGINE_FORWARDED_ROUTES[kind].includes(path)) {
     throw new EngineCommandError(400, `${kind} does not carry that route.`);
   }
-  const headers = asRecord8(request.headers);
+  const headers = asRecord9(request.headers);
   if (!headers || Object.values(headers).some((entry) => typeof entry !== "string"))
     throw new EngineCommandError(400, "Forwarded headers must be strings.");
   const body = request.body;
@@ -64456,11 +65739,11 @@ async function responseToForwarded(response) {
   return { status: response.status, headers, body: await response.text() };
 }
 function parseEngineCommandEnvelope(value) {
-  const record = asRecord8(value);
+  const record = asRecord9(value);
   const id = record?.id;
   if (typeof id !== "string" || !ID2.test(id))
     throw new EngineCommandError(400, "A command needs an id.");
-  const command = asRecord8(record?.command);
+  const command = asRecord9(record?.command);
   const kind = command?.kind;
   const fail = (message) => {
     throw new EngineCommandError(400, message);
@@ -64522,7 +65805,7 @@ function parseEngineCommandEnvelope(value) {
     }
     case "tier_set_recorded": {
       const locator = boundedString2(command.locator, 2048);
-      const expected = asRecord8(command.expected);
+      const expected = asRecord9(command.expected);
       const provider = boundedString2(expected?.provider, 64);
       const providerItemId = boundedString2(expected?.providerItemId);
       const conversation = expected?.providerConversationId;
@@ -64565,7 +65848,7 @@ function parseEngineCommandEnvelope(value) {
         fail(`${kind} takes 1 to ${ENGINE_JUDGE_BOOST_MAX_IDS} items.`);
       }
       const identities = raw.map((entry) => {
-        const item = asRecord8(entry);
+        const item = asRecord9(entry);
         const provider = boundedString2(item?.provider, 64);
         const accountScope = boundedString2(item?.accountScope);
         const providerItemId = boundedString2(item?.providerItemId);
@@ -64747,7 +66030,7 @@ function createEngineCommandHandler(options) {
         return;
       });
       const parsed = parseModelRequest(body);
-      const priority = parseModelPriority(asRecord8(body)?.priority);
+      const priority = parseModelPriority(asRecord9(body)?.priority);
       if (!parsed || !priority)
         return Response.json({ error: "invalid_model_request" }, { status: 400 });
       const modelComplete = options.modelComplete;
@@ -64788,7 +66071,7 @@ function parseModelPriority(value) {
   return MODEL_PRIORITIES.find((priority) => priority === value);
 }
 function parseModelRequest(value) {
-  const record = asRecord8(value);
+  const record = asRecord9(value);
   if (!record)
     return;
   const { system, prompt, localOnly, maxOutputChars, responseSchema } = record;
@@ -64796,7 +66079,7 @@ function parseModelRequest(value) {
     return;
   if (maxOutputChars !== undefined && (!Number.isSafeInteger(maxOutputChars) || maxOutputChars < 1))
     return;
-  if (responseSchema !== undefined && !asRecord8(responseSchema))
+  if (responseSchema !== undefined && !asRecord9(responseSchema))
     return;
   return {
     system,
@@ -64951,18 +66234,18 @@ async function inspectChunks(inputs, scopes, check, options = {}) {
     const record = scope.ledger.getCurrent(input);
     if (!snapshot || !record)
       continue;
-    const override = scope.ledger.getOverride(input);
+    const override = scope.ledger.getOverride(input, { withHistory: true });
     const overrideKey = JSON.stringify(override);
-    const ownerRead = override?.kind === "tier" && (override.tier === "public" || override.tier === "private") || record.decidedBy === "owner_rule" && record.reasons.some((reason) => reason.startsWith("metadata:owner_rule:"));
+    const fullText = snapshot.chunks.map((chunk) => chunk.text).join("");
+    const ownerRead = personalOverrideAllowsText(override, fullText) || record.decidedBy === "owner_rule" && record.reasons.some((reason) => reason.startsWith("metadata:owner_rule:"));
     const names = JSON.stringify([snapshot.title, snapshot.path, snapshot.sender]);
     const parentContext = set ? parentNamesContext(set, input) : undefined;
     snapshots.set(index, () => {
       const current = store?.releaseItemChunks?.(input);
       const currentClassification = registeredInstalledTierClassification()?.forLedger(scope.ledger.dbPath);
       const currentReader = currentClassification?.releaseWindows ?? currentClassification?.releaseJudge;
-      return scopesNow().find((now) => now.corpusIds.has(input.corpusId))?.ledger === scope.ledger && !!current && JSON.stringify([current.title, current.path, current.sender]) === names && JSON.stringify(scope.ledger.getOverride(input)) === overrideKey && scope.ledger.getCurrent(input)?.generation === record.generation && (!set || parentNamesContext(set, input) === parentContext) && currentReader?.modelId === reader?.modelId && currentReader?.promptVersion === reader?.promptVersion && allowed[index].every((hash) => current.chunks.some((chunk) => chunk.contentHash === hash));
+      return scopesNow().find((now) => now.corpusIds.has(input.corpusId))?.ledger === scope.ledger && !!current && JSON.stringify([current.title, current.path, current.sender]) === names && JSON.stringify(scope.ledger.getOverride(input, { withHistory: true })) === overrideKey && scope.ledger.getCurrent(input)?.generation === record.generation && (!set || parentNamesContext(set, input) === parentContext) && currentReader?.modelId === reader?.modelId && currentReader?.promptVersion === reader?.promptVersion && allowed[index].every((hash) => current.chunks.some((chunk) => chunk.contentHash === hash));
     });
-    const fullText = snapshot.chunks.map((chunk) => chunk.text).join("");
     const shortRead = normalize5(fullText).length <= SNIFFER_EXCERPT_MAX_CHARS && record.reasons.includes(contentDigestReason(fullText)) && record.reasons.some((reason) => reason.startsWith(sniffer && sniffer.id !== "no_judge" ? `content:sniffer:${sniffer.id}:` : "content:sniffer:") && !reason.endsWith(":undecided"));
     for (const hash of new Set(input.chunkHashes ?? [])) {
       const chunk = snapshot.chunks.find((chunk) => chunk.contentHash === hash);
@@ -65891,11 +67174,754 @@ var init_reactions = __esm(() => {
   };
 });
 
+// src/core/source-index/router.ts
+function applySourceIndexVisibilityGate(gate, hits, report) {
+  return gate.offThread ? gate.offThread(hits, report) : Promise.resolve(gate(hits, report));
+}
+function distinctSearchMatches(hits) {
+  const matches = new Map;
+  for (const hit of hits) {
+    const key = hit.candidateId ?? JSON.stringify(hit.sourceItem);
+    const prior = matches.get(key);
+    if (!prior || !prior[SEARCH_GRANT_MATCH] && hit[SEARCH_GRANT_MATCH])
+      matches.set(key, hit);
+  }
+  return [...matches.values()];
+}
+function deliverCorpusSearch(responses, maxPartialResults) {
+  const first = responses[0];
+  const delivery = first[SEARCH_GRANT_DELIVERY] ?? responses.find((response) => response[SEARCH_GRANT_DELIVERY])?.[SEARCH_GRANT_DELIVERY];
+  const partial = maxPartialResults !== undefined;
+  if (!partial && !delivery)
+    return first;
+  const grantMatches = responses.flatMap((response) => response[SEARCH_GRANT_DELIVERY]?.matches ?? []);
+  const hits = responses.flatMap((response) => response.hits);
+  const candidates = [...hits, ...grantMatches, ...first.semanticNeighbourHits ?? [], ...first.semanticRows?.hits ?? []];
+  const scoped = candidates.filter((hit) => hit[SEARCH_GRANT_MATCH] !== undefined);
+  const visible = delivery?.checkIfChanged(scoped);
+  const keep = (hit) => !visible || !hit[SEARCH_GRANT_MATCH] || visible.get(hit) === "content";
+  const current = (rows, metadata) => rows.flatMap((hit) => {
+    if (keep(hit))
+      return [hit];
+    const fallback = metadata && visible?.get(hit) === "metadata" && hit[SEARCH_GRANT_MATCH]?.metadataFallback;
+    return fallback ? [fallback] : [];
+  });
+  const retained = current(hits, true);
+  const matchCount = delivery && (partial || grantMatches.some((hit) => !keep(hit))) ? (() => {
+    const matches = distinctSearchMatches(current(grantMatches, true));
+    return {
+      matchedItems: matches.length,
+      contentMatchedItems: matches.filter((hit) => hit[SEARCH_GRANT_MATCH]).length,
+      secureMatchedItems: matches.filter((hit) => hit.trustTier !== undefined && isSecureTrustTier(hit.trustTier)).length,
+      saturated: partial || first.matchCount?.saturated === true
+    };
+  })() : first.matchCount;
+  const { [SEARCH_GRANT_DELIVERY]: _delivery, laneAudits, storeRelevance, ...response } = first;
+  return {
+    ...response,
+    ...!visible && laneAudits ? { laneAudits } : {},
+    ...!visible && storeRelevance ? { storeRelevance } : {},
+    hits: partial ? distinctSearchMatches(retained).slice(0, maxPartialResults) : retained,
+    ...partial ? { incomplete: true } : {},
+    ...matchCount ? { matchCount } : {},
+    ...first.semanticNeighbourHits ? { semanticNeighbourHits: current(first.semanticNeighbourHits, false) } : {},
+    ...first.semanticRows ? { semanticRows: { ...first.semanticRows, hits: current(first.semanticRows.hits, false) } } : {}
+  };
+}
+function poolHitKey(hit) {
+  return `${hit.sourceItem.providerItemId}\x00${hit.sourceItem.localItemId ?? ""}`;
+}
+function routeHit(hit, corpus) {
+  const { [SEARCH_GRANT_MATCH]: _grant, ...candidate } = hit;
+  return { ...candidate, corpusId: corpus.corpusId, trustDomain: corpus.trustDomain };
+}
+async function routeSourceIndexSearch(options) {
+  return withKeywordRequestScope(() => routePreparedSourceIndexSearch(options));
+}
+async function routePreparedSourceIndexSearch(options) {
+  const request = normalizeSearchRequest(options.request);
+  const candidateCorpora = options.registry.list();
+  const skippedCorpora = [];
+  const searchedCorpora = [];
+  const laneAudits = [];
+  const degradations = [];
+  const corpusTimings = [];
+  const lanes = [];
+  const matchCounts = [];
+  const incompleteCorpora = [];
+  let encounteredSecureLocal = false;
+  const secureLaneAudits = [];
+  const startedAt = Date.now();
+  const searchableCorpora = [];
+  for (const corpus of candidateCorpora) {
+    const skipReason = skipReasonForCorpus(corpus, request);
+    if (skipReason) {
+      skippedCorpora.push({ corpusId: corpus.corpusId, trustDomain: corpus.trustDomain, reason: skipReason });
+      continue;
+    }
+    const adapter = options.adapters[corpus.corpusId];
+    if (!adapter) {
+      skippedCorpora.push({ corpusId: corpus.corpusId, trustDomain: corpus.trustDomain, reason: "no_adapter" });
+      degradations.push({
+        laneName: corpus.corpusId,
+        laneType: "keyword",
+        reason: "lane_no_adapter",
+        occurrences: 1
+      });
+      continue;
+    }
+    if (request.context.metadataOnly === true && !adapter.metadataMatches) {
+      skippedCorpora.push({ corpusId: corpus.corpusId, trustDomain: corpus.trustDomain, reason: "metadata_search_unsupported" });
+      continue;
+    }
+    searchableCorpora.push(corpus);
+  }
+  const retrievalStates = new Map(searchableCorpora.map((corpus) => [
+    corpus.corpusId,
+    retrievalStateForAdapter(options.adapters[corpus.corpusId], {
+      query: request.query,
+      maxResults: request.maxResults,
+      corpus,
+      context: request.context
+    })
+  ]));
+  const semanticPrepareBudgetMs = options.semanticPrepareBudgetMs ?? DEFAULT_SEMANTIC_PREPARE_BUDGET_MS;
+  let prepareKeywordsMaxMs = 0;
+  let keywordModel;
+  let prepareSemanticMaxMs = 0;
+  const timed = async (run) => {
+    const started = Date.now();
+    try {
+      await run();
+    } catch {}
+    return Date.now() - started;
+  };
+  const prepareStartedAt = Date.now();
+  await Promise.all(searchableCorpora.map(async (corpus) => {
+    const adapter = options.adapters[corpus.corpusId];
+    const semantic = adapter.prepareSemantic && semanticPrepareBudgetMs > 0 && request.context.metadataOnly !== true && retrievalStates.get(corpus.corpusId).hybridServable;
+    const [keywordsMs, semanticMs] = await Promise.all([
+      timed(async () => {
+        const prepared = await adapter.prepareKeywords?.(request.query).catch(() => ({ incomplete: true }));
+        if (prepared?.keyword_model && (!keywordModel || keywordModel === "ready" || prepared.keyword_model === "cold")) {
+          keywordModel = prepared.keyword_model;
+        }
+        if (prepared?.incomplete)
+          degradations.push({ laneName: `${corpus.corpusId}:keywords`, laneType: "keyword", reason: "lane_timeout", detail: "keyword_preparation_incomplete", occurrences: 1 });
+      }),
+      semantic ? timed(() => adapter.prepareSemantic(request.query, semanticPrepareBudgetMs)) : Promise.resolve(0)
+    ]);
+    prepareKeywordsMaxMs = Math.max(prepareKeywordsMaxMs, keywordsMs);
+    prepareSemanticMaxMs = Math.max(prepareSemanticMaxMs, semanticMs);
+  }));
+  const lanesStartedAt = Date.now();
+  const laneTimeoutMs = resolveLaneTimeoutMs(options.laneTimeoutMs);
+  const matchingIds = new Set;
+  const laneOutcomes = await Promise.all(searchableCorpora.map(async (corpus) => {
+    const adapter = options.adapters[corpus.corpusId];
+    let progress = () => {};
+    const partials = new Map;
+    const corpusRequest = {
+      query: request.query,
+      maxResults: options.storeSearchDepth ?? request.maxResults,
+      corpus,
+      context: request.context,
+      onProgress: () => progress(),
+      [DEFER_SEARCH_DELIVERY]: true,
+      onPartialResponse: (response, lane = "keyword") => {
+        assertSafeCorpusSearchResponse(response);
+        partials.set(lane, response);
+      }
+    };
+    const retrievalState = retrievalStates.get(corpus.corpusId).state;
+    const metadataMatches = request.context.metadataOnly === true ? adapter.metadataMatches : undefined;
+    const outcome = await runCorpusLaneUntilIdle((report) => {
+      progress = report;
+      return withSourceIndexReadProgress(report, () => runInSourceAnswerLane(corpus.corpusId, () => (metadataMatches ?? adapter)(corpusRequest)));
+    }, laneTimeoutMs, corpus.corpusId, options.laneClock ?? REAL_LANE_CLOCK);
+    const responses = outcome.kind === "response" ? [outcome.response] : [...partials.values()];
+    return { corpus, outcome, retrievalState, responses, maxResults: corpusRequest.maxResults };
+  }));
+  const lanesSettledAt = Date.now();
+  const visibilityRejected = new Map;
+  if (options.visibilityGate) {
+    const candidates = new Map;
+    for (const { corpus, responses } of laneOutcomes) {
+      for (const response of responses) {
+        const depth = request.context.metadataOnly ? undefined : request.poolAllocation?.storeDepth;
+        const mayFillNeighbours = depth !== undefined && (response.hits.length < depth || response[SEARCH_GRANT_DELIVERY]);
+        for (const hit of [
+          ...response.hits,
+          ...mayFillNeighbours ? response.semanticNeighbourHits ?? [] : [],
+          ...request.poolAllocation?.semanticSeats ? response.semanticRows?.hits ?? [] : []
+        ]) {
+          for (const option of [hit, hit[SEARCH_GRANT_MATCH]?.metadataFallback]) {
+            if (!option)
+              continue;
+            candidates.set(routeHit(option, corpus), option);
+          }
+        }
+      }
+    }
+    const unchecked = new Set;
+    const visible = new Set(await applySourceIndexVisibilityGate(options.visibilityGate, [...candidates.keys()], {
+      onUnchecked: (corpusIds) => {
+        for (const corpusId of corpusIds)
+          unchecked.add(corpusId);
+      }
+    }));
+    for (const [routed, hit] of candidates) {
+      if (visible.has(routed))
+        continue;
+      const rejected = visibilityRejected.get(routed.corpusId) ?? new Set;
+      rejected.add(hit);
+      visibilityRejected.set(routed.corpusId, rejected);
+    }
+    for (const corpusId of [...unchecked].sort())
+      degradations.push(visibilityCheckDegradation(corpusId));
+  }
+  for (const { corpus, outcome, retrievalState, responses, maxResults } of laneOutcomes) {
+    if (outcome.kind === "timeout") {
+      skippedCorpora.push({ corpusId: corpus.corpusId, trustDomain: corpus.trustDomain, reason: "lane_timeout" });
+      degradations.push({
+        laneName: corpus.corpusId,
+        laneType: "keyword",
+        reason: "lane_timeout",
+        occurrences: 1
+      });
+      corpusTimings.push({
+        corpusId: corpus.corpusId,
+        elapsedMs: outcome.elapsedMs,
+        outcome: "timeout"
+      });
+      if (responses.length === 0)
+        continue;
+      incompleteCorpora.push(corpus.corpusId);
+    }
+    const response = deliverCorpusSearch(responses, outcome.kind === "timeout" ? maxResults : undefined);
+    assertSafeCorpusSearchResponse(response);
+    const rejected = visibilityRejected.get(corpus.corpusId);
+    const visible = (hit) => !rejected?.has(hit);
+    const matches = response.hits.filter(visible);
+    if (request.readWide) {
+      for (const hit of matches) {
+        matchingIds.add(routedHitCandidateId(routeHit(hit, corpus)));
+      }
+    }
+    if (outcome.kind === "response")
+      corpusTimings.push({
+        corpusId: corpus.corpusId,
+        elapsedMs: outcome.elapsedMs,
+        adapterReportedMs: response.latencyMs,
+        outcome: "success"
+      });
+    searchedCorpora.push(corpus.corpusId);
+    if (response.incomplete === true && !incompleteCorpora.includes(corpus.corpusId))
+      incompleteCorpora.push(corpus.corpusId);
+    const corpusLaneAuditsStart = laneAudits.length;
+    laneAudits.push(...response.laneAudits ?? []);
+    const contributedSecure = corpusContributedSecure(corpus, response);
+    if (contributedSecure)
+      encounteredSecureLocal = true;
+    if (response.matchCount) {
+      matchCounts.push({
+        corpusId: corpus.corpusId,
+        family: corpus.family,
+        trustDomain: corpus.trustDomain,
+        trustTier: corpus.defaultSensitivity.trustTier,
+        matchedItems: response.matchCount.matchedItems,
+        contentMatchedItems: response.matchCount.contentMatchedItems,
+        saturated: response.matchCount.saturated,
+        ...response.matchCount.secureMatchedItems !== undefined ? { secureMatchedItems: response.matchCount.secureMatchedItems } : {}
+      });
+    }
+    if (corpus.activationMode !== "lexical_only") {
+      laneAudits.push(sourceIndexRetrievalStateLaneAudit({
+        corpusId: corpus.corpusId,
+        localOnly: corpus.storageProfile.placement === "local_private",
+        state: retrievalState
+      }));
+      const semanticLoss = semanticLaneDegradation(corpus.corpusId, retrievalState, response);
+      if (semanticLoss)
+        degradations.push(semanticLoss);
+    }
+    const newestLoss = recentItemsLaneDegradation(corpus.corpusId, response);
+    if (newestLoss)
+      degradations.push(newestLoss);
+    if (contributedSecure)
+      secureLaneAudits.push(...laneAudits.slice(corpusLaneAuditsStart));
+    const depth = request.context.metadataOnly ? undefined : request.poolAllocation?.storeDepth;
+    const seen = new Set(matches.map(poolHitKey));
+    const neighbours = depth !== undefined && matches.length < depth && (response.hits.length < depth || responses.some((row) => row[SEARCH_GRANT_DELIVERY])) ? (response.semanticNeighbourHits ?? []).filter((hit) => visible(hit) && !seen.has(poolHitKey(hit))).slice(0, depth - matches.length) : [];
+    lanes.push({
+      name: corpus.corpusId,
+      ...response.storeRelevance ? { relevance: response.storeRelevance } : {},
+      ...request.readWide ? { matchingIds } : {},
+      items: [...matches, ...neighbours].map((hit) => routeHit(hit, corpus)),
+      ...request.poolAllocation?.semanticSeats && response.semanticRows?.hits.length ? { semantic: response.semanticRows.hits.filter(visible).map((hit) => ({
+        hit: routeHit(hit, corpus),
+        margin: (hit.score ?? Number.NEGATIVE_INFINITY) - response.semanticRows.bar
+      })) } : {}
+    });
+  }
+  options.onSeatingLanes?.(lanes);
+  const recency = seatRoutedLanes(lanes, request);
+  const { hits: fused, degradations: budgetDegradations } = recency;
+  const result = {
+    hits: fused,
+    ...request.readWide ? { matchingCandidateIds: [...matchingIds] } : {},
+    searchedCorpora,
+    skippedCorpora,
+    laneAudits,
+    degradations: mergeRetrievalDegradations(degradations, budgetDegradations),
+    corpusTimings,
+    ...matchCounts.length > 0 ? { matchCounts } : {},
+    ...incompleteCorpora.length > 0 ? { incompleteCorpora } : {},
+    encounteredSecureLocal,
+    secureLaneAudits,
+    ...recency.recencySeats > 0 ? { recencySeats: recency.recencySeats } : {},
+    ...recency.semanticSeats?.length ? { semanticSeats: recency.semanticSeats } : {},
+    latencyMs: Date.now() - startedAt,
+    rawExposed: false
+  };
+  assertSafeRoutedSearchResponse(result);
+  recordSourceAnswerQueryStages({
+    prepare_ms: lanesStartedAt - prepareStartedAt,
+    prepare_keywords_max_ms: prepareKeywordsMaxMs,
+    ...keywordModel && { keyword_model: keywordModel },
+    prepare_semantic_max_ms: prepareSemanticMaxMs,
+    lanes_ms: lanesSettledAt - lanesStartedAt,
+    after_lanes_ms: Date.now() - lanesSettledAt
+  });
+  return result;
+}
+function withSemanticPoolSeats(hits, lanes, seats) {
+  if (seats <= 0)
+    return { hits: [...hits], seated: [] };
+  const taken = new Set(hits.map(routedHitCandidateId));
+  const offered = lanes.flatMap((lane) => lane.semantic ?? []).filter((seat) => Number.isFinite(seat.margin)).sort((left, right) => right.margin - left.margin);
+  const perStore = new Map;
+  const seated = [];
+  for (const seat of offered) {
+    if (seated.length >= seats)
+      break;
+    const id = routedHitCandidateId(seat.hit);
+    const used = perStore.get(seat.hit.corpusId) ?? 0;
+    if (taken.has(id) || used >= SEMANTIC_POOL_SEATS_PER_STORE)
+      continue;
+    taken.add(id);
+    perStore.set(seat.hit.corpusId, used + 1);
+    seated.push(seat);
+  }
+  return { hits: [...hits, ...seated.map((seat) => seat.hit)], seated };
+}
+function seatRoutedLanes(lanes, options) {
+  const laneOrder = storeOrderForQuestion(lanes);
+  const fusedAll = fuseRankedCandidateLanes({
+    lanes,
+    getId: routedHitCandidateId,
+    limit: lanes.reduce((total, lane) => total + lane.items.length, 0),
+    tieBreaker: (left, right) => compareTiedRoutedCandidates(left, right, laneOrder)
+  });
+  const budgeted = options.poolAllocation ? applyStrengthPoolBudget(fusedAll, options.maxResults, laneOrder, options.poolAllocation.storeDepth) : applyPerCorpusResultBudget(fusedAll, options.maxResults);
+  const pool = fusedAll.map((candidate) => candidate.item);
+  const leadered = withReservedLeaderSeats(budgeted, pool, options.maxResults);
+  const recency = options.temporalIntent ? withReservedRecencySeats(leadered, pool, options.maxResults) : { ...leadered, recencySeats: 0 };
+  if (options.readWide) {
+    const taken = new Set(recency.hits.map(routedHitCandidateId));
+    const matches = fusedAll.map((candidate) => candidate.item).filter((hit) => lanes.some((lane) => lane.name === hit.corpusId && (!lane.matchingIds || lane.matchingIds.has(routedHitCandidateId(hit)))));
+    let matching = recency.hits.filter((hit) => matches.some((match) => routedHitCandidateId(match) === routedHitCandidateId(hit))).length;
+    for (const hit of matches) {
+      if (matching >= READ_WIDE_MATCH_LIMIT)
+        break;
+      const id = routedHitCandidateId(hit);
+      if (taken.has(id))
+        continue;
+      taken.add(id);
+      recency.hits.push(hit);
+      matching += 1;
+    }
+    const represented = new Set(recency.hits.map((hit) => hit.corpusId));
+    recency.degradations = recency.degradations.filter((loss) => loss.reason !== "lane_budget_cut" || !represented.has(loss.laneName));
+  }
+  const seats = options.poolAllocation?.semanticSeats ?? 0;
+  if (seats <= 0)
+    return recency;
+  const semantic = withSemanticPoolSeats(recency.hits, lanes, seats);
+  return { ...recency, hits: semantic.hits, ...semantic.seated.length ? { semanticSeats: semantic.seated } : {} };
+}
+function corpusContributedSecure(corpus, response) {
+  const count = response.matchCount;
+  const positiveCount = count !== undefined && (count.matchedItems > 0 || count.saturated);
+  if (response.hits.length === 0 && !positiveCount)
+    return false;
+  if (isSecureSensitivity(corpus.defaultSensitivity))
+    return true;
+  if (response.hits.some((hit) => hit.trustTier !== undefined && isSecureSensitivity({ trustDomain: corpus.trustDomain, trustTier: hit.trustTier }))) {
+    return true;
+  }
+  return positiveCount && (count.secureMatchedItems === undefined || count.secureMatchedItems > 0);
+}
+function storeOrderForQuestion(lanes) {
+  const keyword = (lane) => {
+    const share = lane.relevance?.conceptShare ?? 0;
+    return share >= STORE_ORDER_MIN_CONCEPT_SHARE ? share : 0;
+  };
+  const vector = (lane) => lane.relevance?.vectorMargin ?? Number.NEGATIVE_INFINITY;
+  const ordered = lanes.map((lane, index) => ({ lane, index })).sort((left, right) => keyword(right.lane) - keyword(left.lane) || (vector(right.lane) === vector(left.lane) ? 0 : vector(right.lane) > vector(left.lane) ? 1 : -1) || left.index - right.index);
+  return new Map(ordered.map(({ lane }, index) => [lane.name, index]));
+}
+function compareTiedRoutedCandidates(left, right, laneOrder) {
+  const bestRank = bestLaneRank(left) - bestLaneRank(right);
+  if (bestRank !== 0)
+    return bestRank;
+  const laneCount = right.laneRanks.size - left.laneRanks.size;
+  if (laneCount !== 0)
+    return laneCount;
+  const position = laneIndex(laneOrder, left.item.corpusId) - laneIndex(laneOrder, right.item.corpusId);
+  if (position !== 0)
+    return position;
+  const corpus = left.item.corpusId.localeCompare(right.item.corpusId);
+  if (corpus !== 0)
+    return corpus;
+  return String(left.id).localeCompare(String(right.id));
+}
+function bestLaneRank(candidate) {
+  let best = Number.MAX_SAFE_INTEGER;
+  for (const rank of candidate.laneRanks.values()) {
+    if (rank < best)
+      best = rank;
+  }
+  return best;
+}
+function laneIndex(laneOrder, corpusId) {
+  return laneOrder.get(corpusId) ?? Number.MAX_SAFE_INTEGER;
+}
+function recentItemsLaneDegradation(corpusId, response) {
+  const cut = (response.laneAudits ?? []).find((audit) => audit.skippedReason === RECENT_ITEMS_CUT_SHORT);
+  if (!cut)
+    return;
+  return {
+    laneName: `${corpusId}:recency`,
+    laneType: cut.laneType,
+    reason: "lane_timeout",
+    detail: RECENT_ITEMS_CUT_SHORT,
+    occurrences: 1
+  };
+}
+function visibilityCheckDegradation(corpusId) {
+  return {
+    laneName: `${corpusId}:visibility`,
+    laneType: "keyword",
+    reason: "lane_timeout",
+    detail: VISIBILITY_CHECK_CUT_SHORT,
+    occurrences: 1
+  };
+}
+function semanticLaneDegradation(corpusId, state, response) {
+  if (state.health === "degraded") {
+    return {
+      laneName: `${corpusId}:semantic`,
+      laneType: "semantic",
+      reason: "semantic_lane_unservable",
+      ...state.reason ? { detail: state.reason } : {},
+      occurrences: 1
+    };
+  }
+  const laneAudits = response.laneAudits ?? [];
+  const skippedSemantic = laneAudits.find((audit) => audit.laneType === "semantic" && audit.skippedReason !== undefined && audit.skippedReason !== "semantic_below_relevance_bar");
+  if (skippedSemantic?.skippedReason) {
+    return {
+      laneName: `${corpusId}:semantic`,
+      laneType: "semantic",
+      reason: "semantic_lane_skipped",
+      detail: skippedSemantic.skippedReason,
+      occurrences: 1
+    };
+  }
+  const ranSemantic = laneAudits.some((audit) => audit.laneType === "semantic" || audit.laneType === "hybrid");
+  if (ranSemantic)
+    return;
+  return {
+    laneName: `${corpusId}:semantic`,
+    laneType: "semantic",
+    reason: "semantic_lane_not_run",
+    occurrences: 1
+  };
+}
+function retrievalStateForAdapter(adapter, request) {
+  let hybridAvailability;
+  try {
+    hybridAvailability = adapter.hybridAvailability?.(request);
+  } catch {
+    hybridAvailability = { servable: false, reason: "hybrid_capability_unreported" };
+  }
+  return {
+    state: assessSourceIndexRetrievalState({
+      declaredMode: request.corpus.activationMode,
+      ...hybridAvailability ? { hybridAvailability } : {}
+    }),
+    hybridServable: hybridAvailability?.servable === true
+  };
+}
+function normalizeSearchRequest(request) {
+  const query = request.query.trim();
+  if (!query) {
+    throw new Error("Source-index routed search requires a non-empty query.");
+  }
+  if (!Number.isFinite(request.maxResults) || request.maxResults < 0) {
+    throw new Error("Source-index routed search maxResults must be a non-negative number.");
+  }
+  return {
+    ...request,
+    query,
+    maxResults: Math.floor(request.maxResults)
+  };
+}
+async function runCorpusLaneUntilIdle(run, timeoutMs, corpusId, clock = REAL_LANE_CLOCK) {
+  const startedAt = Date.now();
+  let active = true;
+  let lastProgressAt = clock.now();
+  let reading = 0;
+  const report = Object.assign(() => {
+    if (!active)
+      return;
+    lastProgressAt = clock.now();
+    noteSourceAnswerProgress("searching");
+  }, {
+    began: () => {
+      reading += 1;
+      report();
+    },
+    ended: () => {
+      reading = Math.max(0, reading - 1);
+      report();
+    }
+  });
+  const runValidated = async () => {
+    const response = await run(report);
+    assertSafeCorpusSearchResponse(response);
+    return response;
+  };
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    try {
+      const response = await runValidated();
+      const elapsedMs = Math.max(0, Date.now() - startedAt);
+      recordSourceAnswerCorpusTiming({
+        corpus_id: corpusId,
+        elapsed_ms: elapsedMs,
+        adapter_reported_ms: response.latencyMs,
+        outcome: "success"
+      });
+      return { kind: "response", response, elapsedMs };
+    } catch (error) {
+      if (isSourceIndexLaneBusyError(error)) {
+        const elapsedMs = Math.max(0, Date.now() - startedAt);
+        recordSourceAnswerCorpusTiming({ corpus_id: corpusId, elapsed_ms: elapsedMs, outcome: "timeout" });
+        return { kind: "timeout", elapsedMs };
+      }
+      recordSourceAnswerCorpusTiming({
+        corpus_id: corpusId,
+        elapsed_ms: Math.max(0, Date.now() - startedAt),
+        outcome: "error",
+        error_class: sourceAnswerTraceErrorClass(error)
+      });
+      throw error;
+    } finally {
+      active = false;
+    }
+  }
+  let timer;
+  const laneSettled = runValidated().then((response) => ({ kind: "response", response }), (error) => ({ kind: "error", error }));
+  const deadline = new Promise((resolve) => {
+    const arm = (delayMs) => {
+      const dueAtMs = clock.now() + delayMs;
+      timer = clock.setTimeout(() => {
+        if (reading > 0)
+          report();
+        const now = clock.now();
+        const remaining = timeoutMs - (now - lastProgressAt);
+        if (remaining > 0) {
+          arm(remaining);
+          return;
+        }
+        if (now - dueAtMs >= HELD_THREAD_LATE_TIMER_MS) {
+          arm(HELD_THREAD_GRACE_MS);
+          return;
+        }
+        resolve({ kind: "timeout" });
+      }, delayMs);
+    };
+    arm(timeoutMs);
+  });
+  try {
+    const settled = await Promise.race([laneSettled, deadline]);
+    if (settled.kind === "timeout") {
+      laneSettled.then((late) => {
+        if (late.kind === "error") {
+          console.error(`[source-index-router] lane=${corpusId} outcome=late_error error_class=${sourceAnswerTraceErrorClass(late.error)}`);
+        }
+      });
+      const elapsedMs = Math.max(0, Date.now() - startedAt);
+      recordSourceAnswerCorpusTiming({
+        corpus_id: corpusId,
+        elapsed_ms: elapsedMs,
+        outcome: "timeout"
+      });
+      return { kind: "timeout", elapsedMs };
+    }
+    if (settled.kind === "error" && isSourceIndexLaneBusyError(settled.error)) {
+      const elapsedMs = Math.max(0, Date.now() - startedAt);
+      recordSourceAnswerCorpusTiming({ corpus_id: corpusId, elapsed_ms: elapsedMs, outcome: "timeout" });
+      return { kind: "timeout", elapsedMs };
+    }
+    if (settled.kind === "error") {
+      recordSourceAnswerCorpusTiming({
+        corpus_id: corpusId,
+        elapsed_ms: Math.max(0, Date.now() - startedAt),
+        outcome: "error",
+        error_class: sourceAnswerTraceErrorClass(settled.error)
+      });
+      throw settled.error;
+    }
+    const elapsedMs = Math.max(0, Date.now() - startedAt);
+    recordSourceAnswerCorpusTiming({
+      corpus_id: corpusId,
+      elapsed_ms: elapsedMs,
+      adapter_reported_ms: settled.response.latencyMs,
+      outcome: "success"
+    });
+    return { kind: "response", response: settled.response, elapsedMs };
+  } finally {
+    active = false;
+    if (timer !== undefined)
+      clock.clearTimeout(timer);
+  }
+}
+function resolveLaneTimeoutMs(explicit) {
+  if (explicit !== undefined)
+    return explicit;
+  const raw = process.env.OLYMPUS_SOURCE_ANSWER_LANE_TIMEOUT_MS?.trim();
+  if (!raw)
+    return DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed))
+    return DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS;
+  return parsed;
+}
+function skipReasonForCorpus(corpus, request) {
+  if (!corpusMatchesRequestedSelection(corpus, request))
+    return "not_requested";
+  if (!request.context.allowedTrustDomains.includes(corpus.trustDomain))
+    return "trust_domain_not_allowed";
+  if (request.context.allowedCorpusIds && !request.context.allowedCorpusIds.includes(corpus.corpusId))
+    return "corpus_not_allowed";
+  if (corpus.storageProfile.cloudQueryEligible && request.context.allowCloudQueries !== true)
+    return "cloud_query_not_allowed";
+  return;
+}
+function corpusMatchesRequestedSelection(corpus, selection) {
+  if (selection.corpusIds && !selection.corpusIds.includes(corpus.corpusId))
+    return false;
+  if (selection.families && !selection.families.includes(corpus.family))
+    return false;
+  return true;
+}
+function routedHitCandidateId(hit) {
+  return hit.candidateId ?? `${hit.corpusId}:${hit.sourceItem.localItemId || hit.sourceItem.providerItemId}`;
+}
+function assertSafeCorpusSearchResponse(response) {
+  if (response.rawExposed !== false) {
+    throw new Error("Source-index corpus adapter reported raw source exposure.");
+  }
+  for (const hit of response.hits) {
+    if (hit.rawExposed !== false) {
+      throw new Error("Source-index corpus adapter returned a hit with raw source exposure.");
+    }
+  }
+  assertNoForbiddenRouterResultKeys(response, []);
+}
+function assertSafeRoutedSearchResponse(response) {
+  if (response.rawExposed !== false) {
+    throw new Error("Source-index router reported raw source exposure.");
+  }
+  assertNoForbiddenRouterResultKeys(response, []);
+}
+function assertNoForbiddenRouterResultKeys(value, path) {
+  if (!value || typeof value !== "object")
+    return;
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => assertNoForbiddenRouterResultKeys(item, [...path, String(index)]));
+    return;
+  }
+  for (const [key, child] of Object.entries(value)) {
+    if (NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS.has(normalizeRouterResultKey(key))) {
+      const location = [...path, key].join(".");
+      throw new Error(`Source-index routed search output included forbidden raw field "${location}".`);
+    }
+    assertNoForbiddenRouterResultKeys(child, [...path, key]);
+  }
+}
+function normalizeRouterResultKey(key) {
+  return key.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+var DEFER_SEARCH_DELIVERY, SEARCH_GRANT_MATCH, SEARCH_GRANT_DELIVERY, REAL_LANE_CLOCK, DEFAULT_SEMANTIC_PREPARE_BUDGET_MS = 15000, DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS = 20000, HELD_THREAD_LATE_TIMER_MS = 500, HELD_THREAD_GRACE_MS = 1000, FORBIDDEN_ROUTER_RESULT_KEYS, NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS, SEMANTIC_POOL_SEATS_PER_STORE = 2, STORE_ORDER_MIN_CONCEPT_SHARE;
+var init_router = __esm(() => {
+  init_read_progress();
+  init_source_answer_jobs();
+  init_read_wide();
+  init_partial_search();
+  init_keyword_context();
+  init_types();
+  init_answer_latency_trace();
+  DEFER_SEARCH_DELIVERY = Symbol("defer search delivery");
+  SEARCH_GRANT_MATCH = Symbol("search grant match");
+  SEARCH_GRANT_DELIVERY = Symbol("search grant delivery");
+  REAL_LANE_CLOCK = {
+    now: () => Date.now(),
+    setTimeout: (callback, ms) => setTimeout(callback, ms),
+    clearTimeout: (timer) => clearTimeout(timer)
+  };
+  FORBIDDEN_ROUTER_RESULT_KEYS = new Set([
+    "body",
+    "bodies",
+    "content",
+    "contents",
+    "message",
+    "messages",
+    "raw",
+    "raw_packet",
+    "rawPacket",
+    "raw_source",
+    "rawSource",
+    "sanitized_text",
+    "sanitizedText",
+    "snippet",
+    "snippets",
+    "source_text",
+    "sourceText",
+    "raw_source_text",
+    "rawSourceText",
+    "text",
+    "access_token",
+    "accessToken",
+    "api_key",
+    "apiKey",
+    "approved_scope_key",
+    "approvedScopeKey",
+    "refresh_token",
+    "refreshToken",
+    "token"
+  ]);
+  NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS = new Set([...FORBIDDEN_ROUTER_RESULT_KEYS].map(normalizeRouterResultKey));
+  STORE_ORDER_MIN_CONCEPT_SHARE = RESERVED_LEADER_MIN_CONCEPT_SHARE;
+});
+
 // src/workers/connector-store/local-index.ts
-import { createHash as createHash33, randomUUID as randomUUID12 } from "node:crypto";
-import { closeSync as closeSync17, existsSync as existsSync39, fsyncSync as fsyncSync3, lstatSync as lstatSync21, mkdirSync as mkdirSync23, openSync as openSync17, statSync as statSync18, statfsSync } from "node:fs";
+import { createHash as createHash34, randomUUID as randomUUID12 } from "node:crypto";
+import { closeSync as closeSync17, existsSync as existsSync39, fsyncSync as fsyncSync3, lstatSync as lstatSync22, mkdirSync as mkdirSync24, openSync as openSync17, statSync as statSync18, statfsSync } from "node:fs";
 import { open as openFile } from "node:fs/promises";
-import { basename as basename9, dirname as dirname45 } from "node:path";
+import { basename as basename9, dirname as dirname46, resolve as resolve15 } from "node:path";
 import { Database as Database9 } from "bun:sqlite";
 function semanticRelevanceBarFor(modelId, adapterBar) {
   return adapterBar ?? CALIBRATED_SEMANTIC_RELEVANCE_BARS.get(modelId);
@@ -66041,7 +68067,11 @@ function connectorStoreMigrations() {
       version: 16,
       name: "connector_store_vector_digest",
       up: createVectorDigestSchema
-    }
+    },
+    additiveMigration(17, "connector_store_on_demand_grant_epoch", [
+      "CREATE TABLE IF NOT EXISTS on_demand_grant_epoch (id INTEGER PRIMARY KEY CHECK (id = 1), epoch INTEGER NOT NULL)",
+      "CREATE TABLE IF NOT EXISTS on_demand_grant_acquisitions (local_item_id TEXT PRIMARY KEY, epoch INTEGER NOT NULL)"
+    ])
   ];
 }
 function createConnectorStoreVisibilityTables(db) {
@@ -66601,11 +68631,12 @@ function connectorStoreCurrentEmbeddingRowsQuery(options, ordered, page) {
   const accountScope = normalizeOptionalAccountScope(options.accountScope);
   const selectedFilters = connectorStoreFilterSql(options.filters);
   const metadataOnly = connectorStoreMetadataOnlySql(options.filters, options.onDemandReadsTablePresent);
-  const chunkContentHash = page ? ", c.content_hash AS chunk_content_hash" : "";
+  const winnerIdentity = page ? ", c.content_hash AS chunk_content_hash" : "";
+  const sourceVersion = options.includeSourceVersion ? ", i.source_version" : "";
   if (options.chunkPks) {
     return {
       sql: `
-        SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding${chunkContentHash}
+        SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding${winnerIdentity}${sourceVersion}
         FROM json_each(?) pick
         CROSS JOIN chunk_embeddings emb ON emb.chunk_pk = pick.value AND emb.model_id = ?
         CROSS JOIN chunks c ON c.chunk_pk = emb.chunk_pk
@@ -66631,7 +68662,7 @@ function connectorStoreCurrentEmbeddingRowsQuery(options, ordered, page) {
   }
   return {
     sql: `
-      SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding${chunkContentHash}
+      SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding${winnerIdentity}${sourceVersion}
       ${CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER}
         -- Unary + avoids the model index + repeated whole-model sort (#1242).
         AND ${page ? "+emb.model_id" : "emb.model_id"} = ?
@@ -66664,7 +68695,8 @@ function foldVectorScore(bestByItem, row, queryVector) {
       bestCosine: score,
       bestChunkPk: row.chunk_pk,
       bestChunkContentHash: row.chunk_content_hash,
-      localItemId: row.local_item_id
+      localItemId: row.local_item_id,
+      sourceVersion: row.source_version ?? null
     });
   }
   return { mismatch: 0, qualified, score };
@@ -66676,6 +68708,7 @@ async function scanVectorPages(read, provider, beforeToken, queryVector, pageOpt
     return { skippedReason: after.skippedReason };
   if (after.token !== beforeToken)
     return { skippedReason: "embedding_authority_changed_during_query" };
+  pageOptions = { ...pageOptions, includeSourceVersion: true };
   if (pageOptions.filters?.metadataOnlyLocatorPathScopes?.length || pageOptions.filters?.metadataOnlySourceScopeFolderKeys?.length) {
     pageOptions = { ...pageOptions, onDemandReadsTablePresent: Boolean(await read({
       mode: "get",
@@ -66965,7 +68998,7 @@ function visibilityStepAwaited(read) {
 function connectorStoreReadableNow(dbPath, onFailure) {
   let db;
   try {
-    const stat = lstatSync21(dbPath);
+    const stat = lstatSync22(dbPath);
     if (!stat.isFile()) {
       onFailure?.(new Error("Connector store read-only mode requires a regular non-symlink database file."));
       return false;
@@ -67058,7 +69091,7 @@ function spawnConnectorStoreMaintenance(dbPath, source, args = []) {
     stdin: "pipe",
     stdout: "pipe",
     stderr: "ignore",
-    env: { ...process.env, SQLITE_TMPDIR: dirname45(dbPath), TMPDIR: dirname45(dbPath) }
+    env: { ...process.env, SQLITE_TMPDIR: dirname46(dbPath), TMPDIR: dirname46(dbPath) }
   });
 }
 function setConnectorStoreRecencyIndexAdmission(admit) {
@@ -67135,17 +69168,91 @@ function defineConnectorCorpus(options) {
     description: "Shared connector-store corpus: generic local index over a Contract 1 SourceConnector."
   });
 }
-function partialKeywordRows(store, request, projector, locatorPathScope) {
-  return (rows) => request.onPartialResponse?.({
-    hits: rows.slice(0, request.maxResults).map((row) => connectorStoreHitFromRow(store, row, -row.rank, projector, locatorPathScope)),
-    latencyMs: 0,
-    incomplete: true,
-    rawExposed: false
+function publishPartialRows(store, request, rows, filters, score, projector, lane = "keyword") {
+  if (!request.onPartialResponse)
+    return;
+  const prefix = rows.slice(0, request.maxResults);
+  const hits = prefix.map((row) => connectorStoreHitFromRow(store, row, score(row), projector, filters?.locatorPathScope));
+  const response = withSearchGrantDelivery(store, filters, request, { hits, latencyMs: 0, incomplete: true, rawExposed: false }, prefix);
+  request.onPartialResponse(response, lane);
+}
+function partialKeywordRows(store, request, filters, projector) {
+  return request.onPartialResponse ? (rows, contentOnly) => publishPartialRows(store, request, rows, filters, (row) => -row.rank, projector, contentOnly ? "keyword_content" : "keyword") : undefined;
+}
+function publishKeywordLane(emit, rows) {
+  if (!emit)
+    return;
+  emit(rows);
+  emit([], true);
+}
+function usesSearchGrants(filters) {
+  return Boolean(filters?.metadataOnlyLocatorPathScopes?.length || filters?.metadataOnlySourceScopeFolderKeys?.length);
+}
+function withSearchGrantDelivery(store, filters, request, response, matches) {
+  if (!usesSearchGrants(filters))
+    return response;
+  return {
+    ...response,
+    [SEARCH_GRANT_DELIVERY]: {
+      checkIfChanged: (hits) => request.startGrantEpoch !== undefined && request.startGrantEpoch === store.onDemandGrantEpoch() ? undefined : store.searchGrantLayers(hits, filters),
+      matches: matches.map((row) => ({
+        sourceItem: row.sourceItem,
+        candidateId: `${store.corpusId}:${row.sourceItem.localItemId}`,
+        trustTier: row.trustTier,
+        ...searchGrantMatch(store, row),
+        rawExposed: false
+      }))
+    }
+  };
+}
+function searchGrantMatch(store, row, projection) {
+  if (!connectorStoreRowHasContent(row))
+    return {};
+  return {
+    [SEARCH_GRANT_MATCH]: row.metadataFallback ? { metadataFallback: { ...projection, ...connectorStoreHitFromRow(store, row.metadataFallback, -row.metadataFallback.rank) } } : {}
+  };
+}
+function searchGrantIdentityKey(identity) {
+  return JSON.stringify([
+    identity.provider,
+    identity.accountScope,
+    identity.providerItemId,
+    identity.providerConversationId,
+    identity.localItemId,
+    identity.sourceVersion
+  ]);
+}
+async function withVectorMetadataFallbacks(store, request, rows, accountScope, filters, searchEligibility) {
+  if (!usesSearchGrants(filters) || rows.length === 0)
+    return [...rows];
+  const metadata = await store.searchItemsDetailedOffThread(request.query, MAX_SEARCH_RESULTS, accountScope, filters, {
+    prefix: false,
+    locate: false,
+    searchEligibility,
+    metadataCandidates: rows.map((row) => row.sourceItem)
+  }, request.deadlineAtMs !== undefined ? { deadlineAtMs: request.deadlineAtMs } : {});
+  const byVersion = new Map(metadata.rows.map((row) => [searchGrantIdentityKey(row.sourceItem), row]));
+  return rows.map((row) => {
+    const metadataFallback = byVersion.get(searchGrantIdentityKey(row.sourceItem));
+    return metadataFallback ? { ...row, metadataFallback } : row;
   });
 }
 function createConnectorStoreCorpusAdapter(options) {
   const { store, embeddingProvider } = options;
   const filters = normalizeConnectorStoreSearchFilters(options.filters);
+  const scopedSearch = (search) => async (input) => {
+    assertConnectorStoreCorpusRequest(store, input);
+    const publish = input.onPartialResponse;
+    const request = {
+      ...input,
+      ...usesSearchGrants(filters) ? { startGrantEpoch: store.onDemandGrantEpoch() } : {},
+      ...publish && !input[DEFER_SEARCH_DELIVERY] ? {
+        onPartialResponse: (response, lane) => publish(deliverCorpusSearch([response], input.maxResults), lane)
+      } : {}
+    };
+    const result = await search(request);
+    return input[DEFER_SEARCH_DELIVERY] ? result : deliverCorpusSearch([result]);
+  };
   const semanticRelevanceBar = normalizeSemanticRelevanceBar(options.semanticRelevanceBar);
   const adapter = (request, stages) => {
     assertConnectorStoreCorpusRequest(store, request);
@@ -67163,18 +69270,20 @@ function createConnectorStoreCorpusAdapter(options) {
       return (async () => {
         const markStage = startStoreStageClock(stages);
         const { searchEligibility } = options;
-        let keywordLane = await connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters, { searchEligibility, onPartialRows: partialKeywordRows(store, request, options.resultProjector, filters?.locatorPathScope) }, request.deadlineAtMs);
+        const emitPartial = partialKeywordRows(store, request, filters, options.resultProjector);
+        let keywordLane = await connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters, { searchEligibility, onPartialRows: emitPartial }, request.deadlineAtMs);
         markStage?.("keyword_lane_ms");
         keywordLane = await relaxEmptyLocalKeywordLane(store, request.query, request.maxResults, options.accountScope, filters, keywordLane, options.localKeywordFallback, { searchEligibility }, request.deadlineAtMs);
+        publishKeywordLane(emitPartial, keywordLane.rows);
         markStage?.("keyword_relaxation_ms");
-        keywordLane = await revalidateKeywordLane(store, keywordLane);
-        markStage?.("keyword_revalidation_ms");
-        const rows = keywordLane.rows;
         let recencyCut = false;
         const recencyRows = await chatRecencyLaneRows(store, options.accountScope, filters, request.deadlineAtMs, () => {
           recencyCut = true;
         }, searchEligibility);
         markStage?.("recency_read_ms");
+        keywordLane = (await refreshSearchTierVisibility(store, keywordLane, [], searchEligibility)).keyword;
+        markStage?.("keyword_revalidation_ms");
+        const rows = keywordLane.rows;
         if (recencyRows.length === 0) {
           const hits = withKeywordLeaderSignals(rows.map((row) => connectorStoreHitFromRow(store, row, -row.rank, options.resultProjector, filters?.locatorPathScope)), keywordLane);
           markStage?.("fusion_ms");
@@ -67190,7 +69299,7 @@ function createConnectorStoreCorpusAdapter(options) {
             rawExposed: false
           };
           markStage?.("finalize_ms");
-          return response;
+          return withSearchGrantDelivery(store, filters, request, response, keywordLane.allRows);
         }
         const lanes = [
           { name: "keyword", items: rows },
@@ -67230,7 +69339,7 @@ function createConnectorStoreCorpusAdapter(options) {
           rawExposed: false
         };
         markStage?.("finalize_ms");
-        return response;
+        return withSearchGrantDelivery(store, filters, request, response, keywordLane.allRows);
       })();
     return hybridConnectorStoreSearch(store, embeddingProvider, request, startedAt, stages, options.accountScope, filters, semanticRelevanceBar, options.resultProjector, options.localKeywordFallback, options.searchEligibility);
   };
@@ -67256,16 +69365,15 @@ function createConnectorStoreCorpusAdapter(options) {
       backend: embeddingProvider.backend
     };
   };
-  adapter.semanticNeighbours = async (request) => {
-    assertConnectorStoreCorpusRequest(store, request);
+  adapter.semanticNeighbours = scopedSearch(async (request) => {
     const startedAt = Date.now();
     const none = { matchedItems: 0, contentMatchedItems: 0, saturated: false };
     if (!embeddingProvider || (options.retrievalMode ?? "hybrid") !== "hybrid" || store.trustDomain === "secure_local" && !isApprovedSecureSourceEmbeddingProvider(embeddingProvider) || !store.vectorLaneServable(embeddingProvider.modelId)) {
       return { hits: [], latencyMs: Date.now() - startedAt, matchCount: none, rawExposed: false };
     }
     const maxResults = Math.max(1, Math.min(Math.floor(request.maxResults), MAX_SEARCH_RESULTS));
-    const lane = await store.vectorSearchLane(request.query, embeddingProvider, maxResults, options.accountScope, filters, request.deadlineAtMs);
-    return {
+    const lane = await store.vectorSearchLane(request.query, embeddingProvider, maxResults, options.accountScope, filters, request.deadlineAtMs, { searchEligibility: options.searchEligibility });
+    const response = {
       hits: lane.rows.map((row) => connectorStoreHitFromRow(store, row, row.bestCosine, options.resultProjector, filters?.locatorPathScope)),
       latencyMs: Date.now() - startedAt,
       laneAudits: [{
@@ -67282,34 +69390,37 @@ function createConnectorStoreCorpusAdapter(options) {
       matchCount: none,
       rawExposed: false
     };
-  };
+    return withSearchGrantDelivery(store, filters, request, response, []);
+  });
   const metadataMatches = async (request) => {
     const startedAt = Date.now();
     const maxResults = Math.max(1, Math.min(Math.floor(request.maxResults), MAX_SEARCH_RESULTS));
     const hybrid = embeddingProvider !== undefined && (options.retrievalMode ?? "hybrid") === "hybrid" && (store.trustDomain !== "secure_local" || isApprovedSecureSourceEmbeddingProvider(embeddingProvider)) && store.vectorLaneServable(embeddingProvider.modelId);
-    const ftsOptions = { ...hybrid ? { prefix: false } : {}, locate: false, onPartialRows: partialKeywordRows(store, request) };
+    const { searchEligibility } = options;
+    const emitPartial = partialKeywordRows(store, request, filters);
+    const ftsOptions = { ...hybrid ? { prefix: false } : {}, locate: false, searchEligibility, onPartialRows: emitPartial };
     const meaningLane = hybrid && request.context.lexicalOnly !== true;
     const readKeywordLane = await relaxEmptyLocalKeywordLane(store, request.query, maxResults, options.accountScope, filters, await connectorStoreKeywordLaneRows(store, request.query, maxResults, options.accountScope, filters, ftsOptions, request.deadlineAtMs), options.localKeywordFallback, ftsOptions, request.deadlineAtMs);
+    publishKeywordLane(emitPartial, readKeywordLane.rows);
     const semanticRows = [];
     let incomplete = false;
     if (meaningLane) {
       const bar = semanticRelevanceBarFor(embeddingProvider.modelId, semanticRelevanceBar);
       if (bar !== undefined) {
-        const lane = await store.vectorSearchLane(request.query, embeddingProvider, maxResults, options.accountScope, filters, request.deadlineAtMs, { locate: false });
+        const lane = await store.vectorSearchLane(request.query, embeddingProvider, maxResults, options.accountScope, filters, request.deadlineAtMs, { locate: false, searchEligibility });
         if (lane.skippedReason !== undefined)
           incomplete = true;
-        for (const row of lane.rows) {
-          if (row.bestCosine < bar || readKeywordLane.matchedItemIds.has(row.sourceItem.localItemId))
-            continue;
-          semanticRows.push(row);
-        }
+        const rows = lane.rows.filter((row) => row.bestCosine >= bar);
+        const matches = await withVectorMetadataFallbacks(store, request, rows, options.accountScope, filters, searchEligibility);
+        semanticRows.push(...matches);
+        publishPartialRows(store, request, matches, filters, (row) => -row.rank, undefined, "vector");
       }
     }
-    const keywordLane = await revalidateKeywordLane(store, readKeywordLane);
-    const visibleSemanticRows = await store.stillVisibleSearchRowsOffThread(semanticRows);
+    const { keyword: keywordLane, vectors } = await refreshSearchTierVisibility(store, readKeywordLane, semanticRows, searchEligibility);
+    const visibleSemanticRows = vectors.filter((row) => !keywordLane.matchedItemIds.has(row.sourceItem.localItemId));
     const rows = [...keywordLane.rows, ...visibleSemanticRows];
     const semanticOnly = visibleSemanticRows.length;
-    return {
+    return withSearchGrantDelivery(store, filters, request, {
       hits: rows.slice(0, maxResults).map((row) => connectorStoreHitFromRow(store, row, -row.rank)),
       latencyMs: Date.now() - startedAt,
       matchCount: {
@@ -67319,21 +69430,15 @@ function createConnectorStoreCorpusAdapter(options) {
       },
       ...incomplete ? { incomplete: true } : {},
       rawExposed: false
-    };
+    }, [...keywordLane.allRows, ...visibleSemanticRows]);
   };
-  const expanded = (request) => {
+  const expanded = scopedSearch(async (request) => {
     const timing = beginSourceAnswerStoreTiming();
-    assertConnectorStoreCorpusRequest(store, request);
-    const response = withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), () => adapter(request, timing?.stages), store);
-    return timing ? response.then((result) => {
-      timing.finish();
-      return result;
-    }) : response;
-  };
-  expanded.metadataMatches = (request) => {
-    assertConnectorStoreCorpusRequest(store, request);
-    return withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), () => metadataMatches(request), store);
-  };
+    const response = await withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), () => adapter(request, timing?.stages), store);
+    timing?.finish();
+    return response;
+  });
+  expanded.metadataMatches = scopedSearch((request) => withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), () => metadataMatches(request), store));
   expanded.selectedItemServable = (sourceItem, layer) => store.selectedItemServable(sourceItem, options.accountScope, filters, layer);
   expanded.prepareKeywords = async (query) => {
     const status = { incomplete: false };
@@ -67352,7 +69457,7 @@ async function chatRecencyLaneRows(store, accountScope, filters, deadlineAtMs, o
     return [];
   const rows = await store.recentItemsOffThread(CHAT_RECENCY_LANE_LIMIT, accountScope, filters, deadlineAtMs, onCutShort);
   const eligible = searchEligibility?.(rows);
-  return eligible ? rows.filter((_, index) => eligible[index]) : rows;
+  return (eligible ? rows.filter((_, index) => eligible[index]) : rows).map((row) => ({ ...row, contentMatched: true }));
 }
 function connectorStoreHitFromRow(store, row, score, resultProjector, locatorPathScope) {
   let locatorRead = false;
@@ -67369,6 +69474,7 @@ function connectorStoreHitFromRow(store, row, score, resultProjector, locatorPat
   });
   return {
     ...projection ?? {},
+    ...searchGrantMatch(store, row, projection),
     sourceItem: row.sourceItem,
     provenance: provenanceFromSearchRow(store.corpusId, row, store.personCitationName(row)),
     candidateId: `${store.corpusId}:${row.sourceItem.localItemId}`,
@@ -67431,12 +69537,13 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, s
   const maxResults = Math.max(1, Math.min(Math.floor(request.maxResults), MAX_SEARCH_RESULTS));
   const laneLimit = Math.min(maxResults * 6, MAX_SEARCH_RESULTS);
   const markStage = startStoreStageClock(stages);
+  const emitPartial = partialKeywordRows(store, request, filters, resultProjector);
   const keywordWork = (async () => {
     const laneStartedAt = stages ? performance.now() : 0;
     const keywordStartedAt = Date.now();
-    const lane = await connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false, searchEligibility, onPartialRows: partialKeywordRows(store, request, resultProjector, filters?.locatorPathScope) }, request.deadlineAtMs);
+    const lane = await connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false, searchEligibility, onPartialRows: emitPartial }, request.deadlineAtMs);
     const baseline = keywordAlternatives(request.query)?.size ? lane.baseline ?? await withKeywordExpansionDisabled(() => connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false, searchEligibility }, request.deadlineAtMs)) : undefined;
-    partialKeywordRows(store, request, resultProjector, filters?.locatorPathScope)(lane.rows);
+    publishKeywordLane(emitPartial, lane.rows);
     if (stages)
       stages.keyword_lane_ms = performance.now() - laneStartedAt;
     return { lane, baseline, elapsedMs: Date.now() - keywordStartedAt };
@@ -67446,16 +69553,16 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, s
     const vectorStartedAt = Date.now();
     const lane = await store.vectorSearchLane(request.query, provider, laneLimit, accountScope, filters, request.deadlineAtMs, { searchEligibility });
     const bar = semanticRelevanceBarFor(provider.modelId, semanticRelevanceBar);
-    const rows = bar === undefined ? lane.rows : lane.rows.filter((row) => row.bestCosine >= bar);
-    request.onPartialResponse?.({
-      hits: rows.slice(0, maxResults).map((row) => connectorStoreHitFromRow(store, row, row.bestCosine, resultProjector, filters?.locatorPathScope)),
-      latencyMs: Date.now() - startedAt,
-      incomplete: true,
-      rawExposed: false
-    });
+    const vetted = bar === undefined ? [] : lane.rows.filter((row) => row.bestCosine >= bar);
+    const rows = await withVectorMetadataFallbacks(store, request, vetted, accountScope, filters, searchEligibility);
+    publishPartialRows(store, request, rows, filters, (row) => row.bestCosine, resultProjector, "vector");
+    const byVersion = new Map(rows.map((row) => [searchGrantIdentityKey(row.sourceItem), row]));
     if (stages)
       stages.vector_lane_ms = performance.now() - laneStartedAt;
-    return { lane, elapsedMs: Date.now() - vectorStartedAt };
+    return {
+      lane: { ...lane, rows: lane.rows.map((row) => byVersion.get(searchGrantIdentityKey(row.sourceItem)) ?? row) },
+      elapsedMs: Date.now() - vectorStartedAt
+    };
   })();
   const [keywordResult, vectorResult] = await Promise.all([keywordWork, vectorWork]);
   markStage?.("join_wait_ms");
@@ -67464,10 +69571,8 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, s
   let keywordElapsedMs = keywordResult.elapsedMs;
   const vectorLane = vectorResult.lane;
   const vectorElapsedMs = vectorResult.elapsedMs;
-  let scoredVectorRows = vectorLane.rows;
   const relevanceBar = semanticRelevanceBarFor(provider.modelId, semanticRelevanceBar);
   const gateArmed = relevanceBar !== undefined;
-  let vectorRows = gateArmed ? scoredVectorRows.filter((row) => row.bestCosine >= relevanceBar) : scoredVectorRows;
   if (baselineKeywordLane && gateArmed) {
     const extra = keywordLane.allRows.filter((row) => !baselineKeywordLane.matchedItemIds.has(row.sourceItem.localItemId) && keywordLane.completeItemIds.has(row.sourceItem.localItemId));
     const improved = new Map(keywordLane.allRows.map((row) => [row.sourceItem.localItemId, row]));
@@ -67482,22 +69587,25 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, s
   markStage?.("post_join_setup_ms");
   const relaxStartedAt = Date.now();
   keywordLane = await relaxEmptyLocalKeywordLane(store, request.query, laneLimit, accountScope, filters, keywordLane, localKeywordFallback, { searchEligibility }, request.deadlineAtMs);
+  if (keywordLane !== keywordResult.lane)
+    publishKeywordLane(emitPartial, keywordLane.rows);
   keywordElapsedMs += Date.now() - relaxStartedAt;
   markStage?.("keyword_relaxation_ms");
-  keywordLane = await revalidateKeywordLane(store, keywordLane);
-  markStage?.("keyword_revalidation_ms");
-  scoredVectorRows = await store.stillVisibleSearchRowsOffThread(scoredVectorRows);
-  vectorRows = await store.stillVisibleSearchRowsOffThread(vectorRows);
-  markStage?.("vector_revalidation_ms");
-  const keywordRows = keywordLane.rows;
-  const suppressedBelowBar = scoredVectorRows.length - vectorRows.length;
-  const bestCosine = scoredVectorRows.length > 0 ? roundCosine(Math.max(...scoredVectorRows.map((row) => row.bestCosine))) : undefined;
   let recencyCut = false;
-  markStage?.("vector_summary_ms");
   const recencyRows = await chatRecencyLaneRows(store, accountScope, filters, request.deadlineAtMs, () => {
     recencyCut = true;
   }, searchEligibility);
   markStage?.("recency_read_ms");
+  const checked = await refreshSearchTierVisibility(store, keywordLane, vectorLane.rows, searchEligibility);
+  keywordLane = checked.keyword;
+  markStage?.("keyword_revalidation_ms");
+  const scoredVectorRows = checked.vectors;
+  const vectorRows = gateArmed ? scoredVectorRows.filter((row) => row.bestCosine >= relevanceBar) : scoredVectorRows;
+  markStage?.("vector_revalidation_ms");
+  const suppressedBelowBar = scoredVectorRows.length - vectorRows.length;
+  const bestCosine = scoredVectorRows.length > 0 ? roundCosine(Math.max(...scoredVectorRows.map((row) => row.bestCosine))) : undefined;
+  markStage?.("vector_summary_ms");
+  const keywordRows = keywordLane.rows;
   const contentBar = relevanceBar ?? CALIBRATED_CONTENT_PREFERENCE_BARS.get(provider.modelId);
   const vettedVectorItemIds = new Set(contentBar === undefined ? [] : vectorRows.filter((row) => row.bestCosine >= contentBar).map((row) => row.sourceItem.localItemId));
   const contentPreference = connectorStoreContentPreference(vettedVectorItemIds);
@@ -67572,7 +69680,7 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, s
     rawExposed: false
   };
   markStage?.("finalize_ms");
-  return response;
+  return withSearchGrantDelivery(store, filters, request, response, gateArmed ? [...keywordLane.allRows, ...vectorRows] : keywordLane.allRows);
 }
 function hybridMatchCount(keyword, lexicalItemIds, vectorRows, gateArmed) {
   if (!gateArmed)
@@ -67604,7 +69712,11 @@ function normalizeSemanticRelevanceBar(value) {
   return value;
 }
 async function connectorStoreKeywordLaneRows(store, query, limit, accountScope, filters, ftsOptions = {}, deadlineAtMs) {
-  ftsOptions = { ...ftsOptions, conceptHitMemo: ftsOptions.conceptHitMemo ?? new Map };
+  ftsOptions = {
+    ...ftsOptions,
+    conceptHitMemo: ftsOptions.conceptHitMemo ?? new Map,
+    prepareGrantFallbacks: usesSearchGrants(filters)
+  };
   const pool = deadlineAtMs !== undefined ? { deadlineAtMs } : {};
   const plain = await store.searchItemsDetailedOffThread(query, MAX_SEARCH_RESULTS, accountScope, filters, ftsOptions, pool);
   const rows = plain.rows;
@@ -67645,7 +69757,7 @@ async function connectorStoreKeywordLaneRows(store, query, limit, accountScope, 
       readable: connectorStoreRowHasContent
     });
   }
-  const baseline = keywordExpansionDisabled() || ftsOptions.relaxed || !keywordExpansionChangesSearch(query, ftsOptions) ? undefined : await withKeywordExpansionDisabled(() => connectorStoreKeywordLaneRows(store, query, limit, accountScope, filters, ftsOptions, deadlineAtMs));
+  const baseline = keywordExpansionDisabled() || ftsOptions.relaxed || !keywordExpansionChangesSearch(query, ftsOptions) ? undefined : await withKeywordExpansionDisabled(() => connectorStoreKeywordLaneRows(store, query, limit, accountScope, filters, { ...ftsOptions, onPartialRows: undefined }, deadlineAtMs));
   const enriched = new Map(ordered.map((row) => [row.sourceItem.localItemId, row]));
   const allRows = baseline ? [
     ...baseline.allRows.map((row) => complete.has(row.sourceItem.localItemId) ? enriched.get(row.sourceItem.localItemId) ?? row : row),
@@ -67693,23 +69805,30 @@ function keywordExpansionChangesSearch(query, ftsOptions) {
   const shape = () => JSON.stringify([toFtsQuery(query, ftsOptions), sourceIndexFtsTermGroups(query), sourceIndexTopicTokens(query)]);
   return shape() !== withKeywordExpansionDisabled(shape);
 }
-async function revalidateKeywordLane(store, lane) {
-  const allRows = await store.stillVisibleSearchRowsOffThread(lane.allRows);
-  if (allRows.length === lane.allRows.length)
-    return lane;
-  const served = new Set(allRows.map((row) => row.sourceItem.localItemId));
+async function refreshSearchTierVisibility(store, lane, vectors, searchEligibility) {
+  const candidates = [...lane.allRows, ...vectors];
+  const current = await store.stillVisibleSearchRowsOffThread(candidates);
+  const eligible = searchEligibility?.(current);
+  const visible = new Set(eligible ? current.filter((_, index) => eligible[index]) : current);
+  if (visible.size === candidates.length)
+    return { keyword: lane, vectors: [...vectors] };
+  const retained = lane.allRows.filter((row) => visible.has(row));
+  const served = new Set(retained.map((row) => row.sourceItem.localItemId));
   return {
-    rows: lane.rows.filter((row) => served.has(row.sourceItem.localItemId)),
-    allRows,
-    matchedItemIds: served,
-    completeItemIds: new Set([...lane.completeItemIds].filter((id) => served.has(id))),
-    ...lane.nameLeaderItemId !== undefined && served.has(lane.nameLeaderItemId) ? { nameLeaderItemId: lane.nameLeaderItemId } : {},
-    ...lane.conceptShare ? { conceptShare: new Map([...lane.conceptShare].filter(([id]) => served.has(id))) } : {},
-    matchCount: {
-      matchedItems: allRows.length,
-      contentMatchedItems: allRows.filter(connectorStoreRowHasContent).length,
-      saturated: lane.matchCount.saturated,
-      secureMatchedItems: allRows.filter(connectorStoreRowIsSecureTier).length
+    vectors: vectors.filter((row) => visible.has(row)),
+    keyword: {
+      rows: retained.slice(0, lane.rows.length),
+      allRows: retained,
+      matchedItemIds: served,
+      completeItemIds: new Set([...lane.completeItemIds].filter((id) => served.has(id))),
+      ...lane.nameLeaderItemId !== undefined && served.has(lane.nameLeaderItemId) ? { nameLeaderItemId: lane.nameLeaderItemId } : {},
+      conceptShare: new Map([...lane.conceptShare ?? []].filter(([id]) => served.has(id))),
+      matchCount: {
+        matchedItems: retained.length,
+        contentMatchedItems: retained.filter(connectorStoreRowHasContent).length,
+        saturated: lane.matchCount.saturated,
+        secureMatchedItems: retained.filter(connectorStoreRowIsSecureTier).length
+      }
     }
   };
 }
@@ -67879,7 +69998,7 @@ function createConnectorStoreContentProvider(options) {
       const localItemId = request.provenance.sourceItem.localItemId.trim();
       if (!localItemId)
         return false;
-      if (!(options.contentAllowed !== false && store.itemMatchesSearchFilters(localItemId, options.accountScope, options.filters)) && !(options.metadataFilters !== undefined && store.readOnDemand(localItemId) && store.itemMatchesSearchFilters(localItemId, options.accountScope, options.metadataFilters)))
+      if (!(options.contentAllowed !== false && store.itemMatchesSearchFilters(localItemId, options.accountScope, options.filters)) && !(options.metadataFilters !== undefined && store.currentOnDemandRead(localItemId, request.provenance.sourceItem.sourceVersion) && store.itemMatchesSearchFilters(localItemId, options.accountScope, options.metadataFilters)))
         return false;
       return store.contentServedNow(localItemId, request.throwOnUnavailable);
     },
@@ -67895,12 +70014,17 @@ function createConnectorStoreContentProvider(options) {
       if (request.trustDomain !== store.trustDomain) {
         throw new Error(`Connector store content provider for ${store.corpusId} (${store.trustDomain}) ` + `refused a ${request.trustDomain} content request.`);
       }
-      return withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), async () => {
+      let releaseGranted;
+      const result = await withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), async () => {
         const localItemId = request.provenance.sourceItem.localItemId.trim();
         if (!localItemId)
           return;
-        const contentInScope = options.contentAllowed !== false && store.itemMatchesSearchFilters(localItemId, options.accountScope, options.filters) || options.metadataFilters !== undefined && store.readOnDemand(localItemId) && store.itemMatchesSearchFilters(localItemId, options.accountScope, options.metadataFilters);
-        if (!contentInScope) {
+        const contentInScope = options.contentAllowed !== false && store.itemMatchesSearchFilters(localItemId, options.accountScope, options.filters);
+        const needsGrant = !contentInScope && options.metadataFilters !== undefined;
+        const startEpoch = needsGrant ? store.onDemandGrantEpoch() : undefined;
+        const sourceVersion = request.provenance.sourceItem.sourceVersion;
+        const granted = needsGrant && store.currentOnDemandRead(localItemId, sourceVersion) && store.itemMatchesSearchFilters(localItemId, options.accountScope, options.metadataFilters);
+        if (!contentInScope && !granted) {
           if (!options.metadataFilters || !store.itemMatchesSearchFilters(localItemId, options.accountScope, options.metadataFilters)) {
             return;
           }
@@ -67923,6 +70047,9 @@ function createConnectorStoreContentProvider(options) {
             coverageGaps: [CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP],
             ...names.locatorUri ? { locatorUri: names.locatorUri } : {}
           };
+        }
+        if (granted) {
+          releaseGranted = () => startEpoch !== undefined && startEpoch === store.onDemandGrantEpoch() || store.currentOnDemandRead(localItemId, sourceVersion ?? "");
         }
         const anchorChunkIndex = request.provenance.chunk?.chunkIndex;
         const anchorLane = request.provenance.chunk?.span?.lane;
@@ -67958,6 +70085,7 @@ function createConnectorStoreContentProvider(options) {
           ...content.locatorUri ? { locatorUri: content.locatorUri } : {}
         };
       }, store);
+      return releaseGranted && !releaseGranted() ? undefined : result;
     }
   };
 }
@@ -68295,7 +70423,7 @@ function connectorStoreEmbeddingSelectionSha256(localItemIds) {
   return hashString2(JSON.stringify(normalized ? [...normalized].sort() : null));
 }
 function connectorStoreEmbeddingInputSha256(rows) {
-  const digest = createHash33("sha256");
+  const digest = createHash34("sha256");
   for (const row of rows)
     digest.update(`${row.chunk_pk}\x00${row.content_hash}
 `);
@@ -68395,7 +70523,7 @@ function namesOnlyKeptCount(n) {
   return n > 0 ? { namesOnlyKeptChunks: n } : {};
 }
 function migrationFingerprint(contentHash, chunkHashes) {
-  return createHash33("sha256").update(contentHash ?? "").update("\x00").update(String(chunkHashes.length)).update("\x00").update(chunkHashes.join("\x00")).digest("hex");
+  return createHash34("sha256").update(contentHash ?? "").update("\x00").update(String(chunkHashes.length)).update("\x00").update(chunkHashes.join("\x00")).digest("hex");
 }
 function carryHold(listed, fetched) {
   return listed.holdContentUntilJudged === true && fetched.holdContentUntilJudged !== true ? { ...fetched, holdContentUntilJudged: true } : fetched;
@@ -69429,7 +71557,7 @@ function validateCurrentConnectorStoreSchemaBeforeMigration(db) {
     validateConnectorStoreV12Schema(db, "v15", CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS);
     assertIndexColumns(db, "idx_connector_store_items_parent", ["parent_local_item_id"], "v15");
   }
-  if (version === 16)
+  if (version >= 16)
     validateVectorDigestSchema(db);
 }
 function validateConnectorStoreVisibilitySchema(db, versionLabel) {
@@ -69459,9 +71587,16 @@ function validateVectorDigestSchema(db) {
   assertTriggerExists(db, "connector_store_vector_digest_delete", "v16");
   assertTriggerExists(db, "connector_store_vector_digest_account", "v16");
 }
-function validateConnectorStoreSchema(db) {
+function validateConnectorStoreSchema(db, version = CONNECTOR_STORE_SQLITE_SCHEMA_VERSION) {
   validateConnectorStoreV12Schema(db, "v15", CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS);
-  validateVectorDigestSchema(db);
+  if (version >= 16)
+    validateVectorDigestSchema(db);
+  if (version >= 17) {
+    assertExactTableColumns(db, "on_demand_grant_epoch", ["id", "epoch"], false, "v17");
+    assertExactTableColumns(db, "on_demand_grant_acquisitions", ["local_item_id", "epoch"], false, "v17");
+    for (const trigger of ON_DEMAND_GRANT_EPOCH_TRIGGERS)
+      assertTriggerExists(db, trigger, "v17");
+  }
   assertIndexColumns(db, "idx_connector_store_items_parent", ["parent_local_item_id"], "v15");
   assertExactTableColumns(db, "chunk_media_releases", ["media_sha256", "media_path"], false, "v13");
   assertExactTableColumns(db, "chunk_media_failures", ["media_sha256", "reason", "failed_at", "attempts"], false, "v13");
@@ -69582,20 +71717,75 @@ function sameStrings(actual, expected) {
 function sameStringSet(actual, expected) {
   return actual.length === expected.length && expected.every((value) => actual.includes(value));
 }
-function applyConnectorStoreOpenSchema(db) {
+function createOnDemandReads(db) {
+  db.exec(`CREATE TABLE IF NOT EXISTS on_demand_item_reads (
+    local_item_id TEXT PRIMARY KEY, source_version TEXT NOT NULL, read_on_demand INTEGER NOT NULL DEFAULT 1
+  );`);
+}
+function createOnDemandGrantEpoch(db) {
+  db.transaction(() => db.exec(`
+    INSERT OR IGNORE INTO on_demand_grant_epoch (id, epoch) VALUES (1, 0);
+    CREATE TRIGGER IF NOT EXISTS ${ON_DEMAND_GRANT_EPOCH_TRIGGERS[4]} AFTER INSERT ON on_demand_item_reads
+    BEGIN
+      UPDATE on_demand_grant_epoch SET epoch = epoch + 1 WHERE id = 1;
+      INSERT INTO on_demand_grant_acquisitions (local_item_id, epoch)
+        SELECT NEW.local_item_id, epoch FROM on_demand_grant_epoch WHERE id = 1
+        ON CONFLICT(local_item_id) DO UPDATE SET epoch = excluded.epoch;
+    END;
+    CREATE TRIGGER IF NOT EXISTS ${ON_DEMAND_GRANT_EPOCH_TRIGGERS[0]} AFTER DELETE ON on_demand_item_reads
+    BEGIN
+      UPDATE on_demand_grant_epoch SET epoch = epoch + 1 WHERE id = 1;
+      DELETE FROM on_demand_grant_acquisitions WHERE local_item_id = OLD.local_item_id;
+    END;
+    CREATE TRIGGER IF NOT EXISTS ${ON_DEMAND_GRANT_EPOCH_TRIGGERS[1]} AFTER UPDATE OF source_version, local_item_id ON on_demand_item_reads
+    WHEN OLD.source_version IS NOT NEW.source_version OR OLD.local_item_id IS NOT NEW.local_item_id
+    BEGIN
+      UPDATE on_demand_grant_epoch SET epoch = epoch + 1 WHERE id = 1;
+      DELETE FROM on_demand_grant_acquisitions WHERE local_item_id = OLD.local_item_id;
+      INSERT INTO on_demand_grant_acquisitions (local_item_id, epoch)
+        SELECT NEW.local_item_id, epoch FROM on_demand_grant_epoch WHERE id = 1
+        ON CONFLICT(local_item_id) DO UPDATE SET epoch = excluded.epoch;
+    END;
+    CREATE TRIGGER IF NOT EXISTS ${ON_DEMAND_GRANT_EPOCH_TRIGGERS[2]} AFTER DELETE ON items
+    WHEN OLD.tombstoned = 0
+    BEGIN
+      UPDATE on_demand_grant_epoch SET epoch = epoch + 1 WHERE id = 1;
+      INSERT INTO on_demand_grant_acquisitions (local_item_id, epoch)
+        SELECT r.local_item_id, e.epoch FROM on_demand_item_reads r CROSS JOIN on_demand_grant_epoch e
+        WHERE r.local_item_id = OLD.local_item_id AND r.source_version = COALESCE(OLD.source_version, '') AND e.id = 1
+        ON CONFLICT(local_item_id) DO UPDATE SET epoch = excluded.epoch;
+    END;
+    CREATE TRIGGER IF NOT EXISTS ${ON_DEMAND_GRANT_EPOCH_TRIGGERS[3]} AFTER UPDATE OF source_version, local_item_id, tombstoned,
+      provider, account_scope, provider_item_id, normalized_conversation, locator_uri, source_scope_folder_keys_json ON items
+    WHEN OLD.tombstoned = 0 AND (NEW.tombstoned <> 0 OR OLD.source_version IS NOT NEW.source_version
+      OR OLD.local_item_id IS NOT NEW.local_item_id OR OLD.provider IS NOT NEW.provider
+      OR OLD.account_scope IS NOT NEW.account_scope OR OLD.provider_item_id IS NOT NEW.provider_item_id
+      OR OLD.normalized_conversation IS NOT NEW.normalized_conversation OR OLD.locator_uri IS NOT NEW.locator_uri
+      OR OLD.source_scope_folder_keys_json IS NOT NEW.source_scope_folder_keys_json)
+    BEGIN
+      UPDATE on_demand_grant_epoch SET epoch = epoch + 1 WHERE id = 1;
+      INSERT INTO on_demand_grant_acquisitions (local_item_id, epoch)
+        SELECT r.local_item_id, e.epoch FROM on_demand_item_reads r CROSS JOIN on_demand_grant_epoch e
+        WHERE r.local_item_id = OLD.local_item_id AND r.source_version = COALESCE(OLD.source_version, '') AND e.id = 1
+          AND (NEW.tombstoned <> 0 OR OLD.source_version IS NOT NEW.source_version OR OLD.local_item_id IS NOT NEW.local_item_id)
+        ON CONFLICT(local_item_id) DO UPDATE SET epoch = excluded.epoch;
+    END;
+  `))();
+}
+function applyConnectorStoreOpenSchema(db, version = CONNECTOR_STORE_SQLITE_SCHEMA_VERSION) {
   refuseUnversionedConnectorStoreSchema(db);
   LocalConnectorStore.migrateSchema(db);
-  runSqliteMigrations(db, SQLITE_STORE_ID, connectorStoreMigrations());
+  runSqliteMigrations(db, SQLITE_STORE_ID, connectorStoreMigrations().filter((migration) => migration.version <= version));
   createConnectorStoreChunkMediaReleases(db);
   createConnectorStoreMediaJudgments(db);
   createConnectorStoreItemTextVersions(db);
   createConnectorStoreVisibilityTables(db);
   createStoreTotals(db, NON_SYNC_RUN_CONNECTORS_SQL);
   createConnectorStorePeopleIndex(db);
-  db.exec(`CREATE TABLE IF NOT EXISTS on_demand_item_reads (
-    local_item_id TEXT PRIMARY KEY, source_version TEXT NOT NULL, read_on_demand INTEGER NOT NULL DEFAULT 1
-  );`);
-  validateConnectorStoreSchema(db);
+  createOnDemandReads(db);
+  if (version >= 17)
+    createOnDemandGrantEpoch(db);
+  validateConnectorStoreSchema(db, version);
 }
 function connectorStoreOpenShape() {
   if (openShape !== undefined)
@@ -70019,7 +72209,7 @@ function requireNonEmpty(value, label) {
   return text;
 }
 function hashString2(value) {
-  return createHash33("sha256").update(value).digest("hex");
+  return createHash34("sha256").update(value).digest("hex");
 }
 function errorMessage2(error) {
   return error instanceof Error ? error.message : String(error);
@@ -70044,13 +72234,13 @@ function sqliteJournalSettingsOf(db) {
     wal_autocheckpoint: db.query("PRAGMA wal_autocheckpoint").get().wal_autocheckpoint
   };
 }
-var TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff", DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, KEYWORD_CANDIDATE_SCAN_CAP = 1000, KEYWORD_RANKED_BOUND_MIN = 256, KEYWORD_RANKED_BOUND_MAX = 8192, KEYWORD_RANKED_BOUND_ROWS_PER_ITEM = 8, CONCEPT_COUNT_MAX_AGE_MS, KEYWORD_POPULATION_SQL = "SELECT COUNT(*) AS count FROM items WHERE tombstoned = 0", CONCEPT_COUNT_MEMO_LIMIT = 512, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, VECTOR_VISIBILITY_BATCH_SIZE = 200, VECTOR_VISIBILITY_SLICE_MS = 50, CONNECTOR_STORE_CONVERSATION_INDEX = "idx_connector_store_items_conversation_time", CONNECTOR_STORE_CONVERSATION_INDEX_SQL, CONNECTOR_STORE_RECENCY_INDEX = "idx_connector_store_items_recent_live", CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX = "idx_connector_store_items_recent_account_live", RECENCY_LIVE_SQL = "tombstoned IS 0", ACCOUNT_RECENCY_LIVE_SQL = "+tombstoned IS 0", CONNECTOR_STORE_RECENCY_INDEX_SQL, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 16, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, ITEM_VISIBILITY_FEED_RETENTION = 65536, CONNECTOR_STORE_VISIBILITY_TRIGGERS, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, SEARCH_VECTOR_LANE_MEMO_MS = 60000, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, MISSING_EMBEDDING_CHUNK_WINDOW = 20000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 500, EMBEDDING_WORK_PAGE_ROWS = 5000, VISIBILITY_HOLD_WAITS = 100, VISIBILITY_HOLD_WAIT_MS = 10, PK_SET_SLICE = 20000, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, VISIBILITY_MEMBER_BITS, VISIBILITY_PUBLISH_CHUNK = 4096, VISIBILITY_BACKSTOP_MS = 5000, VISIBILITY_LEASE_MS = 30000, VISIBILITY_RETRY_MIN_MS = 1000, VISIBILITY_RETRY_MAX_MS = 60000, LEDGER_VISIBILITY_FEED_RETENTION = 8192, VISIBILITY_TICK_ITEMS = 256, visibilityWritersByLedger, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_RUN_ID = "restored-source-scope", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE = 512, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff", DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, KEYWORD_CANDIDATE_SCAN_CAP = 1000, KEYWORD_RANKED_BOUND_MIN = 256, KEYWORD_RANKED_BOUND_MAX = 8192, KEYWORD_RANKED_BOUND_ROWS_PER_ITEM = 8, CONCEPT_COUNT_MAX_AGE_MS, KEYWORD_POPULATION_SQL = "SELECT COUNT(*) AS count FROM items WHERE tombstoned = 0", CONCEPT_COUNT_MEMO_LIMIT = 512, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, VECTOR_VISIBILITY_BATCH_SIZE = 200, VECTOR_VISIBILITY_SLICE_MS = 50, CONNECTOR_STORE_CONVERSATION_INDEX = "idx_connector_store_items_conversation_time", CONNECTOR_STORE_CONVERSATION_INDEX_SQL, CONNECTOR_STORE_RECENCY_INDEX = "idx_connector_store_items_recent_live", CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX = "idx_connector_store_items_recent_account_live", RECENCY_LIVE_SQL = "tombstoned IS 0", ACCOUNT_RECENCY_LIVE_SQL = "+tombstoned IS 0", CONNECTOR_STORE_RECENCY_INDEX_SQL, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 17, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, ITEM_VISIBILITY_FEED_RETENTION = 65536, CONNECTOR_STORE_VISIBILITY_TRIGGERS, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, SEARCH_VECTOR_LANE_MEMO_MS = 60000, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, MISSING_EMBEDDING_CHUNK_WINDOW = 20000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 500, EMBEDDING_WORK_PAGE_ROWS = 5000, VISIBILITY_HOLD_WAITS = 100, VISIBILITY_HOLD_WAIT_MS = 10, PK_SET_SLICE = 20000, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, VISIBILITY_MEMBER_BITS, VISIBILITY_PUBLISH_CHUNK = 4096, VISIBILITY_BACKSTOP_MS = 5000, VISIBILITY_LEASE_MS = 30000, VISIBILITY_RETRY_MIN_MS = 1000, VISIBILITY_RETRY_MAX_MS = 60000, LEDGER_VISIBILITY_FEED_RETENTION = 8192, VISIBILITY_TICK_ITEMS = 256, visibilityWritersByLedger, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_RUN_ID = "restored-source-scope", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE = 512, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
-`, VECTOR_DIGEST_BACKFILL_MAX_ROWS = 128, VECTOR_DIGEST_BACKFILL_MIN_ROWS = 8, VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS = 25, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS = 250, vectorDigestBackfillHold = () => false, VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS = 60000, VECTOR_DIGEST_PAGE_ROWS = 4096, VECTOR_DIGEST_MIN_MARGIN = 0.05, VECTOR_DIGEST_MAX_CANDIDATES = 5000, VECTOR_SCAN_BACKSTOP_GRACE_MS = 250, PEOPLE_OFF_THREAD_READ_ATTEMPTS = 3, READ_ONLY_MIN_SCHEMA_VERSION = 7, INLINE_CLOSE_SQLITE_STORE = "const closeSqliteStore = (db) => { try { db.exec('PRAGMA wal_checkpoint(TRUNCATE);'); } catch {} db.close(); };", admitRecencyIndexBuild, recencyIndexBuilding = false, RECENCY_INDEX_RETRY_MS = 250, RECENCY_INDEX_BUSY_RETRY_MS = 2000, RECENCY_INDEX_NOT_ADMITTED_RETRY_MS = 30000, RECLAIM_MAX_PAGES_PER_STEP = 128, RECLAIM_CONVERSION_BYTES_PER_MS = 15000, SUPERSEDED_PRUNE_MEDIA_ROWS = 1, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_WEIGHT = 0.25, CHAT_RECENCY_PIN_COUNT = 2, CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8, lexicalContentPreference, STORE_LEADER_LATEST_SEAT = 1, LANE_LEADER_SEATS = 3, OWNER_AUTHOR_LABEL = "You", CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", PDF_EXTRACTION_BACKLOG_SQL = `
+`, VECTOR_DIGEST_BACKFILL_MAX_ROWS = 128, VECTOR_DIGEST_BACKFILL_MIN_ROWS = 8, VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS = 25, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS = 250, vectorDigestBackfillHold = () => false, VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS = 60000, VECTOR_DIGEST_PAGE_ROWS = 4096, VECTOR_DIGEST_MIN_MARGIN = 0.05, VECTOR_DIGEST_MAX_CANDIDATES = 5000, VECTOR_SCAN_BACKSTOP_GRACE_MS = 250, PEOPLE_OFF_THREAD_READ_ATTEMPTS = 3, READ_ONLY_MIN_SCHEMA_VERSION = 7, INLINE_CLOSE_SQLITE_STORE = "const closeSqliteStore = (db) => { try { db.exec('PRAGMA wal_checkpoint(TRUNCATE);'); } catch {} db.close(); };", admitRecencyIndexBuild, recencyIndexBuilding = false, RECENCY_INDEX_RETRY_MS = 250, RECENCY_INDEX_BUSY_RETRY_MS = 2000, RECENCY_INDEX_NOT_ADMITTED_RETRY_MS = 30000, RECLAIM_MAX_PAGES_PER_STEP = 128, RECLAIM_CONVERSION_BYTES_PER_MS = 15000, SUPERSEDED_PRUNE_MEDIA_ROWS = 1, grantNotifications, ON_DEMAND_GRANT_EPOCH_CHECK_MS = 250, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_WEIGHT = 0.25, CHAT_RECENCY_PIN_COUNT = 2, CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8, lexicalContentPreference, STORE_LEADER_LATEST_SEAT = 1, LANE_LEADER_SEATS = 3, OWNER_AUTHOR_LABEL = "You", CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", PDF_EXTRACTION_BACKLOG_SQL = `
   SELECT
     SUM(CASE WHEN chars IS NULL THEN 1 ELSE 0 END) AS pending,
     SUM(CASE WHEN chars IS NULL THEN 0 ELSE 1 END) AS extracted,
@@ -70077,7 +72267,12 @@ var TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff", DEFAULT_
   FROM items
   WHERE item_pk > ? AND item_pk <= ? AND tombstoned = 0 AND parent_local_item_id IS NULL
   GROUP BY provider
-`, CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, IMAGE_CONTENT_PAGE_KEYS = 20000, STATUS_PAGE_KEYS = 20000, statusPageKeys, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, openShape, PEOPLE_SENDER_PREDICATE = `((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))`, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
+`, CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, IMAGE_CONTENT_PAGE_KEYS = 20000, STATUS_PAGE_KEYS = 20000, statusPageKeys, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, FTS_CANDIDATE_IDENTITY_SQL = `i.local_item_id = json_extract(candidate.value, '$.localItemId')
+          AND i.provider = json_extract(candidate.value, '$.provider')
+          AND i.account_scope = json_extract(candidate.value, '$.accountScope')
+          AND i.provider_item_id = json_extract(candidate.value, '$.providerItemId')
+          AND i.normalized_conversation = COALESCE(json_extract(candidate.value, '$.providerConversationId'), '')
+          AND COALESCE(i.source_version, '') = COALESCE(json_extract(candidate.value, '$.sourceVersion'), '')`, MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, ON_DEMAND_GRANT_EPOCH_TRIGGERS, openShape, PEOPLE_SENDER_PREDICATE = `((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))`, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_memory_counters();
   init_local_pacing();
@@ -70131,7 +72326,9 @@ var init_local_index = __esm(() => {
   init_embeddings();
   init_manifest();
   init_media_judge();
+  init_router();
   init_types();
+  init_waiting_private_questions();
   init_sqlite_store();
   CONCEPT_COUNT_MAX_AGE_MS = 5 * 60000;
   CONNECTOR_STORE_CONVERSATION_INDEX_SQL = `CREATE INDEX IF NOT EXISTS ${CONNECTOR_STORE_CONVERSATION_INDEX}
@@ -70256,6 +72453,11 @@ var init_local_index = __esm(() => {
     childLane;
     chunkMediaColumnsPresent = false;
     imageMediaReadsPresent = false;
+    onDemandReadsTablePresent;
+    onDemandGrantEpochPresent = false;
+    onDemandGrantChecks;
+    onDemandGrantTimer;
+    onDemandGrantCheckedEpoch;
     itemTextVersionsPresent = false;
     mediaJudgmentsPresent = false;
     mediaHolder;
@@ -70304,7 +72506,7 @@ var init_local_index = __esm(() => {
         throw new Error("Connector store read-only mode requires an existing database path.");
       }
       if (options.readOnly === true) {
-        const stat = lstatSync21(this.dbPath);
+        const stat = lstatSync22(this.dbPath);
         if (!stat.isFile() || stat.isSymbolicLink()) {
           throw new Error("Connector store read-only mode requires a regular non-symlink database file.");
         }
@@ -70312,7 +72514,7 @@ var init_local_index = __esm(() => {
         assertStoreTierLedgerCanOpen(this.dbPath);
         assertWritableStoreOpenAllowed("connector store", this.dbPath);
         if (this.dbPath !== ":memory:")
-          mkdirSync23(dirname45(this.dbPath), { recursive: true, mode: 448 });
+          mkdirSync24(dirname46(this.dbPath), { recursive: true, mode: 448 });
       }
       const creatingFile = this.dbPath === ":memory:" || !existsSync39(this.dbPath);
       this.db = new Database9(this.dbPath, options.readOnly === true ? { readonly: true, create: false, strict: true } : { create: true });
@@ -70322,7 +72524,8 @@ var init_local_index = __esm(() => {
         applySqliteMmap(this.db);
         assertSqliteSchemaCanOpen(this.db, SQLITE_STORE_ID, CONNECTOR_STORE_SQLITE_SCHEMA_VERSION);
         const versionAtOpen = readSqliteSchemaVersion(this.db, SQLITE_STORE_ID);
-        const migrating = options.readOnly !== true && versionAtOpen < CONNECTOR_STORE_SQLITE_SCHEMA_VERSION;
+        const schemaTarget = options.restoreSchemaVersion ?? CONNECTOR_STORE_SQLITE_SCHEMA_VERSION;
+        const migrating = options.readOnly !== true && versionAtOpen < schemaTarget;
         validateCurrentConnectorStoreSchemaBeforeMigration(this.db);
         if (migrating) {
           setEngineStep(`checking ${SQLITE_STORE_ID} rows`);
@@ -70334,6 +72537,12 @@ var init_local_index = __esm(() => {
           if (version < READ_ONLY_MIN_SCHEMA_VERSION) {
             throw new Error("Connector store read-only mode requires the v7 filter schema or newer.");
           }
+        } else if (options.restoreSchemaVersion !== undefined) {
+          if (schemaTarget < 15 || schemaTarget > CONNECTOR_STORE_SQLITE_SCHEMA_VERSION || !creatingFile && versionAtOpen !== schemaTarget) {
+            throw new Error("The connector store cannot be written at its restored schema.");
+          }
+          if (creatingFile)
+            applyConnectorStoreOpenSchema(this.db, schemaTarget);
         } else {
           const current = !migrating && !creatingFile && this.db.query("PRAGMA user_version").get().user_version === connectorStoreOpenStamp(this.db);
           if (!current) {
@@ -70359,15 +72568,17 @@ var init_local_index = __esm(() => {
         this.childItemColumnsPresent = tableColumns(this.db, "items", false).includes("parent_local_item_id");
         this.chunkMediaColumnsPresent = tableColumns(this.db, "chunks", false).includes("media_sha256");
         this.imageMediaReadsPresent = this.db.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'image_media_reads'").get() !== null;
+        this.onDemandReadsTablePresent = !this.readOnly || this.db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'").get() !== null;
+        this.onDemandGrantEpochPresent = this.onDemandReadsTablePresent && this.db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_grant_epoch'").get() !== null;
         this.itemTextVersionsPresent = this.db.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'item_text_versions'").get() !== null;
         const judgmentColumns = this.db.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'media_judgments'").get() !== null ? tableColumns(this.db, "media_judgments", false) : [];
         this.mediaJudgmentsPresent = CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS.every((column) => judgmentColumns.includes(column));
-        if (!this.readOnly) {
+        if (!this.readOnly && options.restoreSchemaVersion === undefined) {
           const model = this.db.query("SELECT model_id FROM chunk_embeddings ORDER BY rowid DESC LIMIT 1").get()?.model_id;
           if (model && !vectorDigestState(this.db, model).completed)
             this.scheduleVectorDigestBackfill(model, VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS);
         }
-        if (!this.readOnly && !creatingFile && this.db.query("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name IN (?, ?)").get(CONNECTOR_STORE_RECENCY_INDEX, CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX).n < 2) {
+        if (!this.readOnly && options.restoreSchemaVersion === undefined && !creatingFile && this.db.query("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name IN (?, ?)").get(CONNECTOR_STORE_RECENCY_INDEX, CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX).n < 2) {
           if (admitRecencyIndexBuild)
             this.scheduleRecencyIndexBuild();
         }
@@ -70533,6 +72744,7 @@ var init_local_index = __esm(() => {
     close() {
       if (this.closedForPoolReads)
         return;
+      this.stopOnDemandGrantChecks();
       changeMemoryCounter("connector_stores", -1);
       untrackSqliteStoreMemory(this.db);
       this.tierLedgerHiddenMemo = undefined;
@@ -70556,6 +72768,7 @@ var init_local_index = __esm(() => {
       } finally {
         this.tierLedgerHandle = undefined;
         this.closedForPoolReads = true;
+        this.checkOnDemandGrantWork();
         if (offThreadReadsSupported(this.dbPath))
           releaseOffThreadReads(this.dbPath);
         closeSqliteStore(this.db, this.readOnly ? { checkpoint: false, readOnly: true } : buildingRecencyIndex ? { checkpoint: false } : undefined);
@@ -70597,7 +72810,7 @@ var init_local_index = __esm(() => {
         if (this.reclaimKilledAttempts >= 3 && storeOwnerIdleMs(this.now().getTime()) < 10 * 60000)
           return;
         const neededBytes = 2 * statSync18(this.dbPath).size + 1024 ** 3;
-        const disk = (options.statfs ?? statfsSync)(dirname45(this.dbPath));
+        const disk = (options.statfs ?? statfsSync)(dirname46(this.dbPath));
         const availableBytes = Number(disk.bavail) * Number(disk.bsize);
         if (!Number.isFinite(availableBytes) || availableBytes < neededBytes) {
           console.info(`[store-reclaim] conversion_skipped reason=disk_space needed_bytes=${neededBytes} available_bytes=${availableBytes}`);
@@ -70715,10 +72928,10 @@ var init_local_index = __esm(() => {
         const ledger = this.tierLedger();
         if (!ledger)
           return false;
-        const read = ledger.classificationRead(item.identity);
         const existing = ledger.getCurrent(item.identity);
         if (!existing)
           return false;
+        const read = ledger.classificationRead(item.identity, text);
         const override = read.override;
         const metadataString = (keys) => {
           for (const key of keys) {
@@ -72465,7 +74678,7 @@ ${parentKey(ref)}`, { ref, origin });
     `).get(item.identity.provider, item.identity.accountScope, normalizeConversationId(item.identity.providerConversationId), item.identity.providerItemId);
       if (!row)
         return;
-      this.rememberItemOwner(row.item_pk, connectorId, ownershipKind, syncRunId, nowIso(), "provider_listing");
+      this.rememberItemOwner(row.item_pk, connectorId, ownershipKind, syncRunId, this.now().toISOString(), "provider_listing");
     }
     tombstoneCopy(identity, options) {
       const syncRunId = `connector-tier-copy-${randomUUID12()}`;
@@ -73781,6 +75994,23 @@ ${parentKey(ref)}`, { ref, origin });
         tombstoned: row.tombstoned === 1
       };
     }
+    repeatsListedCopy(item, text, connectorId) {
+      if (!this.childItemColumnsPresent)
+        return false;
+      const { identity, metadata } = item;
+      const title = itemTitle(item);
+      const sender = senderMetadataFromRawItem(item);
+      const locator = metadataString(metadata, "locatorUri") ?? metadataString(metadata, "pathDisplay") ?? metadataString(metadata, "url");
+      const chunks = this.db.query(`SELECT c.bounded_text FROM items i JOIN chunks c USING (item_pk)
+      WHERE i.provider = ? AND i.account_scope = ? AND i.normalized_conversation = ? AND i.provider_item_id = ?
+        AND i.tombstoned = 0 AND i.source_version IS ? AND i.title IS ? AND i.search_text IS ?
+        AND i.sender_label IS ? AND i.sender_id IS ? AND i.locator_uri IS ? AND i.mime_type IS ?
+        AND i.parent_local_item_id IS ?
+        AND (i.source_version IS NOT NULL OR EXISTS (
+          SELECT 1 FROM item_owners o WHERE o.item_pk = i.item_pk AND o.connector_id <> ?
+        )) ORDER BY c.chunk_index`).all(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId, identity.sourceVersion ?? null, title ?? null, itemSearchText(item, title) ?? null, sender.senderLabel ?? null, sender.senderId ?? null, locator ?? null, item.mimeType, identity.parent?.localItemId ?? null, connectorId);
+      return chunks.length > 0 && chunks.map((chunk) => chunk.bounded_text).join("") === text.trim();
+    }
     itemPresence(identity) {
       const row = this.db.query(`
       SELECT source_version, content_hash, tombstoned
@@ -74150,6 +76380,108 @@ ${parentKey(ref)}`, { ref, origin });
     grantOnDemandRead(localItemId, sourceVersion = "") {
       this.db.query(`INSERT INTO on_demand_item_reads(local_item_id, source_version) VALUES (?, ?)
       ON CONFLICT(local_item_id) DO UPDATE SET source_version = excluded.source_version`).run(localItemId, sourceVersion);
+      this.notifyOnDemandGrantChange();
+    }
+    revokeOnDemandRead(localItemId) {
+      const previous = this.db.query("PRAGMA busy_timeout").get().timeout;
+      this.db.exec(`PRAGMA busy_timeout = ${Math.min(previous, REVOCATION_WRITE_LIMIT.milliseconds)}`);
+      try {
+        const removed = this.db.query("DELETE FROM on_demand_item_reads WHERE local_item_id = ?").run(localItemId);
+        if (removed.changes > 0)
+          this.notifyOnDemandGrantChange();
+      } finally {
+        this.db.exec(`PRAGMA busy_timeout = ${previous}`);
+      }
+    }
+    onDemandGrantEpoch() {
+      if (this.closedForPoolReads || !this.onDemandReadsTablePresent)
+        return;
+      if (!this.onDemandGrantEpochPresent) {
+        this.onDemandGrantEpochPresent = !!this.db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_grant_epoch'").get();
+        if (!this.onDemandGrantEpochPresent)
+          return;
+      }
+      return this.db.query("SELECT epoch FROM on_demand_grant_epoch WHERE id = 1").get()?.epoch;
+    }
+    currentOnDemandRead(localItemId, sourceVersion) {
+      const current = this.currentOnDemandGrant(localItemId);
+      return current !== undefined && (sourceVersion === undefined || current.source_version === sourceVersion);
+    }
+    currentOnDemandGrant(localItemId) {
+      if (!this.onDemandReadsTablePresent || this.closedForPoolReads)
+        return;
+      const acquisition = this.onDemandGrantEpochPresent ? "COALESCE((SELECT epoch FROM on_demand_grant_acquisitions WHERE local_item_id = r.local_item_id), 0)" : "(SELECT -(data_version + total_changes()) FROM pragma_data_version)";
+      return this.db.query(`SELECT r.source_version, ${acquisition} AS acquired_epoch
+      FROM on_demand_item_reads r JOIN items i ON i.local_item_id = r.local_item_id
+      AND COALESCE(i.source_version, '') = r.source_version
+      WHERE r.local_item_id = ? AND i.tombstoned = 0 LIMIT 1`).get(localItemId) ?? undefined;
+    }
+    observeOnDemandRead(localItemId, sourceVersion, controller) {
+      const epoch = this.onDemandGrantEpoch();
+      const grant = this.currentOnDemandGrant(localItemId);
+      if (!grant || sourceVersion !== undefined && sourceVersion !== grant.source_version)
+        return;
+      let checkedEpoch = epoch;
+      let valid = true;
+      const checkAtEpoch = (currentEpoch) => {
+        if (!valid)
+          return false;
+        if (currentEpoch === undefined || currentEpoch !== checkedEpoch) {
+          const current = this.currentOnDemandGrant(localItemId);
+          valid = current?.source_version === grant.source_version && current.acquired_epoch === grant.acquired_epoch;
+          if (!valid)
+            controller.abort();
+          checkedEpoch = currentEpoch;
+        }
+        return valid;
+      };
+      const check = () => checkAtEpoch(this.onDemandGrantEpoch());
+      const checks = this.onDemandGrantChecks ??= new Set;
+      checks.add(checkAtEpoch);
+      if (checks.size === 1 && this.dbPath !== ":memory:") {
+        this.onDemandGrantTimer = setInterval(this.checkOnDemandGrantWork, ON_DEMAND_GRANT_EPOCH_CHECK_MS);
+        this.onDemandGrantTimer.unref?.();
+        const paths = grantNotifications ??= new Map;
+        const path = resolve15(this.dbPath);
+        const listeners = paths.get(path) ?? new Set;
+        listeners.add(this.checkOnDemandGrantWork);
+        paths.set(path, listeners);
+      }
+      check();
+      return { check, release: () => {
+        checks.delete(checkAtEpoch);
+        if (checks.size === 0)
+          this.stopOnDemandGrantChecks();
+      } };
+    }
+    checkOnDemandGrantWork = () => {
+      const checks = this.onDemandGrantChecks;
+      if (!checks?.size)
+        return;
+      const epoch = this.onDemandGrantEpoch();
+      if (epoch !== undefined && epoch === this.onDemandGrantCheckedEpoch)
+        return;
+      this.onDemandGrantCheckedEpoch = epoch;
+      for (const notify of checks)
+        notify(epoch);
+    };
+    notifyOnDemandGrantChange() {
+      if (this.dbPath === ":memory:")
+        this.checkOnDemandGrantWork();
+      else
+        for (const notify of grantNotifications?.get(resolve15(this.dbPath)) ?? [])
+          notify();
+    }
+    stopOnDemandGrantChecks() {
+      clearInterval(this.onDemandGrantTimer);
+      this.onDemandGrantTimer = undefined;
+      if (this.dbPath === ":memory:")
+        return;
+      const path = resolve15(this.dbPath);
+      const listeners = grantNotifications?.get(path);
+      listeners?.delete(this.checkOnDemandGrantWork);
+      if (listeners?.size === 0)
+        grantNotifications?.delete(path);
     }
     onDemandContentHeld(identity) {
       if (!this.db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'").get())
@@ -74432,7 +76764,7 @@ ${parentKey(ref)}`, { ref, origin });
           embeddingsComplete: false
         };
       }
-      const chunkTextCoherent = chunkRows.every((chunk) => createHash33("sha256").update(chunk.bounded_text).digest("hex") === chunk.content_hash);
+      const chunkTextCoherent = chunkRows.every((chunk) => createHash34("sha256").update(chunk.bounded_text).digest("hex") === chunk.content_hash);
       if (!chunkTextCoherent) {
         return {
           chunksIndexed: 0,
@@ -74593,6 +76925,7 @@ ${parentKey(ref)}`, { ref, origin });
         seenIdentities.add(key);
       }
       const tierLedgerForWrite = this.visibilityLedger();
+      const landed = [];
       const summary = this.db.transaction(() => {
         const syncRunId = `connector-representation-restore-${randomUUID12()}`;
         const startedAt = this.now().toISOString();
@@ -74615,7 +76948,7 @@ ${parentKey(ref)}`, { ref, origin });
         const skippedProviderItemIds = [];
         for (const record of options.items) {
           const item = record.item;
-          if (!this.tierWriteAllowed(item.identity, "content", tierLedgerForWrite)) {
+          if (!this.tierWriteAllowed(item.identity, options.route ? "metadata" : "content", tierLedgerForWrite)) {
             itemsMetadataOnly += 1;
             skippedProviderItemIds.push(item.identity.providerItemId);
             continue;
@@ -74636,10 +76969,11 @@ ${parentKey(ref)}`, { ref, origin });
             COUNT(*) AS matching_provider_id_rows,
             SUM(CASE WHEN normalized_conversation = ? THEN 1 ELSE 0 END) AS exact_identity_rows,
             MIN(CASE WHEN normalized_conversation = ? THEN item_pk END) AS item_pk,
-            MIN(CASE WHEN normalized_conversation = ? THEN tombstoned END) AS tombstoned
+            MIN(CASE WHEN normalized_conversation = ? THEN tombstoned END) AS tombstoned,
+            MIN(CASE WHEN normalized_conversation = ? THEN source_version END) AS source_version
           FROM items
           WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
-        `).get(normalizeConversationId(item.identity.providerConversationId), normalizeConversationId(item.identity.providerConversationId), normalizeConversationId(item.identity.providerConversationId), item.identity.provider, item.identity.accountScope, item.identity.providerItemId);
+        `).get(normalizeConversationId(item.identity.providerConversationId), normalizeConversationId(item.identity.providerConversationId), normalizeConversationId(item.identity.providerConversationId), normalizeConversationId(item.identity.providerConversationId), item.identity.provider, item.identity.accountScope, item.identity.providerItemId);
           if (identityAmbiguous(item.identity, existing)) {
             throw new Error("Representation restore refused because a targeted identity matches multiple store rows.");
           }
@@ -74669,16 +77003,70 @@ ${parentKey(ref)}`, { ref, origin });
             skippedProviderItemIds.push(item.identity.providerItemId);
             continue;
           }
+          const expectedVersion = record.expectedStoredSourceVersion !== undefined ? record.expectedStoredSourceVersion : item.identity.sourceVersion;
+          const route = options.route && (expectedVersion === undefined || existing.source_version === expectedVersion) ? options.route(record) : undefined;
+          if (options.route && (!route || ("refused" in route))) {
+            if (route && "refused" in route)
+              landed.push(route.refused);
+            itemsMetadataOnly += 1;
+            skippedProviderItemIds.push(item.identity.providerItemId);
+            continue;
+          }
+          const landing = route && "store" in route ? route : undefined;
+          if (landing && landing.store !== this) {
+            const placed = landing.store.withItemCopyWriteFence(item.identity, () => {
+              if (!landing.prepare())
+                return;
+              return landing.store.restoreItemRepresentations({
+                items: [record],
+                syncConnectorId,
+                ownerConnectorId,
+                ownershipKind: options.ownershipKind,
+                classify: () => landing.sensitivity,
+                ...writeClaim ? { writeClaim } : {},
+                ...options.maxChunkChars !== undefined ? { maxChunkChars: options.maxChunkChars } : {},
+                ...options.preserveStoredSearchText ? { preserveStoredSearchText: true } : {},
+                ...options.preserveStoredSearchTextOwnedFacets ? { preserveStoredSearchTextOwnedFacets: true } : {}
+              });
+            });
+            if (!placed) {
+              itemsMetadataOnly += 1;
+              skippedProviderItemIds.push(item.identity.providerItemId);
+              continue;
+            }
+            const { counts } = placed;
+            itemsRestored += counts.itemsRestored;
+            itemsUnchanged += counts.itemsUnchanged;
+            itemsExcluded += counts.itemsExcluded;
+            itemsMetadataOnly += counts.itemsMetadataOnly;
+            itemsSkippedTombstoned += counts.itemsSkippedTombstoned;
+            itemsSkippedStaleClaim += counts.itemsSkippedStaleClaim;
+            chunksAwaitingEmbedding += counts.chunksAwaitingEmbedding;
+            if (counts.itemsRestored > 0)
+              restoredProviderItemIds.push(item.identity.providerItemId);
+            if (counts.itemsRestored + counts.itemsUnchanged > 0)
+              landed.push(landing.landed);
+            else
+              skippedProviderItemIds.push(item.identity.providerItemId);
+            continue;
+          }
+          if (landing && !landing.prepare()) {
+            itemsMetadataOnly += 1;
+            skippedProviderItemIds.push(item.identity.providerItemId);
+            continue;
+          }
           if (this.itemRepresentationCoverage(record.expectation).complete) {
             if (this.imageMediaReadsPresent && isImageMediaType(item.mimeType) && this.imageFormatReadsPictures(item.mimeType)) {
               this.db.query("INSERT OR REPLACE INTO image_media_reads (item_pk, read_at) VALUES (?, ?)").run(existing.item_pk, this.now().toISOString());
             }
             this.clearItemTextVersion(existing.item_pk);
             itemsUnchanged += 1;
+            if (landing)
+              landed.push(landing.landed);
             continue;
           }
-          const sensitivity = options.classify(item);
-          if (sensitivity.trustDomain !== this.trustDomain || sensitivity.trustTier === "S5") {
+          const sensitivity = landing?.sensitivity ?? options.classify?.(item);
+          if (!sensitivity || sensitivity.trustDomain !== this.trustDomain || sensitivity.trustTier === "S5") {
             throw new Error("Representation restore item classification is not eligible for this store.");
           }
           const upsert = this.upsertItemWithOwner(item, sensitivity, ownerConnectorId, options.ownershipKind, syncRunId, "local_write", options.preserveStoredSearchText === true, options.preserveStoredSearchTextOwnedFacets === true);
@@ -74700,6 +77088,8 @@ ${parentKey(ref)}`, { ref, origin });
         `).get(upsert.itemPk).count;
           itemsRestored += 1;
           restoredProviderItemIds.push(item.identity.providerItemId);
+          if (landing)
+            landed.push(landing.landed);
         }
         const completedAt = this.now().toISOString();
         this.db.query(`
@@ -74724,6 +77114,8 @@ ${parentKey(ref)}`, { ref, origin });
           skippedProviderItemIds: skippedProviderItemIds.sort()
         };
       }).immediate();
+      for (const commit of landed)
+        commit();
       for (const record of options.items) {
         if (record.media && summary.restoredProviderItemIds.includes(record.item.identity.providerItemId)) {
           retainMediaCacheFile(record.media.path, record.media.sha256, this.mediaHolder);
@@ -75122,6 +77514,14 @@ ${parentKey(ref)}`, { ref, origin });
     `).run(itemPk, claim.scope, claim.authority, claim.ordinal, claim.holder, claim.generation, this.now().toISOString());
       return true;
     }
+    hasNewerItemWriteClaim(identity, claim) {
+      return this.db.query(`
+      SELECT 1 FROM item_write_claims w
+      JOIN items i ON i.item_pk = w.item_pk
+      WHERE i.provider = ? AND i.account_scope = ? AND i.normalized_conversation = ?
+        AND i.provider_item_id = ? AND w.claim_scope = ? AND w.claim_authority = ? AND w.claim_ordinal > ?
+    `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId, claim.scope, claim.authority, claim.ordinal) !== null;
+    }
     purgeExcludedItems(options) {
       try {
         return this.purgeExcludedItemsHeld(options);
@@ -75351,8 +77751,8 @@ ${parentKey(ref)}`, { ref, origin });
         itemsUnchanged: 0,
         itemsMissing: 0
       };
-      const inputDigest = createHash33("sha256");
-      const outputDigest = createHash33("sha256");
+      const inputDigest = createHash34("sha256");
+      const outputDigest = createHash34("sha256");
       const select = this.db.query(`
       SELECT item_pk, sender_id, sender_label, sender_is_owner
       FROM items
@@ -75429,8 +77829,8 @@ ${parentKey(ref)}`, { ref, origin });
         ftsRowsRefreshed: 0,
         chunkEmbeddingInputsInvalidated: 0
       };
-      const inputDigest = createHash33("sha256");
-      const outputDigest = createHash33("sha256");
+      const inputDigest = createHash34("sha256");
+      const outputDigest = createHash34("sha256");
       let lastItemPk = startAfter;
       let hasMore = false;
       while (maxItems === undefined || counts.itemsScanned < maxItems) {
@@ -75852,7 +78252,7 @@ ${parentKey(ref)}`, { ref, origin });
               tallyExclusion(metadataOnlyTally, exclusion);
             let itemForStorage = item;
             let contentFetchFailed = false;
-            if (!metadataOnly && !deferMetadataOnlyContent && item.deferredBytes === undefined && classification && fetchContent && item.content.kind === "metadata_only") {
+            if (!metadataOnly && !deferMetadataOnlyContent && item.deferredBytes === undefined && (classification || tierRouting) && fetchContent && item.content.kind === "metadata_only") {
               try {
                 itemForStorage = carryHold(item, await connector.fetchItem(item.identity.localItemId));
                 consecutiveContentFetchFailures = 0;
@@ -75959,7 +78359,7 @@ ${parentKey(ref)}`, { ref, origin });
             itemsIndexed += 1;
             let itemChanged = upsert.contentChanged;
             let ftsContentChanged = false;
-            if (fetchContent && !contentFetchFailed && !metadataOnly && routedLayer !== "metadata" && (!(deferMetadataOnlyContent || itemForStorage.deferredBytes !== undefined) || itemForStorage.content.kind !== "metadata_only")) {
+            if ((fetchContent || route.kind === "store" && route.writeListedBody && itemForStorage.content.kind !== "metadata_only") && !contentFetchFailed && !metadataOnly && routedLayer !== "metadata" && !(tierRouting && itemForStorage.content.kind === "metadata_only") && (!(deferMetadataOnlyContent || itemForStorage.deferredBytes !== undefined) || itemForStorage.content.kind !== "metadata_only")) {
               const indexed = await this.indexItemContent(connector, (fetched) => routedLayer !== undefined ? sensitivity : classifyConnectorStoreItem(fetched, classification, placement, this.trustDomain), (fetched, fetchedSensitivity) => routedLayer !== undefined ? undefined : this.recordTierDecision(connector, fetched, fetchedSensitivity, tierClassification, tierRun, itemContentKeptNamesOnly(fetched)), itemForStorage, upsert.itemPk, maxChunkChars, gaps, () => {
                 consecutiveContentFetchFailures += 1;
                 assertContentFetchFailureBudget(consecutiveContentFetchFailures);
@@ -77826,12 +80226,12 @@ ${parentKey(ref)}`, { ref, origin });
       const searchRows = this.searchRowsByItemPks(rankedItems.map(([itemPk]) => itemPk), selectedAccount, filters);
       const laneRows = rankedItems.flatMap(([itemPk, winner]) => {
         const row = searchRows.get(itemPk);
-        if (!row || row.sourceItem.localItemId !== winner.localItemId)
+        if (!row || row.sourceItem.localItemId !== winner.localItemId || (row.sourceItem.sourceVersion ?? "") !== (winner.sourceVersion ?? ""))
           return [];
         if (!input.locate)
           return [{ ...row, contentMatched: true, bestCosine: winner.bestCosine }];
         const chunk = this.chunkMatchForChunkPk(winner.bestChunkPk, itemPk, winner.bestChunkContentHash);
-        return [{ ...row, ...chunk ? { chunk } : {}, bestCosine: winner.bestCosine }];
+        return [{ ...row, ...chunk ? { chunk } : { contentMatched: true }, bestCosine: winner.bestCosine }];
       });
       return {
         rows: laneRows,
@@ -78106,20 +80506,28 @@ ${parentKey(ref)}`, { ref, origin });
       return step.value;
     }
     stillVisibleSearchRows(rows) {
-      return this.tierVisibleRows(rows, (row) => ({
-        provider: row.sourceItem.provider,
-        accountScope: row.sourceItem.accountScope,
-        providerItemId: row.sourceItem.providerItemId,
-        ...row.sourceItem.providerConversationId ? { providerConversationId: row.sourceItem.providerConversationId } : {}
-      }), (row) => row.chunk !== undefined || row.contentMatched === true ? "content" : "metadata");
+      return visibilityHere(this.stillVisibleSearchRowsSteps(rows));
     }
     async stillVisibleSearchRowsOffThread(rows) {
-      return visibilityAwaited(() => this.tierVisibleRowsSteps(rows, (row) => ({
-        provider: row.sourceItem.provider,
-        accountScope: row.sourceItem.accountScope,
-        providerItemId: row.sourceItem.providerItemId,
-        ...row.sourceItem.providerConversationId ? { providerConversationId: row.sourceItem.providerConversationId } : {}
-      }), (row) => row.chunk !== undefined || row.contentMatched === true ? "content" : "metadata"), this.childVisibilityLane());
+      return visibilityAwaited(() => this.stillVisibleSearchRowsSteps(rows), this.childVisibilityLane());
+    }
+    *stillVisibleSearchRowsSteps(rows) {
+      return yield* this.tierVisibleRowsSteps(rows, (row) => row.sourceItem, (row) => connectorStoreRowHasContent(row) ? "content" : "metadata");
+    }
+    searchGrantLayers(hits, filters) {
+      if (this.closedForPoolReads)
+        return new Map;
+      const metadataOnly = connectorStoreMetadataOnlySql(filters, this.onDemandReadsTablePresent);
+      const read = {
+        mode: "all",
+        sql: `SELECT candidate.key AS idx, ${metadataOnly.sql} AS names_only
+        FROM json_each(?) candidate CROSS JOIN items i
+        WHERE ${FTS_CANDIDATE_IDENTITY_SQL}
+          AND i.tombstoned = 0`,
+        params: [...metadataOnly.params, JSON.stringify(hits.map((hit) => hit.sourceItem))]
+      };
+      const allowed = visibilityHere(this.visibilityStoreRead(read));
+      return new Map(allowed.map((row) => [hits[row.idx], row.names_only ? "metadata" : "content"]));
     }
     closedForPoolReads = false;
     conceptCountMemo;
@@ -78189,9 +80597,20 @@ ${parentKey(ref)}`, { ref, origin });
     }
     *searchItemsSteps(query, maxResults, accountScope, filters, ftsOptions) {
       const selectedFilters = connectorStoreFilterSql(filters);
-      const onDemandReadsTablePresent = Boolean((filters?.metadataOnlyLocatorPathScopes?.length || filters?.metadataOnlySourceScopeFolderKeys?.length) && (yield { mode: "get", sql: "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'", params: [] }));
-      const selectedFtsScope = connectorStoreFtsScopeSql(filters, onDemandReadsTablePresent);
-      const conceptScope = connectorStoreFtsScopeSql(filters, onDemandReadsTablePresent, "r.chunk_pk");
+      if (!this.onDemandReadsTablePresent && (filters?.metadataOnlyLocatorPathScopes?.length || filters?.metadataOnlySourceScopeFolderKeys?.length)) {
+        this.onDemandReadsTablePresent = Boolean(yield {
+          mode: "get",
+          sql: "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'",
+          params: []
+        });
+      }
+      const metadataCandidates = ftsOptions.metadataCandidates;
+      const selectedFtsScope = metadataCandidates ? {
+        sql: `AND connector_store_fts.chunk_pk IS NULL
+        AND i.item_pk IN (SELECT i.item_pk FROM json_each(?) candidate CROSS JOIN items i WHERE ${FTS_CANDIDATE_IDENTITY_SQL})`,
+        params: [JSON.stringify(metadataCandidates)]
+      } : connectorStoreFtsScopeSql(filters, this.onDemandReadsTablePresent);
+      const conceptScope = metadataCandidates ? { sql: "AND r.chunk_pk IS NULL", params: [] } : connectorStoreFtsScopeSql(filters, this.onDemandReadsTablePresent, "r.chunk_pk");
       const terms = ftsOptions.relaxed ? ftsOptions.privatePrecision ? yield* this.privateRelaxedFtsQuerySteps(query) : toRelaxedLocalFtsQuery(query) : toFtsQuery(query, ftsOptions);
       if (!terms)
         return { rows: [], saturated: false, concepts: { total: 0, matched: new Map } };
@@ -78206,6 +80625,7 @@ ${parentKey(ref)}`, { ref, origin });
       const matchedGroupIndexes = new Map;
       let conceptWeights;
       const selected = [];
+      const fallbackRows = new Map;
       const seen = new Set;
       let scanned = 0;
       let pageSize = fetchLimit;
@@ -78316,8 +80736,34 @@ ${parentKey(ref)}`, { ref, origin });
         })));
         const visible = eligible ? current.filter((_, index) => eligible[index]) : current;
         selected.push(...visible);
-        if (visible.length > 0)
-          ftsOptions.onPartialRows?.(selected.slice(0, limit).map(searchRowFromItemRow));
+        if (ftsOptions.prepareGrantFallbacks && visible.length > 0) {
+          const pageBodies = visible.filter((row) => row.chunk_pk != null);
+          if (pageBodies.length > 0) {
+            const metadataCandidates = pageBodies.map((row) => searchRowFromItemRow(row).sourceItem);
+            const metadata = yield* this.searchItemsSteps(query, MAX_SEARCH_RESULTS, accountScope, filters, {
+              ...ftsOptions,
+              contentOnly: false,
+              locate: false,
+              onPartialRows: undefined,
+              prepareGrantFallbacks: false,
+              metadataCandidates
+            });
+            const byVersion = new Map(metadata.rows.map((row) => [searchGrantIdentityKey(row.sourceItem), row]));
+            for (const [index, candidate] of metadataCandidates.entries()) {
+              const fallback = byVersion.get(searchGrantIdentityKey(candidate));
+              if (fallback)
+                fallbackRows.set(pageBodies[index].item_pk, fallback);
+            }
+          }
+        }
+        if (visible.length > 0 && ftsOptions.onPartialRows) {
+          const partial = selected.slice(0, limit).map((row) => ({
+            ...searchRowFromItemRow(row),
+            ...row.chunk_pk != null ? { contentMatched: true } : {},
+            ...fallbackRows.has(row.item_pk) ? { metadataFallback: fallbackRows.get(row.item_pk) } : {}
+          }));
+          ftsOptions.onPartialRows(partial, ftsOptions.contentOnly);
+        }
         if (exhausted || selected.length >= limit || visible.length === signalled.length || scanned >= KEYWORD_CANDIDATE_SCAN_CAP)
           break;
         pageSize = Math.min(pageSize * 4, KEYWORD_CANDIDATE_SCAN_CAP - scanned);
@@ -78328,7 +80774,8 @@ ${parentKey(ref)}`, { ref, origin });
       const locatedRows = [];
       const chunks = ftsOptions.locate === false ? new Map : yield* this.keywordChunkMatchesSteps(kept, spanTerms);
       for (const [index, row] of kept.entries()) {
-        const base = searchRowFromItemRow(row);
+        const fallback = fallbackRows.get(row.item_pk);
+        const base = { ...searchRowFromItemRow(row), ...fallback ? { metadataFallback: fallback } : {} };
         if (ftsOptions.locate === false || row.chunk_pk === null || row.chunk_pk === undefined) {
           located.push(row.chunk_pk === null || row.chunk_pk === undefined || ftsOptions.locate !== false ? base : { ...base, contentMatched: true });
           locatedRows.push(row);
@@ -79824,6 +82271,13 @@ ${parentKey(ref)}`, { ref, origin });
     "attempts",
     "tier_checked_at"
   ];
+  ON_DEMAND_GRANT_EPOCH_TRIGGERS = [
+    "on_demand_grant_delete",
+    "on_demand_grant_update",
+    "on_demand_item_delete",
+    "on_demand_item_update",
+    "on_demand_grant_insert"
+  ];
   LOCAL_RELAXED_STOPWORDS = new Set([
     "do",
     "i",
@@ -79872,8 +82326,8 @@ ${parentKey(ref)}`, { ref, origin });
 
 // src/core/source-storage.ts
 import { Database as Database10 } from "bun:sqlite";
-import { existsSync as existsSync40, lstatSync as lstatSync22, mkdtempSync as mkdtempSync2, readdirSync as readdirSync8, rmSync as rmSync11, rmdirSync as rmdirSync2, statSync as statSync19 } from "node:fs";
-import { basename as basename10, join as join51, resolve as resolve14, sep as sep12 } from "node:path";
+import { existsSync as existsSync40, lstatSync as lstatSync23, mkdtempSync as mkdtempSync2, readdirSync as readdirSync8, rmSync as rmSync11, rmdirSync as rmdirSync2, statSync as statSync19 } from "node:fs";
+import { basename as basename10, join as join51, resolve as resolve16, sep as sep12 } from "node:path";
 function enableSourceRegistryAdoption() {
   adoptionEnabled = true;
 }
@@ -79976,7 +82430,7 @@ function reclaimEmptyCaptureClaims(env = process.env) {
       continue;
     let stat;
     try {
-      stat = lstatSync22(claim);
+      stat = lstatSync23(claim);
     } catch {
       continue;
     }
@@ -80168,7 +82622,7 @@ function storeFileKey(dbPath) {
     const stat = statSync19(dbPath);
     return `file:${stat.dev}:${stat.ino}`;
   } catch {
-    return `path:${resolve14(dbPath)}`;
+    return `path:${resolve16(dbPath)}`;
   }
 }
 function unavailableStateReason(state) {
@@ -80256,6 +82710,23 @@ function storeFileReads(path, busyTimeoutMs = 2000) {
       closeSqliteStore(db, { checkpoint: false });
   }
 }
+function storeFileSchemaVersion(path, storeId) {
+  const db = openToLookAt(path, 0);
+  try {
+    return readSqliteSchemaVersion(db, storeId);
+  } finally {
+    closeSqliteStore(db, { checkpoint: false });
+  }
+}
+function restoredConnectorStoreHasBody(path) {
+  const db = openToLookAt(path, 0);
+  try {
+    const chunks = db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'chunks'").get();
+    return !!chunks && !!db.query("SELECT 1 FROM chunks WHERE length(bounded_text) > 0 LIMIT 1").get();
+  } finally {
+    closeSqliteStore(db, { checkpoint: false });
+  }
+}
 function storeFileQuickCheck(path, busyTimeoutMs = 2000) {
   let db;
   try {
@@ -80303,6 +82774,7 @@ function storeFileCheckpoint(path, busyTimeoutMs = 2000) {
 var DEFAULT_STORAGE_SLOT, SourceStorageUnavailableError, adoptionEnabled = false, storeOpens2 = 0, CAPTURE_CLAIM_RECLAIM_AGE_MS, busyWait = (ms) => Math.max(0, Math.floor(ms));
 var init_source_storage = __esm(() => {
   init_sqlite_store();
+  init_sqlite_migrations();
   init_store_write_guard();
   init_secret_locations();
   init_sniffer_store();
@@ -80335,7 +82807,7 @@ var init_source_storage = __esm(() => {
 });
 
 // src/core/pairing-placement.ts
-import { mkdirSync as mkdirSync24, rmdirSync as rmdirSync3 } from "node:fs";
+import { mkdirSync as mkdirSync25, rmdirSync as rmdirSync3 } from "node:fs";
 async function settlePairingPlacement(account, env, options = {}) {
   const slot = account.slot ?? DEFAULT_ACCOUNT_SLOT;
   const entryLayout = (read) => {
@@ -80368,7 +82840,7 @@ async function settlePairingPlacement(account, env, options = {}) {
   if (layout !== "legacy")
     return layout;
   const claimDir = legacyCaptureClaimDir(account.sourceId, env);
-  const made = claimDir ? mkdirSync24(claimDir, { recursive: true, mode: 448 }) : undefined;
+  const made = claimDir ? mkdirSync25(claimDir, { recursive: true, mode: 448 }) : undefined;
   const settled = entryLayout(readSourceRegistryUnderLease) ?? "legacy";
   if (settled === "folder" && made && claimDir) {
     try {
@@ -80403,11 +82875,11 @@ var init_pairing_placement = __esm(() => {
 });
 
 // src/core/whatsapp-bridge-name.ts
-import { createHash as createHash34 } from "node:crypto";
+import { createHash as createHash35 } from "node:crypto";
 import { existsSync as existsSync41, readdirSync as readdirSync9, readFileSync as readFileSync38 } from "node:fs";
 import { join as join52 } from "node:path";
 function whatsappBridgeFileName(sourceDir) {
-  const hash = createHash34("sha256");
+  const hash = createHash35("sha256");
   for (const name of ["main.go", "go.mod", "go.sum"]) {
     const path = join52(sourceDir, name);
     if (!existsSync41(path))
@@ -80488,15 +82960,15 @@ var init_messaging_chat_kinds = __esm(() => {
 
 // src/core/messaging-pairing.ts
 import { Database as Database11 } from "bun:sqlite";
-import { chmodSync as chmodSync13, existsSync as existsSync42, linkSync as linkSync3, lstatSync as lstatSync23, mkdirSync as mkdirSync25, renameSync as renameSync5, rmSync as rmSync12, rmdirSync as rmdirSync4, statSync as statSync20 } from "node:fs";
+import { chmodSync as chmodSync14, existsSync as existsSync42, linkSync as linkSync3, lstatSync as lstatSync24, mkdirSync as mkdirSync26, renameSync as renameSync5, rmSync as rmSync12, rmdirSync as rmdirSync4, statSync as statSync20 } from "node:fs";
 import { spawn as spawnChild } from "node:child_process";
 import { randomBytes as randomBytes19 } from "node:crypto";
 import { homedir as homedir24 } from "node:os";
-import { dirname as dirname46, join as join53, resolve as resolve15 } from "node:path";
+import { dirname as dirname47, join as join53, resolve as resolve17 } from "node:path";
 import { fileURLToPath as fileURLToPath7 } from "node:url";
 async function pairMessagingSource(options) {
   const env = { ...process.env, ...options.env ?? {} };
-  const packageRoot = resolve15(options.packageRoot ?? join53(dirname46(fileURLToPath7(import.meta.url)), "..", ".."));
+  const packageRoot = resolve17(options.packageRoot ?? join53(dirname47(fileURLToPath7(import.meta.url)), "..", ".."));
   const runner = options.runCommand ?? runPairingCommand;
   const secretStore = options.secretStore ?? createDefaultSecretStore();
   const account = { sourceId: options.source === "telegram" ? TELEGRAM_SOURCE_ID : WHATSAPP_SOURCE_ID };
@@ -80510,7 +82982,7 @@ async function pairMessagingSource(options) {
   };
   const sessionPath = options.source === "telegram" ? telegramSessionBasePath(pathContext) : whatsappStateDir(pathContext);
   if (layout === "folder") {
-    mkdirSync25(options.source === "telegram" ? dirname46(sessionPath) : sessionPath, { recursive: true, mode: 448 });
+    mkdirSync26(options.source === "telegram" ? dirname47(sessionPath) : sessionPath, { recursive: true, mode: 448 });
   }
   const pairing = async () => {
     if (options.source === "telegram")
@@ -80570,7 +83042,7 @@ async function pairMessagingSource(options) {
         throw pairingFailure(options.source, safeErrorCode(result.stderr));
       }
       receipt = parseReadyReceipt(stdoutEvents, options.source);
-      if (options.source === "telegram" && (typeof receipt.session_path !== "string" || resolve15(receipt.session_path) !== resolve15(pairingPath))) {
+      if (options.source === "telegram" && (typeof receipt.session_path !== "string" || resolve17(receipt.session_path) !== resolve17(pairingPath))) {
         throw new Error("Telegram pairing proved a different session path than the one Olympus requested.");
       }
       if (historyAccount !== undefined)
@@ -80686,7 +83158,7 @@ async function pairMessagingSource(options) {
   }
 }
 function takeWhatsAppBridgeLock(stateDir, stillPlaced) {
-  const made = mkdirSync25(stateDir, { recursive: true, mode: 448 }) !== undefined;
+  const made = mkdirSync26(stateDir, { recursive: true, mode: 448 }) !== undefined;
   const lockPath = join53(stateDir, WHATSAPP_BRIDGE_LOCK_NAME);
   const lock = tryHoldFileFlock(lockPath);
   if (!lock) {
@@ -80745,9 +83217,9 @@ async function readyWhatsAppBridge(options, packageRoot) {
   const output = whatsappBridgeCachePath(packageRoot, options);
   const cacheHome = options.env?.XDG_CACHE_HOME ?? join53(options.homeDir ?? options.env?.HOME ?? homedir24(), ".cache");
   ensurePrivateRootDirectorySync(cacheHome);
-  ensurePrivateDirectoryTreeSync(cacheHome, dirname46(output));
-  for (const directory of [cacheHome, join53(cacheHome, "olympus"), dirname46(output)]) {
-    const stat = lstatSync23(directory);
+  ensurePrivateDirectoryTreeSync(cacheHome, dirname47(output));
+  for (const directory of [cacheHome, join53(cacheHome, "olympus"), dirname47(output)]) {
+    const stat = lstatSync24(directory);
     if (!stat.isDirectory() || stat.isSymbolicLink() || typeof process.getuid === "function" && stat.uid !== process.getuid() || (stat.mode & 18) !== 0) {
       throw new Error("The Olympus bridge cache must be owned by this user and not writable by other users.");
     }
@@ -80765,12 +83237,12 @@ async function readyWhatsAppBridge(options, packageRoot) {
   if (!go || !compiler) {
     throw codedPairingError("WhatsApp pairing requires Go and a C compiler. Install Go plus cc/clang/gcc, then re-run olympus connect whatsapp --pair; Olympus will build the pinned bridge automatically.", "bridge_build_tools_missing");
   }
-  mkdirSync25(join53(output, ".."), { recursive: true, mode: 448 });
+  mkdirSync26(join53(output, ".."), { recursive: true, mode: 448 });
   const built = await (options.buildWhatsAppBridge ?? buildWhatsAppBridge)({ go, compiler, sourceDir, outputPath: output });
   if (!built || !existsSync42(output)) {
     throw codedPairingError("The pinned WhatsApp bridge could not be built. Verify Go and the C compiler, then re-run olympus connect whatsapp --pair.", "bridge_build_failed");
   }
-  chmodSync13(output, 448);
+  chmodSync14(output, 448);
   return output;
 }
 function packagedWhatsAppBridgePath(packageRoot) {
@@ -80783,13 +83255,13 @@ function whatsappBridgeCachePath(packageRoot, context) {
   return join53(cacheHome, "olympus", "bin", whatsappBridgeFileName(join53(packageRoot, "tools", "whatsapp-bridge")));
 }
 function assertTrustedBridge(path, message) {
-  const stat = lstatSync23(path);
+  const stat = lstatSync24(path);
   if (!stat.isFile() || stat.isSymbolicLink() || typeof process.getuid === "function" && stat.uid !== process.getuid() || (stat.mode & 18) !== 0 || (stat.mode & 64) === 0) {
     throw new Error(message);
   }
 }
 function whatsappBridgeBuildEnv(input, base = process.env) {
-  const dirs = [...new Set([dirname46(input.go), dirname46(input.compiler)])];
+  const dirs = [...new Set([dirname47(input.go), dirname47(input.compiler)])];
   const path = [...dirs, ...(base.PATH ?? "").split(":").filter((dir) => dir && !dirs.includes(dir))].join(":");
   return { ...base, CGO_ENABLED: "1", CC: input.compiler, PATH: path };
 }
@@ -80827,7 +83299,7 @@ async function buildWhatsAppBridge(input) {
     rmSync12(temporary, { force: true });
     return false;
   }
-  chmodSync13(temporary, 448);
+  chmodSync14(temporary, 448);
   renameSync5(temporary, input.outputPath);
   return true;
 }
@@ -80958,7 +83430,7 @@ function copyLogin(from, to) {
     db = new Database11(from, { readonly: true });
     db.run("PRAGMA busy_timeout = 5000");
     db.run("VACUUM INTO ?", [to]);
-    chmodSync13(to, 384);
+    chmodSync14(to, 384);
   } catch {
     rmSync12(to, { force: true });
   } finally {
@@ -81245,8 +83717,8 @@ var init_messaging_pairing = __esm(() => {
 var WHATSAPP_UNOFFICIAL_CLIENT_NOTICE = "WhatsApp connects through an unofficial client. WhatsApp's terms don't allow third-party clients, and accounts have been restricted or banned for using them. Connect only if you accept that risk.";
 
 // src/core/messaging-capture.ts
-import { existsSync as existsSync43, mkdirSync as mkdirSync26, rmSync as rmSync13 } from "node:fs";
-import { dirname as dirname47, join as join54 } from "node:path";
+import { existsSync as existsSync43, mkdirSync as mkdirSync27, rmSync as rmSync13 } from "node:fs";
+import { dirname as dirname48, join as join54 } from "node:path";
 import { fileURLToPath as fileURLToPath8 } from "node:url";
 function defaultMessagingCaptureGrantPath(source, registryPath = defaultHandleRegistryPath()) {
   return captureGrantPathBeside(source, registryPath);
@@ -81398,7 +83870,7 @@ class MessagingCaptureSupervisor {
         delete childEnv[name];
       Object.assign(childEnv, folderCaptureEnv(account, layoutEnv));
       for (const dir of folderCaptureDirs(account, layoutEnv))
-        mkdirSync26(dir, { recursive: true, mode: 448 });
+        mkdirSync27(dir, { recursive: true, mode: 448 });
     }
     const secrets = this.options.secretStore ?? createDefaultSecretStore();
     for (const mapping of grant.producer.secretEnvironment) {
@@ -81477,10 +83949,10 @@ async function resolveCurrentLaunch(options, source, env) {
       ...options.pythonHasTelethon ? { pythonHasTelethon: options.pythonHasTelethon } : {},
       ...options.provisionTelegramPython ? { provisionTelegramPython: options.provisionTelegramPython } : {}
     });
-    const packageRoot = options.packageRoot ?? join54(dirname47(fileURLToPath8(import.meta.url)), "..", "..");
+    const packageRoot = options.packageRoot ?? join54(dirname48(fileURLToPath8(import.meta.url)), "..", "..");
     return { executable, args: [join54(packageRoot, "scripts", "telegram-telethon-reader.py"), "--gateway"] };
   }
-  const packageRoot = options.packageRoot ?? join54(dirname47(fileURLToPath8(import.meta.url)), "..", "..");
+  const packageRoot = options.packageRoot ?? join54(dirname48(fileURLToPath8(import.meta.url)), "..", "..");
   const executable = await readyWhatsAppBridge({
     env,
     ...options.whatsappBridgePath ? { whatsappBridgePath: options.whatsappBridgePath } : {},
@@ -81563,8 +84035,8 @@ var init_messaging_capture = __esm(() => {
 });
 
 // src/core/descendant-groups.ts
-import { existsSync as existsSync44, mkdirSync as mkdirSync27, readFileSync as readFileSync40, renameSync as renameSync6, rmSync as rmSync14, writeFileSync as writeFileSync10 } from "node:fs";
-import { dirname as dirname48, join as join55 } from "node:path";
+import { existsSync as existsSync44, mkdirSync as mkdirSync28, readFileSync as readFileSync40, renameSync as renameSync6, rmSync as rmSync14, writeFileSync as writeFileSync10 } from "node:fs";
+import { dirname as dirname49, join as join55 } from "node:path";
 function descendantGroupsSupported(platform = process.platform) {
   return platform === "linux";
 }
@@ -81609,7 +84081,7 @@ function writeRecord(path, owner, groups) {
         rmSync14(path, { force: true });
       return;
     }
-    mkdirSync27(dirname48(path), { recursive: true, mode: 448 });
+    mkdirSync28(dirname49(path), { recursive: true, mode: 448 });
     const temporary = `${path}.${process.pid}.tmp`;
     writeFileSync10(temporary, `${JSON.stringify({ schema: DESCENDANT_GROUPS_SCHEMA, owner, groups })}
 `, { mode: 384 });
@@ -82225,8 +84697,8 @@ var init_upgrade_store_copies = __esm(() => {
 
 // src/core/linux-owner-bridge-host.ts
 import { randomBytes as randomBytes20 } from "node:crypto";
-import { lstatSync as lstatSync24, unlinkSync as unlinkSync3 } from "node:fs";
-import { dirname as dirname49, join as join56 } from "node:path";
+import { lstatSync as lstatSync25, unlinkSync as unlinkSync3 } from "node:fs";
+import { dirname as dirname50, join as join56 } from "node:path";
 function startLinuxOwnerBridgeHost(options) {
   let closed = false, probing = false, workerProbing = false, ready = false, workerReady = false;
   const manager = manageLinuxOwnerBridge({ ...options, platform: "linux", listenerOwner: "engine-host", ready: () => !closed && ready, workerReady: () => workerReady && options.workerOwned?.() !== false });
@@ -82275,7 +84747,7 @@ function startLinuxOwnerBridgeHost(options) {
   };
   if (validateWorkerSocketDirectory(options.transport) !== options.socketPath)
     throw new Error("Owner runtime changed.");
-  const controlPath = join56(dirname49(options.socketPath), `owner-host-${process.pid}-${randomBytes20(6).toString("hex")}.sock`);
+  const controlPath = join56(dirname50(options.socketPath), `owner-host-${process.pid}-${randomBytes20(6).toString("hex")}.sock`);
   const control = bindWorkerSocket(controlPath, () => Bun.serve(workerSocketServe({ unix: controlPath, async fetch(request) {
     if (closed)
       return new Response(null, { status: 503 });
@@ -82290,7 +84762,7 @@ function startLinuxOwnerBridgeHost(options) {
       return new Response(null, { status: 503 });
     }
   } })));
-  const inode = lstatSync24(controlPath);
+  const inode = lstatSync25(controlPath);
   const timer = setInterval(() => {
     probe();
   }, 2000);
@@ -82309,7 +84781,7 @@ function startLinuxOwnerBridgeHost(options) {
       manager.close();
       control.stop(true);
       try {
-        const current = lstatSync24(controlPath);
+        const current = lstatSync25(controlPath);
         if (current.ino === inode.ino && current.dev === inode.dev)
           unlinkSync3(controlPath);
       } catch {}
@@ -82321,8 +84793,8 @@ function connectLinuxOwnerBridgeHost(path, transport) {
   let closed = false;
   const request = async (suffix, method = "GET") => {
     const workerPath = validateWorkerSocketDirectory(transport);
-    const stat = lstatSync24(path);
-    if (!workerPath || dirname49(path) !== dirname49(workerPath) || !/^owner-host-\d+-[a-f0-9]{12}\.sock$/.test(path.split("/").at(-1)) || !stat.isSocket() || stat.uid !== (transport?.uid ?? process.getuid?.()) || (stat.mode & 511) !== 384)
+    const stat = lstatSync25(path);
+    if (!workerPath || dirname50(path) !== dirname50(workerPath) || !/^owner-host-\d+-[a-f0-9]{12}\.sock$/.test(path.split("/").at(-1)) || !stat.isSocket() || stat.uid !== (transport?.uid ?? process.getuid?.()) || (stat.mode & 511) !== 384)
       throw new Error("Unsafe owner host socket.");
     return fetch("http://localhost" + suffix, { unix: path, method, signal: AbortSignal.timeout(5000) });
   };
@@ -82824,17 +85296,17 @@ async function prepareWorkerStart(input, worker) {
   };
 }
 function freshConfig(contextConfig, initialPluginConfig) {
-  const root = asRecord9(contextConfig);
-  const plugins = asRecord9(root?.plugins);
-  const entries = asRecord9(plugins?.entries);
-  const olympus = asRecord9(entries?.olympus);
+  const root = asRecord10(contextConfig);
+  const plugins = asRecord10(root?.plugins);
+  const entries = asRecord10(plugins?.entries);
+  const olympus = asRecord10(entries?.olympus);
   const livePluginConfig = olympus && Object.prototype.hasOwnProperty.call(olympus, "config") ? olympus.config : undefined;
   const directPluginConfig = root && ["worker", "email", "sourceIndex", "argus", "identity", "sovereignty"].some((key) => Object.prototype.hasOwnProperty.call(root, key)) ? root : undefined;
   const pluginConfig = entries ? livePluginConfig : directPluginConfig ?? initialPluginConfig;
   return { config: configFromPluginConfig(pluginConfig), pluginConfig };
 }
 function assertNativeWorkerScopeConfigSupported(pluginConfig) {
-  const sourceIndex = asRecord9(asRecord9(pluginConfig)?.sourceIndex);
+  const sourceIndex = asRecord10(asRecord10(pluginConfig)?.sourceIndex);
   const unsupported = [
     "corpusRegistry",
     "corpora",
@@ -83006,7 +85478,7 @@ function stripGatewayBootstrapSecrets(env) {
       delete env[key];
   }
 }
-function asRecord9(value) {
+function asRecord10(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 async function waitUntil(condition, timeoutMs, pollMs) {
@@ -83440,9 +85912,9 @@ self.onmessage = (event) => {
 
 // src/core/people-index.ts
 import { Database as Database12 } from "bun:sqlite";
-import { createHash as createHash36 } from "node:crypto";
-import { chmodSync as chmodSync14, existsSync as existsSync46, mkdirSync as mkdirSync29 } from "node:fs";
-import { dirname as dirname51 } from "node:path";
+import { createHash as createHash37 } from "node:crypto";
+import { chmodSync as chmodSync15, existsSync as existsSync46, mkdirSync as mkdirSync30 } from "node:fs";
+import { dirname as dirname52 } from "node:path";
 function peopleIndexMigrations() {
   return [{
     version: 1,
@@ -83772,7 +86244,7 @@ function linkPeople(input) {
   for (const [root, memberSet] of uf.members) {
     const members = [...memberSet].sort().map((key) => identities.get(key));
     const isOwner = members.some((member) => member.isOwner);
-    const personId = isOwner ? OWNER_PERSON_ID : `p_${createHash36("sha256").update(members[0].identityKey).digest("hex").slice(0, 16)}`;
+    const personId = isOwner ? OWNER_PERSON_ID : `p_${createHash37("sha256").update(members[0].identityKey).digest("hex").slice(0, 16)}`;
     const renamed = [...memberSet].map((identity) => renames.get(identity)).reduce((best, next) => next && (!best || next.at > best.at) ? next : best, undefined)?.name;
     const displayName = isOwner ? OWNER_DISPLAY_NAME : renamed ?? bestName(members);
     const nameShareable = isOwner || renamed !== undefined || members.some((member) => member.publicNames.size > 0);
@@ -83969,11 +86441,11 @@ class LocalPeopleIndex {
     }
     assertWritableStoreOpenAllowed("people index", options.dbPath);
     if (options.dbPath !== ":memory:")
-      mkdirSync29(dirname51(options.dbPath), { recursive: true, mode: 448 });
+      mkdirSync30(dirname52(options.dbPath), { recursive: true, mode: 448 });
     this.db = new Database12(options.dbPath, { create: true, strict: true });
     try {
       if (options.dbPath !== ":memory:")
-        chmodSync14(options.dbPath, 384);
+        chmodSync15(options.dbPath, 384);
       this.db.exec("PRAGMA busy_timeout = 5000; PRAGMA secure_delete = ON;");
       this.db.transaction(() => {
         assertSqliteSchemaCanOpen(this.db, PEOPLE_INDEX_STORE_ID, PEOPLE_SCHEMA_VERSION);
@@ -84477,7 +86949,7 @@ var init_people_index = __esm(() => {
 });
 
 // src/core/mac-engine-daemon.ts
-import { lstatSync as lstatSync26, readFileSync as readFileSync42 } from "node:fs";
+import { lstatSync as lstatSync27, readFileSync as readFileSync42 } from "node:fs";
 import { execFileSync as execFileSync3 } from "node:child_process";
 import { userInfo } from "node:os";
 function validateMacEngineOwner(userName, uid) {
@@ -84488,7 +86960,7 @@ function validateMacEngineOwner(userName, uid) {
 function macEngineManager(home, daemonPath = MAC_ENGINE_DAEMON_PLIST) {
   let stat;
   try {
-    stat = lstatSync26(daemonPath);
+    stat = lstatSync27(daemonPath);
   } catch (error) {
     if (error.code === "ENOENT")
       return "agent";
@@ -84616,8 +87088,8 @@ var init_mac_engine_daemon = __esm(() => {
 });
 
 // src/workers/archive-import/state.ts
-import { existsSync as existsSync47, mkdirSync as mkdirSync30, readFileSync as readFileSync43 } from "node:fs";
-import { dirname as dirname52 } from "node:path";
+import { existsSync as existsSync47, mkdirSync as mkdirSync31, readFileSync as readFileSync43 } from "node:fs";
+import { dirname as dirname53 } from "node:path";
 import { randomUUID as randomUUID15 } from "node:crypto";
 function defaultArchiveImportStatePath(env = process.env) {
   return resolvedRawPath(ARCHIVE_IMPORTS_SOURCE_ID2, "archive-imports.json", env);
@@ -84846,7 +87318,7 @@ class ArchiveImportStateStore {
   }
   mutate(change) {
     recordAccountPlacement({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID2 }, this.path, this.env);
-    mkdirSync30(dirname52(this.path), { recursive: true, mode: 448 });
+    mkdirSync31(dirname53(this.path), { recursive: true, mode: 448 });
     withFileLeaseSync(this.path, (lease) => {
       const state = readState(this.path);
       if (change(state) === false)
@@ -85488,9 +87960,9 @@ var init_scope_safe_fs = __esm(() => {
 
 // src/workers/archive-import/media-bindings.ts
 import { Database as Database13 } from "bun:sqlite";
-import { createHash as createHash37 } from "node:crypto";
-import { chmodSync as chmodSync15, existsSync as existsSync49, mkdirSync as mkdirSync31 } from "node:fs";
-import { dirname as dirname53 } from "node:path";
+import { createHash as createHash38 } from "node:crypto";
+import { chmodSync as chmodSync16, existsSync as existsSync49, mkdirSync as mkdirSync32 } from "node:fs";
+import { dirname as dirname54 } from "node:path";
 function archiveMediaBindingsPath(statePath) {
   return archiveStateSiblingPath(statePath, "archive-media-bindings.sqlite");
 }
@@ -85534,7 +88006,7 @@ function bindingOf(row) {
   };
 }
 function mediaBindingId(archiveId, relPath) {
-  return `mb-${createHash37("sha256").update(`${archiveId}\x00${relPath}`).digest("hex").slice(0, 32)}`;
+  return `mb-${createHash38("sha256").update(`${archiveId}\x00${relPath}`).digest("hex").slice(0, 32)}`;
 }
 
 class ArchiveMediaBindingStore {
@@ -85546,11 +88018,11 @@ class ArchiveMediaBindingStore {
     this.now = options.now ?? (() => new Date);
     if (options.path !== ":memory:") {
       recordAccountPlacement({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID2 }, options.path, options.env ?? process.env);
-      mkdirSync31(dirname53(options.path), { recursive: true, mode: 448 });
+      mkdirSync32(dirname54(options.path), { recursive: true, mode: 448 });
     }
     this.db = new Database13(options.path, { create: true });
     if (options.path !== ":memory:")
-      chmodSync15(options.path, 384);
+      chmodSync16(options.path, 384);
     this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;");
     assertSqliteSchemaCanOpen(this.db, ARCHIVE_MEDIA_BINDINGS_STORE_ID, SCHEMA_VERSION);
     runSqliteMigrations(this.db, ARCHIVE_MEDIA_BINDINGS_STORE_ID, migrations3());
@@ -85845,7 +88317,7 @@ var init_folder_facets = __esm(() => {
 });
 
 // src/workers/x-bookmarks/connector.ts
-import { createHash as createHash38 } from "node:crypto";
+import { createHash as createHash39 } from "node:crypto";
 function createXBookmarksSourceConnector(options) {
   const account = requireAccount(options.account);
   const fetchedAt = validIso(options.fetchedAt ?? new Date().toISOString());
@@ -85946,7 +88418,7 @@ function xBookmarkRawItemFromPost(post, account, folderMemberships, fetchedAt) {
       ...folders.length > 0 ? { folders, folderIds, folderNames } : {},
       ...post.lang ? { language: post.lang } : {},
       ...post.mediaUrls?.length ? { mediaUrls: [...post.mediaUrls] } : {},
-      contentHash: createHash38("sha256").update(JSON.stringify({ text, title, url, folders })).digest("hex")
+      contentHash: createHash39("sha256").update(JSON.stringify({ text, title, url, folders })).digest("hex")
     }),
     fetchedAt
   };
@@ -85997,9 +88469,9 @@ var init_connector = __esm(() => {
 });
 
 // src/workers/x-bookmarks/reconcile-state.ts
-import { createHash as createHash39, randomUUID as randomUUID16 } from "node:crypto";
-import { chmodSync as chmodSync16, mkdirSync as mkdirSync32 } from "node:fs";
-import { dirname as dirname54 } from "node:path";
+import { createHash as createHash40, randomUUID as randomUUID16 } from "node:crypto";
+import { chmodSync as chmodSync17, mkdirSync as mkdirSync33 } from "node:fs";
+import { dirname as dirname55 } from "node:path";
 import { Database as Database14 } from "bun:sqlite";
 
 class LocalXBookmarksReconcileStateStore {
@@ -86009,11 +88481,11 @@ class LocalXBookmarksReconcileStateStore {
     this.dbPath = dbPath;
     if (dbPath !== ":memory:") {
       recordAccountPlacement({ sourceId: X_BOOKMARKS_SOURCE_ID }, dbPath, env);
-      mkdirSync32(dirname54(dbPath), { recursive: true, mode: 448 });
+      mkdirSync33(dirname55(dbPath), { recursive: true, mode: 448 });
     }
     this.db = new Database14(dbPath, { create: true });
     if (dbPath !== ":memory:")
-      chmodSync16(dbPath, 384);
+      chmodSync17(dbPath, 384);
     this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
     assertSqliteSchemaCanOpen(this.db, X_BOOKMARKS_RECONCILE_STATE_STORE_ID, X_BOOKMARKS_RECONCILE_STATE_SCHEMA_VERSION);
     runSqliteMigrations(this.db, X_BOOKMARKS_RECONCILE_STATE_STORE_ID, xBookmarksReconcileStateMigrations());
@@ -88147,7 +90619,7 @@ function normalizeFolderFacetRefreshCounts(counts) {
   };
 }
 function reconcileCompatibilityHash(limits, providerUserId, coverageScope, windowBoundaryAlgorithmVersion) {
-  return createHash39("sha256").update(JSON.stringify({
+  return createHash40("sha256").update(JSON.stringify({
     algorithm: RECONCILE_ALGORITHM_VERSION,
     providerUserId,
     coverageScope,
@@ -88173,7 +90645,7 @@ function recoveryPolicy() {
   };
 }
 function sha256Json(value) {
-  return createHash39("sha256").update(JSON.stringify(value)).digest("hex");
+  return createHash40("sha256").update(JSON.stringify(value)).digest("hex");
 }
 function normalizeOptionalSha2562(value, label) {
   if (value === undefined)
@@ -88390,7 +90862,7 @@ var init_reconcile_state = __esm(() => {
 });
 
 // src/core/account-files.ts
-import { lstatSync as lstatSync28 } from "node:fs";
+import { lstatSync as lstatSync29 } from "node:fs";
 import { join as join62 } from "node:path";
 function lifecycleSourceIds() {
   return [...new Set([...FOLDER_LAYOUT_SOURCES, ...mountedStoreSources()])];
@@ -88520,7 +90992,7 @@ function dropboxIngestionPolicyPath(context) {
 }
 function existsOnDisk(path) {
   try {
-    lstatSync28(path);
+    lstatSync29(path);
     return true;
   } catch {
     return false;
@@ -90781,7 +93253,7 @@ var init_browser2 = __esm(() => {
 });
 
 // src/workers/archive-import/zip-reader.ts
-import { createHash as createHash40 } from "node:crypto";
+import { createHash as createHash41 } from "node:crypto";
 function decodeCp437(bytes) {
   let out = "";
   for (const byte of bytes)
@@ -91008,7 +93480,7 @@ class ZipArchive {
     }
   }
   memberTable() {
-    const hash = createHash40("sha256");
+    const hash = createHash41("sha256");
     let count = 0;
     for (const entry of this.entries()) {
       hash.update(`${JSON.stringify([entry.name, entry.method, entry.flags, entry.crc32, entry.compressedSize, entry.uncompressedSize, entry.localHeaderOffset])}
@@ -91612,7 +94084,7 @@ var init_zip_reader = __esm(() => {
 });
 
 // src/workers/archive-import/manifest.ts
-import { createHash as createHash41 } from "node:crypto";
+import { createHash as createHash42 } from "node:crypto";
 function lastComponent(relPath, rootPath) {
   const source = relPath === "" ? rootPath : relPath;
   const parts = source.split("/").filter((part) => part !== "");
@@ -91849,7 +94321,7 @@ function probeArchivePath(root, chosenRelPath, options = {}) {
   };
 }
 function sha2563(bytes) {
-  return createHash41("sha256").update(bytes).digest("hex");
+  return createHash42("sha256").update(bytes).digest("hex");
 }
 function zipMemberTable(reader, head) {
   if (!ZipArchive.looksLikeZip(head))
@@ -91896,7 +94368,7 @@ function archiveFileEntries(files) {
   }));
 }
 function archiveManifestSha256(files) {
-  return createHash41("sha256").update(JSON.stringify(files.map((file) => [
+  return createHash42("sha256").update(JSON.stringify(files.map((file) => [
     file.rel_path,
     file.dev,
     file.ino,
@@ -91949,7 +94421,7 @@ function verifyArchiveManifest(root, files, options = {}) {
 function* archiveFileDigestSteps(root, file) {
   const reader = root.openFile(file.rel_path, { expected: manifestFileVersion(file) });
   try {
-    const hash = createHash41("sha256");
+    const hash = createHash42("sha256");
     for (let offset = 0;offset < file.size; offset += ARCHIVE_DIGEST_RANGE_BYTES) {
       hash.update(reader.readAt(offset, Math.min(ARCHIVE_DIGEST_RANGE_BYTES, file.size - offset)));
       reader.assertCurrent();
@@ -92002,14 +94474,14 @@ var init_manifest3 = __esm(() => {
 });
 
 // src/workers/archive-import/requests.ts
-import { existsSync as existsSync50, mkdirSync as mkdirSync33, readFileSync as readFileSync44 } from "node:fs";
-import { dirname as dirname55, join as join63 } from "node:path";
+import { existsSync as existsSync50, mkdirSync as mkdirSync34, readFileSync as readFileSync44 } from "node:fs";
+import { dirname as dirname56, join as join63 } from "node:path";
 import { randomUUID as randomUUID17 } from "node:crypto";
 function archiveImportRequestsPath(statePath) {
   return archiveStateSiblingPath(statePath, "archive-import-requests.json");
 }
 function withArchiveImportApprovals(statePath, run) {
-  return withFileLeaseSync(join63(dirname55(statePath), "archive-import-approvals"), () => run());
+  return withFileLeaseSync(join63(dirname56(statePath), "archive-import-approvals"), () => run());
 }
 function isRecord4(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -92182,7 +94654,7 @@ class ArchiveImportRequestStore {
   }
   mutate(change) {
     recordAccountPlacement({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID2 }, this.path, this.env);
-    mkdirSync33(dirname55(this.path), { recursive: true, mode: 448 });
+    mkdirSync34(dirname56(this.path), { recursive: true, mode: 448 });
     withFileLeaseSync(this.path, (lease) => {
       const state = readRequests(this.path);
       if (change(state) === false)
@@ -92233,8 +94705,8 @@ var init_source_delete_holds = __esm(() => {
 
 // src/core/engine-children.ts
 import { spawnSync as spawnSync10 } from "node:child_process";
-import { existsSync as existsSync51, mkdirSync as mkdirSync34, readFileSync as readFileSync45 } from "node:fs";
-import { dirname as dirname56, join as join64 } from "node:path";
+import { existsSync as existsSync51, mkdirSync as mkdirSync35, readFileSync as readFileSync45 } from "node:fs";
+import { dirname as dirname57, join as join64 } from "node:path";
 function engineChildrenPath(env = process.env) {
   return join64(olympusDataDir(env), "engine", "children.json");
 }
@@ -92449,7 +94921,7 @@ function signalGroup(kill, pgid, signal) {
 }
 function writeRecord2(path, file) {
   try {
-    mkdirSync34(dirname56(path), { recursive: true, mode: 448 });
+    mkdirSync35(dirname57(path), { recursive: true, mode: 448 });
     writePrivateFileAtomicSync(path, `${JSON.stringify(file, null, 2)}
 `);
   } catch {}
@@ -92474,10 +94946,10 @@ var init_engine_children = __esm(() => {
 
 // src/core/data-root-snapshot.ts
 import { spawnSync as spawnSync11 } from "node:child_process";
-import { chmodSync as chmodSync17, existsSync as existsSync52, lstatSync as lstatSync29, mkdirSync as mkdirSync35, readdirSync as readdirSync11, readFileSync as readFileSync46, readlinkSync, realpathSync as realpathSync14, renameSync as renameSync8, rmSync as rmSync17, statfsSync as statfsSync2, statSync as statSync25, writeFileSync as writeFileSync12 } from "node:fs";
-import { basename as basename12, dirname as dirname57, join as join65, relative as relative9, resolve as resolve16, sep as sep13 } from "node:path";
+import { chmodSync as chmodSync18, existsSync as existsSync52, lstatSync as lstatSync30, mkdirSync as mkdirSync36, readdirSync as readdirSync11, readFileSync as readFileSync46, readlinkSync, realpathSync as realpathSync14, renameSync as renameSync8, rmSync as rmSync17, statfsSync as statfsSync2, statSync as statSync25, writeFileSync as writeFileSync12 } from "node:fs";
+import { basename as basename12, dirname as dirname58, join as join65, relative as relative9, resolve as resolve18, sep as sep13 } from "node:path";
 function samePlace(a, b) {
-  return a === b || join65(realOrSelf(dirname57(a)), basename12(a)) === join65(realOrSelf(dirname57(b)), basename12(b));
+  return a === b || join65(realOrSelf(dirname58(a)), basename12(a)) === join65(realOrSelf(dirname58(b)), basename12(b));
 }
 function keptWithLive(folder, env) {
   if (samePlace(folder, olympusDataRoot(env)))
@@ -92497,7 +94969,7 @@ function removeTree(path) {
   }
   const writable = (directory) => {
     try {
-      chmodSync17(directory, 448);
+      chmodSync18(directory, 448);
     } catch {
       return;
     }
@@ -92510,7 +94982,7 @@ function removeTree(path) {
     for (const name of names) {
       const child = join65(directory, name);
       try {
-        if (lstatSync29(child).isDirectory())
+        if (lstatSync30(child).isDirectory())
           writable(child);
       } catch {}
     }
@@ -92549,7 +95021,7 @@ function readRecord2(env) {
     throw unreadable("cannot be read");
   }
   const root = olympusDataRoot(env);
-  const absolute = (value) => typeof value === "string" && value.startsWith("/") && resolve16(value) === value;
+  const absolute = (value) => typeof value === "string" && value.startsWith("/") && resolve18(value) === value;
   const record = { schema: RECORD_SCHEMA, failed: [] };
   if (parsed.in_flight !== undefined) {
     const flight = parsed.in_flight;
@@ -92562,7 +95034,8 @@ function readRecord2(env) {
     }
     if (roots.length > 0 && roots[0].live !== root)
       throw unreadable(`does not start with the data root ${root}`);
-    record.in_flight = { started_at: flight.started_at, state: flight.state === "cloning" ? "cloning" : "ready", roots };
+    const state = flight.state === "cloning" || flight.state === "restoring" ? flight.state : "ready";
+    record.in_flight = { started_at: flight.started_at, state, roots };
   }
   for (const entry of Array.isArray(parsed.failed) ? parsed.failed : []) {
     if (!absolute(entry?.live) || !absolute(entry.failed) || !isFailedPathOf(entry.failed, entry.live))
@@ -92585,13 +95058,13 @@ function writeRecord3(env, record) {
     removeFileDurablySync(path);
     return;
   }
-  mkdirSync35(dirname57(path), { recursive: true, mode: 448 });
+  mkdirSync36(dirname58(path), { recursive: true, mode: 448 });
   writePrivateFileAtomicSync(path, `${JSON.stringify(record)}
 `);
 }
 function updateInFlightSince(env) {
   const flight = readRecord2(env).in_flight;
-  return flight?.state === "ready" ? flight.started_at : undefined;
+  return flight && flight.state !== "cloning" ? flight.started_at : undefined;
 }
 function inside(path, root) {
   return path === root || path.startsWith(root.endsWith(sep13) ? root : `${root}${sep13}`);
@@ -92600,7 +95073,7 @@ function realOrSelf(path) {
   try {
     return realpathSync14(path);
   } catch {
-    return resolve16(path);
+    return resolve18(path);
   }
 }
 function foldersOutsideRoot(env) {
@@ -92636,7 +95109,7 @@ function foldersOutsideRoot(env) {
   }
   for (const mount of declared)
     if (mount.dbPath)
-      add(dirname57(resolve16(mount.dbPath)));
+      add(dirname58(resolve18(mount.dbPath)));
   const walked = new Set;
   const walk = (directory, top) => {
     let names;
@@ -92651,7 +95124,7 @@ function foldersOutsideRoot(env) {
         continue;
       let stat;
       try {
-        stat = lstatSync29(path);
+        stat = lstatSync30(path);
       } catch {
         continue;
       }
@@ -92791,7 +95264,7 @@ function swapIn(pair, failed, env) {
     rmSync17(pair.live, { recursive: true, force: true });
   }
   renameSync8(pair.snapshot, pair.live);
-  syncDirectorySync(dirname57(pair.live));
+  syncDirectorySync(dirname58(pair.live));
 }
 function treeBytes(directory, kept = new Set) {
   let total = 0;
@@ -92807,7 +95280,7 @@ function treeBytes(directory, kept = new Set) {
     const path = join65(directory, name);
     let stat;
     try {
-      stat = lstatSync29(path);
+      stat = lstatSync30(path);
     } catch {
       continue;
     }
@@ -92861,7 +95334,7 @@ function formatBytes(bytes) {
 function cloneTree(live, target, kept, clones) {
   const partial = `${target}.partial`;
   const mode = statSync25(live).mode & 511;
-  mkdirSync35(partial, { mode });
+  mkdirSync36(partial, { mode });
   try {
     const names = readdirSync11(live).filter((name) => !kept.has(name));
     if (names.length > 0) {
@@ -92875,7 +95348,7 @@ function cloneTree(live, target, kept, clones) {
     }
     spawnSync11("sync", process.platform === "linux" ? ["-f", partial] : [], { stdio: "ignore" });
     renameSync8(partial, target);
-    syncDirectorySync(dirname57(target));
+    syncDirectorySync(dirname58(target));
   } catch (error) {
     removeTree(partial);
     throw error;
@@ -92893,8 +95366,15 @@ function snapshotDataRoot(env, options = {}) {
   const deps = options.deps ?? {};
   const log = options.log ?? (() => {});
   const root = olympusDataRoot(env);
-  const record = readRecord2(env);
+  let record = readRecord2(env);
   finishRemoving(env, record);
+  const earlier = record.in_flight;
+  const interrupted = earlier?.state === "ready" && earlier.roots.some((pair) => existsSync52(pair.snapshot) && holdsOnlyLocks(pair.live, env));
+  if (earlier?.state === "restoring" || interrupted) {
+    for (const line of putDataRootBack(env, options))
+      log(line);
+    record = readRecord2(env);
+  }
   const flight = record.in_flight;
   if (flight?.state === "cloning") {
     for (const pair of flight.roots) {
@@ -92908,11 +95388,6 @@ function snapshotDataRoot(env, options = {}) {
     for (const pair of flight.roots) {
       if (!existsSync52(pair.snapshot))
         continue;
-      if (holdsOnlyLocks(pair.live, env)) {
-        swapIn(pair, failedRootPathOf(pair.live, startedMs), env);
-        log(`Finished putting ${pair.live} back as it was before the update of ${flight.started_at}.`);
-        continue;
-      }
       const kept = failedRootPathOf(pair.live, startedMs);
       if (existsSync52(kept))
         continue;
@@ -92940,7 +95415,7 @@ function snapshotDataRoot(env, options = {}) {
   const clones = new Map;
   const needed = new Map;
   for (const folder of live) {
-    const parent = dirname57(folder);
+    const parent = dirname58(folder);
     const cloning = (deps.clones ?? defaultClones)(parent);
     clones.set(folder, cloning);
     if (cloning)
@@ -92989,6 +95464,10 @@ function putDataRootBack(env, options = {}) {
   }
   const startedMs = Date.parse(flight.started_at);
   proveNoHolders(flight.roots.map((pair) => pair.live).filter(existsSync52).map(realOrSelf), "a process of the new version still has Olympus data open, so it was not put back", options.deps ?? {});
+  if (flight.state !== "restoring") {
+    flight.state = "restoring";
+    writeRecord3(env, record);
+  }
   const kept = [];
   for (const pair of flight.roots) {
     const failed = failedRootPathOf(pair.live, startedMs);
@@ -93004,6 +95483,7 @@ function putDataRootBack(env, options = {}) {
     if (existsSync52(failed))
       kept.push({ live: pair.live, failed, at: flight.started_at });
   }
+  options.afterRestore?.();
   writeRecord3(env, { schema: RECORD_SCHEMA, failed: [...record.failed.filter((entry) => !kept.some((now) => now.failed === entry.failed)), ...kept] });
   if (kept.length === 0)
     return ["The Olympus data was put back as it was before the update."];
@@ -93043,15 +95523,15 @@ var init_data_root_snapshot = __esm(() => {
 });
 
 // src/core/source-watch.ts
-import { createHash as createHash42, randomUUID as randomUUID18 } from "node:crypto";
+import { createHash as createHash43, randomUUID as randomUUID18 } from "node:crypto";
 import {
-  chmodSync as chmodSync18,
+  chmodSync as chmodSync19,
   existsSync as existsSync53,
-  lstatSync as lstatSync30,
-  mkdirSync as mkdirSync36
+  lstatSync as lstatSync31,
+  mkdirSync as mkdirSync37
 } from "node:fs";
 import { homedir as homedir27 } from "node:os";
-import { dirname as dirname58, isAbsolute as isAbsolute23 } from "node:path";
+import { dirname as dirname59, isAbsolute as isAbsolute23 } from "node:path";
 import { Database as Database15 } from "bun:sqlite";
 function sourceWatchAuthenticatedRouteHeaders(route) {
   const headers = new Headers({
@@ -93104,7 +95584,7 @@ function createSourceWatchExecutorCapability(input) {
 }
 function sourceWatchDeliveryKey(watchId, ref) {
   const canonical = requireCanonicalRef(ref);
-  return createHash42("sha256").update(JSON.stringify([
+  return createHash43("sha256").update(JSON.stringify([
     requireId(watchId, "watchId"),
     canonical.corpusId,
     canonical.localItemId,
@@ -93128,7 +95608,7 @@ class LocalSourceWatchStore {
     hardenPrivateDatabasePath2(dbPath);
     this.db = new Database15(dbPath, { create: true });
     try {
-      chmodSync18(dbPath, 384);
+      chmodSync19(dbPath, 384);
       this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON; PRAGMA journal_mode = WAL;");
       refuseUnversionedOwnedSchema(this.db);
       assertSqliteSchemaCanOpen(this.db, SOURCE_WATCH_STORE_ID, SOURCE_WATCH_SCHEMA_VERSION);
@@ -93795,7 +96275,7 @@ function hardenPrivateDatabasePath2(dbPath) {
   if (!isAbsolute23(dbPath)) {
     throw new TypeError("Source watch database path must be absolute.");
   }
-  const leafDir = dirname58(dbPath);
+  const leafDir = dirname59(dbPath);
   const forbiddenLeafDirs = new Set([
     "/",
     "/tmp",
@@ -93807,14 +96287,14 @@ function hardenPrivateDatabasePath2(dbPath) {
   if (forbiddenLeafDirs.has(leafDir)) {
     throw new Error("Source watch database must live inside a dedicated private leaf directory.");
   }
-  mkdirSync36(leafDir, { recursive: true, mode: 448 });
-  const dirStat = lstatSync30(leafDir);
+  mkdirSync37(leafDir, { recursive: true, mode: 448 });
+  const dirStat = lstatSync31(leafDir);
   if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) {
     throw new Error("Source watch database leaf must be a real private directory.");
   }
-  chmodSync18(leafDir, 448);
+  chmodSync19(leafDir, 448);
   if (existsSync53(dbPath)) {
-    const dbStat = lstatSync30(dbPath);
+    const dbStat = lstatSync31(dbPath);
     if (dbStat.isSymbolicLink() || !dbStat.isFile()) {
       throw new Error("Source watch database must be a regular file, not a symlink.");
     }
@@ -94176,7 +96656,7 @@ function addMilliseconds(timestamp, deltaMs) {
   return new Date(Date.parse(timestamp) + deltaMs).toISOString();
 }
 function sha2564(value) {
-  return createHash42("sha256").update(value, "utf8").digest("hex");
+  return createHash43("sha256").update(value, "utf8").digest("hex");
 }
 var SOURCE_WATCH_STORE_ID = "source-watch", SOURCE_WATCH_SCHEMA_VERSION = 1, SOURCE_WATCH_MIN_LEASE_MS = 1000, SOURCE_WATCH_MAX_LEASE_MS, SOURCE_WATCH_MIN_RETRY_MS = 1000, SOURCE_WATCH_MAX_RETRY_MS, SOURCE_WATCH_MIN_RETENTION_MS, SOURCE_WATCH_MAX_RETENTION_MS, SOURCE_WATCH_OWNER_HEADER = "X-Olympus-Source-Watch-Owner", SOURCE_WATCH_ROUTE_KIND_HEADER = "X-Olympus-Source-Watch-Route-Kind", SOURCE_WATCH_ROUTE_TARGET_HEADER = "X-Olympus-Source-Watch-Route-Target", SOURCE_WATCH_ROUTE_ACCOUNT_HEADER = "X-Olympus-Source-Watch-Route-Account", SOURCE_WATCH_MAX_QUERY_LENGTH = 4096, MAX_WATCH_LIFETIME_MS, MAX_SOURCE_CLOCK_SKEW_MS, MAX_LOCAL_ITEM_ID_LENGTH = 4096, MAX_SOURCE_VERSION_LENGTH = 1024, MAX_DELIVERY_ATTEMPTS = 100, MAX_AVAILABLE_DELAY_MS, MAX_PAGE_SIZE = 100, MAX_MAINTENANCE_BATCH = 1000, MAX_CURSOR_LENGTH = 1024, DEFAULT_MAX_DELIVERY_ATTEMPTS = 5, DEFAULT_PAGE_SIZE = 50, SAFE_ID, SAFE_TOKEN, SAFE_HASH, SAFE_UUID, SAFE_CHANNEL_TARGET, SAFE_CANONICAL_REF, OWNER_CONTEXT_FIELDS, CREATE_WATCH_FIELDS, CANONICAL_REF_FIELDS, WATCH_STATUS_VALUES, OUTBOX_STATUS_VALUES, ownedContexts, executorCapabilities, OWNED_SCHEMA_OBJECTS, REQUIRED_COLUMNS, SYSTEM_CLOCK;
 var init_source_watch = __esm(() => {
@@ -94289,8 +96769,8 @@ var init_source_watch = __esm(() => {
 });
 
 // src/core/ingestion-health-state.ts
-import { existsSync as existsSync54, mkdirSync as mkdirSync37, readFileSync as readFileSync47, writeFileSync as writeFileSync13 } from "node:fs";
-import { dirname as dirname59 } from "node:path";
+import { existsSync as existsSync54, mkdirSync as mkdirSync38, readFileSync as readFileSync47, writeFileSync as writeFileSync13 } from "node:fs";
+import { dirname as dirname60 } from "node:path";
 function defaultIngestionHealthStatePath(env = process.env) {
   return sharedDataPath("ingestion-doctor-state", env);
 }
@@ -94299,12 +96779,12 @@ function readIngestionHealthState(path) {
     if (!existsSync54(path))
       return;
     const parsed = JSON.parse(readFileSync47(path, "utf8"));
-    const record = asRecord10(parsed);
-    const sources = asRecord10(record.sources);
+    const record = asRecord11(parsed);
+    const sources = asRecord11(record.sources);
     const normalized = {};
     for (const [sourceId, sourceValue] of Object.entries(sources)) {
-      const source = asRecord10(sourceValue);
-      const terminal = asRecord10(source.failed_terminal_by_class);
+      const source = asRecord11(sourceValue);
+      const terminal = asRecord11(source.failed_terminal_by_class);
       normalized[sourceId] = {
         actionable_stuck: asCount(source.actionable_stuck),
         failed_terminal_by_class: Object.fromEntries(Object.entries(terminal).map(([key, value]) => [key, asCount(value)]))
@@ -94319,7 +96799,7 @@ function readIngestionHealthState(path) {
   }
 }
 function writeIngestionHealthState(path, state) {
-  mkdirSync37(dirname59(path), { recursive: true, mode: 448 });
+  mkdirSync38(dirname60(path), { recursive: true, mode: 448 });
   writeFileSync13(path, `${JSON.stringify(state, null, 2)}
 `);
 }
@@ -94335,7 +96815,7 @@ function forgetIngestionHealthState(path, ledgerSourceIds, options = {}) {
 `);
   return doomed.length;
 }
-function asRecord10(value) {
+function asRecord11(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
 function asCount(value) {
@@ -94468,11 +96948,11 @@ var init_file_scope_sources = __esm(() => {
 });
 
 // src/core/source-scope-approval.ts
-import { createHash as createHash43, randomUUID as randomUUID19 } from "node:crypto";
+import { createHash as createHash44, randomUUID as randomUUID19 } from "node:crypto";
 import { existsSync as existsSync55, readFileSync as readFileSync48 } from "node:fs";
-import { dirname as dirname60, join as join67 } from "node:path";
+import { dirname as dirname61, join as join67 } from "node:path";
 function defaultFileSourceScopeStatePath(handleRegistryPath) {
-  return join67(dirname60(handleRegistryPath), "file-source-scopes.json");
+  return join67(dirname61(handleRegistryPath), "file-source-scopes.json");
 }
 function forgetFileSourceScopeApproval(statePath, sourceIds, options = {}) {
   if (!existsSync55(statePath))
@@ -94517,7 +96997,7 @@ function connectedSourceScopeAccountGeneration(sourceId, capability, registry, p
   if (handles.length !== 1)
     return;
   const handle = handles[0];
-  const generation = createHash43("sha256").update(JSON.stringify([
+  const generation = createHash44("sha256").update(JSON.stringify([
     sourceId,
     handle.handle,
     handle.providerAccountId ?? "",
@@ -94696,7 +97176,7 @@ function readState2(path) {
   } catch {
     return { kind: "malformed", digest: "unreadable" };
   }
-  const digest = createHash43("sha256").update(raw).digest("hex");
+  const digest = createHash44("sha256").update(raw).digest("hex");
   try {
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
@@ -94752,11 +97232,11 @@ var init_source_scope_approval = __esm(() => {
 });
 
 // src/core/mail-source-scope.ts
-import { createHash as createHash44, randomUUID as randomUUID20 } from "node:crypto";
+import { createHash as createHash45, randomUUID as randomUUID20 } from "node:crypto";
 import { existsSync as existsSync56, readFileSync as readFileSync49 } from "node:fs";
-import { dirname as dirname61, join as join68 } from "node:path";
+import { dirname as dirname62, join as join68 } from "node:path";
 function defaultMailSourceScopeStatePath(handleRegistryPath) {
-  return join68(dirname61(handleRegistryPath), "mail-source-scopes.json");
+  return join68(dirname62(handleRegistryPath), "mail-source-scopes.json");
 }
 function forgetMailSourceScopeApproval(statePath, sourceIds, options = {}) {
   if (!existsSync56(statePath))
@@ -94807,8 +97287,10 @@ function readMailSourceScopeApproval(input) {
     ...pendingSnapshot2(revision, account?.generation, reason),
     ...carried && carried.length > 0 ? { carriedAlwaysPrivateSenders: [...carried] } : {}
   });
-  if (!account)
-    return pending("not-connected", "not_connected");
+  if (!account) {
+    const unresolved = read.kind === "malformed" || read.kind === "valid" && read.state.approvals.some((approval) => approval.owner_tier_rules.length > 0);
+    return { ...pending("not-connected", "not_connected"), ...unresolved ? { senderPolicyUnresolved: true } : {} };
+  }
   if (read.kind === "missing")
     return pending(`missing:${account.generation}`, "missing");
   if (read.kind === "malformed")
@@ -94880,7 +97362,7 @@ function assertMailSourceScopeApproved(input) {
 }
 function mailScopeOwnerTierRules(scope) {
   return scope.alwaysPrivateSenders.map((sender) => ({
-    id: `mail-scope-always-private-${createHash44("sha256").update(sender).digest("hex").slice(0, 12)}`,
+    id: `mail-scope-always-private-${createHash45("sha256").update(sender).digest("hex").slice(0, 12)}`,
     source: MAIL_SCOPE_RULE_SOURCE,
     match: { kind: "sender", value: sender },
     tier: "secure",
@@ -95132,7 +97614,7 @@ function readState3(path) {
   } catch {
     return { kind: "malformed", digest: "unreadable" };
   }
-  const digest = createHash44("sha256").update(raw).digest("hex");
+  const digest = createHash45("sha256").update(raw).digest("hex");
   try {
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
@@ -95356,11 +97838,11 @@ var init_forget = __esm(() => {
 // src/core/this-computer.ts
 import { spawnSync as spawnSync12 } from "node:child_process";
 import { existsSync as existsSync58, readFileSync as readFileSync50 } from "node:fs";
-import { createHash as createHash45, randomUUID as randomUUID21 } from "node:crypto";
-import { dirname as dirname62, join as join70 } from "node:path";
+import { createHash as createHash46, randomUUID as randomUUID21 } from "node:crypto";
+import { dirname as dirname63, join as join70 } from "node:path";
 function hostBinding(machineId, hostIdentity) {
   const identity = hostIdentity();
-  return identity ? createHash45("sha256").update(`${machineId}:${identity}`).digest("hex") : undefined;
+  return identity ? createHash46("sha256").update(`${machineId}:${identity}`).digest("hex") : undefined;
 }
 function readStateForHost(path, hostIdentity) {
   const state = readState4(path);
@@ -95372,7 +97854,7 @@ function readStateForHost(path, hostIdentity) {
   return state;
 }
 function defaultThisComputerStatePath(handleRegistryPath) {
-  return join70(dirname62(handleRegistryPath), "this-computer.json");
+  return join70(dirname63(handleRegistryPath), "this-computer.json");
 }
 function readState4(path) {
   if (!existsSync58(path))
@@ -97307,6 +99789,10 @@ var init_vocabulary = __esm(() => {
       privateAnswers: { title: "Privacy", line: "Ask privately, your private inbox, and how Private items are answered" },
       connector: { title: "Build a connector", line: "For a source Olympus does not have yet" }
     },
+    overrideReview: {
+      sentence: "Text you marked Personal changed. Olympus found a possible secret ({kinds}) and is holding the text Private.",
+      open: "Review changed items"
+    },
     waiting: { one: "1 unread private answer", many: "{count} unread private answers" },
     locked: "Open dashboard controls first",
     readOnlyOpenClaw: "Reconnect OpenClaw with operator.write access to change this",
@@ -98248,6 +100734,12 @@ var init_vocabulary = __esm(() => {
     noMatch: "No items match. Try part of a title, a sender or a file name.",
     apps: "An AI app can ask to make an item Private. Only you, here on this computer, can make one Personal.",
     changedByYou: "Changed by you",
+    reviewFilter: "Needs your review",
+    reviewEmpty: "No Personal overrides need your review.",
+    reviewReason: "You marked this item Personal. Its text changed and may contain a secret ({kinds}). Olympus is holding this version Private.",
+    overrideFinding: "Olympus found a possible secret ({kinds}) in text you marked Personal.",
+    confirmReview: "Confirm Personal for this text",
+    liftOverride: "Lift Personal override",
     notSorted: "Not sorted yet",
     moving: "Moving to {tier}",
     untitled: "Untitled item",
@@ -98749,9 +101241,9 @@ var init_phases = __esm(() => {
 });
 
 // src/workers/credential-health.ts
-import { mkdirSync as mkdirSync38, readFileSync as readFileSync51 } from "node:fs";
+import { mkdirSync as mkdirSync39, readFileSync as readFileSync51 } from "node:fs";
 import { homedir as homedir28, uptime } from "node:os";
-import { dirname as dirname63, join as join71 } from "node:path";
+import { dirname as dirname64, join as join71 } from "node:path";
 function defaultCredentialHealthReportPath() {
   return join71(homedir28(), ".local", "state", "olympus", "credential-health", "current.json");
 }
@@ -98915,7 +101407,7 @@ function sourceInvocationProvenance(value) {
 }
 
 // src/core/file-extraction-source.ts
-import { createHash as createHash46 } from "node:crypto";
+import { createHash as createHash47 } from "node:crypto";
 function isFileExtractionSourceError(value) {
   if (!value || typeof value !== "object")
     return false;
@@ -98960,7 +101452,7 @@ var init_file_extraction_source = __esm(() => {
       this.errorKind = errorKind;
       this.settleAs = FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS[errorKind];
       this.retryable = this.settleAs === "failed_retryable";
-      const errorHash = options.detailForHash === undefined ? undefined : createHash46("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
+      const errorHash = options.detailForHash === undefined ? undefined : createHash47("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
       if (errorHash)
         this.errorHash = errorHash;
       if (options.sizeBytes !== undefined && Number.isSafeInteger(options.sizeBytes) && options.sizeBytes >= 0)
@@ -99043,7 +101535,7 @@ function metadataStringArray2(metadata, key) {
 }
 
 // src/workers/google-connectors/gmail-mail-record.ts
-import { createHash as createHash47 } from "node:crypto";
+import { createHash as createHash48 } from "node:crypto";
 function isGmailAttachmentPart(part) {
   const type = (part.mimeType ?? "").trim().toLowerCase();
   if (type.startsWith("multipart/"))
@@ -99072,7 +101564,7 @@ function childrenOf(record, build) {
   return record.metadataOnly || build.children !== true ? [] : record.attachments.filter((attachment) => attachment.filename.trim() !== "" && (attachment.partId === "" ? 0 : attachment.partId.split(".").length) <= GMAIL_CHILD_MAX_DEPTH);
 }
 function hashString3(value) {
-  return createHash47("sha256").update(value).digest("hex");
+  return createHash48("sha256").update(value).digest("hex");
 }
 function parsedDate(value) {
   if (!value)
@@ -99227,28 +101719,30 @@ function gmailMailEntries(record, account, build = {}) {
 function gmailClassificationSignals(item) {
   const subject = metadataString2(item.metadata, "subject") ?? metadataString2(item.metadata, "title");
   const sender = metadataString2(item.metadata, "from");
-  const labels = metadataStringArray2(item.metadata, "labels");
+  const labels = metadataStringArray2(item.metadata, GMAIL_LABEL_CAPABILITY.metadataKey);
   return {
     ...subject ? { title: subject } : {},
     ...sender ? { sender } : {},
     ...labels.length > 0 ? { labels } : {}
   };
 }
-var GMAIL_MAIL_PROVIDER = "gmail", MAX_ATTACHMENT_NAME_CHARS = 256, GMAIL_OWN_ID_PREFIX = "mbox-", gmailChildProviderId = (messageId, partId) => childProviderItemId(messageId, partId || "root"), gmailId = (record) => !record.id.startsWith(GMAIL_OWN_ID_PREFIX), GMAIL_CHILD_MAX_DEPTH = 8, compareGmailMailVersions = (_a, _b) => 0;
+var GMAIL_MAIL_PROVIDER, MAX_ATTACHMENT_NAME_CHARS = 256, GMAIL_OWN_ID_PREFIX = "mbox-", gmailChildProviderId = (messageId, partId) => childProviderItemId(messageId, partId || "root"), gmailId = (record) => !record.id.startsWith(GMAIL_OWN_ID_PREFIX), GMAIL_CHILD_MAX_DEPTH = 8, compareGmailMailVersions = (_a, _b) => 0;
 var init_gmail_mail_record = __esm(() => {
   init_people_index();
+  init_source_connector_labels();
   init_sender_rules();
+  GMAIL_MAIL_PROVIDER = GMAIL_LABEL_CAPABILITY.provider;
 });
 
 // src/workers/google-connectors/request-budget.ts
 import {
-  chmodSync as chmodSync19,
+  chmodSync as chmodSync20,
   existsSync as existsSync59,
-  mkdirSync as mkdirSync39,
+  mkdirSync as mkdirSync40,
   readFileSync as readFileSync52,
   renameSync as renameSync9
 } from "node:fs";
-import { dirname as dirname64 } from "node:path";
+import { dirname as dirname65 } from "node:path";
 import { Database as Database16 } from "bun:sqlite";
 
 class GoogleDailyRequestBudget {
@@ -99338,7 +101832,7 @@ function requestBudgetLedgerPath(statePath) {
   return statePath.endsWith(".sqlite") ? statePath : `${statePath}.sqlite`;
 }
 function initializeRequestBudgetLedger(ledgerPath, provider, now) {
-  mkdirSync39(dirname64(ledgerPath), { recursive: true, mode: 448 });
+  mkdirSync40(dirname65(ledgerPath), { recursive: true, mode: 448 });
   runBudgetLedgerOperation(ledgerPath, provider, now, () => withLedger(ledgerPath, (db) => {
     db.exec(`
         CREATE TABLE IF NOT EXISTS ${GOOGLE_REQUEST_BUDGET_LEDGER_TABLE} (
@@ -99490,7 +101984,7 @@ function hardenLedgerFiles(ledgerPath) {
   for (const path of [ledgerPath, `${ledgerPath}-wal`, `${ledgerPath}-shm`]) {
     try {
       if (existsSync59(path))
-        chmodSync19(path, 384);
+        chmodSync20(path, 384);
     } catch (error) {
       if (error.code !== "ENOENT")
         throw error;
@@ -99599,7 +102093,7 @@ var init_request_budget = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail.ts
-import { createHash as createHash48 } from "node:crypto";
+import { createHash as createHash49 } from "node:crypto";
 
 class GoogleGmailSourceConnector {
   id = GMAIL_PROVIDER;
@@ -100316,9 +102810,9 @@ class RestGmailApiClient {
     for (const labelId of request.labelIds ?? [])
       params.append("labelIds", labelId);
     const json = await this.getJson(`users/me/messages?${params.toString()}`);
-    const record = asRecord11(json, "Gmail messages list response");
+    const record = asRecord12(json, "Gmail messages list response");
     return {
-      messages: Array.isArray(record.messages) ? record.messages.map((item) => asRecord11(item, "Gmail message list item")).map((item) => ({
+      messages: Array.isArray(record.messages) ? record.messages.map((item) => asRecord12(item, "Gmail message list item")).map((item) => ({
         id: stringValue(item.id),
         threadId: stringValue(item.threadId)
       })).filter((item) => item.id) : [],
@@ -100336,22 +102830,22 @@ class RestGmailApiClient {
     return json;
   }
   async getProfile() {
-    const record = asRecord11(await this.getJson("users/me/profile"), "Gmail profile");
+    const record = asRecord12(await this.getJson("users/me/profile"), "Gmail profile");
     return { emailAddress: stringValue(record.emailAddress) };
   }
   async getAttachment(messageId, attachmentId) {
-    const record = asRecord11(await this.getJson(`users/me/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}`), "Gmail attachment");
+    const record = asRecord12(await this.getJson(`users/me/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}`), "Gmail attachment");
     return {
       data: stringValue(record.data),
       ...typeof record.size === "number" && Number.isSafeInteger(record.size) ? { size: record.size } : {}
     };
   }
   async listLabels() {
-    const record = asRecord11(await this.getJson("users/me/labels"), "Gmail labels list response");
-    return Array.isArray(record.labels) ? record.labels.map((item) => gmailLabelFromJson(asRecord11(item, "Gmail label"))).filter((label) => label.id) : [];
+    const record = asRecord12(await this.getJson("users/me/labels"), "Gmail labels list response");
+    return Array.isArray(record.labels) ? record.labels.map((item) => gmailLabelFromJson(asRecord12(item, "Gmail label"))).filter((label) => label.id) : [];
   }
   async getLabel(id) {
-    return gmailLabelFromJson(asRecord11(await this.getJson(`users/me/labels/${encodeURIComponent(id)}`), "Gmail label"));
+    return gmailLabelFromJson(asRecord12(await this.getJson(`users/me/labels/${encodeURIComponent(id)}`), "Gmail label"));
   }
   async getJson(path) {
     let attempt = 0;
@@ -100560,7 +103054,7 @@ function normalizeGmailMaxMessages(value) {
     return DEFAULT_GMAIL_SYNC_MAX_MESSAGES;
   return Math.max(1, Math.min(Math.floor(value), MAX_GMAIL_SYNC_MESSAGES));
 }
-function asRecord11(value, label) {
+function asRecord12(value, label) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${label} must be an object.`);
   }
@@ -100581,7 +103075,7 @@ function metadataCount(metadata, key) {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }
 function hashString4(value) {
-  return createHash48("sha256").update(value).digest("hex");
+  return createHash49("sha256").update(value).digest("hex");
 }
 var GMAIL_SOURCE_ID = "gmail.email", GMAIL_INTERNAL_CONNECTOR_CORPUS_ID = "internal.email", GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private", GMAIL_PUBLIC_CONNECTOR_CORPUS_ID = "public_safe.email", GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, GMAIL_DAILY_REQUEST_BUDGET_ENV = "OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET", GMAIL_DAILY_REQUEST_BUDGET_STATE_PATH_ENV = "OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET_STATE_PATH", DEFAULT_GMAIL_DAILY_REQUEST_BUDGET = 1e6, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GmailPageTokenRejectedError, GMAIL_LABEL_PAGE_SIZE = 500, GMAIL_METADATA_HEADERS, GMAIL_PART_LOCATOR_PREFIX = "gmail-part1:";
 var init_gmail = __esm(() => {
@@ -100604,7 +103098,7 @@ var init_gmail = __esm(() => {
 });
 
 // src/workers/google-connectors/drive.ts
-import { createHash as createHash49 } from "node:crypto";
+import { createHash as createHash50 } from "node:crypto";
 
 class GoogleDriveSourceConnector {
   id = GOOGLE_DRIVE_PROVIDER;
@@ -100910,17 +103404,17 @@ function budgetedDriveApiClient(inner, budget, provenance) {
       budget.reserve(runProvenance);
       return inner.listFiles(request);
     },
-    exportGoogleDocText(fileId, maxBytes) {
+    exportGoogleDocText(fileId, maxBytes, signal) {
       budget.reserve(runProvenance);
-      return inner.exportGoogleDocText(fileId, maxBytes);
+      return inner.exportGoogleDocText(fileId, maxBytes, signal);
     },
     downloadTextFile(fileId, maxBytes) {
       budget.reserve(runProvenance);
       return inner.downloadTextFile(fileId, maxBytes);
     },
-    downloadFileBytes(fileId, maxBytes) {
+    downloadFileBytes(fileId, maxBytes, signal) {
       budget.reserve(runProvenance);
-      return inner.downloadFileBytes(fileId, maxBytes);
+      return inner.downloadFileBytes(fileId, maxBytes, signal);
     },
     ...inner.getFolder ? {
       getFolder(folderId) {
@@ -101075,16 +103569,16 @@ class RestGoogleDriveApiClient {
     if (request.pageToken)
       params.set("pageToken", request.pageToken);
     const json = await this.getJson(`files?${params.toString()}`);
-    const record = asRecord12(json, "Google Drive files list response");
+    const record = asRecord13(json, "Google Drive files list response");
     return {
-      files: Array.isArray(record.files) ? record.files.map((item) => normalizeDriveFile(asRecord12(item, "Google Drive file"))).filter((file) => file.id) : [],
+      files: Array.isArray(record.files) ? record.files.map((item) => normalizeDriveFile(asRecord13(item, "Google Drive file"))).filter((file) => file.id) : [],
       ...optionalStringProp2(record, "nextPageToken")
     };
   }
   async getFolder(folderId) {
     const params = new URLSearchParams({ fields: "id,name,parents", supportsAllDrives: "true" });
     const json = await this.getJson(`files/${encodeURIComponent(folderId)}?${params.toString()}`);
-    const record = asRecord12(json, "Google Drive folder");
+    const record = asRecord13(json, "Google Drive folder");
     const id = typeof record.id === "string" ? record.id : folderId;
     return {
       id,
@@ -101092,15 +103586,15 @@ class RestGoogleDriveApiClient {
       ...Array.isArray(record.parents) ? { parents: record.parents.filter((entry) => typeof entry === "string") } : {}
     };
   }
-  async exportGoogleDocText(fileId, maxBytes) {
+  async exportGoogleDocText(fileId, maxBytes, signal) {
     const params = new URLSearchParams({ mimeType: "text/plain" });
-    return this.getText(`files/${encodeURIComponent(fileId)}/export?${params.toString()}`, maxBytes);
+    return this.getText(`files/${encodeURIComponent(fileId)}/export?${params.toString()}`, maxBytes, signal);
   }
   async downloadTextFile(fileId, maxBytes) {
     return this.getText(`files/${encodeURIComponent(fileId)}?alt=media&supportsAllDrives=true`, maxBytes);
   }
-  async downloadFileBytes(fileId, maxBytes) {
-    const response = await this.send(`files/${encodeURIComponent(fileId)}?alt=media&supportsAllDrives=true`, "application/octet-stream", "Google Drive content request");
+  async downloadFileBytes(fileId, maxBytes, signal) {
+    const response = await this.send(`files/${encodeURIComponent(fileId)}?alt=media&supportsAllDrives=true`, "application/octet-stream", "Google Drive content request", signal);
     const declared = Number.parseInt(response.headers.get("content-length") ?? "", 10);
     if (maxBytes !== undefined && Number.isSafeInteger(declared) && declared > maxBytes) {
       throw new GoogleDriveContentTooLargeError;
@@ -101120,18 +103614,20 @@ class RestGoogleDriveApiClient {
     const text = await this.get(path, "application/json", "Google Drive API request");
     return text ? JSON.parse(text) : {};
   }
-  async getText(path, maxBytes) {
-    const text = await this.get(path, "text/plain,application/octet-stream", "Google Drive content request");
+  async getText(path, maxBytes, signal) {
+    const text = await this.get(path, "text/plain,application/octet-stream", "Google Drive content request", signal);
     return text.slice(0, maxBytes);
   }
-  async get(path, accept, context) {
-    return (await this.send(path, accept, context)).text();
+  async get(path, accept, context, signal) {
+    return (await this.send(path, accept, context, signal)).text();
   }
-  async send(path, accept, context) {
+  async send(path, accept, context, signal) {
     let attempt = 0;
     while (true) {
+      signal?.throwIfAborted();
       this.requestBudget?.reserve(this.provenance);
       const response = await this.fetchImpl(`${this.baseUrl}/${path}`, {
+        ...signal ? { signal } : {},
         headers: {
           Accept: accept,
           Authorization: `Bearer ${this.token}`
@@ -101179,7 +103675,7 @@ function normalizeDriveFile(record) {
     ...optionalStringProp2(record, "size"),
     ...optionalStringProp2(record, "md5Checksum"),
     ...Array.isArray(record.parents) ? { parents: record.parents.map(stringValue2).filter(Boolean) } : {},
-    ...Array.isArray(record.owners) ? { owners: record.owners.map((owner) => asRecord12(owner, "Google Drive owner")).map((owner) => optionalStringProp2(owner, "emailAddress")) } : {}
+    ...Array.isArray(record.owners) ? { owners: record.owners.map((owner) => asRecord13(owner, "Google Drive owner")).map((owner) => optionalStringProp2(owner, "emailAddress")) } : {}
   };
 }
 function isDownloadableTextMime(mimeType, name) {
@@ -101207,7 +103703,7 @@ function normalizeMaxTextBytes(value) {
     return DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES;
   return Math.max(1000, Math.min(Math.floor(value), 512000));
 }
-function asRecord12(value, label) {
+function asRecord13(value, label) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${label} must be an object.`);
   }
@@ -101224,7 +103720,7 @@ function safeProviderDetail2(value) {
   return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
 }
 function hashString5(value) {
-  return createHash49("sha256").update(value).digest("hex");
+  return createHash50("sha256").update(value).digest("hex");
 }
 var GOOGLE_DRIVE_SOURCE_ID = "google_drive.docs", GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID = "internal.drive.docs", GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID = "secure_local.drive.docs", GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID = "public_safe.drive.docs", GOOGLE_DRIVE_PROVIDER = "google_drive", DEFAULT_GOOGLE_DRIVE_SYNC_MAX_FILES = 200, DEFAULT_GOOGLE_DRIVE_CONTENT_MAX_FILES = 50, GOOGLE_DRIVE_DAILY_REQUEST_BUDGET_ENV = "OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_DAILY_API_REQUEST_BUDGET", GOOGLE_DRIVE_DAILY_REQUEST_BUDGET_STATE_PATH_ENV = "OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_DAILY_API_REQUEST_BUDGET_STATE_PATH", DEFAULT_GOOGLE_DRIVE_DAILY_REQUEST_BUDGET = 3000, DEFAULT_GOOGLE_DRIVE_PAGE_SIZE = 100, DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES = 128000, MAX_GOOGLE_DRIVE_SYNC_FILES = 1000, GOOGLE_DRIVE_API_BASE_URL = "https://www.googleapis.com/drive/v3", GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document", GOOGLE_DRIVE_CURSOR_PREFIX = "gd1:", MAX_GOOGLE_DRIVE_CURSOR_LENGTH = 4096, DEFAULT_GOOGLE_DRIVE_MAX_RETRIES = 3, MAX_GOOGLE_DRIVE_RETRY_DELAY_MS = 30000, GoogleDriveContentTooLargeError, GoogleDriveApiError, GOOGLE_DRIVE_MAX_ANCESTRY_LOOKUPS = 64, FOLDER_LOOKUP_FAILED, GOOGLE_DRIVE_INGESTION_EXCLUSION_SOURCE = "google_drive.personal", GOOGLE_DRIVE_ENFORCEABLE_EXCLUSION_CRITERIA;
 var init_drive = __esm(() => {
@@ -101559,9 +104055,9 @@ var init_corpus_adapter2 = __esm(() => {
 });
 
 // src/workers/readwise/connector.ts
-import { createHash as createHash50 } from "node:crypto";
-import { mkdirSync as mkdirSync40, readFileSync as readFileSync53 } from "node:fs";
-import { dirname as dirname65 } from "node:path";
+import { createHash as createHash51 } from "node:crypto";
+import { mkdirSync as mkdirSync41, readFileSync as readFileSync53 } from "node:fs";
+import { dirname as dirname66 } from "node:path";
 
 class ReadwiseDailyRequestBudget {
   utcDay = "";
@@ -101656,7 +104152,7 @@ function readReadwiseRequestBudgetState(statePath) {
   return { utcDay: parsed.utcDay, requests: parsed.requests };
 }
 function writeReadwiseRequestBudgetState(statePath, state) {
-  mkdirSync40(dirname65(statePath), { recursive: true, mode: 448 });
+  mkdirSync41(dirname66(statePath), { recursive: true, mode: 448 });
   writePrivateFileAtomicSync(statePath, `${JSON.stringify({ version: READWISE_REQUEST_BUDGET_STATE_VERSION, ...state })}
 `);
 }
@@ -101679,7 +104175,7 @@ function createReadwiseSourceConnector(options) {
         return;
       const session = requireBearerTokenCredentialSession(await broker.issueSession({
         handle: credentialHandle,
-        provider: "readwise",
+        provider: READWISE_PROVIDER,
         capability: "readwise.sync",
         trustDomain: "internal",
         purpose: "Synchronize Readwise documents and highlights into the shared connector store."
@@ -101796,7 +104292,7 @@ function createReadwiseSourceConnector(options) {
       return compactClassificationSignals({
         title: signalText(item.metadata, "title"),
         sender: signalText(item.metadata, "author"),
-        labels: signalTexts(item.metadata, "tags"),
+        labels: signalTexts(item.metadata, READWISE_LABEL_CAPABILITY.metadataKey),
         folderKeys: [signalText(item.metadata, "category"), signalText(item.metadata, "location")].filter((key) => Boolean(key))
       });
     },
@@ -101931,7 +104427,7 @@ function rawItem(input) {
       ...input.authoredAt ? { authoredAt: input.authoredAt } : {},
       ...input.updatedAt ? { updatedAt: input.updatedAt } : {},
       ...input.metadata,
-      contentHash: createHash50("sha256").update(JSON.stringify({
+      contentHash: createHash51("sha256").update(JSON.stringify({
         text: input.text,
         title: input.title,
         author: input.author,
@@ -102073,15 +104569,17 @@ function validDate3(value) {
 function nextUtcDay2(date) {
   return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() + 1)).toISOString();
 }
-var READWISE_CONNECTOR_ID = "readwise_live", READWISE_SOURCE_ID = "readwise.library", READWISE_PROVIDER = "readwise", READWISE_DAILY_REQUEST_BUDGET_ENV = "OLYMPUS_SOURCE_INDEX_READWISE_DAILY_API_REQUEST_BUDGET", READWISE_DAILY_REQUEST_BUDGET_STATE_PATH_ENV = "OLYMPUS_SOURCE_INDEX_READWISE_DAILY_API_REQUEST_BUDGET_STATE_PATH", DEFAULT_READWISE_DAILY_REQUEST_BUDGET = 1000, DEFAULT_READWISE_CONNECTOR_PAGE_SIZE = 100, MAX_CURSOR_LENGTH2 = 4096, MAX_CURSOR_ITEM_OFFSET = 1e6, MAX_TIMESTAMP_LENGTH = 64, MAX_ACCOUNT_LENGTH2 = 256, READWISE_REQUEST_BUDGET_STATE_VERSION = 1, ReadwiseRequestBudgetError, READWISE_STORE_PLACEMENT;
+var READWISE_CONNECTOR_ID = "readwise_live", READWISE_SOURCE_ID = "readwise.library", READWISE_PROVIDER, READWISE_DAILY_REQUEST_BUDGET_ENV = "OLYMPUS_SOURCE_INDEX_READWISE_DAILY_API_REQUEST_BUDGET", READWISE_DAILY_REQUEST_BUDGET_STATE_PATH_ENV = "OLYMPUS_SOURCE_INDEX_READWISE_DAILY_API_REQUEST_BUDGET_STATE_PATH", DEFAULT_READWISE_DAILY_REQUEST_BUDGET = 1000, DEFAULT_READWISE_CONNECTOR_PAGE_SIZE = 100, MAX_CURSOR_LENGTH2 = 4096, MAX_CURSOR_ITEM_OFFSET = 1e6, MAX_TIMESTAMP_LENGTH = 64, MAX_ACCOUNT_LENGTH2 = 256, READWISE_REQUEST_BUDGET_STATE_VERSION = 1, ReadwiseRequestBudgetError, READWISE_STORE_PLACEMENT;
 var init_connector2 = __esm(() => {
   init_olympus_layout();
   init_source_placement();
   init_atomic_file();
+  init_source_connector_labels();
   init_credential_broker();
   init_source_storage();
   init_api();
   init_corpus_adapter2();
+  READWISE_PROVIDER = READWISE_LABEL_CAPABILITY.provider;
   ReadwiseRequestBudgetError = class ReadwiseRequestBudgetError extends Error {
     amounts;
     retryAt;
@@ -102298,28 +104796,37 @@ function purgeLowerTierContent(set, options = {}) {
   const note = options.embeddingLedger ?? { path: resolveEmbeddingLedgerPath(), approvedBy: "system-automatic" };
   const resumed = new Set;
   const receiptBudget = Math.max(1, Math.floor(limit / 2));
-  const receiptAfter = set.ledger.readMeta(RECEIPT_CURSOR) || undefined;
-  let receipts = set.ledger.metaEntries(VERIFIED, { ...receiptAfter ? { after: receiptAfter } : {}, limit: receiptBudget });
-  if (!receipts.length && receiptAfter)
-    receipts = set.ledger.metaEntries(VERIFIED, { limit: receiptBudget });
-  for (const { key } of receipts) {
-    const [provider, accountScope, conversation, providerItemId] = key.slice(VERIFIED.length).split("\x00");
-    if (!provider || !accountScope || !providerItemId)
-      continue;
-    const identity = { provider, accountScope, providerItemId, ...conversation ? { providerConversationId: conversation } : {} };
-    report.checked++;
-    try {
-      if (resumeVerifiedTierMove(set, identity, note))
-        report.resumed++;
-      resumed.add(tierLedgerIdentityKey(identity));
-    } catch {
-      report.failed++;
+  const resumePage = (prefix, cursor, work) => {
+    const pageLimit = Math.min(receiptBudget, limit - report.checked);
+    if (pageLimit === 0)
+      return false;
+    const after = set.ledger.readMeta(cursor) || undefined;
+    let receipts = set.ledger.metaEntries(prefix, { ...after ? { after } : {}, limit: pageLimit });
+    if (!receipts.length && after)
+      receipts = set.ledger.metaEntries(prefix, { limit: pageLimit });
+    for (const { key } of receipts) {
+      const [provider, accountScope, conversation, providerItemId] = key.slice(prefix.length).split("\x00");
+      if (!provider || !accountScope || !providerItemId)
+        continue;
+      const identity = { provider, accountScope, providerItemId, ...conversation ? { providerConversationId: conversation } : {} };
+      if (resumed.has(tierLedgerIdentityKey(identity)))
+        continue;
+      report.checked++;
+      try {
+        if (work(identity))
+          report.resumed++;
+        resumed.add(tierLedgerIdentityKey(identity));
+      } catch {
+        report.failed++;
+      }
     }
-  }
-  set.ledger.writeSettleProgress(RECEIPT_CURSOR, receipts.at(-1)?.key ?? "");
-  const receiptsComplete = receipts.length < receiptBudget;
+    set.ledger.writeSettleProgress(cursor, receipts.at(-1)?.key ?? "");
+    return receipts.length < pageLimit;
+  };
+  const receiptsComplete = resumePage(VERIFIED, RECEIPT_CURSOR, (identity) => resumeVerifiedTierMove(set, identity, note));
+  const importsComplete = resumePage(TIER_MOVE_IMPORTS_PREFIX, IMPORT_CURSOR, (identity) => settleDiscardedTierMoveImports(set, identity));
   if (options.maintenance && set.ledger.readMeta(DONE) === "1")
-    return { ...report, complete: receiptsComplete };
+    return { ...report, complete: receiptsComplete && importsComplete };
   const raw = set.ledger.readMeta(CURSOR);
   const after = raw ? JSON.parse(raw) : undefined;
   const stores = ["public_safe", "internal"].flatMap((domain) => {
@@ -102471,7 +104978,7 @@ function purgeLowerTierContent(set, options = {}) {
     }));
     if (finished) {
       const historyComplete = set.ledger.readMeta(FAILED) !== "1";
-      report.complete = historyComplete && receiptsComplete;
+      report.complete = historyComplete && receiptsComplete && importsComplete;
       set.ledger.writeSettleProgress(DONE, historyComplete ? "1" : "");
       set.ledger.writeSettleProgress(FAILED, "");
     }
@@ -102489,7 +104996,7 @@ function compareContentVersions(a, b) {
     return Math.sign(aTime - bTime);
   return;
 }
-var CURSOR = "lower-content-purge-cursor-v2", DONE = "lower-content-purge-done-v2", FAILED = "lower-content-purge-failed-v2", VERIFIED = "tier-move-verified:", RECEIPT_CURSOR = "lower-content-purge-receipt-cursor-v2", LOWER_CONTENT_PURGE_BATCH = 200;
+var CURSOR = "lower-content-purge-cursor-v2", DONE = "lower-content-purge-done-v2", FAILED = "lower-content-purge-failed-v2", VERIFIED = "tier-move-verified:", RECEIPT_CURSOR = "lower-content-purge-receipt-cursor-v2", IMPORT_CURSOR = "lower-content-purge-import-cursor", LOWER_CONTENT_PURGE_BATCH = 200;
 var init_tier_content_purge = __esm(() => {
   init_tier_ledger();
   init_embedding_ledger();
@@ -103161,6 +105668,11 @@ async function runQueuedMoves(options, report, found) {
       moved.push(exported.identity.localItemId);
       addPendingEmbeddings(set, [exported.identity.localItemId]);
     } catch (error) {
+      if (error instanceof TierMoveRefusedError && error.code === "rule_policy_unavailable") {
+        waiting++;
+        report.skipped++;
+        continue;
+      }
       if (error instanceof TierLedgerGenerationConflictError) {
         continue;
       }
@@ -103364,6 +105876,18 @@ function restoreClearedOverride(set, record) {
   }
   if (ledger.rejudgeQuestion(identity))
     return false;
+  if (ownerOverrideSecretReview(record.reasons) || record.reasons.includes(OWNER_OVERRIDE_SECRET_CONFIRMED_REASON)) {
+    if (ledger.writeIntent(identity))
+      return false;
+    const report = emptyTierRejudgeReport();
+    rejudgeStoredContent(set, record, { report, autoMoves: true, preserveMetadata: true });
+    if (report.secrets > 0 || report.updated > 0 || report.movesQueued > 0) {
+      if (request)
+        ledger.completeOverrideRestore(identity, request.receipt);
+      return true;
+    }
+    return false;
+  }
   const before = ledger.settledDecisionBeforeOverride(identity);
   if (!before || before.metadataTier === "secrets" || before.contentTier === "secrets")
     return false;
@@ -103380,7 +105904,8 @@ function restoreClearedOverride(set, record) {
   const namesReceipt = before.reasons.find((reason) => reason.startsWith("content:names:"));
   const namesChanged = namesReceipt !== undefined && (!exported || namesReceipt !== contentNamesReason(stored, parentNamesContext(set, identity)));
   const matched = raising.filter((rule) => rule.match.kind !== "label" && ownerRuleMatches(rule, stored, record.provider));
-  const labelRules = raising.filter((rule) => rule.match.kind === "label" && ownerRuleMatches(rule, { labels: [rule.match.value] }, record.provider));
+  const applicableLabels = applicableProviderLabelRules(raising, record.provider);
+  const labelRules = applicableLabels.length > 0 ? withTierRuleFence(set, () => labelRulesWithoutNonmatch(set, record, currentTierRulePolicy(set), applicableLabels)) : applicableLabels;
   const heldNow = maxTier(record.metadataTier, record.contentTier);
   let ruleTier = matched.reduce((tier, rule) => maxTier(tier, rule.tier), "public");
   for (const rule of labelRules)
@@ -103462,8 +105987,34 @@ function restoreClearedOverride(set, record) {
 function applyOne(set, record, tier, retirePublic, report, guard) {
   const ledger = set.ledger;
   const identity = identityOf3(record);
+  const lowerOverride = tier === "private" || tier === "public";
+  const review = ownerOverrideSecretReview(record.reasons);
+  const source = copyServingLayer(ledger.copies(identity).filter((copy) => copy.state === "current"), "content");
+  const stored = lowerOverride && source ? set.store(source.trustDomain)?.exportItemCopy(identity) : undefined;
+  const text = stored?.chunks.length ? stored.chunks.map((chunk) => chunk.boundedText).join("") : undefined;
+  let override = guard.override;
+  if (lowerOverride && text !== undefined && override?.kind === "tier" && override.setDigest === undefined) {
+    if (ledger.writeIntent(identity) || JSON.stringify(ledger.getOverride(identity)) !== JSON.stringify(override))
+      return;
+    const observed = ledger.observeOverrideText(identity, text);
+    if (observed?.kind !== "tier" || observed.tier !== override.tier)
+      return;
+    override = observed;
+    guard = { ...guard, override };
+  }
+  if (lowerOverride && review && (!ownerOverrideMatchesDigest(override, review.digest) || text === undefined || review.digest !== contentDigestReason(text) || ledger.writeIntent(identity)))
+    return;
+  if (lowerOverride && record.contentTier === "secrets" && !text?.trim())
+    return;
   const holdUntilJudged = set.holdsContentUntilJudged() || heldUntilJudged(record.reasons);
-  const decision = classifyItemTiers({ signals: {}, provider: record.provider, subject: identity, ...holdUntilJudged ? { holdUntilJudged: true } : {} }, { override: { kind: "tier", tier }, ...retirePublic ? { retirePublic: true } : {} });
+  const decision = classifyItemTiers({
+    signals: {},
+    provider: record.provider,
+    subject: identity,
+    ...text !== undefined ? { text } : {},
+    ...record.contentTier === "secrets" ? { heldSecret: true } : {},
+    ...holdUntilJudged ? { holdUntilJudged: true } : {}
+  }, { ...override ? { override } : {}, ...retirePublic ? { retirePublic: true } : {} });
   const secrets = decision.contentTier === "secrets";
   if (record.state === "moving" && !secrets) {
     const outcome = ledger.queueOwnerRaise(identity, decision, leastPrivateDomain(set, decision), { guard });
@@ -103475,15 +106026,17 @@ function applyOne(set, record, tier, retirePublic, report, guard) {
   }
   const atTiers = record.metadataTier === decision.metadataTier && record.contentTier === decision.contentTier;
   if (atTiers && record.state !== "moving") {
-    if (!secrets && record.decidedBy === "override")
+    const findings = contentSecretFindingKinds(decision.reasons);
+    if (!secrets && record.decidedBy === "override" && !record.contentPending && !review && (text === undefined || record.reasons.includes(contentDigestReason(text)) && JSON.stringify(contentSecretFindingKinds(record.reasons)) === JSON.stringify(findings)))
       return;
     if (secrets && !secretsCopiesLeft(set, identity))
       return;
   }
   if (secrets) {
-    const exported = storedCopy(set, identity);
+    const exported = stored ?? storedCopy(set, identity);
     if (exported) {
-      if (settleRoutedSecrets(set, identity, decision, exported, { findingKinds: ["owner_marked_secret"] }, { guard }))
+      const findingKinds = decision.reasons.filter((reason) => reason.startsWith("content:secret:")).map((reason) => reason.slice("content:secret:".length));
+      if (settleRoutedSecrets(set, identity, decision, exported, { findingKinds, ...text !== undefined ? { text } : {} }, { guard }))
         report.secrets += 1;
       return;
     }
@@ -103496,13 +106049,6 @@ function applyOne(set, record, tier, retirePublic, report, guard) {
     return;
   }
   const placement = set.placementFor(decision);
-  const source = copyServingLayer(ledger.copies(identity).filter((copy) => copy.state === "current"), "content");
-  const destination = copyServingLayer(placement.copies, "content");
-  if (source && destination && trustDomainRank(destination.trustDomain) < trustDomainRank(source.trustDomain)) {
-    const exported = set.store(source.trustDomain)?.exportItemCopy(identity);
-    if (exported)
-      decision.reasons.push(contentDigestReason(exported.chunks.map((chunk) => chunk.boundedText).join("")));
-  }
   const recorded = ledger.recordRoutedPlacement(identity, decision, placement, {
     guard,
     staleCopiesGone: set.routedWithoutAnyCopy(identity)
@@ -103562,6 +106108,7 @@ var init_tier_override_settle = __esm(() => {
   init_loop_pass();
   init_parent_context();
   init_stored_names();
+  init_tier_move_rule_policy();
   init_tier_rejudge();
   init_tier_rules_sweep();
   CLEARED_RECHECK_MS = 10 * 60000;
@@ -103570,7 +106117,7 @@ var init_tier_override_settle = __esm(() => {
 });
 
 // src/workers/connector-store/tier-rules-sweep.ts
-import { createHash as createHash51 } from "node:crypto";
+import { randomUUID as randomUUID22 } from "node:crypto";
 function sweepOwnerRuleRaisesOffThread(options) {
   return runPassOffThread(ownerRuleRaisesPass(options), { family: "owner-rule-raises", ...options.turn ? { turn: options.turn } : {} });
 }
@@ -103673,8 +106220,8 @@ function raiseRoutedItem(set, record, rules, inputs, extraSignals = {}) {
   if (matched.length === 0)
     return "unchanged";
   const ruleTier = matched.reduce((tier, rule) => maxTier(tier, rule.tier), "public");
-  const metadataTier = maxTier(record.metadataTier, ruleTier);
   const moving = record.state === "moving";
+  const metadataTier = maxTier(record.targetMetadataTier ?? record.metadataTier, ruleTier);
   if (!moving && tierRank(metadataTier) <= tierRank(record.metadataTier))
     return "unchanged";
   const classified = classifyItemTiers({ signals, provider: record.provider, subject: identity }, {
@@ -103682,7 +106229,7 @@ function raiseRoutedItem(set, record, rules, inputs, extraSignals = {}) {
     ...inputs.retirePublic ? { retirePublic: true } : {}
   });
   const ruleReasons = classified.reasons.filter((reason) => reason.startsWith("metadata:owner_rule:"));
-  const contentTier = maxTier(record.contentTier, metadataTier);
+  const contentTier = maxTier(record.targetContentTier ?? record.contentTier, ruleTier);
   const contentPending = record.contentPending && tierRank(contentTier) < tierRank("secure");
   const decision = {
     metadataTier,
@@ -103706,7 +106253,8 @@ function raiseRoutedItem(set, record, rules, inputs, extraSignals = {}) {
     return settleRoutedSecrets(set, identity, decision, exported, { findingKinds: ["owner_marked_secret"] }) ? "secrets" : "unchanged";
   }
   if (moving) {
-    return set.ledger.queueOwnerRaise(identity, decision, leastPrivateDomain(set, decision)) === "none" ? "unchanged" : "raised";
+    const floor = leastPrivateDomain(set, { ...decision, metadataTier: ruleTier, contentTier: ruleTier });
+    return set.ledger.queueOwnerRaise(identity, decision, floor) === "none" ? "unchanged" : "raised";
   }
   set.ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision));
   return "raised";
@@ -103714,27 +106262,33 @@ function raiseRoutedItem(set, record, rules, inputs, extraSignals = {}) {
 async function sweepLabelRuleRaises(options) {
   const report = { rules: 0, scanned: 0, raised: 0, secrets: 0, pending: 0 };
   const { set, provider, accountScope, source } = options;
-  const classification = set.classification();
-  if (!classification || classification.unavailableReason)
+  const policy = withTierRuleFence(set, () => currentTierRulePolicy(set));
+  if (policy.unavailable)
     return report;
   const ledger = set.ledger;
   const keyed = new Map;
-  for (const rule of classification.rules ?? []) {
-    if (!isRaisingRule(rule) || !isLabelRule(rule))
+  for (const rule of policy.rules) {
+    if (tierRank(rule.tier) <= tierRank("public") || !isLabelRule(rule))
       continue;
     if (rule.source !== undefined && rule.source !== provider)
       continue;
     keyed.set(ruleKey(rule), rule);
   }
-  const metaKey = `${LABEL_SWEEP_META_KEY}:${provider}:${accountScope}`;
+  const metaKey = labelSweepMetaKey(provider, accountScope);
   let written = ledger.readMeta(metaKey);
-  const stored = readLabelState(written);
+  const previous = readLabelState(written);
+  const stored = labelSweepHasPolicy(previous, policy, provider, accountScope) ? previous : { done: [] };
   const done = new Set(stored.done.filter((key) => keyed.has(key)));
+  const completed = new Map(Object.entries(stored.completed ?? {}).filter(([key]) => keyed.has(key)));
   const walks = new Map(Object.entries(stored.walks ?? {}).filter(([key]) => keyed.has(key)));
   const order = (stored.order ?? []).filter((key, at, all) => keyed.has(key) && all.indexOf(key) === at);
   const save = () => {
     const state = {
+      revision: policy.revision,
+      provider,
+      accountScope,
       done: [...done].sort(),
+      ...completed.size > 0 ? { completed: Object.fromEntries(completed) } : {},
       ...order.length > 0 ? { order: [...order] } : {},
       ...walks.size > 0 ? { walks: Object.fromEntries([...walks].sort(([left], [right]) => left < right ? -1 : 1)) } : {}
     };
@@ -103744,6 +106298,18 @@ async function sweepLabelRuleRaises(options) {
     ledger.writeMeta(metaKey, next);
     written = next;
   };
+  const applyCurrent = (work) => withTierRuleFence(set, () => ledger.withMoveBatch(() => {
+    const current = currentTierRulePolicy(set);
+    if (current.unavailable || current.revision !== policy.revision || ledger.readMeta(metaKey) !== written)
+      return false;
+    work();
+    save();
+    return true;
+  }));
+  const stale = () => {
+    report.pending = keyed.size;
+    return report;
+  };
   const queue = [...keyed.keys()].filter((key) => options.recheck === true || !done.has(key)).sort((left, right) => order.indexOf(left) - order.indexOf(right) || (left < right ? -1 : 1));
   let pagesLeft = Math.max(1, options.maxPages ?? DEFAULT_LABEL_SWEEP_PAGES);
   for (const key of queue) {
@@ -103751,10 +106317,17 @@ async function sweepLabelRuleRaises(options) {
       break;
     const rule = keyed.get(key);
     const resumed = walks.get(key);
+    const walkId = resumed?.id ?? randomUUID22();
     let pageToken = resumed?.pageToken;
     let deferred = resumed?.deferred === true;
     report.rules += 1;
     let finished = false;
+    if (!applyCurrent(() => {
+      done.delete(key);
+      if (!resumed)
+        walks.set(key, { id: walkId });
+    }))
+      return stale();
     try {
       let firstPage = true;
       while (pagesLeft > 0) {
@@ -103763,44 +106336,49 @@ async function sweepLabelRuleRaises(options) {
         try {
           page = await source.listLabelled(rule.match.value, pageToken !== undefined ? { pageToken } : {});
         } catch (error) {
-          if (error instanceof LabelPageRejectedError && firstPage && resumed)
+          if (error instanceof LabelPageRejectedError && firstPage && resumed && !applyCurrent(() => {
             walks.delete(key);
+          }))
+            return stale();
           throw error;
         }
         firstPage = false;
-        for (const id of page.ids) {
-          report.scanned += 1;
-          const outcome = raiseLabelled(set, { provider, accountScope, providerItemId: id }, rule, classification);
-          if (outcome === "raised")
-            report.raised += 1;
-          else if (outcome === "secrets")
-            report.secrets += 1;
-          else if (outcome === "deferred")
-            deferred = true;
-        }
-        pageToken = page.nextPageToken || undefined;
-        if (pageToken === undefined) {
-          finished = true;
+        if (!applyCurrent(() => {
+          ledger.recordLabelRuleMatches(provider, accountScope, key, walkId, page.ids.map(labelEvidenceItemKey));
+          for (const id of page.ids) {
+            report.scanned += 1;
+            const outcome = raiseLabelled(set, { provider, accountScope, providerItemId: id }, rule, policy);
+            if (outcome === "raised")
+              report.raised += 1;
+            else if (outcome === "secrets")
+              report.secrets += 1;
+            else if (outcome === "deferred")
+              deferred = true;
+          }
+          pageToken = page.nextPageToken || undefined;
+          finished = pageToken === undefined;
+          if (!finished) {
+            walks.set(key, { id: walkId, pageToken, ...deferred ? { deferred: true } : {} });
+          } else {
+            walks.delete(key);
+            if (!deferred) {
+              done.add(key);
+              completed.set(key, walkId);
+              ledger.retirePreviousLabelRuleMatches(provider, accountScope, key, walkId);
+            }
+            order.splice(0, order.length, ...order.filter((entry) => entry !== key), key);
+          }
+        }))
+          return stale();
+        if (finished)
           break;
-        }
-        walks.set(key, { pageToken, ...deferred ? { deferred: true } : {} });
-        save();
       }
     } catch {}
-    if (!finished) {
-      done.delete(key);
-      save();
+    if (!finished)
       break;
-    }
-    if (deferred)
-      done.delete(key);
-    else
-      done.add(key);
-    walks.delete(key);
-    order.splice(0, order.length, ...order.filter((entry) => entry !== key), key);
-    save();
   }
-  save();
+  if (!applyCurrent(() => {}))
+    return stale();
   report.pending = [...keyed.keys()].filter((key) => !done.has(key)).length;
   return report;
 }
@@ -103814,32 +106392,8 @@ function raiseLabelled(set, identity, rule, classification) {
     return "deferred";
   }
 }
-function readLabelState(raw) {
-  if (!raw)
-    return { done: [] };
-  try {
-    const parsed = JSON.parse(raw);
-    const walks = {};
-    if (parsed.walks && typeof parsed.walks === "object" && !Array.isArray(parsed.walks)) {
-      for (const [key, walk] of Object.entries(parsed.walks)) {
-        const entry = walk;
-        if (entry && typeof entry.pageToken === "string" && entry.pageToken) {
-          walks[key] = { pageToken: entry.pageToken, ...entry.deferred === true ? { deferred: true } : {} };
-        }
-      }
-    }
-    const order = Array.isArray(parsed.order) ? parsed.order.filter((key) => typeof key === "string") : [];
-    return {
-      done: Array.isArray(parsed.done) ? parsed.done.filter((key) => typeof key === "string") : [],
-      ...Object.keys(walks).length > 0 ? { walks } : {},
-      ...order.length > 0 ? { order } : {}
-    };
-  } catch {
-    return { done: [] };
-  }
-}
 function reopenLabelRuleSweep(ledger, provider, accountScope) {
-  const metaKey = `${LABEL_SWEEP_META_KEY}:${provider}:${accountScope}`;
+  const metaKey = labelSweepMetaKey(provider, accountScope);
   const written = ledger.readMeta(metaKey);
   const state = readLabelState(written);
   if (state.done.length === 0)
@@ -103851,9 +106405,6 @@ function isLabelRule(rule) {
 }
 function isRaisingRule(rule) {
   return tierRank(rule.tier) > tierRank("private");
-}
-function ruleKey(rule) {
-  return createHash51("sha256").update(JSON.stringify([rule.id, rule.source ?? "", rule.match.kind, rule.match.value, rule.tier, rule.strength])).digest("hex").slice(0, 24);
 }
 function readState5(raw) {
   if (!raw)
@@ -103911,13 +106462,15 @@ function identityOf4(record) {
     ...record.conversationKey ? { providerConversationId: record.conversationKey } : {}
   };
 }
-var DEFAULT_RULES_SWEEP_ROWS = 1000, SWEEP_META_KEY = "owner_rules_sweep", LABEL_SWEEP_META_KEY = "owner_rules_label_sweep", DEFAULT_LABEL_SWEEP_PAGES = 20, MAX_HELD_ITEMS = 200, LabelPageRejectedError;
+var DEFAULT_RULES_SWEEP_ROWS = 1000, SWEEP_META_KEY = "owner_rules_sweep", DEFAULT_LABEL_SWEEP_PAGES = 20, MAX_HELD_ITEMS = 200, LabelPageRejectedError;
 var init_tier_rules_sweep = __esm(() => {
   init_tier_classifier();
+  init_tier_ledger();
   init_stored_names();
   init_tier_override_settle();
   init_tier_rejudge();
   init_loop_pass();
+  init_tier_move_rule_policy();
   LabelPageRejectedError = class LabelPageRejectedError extends Error {
     constructor() {
       super("The provider no longer accepts the saved label page.");
@@ -104360,6 +106913,8 @@ class TieredStoreSet {
   setId;
   automaticMoveContext;
   ledger;
+  ownerRulesPath;
+  ownerRuleSource;
   legs;
   splitLayers;
   tierClassification;
@@ -104381,6 +106936,8 @@ class TieredStoreSet {
     this.setId = options.setId;
     this.automaticMoveContext = options.automaticMoveContext ?? registeredInstalledTierClassification()?.automaticMoveContext;
     this.ledger = options.ledger;
+    this.ownerRulesPath = options.ownerRulesPath;
+    this.ownerRuleSource = options.ownerRuleSource;
     this.splitLayers = options.splitLayers !== false;
     this.tierClassification = options.tierClassification;
     this.secretLocations = options.secretLocations;
@@ -104408,7 +106965,7 @@ class TieredStoreSet {
       registerTierSetPlanner(this.ledger.dbPath, (decision) => this.placementFor(decision));
       registerTierSetForLedger(this.ledger.dbPath, this);
     }
-    if (!writableStoreOpensForbidden()) {
+    if (!writableStoreOpensForbidden() && !options.skipOpeningMaintenance) {
       this.repairLowerContent();
       this.sweepOrphanedChildren();
     }
@@ -104673,6 +107230,13 @@ class TieredStoreSet {
       stored: { trustDomain: contentDomain, trustTier: this.restingTierFor(contentDomain) }
     };
   }
+  checkedBodyDecision(identity, decision, text, imageJudgment) {
+    if (decision.contentPending)
+      return decision;
+    const destination = copyServingLayer(this.placementFor(decision).copies, "content");
+    const override = this.ledger.getOverride(identity);
+    return destination?.trustDomain === "internal" && !personalContentAuthorized(decision, text, override?.kind === "not_secret", override, imageJudgment) ? { ...decision, state: "pending", contentPending: true } : decision;
+  }
   declarePrivateEmbedder(provider, options = {}) {
     this.privateEmbedder = provider;
     this.privateEmbedWith = options.embedWith;
@@ -104866,6 +107430,30 @@ class TieredStoreSet {
   routedWithoutAnyCopyRow(identity) {
     return TIER_DOMAIN_ORDER.every((domain) => this.store(domain)?.itemPresence(identity).active !== true);
   }
+  adoptLegacyItem(identity) {
+    const current = this.ledger.getCurrent(identity);
+    if (current?.routed)
+      return current;
+    const copies = [];
+    for (const domain of TIER_DOMAIN_ORDER) {
+      const store = this.store(domain);
+      const row = store?.storedItemState(identity);
+      if (!store || !row || row.tombstoned)
+        continue;
+      store.bindTierSet(this.ledger);
+      copies.push({ corpusId: store.corpusId, trustDomain: domain, layers: row.chunkCount > 0 ? "both" : "metadata" });
+    }
+    const last = copies.at(-1);
+    if (last && !copyServingLayer(copies, "content"))
+      last.layers = "both";
+    const domain = last?.trustDomain;
+    if (!domain)
+      return current;
+    const tier = domain === "secure_local" ? "secure" : domain === "internal" ? "private" : "public";
+    return this.ledger.adoptLegacyPlacement(identity, copies, {
+      whenMissing: { family: identity.family, metadataTier: tier, contentTier: tier }
+    });
+  }
   anyLegHasRow(identity) {
     return TIER_DOMAIN_ORDER.some((domain) => this.store(domain)?.hasItemRow(identity) === true);
   }
@@ -105013,8 +107601,13 @@ class TieredStoreSet {
       ...owedBodyVersion !== undefined ? { owedBodyVersion } : {}
     };
   }
-  classification() {
-    const resolved = resolveStoreTierClassification(this.tierClassification, this.ledger.dbPath);
+  classification(ownerRules = this.ownerRuleSource?.read()) {
+    const installed = resolveStoreTierClassification(this.tierClassification, this.ledger.dbPath);
+    const resolved = ownerRules && (ownerRules.rules.length > 0 || ownerRules.unavailable) ? {
+      ...installed,
+      rules: [...installed?.rules ?? [], ...ownerRules.rules],
+      ...ownerRules.unavailable ? { unavailableReason: "owner_rules_unavailable" } : {}
+    } : installed;
     return resolved ? { ...resolved, parentNamesContext: (child, parentLink) => parentNamesContext(this, child, parentLink) } : resolved;
   }
   holdsContentUntilJudged() {
@@ -105044,6 +107637,8 @@ function createLaneTieredStoreSet(options) {
     ledger,
     ...options.splitLayers === false ? { splitLayers: false } : {},
     ...options.tierClassification ? { tierClassification: options.tierClassification } : {},
+    ...options.ownerRulesPath ? { ownerRulesPath: options.ownerRulesPath } : {},
+    ...options.ownerRuleSource ? { ownerRuleSource: options.ownerRuleSource } : {},
     ...options.secretLocations ? { secretLocations: options.secretLocations } : {},
     ...options.onLegOpened ? { onLegOpened: options.onLegOpened } : {},
     ...options.contentArrivesLaterFor ? { contentArrivesLaterFor: options.contentArrivesLaterFor } : {},
@@ -105103,6 +107698,8 @@ function createTieredLaneSet(options) {
     legs,
     ...options.splitLayers === false ? { splitLayers: false } : {},
     ...options.tierClassification ? { tierClassification: options.tierClassification } : {},
+    ...options.ownerRulesPath ? { ownerRulesPath: options.ownerRulesPath } : {},
+    ...options.ownerRuleSource ? { ownerRuleSource: options.ownerRuleSource } : {},
     ...options.secretLocations ? { secretLocations: options.secretLocations } : {},
     ...options.onLegOpened ? { onLegOpened: options.onLegOpened } : {},
     ...options.contentArrivesLater === true ? { contentArrivesLater: true } : {},
@@ -105300,7 +107897,7 @@ class TieredRoutingRun {
     const key = planKey(input.item);
     let entry = this.plans.get(key);
     if (!entry) {
-      entry = { plan: this.planFor(input), identity: input.item.identity, handedOff: false };
+      entry = { plan: this.classifyAndPlan(input), identity: input.item.identity, handedOff: false };
       this.plans.set(key, entry);
     }
     this.versionPlans.set(versionKey(input.item), entry.plan.kind);
@@ -105340,20 +107937,6 @@ class TieredRoutingRun {
         this.set.store(domain)?.stripCopyContent(item.identity);
     }
     this.pendingWithdrawals.clear();
-    for (const move of this.cachedLowerings.values()) {
-      await ingestionTurn();
-      const context = this.set.automaticMoveContext;
-      if (!context || !automaticTierMovesAllowed(this.set, context))
-        continue;
-      await moveTieredItem({
-        set: this.set,
-        identity: move.identity,
-        target: move.target,
-        ...automaticTierMoveOptions(this.set, context),
-        expectedGeneration: move.generation
-      });
-    }
-    this.cachedLowerings.clear();
     const barrier = async () => {
       for (const domain of TIER_DOMAIN_ORDER)
         await this.set.store(domain)?.durabilityBarrierOffLoop();
@@ -105384,6 +107967,20 @@ class TieredRoutingRun {
       await barrier();
     for (const identity of cleared)
       this.set.ledger.clearWriteIntent(identity);
+    for (const move of this.cachedLowerings.values()) {
+      await ingestionTurn();
+      const context = this.set.automaticMoveContext;
+      if (!context || !automaticTierMovesAllowed(this.set, context) || this.set.ledger.getCurrent(move.identity)?.generation !== move.generation)
+        continue;
+      await moveTieredItem({
+        set: this.set,
+        identity: move.identity,
+        target: move.target,
+        ...automaticTierMoveOptions(this.set, context),
+        expectedGeneration: move.generation
+      });
+    }
+    this.cachedLowerings.clear();
     this.intents.clear();
     this.namesAdvance.clear();
     this.emptied.clear();
@@ -105391,11 +107988,13 @@ class TieredRoutingRun {
   routeFor(plan, corpusId, domain) {
     switch (plan.kind) {
       case "legacy":
+        if (plan.reobserveOnly)
+          return { kind: "elsewhere", reason: "routed_to_other_tier" };
         return this.set.legSpec(domain)?.legacy === true ? { kind: "legacy" } : { kind: "elsewhere", reason: "routed_to_other_tier" };
       case "routed": {
         const layers = plan.copies.get(corpusId);
         const sensitivity = plan.sensitivity.get(corpusId);
-        return layers && sensitivity ? { kind: "store", sensitivity, layer: layers } : { kind: "elsewhere", reason: "routed_to_other_tier" };
+        return layers && sensitivity ? { kind: "store", sensitivity, layer: layers, ...plan.writeListedBody ? { writeListedBody: true } : {} } : { kind: "elsewhere", reason: "routed_to_other_tier" };
       }
       case "hold":
         return plan.location === true && domain === SECRET_LOCATION_DOMAIN ? { kind: "delete", reason: "secrets", keepLocation: true } : { kind: "elsewhere", reason: plan.reason };
@@ -105406,12 +108005,13 @@ class TieredRoutingRun {
         return plan.corpora.has(corpusId) ? { kind: "delete", reason: plan.reason } : { kind: "elsewhere", reason: plan.reason === "secrets" ? "secrets" : "routed_to_other_tier" };
     }
   }
-  planFor(input) {
+  classifyAndPlan(input) {
     const { item, connector } = input;
     const identity = item.identity;
     const ledger = this.set.ledger;
     const hasRow = this.set.anyLegHasRow(identity);
-    const routed = ledger.isRouted(identity);
+    const before = ledger.getCurrent(identity);
+    const routed = before?.routed === true;
     if (item.metadata["deleted"] === true) {
       this.cachedLowerings.delete(identityKey(identity));
       this.set.secrets()?.remove(identity);
@@ -105440,10 +108040,21 @@ class TieredRoutingRun {
     const promoted = TIER_DOMAIN_ORDER.some((domain) => this.set.store(domain)?.readOnDemand(item.identity.localItemId, item.identity.sourceVersion ?? ""));
     const namesOnly = deferred && !promoted && (input.metadataOnly || CONTAINER_MIME_TYPES.includes(item.mimeType?.trim().toLowerCase() ?? "") || this.set.ownerKeepsNamesOnly(pathOf(sourceExclusionFactsFromMetadata(item.metadata).path)));
     const text = namesOnly ? undefined : connectorStoreItemText(item);
+    const override = before?.contentTier === "secrets" && text?.trim() && !input.contentFetchFailed ? ledger.getOverride(identity) : undefined;
+    let freshSecretReplacement = false;
+    if (override?.kind === "tier" && (override.tier === "private" || override.tier === "public") && text !== undefined) {
+      const oldHash = this.set.secrets()?.get(identity)?.contentHash;
+      const sourceVersion = typeof item.metadata.contentVersion === "string" ? item.metadata.contentVersion : identity.sourceVersion;
+      freshSecretReplacement = oldHash !== undefined && oldHash !== null ? oldHash !== createHash52("sha256").update(text).digest("hex") : sourceVersion === undefined || !TIER_DOMAIN_ORDER.some((domain) => this.set.store(domain)?.storedItemState(identity)?.version === sourceVersion);
+    }
     const classification = this.classification;
+    const repeatedLegacyBody = !routed && hasRow && text !== undefined && !input.contentFetchFailed && !input.sourceScope && this.set.store(input.legacy.trustDomain)?.repeatsListedCopy(item, text, connector.id);
+    const arrivingBody = text !== undefined && (routed ? !before.reasons.includes(contentDigestReason(text)) && ledger.copies(identity).length > 0 : hasRow && !repeatedLegacyBody);
     let decision = decideItemTiers(connector, item, text, classification, ledger, {
       namesOnly,
+      requireContentVerdict: arrivingBody,
       afterFirstImport: ledger.listingCaughtUp(connector.id),
+      ...freshSecretReplacement ? { freshSecretReplacement: true } : {},
       ...input.contentFetchFailed ? { contentFetchFailed: true } : {},
       storedContentNames: () => {
         const serving = copyServingLayer(ledger.copies(identity).filter((copy) => copy.state === "current"), "content");
@@ -105456,21 +108067,29 @@ class TieredRoutingRun {
     }
     this.recordSecretLocation(input, text, decision);
     const contentRead = decision.contentRead && !input.contentFetchFailed;
+    if (repeatedLegacyBody && decision.state === "current" && decision.decidedBy === "default" && decision.metadataTier === "private" && decision.contentTier === "private" && decision.reasons.includes("content:no_raise") && !ledger.writeIntent(identity)) {
+      this.counts.itemsLegacy += 1;
+      return { kind: "legacy", reobserveOnly: true };
+    }
+    if ((arrivingBody || !routed && hasRow) && contentRead && text !== undefined) {
+      decision = this.set.checkedBodyDecision(identity, decision, text);
+    }
     if (!routed) {
-      const laneRow = hasRow && (TIER_DOMAIN_ORDER.some((domain) => this.set.store(domain)?.itemPresence(identity).active === true) || !ledger.isUnseenDeletion(identity));
-      if (laneRow || !deferred && (!contentRead || input.metadataOnly)) {
+      const laneRow = hasRow && (!ledger.isUnseenDeletion(identity) || !this.set.routedWithoutAnyCopyRow(identity));
+      if (laneRow && text === undefined || (laneRow || !deferred) && (!contentRead || input.metadataOnly)) {
         this.counts.itemsLegacy += 1;
         return { kind: "legacy" };
       }
     } else if (!contentRead) {
-      if (!deferred) {
+      if (!deferred && !(before?.state === "moving" && decision.contentTier === "secrets")) {
         this.counts.contentUnreadHeld += 1;
         const key = identityKey(identity);
         const owed = ledger.writeIntent(identity);
         const emptied = text !== undefined && text.trim() === "" && item.content.kind !== "metadata_only" && !input.contentFetchFailed;
         if (emptied && !((owed?.kind === "content" || owed?.kind === "names") && !this.intents.has(key) && owed.version !== identity.sourceVersion)) {
           this.writeIntent(connector.id, identity, "content", () => {
-            return;
+            if (before?.state === "moving")
+              ledger.recordDecision(identity, decision);
           }, undefined, typeof item.metadata["contentVersion"] === "string" && item.metadata["contentVersion"] !== identity.sourceVersion ? item.metadata["contentVersion"] : undefined);
           this.emptied.set(key, identity);
           this.namesAdvance.set(key, identity);
@@ -105483,13 +108102,34 @@ class TieredRoutingRun {
             this.owedAlready.add(key);
           return { kind: "hold", reason: "content_unread" };
         }
-        this.writeIntent(connector.id, identity, "advance", () => {
-          return;
-        });
+        const observed = this.writeIntent(connector.id, identity, "advance", () => before?.state === "moving" ? ledger.recordDecision(identity, decision, undefined, input.contentFetchFailed ? { contentFetchOwed: true } : undefined) : undefined, (result) => result?.outcome === "updated" && input.contentFetchFailed ? { kind: "content" } : undefined);
+        if (observed?.outcome === "updated") {
+          this.cachedLowerings.delete(key);
+          if (input.contentFetchFailed)
+            this.intents.delete(key);
+        }
         return { kind: "hold", reason: "content_unread" };
       }
-      if (ledger.copies(identity).length > 0)
-        decision = withRecordedContent(decision, ledger.getCurrent(identity));
+      if (ledger.copies(identity).length > 0 && before)
+        decision = before.state === "moving" ? movingObservation(before, decision, input.contentFetchFailed ? { contentFetchOwed: true } : undefined) : withRecordedContent(decision, before);
+    }
+    if (!routed && hasRow && contentRead && text !== undefined && !input.metadataOnly) {
+      return ledger.withMoveBatch(() => {
+        this.set.adoptLegacyItem(identity);
+        const plan = this.planFor(input, decision, contentRead, deferred, before, hasRow);
+        return plan.kind === "routed" ? { ...plan, writeListedBody: true } : plan;
+      });
+    }
+    return this.planFor(input, decision, contentRead, deferred, before, hasRow);
+  }
+  planFor(input, decision, contentRead, deferred, before, hasRow) {
+    const { item, connector } = input;
+    const { identity } = item;
+    const { ledger } = this.set;
+    const routed = before?.routed === true;
+    if (before?.state === "moving" && item.holdContentUntilJudged && decision.contentPending && !decision.metadataPending && before.targetMetadataTier === decision.metadataTier && before.targetContentTier === decision.contentTier && decision.reasons.some((reason) => reason.startsWith("content:names:") && before.reasons.includes(reason)) && decision.reasons.some((reason) => reason.startsWith("metadata:names_input:") && before.reasons.includes(reason)) && decision.reasons.some((reason) => reason.startsWith("content:sha256:") && !before.reasons.includes(reason))) {
+      this.counts.movesQueued += 1;
+      return { kind: "hold", reason: "move_queued" };
     }
     let placement = this.set.placementFor(decision, { contentArrivesLater: deferred });
     const currentCopies = ledger.copies(identity).filter((copy) => copy.state === "current");
@@ -105498,18 +108138,45 @@ class TieredRoutingRun {
     if (contentRead && decision.contentPending && fromContent && toContent && trustDomainRank(toContent.trustDomain) < trustDomainRank(fromContent.trustDomain) && !placementIsRaise(currentCopies, placement.copies)) {
       placement = { copies: currentCopies, embedHold: true };
     }
-    const holdsReplacement = routed && contentRead && (heldUntilJudged(decision.reasons) || contentHeldForJudgment(decision)) && decision.contentTier !== "secrets" && ledger.getCurrent(identity)?.state !== "moving";
-    const replacesInPlace = holdsReplacement && currentCopies.length > 0 && placementIsRaise(currentCopies, placement.copies);
-    const placedDomains = new Set(placement.copies.map((copy) => copy.trustDomain));
+    const legacyRaise = !routed && hasRow && contentRead && decision.contentTier !== "secrets" && placementIsRaise(currentCopies, placement.copies);
+    const replacingLowerBody = !routed && contentRead && toContent && toContent.trustDomain !== "secure_local" && (this.set.store(toContent.trustDomain)?.storedItemState(identity)?.chunkCount ?? 0) > 0;
+    const firstPrivateWrite = legacyRaise || replacingLowerBody;
+    const priorIntent = before?.state === "moving" ? ledger.writeIntent(identity) : undefined;
+    const holdsReplacement = (routed || hasRow) && contentRead && (firstPrivateWrite || item.holdContentUntilJudged === true || contentHeldForJudgment(decision)) && decision.contentTier !== "secrets" && before?.state !== "moving";
+    const restoresChangedSecret = before?.contentTier === "secrets" && decision.reasons.includes(OWNER_OVERRIDE_SECRET_REVIEW_REASON);
+    const replacesInPlace = holdsReplacement && (restoresChangedSecret || currentCopies.length > 0 && (!routed || placementIsRaise(currentCopies, placement.copies)));
+    const legacyLanding = firstPrivateWrite && !contentHeldForJudgment(decision) ? this.set.placementFor({ ...decision, metadataPending: true }) : undefined;
+    const writes = legacyLanding ?? placement;
+    const placedDomains = new Set(writes.copies.map((copy) => copy.trustDomain));
     const staleDomains = holdsReplacement ? TIER_DOMAIN_ORDER.filter((domain) => !placedDomains.has(domain) && this.set.store(domain)?.itemPresence(identity).active === true) : [];
-    const staleText = holdsReplacement ? placement.copies.filter((copy) => copy.layers === "metadata" && (this.set.store(copy.trustDomain)?.storedItemState(identity)?.chunkCount ?? 0) > 0).map((copy) => copy.trustDomain) : [];
-    const recorded = this.writeIntent(connector.id, identity, decision.contentTier === "secrets" ? "secret" : item.content.kind === "metadata_only" ? "names" : "content", () => ledger.recordRoutedPlacement(identity, decision, placement, {
-      staleCopiesGone: replacesInPlace || routed && (this.copyRemovals.has(identityKey(identity)) || this.set.routedCopiesGone(identity)),
-      ...deferred ? { stagedLandingAllowed: true } : {}
-    }), (result) => result.outcome === "secrets" ? { kind: "secret", ...!hasRow && this.set.legSpec(SECRET_LOCATION_DOMAIN) !== undefined ? { location: true } : {} } : { kind: item.content.kind === "metadata_only" ? "names" : "content" }, typeof item.metadata["contentVersion"] === "string" && item.metadata["contentVersion"] !== identity.sourceVersion ? item.metadata["contentVersion"] : undefined);
+    const staleText = holdsReplacement ? writes.copies.filter((copy) => copy.layers === "metadata" && (this.set.store(copy.trustDomain)?.storedItemState(identity)?.chunkCount ?? 0) > 0).map((copy) => copy.trustDomain) : [];
+    const recorded = this.writeIntent(connector.id, identity, decision.contentTier === "secrets" ? "secret" : item.content.kind === "metadata_only" ? "names" : "content", () => {
+      if (legacyLanding) {
+        ledger.recordRoutedPlacement(identity, decision, legacyLanding, { staleCopiesGone: true });
+        for (const copy of legacyLanding.copies) {
+          this.set.store(copy.trustDomain, { create: true }).bindTierSet(ledger);
+          this.routedDomains.add(copy.trustDomain);
+        }
+        return ledger.recordRoutedPlacement(identity, decision, placement);
+      }
+      return ledger.recordRoutedPlacement(identity, decision, placement, {
+        staleCopiesGone: replacesInPlace || routed && (this.copyRemovals.has(identityKey(identity)) || this.set.routedCopiesGone(identity)),
+        ...deferred ? { stagedLandingAllowed: true } : {}
+      });
+    }, (result) => result.outcome === "secrets" ? { kind: "secret", ...!hasRow && this.set.legSpec(SECRET_LOCATION_DOMAIN) !== undefined ? { location: true } : {} } : { kind: item.content.kind === "metadata_only" ? "names" : "content" }, typeof item.metadata["contentVersion"] === "string" && item.metadata["contentVersion"] !== identity.sourceVersion ? item.metadata["contentVersion"] : undefined);
     if (recorded.outcome !== "secrets") {
       retireSecretRedactions(ledger, { identity });
       this.copyRemovals.delete(identityKey(identity));
+    }
+    if (before?.state === "moving" && before.generation !== recorded.record.generation) {
+      this.cachedLowerings.delete(identityKey(identity));
+      const text = connectorStoreItemText(item);
+      if (recorded.outcome === "queued_move" && recorded.raise && contentRead && text !== undefined && !before.reasons.includes(contentDigestReason(text))) {
+        this.intents.delete(identityKey(identity));
+      }
+    }
+    if (staleDomains.length > 0 || staleText.length > 0) {
+      this.pendingWithdrawals.set(identityKey(identity), { item, domains: staleDomains, text: staleText });
     }
     switch (recorded.outcome) {
       case "secrets":
@@ -105533,6 +108200,7 @@ class TieredRoutingRun {
       case "queued_move":
         this.counts.movesQueued += 1;
         if (contentRead && !recorded.raise) {
+          const classification = this.classification;
           if (classification?.sniffer?.cachedVerdict && decision.reasons.some((reason) => reason.startsWith(`content:sniffer:${classification.sniffer.id}:`)) && !decision.contentPending && !decision.metadataPending) {
             this.cachedLowerings.set(identityKey(identity), {
               identity,
@@ -105540,16 +108208,19 @@ class TieredRoutingRun {
               target: { metadataTier: decision.metadataTier, contentTier: decision.contentTier }
             });
           }
-          return this.storedPlan(currentCopies);
+          return this.storedPlan(ledger.copies(identity).filter((copy) => copy.state === "current"));
         }
         return { kind: "hold", reason: "move_queued" };
       case "held_moving":
         this.counts.movesQueued += 1;
+        if (priorIntent?.kind === "content" && priorIntent.version === identity.sourceVersion && contentRead && fromContent?.trustDomain === "secure_local" && currentCopies.every((copy) => copy.trustDomain === "secure_local") && before?.targetContentTier === decision.contentTier && before.targetMetadataTier === decision.metadataTier && before.reasons.includes(contentDigestReason(connectorStoreItemText(item) ?? ""))) {
+          this.set.store("secure_local", { create: true }).bindTierSet(ledger);
+          this.routedDomains.add("secure_local");
+          return { ...this.storedPlan(currentCopies), writeListedBody: true };
+        }
         return { kind: "hold", reason: "move_queued" };
       default: {
         this.counts.itemsRouted += 1;
-        if (staleDomains.length > 0 || staleText.length > 0)
-          this.pendingWithdrawals.set(identityKey(identity), { item, domains: staleDomains, text: staleText });
         if (placement.embedHold)
           this.counts.itemsPendingHeld += 1;
         const copies = new Map;
@@ -106637,12 +109308,12 @@ var init_sniffer_decision = __esm(() => {
 // src/workers/source-index/built-in-reasoning/install.ts
 import { isMainThread as isMainThread7 } from "node:worker_threads";
 import { spawn as spawn5 } from "node:child_process";
-import { createHash as createHash54, randomUUID as randomUUID22 } from "node:crypto";
+import { createHash as createHash54, randomUUID as randomUUID23 } from "node:crypto";
 import {
   closeSync as closeSync19,
   createReadStream as createReadStream3,
   existsSync as existsSync61,
-  mkdirSync as mkdirSync41,
+  mkdirSync as mkdirSync42,
   openSync as openSync19,
   readFileSync as readFileSync54,
   readdirSync as readdirSync12,
@@ -106653,7 +109324,7 @@ import {
   writeFileSync as writeFileSync14,
   writeSync as writeSync4
 } from "node:fs";
-import { dirname as dirname66, isAbsolute as isAbsolute24, join as join73 } from "node:path";
+import { dirname as dirname67, isAbsolute as isAbsolute24, join as join73 } from "node:path";
 function builtInReasoningPaths(model, env = process.env, runtime = LLAMA_SERVER_RUNTIME, platform = currentPlatform2()) {
   const root = builtInReasoningRoot(env);
   return {
@@ -106917,7 +109588,7 @@ function runtimeInstalled2(runtimeDir, archive) {
   return marker !== undefined && marker.sha256 === archive.sha256 && existsSync61(join73(runtimeDir, marker.serverPath));
 }
 async function installRuntime2(fetchImpl, runtimeDir, archive, reporter, extract, stallMs, space) {
-  const staging = `${runtimeDir}.staging-${randomUUID22()}`;
+  const staging = `${runtimeDir}.staging-${randomUUID23()}`;
   ensureDirectory2(staging);
   try {
     const archivePath = join73(staging, archive.name);
@@ -106927,7 +109598,7 @@ async function installRuntime2(fetchImpl, runtimeDir, archive, reporter, extract
       await extract(archivePath, staging);
     } catch (error) {
       if (isNoSpaceError(error)) {
-        throw spaceShortfallError(space, archive.bytes * RUNTIME_UNPACK_FACTOR + space.headroomBytes, space.freeBytes(dirname66(runtimeDir)) ?? 0, "the disk filled up while unpacking");
+        throw spaceShortfallError(space, archive.bytes * RUNTIME_UNPACK_FACTOR + space.headroomBytes, space.freeBytes(dirname67(runtimeDir)) ?? 0, "the disk filled up while unpacking");
       }
       throw new BuiltInReasoningInstallError("runtime_load_failed", `The built-in model server could not be unpacked (${error instanceof Error ? error.message : String(error)}).`);
     }
@@ -107035,7 +109706,7 @@ async function downloadVerified2(fetchImpl, url, target, expectedBytes, expected
     verifyStallMs: VERIFY_STALL_MS,
     keepPartial: true,
     error: (reason, message) => new BuiltInReasoningInstallError(reason, message),
-    diskError: (error) => isNoSpaceError(error) ? spaceShortfallError(space, expectedBytes + space.headroomBytes, space.freeBytes(dirname66(target)) ?? 0, "the disk filled up during the download") : new BuiltInReasoningInstallError("disk_write_failed", `Could not write the download: ${String(error)}`),
+    diskError: (error) => isNoSpaceError(error) ? spaceShortfallError(space, expectedBytes + space.headroomBytes, space.freeBytes(dirname67(target)) ?? 0, "the disk filled up during the download") : new BuiltInReasoningInstallError("disk_write_failed", `Could not write the download: ${String(error)}`),
     write: space.write,
     onStart: () => reporter.set("downloading", label),
     onProgress: (bytes) => reporter.advance(bytes, label)
@@ -107079,7 +109750,7 @@ async function sha256File2(path, stallMs, onProgress) {
 }
 async function withInstallLock2(lockPath, waitMs, refreshMs, noun, run) {
   const deadline = Date.now() + waitMs;
-  const token = randomUUID22();
+  const token = randomUUID23();
   for (;; ) {
     if (tryAcquireLock2(lockPath, token))
       break;
@@ -107150,7 +109821,7 @@ function lockIsStale2(lockPath) {
 }
 function ensureDirectory2(path) {
   try {
-    mkdirSync41(path, { recursive: true, mode: 448 });
+    mkdirSync42(path, { recursive: true, mode: 448 });
   } catch (error) {
     throw new BuiltInReasoningInstallError("disk_write_failed", `Could not create ${path}: ${String(error)}`);
   }
@@ -107220,7 +109891,7 @@ class ProgressReporter2 {
       return;
     this.lastWriteMs = nowMs;
     try {
-      mkdirSync41(dirname66(this.statusPath), { recursive: true, mode: 448 });
+      mkdirSync42(dirname67(this.statusPath), { recursive: true, mode: 448 });
       const temporary = `${this.statusPath}.${process.pid}.tmp`;
       writeFileSync14(temporary, `${JSON.stringify(this.status)}
 `, { mode: 384 });
@@ -108686,689 +111357,6 @@ var init_analyst_openclaw_infer = __esm(() => {
   };
 });
 
-// src/core/source-index/router.ts
-function applySourceIndexVisibilityGate(gate, hits, report) {
-  return gate.offThread ? gate.offThread(hits, report) : Promise.resolve(gate(hits, report));
-}
-async function routeSourceIndexSearch(options) {
-  return withKeywordRequestScope(() => routePreparedSourceIndexSearch(options));
-}
-async function routePreparedSourceIndexSearch(options) {
-  const request = normalizeSearchRequest(options.request);
-  const candidateCorpora = options.registry.list();
-  const skippedCorpora = [];
-  const searchedCorpora = [];
-  const laneAudits = [];
-  const degradations = [];
-  const corpusTimings = [];
-  const lanes = [];
-  const matchCounts = [];
-  const incompleteCorpora = [];
-  let encounteredSecureLocal = false;
-  const secureLaneAudits = [];
-  const startedAt = Date.now();
-  const searchableCorpora = [];
-  for (const corpus of candidateCorpora) {
-    const skipReason = skipReasonForCorpus(corpus, request);
-    if (skipReason) {
-      skippedCorpora.push({ corpusId: corpus.corpusId, trustDomain: corpus.trustDomain, reason: skipReason });
-      continue;
-    }
-    const adapter = options.adapters[corpus.corpusId];
-    if (!adapter) {
-      skippedCorpora.push({ corpusId: corpus.corpusId, trustDomain: corpus.trustDomain, reason: "no_adapter" });
-      degradations.push({
-        laneName: corpus.corpusId,
-        laneType: "keyword",
-        reason: "lane_no_adapter",
-        occurrences: 1
-      });
-      continue;
-    }
-    if (request.context.metadataOnly === true && !adapter.metadataMatches) {
-      skippedCorpora.push({ corpusId: corpus.corpusId, trustDomain: corpus.trustDomain, reason: "metadata_search_unsupported" });
-      continue;
-    }
-    searchableCorpora.push(corpus);
-  }
-  const retrievalStates = new Map(searchableCorpora.map((corpus) => [
-    corpus.corpusId,
-    retrievalStateForAdapter(options.adapters[corpus.corpusId], {
-      query: request.query,
-      maxResults: request.maxResults,
-      corpus,
-      context: request.context
-    })
-  ]));
-  const semanticPrepareBudgetMs = options.semanticPrepareBudgetMs ?? DEFAULT_SEMANTIC_PREPARE_BUDGET_MS;
-  let prepareKeywordsMaxMs = 0;
-  let keywordModel;
-  let prepareSemanticMaxMs = 0;
-  const timed = async (run) => {
-    const started = Date.now();
-    try {
-      await run();
-    } catch {}
-    return Date.now() - started;
-  };
-  const prepareStartedAt = Date.now();
-  await Promise.all(searchableCorpora.map(async (corpus) => {
-    const adapter = options.adapters[corpus.corpusId];
-    const semantic = adapter.prepareSemantic && semanticPrepareBudgetMs > 0 && request.context.metadataOnly !== true && retrievalStates.get(corpus.corpusId).hybridServable;
-    const [keywordsMs, semanticMs] = await Promise.all([
-      timed(async () => {
-        const prepared = await adapter.prepareKeywords?.(request.query).catch(() => ({ incomplete: true }));
-        if (prepared?.keyword_model && (!keywordModel || keywordModel === "ready" || prepared.keyword_model === "cold")) {
-          keywordModel = prepared.keyword_model;
-        }
-        if (prepared?.incomplete)
-          degradations.push({ laneName: `${corpus.corpusId}:keywords`, laneType: "keyword", reason: "lane_timeout", detail: "keyword_preparation_incomplete", occurrences: 1 });
-      }),
-      semantic ? timed(() => adapter.prepareSemantic(request.query, semanticPrepareBudgetMs)) : Promise.resolve(0)
-    ]);
-    prepareKeywordsMaxMs = Math.max(prepareKeywordsMaxMs, keywordsMs);
-    prepareSemanticMaxMs = Math.max(prepareSemanticMaxMs, semanticMs);
-  }));
-  const lanesStartedAt = Date.now();
-  const laneTimeoutMs = resolveLaneTimeoutMs(options.laneTimeoutMs);
-  const matchingIds = new Set;
-  const laneOutcomes = await Promise.all(searchableCorpora.map(async (corpus) => {
-    const adapter = options.adapters[corpus.corpusId];
-    let progress = () => {};
-    let partial;
-    const corpusRequest = {
-      query: request.query,
-      maxResults: options.storeSearchDepth ?? request.maxResults,
-      corpus,
-      context: request.context,
-      onProgress: () => progress(),
-      onPartialResponse: (response) => {
-        assertSafeCorpusSearchResponse(response);
-        const key = (hit) => `${hit.sourceItem.providerItemId}\x00${hit.sourceItem.localItemId}`;
-        const hits = new Map((partial?.hits ?? []).map((hit) => [key(hit), hit]));
-        for (const hit of response.hits) {
-          hits.set(key(hit), hit);
-          if (request.readWide)
-            matchingIds.add(routedHitCandidateId({ ...hit, corpusId: corpus.corpusId, trustDomain: corpus.trustDomain }));
-        }
-        partial = { hits: [...hits.values()].slice(0, corpusRequest.maxResults), latencyMs: response.latencyMs, incomplete: true, rawExposed: false };
-      }
-    };
-    const retrievalState = retrievalStates.get(corpus.corpusId).state;
-    const metadataMatches = request.context.metadataOnly === true ? adapter.metadataMatches : undefined;
-    const outcome = await runCorpusLaneUntilIdle((report) => {
-      progress = report;
-      return withSourceIndexReadProgress(report, () => runInSourceAnswerLane(corpus.corpusId, async () => {
-        if (metadataMatches) {
-          const response = await metadataMatches(corpusRequest);
-          if (request.readWide)
-            for (const hit of response.hits)
-              matchingIds.add(routedHitCandidateId({ ...hit, corpusId: corpus.corpusId, trustDomain: corpus.trustDomain }));
-          return response;
-        }
-        const response = await adapter(corpusRequest);
-        if (request.readWide)
-          for (const hit of response.hits) {
-            matchingIds.add(routedHitCandidateId({ ...hit, corpusId: corpus.corpusId, trustDomain: corpus.trustDomain }));
-          }
-        const depth = request.poolAllocation?.storeDepth;
-        const neighbours = response.semanticNeighbourHits;
-        if (depth === undefined || !neighbours?.length || response.hits.length >= depth)
-          return response;
-        const key = (hit) => `${hit.sourceItem.providerItemId}\x00${hit.sourceItem.localItemId ?? ""}`;
-        const seen = new Set(response.hits.map(key));
-        const added = neighbours.filter((hit) => !seen.has(key(hit))).slice(0, depth - response.hits.length);
-        return added.length === 0 ? response : { ...response, hits: [...response.hits, ...added] };
-      }));
-    }, laneTimeoutMs, corpus.corpusId, options.laneClock ?? REAL_LANE_CLOCK);
-    return { corpus, outcome, retrievalState, partial };
-  }));
-  for (const { corpus, outcome, retrievalState, partial } of laneOutcomes) {
-    if (outcome.kind === "timeout") {
-      skippedCorpora.push({ corpusId: corpus.corpusId, trustDomain: corpus.trustDomain, reason: "lane_timeout" });
-      degradations.push({
-        laneName: corpus.corpusId,
-        laneType: "keyword",
-        reason: "lane_timeout",
-        occurrences: 1
-      });
-      corpusTimings.push({
-        corpusId: corpus.corpusId,
-        elapsedMs: outcome.elapsedMs,
-        outcome: "timeout"
-      });
-      if (!partial)
-        continue;
-      incompleteCorpora.push(corpus.corpusId);
-    }
-    const response = outcome.kind === "response" ? outcome.response : partial;
-    if (outcome.kind === "response")
-      corpusTimings.push({
-        corpusId: corpus.corpusId,
-        elapsedMs: outcome.elapsedMs,
-        adapterReportedMs: response.latencyMs,
-        outcome: "success"
-      });
-    searchedCorpora.push(corpus.corpusId);
-    if (response.incomplete === true && !incompleteCorpora.includes(corpus.corpusId))
-      incompleteCorpora.push(corpus.corpusId);
-    const corpusLaneAuditsStart = laneAudits.length;
-    laneAudits.push(...response.laneAudits ?? []);
-    const contributedSecure = corpusContributedSecure(corpus, response);
-    if (contributedSecure)
-      encounteredSecureLocal = true;
-    if (response.matchCount) {
-      matchCounts.push({
-        corpusId: corpus.corpusId,
-        family: corpus.family,
-        trustDomain: corpus.trustDomain,
-        trustTier: corpus.defaultSensitivity.trustTier,
-        matchedItems: response.matchCount.matchedItems,
-        contentMatchedItems: response.matchCount.contentMatchedItems,
-        saturated: response.matchCount.saturated,
-        ...response.matchCount.secureMatchedItems !== undefined ? { secureMatchedItems: response.matchCount.secureMatchedItems } : {}
-      });
-    }
-    if (corpus.activationMode !== "lexical_only") {
-      laneAudits.push(sourceIndexRetrievalStateLaneAudit({
-        corpusId: corpus.corpusId,
-        localOnly: corpus.storageProfile.placement === "local_private",
-        state: retrievalState
-      }));
-      const semanticLoss = semanticLaneDegradation(corpus.corpusId, retrievalState, response);
-      if (semanticLoss)
-        degradations.push(semanticLoss);
-    }
-    const newestLoss = recentItemsLaneDegradation(corpus.corpusId, response);
-    if (newestLoss)
-      degradations.push(newestLoss);
-    if (contributedSecure)
-      secureLaneAudits.push(...laneAudits.slice(corpusLaneAuditsStart));
-    lanes.push({
-      name: corpus.corpusId,
-      ...response.storeRelevance ? { relevance: response.storeRelevance } : {},
-      ...request.readWide ? { matchingIds } : {},
-      items: response.hits.map((hit) => ({
-        ...hit,
-        corpusId: corpus.corpusId,
-        trustDomain: corpus.trustDomain
-      })),
-      ...request.poolAllocation?.semanticSeats && response.semanticRows?.hits.length ? { semantic: response.semanticRows.hits.map((hit) => ({
-        hit: { ...hit, corpusId: corpus.corpusId, trustDomain: corpus.trustDomain },
-        margin: (hit.score ?? Number.NEGATIVE_INFINITY) - response.semanticRows.bar
-      })) } : {}
-    });
-  }
-  const lanesSettledAt = Date.now();
-  if (options.visibilityGate) {
-    const unchecked = new Set;
-    const kept = new Set(await applySourceIndexVisibilityGate(options.visibilityGate, lanes.flatMap((lane) => [
-      ...lane.items,
-      ...(lane.semantic ?? []).map((seat) => seat.hit)
-    ]), {
-      onUnchecked: (corpusIds) => {
-        for (const corpusId of corpusIds)
-          unchecked.add(corpusId);
-      }
-    }));
-    for (const lane of lanes) {
-      lane.items = lane.items.filter((hit) => kept.has(hit));
-      if (lane.semantic)
-        lane.semantic = lane.semantic.filter((seat) => kept.has(seat.hit));
-    }
-    for (const corpusId of [...unchecked].sort())
-      degradations.push(visibilityCheckDegradation(corpusId));
-  }
-  options.onSeatingLanes?.(lanes);
-  const recency = seatRoutedLanes(lanes, request);
-  const { hits: fused, degradations: budgetDegradations } = recency;
-  const result = {
-    hits: fused,
-    ...request.readWide ? { matchingCandidateIds: [...matchingIds] } : {},
-    searchedCorpora,
-    skippedCorpora,
-    laneAudits,
-    degradations: mergeRetrievalDegradations(degradations, budgetDegradations),
-    corpusTimings,
-    ...matchCounts.length > 0 ? { matchCounts } : {},
-    ...incompleteCorpora.length > 0 ? { incompleteCorpora } : {},
-    encounteredSecureLocal,
-    secureLaneAudits,
-    ...recency.recencySeats > 0 ? { recencySeats: recency.recencySeats } : {},
-    ...recency.semanticSeats?.length ? { semanticSeats: recency.semanticSeats } : {},
-    latencyMs: Date.now() - startedAt,
-    rawExposed: false
-  };
-  assertSafeRoutedSearchResponse(result);
-  recordSourceAnswerQueryStages({
-    prepare_ms: lanesStartedAt - prepareStartedAt,
-    prepare_keywords_max_ms: prepareKeywordsMaxMs,
-    ...keywordModel && { keyword_model: keywordModel },
-    prepare_semantic_max_ms: prepareSemanticMaxMs,
-    lanes_ms: lanesSettledAt - lanesStartedAt,
-    after_lanes_ms: Date.now() - lanesSettledAt
-  });
-  return result;
-}
-function withSemanticPoolSeats(hits, lanes, seats) {
-  if (seats <= 0)
-    return { hits: [...hits], seated: [] };
-  const taken = new Set(hits.map(routedHitCandidateId));
-  const offered = lanes.flatMap((lane) => lane.semantic ?? []).filter((seat) => Number.isFinite(seat.margin)).sort((left, right) => right.margin - left.margin);
-  const perStore = new Map;
-  const seated = [];
-  for (const seat of offered) {
-    if (seated.length >= seats)
-      break;
-    const id = routedHitCandidateId(seat.hit);
-    const used = perStore.get(seat.hit.corpusId) ?? 0;
-    if (taken.has(id) || used >= SEMANTIC_POOL_SEATS_PER_STORE)
-      continue;
-    taken.add(id);
-    perStore.set(seat.hit.corpusId, used + 1);
-    seated.push(seat);
-  }
-  return { hits: [...hits, ...seated.map((seat) => seat.hit)], seated };
-}
-function seatRoutedLanes(lanes, options) {
-  const laneOrder = storeOrderForQuestion(lanes);
-  const fusedAll = fuseRankedCandidateLanes({
-    lanes,
-    getId: routedHitCandidateId,
-    limit: lanes.reduce((total, lane) => total + lane.items.length, 0),
-    tieBreaker: (left, right) => compareTiedRoutedCandidates(left, right, laneOrder)
-  });
-  const budgeted = options.poolAllocation ? applyStrengthPoolBudget(fusedAll, options.maxResults, laneOrder, options.poolAllocation.storeDepth) : applyPerCorpusResultBudget(fusedAll, options.maxResults);
-  const pool = fusedAll.map((candidate) => candidate.item);
-  const leadered = withReservedLeaderSeats(budgeted, pool, options.maxResults);
-  const recency = options.temporalIntent ? withReservedRecencySeats(leadered, pool, options.maxResults) : { ...leadered, recencySeats: 0 };
-  if (options.readWide) {
-    const taken = new Set(recency.hits.map(routedHitCandidateId));
-    const matches = fusedAll.map((candidate) => candidate.item).filter((hit) => lanes.some((lane) => lane.name === hit.corpusId && (!lane.matchingIds || lane.matchingIds.has(routedHitCandidateId(hit)))));
-    let matching = recency.hits.filter((hit) => matches.some((match) => routedHitCandidateId(match) === routedHitCandidateId(hit))).length;
-    for (const hit of matches) {
-      if (matching >= READ_WIDE_MATCH_LIMIT)
-        break;
-      const id = routedHitCandidateId(hit);
-      if (taken.has(id))
-        continue;
-      taken.add(id);
-      recency.hits.push(hit);
-      matching += 1;
-    }
-    const represented = new Set(recency.hits.map((hit) => hit.corpusId));
-    recency.degradations = recency.degradations.filter((loss) => loss.reason !== "lane_budget_cut" || !represented.has(loss.laneName));
-  }
-  const seats = options.poolAllocation?.semanticSeats ?? 0;
-  if (seats <= 0)
-    return recency;
-  const semantic = withSemanticPoolSeats(recency.hits, lanes, seats);
-  return { ...recency, hits: semantic.hits, ...semantic.seated.length ? { semanticSeats: semantic.seated } : {} };
-}
-function corpusContributedSecure(corpus, response) {
-  const count = response.matchCount;
-  const positiveCount = count !== undefined && (count.matchedItems > 0 || count.saturated);
-  if (response.hits.length === 0 && !positiveCount)
-    return false;
-  if (isSecureSensitivity(corpus.defaultSensitivity))
-    return true;
-  if (response.hits.some((hit) => hit.trustTier !== undefined && isSecureSensitivity({ trustDomain: corpus.trustDomain, trustTier: hit.trustTier }))) {
-    return true;
-  }
-  return positiveCount && (count.secureMatchedItems === undefined || count.secureMatchedItems > 0);
-}
-function storeOrderForQuestion(lanes) {
-  const keyword = (lane) => {
-    const share = lane.relevance?.conceptShare ?? 0;
-    return share >= STORE_ORDER_MIN_CONCEPT_SHARE ? share : 0;
-  };
-  const vector = (lane) => lane.relevance?.vectorMargin ?? Number.NEGATIVE_INFINITY;
-  const ordered = lanes.map((lane, index) => ({ lane, index })).sort((left, right) => keyword(right.lane) - keyword(left.lane) || (vector(right.lane) === vector(left.lane) ? 0 : vector(right.lane) > vector(left.lane) ? 1 : -1) || left.index - right.index);
-  return new Map(ordered.map(({ lane }, index) => [lane.name, index]));
-}
-function compareTiedRoutedCandidates(left, right, laneOrder) {
-  const bestRank = bestLaneRank(left) - bestLaneRank(right);
-  if (bestRank !== 0)
-    return bestRank;
-  const laneCount = right.laneRanks.size - left.laneRanks.size;
-  if (laneCount !== 0)
-    return laneCount;
-  const position = laneIndex(laneOrder, left.item.corpusId) - laneIndex(laneOrder, right.item.corpusId);
-  if (position !== 0)
-    return position;
-  const corpus = left.item.corpusId.localeCompare(right.item.corpusId);
-  if (corpus !== 0)
-    return corpus;
-  return String(left.id).localeCompare(String(right.id));
-}
-function bestLaneRank(candidate) {
-  let best = Number.MAX_SAFE_INTEGER;
-  for (const rank of candidate.laneRanks.values()) {
-    if (rank < best)
-      best = rank;
-  }
-  return best;
-}
-function laneIndex(laneOrder, corpusId) {
-  return laneOrder.get(corpusId) ?? Number.MAX_SAFE_INTEGER;
-}
-function recentItemsLaneDegradation(corpusId, response) {
-  const cut = (response.laneAudits ?? []).find((audit) => audit.skippedReason === RECENT_ITEMS_CUT_SHORT);
-  if (!cut)
-    return;
-  return {
-    laneName: `${corpusId}:recency`,
-    laneType: cut.laneType,
-    reason: "lane_timeout",
-    detail: RECENT_ITEMS_CUT_SHORT,
-    occurrences: 1
-  };
-}
-function visibilityCheckDegradation(corpusId) {
-  return {
-    laneName: `${corpusId}:visibility`,
-    laneType: "keyword",
-    reason: "lane_timeout",
-    detail: VISIBILITY_CHECK_CUT_SHORT,
-    occurrences: 1
-  };
-}
-function semanticLaneDegradation(corpusId, state, response) {
-  if (state.health === "degraded") {
-    return {
-      laneName: `${corpusId}:semantic`,
-      laneType: "semantic",
-      reason: "semantic_lane_unservable",
-      ...state.reason ? { detail: state.reason } : {},
-      occurrences: 1
-    };
-  }
-  const laneAudits = response.laneAudits ?? [];
-  const skippedSemantic = laneAudits.find((audit) => audit.laneType === "semantic" && audit.skippedReason !== undefined && audit.skippedReason !== "semantic_below_relevance_bar");
-  if (skippedSemantic?.skippedReason) {
-    return {
-      laneName: `${corpusId}:semantic`,
-      laneType: "semantic",
-      reason: "semantic_lane_skipped",
-      detail: skippedSemantic.skippedReason,
-      occurrences: 1
-    };
-  }
-  const ranSemantic = laneAudits.some((audit) => audit.laneType === "semantic" || audit.laneType === "hybrid");
-  if (ranSemantic)
-    return;
-  return {
-    laneName: `${corpusId}:semantic`,
-    laneType: "semantic",
-    reason: "semantic_lane_not_run",
-    occurrences: 1
-  };
-}
-function retrievalStateForAdapter(adapter, request) {
-  let hybridAvailability;
-  try {
-    hybridAvailability = adapter.hybridAvailability?.(request);
-  } catch {
-    hybridAvailability = { servable: false, reason: "hybrid_capability_unreported" };
-  }
-  return {
-    state: assessSourceIndexRetrievalState({
-      declaredMode: request.corpus.activationMode,
-      ...hybridAvailability ? { hybridAvailability } : {}
-    }),
-    hybridServable: hybridAvailability?.servable === true
-  };
-}
-function normalizeSearchRequest(request) {
-  const query = request.query.trim();
-  if (!query) {
-    throw new Error("Source-index routed search requires a non-empty query.");
-  }
-  if (!Number.isFinite(request.maxResults) || request.maxResults < 0) {
-    throw new Error("Source-index routed search maxResults must be a non-negative number.");
-  }
-  return {
-    ...request,
-    query,
-    maxResults: Math.floor(request.maxResults)
-  };
-}
-async function runCorpusLaneUntilIdle(run, timeoutMs, corpusId, clock = REAL_LANE_CLOCK) {
-  const startedAt = Date.now();
-  let active = true;
-  let lastProgressAt = clock.now();
-  let reading = 0;
-  const report = Object.assign(() => {
-    if (!active)
-      return;
-    lastProgressAt = clock.now();
-    noteSourceAnswerProgress("searching");
-  }, {
-    began: () => {
-      reading += 1;
-      report();
-    },
-    ended: () => {
-      reading = Math.max(0, reading - 1);
-      report();
-    }
-  });
-  const runValidated = async () => {
-    const response = await run(report);
-    assertSafeCorpusSearchResponse(response);
-    return response;
-  };
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-    try {
-      const response = await runValidated();
-      const elapsedMs = Math.max(0, Date.now() - startedAt);
-      recordSourceAnswerCorpusTiming({
-        corpus_id: corpusId,
-        elapsed_ms: elapsedMs,
-        adapter_reported_ms: response.latencyMs,
-        outcome: "success"
-      });
-      return { kind: "response", response, elapsedMs };
-    } catch (error) {
-      if (isSourceIndexLaneBusyError(error)) {
-        const elapsedMs = Math.max(0, Date.now() - startedAt);
-        recordSourceAnswerCorpusTiming({ corpus_id: corpusId, elapsed_ms: elapsedMs, outcome: "timeout" });
-        return { kind: "timeout", elapsedMs };
-      }
-      recordSourceAnswerCorpusTiming({
-        corpus_id: corpusId,
-        elapsed_ms: Math.max(0, Date.now() - startedAt),
-        outcome: "error",
-        error_class: sourceAnswerTraceErrorClass(error)
-      });
-      throw error;
-    } finally {
-      active = false;
-    }
-  }
-  let timer;
-  const laneSettled = runValidated().then((response) => ({ kind: "response", response }), (error) => ({ kind: "error", error }));
-  const deadline = new Promise((resolve) => {
-    const arm = (delayMs) => {
-      const dueAtMs = clock.now() + delayMs;
-      timer = clock.setTimeout(() => {
-        if (reading > 0)
-          report();
-        const now = clock.now();
-        const remaining = timeoutMs - (now - lastProgressAt);
-        if (remaining > 0) {
-          arm(remaining);
-          return;
-        }
-        if (now - dueAtMs >= HELD_THREAD_LATE_TIMER_MS) {
-          arm(HELD_THREAD_GRACE_MS);
-          return;
-        }
-        resolve({ kind: "timeout" });
-      }, delayMs);
-    };
-    arm(timeoutMs);
-  });
-  try {
-    const settled = await Promise.race([laneSettled, deadline]);
-    if (settled.kind === "timeout") {
-      laneSettled.then((late) => {
-        if (late.kind === "error") {
-          console.error(`[source-index-router] lane=${corpusId} outcome=late_error error_class=${sourceAnswerTraceErrorClass(late.error)}`);
-        }
-      });
-      const elapsedMs = Math.max(0, Date.now() - startedAt);
-      recordSourceAnswerCorpusTiming({
-        corpus_id: corpusId,
-        elapsed_ms: elapsedMs,
-        outcome: "timeout"
-      });
-      return { kind: "timeout", elapsedMs };
-    }
-    if (settled.kind === "error" && isSourceIndexLaneBusyError(settled.error)) {
-      const elapsedMs = Math.max(0, Date.now() - startedAt);
-      recordSourceAnswerCorpusTiming({ corpus_id: corpusId, elapsed_ms: elapsedMs, outcome: "timeout" });
-      return { kind: "timeout", elapsedMs };
-    }
-    if (settled.kind === "error") {
-      recordSourceAnswerCorpusTiming({
-        corpus_id: corpusId,
-        elapsed_ms: Math.max(0, Date.now() - startedAt),
-        outcome: "error",
-        error_class: sourceAnswerTraceErrorClass(settled.error)
-      });
-      throw settled.error;
-    }
-    const elapsedMs = Math.max(0, Date.now() - startedAt);
-    recordSourceAnswerCorpusTiming({
-      corpus_id: corpusId,
-      elapsed_ms: elapsedMs,
-      adapter_reported_ms: settled.response.latencyMs,
-      outcome: "success"
-    });
-    return { kind: "response", response: settled.response, elapsedMs };
-  } finally {
-    active = false;
-    if (timer !== undefined)
-      clock.clearTimeout(timer);
-  }
-}
-function resolveLaneTimeoutMs(explicit) {
-  if (explicit !== undefined)
-    return explicit;
-  const raw = process.env.OLYMPUS_SOURCE_ANSWER_LANE_TIMEOUT_MS?.trim();
-  if (!raw)
-    return DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS;
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed))
-    return DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS;
-  return parsed;
-}
-function skipReasonForCorpus(corpus, request) {
-  if (!corpusMatchesRequestedSelection(corpus, request))
-    return "not_requested";
-  if (!request.context.allowedTrustDomains.includes(corpus.trustDomain))
-    return "trust_domain_not_allowed";
-  if (request.context.allowedCorpusIds && !request.context.allowedCorpusIds.includes(corpus.corpusId))
-    return "corpus_not_allowed";
-  if (corpus.storageProfile.cloudQueryEligible && request.context.allowCloudQueries !== true)
-    return "cloud_query_not_allowed";
-  return;
-}
-function corpusMatchesRequestedSelection(corpus, selection) {
-  if (selection.corpusIds && !selection.corpusIds.includes(corpus.corpusId))
-    return false;
-  if (selection.families && !selection.families.includes(corpus.family))
-    return false;
-  return true;
-}
-function routedHitCandidateId(hit) {
-  return hit.candidateId ?? `${hit.corpusId}:${hit.sourceItem.localItemId || hit.sourceItem.providerItemId}`;
-}
-function assertSafeCorpusSearchResponse(response) {
-  if (response.rawExposed !== false) {
-    throw new Error("Source-index corpus adapter reported raw source exposure.");
-  }
-  for (const hit of response.hits) {
-    if (hit.rawExposed !== false) {
-      throw new Error("Source-index corpus adapter returned a hit with raw source exposure.");
-    }
-  }
-  assertNoForbiddenRouterResultKeys(response, []);
-}
-function assertSafeRoutedSearchResponse(response) {
-  if (response.rawExposed !== false) {
-    throw new Error("Source-index router reported raw source exposure.");
-  }
-  assertNoForbiddenRouterResultKeys(response, []);
-}
-function assertNoForbiddenRouterResultKeys(value, path) {
-  if (!value || typeof value !== "object")
-    return;
-  if (Array.isArray(value)) {
-    value.forEach((item, index) => assertNoForbiddenRouterResultKeys(item, [...path, String(index)]));
-    return;
-  }
-  for (const [key, child] of Object.entries(value)) {
-    if (NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS.has(normalizeRouterResultKey(key))) {
-      const location = [...path, key].join(".");
-      throw new Error(`Source-index routed search output included forbidden raw field "${location}".`);
-    }
-    assertNoForbiddenRouterResultKeys(child, [...path, key]);
-  }
-}
-function normalizeRouterResultKey(key) {
-  return key.toLowerCase().replace(/[^a-z0-9]+/g, "");
-}
-var REAL_LANE_CLOCK, DEFAULT_SEMANTIC_PREPARE_BUDGET_MS = 15000, DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS = 20000, HELD_THREAD_LATE_TIMER_MS = 500, HELD_THREAD_GRACE_MS = 1000, FORBIDDEN_ROUTER_RESULT_KEYS, NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS, SEMANTIC_POOL_SEATS_PER_STORE = 2, STORE_ORDER_MIN_CONCEPT_SHARE;
-var init_router = __esm(() => {
-  init_read_progress();
-  init_source_answer_jobs();
-  init_read_wide();
-  init_partial_search();
-  init_keyword_context();
-  init_types();
-  init_answer_latency_trace();
-  REAL_LANE_CLOCK = {
-    now: () => Date.now(),
-    setTimeout: (callback, ms) => setTimeout(callback, ms),
-    clearTimeout: (timer) => clearTimeout(timer)
-  };
-  FORBIDDEN_ROUTER_RESULT_KEYS = new Set([
-    "body",
-    "bodies",
-    "content",
-    "contents",
-    "message",
-    "messages",
-    "raw",
-    "raw_packet",
-    "rawPacket",
-    "raw_source",
-    "rawSource",
-    "sanitized_text",
-    "sanitizedText",
-    "snippet",
-    "snippets",
-    "source_text",
-    "sourceText",
-    "raw_source_text",
-    "rawSourceText",
-    "text",
-    "access_token",
-    "accessToken",
-    "api_key",
-    "apiKey",
-    "approved_scope_key",
-    "approvedScopeKey",
-    "refresh_token",
-    "refreshToken",
-    "token"
-  ]);
-  NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS = new Set([...FORBIDDEN_ROUTER_RESULT_KEYS].map(normalizeRouterResultKey));
-  STORE_ORDER_MIN_CONCEPT_SHARE = RESERVED_LEADER_MIN_CONCEPT_SHARE;
-});
-
 // src/core/evidence-pack.ts
 async function buildEvidencePackDetailed(input) {
   return withKeywordRequestScope(() => buildPreparedEvidencePackDetailed(input));
@@ -110245,9 +112233,9 @@ function nonNegativeInteger2(value, fallback) {
 var DEFAULT_SECURE_ANALYST_POOL_SLO_MS = 60000, DEFAULT_SECURE_ANALYST_POOL_RESERVE_MS = 1000, DEFAULT_SECURE_ANALYST_POOL_FAILURE_THRESHOLD = 2, DEFAULT_SECURE_ANALYST_POOL_COOLDOWN_MS = 30000, DEFAULT_SECURE_ANALYST_POOL_LAST_LEG_TIMEOUT_MS = 60000, MIN_SECURE_ANALYST_POOL_LAST_LEG_TIMEOUT_MS = 30000, MAX_SECURE_ANALYST_POOL_LAST_LEG_TIMEOUT_MS = 1800000, SECURE_ANALYST_POOL_LAST_LEG_TIMEOUT_ENV = "OLYMPUS_SOURCE_ANSWER_LAST_LEG_TIMEOUT_MS";
 
 // src/workers/source-index/analyst-answer.ts
-import { randomUUID as randomUUID23 } from "node:crypto";
+import { randomUUID as randomUUID24 } from "node:crypto";
 async function readNamesOnlyMatches(detail, read, waitMs) {
-  const questionId = randomUUID23();
+  const questionId = randomUUID24();
   const requests = new Map;
   for (const index of [...new Set([...detail.namesOnlyCandidateIndexes ?? [], ...detail.contentPrivateCandidateIndexes ?? []])].sort((a, b) => a - b)) {
     if (index >= 3)
@@ -113117,9 +115105,9 @@ var init_grant_fence = __esm(() => {
 });
 
 // src/workers/x-bookmarks/live-control.ts
-import { createHash as createHash55, randomUUID as randomUUID24 } from "node:crypto";
-import { chmodSync as chmodSync20, existsSync as existsSync62, lstatSync as lstatSync31, mkdirSync as mkdirSync42 } from "node:fs";
-import { dirname as dirname67 } from "node:path";
+import { createHash as createHash55, randomUUID as randomUUID25 } from "node:crypto";
+import { chmodSync as chmodSync21, existsSync as existsSync62, lstatSync as lstatSync32, mkdirSync as mkdirSync43 } from "node:fs";
+import { dirname as dirname68 } from "node:path";
 import { Database as Database17 } from "bun:sqlite";
 function xApiInvocationProvenance(value) {
   return value === "operator" ? "operator" : "scheduled";
@@ -113241,10 +115229,10 @@ class LocalXBookmarksApiUsageStore {
   constructor(dbPath = defaultXBookmarksApiUsageDbPath()) {
     this.dbPath = dbPath;
     if (dbPath !== ":memory:")
-      mkdirSync42(dirname67(dbPath), { recursive: true, mode: 448 });
+      mkdirSync43(dirname68(dbPath), { recursive: true, mode: 448 });
     this.db = new Database17(dbPath, { create: true });
     if (dbPath !== ":memory:")
-      chmodSync20(dbPath, 384);
+      chmodSync21(dbPath, 384);
     this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
     assertSqliteSchemaCanOpen(this.db, X_BOOKMARKS_API_USAGE_STORE_ID, X_BOOKMARKS_API_USAGE_SCHEMA_VERSION);
     runSqliteMigrations(this.db, X_BOOKMARKS_API_USAGE_STORE_ID, xBookmarksApiUsageMigrations());
@@ -113424,7 +115412,7 @@ class LocalXBookmarksApiUsageStore {
       }
       const maxResources = routine ? Math.min(requestedMaxResources, input.preserveHeadReserve ? backgroundRemainingReads : remainingReads, input.preserveHeadReserve ? backgroundRemainingCostUnits : remainingCostUnits) : requestedMaxResources;
       const reservation = {
-        reservationId: randomUUID24(),
+        reservationId: randomUUID25(),
         account,
         utcDay,
         maxResources,
@@ -115465,17 +117453,17 @@ var init_archive_import = __esm(() => {
 });
 
 // src/workers/x-bookmarks/window-diagnostic.ts
-import { createHash as createHash57, randomUUID as randomUUID25 } from "node:crypto";
+import { createHash as createHash57, randomUUID as randomUUID26 } from "node:crypto";
 import {
-  chmodSync as chmodSync21,
+  chmodSync as chmodSync22,
   existsSync as existsSync64,
-  mkdirSync as mkdirSync43,
+  mkdirSync as mkdirSync44,
   renameSync as renameSync11,
   statSync as statSync27,
   unlinkSync as unlinkSync4,
   writeFileSync as writeFileSync16
 } from "node:fs";
-import { dirname as dirname68 } from "node:path";
+import { dirname as dirname69 } from "node:path";
 async function runXBookmarksWindowDiagnostic(options) {
   const env = options.env ?? process.env;
   const config = options.config ?? defaultXBookmarksLiveSyncConfig(env);
@@ -115714,14 +117702,14 @@ function writePrivateReport(pathValue, contents) {
   const reportPath = pathValue.trim();
   if (!reportPath)
     throw new TypeError("X bookmark diagnostic report path is required.");
-  const parent = dirname68(reportPath);
-  mkdirSync43(parent, { recursive: true, mode: 448 });
-  const temporaryPath = `${reportPath}.tmp-${randomUUID25()}`;
+  const parent = dirname69(reportPath);
+  mkdirSync44(parent, { recursive: true, mode: 448 });
+  const temporaryPath = `${reportPath}.tmp-${randomUUID26()}`;
   try {
     writeFileSync16(temporaryPath, contents, { encoding: "utf8", mode: 384, flag: "wx" });
-    chmodSync21(temporaryPath, 384);
+    chmodSync22(temporaryPath, 384);
     renameSync11(temporaryPath, reportPath);
-    chmodSync21(reportPath, 384);
+    chmodSync22(reportPath, 384);
     if ((statSync27(reportPath).mode & 511) !== 384) {
       throw new Error("X bookmark diagnostic report permissions are not 0600.");
     }
@@ -115745,7 +117733,7 @@ var init_window_diagnostic = __esm(() => {
 });
 
 // src/workers/x-bookmarks/live-sync.ts
-import { resolve as resolve17 } from "node:path";
+import { resolve as resolve19 } from "node:path";
 function xBookmarksReconcileTombstonesAccounted(counts) {
   const tombstoned = counts.items_tombstoned;
   if (!nonNegativeSafeInteger(tombstoned))
@@ -116096,7 +118084,7 @@ function createXBookmarksConnectorStoreSyncHandler(options) {
     },
     async importArchive(request) {
       const archived = readArchivedXBookmarks(request.archive_path);
-      if (options.store.dbPath !== ":memory:" && resolve17(request.archive_path) === resolve17(options.store.dbPath)) {
+      if (options.store.dbPath !== ":memory:" && resolve19(request.archive_path) === resolve19(options.store.dbPath)) {
         throw new XBookmarksArchiveImportError("The archive path is this install's own X store.");
       }
       const missing = archived.posts.filter((post) => {
@@ -116283,15 +118271,781 @@ var init_scheduler_limit_stops = __esm(() => {
   }
 });
 
+// src/workers/file-extraction/store-sink.ts
+function racedRestoreSkipReason(error) {
+  const message = error instanceof Error ? error.message : "";
+  if (message.includes("targeted store item is missing")) {
+    return EXTRACTION_SINK_SKIPPED_ITEM_MISSING;
+  }
+  if (message.includes("matches multiple store rows")) {
+    return EXTRACTION_SINK_SKIPPED_IDENTITY_AMBIGUOUS;
+  }
+  return;
+}
+function identityForRef(store, ref, sourceVersion) {
+  return {
+    family: store.family,
+    provider: ref.provider,
+    accountScope: ref.accountScope,
+    providerItemId: ref.providerItemId,
+    localItemId: ref.localItemId,
+    ...sourceVersion ? { sourceVersion } : {}
+  };
+}
+function buildExtractionRepresentationExpectation(identity, text, mediaSha256) {
+  return {
+    sourceItem: identity,
+    ...identity.sourceVersion ? { sourceVersion: identity.sourceVersion } : {},
+    contentHash: hashString2(text),
+    chunkContentHashes: chunkText(text, DEFAULT_MAX_CHUNK_CHARS).map(hashString2),
+    ...mediaSha256 ? { mediaSha256 } : {}
+  };
+}
+function metadataForItem(stored, ref, requested) {
+  const name = ref.name ?? stored.name;
+  const merged = {
+    ...name ? { name } : {},
+    ...stored.authoredAt ? { authoredAt: stored.authoredAt } : {},
+    ...stored.updatedAt ? { updatedAt: stored.updatedAt } : {},
+    ...requested ?? {}
+  };
+  for (const key of SOURCE_EXCLUSION_PATH_METADATA_KEYS)
+    delete merged[key];
+  if (stored.locatorUri) {
+    merged["locatorUri"] = stored.locatorUri;
+    merged["pathDisplay"] = stored.locatorUri;
+  }
+  delete merged["contentHash"];
+  return merged;
+}
+function createConnectorStoreExtractionSink(options) {
+  const store = options.store;
+  let standaloneRoute;
+  return {
+    async accept(request) {
+      if (request.onDemandGrantCurrent?.() === false) {
+        return { accepted: false, chunksIndexed: 0, chunksAwaitingEmbedding: 0, skippedReason: EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE };
+      }
+      const plan = planExtractionSinkWrite(store, request);
+      if ("skippedReason" in plan) {
+        return {
+          accepted: false,
+          chunksIndexed: 0,
+          chunksAwaitingEmbedding: 0,
+          skippedReason: plan.skippedReason
+        };
+      }
+      const judgment = plan.media ? (options.mediaJudgment ?? ((sha) => store.mediaJudgment(sha)))(plan.media.sha256) : undefined;
+      if (plan.media && judgment)
+        plan.media = { ...plan.media, judgment };
+      const checkedPicture = !!options.mediaJudgment && !!plan.media && judgment?.verdict === "ordinary";
+      if ((plan.media || isImageMediaType(plan.item.mimeType)) && store.trustDomain !== "secure_local" && !checkedPicture && !(options.route && options.mediaJudgment)) {
+        return {
+          accepted: false,
+          chunksIndexed: 0,
+          chunksAwaitingEmbedding: 0,
+          skippedReason: EXTRACTION_SINK_SKIPPED_IMAGE_PRIVATE_ONLY
+        };
+      }
+      const sensitivity = options.classify(plan.item);
+      if (sensitivity.trustDomain !== store.trustDomain || sensitivity.trustTier === "S5") {
+        return {
+          accepted: false,
+          chunksIndexed: 0,
+          chunksAwaitingEmbedding: 0,
+          skippedReason: EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE
+        };
+      }
+      if (request.claim && options.claims && !options.claims.holdsExtractionClaim(request.claim)) {
+        return {
+          accepted: false,
+          chunksIndexed: 0,
+          chunksAwaitingEmbedding: 0,
+          skippedReason: EXTRACTION_SINK_SKIPPED_CLAIM_SUPERSEDED
+        };
+      }
+      const writeClaim = extractionWriteClaim(request);
+      if (!options.route && options.recordContentTier !== false && !standaloneRoute) {
+        const ledger = store.tierLedger();
+        if (ledger) {
+          const registered = tierSetForLedger(ledger.dbPath);
+          const set = registered?.store(store.trustDomain) === store ? registered : store.trustDomain === "secure_local" ? new TieredStoreSet({
+            setId: store.corpusId,
+            ledger,
+            registerWithLedger: false,
+            legs: [{ trustDomain: "secure_local", corpusId: store.corpusId, store, legacy: true }],
+            ...options.tierClassification ? { tierClassification: options.tierClassification } : {}
+          }) : undefined;
+          if (set)
+            standaloneRoute = tieredRepresentationLanding({
+              set,
+              anchor: store,
+              replaceStoredContent: !registered
+            });
+        }
+      }
+      const route = options.route ?? standaloneRoute;
+      if (options.secretsFloor !== false && plan.item.content.kind === "text" && secretsFloorHolds(store, plan.item, plan.item.content.text, route !== undefined)) {
+        const settled = settleUntrackedSecretsCopy({
+          store,
+          identity: plan.item.identity,
+          connectorId: options.syncConnectorId,
+          metadata: plan.item.metadata,
+          ...options.skipOwner ? { skipOwner: options.skipOwner } : {},
+          ...writeClaim ? { writeClaim } : {}
+        });
+        if (settled === "tombstoned" && options.recordContentTier !== false) {
+          store.recordExtractedContentTier(plan.item, plan.item.content.text, options.tierClassification);
+        }
+        const secretsSkip = {
+          tombstoned: EXTRACTION_SINK_SKIPPED_SECRETS,
+          missing: EXTRACTION_SINK_SKIPPED_ITEM_MISSING,
+          ambiguous: EXTRACTION_SINK_SKIPPED_IDENTITY_AMBIGUOUS,
+          excluded: EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE,
+          metadata_only: EXTRACTION_SINK_SKIPPED_METADATA_ONLY,
+          stale_version: EXTRACTION_SINK_SKIPPED_SOURCE_VERSION_STALE,
+          owned_elsewhere: EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE,
+          stale_claim: EXTRACTION_SINK_SKIPPED_CLAIM_SUPERSEDED
+        };
+        return {
+          accepted: false,
+          chunksIndexed: 0,
+          chunksAwaitingEmbedding: 0,
+          skippedReason: secretsSkip[settled]
+        };
+      }
+      if (!route && options.recordContentTier !== false && store.trustDomain !== "secure_local" && (!checkedPicture || imageJudgmentSignal(judgment).textDecides || store.readOnDemand(plan.item.identity.localItemId, plan.item.identity.sourceVersion ?? ""))) {
+        return { accepted: false, chunksIndexed: 0, chunksAwaitingEmbedding: 0, skippedReason: EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE };
+      }
+      let landingStore = store;
+      let refusedSecrets = false;
+      let summary;
+      try {
+        summary = store.restoreItemRepresentations({
+          items: [{ item: plan.item, expectation: plan.expectation, ...plan.media ? { media: plan.media } : {} }],
+          syncConnectorId: options.syncConnectorId,
+          ownerConnectorId: options.ownerConnectorId,
+          ownershipKind: options.ownershipKind,
+          classify: options.classify,
+          ...route ? { route: (record) => {
+            const landing = route(record);
+            if (landing && "store" in landing)
+              landingStore = landing.store;
+            if (landing && "refused" in landing)
+              refusedSecrets = true;
+            return landing;
+          } } : {},
+          ...options.skipOwner ? { skipOwner: options.skipOwner } : {},
+          ...writeClaim ? { writeClaim } : {}
+        });
+      } catch (error) {
+        const skippedReason = racedRestoreSkipReason(error);
+        if (skippedReason === undefined)
+          throw error;
+        return { accepted: false, chunksIndexed: 0, chunksAwaitingEmbedding: 0, skippedReason };
+      }
+      if (summary.counts.itemsSkippedTombstoned === 1) {
+        return {
+          accepted: false,
+          chunksIndexed: 0,
+          chunksAwaitingEmbedding: 0,
+          skippedReason: EXTRACTION_SINK_SKIPPED_ITEM_MISSING
+        };
+      }
+      if (summary.counts.itemsSkippedStaleClaim === 1) {
+        return {
+          accepted: false,
+          chunksIndexed: 0,
+          chunksAwaitingEmbedding: 0,
+          skippedReason: EXTRACTION_SINK_SKIPPED_CLAIM_SUPERSEDED
+        };
+      }
+      if (summary.counts.itemsSkippedByOwner === 1) {
+        return {
+          accepted: false,
+          chunksIndexed: 0,
+          chunksAwaitingEmbedding: 0,
+          skippedReason: EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE
+        };
+      }
+      if (summary.counts.itemsMetadataOnly === 1) {
+        return {
+          accepted: false,
+          chunksIndexed: 0,
+          chunksAwaitingEmbedding: 0,
+          skippedReason: refusedSecrets ? EXTRACTION_SINK_SKIPPED_SECRETS : EXTRACTION_SINK_SKIPPED_METADATA_ONLY
+        };
+      }
+      const coverage = landingStore.itemRepresentationCoverage(plan.expectation);
+      return {
+        accepted: true,
+        chunksIndexed: coverage.chunksIndexed,
+        chunksAwaitingEmbedding: summary.counts.chunksAwaitingEmbedding
+      };
+    }
+  };
+}
+function extractionWriteClaim(request) {
+  return request.claim ? {
+    scope: request.extractorKind,
+    authority: request.claim.grantAuthority,
+    ordinal: request.claim.grantOrdinal,
+    holder: request.claim.jobId,
+    generation: hashString2(request.claim.leaseToken)
+  } : undefined;
+}
+function secretsFloorHolds(store, item, text, routed) {
+  let override;
+  try {
+    override = store.tierLedger()?.getOverride(item.identity);
+  } catch {
+    override = undefined;
+  }
+  if (override?.kind === "tier") {
+    if (override.tier === "secrets")
+      return true;
+    if (override.tier === "secure" || routed)
+      return false;
+  }
+  if (override?.kind === "not_secret")
+    return false;
+  return detectSecretFindingKinds(text).length > 0 || hasCredentialUrl(text);
+}
+function planExtractionSinkWrite(store, request) {
+  const text = request.text;
+  if (text.trim() === "")
+    return { skippedReason: EXTRACTION_SINK_SKIPPED_EMPTY_TEXT };
+  const ref = request.ref;
+  const identityResolver = store.activeIdentityForLocalItemId;
+  const storedIdentity = identityResolver?.call(store, {
+    provider: ref.provider,
+    accountScope: ref.accountScope,
+    providerItemId: ref.providerItemId,
+    localItemId: ref.localItemId
+  });
+  const probe = storedIdentity ?? identityForRef(store, ref, ref.sourceVersion);
+  const stored = store.itemMetadataSnapshot(probe);
+  if (!stored)
+    return { skippedReason: EXTRACTION_SINK_SKIPPED_ITEM_MISSING };
+  const identity = {
+    ...probe,
+    ...ref.sourceVersion ?? stored.sourceVersion ? { sourceVersion: ref.sourceVersion ?? stored.sourceVersion } : {}
+  };
+  return {
+    item: {
+      identity,
+      mimeType: ref.mimeType ?? stored.mimeType ?? "application/octet-stream",
+      content: { kind: "text", text },
+      metadata: metadataForItem(stored, ref, request.metadata),
+      fetchedAt: request.fetchedAt
+    },
+    expectation: buildExtractionRepresentationExpectation(identity, text, request.media?.sha256),
+    ...request.media ? { media: { path: request.media.path, sha256: request.media.sha256 } } : {}
+  };
+}
+var EXTRACTION_SINK_SKIPPED_ITEM_MISSING = "store_item_missing", EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE = "store_item_not_eligible", EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE = "store_item_owned_elsewhere", EXTRACTION_SINK_SKIPPED_EMPTY_TEXT = "extracted_text_empty", EXTRACTION_SINK_SKIPPED_IDENTITY_AMBIGUOUS = "store_identity_ambiguous", EXTRACTION_SINK_SKIPPED_METADATA_ONLY = "store_item_metadata_only", EXTRACTION_SINK_SKIPPED_CLAIM_SUPERSEDED = "extraction_claim_superseded", EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED = "store_item_tier_move_queued", EXTRACTION_SINK_SKIPPED_SECRETS = "store_item_secrets", EXTRACTION_SINK_SKIPPED_SOURCE_VERSION_STALE = "store_item_source_version_stale", EXTRACTION_SINK_SKIPPED_IMAGE_PRIVATE_ONLY = "store_image_content_private_only";
+var init_store_sink = __esm(() => {
+  init_engine();
+  init_tier_classifier();
+  init_secrets_disposition();
+  init_tiered_store_set();
+  init_tiered_store_sink();
+  init_media_judge();
+  init_source_ingestion_exclusions();
+  init_connector_store();
+});
+
+// src/workers/file-extraction/tiered-store-sink.ts
+function createTieredStoreExtractionSink(options) {
+  const set = options.set;
+  const classificationNow = () => options.tierClassification ?? set.classification();
+  const sinkFor = (store, route, routed = true) => createConnectorStoreExtractionSink({
+    store,
+    classify: (item) => buildSourceSensitivity({
+      trustTier: store.activeLocalItemRow(item.identity.localItemId)?.trustTier ?? set.restingTierFor(store.trustDomain),
+      trustDomain: store.trustDomain
+    }),
+    syncConnectorId: options.syncConnectorId,
+    ownerConnectorId: options.ownerConnectorId,
+    ownershipKind: options.ownershipKind,
+    ...options.claims ? { claims: options.claims } : {},
+    ...route ? { route } : {},
+    recordContentTier: false,
+    secretsFloor: false,
+    ...routed ? { mediaJudgment: (sha256) => setMediaJudgment(set, sha256) } : {}
+  });
+  return {
+    async accept(request) {
+      if (request.onDemandGrantCurrent?.() === false)
+        return skipped(EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE);
+      const ref = request.ref;
+      const stored = TIER_DOMAIN_ORDER.map((domain) => set.store(domain)?.activeLocalItemRow(ref.localItemId)?.identity).find((candidate) => candidate !== undefined && candidate.provider === ref.provider && candidate.accountScope === ref.accountScope && candidate.providerItemId === ref.providerItemId);
+      const identity = stored ?? { provider: ref.provider, accountScope: ref.accountScope, providerItemId: ref.providerItemId };
+      const ledger = set.ledger;
+      const recorded = ledger.getCurrent(identity);
+      if (!recorded?.routed || representationLandingDue(recorded)) {
+        const retry = recorded?.routed ? ledger.copies(identity).find((copy) => copy.state === "current" && copy.layers === "metadata") : undefined;
+        const legacy = retry ? set.store(retry.trustDomain) : legacyStoreFor(set, ref.localItemId, options.home);
+        if (!legacy)
+          return skipped(EXTRACTION_SINK_SKIPPED_ITEM_MISSING);
+        const route = tieredRepresentationLanding({
+          set,
+          anchor: legacy,
+          classification: classificationNow
+        });
+        return sinkFor(legacy, route, recorded?.routed === true).accept(request);
+      }
+      const record = ledger.getCurrent(identity);
+      if (!record || record.state === "moving")
+        return skipped(EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED);
+      const current = ledger.copies(identity).filter((copy) => copy.state === "current");
+      const anchor = current.find((copy) => copy.layers !== "content");
+      const anchorDomain = anchor ? set.domainForCorpus(anchor.corpusId) : undefined;
+      const anchorStore = anchorDomain ? set.store(anchorDomain) : undefined;
+      if (!anchor || !anchorStore)
+        return skipped(EXTRACTION_SINK_SKIPPED_ITEM_MISSING);
+      const plan = planExtractionSinkWrite(anchorStore, request);
+      if ("skippedReason" in plan)
+        return skipped(plan.skippedReason);
+      const writeClaim = extractionWriteClaim(request);
+      if (request.claim && options.claims && !options.claims.holdsExtractionClaim(request.claim) || writeClaim && current.some((copy) => set.store(copy.trustDomain)?.hasNewerItemWriteClaim(plan.item.identity, writeClaim))) {
+        return skipped(EXTRACTION_SINK_SKIPPED_CLAIM_SUPERSEDED);
+      }
+      const currentVersion = anchorStore.itemMetadataSnapshot(plan.item.identity)?.sourceVersion;
+      if (plan.item.identity.sourceVersion && currentVersion && plan.item.identity.sourceVersion !== currentVersion) {
+        return skipped(EXTRACTION_SINK_SKIPPED_SOURCE_VERSION_STALE);
+      }
+      const read = ledger.classificationRead(identity, request.text);
+      const tierClassification = classificationNow();
+      const override = read.override;
+      const itemTitle = stringMetadata2(plan.item, ["title", "name", "subject"]);
+      const itemPath = stringMetadata2(plan.item, ["locatorUri", "pathDisplay"]);
+      const imageJudgment = plan.media ? setMediaJudgment(set, plan.media.sha256) : undefined;
+      const settledUnread = !record.contentRead && record.reasons.some(isFailSafeMissingContentQuestion) || record.reasons.some((reason) => reason === CONTENT_NAMES_ONLY_REASON || reason === CONTENT_NAMES_ONLY_LIFTED_REASON);
+      const holdUntilJudged = tierClassification?.holdContentUntilJudged === true || set.holdsContentUntilJudged() || heldUntilJudged(record.reasons) || settledUnread || anchorStore.parentLocalItemIdOf(identity) !== undefined;
+      const parentContext = tierClassification?.sniffer ? parentNamesContext(set, identity) : undefined;
+      const judgeStarted = Date.now();
+      const content = classifyContentTier({
+        text: request.text,
+        hasNonTextContent: true,
+        ...read.secret ? { heldSecret: true } : {},
+        metadataTier: record.metadataTier,
+        metadataForced: record.metadataForced,
+        metadataFlagged: record.metadataFlagged,
+        metadataOwnerDecided: namesDecidedByOwner(record.reasons),
+        ...itemTitle ? { title: itemTitle } : {},
+        ...itemPath ? { path: itemPath } : {},
+        mimeType: plan.item.mimeType,
+        ...imageJudgment ? { imageJudgment: imageJudgmentSignal(imageJudgment) } : {},
+        ...holdUntilJudged ? { holdUntilJudged: true } : {},
+        ...parentContext ? { parentContext } : {},
+        subject: identity
+      }, {
+        ...tierClassification?.sniffer ? { sniffer: arrivalOrderedSniffer(secretFencedSniffer(tierClassification.sniffer, ledger, identity, read), ledger.newArrival(identity, { consume: true }) || anchorStore.readOnDemand(ref.localItemId, ref.sourceVersion ?? "")) } : {},
+        ...override ? { override } : {},
+        ...tierClassification?.retirePublic ? { retirePublic: true } : {}
+      });
+      if (content.reasons.includes(OWNER_OVERRIDE_SECRET_REVIEW_REASON)) {
+        const route = tieredRepresentationLanding({ set, anchor: anchorStore, classification: classificationNow, replaceStoredContent: true });
+        return sinkFor(anchorStore, route).accept(request);
+      }
+      if (!content.contentPending && anchorStore.readOnDemand(ref.localItemId, ref.sourceVersion ?? "")) {
+        console.info(`[olympus:on-demand] step=judge count=1 ms=${Math.max(0, Date.now() - judgeStarted)}`);
+      }
+      const held = tierClassification?.unavailableReason !== undefined && content.contentTier !== "secrets";
+      const contentPending = content.contentPending || held;
+      const decision = set.checkedBodyDecision(plan.item.identity, {
+        metadataTier: record.metadataTier,
+        contentTier: maxTier(content.contentTier, record.metadataTier),
+        decidedBy: content.decidedBy,
+        reasons: [
+          ...record.reasons.filter((reason) => !reason.startsWith("content:")),
+          ...content.reasons,
+          ...held ? [`content:${tierClassification.unavailableReason}`] : []
+        ],
+        state: record.metadataPending || contentPending ? "pending" : "current",
+        contentRead: true,
+        metadataPending: record.metadataPending,
+        contentPending,
+        metadataForced: record.metadataForced,
+        metadataFlagged: record.metadataFlagged,
+        engineVersion: content.engineVersion,
+        mapRevision: content.mapRevision,
+        snifferId: content.snifferId
+      }, request.text, imageJudgment && imageJudgmentSignal(imageJudgment));
+      if (decision.contentTier === "secrets") {
+        recordSecret(set, plan.item, request.text, {
+          namesReleasable: record.metadataTier === "public" || record.metadataTier === "private",
+          sourceScope: anchorStore.activeLocalItemRow(ref.localItemId)?.sourceScope
+        });
+        const recorded = ledger.recordRoutedPlacement(identity, decision, { copies: [], embedHold: false });
+        settleSecretsCopies({
+          ledger,
+          identity: plan.item.identity,
+          copies: recorded.previousCopies,
+          storeFor: (corpusId) => {
+            const domain = set.domainForCorpus(corpusId);
+            return domain ? set.store(domain) : undefined;
+          },
+          connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID
+        });
+        return skipped(EXTRACTION_SINK_SKIPPED_SECRETS);
+      }
+      let placement = set.placementFor(decision, record.contentRead ? {} : { contentArrivesLater: true });
+      const fromContent = copyServingLayer(current, "content");
+      const toContent = copyServingLayer(placement.copies, "content");
+      if (record.contentRead && decision.contentPending && fromContent && toContent && trustDomainRank(toContent.trustDomain) < trustDomainRank(fromContent.trustDomain) && !placementIsRaise(current, placement.copies)) {
+        placement = { copies: current, embedHold: true };
+      }
+      const contentCopy = placement.copies.find((copy) => copy.layers !== "metadata");
+      const contentStore = contentCopy ? set.store(contentCopy.trustDomain, { create: true }) : undefined;
+      if (!contentCopy || !contentStore)
+        return skipped(EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE);
+      if (record.contentRead) {
+        if (!samePlacement(current, placement)) {
+          if (!placementIsRaise(current, placement.copies)) {
+            const resting = current.find((copy) => copy.layers !== "metadata");
+            const restingDomain = resting ? set.domainForCorpus(resting.corpusId) : undefined;
+            const restingStore = restingDomain ? set.store(restingDomain) : undefined;
+            if (!restingStore)
+              return skipped(EXTRACTION_SINK_SKIPPED_ITEM_MISSING);
+            const replaced = await sinkFor(restingStore).accept(request);
+            if (!replaced.accepted)
+              return replaced;
+          }
+          if (request.onDemandGrantCurrent?.() === false)
+            return skipped(EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE);
+          ledger.recordRoutedPlacement(identity, decision, placement);
+          return skipped(EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED);
+        }
+        const result = await sinkFor(contentStore).accept(request);
+        if (request.onDemandGrantCurrent?.() === false)
+          return skipped(EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE);
+        if (result.accepted)
+          ledger.recordRoutedPlacement(identity, decision, placement);
+        return result;
+      }
+      const namesStay = placement.copies.some((copy) => copy.corpusId === anchor.corpusId && copy.layers !== "content");
+      if (!namesStay) {
+        if (decision.contentPending && !contentPending) {
+          const route = tieredRepresentationLanding({
+            set,
+            anchor: anchorStore,
+            classification: classificationNow,
+            replaceStoredContent: true
+          });
+          return sinkFor(anchorStore, route).accept(request);
+        }
+        ledger.recordRoutedPlacement(identity, decision, placement);
+        return skipped(EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED);
+      }
+      if (anchorStore.readOnDemand(ref.localItemId, ref.sourceVersion ?? "")) {
+        contentStore.grantOnDemandRead(ref.localItemId, ref.sourceVersion);
+      }
+      if (contentStore !== anchorStore) {
+        contentStore.bindTierSet(ledger);
+        ledger.stageLandingCopy(identity, contentCopy, {
+          expectedGeneration: record.generation,
+          embedHold: placement.embedHold
+        });
+      }
+      let landingGeneration = record.generation;
+      if (contentStore === anchorStore && settledUnread && record.contentTier === "secure" && contentDomainOf(record) !== contentStore.trustDomain) {
+        const unread = { ...decision, contentRead: false };
+        landingGeneration = ledger.recordRoutedPlacement(identity, unread, set.placementFor(unread, { contentArrivesLater: true }), { guard: { generation: record.generation, override }, stagedLandingAllowed: true }).record.generation;
+      }
+      const anchorScope = anchorStore.activeLocalItemRow(ref.localItemId)?.sourceScope;
+      if (contentStore !== anchorStore && !contentStore.activeLocalItemRow(ref.localItemId)) {
+        const parent = parentOf(set, anchorStore, identity);
+        await contentStore.syncFromConnector(singleItemConnector(contentStore, {
+          ...plan.item,
+          ...parent ? { identity: { ...plan.item.identity, parent } } : {},
+          content: { kind: "metadata_only" }
+        }), {
+          fetchContent: false,
+          ...anchorScope ? { sourceScopeObservation: () => anchorScope } : {},
+          tierRouting: {
+            route: () => ({
+              kind: "store",
+              layer: "content",
+              sensitivity: buildSourceSensitivity({
+                trustTier: set.restingTierFor(contentCopy.trustDomain),
+                trustDomain: contentCopy.trustDomain
+              })
+            })
+          }
+        });
+      }
+      const result = await sinkFor(contentStore).accept(request);
+      if (!result.accepted)
+        return result;
+      if (request.onDemandGrantCurrent?.() === false)
+        return skipped(EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE);
+      ledger.landExtractedContent(identity, decision, placement, { expectedGeneration: landingGeneration });
+      return result;
+    }
+  };
+}
+function representationLandingDue(record) {
+  return record.routed && record.state === "pending" && !record.contentRead && record.reasons.some((reason) => reason.startsWith("content:sha256:"));
+}
+function tieredRepresentationLanding(options) {
+  const { set, anchor } = options;
+  const ledger = set.ledger;
+  return ({ item, expectation, media }) => {
+    if (item.content.kind !== "text")
+      return;
+    const { identity } = item;
+    const prior = ledger.getCurrent(identity);
+    if (prior?.routed && !representationLandingDue(prior) && (!options.replaceStoredContent || prior.state === "moving"))
+      return;
+    const classification = options.classification?.() ?? set.classification();
+    const text = item.content.text;
+    const source = anchor.exportItemCopy(identity);
+    if (!source)
+      return;
+    const connector = options.connector ?? { classificationSignals: () => storedSignals(source) };
+    const read = ledger.classificationRead(identity, text);
+    const override = read.override;
+    const imageJudgment = media?.judgment ? imageJudgmentSignal(media.judgment) : undefined;
+    const parentContext = classification?.sniffer ? parentNamesContext(set, identity) : undefined;
+    let decision = decideItemTiers(connector, item, text, classification, ledger, {
+      requireContentVerdict: imageJudgment?.verdict !== "ordinary" || imageJudgment.textDecides === true,
+      classificationRead: read,
+      ...parentContext ? { parentContext } : {},
+      ...imageJudgment ? { imageJudgment } : {}
+    });
+    if (decision.contentTier === "secrets") {
+      if (set.openStores().some((store) => {
+        const copy = store.itemMetadataSnapshot(identity);
+        return copy !== undefined && copy.sourceVersion !== source.identity.sourceVersion;
+      }))
+        return;
+      const adopted = set.adoptLegacyItem(identity);
+      if (!adopted?.routed)
+        return;
+      const { previousCopies } = ledger.recordRoutedPlacement(identity, decision, { copies: [], embedHold: false });
+      return { refused: () => {
+        recordSecret(set, item, text, {
+          namesReleasable: decision.metadataTier === "public" || decision.metadataTier === "private",
+          sourceScope: anchor.activeLocalItemRow(identity.localItemId)?.sourceScope
+        });
+        settleSecretsCopies({
+          ledger,
+          identity,
+          copies: previousCopies,
+          storeFor: (corpusId) => {
+            const domain = set.domainForCorpus(corpusId);
+            return domain ? set.store(domain) : undefined;
+          },
+          connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID
+        });
+      } };
+    }
+    if (classification?.unavailableReason) {
+      decision = {
+        ...decision,
+        state: "pending",
+        metadataPending: true,
+        contentPending: true,
+        reasons: [...decision.reasons, `content:${classification.unavailableReason}`]
+      };
+    }
+    decision = set.checkedBodyDecision(identity, decision, text, imageJudgment);
+    const hasLowerCopy = () => set.openStores().some((store) => trustDomainRank(store.trustDomain) < trustDomainRank(anchor.trustDomain) && store.itemPresence(identity).active);
+    if (prior && !prior.routed && anchor.trustDomain === "secure_local" && prior.state !== "moving" && decision.contentTier === "secure" && decision.state === "current" && !contentHeldForJudgment(decision) && !read.secret && !hasLowerCopy()) {
+      const preservedPlacementCurrent = () => {
+        const current = ledger.getCurrent(identity);
+        const now = ledger.classificationRead(identity);
+        return current?.routed === false && current.generation === prior.generation && current.state === prior.state && !now.secret && now.scrubRevision === read.scrubRevision && JSON.stringify(now.override ?? null) === JSON.stringify(override ?? null) && !hasLowerCopy();
+      };
+      return {
+        store: anchor,
+        sensitivity: buildSourceSensitivity({ trustTier: set.restingTierFor(anchor.trustDomain), trustDomain: anchor.trustDomain }),
+        prepare: () => ledger.withMoveBatch(preservedPlacementCurrent),
+        landed: () => {
+          ledger.withMoveBatch(() => {
+            if (!preservedPlacementCurrent())
+              return;
+            ledger.recordContentDecision(identity, {
+              ...decision,
+              reasons: decision.reasons.filter((reason) => reason.startsWith("content:"))
+            });
+          });
+        }
+      };
+    }
+    const placement = set.placementFor(decision);
+    const contentCopy = copyServingLayer(placement.copies, "content");
+    const store = contentCopy ? set.store(contentCopy.trustDomain, { create: true }) : undefined;
+    if (!contentCopy || !store)
+      return;
+    let prepared;
+    return {
+      store,
+      sensitivity: buildSourceSensitivity({
+        trustTier: set.restingTierFor(store.trustDomain),
+        trustDomain: store.trustDomain
+      }),
+      prepare: () => {
+        const destinationRow = store.itemMetadataSnapshot(identity);
+        if (destinationRow && destinationRow.sourceVersion !== source.identity.sourceVersion && !(prior && representationLandingDue(prior) && store.itemRepresentationCoverage(expectation).complete))
+          return false;
+        const adopted = set.adoptLegacyItem(identity);
+        if (!adopted?.routed)
+          return false;
+        prepared = ledger.recordRoutedPlacement(identity, {
+          ...decision,
+          state: "pending",
+          contentRead: false,
+          contentPending: true,
+          contentTier: store.trustDomain === "secure_local" ? "secure" : store.trustDomain === "internal" ? "private" : "public"
+        }, {
+          copies: [{ corpusId: anchor.corpusId, trustDomain: anchor.trustDomain, layers: "metadata" }],
+          embedHold: placement.embedHold
+        }, { staleCopiesGone: true, guard: { generation: adopted.generation, override } }).record;
+        if (store !== anchor) {
+          store.bindTierSet(ledger);
+          ledger.stageLandingCopy(identity, contentCopy, { expectedGeneration: prepared.generation, embedHold: placement.embedHold });
+          if (anchor.readOnDemand(identity.localItemId, identity.sourceVersion ?? "")) {
+            store.grantOnDemandRead(identity.localItemId, identity.sourceVersion);
+          }
+        }
+        for (const copy of placement.copies) {
+          const destination = set.store(copy.trustDomain, { create: true });
+          destination.bindTierSet(ledger);
+          if (!destination.itemPresence(identity).active) {
+            destination.importItemCopy(source, {
+              trustTier: set.restingTierFor(copy.trustDomain),
+              syncConnectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID,
+              layers: "metadata"
+            });
+          }
+        }
+        return true;
+      },
+      landed: () => {
+        store.withItemCopyWriteFence(identity, () => {
+          if (!prepared || !store.itemRepresentationCoverage(expectation).complete)
+            return;
+          ledger.recordRoutedPlacement(identity, decision, placement, {
+            staleCopiesGone: true,
+            guard: { generation: prepared.generation, override }
+          });
+        });
+      }
+    };
+  };
+}
+function setMediaJudgment(set, mediaSha256) {
+  const rank = { sensitive: 2, unjudged: 1, ordinary: 0 };
+  let chosen;
+  for (const domain of [...TIER_DOMAIN_ORDER].reverse()) {
+    const judgment = set.store(domain)?.mediaJudgment(mediaSha256);
+    if (judgment && (!chosen || rank[judgment.verdict] > rank[chosen.verdict]))
+      chosen = judgment;
+  }
+  return chosen;
+}
+function skipped(skippedReason) {
+  return { accepted: false, chunksIndexed: 0, chunksAwaitingEmbedding: 0, skippedReason };
+}
+function legacyStoreFor(set, localItemId, home) {
+  const homeStore = home !== undefined && set.legSpec(home)?.legacy === true ? set.store(home) : undefined;
+  if (homeStore?.activeLocalItemRow(localItemId))
+    return homeStore;
+  const legacy = TIER_DOMAIN_ORDER.filter((domain) => set.legSpec(domain)?.legacy === true).flatMap((domain) => {
+    const store = set.store(domain);
+    return store ? [store] : [];
+  });
+  return legacy.find((store) => store.activeLocalItemRow(localItemId) !== undefined) ?? legacy[0];
+}
+function contentDomainOf(record) {
+  return record.contentTier === "secrets" ? undefined : TIER_KEY_TRUST_DOMAIN[record.contentTier];
+}
+function samePlacement(current, placement) {
+  if (current.length !== placement.copies.length)
+    return false;
+  return placement.copies.every((planned) => current.some((copy) => copy.corpusId === planned.corpusId && copy.layers === planned.layers));
+}
+function recordSecret(set, item, text, options) {
+  const index = set.secrets();
+  if (!index)
+    return;
+  const title = stringMetadata2(item, ["title", "name", "subject"]);
+  const locator = stringMetadata2(item, ["locatorUri", "pathDisplay", "url"]);
+  const kinds = [...new Set([
+    ...detectSecretFindingKinds(text),
+    ...title ? detectSecretFindingKinds(title) : [],
+    ...locator ? detectSecretFindingKinds(locator) : []
+  ])];
+  index.record({
+    identity: item.identity,
+    ...locator ? { locator } : {},
+    ...title && options.namesReleasable ? { title } : {},
+    namesReleasable: options.namesReleasable,
+    folderKeys: options.sourceScope?.folderKeys ?? [],
+    ...options.sourceScope ? { scopeGeneration: options.sourceScope.accountGeneration, scopeRevision: options.sourceScope.scopeRevision } : {},
+    findingKinds: kinds.length > 0 ? kinds : ["owner_marked_secret"],
+    text
+  });
+}
+function stringMetadata2(item, keys) {
+  for (const key of keys) {
+    const value = item.metadata[key];
+    if (typeof value === "string" && value.trim())
+      return value.trim();
+  }
+  return;
+}
+function singleItemConnector(store, item) {
+  return {
+    id: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID,
+    family: store.family,
+    authenticate: async () => {},
+    fetchItem: async () => item,
+    classificationSignals: () => ({}),
+    listItems() {
+      return async function* () {
+        yield { items: [item], done: true };
+      }();
+    }
+  };
+}
+function parentOf(set, anchorStore, child) {
+  const localItemId = anchorStore.parentLocalItemIdOf(child);
+  if (!localItemId)
+    return;
+  for (const domain of TIER_DOMAIN_ORDER) {
+    const row = set.store(domain)?.activeLocalItemRow(localItemId);
+    if (row)
+      return { providerItemId: row.identity.providerItemId, localItemId };
+  }
+  return;
+}
+var init_tiered_store_sink = __esm(() => {
+  init_types();
+  init_engine();
+  init_tier_classifier();
+  init_tier_ledger();
+  init_parent_context();
+  init_stored_names();
+  init_tier_placement();
+  init_media_judge();
+  init_secrets_disposition();
+  init_tiered_store_set();
+  init_store_sink();
+});
+
 // src/workers/x-bookmarks/content-recovery.ts
-import { createHash as createHash58, randomUUID as randomUUID26 } from "node:crypto";
+import { createHash as createHash58, randomUUID as randomUUID27 } from "node:crypto";
 import {
-  chmodSync as chmodSync22,
+  chmodSync as chmodSync23,
   renameSync as renameSync12,
   rmSync as rmSync21,
   writeFileSync as writeFileSync17
 } from "node:fs";
-import { resolve as resolve18 } from "node:path";
+import { resolve as resolve20 } from "node:path";
 function createXBookmarksContentRecoveryHandler(options) {
   const account = requireNonEmpty2(options.account, "X bookmark content-recovery account");
   const userId = requireNonEmpty2(options.userId, "X bookmark content-recovery provider user id");
@@ -116332,8 +119086,15 @@ function createXBookmarksContentRecoveryHandler(options) {
         mimeTypes: ["text/plain; charset=utf-8"],
         maxExamined: Number.POSITIVE_INFINITY
       }).candidates;
-      const routed = options.tierLedger ? candidates.filter((candidate) => options.tierLedger.isRouted(candidate.identity)).length : 0;
-      const recoverable = candidates.filter((candidate) => !options.tierLedger?.isRouted(candidate.identity)).filter(isRecoverableXBookmarkCandidate);
+      let routed = 0;
+      const recoverable = candidates.filter((candidate) => {
+        const record = options.tierSet.ledger.getCurrent(candidate.identity);
+        if (record?.routed && !representationLandingDue(record)) {
+          routed += 1;
+          return false;
+        }
+        return isRecoverableXBookmarkCandidate(candidate);
+      });
       const counts = emptyCounts();
       if (routed > 0)
         counts.candidates_tier_routed = routed;
@@ -116468,9 +119229,13 @@ function createXBookmarksContentRecoveryHandler(options) {
           const candidate = candidatesById.get(post.id);
           if (!candidate)
             return [];
-          const item = recoveryRawItem(post, account, attemptedAt.toISOString());
+          const item = recoveryRawItem({
+            ...post,
+            ...post.sourceVersion === undefined && candidate.identity.sourceVersion !== undefined ? { sourceVersion: candidate.identity.sourceVersion } : {}
+          }, account, attemptedAt.toISOString());
           return [{
             item,
+            expectedStoredSourceVersion: candidate.identity.sourceVersion ?? null,
             expectation: {
               sourceItem: item.identity,
               ...item.identity.sourceVersion ? { sourceVersion: item.identity.sourceVersion } : {},
@@ -116489,6 +119254,11 @@ function createXBookmarksContentRecoveryHandler(options) {
           return writeReceipt(receiptPath, buildReceipt("deferred", counts));
         }
         const completedFacetAuthority = facetAuthorityAtRestore?.status === "completed" ? facetAuthorityAtRestore : undefined;
+        const connector = createXBookmarksSourceConnector({
+          account,
+          posts: postsWithText,
+          fetchedAt: attemptedAt.toISOString()
+        });
         const restored = options.store.restoreItemRepresentations({
           items: restoreItems,
           syncConnectorId: RECOVERY_CONNECTOR_ID,
@@ -116496,7 +119266,7 @@ function createXBookmarksContentRecoveryHandler(options) {
           ownershipKind: "observed",
           preserveStoredSearchText: true,
           preserveStoredSearchTextOwnedFacets: true,
-          classify: () => buildSourceSensitivity({ trustTier: "S1", trustDomain: "internal" })
+          route: tieredRepresentationLanding({ set: options.tierSet, anchor: options.store, connector })
         });
         counts.items_recovered = restored.counts.itemsRestored;
         counts.items_unchanged_at_execute = restored.counts.itemsUnchanged;
@@ -116504,15 +119274,15 @@ function createXBookmarksContentRecoveryHandler(options) {
         counts.chunks_awaiting_embedding = restored.counts.chunksAwaitingEmbedding;
         if (options.embeddingProvider && restored.restoredProviderItemIds.length > 0) {
           const restoredIds = new Set(restored.restoredProviderItemIds);
-          const localItemIds = restoreItems.filter((record) => restoredIds.has(record.item.identity.providerItemId)).map((record) => record.item.identity.localItemId);
-          const embedded = await options.store.embedChunks({
+          const localItemIds = restoreItems.filter((record) => restoredIds.has(record.item.identity.providerItemId)).filter(({ item }) => options.tierSet.ledger.copies(item.identity).some((copy) => copy.corpusId === options.store.corpusId && copy.state === "current" && copy.layers !== "metadata" && !copy.embedHold)).map((record) => record.item.identity.localItemId);
+          const embedded = localItemIds.length > 0 ? await options.store.embedChunks({
             provider: options.embeddingProvider,
             localItemIds,
             ...completedFacetAuthority && completedFacetAuthority.leaseGeneration > 0 ? {
               journalId: contentRecoveryEmbeddingJournalId(restoreItems),
               journalLeaseGeneration: completedFacetAuthority.leaseGeneration
             } : {}
-          });
+          }) : { chunksEmbedded: 0 };
           counts.chunks_embedded = embedded.chunksEmbedded;
           counts.chunks_awaiting_embedding = Math.max(0, counts.chunks_awaiting_embedding - embedded.chunksEmbedded);
         }
@@ -116535,7 +119305,7 @@ function contentRecoveryEmbeddingJournalId(restoreItems) {
   return `x_content_recovery:${inputSha256}:embeddings`;
 }
 function defaultXBookmarksContentRecoveryReceiptPath(storePath) {
-  return resolve18(`${storePath}.content-recovery-receipt.json`);
+  return resolve20(`${storePath}.content-recovery-receipt.json`);
 }
 async function authenticatedClient(input) {
   const session = await issueGrantFencedXSession({
@@ -116625,8 +119395,8 @@ function buildReceipt(status, counts, retryAt) {
   return { ...unsigned, receipt_sha256: sha256Json2(unsigned) };
 }
 function writeReceipt(pathValue, receipt) {
-  const path = resolve18(pathValue);
-  const temporary = `${path}.tmp-${randomUUID26()}`;
+  const path = resolve20(pathValue);
+  const temporary = `${path}.tmp-${randomUUID27()}`;
   try {
     writeFileSync17(temporary, `${JSON.stringify(receipt, null, 2)}
 `, {
@@ -116634,9 +119404,9 @@ function writeReceipt(pathValue, receipt) {
       flag: "wx",
       mode: 384
     });
-    chmodSync22(temporary, 384);
+    chmodSync23(temporary, 384);
     renameSync12(temporary, path);
-    chmodSync22(path, 384);
+    chmodSync23(path, 384);
     return receipt;
   } catch (error) {
     rmSync21(temporary, { force: true });
@@ -116663,9 +119433,9 @@ var init_content_recovery = __esm(() => {
   init_provider_rate_limits();
   init_scheduler_limit_stops();
   init_limit_stops();
-  init_types();
   init_connector_store();
   init_credential_broker();
+  init_tiered_store_sink();
   init_api2();
   init_connector();
   init_folder_facets();
@@ -118374,12 +121144,19 @@ var init_dropbox = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/command-runner.ts
+import { AsyncLocalStorage as AsyncLocalStorage13 } from "node:async_hooks";
 import { Buffer as Buffer4 } from "node:buffer";
 import { execFile as execFile3, spawn as spawn7 } from "node:child_process";
 import { readFile as readFile6, readdir } from "node:fs/promises";
 import { promisify } from "node:util";
 import { accessSync as accessSync7, constants as fsConstants5, statSync as statSync28 } from "node:fs";
 import { delimiter as delimiter5, join as join77 } from "node:path";
+function runWithExtractionAbortSignal(signal, run) {
+  return activeExtraction.run(signal, run);
+}
+function currentExtractionAbortSignal() {
+  return activeExtraction.getStore();
+}
 function errnoCode(error) {
   const code = error?.code;
   return typeof code === "string" && code.length > 0 ? code : "UNKNOWN";
@@ -118515,6 +121292,8 @@ function commandGroupRecorder() {
   return groupRecorder.recorder;
 }
 async function runExtractionCommand(request, internals = {}) {
+  const signal = currentExtractionAbortSignal();
+  signal?.throwIfAborted();
   const kill = internals.kill ?? process.kill;
   const command = resolveExtractionCommand(request.command);
   for (const argument of request.args)
@@ -118575,7 +121354,7 @@ async function runExtractionCommand(request, internals = {}) {
       if (Date.now() - lastProgress < request.timeoutMs)
         return;
       settled = true;
-      clearInterval(timer);
+      cleanup();
       const outcome = killExtractionProcessGroup(child, "SIGKILL", kill);
       reject(new ExtractionCommandTimeoutError({
         command: request.command,
@@ -118583,14 +121362,27 @@ async function runExtractionCommand(request, internals = {}) {
         ...outcome.ok ? {} : { terminationFailed: outcome.code }
       }));
     }, stallCheckIntervalMs(request.timeoutMs)) : undefined;
+    const cleanup = () => {
+      if (timer)
+        clearInterval(timer);
+      signal?.removeEventListener("abort", abort);
+    };
+    const abort = () => {
+      if (settled)
+        return;
+      settled = true;
+      cleanup();
+      killExtractionProcessGroup(child, "SIGKILL", kill);
+      reject(signal?.reason);
+    };
+    signal?.addEventListener("abort", abort, { once: true });
     child.stdout.on("data", collect(stdout));
     child.stderr.on("data", collect(stderr));
     child.on("error", (error) => {
       if (settled)
         return;
       settled = true;
-      if (timer)
-        clearInterval(timer);
+      cleanup();
       killExtractionProcessGroup(child, "SIGKILL", kill);
       reject(error);
     });
@@ -118599,8 +121391,7 @@ async function runExtractionCommand(request, internals = {}) {
       if (settled)
         return;
       settled = true;
-      if (timer)
-        clearInterval(timer);
+      cleanup();
       const result = {
         stdout: Buffer4.concat(stdout).toString("utf8"),
         stderr: Buffer4.concat(stderr).toString("utf8")
@@ -118618,11 +121409,12 @@ async function runExtractionCommand(request, internals = {}) {
     });
   });
 }
-var ExtractionCommandError, ExtractionCommandTimeoutError, execFileAsync, EXTRACTION_COMMAND_FALLBACK_DIRS, resolvedCommands, groupRecorder;
+var activeExtraction, ExtractionCommandError, ExtractionCommandTimeoutError, execFileAsync, EXTRACTION_COMMAND_FALLBACK_DIRS, resolvedCommands, groupRecorder;
 var init_command_runner = __esm(() => {
   init_memory_counters();
   init_descendant_groups();
   init_native_process_service();
+  activeExtraction = new AsyncLocalStorage13;
   ExtractionCommandError = class ExtractionCommandError extends Error {
     command;
     exitCode;
@@ -118892,7 +121684,7 @@ var init_dropbox_files = __esm(() => {
 // src/workers/local-files/paths.ts
 import { realpathSync as realpathSync16 } from "node:fs";
 import { homedir as homedir29 } from "node:os";
-import { basename as basename13, dirname as dirname69, join as join79 } from "node:path";
+import { basename as basename13, dirname as dirname70, join as join79 } from "node:path";
 function normalizeScopePath(value) {
   const composed = value.trim().normalize("NFC");
   if (!composed.startsWith("/") || composed.length > MAX_SCOPE_PATH_LENGTH || UNSAFE_PATH_CHARACTERS.test(composed))
@@ -119011,7 +121803,7 @@ function realPathThroughExisting(path) {
     try {
       return join79(realpathSync16.native(existing), ...[...rest].reverse());
     } catch {}
-    const parent = dirname69(existing);
+    const parent = dirname70(existing);
     if (parent === existing)
       return path;
     rest.push(basename13(existing));
@@ -119381,7 +122173,7 @@ var init_corpus_adapter4 = __esm(() => {
 });
 // src/workers/connector-store/capture-spool-secrets.ts
 import { createHash as createHash62 } from "node:crypto";
-import { closeSync as closeSync20, fsyncSync as fsyncSync4, lstatSync as lstatSync32, openSync as openSync20, readSync as readSync3, writeSync as writeSync5 } from "node:fs";
+import { closeSync as closeSync20, fsyncSync as fsyncSync4, lstatSync as lstatSync33, openSync as openSync20, readSync as readSync3, writeSync as writeSync5 } from "node:fs";
 import { join as join80 } from "node:path";
 async function redactCaptureSpoolLines(options) {
   const result = { recordsRedacted: 0, recordsBlanked: 0 };
@@ -119391,7 +122183,7 @@ async function redactCaptureSpoolLines(options) {
     if (options.through && name > options.through.file)
       break;
     const path = join80(options.dir, name);
-    const stat = lstatSync32(path);
+    const stat = lstatSync33(path);
     if (!stat.isFile() || stat.isSymbolicLink())
       continue;
     const startLine = options.from?.file === name ? options.from.line : 0;
@@ -120254,8 +123046,8 @@ var init_record_builder = __esm(() => {
 });
 
 // src/workers/telegram-messages/media-child.ts
-import { lstatSync as lstatSync33, readdirSync as readdirSync13, readFileSync as readFileSync55, rmSync as rmSync22, statfsSync as statfsSync4 } from "node:fs";
-import { join as join81, resolve as resolve19, sep as sep15 } from "node:path";
+import { lstatSync as lstatSync34, readdirSync as readdirSync13, readFileSync as readFileSync55, rmSync as rmSync22, statfsSync as statfsSync4 } from "node:fs";
+import { join as join81, resolve as resolve21, sep as sep15 } from "node:path";
 function telegramMediaChild(parent, media, deferredBytes, options = {}) {
   const providerItemId = childProviderItemId(parent.identity.providerItemId, TELEGRAM_CHILD_KEY);
   const version = options.version ?? parent.identity.sourceVersion;
@@ -120299,12 +123091,12 @@ function telegramLiveMediaPath(spoolDir, locator) {
   const relative = locator.slice(TELEGRAM_LIVE_MEDIA_LOCATOR_PREFIX.length);
   if (!/^media\/-?[A-Za-z0-9_]{1,40}\/-?\d{1,20}\.[0-9a-f]{12}\.[a-z0-9]{1,5}$/.test(relative))
     return;
-  const root = resolve19(spoolDir, "media");
-  const path = resolve19(spoolDir, relative);
+  const root = resolve21(spoolDir, "media");
+  const path = resolve21(spoolDir, relative);
   if (!path.startsWith(`${root}${sep15}`))
     return;
   try {
-    const stat = lstatSync33(path);
+    const stat = lstatSync34(path);
     return stat.isFile() && !stat.isSymbolicLink() ? path : undefined;
   } catch {
     return;
@@ -120333,7 +123125,7 @@ function telegramLiveMediaBytes(child, spoolDir, locator) {
   const path = telegramLiveMediaPath(spoolDir, locator);
   if (!path)
     throw new Error("Telegram no longer has this media file.");
-  const size = lstatSync33(path).size;
+  const size = lstatSync34(path).size;
   if (size > sourceSizeBytes(sourceSizeLimitForProvider("telegram"), { ...child.identity, mimeType: child.mimeType }))
     throw new FileExtractionSourceError("source_too_large", { sizeBytes: size });
   const bytes = readFileSync55(path);
@@ -120351,7 +123143,7 @@ function telegramLiveMediaFile(spoolDir, conversationId, messageId) {
   }
   return names.filter((name) => name.startsWith(`${messageId}.`) || name.startsWith(`.${messageId}.`) && name.includes(TEMPORARY_MARK)).map((name) => join81(folder, name)).filter((path) => {
     try {
-      return lstatSync33(path).isFile();
+      return lstatSync34(path).isFile();
     } catch {
       return false;
     }
@@ -120378,7 +123170,7 @@ function sweepTelegramMediaTemporaries(spoolDir) {
     const folder = join81(root, chat);
     let names;
     try {
-      if (!lstatSync33(folder).isDirectory())
+      if (!lstatSync34(folder).isDirectory())
         continue;
       names = readdirSync13(folder);
     } catch {
@@ -120401,7 +123193,7 @@ function telegramMediaDiskFloor(total) {
 }
 function telegramMediaDiskLow(spoolDir, space = diskSpaceOf) {
   try {
-    const waiting = lstatSync33(join81(spoolDir, MEDIA_WAITING_FILE));
+    const waiting = lstatSync34(join81(spoolDir, MEDIA_WAITING_FILE));
     if (waiting.isFile() && waiting.size > 0)
       return true;
   } catch {}
@@ -120425,7 +123217,7 @@ var init_media_child = __esm(() => {
 
 // src/workers/telegram-messages/capture-spool-connector.ts
 import { createHash as createHash64 } from "node:crypto";
-import { closeSync as closeSync22, existsSync as existsSync65, lstatSync as lstatSync34, openSync as openSync22, readSync as readSync6, readdirSync as readdirSync14 } from "node:fs";
+import { closeSync as closeSync22, existsSync as existsSync65, lstatSync as lstatSync35, openSync as openSync22, readSync as readSync6, readdirSync as readdirSync14 } from "node:fs";
 import { join as join82 } from "node:path";
 function defaultTelegramCaptureSpoolDir(env = process.env) {
   return resolvedRawPath(TELEGRAM_SOURCE_ID, "telegram-spool", env);
@@ -120555,7 +123347,7 @@ function readTelegramCaptureSpool(options) {
       if (admitThrough && name > admitThrough.file)
         break;
       const path = join82(options.spoolDir, name);
-      const stat = lstatSync34(path);
+      const stat = lstatSync35(path);
       if (!stat.isFile() || stat.isSymbolicLink()) {
         throw new Error("Telegram capture spool refuses non-regular JSONL files.");
       }
@@ -120646,7 +123438,7 @@ function telegramCaptureCursorOffset(spoolDir, cursorText) {
   const cursor = parseTelegramCaptureSpoolCursor(cursorText);
   const path = join82(spoolDir, cursor.file);
   try {
-    const stat = lstatSync34(path);
+    const stat = lstatSync35(path);
     if (!stat.isFile() || stat.isSymbolicLink())
       return;
     const fd = openSync22(path, "r");
@@ -120667,7 +123459,7 @@ function telegramCaptureSpoolCursorState(spoolDir, cursorText, names = telegramC
   if (cursor.line === 0)
     return "ok";
   const path = join82(spoolDir, cursor.file);
-  const stat = lstatSync34(path);
+  const stat = lstatSync35(path);
   if (!stat.isFile() || stat.isSymbolicLink())
     return "ok";
   const fd = openSync22(path, "r");
@@ -120706,7 +123498,7 @@ function readTelegramCaptureSpoolNewestCapturedAt(spoolDir) {
 function readTelegramCaptureHeartbeat(spoolDir) {
   try {
     const path = join82(spoolDir, TELEGRAM_CAPTURE_HEARTBEAT_FILE);
-    const stat = lstatSync34(path);
+    const stat = lstatSync35(path);
     if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_HEARTBEAT_BYTES)
       return;
     const buffer = Buffer.alloc(stat.size);
@@ -120726,7 +123518,7 @@ function readTelegramCaptureHeartbeat(spoolDir) {
   }
 }
 function spoolTailLines(path) {
-  const stat = lstatSync34(path);
+  const stat = lstatSync35(path);
   if (!stat.isFile() || stat.isSymbolicLink())
     return [];
   const start = Math.max(0, stat.size - MAX_TAIL_SCAN_BYTES);
@@ -120816,7 +123608,7 @@ function telegramCaptureSpoolFiles(spoolDir) {
 function assertTelegramCaptureSpoolDirectory(spoolDir) {
   if (!existsSync65(spoolDir))
     throw new Error("Telegram capture spool directory does not exist.");
-  const dir = lstatSync34(spoolDir);
+  const dir = lstatSync35(spoolDir);
   if (!dir.isDirectory() || dir.isSymbolicLink()) {
     throw new Error("Telegram capture spool requires a real directory.");
   }
@@ -120926,7 +123718,7 @@ function telegramMessageItem(input) {
   ]);
   const identity = {
     family: "chat",
-    provider: "telegram",
+    provider: TELEGRAM_LABEL_CAPABILITY.provider,
     accountScope: input.account,
     providerItemId: messageId,
     providerConversationId: input.conversationId,
@@ -121141,6 +123933,7 @@ function telegramConversationKind(chatType) {
 var TELEGRAM_CAPTURE_CONNECTOR_ID = "telegram_capture_spool", TELEGRAM_CAPTURE_CONNECTOR_IDS, TELEGRAM_TRUST_EVICTION_CONNECTOR_ID, TELEGRAM_TRUST_RECONCILIATION_CONNECTOR_ID, TELEGRAM_SECRET_REDACTED_FLOOR_BASIS = "capture:secret_redacted", MAX_READ_BYTES, MAX_LINES_PER_READ = 200000, MAX_RECORD_BYTES, MAX_TAIL_SCAN_BYTES, MAX_TEXT_CHARS = 4000000, DEFAULT_PAGE_LIMIT2 = 500, MAX_PAGE_LIMIT2 = 1e4, TELEGRAM_CAPTURE_HEARTBEAT_FILE = ".capture-heartbeat.json", MAX_HEARTBEAT_BYTES = 4096, SERVICE_FIELDS;
 var init_capture_spool_connector = __esm(() => {
   init_olympus_layout();
+  init_source_connector_labels();
   init_source_placement();
   init_source_inputs();
   init_capture_spool_secrets();
@@ -122269,7 +125062,7 @@ var init_export_records = __esm(() => {
 });
 
 // src/workers/telegram-messages/export-input.ts
-import { dirname as dirname70 } from "node:path";
+import { dirname as dirname71 } from "node:path";
 function telegramExportMediaLocator(archiveId, bindingId) {
   return `archive-input-media:v1:${archiveId}:b:${bindingId}`;
 }
@@ -122280,7 +125073,7 @@ function telegramExportInput(archive, options) {
   const file = archive.files[0];
   if (!file || archive.files.length !== 1)
     throw new Error("A Telegram export is one result.json.");
-  const base = dirname70(file.relPath) === "." ? "" : dirname70(file.relPath);
+  const base = dirname71(file.relPath) === "." ? "" : dirname71(file.relPath);
   const fetchedAt = new Date().toISOString();
   const context = {
     account: options.account,
@@ -122723,7 +125516,7 @@ var init_size_limit_stops = __esm(() => {
 });
 
 // src/workers/file-extraction/on-demand-read.ts
-import { createHash as createHash69, randomUUID as randomUUID27 } from "node:crypto";
+import { createHash as createHash69, randomUUID as randomUUID28 } from "node:crypto";
 async function requestOnDemandRead(request, context) {
   if (!["owner", "remote_app", "analyst"].includes(request.requester))
     return { state: "refused", reason: "invalid_requester" };
@@ -122735,7 +125528,7 @@ async function requestOnDemandRead(request, context) {
     return { state: "refused", reason: "item_not_found" };
   return context.jobs.enqueueOnDemandRead({
     ...request,
-    questionId: request.questionId?.trim() || randomUUID27(),
+    questionId: request.questionId?.trim() || randomUUID28(),
     itemRef: { corpusId: ref.corpusId, providerItemId: ref.providerItemId }
   }, target.job, target.grant, context.limits);
 }
@@ -122754,8 +125547,8 @@ var init_on_demand_read = () => {};
 
 // src/workers/file-extraction/spool.ts
 import { createHash as createHash70 } from "node:crypto";
-import { chmodSync as chmodSync23, existsSync as existsSync66, mkdirSync as mkdirSync44, readdirSync as readdirSync15, rmSync as rmSync24, rmdirSync as rmdirSync5, statSync as statSync30 } from "node:fs";
-import { dirname as dirname71, isAbsolute as isAbsolute27, join as join83, relative as relative11, sep as sep16 } from "node:path";
+import { chmodSync as chmodSync24, existsSync as existsSync66, mkdirSync as mkdirSync45, readdirSync as readdirSync15, rmSync as rmSync24, rmdirSync as rmdirSync5, statSync as statSync30 } from "node:fs";
+import { dirname as dirname72, isAbsolute as isAbsolute27, join as join83, relative as relative11, sep as sep16 } from "node:path";
 function extractionSpoolOwnerDir(root, owner) {
   return join83(root, corpusFolder(owner.corpusId), accountFolder2(owner.accountScope));
 }
@@ -122834,7 +125627,7 @@ function prepareExtractionSpool(dir, options = {}) {
   try {
     if (!existsSync66(dir))
       return dir;
-    chmodSync23(dir, 448);
+    chmodSync24(dir, 448);
     let owners;
     const ownersWithJobs = () => {
       if (owners !== undefined)
@@ -122913,7 +125706,7 @@ function prepareExtractionSpool(dir, options = {}) {
 }
 function discardExtractionSpoolFile(path, ownerDir) {
   rmSync24(path, { force: true });
-  for (const dir of [ownerDir, dirname71(ownerDir)]) {
+  for (const dir of [ownerDir, dirname72(ownerDir)]) {
     try {
       rmdirSync5(dir);
     } catch {
@@ -122923,7 +125716,7 @@ function discardExtractionSpoolFile(path, ownerDir) {
 }
 function makeExtractionSpoolOwnerDir(ownerDir, anchor) {
   if (anchor === undefined) {
-    mkdirSync44(ownerDir, { recursive: true, mode: 448 });
+    mkdirSync45(ownerDir, { recursive: true, mode: 448 });
     return;
   }
   const levels = relative11(anchor, ownerDir);
@@ -122942,14 +125735,14 @@ function makeExtractionSpoolOwnerDir(ownerDir, anchor) {
   for (const level of levels.split(sep16)) {
     path = join83(path, level);
     try {
-      mkdirSync44(path, { mode: 448 });
+      mkdirSync45(path, { mode: 448 });
     } catch (error) {
       if (error.code !== "EEXIST")
         throw error;
     }
   }
 }
-var EXTRACTION_SPOOL_STALE_MS, digest4 = (value) => createHash70("sha256").update(value).digest("hex").slice(0, 32), corpusFolder = (corpusId) => `c-${digest4(corpusId)}`, accountFolder2 = (accountScope) => `a-${digest4(accountScope)}`;
+var EXTRACTION_SPOOL_STALE_MS, digest5 = (value) => createHash70("sha256").update(value).digest("hex").slice(0, 32), corpusFolder = (corpusId) => `c-${digest5(corpusId)}`, accountFolder2 = (accountScope) => `a-${digest5(accountScope)}`;
 var init_spool = __esm(() => {
   EXTRACTION_SPOOL_STALE_MS = 24 * 60 * 60 * 1000;
 });
@@ -122965,7 +125758,7 @@ var init_types4 = __esm(() => {
 
 // src/workers/dropbox-files/extraction-source.ts
 import { readFile as readFile8, realpath, stat as stat3 } from "node:fs/promises";
-import { relative as relative12, resolve as resolve20, sep as sep17 } from "node:path";
+import { relative as relative12, resolve as resolve22, sep as sep17 } from "node:path";
 
 class DropboxExtractionSource {
   id;
@@ -123031,10 +125824,12 @@ class DropboxExtractionSource {
     };
   }
   async fetch(ref, options) {
-    const local = await this.readFromLocalMount(ref, options.maxBytes);
+    options.signal?.throwIfAborted();
+    const local = await this.readFromLocalMount(ref, options);
+    options.signal?.throwIfAborted();
     if (local)
       return local;
-    return this.downloadFromProvider(ref, options.maxBytes);
+    return this.downloadFromProvider(ref, options);
   }
   verifyBytes(ref, bytes) {
     if (!ref.contentHash)
@@ -123071,7 +125866,7 @@ class DropboxExtractionSource {
       ...row.sizeBytes !== undefined ? { sizeBytes: row.sizeBytes } : {}
     };
   }
-  async readFromLocalMount(ref, maxBytes) {
+  async readFromLocalMount(ref, { maxBytes, signal }) {
     if (this.localRoots.length === 0)
       return;
     if (!ref.contentHash)
@@ -123089,6 +125884,7 @@ class DropboxExtractionSource {
       const bytes = await readVerifiedCandidate({
         candidatePath,
         contentHash: ref.contentHash,
+        ...signal ? { signal } : {},
         ...maxBytes !== undefined ? { maxBytes } : {},
         ...ref.sizeBytes !== undefined ? { declaredSizeBytes: ref.sizeBytes } : {}
       });
@@ -123115,7 +125911,7 @@ class DropboxExtractionSource {
     const rootRealPath = await this.canonicalRoot(root.rootPath);
     if (!rootRealPath)
       return;
-    const candidatePath = resolve20(rootRealPath, relativePath);
+    const candidatePath = resolve22(rootRealPath, relativePath);
     const relativeToRoot = relative12(rootRealPath, candidatePath);
     if (relativeToRoot.startsWith("..") || relativeToRoot === "" || relativeToRoot.includes(`..${sep17}`)) {
       return;
@@ -123132,12 +125928,13 @@ class DropboxExtractionSource {
     }
     return cached;
   }
-  async downloadFromProvider(ref, maxBytes) {
+  async downloadFromProvider(ref, { maxBytes, signal }) {
     let response;
     try {
       const fetchImpl = (url, init) => this.fetchImpl(url, init);
       response = await fetchWithIdleDeadline(fetchImpl, `${this.contentBaseUrl}/files/download`, {
         method: "POST",
+        ...signal ? { signal } : {},
         headers: {
           Authorization: `Bearer ${this.token}`,
           "Dropbox-API-Arg": JSON.stringify(dropboxDownloadArg2(ref))
@@ -123235,7 +126032,7 @@ async function readVerifiedCandidate(input) {
   if (input.declaredSizeBytes !== undefined && input.declaredSizeBytes !== fileStat.size) {
     return;
   }
-  const bytes = new Uint8Array(await readFile8(input.candidatePath));
+  const bytes = new Uint8Array(await readFile8(input.candidatePath, input.signal ? { signal: input.signal } : undefined));
   if (input.maxBytes !== undefined && bytes.byteLength > input.maxBytes) {
     throw new FileExtractionSourceError("source_too_large", { sizeBytes: bytes.byteLength });
   }
@@ -123383,13 +126180,13 @@ class GoogleDriveExtractionSource {
     const maxBytes = options.maxBytes ?? this.maxBytes;
     try {
       if (this.onDemandReadFormat(ref)) {
-        const text = await this.client.exportGoogleDocText(fileId, maxBytes === undefined ? Number.MAX_SAFE_INTEGER : maxBytes + 1);
+        const text = await this.client.exportGoogleDocText(fileId, maxBytes === undefined ? Number.MAX_SAFE_INTEGER : maxBytes + 1, options.signal);
         const bytes = new TextEncoder().encode(text);
         if (maxBytes !== undefined && bytes.byteLength > maxBytes)
           throw new GoogleDriveContentTooLargeError;
         return { bytes, mimeType: "text/plain", sizeBytes: bytes.byteLength };
       }
-      const result = await this.client.downloadFileBytes(fileId, maxBytes);
+      const result = await this.client.downloadFileBytes(fileId, maxBytes, options.signal);
       return {
         bytes: result.bytes,
         ...result.mimeType ? { mimeType: result.mimeType } : {},
@@ -123472,7 +126269,7 @@ var init_drive_extraction_source = __esm(() => {
 
 // src/workers/file-extraction/connector-source.ts
 import { rmSync as rmSync25, writeFileSync as writeFileSync18 } from "node:fs";
-import { basename as basename14, join as join84, resolve as resolve21, sep as sep18 } from "node:path";
+import { basename as basename14, join as join84, resolve as resolve23, sep as sep18 } from "node:path";
 function isBoundedFetchConnector(connector) {
   return typeof connector.fetchItemWithin === "function";
 }
@@ -123480,20 +126277,24 @@ function isFileFetchConnector(connector) {
   return typeof connector.fetchItemToFile === "function";
 }
 async function readItemWithin(connector, localItemId, options) {
+  options.signal?.throwIfAborted();
   const deferred = options.deferredBytes ? { deferredBytes: options.deferredBytes } : {};
   if (isBoundedFetchConnector(connector)) {
     return connector.fetchItemWithin(localItemId, {
       ...options.maxBytes !== undefined ? { maxBytes: options.maxBytes } : {},
       ...options.expectedVersion ? { expectedVersion: options.expectedVersion } : {},
+      ...options.signal ? { signal: options.signal } : {},
       ...deferred
     });
   }
   return connector.fetchItem(localItemId, options.deferredBytes ? deferred : undefined);
 }
 async function readItemToFile(connector, localItemId, options) {
+  options.signal?.throwIfAborted();
   if (isFileFetchConnector(connector))
     return connector.fetchItemToFile(localItemId, options);
   const item = await readItemWithin(connector, localItemId, options);
+  options.signal?.throwIfAborted();
   const content = item.content;
   if (content.kind === "metadata_only")
     throw refusalFor(item);
@@ -123615,6 +126416,7 @@ function createConnectorFileExtractionSource(options) {
     },
     async fetch(ref, fetchOptions) {
       const item = await readItem(ref, fetchOptions);
+      fetchOptions.signal?.throwIfAborted();
       const content = item.content;
       if (content.kind === "metadata_only")
         throw refusalFor(item);
@@ -123632,6 +126434,7 @@ function createConnectorFileExtractionSource(options) {
       let handed;
       try {
         handed = await readItemToFile(connector, ref.localItemId, {
+          ...fileOptions.signal ? { signal: fileOptions.signal, stillServed: () => !fileOptions.signal?.aborted } : {},
           ...fileOptions.maxBytes !== undefined ? { maxBytes: fileOptions.maxBytes } : {},
           ...ref.sourceVersion ? { expectedVersion: ref.sourceVersion } : {},
           ...deferred ? { deferredBytes: { locator: deferred.locator } } : {},
@@ -123669,6 +126472,7 @@ function createConnectorFileExtractionSource(options) {
     const { connector, deferred } = resolve_(ref, fetchOptions.maxBytes);
     try {
       return await readItemWithin(connector, ref.localItemId, {
+        ...fetchOptions.signal ? { signal: fetchOptions.signal } : {},
         ...fetchOptions.maxBytes !== undefined ? { maxBytes: fetchOptions.maxBytes } : {},
         ...ref.sourceVersion ? { expectedVersion: ref.sourceVersion } : {},
         ...deferred ? { deferredBytes: { locator: deferred.locator } } : {}
@@ -123724,8 +126528,8 @@ function fileHandOver(path, spooled, spoolDir, tidy) {
     async dispose() {
       if (!spooled)
         return;
-      const root = resolve21(spoolDir) + sep18;
-      const target = resolve21(path);
+      const root = resolve23(spoolDir) + sep18;
+      const target = resolve23(path);
       if (!target.startsWith(root) || basename14(target) === "")
         return;
       rmSync25(target, { force: true });
@@ -123742,7 +126546,7 @@ var init_connector_source = __esm(() => {
 
 // src/workers/whatsapp/child-media.ts
 import { closeSync as closeSync24, constants as constants12, fstatSync as fstatSync6, openSync as openSync24, readSync as readSync7, realpathSync as realpathSync17, rmSync as rmSync26, statSync as statSync31 } from "node:fs";
-import { isAbsolute as isAbsolute28, join as join85, relative as relative13, resolve as resolve22 } from "node:path";
+import { isAbsolute as isAbsolute28, join as join85, relative as relative13, resolve as resolve24 } from "node:path";
 function whatsAppMediaFileLocator(path) {
   return `${WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX}${path}`;
 }
@@ -123837,7 +126641,7 @@ function insideAny(real, roots) {
   return roots.some((root) => {
     let base;
     try {
-      base = realpathSync17(resolve22(root));
+      base = realpathSync17(resolve24(root));
     } catch {
       return false;
     }
@@ -123919,7 +126723,7 @@ var init_child_media = __esm(() => {
 // src/workers/whatsapp/extraction-source.ts
 import { readFile as readFile9, realpath as realpath2, stat as stat4 } from "node:fs/promises";
 import { closeSync as closeSync25, constants as constants13, openSync as openSync25, readSync as readSync8, rmSync as rmSync27 } from "node:fs";
-import { basename as basename15, join as join86, relative as relative14, resolve as resolve23, sep as sep19 } from "node:path";
+import { basename as basename15, join as join86, relative as relative14, resolve as resolve25, sep as sep19 } from "node:path";
 
 class WhatsAppExtractionSource {
   id;
@@ -123942,7 +126746,7 @@ class WhatsAppExtractionSource {
     this.approvedScopeKey = requireNonEmpty6(options.approvedScopeKey, "WhatsApp extraction scope key");
     this.candidates = options.candidates;
     this.locators = options.locators;
-    this.mediaRoots = options.mediaRoots.map((root) => root.trim()).filter(Boolean).map((root) => resolve23(root));
+    this.mediaRoots = options.mediaRoots.map((root) => root.trim()).filter(Boolean).map((root) => resolve25(root));
     if (this.mediaRoots.length === 0) {
       throw new Error("WhatsApp extraction needs at least one local media root.");
     }
@@ -124292,7 +127096,7 @@ var init_reaction_index = __esm(() => {
 // src/workers/whatsapp/spool-index.ts
 import { Database as Database19 } from "bun:sqlite";
 import { randomBytes as randomBytes22 } from "node:crypto";
-import { chmodSync as chmodSync24, existsSync as existsSync67 } from "node:fs";
+import { chmodSync as chmodSync25, existsSync as existsSync67 } from "node:fs";
 import { join as join87 } from "node:path";
 function comparePlaces(a, b) {
   if (a.file !== b.file)
@@ -124312,7 +127116,7 @@ class WhatsAppSpoolIndex {
     let db;
     try {
       db = new Database19(path, { create: true });
-      chmodSync24(path, 384);
+      chmodSync25(path, 384);
       db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;");
       const version = db.query("PRAGMA user_version").get().user_version;
       if (version !== SCHEMA) {
@@ -124558,7 +127362,7 @@ var init_spool_index = __esm(() => {
 
 // src/workers/whatsapp/spool-resets.ts
 import { Database as Database20 } from "bun:sqlite";
-import { chmodSync as chmodSync25 } from "node:fs";
+import { chmodSync as chmodSync26 } from "node:fs";
 import { join as join88 } from "node:path";
 
 class WhatsAppSpoolResets {
@@ -124571,7 +127375,7 @@ class WhatsAppSpoolResets {
     let db;
     try {
       db = new Database20(path, { create: true });
-      chmodSync25(path, 384);
+      chmodSync26(path, 384);
       db.exec(`
         PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;
         CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
@@ -124943,8 +127747,8 @@ var init_spool_reader = __esm(() => {
 // src/workers/whatsapp/live-connector.ts
 import { execFileSync as execFileSync4 } from "node:child_process";
 import { createHash as createHash72 } from "node:crypto";
-import { closeSync as closeSync27, existsSync as existsSync68, fsyncSync as fsyncSync5, lstatSync as lstatSync35, openSync as openSync27, readFileSync as readFileSync57, readdirSync as readdirSync16, realpathSync as realpathSync18, rmSync as rmSync28, statSync as statSync33 } from "node:fs";
-import { basename as basename16, dirname as dirname72, isAbsolute as isAbsolute29, join as join90, relative as relative15 } from "node:path";
+import { closeSync as closeSync27, existsSync as existsSync68, fsyncSync as fsyncSync5, lstatSync as lstatSync36, openSync as openSync27, readFileSync as readFileSync57, readdirSync as readdirSync16, realpathSync as realpathSync18, rmSync as rmSync28, statSync as statSync33 } from "node:fs";
+import { basename as basename16, dirname as dirname73, isAbsolute as isAbsolute29, join as join90, relative as relative15 } from "node:path";
 function emptyWhatsAppSpoolPassFindings() {
   return {
     malformedLines: 0,
@@ -125927,7 +128731,7 @@ function removeTemp(path) {
   fsyncFolderOf(path);
 }
 function fsyncFolderOf(path) {
-  const fd = openSync27(dirname72(path), "r");
+  const fd = openSync27(dirname73(path), "r");
   try {
     fsyncSync5(fd);
   } finally {
@@ -125943,7 +128747,7 @@ function sweepOrphanMediaTemps(roots, nowMs = Date.now()) {
         continue;
     } else {
       try {
-        if (nowMs - lstatSync35(path).mtimeMs < MEDIA_TEMP_MAX_AGE_MS)
+        if (nowMs - lstatSync36(path).mtimeMs < MEDIA_TEMP_MAX_AGE_MS)
           continue;
       } catch {
         continue;
@@ -126111,10 +128915,10 @@ var init_live_connector = __esm(() => {
 import { Database as Database21 } from "bun:sqlite";
 import { createHash as createHash73 } from "node:crypto";
 import {
-  chmodSync as chmodSync26,
+  chmodSync as chmodSync27,
   closeSync as closeSync28,
   fsyncSync as fsyncSync6,
-  mkdirSync as mkdirSync45,
+  mkdirSync as mkdirSync46,
   openSync as openSync28,
   readFileSync as readFileSync58,
   readdirSync as readdirSync17,
@@ -126125,7 +128929,7 @@ import {
   writeSync as writeSync8
 } from "node:fs";
 import { createConnection } from "node:net";
-import { dirname as dirname73, join as join91 } from "node:path";
+import { dirname as dirname74, join as join91 } from "node:path";
 async function runWhatsAppMediaFetch(options) {
   const result = { received: 0, filled: 0, dropped: 0, waitingForDisk: false };
   const { state, folder } = options;
@@ -126133,7 +128937,7 @@ async function runWhatsAppMediaFetch(options) {
     state.note(media);
   for (const saved of options.findings.savedMedia)
     state.saved(saved.chatJid, saved.id, saved.version);
-  mkdirSync45(folder, { recursive: true, mode: 448 });
+  mkdirSync46(folder, { recursive: true, mode: 448 });
   const space = options.space ?? volumeSpace;
   for (const name of listNames(folder))
     if (name.endsWith(PART_SUFFIX))
@@ -126279,12 +129083,12 @@ function fillInput(record) {
     }()
   };
 }
-function parentOf(options, row) {
+function parentOf2(options, row) {
   return { provider: "whatsapp", accountScope: options.account, providerItemId: row.id, providerConversationId: row.chatJid };
 }
 function revokeFetchedChild(options, row) {
   const { tierSet } = options;
-  const parent = parentOf(options, row);
+  const parent = parentOf2(options, row);
   const child = isWhatsAppChildMediaType(row.media.mediaType) ? { ...parent, providerItemId: childProviderItemId(row.id, "media") } : undefined;
   const stored = tierSet.storedItem(child ?? parent, compareWhatsAppVersions);
   if (stored?.version !== undefined && compareWhatsAppVersions(stored.version, row.version) !== 0)
@@ -126350,7 +129154,7 @@ class WhatsAppMediaFetchState {
   static open(spoolDir) {
     const path = join91(spoolDir, WHATSAPP_MEDIA_FETCH_STATE_FILE);
     const db = new Database21(path, { create: true });
-    chmodSync26(path, 384);
+    chmodSync27(path, 384);
     db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;");
     db.run(`CREATE TABLE IF NOT EXISTS media (
       key TEXT PRIMARY KEY,
@@ -126423,7 +129227,7 @@ function toRow(row) {
 }
 function judge2(options, row) {
   const { tierSet } = options;
-  const parent = parentOf(options, row);
+  const parent = parentOf2(options, row);
   const child = isWhatsAppChildMediaType(row.media.mediaType) ? { ...parent, providerItemId: childProviderItemId(row.id, "media") } : undefined;
   const parentRecord = tierSet.ledger.getCurrent(parent);
   const childRecord = child ? tierSet.ledger.getCurrent(child) : undefined;
@@ -126649,7 +129453,7 @@ function removeDurably(path) {
       throw error;
     return;
   }
-  fsyncFolder(dirname73(path));
+  fsyncFolder(dirname74(path));
 }
 var WHATSAPP_MEDIA_FETCH_STATE_FILE = "media-fetch.sqlite", WHATSAPP_MEDIA_FETCH_INPUT_ID = "whatsapp-media-fetch", WHATSAPP_MEDIA_SOCKET_POINTER = "media-download.json", PART_SUFFIX = ".part", DISK_FLOOR_MIN_BYTES, DISK_FLOOR_SHARE = 20, CALL_STALL_MS = 120000, ANSWER_HEAD_MAX_BYTES, FETCHED_MEDIA_SECRET_FINDING = "fetched_media_parent_secret", EXTENSIONS2;
 var init_media_fetch = __esm(() => {
@@ -127154,9 +129958,9 @@ var init_extraction_factory = __esm(() => {
 });
 
 // src/workers/file-extraction/job-store.ts
-import { chmodSync as chmodSync27, mkdirSync as mkdirSync46 } from "node:fs";
-import { createHash as createHash74, randomUUID as randomUUID28 } from "node:crypto";
-import { dirname as dirname74 } from "node:path";
+import { chmodSync as chmodSync28, mkdirSync as mkdirSync47 } from "node:fs";
+import { createHash as createHash74, randomUUID as randomUUID29 } from "node:crypto";
+import { dirname as dirname75 } from "node:path";
 import { Database as Database22 } from "bun:sqlite";
 function settleUnreadable(candidates, classify) {
   const items = [];
@@ -127203,11 +130007,11 @@ class LocalFileExtractionJobStore {
     if (!this.readonly)
       assertWritableStoreOpenAllowed("extraction job store", dbPath);
     if (!inMemory && !this.readonly) {
-      mkdirSync46(dirname74(dbPath), { recursive: true, mode: 448 });
+      mkdirSync47(dirname75(dbPath), { recursive: true, mode: 448 });
     }
     this.db = this.readonly ? new Database22(dbPath, { readonly: true }) : new Database22(dbPath, { create: true });
     if (!inMemory && !this.readonly)
-      chmodSync27(dbPath, 384);
+      chmodSync28(dbPath, 384);
     const busyTimeoutMs = options.busyTimeoutMs ?? (this.readonly ? DEFAULT_READ_ONLY_SQLITE_BUSY_TIMEOUT_MS : DEFAULT_SQLITE_BUSY_TIMEOUT_MS);
     if (this.readonly) {
       this.db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs};`);
@@ -127506,7 +130310,7 @@ class LocalFileExtractionJobStore {
     const leaseSeconds = clampInteger(request.leaseSeconds ?? DEFAULT_EXTRACTION_LEASE_SECONDS, 1, MAX_EXTRACTION_LEASE_SECONDS);
     const now = nowIso4();
     const leaseExpiresAt = new Date(Date.now() + leaseSeconds * 1000).toISOString();
-    const leaseToken = randomUUID28();
+    const leaseToken = randomUUID29();
     const workerHash = hashString6(workerId);
     const claimed = [];
     this.db.transaction(() => {
@@ -128585,7 +131389,7 @@ function fileExtractionJobMigrations() {
       db.query(`
         INSERT OR IGNORE INTO extraction_claim_grants (grant_id, authority_id, last_ordinal)
         VALUES (1, ?, 0)
-      `).run(randomUUID28());
+      `).run(randomUUID29());
     }
   }, {
     version: 4,
@@ -128849,7 +131653,7 @@ function clampInteger(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
 function makeJobId() {
-  return `fx_${randomUUID28()}`;
+  return `fx_${randomUUID29()}`;
 }
 function hashString6(value) {
   return createHash74("sha256").update(value).digest("hex");
@@ -131365,7 +134169,7 @@ var init_image_prepare = __esm(() => {
 // src/workers/file-extraction/extractors/text.ts
 import { mkdtemp as mkdtemp3, rm as rm4, writeFile as writeFile3 } from "node:fs/promises";
 import { tmpdir as tmpdir6 } from "node:os";
-import { dirname as dirname75, join as join94 } from "node:path";
+import { dirname as dirname76, join as join94 } from "node:path";
 function createTextExtractor(options = {}) {
   const kind = options.kind ?? TEXT_EXTRACTOR_KIND;
   const version = options.version ?? TEXT_EXTRACTOR_VERSION;
@@ -131553,7 +134357,7 @@ function createTextExtractor(options = {}) {
 }
 function releaseStaged(media) {
   if (media.stagingHolder)
-    releaseMediaCacheFile(media.path, media.sha256, media.stagingHolder, dirname75(media.path));
+    releaseMediaCacheFile(media.path, media.sha256, media.stagingHolder, dirname76(media.path));
 }
 function preparedImageOutput(media, ocr, maxBoundedTextChars, hasOcr) {
   const pending = !ocr && hasOcr ? [OCR_UNAVAILABLE_IMAGE_WARNING] : imageOcrFailed(ocr) ? [OCR_FAILED_IMAGE_WARNING] : [];
@@ -132093,15 +134897,15 @@ var init_text = __esm(() => {
 
 // src/workers/file-extraction/extractors/apple-vision-ocr.ts
 import { existsSync as existsSync69 } from "node:fs";
-import { dirname as dirname76, join as join95 } from "node:path";
+import { dirname as dirname77, join as join95 } from "node:path";
 import { fileURLToPath as fileURLToPath10 } from "node:url";
 function resolveAppleVisionOcrScript(moduleUrl = import.meta.url, exists = existsSync69) {
-  let directory = dirname76(fileURLToPath10(moduleUrl));
+  let directory = dirname77(fileURLToPath10(moduleUrl));
   for (let depth = 0;depth < 6; depth += 1) {
     const candidate = join95(directory, APPLE_VISION_OCR_SCRIPT);
     if (exists(candidate))
       return candidate;
-    const parent = dirname76(directory);
+    const parent = dirname77(directory);
     if (parent === directory)
       break;
     directory = parent;
@@ -133611,10 +136415,12 @@ var init_remote_vlm = __esm(() => {
 // src/workers/file-extraction/extractors/model-stream.ts
 function idleClock(windowMs) {
   const controller = new AbortController;
+  const upstream = currentExtractionAbortSignal();
+  const signal = upstream ? AbortSignal.any([upstream, controller.signal]) : controller.signal;
   let timer;
   const usable = Number.isFinite(windowMs) && windowMs > 0;
   const arm = () => {
-    if (!usable || controller.signal.aborted)
+    if (!usable || signal.aborted)
       return;
     if (timer !== undefined)
       clearTimeout(timer);
@@ -133627,7 +136433,7 @@ function idleClock(windowMs) {
   };
   arm();
   return {
-    signal: controller.signal,
+    signal,
     touch: arm,
     clear: () => {
       if (timer !== undefined)
@@ -133703,6 +136509,7 @@ async function readChatCompletion(response, clock) {
 var init_model_stream2 = __esm(() => {
   init_memory_counters();
   init_http_timeout();
+  init_command_runner();
 });
 
 // src/workers/source-index/built-in-reasoning/transcription-model.ts
@@ -135096,254 +137903,9 @@ var init_registry = __esm(() => {
   ];
 });
 
-// src/workers/file-extraction/store-sink.ts
-function racedRestoreSkipReason(error) {
-  const message = error instanceof Error ? error.message : "";
-  if (message.includes("targeted store item is missing")) {
-    return EXTRACTION_SINK_SKIPPED_ITEM_MISSING;
-  }
-  if (message.includes("matches multiple store rows")) {
-    return EXTRACTION_SINK_SKIPPED_IDENTITY_AMBIGUOUS;
-  }
-  return;
-}
-function identityForRef(store, ref, sourceVersion) {
-  return {
-    family: store.family,
-    provider: ref.provider,
-    accountScope: ref.accountScope,
-    providerItemId: ref.providerItemId,
-    localItemId: ref.localItemId,
-    ...sourceVersion ? { sourceVersion } : {}
-  };
-}
-function buildExtractionRepresentationExpectation(identity, text, mediaSha256) {
-  return {
-    sourceItem: identity,
-    ...identity.sourceVersion ? { sourceVersion: identity.sourceVersion } : {},
-    contentHash: hashString2(text),
-    chunkContentHashes: chunkText(text, DEFAULT_MAX_CHUNK_CHARS).map(hashString2),
-    ...mediaSha256 ? { mediaSha256 } : {}
-  };
-}
-function metadataForItem(stored, ref, requested) {
-  const name = ref.name ?? stored.name;
-  const merged = {
-    ...name ? { name } : {},
-    ...stored.authoredAt ? { authoredAt: stored.authoredAt } : {},
-    ...stored.updatedAt ? { updatedAt: stored.updatedAt } : {},
-    ...requested ?? {}
-  };
-  for (const key of SOURCE_EXCLUSION_PATH_METADATA_KEYS)
-    delete merged[key];
-  if (stored.locatorUri) {
-    merged["locatorUri"] = stored.locatorUri;
-    merged["pathDisplay"] = stored.locatorUri;
-  }
-  delete merged["contentHash"];
-  return merged;
-}
-function createConnectorStoreExtractionSink(options) {
-  const store = options.store;
-  return {
-    async accept(request) {
-      const plan = planExtractionSinkWrite(store, request);
-      if ("skippedReason" in plan) {
-        return {
-          accepted: false,
-          chunksIndexed: 0,
-          chunksAwaitingEmbedding: 0,
-          skippedReason: plan.skippedReason
-        };
-      }
-      const judgment = plan.media ? (options.mediaJudgment ?? ((sha) => store.mediaJudgment(sha)))(plan.media.sha256) : undefined;
-      if (plan.media && judgment)
-        plan.media = { ...plan.media, judgment };
-      if ((plan.media || isImageMediaType(plan.item.mimeType)) && store.trustDomain !== "secure_local" && !(options.mediaJudgment && plan.media && judgment?.verdict === "ordinary")) {
-        return {
-          accepted: false,
-          chunksIndexed: 0,
-          chunksAwaitingEmbedding: 0,
-          skippedReason: EXTRACTION_SINK_SKIPPED_IMAGE_PRIVATE_ONLY
-        };
-      }
-      const sensitivity = options.classify(plan.item);
-      if (sensitivity.trustDomain !== store.trustDomain || sensitivity.trustTier === "S5") {
-        return {
-          accepted: false,
-          chunksIndexed: 0,
-          chunksAwaitingEmbedding: 0,
-          skippedReason: EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE
-        };
-      }
-      if (request.claim && options.claims && !options.claims.holdsExtractionClaim(request.claim)) {
-        return {
-          accepted: false,
-          chunksIndexed: 0,
-          chunksAwaitingEmbedding: 0,
-          skippedReason: EXTRACTION_SINK_SKIPPED_CLAIM_SUPERSEDED
-        };
-      }
-      const writeClaim = extractionWriteClaim(request);
-      if (options.secretsFloor !== false && plan.item.content.kind === "text" && secretsFloorHolds(store, plan.item, plan.item.content.text)) {
-        const settled = settleUntrackedSecretsCopy({
-          store,
-          identity: plan.item.identity,
-          connectorId: options.syncConnectorId,
-          metadata: plan.item.metadata,
-          ...options.skipOwner ? { skipOwner: options.skipOwner } : {},
-          ...writeClaim ? { writeClaim } : {}
-        });
-        if (settled === "tombstoned" && options.recordContentTier !== false) {
-          store.recordExtractedContentTier(plan.item, plan.item.content.text, options.tierClassification);
-        }
-        const secretsSkip = {
-          tombstoned: EXTRACTION_SINK_SKIPPED_SECRETS,
-          missing: EXTRACTION_SINK_SKIPPED_ITEM_MISSING,
-          ambiguous: EXTRACTION_SINK_SKIPPED_IDENTITY_AMBIGUOUS,
-          excluded: EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE,
-          metadata_only: EXTRACTION_SINK_SKIPPED_METADATA_ONLY,
-          stale_version: EXTRACTION_SINK_SKIPPED_SOURCE_VERSION_STALE,
-          owned_elsewhere: EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE,
-          stale_claim: EXTRACTION_SINK_SKIPPED_CLAIM_SUPERSEDED
-        };
-        return {
-          accepted: false,
-          chunksIndexed: 0,
-          chunksAwaitingEmbedding: 0,
-          skippedReason: secretsSkip[settled]
-        };
-      }
-      if (options.recordContentTier !== false && store.readOnDemand?.(plan.item.identity.localItemId, plan.item.identity.sourceVersion ?? "") && !store.recordExtractedContentTier(plan.item, request.text, options.tierClassification)) {
-        return { accepted: false, chunksIndexed: 0, chunksAwaitingEmbedding: 0, skippedReason: EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE };
-      }
-      let summary;
-      try {
-        summary = store.restoreItemRepresentations({
-          items: [{ item: plan.item, expectation: plan.expectation, ...plan.media ? { media: plan.media } : {} }],
-          syncConnectorId: options.syncConnectorId,
-          ownerConnectorId: options.ownerConnectorId,
-          ownershipKind: options.ownershipKind,
-          classify: options.classify,
-          ...options.skipOwner ? { skipOwner: options.skipOwner } : {},
-          ...writeClaim ? { writeClaim } : {}
-        });
-      } catch (error) {
-        const skippedReason = racedRestoreSkipReason(error);
-        if (skippedReason === undefined)
-          throw error;
-        return { accepted: false, chunksIndexed: 0, chunksAwaitingEmbedding: 0, skippedReason };
-      }
-      if (summary.counts.itemsSkippedTombstoned === 1) {
-        return {
-          accepted: false,
-          chunksIndexed: 0,
-          chunksAwaitingEmbedding: 0,
-          skippedReason: EXTRACTION_SINK_SKIPPED_ITEM_MISSING
-        };
-      }
-      if (summary.counts.itemsSkippedStaleClaim === 1) {
-        return {
-          accepted: false,
-          chunksIndexed: 0,
-          chunksAwaitingEmbedding: 0,
-          skippedReason: EXTRACTION_SINK_SKIPPED_CLAIM_SUPERSEDED
-        };
-      }
-      if (summary.counts.itemsSkippedByOwner === 1) {
-        return {
-          accepted: false,
-          chunksIndexed: 0,
-          chunksAwaitingEmbedding: 0,
-          skippedReason: EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE
-        };
-      }
-      if (summary.counts.itemsMetadataOnly === 1) {
-        return {
-          accepted: false,
-          chunksIndexed: 0,
-          chunksAwaitingEmbedding: 0,
-          skippedReason: EXTRACTION_SINK_SKIPPED_METADATA_ONLY
-        };
-      }
-      const coverage = store.itemRepresentationCoverage(plan.expectation);
-      if (options.recordContentTier !== false && plan.item.content.kind === "text") {
-        store.recordExtractedContentTier(plan.item, plan.item.content.text, options.tierClassification);
-      }
-      return {
-        accepted: true,
-        chunksIndexed: coverage.chunksIndexed,
-        chunksAwaitingEmbedding: summary.counts.chunksAwaitingEmbedding
-      };
-    }
-  };
-}
-function extractionWriteClaim(request) {
-  return request.claim ? {
-    scope: request.extractorKind,
-    authority: request.claim.grantAuthority,
-    ordinal: request.claim.grantOrdinal,
-    holder: request.claim.jobId,
-    generation: hashString2(request.claim.leaseToken)
-  } : undefined;
-}
-function secretsFloorHolds(store, item, text) {
-  let override;
-  try {
-    override = store.tierLedger()?.getOverride(item.identity);
-  } catch {
-    override = undefined;
-  }
-  if (override?.kind === "tier")
-    return override.tier === "secrets";
-  if (override?.kind === "not_secret")
-    return false;
-  return detectSecretFindingKinds(text).length > 0;
-}
-function planExtractionSinkWrite(store, request) {
-  const text = request.text;
-  if (text.trim() === "")
-    return { skippedReason: EXTRACTION_SINK_SKIPPED_EMPTY_TEXT };
-  const ref = request.ref;
-  const identityResolver = store.activeIdentityForLocalItemId;
-  const storedIdentity = identityResolver?.call(store, {
-    provider: ref.provider,
-    accountScope: ref.accountScope,
-    providerItemId: ref.providerItemId,
-    localItemId: ref.localItemId
-  });
-  const probe = storedIdentity ?? identityForRef(store, ref, ref.sourceVersion);
-  const stored = store.itemMetadataSnapshot(probe);
-  if (!stored)
-    return { skippedReason: EXTRACTION_SINK_SKIPPED_ITEM_MISSING };
-  const identity = {
-    ...probe,
-    ...ref.sourceVersion ?? stored.sourceVersion ? { sourceVersion: ref.sourceVersion ?? stored.sourceVersion } : {}
-  };
-  return {
-    item: {
-      identity,
-      mimeType: ref.mimeType ?? stored.mimeType ?? "application/octet-stream",
-      content: { kind: "text", text },
-      metadata: metadataForItem(stored, ref, request.metadata),
-      fetchedAt: request.fetchedAt
-    },
-    expectation: buildExtractionRepresentationExpectation(identity, text, request.media?.sha256),
-    ...request.media ? { media: { path: request.media.path, sha256: request.media.sha256 } } : {}
-  };
-}
-var EXTRACTION_SINK_SKIPPED_ITEM_MISSING = "store_item_missing", EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE = "store_item_not_eligible", EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE = "store_item_owned_elsewhere", EXTRACTION_SINK_SKIPPED_EMPTY_TEXT = "extracted_text_empty", EXTRACTION_SINK_SKIPPED_IDENTITY_AMBIGUOUS = "store_identity_ambiguous", EXTRACTION_SINK_SKIPPED_METADATA_ONLY = "store_item_metadata_only", EXTRACTION_SINK_SKIPPED_CLAIM_SUPERSEDED = "extraction_claim_superseded", EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED = "store_item_tier_move_queued", EXTRACTION_SINK_SKIPPED_SECRETS = "store_item_secrets", EXTRACTION_SINK_SKIPPED_SOURCE_VERSION_STALE = "store_item_source_version_stale", EXTRACTION_SINK_SKIPPED_IMAGE_PRIVATE_ONLY = "store_image_content_private_only";
-var init_store_sink = __esm(() => {
-  init_engine();
-  init_tier_classifier();
-  init_secrets_disposition();
-  init_source_ingestion_exclusions();
-  init_connector_store();
-});
-
 // src/workers/file-extraction/runner.ts
 import { createHash as createHash76 } from "node:crypto";
-import { dirname as dirname77 } from "node:path";
+import { dirname as dirname78 } from "node:path";
 function evaluateExtractionEgress(input) {
   if (input.egress === "local")
     return { allowed: true };
@@ -135776,12 +138338,21 @@ async function settleOneJob(input) {
   let outcome;
   const renewal = setInterval(() => renewJobLease(input), input.leaseRenewMs ?? EXTRACTION_LEASE_RENEW_MS);
   renewal.unref?.();
+  let grant;
   try {
-    outcome = await withMemoryPayload("extract", () => settleOneJobHeld(input, staged));
+    const onDemand = input.jobs.onDemandJob(input.job.jobId);
+    const hold = onDemand ? input.corpus.holdOnDemandRead : undefined;
+    const controller = hold ? new AbortController : undefined;
+    grant = controller ? hold?.(input.job.ref, controller) : undefined;
+    outcome = hold && !grant ? supersededExtractionAuthorization() : await withMemoryPayload("extract", () => settleOneJobHeld(input, staged, {
+      onDemand,
+      ...controller && grant ? { signal: controller.signal, current: grant.check } : {}
+    }));
   } catch (error) {
     console.error(`[olympus:file-extraction] job_internal_error job_id=${input.job.jobId} extractor_kind=${input.job.extractorKind} ` + `reason=${boundedLogErrorMessage(error)}`);
     outcome = retryable(EXTRACTION_ERROR_KIND_INTERNAL_ERROR, error);
   } finally {
+    grant?.release();
     clearInterval(renewal);
   }
   try {
@@ -135792,7 +138363,7 @@ async function settleOneJob(input) {
   try {
     const media = staged.media;
     if (media?.stagingHolder)
-      releaseMediaCacheFile(media.path, media.sha256, media.stagingHolder, dirname77(media.path));
+      releaseMediaCacheFile(media.path, media.sha256, media.stagingHolder, dirname78(media.path));
   } catch (error) {
     console.error(`[olympus:file-extraction] media_release_failed job_id=${input.job.jobId} reason=${boundedLogErrorMessage(error)}`);
   }
@@ -135807,9 +138378,11 @@ function renewJobLease(input) {
     console.error(`[olympus:file-extraction] lease_renew_failed job_id=${input.job.jobId} reason=${boundedLogErrorMessage(error)}`);
   }
 }
-async function settleOneJobHeld(input, staged) {
+function supersededExtractionAuthorization() {
+  return { status: "blocked_policy", errorKind: EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED };
+}
+async function settleOneJobHeld(input, staged, { onDemand, signal, current }) {
   const { job, extractor, corpus } = input;
-  const onDemand = input.jobs.onDemandJob(job.jobId);
   const timing = (step, started) => {
     if (onDemand)
       console.info(`[olympus:on-demand] step=${step} count=1 ms=${Math.max(0, Date.now() - started)}`);
@@ -135817,8 +138390,8 @@ async function settleOneJobHeld(input, staged) {
   if (!extractor) {
     return { status: "failed_terminal", errorKind: EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR };
   }
-  if (!await extractionAuthorizationCurrent(corpus, job.ref)) {
-    return { status: "blocked_policy", errorKind: EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED };
+  if (!await extractionAuthorizationCurrent(corpus, job.ref) || current?.() === false) {
+    return supersededExtractionAuthorization();
   }
   const checkEgress = async () => {
     const trustTier = extractor.egress === "approved_remote" ? await readTrustTier(corpus, job.ref) : undefined;
@@ -135856,12 +138429,15 @@ async function settleOneJobHeld(input, staged) {
     } catch (error) {
       return retryable(EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED, error);
     }
+    if (current?.() === false)
+      return supersededExtractionAuthorization();
     const sourceMax = corpus.sizeLimit && (!corpus.sizeLimit.bytesOnly || extractor.input.kind !== "file") ? sourceSizeBytes(corpus.sizeLimit, job.ref, input.now()) : undefined;
     const maxBytes = boundedByReader(sourceMax === undefined ? job.maxBytesPerFile : Math.min(sourceMax, job.maxBytesPerFile ?? sourceMax), extractor);
     const fetchStarted = Date.now();
     try {
       if (extractor.input.kind === "file" && source.fetchFile && input.spoolDir !== undefined) {
         fetchedFile = await source.fetchFile(job.ref, {
+          ...signal ? { signal } : {},
           ...maxBytes !== undefined ? { maxBytes } : {},
           spoolDir: input.spoolDir,
           ...input.spoolAnchor !== undefined ? { spoolAnchor: input.spoolAnchor } : {}
@@ -135871,7 +138447,7 @@ async function settleOneJobHeld(input, staged) {
         if (bytes !== undefined && Number.isSafeInteger(bytes) && bytes > 0)
           addMemoryPayloadBytes(bytes);
       } else {
-        fetched = await source.fetch(job.ref, { ...maxBytes !== undefined ? { maxBytes } : {} });
+        fetched = await source.fetch(job.ref, { ...maxBytes !== undefined ? { maxBytes } : {}, ...signal ? { signal } : {} });
         addMemoryPayloadBytes(fetched.bytes.byteLength);
         if (maxBytes !== undefined && fetched.bytes.byteLength > maxBytes) {
           input.jobs.recordSizeRefusal(job.jobId, job.leaseToken, { sizeBytes: fetched.bytes.byteLength, maxBytes });
@@ -135879,6 +138455,8 @@ async function settleOneJobHeld(input, staged) {
         }
       }
     } catch (error) {
+      if (current?.() === false)
+        return supersededExtractionAuthorization();
       if (isFileExtractionSourceError(error)) {
         if (error.errorKind === "source_too_large")
           input.jobs.recordSizeRefusal(job.jobId, job.leaseToken, {
@@ -135896,6 +138474,8 @@ async function settleOneJobHeld(input, staged) {
     } finally {
       timing("fetch", fetchStarted);
     }
+    if (current?.() === false)
+      return supersededExtractionAuthorization();
     if (onDemand) {
       const bytes = fetched?.bytes.byteLength ?? fetchedFile?.sizeBytes;
       if (bytes !== undefined)
@@ -135917,14 +138497,17 @@ async function settleOneJobHeld(input, staged) {
   const resolvedSizeBytes = fetched?.sizeBytes ?? fetchedFile?.sizeBytes ?? job.ref.sizeBytes;
   const extractorInput = {
     ref: job.ref,
+    ...signal ? { signal } : {},
     ...extractor.egress === "approved_remote" ? {
       assertRemoteEgressAllowed: async () => {
-        if (!await extractionAuthorizationCurrent(corpus, job.ref)) {
+        if (!await extractionAuthorizationCurrent(corpus, job.ref) || current?.() === false) {
           throw new ExtractionEgressRefusedError(EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED);
         }
-        const current = await checkEgress();
-        if (!current.allowed)
-          throw new ExtractionEgressRefusedError(current.errorKind);
+        const egressCurrent = await checkEgress();
+        if (current?.() === false)
+          throw new ExtractionEgressRefusedError(EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED);
+        if (!egressCurrent.allowed)
+          throw new ExtractionEgressRefusedError(egressCurrent.errorKind);
       }
     } : {},
     job: {
@@ -135942,15 +138525,18 @@ async function settleOneJobHeld(input, staged) {
     ...resolvedSizeBytes !== undefined ? { sizeBytes: resolvedSizeBytes } : {}
   };
   let output;
-  if (!await extractionAuthorizationCurrent(corpus, job.ref)) {
-    return { status: "blocked_policy", errorKind: EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED };
+  if (!await extractionAuthorizationCurrent(corpus, job.ref) || current?.() === false) {
+    return supersededExtractionAuthorization();
   }
   const extractStarted = Date.now();
   try {
-    output = await extractor.extract(extractorInput);
+    const extract = () => extractor.extract(extractorInput);
+    output = await (signal ? runWithExtractionAbortSignal(signal, extract) : extract());
     if (output.status === "indexed" && output.media)
       staged.media = output.media;
   } catch (error) {
+    if (current?.() === false)
+      return supersededExtractionAuthorization();
     if (error instanceof ExtractionEgressRefusedError) {
       return egressRefusalOutcome(error.errorKind);
     }
@@ -135960,6 +138546,8 @@ async function settleOneJobHeld(input, staged) {
   } finally {
     timing("extract", extractStarted);
   }
+  if (current?.() === false)
+    return supersededExtractionAuthorization();
   if (output.status !== "indexed") {
     if (output.status === "empty_output") {
       return {
@@ -135995,12 +138583,13 @@ async function settleOneJobHeld(input, staged) {
   }
   await scanSecretsAhead(output.text);
   let accepted;
-  if (!await extractionAuthorizationCurrent(corpus, job.ref)) {
-    return { status: "blocked_policy", errorKind: EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED };
+  if (!await extractionAuthorizationCurrent(corpus, job.ref) || current?.() === false) {
+    return supersededExtractionAuthorization();
   }
   try {
     accepted = await corpus.sink.accept({
       ref: job.ref,
+      ...current ? { onDemandGrantCurrent: current } : {},
       text: output.text,
       extractorKind: job.extractorKind,
       extractorVersion: job.extractorVersion,
@@ -136015,11 +138604,15 @@ async function settleOneJobHeld(input, staged) {
       ...output.media ? { media: output.media } : {}
     });
   } catch (error) {
+    if (current?.() === false)
+      return supersededExtractionAuthorization();
     return {
       ...retryable(EXTRACTION_ERROR_KIND_SINK_FAILED, error),
       ...output.egressDestination ? { egressDestination: output.egressDestination } : {}
     };
   }
+  if (current?.() === false)
+    return supersededExtractionAuthorization();
   if (!accepted.accepted) {
     const reason = accepted.skippedReason;
     if (reason === EXTRACTION_SINK_SKIPPED_CLAIM_SUPERSEDED) {
@@ -136418,323 +139011,6 @@ var init_runner = __esm(() => {
   PDF_MIME_TYPES = Object.freeze(["application/pdf"]);
 });
 
-// src/workers/file-extraction/tiered-store-sink.ts
-function createTieredStoreExtractionSink(options) {
-  const set = options.set;
-  const classificationNow = () => options.tierClassification ?? set.classification();
-  const sinkFor = (store, recordContentTier, tierClassification, contentRulesRan) => createConnectorStoreExtractionSink({
-    store,
-    classify: (item) => buildSourceSensitivity({
-      trustTier: store.activeLocalItemRow(item.identity.localItemId)?.trustTier ?? set.restingTierFor(store.trustDomain),
-      trustDomain: store.trustDomain
-    }),
-    syncConnectorId: options.syncConnectorId,
-    ownerConnectorId: options.ownerConnectorId,
-    ownershipKind: options.ownershipKind,
-    ...options.claims ? { claims: options.claims } : {},
-    ...tierClassification ? { tierClassification } : {},
-    ...recordContentTier ? {} : { recordContentTier: false },
-    ...contentRulesRan ? { secretsFloor: false } : {},
-    ...contentRulesRan ? { mediaJudgment: (sha256) => setMediaJudgment(set, sha256) } : {}
-  });
-  return {
-    async accept(request) {
-      const ref = request.ref;
-      const stored = TIER_DOMAIN_ORDER.map((domain) => set.store(domain)?.activeLocalItemRow(ref.localItemId)?.identity).find((candidate) => candidate !== undefined && candidate.provider === ref.provider && candidate.accountScope === ref.accountScope && candidate.providerItemId === ref.providerItemId);
-      const identity = stored ?? { provider: ref.provider, accountScope: ref.accountScope, providerItemId: ref.providerItemId };
-      const ledger = set.ledger;
-      if (!ledger.isRouted(identity)) {
-        const legacy = legacyStoreFor(set, ref.localItemId, options.home);
-        if (!legacy)
-          return skipped(EXTRACTION_SINK_SKIPPED_ITEM_MISSING);
-        const legacyPlan = planExtractionSinkWrite(legacy, request);
-        const legacyScope = legacy.activeLocalItemRow(ref.localItemId)?.sourceScope;
-        const result = await sinkFor(legacy, true, classificationNow(), false).accept(request);
-        if (result.skippedReason === EXTRACTION_SINK_SKIPPED_SECRETS && !("skippedReason" in legacyPlan)) {
-          const writeClaim = extractionWriteClaim(request);
-          for (const domain of TIER_DOMAIN_ORDER) {
-            const other = set.legSpec(domain)?.legacy === true ? set.store(domain) : undefined;
-            if (!other || other === legacy)
-              continue;
-            settleUntrackedSecretsCopy({
-              store: other,
-              identity: legacyPlan.item.identity,
-              connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID,
-              metadata: legacyPlan.item.metadata,
-              ...writeClaim ? { writeClaim } : {}
-            });
-          }
-          const names = ledger.getCurrent(identity)?.metadataTier;
-          recordSecret(set, legacyPlan.item, request.text, {
-            namesReleasable: names === "public" || names === "private",
-            sourceScope: legacyScope
-          });
-        }
-        return result;
-      }
-      const read = ledger.classificationRead(identity);
-      const record = ledger.getCurrent(identity);
-      if (!record || record.state === "moving")
-        return skipped(EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED);
-      const current = ledger.copies(identity).filter((copy) => copy.state === "current");
-      const anchor = current.find((copy) => copy.layers !== "content");
-      const anchorDomain = anchor ? set.domainForCorpus(anchor.corpusId) : undefined;
-      const anchorStore = anchorDomain ? set.store(anchorDomain) : undefined;
-      if (!anchor || !anchorStore)
-        return skipped(EXTRACTION_SINK_SKIPPED_ITEM_MISSING);
-      const plan = planExtractionSinkWrite(anchorStore, request);
-      if ("skippedReason" in plan)
-        return skipped(plan.skippedReason);
-      const tierClassification = classificationNow();
-      const override = read.override;
-      const itemTitle = stringMetadata2(plan.item, ["title", "name", "subject"]);
-      const itemPath = stringMetadata2(plan.item, ["locatorUri", "pathDisplay"]);
-      const imageJudgment = plan.media ? setMediaJudgment(set, plan.media.sha256) : undefined;
-      const settledUnread = !record.contentRead && record.reasons.some(isFailSafeMissingContentQuestion) || record.reasons.some((reason) => reason === CONTENT_NAMES_ONLY_REASON || reason === CONTENT_NAMES_ONLY_LIFTED_REASON);
-      const holdUntilJudged = tierClassification?.holdContentUntilJudged === true || set.holdsContentUntilJudged() || heldUntilJudged(record.reasons) || settledUnread || anchorStore.parentLocalItemIdOf(identity) !== undefined;
-      const parentContext = tierClassification?.sniffer ? parentNamesContext(set, identity) : undefined;
-      const judgeStarted = Date.now();
-      const content = classifyContentTier({
-        text: request.text,
-        hasNonTextContent: true,
-        ...read.secret ? { heldSecret: true } : {},
-        metadataTier: record.metadataTier,
-        metadataForced: record.metadataForced,
-        metadataFlagged: record.metadataFlagged,
-        metadataOwnerDecided: namesDecidedByOwner(record.reasons),
-        ...itemTitle ? { title: itemTitle } : {},
-        ...itemPath ? { path: itemPath } : {},
-        mimeType: plan.item.mimeType,
-        ...imageJudgment ? { imageJudgment: imageJudgmentSignal(imageJudgment) } : {},
-        ...holdUntilJudged ? { holdUntilJudged: true } : {},
-        ...parentContext ? { parentContext } : {},
-        subject: identity
-      }, {
-        ...tierClassification?.sniffer ? { sniffer: arrivalOrderedSniffer(secretFencedSniffer(tierClassification.sniffer, ledger, identity, read), ledger.newArrival(identity, { consume: true }) || anchorStore.readOnDemand(ref.localItemId, ref.sourceVersion ?? "")) } : {},
-        ...override ? { override } : {},
-        ...tierClassification?.retirePublic ? { retirePublic: true } : {}
-      });
-      if (!content.contentPending && anchorStore.readOnDemand(ref.localItemId, ref.sourceVersion ?? "")) {
-        console.info(`[olympus:on-demand] step=judge count=1 ms=${Math.max(0, Date.now() - judgeStarted)}`);
-      }
-      const held = tierClassification?.unavailableReason !== undefined && content.contentTier !== "secrets";
-      const contentPending = content.contentPending || held;
-      const decision = {
-        metadataTier: record.metadataTier,
-        contentTier: maxTier(content.contentTier, record.metadataTier),
-        decidedBy: content.decidedBy,
-        reasons: [
-          ...record.reasons.filter((reason) => !reason.startsWith("content:")),
-          ...content.reasons,
-          ...held ? [`content:${tierClassification.unavailableReason}`] : []
-        ],
-        state: record.metadataPending || contentPending ? "pending" : "current",
-        contentRead: true,
-        metadataPending: record.metadataPending,
-        contentPending,
-        metadataForced: record.metadataForced,
-        metadataFlagged: record.metadataFlagged,
-        engineVersion: content.engineVersion,
-        mapRevision: content.mapRevision,
-        snifferId: content.snifferId
-      };
-      if (decision.contentTier === "secrets") {
-        recordSecret(set, plan.item, request.text, {
-          namesReleasable: record.metadataTier === "public" || record.metadataTier === "private",
-          sourceScope: anchorStore.activeLocalItemRow(ref.localItemId)?.sourceScope
-        });
-        const recorded = ledger.recordRoutedPlacement(identity, decision, { copies: [], embedHold: false });
-        settleSecretsCopies({
-          ledger,
-          identity: plan.item.identity,
-          copies: recorded.previousCopies,
-          storeFor: (corpusId) => {
-            const domain = set.domainForCorpus(corpusId);
-            return domain ? set.store(domain) : undefined;
-          },
-          connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID
-        });
-        return skipped(EXTRACTION_SINK_SKIPPED_SECRETS);
-      }
-      let placement = set.placementFor(decision, record.contentRead ? {} : { contentArrivesLater: true });
-      const fromContent = copyServingLayer(current, "content");
-      const toContent = copyServingLayer(placement.copies, "content");
-      if (record.contentRead && decision.contentPending && fromContent && toContent && trustDomainRank(toContent.trustDomain) < trustDomainRank(fromContent.trustDomain) && !placementIsRaise(current, placement.copies)) {
-        placement = { copies: current, embedHold: true };
-      }
-      const contentCopy = placement.copies.find((copy) => copy.layers !== "metadata");
-      const contentStore = contentCopy ? set.store(contentCopy.trustDomain, { create: true }) : undefined;
-      if (!contentCopy || !contentStore)
-        return skipped(EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE);
-      if (record.contentRead) {
-        if (!samePlacement(current, placement)) {
-          if (!placementIsRaise(current, placement.copies)) {
-            const resting = current.find((copy) => copy.layers !== "metadata");
-            const restingDomain = resting ? set.domainForCorpus(resting.corpusId) : undefined;
-            const restingStore = restingDomain ? set.store(restingDomain) : undefined;
-            if (!restingStore)
-              return skipped(EXTRACTION_SINK_SKIPPED_ITEM_MISSING);
-            const replaced = await sinkFor(restingStore, false, tierClassification, true).accept(request);
-            if (!replaced.accepted)
-              return replaced;
-          }
-          ledger.recordRoutedPlacement(identity, decision, placement);
-          return skipped(EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED);
-        }
-        const result = await sinkFor(contentStore, false, tierClassification, true).accept(request);
-        if (result.accepted)
-          ledger.recordRoutedPlacement(identity, decision, placement);
-        return result;
-      }
-      const namesStay = placement.copies.some((copy) => copy.corpusId === anchor.corpusId && copy.layers !== "content");
-      if (!namesStay) {
-        ledger.recordRoutedPlacement(identity, decision, placement);
-        return skipped(EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED);
-      }
-      if (anchorStore.readOnDemand(ref.localItemId, ref.sourceVersion ?? "")) {
-        contentStore.grantOnDemandRead(ref.localItemId, ref.sourceVersion);
-      }
-      if (contentStore !== anchorStore) {
-        contentStore.bindTierSet(ledger);
-        ledger.stageLandingCopy(identity, contentCopy, {
-          expectedGeneration: record.generation,
-          embedHold: placement.embedHold
-        });
-      }
-      let landingGeneration = record.generation;
-      if (contentStore === anchorStore && settledUnread && record.contentTier === "secure" && contentDomainOf(record) !== contentStore.trustDomain) {
-        const unread = { ...decision, contentRead: false };
-        landingGeneration = ledger.recordRoutedPlacement(identity, unread, set.placementFor(unread, { contentArrivesLater: true }), { guard: { generation: record.generation, override }, stagedLandingAllowed: true }).record.generation;
-      }
-      const anchorScope = anchorStore.activeLocalItemRow(ref.localItemId)?.sourceScope;
-      if (contentStore !== anchorStore && !contentStore.activeLocalItemRow(ref.localItemId)) {
-        const parent = parentOf2(set, anchorStore, identity);
-        await contentStore.syncFromConnector(singleItemConnector(contentStore, {
-          ...plan.item,
-          ...parent ? { identity: { ...plan.item.identity, parent } } : {},
-          content: { kind: "metadata_only" }
-        }), {
-          fetchContent: false,
-          ...anchorScope ? { sourceScopeObservation: () => anchorScope } : {},
-          tierRouting: {
-            route: () => ({
-              kind: "store",
-              layer: "content",
-              sensitivity: buildSourceSensitivity({
-                trustTier: set.restingTierFor(contentCopy.trustDomain),
-                trustDomain: contentCopy.trustDomain
-              })
-            })
-          }
-        });
-      }
-      const result = await sinkFor(contentStore, false, tierClassification, true).accept(request);
-      if (!result.accepted)
-        return result;
-      ledger.landExtractedContent(identity, decision, placement, { expectedGeneration: landingGeneration });
-      return result;
-    }
-  };
-}
-function setMediaJudgment(set, mediaSha256) {
-  const rank = { sensitive: 2, unjudged: 1, ordinary: 0 };
-  let chosen;
-  for (const domain of [...TIER_DOMAIN_ORDER].reverse()) {
-    const judgment = set.store(domain)?.mediaJudgment(mediaSha256);
-    if (judgment && (!chosen || rank[judgment.verdict] > rank[chosen.verdict]))
-      chosen = judgment;
-  }
-  return chosen;
-}
-function skipped(skippedReason) {
-  return { accepted: false, chunksIndexed: 0, chunksAwaitingEmbedding: 0, skippedReason };
-}
-function legacyStoreFor(set, localItemId, home) {
-  const homeStore = home !== undefined && set.legSpec(home)?.legacy === true ? set.store(home) : undefined;
-  if (homeStore?.activeLocalItemRow(localItemId))
-    return homeStore;
-  const legacy = TIER_DOMAIN_ORDER.filter((domain) => set.legSpec(domain)?.legacy === true).flatMap((domain) => {
-    const store = set.store(domain);
-    return store ? [store] : [];
-  });
-  return legacy.find((store) => store.activeLocalItemRow(localItemId) !== undefined) ?? legacy[0];
-}
-function contentDomainOf(record) {
-  return record.contentTier === "secrets" ? undefined : TIER_KEY_TRUST_DOMAIN[record.contentTier];
-}
-function samePlacement(current, placement) {
-  if (current.length !== placement.copies.length)
-    return false;
-  return placement.copies.every((planned) => current.some((copy) => copy.corpusId === planned.corpusId && copy.layers === planned.layers));
-}
-function recordSecret(set, item, text, options) {
-  const index = set.secrets();
-  if (!index)
-    return;
-  const title = stringMetadata2(item, ["title", "name", "subject"]);
-  const locator = stringMetadata2(item, ["locatorUri", "pathDisplay", "url"]);
-  const kinds = [...new Set([
-    ...detectSecretFindingKinds(text),
-    ...title ? detectSecretFindingKinds(title) : [],
-    ...locator ? detectSecretFindingKinds(locator) : []
-  ])];
-  index.record({
-    identity: item.identity,
-    ...locator ? { locator } : {},
-    ...title && options.namesReleasable ? { title } : {},
-    namesReleasable: options.namesReleasable,
-    folderKeys: options.sourceScope?.folderKeys ?? [],
-    ...options.sourceScope ? { scopeGeneration: options.sourceScope.accountGeneration, scopeRevision: options.sourceScope.scopeRevision } : {},
-    findingKinds: kinds.length > 0 ? kinds : ["owner_marked_secret"],
-    text
-  });
-}
-function stringMetadata2(item, keys) {
-  for (const key of keys) {
-    const value = item.metadata[key];
-    if (typeof value === "string" && value.trim())
-      return value.trim();
-  }
-  return;
-}
-function singleItemConnector(store, item) {
-  return {
-    id: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID,
-    family: store.family,
-    authenticate: async () => {},
-    fetchItem: async () => item,
-    classificationSignals: () => ({}),
-    listItems() {
-      return async function* () {
-        yield { items: [item], done: true };
-      }();
-    }
-  };
-}
-function parentOf2(set, anchorStore, child) {
-  const localItemId = anchorStore.parentLocalItemIdOf(child);
-  if (!localItemId)
-    return;
-  for (const domain of TIER_DOMAIN_ORDER) {
-    const row = set.store(domain)?.activeLocalItemRow(localItemId);
-    if (row)
-      return { providerItemId: row.identity.providerItemId, localItemId };
-  }
-  return;
-}
-var init_tiered_store_sink = __esm(() => {
-  init_types();
-  init_engine();
-  init_tier_classifier();
-  init_tier_ledger();
-  init_parent_context();
-  init_tier_placement();
-  init_media_judge();
-  init_secrets_disposition();
-  init_tiered_store_set();
-  init_store_sink();
-});
-
 // src/workers/connector-store/tiered-extraction.ts
 function tieredExtractionView(set, options = {}) {
   const legacyDomains = () => TIER_DOMAIN_ORDER.filter((domain) => set.legSpec(domain)?.legacy === true);
@@ -136999,6 +139275,10 @@ function createFileExtractionRuntime(options) {
     return;
   const warn = options.warn ?? ((message) => console.warn(message));
   const storesByCorpusId = new Map(options.connectorStores.map((store) => [store.corpusId, store]));
+  const registeredTierSetForStore = (store) => {
+    const registered = tierSetForLedger(store.tierLedgerPathInUse());
+    return registered?.legSpec(store.trustDomain)?.legacy && registered.store(store.trustDomain) === store ? registered : undefined;
+  };
   const sourceFactories = options.sourceFactories ?? new Map([
     ...defaultSourceFactories(env, options.credentialBroker ? { credentialBroker: options.credentialBroker } : {}),
     ...options.extraSourceFactories ?? []
@@ -137060,11 +139340,12 @@ function createFileExtractionRuntime(options) {
       warn(fileExtractionCorpusDropped(config, "no_source_factory"));
       continue;
     }
-    const tierSet = options.tierSets?.get(config.corpusId);
+    const configuredTierSet = options.tierSets?.get(config.corpusId);
+    const tierSet = configuredTierSet ?? registeredTierSetForStore(store);
     if (tierSet && tierSet.store(store.trustDomain) !== store) {
       throw new Error(`[file-extraction] corpus=${config.corpusId} tier set does not hold its store.`);
     }
-    const view = tierSet ? tieredExtractionView(tierSet, { home: store.trustDomain }) : undefined;
+    const view = configuredTierSet ? tieredExtractionView(configuredTierSet, { home: store.trustDomain }) : undefined;
     itemStores.set(config.corpusId, tierSet ? () => TIER_DOMAIN_ORDER.flatMap((domain) => {
       const leg = tierSet.store(domain);
       return leg ? [leg] : [];
@@ -137109,6 +139390,15 @@ function createFileExtractionRuntime(options) {
       } } : {} } : {},
       corpusId: config.corpusId,
       trustDomain: store.trustDomain,
+      holdOnDemandRead(ref, controller) {
+        const held = (itemStores.get(config.corpusId)?.() ?? []).flatMap((holder) => {
+          const grant = holder.observeOnDemandRead(ref.localItemId, ref.sourceVersion ?? "", controller);
+          return grant ? [grant] : [];
+        });
+        if (held.length === 0)
+          return;
+        return { check: () => held.every((grant) => grant.check()), release: () => held.forEach((grant) => grant.release()) };
+      },
       ...spoolDir ? { spoolDir } : {},
       ...spoolDir && placement.anchor !== undefined ? { spoolAnchor: placement.anchor } : {},
       source: async () => {
@@ -137645,7 +139935,7 @@ var init_child_extraction_runtime = __esm(() => {
 });
 
 // src/workers/telegram-messages/media-extraction.ts
-import { lstatSync as lstatSync36, readFileSync as readFileSync60 } from "node:fs";
+import { lstatSync as lstatSync37, readFileSync as readFileSync60 } from "node:fs";
 import { join as join102 } from "node:path";
 function telegramMediaLanes(corpusIds, accountScope) {
   return corpusIds.map((corpusId) => ({ corpusId, provider: "telegram", accountScope, approvedScopeKey: TELEGRAM_MEDIA_EXTRACTION_SCOPE_KEY }));
@@ -137680,7 +139970,7 @@ function telegramMediaConnector(input) {
       throw new FileExtractionSourceError("source_item_not_found");
     let size;
     try {
-      size = lstatSync36(path).size;
+      size = lstatSync37(path).size;
     } catch {
       throw new FileExtractionSourceError("source_item_not_found");
     }
@@ -138218,7 +140508,7 @@ function createGmailConnectorStoreSyncHandler(options) {
     ...options.publicStore ? { publicLeg: { corpusId: GMAIL_PUBLIC_CONNECTOR_CORPUS_ID, ...options.publicStore } } : {},
     ...options.internalEmbeddingProvider ? { internalEmbeddingProvider: options.internalEmbeddingProvider } : {},
     ...options.secureEmbeddingProvider ? { secureEmbeddingProvider: options.secureEmbeddingProvider } : {},
-    tierClassification,
+    ...options.ownerRuleSource ? { ownerRuleSource: options.ownerRuleSource } : { tierClassification },
     ...options.secretLocations ? { secretLocations: options.secretLocations } : {},
     ...options.onTierLegOpened ? { onLegOpened: (store) => options.onTierLegOpened(store) } : {},
     contentArrivesLaterFor: gmailContentArrivesLater
@@ -138929,8 +141219,8 @@ var init_google_connectors = __esm(() => {
 });
 
 // src/workers/source-ingestion-ledger.ts
-import { existsSync as existsSync73, mkdirSync as mkdirSync47 } from "node:fs";
-import { dirname as dirname78 } from "node:path";
+import { existsSync as existsSync73, mkdirSync as mkdirSync48 } from "node:fs";
+import { dirname as dirname79 } from "node:path";
 import { Database as Database23 } from "bun:sqlite";
 function buildSourceIngestionLedgerSnapshot(status, options = {}) {
   const now = options.now ?? new Date(status.generated_at);
@@ -138999,7 +141289,7 @@ class SqliteSourceIngestionLedgerStore {
   constructor(dbPath = defaultSourceDashboardHistoryDbPath()) {
     assertWritableStoreOpenAllowed("ingestion ledger", dbPath);
     if (dbPath !== ":memory:")
-      mkdirSync47(dirname78(dbPath), { recursive: true, mode: 448 });
+      mkdirSync48(dirname79(dbPath), { recursive: true, mode: 448 });
     this.db = new Database23(dbPath);
     this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;");
     this.db.exec(`
@@ -140820,8 +143110,8 @@ var init_public_source_capabilities = __esm(() => {
 });
 
 // src/workers/source-dashboard.ts
-import { existsSync as existsSync75, mkdirSync as mkdirSync48 } from "node:fs";
-import { dirname as dirname79 } from "node:path";
+import { existsSync as existsSync75, mkdirSync as mkdirSync49 } from "node:fs";
+import { dirname as dirname80 } from "node:path";
 import { Database as Database24 } from "bun:sqlite";
 function dashboardSchedulerTaskFailing(task) {
   if (task.consecutive_failures <= 0)
@@ -140966,7 +143256,7 @@ class SqliteSourceDashboardHistory {
   db;
   constructor(dbPath = defaultSourceDashboardHistoryDbPath()) {
     if (dbPath !== ":memory:")
-      mkdirSync48(dirname79(dbPath), { recursive: true, mode: 448 });
+      mkdirSync49(dirname80(dbPath), { recursive: true, mode: 448 });
     this.db = new Database24(dbPath);
     this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;");
     runSqliteMigrations(this.db, DASHBOARD_SQLITE_STORE_ID, currentStoreMigrations());
@@ -143436,8 +145726,8 @@ var init_source_dashboard = __esm(() => {
 });
 
 // src/workers/source-scheduler-state.ts
-import { chmodSync as chmodSync28, existsSync as existsSync76, mkdirSync as mkdirSync49 } from "node:fs";
-import { dirname as dirname80 } from "node:path";
+import { chmodSync as chmodSync29, existsSync as existsSync76, mkdirSync as mkdirSync50 } from "node:fs";
+import { dirname as dirname81 } from "node:path";
 import { Database as Database25 } from "bun:sqlite";
 function defaultSourceSchedulerStateDbPath(env = process.env) {
   return sharedDataPath("source-scheduler", env);
@@ -143472,11 +145762,11 @@ class LocalSourceSchedulerStateStore {
     this.visiting = options.visiting === true;
     this.dbPath = dbPath;
     if (dbPath !== ":memory:") {
-      mkdirSync49(dirname80(dbPath), { recursive: true, mode: 448 });
+      mkdirSync50(dirname81(dbPath), { recursive: true, mode: 448 });
     }
     this.db = new Database25(dbPath, { create: true });
     if (dbPath !== ":memory:")
-      chmodSync28(dbPath, 384);
+      chmodSync29(dbPath, 384);
     this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
     assertSqliteSchemaCanOpen(this.db, SOURCE_SCHEDULER_STATE_STORE_ID, SOURCE_SCHEDULER_STATE_SCHEMA_VERSION);
     runSqliteMigrations(this.db, SOURCE_SCHEDULER_STATE_STORE_ID, sourceSchedulerStateMigrations());
@@ -144067,8 +146357,8 @@ var init_source_scheduler_state = __esm(() => {
 });
 
 // src/workers/classification/judge-check.ts
-import { existsSync as existsSync77, mkdirSync as mkdirSync50, readFileSync as readFileSync62 } from "node:fs";
-import { dirname as dirname81 } from "node:path";
+import { existsSync as existsSync77, mkdirSync as mkdirSync51, readFileSync as readFileSync62 } from "node:fs";
+import { dirname as dirname82 } from "node:path";
 function judgeCheckPath(env = process.env) {
   return defaultOwnerConfigPath("judge-check.json", env);
 }
@@ -144110,7 +146400,7 @@ function createJudgeCheck(options) {
     }
   };
   const write = (state) => {
-    mkdirSync50(dirname81(path), { recursive: true, mode: 448 });
+    mkdirSync51(dirname82(path), { recursive: true, mode: 448 });
     writePrivateFileAtomicSync(path, `${JSON.stringify(state)}
 `);
   };
@@ -144346,16 +146636,16 @@ var init_judge_check = __esm(() => {
 // src/workers/classification/judge-second-round.ts
 import { Database as Database26 } from "bun:sqlite";
 import { createHash as createHash79 } from "node:crypto";
-import { chmodSync as chmodSync29, existsSync as existsSync78, readFileSync as readFileSync63, rmSync as rmSync31 } from "node:fs";
-import { dirname as dirname82, join as join107, sep as sep20 } from "node:path";
+import { chmodSync as chmodSync30, existsSync as existsSync78, readFileSync as readFileSync63, rmSync as rmSync31 } from "node:fs";
+import { dirname as dirname83, join as join107, sep as sep20 } from "node:path";
 function judgeObservationsPath(env) {
-  return join107(dirname82(resolveClassificationLedgerPath(env)), "judge-observed.json");
+  return join107(dirname83(resolveClassificationLedgerPath(env)), "judge-observed.json");
 }
 function judgeSecondRoundStatePath(env) {
-  return join107(dirname82(resolveClassificationLedgerPath(env)), "judge-second-round.json");
+  return join107(dirname83(resolveClassificationLedgerPath(env)), "judge-second-round.json");
 }
 function judgeSecondRoundConfirmedPath(env) {
-  return join107(dirname82(resolveClassificationLedgerPath(env)), "judge-second-round.sqlite");
+  return join107(dirname83(resolveClassificationLedgerPath(env)), "judge-second-round.sqlite");
 }
 
 class SecondRoundConfirmed {
@@ -144364,7 +146654,7 @@ class SecondRoundConfirmed {
     this.db = new Database26(path, { create: true });
     this.db.exec("PRAGMA busy_timeout = 10000;");
     try {
-      chmodSync29(path, 384);
+      chmodSync30(path, 384);
     } catch {}
     this.db.run("CREATE TABLE IF NOT EXISTS confirmed (digest TEXT PRIMARY KEY)");
   }
@@ -144945,215 +147235,6 @@ var init_source_forget_registry = __esm(() => {
   ];
 });
 
-// src/workers/classification/tier-rules.ts
-import { chmodSync as chmodSync30, lstatSync as lstatSync37, mkdirSync as mkdirSync51 } from "node:fs";
-import { dirname as dirname83 } from "node:path";
-function defaultTierRulesPath(env = process.env) {
-  return defaultOwnerConfigPath("tier-rules.json", env);
-}
-function resolveTierRulesPath(options = {}) {
-  const env = options.env ?? process.env;
-  return options.path?.trim() || env[OLYMPUS_TIER_RULES_ENV]?.trim() || defaultTierRulesPath(env);
-}
-function loadOwnerTierRules(options = {}) {
-  const path = resolveTierRulesPath(options);
-  const read = readOwnerConfigFile(path);
-  if (read.status === "missing") {
-    if (options.allowMissing)
-      return [];
-    throw new OperationError("config_error", `Tier rules not found at ${path}.`, tierRulesRemedy(path));
-  }
-  if (read.status === "refused") {
-    throw new OperationError("config_error", read.reason === "unsafe_permissions" ? `Tier rules at ${path} are writable by someone other than their owner.` : `Tier rules at ${path} could not be read consistently (${read.reason}).`, read.reason === "unsafe_permissions" ? `chmod 600 ${path}` : tierRulesRemedy(path));
-  }
-  let raw;
-  try {
-    raw = JSON.parse(read.text);
-  } catch {
-    throw new OperationError("config_error", `Tier rules at ${path} are not valid JSON.`, tierRulesRemedy(path));
-  }
-  return parseOwnerTierRules(raw, path);
-}
-function tierRulesFileStamp(options = {}) {
-  return ownerConfigStamp(resolveTierRulesPath(options));
-}
-function validateTierRulesFile(options = {}) {
-  const path = resolveTierRulesPath(options);
-  const rules = loadOwnerTierRules({ ...options, path, allowMissing: false });
-  return {
-    ok: true,
-    path,
-    schemaVersion: TIER_RULES_SCHEMA_VERSION,
-    rules: rules.length,
-    ruleIds: rules.map((rule) => rule.id),
-    ...tightenPermissions(path)
-  };
-}
-function parseOwnerTierRules(raw, label = "tier rules") {
-  const root = asRecord13(raw);
-  if (!root)
-    throw new OperationError("config_error", `${label} must be a JSON object.`);
-  if (root.schemaVersion !== TIER_RULES_SCHEMA_VERSION) {
-    throw new OperationError("config_error", `${label}.schemaVersion must be ${TIER_RULES_SCHEMA_VERSION}.`);
-  }
-  if (!Array.isArray(root.rules))
-    throw new OperationError("config_error", `${label}.rules must be an array.`);
-  if (root.rules.length > MAX_RULES) {
-    throw new OperationError("config_error", `${label}.rules may hold at most ${MAX_RULES} rules.`);
-  }
-  const unknownKeys = Object.keys(root).filter((key) => key !== "schemaVersion" && key !== "rules");
-  if (unknownKeys.length > 0) {
-    throw new OperationError("config_error", `${label} has unknown field(s): ${unknownKeys.join(", ")}.`);
-  }
-  const seen = new Set;
-  return root.rules.map((entry, index) => {
-    const rule = parseOwnerTierRule(entry, `${label}.rules[${index}]`);
-    if (seen.has(rule.id))
-      throw new OperationError("config_error", `${label}: duplicate rule id "${rule.id}".`);
-    seen.add(rule.id);
-    return rule;
-  });
-}
-function parseOwnerTierRule(raw, label = "tier rule") {
-  const record = asRecord13(raw);
-  if (!record)
-    throw new OperationError("config_error", `${label} must be an object.`);
-  const unknownKeys = Object.keys(record).filter((key) => !["id", "source", "match", "tier", "strength"].includes(key));
-  if (unknownKeys.length > 0) {
-    throw new OperationError("config_error", `${label} has unknown field(s): ${unknownKeys.join(", ")}.`);
-  }
-  const id = typeof record.id === "string" ? record.id.trim() : "";
-  if (!RULE_ID_PATTERN.test(id)) {
-    throw new OperationError("config_error", `${label}.id must be a short lower-case slug (a-z, 0-9, _ . : -).`);
-  }
-  let source;
-  if (record.source !== undefined) {
-    if (typeof record.source !== "string" || !SOURCE_PATTERN.test(record.source.trim())) {
-      throw new OperationError("config_error", `${label}.source must be a provider id (letters, digits, _ . : -).`);
-    }
-    source = record.source.trim();
-  }
-  const match = parseMatch(record.match, `${label}.match`);
-  const tier = record.tier;
-  if (typeof tier !== "string" || !TIER_KEYS.includes(tier)) {
-    throw new OperationError("config_error", `${label}.tier must be one of ${TIER_KEYS.join(", ")} (schema-v1 keys).`);
-  }
-  const strength = record.strength ?? "prior";
-  if (strength !== "prior" && strength !== "force") {
-    throw new OperationError("config_error", `${label}.strength must be prior or force.`);
-  }
-  return { id, ...source ? { source } : {}, match, tier, strength };
-}
-function parseMatch(raw, label) {
-  const record = asRecord13(raw);
-  if (!record)
-    throw new OperationError("config_error", `${label} must be an object.`);
-  const keys = Object.keys(record);
-  if (keys.length !== 1 || !OWNER_TIER_RULE_MATCH_KINDS.includes(keys[0])) {
-    throw new OperationError("config_error", `${label} must hold exactly one of ${OWNER_TIER_RULE_MATCH_KINDS.join(", ")}.`);
-  }
-  const kind = keys[0];
-  const value = record[kind];
-  if (typeof value !== "string" || !value.trim() || value.length > MAX_VALUE_LENGTH) {
-    throw new OperationError("config_error", `${label}.${kind} must be a non-empty string of at most ${MAX_VALUE_LENGTH} characters.`);
-  }
-  if (kind === "sender" && !SENDER_PATTERN.test(value.trim())) {
-    throw new OperationError("config_error", `${label}.sender must be an address (name@example.com) or a whole domain (@example.com).`);
-  }
-  return { kind, value: value.trim() };
-}
-function serializeOwnerTierRule(rule) {
-  return {
-    id: rule.id,
-    ...rule.source ? { source: rule.source } : {},
-    match: { [rule.match.kind]: rule.match.value },
-    tier: rule.tier,
-    strength: rule.strength
-  };
-}
-function writeOwnerTierRules(rules, options = {}) {
-  const path = resolveTierRulesPath(options);
-  const document2 = { schemaVersion: TIER_RULES_SCHEMA_VERSION, rules: rules.map(serializeOwnerTierRule) };
-  parseOwnerTierRules(document2, "tier rules");
-  mkdirSync51(dirname83(path), { recursive: true, mode: 448 });
-  writePrivateFileAtomicSync(path, `${JSON.stringify(document2, null, 2)}
-`);
-  return path;
-}
-function addOwnerTierRule(rule, options = {}) {
-  const existing = loadOwnerTierRules({ ...options, allowMissing: true });
-  if (existing.some((candidate) => candidate.id === rule.id)) {
-    throw new OperationError("invalid_params", `A tier rule with id "${rule.id}" already exists.`, "Remove it first or choose another id.");
-  }
-  const rules = [...existing, rule];
-  return { path: writeOwnerTierRules(rules, options), rules };
-}
-function removeOwnerTierRule(id, options = {}) {
-  const existing = loadOwnerTierRules({ ...options, allowMissing: true });
-  const rules = existing.filter((rule) => rule.id !== id);
-  if (rules.length === existing.length)
-    return { path: resolveTierRulesPath(options), removed: false, rules: existing };
-  return { path: writeOwnerTierRules(rules, options), removed: true, rules };
-}
-function tierKeyFromDisplayName(value) {
-  switch (value.trim().toLowerCase()) {
-    case "public":
-      return "public";
-    case "personal":
-      return "private";
-    case "private":
-      return "secure";
-    case "secrets":
-    case "secret":
-      return "secrets";
-    default:
-      return;
-  }
-}
-function tierDisplayName(tier) {
-  switch (tier) {
-    case "public":
-      return "Public";
-    case "private":
-      return "Personal";
-    case "secure":
-      return "Private";
-    case "secrets":
-      return "Secrets";
-  }
-}
-function tightenPermissions(path) {
-  try {
-    const stat = lstatSync37(path);
-    if (!stat.isFile())
-      return {};
-    const mode = stat.mode & 511;
-    if ((mode & 63) === 0)
-      return { permissions: `0${mode.toString(8).padStart(3, "0")}` };
-    chmodSync30(path, 384);
-    return { permissions: "0600", permissionsTightened: true };
-  } catch {
-    return {};
-  }
-}
-function tierRulesRemedy(path) {
-  return `Write the rules to ${path} (schemaVersion 1), or add them with \`olympus tier rules add\`.`;
-}
-function asRecord13(value) {
-  return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
-}
-var TIER_RULES_SCHEMA_VERSION = 1, OLYMPUS_TIER_RULES_ENV = "OLYMPUS_TIER_RULES_PATH", OWNER_TIER_RULE_MATCH_KINDS, MAX_RULES = 500, MAX_VALUE_LENGTH = 240, RULE_ID_PATTERN, SOURCE_PATTERN, SENDER_PATTERN;
-var init_tier_rules = __esm(() => {
-  init_atomic_file();
-  init_operation_error();
-  init_owner_config_read();
-  init_tier_classifier();
-  OWNER_TIER_RULE_MATCH_KINDS = ["pathPrefix", "folderKey", "label", "sender", "chat"];
-  RULE_ID_PATTERN = /^[a-z0-9][a-z0-9_.:-]{0,63}$/;
-  SOURCE_PATTERN = /^[a-z0-9][a-z0-9_.:-]{0,63}$/i;
-  SENDER_PATTERN = /^(?:[^\s<>"(),;:@]+)?@[a-z0-9-]+(?:\.[a-z0-9-]+)+$/i;
-});
-
 // src/workers/classification/privacy-profile.ts
 import { createHash as createHash80 } from "node:crypto";
 import { mkdirSync as mkdirSync52 } from "node:fs";
@@ -145301,24 +147382,26 @@ function privacyRuleId(rule) {
   return `${PRIVACY_RULE_ID_PREFIX}${rule.kind}-${digest}`;
 }
 function writePrivacyProfile(update, options = {}) {
-  const current = readPrivacyProfile(options);
-  const next = {
-    description: update.description ?? current?.description ?? "",
-    rules: update.rules ?? current?.rules ?? [],
-    updatedAt: (options.now?.() ?? new Date).toISOString()
-  };
   const rulesOptions = { ...options.tierRulesPath ? { path: options.tierRulesPath } : {}, ...options.env ? { env: options.env } : {} };
-  const existing = loadOwnerTierRules({ ...rulesOptions, allowMissing: true });
-  const kept = existing.filter((rule) => !rule.id.startsWith(PRIVACY_RULE_ID_PREFIX));
-  const owned = next.rules.map(privacyRuleToTierRule);
-  const unchanged = existing.length === kept.length + owned.length && owned.every((rule) => existing.some((candidate) => candidate.id === rule.id));
-  if (!unchanged)
-    writeOwnerTierRules([...kept, ...owned], rulesOptions);
-  const path = resolvePrivacyProfilePath(options);
-  mkdirSync52(dirname84(path), { recursive: true, mode: 448 });
-  writePrivateFileAtomicSync(path, `${JSON.stringify({ schemaVersion: PRIVACY_PROFILE_SCHEMA_VERSION, ...next }, null, 2)}
+  return withOwnerTierRulesWriter(rulesOptions, (existing, save) => {
+    options.checkRevision?.();
+    const current = readPrivacyProfile(options);
+    const next = {
+      description: update.description ?? current?.description ?? "",
+      rules: update.rules ?? current?.rules ?? [],
+      updatedAt: (options.now?.() ?? new Date).toISOString()
+    };
+    const owned = next.rules.map(privacyRuleToTierRule);
+    const kept = existing.filter((rule) => !rule.id.startsWith(PRIVACY_RULE_ID_PREFIX));
+    const unchanged = existing.length === kept.length + owned.length && owned.every((rule) => existing.some((candidate) => candidate.id === rule.id));
+    if (!unchanged)
+      save([...kept, ...owned]);
+    const path = resolvePrivacyProfilePath(options);
+    mkdirSync52(dirname84(path), { recursive: true, mode: 448 });
+    writePrivateFileAtomicSync(path, `${JSON.stringify({ schemaVersion: PRIVACY_PROFILE_SCHEMA_VERSION, ...next }, null, 2)}
 `);
-  return next;
+    return next;
+  });
 }
 function invalid2(message) {
   return new OperationError("invalid_params", message);
@@ -145331,6 +147414,7 @@ var init_privacy_profile = __esm(() => {
   init_atomic_file();
   init_operation_error();
   init_owner_config_read();
+  init_source_connector_labels();
   init_tier_rules();
   PRIVACY_RULE_KINDS = ["folder", "label", "sender", "chat"];
   RULE_SOURCES = {
@@ -145340,7 +147424,7 @@ var init_privacy_profile = __esm(() => {
       "evernote.notes": { provider: "evernote", match: "folderKey" }
     },
     label: {
-      "gmail.email": { provider: "gmail", match: "label" }
+      "gmail.email": { provider: GMAIL_LABEL_CAPABILITY.provider, match: "label" }
     },
     sender: {
       "gmail.email": { provider: "gmail", match: "sender" }
@@ -145717,7 +147801,7 @@ var init_source_dispositions = __esm(() => {
 
 // src/data-lifecycle.ts
 import { spawnSync as spawnSync13 } from "node:child_process";
-import { createHash as createHash81, randomUUID as randomUUID29 } from "node:crypto";
+import { createHash as createHash81, randomUUID as randomUUID30 } from "node:crypto";
 import {
   chmodSync as chmodSync32,
   closeSync as closeSync29,
@@ -145737,7 +147821,7 @@ import {
   statSync as statSync35
 } from "node:fs";
 import { homedir as homedir30 } from "node:os";
-import { basename as basename17, dirname as dirname86, join as join109, relative as relative17, resolve as resolve24, sep as sep21 } from "node:path";
+import { basename as basename17, dirname as dirname86, join as join109, relative as relative17, resolve as resolve26, sep as sep21 } from "node:path";
 import { rm as rm10 } from "node:fs/promises";
 import { Database as Database27 } from "bun:sqlite";
 function lifecycleStoreFileOwner(env) {
@@ -145970,7 +148054,7 @@ function exportReferencedMedia(refs, destination, durabilityBoundary, files, art
       continue;
     }
     const target = join109(mediaRoot, basename17(path));
-    const staging = `${target}.${randomUUID29()}.partial`;
+    const staging = `${target}.${randomUUID30()}.partial`;
     try {
       copyFileSync2(path, staging);
       chmodSync32(staging, 384);
@@ -145997,7 +148081,7 @@ function exportReferencedMedia(refs, destination, durabilityBoundary, files, art
   return counts;
 }
 function verifyOlympusDataExport(options) {
-  const destination = resolve24(requirePath(options.destination, "--input"));
+  const destination = resolve26(requirePath(options.destination, "--input"));
   const manifestPath = join109(destination, "manifest.json");
   const parsed = JSON.parse(readFileSync66(manifestPath, "utf8"));
   if (parsed.kind !== "olympus_data_export" || parsed.version !== 2 && parsed.version !== 3 || !Array.isArray(parsed.artifacts)) {
@@ -146006,7 +148090,7 @@ function verifyOlympusDataExport(options) {
   const verified = [];
   for (const value of parsed.artifacts) {
     const artifact = parseExportArtifact(value);
-    const path = resolve24(destination, artifact.relativePath);
+    const path = resolve26(destination, artifact.relativePath);
     if (!isSameOrInsidePath(path, destination) || path === destination) {
       throw new OperationError("source_index_error", "Olympus data export manifest contains an unsafe artifact path.");
     }
@@ -146170,7 +148254,7 @@ function removeAccount(account, plan, context, options) {
   }
   const removed = [];
   const missing = [];
-  const folders = plan.targets.filter((target) => target.kind === "account_folder").map((target) => resolve24(target.path));
+  const folders = plan.targets.filter((target) => target.kind === "account_folder").map((target) => resolve26(target.path));
   for (const target of plan.targets) {
     if (!existsSync81(target.path)) {
       missing.push(target.path);
@@ -146179,7 +148263,7 @@ function removeAccount(account, plan, context, options) {
     removed.push(target.path);
     if (target.kind === "account_folder")
       moveAccountFolderToTrash(target.path, env, options);
-    else if (!folders.some((folder) => isStrictlyInside(resolve24(target.path), folder)))
+    else if (!folders.some((folder) => isStrictlyInside(resolve26(target.path), folder)))
       rmTargetKeepingOwnerLock(target, ownerLockPath);
   }
   removed.push(...releaseSourceMedia(media, false));
@@ -146227,8 +148311,8 @@ function moveAccountFolderToTrash(folder, env, options) {
   try {
     mkdirSync54(trash, { recursive: true, mode: 448 });
     const dataRoot = olympusDataRoot(env);
-    if (lstatSync39(trash).isDirectory() && canonicalPath2(trash) === join109(canonicalPath2(dataRoot), relative17(resolve24(dataRoot), resolve24(trash)))) {
-      renameSync14(folder, accountTrashEntry(randomUUID29(), env));
+    if (lstatSync39(trash).isDirectory() && canonicalPath2(trash) === join109(canonicalPath2(dataRoot), relative17(resolve26(dataRoot), resolve26(trash)))) {
+      renameSync14(folder, accountTrashEntry(randomUUID30(), env));
       moved = true;
     }
   } catch {
@@ -146629,7 +148713,7 @@ function retiredEmbeddingDirectoryTargets(ledgerPath) {
 function sourceDeleteTargets(source, context) {
   const { files } = source;
   const folder = files.folder;
-  const inFolder = (path) => folder !== undefined && isStrictlyInside(resolve24(path), resolve24(folder));
+  const inFolder = (path) => folder !== undefined && isStrictlyInside(resolve26(path), resolve26(folder));
   const sqliteTargets = (path, storeId) => sqliteDeleteTargets(path, storeId, context, inFolder(path));
   return [
     ...retiredEmbeddingDirectoryTargets(resolveClassificationLedgerPath(envForContext(context))).map((target) => ({ ...target, sharedRetiredPrefilter: true })),
@@ -146773,7 +148857,7 @@ function exportSqliteStore(options) {
     return;
   }
   const destination = join109(destinationRoot, basename17(sqlitePath));
-  const staging = `${destination}.${randomUUID29()}.partial`;
+  const staging = `${destination}.${randomUUID30()}.partial`;
   if (snapshotSqliteStore(sqlitePath, staging)) {
     let sqlite;
     try {
@@ -146846,7 +148930,7 @@ function fileArtifact(exportRoot, path, sourceId, role) {
   return {
     sourceId,
     role,
-    relativePath: relative17(resolve24(exportRoot), resolve24(path)),
+    relativePath: relative17(resolve26(exportRoot), resolve26(path)),
     bytes: stats.size,
     sha256: sha256File3(path)
   };
@@ -146899,7 +148983,7 @@ function copySanitizedJsonIfPresent(source, destination, files, skipped) {
   return true;
 }
 function exportDurabilityBoundary(destination) {
-  let current = dirname86(resolve24(destination));
+  let current = dirname86(resolve26(destination));
   for (;; ) {
     if (existsSync81(current))
       return current;
@@ -146911,7 +148995,7 @@ function exportDurabilityBoundary(destination) {
 }
 function makeDurableDirectory(path, boundary) {
   mkdirSync54(path, { recursive: true, mode: 448 });
-  let current = resolve24(path);
+  let current = resolve26(path);
   for (;; ) {
     syncDirectorySync2(current);
     if (current === boundary)
@@ -147011,8 +149095,8 @@ function assertAccountFolderOwned(target) {
   const refuse = (why) => {
     throw new OperationError("invalid_params", `Refusing to delete the account folder ${why}: ${target.path}`, "Check the Olympus data folder, then remove that folder by hand. Nothing was deleted.");
   };
-  const owned = target.ownedRoot ? resolve24(target.ownedRoot) : undefined;
-  const lexical = resolve24(target.path);
+  const owned = target.ownedRoot ? resolve26(target.ownedRoot) : undefined;
+  const lexical = resolve26(target.path);
   const inside = (name) => {
     const folder = join109(owned, name);
     return lexical === folder || isStrictlyInside(lexical, folder);
@@ -147059,7 +149143,7 @@ function assertVerifiedExternalSqliteStore(path, storeId) {
   }
 }
 function canonicalPath2(path) {
-  const absolute = resolve24(path);
+  const absolute = resolve26(path);
   let existing = absolute;
   const rest = [];
   for (;; ) {
@@ -147082,12 +149166,12 @@ function assertRawStateTargetsContained(targets, context, selectedSource) {
   const overlapTargets = selectedSource ? [...stateTargets, ...targets.filter((target) => target.kind === "account_folder")] : stateTargets;
   if (overlapTargets.length === 0)
     return;
-  const roots = rawStateRoots(context).map((root) => ({ lexical: resolve24(root), real: canonicalPath2(root) }));
+  const roots = rawStateRoots(context).map((root) => ({ lexical: resolve26(root), real: canonicalPath2(root) }));
   const refuse = (path, why) => {
     throw new OperationError("invalid_params", `Refusing to delete source state ${why}: ${path}`, "Check the configured state-directory values, then remove that directory by hand. Nothing was deleted.");
   };
   for (const target of stateTargets) {
-    const lexical = resolve24(target.path);
+    const lexical = resolve26(target.path);
     const root = roots.find((candidate) => isStrictlyInside(lexical, candidate.lexical));
     if (!root) {
       if (roots.some((candidate) => lexical === candidate.lexical || isStrictlyInside(candidate.lexical, lexical))) {
@@ -147149,9 +149233,9 @@ function assertRawStateTargetsContained(targets, context, selectedSource) {
     ...mediaCacheDeleteTargets(context).map((target) => target.path)
   ])
     protectedPaths.add(path);
-  const protectedCanonical = [...protectedPaths].flatMap((path) => [resolve24(path), canonicalPath2(path)]);
+  const protectedCanonical = [...protectedPaths].flatMap((path) => [resolve26(path), canonicalPath2(path)]);
   for (const target of overlapTargets) {
-    const candidates = [resolve24(target.path), canonicalPath2(target.path)];
+    const candidates = [resolve26(target.path), canonicalPath2(target.path)];
     for (const protectedPath of protectedCanonical) {
       for (const candidate of candidates) {
         if (candidate === protectedPath || isStrictlyInside(protectedPath, candidate) || isStrictlyInside(candidate, protectedPath)) {
@@ -147166,13 +149250,13 @@ function assertRawStateTargetsContained(targets, context, selectedSource) {
 }
 function assertSourcesFolderTargetsUnlinked(targets, context) {
   const env = envForContext(context);
-  const owned = resolve24(olympusDataRoot(env));
-  const sources = resolve24(accountFoldersRoot(env));
+  const owned = resolve26(olympusDataRoot(env));
+  const sources = resolve26(accountFoldersRoot(env));
   const ownedReal = canonicalPath2(owned);
   for (const target of targets) {
     if (target.kind === "account_folder")
       continue;
-    const lexical = resolve24(target.path);
+    const lexical = resolve26(target.path);
     if (!isStrictlyInside(lexical, sources))
       continue;
     if (canonicalPath2(lexical) !== join109(ownedReal, relative17(owned, lexical))) {
@@ -147190,8 +149274,8 @@ function isInsideRawStateRoot(path, context) {
   return rawStateRoots(context).some((root) => isSameOrInsidePath(path, root));
 }
 function isSameOrInsidePath(path, root) {
-  const absolutePath = resolve24(path);
-  const absoluteRoot = resolve24(root);
+  const absolutePath = resolve26(path);
+  const absoluteRoot = resolve26(root);
   return absolutePath === absoluteRoot || absolutePath.startsWith(`${absoluteRoot}${sep21}`);
 }
 function defaultSovereigntyConfigPathForHome(homeDir) {
@@ -149154,6 +151238,1064 @@ var init_put_back_manifest = __esm(() => {
   init_olympus_layout();
 });
 
+// src/workers/source-scope-runtime.ts
+import { statSync as statSync36 } from "node:fs";
+function isMailSourceScopePolicyRef(ref) {
+  return ref.sourceId === "gmail.email";
+}
+
+class FileSourceScopeAuthority {
+  registryPath;
+  statePath;
+  mailStatePath;
+  readRegistry;
+  mailPinnedHandle;
+  registryFromFile;
+  approvedByFiles = new Map;
+  constructor(options = {}) {
+    this.registryPath = options.registryPath ?? defaultHandleRegistryPath();
+    this.statePath = options.statePath ?? defaultFileSourceScopeStatePath(this.registryPath);
+    this.mailStatePath = options.mailStatePath ?? defaultMailSourceScopeStatePath(this.registryPath);
+    this.readRegistry = options.readRegistry ?? (() => readConnectedHandleRegistry(this.registryPath));
+    this.registryFromFile = options.readRegistry === undefined;
+    this.mailPinnedHandle = options.mailPinnedHandle ?? (() => {
+      return;
+    });
+  }
+  mailSnapshot() {
+    try {
+      return readMailSourceScopeApproval(this.mailInput());
+    } catch {
+      return { sourceId: "gmail.email", status: "scope_pending", revision: "unreadable", reason: "malformed" };
+    }
+  }
+  approveMail(input) {
+    return approveMailSourceScope({ ...this.mailInput(), ...input });
+  }
+  mailPolicyRef() {
+    const snapshot = this.mailSnapshot();
+    if (snapshot.status !== "approved" || !snapshot.accountGeneration)
+      return;
+    return { sourceId: "gmail.email", accountGeneration: snapshot.accountGeneration, revision: snapshot.revision };
+  }
+  assertCurrentMail(ref) {
+    return assertMailSourceScopeApproved({
+      ...this.mailInput(),
+      expectedAccountGeneration: ref.accountGeneration,
+      expectedRevision: ref.revision
+    });
+  }
+  assertRefCurrent(ref) {
+    if (isMailSourceScopePolicyRef(ref))
+      this.assertCurrentMail(ref);
+    else
+      this.assertCurrent(ref);
+  }
+  mailInput() {
+    const pinnedHandle = this.mailPinnedHandle()?.trim();
+    return {
+      registry: this.readRegistry(),
+      statePath: this.mailStatePath,
+      ...pinnedHandle ? { pinnedHandle } : {}
+    };
+  }
+  fileScopeRegistry() {
+    const registry = this.readRegistry();
+    return {
+      handles: [
+        ...registry.handles.map((handle) => {
+          const { thisComputer: _ignored, ...credential } = handle;
+          return credential;
+        }),
+        ...readThisComputerHandles(this.registryPath)
+      ]
+    };
+  }
+  snapshot(sourceId) {
+    try {
+      return readFileSourceScopeApproval({
+        sourceId,
+        registry: this.fileScopeRegistry(),
+        statePath: this.statePath
+      });
+    } catch {
+      return {
+        sourceId,
+        status: "scope_pending",
+        revision: "unreadable",
+        selections: [],
+        wholeAccount: false,
+        reason: "malformed"
+      };
+    }
+  }
+  approve(input) {
+    return approveFileSourceScope({
+      ...input,
+      registry: this.fileScopeRegistry(),
+      statePath: this.statePath
+    });
+  }
+  approvedProviderAccount(approval) {
+    if (approval.status !== "approved" || !approval.accountGeneration)
+      return;
+    try {
+      const account = connectedFileSourceAccountGeneration(approval.sourceId, this.fileScopeRegistry());
+      return account?.generation === approval.accountGeneration ? account.handle.providerAccountId : undefined;
+    } catch {
+      return;
+    }
+  }
+  assertCurrent(ref) {
+    const key = this.approvalFilesKey(ref);
+    const reused = key === undefined ? undefined : this.approvedByFiles.get(ref.sourceId);
+    if (reused && reused.key === key)
+      return reused.snapshot;
+    const snapshot = assertFileSourceScopeApproved({
+      sourceId: ref.sourceId,
+      registry: this.fileScopeRegistry(),
+      statePath: this.statePath,
+      expectedAccountGeneration: ref.accountGeneration,
+      expectedRevision: ref.revision
+    });
+    if (key !== undefined)
+      this.approvedByFiles.set(ref.sourceId, { key, snapshot });
+    return snapshot;
+  }
+  approvalFilesKey(ref) {
+    if (!this.registryFromFile)
+      return;
+    try {
+      const files = [this.registryPath, defaultThisComputerStatePath(this.registryPath), this.statePath].map((path) => {
+        const stat = statSync36(path, { throwIfNoEntry: false });
+        return stat ? [stat.ino, stat.mtimeMs, stat.size] : null;
+      });
+      return JSON.stringify([ref.accountGeneration, ref.revision, files]);
+    } catch {
+      return;
+    }
+  }
+  policyRef(sourceId) {
+    const snapshot = this.snapshot(sourceId);
+    if (snapshot.status !== "approved" || !snapshot.accountGeneration)
+      return;
+    return {
+      sourceId,
+      accountGeneration: snapshot.accountGeneration,
+      revision: snapshot.revision
+    };
+  }
+}
+function rebindRestoredFileScope(input) {
+  const { approval, providerAccountId } = input;
+  if (approval.status !== "approved" || !approval.accountGeneration || !providerAccountId)
+    return 0;
+  const definition = getFileScopeSource(approval.sourceId);
+  if (!definition || definition.account !== "provider_account")
+    return 0;
+  const target = { provider: definition.provider, accountGeneration: approval.accountGeneration, revision: approval.revision };
+  let carried = 0;
+  const seenStores = new Set;
+  const seenSecrets = new Set;
+  for (const set of input.sets) {
+    const stores = set.stores.filter((store) => !seenStores.has(store));
+    for (const store of stores)
+      seenStores.add(store);
+    const fromGenerations = [...new Set(stores.flatMap((store) => store.restoredScopeGenerations(definition.provider, providerAccountId) ?? []))];
+    if (set.secretLocations && !seenSecrets.has(set.secretLocations) && fromGenerations.length > 0) {
+      seenSecrets.add(set.secretLocations);
+      carried += set.secretLocations.rebindScopeGenerations({ ...target, fromGenerations });
+    }
+    for (const store of stores)
+      carried += store.rebindRestoredSourceScope({ ...target, providerAccountId });
+  }
+  return carried;
+}
+function scopeKeyFilter(definition, role, keys) {
+  if (keys.length === 0)
+    return {};
+  return { [FILTER_KEYS[definition.filterFamily][role]]: [...keys] };
+}
+function scopeStampFilter(definition, accountGeneration, revision) {
+  return {
+    provider: definition.provider,
+    sourceScopeGeneration: accountGeneration,
+    ...definition.itemKeysExact ? {} : { sourceScopeRevision: revision }
+  };
+}
+function fileSourceScopeContentFilters(approval) {
+  if (approval.status !== "approved" || !approval.accountGeneration)
+    return { allowed: false };
+  const definition = getFileScopeSource(approval.sourceId);
+  if (!definition)
+    return { allowed: false };
+  const deniedKeys = approval.selections.filter((selection) => selection.state !== "ingest").map((selection) => selection.key);
+  const base = scopeStampFilter(definition, approval.accountGeneration, approval.revision);
+  if (approval.wholeAccount) {
+    return {
+      allowed: true,
+      filters: { ...base, ...scopeKeyFilter(definition, "exclude", deniedKeys) }
+    };
+  }
+  const ingestKeys = approval.selections.filter((selection) => selection.state === "ingest").map((selection) => selection.key);
+  if (ingestKeys.length === 0)
+    return { allowed: false };
+  return {
+    allowed: true,
+    filters: {
+      ...base,
+      ...scopeKeyFilter(definition, "include", ingestKeys),
+      ...scopeKeyFilter(definition, "exclude", deniedKeys)
+    }
+  };
+}
+function fileSourceScopeMetadataFilters(approval) {
+  if (approval.status !== "approved" || !approval.accountGeneration)
+    return { allowed: false };
+  const definition = getFileScopeSource(approval.sourceId);
+  if (!definition)
+    return { allowed: false };
+  const excludedKeys = approval.selections.filter((selection) => selection.state === "exclude").map((selection) => selection.key);
+  const metadataOnlyKeys = approval.selections.filter((selection) => selection.state === "metadata_only" || selection.state === "on_demand").map((selection) => selection.key);
+  const base = {
+    ...scopeStampFilter(definition, approval.accountGeneration, approval.revision),
+    ...scopeKeyFilter(definition, "exclude", excludedKeys),
+    ...scopeKeyFilter(definition, "metadataOnly", metadataOnlyKeys)
+  };
+  if (approval.wholeAccount)
+    return { allowed: true, filters: base };
+  const includedKeys = approval.selections.filter((selection) => selection.state !== "exclude").map((selection) => selection.key);
+  if (includedKeys.length === 0)
+    return { allowed: false };
+  return {
+    allowed: true,
+    filters: { ...base, ...scopeKeyFilter(definition, "include", includedKeys) }
+  };
+}
+function fileSourceScopeMetadataEnabled(approval) {
+  return approval.status === "approved" && (approval.wholeAccount || approval.selections.some((selection) => selection.state !== "exclude"));
+}
+function fileSourceScopeDropboxPolicy(base, approval) {
+  if (approval.sourceId !== "dropbox.files" || approval.status !== "approved") {
+    return { ...base, roots: [] };
+  }
+  const roots = approval.wholeAccount ? [{
+    path: "/",
+    approved_scope_key: `${base.source}:/`,
+    default_action: "full_extract"
+  }] : approval.selections.filter((selection) => selection.state !== "exclude").map((selection) => ({
+    path: normalizeDropboxScopePath(selection.key),
+    approved_scope_key: `${base.source}:${normalizeDropboxScopePath(selection.key)}`,
+    default_action: selection.state === "ingest" ? "full_extract" : selection.state === "on_demand" ? "on_demand" : "metadata_only"
+  }));
+  return { ...base, roots };
+}
+function createScopeBoundGoogleDriveContentScope(input) {
+  const current = () => input.authority.assertCurrent(input.ref);
+  return {
+    generation: input.ref.accountGeneration,
+    revision: input.ref.revision,
+    allowsMetadata(folderAncestorIds) {
+      return fileSourceScopeAllowsMetadata(current(), folderAncestorIds);
+    },
+    allowsContent(folderAncestorIds) {
+      return fileSourceScopeAllowsContent(current(), folderAncestorIds);
+    }
+  };
+}
+function createScopeBoundDropboxContentScope(input) {
+  const current = () => input.authority.assertCurrent(input.ref);
+  return {
+    generation: input.ref.accountGeneration,
+    revision: input.ref.revision,
+    assertCurrent() {
+      current();
+    },
+    allowsMetadata: (path) => dropboxScopeAllows(current(), path).metadata,
+    allowsContent: (path) => dropboxScopeAllows(current(), path).content
+  };
+}
+function dropboxScopeAllows(approval, path) {
+  const normalized = normalizeDropboxScopePath(path);
+  const selected = approval.selections.filter((selection) => {
+    const root = normalizeDropboxScopePath(selection.key);
+    return normalized === root || root !== "/" && normalized.startsWith(`${root}/`) || root === "/";
+  });
+  return {
+    metadata: !selected.some((entry) => entry.state === "exclude") && (approval.wholeAccount || selected.some((entry) => entry.state !== "exclude")),
+    content: !selected.some((entry) => entry.state !== "ingest") && (approval.wholeAccount || selected.some((entry) => entry.state === "ingest"))
+  };
+}
+function dropboxNamesOnlyByOwner(authority, now = Date.now) {
+  let cached;
+  const namesOnly = (path, requireReadable = false) => {
+    const at = now();
+    if (!cached || at - cached.at >= DROPBOX_NAMES_ONLY_APPROVAL_TTL_MS) {
+      cached = { at, ref: authority.policyRef("dropbox.files") };
+    }
+    if (!cached.ref)
+      return false;
+    let approval;
+    try {
+      approval = authority.assertCurrent(cached.ref);
+    } catch (error) {
+      cached = undefined;
+      if (requireReadable)
+        throw error;
+      return false;
+    }
+    if (approval.status !== "approved")
+      return false;
+    const allows = dropboxScopeAllows(approval, path);
+    return allows.metadata && !allows.content;
+  };
+  return Object.assign(namesOnly, {
+    revision: () => {
+      const snapshot = authority.snapshot("dropbox.files");
+      const ref = snapshot.status === "approved" && snapshot.accountGeneration ? { sourceId: snapshot.sourceId, accountGeneration: snapshot.accountGeneration, revision: snapshot.revision } : undefined;
+      cached = { at: now(), ref };
+      return snapshot.reason === "malformed" ? undefined : JSON.stringify([snapshot.status, snapshot.accountGeneration, snapshot.revision]);
+    }
+  });
+}
+function normalizeDropboxScopePath(path) {
+  const normalized = path.trim().replace(/\/{2,}/g, "/").toLowerCase();
+  return normalized.length > 1 && normalized.endsWith("/") ? normalized.slice(0, -1) : normalized;
+}
+function scopeBoundEmbeddingProvider(provider, authority, ref) {
+  return checkedEmbeddingProvider(provider, () => authority.assertRefCurrent(ref));
+}
+function checkedEmbeddingProvider(provider, check) {
+  const assertCurrent = () => {
+    provider.assertBindingCurrent?.();
+    check();
+  };
+  return {
+    ...provider,
+    async embed(inputs, options) {
+      assertCurrent();
+      return provider.embed(inputs, options);
+    },
+    assertBindingCurrent() {
+      assertCurrent();
+    },
+    ...provider.imageSupport ? { imageSupport: () => provider.imageSupport() } : {},
+    ...provider.embedWithImageVectors ? {
+      embedWithImageVectors: (inputs) => {
+        assertCurrent();
+        return provider.embedWithImageVectors(inputs);
+      }
+    } : {},
+    ...provider.embedImageVectors ? {
+      embedImageVectors: (images) => {
+        assertCurrent();
+        return provider.embedImageVectors(images);
+      }
+    } : {},
+    ...provider.embedPromptTexts ? { embedPromptTexts: (texts) => provider.embedPromptTexts(texts) } : {},
+    ...provider.runsOnThisComputer ? { runsOnThisComputer: () => provider.runsOnThisComputer() } : {}
+  };
+}
+function mailScopeTierOwnerRuleSource(authority) {
+  return {
+    path: authority.mailStatePath,
+    read: () => {
+      const scope = authority.mailSnapshot();
+      const rules = scope.ownerTierRules ?? mailScopeOwnerTierRules({ alwaysPrivateSenders: scope.carriedAlwaysPrivateSenders ?? [] });
+      const unavailable = scope.senderPolicyUnresolved === true || scope.reason === "malformed" || scope.reason === "account_changed";
+      return { rules, revision: scope.revision, unavailable };
+    }
+  };
+}
+function gmailConnectorScopeFromApproval(approval) {
+  const compiled = compileGmailMailScope(approval.mailScope);
+  return {
+    ...compiled.baseQuery ? { baseQuery: compiled.baseQuery } : {},
+    ...compiled.contentAfterMs !== undefined ? { contentAfterMs: compiled.contentAfterMs } : {},
+    skippedCategoryLabelIds: compiled.skippedCategoryLabelIds,
+    ...compiled.skippedLabelIds.length > 0 ? { skippedLabelIds: compiled.skippedLabelIds } : {},
+    ...approval.mailScope.skipSenders.length > 0 ? { skipSenders: approval.mailScope.skipSenders } : {},
+    ...approval.mailScope.alwaysPrivateSenders.length > 0 ? { ownerTierRules: mailScopeOwnerTierRules(approval.mailScope) } : {}
+  };
+}
+function scopeBoundSchedulerSource(input) {
+  const suffix = input.ref.revision.replaceAll("-", "").slice(0, 16);
+  return {
+    ...input.source,
+    tasks: input.source.tasks.map((task) => ({
+      ...task,
+      id: `${task.id}:scope:${suffix}`,
+      async run(context) {
+        input.authority.assertRefCurrent(input.ref);
+        return task.run(context);
+      }
+    }))
+  };
+}
+function fileSourceScopeOnDemandFilters(approval) {
+  return fileSourceScopeContentFilters({
+    ...approval,
+    wholeAccount: false,
+    selections: approval.selections.filter((selection) => selection.state !== "ingest").map((selection) => ({
+      ...selection,
+      state: selection.state === "on_demand" ? "ingest" : "exclude"
+    }))
+  });
+}
+var FILTER_KEYS, DROPBOX_NAMES_ONLY_APPROVAL_TTL_MS = 5000;
+var init_source_scope_runtime = __esm(() => {
+  init_source_scope_approval();
+  init_file_scope_sources();
+  init_this_computer();
+  init_connected_handles();
+  init_mail_source_scope();
+  FILTER_KEYS = {
+    locator_path: {
+      include: "locatorPathScopes",
+      exclude: "locatorPathExcludedScopes",
+      metadataOnly: "metadataOnlyLocatorPathScopes"
+    },
+    folder_id: {
+      include: "sourceScopeFolderAnyKeys",
+      exclude: "sourceScopeFolderNoneKeys",
+      metadataOnly: "metadataOnlySourceScopeFolderKeys"
+    }
+  };
+});
+
+// src/workers/readwise/tier-set.ts
+function createReadwiseTierLane(options) {
+  const env = options.env ?? process.env;
+  const secureDbPath = resolvedStorePath(READWISE_SOURCE_ID, "secure_local", env);
+  return createExistingStoreTierLane({
+    setId: READWISE_TIER_SET_ID,
+    store: options.store,
+    restingTier: READWISE_STORE_PLACEMENT.trustTier,
+    ...options.embeddingProvider ? { embeddingProvider: options.embeddingProvider } : {},
+    newLegs: {
+      secure_local: {
+        corpusId: READWISE_SECURE_LIBRARY_CORPUS_ID,
+        dbPath: secureDbPath,
+        create: (ledger) => openConnectorStore({ sourceId: READWISE_SOURCE_ID }, {
+          dbPath: secureDbPath,
+          corpusId: READWISE_SECURE_LIBRARY_CORPUS_ID,
+          family: "readwise",
+          trustDomain: "secure_local",
+          tierLedger: ledger
+        }, env),
+        ...options.secureEmbeddingProvider ? { embeddingProvider: options.secureEmbeddingProvider } : {}
+      }
+    },
+    ...options.secretLocations ? { secretLocations: options.secretLocations } : {},
+    ...options.tierClassification ? { tierClassification: options.tierClassification } : {},
+    ...options.onStoreOpened ? { onStoreOpened: options.onStoreOpened } : {}
+  });
+}
+var READWISE_SECURE_LIBRARY_CORPUS_ID = "secure_local.readwise.library", READWISE_TIER_SET_ID = "readwise.library";
+var init_tier_set2 = __esm(() => {
+  init_source_placement();
+  init_source_storage();
+  init_tiered_store_set();
+  init_connector2();
+});
+
+// src/workers/x-bookmarks/tier-set.ts
+function createXBookmarksTierLane(options) {
+  const env = options.env ?? process.env;
+  const secureDbPath = resolvedStorePath(X_BOOKMARKS_SOURCE_ID, "secure_local", env);
+  return createExistingStoreTierLane({
+    setId: X_BOOKMARKS_TIER_SET_ID,
+    store: options.store,
+    restingTier: X_BOOKMARKS_STORE_PLACEMENT.trustTier,
+    ...options.embeddingProvider ? { embeddingProvider: options.embeddingProvider } : {},
+    newLegs: {
+      secure_local: {
+        corpusId: X_BOOKMARKS_SECURE_CORPUS_ID,
+        dbPath: secureDbPath,
+        create: (ledger) => openConnectorStore({ sourceId: X_BOOKMARKS_SOURCE_ID }, {
+          dbPath: secureDbPath,
+          corpusId: X_BOOKMARKS_SECURE_CORPUS_ID,
+          family: "x",
+          trustDomain: "secure_local",
+          tierLedger: ledger
+        }, env),
+        ...options.secureEmbeddingProvider ? { embeddingProvider: options.secureEmbeddingProvider } : {}
+      }
+    },
+    ...options.secretLocations ? { secretLocations: options.secretLocations } : {},
+    ...options.tierClassification ? { tierClassification: options.tierClassification } : {},
+    ...options.onStoreOpened ? { onStoreOpened: options.onStoreOpened } : {}
+  });
+}
+var X_BOOKMARKS_SECURE_CORPUS_ID = "secure_local.x.bookmarks", X_BOOKMARKS_TIER_SET_ID = "x.bookmarks";
+var init_tier_set3 = __esm(() => {
+  init_source_placement();
+  init_source_storage();
+  init_tiered_store_set();
+  init_connector();
+});
+
+// src/workers/archive-import/lane.ts
+function archiveLaneLegs(lane) {
+  return [lane.secure, lane.internal, lane.public];
+}
+function archiveLaneStores(lane) {
+  return lane.set.openStores();
+}
+function createArchiveTierLane(options) {
+  const env = options.env ?? process.env;
+  const family = options.family;
+  const secureDbPath = archiveConnectorStoreDbPath("secure_local", family, env);
+  const ledger = openTierLedger({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID2 }, { dbPath: tieredStoreSetLedgerPath(secureDbPath) }, env);
+  const leg = (domain) => onDemandTierStore({
+    corpusId: archiveCorpusId(domain, family),
+    dbPath: archiveConnectorStoreDbPath(domain, family, env),
+    create: () => createArchiveConnectorStore(domain, family, env, { tierLedger: ledger }),
+    ...options.onStoreOpened ? { onOpened: options.onStoreOpened } : {}
+  });
+  const secure = leg("secure_local");
+  const internal = leg("internal");
+  const publicStore = leg("public_safe");
+  const secretLocations = options.openSecretLocations?.(secureDbPath);
+  const set = createTieredLaneSet({
+    setId: archiveTierSetId(family),
+    ledger,
+    tierClassification: ARCHIVE_TIER_CLASSIFICATION,
+    contentArrivesLaterFor: archiveContentArrivesLaterFor,
+    ...secretLocations ? { secretLocations } : {},
+    legs: {
+      public_safe: { onDemand: publicStore },
+      internal: { onDemand: internal },
+      secure_local: { onDemand: secure, legacy: true }
+    }
+  });
+  return {
+    family,
+    env,
+    set,
+    ledger,
+    secure,
+    internal,
+    public: publicStore,
+    ...secretLocations ? { secretLocations } : {}
+  };
+}
+function archiveTierMigrationLaneSpecs(env = process.env) {
+  return archiveImportFamilies().map((family) => {
+    const leg = (domain, legacy) => ({
+      corpusId: archiveCorpusId(domain, family),
+      dbPath: archiveConnectorStoreDbPath(domain, family, env),
+      family,
+      ...legacy ? { legacy: true } : {},
+      open: ({ readOnly, tierLedger }) => createArchiveConnectorStore(domain, family, env, { readOnly, tierLedger })
+    });
+    return {
+      sourceId: ARCHIVE_IMPORTS_SOURCE_ID2,
+      setId: archiveTierSetId(family),
+      tierClassification: ARCHIVE_TIER_CLASSIFICATION,
+      contentArrivesLaterFor: archiveContentArrivesLaterFor,
+      legs: {
+        public_safe: leg("public_safe", false),
+        internal: leg("internal", false),
+        secure_local: leg("secure_local", true)
+      }
+    };
+  });
+}
+var ARCHIVE_TIER_CLASSIFICATION, archiveContentArrivesLaterFor = (item) => item.deferredBytes !== undefined;
+var init_lane = __esm(() => {
+  init_source_storage();
+  init_tiered_store_set();
+  init_archive_formats();
+  init_state();
+  init_store();
+  ARCHIVE_TIER_CLASSIFICATION = Object.freeze({
+    holdContentUntilJudged: true
+  });
+});
+
+// src/workers/classification/tier-migration-lanes.ts
+import { existsSync as existsSync83 } from "node:fs";
+function installedTierMigrationLaneSpecs(env = process.env) {
+  const registryPath = handleRegistryPathFromEnv(env, true);
+  const mailAuthority = new FileSourceScopeAuthority({
+    ...registryPath ? { registryPath } : {},
+    mailPinnedHandle: () => env.OLYMPUS_SOURCE_INDEX_GMAIL_CREDENTIAL_HANDLE
+  });
+  return [
+    {
+      sourceId: "gmail.email",
+      ownerRuleSource: mailScopeTierOwnerRuleSource(mailAuthority),
+      setId: "gmail.email",
+      legs: {
+        public_safe: { corpusId: GMAIL_PUBLIC_CONNECTOR_CORPUS_ID, dbPath: resolvedStorePath("gmail.email", "public_safe", env), family: "email" },
+        internal: { corpusId: GMAIL_INTERNAL_CONNECTOR_CORPUS_ID, dbPath: resolvedStorePath("gmail.email", "internal", env), family: "email", legacy: true },
+        secure_local: { corpusId: GMAIL_SECURE_CONNECTOR_CORPUS_ID, dbPath: resolvedStorePath("gmail.email", "secure_local", env), family: "email", legacy: true }
+      }
+    },
+    {
+      sourceId: "google_drive.docs",
+      setId: "google_drive.docs",
+      legs: {
+        public_safe: { corpusId: GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID, dbPath: resolvedStorePath("google_drive.docs", "public_safe", env), family: "file" },
+        internal: { corpusId: GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID, dbPath: resolvedStorePath("google_drive.docs", "internal", env), family: "file", legacy: true },
+        secure_local: { corpusId: GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID, dbPath: resolvedStorePath("google_drive.docs", "secure_local", env), family: "file", legacy: true }
+      }
+    },
+    {
+      sourceId: DROPBOX_FILES_SOURCE_ID,
+      setId: DROPBOX_FILES_SOURCE_ID,
+      contentArrivesLater: true,
+      legs: {
+        public_safe: {
+          corpusId: DROPBOX_TIER_CORPUS_IDS.public_safe,
+          dbPath: resolvedStorePath(DROPBOX_FILES_SOURCE_ID, "public_safe", env),
+          family: "file",
+          open: ({ readOnly, tierLedger }) => createDropboxTierConnectorStore("public_safe", env, { readOnly, tierLedger })
+        },
+        internal: {
+          corpusId: DROPBOX_TIER_CORPUS_IDS.internal,
+          dbPath: resolvedStorePath(DROPBOX_FILES_SOURCE_ID, "internal", env),
+          family: "file",
+          open: ({ readOnly, tierLedger }) => createDropboxTierConnectorStore("internal", env, { readOnly, tierLedger })
+        },
+        secure_local: {
+          corpusId: DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID,
+          dbPath: resolvedStorePath(DROPBOX_FILES_SOURCE_ID, "secure_local", env),
+          family: "file",
+          legacy: true,
+          open: ({ readOnly }) => createDropboxConnectorStore(env, { readOnly })
+        }
+      }
+    },
+    {
+      sourceId: LOCAL_FILES_SOURCE_ID,
+      setId: LOCAL_FILES_SOURCE_ID,
+      contentArrivesLater: true,
+      legs: {
+        public_safe: {
+          corpusId: LOCAL_FILES_TIER_CORPUS_IDS.public_safe,
+          dbPath: resolvedStorePath(LOCAL_FILES_SOURCE_ID, "public_safe", env),
+          family: "file",
+          open: ({ readOnly, tierLedger }) => createLocalFilesTierConnectorStore("public_safe", env, { readOnly, tierLedger })
+        },
+        internal: {
+          corpusId: LOCAL_FILES_TIER_CORPUS_IDS.internal,
+          dbPath: resolvedStorePath(LOCAL_FILES_SOURCE_ID, "internal", env),
+          family: "file",
+          open: ({ readOnly, tierLedger }) => createLocalFilesTierConnectorStore("internal", env, { readOnly, tierLedger })
+        },
+        secure_local: {
+          corpusId: LOCAL_FILES_TIER_CORPUS_IDS.secure_local,
+          dbPath: resolvedStorePath(LOCAL_FILES_SOURCE_ID, "secure_local", env),
+          family: "file",
+          legacy: true,
+          open: ({ readOnly }) => createLocalFilesConnectorStore(env, { readOnly })
+        }
+      }
+    },
+    {
+      sourceId: TELEGRAM_MESSAGES_SOURCE_ID,
+      setId: TELEGRAM_MESSAGES_SOURCE_ID,
+      splitLayers: false,
+      legs: {
+        internal: { corpusId: INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID, dbPath: resolvedStorePath("telegram.messages", "internal", env), family: "chat", legacy: true },
+        secure_local: { corpusId: PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID2, dbPath: resolvedStorePath("telegram.messages", "secure_local", env), family: "chat", legacy: true }
+      }
+    },
+    {
+      sourceId: "readwise.library",
+      setId: READWISE_TIER_SET_ID,
+      legs: {
+        internal: {
+          corpusId: READWISE_LIBRARY_CORPUS_ID,
+          dbPath: resolvedStorePath("readwise.library", "internal", env),
+          family: "readwise",
+          legacy: true,
+          ...READWISE_STORE_PLACEMENT.trustTier ? { restingTier: READWISE_STORE_PLACEMENT.trustTier } : {}
+        },
+        secure_local: { corpusId: READWISE_SECURE_LIBRARY_CORPUS_ID, dbPath: resolvedStorePath("readwise.library", "secure_local", env), family: "readwise" }
+      }
+    },
+    {
+      sourceId: "x.bookmarks",
+      setId: X_BOOKMARKS_TIER_SET_ID,
+      legs: {
+        internal: {
+          corpusId: X_BOOKMARKS_CORPUS_ID,
+          dbPath: resolvedStorePath("x.bookmarks", "internal", env),
+          family: "x",
+          legacy: true,
+          ...X_BOOKMARKS_STORE_PLACEMENT.trustTier ? { restingTier: X_BOOKMARKS_STORE_PLACEMENT.trustTier } : {}
+        },
+        secure_local: { corpusId: X_BOOKMARKS_SECURE_CORPUS_ID, dbPath: resolvedStorePath("x.bookmarks", "secure_local", env), family: "x" }
+      }
+    },
+    {
+      sourceId: WHATSAPP_PERSONAL_SOURCE_ID,
+      setId: WHATSAPP_PERSONAL_SOURCE_ID,
+      splitLayers: false,
+      legs: {
+        internal: { corpusId: WHATSAPP_INTERNAL_CORPUS_ID, dbPath: resolvedStorePath("whatsapp.personal.messages", "internal", env), family: "chat" },
+        secure_local: { corpusId: WHATSAPP_LIVE_CORPUS_ID, dbPath: resolvedStorePath("whatsapp.personal.messages", "secure_local", env), family: "chat", legacy: true }
+      }
+    },
+    ...archiveTierMigrationLaneSpecs(env)
+  ];
+}
+function openTierMigrationLanes(specs, options) {
+  const readOnly = options.mode === "read";
+  const opened = [];
+  const lanes = [];
+  try {
+    for (const spec of specs) {
+      const legs = Object.entries(spec.legs);
+      if (!legs.some(([, leg]) => leg.dbPath !== ":memory:" && existsSync83(leg.dbPath)))
+        continue;
+      const secure = spec.legs.secure_local;
+      const account = { sourceId: spec.sourceId };
+      const ledger = openTierLedger(account, { dbPath: tieredStoreSetLedgerPath(secure.dbPath) });
+      opened.push(ledger);
+      const secretLocations = readOnly ? undefined : openSecretLocations(account, { dbPath: secretLocationsPathForStore(secure.dbPath) });
+      if (secretLocations)
+        opened.push(secretLocations);
+      const laneLegs = {};
+      for (const [domain, leg] of legs) {
+        const store = onDemandTierStore({
+          corpusId: leg.corpusId,
+          dbPath: leg.dbPath,
+          create: () => {
+            const created = leg.open ? leg.open({ readOnly, tierLedger: ledger }) : openConnectorStore(account, {
+              dbPath: leg.dbPath,
+              corpusId: leg.corpusId,
+              family: leg.family,
+              trustDomain: domain,
+              tierLedger: ledger,
+              ...readOnly ? { readOnly: true } : {}
+            });
+            opened.push(created);
+            return created;
+          }
+        });
+        laneLegs[domain] = {
+          onDemand: store,
+          ...leg.legacy ? { legacy: true } : {},
+          ...leg.restingTier ? { restingTier: leg.restingTier } : {}
+        };
+      }
+      const tierClassification = spec.tierClassification || options.tierClassification ? { ...options.tierClassification, ...spec.tierClassification } : undefined;
+      const set = createTieredLaneSet({
+        setId: spec.setId,
+        ledger,
+        legs: laneLegs,
+        ...spec.splitLayers === false ? { splitLayers: false } : {},
+        ...spec.contentArrivesLater ? { contentArrivesLater: true } : {},
+        ...spec.contentArrivesLaterFor ? { contentArrivesLaterFor: spec.contentArrivesLaterFor } : {},
+        ...tierClassification ? { tierClassification } : {},
+        ...options.ownerRulesPath ? { ownerRulesPath: options.ownerRulesPath } : {},
+        ...spec.ownerRuleSource ? { ownerRuleSource: spec.ownerRuleSource } : {},
+        ...secretLocations ? { secretLocations } : {}
+      });
+      lanes.push({ sourceId: spec.sourceId, set });
+    }
+  } catch (error) {
+    closeAll(opened);
+    throw error;
+  }
+  return { lanes, close: () => closeAll(opened) };
+}
+function closeAll(opened) {
+  for (const handle of [...opened].reverse()) {
+    try {
+      handle.close();
+    } catch {}
+  }
+}
+var init_tier_migration_lanes = __esm(() => {
+  init_source_placement();
+  init_source_scope_runtime();
+  init_connected_handles();
+  init_source_corpus_registry();
+  init_source_storage();
+  init_tiered_store_set();
+  init_connector_store2();
+  init_corpus_adapter3();
+  init_store2();
+  init_scope();
+  init_drive();
+  init_gmail();
+  init_connector2();
+  init_tier_set2();
+  init_corpus_adapter4();
+  init_store_sync2();
+  init_store_sync();
+  init_connector();
+  init_corpus_adapter();
+  init_tier_set3();
+  init_lane();
+  init_secret_locations();
+});
+
+// src/core/restore-held-content.ts
+import { existsSync as existsSync84, realpathSync as realpathSync20 } from "node:fs";
+import { resolve as resolve27 } from "node:path";
+function holdRestoredPersonalContent(env) {
+  const specs = installedTierMigrationLaneSpecs(env);
+  const roster = placedRosterStores(env);
+  const corpusById = new Map(defaultSourceCorpusRegistryConfig().corpora.map((corpus) => [corpus.corpusId, corpus]));
+  const known = new Set(specs.map((spec) => spec.sourceId));
+  for (const personal of roster) {
+    if (personal.trustDomain !== "internal")
+      continue;
+    const sourceId = corpusById.get(personal.corpusId).sourceId;
+    if (known.has(sourceId))
+      continue;
+    const secure = roster.find((corpus) => corpus.trustDomain === "secure_local" && corpusById.get(corpus.corpusId)?.sourceId === sourceId);
+    if (!secure)
+      continue;
+    specs.push({ sourceId, setId: sourceId, legs: { internal: personal, secure_local: secure } });
+    known.add(sourceId);
+  }
+  const mounts = declaredConnectorStoreMountPaths(env).filter((mount) => !hasFolderLayout(mount.sourceId));
+  const personalMounts = mounts.filter((mount) => mount.trustDomain === "internal" && existsSync84(mount.dbPath));
+  if (!existsSync84(accountFoldersRoot(env)) && personalMounts.length === 0 && !specs.some((spec) => spec.legs.internal && existsSync84(spec.legs.internal.dbPath) || existsSync84(tieredStoreSetLedgerPath(spec.legs.secure_local.dbPath))))
+    return;
+  const registry = readSourceRegistry(env);
+  const checked = new Set;
+  const checkedLedgers = new Set;
+  for (const spec of specs) {
+    const accounts = registry.accounts.filter((account) => account.source_id === spec.sourceId);
+    if (!accounts.some((account) => account.slot === DEFAULT_ACCOUNT_SLOT && account.state !== "active")) {
+      holdLane({ sourceId: spec.sourceId }, spec);
+    }
+    for (const account of accounts) {
+      if (account.slot === DEFAULT_ACCOUNT_SLOT || account.state !== "active" || account.layout !== "folder")
+        continue;
+      const legs = Object.fromEntries(legEntries(spec).map(([domain, leg]) => {
+        const name = isArchiveCorpusId(leg.corpusId, domain) ? `${leg.family}.${domain}` : domain;
+        return [domain, { ...leg, dbPath: accountStorePath(account, name, env) }];
+      }));
+      holdLane({ sourceId: spec.sourceId, slot: account.slot }, { ...spec, legs });
+    }
+  }
+  for (const personal of personalMounts) {
+    if (checked.has(realpathSync20(personal.dbPath)))
+      continue;
+    const destinations = mounts.filter((mount) => mount.sourceId === personal.sourceId && mount.trustDomain === "secure_local");
+    if (destinations.length !== 1 || destinations[0].dbPath === personal.dbPath) {
+      if (restoredConnectorStoreHasBody(personal.dbPath))
+        throw missingPrivateStore(personal.corpusId);
+      continue;
+    }
+    const secure = destinations[0];
+    const family = corpusById.get(personal.corpusId)?.family ?? "x-restored";
+    holdLane({ sourceId: personal.sourceId }, {
+      sourceId: personal.sourceId,
+      setId: personal.sourceId,
+      legs: { internal: { ...personal, family }, secure_local: { ...secure, family } }
+    });
+  }
+  for (const account of registry.accounts) {
+    if (known.has(account.source_id) || account.state !== "active" || account.layout !== "folder")
+      continue;
+    const path = accountStorePath(account, "internal", env);
+    if (existsSync84(path) && !checked.has(realpathSync20(path)) && restoredConnectorStoreHasBody(path)) {
+      throw missingPrivateStore(account.source_id);
+    }
+  }
+  function holdLane(account, spec) {
+    const personal = spec.legs.internal;
+    const path = personal && existsSync84(personal.dbPath) ? realpathSync20(personal.dbPath) : undefined;
+    if (path && checked.has(path))
+      return;
+    const holdBodies = !!(personal && path && restoredConnectorStoreHasBody(personal.dbPath));
+    const securePath = spec.legs.secure_local.dbPath;
+    const ledgerPath = tieredStoreSetLedgerPath(securePath);
+    if (holdBodies && personal && path) {
+      if (path === (existsSync84(securePath) ? realpathSync20(securePath) : resolve27(securePath)))
+        throw missingPrivateStore(personal.corpusId);
+      if (!tierLedgerIsWithin(tierStoreDataRoot(personal.dbPath), ledgerPath))
+        throw missingPrivateStore(personal.corpusId);
+    }
+    const existingLedger = existsSync84(ledgerPath) ? realpathSync20(ledgerPath) : undefined;
+    if (existingLedger && !tierLedgerIsWithin(tierStoreDataRoot(securePath), existingLedger)) {
+      throw missingPrivateStore(personal?.corpusId ?? spec.sourceId);
+    }
+    const ledgerSchema = existingLedger ? storeFileSchemaVersion(ledgerPath, TIER_LEDGER_SQLITE_STORE_ID) : INITIAL_RESTORED_LEDGER_SCHEMA;
+    if (holdBodies || existingLedger && ledgerSchema >= INITIAL_RESTORED_LEDGER_SCHEMA && !checkedLedgers.has(existingLedger)) {
+      holdLaneContent(env, account, spec, ledgerPath, ledgerSchema, holdBodies);
+      if (existingLedger)
+        checkedLedgers.add(existingLedger);
+    }
+    if (path)
+      checked.add(path);
+  }
+}
+function missingPrivateStore(corpusId) {
+  return new OperationError("config_error", `No Private store is configured for restored Personal store ${corpusId}.`);
+}
+function legEntries(spec) {
+  return Object.entries(spec.legs);
+}
+function holdLaneContent(env, account, spec, ledgerPath, ledgerSchema, holdBodies) {
+  const restoredStoreSchema = holdBodies ? storeFileSchemaVersion(spec.legs.internal.dbPath, SQLITE_STORE_ID) : undefined;
+  const ledger = openTierLedger(account, { dbPath: ledgerPath, restoreSchemaVersion: ledgerSchema }, env);
+  const stores = [];
+  let queue;
+  try {
+    const snifferPath = tierSnifferPathForLedger(ledgerPath);
+    if (holdBodies && existsSync84(snifferPath))
+      queue = openTierSniffer(account, { dbPath: snifferPath, restoreQueue: true }, env);
+    const legs = legEntries(spec).map(([trustDomain, leg]) => {
+      return {
+        trustDomain,
+        corpusId: leg.corpusId,
+        exists: () => existsSync84(leg.dbPath),
+        ...leg.restingTier ? { restingTier: leg.restingTier } : {},
+        open() {
+          const schema = existsSync84(leg.dbPath) ? storeFileSchemaVersion(leg.dbPath, SQLITE_STORE_ID) : restoredStoreSchema;
+          if (schema === undefined)
+            throw new Error("A restored tier store is missing.");
+          const store = openConnectorStore(account, {
+            dbPath: leg.dbPath,
+            corpusId: leg.corpusId,
+            family: leg.family,
+            trustDomain,
+            tierLedger: ledger,
+            restoreSchemaVersion: schema
+          }, env);
+          stores.push(store);
+          return store;
+        }
+      };
+    });
+    const set = new TieredStoreSet({
+      setId: spec.setId,
+      ledger,
+      legs,
+      registerWithLedger: false,
+      skipOpeningMaintenance: true,
+      ...spec.splitLayers === false ? { splitLayers: false } : {}
+    });
+    const personal = holdBodies ? set.store("internal") : undefined;
+    const binding = personal?.tierSetBinding();
+    if (binding && binding.ledgerId !== ledger.ledgerId())
+      throw new Error("The restored Personal store is bound to a different privacy ledger.");
+    retireRestoredTierLowerings(set);
+    if (personal)
+      placeRestoredBodies(set, personal, queue);
+  } finally {
+    for (const store of stores.reverse())
+      store.close();
+    queue?.close();
+    ledger.close();
+  }
+}
+function placeRestoredBodies(set, personal, queue) {
+  const { ledger } = set;
+  let afterItemPk;
+  do {
+    const page = personal.migrationItemsPage(afterItemPk === undefined ? {} : { afterItemPk });
+    for (const item of page.items) {
+      const { identity } = item;
+      const text = item.chunks.map((chunk) => chunk.text).join("");
+      if (!text.trim())
+        continue;
+      const current = ledger.getCurrent(identity);
+      const override = ledger.observeOverrideText(identity);
+      const copies = ledger.copies(identity);
+      const copy = copies.find((copy) => copy.corpusId === personal.corpusId && copy.layers !== "metadata");
+      if (override?.kind !== "not_secret" && (override?.tier === "secrets" || current?.metadataTier === "secrets" || current?.contentTier === "secrets" || current?.targetMetadataTier === "secrets" || current?.targetContentTier === "secrets")) {
+        const record = set.adoptLegacyItem(identity);
+        const { copies: hidden } = ledger.flipToSecrets(identity, { expectedGeneration: record.generation });
+        if (!hidden.some((copy) => copy.corpusId === personal.corpusId)) {
+          personal.tombstoneCopy(identity, { trustTier: "S5", connectorId: TIER_MOVE_CONNECTOR_ID });
+          personal.durabilityBarrier();
+        }
+        settleSecretsCopies({
+          ledger,
+          identity,
+          copies: hidden,
+          connectorId: TIER_MOVE_CONNECTOR_ID,
+          restoreQueue: true,
+          storeFor: (corpusId) => {
+            const domain = set.domainForCorpus(corpusId);
+            return domain && set.store(domain);
+          }
+        });
+        continue;
+      }
+      const resuming = current?.state === "moving" && copy?.state === "superseded" && copy.supersededByGeneration === current.generation + 1 && (current.reasons.includes(HELD_UNTIL_JUDGED_REASON) && current.contentPending || !!ownerOverrideSecretReview(current.reasons));
+      if (current?.routed && !resuming && copy?.state !== "current")
+        continue;
+      const ownerTier = override?.kind === "tier" ? override.tier : undefined;
+      const photo = isImageMediaType(item.mimeType) ? personal.imageJudgmentForItem(identity) : undefined;
+      if (current?.state === "current" && !current.metadataPending && (current.contentTier === "private" || current.contentTier === "public") && (current.metadataTier === "private" || current.metadataTier === "public") && ownerTier !== "secure" && (current.decidedBy !== "override" || ownerTier !== undefined) && personalContentAuthorized(current, text, override?.kind === "not_secret", override, photo && imageJudgmentSignal(photo)))
+        continue;
+      const record = set.adoptLegacyItem(identity);
+      const privateCopy = ledger.copies(identity).find((copy) => copy.trustDomain === "secure_local" && copy.state === "current" && copy.layers !== "metadata");
+      const privateText = privateCopy && set.store("secure_local")?.exportItemCopy(identity)?.chunks.map((chunk) => chunk.boundedText).join("");
+      if (privateText && privateText !== text) {
+        throw new OperationError("config_error", "The restored tier stores contain different active bodies for the same item.");
+      }
+      queue?.deleteItemQuestions(identity);
+      const floor = ownerTier === "secure" ? "secure" : "public";
+      const names = ownerTier === "private" || ownerTier === "public" ? personal.exportItemNames(identity) : undefined;
+      const scanned = names && override ? classifyItemTiers({ signals: storedSignals(names), text }, { override }) : undefined;
+      const decision = scanned && ownerOverrideSecretReview(scanned.reasons) ? {
+        ...scanned,
+        metadataTier: maxTier(record.metadataTier, scanned.metadataTier)
+      } : {
+        metadataTier: heldTier(floor, record.metadataTier, record.targetMetadataTier),
+        contentTier: heldTier(floor, record.contentTier, record.targetContentTier),
+        decidedBy: "default",
+        reasons: [
+          ...record.reasons.filter((reason) => !reason.startsWith("content:") && !reason.startsWith("override:")),
+          HELD_UNTIL_JUDGED_REASON,
+          "content:sniffer:undecided:undecided"
+        ],
+        state: "pending",
+        contentRead: true,
+        metadataPending: record.metadataPending,
+        contentPending: true,
+        metadataForced: record.metadataForced && record.decidedBy !== "override",
+        metadataFlagged: record.metadataFlagged,
+        engineVersion: TIER_CLASSIFIER_VERSION,
+        mapRevision: TIER_MAP_REVISION,
+        snifferId: "undecided"
+      };
+      const pending = resuming ? record : ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision)).record;
+      moveRestoredItemToHold({ set, identity, decision, expectedGeneration: pending.generation });
+    }
+    afterItemPk = page.nextAfterItemPk;
+  } while (afterItemPk !== undefined);
+}
+function heldTier(floor, current, target) {
+  const tier = maxTier(floor, maxTier(current, target ?? current));
+  return tier === "secrets" ? "secure" : tier;
+}
+var INITIAL_RESTORED_LEDGER_SCHEMA = 12;
+var init_restore_held_content = __esm(() => {
+  init_archive_formats();
+  init_olympus_layout();
+  init_operation_error();
+  init_source_corpus_registry();
+  init_source_placement();
+  init_source_registry();
+  init_source_storage();
+  init_tier_classifier();
+  init_tier_ledger();
+  init_tier_ledger_path();
+  init_tier_set_binding();
+  init_tier_migration_lanes();
+  init_local_index();
+  init_secrets_disposition();
+  init_stored_names();
+  init_tier_move();
+  init_tiered_store_set();
+  init_media_judge();
+});
+
 // src/core/engine-store-copies.ts
 function withStoppedEngine(env, what, step, waitMs = ENGINE_STORES_OWNER_WAIT_MS) {
   try {
@@ -149166,7 +152308,7 @@ function withStoppedEngine(env, what, step, waitMs = ENGINE_STORES_OWNER_WAIT_MS
 }
 function copyEngineStores(env, options = {}) {
   withStoppedEngine(env, "copied", () => {
-    snapshotDataRoot(env, { ...options.log ? { log: options.log } : {}, ...options.deps ? { deps: options.deps } : {} });
+    snapshotDataRoot(env, { ...options, afterRestore: () => holdRestoredPersonalContent(env) });
   }, options.ownerWaitMs ?? ENGINE_STORES_OWNER_WAIT_MS);
 }
 function restoreEngineStores(env, options = {}) {
@@ -149176,7 +152318,7 @@ function restoreEngineStores(env, options = {}) {
 `));
   return withStoppedEngine(env, "put back", () => {
     log(putBackManifest(env, "before put-back"));
-    const told = putDataRootBack(env, options.deps ? { deps: options.deps } : {});
+    const told = putDataRootBack(env, { ...options, afterRestore: () => holdRestoredPersonalContent(env) });
     log(putBackManifest(env, "after put-back"));
     return told;
   }, options.ownerWaitMs ?? ENGINE_STORES_OWNER_WAIT_MS);
@@ -149197,6 +152339,7 @@ var init_engine_store_copies = __esm(() => {
   init_data_owner_lock();
   init_operation_error();
   init_put_back_manifest();
+  init_restore_held_content();
 });
 
 // src/core/engine-helper-names.ts
@@ -149467,7 +152610,7 @@ var init_update_check = __esm(() => {
 
 // src/core/managed-tools.ts
 import { execFile as execFile4 } from "node:child_process";
-import { createHash as createHash82, randomUUID as randomUUID30 } from "node:crypto";
+import { createHash as createHash82, randomUUID as randomUUID31 } from "node:crypto";
 import {
   accessSync as accessSync9,
   constants as constants16,
@@ -149475,10 +152618,10 @@ import {
   mkdirSync as mkdirSync55,
   readFileSync as readFileSync70,
   readdirSync as readdirSync23,
-  realpathSync as realpathSync20,
+  realpathSync as realpathSync21,
   renameSync as renameSync15,
   rmSync as rmSync33,
-  statSync as statSync36,
+  statSync as statSync37,
   symlinkSync,
   writeFileSync as writeFileSync19,
   chmodSync as chmodSync33
@@ -149542,7 +152685,7 @@ function currentUid(host) {
 }
 function privatelyOwned(path, uid, kind) {
   try {
-    const stats = statSync36(path);
+    const stats = statSync37(path);
     if (kind === "dir" ? !stats.isDirectory() : !stats.isFile())
       return false;
     if (uid !== undefined && stats.uid !== uid)
@@ -149592,13 +152735,13 @@ function managedToolExecutable(tool, host = {}) {
   if (!manifest || manifest.tool !== tool || manifest.version !== pin.version || manifest.platform !== platformKey || manifest.sha256 !== asset.sha256)
     return;
   try {
-    const realDir = realpathSync20(versionDir);
+    const realDir = realpathSync21(versionDir);
     for (const required of new Set([...asset.required, asset.executable])) {
       if (!trustedInside(realDir, join113(versionDir, required), uid, versionDir))
         return;
     }
     verifyPinnedFiles(versionDir, asset, uid, pin.label, tool);
-    const real = realpathSync20(join113(versionDir, asset.executable));
+    const real = realpathSync21(join113(versionDir, asset.executable));
     accessSync9(real, constants16.X_OK);
     return real;
   } catch {
@@ -149623,7 +152766,7 @@ function trustedInside(realDir, path, uid, versionDir) {
   }
   let real;
   try {
-    real = realpathSync20(path);
+    real = realpathSync21(path);
   } catch {
     return false;
   }
@@ -149693,13 +152836,13 @@ function earlierManagedFolders(tool, host) {
 async function adhocSignUnsigned(staging, asset, platformKey, run, label, tool) {
   if (platformKey !== "darwin-arm64" || !asset.adhocSign?.length)
     return [];
-  const realStaging = realpathSync20(staging);
+  const realStaging = realpathSync21(staging);
   const signed = [];
   for (const relative of asset.adhocSign) {
     const file = join113(staging, relative);
     let real;
     try {
-      real = realpathSync20(file);
+      real = realpathSync21(file);
     } catch {
       throw new ManagedToolsError("archive_incomplete", `The ${label} download is missing ${relative}, so nothing was installed.`, tool);
     }
@@ -149816,7 +152959,7 @@ async function installOne(tool, pin, platformKey, root, uid, options, lease) {
     return { tool, version: pin.version, outcome: "already_installed", executable: existing };
   const toolDir = join113(root, tool);
   const versionDir = join113(toolDir, pin.version);
-  const id = randomUUID30();
+  const id = randomUUID31();
   const download = join113(toolDir, `.download-${id}`);
   const staging = join113(toolDir, `.staging-${id}`);
   try {
@@ -150188,13 +153331,13 @@ async function extractVerifiedArchive(archivePath, staging, asset, tool) {
     mkdirs(posix3.dirname(entry.target));
     symlinkSync(entry.linkTarget, join113(staging, entry.target));
   }
-  const realStaging = realpathSync20(staging);
+  const realStaging = realpathSync21(staging);
   for (const entry of planned) {
     if (entry.type !== "symlink")
       continue;
     let real;
     try {
-      real = realpathSync20(join113(staging, entry.target));
+      real = realpathSync21(join113(staging, entry.target));
     } catch {
       throw new ManagedToolsError("unsafe_archive", `The archive has a link that leads nowhere (${entry.path}).`, tool);
     }
@@ -151714,7 +154857,7 @@ import { execFile as execFile5 } from "node:child_process";
 import { promisify as promisify2 } from "node:util";
 import { readFile as readFile15, stat as fileStat } from "node:fs/promises";
 import { createHash as createHash83 } from "node:crypto";
-import { lstatSync as lstatSync42, readFileSync as readFileSync72, readlinkSync as readlinkSync4, readdirSync as readdirSync25, realpathSync as realpathSync21 } from "node:fs";
+import { lstatSync as lstatSync42, readFileSync as readFileSync72, readlinkSync as readlinkSync4, readdirSync as readdirSync25, realpathSync as realpathSync22 } from "node:fs";
 import { dirname as dirname89, join as join115 } from "node:path";
 function record(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
@@ -151879,7 +155022,7 @@ async function launcherPath(env) {
     if (!path)
       continue;
     try {
-      if (realpathSync21(path) !== path)
+      if (realpathSync22(path) !== path)
         continue;
       let current = path;
       while (true) {
@@ -152062,8 +155205,8 @@ var init_zkapi_confinement_linux = __esm(() => {
 
 // src/core/consult-transport-zkapi.ts
 import { spawn as spawn8, execFileSync as execFileSync5 } from "node:child_process";
-import { createHash as createHash84, randomUUID as randomUUID31 } from "node:crypto";
-import { accessSync as accessSync10, chmodSync as chmodSync35, closeSync as closeSync30, constants as constants17, existsSync as existsSync83, mkdirSync as mkdirSync56, mkdtempSync as mkdtempSync4, readdirSync as readdirSync26, readFileSync as readFileSync73, readlinkSync as readlinkSync5, realpathSync as realpathSync22, rmSync as rmSync35, statSync as statSync37, writeFileSync as writeFileSync21 } from "node:fs";
+import { createHash as createHash84, randomUUID as randomUUID32 } from "node:crypto";
+import { accessSync as accessSync10, chmodSync as chmodSync35, closeSync as closeSync30, constants as constants17, existsSync as existsSync85, mkdirSync as mkdirSync56, mkdtempSync as mkdtempSync4, readdirSync as readdirSync26, readFileSync as readFileSync73, readlinkSync as readlinkSync5, realpathSync as realpathSync23, rmSync as rmSync35, statSync as statSync38, writeFileSync as writeFileSync21 } from "node:fs";
 import { createConnection as createConnection4, createServer as createServer4 } from "node:net";
 import { homedir as homedir32, tmpdir as tmpdir12 } from "node:os";
 import { delimiter as delimiter7, dirname as dirname90, isAbsolute as isAbsolute33, join as join116, resolve as resolvePath } from "node:path";
@@ -152262,7 +155405,7 @@ function defaultZkapiConfinement(host = {}) {
   const platform = host.platform ?? process.platform;
   if (platform === "linux")
     return linuxZkapiConfinement(host);
-  if (platform === "darwin" && (host.sandboxAvailable ?? existsSync83("/usr/bin/sandbox-exec"))) {
+  if (platform === "darwin" && (host.sandboxAvailable ?? existsSync85("/usr/bin/sandbox-exec"))) {
     const level = confinementLevel(DARWIN_POLICY);
     return {
       level,
@@ -152309,7 +155452,7 @@ function utcDay(now) {
   return now.toISOString().slice(0, 10);
 }
 function readState8(path) {
-  if (!existsSync83(path))
+  if (!existsSync85(path))
     return;
   const parsed = JSON.parse(readFileSync73(path, "utf8"));
   if (parsed.version !== 1 || typeof parsed.day !== "string" || !Number.isInteger(parsed.count) || parsed.count < 0 || !Number.isInteger(parsed.reservedMicroUsd) || parsed.reservedMicroUsd < 0) {
@@ -152332,7 +155475,7 @@ function zkapiWalletDirectory(env) {
   const configured = env.ZKAPI_CLIENTD_CONFIG_DIR?.trim() || env.OA_CHAT_CONFIG_DIR?.trim() || (process.platform === "darwin" ? join116(home, "Library", "Application Support", "zkapi-clientd") : join116(env.XDG_CONFIG_HOME?.trim() || join116(home, ".config"), "zkapi-clientd"));
   const absolute = resolvePath(configured);
   try {
-    return realpathSync22(absolute);
+    return realpathSync23(absolute);
   } catch {
     return absolute;
   }
@@ -152688,7 +155831,7 @@ function zkapiConsultInFlightOnDisk(statePath) {
 }
 function zkapiRunningSince(statePath) {
   try {
-    return statSync37(statePath).mtime.toISOString();
+    return statSync38(statePath).mtime.toISOString();
   } catch {
     return "an unknown time";
   }
@@ -152772,7 +155915,7 @@ function childEnvironment(env) {
 function daemonEnvironment(base, daemonExecutable) {
   let real = daemonExecutable;
   try {
-    real = realpathSync22(daemonExecutable);
+    real = realpathSync23(daemonExecutable);
   } catch {}
   const installBin = dirname90(real);
   const rest = (base.PATH ?? "").split(delimiter7).filter((entry) => entry && entry !== installBin);
@@ -152824,7 +155967,7 @@ function resolveExecutable(name, explicit, env, platform = process.platform, tru
   for (const candidate of candidates) {
     try {
       accessSync10(candidate, constants17.X_OK);
-      if (statSync37(candidate).isFile())
+      if (statSync38(candidate).isFile())
         return candidate;
     } catch {}
   }
@@ -153424,7 +156567,7 @@ async function runSession(recovery, options, statePath, bridge, sent, clock, sta
     return refuse("tor_port_busy");
   if (sessionSignal.aborted)
     return refuse(abortCause);
-  const sessionId = randomUUID31();
+  const sessionId = randomUUID32();
   const workDir = mkdtempSync4(join116(tmpdir12(), "olympus-zkapi-"));
   chmodSync35(workDir, 448);
   const watchdog = join116(workDir, "watchdog.cjs");
@@ -154308,8 +157451,8 @@ process.stdin.on('end', () => { if (!child) process.exit(71); });
 setInterval(() => { if (process.ppid !== expectedParent) cleanup(); }, 500);
 `;
   DEFAULT_EXECUTABLE_TRUST = {
-    realpath: (path) => realpathSync22(path),
-    stat: (path) => statSync37(path),
+    realpath: (path) => realpathSync23(path),
+    stat: (path) => statSync38(path),
     executable: (path) => {
       try {
         accessSync10(path, constants17.X_OK);
@@ -154342,7 +157485,7 @@ setInterval(() => { if (process.ppid !== expectedParent) cleanup(); }, 500);
 // src/core/engine-service.ts
 import { spawn as spawn9, spawnSync as spawnSync14 } from "node:child_process";
 import { createHash as createHash85, randomBytes as randomBytes25 } from "node:crypto";
-import { existsSync as existsSync84, lstatSync as lstatSync43, readdirSync as readdirSync27, readFileSync as readFileSync74, renameSync as renameSync16, rmSync as rmSync36, statSync as statSync38 } from "node:fs";
+import { existsSync as existsSync86, lstatSync as lstatSync43, readdirSync as readdirSync27, readFileSync as readFileSync74, renameSync as renameSync16, rmSync as rmSync36, statSync as statSync39 } from "node:fs";
 import { homedir as homedir33, platform as osPlatform3 } from "node:os";
 import { basename as basename18, dirname as dirname91, isAbsolute as isAbsolute34, join as join117, resolve as resolvePath2 } from "node:path";
 function enginePaths(homeDir) {
@@ -154534,7 +157677,7 @@ function defaultEngineConfig() {
   };
 }
 function readEngineConfig(path) {
-  if (!existsSync84(path))
+  if (!existsSync86(path))
     return;
   let parsed;
   try {
@@ -154611,7 +157754,7 @@ function preflightMaintenance(options) {
   const paths = engineServicePaths(options);
   if (paths.linux) {
     preflightLinuxEngineLayout(paths.linux);
-    return existsSync84(paths.linux.receiptPath);
+    return existsSync86(paths.linux.receiptPath);
   }
   assertDarwin(options.platform);
   preflightEnginePaths(absolute2(options.homeDir ?? homedir33(), "home directory"), paths);
@@ -154672,7 +157815,7 @@ function installEngineUnderFence(options = {}) {
     assertDaemonProgramUnchanged(paths, program);
   const warnings = engineConflictWarnings(homeDir, "darwin");
   const privacyState = resolveInstallationPrivacyState({ homeDir, paths, env: options.env ?? process.env });
-  const sovereigntyBlocker = existsSync84(paths.sovereigntyPath) || privacyState.state === "not_installed" ? undefined : privacyState.reason ?? "An existing privacy policy is preserved.";
+  const sovereigntyBlocker = existsSync86(paths.sovereigntyPath) || privacyState.state === "not_installed" ? undefined : privacyState.reason ?? "An existing privacy policy is preserved.";
   const base = {
     ok: true,
     label: paths.label,
@@ -154691,7 +157834,7 @@ function installEngineUnderFence(options = {}) {
       wrote_plist: false,
       wrote_config: false,
       wrote_worker_env: false,
-      sovereignty: existsSync84(paths.sovereigntyPath) ? { action: "present", path: paths.sovereigntyPath } : sovereigntyBlocker ? { action: "skipped", path: paths.sovereigntyPath, reason: sovereigntyBlocker } : { action: "would_seed", path: paths.sovereigntyPath, preset: STANDALONE_SOVEREIGNTY_PRESET },
+      sovereignty: existsSync86(paths.sovereigntyPath) ? { action: "present", path: paths.sovereigntyPath } : sovereigntyBlocker ? { action: "skipped", path: paths.sovereigntyPath, reason: sovereigntyBlocker } : { action: "would_seed", path: paths.sovereigntyPath, preset: STANDALONE_SOVEREIGNTY_PRESET },
       action: "dry_run"
     };
   }
@@ -154965,7 +158108,7 @@ async function verifyEngine(options = {}) {
   if (normalizedPlatform(options.platform) !== "linux")
     assertDarwin(options.platform);
   const paths = engineServicePaths(options);
-  if (!existsSync84(paths.plistPath)) {
+  if (!existsSync86(paths.plistPath)) {
     throw new OperationError("config_error", "The engine is not installed.", "Run olympus engine install.");
   }
   const expectedBuild = expectedEngineBuild(options);
@@ -155018,7 +158161,7 @@ function preflightEnginePaths(homeDir, paths = enginePaths(homeDir), ownerUid = 
     let problem;
     try {
       assertManagedPathParentsSync(homeDir, dir, label);
-      const stat = existsSync84(dir) || isSymlink(dir) ? lstatSync43(dir) : undefined;
+      const stat = existsSync86(dir) || isSymlink(dir) ? lstatSync43(dir) : undefined;
       if (stat && (stat.isSymbolicLink() || !stat.isDirectory()))
         problem = `${dir} is not a real folder (a symbolic link or a file).`;
       else if (stat && ownerUid !== undefined && stat.uid !== ownerUid)
@@ -155043,7 +158186,7 @@ function preflightEnginePaths(homeDir, paths = enginePaths(homeDir), ownerUid = 
     } catch (error) {
       throw new OperationError("config_error", `Olympus cannot install here: ${error instanceof Error ? error.message : String(error)}`, `Olympus keeps ${label} files in real directories it can lock down. Replace the symbolic link or file at that path with a directory (or remove it), then run olympus engine install again. Nothing was changed.`);
     }
-    if (!existsSync84(path))
+    if (!existsSync86(path))
       continue;
     const stat = lstatSync43(path);
     if (!stat.isFile() || stat.isSymbolicLink()) {
@@ -155064,7 +158207,7 @@ function runningBuildDiffers(statusPath, build) {
   }
 }
 function seedEngineSovereignty(path) {
-  if (existsSync84(path))
+  if (existsSync86(path))
     return;
   writeSovereigntyConfigFile({ config: createPendingPrivacyPolicy(), path });
   return STANDALONE_SOVEREIGNTY_PRESET;
@@ -155072,18 +158215,18 @@ function seedEngineSovereignty(path) {
 function resolveInstallationPrivacyState(input = {}) {
   const env = { ...input.env ?? process.env, HOME: input.homeDir ?? input.env?.HOME ?? homedir33() };
   const paths = input.paths ?? engineServicePaths({ env });
-  if (existsSync84(paths.sovereigntyPath)) {
+  if (existsSync86(paths.sovereigntyPath)) {
     const policy = validateSovereigntyConfig(JSON.parse(readFileSync74(paths.sovereigntyPath, "utf8")));
     return { state: isPendingPrivacyPolicy(policy) ? "pending" : "configured" };
   }
-  if (existsSync84(paths.configPath) || existsSync84(paths.plistPath))
+  if (existsSync86(paths.configPath) || existsSync86(paths.plistPath))
     return {
       state: "configured",
       reason: "An existing engine installation has no policy file; its current policy is preserved."
     };
   const platform = paths.linux ? "linux" : "darwin";
   const worker = workerServicePaths(platform, env.HOME, env);
-  if (existsSync84(worker.unitPath)) {
+  if (existsSync86(worker.unitPath)) {
     const workerEnv = environmentWithWorkerSetupEnv({ env, workerEnvPath: worker.envPath });
     const config = loadConfig(workerEnv);
     const policy = loadSovereigntyEngine({
@@ -155103,7 +158246,7 @@ function resolveInstallationPrivacyState(input = {}) {
 }
 function engineSovereigntySeedBlocker(input) {
   try {
-    if (existsSync84(input.workerEnvPath)) {
+    if (existsSync86(input.workerEnvPath)) {
       const key = ENV_POLICY_KEY.exec(readFileSync74(input.workerEnvPath, "utf8"))?.[1];
       if (key)
         return `${input.workerEnvPath} already sets ${key}, which chooses this worker's models and privacy routes.`;
@@ -155112,10 +158255,10 @@ function engineSovereigntySeedBlocker(input) {
     return `${input.workerEnvPath} could not be read to check for an existing policy.`;
   }
   const legacy = workerServicePaths(input.platform ?? (process.platform === "linux" ? "linux" : "darwin"), input.homeDir, input.env).unitPath;
-  if (existsSync84(legacy))
+  if (existsSync86(legacy))
     return `the worker service from olympus worker install (${legacy}) already runs Olympus with its own environment.`;
   const openclawConfig = openClawConfigPath(input.homeDir, input.env ?? process.env);
-  if (existsSync84(openclawConfig)) {
+  if (existsSync86(openclawConfig)) {
     let text;
     try {
       text = readFileSync74(openclawConfig, "utf8");
@@ -155138,7 +158281,7 @@ function openClawConfigHasOlympus(text, stateDir) {
       return false;
     const installed = Boolean(plugins?.installs && Object.hasOwn(plugins.installs, "olympus"));
     const loaded = Array.isArray(plugins?.load?.paths) && plugins.load.paths.some((path) => typeof path === "string" && /olympus/i.test(path));
-    return installed || loaded || existsSync84(join117(stateDir, "extensions", "olympus"));
+    return installed || loaded || existsSync86(join117(stateDir, "extensions", "olympus"));
   } catch {
     return /["']?\bolympus\b["']?\s*:/.test(text);
   }
@@ -155160,7 +158303,7 @@ function uninstallEngineUnderFence(options = {}) {
   if (paths.engineManager === "daemon" && launchctlLoaded(exec, serviceTarget(options.uid)))
     mustSucceed(exec("launchctl", ["bootout", serviceTarget(options.uid)]), "stop the login engine");
   let removed = false;
-  if (existsSync84(agentPath)) {
+  if (existsSync86(agentPath)) {
     const stat = lstatSync43(agentPath);
     if (!stat.isFile() || stat.isSymbolicLink()) {
       throw new OperationError("config_error", `${paths.plistPath} is not a regular file; remove it by hand.`);
@@ -155191,7 +158334,7 @@ function engineKeptItems(paths) {
     { path: paths.modelsDir, what: "downloaded built-in models", bytes: directoryBytes(paths.modelsDir) },
     { path: paths.remoteAccessDir, what: "this Mac's relay registration and keys; ChatGPT stays linked until you disconnect it or delete this data" }
   ];
-  return candidates.filter((item) => existsSync84(item.path));
+  return candidates.filter((item) => existsSync86(item.path));
 }
 function directoryBytes(path, budget = { entries: 20000 }) {
   let total = 0;
@@ -155245,7 +158388,7 @@ function startEngine(options = {}) {
   assertDarwin(options.platform);
   const homeDir = absolute2(options.homeDir ?? homedir33(), "home directory");
   const paths = engineServicePaths({ ...options, homeDir, platform: "darwin" });
-  if (!existsSync84(paths.plistPath)) {
+  if (!existsSync86(paths.plistPath)) {
     throw new OperationError("config_error", "The engine is not installed.", "Run olympus engine install.");
   }
   const exec = options.exec ?? defaultExec3;
@@ -155414,7 +158557,7 @@ function recoverInterruptedHelperSwap(paths, deps = {}) {
       } catch {
         return false;
       }
-    }).sort((a, b) => statSync38(b).mtimeMs - statSync38(a).mtimeMs)[0];
+    }).sort((a, b) => statSync39(b).mtimeMs - statSync39(a).mtimeMs)[0];
     if (aside) {
       try {
         rename(aside, target);
@@ -155467,14 +158610,14 @@ function installedProgram(plistPath) {
 function inspectEngine(options = {}) {
   const homeDir = absolute2(options.homeDir ?? homedir33(), "home directory");
   const paths = engineServicePaths(options);
-  const installed = existsSync84(paths.plistPath);
+  const installed = existsSync86(paths.plistPath);
   const base = {
     ...paths.engineManager ? { manager: paths.engineManager } : {},
     label: paths.label,
     installed,
     plist_path: paths.plistPath,
     config_path: paths.configPath,
-    config_present: existsSync84(paths.configPath),
+    config_present: existsSync86(paths.configPath),
     log_path: paths.logPath,
     error_log_path: paths.errorLogPath
   };
@@ -155570,7 +158713,7 @@ function engineConflictWarnings(homeDir, platform = process.platform, env = proc
   const warnings = [];
   const linux = platform === "linux";
   const legacy = workerServicePaths(linux ? "linux" : "darwin", homeDir, env).unitPath;
-  if (existsSync84(legacy)) {
+  if (existsSync86(legacy)) {
     warnings.push(`The worker ${linux ? "user service" : "LaunchAgent"} from olympus worker install is present (${legacy}); ${linux ? "it competes for the owner socket" : "it serves the same port"}. Run olympus worker uninstall so the engine owns the worker.`);
   }
   return warnings;
@@ -155629,7 +158772,7 @@ function defaultExec3(command, args) {
   };
 }
 function writeIfChanged(path, text) {
-  if (existsSync84(path)) {
+  if (existsSync86(path)) {
     const stat = lstatSync43(path);
     if (!stat.isFile() || stat.isSymbolicLink()) {
       throw new OperationError("config_error", `${path} is not a regular file; remove it by hand.`);
@@ -155654,7 +158797,7 @@ function resolveBun2(explicit) {
     if (!candidate || !isAbsolute34(candidate) || !isBunName(candidate))
       continue;
     try {
-      if (statSync38(candidate).isFile())
+      if (statSync39(candidate).isFile())
         return candidate;
     } catch {}
   }
@@ -155680,7 +158823,7 @@ function assertOlympusPackage(root, label) {
 }
 function assertFile(path, message) {
   try {
-    if (statSync38(path).isFile())
+    if (statSync39(path).isFile())
       return;
   } catch {}
   throw new OperationError("config_error", message);
@@ -155864,9 +159007,9 @@ function requestMacServerMode(enable, options = {}) {
 }
 async function runMacServerModeChange(enable, options = {}) {
   const paths = engineServicePaths(options);
-  const desktopAgent = !enable && existsSync84(serverModeAgentPath(paths));
+  const desktopAgent = !enable && existsSync86(serverModeAgentPath(paths));
   const since = (options.health?.now ?? Date.now)();
-  const needsHandoff = paths.engineManager === "daemon" !== enable || enable && existsSync84(enginePaths(options.homeDir ?? homedir33()).plistPath);
+  const needsHandoff = paths.engineManager === "daemon" !== enable || enable && existsSync86(enginePaths(options.homeDir ?? homedir33()).plistPath);
   try {
     if (desktopAgent)
       writePrivateFileAtomicSync(serverModeResultPath(paths), JSON.stringify({ pending: true, pid: process.pid, message: "Your Mac will ask for an administrator’s password. Olympus will reconnect here when the change is finished." }));
@@ -155890,7 +159033,7 @@ function macComputerSetupView() {
   if (process.platform !== "darwin" || process.env.OLYMPUS_ENGINE_HOST !== "1")
     return {};
   const paths = engineServicePaths();
-  if (!existsSync84(paths.plistPath))
+  if (!existsSync86(paths.plistPath))
     return {};
   return { engine_server_mode: macServerModeView(), computer_use_pending: readComputerUseState(paths.sovereigntyPath)?.choice === null };
 }
@@ -155938,11 +159081,11 @@ var init_engine_service = __esm(() => {
 
 // src/core/linux-engine-service.ts
 import { spawnSync as spawnSync15 } from "node:child_process";
-import { chmodSync as chmodSync36, closeSync as closeSync31, constants as constants18, copyFileSync as copyFileSync3, existsSync as existsSync85, fstatSync as fstatSync7, fsyncSync as fsyncSync8, ftruncateSync, lstatSync as lstatSync44, linkSync as linkSync4, mkdirSync as mkdirSync57, openSync as openSync30, readFileSync as readFileSync75, readlinkSync as readlinkSync6, readdirSync as readdirSync28, realpathSync as realpathSync23, renameSync as renameSync17, rmSync as rmSync37, rmdirSync as rmdirSync7, statSync as statSync39, symlinkSync as symlinkSync2, writeFileSync as writeFileSync22 } from "node:fs";
+import { chmodSync as chmodSync36, closeSync as closeSync31, constants as constants18, copyFileSync as copyFileSync3, existsSync as existsSync87, fstatSync as fstatSync7, fsyncSync as fsyncSync8, ftruncateSync, lstatSync as lstatSync44, linkSync as linkSync4, mkdirSync as mkdirSync57, openSync as openSync30, readFileSync as readFileSync75, readlinkSync as readlinkSync6, readdirSync as readdirSync28, realpathSync as realpathSync24, renameSync as renameSync17, rmSync as rmSync37, rmdirSync as rmdirSync7, statSync as statSync40, symlinkSync as symlinkSync2, writeFileSync as writeFileSync22 } from "node:fs";
 import { createRequire as createRequire7 } from "node:module";
-import { basename as basename19, dirname as dirname92, join as join118, relative as relative19, resolve as resolve25, sep as sep23 } from "node:path";
+import { basename as basename19, dirname as dirname92, join as join118, relative as relative19, resolve as resolve28, sep as sep23 } from "node:path";
 import { userInfo as userInfo2 } from "node:os";
-import { randomBytes as randomBytes26, createHash as createHash86, randomUUID as randomUUID32 } from "node:crypto";
+import { randomBytes as randomBytes26, createHash as createHash86, randomUUID as randomUUID33 } from "node:crypto";
 function linuxEngineExec(command, args) {
   const r = spawnSync15(command, args, { encoding: "utf8", timeout: 35000, env: { ...process.env, SYSTEMD_PAGER: "", SYSTEMD_COLORS: "0" } });
   return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? r.error?.message ?? "" };
@@ -156011,7 +159154,7 @@ function inspectSystemdEngine(l, exec = linuxEngineExec) {
     return unknown;
   if (f.FragmentPath !== l.unitPath) {
     try {
-      if (!f.FragmentPath || realpathSync23(f.FragmentPath) !== l.unitPath)
+      if (!f.FragmentPath || realpathSync24(f.FragmentPath) !== l.unitPath)
         return { ...unknown, detail: `Conflicting unit fragment ${f.FragmentPath || "(unknown)"}; expected ${l.unitPath}. Stop its custodian before retrying.` };
     } catch {
       return { ...unknown, detail: `Cannot verify unit fragment ${f.FragmentPath || "(unknown)"}; expected ${l.unitPath}.` };
@@ -156079,7 +159222,7 @@ function preflightSystemdEngine(l, exec = linuxEngineExec, uid = process.getuid(
 }
 function rotateEngineLog(path, maxBytes = 10 * 1024 * 1024, retained = 3) {
   assertLinuxManagedPath(path);
-  if (!existsSync85(path))
+  if (!existsSync87(path))
     return;
   const fd = openSync30(path, constants18.O_RDWR | constants18.O_NOFOLLOW);
   try {
@@ -156093,7 +159236,7 @@ function rotateEngineLog(path, maxBytes = 10 * 1024 * 1024, retained = 3) {
       assertLinuxManagedPath(dest);
       if (i === retained)
         rmSync37(dest, { force: true });
-      else if (existsSync85(dest))
+      else if (existsSync87(dest))
         renameSync17(dest, `${path}.${i + 1}`);
     }
     copyFileSync3(path, `${path}.1`, constants18.COPYFILE_EXCL);
@@ -156115,12 +159258,12 @@ function systemdCgroupEmpty(group, root = "/sys/fs/cgroup") {
       return;
     try {
       readFileSync75(join118(root, "cgroup.controllers"));
-      statSync39(dirname92(join118(root, group)));
+      statSync40(dirname92(join118(root, group)));
     } catch {
       return;
     }
     try {
-      statSync39(join118(root, group));
+      statSync40(join118(root, group));
       return;
     } catch (error) {
       return error.code === "ENOENT" ? true : undefined;
@@ -156169,7 +159312,7 @@ function kernelFlock() {
   if (flockSymbols)
     return flockSymbols;
   const { dlopen, FFIType } = runtimeRequire4("bun:ffi");
-  const libc = ["/usr/lib/libc.so.6", "/lib/x86_64-linux-gnu/libc.so.6", "/lib64/libc.so.6"].find(existsSync85) ?? "libc.so.6";
+  const libc = ["/usr/lib/libc.so.6", "/lib/x86_64-linux-gnu/libc.so.6", "/lib64/libc.so.6"].find(existsSync87) ?? "libc.so.6";
   const library = dlopen(libc, {
     flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
     fcntl: { args: [FFIType.i32, FFIType.i32, FFIType.i32], returns: FFIType.i32 }
@@ -156189,10 +159332,10 @@ function inheritedUtilLinuxFlock(lockPath) {
   let pid = process.ppid;
   for (let depth = 0;pid > 1 && depth < 16; depth += 1) {
     try {
-      const executable = realpathSync23(`/proc/${pid}/exe`);
-      const executableStat = statSync39(executable);
+      const executable = realpathSync24(`/proc/${pid}/exe`);
+      const executableStat = statSync40(executable);
       const args = readFileSync75(`/proc/${pid}/cmdline`).toString("utf8").split("\x00").filter(Boolean);
-      if (basename19(executable) === "flock" && executableStat.uid === 0 && (executableStat.mode & 18) === 0 && args.slice(1).some((arg) => arg.startsWith("/") && resolve25(arg) === lockPath))
+      if (basename19(executable) === "flock" && executableStat.uid === 0 && (executableStat.mode & 18) === 0 && args.slice(1).some((arg) => arg.startsWith("/") && resolve28(arg) === lockPath))
         return true;
     } catch {}
     const parent = processParent(pid);
@@ -156306,7 +159449,7 @@ function linuxMachineArtifactDigest(path, kind) {
       throw new Error(`${path} is not a symbolic link.`);
     return createHash86("sha256").update(readlinkSync6(path)).digest("hex");
   }
-  const root = resolve25(path);
+  const root = resolve28(path);
   const rootInfo = lstatSync44(root);
   if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink())
     throw new Error(`${path} is not a real directory tree.`);
@@ -156399,11 +159542,11 @@ function durableProgram(layout, source, transaction, options) {
   const digest = linuxMachineArtifactDigest(staging, "tree");
   const generation = join118(generations, digest);
   transaction.generationPath = generation;
-  transaction.generationCreated = !existsSync85(generation);
+  transaction.generationCreated = !existsSync87(generation);
   transaction.generationArtifact = treeMachineArtifact(staging, generation);
   writeInstallTransaction(layout, transaction);
   lifecycleCheckpoint(options, "generation_identity_published");
-  if (existsSync85(generation)) {
+  if (existsSync87(generation)) {
     if (linuxMachineArtifactDigest(generation, "tree") !== digest)
       throw new Error(`Existing engine generation ${generation} failed identity verification.`);
     rmSync37(staging, { recursive: true });
@@ -156435,7 +159578,7 @@ function ownedUnitLink(layout, path) {
   if (!info)
     return false;
   assertLinuxManagedPath(dirname92(path), process.getuid(), "directory");
-  if (!info.isSymbolicLink() || info.uid !== process.getuid() || resolve25(dirname92(path), readlinkSync6(path)) !== layout.unitPath) {
+  if (!info.isSymbolicLink() || info.uid !== process.getuid() || resolve28(dirname92(path), readlinkSync6(path)) !== layout.unitPath) {
     throw new Error(`The systemd unit link changed at ${path}; it was retained.`);
   }
   return true;
@@ -156484,13 +159627,13 @@ function writeSnapshot(backupDir, index, text, mode = 384) {
   return { present: true, backupPath, sha256: hashFile(backupPath), mode };
 }
 function createInstallTransaction(input) {
-  const backupDir = join118(input.layout.stateDir, `.install-backup-${randomUUID32()}`);
+  const backupDir = join118(input.layout.stateDir, `.install-backup-${randomUUID33()}`);
   createLinuxPrivateDirectory(backupDir);
   const root = lstatSync44(backupDir);
   const files = {};
   let index = 0;
   for (const path of transactionManagedFiles(input.layout)) {
-    const text = existsSync85(path) ? readFileSync75(path) : null;
+    const text = existsSync87(path) ? readFileSync75(path) : null;
     const mode = text === null ? 384 : lstatSync44(path).mode & 511;
     files[path] = writeSnapshot(backupDir, index++, text, mode);
   }
@@ -156501,7 +159644,7 @@ function createInstallTransaction(input) {
     priorUnitLinks,
     action: input.action,
     phase: input.phase,
-    stagingPath: join118(input.layout.packageDir, `.prepare-${process.pid}-${randomUUID32()}`),
+    stagingPath: join118(input.layout.packageDir, `.prepare-${process.pid}-${randomUUID33()}`),
     backupDir,
     backupDevice: root.dev,
     backupInode: root.ino,
@@ -156511,7 +159654,7 @@ function createInstallTransaction(input) {
       enabledRuntime: input.enabledRuntime,
       files,
       receipt,
-      absentCreatedFiles: transactionCreatedFiles(input.layout).filter((path) => !existsSync85(path))
+      absentCreatedFiles: transactionCreatedFiles(input.layout).filter((path) => !existsSync87(path))
     }
   };
 }
@@ -156521,7 +159664,7 @@ function writeInstallTransaction(layout, transaction) {
 }
 function readInstallTransaction(layout) {
   const path = transactionPath(layout);
-  if (!existsSync85(path))
+  if (!existsSync87(path))
     return;
   assertLinuxManagedPath(path);
   if ((lstatSync44(path).mode & 511) !== 384)
@@ -156529,8 +159672,8 @@ function readInstallTransaction(layout) {
   const value = JSON.parse(readFileSync75(path, "utf8"));
   const hasDesktop = Object.hasOwn(value?.before?.files ?? {}, linuxDesktopEntryPaths(layout).desktop);
   const allowedFiles = transactionManagedFiles(layout, hasDesktop), actualFiles = value?.before?.files && typeof value.before.files === "object" ? Object.keys(value.before.files) : [];
-  const backupDir = typeof value?.backupDir === "string" ? resolve25(value.backupDir) : "";
-  const snapshotValid = (snapshot) => Boolean(snapshot && typeof snapshot.present === "boolean" && (!snapshot.present ? snapshot.backupPath === undefined && snapshot.sha256 === undefined && snapshot.mode === undefined : typeof snapshot.backupPath === "string" && dirname92(resolve25(snapshot.backupPath)) === backupDir && /^file-[0-9]+[.]backup$/.test(basename19(snapshot.backupPath)) && /^[0-9a-f]{64}$/.test(snapshot.sha256 ?? "") && Number.isInteger(snapshot.mode) && snapshot.mode >= 0 && snapshot.mode <= 511));
+  const backupDir = typeof value?.backupDir === "string" ? resolve28(value.backupDir) : "";
+  const snapshotValid = (snapshot) => Boolean(snapshot && typeof snapshot.present === "boolean" && (!snapshot.present ? snapshot.backupPath === undefined && snapshot.sha256 === undefined && snapshot.mode === undefined : typeof snapshot.backupPath === "string" && dirname92(resolve28(snapshot.backupPath)) === backupDir && /^file-[0-9]+[.]backup$/.test(basename19(snapshot.backupPath)) && /^[0-9a-f]{64}$/.test(snapshot.sha256 ?? "") && Number.isInteger(snapshot.mode) && snapshot.mode >= 0 && snapshot.mode <= 511));
   const legacy = value.legacySettings;
   if (legacy !== undefined && (!legacy || typeof legacy !== "object" || Array.isArray(legacy) || Object.entries(legacy).some(([name, snapshot], index) => !isLegacyLinuxSetting(name) || !snapshotValid(snapshot) || snapshot.present && snapshot.backupPath !== join118(backupDir, `file-${1e4 + index}.backup`))))
     throw new Error("Invalid legacy settings recovery journal.");
@@ -156539,11 +159682,11 @@ function readInstallTransaction(layout) {
     throw new Error("Invalid legacy settings restore journal.");
   const createdAllowed = new Set(transactionCreatedFiles(layout));
   const absent = value?.before?.absentCreatedFiles;
-  if (value.schema !== "olympus.engine.install-transaction.v1" || !["install", "rollback"].includes(value.action) || !["preparing", "activating", "rollback_required", "qualified", "recovered"].includes(value.phase) || value.priorUnitLinks !== undefined && (!Array.isArray(value.priorUnitLinks) || new Set(value.priorUnitLinks.map((entry) => entry?.path)).size !== value.priorUnitLinks.length || value.priorUnitLinks.some((entry) => !entry || !unitLinkCandidates(layout).includes(entry.path) || typeof entry.target !== "string" || /[\x00-\x1f\x7f]/.test(entry.target) || resolve25(dirname92(entry.path), entry.target) !== layout.unitPath)) || value.newUnitLinks !== undefined && (!Array.isArray(value.newUnitLinks) || new Set(value.newUnitLinks).size !== value.newUnitLinks.length || value.newUnitLinks.some((path) => !unitLinkCandidates(layout).includes(path))) || value.desktopIconSha256 !== undefined && (!hasDesktop || !/^[0-9a-f]{64}$/.test(value.desktopIconSha256)) || value.before?.enabledRuntime !== undefined && (typeof value.before.enabledRuntime !== "boolean" || value.before.enabledRuntime && !value.before.enabled) || typeof value.before?.active !== "boolean" || typeof value.before?.enabled !== "boolean" || !snapshotValid(value.before?.receipt) || dirname92(backupDir) !== layout.stateDir || !/^\.install-backup-[0-9a-f-]{36}$/.test(basename19(backupDir)) || !Number.isSafeInteger(value.backupDevice) || value.backupDevice < 0 || !Number.isSafeInteger(value.backupInode) || value.backupInode <= 0 || !Array.isArray(absent) || new Set(absent).size !== absent.length || absent.some((item) => typeof item !== "string" || !createdAllowed.has(item)) || actualFiles.length !== allowedFiles.length || allowedFiles.some((file, index) => !Object.hasOwn(value.before.files, file) || !snapshotValid(value.before.files[file]) || value.before.files[file].present && value.before.files[file].backupPath !== join118(backupDir, `file-${index}.backup`)) || !snapshotValid(value.before.receipt) || value.before.receipt.present && value.before.receipt.backupPath !== join118(backupDir, `file-${allowedFiles.length}.backup`) || dirname92(resolve25(value.stagingPath)) !== layout.packageDir || !/^[.]prepare-[0-9]+-[0-9a-f-]{36}$/.test(basename19(value.stagingPath)) || value.generationPath !== undefined && (dirname92(resolve25(value.generationPath)) !== join118(layout.packageDir, "generations") || !/^[0-9a-f]{64}$/.test(basename19(value.generationPath))) || value.generationCreated !== undefined && typeof value.generationCreated !== "boolean" || (value.stagingDevice !== undefined || value.stagingInode !== undefined) && (!Number.isSafeInteger(value.stagingDevice) || value.stagingDevice < 0 || !Number.isSafeInteger(value.stagingInode) || value.stagingInode <= 0) || value.generationArtifact !== undefined && (value.generationArtifact.kind !== "tree" || value.generationArtifact.path !== value.generationPath || value.generationArtifact.sha256 !== basename19(value.generationArtifact.path) || !Number.isSafeInteger(value.generationArtifact.rootDevice) || value.generationArtifact.rootDevice < 0 || !Number.isSafeInteger(value.generationArtifact.rootInode) || value.generationArtifact.rootInode <= 0 || value.generationArtifact.markerPath !== join118(value.generationArtifact.path, ".olympus-generation.json") || !/^[0-9a-f]{64}$/.test(value.generationArtifact.markerSha256 ?? ""))) {
+  if (value.schema !== "olympus.engine.install-transaction.v1" || !["install", "rollback"].includes(value.action) || !["preparing", "activating", "rollback_required", "qualified", "recovered"].includes(value.phase) || value.priorUnitLinks !== undefined && (!Array.isArray(value.priorUnitLinks) || new Set(value.priorUnitLinks.map((entry) => entry?.path)).size !== value.priorUnitLinks.length || value.priorUnitLinks.some((entry) => !entry || !unitLinkCandidates(layout).includes(entry.path) || typeof entry.target !== "string" || /[\x00-\x1f\x7f]/.test(entry.target) || resolve28(dirname92(entry.path), entry.target) !== layout.unitPath)) || value.newUnitLinks !== undefined && (!Array.isArray(value.newUnitLinks) || new Set(value.newUnitLinks).size !== value.newUnitLinks.length || value.newUnitLinks.some((path) => !unitLinkCandidates(layout).includes(path))) || value.desktopIconSha256 !== undefined && (!hasDesktop || !/^[0-9a-f]{64}$/.test(value.desktopIconSha256)) || value.before?.enabledRuntime !== undefined && (typeof value.before.enabledRuntime !== "boolean" || value.before.enabledRuntime && !value.before.enabled) || typeof value.before?.active !== "boolean" || typeof value.before?.enabled !== "boolean" || !snapshotValid(value.before?.receipt) || dirname92(backupDir) !== layout.stateDir || !/^\.install-backup-[0-9a-f-]{36}$/.test(basename19(backupDir)) || !Number.isSafeInteger(value.backupDevice) || value.backupDevice < 0 || !Number.isSafeInteger(value.backupInode) || value.backupInode <= 0 || !Array.isArray(absent) || new Set(absent).size !== absent.length || absent.some((item) => typeof item !== "string" || !createdAllowed.has(item)) || actualFiles.length !== allowedFiles.length || allowedFiles.some((file, index) => !Object.hasOwn(value.before.files, file) || !snapshotValid(value.before.files[file]) || value.before.files[file].present && value.before.files[file].backupPath !== join118(backupDir, `file-${index}.backup`)) || !snapshotValid(value.before.receipt) || value.before.receipt.present && value.before.receipt.backupPath !== join118(backupDir, `file-${allowedFiles.length}.backup`) || dirname92(resolve28(value.stagingPath)) !== layout.packageDir || !/^[.]prepare-[0-9]+-[0-9a-f-]{36}$/.test(basename19(value.stagingPath)) || value.generationPath !== undefined && (dirname92(resolve28(value.generationPath)) !== join118(layout.packageDir, "generations") || !/^[0-9a-f]{64}$/.test(basename19(value.generationPath))) || value.generationCreated !== undefined && typeof value.generationCreated !== "boolean" || (value.stagingDevice !== undefined || value.stagingInode !== undefined) && (!Number.isSafeInteger(value.stagingDevice) || value.stagingDevice < 0 || !Number.isSafeInteger(value.stagingInode) || value.stagingInode <= 0) || value.generationArtifact !== undefined && (value.generationArtifact.kind !== "tree" || value.generationArtifact.path !== value.generationPath || value.generationArtifact.sha256 !== basename19(value.generationArtifact.path) || !Number.isSafeInteger(value.generationArtifact.rootDevice) || value.generationArtifact.rootDevice < 0 || !Number.isSafeInteger(value.generationArtifact.rootInode) || value.generationArtifact.rootInode <= 0 || value.generationArtifact.markerPath !== join118(value.generationArtifact.path, ".olympus-generation.json") || !/^[0-9a-f]{64}$/.test(value.generationArtifact.markerSha256 ?? ""))) {
     throw new Error("The Linux install recovery journal is invalid; recovery refused.");
   }
   if (value.phase === "qualified" || value.phase === "recovered") {
-    if (existsSync85(backupDir)) {
+    if (existsSync87(backupDir)) {
       const terminalBackup = lstatSync44(backupDir);
       if (!terminalBackup.isDirectory() || terminalBackup.isSymbolicLink() || terminalBackup.uid !== process.getuid() || (terminalBackup.mode & 63) !== 0 || terminalBackup.dev !== value.backupDevice || terminalBackup.ino !== value.backupInode)
         throw new Error("The terminal Linux recovery backup root changed; cleanup refused.");
@@ -156591,7 +159734,7 @@ function restoreOptionalFile(path, snapshot) {
   }
 }
 function removeOwnedDirectory(path, device, inode) {
-  if (!existsSync85(path))
+  if (!existsSync87(path))
     return;
   if (device === undefined || inode === undefined)
     throw new Error(`Missing custody identity for ${path}; it was retained.`);
@@ -156604,7 +159747,7 @@ function removeOwnedDirectory(path, device, inode) {
 }
 function cleanupTransactionTrees(transaction) {
   removeOwnedDirectory(transaction.stagingPath, transaction.stagingDevice, transaction.stagingInode);
-  if (transaction.generationCreated && transaction.generationPath && existsSync85(transaction.generationPath)) {
+  if (transaction.generationCreated && transaction.generationPath && existsSync87(transaction.generationPath)) {
     if (!transaction.generationArtifact)
       throw new Error("Missing generation custody identity; it was retained.");
     assertTreeArtifactCustody(transaction.generationPath, transaction.generationArtifact);
@@ -156710,7 +159853,7 @@ function assertLegacySettingOverrides(layout, env) {
   for (const [key, value] of Object.entries(effective)) {
     if (!/^OLYMPUS_.*(?:_PATH|_DIR|_CONFIG)$/.test(key) || !value?.trim())
       continue;
-    const selected = resolve25(value.trim());
+    const selected = resolve28(value.trim());
     const moved = files.find((name) => {
       const source = join118(layout.home, ".olympus", name);
       return selected === source || source.startsWith(selected + sep23);
@@ -156762,9 +159905,9 @@ function migrateLegacySettings(layout, transaction, options) {
   if (!files.length && !legacyReader)
     return;
   const snapshots = {};
-  const tracked = [...files, ...LEGACY_LINUX_POLICY_FILES.filter((name) => !files.includes(name) && !existsSync85(legacySettingTarget(layout, name)))];
+  const tracked = [...files, ...LEGACY_LINUX_POLICY_FILES.filter((name) => !files.includes(name) && !existsSync87(legacySettingTarget(layout, name)))];
   for (const [index, name] of tracked.entries()) {
-    const source = join118(layout.home, ".olympus", name), present = existsSync85(source);
+    const source = join118(layout.home, ".olympus", name), present = existsSync87(source);
     snapshots[name] = writeSnapshot(transaction.backupDir, 1e4 + index, present ? readFileSync75(source) : null, present ? lstatSync44(source).mode & 511 : 384);
   }
   transaction.legacySettings = snapshots;
@@ -156837,10 +159980,10 @@ function restoreLegacySettings(layout, transaction) {
       const source = join118(layout.home, ".olympus", name), target = legacySettingTarget(layout, name);
       assertLinuxManagedPath(source);
       assertLinuxManagedPath(target);
-      const sourceChanged = existsSync85(source) && hashFile(source) !== original.sha256;
-      if (sourceChanged && existsSync85(target) && hashFile(target) !== original.sha256 && hashFile(source) !== hashFile(target))
+      const sourceChanged = existsSync87(source) && hashFile(source) !== original.sha256;
+      if (sourceChanged && existsSync87(target) && hashFile(target) !== original.sha256 && hashFile(source) !== hashFile(target))
         throw new Error(`Conflicting settings edits at ${source} and ${target}; retained for recovery.`);
-      const bytes = sourceChanged ? readFileSync75(source) : existsSync85(target) ? readFileSync75(target) : snapshotBytes(original);
+      const bytes = sourceChanged ? readFileSync75(source) : existsSync87(target) ? readFileSync75(target) : snapshotBytes(original);
       snapshots[name] = writeSnapshot(transaction.backupDir, 20000 + index, bytes, 384);
     }
     transaction.legacyRestoreSettings = snapshots;
@@ -156851,7 +159994,7 @@ function restoreLegacySettings(layout, transaction) {
     const source = join118(layout.home, ".olympus", name), target = legacySettingTarget(layout, name);
     for (const path of [source, target]) {
       assertLinuxManagedPath(path);
-      if (existsSync85(path) && ![snapshot.sha256, transaction.legacySettings[name].sha256].includes(hashFile(path)))
+      if (existsSync87(path) && ![snapshot.sha256, transaction.legacySettings[name].sha256].includes(hashFile(path)))
         throw new Error(`Migrated settings changed at ${path}; retained for recovery.`);
     }
   }
@@ -156958,11 +160101,11 @@ function refreshMachineArtifacts(layout, _includeTransaction = true) {
     ...receipt.ownedUnitLinks.map((path) => ({ path, kind: "symlink" }))
   ];
   const generations = join118(layout.packageDir, "generations");
-  if (existsSync85(generations)) {
+  if (existsSync87(generations)) {
     for (const name of readdirSync28(generations).sort())
       candidates.push({ path: join118(generations, name), kind: "tree" });
   }
-  const machineArtifacts = candidates.filter(({ path }) => existsSync85(path)).map(({ path, kind }) => {
+  const machineArtifacts = candidates.filter(({ path }) => existsSync87(path)).map(({ path, kind }) => {
     if (kind === "tree")
       return treeMachineArtifact(path);
     return { path, kind, sha256: linuxMachineArtifactDigest(path, kind) };
@@ -157027,7 +160170,7 @@ exec ${shellQuote3(program.runtimePath)} --no-env-file ${shellQuote3(program.ent
   syncDirectorySync(dirname92(layout.launcherPath));
 }
 function assertInstalled(l) {
-  if (readLinuxEngineReceipt(l.receiptPath)?.installationState !== "installed" || !existsSync85(l.unitPath))
+  if (readLinuxEngineReceipt(l.receiptPath)?.installationState !== "installed" || !existsSync87(l.unitPath))
     throw new Error("The engine is not installed. Run olympus engine install.");
   preflightLinuxEngineLayout(l);
 }
@@ -157057,12 +160200,12 @@ function removeReleasedWorkerSocket2(layout, before, after, options) {
   const childrenPath = engineServicePaths({ ...options, platform: "linux" }).childrenPath;
   const recorded = readEngineChildren(childrenPath);
   const table = processTable(options);
-  if (existsSync85(childrenPath) && (!recorded || !table || recorded.children.some((child) => table.some((process2) => process2.pgid === child.pgid)))) {
+  if (existsSync87(childrenPath) && (!recorded || !table || recorded.children.some((child) => table.some((process2) => process2.pgid === child.pgid)))) {
     throw new Error("Recorded engine process custody is live or unknown; the worker socket was retained.");
   }
   if ((options.workerStopped ?? workerSocketListenerStopped)(layout.workerSocketPath) !== true)
     throw new Error("The worker socket is still listening or its status is unknown; the path was retained.");
-  if (!existsSync85(layout.workerSocketPath))
+  if (!existsSync87(layout.workerSocketPath))
     return;
   removeReleasedWorkerSocket({ platform: "linux", env: linuxEngineEnvironment(layout) }, { previousWorkerReleased: true });
 }
@@ -157095,7 +160238,7 @@ function installLinuxEngine(options) {
     assertKnown(before);
     const privacyState = resolveInstallationPrivacyState({ homeDir: l.home, paths, env: options.env ?? process.env });
     if (options.dryRun)
-      return { ...base, wrote_plist: false, wrote_config: false, wrote_worker_env: false, sovereignty: { action: existsSync85(l.sovereigntyPath) ? "present" : privacyState.state === "not_installed" ? "would_seed" : "skipped", path: l.sovereigntyPath, ...privacyState.reason ? { reason: privacyState.reason } : {} }, action: "dry_run" };
+      return { ...base, wrote_plist: false, wrote_config: false, wrote_worker_env: false, sovereignty: { action: existsSync87(l.sovereigntyPath) ? "present" : privacyState.state === "not_installed" ? "would_seed" : "skipped", path: l.sovereigntyPath, ...privacyState.reason ? { reason: privacyState.reason } : {} }, action: "dry_run" };
     requireLinuxApprovalTransport(source);
     const existingReceipt = readLinuxEngineReceipt(l.receiptPath);
     const observedLinger = readEngineLinger(exec, options.uid);
@@ -157108,7 +160251,7 @@ function installLinuxEngine(options) {
     ensureEngineLinger(exec, options.uid, options.userName, options.notice);
     lifecycleCheckpoint(options, "linger_enabled");
     for (const parent of new Set([dirname92(l.stateDir), dirname92(l.cacheDir)])) {
-      if (existsSync85(parent))
+      if (existsSync87(parent))
         continue;
       createLinuxPrivateDirectory(dirname92(parent));
       mkdirSync57(parent, { mode: 448 });
@@ -157160,16 +160303,16 @@ function installLinuxEngine(options) {
       selectLinuxSecretBackend({ encryptedFilePath: l.secretsPath, keyFilePath: l.secretsKeyPath, backendFilePath: join118(l.configDir, "secret-backend.json") }, (options.env ?? process.env).OLYMPUS_SECRET_STORE_BACKEND?.trim() || "auto");
       for (const path of [paths.logPath, paths.errorLogPath]) {
         assertLinuxManagedPath(path);
-        if (!existsSync85(path))
+        if (!existsSync87(path))
           writePrivateFileAtomicSync(path, "");
       }
       const oldUnit = optionalText(l.unitPath), oldProgram = currentProgram(l);
       if (oldUnit && oldProgram && oldProgram.build !== program.build)
         writePrivateFileAtomicSync(join118(l.stateDir, "service-previous.json"), JSON.stringify({ program: oldProgram, unit: oldUnit, config: readFileSync75(l.configPath, "utf8") }));
-      const existingWithoutPolicy = !existsSync85(l.sovereigntyPath) && (existingReceipt?.installationState === "installed" || privacyState.state !== "not_installed");
+      const existingWithoutPolicy = !existsSync87(l.sovereigntyPath) && (existingReceipt?.installationState === "installed" || privacyState.state !== "not_installed");
       const config = reconcileEngineConfig(l.configPath), seeded = existingWithoutPolicy ? undefined : seedEngineSovereignty(l.sovereigntyPath);
       let wroteEnv = false;
-      if (!existsSync85(l.workerEnvPath)) {
+      if (!existsSync87(l.workerEnvPath)) {
         writePrivateFileAtomicSync(l.workerEnvPath, `OLYMPUS_WORKER_AUTH_TOKEN='${randomBytes26(32).toString("base64url")}'
 OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED=true
 `);
@@ -157228,7 +160371,7 @@ function assertTreeArtifactCustody(path, artifact) {
 function pruneOldGenerations(layout) {
   const keep = new Set([currentProgram(layout)?.workingDirectory, previousProgram(layout)?.workingDirectory].filter((path) => Boolean(path)).map((path) => dirname92(path)));
   const generations = join118(layout.packageDir, "generations");
-  if (!existsSync85(generations))
+  if (!existsSync87(generations))
     return;
   const receipt = readLinuxEngineReceipt(layout.receiptPath);
   for (const name of readdirSync28(generations)) {
@@ -157422,7 +160565,7 @@ function uninstallLinuxEngine(options) {
       if (removeFileDurablySync(path))
         deletedPaths.add(path);
     }
-    const desktopPaths = Object.values(linuxDesktopEntryPaths(l)).filter((path) => existsSync85(path));
+    const desktopPaths = Object.values(linuxDesktopEntryPaths(l)).filter((path) => existsSync87(path));
     removeLinuxDesktopEntry(l, exec);
     for (const path of desktopPaths)
       deletedPaths.add(path);
@@ -157553,9 +160696,9 @@ function linuxEngineCustody(l, facts, options = {}) {
     return "unknown";
   const childrenPath = join118(l.dataDir, "engine/children.json");
   const record = readEngineChildren(childrenPath);
-  if (existsSync85(childrenPath) && (!record || record.children.length > 0))
+  if (existsSync87(childrenPath) && (!record || record.children.length > 0))
     return "unknown";
-  if (!existsSync85(l.receiptPath) && !existsSync85(l.unitPath))
+  if (!existsSync87(l.receiptPath) && !existsSync87(l.unitPath))
     return "none";
   return (options.workerStopped ?? workerSocketListenerStopped)(l.workerSocketPath) === true ? "none" : "unknown";
 }
@@ -157589,7 +160732,7 @@ var init_version = __esm(() => {
 });
 
 // src/core/setup-preflight.ts
-import { existsSync as existsSync86 } from "node:fs";
+import { existsSync as existsSync88 } from "node:fs";
 async function setupPreflight(options) {
   const inputEnv = options.env ?? (options.homeDir ? { HOME: options.homeDir } : process.env);
   const env = environmentWithWorkerSetupEnv({
@@ -157597,7 +160740,7 @@ async function setupPreflight(options) {
     ...options.homeDir ? { homeDir: options.homeDir } : {},
     ...options.workerEnvPath ? { workerEnvPath: options.workerEnvPath } : {}
   });
-  const managedInstall = options.workerEnvPath || options.homeDir || inputEnv.HOME?.trim() && existsSync86(workerSetupEnvPath(options));
+  const managedInstall = options.workerEnvPath || options.homeDir || inputEnv.HOME?.trim() && existsSync88(workerSetupEnvPath(options));
   const credentialEnv = managedInstall ? readWorkerSetupEnv(options) ?? {} : env;
   let secretStore = options.secretStore;
   const getSecretStore = () => secretStore ??= createDefaultSecretStore({
@@ -157907,7 +161050,7 @@ var init_credential_degradation = __esm(() => {
 
 // src/core/consult-gate.ts
 import { createHash as createHash88 } from "node:crypto";
-import { existsSync as existsSync87, readFileSync as readFileSync77, statSync as statSync40 } from "node:fs";
+import { existsSync as existsSync89, readFileSync as readFileSync77, statSync as statSync41 } from "node:fs";
 import { homedir as homedir34 } from "node:os";
 import { basename as basename20, dirname as dirname94, join as join120 } from "node:path";
 import { fileURLToPath as fileURLToPath12 } from "node:url";
@@ -158415,9 +161558,9 @@ function requestedPackNotLoaded(options) {
 }
 function verifiedPackFile(path, sha256) {
   try {
-    if (!existsSync87(path))
+    if (!existsSync89(path))
       return "missing";
-    if (statSync40(path).size > CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES)
+    if (statSync41(path).size > CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES)
       return "too_large";
     const gz = readFileSync77(path);
     return createHash88("sha256").update(gz).digest("hex") === sha256 ? gz : "hash_mismatch";
@@ -158444,7 +161587,7 @@ function readPack(path, sha256) {
 function consultVocabularyRoot(moduleUrl = import.meta.url) {
   const here = dirname94(fileURLToPath12(moduleUrl));
   const root = basename20(here) === "core" && basename20(dirname94(here)) === "src" ? dirname94(dirname94(here)) : basename20(here) === "dist" ? dirname94(here) : undefined;
-  return root !== undefined && existsSync87(join120(root, ...VOCABULARY_DIR)) ? root : undefined;
+  return root !== undefined && existsSync89(join120(root, ...VOCABULARY_DIR)) ? root : undefined;
 }
 function consultVocabularyFileStatus(options = {}, env = process.env) {
   const selection = consultVocabularySelection(options);
@@ -158512,7 +161655,7 @@ function userManifestEntries(userDir) {
     return [];
   try {
     const path = join120(userDir, "manifest.json");
-    if (!existsSync87(path) || statSync40(path).size > 1024 * 1024)
+    if (!existsSync89(path) || statSync41(path).size > 1024 * 1024)
       return [];
     const manifest = JSON.parse(readFileSync77(path, "utf8"));
     if (!manifest || typeof manifest !== "object" || Array.isArray(manifest))
@@ -161335,7 +164478,7 @@ var init_consult_settings = __esm(() => {
 
 // src/core/doctor.ts
 import { spawnSync as spawnSync16 } from "node:child_process";
-import { existsSync as existsSync88, readFileSync as readFileSync78 } from "node:fs";
+import { existsSync as existsSync90, readFileSync as readFileSync78 } from "node:fs";
 import { join as join122 } from "node:path";
 import { homedir as homedir35 } from "node:os";
 function installedPluginVersion() {
@@ -161351,7 +164494,7 @@ async function defaultDoctorHostProbe(env = process.env, options = {}) {
   const paths = engineServicePaths({ homeDir: home, env });
   const openclawPath = resolveOpenClawExecutable({ env, homeDir: home });
   const engine = process.platform === "darwin" || process.platform === "linux" ? inspectEngine({ homeDir: home, env }) : { installed: false, state: "not_loaded" };
-  const legacyWorkerUnit = process.platform === "darwin" || process.platform === "linux" ? existsSync88(workerServicePaths(process.platform, home).unitPath) : false;
+  const legacyWorkerUnit = process.platform === "darwin" || process.platform === "linux" ? existsSync90(workerServicePaths(process.platform, home).unitPath) : false;
   const health = process.platform === "linux" && engine.installed ? await waitForEngineHealthy({ paths, expectedBuild: linuxInstalledBuild({ homeDir: home, env }) }, { timeoutMs: 0 }) : undefined;
   return {
     ...openclawPath ? { openclawPath } : {},
@@ -161453,7 +164596,7 @@ function doctorSovereigntyEngine(deps) {
   if (inline !== undefined)
     return loadSovereigntyEngine({ inlineConfig: inline });
   const configPath = doctorSovereigntyConfigPath(deps);
-  if (configPath === undefined || !existsSync88(configPath))
+  if (configPath === undefined || !existsSync90(configPath))
     return;
   return loadSovereigntyEngine({ configPath, ...deps.env ? { env: deps.env } : {} });
 }
@@ -162741,7 +165884,7 @@ function readRegistrySafely(deps) {
 }
 function defaultCommandExists(command) {
   const path = process.env.PATH ?? "";
-  return path.split(":").some((dir) => Boolean(dir) && existsSync88(join122(dir, command)));
+  return path.split(":").some((dir) => Boolean(dir) && existsSync90(join122(dir, command)));
 }
 function defaultPythonModuleExists(pythonCommand, moduleName) {
   const proc = spawnSync16(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
@@ -162798,7 +165941,7 @@ var init_doctor = __esm(() => {
 });
 
 // src/core/ocr-readiness.ts
-import { existsSync as existsSync89, readFileSync as readFileSync79 } from "node:fs";
+import { existsSync as existsSync91, readFileSync as readFileSync79 } from "node:fs";
 function osReleaseValue2(text, key) {
   for (const line of text.split(`
 `)) {
@@ -162851,7 +165994,7 @@ function ocrInstallRemedy(input) {
   return "Install the packages that provide tesseract (with its English language data) and pdftoppm (poppler-utils) with your package manager.";
 }
 function visionReady(platform, preference) {
-  return appleVisionOcrSelected(preference, platform) && resolveAppleVisionOcrScript() !== undefined && existsSync89(APPLE_VISION_OSASCRIPT);
+  return appleVisionOcrSelected(preference, platform) && resolveAppleVisionOcrScript() !== undefined && existsSync91(APPLE_VISION_OSASCRIPT);
 }
 function describeOcrReadiness(input) {
   if (input.preference === "tesseract")
@@ -164561,7 +167704,7 @@ var init_installed_sniffer_runtime = __esm(() => {
 
 // src/workers/classification/tier-migration.ts
 import { createHash as createHash91 } from "node:crypto";
-import { chmodSync as chmodSync38, existsSync as existsSync93, mkdirSync as mkdirSync59, readFileSync as readFileSync83, renameSync as renameSync19, writeFileSync as writeFileSync24 } from "node:fs";
+import { chmodSync as chmodSync38, existsSync as existsSync95, mkdirSync as mkdirSync59, readFileSync as readFileSync83, renameSync as renameSync19, writeFileSync as writeFileSync24 } from "node:fs";
 import { dirname as dirname96, join as join126 } from "node:path";
 function domainTier(domain) {
   return domain === "public_safe" ? "public" : domain === "internal" ? "private" : "secure";
@@ -164570,7 +167713,7 @@ function resolveTierMigrationPaths(env, embeddingLedgerPath) {
   return { statePath: tierMigrationStatePath(env), reportDir: tierMigrationReportDir(env), embeddingLedgerPath };
 }
 function readTierMigrationState(statePath) {
-  if (!existsSync93(statePath))
+  if (!existsSync95(statePath))
     return { schemaVersion: TIER_MIGRATION_STATE_SCHEMA_VERSION, plans: [] };
   const parsed = JSON.parse(readFileSync83(statePath, "utf8"));
   if (parsed.schemaVersion !== TIER_MIGRATION_STATE_SCHEMA_VERSION || !Array.isArray(parsed.plans)) {
@@ -164870,7 +168013,6 @@ async function planTierMigration(options) {
           const override = read.override;
           const sniffer = laneSniffer ? secretFencedSniffer(laneSniffer, ledger, item.identity, read) : undefined;
           const imageJudgment = item.mimeType ? store.imageJudgmentForItem(item.identity) : undefined;
-          const holdUntilJudged = set.holdsContentUntilJudged() || heldUntilJudged(ledger.getCurrent(item.identity)?.reasons);
           const decision = classifyItemTiers({
             signals: signalsFromStoredItem(item),
             ...item.locatorUri ? { locators: [item.locatorUri] } : {},
@@ -164879,7 +168021,7 @@ async function planTierMigration(options) {
             hasNonTextContent: true,
             ...read.secret ? { heldSecret: true } : {},
             ...item.mimeType ? { mimeType: item.mimeType } : {},
-            ...holdUntilJudged ? { holdUntilJudged: true } : {},
+            holdUntilJudged: true,
             ...imageJudgment ? { imageJudgment: imageJudgmentSignal(imageJudgment) } : {},
             subject: item.identity
           }, {
@@ -165724,6 +168866,46 @@ function resumeSecretsSettle(lane, proposal, record, copies, disposition) {
   }
   return settleMigrationSecrets(lane, identity ?? fullIdentity2(proposal, ""), record.generation, copies, disposition);
 }
+function rollbackRetainedCopies(set, identity, expectedGeneration) {
+  const stores = set.openStores().sort((a, b) => a.corpusId.localeCompare(b.corpusId));
+  const restore = (index) => {
+    const store = stores[index];
+    if (store)
+      return store.withItemCopyWriteFence(identity, () => restore(index + 1));
+    return set.ledger.rollbackMove(identity, {
+      expectedGeneration,
+      authorize(current, target, sources, destination) {
+        if (tierMoveRuleAuthorization(set, current, target, sources, destination) === undefined)
+          return false;
+        for (const layer of ["metadata", "content"]) {
+          const to = copyServingLayer(destination, layer);
+          if (!to)
+            continue;
+          const from = copyServingLayer(sources, layer);
+          if (!from)
+            return false;
+          if (trustDomainRank(to.trustDomain) >= trustDomainRank(from.trustDomain))
+            continue;
+          if (set.ledger.writeIntent(identity))
+            return false;
+          const original = set.store(from.trustDomain);
+          const retained = set.store(to.trustDomain);
+          if (layer === "content") {
+            if (!sameText(original?.exportItemCopy(identity), retained?.exportItemCopy(identity)))
+              return false;
+          } else {
+            const currentNames = original?.exportItemNames(identity);
+            const restoredNames = retained?.exportItemNames(identity);
+            if (!currentNames || !restoredNames || JSON.stringify(storedSignals(currentNames)) !== JSON.stringify(storedSignals(restoredNames)))
+              return false;
+          }
+        }
+        return true;
+      }
+    });
+  };
+  return withTierRuleFence(set, () => restore(0));
+}
 async function rollbackTierMigrationBatch(options) {
   const now = options.now ?? (() => new Date);
   const state = readTierMigrationState(options.paths.statePath);
@@ -165758,7 +168940,7 @@ async function rollbackTierMigrationBatch(options) {
         continue;
       }
       try {
-        const restored = lane.set.ledger.rollbackMove(proposal.identity, { expectedGeneration: record.generation });
+        const restored = rollbackRetainedCopies(lane.set, proposal.identity, record.generation);
         lane.set.ledger.markMigrationProposal(plan.planId, proposal.identity, {
           status: "rolled_back",
           movedGeneration: restored.generation
@@ -165788,7 +168970,7 @@ async function rollbackTierMigrationBatch(options) {
     entry_id: entryId,
     recorded_at: now().toISOString(),
     kind: "note",
-    what: `Tier migration batch ${batch.batchId} of plan ${plan.planId} was rolled back by a ledger flip: ${rolledBack} item(s) ` + `serve from their previous copies again${skipped > purgedKept ? ` (${skipped - purgedKept} left alone because a later sync changed them)` : ""}` + `${secretsKept > 0 ? `; ${secretsKept} Secret(s) stay Secrets and are never exposed again` : ""}` + `${purgedKept > 0 ? `; ${purgedKept} item(s) skipped: ${purgedKeptReason}` : ""}. ` + "Nothing was re-embedded or deleted; the copies the batch wrote are kept, hidden.",
+    what: `Tier migration batch ${batch.batchId} of plan ${plan.planId} was rolled back by a ledger flip: ${rolledBack} item(s) ` + `serve from their previous copies again${skipped > purgedKept ? ` (${skipped - purgedKept} left alone under their current decision or rules)` : ""}` + `${secretsKept > 0 ? `; ${secretsKept} Secret(s) stay Secrets and are never exposed again` : ""}` + `${purgedKept > 0 ? `; ${purgedKept} item(s) skipped: ${purgedKeptReason}` : ""}. ` + "Nothing was re-embedded or deleted; the copies the batch wrote are kept, hidden.",
     approved_by: EMBEDDING_LEDGER_OWNER_APPROVAL,
     status: "complete"
   });
@@ -165977,6 +169159,8 @@ var init_tier_migration = __esm(() => {
   init_media_judge();
   init_embedding_cost_estimates();
   init_operation_error();
+  init_stored_names();
+  init_tier_move_rule_policy();
   init_tier_move();
   init_secrets_disposition();
   init_tier_placement();
@@ -165999,369 +169183,6 @@ var init_tier_migration = __esm(() => {
     "chunk_cap",
     "cost_cap"
   ]);
-});
-
-// src/workers/readwise/tier-set.ts
-function createReadwiseTierLane(options) {
-  const env = options.env ?? process.env;
-  const secureDbPath = resolvedStorePath(READWISE_SOURCE_ID, "secure_local", env);
-  return createExistingStoreTierLane({
-    setId: READWISE_TIER_SET_ID,
-    store: options.store,
-    restingTier: READWISE_STORE_PLACEMENT.trustTier,
-    ...options.embeddingProvider ? { embeddingProvider: options.embeddingProvider } : {},
-    newLegs: {
-      secure_local: {
-        corpusId: READWISE_SECURE_LIBRARY_CORPUS_ID,
-        dbPath: secureDbPath,
-        create: (ledger) => openConnectorStore({ sourceId: READWISE_SOURCE_ID }, {
-          dbPath: secureDbPath,
-          corpusId: READWISE_SECURE_LIBRARY_CORPUS_ID,
-          family: "readwise",
-          trustDomain: "secure_local",
-          tierLedger: ledger
-        }, env),
-        ...options.secureEmbeddingProvider ? { embeddingProvider: options.secureEmbeddingProvider } : {}
-      }
-    },
-    ...options.secretLocations ? { secretLocations: options.secretLocations } : {},
-    ...options.tierClassification ? { tierClassification: options.tierClassification } : {},
-    ...options.onStoreOpened ? { onStoreOpened: options.onStoreOpened } : {}
-  });
-}
-var READWISE_SECURE_LIBRARY_CORPUS_ID = "secure_local.readwise.library", READWISE_TIER_SET_ID = "readwise.library";
-var init_tier_set2 = __esm(() => {
-  init_source_placement();
-  init_source_storage();
-  init_tiered_store_set();
-  init_connector2();
-});
-
-// src/workers/x-bookmarks/tier-set.ts
-function createXBookmarksTierLane(options) {
-  const env = options.env ?? process.env;
-  const secureDbPath = resolvedStorePath(X_BOOKMARKS_SOURCE_ID, "secure_local", env);
-  return createExistingStoreTierLane({
-    setId: X_BOOKMARKS_TIER_SET_ID,
-    store: options.store,
-    restingTier: X_BOOKMARKS_STORE_PLACEMENT.trustTier,
-    ...options.embeddingProvider ? { embeddingProvider: options.embeddingProvider } : {},
-    newLegs: {
-      secure_local: {
-        corpusId: X_BOOKMARKS_SECURE_CORPUS_ID,
-        dbPath: secureDbPath,
-        create: (ledger) => openConnectorStore({ sourceId: X_BOOKMARKS_SOURCE_ID }, {
-          dbPath: secureDbPath,
-          corpusId: X_BOOKMARKS_SECURE_CORPUS_ID,
-          family: "x",
-          trustDomain: "secure_local",
-          tierLedger: ledger
-        }, env),
-        ...options.secureEmbeddingProvider ? { embeddingProvider: options.secureEmbeddingProvider } : {}
-      }
-    },
-    ...options.secretLocations ? { secretLocations: options.secretLocations } : {},
-    ...options.tierClassification ? { tierClassification: options.tierClassification } : {},
-    ...options.onStoreOpened ? { onStoreOpened: options.onStoreOpened } : {}
-  });
-}
-var X_BOOKMARKS_SECURE_CORPUS_ID = "secure_local.x.bookmarks", X_BOOKMARKS_TIER_SET_ID = "x.bookmarks";
-var init_tier_set3 = __esm(() => {
-  init_source_placement();
-  init_source_storage();
-  init_tiered_store_set();
-  init_connector();
-});
-
-// src/workers/archive-import/lane.ts
-function archiveLaneLegs(lane) {
-  return [lane.secure, lane.internal, lane.public];
-}
-function archiveLaneStores(lane) {
-  return lane.set.openStores();
-}
-function createArchiveTierLane(options) {
-  const env = options.env ?? process.env;
-  const family = options.family;
-  const secureDbPath = archiveConnectorStoreDbPath("secure_local", family, env);
-  const ledger = openTierLedger({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID2 }, { dbPath: tieredStoreSetLedgerPath(secureDbPath) }, env);
-  const leg = (domain) => onDemandTierStore({
-    corpusId: archiveCorpusId(domain, family),
-    dbPath: archiveConnectorStoreDbPath(domain, family, env),
-    create: () => createArchiveConnectorStore(domain, family, env, { tierLedger: ledger }),
-    ...options.onStoreOpened ? { onOpened: options.onStoreOpened } : {}
-  });
-  const secure = leg("secure_local");
-  const internal = leg("internal");
-  const publicStore = leg("public_safe");
-  const secretLocations = options.openSecretLocations?.(secureDbPath);
-  const set = createTieredLaneSet({
-    setId: archiveTierSetId(family),
-    ledger,
-    tierClassification: ARCHIVE_TIER_CLASSIFICATION,
-    contentArrivesLaterFor: archiveContentArrivesLaterFor,
-    ...secretLocations ? { secretLocations } : {},
-    legs: {
-      public_safe: { onDemand: publicStore },
-      internal: { onDemand: internal },
-      secure_local: { onDemand: secure, legacy: true }
-    }
-  });
-  return {
-    family,
-    env,
-    set,
-    ledger,
-    secure,
-    internal,
-    public: publicStore,
-    ...secretLocations ? { secretLocations } : {}
-  };
-}
-function archiveTierMigrationLaneSpecs(env = process.env) {
-  return archiveImportFamilies().map((family) => {
-    const leg = (domain, legacy) => ({
-      corpusId: archiveCorpusId(domain, family),
-      dbPath: archiveConnectorStoreDbPath(domain, family, env),
-      family,
-      ...legacy ? { legacy: true } : {},
-      open: ({ readOnly, tierLedger }) => createArchiveConnectorStore(domain, family, env, { readOnly, tierLedger })
-    });
-    return {
-      sourceId: ARCHIVE_IMPORTS_SOURCE_ID2,
-      setId: archiveTierSetId(family),
-      tierClassification: ARCHIVE_TIER_CLASSIFICATION,
-      contentArrivesLaterFor: archiveContentArrivesLaterFor,
-      legs: {
-        public_safe: leg("public_safe", false),
-        internal: leg("internal", false),
-        secure_local: leg("secure_local", true)
-      }
-    };
-  });
-}
-var ARCHIVE_TIER_CLASSIFICATION, archiveContentArrivesLaterFor = (item) => item.deferredBytes !== undefined;
-var init_lane = __esm(() => {
-  init_source_storage();
-  init_tiered_store_set();
-  init_archive_formats();
-  init_state();
-  init_store();
-  ARCHIVE_TIER_CLASSIFICATION = Object.freeze({
-    holdContentUntilJudged: true
-  });
-});
-
-// src/workers/classification/tier-migration-lanes.ts
-import { existsSync as existsSync94 } from "node:fs";
-function installedTierMigrationLaneSpecs(env = process.env) {
-  return [
-    {
-      sourceId: "gmail.email",
-      setId: "gmail.email",
-      legs: {
-        public_safe: { corpusId: GMAIL_PUBLIC_CONNECTOR_CORPUS_ID, dbPath: resolvedStorePath("gmail.email", "public_safe", env), family: "email" },
-        internal: { corpusId: GMAIL_INTERNAL_CONNECTOR_CORPUS_ID, dbPath: resolvedStorePath("gmail.email", "internal", env), family: "email", legacy: true },
-        secure_local: { corpusId: GMAIL_SECURE_CONNECTOR_CORPUS_ID, dbPath: resolvedStorePath("gmail.email", "secure_local", env), family: "email", legacy: true }
-      }
-    },
-    {
-      sourceId: "google_drive.docs",
-      setId: "google_drive.docs",
-      legs: {
-        public_safe: { corpusId: GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID, dbPath: resolvedStorePath("google_drive.docs", "public_safe", env), family: "file" },
-        internal: { corpusId: GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID, dbPath: resolvedStorePath("google_drive.docs", "internal", env), family: "file", legacy: true },
-        secure_local: { corpusId: GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID, dbPath: resolvedStorePath("google_drive.docs", "secure_local", env), family: "file", legacy: true }
-      }
-    },
-    {
-      sourceId: DROPBOX_FILES_SOURCE_ID,
-      setId: DROPBOX_FILES_SOURCE_ID,
-      contentArrivesLater: true,
-      legs: {
-        public_safe: {
-          corpusId: DROPBOX_TIER_CORPUS_IDS.public_safe,
-          dbPath: resolvedStorePath(DROPBOX_FILES_SOURCE_ID, "public_safe", env),
-          family: "file",
-          open: ({ readOnly, tierLedger }) => createDropboxTierConnectorStore("public_safe", env, { readOnly, tierLedger })
-        },
-        internal: {
-          corpusId: DROPBOX_TIER_CORPUS_IDS.internal,
-          dbPath: resolvedStorePath(DROPBOX_FILES_SOURCE_ID, "internal", env),
-          family: "file",
-          open: ({ readOnly, tierLedger }) => createDropboxTierConnectorStore("internal", env, { readOnly, tierLedger })
-        },
-        secure_local: {
-          corpusId: DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID,
-          dbPath: resolvedStorePath(DROPBOX_FILES_SOURCE_ID, "secure_local", env),
-          family: "file",
-          legacy: true,
-          open: ({ readOnly }) => createDropboxConnectorStore(env, { readOnly })
-        }
-      }
-    },
-    {
-      sourceId: LOCAL_FILES_SOURCE_ID,
-      setId: LOCAL_FILES_SOURCE_ID,
-      contentArrivesLater: true,
-      legs: {
-        public_safe: {
-          corpusId: LOCAL_FILES_TIER_CORPUS_IDS.public_safe,
-          dbPath: resolvedStorePath(LOCAL_FILES_SOURCE_ID, "public_safe", env),
-          family: "file",
-          open: ({ readOnly, tierLedger }) => createLocalFilesTierConnectorStore("public_safe", env, { readOnly, tierLedger })
-        },
-        internal: {
-          corpusId: LOCAL_FILES_TIER_CORPUS_IDS.internal,
-          dbPath: resolvedStorePath(LOCAL_FILES_SOURCE_ID, "internal", env),
-          family: "file",
-          open: ({ readOnly, tierLedger }) => createLocalFilesTierConnectorStore("internal", env, { readOnly, tierLedger })
-        },
-        secure_local: {
-          corpusId: LOCAL_FILES_TIER_CORPUS_IDS.secure_local,
-          dbPath: resolvedStorePath(LOCAL_FILES_SOURCE_ID, "secure_local", env),
-          family: "file",
-          legacy: true,
-          open: ({ readOnly }) => createLocalFilesConnectorStore(env, { readOnly })
-        }
-      }
-    },
-    {
-      sourceId: TELEGRAM_MESSAGES_SOURCE_ID,
-      setId: TELEGRAM_MESSAGES_SOURCE_ID,
-      splitLayers: false,
-      legs: {
-        internal: { corpusId: INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID, dbPath: resolvedStorePath("telegram.messages", "internal", env), family: "chat", legacy: true },
-        secure_local: { corpusId: PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID2, dbPath: resolvedStorePath("telegram.messages", "secure_local", env), family: "chat", legacy: true }
-      }
-    },
-    {
-      sourceId: "readwise.library",
-      setId: READWISE_TIER_SET_ID,
-      legs: {
-        internal: {
-          corpusId: READWISE_LIBRARY_CORPUS_ID,
-          dbPath: resolvedStorePath("readwise.library", "internal", env),
-          family: "readwise",
-          legacy: true,
-          ...READWISE_STORE_PLACEMENT.trustTier ? { restingTier: READWISE_STORE_PLACEMENT.trustTier } : {}
-        },
-        secure_local: { corpusId: READWISE_SECURE_LIBRARY_CORPUS_ID, dbPath: resolvedStorePath("readwise.library", "secure_local", env), family: "readwise" }
-      }
-    },
-    {
-      sourceId: "x.bookmarks",
-      setId: X_BOOKMARKS_TIER_SET_ID,
-      legs: {
-        internal: {
-          corpusId: X_BOOKMARKS_CORPUS_ID,
-          dbPath: resolvedStorePath("x.bookmarks", "internal", env),
-          family: "x",
-          legacy: true,
-          ...X_BOOKMARKS_STORE_PLACEMENT.trustTier ? { restingTier: X_BOOKMARKS_STORE_PLACEMENT.trustTier } : {}
-        },
-        secure_local: { corpusId: X_BOOKMARKS_SECURE_CORPUS_ID, dbPath: resolvedStorePath("x.bookmarks", "secure_local", env), family: "x" }
-      }
-    },
-    {
-      sourceId: WHATSAPP_PERSONAL_SOURCE_ID,
-      setId: WHATSAPP_PERSONAL_SOURCE_ID,
-      splitLayers: false,
-      legs: {
-        internal: { corpusId: WHATSAPP_INTERNAL_CORPUS_ID, dbPath: resolvedStorePath("whatsapp.personal.messages", "internal", env), family: "chat" },
-        secure_local: { corpusId: WHATSAPP_LIVE_CORPUS_ID, dbPath: resolvedStorePath("whatsapp.personal.messages", "secure_local", env), family: "chat", legacy: true }
-      }
-    },
-    ...archiveTierMigrationLaneSpecs(env)
-  ];
-}
-function openTierMigrationLanes(specs, options) {
-  const readOnly = options.mode === "read";
-  const opened = [];
-  const lanes = [];
-  try {
-    for (const spec of specs) {
-      const legs = Object.entries(spec.legs);
-      if (!legs.some(([, leg]) => leg.dbPath !== ":memory:" && existsSync94(leg.dbPath)))
-        continue;
-      const secure = spec.legs.secure_local;
-      const account = { sourceId: spec.sourceId };
-      const ledger = openTierLedger(account, { dbPath: tieredStoreSetLedgerPath(secure.dbPath) });
-      opened.push(ledger);
-      const secretLocations = readOnly ? undefined : openSecretLocations(account, { dbPath: secretLocationsPathForStore(secure.dbPath) });
-      if (secretLocations)
-        opened.push(secretLocations);
-      const laneLegs = {};
-      for (const [domain, leg] of legs) {
-        const store = onDemandTierStore({
-          corpusId: leg.corpusId,
-          dbPath: leg.dbPath,
-          create: () => {
-            const created = leg.open ? leg.open({ readOnly, tierLedger: ledger }) : openConnectorStore(account, {
-              dbPath: leg.dbPath,
-              corpusId: leg.corpusId,
-              family: leg.family,
-              trustDomain: domain,
-              tierLedger: ledger,
-              ...readOnly ? { readOnly: true } : {}
-            });
-            opened.push(created);
-            return created;
-          }
-        });
-        laneLegs[domain] = {
-          onDemand: store,
-          ...leg.legacy ? { legacy: true } : {},
-          ...leg.restingTier ? { restingTier: leg.restingTier } : {}
-        };
-      }
-      const tierClassification = spec.tierClassification || options.tierClassification ? { ...options.tierClassification, ...spec.tierClassification } : undefined;
-      const set = createTieredLaneSet({
-        setId: spec.setId,
-        ledger,
-        legs: laneLegs,
-        ...spec.splitLayers === false ? { splitLayers: false } : {},
-        ...spec.contentArrivesLater ? { contentArrivesLater: true } : {},
-        ...spec.contentArrivesLaterFor ? { contentArrivesLaterFor: spec.contentArrivesLaterFor } : {},
-        ...tierClassification ? { tierClassification } : {},
-        ...secretLocations ? { secretLocations } : {}
-      });
-      lanes.push({ sourceId: spec.sourceId, set });
-    }
-  } catch (error) {
-    closeAll(opened);
-    throw error;
-  }
-  return { lanes, close: () => closeAll(opened) };
-}
-function closeAll(opened) {
-  for (const handle of [...opened].reverse()) {
-    try {
-      handle.close();
-    } catch {}
-  }
-}
-var init_tier_migration_lanes = __esm(() => {
-  init_source_placement();
-  init_source_corpus_registry();
-  init_source_storage();
-  init_tiered_store_set();
-  init_connector_store2();
-  init_corpus_adapter3();
-  init_store2();
-  init_scope();
-  init_drive();
-  init_gmail();
-  init_connector2();
-  init_tier_set2();
-  init_corpus_adapter4();
-  init_store_sync2();
-  init_store_sync();
-  init_connector();
-  init_corpus_adapter();
-  init_tier_set3();
-  init_lane();
-  init_secret_locations();
 });
 
 // src/workers/classification/tier-migration-cli.ts
@@ -166523,7 +169344,8 @@ async function runTierMigrateCommand(args, context = {}) {
 async function withLanes(context, env, mode, inputs, run) {
   const opened = openTierMigrationLanes(context.laneSpecs ?? installedTierMigrationLaneSpecs(env), {
     mode,
-    ...inputs.rules ? { tierClassification: { rules: inputs.rules } } : {}
+    ownerRulesPath: resolveTierRulesPath({ env }),
+    ...context.inputs?.rules ? { tierClassification: { rules: context.inputs.rules } } : {}
   });
   try {
     return await run(opened);
@@ -166686,7 +169508,7 @@ var init_tier_migration_cli = __esm(() => {
 
 // src/workers/classification/tier-cli.ts
 import { Database as Database28, SQLiteError } from "bun:sqlite";
-import { existsSync as existsSync95 } from "node:fs";
+import { existsSync as existsSync96 } from "node:fs";
 function tierCommandOpensStores(args) {
   return args[0] === "set" || args[0] === "explain" || args[0] === "recheck" || args[0] === "migrate";
 }
@@ -166719,7 +169541,7 @@ async function runTierCommand(args, context = {}) {
 }
 function knownStorePaths(context) {
   const paths = context.storePaths ?? lifecycleStorePaths(context);
-  return [...new Set(paths)].filter((path) => path !== ":memory:" && existsSync95(path));
+  return [...new Set(paths)].filter((path) => path !== ":memory:" && existsSync96(path));
 }
 function storeItemColumns(db) {
   return new Set(db.query("PRAGMA table_xinfo(items)").all().map((column) => column.name));
@@ -166762,6 +169584,7 @@ function matchStore2(dbPath, needle) {
         ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
       },
       localItemId: row.local_item_id,
+      dbPath,
       ...bound ? { bound } : {},
       ownLedgerPath: tierLedgerPathForStore(dbPath)
     }));
@@ -166817,7 +169640,7 @@ function discoverTierLookup(needle, context) {
   const ledgerPaths = new Set;
   for (const dbPath of stores) {
     const path = tierLedgerPathForStore(dbPath);
-    if (existsSync95(path))
+    if (existsSync96(path))
       ledgerPaths.add(path);
   }
   const boundIds = new Map;
@@ -166835,6 +169658,7 @@ function locateMatched({ identity, localItemId, matches, ledgerPaths, boundIds }
     ledgerPath,
     identity,
     localItemId,
+    storePaths: matches.filter((match) => (match.bound?.path ?? match.ownLedgerPath) === ledgerPath).map((match) => match.dbPath),
     ...boundIds.has(ledgerPath) ? { boundLedgerId: boundIds.get(ledgerPath) } : {}
   });
   const skipped = new Set;
@@ -166881,7 +169705,7 @@ function knownTierLedgers(context = {}) {
   const ledgers = new Map;
   for (const dbPath of knownStorePaths(context)) {
     const own = tierLedgerPathForStore(dbPath);
-    if (existsSync95(own) && !ledgers.has(own))
+    if (existsSync96(own) && !ledgers.has(own))
       ledgers.set(own, undefined);
     let bound;
     const db = new Database28(dbPath, { readonly: true });
@@ -166893,7 +169717,7 @@ function knownTierLedgers(context = {}) {
     } finally {
       closeSqliteStore(db, { checkpoint: false, readOnly: true });
     }
-    if (bound && existsSync95(bound.path))
+    if (bound && existsSync96(bound.path))
       ledgers.set(bound.path, bound.id);
   }
   return [...ledgers].map(([path, boundLedgerId]) => ({ path, ...boundLedgerId ? { boundLedgerId } : {} }));
@@ -166994,7 +169818,17 @@ function applyTierSet(items, override, context = {}) {
       const cleared = ledger.clearOverride(item.identity);
       return { cleared, note: "The next sync re-decides this item without the override." };
     }
-    ledger.setOverride(item.identity, override);
+    let setDigest;
+    if (override.kind === "tier" && (override.tier === "private" || override.tier === "public") && override.setDigest === undefined && !ledger.itemIsSecret(item.identity) && !ledger.writeIntent(item.identity)) {
+      const current = ledger.getCurrent(item.identity);
+      const hasReceipt = current?.contentRead && current.state !== "moving" && current.reasons.some((reason) => reason.startsWith("content:sha256:"));
+      if (!hasReceipt) {
+        const serving = current?.routed ? copyServingLayer(ledger.copies(item.identity).filter((copy) => copy.state === "current"), "content") : undefined;
+        if (!current?.routed || serving)
+          setDigest = storedOverrideDigest(item, serving?.corpusId);
+      }
+    }
+    ledger.setOverride(item.identity, override.kind === "tier" && setDigest ? { ...override, setDigest } : override);
     if (override.kind === "tier" && override.tier === "secrets") {
       const current = ledger.getCurrent(item.identity);
       const outcome = current?.routed ? ledger.recordRoutedPlacement(item.identity, classifyItemTiers({ signals: {} }, { override }), { copies: [], embedHold: false }).outcome : undefined;
@@ -167042,6 +169876,24 @@ function applyTierSet(items, override, context = {}) {
     };
   }, item.boundLedgerId));
 }
+function storedOverrideDigest(item, corpusId) {
+  const digests = new Set;
+  for (const path of item.storePaths ?? []) {
+    const text = withStore(path, undefined, (db, columns) => {
+      if (corpusId && !db.query(`SELECT 1 FROM sync_runs WHERE sync_run_id = ? AND connector_id = ? AND corpus_id = ?`).get(TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID, corpusId))
+        return;
+      const predicate = storeItemIdentityPredicate(item.identity, columns, "i.");
+      return db.query(`
+        SELECT c.bounded_text AS text FROM items i JOIN chunks c ON c.item_pk = i.item_pk
+        WHERE ${predicate.sql}
+        ORDER BY c.chunk_index
+      `).all(...predicate.params).map((chunk) => chunk.text).join("");
+    });
+    if (text?.trim())
+      digests.add(contentDigestReason(text));
+  }
+  return digests.size === 1 ? digests.values().next().value : undefined;
+}
 function runTierExplain(args, context = {}) {
   const [locator] = args;
   if (!locator || args.length > 1)
@@ -167057,7 +169909,7 @@ function runTierExplain(args, context = {}) {
     }), item.boundLedgerId, "read-only-on-front");
     const snifferPath = tierSnifferPathForLedger(item.ledgerPath);
     let waitingOn = [];
-    if (existsSync95(snifferPath)) {
+    if (existsSync96(snifferPath)) {
       const sniffer = new TierSnifferStore({ dbPath: snifferPath, ...writableStoreOpensForbidden() ? { readOnly: true } : {} });
       try {
         waitingOn = ["metadata", "content"].filter((pass) => sniffer.questionFor(item.identity, pass) !== undefined);
@@ -167155,10 +170007,10 @@ function knownLedgerPaths(context) {
   const found = new Map;
   for (const dbPath of knownStorePaths(context)) {
     const own = tierLedgerPathForStore(dbPath);
-    if (existsSync95(own) && !found.has(own))
+    if (existsSync96(own) && !found.has(own))
       found.set(own, undefined);
     const bound = boundLedgerOf(dbPath);
-    if (bound && existsSync95(bound.path))
+    if (bound && existsSync96(bound.path))
       found.set(bound.path, bound.id);
   }
   return [...found].map(([path, id]) => ({ path, ...id ? { id } : {} }));
@@ -167196,7 +170048,7 @@ function runTierRules(args, context = {}) {
   if (command === "list") {
     const path = resolveTierRulesPath({ env });
     const mailScopeRules = mailScopeTierRules(env);
-    if (!existsSync95(path)) {
+    if (!existsSync96(path)) {
       return { path, rules: [], mailScopeRules, note: "No tier rules file yet; add one with olympus tier rules add." };
     }
     const validation = validateTierRulesFile({ env });
@@ -167373,7 +170225,7 @@ var init_tier_cli = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail-import-allowance.ts
-import { AsyncLocalStorage as AsyncLocalStorage13 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage14 } from "node:async_hooks";
 function withGmailImportRunOnce(run) {
   const permission = { active: true };
   return operatorImport.run(permission, async () => {
@@ -167459,7 +170311,7 @@ var init_gmail_import_allowance = __esm(() => {
   init_limit_stops();
   registerLimit({ id: "gmail.import_allowance", kind: "requests", scope: "source", label: "Gmail import request allowance reached", unit: "requests", continue: "run_once" });
   GMAIL_IMPORT_LIMIT_SUBJECT = JSON.stringify(["gmail.email", "internal.email", "gmail.import_allowance"]);
-  operatorImport = new AsyncLocalStorage13;
+  operatorImport = new AsyncLocalStorage14;
   GMAIL_IMPORT_ATTEMPTS = 1 + GMAIL_IMPORT_MAX_RETRIES;
   GMAIL_IMPORT_MESSAGE_COST = 7 * GMAIL_IMPORT_ATTEMPTS;
   GMAIL_IMPORT_LABELS_COST = 1 * GMAIL_IMPORT_ATTEMPTS;
@@ -167475,7 +170327,7 @@ var init_gmail_import_allowance = __esm(() => {
 });
 
 // src/core/provider-credit-status.ts
-import { existsSync as existsSync96, mkdirSync as mkdirSync60, readFileSync as readFileSync84, unlinkSync as unlinkSync5 } from "node:fs";
+import { existsSync as existsSync97, mkdirSync as mkdirSync60, readFileSync as readFileSync84, unlinkSync as unlinkSync5 } from "node:fs";
 import { dirname as dirname97 } from "node:path";
 async function fetchVeniceCreditStatus(options = {}) {
   const env = options.env ?? process.env;
@@ -167852,7 +170704,7 @@ function reconcileProviderPauseFile(path, report, stops) {
     stops?.clear("venice.credit", path);
     return "cleared";
   }
-  if (report.status === "ok" && report.can_consume === true && !existsSync96(path))
+  if (report.status === "ok" && report.can_consume === true && !existsSync97(path))
     stops?.clear("venice.credit", path);
   return "left";
 }
@@ -167913,7 +170765,7 @@ function startVeniceCreditRecovery(options) {
   };
 }
 function isVeniceProviderPauseFile(path) {
-  if (!existsSync96(path))
+  if (!existsSync97(path))
     return false;
   try {
     const raw = JSON.parse(readFileSync84(path, "utf8"));
@@ -167932,7 +170784,7 @@ var init_provider_credit_status = __esm(() => {
 });
 
 // src/core/owner-limit-state.ts
-import { existsSync as existsSync97 } from "node:fs";
+import { existsSync as existsSync98 } from "node:fs";
 function withOwnerLimitStore(use, dbPath = defaultSourceSchedulerStateDbPath()) {
   const store = new LocalSourceSchedulerStateStore(dbPath, { visiting: true });
   try {
@@ -167945,7 +170797,7 @@ function recordOwnerLimitStop(stop) {
   withOwnerLimitStore((store) => store.reportLimitStop(stop));
 }
 function clearOwnerLimitStop(id, subject) {
-  if (!existsSync97(defaultSourceSchedulerStateDbPath()))
+  if (!existsSync98(defaultSourceSchedulerStateDbPath()))
     return;
   withOwnerLimitStore((store) => store.clearLimitStop(id, subject));
   invalidateLimitStop(id, subject);
@@ -168276,11 +171128,14 @@ async function runSnifferPass(options) {
     if (sameQuestion(item.target, item.question) && stillOpen(item.target, item.question, false) && !screenQuestion(item.target, item.question))
       return;
     const { tier, code } = snifferVerdictTier(verdict, options.lane, item.question.flags);
+    const contentDigest = item.question.pass === "content" ? item.question.flags.find((flag) => flag.startsWith("content:sha256:")) : undefined;
     const applied = item.target.ledger.applySnifferVerdict(item.question, {
       pass: item.question.pass,
       tier,
       reason: `${item.question.pass}:sniffer:${id}:${reused ? "rule:duplicate_model:" : ""}${code}`,
       modelId: snifferCacheModelId(options.lane),
+      failSafe: verdict.failSafe,
+      ...contentDigest ? { contentDigest } : {},
       mapRevision: item.question.mapRevision
     }, {
       ...item.target.placementFor ? { placementFor: item.target.placementFor } : {},
@@ -168835,12 +171690,12 @@ var init_owner_limits = __esm(() => {
 });
 
 // src/data-restore.ts
-import { closeSync as closeSync34, copyFileSync as copyFileSync4, existsSync as existsSync98, fsyncSync as fsyncSync10, openSync as openSync33, readFileSync as readFileSync86, renameSync as renameSync20, rmSync as rmSync39, statSync as statSync42, chmodSync as chmodSync39 } from "node:fs";
-import { dirname as dirname99, join as join127, resolve as resolve26 } from "node:path";
-import { randomUUID as randomUUID35 } from "node:crypto";
+import { closeSync as closeSync34, copyFileSync as copyFileSync4, existsSync as existsSync99, fsyncSync as fsyncSync10, openSync as openSync33, readFileSync as readFileSync86, renameSync as renameSync20, rmSync as rmSync39, statSync as statSync43, chmodSync as chmodSync39 } from "node:fs";
+import { dirname as dirname99, join as join127, resolve as resolve29 } from "node:path";
+import { randomUUID as randomUUID36 } from "node:crypto";
 import { Database as Database29 } from "bun:sqlite";
 function restoreOlympusData(options) {
-  const input = resolve26(options.input);
+  const input = resolve29(options.input);
   verifyOlympusDataExport({ destination: input });
   const manifest = JSON.parse(readFileSync86(join127(input, "manifest.json"), "utf8"));
   const context = {
@@ -168938,7 +171793,7 @@ function restoreOlympusData(options) {
   if (manifest.version < 3 || !sawJudgments) {
     notes.push("This backup has no privacy judgments, so Olympus judges the restored items again.");
   }
-  const holds = (path) => existsSync98(path) && statSync42(path).size > 0;
+  const holds = (path) => existsSync99(path) && statSync43(path).size > 0;
   const restoredSources = [...new Set(plan.filter((entry) => entry.kind !== "owner_settings").map((entry) => entry.sourceId))];
   const occupiedSources = restoredSources.filter((sourceId) => storesOf(sourceId).some((store) => [
     store,
@@ -168951,7 +171806,7 @@ function restoreOlympusData(options) {
     throw new OperationError("invalid_params", `This computer already holds Olympus data for ${sources.join(", ")}, so nothing was restored.`, "Restore onto a fresh install, or delete that data first with olympus data delete --source <id>.");
   }
   for (const entry of plan) {
-    if (entry.kind === "owner_settings" && !entry.merge && existsSync98(entry.to))
+    if (entry.kind === "owner_settings" && !entry.merge && existsSync99(entry.to))
       entry.keptAs = `${entry.to}.before-restore`;
   }
   const sourceIds = [...new Set(plan.filter((entry) => entry.kind === "store").map((entry) => entry.sourceId))];
@@ -168975,7 +171830,7 @@ function restoreOlympusData(options) {
     for (const entry of plan) {
       if (entry.kind !== "media")
         continue;
-      if (!existsSync98(entry.to))
+      if (!existsSync99(entry.to))
         copyPrivate(join127(input, entry.from), entry.to);
       pictures.set(entry.to.split("/").pop().slice(0, -".jpg".length), entry.to);
     }
@@ -169099,7 +171954,7 @@ function writeRestoredIdentities(identities, bindingsPath, env) {
 }
 function copyPrivate(from, to, prepare) {
   makeDurableDirectory(dirname99(to), exportDurabilityBoundary(dirname99(to)));
-  const staging = `${to}.${randomUUID35()}.restoring`;
+  const staging = `${to}.${randomUUID36()}.restoring`;
   try {
     copyFileSync4(from, staging);
     chmodSync39(staging, 384);
@@ -169253,10 +172108,10 @@ var init_data_restore = __esm(() => {
 });
 
 // src/data-backup.ts
-import { createCipheriv as createCipheriv2, createDecipheriv as createDecipheriv2, createHash as createHash94, createHmac as createHmac6, randomBytes as randomBytes27, randomUUID as randomUUID36, scryptSync as scryptSync2, timingSafeEqual as timingSafeEqual8 } from "node:crypto";
-import { closeSync as closeSync35, existsSync as existsSync99, lstatSync as lstatSync48, mkdirSync as mkdirSync62, openSync as openSync34, readdirSync as readdirSync30, readSync as readSync12, renameSync as renameSync21, rmSync as rmSync40, statSync as statSync43, unlinkSync as unlinkSync6, writeSync as writeSync9, chmodSync as chmodSync40, fsyncSync as fsyncSync11 } from "node:fs";
+import { createCipheriv as createCipheriv2, createDecipheriv as createDecipheriv2, createHash as createHash94, createHmac as createHmac6, randomBytes as randomBytes27, randomUUID as randomUUID37, scryptSync as scryptSync2, timingSafeEqual as timingSafeEqual8 } from "node:crypto";
+import { closeSync as closeSync35, existsSync as existsSync100, lstatSync as lstatSync48, mkdirSync as mkdirSync62, openSync as openSync34, readdirSync as readdirSync30, readSync as readSync12, renameSync as renameSync21, rmSync as rmSync40, statSync as statSync44, unlinkSync as unlinkSync6, writeSync as writeSync9, chmodSync as chmodSync40, fsyncSync as fsyncSync11 } from "node:fs";
 import { open as openAsync } from "node:fs/promises";
-import { basename as basename22, dirname as dirname100, join as join128, resolve as resolve27, sep as sep24 } from "node:path";
+import { basename as basename22, dirname as dirname100, join as join128, resolve as resolve30, sep as sep24 } from "node:path";
 function normalizePassphrase(passphrase) {
   const value = passphrase.normalize("NFC");
   if (value.trim().length === 0)
@@ -169398,13 +172253,13 @@ async function writeBackupFile(options) {
   const now = options.now ?? new Date;
   if (options.key)
     checkKdf(options.key.kdf);
-  const folder = resolve27(options.folder);
+  const folder = resolve30(options.folder);
   mkdirSync62(folder, { recursive: true });
   let name = backupFileName(now);
-  for (let n = 2;existsSync99(join128(folder, name)); n += 1)
+  for (let n = 2;existsSync100(join128(folder, name)); n += 1)
     name = backupFileName(now).replace(BACKUP_FILE_EXTENSION, `-${n}${BACKUP_FILE_EXTENSION}`);
   const target = join128(folder, name);
-  const staging = join128(folder, `.${name}.${randomUUID36()}.partial`);
+  const staging = join128(folder, `.${name}.${randomUUID37()}.partial`);
   const nonce = options.key ? randomBytes27(12) : undefined;
   const header = encodeHeader({
     kind: "olympus_backup",
@@ -169461,7 +172316,7 @@ async function writeBackupFile(options) {
   await handle.close();
   renameSync21(staging, target);
   syncDirectorySync(folder);
-  return { path: target, name, bytes: statSync43(target).size, encrypted: options.key !== undefined, createdAt: now.toISOString() };
+  return { path: target, name, bytes: statSync44(target).size, encrypted: options.key !== undefined, createdAt: now.toISOString() };
 }
 function readExactly(fd, length, position) {
   const out = Buffer.alloc(length);
@@ -169480,7 +172335,7 @@ function notABackup(path) {
 function readBackupHeader(path) {
   const fd = openSync34(path, "r");
   try {
-    const size = statSync43(path).size;
+    const size = statSync44(path).size;
     const lead = readExactly(fd, MAGIC.length + 4, 0);
     if (lead.length < MAGIC.length + 4 || !lead.subarray(0, MAGIC.length).equals(MAGIC))
       throw notABackup(path);
@@ -169662,8 +172517,8 @@ function openBackupFile(options) {
   } else {
     hash = createHash94("sha256").update(headerBytes);
   }
-  const into = resolve27(options.into);
-  if (existsSync99(into))
+  const into = resolve30(options.into);
+  if (existsSync100(into))
     throw new OperationError("invalid_params", `${into} already exists.`);
   mkdirSync62(into, { recursive: true, mode: 448 });
   chmodSync40(into, 448);
@@ -169757,10 +172612,10 @@ function backupStagingDir(env) {
   const root = sharedDataPath("backup-staging", env);
   mkdirSync62(root, { recursive: true, mode: 448 });
   chmodSync40(root, 448);
-  return join128(root, randomUUID36());
+  return join128(root, randomUUID37());
 }
 async function backupOlympusData(options) {
-  const folder = resolve27(options.folder);
+  const folder = resolve30(options.folder);
   const staging = backupStagingDir(lifecycleEnv(options));
   try {
     mkdirSync62(staging, { mode: 448 });
@@ -169777,14 +172632,14 @@ async function backupOlympusData(options) {
   }
 }
 function restoreOlympusBackup(options) {
-  const input = resolve27(options.input);
+  const input = resolve30(options.input);
   const context = {
     ...options.homeDir ? { homeDir: options.homeDir } : {},
     ...options.env ? { env: options.env } : {}
   };
-  if (!existsSync99(input))
+  if (!existsSync100(input))
     throw new OperationError("invalid_params", `${input} does not exist.`);
-  if (statSync43(input).isDirectory())
+  if (statSync44(input).isDirectory())
     return restoreOlympusData({ input, ...options.dryRun ? { dryRun: true } : {}, ...context });
   const staging = backupStagingDir(lifecycleEnv(context));
   try {
@@ -169916,7 +172771,7 @@ var init_settings_proposal = __esm(() => {
 });
 
 // src/core/engine-brief.ts
-import { existsSync as existsSync101, readFileSync as readFileSync88 } from "node:fs";
+import { existsSync as existsSync102, readFileSync as readFileSync88 } from "node:fs";
 import { homedir as homedir38 } from "node:os";
 function engineBriefFromViewModel(view) {
   const items = Array.isArray(view.needsYou) ? view.needsYou : [];
@@ -170027,7 +172882,7 @@ async function readEngineBrief(deps) {
 }
 function startingGraceOver(path, agentPid, now) {
   try {
-    if (!existsSync101(path))
+    if (!existsSync102(path))
       return false;
     const status = JSON.parse(readFileSync88(path, "utf8"));
     if (status?.schema !== "olympus.engine.status.v1" || typeof status.started_at !== "string")
@@ -170157,7 +173012,7 @@ var init_zkapi_recovery = __esm(() => {
 });
 
 // src/core/zkapi-funding-date.ts
-import { readFileSync as readFileSync90, statSync as statSync44 } from "node:fs";
+import { readFileSync as readFileSync90, statSync as statSync45 } from "node:fs";
 function setZkapiFundingDate(input) {
   const date = input.date.trim();
   if (parseIsoDate(date) === undefined) {
@@ -170204,7 +173059,7 @@ function zkapiFundingDateRefresher(path) {
       return;
     let key;
     try {
-      const stat = statSync44(path);
+      const stat = statSync45(path);
       key = `${stat.ino}:${stat.size}:${stat.mtimeMs}`;
     } catch {
       return known;
@@ -185618,8 +188473,8 @@ var init_embedding_runtime = __esm(() => {
 });
 
 // src/core/native-embedding-drain-service.ts
-import { randomUUID as randomUUID37 } from "node:crypto";
-import { readFileSync as readFileSync93, statSync as statSync45 } from "node:fs";
+import { randomUUID as randomUUID38 } from "node:crypto";
+import { readFileSync as readFileSync93, statSync as statSync46 } from "node:fs";
 import { delimiter as delimiter8, dirname as dirname104, isAbsolute as isAbsolute38, join as join133 } from "node:path";
 import { fileURLToPath as fileURLToPath13 } from "node:url";
 function createNativeEmbeddingDrainService(options) {
@@ -185669,7 +188524,7 @@ async function prepareEmbeddingDrainStart(input, options) {
     throw new NativeProcessConfigurationError("Olympus source embedding drain report path must be absolute.");
   }
   const readinessPath = join133(dirname104(reportPath), READINESS_FILE);
-  const instanceId = randomUUID37();
+  const instanceId = randomUUID38();
   env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_INSTANCE_ID = instanceId;
   env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_READINESS_PATH = readinessPath;
   return {
@@ -185720,7 +188575,7 @@ function resolveBunRuntimePath2(configured, env) {
     if (!["bun", "bun.exe"].includes(candidate.split(/[\\/]/).at(-1)?.toLowerCase() ?? ""))
       continue;
     try {
-      if (statSync45(candidate).isFile())
+      if (statSync46(candidate).isFile())
         return candidate;
     } catch {}
   }
@@ -185731,14 +188586,14 @@ function assertUsableFile(path, label) {
     throw new NativeProcessConfigurationError(`Olympus source embedding drain ${label} path must be absolute.`);
   }
   try {
-    if (statSync45(path).isFile())
+    if (statSync46(path).isFile())
       return path;
   } catch {}
   throw new NativeProcessConfigurationError(`Olympus source embedding drain ${label} file is missing.`);
 }
 async function embeddingDrainReadinessProbe(readinessPath, instanceId, child) {
   try {
-    const stat = statSync45(readinessPath);
+    const stat = statSync46(readinessPath);
     if (!stat.isFile() || stat.size > 16 * 1024)
       return false;
     const receipt = JSON.parse(readFileSync93(readinessPath, "utf8"));
@@ -186511,7 +189366,7 @@ var init_protocol3 = __esm(() => {
 
 // connect-relay/client/identity.ts
 import { createPrivateKey, createPublicKey as createPublicKey2, generateKeyPairSync } from "node:crypto";
-import { chmodSync as chmodSync41, existsSync as existsSync105, lstatSync as lstatSync50, mkdirSync as mkdirSync66, readFileSync as readFileSync94, renameSync as renameSync23, writeFileSync as writeFileSync26 } from "node:fs";
+import { chmodSync as chmodSync41, existsSync as existsSync106, lstatSync as lstatSync50, mkdirSync as mkdirSync66, readFileSync as readFileSync94, renameSync as renameSync23, writeFileSync as writeFileSync26 } from "node:fs";
 import { join as join135 } from "node:path";
 function ensureStateDir(stateDir) {
   mkdirSync66(stateDir, { recursive: true, mode: 448 });
@@ -186533,7 +189388,7 @@ function writePrivateFile(path, contents) {
 function loadOrCreateIdentity(stateDir) {
   const path = join135(ensureStateDir(stateDir), "install-key.pem");
   let privateKey;
-  if (existsSync105(path)) {
+  if (existsSync106(path)) {
     privateKey = createPrivateKey(readFileSync94(path));
   } else {
     privateKey = generateKeyPairSync("ed25519").privateKey;
@@ -187459,7 +190314,7 @@ function parseOwnerTierItemId(itemId) {
 }
 function namesAbovePersonal(state) {
   const { record } = state;
-  if (!record || state.namesHeld)
+  if (!record || state.namesHeld || state.reviewHeld)
     return true;
   return [record.metadataTier, record.targetMetadataTier, state.ownerTier].some((tier) => tier !== null && tier !== undefined && tierRank(tier) > tierRank("private"));
 }
@@ -187472,10 +190327,10 @@ function findOwnerTierItems(input, context = {}) {
     throw new OperationError("invalid_params", "Give words to search for, or ask for the recently sorted items.");
   if (input.recent && query)
     throw new OperationError("invalid_params", "Search, or list the recently sorted items, not both.");
-  if (input.filter !== undefined && (!input.recent || !["personal", "private", "changed"].includes(input.filter))) {
-    throw new OperationError("invalid_params", "filter is personal, private or changed, with the recently sorted items.");
+  if (input.filter !== undefined && (!input.recent || !["personal", "private", "changed", "override_review"].includes(input.filter) || input.personalNamesOnly && input.filter === "override_review")) {
+    throw new OperationError("invalid_params", "Use an available filter with the recently sorted items.");
   }
-  if (input.before !== undefined && (!input.recent || input.filter === "changed" || Number.isNaN(Date.parse(input.before)))) {
+  if (input.before !== undefined && (!input.recent || input.filter === "changed" || input.filter === "override_review" || Number.isNaN(Date.parse(input.before)))) {
     throw new OperationError("invalid_params", "before is a time, with the recently sorted items.");
   }
   if (input.beforeItem !== undefined && input.before === undefined) {
@@ -187493,9 +190348,17 @@ function findOwnerTierItems(input, context = {}) {
       continue;
     if (input.personalNamesOnly && namesAbovePersonal(state))
       continue;
+    if (input.filter === "override_review" && !state.overrideReview)
+      continue;
     const item = view3(row, state, context);
-    if (input.withPreview && !input.personalNamesOnly)
-      item.preview = previewOf(identity, context);
+    if (!input.personalNamesOnly) {
+      if (state.overrideReview)
+        item.override_review = state.overrideReview;
+      if (state.overrideFindingKinds?.length)
+        item.override_finding_kinds = state.overrideFindingKinds;
+      if (input.withPreview && !state.reviewHeld && !state.overrideFindingKinds?.length)
+        item.preview = previewOf(identity, context);
+    }
     items.push(item);
   }
   return { items };
@@ -187540,7 +190403,7 @@ function recentRows(limit, context, filter, before, beforeItem) {
   for (const ledger of knownTierLedgers(context)) {
     let records = [];
     try {
-      records = withLedgerAt(ledger.path, context.now, (opened) => filter === "changed" ? opened.listRoutedOverrides().filter(({ override }) => override.kind === "tier").map(({ record }) => record).sort((left, right) => right.decidedAt.localeCompare(left.decidedAt)).slice(0, limit) : opened.recentDecisions(limit, filter === "personal" ? "private" : filter === "private" ? "secure" : undefined, before, beforeItem), ledger.boundLedgerId, "read-only-on-front");
+      records = withLedgerAt(ledger.path, context.now, (opened) => filter === "changed" || filter === "override_review" ? opened.listRoutedOverrides().filter(({ record, override }) => override.kind === "tier" && (filter === "changed" || opened.ownerOverrideReview(identityOfRecord2(record), record, override))).map(({ record }) => record).sort((left, right) => right.decidedAt.localeCompare(left.decidedAt)).slice(0, limit) : opened.recentDecisions(limit, filter === "personal" ? "private" : filter === "private" ? "secure" : undefined, before, beforeItem), ledger.boundLedgerId, "read-only-on-front");
     } catch {}
     for (const record of records) {
       const key = tierLedgerIdentityKey(identityOfRecord2(record));
@@ -187637,6 +190500,12 @@ function readLocatedState(items, context) {
         state.ownerSet = true;
         state.ownerTier = override.tier;
       }
+      state.overrideReview ??= ledger.ownerOverrideReview(item.identity, record, override);
+      if (record?.reasons.includes(OWNER_OVERRIDE_SECRET_REVIEW_REASON))
+        state.reviewHeld = true;
+      if (record?.state === "current" && override?.kind === "tier" && (record.contentTier === "private" || record.contentTier === "public") && (override.tier === "private" || override.tier === "public") && record.reasons.includes(OWNER_OVERRIDE_SECRET_CONFIRMED_REASON)) {
+        state.overrideFindingKinds ??= contentSecretFindingKinds(record.reasons);
+      }
       if (ledger.itemIsSecret(item.identity))
         state.secret = true;
     }, item.boundLedgerId, "read-only-on-front");
@@ -187669,14 +190538,15 @@ function judgeReason(record) {
 function view3(row, state, context) {
   const { record } = state;
   const identity = identityOfRow2(row);
+  const screenName = (value) => state.reviewHeld || state.overrideFindingKinds?.length ? screenedSecretLocator(value) : value;
   const hold = record?.state === "current" && record.contentTier === "secure" && !record.contentRead && record.reasons.some(isFailSafeMissingContentQuestion) ? unreadHoldDisposition(context.extractionOutcome?.(row.family ?? undefined, identity, row.local_item_id ?? undefined), context.contentAllowed?.(identity, row.local_item_id, row.locator_uri)) : undefined;
   return {
     item_id: ownerTierItemId(identityOfRow2(row)),
     source: row.provider,
     family: row.family,
-    title: row.title,
-    sender: row.sender_label?.trim() || row.sender_id?.trim() || null,
-    location: row.locator_uri,
+    title: screenName(row.title),
+    sender: screenName(row.sender_label?.trim() || row.sender_id?.trim() || null),
+    location: screenName(row.locator_uri),
     tier: record ? tierDisplayName(record.contentTier) : null,
     names_tier: record ? tierDisplayName(record.metadataTier) : null,
     ...record?.state === "moving" && record.targetContentTier ? { moving_to: tierDisplayName(record.targetContentTier) } : {},
@@ -187704,7 +190574,11 @@ function getOwnerTierItem(itemId, context = {}, options = {}) {
   if (state.secret)
     return;
   const item = view3(storedRowFor(identity, located, context), state, context);
-  if (options.withPreview)
+  if (state.overrideReview)
+    item.override_review = state.overrideReview;
+  if (state.overrideFindingKinds?.length)
+    item.override_finding_kinds = state.overrideFindingKinds;
+  if (options.withPreview && !state.reviewHeld && !state.overrideFindingKinds?.length)
     item.preview = previewOf(identity, context);
   return item;
 }
@@ -187736,7 +190610,17 @@ function setOwnerTierItem(input, context = {}) {
   }
   let results;
   let changed;
-  if (choice === "judge") {
+  if (before.reviewHeld || input.reviewDigest !== undefined) {
+    const staleReview = { ok: false, code: "override_review_changed", message: "Open the current review before changing this item." };
+    if (!input.allowLower || !input.reviewDigest || before.overrideReview?.digest !== input.reviewDigest || choice === "private")
+      return staleReview;
+    const digest = input.reviewDigest;
+    const answered = located.map((item) => withLedgerAt(item.ledgerPath, context.now, (ledger) => ledger.resolveOwnerOverrideReview(item.identity, digest, choice), item.boundLedgerId));
+    if (!answered.some(Boolean))
+      return staleReview;
+    results = [];
+    changed = choice === "judge" ? "cleared" : "set";
+  } else if (choice === "judge") {
     if (!before.ownerSet) {
       return { ok: false, code: "not_owner_set", message: "This item already has the judge's label: nobody changed it by hand." };
     }
@@ -187795,420 +190679,7 @@ var init_tier_owner_items = __esm(() => {
   init_tier_ledger();
   init_unreadable_files();
   init_tier_rules();
-});
-
-// src/workers/source-scope-runtime.ts
-import { statSync as statSync46 } from "node:fs";
-function isMailSourceScopePolicyRef(ref) {
-  return ref.sourceId === "gmail.email";
-}
-
-class FileSourceScopeAuthority {
-  registryPath;
-  statePath;
-  mailStatePath;
-  readRegistry;
-  mailPinnedHandle;
-  registryFromFile;
-  approvedByFiles = new Map;
-  constructor(options = {}) {
-    this.registryPath = options.registryPath ?? defaultHandleRegistryPath();
-    this.statePath = options.statePath ?? defaultFileSourceScopeStatePath(this.registryPath);
-    this.mailStatePath = options.mailStatePath ?? defaultMailSourceScopeStatePath(this.registryPath);
-    this.readRegistry = options.readRegistry ?? (() => readConnectedHandleRegistry(this.registryPath));
-    this.registryFromFile = options.readRegistry === undefined;
-    this.mailPinnedHandle = options.mailPinnedHandle ?? (() => {
-      return;
-    });
-  }
-  mailSnapshot() {
-    try {
-      return readMailSourceScopeApproval(this.mailInput());
-    } catch {
-      return { sourceId: "gmail.email", status: "scope_pending", revision: "unreadable", reason: "malformed" };
-    }
-  }
-  approveMail(input) {
-    return approveMailSourceScope({ ...this.mailInput(), ...input });
-  }
-  mailPolicyRef() {
-    const snapshot = this.mailSnapshot();
-    if (snapshot.status !== "approved" || !snapshot.accountGeneration)
-      return;
-    return { sourceId: "gmail.email", accountGeneration: snapshot.accountGeneration, revision: snapshot.revision };
-  }
-  assertCurrentMail(ref) {
-    return assertMailSourceScopeApproved({
-      ...this.mailInput(),
-      expectedAccountGeneration: ref.accountGeneration,
-      expectedRevision: ref.revision
-    });
-  }
-  assertRefCurrent(ref) {
-    if (isMailSourceScopePolicyRef(ref))
-      this.assertCurrentMail(ref);
-    else
-      this.assertCurrent(ref);
-  }
-  mailInput() {
-    const pinnedHandle = this.mailPinnedHandle()?.trim();
-    return {
-      registry: this.readRegistry(),
-      statePath: this.mailStatePath,
-      ...pinnedHandle ? { pinnedHandle } : {}
-    };
-  }
-  fileScopeRegistry() {
-    const registry = this.readRegistry();
-    return {
-      handles: [
-        ...registry.handles.map((handle) => {
-          const { thisComputer: _ignored, ...credential } = handle;
-          return credential;
-        }),
-        ...readThisComputerHandles(this.registryPath)
-      ]
-    };
-  }
-  snapshot(sourceId) {
-    try {
-      return readFileSourceScopeApproval({
-        sourceId,
-        registry: this.fileScopeRegistry(),
-        statePath: this.statePath
-      });
-    } catch {
-      return {
-        sourceId,
-        status: "scope_pending",
-        revision: "unreadable",
-        selections: [],
-        wholeAccount: false,
-        reason: "malformed"
-      };
-    }
-  }
-  approve(input) {
-    return approveFileSourceScope({
-      ...input,
-      registry: this.fileScopeRegistry(),
-      statePath: this.statePath
-    });
-  }
-  approvedProviderAccount(approval) {
-    if (approval.status !== "approved" || !approval.accountGeneration)
-      return;
-    try {
-      const account = connectedFileSourceAccountGeneration(approval.sourceId, this.fileScopeRegistry());
-      return account?.generation === approval.accountGeneration ? account.handle.providerAccountId : undefined;
-    } catch {
-      return;
-    }
-  }
-  assertCurrent(ref) {
-    const key = this.approvalFilesKey(ref);
-    const reused = key === undefined ? undefined : this.approvedByFiles.get(ref.sourceId);
-    if (reused && reused.key === key)
-      return reused.snapshot;
-    const snapshot = assertFileSourceScopeApproved({
-      sourceId: ref.sourceId,
-      registry: this.fileScopeRegistry(),
-      statePath: this.statePath,
-      expectedAccountGeneration: ref.accountGeneration,
-      expectedRevision: ref.revision
-    });
-    if (key !== undefined)
-      this.approvedByFiles.set(ref.sourceId, { key, snapshot });
-    return snapshot;
-  }
-  approvalFilesKey(ref) {
-    if (!this.registryFromFile)
-      return;
-    try {
-      const files = [this.registryPath, defaultThisComputerStatePath(this.registryPath), this.statePath].map((path) => {
-        const stat = statSync46(path, { throwIfNoEntry: false });
-        return stat ? [stat.ino, stat.mtimeMs, stat.size] : null;
-      });
-      return JSON.stringify([ref.accountGeneration, ref.revision, files]);
-    } catch {
-      return;
-    }
-  }
-  policyRef(sourceId) {
-    const snapshot = this.snapshot(sourceId);
-    if (snapshot.status !== "approved" || !snapshot.accountGeneration)
-      return;
-    return {
-      sourceId,
-      accountGeneration: snapshot.accountGeneration,
-      revision: snapshot.revision
-    };
-  }
-}
-function rebindRestoredFileScope(input) {
-  const { approval, providerAccountId } = input;
-  if (approval.status !== "approved" || !approval.accountGeneration || !providerAccountId)
-    return 0;
-  const definition = getFileScopeSource(approval.sourceId);
-  if (!definition || definition.account !== "provider_account")
-    return 0;
-  const target = { provider: definition.provider, accountGeneration: approval.accountGeneration, revision: approval.revision };
-  let carried = 0;
-  const seenStores = new Set;
-  const seenSecrets = new Set;
-  for (const set of input.sets) {
-    const stores = set.stores.filter((store) => !seenStores.has(store));
-    for (const store of stores)
-      seenStores.add(store);
-    const fromGenerations = [...new Set(stores.flatMap((store) => store.restoredScopeGenerations(definition.provider, providerAccountId) ?? []))];
-    if (set.secretLocations && !seenSecrets.has(set.secretLocations) && fromGenerations.length > 0) {
-      seenSecrets.add(set.secretLocations);
-      carried += set.secretLocations.rebindScopeGenerations({ ...target, fromGenerations });
-    }
-    for (const store of stores)
-      carried += store.rebindRestoredSourceScope({ ...target, providerAccountId });
-  }
-  return carried;
-}
-function scopeKeyFilter(definition, role, keys) {
-  if (keys.length === 0)
-    return {};
-  return { [FILTER_KEYS[definition.filterFamily][role]]: [...keys] };
-}
-function scopeStampFilter(definition, accountGeneration, revision) {
-  return {
-    provider: definition.provider,
-    sourceScopeGeneration: accountGeneration,
-    ...definition.itemKeysExact ? {} : { sourceScopeRevision: revision }
-  };
-}
-function fileSourceScopeContentFilters(approval) {
-  if (approval.status !== "approved" || !approval.accountGeneration)
-    return { allowed: false };
-  const definition = getFileScopeSource(approval.sourceId);
-  if (!definition)
-    return { allowed: false };
-  const deniedKeys = approval.selections.filter((selection) => selection.state !== "ingest").map((selection) => selection.key);
-  const base = scopeStampFilter(definition, approval.accountGeneration, approval.revision);
-  if (approval.wholeAccount) {
-    return {
-      allowed: true,
-      filters: { ...base, ...scopeKeyFilter(definition, "exclude", deniedKeys) }
-    };
-  }
-  const ingestKeys = approval.selections.filter((selection) => selection.state === "ingest").map((selection) => selection.key);
-  if (ingestKeys.length === 0)
-    return { allowed: false };
-  return {
-    allowed: true,
-    filters: {
-      ...base,
-      ...scopeKeyFilter(definition, "include", ingestKeys),
-      ...scopeKeyFilter(definition, "exclude", deniedKeys)
-    }
-  };
-}
-function fileSourceScopeMetadataFilters(approval) {
-  if (approval.status !== "approved" || !approval.accountGeneration)
-    return { allowed: false };
-  const definition = getFileScopeSource(approval.sourceId);
-  if (!definition)
-    return { allowed: false };
-  const excludedKeys = approval.selections.filter((selection) => selection.state === "exclude").map((selection) => selection.key);
-  const metadataOnlyKeys = approval.selections.filter((selection) => selection.state === "metadata_only" || selection.state === "on_demand").map((selection) => selection.key);
-  const base = {
-    ...scopeStampFilter(definition, approval.accountGeneration, approval.revision),
-    ...scopeKeyFilter(definition, "exclude", excludedKeys),
-    ...scopeKeyFilter(definition, "metadataOnly", metadataOnlyKeys)
-  };
-  if (approval.wholeAccount)
-    return { allowed: true, filters: base };
-  const includedKeys = approval.selections.filter((selection) => selection.state !== "exclude").map((selection) => selection.key);
-  if (includedKeys.length === 0)
-    return { allowed: false };
-  return {
-    allowed: true,
-    filters: { ...base, ...scopeKeyFilter(definition, "include", includedKeys) }
-  };
-}
-function fileSourceScopeMetadataEnabled(approval) {
-  return approval.status === "approved" && (approval.wholeAccount || approval.selections.some((selection) => selection.state !== "exclude"));
-}
-function fileSourceScopeDropboxPolicy(base, approval) {
-  if (approval.sourceId !== "dropbox.files" || approval.status !== "approved") {
-    return { ...base, roots: [] };
-  }
-  const roots = approval.wholeAccount ? [{
-    path: "/",
-    approved_scope_key: `${base.source}:/`,
-    default_action: "full_extract"
-  }] : approval.selections.filter((selection) => selection.state !== "exclude").map((selection) => ({
-    path: normalizeDropboxScopePath(selection.key),
-    approved_scope_key: `${base.source}:${normalizeDropboxScopePath(selection.key)}`,
-    default_action: selection.state === "ingest" ? "full_extract" : selection.state === "on_demand" ? "on_demand" : "metadata_only"
-  }));
-  return { ...base, roots };
-}
-function createScopeBoundGoogleDriveContentScope(input) {
-  const current = () => input.authority.assertCurrent(input.ref);
-  return {
-    generation: input.ref.accountGeneration,
-    revision: input.ref.revision,
-    allowsMetadata(folderAncestorIds) {
-      return fileSourceScopeAllowsMetadata(current(), folderAncestorIds);
-    },
-    allowsContent(folderAncestorIds) {
-      return fileSourceScopeAllowsContent(current(), folderAncestorIds);
-    }
-  };
-}
-function createScopeBoundDropboxContentScope(input) {
-  const current = () => input.authority.assertCurrent(input.ref);
-  return {
-    generation: input.ref.accountGeneration,
-    revision: input.ref.revision,
-    assertCurrent() {
-      current();
-    },
-    allowsMetadata: (path) => dropboxScopeAllows(current(), path).metadata,
-    allowsContent: (path) => dropboxScopeAllows(current(), path).content
-  };
-}
-function dropboxScopeAllows(approval, path) {
-  const normalized = normalizeDropboxScopePath(path);
-  const selected = approval.selections.filter((selection) => {
-    const root = normalizeDropboxScopePath(selection.key);
-    return normalized === root || root !== "/" && normalized.startsWith(`${root}/`) || root === "/";
-  });
-  return {
-    metadata: !selected.some((entry) => entry.state === "exclude") && (approval.wholeAccount || selected.some((entry) => entry.state !== "exclude")),
-    content: !selected.some((entry) => entry.state !== "ingest") && (approval.wholeAccount || selected.some((entry) => entry.state === "ingest"))
-  };
-}
-function dropboxNamesOnlyByOwner(authority, now = Date.now) {
-  let cached;
-  const namesOnly = (path, requireReadable = false) => {
-    const at = now();
-    if (!cached || at - cached.at >= DROPBOX_NAMES_ONLY_APPROVAL_TTL_MS) {
-      cached = { at, ref: authority.policyRef("dropbox.files") };
-    }
-    if (!cached.ref)
-      return false;
-    let approval;
-    try {
-      approval = authority.assertCurrent(cached.ref);
-    } catch (error) {
-      cached = undefined;
-      if (requireReadable)
-        throw error;
-      return false;
-    }
-    if (approval.status !== "approved")
-      return false;
-    const allows = dropboxScopeAllows(approval, path);
-    return allows.metadata && !allows.content;
-  };
-  return Object.assign(namesOnly, {
-    revision: () => {
-      const snapshot = authority.snapshot("dropbox.files");
-      const ref = snapshot.status === "approved" && snapshot.accountGeneration ? { sourceId: snapshot.sourceId, accountGeneration: snapshot.accountGeneration, revision: snapshot.revision } : undefined;
-      cached = { at: now(), ref };
-      return snapshot.reason === "malformed" ? undefined : JSON.stringify([snapshot.status, snapshot.accountGeneration, snapshot.revision]);
-    }
-  });
-}
-function normalizeDropboxScopePath(path) {
-  const normalized = path.trim().replace(/\/{2,}/g, "/").toLowerCase();
-  return normalized.length > 1 && normalized.endsWith("/") ? normalized.slice(0, -1) : normalized;
-}
-function scopeBoundEmbeddingProvider(provider, authority, ref) {
-  return checkedEmbeddingProvider(provider, () => authority.assertRefCurrent(ref));
-}
-function checkedEmbeddingProvider(provider, check) {
-  const assertCurrent = () => {
-    provider.assertBindingCurrent?.();
-    check();
-  };
-  return {
-    ...provider,
-    async embed(inputs, options) {
-      assertCurrent();
-      return provider.embed(inputs, options);
-    },
-    assertBindingCurrent() {
-      assertCurrent();
-    },
-    ...provider.imageSupport ? { imageSupport: () => provider.imageSupport() } : {},
-    ...provider.embedWithImageVectors ? {
-      embedWithImageVectors: (inputs) => {
-        assertCurrent();
-        return provider.embedWithImageVectors(inputs);
-      }
-    } : {},
-    ...provider.embedImageVectors ? {
-      embedImageVectors: (images) => {
-        assertCurrent();
-        return provider.embedImageVectors(images);
-      }
-    } : {},
-    ...provider.embedPromptTexts ? { embedPromptTexts: (texts) => provider.embedPromptTexts(texts) } : {},
-    ...provider.runsOnThisComputer ? { runsOnThisComputer: () => provider.runsOnThisComputer() } : {}
-  };
-}
-function gmailConnectorScopeFromApproval(approval) {
-  const compiled = compileGmailMailScope(approval.mailScope);
-  return {
-    ...compiled.baseQuery ? { baseQuery: compiled.baseQuery } : {},
-    ...compiled.contentAfterMs !== undefined ? { contentAfterMs: compiled.contentAfterMs } : {},
-    skippedCategoryLabelIds: compiled.skippedCategoryLabelIds,
-    ...compiled.skippedLabelIds.length > 0 ? { skippedLabelIds: compiled.skippedLabelIds } : {},
-    ...approval.mailScope.skipSenders.length > 0 ? { skipSenders: approval.mailScope.skipSenders } : {},
-    ...approval.mailScope.alwaysPrivateSenders.length > 0 ? { ownerTierRules: mailScopeOwnerTierRules(approval.mailScope) } : {}
-  };
-}
-function scopeBoundSchedulerSource(input) {
-  const suffix = input.ref.revision.replaceAll("-", "").slice(0, 16);
-  return {
-    ...input.source,
-    tasks: input.source.tasks.map((task) => ({
-      ...task,
-      id: `${task.id}:scope:${suffix}`,
-      async run(context) {
-        input.authority.assertRefCurrent(input.ref);
-        return task.run(context);
-      }
-    }))
-  };
-}
-function fileSourceScopeOnDemandFilters(approval) {
-  return fileSourceScopeContentFilters({
-    ...approval,
-    wholeAccount: false,
-    selections: approval.selections.filter((selection) => selection.state !== "ingest").map((selection) => ({
-      ...selection,
-      state: selection.state === "on_demand" ? "ingest" : "exclude"
-    }))
-  });
-}
-var FILTER_KEYS, DROPBOX_NAMES_ONLY_APPROVAL_TTL_MS = 5000;
-var init_source_scope_runtime = __esm(() => {
-  init_source_scope_approval();
-  init_file_scope_sources();
-  init_this_computer();
-  init_connected_handles();
-  init_mail_source_scope();
-  FILTER_KEYS = {
-    locator_path: {
-      include: "locatorPathScopes",
-      exclude: "locatorPathExcludedScopes",
-      metadataOnly: "metadataOnlyLocatorPathScopes"
-    },
-    folder_id: {
-      include: "sourceScopeFolderAnyKeys",
-      exclude: "sourceScopeFolderNoneKeys",
-      metadataOnly: "metadataOnlySourceScopeFolderKeys"
-    }
-  };
+  init_secret_locations();
 });
 
 // src/workers/engine/dashboard/dashboard-people.ts
@@ -190760,7 +193231,7 @@ var init_json_tokenizer = __esm(() => {
 // src/workers/source-index/built-in-reranker.ts
 import { isMainThread as isMainThread9 } from "node:worker_threads";
 import { availableParallelism as availableParallelism3, totalmem as totalmem4 } from "node:os";
-import { existsSync as existsSync106, readFileSync as readFileSync96 } from "node:fs";
+import { existsSync as existsSync107, readFileSync as readFileSync96 } from "node:fs";
 import { isAbsolute as isAbsolute39, join as join136 } from "node:path";
 function createCrossEncoderReranker(options) {
   const maxPairTokens = options.maxPairTokens ?? DEFAULT_PAIR_TOKENS;
@@ -190902,7 +193373,7 @@ function builtInRerankerFromEnv(options = {}) {
   const modelPath = join136(modelDir, "model.onnx");
   const vocabularyPath = join136(modelDir, "vocab.txt");
   const tokenizerPath = join136(modelDir, "tokenizer.json");
-  if (!existsSync106(modelPath) || !existsSync106(vocabularyPath) && !existsSync106(tokenizerPath))
+  if (!existsSync107(modelPath) || !existsSync107(vocabularyPath) && !existsSync107(tokenizerPath))
     return;
   const runtimeOverride = env[SOURCE_RERANKER_RUNTIME_DIR_ENV]?.trim();
   const runtimeDir = runtimeOverride || builtInEmbeddingPaths(env, ARCTIC_EMBED_M_V1_5).runtimeDir;
@@ -190937,7 +193408,7 @@ function builtInRerankerFromEnv(options = {}) {
   return createCrossEncoderReranker({
     id: `cross-encoder:${modelDir.split(/[\\/]/).filter(Boolean).pop() ?? "model"}`,
     session: () => runtime.createSession(modelPath, { threads }),
-    tokenizer: existsSync106(vocabularyPath) ? new WordPieceTokenizer(readFileSync96(vocabularyPath, "utf8")) : new JsonPairTokenizer(readFileSync96(tokenizerPath, "utf8")),
+    tokenizer: existsSync107(vocabularyPath) ? new WordPieceTokenizer(readFileSync96(vocabularyPath, "utf8")) : new JsonPairTokenizer(readFileSync96(tokenizerPath, "utf8")),
     ...poolSize !== undefined ? { poolSize } : {},
     ...maxPairTokens !== undefined ? { maxPairTokens } : {},
     ...env[SOURCE_RERANKER_WINDOWS_ENV]?.trim().toLowerCase() === "all" ? { everyWindow: true } : {}
@@ -190963,7 +193434,7 @@ var init_built_in_reranker = __esm(() => {
 });
 
 // src/workers/classification/judge-pacing.ts
-import { AsyncLocalStorage as AsyncLocalStorage14 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage15 } from "node:async_hooks";
 import { createHash as createHash96 } from "node:crypto";
 function header(response, name) {
   const raw = response.headers.get(name);
@@ -190980,7 +193451,7 @@ class JudgeRateLimitPacer {
   lastSeq = 0;
   reportSeq = 0;
   blockedUntil = 0;
-  calls = new AsyncLocalStorage14;
+  calls = new AsyncLocalStorage15;
   constructor(clock = realClock) {
     this.clock = clock;
   }
@@ -191445,10 +193916,10 @@ var init_local_model_discovery = __esm(() => {
 });
 
 // src/workers/messaging-spool-wake.ts
-import { existsSync as existsSync107, watch as watch2 } from "node:fs";
-import { dirname as dirname105, resolve as resolve29 } from "node:path";
+import { existsSync as existsSync108, watch as watch2 } from "node:fs";
+import { dirname as dirname105, resolve as resolve32 } from "node:path";
 function createSpoolChangeSubscription(spoolDir, options = {}) {
-  const target = resolve29(spoolDir);
+  const target = resolve32(spoolDir);
   return (wake) => {
     let closed = false;
     let watchers = [];
@@ -191478,7 +193949,7 @@ function createSpoolChangeSubscription(spoolDir, options = {}) {
         watcher.close();
       watchers = [];
       let parent = dirname105(target);
-      while (!existsSync107(parent) && dirname105(parent) !== parent)
+      while (!existsSync108(parent) && dirname105(parent) !== parent)
         parent = dirname105(parent);
       const next = target.slice(parent.length + (parent === "/" ? 0 : 1)).split("/")[0];
       try {
@@ -191490,7 +193961,7 @@ function createSpoolChangeSubscription(spoolDir, options = {}) {
         });
         watcher.on("error", retry);
         watchers.push(watcher);
-        if (existsSync107(target)) {
+        if (existsSync108(target)) {
           const spool = watchDir(target, { persistent: false }, (_event, name) => {
             if (name == null || name.toString().endsWith(".jsonl"))
               wake();
@@ -193086,7 +195557,7 @@ var init_release_signing = __esm(() => {
 // src/core/self-update.ts
 import { spawn as spawn12 } from "node:child_process";
 import { randomBytes as randomBytes32 } from "node:crypto";
-import { chmodSync as chmodSync42, existsSync as existsSync108, mkdirSync as mkdirSync67, readdirSync as readdirSync31, readFileSync as readFileSync97, rmSync as rmSync43 } from "node:fs";
+import { chmodSync as chmodSync42, existsSync as existsSync109, mkdirSync as mkdirSync67, readdirSync as readdirSync31, readFileSync as readFileSync97, rmSync as rmSync43 } from "node:fs";
 import { join as join137 } from "node:path";
 function linuxSelfUpdateRunArgs(runner, runDir, layoutEnv) {
   return [
@@ -193286,7 +195757,7 @@ function createSelfUpdater(options) {
       if (!target || !newerVersion(target.version, options.runningVersion))
         return { ok: false, refusal: "no_update" };
       try {
-        for (const name of existsSync108(options.stateDir) ? readdirSync31(options.stateDir) : []) {
+        for (const name of existsSync109(options.stateDir) ? readdirSync31(options.stateDir) : []) {
           if (name.startsWith("run-"))
             rmSync43(join137(options.stateDir, name), { recursive: true, force: true });
         }
@@ -194663,14 +197134,14 @@ var init_readiness_ledger = __esm(() => {
 
 // src/core/venice-model-catalog.ts
 import {
-  existsSync as existsSync109,
+  existsSync as existsSync110,
   mkdirSync as mkdirSync69,
   readFileSync as readFileSync100,
   renameSync as renameSync24,
   rmSync as rmSync44,
   writeFileSync as writeFileSync27
 } from "node:fs";
-import { randomUUID as randomUUID38 } from "node:crypto";
+import { randomUUID as randomUUID39 } from "node:crypto";
 import { homedir as homedir43 } from "node:os";
 import { dirname as dirname107, isAbsolute as isAbsolute40, join as join140 } from "node:path";
 function defaultVeniceModelCatalogCachePath(env = process.env, homeDir = homedir43(), type = "text") {
@@ -194846,7 +197317,7 @@ function parseCatalogModels(payload) {
   return Object.keys(models).length > 0 ? Object.freeze(models) : undefined;
 }
 function readCatalogCache(path, type) {
-  if (!existsSync109(path))
+  if (!existsSync110(path))
     return;
   let payload;
   try {
@@ -194880,7 +197351,7 @@ function readCatalogCache(path, type) {
   return { fetchedAtMs, type, models: Object.freeze(models) };
 }
 function writeCatalogCache(path, catalog) {
-  const tempPath = `${path}.${process.pid}.${randomUUID38()}.tmp`;
+  const tempPath = `${path}.${process.pid}.${randomUUID39()}.tmp`;
   try {
     mkdirSync69(dirname107(path), { recursive: true, mode: 448 });
     const models = Object.fromEntries(Object.entries(catalog.models).sort(([a], [b]) => a.localeCompare(b)));
@@ -195428,7 +197899,10 @@ async function runDeepRead(input) {
     input.signal?.throwIfAborted();
     await input.beforeModelCall?.();
     input.signal?.throwIfAborted();
-    return input.analyst.analyze(pack, { localOnly: true });
+    const analyze = () => input.analyst.analyze(pack, { localOnly: true });
+    const result = input.signal ? await runWithAnalystAbortSignal(input.signal, analyze) : await analyze();
+    input.signal?.throwIfAborted();
+    return result;
   };
   await progress("reading");
   for (let index = state.sectionsDone;index < sections.length; index += 1) {
@@ -195498,14 +197972,40 @@ var init_deep_read = __esm(() => {
 import { randomBytes as randomBytes34 } from "node:crypto";
 import { mkdirSync as mkdirSync70, readFileSync as readFileSync101, renameSync as renameSync25, writeFileSync as writeFileSync28 } from "node:fs";
 import { dirname as dirname108 } from "node:path";
+function deepReadView(job) {
+  if (job.grantsCurrent())
+    return { ...job.view };
+  const { inboxId: _inboxId, estimateSecondsLeft: _eta, waitingOn: _waiting, ...view } = job.view;
+  return {
+    ...view,
+    state: "cancelled",
+    unreadable: 0,
+    sectionsDone: 0,
+    sectionsTotal: 0,
+    notes: 0,
+    read: "all",
+    choices: { all: { sections: 0, messageCount: 0 } },
+    choiceSummary: "Access to an item changed."
+  };
+}
 async function searchSetHits(lanes, question, corpusIds, maxResults = DEEP_READ_DAY_HITS) {
-  const hits = new Set;
+  const results = [];
   for (const corpusId of corpusIds) {
     const adapter = lanes.adapters[corpusId];
     const corpus = lanes.registry.get(corpusId);
     if (!adapter || !corpus)
       continue;
-    const response = await adapter({ query: question, maxResults, corpus, context: { allowedTrustDomains: [corpus.trustDomain], allowCloudQueries: false } });
+    results.push(await adapter({
+      query: question,
+      maxResults,
+      corpus,
+      [DEFER_SEARCH_DELIVERY]: true,
+      context: { allowedTrustDomains: [corpus.trustDomain], allowCloudQueries: false }
+    }));
+  }
+  const hits = new Set;
+  for (const result of results) {
+    const response = deliverCorpusSearch([result]);
     for (const hit of response.hits)
       hits.add(hit.sourceItem.providerItemId);
   }
@@ -195645,7 +198145,7 @@ function paceBook(file) {
     }
   };
 }
-async function readDeepReadSet(set, storesOf, lanesOf) {
+async function readDeepReadSet(set, storesOf, lanesOf, grants) {
   const selected = set.selected_item;
   const provider = selected.provider;
   const accountScope = selected.account_scope;
@@ -195702,7 +198202,14 @@ async function readDeepReadSet(set, storesOf, lanesOf) {
     const contentProvider = lanes.contentProviders[member.corpusId];
     if (!trustDomain || !contentProvider)
       continue;
+    const holder = stores.find((store) => store.corpusId === member.corpusId);
+    const observed = grants && holder?.observeOnDemandRead?.(member.sourceItem.localItemId, undefined, grants.controller);
+    if (observed)
+      grants?.work.push(observed);
     const content = await contentProvider.fetchLocalContent({ provenance: { sourceItem: member.sourceItem }, trustDomain, maxChars: Number.MAX_SAFE_INTEGER });
+    if (grants?.controller.signal.aborted || observed?.check() === false) {
+      throw new DeepReadRefused("nothing_readable", "Access to an item changed while opening this read.");
+    }
     if (!content || content.namesOnly || content.contentPrivate || content.chunks.length === 0)
       continue;
     readItems.add(key);
@@ -195729,7 +198236,6 @@ function createDeepReadJobs(options) {
   const sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   const jobs = new Map;
   const paces = paceBook(options.paceFile);
-  const readSet = (set) => readDeepReadSet(set, options.stores, options.lanes);
   function land(view, result, candidates, corpusIds) {
     const store = options.inbox();
     if (!store)
@@ -195771,145 +198277,174 @@ ${readFooter(view, result)}` } : {},
     }
     return `Read all of ${view.setLabel} with ${view.model}: ${result.sectionsRead} of ${result.sectionsTotal} sections, ${view.items} items${unreadable}.`;
   }
+  async function startRead(question, set, maxSeconds, grants) {
+    const { controller, work } = grants;
+    const grantsCurrent = () => work.every((hold) => hold.check());
+    if (!question.trim())
+      throw new DeepReadRefused("invalid_set", "A question is required.");
+    const model = await options.model();
+    if (!model)
+      throw new DeepReadRefused("no_private_model", "Deep read needs your own private model. Set one up in Settings, Models.");
+    if ("unavailable" in model)
+      throw new DeepReadRefused("model_unavailable", `Your private model ${model.modelId} is not reachable right now.`);
+    const { candidates, corpusIds, unreadable, items, label } = await readDeepReadSet(set, options.stores, options.lanes, grants);
+    if (candidates.length === 0)
+      throw new DeepReadRefused("nothing_readable", `Nothing in ${label} is readable here (${items} items found).`);
+    if (set.read !== undefined && set.read !== "all" && set.read !== "relevant_days")
+      throw new DeepReadRefused("invalid_set", "read must be all or relevant_days.");
+    const sectionsOf = (pieces) => planDeepReadSections(question, pieces, corpusIds, model.promptBytes, "compact").length;
+    const pace = paces.get(model.modelId);
+    const priced = (sections) => pace === undefined ? {} : { seconds: Math.round(sections * pace) };
+    const fullSections = sectionsOf(candidates);
+    const allMessages = new Set(candidates.map(messageKey)).size;
+    const choices = { all: { sections: fullSections, messageCount: allMessages, ...priced(fullSections) } };
+    let relevantCandidates;
+    if (set.whole === "conversation" && options.relevantItems) {
+      const totalChars = candidates.reduce((n, c) => n + c.chunks.join("").length, 0) || 1;
+      const pick = pickRelevantDaysWithin(candidates, await options.relevantItems(question, set, corpusIds), (picked) => pace === undefined || fullSections * (picked.reduce((n, c) => n + c.chunks.join("").length, 0) / totalChars) * pace <= DEEP_READ_BUDGET_SECONDS);
+      if (pick.candidates.length > 0) {
+        relevantCandidates = pick.candidates;
+        const sections = sectionsOf(pick.candidates);
+        choices.relevantDays = { sections, messageCount: pick.messages, days: pick.days, totalDays: pick.totalDays, ...priced(sections) };
+      }
+    }
+    if (set.read === "relevant_days" && !relevantCandidates) {
+      throw new DeepReadRefused("nothing_readable", `No day in ${label} mentions this, so there is no relevant-days read; ask for read: all.`);
+    }
+    const read = chooseDeepRead(choices, set.read);
+    const reading = read === "relevant_days" && relevantCandidates ? relevantCandidates : candidates;
+    const sectionsTotal = read === "relevant_days" ? choices.relevantDays.sections : fullSections;
+    if (!grantsCurrent())
+      throw new DeepReadRefused("nothing_readable", "Access to an item changed while opening this read.");
+    if (maxSeconds !== undefined) {
+      const estimateSeconds = sectionsTotal * (pace ?? maxSeconds / UNMEASURED_SECTION_LIMIT);
+      if (pace === undefined ? sectionsTotal > UNMEASURED_SECTION_LIMIT : estimateSeconds > maxSeconds) {
+        const minutes = Math.max(1, Math.round(estimateSeconds / 60));
+        throw new DeepReadRefused("too_long", `A full read would take about ${minutes} minutes.`, { sectionsTotal, estimateSeconds });
+      }
+    }
+    const id = `dr_${randomBytes34(9).toString("base64url")}`;
+    const view = {
+      id,
+      state: "reading",
+      question,
+      setLabel: label,
+      items,
+      unreadable,
+      sectionsTotal,
+      sectionsDone: 0,
+      notes: 0,
+      model: model.modelId,
+      startedAt: now().toISOString(),
+      read,
+      choices,
+      choiceSummary: deepReadChoiceSummary(choices, read, set.read)
+    };
+    const coverageNotes = read === "relevant_days" && choices.relevantDays ? [`Only the days that mention this were read: ${choices.relevantDays.days} of ${choices.relevantDays.totalDays} days, ${choices.relevantDays.messageCount} of ${allMessages} messages. ${allMessages - choices.relevantDays.messageCount} messages on other days were not read.`] : [];
+    const job = { view, controller, grantsCurrent };
+    jobs.set(id, job);
+    while (jobs.size > MAX_JOBS_KEPT)
+      jobs.delete(jobs.keys().next().value);
+    const started = now().getTime();
+    let lastCallMs = 0;
+    let callStarted;
+    let waitedMs = 0;
+    const stepAside = async () => {
+      if (callStarted !== undefined)
+        lastCallMs = now().getTime() - callStarted;
+      const waitStarted = now().getTime();
+      const until = waitStarted + Math.max(JUDGE_STEP_ASIDE_MIN_MS, lastCallMs);
+      for (;; ) {
+        if (controller.signal.aborted)
+          break;
+        if (options.interactiveBusy?.())
+          view.waitingOn = "your questions";
+        else if (options.judgeBusy?.() && now().getTime() < until)
+          view.waitingOn = "privacy checks";
+        else
+          break;
+        await sleep(JUDGE_LOOK_MS);
+      }
+      delete view.waitingOn;
+      grantsCurrent();
+      callStarted = now().getTime();
+      waitedMs += callStarted - waitStarted;
+    };
+    job.completion = runBackgroundInference(() => runDeepRead({
+      question,
+      candidates: reading,
+      corpusIds,
+      analyst: model.analyst,
+      promptBytes: model.promptBytes,
+      evidenceFormat: "compact",
+      signal: controller.signal,
+      coverageNotes,
+      beforeModelCall: stepAside,
+      onProgress: (progress) => {
+        view.state = progress.phase === "done" ? "answering" : progress.phase;
+        view.sectionsDone = progress.sectionsDone;
+        view.notes = progress.notes;
+        if (progress.sectionsDone > 0 && progress.phase === "reading") {
+          const perSection = Math.max(0, now().getTime() - started - waitedMs) / 1000 / progress.sectionsDone;
+          if (perSection > 0)
+            paces.set(model.modelId, perSection);
+          view.estimateSecondsLeft = Math.round(perSection * (progress.sectionsTotal - progress.sectionsDone + 1));
+        }
+      }
+    })).then((result) => {
+      if (controller.signal.aborted || !grantsCurrent()) {
+        view.state = "cancelled";
+        view.finishedAt = now().toISOString();
+        delete view.estimateSecondsLeft;
+        return;
+      }
+      const inboxId = land(view, result, reading, corpusIds);
+      if (inboxId)
+        view.inboxId = inboxId;
+      view.state = "done";
+      view.finishedAt = now().toISOString();
+      delete view.estimateSecondsLeft;
+      if (!inboxId)
+        view.failure = "The answer could not be saved to Private answers.";
+      return result;
+    }, (error) => {
+      view.state = controller.signal.aborted ? "cancelled" : "failed";
+      view.finishedAt = now().toISOString();
+      delete view.estimateSecondsLeft;
+      if (!controller.signal.aborted) {
+        view.failure = "The private model stopped before the read finished.";
+        options.log?.(`[deep-read] ${id} failed: ${error instanceof Error ? error.name : "error"}`);
+      }
+      return;
+    }).finally(() => {
+      for (const hold of work)
+        hold.release();
+    });
+    return job;
+  }
   return {
     async start(question, set, { maxSeconds } = {}) {
-      if (!question.trim())
-        throw new DeepReadRefused("invalid_set", "A question is required.");
-      const model = await options.model();
-      if (!model)
-        throw new DeepReadRefused("no_private_model", "Deep read needs your own private model. Set one up in Settings, Models.");
-      if ("unavailable" in model)
-        throw new DeepReadRefused("model_unavailable", `Your private model ${model.modelId} is not reachable right now.`);
-      const { candidates, corpusIds, unreadable, items, label } = await readSet(set);
-      if (candidates.length === 0)
-        throw new DeepReadRefused("nothing_readable", `Nothing in ${label} is readable here (${items} items found).`);
-      if (set.read !== undefined && set.read !== "all" && set.read !== "relevant_days")
-        throw new DeepReadRefused("invalid_set", "read must be all or relevant_days.");
-      const sectionsOf = (pieces) => planDeepReadSections(question, pieces, corpusIds, model.promptBytes, "compact").length;
-      const pace = paces.get(model.modelId);
-      const priced = (sections) => pace === undefined ? {} : { seconds: Math.round(sections * pace) };
-      const fullSections = sectionsOf(candidates);
-      const allMessages = new Set(candidates.map(messageKey)).size;
-      const choices = { all: { sections: fullSections, messageCount: allMessages, ...priced(fullSections) } };
-      let relevantCandidates;
-      if (set.whole === "conversation" && options.relevantItems) {
-        const totalChars = candidates.reduce((n, c) => n + c.chunks.join("").length, 0) || 1;
-        const pick = pickRelevantDaysWithin(candidates, await options.relevantItems(question, set, corpusIds), (picked) => pace === undefined || fullSections * (picked.reduce((n, c) => n + c.chunks.join("").length, 0) / totalChars) * pace <= DEEP_READ_BUDGET_SECONDS);
-        if (pick.candidates.length > 0) {
-          relevantCandidates = pick.candidates;
-          const sections = sectionsOf(pick.candidates);
-          choices.relevantDays = { sections, messageCount: pick.messages, days: pick.days, totalDays: pick.totalDays, ...priced(sections) };
+      const grants = { controller: new AbortController, work: [] };
+      let job;
+      try {
+        job = await startRead(question, set, maxSeconds, grants);
+        if (!job.grantsCurrent()) {
+          throw new DeepReadRefused("nothing_readable", "Access to an item changed while opening this read.");
         }
+        return { ...job.view };
+      } finally {
+        if (!job)
+          for (const hold of grants.work)
+            hold.release();
       }
-      if (set.read === "relevant_days" && !relevantCandidates) {
-        throw new DeepReadRefused("nothing_readable", `No day in ${label} mentions this, so there is no relevant-days read; ask for read: all.`);
-      }
-      const read = chooseDeepRead(choices, set.read);
-      const reading = read === "relevant_days" && relevantCandidates ? relevantCandidates : candidates;
-      const sectionsTotal = read === "relevant_days" ? choices.relevantDays.sections : fullSections;
-      if (maxSeconds !== undefined) {
-        const estimateSeconds = sectionsTotal * (pace ?? maxSeconds / UNMEASURED_SECTION_LIMIT);
-        if (pace === undefined ? sectionsTotal > UNMEASURED_SECTION_LIMIT : estimateSeconds > maxSeconds) {
-          const minutes = Math.max(1, Math.round(estimateSeconds / 60));
-          throw new DeepReadRefused("too_long", `A full read would take about ${minutes} minutes.`, { sectionsTotal, estimateSeconds });
-        }
-      }
-      const id = `dr_${randomBytes34(9).toString("base64url")}`;
-      const view = {
-        id,
-        state: "reading",
-        question,
-        setLabel: label,
-        items,
-        unreadable,
-        sectionsTotal,
-        sectionsDone: 0,
-        notes: 0,
-        model: model.modelId,
-        startedAt: now().toISOString(),
-        read,
-        choices,
-        choiceSummary: deepReadChoiceSummary(choices, read, set.read)
-      };
-      const coverageNotes = read === "relevant_days" && choices.relevantDays ? [`Only the days that mention this were read: ${choices.relevantDays.days} of ${choices.relevantDays.totalDays} days, ${choices.relevantDays.messageCount} of ${allMessages} messages. ${allMessages - choices.relevantDays.messageCount} messages on other days were not read.`] : [];
-      const controller = new AbortController;
-      const job = { view, controller };
-      jobs.set(id, job);
-      while (jobs.size > MAX_JOBS_KEPT)
-        jobs.delete(jobs.keys().next().value);
-      const started = now().getTime();
-      let lastCallMs = 0;
-      let callStarted;
-      let waitedMs = 0;
-      const stepAside = async () => {
-        if (callStarted !== undefined)
-          lastCallMs = now().getTime() - callStarted;
-        const waitStarted = now().getTime();
-        const until = waitStarted + Math.max(JUDGE_STEP_ASIDE_MIN_MS, lastCallMs);
-        for (;; ) {
-          if (controller.signal.aborted)
-            break;
-          if (options.interactiveBusy?.())
-            view.waitingOn = "your questions";
-          else if (options.judgeBusy?.() && now().getTime() < until)
-            view.waitingOn = "privacy checks";
-          else
-            break;
-          await sleep(JUDGE_LOOK_MS);
-        }
-        delete view.waitingOn;
-        callStarted = now().getTime();
-        waitedMs += callStarted - waitStarted;
-      };
-      job.completion = runBackgroundInference(() => runDeepRead({
-        question,
-        candidates: reading,
-        corpusIds,
-        analyst: model.analyst,
-        promptBytes: model.promptBytes,
-        evidenceFormat: "compact",
-        signal: controller.signal,
-        coverageNotes,
-        beforeModelCall: stepAside,
-        onProgress: (progress) => {
-          view.state = progress.phase === "done" ? "answering" : progress.phase;
-          view.sectionsDone = progress.sectionsDone;
-          view.notes = progress.notes;
-          if (progress.sectionsDone > 0 && progress.phase === "reading") {
-            const perSection = Math.max(0, now().getTime() - started - waitedMs) / 1000 / progress.sectionsDone;
-            if (perSection > 0)
-              paces.set(model.modelId, perSection);
-            view.estimateSecondsLeft = Math.round(perSection * (progress.sectionsTotal - progress.sectionsDone + 1));
-          }
-        }
-      })).then((result) => {
-        const inboxId = land(view, result, reading, corpusIds);
-        if (inboxId)
-          view.inboxId = inboxId;
-        view.state = "done";
-        view.finishedAt = now().toISOString();
-        delete view.estimateSecondsLeft;
-        if (!inboxId)
-          view.failure = "The answer could not be saved to Private answers.";
-        return result;
-      }, (error) => {
-        view.state = controller.signal.aborted ? "cancelled" : "failed";
-        view.finishedAt = now().toISOString();
-        delete view.estimateSecondsLeft;
-        if (!controller.signal.aborted) {
-          view.failure = "The private model stopped before the read finished.";
-          options.log?.(`[deep-read] ${id} failed: ${error instanceof Error ? error.name : "error"}`);
-        }
-        return;
-      });
-      return { ...view };
     },
     async wait(id) {
-      return jobs.get(id)?.completion;
+      const job = jobs.get(id);
+      const result = await job?.completion;
+      return job?.grantsCurrent() ? result : undefined;
     },
     status(id) {
-      const all = [...jobs.values()].map((job) => ({ ...job.view })).reverse();
-      return id ? all.filter((view) => view.id === id) : all;
+      return [...jobs.values()].filter((job) => id === undefined || job.view.id === id).reverse().map(deepReadView);
     },
     cancel(id) {
       const job = jobs.get(id);
@@ -195928,6 +198463,7 @@ var init_deep_read_jobs = __esm(() => {
   init_remote_result();
   init_local_private_answers();
   init_answer_activity();
+  init_router();
 });
 
 // src/core/computer-identity.ts
@@ -199554,7 +202090,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     state.hostReadOnly = value.readOnly === true;
     const links = {};
     const given = value.links && typeof value.links === "object" ? value.links : {};
-    for (const key of ["keys", "agents", "privateAnswers", "connector", "help"]) {
+    for (const key of ["keys", "agents", "privateAnswers", "overrideReviews", "connector", "help"]) {
       const href = given[key];
       if (typeof href === "string" && /^https?:\/\//.test(href))
         links[key] = href;
@@ -200351,6 +202887,18 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const body = add(el("div", "need-body"), el("p", "row-text", sentence), add(el("span", "fix"), open));
     const row = add(el("li", "row need"), body);
     row.setAttribute("data-waiting-private", String(Math.floor(count)));
+    return row;
+  }
+  function overrideReviewRow() {
+    const kinds = state.computerMeta?.overrideReviewKinds;
+    const href = state.hostLinks.overrideReviews;
+    if (!onComputer() || !href || !Array.isArray(kinds) || kinds.length === 0)
+      return null;
+    const copy = H.copy.overrideReview;
+    const sentence = fill(copy.sentence, { kinds: kinds.join(", ").replace(/_/g, " ") });
+    const open = button(copy.open, "need:override-review", () => openLink(href), "warn");
+    const row = add(el("li", "row need"), add(el("div", "need-body"), el("p", "row-text", sentence), add(el("span", "fix"), open)));
+    row.setAttribute("data-override-review", "");
     return row;
   }
   function sourceItem(source) {
@@ -201742,7 +204290,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     page.className += " home-page";
     const all = Array.isArray(data.sources) ? data.sources : [];
     const needs = Array.isArray(data.needsYou) ? data.needsYou.filter((item) => !!item) : [];
-    const extra = [transcriptionNeedRow(data.models)].filter((row) => !!row);
+    const extra = [overrideReviewRow(), transcriptionNeedRow(data.models)].filter((row) => !!row);
     const waiting = waitingRow() ? 1 : 0;
     add(page, homeStatus(data, needs.length + extra.length + waiting + (data.blocker ? 1 : 0), all.filter((source) => !isArchivesCard(source))));
     add(page, staleLine());
@@ -208123,9 +210671,9 @@ var init_top_nav = __esm(() => {
 
 // src/workers/archive-import/staging.ts
 import { randomBytes as randomBytes35 } from "node:crypto";
-import { existsSync as existsSync110, mkdirSync as mkdirSync71, readdirSync as readdirSync32, realpathSync as realpathSync24, renameSync as renameSync26, rmSync as rmSync45, statSync as statSync47, statfsSync as statfsSync6, utimesSync } from "node:fs";
+import { existsSync as existsSync111, mkdirSync as mkdirSync71, readdirSync as readdirSync32, realpathSync as realpathSync25, renameSync as renameSync26, rmSync as rmSync45, statSync as statSync47, statfsSync as statfsSync6, utimesSync } from "node:fs";
 import { open as open7, rm as rm11 } from "node:fs/promises";
-import { sep as sep25, join as join141, resolve as resolve30 } from "node:path";
+import { sep as sep25, join as join141, resolve as resolve33 } from "node:path";
 function sanitizeUploadPath(raw) {
   const bad = () => {
     throw new ArchiveUploadError("bad_path", ARCHIVE_UPLOAD_COPY.bad_path);
@@ -208183,7 +210731,7 @@ function createArchiveUploads(options) {
     if (rootPath)
       return rootPath;
     mkdirSync71(options.root, { recursive: true, mode: 448 });
-    rootPath = realpathSync24.native(options.root);
+    rootPath = realpathSync25.native(options.root);
     return rootPath;
   };
   const contained = (parent, child) => child === parent || child.startsWith(parent + sep25);
@@ -208262,7 +210810,7 @@ function createArchiveUploads(options) {
       const parent = join141(found.files, ...segments.slice(0, -1));
       try {
         mkdirSync71(parent, { recursive: true, mode: 448 });
-        if (!contained(realpathSync24.native(found.files), realpathSync24.native(parent)))
+        if (!contained(realpathSync25.native(found.files), realpathSync25.native(parent)))
           throw new ArchiveUploadError("bad_path", ARCHIVE_UPLOAD_COPY.bad_path);
       } catch (error) {
         if (error instanceof ArchiveUploadError)
@@ -208270,7 +210818,7 @@ function createArchiveUploads(options) {
         throw new ArchiveUploadError("bad_path", ARCHIVE_UPLOAD_COPY.bad_path, 409);
       }
       target = join141(parent, segments[segments.length - 1]);
-      if (!contained(found.files, resolve30(target)))
+      if (!contained(found.files, resolve33(target)))
         throw new ArchiveUploadError("bad_path", ARCHIVE_UPLOAD_COPY.bad_path);
       if (!await roomFor(found, declared !== undefined && Number.isFinite(declared) && declared > 0 ? declared : 0, receiveOptions.signal)) {
         throw new ArchiveUploadError("cancelled", ARCHIVE_UPLOAD_COPY.cancelled, 409);
@@ -208344,7 +210892,7 @@ function createArchiveUploads(options) {
         await handle.close().catch(() => {
           return;
         });
-      if (created && existsSync110(target))
+      if (created && existsSync111(target))
         rmSync45(target, { force: true });
       found.paths.delete(key);
       found.partials.delete(key);
@@ -208393,7 +210941,7 @@ function createArchiveUploads(options) {
       if (typeof uploadId !== "string" || !ID3.test(uploadId))
         return false;
       const found = sessions.get(uploadId);
-      const dir = found?.dir ?? (existsSync110(options.root) ? join141(stagingRoot(), uploadId) : undefined);
+      const dir = found?.dir ?? (existsSync111(options.root) ? join141(stagingRoot(), uploadId) : undefined);
       if (!dir)
         return false;
       if (keep?.(dir)) {
@@ -208422,8 +210970,8 @@ function createArchiveUploads(options) {
         throw new ArchiveUploadError("upload_closed", "Files are still arriving. Wait until the upload has finished.", 409);
       const entries = readdirSync32(found.files);
       const top = entries.length === 1 ? join141(found.files, entries[0]) : found.files;
-      const canonical = realpathSync24.native(top);
-      if (!contained(realpathSync24.native(found.dir), canonical))
+      const canonical = realpathSync25.native(top);
+      if (!contained(realpathSync25.native(found.dir), canonical))
         throw new ArchiveUploadError("bad_path", ARCHIVE_UPLOAD_COPY.bad_path);
       return canonical;
     },
@@ -208440,14 +210988,14 @@ function createArchiveUploads(options) {
       if (typeof uploadId !== "string" || !ID3.test(uploadId))
         return;
       const found = sessions.get(uploadId);
-      const dir = found?.dir ?? (existsSync110(options.root) ? join141(stagingRoot(), uploadId) : undefined);
+      const dir = found?.dir ?? (existsSync111(options.root) ? join141(stagingRoot(), uploadId) : undefined);
       if (!dir || keep?.(dir))
         return;
       sessions.delete(uploadId);
       rmSync45(dir, { recursive: true, force: true });
     },
     sweep(needed) {
-      if (!rootPath && !existsSync110(options.root))
+      if (!rootPath && !existsSync111(options.root))
         return;
       let root;
       try {
@@ -209068,6 +211616,7 @@ function renderComputerHostPage(input) {
   for (const page of Object.keys(DASHBOARD_LOCAL_PAGES)) {
     links[page] = `${input.origin}${dashboardLocalPageHref(page, token)}`;
   }
+  links.overrideReviews = `${links.privacyItems}#override-review`;
   const bridge = {
     contextKey: OLYMPUS_HOST_CONTEXT_KEY,
     kind: "computer",
@@ -213602,7 +216151,7 @@ function renderBody2(options, token) {
   if (options?.outsideHelpLocalSession !== true) {
     return `<div class="pi" data-privacy-items>${head}<form class="paunlock" data-pi-unlock>` + `<button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.unlock)}</button><span class="hint">${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.unlockIntro)}</span>` + `<span class="pimsg" data-pi-msg role="status"></span></form></div>` + `<script>${privacyItemsClientScript({ csrfToken: "", unlockOnly: true })}</script>`;
   }
-  return `<div class="pi" data-privacy-items>${JUDGE_CHECK_MOUNT}<div class="pigrid" id="${PRIVACY_ITEMS_LIST_ID}"><div class="pimain">${head}` + `<label class="pifind"><span aria-hidden="true">⌕</span><input type="search" data-pi-search maxlength="200" autocomplete="off" aria-label="${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.searchLabel)}" placeholder="${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.searchPlaceholder)}"></label>` + `<div class="pichips" data-pi-filters role="group" aria-label="${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.filtersLabel)}">` + `<button type="button" class="pichip" data-pi-filter="" aria-pressed="true">${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.recentHeading)}</button>` + `<button type="button" class="pichip" data-pi-filter="private" aria-pressed="false">Private<i data-pi-count="private"></i></button>` + `<button type="button" class="pichip" data-pi-filter="personal" aria-pressed="false">Personal<i data-pi-count="personal"></i></button>` + `<button type="button" class="pichip" data-pi-filter="changed" aria-pressed="false">${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.changedByYou)}<i data-pi-count="changed"></i></button></div>` + `<p class="picap" data-pi-heading hidden>${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.resultsHeading)}</p>` + `<p class="pimsg" data-pi-msg role="status">${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.loading)}</p>` + `<ul class="pilist" data-pi-list></ul>` + `<p class="pnote piapps" data-pi-apps>${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.apps)}</p></div>` + `<div class="piside" data-pi-side></div></div>` + `<dialog class="judgedialog pidialog" data-pi-confirm aria-labelledby="pi-confirm-title"><div class="pidbody">` + `<div class="pidtop"><h3 id="pi-confirm-title">${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.confirmTitle)}</h3><button type="button" class="pix" data-pi-confirm-close aria-label="${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.close)}">✕</button></div>` + `<div class="piitem" data-pi-confirm-item></div>` + `<div class="piarrow"><div class="piopt"><b><span class="pipill Private">Private</span> ${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.now)}</b><span>${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.privateLine)}</span></div><i aria-hidden="true">→</i>` + `<div class="piopt on"><b><span class="pipill Personal">Personal</span> ${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.after)}</b><span>${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.afterPersonalLine)}</span></div></div>` + `<p class="pionly">${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.confirmOnly)}</p>` + `<div class="judgedialogbar"><button type="button" class="btn" data-pi-confirm-cancel>${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.cancel)}</button><button type="button" class="btn primary" data-pi-confirm-ok>${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.makePersonal)}</button></div>` + `</div></dialog>` + `<div class="pitoast" data-pi-toast role="status" hidden><span data-pi-toast-text></span><button type="button" data-pi-toast-undo>${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.undo)}</button></div>` + `</div><script>${privacyItemsClientScript({ csrfToken, unlockOnly: false })}</script>` + `<script>${judgeCheckClientScript({ csrfToken, itemsHref: `#${PRIVACY_ITEMS_LIST_ID}` })}</script>`;
+  return `<div class="pi" data-privacy-items>${JUDGE_CHECK_MOUNT}<div class="pigrid" id="${PRIVACY_ITEMS_LIST_ID}"><div class="pimain">${head}` + `<label class="pifind"><span aria-hidden="true">⌕</span><input type="search" data-pi-search maxlength="200" autocomplete="off" aria-label="${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.searchLabel)}" placeholder="${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.searchPlaceholder)}"></label>` + `<div class="pichips" data-pi-filters role="group" aria-label="${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.filtersLabel)}">` + `<button type="button" class="pichip" data-pi-filter="" aria-pressed="true">${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.recentHeading)}</button>` + `<button type="button" class="pichip" data-pi-filter="private" aria-pressed="false">Private<i data-pi-count="private"></i></button>` + `<button type="button" class="pichip" data-pi-filter="personal" aria-pressed="false">Personal<i data-pi-count="personal"></i></button>` + `<button type="button" class="pichip" data-pi-filter="changed" aria-pressed="false">${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.changedByYou)}<i data-pi-count="changed"></i></button>` + `<button type="button" class="pichip" data-pi-filter="override_review" aria-pressed="false">${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.reviewFilter)}</button></div>` + `<p class="picap" data-pi-heading hidden>${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.resultsHeading)}</p>` + `<p class="pimsg" data-pi-msg role="status">${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.loading)}</p>` + `<ul class="pilist" data-pi-list></ul>` + `<p class="pnote piapps" data-pi-apps>${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.apps)}</p></div>` + `<div class="piside" data-pi-side></div></div>` + `<dialog class="judgedialog pidialog" data-pi-confirm aria-labelledby="pi-confirm-title"><div class="pidbody">` + `<div class="pidtop"><h3 id="pi-confirm-title">${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.confirmTitle)}</h3><button type="button" class="pix" data-pi-confirm-close aria-label="${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.close)}">✕</button></div>` + `<div class="piitem" data-pi-confirm-item></div>` + `<div class="piarrow"><div class="piopt"><b><span class="pipill Private">Private</span> ${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.now)}</b><span>${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.privateLine)}</span></div><i aria-hidden="true">→</i>` + `<div class="piopt on"><b><span class="pipill Personal">Personal</span> ${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.after)}</b><span>${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.afterPersonalLine)}</span></div></div>` + `<p class="pionly">${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.confirmOnly)}</p>` + `<div class="judgedialogbar"><button type="button" class="btn" data-pi-confirm-cancel>${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.cancel)}</button><button type="button" class="btn primary" data-pi-confirm-ok>${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.makePersonal)}</button></div>` + `</div></dialog>` + `<div class="pitoast" data-pi-toast role="status" hidden><span data-pi-toast-text></span><button type="button" data-pi-toast-undo>${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.undo)}</button></div>` + `</div><script>${privacyItemsClientScript({ csrfToken, unlockOnly: false })}</script>` + `<script>${judgeCheckClientScript({ csrfToken, itemsHref: `#${PRIVACY_ITEMS_LIST_ID}` })}</script>`;
 }
 function privacyItemsClientScript(input) {
   const config = {
@@ -213655,7 +216204,7 @@ function privacyItemsClientScript(input) {
   var items = [];
   var selected = null;
   var query = '';
-  var filter = '';
+  var filter = window.location.hash === '#override-review' ? 'override_review' : '';
   var counts = null;
   var seq = 0;
   var debounce = null;
@@ -213690,8 +216239,10 @@ function privacyItemsClientScript(input) {
     return { ok: false, retry: restarting, unknown: result.unknown === true, message: message };
   }
 
-  async function save(id, tier) {
-    var response = await post(config.paths.set, { item_id: id, tier: tier });
+  async function save(id, tier, digest) {
+    var body = { item_id: id, tier: tier };
+    if (digest) body.review_digest = digest;
+    var response = await post(config.paths.set, body);
     if (!response.ok || response.result.state !== 'pending') return response;
     var requestId = response.result.request_id;
     saving[id] = 'pending';
@@ -213706,7 +216257,7 @@ function privacyItemsClientScript(input) {
   function narrow() { return !!(window.matchMedia && window.matchMedia('(max-width: 719px)').matches); }
   function find(id) { for (var i = 0; i < items.length; i += 1) if (items[i].item_id === id) return items[i]; return null; }
   // The owner's latest choice wins over the recorded label while it waits for the next pass.
-  function shown(item) { var change = changes[item.item_id]; return change ? change.chosen : (item.owner_choice || item.tier); }
+  function shown(item) { if (item.override_review) return 'Private'; var change = changes[item.item_id]; return change ? change.chosen : (item.owner_choice || item.tier); }
   function changedByYou(item) { return !!changes[item.item_id] || item.owner_set === true; }
   function logo(item, small) {
     var tile = config.logos[item.source];
@@ -213737,7 +216288,7 @@ function privacyItemsClientScript(input) {
   function row(item) {
     var open = selected === item.item_id;
     var tier = shown(item);
-    var note = saving[item.item_id] ? C.saving : changedByYou(item) ? C.changedByYou
+    var note = saving[item.item_id] ? C.saving : item.override_review ? C.reviewFilter : changedByYou(item) ? C.changedByYou
       : item.moving_to ? fill(C.moving, { tier: item.moving_to }) : '';
     return '<li><button type="button" class="pirow" data-pi-item="' + esc(item.item_id) + '" aria-expanded="' + (open ? 'true' : 'false') + '">'
       + logo(item) + '<span class="grow"><span class="pititle">' + esc(title(item)) + '</span><span class="pimeta">' + esc(meta(item)) + '</span></span>'
@@ -213753,12 +216304,17 @@ function privacyItemsClientScript(input) {
   function detail(item) {
     var tier = shown(item);
     var change = changes[item.item_id];
+    var finding = item.override_finding_kinds && item.override_finding_kinds.length;
     var preview = item.preview ? '<div class="piprev" data-pi-preview>' + esc(item.preview) + '</div>' : '<div class="piprev" data-pi-preview>' + esc(C.noPreview) + '</div>';
     var why = '';
     var foot = '';
     var busy = saving[item.item_id];
     var status = busy === 'pending' ? C.pendingRestart : busy ? C.saving : statusFor[item.item_id] || '';
-    if (changedByYou(item)) {
+    if (item.override_review) {
+      why = '<p class="piwhy">' + esc(fill(C.reviewReason, { kinds: item.override_review.kinds.join(', ').replace(/_/g, ' ') })) + '</p>'
+        + '<div class="piundo"><button type="button" class="btn primary" data-pi-choose="Personal"' + (busy ? ' disabled' : '') + '>' + esc(C.confirmReview) + '</button>'
+        + '<button type="button" class="btn" data-pi-undo' + (busy ? ' disabled' : '') + '>' + esc(C.liftOverride) + '</button></div>';
+    } else if (changedByYou(item)) {
       var said = change && change.judge ? ' ' + esc(fill(C.judgeSaid, { tier: change.judge })) : '';
       why = '<div class="piundo" data-pi-undo-row><p class="piwhy"><b>' + esc(fill(C.youChose, { tier: tier || '' })) + '</b>' + (change ? ' ' + esc(C.justNow) + '.' : '.') + said + '</p>'
         + '<button type="button" class="btn" data-pi-undo' + (busy ? ' disabled' : '') + '>' + esc(C.undo) + '</button></div>';
@@ -213776,16 +216332,17 @@ function privacyItemsClientScript(input) {
       var group = item.sender ? fill(C.promiseGroup, { sender: item.sender }) : C.promiseGroupNoSender;
       foot = esc(fill(C.promise, { group: group }));
     }
+    if (finding) why += '<p class="piwhy">' + esc(fill(C.overrideFinding, { kinds: item.override_finding_kinds.join(', ').replace(/_/g, ' ') })) + '</p>';
     return '<section class="pidetail" data-pi-detail="' + esc(item.item_id) + '" aria-label="' + esc(title(item)) + '">'
       + '<div class="pidhead">' + logo(item, true) + '<div class="grow"><h4>' + esc(title(item)) + '</h4><span class="pimeta">' + esc(meta(item)) + '</span></div>'
       + '<button type="button" class="pix" data-pi-close aria-label="' + esc(C.close) + '">✕</button></div>'
-      + '<p class="pidcap">' + esc(C.previewCaption) + '</p>' + preview
+      + (item.override_review ? '' : (finding ? '' : '<p class="pidcap">' + esc(C.previewCaption) + '</p>' + preview)
       + (item.family === 'file' && (item.names_only || item.not_read && item.not_read.kind === 'by_choice') ? '<button type="button" class="btn" data-pi-read>Read this file</button>' : '')
       + '<p class="pidcap" id="pi-who">' + esc(C.whoCaption) + '</p>'
-      + '<div class="pipair" role="radiogroup" aria-labelledby="pi-who">' + option(item, 'Personal', C.personalLine) + option(item, 'Private', C.privateLine) + '</div>'
+      + '<div class="pipair" role="radiogroup" aria-labelledby="pi-who">' + option(item, 'Personal', C.personalLine) + option(item, 'Private', C.privateLine) + '</div>')
       + why
       + '<p class="pistatus" data-pi-status role="status"' + (busy ? ' data-saving' : '') + '>' + esc(status) + '</p>'
-      + '<p class="pifoot" data-pi-foot>' + foot + '</p></section>';
+      + (foot ? '<p class="pifoot" data-pi-foot>' + foot + '</p>' : '') + '</section>';
   }
 
   function render() {
@@ -213828,7 +216385,7 @@ function privacyItemsClientScript(input) {
     items = Array.isArray(response.result.items) ? response.result.items : [];
     if (response.result.counts) counts = response.result.counts;
     renderFilters();
-    setMessage(items.length ? '' : words ? C.noMatch : C.empty, false);
+    setMessage(items.length ? '' : words ? C.noMatch : filter === 'override_review' ? C.reviewEmpty : C.empty, false);
     render();
   }
 
@@ -213872,7 +216429,7 @@ function privacyItemsClientScript(input) {
     render();
   }
 
-  async function choose(id, tier) {
+  async function choose(id, tier, digest) {
     var item = find(id);
     if (!item || saving[id]) return;
     delete statusFor[id];
@@ -213880,11 +216437,12 @@ function privacyItemsClientScript(input) {
     render();
     var response;
     try {
-      response = await save(id, tier === 'Personal' ? 'personal' : 'private');
+      response = await save(id, tier === 'Personal' ? 'personal' : 'private', digest);
     } finally {
       delete saving[id];
     }
     if (!response.ok) { await saveFailed(id, response, tier); return; }
+    if (item.override_review && filter === 'override_review') await load();
     var previous = changes[id];
     if (counts && !previous && !item.owner_set) { counts.changed += 1; renderFilters(); }
     // What the judge had said: the label before this visit's first change, if nobody had set it before.
@@ -213905,7 +216463,7 @@ function privacyItemsClientScript(input) {
     if (item) render();
     var response;
     try {
-      response = await save(id, 'judge');
+      response = await save(id, 'judge', item && item.override_review && item.override_review.digest);
     } finally {
       delete saving[id];
     }
@@ -213914,6 +216472,7 @@ function privacyItemsClientScript(input) {
     if (counts && counts.changed > 0) { counts.changed -= 1; renderFilters(); }
     if (item) merge(response.result.item, item);
     // Listed under Changed by you, it is no longer changed by you.
+    if (item && item.override_review && filter === 'override_review') await load();
     if (!query && filter === 'changed') items = items.filter(function (listed) { return listed.item_id !== id; });
     render();
     showToast(C.toastJudge, null);
@@ -213922,7 +216481,7 @@ function privacyItemsClientScript(input) {
   function openConfirm(id) {
     var item = find(id);
     if (!item) return;
-    pendingLower = id;
+    pendingLower = { id: id, digest: item.override_review && item.override_review.digest };
     dialog.querySelector('[data-pi-confirm-item]').innerHTML = logo(item, true) + '<span class="grow"><span class="pititle">' + esc(title(item)) + '</span><span class="pimeta">' + esc(meta(item)) + '</span></span>';
     if (typeof dialog.showModal === 'function') dialog.showModal(); else dialog.setAttribute('open', '');
   }
@@ -213978,9 +216537,9 @@ function privacyItemsClientScript(input) {
     if (!target) return;
     if (target.closest('[data-pi-confirm-close]') || target.closest('[data-pi-confirm-cancel]')) { closeConfirm(); return; }
     if (target.closest('[data-pi-confirm-ok]')) {
-      var id = pendingLower;
+      var pending = pendingLower;
       closeConfirm();
-      if (id) choose(id, 'Personal');
+      if (pending) choose(pending.id, 'Personal', pending.digest);
     }
   });
   // Esc: the browser closes the dialog and sends cancel.
@@ -214259,7 +216818,7 @@ var init_locations = __esm(() => {
 // src/workers/local-files/volume-identity.ts
 import { createHash as createHash101 } from "node:crypto";
 import { execFileSync as execFileSync7 } from "node:child_process";
-import { existsSync as existsSync111, lstatSync as lstatSync53, readFileSync as readFileSync103, readdirSync as readdirSync33, realpathSync as realpathSync25 } from "node:fs";
+import { existsSync as existsSync112, lstatSync as lstatSync53, readFileSync as readFileSync103, readdirSync as readdirSync33, realpathSync as realpathSync26 } from "node:fs";
 import { homedir as homedir45 } from "node:os";
 
 class VolumeResolver {
@@ -214446,11 +217005,11 @@ function defaultUuidsByDevice() {
   const result = new Map;
   const dir = "/dev/disk/by-uuid";
   try {
-    if (!existsSync111(dir))
+    if (!existsSync112(dir))
       return result;
     for (const name of readdirSync33(dir)) {
       try {
-        result.set(realpathSync25(`${dir}/${name}`), name);
+        result.set(realpathSync26(`${dir}/${name}`), name);
       } catch {}
     }
   } catch {}
@@ -214544,7 +217103,7 @@ var init_volume_identity = __esm(() => {
 });
 
 // src/workers/backup-service.ts
-import { existsSync as existsSync112, mkdirSync as mkdirSync72, readFileSync as readFileSync104, readdirSync as readdirSync34, rmSync as rmSync46, statSync as statSync48 } from "node:fs";
+import { existsSync as existsSync113, mkdirSync as mkdirSync72, readFileSync as readFileSync104, readdirSync as readdirSync34, rmSync as rmSync46, statSync as statSync48 } from "node:fs";
 import { dirname as dirname109, join as join142 } from "node:path";
 function defaultBackupServicePaths(env = process.env) {
   return {
@@ -214760,7 +217319,7 @@ function createBackupService(options) {
       } catch {
         throw new OperationError("invalid_params", "That backup file is no longer there. Choose it again.");
       }
-      if (existsSync112(join142(options.paths.staging, PENDING_RESTORE)))
+      if (existsSync113(join142(options.paths.staging, PENDING_RESTORE)))
         return status();
       const staging = backupStagingDir(options.env);
       try {
@@ -215098,7 +217657,7 @@ var init_source_scope_browser = __esm(() => {
 });
 
 // src/workers/local-files/mac-permissions.ts
-import { existsSync as existsSync113, mkdirSync as mkdirSync73, opendirSync, readFileSync as readFileSync105 } from "node:fs";
+import { existsSync as existsSync114, mkdirSync as mkdirSync73, opendirSync, readFileSync as readFileSync105 } from "node:fs";
 import { opendir } from "node:fs/promises";
 import { dirname as dirname110, join as join143 } from "node:path";
 function folderAccessMemoryPath() {
@@ -215325,7 +217884,7 @@ class MacPermissions {
     if (this.memory && !this.memoryPath)
       return this.memory;
     let loaded = {};
-    if (this.memoryPath && existsSync113(this.memoryPath)) {
+    if (this.memoryPath && existsSync114(this.memoryPath)) {
       try {
         const parsed = JSON.parse(readFileSync105(this.memoryPath, "utf8"));
         if (parsed && typeof parsed === "object")
@@ -215377,7 +217936,7 @@ var init_mac_permissions = __esm(() => {
 
 // src/workers/local-files/mac-settings.ts
 import { spawn as spawn15 } from "node:child_process";
-import { existsSync as existsSync114 } from "node:fs";
+import { existsSync as existsSync115 } from "node:fs";
 import { homedir as homedir46 } from "node:os";
 import { join as join144 } from "node:path";
 function helperAppPathForHome(home = homedir46()) {
@@ -215388,7 +217947,7 @@ function revealHelperAndOpenFullDiskAccess(deps = {}) {
     spawn15(command, args, { stdio: "ignore", detached: true }).unref();
   });
   const helper = deps.helperApp ?? helperAppPathForHome();
-  if ((deps.exists ?? existsSync114)(helper))
+  if ((deps.exists ?? existsSync115)(helper))
     run("/usr/bin/open", ["-R", helper]);
   run("/usr/bin/open", [FULL_DISK_ACCESS_URL]);
 }
@@ -215397,7 +217956,7 @@ var init_mac_settings = __esm(() => {
 });
 
 // src/workers/local-files/scope-browser.ts
-import { lstatSync as lstatSync54, readdirSync as readdirSync35, realpathSync as realpathSync26 } from "node:fs";
+import { lstatSync as lstatSync54, readdirSync as readdirSync35, realpathSync as realpathSync27 } from "node:fs";
 import { homedir as homedir47 } from "node:os";
 import { dirname as dirname111, join as join145 } from "node:path";
 function realFolder2(path) {
@@ -215410,7 +217969,7 @@ function realFolder2(path) {
 }
 function safeRealpath(path) {
   try {
-    return realpathSync26.native(path);
+    return realpathSync27.native(path);
   } catch {
     return path;
   }
@@ -215588,7 +218147,7 @@ function createLocalFilesFolderScopeBrowser(options = {}) {
         }
         if (!isFolder)
           throw new Error("A selected folder could not be verified. It may have moved.");
-        const canonical = realpathSync26.native(real);
+        const canonical = realpathSync27.native(real);
         if (canonical !== real) {
           if (canonical.normalize("NFC").toLowerCase() !== real.normalize("NFC").toLowerCase()) {
             throw new Error("A selected folder is reached through a link. Choose the folder itself.");
@@ -215642,7 +218201,7 @@ function createArchivePathResolver(options = {}) {
       return refuse("not_regular", ARCHIVE_PATH_COPY.not_regular);
     let canonical;
     try {
-      canonical = realpathSync26.native(real);
+      canonical = realpathSync27.native(real);
     } catch {
       return refuse("not_found", ARCHIVE_PATH_COPY.not_found);
     }
@@ -215938,7 +218497,7 @@ var init_cli_operations = __esm(() => {
 });
 
 // src/workers/settings-proposal-holder.ts
-import { randomUUID as randomUUID39 } from "node:crypto";
+import { randomUUID as randomUUID40 } from "node:crypto";
 function modeLabel(id) {
   return PRIVACY_PRESET_LABELS[id] ?? id;
 }
@@ -216017,7 +218576,7 @@ function createSettingsProposalHolder(targets, now = () => new Date) {
   return {
     async propose(input, from) {
       const proposal = {
-        id: randomUUID39(),
+        id: randomUUID40(),
         created_at: now().toISOString(),
         ...from ? { from } : {},
         input,
@@ -219560,11 +222119,12 @@ function buildNoteItem(input, draft, place, savedAt) {
 function noteClassificationSignals(item) {
   return compactClassificationSignals({
     title: signalText(item.metadata, "title"),
-    labels: signalTexts(item.metadata, "tags")
+    labels: signalTexts(item.metadata, NOTE_TAGS_METADATA_KEY)
   });
 }
 var NOTE_MAX_RECORD_BYTES, MAX_TAGS = 100, MAX_TAG_CHARS = 200, MAX_TITLE_CHARS = 500, NOTE_FINDINGS;
 var init_note = __esm(() => {
+  init_source_connector_labels();
   NOTE_MAX_RECORD_BYTES = 16 * 1024 * 1024;
   NOTE_FINDINGS = {
     empty: "note_empty",
@@ -219905,8 +222465,8 @@ function evernoteUnfinishedWith(unfinished, notes) {
   return next;
 }
 function evernoteNoteVersion(updatedAt, notebookId, notebookLabel, disposition = "ingest", scope) {
-  const base = `${updatedAt}|${notebookId}|${digest5(notebookLabel)}|${disposition === "ingest" ? "f" : "n"}`;
-  return scope ? `${base}|${digest5(scope.accountGeneration)}` : base;
+  const base = `${updatedAt}|${notebookId}|${digest6(notebookLabel)}|${disposition === "ingest" ? "f" : "n"}`;
+  return scope ? `${base}|${digest6(scope.accountGeneration)}` : base;
 }
 function evernoteAttachmentKeys(hashes) {
   const seen = new Map;
@@ -220312,20 +222872,22 @@ function createEvernoteSourceConnector(options) {
       return compactClassificationSignals({
         title: signalText(item.metadata, "title"),
         folderKeys: [...signalTexts(item.metadata, "folderKeys") ?? [], ...notebookId ? [notebookId] : []],
-        labels: signalTexts(item.metadata, "tags")
+        labels: signalTexts(item.metadata, EVERNOTE_LABEL_CAPABILITY.metadataKey)
       });
     },
     lastOutcome: () => outcome
   };
 }
-var EVERNOTE_SOURCE_ID = "evernote.notes", EVERNOTE_PROVIDER = "evernote", EVERNOTE_CONNECTOR_ID = "evernote_live", EVERNOTE_MCP_SERVER_URL = "https://mcp.evernote.com/mcp", EVERNOTE_MCP_SCOPE = "read", EVERNOTE_AUTHORIZATION_HOSTS, EVERNOTE_DOWNLOAD_HOSTS, EVERNOTE_READ_TOOLS, EVERNOTE_PASS_CALL_BUDGET = 3000, EVERNOTE_ATTACHMENT_LOCATOR_PREFIX = "evernote-res1:", PAGE_ITEMS = 50, MAX_TITLE_CHARS2 = 500, EVERNOTE_DELETION_FLOOR = 50, EVERNOTE_DELETION_SHARE = 0.1, digest5 = (value) => createHash104("sha256").update(value).digest("hex").slice(0, 16), record7 = (value) => value && typeof value === "object" && !Array.isArray(value) ? value : undefined, PASS_STOPS, MCP_TO_SOURCE_ERROR;
+var EVERNOTE_SOURCE_ID = "evernote.notes", EVERNOTE_PROVIDER, EVERNOTE_CONNECTOR_ID = "evernote_live", EVERNOTE_MCP_SERVER_URL = "https://mcp.evernote.com/mcp", EVERNOTE_MCP_SCOPE = "read", EVERNOTE_AUTHORIZATION_HOSTS, EVERNOTE_DOWNLOAD_HOSTS, EVERNOTE_READ_TOOLS, EVERNOTE_PASS_CALL_BUDGET = 3000, EVERNOTE_ATTACHMENT_LOCATOR_PREFIX = "evernote-res1:", PAGE_ITEMS = 50, MAX_TITLE_CHARS2 = 500, EVERNOTE_DELETION_FLOOR = 50, EVERNOTE_DELETION_SHARE = 0.1, digest6 = (value) => createHash104("sha256").update(value).digest("hex").slice(0, 16), record7 = (value) => value && typeof value === "object" && !Array.isArray(value) ? value : undefined, PASS_STOPS, MCP_TO_SOURCE_ERROR;
 var init_connector5 = __esm(() => {
+  init_source_connector_labels();
   init_file_extraction_source();
   init_file_mime();
   init_errors6();
   init_note();
   init_enml();
   init_listing();
+  EVERNOTE_PROVIDER = EVERNOTE_LABEL_CAPABILITY.provider;
   EVERNOTE_AUTHORIZATION_HOSTS = ["evernote.com"];
   EVERNOTE_DOWNLOAD_HOSTS = ["storage.googleapis.com"];
   EVERNOTE_READ_TOOLS = ["search_notes", "search_notebooks", "get_note", "get_attachment"];
@@ -220344,7 +222906,7 @@ var init_connector5 = __esm(() => {
 });
 
 // src/workers/evernote/live-sync.ts
-import { existsSync as existsSync115, mkdirSync as mkdirSync74, readFileSync as readFileSync106 } from "node:fs";
+import { existsSync as existsSync116, mkdirSync as mkdirSync74, readFileSync as readFileSync106 } from "node:fs";
 import { dirname as dirname112 } from "node:path";
 function evernoteExclusionMatcher(env = process.env) {
   return createSourceExclusionMatcher(loadSourceIngestionExclusions({ env }), EVERNOTE_SOURCE_ID, {
@@ -220397,7 +222959,7 @@ function createEvernoteTierLane(options = {}) {
   return { set, ledger, secure, internal };
 }
 function readPassFile(path) {
-  if (!existsSync115(path))
+  if (!existsSync116(path))
     return { version: 1, status: {} };
   try {
     const parsed = JSON.parse(readFileSync106(path, "utf8"));
@@ -220416,7 +222978,7 @@ function writePassFile(path, file) {
 }
 function evernotePassStatus(env = process.env) {
   const path = resolvedRawPath(EVERNOTE_SOURCE_ID, "evernote-pass.json", env);
-  if (!existsSync115(path))
+  if (!existsSync116(path))
     return;
   return readPassFile(path).status;
 }
@@ -220658,7 +223220,7 @@ function createEvernoteLiveSync(options) {
     bindNotebookChoice: (choice) => {
       boundChoice = choice;
     },
-    status: () => existsSync115(passPath) ? readPassFile(passPath).status : undefined,
+    status: () => existsSync116(passPath) ? readPassFile(passPath).status : undefined,
     lastStoreRunCompletedAt: () => lastCompletedAt
   };
 }
@@ -222730,16 +225292,16 @@ var init_dashboard_oauth_pages = __esm(() => {
 // src/core/messaging-account-move.ts
 import { readFileSync as readFileSync108 } from "node:fs";
 import { homedir as homedir49 } from "node:os";
-import { join as join148, resolve as resolve31 } from "node:path";
+import { join as join148, resolve as resolve34 } from "node:path";
 function namesDefaultLegacySession(source, value, env) {
   const trimmed = value.trim();
   if (trimmed === "")
     return false;
   if (source === "telegram") {
     const base = trimmed.endsWith(".session") ? trimmed.slice(0, -".session".length) : trimmed;
-    return resolve31(base) === resolve31(legacyTelegramSessionBase(env));
+    return resolve34(base) === resolve34(legacyTelegramSessionBase(env));
   }
-  return resolve31(whatsappStateDirFromValue(trimmed)) === resolve31(legacyWhatsAppDefaultStateDir(env));
+  return resolve34(whatsappStateDirFromValue(trimmed)) === resolve34(legacyWhatsAppDefaultStateDir(env));
 }
 function movedSessionValue(source, value, env) {
   try {
@@ -222881,7 +225443,7 @@ var init_messaging_account_move = __esm(() => {
 });
 
 // src/workers/engine/http/dashboard-pairing.ts
-import { resolve as resolve32 } from "node:path";
+import { resolve as resolve35 } from "node:path";
 function dashboardUnpairObligations(existing, sourceIds) {
   if (existing.status !== "ok")
     return { paths: [], steps: [] };
@@ -222962,10 +225524,10 @@ async function dashboardStoredSessionPaths(sourceId, source, sessionKeys, secret
   return [...bySession.values()][0];
 }
 function sessionPathListKey(paths) {
-  return [...new Set(paths.map((path) => resolve32(path)))].sort().join("\x00");
+  return [...new Set(paths.map((path) => resolve35(path)))].sort().join("\x00");
 }
 function samePathList(left, right) {
-  const normalize = (paths) => [...new Set(paths.map((path) => resolve32(path)))].sort();
+  const normalize = (paths) => [...new Set(paths.map((path) => resolve35(path)))].sort();
   const a = normalize(left);
   const b = normalize(right);
   return a.length === b.length && a.every((value, index) => value === b[index]);
@@ -225109,8 +227671,8 @@ function createEmailSourceWorker(options = {}) {
             const recent = asOptionalBoolean(record.recent);
             const limit = asOptionalNumber(record.limit, "limit");
             const filter = asOptionalString(record.filter);
-            if (filter !== undefined && filter !== "personal" && filter !== "private" && filter !== "changed") {
-              throw new EmailSourceWorkerError(400, "invalid_request", 'filter must be "personal", "private" or "changed".');
+            if (filter !== undefined && filter !== "personal" && filter !== "private" && filter !== "changed" && filter !== "override_review") {
+              throw new EmailSourceWorkerError(400, "invalid_request", 'filter must be "personal", "private", "changed" or "override_review".');
             }
             return json({ ok: true, ...ownerTierItems.find({
               ...query !== undefined ? { query } : {},
@@ -225136,7 +227698,13 @@ function createEmailSourceWorker(options = {}) {
             if (tier !== "personal" && tier !== "private" && tier !== "judge") {
               throw new EmailSourceWorkerError(400, "invalid_request", 'tier must be "personal", "private" or "judge".');
             }
-            return json(ownerTierItems.set({ itemId, choice: tier, allowLower: true }));
+            const reviewDigest = asOptionalString(record.review_digest);
+            return json(ownerTierItems.set({
+              itemId,
+              choice: tier,
+              allowLower: true,
+              ...reviewDigest !== undefined ? { reviewDigest } : {}
+            }));
           }
           throw new EmailSourceWorkerError(404, "not_found", "No such privacy item route.");
         }
@@ -225602,6 +228170,7 @@ function createEmailSourceWorker(options = {}) {
                 ...searchEmbeddingProvider ? { embeddingProvider: searchEmbeddingProvider } : {}
               });
               const result = await retrySqliteBusy(() => adapter({
+                [DEFER_SEARCH_DELIVERY]: true,
                 query: searchRequest.query,
                 maxResults: searchRequest.maxResults,
                 corpus: defineConnectorCorpus({
@@ -225645,11 +228214,15 @@ function createEmailSourceWorker(options = {}) {
             }
             const runs = [primary, ...siblingRuns];
             const tiered = siblingRuns.length > 0;
-            const tagged = runs.flatMap((run) => run.result.hits.map((hit) => ({
-              ...hit,
-              corpusId: run.store.corpusId,
-              trustDomain: run.store.trustDomain
+            const taggedByHit = new Map(runs.flatMap((run) => run.result.hits.flatMap((hit) => {
+              const fallback = hit[SEARCH_GRANT_MATCH]?.metadataFallback;
+              return (fallback ? [hit, fallback] : [hit]).map((candidate) => [candidate, {
+                ...candidate,
+                corpusId: run.store.corpusId,
+                trustDomain: run.store.trustDomain
+              }]);
             })));
+            const tagged = [...taggedByHit.values()];
             return () => {
               const visible = new Set(options.sourceIndexVisibilityGate ? options.sourceIndexVisibilityGate(tagged) : tagged);
               const verdictScopes = new Map;
@@ -225694,18 +228267,20 @@ function createEmailSourceWorker(options = {}) {
                 }
               }
               const searchedSecureLocal = runs.some((run) => run.store.trustDomain === "secure_local");
+              const secretLocations = tiered ? options.secretLocationSearch?.(searchRequest.query, runs.map((run) => run.scope)) ?? [] : [];
+              const pendingPrivacy = readPendingPrivacyItems(options);
+              const released = runs.map((run) => deliverCorpusSearch([run.result]));
               const withheld = new Set(runs.flatMap((run) => [...run.privateMatches]));
-              for (const hit of hiddenNames)
-                visible.delete(hit);
-              if (personalNamesOnly || !searchedSecureLocal) {
-                for (const hit of visible) {
-                  if (!privateNames.has(hit))
-                    continue;
-                  visible.delete(hit);
-                  withheld.add(tierLedgerIdentityKey(hit.sourceItem));
+              const perRun = released.map((result) => result.hits.flatMap((hit) => {
+                const taggedHit = taggedByHit.get(hit);
+                if (!visible.has(taggedHit) || hiddenNames.has(taggedHit))
+                  return [];
+                if ((personalNamesOnly || !searchedSecureLocal) && privateNames.has(taggedHit)) {
+                  withheld.add(tierLedgerIdentityKey(taggedHit.sourceItem));
+                  return [];
                 }
-              }
-              const perRun = runs.map((run) => tagged.filter((hit) => hit.corpusId === run.store.corpusId && visible.has(hit)));
+                return [taggedHit];
+              }));
               const merged = [];
               for (let rank = 0;merged.length < searchRequest.maxResults && perRun.some((hits) => hits.length > rank); rank += 1) {
                 for (const hits of perRun) {
@@ -225715,7 +228290,6 @@ function createEmailSourceWorker(options = {}) {
                 }
               }
               const hits = merged;
-              const secretLocations = tiered ? options.secretLocationSearch?.(searchRequest.query, runs.map((run) => run.scope)) ?? [] : [];
               const withheldChildIdentifiers = new Set;
               for (const { store } of runs) {
                 const governed = hits.filter((hit) => hit.corpusId === store.corpusId);
@@ -225747,7 +228321,6 @@ function createEmailSourceWorker(options = {}) {
                 };
               });
               const locatorsExposed = releasedHits.some((hit) => Object.prototype.hasOwnProperty.call(hit, "locator"));
-              const pendingPrivacy = readPendingPrivacyItems(options);
               const safeResult = {
                 kind: "source_index_search",
                 corpus_id: connectorStore.corpusId,
@@ -225770,7 +228343,7 @@ function createEmailSourceWorker(options = {}) {
                   items_returned: hits.length,
                   latency_ms: runs.reduce((total, run) => total + run.result.latencyMs, 0),
                   ...tiered ? { searched_corpora: runs.map((run) => run.store.corpusId) } : {},
-                  ...searchRequest.explicitEmptyChatScope ? {} : { lane_audits: runs.flatMap((run) => run.result.laneAudits ?? []) },
+                  ...searchRequest.explicitEmptyChatScope ? {} : { lane_audits: released.flatMap((result) => result.laneAudits ?? []) },
                   raw_source_exposed: false,
                   source_text_returned: false,
                   ...searchRequest.locatorsRequested ? { locators_requested: true } : {},
@@ -226165,6 +228738,7 @@ function readBusySentence(action, engineState) {
   return `This source is finishing a read. Retry ${action} after the current read completes.` + (age !== undefined && age > 0 ? ` Olympus is busy: it last reported ${age} s ago.` : "");
 }
 var init_engine2 = __esm(() => {
+  init_router();
   init_embedding_plan();
   init_tier_visibility();
   init_child_visibility();
@@ -226741,7 +229315,7 @@ var init_query_planner = __esm(() => {
 
 // src/workers/local-files/watch-hub.ts
 import { createRequire as createRequire8 } from "node:module";
-import { existsSync as existsSync116, readFileSync as readFileSync110 } from "node:fs";
+import { existsSync as existsSync117, readFileSync as readFileSync110 } from "node:fs";
 import { dirname as dirname116, join as join150 } from "node:path";
 function watchIgnoreGlobs(context, extra = []) {
   const home = context.home;
@@ -226828,7 +229402,7 @@ class WatchHub {
   }
   async eventsSince(root, snapshotPath, ignore = []) {
     const watcher = await this.watcherOrHistoryError();
-    if (!existsSync116(snapshotPath))
+    if (!existsSync117(snapshotPath))
       throw new WatchHistoryUnavailableError("the snapshot is gone");
     try {
       return await watcher.getEventsSince(root, snapshotPath, { ignore: [...ignore] });
@@ -226958,7 +229532,7 @@ async function loadParcelWatcher(extraDirs = []) {
   const dirs = [...extraDirs, ...process.env.OLYMPUS_NATIVE_MODULES_DIR ? [process.env.OLYMPUS_NATIVE_MODULES_DIR] : []];
   for (const dir of dirs) {
     const candidate = join150(dir, "node_modules");
-    if (!existsSync116(join150(candidate, "@parcel", "watcher")))
+    if (!existsSync117(join150(candidate, "@parcel", "watcher")))
       continue;
     try {
       const requireFrom = createRequire8(join150(dirname116(candidate), "package.json"));
@@ -227002,8 +229576,8 @@ var init_watch_hub = __esm(() => {
 });
 
 // src/workers/local-files/connector.ts
-import { createHash as createHash108, randomUUID as randomUUID40 } from "node:crypto";
-import { realpathSync as realpathSync27, rmSync as rmSync47, readdirSync as readdirSync36 } from "node:fs";
+import { createHash as createHash108, randomUUID as randomUUID41 } from "node:crypto";
+import { realpathSync as realpathSync28, rmSync as rmSync47, readdirSync as readdirSync36 } from "node:fs";
 import { join as join151, posix as posix4 } from "node:path";
 function nameAsOnDisk(scopeRoot, rel) {
   let dir = "";
@@ -227082,7 +229656,7 @@ function createLocalFilesSourceConnector(options) {
       throw new LocalFilesRootMissingError(root);
     let real;
     try {
-      real = realpathSync27.native(configured);
+      real = realpathSync28.native(configured);
     } catch {
       throw new LocalFilesRootMissingError(root);
     }
@@ -227394,7 +229968,7 @@ function createLocalFilesSourceConnector(options) {
           const deletedSeen = new Set;
           const priorGen = cursor?.startsWith(LOCAL_FILES_CURSOR_PREFIX) ? cursor.slice(LOCAL_FILES_CURSOR_PREFIX.length) : undefined;
           const replay = priorGen !== undefined && priorGen !== "poll";
-          const nextGen = randomUUID40();
+          const nextGen = randomUUID41();
           let wroteSnapshot = false;
           if (options.watch) {
             try {
@@ -227495,7 +230069,7 @@ function createLocalFilesSourceConnector(options) {
         throw new FileExtractionSourceError("source_unavailable");
       let scopeRoot;
       try {
-        scopeRoot = ScopeRoot.open(realpathSync27.native(rootReal));
+        scopeRoot = ScopeRoot.open(realpathSync28.native(rootReal));
       } catch {
         throw new FileExtractionSourceError("source_unavailable");
       }
@@ -230481,7 +233055,7 @@ var init_source_scheduler = __esm(() => {
 });
 
 // src/workers/local-files/scheduler-source.ts
-import { realpathSync as realpathSync28 } from "node:fs";
+import { realpathSync as realpathSync29 } from "node:fs";
 import { homedir as homedir50 } from "node:os";
 function retryTomorrow(context, reason, afterMs = DAY_MS4) {
   const attempted = Date.parse(context?.attemptedAt ?? new Date().toISOString());
@@ -230492,7 +233066,7 @@ function createLocalFilesSchedulerSource(input) {
     return;
   const roots = input.policy.roots;
   const tasks = [];
-  const macPermissions = input.macPermissions ?? new MacPermissions({ home: realpathSync28(homedir50()), memoryPath: folderAccessMemoryPath() });
+  const macPermissions = input.macPermissions ?? new MacPermissions({ home: realpathSync29(homedir50()), memoryPath: folderAccessMemoryPath() });
   const volumeResolver = input.volumes ?? input.watch?.volumes;
   const needsHelper = (scopePath) => {
     if (!macPermissions.active || macPermissions.hasHelper())
@@ -236125,7 +238699,8 @@ function createMboxArchiveConnector(input) {
     classificationSignals(item) {
       const subject = typeof item.metadata.subject === "string" ? item.metadata.subject : undefined;
       const sender = typeof item.metadata.from === "string" && item.metadata.from ? item.metadata.from : undefined;
-      const labels = Array.isArray(item.metadata.labels) ? item.metadata.labels.filter((label) => typeof label === "string") : [];
+      const storedLabels = item.metadata[MBOX_LABEL_CAPABILITY.metadataKey];
+      const labels = Array.isArray(storedLabels) ? storedLabels.filter((label) => typeof label === "string") : [];
       return {
         ...subject ? { title: subject } : {},
         ...sender ? { sender } : {},
@@ -236139,6 +238714,7 @@ function registerMboxArchiveConnector() {
 }
 var MBOX_CURSOR_PREFIX = "mbox1:", MBOX_DEFAULT_PAGE_SIZE = 100, MBOX_DEFAULT_MAX_BYTES_PER_LISTING, MAX_ATTACHMENT_NAME_CHARS2 = 256, MBOX_FINDINGS;
 var init_connector7 = __esm(() => {
+  init_source_connector_labels();
   init_archive_formats();
   init_stop_errors();
   init_sender_rules();
@@ -239913,7 +242489,7 @@ var init_source_targets = __esm(() => {
 });
 
 // src/workers/archive-import/start.ts
-import { lstatSync as lstatSync55, realpathSync as realpathSync29 } from "node:fs";
+import { lstatSync as lstatSync55, realpathSync as realpathSync30 } from "node:fs";
 import { posix as posix5 } from "node:path";
 function prepareArchiveImport(input) {
   const path = input.path;
@@ -239921,7 +242497,7 @@ function prepareArchiveImport(input) {
     return { kind: "unreadable", code: "escape" };
   let kind;
   try {
-    if (realpathSync29.native(path) !== path)
+    if (realpathSync30.native(path) !== path)
       return { kind: "unreadable", code: "escape" };
     const stat = lstatSync55(path);
     if (stat.isFile())
@@ -240111,7 +242687,7 @@ var init_start = __esm(() => {
 });
 
 // src/workers/archive-import/runtime.ts
-import { existsSync as existsSync117 } from "node:fs";
+import { existsSync as existsSync118 } from "node:fs";
 function createArchiveImportRuntime(options = {}) {
   registerArchiveFormatConnectors();
   const env = options.env ?? process.env;
@@ -240157,9 +242733,9 @@ function createArchiveImportRuntime(options = {}) {
     }
   };
   const hasData = (family) => {
-    if (archiveConnectorStoreDbPaths([family], env).some((path) => existsSync117(path)))
+    if (archiveConnectorStoreDbPaths([family], env).some((path) => existsSync118(path)))
       return true;
-    if (writableStoreOpensForbidden() && !existsSync117(tieredStoreSetLedgerPath(archiveConnectorStoreDbPath("secure_local", family, env))))
+    if (writableStoreOpensForbidden() && !existsSync118(tieredStoreSetLedgerPath(archiveConnectorStoreDbPath("secure_local", family, env))))
       return false;
     try {
       return state.list().some((record) => record.family === family);
@@ -240192,7 +242768,7 @@ function createArchiveImportRuntime(options = {}) {
     laneMounted: (family) => lanes.has(family),
     openWaitingQuestions: () => {
       const path = options.waitingQuestionsDbPath ?? waitingPrivateQuestionsDbPath(resolveRemoteConnectionsDbPath(env));
-      return existsSync117(path) ? openWaitingPrivateQuestionStore(path) : undefined;
+      return existsSync118(path) ? openWaitingPrivateQuestionStore(path) : undefined;
     },
     start: (path) => startArchiveImport({ state, path }),
     subscribeWork: (wake) => {
@@ -240552,7 +243128,7 @@ var init_agent = __esm(() => {
 });
 
 // src/workers/archive-import/removal.ts
-import { existsSync as existsSync118 } from "node:fs";
+import { existsSync as existsSync119 } from "node:fs";
 function requestArchiveRemoval(state, archiveId, now = () => new Date) {
   return state.update(archiveId, (record) => {
     if (record.status === "removing" || record.target)
@@ -240586,7 +243162,7 @@ function deleteWaitingAnswers(options, input) {
 }
 function deleteJudgeQuestions(lane, provider, accountScope) {
   const path = tierSnifferPathForLedger(lane.ledger.dbPath);
-  if (path !== ":memory:" && !existsSync118(path))
+  if (path !== ":memory:" && !existsSync119(path))
     return 0;
   const sniffer = openTierSniffer({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID2 }, { dbPath: path });
   try {
@@ -240654,7 +243230,7 @@ var init_removal = __esm(() => {
 // src/workers/archive-import/dashboard.ts
 import { homedir as homedir51 } from "node:os";
 import { posix as posix7 } from "node:path";
-import { realpathSync as realpathSync30 } from "node:fs";
+import { realpathSync as realpathSync31 } from "node:fs";
 function archivePrivateModelFromSniffer(sniffer) {
   if (!sniffer)
     return "off";
@@ -240754,7 +243330,7 @@ function createArchiveImportDashboard(options) {
   const inStaging = (path) => {
     let canonical = stagingFolder;
     try {
-      canonical = realpathSync30.native(stagingFolder);
+      canonical = realpathSync31.native(stagingFolder);
     } catch {}
     return path.startsWith(`${canonical}/`) || path.startsWith(`${stagingFolder}/`);
   };
@@ -242492,7 +245068,7 @@ var init_scheduler_source2 = __esm(() => {
 });
 
 // src/workers/local-files/open-target.ts
-import { realpathSync as realpathSync31, statSync as statSync50 } from "node:fs";
+import { realpathSync as realpathSync32, statSync as statSync50 } from "node:fs";
 function localFilesOpenRoots(volumes, approvedScopePaths) {
   const roots = [];
   for (const scopePath of approvedScopePaths()) {
@@ -242500,7 +245076,7 @@ function localFilesOpenRoots(volumes, approvedScopePaths) {
     if (!resolved)
       continue;
     try {
-      const real = realpathSync31.native(resolved);
+      const real = realpathSync32.native(resolved);
       if (statSync50(real).isDirectory() && !roots.includes(real))
         roots.push(real);
     } catch {}
@@ -242522,7 +245098,7 @@ function createLocalFilesOpenTargets(options) {
     if (!resolved)
       return;
     try {
-      const real = realpathSync31.native(resolved);
+      const real = realpathSync32.native(resolved);
       return statSync50(real).isFile() ? { localPath: real } : undefined;
     } catch {
       return;
@@ -242535,9 +245111,9 @@ var init_open_target2 = __esm(() => {
 });
 
 // src/workers/engine/runtime/source-answer-lanes.ts
-import { AsyncLocalStorage as AsyncLocalStorage15 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage16 } from "node:async_hooks";
 function createOwnerQuestionActivity(relay, now = Date.now) {
-  const context = new AsyncLocalStorage15;
+  const context = new AsyncLocalStorage16;
   let inFlight = 0;
   let lastEndedAt;
   const release = () => {
@@ -243539,7 +246115,7 @@ var init_gmail_status_scope = __esm(() => {
 });
 
 // src/workers/evernote/runtime.ts
-import { existsSync as existsSync119 } from "node:fs";
+import { existsSync as existsSync120 } from "node:fs";
 function createEvernoteRuntime(options) {
   const env = options.env ?? process.env;
   const now = options.now ?? (() => new Date);
@@ -243558,7 +246134,7 @@ function createEvernoteRuntime(options) {
   const existingLane = (openStores = true) => {
     if (lane)
       return lane;
-    if (!existsSync119(resolvedStorePath(EVERNOTE_SOURCE_ID, "secure_local", env)))
+    if (!existsSync120(resolvedStorePath(EVERNOTE_SOURCE_ID, "secure_local", env)))
       return;
     const opened = openLane();
     if (openStores) {
@@ -244445,7 +247021,7 @@ var init_export_zone = __esm(() => {
 
 // src/workers/whatsapp/archive-input.ts
 import { createHash as createHash115 } from "node:crypto";
-import { existsSync as existsSync120 } from "node:fs";
+import { existsSync as existsSync121 } from "node:fs";
 import { posix as posix8 } from "node:path";
 function hash2(value) {
   return createHash115("sha256").update(value).digest("hex").slice(0, 24);
@@ -244535,7 +247111,7 @@ function createWhatsAppExportInput(options) {
     records(listing = {}) {
       return async function* () {
         const decoded = decodeCursor3(listing.cursor);
-        if (existsSync120(options.spoolDir) && !catchUpWhatsAppSpoolIndex(options.spoolDir, options.liveIndexBudgetBytes ?? LIVE_INDEX_BYTES)) {
+        if (existsSync121(options.spoolDir) && !catchUpWhatsAppSpoolIndex(options.spoolDir, options.liveIndexBudgetBytes ?? LIVE_INDEX_BYTES)) {
           yield { records: [], ...listing.cursor !== undefined ? { nextCursor: listing.cursor } : {}, done: false };
           return;
         }
@@ -245622,6 +248198,9 @@ class InstalledTierClassification {
     this.ownerContext = options.ownerContext;
     this.now = options.now;
   }
+  get ownerTierRulesPath() {
+    return resolveTierRulesPath({ env: this.env });
+  }
   forLedger(ledgerPath) {
     const rules = this.currentRules();
     const unavailableReason = this.rulesInvalid ? "tier_rules_invalid" : undefined;
@@ -245675,14 +248254,11 @@ class InstalledTierClassification {
   currentRules() {
     const stamp = tierRulesFileStamp({ env: this.env });
     if (stamp !== this.rulesStamp) {
-      try {
-        this.rules = loadOwnerTierRules({ env: this.env, allowMissing: true });
-        this.rulesInvalid = false;
-        this.rulesStamp = stamp;
-      } catch {
-        this.rulesInvalid = true;
-        this.rulesStamp = undefined;
-      }
+      const result = readDecisionRules(this.ownerTierRulesPath);
+      this.rulesInvalid = result.unavailable;
+      if (!result.unavailable)
+        this.rules = result.rules;
+      this.rulesStamp = result.unavailable ? undefined : stamp;
     }
     return this.rules;
   }
@@ -245707,7 +248283,7 @@ var init_installed_tier_classification = __esm(() => {
 
 // src/workers/classification/sniffer-service.ts
 import { Database as Database30 } from "bun:sqlite";
-import { existsSync as existsSync121, rmSync as rmSync48 } from "node:fs";
+import { existsSync as existsSync122, rmSync as rmSync48 } from "node:fs";
 import { basename as basename25 } from "node:path";
 function unrefTimer(timer) {
   timer?.unref?.();
@@ -246086,7 +248662,7 @@ class TierSnifferService {
         }
       }
       const path = tierSnifferPathForLedger(ledgerPath);
-      const hasQueue = existsSync121(path);
+      const hasQueue = existsSync122(path);
       if (hasQueue)
         db.query("ATTACH DATABASE ? AS queue").run(path);
       return { db, hasQueue };
@@ -246157,7 +248733,7 @@ class TierSnifferService {
   async countBacklogOffThread() {
     const ledgers = this.ledgerPaths().map((path) => {
       const queue = tierSnifferPathForLedger(path);
-      return { path, expectedId: this.boundLedgerIds.get(path) ?? null, queue: existsSync121(queue) ? queue : null };
+      return { path, expectedId: this.boundLedgerIds.get(path) ?? null, queue: existsSync122(queue) ? queue : null };
     });
     const sql = { pendingQueued: pendingCountSql(true), pendingAlone: pendingCountSql(false), questions: questionCountSql() };
     const results = await runBacklogCountWorker({ ledgers, sql });
@@ -246578,7 +249154,7 @@ class TierSnifferService {
       try {
         const binding = store.tierSetBinding?.();
         const bound = store.tierSetLedgerPath ? store.tierSetLedgerPath() : binding?.ledgerPath;
-        if (bound && bound !== ":memory:" && existsSync121(bound)) {
+        if (bound && bound !== ":memory:" && existsSync122(bound)) {
           paths.add(bound);
           if (binding?.ledgerId)
             this.boundLedgerIds.set(bound, binding.ledgerId);
@@ -246588,7 +249164,7 @@ class TierSnifferService {
         this.noteUnreadable(store.dbPath, "which privacy ledger the store is bound to");
       }
       const own = tierLedgerPathForStore(store.dbPath);
-      if (existsSync121(own))
+      if (existsSync122(own))
         paths.add(own);
     }
     return [...paths];
@@ -247264,9 +249840,21 @@ class TierSnifferService {
         report.notEligible += queued.length;
         continue;
       }
+      const deferRetry = (identity, generation) => {
+        try {
+          set.ledger.recordMoveFailure(identity, { expectedGeneration: generation });
+        } catch {}
+      };
       const failure = (record, error) => {
         const identity = recordIdentity2(record);
         const failureKey = `${ledgerPath}\x00${tierLedgerIdentityKey(identity)}\x00${record.generation}`;
+        if (error instanceof TierMoveRefusedError && error.code === "rule_policy_unavailable") {
+          if (direction === "raise")
+            deferRetry(identity, record.generation);
+          this.moveFailures.delete(failureKey);
+          report.notEligible++;
+          return;
+        }
         report.failed += 1;
         const why = moveFailureName(error);
         report.failedBy = { ...report.failedBy, [why]: (report.failedBy?.[why] ?? 0) + 1 };
@@ -247299,9 +249887,7 @@ class TierSnifferService {
           this.moveFailures.delete(failureKey);
           return;
         }
-        try {
-          set.ledger.recordMoveFailure(identity, { expectedGeneration: record.generation });
-        } catch {}
+        deferRetry(identity, record.generation);
         const firstFailedAt = this.moveFailures.get(failureKey) ?? now;
         this.moveFailures.set(failureKey, firstFailedAt);
         if (now - firstFailedAt >= staleAfterMs && this.settleStaleMove(set, record, report)) {
@@ -247471,9 +250057,9 @@ function moveFailureName(error) {
   return /^[a-z][a-z ]{0,39}$/.test(error.message) ? error.message : "Error";
 }
 function checkpointRetiredLedger(path) {
-  if (!existsSync121(`${path}-wal`))
+  if (!existsSync122(`${path}-wal`))
     return true;
-  if (!existsSync121(path))
+  if (!existsSync122(path))
     return false;
   let db;
   try {
@@ -247679,7 +250265,7 @@ var init_tier_over_private = __esm(() => {
 });
 
 // src/workers/engine-split/client.ts
-import { randomUUID as randomUUID41 } from "node:crypto";
+import { randomUUID as randomUUID42 } from "node:crypto";
 
 class EngineCommandClient {
   options;
@@ -247839,7 +250425,7 @@ class OwnerBusyRelay {
   constructor(client, log = () => {}, options = {}) {
     this.client = client;
     this.log = log;
-    this.front = options.front ?? randomUUID41();
+    this.front = options.front ?? randomUUID42();
     this.renewEveryMs = options.renewEveryMs ?? 3 * 60000;
     this.setTimer = options.setInterval ?? ((callback, ms) => {
       const timer = setInterval(callback, ms);
@@ -247924,11 +250510,11 @@ var init_client5 = __esm(() => {
 });
 
 // src/workers/engine-split/snapshot.ts
-import { randomUUID as randomUUID42 } from "node:crypto";
+import { randomUUID as randomUUID43 } from "node:crypto";
 import { closeSync as closeSync37, fstatSync as fstatSync10, openSync as openSync36, readFileSync as readFileSync111, renameSync as renameSync27, rmSync as rmSync49, writeFileSync as writeFileSync29 } from "node:fs";
 import { open as open9 } from "node:fs/promises";
 function writeEngineStatusSnapshot(path, snapshot) {
-  const partial = `${path}.${randomUUID42()}.tmp`;
+  const partial = `${path}.${randomUUID43()}.tmp`;
   try {
     writeFileSync29(partial, `${JSON.stringify(snapshot)}
 `, { flag: "wx", mode: 384 });
@@ -248028,14 +250614,14 @@ var ENGINE_STATUS_SNAPSHOT_SCHEMA = "olympus.engine.background-status.v1", ENGIN
 var init_snapshot = () => {};
 
 // src/workers/engine-split/control-plane.ts
-import { existsSync as existsSync122 } from "node:fs";
+import { existsSync as existsSync123 } from "node:fs";
 import { dirname as dirname118, join as join153 } from "node:path";
 import { fileURLToPath as fileURLToPath14 } from "node:url";
 function controlWorkerPath() {
   const here = dirname118(fileURLToPath14(import.meta.url));
   for (const name of ["engine-control-worker.js", "control-worker.ts"]) {
     const candidate = join153(here, name);
-    if (existsSync122(candidate))
+    if (existsSync123(candidate))
       return candidate;
   }
   return;
@@ -248212,8 +250798,8 @@ var init_control_plane = __esm(() => {
 });
 
 // src/workers/engine-split/runtime.ts
-import { AsyncLocalStorage as AsyncLocalStorage16 } from "node:async_hooks";
-import { randomUUID as randomUUID43 } from "node:crypto";
+import { AsyncLocalStorage as AsyncLocalStorage17 } from "node:async_hooks";
+import { randomUUID as randomUUID44 } from "node:crypto";
 import { lstatSync as lstatSync56 } from "node:fs";
 function engineBackgroundSocketFromEnv(env) {
   const path = env[ENGINE_BACKGROUND_SOCKET_ENV]?.trim();
@@ -248225,7 +250811,7 @@ function engineStatusSnapshotPath(env) {
   return sharedDataPath("engine-status", env);
 }
 function startEngineBackgroundServer(input) {
-  const instanceId = input.instanceId ?? randomUUID43();
+  const instanceId = input.instanceId ?? randomUUID44();
   prepareEngineBackgroundSocketDirectory(input.socketPath);
   let present = false;
   try {
@@ -248432,7 +251018,7 @@ function restartingResponse(request) {
 function createFrontGate() {
   let open = true;
   let generation = 0;
-  const current = new AsyncLocalStorage16;
+  const current = new AsyncLocalStorage17;
   return {
     isOpen: () => open,
     close() {
@@ -249030,7 +251616,7 @@ var init_front_scheduler = __esm(() => {
 
 // src/workers/engine-split/front-history.ts
 import { SQLiteError as SQLiteError2 } from "bun:sqlite";
-import { existsSync as existsSync123 } from "node:fs";
+import { existsSync as existsSync124 } from "node:fs";
 function openWritableDashboardHistory(path = defaultSourceDashboardHistoryDbPath()) {
   assertWritableStoreOpenAllowed("dashboard history", path);
   return new SqliteSourceDashboardHistory(path);
@@ -249055,7 +251641,7 @@ function createFrontDashboardHistory(input) {
   let lastReadWarning = Number.NEGATIVE_INFINITY;
   const read = (query) => {
     try {
-      if (!reader && existsSync123(input.path))
+      if (!reader && existsSync124(input.path))
         reader = openReadOnlyDashboardHistory(input.path);
       return reader && query(reader);
     } catch (error) {
@@ -249255,8 +251841,8 @@ var init_remote_access_control = __esm(() => {
 });
 
 // src/core/source-account-migration.ts
-import { linkSync as linkSync6, lstatSync as lstatSync57, mkdirSync as mkdirSync75, readdirSync as readdirSync37, realpathSync as realpathSync32, renameSync as renameSync28, rmdirSync as rmdirSync8, statSync as statSync52, unlinkSync as unlinkSync7 } from "node:fs";
-import { basename as basename26, dirname as dirname119, isAbsolute as isAbsolute42, join as join154, relative as relative20, resolve as resolve33, sep as sep26 } from "node:path";
+import { linkSync as linkSync6, lstatSync as lstatSync57, mkdirSync as mkdirSync75, readdirSync as readdirSync37, realpathSync as realpathSync33, renameSync as renameSync28, rmdirSync as rmdirSync8, statSync as statSync52, unlinkSync as unlinkSync7 } from "node:fs";
+import { basename as basename26, dirname as dirname119, isAbsolute as isAbsolute42, join as join154, relative as relative20, resolve as resolve36, sep as sep26 } from "node:path";
 function accountFolderMigrationEnabled(env = process.env) {
   const value = env[MIGRATE_ACCOUNT_FOLDERS_ENV]?.trim().toLowerCase() ?? "";
   return value === "" || MIGRATION_ON.includes(value);
@@ -249394,18 +251980,18 @@ function storeNameForCorpus(sourceId, corpusId) {
 }
 function nearRealPath(path) {
   try {
-    return realpathSync32(path);
+    return realpathSync33(path);
   } catch {}
   const rest = [];
-  let near = resolve33(path);
+  let near = resolve36(path);
   for (;; ) {
     rest.unshift(basename26(near));
     const up = dirname119(near);
     if (up === near)
-      return resolve33(path);
+      return resolve36(path);
     near = up;
     try {
-      return join154(realpathSync32(near), ...rest);
+      return join154(realpathSync33(near), ...rest);
     } catch {}
   }
 }
@@ -249417,7 +252003,7 @@ function destinationIsOurs(ctx, destination) {
   return nearRealPath(parent) === join154(nearRealPath(at.root), at.below);
 }
 function nearestExisting(path) {
-  let near = resolve33(path);
+  let near = resolve36(path);
   for (;; ) {
     try {
       statSync52(near);
@@ -249443,9 +252029,9 @@ function pinFor(ctx, sourceId) {
   if (facts?.pin)
     return skip("pinned", facts.pin);
   if (sourceId === WHATSAPP_SOURCE_ID) {
-    const moving = resolve33(legacyWhatsAppDefaultStateDir(env));
+    const moving = resolve36(legacyWhatsAppDefaultStateDir(env));
     for (const other of [legacyWhatsAppServiceStateDir(env), legacyWhatsAppLiveSyncStateDir(env, env.HOME?.trim() || undefined)]) {
-      if (resolve33(other) === moving)
+      if (resolve36(other) === moving)
         continue;
       const found = look(other);
       if (found.kind === "absent")
@@ -249580,7 +252166,7 @@ function syncFolderChains(ctx, folders) {
     const at = rootOf(ctx, folder);
     if (!at)
       throw Object.assign(new Error("outside every root"), { code: "EINVAL" });
-    let current = realpathSync32(at.root);
+    let current = realpathSync33(at.root);
     chain.add(current);
     for (const part of at.below.split(sep26).filter(Boolean)) {
       current = join154(current, part);
@@ -249594,7 +252180,7 @@ function syncFolderChains(ctx, folders) {
 }
 function makeFolders(ctx, moves) {
   try {
-    const real = realpathSync32(ctx.root);
+    const real = realpathSync33(ctx.root);
     const destinations = new Set;
     for (const move of moves) {
       const destination = dirname119(absPath(ctx, move.to));
@@ -249930,11 +252516,11 @@ function holdCaptureLocks(ctx, sourceId, slot) {
 function removeEmptiedLegacyFolders(ctx, sourceId, slot) {
   if (!isMessaging(sourceId))
     return;
-  const rootFolders = new Set(ctx.roots.map(({ root }) => resolve33(root)));
+  const rootFolders = new Set(ctx.roots.map(({ root }) => resolve36(root)));
   const folders = new Set;
   try {
     for (const candidate of candidates(sourceId, slot, ctx.env)) {
-      const folder = resolve33(dirname119(candidate.from));
+      const folder = resolve36(dirname119(candidate.from));
       if (!rootFolders.has(folder) && rootOf(ctx, folder))
         folders.add(folder);
     }
@@ -250164,7 +252750,7 @@ var init_source_account_migration = __esm(() => {
 });
 
 // src/workers/engine/runtime/boot-storage.ts
-import { existsSync as existsSync124 } from "node:fs";
+import { existsSync as existsSync125 } from "node:fs";
 function reportRehomedChatOverrides(lane, result) {
   if (result.rehomed === 0 && result.orphaned === 0)
     return;
@@ -250172,7 +252758,7 @@ function reportRehomedChatOverrides(lane, result) {
 }
 function openPeopleIndexOrUndefined(options = {}) {
   const dbPath = peopleIndexPath(process.env);
-  if (options.readOnly && !existsSync124(dbPath))
+  if (options.readOnly && !existsSync125(dbPath))
     return;
   try {
     return new LocalPeopleIndex({ dbPath, ...options.readOnly ? { readOnly: true } : {} });
@@ -251729,7 +254315,7 @@ function bindXBookmarksConnectorStoreRuntime(options) {
   });
   const contentRecovery = createXBookmarksContentRecoveryHandler({
     store: options.store,
-    tierLedger: options.tierSet.ledger,
+    tierSet: options.tierSet,
     usageStore: options.usageStore,
     reconcileStateStore: options.reconcileStateStore,
     embeddingProvider: options.embeddingProvider,
@@ -252330,7 +254916,7 @@ var init_private_analysts = __esm(() => {
 });
 
 // src/workers/engine/runtime/connector-mounts.ts
-import { existsSync as existsSync125 } from "node:fs";
+import { existsSync as existsSync126 } from "node:fs";
 import { isAbsolute as isAbsolute43 } from "node:path";
 function createConnectorStoreMountDiscovery(raw, options) {
   const retryBaseMs = 5000;
@@ -252365,7 +254951,7 @@ function createConnectorStoreMountDiscovery(raw, options) {
     const absent = [];
     for (const declaration of candidates) {
       const placed = hasFolderLayout(storageAccountForCorpus(declaration, registeredCorpora).sourceId);
-      if (byCorpus.has(declaration.corpusId) || !placed && (!declaration.dbPath || existsSync125(declaration.dbPath)))
+      if (byCorpus.has(declaration.corpusId) || !placed && (!declaration.dbPath || existsSync126(declaration.dbPath)))
         ready.push(declaration);
       else
         absent.push(declaration);
@@ -252450,7 +255036,7 @@ function mountConnectorStoreDeclarations(declarations, options) {
         throw new Error("Connector store entries require dbPath, corpusId, family, trustDomain.");
       if (collidingStore)
         assertConnectorStoreMountIdentity(declaration, collidingStore);
-      if (options.existingOnly && !collidingStore && !existsSync125(declaration.dbPath))
+      if (options.existingOnly && !collidingStore && !existsSync126(declaration.dbPath))
         continue;
       const pathOwnerCorpusId = ownerCorpusIdByDbPath.get(declaration.dbPath);
       if (pathOwnerCorpusId !== undefined && pathOwnerCorpusId !== declaration.corpusId) {
@@ -252666,7 +255252,7 @@ var init_answer_scope = __esm(() => {
 });
 
 // src/workers/engine/runtime/ingestion-dispositions.ts
-import { existsSync as existsSync126 } from "node:fs";
+import { existsSync as existsSync127 } from "node:fs";
 function storedExclusionDebtReader(handles) {
   let walked;
   return () => {
@@ -252697,7 +255283,7 @@ function openIngestionDispositionsRuntime(env = process.env, options = {}) {
     try {
       stores = definition.stores(env);
       const matcher = definition.matcher(env);
-      const present = stores.filter((store) => existsSync126(store.dbPath));
+      const present = stores.filter((store) => existsSync127(store.dbPath));
       let openedAll = false;
       const openStores = () => {
         if (openedAll)
@@ -258524,17 +261110,17 @@ async function callSetupTool(name, args, backend) {
         if (current.revision !== revision)
           return privacyToolResult(visiblePrivacy(current, secrets), "conflict");
         const confirmed = confirmation !== undefined && privacyConfirmationValid(backend, confirmation);
-        if (!confirmed && lowersPrivacy(update, visiblePrivacy(backend.privacySettings(), secrets))) {
+        if (!confirmed && lowersPrivacy(update, visiblePrivacy(current, secrets))) {
           throw new ChatGptSurfaceError("privacy_owner_only");
         }
         const rules = update.rules ? [
           ...update.rules.filter((rule) => !isSecretPrivacyRule(secrets, rule)),
-          ...backend.privacySettings().rules.filter((rule) => isSecretPrivacyRule(secrets, rule))
+          ...current.rules.filter((rule) => isSecretPrivacyRule(secrets, rule))
         ] : undefined;
         const saved = backend.savePrivacy({
           ...update.description !== undefined ? { description: update.description } : {},
           ...rules ? { rules } : {}
-        });
+        }, revision);
         if (confirmed)
           spendPrivacyConfirmation(backend, confirmation);
         return privacyToolResult(visiblePrivacy(saved, secrets), "saved", saved.privateAnswerChoice ? issuePrivacyConfirmation(backend) : undefined);
@@ -258543,6 +261129,8 @@ async function callSetupTool(name, args, backend) {
         throw new ChatGptSurfaceError("unknown_tool");
     }
   } catch (error) {
+    if (error instanceof PrivacySettingsConflict)
+      return privacyToolResult(visiblePrivacy(error.current, secretLocations(backend)), "conflict");
     throw surfaceError(error);
   }
 }
@@ -258807,7 +261395,7 @@ function surfaceError(error) {
     return new ChatGptSurfaceError("internal");
   return new ChatGptSurfaceError("internal");
 }
-var SetupBackendError, OAUTH2_REQUIRED, OAUTH_SOURCES2, FOLDER_SOURCE_IDS2, SCOPE_SOURCE_IDS3, DISCONNECT_SOURCE_IDS3, SYNC_SOURCE_IDS3, DELETE_DATA_SOURCE_IDS2, WIDGET_AND_MODEL, WIDGET_ONLY, SELECTION_SCHEMA, MAIL_DRAFT_SCHEMA, CONNECT_SOURCE_TOOL, SCOPE_LIST_TOOL, SCOPE_SET_TOOL, DISCONNECT_SOURCE_TOOL, DELETE_SOURCE_DATA_TOOL, MODEL_SET_TOOL, MODEL_RETRY_TOOL, SYNC_SOURCE_TOOL, PRIVACY_CHAT_SOURCE_IDS2, PRIVACY_RULE_SCHEMA, PRIVACY_GET_TOOL, PRIVACY_SET_TOOL, PRIVACY_DRAFT_TOOLS, SETUP_TOOLS, SETUP_TOOL_NAMES, PRIVACY_CONFIRMATION_TTL_MS, PRIVACY_CONFIRMATIONS_MAX = 32, privacyConfirmations, SCOPE_LIST_PAGE_SIZE = 100, MAX_PROVIDER_PAGES = 50, FOLDER_COLLATOR, SORTED_CURSOR_PREFIX = "olysort1.", BACKEND_CODES;
+var SetupBackendError, PrivacySettingsConflict, OAUTH2_REQUIRED, OAUTH_SOURCES2, FOLDER_SOURCE_IDS2, SCOPE_SOURCE_IDS3, DISCONNECT_SOURCE_IDS3, SYNC_SOURCE_IDS3, DELETE_DATA_SOURCE_IDS2, WIDGET_AND_MODEL, WIDGET_ONLY, SELECTION_SCHEMA, MAIL_DRAFT_SCHEMA, CONNECT_SOURCE_TOOL, SCOPE_LIST_TOOL, SCOPE_SET_TOOL, DISCONNECT_SOURCE_TOOL, DELETE_SOURCE_DATA_TOOL, MODEL_SET_TOOL, MODEL_RETRY_TOOL, SYNC_SOURCE_TOOL, PRIVACY_CHAT_SOURCE_IDS2, PRIVACY_RULE_SCHEMA, PRIVACY_GET_TOOL, PRIVACY_SET_TOOL, PRIVACY_DRAFT_TOOLS, SETUP_TOOLS, SETUP_TOOL_NAMES, PRIVACY_CONFIRMATION_TTL_MS, PRIVACY_CONFIRMATIONS_MAX = 32, privacyConfirmations, SCOPE_LIST_PAGE_SIZE = 100, MAX_PROVIDER_PAGES = 50, FOLDER_COLLATOR, SORTED_CURSOR_PREFIX = "olysort1.", BACKEND_CODES;
 var init_setup_tools = __esm(() => {
   init_privacy_profile();
   init_privacy_language();
@@ -258826,6 +261414,13 @@ var init_setup_tools = __esm(() => {
       super(code);
       this.code = code;
       this.name = "SetupBackendError";
+    }
+  };
+  PrivacySettingsConflict = class PrivacySettingsConflict extends Error {
+    current;
+    constructor(current) {
+      super("Privacy settings changed since this revision.");
+      this.current = current;
     }
   };
   OAUTH2_REQUIRED = [{ type: "oauth2", scopes: [] }];
@@ -269461,7 +272056,7 @@ var init_remote_search = __esm(() => {
 
 // src/workers/remote-mcp.ts
 import { createHash as createHash117 } from "node:crypto";
-import { existsSync as existsSync127 } from "node:fs";
+import { existsSync as existsSync128 } from "node:fs";
 function isRemoteMcpRequest(request) {
   return remoteMcpSurface(request) !== undefined;
 }
@@ -269697,7 +272292,7 @@ function lazyRemoteConnectionStore(resolvePath, open) {
     if (store)
       return store;
     const dbPath = resolvePath();
-    if (!options.create && !existsSync127(dbPath))
+    if (!options.create && !existsSync128(dbPath))
       return;
     store = open(dbPath);
     return store;
@@ -273568,13 +276163,20 @@ function createChatGptSetupBackend(options) {
         options.requestReload();
       return privacySettings();
     },
-    savePrivacy(update) {
-      if (privacySettings().privateAnswerChoice?.pending)
-        throw new SetupBackendError("privacy_choice_required");
+    savePrivacy(update, expectedRevision) {
       writePrivacyProfile({
         ...update.description !== undefined ? { description: update.description } : {},
         ...update.rules ? { rules: update.rules } : {}
-      }, { env: options.env ?? process.env });
+      }, {
+        env: options.env ?? process.env,
+        checkRevision() {
+          const current = privacySettings();
+          if (expectedRevision !== undefined && current.revision !== expectedRevision)
+            throw new PrivacySettingsConflict(current);
+          if (current.privateAnswerChoice?.pending)
+            throw new SetupBackendError("privacy_choice_required");
+        }
+      });
       return privacySettings();
     }
   };
@@ -274817,13 +277419,14 @@ function createDashboardPanelTools(options) {
       const missingFolders = (view?.sources ?? []).flatMap((source) => source.schedule?.missing_folders?.length ? [{ sourceId: source.source_id, paths: source.schedule.missing_folders }] : []);
       const permissionSettings = process.platform === "darwin" ? (view?.sources ?? []).flatMap((source) => source.schedule?.degraded_reason === "scope_root_permission_needed" ? [{ sourceId: source.source_id, url: FILES_AND_FOLDERS_URL }] : []) : [];
       const waiting = context.localSession === true ? waitingCount(options) : 0;
+      const reviewKinds = context.localSession === true ? await options.overrideReviewKinds?.() ?? [] : [];
       const indexedItems = (view?.sources ?? []).reduce((sum, source) => sum + (Number.isFinite(source.coverage?.indexed_items) ? Math.max(0, source.coverage.indexed_items) : 0), 0);
       const archives = archivesMeta(options);
       const sourceImports = sourceImportsMeta(options);
       const archiveSources = archiveSourcesMeta(options);
       const archiveCards = archiveCardsMeta(options);
       const setup = setupMeta(options, view);
-      if (on === undefined && !setup && unpair.length === 0 && unreadable.length === 0 && waiting === 0 && indexedItems === 0 && missingFolders.length === 0 && permissionSettings.length === 0 && !archives && !sourceImports && !archiveSources && !archiveCards)
+      if (on === undefined && !setup && unpair.length === 0 && unreadable.length === 0 && waiting === 0 && reviewKinds.length === 0 && indexedItems === 0 && missingFolders.length === 0 && permissionSettings.length === 0 && !archives && !sourceImports && !archiveSources && !archiveCards)
         return result;
       const meta = {
         ...missingFolders.length ? { missingFolders } : {},
@@ -274832,6 +277435,7 @@ function createDashboardPanelTools(options) {
         ...unpair.length > 0 ? { unpair } : {},
         ...unreadable.length > 0 ? { unreadable } : {},
         ...waiting > 0 ? { waitingPrivateQuestions: waiting } : {},
+        ...reviewKinds.length ? { overrideReviewKinds: reviewKinds } : {},
         ...indexedItems > 0 ? { indexedItems } : {},
         ...setup ? { setup } : {},
         ...archives ? { archives, archiveGuideLinks: archiveExportGuideLinks() } : {},
@@ -275092,7 +277696,7 @@ __export(exports_server, {
 import { SQLiteError as SQLiteError3 } from "bun:sqlite";
 import { release as release2, totalmem as totalmem8 } from "node:os";
 import { execFile as execFile6 } from "node:child_process";
-import { appendFileSync as appendFileSync2, existsSync as existsSync128, readFileSync as readFileSync115, writeFileSync as writeFileSync30 } from "node:fs";
+import { appendFileSync as appendFileSync2, existsSync as existsSync129, readFileSync as readFileSync115, writeFileSync as writeFileSync30 } from "node:fs";
 import { appendFile as appendFile2, writeFile as writeFile7 } from "node:fs/promises";
 import { fileURLToPath as fileURLToPath15 } from "node:url";
 import { dirname as dirname122, join as join156 } from "node:path";
@@ -275413,6 +278017,7 @@ async function main() {
     registryPath: connectedHandleRegistryPath,
     mailPinnedHandle: () => process.env.OLYMPUS_SOURCE_INDEX_GMAIL_CREDENTIAL_HANDLE
   }) : undefined;
+  const gmailTierOwnerRuleSource = fileSourceScopeAuthority ? mailScopeTierOwnerRuleSource(fileSourceScopeAuthority) : undefined;
   const dropboxHandle = selectedSourceCredentialHandle({
     env: process.env,
     pinEnvName: "OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_CREDENTIAL_HANDLE",
@@ -275638,7 +278243,7 @@ async function main() {
   };
   const sourceHasStores = (sourceId) => accountStoreNames(sourceId).some((domain) => {
     const path = resolvedStorePath(sourceId, domain, process.env);
-    return existsSync128(path) || existsSync128(tieredStoreSetLedgerPath(path)) || existsSync128(secretLocationsPathForStore(path));
+    return existsSync129(path) || existsSync129(tieredStoreSetLedgerPath(path)) || existsSync129(secretLocationsPathForStore(path));
   });
   const frontMountProblems = new Map;
   const mountFailureReason = (error) => {
@@ -276037,7 +278642,7 @@ async function main() {
               secureStore: gmailSecureConnectorStore,
               ...gmailTierLane?.publicStore ? { publicLeg: gmailTierLane.publicStore } : {},
               ...gmailTierLane?.secrets ? { secretLocations: gmailTierLane.secrets } : {},
-              tierClassification: { ...ownerRules.length > 0 ? { rules: [...ownerRules] } : {} },
+              ...gmailTierOwnerRuleSource ? { ownerRuleSource: gmailTierOwnerRuleSource } : { tierClassification: { rules: ownerRules } },
               ...internalEmbedder ? { internalEmbeddingProvider: internalEmbedder } : {},
               ...secureEmbedder ? { secureEmbeddingProvider: secureEmbedder } : {},
               contentArrivesLaterFor: gmailContentArrivesLater
@@ -277215,6 +279820,7 @@ ${key}`;
         setId: GMAIL_SOURCE_ID,
         internalStore: gmailInternalConnectorStore,
         secureStore: gmailSecureConnectorStore,
+        ...gmailTierOwnerRuleSource ? { ownerRuleSource: gmailTierOwnerRuleSource } : {},
         ...gmailTierLane?.publicStore ? { publicLeg: gmailTierLane.publicStore } : {},
         ...gmailTierLane?.secrets ? { secretLocations: gmailTierLane.secrets } : {},
         contentArrivesLaterFor: gmailContentArrivesLater
@@ -277344,6 +279950,7 @@ ${key}`;
       secureStore: gmailSecureConnectorStore,
       requestBudget: gmailRequestBudget,
       scope: gmailConnectorScopeFromApproval(approval),
+      ...gmailTierOwnerRuleSource ? { ownerRuleSource: gmailTierOwnerRuleSource } : {},
       scopeApproval: { generation: scopeRef.accountGeneration, revision: scopeRef.revision },
       assertScopeCurrent: () => {
         fileSourceScopeAuthority.assertCurrentMail(scopeRef);
@@ -279625,6 +282232,11 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     },
     unreadableFiles: () => unreadableFiles,
     waitingPrivateQuestions: () => localPrivateAnswers?.waitingCount() ?? 0,
+    overrideReviewKinds: async () => {
+      const ledgers = [...new Set(tierScopes().map((scope) => scope.ledger))];
+      const kinds = await Promise.all(ledgers.map((ledger) => ledgerReadOffThread(ledger, ledger.ownerOverrideReviewKindsSteps(), BACKGROUND_READS)));
+      return [...new Set(kinds.flat())].sort();
+    },
     archives: () => archiveViews.view(),
     sourceImports: () => archiveViews.sourceImports(),
     archiveSources: () => archiveViews.archiveSources(),
@@ -280465,7 +283077,7 @@ function frontLoopSqlAllowance() {
   if (!import.meta.url.endsWith("/src/workers/engine/server.ts"))
     return {};
   const path = fileURLToPath15(new URL("../../../config/front-loop-sql-allowance.json", import.meta.url));
-  if (!existsSync128(path))
+  if (!existsSync129(path))
     return {};
   const sections = JSON.parse(readFileSync115(path, "utf8")).sites;
   return { allowed: Object.values(sections).flat() };
@@ -281130,10 +283742,10 @@ init_messaging_capture();
 init_config2();
 import { randomBytes as randomBytes43 } from "node:crypto";
 import { spawnSync as spawnSync23 } from "node:child_process";
-import { existsSync as existsSync129, readFileSync as readFileSync116, openSync as openSync37, closeSync as closeSync38, writeSync as writeSync10 } from "node:fs";
+import { existsSync as existsSync130, readFileSync as readFileSync116, openSync as openSync37, closeSync as closeSync38, writeSync as writeSync10 } from "node:fs";
 import { createInterface as createInterface3 } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
-import { resolve as resolve34 } from "node:path";
+import { resolve as resolve37 } from "node:path";
 
 // src/core/worker-service-split.ts
 init_engine_split();
@@ -281267,9 +283879,9 @@ init_open_targets();
 init_package_root();
 init_linux_engine_layout();
 import { spawnSync as spawnSync9 } from "node:child_process";
-import { existsSync as existsSync45, lstatSync as lstatSync25, mkdirSync as mkdirSync28, readFileSync as readFileSync41, renameSync as renameSync7, rmSync as rmSync16, statSync as statSync24, writeFileSync as writeFileSync11 } from "node:fs";
+import { existsSync as existsSync45, lstatSync as lstatSync26, mkdirSync as mkdirSync29, readFileSync as readFileSync41, renameSync as renameSync7, rmSync as rmSync16, statSync as statSync24, writeFileSync as writeFileSync11 } from "node:fs";
 import { homedir as homedir26, platform as osPlatform2 } from "node:os";
-import { dirname as dirname50, isAbsolute as isAbsolute22, join as join59 } from "node:path";
+import { dirname as dirname51, isAbsolute as isAbsolute22, join as join59 } from "node:path";
 var OPEN_HANDLER_BUNDLE_ID = "ai.olympusplugin.open";
 var OPEN_HANDLER_DESKTOP_ID = `${OPEN_HANDLER_BUNDLE_ID}.desktop`;
 var OPEN_HANDLER_MIME_TYPE = `x-scheme-handler/${OLYMPUS_URL_SCHEME}`;
@@ -281314,7 +283926,7 @@ function renderMacOpenHandlerScript(program) {
 }
 function renderLinuxDesktopEntry2(program, launcherPath) {
   assertProgram(program);
-  const workDir = launcherPath ? dirname50(launcherPath) : programWorkingDirectory(program);
+  const workDir = launcherPath ? dirname51(launcherPath) : programWorkingDirectory(program);
   for (const path of [program.runtimePath, program.entryPath, workDir, ...launcherPath ? [launcherPath] : []]) {
     if (!isAbsolute22(path) || /[\x00-\x1f\x7f"`$\\%]/.test(path))
       throw new Error(`The path ${path} cannot be written into a desktop entry.`);
@@ -281382,8 +283994,8 @@ function installMac(options) {
     return { ok: false, platform: "darwin", action: "failed", path: handlerPath, detail: `${handlerPath} is not the Olympus link handler, so it was left alone.` };
   }
   const script = renderMacOpenHandlerScript(program);
-  const support = dirname50(handlerPath);
-  mkdirSync28(support, { recursive: true, mode: 448 });
+  const support = dirname51(handlerPath);
+  mkdirSync29(support, { recursive: true, mode: 448 });
   const staging = join59(support, ".Olympus-next.app");
   const scriptPath = join59(support, ".open-handler.applescript");
   rmSync16(staging, { recursive: true, force: true });
@@ -281423,7 +284035,7 @@ function installMac(options) {
 function uninstallMac(options) {
   const exec = options.exec ?? defaultExec2;
   const { handlerPath } = openHandlerPaths("darwin", home(options));
-  const staging = join59(dirname50(handlerPath), ".Olympus-next.app");
+  const staging = join59(dirname51(handlerPath), ".Olympus-next.app");
   rmSync16(staging, { recursive: true, force: true });
   if (!existsSync45(handlerPath))
     return { ok: true, platform: "darwin", action: "absent", path: handlerPath };
@@ -281443,10 +284055,10 @@ function installLinux(options) {
   if (existsSync45(handlerPath) && !ownedHandler("linux", handlerPath)) {
     return { ok: false, platform: "linux", action: "failed", path: handlerPath, detail: `${handlerPath} was not written by Olympus, so it was left alone.` };
   }
-  mkdirSync28(dirname50(handlerPath), { recursive: true, mode: 448 });
+  mkdirSync29(dirname51(handlerPath), { recursive: true, mode: 448 });
   writeAtomic(handlerPath, entry, 420);
   const registered = exec("xdg-mime", ["default", OPEN_HANDLER_DESKTOP_ID, OPEN_HANDLER_MIME_TYPE]).status === 0;
-  exec("update-desktop-database", [dirname50(handlerPath)]);
+  exec("update-desktop-database", [dirname51(handlerPath)]);
   return {
     ok: registered,
     platform: "linux",
@@ -281467,13 +284079,13 @@ function uninstallLinux(options) {
     return { ok: false, platform: "linux", action: "failed", path: handlerPath, detail: `${handlerPath} was not written by Olympus, so it was left alone.` };
   }
   rmSync16(handlerPath, { force: true });
-  exec("update-desktop-database", [dirname50(handlerPath)]);
+  exec("update-desktop-database", [dirname51(handlerPath)]);
   return { ok: true, platform: "linux", action: "removed", path: handlerPath };
 }
 function forgetLinuxDefault(mimeappsPath) {
   if (!existsSync45(mimeappsPath))
     return false;
-  const stat = lstatSync25(mimeappsPath);
+  const stat = lstatSync26(mimeappsPath);
   if (!stat.isFile() || stat.isSymbolicLink())
     return false;
   const text = readFileSync41(mimeappsPath, "utf8");
@@ -281499,9 +284111,9 @@ function ownedHandler(platform, handlerPath) {
   try {
     if (platform === "darwin") {
       const plist = join59(handlerPath, "Contents", "Info.plist");
-      return lstatSync25(handlerPath).isDirectory() && readFileSync41(plist, "utf8").includes(OPEN_HANDLER_BUNDLE_ID);
+      return lstatSync26(handlerPath).isDirectory() && readFileSync41(plist, "utf8").includes(OPEN_HANDLER_BUNDLE_ID);
     }
-    const stat = lstatSync25(handlerPath);
+    const stat = lstatSync26(handlerPath);
     return stat.isFile() && !stat.isSymbolicLink() && readFileSync41(handlerPath, "utf8").includes(OPEN_HANDLER_MARK);
   } catch {
     return false;
@@ -281512,7 +284124,7 @@ function defaultProgram() {
   return { runtimePath: process.execPath, entryPath: join59(root, "dist", "cli.js"), workingDirectory: root };
 }
 function programWorkingDirectory(program) {
-  return program.workingDirectory ?? dirname50(dirname50(program.entryPath));
+  return program.workingDirectory ?? dirname51(dirname51(program.entryPath));
 }
 function refuseForeignUser(platform, options) {
   if (platform !== "darwin" && platform !== "linux")
@@ -281588,26 +284200,24 @@ init_worker_cli_launcher();
 init_worker_transport();
 init_atomic_file();
 init_boot_progress();
-init_data_root_snapshot();
 init_engine_heartbeat();
 init_upgrade_store_copies();
-init_put_back_manifest();
 init_engine_store_copies();
 import { createHash as createHash90 } from "node:crypto";
 import { spawnSync as spawnSync18 } from "node:child_process";
-import { existsSync as existsSync92, lstatSync as lstatSync47, mkdirSync as mkdirSync58, readFileSync as readFileSync82 } from "node:fs";
+import { existsSync as existsSync94, lstatSync as lstatSync47, mkdirSync as mkdirSync58, readFileSync as readFileSync82 } from "node:fs";
 import { homedir as homedir36, platform as osPlatform4 } from "node:os";
 import { dirname as dirname95, isAbsolute as isAbsolute36, join as join125 } from "node:path";
 
 // src/core/lifecycle-artifact.ts
 init_atomic_file();
 init_operation_error();
-import { createHash as createHash89, randomUUID as randomUUID33 } from "node:crypto";
+import { createHash as createHash89, randomUUID as randomUUID34 } from "node:crypto";
 import { spawnSync as spawnSync17 } from "node:child_process";
 import {
   chmodSync as chmodSync37,
   closeSync as closeSync33,
-  existsSync as existsSync90,
+  existsSync as existsSync92,
   fsyncSync as fsyncSync9,
   lstatSync as lstatSync45,
   mkdtempSync as mkdtempSync5,
@@ -281616,7 +284226,7 @@ import {
   readdirSync as readdirSync29,
   renameSync as renameSync18,
   rmSync as rmSync38,
-  statSync as statSync41,
+  statSync as statSync42,
   writeFileSync as writeFileSync23
 } from "node:fs";
 import { tmpdir as tmpdir13 } from "node:os";
@@ -281670,7 +284280,7 @@ function prepareWorkerUpgradeArtifact(options) {
 `);
       makeVersionTreeReadOnly(staging);
       syncVersionTree(staging);
-      if (existsSync90(workingDirectory)) {
+      if (existsSync92(workingDirectory)) {
         assertManagedVersionRoot(workingDirectory, artifactSha256);
         const expectedDigest = versionTreeDigest(staging);
         const existingMode = lstatSync45(workingDirectory).mode & 511;
@@ -281683,13 +284293,13 @@ function prepareWorkerUpgradeArtifact(options) {
       publishVersionTree(staging, workingDirectory, versionsDir);
       return { artifactSha256, packageVersion, workingDirectory };
     } catch (error) {
-      if (existsSync90(staging))
+      if (existsSync92(staging))
         removeStagingTree(staging);
       if (error instanceof OperationError)
         throw error;
       throw new OperationError("config_error", "Could not prepare the Olympus upgrade artifact.", error instanceof Error ? error.message : undefined);
     } finally {
-      if (options.dryRun && existsSync90(staging))
+      if (options.dryRun && existsSync92(staging))
         rmSync38(staging, { recursive: true, force: true });
     }
   } finally {
@@ -281858,7 +284468,7 @@ function makeVersionTreeReadOnly(root) {
     }
   }
   chmodSync37(root, 448);
-  const rootStats = statSync41(root);
+  const rootStats = statSync42(root);
   if (!rootStats.isDirectory() || (rootStats.mode & 511) !== 448) {
     throw new OperationError("config_error", "Managed upgrade version root changed during staging.");
   }
@@ -281906,8 +284516,8 @@ function publishVersionTree(staging, workingDirectory, versionsDir, syncDirector
   let replacedPath;
   let published = false;
   try {
-    if (existsSync90(workingDirectory)) {
-      replacedPath = join123(versionsDir, `.olympus-replaced-${basename21(workingDirectory)}-${randomUUID33()}`);
+    if (existsSync92(workingDirectory)) {
+      replacedPath = join123(versionsDir, `.olympus-replaced-${basename21(workingDirectory)}-${randomUUID34()}`);
       renameSync18(workingDirectory, replacedPath);
       syncDirectory(versionsDir);
     }
@@ -281918,9 +284528,9 @@ function publishVersionTree(staging, workingDirectory, versionsDir, syncDirector
     syncDirectory(versionsDir);
   } catch (error) {
     try {
-      if (published && existsSync90(workingDirectory))
+      if (published && existsSync92(workingDirectory))
         removeStagingTree(workingDirectory);
-      if (replacedPath && existsSync90(replacedPath) && !existsSync90(workingDirectory)) {
+      if (replacedPath && existsSync92(replacedPath) && !existsSync92(workingDirectory)) {
         renameSync18(replacedPath, workingDirectory);
       }
       syncDirectory(versionsDir);
@@ -281931,7 +284541,7 @@ function publishVersionTree(staging, workingDirectory, versionsDir, syncDirector
     }
     throw error;
   }
-  if (replacedPath && existsSync90(replacedPath)) {
+  if (replacedPath && existsSync92(replacedPath)) {
     removeStagingTree(replacedPath);
     syncDirectory(versionsDir);
   }
@@ -281949,8 +284559,8 @@ function removeStagingTree(root) {
 init_atomic_file();
 init_file_lease();
 init_operation_error();
-import { randomUUID as randomUUID34 } from "node:crypto";
-import { existsSync as existsSync91, linkSync as linkSync5, lstatSync as lstatSync46, readFileSync as readFileSync81 } from "node:fs";
+import { randomUUID as randomUUID35 } from "node:crypto";
+import { existsSync as existsSync93, linkSync as linkSync5, lstatSync as lstatSync46, readFileSync as readFileSync81 } from "node:fs";
 import { join as join124 } from "node:path";
 function acquireLifecycleMutationLock(homeDir, action, now = () => new Date) {
   const dir = join124(homeDir, ".local", "state", "olympus", "lifecycle");
@@ -281965,7 +284575,7 @@ function acquireLifecycleMutationLock(homeDir, action, now = () => new Date) {
       schema_version: 1,
       pid: process.pid,
       process_instance: ownerProcessInstance,
-      nonce: randomUUID34(),
+      nonce: randomUUID35(),
       action,
       started_at: now().toISOString()
     };
@@ -281980,7 +284590,7 @@ function acquireLifecycleMutationLock(homeDir, action, now = () => new Date) {
         release: () => releaseLifecycleMutationLock(lockPath, owner.nonce)
       };
     } catch (error) {
-      if (existsSync91(candidate))
+      if (existsSync93(candidate))
         removeFileDurablySync(candidate);
       if (!isAlreadyExists(error))
         throw error;
@@ -281993,7 +284603,7 @@ function acquireLifecycleMutationLock(homeDir, action, now = () => new Date) {
         }
         removeFileDurablySync(lockPath);
         const staleCandidate = join124(dir, `mutation-owner-${current.nonce}.tmp`);
-        if (existsSync91(staleCandidate))
+        if (existsSync93(staleCandidate))
           removeFileDurablySync(staleCandidate);
       }, {
         acquireTimeoutMs: 1000,
@@ -282424,14 +285034,7 @@ function rollbackTransaction(options, intent) {
   const paths = transactionPaths(options.homeDir);
   if (intent.touchServiceManager)
     quiesceAttemptedWorker(options);
-  const restored = intent.touchServiceManager ? withStoppedEngine(lifecycleEnv2(options), "put back", () => {
-    const log = options.progressLine ?? ((line) => process.stderr.write(`${line}
-`));
-    log(putBackManifest(lifecycleEnv2(options), "before put-back"));
-    const back = putDataRootBack(lifecycleEnv2(options));
-    log(putBackManifest(lifecycleEnv2(options), "after put-back"));
-    return back;
-  }) : [];
+  const restored = intent.touchServiceManager ? restoreEngineStores(lifecycleEnv2(options), options.progressLine ? { log: options.progressLine } : {}) : [];
   restoreManagedFile(options.homeDir, transaction.unit_path, paths.unitBackup, transaction.previous_unit_present, transaction.previous_unit_sha256);
   restoreManagedFile(options.homeDir, transaction.env_path, paths.envBackup, transaction.previous_env_present, transaction.previous_env_sha256);
   if (transaction.previous_launcher_present !== undefined) {
@@ -282483,9 +285086,7 @@ function copyStoresForUpgrade(options, stopFirst) {
     runWorkerServiceAction("stop", serviceActionOptions(options));
   }
   try {
-    withStoppedEngine(lifecycleEnv2(options), "copied", () => {
-      snapshotDataRoot(lifecycleEnv2(options), { log: progressLine });
-    });
+    copyEngineStores(lifecycleEnv2(options), { log: progressLine });
   } finally {
     hold?.release();
   }
@@ -282564,7 +285165,7 @@ function readTransaction(options) {
   const homeDir = validateHomeDir(options.homeDir ?? homedir36());
   const paths = transactionPaths(homeDir);
   assertTransactionParentSafety(homeDir, paths);
-  if (!existsSync92(paths.transaction))
+  if (!existsSync94(paths.transaction))
     return;
   assertRegularFile2(paths.transaction, "lifecycle transaction");
   let value;
@@ -282594,14 +285195,14 @@ function clearTransaction(options) {
   const paths = transactionPaths(validateHomeDir(options.homeDir ?? homedir36()));
   assertTransactionParentSafety(validateHomeDir(options.homeDir ?? homedir36()), paths);
   for (const path of [paths.unitBackup, paths.envBackup, paths.launcherBackup, paths.transaction]) {
-    if (!existsSync92(path))
+    if (!existsSync94(path))
       continue;
     assertRegularFile2(path, "lifecycle transaction artifact");
     removeFileDurablySync(path);
   }
 }
 function readManagedFileSnapshot(path) {
-  if (!existsSync92(path)) {
+  if (!existsSync94(path)) {
     return;
   }
   assertRegularFile2(path, "managed lifecycle file");
@@ -282609,7 +285210,7 @@ function readManagedFileSnapshot(path) {
 }
 function writeSnapshotBackup(path, text) {
   if (text === undefined) {
-    if (existsSync92(path)) {
+    if (existsSync94(path)) {
       assertRegularFile2(path, "lifecycle backup");
       removeFileDurablySync(path);
     }
@@ -282619,7 +285220,7 @@ function writeSnapshotBackup(path, text) {
 }
 function restoreManagedFile(homeDir, path, backupPath, previousPresent, expectedDigest) {
   if (!previousPresent) {
-    if (existsSync92(path)) {
+    if (existsSync94(path)) {
       assertRegularFile2(path, "managed lifecycle file");
       removeFileDurablySync(path);
     }
@@ -282812,7 +285413,7 @@ function workerReadinessPort(options) {
   if (options.port !== undefined)
     return validateWorkerReadinessPort(options.port);
   const envPath = options.envPath ?? workerServicePaths(options.platform ?? "linux", options.homeDir).envPath;
-  if (!existsSync92(envPath))
+  if (!existsSync94(envPath))
     return 8010;
   assertRegularFile2(envPath, "worker environment");
   const line = /^OLYMPUS_EMAIL_SOURCE_PORT=(.*)$/m.exec(readFileSync82(envPath, "utf8"))?.[1];
@@ -283116,7 +285717,7 @@ init_olympus_layout();
 init_first_run_privacy();
 init_privacy_language();
 init_messaging_runtime();
-import { existsSync as existsSync100, readFileSync as readFileSync87 } from "node:fs";
+import { existsSync as existsSync101, readFileSync as readFileSync87 } from "node:fs";
 import { randomBytes as randomBytes28 } from "node:crypto";
 import { spawnSync as spawnSync19 } from "node:child_process";
 import { homedir as homedir37 } from "node:os";
@@ -283220,7 +285821,7 @@ async function runSetupWizard(options) {
     managedWorker = installManagedWorkerFiles(workerOptions(options, workerToken));
   } else {
     let pending = false;
-    if (existsSync100(sovereigntyPath)) {
+    if (existsSync101(sovereigntyPath)) {
       try {
         pending = isPendingPrivacyPolicy(JSON.parse(readFileSync87(sovereigntyPath, "utf8")));
       } catch {}
@@ -283427,7 +286028,7 @@ init_engine_brief();
 init_engine_service();
 import { spawn as spawn10 } from "node:child_process";
 import { createInterface as createInterface2 } from "node:readline";
-import { existsSync as existsSync103, readFileSync as readFileSync89 } from "node:fs";
+import { existsSync as existsSync104, readFileSync as readFileSync89 } from "node:fs";
 import { homedir as homedir40 } from "node:os";
 import { dirname as dirname102, join as join130 } from "node:path";
 
@@ -283436,9 +286037,9 @@ init_engine_service();
 init_operation_error();
 init_package_root();
 import { spawnSync as spawnSync20 } from "node:child_process";
-import { existsSync as existsSync102, lstatSync as lstatSync49, mkdirSync as mkdirSync63, mkdtempSync as mkdtempSync6, renameSync as renameSync22, rmSync as rmSync41 } from "node:fs";
+import { existsSync as existsSync103, lstatSync as lstatSync49, mkdirSync as mkdirSync63, mkdtempSync as mkdtempSync6, renameSync as renameSync22, rmSync as rmSync41 } from "node:fs";
 import { homedir as homedir39 } from "node:os";
-import { join as join129, resolve as resolve28 } from "node:path";
+import { join as join129, resolve as resolve31 } from "node:path";
 var MACOS_SIGNING_IDENTITY_ENV = "OLYMPUS_MACOS_SIGNING_IDENTITY";
 var MACOS_HELPER_TEAM_ENV = "OLYMPUS_MACOS_HELPER_TEAM_ID";
 function run(exec, command, args, env) {
@@ -283463,7 +286064,7 @@ function installEngineHelper(options = {}) {
     throw new OperationError("invalid_params", "The Olympus helper app is for macOS. Linux does not need one.");
   }
   const env = options.env ?? process.env;
-  const homeDir = resolve28(options.homeDir ?? homedir39());
+  const homeDir = resolve31(options.homeDir ?? homedir39());
   const paths = enginePaths(homeDir);
   const target = paths.helperAppPath;
   mkdirSync63(paths.appSupportDir, { recursive: true, mode: 448 });
@@ -283474,8 +286075,8 @@ function installEngineHelper(options = {}) {
     let built = false;
     let candidate;
     if (options.from !== undefined) {
-      candidate = resolve28(options.from);
-      if (!existsSync102(join129(candidate, "Contents", "Info.plist"))) {
+      candidate = resolve31(options.from);
+      if (!existsSync103(join129(candidate, "Contents", "Info.plist"))) {
         throw new OperationError("invalid_params", `${candidate} is not an app bundle.`);
       }
     } else {
@@ -283485,7 +286086,7 @@ function installEngineHelper(options = {}) {
       }
       const root = options.packageRoot ?? olympusPackageRoot();
       const script = join129(root, "scripts", "build-macos-helper.sh");
-      if (!existsSync102(script) || !existsSync102(join129(root, "native", "macos-engine-host", "main.c"))) {
+      if (!existsSync103(script) || !existsSync103(join129(root, "native", "macos-engine-host", "main.c"))) {
         throw new OperationError("config_error", "This install does not include the helper app source.", "Pass --from <signed app>, or build from an Olympus source checkout.");
       }
       const result = run(options.exec, script, ["--out", staging], { ...process.env, ...env, [MACOS_SIGNING_IDENTITY_ENV]: identity });
@@ -283516,10 +286117,10 @@ function installEngineHelper(options = {}) {
       throw new OperationError("config_error", `The helper app is signed by team ${details.teamId ?? "none"}, not the expected team.`);
     }
     const executable = join129(candidate, "Contents", "MacOS", ENGINE_HELPER_EXECUTABLE);
-    if (!existsSync102(executable)) {
+    if (!existsSync103(executable)) {
       throw new OperationError("config_error", `The helper app has no ${ENGINE_HELPER_EXECUTABLE} program.`);
     }
-    const replaced = existsSync102(target);
+    const replaced = existsSync103(target);
     if (replaced && lstatSync49(target).isSymbolicLink()) {
       throw new OperationError("config_error", `${target} is a link; remove it and run this again.`);
     }
@@ -283553,7 +286154,7 @@ function installEngineHelper(options = {}) {
       replaced
     };
   } finally {
-    if (existsSync102(target) || !existsSync102(aside))
+    if (existsSync103(target) || !existsSync103(aside))
       rmSync41(staging, { recursive: true, force: true });
   }
 }
@@ -283637,7 +286238,7 @@ async function runEngineCommand(args, deps = {}) {
       ...options
     });
     const paths = engineServicePaths({ ...service, homeDir: deps.homeDir ?? homedir40() });
-    if (!existsSync103(paths.plistPath)) {
+    if (!existsSync104(paths.plistPath)) {
       return { ...helper, engine: "not_installed", next: "Run olympus engine install; the engine will start through the Olympus helper app." };
     }
     const current = installedProgram(paths.plistPath);
@@ -283957,7 +286558,7 @@ function expectNoArgs(command, args) {
 // src/core/engine-bun.ts
 init_operation_error();
 import { spawnSync as spawnSync21 } from "node:child_process";
-import { existsSync as existsSync104 } from "node:fs";
+import { existsSync as existsSync105 } from "node:fs";
 import { homedir as homedir41 } from "node:os";
 import { isAbsolute as isAbsolute37, join as join131 } from "node:path";
 var ENGINE_BUN_MINIMUM = "1.4.4";
@@ -283999,7 +286600,7 @@ function resolveEngineBun(input = {}) {
   for (const candidate of candidates) {
     if (!candidate || !isAbsolute37(candidate) || seen.some((entry) => entry.startsWith(`${candidate} `)))
       continue;
-    if (!existsSync104(candidate)) {
+    if (!existsSync105(candidate)) {
       if (input.bunBin)
         seen.push(`${candidate} (missing)`);
       continue;
@@ -284097,7 +286698,7 @@ async function runZkapiFundingDateCommand(args, deps = {}) {
 }
 var ZKAPI_FUNDING_DATE_USAGE = "olympus zkapi funding-date <YYYY-MM-DD>";
 function olympusCommandHint2(input2 = {}) {
-  return olympusCommandHint({ ...input2, pluginBin: input2.pluginBin ?? resolve34(olympusPackageRoot(), "bin", "olympus") });
+  return olympusCommandHint({ ...input2, pluginBin: input2.pluginBin ?? resolve37(olympusPackageRoot(), "bin", "olympus") });
 }
 var PUBLIC_CLI_COMMAND_NAMES = new Set(V0_4_PUBLIC_CLI_COMMANDS);
 var ZKAPI_TEST_WRITER_USAGE = "olympus zkapi test-writer [--level unnamed|general] [--base-url <url> --model <name> [--secret-ref <ref>]] [--json]";
@@ -285090,7 +287691,7 @@ function parseEvalShardExportArgs(args) {
     account,
     approved_scope_key: approvedScopeKey,
     count,
-    out_dir: resolve34(out),
+    out_dir: resolve37(out),
     ...docTypes ? { doc_types: docTypes } : {},
     dry_run: !execute
   };
@@ -285140,7 +287741,7 @@ function parseOwnerTierOverrideArgs(args) {
     throw new OperationError("invalid_params", "Owner tier override requires --reason <string>.");
   let raw;
   try {
-    raw = readFileSync116(resolve34(input2), "utf8");
+    raw = readFileSync116(resolve37(input2), "utf8");
   } catch (error) {
     throw new OperationError("invalid_params", `Owner tier override --input file could not be read: ${error.message}`);
   }
@@ -285498,14 +288099,14 @@ function parseXReconcileRecoveryArgs(args) {
   }
   return {
     account,
-    ...stateDbPath ? { stateDbPath: resolve34(stateDbPath) } : {},
+    ...stateDbPath ? { stateDbPath: resolve37(stateDbPath) } : {},
     execute,
     ...expectedStagedDigestSha256 ? { expectedStagedDigestSha256 } : {}
   };
 }
 function runXReconcileRecovery(options) {
   const stateDbPath = options.stateDbPath ?? resolvedRawPath("x.bookmarks", "x-reconcile.sqlite");
-  if (stateDbPath !== ":memory:" && !existsSync129(stateDbPath)) {
+  if (stateDbPath !== ":memory:" && !existsSync130(stateDbPath)) {
     if (!options.execute)
       return xBookmarksRecoveryStatusWithoutState();
     throw new Error("X reconciliation has no staged run to recover.");
@@ -285722,7 +288323,7 @@ function engineRunsWorkerHere(options) {
   if (platform !== "darwin" && platform !== "linux")
     return false;
   const env = options.homeDir ? { HOME: options.homeDir } : process.env;
-  return existsSync129(engineServicePaths({ env, platform }).plistPath);
+  return existsSync130(engineServicePaths({ env, platform }).plistPath);
 }
 function linuxDesktopOpenHandler(action, options) {
   if ((options.platform ?? process.platform) !== "linux")
@@ -285779,7 +288380,7 @@ async function superviseWorkerServiceSplitHere(env) {
   await superviseWorkerServiceSplit({
     env,
     runtimePath: process.execPath,
-    executablePath: resolve34(process.argv[1]),
+    executablePath: resolve37(process.argv[1]),
     authToken
   });
 }
@@ -286471,7 +289072,7 @@ async function runDataCommand(args) {
     const options = parseDataOptions(args.slice(1));
     if (!options.output.trim())
       throw new OperationError("invalid_params", "--output must be provided.");
-    const destination = resolve34(options.output.trim());
+    const destination = resolve37(options.output.trim());
     return runLocallyOrThroughWorker(() => exportOlympusData({
       destination,
       ...options.sourceId ? { sourceId: options.sourceId } : {}
@@ -286488,7 +289089,7 @@ async function runDataCommand(args) {
     const options = parseDataOptions(args.slice(1));
     if (!options.output.trim())
       throw new OperationError("invalid_params", "--output must be provided.");
-    const folder = resolve34(options.output.trim());
+    const folder = resolve37(options.output.trim());
     const passphrase = options.passphraseStdin ? await readBackupPassphrase() : undefined;
     const key = passphrase !== undefined ? deriveBackupKey(passphrase) : undefined;
     return backupOlympusData({
@@ -286502,7 +289103,7 @@ async function runDataCommand(args) {
     if (!options.input.trim())
       throw new OperationError("invalid_params", "--input must be provided.");
     const passphrase = options.passphraseStdin ? await readBackupPassphrase() : undefined;
-    return runLocallyOrThroughWorker(() => restoreOlympusBackup({ input: resolve34(options.input.trim()), dryRun: options.dryRun, ...passphrase !== undefined ? { passphrase } : {} }), undefined);
+    return runLocallyOrThroughWorker(() => restoreOlympusBackup({ input: resolve37(options.input.trim()), dryRun: options.dryRun, ...passphrase !== undefined ? { passphrase } : {} }), undefined);
   }
   if (command === "delete") {
     const options = parseDataOptions(args.slice(1));
@@ -286647,7 +289248,7 @@ function runConnectionsCommand(args, env = process.env) {
       throw new OperationError("invalid_params", "Usage: olympus connections requests");
     const dbPath = resolveRemoteConnectionsDbPathForCli(env);
     let apps = [];
-    if (existsSync129(dbPath)) {
+    if (existsSync130(dbPath)) {
       let store;
       try {
         store = openRemoteConnectionStore(dbPath);

@@ -30,7 +30,7 @@ import {
   type XBookmarksLiveSyncConfig,
 } from '../src/workers/x-bookmarks/index.ts';
 import { X_BOOKMARKS_STORE_PLACEMENT } from '../src/workers/x-bookmarks/connector.ts';
-import { xBookmarksTestTierSet } from './helpers/lane-tier-sets.ts';
+import { xBookmarksRecoveryTestTierSet, xBookmarksTestTierSet } from './helpers/lane-tier-sets.ts';
 
 const HANDLE = 'x.bookmarks.personal';
 const ACCOUNT = 'personal';
@@ -141,6 +141,7 @@ describe('X bookmarks content recovery grant fence', () => {
     }), { fetchContent: true });
     const recoveryAs = (userId: string) => createXBookmarksContentRecoveryHandler({
       store,
+      tierSet: xBookmarksRecoveryTestTierSet(store),
       usageStore: f.usage,
       account: ACCOUNT,
       userId,
@@ -213,6 +214,7 @@ describe('X runs read only as the account their grant is for', () => {
 
     const receipt = await createXBookmarksContentRecoveryHandler({
       store,
+      tierSet: xBookmarksRecoveryTestTierSet(store),
       usageStore: f.usage,
       account: ACCOUNT,
       userId: USER_ID,

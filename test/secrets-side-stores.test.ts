@@ -23,10 +23,13 @@ import { TierSnifferService } from '../src/workers/classification/sniffer-servic
 import type { AnalystModel } from '../src/core/analyst.ts';
 import type { SnifferLane } from '../src/workers/classification/sniffer-lane.ts';
 import { runTierSet } from '../src/workers/classification/tier-cli.ts';
+import { createOwnerTierItems } from '../src/workers/classification/tier-owner-items.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
+import { contentDigestReason } from '../src/workers/classification/tier-classifier.ts';
 import { TIER_LEDGER_SQLITE_STORE_ID, tierSnifferPathForLedger } from '../src/workers/classification/tier-ledger-path.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { applyOwnerOverrides } from '../src/workers/connector-store/tier-override-settle.ts';
+import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { secretFencedSniffer } from '../src/workers/connector-store/tier-placement.ts';
 import { forgetSecretInSideStores, retireSecretRedactions, retrySecretSideStoreDebts, settleUntrackedSecretsCopy } from '../src/workers/connector-store/secrets-disposition.ts';
 import type { AppRequestRecord, ReleasedItem } from '../src/core/app-release-capture.ts';
@@ -44,6 +47,7 @@ import {
   ACCOUNT,
   CORPORA,
   FIXTURE_PLACEMENT,
+  JUDGED_PERSONAL_SNIFFER,
   PROVIDER,
   fixtureConnector,
   fixtureLocalId,
@@ -522,39 +526,195 @@ describe('the extraction job ledger keeps no name of an item that becomes Secret
     expect(jobs.get(again!)?.ref.name).toBeUndefined();
   });
 
-  test('an unchanged file restored by a lower tier is read again once its copy is back: its indexed job keeps its name and stores artifacts', async () => {
+  test('an unchanged file restored by a Personal override is read again once its copy is back: its indexed job keeps its name and stores artifacts', async () => {
     const dir = workspace('olympus-secret-side-jobs-');
     const fx = fixture(dir);
     const jobs = jobStore(dir);
-    fx.ledger.setOverride(identityOf('keys'), { kind: 'not_secret' });
-    await fx.set.sync(fixtureConnector(() => [KEYS]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
-    const [job] = jobs.enqueue({ refs: [ref(KEYS)], extractorKind: 'text', extractorVersion: 'v1' }).jobRefs.map((entry) => entry.jobId);
-    const sheet = { artifactKind: 'sheet' as const, structuralRef: { kind: 'sheet' as const, sheet: 'deploy keys' }, chars: 40 };
+    await fx.set.sync(fixtureConnector(() => [GARDEN]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    const [job] = jobs.enqueue({ refs: [ref(GARDEN)], extractorKind: 'text', extractorVersion: 'v1' }).jobRefs.map((entry) => entry.jobId);
+    const sheet = { artifactKind: 'sheet' as const, structuralRef: { kind: 'sheet' as const, sheet: 'garden plan' }, chars: 40 };
     jobs.lease({ ...LANE_KEY, workerId: 'worker-1' });
     jobs.record({ jobId: job!, status: 'indexed', derivations: [sheet] });
-    fx.ledger.setOverride(identityOf('keys'), { kind: 'tier', tier: 'secrets' });
+    fx.ledger.setOverride(identityOf('garden'), { kind: 'tier', tier: 'secrets' });
     expect(applyOwnerOverrides({ set: fx.set })).toMatchObject({ secrets: 1 });
-    expect(jobs.artifacts(LANE_KEY.corpusId, fixtureLocalId(KEYS))).toEqual([]);
+    expect(jobs.artifacts(LANE_KEY.corpusId, fixtureLocalId(GARDEN))).toEqual([]);
 
-    // Restored by a lower tier through the worker's pass, before any listing:
-    // nothing to move, so no move is queued that could never land.
-    fx.ledger.setOverride(identityOf('keys'), { kind: 'tier', tier: 'private' });
+    // The body is read and screened when the next listing brings it back.
+    fx.ledger.setOverride(identityOf('garden'), { kind: 'tier', tier: 'private' });
     applyOwnerOverrides({ set: fx.set });
-    expect(fx.ledger.getCurrent(identityOf('keys'))).toMatchObject({ state: 'current', contentTier: 'private' });
+    expect(fx.ledger.getCurrent(identityOf('garden'))).toMatchObject({ state: 'current', contentTier: 'secrets' });
     expect(fx.ledger.listMoving()).toEqual([]);
     // Not leasable yet: no restored copy exists for it to land in.
     expect(jobs.get(job!)).toMatchObject({ status: 'indexed' });
     expect(jobs.lease({ ...LANE_KEY, workerId: 'worker-1' }).leasedJobs).toEqual([]);
     // The unchanged listing writes the copy; its plan pass enqueues the same
     // ref: the same job, named again and queued to be read again.
-    await fx.set.sync(fixtureConnector(() => [KEYS]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
-    expect(fx.stores.internal!.itemPresence(identityOf('keys')).active).toBe(true);
-    const [same] = jobs.enqueue({ refs: [ref(KEYS)], extractorKind: 'text', extractorVersion: 'v1' }).jobRefs.map((entry) => entry.jobId);
+    await fx.set.sync(fixtureConnector(() => [GARDEN]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    expect(fx.stores.internal!.itemPresence(identityOf('garden')).active).toBe(true);
+    const [same] = jobs.enqueue({ refs: [ref(GARDEN)], extractorKind: 'text', extractorVersion: 'v1' }).jobRefs.map((entry) => entry.jobId);
     expect(same).toBe(job);
-    expect(jobs.get(job!)).toMatchObject({ status: 'queued', ref: { name: KEYS.name } });
+    expect(jobs.get(job!)).toMatchObject({ status: 'queued', ref: { name: GARDEN.name } });
     const [lease] = jobs.lease({ ...LANE_KEY, workerId: 'worker-1' }).leasedJobs;
     expect(lease?.jobId).toBe(job);
     expect(jobs.record({ jobId: job!, status: 'indexed', leaseToken: lease!.leaseToken, derivations: [sheet] }).artifactsRecorded).toBe(1);
+  });
+
+  test.each(['personal', 'judge'] as const)('a changed Personal override waits in Private for the owner to choose %s', async (choice) => {
+    const fx = fixture(workspace('olympus-secret-override-'));
+    const identity = identityOf('garden');
+    const owner = createOwnerTierItems({ storePaths: Object.values(fx.paths) });
+    const classification = spyOn(fx.set, 'classification').mockReturnValue({ sniffer: JUDGED_PERSONAL_SNIFFER });
+    cleanups.push(() => classification.mockRestore());
+    let row = GARDEN;
+    const sync = () => fx.set.sync(fixtureConnector(() => [row]), {
+      fetchContent: true, placement: FIXTURE_PLACEMENT,
+    });
+    await sync();
+    fx.ledger.setOverride(identity, { kind: 'tier', tier: 'private' });
+    applyOwnerOverrides({ set: fx.set });
+    row = { ...GARDEN, name: `Garden ${FAKE_AWS_KEY}`, version: 'v2', text: `The orchard marker came next to a credential ${FAKE_AWS_KEY}.` };
+    await sync();
+    expect(fx.ledger.getCurrent(identity)).toMatchObject({ state: 'current', contentTier: 'secure' });
+    expect(fx.ledger.getOverride(identity)).toMatchObject({ kind: 'tier', tier: 'private' });
+    expect(fx.stores.internal?.searchItems('orchard', 10) ?? []).toEqual([]);
+    expect(fx.stores.secure_local?.exportItemCopy(identity)?.chunks.map(chunk => chunk.boundedText).join('')).toBe(row.text!);
+    applyOwnerOverrides({ set: fx.set });
+    const [item] = owner.find({ recent: true, filter: 'override_review', withPreview: true }).items;
+    expect(item?.override_review?.kinds).toEqual(['aws_access_key_id']);
+    expect(fx.ledger.readSteps(fx.ledger.ownerOverrideReviewKindsSteps())).toEqual(item!.override_review!.kinds);
+    expect(item?.preview).toBeUndefined();
+    expect(item?.title).toBeNull();
+    expect(item?.location).toBeNull();
+    const reviewDigest = item!.override_review!.digest;
+    row = { ...row, version: 'v3', text: `Updated ${row.text}` };
+    await sync();
+    expect(owner.set({ itemId: item!.item_id, choice, allowLower: true, reviewDigest })).toMatchObject({ ok: false, code: 'override_review_changed' });
+    const [updated] = owner.find({ recent: true, filter: 'override_review' }).items;
+    expect(owner.set({ itemId: item!.item_id, choice, allowLower: true, reviewDigest: updated!.override_review!.digest })).toMatchObject({ ok: true });
+    expect(fx.ledger.readSteps(fx.ledger.ownerOverrideReviewKindsSteps())).toEqual([]);
+    applyOwnerOverrides({ set: fx.set });
+    if (choice === 'personal') {
+      const record = fx.ledger.getCurrent(identity)!;
+      expect(record).toMatchObject({ state: 'moving', targetContentTier: 'private' });
+      await moveTieredItem({ set: fx.set, identity, target: { metadataTier: 'private', contentTier: 'private' }, expectedGeneration: record.generation });
+      expect(fx.ledger.getCurrent(identity)).toMatchObject({ state: 'current', contentTier: 'private' });
+      expect(fx.stores.internal?.searchItems('orchard', 10)).toHaveLength(1);
+      expect(owner.find({ recent: true, filter: 'override_review' }).items).toEqual([]);
+      row = { ...row, version: 'v4', text: `Further changes ${row.text}` };
+      await sync();
+      expect(fx.ledger.getCurrent(identity)).toMatchObject({ state: 'current', contentTier: 'secure' });
+      expect(fx.ledger.getOverride(identity)).toMatchObject({ kind: 'tier', tier: 'private', confirmedDigest: updated!.override_review!.digest });
+      expect(owner.find({ recent: true, filter: 'override_review' }).items).toHaveLength(1);
+    } else {
+      expect(fx.ledger.getOverride(identity)).toBeUndefined();
+      expect(fx.ledger.itemIsSecret(identity)).toBe(true);
+      expect(owner.find({ recent: true, filter: 'override_review' }).items).toEqual([]);
+    }
+  });
+
+  test.each([false, true])('unchanged Personal text shows a finding without a review (legacy override: %s)', async (legacy) => {
+    const fx = fixture(workspace('olympus-override-finding-'));
+    const identity = identityOf('garden');
+    const owner = createOwnerTierItems({ storePaths: Object.values(fx.paths) });
+    const classification = spyOn(fx.set, 'classification').mockReturnValue({ sniffer: JUDGED_PERSONAL_SNIFFER });
+    cleanups.push(() => classification.mockRestore());
+    const text = `${GARDEN.text} Example key ${FAKE_AWS_KEY}.`;
+    fx.ledger.setOverride(identity, { kind: 'not_secret' });
+    await fx.set.sync(fixtureConnector(() => [{ ...GARDEN, text }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    fx.ledger.setOverride(identity, { kind: 'tier', tier: 'private' });
+    if (legacy) {
+      const db = new Database(fx.ledger.dbPath);
+      try { db.query("UPDATE tier_overrides SET override_json = json_remove(override_json, '$.setDigest')").run(); }
+      finally { db.close(); }
+    }
+    applyOwnerOverrides({ set: fx.set });
+    expect(fx.ledger.getOverride(identity)).toMatchObject({ setDigest: contentDigestReason(text) });
+    expect(fx.ledger.getCurrent(identity)).toMatchObject({ state: 'current', contentTier: 'private' });
+    expect(owner.find({ recent: true, filter: 'override_review', withPreview: true }).items).toEqual([]);
+    expect(fx.ledger.readSteps(fx.ledger.ownerOverrideReviewKindsSteps())).toEqual([]);
+    const [item] = owner.find({ recent: true, filter: 'changed', withPreview: true }).items;
+    expect(item).toMatchObject({ tier: 'Personal', override_finding_kinds: ['aws_access_key_id'] });
+    expect(item?.override_review).toBeUndefined();
+    expect(JSON.stringify(item)).not.toContain(FAKE_AWS_KEY);
+  });
+
+  test('the first body supplies a missing Personal override receipt', async () => {
+    const fx = fixture(workspace('olympus-override-first-body-'));
+    const identity = identityOf('garden');
+    fx.ledger.setOverride(identity, { kind: 'tier', tier: 'private' });
+    const text = `${GARDEN.text} Example key ${FAKE_AWS_KEY}.`;
+    const reader = new TierLedger({ dbPath: fx.ledger.dbPath, readOnly: true });
+    try {
+      expect(reader.classificationRead(identity, text).override).toEqual({ kind: 'tier', tier: 'private' });
+    } finally {
+      reader.close();
+    }
+    const sync = (body: string, version: string) => fx.set.sync(
+      fixtureConnector(() => [{ ...GARDEN, text: body, version }]), { fetchContent: true, placement: FIXTURE_PLACEMENT },
+    );
+    await sync(text, 'v1');
+    expect(fx.ledger.getOverride(identity)).toMatchObject({ setDigest: contentDigestReason(text) });
+    expect(fx.ledger.getCurrent(identity)).toMatchObject({ state: 'current', contentTier: 'private' });
+    await sync(`Updated ${text}`, 'v2');
+    expect(fx.ledger.ownerOverrideReview(identity)?.kinds).toEqual(['aws_access_key_id']);
+  });
+
+  test.each([false, true])('a queued Personal override review keeps the embedding hold after the Private raise (legacy override: %s)', async (legacy) => {
+    const fx = fixture(workspace('olympus-override-raise-'));
+    const identity = identityOf('garden');
+    const classification = spyOn(fx.set, 'classification').mockReturnValue({ sniffer: JUDGED_PERSONAL_SNIFFER });
+    cleanups.push(() => classification.mockRestore());
+    await fx.set.sync(fixtureConnector(() => [GARDEN]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    fx.ledger.setOverride(identity, { kind: 'tier', tier: 'private' });
+    applyOwnerOverrides({ set: fx.set });
+    if (legacy) {
+      const db = new Database(fx.ledger.dbPath);
+      try { db.query("UPDATE tier_overrides SET override_json = json_remove(override_json, '$.setDigest')").run(); }
+      finally { db.close(); }
+    }
+    const db = new Database(fx.paths.internal!);
+    try { db.query('UPDATE chunks SET bounded_text = ?').run(`Changed ${GARDEN.text} ${FAKE_AWS_KEY}`); }
+    finally { db.close(); }
+    applyOwnerOverrides({ set: fx.set });
+    expect(fx.ledger.getOverride(identity)).toMatchObject({ setDigest: contentDigestReason(GARDEN.text!) });
+    const record = fx.ledger.getCurrent(identity)!;
+    expect(record).toMatchObject({ state: 'moving', targetContentTier: 'secure', contentPending: false });
+    await moveTieredItem({ set: fx.set, identity, target: { metadataTier: 'secure', contentTier: 'secure' }, expectedGeneration: record.generation });
+    expect(fx.ledger.ownerOverrideReview(identity)?.kinds).toEqual(['aws_access_key_id']);
+    expect(fx.ledger.copies(identity).find(copy => copy.state === 'current')).toMatchObject({
+      trustDomain: 'secure_local', embedHold: true,
+    });
+  });
+
+  test('a Personal override keeps an unchanged Secret hidden and holds its replacement for review', async () => {
+    const dir = workspace('olympus-secret-side-jobs-');
+    const fx = fixture(dir);
+    let row = { ...GARDEN, text: `The old orchard marker came next to a credential ${FAKE_AWS_KEY}.` };
+    const sync = () => fx.set.sync(fixtureConnector(() => [row]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    await sync();
+    const identity = identityOf('garden');
+    expect(fx.ledger.getCurrent(identity)?.contentTier).toBe('secrets');
+    fx.ledger.setOverride(identity, { kind: 'tier', tier: 'private' });
+    applyOwnerOverrides({ set: fx.set });
+    await sync();
+    expect(fx.ledger.getCurrent(identity)?.contentTier).toBe('secrets');
+    expect(fx.stores.internal?.searchItems('orchard', 10) ?? []).toEqual([]);
+    row = { ...row, version: 'v2', text: `An edited note. ${row.text}` };
+    await sync();
+    expect(fx.ledger.getCurrent(identity)).toMatchObject({ state: 'current', contentTier: 'secure' });
+    expect(fx.ledger.getOverride(identity)).toEqual({ kind: 'tier', tier: 'private', setDigest: null });
+    const review = fx.ledger.ownerOverrideReview(identity)!;
+    expect(review.kinds).toEqual(['aws_access_key_id']);
+    expect(fx.ledger.resolveOwnerOverrideReview(identity, review.digest, 'personal')).toBe(true);
+    applyOwnerOverrides({ set: fx.set });
+    await moveTieredItem({
+      set: fx.set, identity, target: { metadataTier: 'private', contentTier: 'private' },
+      expectedGeneration: fx.ledger.getCurrent(identity)!.generation,
+    });
+    expect(fx.ledger.getCurrent(identity)).toMatchObject({ state: 'current', contentTier: 'private' });
+    expect(fx.ledger.getOverride(identity)).toEqual({
+      kind: 'tier', tier: 'private', setDigest: null, confirmedDigest: review.digest,
+    });
   });
 
   for (const restoreBeforeRecord of [false, true]) for (const errorKind of ['store_item_secrets', 'store_item_not_eligible', 'source_scope_superseded', 'egress_policy_trust_tier']) {

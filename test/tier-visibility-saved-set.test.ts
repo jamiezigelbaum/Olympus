@@ -395,7 +395,7 @@ test('schema v16 fences older builds while legacy TEMP journals still coexist wi
   probe(reader).tierHiddenItemPks();
   // The digest changes the versioned store schema. A v15 binary must refuse
   // it; the additive visibility feed still coexists with legacy journal SQL.
-  expect(storeDb.query("SELECT version FROM schema_version WHERE store_id = 'connector-store'").get()).toEqual({ version: 16 });
+  expect(storeDb.query("SELECT version FROM schema_version WHERE store_id = 'connector-store'").get()).toEqual({ version: 17 });
   expect(() => assertSqliteSchemaCanOpen(storeDb, 'connector-store', 15)).toThrow(/only knows schema_version 15/);
   // Legacy writer SQL uses its own TEMP change journal, whose
   // table and triggers shadow names in main for that connection.

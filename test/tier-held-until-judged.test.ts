@@ -125,8 +125,25 @@ test('held questions queue behind every live question, own records included', ()
   expect(HELD_UNTIL_JUDGED_PRIORITY).toBeLessThan(0);
 });
 
+test('a source force and a rule-only sniffer result leave held Personal text pending', () => {
+  const input = {
+    signals: { title: 'Picnic list', prior: { tier: 'private', strength: 'force', basis: 'source_config:personal' } },
+    text: ORDINARY,
+    holdUntilJudged: true,
+  } as const;
+  const sniffer: TierSniffer = {
+    id: 'fixture-rule',
+    judge: () => ({ verdict: 'decided', tier: 'private', code: 'content_only_rule', origin: 'rule' }),
+  };
+  for (const candidate of [waiting, sniffer]) {
+    expect(classifyItemTiers(input, { sniffer: candidate })).toMatchObject({
+      contentTier: 'private', contentPending: true, metadataForced: true,
+    });
+  }
+});
+
 test('a verdict settles a held item: Personal and Private alike, the hold reason stays', () => {
-  const personal: TierSniffer = { id: 'fixture-model', judge: () => ({ verdict: 'decided', tier: 'private', code: 'personal' }) };
+  const personal: TierSniffer = { id: 'fixture-model', judge: () => ({ verdict: 'decided', tier: 'private', code: 'personal', origin: 'model' }) };
   const privately: TierSniffer = { id: 'fixture-model', judge: () => ({ verdict: 'decided', tier: 'secure', code: 'private' }) };
   const judgedPersonal = classifyItemTiers({ signals: { title: 'Picnic list' }, text: ORDINARY, holdUntilJudged: true }, { sniffer: personal });
   expect(judgedPersonal).toMatchObject({ contentTier: 'private', state: 'current', contentPending: false });

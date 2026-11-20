@@ -16,11 +16,13 @@ import type { SourceIndexRoutedSearchHit } from '../src/core/source-index/router
 import { readEmbeddingLedger } from '../src/workers/embedding-ledger.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { TierLedgerPurgedRollbackRefusedError } from '../src/workers/classification/tier-ledger.ts';
+import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
 import {
   CORPORA,
   FIXTURE_PLACEMENT,
+  JUDGED_PERSONAL_SNIFFER,
   fixtureConnector,
   identityOf,
   localId,
@@ -312,7 +314,7 @@ describe('P1b visibility: never searchable in two tiers', () => {
     await moveTieredItem({
       set: fixture.set,
       identity: identityOf('launch'),
-      target: { metadataTier: 'private', contentTier: 'private' },
+      decision: classifyItemTiers({ signals: {}, text: LAUNCH.text! }, { sniffer: JUDGED_PERSONAL_SNIFFER }),
       vectorIdentities: { internal: fixture.cloud },
     });
     for (let tick = 0; tick < 3; tick += 1) await new Promise((resolve) => setTimeout(resolve, 0));

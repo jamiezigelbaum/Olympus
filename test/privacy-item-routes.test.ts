@@ -182,6 +182,16 @@ describe('the dashboard\'s routes', () => {
     expect((await f.guarded(post('/dashboard/privacy/items/set', session, { item_id: ITEM_ID, tier: 'secrets' }))).status).toBe(400);
   });
 
+  test('the local review filter and text receipt reach the same per-item operation', async () => {
+    const f = fixture();
+    const session = await localSession(f.guarded);
+    const digest = 'content:sha256:' + 'd'.repeat(64);
+    expect((await f.guarded(post('/dashboard/privacy/items/find', session, { recent: true, filter: 'override_review' }))).status).toBe(200);
+    await f.guarded(post('/dashboard/privacy/items/set', session, { item_id: ITEM_ID, tier: 'personal', review_digest: digest }));
+    expect(f.finds).toEqual([{ recent: true, filter: 'override_review', withPreview: true }]);
+    expect(f.sets).toEqual([{ itemId: ITEM_ID, choice: 'personal', reviewDigest: digest, allowLower: true }]);
+  });
+
   test('Read this file uses the owner operation only from a local session', async () => {
     const f = fixture();
     const session = await localSession(f.guarded);

@@ -14,6 +14,7 @@ import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
 import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
+import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
 import { EMBEDDING_LEDGER_OWNER_APPROVAL, readEmbeddingLedger } from '../src/workers/embedding-ledger.ts';
 import { embedPendingChunks, LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { rehomePrivateTierRows } from '../src/workers/connector-store/tier-row-rehome.ts';
@@ -23,6 +24,7 @@ import { TieredStoreSet, tieredStoreSetLedgerPath } from '../src/workers/connect
 import {
   CORPORA,
   FIXTURE_PLACEMENT,
+  JUDGED_PERSONAL_SNIFFER,
   cloudProvider,
   fixtureConnector,
   identityOf,
@@ -448,7 +450,8 @@ describe('Private-row re-home', () => {
       await fixture.set.sync(fixtureConnector(() => [GARDEN]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
       const identity = { ...identityOf('garden'), localItemId: localId('garden') };
       await moveTieredItem({ set: fixture.set, identity, target: { metadataTier: 'secure', contentTier: 'secure' } });
-      await moveTieredItem({ set: fixture.set, identity, target: { metadataTier: 'private', contentTier: 'private' } });
+      const decision = classifyItemTiers({ signals: { title: GARDEN.name }, text: GARDEN.text! }, { sniffer: JUDGED_PERSONAL_SNIFFER });
+      await moveTieredItem({ set: fixture.set, identity, decision });
       // The Private store keeps an older, different copy; the row is S4 again.
       rawDb(fixture.stores.secure_local!).query("UPDATE chunks SET bounded_text = 'older different text'").run();
       rawDb(fixture.stores.internal!).query("UPDATE items SET trust_tier = 'S4' WHERE local_item_id = ?").run(localId('garden'));
@@ -553,7 +556,8 @@ describe('Private-row re-home', () => {
       for (const spec of specs) {
         const identity = { ...identityOf(spec.id), localItemId: localId(spec.id) };
         await moveTieredItem({ set: fixture.set, identity, target: { metadataTier: 'secure', contentTier: 'secure' } });
-        await moveTieredItem({ set: fixture.set, identity, target: { metadataTier: 'private', contentTier: 'private' } });
+        const decision = classifyItemTiers({ signals: { title: spec.name }, text: spec.text! }, { sniffer: JUDGED_PERSONAL_SNIFFER });
+        await moveTieredItem({ set: fixture.set, identity, decision });
       }
       rawDb(fixture.stores.secure_local!).query("UPDATE chunks SET bounded_text = 'older different text'").run();
       rawDb(fixture.stores.internal!).query("UPDATE items SET trust_tier = 'S4'").run();

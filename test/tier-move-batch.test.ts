@@ -12,12 +12,12 @@ import { TierSnifferService } from '../src/workers/classification/sniffer-servic
 import { flushTierMoveNotes, moveTieredItem, moveTieredItemsLowering, type TierMoveOptions } from '../src/workers/connector-store/tier-move.ts';
 import { readEmbeddingLedger } from '../src/workers/embedding-ledger.ts';
 import { createTestClock } from './helpers/test-clock.ts';
-import { FIXTURE_PLACEMENT, fixtureConnector, identityOf, localId, openLegStore, openTierFixture, tempDir, type TierFixture } from './helpers/tier-fixtures.ts';
+import { FIXTURE_PLACEMENT, JUDGED_PERSONAL_SNIFFER, fixtureConnector, identityOf, localId, openLegStore, openTierFixture, tempDir, type TierFixture } from './helpers/tier-fixtures.ts';
 
 const cleanup: Array<() => void> = [];
 afterEach(() => { for (const close of cleanup.splice(0).reverse()) close(); });
 const body = 'Synthetic orchard inventory.';
-const lower = classifyItemTiers({ signals: { title: 'Synthetic' }, text: body });
+const lower = classifyItemTiers({ signals: { title: 'Synthetic' }, text: body }, { sniffer: JUDGED_PERSONAL_SNIFFER });
 const high = { ...lower, metadataTier: 'secure' as const, contentTier: 'secure' as const };
 
 async function fixture(count = 4, privateOnly = false) {
@@ -146,7 +146,7 @@ for (const retry of ['batch', 'single'] as const) {
     await f.f.stores.secure_local!.syncFromConnector(fixtureConnector(() => f.specs.map(spec => ({
       ...spec, text: updatedBody, version: 'v2', legacyDomain: 'secure_local' as const,
     }))), { fetchContent: true, placement: FIXTURE_PLACEMENT });
-    const fresh = classifyItemTiers({ signals: { title: 'Synthetic' }, text: updatedBody });
+    const fresh = classifyItemTiers({ signals: { title: 'Synthetic' }, text: updatedBody }, { sniffer: JUDGED_PERSONAL_SNIFFER });
     expect(fresh).toMatchObject({ metadataTier: 'private', contentTier: 'private', contentPending: false });
     for (const spec of f.specs) {
       expect(f.f.stores.secure_local!.localContent(localId(spec.id))?.chunks.join('')).toBe(updatedBody);

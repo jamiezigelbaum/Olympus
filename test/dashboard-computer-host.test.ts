@@ -61,6 +61,7 @@ const LINKS = {
   keys: `${ORIGIN}/dashboard?keys`,
   agents: `${ORIGIN}/dashboard?agents`,
   privateAnswers: `${ORIGIN}/dashboard?private-answers`,
+  overrideReviews: `${ORIGIN}/dashboard?privacy-items#override-review`,
   connector: `${ORIGIN}/dashboard?connector`,
 };
 
@@ -1355,6 +1356,17 @@ describe('the host page when its session expires', () => {
 // ---- Needs you: private questions waiting, on the computer only --------------
 
 describe('the computer\'s Needs you line for waiting private questions', () => {
+  test('Needs you names the secret kind and opens pending Personal overrides on this computer', async () => {
+    const meta = { overrideReviewKinds: ['api_key'] };
+    const page = await onHost(COMPUTER, model(), meta);
+    const row = page.win.document.querySelector('[data-override-review]')!;
+    expect(row?.closest('section')?.querySelector('h2')?.textContent).toBe('Needs you');
+    expect(row.textContent).toContain('api key');
+    row.querySelector('button')!.click();
+    expect(page.sent.filter(message => message.method === 'ui/open-link').map(message => message.params.url)).toEqual([LINKS.overrideReviews]);
+    expect((await onHost(undefined, model(), meta)).text()).not.toContain('api key');
+  });
+
   test('on the computer: one line with the count, opening Private answers', async () => {
     const page = await onHost(COMPUTER, model(), { waitingPrivateQuestions: 2 });
     const line = page.win.document.querySelector('[data-waiting-private]')!;

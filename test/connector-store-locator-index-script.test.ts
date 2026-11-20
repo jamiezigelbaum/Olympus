@@ -54,6 +54,11 @@ describe('connector-store locator-index operator', () => {
     const rewind = new Database(dbPath);
     try {
       rewind.exec(`
+        DROP TRIGGER on_demand_item_update;
+        DROP TRIGGER on_demand_item_delete;
+        DROP TABLE on_demand_item_reads;
+        DROP TABLE on_demand_grant_epoch;
+        DROP TABLE on_demand_grant_acquisitions;
         DROP INDEX IF EXISTS idx_connector_store_items_parent;
         ALTER TABLE items DROP COLUMN parent_local_item_id;
         ALTER TABLE items DROP COLUMN deferred_locator;
@@ -91,7 +96,7 @@ describe('connector-store locator-index operator', () => {
     expect(first).toMatchObject({
       execute: true,
       schemaVersionBefore: 10,
-      schemaVersionAfter: 16,
+      schemaVersionAfter: 17,
       before: { state: 'backfill_required', cursorItemPk: 0, indexedItems: 0 },
       after: { state: 'backfill_required', indexedItems: 1 },
       batch: { scannedItems: 1 },
@@ -100,8 +105,8 @@ describe('connector-store locator-index operator', () => {
     const second = runConnectorStoreLocatorIndex([...args, '--execute']);
     expect(second).toMatchObject({
       execute: true,
-      schemaVersionBefore: 16,
-      schemaVersionAfter: 16,
+      schemaVersionBefore: 17,
+      schemaVersionAfter: 17,
       before: { state: 'backfill_required', indexedItems: 1 },
       after: { state: 'ready', indexedItems: 2 },
       batch: { scannedItems: 1 },
@@ -119,7 +124,7 @@ describe('connector-store locator-index operator', () => {
     const proof = new Database(dbPath, { readonly: true });
     try {
       expect(proof.query("SELECT version FROM schema_version WHERE store_id = 'connector-store'").get())
-        .toEqual({ version: 16 });
+        .toEqual({ version: 17 });
       expect((proof.query('PRAGMA table_info(items)').all() as Array<{ name: string }>).map((row) => row.name))
         .toEqual(expect.arrayContaining([
           'source_scope_generation', 'source_scope_revision', 'source_scope_folder_keys_json',

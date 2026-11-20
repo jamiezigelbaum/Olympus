@@ -21,6 +21,7 @@ import { registerInstalledTierClassification } from '../src/workers/classificati
 import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
 import { classifyItemTiers, type OwnerTierRule } from '../src/workers/classification/tier-classifier.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
+import { tierSetForLedger } from '../src/workers/connector-store/tier-set-registry.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { createLaneTieredStoreSet, tieredStoreSetLedgerPath } from '../src/workers/connector-store/tiered-store-set.ts';
 import { createReleaseTierCheck } from '../src/workers/connector-store/tier-visibility.ts';
@@ -37,7 +38,7 @@ import type {
   GmailMessage,
 } from '../src/workers/google-connectors/gmail.ts';
 import type { CredentialBroker } from '../src/workers/credential-broker/index.ts';
-import { FIXTURE_PLACEMENT, fixtureItem, identityOf, openTierFixture, tempDir, type FixtureSpec } from './helpers/tier-fixtures.ts';
+import { FIXTURE_PLACEMENT, expectHeldThenPersonal, fixtureItem, identityOf, openTierFixture, tempDir, type FixtureSpec } from './helpers/tier-fixtures.ts';
 
 const OFFLINE_BROKER = { async issueSession() { throw new Error('Unexpected credential request in offline Gmail fixture'); } } as unknown as CredentialBroker;
 const CUTOFF_MS = Date.parse('2026-04-13T00:00:00.000Z');
@@ -303,8 +304,11 @@ describe('Gmail mail older than the approved window', () => {
       expect(question).toBeDefined();
       expect(question!.material).toContain('first Saturday of June');
     }
-    // And the body is stored now (it was never readable before).
-    expect(lane.internal.itemStoredContent(lane.identity('old-1'))?.chunkCount).toBeGreaterThan(0);
+    const item = lane.identity('old-1');
+    expect(lane.internal.itemStoredContent(item)?.chunkCount).toBe(0);
+    expect(lane.secure.itemStoredContent(item)?.chunkCount).toBeGreaterThan(0);
+    const set = tierSetForLedger(lane.ledger.dbPath)!;
+    await expectHeldThenPersonal(set, item, body);
   });
 });
 

@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Analyst, EvidencePack } from '../src/core/contracts.ts';
+import { currentAnalystAbortSignal } from '../src/core/analyst.ts';
 import type { SourceItemIdentity } from '../src/core/source-index/types.ts';
 import { openWaitingPrivateQuestionStore, type WaitingQuestionStore } from '../src/core/waiting-private-questions.ts';
 import { chooseDeepRead, createDeepReadJobs, DeepReadRefused, pickRelevantDays, pickRelevantDaysWithin, type DeepReadStore } from '../src/workers/engine/runtime/deep-read-jobs.ts';
@@ -183,6 +184,60 @@ describe('deep read jobs', () => {
     expect(jobs.cancel(started.id)).toBe(true);
     release();
     expect((await settled(jobs, started.id)).state).toBe('cancelled');
+  });
+
+  test('revoking an item grant aborts the active model call and withholds its answer', async () => {
+    const { stores: deepStores, lanes } = fixture(() => 'body text');
+    const running = Promise.withResolvers<AbortSignal | undefined>();
+    const release = Promise.withResolvers<void>();
+    const waiting = inbox();
+    let revoke: (() => void) | undefined;
+    Object.assign(deepStores[0]!, {
+      observeOnDemandRead(localItemId: string, _version: string | undefined, controller: AbortController) {
+        if (localItemId !== 'l3') return undefined;
+        revoke = () => controller.abort();
+        return { check: () => !controller.signal.aborted, release() {} };
+      },
+    });
+    const slow: Analyst = {
+      async analyze() {
+        running.resolve(currentAnalystAbortSignal());
+        await release.promise;
+        return { answer: 'body text', citations: [], unanswered: [] };
+      },
+    };
+    const jobs = createDeepReadJobs({ stores: () => deepStores, lanes: () => lanes, inbox: () => waiting,
+      model: async () => ({ analyst: slow, promptBytes: 13_500, modelId: 'm' }) });
+    const started = await jobs.start('q', { ...set, whole: 'item' });
+    const signal = await running.promise;
+    revoke?.();
+    release.resolve();
+    expect(signal?.aborted).toBe(true);
+    expect(await jobs.wait(started.id)).toBeUndefined();
+    expect(jobs.status(started.id)[0]).toMatchObject({ state: 'cancelled' });
+    expect(jobs.status(started.id)[0]?.inboxId).toBeUndefined();
+  });
+
+  test('collection withdraws a completed read and its progress after the item grant changes', async () => {
+    const { stores: deepStores, lanes } = fixture(() => 'heart health');
+    let granted = true;
+    const waiting = inbox();
+    Object.assign(deepStores[0]!, {
+      observeOnDemandRead() {
+        return { check: () => granted, release() {} };
+      },
+    });
+    const jobs = createDeepReadJobs({ stores: () => deepStores, lanes: () => lanes, inbox: () => waiting,
+      model: async () => ({ analyst: analyst([]), promptBytes: 13_500, modelId: 'm' }) });
+    const started = await jobs.start('q', { ...set, whole: 'item' });
+    expect((await jobs.wait(started.id))?.answer).toContain('heart health');
+    expect(jobs.status(started.id)[0]).toMatchObject({ state: 'done', sectionsDone: 1 });
+    granted = false;
+    expect(await jobs.wait(started.id)).toBeUndefined();
+    const [view] = jobs.status(started.id);
+    expect(view).toMatchObject({ state: 'cancelled', sectionsDone: 0, sectionsTotal: 0, notes: 0,
+      choices: { all: { sections: 0, messageCount: 0 } } });
+    expect(view?.inboxId).toBeUndefined();
   });
 });
 
