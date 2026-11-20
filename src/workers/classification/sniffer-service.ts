@@ -58,7 +58,7 @@ import { settlePersonalFirstItemsOffThread } from '../connector-store/tier-held-
 import { sweepOwnerRuleRaisesOffThread } from '../connector-store/tier-rules-sweep.ts';
 import { applyOwnerOverridesOffThread } from '../connector-store/tier-override-settle.ts';
 import { retireSecretRedactions, retrySecretSideStoreDebtsOffThread } from '../connector-store/secrets-disposition.ts';
-import { ledgerReadOffThread } from '../connector-store/child-visibility.ts';
+import { ledgerReadOffThread, settleStaleEmbedHolds } from '../connector-store/child-visibility.ts';
 import { sweepImageContentToPrivateOffThread } from '../connector-store/tier-image-content-sweep.ts';
 import { applyMediaJudgmentsOffThread } from '../connector-store/tier-media-judgment-sweep.ts';
 import {
@@ -252,6 +252,8 @@ export interface TierSnifferServiceOptions {
     maxPerPass?: number;
     /** Destinations with newly visible chunks that still need vectors. */
     onEmbeddingNeeded?: (corpora: ReadonlySet<string>) => void;
+    /** Ledgers where this drain moved an item or refused a move. */
+    onPlacementChecked?: (ledgerPaths: ReadonlySet<string>) => void;
     /** Fixed lowering slice override; still capped at 25% of judge + moves. Default adapts to backlog. */
     lowerSliceMs?: number;
     /** Maximum synchronous copy batch. Default 25 items / 25 ms. */
@@ -344,7 +346,7 @@ const BACKLOG_REFRESH_MS = 60_000;
 const BACKLOG_SLICE_ROWS = 5_000;
 const STORED_WALK_BACKSTOP_MS = 60 * 60_000;
 
-type StoredWalker = 'ownerOverrides' | 'ownerRules' | 'imageContent' | 'mediaJudgments' | 'namesOnly' | 'personalFirst' | 'rejudge';
+type StoredWalker = 'ownerOverrides' | 'ownerRules' | 'imageContent' | 'mediaJudgments' | 'namesOnly' | 'personalFirst' | 'rejudge' | 'staleEmbedHolds';
 type StoredWalkResult = 'no_work' | 'changed' | 'more_rows' | 'read_failed' | 'inputs_unavailable' | 'queue_full' | 'retired';
 interface StoredWalkStatus {
   lastRanAt: string;
@@ -367,6 +369,68 @@ interface StoredWalkPage {
   retired?: boolean;
   next?: TierLedgerIdentity;
   blocked?: 'queue_full';
+}
+
+function newStoredWalk(now: number): StoredWalkState {
+  return { active: false, status: { lastRanAt: new Date(now).toISOString(), reason: 'working' } };
+}
+
+async function runStoredWalk(
+  walk: StoredWalkState,
+  inputs: string | undefined,
+  readPage: (after: TierLedgerIdentity | undefined) => Promise<StoredWalkPage>,
+  clockMs: () => number,
+): Promise<void> {
+  if (walk.active || walk.status.reason === 'retired') return;
+  const now = clockMs();
+  const unchanged = walk.clean !== undefined && walk.clean.inputs === inputs;
+  const backstop = unchanged && now - walk.clean!.at >= STORED_WALK_BACKSTOP_MS;
+  if (unchanged && !backstop) return;
+
+  walk.clean = undefined;
+  const lap = walk.lap ??= { inputs };
+  if (lap.inputs !== inputs) lap.inputs = undefined;
+  walk.active = true;
+  walk.status.lastRanAt = new Date(now).toISOString();
+  walk.status.reason = backstop ? 'backstop_due' : 'working';
+  try {
+    const page = await readPage(walk.after);
+    walk.after = page.next;
+    if (page.changed || page.failed) lap.inputs = undefined;
+    walk.status.lastResult = page.retired ? 'retired'
+      : page.failed ? 'read_failed'
+      : page.blocked ?? (page.changed ? 'changed' : page.complete === false ? 'more_rows' : inputs === undefined ? 'inputs_unavailable' : 'no_work');
+    if (page.retired) walk.status.reason = 'retired';
+    else if (page.complete !== false && lap.inputs !== undefined) {
+      walk.clean = { inputs: lap.inputs, at: clockMs() };
+      walk.status.reason = 'idle_unchanged';
+    } else walk.status.reason = 'working';
+    if (page.complete !== false) walk.lap = undefined;
+  } catch {
+    // Keep the cursor for retry and invalidate this lap's clean result.
+    lap.inputs = undefined;
+    walk.status = { ...walk.status, reason: 'working', lastResult: 'read_failed' };
+  } finally {
+    walk.active = false;
+  }
+}
+
+async function staleEmbedHoldLap(ledger: TierLedger, turn: () => Promise<void> | undefined, log?: (line: string) => void): Promise<StoredWalkPage> {
+  const settled = await settleStaleEmbedHolds(ledger, undefined, turn);
+  if (settled) log?.(`Olympus embedding: released holds on ${settled} decided copies.`);
+  return { changed: settled > 0 };
+}
+
+// Status maintenance takes the same walk for ledgers without a judge walk.
+const unattendedEmbedHoldWalks = new WeakMap<TierLedger, StoredWalkState>();
+export async function runUnattendedStaleEmbedHoldWalk(ledger: TierLedger, log: (line: string) => void): Promise<void> {
+  let walk = unattendedEmbedHoldWalks.get(ledger);
+  if (!walk) {
+    walk = newStoredWalk(Date.now());
+    unattendedEmbedHoldWalks.set(ledger, walk);
+  }
+  await runStoredWalk(walk, ledger.changeMarker({ ignoreSettleProgress: true }), () => staleEmbedHoldLap(ledger, ingestionTurn, log), Date.now);
+  if (walk.status.lastResult === 'read_failed') log('Olympus embedding: could not check held copies. The next pass will retry.');
 }
 
 export interface TierClassificationBacklog {
@@ -1901,8 +1965,14 @@ export class TierSnifferService {
         if (this.stopped) return undefined;
         this.movingDirection = direction;
         if (direction === 'lower') this.lowerMovePreempted = false;
-        this.moving = this.runAutoMoves(this.options.autoMoves, this.moveAbort.signal, direction)
-          .finally(() => { this.moving = undefined; this.movingDirection = undefined; });
+        const changedPaths = new Set<string>();
+        const options = this.options.autoMoves;
+        this.moving = this.runAutoMoves(options, this.moveAbort.signal, direction, changedPaths)
+          .finally(() => {
+            this.moving = undefined;
+            this.movingDirection = undefined;
+            if (!this.stopped && changedPaths.size > 0) options.onPlacementChecked?.(changedPaths);
+          });
       }
       return await this.moving;
     } catch (error) {
@@ -1928,14 +1998,16 @@ export class TierSnifferService {
   }
 
   /** The inputs shared by the stored walks, before their first read of a page. */
-  private storedWalkInputs(set: TieredStoreSet): string | undefined {
+  private storedWalkInputs(set: TieredStoreSet, ledgerOnly = false): string | undefined {
     try {
+      const ledger = set.ledger.changeMarker({ ignoreSettleProgress: true });
+      if (ledgerOnly) return ledger;
       const classification = set.classification();
       if (classification?.unavailableReason) return undefined;
       const folderRevision = set.namesOnlyOwnerRevision();
       if (folderRevision === undefined) return undefined;
       return JSON.stringify([
-        set.ledger.changeMarker({ ignoreSettleProgress: true }),
+        ledger,
         this.options.installed.snifferStoreForLedger(set.ledger.dbPath).changeMarker({ ignoreScanProgress: true }),
         classification?.rules, classification?.retirePublic, classification?.sniffer?.id, classification?.sniffer?.rejudgeReady,
         folderRevision,
@@ -1959,43 +2031,12 @@ export class TierSnifferService {
       entry = { set, walks: new Map() };
       this.storedWalks.set(path, entry);
     }
-    const now = this.clockMs();
     let walk = entry.walks.get(name);
     if (!walk) {
-      walk = { active: false, status: { lastRanAt: new Date(now).toISOString(), reason: 'working' } };
+      walk = newStoredWalk(this.clockMs());
       entry.walks.set(name, walk);
     }
-    if (walk.active || walk.status.reason === 'retired') return;
-    const unchanged = walk.clean !== undefined && walk.clean.inputs === inputs;
-    const backstop = unchanged && now - walk.clean!.at >= STORED_WALK_BACKSTOP_MS;
-    if (unchanged && !backstop) return;
-
-    walk.clean = undefined;
-    const lap = walk.lap ??= { inputs };
-    if (lap.inputs !== inputs) lap.inputs = undefined;
-    walk.active = true;
-    walk.status.lastRanAt = new Date(now).toISOString();
-    walk.status.reason = backstop ? 'backstop_due' : 'working';
-    try {
-      const page = await readPage(walk.after);
-      walk.after = page.next;
-      if (page.changed || page.failed) lap.inputs = undefined;
-      walk.status.lastResult = page.retired ? 'retired'
-        : page.failed ? 'read_failed'
-        : page.blocked ?? (page.changed ? 'changed' : page.complete === false ? 'more_rows' : inputs === undefined ? 'inputs_unavailable' : 'no_work');
-      if (page.retired) walk.status.reason = 'retired';
-      else if (page.complete !== false && lap.inputs !== undefined) {
-        walk.clean = { inputs: lap.inputs, at: this.clockMs() };
-        walk.status.reason = 'idle_unchanged';
-      } else walk.status.reason = 'working';
-      if (page.complete !== false) walk.lap = undefined;
-    } catch {
-      // Keep the cursor for retry and invalidate this lap's clean result.
-      lap.inputs = undefined;
-      walk.status = { ...walk.status, reason: 'working', lastResult: 'read_failed' };
-    } finally {
-      walk.active = false;
-    }
+    await runStoredWalk(walk, inputs, readPage, () => this.clockMs());
   }
 
   /** Settles stored items even while model availability or approval is pending. */
@@ -2062,6 +2103,8 @@ export class TierSnifferService {
         }
         return { retired: held.retired, complete: held.retired, changed: held.settled > 0, failed: held.failed > 0 };
       });
+      await this.runStoredWalker(set, 'staleEmbedHolds', this.storedWalkInputs(set, true),
+        () => staleEmbedHoldLap(set.ledger, turn, this.options.log));
     }
   }
 
@@ -2149,6 +2192,7 @@ export class TierSnifferService {
     options: NonNullable<TierSnifferServiceOptions['autoMoves']>,
     signal: AbortSignal,
     direction: 'raise' | 'lower',
+    changedPaths: Set<string>,
   ): Promise<TierAutoMoveReport> {
     const timings = emptyTierMoveTimings();
     const started = this.monotonicNow();
@@ -2204,6 +2248,7 @@ export class TierSnifferService {
         // the same move again (the content check) is one item refused twice.
         const refusedKey = `${ledgerPath}\u0000${tierLedgerIdentityKey(identity)}`;
         if (error instanceof TierMoveRefusedError) {
+          changedPaths.add(ledgerPath);
           this.moveRefusalAttempts += 1;
           this.movesRefusedNow.set(refusedKey, why);
         } else this.movesRefusedNow.delete(refusedKey);
@@ -2243,6 +2288,7 @@ export class TierSnifferService {
         }
       };
       const succeeded = (record: TierLedgerRecord, result: TierMoveResult) => {
+        changedPaths.add(ledgerPath);
         report.moved++;
         for (const destination of result.destinations) {
           if (destination.chunksToEmbed > 0) embeddingCorpora.add(destination.corpusId);

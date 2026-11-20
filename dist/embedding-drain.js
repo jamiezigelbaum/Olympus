@@ -13516,6 +13516,41 @@ class TierLedger {
       return true;
     })();
   }
+  *overPrivateCountSteps() {
+    return yield { mode: "all", params: [], sql: `
+      WITH verdicts AS (
+        SELECT provider, account_scope, conversation_key, provider_item_id, decided_at,
+          CASE WHEN state = 'moving' THEN target_metadata_tier ELSE metadata_tier END AS vm,
+          CASE WHEN state = 'moving' THEN target_content_tier ELSE content_tier END AS vc
+        FROM tier_items
+        -- A pending item is held at least Private, regardless of either layer's verdict.
+        WHERE state <> 'pending' AND metadata_pending = 0 AND content_pending = 0
+      ), needs AS (
+        SELECT *,
+          CASE vm WHEN 'secrets' THEN 3 WHEN 'secure' THEN 2 WHEN 'private' THEN 1 ELSE 0 END AS need_m,
+          CASE WHEN vc = 'secrets' OR vm = 'secrets' THEN 3
+               WHEN vc = 'secure' OR vm = 'secure' THEN 2
+               WHEN vc = 'private' OR vm = 'private' THEN 1 ELSE 0 END AS need_c
+        FROM verdicts
+      )
+      SELECT n.provider, COUNT(*) AS items, MIN(n.decided_at) AS oldest_since
+      FROM needs n
+      WHERE EXISTS (
+        SELECT 1 FROM tier_copies c
+        WHERE c.provider = n.provider AND c.account_scope = n.account_scope
+          AND c.conversation_key = n.conversation_key AND c.provider_item_id = n.provider_item_id
+          AND c.copy_state = 'current'
+          AND (
+            (c.layers IN ('metadata', 'both') AND
+              (CASE c.trust_domain WHEN 'secure_local' THEN 2 WHEN 'internal' THEN 1 ELSE 0 END) > n.need_m)
+            OR (c.layers IN ('content', 'both') AND
+              (CASE c.trust_domain WHEN 'secure_local' THEN 2 WHEN 'internal' THEN 1 ELSE 0 END) > n.need_c)
+          )
+      )
+      GROUP BY n.provider
+      ORDER BY n.provider
+    ` };
+  }
   counts() {
     const byState = { pending: 0, current: 0, moving: 0 };
     const byContentTier = { public: 0, private: 0, secure: 0, secrets: 0 };
@@ -13744,6 +13779,9 @@ class TierLedger {
           move_attempts = 0, owner_prior_json = NULL
         WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
       `).run(state, staleFlip, prior.decidedBy, reasonsJson, prior.engineVersion, prior.mapRevision, decidedAt, ...decisionFlags(prior), ...idParams(identity));
+      if (state === "current" && copies.some((copy) => copy.state === "current" && copy.embedHold)) {
+        this.releaseDecidedEmbedHolds(identity, decidedAt);
+      }
       this.appendHistory(identity, staleFlip, existing.metadataTier, existing.contentTier, prior.decidedBy, reasonsJson, state, decidedAt);
       return "cancelled";
     }
@@ -14639,6 +14677,10 @@ class TierLedger {
           WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
         `).run(decision.contentRead ? 1 : 0, decision.metadataPending ? 1 : 0, decision.contentPending ? 1 : 0, decision.metadataForced ? 1 : 0, decision.metadataFlagged ? 1 : 0, decision.engineVersion, decision.mapRevision, pending ? "pending" : "current", ...idParams(identity));
       }
+      const finalDecision = options.decision ?? existing;
+      if (options.embedHold !== false && !finalDecision.metadataPending && !finalDecision.contentPending) {
+        this.releaseDecidedEmbedHolds(identity, now);
+      }
     })();
     return this.getCurrent(identity);
   }
@@ -14692,6 +14734,8 @@ class TierLedger {
         reasons: existing.reasons,
         decidedAt: now
       });
+      if (!existing.metadataPending && !existing.contentPending)
+        this.releaseDecidedEmbedHolds(identity, now);
     })();
     return this.getCurrent(identity);
   }
@@ -14720,6 +14764,9 @@ class TierLedger {
         UPDATE tier_items SET state = ?, target_metadata_tier = NULL, target_content_tier = NULL
         WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND generation = ?
       `).run(state, ...idParams(identity), existing.generation);
+      if (state === "current" && copies.some((copy) => copy.state === "current" && copy.embedHold)) {
+        this.releaseDecidedEmbedHolds(identity, now);
+      }
       this.appendHistory(identity, existing.generation, existing.metadataTier, existing.contentTier, "rollback", JSON.stringify(existing.reasons), state, now);
     })();
     return this.getCurrent(identity);
@@ -15054,9 +15101,6 @@ class TierLedger {
       wal_autocheckpoint: this.db.query("PRAGMA wal_autocheckpoint").get().wal_autocheckpoint
     };
   }
-  staleEmbedHoldsSettled() {
-    return this.db.query("SELECT 1 FROM tier_ledger_meta WHERE key = ?").get(STALE_EMBED_HOLDS_SETTLED) !== null;
-  }
   *staleEmbedHoldSteps(after, limit) {
     const rowIds = [];
     let corpusId = after?.corpusId;
@@ -15086,18 +15130,41 @@ class TierLedger {
       rowId = 0;
     }
   }
+  *embeddingHoldReasonSteps(corpusId, after) {
+    const rows = yield {
+      sql: `SELECT tier_copies.rowid AS row_id, tier_copies.provider, tier_copies.account_scope,
+          tier_copies.conversation_key, tier_copies.provider_item_id,
+          CASE
+            WHEN t.state = 'moving' THEN 'held_while_moving'
+            WHEN ${STALE_EMBED_HOLD_DECIDED} THEN 'held_after_decision'
+            WHEN t.content_read = 0 THEN 'held_while_text_is_unread'
+            WHEN t.state = 'pending' OR t.metadata_pending = 1 OR t.content_pending = 1 THEN 'held_for_judgment'
+            ELSE 'held_for_other_reasons'
+          END AS reason
+        FROM tier_copies LEFT JOIN tier_items t USING (provider, account_scope, conversation_key, provider_item_id)
+        WHERE corpus_id = ? AND copy_state = 'current' AND embed_hold = 1 AND tier_copies.rowid > ?
+        ORDER BY tier_copies.rowid LIMIT 500`,
+      params: [corpusId, after],
+      mode: "all"
+    };
+    return rows.map((row) => ({ rowId: row.row_id, key: tierLedgerIdentityKey(identityFromRow(row)), reason: row.reason }));
+  }
   settleStaleEmbedHoldRows(rowIds) {
     if (this.readOnly || rowIds.length === 0)
       return 0;
-    return this.db.query(`
+    const released = this.db.query(`
       UPDATE tier_copies SET embed_hold = 0, updated_at = ?
       WHERE rowid IN (SELECT value FROM json_each(?)) AND copy_state = 'current' AND embed_hold = 1 AND ${STALE_EMBED_HOLD_DECIDED}
-    `).run(this.now().toISOString(), JSON.stringify(rowIds)).changes;
+      RETURNING rowid
+    `).all(this.now().toISOString(), JSON.stringify(rowIds));
+    return released.length;
   }
-  markStaleEmbedHoldsSettled() {
-    if (this.readOnly)
-      return;
-    this.db.query("INSERT OR REPLACE INTO tier_ledger_meta (key, value) VALUES (?, ?)").run(STALE_EMBED_HOLDS_SETTLED, this.now().toISOString());
+  releaseDecidedEmbedHolds(identity, now) {
+    this.db.query(`
+      UPDATE tier_copies SET embed_hold = 0, updated_at = ?
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+        AND copy_state = 'current' AND embed_hold = 1 AND ${STALE_EMBED_HOLD_DECIDED}
+    `).run(now, ...idParams(identity));
   }
   *corpusCopyIdentitiesSteps(corpusId, filter, pageSize = 5000) {
     const query = this.db.query(`
@@ -15754,12 +15821,38 @@ function rowOf(record) {
     metadataFlagged: record.metadataFlagged
   };
 }
-var STALE_EMBED_HOLDS_SETTLED = "settled:stale_embed_holds:v1";
 var STALE_EMBED_HOLD_DECIDED = `EXISTS (
         SELECT 1 FROM tier_items t
         WHERE t.provider = tier_copies.provider AND t.account_scope = tier_copies.account_scope
           AND t.conversation_key = tier_copies.conversation_key AND t.provider_item_id = tier_copies.provider_item_id
           AND t.state = 'current' AND t.metadata_pending = 0 AND t.content_pending = 0
+          AND t.metadata_tier <> 'secrets' AND t.content_tier <> 'secrets'
+          AND t.target_metadata_tier IS NULL AND t.target_content_tier IS NULL
+          -- A re-judgment still open on this decision keeps the hold.
+          AND NOT (t.rejudge_json IS NOT NULL
+            AND json_extract(t.rejudge_json, '$.generation') = t.generation
+            AND json_extract(t.rejudge_json, '$.decidedAt') = t.decided_at
+            AND json_extract(t.rejudge_json, '$.reasonsJson') = t.reasons_json
+            AND json_extract(t.rejudge_json, '$.decidedBy') = t.decided_by)
+          -- The store must be at least as private as the verdict for each layer
+          -- the copy serves (same ranks as the tier exposure count).
+          AND (tier_copies.layers NOT IN ('content', 'both')
+            OR (CASE tier_copies.trust_domain WHEN 'secure_local' THEN 2 WHEN 'internal' THEN 1 ELSE 0 END)
+              >= (CASE WHEN t.content_tier = 'secure' OR t.metadata_tier = 'secure' THEN 2
+                       WHEN t.content_tier = 'private' OR t.metadata_tier = 'private' THEN 1 ELSE 0 END))
+          AND (tier_copies.layers NOT IN ('metadata', 'both')
+            OR (CASE tier_copies.trust_domain WHEN 'secure_local' THEN 2 WHEN 'internal' THEN 1 ELSE 0 END)
+              >= (CASE t.metadata_tier WHEN 'secure' THEN 2 WHEN 'private' THEN 1 ELSE 0 END))
+      ) AND NOT EXISTS (
+        SELECT 1 FROM tier_overrides o
+        WHERE o.provider = tier_copies.provider AND o.account_scope = tier_copies.account_scope
+          AND o.conversation_key = tier_copies.conversation_key AND o.provider_item_id = tier_copies.provider_item_id
+          AND json_extract(o.override_json, '$.kind') = 'tier' AND json_extract(o.override_json, '$.tier') = 'secrets'
+      ) AND NOT EXISTS (
+        SELECT 1 FROM tier_write_intents w
+        WHERE w.provider = tier_copies.provider AND w.account_scope = tier_copies.account_scope
+          AND w.conversation_key = tier_copies.conversation_key AND w.provider_item_id = tier_copies.provider_item_id
+          AND w.kind IN ('secret', 'deletion')
       )`;
 var TIER_RECHECK_META_PREFIX = "recheck:";
 function recheckRequestKey(scope) {
@@ -16360,6 +16453,32 @@ function overrideFromJson(json) {
     return parsed;
   return;
 }
+
+// src/core/embedding-sweep-idle.ts
+var EMBEDDING_HOLD_REASONS = [
+  "held_for_judgment",
+  "held_after_decision",
+  "held_while_text_is_unread",
+  "held_while_moving",
+  "held_for_other_reasons"
+];
+var INVENTORY_FIELDS = [
+  "pending_chunks",
+  "eligible_chunks",
+  "skipped_held_chunks",
+  "skipped_moving_chunks",
+  "skipped_hidden_chunks",
+  "skipped_metadata_chunks",
+  "skipped_failed_chunks",
+  "skipped_out_of_scope_chunks",
+  "skipped_held_recent_chunks",
+  "skipped_out_of_scope_recent_chunks",
+  "skipped_private_tier_chunks",
+  "skipped_retired_chunks",
+  "inventory_complete",
+  "inventory_ms",
+  ...EMBEDDING_HOLD_REASONS.flatMap((reason) => [`${reason}_chunks`, `${reason}_items`])
+];
 
 // src/workers/engine-split/sqlite-memory.ts
 var stores = new Set;
@@ -17752,6 +17871,9 @@ function backfillVectorDigests(db, modelId, maxRows = 128) {
   const rows = db.query(query.sql).all(...query.params);
   return applyVectorDigestWindow(db, modelId, state.cursorRowid, rows, maxRows);
 }
+
+// src/workers/source-index/status-count-reuse.ts
+var STORE_UNCHANGED_REUSE_MS = 30 * 60000;
 
 // src/core/sqlite-rows.ts
 function* iterateRows(db, sql, ...params) {
@@ -21612,13 +21734,15 @@ function askReadMemo(owner, kind, marker) {
     kinds.set(kind, memo = { marker, rows: new Map });
   return memo;
 }
-async function memoVisibilityItems(owner, kind, marker, items, keyOf, read) {
+async function memoVisibilityItems(owner, kind, marker, items, keyOf, read, writesHeld) {
   const asked = new Map(items.map((item) => [keyOf(item), item]));
+  if (writesHeld?.())
+    throw new VisibilityChangedError;
   const before = marker();
   const memo = askReadMemo(owner, kind, before);
   const missing = [...asked].filter(([key]) => !memo?.rows.has(key)).map(([, item]) => item);
   const fresh = missing.length > 0 ? await read(missing) : new Map;
-  if (marker() !== before)
+  if (marker() !== before || writesHeld?.())
     throw new VisibilityChangedError;
   if (memo)
     for (const item of missing)
@@ -21633,7 +21757,7 @@ async function memoVisibilityItems(owner, kind, marker, items, keyOf, read) {
 }
 var ASK_LEDGER_READS = { perRead: true };
 function itemStatesOffThread(ledger, identities) {
-  return memoVisibilityItems(ledger, "states", () => ledger.changeMarker(), identities, tierLedgerIdentityKey, (missing) => ledgerReadOffThread(ledger, ledger.itemStatesSteps(missing), ASK_LEDGER_READS));
+  return memoVisibilityItems(ledger, "states", () => ledger.changeMarker(), identities, tierLedgerIdentityKey, (missing) => ledgerReadOffThread(ledger, ledger.itemStatesSteps(missing), ASK_LEDGER_READS), () => ledger.writesHeld());
 }
 function* itemSecretSteps(ledger, identity) {
   const key = tierLedgerIdentityKey(identity);
@@ -21642,7 +21766,7 @@ function* itemSecretSteps(ledger, identity) {
     for (const item of missing)
       rows.set(tierLedgerIdentityKey(item), await ledgerReadOffThread(ledger, ledger.itemIsSecretSteps(item), ASK_LEDGER_READS));
     return rows;
-  }));
+  }, () => ledger.writesHeld()));
   return rows.get(key) === true;
 }
 function visibilityRows(identities, read) {
@@ -21667,7 +21791,7 @@ function ledgerVisibilityHere(ledger, identities, options = {}) {
   return visibilityFromRows(memoVisibilityItemsHere(ledger, options.personalFirst ? "visibility-personal-first" : "visibility", () => ledger.changeMarker(), identities, tierLedgerIdentityKey, (missing) => visibilityRows(missing, ledger.readSteps(ledger.visibilityReadSteps(missing, options)))));
 }
 async function ledgerVisibilityOffThread(ledger, identities, options = {}) {
-  const rows = await memoVisibilityItems(ledger, options.personalFirst ? "visibility-personal-first" : "visibility", () => ledger.changeMarker(), identities, tierLedgerIdentityKey, async (missing) => visibilityRows(missing, await ledgerReadOffThread(ledger, ledger.visibilityReadSteps(missing, options), ASK_LEDGER_READS)));
+  const rows = await memoVisibilityItems(ledger, options.personalFirst ? "visibility-personal-first" : "visibility", () => ledger.changeMarker(), identities, tierLedgerIdentityKey, async (missing) => visibilityRows(missing, await ledgerReadOffThread(ledger, ledger.visibilityReadSteps(missing, options), ASK_LEDGER_READS)), () => ledger.writesHeld());
   return visibilityFromRows(rows);
 }
 var releasing = new WeakSet;
@@ -25102,10 +25226,11 @@ function connectorStoreCurrentEmbeddingRowsQuery(options, ordered, page) {
   const accountScope = normalizeOptionalAccountScope(options.accountScope);
   const selectedFilters = connectorStoreFilterSql(options.filters);
   const metadataOnly = connectorStoreMetadataOnlySql(options.filters, options.onDemandReadsTablePresent);
+  const chunkContentHash = page ? ", c.content_hash AS chunk_content_hash" : "";
   if (options.chunkPks) {
     return {
       sql: `
-        SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding
+        SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding${chunkContentHash}
         FROM json_each(?) pick
         CROSS JOIN chunk_embeddings emb ON emb.chunk_pk = pick.value AND emb.model_id = ?
         CROSS JOIN chunks c ON c.chunk_pk = emb.chunk_pk
@@ -25131,7 +25256,7 @@ function connectorStoreCurrentEmbeddingRowsQuery(options, ordered, page) {
   }
   return {
     sql: `
-      SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding
+      SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding${chunkContentHash}
       ${CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER}
         -- Unary + avoids the model index + repeated whole-model sort (#1242).
         AND ${page ? "+emb.model_id" : "emb.model_id"} = ?
@@ -25160,7 +25285,12 @@ function foldVectorScore(bestByItem, row, queryVector) {
   let qualified = 0;
   if (!prior || score > prior.bestCosine || score === prior.bestCosine && row.chunk_pk < prior.bestChunkPk) {
     qualified = Number(score >= MIN_VECTOR_SCORE && (!prior || prior.bestCosine < MIN_VECTOR_SCORE));
-    bestByItem.set(row.item_pk, { bestCosine: score, bestChunkPk: row.chunk_pk, localItemId: row.local_item_id });
+    bestByItem.set(row.item_pk, {
+      bestCosine: score,
+      bestChunkPk: row.chunk_pk,
+      bestChunkContentHash: row.chunk_content_hash,
+      localItemId: row.local_item_id
+    });
   }
   return { mismatch: 0, qualified, score };
 }
@@ -25178,16 +25308,19 @@ async function scanVectorPages(read, provider, beforeToken, queryVector, pageOpt
       params: []
     })) };
   }
+  const onDemandReadsTablePresent = pageOptions.onDemandReadsTablePresent ?? false;
   const digestTable = !vectorDigestSearchDisabled() && await read({ mode: "get", sql: "SELECT 1 FROM sqlite_master WHERE name = 'chunk_vector_digest_meta'", params: [] });
   const digestReady = digestTable && await read({ mode: "get", sql: "SELECT 1 FROM chunk_vector_digest_meta WHERE model_id = ? AND completed = 1", params: [pageOptions.modelId] });
-  if (digestReady)
-    return scanDigestPages(read, queryVector, pageOptions, deadlineAtMs, resultLimit, VECTOR_DIGEST_MAX_CANDIDATES, sideReaders);
+  if (digestReady) {
+    const scanned = await scanDigestPages(read, queryVector, pageOptions, deadlineAtMs, resultLimit, VECTOR_DIGEST_MAX_CANDIDATES, sideReaders);
+    return "skippedReason" in scanned ? scanned : { ...scanned, onDemandReadsTablePresent };
+  }
   const bestByItem = new Map;
   let dimensionMismatches = 0;
   let afterChunkPk = 0;
   let pagesScanned = 0;
   const excluded = pageOptions.excludedItemPks;
-  const cutExact = () => bestByItem.size > 0 ? { bestByItem, dimensionMismatches, exhausted: false, cutReason: "vector_scan_deadline_exceeded" } : { skippedReason: "vector_scan_deadline_exceeded" };
+  const cutExact = () => bestByItem.size > 0 ? { bestByItem, dimensionMismatches, onDemandReadsTablePresent, exhausted: false, cutReason: "vector_scan_deadline_exceeded" } : { skippedReason: "vector_scan_deadline_exceeded" };
   while (true) {
     if (connectorStoreVectorDeadlineExpired(deadlineAtMs))
       return cutExact();
@@ -25210,7 +25343,7 @@ async function scanVectorPages(read, provider, beforeToken, queryVector, pageOpt
     if (pagesScanned++ % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0)
       await yieldConnectorStoreVectorScan();
   }
-  return { bestByItem, dimensionMismatches };
+  return { bestByItem, dimensionMismatches, onDemandReadsTablePresent };
 }
 function vectorDigestSearchDisabled(env = process.env) {
   return env.OLYMPUS_VECTOR_DIGEST?.trim().toLowerCase() === "off";
@@ -27216,7 +27349,7 @@ class LocalConnectorStore {
     return memoVisibilityItemsHere(this, "parentLinksOf", () => this.childVisibilityMarker(), identities, tierLedgerIdentityKey, (missing) => this.readHere(this.parentLinksOfSteps(missing)));
   }
   parentLinksOfOffThread(identities) {
-    return memoVisibilityItems(this, "parentLinksOf", () => this.childVisibilityMarker(), identities, tierLedgerIdentityKey, (missing) => this.readOffThread(this.parentLinksOfSteps(missing)));
+    return memoVisibilityItems(this, "parentLinksOf", () => this.childVisibilityMarker(), identities, tierLedgerIdentityKey, (missing) => this.readOffThread(this.parentLinksOfSteps(missing)), () => this.db.inTransaction);
   }
   childVisibilityMarker() {
     if (this.visibilityFeedPresent)
@@ -27269,7 +27402,7 @@ class LocalConnectorStore {
   async parentStandingsOffThread(parents) {
     const rows = await memoVisibilityItems(this, "parentStandings", () => this.childVisibilityMarker(), parents, parentKey, async (missing) => {
       return this.parentStandingGroups(await this.readOffThread(this.parentStandingsSteps(missing)));
-    });
+    }, () => this.db.inTransaction);
     return [...rows.values()].flat();
   }
   parentStandingGroups(rows) {
@@ -27318,7 +27451,7 @@ class LocalConnectorStore {
     return memoVisibilityItemsHere(this, "itemStandings", () => this.childVisibilityMarker(), identities, tierLedgerIdentityKey, (missing) => this.readHere(this.itemStandingsSteps(missing)));
   }
   itemStandingsOffThread(identities) {
-    return memoVisibilityItems(this, "itemStandings", () => this.childVisibilityMarker(), identities, tierLedgerIdentityKey, (missing) => this.readOffThread(this.itemStandingsSteps(missing)));
+    return memoVisibilityItems(this, "itemStandings", () => this.childVisibilityMarker(), identities, tierLedgerIdentityKey, (missing) => this.readOffThread(this.itemStandingsSteps(missing)), () => this.db.inTransaction);
   }
   *itemStandingsSteps(identities) {
     const out = new Map;
@@ -32029,6 +32162,35 @@ ${parentKey(ref)}`, { ref, origin });
       return query.mode === "get" ? statement.get(...query.params) : statement.all(...query.params);
     };
   }
+  async countEmbeddingHolds(visibility, counts, read, stopAtMs) {
+    const { ledger, members } = visibility;
+    let after = 0;
+    while (stopAtMs === undefined || Date.now() < stopAtMs) {
+      const page = await ledgerReadOffThread(ledger, ledger.embeddingHoldReasonSteps(this.corpusId, after), BACKGROUND_READS);
+      if (page.length === 0)
+        break;
+      const reasons = new Map;
+      for (const { key, reason } of page)
+        for (const pk of members.get(key)?.pks ?? [])
+          reasons.set(pk, reason);
+      if (reasons.size) {
+        const rows = await read({
+          sql: `SELECT i.item_pk, (SELECT COUNT(*) FROM chunks c WHERE c.item_pk = i.item_pk) AS chunks
+            FROM json_each(?) ids CROSS JOIN items i ON i.item_pk = ids.value
+            WHERE i.tombstoned = 0 AND i.trust_tier <> 'S5'`,
+          params: [JSON.stringify([...reasons.keys()])],
+          mode: "all"
+        });
+        for (const row of rows) {
+          const reason = reasons.get(row.item_pk);
+          counts[`${reason}_chunks`] += row.chunks;
+          counts[`${reason}_items`] += 1;
+        }
+      }
+      after = page[page.length - 1].rowId;
+      await ingestionTurn();
+    }
+  }
   async embeddingSweepInventory(provider, scope = {}, stopAtMs, windowChunks = MISSING_EMBEDDING_CHUNK_WINDOW) {
     const started = Date.now();
     const tier = await this.tierHiddenItemPksInTurns();
@@ -32038,7 +32200,8 @@ ${parentKey(ref)}`, { ref, origin });
     const namesOnly = await pkSetInTurns([tier.metadataLayer]);
     const moving = new Set;
     let walked = 0;
-    for (const member of this.tierLedgerHiddenMemo?.members.values() ?? []) {
+    const visibility = this.tierLedgerHiddenMemo;
+    for (const member of visibility?.members.values() ?? []) {
       if (member.flags.moving)
         for (const pk of member.pks)
           moving.add(pk);
@@ -32063,6 +32226,13 @@ ${parentKey(ref)}`, { ref, origin });
       skipped_retired_chunks: 0,
       inventory_complete: 0
     };
+    for (const reason of EMBEDDING_HOLD_REASONS) {
+      counts[`${reason}_chunks`] = 0;
+      counts[`${reason}_items`] = 0;
+    }
+    const read = this.embeddingSweepRead(offThreadReadsSupported(this.dbPath));
+    if (visibility && held.size)
+      await this.countEmbeddingHolds(visibility, counts, read, stopAtMs);
     const windowSql = `
       SELECT c.chunk_pk, i.item_pk, i.local_item_id, i.tombstoned, i.trust_tier, i.indexed_at,
         CASE WHEN 1 = 1 ${account ? "AND i.account_scope = ?" : ""} ${scoped.sql} THEN 1 ELSE 0 END AS in_scope
@@ -32073,7 +32243,6 @@ ${parentKey(ref)}`, { ref, origin });
       ORDER BY c.chunk_pk
     `;
     const recentSince = new Date(started - 3 * 24 * 60 * 60000).toISOString();
-    const read = this.embeddingSweepRead(offThreadReadsSupported(this.dbPath));
     const maxChunkPk = (await read({ sql: "SELECT COALESCE(MAX(chunk_pk), 0) AS n FROM chunks", params: [], mode: "get" })).n;
     let after = 0;
     while (stopAtMs === undefined || Date.now() < stopAtMs) {
@@ -32979,7 +33148,7 @@ ${parentKey(ref)}`, { ref, origin });
     const scanned = offThreadReadsSupported(this.dbPath) ? await scanVectorPagesOnPool(this.dbPath, provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit) : await this.scanVectorPagesInThread(provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit);
     if ("skippedReason" in scanned)
       return { rows: [], skippedReason: scanned.skippedReason };
-    const { bestByItem, dimensionMismatches } = scanned;
+    const { bestByItem, dimensionMismatches, onDemandReadsTablePresent } = scanned;
     let sliceStarted = performance.now();
     const candidates = Array.from(bestByItem.entries()).filter(([, candidate]) => candidate.bestCosine >= MIN_VECTOR_SCORE).sort((left, right) => right[1].bestCosine - left[1].bestCosine || left[0] - right[0]);
     let rankedItems = [];
@@ -32996,26 +33165,25 @@ ${parentKey(ref)}`, { ref, origin });
         if (visibleInBatch.length === 0) {
           const batch = candidates.slice(candidateOffset, candidateOffset + VECTOR_VISIBILITY_BATCH_SIZE);
           candidateOffset += batch.length;
-          const visible = this.visibleVectorItemPks(batch.map(([itemPk]) => itemPk), selectedAccount, filters);
+          const visible = this.visibleVectorItemPks(batch.map(([itemPk]) => itemPk), selectedAccount, filters, onDemandReadsTablePresent);
           visibleInBatch = batch.filter(([itemPk]) => visible.has(itemPk));
         }
         rankedItems.push(...visibleInBatch.splice(0, limit - rankedItems.length));
         continue;
       }
-      const stillVisible = this.visibleVectorItemPks(rankedItems.map(([itemPk]) => itemPk), selectedAccount, filters);
+      const stillVisible = this.visibleVectorItemPks(rankedItems.map(([itemPk]) => itemPk), selectedAccount, filters, onDemandReadsTablePresent);
       rankedItems = rankedItems.filter(([itemPk]) => stillVisible.has(itemPk));
       if (!canFill())
         break;
     }
     const searchRows = this.searchRowsByItemPks(rankedItems.map(([itemPk]) => itemPk), selectedAccount, filters);
-    const winnersByLocalItemId = new Map(rankedItems.map(([, candidate]) => [candidate.localItemId, candidate]));
-    const laneRows = searchRows.flatMap((row) => {
-      const winner = winnersByLocalItemId.get(row.sourceItem.localItemId);
-      if (winner === undefined)
+    const laneRows = rankedItems.flatMap(([itemPk, winner]) => {
+      const row = searchRows.get(itemPk);
+      if (!row || row.sourceItem.localItemId !== winner.localItemId)
         return [];
       if (!input.locate)
         return [{ ...row, contentMatched: true, bestCosine: winner.bestCosine }];
-      const chunk = this.chunkMatchForChunkPk(winner.bestChunkPk, "semantic");
+      const chunk = this.chunkMatchForChunkPk(winner.bestChunkPk, itemPk, winner.bestChunkContentHash);
       return [{ ...row, ...chunk ? { chunk } : {}, bestCosine: winner.bestCosine }];
     });
     return {
@@ -33207,14 +33375,16 @@ ${parentKey(ref)}`, { ref, origin });
       ORDER BY c.chunk_pk ASC
     `).all(...selectedLocalItemIds ?? [], ...tierExclusion.params, ...selectedAccount ? [selectedAccount] : [], ...selectedFilters.params);
   }
-  visibleVectorItemPks(itemPks, accountScope, filters) {
+  visibleVectorItemPks(itemPks, accountScope, filters, onDemandReadsTablePresent = false) {
     const visible = new Set;
     const selectedFilters = connectorStoreFilterSql(filters);
+    const metadataOnly = connectorStoreMetadataOnlySql(filters, onDemandReadsTablePresent);
     for (let offset = 0;offset < itemPks.length; offset += VECTOR_VISIBILITY_BATCH_SIZE) {
       const batch = itemPks.slice(offset, offset + VECTOR_VISIBILITY_BATCH_SIZE);
       const rows = this.db.query(`SELECT i.item_pk, i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id
         FROM items i WHERE i.item_pk IN (${batch.map(() => "?").join(",")}) AND i.tombstoned = 0
-        ${accountScope ? "AND i.account_scope = ?" : ""} ${selectedFilters.sql}`).all(...batch, ...accountScope ? [accountScope] : [], ...selectedFilters.params);
+        ${accountScope ? "AND i.account_scope = ?" : ""} ${selectedFilters.sql}
+        ${metadataOnly.sql ? `AND NOT ${metadataOnly.sql}` : ""}`).all(...batch, ...accountScope ? [accountScope] : [], ...selectedFilters.params, ...metadataOnly.params);
       for (const row of this.tierVisibleRows(rows, (row) => ({
         provider: row.provider,
         accountScope: row.account_scope,
@@ -33227,7 +33397,7 @@ ${parentKey(ref)}`, { ref, origin });
   }
   searchRowsByItemPks(itemPks, accountScope, filters) {
     if (itemPks.length === 0)
-      return [];
+      return new Map;
     const placeholders = itemPks.map(() => "?").join(", ");
     const selectedAccount = normalizeOptionalAccountScope(accountScope);
     const selectedFilters = connectorStoreFilterSql(filters);
@@ -33245,11 +33415,7 @@ ${parentKey(ref)}`, { ref, origin });
         ${selectedAccount ? "AND i.account_scope = ?" : ""}
         ${selectedFilters.sql}
     `).all(...itemPks, ...selectedAccount ? [selectedAccount] : [], ...selectedFilters.params);
-    const byPk = new Map(rows.map((row) => [row.item_pk, row]));
-    return itemPks.flatMap((itemPk) => {
-      const row = byPk.get(itemPk);
-      return row ? [searchRowFromItemRow(row)] : [];
-    });
+    return new Map(rows.map((row) => [row.item_pk, searchRowFromItemRow(row)]));
   }
   async keywordLanguages() {
     if (!offThreadReadsSupported(this.dbPath))
@@ -33623,13 +33789,13 @@ ${parentKey(ref)}`, { ref, origin });
     const of = counts.map((count) => Math.max(0, Math.log((items + 1) / (count + 0.5))));
     return { of, total: of.reduce((sum, weight) => sum + weight, 0), counts, population: items };
   }
-  chunkMatchForChunkPk(chunkPk, lane, queryTerms) {
-    const row = this.db.query("SELECT item_pk, chunk_index, content_hash, bounded_text FROM chunks WHERE chunk_pk = ?").get(chunkPk);
+  chunkMatchForChunkPk(chunkPk, itemPk, contentHash) {
+    const row = this.db.query("SELECT chunk_index, content_hash, bounded_text FROM chunks WHERE chunk_pk = ? AND item_pk = ? AND content_hash = ?").get(chunkPk, itemPk, contentHash);
     if (!row)
       return;
-    const priorRows = this.db.query("SELECT bounded_text FROM chunks WHERE item_pk = ? AND chunk_index < ? ORDER BY chunk_index").all(row.item_pk, row.chunk_index);
+    const priorRows = this.db.query("SELECT bounded_text FROM chunks WHERE item_pk = ? AND chunk_index < ? ORDER BY chunk_index").all(itemPk, row.chunk_index);
     const itemOffset = priorRows.reduce((sum, prior) => sum + prior.bounded_text.length, 0);
-    return chunkMatchFromRows(chunkPk, row, itemOffset, lane, queryTerms);
+    return chunkMatchFromRows(chunkPk, row, itemOffset, "semantic");
   }
   *keywordChunkMatchesSteps(rows, queryTerms) {
     const wanted = [...rows.entries()].filter(([, row]) => row.chunk_pk !== null && row.chunk_pk !== undefined);
@@ -34097,47 +34263,67 @@ ${parentKey(ref)}`, { ref, origin });
     const value = await this.tierHiddenItemPksInTurns();
     this.tierHiddenCountsMemo = { at: Date.now(), value };
     const key = JSON.stringify(scope ?? null);
-    const counts = this.unreadHoldCounts(await runHiddenStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
     const memos = this.settledUnreadableCountMemo ??= new Map;
+    const stamp = this.settledUnreadableStamp();
+    if (this.reusesSettledUnreadableCount(memos.get(key), stamp))
+      return;
+    const counts = this.unreadHoldCounts(await runHiddenStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
+    if (this.settledUnreadableCountMemo !== memos)
+      return;
     if (memos.size > 32)
       memos.clear();
-    memos.set(key, { at: Date.now(), ...counts });
+    memos.set(key, { at: Date.now(), stamp, ...counts });
+  }
+  settledUnreadableStamp() {
+    try {
+      const visibility = this.visibilityMarker();
+      const writes = this.writeSequence();
+      return visibility === undefined || writes === undefined ? undefined : [visibility, writes];
+    } catch {
+      return;
+    }
+  }
+  reusesSettledUnreadableCount(memo, stamp) {
+    return memo?.stamp !== undefined && stamp !== undefined && memo.stamp[0] === stamp[0] && memo.stamp[1] === stamp[1] && Date.now() - memo.at < STORE_UNCHANGED_REUSE_MS;
   }
   settledUnreadableCount(scope, maxAgeMs) {
     const key = JSON.stringify(scope ?? null);
     const memos = this.settledUnreadableCountMemo ??= new Map;
     const memo = memos.get(key);
+    const stamp = this.settledUnreadableStamp();
+    if (memo && this.reusesSettledUnreadableCount(memo, stamp))
+      return memo;
     if (maxAgeMs > 0 && memo) {
-      if (Date.now() - memo.at >= maxAgeMs)
-        this.refreshSettledUnreadableCountInTurns(key, scope);
+      if (stamp !== undefined || Date.now() - memo.at >= maxAgeMs)
+        this.refreshSettledUnreadableCountInTurns(key, scope, stamp);
       return memo;
     }
     if (offThreadReadsSupported(this.dbPath)) {
-      this.refreshSettledUnreadableCountInTurns(key, scope);
+      this.refreshSettledUnreadableCountInTurns(key, scope, stamp);
       return memo ?? { count: 0, waitingPks: [], policyPks: [] };
     }
     const counts = this.unreadHoldCounts(runHiddenStepsHere(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
     if (memos.size > 32)
       memos.clear();
-    memos.set(key, { at: Date.now(), ...counts });
+    memos.set(key, { at: Date.now(), stamp, ...counts });
     return counts;
   }
   settledUnreadableCountRefresh;
-  refreshSettledUnreadableCountInTurns(key, scope) {
+  refreshSettledUnreadableCountInTurns(key, scope, stamp) {
     const running = this.settledUnreadableCountRefresh ??= new Set;
     if (running.has(key))
       return;
     running.add(key);
-    const prior = this.settledUnreadableCountMemo?.get(key);
+    const memos = this.settledUnreadableCountMemo ??= new Map;
+    const prior = memos.get(key);
     (async () => {
       try {
         const counts = this.unreadHoldCounts(await runHiddenStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
-        const memos = this.settledUnreadableCountMemo ??= new Map;
-        if (memos.get(key) !== prior)
+        if (this.settledUnreadableCountMemo !== memos || memos.get(key) !== prior)
           return;
         if (memos.size > 32)
           memos.clear();
-        memos.set(key, { at: Date.now(), ...counts });
+        memos.set(key, { at: Date.now(), stamp, ...counts });
       } catch {} finally {
         running.delete(key);
       }

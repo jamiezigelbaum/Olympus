@@ -1,5 +1,5 @@
 import type { Database } from 'bun:sqlite';
-import { waitFor } from './helpers/test-clock.ts';
+import { createTestClock, waitFor } from './helpers/test-clock.ts';
 // Critical-review fixes for P1b (#78 at d371a174):
 // D1 — the conversation is part of every tier identity: chat message ids
 //      repeat across chats, and a collision must never route, hide or lose a
@@ -11,13 +11,14 @@ import { waitFor } from './helpers/test-clock.ts';
 // flight, and copy lists have no ceiling.
 
 import { existsSync, rmSync } from 'node:fs';
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import { SecretLocationsIndex } from '../src/workers/classification/secret-locations.ts';
 import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { LocalConnectorStore, TierLedgerUnavailableError } from '../src/workers/connector-store/index.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { tieredStoreSetLedgerPath } from '../src/workers/connector-store/tiered-store-set.ts';
+import { STORE_UNCHANGED_REUSE_MS } from '../src/workers/source-index/status.ts';
 import {
   ACCOUNT,
   CORPORA,
@@ -213,14 +214,18 @@ describe('the set ledger governs every handle, and its loss fails closed', () =>
   // A store the read pool reads never walks the hidden copies inside the
   // status call: on the loop that walk was the gate's top statement (16 Nov).
   // The call serves the last count and a new one is read in turns, on the
-  // read worker, whatever age the caller allows.
-  test('a status call never reads the hidden copies itself; a fresh count follows in turns', async () => {
+  // read worker when the store changes or the safety recount is due.
+  test('status recounts settled unreadable copies off-thread on change or at the safety bound', async () => {
     const dir = workspace();
     const tiered = await raised(dir);
     const store = tiered.stores.internal!;
     const ledger = tiered.ledger;
     let inCall = 0;
     let inTurns = 0;
+    const identity = identityOf('garden');
+    const maxAgeMs = 60_000;
+    const clock = createTestClock(Date.now());
+    const now = spyOn(Date, 'now').mockImplementation(clock.now);
     const real = ledger.corpusCopyIdentities.bind(ledger);
     ledger.corpusCopyIdentities = ((...args: Parameters<typeof real>) => { inCall += 1; return real(...args); }) as typeof real;
     const realSteps = ledger.corpusCopyIdentitiesSteps.bind(ledger);
@@ -228,25 +233,41 @@ describe('the set ledger governs every handle, and its loss fails closed', () =>
     const realReads = ledger.corpusCopyIdentityReads.bind(ledger);
     ledger.corpusCopyIdentityReads = ((...args: Parameters<typeof realReads>) => { inTurns += 1; return realReads(...args); }) as typeof realReads;
     try {
-      const statusThenTurns = async (options?: { countsMaxAgeMs: number }): Promise<{ call: number; turns: number }> => {
-        const [callBefore, turnsBefore] = [inCall, inTurns];
-        store.status(undefined, options);
-        const call = inCall - callBefore;
-        await waitFor(() => inTurns !== turnsBefore, { timeoutMs: 5_000, intervalMs: 5, description: 'a recount in turns' });
-        const turns = inTurns - turnsBefore;
-        // Until it ends, a later call finds it running and starts none.
+      const statusThenTurns = async (): Promise<void> => {
+        store.status(undefined, { countsMaxAgeMs: maxAgeMs });
         await waitFor(() => ((store as unknown as { settledUnreadableCountRefresh?: Set<string> }).settledUnreadableCountRefresh?.size ?? 0) === 0,
-          { timeoutMs: 5_000, intervalMs: 5, description: 'the recount finished' });
-        return { call, turns };
+          { timeoutMs: 5_000, intervalMs: 5, description: 'the recount finished or was reused' });
       };
-      for (const options of [{ countsMaxAgeMs: 60_000 }, undefined, { countsMaxAgeMs: 0 }]) {
-        ledger.recordDecision(identityOf('unrelated'), ledger.getCurrent(identityOf('garden'))! as unknown as Parameters<typeof ledger.recordDecision>[1]);
-        store.advanceItemVersion(identityOf('garden'));
-        const seen = await statusThenTurns(options);
-        expect(seen.call).toBe(0);
-        expect(seen.turns).toBeGreaterThan(0);
+      for (const prepare of [false, true]) {
+        const recount = async (expectedWalks: number): Promise<void> => {
+          const turnsBefore = inTurns;
+          if (prepare) await store.prepareStatusCounts();
+          else await statusThenTurns();
+          expect(inCall).toBe(0);
+          expect(inTurns - turnsBefore).toBe(expectedWalks);
+        };
+        await recount(prepare ? 0 : 1);
+        await clock.advance(maxAgeMs + 1);
+        await recount(0);
+
+        const writes = store.writeSequence();
+        const visibility = store.visibilityMarker();
+        ledger.setOverride(identity, prepare ? { kind: 'not_secret' } : { kind: 'tier', tier: 'secrets' });
+        expect(store.visibilityMarker()).not.toBe(visibility);
+        expect(store.writeSequence()).toBe(writes);
+        await recount(1);
+
+        const afterOverride = store.visibilityMarker();
+        store.advanceItemVersion({ ...identity, sourceVersion: prepare ? 'v3' : 'v2' });
+        expect(store.writeSequence()).not.toBe(writes);
+        expect(store.visibilityMarker()).toBe(afterOverride);
+        await recount(1);
+
+        await clock.advance(STORE_UNCHANGED_REUSE_MS);
+        await recount(1);
       }
     } finally {
+      now.mockRestore();
       ledger.corpusCopyIdentities = real;
       ledger.corpusCopyIdentitiesSteps = realSteps;
       ledger.corpusCopyIdentityReads = realReads;
@@ -259,38 +280,29 @@ describe('the set ledger governs every handle, and its loss fails closed', () =>
     const tiered = await raised(dir);
     const store = tiered.stores.internal!;
     const ledger = tiered.ledger;
-    const real = ledger.corpusCopyIdentities.bind(ledger);
-    let reads = 0;
-    ledger.corpusCopyIdentities = ((...args: Parameters<typeof real>) => { reads += 1; return real(...args); }) as typeof real;
-    const realSteps = ledger.corpusCopyIdentitiesSteps.bind(ledger);
-    // The paged form (#858) reads the hidden copies too.
-    ledger.corpusCopyIdentitiesSteps = ((...args: Parameters<typeof realSteps>) => { reads += 1; return realSteps(...args); }) as typeof realSteps;
-    // A rebuild in turns reads them on the read worker (loop-stall step-back, family 2).
-    const realReads = ledger.corpusCopyIdentityReads.bind(ledger);
-    ledger.corpusCopyIdentityReads = ((...args: Parameters<typeof realReads>) => { reads += 1; return realReads(...args); }) as typeof realReads;
+    const clock = createTestClock(Date.now());
+    const now = spyOn(Date, 'now').mockImplementation(clock.now);
+    const here = spyOn(ledger, 'corpusVisibilityPages');
+    const pooled = spyOn(ledger, 'corpusVisibilityFlaggedSteps');
+    const reads = () => here.mock.calls.length + pooled.mock.calls.length;
     try {
-      const readsFor = (): number => {
-        const before = reads;
-        store.status(undefined, { countsMaxAgeMs: 5 });
-        return reads - before;
-      };
-      // The first call too reads nothing itself; the set is built in turns.
-      const first = reads;
-      expect(readsFor()).toBe(0);
-      await waitFor(() => reads !== first, { timeoutMs: 5_000, intervalMs: 5, description: 'the set built in turns' });
-      expect(reads).toBeGreaterThan(first);
+      await store.prepareStatusCounts();
       ledger.recordDecision(identityOf('unrelated'), ledger.getCurrent(identityOf('garden'))! as unknown as Parameters<typeof ledger.recordDecision>[1]);
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      const maxAgeMs = 5;
+      await clock.advance(maxAgeMs);
       // Expired: the call itself reads nothing and answers from the older set.
-      const before = reads;
-      expect(readsFor()).toBe(0);
+      const before = reads();
+      expect(store.status(undefined, { countsMaxAgeMs: maxAgeMs }).counts.chunks).toBe(0);
+      expect(reads()).toBe(before);
       // The rebuild runs in later turns.
-      await waitFor(() => reads !== before, { timeoutMs: 5_000, intervalMs: 5, description: 'the rebuild in turns' });
-      expect(reads).toBeGreaterThan(before);
+      const refresh = (store as unknown as { tierHiddenCountsRefresh?: Promise<void> }).tierHiddenCountsRefresh;
+      expect(refresh).toBeDefined();
+      await refresh;
+      expect(reads()).toBeGreaterThan(before);
     } finally {
-      ledger.corpusCopyIdentities = real;
-      ledger.corpusCopyIdentitiesSteps = realSteps;
-      ledger.corpusCopyIdentityReads = realReads;
+      here.mockRestore();
+      pooled.mockRestore();
+      now.mockRestore();
       tiered.close();
     }
   });

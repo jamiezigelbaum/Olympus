@@ -58,6 +58,7 @@ function fixture() {
       spyOn(f.ledger, 'listAwaitingTextWindowSteps'), spyOn(f.ledger, 'listPersonalFirstWindowSteps'),
       spyOn(f.ledger, 'rejudgeCandidatePageSteps'), spyOn(f.ledger, 'listRoutedSteps'),
       spyOn(f.ledger, 'listRoutedOverridesSteps'), spyOn(f.ledger, 'listClearedOverrideRowsSteps'),
+      spyOn(f.ledger, 'staleEmbedHoldSteps'),
     ],
   };
 }
@@ -84,7 +85,7 @@ test('settled ledgers read no background tier item windows on idle ticks', async
   const reads = f.readWindows();
   const marker = f.ledger.changeMarker();
   for (let tick = 0; tick < 5; tick++) await f.tick();
-  expect(reads.map(read => read.mock.calls.length)).toEqual([0, 0, 0, 0, 0, 0]);
+  for (const read of reads) expect(read).not.toHaveBeenCalled();
   // Idle ticks write nothing to the ledger either, progress meta included.
   expect(f.ledger.changeMarker()).toBe(marker);
   expect(f.service.backlog().storedWalks?.[0]).toMatchObject({
@@ -93,8 +94,29 @@ test('settled ledgers read no background tier item windows on idle ticks', async
       namesOnly: { reason: 'idle_unchanged', lastResult: 'no_work' },
       personalFirst: { reason: 'retired', lastResult: 'retired' },
       rejudge: { reason: 'idle_unchanged', lastResult: 'no_work' },
+      staleEmbedHolds: { reason: 'idle_unchanged', lastResult: 'no_work' },
     },
   });
+});
+
+test('a new decided hold wakes the release walk on the next tick', async () => {
+  const f = fixture();
+  const identity = identityOf('decided');
+  const decision = classifyItemTiers({ signals: { title: 'Notes' }, namesOnly: true });
+  f.ledger.recordRoutedPlacement(identity, decision, f.set.placementFor(decision));
+  await f.tick();
+  await f.tick();
+  const read = spyOn(f.ledger, 'staleEmbedHoldSteps');
+  const db = new Database(f.ledger.dbPath);
+  try {
+    db.query('UPDATE tier_copies SET embed_hold = 1 WHERE provider_item_id = ?').run(identity.providerItemId);
+  } finally {
+    db.close();
+  }
+  await f.tick();
+  expect(read).toHaveBeenCalledTimes(1);
+  expect(f.ledger.copies(identity)[0]?.embedHold).toBe(false);
+  expect(f.service.backlog().storedWalks?.[0]?.walkers.staleEmbedHolds?.lastResult).toBe('changed');
 });
 
 test('a new unread item and a folder revision each wake names-only settlement on the next tick', async () => {
@@ -169,7 +191,10 @@ test('the hourly backstop reaches the end after a missed folder revision', async
   expect(read).not.toHaveBeenCalled();
   await f.clock.advance(60 * 60_000);
   expect(f.service.backlog().storedWalks?.[0]?.walkers.namesOnly?.reason).toBe('backstop_due');
+  const holds = spyOn(f.ledger, 'staleEmbedHoldSteps');
+  expect(f.service.backlog().storedWalks?.[0]?.walkers.staleEmbedHolds?.reason).toBe('backstop_due');
   await f.tick();
+  expect(holds).toHaveBeenCalledTimes(1);
   expect(f.ledger.getCurrent(pending)?.reasons).not.toContain('content:names_only');
   await f.tick();
   expect(f.ledger.getCurrent(pending)?.reasons).toContain('content:names_only');

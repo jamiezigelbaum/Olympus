@@ -1,7 +1,7 @@
 import { READ_WIDE_MATCH_LIMIT, markReadWidePack, readWideEnabled, scoresHaveNoLeader } from './read-wide.ts';
 import { withKeywordRequestScope } from './source-index/keyword-context.ts';
 import { bindReleaseChunks, copyReleaseChunks } from './release-manifest.ts';
-import { KEYWORD_PREPARATION_INCOMPLETE, keywordPreparationGap, RECENT_ITEMS_CUT_SHORT, STARTUP_SEARCH_GAP, VISIBILITY_CHECK_CUT_SHORT, recentItemsTimeoutGap, semanticSearchTimedOut, semanticTimeoutGap, visibilityCheckTimeoutGap } from './source-index/partial-search.ts';
+import { KEYWORD_PREPARATION_INCOMPLETE, keywordPreparationGap, RECENT_ITEMS_CUT_SHORT, RERANK_FALLBACK_GAP, STARTUP_SEARCH_GAP, VISIBILITY_CHECK_CUT_SHORT, recentItemsTimeoutGap, semanticSearchTimedOut, semanticTimeoutGap, visibilityCheckTimeoutGap } from './source-index/partial-search.ts';
 import { startupProgress } from './startup-progress.ts';
 import {
   rerankCandidates,
@@ -554,6 +554,7 @@ async function buildPreparedEvidencePackDetailed(
       promoted: reranked.audit.outcome === 'applied'
         ? hydrated.filter(entry => !entry.policyDenied && scorable.indexOf(entry) >= hydrated.length - denied.length).length : 0,
     } : reranked.audit;
+    if (rerank.outcome === 'timed_out' || rerank.outcome === 'failed') extractionGaps.push(RERANK_FALLBACK_GAP);
   }
   const windowSide = conversationWindowPerSide();
   if (windowSide > 0 && !input.selectedItems?.length) {

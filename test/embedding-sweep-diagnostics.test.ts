@@ -11,7 +11,7 @@ import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { EMBEDDING_SWEEP_IDLE_BACKOFF_ENV, EMBEDDING_SWEEP_IDLE_FULL_PASS_MS, SourceScheduler, withEmbeddingSweep } from '../src/workers/source-scheduler.ts';
 import { TransientSourceEmbeddingError } from '../src/workers/source-index/embeddings.ts';
 import { FileLeaseBusyError } from '../src/core/file-lease.ts';
-import { EMBEDDING_SWEEP_IDLE_SUFFIX } from '../src/core/embedding-sweep-idle.ts';
+import { EMBEDDING_SWEEP_IDLE_SUFFIX, readEmbeddingSweepIdle, writeEmbeddingSweepIdle } from '../src/core/embedding-sweep-idle.ts';
 import { CORPORA, FIXTURE_PLACEMENT, fixtureConnector, identityOf, localId, localProvider, RecordingProvider, tempDir } from './helpers/tier-fixtures.ts';
 import { createTestClock } from './helpers/test-clock.ts';
 
@@ -74,6 +74,9 @@ async function fixture(options: { accountScope?: string; empty?: boolean } = {})
     const record = JSON.parse(lines[0]!.slice('[olympus:embedding-sweep] '.length));
     expect(record).toMatchObject({ source_index: 0, store_index: 0 });
     expect(record.next_run_at).toBe(status.sources[0]!.tasks[0]!.next_run_at);
+    const sweep = status.sources[0]!.tasks[0]!.embedding_sweep?.[0];
+    expect(sweep?.counts).toBeDefined();
+    expect(record).toMatchObject(sweep!.counts);
     now = new Date(record.next_run_at);
     return record;
   };
@@ -107,9 +110,33 @@ test('a superseded-only Private backlog is an explained idle pass, never revived
 
 test('pending judgments embed early under the shared local identity and idle is still logged after completion', async () => {
   const f = await fixture();
-  expect(await f.pass()).toMatchObject({ eligible_chunks: 1, pending_chunks: 1, skipped_held_chunks: 0, chunks_embedded: 1 });
-  expect(await f.pass()).toMatchObject({ eligible_chunks: 0, pending_chunks: 0, chunks_embedded: 0 });
+  expect(await f.pass()).toMatchObject({ eligible_chunks: 1, pending_chunks: 1, skipped_held_chunks: 0, held_for_judgment_chunks: 1, chunks_embedded: 1 });
+  expect(await f.pass()).toMatchObject({ eligible_chunks: 0, pending_chunks: 0, chunks_embedded: 0, held_for_judgment_chunks: 1, held_for_judgment_items: 1 });
   expect(f.ledger.getCurrent(identityOf('synthetic-id'))?.contentPending).toBe(true);
+});
+
+test('per-store sweep receipts count held items and chunks by reason', async () => {
+  const f = await fixture({ empty: true });
+  const ids = ['for-judgment', 'decided', 'unread', 'moving'];
+  await f.set.sync(fixtureConnector(() => ids.map(id => ({ id, name: 'Sample.txt', text: 'Sample text.' }))),
+    { fetchContent: true, placement: FIXTURE_PLACEMENT }, { embed: false });
+  f.store.usePersonalEmbeddingProvider(() => undefined);
+  const db = new Database(f.ledger.dbPath);
+  try {
+    db.query("UPDATE tier_items SET state = 'current', metadata_pending = 0, content_pending = 0 WHERE provider_item_id = 'decided'").run();
+    db.query("UPDATE tier_items SET content_read = 0 WHERE provider_item_id = 'unread'").run();
+    db.query("UPDATE tier_items SET state = 'moving' WHERE provider_item_id = 'moving'").run();
+  } finally {
+    db.close();
+  }
+  const holds = {
+    held_for_judgment_chunks: 1, held_for_judgment_items: 1,
+    held_after_decision_chunks: 1, held_after_decision_items: 1,
+    held_while_text_is_unread_chunks: 1, held_while_text_is_unread_items: 1,
+    held_while_moving_chunks: 1, held_while_moving_items: 1,
+    held_for_other_reasons_chunks: 0, held_for_other_reasons_items: 0,
+  };
+  expect(await f.pass()).toMatchObject({ ...holds, pending_chunks: 4, eligible_chunks: 0, inventory_complete: 1 });
 });
 
 test('held, moving and failed reasons remain distinct', async () => {
@@ -147,7 +174,7 @@ test('a spent diagnostic budget explicitly reports an incomplete inventory', asy
   expect(await f.pass()).toMatchObject({ chunks_embedded: 1 });
   const inventory = f.store.embeddingSweepInventory.bind(f.store);
   f.store.embeddingSweepInventory = (provider, scope) => inventory(provider, scope, Date.now() - 1);
-  expect(await f.pass()).toMatchObject({ inventory_complete: 0, pending_chunks: 0, rested: 0 });
+  expect(await f.pass()).toMatchObject({ inventory_complete: 0, pending_chunks: 0, rested: 0, not_resting: 'inventory_incomplete' });
   expect(f.walks).toEqual({ inventory: 0, workList: 1 });
   expect(existsSync(f.statePath)).toBe(false);
 });
@@ -156,9 +183,9 @@ test('provider deferral and lease contention log their backoff and exact next ru
   const f = await fixture();
   const embed = f.store.embedChunks.bind(f.store);
   f.store.embedChunks = async () => { throw new TransientSourceEmbeddingError('built-in', 'timeout', 1, 1_000); };
-  expect(await f.pass()).toMatchObject({ stores_deferred: 1, backoff_ms: 120_000, skipped_deferred_items: 1 });
+  expect(await f.pass()).toMatchObject({ stores_deferred: 1, backoff_ms: 120_000, skipped_deferred_items: 1, not_resting: 'deferred' });
   f.store.embedChunks = async () => { throw new FileLeaseBusyError('synthetic'); };
-  expect(await f.pass()).toMatchObject({ stores_deferred: 1, backoff_ms: 240_000, skipped_lease_busy_items: 1 });
+  expect(await f.pass()).toMatchObject({ stores_deferred: 1, backoff_ms: 240_000, skipped_lease_busy_items: 1, not_resting: 'busy' });
   f.store.embedChunks = embed;
   expect(await f.pass()).toMatchObject({ chunks_embedded: 1, stores_deferred: 0, backoff_ms: 0 });
 });
@@ -199,14 +226,16 @@ test('the quiet sweep ignores another leg but wakes for a local ledger-only visi
   expect(walks).not.toHaveBeenCalled();
 
   db.query("UPDATE tier_copies SET copy_state = 'superseded' WHERE corpus_id = ?").run(f.store.corpusId);
-  expect(await f.pass()).toMatchObject({ rested: 0 });
+  expect(await f.pass()).toMatchObject({ rested: 0, wake: 'visibility' });
   expect(walks).toHaveBeenCalledTimes(1);
 });
 
 async function catchUp(f: Awaited<ReturnType<typeof fixture>>): Promise<void> {
-  expect(await f.pass()).toMatchObject({ chunks_embedded: 1, rested: 0 });
+  expect(await f.pass()).toMatchObject({ chunks_embedded: 1, rested: 0, wake: 'none_remembered', not_resting: 'items_attempted' });
   expect(f.walks).toEqual({ inventory: 1, workList: 1 });
-  expect(await f.pass()).toMatchObject({ inventory_complete: 1, pending_chunks: 0, rested: 0 });
+  const idle = await f.pass();
+  expect(idle).toMatchObject({ inventory_complete: 1, pending_chunks: 0, rested: 0, wake: 'none_remembered' });
+  expect(idle).not.toHaveProperty('not_resting');
   expect(f.walks).toEqual({ inventory: 1, workList: 0 });
   expect(existsSync(f.statePath)).toBe(true);
 }
@@ -219,11 +248,20 @@ test('the first pass after reopening the scheduler, ledger and store runs no chu
   const sequence = f.store.writeSequence();
   const visibility = f.store.visibilityMarker();
   expect(await f.pass()).toMatchObject({ pending_chunks: 0, rested: 0 });
+  const receipts = await readEmbeddingSweepIdle(f.statePath);
+  expect(receipts.size).toBe(1);
+  expect([...receipts.values()][0]).toMatchObject({ writes: sequence, visibilityHash: expect.stringMatching(/^[a-f0-9]{16}$/) });
   expect(f.walks).toEqual({ inventory: 1, workList: 0 });
   f.restart();
   expect(f.store.writeSequence()).toBe(sequence);
   expect(f.store.visibilityMarker()).toBe(visibility);
-  expect(await f.pass()).toMatchObject({ inventory_complete: 1, rested: 1, chunks_embedded: 0 });
+  const rested = await f.pass();
+  expect(rested).toMatchObject({
+    inventory_complete: 1, rested: 1, chunks_embedded: 0,
+    held_for_judgment_items: 1, held_for_judgment_chunks: 1,
+  });
+  expect(rested).not.toHaveProperty('wake');
+  expect(rested).not.toHaveProperty('not_resting');
   expect(f.walks).toEqual({ inventory: 0, workList: 0 });
 });
 
@@ -250,7 +288,7 @@ test('a vector write wakes the first pass even when visibility is unchanged', as
   f.restart();
   expect(f.store.writeSequence()).not.toBe(sequence);
   expect(f.store.visibilityMarker()).toBe(visibility);
-  expect(await f.pass()).toMatchObject({ chunks_embedded: 1, rested: 0 });
+  expect(await f.pass()).toMatchObject({ chunks_embedded: 1, rested: 0, wake: 'writes' });
   expect(f.walks).toEqual({ inventory: 1, workList: 1 });
 });
 
@@ -264,7 +302,7 @@ test('a ledger visibility write wakes the first pass even when the store write s
   f.restart();
   expect(f.store.writeSequence()).toBe(sequence);
   expect(f.store.visibilityMarker()).not.toBe(visibility);
-  expect(await f.pass()).toMatchObject({ rested: 0 });
+  expect(await f.pass()).toMatchObject({ rested: 0, wake: 'visibility' });
   expect(f.walks).toEqual({ inventory: 1, workList: 0 });
 });
 
@@ -306,8 +344,53 @@ test('the full pass is due at 30 minutes of wall time across restarts', async ()
   expect(f.walks).toEqual({ inventory: 0, workList: 0 });
   await clock.advance(1);
   f.restart();
-  expect(await f.pass()).toMatchObject({ rested: 0 });
+  expect(await f.pass()).toMatchObject({ rested: 0, wake: 'expired' });
   expect(f.walks).toEqual({ inventory: 1, workList: 0 });
+});
+
+test('a key change with the same writes and visibility reports a build change', async () => {
+  const f = await fixture();
+  await catchUp(f);
+  const receipts = await readEmbeddingSweepIdle(f.statePath);
+  for (const receipt of receipts.values()) receipt.key = '0'.repeat(64);
+  await writeEmbeddingSweepIdle(f.statePath, receipts);
+  f.restart();
+  expect(await f.pass()).toMatchObject({ rested: 0, wake: 'build' });
+});
+
+test('old receipts can still rest and a changed key reports key_changed', async () => {
+  const f = await fixture();
+  await catchUp(f);
+  const receipts = await readEmbeddingSweepIdle(f.statePath);
+  for (const receipt of receipts.values()) {
+    delete receipt.writes;
+    delete receipt.visibilityHash;
+  }
+  await writeEmbeddingSweepIdle(f.statePath, receipts);
+  f.restart();
+  expect(await f.pass()).toMatchObject({ rested: 1 });
+  for (const receipt of receipts.values()) receipt.key = '0'.repeat(64);
+  await writeEmbeddingSweepIdle(f.statePath, receipts);
+  expect(await f.pass()).toMatchObject({ rested: 0, wake: 'key_changed' });
+});
+
+test('a marker change during an otherwise idle walk prevents remembering it', async () => {
+  const f = await fixture();
+  await catchUp(f);
+  const marker = spyOn(f.store, 'embeddingSweepVisibilityMarker')
+    .mockReturnValueOnce('synthetic marker before')
+    .mockReturnValue('synthetic marker after');
+  cleanups.push(() => marker.mockRestore());
+  expect(await f.pass()).toMatchObject({ rested: 0, wake: 'visibility', not_resting: 'marker_moved_during_pass' });
+  expect(existsSync(f.statePath)).toBe(true);
+  expect((await readEmbeddingSweepIdle(f.statePath)).size).toBe(0);
+});
+
+test('a deferral wakes an otherwise fresh receipt', async () => {
+  const f = await fixture();
+  await catchUp(f);
+  f.store.setEmbeddingDeferral('embedding_provider_unavailable');
+  expect(await f.pass()).toMatchObject({ rested: 0, wake: 'deferred', not_resting: 'deferred' });
 });
 
 test('unreadable remembered state forces a walk on restart', async () => {
@@ -342,7 +425,9 @@ test('with the idle back-off switched off, every pass walks the store', async ()
   cleanups.push(() => { if (before === undefined) delete process.env[EMBEDDING_SWEEP_IDLE_BACKOFF_ENV]; else process.env[EMBEDDING_SWEEP_IDLE_BACKOFF_ENV] = before; });
   f.restart();
   for (let i = 0; i < 2; i++) {
-    await f.pass();
+    const record = await f.pass();
+    expect(record).not.toHaveProperty('wake');
+    expect(record).not.toHaveProperty('not_resting');
     expect(f.walks).toEqual({ inventory: 1, workList: 0 });
   }
 });
@@ -353,7 +438,7 @@ test('a deferred pass invalidates the previous idle pass before the queue is los
   const before = f.store.writeSequence();
   f.store.queueEmbedding([localId('synthetic-id')], f.provider);
   f.store.embedChunks = async () => { throw new TransientSourceEmbeddingError('built-in', 'timeout', 1, 1_000); };
-  expect(await f.pass()).toMatchObject({ stores_deferred: 1, rested: 0 });
+  expect(await f.pass()).toMatchObject({ stores_deferred: 1, rested: 0, wake: 'queued', not_resting: 'deferred' });
   expect(f.store.writeSequence()).toBe(before);
   f.restart();
   expect(await f.pass()).toMatchObject({ pending_chunks: 0, rested: 0 });
@@ -375,7 +460,7 @@ test('failed passes and idle passes that rely on failed-item exclusions do not s
 test('a brand-new store without a write sequence picks up its first write', async () => {
   const f = await fixture({ empty: true });
   expect(f.store.writeSequence()).toBeUndefined();
-  expect(await f.pass()).toMatchObject({ eligible_chunks: 0, rested: 0 });
+  expect(await f.pass()).toMatchObject({ eligible_chunks: 0, rested: 0, wake: 'marker_unavailable', not_resting: 'marker_unavailable' });
   await f.set.sync(fixtureConnector(() => [
     { id: 'synthetic-id', name: 'synthetic-name.txt', text: 'The first synthetic body.' },
   ]), { fetchContent: true, placement: FIXTURE_PLACEMENT }, { embed: false });

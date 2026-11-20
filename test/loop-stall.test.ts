@@ -2,9 +2,9 @@
 import { expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import { tmpdir, userInfo } from 'node:os';
-import { mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, openSync, readFileSync, rmSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { Database } from 'bun:sqlite';
-import { beatP95, coldStartVerdict, gate, memoryMaxBytes, sampledBeatSite, sqliteGuards, summarizeBeats, summarizeStartupGaps, summarizeStartupSearches } from '../scripts/loop-stall-test.ts';
+import { OffLoopAppender, beatP95, coldStartVerdict, gate, memoryMaxBytes, sampledBeatSite, sqliteGuards, summarizeBeats, summarizeStartupGaps, summarizeStartupSearches } from '../scripts/loop-stall-test.ts';
 import { join } from 'node:path';
 import { waitFor } from './helpers/test-clock.ts';
 
@@ -271,4 +271,21 @@ test('start-up searches: outcomes before READY, latency and stable result lists 
   ], 2);
   expect(summary).toMatchObject({ sent: 6, skipped: 2, before_ready: { count: 2, outcomes: { http_503: 1, ok: 1 }, max_ms: 2_500 },
     after_ready: { count: 4, ok: 4, max_ms: 1_500, over_1s: 1 }, after_ready_results: { a: ['1,2'], b: ['3', '4'] } });
+});
+
+test('the probe writes its beat log off the loop, in order, and says when every line is in the file', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'off-loop-'));
+  try {
+    const path = join(dir, 'front.beats.jsonl');
+    const log = new OffLoopAppender(openSync(path, 'a', 0o600));
+    const lines = Array.from({ length: 2000 }, (_, i) => `{"n":${i}}\n`);
+    for (const line of lines) log.append(line);
+    // append returns before the bytes are written: the loop never waits on the file system.
+    expect(readFileSync(path, 'utf8').length).toBeLessThan(lines.join('').length);
+    await new Promise<void>(resolve => log.whenIdle(resolve));
+    expect(readFileSync(path, 'utf8')).toBe(lines.join(''));
+    let idle = false;
+    log.whenIdle(() => { idle = true; });
+    expect(idle).toBe(true);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
