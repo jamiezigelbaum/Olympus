@@ -82,7 +82,7 @@ function privacyFrame(options: { missingConfirmation?: boolean; failAddition?: b
       }
       return privacyToolResult({ configured: true, description: '', rules: saved, pendingCount: 0, revision: String(revision) }, name === CHATGPT_PRIVACY_TOOLS.set ? 'saved' : 'current', 'test-confirmation');
     },
-    render, compact: () => false, fullscreen: () => {}, data: () => ({ sources: [] }), heldWords: info => privacyHeldItemsText(info, DASHBOARD_CHATGPT_PRIVACY_COUNT_COPY, Date.now()), judgeAction: () => null, picker: null, remember: () => {}, close: dashboard,
+    render, compact: () => false, fullscreen: () => {}, data: () => ({ sources: [] }), heldWords: info => privacyHeldItemsText(info, DASHBOARD_CHATGPT_PRIVACY_COUNT_COPY, Date.now()).text, judgeAction: () => null, picker: null, remember: () => {}, close: dashboard,
   }, privacyLogic);
   dashboard();
   const frame: AppFrame = { evaluate: async <T>(expression: string) => new Function('document', 'Event', `return ${expression}`)(doc, win.Event) as T };

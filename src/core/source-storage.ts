@@ -39,7 +39,7 @@ import { SecretLocationsIndex } from '../workers/classification/secret-locations
 import { TierSnifferStore } from '../workers/classification/sniffer-store.ts';
 import { assertStoreTierLedgerCanOpen } from '../workers/classification/tier-set-binding.ts';
 import { TierLedger, type TierLedgerOptions } from '../workers/classification/tier-ledger.ts';
-import { LocalConnectorStore, itemAccountScopesOn, type LocalConnectorStoreOptions } from '../workers/connector-store/local-index.ts';
+import { LocalConnectorStore, type LocalConnectorStoreOptions } from '../workers/connector-store/local-index.ts';
 import {
   TELEGRAM_SOURCE_ID,
   WHATSAPP_BRIDGE_LOCK_NAME,
@@ -731,14 +731,6 @@ function openToLookAt(path: string, busyTimeoutMs: number): Database {
     }
   }
   throw failure ?? new Error('The store has writes outside its file.');
-}
-
-/** Names the accounts in a mounted store without opening it for ingestion. */
-export function readStoreItemAccountScopes(account: StorageAccount, path: string, provider: string, limit: number): string[] {
-  assertOpenable(readSourceRegistry(), account.sourceId, account.slot ?? DEFAULT_STORAGE_SLOT);
-  const db = openToLookAt(path, 10_000);
-  try { return itemAccountScopesOn(db, provider, limit); }
-  finally { closeSqliteStore(db, { checkpoint: false }); }
 }
 
 /** What looking at a store file came to: `busy` when another connection kept it from being read within the wait. */

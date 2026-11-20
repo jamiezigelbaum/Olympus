@@ -468,13 +468,10 @@ const UNPAIRED_SOURCE_PROVIDERS: Record<string, string> = {
  * closed for the same reason it renders as a degraded card: not knowing whether
  * a source was unpaired is not permission to start reading it again.
  */
-export function unpairedLaneProviders(registryPath: string, requireReadable = false): Set<string> {
+export function unpairedLaneProviders(registryPath: string): Set<string> {
   const read = readUnpairedSources(registryPath);
   if (read.status === 'missing') return new Set();
-  if (read.status === 'unreadable') {
-    if (requireReadable) throw new Error('Unpaired sources are unreadable');
-    return new Set(Object.values(UNPAIRED_SOURCE_PROVIDERS));
-  }
+  if (read.status === 'unreadable') return new Set(Object.values(UNPAIRED_SOURCE_PROVIDERS));
   const providers = new Set<string>();
   for (const record of read.records) {
     const provider = UNPAIRED_SOURCE_PROVIDERS[record.source_id];
@@ -494,9 +491,8 @@ export function unpairedLaneProviders(registryPath: string, requireReadable = fa
 export function withoutUnpairedLaneHandles<T extends { provider: string }>(
   handles: readonly T[],
   registryPath: string,
-  requireReadable = false,
 ): T[] {
-  const unpaired = unpairedLaneProviders(registryPath, requireReadable);
+  const unpaired = unpairedLaneProviders(registryPath);
   if (unpaired.size === 0) return [...handles];
   return handles.filter((handle) => !unpaired.has(handle.provider));
 }

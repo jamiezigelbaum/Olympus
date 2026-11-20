@@ -1,3 +1,4 @@
+import { engineRoleFromEnv } from '../../core/engine-split.ts';
 import { changeMemoryActivity, changeMemoryCounter } from '../../core/memory-counters.ts';
 import { EMBEDDING_HOLD_REASONS, type EmbeddingHoldReason } from '../../core/embedding-sweep-idle.ts';
 import { trackSqliteStoreMemory, untrackSqliteStoreMemory } from '../engine-split/sqlite-memory.ts';
@@ -3907,17 +3908,16 @@ export interface ImageContentOutsidePrivateRow {
   provider_conversation_id: string | null;
 }
 
-/** Account scopes named by retained rows, including tombstones. */
-export function itemAccountScopesOn(db: Database, provider: string, limit: number): string[] {
-  const rows = db.query('SELECT DISTINCT account_scope AS scope FROM items WHERE provider = ? LIMIT ?')
-    .all(provider, limit) as Array<{ scope: string }>;
-  return rows.map(row => row.scope);
-}
-
 export class LocalConnectorStore {
   readonly dbPath: string;
   /** The file this store opened, so a later delete or replace of it is seen. */
   private readonly openedFile: ReturnType<typeof fileIdentity>;
+  private readonly statusFile?: string;
+  get statusMount(): { file: string; generation: string } | undefined {
+    return !this.closedForPoolReads && this.statusFile
+      ? { file: this.statusFile, generation: this.visibilityOwner }
+      : undefined;
+  }
   readonly corpusId: string;
   readonly family: SourceFamily;
   readonly trustDomain: SourceTrustDomain;
@@ -4045,6 +4045,11 @@ export class LocalConnectorStore {
       if (this.dbPath !== ':memory:') mkdirSync(dirname(this.dbPath), { recursive: true, mode: 0o700 });
     }
     const creatingFile = this.dbPath === ':memory:' || !existsSync(this.dbPath);
+    const trackMount = this.dbPath !== ':memory:' && engineRoleFromEnv() !== 'single';
+    // Anchor a new file before SQLite opens it, so a replacement cannot be
+    // attributed to the store handle. Existing files are never touched here.
+    if (trackMount && creatingFile && !this.readOnly) closeSync(openSync(this.dbPath, 'a', 0o600));
+    const openingFile = trackMount ? fileIdentity(this.dbPath) : undefined;
     this.db = new Database(this.dbPath, options.readOnly === true
       ? { readonly: true, create: false, strict: true }
       : { create: true });
@@ -4060,6 +4065,11 @@ export class LocalConnectorStore {
         : creatingFile
         ? 'PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA auto_vacuum = INCREMENTAL; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA journal_size_limit = 67108864;' + loopWalAutocheckpointPragma(this.dbPath)
         : 'PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA journal_size_limit = 67108864;' + loopWalAutocheckpointPragma(this.dbPath));
+      const opened = this.openedFile;
+      if (opened && openingFile && opened.dev === openingFile.dev && opened.ino === openingFile.ino
+        && opened.birthtimeNs === openingFile.birthtimeNs) {
+        this.statusFile = `${opened.dev}:${opened.ino}:${opened.birthtimeNs}`;
+      }
       applySqliteMmap(this.db);
       // New stores need no conversion. Existing stores are converted only by
       // background reclaim, after the sweep, never by opening a request's store.
@@ -4305,17 +4315,6 @@ export class LocalConnectorStore {
     return state;
   }
 
-  private governanceListeners: Set<() => void> | undefined;
-
-  onGovernanceChange(listener: () => void): void {
-    (this.governanceListeners ??= new Set()).add(listener);
-  }
-
-  get closed(): boolean { return this.closedForPoolReads; }
-
-  /** The ledger already supplied by the owner, without discovering or opening one. */
-  get mountedTierLedger(): TierLedger | undefined { return this.tierLedgerHandle; }
-
   close(): void {
     if (this.closedForPoolReads) return;
     changeMemoryCounter('connector_stores', -1);
@@ -4343,8 +4342,6 @@ export class LocalConnectorStore {
       // The read pool's connections to this file go with the store, and so
       // do its waiting queries.
       this.closedForPoolReads = true;
-      for (const changed of this.governanceListeners ?? []) changed();
-      this.governanceListeners = undefined;
       if (offThreadReadsSupported(this.dbPath)) releaseOffThreadReads(this.dbPath);
       closeSqliteStore(this.db, this.readOnly ? { checkpoint: false, readOnly: true }
         : buildingRecencyIndex ? { checkpoint: false } : undefined);
@@ -4593,7 +4590,6 @@ export class LocalConnectorStore {
     if (this.tierLedgerOwned === true) this.tierLedgerHandle?.close();
     this.tierLedgerHandle = ledger;
     this.tierLedgerOwned = false;
-    for (const changed of this.governanceListeners ?? []) changed();
   }
 
   private personalEmbeddingProvider: (() => SourceEmbeddingProvider | undefined) | undefined;
@@ -4822,7 +4818,6 @@ export class LocalConnectorStore {
       TIER_SET_BINDING_CONNECTOR_ID,
       JSON.stringify({ ledgerId, ledgerPath: ledger.dbPath }),
     );
-    if (this.tierLedgerHandle !== ledger) for (const changed of this.governanceListeners ?? []) changed();
   }
 
   /**
@@ -16829,7 +16824,8 @@ export class LocalConnectorStore {
 
   /** The account scopes a provider's rows are kept under, at most `limit` of them (tombstones included). */
   itemAccountScopes(provider: string, limit = 2): string[] {
-    return itemAccountScopesOn(this.db, provider, limit);
+    const rows = this.db.query('SELECT DISTINCT account_scope AS scope FROM items WHERE provider = ? LIMIT ?').all(provider, limit) as Array<{ scope: string }>;
+    return rows.map((row) => row.scope);
   }
 
   /**

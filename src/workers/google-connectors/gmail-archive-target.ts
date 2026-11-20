@@ -20,7 +20,6 @@
  *   and writes into it, so the account guard cannot bind another account in
  *   between.
  */
-import { accountFromGoogleHandle } from './classification.ts';
 import type { SourceConnector, SourceConnectorInput } from '../../core/contracts.ts';
 import type { ArchiveConnectorInput } from '../../core/archive-formats.ts';
 import { googleAccountIdFromAddress } from '../../core/provider-account-identity.ts';
@@ -62,13 +61,6 @@ export function gmailItemAccountScope(stores: readonly Pick<LocalConnectorStore,
   const held = new Set(stores.flatMap((store) => store.itemAccountScopes(GMAIL_PROVIDER_ID, 3)));
   if (held.size !== 1 || held.has(roleScope)) return roleScope;
   return [...held][0]!;
-}
-
-export function gmailReadAccount(
-  handle: { accountRole?: string; handle?: string } | undefined,
-  stores: readonly Pick<LocalConnectorStore, 'itemAccountScopes'>[],
-): string {
-  return gmailItemAccountScope(stores, handle?.accountRole?.trim() || accountFromGoogleHandle(handle?.handle));
 }
 
 /** What an import brought into the Gmail stores: rows an import's input observed. */

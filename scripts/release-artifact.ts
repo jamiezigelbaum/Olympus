@@ -140,7 +140,7 @@ mkdirSync(stagingDir, { recursive: true });
 mkdirSync(artifactDir, { recursive: true });
 
 for (const path of V0_4_PUBLIC_PACKAGE_FILES) {
-  if (path === 'dist/index.js' || path === 'dist/cli.js' || path === 'dist/embedding-drain.js' || path === 'dist/litert-helper.js' || path === 'dist/secret-scan-worker.js' || path === 'dist/engine-control-worker.js' || path === 'dist/held-item-worker.js' || path === 'dist/model-worker.js' || path === 'dist/control-ui/index.js') continue;
+  if (path === 'dist/index.js' || path === 'dist/cli.js' || path === 'dist/embedding-drain.js' || path === 'dist/litert-helper.js' || path === 'dist/secret-scan-worker.js' || path === 'dist/engine-control-worker.js' || path === 'dist/model-worker.js' || path === 'dist/control-ui/index.js') continue;
   const source = join(rootDir, path);
   const sourceStat = lstatSync(source);
   if (!sourceStat.isFile() || sourceStat.isSymbolicLink()) {
@@ -156,7 +156,6 @@ await buildPublicRuntime('src/workers/source-index/built-in-embedding/litert-hel
 await buildPublicRuntime('src/workers/source-index/built-in-reasoning/model-worker.ts', 'dist/model-worker.js', 'node');
 await buildPublicRuntime('src/workers/classification/secret-scan-worker.ts', 'dist/secret-scan-worker.js', 'bun');
 await buildPublicRuntime('src/workers/engine-split/control-worker.ts', 'dist/engine-control-worker.js', 'bun');
-await buildPublicRuntime('src/workers/engine/held-item-worker.ts', 'dist/held-item-worker.js', 'bun');
 await buildPublicRuntime('src/control-ui.ts', 'dist/control-ui/index.js', 'browser');
 run('bun', [
   join(rootDir, 'scripts/strip-generated-trailing-whitespace.ts'),
@@ -166,7 +165,6 @@ run('bun', [
   join(stagingDir, 'dist/litert-helper.js'),
   join(stagingDir, 'dist/secret-scan-worker.js'),
   join(stagingDir, 'dist/engine-control-worker.js'),
-  join(stagingDir, 'dist/held-item-worker.js'),
   join(stagingDir, 'dist/model-worker.js'),
   join(stagingDir, 'dist/control-ui/index.js'),
 ]);

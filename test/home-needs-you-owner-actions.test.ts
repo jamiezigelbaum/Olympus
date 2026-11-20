@@ -54,23 +54,22 @@ function ownerAction(fix: { label?: string; tool?: string; args?: Record<string,
 }
 
 describe('Needs you is only what the owner can do', () => {
-  test('items waiting for the private model are never Needs you on their own', () => {
-    const view = home([dropbox()], { privacy: privacy });
+  test('items waiting for the private model are never Needs you on their own, and carry its speed for In progress', () => {
+    const view = home([dropbox()], { privacy: { ...privacy, judgePerMinute: 188 } });
     expect(view.needsYou).toEqual([]);
-    expect(view.privacy).toMatchObject({ pendingCount: 763 });
+    expect(view.privacy).toMatchObject({ pendingCount: 763, judgePerMinute: 188 });
   });
 
-  test('a stopped privacy check has its own line and opens the model', () => {
+  test('a stopped privacy check makes the waiting items one line, saying why, that opens the model', () => {
     const view = home([dropbox()], { privacy: { ...privacy, judgeStopped: 'model_not_answering' } });
     expect(view.needsYou).toHaveLength(1);
     const [item] = view.needsYou;
     expect(item!.id).toBe('privacy:judge_stopped');
-    expect(item!.sentence).toBe('the private model is not answering');
+    expect(item!.sentence).toBe('763 items are waiting because the privacy check stopped: the private model is not answering');
     expect(item!.fix?.label).toBe('Check the private model');
     expect(ownerAction(item!.fix)).toBe(true);
-    expect(home([dropbox()], { privacy: { ...privacy, pendingCount: 0, judgeStopped: 'failed' } }).needsYou).toMatchObject([
-      { id: 'privacy:judge_stopped', sentence: 'its last pass failed', fix: { label: 'Check the private model' } },
-    ]);
+    // Stopped with nothing waiting asks nothing.
+    expect(home([dropbox()], { privacy: { ...privacy, pendingCount: 0, judgeStopped: 'failed' } }).needsYou).toEqual([]);
   });
 
   test('every kind that reaches Needs you names an owner action with its target', () => {

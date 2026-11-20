@@ -5,9 +5,8 @@
 // serves no HTTP, only its command socket. Spawning tests carry an explicit
 // timeout (test/spawn-timeout-guard.test.ts).
 import { afterEach, describe, expect, test } from 'bun:test';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { createPendingPrivacyPolicy } from '../src/core/first-run-privacy.ts';
 import { connectThisComputerSource } from '../src/core/this-computer.ts';
 import { resolvedStorePath } from '../src/core/source-placement.ts';
 import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
@@ -25,7 +24,6 @@ import { seedHeldLedger } from './helpers/held-item-fixture.ts';
 const SERVER = join(import.meta.dir, '..', 'src', 'workers', 'engine', 'server.ts');
 const REPO = join(import.meta.dir, '..');
 const TOKEN = 'engine-split-boot-token';
-const PRELOAD = join(import.meta.dir, 'helpers', 'engine-split-boot-preload.ts');
 
 const roots: string[] = [];
 const children: Array<ReturnType<typeof Bun.spawn>> = [];
@@ -34,10 +32,10 @@ afterEach(async () => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-function spawnWorker(env: Record<string, string>, role: 'background' | 'front' | 'single', preload?: string) {
+function spawnWorker(env: Record<string, string>, role: 'background' | 'front', preload?: string) {
   const messages = new Set<unknown>();
   const child = Bun.spawn([process.execPath, ...(preload ? ['--preload', preload] : []), SERVER], {
-    env: { PATH: process.env.PATH ?? '', ...env, ...(role === 'single' ? {} : { OLYMPUS_WORKER_ENGINE_ROLE: role }) },
+    env: { PATH: process.env.PATH ?? '', ...env, OLYMPUS_WORKER_ENGINE_ROLE: role },
     cwd: REPO, stdout: 'pipe', stderr: 'pipe',
     ...(preload ? { ipc: (message: unknown) => { messages.add(message); } } : {}),
   });
@@ -55,7 +53,7 @@ function spawnWorker(env: Record<string, string>, role: 'background' | 'front' |
 describe('the engine split boots as two processes', () => {
   test('the front waits for the background, then serves; the background serves only its socket', async () => {
     // Short paths: a unix socket path has a length limit.
-    const home = mkdtempSync(join(realpathSync('/tmp'), 'oes-'));
+    const home = mkdtempSync(join('/tmp', 'oes-'));
     roots.push(home);
     mkdirSync(join(home, 'run'), { mode: 0o700 });
     const port = (() => { const server = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: { data() {} } }); const value = server.port; server.stop(true); return value; })();
@@ -80,7 +78,7 @@ describe('the engine split boots as two processes', () => {
     await waitFor(() => front.output().includes('worker listening'), { timeoutMs: 60_000 });
     expect(front.output()).not.toContain('FrontStoreWriteError');
 
-    const workerFetch = createWorkerFetch({ env });
+    const workerFetch = createWorkerFetch({ platform: 'linux', env });
     const health = await workerFetch(`http://127.0.0.1:${port}/v1/health`, { headers: { Authorization: `Bearer ${TOKEN}` } });
     expect(health.status).toBe(200);
     // The front reports its background, so an upgrade or rollback never calls a crash-looping background healthy (#1563 review).
@@ -129,7 +127,7 @@ describe('the engine split boots as two processes', () => {
   }, 120_000);
 
   test('the front answers through cleanup and visibility warm-up, then serves its read-only stores on the same socket', async () => {
-    const home = mkdtempSync(join(realpathSync('/tmp'), 'oes-'));
+    const home = mkdtempSync(join('/tmp', 'oes-'));
     roots.push(home);
     mkdirSync(join(home, 'run'), { mode: 0o700 });
     const port = (() => { const server = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: { data() {} } }); const value = server.port; server.stop(true); return value; })();
@@ -174,30 +172,22 @@ describe('the engine split boots as two processes', () => {
     seeded.close();
     seedHeldLedger(tieredStoreSetLedgerPath(storePath), ['secure_local.local.files'], ['this_computer', 'other']).close();
 
-    const socketPath = workerFrontSocketPath({ env });
-    const frontEnv = { ...env, ...(socketPath ? { [WORKER_LISTEN_SOCKET_ENV]: socketPath } : {}) };
-    const front = spawnWorker(frontEnv, 'front', PRELOAD);
-    const origin = `http://127.0.0.1:${port}`;
-    const workerFetch = socketPath ? createUnixSocketFetch(socketPath) : fetch;
-    await waitFor(async () => {
-      if (front.child.exitCode != null) throw new Error(front.output());
-      if (socketPath) return existsSync(socketPath);
-      try {
-        const response = await workerFetch(origin + '/v1/health');
-        await response.body?.cancel();
-        return response.status === 503;
-      } catch { return false; }
-    }, { description: 'front starting listener' });
-    const initialSocket = socketPath ? lstatSync(socketPath) : undefined;
+    const socketPath = workerFrontSocketPath({ env })!;
+    const frontEnv = { ...env, [WORKER_LISTEN_SOCKET_ENV]: socketPath };
+    const front = spawnWorker(frontEnv, 'front', join(import.meta.dir, 'helpers', 'engine-split-boot-preload.ts'));
+    await waitFor(() => existsSync(socketPath), { description: 'front starting socket' });
+    const initialSocket = lstatSync(socketPath);
     const checkSocket = () => {
-      if (!socketPath) return;
       const socket = lstatSync(socketPath);
       expect(socket.isSocket()).toBe(true);
-      expect(socket.ino).toBe(initialSocket!.ino);
+      expect(socket.ino).toBe(initialSocket.ino);
       expect(socket.mode & 0o777).toBe(0o600);
     };
     checkSocket();
-    if (socketPath) expect(() => prepareWorkerSocket({ env: frontEnv })).toThrow('Worker socket path is occupied');
+    expect(() => prepareWorkerSocket({ env: frontEnv })).toThrow('Worker socket path is occupied');
+
+    const workerFetch = createUnixSocketFetch(socketPath);
+    const origin = `http://127.0.0.1:${port}`;
     const get = (path: string, headers: Record<string, string> = {}) => workerFetch(`${origin}${path}`, {
       headers: { Authorization: `Bearer ${TOKEN}`, Connection: 'close', ...headers },
       signal: AbortSignal.timeout(10_000),
@@ -214,7 +204,7 @@ describe('the engine split boots as two processes', () => {
     const dashboardHeaders = { Accept: 'text/html' };
     await expectStarting(get('/dashboard', dashboardHeaders));
 
-    const background = spawnWorker(env, 'background', PRELOAD);
+    const background = spawnWorker(env, 'background');
     await waitFor(() => background.output().includes('engine background ready'), { timeoutMs: 60_000, description: 'background boot' });
     await waitForGate('cleanup');
     await expectStarting(get('/dashboard', dashboardHeaders));
@@ -243,7 +233,7 @@ describe('the engine split boots as two processes', () => {
       front.child.send('cleanup');
       await Promise.race([waitForGate('visibility'), traffic]);
       await expectStarting(get('/dashboard', dashboardHeaders));
-      if (socketPath) expect(() => prepareWorkerSocket({ env: frontEnv })).toThrow('Worker socket path is occupied');
+      expect(() => prepareWorkerSocket({ env: frontEnv })).toThrow('Worker socket path is occupied');
       inFlight = expectStarting(get('/dashboard', { ...dashboardHeaders, 'X-Test-Hold-Starting-Response': '1' }));
       void inFlight.catch(() => {});
       await waitForGate('response');
@@ -281,23 +271,9 @@ describe('the engine split boots as two processes', () => {
       oldest_since: record.decidedAt, measured_at: expect.any(String),
     });
     expect(front.output()).not.toContain('FrontStoreWriteError');
-    await waitFor(() => background.messages.has('count-blocked'), { description: 'held count worker blocked' });
-    const collectedBefore = background.messages.size;
-    const collection = await waitFor(() => [...background.messages].slice(collectedBefore).find(message =>
-      typeof message === 'object' && message !== null && 'kind' in message && message.kind === 'count-collection'),
-    { description: 'writer collection while the held count is blocked' });
-    expect(collection).toMatchObject({ held: false, fs: 0, sql: 0, pool: 0 });
-    front.child.send('held-count');
-    const absent = await waitFor(() => [...front.messages].find(message => typeof message === 'object' && message !== null
-      && 'kind' in message && message.kind === 'held-count'), { description: 'front reads while the writer counts' });
-    expect(absent).toMatchObject({ dashboard_sql: 0, setup_sql: 0, dashboard_fs: 0, setup_fs: 0, count_fs: 0, pool: 0 });
-    expect(absent).not.toHaveProperty('dashboard.pendingCount');
-    expect(absent).not.toHaveProperty('setup.pendingCount');
-    expect(readEngineStatusSnapshot(engineStatusSnapshotPath(env))?.snapshot.held_items).toBeUndefined();
-    background.child.send('count');
     const held = await waitFor(() => readEngineStatusSnapshot(engineStatusSnapshotPath(env))?.snapshot.held_items,
       { timeoutMs: 12_000, description: 'background held count with judge off' });
-    expect(held).toMatchObject({ count: 1, counted_scope: [{ corpusId: 'secure_local.local.files', accountScope: 'this_computer' }] });
+    expect(held.count).toBe(1);
     type HeldReceipt = { kind: 'held-count'; dashboard?: { pendingCount?: number } };
     const receipt = await waitFor(() => {
       front.child.send('held-count');
@@ -308,35 +284,7 @@ describe('the engine split boots as two processes', () => {
     expect(receipt).toMatchObject({
       dashboard: { pendingCount: 1, pendingCountObservedAt: held.observed_at, judgeMissing: 'turned_off' },
       setup: { pendingCount: 1, pendingCountObservedAt: held.observed_at },
-      dashboard_sql: 0, setup_sql: 0, dashboard_fs: 0, setup_fs: 0, count_fs: 0, pool: 0,
+      dashboard_sql: 0, setup_sql: 0, dashboard_fs: 0, setup_fs: 0,
     });
   }, 180_000);
-  test('single-process first-run setup returns its choice while the count worker is blocked', async () => {
-    const home = mkdtempSync(join(realpathSync('/tmp'), 'oes-single-'));
-    roots.push(home);
-    mkdirSync(join(home, 'run'), { mode: 0o700 });
-    const listener = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: { data() {} } });
-    const port = listener.port;
-    listener.stop(true);
-    const policy = join(home, 'sovereignty.json');
-    writeFileSync(policy, JSON.stringify(createPendingPrivacyPolicy()));
-    const worker = spawnWorker({
-      HOME: home, XDG_DATA_HOME: join(home, 'd'), XDG_CONFIG_HOME: join(home, 'c'),
-      XDG_STATE_HOME: join(home, 's'), XDG_RUNTIME_DIR: join(home, 'run'),
-      OLYMPUS_EMAIL_SOURCE_PORT: String(port), OLYMPUS_WORKER_AUTH_TOKEN: TOKEN,
-      OLYMPUS_SOVEREIGNTY_CONFIG_PATH: policy, OLYMPUS_WORKER_SCHEDULER_ENABLED: 'false', NODE_ENV: 'test',
-    }, 'single', PRELOAD);
-    await waitFor(() => {
-      if (worker.child.exitCode != null) throw new Error(worker.output());
-      return worker.output().includes('worker listening') && worker.messages.has('count-blocked');
-    },
-      { timeoutMs: 60_000, description: 'single engine serving with its count worker blocked' });
-    worker.child.send('held-count');
-    const receipt = await waitFor(() => [...worker.messages].find(message => typeof message === 'object' && message !== null
-      && 'kind' in message && message.kind === 'held-count'), { description: 'single engine first-run setup' });
-    expect(receipt).toMatchObject({ setup: { privateAnswerChoice: { pending: true } }, setup_sql: 0, count_fs: 0, pool: 0 });
-    expect(receipt).not.toHaveProperty('setup.pendingCount');
-    expect(receipt).not.toHaveProperty('dashboard.pendingCount');
-  }, 120_000);
-
 });

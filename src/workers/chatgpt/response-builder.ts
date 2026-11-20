@@ -329,7 +329,8 @@ export function copyDashboardViewModel(view: DashboardViewModelV1): DashboardVie
       ...copyPrivacyCount(view.privacy),
       ...copyJudgeStop(view.privacy),
       ruleCount: whole(view.privacy.ruleCount),
-
+      ...(typeof view.privacy.judgePerMinute === 'number' && Number.isFinite(view.privacy.judgePerMinute) && view.privacy.judgePerMinute > 0
+        ? { judgePerMinute: Math.round(view.privacy.judgePerMinute * 10) / 10 } : {}),
     };
   }
   const remote = view.remote;
@@ -1306,16 +1307,14 @@ export function privacyToolResult(
         : (summary.configured ? 'The owner has set what is private for them.' : 'The owner has not said yet what is private for them.'),
   ];
   if (summary.ruleCount > 0) parts.push(`${summary.ruleCount} folder, label, sender or chat rule${summary.ruleCount === 1 ? '' : 's'} keep items Private; they are shown to the owner in the Olympus panel.`);
-  const { text, stop } = privacyHeldItemsText(copy, DASHBOARD_CHATGPT_PRIVACY_COUNT_COPY, Date.now(), 'tool');
-  parts.push(text + '.');
-  if (stop) parts.push(stop + '.');
+  parts.push(privacyHeldItemsText(copy, DASHBOARD_CHATGPT_PRIVACY_COUNT_COPY, Date.now(), 'tool').text + '.');
   const panel = {
     ...copy,
     ...(copy.judgeStopped ? { judgeModelHref: openPageUrl({ kind: 'fix', section: 'models' }) } : {}),
     ...(confirmation ? { confirmation } : {}),
   };
   return {
-    content: [{ type: 'text', text: parts.join('\n') }],
+    content: [{ type: 'text', text: parts.join(' ') }],
     structuredContent: summary as unknown as Record<string, unknown>,
     _meta: { [PRIVACY_META_KEY]: panel },
   };
@@ -1326,14 +1325,15 @@ const MAX_PRIVACY_RULES = 100;
 const MAX_PRIVACY_DESCRIPTION = 2_000;
 
 function copyPrivacyCount(value: Pick<PrivacySettings, 'pendingCount' | 'pendingCountObservedAt'>) {
-  if (!finite(value.pendingCount) || !Number.isSafeInteger(value.pendingCount) || value.pendingCount < 0) return {};
+  if (!finite(value.pendingCount) || value.pendingCount < 0) return {};
   const observed = iso(value.pendingCountObservedAt);
   return { pendingCount: whole(value.pendingCount), ...(observed ? { pendingCountObservedAt: observed } : {}) };
 }
 
-function copyJudgeStop(value: Pick<PrivacySettings, 'judgeStopped'>) {
+function copyJudgeStop(value: Pick<PrivacySettings, 'judgeStopped' | 'judgeStoppedAt'>) {
   if (!value.judgeStopped || !Object.hasOwn(DASHBOARD_CHATGPT_PRIVACY_COUNT_COPY.stopped.reason, value.judgeStopped)) return {};
-  return { judgeStopped: value.judgeStopped };
+  const at = iso(value.judgeStoppedAt);
+  return { judgeStopped: value.judgeStopped, ...(at ? { judgeStoppedAt: at } : {}) };
 }
 
 function copyPrivacySettings(settings: PrivacySettings): PrivacySettings {

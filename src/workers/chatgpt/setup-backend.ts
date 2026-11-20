@@ -75,9 +75,11 @@ export interface ChatGptSetupBackendOptions {
   credentialPresent: (id: string, profile: SovereigntyModelProfile) => boolean | Promise<boolean>;
   /** Restarts the worker to apply a policy change; false when it cannot restart itself. */
   requestReload: () => boolean;
-  /** The writer's last complete held-item observation. */
+  /** The single-process engine's existing count path. */
+  pendingClassificationCount?: () => number;
+  /** The split background's last complete held-item observation. */
   heldItemCount?: () => PrivacyCount | undefined;
-  judgeStop?: () => Pick<PrivacySettings, 'judgeStopped'>;
+  judgeStop?: () => Pick<PrivacySettings, 'judgeStopped' | 'judgeStoppedAt'>;
   privacyQuestionEngine?: PrivacyQuestionEngine;
   /** Starts a built-in model's install again; false when that model is not built in here. */
   retryModel?: (model: 'embedding' | 'answers' | 'transcription') => boolean;
@@ -102,14 +104,14 @@ type PrivacyCount = Pick<PrivacySettings, 'pendingCount' | 'pendingCountObserved
 /** The owner's privacy settings and the privacy-check backlog. Throws when the profile cannot be read. */
 export function readChatGptPrivacySettings(
   env: Record<string, string | undefined>,
-  count: PrivacyCount | undefined,
+  count: PrivacyCount | number | undefined,
 ): PrivacySettings {
   const profile = readPrivacyProfile({ env });
   return {
     configured: profile !== undefined,
     description: profile?.description ?? '',
     rules: (profile?.rules ?? []).flatMap(privacyRuleView),
-    ...count,
+    ...(typeof count === 'number' ? { pendingCount: count } : count),
     revision: privacyRevision(profile),
   };
 }
@@ -133,14 +135,18 @@ export function createChatGptSetupBackend(options: ChatGptSetupBackendOptions): 
       ? validateSovereigntyConfig(JSON.parse(readFileSync(options.sovereignty.path, 'utf8'))) : policy;
     policy = current;
     const policyRevision = createHash('sha256').update(JSON.stringify(current)).digest('hex').slice(0, 16);
+    const count = safeCount(options.heldItemCount ?? options.pendingClassificationCount);
+    const judgeStop = options.judgeStop?.();
     if (isPendingPrivacyPolicy(current)) return {
       configured: false, description: '', rules: [],
+      ...count,
+      ...judgeStop,
       revision: privacyRevision(undefined) + '.' + policyRevision,
       privateAnswerChoice: { pending: true, options: privateAnswerOptions(totalmem()) },
     };
-    const settings = readChatGptPrivacySettings(options.env ?? process.env, options.heldItemCount?.());
+    const settings = readChatGptPrivacySettings(options.env ?? process.env, count);
     const id = privateAnswerMode(current);
-    return { ...settings, ...options.judgeStop?.(), revision: settings.revision + '.' + policyRevision, privateAnswerMode: { id, label: id === 'custom' ? 'Custom Private-answer mode' : PRIVACY_PRESET_LABELS[id], options: privateAnswerOptions(totalmem()) } };
+    return { ...settings, ...judgeStop, revision: settings.revision + '.' + policyRevision, privateAnswerMode: { id, label: id === 'custom' ? 'Custom Private-answer mode' : PRIVACY_PRESET_LABELS[id], options: privateAnswerOptions(totalmem()) } };
   };
 
 
@@ -350,4 +356,16 @@ export function createChatGptSetupBackend(options: ChatGptSetupBackendOptions): 
       return privacySettings();
     },
   };
+}
+
+function safeCount(count: (() => PrivacyCount | number | undefined) | undefined): PrivacyCount {
+  try {
+    const observation = count?.();
+    const value = typeof observation === 'number' ? observation : observation?.pendingCount;
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return {};
+    const at = typeof observation === 'object' ? observation.pendingCountObservedAt : undefined;
+    return { pendingCount: Math.floor(value), ...(at ? { pendingCountObservedAt: at } : {}) };
+  } catch {
+    return {};
+  }
 }

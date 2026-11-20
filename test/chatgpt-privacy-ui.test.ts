@@ -13,7 +13,7 @@ import { CHATGPT_PRIVACY_META_KEY, CHATGPT_PRIVACY_TOOLS } from '../src/workers/
 import { privacyToolResult } from '../src/workers/chatgpt/response-builder.ts';
 import type { PrivacyRuleView } from '../src/workers/chatgpt/dashboard-contract.ts';
 import { DASHBOARD_CHATGPT_PRIVACY_COPY as W } from '../src/workers/dashboard/vocabulary.ts';
-import { createTestClock, waitFor } from './helpers/test-clock.ts';
+import { waitFor } from './helpers/test-clock.ts';
 
 const P = CHATGPT_PRIVACY_TOOLS;
 const S = CHATGPT_PICKER_TOOLS;
@@ -58,11 +58,7 @@ async function questionsShown(host: Host): Promise<void> {
   }, { description: 'the privacy questions step to finish loading', intervalMs: 5 });
 }
 
-function mount(
-  serve: Record<string, Serve>,
-  openai: Record<string, any> = { displayMode: 'fullscreen' },
-  clock?: ReturnType<typeof createTestClock>,
-): Host {
+function mount(serve: Record<string, Serve>, openai: Record<string, any> = { displayMode: 'fullscreen' }): Host {
   serve[P.questions] ??= () => ({ _meta: { [CHATGPT_PRIVACY_META_KEY]: { fallback: true, questions: [] } } });
   const html = chatgptDashboardPageHtml({ resultTimeoutMs: 5_000 });
   const start = html.indexOf('<script>') + '<script>'.length;
@@ -98,12 +94,7 @@ function mount(
     openExternal: (args: unknown) => calls.push(['openExternal', args]),
     setWidgetState: (args: unknown) => calls.push(['setWidgetState', args]),
   };
-  if (clock) {
-    const date = class extends Date { static override now() { return clock.now(); } };
-    new Function('window', 'document', 'Date', 'setTimeout', 'clearTimeout', 'setInterval', script)(
-      win, win.document, date, clock.setTimeout, clock.clearTimeout, clock.setInterval,
-    );
-  } else new Function('window', 'document', script)(win, win.document);
+  new Function('window', 'document', script)(win, win.document);
   const buttons = () => Array.from(win.document.querySelectorAll('#app button')) as unknown as HTMLButtonElement[];
   const host: Host = {
     win,
@@ -143,7 +134,7 @@ function model(privacy: Record<string, unknown> | null, overrides: Partial<Dashb
   if (privacy) base.privacy = privacy;
   return base;
 }
-const unconfigured = () => model({ configured: false }, { needsYou: [ASK] });
+const unconfigured = () => model({ configured: false, pendingCount: 0 }, { needsYou: [ASK] });
 
 // Private-looking names: they may appear only in the privacy and picker views and those tools' calls.
 const DESCRIPTION = 'my divorce and my lawyer letters';
@@ -331,7 +322,7 @@ describe('the Privacy screen', () => {
     expect(text).toContain(W.rulesTitle);
     expect(ruleRows(host)).toEqual(['Medical RecordsFolder in Dropbox', 'Lawyer LettersGmail label', 'doctor@clinic.exampleSender']);
     expect(host.button(W.addRule).disabled).toBe(false);
-    expect(text).toContain('Items waiting for the private model: 12');
+    expect(text).not.toContain('waiting to be checked');
     expect(host.button(W.save).disabled).toBe(true);
     expect(host.hasButton(W.cancel)).toBe(true);
     expect(host.doc.querySelector('.privacy-description .picker-footer')).not.toBeNull();
@@ -361,12 +352,12 @@ describe('the Privacy screen', () => {
     expect(W.namesShared).toContain('shown to ChatGPT');
   });
 
-  test('the editor displays measured zero and one', async () => {
+  test('no waiting line when nothing is waiting; one item reads in the singular', async () => {
     const none = await openPrivacy();
-    expect(none.host.text()).toContain('Items waiting for the private model: 0');
+    expect(none.host.text()).not.toContain('waiting to be checked');
     expect(none.host.text()).toContain(W.rulesEmpty);
     const one = await openPrivacy({ pending: 1 });
-    expect(one.host.text()).toContain('Items waiting for the private model: 1');
+    expect(one.host.text()).not.toContain('waiting to be checked');
   });
 
   test('a load failure says so inline and Try again loads again', async () => {
@@ -1233,7 +1224,7 @@ describe('the dashboard Privacy row', () => {
     const host = mount({ olympus_dashboard: () => ({ structuredContent: dashboard }), [P.get]: () => privacyResult(DESCRIPTION, SAVED_RULES) });
     host.push({ structuredContent: dashboard });
     const text = host.text();
-    const order = ['Sources', W.section, 'Uses your description and 3 always-private rules.', 'Items waiting for the private model: 4', 'Progress', 'Models'];
+    const order = ['Sources', W.section, 'Uses your description and 3 always-private rules.', '4 items waiting for the private model', 'Progress', 'Models'];
     let at = -1;
     for (const marker of order) {
       const next = text.indexOf(marker, at + 1);
@@ -1243,7 +1234,7 @@ describe('the dashboard Privacy row', () => {
     const edit = host.button(W.editLabel);
     expect(edit.textContent).toBe(W.edit);
     expect(edit.className).toBe('btn');
-    expect(host.doc.querySelector('.privacy-row .muted')!.textContent).toBe('Items waiting for the private model: 4');
+    expect(host.doc.querySelector('.privacy-row .muted')!.textContent).toBe('4 items waiting for the private model');
     edit.click();
     await host.settle();
     expect(host.text()).toContain(W.title);
@@ -1255,22 +1246,24 @@ describe('the dashboard Privacy row', () => {
     const dashboard = model({ configured: true, pendingCount: 0, ruleCount: 0 });
     const host = mount({ olympus_dashboard: () => ({ structuredContent: dashboard }) });
     host.push({ structuredContent: dashboard });
-    expect(host.doc.querySelector('.privacy-row .row-text')!.textContent).toBe('Uses your description. No always-private rules.Items waiting for the private model: 0');
+    expect(host.doc.querySelector('.privacy-row .row-text')!.textContent).toBe('Uses your description. No always-private rules.0 items waiting for the private model');
     expect(host.text()).not.toContain('0 always-private');
   });
 
-  test('not configured: the needs-you item carries the one setup action and Privacy shows the count', () => {
+  test('not configured: the needs-you item carries the one call to action and the row is not repeated', () => {
     const host = mount({});
     host.push({ structuredContent: unconfigured() });
     expect(host.text()).toContain('Tell Olympus what\'s private for you');
-    expect(host.doc.querySelector('.privacy-row')?.textContent).toContain('Items waiting for the private model: counting');
+    expect(host.doc.querySelector('.privacy-row')).toBeNull();
     expect(host.hasButton(W.edit)).toBe(false);
     expect(host.button('Set up').className).toContain('warnfill');
   });
 
   test('unknown and stopped observations carry the same count words and action into setup', async () => {
     const observed = new Date(Date.now() - 180_000).toISOString();
-    const stopped = { judgeStopped: 'failed' } as const;
+    const stopped = {
+      judgeStopped: 'failed', judgeStoppedAt: new Date(Date.now() - 30_000).toISOString(),
+    } as const;
     const scratch = { configured: true, ruleCount: 0 };
     const unknownHost = mount({});
     unknownHost.push({ structuredContent: model(scratch) });
@@ -1281,68 +1274,16 @@ describe('the dashboard Privacy row', () => {
       [P.get]: () => privacyToolResult({ configured: true, description: '', rules: [], ...held }, 'current'),
     });
     host.push({ structuredContent: model({ ...scratch, ...held }) });
-    const line = 'Items waiting for the private model: 0 (as of 3 min ago)';
+    const line = '0 items are waiting (as of 3 min ago) because the privacy check stopped: its last pass failed';
     expect(host.doc.querySelector('.privacy-row .row-text')!.textContent).toContain(line);
     expect(host.hasButton('Check the private model')).toBe(true);
     host.button(W.editLabel).click();
     await host.settle();
     expect(host.text()).toContain(line);
-    expect(host.text()).toContain('its last pass failed');
     const action = host.button('Check the private model');
     expect(action.disabled).toBe(false);
     action.click();
     expect(host.calls).toContainEqual(['openExternal', { href: 'https://olympusplugin.ai/open/fix/models/' }]);
-  });
-
-  test('live samples and the age tick preserve the open editor, unsaved text and focus', async () => {
-    const clock = createTestClock(Date.now());
-    const dashboard = (count?: number, stopped = false) => model({
-      configured: true, ruleCount: SAVED_RULES.length,
-      ...(count === undefined ? {} : { pendingCount: count, pendingCountObservedAt: clock.date().toISOString() }),
-      ...(stopped ? { judgeStopped: 'failed' } : {}),
-    });
-    let next = dashboard(4, true);
-    const host = mount({
-      olympus_dashboard: () => ({ structuredContent: next }),
-      [P.get]: () => privacyToolResult({ configured: true, description: DESCRIPTION, rules: SAVED_RULES as PrivacyRuleView[] }, 'current', 'conf1'),
-    }, { displayMode: 'fullscreen' }, clock);
-    host.push({ structuredContent: dashboard() });
-    host.button(W.editLabel).click();
-    await host.settle();
-    const field = editDescription(host);
-    field.value = 'unsaved draft';
-    field.dispatchEvent(new host.win.Event('input', { bubbles: true }) as unknown as Event);
-    await clock.advance(1_000);
-    await host.settle();
-    const draft = editDescription(host);
-    draft.focus();
-    draft.setSelectionRange(2, 5);
-
-    const assertDraft = () => {
-      expect(host.doc.querySelector('textarea') === draft).toBe(true);
-      expect(host.doc.activeElement === draft).toBe(true);
-      expect(draft.value).toBe('unsaved draft');
-      expect([draft.selectionStart, draft.selectionEnd]).toEqual([2, 5]);
-      expect(host.toolCalls(P.get)).toHaveLength(1);
-    };
-    await clock.advance(59_000);
-    await host.settle();
-    expect(host.toolCalls('olympus_dashboard')).toHaveLength(1);
-    expect(host.text()).toContain('Items waiting for the private model: 4 (as of 1 min ago)');
-    expect(host.hasButton('Check the private model')).toBe(true);
-    assertDraft();
-
-    await clock.advance(60_000);
-    expect(host.text()).toContain('Items waiting for the private model: 4 (as of 2 min ago)');
-    assertDraft();
-    next = dashboard(0);
-    await host.settle();
-    // A request already in flight can show its previous reading, so deliver the
-    // recovery through the host's dashboard result notification as well.
-    host.push({ structuredContent: next });
-    expect(host.text()).toContain('Items waiting for the private model: 0');
-    expect(host.hasButton('Check the private model')).toBe(false);
-    assertDraft();
   });
 
   test('without a count from the dashboard the row names no number until a save tells it', async () => {

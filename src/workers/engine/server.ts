@@ -35,7 +35,7 @@ import { privacyChoicePending } from '../../core/first-run-privacy.ts';
 import { LocalModelDiscovery, saveLocalAnswerModel } from '../../core/local-model-discovery.ts';
 import { saveFirstRunPrivacyChoice, savePrivateAnswerMode } from '../../core/first-run-privacy.ts';
 import { createSpoolChangeSubscription } from '../messaging-spool-wake.ts';
-import { declaredConnectorStoreMountPaths, resolvedStorePath, retiredPathSettings, storageAccountForCorpus } from '../../core/source-placement.ts';
+import { declaredConnectorStoreMountPaths, declaredConnectorStoreMounts, resolvedStorePath, retiredPathSettings } from '../../core/source-placement.ts';
 import { DASHBOARD_PRIVATE_ANSWERS_COPY as PRIVATE_ANSWERS_COPY, type PrivacyJudgeStopReason } from '../dashboard/vocabulary.ts';
 import { anonymousInboxConnectionId, localInboxLabel, askWithAnonymousInbox } from './runtime/local-private-answers.ts';
 import { installWorkerShutdownSignals } from '../../core/worker-shutdown.ts';
@@ -66,8 +66,9 @@ import { environmentWithWorkerSetupEnv, mergeWorkerSetupEnv, readWorkerSetupEnv,
 import { remoteOpenInstructions, resolveServerMode, resolveAgentApprovalHost } from '../../core/remote-open.ts';
 import { loadOrCreateDashboardSessionSecret } from '../../core/dashboard-session-secret.ts';
 import { execFile } from 'node:child_process';
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { appendFile, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { appendFileSync, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { appendFile, stat, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import {
@@ -110,7 +111,7 @@ import {
   PLAIN_STATUS_REQUEST,
 } from '../source-index/status.ts';
 import { startPacedStatusRecount, type PacedStatusRecount } from './status-recount.ts';
-import { startHeldItemStatus, type HeldInventory } from './held-item-status.ts';
+import { heldCountFilesCurrent, heldCountPlan, heldGoogleAccount, heldSourceMountsComplete, startHeldItemStatus, type HeldCountPlan } from './held-item-status.ts';
 import { LOOP_SLOW_SQL_MS, setAskBenchLoopSqlRecorder, slowMainThreadSqlHealth, startMainThreadSqlSiteCount, startSlowMainThreadSqlLog } from '../connector-store/main-thread-sql-trace.ts';
 import {
   dashboardOwnerSessionCheck,
@@ -240,7 +241,7 @@ import { accountRawPath, accountStoreNames, accountStorePath, hasLegacyLayout, l
 import { ARCHIVE_IMPORTS_SOURCE_ID } from '../archive-import/state.ts';
 import { archiveImportFamilies } from '../../core/archive-formats.ts';
 import { captureGrantPathFromEnv } from '../../core/messaging-capture-grant-file.ts';
-import { unpairedSourcesPath } from '../credential-broker/unpaired-sources.ts';
+import { readUnpairedSources, unpairedSourcesPath, withoutUnpairedLaneHandles } from '../credential-broker/unpaired-sources.ts';
 import { createFrontMountChanges } from './runtime/front-mount-changes.ts';
 import { createArchiveExtractionRuntime } from '../archive-import/extraction-runtime.ts';
 import { createArchiveImportsSchedulerSource } from '../archive-import/scheduler-source.ts';
@@ -325,7 +326,7 @@ import {
 import { recordedProviderAccount } from '../../core/provider-account-history.ts';
 import { takeWorkerDataOwnerLock, type HeldDataOwnerLock } from '../../core/data-owner-lock.ts';
 import { exportOlympusData, lifecycleStoreFileOwner } from '../../data-lifecycle.ts';
-import { TierLedger, TierLedgerSchemaError, type TierLedgerIdentity } from '../classification/tier-ledger.ts';
+import { heldCountFileIdentity, TierLedger, TierLedgerSchemaError, type TierLedgerIdentity } from '../classification/tier-ledger.ts';
 import { resolveSecretRefValueSync } from '../../core/secret-store.ts';
 import {
   WorkerBootSecretResolver,
@@ -398,6 +399,9 @@ import {
 } from '../source-ingestion-ledger.ts';
 import {
   handleRegistryPathFromEnv,
+  connectedHandleGrantEpochPath,
+  readConnectedHandleGrantEpoch,
+  readConnectedHandleRegistry,
   type ConnectedCredentialHandle,
 } from '../credential-broker/connected-handles.ts';
 import {
@@ -426,7 +430,7 @@ import { createGmailMailScopeBrowser, createGmailPickerRequestBudget } from '../
 import {
   gmailArchiveTarget,
   gmailHoldsImportedHistory,
-  gmailReadAccount,
+  gmailItemAccountScope,
 } from '../google-connectors/gmail-archive-target.ts';
 import { gmailHeaderMatch } from '../google-connectors/gmail-header-match.ts';
 import { planStoreEmbedding } from '../connector-store/embedding-plan.ts';
@@ -439,7 +443,7 @@ import {
   gmailImportWait,
 } from '../google-connectors/gmail-import-allowance.ts';
 import type { GmailApiClient } from '../google-connectors/gmail.ts';
-import { DEFAULT_ACCOUNT_SLOT, readSourceRegistry, sourceRegistryPath } from '../../core/source-registry.ts';
+import { DEFAULT_ACCOUNT_SLOT, findRegistryAccount, readSourceRegistry, sourceAccountMovePending, sourceRegistryPath } from '../../core/source-registry.ts';
 import { gmailContentArrivesLater, gmailLaneSyncOptions } from '../google-connectors/gmail-live-sync.ts';
 import {
   GMAIL_ATTACHMENT_EXTRACTION_BATCH_SIZE,
@@ -576,8 +580,7 @@ import {
 import {
   readActiveConnectedHandles,
   selectedSourceCredentialHandle,
-  fileReadAccount,
-  readCredentialSelection,
+  selectCredentialHandle,
   SOURCE_REGISTRY_LANE_DECISION,
   sourceIndexLaneEnabled,
   sourceIndexLaneAccountDecision,
@@ -764,6 +767,9 @@ export async function main(): Promise<void> {
   }
   const engineSocketPath = engineRole === 'single' ? undefined : engineBackgroundSocketFromEnv(process.env);
   let engineFront: EngineFront | undefined;
+  let frontHeldPlan: HeldCountPlan | undefined;
+  let frontHeldChangedAt: number | undefined;
+  let heldScopeChanged = (): void => {};
   let frontStarting: ReturnType<typeof listenWhileStarting>;
   if (engineRole === 'front') {
     // The front does none of the boot work that needs the data root to
@@ -788,6 +794,9 @@ export async function main(): Promise<void> {
     reportFrontStep();
     engineFront = createEngineFront({
       env: process.env, socketPath: engineSocketPath!, authToken: frontToken,
+      heldView: () => frontHeldPlan?.mountsCurrent()
+        ? { scope: frontHeldPlan.scope, ...(frontHeldChangedAt === undefined ? {} : { changedAt: frontHeldChangedAt }) }
+        : undefined,
     });
     void engineFront.refreshStatus();
     refreshSetupEnv();
@@ -923,6 +932,8 @@ export async function main(): Promise<void> {
   // Set once the judge's model is built (below): a lane whose model cannot be
   // built queues questions nothing answers, the same as no judge (#1316).
   let snifferModelBuilt: boolean | undefined;
+  // Stops of the privacy check the owner can look into: waiting items then need them (Home's Needs you).
+  const DASHBOARD_JUDGE_STOP_REASONS: ReadonlySet<string> = new Set(['model_not_answering', 'cloud_stopped', 'failed']);
   const judgeMissing = (): 'no_model' | 'turned_off' | undefined => (
     !tierSnifferServiceEnv(process.env).enabled ? 'turned_off'
       : snifferRuntime.source === 'off' || snifferModelBuilt === false ? 'no_model'
@@ -1402,6 +1413,7 @@ export async function main(): Promise<void> {
     const reason = mountFailureReason(error);
     if (frontMountProblems.get(id)?.reason !== reason) console.warn(`[olympus] the front could not open a source's stores yet (${label}): ${reason}`);
     frontMountProblems.set(id, { label, reason, lastAttemptAt: Date.now() });
+    heldScopeChanged();
   };
   const attemptFrontMount = (id: string, attempt: () => boolean, label = id): void => {
     try {
@@ -1421,12 +1433,11 @@ export async function main(): Promise<void> {
     tierLedgerProblems.delete(sourceId);
     return true;
   };
-  // The source owning a tier corpus is part of the mount inventory.
+  // Mounted identities are kept with the existing in-memory mount state.
   const heldSourceByCorpus = new Map<string, string>();
   const identifyHeldCorpus = (sourceId: string, corpusIds: Iterable<string>): void => {
-    if (engineFront) return;
     for (const id of corpusIds) heldSourceByCorpus.set(id, sourceId);
-    heldItemStatus?.invalidate();
+    heldScopeChanged();
   };
   const tierLanes: Array<{
     ledger: TierLedger;
@@ -1607,6 +1618,7 @@ export async function main(): Promise<void> {
     tierLanes,
     (store, ledger) => ({ ledger, secureCorpusId: store.corpusId, corpusIds: new Set([store.corpusId]), onDemand: [] }),
     (line) => console.warn(line),
+    () => heldScopeChanged(),
   );
   const tierScopes = (): TierVisibilityScope[] => (pendingGovernance.retry(), tierLanes).map((lane) => ({
     ledger: lane.ledger,
@@ -1813,12 +1825,12 @@ export async function main(): Promise<void> {
   // `gmailItemAccountScope`): the handle's role, unless the stores already
   // hold the account's mail under one other scope (an import made before the
   // connect), which every reader and writer then keeps using.
-  const gmailReadCredential = {
-    provider: 'gmail', capability: 'gmail.email.sync', pin: 'OLYMPUS_SOURCE_INDEX_GMAIL_CREDENTIAL_HANDLE',
-  } as const;
-  const gmailItemScopeFor = (handle: { accountRole?: string; handle?: string } | undefined): string =>
-    gmailReadAccount(handle, gmailInternalConnectorStore && gmailSecureConnectorStore
-      ? [gmailInternalConnectorStore, gmailSecureConnectorStore] : []);
+  const gmailItemScopeFor = (handle: { accountRole?: string; handle?: string } | undefined): string => {
+    const role = handle?.accountRole?.trim() || accountFromGoogleHandle(handle?.handle);
+    return gmailInternalConnectorStore && gmailSecureConnectorStore
+      ? gmailItemAccountScope([gmailInternalConnectorStore, gmailSecureConnectorStore], role)
+      : role;
+  };
   // An mbox export of a Gmail account is an input of the Gmail connector
   // (docs/design/archive-live-one-dataset.md, step 6): its mail joins the
   // Gmail stores, matched by Gmail's own ids, under the account it proves and
@@ -2389,7 +2401,7 @@ export async function main(): Promise<void> {
   const storeAt = (sourceId: string, domain: 'internal' | 'secure_local'): string =>
     resolvedStorePath(sourceId, domain, process.env);
   const sourceMounts = [
-    { id: GMAIL_SOURCE_ID, enabled: gmailConnectorStoreLane.enabled, mountBlocked: gmailConnectorStoreLane.decidedBy === SOURCE_REGISTRY_LANE_DECISION, pending: () => !gmailInternalConnectorStore && gmailConnectorStoreLane.enabled, ...gmailReadCredential, stores: ['internal', 'secure_local'], open: mountGmail },
+    { id: GMAIL_SOURCE_ID, enabled: gmailConnectorStoreLane.enabled, mountBlocked: gmailConnectorStoreLane.decidedBy === SOURCE_REGISTRY_LANE_DECISION, pending: () => !gmailInternalConnectorStore && gmailConnectorStoreLane.enabled, provider: 'gmail', capability: 'gmail.email.sync', pin: 'OLYMPUS_SOURCE_INDEX_GMAIL_CREDENTIAL_HANDLE', stores: ['internal', 'secure_local'], open: mountGmail },
     { id: GOOGLE_DRIVE_SOURCE_ID, enabled: googleDriveConnectorStoreLane.enabled, mountBlocked: googleDriveConnectorStoreLane.decidedBy === SOURCE_REGISTRY_LANE_DECISION, pending: () => !googleDriveInternalConnectorStore && googleDriveConnectorStoreLane.enabled, provider: 'google_drive', capability: 'google_drive.docs.sync', pin: 'OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CREDENTIAL_HANDLE', stores: ['internal', 'secure_local'], open: mountGoogleDrive },
     { id: DROPBOX_FILES_SOURCE_ID, enabled: dropboxConnectorStoreLane.enabled, mountBlocked: dropboxConnectorStoreLane.decidedBy === SOURCE_REGISTRY_LANE_DECISION, pending: () => !dropboxConnectorStore && dropboxConnectorStoreLane.enabled, provider: 'dropbox', capability: 'dropbox.files.sync', pin: 'OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_CREDENTIAL_HANDLE', stores: ['secure_local'], open: mountDropbox },
     { id: LOCAL_FILES_SOURCE_ID, enabled: localFilesConnectorStoreLane.enabled, mountBlocked: localFilesConnectorStoreLane.decidedBy === SOURCE_REGISTRY_LANE_DECISION, pending: () => !localFilesConnectorStore && localFilesConnectorStoreLane.enabled, stores: ['secure_local'], open: mountLocalFiles },
@@ -3069,14 +3081,9 @@ export async function main(): Promise<void> {
   };
   const connectorStoreEmbeddingProviders = new Map<string, SourceEmbeddingProvider>();
   const connectorStoreAccountScopes = new Map<string, string>();
-  const setConnectorStoreReadAccount = (corpusId: string, accountScope: string): void => {
-    if (connectorStoreAccountScopes.get(corpusId) === accountScope) return;
-    connectorStoreAccountScopes.set(corpusId, accountScope);
-    heldItemStatus?.invalidate();
-  };
   const connectorStorePrincipals = new Map<string, ConnectorStoreDeclaredPrincipal>();
   if (dropboxConnectorStore) {
-    setConnectorStoreReadAccount(
+    connectorStoreAccountScopes.set(
       DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID,
       dropboxProviderAccount,
     );
@@ -3086,14 +3093,14 @@ export async function main(): Promise<void> {
     });
   }
   if (localFilesConnectorStore) {
-    setConnectorStoreReadAccount(LOCAL_FILES_CORPUS_ID, LOCAL_FILES_ACCOUNT_SCOPE);
+    connectorStoreAccountScopes.set(LOCAL_FILES_CORPUS_ID, LOCAL_FILES_ACCOUNT_SCOPE);
     connectorStorePrincipals.set(LOCAL_FILES_CORPUS_ID, {
       provider: LOCAL_FILES_PROVIDER,
       accountScope: LOCAL_FILES_ACCOUNT_SCOPE,
     });
   }
   if (whatsappConnectorStore) {
-    setConnectorStoreReadAccount(WHATSAPP_LIVE_CORPUS_ID, WHATSAPP_PERSONAL_ACCOUNT_SCOPE);
+    connectorStoreAccountScopes.set(WHATSAPP_LIVE_CORPUS_ID, WHATSAPP_PERSONAL_ACCOUNT_SCOPE);
     connectorStorePrincipals.set(
       WHATSAPP_LIVE_CORPUS_ID,
       canonicalConnectorStoreChatPrincipal('whatsapp', WHATSAPP_PERSONAL_ACCOUNT_SCOPE),
@@ -3104,7 +3111,7 @@ export async function main(): Promise<void> {
       INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID,
       PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
     ]) {
-      setConnectorStoreReadAccount(corpusId, telegramConnectorAccountScope);
+      connectorStoreAccountScopes.set(corpusId, telegramConnectorAccountScope);
       connectorStorePrincipals.set(
         corpusId,
         canonicalConnectorStoreChatPrincipal('telegram', telegramConnectorAccountScope),
@@ -3116,7 +3123,7 @@ export async function main(): Promise<void> {
       connectorStorePrincipals.set(mount.store.corpusId, mount.principal);
     }
     if (mount.store.family === 'chat' && mount.chatPrincipal && !connectorStoreAccountScopes.has(mount.store.corpusId)) {
-      setConnectorStoreReadAccount(mount.store.corpusId, mount.chatPrincipal.accountScope);
+      connectorStoreAccountScopes.set(mount.store.corpusId, mount.chatPrincipal.accountScope);
     }
   };
   for (const mount of configuredConnectorStoreMounts) adoptConfiguredPrincipal(mount);
@@ -3193,22 +3200,14 @@ export async function main(): Promise<void> {
   // scope and principal. Its embedding identity is its own trust domain's: a
   // Public store shares its Personal sibling's cloud identity; a lane's new
   // Private or Personal store is handed the identity for its domain.
-  const watchHeldStore = (store: LocalConnectorStore): void => {
-    if (!engineFront) store.onGovernanceChange(() => {
-      if (store.closed) heldItemStatus?.closed();
-      else heldItemStatus?.invalidate();
-    });
-  };
-  for (const store of connectorStores) watchHeldStore(store);
   registerTierLegStore = (store, siblingCorpusId, embeddingProvider) => {
     frontMountProblems.delete(store.dbPath);
     if (!connectorStores.includes(store)) {
       connectorStores.push(store);
-      watchHeldStore(store);
       // A new store shows on the dashboard at the background's next count: the
       // split's front serves that count and never counts a store itself.
       statusRecount?.soon();
-      heldItemStatus?.invalidate();
+      heldScopeChanged();
       if (engineFront) console.log(`[olympus] front: mounted ${store.corpusId}`);
     }
     probeExtractionEnded(store);
@@ -3222,7 +3221,7 @@ export async function main(): Promise<void> {
       fullyDefinedCorpusIds.add(store.corpusId);
     }
     const accountScope = connectorStoreAccountScopes.get(siblingCorpusId);
-    if (accountScope) setConnectorStoreReadAccount(store.corpusId, accountScope);
+    if (accountScope) connectorStoreAccountScopes.set(store.corpusId, accountScope);
     const principal = connectorStorePrincipals.get(siblingCorpusId);
     if (principal) connectorStorePrincipals.set(store.corpusId, principal);
     const provider = embeddingProvider === null
@@ -3246,15 +3245,15 @@ export async function main(): Promise<void> {
         : store.trustDomain === 'secure_local' ? tierSecureEmbeddingProvider : sourceIndexEmbeddingProvider;
       registerTierLegStore(store, store.corpusId, provider ?? null);
       if (store === dropboxConnectorStore) {
-        setConnectorStoreReadAccount(store.corpusId, dropboxProviderAccount);
+        connectorStoreAccountScopes.set(store.corpusId, dropboxProviderAccount);
         connectorStorePrincipals.set(store.corpusId, { provider: 'dropbox', accountScope: dropboxProviderAccount });
       } else if (store === localFilesConnectorStore) {
-        setConnectorStoreReadAccount(store.corpusId, LOCAL_FILES_ACCOUNT_SCOPE);
+        connectorStoreAccountScopes.set(store.corpusId, LOCAL_FILES_ACCOUNT_SCOPE);
         connectorStorePrincipals.set(store.corpusId, { provider: LOCAL_FILES_PROVIDER, accountScope: LOCAL_FILES_ACCOUNT_SCOPE });
       } else if (store === whatsappConnectorStore || store === telegramConnectorStores?.internal || store === telegramConnectorStores?.secureLocal) {
         const telegram = store !== whatsappConnectorStore;
         const accountScope = telegram ? telegramConnectorAccountScope : WHATSAPP_PERSONAL_ACCOUNT_SCOPE;
-        setConnectorStoreReadAccount(store.corpusId, accountScope);
+        connectorStoreAccountScopes.set(store.corpusId, accountScope);
         connectorStorePrincipals.set(store.corpusId, canonicalConnectorStoreChatPrincipal(telegram ? 'telegram' : 'whatsapp', accountScope));
       }
     }
@@ -3500,12 +3499,12 @@ export async function main(): Promise<void> {
   }
   if (xBookmarksConnectorStore) {
     const principalXAccount = sourceIndexAccount?.trim() || xBookmarksHandle?.accountRole?.trim();
-    if (principalXAccount) setConnectorStoreReadAccount(xBookmarksConnectorStore.corpusId, principalXAccount);
+    if (principalXAccount) connectorStoreAccountScopes.set(xBookmarksConnectorStore.corpusId, principalXAccount);
   }
   if (readwiseConnectorStore) {
     // The handle's own account role, when it has one, replaces this default on
     // every scheduler build (first one below, before the worker serves).
-    setConnectorStoreReadAccount(
+    connectorStoreAccountScopes.set(
       readwiseConnectorStore.corpusId,
       sourceIndexAccount?.trim() || 'personal',
     );
@@ -4159,7 +4158,7 @@ export async function main(): Promise<void> {
     }
     const runtime = refreshableXBookmarksRuntime?.runtimeForHandle(handle);
     if (!runtime) return undefined;
-    setConnectorStoreReadAccount(
+    connectorStoreAccountScopes.set(
       runtime.store.corpusId,
       sourceIndexAccount?.trim() || handle?.accountRole?.trim() || 'personal',
     );
@@ -4176,7 +4175,7 @@ export async function main(): Promise<void> {
     }
     const sync = refreshableReadwiseRuntime?.syncForHandle(handle);
     if (sync && readwiseConnectorStore) {
-      setConnectorStoreReadAccount(
+      connectorStoreAccountScopes.set(
         readwiseConnectorStore.corpusId,
         sourceIndexAccount?.trim() || handle?.accountRole?.trim() || 'personal',
       );
@@ -4407,7 +4406,7 @@ export async function main(): Promise<void> {
     const currentXBookmarksConnectorStoreRuntime = refreshableXBookmarksRuntime
       ?.runtimeForHandle(currentXBookmarksHandle);
     if (currentXBookmarksConnectorStoreRuntime) {
-      setConnectorStoreReadAccount(
+      connectorStoreAccountScopes.set(
         currentXBookmarksConnectorStoreRuntime.store.corpusId,
         sourceIndexAccount?.trim() || currentXBookmarksHandle?.accountRole?.trim() || 'personal',
       );
@@ -4836,6 +4835,7 @@ export async function main(): Promise<void> {
         console.warn(`[olympus] the front could not open a source's stores yet: ${mountFailureReason(error)}`);
       }
     }
+    heldScopeChanged();
   };
   const archiveImportDashboard = createArchiveImportDashboard({
     runtime: archiveImports,
@@ -4918,25 +4918,23 @@ export async function main(): Promise<void> {
   // binds to this computer instead of an account. Function declarations, so
   // they are hoisted: the connector-store read scope (assembled with the
   // scheduler, earlier in main) calls them before this point is reached.
-  function fileScopeReadCredential(definition: FileScopeSourceDefinition) {
-    return {
-      pin: definition.pinEnvName ?? '',
-      provider: definition.provider as ConnectedCredentialHandle['provider'],
-      capability: definition.credentialCapability!,
-    };
-  }
-  function fileScopeSelection(definition: FileScopeSourceDefinition) {
-    return readCredentialSelection(fileScopeReadCredential(definition), process.env, readActiveConnectedHandles(process.env));
-  }
   function fileScopeCredentialHandle(definition: FileScopeSourceDefinition): ConnectedCredentialHandle | undefined {
-    return definition.account === 'this_computer' ? undefined : fileScopeSelection(definition).handle;
+    return definition.account === 'this_computer'
+      ? undefined
+      : selectedSourceCredentialHandle({
+          env: process.env,
+          pinEnvName: definition.pinEnvName ?? '',
+          provider: definition.provider as ConnectedCredentialHandle['provider'],
+          capability: definition.credentialCapability!,
+          handles: readActiveConnectedHandles(process.env),
+        });
   }
   function fileScopeAccount(sourceId: string): { accountScope: string } | undefined {
     const definition = getFileScopeSource(sourceId);
     if (!definition) return undefined;
-    if (definition.account === 'this_computer') return { accountScope: LOCAL_FILES_ACCOUNT_SCOPE };
-    const scope = fileReadAccount(fileScopeSelection(definition));
-    return scope ? { accountScope: scope } : undefined;
+    if (definition.account === 'this_computer') return { accountScope: 'this_computer' };
+    const handle = fileScopeCredentialHandle(definition);
+    return handle ? { accountScope: handle.accountRole?.trim() || 'personal' } : undefined;
   }
   const fileScopeBrowserFor = (sourceId: string): SourceFolderScopeBrowser => {
     const definition = requireFileScopeSource(sourceId);
@@ -5554,12 +5552,9 @@ export async function main(): Promise<void> {
             // source may start reading again — and routing it around the check
             // is exactly how an outstanding obligation honoured at boot got
             // bypassed on the next unrelated registry change.
-            refreshSchedulerSources: (connectedHandlesOverride) => {
-              heldItemStatus?.invalidate();
-              return schedulerSourcesForHandles(
-                activeLaneHandles(connectedHandlesOverride ?? readActiveConnectedHandles(process.env), process.env),
-              ).sources;
-            },
+            refreshSchedulerSources: (connectedHandlesOverride) => schedulerSourcesForHandles(
+              activeLaneHandles(connectedHandlesOverride ?? readActiveConnectedHandles(process.env), process.env),
+            ).sources,
             // The hook below is the Dropbox lane and nothing else; every other
             // source reaches it only to be refused. Saying so keeps a Sync now
             // button off the cards it could only 501 for.
@@ -6255,52 +6250,207 @@ export async function main(): Promise<void> {
   const { createChatGptHandoffs, createChatGptHandoffHandler, withChatGptHandoffRoutes } = await import('../chatgpt/handoff.ts');
   const { createChatGptSetupBackend, readChatGptPrivacySettings } = await import('../chatgpt/setup-backend.ts');
   const chatgptHandoffs = createChatGptHandoffs();
-  const watchedHeldLedgers = new WeakSet<TierLedger>();
-  const closedHeldLedgers = new WeakSet<TierLedger>();
-  const heldInventory = (): HeldInventory => {
-    const stores: HeldInventory['stores'] = [];
-    const mountProblems = [...tierLedgerProblems.keys()];
-    for (const store of connectorStores) {
-      if (store.closed) continue;
-      const { dbPath, corpusId, mountedTierLedger: ledger } = store;
-      const sourceId = heldSourceByCorpus.get(corpusId) ?? storageAccountForCorpus(store).sourceId;
-      if (ledger && !watchedHeldLedgers.has(ledger)) {
-        watchedHeldLedgers.add(ledger);
-        ledger.onClose(() => {
-          closedHeldLedgers.add(ledger);
-          heldItemStatus?.closed();
-        });
-      }
-      if (ledger && closedHeldLedgers.has(ledger)) { mountProblems.push(sourceId); continue; }
-      const fileSource = getFileScopeSource(sourceId);
-      const read: HeldInventory['stores'][number]['read'] = sourceId === GMAIL_SOURCE_ID
-        ? { credential: gmailReadCredential, gmail: true }
-        : fileSource?.account === 'provider_account'
-          ? { credential: fileScopeReadCredential(fileSource) }
-          : { accountScope: connectorStorePrincipals.get(corpusId)?.accountScope ?? connectorStoreAccountScopes.get(corpusId) ?? null };
-      stores.push({ corpusId, dbPath, sourceId, read, ...(ledger ? { ledgerPath: ledger.dbPath } : {}) });
-    }
-    return {
-      stores, mountProblems,
-      gmailStores: [gmailInternalConnectorStore, gmailSecureConnectorStore].flatMap(store => store && !store.closed ? [store.dbPath] : []),
-      pending: [
-        ...sourceMounts.filter(lane => lane.mountBlocked || lane.pending()).map(lane => ({
-          id: lane.id, stores: accountStoreNames(lane.id), mountBlocked: lane.mountBlocked,
-          ...('provider' in lane ? { credential: { provider: lane.provider, pin: lane.pin, capability: lane.capability } } : {}),
-        })),
-        ...(!stores.some(store => store.sourceId === EVERNOTE_SOURCE_ID) ? [{ id: EVERNOTE_SOURCE_ID, stores: accountStoreNames(EVERNOTE_SOURCE_ID) }] : []),
-        ...archiveFamilies.filter(family => !archiveImports.laneMounted(family)).map(family => ({
-          id: ARCHIVE_IMPORTS_SOURCE_ID, stores: accountStoreNames(ARCHIVE_IMPORTS_SOURCE_ID, [family]),
-        })),
-      ],
-    };
+  // The front derives its view on mount/selection changes. Only the writer
+  // resolves Gmail's retained item scope from the stores.
+  const heldSelectionFiles = [
+    sourceRegistryPath(),
+    ...(connectedHandleRegistryPath ? [
+      connectedHandleRegistryPath, unpairedSourcesPath(connectedHandleRegistryPath),
+      connectedHandleGrantEpochPath(connectedHandleRegistryPath),
+      defaultFileSourceScopeStatePath(connectedHandleRegistryPath),
+    ] : []),
+    captureGrantPathFromEnv('telegram', process.env),
+    captureGrantPathFromEnv('whatsapp', process.env),
+  ];
+  const heldSelectionStamp = (file: { dev: bigint; ino: bigint; ctimeNs: bigint } | undefined) =>
+    file ? `${file.dev}:${file.ino}:${file.ctimeNs}` : null;
+  const warnHeldScope = (error: unknown) => {
+    console.warn(`[held items] could not verify the mounted view (${error instanceof Error ? error.name : 'error'}).`);
   };
-  const heldItemCount = engineFront?.heldItems ?? (() => {
-    const held = heldItemStatus?.observation();
-    return held && { pendingCount: held.count, pendingCountObservedAt: held.observed_at };
-  });
-  let judgeWaitingReason = (): PrivacyJudgeStopReason | undefined => undefined;
-  const privacyJudgeStop = () => ((reason) => reason ? { judgeStopped: reason } : {})(judgeWaitingReason());
+  const heldSelectionRevision = () => {
+    try {
+      return JSON.stringify(heldSelectionFiles.map(path => heldSelectionStamp(statSync(path, { bigint: true, throwIfNoEntry: false }))));
+    } catch (error) {
+      warnHeldScope(error);
+      return undefined;
+    }
+  };
+  const heldSelectionRevisionAsync = async () => {
+    try {
+      return JSON.stringify(await Promise.all(heldSelectionFiles.map(async path => {
+        try { return heldSelectionStamp(await stat(path, { bigint: true })); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }
+      })));
+    } catch (error) {
+      warnHeldScope(error);
+      return undefined;
+    }
+  };
+  const currentHeldCountPlan = (): HeldCountPlan | undefined => {
+    try {
+      if (sourceRuntimeClosed || tierLedgerProblems.size || frontMountProblems.size || pendingGovernance.waiting().length) return undefined;
+      const revision = heldSelectionRevision();
+      if (revision === undefined) return undefined;
+      const registry = readSourceRegistry();
+      const openable = (sourceId: string): boolean => {
+        const entry = findRegistryAccount(registry, sourceId, DEFAULT_ACCOUNT_SLOT);
+        return !entry || (entry.state === 'active' && !sourceAccountMovePending(entry));
+      };
+      const grantEpoch = connectedHandleRegistryPath ? readConnectedHandleGrantEpoch(connectedHandleRegistryPath) : undefined;
+      if (connectedHandleRegistryPath && readUnpairedSources(connectedHandleRegistryPath).status === 'unreadable') return undefined;
+      const handles = connectedHandleRegistryPath
+        ? withoutUnpairedLaneHandles(readConnectedHandleRegistry(connectedHandleRegistryPath).handles, connectedHandleRegistryPath)
+        : [];
+      const mounted = new Map(connectorStores.map(store => [store.corpusId, store]));
+      const mountedSources = new Set(heldSourceByCorpus.values());
+      if (!heldSourceMountsComplete(sourceMounts, mountedSources, openable, lane =>
+        sourceHasStores(lane.id) || ('provider' in lane
+          ? activeCredentialHandle(handles, lane) !== undefined
+          : fileSourceScopeAuthority?.policyRef(LOCAL_FILES_SOURCE_ID) !== undefined))) return undefined;
+      if (openable(EVERNOTE_SOURCE_ID) && !mountedSources.has(EVERNOTE_SOURCE_ID) && sourceHasStores(EVERNOTE_SOURCE_ID)) return undefined;
+      if (openable(ARCHIVE_IMPORTS_SOURCE_ID) && archiveFamilies.some(family => !archiveImports.laneMounted(family)
+        && accountStoreNames(ARCHIVE_IMPORTS_SOURCE_ID, [family]).some(name => {
+          const path = resolvedStorePath(ARCHIVE_IMPORTS_SOURCE_ID, name, process.env);
+          return existsSync(path) || existsSync(tieredStoreSetLedgerPath(path));
+        }))) return undefined;
+      const declared = declaredConnectorStoreMounts();
+      if (declared === 'unreadable' || declared.some(({ sourceId, corpusId }) => openable(sourceId) && !mounted.has(corpusId))) return undefined;
+      if ([...mountedSources, ...declared.filter(({ corpusId }) => mounted.has(corpusId)).map(mount => mount.sourceId)]
+        .some(sourceId => !openable(sourceId))) return undefined;
+
+      const selected = new Map<string, string | null>();
+      const retainedSelections = new Map<string, string>();
+      for (const lane of sourceMounts) {
+        if (!mountedSources.has(lane.id) || !('provider' in lane)) continue;
+        const pin = process.env[lane.pin]?.trim();
+        const choice = selectCredentialHandle(handles, { ...lane, ...(pin ? { pinnedHandle: pin } : {}) });
+        if (choice.reason === 'ambiguous' || choice.reason === 'pinned_missing') return undefined;
+        const role = choice.handle?.accountRole?.trim();
+        switch (lane.id) {
+          case GMAIL_SOURCE_ID:
+          case GOOGLE_DRIVE_SOURCE_ID: {
+            const gmail = lane.id === GMAIL_SOURCE_ID;
+            const accountScope = heldGoogleAccount(choice.handle, gmail && !engineFront ? gmailItemScopeFor : undefined);
+            if (accountScope === undefined) return undefined;
+            // Both roles attest the selected Gmail handle and its mounts. The
+            // writer also resolves the retained item scope through Gmail's view.
+            if (gmail) retainedSelections.set(lane.id, choice.handle!.handle);
+            selected.set(lane.id, accountScope);
+            break;
+          }
+          case DROPBOX_FILES_SOURCE_ID:
+            selected.set(lane.id, role || dropboxFilesAccount || 'personal');
+            break;
+          case WHATSAPP_PERSONAL_SOURCE_ID:
+            selected.set(lane.id, WHATSAPP_PERSONAL_ACCOUNT_SCOPE);
+            break;
+          case TELEGRAM_MESSAGES_SOURCE_ID:
+            selected.set(lane.id, telegramConnectorAccountScope);
+            break;
+          default:
+            selected.set(lane.id, sourceIndexAccount?.trim() || role || 'personal');
+        }
+      }
+      selected.set(LOCAL_FILES_SOURCE_ID, LOCAL_FILES_ACCOUNT_SCOPE);
+      selected.set(ARCHIVE_IMPORTS_SOURCE_ID, null);
+      if (mountedSources.has(EVERNOTE_SOURCE_ID)) {
+        const handle = fileScopeCredentialHandle(requireFileScopeSource(EVERNOTE_SOURCE_ID));
+        if (!handle) return undefined;
+        selected.set(EVERNOTE_SOURCE_ID, handle.accountRole?.trim() || 'personal');
+      }
+
+      const onDemand = new Map(tierLanes.flatMap(lane => lane.onDemand.map(store => [store.corpusId, store] as const)));
+      const selection = createHash('sha256').update(JSON.stringify([revision, grantEpoch])).digest('hex');
+      const configured = new Set(declared.map(mount => mount.corpusId));
+      const plan = heldCountPlan(tierLanes, corpusId => {
+        const store = mounted.get(corpusId);
+        const mount = store?.statusMount;
+        const path = store?.dbPath ?? onDemand.get(corpusId)?.dbPath;
+        if (!path || (store && !mount)) return undefined;
+        const file = mount?.file ?? null;
+        const stillAtPath = () => file === null
+          ? statSync(path, { throwIfNoEntry: false }) === undefined
+          : heldCountFileIdentity(path) === file;
+        if (!stillAtPath()) return undefined;
+        const sourceId = heldSourceByCorpus.get(corpusId);
+        const accountScope = sourceId ? selected.get(sourceId)
+          : connectorStorePrincipals.get(corpusId)?.accountScope ?? connectorStoreAccountScopes.get(corpusId)
+            ?? (configured.has(corpusId) ? null : undefined);
+        if (accountScope === undefined) return undefined;
+        const retainedSelection = sourceId && retainedSelections.get(sourceId);
+        return {
+          corpusId, accountScope, file, path, generation: mount?.generation ?? null,
+          ...(retainedSelection ? { selection: retainedSelection } : {}),
+          current: stillAtPath,
+          mounted: () => !store || store.statusMount?.generation === mount?.generation,
+        };
+      }, selection, connectorStores.length === 0);
+      // Configuration can change while its separate files are being read.
+      const selectionCurrent = () => revision === heldSelectionRevision()
+        && (!connectedHandleRegistryPath || grantEpoch === readConnectedHandleGrantEpoch(connectedHandleRegistryPath));
+      if (!plan || !selectionCurrent()) return undefined;
+      return {
+        ...plan,
+        current: () => {
+          try { return !sourceRuntimeClosed && selectionCurrent() && plan.current(); }
+          catch (error) {
+            warnHeldScope(error);
+            return false;
+          }
+        },
+      };
+    } catch {
+      // An unreadable configuration or mount cannot establish a complete scope.
+      return undefined;
+    }
+  };
+  // The unsplit engine keeps its existing one-minute request-side count.
+  let pendingClassificationCounted: { at: number; total: number } | undefined;
+  const legacyPendingClassificationCount = (): number => {
+    if (pendingClassificationCounted && Date.now() - pendingClassificationCounted.at < 60_000) return pendingClassificationCounted.total;
+    let total = 0;
+    for (const lane of tierLanes) {
+      try {
+        total += lane.ledger.heldItemCount([...lane.corpusIds]);
+      } catch {
+        // Preserve the single-process engine's existing best-effort count.
+      }
+    }
+    pendingClassificationCounted = { at: Date.now(), total };
+    return total;
+  };
+  let heldViewQueued = false;
+  let frontHeldRevision: string | undefined;
+  const refreshHeldView = () => {
+    frontHeldRevision = heldSelectionRevision();
+    frontHeldPlan = currentHeldCountPlan();
+    void engineFront?.refreshStatus();
+  };
+  heldScopeChanged = () => {
+    heldItemStatus?.invalidate();
+    if (!engineFront) return;
+    frontHeldPlan = undefined;
+    frontHeldChangedAt = Date.now();
+    if (heldViewQueued) return;
+    heldViewQueued = true;
+    setImmediate(() => {
+      heldViewQueued = false;
+      if (!sourceRuntimeClosed) refreshHeldView();
+    });
+  };
+  if (engineFront) refreshHeldView();
+  const heldItemCount = engineFront
+    ? engineFront.heldItems
+    : () => {
+        const held = heldItemStatus?.observation();
+        return held && { pendingCount: held.count, pendingCountObservedAt: held.observed_at };
+      };
+  const pendingClassificationCount = engineRole === 'single' ? legacyPendingClassificationCount : heldItemCount;
+  const privacyJudgeStop = (waiting = tierSnifferBacklog?.()?.waiting) => (
+    waiting && DASHBOARD_JUDGE_STOP_REASONS.has(waiting.reason)
+      ? { judgeStopped: waiting.reason as PrivacyJudgeStopReason, ...(engineFront ? { judgeStoppedAt: waiting.since } : {}) }
+      : {}
+  );
   const chatgptSetup = createChatGptSetupBackend({
     judgeStop: () => privacyJudgeStop(),
     privacyQuestionEngine: createPrivacyQuestionEngine({ runtime: async () => {
@@ -6316,7 +6466,7 @@ export async function main(): Promise<void> {
           ? localModelActivity.track(snifferResource, snifferModel) : snifferModel).complete(request)),
       } };
     } }),
-    heldItemCount,
+    ...(engineRole === 'single' ? { pendingClassificationCount: legacyPendingClassificationCount } : { heldItemCount }),
     workerFetch: workerFetchInProcess,
     handoffs: chatgptHandoffs,
     publicUrls: remotePublicUrls,
@@ -6553,7 +6703,12 @@ export async function main(): Promise<void> {
         : undefined;
     },
     privacy: () => {
-      const settings = readChatGptPrivacySettings(process.env, heldItemCount());
+      const settings = readChatGptPrivacySettings(process.env, pendingClassificationCount());
+      // The local judge's measured speed, for Home's time left on the waiting items.
+      const judgePerMinute = (): number | undefined => {
+        const rate = judgeObservations.observed().localItemsPerMinute;
+        return rate !== undefined && Number.isFinite(rate) && rate > 0 ? rate : undefined;
+      };
       const backlog = tierSnifferBacklog?.();
       const missing = judgeMissing();
       return {
@@ -6563,7 +6718,8 @@ export async function main(): Promise<void> {
         classifierAwaitingApproval: backlog?.awaitingOwnerApproval === true,
         // No judge: every new item waits, held, until one is set up (#1316).
         ...(missing ? { judgeMissing: missing } : {}),
-        ...privacyJudgeStop(),
+        ...privacyJudgeStop(backlog?.waiting),
+        ...((rate) => (rate !== undefined ? { judgePerMinute: rate } : {}))(judgePerMinute()),
         ...(backlog?.awaitingApproval ? { classifierWaiting: { lane: backlog.awaitingApproval.lane, modelId: backlog.awaitingApproval.modelId } } : {}),
       };
     },
@@ -7048,6 +7204,15 @@ export async function main(): Promise<void> {
     const retryDue = ({ lastAttemptAt }: { lastAttemptAt: number }) => now - lastAttemptAt >= FRONT_MOUNT_FAILURE_RETRY_MS;
     checkingFrontMounts = true;
     try {
+      // Check selection changes even for stores that are already mounted. When
+      // a ledger or corpus path no longer names its handle, drop the view too.
+      const heldPlan = frontHeldPlan;
+      const [heldRevision, heldFilesMatch] = await Promise.all([
+        heldSelectionRevisionAsync(),
+        heldPlan ? heldCountFilesCurrent(heldPlan.files) : true,
+      ]);
+      if (heldRevision !== frontHeldRevision
+        || (heldPlan && heldPlan === frontHeldPlan && (!heldFilesMatch || !heldPlan.mountsCurrent()))) heldScopeChanged();
       if (!probeDue && ![...frontMountProblems.values()].some(retryDue)) return;
       const changed = new Set<string>();
       if (probeDue) {
@@ -7091,13 +7256,11 @@ export async function main(): Promise<void> {
     classificationBusy = judge.busy;
     tierSnifferBacklog = judge.backlog as typeof tierSnifferBacklog;
     tierOverPrivate = judge.overPrivate;
-    judgeWaitingReason = judge.waitingReason;
     archivePrivateModelState = judge.archivePrivateModel;
   } else {
     classificationBusy = () => tierSniffer?.hasPriority ?? false;
     tierSnifferBacklog = tierSniffer ? () => tierSniffer.backlog() : undefined;
     if (overPrivate) tierOverPrivate = () => overPrivate.status();
-    judgeWaitingReason = () => tierSniffer?.actionableStop();
     archivePrivateModelState = () => archivePrivateModelFromSniffer(tierSniffer);
   }
   tierSniffer?.start();
@@ -7126,14 +7289,6 @@ export async function main(): Promise<void> {
     previous: { count: 0 }, memory: memoryDiagnostic,
     ...(engineRole === 'front' ? { sampleAsync: processMemoryAsync } : {}),
   }) : undefined;
-  const startHeldCount = () => {
-    heldItemStatus = startHeldItemStatus({
-      inventory: heldInventory,
-      holds: () => standBack.holds('status'),
-      log: (line) => console.warn(`[held items] ${line}`),
-    });
-  };
-  if (engineRole === 'single') startHeldCount();
   let engineBackground: { stop(): void } | undefined;
   if (engineRole === 'background') {
     if (!authToken) throw new Error('The engine background needs the worker auth token.');
@@ -7143,7 +7298,7 @@ export async function main(): Promise<void> {
       ).sources);
       // A source connected or removed shows on the dashboard at the next count, not after the rest.
       statusRecount?.soon();
-      heldItemStatus?.invalidate();
+      heldItemStatus?.soon();
     };
     // A forwarded owner action runs as the route that served it before, behind
     // the front's authorization: the route's handler checks the body itself.
@@ -7285,6 +7440,7 @@ export async function main(): Promise<void> {
       env: process.env,
       instanceId: commands.instanceId,
       collect: () => {
+        heldItemStatus?.check();
         return {
           activity: statusMemoryActivity(tierSniffer?.passRunning ?? false, statusRecount?.health().counting ?? false),
           scheduler: sourceScheduler?.status() ?? null,
@@ -7293,7 +7449,6 @@ export async function main(): Promise<void> {
             return {
               backlog: backlog ?? null,
               over_private: tierOverPrivate(),
-              ...((reason) => reason ? { waiting_reason: reason } : {})(tierSniffer?.actionableStop()),
               pending: backlog?.pendingItems ?? null,
               spending: judgeSpending.status(),
               busy: tierSniffer?.hasPriority ?? false,
@@ -7333,7 +7488,11 @@ export async function main(): Promise<void> {
     commands.markReady();
     finishBootProgress();
     setEngineStep(undefined);
-    startHeldCount();
+    heldItemStatus = startHeldItemStatus({
+      plan: () => { pendingGovernance.retry(); return currentHeldCountPlan(); },
+      holds: () => standBack.holds('status'),
+      log: (line) => console.warn(`[held items] ${line}`),
+    });
     // What the dashboard and status show, recounted here on its own pace and
     // kept for the front, which never counts (status-recount.ts).
     const refreshSnapshot = sourceIndexStatus?.refreshSnapshot;

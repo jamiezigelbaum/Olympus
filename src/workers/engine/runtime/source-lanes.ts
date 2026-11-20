@@ -223,26 +223,6 @@ export function connectorStoreLaneHandle(input: {
   return handle && laneEnabled ? handle : undefined;
 }
 
-export type ReadCredential = {
-  provider: ConnectedCredentialHandle['provider'];
-  capability: string;
-  pin: string;
-};
-
-export function readCredentialSelection(
-  lane: ReadCredential,
-  env: Record<string, string | undefined>,
-  handles: readonly ConnectedCredentialHandle[],
-): CredentialHandleSelection {
-  return selectCredentialHandle(handles, { ...lane, pinnedHandle: env[lane.pin]?.trim() ?? '' });
-}
-
-/** Null is a known exclusion. Undefined leaves the read account unresolved. */
-export function fileReadAccount(selection: CredentialHandleSelection): string | null | undefined {
-  if (selection.handle) return selection.handle.accountRole?.trim() || 'personal';
-  return selection.reason === 'none' ? null : undefined;
-}
-
 /** Select a source credential independently from any storage-lane enable. */
 /**
  * Starts the first read after a scope approval without holding the approval's
@@ -266,7 +246,13 @@ export function selectedSourceCredentialHandle(input: {
   handles: readonly ConnectedCredentialHandle[];
   warn?: (message: string) => void;
 }): ConnectedCredentialHandle | undefined {
-  const selection = readCredentialSelection({ ...input, pin: input.pinEnvName }, input.env, input.handles);
+  const selection = selectCredentialHandle(input.handles, {
+    provider: input.provider,
+    capability: input.capability,
+    ...(input.env[input.pinEnvName]?.trim()
+      ? { pinnedHandle: input.env[input.pinEnvName]!.trim() }
+      : {}),
+  });
   const warn = input.warn ?? ((message: string) => console.warn(message));
   if (selection.reason === 'ambiguous') {
     warn(

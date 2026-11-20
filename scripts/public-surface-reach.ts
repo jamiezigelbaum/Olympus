@@ -40,7 +40,6 @@ export const PUBLIC_ENTRYPOINTS = [
   'src/workers/classification/secret-scan-worker.ts',
   // Started as a Bun Worker by the split's background for its command socket and status (dist/engine-control-worker.js).
   'src/workers/engine-split/control-worker.ts',
-  'src/workers/engine/held-item-worker.ts',
   // Installed beside the entrypoints and used for built-in model lifecycle work.
   'src/workers/source-index/built-in-reasoning/model-worker.ts',
 ] as const;

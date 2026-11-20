@@ -3208,10 +3208,22 @@ export const DASHBOARD_CHATGPT_PRIVACY_COPY = {
   descriptionEmpty: 'You haven\'t said what\'s private yet.',
   descriptionStart: 'Describe what\'s private',
   editLabel: 'Edit what\'s private',
+  /** Home's In progress line for items waiting for the private model: machine work, no button. */
+  dashboardPending: {
+    one: '{n} item waiting for the private model',
+    many: '{n} items waiting for the private model',
+  },
 } as const;
 
-/** The judge's actionable stops, displayed beside its model action. */
+/**
+ * The privacy check stopped while items wait (sniffer-service `waiting`):
+ * {n} waiting items, {reason} the check's own plain sentence. Only this makes
+ * waiting items a Needs you line; waiting alone is In progress.
+ */
 export const DASHBOARD_CHATGPT_PRIVACY_JUDGE_STOPPED_COPY = {
+  one: '{n} item is waiting{age} because the privacy check stopped: {reason}',
+  many: '{n} items are waiting{age} because the privacy check stopped: {reason}',
+  unknown: 'Items waiting for the privacy check: not known while judging is stopped ({reason})',
   /** One closed reason per stop the owner can look into (sniffer-service TierSnifferWaitReason). */
   reason: {
     model_not_answering: 'the private model is not answering',
@@ -3223,10 +3235,13 @@ export const DASHBOARD_CHATGPT_PRIVACY_JUDGE_STOPPED_COPY = {
 
 export const DASHBOARD_CHATGPT_PRIVACY_COUNT_COPY = {
   counting: 'counting',
-  unknownStopped: 'not known while judging is stopped',
   asOf: ' (as of {n} min ago)',
-  dashboard: 'Items waiting for the private model: {count}',
-  tool: 'Items waiting for the privacy check on the computer: {count}',
+  dashboard: { ...DASHBOARD_CHATGPT_PRIVACY_COPY.dashboardPending, counting: 'Items waiting for the private model: {count}' },
+  tool: {
+    one: '{n} item waits for the privacy check on the computer',
+    many: '{n} items wait for the privacy check on the computer',
+    counting: 'Items waiting for the privacy check on the computer: {count}',
+  },
   stopped: DASHBOARD_CHATGPT_PRIVACY_JUDGE_STOPPED_COPY,
 } as const;
 
@@ -3234,19 +3249,29 @@ export type PrivacyJudgeStopReason = keyof typeof DASHBOARD_CHATGPT_PRIVACY_JUDG
 
 /** Shared with the inline dashboard program. Keep runtime references inside this function. */
 export function privacyHeldItemsText(
-  info: { pendingCount?: number; pendingCountObservedAt?: string; judgeStopped?: PrivacyJudgeStopReason },
+  info: { pendingCount?: number; pendingCountObservedAt?: string; judgeStopped?: PrivacyJudgeStopReason; judgeStoppedAt?: string },
   copy: typeof DASHBOARD_CHATGPT_PRIVACY_COUNT_COPY,
   now: number,
   surface: 'dashboard' | 'tool' = 'dashboard',
-): { text: string; stop?: string } {
+): { text: string; needsModel: boolean } {
   const count = Number.isSafeInteger(info.pendingCount) && info.pendingCount! >= 0 ? info.pendingCount : undefined;
   const observed = Date.parse(info.pendingCountObservedAt ?? '');
   const minutes = Math.floor((now - observed) / 60_000);
   const age = count !== undefined && minutes >= 1 ? copy.asOf.replace('{n}', String(minutes)) : '';
   const stopped = info.judgeStopped && Object.hasOwn(copy.stopped.reason, info.judgeStopped) ? info.judgeStopped : undefined;
-  const value = count === undefined ? (stopped ? copy.unknownStopped : copy.counting) : count.toLocaleString('en-US') + age;
-  const text = copy[surface].replace('{count}', value);
-  return stopped ? { text, stop: copy.stopped.reason[stopped] } : { text };
+  const n = count?.toLocaleString('en-US') ?? copy.counting;
+  if (stopped) {
+    const sentence = count === undefined ? copy.stopped.unknown : count === 1 ? copy.stopped.one : copy.stopped.many;
+    const stop = Date.parse(info.judgeStoppedAt ?? '');
+    return {
+      text: sentence.replace('{n}', n).replace('{age}', age).replace('{reason}', copy.stopped.reason[stopped]),
+      needsModel: count !== 0 || (Number.isFinite(stop) && (!Number.isFinite(observed) || observed < stop)),
+    };
+  }
+  const words = copy[surface];
+  const sentence = count === undefined ? words.counting.replace('{count}', n)
+    : (count === 1 ? words.one : words.many).replace('{n}', n) + age;
+  return { text: sentence, needsModel: false };
 }
 
 /** The dashboard's prompt to set up privacy, until the person has said what's private for them. */
@@ -3535,6 +3560,7 @@ export const DASHBOARD_LOCAL_COPY = {
     editLabel: DASHBOARD_CHATGPT_PRIVACY_COPY.editLabel,
     setUpSentence: DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY.sentence,
     setUp: DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY.label,
+    pending: DASHBOARD_CHATGPT_PRIVACY_COPY.dashboardPending,
     unreadable: 'Olympus could not read your privacy settings.',
   },
 } as const;

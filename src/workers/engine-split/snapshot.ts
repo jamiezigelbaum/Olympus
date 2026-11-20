@@ -12,7 +12,6 @@ import type { TierOverPrivateStatus } from '../classification/tier-over-private.
 import { randomUUID } from 'node:crypto';
 import { closeSync, fstatSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { open } from 'node:fs/promises';
-import type { HeldItemCorpus } from '../classification/tier-ledger.ts';
 
 export const ENGINE_STATUS_SNAPSHOT_SCHEMA = 'olympus.engine.background-status.v1';
 export const ENGINE_STATUS_PUBLISH_INTERVAL_MS = 3_000;
@@ -22,11 +21,18 @@ export const ENGINE_STATUS_PUBLISH_INTERVAL_MS = 3_000;
  */
 export const ENGINE_STATUS_STALE_MS = 30_000;
 
+export interface HeldCountScope {
+  /** A digest of the account selection and backing files both roles must share. */
+  view: string;
+  /** Includes the opened handles and the resolved account scopes. */
+  generation: string;
+}
+
 export interface HeldItemStatus {
   count: number;
   observed_at: string;
-  /** Null account means the whole corpus was counted. */
-  counted_scope: HeldItemCorpus[];
+  writer_pid: number;
+  scope: HeldCountScope;
 }
 
 export interface EngineStatusSnapshot {
@@ -65,7 +71,6 @@ export interface EngineStatusSnapshot {
     over_private?: TierOverPrivateStatus;
     pending: number | null;
     spending: unknown;
-    waiting_reason?: 'model_not_answering' | 'cloud_stopped' | 'failed';
     /** The judge is ahead of the lanes (it has priority): the front's "busy classifying". */
     busy?: boolean;
     /** Whether the judge can take imported archive items now (archive-import/dashboard.ts). */

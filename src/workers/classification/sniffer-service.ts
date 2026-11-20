@@ -1116,13 +1116,6 @@ export class TierSnifferService {
 
   private readonly retiredPrefilterCleaned = new Set<string>();
 
-  /** The owner's action follows the judge's state even before backlog is counted. */
-  actionableStop(): 'model_not_answering' | 'cloud_stopped' | 'failed' | undefined {
-    const reason = this.waiting?.reason;
-    if (reason === 'model_not_answering' || reason === 'cloud_stopped' || reason === 'failed') return reason;
-    return undefined;
-  }
-
   status(): { lane: string; modelId: string; callsToday: number; lastTick?: TierSnifferTick; waiting?: TierSnifferWaiting; throughput?: { last: TierSnifferThroughput; total: TierSnifferThroughput } } {
     return {
       lane: this.options.lane.kind,

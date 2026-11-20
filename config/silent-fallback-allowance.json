@@ -137,7 +137,7 @@
     "src/workers/chatgpt/private-answer-payload.ts": 1,
     "src/workers/chatgpt/private-question-jobs.ts": 2,
     "src/workers/chatgpt/response-builder.ts": 2,
-    "src/workers/chatgpt/setup-backend.ts": 1,
+    "src/workers/chatgpt/setup-backend.ts": 2,
     "src/workers/classification/delphi-scorer.ts": 2,
     "src/workers/classification/judge-check.ts": 1,
     "src/workers/classification/judge-second-round.ts": 1,

@@ -616,7 +616,7 @@ describe('the panel on the computer', () => {
   test('privacy items waiting are In progress with no button, and a transcription that needs a hand is a Needs you line with one', async () => {
     const data = model({
       sources: [TELEGRAM],
-      privacy: { configured: true, ruleCount: 2, pendingCount: 2 },
+      privacy: { configured: true, ruleCount: 2, pendingCount: 2, judgePerMinute: 1 },
       models: { embedding: { kind: 'built_in', state: 'ready' }, transcription: { state: 'load_failed', download: { label: 'Try again', tool: 'olympus_model_retry', args: { model: 'transcription' } } } },
     } as unknown as Partial<DashboardViewModelV1>);
     const page = await onHost(COMPUTER, data);
@@ -624,7 +624,7 @@ describe('the panel on the computer', () => {
     expect(doc.querySelector('section.privacy-row')).toBeNull();
     expect(doc.querySelector('details[data-open-key="models"]')).toBeNull();
     const pending = doc.querySelector('[data-privacy-pending]')!;
-    expect(pending.textContent).toBe('Items waiting for the private model: 2');
+    expect(pending.textContent).toBe('2 items waiting for the private model · about 2 min left');
     expect(pending.closest('.row.need')).toBeNull();
     expect(pending.querySelectorAll('button')).toHaveLength(0);
     const needs = Array.from(doc.querySelectorAll('.row.need')).map((node) => node.textContent);

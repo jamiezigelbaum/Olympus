@@ -27,7 +27,6 @@ export const BUNDLED_OUTPUTS = [
   'dist/litert-helper.js',
   'dist/secret-scan-worker.js',
   'dist/engine-control-worker.js',
-  'dist/held-item-worker.js',
   'dist/model-worker.js',
   'dist/control-ui/index.js',
 ] as const;
