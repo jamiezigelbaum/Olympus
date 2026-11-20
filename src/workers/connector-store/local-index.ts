@@ -1,4 +1,5 @@
 import { changeMemoryActivity, changeMemoryCounter } from '../../core/memory-counters.ts';
+import { embedsOnThisComputer } from '../local-pacing.ts';
 import { EMBEDDING_HOLD_REASONS, type EmbeddingHoldReason } from '../../core/embedding-sweep-idle.ts';
 import { trackSqliteStoreMemory, untrackSqliteStoreMemory } from '../engine-split/sqlite-memory.ts';
 import { noteSourceIndexReadProgress } from '../../core/source-index/read-progress.ts';
@@ -6,7 +7,7 @@ import { sizeHeldItemKey } from '../../core/source-size-limits.ts';
 import { applySqliteMmap } from './sqlite-mmap.ts';
 import {
   applyStoreTotalsCount, createStoreTotals, deferStoreTotalsWalk, readStoreTotals, readStoreWriteSequence,
-  STORE_TOTALS_QUIET_MS, STORE_TOTALS_WRITES, storeTotalsFromRows, storeTotalsInstalled, storeTotalsWalkSteps,
+  STORE_TOTALS_QUIET_MS, storeTotalsFromRows, storeTotalsInstalled, storeTotalsWalkSteps,
   type StoreTotals,
 } from './store-totals.ts';
 import { createVectorDigestSchema, writeVectorDigest, backfillVectorDigests, vectorDigestState, vectorDigestSourceQuery, applyVectorDigestWindow, type VectorDigestSourceRow } from './vector-digest.ts';
@@ -76,7 +77,7 @@ import type {
   LocalContentProvider,
   LocalContentRequest,
 } from '../../core/evidence-pack.ts';
-import { OperationError } from '../../core/operation-error.ts';
+import { OperationError, SOURCE_SCOPE_APPROVAL_REQUIRED, SourceScopeApprovalRequiredError } from '../../core/operation-error.ts';
 import { itemContentKeptNamesOnly } from '../../core/classification-signals.ts';
 import {
   isMediaCachePath,
@@ -2042,8 +2043,12 @@ export interface ConnectorStoreEmbedOptions {
   accountScope?: string;
   /** Trusted content-scope predicates applied in SQL before provider dispatch. */
   filters?: ConnectorStoreSearchFilters;
+  /** Maintain retained, serveable content only, leaving even judgment holds in place. */
+  excludeAllEmbeddingHolds?: true;
   /** Revalidates dynamic authorization immediately before every provider call. */
   assertAuthorized?: () => void | Promise<void>;
+  /** A queued provider can differ from the provider bound to this sweep's scope. */
+  assertSweepBindingCurrent?: () => void;
   /** Optional item selection for latency-sensitive incremental ingest. */
   localItemIds?: readonly string[];
   /**
@@ -2161,6 +2166,7 @@ export interface ConnectorStoreEmbeddingTarget {
   wholeStore?: boolean;
   accountScope?: string;
   filters?: ConnectorStoreSearchFilters;
+  excludeAllEmbeddingHolds?: true;
   assertAuthorized?: () => void | Promise<void>;
 }
 
@@ -2173,7 +2179,7 @@ export interface ConnectorStoreEmbedStoreRun {
   itemsFailed: number;
   /** Queued items dropped because the scope they were queued under is no longer current. */
   itemsOutOfScope: number;
-  /** Set when the provider did not answer; the items stay pending. */
+  /** Set when the provider did not answer or approval was refused; the items stay pending. */
   deferredReason?: string;
   /** Another embedder still holds the lease but its heartbeat stalled; nothing was lost. */
   busy?: boolean;
@@ -2247,16 +2253,26 @@ export async function embedPendingChunks(
         run.stoppedAtDeadline = true;
         return;
       }
+      // A historical queue binding may be stale even when the current
+      // target is approved. Drop that group without deferring the target.
+      let checkingQueuedBinding = onBatchWritten !== undefined;
       try {
-        group.provider.assertBindingCurrent?.();
+        if (checkingQueuedBinding) group.provider.assertBindingCurrent?.();
+        checkingQueuedBinding = false;
         await target.assertAuthorized?.();
-      } catch {
-        store.completeQueuedEmbedding(group.localItemIds);
-        run.itemsOutOfScope += group.localItemIds.length;
+      } catch (error) {
+        if (!checkingQueuedBinding && error instanceof SourceScopeApprovalRequiredError) {
+          run.deferredReason = SOURCE_SCOPE_APPROVAL_REQUIRED;
+        } else {
+          store.completeQueuedEmbedding(group.localItemIds);
+          run.itemsOutOfScope += group.localItemIds.length;
+        }
         return;
       }
       const outcome = await embedItemsIsolated(store, group.provider, group.localItemIds, {
         ...target,
+        ...(group.provider !== target.provider && target.provider.assertBindingCurrent
+          ? { assertSweepBindingCurrent: () => target.provider.assertBindingCurrent!() } : {}),
         ...(onBatchWritten ? { onBatchWritten } : {}),
         ...(options.stopAtMs !== undefined ? { stopAtMs: options.stopAtMs } : {}),
         ...(options.shouldStop ? { shouldStop: options.shouldStop } : {}),
@@ -2285,6 +2301,7 @@ export async function embedPendingChunks(
     // A stable, complete zero-pending inventory replaces the work-list walk.
     const noMissingVectors = run.inventory?.inventory_complete === 1 && run.inventory.pending_chunks === 0
       && inventoryWrites !== undefined && store.writeSequence() === inventoryWrites && !store.fileReplacedOrRemoved();
+    let exhausted = !target.wholeStore || noMissingVectors;
     if (target.wholeStore && queuedIds.size < options.maxItems && !noMissingVectors
       && !run.busy && !run.deferredReason && !run.stoppedAtDeadline) {
       if (budgetSpent()) {
@@ -2292,17 +2309,25 @@ export async function embedPendingChunks(
       } else {
         const missing = (await store.missingEmbeddingItemIdsInTurns(target.provider, options.maxItems - queuedIds.size, target))
           .filter((id) => !queuedIds.has(id));
+        exhausted = missing.length === 0;
         if (missing.length) await dispatch({ provider: target.provider, localItemIds: missing });
       }
     }
     if (run.deferredReason) store.setEmbeddingDeferral(run.deferredReason);
-    else if (answered) store.setEmbeddingDeferral(undefined);
+    else if (answered || (exhausted && !run.busy && !run.stoppedAtDeadline
+      && store.embeddingDeferredReason() === SOURCE_SCOPE_APPROVAL_REQUIRED && !store.queuedEmbeddingGroups(1).length)) {
+      store.setEmbeddingDeferral(undefined);
+    }
   }
   return runs;
 }
 
 function sameEmbeddingIdentity(a: SourceEmbeddingProvider, b: SourceEmbeddingProvider): boolean {
-  return a.provider === b.provider && a.backend === b.backend && a.modelId === b.modelId && a.epochId === b.epochId;
+  const onDevice = embedsOnThisComputer(b);
+  return a.provider === b.provider && a.backend === b.backend && a.modelId === b.modelId && a.epochId === b.epochId
+    && embedsOnThisComputer(a) === onDevice
+    // A scoped off-device sweep can authorize only its configured processor.
+    && (!b.assertBindingCurrent || onDevice || a.configHash === b.configHash);
 }
 
 /**
@@ -2314,15 +2339,21 @@ async function embedItemsIsolated(
   store: LocalConnectorStore,
   provider: SourceEmbeddingProvider,
   localItemIds: readonly string[],
-  scope: Pick<ConnectorStoreEmbedOptions, 'accountScope' | 'filters' | 'assertAuthorized' | 'stopAtMs' | 'shouldStop' | 'onBatchWritten'> = {},
+  scope: Pick<ConnectorStoreEmbedOptions, 'accountScope' | 'filters' | 'excludeAllEmbeddingHolds' | 'assertAuthorized' | 'assertSweepBindingCurrent' | 'stopAtMs' | 'shouldStop' | 'onBatchWritten'> = {},
 ): Promise<{ chunksEmbedded: number; itemsFailed: number; deferredReason?: string; busy?: boolean; stoppedAtDeadline?: boolean }> {
+  let chunksEmbedded = 0;
   try {
     const embed = await store.embedChunks({
       provider, localItemIds: [...localItemIds],
-      ...(scope.onBatchWritten ? { onBatchWritten: scope.onBatchWritten } : {}),
+      onBatchWritten(itemPks) {
+        chunksEmbedded += itemPks.length;
+        scope.onBatchWritten?.(itemPks);
+      },
       ...(scope.accountScope ? { accountScope: scope.accountScope } : {}),
       ...(scope.filters ? { filters: scope.filters } : {}),
+      ...(scope.excludeAllEmbeddingHolds ? { excludeAllEmbeddingHolds: true } : {}),
       ...(scope.assertAuthorized ? { assertAuthorized: scope.assertAuthorized } : {}),
+      ...(scope.assertSweepBindingCurrent ? { assertSweepBindingCurrent: scope.assertSweepBindingCurrent } : {}),
       ...(scope.stopAtMs !== undefined ? { stopAtMs: scope.stopAtMs } : {}),
       ...(scope.shouldStop ? { shouldStop: scope.shouldStop } : {}),
     });
@@ -2332,18 +2363,22 @@ async function embedItemsIsolated(
     store.completeQueuedEmbedding(localItemIds);
     return { chunksEmbedded: embed.chunksEmbedded, itemsFailed: 0 };
   } catch (error) {
-    if (error instanceof FileLeaseBusyError) return { chunksEmbedded: 0, itemsFailed: 0, busy: true };
+    if (error instanceof FileLeaseBusyError) return { chunksEmbedded, itemsFailed: 0, busy: true };
+    // An expired approval applies to the whole dispatch. Marking individual
+    // items failed would hide their debt even after a fresh approval.
+    if (error instanceof SourceScopeApprovalRequiredError) {
+      return { chunksEmbedded, itemsFailed: 0, deferredReason: SOURCE_SCOPE_APPROVAL_REQUIRED };
+    }
     if (error instanceof TransientSourceEmbeddingError) {
-      return { chunksEmbedded: 0, itemsFailed: 0, deferredReason: connectorStoreEmbeddingDeferredReason(error) };
+      return { chunksEmbedded, itemsFailed: 0, deferredReason: connectorStoreEmbeddingDeferredReason(error) };
     }
     if (localItemIds.length === 1) {
       store.markEmbeddingFailed(localItemIds[0]!, embeddingFailureKind(error));
       console.warn(
         `[olympus:connector-store] embedding_item_skipped corpus_id=${store.corpusId} error_kind=${embeddingFailureKind(error)}`,
       );
-      return { chunksEmbedded: 0, itemsFailed: 1 };
+      return { chunksEmbedded, itemsFailed: 1 };
     }
-    let chunksEmbedded = 0;
     let itemsFailed = 0;
     for (const [index, localItemId] of localItemIds.entries()) {
       // One budget for the whole retry: each item's first batch always runs,
@@ -3531,6 +3566,8 @@ export interface ConnectorStoreSearchFilters {
   provider?: string;
   /** An actual provider observation under this connector's current scope binding. */
   observedConnectorId?: string;
+  /** An earlier ID for the same binding, requiring original admission provenance. */
+  previousObservedConnectorId?: string;
   /**
    * An observation by any connector whose id starts with this prefix (the
    * source's imported archives, `archive.`, which the owner approved one by
@@ -6739,21 +6776,6 @@ export class LocalConnectorStore {
     return rows.map((row) => sourceItemFromRow({ ...row, rank: 0 } as ItemRow));
   }
 
-  /** Confirm an immutable stored item's current provider scope without rewriting its body or vectors. */
-  observeStoredItemOwner(identity: SourceItemIdentity, connectorId: string): void {
-    this.db.transaction(() => {
-      const row = this.db.query(`
-        SELECT item_pk, sync_run_id FROM items
-        WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ? AND tombstoned = 0
-      `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId) as { item_pk: number; sync_run_id: string } | null;
-      if (row) {
-        this.rememberItemOwner(row.item_pk, connectorId, 'observed', row.sync_run_id, nowIso(), 'provider_listing');
-        // Ownership changes sweep eligibility, so move the store write sequence.
-        this.db.query('INSERT INTO store_totals (name, n) VALUES (?, 1) ON CONFLICT(name) DO UPDATE SET n = n + 1').run(STORE_TOTALS_WRITES);
-      }
-    })();
-  }
-
   /**
    * Re-stamp the owner row of a copy this store keeps while the item is
    * routed elsewhere. Writes only `item_owners`, never the item or its
@@ -8635,20 +8657,6 @@ export class LocalConnectorStore {
     ) as { authored_at: string | null; tombstoned: number; chunk_count: number } | null;
     if (!row || row.tombstoned === 1) return undefined;
     return { chunkCount: row.chunk_count, ...(row.authored_at ? { authoredAt: row.authored_at } : {}) };
-  }
-
-  /** Counts retained parent copies without an accepted observed owner, for a paused confirmation walk. */
-  async unobservedContentCount(provider: string, account: string, connectorId: string, connectorIdPrefix: string): Promise<number> {
-    const owner = observedOwnerPredicate(connectorId, connectorIdPrefix);
-    const sql = `SELECT COUNT(*) AS n FROM items i
-      WHERE i.provider = ? AND i.account_scope = ? AND i.tombstoned = 0 AND i.parent_local_item_id IS NULL
-        AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
-        AND NOT ${owner.sql}`;
-    const params = [provider, account, ...owner.params];
-    const row = (offThreadReadsSupported(this.dbPath)
-      ? await readInBackground(this.dbPath, { sql, params, mode: 'get' })
-      : this.db.query(sql).get(...params)) as { n: number };
-    return row.n;
   }
 
   /**
@@ -13436,7 +13444,7 @@ export class LocalConnectorStore {
   missingEmbeddingItemIds(
     embedder: Pick<SourceEmbeddingProvider, 'modelId' | 'provider' | 'backend'> & Partial<ConnectorStoreEmbeddingAuthorityIdentity>,
     limit: number,
-    scope: Pick<ConnectorStoreEmbedOptions, 'accountScope' | 'filters'> = {},
+    scope: Pick<ConnectorStoreEmbedOptions, 'accountScope' | 'filters' | 'excludeAllEmbeddingHolds'> = {},
     tierHidden?: TierLedgerHiddenItemPks,
   ): string[] {
     if (limit <= 0) return [];
@@ -13444,7 +13452,8 @@ export class LocalConnectorStore {
     const accountScope = normalizeOptionalAccountScope(scope.accountScope);
     const scoped = connectorStoreFilterSql(scope.filters);
     const failed = this.embeddingFailureState;
-    const tierExclusion = this.embeddingWorkListExclusionFilter(0, tierHidden, this.canEmbedHeld(embedder));
+    const tierExclusion = this.embeddingWorkListExclusionFilter(0, tierHidden,
+      !scope.excludeAllEmbeddingHolds && this.canEmbedHeld(embedder));
     const privateTier = this.privateTierEmbeddingFilter(embedder);
     const filter = `${tierExclusion.filter} ${privateTier.filter} ${accountScope ? 'AND i.account_scope = ?' : ''} ${scoped.sql}`;
     const params = [...tierExclusion.params, ...privateTier.params, ...(accountScope ? [accountScope] : []), ...scoped.params];
@@ -13482,7 +13491,7 @@ export class LocalConnectorStore {
   async missingEmbeddingItemIdsInTurns(
     embedder: Pick<SourceEmbeddingProvider, 'modelId' | 'provider' | 'backend'> & Partial<ConnectorStoreEmbeddingAuthorityIdentity>,
     limit: number,
-    scope: Pick<ConnectorStoreEmbedOptions, 'accountScope' | 'filters'> = {},
+    scope: Pick<ConnectorStoreEmbedOptions, 'accountScope' | 'filters' | 'excludeAllEmbeddingHolds'> = {},
     windowChunks = MISSING_EMBEDDING_CHUNK_WINDOW,
   ): Promise<string[]> {
     if (limit <= 0) return [];
@@ -13496,7 +13505,7 @@ export class LocalConnectorStore {
     const accountScope = normalizeOptionalAccountScope(scope.accountScope);
     const scoped = connectorStoreFilterSql(scope.filters);
     const failed = this.embeddingFailureState;
-    const allowHeld = this.canEmbedHeld(embedder);
+    const allowHeld = !scope.excludeAllEmbeddingHolds && this.canEmbedHeld(embedder);
     const privateTier = this.privateTierEmbeddingFilter(embedder);
     const offThread = offThreadReadsSupported(this.dbPath);
     // On the read worker the tier ledger's exclusions apply here, from the
@@ -13594,7 +13603,7 @@ export class LocalConnectorStore {
    */
   async embeddingSweepInventory(
     provider: SourceEmbeddingProvider,
-    scope: Pick<ConnectorStoreEmbedOptions, 'accountScope' | 'filters'> = {},
+    scope: Pick<ConnectorStoreEmbedOptions, 'accountScope' | 'filters' | 'excludeAllEmbeddingHolds'> = {},
     stopAtMs?: number,
     windowChunks = MISSING_EMBEDDING_CHUNK_WINDOW,
   ): Promise<Record<string, number>> {
@@ -13616,7 +13625,8 @@ export class LocalConnectorStore {
     const tier = await this.tierHiddenItemPksInTurns();
     const hidden = await pkSetInTurns([tier.hidden]);
     const held = await pkSetInTurns([tier.held]);
-    const heldForJudgment = this.canEmbedHeld(provider) ? await pkSetInTurns([tier.heldForJudgment]) : new Set<number>();
+    const heldForJudgment = !scope.excludeAllEmbeddingHolds && this.canEmbedHeld(provider)
+      ? await pkSetInTurns([tier.heldForJudgment]) : new Set<number>();
     const namesOnly = await pkSetInTurns([tier.metadataLayer]);
     const moving = new Set<number>();
     let walked = 0;
@@ -13844,13 +13854,14 @@ export class LocalConnectorStore {
   private embeddingBatchRecheck<T extends { item_pk: number }>(
     batch: readonly T[],
     embeddableTiers: readonly SourceTrustTier[] | undefined,
-    provider: SourceEmbeddingProvider,
+    allowHeld: boolean,
+    scope: ReturnType<typeof statusScopeContentFilter>,
   ): { kept: T[]; privateTier: number; notVisible: number } {
     const itemPks = [...new Set(batch.map((row) => row.item_pk))];
     const currentRows = this.db.query(`
-      SELECT item_pk, trust_tier, tombstoned, provider, account_scope, provider_item_id, provider_conversation_id FROM items
-      WHERE item_pk IN (SELECT value FROM json_each(?))
-    `).all(JSON.stringify(itemPks)) as Array<{
+      SELECT item_pk, trust_tier, tombstoned, provider, account_scope, provider_item_id, provider_conversation_id FROM items i
+      WHERE item_pk IN (SELECT value FROM json_each(?)) ${scope.filter}
+    `).all(JSON.stringify(itemPks), ...scope.params) as Array<{
       item_pk: number;
       trust_tier: string;
       tombstoned: number;
@@ -13860,7 +13871,7 @@ export class LocalConnectorStore {
       provider_conversation_id: string | null;
     }>;
     const current = new Map(currentRows.map((row) => [row.item_pk, row] as const));
-    const hidden = this.embeddingHiddenAmong(currentRows, this.canEmbedHeld(provider));
+    const hidden = this.embeddingHiddenAmong(currentRows, allowHeld);
     const verdicts = this.effectiveItemTiers(currentRows.map(item => ({
       provider: item.provider, accountScope: item.account_scope, providerItemId: item.provider_item_id,
       ...(item.provider_conversation_id ? { providerConversationId: item.provider_conversation_id } : {}),
@@ -14025,6 +14036,10 @@ export class LocalConnectorStore {
 
   private async embedChunksUnderLease(options: ConnectorStoreEmbedOptions): Promise<ConnectorStoreEmbedSummary> {
     const provider = options.provider;
+    const assertBindingCurrent = () => {
+      provider.assertBindingCurrent?.();
+      options.assertSweepBindingCurrent?.();
+    };
     if (options.modelId && options.modelId !== provider.modelId) {
       throw new Error(
         `Connector store ${this.corpusId} embedding provider is ${provider.modelId}, `
@@ -14033,6 +14048,7 @@ export class LocalConnectorStore {
     }
     assertConnectorStoreEmbeddingProvider(this.trustDomain, provider);
     await options.assertAuthorized?.();
+    assertBindingCurrent();
     // Media no chunk here references any more is released before an embed
     // pass, and copies nothing holds are swept (at most hourly), so the
     // regular drain also keeps the media cache tidy.
@@ -14101,6 +14117,11 @@ export class LocalConnectorStore {
     // Built in turns: a pass over a store that is being written would
     // otherwise rebuild it synchronously on every call (Sparta, 2026-11-04).
     const tierHidden = await this.tierHiddenItemPksInTurns();
+    const allowHeld = () => !options.excludeAllEmbeddingHolds && this.canEmbedHeld(provider);
+    const dispatchScope = statusScopeContentFilter({
+      ...(options.accountScope ? { accountScope: options.accountScope } : {}),
+      ...(options.filters ? { contentFilters: options.filters } : {}),
+    });
     // Read on the read thread where the store allows it, without the text
     // (fetched by key for each batch) and with each chunk's current vector
     // hash: a whole-store pass held the loop 41 s on lane 6's fixture
@@ -14111,7 +14132,7 @@ export class LocalConnectorStore {
       options.accountScope,
       options.filters,
       tierHidden,
-      this.canEmbedHeld(provider),
+      allowHeld(),
     );
     // A row that is Private by its own stored tier (or carries a tier the
     // store does not recognise) never reaches an embedder that is not approved
@@ -14160,12 +14181,14 @@ export class LocalConnectorStore {
     if (!(priorJournal && priorCounts)
       && this.embeddingRebindWouldInvalidateCurrency(provider)) {
       await options.assertAuthorized?.();
+      assertBindingCurrent();
       await assertEmbeddingProviderCanEmbed(provider);
     }
     let activeJournalSha256 = priorJournal?.audit_receipt_sha256 ?? undefined;
     let providerEpoch!: number;
     if (priorJournal && priorCounts) {
       this.db.transaction(() => {
+        assertBindingCurrent();
         providerEpoch = priorCounts.providerEpoch
           ?? this.bindEmbeddingWriteAuthority(provider, {
             mode: 'match',
@@ -14205,11 +14228,13 @@ export class LocalConnectorStore {
         if (claimed.changes !== 1) {
           throw new Error('Connector store embedding journal lease generation was superseded.');
         }
+        assertBindingCurrent();
         activeJournalSha256 = claimedSha256;
       })();
     } else if (journalId) {
       const startedAt = this.now().toISOString();
       this.db.transaction(() => {
+        assertBindingCurrent();
         providerEpoch = this.bindEmbeddingWriteAuthority(provider, {
           mode: 'rebind',
           invalidateOnCreate: invalidateCurrentModelEmbeddings,
@@ -14241,11 +14266,12 @@ export class LocalConnectorStore {
           startedAt,
           journalSha256,
         );
+        assertBindingCurrent();
       })();
     } else {
       providerEpoch = this.db.transaction(() => this.bindEmbeddingWriteAuthority(
         provider,
-        { mode: 'rebind', invalidateOnCreate: false },
+        { mode: 'rebind', invalidateOnCreate: false, assertAuthorized: assertBindingCurrent },
       ))();
     }
     if (priorJournal?.status === 'completed' && priorCounts) {
@@ -14341,7 +14367,7 @@ export class LocalConnectorStore {
       // Item and classification writes are not serialized by the embedding
       // lease. Recheck after any imageSupport await, immediately before dispatch.
       {
-        const recheck = this.embeddingBatchRecheck(batch, embeddableTiers, provider);
+        const recheck = this.embeddingBatchRecheck(batch, embeddableTiers, allowHeld(), dispatchScope);
         privateTierWithheldChunks += recheck.privateTier;
         staleSkipped += recheck.notVisible + recheck.privateTier;
         batch = recheck.kept;
@@ -14370,6 +14396,7 @@ export class LocalConnectorStore {
         && batch.some((row) => row.media_sha256 && !this.mediaJudgmentSettled(row.media_sha256, mediaJudgeId(judging)));
       let judgedBatch: Map<number, MediaJudgment> | undefined;
       try {
+        assertBindingCurrent();
         if (judgeNow) {
           const returned = await judging!.embedWithImageVectors!(inputsFor(batch));
           vectors = returned.vectors;
@@ -14410,11 +14437,12 @@ export class LocalConnectorStore {
         staleSkipped += failedRows.size;
         batch = batch.filter((row) => !failedRows.has(row));
         if (batch.length === 0) continue;
-        const recheck = this.embeddingBatchRecheck(batch, embeddableTiers, provider);
+        const recheck = this.embeddingBatchRecheck(batch, embeddableTiers, allowHeld(), dispatchScope);
         privateTierWithheldChunks += recheck.privateTier;
         staleSkipped += recheck.notVisible + recheck.privateTier;
         batch = recheck.kept;
         if (batch.length === 0) continue;
+        assertBindingCurrent();
         vectors = await provider.embed(inputsFor(batch), { taskType: 'RETRIEVAL_DOCUMENT' });
       }
       const onDemandItems = this.db.query(`SELECT COUNT(*) AS n FROM items i JOIN on_demand_item_reads r ON r.local_item_id = i.local_item_id
@@ -14430,7 +14458,7 @@ export class LocalConnectorStore {
       const writtenItemPks: number[] | undefined = options.onBatchWritten ? [] : undefined;
       this.db.transaction(() => {
         this.assertEmbeddingWriteAuthority(provider, providerEpoch);
-        const stillEligible = new Set(this.embeddingBatchRecheck(batch, embeddableTiers, provider).kept);
+        const stillEligible = new Set(this.embeddingBatchRecheck(batch, embeddableTiers, allowHeld(), dispatchScope).kept);
         for (let index = 0; index < batch.length; index += 1) {
           const row = batch[index]!;
           if (!stillEligible.has(row)) continue;
@@ -14525,6 +14553,9 @@ export class LocalConnectorStore {
           epochId: provider.epochId,
           configHash: provider.configHash,
         }, now);
+        // The provider round trip can outlive its approval. Throwing here
+        // rolls back the whole batch, including its maintenance checkpoint.
+        assertBindingCurrent();
       })();
       if (nextJournalSha256) activeJournalSha256 = nextJournalSha256;
       if (writtenItemPks?.length) options.onBatchWritten?.(writtenItemPks);
@@ -14550,6 +14581,7 @@ export class LocalConnectorStore {
       );
       const completedSha256 = hashString(cursor);
       this.db.transaction(() => {
+        assertBindingCurrent();
         this.assertEmbeddingWriteAuthority(provider, providerEpoch);
         const completed = this.db.query(`
           UPDATE sync_runs
@@ -14569,10 +14601,11 @@ export class LocalConnectorStore {
         if (completed.changes !== 1) {
           throw new Error('Connector store embedding journal lease generation was superseded.');
         }
+        assertBindingCurrent();
       })();
       skipped = rows.length - embedded;
     }
-    this.clearEmbeddingCurrencyRebuildDebt(provider, providerEpoch);
+    this.clearEmbeddingCurrencyRebuildDebt(provider, providerEpoch, assertBindingCurrent);
     const summary = connectorStoreEmbedSummary(
       this.corpusId,
       this.trustDomain,
@@ -14605,12 +14638,14 @@ export class LocalConnectorStore {
     options: {
       mode: 'rebind' | 'match';
       invalidateOnCreate: boolean;
+      assertAuthorized?: () => void;
     },
   ): number {
     // Bind runs before the provider call, so a lazily discovered dimension is
     // not authoritative yet. Refuse before any currency invalidation or row
     // mutation; connectorStoreEmbeddingWriteAuthority repeats this guard so
     // no future writer can serialize an invalid dimension by bypassing bind.
+    options.assertAuthorized?.();
     assertConnectorStoreEmbeddingAuthorityProviderDimension(provider);
     const authorityId = connectorStoreEmbeddingWriteAuthorityId(provider.modelId);
     const existing = this.db.query(`
@@ -14663,6 +14698,7 @@ export class LocalConnectorStore {
         startedAt,
         hashString(cursor),
       );
+      options.assertAuthorized?.();
       return providerEpoch;
     }
     if (existing.status !== 'running'
@@ -14703,6 +14739,7 @@ export class LocalConnectorStore {
         throw new Error('Connector store embedding write authority was superseded.');
       }
       this.invalidateEmbeddingModelCurrency(provider.modelId);
+      options.assertAuthorized?.();
       return providerEpoch;
     }
     if (current.modelId !== provider.modelId) {
@@ -14743,6 +14780,7 @@ export class LocalConnectorStore {
       throw new Error('Connector store embedding write authority was superseded.');
     }
     if (!providerMatches) this.invalidateEmbeddingModelCurrency(provider.modelId);
+    options.assertAuthorized?.();
     return providerEpoch;
   }
 
@@ -14840,6 +14878,7 @@ export class LocalConnectorStore {
   private clearEmbeddingCurrencyRebuildDebt(
     provider: ConnectorStoreEmbeddingAuthorityIdentity,
     providerEpoch: number,
+    assertBindingCurrent: () => void,
   ): void {
     this.db.transaction(() => {
       const authorityId = connectorStoreEmbeddingWriteAuthorityId(provider.modelId);
@@ -14854,6 +14893,7 @@ export class LocalConnectorStore {
       if (!existing) return;
       if (!parseConnectorStoreEmbeddingWriteAuthority(existing.cursor).currencyRebuildPending) return;
       if (this.embeddingModelCurrencyIncomplete(provider)) return;
+      assertBindingCurrent();
       this.assertEmbeddingWriteAuthority(provider, providerEpoch);
       const cursor = connectorStoreEmbeddingWriteAuthority(provider, providerEpoch);
       const cleared = this.db.query(`
@@ -20811,6 +20851,7 @@ function normalizeOptionalAccountScope(value: string | undefined): string | unde
 interface NormalizedConnectorStoreSearchFilters {
   provider?: string;
   observedConnectorId?: string;
+  previousObservedConnectorId?: string;
   observedConnectorIdPrefix?: string;
   locatorPathScope?: string;
   locatorPathScopes?: readonly string[];
@@ -20863,6 +20904,9 @@ export function normalizeConnectorStoreSearchFilters(
   const normalized = {
     ...(provider ? { provider } : {}),
     ...(value.observedConnectorId ? { observedConnectorId: requireNonEmpty(value.observedConnectorId, 'Observed connector id') } : {}),
+    ...(value.previousObservedConnectorId
+      ? { previousObservedConnectorId: requireNonEmpty(value.previousObservedConnectorId, 'Previous observed connector id') }
+      : {}),
     ...(value.observedConnectorIdPrefix
       ? { observedConnectorIdPrefix: requireNonEmpty(value.observedConnectorIdPrefix, 'Observed connector id prefix') }
       : {}),
@@ -20922,32 +20966,25 @@ export function identityRowsSql(extraSql: string): string {
     `;
 }
 
-// A new observation namespace admits earlier ordinary ingestion only when its
-// origin is provable. Tier moves copy the keys but replace the run links. A
-// sole inherited owner still proves ingestion: confirmation could only add a
-// second key to an already-owned copy, and a move carries *all* its owners.
-const VERIFIED_OBSERVATION_PREFIX = 'verified-observation.v1:';
-
-export function verifiedObservationConnectorId(previousId: string): string {
-  return VERIFIED_OBSERVATION_PREFIX + previousId;
-}
-
-function observedOwnerPredicate(exact?: string, prefix?: string): { sql: string; params: string[] } {
+function observedOwnerPredicate(exact?: string, prefix?: string, previous?: string): { sql: string; params: string[] } {
   const keys: string[] = [];
   const params: string[] = [];
   if (exact) {
     keys.push('o.connector_id = ?');
     params.push(exact);
-    if (exact.startsWith(VERIFIED_OBSERVATION_PREFIX)) {
-      keys.push(`(o.connector_id = ? AND EXISTS (
-        SELECT 1 FROM sync_runs r
-        WHERE r.sync_run_id IN (o.first_seen_sync_run_id, o.last_seen_sync_run_id)
-          AND (r.connector_id = o.connector_id OR (r.connector_id = ? AND NOT EXISTS (
-            SELECT 1 FROM item_owners other WHERE other.item_pk = o.item_pk AND other.connector_id <> o.connector_id
-          )))
-      ))`);
-      params.push(exact.slice(VERIFIED_OBSERVATION_PREFIX.length), TIER_MOVE_CONNECTOR_ID);
-    }
+  }
+  if (exact && previous) {
+    // Preserve original admission under an earlier connector ID. An inherited
+    // sole owner survives a tier move, which replaces the run links but copies
+    // all owners. An added observation on an already-owned item cannot use it.
+    keys.push(`(o.connector_id = ? AND EXISTS (
+      SELECT 1 FROM sync_runs r
+      WHERE r.sync_run_id IN (o.first_seen_sync_run_id, o.last_seen_sync_run_id)
+        AND (r.connector_id = o.connector_id OR (r.connector_id = ? AND NOT EXISTS (
+          SELECT 1 FROM item_owners other WHERE other.item_pk = o.item_pk AND other.connector_id <> o.connector_id
+        )))
+    ))`);
+    params.push(previous, TIER_MOVE_CONNECTOR_ID);
   }
   if (prefix) {
     keys.push('substr(o.connector_id, 1, length(?)) = ?');
@@ -20970,7 +21007,9 @@ function connectorStoreFilterSql(filters: ConnectorStoreSearchFilters | undefine
     params.push(normalized.provider);
   }
   if (normalized.observedConnectorId || normalized.observedConnectorIdPrefix) {
-    const owner = observedOwnerPredicate(normalized.observedConnectorId, normalized.observedConnectorIdPrefix);
+    const owner = observedOwnerPredicate(
+      normalized.observedConnectorId, normalized.observedConnectorIdPrefix, normalized.previousObservedConnectorId,
+    );
     clauses.push(`AND ${owner.sql}`);
     params.push(...owner.params);
   }

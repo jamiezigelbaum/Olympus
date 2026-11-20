@@ -19,7 +19,14 @@ import type {
 } from '../src/workers/connector-store/index.ts';
 import { withDataOwnerLock } from '../src/core/data-owner-lock.ts';
 import { openConnectorStore, storageAccountForCorpus } from '../src/core/source-storage.ts';
-import { createSourceIndexEmbeddingProviderFromEnv } from '../src/workers/engine/runtime/embedding-providers.ts';
+import { FileSourceScopeAuthority } from '../src/workers/source-scope-runtime.ts';
+import { gmailItemAccountScope } from '../src/workers/google-connectors/gmail-archive-target.ts';
+import { accountFromGoogleHandle } from '../src/workers/google-connectors/classification.ts';
+import { readGmailRetainedAccountScope } from '../src/workers/email-source/gmail-status-scope.ts';
+import { handleRegistryPathFromEnv } from '../src/workers/credential-broker/connected-handles.ts';
+import { recordedProviderAccount } from '../src/core/provider-account-history.ts';
+import { scopedEmbeddingOptions } from '../src/workers/connector-store/embedding-plan.ts';
+import { createSourceIndexEmbeddingProviderFromEnv, storeEmbeddingScope } from '../src/workers/engine/runtime/embedding-providers.ts';
 
 interface ConnectorStoreEmbedCliArgs {
   db: string;
@@ -167,10 +174,26 @@ async function runConnectorStoreEmbed(argv: readonly string[]): Promise<{
   const options = resolveConnectorStoreOptions(args);
   // Held for the whole run: it refuses while Olympus runs (core/data-owner-lock.ts).
   return withDataOwnerLock(process.env, async () => {
-    const store = openConnectorStore(storageAccountForCorpus(options), options);
+    const account = storageAccountForCorpus(options);
+    const store = openConnectorStore(account, options);
     try {
+      let embedding = { provider };
+      if (account.sourceId === 'gmail.email') {
+        const registryPath = handleRegistryPathFromEnv(process.env, true)!;
+        const authority = new FileSourceScopeAuthority({ registryPath, mailPinnedHandle: () => process.env.OLYMPUS_SOURCE_INDEX_GMAIL_CREDENTIAL_HANDLE });
+        const scope = storeEmbeddingScope({
+          store, provider, sourceId: account.sourceId, authority, scopeRef: authority.mailPolicyRef(),
+          readScope: () => ({ allowed: false }),
+          gmailRetainedAccountScope: () => readGmailRetainedAccountScope({
+            registryPath, historyAccountId: () => recordedProviderAccount(account),
+            itemScope: (handle) => gmailItemAccountScope([store], handle?.accountRole?.trim() || accountFromGoogleHandle(handle?.handle)),
+          }),
+        });
+        if (!scope.allowed) throw new Error('This Gmail processor needs the running worker to verify the current mailbox.');
+        embedding = scopedEmbeddingOptions(scope, provider);
+      }
       const embed = await store.embedChunks({
-        provider,
+        ...embedding,
         ...(args.limit !== undefined ? { limit: args.limit } : {}),
       });
       const status = store.status();

@@ -626,6 +626,12 @@ provider revocation page. Local data deletion remains the deliberate CLI-only
 flow: preview `olympus data delete --source <id> --dry-run`, Disconnect the
 source, then run the command without `--dry-run`.
 
+Gmail’s mail selection controls what Olympus fetches. The built-in embedder on
+this computer can index retained mail for meaning after Disconnect or a move
+to Private. Per-item privacy rules and holds still apply. An HTTP model
+endpoint, a remote helper, or Venice still needs the existing permission for
+that mail.
+
 Telegram and WhatsApp are paired sessions rather than broker grants, so their
 cards carry **Unpair** instead: it stops new reads and deletes this computer's
 pairing session, keeping indexed messages and captured media, and leaves the

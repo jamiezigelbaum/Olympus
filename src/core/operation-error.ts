@@ -43,6 +43,14 @@ export class OperationError extends Error {
   }
 }
 
+export class SourceScopeApprovalRequiredError extends OperationError {
+  constructor(message: string) {
+    super('source_index_policy_violation', message);
+  }
+}
+
+export const SOURCE_SCOPE_APPROVAL_REQUIRED = 'source_scope_approval_required';
+
 /**
  * An unknown, expired, or another caller's source-answer job: one refusal, so
  * a caller cannot tell a job it may not read from one that does not exist.

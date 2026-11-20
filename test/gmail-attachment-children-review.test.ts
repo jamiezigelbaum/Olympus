@@ -192,7 +192,7 @@ describe('attachment children, review round 1', () => {
     h.mailbox.calls.length = 0;
     const outside = h.liveReader({ scope: { skippedLabelIds: ['INBOX'] } }).fetchItemWithin(child, { deferredBytes: { locator }, maxBytes: 10_000 });
     await expect(outside).rejects.toMatchObject({ errorKind: 'source_permission_denied' });
-    expect(h.mailbox.calls.some((call) => call.startsWith('attachment:'))).toBe(false);
+    expect(h.mailbox.calls).toEqual([`metadata:${lease.id}`]);
 
     // The approval changes between the message and the part: the part is never asked for.
     h.mailbox.calls.length = 0;
@@ -205,7 +205,7 @@ describe('attachment children, review round 1', () => {
       },
     }).fetchItemWithin(child, { deferredBytes: { locator }, maxBytes: 10_000 });
     await expect(revoked).rejects.toThrow('no longer current');
-    expect(h.mailbox.calls).toEqual([`message:${lease.id}`]);
+    expect(h.mailbox.calls).toEqual([`metadata:${lease.id}`]);
   });
 
   test('one live reader fetches a message once for all of its parts, and asks only for its labels again', async () => {
@@ -217,8 +217,8 @@ describe('attachment children, review round 1', () => {
     for (const part of ['1', '2.1']) {
       await reader.fetchItemWithin(`${ACCOUNT}:${childOf(part)}`, { deferredBytes: { locator: `gmail-part1:${message.id}:${part}` }, maxBytes: 10_000 });
     }
-    // The message once; before the second part only its current labels, by a metadata read.
-    expect(h.mailbox.calls).toEqual([`message:${message.id}`, `attachment:${message.id}:att-logo`, `metadata:${message.id}`, `attachment:${message.id}:att-pdf`]);
+    // Check the parent before both reads. Fetch its full message once.
+    expect(h.mailbox.calls).toEqual([`metadata:${message.id}`, `message:${message.id}`, `attachment:${message.id}:att-logo`, `metadata:${message.id}`, `attachment:${message.id}:att-pdf`]);
   });
 
   test('a live part is bounded by its declared size before it is fetched, and by its decoded size when the declaration understated it', async () => {
@@ -279,8 +279,8 @@ describe('attachment children, review round 1', () => {
     expect(two).toMatchObject({ examined: 1, listed: 1, done: false });
     const three = await handler.backfillChildren!({ max_items: 1 });
     expect(three).toMatchObject({ examined: 0, listed: 0, done: true });
-    // Only messages whose stored text names an attachment were asked for, each once; the plain one never.
-    expect(h.mailbox.calls.sort()).toEqual([`message:${first.id}`, `message:${second.id}`].sort());
+    // Only messages whose stored text names an attachment were asked for. Their metadata precedes the full GET.
+    expect(h.mailbox.calls).toEqual([`metadata:${first.id}`, `message:${first.id}`, `metadata:${second.id}`, `message:${second.id}`]);
     const children = activeIds(h).filter((id) => id.includes('#child:'));
     expect(children).toEqual([childOf('1', first.id), childOf('1', second.id)].sort());
     expect(heldChildren(h, children)).toEqual([true, true]);
