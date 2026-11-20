@@ -109,7 +109,6 @@ import {
   copyServingLayer,
   tierLedgerIdentityKey,
   tierLedgerPathForStore,
-  trustDomainRank,
   type TierCopy,
   type TierCorpusVisibility,
   type TierLedgerIdentity,
@@ -4557,7 +4556,7 @@ export class LocalConnectorStore {
       if (recorded && (recorded.record.contentTier === 'secrets' || recorded.record.metadataTier === 'secrets')) {
         forgetSecretInSideStores({ ledger, identity: item.identity });
       }
-      return recorded !== undefined && recorded.outcome !== 'needs_placement';
+      return recorded !== undefined;
     } catch {
       return false;
     }
@@ -7959,7 +7958,7 @@ export class LocalConnectorStore {
      * arrives, so the names are the whole decision and nothing waits for text.
      */
     namesOnly = false,
-  ): Extract<ConnectorStoreTierRoute, { kind: 'store' | 'elsewhere' }> | undefined {
+  ): void {
     if (run.ledgerFailed) return;
     if (tierClassification?.unavailableReason) {
       // Fail safe: without the owner's rules a decision could be less private
@@ -7973,7 +7972,7 @@ export class LocalConnectorStore {
       if (!ledger) return;
       const decision = decideItemTiers(connector, item, textFromRawItem(item), tierClassification, ledger,
         { ...(namesOnly ? { namesOnly: true } : {}), afterFirstImport: ledger.listingCaughtUp(connector.id) });
-      const recorded = ledger.recordDecision(item.identity, decision, {
+      ledger.recordDecision(item.identity, decision, {
         trustDomain: stored.trustDomain,
         trustTier: stored.trustTier,
       });
@@ -7985,22 +7984,6 @@ export class LocalConnectorStore {
       } else {
         // Left Secrets in this write: its job names come back.
         retireSecretRedactions(ledger, { identity: item.identity });
-        if (recorded.record.routed && stored.trustTier !== 'S5') {
-          if (recorded.outcome === 'held_moving' || recorded.outcome === 'needs_placement') return { kind: 'elsewhere', reason: 'move_queued' };
-          if (recorded.outcome === 'queued_move') {
-            // Keep the newly judged bytes in the current content copy, even
-            // when the standalone listing would otherwise tombstone it. The
-            // destination remains the mover's to verify and publish.
-            const source = copyServingLayer(ledger.copies(item.identity).filter(copy => copy.state === 'current'), 'content');
-            const active = source?.corpusId === this.corpusId ? this.activeStoredCopy(item) : undefined;
-            if (source && active && decision.contentRead && trustDomainRank(this.trustDomain) >= trustDomainRank(stored.trustDomain)) {
-              return { kind: 'store', layer: source.layers, sensitivity: buildSourceSensitivity({
-                trustDomain: this.trustDomain, trustTier: maxTrustTier(active.trustTier, stored.trustTier),
-              }) };
-            }
-            return { kind: 'elsewhere', reason: 'move_queued' };
-          }
-        }
       }
     } catch {
       run.ledgerFailed = true;
@@ -11906,7 +11889,7 @@ export class LocalConnectorStore {
           const legacySensitivity = classifyConnectorStoreItem(itemForStorage, classification, placement, this.trustDomain);
           // A tiered store set routes NEW items by their recorded tiers; every
           // other item gets `legacy` and takes exactly the P1a path below.
-          let route: ConnectorStoreTierRoute = tierRouting
+          const route: ConnectorStoreTierRoute = tierRouting
             ? await tierRouting.route({
               store: this,
               connector,
@@ -11919,11 +11902,6 @@ export class LocalConnectorStore {
                 : {}),
             })
             : { kind: 'legacy' };
-          if (route.kind === 'legacy' && itemForStorage.metadata['deleted'] !== true
-            && !this.readOnDemand(itemForStorage.identity.localItemId, itemForStorage.identity.sourceVersion ?? '')) {
-            route = this.recordTierDecision(connector, itemForStorage, legacySensitivity, tierClassification, tierRun,
-              metadataOnly || itemContentKeptNamesOnly(itemForStorage)) ?? route;
-          }
           // A Secret this store keeps as a location only is still at the provider while it is listed.
           if (keepsSecretLocations && itemForStorage.metadata['deleted'] !== true) {
             this.reobserveSecretLocation(itemForStorage, connector.id, ownershipKind, syncRunId);
@@ -11955,6 +11933,13 @@ export class LocalConnectorStore {
           }
           const routedLayer = route.kind === 'store' ? route.layer : undefined;
           const sensitivity = route.kind === 'store' ? route.sensitivity : legacySensitivity;
+          if (route.kind === 'legacy' && itemForStorage.metadata['deleted'] !== true
+            && !this.readOnDemand(itemForStorage.identity.localItemId, itemForStorage.identity.sourceVersion ?? '')) {
+            this.recordTierDecision(
+              connector, itemForStorage, sensitivity, tierClassification, tierRun,
+              metadataOnly || itemContentKeptNamesOnly(itemForStorage),
+            );
+          }
           if (routedLayer === 'metadata') {
             // The metadata tier's copy: names only. The body lives in the
             // content tier's store, so this copy never acquires chunks.
@@ -12997,7 +12982,7 @@ export class LocalConnectorStore {
   private async indexItemContent(
     connector: SourceConnector,
     place: (item: RawItem) => SourceSensitivity,
-    recordDecision: (item: RawItem, sensitivity: SourceSensitivity) => Extract<ConnectorStoreTierRoute, { kind: 'store' | 'elsewhere' }> | undefined,
+    recordDecision: (item: RawItem, sensitivity: SourceSensitivity) => void,
     item: RawItem,
     itemPk: number,
     maxChunkChars: number,
@@ -13019,10 +13004,8 @@ export class LocalConnectorStore {
       // Fetched content gets its own classification: bytes can reveal more
       // than the listing did. A mismatched trust domain rejects the CONTENT
       // (fail closed) while the metadata row, which classified clean, stays.
-      const observed = place(fetched);
-      const route = recordDecision(fetched, observed);
-      if (route?.kind === 'elsewhere') return { chunksIndexed: 0, ftsContentChanged: false, secretsTierExcluded: false };
-      const fetchedSensitivity = route?.sensitivity ?? observed;
+      const fetchedSensitivity = place(fetched);
+      recordDecision(fetched, fetchedSensitivity);
       if (fetchedSensitivity.trustDomain !== this.trustDomain) {
         gaps.push(trustDomainMismatchGap(fetched, fetchedSensitivity.trustDomain, this.trustDomain, 'content skipped'));
         return { chunksIndexed: 0, ftsContentChanged: false, secretsTierExcluded: false };

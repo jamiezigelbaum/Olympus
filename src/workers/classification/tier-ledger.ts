@@ -43,7 +43,6 @@ import {
   type TierDecision,
   type TierKey,
 } from './tier-classifier.ts';
-import { tierSetPlannerForLedger } from './installed-tier-classification-registry.ts';
 import { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore } from './tier-ledger-path.ts';
 
 export { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore };
@@ -664,7 +663,7 @@ function corpusVisibilityFromRows(rows: CorpusVisibilityRow[]): TierCorpusVisibi
     metadataLayer: !!row.metadata_layer, metadataLayerContentUnread: !!row.metadata_unread, moving: !!row.moving }));
 }
 
-export type TierLedgerRecordOutcome = 'inserted' | 'updated' | 'unchanged' | 'held_moving' | 'queued_move' | 'needs_placement';
+export type TierLedgerRecordOutcome = 'inserted' | 'updated' | 'unchanged' | 'held_moving';
 
 /** Which layer(s) of an item a store copy is searchable for. */
 export type TierCopyLayers = 'metadata' | 'content' | 'both';
@@ -1248,18 +1247,7 @@ export class TierLedger {
   ): TierLedgerRecordOutcome {
     // A routed item's stored placement is its copy rows, owned by the router;
     // a legacy-path observation of it must not relabel them.
-    if (existing?.routed) {
-      stored = undefined;
-      if (judgedPersonal(next)) {
-        // A store can observe the same item outside a routed listing, including
-        // a late extraction. Never replace an owner's decision or an active write.
-        if (!this.db.query(`SELECT 1 FROM tier_items i WHERE provider = ? AND account_scope = ?
-          AND conversation_key = ? AND provider_item_id = ? AND ${PERSONAL_LOWERING_UNCLAIMED}`).get(...idParams(identity))) return 'unchanged';
-        if (holdSnifferLowering(existing, next)) return 'unchanged';
-        const outcome = this.queuePersonalPlacement(identity, existing, next, tierSetPlannerForLedger(this.dbPath));
-        if (outcome) return outcome;
-      }
-    }
+    if (existing?.routed) stored = undefined;
     const decidedAt = this.now().toISOString();
     const reasonsJson = JSON.stringify(next.reasons);
     const state: TierLedgerState = next.metadataPending || next.contentPending ? 'pending' : 'current';
@@ -1939,44 +1927,24 @@ export class TierLedger {
     return windowSteps(STORED_PERSONAL_LOWERING, [], { ...options, examine: WINDOW_SLICE_ROWS });
   }
 
-  queueStoredPersonalLowering(identity: TierLedgerIdentity, placementFor: (decision: TierDecision) => TierPlacementPlan): boolean {
+  queueStoredPersonalLowering(identity: TierLedgerIdentity, placementFor: (decision: TierDecision) => TierPlacementPlan | undefined): boolean {
     return this.db.transaction(() => {
       const row = this.db.query(`SELECT * FROM tier_items i WHERE provider = ? AND account_scope = ?
         AND conversation_key = ? AND provider_item_id = ? AND ${STORED_PERSONAL_LOWERING}`).get(...idParams(identity)) as TierItemRow | null;
       if (!row) return false;
       const record = recordFromRow(row);
       if (!judgedPersonal(record) || record.reasons.filter(reason => reason.startsWith('content:sha256:')).length !== 1) return false;
-      return this.queuePersonalPlacement(identity, record, record, placementFor, true) === 'queued_move';
-    })();
-  }
-
-  /** Called inside the decision transaction. The mover owns every store write and receipt check. */
-  private queuePersonalPlacement(
-    identity: TierLedgerIdentity, existing: TierLedgerRecord, next: EffectiveRow,
-    placementFor: ((decision: TierDecision) => TierPlacementPlan) | undefined, loweringOnly = false,
-  ): 'queued_move' | 'needs_placement' | undefined {
-    const copies = this.copies(identity).filter(copy => copy.state === 'current');
-    const source = copyServingLayer(copies, 'content');
-    if (!source || trustDomainRank(source.trustDomain) <= tierRank(maxTier(next.contentTier, next.metadataTier))) return;
-    const decision = decisionOfRow(next);
-    let raise = false;
-    if (placementFor) {
+      const decision = decisionOfRow(record);
       const plan = placementFor(decision);
-      const destination = copyServingLayer(plan.copies, 'content');
-      if (!destination || trustDomainRank(destination.trustDomain) >= trustDomainRank(source.trustDomain)) return;
-      raise = placementIsRaise(copies, plan.copies);
-    } else {
-      // A standalone leg can recognize a held split: this item's own names
-      // already occupy the target tier for both layers. For other layouts
-      // only the mounted set can decide whether this is a lowering or a raise.
-      const names = copyServingLayer(copies, 'metadata');
-      if (next.metadataTier !== next.contentTier || !names || trustDomainRank(names.trustDomain) !== tierRank(next.contentTier)) {
-        return 'needs_placement';
-      }
-    }
-    if (loweringOnly && raise) return;
-    this.queueMoveRow(identity, existing, decision, { hide: raise, decidedAt: this.now().toISOString() });
-    return 'queued_move';
+      if (!plan) return false;
+      const copies = this.copies(identity).filter(copy => copy.state === 'current');
+      const source = copyServingLayer(copies, 'content');
+      const target = copyServingLayer(plan.copies, 'content');
+      if (!source || !target || trustDomainRank(target.trustDomain) >= trustDomainRank(source.trustDomain)
+        || placementIsRaise(copies, plan.copies)) return false;
+      this.queueMoveRow(identity, record, decision, { hide: false, decidedAt: this.now().toISOString() });
+      return true;
+    })();
   }
 
   /** Items waiting on an unanswered sniffer question, oldest first. */
@@ -2664,6 +2632,19 @@ export class TierLedger {
       return await work();
     } finally {
       this.db.exec('COMMIT');
+    }
+  }
+
+  /** One index seek per account, independent of how many items it holds. */
+  *storedAccounts(): Generator<{ provider: string; accountScope: string }> {
+    const first = this.db.query("SELECT provider, account_scope AS accountScope FROM tier_items WHERE provider >= '' ORDER BY provider, account_scope LIMIT 1");
+    const next = this.db.query(`SELECT provider, account_scope AS accountScope FROM tier_items
+      WHERE (provider, account_scope) > (?, ?) ORDER BY provider, account_scope LIMIT 1`);
+    type Account = { provider: string; accountScope: string };
+    let account = first.get() as Account | null;
+    while (account) {
+      yield account;
+      account = next.get(account.provider, account.accountScope) as Account | null;
     }
   }
 

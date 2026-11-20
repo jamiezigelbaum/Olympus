@@ -4,13 +4,14 @@ import { join } from 'node:path';
 import { BUILT_IN_SNIFFER_LANE } from '../src/workers/classification/built-in-sniffer.ts';
 import { InstalledTierClassification } from '../src/workers/classification/installed-tier-classification.ts';
 import { registerInstalledTierClassification } from '../src/workers/classification/installed-tier-classification-registry.ts';
-import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
+import { storedPersonalLoweringLap, TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
 import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts';
 import { snifferId, snifferPromptVersions } from '../src/workers/classification/sniffer.ts';
 import { classifyItemTiers, PERSONAL_FIRST_REASON, TIER_CLASSIFIER_VERSION } from '../src/workers/classification/tier-classifier.ts';
 import { PERSONAL_FIRST_SETTLE_DONE, TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { writeOwnerTierRules } from '../src/workers/classification/tier-rules.ts';
 import { TieredStoreSet } from '../src/workers/connector-store/tiered-store-set.ts';
+import { reopenLabelRuleSweep, sweepLabelRuleRaises, sweepOwnerRuleRaises } from '../src/workers/connector-store/tier-rules-sweep.ts';
 import { settlePersonalFirstItems } from '../src/workers/connector-store/tier-held-settle.ts';
 import { createTestClock } from './helpers/test-clock.ts';
 import { FIXTURE_PLACEMENT, JUDGED_PERSONAL_SNIFFER, fixtureConnector, identityOf, localId, openTierFixture, tempDir } from './helpers/tier-fixtures.ts';
@@ -142,7 +143,7 @@ test('repair resumes after its page, even after stale holds clear, and the norma
 
 test('a repair page rechecks overrides, open questions, write intents and verdict evidence on the writer', async () => {
   const f = fixture();
-  const ids = ['override', 'owner-rule', 'pending', 'moving', 'secret', 'rejudge', 'intent', 'fail-safe', 'two-receipts', 'unchanged'];
+  const ids = ['override', 'owner-rule', 'pending', 'moving', 'secret', 'rejudge', 'intent', 'staged', 'mixed', 'fail-safe', 'two-receipts', 'unchanged'];
   await storedPersonalRows(f, ids);
   const page = f.ledger.readSteps(f.ledger.storedPersonalLoweringSteps({ limit: 100 }));
   expect(page.records).toHaveLength(ids.length);
@@ -156,12 +157,44 @@ test('a repair page rechecks overrides, open questions, write intents and verdic
     db.exec("UPDATE tier_items SET content_pending = 1, state = 'pending' WHERE provider_item_id = 'pending'");
     db.exec("UPDATE tier_items SET state = 'moving', target_content_tier = 'secure', target_metadata_tier = 'secure' WHERE provider_item_id = 'moving'");
     db.exec("UPDATE tier_items SET content_tier = 'secrets' WHERE provider_item_id = 'secret'");
+    db.exec("UPDATE tier_copies SET copy_state = 'staged' WHERE provider_item_id = 'staged' AND layers = 'metadata'");
+    // The plan brings both layers to Personal: names would rise from Public as the body comes down.
+    db.exec("UPDATE tier_copies SET trust_domain = 'public_safe' WHERE provider_item_id = 'mixed' AND layers = 'metadata'");
     db.exec("UPDATE tier_items SET rejudge_json = '{}' WHERE provider_item_id = 'rejudge'");
   } finally { db.close(); }
   f.ledger.putWriteIntent({ identity: identityOf('intent'), kind: 'deletion', version: 'v2', connectorId: 'fixture' });
   const queued = page.records.filter(row => f.ledger.queueStoredPersonalLowering(identityOf(row.providerItemId), decision => f.set.placementFor(decision)));
   expect(queued.map(row => row.providerItemId)).toEqual(['unchanged']);
   expect(f.ledger.listMoving({ direction: 'raise' }).map(row => row.providerItemId)).toEqual(['moving']);
+});
+
+test('repair waits for the full stored sweep and the label receipt for every applicable account in the ledger', async () => {
+  const f = fixture();
+  await storedPersonalRows(f, ['outside']);
+  const identity = identityOf('outside');
+  const second = { ...identity, accountScope: 'second' };
+  const names = classifyItemTiers({ signals: { title: 'Picnic' }, namesOnly: true });
+  f.ledger.recordDecision(second, names);
+  writeOwnerTierRules([
+    { id: 'folder', match: { kind: 'pathPrefix', value: '/Elsewhere/' }, tier: 'secure', strength: 'force' },
+    { id: 'label', source: identity.provider, match: { kind: 'label', value: 'Family' }, tier: 'secure', strength: 'force' },
+    { id: 'unrelated', source: 'different-provider', match: { kind: 'label', value: 'Work' }, tier: 'secure', strength: 'force' },
+  ], { path: f.rulesPath });
+  const repair = () => storedPersonalLoweringLap(f.set, undefined, () => undefined);
+  const labels = (accountScope: string) => sweepLabelRuleRaises({
+    set: f.set, provider: identity.provider, accountScope, source: { async listLabelled() { return { ids: [] }; } },
+  });
+  expect(sweepOwnerRuleRaises({ set: f.set, limit: 1 }).complete).toBe(false);
+  expect((await labels(identity.accountScope)).pending).toBe(0);
+  expect((await labels(second.accountScope)).pending).toBe(0);
+  expect(await repair()).toMatchObject({ complete: false });
+  reopenLabelRuleSweep(f.ledger, identity.provider, second.accountScope);
+  expect(sweepOwnerRuleRaises({ set: f.set, limit: 1 }).complete).toBe(true);
+  expect(await repair()).toMatchObject({ complete: false });
+  expect(f.ledger.listMoving()).toEqual([]);
+  expect((await labels(second.accountScope)).pending).toBe(0);
+  expect(await repair()).toMatchObject({ complete: true, changed: true });
+  expect(f.ledger.listMoving({ direction: 'lower' }).map(row => row.providerItemId)).toEqual(['outside']);
 });
 
 test('a new decided hold wakes the release walk on the next tick', async () => {

@@ -55,7 +55,7 @@ import {
 } from '../connector-store/tier-rejudge.ts';
 import { settleNamesOnlyItemsOffThread } from '../connector-store/tier-names-only-settle.ts';
 import { settlePersonalFirstItemsOffThread } from '../connector-store/tier-held-settle.ts';
-import { sweepOwnerRuleRaisesOffThread } from '../connector-store/tier-rules-sweep.ts';
+import { ownerRuleSweepsComplete, sweepOwnerRuleRaisesOffThread } from '../connector-store/tier-rules-sweep.ts';
 import { applyOwnerOverridesOffThread } from '../connector-store/tier-override-settle.ts';
 import { retireSecretRedactions, retrySecretSideStoreDebtsOffThread } from '../connector-store/secrets-disposition.ts';
 import { ledgerReadOffThread, settleStaleEmbedHolds } from '../connector-store/child-visibility.ts';
@@ -413,6 +413,31 @@ async function runStoredWalk(
   } finally {
     walk.active = false;
   }
+}
+
+export async function storedPersonalLoweringLap(
+  set: TieredStoreSet,
+  after: TierLedgerIdentity | undefined,
+  turn: () => Promise<void> | undefined,
+): Promise<StoredWalkPage> {
+  const retryPage = { complete: false, ...(after ? { next: after } : {}) };
+  if (!ownerRuleSweepsComplete(set)) return retryPage;
+  const page = await ledgerReadOffThread(set.ledger, set.ledger.storedPersonalLoweringSteps({
+    limit: DEFAULT_AUTO_MOVES_PER_PASS, ...(after ? { after } : {}),
+  }), { lane: 'background' });
+  let changed = false;
+  for (const record of page.records) {
+    await turn();
+    // A rule may have changed or a provider may have reopened a sweep while we yielded.
+    let rulesReady = true;
+    const queued = set.ledger.queueStoredPersonalLowering(recordIdentity(record), decision => {
+      rulesReady = ownerRuleSweepsComplete(set);
+      return rulesReady ? set.placementFor(decision) : undefined;
+    });
+    if (!rulesReady) return { ...retryPage, changed };
+    if (queued) changed = true;
+  }
+  return { changed, complete: !page.resumeAfter, ...(page.resumeAfter ? { next: page.resumeAfter } : {}) };
 }
 
 async function staleEmbedHoldLap(ledger: TierLedger, turn: () => Promise<void> | undefined, log?: (line: string) => void): Promise<StoredWalkPage> {
@@ -2053,11 +2078,8 @@ export class TierSnifferService {
         embeddingLedger: { path: this.options.autoMoves.embeddingLedgerPath, approvedBy: 'system-automatic' as const, why: AUTO_MOVE_WHY },
       } : {}) });
       const inputs = this.storedWalkInputs(set);
-      let rulesReady = true;
       await this.runStoredWalker(set, 'ownerRules', inputs, async () => {
-        rulesReady = false;
         const report = await sweepOwnerRuleRaisesOffThread({ set, turn });
-        rulesReady = report.complete;
         const changed = report.raised > 0 || report.secrets > 0;
         if (changed) {
           this.options.log?.(
@@ -2106,17 +2128,10 @@ export class TierSnifferService {
         }
         return { retired: held.retired, complete: held.retired, changed: held.settled > 0, failed: held.failed > 0 };
       });
-      if (rulesReady && !set.classification()?.unavailableReason) await this.runStoredWalker(set, 'personalLowerings', this.storedWalkInputs(set, true), async after => {
-        const page = await ledgerReadOffThread(set.ledger, set.ledger.storedPersonalLoweringSteps({
-          limit: DEFAULT_AUTO_MOVES_PER_PASS, ...(after ? { after } : {}),
-        }), { lane: 'background' });
-        let queued = 0;
-        for (const record of page.records) {
-          await turn();
-          if (set.ledger.queueStoredPersonalLowering(recordIdentity(record), decision => set.placementFor(decision))) queued++;
-        }
-        if (queued) this.forgetLowerMoves();
-        return { changed: queued > 0, complete: !page.resumeAfter, ...(page.resumeAfter ? { next: page.resumeAfter } : {}) };
+      await this.runStoredWalker(set, 'personalLowerings', this.storedWalkInputs(set, true), async after => {
+        const page = await storedPersonalLoweringLap(set, after, turn);
+        if (page.changed) this.forgetLowerMoves();
+        return page;
       });
       await this.runStoredWalker(set, 'staleEmbedHolds', this.storedWalkInputs(set, true),
         () => staleEmbedHoldLap(set.ledger, turn, this.options.log));

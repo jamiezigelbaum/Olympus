@@ -17,8 +17,9 @@ import {
   clearInstalledTierClassification,
   configureInstalledTierClassification,
 } from '../src/workers/classification/installed-tier-classification.ts';
+import { storedPersonalLoweringLap } from '../src/workers/classification/sniffer-service.ts';
 import { writePrivacyProfile } from '../src/workers/classification/privacy-profile.ts';
-import { classifyItemTiers, type OwnerTierRule, type TierDecision } from '../src/workers/classification/tier-classifier.ts';
+import { classifyItemTiers, type OwnerTierRule, type TierDecision, type TierSniffer } from '../src/workers/classification/tier-classifier.ts';
 import { writeOwnerTierRules } from '../src/workers/classification/tier-rules.ts';
 import {
   createConnectorStoreContentProvider,
@@ -149,7 +150,7 @@ function fakeGmail(messages: GmailMessage[]): FakeGmail {
 const identity = (id: string) => ({ provider: 'gmail', accountScope: ACCOUNT, providerItemId: id });
 const itemIdentity = (id: string) => ({ family: 'email' as const, ...identity(id), localItemId: `${ACCOUNT}:${id}` });
 
-function openLane(client: FakeGmail, options: { ownerRules?: OwnerTierRule[] } = {}) {
+function openLane(client: FakeGmail, options: { ownerRules?: OwnerTierRule[]; sniffer?: TierSniffer } = {}) {
   const internalStore = new LocalConnectorStore({
     dbPath: join(root, 'internal.sqlite'), corpusId: GMAIL_INTERNAL_CONNECTOR_CORPUS_ID, family: 'email', trustDomain: 'internal',
   });
@@ -162,8 +163,7 @@ function openLane(client: FakeGmail, options: { ownerRules?: OwnerTierRule[] } =
     setId: 'gmail.label-sweep-test',
     internalStore,
     secureStore,
-    // The judge has cleared this mail as Personal: these tests are about the label rule, not judging.
-    tierClassification: { sniffer: JUDGED_PERSONAL_SNIFFER, ...(ownerRules.length > 0 ? { rules: ownerRules } : {}) },
+    tierClassification: { sniffer: options.sniffer ?? JUDGED_PERSONAL_SNIFFER, ...(ownerRules.length > 0 ? { rules: ownerRules } : {}) },
   });
   const handler = createGmailConnectorStoreSyncHandler({
     internalStore,
@@ -240,6 +240,48 @@ describe('a Gmail label saved as always Private after the mail was stored', () =
     // Asked of Gmail by the label's id, spam and trash included.
     expect(client.labelListings).toHaveLength(1);
     expect(client.labelListings[0]).toMatchObject({ labelIds: ['Label_7'], includeSpamTrash: true });
+  });
+
+  test('the stranded Personal repair waits for Gmail, then queues only the unlabelled message', async () => {
+    const body = 'Bring apples to the garden club picnic.';
+    const client = fakeGmail([
+      message('labelled', { subject: 'Picnic', body, labels: ['INBOX', 'Label_7'] }),
+      message('outside', { subject: 'Picnic', body, labels: ['INBOX'] }),
+    ]);
+    const lane = openLane(client, { sniffer: { id: 'waiting', judge: () => ({ verdict: 'undecided', queued: true }) } });
+    await lane.handler.pull({ max_items: 50 });
+    for (const id of ['labelled', 'outside']) {
+      expect(lane.ledger.copies(identity(id))).toContainEqual(expect.objectContaining({ trustDomain: 'secure_local', state: 'current' }));
+      const decision = classifyItemTiers({ signals: { title: 'Picnic' }, text: body }, { sniffer: JUDGED_PERSONAL_SNIFFER });
+      lane.ledger.recordDecision(identity(id), decision);
+    }
+    // Add the rule after the walker reads its candidates but before its first writer transaction.
+    expect(await storedPersonalLoweringLap(lane.tierSet, undefined, async () => { saveLabelRule(); }))
+      .toMatchObject({ complete: false, changed: false });
+    expect(sweepOwnerRuleRaises({ set: lane.tierSet })).toMatchObject({ complete: true, scanned: 0 });
+    const repair = () => storedPersonalLoweringLap(lane.tierSet, undefined, () => undefined);
+    expect(await repair()).toMatchObject({ complete: false });
+    expect(lane.ledger.listMoving()).toEqual([]);
+
+    client.failLabelListing = true;
+    const pending = await lane.handler.pull({ max_items: 50 });
+    expect(pending.receipt.warnings).toContain(GMAIL_LABEL_RULES_PENDING_WARNING);
+    expect(await repair()).toMatchObject({ complete: false });
+    expect(lane.ledger.listMoving()).toEqual([]);
+
+    client.failLabelListing = false;
+    await lane.handler.pull({ max_items: 50 });
+    expect(lane.ledger.getCurrent(identity('labelled'))).toMatchObject({ decidedBy: 'owner_rule', targetContentTier: 'secure' });
+    // The previous receipt also stops authorizing repair while Gmail rechecks the label.
+    let duringRecheck;
+    const recheck = await sweepLabelRuleRaises({
+      set: lane.tierSet, provider: 'gmail', accountScope: ACCOUNT, recheck: true,
+      source: { async listLabelled() { duringRecheck = await repair(); return { ids: ['labelled'] }; } },
+    });
+    expect(duringRecheck).toMatchObject({ complete: false });
+    expect(recheck.pending).toBe(0);
+    expect(await repair()).toMatchObject({ complete: true, changed: true });
+    expect(lane.ledger.listMoving({ direction: 'lower' }).map(row => row.providerItemId)).toEqual(['outside']);
   });
 
   test('is applied once: a rule that has been applied asks Gmail nothing further', async () => {
