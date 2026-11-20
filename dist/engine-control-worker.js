@@ -88,6 +88,12 @@ import { dirname as dirname2, isAbsolute as isAbsolute2, join as join3, relative
 // src/core/file-lease.ts
 import { execFileSync } from "child_process";
 import { createRequire } from "module";
+
+// src/core/http-timeout.ts
+var NULL_BODY_STATUSES = new Set([101, 204, 205, 304]);
+var DEFAULT_BOUNDED_RESPONSE_LIMIT_BYTES = 64 * 1024;
+
+// src/core/file-lease.ts
 var runtimeRequire = createRequire(import.meta.url);
 var CURRENT_BOOT_ID = process.platform === "darwin" ? darwinBootId() : undefined;
 function darwinBootId() {
