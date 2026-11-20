@@ -76849,16 +76849,16 @@ ${parentKey(ref)}`, { ref, origin });
     async embeddingBacklogEstimateOffThread(modelId, embedder, scope, options = {}) {
       if (!offThreadReadsSupported(this.dbPath))
         return this.embeddingBacklogEstimate(modelId, embedder, scope, options);
-      const tierExclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0, undefined, false, false);
+      const tierExclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0, undefined, scope?.embedding?.includeHeldForJudgment, false);
       const excluded = tierExclusion.params.length > 0 ? JSON.parse(tierExclusion.params[0]) : [];
       const privateTier = embedder ? this.privateTierEmbeddingFilter(embedder) : { filter: "", params: [] };
-      const scoped = statusScopeContentFilter(scope);
+      const scoped = statusScopeContentFilter(scope?.embedding ?? scope);
       const sql = `
       SELECT COUNT(*) AS missing, COALESCE(SUM(LENGTH(c.bounded_text)), 0) AS chars
       FROM items i
       CROSS JOIN chunks c ON c.item_pk = i.item_pk
       LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
-      WHERE i.item_pk > ? AND i.item_pk <= ? AND i.tombstoned = 0
+      WHERE i.item_pk > ? AND i.item_pk <= ? AND i.tombstoned = 0 AND i.trust_tier <> 'S5'
         AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
         ${tierExclusion.filter} ${privateTier.filter} ${scoped.filter}
     `;
@@ -76878,16 +76878,16 @@ ${parentKey(ref)}`, { ref, origin });
         await page(lo, Math.min(lo + statusPageKeys, end));
     }
     embeddingBacklogRead(modelId, embedder, scope, options, connectionLocal) {
-      const tierExclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0, undefined, false, connectionLocal);
+      const tierExclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0, undefined, scope?.embedding?.includeHeldForJudgment, connectionLocal);
       const privateTier = embedder ? this.privateTierEmbeddingFilter(embedder) : { filter: "", params: [] };
-      const scoped = statusScopeContentFilter(scope);
+      const scoped = statusScopeContentFilter(scope?.embedding ?? scope);
       const filter = `${tierExclusion.filter} ${privateTier.filter} ${scoped.filter}`;
       return { mode: "get", params: [modelId, ...tierExclusion.params, ...privateTier.params, ...scoped.params], sql: `
       SELECT COUNT(*) AS missing, COALESCE(SUM(LENGTH(c.bounded_text)), 0) AS chars
       FROM chunks c
       JOIN items i ON i.item_pk = c.item_pk
       LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
-      WHERE i.tombstoned = 0
+      WHERE i.tombstoned = 0 AND i.trust_tier <> 'S5'
         AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
         ${filter}
     ` };
@@ -77004,7 +77004,7 @@ ${parentKey(ref)}`, { ref, origin });
       if (tiers === undefined)
         return { items: 0, chunks: 0, reason };
       const tierExclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0);
-      const scoped = statusScopeContentFilter(scope);
+      const scoped = statusScopeContentFilter(scope?.embedding ?? scope);
       const filter = `${tierExclusion.filter} ${scoped.filter}`;
       const params = [...tierExclusion.params, ...scoped.params];
       const row = this.db.query(`
@@ -77012,7 +77012,7 @@ ${parentKey(ref)}`, { ref, origin });
       FROM chunks c
       JOIN items i ON i.item_pk = c.item_pk
       LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
-      WHERE i.tombstoned = 0
+      WHERE i.tombstoned = 0 AND i.trust_tier <> 'S5'
         AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
         AND i.trust_tier NOT IN (SELECT value FROM json_each(?))
         ${filter}
@@ -79204,7 +79204,8 @@ ${parentKey(ref)}`, { ref, origin });
       const accountScope = normalizeOptionalAccountScope(scope?.accountScope);
       const itemFilters = connectorStoreFilterSql(scope?.itemFilters);
       const contentFilters = connectorStoreFilterSql(scope?.contentFilters);
-      const kept = this.totals();
+      const embedding = scope?.embedding;
+      const kept = embedding?.accountScope || embedding?.contentFilters || embedding?.contentAllowed === false ? undefined : this.totals();
       const countedTotals = kept ? storeTotalsFromRows(yield { sql: "SELECT name, n FROM store_totals", params: [], mode: "all" }, kept.reconciledAt) : undefined;
       const currentTier = this.tierHiddenItemPks({ countsMaxAgeMs: options.countsMaxAgeMs ?? 0 });
       const tier = {
@@ -79215,7 +79216,9 @@ ${parentKey(ref)}`, { ref, origin });
         metadataLayerContentUnread: currentTier.metadataLayerContentUnread.slice()
       };
       const hiddenNotIn = tier.hidden.length > 0 ? "AND i.item_pk NOT IN (SELECT value FROM json_each(?))" : "";
-      const heldNotIn = tier.held.length > 0 ? "AND i.item_pk NOT IN (SELECT value FROM json_each(?))" : "";
+      const heldForJudgment = scope?.embedding?.includeHeldForJudgment ? new Set(tier.heldForJudgment) : undefined;
+      const held = heldForJudgment ? tier.held.filter((pk) => !heldForJudgment.has(pk)) : tier.held;
+      const heldNotIn = held.length > 0 ? "AND i.item_pk NOT IN (SELECT value FROM json_each(?))" : "";
       const namesOnlyWithText = tier.metadataLayer.length > 0 ? (yield { sql: `
           SELECT j.value AS pk FROM json_each(?) j
           WHERE EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = j.value)
@@ -79235,7 +79238,9 @@ ${parentKey(ref)}`, { ref, origin });
       ${accountScope ? "AND i.account_scope = ?" : ""}
       ${contentFilters.sql}
       ${hiddenNotIn}`;
-      const parityWhere = `${contentWhere}
+      const embeddingFilter = statusScopeContentFilter(scope?.embedding ?? scope);
+      const parityWhere = `AND i.trust_tier <> 'S5' ${embeddingFilter.filter}
+      ${hiddenNotIn} ${namesOnlyNotIn}
       ${heldNotIn}`;
       const unreadHolds = this.settledUnreadableCount(scope, options.countsMaxAgeMs ?? 0);
       const policyHolds = new Set(unreadHolds.policyPks);
@@ -79258,7 +79263,12 @@ ${parentKey(ref)}`, { ref, origin });
           ...pageList(tier.hidden, lo, hi),
           ...pageList(namesOnlyWithText, lo, hi)
         ];
-        const parityParams = [...contentParams, ...pageList(tier.held, lo, hi)];
+        const parityParams = [
+          ...embeddingFilter.params,
+          ...pageList(tier.hidden, lo, hi),
+          ...pageList(namesOnlyWithText, lo, hi),
+          ...pageList(held, lo, hi)
+        ];
         const fileScopeParams = [
           ...accountScope ? [accountScope] : [],
           ...contentFilters.params,
@@ -79267,7 +79277,7 @@ ${parentKey(ref)}`, { ref, origin });
         ];
         return { itemParams, contentParams, parityParams, fileScopeParams };
       };
-      const fileScoped = policyHolds.size > 0 || scope !== undefined && !(scope.contentNotBefore !== undefined && Object.entries(scope).every(([key, value]) => key === "contentNotBefore" || value === undefined));
+      const fileScoped = policyHolds.size > 0 || Object.entries(scope ?? {}).some(([key, value]) => key !== "contentNotBefore" && key !== "embedding" && value !== undefined);
       const contentNotBeforeMs = scope?.contentNotBefore === undefined ? Number.NaN : Date.parse(scope.contentNotBefore);
       const outsideWindowSql = Number.isFinite(contentNotBeforeMs) ? `(COALESCE(julianday(i.authored_at) < julianday(?), 0) = 1
           AND NOT EXISTS (SELECT 1 FROM chunks oc WHERE oc.item_pk = i.item_pk))` : undefined;
@@ -79417,7 +79427,7 @@ ${parentKey(ref)}`, { ref, origin });
           SELECT DISTINCT emb.model_id
           FROM items i
           CROSS JOIN chunk_embeddings emb ON emb.item_pk = i.item_pk
-          WHERE i.item_pk > ? AND i.item_pk <= ? AND i.tombstoned = 0 ${contentWhere}
+          WHERE i.item_pk > ? AND i.item_pk <= ? AND i.tombstoned = 0 ${parityWhere}
         ) m
       `, params: [
           lo,
@@ -79428,7 +79438,7 @@ ${parentKey(ref)}`, { ref, origin });
           ...parityParams,
           lo,
           hi,
-          ...contentParams
+          ...parityParams
         ], mode: "all" };
         for (const row of pageByModel) {
           const total = modelTotals.get(row.model_id) ?? { embedded_chunks: 0, items_embedded: 0 };
@@ -106048,7 +106058,8 @@ var init_filter_capabilities = __esm(() => {
     "after",
     "before",
     "trust_domain",
-    "all_tiers"
+    "all_tiers",
+    "personal_names_only"
   ];
   CONNECTOR_STORE_DECLARED_FILTER_FIELDS = [
     "approved_scope_key",
@@ -147928,7 +147939,7 @@ class EmailClient {
       });
     return result;
   }
-  async sourceIndexSearch(options) {
+  async sourceIndexSearch(options, audience = "calling_model") {
     if (!isSourceIndexReadSurfaceEnabled(this.config)) {
       throw new OperationError("source_index_not_enabled", "Source-index search is disabled.", "Enable sourceIndex.enabled to turn on the source read surface.");
     }
@@ -147942,6 +147953,7 @@ class EmailClient {
       body: JSON.stringify({
         query: options.query,
         corpus_id: corpusId,
+        ...audience === "calling_model" ? { personal_names_only: true } : {},
         ...options.retrievalMode ? { retrieval_mode: options.retrievalMode } : {},
         ...options.account ? { account: options.account } : {},
         ...options.folderId ? { folder_id: options.folderId } : {},
@@ -225447,6 +225459,10 @@ function createEmailSourceWorker(options = {}) {
         if (request.method === "POST" && url.pathname === `${basePath}/source/index/search`) {
           const record = await parseObjectBody(request);
           assertSourceIndexSearchQuery(record.query);
+          const personalNamesOnly = record.personal_names_only !== undefined;
+          if (personalNamesOnly && record.personal_names_only !== true) {
+            throw new EmailSourceWorkerError(400, "invalid_request", "personal_names_only must be true when provided.");
+          }
           const corpusId = canonicalRequestCorpusId(record);
           const connectorStore = corpusId ? connectorStoresByCorpusId.get(corpusId) : undefined;
           if (connectorStore) {
@@ -225536,7 +225552,7 @@ function createEmailSourceWorker(options = {}) {
                 unreadCorpora.add(store.corpusId);
               }
             }
-            const privateNames = new Set;
+            const privateNames = new Set(tagged.filter((hit) => hit.trustTier === undefined || isSecureSensitivity({ trustDomain: hit.trustDomain, trustTier: hit.trustTier })));
             const hiddenNames = new Set(tagged.filter((hit) => unreadCorpora.has(hit.corpusId)));
             for (const scope of verdictScopes.values()) {
               const governed = tagged.filter((hit) => scope.corpusIds.has(hit.corpusId));
@@ -225549,24 +225565,25 @@ function createEmailSourceWorker(options = {}) {
                 }))));
                 governed.forEach((hit, index) => {
                   const verdict = verdicts[index];
-                  if (verdict.tier === "secret" || verdict.tier === "unknown" || verdict.pendingDeletion)
+                  if (verdict.tier === "secret" || verdict.tier === "unknown" || verdict.pendingDeletion || personalNamesOnly && verdict.gone)
                     hiddenNames.add(hit);
                   else if (verdict.tier === "private")
                     privateNames.add(hit);
+                  else if (personalNamesOnly && verdict.tier === "public_or_personal" && hit.trustTier !== undefined && hit.trustTier !== "S5")
+                    privateNames.delete(hit);
                 });
               } catch {
                 for (const hit of governed)
                   hiddenNames.add(hit);
               }
             }
-            const hitIsPrivate = (hit) => privateNames.has(hit) || hit.trustTier === undefined || isSecureSensitivity({ trustDomain: hit.trustDomain, trustTier: hit.trustTier });
             const searchedSecureLocal = runs.some((run) => run.store.trustDomain === "secure_local");
             let privateTierWithheld = 0;
             for (const hit of hiddenNames)
               visible.delete(hit);
-            if (!searchedSecureLocal) {
-              for (const hit of [...visible]) {
-                if (!hitIsPrivate(hit))
+            if (personalNamesOnly || !searchedSecureLocal) {
+              for (const hit of visible) {
+                if (!privateNames.has(hit))
                   continue;
                 visible.delete(hit);
                 privateTierWithheld += 1;
@@ -225618,7 +225635,7 @@ function createEmailSourceWorker(options = {}) {
                 raw_source_exposed: false,
                 source_text_returned: false,
                 source_packets_exposed: false,
-                local_only: searchRequest.explicitEmptyChatScope || searchedSecureLocal || hits.some(hitIsPrivate),
+                local_only: searchRequest.explicitEmptyChatScope || searchedSecureLocal || hits.some((hit) => privateNames.has(hit)),
                 trust_domain: mostPrivateTrustDomain(runs.map((run) => run.store.trustDomain)),
                 ...locatorsExposed ? { locators_exposed: true, locator_release: "explicit_request" } : {}
               }
@@ -243241,16 +243258,6 @@ var init_gmail_archive_target = __esm(() => {
 });
 
 // src/workers/email-source/gmail-status-scope.ts
-function contentWindow(contentAfter) {
-  return contentAfter ? { contentNotBefore: contentAfter } : {};
-}
-function gmailInternalStoreStatusScope(authority) {
-  const approval = authority?.mailSnapshot();
-  if (approval?.status !== "approved")
-    return;
-  const window2 = contentWindow(approval.mailScope?.contentAfter);
-  return window2.contentNotBefore ? window2 : undefined;
-}
 function gmailRetainedAccountMatches(input) {
   const { handle, binding, historyAccountId } = input;
   if (!handle)
@@ -243303,20 +243310,21 @@ function gmailEmbeddingPopulation(input) {
     observedConnectorIdPrefix: GMAIL_IMPORT_CONNECTOR_PREFIX
   } };
 }
-function gmailPrivateStoreStatusScope(input) {
-  const accountScope = input.gmailRetainedAccountScope();
-  if (!accountScope)
+function gmailReadCountScope(domain, population, ref, authority) {
+  if (domain === "public_safe")
+    return {};
+  const contentAfter = ref && authority?.assertCurrentMail(ref).mailScope.contentAfter;
+  const window2 = contentAfter ? { contentNotBefore: contentAfter } : {};
+  if (domain !== "secure_local")
+    return window2;
+  if (population.contentAllowed === false)
     return { itemsAllowed: false, contentAllowed: false };
-  const ref = input.handle ? input.authority?.mailPolicyRef() : undefined;
-  const approval = ref ? input.authority.assertCurrentMail(ref) : undefined;
-  const population = gmailEmbeddingPopulation({ ...input, accountScope, ref, privateStore: true });
-  const { filters } = population;
   return {
-    accountScope,
+    ...window2,
     contentAllowed: true,
-    ...filters ? { itemFilters: filters, contentFilters: filters } : {},
-    ...ref ? { scopeRevision: ref.revision } : {},
-    ...contentWindow(approval?.mailScope.contentAfter)
+    ...population.accountScope ? { accountScope: population.accountScope } : {},
+    ...population.contentFilters ? { itemFilters: population.contentFilters, contentFilters: population.contentFilters } : {},
+    ...ref ? { scopeRevision: ref.revision } : {}
   };
 }
 function gmailStoreEmbeddingScope(deps) {
@@ -250827,6 +250835,15 @@ function storeEmbeddingScope(input) {
     }
   };
 }
+function embeddingCountScope(store, provider, scope) {
+  if (!scope.allowed)
+    return { contentAllowed: false };
+  return {
+    ...scope.accountScope ? { accountScope: scope.accountScope } : {},
+    ...scope.filters ? { contentFilters: scope.filters } : {},
+    ...!scope.excludeAllEmbeddingHolds && store.canEmbedHeld(provider) ? { includeHeldForJudgment: true } : {}
+  };
+}
 var init_embedding_scope = __esm(() => {
   init_operation_error();
   init_source_scope_runtime();
@@ -250984,13 +251001,43 @@ function registeredStoreReadScope(sourceId, authority) {
     ...content.allowed && content.filters ? { contentFilters: content.filters } : {}
   };
 }
-function createStoreEmbeddingScopeFor(input) {
-  const policies = new Map([[GMAIL_SOURCE_ID, gmailStoreEmbeddingScope(input)]]);
-  return (store, provider) => {
+function createStoreScopes(input) {
+  const policies = new Map([[GMAIL_SOURCE_ID, {
+    embedding: gmailStoreEmbeddingScope(input),
+    ref: () => input.authority?.mailPolicyRef(),
+    readCounts: gmailReadCountScope
+  }]]);
+  function resolve(store, provider, readScope) {
     const sourceId = input.sourceIdForStore(store);
-    const policy = policies.get(sourceId) ?? (getFileScopeSource(sourceId) ? "approval" : "open");
-    const scopeRef = policy === "approval" ? input.authority?.policyRef(sourceId) : sourceId === GMAIL_SOURCE_ID ? input.authority?.mailPolicyRef() : undefined;
-    return storeEmbeddingScope({ store, provider, policy, scopeRef, authority: input.authority, readScope: input.readScope });
+    const published = policies.get(sourceId);
+    const ref = published?.ref();
+    const policy = published?.embedding ?? (getFileScopeSource(sourceId) ? "approval" : "open");
+    const scopeRef = policy === "approval" ? input.authority?.policyRef(sourceId) : ref;
+    const scope = storeEmbeddingScope({ store, provider, policy, scopeRef, authority: input.authority, readScope });
+    return { scope, published, ref };
+  }
+  return {
+    embeddingScopeFor: (store, provider) => resolve(store, provider, input.readScope).scope,
+    statusScopeFor(store, provider) {
+      const read = input.readScope(store);
+      const { scope, published, ref } = resolve(store, provider, () => read);
+      const embedding = embeddingCountScope(store, provider, scope);
+      const counts = published ? published.readCounts(store.trustDomain, embedding, ref, input.authority) : readCountScope(read);
+      return { ...counts, embedding };
+    }
+  };
+}
+function readCountScope(read) {
+  if (!read.allowed)
+    return { itemsAllowed: false, contentAllowed: false };
+  if (read.contentAllowed && !read.filters && !read.contentFilters)
+    return {};
+  return {
+    ...read.filters?.sourceScopeRevision ? { scopeRevision: read.filters.sourceScopeRevision } : {},
+    ...read.accountScope ? { accountScope: read.accountScope } : {},
+    ...read.filters ? { itemFilters: read.filters } : {},
+    ...read.contentAllowed !== undefined ? { contentAllowed: read.contentAllowed } : {},
+    ...read.contentFilters ? { contentFilters: read.contentFilters } : {}
   };
 }
 var init_store_scope_policies = __esm(() => {
@@ -259285,7 +259332,7 @@ async function defaultPrivateMatchProbe(question, ctx) {
   const none = { count: 0, evidence: [] };
   if (corpora.length === 0)
     return none;
-  const searches = corpora.map((corpus) => ctx.email.sourceIndexSearch({ query, corpusId: corpus.corpusId, maxResults: PROBE_HITS_PER_CORPUS, allTiers: false }).then((result) => (Array.isArray(result.hits) ? result.hits : []).filter((hit) => typeof hit === "object" && hit !== null && !Array.isArray(hit)), () => []));
+  const searches = corpora.map((corpus) => ctx.email.sourceIndexSearch({ query, corpusId: corpus.corpusId, maxResults: PROBE_HITS_PER_CORPUS, allTiers: false }, "private_answer").then((result) => (Array.isArray(result.hits) ? result.hits : []).filter((hit) => typeof hit === "object" && hit !== null && !Array.isArray(hit)), () => []));
   const perCorpus = await Promise.all(searches);
   const evidence = perCorpus.flat();
   return { count: evidence.length, evidence };
@@ -276597,7 +276644,7 @@ ${key}`;
       return { allowed: false };
     return registeredStoreReadScope(sourceId, fileSourceScopeAuthority);
   };
-  const embeddingScopeFor = createStoreEmbeddingScopeFor({
+  const { embeddingScopeFor, statusScopeFor } = createStoreScopes({
     sourceIdForStore,
     authority: fileSourceScopeAuthority,
     readScope: connectorStoreReadScope,
@@ -276770,37 +276817,7 @@ ${key}`;
   };
   for (const mount of configuredConnectorStoreMounts)
     adoptConfiguredPrincipal(mount);
-  const connectorStoreStatusScope = (store) => {
-    if (store === gmailSecureConnectorStore) {
-      const handle = selectedSourceCredentialHandle({
-        env: process.env,
-        pinEnvName: "OLYMPUS_SOURCE_INDEX_GMAIL_CREDENTIAL_HANDLE",
-        provider: "gmail",
-        capability: "gmail.email.sync",
-        handles: readActiveConnectedHandles(process.env)
-      });
-      return gmailPrivateStoreStatusScope({
-        authority: fileSourceScopeAuthority,
-        handle,
-        provider: connectorStoreEmbeddingProviders.get(store.corpusId),
-        gmailRetainedAccountScope
-      });
-    }
-    if (store === gmailInternalConnectorStore)
-      return gmailInternalStoreStatusScope(fileSourceScopeAuthority);
-    const readScope = connectorStoreReadScope(store);
-    if (!readScope.allowed)
-      return { itemsAllowed: false, contentAllowed: false };
-    if (readScope.contentAllowed && !readScope.filters && !readScope.contentFilters)
-      return;
-    return {
-      ...readScope.filters?.sourceScopeRevision ? { scopeRevision: readScope.filters.sourceScopeRevision } : {},
-      ...readScope.accountScope ? { accountScope: readScope.accountScope } : {},
-      ...readScope.filters ? { itemFilters: readScope.filters } : {},
-      contentAllowed: readScope.contentAllowed,
-      ...readScope.contentFilters ? { contentFilters: readScope.contentFilters } : {}
-    };
-  };
+  const connectorStoreStatusScope = (store) => statusScopeFor(store, connectorStoreEmbeddingProviders.get(store.corpusId));
   const secureEmbeddingProfile = sovereigntyEngine.resolveEmbeddingProfile("secure_local");
   const secureEmbeddingCloudApproved = secureEmbeddingProfile?.profile.provider === "venice" && secureEmbeddingProfile.profile.trust === "encrypted_cloud";
   const fullCorpusDefinitions = [

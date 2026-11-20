@@ -32209,16 +32209,16 @@ ${parentKey(ref)}`, { ref, origin });
   async embeddingBacklogEstimateOffThread(modelId, embedder, scope, options = {}) {
     if (!offThreadReadsSupported(this.dbPath))
       return this.embeddingBacklogEstimate(modelId, embedder, scope, options);
-    const tierExclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0, undefined, false, false);
+    const tierExclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0, undefined, scope?.embedding?.includeHeldForJudgment, false);
     const excluded = tierExclusion.params.length > 0 ? JSON.parse(tierExclusion.params[0]) : [];
     const privateTier = embedder ? this.privateTierEmbeddingFilter(embedder) : { filter: "", params: [] };
-    const scoped = statusScopeContentFilter(scope);
+    const scoped = statusScopeContentFilter(scope?.embedding ?? scope);
     const sql = `
       SELECT COUNT(*) AS missing, COALESCE(SUM(LENGTH(c.bounded_text)), 0) AS chars
       FROM items i
       CROSS JOIN chunks c ON c.item_pk = i.item_pk
       LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
-      WHERE i.item_pk > ? AND i.item_pk <= ? AND i.tombstoned = 0
+      WHERE i.item_pk > ? AND i.item_pk <= ? AND i.tombstoned = 0 AND i.trust_tier <> 'S5'
         AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
         ${tierExclusion.filter} ${privateTier.filter} ${scoped.filter}
     `;
@@ -32238,16 +32238,16 @@ ${parentKey(ref)}`, { ref, origin });
       await page(lo, Math.min(lo + statusPageKeys, end));
   }
   embeddingBacklogRead(modelId, embedder, scope, options, connectionLocal) {
-    const tierExclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0, undefined, false, connectionLocal);
+    const tierExclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0, undefined, scope?.embedding?.includeHeldForJudgment, connectionLocal);
     const privateTier = embedder ? this.privateTierEmbeddingFilter(embedder) : { filter: "", params: [] };
-    const scoped = statusScopeContentFilter(scope);
+    const scoped = statusScopeContentFilter(scope?.embedding ?? scope);
     const filter = `${tierExclusion.filter} ${privateTier.filter} ${scoped.filter}`;
     return { mode: "get", params: [modelId, ...tierExclusion.params, ...privateTier.params, ...scoped.params], sql: `
       SELECT COUNT(*) AS missing, COALESCE(SUM(LENGTH(c.bounded_text)), 0) AS chars
       FROM chunks c
       JOIN items i ON i.item_pk = c.item_pk
       LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
-      WHERE i.tombstoned = 0
+      WHERE i.tombstoned = 0 AND i.trust_tier <> 'S5'
         AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
         ${filter}
     ` };
@@ -32364,7 +32364,7 @@ ${parentKey(ref)}`, { ref, origin });
     if (tiers === undefined)
       return { items: 0, chunks: 0, reason };
     const tierExclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0);
-    const scoped = statusScopeContentFilter(scope);
+    const scoped = statusScopeContentFilter(scope?.embedding ?? scope);
     const filter = `${tierExclusion.filter} ${scoped.filter}`;
     const params = [...tierExclusion.params, ...scoped.params];
     const row = this.db.query(`
@@ -32372,7 +32372,7 @@ ${parentKey(ref)}`, { ref, origin });
       FROM chunks c
       JOIN items i ON i.item_pk = c.item_pk
       LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
-      WHERE i.tombstoned = 0
+      WHERE i.tombstoned = 0 AND i.trust_tier <> 'S5'
         AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
         AND i.trust_tier NOT IN (SELECT value FROM json_each(?))
         ${filter}
@@ -34564,7 +34564,8 @@ ${parentKey(ref)}`, { ref, origin });
     const accountScope = normalizeOptionalAccountScope(scope?.accountScope);
     const itemFilters = connectorStoreFilterSql(scope?.itemFilters);
     const contentFilters = connectorStoreFilterSql(scope?.contentFilters);
-    const kept = this.totals();
+    const embedding = scope?.embedding;
+    const kept = embedding?.accountScope || embedding?.contentFilters || embedding?.contentAllowed === false ? undefined : this.totals();
     const countedTotals = kept ? storeTotalsFromRows(yield { sql: "SELECT name, n FROM store_totals", params: [], mode: "all" }, kept.reconciledAt) : undefined;
     const currentTier = this.tierHiddenItemPks({ countsMaxAgeMs: options.countsMaxAgeMs ?? 0 });
     const tier = {
@@ -34575,7 +34576,9 @@ ${parentKey(ref)}`, { ref, origin });
       metadataLayerContentUnread: currentTier.metadataLayerContentUnread.slice()
     };
     const hiddenNotIn = tier.hidden.length > 0 ? "AND i.item_pk NOT IN (SELECT value FROM json_each(?))" : "";
-    const heldNotIn = tier.held.length > 0 ? "AND i.item_pk NOT IN (SELECT value FROM json_each(?))" : "";
+    const heldForJudgment = scope?.embedding?.includeHeldForJudgment ? new Set(tier.heldForJudgment) : undefined;
+    const held = heldForJudgment ? tier.held.filter((pk) => !heldForJudgment.has(pk)) : tier.held;
+    const heldNotIn = held.length > 0 ? "AND i.item_pk NOT IN (SELECT value FROM json_each(?))" : "";
     const namesOnlyWithText = tier.metadataLayer.length > 0 ? (yield { sql: `
           SELECT j.value AS pk FROM json_each(?) j
           WHERE EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = j.value)
@@ -34595,7 +34598,9 @@ ${parentKey(ref)}`, { ref, origin });
       ${accountScope ? "AND i.account_scope = ?" : ""}
       ${contentFilters.sql}
       ${hiddenNotIn}`;
-    const parityWhere = `${contentWhere}
+    const embeddingFilter = statusScopeContentFilter(scope?.embedding ?? scope);
+    const parityWhere = `AND i.trust_tier <> 'S5' ${embeddingFilter.filter}
+      ${hiddenNotIn} ${namesOnlyNotIn}
       ${heldNotIn}`;
     const unreadHolds = this.settledUnreadableCount(scope, options.countsMaxAgeMs ?? 0);
     const policyHolds = new Set(unreadHolds.policyPks);
@@ -34618,7 +34623,12 @@ ${parentKey(ref)}`, { ref, origin });
         ...pageList(tier.hidden, lo, hi),
         ...pageList(namesOnlyWithText, lo, hi)
       ];
-      const parityParams = [...contentParams, ...pageList(tier.held, lo, hi)];
+      const parityParams = [
+        ...embeddingFilter.params,
+        ...pageList(tier.hidden, lo, hi),
+        ...pageList(namesOnlyWithText, lo, hi),
+        ...pageList(held, lo, hi)
+      ];
       const fileScopeParams = [
         ...accountScope ? [accountScope] : [],
         ...contentFilters.params,
@@ -34627,7 +34637,7 @@ ${parentKey(ref)}`, { ref, origin });
       ];
       return { itemParams, contentParams, parityParams, fileScopeParams };
     };
-    const fileScoped = policyHolds.size > 0 || scope !== undefined && !(scope.contentNotBefore !== undefined && Object.entries(scope).every(([key, value]) => key === "contentNotBefore" || value === undefined));
+    const fileScoped = policyHolds.size > 0 || Object.entries(scope ?? {}).some(([key, value]) => key !== "contentNotBefore" && key !== "embedding" && value !== undefined);
     const contentNotBeforeMs = scope?.contentNotBefore === undefined ? Number.NaN : Date.parse(scope.contentNotBefore);
     const outsideWindowSql = Number.isFinite(contentNotBeforeMs) ? `(COALESCE(julianday(i.authored_at) < julianday(?), 0) = 1
           AND NOT EXISTS (SELECT 1 FROM chunks oc WHERE oc.item_pk = i.item_pk))` : undefined;
@@ -34777,7 +34787,7 @@ ${parentKey(ref)}`, { ref, origin });
           SELECT DISTINCT emb.model_id
           FROM items i
           CROSS JOIN chunk_embeddings emb ON emb.item_pk = i.item_pk
-          WHERE i.item_pk > ? AND i.item_pk <= ? AND i.tombstoned = 0 ${contentWhere}
+          WHERE i.item_pk > ? AND i.item_pk <= ? AND i.tombstoned = 0 ${parityWhere}
         ) m
       `, params: [
         lo,
@@ -34788,7 +34798,7 @@ ${parentKey(ref)}`, { ref, origin });
         ...parityParams,
         lo,
         hi,
-        ...contentParams
+        ...parityParams
       ], mode: "all" };
       for (const row of pageByModel) {
         const total = modelTotals.get(row.model_id) ?? { embedded_chunks: 0, items_embedded: 0 };
@@ -37260,7 +37270,8 @@ var CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS = [
   "after",
   "before",
   "trust_domain",
-  "all_tiers"
+  "all_tiers",
+  "personal_names_only"
 ];
 var CONNECTOR_STORE_DECLARED_FILTER_FIELDS = [
   "approved_scope_key",

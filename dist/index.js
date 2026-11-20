@@ -18111,7 +18111,8 @@ var init_filter_capabilities = __esm(() => {
     "after",
     "before",
     "trust_domain",
-    "all_tiers"
+    "all_tiers",
+    "personal_names_only"
   ];
   CONNECTOR_STORE_DECLARED_FILTER_FIELDS = [
     "approved_scope_key",
@@ -24522,7 +24523,7 @@ class EmailClient {
       });
     return result;
   }
-  async sourceIndexSearch(options) {
+  async sourceIndexSearch(options, audience = "calling_model") {
     if (!isSourceIndexReadSurfaceEnabled(this.config)) {
       throw new OperationError("source_index_not_enabled", "Source-index search is disabled.", "Enable sourceIndex.enabled to turn on the source read surface.");
     }
@@ -24536,6 +24537,7 @@ class EmailClient {
       body: JSON.stringify({
         query: options.query,
         corpus_id: corpusId,
+        ...audience === "calling_model" ? { personal_names_only: true } : {},
         ...options.retrievalMode ? { retrieval_mode: options.retrievalMode } : {},
         ...options.account ? { account: options.account } : {},
         ...options.folderId ? { folder_id: options.folderId } : {},
