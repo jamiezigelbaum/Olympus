@@ -345,6 +345,7 @@ export function privacyItemsClientScript(input: { csrfToken: string; unlockOnly:
   function detail(item) {
     var tier = shown(item);
     var change = changes[item.item_id];
+    var finding = item.override_finding_kinds && item.override_finding_kinds.length;
     var preview = item.preview ? '<div class="piprev" data-pi-preview>' + esc(item.preview) + '</div>' : '<div class="piprev" data-pi-preview>' + esc(C.noPreview) + '</div>';
     var why = '';
     var foot = '';
@@ -372,10 +373,11 @@ export function privacyItemsClientScript(input: { csrfToken: string; unlockOnly:
       var group = item.sender ? fill(C.promiseGroup, { sender: item.sender }) : C.promiseGroupNoSender;
       foot = esc(fill(C.promise, { group: group }));
     }
+    if (finding) why += '<p class="piwhy">' + esc(fill(C.overrideFinding, { kinds: item.override_finding_kinds.join(', ').replace(/_/g, ' ') })) + '</p>';
     return '<section class="pidetail" data-pi-detail="' + esc(item.item_id) + '" aria-label="' + esc(title(item)) + '">'
       + '<div class="pidhead">' + logo(item, true) + '<div class="grow"><h4>' + esc(title(item)) + '</h4><span class="pimeta">' + esc(meta(item)) + '</span></div>'
       + '<button type="button" class="pix" data-pi-close aria-label="' + esc(C.close) + '">✕</button></div>'
-      + (item.override_review ? '' : '<p class="pidcap">' + esc(C.previewCaption) + '</p>' + preview
+      + (item.override_review ? '' : (finding ? '' : '<p class="pidcap">' + esc(C.previewCaption) + '</p>' + preview)
       + (item.family === 'file' && (item.names_only || item.not_read && item.not_read.kind === 'by_choice') ? '<button type="button" class="btn" data-pi-read>Read this file</button>' : '')
       + '<p class="pidcap" id="pi-who">' + esc(C.whoCaption) + '</p>'
       + '<div class="pipair" role="radiogroup" aria-labelledby="pi-who">' + option(item, 'Personal', C.personalLine) + option(item, 'Private', C.privateLine) + '</div>')

@@ -111,7 +111,7 @@ async function inspectChunks(
     const record = scope.ledger.getCurrent(input);
     if (!snapshot || !record) continue;
     // The owner's own word on this item (a per-item choice or a rule they set) decides all of its text.
-    const override = scope.ledger.getOverride(input);
+    const override = scope.ledger.getOverride(input, { withHistory: true });
     const overrideKey = JSON.stringify(override);
     const fullText = snapshot.chunks.map(chunk => chunk.text).join('');
     const ownerRead = personalOverrideAllowsText(override, fullText)
@@ -126,7 +126,7 @@ async function inspectChunks(
       return scopesNow().find(now => now.corpusIds.has(input.corpusId))?.ledger === scope.ledger
         && !!current && JSON.stringify([current.title, current.path, current.sender]) === names
         // An owner choice or a new decision made while the release waited withholds what was read before it.
-        && JSON.stringify(scope.ledger.getOverride(input)) === overrideKey
+        && JSON.stringify(scope.ledger.getOverride(input, { withHistory: true })) === overrideKey
         && scope.ledger.getCurrent(input)?.generation === record.generation
         && (!set || parentNamesContext(set, input) === parentContext)
         && currentReader?.modelId === reader?.modelId && currentReader?.promptVersion === reader?.promptVersion

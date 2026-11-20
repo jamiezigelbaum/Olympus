@@ -212,6 +212,8 @@ export function decideItemTiers(
     contentFetchFailed?: boolean;
     /** The source read a replacement for the Secret body recorded previously. */
     freshSecretReplacement?: true;
+    /** The caller's classification snapshot, reused by its write fence. */
+    classificationRead?: ReturnType<TierLedger['classificationRead']>;
     /** The names the current content copy gives a re-judge, read only on a cache miss. */
     storedContentNames?: () => { title?: string; path?: string; sender?: string } | undefined;
     /**
@@ -221,7 +223,9 @@ export function decideItemTiers(
     afterFirstImport?: boolean;
   } = {},
 ): TierDecision {
-  const read = ledger?.classificationRead(item.identity);
+  const read = extra.classificationRead ?? ledger?.classificationRead(
+    item.identity, extra.contentFetchFailed ? undefined : text,
+  );
   const override = read?.override;
   // Only a listing that read the item's text is fresh enough to ask about an
   // item recorded Secrets (an unread one keeps the recorded content tier).

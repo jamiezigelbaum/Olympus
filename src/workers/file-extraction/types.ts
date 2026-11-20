@@ -127,6 +127,7 @@ export const EXTRACTION_CANDIDATE_SKIP = {
 } as const;
 
 export interface ExtractionFetchOptions {
+  signal?: AbortSignal;
   /**
    * The most bytes a read may take. A source enforces it while reading
    * (at most this many plus one), never by trusting a size the item states.
@@ -139,6 +140,7 @@ export interface ExtractionFetchOptions {
  * instead of bytes.
  */
 export interface ExtractionFetchFileOptions {
+  signal?: AbortSignal;
   maxBytes?: number;
   /**
    * The root of a private folder the runner owns, in the account's folder (or
@@ -322,6 +324,7 @@ export interface ExtractorInput {
   job: ExtractorJobContext;
   bytes?: Uint8Array;
   localPath?: string;
+  signal?: AbortSignal;
   /**
    * Runner-owned live gate. Remote readers call it after local preparation,
    * and forward it to clients that await model preparation before sending.
@@ -765,6 +768,8 @@ export interface ExtractionSinkRequest {
    * When the bytes behind this text were fetched.
    */
   fetchedAt: string;
+  // Synchronous admission check until the content commit.
+  onDemandGrantCurrent?: () => boolean;
   derivations?: readonly ExtractionDerivation[];
   /**
    * The prepared media copy the extractor produced with this text, if any.

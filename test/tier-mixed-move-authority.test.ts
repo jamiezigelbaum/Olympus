@@ -6,7 +6,7 @@ import { classifyItemTiers } from '../src/workers/classification/tier-classifier
 import { tierLedgerIdentityKey } from '../src/workers/classification/tier-ledger.ts';
 import { writeOwnerTierRules } from '../src/workers/classification/tier-rules.ts';
 import { purgeLowerTierContent } from '../src/workers/connector-store/tier-content-purge.ts';
-import { moveTieredItem, moveTieredItemsLowering, TierMoveContentChangedError } from '../src/workers/connector-store/tier-move.ts';
+import { moveTieredItem, moveTieredItemsLowering, retireRestoredTierLowerings, TierMoveContentChangedError } from '../src/workers/connector-store/tier-move.ts';
 import { CORPORA, FIXTURE_PLACEMENT, JUDGED_PERSONAL_SNIFFER, fixtureConnector, identityOf, localId, openTierFixture, tempDir } from './helpers/tier-fixtures.ts';
 
 const cleanup: Array<() => void> = [];
@@ -176,4 +176,53 @@ test('a source edit discards staged bytes after an interruption before the recei
   expect(refused).toEqual({ error: expect.any(TierMoveContentChangedError) });
   expect(fixture.stores.internal!.exportItemCopy(identity)).toBeUndefined();
   expect(source.localContent(localId('orchard'))?.chunks.join('')).toBe(edited);
+});
+
+test('a source-unspecified label rule permits lowerings in a lane without label resolution', async () => {
+  const tmp = tempDir();
+  const fixture = openTierFixture(tmp.dir, { embed: false });
+  cleanup.push(() => { fixture.close(); tmp.cleanup(); });
+  const identity = identityOf('orchard');
+  const text = 'Orchard inventory and planting notes.';
+  await fixture.set.sync(fixtureConnector(() => [{ id: identity.providerItemId, name: 'Inventory', text }]),
+    { fetchContent: true, placement: FIXTURE_PLACEMENT });
+  await moveTieredItem({ set: fixture.set, identity, target: { metadataTier: 'secure', contentTier: 'secure' } });
+  const env = { OLYMPUS_TIER_RULES_PATH: join(tmp.dir, 'tier-rules.json') };
+  configureInstalledTierClassification({ env });
+  writeOwnerTierRules([{ id: 'private-label', match: { kind: 'label', value: 'private' }, tier: 'secure', strength: 'force' }], { env });
+  const target = classifyItemTiers({ signals: { title: 'Inventory' }, text }, { sniffer: JUDGED_PERSONAL_SNIFFER });
+  fixture.ledger.recordRoutedPlacement(identity, target, fixture.set.placementFor(target));
+
+  expect(moveTieredItemsLowering([{ set: fixture.set, identity, target }])[0]).toHaveProperty('result');
+  expect(fixture.stores.internal!.localContent(localId('orchard'))?.chunks.join('')).toBe(text);
+});
+
+test('restore of a verified mixed move retires the names lowering and retains the only copy of the raised body', async () => {
+  const tmp = tempDir();
+  const fixture = openTierFixture(tmp.dir, { embed: false });
+  cleanup.push(() => { fixture.close(); tmp.cleanup(); });
+  const identity = identityOf('orchard');
+  const text = 'Orchard inventory and planting notes.';
+  const target = { metadataTier: 'public', contentTier: 'secure' } as const;
+  await fixture.set.sync(fixtureConnector(() => [{ id: identity.providerItemId, name: 'Inventory', text }]),
+    { fetchContent: true, placement: FIXTURE_PLACEMENT });
+  const decision = { ...classifyItemTiers({ signals: { title: 'Inventory' }, text }), ...target };
+  fixture.ledger.recordRoutedPlacement(identity, decision, fixture.set.placementFor(decision));
+  await expect(moveTieredItem({ set: fixture.set, identity, target, afterVerified() { throw new Error('checkpoint'); } }))
+    .rejects.toThrow('checkpoint');
+  const key = tierLedgerIdentityKey(identity);
+  const receiptKey = `tier-move-verified:${key}`;
+  const { ruleRevision: _revision, sourceFingerprints: _fingerprints, ...legacy } = JSON.parse(fixture.ledger.readMeta(receiptKey)!);
+  fixture.ledger.writeMeta(receiptKey, JSON.stringify(legacy));
+  fixture.ledger.writeMeta(`tier-move-imports:${key}`, '');
+  fixture.stores.internal!.stripCopyContent(identity, { keepMetadata: true });
+
+  retireRestoredTierLowerings(fixture.set);
+
+  expect(fixture.ledger.readMeta(receiptKey)).toBeFalsy();
+  expect(fixture.stores.public_safe?.exportItemCopy(identity)).toBeUndefined();
+  const retained = { metadataTier: 'private', contentTier: 'secure' } as const;
+  expect(fixture.ledger.getCurrent(identity)).toMatchObject({ state: 'moving', targetMetadataTier: 'private', targetContentTier: 'secure' });
+  await moveTieredItem({ set: fixture.set, identity, target: retained });
+  expect(fixture.stores.secure_local!.localContent(localId('orchard'))?.chunks.join('')).toBe(text);
 });

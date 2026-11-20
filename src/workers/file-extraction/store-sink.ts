@@ -322,6 +322,9 @@ export function createConnectorStoreExtractionSink(
 
   return {
     async accept(request: ExtractionSinkRequest): Promise<ExtractionSinkResult> {
+      if (request.onDemandGrantCurrent?.() === false) {
+        return { accepted: false, chunksIndexed: 0, chunksAwaitingEmbedding: 0, skippedReason: EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE };
+      }
       const plan = planExtractionSinkWrite(store, request);
       if ('skippedReason' in plan) {
         return {

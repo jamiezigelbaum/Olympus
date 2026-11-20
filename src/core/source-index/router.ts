@@ -91,10 +91,10 @@ export interface SourceIndexCorpusSearchRequest {
   onProgress?: () => void;
   // Each prefix replaces the preceding one from the same lane.
   onPartialResponse?: (response: SourceIndexCorpusSearchResponse, lane?: 'keyword' | 'vector' | 'keyword_content') => void;
-  [ROUTER_DELIVERS_SEARCH]?: true;
+  [DEFER_SEARCH_DELIVERY]?: true;
 }
 
-export const ROUTER_DELIVERS_SEARCH = Symbol('router delivers search');
+export const DEFER_SEARCH_DELIVERY = Symbol('defer search delivery');
 export const SEARCH_GRANT_MATCH = Symbol('search grant match');
 export const SEARCH_GRANT_DELIVERY = Symbol('search grant delivery');
 
@@ -186,7 +186,8 @@ export interface SourceIndexCorpusSearchResponse {
    */
   semanticRows?: { hits: readonly SourceIndexSearchHit[]; bar: number };
   [SEARCH_GRANT_DELIVERY]?: {
-    check: (hits: readonly SourceIndexSearchHit[]) => ReadonlyMap<SourceIndexSearchHit, 'metadata' | 'content'>;
+    // An unchanged store epoch needs no per-item grant lookup.
+    checkIfChanged: (hits: readonly SourceIndexSearchHit[]) => ReadonlyMap<SourceIndexSearchHit, 'metadata' | 'content'> | undefined;
     matches: readonly SourceIndexSearchHit[];
   };
   rawExposed: false;
@@ -502,8 +503,8 @@ export function deliverCorpusSearch(
   const hits = responses.flatMap(response => response.hits);
   const candidates = [...hits, ...grantMatches, ...(first.semanticNeighbourHits ?? []), ...(first.semanticRows?.hits ?? [])];
   const scoped = candidates.filter(hit => hit[SEARCH_GRANT_MATCH] !== undefined);
-  const visible = scoped.length > 0 ? delivery?.check(scoped) : undefined;
-  const keep = (hit: SourceIndexSearchHit) => !delivery || !hit[SEARCH_GRANT_MATCH] || visible?.get(hit) === 'content';
+  const visible = delivery?.checkIfChanged(scoped);
+  const keep = (hit: SourceIndexSearchHit) => !visible || !hit[SEARCH_GRANT_MATCH] || visible.get(hit) === 'content';
   const current = (rows: readonly SourceIndexSearchHit[], metadata: boolean) => rows.flatMap(hit => {
     if (keep(hit)) return [hit];
     const fallback = metadata && visible?.get(hit) === 'metadata' && hit[SEARCH_GRANT_MATCH]?.metadataFallback;
@@ -519,9 +520,13 @@ export function deliverCorpusSearch(
       saturated: partial || first.matchCount?.saturated === true,
     };
   })() : first.matchCount;
-  const { [SEARCH_GRANT_DELIVERY]: _delivery, ...response } = first;
+  // Lane aggregates may include candidates outside the returned cut. Only
+  // the original epoch authorizes those counts and relevance scores.
+  const { [SEARCH_GRANT_DELIVERY]: _delivery, laneAudits, storeRelevance, ...response } = first;
   return {
     ...response,
+    ...(!visible && laneAudits ? { laneAudits } : {}),
+    ...(!visible && storeRelevance ? { storeRelevance } : {}),
     hits: partial ? distinctSearchMatches(retained).slice(0, maxPartialResults) : retained,
     ...(partial ? { incomplete: true } : {}),
     ...(matchCount ? { matchCount } : {}),
@@ -649,7 +654,7 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
       corpus,
       context: request.context,
       onProgress: () => progress(),
-      [ROUTER_DELIVERS_SEARCH]: true,
+      [DEFER_SEARCH_DELIVERY]: true,
       onPartialResponse: (response, lane = 'keyword') => {
         assertSafeCorpusSearchResponse(response);
         partials.set(lane, response);

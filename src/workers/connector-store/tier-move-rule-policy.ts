@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
 import { withOwnerConfigLease } from '../../core/owner-config-read.ts';
 import { registeredInstalledTierClassification } from '../classification/installed-tier-classification-registry.ts';
+import { providerSupportsLabelRules } from '../classification/privacy-profile.ts';
 import { ownerRuleMatches, tierRank, type OwnerTierRule, type TierKey } from '../classification/tier-classifier.ts';
 import { copyServingLayer, labelSweepMetaKey, tierLedgerIdentityOfRecord, tierMoveOverrideConflict, trustDomainRank, type TierCopyPlan, type TierLedgerRecord } from '../classification/tier-ledger.ts';
 import { readDecisionRules, OLYMPUS_TIER_RULES_ENV, resolveTierRulesPath, tierRulesFileStamp } from '../classification/tier-rules.ts';
@@ -103,7 +104,7 @@ export function tierMoveRuleAuthorization(
     if (storedRules.some((rule) => ownerRuleMatches(rule, signals, record.provider))) return undefined;
   }
   const labelRules = rules.filter((rule) => rule.match.kind === 'label');
-  if (labelRules.length > 0) {
+  if (labelRules.length > 0 && providerSupportsLabelRules(record.provider)) {
     const { provider, accountScope, providerItemId } = identity;
     const progress = readLabelState(set.ledger.readMeta(labelSweepMetaKey(provider, accountScope)));
     if (!labelSweepHasPolicy(progress, policy, provider, accountScope)) return undefined;

@@ -90,6 +90,12 @@ export class SetupBackendError extends Error {
   }
 }
 
+export class PrivacySettingsConflict extends Error {
+  constructor(readonly current: PrivacySettings) {
+    super('Privacy settings changed since this revision.');
+  }
+}
+
 export interface ChatGptSetupBackend {
   /**
    * Starts a publisher-app sign-in; the provider's authorize URL. It returns
@@ -156,7 +162,7 @@ export interface ChatGptSetupBackend {
   privacyCheck?: PrivacyQuestionEngine['check'];
   /** Saves a validated update (each field given replaces the saved one); returns the settings now. */
   choosePrivateAnswers?(choice: SovereigntyPresetName): PrivacySettings;
-  savePrivacy(update: { description?: string; rules?: PrivacyRuleView[] }): PrivacySettings;
+  savePrivacy(update: { description?: string; rules?: PrivacyRuleView[] }, expectedRevision?: string): PrivacySettings;
   /**
    * Whose privacy confirmations these are. A host that wraps the backend per
    * call (the computer's panel tools) passes one stable object, so the
@@ -575,25 +581,25 @@ export async function callSetupTool(
           throw new ChatGptSurfaceError('invalid_params');
         }
         const secrets = secretLocations(backend);
-        // Compare-and-swap: read and write run with no await between them.
+        // Authorize the proposed changes against the revision the owner saw.
         const current = backend.privacySettings();
         if (current.revision !== revision) return privacyToolResult(visiblePrivacy(current, secrets), 'conflict');
         // Lowering protection is the owner's alone: only with the panel's confirmation.
         const confirmed = confirmation !== undefined && privacyConfirmationValid(backend, confirmation);
-        if (!confirmed && lowersPrivacy(update, visiblePrivacy(backend.privacySettings(), secrets))) {
+        if (!confirmed && lowersPrivacy(update, visiblePrivacy(current, secrets))) {
           throw new ChatGptSurfaceError('privacy_owner_only');
         }
         // Rules on Secrets locations are never shown, so a save keeps them as saved.
         const rules = update.rules
           ? [
               ...update.rules.filter((rule) => !isSecretPrivacyRule(secrets, rule)),
-              ...backend.privacySettings().rules.filter((rule) => isSecretPrivacyRule(secrets, rule)),
+              ...current.rules.filter((rule) => isSecretPrivacyRule(secrets, rule)),
             ]
           : undefined;
         const saved = backend.savePrivacy({
           ...(update.description !== undefined ? { description: update.description } : {}),
           ...(rules ? { rules: rules as PrivacyRuleView[] } : {}),
-        });
+        }, revision);
         if (confirmed) spendPrivacyConfirmation(backend, confirmation);
         return privacyToolResult(visiblePrivacy(saved, secrets), 'saved', saved.privateAnswerChoice ? issuePrivacyConfirmation(backend) : undefined);
       }
@@ -601,6 +607,7 @@ export async function callSetupTool(
         throw new ChatGptSurfaceError('unknown_tool');
     }
   } catch (error) {
+    if (error instanceof PrivacySettingsConflict) return privacyToolResult(visiblePrivacy(error.current, secretLocations(backend)), 'conflict');
     throw surfaceError(error);
   }
 }

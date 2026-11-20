@@ -29,9 +29,11 @@ import {
   ACCOUNT,
   CORPORA,
   FIXTURE_PLACEMENT,
+  JUDGED_PERSONAL_SNIFFER,
   PROVIDER,
   fixtureConnector,
   fixtureItem,
+  fixtureLocalId,
   identityOf,
   localId,
   openLegStore,
@@ -255,6 +257,28 @@ describe('a lane where only pictures arrive later', () => {
     expect(ledger.copies(identityOf(id))).toContainEqual(expect.objectContaining({
       trustDomain: 'secure_local', embedHold: true,
     }));
+  });
+
+  test('legacy attachment extraction honors the stored conversation rule', async () => {
+    const { set, stores } = openSet();
+    const spec = { id: 'chat-attachment', name: 'notes.pdf', conversation: 'private-chat' };
+    MIME[spec.id] = 'application/pdf';
+    await stores.internal!.syncFromConnector(lane([spec]), { fetchContent: false, placement: FIXTURE_PLACEMENT });
+    const sink = createTieredStoreExtractionSink({
+      set, home: 'internal', syncConnectorId: 'extraction', ownerConnectorId: 'fixture-connector', ownershipKind: 'observed',
+      tierClassification: {
+        sniffer: JUDGED_PERSONAL_SNIFFER,
+        rules: [{ id: 'private-chat', match: { kind: 'chat', value: spec.conversation }, tier: 'secure', strength: 'force' }],
+      },
+    });
+    const text = 'A schedule for watering the balcony plants.';
+    const extraction = request(CORPORA.internal, spec.id, text);
+    extraction.ref.localItemId = fixtureLocalId(spec);
+    const identity = fixtureItem(spec).identity;
+
+    expect((await sink.accept(extraction)).accepted).toBe(true);
+    expect(stores.secure_local!.exportItemCopy(identity)?.chunks.map(chunk => chunk.boundedText).join('')).toBe(text);
+    expect(stores.internal!.exportItemCopy(identity)?.chunks ?? []).toEqual([]);
   });
 
   test('legacy extraction preserves a newer revision in the destination store', async () => {

@@ -141,7 +141,7 @@ export interface OwnerTierRule {
  *   through normal classification. It never jumps straight to a tier.
  */
 export type ItemTierOverride =
-  | { kind: 'tier'; tier: TierKey; confirmedDigest?: string }
+  | { kind: 'tier'; tier: TierKey; setDigest?: string | null; confirmedDigest?: string }
   | { kind: 'not_secret' };
 
 // --- Sniffer seam -------------------------------------------------------------
@@ -322,22 +322,27 @@ export function contentDigestReason(text: string): string {
 export const OWNER_OVERRIDE_SECRET_REVIEW_REASON = 'content:owner_override_secret_review';
 export const OWNER_OVERRIDE_SECRET_CONFIRMED_REASON = 'content:owner_override_secret_confirmed';
 
-export function ownerConfirmedSecretFinding(override: ItemTierOverride | undefined, text: string): boolean {
+export function ownerOverrideMatchesDigest(override: ItemTierOverride | undefined, digest: string): boolean {
   return override?.kind === 'tier' && (override.tier === 'private' || override.tier === 'public')
-    && override.confirmedDigest !== undefined && override.confirmedDigest === contentDigestReason(text);
+    && (override.setDigest === digest || override.confirmedDigest === digest);
 }
 
-/** A Personal override covers clean text and findings the owner confirmed for this body. */
+/** A Personal override covers clean text and text the owner set or confirmed. */
 export function personalOverrideAllowsText(override: ItemTierOverride | undefined, text: string): boolean {
   return override?.kind === 'tier' && (override.tier === 'private' || override.tier === 'public')
-    && (ownerConfirmedSecretFinding(override, text) || contentSecretReasons(text).length === 0);
+    && (ownerOverrideMatchesDigest(override, contentDigestReason(text)) || contentSecretReasons(text).length === 0);
+}
+
+export function contentSecretFindingKinds(reasons: readonly string[]): string[] {
+  const prefix = 'content:secret:';
+  return reasons.filter(reason => reason.startsWith(prefix)).map(reason => reason.slice(prefix.length));
 }
 
 /** The owner question carries the body receipt and finding kinds. */
 export function ownerOverrideSecretReview(reasons: readonly string[]): { kinds: string[]; digest: string } | undefined {
   if (!reasons.includes(OWNER_OVERRIDE_SECRET_REVIEW_REASON)) return undefined;
   const digest = reasons.find(reason => reason.startsWith('content:sha256:'));
-  const kinds = reasons.filter(reason => reason.startsWith('content:secret:')).map(reason => reason.slice('content:secret:'.length));
+  const kinds = contentSecretFindingKinds(reasons);
   return digest && kinds.length > 0 ? { digest, kinds } : undefined;
 }
 
@@ -377,7 +382,7 @@ export function personalContentAuthorized(
   const trivial = reasons.includes('content:text_only') ? trivialContentRule(text) : undefined;
   const trivialSettled = trivial !== undefined && reasons.includes(`content:rule:${trivial}`);
   if (!ownerDecided && !trivialSettled && !hasContentJudgeVerdict(reasons, 'private', digest)) return false;
-  return (ownerDecided && reasons.includes(OWNER_OVERRIDE_SECRET_CONFIRMED_REASON) && ownerConfirmedSecretFinding(override, text))
+  return (ownerDecided && reasons.includes(OWNER_OVERRIDE_SECRET_CONFIRMED_REASON) && ownerOverrideMatchesDigest(override, digest))
     || (notSecret && reasons.includes('override:item:not_secret')) || contentSecretReasons(text).length === 0;
 }
 
@@ -768,7 +773,7 @@ function classifyItemTiersWithPublic(
     const personal = tier === 'private' || tier === 'public';
     const findings = text !== undefined && personal ? contentSecretReasons(text) : [];
     const stillUnread = personal && input.heldSecret === true && !text?.trim();
-    const confirmed = text !== undefined && ownerConfirmedSecretFinding(options.override, text);
+    const confirmed = text !== undefined && ownerOverrideMatchesDigest(options.override, contentDigestReason(text));
     const review = findings.length > 0 && !confirmed;
     const staysSecret = review && input.heldSecret === true;
     return {
@@ -921,7 +926,7 @@ export function classifyContentTier(
     const tier = options.retirePublic && options.override.tier === 'public' ? 'private' : options.override.tier;
     const lower = tier === 'private' || tier === 'public';
     const findings = lower ? contentSecretReasons(input.text) : [];
-    const confirmed = ownerConfirmedSecretFinding(options.override, input.text);
+    const confirmed = ownerOverrideMatchesDigest(options.override, contentDigestReason(input.text));
     const review = findings.length > 0 && !confirmed;
     if (review && input.heldSecret) return { ...base, contentTier: 'secrets', decidedBy: 'secret_detector', reasons: findings, contentPending: false };
     return {
@@ -1397,8 +1402,7 @@ function contentSecretReasons(text: string): string[] {
 
 function ownerOverrideReasons(tier: TierKey, holdUntilJudged: boolean, findings: string[], confirmed: boolean): string[] {
   return [`override:item:${tier}`, ...heldMark(holdUntilJudged, tier),
-    ...(confirmed ? [OWNER_OVERRIDE_SECRET_CONFIRMED_REASON]
-      : findings.length > 0 ? [OWNER_OVERRIDE_SECRET_REVIEW_REASON, ...findings] : [])];
+    ...(findings.length > 0 ? [confirmed ? OWNER_OVERRIDE_SECRET_CONFIRMED_REASON : OWNER_OVERRIDE_SECRET_REVIEW_REASON, ...findings] : [])];
 }
 
 /** The lane-hold reason for a decision at `tier`: none for Secrets, which outrank it. */

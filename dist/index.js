@@ -9178,7 +9178,7 @@ var init_answer_latency_trace = __esm(() => {
 function normalizeRouterResultKey(key) {
   return key.toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
-var ROUTER_DELIVERS_SEARCH, SEARCH_GRANT_MATCH, SEARCH_GRANT_DELIVERY, FORBIDDEN_ROUTER_RESULT_KEYS, NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS;
+var DEFER_SEARCH_DELIVERY, SEARCH_GRANT_MATCH, SEARCH_GRANT_DELIVERY, FORBIDDEN_ROUTER_RESULT_KEYS, NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS;
 var init_router = __esm(() => {
   init_read_progress();
   init_source_answer_jobs();
@@ -9187,7 +9187,7 @@ var init_router = __esm(() => {
   init_keyword_context();
   init_types();
   init_answer_latency_trace();
-  ROUTER_DELIVERS_SEARCH = Symbol("router delivers search");
+  DEFER_SEARCH_DELIVERY = Symbol("defer search delivery");
   SEARCH_GRANT_MATCH = Symbol("search grant match");
   SEARCH_GRANT_DELIVERY = Symbol("search grant delivery");
   FORBIDDEN_ROUTER_RESULT_KEYS = new Set([
@@ -12301,8 +12301,9 @@ var init_remote_oauth_store = __esm(() => {
 });
 
 // src/core/waiting-private-questions.ts
-var WAITING_QUESTION_LIMITS;
+var WAITING_QUESTION_LIMITS, REVOKE_BUSY_TIMEOUT_MS = 1000, REVOCATION_WRITE_LIMIT;
 var init_waiting_private_questions = __esm(() => {
+  init_limit_stops();
   init_app_release_capture();
   init_sqlite_migrations();
   init_sqlite_store();
@@ -12315,6 +12316,16 @@ var init_waiting_private_questions = __esm(() => {
     ttlMs: 7 * 24 * 60 * 60000,
     reanswerAfterMs: 10 * 60000
   });
+  REVOCATION_WRITE_LIMIT = Object.freeze({
+    id: "privacy.revocation_write",
+    kind: "time",
+    scope: "source",
+    label: "Wait for a privacy revocation to acquire the write lock",
+    unit: "ms",
+    continue: "none",
+    milliseconds: REVOKE_BUSY_TIMEOUT_MS
+  });
+  registerLimit(REVOCATION_WRITE_LIMIT);
 });
 
 // src/core/remote-connections.ts
@@ -12548,10 +12559,19 @@ var init_tier_rules = __esm(() => {
   init_tier_classifier();
 });
 
+// src/workers/classification/privacy-profile.ts
+var init_privacy_profile = __esm(() => {
+  init_atomic_file();
+  init_operation_error();
+  init_owner_config_read();
+  init_tier_rules();
+});
+
 // src/workers/connector-store/tier-move-rule-policy.ts
 var heldPolicyFences;
 var init_tier_move_rule_policy = __esm(() => {
   init_owner_config_read();
+  init_privacy_profile();
   init_tier_classifier();
   init_tier_ledger();
   init_tier_rules();
@@ -12678,6 +12698,7 @@ var init_local_index = __esm(() => {
   init_media_judge();
   init_router();
   init_types();
+  init_waiting_private_questions();
   init_sqlite_store();
   CONCEPT_COUNT_MAX_AGE_MS = 5 * 60000;
   CONNECTOR_STORE_CONVERSATION_INDEX_SQL = `CREATE INDEX IF NOT EXISTS ${CONNECTOR_STORE_CONVERSATION_INDEX}
@@ -14722,12 +14743,16 @@ var init_bounded_text = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/command-runner.ts
+import { AsyncLocalStorage as AsyncLocalStorage12 } from "node:async_hooks";
 import { Buffer as Buffer2 } from "node:buffer";
 import { execFile as execFile2, spawn as spawn2 } from "node:child_process";
 import { readFile as readFile2, readdir } from "node:fs/promises";
 import { promisify } from "node:util";
 import { accessSync as accessSync7, constants as fsConstants5, statSync as statSync15 } from "node:fs";
 import { delimiter as delimiter5, join as join32 } from "node:path";
+function currentExtractionAbortSignal() {
+  return activeExtraction.getStore();
+}
 function errnoCode(error) {
   const code = error?.code;
   return typeof code === "string" && code.length > 0 ? code : "UNKNOWN";
@@ -14863,6 +14888,8 @@ function commandGroupRecorder() {
   return groupRecorder.recorder;
 }
 async function runExtractionCommand(request, internals = {}) {
+  const signal = currentExtractionAbortSignal();
+  signal?.throwIfAborted();
   const kill = internals.kill ?? process.kill;
   const command = resolveExtractionCommand(request.command);
   for (const argument of request.args)
@@ -14923,7 +14950,7 @@ async function runExtractionCommand(request, internals = {}) {
       if (Date.now() - lastProgress < request.timeoutMs)
         return;
       settled = true;
-      clearInterval(timer);
+      cleanup();
       const outcome = killExtractionProcessGroup(child, "SIGKILL", kill);
       reject(new ExtractionCommandTimeoutError({
         command: request.command,
@@ -14931,14 +14958,27 @@ async function runExtractionCommand(request, internals = {}) {
         ...outcome.ok ? {} : { terminationFailed: outcome.code }
       }));
     }, stallCheckIntervalMs(request.timeoutMs)) : undefined;
+    const cleanup = () => {
+      if (timer)
+        clearInterval(timer);
+      signal?.removeEventListener("abort", abort);
+    };
+    const abort = () => {
+      if (settled)
+        return;
+      settled = true;
+      cleanup();
+      killExtractionProcessGroup(child, "SIGKILL", kill);
+      reject(signal?.reason);
+    };
+    signal?.addEventListener("abort", abort, { once: true });
     child.stdout.on("data", collect(stdout));
     child.stderr.on("data", collect(stderr));
     child.on("error", (error) => {
       if (settled)
         return;
       settled = true;
-      if (timer)
-        clearInterval(timer);
+      cleanup();
       killExtractionProcessGroup(child, "SIGKILL", kill);
       reject(error);
     });
@@ -14947,8 +14987,7 @@ async function runExtractionCommand(request, internals = {}) {
       if (settled)
         return;
       settled = true;
-      if (timer)
-        clearInterval(timer);
+      cleanup();
       const result = {
         stdout: Buffer2.concat(stdout).toString("utf8"),
         stderr: Buffer2.concat(stderr).toString("utf8")
@@ -14966,11 +15005,12 @@ async function runExtractionCommand(request, internals = {}) {
     });
   });
 }
-var ExtractionCommandError, ExtractionCommandTimeoutError, execFileAsync, EXTRACTION_COMMAND_FALLBACK_DIRS, resolvedCommands, groupRecorder;
+var activeExtraction, ExtractionCommandError, ExtractionCommandTimeoutError, execFileAsync, EXTRACTION_COMMAND_FALLBACK_DIRS, resolvedCommands, groupRecorder;
 var init_command_runner = __esm(() => {
   init_memory_counters();
   init_descendant_groups();
   init_native_process_service();
+  activeExtraction = new AsyncLocalStorage12;
   ExtractionCommandError = class ExtractionCommandError extends Error {
     command;
     exitCode;
@@ -15749,6 +15789,7 @@ var init_remote_vlm = __esm(() => {
 var init_model_stream2 = __esm(() => {
   init_memory_counters();
   init_http_timeout();
+  init_command_runner();
 });
 
 // src/workers/source-index/built-in-reasoning/install.ts
@@ -15956,6 +15997,7 @@ var init_tiered_store_sink = __esm(() => {
   init_tier_classifier();
   init_tier_ledger();
   init_parent_context();
+  init_stored_names();
   init_tier_placement();
   init_media_judge();
   init_secrets_disposition();
@@ -22145,14 +22187,6 @@ var init_source_forget_registry = __esm(() => {
   init_olympus_layout();
   init_live_control2();
   init_tier_migration_reports();
-});
-
-// src/workers/classification/privacy-profile.ts
-var init_privacy_profile = __esm(() => {
-  init_atomic_file();
-  init_operation_error();
-  init_owner_config_read();
-  init_tier_rules();
 });
 
 // src/core/source-disposition-tree.ts

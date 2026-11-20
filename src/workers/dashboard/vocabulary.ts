@@ -4038,6 +4038,7 @@ export const DASHBOARD_PRIVACY_ITEMS_COPY = {
   reviewFilter: 'Needs your review',
   reviewEmpty: 'No Personal overrides need your review.',
   reviewReason: 'You marked this item Personal. Its text changed and may contain a secret ({kinds}). Olympus is holding this version Private.',
+  overrideFinding: 'Olympus found a possible secret ({kinds}) in text you marked Personal.',
   confirmReview: 'Confirm Personal for this text',
   liftOverride: 'Lift Personal override',
   notSorted: 'Not sorted yet',

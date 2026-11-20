@@ -28,8 +28,10 @@
 import {
   classifyItemTiers,
   contentNamesReason,
+  contentSecretFindingKinds,
   heldUntilJudged,
   maxTier,
+  ownerOverrideMatchesDigest,
   ownerOverrideSecretReview,
   contentDigestReason,
   OWNER_OVERRIDE_SECRET_CONFIRMED_REASON,
@@ -347,14 +349,21 @@ function applyOne(
   const ledger = set.ledger;
   const identity = identityOf(record);
   const lowerOverride = tier === 'private' || tier === 'public';
-  const override = guard.override;
   const review = ownerOverrideSecretReview(record.reasons);
-  if (lowerOverride && review && (override?.kind !== 'tier' || override.confirmedDigest !== review.digest)) return;
   const source = copyServingLayer(ledger.copies(identity).filter(copy => copy.state === 'current'), 'content');
   const stored = lowerOverride && source ? set.store(source.trustDomain)?.exportItemCopy(identity) : undefined;
   const text = stored?.chunks.length ? stored.chunks.map(chunk => chunk.boundedText).join('') : undefined;
+  let override = guard.override;
+  if (lowerOverride && text !== undefined && override?.kind === 'tier' && override.setDigest === undefined) {
+    if (ledger.writeIntent(identity) || JSON.stringify(ledger.getOverride(identity)) !== JSON.stringify(override)) return;
+    const observed = ledger.observeOverrideText(identity, text);
+    if (observed?.kind !== 'tier' || observed.tier !== override.tier) return;
+    override = observed;
+    guard = { ...guard, override };
+  }
   // Only let a review settle from the exact body that opened it.
-  if (lowerOverride && review && (text === undefined || review.digest !== contentDigestReason(text) || ledger.writeIntent(identity))) return;
+  if (lowerOverride && review && (!ownerOverrideMatchesDigest(override, review.digest)
+    || text === undefined || review.digest !== contentDigestReason(text) || ledger.writeIntent(identity))) return;
   if (lowerOverride && record.contentTier === 'secrets' && !text?.trim()) return;
   const holdUntilJudged = set.holdsContentUntilJudged() || heldUntilJudged(record.reasons);
   const decision: TierDecision = classifyItemTiers(
@@ -376,7 +385,10 @@ function applyOne(
   }
   const atTiers = record.metadataTier === decision.metadataTier && record.contentTier === decision.contentTier;
   if (atTiers && record.state !== 'moving') {
-    if (!secrets && record.decidedBy === 'override' && !record.contentPending) return;
+    const findings = contentSecretFindingKinds(decision.reasons);
+    if (!secrets && record.decidedBy === 'override' && !record.contentPending && !review
+      && (text === undefined || (record.reasons.includes(contentDigestReason(text))
+        && JSON.stringify(contentSecretFindingKinds(record.reasons)) === JSON.stringify(findings)))) return;
     if (secrets && !secretsCopiesLeft(set, identity)) return;
   }
   if (secrets) {

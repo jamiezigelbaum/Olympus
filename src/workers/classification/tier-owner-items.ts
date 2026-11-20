@@ -28,7 +28,10 @@ import {
   type LocatedItem,
   type TierCliContext,
 } from './tier-cli.ts';
-import { CONTENT_NAMES_ONLY_REASON, OWNER_OVERRIDE_SECRET_REVIEW_REASON, tierRank, type TierKey } from './tier-classifier.ts';
+import {
+  CONTENT_NAMES_ONLY_REASON, OWNER_OVERRIDE_SECRET_CONFIRMED_REASON, OWNER_OVERRIDE_SECRET_REVIEW_REASON,
+  contentSecretFindingKinds, tierRank, type TierKey,
+} from './tier-classifier.ts';
 import { isFailSafeMissingContentQuestion, itemNamesHeldForJudgment, tierLedgerIdentityKey, type TierLedgerIdentity, type TierLedgerRecord } from './tier-ledger.ts';
 import type { ItemExtractionOutcome } from '../file-extraction/job-store.ts';
 import { unreadHoldDisposition, type UnreadableFileReason } from '../file-extraction/unreadable-files.ts';
@@ -89,6 +92,8 @@ export interface OwnerTierItem {
   preview?: string | null;
   /** A changed body awaiting the owner's decision, with its finding kinds and receipt. */
   override_review?: { kinds: string[]; digest: string };
+  /** Finding kinds for text covered by the owner's Personal override. */
+  override_finding_kinds?: string[];
 }
 
 export interface OwnerTierItemFindInput {
@@ -209,6 +214,7 @@ interface ItemState {
   /** The owner's tier override, when one is set. */
   ownerTier?: TierKey;
   overrideReview?: OwnerTierItem['override_review'];
+  overrideFindingKinds?: string[];
   reviewHeld?: true;
   secret: boolean;
 }
@@ -254,7 +260,8 @@ export function findOwnerTierItems(input: OwnerTierItemFindInput, context: Owner
     const item = view(row, state, context);
     if (!input.personalNamesOnly) {
       if (state.overrideReview) item.override_review = state.overrideReview;
-      if (input.withPreview && !state.reviewHeld) item.preview = previewOf(identity, context);
+      if (state.overrideFindingKinds?.length) item.override_finding_kinds = state.overrideFindingKinds;
+      if (input.withPreview && !state.reviewHeld && !state.overrideFindingKinds?.length) item.preview = previewOf(identity, context);
     }
     items.push(item);
   }
@@ -417,6 +424,12 @@ function readLocatedState(items: readonly LocatedItem[], context: TierCliContext
       }
       state.overrideReview ??= ledger.ownerOverrideReview(item.identity, record, override);
       if (record?.reasons.includes(OWNER_OVERRIDE_SECRET_REVIEW_REASON)) state.reviewHeld = true;
+      if (record?.state === 'current' && override?.kind === 'tier'
+        && (record.contentTier === 'private' || record.contentTier === 'public')
+        && (override.tier === 'private' || override.tier === 'public')
+        && record.reasons.includes(OWNER_OVERRIDE_SECRET_CONFIRMED_REASON)) {
+        state.overrideFindingKinds ??= contentSecretFindingKinds(record.reasons);
+      }
       if (ledger.itemIsSecret(item.identity)) state.secret = true;
     }, item.boundLedgerId, 'read-only-on-front');
   }
@@ -450,7 +463,7 @@ function judgeReason(record: TierLedgerRecord | undefined): string | null {
 function view(row: StoredItemRow, state: ItemState, context: OwnerTierItemsContext): OwnerTierItem {
   const { record } = state;
   const identity = identityOfRow(row);
-  const screenName = (value: string | null) => state.reviewHeld ? screenedSecretLocator(value) : value;
+  const screenName = (value: string | null) => state.reviewHeld || state.overrideFindingKinds?.length ? screenedSecretLocator(value) : value;
   const hold = record?.state === 'current' && record.contentTier === 'secure' && !record.contentRead
     && record.reasons.some(isFailSafeMissingContentQuestion)
     ? unreadHoldDisposition(context.extractionOutcome?.(row.family ?? undefined, identity, row.local_item_id ?? undefined), context.contentAllowed?.(identity, row.local_item_id, row.locator_uri))
@@ -502,7 +515,8 @@ export function getOwnerTierItem(itemId: string, context: OwnerTierItemsContext 
   if (state.secret) return undefined;
   const item = view(storedRowFor(identity, located, context), state, context);
   if (state.overrideReview) item.override_review = state.overrideReview;
-  if (options.withPreview && !state.reviewHeld) item.preview = previewOf(identity, context);
+  if (state.overrideFindingKinds?.length) item.override_finding_kinds = state.overrideFindingKinds;
+  if (options.withPreview && !state.reviewHeld && !state.overrideFindingKinds?.length) item.preview = previewOf(identity, context);
   return item;
 }
 

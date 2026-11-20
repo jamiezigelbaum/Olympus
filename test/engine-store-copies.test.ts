@@ -13,12 +13,13 @@ import { resolvedStorePath } from '../src/core/source-placement.ts';
 import { storeFileSchemaVersion } from '../src/core/source-storage.ts';
 import { classifyItemTiers, contentDigestReason, ownerOverrideSecretReview } from '../src/workers/classification/tier-classifier.ts';
 import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts';
-import { TIER_LEDGER_SQLITE_STORE_ID, TierLedger } from '../src/workers/classification/tier-ledger.ts';
+import { TIER_LEDGER_SQLITE_STORE_ID, TierLedger, tierLedgerIdentityKey } from '../src/workers/classification/tier-ledger.ts';
 import { TIER_SNIFFER_SQLITE_STORE_ID, tierSnifferPathForLedger } from '../src/workers/classification/tier-ledger-path.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/local-index.ts';
-import { tieredStoreSetLedgerPath } from '../src/workers/connector-store/tiered-store-set.ts';
+import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
+import { TieredStoreSet, tieredStoreSetLedgerPath } from '../src/workers/connector-store/tiered-store-set.ts';
 import { GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID, GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID } from '../src/workers/google-connectors/drive.ts';
-import { JUDGED_PERSONAL_SNIFFER, fixtureConnector, fixtureItem } from './helpers/tier-fixtures.ts';
+import { FIXTURE_PLACEMENT, JUDGED_PERSONAL_SNIFFER, fixtureConnector, fixtureItem } from './helpers/tier-fixtures.ts';
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -186,6 +187,62 @@ describe('the copy of the data an engine install takes', () => {
     } finally {
       secure?.close();
       restored.close();
+      restoredLedger.close();
+    }
+  });
+
+  test('put-back retires a pre-batch receipt for an unjudged body staged in Personal', async () => {
+    const { env } = setup();
+    const personal = {
+      dbPath: resolvedStorePath('google_drive.docs', 'internal', env), corpusId: GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID,
+      family: 'file' as const, trustDomain: 'internal' as const,
+    };
+    const secure = {
+      dbPath: resolvedStorePath('google_drive.docs', 'secure_local', env), corpusId: GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID,
+      family: 'file' as const, trustDomain: 'secure_local' as const,
+    };
+    const ledgerPath = tieredStoreSetLedgerPath(secure.dbPath);
+    const row = { id: 'staged', name: 'Picnic list', text: 'Bring the picnic basket to the stagedorchardmarker.' };
+    const { identity } = fixtureItem(row);
+    const receiptKey = `tier-move-verified:${tierLedgerIdentityKey(identity)}`;
+    const ledger = new TierLedger({ dbPath: ledgerPath });
+    const lowerStore = new LocalConnectorStore({ ...personal, tierLedger: ledger });
+    const higherStore = new LocalConnectorStore({ ...secure, tierLedger: ledger });
+    try {
+      const set = new TieredStoreSet({ setId: 'google_drive.docs', ledger, registerWithLedger: false, skipOpeningMaintenance: true,
+        legs: [{ ...personal, store: lowerStore }, { ...secure, store: higherStore }],
+      });
+      await set.sync(fixtureConnector(() => [row]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+      await moveTieredItem({ set, identity, target: { metadataTier: 'secure', contentTier: 'secure' } });
+      const target = classifyItemTiers({ signals: { title: row.name }, text: row.text }, { sniffer: JUDGED_PERSONAL_SNIFFER });
+      ledger.recordRoutedPlacement(identity, target, set.placementFor(target));
+      await expect(moveTieredItem({ set, identity, target, afterVerified() { throw new Error('checkpoint'); } })).rejects.toThrow('checkpoint');
+      const { ruleRevision: _rules, sourceFingerprints: _source, ...legacy } = JSON.parse(ledger.readMeta(receiptKey)!);
+      ledger.writeMeta(receiptKey, JSON.stringify(legacy));
+      ledger.writeMeta(`tier-move-imports:${tierLedgerIdentityKey(identity)}`, '');
+      expect(ledger.copies(identity)).toContainEqual(expect.objectContaining({ trustDomain: 'internal', state: 'staged' }));
+      expect(lowerStore.exportItemCopy(identity)?.chunks.map(chunk => chunk.boundedText).join('')).toBe(row.text);
+      using snapshotLedger = new Database(ledgerPath);
+      snapshotLedger.query('UPDATE tier_items SET reasons_json = ? WHERE provider_item_id = ?')
+        .run(JSON.stringify([contentDigestReason(row.text)]), row.id);
+    } finally {
+      higherStore.close();
+      lowerStore.close();
+      ledger.close();
+    }
+    copyEngineStores(env, { log: () => {}, deps: { clones: () => false } });
+    restoreEngineStores(env, { log: () => {} });
+    const restoredLedger = new TierLedger({ dbPath: ledgerPath });
+    const restoredLower = new LocalConnectorStore({ ...personal, tierLedger: restoredLedger });
+    const restoredHigher = new LocalConnectorStore({ ...secure, tierLedger: restoredLedger });
+    try {
+      expect(restoredLedger.readMeta(receiptKey)).toBeFalsy();
+      expect(restoredLedger.getCurrent(identity)).toMatchObject({ contentTier: 'secure', targetContentTier: null });
+      expect(restoredLower.exportItemCopy(identity)).toBeUndefined();
+      expect(restoredHigher.exportItemCopy(identity)?.chunks.map(chunk => chunk.boundedText).join('')).toBe(row.text);
+    } finally {
+      restoredHigher.close();
+      restoredLower.close();
       restoredLedger.close();
     }
   });

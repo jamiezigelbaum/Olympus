@@ -400,6 +400,7 @@ function stageTieredMove(options: TierMoveOptions, repairSource?: TierCopy, lowe
     metadataPending: record.metadataPending,
     contentPending: record.contentPending,
     contentRead: record.contentRead,
+    reasons: record.reasons,
     ...(ownerOverride ? { decidedBy: 'override' as const } : {}),
   });
   const moveGeneration = record.generation + 1;
@@ -649,6 +650,34 @@ export function resumeVerifiedTierMove(set: TieredStoreSet, identity: TierLedger
   }
 }
 
+/** Retire uncommitted lowerings while restore has exclusive access to the stores. */
+export function retireRestoredTierLowerings(set: TieredStoreSet): void {
+  const { ledger } = set;
+  for (const { key, value } of ledger.metaEntries(TIER_MOVE_VERIFIED_PREFIX)) {
+    const receipt = JSON.parse(value) as VerifiedMove;
+    if (receipt.result) continue;
+    const [provider, accountScope, conversation, providerItemId] = key.slice(TIER_MOVE_VERIFIED_PREFIX.length).split('\0');
+    if (!provider || !accountScope || !providerItemId) throw new Error('Invalid verified tier move identity.');
+    const identity = { provider, accountScope, providerItemId, ...(conversation ? { providerConversationId: conversation } : {}) };
+    const current = ledger.getCurrent(identity);
+    if (!current || current.state !== 'moving' || receipt.generation !== current.generation) continue;
+    const imports = plannedLowerImports(receipt.generation, receipt.target, receipt.sources, receipt.placement);
+    if (imports.copies.length === 0 && !tiersLower(current, receipt.target)
+        && loweredCopyLayers(receipt.sources, receipt.placement).length === 0) continue;
+
+    withTierRuleFence(set, () => ledger.withGenerationFence(identity, current.generation, () => {
+      if (placementIsRaise(receipt.sources, receipt.placement)) {
+        retainAuthorizedRaise(set, identity, current, receipt.target, receipt.sources, receipt.placement, receipt);
+      } else {
+        ledger.abandonMove(identity, { expectedGeneration: current.generation });
+      }
+      discardTierMoveImports(ledger, identity, imports);
+      settleDiscardedTierMoveImports(set, identity);
+      ledger.writeMeta(key, '');
+    }));
+  }
+}
+
 interface VerifiedMove {
   generation: number;
   target: { metadataTier: TierKey; contentTier: TierKey };
@@ -855,8 +884,10 @@ export async function flushTierMoveNotes(ledger: TierLedger, options: {
   } finally { if (options.timings) options.timings.notesMs += performance.now() - started; }
 }
 
+const TIER_MOVE_VERIFIED_PREFIX = 'tier-move-verified:';
+
 function purgeReceiptKey(identity: TierLedgerIdentity): string {
-  return `tier-move-verified:${tierLedgerIdentityKey(identity)}`;
+  return `${TIER_MOVE_VERIFIED_PREFIX}${tierLedgerIdentityKey(identity)}`;
 }
 
 export const TIER_MOVE_IMPORTS_PREFIX = 'tier-move-imports:';

@@ -22,6 +22,7 @@ interface Item {
   item_id: string; source: string; family: string; title: string | null; sender: string | null; location: string | null;
   tier: string | null; names_tier: string | null; decided_by: string | null; owner_set: boolean; judge_reason: string | null;
   override_review?: { kinds: string[]; digest: string };
+  override_finding_kinds?: string[];
   decided_at: string | null; preview?: string | null; owner_choice?: string; waiting_for_judge?: true; names_only?: true; not_read?: { kind: 'by_choice' } | { kind: 'cannot_read'; reason: string };
 }
 
@@ -367,6 +368,16 @@ describe('finding an item', () => {
 });
 
 describe('reviewing a changed Personal override', () => {
+  test('an unchanged Personal item shows the finding with the ordinary item controls', async () => {
+    const item = { ...invoice(), tier: 'Personal', owner_set: true, override_finding_kinds: ['api_key'] };
+    const p = await page([item]);
+    await p.click('[data-pi-item="oti_inv"]');
+    expect(p.text('[data-pi-detail]')).toContain('Olympus found a possible secret (api key) in text you marked Personal.');
+    expect(p.text('[data-pi-detail]')).not.toContain(C.confirmReview);
+    expect(p.text('[data-pi-detail]')).not.toContain(C.liftOverride);
+    expect(p.text('[data-pi-item] .pipill')).toBe('Personal');
+  });
+
   for (const choice of ['personal', 'judge'] as const) {
     test(`the review opens the held item and binds ${choice} to the displayed text`, async () => {
       const item = { ...invoice(), owner_set: true, owner_choice: 'Personal', override_review: { kinds: ['api_key'], digest: 'a'.repeat(64) } };

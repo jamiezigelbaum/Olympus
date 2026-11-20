@@ -30,6 +30,7 @@
  */
 
 import { addMemoryPayloadText, memoryPayloadByteCounter } from '../../../core/memory-counters.ts';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { Buffer } from 'node:buffer';
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { readFile, readdir } from 'node:fs/promises';
@@ -38,6 +39,17 @@ import { accessSync, constants as fsConstants, statSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
 import { descendantGroupsRecorder, descendantGroupsSupported } from '../../../core/descendant-groups.ts';
 import { DESCENDANT_GROUPS_ENV } from '../../../core/native-process-service.ts';
+
+// Built-in readers use one extraction signal for commands and model requests.
+const activeExtraction = new AsyncLocalStorage<AbortSignal>();
+
+export function runWithExtractionAbortSignal<T>(signal: AbortSignal, run: () => T): T {
+  return activeExtraction.run(signal, run);
+}
+
+export function currentExtractionAbortSignal(): AbortSignal | undefined {
+  return activeExtraction.getStore();
+}
 
 export interface ExtractionCommandRunRequest {
   command: string;
@@ -331,6 +343,8 @@ export async function runExtractionCommand(
   request: ExtractionCommandRunRequest,
   internals: ExtractionCommandRunInternals = {},
 ): Promise<ExtractionCommandRunResult> {
+  const signal = currentExtractionAbortSignal();
+  signal?.throwIfAborted();
   const kill = internals.kill ?? process.kill;
   const command = resolveExtractionCommand(request.command);
   for (const argument of request.args) addMemoryPayloadText(argument);
@@ -377,7 +391,7 @@ export async function runExtractionCommand(
           if (cpu !== undefined) lastCpu = cpu;
           if (Date.now() - lastProgress < request.timeoutMs) return;
           settled = true;
-          clearInterval(timer);
+          cleanup();
           const outcome = killExtractionProcessGroup(child, 'SIGKILL', kill);
           reject(new ExtractionCommandTimeoutError({
             command: request.command,
@@ -386,12 +400,24 @@ export async function runExtractionCommand(
           }));
         }, stallCheckIntervalMs(request.timeoutMs))
       : undefined;
+    const cleanup = () => {
+      if (timer) clearInterval(timer);
+      signal?.removeEventListener('abort', abort);
+    };
+    const abort = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      killExtractionProcessGroup(child, 'SIGKILL', kill);
+      reject(signal?.reason);
+    };
+    signal?.addEventListener('abort', abort, { once: true });
     child.stdout.on('data', collect(stdout));
     child.stderr.on('data', collect(stderr));
     child.on('error', (error) => {
       if (settled) return;
       settled = true;
-      if (timer) clearInterval(timer);
+      cleanup();
       killExtractionProcessGroup(child, 'SIGKILL', kill);
       reject(error);
     });
@@ -399,7 +425,7 @@ export async function runExtractionCommand(
       notePipeBytes?.(-pipeBytes);
       if (settled) return;
       settled = true;
-      if (timer) clearInterval(timer);
+      cleanup();
       const result = {
         stdout: Buffer.concat(stdout).toString('utf8'),
         stderr: Buffer.concat(stderr).toString('utf8'),

@@ -463,6 +463,14 @@ export function createFileExtractionRuntime(
       } } : {}) } : {}),
       corpusId: config.corpusId,
       trustDomain: store.trustDomain,
+      holdOnDemandRead(ref, controller) {
+        const held = (itemStores.get(config.corpusId)?.() ?? []).flatMap(holder => {
+          const grant = holder.observeOnDemandRead(ref.localItemId, ref.sourceVersion ?? '', controller);
+          return grant ? [grant] : [];
+        });
+        if (held.length === 0) return undefined;
+        return { check: () => held.every(grant => grant.check()), release: () => held.forEach(grant => grant.release()) };
+      },
       ...(spoolDir ? { spoolDir } : {}),
       ...(spoolDir && placement.anchor !== undefined ? { spoolAnchor: placement.anchor } : {}),
       source: async () => {

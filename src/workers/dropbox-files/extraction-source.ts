@@ -232,9 +232,11 @@ export class DropboxExtractionSource implements FileExtractionSource {
    * costs no API call and no egress.
    */
   async fetch(ref: ExtractionItemRef, options: ExtractionFetchOptions): Promise<FetchedBytes> {
-    const local = await this.readFromLocalMount(ref, options.maxBytes);
+    options.signal?.throwIfAborted();
+    const local = await this.readFromLocalMount(ref, options);
+    options.signal?.throwIfAborted();
     if (local) return local;
-    return this.downloadFromProvider(ref, options.maxBytes);
+    return this.downloadFromProvider(ref, options);
   }
 
   /**
@@ -292,7 +294,7 @@ export class DropboxExtractionSource implements FileExtractionSource {
    */
   private async readFromLocalMount(
     ref: ExtractionItemRef,
-    maxBytes: number | undefined,
+    { maxBytes, signal }: ExtractionFetchOptions,
   ): Promise<FetchedBytes | undefined> {
     if (this.localRoots.length === 0) return undefined;
     // Without a provider-supplied hash the equality gate below cannot run, and
@@ -311,6 +313,7 @@ export class DropboxExtractionSource implements FileExtractionSource {
       const bytes = await readVerifiedCandidate({
         candidatePath,
         contentHash: ref.contentHash,
+        ...(signal ? { signal } : {}),
         ...(maxBytes !== undefined ? { maxBytes } : {}),
         ...(ref.sizeBytes !== undefined ? { declaredSizeBytes: ref.sizeBytes } : {}),
       });
@@ -361,7 +364,7 @@ export class DropboxExtractionSource implements FileExtractionSource {
 
   private async downloadFromProvider(
     ref: ExtractionItemRef,
-    maxBytes: number | undefined,
+    { maxBytes, signal }: ExtractionFetchOptions,
   ): Promise<FetchedBytes> {
     let response: Response;
     try {
@@ -372,6 +375,7 @@ export class DropboxExtractionSource implements FileExtractionSource {
       );
       response = await fetchWithIdleDeadline(fetchImpl, `${this.contentBaseUrl}/files/download`, {
         method: 'POST',
+        ...(signal ? { signal } : {}),
         headers: {
           Authorization: `Bearer ${this.token}`,
           'Dropbox-API-Arg': JSON.stringify(dropboxDownloadArg(ref)),
@@ -536,6 +540,7 @@ async function readVerifiedCandidate(input: {
   contentHash: string;
   maxBytes?: number;
   declaredSizeBytes?: number;
+  signal?: AbortSignal;
 }): Promise<Uint8Array | undefined> {
   let fileStat;
   try {
@@ -551,7 +556,7 @@ async function readVerifiedCandidate(input: {
     return undefined;
   }
 
-  const bytes = new Uint8Array(await readFile(input.candidatePath));
+  const bytes = new Uint8Array(await readFile(input.candidatePath, input.signal ? { signal: input.signal } : undefined));
   if (input.maxBytes !== undefined && bytes.byteLength > input.maxBytes) {
     throw new FileExtractionSourceError('source_too_large', { sizeBytes: bytes.byteLength });
   }

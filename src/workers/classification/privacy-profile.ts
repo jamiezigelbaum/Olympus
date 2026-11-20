@@ -76,6 +76,10 @@ const RULE_SOURCES: Readonly<Record<PrivacyRuleKind, Readonly<Record<string, { p
   },
 };
 
+export function providerSupportsLabelRules(provider: string): boolean {
+  return Object.values(RULE_SOURCES.label).some(source => source.provider === provider);
+}
+
 export type PrivacyRuleSourceId =
   | 'dropbox.files'
   | 'google_drive.docs'
@@ -273,6 +277,8 @@ export function privacyRuleId(rule: Pick<PrivacyRule, 'kind' | 'source_id' | 'ke
 export interface PrivacyProfileWriteOptions extends PrivacyProfilePathOptions {
   /** Where the owner tier rules live (tier-rules.ts); defaults from `env`. */
   tierRulesPath?: string;
+  /** Runs under the shared profile/rules write lease, before either file changes. */
+  checkRevision?: () => void;
   now?: () => Date;
 }
 
@@ -288,6 +294,7 @@ export function writePrivacyProfile(
 ): PrivacyProfile {
   const rulesOptions = { ...(options.tierRulesPath ? { path: options.tierRulesPath } : {}), ...(options.env ? { env: options.env } : {}) };
   return withOwnerTierRulesWriter(rulesOptions, (existing, save) => {
+    options.checkRevision?.();
     const current = readPrivacyProfile(options);
     const next: PrivacyProfile = {
       description: update.description ?? current?.description ?? '',

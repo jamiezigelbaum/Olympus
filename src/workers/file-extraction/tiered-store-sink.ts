@@ -32,6 +32,7 @@ import { CONTENT_NAMES_ONLY_LIFTED_REASON, CONTENT_NAMES_ONLY_REASON, OWNER_OVER
 import { copyServingLayer, isFailSafeMissingContentQuestion, placementIsRaise, trustDomainRank, type TierCopy, type TierLedgerRecord, type TierPlacementPlan } from '../classification/tier-ledger.ts';
 import type { ConnectorStoreOwnershipKind, LocalConnectorStore } from '../connector-store/index.ts';
 import { parentNamesContext } from '../connector-store/parent-context.ts';
+import { storedSignals } from '../connector-store/stored-names.ts';
 import { decideItemTiers, secretFencedSniffer, type ConnectorStoreTierClassification } from '../connector-store/tier-placement.ts';
 import type { ConnectorStoreRepresentationRestoreOptions } from '../connector-store/local-index.ts';
 import { imageJudgmentSignal, type MediaJudgment } from '../source-index/media-judge.ts';
@@ -106,6 +107,7 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
 
   return {
     async accept(request: ExtractionSinkRequest): Promise<ExtractionSinkResult> {
+      if (request.onDemandGrantCurrent?.() === false) return skipped(EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE);
       const ref = request.ref;
       // The ledger keys an item by its conversation too; the ref carries none,
       // so it comes from whichever store holds the row.
@@ -128,8 +130,6 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
         return sinkFor(legacy, route).accept(request);
       }
 
-      // Before anything else is read: the sniffer fence keys off this.
-      const read = ledger.classificationRead(identity);
       const record = ledger.getCurrent(identity);
       if (!record || record.state === 'moving') return skipped(EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED);
       const current = ledger.copies(identity).filter((copy) => copy.state === 'current');
@@ -150,6 +150,7 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
         return skipped(EXTRACTION_SINK_SKIPPED_SOURCE_VERSION_STALE);
       }
 
+      const read = ledger.classificationRead(identity, request.text);
       const tierClassification = classificationNow();
       const override = read.override;
       const itemTitle = stringMetadata(plan.item, ['title', 'name', 'subject']);
@@ -294,10 +295,12 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
             const replaced = await sinkFor(restingStore).accept(request);
             if (!replaced.accepted) return replaced;
           }
+          if (request.onDemandGrantCurrent?.() === false) return skipped(EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE);
           ledger.recordRoutedPlacement(identity, decision, placement);
           return skipped(EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED);
         }
         const result = await sinkFor(contentStore).accept(request);
+        if (request.onDemandGrantCurrent?.() === false) return skipped(EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE);
         if (result.accepted) ledger.recordRoutedPlacement(identity, decision, placement);
         return result;
       }
@@ -374,6 +377,7 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
       }
       const result = await sinkFor(contentStore).accept(request);
       if (!result.accepted) return result;
+      if (request.onDemandGrantCurrent?.() === false) return skipped(EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE);
       ledger.landExtractedContent(identity, decision, placement, { expectedGeneration: landingGeneration });
       return result;
     },
@@ -403,23 +407,15 @@ export function tieredRepresentationLanding(options: {
     if (prior?.routed && !representationLandingDue(prior)
       && (!options.replaceStoredContent || prior.state === 'moving')) return undefined;
     const classification = options.classification?.() ?? set.classification();
-    const override = ledger.getOverride(identity);
     const text = item.content.text;
     const source = anchor.exportItemCopy(identity);
     if (!source) return undefined;
-    const connector = options.connector ?? {
-      classificationSignals: (item: RawItem) => {
-        const title = stringMetadata(item, ['title', 'name', 'subject']);
-        const path = stringMetadata(item, ['locatorUri', 'pathDisplay']);
-        const sender = source.columns.sender_label;
-        const folderKeys = JSON.parse(String(source.columns.source_scope_folder_keys_json ?? '[]')) as string[];
-        return {
-          ...(title ? { title } : {}), ...(path ? { path } : {}),
-          ...(typeof sender === 'string' ? { sender } : {}), folderKeys,
-        };
-      },
-    };
-    let decision = decideItemTiers(connector, item, text, classification, ledger, { requireContentVerdict: true });
+    const connector = options.connector ?? { classificationSignals: () => storedSignals(source) };
+    const read = ledger.classificationRead(identity, text);
+    const override = read.override;
+    let decision = decideItemTiers(connector, item, text, classification, ledger, {
+      requireContentVerdict: true, classificationRead: read,
+    });
     if (decision.contentTier === 'secrets') {
       if (set.openStores().some((store) => {
         const copy = store.itemMetadataSnapshot(identity);

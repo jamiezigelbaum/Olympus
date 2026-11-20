@@ -62,7 +62,7 @@ import { compareProviderAccounts } from '../../core/provider-account-identity.ts
 import { createHash, randomUUID } from 'node:crypto';
 import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, statSync, statfsSync } from 'node:fs';
 import { open as openFile } from 'node:fs/promises';
-import { basename, dirname } from 'node:path';
+import { basename, dirname, resolve } from 'node:path';
 import { Database, type SQLQueryBindings } from 'bun:sqlite';
 import type {
   RawItem,
@@ -98,6 +98,7 @@ import {
 } from '../../core/still-image-formats.ts';
 import { resolveStillImageFormats, type StillImagesRead } from '../../core/source-ingestion-policy.ts';
 import {
+  additiveMigration,
   assertSqliteSchemaCanOpen,
   currentStoreMigrations,
   readSqliteSchemaVersion,
@@ -219,7 +220,7 @@ import {
 } from '../source-index/media-judge.ts';
 import {
   deliverCorpusSearch,
-  ROUTER_DELIVERS_SEARCH,
+  DEFER_SEARCH_DELIVERY,
   SEARCH_GRANT_DELIVERY,
   SEARCH_GRANT_MATCH,
   type SourceIndexCorpusSearchAdapter,
@@ -244,6 +245,7 @@ import {
   type SourceTrustDomain,
   type SourceTrustTier,
 } from '../../core/source-index/types.ts';
+import { REVOCATION_WRITE_LIMIT } from '../../core/waiting-private-questions.ts';
 import { closeSqliteStore, loopWalAutocheckpointPragma } from '../../core/sqlite-store.ts';
 import type { ConnectorStoreResultProjector } from './filter-capabilities.ts';
 
@@ -392,7 +394,7 @@ const CONTAINER_MIME_TYPES_SQL = CONTAINER_MIME_TYPES.map((type) => `'${type}'`)
 const VECTOR_BACKEND = 'exact_scan';
 const SQLITE_STORE_ID = 'connector-store';
 export { SQLITE_STORE_ID as CONNECTOR_STORE_SQLITE_STORE_ID };
-const CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 16;
+const CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 17;
 /** The `sync_runs` connector id of a strip of picture content outside Private stores. */
 export const IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = 'olympus_image_content_private_only';
 /** A picture the image encoder fails on is retried after 1 h, 2 h, ... */
@@ -573,6 +575,10 @@ export function connectorStoreMigrations() {
       name: 'connector_store_vector_digest',
       up: createVectorDigestSchema,
     },
+    additiveMigration(17, 'connector_store_on_demand_grant_epoch', [
+      'CREATE TABLE IF NOT EXISTS on_demand_grant_epoch (id INTEGER PRIMARY KEY CHECK (id = 1), epoch INTEGER NOT NULL)',
+      'CREATE TABLE IF NOT EXISTS on_demand_grant_acquisitions (local_item_id TEXT PRIMARY KEY, epoch INTEGER NOT NULL)',
+    ]),
   ];
 }
 
@@ -3930,6 +3936,16 @@ export interface ImageContentOutsidePrivateRow {
   provider_conversation_id: string | null;
 }
 
+export interface OnDemandGrantWork {
+  check(): boolean;
+  release(): void;
+}
+
+// Separate handles to one file share synchronous revocation notifications.
+let grantNotifications: Map<string, Set<() => void>> | undefined;
+// Active work also observes commits made by another engine process.
+const ON_DEMAND_GRANT_EPOCH_CHECK_MS = 250;
+
 export class LocalConnectorStore {
   readonly dbPath: string;
   /** The file this store opened, so a later delete or replace of it is seen. */
@@ -3974,6 +3990,10 @@ export class LocalConnectorStore {
   /** Whether the v13 `image_media_reads` table is here (a read-only open of an older store has none). */
   private imageMediaReadsPresent = false;
   private onDemandReadsTablePresent: boolean;
+  private onDemandGrantEpochPresent = false;
+  private onDemandGrantChecks?: Set<(epoch: number | undefined) => void>;
+  private onDemandGrantTimer: ReturnType<typeof setInterval> | undefined;
+  private onDemandGrantCheckedEpoch: number | undefined;
   /** Whether the `item_text_versions` table is here (a read-only open of an older store has none). */
   private itemTextVersionsPresent = false;
   /** Whether the v14 `media_judgments` table is here (a read-only open of an older store has none). */
@@ -4150,6 +4170,9 @@ export class LocalConnectorStore {
       ).get() !== null;
       this.onDemandReadsTablePresent = !this.readOnly || this.db.query(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'",
+      ).get() !== null;
+      this.onDemandGrantEpochPresent = this.onDemandReadsTablePresent && this.db.query(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_grant_epoch'",
       ).get() !== null;
       this.itemTextVersionsPresent = this.db.query(
         "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'item_text_versions'",
@@ -4334,6 +4357,7 @@ export class LocalConnectorStore {
 
   close(): void {
     if (this.closedForPoolReads) return;
+    this.stopOnDemandGrantChecks();
     changeMemoryCounter('connector_stores', -1);
     untrackSqliteStoreMemory(this.db);
     this.tierLedgerHiddenMemo = undefined;
@@ -4359,6 +4383,7 @@ export class LocalConnectorStore {
       // The read pool's connections to this file go with the store, and so
       // do its waiting queries.
       this.closedForPoolReads = true;
+      this.checkOnDemandGrantWork();
       if (offThreadReadsSupported(this.dbPath)) releaseOffThreadReads(this.dbPath);
       closeSqliteStore(this.db, this.readOnly ? { checkpoint: false, readOnly: true }
         : buildingRecencyIndex ? { checkpoint: false } : undefined);
@@ -4540,9 +4565,9 @@ export class LocalConnectorStore {
       if (inputs?.unavailableReason) return false;
       const ledger = this.tierLedger();
       if (!ledger) return false;
-      const read = ledger.classificationRead(item.identity);
       const existing = ledger.getCurrent(item.identity);
       if (!existing) return false;
+      const read = ledger.classificationRead(item.identity, text);
       const override = read.override;
       // The item's names travel with the text, as they do in the tiered
       // sink: the detectors' origin hint and the sniffer read them too.
@@ -9307,6 +9332,108 @@ export class LocalConnectorStore {
   grantOnDemandRead(localItemId: string, sourceVersion = ''): void {
     this.db.query(`INSERT INTO on_demand_item_reads(local_item_id, source_version) VALUES (?, ?)
       ON CONFLICT(local_item_id) DO UPDATE SET source_version = excluded.source_version`).run(localItemId, sourceVersion);
+    this.notifyOnDemandGrantChange();
+  }
+
+  revokeOnDemandRead(localItemId: string): void {
+    const previous = (this.db.query('PRAGMA busy_timeout').get() as { timeout: number }).timeout;
+    this.db.exec(`PRAGMA busy_timeout = ${Math.min(previous, REVOCATION_WRITE_LIMIT.milliseconds)}`);
+    try {
+      const removed = this.db.query('DELETE FROM on_demand_item_reads WHERE local_item_id = ?').run(localItemId);
+      if (removed.changes > 0) this.notifyOnDemandGrantChange();
+    } finally {
+      this.db.exec(`PRAGMA busy_timeout = ${previous}`);
+    }
+  }
+
+  onDemandGrantEpoch(): number | undefined {
+    if (this.closedForPoolReads || !this.onDemandReadsTablePresent) return undefined;
+    if (!this.onDemandGrantEpochPresent) {
+      // A split reader can stay open while the writer installs the epoch tables.
+      this.onDemandGrantEpochPresent = !!this.db.query(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_grant_epoch'",
+      ).get();
+      if (!this.onDemandGrantEpochPresent) return undefined;
+    }
+    return (this.db.query('SELECT epoch FROM on_demand_grant_epoch WHERE id = 1').get() as { epoch: number } | null)?.epoch;
+  }
+
+  /** A read's grant and the active item must agree on the same version. */
+  currentOnDemandRead(localItemId: string, sourceVersion?: string): boolean {
+    const current = this.currentOnDemandGrant(localItemId);
+    return current !== undefined && (sourceVersion === undefined || current.source_version === sourceVersion);
+  }
+
+  private currentOnDemandGrant(localItemId: string): { source_version: string; acquired_epoch: number } | undefined {
+    if (!this.onDemandReadsTablePresent || this.closedForPoolReads) return undefined;
+    // A legacy reader can prove continuity only across an unchanged database.
+    const acquisition = this.onDemandGrantEpochPresent
+      ? 'COALESCE((SELECT epoch FROM on_demand_grant_acquisitions WHERE local_item_id = r.local_item_id), 0)'
+      : '(SELECT -(data_version + total_changes()) FROM pragma_data_version)';
+    return (this.db.query(`SELECT r.source_version, ${acquisition} AS acquired_epoch
+      FROM on_demand_item_reads r JOIN items i ON i.local_item_id = r.local_item_id
+      AND COALESCE(i.source_version, '') = r.source_version
+      WHERE r.local_item_id = ? AND i.tombstoned = 0 LIMIT 1`)
+      .get(localItemId) as { source_version: string; acquired_epoch: number } | null) ?? undefined;
+  }
+
+  observeOnDemandRead(localItemId: string, sourceVersion: string | undefined, controller: AbortController): OnDemandGrantWork | undefined {
+    const epoch = this.onDemandGrantEpoch();
+    const grant = this.currentOnDemandGrant(localItemId);
+    if (!grant || (sourceVersion !== undefined && sourceVersion !== grant.source_version)) return undefined;
+    let checkedEpoch = epoch;
+    let valid = true;
+    const checkAtEpoch = (currentEpoch: number | undefined): boolean => {
+      if (!valid) return false;
+      if (currentEpoch === undefined || currentEpoch !== checkedEpoch) {
+        const current = this.currentOnDemandGrant(localItemId);
+        valid = current?.source_version === grant.source_version && current.acquired_epoch === grant.acquired_epoch;
+        if (!valid) controller.abort();
+        checkedEpoch = currentEpoch;
+      }
+      return valid;
+    };
+    const check = () => checkAtEpoch(this.onDemandGrantEpoch());
+    const checks = this.onDemandGrantChecks ??= new Set();
+    checks.add(checkAtEpoch);
+    if (checks.size === 1 && this.dbPath !== ':memory:') {
+      this.onDemandGrantTimer = setInterval(this.checkOnDemandGrantWork, ON_DEMAND_GRANT_EPOCH_CHECK_MS);
+      this.onDemandGrantTimer.unref?.();
+      const paths = grantNotifications ??= new Map();
+      const path = resolve(this.dbPath);
+      const listeners = paths.get(path) ?? new Set();
+      listeners.add(this.checkOnDemandGrantWork);
+      paths.set(path, listeners);
+    }
+    check();
+    return { check, release: () => {
+      checks.delete(checkAtEpoch);
+      if (checks.size === 0) this.stopOnDemandGrantChecks();
+    } };
+  }
+
+  private checkOnDemandGrantWork = (): void => {
+    const checks = this.onDemandGrantChecks;
+    if (!checks?.size) return;
+    const epoch = this.onDemandGrantEpoch();
+    if (epoch !== undefined && epoch === this.onDemandGrantCheckedEpoch) return;
+    this.onDemandGrantCheckedEpoch = epoch;
+    for (const notify of checks) notify(epoch);
+  };
+
+  private notifyOnDemandGrantChange(): void {
+    if (this.dbPath === ':memory:') this.checkOnDemandGrantWork();
+    else for (const notify of grantNotifications?.get(resolve(this.dbPath)) ?? []) notify();
+  }
+
+  private stopOnDemandGrantChecks(): void {
+    clearInterval(this.onDemandGrantTimer);
+    this.onDemandGrantTimer = undefined;
+    if (this.dbPath === ':memory:') return;
+    const path = resolve(this.dbPath);
+    const listeners = grantNotifications?.get(path);
+    listeners?.delete(this.checkOnDemandGrantWork);
+    if (listeners?.size === 0) grantNotifications?.delete(path);
   }
 
   onDemandContentHeld(identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>): boolean {
@@ -18085,21 +18212,23 @@ export interface ConnectorStoreCorpusAdapterOptions {
 // Otherwise the keyword lane serves alone (with an honest skip reason when a
 // provider was configured but could not run). secure_local stores never run
 // the vector lane with a non-local provider — fail closed to keyword.
+type GrantSearchRequest = SourceIndexCorpusSearchRequest & { startGrantEpoch?: number | undefined };
+
 function publishPartialRows<T extends ConnectorStoreSearchRow>(
-  store: LocalConnectorStore, request: SourceIndexCorpusSearchRequest, rows: readonly T[],
+  store: LocalConnectorStore, request: GrantSearchRequest, rows: readonly T[],
   filters: ConnectorStoreSearchFilters | undefined, score: (row: T) => number, projector?: ConnectorStoreResultProjector,
   lane: NonNullable<Parameters<NonNullable<SourceIndexCorpusSearchRequest['onPartialResponse']>>[1]> = 'keyword',
 ): void {
   if (!request.onPartialResponse) return;
   const prefix = rows.slice(0, request.maxResults);
   const hits = prefix.map(row => connectorStoreHitFromRow(store, row, score(row), projector, filters?.locatorPathScope));
-  const response = withSearchGrantDelivery(store, filters,
+  const response = withSearchGrantDelivery(store, filters, request,
     { hits, latencyMs: 0, incomplete: true, rawExposed: false }, prefix);
-  request.onPartialResponse(request[ROUTER_DELIVERS_SEARCH] ? response : deliverCorpusSearch([response], request.maxResults), lane);
+  request.onPartialResponse(response, lane);
 }
 
 function partialKeywordRows(
-  store: LocalConnectorStore, request: SourceIndexCorpusSearchRequest, filters?: ConnectorStoreSearchFilters,
+  store: LocalConnectorStore, request: GrantSearchRequest, filters?: ConnectorStoreSearchFilters,
   projector?: ConnectorStoreResultProjector,
 ): ConnectorStoreKeywordFtsOptions['onPartialRows'] {
   return request.onPartialResponse
@@ -18122,6 +18251,7 @@ function usesSearchGrants(filters: ConnectorStoreSearchFilters | undefined): boo
 function withSearchGrantDelivery(
   store: LocalConnectorStore,
   filters: ConnectorStoreSearchFilters | undefined,
+  request: GrantSearchRequest,
   response: SourceIndexCorpusSearchResponse,
   matches: readonly ConnectorStoreSearchRow[],
 ): SourceIndexCorpusSearchResponse {
@@ -18129,7 +18259,8 @@ function withSearchGrantDelivery(
   return {
     ...response,
     [SEARCH_GRANT_DELIVERY]: {
-      check: hits => store.searchGrantLayers(hits, filters),
+      checkIfChanged: hits => request.startGrantEpoch !== undefined && request.startGrantEpoch === store.onDemandGrantEpoch()
+        ? undefined : store.searchGrantLayers(hits, filters),
       matches: matches.map(row => ({
         sourceItem: row.sourceItem,
         candidateId: `${store.corpusId}:${row.sourceItem.localItemId}`,
@@ -18160,7 +18291,7 @@ function searchGrantIdentityKey(identity: SourceItemIdentity): string {
 }
 
 async function withVectorMetadataFallbacks<T extends ConnectorStoreSearchRow>(
-  store: LocalConnectorStore, request: SourceIndexCorpusSearchRequest, rows: readonly T[],
+  store: LocalConnectorStore, request: GrantSearchRequest, rows: readonly T[],
   accountScope: string | undefined, filters: ConnectorStoreSearchFilters | undefined,
 ): Promise<T[]> {
   if (!usesSearchGrants(filters) || rows.length === 0) return [...rows];
@@ -18179,12 +18310,29 @@ export function createConnectorStoreCorpusAdapter(
 ): SourceIndexCorpusSearchAdapter {
   const { store, embeddingProvider } = options;
   const filters = normalizeConnectorStoreSearchFilters(options.filters);
+  // A composite search retains the grant receipt until its last store settles.
+  // Standalone adapter calls release their results and prefixes to their own caller.
+  const scopedSearch = (
+    search: (request: GrantSearchRequest) => Promise<SourceIndexCorpusSearchResponse>,
+  ): NonNullable<SourceIndexCorpusSearchAdapter['metadataMatches']> => async input => {
+    assertConnectorStoreCorpusRequest(store, input);
+    const publish = input.onPartialResponse;
+    const request: GrantSearchRequest = {
+      ...input,
+      ...(usesSearchGrants(filters) ? { startGrantEpoch: store.onDemandGrantEpoch() } : {}),
+      ...(publish && !input[DEFER_SEARCH_DELIVERY] ? {
+        onPartialResponse: (response, lane) => publish(deliverCorpusSearch([response], input.maxResults), lane),
+      } : {}),
+    };
+    const result = await search(request);
+    return input[DEFER_SEARCH_DELIVERY] ? result : deliverCorpusSearch([result]);
+  };
   const semanticRelevanceBar = normalizeSemanticRelevanceBar(options.semanticRelevanceBar);
   const adapter: SourceIndexCorpusSearchAdapter & ((
-    request: SourceIndexCorpusSearchRequest,
+    request: GrantSearchRequest,
     stages?: SourceAnswerTraceAdapterStages,
   ) => SourceIndexCorpusSearchResponse | Promise<SourceIndexCorpusSearchResponse>) = (
-    request: SourceIndexCorpusSearchRequest,
+    request: GrantSearchRequest,
     stages?: SourceAnswerTraceAdapterStages,
   ): SourceIndexCorpusSearchResponse | Promise<SourceIndexCorpusSearchResponse> => {
     assertConnectorStoreCorpusRequest(store, request);
@@ -18239,7 +18387,7 @@ export function createConnectorStoreCorpusAdapter(
           rawExposed: false,
         };
         markStage?.('finalize_ms');
-        return withSearchGrantDelivery(store, filters, response, keywordLane.allRows);
+        return withSearchGrantDelivery(store, filters, request, response, keywordLane.allRows);
       }
       const lanes = [
         { name: 'keyword', items: rows },
@@ -18288,7 +18436,7 @@ export function createConnectorStoreCorpusAdapter(
         rawExposed: false,
       };
       markStage?.('finalize_ms');
-      return withSearchGrantDelivery(store, filters, response, keywordLane.allRows);
+      return withSearchGrantDelivery(store, filters, request, response, keywordLane.allRows);
     })();
 
     return hybridConnectorStoreSearch(
@@ -18333,8 +18481,7 @@ export function createConnectorStoreCorpusAdapter(
   // another (2026-10-10: "Letter of Intent notary" peaked at 0.725 under
   // EmbeddingGemma 2's 0.73, so no vector row entered and the Spanish letter
   // was never found), so a consumer that ranks on its own reads them too.
-  adapter.semanticNeighbours = async (request) => {
-    assertConnectorStoreCorpusRequest(store, request);
+  adapter.semanticNeighbours = scopedSearch(async request => {
     const startedAt = Date.now();
     const none = { matchedItems: 0, contentMatchedItems: 0, saturated: false };
     if (
@@ -18377,14 +18524,13 @@ export function createConnectorStoreCorpusAdapter(
       matchCount: none,
       rawExposed: false,
     };
-    const pending = withSearchGrantDelivery(store, filters, response, []);
-    return request[ROUTER_DELIVERS_SEARCH] ? pending : deliverCorpusSearch([pending]);
-  };
+    return withSearchGrantDelivery(store, filters, request, response, []);
+  });
   // Metadata-only matching (router.ts metadataMatches): the items that match
   // the query, lexically or above the semantic relevance bar, as identity-only
   // hits. No chunk text is read (both lanes run with locate: false), no
   // recency lane or pin (they are not matches), and no result projection.
-  const metadataMatches = async (request: SourceIndexCorpusSearchRequest): Promise<SourceIndexCorpusSearchResponse> => {
+  const metadataMatches = async (request: GrantSearchRequest): Promise<SourceIndexCorpusSearchResponse> => {
     const startedAt = Date.now();
     const maxResults = Math.max(1, Math.min(Math.floor(request.maxResults), MAX_SEARCH_RESULTS));
     const hybrid = embeddingProvider !== undefined
@@ -18429,7 +18575,7 @@ export function createConnectorStoreCorpusAdapter(
     const visibleSemanticRows = vectors.filter(row => !keywordLane.matchedItemIds.has(row.sourceItem.localItemId));
     const rows: ConnectorStoreSearchRow[] = [...keywordLane.rows, ...visibleSemanticRows];
     const semanticOnly = visibleSemanticRows.length;
-    return withSearchGrantDelivery(store, filters, {
+    return withSearchGrantDelivery(store, filters, request, {
       hits: rows.slice(0, maxResults).map((row) => connectorStoreHitFromRow(store, row, -row.rank)),
       latencyMs: Date.now() - startedAt,
       matchCount: {
@@ -18441,23 +18587,14 @@ export function createConnectorStoreCorpusAdapter(
       rawExposed: false,
     }, [...keywordLane.allRows, ...visibleSemanticRows]);
   };
-  const expanded: SourceIndexCorpusSearchAdapter = (request) => {
+  const expanded: SourceIndexCorpusSearchAdapter = scopedSearch(async request => {
     const timing = beginSourceAnswerStoreTiming();
-    assertConnectorStoreCorpusRequest(store, request);
-    const response = withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), () => adapter(request, timing?.stages), store);
-    if (!timing && request[ROUTER_DELIVERS_SEARCH]) return response;
-    return response.then(result => {
-      timing?.finish();
-      return request[ROUTER_DELIVERS_SEARCH] ? result : deliverCorpusSearch([result]);
-    });
-  };
-  expanded.metadataMatches = (request) => {
-    assertConnectorStoreCorpusRequest(store, request);
-    return withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), async () => {
-      const response = await metadataMatches(request);
-      return request[ROUTER_DELIVERS_SEARCH] ? response : deliverCorpusSearch([response]);
-    }, store);
-  };
+    const response = await withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), () => adapter(request, timing?.stages), store);
+    timing?.finish();
+    return response;
+  });
+  expanded.metadataMatches = scopedSearch(request =>
+    withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), () => metadataMatches(request), store));
   expanded.selectedItemServable = (sourceItem) => store.selectedItemServable(sourceItem, options.accountScope, filters);
   expanded.prepareKeywords = async (query) => {
     const status = { incomplete: false };
@@ -18623,7 +18760,7 @@ function startStoreStageClock(stages?: SourceAnswerTraceAdapterStages): ((stage:
 async function hybridConnectorStoreSearch(
   store: LocalConnectorStore,
   provider: SourceEmbeddingProvider,
-  request: SourceIndexCorpusSearchRequest,
+  request: GrantSearchRequest,
   startedAt: number,
   stages: SourceAnswerTraceAdapterStages | undefined,
   accountScope?: string,
@@ -18837,7 +18974,7 @@ async function hybridConnectorStoreSearch(
     rawExposed: false,
   };
   markStage?.('finalize_ms');
-  return withSearchGrantDelivery(store, filters, response,
+  return withSearchGrantDelivery(store, filters, request, response,
     gateArmed ? [...keywordLane.allRows, ...vectorRows] : keywordLane.allRows);
 }
 
@@ -19458,7 +19595,7 @@ export function createConnectorStoreContentProvider(
       const localItemId = request.provenance.sourceItem.localItemId.trim();
       if (!localItemId) return false;
       if (!(options.contentAllowed !== false && store.itemMatchesSearchFilters(localItemId, options.accountScope, options.filters))
-        && !(options.metadataFilters !== undefined && store.readOnDemand(localItemId) && store.itemMatchesSearchFilters(localItemId, options.accountScope, options.metadataFilters))) return false;
+        && !(options.metadataFilters !== undefined && store.currentOnDemandRead(localItemId, request.provenance.sourceItem.sourceVersion) && store.itemMatchesSearchFilters(localItemId, options.accountScope, options.metadataFilters))) return false;
       return store.contentServedNow(localItemId, request.throwOnUnavailable);
     },
     conversationNeighbours(request) {
@@ -19476,13 +19613,18 @@ export function createConnectorStoreContentProvider(
           + `refused a ${request.trustDomain} content request.`,
         );
       }
-      return withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), async () => {
+      let releaseGranted: (() => boolean) | undefined;
+      const result: LocalContentBlock | undefined = await withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), async () => {
       const localItemId = request.provenance.sourceItem.localItemId.trim();
       if (!localItemId) return undefined;
-      const contentInScope = (options.contentAllowed !== false
-        && store.itemMatchesSearchFilters(localItemId, options.accountScope, options.filters))
-        || (options.metadataFilters !== undefined && store.readOnDemand(localItemId) && store.itemMatchesSearchFilters(localItemId, options.accountScope, options.metadataFilters));
-      if (!contentInScope) {
+      const contentInScope = options.contentAllowed !== false
+        && store.itemMatchesSearchFilters(localItemId, options.accountScope, options.filters);
+      const needsGrant = !contentInScope && options.metadataFilters !== undefined;
+      const startEpoch = needsGrant ? store.onDemandGrantEpoch() : undefined;
+      const sourceVersion = request.provenance.sourceItem.sourceVersion;
+      const granted = needsGrant && store.currentOnDemandRead(localItemId, sourceVersion)
+        && store.itemMatchesSearchFilters(localItemId, options.accountScope, options.metadataFilters);
+      if (!contentInScope && !granted) {
         if (!options.metadataFilters
           || !store.itemMatchesSearchFilters(localItemId, options.accountScope, options.metadataFilters)) {
           return undefined;
@@ -19507,6 +19649,10 @@ export function createConnectorStoreContentProvider(
           coverageGaps: [CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP],
           ...(names.locatorUri ? { locatorUri: names.locatorUri } : {}),
         };
+      }
+      if (granted) {
+        releaseGranted = () => (startEpoch !== undefined && startEpoch === store.onDemandGrantEpoch())
+          || store.currentOnDemandRead(localItemId, sourceVersion ?? '');
       }
       const anchorChunkIndex = request.provenance.chunk?.chunkIndex;
       const anchorLane = request.provenance.chunk?.span?.lane;
@@ -19549,6 +19695,7 @@ export function createConnectorStoreContentProvider(
         ...(content.locatorUri ? { locatorUri: content.locatorUri } : {}),
       };
       }, store);
+      return releaseGranted && !releaseGranted() ? undefined : result;
     },
   };
 }
@@ -22033,7 +22180,7 @@ function validateCurrentConnectorStoreSchemaBeforeMigration(db: Database): void 
     validateConnectorStoreV12Schema(db, 'v15', CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS);
     assertIndexColumns(db, 'idx_connector_store_items_parent', ['parent_local_item_id'], 'v15');
   }
-  if (version === 16) validateVectorDigestSchema(db);
+  if (version >= 16) validateVectorDigestSchema(db);
 }
 
 function validateConnectorStoreVisibilitySchema(db: Database, versionLabel: string): void {
@@ -22077,6 +22224,11 @@ function validateVectorDigestSchema(db: Database): void {
 function validateConnectorStoreSchema(db: Database, version = CONNECTOR_STORE_SQLITE_SCHEMA_VERSION): void {
   validateConnectorStoreV12Schema(db, 'v15', CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS);
   if (version >= 16) validateVectorDigestSchema(db);
+  if (version >= 17) {
+    assertExactTableColumns(db, 'on_demand_grant_epoch', ['id', 'epoch'], false, 'v17');
+    assertExactTableColumns(db, 'on_demand_grant_acquisitions', ['local_item_id', 'epoch'], false, 'v17');
+    for (const trigger of ON_DEMAND_GRANT_EPOCH_TRIGGERS) assertTriggerExists(db, trigger, 'v17');
+  }
   assertIndexColumns(db, 'idx_connector_store_items_parent', ['parent_local_item_id'], 'v15');
   assertExactTableColumns(db, 'chunk_media_releases', ['media_sha256', 'media_path'], false, 'v13');
   assertExactTableColumns(db, 'chunk_media_failures', ['media_sha256', 'reason', 'failed_at', 'attempts'], false, 'v13');
@@ -22327,6 +22479,67 @@ function sameStringSet(actual: readonly string[], expected: readonly string[]): 
   return actual.length === expected.length && expected.every((value) => actual.includes(value));
 }
 
+const ON_DEMAND_GRANT_EPOCH_TRIGGERS = [
+  'on_demand_grant_delete', 'on_demand_grant_update', 'on_demand_item_delete', 'on_demand_item_update', 'on_demand_grant_insert',
+] as const;
+
+function createOnDemandReads(db: Database): void {
+  db.exec(`CREATE TABLE IF NOT EXISTS on_demand_item_reads (
+    local_item_id TEXT PRIMARY KEY, source_version TEXT NOT NULL, read_on_demand INTEGER NOT NULL DEFAULT 1
+  );`);
+}
+
+function createOnDemandGrantEpoch(db: Database): void {
+  db.transaction(() => db.exec(`
+    INSERT OR IGNORE INTO on_demand_grant_epoch (id, epoch) VALUES (1, 0);
+    CREATE TRIGGER IF NOT EXISTS ${ON_DEMAND_GRANT_EPOCH_TRIGGERS[4]} AFTER INSERT ON on_demand_item_reads
+    BEGIN
+      UPDATE on_demand_grant_epoch SET epoch = epoch + 1 WHERE id = 1;
+      INSERT INTO on_demand_grant_acquisitions (local_item_id, epoch)
+        SELECT NEW.local_item_id, epoch FROM on_demand_grant_epoch WHERE id = 1
+        ON CONFLICT(local_item_id) DO UPDATE SET epoch = excluded.epoch;
+    END;
+    CREATE TRIGGER IF NOT EXISTS ${ON_DEMAND_GRANT_EPOCH_TRIGGERS[0]} AFTER DELETE ON on_demand_item_reads
+    BEGIN
+      UPDATE on_demand_grant_epoch SET epoch = epoch + 1 WHERE id = 1;
+      DELETE FROM on_demand_grant_acquisitions WHERE local_item_id = OLD.local_item_id;
+    END;
+    CREATE TRIGGER IF NOT EXISTS ${ON_DEMAND_GRANT_EPOCH_TRIGGERS[1]} AFTER UPDATE OF source_version, local_item_id ON on_demand_item_reads
+    WHEN OLD.source_version IS NOT NEW.source_version OR OLD.local_item_id IS NOT NEW.local_item_id
+    BEGIN
+      UPDATE on_demand_grant_epoch SET epoch = epoch + 1 WHERE id = 1;
+      DELETE FROM on_demand_grant_acquisitions WHERE local_item_id = OLD.local_item_id;
+      INSERT INTO on_demand_grant_acquisitions (local_item_id, epoch)
+        SELECT NEW.local_item_id, epoch FROM on_demand_grant_epoch WHERE id = 1
+        ON CONFLICT(local_item_id) DO UPDATE SET epoch = excluded.epoch;
+    END;
+    CREATE TRIGGER IF NOT EXISTS ${ON_DEMAND_GRANT_EPOCH_TRIGGERS[2]} AFTER DELETE ON items
+    WHEN OLD.tombstoned = 0
+    BEGIN
+      UPDATE on_demand_grant_epoch SET epoch = epoch + 1 WHERE id = 1;
+      INSERT INTO on_demand_grant_acquisitions (local_item_id, epoch)
+        SELECT r.local_item_id, e.epoch FROM on_demand_item_reads r CROSS JOIN on_demand_grant_epoch e
+        WHERE r.local_item_id = OLD.local_item_id AND r.source_version = COALESCE(OLD.source_version, '') AND e.id = 1
+        ON CONFLICT(local_item_id) DO UPDATE SET epoch = excluded.epoch;
+    END;
+    CREATE TRIGGER IF NOT EXISTS ${ON_DEMAND_GRANT_EPOCH_TRIGGERS[3]} AFTER UPDATE OF source_version, local_item_id, tombstoned,
+      provider, account_scope, provider_item_id, normalized_conversation, locator_uri, source_scope_folder_keys_json ON items
+    WHEN OLD.tombstoned = 0 AND (NEW.tombstoned <> 0 OR OLD.source_version IS NOT NEW.source_version
+      OR OLD.local_item_id IS NOT NEW.local_item_id OR OLD.provider IS NOT NEW.provider
+      OR OLD.account_scope IS NOT NEW.account_scope OR OLD.provider_item_id IS NOT NEW.provider_item_id
+      OR OLD.normalized_conversation IS NOT NEW.normalized_conversation OR OLD.locator_uri IS NOT NEW.locator_uri
+      OR OLD.source_scope_folder_keys_json IS NOT NEW.source_scope_folder_keys_json)
+    BEGIN
+      UPDATE on_demand_grant_epoch SET epoch = epoch + 1 WHERE id = 1;
+      INSERT INTO on_demand_grant_acquisitions (local_item_id, epoch)
+        SELECT r.local_item_id, e.epoch FROM on_demand_item_reads r CROSS JOIN on_demand_grant_epoch e
+        WHERE r.local_item_id = OLD.local_item_id AND r.source_version = COALESCE(OLD.source_version, '') AND e.id = 1
+          AND (NEW.tombstoned <> 0 OR OLD.source_version IS NOT NEW.source_version OR OLD.local_item_id IS NOT NEW.local_item_id)
+        ON CONFLICT(local_item_id) DO UPDATE SET epoch = excluded.epoch;
+    END;
+  `))();
+}
+
 /** Everything an open that is not on the fast path runs to bring a store to this build's schema, idempotently. */
 function applyConnectorStoreOpenSchema(db: Database, version = CONNECTOR_STORE_SQLITE_SCHEMA_VERSION): void {
   refuseUnversionedConnectorStoreSchema(db);
@@ -22338,9 +22551,8 @@ function applyConnectorStoreOpenSchema(db: Database, version = CONNECTOR_STORE_S
   createConnectorStoreVisibilityTables(db);
   createStoreTotals(db, NON_SYNC_RUN_CONNECTORS_SQL);
   createConnectorStorePeopleIndex(db);
-  db.exec(`CREATE TABLE IF NOT EXISTS on_demand_item_reads (
-    local_item_id TEXT PRIMARY KEY, source_version TEXT NOT NULL, read_on_demand INTEGER NOT NULL DEFAULT 1
-  );`);
+  createOnDemandReads(db);
+  if (version >= 17) createOnDemandGrantEpoch(db);
   validateConnectorStoreSchema(db, version);
 }
 

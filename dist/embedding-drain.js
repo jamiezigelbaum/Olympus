@@ -10746,6 +10746,32 @@ var NAME = "[A-Za-z_][A-Za-z0-9_]*";
 var NEW_TABLE = new RegExp(`^CREATE\\s+TABLE\\s+(IF\\s+NOT\\s+EXISTS\\s+)?${NAME}\\s*\\(`, "i");
 var NEW_INDEX = new RegExp(`^CREATE\\s+INDEX\\s+(IF\\s+NOT\\s+EXISTS\\s+)?${NAME}\\s+ON\\s+${NAME}\\s*\\(\\s*${NAME}(\\s+(ASC|DESC))?(\\s*,\\s*${NAME}(\\s+(ASC|DESC))?)*\\s*\\)$`, "i");
 var NEW_COLUMN = new RegExp(`^ALTER\\s+TABLE\\s+${NAME}\\s+ADD\\s+(COLUMN\\s+)?${NAME}(\\s+(TEXT|INTEGER|REAL|BLOB|NUMERIC))?(\\s+DEFAULT\\s+(NULL|-?[0-9]+(\\.[0-9]+)?|'[^']*'))?$`, "i");
+var NOT_ADDITIVE = /\b(DROP|RENAME|UPDATE|DELETE|INSERT|REPLACE|SELECT|TRIGGER|UNIQUE|VACUUM|PRAGMA|ATTACH|DETACH|REFERENCES)\b/i;
+function additiveStatement(body) {
+  if (body.includes(";") || NOT_ADDITIVE.test(body))
+    return false;
+  return NEW_TABLE.test(body) || NEW_INDEX.test(body) || NEW_COLUMN.test(body);
+}
+function additiveMigration(version, name, statements) {
+  if (statements.length === 0)
+    throw new OperationError("config_error", `Additive migration "${name}" has no statements.`);
+  for (const statement of statements) {
+    const body = statement.trim().replace(/;$/, "").trim();
+    if (!additiveStatement(body)) {
+      throw new OperationError("config_error", `Additive migration "${name}" has a statement that is not additive: ${body.slice(0, 80)}`);
+    }
+  }
+  const migration = {
+    version,
+    name,
+    up(db) {
+      for (const statement of statements)
+        db.exec(statement);
+    }
+  };
+  ADDITIVE_MIGRATIONS.add(migration);
+  return migration;
+}
 function isAdditiveMigration(migration) {
   return ADDITIVE_MIGRATIONS.has(migration);
 }
@@ -14082,14 +14108,18 @@ function contentDigestReason(text) {
 }
 var OWNER_OVERRIDE_SECRET_REVIEW_REASON = "content:owner_override_secret_review";
 var OWNER_OVERRIDE_SECRET_CONFIRMED_REASON = "content:owner_override_secret_confirmed";
-function ownerConfirmedSecretFinding(override, text) {
-  return override?.kind === "tier" && (override.tier === "private" || override.tier === "public") && override.confirmedDigest !== undefined && override.confirmedDigest === contentDigestReason(text);
+function ownerOverrideMatchesDigest(override, digest) {
+  return override?.kind === "tier" && (override.tier === "private" || override.tier === "public") && (override.setDigest === digest || override.confirmedDigest === digest);
+}
+function contentSecretFindingKinds(reasons) {
+  const prefix = "content:secret:";
+  return reasons.filter((reason) => reason.startsWith(prefix)).map((reason) => reason.slice(prefix.length));
 }
 function ownerOverrideSecretReview(reasons) {
   if (!reasons.includes(OWNER_OVERRIDE_SECRET_REVIEW_REASON))
     return;
   const digest = reasons.find((reason) => reason.startsWith("content:sha256:"));
-  const kinds = reasons.filter((reason) => reason.startsWith("content:secret:")).map((reason) => reason.slice("content:secret:".length));
+  const kinds = contentSecretFindingKinds(reasons);
   return digest && kinds.length > 0 ? { digest, kinds } : undefined;
 }
 function contentJudgeVerdictReason(reason, tier, digest) {
@@ -14232,7 +14262,7 @@ function classifyItemTiersWithPublic(input, options) {
     const personal = tier === "private" || tier === "public";
     const findings = text !== undefined && personal ? contentSecretReasons(text) : [];
     const stillUnread = personal && input.heldSecret === true && !text?.trim();
-    const confirmed = text !== undefined && ownerConfirmedSecretFinding(options.override, text);
+    const confirmed = text !== undefined && ownerOverrideMatchesDigest(options.override, contentDigestReason(text));
     const review = findings.length > 0 && !confirmed;
     const staysSecret = review && input.heldSecret === true;
     return {
@@ -14315,7 +14345,7 @@ function classifyContentTier(input, options = {}) {
     const tier = options.retirePublic && options.override.tier === "public" ? "private" : options.override.tier;
     const lower = tier === "private" || tier === "public";
     const findings = lower ? contentSecretReasons(input.text) : [];
-    const confirmed = ownerConfirmedSecretFinding(options.override, input.text);
+    const confirmed = ownerOverrideMatchesDigest(options.override, contentDigestReason(input.text));
     const review = findings.length > 0 && !confirmed;
     if (review && input.heldSecret)
       return { ...base, contentTier: "secrets", decidedBy: "secret_detector", reasons: findings, contentPending: false };
@@ -14638,7 +14668,7 @@ function ownerOverrideReasons(tier, holdUntilJudged, findings, confirmed) {
   return [
     `override:item:${tier}`,
     ...heldMark(holdUntilJudged, tier),
-    ...confirmed ? [OWNER_OVERRIDE_SECRET_CONFIRMED_REASON] : findings.length > 0 ? [OWNER_OVERRIDE_SECRET_REVIEW_REASON, ...findings] : []
+    ...findings.length > 0 ? [confirmed ? OWNER_OVERRIDE_SECRET_CONFIRMED_REASON : OWNER_OVERRIDE_SECRET_REVIEW_REASON, ...findings] : []
   ];
 }
 function heldMark(holdUntilJudged, tier) {
@@ -16173,7 +16203,7 @@ function dispatch() {
 import { createHash as createHash13, randomUUID as randomUUID9 } from "node:crypto";
 import { closeSync as closeSync11, existsSync as existsSync22, fsyncSync as fsyncSync3, lstatSync as lstatSync9, mkdirSync as mkdirSync13, openSync as openSync11, statSync as statSync13, statfsSync } from "node:fs";
 import { open as openFile } from "node:fs/promises";
-import { basename as basename7, dirname as dirname23 } from "node:path";
+import { basename as basename7, dirname as dirname23, resolve as resolve10 } from "node:path";
 import { Database as Database6 } from "bun:sqlite";
 
 // src/core/media-cache.ts
@@ -16943,10 +16973,14 @@ function pendingOverrideReview(record, override) {
   if (record?.state !== "current" || !record.contentRead || override?.kind !== "tier" || override.tier !== "private" && override.tier !== "public")
     return;
   const review = ownerOverrideSecretReview(record.reasons);
-  return review && review.digest !== override.confirmedDigest ? review : undefined;
+  return review && !ownerOverrideMatchesDigest(override, review.digest) ? review : undefined;
 }
 var WRITE_INTENT_SQL = `
       SELECT * FROM tier_write_intents
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `;
+var ITEM_OVERRIDE_SQL = `
+      SELECT override_json, set_at FROM tier_overrides
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
     `;
 function routedOverridesFromRows(rows) {
@@ -18030,15 +18064,54 @@ class TierLedger {
     if (override.kind === "tier")
       assertTier(override.tier);
     this.db.transaction(() => {
+      const setAt = this.now().toISOString();
+      if (override.kind === "tier" && (override.tier === "private" || override.tier === "public") && override.setDigest === undefined) {
+        const current = this.getCurrent(identity);
+        const setDigest = override.confirmedDigest ?? (current?.contentRead && current.state !== "moving" ? current.reasons.find((reason) => reason.startsWith("content:sha256:")) : undefined) ?? this.overrideHistoryDigest(identity, setAt);
+        if (setDigest)
+          override = { ...override, setDigest };
+        else if (this.itemIsSecret(identity))
+          override = { ...override, setDigest: null };
+      }
       this.writeMeta(overrideRestoreKey(identity), "");
       this.db.query(`
         INSERT INTO tier_overrides (provider, account_scope, conversation_key, provider_item_id, override_json, set_at)
         VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT (provider, account_scope, conversation_key, provider_item_id)
         DO UPDATE SET override_json = excluded.override_json, set_at = excluded.set_at
-      `).run(...idParams(identity), JSON.stringify(override), this.now().toISOString());
+      `).run(...idParams(identity), JSON.stringify(override), setAt);
       this.settleRevokedOwnerMove(identity);
     })();
+  }
+  overrideHistoryDigest(identity, setAt) {
+    const row = this.db.query(`
+      SELECT reason.value AS digest FROM tier_history h
+      CROSS JOIN json_each(h.reasons_json) reason
+      WHERE h.provider = ? AND h.account_scope = ? AND h.conversation_key = ? AND h.provider_item_id = ?
+        AND h.decided_at <= ? AND reason.value GLOB 'content:sha256:*'
+      ORDER BY h.decided_at DESC, h.history_pk DESC LIMIT 1
+    `).get(...idParams(identity), setAt);
+    return row?.digest;
+  }
+  observeOverrideText(identity, text) {
+    const row = this.db.query(ITEM_OVERRIDE_SQL).get(...idParams(identity));
+    if (!row)
+      return;
+    const override = overrideFromJson(row.override_json);
+    if (override?.kind !== "tier" || override.tier !== "private" && override.tier !== "public" || override.setDigest !== undefined)
+      return override;
+    const setDigest = this.overrideHistoryDigest(identity, row.set_at) ?? override.confirmedDigest ?? (!this.readOnly && text.trim() ? contentDigestReason(text) : undefined);
+    if (!setDigest)
+      return override;
+    const bound = { ...override, setDigest };
+    if (this.readOnly)
+      return bound;
+    const updated = this.db.query(`
+      UPDATE tier_overrides SET override_json = ?
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+        AND override_json = ? AND set_at = ?
+    `).run(JSON.stringify(bound), ...idParams(identity), row.override_json, row.set_at);
+    return updated.changes === 1 ? bound : this.getOverride(identity);
   }
   ownerOverrideReview(identity, record = this.getCurrent(identity), override = this.getOverride(identity)) {
     const review = pendingOverrideReview(record, override);
@@ -18064,16 +18137,24 @@ class TierLedger {
         return false;
       if (choice === "judge")
         return this.clearOverride(identity);
-      this.setOverride(identity, { kind: "tier", tier: "private", confirmedDigest: digest });
+      this.setOverride(identity, { ...override, confirmedDigest: digest });
       return true;
     }).immediate();
   }
-  classificationRead(identity) {
-    return this.db.transaction(() => ({
-      override: this.getOverride(identity),
-      secret: this.itemIsSecret(identity),
-      scrubRevision: this.secretScrubRevision(identity)
-    }))();
+  classificationRead(identity, text) {
+    const snapshot = this.db.transaction((observe) => {
+      const secret = this.itemIsSecret(identity);
+      return {
+        override: observe && text !== undefined ? this.observeOverrideText(identity, text) : this.getOverride(identity),
+        secret,
+        scrubRevision: this.secretScrubRevision(identity)
+      };
+    });
+    const read = snapshot(false);
+    const override = read.override;
+    if (text === undefined || override?.kind !== "tier" || override.tier !== "private" && override.tier !== "public" || override.setDigest !== undefined)
+      return read;
+    return this.readOnly ? snapshot(true) : snapshot.immediate(true);
   }
   unsettledSecretSideStores(limit = 100) {
     return unsettledSecretRows(this.db.query(UNSETTLED_SECRET_SIDE_STORES_SQL).all(Math.max(1, Math.min(limit, 1000))));
@@ -18151,12 +18232,15 @@ class TierLedger {
     const record = item ? recordFromRow(item) : undefined;
     return record !== undefined && [record.metadataTier, record.contentTier, record.targetMetadataTier, record.targetContentTier].includes("secrets");
   }
-  getOverride(identity) {
-    const row = this.db.query(`
-      SELECT override_json FROM tier_overrides
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-    `).get(...idParams(identity));
-    return row ? overrideFromJson(row.override_json) : undefined;
+  getOverride(identity, options = {}) {
+    const row = this.db.query(ITEM_OVERRIDE_SQL).get(...idParams(identity));
+    if (!row)
+      return;
+    const override = overrideFromJson(row.override_json);
+    if (!options.withHistory || override?.kind !== "tier" || override.tier !== "private" && override.tier !== "public" || override.setDigest !== undefined)
+      return override;
+    const setDigest = this.overrideHistoryDigest(identity, row.set_at) ?? override.confirmedDigest;
+    return setDigest ? { ...override, setDigest } : override;
   }
   conversationlessOverrides(provider) {
     return this.db.query(`
@@ -21807,7 +21891,7 @@ function isTextualMimeType(mimeType) {
   return normalized.startsWith("text/") || normalized === "application/json" || normalized === "application/xml" || normalized.endsWith("+json") || normalized.endsWith("+xml");
 }
 function decideItemTiers(connector, item, text, options, ledger, extra = {}) {
-  const read = ledger?.classificationRead(item.identity);
+  const read = extra.classificationRead ?? ledger?.classificationRead(item.identity, extra.contentFetchFailed ? undefined : text);
   const override = read?.override;
   const fresh = text?.trim() ? extra.contentFetchFailed !== true : false;
   const recorded = ledger?.getCurrent(item.identity);
@@ -22471,6 +22555,17 @@ var WAITING_QUESTION_LIMITS = Object.freeze({
   ttlMs: 7 * 24 * 60 * 60000,
   reanswerAfterMs: 10 * 60000
 });
+var REVOKE_BUSY_TIMEOUT_MS = 1000;
+var REVOCATION_WRITE_LIMIT = Object.freeze({
+  id: "privacy.revocation_write",
+  kind: "time",
+  scope: "source",
+  label: "Wait for a privacy revocation to acquire the write lock",
+  unit: "ms",
+  continue: "none",
+  milliseconds: REVOKE_BUSY_TIMEOUT_MS
+});
+registerLimit(REVOCATION_WRITE_LIMIT);
 
 // src/core/remote-connections.ts
 function resolveRemoteConnectionsDbPath(env = process.env) {
@@ -24915,7 +25010,7 @@ function compareStrings(left, right) {
 }
 
 // src/core/source-index/router.ts
-var ROUTER_DELIVERS_SEARCH = Symbol("router delivers search");
+var DEFER_SEARCH_DELIVERY = Symbol("defer search delivery");
 var SEARCH_GRANT_MATCH = Symbol("search grant match");
 var SEARCH_GRANT_DELIVERY = Symbol("search grant delivery");
 var FORBIDDEN_ROUTER_RESULT_KEYS = new Set([
@@ -25005,7 +25100,7 @@ var CONTAINER_MIME_TYPES = Object.freeze([
 ]);
 var CONTAINER_MIME_TYPES_SQL = CONTAINER_MIME_TYPES.map((type) => `'${type}'`).join(", ");
 var SQLITE_STORE_ID = "connector-store";
-var CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 16;
+var CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 17;
 var IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only";
 var CHUNK_MEDIA_RETRY_BASE_MS = 60 * 60000;
 var CHUNK_MEDIA_MAX_ATTEMPTS = 3;
@@ -25154,7 +25249,11 @@ function connectorStoreMigrations() {
       version: 16,
       name: "connector_store_vector_digest",
       up: createVectorDigestSchema
-    }
+    },
+    additiveMigration(17, "connector_store_on_demand_grant_epoch", [
+      "CREATE TABLE IF NOT EXISTS on_demand_grant_epoch (id INTEGER PRIMARY KEY CHECK (id = 1), epoch INTEGER NOT NULL)",
+      "CREATE TABLE IF NOT EXISTS on_demand_grant_acquisitions (local_item_id TEXT PRIMARY KEY, epoch INTEGER NOT NULL)"
+    ])
   ];
 }
 var ITEM_VISIBILITY_FEED_RETENTION = 65536;
@@ -26115,6 +26214,8 @@ var RECENCY_INDEX_NOT_ADMITTED_RETRY_MS = 30000;
 var RECLAIM_MAX_PAGES_PER_STEP = 128;
 var RECLAIM_CONVERSION_BYTES_PER_MS = 15000;
 var SUPERSEDED_PRUNE_MEDIA_ROWS = 1;
+var grantNotifications;
+var ON_DEMAND_GRANT_EPOCH_CHECK_MS = 250;
 
 class LocalConnectorStore {
   dbPath;
@@ -26136,6 +26237,10 @@ class LocalConnectorStore {
   chunkMediaColumnsPresent = false;
   imageMediaReadsPresent = false;
   onDemandReadsTablePresent;
+  onDemandGrantEpochPresent = false;
+  onDemandGrantChecks;
+  onDemandGrantTimer;
+  onDemandGrantCheckedEpoch;
   itemTextVersionsPresent = false;
   mediaJudgmentsPresent = false;
   mediaHolder;
@@ -26247,6 +26352,7 @@ class LocalConnectorStore {
       this.chunkMediaColumnsPresent = tableColumns(this.db, "chunks", false).includes("media_sha256");
       this.imageMediaReadsPresent = this.db.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'image_media_reads'").get() !== null;
       this.onDemandReadsTablePresent = !this.readOnly || this.db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'").get() !== null;
+      this.onDemandGrantEpochPresent = this.onDemandReadsTablePresent && this.db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_grant_epoch'").get() !== null;
       this.itemTextVersionsPresent = this.db.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'item_text_versions'").get() !== null;
       const judgmentColumns = this.db.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'media_judgments'").get() !== null ? tableColumns(this.db, "media_judgments", false) : [];
       this.mediaJudgmentsPresent = CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS.every((column) => judgmentColumns.includes(column));
@@ -26421,6 +26527,7 @@ class LocalConnectorStore {
   close() {
     if (this.closedForPoolReads)
       return;
+    this.stopOnDemandGrantChecks();
     changeMemoryCounter("connector_stores", -1);
     untrackSqliteStoreMemory(this.db);
     this.tierLedgerHiddenMemo = undefined;
@@ -26444,6 +26551,7 @@ class LocalConnectorStore {
     } finally {
       this.tierLedgerHandle = undefined;
       this.closedForPoolReads = true;
+      this.checkOnDemandGrantWork();
       if (offThreadReadsSupported(this.dbPath))
         releaseOffThreadReads(this.dbPath);
       closeSqliteStore(this.db, this.readOnly ? { checkpoint: false, readOnly: true } : buildingRecencyIndex ? { checkpoint: false } : undefined);
@@ -26603,10 +26711,10 @@ class LocalConnectorStore {
       const ledger = this.tierLedger();
       if (!ledger)
         return false;
-      const read = ledger.classificationRead(item.identity);
       const existing = ledger.getCurrent(item.identity);
       if (!existing)
         return false;
+      const read = ledger.classificationRead(item.identity, text);
       const override = read.override;
       const metadataString = (keys) => {
         for (const key of keys) {
@@ -30014,6 +30122,108 @@ ${parentKey(ref)}`, { ref, origin });
   grantOnDemandRead(localItemId, sourceVersion = "") {
     this.db.query(`INSERT INTO on_demand_item_reads(local_item_id, source_version) VALUES (?, ?)
       ON CONFLICT(local_item_id) DO UPDATE SET source_version = excluded.source_version`).run(localItemId, sourceVersion);
+    this.notifyOnDemandGrantChange();
+  }
+  revokeOnDemandRead(localItemId) {
+    const previous = this.db.query("PRAGMA busy_timeout").get().timeout;
+    this.db.exec(`PRAGMA busy_timeout = ${Math.min(previous, REVOCATION_WRITE_LIMIT.milliseconds)}`);
+    try {
+      const removed = this.db.query("DELETE FROM on_demand_item_reads WHERE local_item_id = ?").run(localItemId);
+      if (removed.changes > 0)
+        this.notifyOnDemandGrantChange();
+    } finally {
+      this.db.exec(`PRAGMA busy_timeout = ${previous}`);
+    }
+  }
+  onDemandGrantEpoch() {
+    if (this.closedForPoolReads || !this.onDemandReadsTablePresent)
+      return;
+    if (!this.onDemandGrantEpochPresent) {
+      this.onDemandGrantEpochPresent = !!this.db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_grant_epoch'").get();
+      if (!this.onDemandGrantEpochPresent)
+        return;
+    }
+    return this.db.query("SELECT epoch FROM on_demand_grant_epoch WHERE id = 1").get()?.epoch;
+  }
+  currentOnDemandRead(localItemId, sourceVersion) {
+    const current = this.currentOnDemandGrant(localItemId);
+    return current !== undefined && (sourceVersion === undefined || current.source_version === sourceVersion);
+  }
+  currentOnDemandGrant(localItemId) {
+    if (!this.onDemandReadsTablePresent || this.closedForPoolReads)
+      return;
+    const acquisition = this.onDemandGrantEpochPresent ? "COALESCE((SELECT epoch FROM on_demand_grant_acquisitions WHERE local_item_id = r.local_item_id), 0)" : "(SELECT -(data_version + total_changes()) FROM pragma_data_version)";
+    return this.db.query(`SELECT r.source_version, ${acquisition} AS acquired_epoch
+      FROM on_demand_item_reads r JOIN items i ON i.local_item_id = r.local_item_id
+      AND COALESCE(i.source_version, '') = r.source_version
+      WHERE r.local_item_id = ? AND i.tombstoned = 0 LIMIT 1`).get(localItemId) ?? undefined;
+  }
+  observeOnDemandRead(localItemId, sourceVersion, controller) {
+    const epoch = this.onDemandGrantEpoch();
+    const grant = this.currentOnDemandGrant(localItemId);
+    if (!grant || sourceVersion !== undefined && sourceVersion !== grant.source_version)
+      return;
+    let checkedEpoch = epoch;
+    let valid = true;
+    const checkAtEpoch = (currentEpoch) => {
+      if (!valid)
+        return false;
+      if (currentEpoch === undefined || currentEpoch !== checkedEpoch) {
+        const current = this.currentOnDemandGrant(localItemId);
+        valid = current?.source_version === grant.source_version && current.acquired_epoch === grant.acquired_epoch;
+        if (!valid)
+          controller.abort();
+        checkedEpoch = currentEpoch;
+      }
+      return valid;
+    };
+    const check = () => checkAtEpoch(this.onDemandGrantEpoch());
+    const checks = this.onDemandGrantChecks ??= new Set;
+    checks.add(checkAtEpoch);
+    if (checks.size === 1 && this.dbPath !== ":memory:") {
+      this.onDemandGrantTimer = setInterval(this.checkOnDemandGrantWork, ON_DEMAND_GRANT_EPOCH_CHECK_MS);
+      this.onDemandGrantTimer.unref?.();
+      const paths = grantNotifications ??= new Map;
+      const path = resolve10(this.dbPath);
+      const listeners = paths.get(path) ?? new Set;
+      listeners.add(this.checkOnDemandGrantWork);
+      paths.set(path, listeners);
+    }
+    check();
+    return { check, release: () => {
+      checks.delete(checkAtEpoch);
+      if (checks.size === 0)
+        this.stopOnDemandGrantChecks();
+    } };
+  }
+  checkOnDemandGrantWork = () => {
+    const checks = this.onDemandGrantChecks;
+    if (!checks?.size)
+      return;
+    const epoch = this.onDemandGrantEpoch();
+    if (epoch !== undefined && epoch === this.onDemandGrantCheckedEpoch)
+      return;
+    this.onDemandGrantCheckedEpoch = epoch;
+    for (const notify of checks)
+      notify(epoch);
+  };
+  notifyOnDemandGrantChange() {
+    if (this.dbPath === ":memory:")
+      this.checkOnDemandGrantWork();
+    else
+      for (const notify of grantNotifications?.get(resolve10(this.dbPath)) ?? [])
+        notify();
+  }
+  stopOnDemandGrantChecks() {
+    clearInterval(this.onDemandGrantTimer);
+    this.onDemandGrantTimer = undefined;
+    if (this.dbPath === ":memory:")
+      return;
+    const path = resolve10(this.dbPath);
+    const listeners = grantNotifications?.get(path);
+    listeners?.delete(this.checkOnDemandGrantWork);
+    if (listeners?.size === 0)
+      grantNotifications?.delete(path);
   }
   onDemandContentHeld(identity) {
     if (!this.db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'").get())
@@ -37219,7 +37429,7 @@ function validateCurrentConnectorStoreSchemaBeforeMigration(db) {
     validateConnectorStoreV12Schema(db, "v15", CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS);
     assertIndexColumns(db, "idx_connector_store_items_parent", ["parent_local_item_id"], "v15");
   }
-  if (version === 16)
+  if (version >= 16)
     validateVectorDigestSchema(db);
 }
 function validateConnectorStoreVisibilitySchema(db, versionLabel) {
@@ -37253,6 +37463,12 @@ function validateConnectorStoreSchema(db, version = CONNECTOR_STORE_SQLITE_SCHEM
   validateConnectorStoreV12Schema(db, "v15", CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS);
   if (version >= 16)
     validateVectorDigestSchema(db);
+  if (version >= 17) {
+    assertExactTableColumns(db, "on_demand_grant_epoch", ["id", "epoch"], false, "v17");
+    assertExactTableColumns(db, "on_demand_grant_acquisitions", ["local_item_id", "epoch"], false, "v17");
+    for (const trigger of ON_DEMAND_GRANT_EPOCH_TRIGGERS)
+      assertTriggerExists(db, trigger, "v17");
+  }
   assertIndexColumns(db, "idx_connector_store_items_parent", ["parent_local_item_id"], "v15");
   assertExactTableColumns(db, "chunk_media_releases", ["media_sha256", "media_path"], false, "v13");
   assertExactTableColumns(db, "chunk_media_failures", ["media_sha256", "reason", "failed_at", "attempts"], false, "v13");
@@ -37386,6 +37602,68 @@ function sameStrings(actual, expected) {
 function sameStringSet(actual, expected) {
   return actual.length === expected.length && expected.every((value) => actual.includes(value));
 }
+var ON_DEMAND_GRANT_EPOCH_TRIGGERS = [
+  "on_demand_grant_delete",
+  "on_demand_grant_update",
+  "on_demand_item_delete",
+  "on_demand_item_update",
+  "on_demand_grant_insert"
+];
+function createOnDemandReads(db) {
+  db.exec(`CREATE TABLE IF NOT EXISTS on_demand_item_reads (
+    local_item_id TEXT PRIMARY KEY, source_version TEXT NOT NULL, read_on_demand INTEGER NOT NULL DEFAULT 1
+  );`);
+}
+function createOnDemandGrantEpoch(db) {
+  db.transaction(() => db.exec(`
+    INSERT OR IGNORE INTO on_demand_grant_epoch (id, epoch) VALUES (1, 0);
+    CREATE TRIGGER IF NOT EXISTS ${ON_DEMAND_GRANT_EPOCH_TRIGGERS[4]} AFTER INSERT ON on_demand_item_reads
+    BEGIN
+      UPDATE on_demand_grant_epoch SET epoch = epoch + 1 WHERE id = 1;
+      INSERT INTO on_demand_grant_acquisitions (local_item_id, epoch)
+        SELECT NEW.local_item_id, epoch FROM on_demand_grant_epoch WHERE id = 1
+        ON CONFLICT(local_item_id) DO UPDATE SET epoch = excluded.epoch;
+    END;
+    CREATE TRIGGER IF NOT EXISTS ${ON_DEMAND_GRANT_EPOCH_TRIGGERS[0]} AFTER DELETE ON on_demand_item_reads
+    BEGIN
+      UPDATE on_demand_grant_epoch SET epoch = epoch + 1 WHERE id = 1;
+      DELETE FROM on_demand_grant_acquisitions WHERE local_item_id = OLD.local_item_id;
+    END;
+    CREATE TRIGGER IF NOT EXISTS ${ON_DEMAND_GRANT_EPOCH_TRIGGERS[1]} AFTER UPDATE OF source_version, local_item_id ON on_demand_item_reads
+    WHEN OLD.source_version IS NOT NEW.source_version OR OLD.local_item_id IS NOT NEW.local_item_id
+    BEGIN
+      UPDATE on_demand_grant_epoch SET epoch = epoch + 1 WHERE id = 1;
+      DELETE FROM on_demand_grant_acquisitions WHERE local_item_id = OLD.local_item_id;
+      INSERT INTO on_demand_grant_acquisitions (local_item_id, epoch)
+        SELECT NEW.local_item_id, epoch FROM on_demand_grant_epoch WHERE id = 1
+        ON CONFLICT(local_item_id) DO UPDATE SET epoch = excluded.epoch;
+    END;
+    CREATE TRIGGER IF NOT EXISTS ${ON_DEMAND_GRANT_EPOCH_TRIGGERS[2]} AFTER DELETE ON items
+    WHEN OLD.tombstoned = 0
+    BEGIN
+      UPDATE on_demand_grant_epoch SET epoch = epoch + 1 WHERE id = 1;
+      INSERT INTO on_demand_grant_acquisitions (local_item_id, epoch)
+        SELECT r.local_item_id, e.epoch FROM on_demand_item_reads r CROSS JOIN on_demand_grant_epoch e
+        WHERE r.local_item_id = OLD.local_item_id AND r.source_version = COALESCE(OLD.source_version, '') AND e.id = 1
+        ON CONFLICT(local_item_id) DO UPDATE SET epoch = excluded.epoch;
+    END;
+    CREATE TRIGGER IF NOT EXISTS ${ON_DEMAND_GRANT_EPOCH_TRIGGERS[3]} AFTER UPDATE OF source_version, local_item_id, tombstoned,
+      provider, account_scope, provider_item_id, normalized_conversation, locator_uri, source_scope_folder_keys_json ON items
+    WHEN OLD.tombstoned = 0 AND (NEW.tombstoned <> 0 OR OLD.source_version IS NOT NEW.source_version
+      OR OLD.local_item_id IS NOT NEW.local_item_id OR OLD.provider IS NOT NEW.provider
+      OR OLD.account_scope IS NOT NEW.account_scope OR OLD.provider_item_id IS NOT NEW.provider_item_id
+      OR OLD.normalized_conversation IS NOT NEW.normalized_conversation OR OLD.locator_uri IS NOT NEW.locator_uri
+      OR OLD.source_scope_folder_keys_json IS NOT NEW.source_scope_folder_keys_json)
+    BEGIN
+      UPDATE on_demand_grant_epoch SET epoch = epoch + 1 WHERE id = 1;
+      INSERT INTO on_demand_grant_acquisitions (local_item_id, epoch)
+        SELECT r.local_item_id, e.epoch FROM on_demand_item_reads r CROSS JOIN on_demand_grant_epoch e
+        WHERE r.local_item_id = OLD.local_item_id AND r.source_version = COALESCE(OLD.source_version, '') AND e.id = 1
+          AND (NEW.tombstoned <> 0 OR OLD.source_version IS NOT NEW.source_version OR OLD.local_item_id IS NOT NEW.local_item_id)
+        ON CONFLICT(local_item_id) DO UPDATE SET epoch = excluded.epoch;
+    END;
+  `))();
+}
 function applyConnectorStoreOpenSchema(db, version = CONNECTOR_STORE_SQLITE_SCHEMA_VERSION) {
   refuseUnversionedConnectorStoreSchema(db);
   LocalConnectorStore.migrateSchema(db);
@@ -37396,9 +37674,9 @@ function applyConnectorStoreOpenSchema(db, version = CONNECTOR_STORE_SQLITE_SCHE
   createConnectorStoreVisibilityTables(db);
   createStoreTotals(db, NON_SYNC_RUN_CONNECTORS_SQL);
   createConnectorStorePeopleIndex(db);
-  db.exec(`CREATE TABLE IF NOT EXISTS on_demand_item_reads (
-    local_item_id TEXT PRIMARY KEY, source_version TEXT NOT NULL, read_on_demand INTEGER NOT NULL DEFAULT 1
-  );`);
+  createOnDemandReads(db);
+  if (version >= 17)
+    createOnDemandGrantEpoch(db);
   validateConnectorStoreSchema(db, version);
 }
 var openShape;
@@ -38806,8 +39084,10 @@ function optionalEnvironmentString(value) {
 // src/workers/dropbox-files/dropbox-content-hash.ts
 var DROPBOX_CONTENT_HASH_BLOCK_SIZE = 4 * 1024 * 1024;
 // src/workers/file-extraction/extractors/command-runner.ts
+import { AsyncLocalStorage as AsyncLocalStorage12 } from "node:async_hooks";
 import { execFile, spawn as spawn2 } from "node:child_process";
 import { promisify } from "node:util";
+var activeExtraction = new AsyncLocalStorage12;
 var execFileAsync = promisify(execFile);
 var resolvedCommands = new Map;
 // src/workers/connector-store/filter-capabilities.ts

@@ -19,7 +19,7 @@ import { installedTierMigrationLaneSpecs, type TierMigrationLaneSpec, type TierM
 import { CONNECTOR_STORE_SQLITE_STORE_ID, type LocalConnectorStore } from '../workers/connector-store/local-index.ts';
 import { settleSecretsCopies } from '../workers/connector-store/secrets-disposition.ts';
 import { storedSignals } from '../workers/connector-store/stored-names.ts';
-import { moveRestoredItemToHold, TIER_MOVE_CONNECTOR_ID } from '../workers/connector-store/tier-move.ts';
+import { moveRestoredItemToHold, retireRestoredTierLowerings, TIER_MOVE_CONNECTOR_ID } from '../workers/connector-store/tier-move.ts';
 import { TieredStoreSet, tieredStoreSetLedgerPath, type TieredStoreLegSpec } from '../workers/connector-store/tiered-store-set.ts';
 import type { SourceTrustDomain } from './source-index/types.ts';
 
@@ -27,7 +27,7 @@ import type { SourceTrustDomain } from './source-index/types.ts';
 // tiered. Start at the schema understood by the original put-back release.
 const INITIAL_RESTORED_LEDGER_SCHEMA = 12;
 
-/** Place restored Personal bodies while the previous engine is still stopped. */
+/** Check restored moves and Personal bodies while the previous engine is still stopped. */
 export function holdRestoredPersonalContent(env: LayoutEnv): void {
   const specs = installedTierMigrationLaneSpecs(env);
   const roster = placedRosterStores(env);
@@ -46,9 +46,11 @@ export function holdRestoredPersonalContent(env: LayoutEnv): void {
   const mounts = declaredConnectorStoreMountPaths(env).filter(mount => !hasFolderLayout(mount.sourceId));
   const personalMounts = mounts.filter(mount => mount.trustDomain === 'internal' && existsSync(mount.dbPath));
   if (!existsSync(accountFoldersRoot(env)) && personalMounts.length === 0
-    && !specs.some(spec => spec.legs.internal && existsSync(spec.legs.internal.dbPath))) return;
+    && !specs.some(spec => (spec.legs.internal && existsSync(spec.legs.internal.dbPath))
+      || existsSync(tieredStoreSetLedgerPath(spec.legs.secure_local.dbPath)))) return;
   const registry = readSourceRegistry(env);
   const checked = new Set<string>();
+  const checkedLedgers = new Set<string>();
   for (const spec of specs) {
     const accounts = registry.accounts.filter(account => account.source_id === spec.sourceId);
     if (!accounts.some(account => account.slot === DEFAULT_ACCOUNT_SLOT && account.state !== 'active')) {
@@ -64,9 +66,12 @@ export function holdRestoredPersonalContent(env: LayoutEnv): void {
     }
   }
   for (const personal of personalMounts) {
-    if (checked.has(realpathSync(personal.dbPath)) || !restoredConnectorStoreHasBody(personal.dbPath)) continue;
+    if (checked.has(realpathSync(personal.dbPath))) continue;
     const destinations = mounts.filter(mount => mount.sourceId === personal.sourceId && mount.trustDomain === 'secure_local');
-    if (destinations.length !== 1 || destinations[0]!.dbPath === personal.dbPath) throw missingPrivateStore(personal.corpusId);
+    if (destinations.length !== 1 || destinations[0]!.dbPath === personal.dbPath) {
+      if (restoredConnectorStoreHasBody(personal.dbPath)) throw missingPrivateStore(personal.corpusId);
+      continue;
+    }
     const secure = destinations[0]!;
     const family = corpusById.get(personal.corpusId)?.family ?? 'x-restored';
     holdLane({ sourceId: personal.sourceId }, {
@@ -85,16 +90,25 @@ export function holdRestoredPersonalContent(env: LayoutEnv): void {
 
   function holdLane(account: StorageAccount, spec: TierMigrationLaneSpec): void {
     const personal = spec.legs.internal;
-    if (!personal || !existsSync(personal.dbPath)) return;
-    const path = realpathSync(personal.dbPath);
-    if (checked.has(path)) return;
-    if (restoredConnectorStoreHasBody(personal.dbPath)) {
-      const securePath = spec.legs.secure_local.dbPath;
+    const path = personal && existsSync(personal.dbPath) ? realpathSync(personal.dbPath) : undefined;
+    if (path && checked.has(path)) return;
+    const holdBodies = !!(personal && path && restoredConnectorStoreHasBody(personal.dbPath));
+    const securePath = spec.legs.secure_local.dbPath;
+    const ledgerPath = tieredStoreSetLedgerPath(securePath);
+    if (holdBodies && personal && path) {
       if (path === (existsSync(securePath) ? realpathSync(securePath) : resolve(securePath))) throw missingPrivateStore(personal.corpusId);
-      if (!tierLedgerIsWithin(tierStoreDataRoot(personal.dbPath), tieredStoreSetLedgerPath(securePath))) throw missingPrivateStore(personal.corpusId);
-      holdLaneContent(env, account, spec);
+      if (!tierLedgerIsWithin(tierStoreDataRoot(personal.dbPath), ledgerPath)) throw missingPrivateStore(personal.corpusId);
     }
-    checked.add(path);
+    const existingLedger = existsSync(ledgerPath) ? realpathSync(ledgerPath) : undefined;
+    if (existingLedger && !tierLedgerIsWithin(tierStoreDataRoot(securePath), existingLedger)) {
+      throw missingPrivateStore(personal?.corpusId ?? spec.sourceId);
+    }
+    const ledgerSchema = existingLedger ? storeFileSchemaVersion(ledgerPath, TIER_LEDGER_SQLITE_STORE_ID) : INITIAL_RESTORED_LEDGER_SCHEMA;
+    if (holdBodies || (existingLedger && ledgerSchema >= INITIAL_RESTORED_LEDGER_SCHEMA && !checkedLedgers.has(existingLedger))) {
+      holdLaneContent(env, account, spec, ledgerPath, ledgerSchema, holdBodies);
+      if (existingLedger) checkedLedgers.add(existingLedger);
+    }
+    if (path) checked.add(path);
   }
 }
 
@@ -106,33 +120,29 @@ function legEntries(spec: TierMigrationLaneSpec): Array<[SourceTrustDomain, Tier
   return Object.entries(spec.legs) as Array<[SourceTrustDomain, TierMigrationLegSpec]>;
 }
 
-function holdLaneContent(env: LayoutEnv, account: StorageAccount, spec: TierMigrationLaneSpec): void {
-  const internal = spec.legs.internal!;
-  const ledgerPath = tieredStoreSetLedgerPath(spec.legs.secure_local.dbPath);
-  const restoredStoreSchema = storeFileSchemaVersion(internal.dbPath, CONNECTOR_STORE_SQLITE_STORE_ID);
-  const ledger = openTierLedger(account, {
-    dbPath: ledgerPath,
-    restoreSchemaVersion: existsSync(ledgerPath)
-      ? storeFileSchemaVersion(ledgerPath, TIER_LEDGER_SQLITE_STORE_ID) : INITIAL_RESTORED_LEDGER_SCHEMA,
-  }, env);
+function holdLaneContent(env: LayoutEnv, account: StorageAccount, spec: TierMigrationLaneSpec,
+  ledgerPath: string, ledgerSchema: number, holdBodies: boolean): void {
+  const restoredStoreSchema = holdBodies ? storeFileSchemaVersion(spec.legs.internal!.dbPath, CONNECTOR_STORE_SQLITE_STORE_ID) : undefined;
+  const ledger = openTierLedger(account, { dbPath: ledgerPath, restoreSchemaVersion: ledgerSchema }, env);
   const stores: LocalConnectorStore[] = [];
   let queue: TierSnifferStore | undefined;
   try {
     const snifferPath = tierSnifferPathForLedger(ledgerPath);
-    if (existsSync(snifferPath)) queue = openTierSniffer(account, { dbPath: snifferPath, restoreQueue: true }, env);
+    if (holdBodies && existsSync(snifferPath)) queue = openTierSniffer(account, { dbPath: snifferPath, restoreQueue: true }, env);
     const legs = legEntries(spec).map(([trustDomain, leg]): TieredStoreLegSpec => {
       return {
         trustDomain, corpusId: leg.corpusId, exists: () => existsSync(leg.dbPath),
         ...(leg.restingTier ? { restingTier: leg.restingTier } : {}),
         open() {
+          const schema = existsSync(leg.dbPath) ? storeFileSchemaVersion(leg.dbPath, CONNECTOR_STORE_SQLITE_STORE_ID) : restoredStoreSchema;
+          if (schema === undefined) throw new Error('A restored tier store is missing.');
           const store = openConnectorStore(account, {
             dbPath: leg.dbPath,
             corpusId: leg.corpusId,
             family: leg.family,
             trustDomain,
             tierLedger: ledger,
-            restoreSchemaVersion: existsSync(leg.dbPath)
-              ? storeFileSchemaVersion(leg.dbPath, CONNECTOR_STORE_SQLITE_STORE_ID) : restoredStoreSchema,
+            restoreSchemaVersion: schema,
           }, env);
           stores.push(store);
           return store;
@@ -142,10 +152,11 @@ function holdLaneContent(env: LayoutEnv, account: StorageAccount, spec: TierMigr
     const set = new TieredStoreSet({ setId: spec.setId, ledger, legs, registerWithLedger: false, skipOpeningMaintenance: true,
       ...(spec.splitLayers === false ? { splitLayers: false } : {}),
     });
-    const personal = set.store('internal')!;
-    const binding = personal.tierSetBinding();
+    const personal = holdBodies ? set.store('internal')! : undefined;
+    const binding = personal?.tierSetBinding();
     if (binding && binding.ledgerId !== ledger.ledgerId()) throw new Error('The restored Personal store is bound to a different privacy ledger.');
-    placeRestoredBodies(set, personal, queue);
+    retireRestoredTierLowerings(set);
+    if (personal) placeRestoredBodies(set, personal, queue);
   } finally {
     for (const store of stores.reverse()) store.close();
     queue?.close();

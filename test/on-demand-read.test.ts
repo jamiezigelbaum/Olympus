@@ -1,3 +1,4 @@
+import { registeredLimits } from '../src/core/limit-stops.ts';
 import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import { classifyContentTier } from '../src/workers/classification/tier-classifier.ts';
 import { approveFileSourceScope, readFileSourceScopeApproval, connectedFileSourceAccountGeneration, fileSourceScopeAllowsMetadata, fileSourceScopeAllowsContent } from '../src/core/source-scope-approval.ts';
@@ -5,7 +6,7 @@ import { createFileExtractionRuntime, fileExtractionCorporaRoster } from '../src
 import { createTestClock, waitFor } from './helpers/test-clock.ts';
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { LocalFileExtractionJobStore } from '../src/workers/file-extraction/job-store.ts';
 import { createFileExtractionRunner } from '../src/workers/file-extraction/runner.ts';
@@ -17,6 +18,7 @@ import { createSourceExclusionMatcher, parseSourceIngestionExclusions } from '..
 import { routeSourceIndexSearch } from '../src/core/source-index/router.ts';
 import { buildSourceIndexCorpusRegistry, defineSourceIndexCorpus } from '../src/core/source-index/corpus.ts';
 import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
+import { assertSqliteSchemaCanOpen } from '../src/core/sqlite-migrations.ts';
 import { createAnalystSourceIndexAnswerHandler } from '../src/workers/source-index/analyst-answer.ts';
 import { LocalConnectorStore, createConnectorStoreContentProvider, createConnectorStoreCorpusAdapter, defineConnectorCorpus } from '../src/workers/connector-store/index.ts';
 import { fixtureConnector, JUDGED_PERSONAL_SNIFFER } from './helpers/tier-fixtures.ts';
@@ -98,7 +100,7 @@ function onDemandTierSet(dir: string, store: LocalConnectorStore, exclusions?: R
   return { set, privateStore, settlePersonal };
 }
 
-async function driveFixture(limits: { files: number; bytes: number }, ids = ['a']) {
+async function driveFixture(limits: { files: number; bytes: number }, ids = ['a'], download?: (signal: AbortSignal | null | undefined) => Promise<Response>) {
   const dir = mkdtempSync(join(tmpdir(), 'on-demand-drive-'));
   const corpusId = GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID;
   const text = 'Café 😀 private notes';
@@ -124,7 +126,10 @@ async function driveFixture(limits: { files: number; bytes: number }, ids = ['a'
   expect(store.activeLocalItemRow(items[0]!.identity.localItemId)).toBeDefined();
   const urls: string[] = [];
   const client = createRestGoogleDriveApiClient({ token: 'test-token', baseUrl: 'https://drive.test/drive/v3', maxRetries: 0,
-    fetch: async input => { urls.push(String(input)); return new Response(text); },
+    fetch: async (input, init) => {
+      urls.push(String(input));
+      return download ? download(init?.signal) : new Response(text);
+    },
   });
   runtime = createFileExtractionRuntime({ enabled: true, connectorStores: [store], jobsDbPath: join(dir, 'jobs.sqlite'),
     env: { OLYMPUS_DATA_DIR: dir, OLYMPUS_ON_DEMAND_FILES_PER_QUESTION: String(limits.files), OLYMPUS_ON_DEMAND_BYTES_PER_QUESTION: String(limits.bytes) },
@@ -146,6 +151,162 @@ async function driveFixture(limits: { files: number; bytes: number }, ids = ['a'
 }
 
 describe('read on demand', () => {
+  test('committed revocation publishes the store grant epoch to an already open reader', async () => {
+    const f = await driveFixture({ files: 3, bytes: 256 });
+    using db = new Database(f.store.dbPath, { readonly: true });
+    expect(() => assertSqliteSchemaCanOpen(db, 'connector-store', 16)).not.toThrow();
+    const reader = new LocalConnectorStore({ dbPath: f.store.dbPath, corpusId: f.store.corpusId, family: 'file',
+      trustDomain: 'internal', readOnly: true });
+    cleanup.push(() => reader.close());
+    f.store.grantOnDemandRead('personal:a', 'v1');
+    const epoch = reader.onDemandGrantEpoch();
+    expect(epoch).toBe(f.store.onDemandGrantEpoch());
+    expect(reader.readOnDemand('personal:a', 'v1')).toBe(true);
+    f.store.revokeOnDemandRead('personal:a');
+    expect(reader.onDemandGrantEpoch()).toBeGreaterThan(epoch!);
+    expect(reader.readOnDemand('personal:a', 'v1')).toBe(false);
+  });
+
+  test('changing a granted item version invalidates the store epoch without changing the grant row', async () => {
+    const { store } = await driveFixture({ files: 3, bytes: 256 });
+    store.grantOnDemandRead('personal:a', 'v1');
+    const epoch = store.onDemandGrantEpoch();
+    using db = new Database(store.dbPath);
+    db.query('UPDATE items SET source_version = ? WHERE local_item_id = ?').run('v2', 'personal:a');
+    expect(store.onDemandGrantEpoch()).toBeGreaterThan(epoch!);
+    expect(store.currentOnDemandRead('personal:a', 'v1')).toBe(false);
+  });
+
+  test('revoking an on-demand grant aborts the active provider download', async () => {
+    const running = Promise.withResolvers<AbortSignal | null | undefined>();
+    const release = Promise.withResolvers<Response>();
+    const f = await driveFixture({ files: 3, bytes: 256 }, ['a'], signal => {
+      running.resolve(signal);
+      signal?.addEventListener('abort', () => release.reject(signal.reason), { once: true });
+      return release.promise;
+    });
+    expect(await f.read('a')).toMatchObject({ state: 'queued' });
+    const signal = await running.promise;
+    f.store.revokeOnDemandRead('personal:a');
+    release.resolve(new Response(f.text));
+    expect(signal?.aborted).toBe(true);
+    await waitFor(() => f.job('a')?.status === 'blocked_policy', { description: 'revoked read settles' });
+    expect(f.store.localContent('personal:a')?.chunks).toEqual([]);
+  });
+
+  test('a grant deleted by a separate connection cancels active work', async () => {
+    const { store } = await driveFixture({ files: 3, bytes: 256 });
+    store.grantOnDemandRead('personal:a', 'v1');
+    const controller = new AbortController();
+    const grant = store.observeOnDemandRead('personal:a', 'v1', controller)!;
+    try {
+      expect(controller.signal.aborted).toBe(false);
+      using writer = new Database(store.dbPath);
+      writer.query('DELETE FROM on_demand_item_reads WHERE local_item_id = ?').run('personal:a');
+      await waitFor(() => controller.signal.aborted, { description: 'revocation notification' });
+    } finally {
+      grant.release();
+    }
+  });
+
+  test('closing a store aborts its grant-dependent work', async () => {
+    const { store } = await driveFixture({ files: 3, bytes: 256 });
+    store.grantOnDemandRead('personal:a', 'v1');
+    const controller = new AbortController();
+    const grant = store.observeOnDemandRead('personal:a', 'v1', controller)!;
+    try {
+      expect(grant.check()).toBe(true);
+      store.close();
+      expect(controller.signal.aborted).toBe(true);
+      expect(grant.check()).toBe(false);
+    } finally {
+      grant.release();
+    }
+  });
+
+  test('a same-version regrant does not preserve active work across revocation', async () => {
+    const { store } = await driveFixture({ files: 3, bytes: 256 });
+    store.grantOnDemandRead('personal:a', 'v1');
+    const controller = new AbortController();
+    const grant = store.observeOnDemandRead('personal:a', 'v1', controller)!;
+    try {
+      using writer = new Database(store.dbPath);
+      writer.transaction(() => {
+        writer.query('DELETE FROM on_demand_item_reads WHERE local_item_id = ?').run('personal:a');
+        writer.query('INSERT INTO on_demand_item_reads(local_item_id, source_version) VALUES (?, ?)').run('personal:a', 'v1');
+      })();
+      expect(store.currentOnDemandRead('personal:a', 'v1')).toBe(true);
+      expect(grant.check()).toBe(false);
+      expect(controller.signal.aborted).toBe(true);
+    } finally {
+      grant.release();
+    }
+  });
+
+  test('a reader opened before the epoch migration withdraws work across a same-version regrant', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'on-demand-legacy-reader-'));
+    const options = { dbPath: join(dir, 'store.sqlite'), corpusId: 'internal.fixture.files', family: 'file', trustDomain: 'internal' } as const;
+    const old = new LocalConnectorStore({ ...options, restoreSchemaVersion: 16 });
+    try {
+      await old.syncFromConnector(fixtureConnector(() => [{ id: 'report', name: 'orchard.txt', text: 'quartzneedle' }]),
+        { fetchContent: true, tierClassification: { sniffer: JUDGED_PERSONAL_SNIFFER } });
+      old.grantOnDemandRead('personal:report', 'v1');
+    } finally { old.close(); }
+    const reader = new LocalConnectorStore({ ...options, readOnly: true });
+    const controller = new AbortController();
+    const hold = reader.observeOnDemandRead('personal:report', 'v1', controller)!;
+    try {
+      expect(hold.check()).toBe(true);
+      const writer = new LocalConnectorStore(options);
+      try {
+        using other = new Database(options.dbPath);
+        other.run("DELETE FROM on_demand_item_reads WHERE local_item_id = 'personal:report'");
+        other.run("INSERT INTO on_demand_item_reads(local_item_id, source_version) VALUES ('personal:report', 'v1')");
+      } finally { writer.close(); }
+      expect(hold.check()).toBe(false);
+      expect(controller.signal.aborted).toBe(true);
+    } finally {
+      hold.release();
+      reader.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('revoking an item grant aborts in-flight extraction before it can write', async () => {
+    const f = fixture();
+    const { store } = await driveFixture({ files: 3, bytes: 256 });
+    store.grantOnDemandRead('personal:a', 'v1');
+    const lane = { corpusId: 'internal.fixture.files', provider: 'fixture', accountScope: 'one', approvedScopeKey: 'scope' };
+    const running = Promise.withResolvers<AbortSignal | undefined>();
+    const release = Promise.withResolvers<void>();
+    let writes = 0;
+    const extractor: Extractor = {
+      kind: 'local_text', version: 'v1', input: { kind: 'none' }, egress: 'local', accepts: () => true,
+      async extract(input) {
+        running.resolve(input.signal);
+        await release.promise;
+        return { status: 'indexed', text: 'body text' };
+      },
+    };
+    const runner = createFileExtractionRunner({ jobs: f.context.jobs, registry: buildExtractorRegistry([extractor]), corpora: [{
+      corpusId: lane.corpusId, trustDomain: 'internal',
+      source: { id: 'fixture', corpusId: lane.corpusId, provider: lane.provider,
+        async listCandidates() { return { candidates: [], done: true }; },
+        async fetch() { return { bytes: new Uint8Array([1]) }; } },
+      sink: { async accept() { writes++; return { accepted: true, chunksIndexed: 1, chunksAwaitingEmbedding: 0 }; } },
+      holdOnDemandRead: (_ref, controller) => store.observeOnDemandRead('personal:a', 'v1', controller),
+    }] });
+    expect(await requestOnDemandRead(req(), f.context)).toMatchObject({ state: 'queued' });
+    const run = runner.run({ ...lane, providerItemIds: ['item'], limit: 1, reclassify: false });
+    const signal = await running.promise;
+    store.revokeOnDemandRead('personal:a');
+    release.resolve();
+    const result = await run;
+    expect(signal?.aborted).toBe(true);
+    expect(result.counts.blocked_policy).toBe(1);
+    expect(writes).toBe(0);
+  });
+
   test('third mode parses, approves names, and does not approve bulk extraction', () => {
     const policy = parseSourceIngestionPolicy({ ...defaultDropboxIngestionPolicy({ stillImagesRead: false }),
       roots: [{ path: '/Selected', approved_scope_key: 'dropbox.personal:/Selected', default_action: 'on_demand' }],
@@ -566,14 +727,13 @@ describe('read on demand', () => {
     const dir = mkdtempSync(join(tmpdir(), 'on-demand-emission-'));
     const dbPath = join(dir, 'store.sqlite');
     const store = new LocalConnectorStore({ dbPath, corpusId: 'internal.fixture.files', family: 'file', trustDomain: 'internal' });
-    const db = new Database(dbPath);
-    cleanup.push(() => { db.close(); store.close(); rmSync(dir, { recursive: true, force: true }); });
+    cleanup.push(() => { store.close(); rmSync(dir, { recursive: true, force: true }); });
     const sync = (version: string, body: string) => store.syncFromConnector(fixtureConnector(() => [
       { id: 'report', name: 'orchard.txt', text: body, version },
     ]), { fetchContent: true, tierClassification: { sniffer: JUDGED_PERSONAL_SNIFFER } });
     await sync('v1', 'quartzneedle');
     store.grantOnDemandRead('personal:report', 'v1');
-    return { store, sync, revoke: () => db.run('DELETE FROM on_demand_item_reads'),
+    return { store, sync, revoke: () => store.revokeOnDemandRead('personal:report'),
       filters: { metadataOnlyLocatorPathScopes: ['/Files'] },
       request: { corpus: defineConnectorCorpus(store), context: { allowedTrustDomains: [store.trustDomain] },
         query: 'quartzneedle', maxResults: 10 },
@@ -689,6 +849,116 @@ describe('read on demand', () => {
     expect(response.hits[0]?.provenance?.chunk).toBeUndefined();
     expect(response.matchingCandidateIds).toHaveLength(titleMatches ? 1 : 0);
     expect(response.matchCounts?.[0]).toMatchObject({ matchedItems: titleMatches ? 1 : 0, contentMatchedItems: 0 });
+  });
+
+  test.each(['sibling search', 'visibility check'] as const)('direct search withdraws the primary hit and audit after revoke during %s', async phase => {
+    const { store, filters, request, revoke } = await searchableGrantFixture();
+    const sibling = new LocalConnectorStore({ dbPath: join(dirname(store.dbPath), 'sibling.sqlite'),
+      corpusId: 'secure_local.fixture.files', family: 'file', trustDomain: 'secure_local' });
+    cleanup.unshift(() => sibling.close());
+    let withdraw = false;
+    const worker = createEmailSourceWorker({
+      connectorStores: [store, sibling],
+      connectorStoreTierSiblings: () => [sibling.corpusId],
+      sourceIndexVisibilityGate: hits => {
+        if (withdraw && phase === 'visibility check') revoke();
+        return [...hits];
+      },
+      connectorStoreReadScope: current => {
+        if (current === sibling && withdraw && phase === 'sibling search') revoke();
+        return { allowed: true, filters };
+      },
+    });
+    async function direct() {
+      const response = await worker.fetch(new Request('http://worker.test/v1/source/index/search', {
+        method: 'POST', body: JSON.stringify({ corpus_id: store.corpusId, query: request.query }),
+      }));
+      expect(response.status).toBe(200);
+      return response.json();
+    }
+    expect((await direct()).hits[0].selected_item).toBeDefined();
+    withdraw = true;
+    const result = await direct();
+    expect(result.hits).toEqual([]);
+    expect(result.audit.metadata_hits).toBe(0);
+    expect(result.audit.lane_audits.some((audit: { candidateCount: number }) => audit.candidateCount > 0)).toBe(false);
+    expect((await direct()).hits).toEqual([]);
+  });
+
+  test.each(['keyword', 'hybrid'] as const)('routed %s hits, readWide IDs and audit counts withdraw a revoked body match', async retrievalMode => {
+    const { store, filters, request, revoke } = await searchableGrantFixture();
+    const provider: SourceEmbeddingProvider = { provider: 'built-in', backend: 'local', modelId: 'audit-epoch',
+      dimension: 2, configHash: '1', epochId: '1', async embed(inputs) { return inputs.map(() => [1, 0]); } };
+    if (retrievalMode === 'hybrid') await store.embedChunks({ provider });
+    const response = await routeSourceIndexSearch({
+      registry: buildSourceIndexCorpusRegistry([request.corpus]),
+      adapters: { [store.corpusId]: createConnectorStoreCorpusAdapter({ store, filters, retrievalMode,
+        embeddingProvider: provider, semanticRelevanceBar: 0.5 }) },
+      visibilityGate: hits => { expect(hits.length).toBeGreaterThan(0); revoke(); return [...hits]; },
+      request: { ...request, readWide: true },
+    });
+    expect(response.hits).toEqual([]);
+    expect(response.matchingCandidateIds).toEqual([]);
+    expect(response.matchCounts?.[0]).toMatchObject({ matchedItems: 0, contentMatchedItems: 0 });
+    expect(response.laneAudits.some(audit => audit.candidateCount > 0 || audit.returnedCount > 0)).toBe(false);
+  });
+
+  test('moving a matched item into a names-only folder withdraws its ungranted body', async () => {
+    const { store, request, revoke } = await searchableGrantFixture();
+    revoke();
+    const filters = { metadataOnlyLocatorPathScopes: ['/names'] };
+    const db = new Database(store.dbPath);
+    try {
+      const response = await routeSourceIndexSearch({
+        registry: buildSourceIndexCorpusRegistry([request.corpus]),
+        adapters: { [store.corpusId]: createConnectorStoreCorpusAdapter({ store, filters }) },
+        visibilityGate: hits => {
+          expect(hits.length).toBeGreaterThan(0);
+          db.run("UPDATE items SET locator_uri = '/names/orchard.txt' WHERE provider_item_id = 'report'");
+          return [...hits];
+        },
+        request: { ...request, readWide: true },
+      });
+      expect(response.hits).toEqual([]);
+      expect(response.matchingCandidateIds).toEqual([]);
+      expect(response.matchCounts?.[0]?.matchedItems).toBe(0);
+    } finally { db.close(); }
+  });
+
+  test('a passage read withdraws its body when the grant changes during query embedding', async () => {
+    const { store, filters, request, revoke } = await searchableGrantFixture();
+    const embeddingProvider: SourceEmbeddingProvider = { provider: 'built-in', backend: 'local', modelId: 'read-epoch',
+      dimension: 2, configHash: '1', epochId: '1', async embed(inputs) { return inputs.map(() => [1, 0]); } };
+    await store.embedChunks({ provider: embeddingProvider });
+    const { hits } = await createConnectorStoreCorpusAdapter({ store, filters })(request);
+    const content = createConnectorStoreContentProvider({ store, contentAllowed: false, metadataFilters: {}, embeddingProvider });
+    const read = () => content.fetchLocalContent({ provenance: hits[0]!.provenance!, trustDomain: store.trustDomain,
+      query: request.query, maxChars: 1000 });
+    expect((await read())?.chunks).toEqual(['quartzneedle']);
+    spyOn(embeddingProvider, 'embed').mockImplementationOnce(async () => { revoke(); return [[1, 0]]; });
+    expect((await read())?.chunks ?? []).toEqual([]);
+  });
+
+  test('revocation uses its registered commit wait', async () => {
+    const { store, revoke } = await searchableGrantFixture();
+    const db = new Database(store.dbPath);
+    try {
+      db.exec(`CREATE TABLE observed_revoke_wait (ms INTEGER);
+        CREATE TRIGGER capture_revoke_wait AFTER DELETE ON on_demand_item_reads BEGIN
+          INSERT INTO observed_revoke_wait SELECT timeout FROM pragma_busy_timeout;
+        END;`);
+      const policy = registeredLimits().find(entry => entry.id === 'privacy.revocation_write');
+      expect(policy).toMatchObject({ kind: 'time', unit: 'ms', milliseconds: 1_000 });
+      revoke();
+      expect(db.query('SELECT ms FROM observed_revoke_wait').get()).toEqual({ ms: 1_000 });
+    } finally { db.close(); }
+  });
+
+  test('an unchanged grant epoch delivers without querying individual grants again', async () => {
+    const { store, filters, request } = await searchableGrantFixture();
+    const check = spyOn(store, 'searchGrantLayers');
+    expect((await createConnectorStoreCorpusAdapter({ store, filters })(request)).hits).toHaveLength(1);
+    expect(check).not.toHaveBeenCalled();
   });
 
   test.each(['same-version title', 'replacement version'] as const)('a timeout recovers a revoked body match only from an independent same-version title (%s)', async version => {

@@ -36,9 +36,11 @@ import {
   OWNER_OVERRIDE_SECRET_REVIEW_REASON,
   PERSONAL_FIRST_REASON,
   TIER_KEYS,
+  contentDigestReason,
   contentHeldForJudgment,
   contentJudgeVerdictReason,
   maxTier,
+  ownerOverrideMatchesDigest,
   ownerOverrideSecretReview,
   tierRank,
   type ContentTierDecision,
@@ -468,11 +470,16 @@ function pendingOverrideReview(record: TierLedgerRecord | undefined, override: I
   if (record?.state !== 'current' || !record.contentRead || override?.kind !== 'tier'
     || (override.tier !== 'private' && override.tier !== 'public')) return undefined;
   const review = ownerOverrideSecretReview(record.reasons);
-  return review && review.digest !== override.confirmedDigest ? review : undefined;
+  return review && !ownerOverrideMatchesDigest(override, review.digest) ? review : undefined;
 }
 
 const WRITE_INTENT_SQL = `
       SELECT * FROM tier_write_intents
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `;
+
+const ITEM_OVERRIDE_SQL = `
+      SELECT override_json, set_at FROM tier_overrides
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
     `;
 
@@ -2184,15 +2191,58 @@ export class TierLedger {
   setOverride(identity: TierLedgerIdentity, override: ItemTierOverride): void {
     if (override.kind === 'tier') assertTier(override.tier);
     this.db.transaction(() => {
+      const setAt = this.now().toISOString();
+      if (override.kind === 'tier' && (override.tier === 'private' || override.tier === 'public')
+        && override.setDigest === undefined) {
+        const current = this.getCurrent(identity);
+        const setDigest = override.confirmedDigest
+          ?? (current?.contentRead && current.state !== 'moving'
+            ? current.reasons.find(reason => reason.startsWith('content:sha256:')) : undefined)
+          ?? this.overrideHistoryDigest(identity, setAt);
+        if (setDigest) override = { ...override, setDigest };
+        // A scrubbed Secret has no current body to associate with this choice.
+        else if (this.itemIsSecret(identity)) override = { ...override, setDigest: null };
+      }
       this.writeMeta(overrideRestoreKey(identity), '');
       this.db.query(`
         INSERT INTO tier_overrides (provider, account_scope, conversation_key, provider_item_id, override_json, set_at)
         VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT (provider, account_scope, conversation_key, provider_item_id)
         DO UPDATE SET override_json = excluded.override_json, set_at = excluded.set_at
-      `).run(...idParams(identity), JSON.stringify(override), this.now().toISOString());
+      `).run(...idParams(identity), JSON.stringify(override), setAt);
       this.settleRevokedOwnerMove(identity);
     })();
+  }
+
+  private overrideHistoryDigest(identity: TierLedgerIdentity, setAt: string): string | undefined {
+    const row = this.db.query(`
+      SELECT reason.value AS digest FROM tier_history h
+      CROSS JOIN json_each(h.reasons_json) reason
+      WHERE h.provider = ? AND h.account_scope = ? AND h.conversation_key = ? AND h.provider_item_id = ?
+        AND h.decided_at <= ? AND reason.value GLOB 'content:sha256:*'
+      ORDER BY h.decided_at DESC, h.history_pk DESC LIMIT 1
+    `).get(...idParams(identity), setAt) as { digest: string } | null;
+    return row?.digest;
+  }
+
+  /** Bind a digestless Personal override to its receipt at set time, or its first observed body. */
+  observeOverrideText(identity: TierLedgerIdentity, text: string): ItemTierOverride | undefined {
+    const row = this.db.query(ITEM_OVERRIDE_SQL).get(...idParams(identity)) as { override_json: string; set_at: string } | null;
+    if (!row) return undefined;
+    const override = overrideFromJson(row.override_json);
+    if (override?.kind !== 'tier' || (override.tier !== 'private' && override.tier !== 'public')
+      || override.setDigest !== undefined) return override;
+    const setDigest = this.overrideHistoryDigest(identity, row.set_at)
+      ?? override.confirmedDigest ?? (!this.readOnly && text.trim() ? contentDigestReason(text) : undefined);
+    if (!setDigest) return override;
+    const bound = { ...override, setDigest };
+    if (this.readOnly) return bound;
+    const updated = this.db.query(`
+      UPDATE tier_overrides SET override_json = ?
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+        AND override_json = ? AND set_at = ?
+    `).run(JSON.stringify(bound), ...idParams(identity), row.override_json, row.set_at);
+    return updated.changes === 1 ? bound : this.getOverride(identity);
   }
 
   ownerOverrideReview(identity: TierLedgerIdentity, record = this.getCurrent(identity), override = this.getOverride(identity)):
@@ -2219,7 +2269,7 @@ export class TierLedger {
       const override = this.getOverride(identity);
       if (override?.kind !== 'tier' || this.ownerOverrideReview(identity)?.digest !== digest) return false;
       if (choice === 'judge') return this.clearOverride(identity);
-      this.setOverride(identity, { kind: 'tier', tier: 'private', confirmedDigest: digest });
+      this.setOverride(identity, { ...override, confirmedDigest: digest });
       return true;
     }).immediate();
   }
@@ -2229,12 +2279,22 @@ export class TierLedger {
    * snapshot: the owner's override, and whether the item is Secrets already
    * (the sniffer fence, connector-store/tier-placement.ts, keys off it).
    */
-  classificationRead(identity: TierLedgerIdentity): { override: ItemTierOverride | undefined; secret: boolean; scrubRevision: number } {
-    return this.db.transaction(() => ({
-      override: this.getOverride(identity),
-      secret: this.itemIsSecret(identity),
-      scrubRevision: this.secretScrubRevision(identity),
-    }))();
+  classificationRead(identity: TierLedgerIdentity, text?: string):
+    { override: ItemTierOverride | undefined; secret: boolean; scrubRevision: number } {
+    const snapshot = this.db.transaction((observe: boolean) => {
+      const secret = this.itemIsSecret(identity);
+      return {
+        override: observe && text !== undefined ? this.observeOverrideText(identity, text)
+          : this.getOverride(identity),
+        secret,
+        scrubRevision: this.secretScrubRevision(identity),
+      };
+    });
+    const read = snapshot(false);
+    const override = read.override;
+    if (text === undefined || override?.kind !== 'tier' || (override.tier !== 'private' && override.tier !== 'public')
+      || override.setDigest !== undefined) return read;
+    return this.readOnly ? snapshot(true) : snapshot.immediate(true);
   }
 
   /**
@@ -2333,12 +2393,14 @@ export class TierLedger {
     return record !== undefined && [record.metadataTier, record.contentTier, record.targetMetadataTier, record.targetContentTier].includes('secrets');
   }
 
-  getOverride(identity: TierLedgerIdentity): ItemTierOverride | undefined {
-    const row = this.db.query(`
-      SELECT override_json FROM tier_overrides
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-    `).get(...idParams(identity)) as { override_json: string } | null;
-    return row ? overrideFromJson(row.override_json) : undefined;
+  getOverride(identity: TierLedgerIdentity, options: { withHistory?: true } = {}): ItemTierOverride | undefined {
+    const row = this.db.query(ITEM_OVERRIDE_SQL).get(...idParams(identity)) as { override_json: string; set_at: string } | null;
+    if (!row) return undefined;
+    const override = overrideFromJson(row.override_json);
+    if (!options.withHistory || override?.kind !== 'tier' || (override.tier !== 'private' && override.tier !== 'public')
+      || override.setDigest !== undefined) return override;
+    const setDigest = this.overrideHistoryDigest(identity, row.set_at) ?? override.confirmedDigest;
+    return setDigest ? { ...override, setDigest } : override;
   }
 
   /**
