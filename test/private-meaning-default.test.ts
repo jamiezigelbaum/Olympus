@@ -7,7 +7,8 @@ import { createSourceCorpusRegistry } from '../src/core/source-corpus-registry.t
 import { withFileLeaseSync } from '../src/core/file-lease.ts';
 import { seedEngineSovereignty } from '../src/core/engine-service.ts';
 import { createSovereigntyEngine, loadSovereigntyEngine, migratePrivateMeaningSearch, defaultSovereigntyConfigPath, type SovereigntyTrustDomainPolicy } from '../src/core/sovereignty.ts';
-import { storeEmbeddingScope, storeServedByMeaning, loadSourceWorkerSovereignty, createSourceIndexEmbeddingProviderFromSovereignty } from '../src/workers/engine/runtime/embedding-providers.ts';
+import { storeEmbeddingScope } from '../src/workers/connector-store/embedding-scope.ts';
+import { storeServedByMeaning, loadSourceWorkerSovereignty, createSourceIndexEmbeddingProviderFromSovereignty } from '../src/workers/engine/runtime/embedding-providers.ts';
 import { planStoreEmbedding } from '../src/workers/connector-store/embedding-plan.ts';
 import { LocalConnectorStore, defineConnectorCorpus } from '../src/workers/connector-store/index.ts';
 import { createSourceIndexStatusHandler } from '../src/workers/source-index/status.ts';
@@ -308,7 +309,7 @@ test('seeded default through worker target wiring gives a Private item a local v
     const target = planStoreEmbedding({
       store, provider,
       servedByMeaning: storeServedByMeaning({ store, sovereigntyEngine: engine, sourceCorpusRegistry: registry, fullCorpusDefinitions: [definition] }),
-      scope: storeEmbeddingScope({ store, sourceId: source.sourceId, scopeRef: undefined, authority: undefined, readScope: () => ({ allowed: true, contentAllowed: true }) }),
+      scope: storeEmbeddingScope({ store, provider, policy: 'open', scopeRef: undefined, authority: undefined, readScope: () => ({ allowed: true, contentAllowed: true }) }),
     });
     return target ? [target] : [];
   });

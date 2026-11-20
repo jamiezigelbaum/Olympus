@@ -71,6 +71,7 @@ import {
   contentHeldForJudgment,
   personalContentAuthorized,
   type ImageJudgmentSignal,
+  heldUntilJudged,
   type TierDecidedBy,
   type TierDecision,
   type TierKey,
@@ -2183,7 +2184,8 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     const firstPrivateWrite = legacyRaise || replacingLowerBody;
     const priorIntent = before?.state === 'moving' ? ledger.writeIntent(identity) : undefined;
     const holdsReplacement = (routed || hasRow) && contentRead
-      && (firstPrivateWrite || item.holdContentUntilJudged === true || contentHeldForJudgment(decision))
+      && (firstPrivateWrite || item.holdContentUntilJudged === true || heldUntilJudged(decision.reasons)
+        || contentHeldForJudgment(decision))
       && decision.contentTier !== 'secrets'
       && before?.state !== 'moving';
     // A legacy source can already be in Private with embedding enabled.

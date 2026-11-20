@@ -51,25 +51,28 @@ test.skipIf(!enabled)('split engine with an 8G cap stays within loop and main-th
   // Each case starts from the pristine fixture, copied outside the memory cap.
   // A file-map arm (cloud-job loop_stall_arm: on, off or bounded) runs the steady case only, with that setting for the whole engine.
   // With a -swap suffix (on-swap, off-swap, bounded-swap) the scope gets a 4G swap allowance: a swap reading, not a gate pass.
+  // With a -profiler suffix (off-profiler) the engines run JSC's sampling profiler for freeze sites: a diagnostic, not a gate
+  // pass, since the profiler cuts SQLite's busy waits short.
   const armInput = process.env.CJ_LOOP_STALL_ARM?.trim() || undefined;
   const coldStart = armInput === 'cold-start' || armInput === 'cold-start-throttled';
-  const armMatch = armInput === undefined ? undefined : /^(on|off|bounded)(-swap)?$/.exec(armInput);
-  if (armInput !== undefined && !coldStart && !armMatch) throw new Error(`Invalid CJ_LOOP_STALL_ARM ${armInput}; use on, off or bounded (optionally with -swap), cold-start or cold-start-throttled`);
+  const armMatch = armInput === undefined ? undefined : /^(on|off|bounded)(?:(-swap)|(-profiler))?$/.exec(armInput);
+  if (armInput !== undefined && !coldStart && !armMatch) throw new Error(`Invalid CJ_LOOP_STALL_ARM ${armInput}; use on, off or bounded (optionally with -swap or -profiler), cold-start or cold-start-throttled`);
   const arm = armMatch?.[1];
   const swapReading = Boolean(armMatch?.[2]);
+  const profilerArm = Boolean(armMatch?.[3]);
   const cases = coldStart ? ['cold-start'] : arm ? ['steady'] : ['steady', 'boot-after-upgrade'];
   const throttle = coldStartThrottle(armInput);
   const results = Object.fromEntries(cases.map(runCase => {
     expect(invoke(['bun', script, 'restore', '--dir', dir], 30 * 60_000, onDisk).status).toBe(0);
     const result = invoke(['systemd-run', '--user', '--scope', '--quiet', '-p', 'MemoryMax=8G', '-p', `MemorySwapMax=${swapReading ? '4G' : '0'}`, ...throttle.scope,
       '--', 'bun', script, 'run', '--dir', dir, '--seconds', '300', '--memory-max', '8G', '--case', runCase,
-      ...(arm ? ['--sqlite-mmap', arm] : []), ...(swapReading ? ['--swap-reading'] : []), ...throttle.bench], (coldStart ? 30 : 25) * 60_000, onDisk);
+      ...(arm ? ['--sqlite-mmap', arm] : []), ...(swapReading ? ['--swap-reading'] : []), ...(profilerArm ? ['--sampling-profiler'] : []), ...throttle.bench], (coldStart ? 30 : 25) * 60_000, onDisk);
     if (coldStart) expect(result.stdout).toMatch(/^cold-start: (?:REPRODUCED|NOT REPRODUCED)\b/m);
     return [runCase, result.status];
   }));
-  console.log(JSON.stringify({ phase: 'cases', arm: armInput ?? 'default', swap_reading: swapReading, results }));
+  console.log(JSON.stringify({ phase: 'cases', arm: armInput ?? 'default', swap_reading: swapReading, sampling_profiler: profilerArm, results }));
   // Bench arms accept either measured result. Missing measurements still fail.
-  if (swapReading || coldStart) expect(Object.values(results).every(code => code === 0 || code === 1)).toBe(true);
+  if (swapReading || profilerArm || coldStart) expect(Object.values(results).every(code => code === 0 || code === 1)).toBe(true);
   else expect(results).toEqual(Object.fromEntries(cases.map(runCase => [runCase, 0])));
 }, 240 * 60_000);
 

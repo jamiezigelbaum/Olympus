@@ -16842,20 +16842,20 @@ export class LocalConnectorStore {
    * Whether an item a caller selected by identity is this store's item and
    * served now under the given scope: its full identity (provider, account,
    * provider item id and conversation) names a live row here, the row matches
-   * the account scope and filters, and its content is served now
-   * (contentServedNow below). Item, chunk-existence and tier-ledger reads
-   * only; no chunk text is loaded. Fails closed.
+   * the account scope and filters, and the requested layer is visible.
+   * Names may be visible before an item's first content read.
    */
   selectedItemServable(
-    identity: Pick<SourceItemIdentity, 'localItemId' | 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>,
+    identity: SourceItemIdentity,
     accountScope: string | undefined,
     filters: ConnectorStoreSearchFilters | undefined,
+    layer: TierSearchLayer = 'content',
   ): boolean {
     try {
       const localItemId = typeof identity.localItemId === 'string' ? identity.localItemId.trim() : '';
       if (!localItemId) return false;
       const row = this.activeLocalItemRow(localItemId);
-      if (!row) return false;
+      if (!row || identity.family !== this.family || row.trustTier === 'S5') return false;
       if (
         row.identity.provider !== identity.provider
         || row.identity.accountScope !== identity.accountScope
@@ -16863,6 +16863,9 @@ export class LocalConnectorStore {
         || normalizeConversationId(row.identity.providerConversationId) !== normalizeConversationId(identity.providerConversationId)
       ) return false;
       if (!this.itemMatchesSearchFilters(localItemId, normalizeOptionalAccountScope(accountScope), filters)) return false;
+      if (layer === 'metadata') {
+        return this.tierVisibleRows([row.identity], entry => entry, () => 'metadata').length > 0;
+      }
       return this.contentServedNow(localItemId);
     } catch {
       return false;
@@ -18690,7 +18693,7 @@ export function createConnectorStoreCorpusAdapter(
   });
   expanded.metadataMatches = scopedSearch(request =>
     withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), () => metadataMatches(request), store));
-  expanded.selectedItemServable = (sourceItem) => store.selectedItemServable(sourceItem, options.accountScope, filters);
+  expanded.selectedItemServable = (sourceItem, layer) => store.selectedItemServable(sourceItem, options.accountScope, filters, layer);
   expanded.prepareKeywords = async (query) => {
     const status = { incomplete: false };
     await expandSourceIndexKeywords(query, () => store.keywordLanguages(), store, { waitMs: keywordPrepareWaitMs(), status });

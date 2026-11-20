@@ -12,12 +12,14 @@ import type { SourceConnector } from '../src/core/contracts.ts';
 import { defaultConfig } from '../src/core/config.ts';
 import { registerInstalledTierClassification } from '../src/workers/classification/installed-tier-classification-registry.ts';
 import { createArchiveExtractionRuntime } from '../src/workers/archive-import/extraction-runtime.ts';
+import { ARCHIVE_EXTRACTION_PROVIDER, ARCHIVE_EXTRACTION_SCOPE_KEY } from '../src/workers/archive-import/extraction-source.ts';
+import { LocalFileExtractionJobStore } from '../src/workers/file-extraction/job-store.ts';
 import {
   archiveExtractionTaskId,
   ARCHIVE_IMPORTS_CONCURRENCY_KEY,
   createArchiveImportsSchedulerSource,
 } from '../src/workers/archive-import/scheduler-source.ts';
-import { childProviderItemId, createFixtureChildConnector, type FixtureParentSpec } from './helpers/child-items-fixture.ts';
+import { childProviderItemId, createFixtureChildConnector, fixtureLocalItemId, type FixtureParentSpec } from './helpers/child-items-fixture.ts';
 import { childItemsArchiveHarness, FIXTURE_ARCHIVE_FORMAT } from './support/child-items-archive-harness.ts';
 
 const format = getArchiveFormat(FIXTURE_ARCHIVE_FORMAT)!;
@@ -73,6 +75,31 @@ describe('the archive lanes\' extraction runtime', () => {
     cleanups.push(() => extraction.close());
     expect(extraction.runner()).toBeDefined();
     expect(extraction.corpusIds()).toEqual([archiveCorpusId('secure_local', format.family)]);
+  });
+
+  test('applies the configured remote tier cap to an imported attachment', async () => {
+    const h = childItemsArchiveHarness(cleanups);
+    const archiveId = h.start();
+    await h.importAll(archiveId, mailbox());
+    const corpusId = archiveCorpusId('secure_local', format.family);
+    const jobsDbPath = join(h.base, 'jobs.sqlite');
+    const extraction = createArchiveExtractionRuntime({
+      runtime: h.runtime, env: h.env, jobsDbPath,
+      configuredCorpora: [{ corpusId, provider: ARCHIVE_EXTRACTION_PROVIDER, scopes: ['ignored'], maxTrustTierForRemote: 'S3' }],
+      extractors: { remote: { client: { describe: async () => { throw new Error('archive exceeds remote cap'); } } } },
+    });
+    cleanups.push(() => extraction.close());
+    const runner = extraction.runner()!;
+    const jobs = new LocalFileExtractionJobStore(jobsDbPath);
+    cleanups.push(() => jobs.close());
+    const providerItemId = childProviderItemId('m1', 'p1');
+    const lane = { corpusId, provider: ARCHIVE_EXTRACTION_PROVIDER, accountScope: archiveId, approvedScopeKey: ARCHIVE_EXTRACTION_SCOPE_KEY };
+    const job = jobs.enqueue({
+      refs: [{ ...lane, providerItemId, localItemId: fixtureLocalItemId(archiveId, providerItemId), sourceVersion: 'v1' }],
+      extractorKind: 'venice_e2ee_document', extractorVersion: 'venice-v1', policyDecision: 'index_allowed',
+    }).jobRefs[0]!;
+    await runner.run(lane);
+    expect(jobs.get(job.jobId)).toMatchObject({ status: 'blocked_policy', lastErrorKind: 'egress_policy_trust_tier' });
   });
 
   test('is closed for good by close(): nothing is served afterwards', async () => {

@@ -788,17 +788,12 @@ export function fileExtractionCorporaRoster(input: {
     resolveAccountScope: () => string;
   };
 }): FileExtractionCorpusConfig[] {
-  const configuredDropbox = input.configured.find(
-    (corpus) => corpus.corpusId === DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID,
-  );
-  const canonicalIds = new Set<string>();
   const canonical: FileExtractionCorpusConfig[] = [];
   if (input.dropbox && (
     input.dropbox.extractionScopes.length > 0
     || input.dropbox.resolveExtractionScopes !== undefined
     || input.dropbox.resolveReadScopes !== undefined
   )) {
-    canonicalIds.add(DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID);
     canonical.push({
       corpusId: DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID,
       provider: 'dropbox',
@@ -814,16 +809,9 @@ export function fileExtractionCorporaRoster(input: {
         : {}),
       resolveCredentialHandle: input.dropbox.resolveCredentialHandle,
       ownerConnectorId: 'dropbox',
-      ...(configuredDropbox?.maxTrustTierForRemote
-        ? {
-            maxTrustTierForRemote: configuredDropbox.maxTrustTierForRemote,
-            allowDefaultDeferred: configuredDropbox.allowDefaultDeferred === true,
-          }
-        : {}),
     });
   }
   if (input.localFiles) {
-    canonicalIds.add(LOCAL_FILES_CORPUS_ID);
     canonical.push({
       corpusId: LOCAL_FILES_CORPUS_ID,
       provider: LOCAL_FILES_PROVIDER,
@@ -838,7 +826,6 @@ export function fileExtractionCorporaRoster(input: {
     });
   }
   if (input.whatsapp === true) {
-    canonicalIds.add(WHATSAPP_LIVE_CORPUS_ID);
     canonical.push({
       corpusId: WHATSAPP_LIVE_CORPUS_ID,
       provider: 'whatsapp',
@@ -846,12 +833,8 @@ export function fileExtractionCorporaRoster(input: {
       ownerConnectorId: WHATSAPP_PRODUCT_CONNECTOR_ID,
     });
   }
-  for (const corpus of input.archive ?? []) {
-    canonicalIds.add(corpus.corpusId);
-    canonical.push(corpus);
-  }
+  canonical.push(...(input.archive ?? []));
   for (const corpusId of input.googleDrive?.corpusIds ?? []) {
-    canonicalIds.add(corpusId);
     canonical.push({
       corpusId,
       provider: GOOGLE_DRIVE_PROVIDER,
@@ -861,9 +844,16 @@ export function fileExtractionCorporaRoster(input: {
       ownerConnectorId: GOOGLE_DRIVE_PROVIDER,
     });
   }
+  const canonicalIds = new Set(canonical.map(corpus => corpus.corpusId));
+  function withConfiguredEgress(corpus: FileExtractionCorpusConfig): FileExtractionCorpusConfig {
+    const policy = input.configured.find(entry => entry.corpusId === corpus.corpusId);
+    return policy?.maxTrustTierForRemote
+      ? { ...corpus, maxTrustTierForRemote: policy.maxTrustTierForRemote, allowDefaultDeferred: policy.allowDefaultDeferred === true }
+      : corpus;
+  }
   return [
-    ...input.configured.filter((corpus) => !canonicalIds.has(corpus.corpusId)),
-    ...canonical,
+    ...input.configured.filter(corpus => !canonicalIds.has(corpus.corpusId)),
+    ...canonical.map(withConfiguredEgress),
   ];
 }
 

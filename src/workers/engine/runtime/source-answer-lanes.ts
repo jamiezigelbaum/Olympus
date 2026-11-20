@@ -263,6 +263,7 @@ export function createSourceAnswerLanes(
       })),
       excludedCorpusIds,
       contentProviders: Object.fromEntries(stores.flatMap((store) => {
+        if (excludedCorpusIds.has(store.corpusId)) return [];
         const mandatoryScope = deps.readScope(store);
         // Built whenever names are searchable, even with no content scope at
         // all: an item in a Names-only folder then reports as kept unread by

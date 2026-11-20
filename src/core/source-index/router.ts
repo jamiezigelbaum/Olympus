@@ -261,10 +261,10 @@ export interface SourceIndexCorpusSearchAdapter {
   /**
    * Whether an item a caller selected by identity is this corpus's item and
    * would be served now under this adapter's scope (account, filters, current
-   * tier and read policy), from metadata only. Absent when the adapter cannot
-   * tell without reading text.
+   * tier and read policy), without reading text. Defaults to checking content.
+   * A metadata check can admit an unread name for subsequent hydration.
    */
-  selectedItemServable?: (sourceItem: SourceItemIdentity) => boolean;
+  selectedItemServable?: (sourceItem: SourceItemIdentity, layer?: 'metadata' | 'content') => boolean;
 }
 
 export function withSourceIndexHybridAvailability(

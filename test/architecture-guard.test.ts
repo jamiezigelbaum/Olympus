@@ -234,6 +234,8 @@ const SOURCE_AGNOSTIC_SHARED_FILES = [
   'src/core/source-index/retrieval.ts',
   'src/core/source-index/router.ts',
   'src/core/source-index/selected-item-safety.ts',
+  'src/workers/connector-store/embedding-plan.ts',
+  'src/workers/connector-store/embedding-scope.ts',
   'src/workers/file-extraction/extractors/apple-vision-ocr.ts',
   'src/workers/file-extraction/extractors/audio-wav.ts',
   'src/workers/file-extraction/extractors/bounded-text.ts',

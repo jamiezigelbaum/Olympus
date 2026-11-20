@@ -275,7 +275,9 @@ export function decideItemTiers(
   // carries it: contracts.ts, 2.2.0), or the one its stored decision carries
   // (a store whose recording did not bring the lane's option still holds the
   // same way, and a later version of a held item stays held until judged).
+  // Every child waits for its own judgment as well.
   const holdUntilJudged = extra.requireContentVerdict === true
+    || item.identity.parent !== undefined
     || options?.holdContentUntilJudged === true
     || item.holdContentUntilJudged === true
     || heldUntilJudged(recorded?.reasons);

@@ -8,11 +8,14 @@ import {
   fileExtractionCorporaRoster,
   parseFileExtractionCorporaEnv,
 } from '../src/workers/engine/runtime/file-extraction-runtime.ts';
+import { LOCAL_FILES_CORPUS_ID } from '../src/workers/local-files/store.ts';
+import { fixtureConnector, fixtureItem } from './helpers/tier-fixtures.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID } from '../src/workers/dropbox-files/connector-store.ts';
 import {
   GOOGLE_DRIVE_DAILY_REQUEST_BUDGET_STATE_PATH_ENV,
   GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID,
+  GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID,
 } from '../src/workers/google-connectors/drive.ts';
 import { createCanonicalDropboxSchedulerSource } from '../src/workers/source-scheduler.ts';
 import {
@@ -217,6 +220,57 @@ describe('file-extraction roster follows the live handle registry', () => {
     expect(dropbox.maxTrustTierForRemote).toBe('S3');
     const whatsapp = roster.find((corpus) => corpus.corpusId === WHATSAPP_LIVE_CORPUS_ID)!;
     expect(whatsapp.ownerConnectorId).toBe(WHATSAPP_PRODUCT_CONNECTOR_ID);
+  });
+
+  test.each([
+    [DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID, 'dropbox'],
+    [LOCAL_FILES_CORPUS_ID, 'local_files'],
+    [WHATSAPP_LIVE_CORPUS_ID, 'whatsapp'],
+    [GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID, 'google_drive'],
+  ])('refuses remote extraction above the configured cap for %s', async (corpusId, provider) => {
+    const root = fixtureRoot();
+    const roster = fileExtractionCorporaRoster({
+      configured: [{ corpusId, provider, scopes: ['ignored'], maxTrustTierForRemote: 'S3', allowDefaultDeferred: true }],
+      dropbox: { extractionScopes: [DROPBOX_EXTRACTION_SCOPE], resolveCredentialHandle: () => undefined },
+      localFiles: { resolveExtractionScopes: () => ['local:/Approved'] },
+      whatsapp: true,
+      googleDrive: { corpusIds: [GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID], resolveCredentialHandle: () => undefined, resolveAccountScope: () => 'personal' },
+    });
+    expect(roster.filter(entry => entry.maxTrustTierForRemote !== undefined).map(entry => entry.corpusId)).toEqual([corpusId]);
+    const corpus = roster.find(c => c.corpusId === corpusId)!;
+    const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId, family: provider === 'whatsapp' ? 'chat' : 'file', trustDomain: 'secure_local' });
+    let runtime: ReturnType<typeof createFileExtractionRuntime>;
+    try {
+      const item = fixtureItem({ id: 'agenda', name: 'agenda.pdf' });
+      item.identity.provider = provider;
+      item.identity.family = store.family;
+      await store.syncFromConnector({
+        ...fixtureConnector(() => []), family: store.family,
+        async *listItems() { yield { items: [item], done: true }; },
+      }, { placement: { trustTier: 'S4', trustDomain: 'secure_local' } });
+      const scope = (corpus.resolveScopes?.() ?? corpus.scopes)[0]!;
+      const lane = { corpusId, provider, accountScope: item.identity.accountScope, approvedScopeKey: scope };
+      let fetches = 0;
+      let remoteCalls = 0;
+      runtime = createFileExtractionRuntime({
+        enabled: true, env: { XDG_DATA_HOME: root }, jobsDbPath: join(root, 'jobs.sqlite'),
+        corpora: [corpus], connectorStores: [store],
+        sourceFactories: new Map([[provider, () => ({
+          id: 'fixture', corpusId, provider, listCandidates: async () => ({ candidates: [], done: true }),
+          fetch: async () => { fetches++; return { bytes: new Uint8Array([1]), mimeType: 'application/pdf' }; },
+        })]]),
+        extractors: { remote: { client: { describe: async () => { remoteCalls++; return { text: 'fixture' }; } } } },
+      });
+      const ref = { ...lane, providerItemId: 'agenda', localItemId: item.identity.localItemId, sourceVersion: 'v1', mimeType: 'application/pdf' };
+      const job = runtime!.jobs.enqueue({ refs: [ref], extractorKind: 'venice_e2ee_document', extractorVersion: 'venice-v1', policyDecision: 'needs_review' }).jobRefs[0]!;
+      await runtime!.runner.run(lane);
+      expect(runtime!.jobs.get(job.jobId)).toMatchObject({ status: 'blocked_policy', lastErrorKind: 'egress_policy_trust_tier' });
+      expect(fetches).toBe(0);
+      expect(remoteCalls).toBe(0);
+    } finally {
+      runtime?.close();
+      store.close();
+    }
   });
 
   test('emits Dropbox extraction tasks for a handle that appears after boot', async () => {

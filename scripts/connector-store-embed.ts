@@ -12,6 +12,7 @@
 // secure_local stores refuse non-local providers inside embedChunks (the
 // trust rule is enforced by the store, not this script).
 
+import { loadConfig } from '../src/core/config.ts';
 import { SOURCE_FAMILIES, SOURCE_TRUST_DOMAINS } from '../src/core/source-index/types.ts';
 import type {
   ConnectorStoreEmbedSummary,
@@ -19,6 +20,8 @@ import type {
 } from '../src/workers/connector-store/index.ts';
 import { withDataOwnerLock } from '../src/core/data-owner-lock.ts';
 import { openConnectorStore, storageAccountForCorpus } from '../src/core/source-storage.ts';
+import { defaultExclusionContext } from '../src/workers/local-files/paths.ts';
+import { LOCAL_FILES_ACCOUNT_SCOPE, LOCAL_FILES_PROVIDER, LOCAL_FILES_SOURCE_ID } from '../src/workers/local-files/scope.ts';
 import { FileSourceScopeAuthority } from '../src/workers/source-scope-runtime.ts';
 import { gmailItemAccountScope } from '../src/workers/google-connectors/gmail-archive-target.ts';
 import { accountFromGoogleHandle } from '../src/workers/google-connectors/classification.ts';
@@ -26,7 +29,8 @@ import { readGmailRetainedAccountScope } from '../src/workers/email-source/gmail
 import { handleRegistryPathFromEnv } from '../src/workers/credential-broker/connected-handles.ts';
 import { recordedProviderAccount } from '../src/core/provider-account-history.ts';
 import { scopedEmbeddingOptions } from '../src/workers/connector-store/embedding-plan.ts';
-import { createSourceIndexEmbeddingProviderFromEnv, storeEmbeddingScope } from '../src/workers/engine/runtime/embedding-providers.ts';
+import { createSourceIndexEmbeddingProviderFromEnv } from '../src/workers/engine/runtime/embedding-providers.ts';
+import { createStoreEmbeddingScopeFor, registeredStoreReadScope } from '../src/workers/engine/runtime/store-scope-policies.ts';
 
 interface ConnectorStoreEmbedCliArgs {
   db: string;
@@ -174,26 +178,31 @@ async function runConnectorStoreEmbed(argv: readonly string[]): Promise<{
   const options = resolveConnectorStoreOptions(args);
   // Held for the whole run: it refuses while Olympus runs (core/data-owner-lock.ts).
   return withDataOwnerLock(process.env, async () => {
-    const account = storageAccountForCorpus(options);
+    const account = storageAccountForCorpus(options, loadConfig().sourceIndex.corpusRegistry.corpora);
     const store = openConnectorStore(account, options);
     try {
-      let embedding = { provider };
-      if (account.sourceId === 'gmail.email') {
-        const registryPath = handleRegistryPathFromEnv(process.env, true)!;
-        const authority = new FileSourceScopeAuthority({ registryPath, mailPinnedHandle: () => process.env.OLYMPUS_SOURCE_INDEX_GMAIL_CREDENTIAL_HANDLE });
-        const scope = storeEmbeddingScope({
-          store, provider, sourceId: account.sourceId, authority, scopeRef: authority.mailPolicyRef(),
-          readScope: () => ({ allowed: false }),
-          gmailRetainedAccountScope: () => readGmailRetainedAccountScope({
-            registryPath, historyAccountId: () => recordedProviderAccount(account),
-            itemScope: (handle) => gmailItemAccountScope([store], handle?.accountRole?.trim() || accountFromGoogleHandle(handle?.handle)),
-          }),
-        });
-        if (!scope.allowed) throw new Error('This Gmail processor needs the running worker to verify the current mailbox.');
-        embedding = scopedEmbeddingOptions(scope, provider);
-      }
+      const registryPath = handleRegistryPathFromEnv(process.env, true)!;
+      const authority = new FileSourceScopeAuthority({ registryPath, mailPinnedHandle: () => process.env.OLYMPUS_SOURCE_INDEX_GMAIL_CREDENTIAL_HANDLE });
+      // With the worker stopped, prove this store is clear of Olympus-owned
+      // folders using the same locator index the worker's cleanup walks.
+      const localFilesReady = () => store.locatorIdentityIndexReady()
+        && (defaultExclusionContext().ownRoots ?? []).every((locatorUri) => store.pageActiveItemsUnderLocatorIfIndexed({
+          provider: LOCAL_FILES_PROVIDER, accountScope: LOCAL_FILES_ACCOUNT_SCOPE, locatorUri, limit: 1,
+        }).items.length === 0);
+      const embeddingScopeFor = createStoreEmbeddingScopeFor({
+        sourceIdForStore: () => account.sourceId, authority,
+        readScope: () => account.sourceId === LOCAL_FILES_SOURCE_ID && !localFilesReady()
+          ? { allowed: false }
+          : registeredStoreReadScope(account.sourceId, authority),
+        gmailRetainedAccountScope: () => readGmailRetainedAccountScope({
+          registryPath, historyAccountId: () => recordedProviderAccount(account),
+          itemScope: (handle) => gmailItemAccountScope([store], handle?.accountRole?.trim() || accountFromGoogleHandle(handle?.handle)),
+        }),
+      });
+      const scope = embeddingScopeFor(store, provider);
+      if (!scope.allowed) throw new Error('This store has no verified content scope for offline embedding.');
       const embed = await store.embedChunks({
-        ...embedding,
+        ...scopedEmbeddingOptions(scope, provider),
         ...(args.limit !== undefined ? { limit: args.limit } : {}),
       });
       const status = store.status();

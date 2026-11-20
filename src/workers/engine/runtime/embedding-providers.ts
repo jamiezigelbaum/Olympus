@@ -17,11 +17,9 @@ import {
   type LoadSovereigntyOptions,
 } from '../../../core/sovereignty.ts';
 import { createSourceCorpusRegistry } from '../../../core/source-corpus-registry.ts';
-import { OperationError, SourceScopeApprovalRequiredError } from '../../../core/operation-error.ts';
-import { gmailEmbeddingPopulation } from '../../email-source/gmail-status-scope.ts';
+import { OperationError } from '../../../core/operation-error.ts';
 import {
   type LocalConnectorStore,
-  type ConnectorStoreSearchFilters,
 } from '../../connector-store/index.ts';
 import {
   type SourceTrustDomain,
@@ -44,17 +42,6 @@ import {
   sharedBuiltInSourceEmbeddingProvider,
 } from '../../source-index/built-in-embedding/provider.ts';
 import { BUILT_IN_EMBEDDING_ENV_DEFAULT_MODEL } from '../../source-index/built-in-embedding/manifest.ts';
-import {
-  SCHEDULER_SOURCE_IDS,
-} from '../../source-scheduler.ts';
-import {
-  FileSourceScopeAuthority,
-  isMailSourceScopePolicyRef,
-  scopeBoundEmbeddingProvider,
-  checkedEmbeddingProvider,
-  type SourceScopePolicyRef,
-} from '../../source-scope-runtime.ts';
-import { type StoreEmbeddingScope } from '../../connector-store/embedding-plan.ts';
 import { parseOptionalTimeoutSeconds, firstNonEmptyEnv, resolveSecretRefSync, bootSecretOptions } from './environment.ts';
 
 export function registerConnectorStoreEmbeddingLane(options: {
@@ -283,59 +270,6 @@ export function sourceStoresCouldEmbed(input: Omit<Parameters<typeof storeServed
   return input.sourceCorpusRegistry.list().some((corpus) => input.corpusIds.has(corpus.corpusId)
     && input.providerFor(corpus.trustDomain) !== undefined
     && storeServedByMeaning({ ...input, store: corpus }));
-}
-
-/** Sources whose stores are read only under the owner's current scope approval. */
-const SCOPE_APPROVED_SOURCE_IDS: ReadonlySet<string> = new Set([
-  SCHEDULER_SOURCE_IDS.gmail, SCHEDULER_SOURCE_IDS.googleDrive, SCHEDULER_SOURCE_IDS.dropbox, SCHEDULER_SOURCE_IDS.localFiles,
-]);
-
-/** Scope for queued and missing vectors, selected for the actual processor. */
-export function storeEmbeddingScope(input: {
-  store: LocalConnectorStore;
-  sourceId: string;
-  scopeRef: SourceScopePolicyRef | undefined;
-  authority: FileSourceScopeAuthority | undefined;
-  readScope: (store: LocalConnectorStore) => { allowed: false } | {
-    allowed: true; contentAllowed: boolean; accountScope?: string; contentFilters?: ConnectorStoreSearchFilters;
-  };
-  provider?: SourceEmbeddingProvider | undefined;
-  gmailRetainedAccountScope?: () => string | undefined;
-  gmailLiveProcessorVerified?: () => boolean;
-}): StoreEmbeddingScope {
-  const { store, sourceId, scopeRef: ref, authority } = input;
-  if (!SCOPE_APPROVED_SOURCE_IDS.has(sourceId)) return { allowed: true };
-  if (sourceId === SCHEDULER_SOURCE_IDS.gmail) {
-    const account = input.gmailRetainedAccountScope;
-    const accountScope = account?.();
-    if (!account || !accountScope) return { allowed: false, skipQueue: true };
-    if (ref && (!isMailSourceScopePolicyRef(ref) || !authority)) return { allowed: false, skipQueue: true };
-    const population = gmailEmbeddingPopulation({
-      provider: input.provider, accountScope, ref, privateStore: store.trustDomain === 'secure_local',
-    });
-    return {
-      ...population, allowed: true,
-      bind(provider) {
-        if (provider !== input.provider) throw new SourceScopeApprovalRequiredError('The selected mail processor changed before embedding.');
-        return checkedEmbeddingProvider(provider, () => {
-          if (account() !== accountScope) throw new SourceScopeApprovalRequiredError('The retained mail belongs to another or unverified account.');
-          if (!ref || population.excludeAllEmbeddingHolds) return;
-          authority!.assertCurrentMail(ref);
-          if (!input.gmailLiveProcessorVerified?.()) throw new SourceScopeApprovalRequiredError('The connected Gmail credential is awaiting account verification.');
-        });
-      },
-    };
-  }
-  if (!ref || !authority) return { allowed: false };
-  const bind = (provider: SourceEmbeddingProvider) => scopeBoundEmbeddingProvider(provider, authority, ref);
-  const scope = input.readScope(store);
-  if (!scope.allowed || !scope.contentAllowed) return { allowed: false };
-  return {
-    allowed: true,
-    bind,
-    ...(scope.accountScope ? { accountScope: scope.accountScope } : {}),
-    ...(scope.contentFilters ? { filters: scope.contentFilters } : {}),
-  };
 }
 
 /** Worker startup policy loading; hosted paths stay read-only. */

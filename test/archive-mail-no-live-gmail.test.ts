@@ -14,13 +14,13 @@ import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { gmailHoldsImportedHistory } from '../src/workers/google-connectors/gmail-archive-target.ts';
 import { gmailCursorConnectorId } from '../src/workers/google-connectors/index.ts';
 import { planStoreEmbedding } from '../src/workers/connector-store/embedding-plan.ts';
+import { storeEmbeddingScope } from '../src/workers/connector-store/embedding-scope.ts';
 import type { FileSourceScopeAuthority, SourceScopePolicyRef } from '../src/workers/source-scope-runtime.ts';
 import type { SourceEmbeddingInput, SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
-import { gmailPrivateStoreStatusScope } from '../src/workers/email-source/gmail-status-scope.ts';
+import { gmailPrivateStoreStatusScope, gmailStoreEmbeddingScope } from '../src/workers/email-source/gmail-status-scope.ts';
 import {
   createSourceIndexEmbeddingProviderFromSovereignty,
   loadSourceWorkerSovereignty,
-  storeEmbeddingScope,
 } from '../src/workers/engine/runtime/embedding-providers.ts';
 import {
   createGmailRetainedHistorySchedulerSource,
@@ -42,11 +42,13 @@ function gmailTargets(input: {
       servedByMeaning: true,
       scope: storeEmbeddingScope({
         store,
-        sourceId: 'gmail.email',
+        policy: gmailStoreEmbeddingScope({
+          gmailLiveProcessorVerified: () => true, gmailRetainedAccountScope: () => input.importAccountScope,
+        }),
         scopeRef: input.ref,
         authority: input.ref ? authority : undefined,
         readScope: () => ({ allowed: true, contentAllowed: true }),
-        provider: input.provider, gmailLiveProcessorVerified: () => true, gmailRetainedAccountScope: () => input.importAccountScope,
+        provider: input.provider,
       }),
     });
     return target ? [target] : [];
@@ -148,9 +150,10 @@ test.each(['queued', 'whole store', 'explicit'] as const)('a configured HTTP loc
   if (route === 'explicit') {
     const worker = createEmailSourceWorker({
       connectorStores: [store], connectorStoreEmbeddingProviders: new Map([[store.corpusId, http]]),
-      gmailEmbeddingScope: (leg, provider) => storeEmbeddingScope({
-        store: leg, provider, sourceId: 'gmail.email', scopeRef: undefined, authority: undefined,
-        gmailLiveProcessorVerified: () => true, gmailRetainedAccountScope: () => 'personal', readScope: () => ({ allowed: false }),
+      embeddingScopeFor: (leg, provider) => storeEmbeddingScope({
+        store: leg, provider, scopeRef: undefined, authority: undefined,
+        policy: gmailStoreEmbeddingScope({ gmailLiveProcessorVerified: () => true, gmailRetainedAccountScope: () => 'personal' }),
+        readScope: () => ({ allowed: false }),
       }),
     });
     try {
@@ -185,10 +188,10 @@ test('an approved live row cannot leave for Venice until the connected credentia
   let verified = false;
   const worker = createEmailSourceWorker({
     connectorStores: [store], connectorStoreEmbeddingProviders: new Map([[store.corpusId, venice]]),
-    gmailEmbeddingScope: (leg, provider) => storeEmbeddingScope({
-      store: leg, provider, sourceId: 'gmail.email', scopeRef: ref,
+    embeddingScopeFor: (leg, provider) => storeEmbeddingScope({
+      store: leg, provider, scopeRef: ref,
       authority: { assertCurrentMail() {} } as unknown as FileSourceScopeAuthority, readScope: () => ({ allowed: false }),
-      gmailRetainedAccountScope: () => 'personal', gmailLiveProcessorVerified: () => verified,
+      policy: gmailStoreEmbeddingScope({ gmailRetainedAccountScope: () => 'personal', gmailLiveProcessorVerified: () => verified }),
     }),
   });
   const embed = () => worker.fetch(new Request('http://worker.test/v1/source/index/embed', {

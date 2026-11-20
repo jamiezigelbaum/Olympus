@@ -22,10 +22,11 @@ import { SourceScopeApprovalRequiredError } from '../src/core/operation-error.ts
 import { tierSetForLedger } from '../src/workers/connector-store/tier-set-registry.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { planStoreEmbedding, scopedEmbeddingOptions } from '../src/workers/connector-store/embedding-plan.ts';
+import { storeEmbeddingScope } from '../src/workers/connector-store/embedding-scope.ts';
 import { automaticTierMoveOptions, automaticTierMovesAllowed } from '../src/workers/connector-store/tier-auto-move.ts';
 import { moveTieredItem, TIER_MOVE_CONNECTOR_ID } from '../src/workers/connector-store/tier-move.ts';
 import { createLaneTieredStoreSet } from '../src/workers/connector-store/tiered-store-set.ts';
-import { storeEmbeddingScope } from '../src/workers/engine/runtime/embedding-providers.ts';
+import { gmailStoreEmbeddingScope } from '../src/workers/email-source/gmail-status-scope.ts';
 import {
   GMAIL_INTERNAL_CONNECTOR_CORPUS_ID,
   GMAIL_SECURE_CONNECTOR_CORPUS_ID,
@@ -419,9 +420,10 @@ async function retainedPersonalMail(options: { legacyUnscoped?: boolean; bodyOnl
   await lane(options.legacyUnscoped ? undefined : approve(), options.bodyOnlyCode ? { OLYMPUS_EMAIL_INGEST_SKIP_OTP: 'false' } : {}).pull({ max_items: 50 });
   expect(stores.internalStore.copyContentState(identity(mail.id))).toMatchObject({ chunks: 1, vectors: 1 });
   const scope = (store: LocalConnectorStore, ref: MailSourceScopePolicyRef | undefined, provider: SourceEmbeddingProvider = privateProvider) => storeEmbeddingScope({
-    store, sourceId: 'gmail.email', scopeRef: ref, authority,
+    store, scopeRef: ref, authority,
     readScope: () => ({ allowed: true, contentAllowed: true }),
-    provider, gmailLiveProcessorVerified: () => true, gmailRetainedAccountScope: () => 'personal',
+    provider,
+    policy: gmailStoreEmbeddingScope({ gmailLiveProcessorVerified: () => true, gmailRetainedAccountScope: () => 'personal' }),
   });
   const privateSweep = (ref: MailSourceScopePolicyRef | undefined, provider: SourceEmbeddingProvider = privateProvider) => {
     const store = stores.secureStore;
@@ -549,13 +551,11 @@ test('an off-device Gmail embedding pass rechecks the live credential witness on
   };
   const scope = storeEmbeddingScope({
     store: stores.internalStore,
-    sourceId: 'gmail.email',
     scopeRef: ref,
     authority,
     readScope: () => ({ allowed: true, contentAllowed: true }),
     provider,
-    gmailRetainedAccountScope: () => 'personal',
-    gmailLiveProcessorVerified: () => verified,
+    policy: gmailStoreEmbeddingScope({ gmailRetainedAccountScope: () => 'personal', gmailLiveProcessorVerified: () => verified }),
   });
   expect(scope.allowed).toBe(true);
   if (!scope.allowed) throw new Error('expected allowed scope');
@@ -579,13 +579,11 @@ test('an off-device Gmail embedding pass rechecks the live credential witness on
   };
   const commitScope = storeEmbeddingScope({
     store: stores.internalStore,
-    sourceId: 'gmail.email',
     scopeRef: ref,
     authority,
     readScope: () => ({ allowed: true, contentAllowed: true }),
     provider: commitFlipProvider,
-    gmailRetainedAccountScope: () => 'personal',
-    gmailLiveProcessorVerified: () => verified,
+    policy: gmailStoreEmbeddingScope({ gmailRetainedAccountScope: () => 'personal', gmailLiveProcessorVerified: () => verified }),
   });
   expect(commitScope.allowed).toBe(true);
   if (!commitScope.allowed) throw new Error('expected allowed scope');

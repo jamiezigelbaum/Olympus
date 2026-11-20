@@ -300,26 +300,31 @@ export function serializeDiagnosticWrites(onError: (error: unknown) => void) {
  * ptrace samplers are blocked there. A gap in the file's timestamps means the
  * thread did not turn at all for that long.
  */
-export async function startCpuSampleLog(env: Record<string, string | undefined> = process.env): Promise<(() => void) | undefined> {
+export async function startCpuSampleLog(
+  env: Record<string, string | undefined> = process.env,
+  loadProfiler: () => Promise<unknown> = () => import('bun:jsc'),
+): Promise<(() => void) | undefined> {
   const configured = env[CPU_SAMPLE_LOG_ENV]?.trim();
   if (configured === 'off') return undefined;
-  // The sampler always runs and writes one line to the engine's own log for
-  // each interval that held a freeze, with or without a file: where a freeze
-  // on a real install was is then in its log, not only in a test run's.
+  // The sampler runs only when a file is named. It signals the JavaScript
+  // thread about every millisecond, and SQLite counts a busy-wait sleep cut
+  // short by a signal as slept in full, so with it on a 10 s busy_timeout is
+  // spent in about 150 ms. Without it each interval that held a freeze still
+  // gets its log line, with the count and durations and no frames.
   const path = configured || undefined;
   // Front and background write one file: each line names its process.
   const role = env.OLYMPUS_WORKER_ENGINE_ROLE?.trim() || 'single';
-  const jsc = await import('bun:jsc') as unknown as {
+  const jsc = await loadProfiler() as {
     startSamplingProfiler?: () => void;
     samplingProfilerStackTraces?: () => { traces?: SampledTrace[]; sources?: { sourceID?: number; url?: string }[] };
   };
-  if (!jsc.startSamplingProfiler || !jsc.samplingProfilerStackTraces) return undefined;
+  const sampling = Boolean(path && jsc.startSamplingProfiler && jsc.samplingProfilerStackTraces);
   const { appendFileSync } = await import('node:fs');
   const queue = role === 'front' && path ? serializeDiagnosticWrites(reportWriteFailure) : undefined;
   function reportWriteFailure(error: unknown): void {
     console.error(`[olympus:control-path] cpu sample log failed: ${error instanceof Error ? error.name : 'error'}`);
   }
-  jsc.startSamplingProfiler();
+  if (sampling) jsc.startSamplingProfiler!();
   // A tick that arrives late by more than CPU_SAMPLE_STALL_MS marks a freeze:
   // the samples inside it are what held the thread, summarized apart from the rest.
   let stalls: { startMs: number; endMs: number }[] = [];
@@ -345,7 +350,7 @@ export async function startCpuSampleLog(env: Record<string, string | undefined> 
       const spinUntil = performance.now() + 3;
       while (performance.now() < spinUntil) { /* spin */ }
       const anchorMs = performance.now();
-      const sampled = jsc.samplingProfilerStackTraces!();
+      const sampled = sampling ? jsc.samplingProfilerStackTraces!() : { traces: [], sources: [] };
       const traces = sampled.traces ?? [];
       const newest = traces.reduce((max, trace) => Math.max(max, trace.timestamp ?? -Infinity), -Infinity);
       const offsetS = Number.isFinite(newest) ? newest - anchorMs / 1000 : 0;
@@ -374,6 +379,6 @@ export async function startCpuSampleLog(env: Record<string, string | undefined> 
   };
   const timer = setInterval(flush, CPU_SAMPLE_FLUSH_MS);
   timer.unref?.();
-  if (path) console.error(`[olympus:control-path] sampling CPU to ${CPU_SAMPLE_LOG_ENV}`);
+  if (sampling) console.error(`[olympus:control-path] sampling CPU to ${CPU_SAMPLE_LOG_ENV}`);
   return () => { clearInterval(timer); clearInterval(lag); };
 }

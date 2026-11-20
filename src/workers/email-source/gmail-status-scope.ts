@@ -14,7 +14,9 @@ import { readSourceAccountBindings, sourceAccountBindingsPath, type SourceAccoun
 import { compareProviderAccounts, namesAccountByAddressOnly } from '../../core/provider-account-identity.ts';
 import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
 import { embedsOnThisComputer } from '../local-pacing.ts';
-import type { FileSourceScopeAuthority, MailSourceScopePolicyRef } from '../source-scope-runtime.ts';
+import type { SourceEmbeddingScopePolicy } from '../connector-store/embedding-scope.ts';
+import { SourceScopeApprovalRequiredError } from '../../core/operation-error.ts';
+import { checkedEmbeddingProvider, isMailSourceScopePolicyRef, type FileSourceScopeAuthority, type MailSourceScopePolicyRef } from '../source-scope-runtime.ts';
 
 /** `{ contentNotBefore }` when the approval names a window, else nothing ("everything" has none). */
 function contentWindow(contentAfter: string | undefined): Pick<ConnectorStoreStatusScope, 'contentNotBefore'> {
@@ -117,5 +119,34 @@ export function gmailPrivateStoreStatusScope(input: {
     ...(filters ? { itemFilters: filters, contentFilters: filters } : {}),
     ...(ref ? { scopeRevision: ref.revision } : {}),
     ...contentWindow(approval?.mailScope.contentAfter),
+  };
+}
+
+/** Select the retained population and recheck its account at each dispatch and write. */
+export function gmailStoreEmbeddingScope(deps: {
+  gmailRetainedAccountScope?: () => string | undefined;
+  gmailLiveProcessorVerified?: () => boolean;
+}): SourceEmbeddingScopePolicy {
+  return (input) => {
+    const { store, scopeRef: ref, authority } = input;
+    const account = deps.gmailRetainedAccountScope;
+    const accountScope = account?.();
+    if (!account || !accountScope) return { allowed: false, skipQueue: true };
+    if (ref && (!isMailSourceScopePolicyRef(ref) || !authority)) return { allowed: false, skipQueue: true };
+    const population = gmailEmbeddingPopulation({
+      provider: input.provider, accountScope, ref, privateStore: store.trustDomain === 'secure_local',
+    });
+    return {
+      ...population, allowed: true,
+      bind(provider) {
+        if (provider !== input.provider) throw new SourceScopeApprovalRequiredError('The selected mail processor changed before embedding.');
+        return checkedEmbeddingProvider(provider, () => {
+          if (account() !== accountScope) throw new SourceScopeApprovalRequiredError('The retained mail belongs to another or unverified account.');
+          if (!ref || population.excludeAllEmbeddingHolds) return;
+          authority!.assertCurrentMail(ref);
+          if (!deps.gmailLiveProcessorVerified?.()) throw new SourceScopeApprovalRequiredError('The connected Gmail credential is awaiting account verification.');
+        });
+      },
+    };
   };
 }

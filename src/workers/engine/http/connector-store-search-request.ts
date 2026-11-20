@@ -8,7 +8,6 @@ import {
 import {
   connectorStoreFilterCapabilityRegistry,
   LocalConnectorStore,
-  type ConnectorStoreSearchFilters,
   normalizeConnectorStoreSearchFilters,
   type ConnectorStoreFilterCapabilityRegistry,
   type ConnectorStoreResultProjector,
@@ -16,7 +15,6 @@ import {
   unsupportedConnectorStoreFilterFields,
 } from '../../connector-store/index.ts';
 import { CHAT_SCOPE_FILTER_CODEC } from '../../chat/chat-scope-filter.ts';
-import type { EmailSourceWorkerOptions } from './worker-options.ts';
 import { EmailSourceWorkerError } from './worker-responses.ts';
 import { asOptionalString, asOptionalNumber, asOptionalBoolean } from './request-fields.ts';
 import { asOptionalRetrievalMode } from './source-index-requests.ts';
@@ -40,38 +38,6 @@ export interface ConnectorStoreDeclaredPrincipal {
 }
 
 export type ConnectorStoreChatPrincipal = ConnectorStoreDeclaredPrincipal;
-
-export function requireCurrentFileEmbeddingScope(
-  store: LocalConnectorStore,
-  resolver: EmailSourceWorkerOptions['connectorStoreReadScope'],
-): {
-  accountScope: string;
-  filters: ConnectorStoreSearchFilters;
-  signature: string;
-} {
-  const current = resolver?.(store);
-  if (current?.allowed !== true || current.contentAllowed !== true) {
-    throw new EmailSourceWorkerError(
-      403,
-      'source_index_policy_violation',
-      'This file source has no currently approved full-content scope for embedding.',
-    );
-  }
-  const accountScope = current.accountScope?.trim();
-  const filters = normalizeConnectorStoreSearchFilters(current.contentFilters);
-  if (!accountScope || !filters) {
-    throw new EmailSourceWorkerError(
-      403,
-      'source_index_policy_violation',
-      'This file source embedding lane is missing its current account-bound content scope.',
-    );
-  }
-  return {
-    accountScope,
-    filters,
-    signature: JSON.stringify({ accountScope, filters }),
-  };
-}
 
 export function assertSourceIndexSearchQuery(value: unknown): asserts value is string {
   if (typeof value !== 'string' || value.trim().length === 0) {
