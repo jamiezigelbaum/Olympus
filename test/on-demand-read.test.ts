@@ -17,7 +17,8 @@ import { createSourceExclusionMatcher, parseSourceIngestionExclusions } from '..
 import { buildSourceIndexCorpusRegistry, defineSourceIndexCorpus } from '../src/core/source-index/corpus.ts';
 import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
 import { createAnalystSourceIndexAnswerHandler } from '../src/workers/source-index/analyst-answer.ts';
-import { LocalConnectorStore, createConnectorStoreContentProvider } from '../src/workers/connector-store/index.ts';
+import { LocalConnectorStore, createConnectorStoreContentProvider, createConnectorStoreCorpusAdapter, defineConnectorCorpus } from '../src/workers/connector-store/index.ts';
+import { fixtureConnector, JUDGED_PERSONAL_SNIFFER } from './helpers/tier-fixtures.ts';
 import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
 import { createConnectorStoreExtractionSink } from '../src/workers/file-extraction/store-sink.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
@@ -465,6 +466,49 @@ describe('read on demand', () => {
     expect(store.contentServedNow('a')).toBe(false);
     expect(store.localContent('a')?.chunks ?? []).toEqual([]);
     expect(store.readOnDemand('a', 'v2')).toBe(false);
+  });
+
+  test('revoking a grant after the keyword read withholds the body match from partial and final hits', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'on-demand-keyword-'));
+    const dbPath = join(dir, 'store.sqlite');
+    const store = new LocalConnectorStore({ dbPath, corpusId: 'internal.fixture.files', family: 'file', trustDomain: 'internal' });
+    const db = new Database(dbPath);
+    cleanup.push(() => { db.close(); store.close(); rmSync(dir, { recursive: true, force: true }); });
+    await store.syncFromConnector(fixtureConnector(() => [
+      { id: 'body', name: 'report.txt', text: 'quartzneedle' },
+      { id: 'name', name: 'quartzneedle.txt' },
+      { id: 'outside', name: 'unrelated.txt' },
+    ]), {
+      fetchContent: true, tierClassification: { sniffer: JUDGED_PERSONAL_SNIFFER },
+      sourceScopeObservation: item => ({
+        accountGeneration: 'a'.repeat(64), scopeRevision: '00000000-0000-4000-8000-000000000001',
+        folderKeys: [item.identity.providerItemId === 'outside' ? 'other' : 'names'],
+      }),
+    });
+    // Another item outside the folder has the same local ID.
+    db.query('UPDATE items SET local_item_id = ? WHERE provider_item_id = ?').run('personal:body', 'outside');
+    store.grantOnDemandRead('personal:body', 'v1');
+    const adapter = createConnectorStoreCorpusAdapter({ store, filters: { metadataOnlySourceScopeFolderKeys: ['names'] } });
+    const request = { corpus: defineConnectorCorpus(store), context: { allowedTrustDomains: [store.trustDomain] }, query: 'quartzneedle', maxResults: 10 };
+    expect((await adapter(request)).hits.map(hit => hit.sourceItem.providerItemId)).toContain('body');
+
+    // The FTS page has returned its body candidate when the tier check sees it.
+    const held = store.onDemandContentHeld.bind(store);
+    const revoke = spyOn(store, 'onDemandContentHeld').mockImplementationOnce(identity => {
+      const result = held(identity);
+      expect(identity.providerItemId).toBe('body');
+      db.query('DELETE FROM on_demand_item_reads WHERE local_item_id = ?').run('personal:body');
+      return result;
+    });
+    const partialIds: string[] = [];
+    const response = await adapter({ ...request, onPartialResponse: partial => {
+      partialIds.push(...partial.hits.map(hit => hit.sourceItem.providerItemId));
+    } });
+    expect(revoke).toHaveBeenCalled();
+    expect(partialIds).toContain('name');
+    expect(partialIds).not.toContain('body');
+    expect(response.hits.map(hit => hit.sourceItem.providerItemId)).toEqual(['name']);
+    expect(response.matchCount).toMatchObject({ matchedItems: 1, contentMatchedItems: 0 });
   });
 
   test.each(['path', 'folder'] as const)('metadata-only %s scopes allow body search only with a current-version grant', async scope => {
