@@ -1205,6 +1205,22 @@ function visibilityFlagged(row: TierCorpusVisibility): boolean {
   return row.moving || row.hidden || row.held || row.heldForJudgment || row.metadataLayer || row.metadataLayerContentUnread;
 }
 
+/**
+ * Loop-stall diagnostic, on only with OLYMPUS_SQLITE_BUSY_DIAGNOSTIC=1: a
+ * sync_runs write that fails with SQLITE_BUSY says how long it waited, whether
+ * this connection was inside a transaction, and its busy_timeout. SQLite skips
+ * the busy handler when the connection already holds a read transaction, so a
+ * failure in a few ms with in_transaction=true names an open reader here, and
+ * one after the full timeout names a long writer elsewhere.
+ */
+function describeSyncRunBusy(db: Database, site: 'start' | 'failed', startedAt: number, error: unknown): void {
+  const code = String((error as { code?: unknown } | null)?.code ?? '');
+  if (process.env.OLYMPUS_SQLITE_BUSY_DIAGNOSTIC !== '1' || !code.startsWith('SQLITE_BUSY') || !(error instanceof Error)) return;
+  let timeout = 'unknown';
+  try { timeout = String((db.query('PRAGMA busy_timeout').get() as { timeout: number }).timeout); } catch { /* closed */ }
+  error.message += ` (sync_runs ${site}: ${code} after ${Math.round(performance.now() - startedAt)} ms, in_transaction=${db.inTransaction}, busy_timeout=${timeout})`;
+}
+
 function runHiddenStepsHere<T>(steps: Generator<HiddenStep, T, unknown>): T {
   let step = steps.next();
   while (!step.done) {
@@ -11761,12 +11777,18 @@ export class LocalConnectorStore {
 
     const syncRunId = `connector-sync-${randomUUID()}`;
     const startedAt = nowIso();
-    this.db.query(`
-      INSERT INTO sync_runs (
-        sync_run_id, corpus_id, connector_id, status, cursor, items_seen,
-        items_indexed, started_at, audit_receipt_sha256
-      ) VALUES (?, ?, ?, 'running', ?, 0, 0, ?, ?)
-    `).run(syncRunId, this.corpusId, connector.id, options?.cursor ?? null, startedAt, auditReceiptSha256 ?? null);
+    const startWriteAt = performance.now();
+    try {
+      this.db.query(`
+        INSERT INTO sync_runs (
+          sync_run_id, corpus_id, connector_id, status, cursor, items_seen,
+          items_indexed, started_at, audit_receipt_sha256
+        ) VALUES (?, ?, ?, 'running', ?, 0, 0, ?, ?)
+      `).run(syncRunId, this.corpusId, connector.id, options?.cursor ?? null, startedAt, auditReceiptSha256 ?? null);
+    } catch (error) {
+      describeSyncRunBusy(this.db, 'start', startWriteAt, error);
+      throw error;
+    }
 
     let itemsSeen = 0;
     let itemsIndexed = 0;
@@ -12229,11 +12251,17 @@ export class LocalConnectorStore {
         }
       }
     } catch (error) {
-      this.db.query(`
-        UPDATE sync_runs
-        SET status = 'failed', cursor = ?, items_seen = ?, items_indexed = ?, completed_at = ?, error = ?
-        WHERE sync_run_id = ?
-      `).run(checkpoint ?? null, itemsSeen, itemsIndexed, nowIso(), errorMessage(error), syncRunId);
+      const failedWriteAt = performance.now();
+      try {
+        this.db.query(`
+          UPDATE sync_runs
+          SET status = 'failed', cursor = ?, items_seen = ?, items_indexed = ?, completed_at = ?, error = ?
+          WHERE sync_run_id = ?
+        `).run(checkpoint ?? null, itemsSeen, itemsIndexed, nowIso(), errorMessage(error), syncRunId);
+      } catch (failedWriteError) {
+        describeSyncRunBusy(this.db, 'failed', failedWriteAt, failedWriteError);
+        throw failedWriteError;
+      }
       throw error;
     }
 

@@ -25073,6 +25073,16 @@ var VISIBILITY_HOLD_WAIT_MS = 10;
 function visibilityFlagged(row) {
   return row.moving || row.hidden || row.held || row.heldForJudgment || row.metadataLayer || row.metadataLayerContentUnread;
 }
+function describeSyncRunBusy(db, site, startedAt, error) {
+  const code = String(error?.code ?? "");
+  if (process.env.OLYMPUS_SQLITE_BUSY_DIAGNOSTIC !== "1" || !code.startsWith("SQLITE_BUSY") || !(error instanceof Error))
+    return;
+  let timeout = "unknown";
+  try {
+    timeout = String(db.query("PRAGMA busy_timeout").get().timeout);
+  } catch {}
+  error.message += ` (sync_runs ${site}: ${code} after ${Math.round(performance.now() - startedAt)} ms, in_transaction=${db.inTransaction}, busy_timeout=${timeout})`;
+}
 function runHiddenStepsHere(steps) {
   let step = steps.next();
   while (!step.done) {
@@ -31220,12 +31230,18 @@ ${parentKey(ref)}`, { ref, origin });
     await connector.authenticate();
     const syncRunId = `connector-sync-${randomUUID9()}`;
     const startedAt = nowIso();
-    this.db.query(`
-      INSERT INTO sync_runs (
-        sync_run_id, corpus_id, connector_id, status, cursor, items_seen,
-        items_indexed, started_at, audit_receipt_sha256
-      ) VALUES (?, ?, ?, 'running', ?, 0, 0, ?, ?)
-    `).run(syncRunId, this.corpusId, connector.id, options?.cursor ?? null, startedAt, auditReceiptSha256 ?? null);
+    const startWriteAt = performance.now();
+    try {
+      this.db.query(`
+        INSERT INTO sync_runs (
+          sync_run_id, corpus_id, connector_id, status, cursor, items_seen,
+          items_indexed, started_at, audit_receipt_sha256
+        ) VALUES (?, ?, ?, 'running', ?, 0, 0, ?, ?)
+      `).run(syncRunId, this.corpusId, connector.id, options?.cursor ?? null, startedAt, auditReceiptSha256 ?? null);
+    } catch (error) {
+      describeSyncRunBusy(this.db, "start", startWriteAt, error);
+      throw error;
+    }
     let itemsSeen = 0;
     let itemsIndexed = 0;
     let itemsChanged = 0;
@@ -31467,11 +31483,17 @@ ${parentKey(ref)}`, { ref, origin });
         }
       }
     } catch (error) {
-      this.db.query(`
-        UPDATE sync_runs
-        SET status = 'failed', cursor = ?, items_seen = ?, items_indexed = ?, completed_at = ?, error = ?
-        WHERE sync_run_id = ?
-      `).run(checkpoint ?? null, itemsSeen, itemsIndexed, nowIso(), errorMessage(error), syncRunId);
+      const failedWriteAt = performance.now();
+      try {
+        this.db.query(`
+          UPDATE sync_runs
+          SET status = 'failed', cursor = ?, items_seen = ?, items_indexed = ?, completed_at = ?, error = ?
+          WHERE sync_run_id = ?
+        `).run(checkpoint ?? null, itemsSeen, itemsIndexed, nowIso(), errorMessage(error), syncRunId);
+      } catch (failedWriteError) {
+        describeSyncRunBusy(this.db, "failed", failedWriteAt, failedWriteError);
+        throw failedWriteError;
+      }
       throw error;
     }
     this.db.query(`
