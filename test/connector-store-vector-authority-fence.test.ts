@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
+import { SourceScopeApprovalRequiredError } from '../src/core/operation-error.ts';
 import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import type { SourceEmbeddingInput, SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
@@ -52,6 +53,37 @@ async function store(): Promise<LocalConnectorStore> {
 }
 
 describe('connector-store vector authority fence', () => {
+  test.each(['ordinary sweep', 'maintenance journal'])('a revoked rebind probe leaves old vectors current through the %s', async (path) => {
+    const fixture = await store();
+    const before = fixture.exportItemCopy(item().identity)?.vectors;
+    expect(before).toHaveLength(1);
+    let approved = true;
+    let probes = 0;
+    const replacement = {
+      ...provider('two'),
+      assertBindingCurrent() {
+        if (!approved) throw new SourceScopeApprovalRequiredError('The scope was revoked.');
+      },
+      async embed(inputs: SourceEmbeddingInput[]) {
+        probes++;
+        expect(inputs.map(({ text }) => text)).toEqual(['olympus connector store embedding rebind probe']);
+        approved = false;
+        return [[1, 0, 0]];
+      },
+    };
+    try {
+      await expect(fixture.embedChunks({
+        provider: replacement,
+        ...(path === 'maintenance journal' ? { journalId: 'fixture-embedding-maintenance', journalLeaseGeneration: 1 } : {}),
+      })).rejects.toBeInstanceOf(SourceScopeApprovalRequiredError);
+      expect(probes).toBe(1);
+      expect(fixture.exportItemCopy(item().identity)?.vectors).toEqual(before);
+      expect((await fixture.vectorSearchLane('retrospective', provider('one'), 5)).rows).toHaveLength(1);
+    } finally {
+      fixture.close();
+    }
+  });
+
   test('refuses a rebind that lands on another provider identity during query embedding', async () => {
     const fixture = await store();
     const lane = await fixture.vectorSearchLane('retrospective', provider('one', async () => {

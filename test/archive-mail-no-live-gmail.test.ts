@@ -1,18 +1,15 @@
-// Gmail's imported history before Gmail is connected (a normal first run:
-// import the Takeout export, connect later). Live approval governs live reads,
-// not the account's own stores: the Private store counts what the imports
-// brought, and the private embedding drains it, with no live connection.
-// Mail live Gmail stored under an approval that no longer stands is neither
-// counted nor embedded by this path.
+// Off-device processors retain the previous approval and archive rules.
+// Only an on-device processor can index all eligible retained mail.
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, test } from 'bun:test';
 import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
 import { seedEngineSovereignty } from '../src/core/engine-service.ts';
 import { defaultSovereigntyConfigPath } from '../src/core/sovereignty.ts';
-import { createSourceCorpusRegistry } from '../src/core/source-corpus-registry.ts';
+import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
+import { OpenAICompatibleSourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { gmailHoldsImportedHistory } from '../src/workers/google-connectors/gmail-archive-target.ts';
 import { gmailCursorConnectorId } from '../src/workers/google-connectors/index.ts';
@@ -26,7 +23,7 @@ import {
   storeEmbeddingScope,
 } from '../src/workers/engine/runtime/embedding-providers.ts';
 import {
-  createGmailImportedHistorySchedulerSource,
+  createGmailRetainedHistorySchedulerSource,
   withEmbeddingSweep,
 } from '../src/workers/source-scheduler.ts';
 
@@ -49,8 +46,7 @@ function gmailTargets(input: {
         scopeRef: input.ref,
         authority: input.ref ? authority : undefined,
         readScope: () => ({ allowed: true, contentAllowed: true }),
-        gmailAccountScope: 'personal',
-        ...(input.importAccountScope ? { gmailImportAccountScope: input.importAccountScope } : {}),
+        provider: input.provider, gmailLiveProcessorVerified: () => true, gmailRetainedAccountScope: () => input.importAccountScope,
       }),
     });
     return target ? [target] : [];
@@ -98,16 +94,16 @@ async function privateStore(): Promise<LocalConnectorStore> {
 }
 
 describe('imported Gmail history with no live connection', () => {
-  test('the Private store counts what the imports brought, and only that', async () => {
+  test('the Private store counts only imports for an off-device processor without an approval', async () => {
     const store = await privateStore();
-    expect(gmailPrivateStoreStatusScope({ authority: undefined, handle: undefined })).toEqual({ itemsAllowed: false, contentAllowed: false });
-    const scope = gmailPrivateStoreStatusScope({ authority: undefined, handle: undefined, importAccountScope: 'personal' });
+    expect(gmailPrivateStoreStatusScope({ authority: undefined, handle: undefined, gmailRetainedAccountScope: () => undefined })).toEqual({ itemsAllowed: false, contentAllowed: false });
+    const scope = gmailPrivateStoreStatusScope({ authority: undefined, handle: undefined, gmailRetainedAccountScope: () => 'personal' });
     expect(store.status(scope).counts.items).toBe(1);
     expect(store.itemMatchesSearchFilters('personal:imported', 'personal', scope.itemFilters!)).toBe(true);
     expect(store.itemMatchesSearchFilters('personal:live', 'personal', scope.itemFilters!)).toBe(false);
   });
 
-  test('a Gmail source with no sync of its own carries the sweeps, and the private embedding drains the imported mail', async () => {
+  test('a Gmail source with no sync of its own embeds imported and retained mail on-device', async () => {
     const store = await privateStore();
     const home = mkdtempSync(join(tmpdir(), 'gmail-no-live-engine-'));
     homes.push(home);
@@ -116,29 +112,97 @@ describe('imported Gmail history with no live connection', () => {
     mkdirSync(dirname(policyPath), { recursive: true });
     seedEngineSovereignty(policyPath);
     const engine = loadSourceWorkerSovereignty({}, env);
-    const registry = createSourceCorpusRegistry();
-    const definition = registry.definitions().find((entry) => entry.corpusId === CORPUS)!;
     const provider = createSourceIndexEmbeddingProviderFromSovereignty(engine, 'secure_local', env)!;
     const inputs: string[] = [];
     provider.embed = async (batch) => {
       inputs.push(...batch.map((entry) => entry.text));
       return batch.map(() => Array.from({ length: provider.dimension }, (_, at) => (at === 0 ? 1 : 0)));
     };
-    const source = createGmailImportedHistorySchedulerSource({
+    const source = createGmailRetainedHistorySchedulerSource({
       config: { worker: { scheduler: { syncIntervalSeconds: 60, freshnessThresholdHours: 24 } } } as never,
     });
     expect(source).toMatchObject({ sourceId: 'gmail.email', tasks: [] });
     const targets = (gmailImportAccountScope?: string) => gmailTargets({
       stores: [store], provider, ...(gmailImportAccountScope ? { importAccountScope: gmailImportAccountScope } : {}),
     });
-    // Without the import scope, only a queue would drain, and nothing queued Gmail's Private store here.
-    expect(targets()()).toEqual([{ store, provider }]);
+    expect(targets()()).toEqual([]);
     const task = withEmbeddingSweep([source], () => targets('personal'))[0]!.tasks.find((entry) => entry.id === 'gmail.email_embeddings')!;
-    expect(await task.run()).toMatchObject({ counts: { chunks_embedded: 1 } });
-    expect(inputs.join('\n')).toContain('imported lease renewal');
-    expect(inputs.join('\n')).not.toContain('approval that no longer stands');
-    writeFileSync(join(home, 'done'), '');
+    expect(provider.runsOnThisComputer?.()).toBe(true);
+    expect(await task.run()).toMatchObject({ counts: { chunks_embedded: 2 } });
+    expect(inputs.join(' ')).toContain('imported lease renewal');
+    expect(inputs.join(' ')).toContain('approval that no longer stands');
   });
+});
+
+test.each(['queued', 'whole store', 'explicit'] as const)('a configured HTTP local processor gets only independent imports after revocation via %s', async (route) => {
+  const store = await privateStore();
+  const seen: string[] = [];
+  const http = new OpenAICompatibleSourceEmbeddingProvider({
+    baseUrl: 'http://127.0.0.1:8080/v1', model: 'fixture-remote', dimension: 4,
+    fetchImpl: (async (_url, init) => {
+      const { input } = JSON.parse(String(init?.body)) as { input: string[] };
+      seen.push(...input);
+      return Response.json({ data: input.map((_, index) => ({ index, embedding: [1, 0, 0, 0] })) });
+    }) as typeof fetch,
+  });
+  if (route === 'explicit') {
+    const worker = createEmailSourceWorker({
+      connectorStores: [store], connectorStoreEmbeddingProviders: new Map([[store.corpusId, http]]),
+      gmailEmbeddingScope: (leg, provider) => storeEmbeddingScope({
+        store: leg, provider, sourceId: 'gmail.email', scopeRef: undefined, authority: undefined,
+        gmailLiveProcessorVerified: () => true, gmailRetainedAccountScope: () => 'personal', readScope: () => ({ allowed: false }),
+      }),
+    });
+    try {
+      const response = await worker.fetch(new Request('http://worker.test/v1/source/index/embed', {
+        method: 'POST', body: JSON.stringify({ corpus_id: store.corpusId }),
+      }));
+      expect(response.status).toBe(200);
+    } finally { worker.close(); }
+  } else {
+    if (route === 'queued') store.queueEmbedding(['personal:live', 'personal:imported'], http);
+    const source = createGmailRetainedHistorySchedulerSource({
+      config: { worker: { scheduler: { syncIntervalSeconds: 60, freshnessThresholdHours: 24 } } } as never,
+    });
+    const [swept] = withEmbeddingSweep([source], () => gmailTargets({ stores: [store], provider: http, importAccountScope: 'personal' }));
+    expect(await swept!.tasks[0]!.run()).toMatchObject({ counts: { chunks_embedded: 1 } });
+  }
+  expect(seen).toHaveLength(1);
+  expect(seen[0]).toContain('imported lease renewal');
+  expect(seen.join(' ')).not.toContain('approval that no longer stands');
+});
+
+test('an approved live row cannot leave for Venice until the connected credential is verified', async () => {
+  const store = await privateStore();
+  const ref = { sourceId: 'gmail.email', accountGeneration: 'connected', revision: 'current' } as const;
+  await store.syncFromConnector(connector(gmailCursorConnectorId('personal', { generation: ref.accountGeneration, revision: ref.revision }),
+    mailItem('current', 'Current live body')), { fetchContent: true });
+  const seen: string[] = [];
+  const venice: SourceEmbeddingProvider = {
+    provider: 'venice', backend: 'cloud', modelId: 'fixture', configHash: 'fixture', dimension: 2, epochId: 'fixture',
+    async embed(batch) { seen.push(...batch.map(entry => entry.text)); return batch.map(() => [1, 0]); },
+  };
+  let verified = false;
+  const worker = createEmailSourceWorker({
+    connectorStores: [store], connectorStoreEmbeddingProviders: new Map([[store.corpusId, venice]]),
+    gmailEmbeddingScope: (leg, provider) => storeEmbeddingScope({
+      store: leg, provider, sourceId: 'gmail.email', scopeRef: ref,
+      authority: { assertCurrentMail() {} } as unknown as FileSourceScopeAuthority, readScope: () => ({ allowed: false }),
+      gmailRetainedAccountScope: () => 'personal', gmailLiveProcessorVerified: () => verified,
+    }),
+  });
+  const embed = () => worker.fetch(new Request('http://worker.test/v1/source/index/embed', {
+    method: 'POST', body: JSON.stringify({ corpus_id: store.corpusId }),
+  }));
+  try {
+    expect((await embed()).status).toBe(403);
+    expect(seen).toEqual([]);
+    verified = true;
+    expect((await embed()).status).toBe(200);
+    expect(seen).toHaveLength(2);
+    expect(seen.join(' ')).toContain('Current live body');
+    expect(seen.join(' ')).not.toContain('no longer stands');
+  } finally { worker.close(); }
 });
 
 describe('imported mail is recovered beside a connected live lane', () => {
@@ -165,7 +229,7 @@ describe('imported mail is recovered beside a connected live lane', () => {
       },
     } as SourceEmbeddingProvider;
     // 3. Live Gmail connected and approved: the store catches up on what the approval and the imports hold.
-    const source = createGmailImportedHistorySchedulerSource({
+    const source = createGmailRetainedHistorySchedulerSource({
       config: { worker: { scheduler: { syncIntervalSeconds: 60, freshnessThresholdHours: 24 } } } as never,
     });
     const lane = withEmbeddingSweep([source], () => gmailTargets({ stores: [store], provider: venice, ref, importAccountScope: 'personal' }))[0]!.tasks[0]!;
@@ -196,7 +260,7 @@ describe('kept live mail with no approval is left alone', () => {
     } as SourceEmbeddingProvider;
   }
 
-  test('live-only kept mail under a revoked approval: no fallback source, no embedding, no provider call; an import then drains alone', async () => {
+  test('live-only kept mail under a revoked approval: no off-device embedding or provider call; an import then drains alone', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'gmail-no-live-internal-'));
     homes.push(dir);
     const store = new LocalConnectorStore({ dbPath: join(dir, 'internal.sqlite'), corpusId: 'internal.email', family: 'email', trustDomain: 'internal', tierLedger: null });
@@ -206,7 +270,7 @@ describe('kept live mail with no approval is left alone', () => {
     const calls: string[] = [];
     const provider = cloudProvider(calls);
     expect(gmailHoldsImportedHistory([store])).toBe(false);
-    const source = createGmailImportedHistorySchedulerSource({
+    const source = createGmailRetainedHistorySchedulerSource({
       config: { worker: { scheduler: { syncIntervalSeconds: 60, freshnessThresholdHours: 24 } } } as never,
     });
     const sweep = withEmbeddingSweep([source], () => gmailTargets({ stores: [store], provider, importAccountScope: 'personal' }))[0]!.tasks[0]!;

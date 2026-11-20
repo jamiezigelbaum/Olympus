@@ -7,7 +7,7 @@ import { runningOlympusVersion } from '../core/update-check.ts';
 import { parseSchedulerSourceIds, type OlympusConfig } from '../core/config.ts';
 import { boundedLogErrorMessage } from '../core/log-redaction.ts';
 import { controlPathHeadroom } from './control-path-headroom.ts';
-import { OperationError } from '../core/operation-error.ts';
+import { OperationError, SOURCE_SCOPE_APPROVAL_REQUIRED } from '../core/operation-error.ts';
 import type { SourceIngestionPolicy } from '../core/source-ingestion-policy.ts';
 import {
   dropboxPolicyApprovedScopeKeys,
@@ -31,10 +31,8 @@ import {
   type ConnectorStoreEmbeddingTarget,
   type LocalConnectorStore,
 } from './connector-store/index.ts';
-import { GMAIL_CONFIRMATION_RESERVE_REASON, type GmailConfirmationYieldReason } from './google-connectors/gmail-live-sync.ts';
 import {
   GMAIL_DAILY_REQUEST_GUARD_REASON,
-  GMAIL_RESUME_REJECTED_WARNING,
   GMAIL_INTERNAL_CONNECTOR_CORPUS_ID,
   GOOGLE_DRIVE_DAILY_REQUEST_GUARD_REASON,
   GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID,
@@ -251,8 +249,6 @@ export interface SourceSchedulerTaskRunContext {
   effectiveIntervalMs: number;
   degradedReason?: string;
   provenance?: SourceSchedulerRunProvenance;
-  /** Gmail confirmation checks this at provider page boundaries. */
-  yieldGmailConfirmation?: () => GmailConfirmationYieldReason | undefined;
 }
 
 export interface SourceSchedulerTask {
@@ -291,7 +287,6 @@ export interface SourceSchedulerTask {
 }
 
 export interface SourceSchedulerTaskRunResult {
-  gmailConfirmationWaitReason?: GmailConfirmationYieldReason;
   status: 'progress' | 'idle';
   counts?: Record<string, number>;
   warnings?: string[];
@@ -506,7 +501,7 @@ export interface SourceSchedulerTaskStatus {
   /** Computer dashboard only; never persisted in scheduler state. */
   missing_scope_path?: string;
   /** Short maintenance hold, never persisted as a failure or provider deferral. */
-  wait_reason?: 'store_reclaim' | GmailConfirmationYieldReason;
+  wait_reason?: 'store_reclaim';
   id: string;
   kind: SourceSchedulerTaskKind;
   metadata_walk_role?: SourceSchedulerTask['metadataWalkRole'];
@@ -532,7 +527,7 @@ export interface SourceSchedulerTaskStatus {
 }
 
 interface SchedulerTaskState {
-  waitReason?: SourceSchedulerTaskStatus['wait_reason'];
+  waitReason?: 'store_reclaim';
   task: SourceSchedulerTask;
   source: SourceSchedulerSource;
   running: boolean;
@@ -934,10 +929,6 @@ export class SourceScheduler {
     const dueAt = now.getTime();
     this.applyPendingUnparks(dueAt);
     if (this.askHolds()) {
-      for (const state of this.states) {
-        if (isGmailConfirmationTask(state.task) && !state.running && state.nextRunAt <= dueAt
-          && taskCadence(state.source, state.task) === 'continuous') state.waitReason = 'owner_ask';
-      }
       this.scheduleContinueWake(dueAt + SOURCE_SCHEDULER_ASK_RECHECK_MS);
       return this.status(now);
     }
@@ -1126,11 +1117,7 @@ export class SourceScheduler {
           // waits out a listing), but when the listing ends it still follows
           // at once, as it did when the two shared the key.
           const sources = new Set(group.map((state) => state.source));
-          const ranGmailConfirmation = group.some(state => isGmailConfirmationTask(state.task));
-          // A live pull can come due again while confirmation holds the lane,
-          // even if the same tick already ran it before confirmation started.
-          const due = this.states.filter((state) => (!ran.has(state)
-              || (ranGmailConfirmation && state.task.metadataWalkRole === 'primary'))
+          const due = this.states.filter((state) => !ran.has(state)
             && !state.running
             && taskCadence(state.source, state.task) === 'continuous'
             && (taskConcurrencyKey(state.source, state.task) === concurrencyKey
@@ -1179,14 +1166,6 @@ export class SourceScheduler {
       try { await Promise.all(holds.map(hold => hold.done)); }
       finally { delete state.waitReason; }
       if (this.stops !== stops) return;
-    }
-    if (isGmailConfirmationTask(state.task)) {
-      if (provenance === 'scheduled' && this.askHolds()) {
-        state.waitReason = 'owner_ask';
-        this.scheduleContinueWake(this.now().getTime() + SOURCE_SCHEDULER_ASK_RECHECK_MS);
-        return;
-      }
-      delete state.waitReason;
     }
     this.executingStates.add(state);
     changeMemoryCounter(`tasks_${state.task.kind}`, 1);
@@ -1284,7 +1263,8 @@ export class SourceScheduler {
         );
       // Woken while it ran (wakeTasksOfKind): what it waited on became
       // available mid-pass, so it runs again within seconds.
-      const wokenWhileRunning = state.wakeAfterRun === true && !retryAt;
+      const blocksWake = retryAt !== undefined && retryAt.degradedReason !== SOURCE_SCOPE_APPROVAL_REQUIRED;
+      const wokenWhileRunning = state.wakeAfterRun === true && !blocksWake;
       delete state.wakeAfterRun;
       const nextRunAt = wokenWhileRunning ? Math.min(scheduledRunAt, continueAt) : scheduledRunAt;
 
@@ -1318,8 +1298,7 @@ export class SourceScheduler {
         }
       }
       state.nextRunAt = nextRunAt;
-      state.retryNotBeforeAt = retryAt ? nextRunAt : undefined;
-      if (result.gmailConfirmationWaitReason) state.waitReason = result.gmailConfirmationWaitReason;
+      state.retryNotBeforeAt = blocksWake ? nextRunAt : undefined;
       state.embeddingSweep = result.embeddingSweep;
       for (const { counts, ...store } of result.embeddingSweep ?? []) {
         console.info(`[olympus:embedding-sweep] ${JSON.stringify({
@@ -1333,7 +1312,7 @@ export class SourceScheduler {
       // A retry due before the next regular tick gets its own wake, or the tick
       // would round it up (an embedding backlog asking for 5 s waited 60 s).
       else if (retryAt && nextRunAt - Date.parse(completedAt) < this.tickMs) this.scheduleContinueWake(nextRunAt);
-      if (result.status === 'progress' && (!retryAt || isGmailConfirmationTask(runningTask))) this.wakeDownstream(state, continueAt);
+      if (result.status === 'progress' && !retryAt) this.wakeDownstream(state, continueAt);
     } catch (error) {
       delete state.wakeAfterRun;
       if (this.stops !== stopsAtStart) {
@@ -1465,13 +1444,6 @@ export class SourceScheduler {
           // byte-identical to what tasks received before provenance existed,
           // and the X adapter reads a missing marker as scheduled (R62).
           ...(provenance === 'operator' ? { provenance } : {}),
-          ...(isGmailConfirmationTask(task) ? { yieldGmailConfirmation: () => {
-            if (this.askHolds()) return 'owner_ask';
-            const liveDue = this.states.some(sibling => sibling.source.sourceId === state.source.sourceId
-              && sibling.source.corpusId === state.source.corpusId
-              && sibling.task.metadataWalkRole === 'primary' && sibling.nextRunAt <= this.now().getTime());
-            return liveDue ? 'live_pull_due' : undefined;
-          } } : {}),
           ...(state.checkpoint ? { checkpoint: state.checkpoint } : {}),
           ...(state.lastSuccessAt ? { lastSuccessAt: state.lastSuccessAt } : {}),
           effectiveIntervalMs: state.effectiveIntervalMs ?? taskIntervalMs(state.source, task),
@@ -2159,8 +2131,7 @@ const EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60_000;
  *     its stores is deferred, so a sync that committed and then could not
  *     embed says so instead of reading healthy.
  *
- * A source exists only while its credential is connected, so a disconnected
- * source has no sweep; its queued items wait for the reconnect's first pass.
+ * A source may also register a maintenance-only lane for locally retained data.
  */
 export function withEmbeddingSweep(
   sources: readonly SourceSchedulerSource[],
@@ -2186,11 +2157,16 @@ export function withEmbeddingSweep(
     return {
       ...source,
       tasks: [...source.tasks, embeddingSweepTask(source, targets, options.storeDeadlineMs, sourceIndex, options.trickle, options.onProgress, options.holdForAsk)],
-      embeddingDeferredReason: () => targets().some((target) => target.store.embeddingDeferredReason() !== undefined)
-        ? EMBEDDING_PROVIDER_UNAVAILABLE_REASON
-        : undefined,
+      embeddingDeferredReason: () => embeddingSweepDeferral(targets().map((target) => target.store.embeddingDeferredReason())),
     };
   });
+}
+
+function embeddingSweepDeferral(reasons: readonly (string | undefined)[]): string | undefined {
+  if (reasons.some((reason) => reason !== undefined && reason !== SOURCE_SCOPE_APPROVAL_REQUIRED)) {
+    return EMBEDDING_PROVIDER_UNAVAILABLE_REASON;
+  }
+  return reasons.includes(SOURCE_SCOPE_APPROVAL_REQUIRED) ? SOURCE_SCOPE_APPROVAL_REQUIRED : undefined;
 }
 
 export function embeddingSweepConcurrencyKey(source: Pick<SourceSchedulerSource, 'corpusId'>): string {
@@ -2254,7 +2230,7 @@ function embeddingSweepTask(
   const quiet = new WeakMap<LocalConnectorStore, Map<string, IdleEmbeddingSweep>>();
   const quietSlot = (target: ConnectorStoreEmbeddingTarget): string => createHash('sha256').update(JSON.stringify([
     target.provider.modelId, target.provider.epochId ?? null, target.wholeStore === true,
-    target.accountScope ?? null, target.filters ?? null,
+    target.accountScope ?? null, target.filters ?? null, target.excludeAllEmbeddingHolds === true,
     target.provider.provider, target.provider.backend, target.provider.dimension, target.provider.configHash,
   ])).digest('hex');
   const quietKey = (target: ConnectorStoreEmbeddingTarget, slot: string, durable: boolean): EmbeddingSweepKey | undefined => {
@@ -2438,17 +2414,18 @@ function embeddingSweepTask(
           },
         };
       }
+      const degradedReason = embeddingSweepDeferral(runs.map((run) => run.deferredReason));
       // A pass that embedded anything has a provider that answers: one store's
       // outage must not back off the stores that are making progress, nor hold
       // off the wake the next sync sends.
-      if (counts.chunks_embedded > 0) {
+      if (counts.chunks_embedded > 0 || degradedReason === SOURCE_SCOPE_APPROVAL_REQUIRED) {
         return {
           status,
           counts,
           embeddingSweep,
           retryAt: {
             at: new Date(attemptedAt + EMBEDDING_SWEEP_INTERVAL_MS).toISOString(),
-            degradedReason: EMBEDDING_PROVIDER_UNAVAILABLE_REASON,
+            ...(degradedReason ? { degradedReason } : {}),
           },
         };
       }
@@ -2656,12 +2633,6 @@ export function createXBookmarksSchedulerSource(input: {
   };
 }
 
-const GMAIL_CONFIRMATION_TASK_ID = 'gmail.email_private_scope_confirmation_v1';
-
-function isGmailConfirmationTask(task: SourceSchedulerTask): boolean {
-  return task.id === GMAIL_CONFIRMATION_TASK_ID || task.id.startsWith(`${GMAIL_CONFIRMATION_TASK_ID}:scope:`);
-}
-
 export function createGmailConnectorStoreSchedulerSource(input: {
   config: OlympusConfig;
   sync?: GmailConnectorStoreSyncHandler;
@@ -2731,41 +2702,6 @@ export function createGmailConnectorStoreSchedulerSource(input: {
           }
         },
       },
-      ...(input.sync.confirmPrivateScope ? [{
-        id: GMAIL_CONFIRMATION_TASK_ID, kind: 'sync' as const, writer: true as const,
-        intervalMs: liveConfig.storePullIntervalMs,
-        freshnessThresholdMs: liveConfig.storePullFreshnessThresholdMs,
-        run: async (context?: SourceSchedulerTaskRunContext): Promise<SourceSchedulerTaskRunResult> => {
-          try {
-            const result = await input.sync!.confirmPrivateScope!({
-              max_items: liveConfig.storePullMaxItems,
-              ...(context?.checkpoint ? { checkpoint: context.checkpoint } : {}),
-              ...(context?.yieldGmailConfirmation ? { yieldReason: context.yieldGmailConfirmation } : {}),
-            });
-            const hold = result.hold;
-            return {
-              status: result.confirmed > 0 ? 'progress' : 'idle',
-              counts: {
-                private_scope_confirmed: result.confirmed,
-                private_scope_confirmed_total: result.confirmedTotal,
-                items_seen: result.confirmed,
-                items_changed: result.confirmed,
-                traversal_complete: Number(result.done),
-                ...(hold ? { private_scope_remaining: hold.remaining } : {}),
-                ...(hold?.error.amounts ? {
-                  limit_stop_limit: hold.error.amounts.limit,
-                  ...(hold.error.amounts.used !== undefined ? { limit_stop_used: hold.error.amounts.used } : {}),
-                } : {}),
-              },
-              checkpoint: result.checkpoint,
-              ...(result.waitReason ? { gmailConfirmationWaitReason: result.waitReason } : {}),
-              ...(result.cursorRejected ? { warnings: [GMAIL_RESUME_REJECTED_WARNING] } : {}),
-              ...(hold ? { retryAt: { at: hold.error.retryAt, degradedReason: gmailConfirmationHoldReason(hold.error) } }
-                : !result.done ? { continueSoon: true } : {}),
-            };
-          } catch (error) { throw gmailSchedulerFailure(error); }
-        },
-      }] : []),
       // Once: attachment children for mail stored before attachments were children. Each pass asks Gmail for a
       // bounded number of messages under the same day budget, and resumes where the last one stopped.
       ...(input.sync.backfillChildren ? [{
@@ -2790,14 +2726,8 @@ export function createGmailConnectorStoreSchedulerSource(input: {
   };
 }
 
-/**
- * Gmail's stores with no live lane (not connected, or no mail approval) that
- * hold mail an import brought in: a source with no sync of its own, so the
- * worker's embedding sweep and private meaning backfill (attached to every
- * source) still drain the imported history. Live approval governs live reads,
- * not the account's own stores.
- */
-export function createGmailImportedHistorySchedulerSource(input: { config: OlympusConfig }): SourceSchedulerSource {
+/** A maintenance lane for retained mail with no live Gmail reader. */
+export function createGmailRetainedHistorySchedulerSource(input: { config: OlympusConfig }): SourceSchedulerSource {
   return {
     sourceId: SCHEDULER_SOURCE_IDS.gmail,
     corpusId: GMAIL_INTERNAL_CONNECTOR_CORPUS_ID,
@@ -2989,15 +2919,6 @@ function gmailStoreProgress(
     // A walk in progress continues within seconds, not at the next interval.
     ...(outcome.backlog ? { continueSoon: true } : {}),
   };
-}
-
-function gmailConfirmationHoldReason(error: GoogleRequestBudgetError): string {
-  switch (error.reason) {
-    case 'request_reserve': return GMAIL_CONFIRMATION_RESERVE_REASON;
-    case 'future_utc_day': return GMAIL_REQUEST_BUDGET_CLOCK_REGRESSION;
-    case 'ledger_busy': return GMAIL_REQUEST_BUDGET_LEDGER_BUSY;
-    case 'daily_api_request_guard': return GMAIL_DAILY_REQUEST_GUARD_REASON;
-  }
 }
 
 /**
@@ -3370,7 +3291,6 @@ const UTC_DAY_SCOPED_DEGRADED_REASONS: ReadonlySet<string> = new Set([
   'reconcile_cost_to_finish_guard',
   READWISE_DAILY_REQUEST_GUARD_REASON,
   GMAIL_DAILY_REQUEST_GUARD_REASON,
-  GMAIL_CONFIRMATION_RESERVE_REASON,
   GOOGLE_DRIVE_DAILY_REQUEST_GUARD_REASON,
 ]);
 

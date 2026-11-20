@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { TimeoutFetch } from '../core/http-timeout.ts';
 import {
+  compareProviderAccounts,
   fetchProviderAccountId,
   type AccountBoundProvider,
   type ProviderIdentityEndpoints,
@@ -111,6 +112,8 @@ export interface SourceAccountGuardOptions {
 
 export interface SourceAccountGuard {
   assertAccount(): Promise<void>;
+  /** Has the current reusable token already proved the account, without any provider call? */
+  hasVerifiedCurrentAccount?(): boolean;
   /** The check, then the task, both inside the source's exclusive runner. */
   run?<T>(task: () => Promise<T>): Promise<T>;
 }
@@ -268,6 +271,30 @@ export function createSourceAccountGuard(options: SourceAccountGuardOptions): So
     async assertAccount(): Promise<void> {
       await verifyAccount();
       agreeWithHistory();
+    },
+    hasVerifiedCurrentAccount(): boolean {
+      const handle = readConnectedHandleRegistry(options.registryPath).handles
+        .find((entry) => entry.handle === options.handle && entry.provider === options.provider);
+      if (!handle?.allowedCapabilities.includes(options.capability) || handle.backendState?.status === 'reauth_required'
+        || options.laneStoresStale?.()) return false;
+      const fingerprint = broker.currentBearerTokenFingerprint?.(options.handle, options.capability);
+      const token = fingerprint ? verified.get(fingerprint) : undefined;
+      if (!token) return false;
+      const read = readSourceAccountBindings(bindingsPath);
+      if (read.kind !== 'ok') return false;
+      const binding = read.bindings.sources[options.sourceId];
+      const history = historyAccountId();
+      if (!binding?.provider_account_id || binding.reconnected_at || binding.purge_required
+        || compareProviderAccounts(binding.provider_account_id, token) !== 'same'
+        || (history && compareProviderAccounts(history, token) !== 'same')) return false;
+      return decideSourceAccountAction({
+        binding,
+        grantAccountId: handle.providerAccountId,
+        grantConnectedAt: handle.connectedAt,
+        tokenAccountId: token,
+        laneHoldsItems: true,
+        now: now(),
+      }).action === 'proceed';
     },
   };
 

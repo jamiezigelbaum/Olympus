@@ -1,3 +1,5 @@
+import { storageAccountForCorpus } from '../../core/source-placement.ts';
+import { scopedEmbeddingOptions } from '../connector-store/embedding-plan.ts';
 import { effectiveItemVerdicts, type TierVisibilityScope } from '../connector-store/tier-visibility.ts';
 import { visibilityHere } from '../connector-store/child-visibility.ts';
 import { currentRemoteReadAccess } from '../remote-access-recheck.ts';
@@ -3860,12 +3862,17 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 `Private source worker does not have an embedding provider configured for ${connectorStore.corpusId}.`,
               );
             }
+            const isGmail = storageAccountForCorpus(connectorStore, options.sourceDashboard?.corpusRegistry?.list()).sourceId === 'gmail.email';
+            const mailScope = isGmail ? options.gmailEmbeddingScope?.(connectorStore, embeddingProvider) : undefined;
+            if (isGmail && !mailScope?.allowed) {
+              throw new EmailSourceWorkerError(403, 'source_index_policy_violation', 'The retained mail account could not be verified for embedding.');
+            }
             const modelId = asOptionalString(record.model_id);
             const maxPendingChunks = asOptionalNumber(record.max_pending_chunks);
             let result: Awaited<ReturnType<typeof connectorStore.embedChunks>>;
             try {
               result = await connectorStore.embedChunks({
-                provider: embeddingProvider,
+                ...(mailScope?.allowed ? scopedEmbeddingOptions(mailScope, embeddingProvider) : { provider: embeddingProvider }),
                 ...(embeddingScope?.accountScope ? { accountScope: embeddingScope.accountScope } : {}),
                 ...(embeddingScope?.filters ? { filters: embeddingScope.filters } : {}),
                 ...(assertEmbeddingScopeCurrent ? { assertAuthorized: assertEmbeddingScopeCurrent } : {}),

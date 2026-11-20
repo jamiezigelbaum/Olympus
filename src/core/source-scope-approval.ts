@@ -10,7 +10,7 @@ import {
   isFileScopeRootKey,
   type FileScopeSourceDefinition,
 } from './file-scope-sources.ts';
-import { OperationError } from './operation-error.ts';
+import { OperationError, SourceScopeApprovalRequiredError } from './operation-error.ts';
 
 export interface SourceScopeConnectedHandle {
   handle: string;
@@ -308,7 +308,7 @@ export function assertFileSourceScopeApproved(input: {
       && approval.accountGeneration !== input.expectedAccountGeneration)
     || (input.expectedRevision !== undefined && approval.revision !== input.expectedRevision)
   ) {
-    throw new OperationError('source_index_policy_violation', 'File-source scope approval is required for this connected account.');
+    throw new SourceScopeApprovalRequiredError('File-source scope approval is required for this connected account.');
   }
   return approval;
 }

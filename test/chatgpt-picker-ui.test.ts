@@ -1109,6 +1109,21 @@ describe('mail picker', () => {
     expect(host.text()).not.toContain('boss@example.com');
   });
 
+  test('shows effective restrictions configured on the computer', async () => {
+    const mail = { ...MAIL, operator_exclusions: {
+      gmail_query: true, categories: ['updates'], other_labels: true, verification_codes: true,
+    } };
+    const host = mount({ openai: {}, serve: { [T.scopeList]: () => scopeResult(mail), olympus_dashboard: () => ({ structuredContent: gmail }) } });
+    host.push({ structuredContent: gmail });
+    host.button('Choose mail').click();
+    await host.settle();
+    expect(host.text()).toContain(Q.mailOperatorQuery);
+    expect(host.text()).toContain(Q.mailOperatorLabels);
+    expect(host.text()).toContain(Q.mailVerificationCodes);
+    const updates = host.win.document.querySelector('input[data-key="picker:category:updates"]')!;
+    expect(updates.parentElement?.textContent).toContain(Q.mailOperatorCategory);
+  });
+
   test('a mail conflict re-lists with the saved scope', async () => {
     const host = mount({ serve: { [T.scopeList]: () => scopeResult(MAIL) } });
     host.push({ structuredContent: gmail });

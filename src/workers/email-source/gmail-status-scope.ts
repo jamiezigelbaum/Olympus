@@ -7,10 +7,14 @@
 // sensitive subject route it there. Each store's status therefore carries the
 // window, and the source-neutral status machinery does the rest.
 import type { ConnectorStoreStatusScope } from '../connector-store/local-index.ts';
-import type { ConnectedCredentialHandle } from '../credential-broker/connected-handles.ts';
-import { gmailCursorConnectorId } from '../google-connectors/index.ts';
-import { GMAIL_IMPORT_CONNECTOR_PREFIX } from '../google-connectors/gmail-archive-target.ts';
-import type { FileSourceScopeAuthority } from '../source-scope-runtime.ts';
+import { readConnectedHandleRegistry, type ConnectedCredentialHandle } from '../credential-broker/connected-handles.ts';
+import { gmailCursorConnectorIds } from '../google-connectors/index.ts';
+import { GMAIL_IMPORTED_FILTERS, GMAIL_IMPORT_CONNECTOR_PREFIX } from '../google-connectors/gmail-archive-target.ts';
+import { readSourceAccountBindings, sourceAccountBindingsPath, type SourceAccountBinding } from '../../core/source-account-binding.ts';
+import { compareProviderAccounts, namesAccountByAddressOnly } from '../../core/provider-account-identity.ts';
+import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
+import { embedsOnThisComputer } from '../local-pacing.ts';
+import type { FileSourceScopeAuthority, MailSourceScopePolicyRef } from '../source-scope-runtime.ts';
 
 /** `{ contentNotBefore }` when the approval names a window, else nothing ("everything" has none). */
 function contentWindow(contentAfter: string | undefined): Pick<ConnectorStoreStatusScope, 'contentNotBefore'> {
@@ -31,40 +35,87 @@ export function gmailInternalStoreStatusScope(
   return window.contentNotBefore ? window : undefined;
 }
 
-/**
- * The Private Gmail store counts the same approved observations the backfill
- * may embed; retained mail outside that scope is not owed work. Rows the
- * window kept as names only leave the owed population too.
- */
+/** Indexing reads the local account record. Connecting a role never proves who owns its history. */
+export function gmailRetainedAccountMatches(input: {
+  handle: Pick<ConnectedCredentialHandle, 'providerAccountId' | 'connectedAt'> | undefined;
+  currentGrantVerified?: (() => boolean) | undefined;
+  binding: SourceAccountBinding | undefined;
+  historyAccountId: string | undefined;
+}): boolean {
+  const { handle, binding, historyAccountId } = input;
+  if (!handle) return true;
+  if (binding?.purge_required || binding?.reconnected_at) return false;
+  const observed = handle.providerAccountId;
+  const owners = [binding?.provider_account_id, historyAccountId].filter((id): id is string => Boolean(id));
+  if (!owners.length) return false;
+  if (observed && owners.every((id) => compareProviderAccounts(id, observed) === 'same')) return true;
+  // An address-only grant can predate a verified rename of its bound account.
+  return (!observed || namesAccountByAddressOnly(observed)) && binding?.bound_grant === handle.connectedAt
+    && input.currentGrantVerified?.() === true;
+}
+
+/** Verify a selected mailbox without opening a token session or contacting Google. */
+export function readGmailRetainedAccountScope(input: {
+  registryPath: string;
+  historyAccountId: () => string | undefined;
+  currentGrantVerified?: () => boolean;
+  itemScope: (handle: ConnectedCredentialHandle | undefined) => string;
+}): string | undefined {
+  try {
+    const registry = readConnectedHandleRegistry(input.registryPath);
+    const handles = registry.handles.filter((handle) => handle.provider === 'gmail');
+    if (registry.dropped?.length || handles.length > 1) return undefined;
+    const handle = handles[0];
+    const record = readSourceAccountBindings(sourceAccountBindingsPath(input.registryPath));
+    if (record.kind !== 'ok' || !gmailRetainedAccountMatches({
+      handle, currentGrantVerified: input.currentGrantVerified, binding: record.bindings.sources['gmail.email'], historyAccountId: input.historyAccountId(),
+    })) return undefined;
+    return input.itemScope(handle);
+  } catch {
+    console.warn('[olympus:gmail] retained indexing paused: mailbox account record unavailable');
+    return undefined;
+  }
+}
+
+/** HTTP "local" and the built-in model with a remote helper both leave this device. */
+export function gmailEmbeddingPopulation(input: {
+  provider?: SourceEmbeddingProvider | undefined;
+  accountScope: string;
+  ref: MailSourceScopePolicyRef | undefined;
+  privateStore: boolean;
+}) {
+  const { provider, accountScope, ref } = input;
+  if (provider?.provider === 'built-in' && provider.backend === 'local' && embedsOnThisComputer(provider)) {
+    return { accountScope, filters: { provider: 'gmail' }, excludeAllEmbeddingHolds: true as const };
+  }
+  if (!ref) return { accountScope, filters: GMAIL_IMPORTED_FILTERS };
+  if (!input.privateStore) return { accountScope };
+  const ids = gmailCursorConnectorIds(accountScope, { generation: ref.accountGeneration, revision: ref.revision });
+  return { accountScope, filters: {
+    provider: 'gmail',
+    observedConnectorId: ids.connectorId,
+    previousObservedConnectorId: ids.previousId,
+    observedConnectorIdPrefix: GMAIL_IMPORT_CONNECTOR_PREFIX,
+  } };
+}
+
+/** Count the same retained population the selected Private processor may index. */
 export function gmailPrivateStoreStatusScope(input: {
   authority: Pick<FileSourceScopeAuthority, 'mailPolicyRef' | 'assertCurrentMail'> | undefined;
   handle: Pick<ConnectedCredentialHandle, 'accountRole'> | undefined;
-  /**
-   * The account scope Gmail's items are kept under, for mail an import brought
-   * in: counted whether or not live Gmail is connected and approved, since the
-   * owner approved each import on its own. Live approval governs live reads.
-   */
-  importAccountScope?: string;
+  provider?: SourceEmbeddingProvider | undefined;
+  gmailRetainedAccountScope: () => string | undefined;
 }): ConnectorStoreStatusScope {
-  const { authority, handle } = input;
-  const ref = authority?.mailPolicyRef();
-  if (!ref || !handle || !authority) {
-    if (!input.importAccountScope) return { itemsAllowed: false, contentAllowed: false };
-    // No live approval: what the imports brought, and only that.
-    const imported = { provider: 'gmail', observedConnectorIdPrefix: GMAIL_IMPORT_CONNECTOR_PREFIX };
-    return { accountScope: input.importAccountScope, itemFilters: imported, contentAllowed: true, contentFilters: imported };
-  }
-  const approval = authority.assertCurrentMail(ref);
-  const accountScope = handle.accountRole?.trim() || 'personal';
-  const itemFilters = {
-    provider: 'gmail',
-    observedConnectorId: gmailCursorConnectorId(accountScope, { generation: ref.accountGeneration, revision: ref.revision }),
-    // Mail an import brought into the account counts too: the owner approved each import on its own.
-    observedConnectorIdPrefix: GMAIL_IMPORT_CONNECTOR_PREFIX,
-  };
+  const accountScope = input.gmailRetainedAccountScope();
+  if (!accountScope) return { itemsAllowed: false, contentAllowed: false };
+  const ref = input.handle ? input.authority?.mailPolicyRef() : undefined;
+  const approval = ref ? input.authority!.assertCurrentMail(ref) : undefined;
+  const population = gmailEmbeddingPopulation({ ...input, accountScope, ref, privateStore: true });
+  const { filters } = population;
   return {
-    accountScope, scopeRevision: ref.revision, itemFilters, contentAllowed: true,
-    contentFilters: itemFilters,
-    ...contentWindow(approval.mailScope.contentAfter),
+    accountScope, contentAllowed: true,
+    ...(filters ? { itemFilters: filters, contentFilters: filters } : {}),
+    ...(ref ? { scopeRevision: ref.revision } : {}),
+    ...contentWindow(approval?.mailScope.contentAfter),
   };
 }
