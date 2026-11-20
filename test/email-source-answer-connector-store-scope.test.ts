@@ -5,6 +5,7 @@ import {
 } from '../src/workers/engine/runtime/answer-scope.ts';
 import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';
 import { answerOnThisComputer } from '../src/workers/source-index/local-answer.ts';
+import { createAnalystSourceIndexAnswerHandler } from '../src/workers/source-index/analyst-answer.ts';
 import { createSourceAnswerLanes } from '../src/workers/engine/runtime/source-answer-lanes.ts';
 import { fixtureConnector, fixtureItem } from './helpers/tier-fixtures.ts';
 import { defineConnectorCorpus, LocalConnectorStore, type ConnectorStoreConversationTitleCandidates } from '../src/workers/connector-store/index.ts';
@@ -216,6 +217,52 @@ describe('connector-store answer lane scope', () => {
       expect(local.status).toBe('not_found');
     } finally {
       for (const store of stores) store.close();
+    }
+  });
+
+  test('requests the first read only for a selected Names-only file inside the requested folder', async () => {
+    const store = new LocalConnectorStore({
+      dbPath: ':memory:', corpusId: 'internal.dropbox.files', family: 'file', trustDomain: 'internal',
+    });
+    try {
+      const items = ['Approved', 'Elsewhere'].map(folder => {
+        const item = fixtureItem({ id: folder, name: 'orchard.txt' });
+        item.identity.provider = 'dropbox';
+        item.metadata = { ...item.metadata, locatorUri: `/${folder}/orchard.txt` };
+        return item;
+      });
+      await store.syncFromConnector({
+        ...fixtureConnector(() => []),
+        async *listItems() { yield { items, done: true }; },
+      });
+      const registry = buildSourceIndexCorpusRegistry([defineConnectorCorpus(store)]);
+      const requested: string[] = [];
+      const handler = createAnalystSourceIndexAnswerHandler({
+        lanes: createSourceAnswerLanes({
+          stores: () => [store], registry: () => registry,
+          embeddingProvider: () => undefined, localEmbedding: () => undefined, accountScope: () => undefined,
+          readScope: () => ({ allowed: true, contentAllowed: false, filters: { provider: 'dropbox' } }),
+          answerScope: (store, request) => connectorStoreAnswerScope({
+            store, request, principal: { provider: 'dropbox', accountScope: 'personal' },
+          }),
+        }),
+        analyst: { analyze: async () => ({ answer: '', citations: [], unanswered: [] }) },
+        requestOnDemandRead: async request => {
+          requested.push(request.itemRef.providerItemId);
+          return { state: 'queued', etaSeconds: 60 };
+        },
+        onDemandReadWaitMs: 0,
+      });
+      await handler.answer({
+        question: 'What is in the selected files?', include_internal: true, approved_scope_key: 'dropbox.personal:/Approved',
+        selected_items: items.map(({ identity }) => ({
+          corpus_id: store.corpusId, family: identity.family, provider: identity.provider,
+          account_scope: identity.accountScope, provider_item_id: identity.providerItemId, local_item_id: identity.localItemId,
+        })),
+      });
+      expect(requested).toEqual(['Approved']);
+    } finally {
+      store.close();
     }
   });
 

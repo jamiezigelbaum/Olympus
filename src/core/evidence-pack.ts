@@ -896,7 +896,7 @@ function selectedItemsToRoutedSlice(input: BuildEvidencePackInput): RoutedSearch
       skippedCorpora.push({ corpusId: corpus.corpusId, trustDomain: corpus.trustDomain, reason: skipReason });
       continue;
     }
-    if (input.requireScopedSelection && input.adapters[corpus.corpusId]?.selectedItemServable?.(selected.sourceItem) !== true) {
+    if (input.requireScopedSelection && input.adapters[corpus.corpusId]?.selectedItemServable?.(selected.sourceItem, 'metadata') !== true) {
       continue;
     }
     searched.add(corpus.corpusId);

@@ -63,17 +63,7 @@ export interface SourceCorpusRegistry {
   ): SourceIndexCorpusDefinition[];
 }
 
-// Answer lanes retrieve from connector stores, and hybrid-primary is a search
-// mode. Apply this to the shipped declarations and to previously saved rosters.
-function connectorStoreCapabilities(corpus: SourceCorpusConfig): SourceCorpusConfig {
-  if (corpus.capabilities.includes('search')) return corpus;
-  if (corpus.capabilities.includes('answer') || corpus.activationMode === 'hybrid_primary') {
-    return { ...corpus, capabilities: [...corpus.capabilities, 'search'] };
-  }
-  return corpus;
-}
-
-const DEFAULT_SOURCE_CORPORA = ([
+const DEFAULT_SOURCE_CORPORA: SourceCorpusConfig[] = [
   {
     corpusId: 'secure_local.email.private',
     sourceId: 'gmail.email',
@@ -81,7 +71,7 @@ const DEFAULT_SOURCE_CORPORA = ([
     family: 'email',
     trustDomain: 'secure_local',
     activationMode: 'hybrid_shadow',
-    capabilities: ['answer', 'status', 'sync'],
+    capabilities: ['answer', 'status', 'sync', 'search'],
   },
   {
     corpusId: 'internal.email',
@@ -90,7 +80,7 @@ const DEFAULT_SOURCE_CORPORA = ([
     family: 'email',
     trustDomain: 'internal',
     activationMode: 'hybrid_shadow',
-    capabilities: ['answer', 'status', 'sync'],
+    capabilities: ['answer', 'status', 'sync', 'search'],
   },
   {
     corpusId: 'public_safe.email',
@@ -100,7 +90,7 @@ const DEFAULT_SOURCE_CORPORA = ([
     trustDomain: 'public_safe',
     activationMode: 'hybrid_shadow',
     // No 'sync' of its own: the Gmail lane's tier set fills it.
-    capabilities: ['answer', 'status'],
+    capabilities: ['answer', 'status', 'search'],
     createdOnDemand: true,
     description: 'Public Gmail messages, routed here by per-item four-tier classification.',
   },
@@ -112,7 +102,7 @@ const DEFAULT_SOURCE_CORPORA = ([
     trustDomain: 'public_safe',
     activationMode: 'hybrid_primary',
     // No 'sync' of its own: the Drive lane's tier set fills it.
-    capabilities: ['answer', 'status'],
+    capabilities: ['answer', 'status', 'search'],
     createdOnDemand: true,
     description: 'Public Google Drive/Docs items, routed here by per-item four-tier classification.',
   },
@@ -123,7 +113,7 @@ const DEFAULT_SOURCE_CORPORA = ([
     family: 'file',
     trustDomain: 'internal',
     activationMode: 'hybrid_primary',
-    capabilities: ['answer', 'status', 'sync'],
+    capabilities: ['answer', 'status', 'sync', 'search'],
   },
   {
     corpusId: 'secure_local.drive.docs',
@@ -132,7 +122,7 @@ const DEFAULT_SOURCE_CORPORA = ([
     family: 'file',
     trustDomain: 'secure_local',
     activationMode: 'hybrid_shadow',
-    capabilities: ['answer', 'status', 'sync'],
+    capabilities: ['answer', 'status', 'sync', 'search'],
     description: 'Secure-local Google Drive/Docs items raised by per-item sensitivity classification.',
   },
   {
@@ -142,7 +132,7 @@ const DEFAULT_SOURCE_CORPORA = ([
     family: 'chat',
     trustDomain: 'internal',
     activationMode: 'hybrid_primary',
-    capabilities: ['answer', 'status', 'sync'],
+    capabilities: ['answer', 'status', 'sync', 'search'],
   },
   {
     corpusId: READWISE_LIBRARY_CORPUS_ID,
@@ -177,7 +167,7 @@ const DEFAULT_SOURCE_CORPORA = ([
     family: 'x',
     trustDomain: 'internal',
     activationMode: 'hybrid_shadow',
-    capabilities: ['answer', 'status', 'sync'],
+    capabilities: ['answer', 'status', 'sync', 'search'],
   },
   {
     corpusId: 'secure_local.x.bookmarks',
@@ -187,7 +177,7 @@ const DEFAULT_SOURCE_CORPORA = ([
     trustDomain: 'secure_local',
     activationMode: 'hybrid_shadow',
     // No 'sync' of its own: the X lane's tier set fills it.
-    capabilities: ['answer', 'status'],
+    capabilities: ['answer', 'status', 'search'],
     createdOnDemand: true,
     description: 'X bookmarks raised to Private by per-item four-tier classification.',
   },
@@ -198,7 +188,7 @@ const DEFAULT_SOURCE_CORPORA = ([
     family: 'note',
     trustDomain: 'secure_local',
     activationMode: 'hybrid_shadow',
-    capabilities: ['answer', 'status', 'sync'],
+    capabilities: ['answer', 'status', 'sync', 'search'],
     createdOnDemand: true,
     description: 'Evernote notes and attachments judged Private (and the lane\'s own placement until judged).',
   },
@@ -210,7 +200,7 @@ const DEFAULT_SOURCE_CORPORA = ([
     trustDomain: 'internal',
     activationMode: 'hybrid_shadow',
     // No 'sync' of its own: the Evernote lane's tier set fills it.
-    capabilities: ['answer', 'status'],
+    capabilities: ['answer', 'status', 'search'],
     createdOnDemand: true,
     description: 'Evernote notes and attachments judged Personal, routed here by per-item four-tier classification.',
   },
@@ -221,7 +211,7 @@ const DEFAULT_SOURCE_CORPORA = ([
     family: 'file',
     trustDomain: 'secure_local',
     activationMode: 'hybrid_shadow',
-    capabilities: ['answer', 'status', 'sync', 'promotion_candidates'],
+    capabilities: ['answer', 'status', 'sync', 'search', 'promotion_candidates'],
   },
   {
     corpusId: 'internal.dropbox.files',
@@ -231,7 +221,7 @@ const DEFAULT_SOURCE_CORPORA = ([
     trustDomain: 'internal',
     activationMode: 'hybrid_shadow',
     // No 'sync' of its own: the Dropbox lane's tier set fills it.
-    capabilities: ['answer', 'status'],
+    capabilities: ['answer', 'status', 'search'],
     createdOnDemand: true,
     description: 'Personal Dropbox files (reference material and Personal names), routed here by per-item four-tier classification.',
   },
@@ -242,7 +232,7 @@ const DEFAULT_SOURCE_CORPORA = ([
     family: 'file',
     trustDomain: 'public_safe',
     activationMode: 'hybrid_shadow',
-    capabilities: ['answer', 'status'],
+    capabilities: ['answer', 'status', 'search'],
     createdOnDemand: true,
     description: 'Public Dropbox files, routed here by per-item four-tier classification on positive public evidence.',
   },
@@ -253,7 +243,7 @@ const DEFAULT_SOURCE_CORPORA = ([
     family: 'file',
     trustDomain: 'secure_local',
     activationMode: 'hybrid_shadow',
-    capabilities: ['answer', 'status', 'sync', 'promotion_candidates'],
+    capabilities: ['answer', 'status', 'sync', 'search', 'promotion_candidates'],
     description: 'Files in the folders and disks the person chose on this computer.',
   },
   {
@@ -264,7 +254,7 @@ const DEFAULT_SOURCE_CORPORA = ([
     trustDomain: 'internal',
     activationMode: 'hybrid_shadow',
     // No 'sync' of its own: the local files lane's tier set fills it.
-    capabilities: ['answer', 'status'],
+    capabilities: ['answer', 'status', 'search'],
     createdOnDemand: true,
     description: 'Personal files on this computer (reference material and Personal names), routed here by per-item four-tier classification.',
   },
@@ -275,7 +265,7 @@ const DEFAULT_SOURCE_CORPORA = ([
     family: 'file',
     trustDomain: 'public_safe',
     activationMode: 'hybrid_shadow',
-    capabilities: ['answer', 'status'],
+    capabilities: ['answer', 'status', 'search'],
     createdOnDemand: true,
     description: 'Public files on this computer, routed here by per-item four-tier classification on positive public evidence.',
   },
@@ -286,7 +276,7 @@ const DEFAULT_SOURCE_CORPORA = ([
     family: 'chat',
     trustDomain: 'secure_local',
     activationMode: 'hybrid_primary',
-    capabilities: ['answer', 'status', 'sync'],
+    capabilities: ['answer', 'status', 'sync', 'search'],
   },
   {
     corpusId: 'secure_local.whatsapp.messages',
@@ -295,7 +285,7 @@ const DEFAULT_SOURCE_CORPORA = ([
     family: 'chat',
     trustDomain: 'secure_local',
     activationMode: 'hybrid_shadow',
-    capabilities: ['status', 'sync', 'answer'],
+    capabilities: ['status', 'sync', 'search', 'answer'],
     description: 'WhatsApp live capture (thin whatsmeow bridge -> shared scheduler -> connector store), including locally transcribed voice notes.',
   },
   {
@@ -307,11 +297,11 @@ const DEFAULT_SOURCE_CORPORA = ([
     activationMode: 'hybrid_shadow',
     // No 'sync' of its own: the WhatsApp lane's tier set fills it with the
     // messages judged Personal.
-    capabilities: ['status', 'answer'],
+    capabilities: ['status', 'search', 'answer'],
     createdOnDemand: true,
     description: 'WhatsApp messages judged Personal by their content, routed here per message.',
   },
-] satisfies SourceCorpusConfig[]).map(connectorStoreCapabilities);
+];
 
 const DEFAULT_CAPABILITY_ORDER: Partial<Record<SourceCorpusCapability, readonly string[]>> = {
   answer: [
@@ -534,7 +524,7 @@ export function parseSourceCorpusRegistryConfig(rawConfig: unknown): SourceCorpu
   if (!Array.isArray(root.corpora)) {
     throw new OperationError('config_error', 'sourceIndex corpus registry requires a corpora array.');
   }
-  const corpora = root.corpora.map(parseSourceCorpusConfig).map(connectorStoreCapabilities);
+  const corpora = root.corpora.map(parseSourceCorpusConfig);
   const seen = new Set<string>();
   for (const corpus of corpora) {
     if (seen.has(corpus.corpusId)) {

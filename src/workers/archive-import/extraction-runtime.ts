@@ -22,6 +22,7 @@ import type { ExtractorRegistryConfig } from '../file-extraction/types.ts';
 import {
   createFileExtractionRuntime,
   fileExtractionCorporaRoster,
+  type FileExtractionCorpusConfig,
   type FileExtractionRuntime,
 } from '../engine/runtime/file-extraction-runtime.ts';
 import type { ArchiveConnectorFactory } from '../../core/archive-formats.ts';
@@ -40,6 +41,7 @@ export interface ArchiveExtractionRuntimeInput {
    * The product's extractor configuration, the one the main runtime was built with.
    */
   extractors?: ExtractorRegistryConfig;
+  configuredCorpora?: readonly FileExtractionCorpusConfig[];
   env?: Record<string, string | undefined>;
   jobsDbPath?: string;
   warn?: (message: string) => void;
@@ -80,16 +82,17 @@ export function createArchiveExtractionRuntime(input: ArchiveExtractionRuntimeIn
       .join('|');
     if (built?.key === key) return built.runtime;
     const previous = built?.runtime;
-    const families = served.map(({ lane }) => lane.family);
-    const runtime = families.length === 0
+    const archive = archiveFileExtractionCorpora({ state: input.runtime.state, families: served.map(({ lane }) => lane.family) });
+    const archiveIds = new Set(archive.map(corpus => corpus.corpusId));
+    const runtime = archive.length === 0
       ? undefined
       : createFileExtractionRuntime({
           ...(input.env ? { env: input.env } : {}),
           enabled: true,
           connectorStores: served.flatMap(({ stores }) => stores),
           corpora: fileExtractionCorporaRoster({
-            configured: [],
-            archive: archiveFileExtractionCorpora({ state: input.runtime.state, families }),
+            configured: (input.configuredCorpora ?? []).filter(corpus => archiveIds.has(corpus.corpusId)),
+            archive,
           }),
           extraSourceFactories: new Map([[
             ARCHIVE_EXTRACTION_PROVIDER,
