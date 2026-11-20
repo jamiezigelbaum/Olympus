@@ -68380,6 +68380,33 @@ function identityRowsSql(extraSql) {
       ORDER BY j.key
     `;
 }
+function verifiedObservationConnectorId(previousId) {
+  return VERIFIED_OBSERVATION_PREFIX + previousId;
+}
+function observedOwnerPredicate(exact, prefix) {
+  const keys = [];
+  const params = [];
+  if (exact) {
+    keys.push("o.connector_id = ?");
+    params.push(exact);
+    if (exact.startsWith(VERIFIED_OBSERVATION_PREFIX)) {
+      keys.push(`(o.connector_id = ? AND EXISTS (
+        SELECT 1 FROM sync_runs r
+        WHERE r.sync_run_id IN (o.first_seen_sync_run_id, o.last_seen_sync_run_id)
+          AND (r.connector_id = o.connector_id OR (r.connector_id = ? AND NOT EXISTS (
+            SELECT 1 FROM item_owners other WHERE other.item_pk = o.item_pk AND other.connector_id <> o.connector_id
+          )))
+      ))`);
+      params.push(exact.slice(VERIFIED_OBSERVATION_PREFIX.length), TIER_MOVE_CONNECTOR_ID);
+    }
+  }
+  if (prefix) {
+    keys.push("substr(o.connector_id, 1, length(?)) = ?");
+    params.push(prefix, prefix);
+  }
+  return { sql: `EXISTS (SELECT 1 FROM item_owners o WHERE o.item_pk = i.item_pk
+    AND o.ownership_kind = 'observed' AND (${keys.join(" OR ")}))`, params };
+}
 function connectorStoreFilterSql(filters) {
   const normalized = normalizeConnectorStoreSearchFilters(filters);
   if (!normalized)
@@ -68390,15 +68417,10 @@ function connectorStoreFilterSql(filters) {
     clauses.push("AND i.provider = ?");
     params.push(normalized.provider);
   }
-  if (normalized.observedConnectorId && normalized.observedConnectorIdPrefix) {
-    clauses.push("AND EXISTS (SELECT 1 FROM item_owners scope_owner WHERE scope_owner.item_pk = i.item_pk AND (scope_owner.connector_id = ? OR substr(scope_owner.connector_id, 1, length(?)) = ?) AND scope_owner.ownership_kind = 'observed')");
-    params.push(normalized.observedConnectorId, normalized.observedConnectorIdPrefix, normalized.observedConnectorIdPrefix);
-  } else if (normalized.observedConnectorId) {
-    clauses.push("AND EXISTS (SELECT 1 FROM item_owners scope_owner WHERE scope_owner.item_pk = i.item_pk AND scope_owner.connector_id = ? AND scope_owner.ownership_kind = 'observed')");
-    params.push(normalized.observedConnectorId);
-  } else if (normalized.observedConnectorIdPrefix) {
-    clauses.push("AND EXISTS (SELECT 1 FROM item_owners scope_owner WHERE scope_owner.item_pk = i.item_pk AND substr(scope_owner.connector_id, 1, length(?)) = ? AND scope_owner.ownership_kind = 'observed')");
-    params.push(normalized.observedConnectorIdPrefix, normalized.observedConnectorIdPrefix);
+  if (normalized.observedConnectorId || normalized.observedConnectorIdPrefix) {
+    const owner = observedOwnerPredicate(normalized.observedConnectorId, normalized.observedConnectorIdPrefix);
+    clauses.push(`AND ${owner.sql}`);
+    params.push(...owner.params);
   }
   if (normalized.sourceScopeGeneration) {
     clauses.push("AND i.source_scope_generation = ?");
@@ -69652,7 +69674,7 @@ var TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff", DEFAULT_
   FROM items
   WHERE item_pk > ? AND item_pk <= ? AND tombstoned = 0 AND parent_local_item_id IS NULL
   GROUP BY provider
-`, CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, IMAGE_CONTENT_PAGE_KEYS = 20000, STATUS_PAGE_KEYS = 20000, statusPageKeys, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, openShape, PEOPLE_SENDER_PREDICATE = `((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))`, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
+`, CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, IMAGE_CONTENT_PAGE_KEYS = 20000, STATUS_PAGE_KEYS = 20000, statusPageKeys, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, VERIFIED_OBSERVATION_PREFIX = "verified-observation.v1:", MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, openShape, PEOPLE_SENDER_PREDICATE = `((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))`, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_memory_counters();
   init_embedding_sweep_idle();
@@ -71991,8 +72013,10 @@ ${parentKey(ref)}`, { ref, origin });
         SELECT item_pk, sync_run_id FROM items
         WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ? AND tombstoned = 0
       `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
-        if (row)
+        if (row) {
           this.rememberItemOwner(row.item_pk, connectorId, "observed", row.sync_run_id, nowIso(), "provider_listing");
+          this.db.query("INSERT INTO store_totals (name, n) VALUES (?, 1) ON CONFLICT(name) DO UPDATE SET n = n + 1").run(STORE_TOTALS_WRITES);
+        }
       })();
     }
     reobserveRoutedCopy(item, connectorId, ownershipKind, syncRunId) {
@@ -73301,6 +73325,16 @@ ${parentKey(ref)}`, { ref, origin });
       if (!row || row.tombstoned === 1)
         return;
       return { chunkCount: row.chunk_count, ...row.authored_at ? { authoredAt: row.authored_at } : {} };
+    }
+    async unobservedContentCount(provider, account, connectorId, connectorIdPrefix) {
+      const owner = observedOwnerPredicate(connectorId, connectorIdPrefix);
+      const sql = `SELECT COUNT(*) AS n FROM items i
+      WHERE i.provider = ? AND i.account_scope = ? AND i.tombstoned = 0 AND i.parent_local_item_id IS NULL
+        AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
+        AND NOT ${owner.sql}`;
+      const params = [provider, account, ...owner.params];
+      const row = offThreadReadsSupported(this.dbPath) ? await readInBackground(this.dbPath, { sql, params, mode: "get" }) : this.db.query(sql).get(...params);
+      return row.n;
     }
     storedItemState(identity) {
       const row = this.db.query(`
@@ -98433,6 +98467,244 @@ var init_file_extraction_source = __esm(() => {
   };
 });
 
+// src/workers/source-account-guard.ts
+import { createHash as createHash47 } from "node:crypto";
+function createExclusiveRunner() {
+  let tail = Promise.resolve();
+  return (task) => {
+    const run = tail.then(task, task);
+    tail = run.catch(() => {
+      return;
+    });
+    return run;
+  };
+}
+function runExclusiveForSource(registryPath, sourceId, task) {
+  return sourceExclusiveRunner(sourceAccountBindingsPath(registryPath), sourceId)(task);
+}
+function sourceExclusiveRunner(bindingsPath, sourceId) {
+  const key = `${bindingsPath}
+${sourceId}`;
+  let runner = sourceExclusiveRunners.get(key);
+  if (!runner) {
+    runner = createExclusiveRunner();
+    sourceExclusiveRunners.set(key, runner);
+  }
+  return runner;
+}
+function runGuarded(guard, task) {
+  return guard.run ? guard.run(task) : guard.assertAccount().then(task);
+}
+function createSourceAccountGuard(options) {
+  const broker = options.broker ?? createEnvCredentialBroker();
+  const now = options.now ?? (() => new Date);
+  const bindingsPath = sourceAccountBindingsPath(options.registryPath);
+  const exclusive = options.exclusive ?? sourceExclusiveRunner(bindingsPath, options.sourceId);
+  const verified = new Map;
+  let lastAccessToken;
+  const evidenceChecked = new Map;
+  const evidenceOpens = async (accessToken, folderIds) => {
+    const key = createHash47("sha256").update(`${accessToken}
+${folderIds.join(",")}`).digest("hex");
+    const known = evidenceChecked.get(key);
+    if (known !== undefined)
+      return known;
+    const answer = await options.ownAccountEvidence?.check(accessToken, folderIds).catch(() => {
+      return;
+    });
+    if (answer !== undefined) {
+      if (evidenceChecked.size >= 8)
+        evidenceChecked.clear();
+      evidenceChecked.set(key, answer);
+    }
+    return answer;
+  };
+  let evidenceRecordAttempted = false;
+  let historyRecorded;
+  const unreadableHistory = (error) => new SourceAccountChangedError("source_account_unverified", `${options.sourceId}: could not read which account its stored items belong to (${error instanceof Error ? error.message : String(error)}); nothing was synced this run.`);
+  const historyAccountId = () => {
+    try {
+      return options.historyAccount?.read();
+    } catch (error) {
+      throw unreadableHistory(error);
+    }
+  };
+  const agreeWithHistory = () => {
+    if (!options.historyAccount)
+      return;
+    const read = readSourceAccountBindings(bindingsPath);
+    const bound = read.kind === "ok" ? read.bindings.sources[options.sourceId] : undefined;
+    if (!bound?.provider_account_id || bound.purge_required || bound.provider_account_id === historyRecorded)
+      return;
+    let recorded;
+    try {
+      recorded = options.historyAccount.record(bound.provider_account_id, { historyEmpty: !options.laneHoldsItems() });
+    } catch (error) {
+      throw unreadableHistory(error);
+    }
+    if (recorded === "different" || recorded === "unproven") {
+      throw new SourceAccountChangedError("source_account_changed", `${options.sourceId}'s stored items belong to another account than the connected one, so nothing syncs: one source never holds two accounts. ` + "To keep them, reconnect the account they came from. " + `To replace them, Disconnect the source, run \`olympus data delete --source ${options.sourceId}\` (preview with --dry-run), then connect again.`);
+    }
+    historyRecorded = bound.provider_account_id;
+  };
+  const tokenAccountId = async () => {
+    const handle = readConnectedHandleRegistry(options.registryPath).handles.find((entry) => entry.handle === options.handle);
+    if (options.readAccountId) {
+      return handle?.providerAccountId?.trim() ? options.readAccountId()?.trim() || undefined : undefined;
+    }
+    const session = await broker.issueSession({
+      handle: options.handle,
+      provider: options.provider,
+      capability: options.capability,
+      ...handle?.trustDomain ? { trustDomain: handle.trustDomain } : {},
+      purpose: "Confirm which provider account the source credential belongs to before syncing."
+    });
+    if (session.kind !== "bearer_token")
+      return;
+    lastAccessToken = session.token;
+    const key = createHash47("sha256").update(session.token).digest("hex");
+    const known = verified.get(key);
+    if (known)
+      return known;
+    try {
+      const id = await fetchProviderAccountId({
+        provider: options.provider,
+        accessToken: session.token,
+        ...options.fetch ? { fetchImpl: options.fetch } : {},
+        ...options.identityEndpoints ? { endpoints: options.identityEndpoints } : {},
+        ...options.identityTimeoutMs ? { timeoutMs: options.identityTimeoutMs } : {}
+      });
+      if (verified.size >= 8)
+        verified.clear();
+      verified.set(key, id);
+      return id;
+    } catch {
+      return;
+    }
+  };
+  const guard = {
+    run(task) {
+      const checked = async () => {
+        await guard.assertAccount();
+        return task();
+      };
+      return exclusive(checked);
+    },
+    async assertAccount() {
+      await verifyAccount();
+      agreeWithHistory();
+    }
+  };
+  async function verifyAccount() {
+    const handle = readConnectedHandleRegistry(options.registryPath).handles.find((entry) => entry.handle === options.handle);
+    if (!handle) {
+      throw new SourceAccountChangedError("source_account_unverified", `${options.sourceId} is not connected.`);
+    }
+    if (options.laneStoresStale?.()) {
+      const restarting = options.requestStoreReopen?.() ?? false;
+      throw new SourceAccountChangedError("source_stores_reopen_required", restarting ? `${options.sourceId}'s stored data was deleted while the worker was running; the worker is restarting to reopen it.` : `${options.sourceId}'s stored data was deleted while the worker was running. Restart the Olympus worker so it reopens the source's stores before syncing.`);
+    }
+    const token = await tokenAccountId();
+    const history = historyAccountId();
+    const decide = (binding) => decideSourceAccountAction({
+      binding: binding?.provider_account_id || !history ? binding : { ...binding, provider_account_id: history },
+      grantAccountId: handle.providerAccountId,
+      grantConnectedAt: handle.connectedAt,
+      tokenAccountId: token,
+      laneHoldsItems: options.laneHoldsItems(),
+      now: now()
+    });
+    const read = readSourceAccountBindings(bindingsPath);
+    if (read.kind === "malformed")
+      throw new SourceAccountBindingsUnreadableError(bindingsPath);
+    let decision = decide(read.bindings.sources[options.sourceId]);
+    const current = read.bindings.sources[options.sourceId];
+    if (decision.action === "purge" && decision.reason === "previous_account_unknown" && token && lastAccessToken && current?.previous_account_folders?.length && await evidenceOpens(lastAccessToken, current.previous_account_folders) === true) {
+      let bound = false;
+      updateSourceAccountBinding(bindingsPath, options.sourceId, (latest) => {
+        const grantNow = readConnectedHandleRegistry(options.registryPath).handles.find((entry) => entry.handle === options.handle);
+        if (JSON.stringify(latest ?? null) !== JSON.stringify(current ?? null) || grantNow?.connectedAt !== handle.connectedAt || grantNow?.providerAccountId !== handle.providerAccountId)
+          return latest;
+        bound = true;
+        return { provider_account_id: token, bound_at: now().toISOString(), bound_grant: handle.connectedAt };
+      });
+      if (bound)
+        return;
+      throw new SourceAccountChangedError("source_account_unverified", `${options.sourceId} was reconnected while its account was being confirmed; it is checked again on the next run.`);
+    }
+    if (decision.action === "proceed" && decision.write === undefined && !token && lastAccessToken && options.ownAccountEvidence && !evidenceRecordAttempted && !current?.provider_account_id && !current?.reconnected_at && !current?.previous_account_folders?.length) {
+      const folders = await options.ownAccountEvidence.record(lastAccessToken).catch(() => {
+        return;
+      });
+      if (folders !== undefined)
+        evidenceRecordAttempted = true;
+      if (folders?.length) {
+        updateSourceAccountBinding(bindingsPath, options.sourceId, (latest) => latest?.provider_account_id || latest?.reconnected_at || latest?.purge_required ? latest : { ...latest, previous_account_folders: folders.slice(0, 5) });
+      }
+    }
+    if (decision.action === "proceed" && decision.write === undefined)
+      return;
+    if (decision.action !== "refuse") {
+      updateSourceAccountBinding(bindingsPath, options.sourceId, (current) => {
+        decision = decide(current);
+        if (decision.action === "proceed") {
+          return decision.write === undefined ? current : decision.write ?? undefined;
+        }
+        if (decision.action === "purge") {
+          return current?.purge_required ? current : { ...current, purge_required: { reason: decision.reason, detected_at: now().toISOString() } };
+        }
+        return current;
+      });
+    }
+    if (decision.action === "proceed")
+      return;
+    if (decision.action === "refuse" && decision.reason === "token_account_mismatch" && options.readAccountId) {
+      throw new SourceAccountChangedError("source_account_token_mismatch", `${options.sourceId}: this source is set to read a different account than the connected credential's, so nothing was synced. This clears once the worker picks up a reconnect; if it stays, remove the account override from the worker's environment.`);
+    }
+    if (decision.action === "refuse" && decision.reason === "token_account_mismatch") {
+      invalidateMintedCredentialSessions(options.handle);
+      verified.clear();
+      throw new SourceAccountChangedError("source_account_token_mismatch", `${options.sourceId}: the access token in use belongs to a different account than the connected credential; it was discarded and nothing was synced. If a Connect for this source just failed, connect it again.`);
+    }
+    if (decision.action === "refuse") {
+      throw new SourceAccountChangedError("source_account_unverified", `${options.sourceId}: could not confirm which account the credential belongs to; nothing was synced this run.`);
+    }
+    throw new SourceAccountChangedError("source_account_changed", `${options.sourceId} is now connected to ${decision.reason === "account_changed" ? "a different account" : "an account that could not be matched to the one its items came from"}, ` + "so nothing syncs: one source never holds two accounts. To keep the items already stored, reconnect the previous account. " + `To replace them, Disconnect the source, run \`olympus data delete --source ${options.sourceId}\` (preview with --dry-run), then connect again.`);
+  }
+  return guard;
+}
+function guardAccountBoundLanes(sources, guards) {
+  return sources.map((source) => {
+    const guard = guards.get(source.sourceId);
+    return guard ? accountBoundSchedulerSource({ source, guard }) : source;
+  });
+}
+function accountBoundSchedulerSource(input) {
+  return {
+    ...input.source,
+    tasks: input.source.tasks.map((task) => ({
+      ...task,
+      run: (context) => runGuarded(input.guard, () => task.run(context))
+    }))
+  };
+}
+var SourceAccountChangedError, sourceExclusiveRunners;
+var init_source_account_guard = __esm(() => {
+  init_provider_account_identity();
+  init_source_account_binding();
+  init_connected_handles();
+  init_credential_broker();
+  SourceAccountChangedError = class SourceAccountChangedError extends Error {
+    code;
+    constructor(code, message) {
+      super(message);
+      this.name = "SourceAccountChangedError";
+      this.code = code;
+    }
+  };
+  sourceExclusiveRunners = new Map;
+});
+
 // src/workers/email-source/ingest-filter.ts
 function classifyEmailIngestSkip(candidate, options = {}) {
   const skipOtp = options.skipOtp ?? true;
@@ -98505,7 +98777,7 @@ function metadataStringArray2(metadata, key) {
 }
 
 // src/workers/google-connectors/gmail-mail-record.ts
-import { createHash as createHash47 } from "node:crypto";
+import { createHash as createHash48 } from "node:crypto";
 function isGmailAttachmentPart(part) {
   const type = (part.mimeType ?? "").trim().toLowerCase();
   if (type.startsWith("multipart/"))
@@ -98534,7 +98806,7 @@ function childrenOf(record, build) {
   return record.metadataOnly || build.children !== true ? [] : record.attachments.filter((attachment) => attachment.filename.trim() !== "" && (attachment.partId === "" ? 0 : attachment.partId.split(".").length) <= GMAIL_CHILD_MAX_DEPTH);
 }
 function hashString3(value) {
-  return createHash47("sha256").update(value).digest("hex");
+  return createHash48("sha256").update(value).digest("hex");
 }
 function parsedDate(value) {
   if (!value)
@@ -98740,16 +99012,19 @@ class GoogleDailyRequestBudget {
       }
     }
   }
-  reserve(provenance) {
+  reserve(provenance, reserveForLive) {
     const routine = sourceInvocationProvenance(provenance) === "scheduled";
     const now = validDate2(this.now(), this.provider);
     const utcDay = now.toISOString().slice(0, 10);
+    const dailyLimit = this.dailyRequestBudget;
+    const limit = routine ? dailyLimit - (reserveForLive?.(dailyLimit) ?? 0) : dailyLimit;
     if (this.ledgerPath) {
       reservePersistentRequest({
         ledgerPath: this.ledgerPath,
         provider: this.provider,
         utcDay,
-        dailyRequestBudget: this.dailyRequestBudget,
+        dailyRequestBudget: dailyLimit,
+        limit,
         routine,
         now
       });
@@ -98762,8 +99037,8 @@ class GoogleDailyRequestBudget {
       this.utcDay = utcDay;
       this.requests = 0;
     }
-    if (routine && this.requests >= this.dailyRequestBudget) {
-      throw new GoogleRequestBudgetError(this.provider, nextUtcDay(now), "daily_api_request_guard", { limit: this.dailyRequestBudget, used: this.requests });
+    if (routine && this.requests >= limit) {
+      throw limitRefusal(this.provider, now, dailyLimit, limit, this.requests);
     }
     this.requests += 1;
   }
@@ -98834,21 +99109,28 @@ function reservePersistentRequest(input) {
           `).run(input.provider, input.utcDay);
         return;
       }
-      const reserved = db.query(`
+      const reserved = input.limit > 0 && db.query(`
           INSERT INTO ${GOOGLE_REQUEST_BUDGET_LEDGER_TABLE} (
-            provider, utc_day, requests
+              provider, utc_day, requests
           ) VALUES (?, ?, 1)
           ON CONFLICT(provider, utc_day) DO UPDATE SET
             requests = requests + 1
           WHERE requests < ?
           RETURNING requests
-        `).get(input.provider, input.utcDay, input.dailyRequestBudget);
+        `).get(input.provider, input.utcDay, input.limit);
       if (!reserved) {
-        throw new GoogleRequestBudgetError(input.provider, nextUtcDay(input.now), "daily_api_request_guard", { limit: input.dailyRequestBudget });
+        if (input.limit === input.dailyRequestBudget) {
+          throw new GoogleRequestBudgetError(input.provider, nextUtcDay(input.now), "daily_api_request_guard", { limit: input.dailyRequestBudget });
+        }
+        const row = db.query(`SELECT requests FROM ${GOOGLE_REQUEST_BUDGET_LEDGER_TABLE} WHERE provider = ? AND utc_day = ?`).get(input.provider, input.utcDay);
+        throw limitRefusal(input.provider, input.now, input.dailyRequestBudget, input.limit, row?.requests ?? 0);
       }
     });
     reserve.immediate();
   }), RESERVATION_BUSY_RETRY_DELAYS_MS);
+}
+function limitRefusal(provider, now, dailyLimit, limit, used) {
+  return used >= dailyLimit ? new GoogleRequestBudgetError(provider, nextUtcDay(now), "daily_api_request_guard", { limit: dailyLimit, used }) : new GoogleRequestBudgetError(provider, nextUtcDay(now), "request_reserve", { limit, used });
 }
 function persistentRequestsForDay(ledgerPath, provider, utcDay, now) {
   return runBudgetLedgerOperation(ledgerPath, provider, now, () => withLedger(ledgerPath, (db) => {
@@ -99049,7 +99331,7 @@ var init_request_budget = __esm(() => {
     observedFutureUtcDay;
     amounts;
     constructor(provider, retryAt, reason = "daily_api_request_guard", options = {}) {
-      super(reason === "future_utc_day" ? `${provider} request budget clock regression: persisted future UTC day ` + `${options.observedFutureUtcDay ?? "future"} is later than current UTC day ` + `${options.currentUtcDay ?? "current"}; recover with ` + "`olympus source request-budget recover-future` using the observed day." : reason === "ledger_busy" ? `${provider} request budget ledger remained busy; the provider request was refused before dispatch.` : `${provider} request deferred by daily_api_request_guard.`);
+      super(reason === "future_utc_day" ? `${provider} request budget clock regression: persisted future UTC day ` + `${options.observedFutureUtcDay ?? "future"} is later than current UTC day ` + `${options.currentUtcDay ?? "current"}; recover with ` + "`olympus source request-budget recover-future` using the observed day." : reason === "ledger_busy" ? `${provider} request budget ledger remained busy; the provider request was refused before dispatch.` : `${provider} request deferred by ${reason}.`);
       this.name = "GoogleRequestBudgetError";
       this.provider = provider;
       this.retryAt = retryAt;
@@ -99061,7 +99343,7 @@ var init_request_budget = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail.ts
-import { createHash as createHash48 } from "node:crypto";
+import { createHash as createHash49 } from "node:crypto";
 
 class GoogleGmailSourceConnector {
   id = GMAIL_PROVIDER;
@@ -99089,10 +99371,12 @@ class GoogleGmailSourceConnector {
   itemsSkippedOtp = 0;
   itemsSkippedCategory = 0;
   itemsSkippedStored = 0;
+  confirmationPagePrefix;
   ingestFilterOptions;
   itemsByLocalId = new Map;
   build;
   beforeEachRequest;
+  confirmationAccountId;
   messagesById = new Map;
   constructor(options = {}) {
     const env = options.env ?? process.env;
@@ -99115,6 +99399,7 @@ class GoogleGmailSourceConnector {
     this.now = options.now ?? (() => Date.now());
     this.build = options.build ?? {};
     this.beforeEachRequest = options.beforeEachRequest;
+    this.confirmationAccountId = options.confirmationAccountId;
     const ingestFilterOptions = options.ingestFilterOptions ?? parseEmailIngestFilterOptionsFromEnv(env);
     this.ingestFilterOptions = this.scope && ingestFilterOptions.skipCategories === undefined ? { ...ingestFilterOptions, skipCategories: [...this.scope.skippedCategoryLabelIds ?? []] } : ingestFilterOptions;
     if (this.scope?.skippedLabelIds?.length) {
@@ -99132,15 +99417,17 @@ class GoogleGmailSourceConnector {
   }
   async* listItems(options = {}) {
     const client = await this.clientForRequest();
-    let scopeConfirmationsFetched = 0;
-    let remaining = normalizeGmailMaxMessages(options.limit ?? this.defaultMaxMessages);
+    const confirmation = this.scope?.confirmStoredItem;
+    const requested = normalizeGmailMaxMessages(options.limit ?? this.defaultMaxMessages);
+    const limit = confirmation && requested > GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS ? GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS : requested;
+    let remaining = limit;
     const resume = decodeGmailCursor(options.cursor);
     const cutoffMs = this.scope?.contentAfterMs;
-    let metadataLeg = !this.scope?.confirmationOnly && resume.phase === "metadata" && cutoffMs !== undefined;
+    let metadataLeg = !confirmation && resume.phase === "metadata" && cutoffMs !== undefined;
     const staleLeg = resume.phase === "metadata" && !metadataLeg;
     const watermarkMs = metadataLeg || staleLeg ? undefined : resume.watermarkMs;
     let query = metadataLeg && cutoffMs !== undefined ? this.metadataLegQuery(cutoffMs) : this.queryForWatermark(watermarkMs);
-    const splitsAtCutoff = !this.scope?.confirmationOnly && !metadataLeg && cutoffMs !== undefined && watermarkMs === undefined;
+    const splitsAtCutoff = !confirmation && !metadataLeg && cutoffMs !== undefined && watermarkMs === undefined;
     let highWaterMs = staleLeg ? undefined : resume.highWaterMs;
     const nowMs = this.now();
     const startedMs = this.scope ? !staleLeg && resume.startedMs !== undefined && (resume.pageToken || metadataLeg) ? resume.startedMs : nowMs : undefined;
@@ -99173,12 +99460,13 @@ class GoogleGmailSourceConnector {
     const requestedPageTokens = new Set;
     let listPages = 0;
     while (remaining > 0 && itemRoom > 0 && listPages < MAX_GMAIL_LIST_PAGES_PER_RUN) {
+      this.confirmationPagePrefix = undefined;
       if (pageToken)
         assertNewProviderPage(requestedPageTokens, pageToken);
       this.providerRequests += 1;
       listPages += 1;
-      const page = await client.listMessages({
-        maxResults: Math.min(DEFAULT_GMAIL_PAGE_SIZE, remaining),
+      const page = await listGmailMessagePage(client, {
+        maxResults: Math.min(DEFAULT_GMAIL_PAGE_SIZE, confirmation ? limit : remaining),
         ...pageToken ? { pageToken } : {},
         ...query ? { query } : {}
       });
@@ -99203,25 +99491,31 @@ class GoogleGmailSourceConnector {
       for (const message of listed.slice(baseSkip)) {
         if (messagesFetched >= remaining || items.length >= itemRoom)
           break;
+        const prior = confirmation ? examinedIds.at(-1) : undefined;
+        if (prior !== undefined) {
+          this.confirmationPagePrefix = { ...pageToken ? { pageToken } : {}, after: prior };
+        }
         messagesExamined += 1;
         examinedIds.push(message.id);
         const stored = this.scope?.storedItem?.(message.id);
-        if (this.scope?.confirmationOnly && (!stored || !stored.hasContent))
-          continue;
-        if (stored && (metadataLeg || stored.hasContent)) {
-          if (!metadataLeg && stored.needsScopeObservation && this.scope?.storedItemObserved && scopeConfirmationsFetched < GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS) {
-            scopeConfirmationsFetched += 1;
-            messagesFetched += 1;
-            this.providerRequests += 1;
-            const metadata = await client.getMessage(message.id, { format: "metadata", metadataHeaders: GMAIL_METADATA_HEADERS });
-            const received = internalDateNumber({ internalDate: metadata.internalDate });
+        if (confirmation) {
+          if (!stored?.needsScopeObservation)
+            continue;
+          this.beforeEachRequest?.();
+          messagesFetched += 1;
+          this.providerRequests += 1;
+          const metadata = await client.getMessage(message.id, { format: "metadata", metadataHeaders: GMAIL_METADATA_HEADERS }).catch((error) => {
+            if (gmailHttpStatus(error) === 404)
+              return;
+            throw error;
+          });
+          if (metadata?.id === message.id && gmailMessageInScope(metadata, this.scope)) {
             const item = gmailMessageItem(gmailMailRecordFromMessage(metadata, { metadataOnly: true }), this.account);
-            const subject = metadataString2(item.metadata, "subject");
-            const from = metadataString2(item.metadata, "from");
-            const skipped = this.scope.skipSenders?.some((rule) => senderMatchesRule(from, rule)) || classifyEmailIngestSkip({ ...subject ? { subject } : {}, ...from ? { from } : {}, labels: metadataStringArray2(item.metadata, "labels") }, this.ingestFilterOptions);
-            if (!skipped && (cutoffMs === undefined || received !== undefined && received >= cutoffMs))
-              this.scope.storedItemObserved(item);
+            confirmation(item, (text) => !this.ingestSkip(item, text));
           }
+          continue;
+        }
+        if (stored && (metadataLeg || stored.hasContent)) {
           this.itemsSkippedStored += 1;
           continue;
         }
@@ -99245,19 +99539,13 @@ class GoogleGmailSourceConnector {
         if (!metadataLeg && internalDateMs !== undefined && (highWaterMs === undefined || internalDateMs > highWaterMs)) {
           highWaterMs = Math.min(internalDateMs, nowMs);
         }
-        const subject = metadataString2(item.metadata, "subject") ?? metadataString2(item.metadata, "title");
         const from = metadataString2(item.metadata, "from");
         if (this.scope?.skipSenders?.some((rule) => senderMatchesRule(from, rule))) {
           this.itemsSkippedCategory += 1;
           continue;
         }
         const body = item.content.kind === "text" ? item.content.text : metadataString2(item.metadata, "snippet");
-        const skip = classifyEmailIngestSkip({
-          ...subject !== undefined ? { subject } : {},
-          ...from !== undefined ? { from } : {},
-          ...body !== undefined ? { body } : {},
-          labels: metadataStringArray2(item.metadata, "labels")
-        }, this.ingestFilterOptions);
+        const skip = this.ingestSkip(item, body);
         if (skip) {
           if (skip === "otp")
             this.itemsSkippedOtp += 1;
@@ -99335,6 +99623,19 @@ class GoogleGmailSourceConnector {
       } else if (!pageToken)
         break;
     }
+  }
+  interruptedConfirmationCursor() {
+    return this.confirmationPagePrefix && encodeGmailCursor(this.confirmationPagePrefix);
+  }
+  ingestSkip(item, body) {
+    const subject = metadataString2(item.metadata, "subject") ?? metadataString2(item.metadata, "title");
+    const from = metadataString2(item.metadata, "from");
+    return classifyEmailIngestSkip({
+      ...subject !== undefined ? { subject } : {},
+      ...from !== undefined ? { from } : {},
+      ...body !== undefined ? { body } : {},
+      labels: metadataStringArray2(item.metadata, "labels")
+    }, this.ingestFilterOptions);
   }
   async fetchItem(localItemId, options) {
     if (options?.deferredBytes)
@@ -99452,6 +99753,8 @@ class GoogleGmailSourceConnector {
       capability: "gmail.email.sync",
       trustDomain: "secure_local"
     }), this.credentialHandle);
+    if (this.scope?.confirmStoredItem)
+      await this.verifyConfirmationAccount(session.token);
     return new RestGmailApiClient({
       token: session.token,
       fetch: this.fetchImpl,
@@ -99462,6 +99765,35 @@ class GoogleGmailSourceConnector {
       ...this.sleepImpl ? { sleep: this.sleepImpl } : {},
       ...this.beforeEachRequest ? { beforeEachAttempt: this.beforeEachRequest } : {}
     });
+  }
+  async verifyConfirmationAccount(token) {
+    const expected = this.confirmationAccountId?.();
+    if (!expected) {
+      throw new SourceAccountChangedError("source_account_unverified", "Gmail confirmation requires a verified account for the stored mail.");
+    }
+    let refused;
+    const observed = await fetchProviderAccountId({
+      provider: GMAIL_PROVIDER,
+      accessToken: token,
+      endpoints: { gmail: `${this.apiBaseUrl}/users/me/profile` },
+      fetchImpl: (url, init) => {
+        try {
+          this.beforeEachRequest?.();
+          this.requestBudget?.reserve(this.provenance);
+        } catch (error) {
+          refused = error;
+          throw error;
+        }
+        return this.fetchImpl(url, init);
+      }
+    }).finally(() => {
+      if (refused !== undefined)
+        throw refused;
+    });
+    if (compareProviderAccounts(expected, observed) !== "same") {
+      throw new SourceAccountChangedError("source_account_token_mismatch", "Gmail confirmation could not match the mailbox to the stored mail.");
+    }
+    this.beforeEachRequest?.();
   }
   queryForWatermark(watermarkMs) {
     if (this.scope) {
@@ -99480,6 +99812,20 @@ class GoogleGmailSourceConnector {
     return parts.length > 0 ? parts.join(" ") : undefined;
   }
 }
+function gmailHttpStatus(error) {
+  const status = error instanceof Error && /^Gmail API request failed \((\d{3})\)/.exec(error.message)?.[1];
+  return status ? Number(status) : undefined;
+}
+async function listGmailMessagePage(client, request) {
+  try {
+    return await client.listMessages(request);
+  } catch (error) {
+    const status = gmailHttpStatus(error);
+    if (request.pageToken && (status === 400 || status === 404))
+      throw new GmailPageTokenRejectedError;
+    throw error;
+  }
+}
 function gmailLabelledMessageSource(getClient) {
   let known;
   return {
@@ -99494,20 +99840,12 @@ function gmailLabelledMessageSource(getClient) {
           return { ids: [] };
         labelId = match.id;
       }
-      let response;
-      try {
-        response = await client.listMessages({
-          maxResults: GMAIL_LABEL_PAGE_SIZE,
-          labelIds: [labelId],
-          includeSpamTrash: true,
-          ...page.pageToken ? { pageToken: page.pageToken } : {}
-        });
-      } catch (error) {
-        if (page.pageToken && error instanceof Error && /Gmail API request failed \((?:400|404)\)/.test(error.message)) {
-          throw new GmailPageTokenRejectedError;
-        }
-        throw error;
-      }
+      const response = await listGmailMessagePage(client, {
+        maxResults: GMAIL_LABEL_PAGE_SIZE,
+        labelIds: [labelId],
+        includeSpamTrash: true,
+        ...page.pageToken ? { pageToken: page.pageToken } : {}
+      });
       return {
         ids: response.messages.map((message) => message.id).filter((id) => id),
         ...response.nextPageToken ? { nextPageToken: response.nextPageToken } : {}
@@ -99984,16 +100322,18 @@ function metadataCount(metadata, key) {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }
 function hashString4(value) {
-  return createHash48("sha256").update(value).digest("hex");
+  return createHash49("sha256").update(value).digest("hex");
 }
 var GMAIL_SOURCE_ID = "gmail.email", GMAIL_INTERNAL_CONNECTOR_CORPUS_ID = "internal.email", GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private", GMAIL_PUBLIC_CONNECTOR_CORPUS_ID = "public_safe.email", GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, GMAIL_DAILY_REQUEST_BUDGET_ENV = "OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET", GMAIL_DAILY_REQUEST_BUDGET_STATE_PATH_ENV = "OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET_STATE_PATH", DEFAULT_GMAIL_DAILY_REQUEST_BUDGET = 1e6, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS = 32, GmailPageTokenRejectedError, GMAIL_LABEL_PAGE_SIZE = 500, GMAIL_METADATA_HEADERS, GMAIL_PART_LOCATOR_PREFIX = "gmail-part1:";
 var init_gmail = __esm(() => {
   init_owner_limit_settings();
   init_olympus_layout();
   init_mail_source_scope();
+  init_provider_account_identity();
   init_sender_rules();
   init_file_extraction_source();
   init_credential_broker();
+  init_source_account_guard();
   init_ingest_filter();
   init_gmail_mail_record();
   init_request_budget();
@@ -100007,7 +100347,7 @@ var init_gmail = __esm(() => {
 });
 
 // src/workers/google-connectors/drive.ts
-import { createHash as createHash49 } from "node:crypto";
+import { createHash as createHash50 } from "node:crypto";
 
 class GoogleDriveSourceConnector {
   id = GOOGLE_DRIVE_PROVIDER;
@@ -100627,7 +100967,7 @@ function safeProviderDetail2(value) {
   return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
 }
 function hashString5(value) {
-  return createHash49("sha256").update(value).digest("hex");
+  return createHash50("sha256").update(value).digest("hex");
 }
 var GOOGLE_DRIVE_SOURCE_ID = "google_drive.docs", GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID = "internal.drive.docs", GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID = "secure_local.drive.docs", GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID = "public_safe.drive.docs", GOOGLE_DRIVE_PROVIDER = "google_drive", DEFAULT_GOOGLE_DRIVE_SYNC_MAX_FILES = 200, DEFAULT_GOOGLE_DRIVE_CONTENT_MAX_FILES = 50, GOOGLE_DRIVE_DAILY_REQUEST_BUDGET_ENV = "OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_DAILY_API_REQUEST_BUDGET", GOOGLE_DRIVE_DAILY_REQUEST_BUDGET_STATE_PATH_ENV = "OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_DAILY_API_REQUEST_BUDGET_STATE_PATH", DEFAULT_GOOGLE_DRIVE_DAILY_REQUEST_BUDGET = 3000, DEFAULT_GOOGLE_DRIVE_PAGE_SIZE = 100, DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES = 128000, MAX_GOOGLE_DRIVE_SYNC_FILES = 1000, GOOGLE_DRIVE_API_BASE_URL = "https://www.googleapis.com/drive/v3", GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document", GOOGLE_DRIVE_CURSOR_PREFIX = "gd1:", MAX_GOOGLE_DRIVE_CURSOR_LENGTH = 4096, DEFAULT_GOOGLE_DRIVE_MAX_RETRIES = 3, MAX_GOOGLE_DRIVE_RETRY_DELAY_MS = 30000, GoogleDriveContentTooLargeError, GoogleDriveApiError, GOOGLE_DRIVE_MAX_ANCESTRY_LOOKUPS = 64, FOLDER_LOOKUP_FAILED, GOOGLE_DRIVE_INGESTION_EXCLUSION_SOURCE = "google_drive.personal", GOOGLE_DRIVE_ENFORCEABLE_EXCLUSION_CRITERIA;
 var init_drive = __esm(() => {
@@ -100962,7 +101302,7 @@ var init_corpus_adapter2 = __esm(() => {
 });
 
 // src/workers/readwise/connector.ts
-import { createHash as createHash50 } from "node:crypto";
+import { createHash as createHash51 } from "node:crypto";
 import { mkdirSync as mkdirSync40, readFileSync as readFileSync52 } from "node:fs";
 import { dirname as dirname65 } from "node:path";
 
@@ -101334,7 +101674,7 @@ function rawItem(input) {
       ...input.authoredAt ? { authoredAt: input.authoredAt } : {},
       ...input.updatedAt ? { updatedAt: input.updatedAt } : {},
       ...input.metadata,
-      contentHash: createHash50("sha256").update(JSON.stringify({
+      contentHash: createHash51("sha256").update(JSON.stringify({
         text: input.text,
         title: input.title,
         author: input.author,
@@ -102973,7 +103313,7 @@ var init_tier_override_settle = __esm(() => {
 });
 
 // src/workers/connector-store/tier-rules-sweep.ts
-import { createHash as createHash51 } from "node:crypto";
+import { createHash as createHash52 } from "node:crypto";
 function sweepOwnerRuleRaisesOffThread(options) {
   return runPassOffThread(ownerRuleRaisesPass(options), { family: "owner-rule-raises", ...options.turn ? { turn: options.turn } : {} });
 }
@@ -103256,7 +103596,7 @@ function isRaisingRule(rule) {
   return tierRank(rule.tier) > tierRank("private");
 }
 function ruleKey(rule) {
-  return createHash51("sha256").update(JSON.stringify([rule.id, rule.source ?? "", rule.match.kind, rule.match.value, rule.tier, rule.strength])).digest("hex").slice(0, 24);
+  return createHash52("sha256").update(JSON.stringify([rule.id, rule.source ?? "", rule.match.kind, rule.match.value, rule.tier, rule.strength])).digest("hex").slice(0, 24);
 }
 function readState5(raw) {
   if (!raw)
@@ -103750,7 +104090,7 @@ var init_tier_secrets_floor_sweep = __esm(() => {
 });
 
 // src/workers/connector-store/tiered-store-set.ts
-import { createHash as createHash52 } from "node:crypto";
+import { createHash as createHash53 } from "node:crypto";
 import { existsSync as existsSync59 } from "node:fs";
 function tieredStoreSetLedgerPath(secureLocalStoreDbPath) {
   return tierLedgerPathForStore(secureLocalStoreDbPath);
@@ -105097,7 +105437,7 @@ function identityKey(identity) {
   return tierLedgerIdentityKey(identity);
 }
 function planKey(item) {
-  const judged = createHash52("sha256").update(JSON.stringify([
+  const judged = createHash53("sha256").update(JSON.stringify([
     item.content.kind,
     item.content.kind === "metadata_only" ? "" : connectorStoreItemText(item) ?? "",
     stringMetadata(item, ["title", "name", "subject"]) ?? "",
@@ -105219,7 +105559,7 @@ var init_tiered_store_set = __esm(() => {
 });
 
 // src/workers/readwise/live-sync.ts
-import { createHash as createHash53 } from "node:crypto";
+import { createHash as createHash54 } from "node:crypto";
 function createReadwiseConnectorStoreSyncHandler(options) {
   const env = options.env ?? process.env;
   const config = options.config ?? defaultReadwiseLiveSyncConfig(env);
@@ -105384,7 +105724,7 @@ function taskOutcome(input) {
   };
 }
 function readwiseReceiptDigest(receipt) {
-  return createHash53("sha256").update(JSON.stringify(receipt)).digest("hex");
+  return createHash54("sha256").update(JSON.stringify(receipt)).digest("hex");
 }
 function emptyEmbedSummary(store, provider) {
   return {
@@ -106038,7 +106378,7 @@ var init_sniffer_decision = __esm(() => {
 // src/workers/source-index/built-in-reasoning/install.ts
 import { isMainThread as isMainThread7 } from "node:worker_threads";
 import { spawn as spawn4 } from "node:child_process";
-import { createHash as createHash54, randomUUID as randomUUID22 } from "node:crypto";
+import { createHash as createHash55, randomUUID as randomUUID22 } from "node:crypto";
 import {
   closeSync as closeSync19,
   createReadStream as createReadStream3,
@@ -106474,7 +106814,7 @@ function hashInto(path, hash, stallMs, onProgress) {
   });
 }
 async function sha256File2(path, stallMs, onProgress) {
-  const hash = createHash54("sha256");
+  const hash = createHash55("sha256");
   await hashInto(path, hash, stallMs, onProgress);
   return hash.digest("hex");
 }
@@ -112503,7 +112843,7 @@ var init_grant_fence = __esm(() => {
 });
 
 // src/workers/x-bookmarks/live-control.ts
-import { createHash as createHash55, randomUUID as randomUUID24 } from "node:crypto";
+import { createHash as createHash56, randomUUID as randomUUID24 } from "node:crypto";
 import { chmodSync as chmodSync20, existsSync as existsSync61, lstatSync as lstatSync31, mkdirSync as mkdirSync42 } from "node:fs";
 import { dirname as dirname67 } from "node:path";
 import { Database as Database17 } from "bun:sqlite";
@@ -113368,7 +113708,7 @@ function rateLimitStatus(row) {
   };
 }
 function hashResourceId(resourceId) {
-  return createHash55("sha256").update(resourceId).digest("hex");
+  return createHash56("sha256").update(resourceId).digest("hex");
 }
 function utcDayFrom(date) {
   return date.toISOString().slice(0, 10);
@@ -113497,7 +113837,7 @@ var init_live_control2 = __esm(() => {
 });
 
 // src/workers/x-bookmarks/api-connector.ts
-import { createHash as createHash56 } from "node:crypto";
+import { createHash as createHash57 } from "node:crypto";
 function createXBookmarksApiSourceConnector(options) {
   const env = options.env ?? process.env;
   const config = options.config ?? defaultXBookmarksLiveSyncConfig(env);
@@ -114242,7 +114582,7 @@ function classifyXBookmarksProviderWindowBoundary(error, context, policy = X_BOO
   const matchedCode = error.providerErrorCode && approvedCodes.has(error.providerErrorCode) ? error.providerErrorCode : undefined;
   if (!matchedType && !matchedCode)
     return;
-  const fingerprintSha256 = createHash56("sha256").update(JSON.stringify({
+  const fingerprintSha256 = createHash57("sha256").update(JSON.stringify({
     kind: "x_provider_window_boundary",
     algorithm_version: algorithmVersion,
     http_status: error.status,
@@ -114851,7 +115191,7 @@ var init_archive_import = __esm(() => {
 });
 
 // src/workers/x-bookmarks/window-diagnostic.ts
-import { createHash as createHash57, randomUUID as randomUUID25 } from "node:crypto";
+import { createHash as createHash58, randomUUID as randomUUID25 } from "node:crypto";
 import {
   chmodSync as chmodSync21,
   existsSync as existsSync63,
@@ -114903,7 +115243,7 @@ async function runXBookmarksWindowDiagnostic(options) {
     kind: "x_bookmarks_window_diagnostic",
     version: 1,
     generated_at: attemptedAt.toISOString(),
-    account_sha256: createHash57("sha256").update(account).digest("hex"),
+    account_sha256: createHash58("sha256").update(account).digest("hex"),
     page_size: config.reconcilePageSize,
     max_pages_per_traversal: MAX_DIAGNOSTIC_PAGES,
     probes: [freshRoot, identicalCursorRetry, idOnlyTraversal, richTraversal],
@@ -114926,7 +115266,7 @@ async function runXBookmarksWindowDiagnostic(options) {
   return {
     report,
     report_path: options.reportPath,
-    report_sha256: createHash57("sha256").update(reportJson).digest("hex")
+    report_sha256: createHash58("sha256").update(reportJson).digest("hex")
   };
 }
 async function diagnosticClient(options, env) {
@@ -115670,7 +116010,7 @@ var init_scheduler_limit_stops = __esm(() => {
 });
 
 // src/workers/x-bookmarks/content-recovery.ts
-import { createHash as createHash58, randomUUID as randomUUID26 } from "node:crypto";
+import { createHash as createHash59, randomUUID as randomUUID26 } from "node:crypto";
 import {
   chmodSync as chmodSync22,
   renameSync as renameSync12,
@@ -115917,7 +116257,7 @@ function sameFolderFacetAuthorityReading(atGate, atRestore) {
   return atGate.leaseGeneration === atRestore.leaseGeneration;
 }
 function contentRecoveryEmbeddingJournalId(restoreItems) {
-  const inputSha256 = createHash58("sha256").update(JSON.stringify(restoreItems)).digest("hex");
+  const inputSha256 = createHash59("sha256").update(JSON.stringify(restoreItems)).digest("hex");
   return `x_content_recovery:${inputSha256}:embeddings`;
 }
 function defaultXBookmarksContentRecoveryReceiptPath(storePath) {
@@ -116030,7 +116370,7 @@ function writeReceipt(pathValue, receipt) {
   }
 }
 function sha256Json2(value) {
-  return createHash58("sha256").update(JSON.stringify(value)).digest("hex");
+  return createHash59("sha256").update(JSON.stringify(value)).digest("hex");
 }
 function requireNonEmpty2(value, label) {
   const normalized = value.trim();
@@ -116549,7 +116889,7 @@ var init_provider_client = __esm(() => {
 });
 
 // src/workers/dropbox-files/connector.ts
-import { createHash as createHash59 } from "node:crypto";
+import { createHash as createHash60 } from "node:crypto";
 function createDropboxSourceConnector(options) {
   const account = requireNonEmpty3(options.account, "Dropbox source connector account");
   const credentialHandle = options.credentialHandle?.trim() || DEFAULT_CREDENTIAL_HANDLE;
@@ -117052,7 +117392,7 @@ function resumedPageOffset(cursor, page) {
   return cursor.pageDigest === metadataPageDigest(page) ? cursor.itemOffset : 0;
 }
 function metadataPageDigest(page) {
-  return createHash59("sha256").update(JSON.stringify({
+  return createHash60("sha256").update(JSON.stringify({
     entries: page.entries,
     cursor: page.cursor?.trim() || null,
     hasMore: Boolean(page.hasMore)
@@ -117067,7 +117407,7 @@ function providerItemIdFromLocalItemId(localItemId, account) {
 }
 function deletedProviderItemId(entry) {
   const ref = entry.pathLower || entry.pathDisplay || entry.name;
-  return `deleted:${createHash59("sha256").update(ref).digest("hex").slice(0, 32)}`;
+  return `deleted:${createHash60("sha256").update(ref).digest("hex").slice(0, 32)}`;
 }
 function listRootPath(rootFolderPath, approvedScopeKey, account) {
   const explicit = rootFolderPath?.trim();
@@ -117356,7 +117696,7 @@ var init_connector_store2 = __esm(() => {
 });
 
 // src/workers/dropbox-files/provider-store-sync.ts
-import { createHash as createHash60 } from "node:crypto";
+import { createHash as createHash61 } from "node:crypto";
 function createDropboxProviderStoreSyncHandler(options) {
   const account = required2(options.account, "Dropbox connector-store account");
   if (options.embeddingProvider && !isApprovedSecureSourceEmbeddingProvider(options.embeddingProvider)) {
@@ -117495,7 +117835,7 @@ function createDropboxProviderStoreSyncHandler(options) {
       return {
         receipt: {
           ...receiptWithoutDigest,
-          receipt_sha256: createHash60("sha256").update(JSON.stringify(receiptWithoutDigest)).digest("hex")
+          receipt_sha256: createHash61("sha256").update(JSON.stringify(receiptWithoutDigest)).digest("hex")
         },
         checkpoint: dropboxScopedCheckpoint(sync.cursor, connectorId, options.scope !== undefined)
       };
@@ -117507,7 +117847,7 @@ function dropboxConnectorIdForScope(account, approvedScopeKey, scope) {
   const normalizedAccount = required2(account, "Dropbox connector account");
   const normalizedScope = required2(approvedScopeKey, "Dropbox approved scope key");
   const approvedScopeIdentity = scope ? `\x00${required2(scope.generation, "Dropbox approved scope generation")}` + `\x00${required2(scope.revision, "Dropbox approved scope revision")}` : "";
-  const scopeHash = createHash60("sha256").update(`${normalizedAccount}\x00${normalizedScope}${approvedScopeIdentity}`).digest("hex").slice(0, 24);
+  const scopeHash = createHash61("sha256").update(`${normalizedAccount}\x00${normalizedScope}${approvedScopeIdentity}`).digest("hex").slice(0, 24);
   return `dropbox.files.${scopeHash}`;
 }
 function dropboxScopedCheckpoint(cursor, connectorId, scoped) {
@@ -117724,14 +118064,14 @@ var init_locator_result_projector = __esm(() => {
 });
 
 // src/workers/dropbox-files/dropbox-content-hash.ts
-import { createHash as createHash61 } from "node:crypto";
+import { createHash as createHash62 } from "node:crypto";
 function computeDropboxContentHash(bytes) {
   const blockDigests = [];
   for (let offset = 0;offset < bytes.byteLength; offset += DROPBOX_CONTENT_HASH_BLOCK_SIZE) {
     const block = bytes.subarray(offset, Math.min(offset + DROPBOX_CONTENT_HASH_BLOCK_SIZE, bytes.byteLength));
-    blockDigests.push(createHash61("sha256").update(block).digest());
+    blockDigests.push(createHash62("sha256").update(block).digest());
   }
-  return createHash61("sha256").update(Buffer.concat(blockDigests)).digest("hex");
+  return createHash62("sha256").update(Buffer.concat(blockDigests)).digest("hex");
 }
 var DROPBOX_CONTENT_HASH_BLOCK_SIZE;
 var init_dropbox_content_hash = __esm(() => {
@@ -118766,7 +119106,7 @@ var init_corpus_adapter4 = __esm(() => {
   LEGACY_SECURE_LOCAL_TELEGRAM_MESSAGES_CORPUS_ID = LEGACY_TELEGRAM_MESSAGES_CORPUS_ID;
 });
 // src/workers/connector-store/capture-spool-secrets.ts
-import { createHash as createHash62 } from "node:crypto";
+import { createHash as createHash63 } from "node:crypto";
 import { closeSync as closeSync20, fsyncSync as fsyncSync4, lstatSync as lstatSync32, openSync as openSync20, readSync as readSync3, writeSync as writeSync5 } from "node:fs";
 import { join as join79 } from "node:path";
 async function redactCaptureSpoolLines(options) {
@@ -118930,7 +119270,7 @@ function addCaptureSpoolRedactions(...results) {
   }), { recordsRedacted: 0, recordsBlanked: 0 });
 }
 function secretsDigest(ledger) {
-  const hash = createHash62("sha256");
+  const hash = createHash63("sha256");
   for (const { identity, names } of ledger.secretsIdentities()) {
     hash.update([
       identity.provider,
@@ -118964,7 +119304,7 @@ var init_capture_spool_secrets = __esm(() => {
 });
 
 // src/workers/connector-store/spool-file-identity.ts
-import { createHash as createHash63 } from "node:crypto";
+import { createHash as createHash64 } from "node:crypto";
 import { closeSync as closeSync21, openSync as openSync21, readSync as readSync4, statSync as statSync29 } from "node:fs";
 function spoolFileIdentity(path) {
   try {
@@ -118995,7 +119335,7 @@ function firstLineDigest(path) {
     const newline = head.subarray(0, read).indexOf(NEWLINE);
     if (newline < 0 && read < SPOOL_IDENTITY_HEAD_BYTES)
       return "none";
-    return createHash63("sha256").update(head.subarray(0, newline < 0 ? read : newline + 1)).digest("hex").slice(0, 16);
+    return createHash64("sha256").update(head.subarray(0, newline < 0 ? read : newline + 1)).digest("hex").slice(0, 16);
   } finally {
     closeSync21(fd);
   }
@@ -119015,7 +119355,7 @@ function spoolBoundaryDigest(path, offset) {
     const read = window2.length === 0 ? 0 : readSync4(fd, window2, 0, window2.length, start);
     if (read < window2.length)
       return;
-    return createHash63("sha256").update(`${offset}\x00`).update(window2).digest("hex").slice(0, 24);
+    return createHash64("sha256").update(`${offset}\x00`).update(window2).digest("hex").slice(0, 24);
   } finally {
     closeSync21(fd);
   }
@@ -119810,7 +120150,7 @@ var init_media_child = __esm(() => {
 });
 
 // src/workers/telegram-messages/capture-spool-connector.ts
-import { createHash as createHash64 } from "node:crypto";
+import { createHash as createHash65 } from "node:crypto";
 import { closeSync as closeSync22, existsSync as existsSync64, lstatSync as lstatSync34, openSync as openSync22, readSync as readSync6, readdirSync as readdirSync13 } from "node:fs";
 import { join as join81 } from "node:path";
 function defaultTelegramCaptureSpoolDir(env = process.env) {
@@ -120485,7 +120825,7 @@ function normalizeBudget(value) {
   return value;
 }
 function sha2565(value) {
-  return createHash64("sha256").update(value).digest("hex");
+  return createHash65("sha256").update(value).digest("hex");
 }
 function telegramConversationSize(message) {
   const size = message.conversationSize;
@@ -120831,7 +121171,7 @@ var init_account = __esm(() => {
 });
 
 // src/workers/archive-import/telegram/connector.ts
-import { createHash as createHash65 } from "node:crypto";
+import { createHash as createHash66 } from "node:crypto";
 function manifestTag(input) {
   return input.manifestSha256.slice(0, 16);
 }
@@ -120898,7 +121238,7 @@ function parseCursor(input, cursor) {
   return { resume, assumedZone: flag === "1:", done: false };
 }
 function sha2566(value) {
-  return createHash65("sha256").update(value).digest("hex");
+  return createHash66("sha256").update(value).digest("hex");
 }
 function placeOf(event) {
   const path = event.path;
@@ -121293,7 +121633,7 @@ function telegramPeerId(kind, bareId) {
 var CHANNEL_OFFSET = 1000000000000n;
 
 // src/workers/telegram-messages/export-facts.ts
-import { createHash as createHash66 } from "node:crypto";
+import { createHash as createHash67 } from "node:crypto";
 function telegramContactBaseKey(value) {
   if (!isRecord5(value))
     return "unreadable";
@@ -121305,9 +121645,9 @@ function telegramContactBaseKey(value) {
     return `peer${(telegramScalar(value.type) ?? "").replace(/[^a-z_]+/g, "")}:${peerId}`;
   const phone = telegramScalar(value.phone_number)?.replace(/\D+/g, "");
   if (phone)
-    return `phone${createHash66("sha256").update(phone).digest("hex").slice(0, 24)}`;
+    return `phone${createHash67("sha256").update(phone).digest("hex").slice(0, 24)}`;
   const names = [value.first_name, value.last_name, value.name, value.category, value.date_unixtime ?? value.date].map((part) => telegramScalar(part) ?? "");
-  return `name${createHash66("sha256").update(names.join("\x1F")).digest("hex").slice(0, 24)}`;
+  return `name${createHash67("sha256").update(names.join("\x1F")).digest("hex").slice(0, 24)}`;
 }
 function telegramExportFacts(root, file) {
   const key = `${file.relPath}\x1F${file.version.dev}:${file.version.ino}:${file.version.size}:${file.version.mtimeMs}`;
@@ -121387,7 +121727,7 @@ var init_export_facts = __esm(() => {
 });
 
 // src/workers/telegram-messages/export-records.ts
-import { createHash as createHash67 } from "node:crypto";
+import { createHash as createHash68 } from "node:crypto";
 function telegramMarkedChatId(type, id) {
   if (!id || !/^-?\d{1,20}$/.test(id))
     return;
@@ -121423,7 +121763,7 @@ function liveIso(iso) {
   return iso?.replace(/\.000Z$/, "Z");
 }
 function sha2567(value) {
-  return createHash67("sha256").update(value).digest("hex");
+  return createHash68("sha256").update(value).digest("hex");
 }
 function telegramExportReactions(value) {
   if (!Array.isArray(value))
@@ -121748,7 +122088,7 @@ var init_export_input = __esm(() => {
 });
 
 // src/workers/telegram-messages/archive-target.ts
-import { createHash as createHash68 } from "node:crypto";
+import { createHash as createHash69 } from "node:crypto";
 function telegramExportUserId(root, relPath, expected) {
   const reader = root.openFile(relPath, expected ? { expected } : {});
   try {
@@ -121775,7 +122115,7 @@ function telegramExportUserId(root, relPath, expected) {
   }
 }
 function telegramProviderAccountId(userId) {
-  return `telegram:${createHash68("sha256").update(userId).digest("hex").slice(0, 16)}`;
+  return `telegram:${createHash69("sha256").update(userId).digest("hex").slice(0, 16)}`;
 }
 function telegramArchiveTarget(options) {
   let connector;
@@ -122109,7 +122449,7 @@ var init_size_limit_stops = __esm(() => {
 });
 
 // src/workers/file-extraction/on-demand-read.ts
-import { createHash as createHash69, randomUUID as randomUUID27 } from "node:crypto";
+import { createHash as createHash70, randomUUID as randomUUID27 } from "node:crypto";
 async function requestOnDemandRead(request, context) {
   if (!["owner", "remote_app", "analyst"].includes(request.requester))
     return { state: "refused", reason: "invalid_requester" };
@@ -122126,7 +122466,7 @@ async function requestOnDemandRead(request, context) {
   }, target.job, target.grant, context.limits);
 }
 async function itemReadOnDemand(read, corpusId, providerItemId) {
-  const questionId = `item-read-${createHash69("sha256").update(JSON.stringify([corpusId, providerItemId])).digest("hex").slice(0, 32)}`;
+  const questionId = `item-read-${createHash70("sha256").update(JSON.stringify([corpusId, providerItemId])).digest("hex").slice(0, 32)}`;
   const outcome = await read({ itemRef: { corpusId, providerItemId }, requester: "remote_app", questionId }).catch(() => {
     return;
   });
@@ -122139,7 +122479,7 @@ async function itemReadOnDemand(read, corpusId, providerItemId) {
 var init_on_demand_read = () => {};
 
 // src/workers/file-extraction/spool.ts
-import { createHash as createHash70 } from "node:crypto";
+import { createHash as createHash71 } from "node:crypto";
 import { chmodSync as chmodSync23, existsSync as existsSync65, mkdirSync as mkdirSync44, readdirSync as readdirSync14, rmSync as rmSync24, rmdirSync as rmdirSync5, statSync as statSync30 } from "node:fs";
 import { dirname as dirname71, isAbsolute as isAbsolute27, join as join82, relative as relative11, sep as sep16 } from "node:path";
 function extractionSpoolOwnerDir(root, owner) {
@@ -122335,7 +122675,7 @@ function makeExtractionSpoolOwnerDir(ownerDir, anchor) {
     }
   }
 }
-var EXTRACTION_SPOOL_STALE_MS, digest4 = (value) => createHash70("sha256").update(value).digest("hex").slice(0, 32), corpusFolder = (corpusId) => `c-${digest4(corpusId)}`, accountFolder2 = (accountScope) => `a-${digest4(accountScope)}`;
+var EXTRACTION_SPOOL_STALE_MS, digest4 = (value) => createHash71("sha256").update(value).digest("hex").slice(0, 32), corpusFolder = (corpusId) => `c-${digest4(corpusId)}`, accountFolder2 = (accountScope) => `a-${digest4(accountScope)}`;
 var init_spool = __esm(() => {
   EXTRACTION_SPOOL_STALE_MS = 24 * 60 * 60 * 1000;
 });
@@ -124012,7 +124352,7 @@ var init_spool_resets = __esm(() => {
 });
 
 // src/workers/whatsapp/match-keys.ts
-import { createHash as createHash71 } from "node:crypto";
+import { createHash as createHash72 } from "node:crypto";
 function nameKey(name) {
   return name.normalize("NFKC").replace(/[‎‏‪-‮⁦-⁩]/gu, "").replace(/\s+/gu, " ").trim().toLowerCase();
 }
@@ -124022,7 +124362,7 @@ function textKey(text) {
 `).trim();
 }
 function keyDigest(...parts) {
-  return createHash71("sha256").update(parts.join("\x00")).digest("hex").slice(0, 32);
+  return createHash72("sha256").update(parts.join("\x00")).digest("hex").slice(0, 32);
 }
 function timeSlot(ms, precision) {
   return precision === "second" ? `s${Math.floor(ms / 1000)}` : `m${Math.floor(ms / 60000)}`;
@@ -124328,7 +124668,7 @@ var init_spool_reader = __esm(() => {
 
 // src/workers/whatsapp/live-connector.ts
 import { execFileSync as execFileSync4 } from "node:child_process";
-import { createHash as createHash72 } from "node:crypto";
+import { createHash as createHash73 } from "node:crypto";
 import { closeSync as closeSync27, existsSync as existsSync67, fsyncSync as fsyncSync5, lstatSync as lstatSync35, openSync as openSync27, readFileSync as readFileSync56, readdirSync as readdirSync15, realpathSync as realpathSync18, rmSync as rmSync28, statSync as statSync33 } from "node:fs";
 import { basename as basename16, dirname as dirname72, isAbsolute as isAbsolute29, join as join89, relative as relative15 } from "node:path";
 function emptyWhatsAppSpoolPassFindings() {
@@ -125224,7 +125564,7 @@ function whatsAppMediaFileStem(chatJid, id) {
     const device = user.indexOf(":");
     normalized = `${device === -1 ? user : user.slice(0, device)}@${jid.slice(at + 1)}`;
   }
-  const digest = createHash72("sha256").update(`${normalized}\x00${id}`).digest("hex").slice(0, 16);
+  const digest = createHash73("sha256").update(`${normalized}\x00${id}`).digest("hex").slice(0, 16);
   let readable = [...id].map((char) => /^[A-Za-z0-9._-]$/u.test(char) ? char : "_").join("");
   if (readable === "")
     readable = "message";
@@ -125242,7 +125582,7 @@ function whatsAppBootNonce() {
   } catch {
     id = "";
   }
-  currentBootNonce = id === "" ? "00000000" : createHash72("sha256").update(id).digest("hex").slice(0, 8);
+  currentBootNonce = id === "" ? "00000000" : createHash73("sha256").update(id).digest("hex").slice(0, 8);
   return currentBootNonce;
 }
 function processAlive4(pid) {
@@ -125495,7 +125835,7 @@ var init_live_connector = __esm(() => {
 
 // src/workers/whatsapp/media-fetch.ts
 import { Database as Database21 } from "bun:sqlite";
-import { createHash as createHash73 } from "node:crypto";
+import { createHash as createHash74 } from "node:crypto";
 import {
   chmodSync as chmodSync26,
   closeSync as closeSync28,
@@ -125786,7 +126126,7 @@ class WhatsAppMediaFetchState {
   }
 }
 function versionDigestOf(version) {
-  return createHash73("sha256").update(version, "utf8").digest("hex").slice(0, 16);
+  return createHash74("sha256").update(version, "utf8").digest("hex").slice(0, 16);
 }
 function rowKey(stem, version) {
   return `${stem}@${versionDigestOf(version)}`;
@@ -126541,7 +126881,7 @@ var init_extraction_factory = __esm(() => {
 
 // src/workers/file-extraction/job-store.ts
 import { chmodSync as chmodSync27, mkdirSync as mkdirSync46 } from "node:fs";
-import { createHash as createHash74, randomUUID as randomUUID28 } from "node:crypto";
+import { createHash as createHash75, randomUUID as randomUUID28 } from "node:crypto";
 import { dirname as dirname74 } from "node:path";
 import { Database as Database22 } from "bun:sqlite";
 function settleUnreadable(candidates, classify) {
@@ -128238,7 +128578,7 @@ function makeJobId() {
   return `fx_${randomUUID28()}`;
 }
 function hashString6(value) {
-  return createHash74("sha256").update(value).digest("hex");
+  return createHash75("sha256").update(value).digest("hex");
 }
 function nowIso4() {
   return new Date().toISOString();
@@ -133964,9 +134304,9 @@ var init_transcription = __esm(() => {
 
 // src/workers/file-extraction/extractors/vlm.ts
 import { Buffer as Buffer6 } from "node:buffer";
-import { createHash as createHash75 } from "node:crypto";
+import { createHash as createHash76 } from "node:crypto";
 function buildVlmPdfPagePrompt(input) {
-  const itemToken = createHash75("sha256").update(input.localItemId).digest("hex");
+  const itemToken = createHash76("sha256").update(input.localItemId).digest("hex");
   return `Page ${input.pageNumber} of ${input.totalPages ?? "unknown"} — item sha256:${itemToken}
 
 ${input.prompt}`;
@@ -134728,7 +135068,7 @@ var init_store_sink = __esm(() => {
 });
 
 // src/workers/file-extraction/runner.ts
-import { createHash as createHash76 } from "node:crypto";
+import { createHash as createHash77 } from "node:crypto";
 import { dirname as dirname77 } from "node:path";
 function evaluateExtractionEgress(input) {
   if (input.egress === "local")
@@ -135514,7 +135854,7 @@ function retryable(errorKind, error) {
 }
 function hashError(error) {
   const detail = error instanceof Error ? `${error.name}:${error.message}` : String(error);
-  return createHash76("sha256").update(detail).digest("hex").slice(0, ERROR_HASH_CHARS2);
+  return createHash77("sha256").update(detail).digest("hex").slice(0, ERROR_HASH_CHARS2);
 }
 function isLostLeaseRecordError(error) {
   const message = error instanceof Error ? error.message : "";
@@ -135650,7 +135990,7 @@ function logPlanRefusal(corpusId, extractorKind, reason, count, error) {
   console.error(`[olympus:file-extraction] plan_bucket_refused corpus_id=${corpusId} extractor_kind=${extractorKind} ` + `reason_kind=${reason}${field} candidates=${count} reason=${boundedLogErrorMessage(error)}`);
 }
 function hashToken(value) {
-  return createHash76("sha256").update(value).digest("hex");
+  return createHash77("sha256").update(value).digest("hex");
 }
 function isScopeApprovalRefusal(error) {
   return error instanceof OperationError && error.code === "source_index_policy_violation";
@@ -135662,7 +136002,7 @@ async function drainPdfExtraction(input) {
     const result = {
       corpusId: lane.corpusId,
       provider: lane.provider,
-      scopeKeyHash: createHash76("sha256").update(lane.approvedScopeKey).digest("hex").slice(0, 16),
+      scopeKeyHash: createHash77("sha256").update(lane.approvedScopeKey).digest("hex").slice(0, 16),
       candidatesRequeued: 0,
       jobsProcessed: 0,
       jobsIndexed: 0,
@@ -137553,8 +137893,6276 @@ var init_gmail_live_control = __esm(() => {
   GMAIL_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
 });
 
+// src/workers/archive-import/mbox/split.ts
+class MboxSplitter {
+  source;
+  maxMessageBytes;
+  buffer = Buffer.alloc(0);
+  bufferStart;
+  next_;
+  maxReadBytes;
+  bytesRead = 0;
+  constructor(source, options = {}) {
+    this.source = source;
+    this.maxReadBytes = options.maxReadBytes ?? Number.POSITIVE_INFINITY;
+    this.maxMessageBytes = Math.max(1, options.maxMessageBytes ?? MBOX_DEFAULT_MAX_MESSAGE_BYTES);
+    this.next_ = options.start ?? 0;
+    this.bufferStart = this.next_;
+  }
+  get position() {
+    return this.next_;
+  }
+  get done() {
+    return this.next_ >= this.source.size;
+  }
+  next() {
+    const start = this.next_;
+    if (start >= this.source.size)
+      return;
+    this.dropBefore(start);
+    this.ensure(start, FROM.length);
+    if (!this.bytesAt(start).subarray(0, FROM.length).equals(FROM))
+      throw new MboxFormatError(start);
+    let scanFrom = start + 1;
+    for (;; ) {
+      const found = this.indexOfSeparator(scanFrom);
+      if (found !== undefined) {
+        const end = found + 1;
+        this.next_ = end;
+        return this.span(start, end);
+      }
+      const buffered = this.bufferStart + this.buffer.length;
+      if (buffered >= this.source.size) {
+        this.next_ = this.source.size;
+        return this.span(start, this.source.size);
+      }
+      if (buffered - start > this.maxMessageBytes)
+        return this.skipTooLarge(start);
+      scanFrom = Math.max(start + 1, buffered - SEPARATOR2.length + 1);
+      this.readMore(Math.max(MIN_READ_BYTES, this.buffer.length));
+    }
+  }
+  span(start, end) {
+    const length = end - start;
+    if (length > this.maxMessageBytes)
+      return { offset: start, length, tooLarge: true };
+    const bytes = this.bytesAt(start).subarray(0, length);
+    return { offset: start, length, raw: unquote(stripSeparatorLines(bytes)), separator: separatorLine(bytes), tooLarge: false };
+  }
+  skipTooLarge(start) {
+    let scanFrom = this.bufferStart + Math.max(0, this.buffer.length - SEPARATOR2.length + 1);
+    for (;; ) {
+      const keepFrom = Math.max(this.bufferStart, scanFrom - SEPARATOR2.length);
+      this.dropBefore(keepFrom);
+      const buffered = this.bufferStart + this.buffer.length;
+      if (buffered >= this.source.size) {
+        this.next_ = this.source.size;
+        return { offset: start, length: this.source.size - start, tooLarge: true };
+      }
+      this.readMore(MIN_READ_BYTES);
+      const found = this.indexOfSeparator(Math.max(start + 1, scanFrom));
+      if (found !== undefined) {
+        this.next_ = found + 1;
+        return { offset: start, length: found + 1 - start, tooLarge: true };
+      }
+      scanFrom = Math.max(start + 1, this.bufferStart + this.buffer.length - SEPARATOR2.length + 1);
+    }
+  }
+  indexOfSeparator(fromOffset) {
+    const index = this.buffer.indexOf(SEPARATOR2, Math.max(0, fromOffset - this.bufferStart));
+    return index < 0 ? undefined : this.bufferStart + index;
+  }
+  bytesAt(offset) {
+    return this.buffer.subarray(offset - this.bufferStart);
+  }
+  dropBefore(offset) {
+    if (offset < this.bufferStart) {
+      this.buffer = Buffer.alloc(0);
+      this.bufferStart = offset;
+      return;
+    }
+    const drop = offset - this.bufferStart;
+    if (drop >= this.buffer.length) {
+      this.buffer = Buffer.alloc(0);
+      this.bufferStart = offset;
+    } else if (drop > 0) {
+      this.buffer = this.buffer.subarray(drop);
+      this.bufferStart = offset;
+    }
+  }
+  ensure(offset, length) {
+    while (this.bufferStart + this.buffer.length < Math.min(offset + length, this.source.size)) {
+      this.readMore(MIN_READ_BYTES);
+    }
+  }
+  readMore(length) {
+    const from = this.bufferStart + this.buffer.length;
+    const allowed = this.maxReadBytes - this.bytesRead;
+    if (allowed <= 0)
+      throw new MboxReadBoundError;
+    const chunk = this.source.readAt(from, Math.min(length, allowed, Math.max(0, this.source.size - from)));
+    this.bytesRead += chunk.length;
+    if (chunk.length === 0)
+      throw new MboxFormatError(from);
+    this.buffer = this.buffer.length === 0 ? Buffer.from(chunk.buffer, chunk.byteOffset, chunk.length) : Buffer.concat([this.buffer, chunk]);
+  }
+}
+function separatorLine(bytes) {
+  const end = bytes.indexOf(LF);
+  const line = bytes.subarray(0, Math.min(end < 0 ? bytes.length : end, MAX_SEPARATOR_CHARS)).toString("latin1");
+  return line.endsWith("\r") ? line.slice(0, -1) : line;
+}
+function stripSeparatorLines(bytes) {
+  const firstLineEnd = bytes.indexOf(LF);
+  let body = firstLineEnd < 0 ? Buffer.alloc(0) : bytes.subarray(firstLineEnd + 1);
+  const n = body.length;
+  if (n >= 4 && body[n - 4] === CR && body[n - 3] === LF && body[n - 2] === CR && body[n - 1] === LF) {
+    body = body.subarray(0, n - 2);
+  } else if (n >= 2 && body[n - 2] === LF && body[n - 1] === LF) {
+    body = body.subarray(0, n - 1);
+  } else if (n === 1 && body[0] === LF) {
+    body = body.subarray(0, 0);
+  }
+  return body;
+}
+function unquote(bytes) {
+  const out = [];
+  let copied = 0;
+  let lineStart = 0;
+  while (lineStart < bytes.length) {
+    if (bytes[lineStart] === GT) {
+      let index = lineStart;
+      while (index < bytes.length && bytes[index] === GT)
+        index += 1;
+      if (bytes.subarray(index, index + FROM.length).equals(FROM)) {
+        out.push(bytes.subarray(copied, lineStart));
+        copied = lineStart + 1;
+      }
+    }
+    const next = bytes.indexOf(LF, lineStart);
+    if (next < 0)
+      break;
+    lineStart = next + 1;
+  }
+  if (copied === 0)
+    return bytes;
+  out.push(bytes.subarray(copied));
+  return Buffer.concat(out);
+}
+var SEPARATOR2, FROM, LF = 10, CR = 13, GT = 62, MBOX_DEFAULT_MAX_MESSAGE_BYTES, MIN_READ_BYTES, MAX_SEPARATOR_CHARS = 1024, MboxFormatError, MboxReadBoundError;
+var init_split = __esm(() => {
+  SEPARATOR2 = Buffer.from(`
+From `, "latin1");
+  FROM = Buffer.from("From ", "latin1");
+  MBOX_DEFAULT_MAX_MESSAGE_BYTES = 32 * 1024 * 1024;
+  MIN_READ_BYTES = 1024 * 1024;
+  MboxFormatError = class MboxFormatError extends Error {
+    offset;
+    constructor(offset) {
+      super("No message starts at this position of the mail file.");
+      this.name = "MboxFormatError";
+      this.offset = offset;
+    }
+  };
+  MboxReadBoundError = class MboxReadBoundError extends Error {
+    constructor() {
+      super("The mail file was read as far as this look may read.");
+      this.name = "MboxReadBoundError";
+    }
+  };
+});
+
+// src/workers/archive-import/mbox/gmail-account.ts
+function topHeaders(raw) {
+  const text = Buffer.from(raw.buffer, raw.byteOffset, Math.min(raw.byteLength, MAX_HEADER_BYTES)).toString("latin1");
+  const end = text.search(/\r?\n\r?\n/);
+  const block = (end < 0 ? text : text.slice(0, end)).replace(/\r?\n[ \t]+/g, " ");
+  const headers = new Map;
+  for (const line of block.split(/\r?\n/)) {
+    const colon = line.indexOf(":");
+    if (colon <= 0)
+      continue;
+    const name = line.slice(0, colon).trim().toLowerCase();
+    if (!headers.has(name))
+      headers.set(name, line.slice(colon + 1).trim());
+  }
+  return headers;
+}
+function bareAddress(value) {
+  if (!value)
+    return;
+  const inner = /<([^<>\s]+)>/.exec(value)?.[1] ?? value.trim();
+  return /^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/.test(inner) ? inner.toLowerCase() : undefined;
+}
+function identifyGmailExport(root, files, limits = {}) {
+  const MAX_MESSAGES = limits.maxMessages ?? DEFAULT_MAX_MESSAGES;
+  const MAX_BYTES = limits.maxBytes ?? DEFAULT_MAX_BYTES;
+  const addresses = new Set;
+  let messages = 0;
+  let bytes = 0;
+  for (const file of files) {
+    const reader = root.openFile(file.relPath, { expected: file.version });
+    try {
+      const splitter = new MboxSplitter(reader, { maxMessageBytes: MAX_MESSAGE_BYTES, maxReadBytes: MAX_BYTES - bytes });
+      for (;; ) {
+        if (messages >= MAX_MESSAGES || bytes >= MAX_BYTES)
+          break;
+        let span;
+        try {
+          span = splitter.next();
+        } catch (error) {
+          if (!(error instanceof MboxReadBoundError))
+            throw error;
+          bytes = MAX_BYTES;
+          break;
+        }
+        if (!span)
+          break;
+        bytes += span.length;
+        if (!span.raw)
+          continue;
+        messages += 1;
+        const headers = topHeaders(span.raw);
+        if (!headers.has("x-gm-thrid") && !headers.has("x-gmail-labels"))
+          return { kind: "not_gmail", reason: "no_markers" };
+        const delivered = headers.get("delivered-to");
+        if (delivered === undefined)
+          continue;
+        const address = bareAddress(delivered);
+        if (!address)
+          return { kind: "not_gmail", reason: "several_addresses" };
+        addresses.add(address);
+        if (addresses.size > 1)
+          return { kind: "not_gmail", reason: "several_addresses" };
+      }
+    } finally {
+      reader.close();
+    }
+    if (messages >= MAX_MESSAGES || bytes >= MAX_BYTES)
+      break;
+  }
+  if (messages === 0)
+    return { kind: "not_gmail", reason: "empty" };
+  const [address] = [...addresses];
+  return address ? { kind: "gmail", address } : { kind: "not_gmail", reason: "no_address" };
+}
+var DEFAULT_MAX_MESSAGES = 500, DEFAULT_MAX_BYTES, MAX_HEADER_BYTES, MAX_MESSAGE_BYTES;
+var init_gmail_account = __esm(() => {
+  init_split();
+  DEFAULT_MAX_BYTES = 64 * 1024 * 1024;
+  MAX_HEADER_BYTES = 256 * 1024;
+  MAX_MESSAGE_BYTES = 32 * 1024 * 1024;
+});
+
+// node_modules/postal-mime/dist/esm/decode-strings.js
+function decodeBase642(base64) {
+  let len = base64.length;
+  while (len > 0 && base64.charAt(len - 1) === "=") {
+    len--;
+  }
+  if (len % 4 === 1) {
+    len--;
+  }
+  const remainder = len % 4;
+  const bufferLength = Math.floor(len / 4) * 3 + (remainder ? remainder - 1 : 0);
+  const arrayBuffer = new ArrayBuffer(bufferLength);
+  const bytes = new Uint8Array(arrayBuffer);
+  let p = 0;
+  for (let i = 0;i < len; i += 4) {
+    let encoded1 = base64Lookup[base64.charCodeAt(i)];
+    let encoded2 = base64Lookup[base64.charCodeAt(i + 1)];
+    let encoded3 = base64Lookup[base64.charCodeAt(i + 2)];
+    let encoded4 = base64Lookup[base64.charCodeAt(i + 3)];
+    bytes[p++] = encoded1 << 2 | encoded2 >> 4;
+    if (p < bufferLength) {
+      bytes[p++] = (encoded2 & 15) << 4 | encoded3 >> 2;
+    }
+    if (p < bufferLength) {
+      bytes[p++] = (encoded3 & 3) << 6 | encoded4 & 63;
+    }
+  }
+  return arrayBuffer;
+}
+function normalizeCharset(charset) {
+  return charset.replace(/^(?:x-ms-|x-|cs)/, "").replace(/[\s._-]+/g, "");
+}
+function resolveLabel(charset) {
+  charset = (charset || "utf8").trim().toLowerCase();
+  if (ENCODING_LABELS.has(charset)) {
+    return charset;
+  }
+  const utf16 = UTF16_LABELS.get(charset);
+  if (utf16) {
+    return utf16;
+  }
+  const normalized = normalizeCharset(charset);
+  const codePage = normalized.match(codePagePattern);
+  const alias = codePage && codePageAliases.get(codePage[1]) || charsetAliases.get(normalized) || normalized;
+  return ENCODING_LABELS.has(alias) ? alias : null;
+}
+function tryDecoder(label) {
+  if (REPLACEMENT_LABELS.has(label)) {
+    return replacementDecoder;
+  }
+  let decoder = decoders.get(label);
+  if (decoder === undefined) {
+    decoder = null;
+    try {
+      decoder = new TextDecoder(label);
+    } catch {}
+    decoders.set(label, decoder);
+  }
+  return decoder;
+}
+function findDecoder(charset) {
+  const label = resolveLabel(charset);
+  return label ? tryDecoder(label) : null;
+}
+function getDecoder2(charset) {
+  return findDecoder(charset) || tryDecoder("windows-1252") || utf8Decoder;
+}
+function bomByteOrder(bytes) {
+  if (bytes[0] === 254 && bytes[1] === 255) {
+    return "utf-16be";
+  }
+  if (bytes[0] === 255 && bytes[1] === 254) {
+    return "utf-16le";
+  }
+  return null;
+}
+function isUtf8(bytes) {
+  for (let i = 0;i < bytes.length; ) {
+    const lead = bytes[i];
+    if (lead < 128) {
+      i++;
+      continue;
+    }
+    let count;
+    if (lead >= 194 && lead <= 223) {
+      count = 1;
+    } else if (lead >= 224 && lead <= 239) {
+      count = 2;
+    } else if (lead >= 240 && lead <= 244) {
+      count = 3;
+    } else {
+      return false;
+    }
+    if (i + count >= bytes.length) {
+      return false;
+    }
+    const second = bytes[i + 1];
+    const min = lead === 224 ? 160 : lead === 240 ? 144 : 128;
+    const max = lead === 237 ? 159 : lead === 244 ? 143 : 191;
+    if (second < min || second > max) {
+      return false;
+    }
+    for (let k = 2;k <= count; k++) {
+      if ((bytes[i + k] & 192) !== 128) {
+        return false;
+      }
+    }
+    i += count + 1;
+  }
+  return true;
+}
+function decodeUtf8OrWindows1252(bytes, utf8 = utf8Decoder) {
+  const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  return isUtf8(view) ? utf8.decode(view) : getDecoder2("windows-1252").decode(view);
+}
+function decodeCharset(bytes, charset) {
+  const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  const label = resolveLabel(charset);
+  let decoder = label ? tryDecoder(label) : null;
+  if (label && UTF16_UNORDERED_LABELS.has(label)) {
+    const order = bomByteOrder(view);
+    decoder = order && tryDecoder(order) || decoder;
+  }
+  return decoder ? decoder.decode(view) : decodeUtf8OrWindows1252(view);
+}
+function sniffHtmlCharset(bytes) {
+  const head = utf8Decoder.decode(bytes.subarray(0, META_PRESCAN_BYTES)).toLowerCase();
+  let pos = 0;
+  while ((pos = head.indexOf("<meta", pos)) >= 0) {
+    let end = head.indexOf(">", pos);
+    if (end < 0) {
+      end = head.length;
+    }
+    const match = CHARSET_ATTRIBUTE.exec(head.slice(pos, end));
+    if (match) {
+      return match[1];
+    }
+    pos = end;
+  }
+  return null;
+}
+function decodeText(bytes, charset, html) {
+  const view = new Uint8Array(bytes);
+  if (charset) {
+    return decodeCharset(view, charset);
+  }
+  const sniffed = html ? sniffHtmlCharset(view) : null;
+  const decoder = sniffed ? findDecoder(sniffed) : null;
+  if (!decoder || UTF16_ENCODINGS.has(decoder.encoding)) {
+    return decodeUtf8OrWindows1252(view);
+  }
+  return (decoder.encoding === "x-user-defined" ? getDecoder2("windows-1252") : decoder).decode(view);
+}
+async function blobToArrayBuffer(blob) {
+  if ("arrayBuffer" in blob) {
+    return await blob.arrayBuffer();
+  }
+  const fr = new FileReader;
+  return new Promise((resolve, reject) => {
+    fr.onload = () => {
+      resolve(fr.result);
+    };
+    fr.onerror = () => {
+      reject(fr.error);
+    };
+    fr.readAsArrayBuffer(blob);
+  });
+}
+function hexNibble(c) {
+  if (c >= 48 && c <= 57) {
+    return c - 48;
+  }
+  if (c >= 97 && c <= 102) {
+    return c - 97 + 10;
+  }
+  if (c >= 65 && c <= 70) {
+    return c - 65 + 10;
+  }
+  return -1;
+}
+function foldLineBreaks(str) {
+  return str.replace(/[\r\n]+/g, " ");
+}
+function decodeWord(charset, encoding, str) {
+  let splitPos = charset.indexOf("*");
+  if (splitPos >= 0) {
+    charset = charset.slice(0, splitPos);
+  }
+  encoding = encoding.toUpperCase();
+  let byteStr;
+  if (encoding === "Q") {
+    str = str.replace(/=\s+([0-9a-fA-F])/g, "=$1").replace(/[_\s]/g, " ");
+    let buf = textEncoder.encode(str);
+    let encodedBytes = [];
+    for (let i = 0, len = buf.length;i < len; i++) {
+      let c = buf[i];
+      if (i <= len - 2 && c === 61) {
+        let high = hexNibble(buf[i + 1]);
+        let low = hexNibble(buf[i + 2]);
+        if (high >= 0 && low >= 0) {
+          encodedBytes.push(high << 4 | low);
+          i += 2;
+          continue;
+        }
+      }
+      encodedBytes.push(c);
+    }
+    byteStr = new ArrayBuffer(encodedBytes.length);
+    let dataView = new DataView(byteStr);
+    for (let i = 0, len = encodedBytes.length;i < len; i++) {
+      dataView.setUint8(i, encodedBytes[i]);
+    }
+  } else if (encoding === "B") {
+    byteStr = decodeBase642(str.replace(/[^a-zA-Z0-9\+\/=]+/g, ""));
+  } else {
+    byteStr = textEncoder.encode(str);
+  }
+  return foldLineBreaks(decodeCharset(byteStr, charset));
+}
+function isEncodedWordsOnly(str) {
+  return ENCODED_WORDS_ONLY_REGEX.test(str);
+}
+function splitEncodedWords(str) {
+  const tokens = [];
+  ENCODED_WORD_REGEX.lastIndex = 0;
+  let pos = 0;
+  let match;
+  while (match = ENCODED_WORD_REGEX.exec(str)) {
+    if (match.index > pos) {
+      tokens.push({ text: str.substring(pos, match.index) });
+    }
+    tokens.push({ charset: match[1], encoding: match[2], encodedText: match[3] });
+    pos = match.index + match[0].length;
+  }
+  if (pos < str.length) {
+    tokens.push({ text: str.substring(pos) });
+  }
+  return tokens;
+}
+function canJoinWords(left, right) {
+  const encoding = left.encoding.toUpperCase();
+  if (left.charset !== right.charset || encoding !== right.encoding.toUpperCase()) {
+    return false;
+  }
+  if (encoding === "B") {
+    return left.encodedText.length % 4 === 0 && !left.padded;
+  }
+  return true;
+}
+function renderTokens(tokens, joinWords) {
+  let result = "";
+  let pending = null;
+  for (let i = 0;i < tokens.length; i++) {
+    const token = tokens[i];
+    if (token.text !== undefined) {
+      const nextToken = tokens[i + 1];
+      if (pending && nextToken && nextToken.text === undefined && WORD_SEPARATOR_REGEX.test(token.text)) {
+        continue;
+      }
+      if (pending) {
+        result += decodeWord(pending.charset, pending.encoding, pending.encodedText);
+        pending = null;
+      }
+      result += token.text;
+      continue;
+    }
+    if (pending && joinWords && canJoinWords(pending, token)) {
+      pending.encodedText += token.encodedText;
+      pending.padded = token.encodedText.endsWith("=");
+      continue;
+    }
+    if (pending) {
+      result += decodeWord(pending.charset, pending.encoding, pending.encodedText);
+    }
+    pending = {
+      charset: token.charset,
+      encoding: token.encoding,
+      encodedText: token.encodedText,
+      padded: token.encodedText.endsWith("=")
+    };
+  }
+  if (pending) {
+    result += decodeWord(pending.charset, pending.encoding, pending.encodedText);
+  }
+  return result;
+}
+function decodeWords(str) {
+  const tokens = splitEncodedWords((str || "").toString());
+  const result = renderTokens(tokens, true);
+  return result.indexOf("�") < 0 ? result : renderTokens(tokens, false);
+}
+function decodeURIComponentWithCharset(encodedStr, charset) {
+  charset = charset || "utf-8";
+  let encodedBytes = [];
+  for (let i = 0;i < encodedStr.length; i++) {
+    let c = encodedStr.charAt(i);
+    const high = c === "%" ? hexNibble(encodedStr.charCodeAt(i + 1)) : -1;
+    const low = high >= 0 ? hexNibble(encodedStr.charCodeAt(i + 2)) : -1;
+    if (low >= 0) {
+      encodedBytes.push(high << 4 | low);
+      i += 2;
+    } else if (c.charCodeAt(0) > 126) {
+      const bytes = textEncoder.encode(c);
+      for (let j = 0;j < bytes.length; j++) {
+        encodedBytes.push(bytes[j]);
+      }
+    } else {
+      encodedBytes.push(c.charCodeAt(0));
+    }
+  }
+  const byteStr = new ArrayBuffer(encodedBytes.length);
+  const dataView = new DataView(byteStr);
+  for (let i = 0, len = encodedBytes.length;i < len; i++) {
+    dataView.setUint8(i, encodedBytes[i]);
+  }
+  return decodeCharset(byteStr, charset);
+}
+function decodeParameterValueContinuations(header) {
+  let paramKeys = new Map;
+  Object.keys(header.params).forEach((key) => {
+    let match = key.match(/\*((\d+)\*?)?$/);
+    if (!match) {
+      return;
+    }
+    let actualKey = key.slice(0, match.index).toLowerCase();
+    let nr = Number(match[2]) || 0;
+    let paramVal = paramKeys.get(actualKey);
+    if (!paramVal) {
+      paramVal = {
+        charset: null,
+        values: []
+      };
+      paramKeys.set(actualKey, paramVal);
+    }
+    let value = header.params[key];
+    let encoded = match[0].charAt(match[0].length - 1) === "*";
+    if (nr === 0 && encoded && (match = value.match(/^([^']*)'[^']*'(.*)$/))) {
+      paramVal.charset = match[1] || "utf-8";
+      value = match[2];
+    }
+    paramVal.values.push({ nr, value, encoded });
+    delete header.params[key];
+  });
+  paramKeys.forEach((paramVal, key) => {
+    if (Object.prototype.hasOwnProperty.call(header.params, key)) {
+      return;
+    }
+    let result = "";
+    let pending = "";
+    for (let part of paramVal.values.sort((a, b) => a.nr - b.nr)) {
+      if (part.encoded) {
+        pending += part.value;
+        continue;
+      }
+      if (pending) {
+        result += decodeURIComponentWithCharset(pending, paramVal.charset);
+        pending = "";
+      }
+      result += part.value;
+    }
+    if (pending) {
+      result += decodeURIComponentWithCharset(pending, paramVal.charset);
+    }
+    header.params[key] = result;
+  });
+}
+var textEncoder, isWsp = (c) => c === 32 || c === 9, base64Chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/", base64Lookup, charsetAliases, codePageAliases, codePagePattern, ENCODING_LABELS, REPLACEMENT_LABELS, replacementDecoder, UTF16_LABELS, decoders, utf8Decoder, UTF16_ENCODINGS, UTF16_UNORDERED_LABELS, META_PRESCAN_BYTES = 1024, CHARSET_ATTRIBUTE, ENCODED_WORD_PATTERN = "=\\?([^?\\s]+)\\?([QqBb])\\?([^?]*)\\?=", ENCODED_WORD_REGEX, WORD_SEPARATOR_REGEX, ENCODED_WORDS_ONLY_REGEX;
+var init_decode_strings = __esm(() => {
+  textEncoder = new TextEncoder;
+  base64Lookup = new Uint8Array(256);
+  for (let i = 0;i < base64Chars.length; i++) {
+    base64Lookup[base64Chars.charCodeAt(i)] = i;
+  }
+  charsetAliases = new Map([
+    ["iso88598i", "iso-8859-8"],
+    ["iso88598e", "iso-8859-8"],
+    ["shiftjis", "shift_jis"],
+    ["windows31j", "shift_jis"],
+    ["mskanji", "shift_jis"],
+    ["eucjp", "euc-jp"],
+    ["iso2022jp", "iso-2022-jp"],
+    ["iso2022jp1", "iso-2022-jp"],
+    ["iso2022jp2", "iso-2022-jp"],
+    ["junet", "iso-2022-jp"],
+    ["euckr", "euc-kr"],
+    ["uhc", "euc-kr"],
+    ["tis620", "windows-874"]
+  ]);
+  codePageAliases = new Map([
+    ["932", "shift_jis"],
+    ["936", "gbk"],
+    ["949", "euc-kr"],
+    ["950", "big5"],
+    ["874", "windows-874"],
+    ["51932", "euc-jp"],
+    ["50220", "iso-2022-jp"],
+    ["50221", "iso-2022-jp"],
+    ["50222", "iso-2022-jp"]
+  ]);
+  codePagePattern = /^(?:cp|windows|ms|ibm)(\d+)$/;
+  ENCODING_LABELS = new Set([
+    "unicode-1-1-utf-8 unicode11utf8 unicode20utf8 utf-8 utf8 x-unicode20utf8",
+    "866 cp866 csibm866 ibm866",
+    "csisolatin2 iso-8859-2 iso-ir-101 iso8859-2 iso88592 iso_8859-2 iso_8859-2:1987 l2 latin2",
+    "csisolatin3 iso-8859-3 iso-ir-109 iso8859-3 iso88593 iso_8859-3 iso_8859-3:1988 l3 latin3",
+    "csisolatin4 iso-8859-4 iso-ir-110 iso8859-4 iso88594 iso_8859-4 iso_8859-4:1988 l4 latin4",
+    "csisolatincyrillic cyrillic iso-8859-5 iso-ir-144 iso8859-5 iso88595 iso_8859-5 iso_8859-5:1988",
+    "arabic asmo-708 csiso88596e csiso88596i csisolatinarabic ecma-114 iso-8859-6 iso-8859-6-e",
+    "iso-8859-6-i iso-ir-127 iso8859-6 iso88596 iso_8859-6 iso_8859-6:1987",
+    "csisolatingreek ecma-118 elot_928 greek greek8 iso-8859-7 iso-ir-126 iso8859-7 iso88597 iso_8859-7",
+    "iso_8859-7:1987 sun_eu_greek",
+    "csiso88598e csisolatinhebrew hebrew iso-8859-8 iso-8859-8-e iso-ir-138 iso8859-8 iso88598 iso_8859-8",
+    "iso_8859-8:1988 visual",
+    "csiso88598i iso-8859-8-i logical",
+    "csisolatin6 iso-8859-10 iso-ir-157 iso8859-10 iso885910 l6 latin6",
+    "iso-8859-13 iso8859-13 iso885913",
+    "iso-8859-14 iso8859-14 iso885914",
+    "csisolatin9 iso-8859-15 iso8859-15 iso885915 iso_8859-15 l9",
+    "iso-8859-16",
+    "cskoi8r koi koi8 koi8-r koi8_r",
+    "koi8-ru koi8-u",
+    "csmacintosh mac macintosh x-mac-roman",
+    "dos-874 iso-8859-11 iso8859-11 iso885911 tis-620 windows-874",
+    "cp1250 windows-1250 x-cp1250",
+    "cp1251 windows-1251 x-cp1251",
+    "ansi_x3.4-1968 ascii cp1252 cp819 csisolatin1 ibm819 iso-8859-1 iso-ir-100 iso8859-1 iso88591",
+    "iso_8859-1 iso_8859-1:1987 l1 latin1 us-ascii windows-1252 x-cp1252",
+    "cp1253 windows-1253 x-cp1253",
+    "cp1254 csisolatin5 iso-8859-9 iso-ir-148 iso8859-9 iso88599 iso_8859-9 iso_8859-9:1989 l5 latin5",
+    "windows-1254 x-cp1254",
+    "cp1255 windows-1255 x-cp1255",
+    "cp1256 windows-1256 x-cp1256",
+    "cp1257 windows-1257 x-cp1257",
+    "cp1258 windows-1258 x-cp1258",
+    "x-mac-cyrillic x-mac-ukrainian",
+    "chinese csgb2312 csiso58gb231280 gb2312 gb_2312 gb_2312-80 gbk iso-ir-58 x-gbk",
+    "gb18030",
+    "big5 big5-hkscs cn-big5 csbig5 x-x-big5",
+    "cseucpkdfmtjapanese euc-jp x-euc-jp",
+    "csiso2022jp iso-2022-jp",
+    "csshiftjis ms932 ms_kanji shift-jis shift_jis sjis windows-31j x-sjis",
+    "cseuckr csksc56011987 euc-kr iso-ir-149 korean ks_c_5601-1987 ks_c_5601-1989 ksc5601 ksc_5601",
+    "windows-949",
+    "csiso2022kr hz-gb-2312 iso-2022-cn iso-2022-cn-ext iso-2022-kr replacement",
+    "x-user-defined"
+  ].join(" ").split(" "));
+  REPLACEMENT_LABELS = new Set([
+    "csiso2022kr",
+    "hz-gb-2312",
+    "iso-2022-cn",
+    "iso-2022-cn-ext",
+    "iso-2022-kr",
+    "replacement"
+  ]);
+  replacementDecoder = {
+    encoding: "replacement",
+    decode: (input) => input && input.byteLength ? "�" : ""
+  };
+  UTF16_LABELS = new Map([
+    ["utf-16", "utf-16"],
+    ["utf16", "utf-16"],
+    ["utf_16", "utf-16"],
+    ["utf-16le", "utf-16le"],
+    ["utf-16be", "utf-16be"]
+  ]);
+  decoders = new Map;
+  utf8Decoder = new TextDecoder;
+  UTF16_ENCODINGS = new Set(["utf-16le", "utf-16be"]);
+  UTF16_UNORDERED_LABELS = new Set(["utf-16"]);
+  CHARSET_ATTRIBUTE = /charset\s*=\s*["']?\s*([^\s"';>]+)/;
+  ENCODED_WORD_REGEX = new RegExp(ENCODED_WORD_PATTERN, "g");
+  WORD_SEPARATOR_REGEX = /^[ \t\r\n]+$/;
+  ENCODED_WORDS_ONLY_REGEX = new RegExp(`^(?:${ENCODED_WORD_PATTERN}\\s*)+$`);
+});
+
+// node_modules/postal-mime/dist/esm/pass-through-decoder.js
+class PassThroughDecoder {
+  constructor() {
+    this.chunks = [];
+    this.runBuffer = null;
+    this.runStart = 0;
+    this.runEnd = 0;
+    this.pendingLineBreak = null;
+  }
+  continuesRun(bytes) {
+    return bytes.buffer === this.runBuffer && bytes.byteOffset === this.runEnd;
+  }
+  flushRun() {
+    if (this.runBuffer && this.runEnd > this.runStart) {
+      this.chunks.push(new Uint8Array(this.runBuffer, this.runStart, this.runEnd - this.runStart));
+    }
+    this.runBuffer = null;
+  }
+  update(line, lineBreak) {
+    const pending = this.pendingLineBreak;
+    if (pending && this.continuesRun(pending) && line.buffer === this.runBuffer && line.byteOffset === this.runEnd + pending.byteLength) {
+      this.runEnd = line.byteOffset + line.byteLength;
+    } else {
+      this.flushRun();
+      if (pending) {
+        this.chunks.push(pending);
+      }
+      this.runBuffer = line.buffer;
+      this.runStart = line.byteOffset;
+      this.runEnd = line.byteOffset + line.byteLength;
+    }
+    this.pendingLineBreak = lineBreak;
+  }
+  finalize(boundaryEnded = false) {
+    const pending = this.pendingLineBreak;
+    if (!boundaryEnded && pending) {
+      if (this.continuesRun(pending)) {
+        this.runEnd += pending.byteLength;
+      } else {
+        this.flushRun();
+        this.chunks.push(pending);
+      }
+    }
+    this.flushRun();
+    return blobToArrayBuffer(new Blob(this.chunks, { type: "application/octet-stream" }));
+  }
+}
+var init_pass_through_decoder = __esm(() => {
+  init_decode_strings();
+});
+
+// node_modules/postal-mime/dist/esm/chunk-writer.js
+class ChunkWriter {
+  constructor(maxChunkSize = 100 * 1024) {
+    this.maxChunkSize = maxChunkSize;
+    this.buffer = null;
+    this.bufferPos = 0;
+    this.chunks = [];
+  }
+  writeByte(byte) {
+    if (!this.buffer || this.bufferPos >= this.buffer.length) {
+      this.flush();
+      this.buffer ??= new Uint8Array(this.maxChunkSize);
+    }
+    this.buffer[this.bufferPos++] = byte;
+  }
+  writeBytes(bytes, start = 0, end = bytes.length) {
+    while (start < end) {
+      if (!this.buffer || this.bufferPos >= this.buffer.length) {
+        this.flush();
+        this.buffer ??= new Uint8Array(this.maxChunkSize);
+      }
+      const count = Math.min(end - start, this.buffer.length - this.bufferPos);
+      this.buffer.set(bytes.subarray(start, start + count), this.bufferPos);
+      this.bufferPos += count;
+      start += count;
+    }
+  }
+  append(bytes) {
+    if (bytes.length >= this.maxChunkSize / 2) {
+      this.flush();
+      this.chunks.push(bytes);
+    } else {
+      this.writeBytes(bytes);
+    }
+  }
+  flush() {
+    if (this.buffer && this.bufferPos) {
+      this.chunks.push(this.buffer.slice(0, this.bufferPos));
+      this.bufferPos = 0;
+    }
+  }
+  finalize() {
+    this.flush();
+    return blobToArrayBuffer(new Blob(this.chunks, { type: "application/octet-stream" }));
+  }
+}
+var init_chunk_writer = __esm(() => {
+  init_decode_strings();
+});
+
+// node_modules/postal-mime/dist/esm/base64-decoder.js
+class Base64Decoder {
+  constructor(opts) {
+    opts = opts || {};
+    this.decoder = opts.decoder || new TextDecoder;
+    this.maxChunkSize = 100 * 1024;
+    this.output = new ChunkWriter;
+    this.remainder = "";
+  }
+  pushChunk(base64Str) {
+    if (base64Str.length) {
+      this.output.append(new Uint8Array(decodeBase642(base64Str)));
+    }
+  }
+  flushRemainder() {
+    this.pushChunk(this.remainder);
+    this.remainder = "";
+  }
+  update(buffer) {
+    let str = this.decoder.decode(buffer).replace(/[^a-zA-Z0-9+/=]+/g, "");
+    let start = 0;
+    let end;
+    while ((end = str.indexOf("=", start)) >= 0) {
+      this.remainder += str.substring(start, end);
+      this.flushRemainder();
+      start = end + 1;
+    }
+    this.remainder += str.substring(start);
+    if (this.remainder.length >= this.maxChunkSize) {
+      const alignedLength = Math.floor(this.remainder.length / 4) * 4;
+      this.pushChunk(this.remainder.substring(0, alignedLength));
+      this.remainder = this.remainder.substring(alignedLength);
+    }
+  }
+  finalize() {
+    this.flushRemainder();
+    return this.output.finalize();
+  }
+}
+var init_base64_decoder = __esm(() => {
+  init_decode_strings();
+  init_chunk_writer();
+});
+
+// node_modules/postal-mime/dist/esm/qp-decoder.js
+class QPDecoder {
+  constructor() {
+    this.output = new ChunkWriter;
+    this.pendingLineBreak = null;
+  }
+  writeLineBreak() {
+    if (this.pendingLineBreak) {
+      this.output.writeBytes(this.pendingLineBreak);
+    }
+  }
+  update(line, lineBreak) {
+    this.writeLineBreak();
+    let len = line.length;
+    while (len > 0 && isWsp(line[len - 1])) {
+      len--;
+    }
+    const softBreak = len > 0 && line[len - 1] === CHR_EQUALS;
+    if (softBreak) {
+      len--;
+    }
+    let literalStart = 0;
+    for (let i = 0;i < len; i++) {
+      if (line[i] !== CHR_EQUALS || i + 2 >= len) {
+        continue;
+      }
+      const high = hexNibble(line[i + 1]);
+      const low = hexNibble(line[i + 2]);
+      if (high < 0 || low < 0) {
+        continue;
+      }
+      this.output.writeBytes(line, literalStart, i);
+      this.output.writeByte(high << 4 | low);
+      i += 2;
+      literalStart = i + 1;
+    }
+    this.output.writeBytes(line, literalStart, len);
+    this.pendingLineBreak = softBreak ? null : lineBreak;
+  }
+  finalize(boundaryEnded = false) {
+    if (!boundaryEnded) {
+      this.writeLineBreak();
+    }
+    return this.output.finalize();
+  }
+}
+var CHR_EQUALS = 61;
+var init_qp_decoder = __esm(() => {
+  init_decode_strings();
+  init_chunk_writer();
+});
+
+// node_modules/postal-mime/dist/esm/errors.js
+function createError(code, message) {
+  const error = new ERROR_TYPES[code](message);
+  error.code = code;
+  return error;
+}
+var ERROR_TYPES;
+var init_errors4 = __esm(() => {
+  ERROR_TYPES = {
+    EINVALIDOPTION: TypeError,
+    EINVALIDINPUT: TypeError,
+    EPARSERREUSED: Error,
+    EMAXNESTINGDEPTH: Error,
+    EMAXHEADERSIZE: Error,
+    EMAXPARTCOUNT: Error,
+    EMAXFORWARDEDADDRESSES: Error
+  };
+});
+
+// node_modules/postal-mime/dist/esm/mime-node.js
+class MimeNode {
+  constructor(options) {
+    this.options = options;
+    this.postalMime = options.postalMime;
+    const limits = this.postalMime.limits;
+    this.postalMime.counters.partCount++;
+    if (this.postalMime.counters.partCount > limits.maxPartCount) {
+      throw createError("EMAXPARTCOUNT", `Maximum MIME part count of ${limits.maxPartCount} parts exceeded`);
+    }
+    this.childNodes = [];
+    this.finalizedChildCount = 0;
+    if (options.parentNode) {
+      this.parentNode = options.parentNode;
+      this.depth = this.parentNode.depth + 1;
+      if (this.depth > limits.maxNestingDepth) {
+        throw createError("EMAXNESTINGDEPTH", `Maximum MIME nesting depth of ${limits.maxNestingDepth} levels exceeded`);
+      }
+      options.parentNode.childNodes.push(this);
+    } else {
+      this.depth = 0;
+    }
+    this.state = "header";
+    this.headerLines = [];
+    const parentMultipartType = options.parentMultipartType || null;
+    const defaultContentType = parentMultipartType === "digest" ? "message/rfc822" : "text/plain";
+    this.contentType = {
+      value: defaultContentType,
+      parsed: { value: defaultContentType, params: {} },
+      multipart: false
+    };
+    this.contentTransferEncoding = {
+      value: "8bit",
+      encoding: ""
+    };
+    this.contentDisposition = {
+      value: "",
+      parsed: { value: "", params: {} }
+    };
+    this.headers = [];
+    this.rawHeaderLines = [];
+    this.contentDecoder = null;
+    this.content = null;
+  }
+  setupContentDecoder(transferEncoding) {
+    if (transferEncoding === "base64") {
+      this.contentDecoder = new Base64Decoder;
+    } else if (transferEncoding === "quoted-printable") {
+      this.contentDecoder = new QPDecoder;
+    } else {
+      this.contentDecoder = new PassThroughDecoder;
+    }
+  }
+  async finalize(boundaryEnded = false) {
+    if (this.state === "finished") {
+      return;
+    }
+    if (this.state === "header") {
+      this.endHeaders();
+    }
+    let boundaries = this.postalMime.boundaries;
+    for (let i = boundaries.length - 1;i >= 0; i--) {
+      let boundary = boundaries[i];
+      if (boundary.node === this) {
+        boundaries.splice(i, 1);
+        break;
+      }
+    }
+    await this.finalizeChildNodes(boundaryEnded);
+    this.content = this.contentDecoder ? await this.contentDecoder.finalize(boundaryEnded) : null;
+    this.contentDecoder = null;
+    this.state = "finished";
+  }
+  async finalizeChildNodes(boundaryEnded = false) {
+    while (this.finalizedChildCount < this.childNodes.length) {
+      await this.childNodes[this.finalizedChildCount++].finalize(boundaryEnded);
+    }
+  }
+  stripComments(str) {
+    let result = "";
+    let depth = 0;
+    let escaped = false;
+    let inQuote = false;
+    let commentStart = -1;
+    let inParameterValue = false;
+    let runStart = 0;
+    const drop = (i) => {
+      result += str.slice(runStart, i);
+      runStart = i + 1;
+    };
+    let keptAny = false;
+    let endsWithWsp = false;
+    const keep = (i) => {
+      keptAny = true;
+      endsWithWsp = isWsp(str.charCodeAt(i));
+    };
+    const opensComment = () => !inParameterValue || !keptAny || endsWithWsp;
+    for (let i = 0;i < str.length; i++) {
+      const chr = str.charAt(i);
+      if (escaped) {
+        escaped = false;
+      } else if (chr === "\\") {
+        escaped = true;
+      } else if (chr === '"' && depth === 0) {
+        inQuote = !inQuote;
+      } else if (!inQuote) {
+        if (chr === "(" && opensComment()) {
+          if (depth === 0) {
+            commentStart = i;
+          }
+          depth++;
+          drop(i);
+          continue;
+        }
+        if (chr === ")" && depth > 0) {
+          depth--;
+          drop(i);
+          continue;
+        }
+        if (depth === 0) {
+          if (chr === "=") {
+            inParameterValue = true;
+          } else if (chr === ";") {
+            inParameterValue = false;
+          }
+        }
+      }
+      if (depth === 0) {
+        keep(i);
+      } else {
+        drop(i);
+      }
+    }
+    if (depth === 0) {
+      return result + str.slice(runStart);
+    }
+    return str.indexOf(";", commentStart) < 0 ? result + str.slice(runStart) : str;
+  }
+  parseStructuredHeader(str) {
+    str = this.stripComments(str);
+    let response = {
+      value: "",
+      params: {}
+    };
+    let key = false;
+    let value = "";
+    let stage = "value";
+    let pendingSpace = "";
+    let quoteClosed = false;
+    let quote = false;
+    let escaped = false;
+    let chr;
+    const flushSpace = () => {
+      if (value.length) {
+        value += pendingSpace;
+      }
+      pendingSpace = "";
+    };
+    let runStart = -1;
+    const closeRun = (end) => {
+      if (runStart >= 0) {
+        value += str.slice(runStart, end);
+        runStart = -1;
+      }
+    };
+    const addChr = (i) => {
+      if (runStart < 0) {
+        flushSpace();
+        runStart = i;
+      }
+    };
+    const takeValue = () => {
+      const result = value;
+      value = "";
+      pendingSpace = "";
+      quoteClosed = false;
+      return result;
+    };
+    const storeParam = (name, result) => {
+      if (name && !Object.prototype.hasOwnProperty.call(response.params, name)) {
+        response.params[name] = result;
+      }
+    };
+    const storeValue = () => {
+      const result = takeValue();
+      if (key === false) {
+        response.value = result;
+      } else {
+        storeParam(key, result);
+      }
+    };
+    const storeEmptyKey = () => {
+      storeParam(takeValue().trim().toLowerCase(), "");
+    };
+    for (let i = 0, len = str.length;i < len; i++) {
+      chr = str.charAt(i);
+      switch (stage) {
+        case "key":
+          if (chr === "=") {
+            closeRun(i);
+            key = takeValue().trim().toLowerCase();
+            stage = "value";
+            break;
+          }
+          if (chr === ";") {
+            closeRun(i);
+            storeEmptyKey();
+            break;
+          }
+          if (runStart < 0) {
+            runStart = i;
+          }
+          break;
+        case "value":
+          if (quoteClosed && chr !== ";") {
+            escaped = false;
+            break;
+          }
+          if (escaped) {
+            addChr(i);
+          } else if (quote && chr === "\\") {
+            closeRun(i);
+            escaped = true;
+            continue;
+          } else if (quote && chr === quote) {
+            closeRun(i);
+            quote = false;
+            quoteClosed = true;
+          } else if (!quote && chr === '"') {
+            closeRun(i);
+            quote = chr;
+            flushSpace();
+          } else if (!quote && chr === ";") {
+            closeRun(i);
+            storeValue();
+            stage = "key";
+          } else if (!quote && (chr === " " || chr === "\t")) {
+            closeRun(i);
+            pendingSpace += chr;
+          } else {
+            addChr(i);
+          }
+          escaped = false;
+          break;
+      }
+    }
+    closeRun(str.length);
+    if (stage === "value") {
+      storeValue();
+    } else {
+      storeEmptyKey();
+    }
+    if (response.value) {
+      response.value = response.value.toLowerCase();
+    }
+    decodeParameterValueContinuations(response);
+    return response;
+  }
+  decodeFlowedText(str, delSp) {
+    const chunks = [];
+    let parts = [];
+    let flowed = false;
+    let depth = 0;
+    for (let lineStart = 0;lineStart <= str.length; ) {
+      let lineEnd = str.indexOf(`
+`, lineStart);
+      if (lineEnd < 0) {
+        lineEnd = str.length;
+      }
+      const line = str.slice(lineStart, lineEnd);
+      let quoteDepth = 0;
+      while (line.charCodeAt(quoteDepth) === 62) {
+        quoteDepth++;
+      }
+      const contentStart = line.charCodeAt(quoteDepth) === 32 ? quoteDepth + 1 : quoteDepth;
+      const content = line.slice(contentStart);
+      const isSignature = content === "-- ";
+      if (flowed && quoteDepth === depth && !isSignature) {
+        if (delSp) {
+          const last = parts[parts.length - 1];
+          parts[parts.length - 1] = last.slice(0, -1);
+        }
+        parts.push(content);
+      } else {
+        if (lineStart) {
+          parts.push(`
+`);
+        }
+        parts.push(quoteDepth ? line : content);
+      }
+      flowed = !isSignature && content.endsWith(" ");
+      depth = quoteDepth;
+      if (parts.length >= FLOWED_JOIN_INTERVAL) {
+        const last = parts.pop();
+        chunks.push(parts.join(""));
+        parts = [last];
+      }
+      lineStart = lineEnd + 1;
+    }
+    chunks.push(parts.join(""));
+    return chunks.join("");
+  }
+  getTextContent() {
+    if (!this.content) {
+      return "";
+    }
+    let str = decodeText(this.content, this.contentType.parsed.params.charset, this.contentType.parsed.value === "text/html").replace(/\r\n/g, `
+`);
+    if (this.contentType.parsed.value === "text/plain" && /^flowed$/i.test(this.contentType.parsed.params.format)) {
+      str = this.decodeFlowedText(str, /^yes$/i.test(this.contentType.parsed.params.delsp));
+    }
+    return str;
+  }
+  processHeaders() {
+    let foldedLines = [];
+    for (let line of this.headerLines) {
+      if (foldedLines.length && /^[ \t]/.test(line)) {
+        foldedLines[foldedLines.length - 1].push(line);
+      } else {
+        foldedLines.push([line]);
+      }
+    }
+    let seenContentHeaders = new Set;
+    for (let parts of foldedLines) {
+      let rawLine = parts.join(`
+`);
+      let sep = rawLine.indexOf(":");
+      let rawKey = sep < 0 ? rawLine : rawLine.slice(0, sep);
+      this.rawHeaderLines.push({
+        key: rawKey.toLowerCase(),
+        line: rawLine
+      });
+      let unfoldedLine = parts.join("");
+      sep = unfoldedLine.indexOf(":");
+      let key = sep < 0 ? unfoldedLine : unfoldedLine.slice(0, sep);
+      let value = sep < 0 ? "" : trimWsp(foldLineBreaks(unfoldedLine.slice(sep + 1)));
+      this.headers.push({ key: key.toLowerCase(), originalKey: key, value });
+      const lowerKey = key.toLowerCase();
+      if (CONTENT_HEADERS.has(lowerKey) && !seenContentHeaders.has(lowerKey)) {
+        seenContentHeaders.add(lowerKey);
+        switch (lowerKey) {
+          case "content-type":
+            this.contentType.value = value;
+            break;
+          case "content-transfer-encoding":
+            this.contentTransferEncoding.value = value;
+            break;
+          case "content-disposition":
+            this.contentDisposition.value = value;
+            break;
+          case "content-id":
+            this.contentId = value;
+            break;
+          case "content-description":
+            this.contentDescription = value;
+            break;
+        }
+      }
+    }
+    this.contentType.parsed = this.parseStructuredHeader(this.contentType.value);
+    this.contentType.multipart = /^multipart\//i.test(this.contentType.parsed.value) ? this.contentType.parsed.value.slice(this.contentType.parsed.value.indexOf("/") + 1) : false;
+    let boundary = this.contentType.multipart ? (this.contentType.parsed.params.boundary || "").trimEnd() : "";
+    if (/[^\x00-\x7f]/.test(boundary)) {
+      boundary = "";
+    }
+    if (this.contentType.multipart && !boundary) {
+      this.contentType.parsed.value = "text/plain";
+      this.contentType.multipart = false;
+    }
+    if (this.contentType.multipart) {
+      this.postalMime.boundaries.push({
+        value: textEncoder.encode(boundary),
+        node: this
+      });
+    }
+    this.contentDisposition.parsed = this.parseStructuredHeader(this.contentDisposition.value);
+    const disposition = this.contentDisposition.parsed.value;
+    const dispositionEnd = disposition.search(/[ \t]/);
+    if (dispositionEnd >= 0) {
+      this.contentDisposition.parsed.value = disposition.slice(0, dispositionEnd);
+    }
+    this.contentTransferEncoding.encoding = (this.stripComments(this.contentTransferEncoding.value).toLowerCase().match(/^[ \t]*([\w-]+)/) || ["", ""])[1];
+    this.setupContentDecoder(this.contentTransferEncoding.encoding);
+    this.headerLines = [];
+  }
+  endHeaders() {
+    this.state = "body";
+    this.processHeaders();
+  }
+  feed(line, lineBreak) {
+    switch (this.state) {
+      case "header": {
+        if (!line.length) {
+          this.endHeaders();
+          return false;
+        }
+        this.postalMime.counters.headerSize += Math.max(line.length, HEADER_LINE_MIN_COST);
+        const maxHeadersSize = this.postalMime.limits.maxHeadersSize;
+        if (this.postalMime.counters.headerSize > maxHeadersSize) {
+          throw createError("EMAXHEADERSIZE", `Maximum header size of ${maxHeadersSize} bytes exceeded`);
+        }
+        const text = decodeUtf8OrWindows1252(line, headerDecoder);
+        if (!isWsp(line[0]) && !FIELD_START.test(text)) {
+          this.endHeaders();
+          return true;
+        }
+        this.headerLines.push(text);
+        break;
+      }
+      case "body":
+        if (this.contentDecoder) {
+          this.contentDecoder.update(line, lineBreak);
+        }
+        break;
+    }
+    return false;
+  }
+}
+var headerDecoder, FLOWED_JOIN_INTERVAL = 4096, HEADER_LINE_MIN_COST = 64, trimWsp = (str) => {
+  let start = 0;
+  let end = str.length;
+  while (start < end && isWsp(str.charCodeAt(start))) {
+    start++;
+  }
+  while (end > start && isWsp(str.charCodeAt(end - 1))) {
+    end--;
+  }
+  return str.slice(start, end);
+}, FIELD_START, CONTENT_HEADERS;
+var init_mime_node = __esm(() => {
+  init_decode_strings();
+  init_pass_through_decoder();
+  init_base64_decoder();
+  init_qp_decoder();
+  init_errors4();
+  headerDecoder = new TextDecoder("utf-8", { ignoreBOM: true });
+  FIELD_START = /^(?:From |[!-9;-~]*[ \t]*:)/;
+  CONTENT_HEADERS = new Set([
+    "content-type",
+    "content-transfer-encoding",
+    "content-disposition",
+    "content-id",
+    "content-description"
+  ]);
+});
+
+// node_modules/postal-mime/dist/esm/html-entities.js
+var htmlEntities;
+var init_html_entities = __esm(() => {
+  htmlEntities = {
+    "&AElig": "Æ",
+    "&AElig;": "Æ",
+    "&AMP": "&",
+    "&AMP;": "&",
+    "&Aacute": "Á",
+    "&Aacute;": "Á",
+    "&Abreve;": "Ă",
+    "&Acirc": "Â",
+    "&Acirc;": "Â",
+    "&Acy;": "А",
+    "&Afr;": "\uD835\uDD04",
+    "&Agrave": "À",
+    "&Agrave;": "À",
+    "&Alpha;": "Α",
+    "&Amacr;": "Ā",
+    "&And;": "⩓",
+    "&Aogon;": "Ą",
+    "&Aopf;": "\uD835\uDD38",
+    "&ApplyFunction;": "⁡",
+    "&Aring": "Å",
+    "&Aring;": "Å",
+    "&Ascr;": "\uD835\uDC9C",
+    "&Assign;": "≔",
+    "&Atilde": "Ã",
+    "&Atilde;": "Ã",
+    "&Auml": "Ä",
+    "&Auml;": "Ä",
+    "&Backslash;": "∖",
+    "&Barv;": "⫧",
+    "&Barwed;": "⌆",
+    "&Bcy;": "Б",
+    "&Because;": "∵",
+    "&Bernoullis;": "ℬ",
+    "&Beta;": "Β",
+    "&Bfr;": "\uD835\uDD05",
+    "&Bopf;": "\uD835\uDD39",
+    "&Breve;": "˘",
+    "&Bscr;": "ℬ",
+    "&Bumpeq;": "≎",
+    "&CHcy;": "Ч",
+    "&COPY": "©",
+    "&COPY;": "©",
+    "&Cacute;": "Ć",
+    "&Cap;": "⋒",
+    "&CapitalDifferentialD;": "ⅅ",
+    "&Cayleys;": "ℭ",
+    "&Ccaron;": "Č",
+    "&Ccedil": "Ç",
+    "&Ccedil;": "Ç",
+    "&Ccirc;": "Ĉ",
+    "&Cconint;": "∰",
+    "&Cdot;": "Ċ",
+    "&Cedilla;": "¸",
+    "&CenterDot;": "·",
+    "&Cfr;": "ℭ",
+    "&Chi;": "Χ",
+    "&CircleDot;": "⊙",
+    "&CircleMinus;": "⊖",
+    "&CirclePlus;": "⊕",
+    "&CircleTimes;": "⊗",
+    "&ClockwiseContourIntegral;": "∲",
+    "&CloseCurlyDoubleQuote;": "”",
+    "&CloseCurlyQuote;": "’",
+    "&Colon;": "∷",
+    "&Colone;": "⩴",
+    "&Congruent;": "≡",
+    "&Conint;": "∯",
+    "&ContourIntegral;": "∮",
+    "&Copf;": "ℂ",
+    "&Coproduct;": "∐",
+    "&CounterClockwiseContourIntegral;": "∳",
+    "&Cross;": "⨯",
+    "&Cscr;": "\uD835\uDC9E",
+    "&Cup;": "⋓",
+    "&CupCap;": "≍",
+    "&DD;": "ⅅ",
+    "&DDotrahd;": "⤑",
+    "&DJcy;": "Ђ",
+    "&DScy;": "Ѕ",
+    "&DZcy;": "Џ",
+    "&Dagger;": "‡",
+    "&Darr;": "↡",
+    "&Dashv;": "⫤",
+    "&Dcaron;": "Ď",
+    "&Dcy;": "Д",
+    "&Del;": "∇",
+    "&Delta;": "Δ",
+    "&Dfr;": "\uD835\uDD07",
+    "&DiacriticalAcute;": "´",
+    "&DiacriticalDot;": "˙",
+    "&DiacriticalDoubleAcute;": "˝",
+    "&DiacriticalGrave;": "`",
+    "&DiacriticalTilde;": "˜",
+    "&Diamond;": "⋄",
+    "&DifferentialD;": "ⅆ",
+    "&Dopf;": "\uD835\uDD3B",
+    "&Dot;": "¨",
+    "&DotDot;": "⃜",
+    "&DotEqual;": "≐",
+    "&DoubleContourIntegral;": "∯",
+    "&DoubleDot;": "¨",
+    "&DoubleDownArrow;": "⇓",
+    "&DoubleLeftArrow;": "⇐",
+    "&DoubleLeftRightArrow;": "⇔",
+    "&DoubleLeftTee;": "⫤",
+    "&DoubleLongLeftArrow;": "⟸",
+    "&DoubleLongLeftRightArrow;": "⟺",
+    "&DoubleLongRightArrow;": "⟹",
+    "&DoubleRightArrow;": "⇒",
+    "&DoubleRightTee;": "⊨",
+    "&DoubleUpArrow;": "⇑",
+    "&DoubleUpDownArrow;": "⇕",
+    "&DoubleVerticalBar;": "∥",
+    "&DownArrow;": "↓",
+    "&DownArrowBar;": "⤓",
+    "&DownArrowUpArrow;": "⇵",
+    "&DownBreve;": "̑",
+    "&DownLeftRightVector;": "⥐",
+    "&DownLeftTeeVector;": "⥞",
+    "&DownLeftVector;": "↽",
+    "&DownLeftVectorBar;": "⥖",
+    "&DownRightTeeVector;": "⥟",
+    "&DownRightVector;": "⇁",
+    "&DownRightVectorBar;": "⥗",
+    "&DownTee;": "⊤",
+    "&DownTeeArrow;": "↧",
+    "&Downarrow;": "⇓",
+    "&Dscr;": "\uD835\uDC9F",
+    "&Dstrok;": "Đ",
+    "&ENG;": "Ŋ",
+    "&ETH": "Ð",
+    "&ETH;": "Ð",
+    "&Eacute": "É",
+    "&Eacute;": "É",
+    "&Ecaron;": "Ě",
+    "&Ecirc": "Ê",
+    "&Ecirc;": "Ê",
+    "&Ecy;": "Э",
+    "&Edot;": "Ė",
+    "&Efr;": "\uD835\uDD08",
+    "&Egrave": "È",
+    "&Egrave;": "È",
+    "&Element;": "∈",
+    "&Emacr;": "Ē",
+    "&EmptySmallSquare;": "◻",
+    "&EmptyVerySmallSquare;": "▫",
+    "&Eogon;": "Ę",
+    "&Eopf;": "\uD835\uDD3C",
+    "&Epsilon;": "Ε",
+    "&Equal;": "⩵",
+    "&EqualTilde;": "≂",
+    "&Equilibrium;": "⇌",
+    "&Escr;": "ℰ",
+    "&Esim;": "⩳",
+    "&Eta;": "Η",
+    "&Euml": "Ë",
+    "&Euml;": "Ë",
+    "&Exists;": "∃",
+    "&ExponentialE;": "ⅇ",
+    "&Fcy;": "Ф",
+    "&Ffr;": "\uD835\uDD09",
+    "&FilledSmallSquare;": "◼",
+    "&FilledVerySmallSquare;": "▪",
+    "&Fopf;": "\uD835\uDD3D",
+    "&ForAll;": "∀",
+    "&Fouriertrf;": "ℱ",
+    "&Fscr;": "ℱ",
+    "&GJcy;": "Ѓ",
+    "&GT": ">",
+    "&GT;": ">",
+    "&Gamma;": "Γ",
+    "&Gammad;": "Ϝ",
+    "&Gbreve;": "Ğ",
+    "&Gcedil;": "Ģ",
+    "&Gcirc;": "Ĝ",
+    "&Gcy;": "Г",
+    "&Gdot;": "Ġ",
+    "&Gfr;": "\uD835\uDD0A",
+    "&Gg;": "⋙",
+    "&Gopf;": "\uD835\uDD3E",
+    "&GreaterEqual;": "≥",
+    "&GreaterEqualLess;": "⋛",
+    "&GreaterFullEqual;": "≧",
+    "&GreaterGreater;": "⪢",
+    "&GreaterLess;": "≷",
+    "&GreaterSlantEqual;": "⩾",
+    "&GreaterTilde;": "≳",
+    "&Gscr;": "\uD835\uDCA2",
+    "&Gt;": "≫",
+    "&HARDcy;": "Ъ",
+    "&Hacek;": "ˇ",
+    "&Hat;": "^",
+    "&Hcirc;": "Ĥ",
+    "&Hfr;": "ℌ",
+    "&HilbertSpace;": "ℋ",
+    "&Hopf;": "ℍ",
+    "&HorizontalLine;": "─",
+    "&Hscr;": "ℋ",
+    "&Hstrok;": "Ħ",
+    "&HumpDownHump;": "≎",
+    "&HumpEqual;": "≏",
+    "&IEcy;": "Е",
+    "&IJlig;": "Ĳ",
+    "&IOcy;": "Ё",
+    "&Iacute": "Í",
+    "&Iacute;": "Í",
+    "&Icirc": "Î",
+    "&Icirc;": "Î",
+    "&Icy;": "И",
+    "&Idot;": "İ",
+    "&Ifr;": "ℑ",
+    "&Igrave": "Ì",
+    "&Igrave;": "Ì",
+    "&Im;": "ℑ",
+    "&Imacr;": "Ī",
+    "&ImaginaryI;": "ⅈ",
+    "&Implies;": "⇒",
+    "&Int;": "∬",
+    "&Integral;": "∫",
+    "&Intersection;": "⋂",
+    "&InvisibleComma;": "⁣",
+    "&InvisibleTimes;": "⁢",
+    "&Iogon;": "Į",
+    "&Iopf;": "\uD835\uDD40",
+    "&Iota;": "Ι",
+    "&Iscr;": "ℐ",
+    "&Itilde;": "Ĩ",
+    "&Iukcy;": "І",
+    "&Iuml": "Ï",
+    "&Iuml;": "Ï",
+    "&Jcirc;": "Ĵ",
+    "&Jcy;": "Й",
+    "&Jfr;": "\uD835\uDD0D",
+    "&Jopf;": "\uD835\uDD41",
+    "&Jscr;": "\uD835\uDCA5",
+    "&Jsercy;": "Ј",
+    "&Jukcy;": "Є",
+    "&KHcy;": "Х",
+    "&KJcy;": "Ќ",
+    "&Kappa;": "Κ",
+    "&Kcedil;": "Ķ",
+    "&Kcy;": "К",
+    "&Kfr;": "\uD835\uDD0E",
+    "&Kopf;": "\uD835\uDD42",
+    "&Kscr;": "\uD835\uDCA6",
+    "&LJcy;": "Љ",
+    "&LT": "<",
+    "&LT;": "<",
+    "&Lacute;": "Ĺ",
+    "&Lambda;": "Λ",
+    "&Lang;": "⟪",
+    "&Laplacetrf;": "ℒ",
+    "&Larr;": "↞",
+    "&Lcaron;": "Ľ",
+    "&Lcedil;": "Ļ",
+    "&Lcy;": "Л",
+    "&LeftAngleBracket;": "⟨",
+    "&LeftArrow;": "←",
+    "&LeftArrowBar;": "⇤",
+    "&LeftArrowRightArrow;": "⇆",
+    "&LeftCeiling;": "⌈",
+    "&LeftDoubleBracket;": "⟦",
+    "&LeftDownTeeVector;": "⥡",
+    "&LeftDownVector;": "⇃",
+    "&LeftDownVectorBar;": "⥙",
+    "&LeftFloor;": "⌊",
+    "&LeftRightArrow;": "↔",
+    "&LeftRightVector;": "⥎",
+    "&LeftTee;": "⊣",
+    "&LeftTeeArrow;": "↤",
+    "&LeftTeeVector;": "⥚",
+    "&LeftTriangle;": "⊲",
+    "&LeftTriangleBar;": "⧏",
+    "&LeftTriangleEqual;": "⊴",
+    "&LeftUpDownVector;": "⥑",
+    "&LeftUpTeeVector;": "⥠",
+    "&LeftUpVector;": "↿",
+    "&LeftUpVectorBar;": "⥘",
+    "&LeftVector;": "↼",
+    "&LeftVectorBar;": "⥒",
+    "&Leftarrow;": "⇐",
+    "&Leftrightarrow;": "⇔",
+    "&LessEqualGreater;": "⋚",
+    "&LessFullEqual;": "≦",
+    "&LessGreater;": "≶",
+    "&LessLess;": "⪡",
+    "&LessSlantEqual;": "⩽",
+    "&LessTilde;": "≲",
+    "&Lfr;": "\uD835\uDD0F",
+    "&Ll;": "⋘",
+    "&Lleftarrow;": "⇚",
+    "&Lmidot;": "Ŀ",
+    "&LongLeftArrow;": "⟵",
+    "&LongLeftRightArrow;": "⟷",
+    "&LongRightArrow;": "⟶",
+    "&Longleftarrow;": "⟸",
+    "&Longleftrightarrow;": "⟺",
+    "&Longrightarrow;": "⟹",
+    "&Lopf;": "\uD835\uDD43",
+    "&LowerLeftArrow;": "↙",
+    "&LowerRightArrow;": "↘",
+    "&Lscr;": "ℒ",
+    "&Lsh;": "↰",
+    "&Lstrok;": "Ł",
+    "&Lt;": "≪",
+    "&Map;": "⤅",
+    "&Mcy;": "М",
+    "&MediumSpace;": " ",
+    "&Mellintrf;": "ℳ",
+    "&Mfr;": "\uD835\uDD10",
+    "&MinusPlus;": "∓",
+    "&Mopf;": "\uD835\uDD44",
+    "&Mscr;": "ℳ",
+    "&Mu;": "Μ",
+    "&NJcy;": "Њ",
+    "&Nacute;": "Ń",
+    "&Ncaron;": "Ň",
+    "&Ncedil;": "Ņ",
+    "&Ncy;": "Н",
+    "&NegativeMediumSpace;": "​",
+    "&NegativeThickSpace;": "​",
+    "&NegativeThinSpace;": "​",
+    "&NegativeVeryThinSpace;": "​",
+    "&NestedGreaterGreater;": "≫",
+    "&NestedLessLess;": "≪",
+    "&NewLine;": `
+`,
+    "&Nfr;": "\uD835\uDD11",
+    "&NoBreak;": "⁠",
+    "&NonBreakingSpace;": " ",
+    "&Nopf;": "ℕ",
+    "&Not;": "⫬",
+    "&NotCongruent;": "≢",
+    "&NotCupCap;": "≭",
+    "&NotDoubleVerticalBar;": "∦",
+    "&NotElement;": "∉",
+    "&NotEqual;": "≠",
+    "&NotEqualTilde;": "≂̸",
+    "&NotExists;": "∄",
+    "&NotGreater;": "≯",
+    "&NotGreaterEqual;": "≱",
+    "&NotGreaterFullEqual;": "≧̸",
+    "&NotGreaterGreater;": "≫̸",
+    "&NotGreaterLess;": "≹",
+    "&NotGreaterSlantEqual;": "⩾̸",
+    "&NotGreaterTilde;": "≵",
+    "&NotHumpDownHump;": "≎̸",
+    "&NotHumpEqual;": "≏̸",
+    "&NotLeftTriangle;": "⋪",
+    "&NotLeftTriangleBar;": "⧏̸",
+    "&NotLeftTriangleEqual;": "⋬",
+    "&NotLess;": "≮",
+    "&NotLessEqual;": "≰",
+    "&NotLessGreater;": "≸",
+    "&NotLessLess;": "≪̸",
+    "&NotLessSlantEqual;": "⩽̸",
+    "&NotLessTilde;": "≴",
+    "&NotNestedGreaterGreater;": "⪢̸",
+    "&NotNestedLessLess;": "⪡̸",
+    "&NotPrecedes;": "⊀",
+    "&NotPrecedesEqual;": "⪯̸",
+    "&NotPrecedesSlantEqual;": "⋠",
+    "&NotReverseElement;": "∌",
+    "&NotRightTriangle;": "⋫",
+    "&NotRightTriangleBar;": "⧐̸",
+    "&NotRightTriangleEqual;": "⋭",
+    "&NotSquareSubset;": "⊏̸",
+    "&NotSquareSubsetEqual;": "⋢",
+    "&NotSquareSuperset;": "⊐̸",
+    "&NotSquareSupersetEqual;": "⋣",
+    "&NotSubset;": "⊂⃒",
+    "&NotSubsetEqual;": "⊈",
+    "&NotSucceeds;": "⊁",
+    "&NotSucceedsEqual;": "⪰̸",
+    "&NotSucceedsSlantEqual;": "⋡",
+    "&NotSucceedsTilde;": "≿̸",
+    "&NotSuperset;": "⊃⃒",
+    "&NotSupersetEqual;": "⊉",
+    "&NotTilde;": "≁",
+    "&NotTildeEqual;": "≄",
+    "&NotTildeFullEqual;": "≇",
+    "&NotTildeTilde;": "≉",
+    "&NotVerticalBar;": "∤",
+    "&Nscr;": "\uD835\uDCA9",
+    "&Ntilde": "Ñ",
+    "&Ntilde;": "Ñ",
+    "&Nu;": "Ν",
+    "&OElig;": "Œ",
+    "&Oacute": "Ó",
+    "&Oacute;": "Ó",
+    "&Ocirc": "Ô",
+    "&Ocirc;": "Ô",
+    "&Ocy;": "О",
+    "&Odblac;": "Ő",
+    "&Ofr;": "\uD835\uDD12",
+    "&Ograve": "Ò",
+    "&Ograve;": "Ò",
+    "&Omacr;": "Ō",
+    "&Omega;": "Ω",
+    "&Omicron;": "Ο",
+    "&Oopf;": "\uD835\uDD46",
+    "&OpenCurlyDoubleQuote;": "“",
+    "&OpenCurlyQuote;": "‘",
+    "&Or;": "⩔",
+    "&Oscr;": "\uD835\uDCAA",
+    "&Oslash": "Ø",
+    "&Oslash;": "Ø",
+    "&Otilde": "Õ",
+    "&Otilde;": "Õ",
+    "&Otimes;": "⨷",
+    "&Ouml": "Ö",
+    "&Ouml;": "Ö",
+    "&OverBar;": "‾",
+    "&OverBrace;": "⏞",
+    "&OverBracket;": "⎴",
+    "&OverParenthesis;": "⏜",
+    "&PartialD;": "∂",
+    "&Pcy;": "П",
+    "&Pfr;": "\uD835\uDD13",
+    "&Phi;": "Φ",
+    "&Pi;": "Π",
+    "&PlusMinus;": "±",
+    "&Poincareplane;": "ℌ",
+    "&Popf;": "ℙ",
+    "&Pr;": "⪻",
+    "&Precedes;": "≺",
+    "&PrecedesEqual;": "⪯",
+    "&PrecedesSlantEqual;": "≼",
+    "&PrecedesTilde;": "≾",
+    "&Prime;": "″",
+    "&Product;": "∏",
+    "&Proportion;": "∷",
+    "&Proportional;": "∝",
+    "&Pscr;": "\uD835\uDCAB",
+    "&Psi;": "Ψ",
+    "&QUOT": '"',
+    "&QUOT;": '"',
+    "&Qfr;": "\uD835\uDD14",
+    "&Qopf;": "ℚ",
+    "&Qscr;": "\uD835\uDCAC",
+    "&RBarr;": "⤐",
+    "&REG": "®",
+    "&REG;": "®",
+    "&Racute;": "Ŕ",
+    "&Rang;": "⟫",
+    "&Rarr;": "↠",
+    "&Rarrtl;": "⤖",
+    "&Rcaron;": "Ř",
+    "&Rcedil;": "Ŗ",
+    "&Rcy;": "Р",
+    "&Re;": "ℜ",
+    "&ReverseElement;": "∋",
+    "&ReverseEquilibrium;": "⇋",
+    "&ReverseUpEquilibrium;": "⥯",
+    "&Rfr;": "ℜ",
+    "&Rho;": "Ρ",
+    "&RightAngleBracket;": "⟩",
+    "&RightArrow;": "→",
+    "&RightArrowBar;": "⇥",
+    "&RightArrowLeftArrow;": "⇄",
+    "&RightCeiling;": "⌉",
+    "&RightDoubleBracket;": "⟧",
+    "&RightDownTeeVector;": "⥝",
+    "&RightDownVector;": "⇂",
+    "&RightDownVectorBar;": "⥕",
+    "&RightFloor;": "⌋",
+    "&RightTee;": "⊢",
+    "&RightTeeArrow;": "↦",
+    "&RightTeeVector;": "⥛",
+    "&RightTriangle;": "⊳",
+    "&RightTriangleBar;": "⧐",
+    "&RightTriangleEqual;": "⊵",
+    "&RightUpDownVector;": "⥏",
+    "&RightUpTeeVector;": "⥜",
+    "&RightUpVector;": "↾",
+    "&RightUpVectorBar;": "⥔",
+    "&RightVector;": "⇀",
+    "&RightVectorBar;": "⥓",
+    "&Rightarrow;": "⇒",
+    "&Ropf;": "ℝ",
+    "&RoundImplies;": "⥰",
+    "&Rrightarrow;": "⇛",
+    "&Rscr;": "ℛ",
+    "&Rsh;": "↱",
+    "&RuleDelayed;": "⧴",
+    "&SHCHcy;": "Щ",
+    "&SHcy;": "Ш",
+    "&SOFTcy;": "Ь",
+    "&Sacute;": "Ś",
+    "&Sc;": "⪼",
+    "&Scaron;": "Š",
+    "&Scedil;": "Ş",
+    "&Scirc;": "Ŝ",
+    "&Scy;": "С",
+    "&Sfr;": "\uD835\uDD16",
+    "&ShortDownArrow;": "↓",
+    "&ShortLeftArrow;": "←",
+    "&ShortRightArrow;": "→",
+    "&ShortUpArrow;": "↑",
+    "&Sigma;": "Σ",
+    "&SmallCircle;": "∘",
+    "&Sopf;": "\uD835\uDD4A",
+    "&Sqrt;": "√",
+    "&Square;": "□",
+    "&SquareIntersection;": "⊓",
+    "&SquareSubset;": "⊏",
+    "&SquareSubsetEqual;": "⊑",
+    "&SquareSuperset;": "⊐",
+    "&SquareSupersetEqual;": "⊒",
+    "&SquareUnion;": "⊔",
+    "&Sscr;": "\uD835\uDCAE",
+    "&Star;": "⋆",
+    "&Sub;": "⋐",
+    "&Subset;": "⋐",
+    "&SubsetEqual;": "⊆",
+    "&Succeeds;": "≻",
+    "&SucceedsEqual;": "⪰",
+    "&SucceedsSlantEqual;": "≽",
+    "&SucceedsTilde;": "≿",
+    "&SuchThat;": "∋",
+    "&Sum;": "∑",
+    "&Sup;": "⋑",
+    "&Superset;": "⊃",
+    "&SupersetEqual;": "⊇",
+    "&Supset;": "⋑",
+    "&THORN": "Þ",
+    "&THORN;": "Þ",
+    "&TRADE;": "™",
+    "&TSHcy;": "Ћ",
+    "&TScy;": "Ц",
+    "&Tab;": "\t",
+    "&Tau;": "Τ",
+    "&Tcaron;": "Ť",
+    "&Tcedil;": "Ţ",
+    "&Tcy;": "Т",
+    "&Tfr;": "\uD835\uDD17",
+    "&Therefore;": "∴",
+    "&Theta;": "Θ",
+    "&ThickSpace;": "  ",
+    "&ThinSpace;": " ",
+    "&Tilde;": "∼",
+    "&TildeEqual;": "≃",
+    "&TildeFullEqual;": "≅",
+    "&TildeTilde;": "≈",
+    "&Topf;": "\uD835\uDD4B",
+    "&TripleDot;": "⃛",
+    "&Tscr;": "\uD835\uDCAF",
+    "&Tstrok;": "Ŧ",
+    "&Uacute": "Ú",
+    "&Uacute;": "Ú",
+    "&Uarr;": "↟",
+    "&Uarrocir;": "⥉",
+    "&Ubrcy;": "Ў",
+    "&Ubreve;": "Ŭ",
+    "&Ucirc": "Û",
+    "&Ucirc;": "Û",
+    "&Ucy;": "У",
+    "&Udblac;": "Ű",
+    "&Ufr;": "\uD835\uDD18",
+    "&Ugrave": "Ù",
+    "&Ugrave;": "Ù",
+    "&Umacr;": "Ū",
+    "&UnderBar;": "_",
+    "&UnderBrace;": "⏟",
+    "&UnderBracket;": "⎵",
+    "&UnderParenthesis;": "⏝",
+    "&Union;": "⋃",
+    "&UnionPlus;": "⊎",
+    "&Uogon;": "Ų",
+    "&Uopf;": "\uD835\uDD4C",
+    "&UpArrow;": "↑",
+    "&UpArrowBar;": "⤒",
+    "&UpArrowDownArrow;": "⇅",
+    "&UpDownArrow;": "↕",
+    "&UpEquilibrium;": "⥮",
+    "&UpTee;": "⊥",
+    "&UpTeeArrow;": "↥",
+    "&Uparrow;": "⇑",
+    "&Updownarrow;": "⇕",
+    "&UpperLeftArrow;": "↖",
+    "&UpperRightArrow;": "↗",
+    "&Upsi;": "ϒ",
+    "&Upsilon;": "Υ",
+    "&Uring;": "Ů",
+    "&Uscr;": "\uD835\uDCB0",
+    "&Utilde;": "Ũ",
+    "&Uuml": "Ü",
+    "&Uuml;": "Ü",
+    "&VDash;": "⊫",
+    "&Vbar;": "⫫",
+    "&Vcy;": "В",
+    "&Vdash;": "⊩",
+    "&Vdashl;": "⫦",
+    "&Vee;": "⋁",
+    "&Verbar;": "‖",
+    "&Vert;": "‖",
+    "&VerticalBar;": "∣",
+    "&VerticalLine;": "|",
+    "&VerticalSeparator;": "❘",
+    "&VerticalTilde;": "≀",
+    "&VeryThinSpace;": " ",
+    "&Vfr;": "\uD835\uDD19",
+    "&Vopf;": "\uD835\uDD4D",
+    "&Vscr;": "\uD835\uDCB1",
+    "&Vvdash;": "⊪",
+    "&Wcirc;": "Ŵ",
+    "&Wedge;": "⋀",
+    "&Wfr;": "\uD835\uDD1A",
+    "&Wopf;": "\uD835\uDD4E",
+    "&Wscr;": "\uD835\uDCB2",
+    "&Xfr;": "\uD835\uDD1B",
+    "&Xi;": "Ξ",
+    "&Xopf;": "\uD835\uDD4F",
+    "&Xscr;": "\uD835\uDCB3",
+    "&YAcy;": "Я",
+    "&YIcy;": "Ї",
+    "&YUcy;": "Ю",
+    "&Yacute": "Ý",
+    "&Yacute;": "Ý",
+    "&Ycirc;": "Ŷ",
+    "&Ycy;": "Ы",
+    "&Yfr;": "\uD835\uDD1C",
+    "&Yopf;": "\uD835\uDD50",
+    "&Yscr;": "\uD835\uDCB4",
+    "&Yuml;": "Ÿ",
+    "&ZHcy;": "Ж",
+    "&Zacute;": "Ź",
+    "&Zcaron;": "Ž",
+    "&Zcy;": "З",
+    "&Zdot;": "Ż",
+    "&ZeroWidthSpace;": "​",
+    "&Zeta;": "Ζ",
+    "&Zfr;": "ℨ",
+    "&Zopf;": "ℤ",
+    "&Zscr;": "\uD835\uDCB5",
+    "&aacute": "á",
+    "&aacute;": "á",
+    "&abreve;": "ă",
+    "&ac;": "∾",
+    "&acE;": "∾̳",
+    "&acd;": "∿",
+    "&acirc": "â",
+    "&acirc;": "â",
+    "&acute": "´",
+    "&acute;": "´",
+    "&acy;": "а",
+    "&aelig": "æ",
+    "&aelig;": "æ",
+    "&af;": "⁡",
+    "&afr;": "\uD835\uDD1E",
+    "&agrave": "à",
+    "&agrave;": "à",
+    "&alefsym;": "ℵ",
+    "&aleph;": "ℵ",
+    "&alpha;": "α",
+    "&amacr;": "ā",
+    "&amalg;": "⨿",
+    "&amp": "&",
+    "&amp;": "&",
+    "&and;": "∧",
+    "&andand;": "⩕",
+    "&andd;": "⩜",
+    "&andslope;": "⩘",
+    "&andv;": "⩚",
+    "&ang;": "∠",
+    "&ange;": "⦤",
+    "&angle;": "∠",
+    "&angmsd;": "∡",
+    "&angmsdaa;": "⦨",
+    "&angmsdab;": "⦩",
+    "&angmsdac;": "⦪",
+    "&angmsdad;": "⦫",
+    "&angmsdae;": "⦬",
+    "&angmsdaf;": "⦭",
+    "&angmsdag;": "⦮",
+    "&angmsdah;": "⦯",
+    "&angrt;": "∟",
+    "&angrtvb;": "⊾",
+    "&angrtvbd;": "⦝",
+    "&angsph;": "∢",
+    "&angst;": "Å",
+    "&angzarr;": "⍼",
+    "&aogon;": "ą",
+    "&aopf;": "\uD835\uDD52",
+    "&ap;": "≈",
+    "&apE;": "⩰",
+    "&apacir;": "⩯",
+    "&ape;": "≊",
+    "&apid;": "≋",
+    "&apos;": "'",
+    "&approx;": "≈",
+    "&approxeq;": "≊",
+    "&aring": "å",
+    "&aring;": "å",
+    "&ascr;": "\uD835\uDCB6",
+    "&ast;": "*",
+    "&asymp;": "≈",
+    "&asympeq;": "≍",
+    "&atilde": "ã",
+    "&atilde;": "ã",
+    "&auml": "ä",
+    "&auml;": "ä",
+    "&awconint;": "∳",
+    "&awint;": "⨑",
+    "&bNot;": "⫭",
+    "&backcong;": "≌",
+    "&backepsilon;": "϶",
+    "&backprime;": "‵",
+    "&backsim;": "∽",
+    "&backsimeq;": "⋍",
+    "&barvee;": "⊽",
+    "&barwed;": "⌅",
+    "&barwedge;": "⌅",
+    "&bbrk;": "⎵",
+    "&bbrktbrk;": "⎶",
+    "&bcong;": "≌",
+    "&bcy;": "б",
+    "&bdquo;": "„",
+    "&becaus;": "∵",
+    "&because;": "∵",
+    "&bemptyv;": "⦰",
+    "&bepsi;": "϶",
+    "&bernou;": "ℬ",
+    "&beta;": "β",
+    "&beth;": "ℶ",
+    "&between;": "≬",
+    "&bfr;": "\uD835\uDD1F",
+    "&bigcap;": "⋂",
+    "&bigcirc;": "◯",
+    "&bigcup;": "⋃",
+    "&bigodot;": "⨀",
+    "&bigoplus;": "⨁",
+    "&bigotimes;": "⨂",
+    "&bigsqcup;": "⨆",
+    "&bigstar;": "★",
+    "&bigtriangledown;": "▽",
+    "&bigtriangleup;": "△",
+    "&biguplus;": "⨄",
+    "&bigvee;": "⋁",
+    "&bigwedge;": "⋀",
+    "&bkarow;": "⤍",
+    "&blacklozenge;": "⧫",
+    "&blacksquare;": "▪",
+    "&blacktriangle;": "▴",
+    "&blacktriangledown;": "▾",
+    "&blacktriangleleft;": "◂",
+    "&blacktriangleright;": "▸",
+    "&blank;": "␣",
+    "&blk12;": "▒",
+    "&blk14;": "░",
+    "&blk34;": "▓",
+    "&block;": "█",
+    "&bne;": "=⃥",
+    "&bnequiv;": "≡⃥",
+    "&bnot;": "⌐",
+    "&bopf;": "\uD835\uDD53",
+    "&bot;": "⊥",
+    "&bottom;": "⊥",
+    "&bowtie;": "⋈",
+    "&boxDL;": "╗",
+    "&boxDR;": "╔",
+    "&boxDl;": "╖",
+    "&boxDr;": "╓",
+    "&boxH;": "═",
+    "&boxHD;": "╦",
+    "&boxHU;": "╩",
+    "&boxHd;": "╤",
+    "&boxHu;": "╧",
+    "&boxUL;": "╝",
+    "&boxUR;": "╚",
+    "&boxUl;": "╜",
+    "&boxUr;": "╙",
+    "&boxV;": "║",
+    "&boxVH;": "╬",
+    "&boxVL;": "╣",
+    "&boxVR;": "╠",
+    "&boxVh;": "╫",
+    "&boxVl;": "╢",
+    "&boxVr;": "╟",
+    "&boxbox;": "⧉",
+    "&boxdL;": "╕",
+    "&boxdR;": "╒",
+    "&boxdl;": "┐",
+    "&boxdr;": "┌",
+    "&boxh;": "─",
+    "&boxhD;": "╥",
+    "&boxhU;": "╨",
+    "&boxhd;": "┬",
+    "&boxhu;": "┴",
+    "&boxminus;": "⊟",
+    "&boxplus;": "⊞",
+    "&boxtimes;": "⊠",
+    "&boxuL;": "╛",
+    "&boxuR;": "╘",
+    "&boxul;": "┘",
+    "&boxur;": "└",
+    "&boxv;": "│",
+    "&boxvH;": "╪",
+    "&boxvL;": "╡",
+    "&boxvR;": "╞",
+    "&boxvh;": "┼",
+    "&boxvl;": "┤",
+    "&boxvr;": "├",
+    "&bprime;": "‵",
+    "&breve;": "˘",
+    "&brvbar": "¦",
+    "&brvbar;": "¦",
+    "&bscr;": "\uD835\uDCB7",
+    "&bsemi;": "⁏",
+    "&bsim;": "∽",
+    "&bsime;": "⋍",
+    "&bsol;": "\\",
+    "&bsolb;": "⧅",
+    "&bsolhsub;": "⟈",
+    "&bull;": "•",
+    "&bullet;": "•",
+    "&bump;": "≎",
+    "&bumpE;": "⪮",
+    "&bumpe;": "≏",
+    "&bumpeq;": "≏",
+    "&cacute;": "ć",
+    "&cap;": "∩",
+    "&capand;": "⩄",
+    "&capbrcup;": "⩉",
+    "&capcap;": "⩋",
+    "&capcup;": "⩇",
+    "&capdot;": "⩀",
+    "&caps;": "∩︀",
+    "&caret;": "⁁",
+    "&caron;": "ˇ",
+    "&ccaps;": "⩍",
+    "&ccaron;": "č",
+    "&ccedil": "ç",
+    "&ccedil;": "ç",
+    "&ccirc;": "ĉ",
+    "&ccups;": "⩌",
+    "&ccupssm;": "⩐",
+    "&cdot;": "ċ",
+    "&cedil": "¸",
+    "&cedil;": "¸",
+    "&cemptyv;": "⦲",
+    "&cent": "¢",
+    "&cent;": "¢",
+    "&centerdot;": "·",
+    "&cfr;": "\uD835\uDD20",
+    "&chcy;": "ч",
+    "&check;": "✓",
+    "&checkmark;": "✓",
+    "&chi;": "χ",
+    "&cir;": "○",
+    "&cirE;": "⧃",
+    "&circ;": "ˆ",
+    "&circeq;": "≗",
+    "&circlearrowleft;": "↺",
+    "&circlearrowright;": "↻",
+    "&circledR;": "®",
+    "&circledS;": "Ⓢ",
+    "&circledast;": "⊛",
+    "&circledcirc;": "⊚",
+    "&circleddash;": "⊝",
+    "&cire;": "≗",
+    "&cirfnint;": "⨐",
+    "&cirmid;": "⫯",
+    "&cirscir;": "⧂",
+    "&clubs;": "♣",
+    "&clubsuit;": "♣",
+    "&colon;": ":",
+    "&colone;": "≔",
+    "&coloneq;": "≔",
+    "&comma;": ",",
+    "&commat;": "@",
+    "&comp;": "∁",
+    "&compfn;": "∘",
+    "&complement;": "∁",
+    "&complexes;": "ℂ",
+    "&cong;": "≅",
+    "&congdot;": "⩭",
+    "&conint;": "∮",
+    "&copf;": "\uD835\uDD54",
+    "&coprod;": "∐",
+    "&copy": "©",
+    "&copy;": "©",
+    "&copysr;": "℗",
+    "&crarr;": "↵",
+    "&cross;": "✗",
+    "&cscr;": "\uD835\uDCB8",
+    "&csub;": "⫏",
+    "&csube;": "⫑",
+    "&csup;": "⫐",
+    "&csupe;": "⫒",
+    "&ctdot;": "⋯",
+    "&cudarrl;": "⤸",
+    "&cudarrr;": "⤵",
+    "&cuepr;": "⋞",
+    "&cuesc;": "⋟",
+    "&cularr;": "↶",
+    "&cularrp;": "⤽",
+    "&cup;": "∪",
+    "&cupbrcap;": "⩈",
+    "&cupcap;": "⩆",
+    "&cupcup;": "⩊",
+    "&cupdot;": "⊍",
+    "&cupor;": "⩅",
+    "&cups;": "∪︀",
+    "&curarr;": "↷",
+    "&curarrm;": "⤼",
+    "&curlyeqprec;": "⋞",
+    "&curlyeqsucc;": "⋟",
+    "&curlyvee;": "⋎",
+    "&curlywedge;": "⋏",
+    "&curren": "¤",
+    "&curren;": "¤",
+    "&curvearrowleft;": "↶",
+    "&curvearrowright;": "↷",
+    "&cuvee;": "⋎",
+    "&cuwed;": "⋏",
+    "&cwconint;": "∲",
+    "&cwint;": "∱",
+    "&cylcty;": "⌭",
+    "&dArr;": "⇓",
+    "&dHar;": "⥥",
+    "&dagger;": "†",
+    "&daleth;": "ℸ",
+    "&darr;": "↓",
+    "&dash;": "‐",
+    "&dashv;": "⊣",
+    "&dbkarow;": "⤏",
+    "&dblac;": "˝",
+    "&dcaron;": "ď",
+    "&dcy;": "д",
+    "&dd;": "ⅆ",
+    "&ddagger;": "‡",
+    "&ddarr;": "⇊",
+    "&ddotseq;": "⩷",
+    "&deg": "°",
+    "&deg;": "°",
+    "&delta;": "δ",
+    "&demptyv;": "⦱",
+    "&dfisht;": "⥿",
+    "&dfr;": "\uD835\uDD21",
+    "&dharl;": "⇃",
+    "&dharr;": "⇂",
+    "&diam;": "⋄",
+    "&diamond;": "⋄",
+    "&diamondsuit;": "♦",
+    "&diams;": "♦",
+    "&die;": "¨",
+    "&digamma;": "ϝ",
+    "&disin;": "⋲",
+    "&div;": "÷",
+    "&divide": "÷",
+    "&divide;": "÷",
+    "&divideontimes;": "⋇",
+    "&divonx;": "⋇",
+    "&djcy;": "ђ",
+    "&dlcorn;": "⌞",
+    "&dlcrop;": "⌍",
+    "&dollar;": "$",
+    "&dopf;": "\uD835\uDD55",
+    "&dot;": "˙",
+    "&doteq;": "≐",
+    "&doteqdot;": "≑",
+    "&dotminus;": "∸",
+    "&dotplus;": "∔",
+    "&dotsquare;": "⊡",
+    "&doublebarwedge;": "⌆",
+    "&downarrow;": "↓",
+    "&downdownarrows;": "⇊",
+    "&downharpoonleft;": "⇃",
+    "&downharpoonright;": "⇂",
+    "&drbkarow;": "⤐",
+    "&drcorn;": "⌟",
+    "&drcrop;": "⌌",
+    "&dscr;": "\uD835\uDCB9",
+    "&dscy;": "ѕ",
+    "&dsol;": "⧶",
+    "&dstrok;": "đ",
+    "&dtdot;": "⋱",
+    "&dtri;": "▿",
+    "&dtrif;": "▾",
+    "&duarr;": "⇵",
+    "&duhar;": "⥯",
+    "&dwangle;": "⦦",
+    "&dzcy;": "џ",
+    "&dzigrarr;": "⟿",
+    "&eDDot;": "⩷",
+    "&eDot;": "≑",
+    "&eacute": "é",
+    "&eacute;": "é",
+    "&easter;": "⩮",
+    "&ecaron;": "ě",
+    "&ecir;": "≖",
+    "&ecirc": "ê",
+    "&ecirc;": "ê",
+    "&ecolon;": "≕",
+    "&ecy;": "э",
+    "&edot;": "ė",
+    "&ee;": "ⅇ",
+    "&efDot;": "≒",
+    "&efr;": "\uD835\uDD22",
+    "&eg;": "⪚",
+    "&egrave": "è",
+    "&egrave;": "è",
+    "&egs;": "⪖",
+    "&egsdot;": "⪘",
+    "&el;": "⪙",
+    "&elinters;": "⏧",
+    "&ell;": "ℓ",
+    "&els;": "⪕",
+    "&elsdot;": "⪗",
+    "&emacr;": "ē",
+    "&empty;": "∅",
+    "&emptyset;": "∅",
+    "&emptyv;": "∅",
+    "&emsp13;": " ",
+    "&emsp14;": " ",
+    "&emsp;": " ",
+    "&eng;": "ŋ",
+    "&ensp;": " ",
+    "&eogon;": "ę",
+    "&eopf;": "\uD835\uDD56",
+    "&epar;": "⋕",
+    "&eparsl;": "⧣",
+    "&eplus;": "⩱",
+    "&epsi;": "ε",
+    "&epsilon;": "ε",
+    "&epsiv;": "ϵ",
+    "&eqcirc;": "≖",
+    "&eqcolon;": "≕",
+    "&eqsim;": "≂",
+    "&eqslantgtr;": "⪖",
+    "&eqslantless;": "⪕",
+    "&equals;": "=",
+    "&equest;": "≟",
+    "&equiv;": "≡",
+    "&equivDD;": "⩸",
+    "&eqvparsl;": "⧥",
+    "&erDot;": "≓",
+    "&erarr;": "⥱",
+    "&escr;": "ℯ",
+    "&esdot;": "≐",
+    "&esim;": "≂",
+    "&eta;": "η",
+    "&eth": "ð",
+    "&eth;": "ð",
+    "&euml": "ë",
+    "&euml;": "ë",
+    "&euro;": "€",
+    "&excl;": "!",
+    "&exist;": "∃",
+    "&expectation;": "ℰ",
+    "&exponentiale;": "ⅇ",
+    "&fallingdotseq;": "≒",
+    "&fcy;": "ф",
+    "&female;": "♀",
+    "&ffilig;": "ﬃ",
+    "&fflig;": "ﬀ",
+    "&ffllig;": "ﬄ",
+    "&ffr;": "\uD835\uDD23",
+    "&filig;": "ﬁ",
+    "&fjlig;": "fj",
+    "&flat;": "♭",
+    "&fllig;": "ﬂ",
+    "&fltns;": "▱",
+    "&fnof;": "ƒ",
+    "&fopf;": "\uD835\uDD57",
+    "&forall;": "∀",
+    "&fork;": "⋔",
+    "&forkv;": "⫙",
+    "&fpartint;": "⨍",
+    "&frac12": "½",
+    "&frac12;": "½",
+    "&frac13;": "⅓",
+    "&frac14": "¼",
+    "&frac14;": "¼",
+    "&frac15;": "⅕",
+    "&frac16;": "⅙",
+    "&frac18;": "⅛",
+    "&frac23;": "⅔",
+    "&frac25;": "⅖",
+    "&frac34": "¾",
+    "&frac34;": "¾",
+    "&frac35;": "⅗",
+    "&frac38;": "⅜",
+    "&frac45;": "⅘",
+    "&frac56;": "⅚",
+    "&frac58;": "⅝",
+    "&frac78;": "⅞",
+    "&frasl;": "⁄",
+    "&frown;": "⌢",
+    "&fscr;": "\uD835\uDCBB",
+    "&gE;": "≧",
+    "&gEl;": "⪌",
+    "&gacute;": "ǵ",
+    "&gamma;": "γ",
+    "&gammad;": "ϝ",
+    "&gap;": "⪆",
+    "&gbreve;": "ğ",
+    "&gcirc;": "ĝ",
+    "&gcy;": "г",
+    "&gdot;": "ġ",
+    "&ge;": "≥",
+    "&gel;": "⋛",
+    "&geq;": "≥",
+    "&geqq;": "≧",
+    "&geqslant;": "⩾",
+    "&ges;": "⩾",
+    "&gescc;": "⪩",
+    "&gesdot;": "⪀",
+    "&gesdoto;": "⪂",
+    "&gesdotol;": "⪄",
+    "&gesl;": "⋛︀",
+    "&gesles;": "⪔",
+    "&gfr;": "\uD835\uDD24",
+    "&gg;": "≫",
+    "&ggg;": "⋙",
+    "&gimel;": "ℷ",
+    "&gjcy;": "ѓ",
+    "&gl;": "≷",
+    "&glE;": "⪒",
+    "&gla;": "⪥",
+    "&glj;": "⪤",
+    "&gnE;": "≩",
+    "&gnap;": "⪊",
+    "&gnapprox;": "⪊",
+    "&gne;": "⪈",
+    "&gneq;": "⪈",
+    "&gneqq;": "≩",
+    "&gnsim;": "⋧",
+    "&gopf;": "\uD835\uDD58",
+    "&grave;": "`",
+    "&gscr;": "ℊ",
+    "&gsim;": "≳",
+    "&gsime;": "⪎",
+    "&gsiml;": "⪐",
+    "&gt": ">",
+    "&gt;": ">",
+    "&gtcc;": "⪧",
+    "&gtcir;": "⩺",
+    "&gtdot;": "⋗",
+    "&gtlPar;": "⦕",
+    "&gtquest;": "⩼",
+    "&gtrapprox;": "⪆",
+    "&gtrarr;": "⥸",
+    "&gtrdot;": "⋗",
+    "&gtreqless;": "⋛",
+    "&gtreqqless;": "⪌",
+    "&gtrless;": "≷",
+    "&gtrsim;": "≳",
+    "&gvertneqq;": "≩︀",
+    "&gvnE;": "≩︀",
+    "&hArr;": "⇔",
+    "&hairsp;": " ",
+    "&half;": "½",
+    "&hamilt;": "ℋ",
+    "&hardcy;": "ъ",
+    "&harr;": "↔",
+    "&harrcir;": "⥈",
+    "&harrw;": "↭",
+    "&hbar;": "ℏ",
+    "&hcirc;": "ĥ",
+    "&hearts;": "♥",
+    "&heartsuit;": "♥",
+    "&hellip;": "…",
+    "&hercon;": "⊹",
+    "&hfr;": "\uD835\uDD25",
+    "&hksearow;": "⤥",
+    "&hkswarow;": "⤦",
+    "&hoarr;": "⇿",
+    "&homtht;": "∻",
+    "&hookleftarrow;": "↩",
+    "&hookrightarrow;": "↪",
+    "&hopf;": "\uD835\uDD59",
+    "&horbar;": "―",
+    "&hscr;": "\uD835\uDCBD",
+    "&hslash;": "ℏ",
+    "&hstrok;": "ħ",
+    "&hybull;": "⁃",
+    "&hyphen;": "‐",
+    "&iacute": "í",
+    "&iacute;": "í",
+    "&ic;": "⁣",
+    "&icirc": "î",
+    "&icirc;": "î",
+    "&icy;": "и",
+    "&iecy;": "е",
+    "&iexcl": "¡",
+    "&iexcl;": "¡",
+    "&iff;": "⇔",
+    "&ifr;": "\uD835\uDD26",
+    "&igrave": "ì",
+    "&igrave;": "ì",
+    "&ii;": "ⅈ",
+    "&iiiint;": "⨌",
+    "&iiint;": "∭",
+    "&iinfin;": "⧜",
+    "&iiota;": "℩",
+    "&ijlig;": "ĳ",
+    "&imacr;": "ī",
+    "&image;": "ℑ",
+    "&imagline;": "ℐ",
+    "&imagpart;": "ℑ",
+    "&imath;": "ı",
+    "&imof;": "⊷",
+    "&imped;": "Ƶ",
+    "&in;": "∈",
+    "&incare;": "℅",
+    "&infin;": "∞",
+    "&infintie;": "⧝",
+    "&inodot;": "ı",
+    "&int;": "∫",
+    "&intcal;": "⊺",
+    "&integers;": "ℤ",
+    "&intercal;": "⊺",
+    "&intlarhk;": "⨗",
+    "&intprod;": "⨼",
+    "&iocy;": "ё",
+    "&iogon;": "į",
+    "&iopf;": "\uD835\uDD5A",
+    "&iota;": "ι",
+    "&iprod;": "⨼",
+    "&iquest": "¿",
+    "&iquest;": "¿",
+    "&iscr;": "\uD835\uDCBE",
+    "&isin;": "∈",
+    "&isinE;": "⋹",
+    "&isindot;": "⋵",
+    "&isins;": "⋴",
+    "&isinsv;": "⋳",
+    "&isinv;": "∈",
+    "&it;": "⁢",
+    "&itilde;": "ĩ",
+    "&iukcy;": "і",
+    "&iuml": "ï",
+    "&iuml;": "ï",
+    "&jcirc;": "ĵ",
+    "&jcy;": "й",
+    "&jfr;": "\uD835\uDD27",
+    "&jmath;": "ȷ",
+    "&jopf;": "\uD835\uDD5B",
+    "&jscr;": "\uD835\uDCBF",
+    "&jsercy;": "ј",
+    "&jukcy;": "є",
+    "&kappa;": "κ",
+    "&kappav;": "ϰ",
+    "&kcedil;": "ķ",
+    "&kcy;": "к",
+    "&kfr;": "\uD835\uDD28",
+    "&kgreen;": "ĸ",
+    "&khcy;": "х",
+    "&kjcy;": "ќ",
+    "&kopf;": "\uD835\uDD5C",
+    "&kscr;": "\uD835\uDCC0",
+    "&lAarr;": "⇚",
+    "&lArr;": "⇐",
+    "&lAtail;": "⤛",
+    "&lBarr;": "⤎",
+    "&lE;": "≦",
+    "&lEg;": "⪋",
+    "&lHar;": "⥢",
+    "&lacute;": "ĺ",
+    "&laemptyv;": "⦴",
+    "&lagran;": "ℒ",
+    "&lambda;": "λ",
+    "&lang;": "⟨",
+    "&langd;": "⦑",
+    "&langle;": "⟨",
+    "&lap;": "⪅",
+    "&laquo": "«",
+    "&laquo;": "«",
+    "&larr;": "←",
+    "&larrb;": "⇤",
+    "&larrbfs;": "⤟",
+    "&larrfs;": "⤝",
+    "&larrhk;": "↩",
+    "&larrlp;": "↫",
+    "&larrpl;": "⤹",
+    "&larrsim;": "⥳",
+    "&larrtl;": "↢",
+    "&lat;": "⪫",
+    "&latail;": "⤙",
+    "&late;": "⪭",
+    "&lates;": "⪭︀",
+    "&lbarr;": "⤌",
+    "&lbbrk;": "❲",
+    "&lbrace;": "{",
+    "&lbrack;": "[",
+    "&lbrke;": "⦋",
+    "&lbrksld;": "⦏",
+    "&lbrkslu;": "⦍",
+    "&lcaron;": "ľ",
+    "&lcedil;": "ļ",
+    "&lceil;": "⌈",
+    "&lcub;": "{",
+    "&lcy;": "л",
+    "&ldca;": "⤶",
+    "&ldquo;": "“",
+    "&ldquor;": "„",
+    "&ldrdhar;": "⥧",
+    "&ldrushar;": "⥋",
+    "&ldsh;": "↲",
+    "&le;": "≤",
+    "&leftarrow;": "←",
+    "&leftarrowtail;": "↢",
+    "&leftharpoondown;": "↽",
+    "&leftharpoonup;": "↼",
+    "&leftleftarrows;": "⇇",
+    "&leftrightarrow;": "↔",
+    "&leftrightarrows;": "⇆",
+    "&leftrightharpoons;": "⇋",
+    "&leftrightsquigarrow;": "↭",
+    "&leftthreetimes;": "⋋",
+    "&leg;": "⋚",
+    "&leq;": "≤",
+    "&leqq;": "≦",
+    "&leqslant;": "⩽",
+    "&les;": "⩽",
+    "&lescc;": "⪨",
+    "&lesdot;": "⩿",
+    "&lesdoto;": "⪁",
+    "&lesdotor;": "⪃",
+    "&lesg;": "⋚︀",
+    "&lesges;": "⪓",
+    "&lessapprox;": "⪅",
+    "&lessdot;": "⋖",
+    "&lesseqgtr;": "⋚",
+    "&lesseqqgtr;": "⪋",
+    "&lessgtr;": "≶",
+    "&lesssim;": "≲",
+    "&lfisht;": "⥼",
+    "&lfloor;": "⌊",
+    "&lfr;": "\uD835\uDD29",
+    "&lg;": "≶",
+    "&lgE;": "⪑",
+    "&lhard;": "↽",
+    "&lharu;": "↼",
+    "&lharul;": "⥪",
+    "&lhblk;": "▄",
+    "&ljcy;": "љ",
+    "&ll;": "≪",
+    "&llarr;": "⇇",
+    "&llcorner;": "⌞",
+    "&llhard;": "⥫",
+    "&lltri;": "◺",
+    "&lmidot;": "ŀ",
+    "&lmoust;": "⎰",
+    "&lmoustache;": "⎰",
+    "&lnE;": "≨",
+    "&lnap;": "⪉",
+    "&lnapprox;": "⪉",
+    "&lne;": "⪇",
+    "&lneq;": "⪇",
+    "&lneqq;": "≨",
+    "&lnsim;": "⋦",
+    "&loang;": "⟬",
+    "&loarr;": "⇽",
+    "&lobrk;": "⟦",
+    "&longleftarrow;": "⟵",
+    "&longleftrightarrow;": "⟷",
+    "&longmapsto;": "⟼",
+    "&longrightarrow;": "⟶",
+    "&looparrowleft;": "↫",
+    "&looparrowright;": "↬",
+    "&lopar;": "⦅",
+    "&lopf;": "\uD835\uDD5D",
+    "&loplus;": "⨭",
+    "&lotimes;": "⨴",
+    "&lowast;": "∗",
+    "&lowbar;": "_",
+    "&loz;": "◊",
+    "&lozenge;": "◊",
+    "&lozf;": "⧫",
+    "&lpar;": "(",
+    "&lparlt;": "⦓",
+    "&lrarr;": "⇆",
+    "&lrcorner;": "⌟",
+    "&lrhar;": "⇋",
+    "&lrhard;": "⥭",
+    "&lrm;": "‎",
+    "&lrtri;": "⊿",
+    "&lsaquo;": "‹",
+    "&lscr;": "\uD835\uDCC1",
+    "&lsh;": "↰",
+    "&lsim;": "≲",
+    "&lsime;": "⪍",
+    "&lsimg;": "⪏",
+    "&lsqb;": "[",
+    "&lsquo;": "‘",
+    "&lsquor;": "‚",
+    "&lstrok;": "ł",
+    "&lt": "<",
+    "&lt;": "<",
+    "&ltcc;": "⪦",
+    "&ltcir;": "⩹",
+    "&ltdot;": "⋖",
+    "&lthree;": "⋋",
+    "&ltimes;": "⋉",
+    "&ltlarr;": "⥶",
+    "&ltquest;": "⩻",
+    "&ltrPar;": "⦖",
+    "&ltri;": "◃",
+    "&ltrie;": "⊴",
+    "&ltrif;": "◂",
+    "&lurdshar;": "⥊",
+    "&luruhar;": "⥦",
+    "&lvertneqq;": "≨︀",
+    "&lvnE;": "≨︀",
+    "&mDDot;": "∺",
+    "&macr": "¯",
+    "&macr;": "¯",
+    "&male;": "♂",
+    "&malt;": "✠",
+    "&maltese;": "✠",
+    "&map;": "↦",
+    "&mapsto;": "↦",
+    "&mapstodown;": "↧",
+    "&mapstoleft;": "↤",
+    "&mapstoup;": "↥",
+    "&marker;": "▮",
+    "&mcomma;": "⨩",
+    "&mcy;": "м",
+    "&mdash;": "—",
+    "&measuredangle;": "∡",
+    "&mfr;": "\uD835\uDD2A",
+    "&mho;": "℧",
+    "&micro": "µ",
+    "&micro;": "µ",
+    "&mid;": "∣",
+    "&midast;": "*",
+    "&midcir;": "⫰",
+    "&middot": "·",
+    "&middot;": "·",
+    "&minus;": "−",
+    "&minusb;": "⊟",
+    "&minusd;": "∸",
+    "&minusdu;": "⨪",
+    "&mlcp;": "⫛",
+    "&mldr;": "…",
+    "&mnplus;": "∓",
+    "&models;": "⊧",
+    "&mopf;": "\uD835\uDD5E",
+    "&mp;": "∓",
+    "&mscr;": "\uD835\uDCC2",
+    "&mstpos;": "∾",
+    "&mu;": "μ",
+    "&multimap;": "⊸",
+    "&mumap;": "⊸",
+    "&nGg;": "⋙̸",
+    "&nGt;": "≫⃒",
+    "&nGtv;": "≫̸",
+    "&nLeftarrow;": "⇍",
+    "&nLeftrightarrow;": "⇎",
+    "&nLl;": "⋘̸",
+    "&nLt;": "≪⃒",
+    "&nLtv;": "≪̸",
+    "&nRightarrow;": "⇏",
+    "&nVDash;": "⊯",
+    "&nVdash;": "⊮",
+    "&nabla;": "∇",
+    "&nacute;": "ń",
+    "&nang;": "∠⃒",
+    "&nap;": "≉",
+    "&napE;": "⩰̸",
+    "&napid;": "≋̸",
+    "&napos;": "ŉ",
+    "&napprox;": "≉",
+    "&natur;": "♮",
+    "&natural;": "♮",
+    "&naturals;": "ℕ",
+    "&nbsp": " ",
+    "&nbsp;": " ",
+    "&nbump;": "≎̸",
+    "&nbumpe;": "≏̸",
+    "&ncap;": "⩃",
+    "&ncaron;": "ň",
+    "&ncedil;": "ņ",
+    "&ncong;": "≇",
+    "&ncongdot;": "⩭̸",
+    "&ncup;": "⩂",
+    "&ncy;": "н",
+    "&ndash;": "–",
+    "&ne;": "≠",
+    "&neArr;": "⇗",
+    "&nearhk;": "⤤",
+    "&nearr;": "↗",
+    "&nearrow;": "↗",
+    "&nedot;": "≐̸",
+    "&nequiv;": "≢",
+    "&nesear;": "⤨",
+    "&nesim;": "≂̸",
+    "&nexist;": "∄",
+    "&nexists;": "∄",
+    "&nfr;": "\uD835\uDD2B",
+    "&ngE;": "≧̸",
+    "&nge;": "≱",
+    "&ngeq;": "≱",
+    "&ngeqq;": "≧̸",
+    "&ngeqslant;": "⩾̸",
+    "&nges;": "⩾̸",
+    "&ngsim;": "≵",
+    "&ngt;": "≯",
+    "&ngtr;": "≯",
+    "&nhArr;": "⇎",
+    "&nharr;": "↮",
+    "&nhpar;": "⫲",
+    "&ni;": "∋",
+    "&nis;": "⋼",
+    "&nisd;": "⋺",
+    "&niv;": "∋",
+    "&njcy;": "њ",
+    "&nlArr;": "⇍",
+    "&nlE;": "≦̸",
+    "&nlarr;": "↚",
+    "&nldr;": "‥",
+    "&nle;": "≰",
+    "&nleftarrow;": "↚",
+    "&nleftrightarrow;": "↮",
+    "&nleq;": "≰",
+    "&nleqq;": "≦̸",
+    "&nleqslant;": "⩽̸",
+    "&nles;": "⩽̸",
+    "&nless;": "≮",
+    "&nlsim;": "≴",
+    "&nlt;": "≮",
+    "&nltri;": "⋪",
+    "&nltrie;": "⋬",
+    "&nmid;": "∤",
+    "&nopf;": "\uD835\uDD5F",
+    "&not": "¬",
+    "&not;": "¬",
+    "&notin;": "∉",
+    "&notinE;": "⋹̸",
+    "&notindot;": "⋵̸",
+    "&notinva;": "∉",
+    "&notinvb;": "⋷",
+    "&notinvc;": "⋶",
+    "&notni;": "∌",
+    "&notniva;": "∌",
+    "&notnivb;": "⋾",
+    "&notnivc;": "⋽",
+    "&npar;": "∦",
+    "&nparallel;": "∦",
+    "&nparsl;": "⫽⃥",
+    "&npart;": "∂̸",
+    "&npolint;": "⨔",
+    "&npr;": "⊀",
+    "&nprcue;": "⋠",
+    "&npre;": "⪯̸",
+    "&nprec;": "⊀",
+    "&npreceq;": "⪯̸",
+    "&nrArr;": "⇏",
+    "&nrarr;": "↛",
+    "&nrarrc;": "⤳̸",
+    "&nrarrw;": "↝̸",
+    "&nrightarrow;": "↛",
+    "&nrtri;": "⋫",
+    "&nrtrie;": "⋭",
+    "&nsc;": "⊁",
+    "&nsccue;": "⋡",
+    "&nsce;": "⪰̸",
+    "&nscr;": "\uD835\uDCC3",
+    "&nshortmid;": "∤",
+    "&nshortparallel;": "∦",
+    "&nsim;": "≁",
+    "&nsime;": "≄",
+    "&nsimeq;": "≄",
+    "&nsmid;": "∤",
+    "&nspar;": "∦",
+    "&nsqsube;": "⋢",
+    "&nsqsupe;": "⋣",
+    "&nsub;": "⊄",
+    "&nsubE;": "⫅̸",
+    "&nsube;": "⊈",
+    "&nsubset;": "⊂⃒",
+    "&nsubseteq;": "⊈",
+    "&nsubseteqq;": "⫅̸",
+    "&nsucc;": "⊁",
+    "&nsucceq;": "⪰̸",
+    "&nsup;": "⊅",
+    "&nsupE;": "⫆̸",
+    "&nsupe;": "⊉",
+    "&nsupset;": "⊃⃒",
+    "&nsupseteq;": "⊉",
+    "&nsupseteqq;": "⫆̸",
+    "&ntgl;": "≹",
+    "&ntilde": "ñ",
+    "&ntilde;": "ñ",
+    "&ntlg;": "≸",
+    "&ntriangleleft;": "⋪",
+    "&ntrianglelefteq;": "⋬",
+    "&ntriangleright;": "⋫",
+    "&ntrianglerighteq;": "⋭",
+    "&nu;": "ν",
+    "&num;": "#",
+    "&numero;": "№",
+    "&numsp;": " ",
+    "&nvDash;": "⊭",
+    "&nvHarr;": "⤄",
+    "&nvap;": "≍⃒",
+    "&nvdash;": "⊬",
+    "&nvge;": "≥⃒",
+    "&nvgt;": ">⃒",
+    "&nvinfin;": "⧞",
+    "&nvlArr;": "⤂",
+    "&nvle;": "≤⃒",
+    "&nvlt;": "<⃒",
+    "&nvltrie;": "⊴⃒",
+    "&nvrArr;": "⤃",
+    "&nvrtrie;": "⊵⃒",
+    "&nvsim;": "∼⃒",
+    "&nwArr;": "⇖",
+    "&nwarhk;": "⤣",
+    "&nwarr;": "↖",
+    "&nwarrow;": "↖",
+    "&nwnear;": "⤧",
+    "&oS;": "Ⓢ",
+    "&oacute": "ó",
+    "&oacute;": "ó",
+    "&oast;": "⊛",
+    "&ocir;": "⊚",
+    "&ocirc": "ô",
+    "&ocirc;": "ô",
+    "&ocy;": "о",
+    "&odash;": "⊝",
+    "&odblac;": "ő",
+    "&odiv;": "⨸",
+    "&odot;": "⊙",
+    "&odsold;": "⦼",
+    "&oelig;": "œ",
+    "&ofcir;": "⦿",
+    "&ofr;": "\uD835\uDD2C",
+    "&ogon;": "˛",
+    "&ograve": "ò",
+    "&ograve;": "ò",
+    "&ogt;": "⧁",
+    "&ohbar;": "⦵",
+    "&ohm;": "Ω",
+    "&oint;": "∮",
+    "&olarr;": "↺",
+    "&olcir;": "⦾",
+    "&olcross;": "⦻",
+    "&oline;": "‾",
+    "&olt;": "⧀",
+    "&omacr;": "ō",
+    "&omega;": "ω",
+    "&omicron;": "ο",
+    "&omid;": "⦶",
+    "&ominus;": "⊖",
+    "&oopf;": "\uD835\uDD60",
+    "&opar;": "⦷",
+    "&operp;": "⦹",
+    "&oplus;": "⊕",
+    "&or;": "∨",
+    "&orarr;": "↻",
+    "&ord;": "⩝",
+    "&order;": "ℴ",
+    "&orderof;": "ℴ",
+    "&ordf": "ª",
+    "&ordf;": "ª",
+    "&ordm": "º",
+    "&ordm;": "º",
+    "&origof;": "⊶",
+    "&oror;": "⩖",
+    "&orslope;": "⩗",
+    "&orv;": "⩛",
+    "&oscr;": "ℴ",
+    "&oslash": "ø",
+    "&oslash;": "ø",
+    "&osol;": "⊘",
+    "&otilde": "õ",
+    "&otilde;": "õ",
+    "&otimes;": "⊗",
+    "&otimesas;": "⨶",
+    "&ouml": "ö",
+    "&ouml;": "ö",
+    "&ovbar;": "⌽",
+    "&par;": "∥",
+    "&para": "¶",
+    "&para;": "¶",
+    "&parallel;": "∥",
+    "&parsim;": "⫳",
+    "&parsl;": "⫽",
+    "&part;": "∂",
+    "&pcy;": "п",
+    "&percnt;": "%",
+    "&period;": ".",
+    "&permil;": "‰",
+    "&perp;": "⊥",
+    "&pertenk;": "‱",
+    "&pfr;": "\uD835\uDD2D",
+    "&phi;": "φ",
+    "&phiv;": "ϕ",
+    "&phmmat;": "ℳ",
+    "&phone;": "☎",
+    "&pi;": "π",
+    "&pitchfork;": "⋔",
+    "&piv;": "ϖ",
+    "&planck;": "ℏ",
+    "&planckh;": "ℎ",
+    "&plankv;": "ℏ",
+    "&plus;": "+",
+    "&plusacir;": "⨣",
+    "&plusb;": "⊞",
+    "&pluscir;": "⨢",
+    "&plusdo;": "∔",
+    "&plusdu;": "⨥",
+    "&pluse;": "⩲",
+    "&plusmn": "±",
+    "&plusmn;": "±",
+    "&plussim;": "⨦",
+    "&plustwo;": "⨧",
+    "&pm;": "±",
+    "&pointint;": "⨕",
+    "&popf;": "\uD835\uDD61",
+    "&pound": "£",
+    "&pound;": "£",
+    "&pr;": "≺",
+    "&prE;": "⪳",
+    "&prap;": "⪷",
+    "&prcue;": "≼",
+    "&pre;": "⪯",
+    "&prec;": "≺",
+    "&precapprox;": "⪷",
+    "&preccurlyeq;": "≼",
+    "&preceq;": "⪯",
+    "&precnapprox;": "⪹",
+    "&precneqq;": "⪵",
+    "&precnsim;": "⋨",
+    "&precsim;": "≾",
+    "&prime;": "′",
+    "&primes;": "ℙ",
+    "&prnE;": "⪵",
+    "&prnap;": "⪹",
+    "&prnsim;": "⋨",
+    "&prod;": "∏",
+    "&profalar;": "⌮",
+    "&profline;": "⌒",
+    "&profsurf;": "⌓",
+    "&prop;": "∝",
+    "&propto;": "∝",
+    "&prsim;": "≾",
+    "&prurel;": "⊰",
+    "&pscr;": "\uD835\uDCC5",
+    "&psi;": "ψ",
+    "&puncsp;": " ",
+    "&qfr;": "\uD835\uDD2E",
+    "&qint;": "⨌",
+    "&qopf;": "\uD835\uDD62",
+    "&qprime;": "⁗",
+    "&qscr;": "\uD835\uDCC6",
+    "&quaternions;": "ℍ",
+    "&quatint;": "⨖",
+    "&quest;": "?",
+    "&questeq;": "≟",
+    "&quot": '"',
+    "&quot;": '"',
+    "&rAarr;": "⇛",
+    "&rArr;": "⇒",
+    "&rAtail;": "⤜",
+    "&rBarr;": "⤏",
+    "&rHar;": "⥤",
+    "&race;": "∽̱",
+    "&racute;": "ŕ",
+    "&radic;": "√",
+    "&raemptyv;": "⦳",
+    "&rang;": "⟩",
+    "&rangd;": "⦒",
+    "&range;": "⦥",
+    "&rangle;": "⟩",
+    "&raquo": "»",
+    "&raquo;": "»",
+    "&rarr;": "→",
+    "&rarrap;": "⥵",
+    "&rarrb;": "⇥",
+    "&rarrbfs;": "⤠",
+    "&rarrc;": "⤳",
+    "&rarrfs;": "⤞",
+    "&rarrhk;": "↪",
+    "&rarrlp;": "↬",
+    "&rarrpl;": "⥅",
+    "&rarrsim;": "⥴",
+    "&rarrtl;": "↣",
+    "&rarrw;": "↝",
+    "&ratail;": "⤚",
+    "&ratio;": "∶",
+    "&rationals;": "ℚ",
+    "&rbarr;": "⤍",
+    "&rbbrk;": "❳",
+    "&rbrace;": "}",
+    "&rbrack;": "]",
+    "&rbrke;": "⦌",
+    "&rbrksld;": "⦎",
+    "&rbrkslu;": "⦐",
+    "&rcaron;": "ř",
+    "&rcedil;": "ŗ",
+    "&rceil;": "⌉",
+    "&rcub;": "}",
+    "&rcy;": "р",
+    "&rdca;": "⤷",
+    "&rdldhar;": "⥩",
+    "&rdquo;": "”",
+    "&rdquor;": "”",
+    "&rdsh;": "↳",
+    "&real;": "ℜ",
+    "&realine;": "ℛ",
+    "&realpart;": "ℜ",
+    "&reals;": "ℝ",
+    "&rect;": "▭",
+    "&reg": "®",
+    "&reg;": "®",
+    "&rfisht;": "⥽",
+    "&rfloor;": "⌋",
+    "&rfr;": "\uD835\uDD2F",
+    "&rhard;": "⇁",
+    "&rharu;": "⇀",
+    "&rharul;": "⥬",
+    "&rho;": "ρ",
+    "&rhov;": "ϱ",
+    "&rightarrow;": "→",
+    "&rightarrowtail;": "↣",
+    "&rightharpoondown;": "⇁",
+    "&rightharpoonup;": "⇀",
+    "&rightleftarrows;": "⇄",
+    "&rightleftharpoons;": "⇌",
+    "&rightrightarrows;": "⇉",
+    "&rightsquigarrow;": "↝",
+    "&rightthreetimes;": "⋌",
+    "&ring;": "˚",
+    "&risingdotseq;": "≓",
+    "&rlarr;": "⇄",
+    "&rlhar;": "⇌",
+    "&rlm;": "‏",
+    "&rmoust;": "⎱",
+    "&rmoustache;": "⎱",
+    "&rnmid;": "⫮",
+    "&roang;": "⟭",
+    "&roarr;": "⇾",
+    "&robrk;": "⟧",
+    "&ropar;": "⦆",
+    "&ropf;": "\uD835\uDD63",
+    "&roplus;": "⨮",
+    "&rotimes;": "⨵",
+    "&rpar;": ")",
+    "&rpargt;": "⦔",
+    "&rppolint;": "⨒",
+    "&rrarr;": "⇉",
+    "&rsaquo;": "›",
+    "&rscr;": "\uD835\uDCC7",
+    "&rsh;": "↱",
+    "&rsqb;": "]",
+    "&rsquo;": "’",
+    "&rsquor;": "’",
+    "&rthree;": "⋌",
+    "&rtimes;": "⋊",
+    "&rtri;": "▹",
+    "&rtrie;": "⊵",
+    "&rtrif;": "▸",
+    "&rtriltri;": "⧎",
+    "&ruluhar;": "⥨",
+    "&rx;": "℞",
+    "&sacute;": "ś",
+    "&sbquo;": "‚",
+    "&sc;": "≻",
+    "&scE;": "⪴",
+    "&scap;": "⪸",
+    "&scaron;": "š",
+    "&sccue;": "≽",
+    "&sce;": "⪰",
+    "&scedil;": "ş",
+    "&scirc;": "ŝ",
+    "&scnE;": "⪶",
+    "&scnap;": "⪺",
+    "&scnsim;": "⋩",
+    "&scpolint;": "⨓",
+    "&scsim;": "≿",
+    "&scy;": "с",
+    "&sdot;": "⋅",
+    "&sdotb;": "⊡",
+    "&sdote;": "⩦",
+    "&seArr;": "⇘",
+    "&searhk;": "⤥",
+    "&searr;": "↘",
+    "&searrow;": "↘",
+    "&sect": "§",
+    "&sect;": "§",
+    "&semi;": ";",
+    "&seswar;": "⤩",
+    "&setminus;": "∖",
+    "&setmn;": "∖",
+    "&sext;": "✶",
+    "&sfr;": "\uD835\uDD30",
+    "&sfrown;": "⌢",
+    "&sharp;": "♯",
+    "&shchcy;": "щ",
+    "&shcy;": "ш",
+    "&shortmid;": "∣",
+    "&shortparallel;": "∥",
+    "&shy": "­",
+    "&shy;": "­",
+    "&sigma;": "σ",
+    "&sigmaf;": "ς",
+    "&sigmav;": "ς",
+    "&sim;": "∼",
+    "&simdot;": "⩪",
+    "&sime;": "≃",
+    "&simeq;": "≃",
+    "&simg;": "⪞",
+    "&simgE;": "⪠",
+    "&siml;": "⪝",
+    "&simlE;": "⪟",
+    "&simne;": "≆",
+    "&simplus;": "⨤",
+    "&simrarr;": "⥲",
+    "&slarr;": "←",
+    "&smallsetminus;": "∖",
+    "&smashp;": "⨳",
+    "&smeparsl;": "⧤",
+    "&smid;": "∣",
+    "&smile;": "⌣",
+    "&smt;": "⪪",
+    "&smte;": "⪬",
+    "&smtes;": "⪬︀",
+    "&softcy;": "ь",
+    "&sol;": "/",
+    "&solb;": "⧄",
+    "&solbar;": "⌿",
+    "&sopf;": "\uD835\uDD64",
+    "&spades;": "♠",
+    "&spadesuit;": "♠",
+    "&spar;": "∥",
+    "&sqcap;": "⊓",
+    "&sqcaps;": "⊓︀",
+    "&sqcup;": "⊔",
+    "&sqcups;": "⊔︀",
+    "&sqsub;": "⊏",
+    "&sqsube;": "⊑",
+    "&sqsubset;": "⊏",
+    "&sqsubseteq;": "⊑",
+    "&sqsup;": "⊐",
+    "&sqsupe;": "⊒",
+    "&sqsupset;": "⊐",
+    "&sqsupseteq;": "⊒",
+    "&squ;": "□",
+    "&square;": "□",
+    "&squarf;": "▪",
+    "&squf;": "▪",
+    "&srarr;": "→",
+    "&sscr;": "\uD835\uDCC8",
+    "&ssetmn;": "∖",
+    "&ssmile;": "⌣",
+    "&sstarf;": "⋆",
+    "&star;": "☆",
+    "&starf;": "★",
+    "&straightepsilon;": "ϵ",
+    "&straightphi;": "ϕ",
+    "&strns;": "¯",
+    "&sub;": "⊂",
+    "&subE;": "⫅",
+    "&subdot;": "⪽",
+    "&sube;": "⊆",
+    "&subedot;": "⫃",
+    "&submult;": "⫁",
+    "&subnE;": "⫋",
+    "&subne;": "⊊",
+    "&subplus;": "⪿",
+    "&subrarr;": "⥹",
+    "&subset;": "⊂",
+    "&subseteq;": "⊆",
+    "&subseteqq;": "⫅",
+    "&subsetneq;": "⊊",
+    "&subsetneqq;": "⫋",
+    "&subsim;": "⫇",
+    "&subsub;": "⫕",
+    "&subsup;": "⫓",
+    "&succ;": "≻",
+    "&succapprox;": "⪸",
+    "&succcurlyeq;": "≽",
+    "&succeq;": "⪰",
+    "&succnapprox;": "⪺",
+    "&succneqq;": "⪶",
+    "&succnsim;": "⋩",
+    "&succsim;": "≿",
+    "&sum;": "∑",
+    "&sung;": "♪",
+    "&sup1": "¹",
+    "&sup1;": "¹",
+    "&sup2": "²",
+    "&sup2;": "²",
+    "&sup3": "³",
+    "&sup3;": "³",
+    "&sup;": "⊃",
+    "&supE;": "⫆",
+    "&supdot;": "⪾",
+    "&supdsub;": "⫘",
+    "&supe;": "⊇",
+    "&supedot;": "⫄",
+    "&suphsol;": "⟉",
+    "&suphsub;": "⫗",
+    "&suplarr;": "⥻",
+    "&supmult;": "⫂",
+    "&supnE;": "⫌",
+    "&supne;": "⊋",
+    "&supplus;": "⫀",
+    "&supset;": "⊃",
+    "&supseteq;": "⊇",
+    "&supseteqq;": "⫆",
+    "&supsetneq;": "⊋",
+    "&supsetneqq;": "⫌",
+    "&supsim;": "⫈",
+    "&supsub;": "⫔",
+    "&supsup;": "⫖",
+    "&swArr;": "⇙",
+    "&swarhk;": "⤦",
+    "&swarr;": "↙",
+    "&swarrow;": "↙",
+    "&swnwar;": "⤪",
+    "&szlig": "ß",
+    "&szlig;": "ß",
+    "&target;": "⌖",
+    "&tau;": "τ",
+    "&tbrk;": "⎴",
+    "&tcaron;": "ť",
+    "&tcedil;": "ţ",
+    "&tcy;": "т",
+    "&tdot;": "⃛",
+    "&telrec;": "⌕",
+    "&tfr;": "\uD835\uDD31",
+    "&there4;": "∴",
+    "&therefore;": "∴",
+    "&theta;": "θ",
+    "&thetasym;": "ϑ",
+    "&thetav;": "ϑ",
+    "&thickapprox;": "≈",
+    "&thicksim;": "∼",
+    "&thinsp;": " ",
+    "&thkap;": "≈",
+    "&thksim;": "∼",
+    "&thorn": "þ",
+    "&thorn;": "þ",
+    "&tilde;": "˜",
+    "&times": "×",
+    "&times;": "×",
+    "&timesb;": "⊠",
+    "&timesbar;": "⨱",
+    "&timesd;": "⨰",
+    "&tint;": "∭",
+    "&toea;": "⤨",
+    "&top;": "⊤",
+    "&topbot;": "⌶",
+    "&topcir;": "⫱",
+    "&topf;": "\uD835\uDD65",
+    "&topfork;": "⫚",
+    "&tosa;": "⤩",
+    "&tprime;": "‴",
+    "&trade;": "™",
+    "&triangle;": "▵",
+    "&triangledown;": "▿",
+    "&triangleleft;": "◃",
+    "&trianglelefteq;": "⊴",
+    "&triangleq;": "≜",
+    "&triangleright;": "▹",
+    "&trianglerighteq;": "⊵",
+    "&tridot;": "◬",
+    "&trie;": "≜",
+    "&triminus;": "⨺",
+    "&triplus;": "⨹",
+    "&trisb;": "⧍",
+    "&tritime;": "⨻",
+    "&trpezium;": "⏢",
+    "&tscr;": "\uD835\uDCC9",
+    "&tscy;": "ц",
+    "&tshcy;": "ћ",
+    "&tstrok;": "ŧ",
+    "&twixt;": "≬",
+    "&twoheadleftarrow;": "↞",
+    "&twoheadrightarrow;": "↠",
+    "&uArr;": "⇑",
+    "&uHar;": "⥣",
+    "&uacute": "ú",
+    "&uacute;": "ú",
+    "&uarr;": "↑",
+    "&ubrcy;": "ў",
+    "&ubreve;": "ŭ",
+    "&ucirc": "û",
+    "&ucirc;": "û",
+    "&ucy;": "у",
+    "&udarr;": "⇅",
+    "&udblac;": "ű",
+    "&udhar;": "⥮",
+    "&ufisht;": "⥾",
+    "&ufr;": "\uD835\uDD32",
+    "&ugrave": "ù",
+    "&ugrave;": "ù",
+    "&uharl;": "↿",
+    "&uharr;": "↾",
+    "&uhblk;": "▀",
+    "&ulcorn;": "⌜",
+    "&ulcorner;": "⌜",
+    "&ulcrop;": "⌏",
+    "&ultri;": "◸",
+    "&umacr;": "ū",
+    "&uml": "¨",
+    "&uml;": "¨",
+    "&uogon;": "ų",
+    "&uopf;": "\uD835\uDD66",
+    "&uparrow;": "↑",
+    "&updownarrow;": "↕",
+    "&upharpoonleft;": "↿",
+    "&upharpoonright;": "↾",
+    "&uplus;": "⊎",
+    "&upsi;": "υ",
+    "&upsih;": "ϒ",
+    "&upsilon;": "υ",
+    "&upuparrows;": "⇈",
+    "&urcorn;": "⌝",
+    "&urcorner;": "⌝",
+    "&urcrop;": "⌎",
+    "&uring;": "ů",
+    "&urtri;": "◹",
+    "&uscr;": "\uD835\uDCCA",
+    "&utdot;": "⋰",
+    "&utilde;": "ũ",
+    "&utri;": "▵",
+    "&utrif;": "▴",
+    "&uuarr;": "⇈",
+    "&uuml": "ü",
+    "&uuml;": "ü",
+    "&uwangle;": "⦧",
+    "&vArr;": "⇕",
+    "&vBar;": "⫨",
+    "&vBarv;": "⫩",
+    "&vDash;": "⊨",
+    "&vangrt;": "⦜",
+    "&varepsilon;": "ϵ",
+    "&varkappa;": "ϰ",
+    "&varnothing;": "∅",
+    "&varphi;": "ϕ",
+    "&varpi;": "ϖ",
+    "&varpropto;": "∝",
+    "&varr;": "↕",
+    "&varrho;": "ϱ",
+    "&varsigma;": "ς",
+    "&varsubsetneq;": "⊊︀",
+    "&varsubsetneqq;": "⫋︀",
+    "&varsupsetneq;": "⊋︀",
+    "&varsupsetneqq;": "⫌︀",
+    "&vartheta;": "ϑ",
+    "&vartriangleleft;": "⊲",
+    "&vartriangleright;": "⊳",
+    "&vcy;": "в",
+    "&vdash;": "⊢",
+    "&vee;": "∨",
+    "&veebar;": "⊻",
+    "&veeeq;": "≚",
+    "&vellip;": "⋮",
+    "&verbar;": "|",
+    "&vert;": "|",
+    "&vfr;": "\uD835\uDD33",
+    "&vltri;": "⊲",
+    "&vnsub;": "⊂⃒",
+    "&vnsup;": "⊃⃒",
+    "&vopf;": "\uD835\uDD67",
+    "&vprop;": "∝",
+    "&vrtri;": "⊳",
+    "&vscr;": "\uD835\uDCCB",
+    "&vsubnE;": "⫋︀",
+    "&vsubne;": "⊊︀",
+    "&vsupnE;": "⫌︀",
+    "&vsupne;": "⊋︀",
+    "&vzigzag;": "⦚",
+    "&wcirc;": "ŵ",
+    "&wedbar;": "⩟",
+    "&wedge;": "∧",
+    "&wedgeq;": "≙",
+    "&weierp;": "℘",
+    "&wfr;": "\uD835\uDD34",
+    "&wopf;": "\uD835\uDD68",
+    "&wp;": "℘",
+    "&wr;": "≀",
+    "&wreath;": "≀",
+    "&wscr;": "\uD835\uDCCC",
+    "&xcap;": "⋂",
+    "&xcirc;": "◯",
+    "&xcup;": "⋃",
+    "&xdtri;": "▽",
+    "&xfr;": "\uD835\uDD35",
+    "&xhArr;": "⟺",
+    "&xharr;": "⟷",
+    "&xi;": "ξ",
+    "&xlArr;": "⟸",
+    "&xlarr;": "⟵",
+    "&xmap;": "⟼",
+    "&xnis;": "⋻",
+    "&xodot;": "⨀",
+    "&xopf;": "\uD835\uDD69",
+    "&xoplus;": "⨁",
+    "&xotime;": "⨂",
+    "&xrArr;": "⟹",
+    "&xrarr;": "⟶",
+    "&xscr;": "\uD835\uDCCD",
+    "&xsqcup;": "⨆",
+    "&xuplus;": "⨄",
+    "&xutri;": "△",
+    "&xvee;": "⋁",
+    "&xwedge;": "⋀",
+    "&yacute": "ý",
+    "&yacute;": "ý",
+    "&yacy;": "я",
+    "&ycirc;": "ŷ",
+    "&ycy;": "ы",
+    "&yen": "¥",
+    "&yen;": "¥",
+    "&yfr;": "\uD835\uDD36",
+    "&yicy;": "ї",
+    "&yopf;": "\uD835\uDD6A",
+    "&yscr;": "\uD835\uDCCE",
+    "&yucy;": "ю",
+    "&yuml": "ÿ",
+    "&yuml;": "ÿ",
+    "&zacute;": "ź",
+    "&zcaron;": "ž",
+    "&zcy;": "з",
+    "&zdot;": "ż",
+    "&zeetrf;": "ℨ",
+    "&zeta;": "ζ",
+    "&zfr;": "\uD835\uDD37",
+    "&zhcy;": "ж",
+    "&zigrarr;": "⇝",
+    "&zopf;": "\uD835\uDD6B",
+    "&zscr;": "\uD835\uDCCF",
+    "&zwj;": "‍",
+    "&zwnj;": "‌"
+  };
+});
+
+// node_modules/postal-mime/dist/esm/text-format.js
+function decodeHTMLEntities(str) {
+  return str.replace(/&(#\d+|#x[a-f0-9]+|[a-z]+\d*);?/gi, (match, entity) => {
+    if (typeof htmlEntities[match] === "string") {
+      return htmlEntities[match];
+    }
+    if (entity.charAt(0) !== "#" || match.charAt(match.length - 1) !== ";") {
+      return match;
+    }
+    let codePoint;
+    if (entity.charAt(1).toLowerCase() === "x") {
+      codePoint = parseInt(entity.slice(2), 16);
+    } else {
+      codePoint = parseInt(entity.slice(1), 10);
+    }
+    let output = "";
+    if (codePoint === 0 || codePoint >= 55296 && codePoint <= 57343 || codePoint > 1114111) {
+      return "�";
+    }
+    codePoint = C1_ENTITY_REPLACEMENTS.get(codePoint) ?? codePoint;
+    if (codePoint > 65535) {
+      codePoint -= 65536;
+      output += String.fromCharCode(codePoint >>> 10 & 1023 | 55296);
+      codePoint = 56320 | codePoint & 1023;
+    }
+    output += String.fromCharCode(codePoint);
+    return output;
+  });
+}
+function escapeHtml2(str) {
+  return str.trim().replace(/[<>"'?&]/g, (c) => "&#x" + hexByte(c.charCodeAt(0)) + ";");
+}
+function encodeMailto(address) {
+  return address.replace(MAILTO_UNSAFE, (run) => Array.from(textEncoder.encode(run), (byte) => PERCENT_ENCODED[byte]).join(""));
+}
+function textToHtml(str) {
+  let html = escapeHtml2(str).replace(/\n/g, "<br />");
+  return "<div>" + html + "</div>";
+}
+function createFinder(str, regex) {
+  let searchedFrom = Infinity;
+  let found = null;
+  return (pos) => {
+    if (pos < searchedFrom || found && pos > found.index) {
+      regex.lastIndex = pos;
+      found = regex.exec(str);
+      searchedFrom = pos;
+    }
+    return found;
+  };
+}
+function throughLastTag(str, process2) {
+  const end = str.lastIndexOf(">") + 1;
+  return process2(str.slice(0, end)) + str.slice(end);
+}
+function replaceClosedTags(str, pattern, replacement) {
+  return throughLastTag(str, (head) => head.replace(pattern, replacement));
+}
+function replaceTags(str, prefix, pattern, replacement) {
+  const parts = [];
+  let copied = 0;
+  let searchFrom = 0;
+  while (true) {
+    prefix.lastIndex = searchFrom;
+    const candidate = prefix.exec(str);
+    if (!candidate) {
+      break;
+    }
+    const start = candidate.index;
+    const gt = str.indexOf(">", start);
+    if (gt < 0) {
+      break;
+    }
+    pattern.lastIndex = start;
+    const match = pattern.exec(str);
+    if (!match) {
+      searchFrom = gt + 1;
+      continue;
+    }
+    parts.push(str.slice(copied, start), replacement(...match));
+    copied = searchFrom = start + match[0].length;
+  }
+  parts.push(str.slice(copied));
+  return parts.join("");
+}
+function replaceBlocks(str, open, openToGt, close, closeToGt, replacement) {
+  const nextGt = createFinder(str, />/g);
+  const nextClose = createFinder(str, close);
+  const parts = [];
+  let copied = 0;
+  let searchFrom = 0;
+  while (true) {
+    open.lastIndex = searchFrom;
+    const opener = open.exec(str);
+    if (!opener) {
+      break;
+    }
+    const start = opener.index;
+    searchFrom = start + 1;
+    let from = start + opener[0].length;
+    if (openToGt) {
+      const gt = nextGt(from);
+      if (!gt) {
+        break;
+      }
+      from = gt.index + 1;
+    }
+    const closer = nextClose(from);
+    if (!closer) {
+      break;
+    }
+    let end = closer.index + closer[0].length;
+    if (closeToGt) {
+      const gt = nextGt(end);
+      if (!gt) {
+        break;
+      }
+      end = gt.index + 1;
+    }
+    parts.push(str.slice(copied, start), replacement);
+    copied = searchFrom = end;
+  }
+  parts.push(str.slice(copied));
+  return parts.join("");
+}
+function stripThroughLastTag(str, prefix) {
+  const limit = str.lastIndexOf(">");
+  let last = -1;
+  prefix.lastIndex = 0;
+  let match;
+  while ((match = prefix.exec(str)) && match.index < limit) {
+    last = match.index;
+  }
+  return last < 0 ? str : str.slice(str.indexOf(">", last) + 1);
+}
+function stripFromFirstTag(str, prefix) {
+  prefix.lastIndex = 0;
+  const match = prefix.exec(str);
+  return match && match.index < str.lastIndexOf(">") ? str.slice(0, match.index) : str;
+}
+function htmlToText(str) {
+  str = str.replace(/\r\n|[\n\r\u2028\u2029]/g, "\x01");
+  str = replaceBlocks(str, /<!--/g, false, /-->/g, false, " ");
+  str = replaceClosedTags(str, /<br\b[^>]*>/gi, `
+`);
+  str = replaceClosedTags(str, /<\/?(p|div|table|tr|td|th)\b[^>]*>/gi, `
+
+`);
+  str = replaceBlocks(str, /<script\b/gi, true, /<\/script\b/gi, true, " ");
+  str = replaceBlocks(str, /<style\b/gi, true, /<\/style\b/gi, true, " ");
+  str = stripThroughLastTag(str, /<body\b/gi);
+  str = stripThroughLastTag(str, /<\/head\b/gi);
+  str = stripThroughLastTag(str, /<!doctype\b/gi);
+  str = stripFromFirstTag(str, /<\/body\b/gi);
+  str = stripFromFirstTag(str, /<\/html\b/gi);
+  str = throughLastTag(str, (head) => replaceTags(head, /<a\b/gi, /<a\b[^>]*href\s*=\s*["']?([^\s"']+)[^>]*>/iy, (match, href) => ` (${href}) `));
+  str = replaceClosedTags(str, /<\/?(span|em|i|strong|b|u|a)\b[^>]*>/gi, "");
+  str = replaceTags(str, /<li\b/gi, /<li\b[^>]*>[\n\u0001\s]*/iy, () => "* ");
+  str = replaceClosedTags(str, /<hr\b[^>]*>/g, `
+-------------
+`);
+  str = replaceClosedTags(str, /<[^>]*>/g, " ");
+  str = str.replace(/\u0001/g, `
+`).replace(/[ \t]+/g, " ").replace(/^\s+$/gm, "").replace(/\n\n+/g, `
+
+`).replace(/^\n+/, `
+`).replace(/\n+$/, `
+`);
+  str = decodeHTMLEntities(str);
+  return str;
+}
+function formatDate(date) {
+  if (typeof Intl === "undefined") {
+    return date;
+  }
+  const parsed = new Date(date);
+  if (isNaN(parsed.getTime())) {
+    return date;
+  }
+  dateFormatter ??= new Intl.DateTimeFormat("default", {
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+    hour: "numeric",
+    minute: "numeric",
+    second: "numeric",
+    hour12: false
+  });
+  return dateFormatter.format(parsed);
+}
+function formatTextAddress(address) {
+  return (address.name ? [address.name, `<${address.address}>`] : [address.address]).join(" ");
+}
+function formatTextAddresses(addresses) {
+  let parts = [];
+  let processAddress = (address, partCounter) => {
+    if (partCounter) {
+      parts.push(", ");
+    }
+    if (address.group) {
+      let groupStart = `${address.name}:`;
+      let groupEnd = `;`;
+      parts.push(groupStart);
+      address.group.forEach(processAddress);
+      parts.push(groupEnd);
+    } else {
+      parts.push(formatTextAddress(address));
+    }
+  };
+  addresses.forEach(processAddress);
+  return parts.join("");
+}
+function formatHtmlAddress(address) {
+  return `<a href="mailto:${escapeHtml2(encodeMailto(address.address))}" class="postal-email-address">${escapeHtml2(address.name || `<${address.address}>`)}</a>`;
+}
+function formatHtmlAddresses(addresses) {
+  let parts = [];
+  let processAddress = (address, partCounter) => {
+    if (partCounter) {
+      parts.push('<span class="postal-email-address-separator">, </span>');
+    }
+    if (address.group) {
+      let groupStart = `<span class="postal-email-address-group">${escapeHtml2(address.name)}:</span>`;
+      let groupEnd = `<span class="postal-email-address-group">;</span>`;
+      parts.push(groupStart);
+      address.group.forEach(processAddress);
+      parts.push(groupEnd);
+    } else {
+      parts.push(formatHtmlAddress(address));
+    }
+  };
+  addresses.forEach(processAddress);
+  return parts.join(" ");
+}
+function foldLines(str, lineLength, afterSpace) {
+  str = (str || "").toString();
+  lineLength = lineLength || 76;
+  let pos = 0, len = str.length, result = "", line, match;
+  while (pos < len) {
+    line = str.slice(pos, pos + lineLength);
+    if (line.length < lineLength) {
+      result += line;
+      break;
+    }
+    if (match = line.match(/^[^\n\r]*(\r?\n|\r)/)) {
+      line = match[0];
+      result += line;
+      pos += line.length;
+      continue;
+    } else if ((match = line.match(/(\s+)[^\s]*$/)) && match[0].length - (afterSpace ? (match[1] || "").length : 0) < line.length) {
+      line = line.slice(0, line.length - (match[0].length - (afterSpace ? (match[1] || "").length : 0)));
+    } else if (match = str.slice(pos + line.length).match(/^[^\s]+(\s*)/)) {
+      line = line + match[0].slice(0, match[0].length - (!afterSpace ? (match[1] || "").length : 0));
+    }
+    result += line;
+    pos += line.length;
+    if (pos < len) {
+      result += `\r
+`;
+    }
+  }
+  return result;
+}
+function formatTextHeader(message) {
+  let rows = [];
+  if (message.from) {
+    rows.push({ key: "From", val: formatTextAddresses([message.from]) });
+  }
+  if (message.subject) {
+    rows.push({ key: "Subject", val: message.subject });
+  }
+  if (message.date) {
+    rows.push({ key: "Date", val: formatDate(message.date) });
+  }
+  if (message.to && message.to.length) {
+    rows.push({ key: "To", val: formatTextAddresses(message.to) });
+  }
+  if (message.cc && message.cc.length) {
+    rows.push({ key: "Cc", val: formatTextAddresses(message.cc) });
+  }
+  if (message.bcc && message.bcc.length) {
+    rows.push({ key: "Bcc", val: formatTextAddresses(message.bcc) });
+  }
+  let maxKeyLength = rows.map((r) => r.key.length).reduce((acc, cur) => {
+    return cur > acc ? cur : acc;
+  }, 0);
+  const lines = rows.flatMap((row) => {
+    let sepLen = maxKeyLength - row.key.length;
+    let prefix = `${row.key}: ${" ".repeat(sepLen)}`;
+    let emptyPrefix = `${" ".repeat(row.key.length + 1)} ${" ".repeat(sepLen)}`;
+    let foldedLines = foldLines(row.val, 80, true).split(/\r?\n/).map((line) => line.trim());
+    return foldedLines.map((line, i) => `${i ? emptyPrefix : prefix}${line}`);
+  });
+  let maxLineLength = lines.map((r) => r.length).reduce((acc, cur) => {
+    return cur > acc ? cur : acc;
+  }, 0);
+  let lineMarker = "-".repeat(maxLineLength);
+  let template = `
+${lineMarker}
+${lines.join(`
+`)}
+${lineMarker}
+`;
+  return template;
+}
+function formatHtmlHeader(message) {
+  let rows = [];
+  if (message.from) {
+    rows.push(`<div class="postal-email-header-key">From</div><div class="postal-email-header-value">${formatHtmlAddresses([message.from])}</div>`);
+  }
+  if (message.subject) {
+    rows.push(`<div class="postal-email-header-key">Subject</div><div class="postal-email-header-value postal-email-header-subject">${escapeHtml2(message.subject)}</div>`);
+  }
+  if (message.date) {
+    rows.push(`<div class="postal-email-header-key">Date</div><div class="postal-email-header-value postal-email-header-date" data-date="${escapeHtml2(message.date)}">${escapeHtml2(formatDate(message.date))}</div>`);
+  }
+  if (message.to && message.to.length) {
+    rows.push(`<div class="postal-email-header-key">To</div><div class="postal-email-header-value">${formatHtmlAddresses(message.to)}</div>`);
+  }
+  if (message.cc && message.cc.length) {
+    rows.push(`<div class="postal-email-header-key">Cc</div><div class="postal-email-header-value">${formatHtmlAddresses(message.cc)}</div>`);
+  }
+  if (message.bcc && message.bcc.length) {
+    rows.push(`<div class="postal-email-header-key">Bcc</div><div class="postal-email-header-value">${formatHtmlAddresses(message.bcc)}</div>`);
+  }
+  let template = `<div class="postal-email-header">${rows.length ? '<div class="postal-email-header-row">' : ""}${rows.join(`</div>
+<div class="postal-email-header-row">`)}${rows.length ? "</div>" : ""}</div>`;
+  return template;
+}
+var C1_ENTITY_REPLACEMENTS, hexByte = (value) => value.toString(16).toUpperCase().padStart(2, "0"), MAILTO_UNSAFE, PERCENT_ENCODED, dateFormatter = null;
+var init_text_format = __esm(() => {
+  init_html_entities();
+  init_decode_strings();
+  C1_ENTITY_REPLACEMENTS = new Map([
+    [128, 8364],
+    [130, 8218],
+    [131, 402],
+    [132, 8222],
+    [133, 8230],
+    [134, 8224],
+    [135, 8225],
+    [136, 710],
+    [137, 8240],
+    [138, 352],
+    [139, 8249],
+    [140, 338],
+    [142, 381],
+    [145, 8216],
+    [146, 8217],
+    [147, 8220],
+    [148, 8221],
+    [149, 8226],
+    [150, 8211],
+    [151, 8212],
+    [152, 732],
+    [153, 8482],
+    [154, 353],
+    [155, 8250],
+    [156, 339],
+    [158, 382],
+    [159, 376]
+  ]);
+  MAILTO_UNSAFE = /[^A-Za-z0-9\-._~!$'()*+,;:@]+/g;
+  PERCENT_ENCODED = Array.from({ length: 256 }, (_, byte) => "%" + hexByte(byte));
+});
+
+// node_modules/postal-mime/dist/esm/address-parser.js
+class TokenList {
+  constructor(str) {
+    this.str = str;
+    this.slots = new Int32Array(48);
+    this.length = 0;
+    this.cleaned = new Map;
+  }
+  push(kind, start, end) {
+    if ((this.length + 1) * 3 > this.slots.length) {
+      const grown = new Int32Array(this.slots.length * 2);
+      grown.set(this.slots);
+      this.slots = grown;
+    }
+    const at = this.length * 3;
+    this.slots[at] = kind;
+    this.slots[at + 1] = start;
+    this.slots[at + 2] = end;
+    return this.length++;
+  }
+  operatorAt(index) {
+    const at = index * 3;
+    return this.slots[at] & TOKEN_OPERATOR ? this.str.charAt(this.slots[at + 1]) : "";
+  }
+  isOperator(index) {
+    return (this.slots[index * 3] & TOKEN_OPERATOR) !== 0;
+  }
+  noBreak(index) {
+    return (this.slots[index * 3] & TOKEN_NO_BREAK) !== 0;
+  }
+  value(index) {
+    const cleaned = this.cleaned.get(index);
+    if (cleaned !== undefined) {
+      return cleaned;
+    }
+    return this.str.slice(this.slots[index * 3 + 1], this.slots[index * 3 + 2]);
+  }
+}
+function isAddrSpec(value) {
+  return ADDR_SPEC.test(value) || LITERAL_ADDR_SPEC.test(value);
+}
+function domainAt(address) {
+  const literal = address.charAt(address.length - 1) === "]" ? DOMAIN_LITERAL_TAIL.exec(address) : null;
+  return literal ? address.length - literal[1].length - 1 : address.lastIndexOf("@");
+}
+function quoteLocalPart(address) {
+  const lastAt = domainAt(address);
+  if (lastAt < 0) {
+    return address;
+  }
+  const user = address.substring(0, lastAt);
+  if (/^[^\s"(),:;<>@[\\\]]+$/.test(user) || /^"(?:[^"\\]|\\[\s\S])*"$/.test(user)) {
+    return address;
+  }
+  return '"' + user.replace(/["\\]/g, "\\$&") + '"@' + address.substring(lastAt + 1);
+}
+function isSpaceCode(code) {
+  return code === 32 || code >= 9 && code <= 13 || code === 160 || code === 5760 || code >= 8192 && code <= 8202 || code === 8232 || code === 8233 || code === 8239 || code === 8287 || code === 12288 || code === 65279;
+}
+function isWordCode(code) {
+  return code >= 48 && code <= 57 || code >= 65 && code <= 90 || code >= 97 && code <= 122 || code === 95;
+}
+function isBoundary(text, at) {
+  return isWordCode(text.charCodeAt(at - 1)) !== isWordCode(text.charCodeAt(at));
+}
+function indexOfAt(text, from, to) {
+  for (let i = from;i < to; i++) {
+    if (text.charCodeAt(i) === 64) {
+      return i;
+    }
+  }
+  return -1;
+}
+function joinAtSpacing(value, at) {
+  if (at < 0) {
+    return value;
+  }
+  let start = at;
+  while (start > 0 && isSpaceCode(value.charCodeAt(start - 1))) {
+    start--;
+  }
+  let end = at + 1;
+  while (end < value.length && isSpaceCode(value.charCodeAt(end))) {
+    end++;
+  }
+  return start === at && end === at + 1 ? value : value.slice(0, start) + "@" + value.slice(end);
+}
+function collapseAtSpacing(value) {
+  const quoted = LEADING_QUOTED_STRING.exec(value);
+  if (quoted) {
+    let at = quoted[0].length;
+    while (at < value.length && isSpaceCode(value.charCodeAt(at))) {
+      at++;
+    }
+    if (value.charAt(at) === "@" && value.indexOf("@", at + 1) < 0) {
+      return joinAtSpacing(value, at);
+    }
+  }
+  const at = value.indexOf("@");
+  if (at < 0 || value.indexOf("@", at + 1) >= 0 || value.lastIndexOf('"') > at) {
+    return value;
+  }
+  return joinAtSpacing(value, at);
+}
+function looseAddressStart(text) {
+  const len = text.length;
+  let pos = 0;
+  while (pos < len) {
+    while (pos < len && isSpaceCode(text.charCodeAt(pos))) {
+      pos++;
+    }
+    if (pos >= len) {
+      break;
+    }
+    const runStart = pos;
+    let runEnd = pos;
+    while (runEnd < len && !isSpaceCode(text.charCodeAt(runEnd))) {
+      runEnd++;
+    }
+    let at = indexOfAt(text, runStart, runEnd);
+    if (at >= 0) {
+      let lastBoundary = -1;
+      for (let k = runEnd;k > runStart; k--) {
+        if (isBoundary(text, k)) {
+          lastBoundary = k;
+          break;
+        }
+      }
+      let atomStart = runStart;
+      while (lastBoundary >= 0 && at >= 0) {
+        if (at > atomStart && runEnd > at + 1 && lastBoundary > at + 1) {
+          for (let start = atomStart;start < at; start++) {
+            if (isBoundary(text, start)) {
+              if (start > runStart) {
+                return start;
+              }
+              let padded = runStart;
+              while (padded > 0 && isSpaceCode(text.charCodeAt(padded - 1))) {
+                padded--;
+              }
+              return padded;
+            }
+          }
+        }
+        atomStart = at + 1;
+        at = indexOfAt(text, atomStart, runEnd);
+      }
+    }
+    pos = runEnd;
+  }
+  return -1;
+}
+function recoverAddrSpec(address, text) {
+  address = collapseAtSpacing(address);
+  if (!HAS_WHITESPACE.test(address)) {
+    return { address, text };
+  }
+  let rest;
+  const quoted = address.match(QUOTED_LOCAL_ADDR);
+  if (quoted) {
+    if (!quoted[2]) {
+      return { address, text };
+    }
+    address = quoted[1];
+    rest = [quoted[2]];
+  } else {
+    if (address.indexOf('"') >= 0) {
+      return { address, text };
+    }
+    const parts = address.split(/\s+/);
+    let addrIndex = parts.findIndex(isAddrSpec);
+    if (addrIndex < 0) {
+      addrIndex = parts.findIndex((part) => LOOSE_ADDR_SPEC.test(part));
+    }
+    if (addrIndex < 0) {
+      return { address, text };
+    }
+    address = parts.splice(addrIndex, 1)[0];
+    rest = parts;
+  }
+  return {
+    address,
+    text: [text, ...rest].filter((part) => part).join(" ")
+  };
+}
+function stripAddressComments(address) {
+  const comments = [];
+  let result = "";
+  let comment = "";
+  let depth = 0;
+  let closer = "";
+  let lastChar = "";
+  let pendingSpace = false;
+  let firstChar = "";
+  let quoteSeen = false;
+  let routeEnd = -1;
+  for (let i = 0, len = address.length;i < len; i++) {
+    const chr = address.charAt(i);
+    if (depth) {
+      if (chr === "\\" && i < len - 1) {
+        comment += address.charAt(++i);
+      } else if (chr === "(") {
+        depth++;
+        comment += chr;
+      } else if (chr === ")" && !--depth) {
+        comments.push(comment.trim());
+        comment = "";
+        pendingSpace = lastChar !== "@";
+      } else {
+        comment += chr;
+      }
+      continue;
+    }
+    if (pendingSpace && chr !== "(") {
+      pendingSpace = false;
+      if (chr !== "@" && chr !== "<" && !isSpaceCode(address.charCodeAt(i))) {
+        result += " ";
+        lastChar = " ";
+      }
+    }
+    if (closer) {
+      if (chr === "\\" && closer === '"' && i < len - 1) {
+        result += chr + address.charAt(++i);
+        lastChar = address.charAt(i);
+        continue;
+      }
+      if (chr === closer) {
+        closer = "";
+      }
+    } else if (chr === '"') {
+      closer = '"';
+      quoteSeen = true;
+    } else if (chr === ":" && routeEnd < 0 && firstChar === "@" && !quoteSeen) {
+      routeEnd = result.length + 1;
+    } else if (chr === "[") {
+      closer = "]";
+    } else if (chr === "(") {
+      depth = 1;
+      continue;
+    } else if (chr === "<") {
+      result = "";
+      lastChar = "";
+      comments.length = 0;
+      firstChar = "";
+      quoteSeen = false;
+      routeEnd = -1;
+      continue;
+    }
+    result += chr;
+    lastChar = chr;
+    if (!firstChar && !isSpaceCode(address.charCodeAt(i))) {
+      firstChar = chr;
+    }
+  }
+  if (routeEnd >= 0 && result.indexOf("@", routeEnd) >= 0) {
+    result = result.slice(routeEnd);
+  }
+  if (depth) {
+    comments.push(comment.trim());
+  }
+  return { address: result.trim(), comments: comments.filter((text) => text) };
+}
+function collectAddressParts(tokens, from, to) {
+  let state = "text";
+  let data = {
+    address: [],
+    comment: [],
+    text: [],
+    textWasQuoted: [],
+    quotedLocalAt: []
+  };
+  let lastTextPureQuoted = false;
+  let i;
+  let insideQuotes = false;
+  const lastChars = { address: "", comment: "", text: "" };
+  for (i = from;i < to; i++) {
+    const value = tokens.value(i);
+    const prevOperator = i > from ? tokens.operatorAt(i - 1) : "";
+    const prevNoBreak = i > from && tokens.noBreak(i - 1);
+    if (tokens.isOperator(i)) {
+      switch (value) {
+        case "<":
+          state = "address";
+          insideQuotes = false;
+          break;
+        case "(":
+          state = "comment";
+          insideQuotes = false;
+          break;
+        case '"':
+          insideQuotes = !insideQuotes;
+          state = "text";
+          break;
+        default:
+          state = "text";
+          insideQuotes = false;
+          break;
+      }
+    } else {
+      const opensAfterEmptyQuotedString = prevOperator === '"' && prevNoBreak && i > from + 1 && tokens.operatorAt(i - 2) === '"';
+      const joins = prevNoBreak && data[state].length && (prevOperator !== ")" || lastChars[state] === "@" || value.charAt(0) === "@");
+      if (joins) {
+        const last = data[state].length - 1;
+        if (state === "text" && !insideQuotes) {
+          if (lastTextPureQuoted && value.charAt(0) === "@") {
+            data.quotedLocalAt[last] = data.text[last].length;
+          }
+          lastTextPureQuoted = false;
+        }
+        data[state][last] += value;
+        if (state === "text" && insideQuotes) {
+          data.textWasQuoted[last] = true;
+        }
+      } else {
+        data[state].push(value);
+        if (state === "text") {
+          data.textWasQuoted.push(insideQuotes || opensAfterEmptyQuotedString);
+          data.quotedLocalAt.push(opensAfterEmptyQuotedString && value.charAt(0) === "@" ? 0 : -1);
+          lastTextPureQuoted = insideQuotes;
+        }
+      }
+      lastChars[state] = value.charAt(value.length - 1);
+    }
+  }
+  let textFromComment = false;
+  if (!data.text.length && data.comment.length) {
+    data.text = data.comment;
+    data.comment = [];
+    textFromComment = true;
+  }
+  return { data, textFromComment };
+}
+function groupName(tokens, from, to) {
+  return decodeWords(collectAddressParts(tokens, from, to).data.text.join(" "));
+}
+function _handleAddress(tokens, from, to) {
+  const collected = collectAddressParts(tokens, from, to);
+  const data = collected.data;
+  let textFromComment = collected.textFromComment;
+  let i;
+  const addressComments = [];
+  const addressParts = [];
+  for (const part of data.address) {
+    const stripped = stripAddressComments(part);
+    for (const comment of stripped.comments) {
+      addressComments.push(comment);
+    }
+    if (stripped.address) {
+      addressParts.push(stripped.address);
+    }
+  }
+  data.address = addressParts;
+  if (!data.address.length && data.text.length && !textFromComment) {
+    const candidates = data.text.map((part) => collapseAtSpacing(part));
+    for (i = 0;i < data.text.length; i++) {
+      const local = data.quotedLocalAt[i];
+      const quotedLocal = data.textWasQuoted[i] && local >= 0 && QUOTED_LOCAL_DOMAIN.test(data.text[i].slice(local)) ? quoteLocalPart(data.text[i]) : "";
+      if (quotedLocal || !data.textWasQuoted[i] && isAddrSpec(candidates[i])) {
+        data.address = [quotedLocal || candidates[i]];
+        data.text.splice(i, 1);
+        data.textWasQuoted.splice(i, 1);
+        data.quotedLocalAt.splice(i, 1);
+        break;
+      }
+    }
+    if (!data.address.length) {
+      for (i = 0;i < data.text.length; i++) {
+        if (!data.textWasQuoted[i]) {
+          const part = candidates[i];
+          const start = looseAddressStart(part);
+          if (start >= 0) {
+            LOOSE_TEXT_ADDR.lastIndex = start;
+            const match = LOOSE_TEXT_ADDR.exec(part);
+            if (match) {
+              data.address = [match[0].trim()];
+              data.text[i] = (part.slice(0, start) + " " + part.slice(start + match[0].length)).trim();
+              break;
+            }
+          }
+          data.text[i] = data.text[i].trim();
+        }
+      }
+    }
+  }
+  if (!data.text.length && data.comment.length) {
+    data.text = data.comment;
+    data.comment = [];
+  }
+  if (data.address.length > 1) {
+    data.text = data.text.concat(data.address.splice(1));
+  }
+  const addressFromQuotedText = !data.address.length && data.textWasQuoted.some((wasQuoted) => wasQuoted);
+  let text = data.text.join(" ");
+  let addressValue = data.address.join(" ");
+  if (!addressValue && isEncodedWordsOnly(text.trim())) {
+    return { address: "", name: decodeWords(text) };
+  }
+  if (addressFromQuotedText && text.indexOf("@") >= 0) {
+    addressValue = quoteLocalPart(joinAtSpacing(text, domainAt(text)));
+    text = "";
+  }
+  ({ address: addressValue, text } = recoverAddrSpec(addressValue, text));
+  if (!text && addressComments.length) {
+    text = addressComments.join(" ");
+    textFromComment = true;
+  }
+  const rawName = text || addressValue || "";
+  const address = {
+    address: addressValue || (textFromComment ? "" : text) || "",
+    name: decodeWords(rawName)
+  };
+  if (address.address === rawName || address.address === address.name) {
+    if (address.address.match(/@/)) {
+      address.name = "";
+    } else {
+      address.address = "";
+    }
+  }
+  return address;
+}
+
+class Tokenizer2 {
+  constructor(str) {
+    this.str = (str || "").toString();
+    this.operatorCurrent = "";
+    this.operatorExpecting = "";
+    this.node = -1;
+    this.escaped = false;
+    this.inDomainLiteral = false;
+    this.afterAt = false;
+    this.inGroup = false;
+    this.innerQuoted = false;
+    this.innerComment = 0;
+    this.innerLiteral = false;
+    this.innerEscaped = false;
+    this.list = new TokenList(this.str);
+    this.operators = {
+      '"': '"',
+      "(": ")",
+      "<": ">",
+      ",": "",
+      ":": "",
+      ";": ""
+    };
+  }
+  tokenize() {
+    const str = this.str;
+    const len = str.length;
+    for (let i = 0;i < len; i++) {
+      this.checkChar(str.charAt(i), i);
+    }
+    this.closeText(len);
+    const list = this.list;
+    const slots = list.slots;
+    let kept = 0;
+    for (let i = 0, count = list.length;i < count; i++) {
+      const kind = slots[i * 3];
+      let start = slots[i * 3 + 1];
+      let end = slots[i * 3 + 2];
+      if (kind & TOKEN_DIRTY) {
+        const value = this.cleanValue(start, end, kind).trim();
+        if (!value) {
+          continue;
+        }
+        list.cleaned.set(kept, value);
+      } else if (!(kind & TOKEN_OPERATOR)) {
+        while (start < end && isSpaceCode(str.charCodeAt(start))) {
+          start++;
+        }
+        while (end > start && isSpaceCode(str.charCodeAt(end - 1))) {
+          end--;
+        }
+        if (start === end) {
+          continue;
+        }
+      }
+      slots[kept * 3] = kind;
+      slots[kept * 3 + 1] = start;
+      slots[kept * 3 + 2] = end;
+      kept++;
+    }
+    list.length = kept;
+    return list;
+  }
+  closeText(end) {
+    if (this.node >= 0) {
+      this.list.slots[this.node * 3 + 2] = end;
+      this.node = -1;
+    }
+  }
+  cleanValue(start, end, kind) {
+    const str = this.str;
+    const escapes = (kind & TOKEN_ESCAPES) !== 0;
+    let escaped = (kind & TOKEN_STARTS_ESCAPED) !== 0;
+    let value = "";
+    for (let i = start;i < end; i++) {
+      const chr = str.charAt(i);
+      if (escapes && !escaped && chr === "\\") {
+        escaped = true;
+        continue;
+      }
+      escaped = false;
+      if (chr === `
+`) {
+        value += " ";
+      } else if (chr.charCodeAt(0) >= 33 || chr === " " || chr === "\t") {
+        value += chr;
+      }
+    }
+    return value;
+  }
+  checkChar(chr, i) {
+    if (!this.escaped && !this.operatorExpecting) {
+      if (!this.inDomainLiteral && chr === "[" && this.afterAt) {
+        this.inDomainLiteral = true;
+      } else if (this.inDomainLiteral && (chr === "]" || chr === "," || chr === ";")) {
+        this.inDomainLiteral = false;
+      }
+    }
+    let nested = false;
+    if (this.operatorExpecting === ">") {
+      nested = this.trackInner(chr);
+      if (!nested && chr === ";" && this.inGroup) {
+        this.closeText(i);
+        this.operatorExpecting = "";
+        this.resetInner();
+      }
+    } else if (this.operatorExpecting === ")" && !this.escaped) {
+      if (chr === "(") {
+        this.innerComment++;
+      } else if (chr === ")" && this.innerComment) {
+        this.innerComment--;
+        nested = true;
+      }
+    }
+    if (this.escaped) {} else if (chr === this.operatorExpecting && !nested) {
+      const nextChr = this.str.charAt(i + 1);
+      this.closeText(i);
+      this.list.push(nextChr && ![" ", "\t", "\r", `
+`, ",", ";"].includes(nextChr) ? TOKEN_OPERATOR | TOKEN_NO_BREAK : TOKEN_OPERATOR, i, i + 1);
+      if (chr !== ")") {
+        this.afterAt = false;
+      }
+      this.operatorExpecting = "";
+      this.escaped = false;
+      this.resetInner();
+      return;
+    } else if (!this.operatorExpecting && !(this.inDomainLiteral && chr === ":") && chr in this.operators) {
+      this.closeText(i);
+      this.list.push(TOKEN_OPERATOR, i, i + 1);
+      if (chr === ":") {
+        this.inGroup = true;
+      } else if (chr === ";") {
+        this.inGroup = false;
+      }
+      if (chr !== "(") {
+        this.afterAt = false;
+      }
+      this.operatorExpecting = this.operators[chr];
+      this.escaped = false;
+      this.resetInner();
+      return;
+    } else if ((this.operatorExpecting === '"' || this.operatorExpecting === ")") && chr === "\\") {
+      this.escaped = true;
+      if (this.node >= 0) {
+        this.list.slots[this.node * 3] |= TOKEN_DIRTY;
+      }
+      return;
+    }
+    if (this.node < 0) {
+      this.node = this.list.push((this.operatorExpecting === '"' || this.operatorExpecting === ")" ? TOKEN_ESCAPES : 0) | (this.escaped ? TOKEN_STARTS_ESCAPED : 0), i, i);
+    }
+    if (chr === `
+`) {
+      chr = " ";
+      this.list.slots[this.node * 3] |= TOKEN_DIRTY;
+    }
+    if (chr.charCodeAt(0) >= 33 || chr === " " || chr === "\t") {
+      if (!this.operatorExpecting && chr !== " " && chr !== "\t") {
+        this.afterAt = chr === "@";
+      }
+    } else {
+      this.list.slots[this.node * 3] |= TOKEN_DIRTY;
+    }
+    this.escaped = false;
+  }
+  trackInner(chr) {
+    if (this.innerEscaped) {
+      this.innerEscaped = false;
+      return true;
+    }
+    if (this.innerQuoted) {
+      if (chr === "\\") {
+        this.innerEscaped = true;
+      } else if (chr === '"') {
+        this.innerQuoted = false;
+      }
+      return true;
+    }
+    if (this.innerComment) {
+      if (chr === "\\") {
+        this.innerEscaped = true;
+      } else if (chr === "(") {
+        this.innerComment++;
+      } else if (chr === ")") {
+        this.innerComment--;
+      }
+      return true;
+    }
+    if (this.innerLiteral) {
+      if (chr === "]") {
+        this.innerLiteral = false;
+      }
+      return true;
+    }
+    if (chr === '"') {
+      this.innerQuoted = true;
+      return true;
+    }
+    if (chr === "(") {
+      this.innerComment = 1;
+      return true;
+    }
+    if (chr === "[" && this.afterAt) {
+      this.innerLiteral = true;
+      return true;
+    }
+    if (!isSpaceCode(chr.charCodeAt(0))) {
+      this.afterAt = chr === "@";
+    }
+    return false;
+  }
+  resetInner() {
+    this.innerQuoted = false;
+    this.innerComment = 0;
+    this.innerLiteral = false;
+    this.innerEscaped = false;
+  }
+}
+function mergeNameFragments(list) {
+  const merged = [];
+  for (let i = list.length - 1;i >= 0; i--) {
+    const current = list[i];
+    const next = merged.length ? merged[merged.length - 1] : null;
+    if (next && current.address === "" && current.name && !current.group && next.address && next.name) {
+      next.name = current.name + ", " + next.name;
+    } else {
+      merged.push(current);
+    }
+  }
+  return merged.reverse();
+}
+function parseAddressList(str) {
+  const tokens = new Tokenizer2(str).tokenize();
+  const parsedAddresses = [];
+  let group = null;
+  let members = [];
+  let from = 0;
+  for (let i = 0, len = tokens.length;i <= len; i++) {
+    const operator = i < len ? tokens.operatorAt(i) : "";
+    if (i < len && operator !== "," && operator !== ";" && operator !== ":") {
+      continue;
+    }
+    if (operator === ":") {
+      if (!group) {
+        group = { name: groupName(tokens, from, i), group: [] };
+        members = [];
+      }
+      from = i + 1;
+      continue;
+    }
+    if (i > from) {
+      (group ? members : parsedAddresses).push(_handleAddress(tokens, from, i));
+    }
+    from = i + 1;
+    if (group && (operator === ";" || i === len)) {
+      group.group = mergeNameFragments(members);
+      parsedAddresses.push(group);
+      group = null;
+    }
+  }
+  return mergeNameFragments(parsedAddresses);
+}
+function addressParser(str, options) {
+  const parsedAddresses = parseAddressList(str);
+  if (options && options.flatten) {
+    let addresses = [];
+    let walkAddressList = (list) => {
+      list.forEach((address) => {
+        if (address.group) {
+          return walkAddressList(address.group);
+        } else {
+          addresses.push(address);
+        }
+      });
+    };
+    walkAddressList(parsedAddresses);
+    return addresses;
+  }
+  return parsedAddresses;
+}
+var TOKEN_OPERATOR = 1, TOKEN_NO_BREAK = 2, TOKEN_DIRTY = 4, TOKEN_ESCAPES = 8, TOKEN_STARTS_ESCAPED = 16, HAS_WHITESPACE, QUOTED_LOCAL_ADDR, ADDR_SPEC, LITERAL_ADDR_SPEC, QUOTED_LOCAL_DOMAIN, LOOSE_ADDR_SPEC, LOOSE_TEXT_ADDR, DOMAIN_LITERAL_TAIL, LEADING_QUOTED_STRING, address_parser_default;
+var init_address_parser = __esm(() => {
+  init_decode_strings();
+  HAS_WHITESPACE = /\s/;
+  QUOTED_LOCAL_ADDR = /^("(?:[^"\\]|\\[\s\S])*"@\S+)(?:\s+([\s\S]+))?$/;
+  ADDR_SPEC = /^[^@\s]+@[^@\s]+$/;
+  LITERAL_ADDR_SPEC = /^[^@\s]+@\[[^[\]\\\s]*\]$/;
+  QUOTED_LOCAL_DOMAIN = /^@(?:[^@\s"]+|\[[^[\]\\\s]*\])$/;
+  LOOSE_ADDR_SPEC = /^[^@\s]+@\S+$/;
+  LOOSE_TEXT_ADDR = /\s*\b[^@\s]+@[^\s]+\b\s*/y;
+  DOMAIN_LITERAL_TAIL = /@(\[[^[\]\\]*\])$/;
+  LEADING_QUOTED_STRING = /^"(?:[^"\\]|\\[\s\S])*"/;
+  address_parser_default = addressParser;
+});
+
+// node_modules/postal-mime/dist/esm/base64-encoder.js
+function base64ArrayBuffer(arrayBuffer) {
+  let base64 = "";
+  const encodings = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  const bytes = new Uint8Array(arrayBuffer);
+  const byteLength = bytes.byteLength;
+  const byteRemainder = byteLength % 3;
+  const mainLength = byteLength - byteRemainder;
+  let a, b, c, d;
+  let chunk;
+  for (let i = 0;i < mainLength; i = i + 3) {
+    chunk = bytes[i] << 16 | bytes[i + 1] << 8 | bytes[i + 2];
+    a = (chunk & 16515072) >> 18;
+    b = (chunk & 258048) >> 12;
+    c = (chunk & 4032) >> 6;
+    d = chunk & 63;
+    base64 += encodings[a] + encodings[b] + encodings[c] + encodings[d];
+  }
+  if (byteRemainder === 1) {
+    chunk = bytes[mainLength];
+    a = (chunk & 252) >> 2;
+    b = (chunk & 3) << 4;
+    base64 += encodings[a] + encodings[b] + "==";
+  } else if (byteRemainder === 2) {
+    chunk = bytes[mainLength] << 8 | bytes[mainLength + 1];
+    a = (chunk & 64512) >> 10;
+    b = (chunk & 1008) >> 4;
+    c = (chunk & 15) << 2;
+    base64 += encodings[a] + encodings[b] + encodings[c] + "=";
+  }
+  return base64;
+}
+
+// node_modules/postal-mime/dist/esm/postal-mime.js
+function isReadableStream(value) {
+  return !!value && typeof value.getReader === "function";
+}
+function isBlob(value) {
+  return value instanceof Blob || Object.prototype.toString.call(value) === "[object Blob]";
+}
+function isArrayBuffer(value) {
+  const tag = Object.prototype.toString.call(value);
+  return tag === "[object ArrayBuffer]" || tag === "[object SharedArrayBuffer]";
+}
+function parseAttachmentEncoding(value) {
+  const encoding = String(value || "").replace(/[-_\s]/g, "").toLowerCase() || "arraybuffer";
+  if (!ATTACHMENT_ENCODINGS.has(encoding)) {
+    throw createError("EINVALIDOPTION", `Unknown attachment encoding ${encoding}`);
+  }
+  return encoding;
+}
+function renderEntry(textEntry, textType, convert) {
+  if (textEntry.type === "subMessage") {
+    return textType === "html" ? formatHtmlHeader(textEntry.value) : formatTextHeader(textEntry.value);
+  }
+  if (!convert) {
+    return textEntry.value;
+  }
+  return textType === "html" ? textToHtml(textEntry.value) : htmlToText(textEntry.value);
+}
+function countAddresses(addresses) {
+  if (!addresses) {
+    return 0;
+  }
+  let count = 0;
+  for (const address of Array.isArray(addresses) ? addresses : [addresses]) {
+    count += 1 + (address.group ? address.group.length : 0);
+  }
+  return count;
+}
+function parseLimitOption(value, defaultValue, name, min = 0) {
+  if (value === undefined || value === null) {
+    return defaultValue;
+  }
+  if (typeof value !== "number" || !Number.isInteger(value) || value < min) {
+    throw createError("EINVALIDOPTION", `${name} must be a ${min ? "positive" : "non-negative"} integer`);
+  }
+  return value;
+}
+function parseLimits(options) {
+  return {
+    maxNestingDepth: parseLimitOption(options.maxNestingDepth, MAX_NESTING_DEPTH, "maxNestingDepth"),
+    maxHeadersSize: parseLimitOption(options.maxHeadersSize, MAX_HEADERS_SIZE, "maxHeadersSize"),
+    maxPartCount: parseLimitOption(options.maxPartCount, MAX_PART_COUNT, "maxPartCount", 1),
+    maxRfc822NestingDepth: parseLimitOption(options.maxRfc822NestingDepth, MAX_RFC822_NESTING_DEPTH, "maxRfc822NestingDepth"),
+    maxForwardedAddresses: parseLimitOption(options.maxForwardedAddresses, MAX_FORWARDED_ADDRESSES, "maxForwardedAddresses")
+  };
+}
+
+class PostalMime {
+  static async parse(buf, options) {
+    const parser = new PostalMime(options);
+    return parser.parse(buf);
+  }
+  constructor(options, parent) {
+    this.options = options || {};
+    this.rfc822NestingDepth = parent ? parent.rfc822NestingDepth + 1 : 0;
+    this.limits = parent ? parent.limits : parseLimits(this.options);
+    this.counters = parent ? parent.counters : { headerSize: 0, partCount: 0, forwardedAddresses: 0 };
+    this.root = this.currentNode = new MimeNode({ postalMime: this });
+    this.boundaries = [];
+    this.textContent = {};
+    this.textMap = new Map;
+    this.textTypes = new Set;
+    this.attachments = [];
+    this.forceRfc822Attachments = false;
+    this.attachmentEncoding = parseAttachmentEncoding(this.options.attachmentEncoding);
+    this.started = false;
+  }
+  async finalize() {
+    await this.root.finalize();
+  }
+  async processLine(line, lineBreak, isFinal) {
+    let boundaries = this.boundaries;
+    if (boundaries.length && line.length > 2 && line[0] === 45 && line[1] === 45) {
+      for (let i = 0;i < boundaries.length; i++) {
+        let boundary = boundaries[i];
+        if (line.length < boundary.value.length + 2) {
+          continue;
+        }
+        let boundaryMatches = true;
+        for (let j = 0;j < boundary.value.length; j++) {
+          if (line[j + 2] !== boundary.value[j]) {
+            boundaryMatches = false;
+            break;
+          }
+        }
+        if (!boundaryMatches) {
+          continue;
+        }
+        let boundaryEnd = boundary.value.length + 2;
+        let isTerminator = false;
+        if (line.length >= boundary.value.length + 4 && line[boundary.value.length + 2] === 45 && line[boundary.value.length + 3] === 45) {
+          isTerminator = true;
+          boundaryEnd = boundary.value.length + 4;
+        }
+        let hasValidTrailing = true;
+        for (let j = boundaryEnd;j < line.length; j++) {
+          if (!isWsp(line[j])) {
+            hasValidTrailing = false;
+            break;
+          }
+        }
+        if (!hasValidTrailing) {
+          continue;
+        }
+        if (isTerminator) {
+          await boundary.node.finalize(true);
+          this.currentNode = boundary.node.parentNode || this.root;
+        } else {
+          await boundary.node.finalizeChildNodes(true);
+          this.currentNode = new MimeNode({
+            postalMime: this,
+            parentNode: boundary.node,
+            parentMultipartType: boundary.node.contentType.multipart
+          });
+        }
+        if (isFinal) {
+          return this.finalize();
+        }
+        return;
+      }
+    }
+    if (this.currentNode.feed(line, lineBreak)) {
+      return this.processLine(line, lineBreak, isFinal);
+    }
+    if (isFinal) {
+      return this.finalize();
+    }
+  }
+  readLine() {
+    let startPos = this.readPos;
+    let endPos = this.readPos;
+    while (this.readPos < this.av.length) {
+      const c = this.av[this.readPos++];
+      if (c !== 13 && c !== 10) {
+        endPos = this.readPos;
+      }
+      if (c === 10) {
+        return {
+          bytes: new Uint8Array(this.buf, startPos, endPos - startPos),
+          lineBreak: this.av.subarray(endPos, this.readPos),
+          done: this.readPos >= this.av.length
+        };
+      }
+    }
+    return {
+      bytes: new Uint8Array(this.buf, startPos, endPos - startPos),
+      lineBreak: LINE_FEED,
+      done: this.readPos >= this.av.length
+    };
+  }
+  addTextEntry(selector, textType, item) {
+    let textEntry = this.textMap.get(selector);
+    if (!textEntry) {
+      textEntry = {};
+      this.textMap.set(selector, textEntry);
+    }
+    const entries = textEntry[textType] || [];
+    textEntry[textType] = entries;
+    entries.push(item);
+    this.textTypes.add(textType);
+  }
+  async collectNode(node, alternative, related) {
+    if (!node.contentType.multipart) {
+      const inlineRfc822 = this.isInlineMessageRfc822(node);
+      const rfc822DepthExceeded = inlineRfc822 && this.rfc822NestingDepth >= this.limits.maxRfc822NestingDepth;
+      if (inlineRfc822 && !rfc822DepthExceeded) {
+        await this.collectSubMessage(node);
+      } else if (this.isInlineTextNode(node)) {
+        const textType = node.contentType.parsed.value === "text/html" ? "html" : "plain";
+        this.addTextEntry(alternative || node, textType, { type: "text", value: node.getTextContent() });
+      } else if (node.content) {
+        this.collectAttachment(node, node.content, related, rfc822DepthExceeded);
+      }
+    } else if (node.contentType.multipart === "alternative") {
+      alternative = node;
+    } else if (node.contentType.multipart === "related") {
+      related = true;
+    }
+    for (let childNode of node.childNodes) {
+      await this.collectNode(childNode, alternative, related);
+    }
+  }
+  async collectSubMessage(node) {
+    const subParser = new PostalMime({
+      attachmentEncoding: "arraybuffer"
+    }, this);
+    const subMessage = await subParser.parse(node.content || new ArrayBuffer(0));
+    this.counters.forwardedAddresses += countAddresses(subMessage.from) + countAddresses(subMessage.to) + countAddresses(subMessage.cc) + countAddresses(subMessage.bcc);
+    if (this.counters.forwardedAddresses > this.limits.maxForwardedAddresses) {
+      throw createError("EMAXFORWARDEDADDRESSES", `Maximum forwarded address count of ${this.limits.maxForwardedAddresses} addresses exceeded`);
+    }
+    const hasPlain = subParser.textTypes.has("plain");
+    const hasHtml = subParser.textTypes.has("html");
+    if (hasPlain || !hasHtml) {
+      this.addTextEntry(node, "plain", { type: "subMessage", value: subMessage });
+    }
+    if (hasHtml) {
+      this.addTextEntry(node, "html", { type: "subMessage", value: subMessage });
+    }
+    subParser.textMap.forEach((subTextEntry, subTextNode) => {
+      this.textMap.set(subTextNode, subTextEntry);
+    });
+    for (let attachment of subMessage.attachments) {
+      this.attachments.push(attachment);
+    }
+  }
+  collectAttachment(node, content, related, rfc822DepthExceeded) {
+    const filename = node.contentDisposition.parsed.params.filename || node.contentType.parsed.params.name || null;
+    const attachment = {
+      filename: filename ? decodeWords(foldLineBreaks(filename)) : null,
+      mimeType: node.contentType.parsed.value,
+      disposition: node.contentDisposition.parsed.value || null
+    };
+    if (related && node.contentId && !rfc822DepthExceeded) {
+      attachment.related = true;
+    }
+    if (rfc822DepthExceeded) {
+      attachment.rfc822DepthExceeded = true;
+    }
+    if (node.contentDescription) {
+      attachment.description = decodeWords(node.contentDescription);
+    }
+    if (node.contentId) {
+      attachment.contentId = node.contentId;
+    }
+    switch (node.contentType.parsed.value) {
+      case "text/calendar":
+      case "application/ics": {
+        if (node.contentType.parsed.params.method) {
+          attachment.method = node.contentType.parsed.params.method.toString().toUpperCase().trim();
+        }
+        const decodedText = node.getTextContent();
+        let end = decodedText.length;
+        while (end > 0 && decodedText.charCodeAt(end - 1) === 10) {
+          end--;
+        }
+        attachment.content = textEncoder.encode(decodedText.slice(0, end) + `
+`);
+        break;
+      }
+      default:
+        attachment.content = content;
+    }
+    this.attachments.push(attachment);
+  }
+  renderTextContent() {
+    const textContent = {};
+    this.textMap.forEach((mapEntry) => {
+      this.textTypes.forEach((textType) => {
+        const output = textContent[textType] || [];
+        textContent[textType] = output;
+        const ownEntries = mapEntry[textType];
+        const entries = ownEntries || mapEntry[textType === "html" ? "plain" : "html"] || [];
+        for (const textEntry of entries) {
+          output.push(renderEntry(textEntry, textType, !ownEntries));
+        }
+      });
+    });
+    Object.keys(textContent).forEach((textType) => {
+      this.textContent[textType] = textContent[textType].join(`
+`);
+    });
+  }
+  isInlineTextNode(node) {
+    if (node.contentDisposition.parsed.value === "attachment") {
+      return false;
+    }
+    switch (node.contentType.parsed.value) {
+      case "text/html":
+      case "text/plain":
+        return true;
+      case "text/calendar":
+      case "text/csv":
+      default:
+        return false;
+    }
+  }
+  isInlineMessageRfc822(node) {
+    if (this.forceRfc822Attachments || node.contentType.parsed.value !== "message/rfc822") {
+      return false;
+    }
+    const encoding = node.contentTransferEncoding.encoding;
+    if (encoding === "base64" || encoding === "quoted-printable") {
+      return false;
+    }
+    let disposition = node.contentDisposition.parsed.value || (this.options.rfc822Attachments ? "attachment" : "inline");
+    return disposition === "inline";
+  }
+  hasReportParts() {
+    let found = false;
+    let walk = (node) => {
+      if (!node.contentType.multipart) {
+        if (["message/delivery-status", "message/feedback-report"].includes(node.contentType.parsed.value)) {
+          found = true;
+        }
+      }
+      for (let childNode of node.childNodes) {
+        walk(childNode);
+      }
+    };
+    walk(this.root);
+    return found;
+  }
+  async resolveStream(stream) {
+    let chunkLen = 0;
+    let chunks = [];
+    const reader = stream.getReader();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      if (!ArrayBuffer.isView(value)) {
+        const error = createError("EINVALIDINPUT", "Stream chunks must be Uint8Array values");
+        reader.cancel(error).catch(() => {});
+        throw error;
+      }
+      chunks.push(new Uint8Array(value.buffer, value.byteOffset, value.byteLength));
+      chunkLen += value.byteLength;
+    }
+    const result = new Uint8Array(chunkLen);
+    let chunkPointer = 0;
+    for (let chunk of chunks) {
+      result.set(chunk, chunkPointer);
+      chunkPointer += chunk.length;
+    }
+    return result;
+  }
+  async resolveInput(buf) {
+    let input = buf;
+    if (isReadableStream(input)) {
+      input = await this.resolveStream(input);
+    }
+    input = input || new ArrayBuffer(0);
+    if (typeof input === "string") {
+      input = textEncoder.encode(input);
+    }
+    if (isBlob(input)) {
+      input = await blobToArrayBuffer(input);
+    }
+    if (ArrayBuffer.isView(input)) {
+      return input.buffer.slice(input.byteOffset, input.byteOffset + input.byteLength);
+    }
+    if (!isArrayBuffer(input)) {
+      throw createError("EINVALIDINPUT", "Unsupported email input type");
+    }
+    return input;
+  }
+  buildMessage() {
+    const headers = this.root.headers;
+    const message = {
+      headers: headers.map((entry) => ({
+        key: entry.key,
+        originalKey: entry.originalKey,
+        value: entry.value
+      }))
+    };
+    for (const key of ["from", "sender"]) {
+      const addressHeader = headers.find((line) => line.key === key);
+      if (addressHeader && addressHeader.value) {
+        const addresses = address_parser_default(addressHeader.value);
+        if (addresses && addresses.length) {
+          message[key] = addresses[0];
+        }
+      }
+    }
+    for (const [key, camelKey] of [
+      ["delivered-to", "deliveredTo"],
+      ["return-path", "returnPath"]
+    ]) {
+      const addressHeader = headers.find((line) => line.key === key);
+      if (addressHeader && addressHeader.value) {
+        const addresses = address_parser_default(addressHeader.value);
+        if (addresses && addresses.length && addresses[0].address) {
+          message[camelKey] = addresses[0].address;
+        }
+      }
+    }
+    for (const [key, camelKey] of [
+      ["to", "to"],
+      ["cc", "cc"],
+      ["bcc", "bcc"],
+      ["reply-to", "replyTo"]
+    ]) {
+      const addresses = [];
+      for (const entry of headers) {
+        if (entry.key === key && entry.value) {
+          for (const address of address_parser_default(entry.value)) {
+            addresses.push(address);
+          }
+        }
+      }
+      if (addresses.length) {
+        message[camelKey] = addresses;
+      }
+    }
+    for (const [key, camelKey] of [
+      ["subject", "subject"],
+      ["message-id", "messageId"],
+      ["in-reply-to", "inReplyTo"],
+      ["references", "references"]
+    ]) {
+      const header = headers.find((line) => line.key === key);
+      if (header && header.value) {
+        message[camelKey] = decodeWords(header.value);
+      }
+    }
+    let dateHeader = headers.find((line) => line.key === "date");
+    if (dateHeader) {
+      let date = new Date(dateHeader.value);
+      message.date = date.toString() === "Invalid Date" ? dateHeader.value : date.toISOString();
+    }
+    if (this.textContent.html) {
+      message.html = this.textContent.html;
+    }
+    if (this.textContent.plain) {
+      message.text = this.textContent.plain;
+    }
+    message.attachments = this.attachments;
+    message.headerLines = this.root.rawHeaderLines.slice();
+    return message;
+  }
+  encodeAttachments() {
+    switch (this.attachmentEncoding) {
+      case "arraybuffer":
+        break;
+      case "base64":
+        for (let attachment of this.attachments) {
+          if (attachment.content && typeof attachment.content !== "string") {
+            attachment.content = base64ArrayBuffer(attachment.content);
+            attachment.encoding = "base64";
+          }
+        }
+        break;
+      case "utf8": {
+        let attachmentDecoder = new TextDecoder("utf8");
+        for (let attachment of this.attachments) {
+          if (attachment.content && typeof attachment.content !== "string") {
+            attachment.content = attachmentDecoder.decode(attachment.content);
+            attachment.encoding = "utf8";
+          }
+        }
+        break;
+      }
+    }
+  }
+  async parse(buf) {
+    if (this.started) {
+      throw createError("EPARSERREUSED", "Can not reuse parser, create a new PostalMime object");
+    }
+    this.started = true;
+    this.buf = await this.resolveInput(buf);
+    this.av = new Uint8Array(this.buf);
+    this.readPos = 0;
+    while (this.readPos < this.av.length) {
+      const line = this.readLine();
+      await this.processLine(line.bytes, line.lineBreak, line.done);
+    }
+    this.forceRfc822Attachments = Boolean(this.options.forceRfc822Attachments) || this.hasReportParts();
+    await this.collectNode(this.root, false, false);
+    if (this.rfc822NestingDepth === 0) {
+      this.renderTextContent();
+    }
+    const message = this.buildMessage();
+    this.encodeAttachments();
+    return message;
+  }
+}
+var ATTACHMENT_ENCODINGS, LINE_FEED, MAX_NESTING_DEPTH = 256, MAX_HEADERS_SIZE, MAX_PART_COUNT = 1e4, MAX_RFC822_NESTING_DEPTH = 10, MAX_FORWARDED_ADDRESSES = 1e4;
+var init_postal_mime = __esm(() => {
+  init_mime_node();
+  init_text_format();
+  init_address_parser();
+  init_decode_strings();
+  init_errors4();
+  ATTACHMENT_ENCODINGS = new Set(["arraybuffer", "base64", "utf8"]);
+  LINE_FEED = new Uint8Array([10]);
+  MAX_HEADERS_SIZE = 2 * 1024 * 1024;
+});
+
+// src/workers/archive-import/mbox/parse.ts
+import { createHash as createHash78 } from "node:crypto";
+function sha2568(value) {
+  return createHash78("sha256").update(value).digest("hex");
+}
+function headerValue(email, key) {
+  const value = email.headers.find((header) => header.key === key)?.value?.trim();
+  return value ? value : undefined;
+}
+function decoded(value) {
+  if (!value)
+    return;
+  try {
+    return decodeWords(value).trim() || undefined;
+  } catch {
+    return value;
+  }
+}
+function bareMessageId2(value) {
+  const trimmed = value?.trim();
+  if (!trimmed)
+    return;
+  const inner = trimmed.startsWith("<") && trimmed.endsWith(">") ? trimmed.slice(1, -1).trim() : trimmed;
+  return inner || undefined;
+}
+function firstMessageId(value) {
+  const match = value ? /<([^<>\s]+)>/.exec(value) : null;
+  return match?.[1] ?? bareMessageId2(value?.split(/\s+/)[0]);
+}
+function isoDate(value) {
+  if (!value)
+    return;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined;
+}
+function stripHtml2(value) {
+  return value.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+}
+function charsetDecodable(charset) {
+  const label = charset.trim().toLowerCase();
+  if (!label)
+    return true;
+  const cached = decodableCharsets.get(label);
+  if (cached !== undefined)
+    return cached;
+  const stripped = label.replace(/^(?:x-ms-|x-|cs)/, "");
+  let ok = false;
+  for (const candidate of [label, stripped, stripped.replace(/[\s._-]+/g, "")]) {
+    try {
+      new TextDecoder(candidate);
+      ok = true;
+      break;
+    } catch {}
+  }
+  decodableCharsets.set(label, ok);
+  return ok;
+}
+function declaredCharsets(raw) {
+  const text = Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength).toString("latin1");
+  const found = new Set;
+  for (const match of text.matchAll(/^content-type:[^\n]*(?:\n[ \t][^\n]*)*/gim)) {
+    const param = /charset\s*=\s*"?([^";\s]+)/i.exec(match[0]);
+    if (param?.[1])
+      found.add(param[1].toLowerCase());
+  }
+  const headerEnd = text.search(/\r?\n\r?\n/);
+  const headers = headerEnd < 0 ? text : text.slice(0, headerEnd);
+  for (const match of headers.matchAll(/=\?([^?*\s]+)(?:\*[^?]*)?\?[bq]\?/gi)) {
+    if (match[1])
+      found.add(match[1].toLowerCase());
+  }
+  return [...found];
+}
+async function parseMboxMessage(raw, options = {}) {
+  let email;
+  try {
+    email = await PostalMime.parse(raw, {
+      ...options.rfc822AsAttachments ? { forceRfc822Attachments: true } : {},
+      maxHeadersSize: 1024 * 1024,
+      maxPartCount: 2000,
+      maxNestingDepth: 64,
+      maxRfc822NestingDepth: 4
+    });
+  } catch {
+    return;
+  }
+  const labels = (headerValue(email, "x-gmail-labels") ?? "").split(",").map((label) => decoded(label.trim()) ?? "").filter((label) => label !== "");
+  const dateHeader = headerValue(email, "date");
+  const authoredAt = isoDate(email.date) ?? isoDate(dateHeader);
+  const to = decoded(headerValue(email, "to"));
+  const messageId = bareMessageId2(email.messageId ?? headerValue(email, "message-id"));
+  const thread = headerValue(email, "x-gm-thrid");
+  const deliveredTo = headerValue(email, "delivered-to");
+  const threadRoot = firstMessageId(email.references) ?? firstMessageId(email.inReplyTo) ?? messageId;
+  return {
+    email,
+    labels,
+    spamOrTrash: labels.some((label) => MBOX_SKIPPED_LABELS.has(label.toLowerCase())),
+    ...email.subject?.trim() ? { subject: email.subject.trim() } : {},
+    from: decoded(headerValue(email, "from")) ?? "",
+    ...to ? { to } : {},
+    ...dateHeader ? { dateHeader } : {},
+    ...authoredAt ? { authoredAt } : {},
+    ...messageId ? { messageId } : {},
+    body: email.text?.trim() || (email.html ? stripHtml2(email.html) : ""),
+    messageHash: sha2568(raw),
+    ...thread && /^\d{1,20}$/.test(thread) ? { gmailThread: thread } : {},
+    ...threadRoot ? { threadRoot } : {},
+    charsetNotDecoded: declaredCharsets(raw).some((charset) => !charsetDecodable(charset)),
+    ...deliveredTo ? { deliveredTo } : {}
+  };
+}
+var MBOX_SKIPPED_LABELS, decodableCharsets;
+var init_parse2 = __esm(() => {
+  init_postal_mime();
+  MBOX_SKIPPED_LABELS = new Set(["spam", "trash"]);
+  decodableCharsets = new Map;
+});
+
+// src/workers/archive-import/mbox/connector.ts
+function manifestTag2(input) {
+  return input.manifestSha256.slice(0, 16);
+}
+function cursorAt2(input, fileIndex, offset) {
+  return `${MBOX_CURSOR_PREFIX}${manifestTag2(input)}:${fileIndex}:${offset}`;
+}
+function doneCursor2(input) {
+  return `${MBOX_CURSOR_PREFIX}${manifestTag2(input)}:done`;
+}
+function parseCursor2(input, cursor) {
+  if (!cursor)
+    return { fileIndex: 0, offset: 0, done: false };
+  const prefix = `${MBOX_CURSOR_PREFIX}${manifestTag2(input)}:`;
+  if (!cursor.startsWith(prefix)) {
+    throw new ArchiveImportStoppedError("resume_point_invalid", "The resume point belongs to other files than this archive's.");
+  }
+  const rest = cursor.slice(prefix.length);
+  if (rest === "done")
+    return { fileIndex: input.files.length, offset: 0, done: true };
+  const [fileText, offsetText, extra] = rest.split(":");
+  const fileIndex = Number(fileText);
+  const offset = Number(offsetText);
+  if (extra !== undefined || !Number.isSafeInteger(fileIndex) || !Number.isSafeInteger(offset) || fileIndex < 0 || offset < 0 || fileIndex >= input.files.length || offset > input.files[fileIndex].version.size) {
+    throw new ArchiveImportStoppedError("resume_point_invalid", "The resume point is not a position in this archive.");
+  }
+  return { fileIndex, offset, done: false };
+}
+function stoppedFrom(error, relPath) {
+  if (error instanceof MboxFormatError) {
+    return new ArchiveImportStoppedError("resume_point_invalid", "No message starts where this import was to resume.", relPath);
+  }
+  return archiveStopFromScopeError(error, relPath);
+}
+function attachmentInventory(email) {
+  const inventory = { count: 0, bytes: 0, lines: [] };
+  for (const attachment of email.attachments) {
+    const name = attachment.filename?.trim();
+    if (!name && attachment.disposition !== "attachment")
+      continue;
+    const content = attachment.content;
+    const size = typeof content === "string" ? undefined : content.byteLength;
+    inventory.count += 1;
+    inventory.bytes += size ?? 0;
+    const details = [attachment.mimeType || undefined, size !== undefined ? `${size} bytes` : undefined].filter((value) => Boolean(value));
+    const label = (name || "unnamed attachment").slice(0, MAX_ATTACHMENT_NAME_CHARS2);
+    inventory.lines.push(`Attachment: ${label}${details.length > 0 ? ` (${details.join(", ")})` : ""}`);
+  }
+  return inventory;
+}
+async function messageOutcome2(input, span) {
+  const raw = span.raw;
+  const parsed = await parseMboxMessage(raw);
+  if (!parsed)
+    return { kind: "unreadable" };
+  const { email, labels } = parsed;
+  if (parsed.spamOrTrash)
+    return { kind: "skipped", reason: MBOX_FINDINGS.spamOrTrash };
+  const findings = [];
+  const subject = parsed.subject ?? "(no subject)";
+  const rawFrom = parsed.from;
+  const from = rawFrom.length > MAX_FROM_HEADER_CHARS ? `${rawFrom.slice(0, MAX_FROM_HEADER_CHARS)}…` : rawFrom;
+  const to = parsed.to;
+  const dateHeader = parsed.dateHeader;
+  const authoredAt = parsed.authoredAt;
+  const attachments = attachmentInventory(email);
+  if (attachments.count > 0)
+    findings.push({ kind: MBOX_FINDINGS.attachments, count: attachments.count });
+  if (parsed.charsetNotDecoded)
+    findings.push({ kind: MBOX_FINDINGS.charset });
+  const summary = [
+    email.subject?.trim() ? `Subject: ${email.subject.trim()}` : undefined,
+    from ? `From: ${from}` : undefined,
+    to ? `To: ${to}` : undefined,
+    dateHeader ? `Date: ${dateHeader}` : undefined
+  ].filter(Boolean).join(`
+`);
+  const body = parsed.body;
+  const text = [summary, body, attachments.lines.join(`
+`)].filter((part) => part !== "").join(`
+
+`) || `Subject: ${subject}`;
+  const messageId = parsed.messageId;
+  const messageHash = parsed.messageHash;
+  const providerItemId = sha2568(`${messageId ?? ""}\x00${messageHash}`).slice(0, 32);
+  const gmailThread = parsed.gmailThread;
+  const threadRoot = parsed.threadRoot;
+  const providerThreadId = gmailThread ? `gm:${gmailThread}` : threadRoot ? `mid:${sha2568(threadRoot).slice(0, 24)}` : undefined;
+  const item = {
+    identity: {
+      family: input.format.family,
+      provider: input.format.provider,
+      accountScope: input.accountScope,
+      providerItemId,
+      ...providerThreadId ? { providerThreadId } : {},
+      localItemId: `${input.accountScope}:${providerItemId}`,
+      sourceVersion: messageHash.slice(0, 32)
+    },
+    mimeType: "message/rfc822",
+    content: { kind: "text", text },
+    metadata: Object.freeze({
+      title: subject,
+      subject,
+      from,
+      ...to ? { to } : {},
+      ...authoredAt ? { authoredAt } : {},
+      ...messageId ? { messageId } : {},
+      labels,
+      attachmentCount: attachments.count,
+      attachmentBytesDeclared: attachments.bytes,
+      ...attachments.lines.length > 0 ? { attachments: attachments.lines } : {},
+      attachmentsNotIngested: attachments.count,
+      contentHash: sha2568(text)
+    }),
+    fetchedAt: new Date().toISOString()
+  };
+  return { kind: "item", item, findings };
+}
+function createMboxArchiveConnector(input) {
+  const pageSizeDefault = Math.max(1, input.pageSize ?? MBOX_DEFAULT_PAGE_SIZE);
+  const byteBudget = Math.max(1, input.maxBytesPerListing ?? MBOX_DEFAULT_MAX_BYTES_PER_LISTING);
+  return {
+    id: input.connectorId,
+    family: input.format.family,
+    async authenticate() {},
+    listItems(options) {
+      return async function* () {
+        const start = parseCursor2(input, options?.cursor);
+        if (start.done) {
+          yield { items: [], nextCursor: doneCursor2(input), done: true };
+          return;
+        }
+        const limit = options?.limit !== undefined && options.limit > 0 ? options.limit : Number.POSITIVE_INFINITY;
+        let emitted = 0;
+        let bytesRead = 0;
+        for (let fileIndex = start.fileIndex;fileIndex < input.files.length; fileIndex += 1) {
+          const file = input.files[fileIndex];
+          let reader;
+          try {
+            reader = input.root.openFile(file.relPath, { expected: file.version });
+          } catch (error) {
+            throw stoppedFrom(error, file.relPath);
+          }
+          const current = () => {
+            try {
+              reader.assertCurrent();
+            } catch (error) {
+              throw stoppedFrom(error, file.relPath);
+            }
+          };
+          try {
+            const splitter = new MboxSplitter(reader, {
+              start: fileIndex === start.fileIndex ? start.offset : 0,
+              maxMessageBytes: MBOX_DEFAULT_MAX_MESSAGE_BYTES
+            });
+            let page = [];
+            let pending = false;
+            for (;; ) {
+              if (!input.shouldContinue()) {
+                if (pending) {
+                  current();
+                  input.reportPosition?.({ fileIndex, offset: splitter.position });
+                  yield { items: page, nextCursor: cursorAt2(input, fileIndex, splitter.position), done: false };
+                }
+                return;
+              }
+              let span;
+              try {
+                span = splitter.next();
+              } catch (error) {
+                throw stoppedFrom(error, file.relPath);
+              }
+              if (!span)
+                break;
+              pending = true;
+              bytesRead += span.length;
+              const report = (kind, findingClass, count) => {
+                input.report({ kind, class: findingClass, fileIndex, offset: span.offset, ...count !== undefined ? { count } : {} });
+              };
+              if (span.tooLarge) {
+                report(MBOX_FINDINGS.tooLarge, "gap");
+              } else {
+                const outcome = await messageOutcome2(input, span);
+                if (outcome.kind === "unreadable")
+                  report(MBOX_FINDINGS.unreadable, "gap");
+                else if (outcome.kind === "skipped")
+                  report(outcome.reason, "skipped");
+                else {
+                  page.push(outcome.item);
+                  for (const finding of outcome.findings)
+                    report(finding.kind, "gap", finding.count);
+                }
+              }
+              const budgetLeft = limit - emitted;
+              if (page.length >= Math.min(pageSizeDefault, budgetLeft) || bytesRead >= byteBudget) {
+                current();
+                const last = fileIndex === input.files.length - 1 && splitter.done;
+                if (last) {
+                  yield { items: page, nextCursor: doneCursor2(input), done: true };
+                  return;
+                }
+                input.reportPosition?.({ fileIndex, offset: splitter.position });
+                yield { items: page, nextCursor: cursorAt2(input, fileIndex, splitter.position), done: false };
+                emitted += page.length;
+                page = [];
+                pending = false;
+                if (emitted >= limit || bytesRead >= byteBudget)
+                  return;
+              }
+            }
+            current();
+            if (fileIndex === input.files.length - 1) {
+              yield { items: page, nextCursor: doneCursor2(input), done: true };
+              return;
+            }
+            if (pending) {
+              input.reportPosition?.({ fileIndex: fileIndex + 1, offset: 0 });
+              yield { items: page, nextCursor: cursorAt2(input, fileIndex + 1, 0), done: false };
+              emitted += page.length;
+              if (emitted >= limit)
+                return;
+            }
+          } finally {
+            reader.close();
+          }
+        }
+      }();
+    },
+    async fetchItem() {
+      throw new Error("An imported message is read only while its archive is listed.");
+    },
+    classificationSignals(item) {
+      const subject = typeof item.metadata.subject === "string" ? item.metadata.subject : undefined;
+      const sender = typeof item.metadata.from === "string" && item.metadata.from ? item.metadata.from : undefined;
+      const labels = Array.isArray(item.metadata.labels) ? item.metadata.labels.filter((label) => typeof label === "string") : [];
+      return {
+        ...subject ? { title: subject } : {},
+        ...sender ? { sender } : {},
+        ...labels.length > 0 ? { labels } : {}
+      };
+    }
+  };
+}
+function registerMboxArchiveConnector() {
+  registerArchiveFormatConnector("mbox", createMboxArchiveConnector);
+}
+var MBOX_CURSOR_PREFIX = "mbox1:", MBOX_DEFAULT_PAGE_SIZE = 100, MBOX_DEFAULT_MAX_BYTES_PER_LISTING, MAX_ATTACHMENT_NAME_CHARS2 = 256, MBOX_FINDINGS;
+var init_connector5 = __esm(() => {
+  init_archive_formats();
+  init_stop_errors();
+  init_sender_rules();
+  init_split();
+  init_parse2();
+  MBOX_DEFAULT_MAX_BYTES_PER_LISTING = 256 * 1024 * 1024;
+  MBOX_FINDINGS = {
+    tooLarge: "message_too_large",
+    unreadable: "message_unreadable",
+    charset: "charset_not_decoded",
+    attachments: "attachments_not_read",
+    textCut: "text_cut",
+    spamOrTrash: "spam_or_trash",
+    otherAccount: "mail_for_another_account"
+  };
+});
+
+// src/workers/archive-import/mbox/mime-parts.ts
+function headerBlockEnd(text, from, to) {
+  const window2 = text.slice(from, Math.min(to, from + MAX_HEADER_BYTES2));
+  if (window2.startsWith(`\r
+`))
+    return { headersEnd: from, bodyStart: from + 2 };
+  if (window2.startsWith(`
+`))
+    return { headersEnd: from, bodyStart: from + 1 };
+  const crlf = window2.indexOf(`\r
+\r
+`);
+  const lf = window2.indexOf(`
+
+`);
+  if (crlf < 0 && lf < 0)
+    return { headersEnd: Math.min(to, from + window2.length), bodyStart: Math.min(to, from + window2.length) };
+  if (lf >= 0 && (crlf < 0 || lf < crlf))
+    return { headersEnd: from + lf, bodyStart: from + lf + 2 };
+  return { headersEnd: from + crlf, bodyStart: from + crlf + 4 };
+}
+function parseHeaders(block) {
+  const map = new Map;
+  const unfolded = block.replace(/\r?\n[ \t]+/g, " ");
+  for (const line of unfolded.split(/\r?\n/)) {
+    const colon = line.indexOf(":");
+    if (colon <= 0)
+      continue;
+    const name = line.slice(0, colon).trim().toLowerCase();
+    if (!map.has(name))
+      map.set(name, line.slice(colon + 1).trim());
+  }
+  return { get: (name) => map.get(name) };
+}
+function splitParams(header) {
+  const pieces = [];
+  let current = "";
+  let quoted = false;
+  for (let index = 0;index < header.length; index += 1) {
+    const char = header[index];
+    if (char === '"' && header[index - 1] !== "\\")
+      quoted = !quoted;
+    if (char === ";" && !quoted) {
+      pieces.push(current);
+      current = "";
+    } else {
+      current += char;
+    }
+  }
+  pieces.push(current);
+  const params = new Map;
+  for (const piece of pieces.slice(1)) {
+    const eq = piece.indexOf("=");
+    if (eq <= 0)
+      continue;
+    const name = piece.slice(0, eq).trim().toLowerCase();
+    let value = piece.slice(eq + 1).trim();
+    if (value.startsWith('"') && value.endsWith('"') && value.length >= 2)
+      value = value.slice(1, -1).replace(/\\(.)/g, "$1");
+    if (!params.has(name))
+      params.set(name, value);
+  }
+  return { value: (pieces[0] ?? "").trim(), params };
+}
+function percentDecode(value, charset) {
+  const bytes = [];
+  for (let index = 0;index < value.length; index += 1) {
+    const char = value[index];
+    if (char === "%" && /^[0-9a-fA-F]{2}$/.test(value.slice(index + 1, index + 3))) {
+      bytes.push(Number.parseInt(value.slice(index + 1, index + 3), 16));
+      index += 2;
+    } else {
+      bytes.push(...Buffer.from(char, "latin1"));
+    }
+  }
+  try {
+    return new TextDecoder(charset || "utf-8").decode(new Uint8Array(bytes));
+  } catch {
+    return new TextDecoder("utf-8").decode(new Uint8Array(bytes));
+  }
+}
+function paramValue(params, name) {
+  const extended = params.get(`${name}*`);
+  if (extended !== undefined) {
+    const match = /^([^']*)'[^']*'(.*)$/.exec(extended);
+    return match ? percentDecode(match[2], match[1]) : extended;
+  }
+  const sections = [];
+  let charset = "";
+  for (let index = 0;index < 1000; index += 1) {
+    const encoded = params.get(`${name}*${index}*`);
+    const plain = params.get(`${name}*${index}`);
+    if (encoded === undefined && plain === undefined)
+      break;
+    if (encoded !== undefined) {
+      let value = encoded;
+      if (index === 0) {
+        const match = /^([^']*)'[^']*'(.*)$/.exec(encoded);
+        if (match) {
+          charset = match[1];
+          value = match[2];
+        }
+      }
+      sections.push(percentDecode(value, charset));
+    } else {
+      sections.push(plain);
+    }
+  }
+  if (sections.length > 0)
+    return sections.join("");
+  const plain = params.get(name);
+  if (plain === undefined)
+    return;
+  try {
+    return decodeWords(plain);
+  } catch {
+    return plain;
+  }
+}
+function decodedSize(body, encoding) {
+  if (encoding === "base64") {
+    const clean = body.replace(/[^A-Za-z0-9+/=]/g, "");
+    const padding = clean.endsWith("==") ? 2 : clean.endsWith("=") ? 1 : 0;
+    return Math.max(0, Math.floor(clean.length * 3 / 4) - padding);
+  }
+  if (encoding === "quoted-printable") {
+    const softBreaks = body.replace(/=\r?\n/g, "");
+    return Buffer.byteLength(softBreaks.replace(/=[0-9A-Fa-f]{2}/g, "x"), "latin1");
+  }
+  return body.length;
+}
+function multipartBodies(text, from, to, boundary) {
+  const delimiter = `--${boundary}`;
+  const bodies = [];
+  let partStart;
+  let lineStart = from;
+  while (lineStart < to) {
+    let lineEnd = text.indexOf(`
+`, lineStart);
+    if (lineEnd < 0 || lineEnd >= to)
+      lineEnd = to;
+    const line = text.slice(lineStart, lineEnd).replace(/\r$/, "").trimEnd();
+    if (line === delimiter || line === `${delimiter}--`) {
+      if (partStart !== undefined) {
+        let end = lineStart;
+        if (end > partStart && text[end - 1] === `
+`)
+          end -= 1;
+        if (end > partStart && text[end - 1] === "\r")
+          end -= 1;
+        bodies.push({ start: partStart, end });
+      }
+      if (line !== delimiter)
+        return bodies;
+      partStart = lineEnd + 1;
+    }
+    lineStart = lineEnd + 1;
+  }
+  if (partStart !== undefined && partStart < to)
+    bodies.push({ start: partStart, end: to });
+  return bodies;
+}
+function decodeBody(body, encoding) {
+  if (encoding === "base64")
+    return new Uint8Array(Buffer.from(body.replace(/[^A-Za-z0-9+/=]/g, ""), "base64"));
+  if (encoding === "quoted-printable") {
+    const joined = body.replace(/=\r?\n/g, "");
+    const bytes = [];
+    for (let index = 0;index < joined.length; index += 1) {
+      const hex = joined.slice(index + 1, index + 3);
+      if (joined[index] === "=" && /^[0-9A-Fa-f]{2}$/.test(hex)) {
+        bytes.push(Number.parseInt(hex, 16));
+        index += 2;
+      } else {
+        bytes.push(joined.charCodeAt(index) & 255);
+      }
+    }
+    return new Uint8Array(bytes);
+  }
+  return new Uint8Array(Buffer.from(body, "latin1"));
+}
+function mimePartBytes(raw, partId, maxBytes = Number.POSITIVE_INFINITY) {
+  const text = Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength).toString("latin1");
+  let parts = 0;
+  const find = (from, to, path, depth) => {
+    parts += 1;
+    if (parts > MAX_PARTS)
+      return;
+    const { headersEnd, bodyStart } = headerBlockEnd(text, from, to);
+    const headers = parseHeaders(text.slice(from, headersEnd));
+    const type = splitParams(headers.get("content-type") ?? "text/plain");
+    const mimeType = type.value.toLowerCase() || "text/plain";
+    if (path === partId) {
+      const encoding = (headers.get("content-transfer-encoding") ?? "").trim().toLowerCase();
+      const body = text.slice(bodyStart, to);
+      if (decodedSize(body, encoding) > maxBytes)
+        throw new MimePartTooLargeError;
+      return { bytes: decodeBody(body, encoding), mimeType };
+    }
+    if (depth >= MAX_DEPTH2)
+      return;
+    if (path !== "" && !partId.startsWith(`${path}.`))
+      return;
+    if (mimeType === "message/rfc822") {
+      for (const inner of encapsulatedParts(text, bodyStart, to, path === "" ? "0" : path)) {
+        if (partId === inner.path || partId.startsWith(`${inner.path}.`))
+          return find(inner.start, inner.end, inner.path, depth + 1);
+      }
+      return;
+    }
+    const boundary = type.params.get("boundary");
+    if (!mimeType.startsWith("multipart/") || !boundary)
+      return;
+    const bodies = multipartBodies(text, bodyStart, to, boundary);
+    for (const [index, body] of bodies.entries()) {
+      const childPath = path === "" ? String(index) : `${path}.${index}`;
+      if (partId === childPath || partId.startsWith(`${childPath}.`))
+        return find(body.start, body.end, childPath, depth + 1);
+    }
+    return;
+  };
+  return find(0, text.length, "", 0);
+}
+function encapsulatedParts(text, from, to, path) {
+  const { headersEnd, bodyStart } = headerBlockEnd(text, from, to);
+  const type = splitParams(parseHeaders(text.slice(from, headersEnd)).get("content-type") ?? "text/plain");
+  const boundary = type.params.get("boundary");
+  if (type.value.toLowerCase().startsWith("multipart/") && boundary) {
+    return multipartBodies(text, bodyStart, to, boundary).map((body, index) => ({ ...body, path: `${path}.${index}` }));
+  }
+  return [{ start: from, end: to, path: `${path}.0` }];
+}
+function mimeAttachments(raw, options = {}) {
+  const text = Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength).toString("latin1");
+  const children = options.children === true;
+  const found = [];
+  let parts = 0;
+  const walk = (from, to, partId, depth, inside) => {
+    parts += 1;
+    if (parts > MAX_PARTS)
+      return;
+    const { headersEnd, bodyStart } = headerBlockEnd(text, from, to);
+    const headers = parseHeaders(text.slice(from, headersEnd));
+    const type = splitParams(headers.get("content-type") ?? "text/plain");
+    const mimeType = type.value.toLowerCase() || "text/plain";
+    const disposition = splitParams(headers.get("content-disposition") ?? "");
+    const filename = (paramValue(disposition.params, "filename") ?? paramValue(type.params, "name"))?.trim();
+    const attachment = children ? isGmailAttachmentPart({ mimeType, ...filename ? { filename } : {}, ...disposition.value ? { disposition: disposition.value } : {} }) : Boolean(filename);
+    if (attachment) {
+      const encoding = (headers.get("content-transfer-encoding") ?? "").trim().toLowerCase();
+      const contentId = headers.get("content-id");
+      found.push({
+        partId,
+        filename: children ? gmailAttachmentPartName({ partId, mimeType, ...filename ? { filename } : {}, ...contentId ? { contentId } : {} }) : filename,
+        mimeType,
+        size: decodedSize(text.slice(bodyStart, to), encoding),
+        ...inside ? { nested: true } : {}
+      });
+    }
+    if (depth >= MAX_DEPTH2)
+      return;
+    const boundary = type.params.get("boundary");
+    if (mimeType.startsWith("multipart/") && boundary) {
+      multipartBodies(text, bodyStart, to, boundary).forEach((body, index) => {
+        walk(body.start, body.end, partId === "" ? String(index) : `${partId}.${index}`, depth + 1, inside || attachment);
+      });
+    } else if (children && mimeType === "message/rfc822") {
+      for (const inner of encapsulatedParts(text, bodyStart, to, partId === "" ? "0" : partId)) {
+        walk(inner.start, inner.end, inner.path, depth + 1, true);
+      }
+    }
+  };
+  walk(0, text.length, "", 0, false);
+  return found;
+}
+var MAX_PARTS = 2000, MAX_DEPTH2 = 64, MAX_HEADER_BYTES2, MimePartTooLargeError;
+var init_mime_parts = __esm(() => {
+  init_postal_mime();
+  init_gmail_mail_record();
+  MAX_HEADER_BYTES2 = 256 * 1024;
+  MimePartTooLargeError = class MimePartTooLargeError extends Error {
+    constructor() {
+      super("The part is larger than this read may take.");
+      this.name = "MimePartTooLargeError";
+    }
+  };
+});
+
+// src/workers/archive-import/mbox/gmail-input.ts
+function gmailIdFromDecimal(decimal) {
+  if (!decimal || !/^\d{1,20}$/.test(decimal))
+    return;
+  const value = BigInt(decimal);
+  return value > 0n && value <= MAX_GMAIL_ID ? value.toString(16) : undefined;
+}
+function takeoutMessageId(separator) {
+  return gmailIdFromDecimal(separator ? TAKEOUT_ID.exec(separator)?.[1] : undefined);
+}
+function gmailLabelIds(names, byName) {
+  const ids = [];
+  const add = (value) => {
+    if (value && !ids.includes(value))
+      ids.push(value);
+  };
+  for (const name of names) {
+    const trimmed = name.trim();
+    const system = SYSTEM_LABELS.get(trimmed.toLowerCase());
+    if (system !== undefined) {
+      add(system);
+      continue;
+    }
+    add(byName?.get(trimmed.toLowerCase()));
+    add(trimmed);
+  }
+  return ids;
+}
+function mboxPartLocator(archiveId, fileIndex, offset, digest, parentId, partId) {
+  return `${MBOX_PART_LOCATOR_PREFIX}${archiveId}:${fileIndex}:${offset}:${digest}:${parentId}:${partId}`;
+}
+function mboxMessageDigest(raw) {
+  return sha2568(raw).slice(0, 32);
+}
+function parseMboxPartLocator(locator) {
+  if (!locator.startsWith(MBOX_PART_LOCATOR_PREFIX))
+    return;
+  const match = /^([0-9a-f-]{36}):(\d{1,6}):(\d{1,15}):([0-9a-f]{32}):([A-Za-z0-9_-]{1,128}):([0-9.]{0,64})$/.exec(locator.slice(MBOX_PART_LOCATOR_PREFIX.length));
+  if (!match)
+    return;
+  return { archiveId: match[1], fileIndex: Number(match[2]), offset: Number(match[3]), digest: match[4], parentId: match[5], partId: match[6] };
+}
+function recordOf(children, archiveId, parsed, span, fileIndex, id, labelsByName) {
+  const threadId = parsed.gmailThread ? gmailIdFromDecimal(parsed.gmailThread) : parsed.threadRoot ? `mid:${sha2568(parsed.threadRoot).slice(0, 24)}` : undefined;
+  return {
+    id,
+    ...threadId ? { threadId } : {},
+    labelIds: gmailLabelIds(parsed.labels, labelsByName),
+    headers: {
+      ...parsed.subject ? { subject: parsed.subject } : {},
+      ...parsed.from ? { from: parsed.from } : {},
+      ...parsed.to ? { to: parsed.to } : {},
+      ...parsed.dateHeader ? { date: parsed.dateHeader } : {},
+      ...parsed.messageId ? { messageId: parsed.messageId } : {}
+    },
+    body: parsed.body,
+    metadataOnly: false,
+    attachments: mimeAttachments(span.raw, { children }).map((part) => ({
+      partId: part.partId,
+      filename: part.filename,
+      ...part.mimeType ? { mimeType: part.mimeType } : {},
+      size: part.size,
+      locator: mboxPartLocator(archiveId, fileIndex, span.offset, mboxMessageDigest(span.raw), id, part.partId),
+      ...part.nested ? { nested: true } : {}
+    })),
+    sourceVersion: parsed.messageHash.slice(0, 32)
+  };
+}
+function ownId(parsed) {
+  return `${GMAIL_OWN_ID_PREFIX}${sha2568(`${parsed.messageId ?? ""}\x00${parsed.messageHash}`).slice(0, 32)}`;
+}
+function exportAddress(archive) {
+  if (!exportAddresses.has(archive.manifestSha256)) {
+    const found = identifyGmailExport(archive.root, archive.files);
+    if (exportAddresses.size > 64)
+      exportAddresses.clear();
+    exportAddresses.set(archive.manifestSha256, found.kind === "gmail" ? found.address : undefined);
+  }
+  return exportAddresses.get(archive.manifestSha256);
+}
+function mboxGmailInput(archive, options = {}) {
+  const pageSizeDefault = Math.max(1, archive.pageSize ?? MBOX_DEFAULT_PAGE_SIZE);
+  const byteBudget = Math.max(1, archive.maxBytesPerListing ?? MBOX_DEFAULT_MAX_BYTES_PER_LISTING);
+  const children = options.build?.children === true;
+  return {
+    inputId: archiveConnectorId(archive.archiveId),
+    kind: "archive",
+    records(listOptions) {
+      return async function* () {
+        const start = parseCursor2(archive, listOptions?.cursor);
+        if (start.done || archive.files.length === 0) {
+          yield { records: [], nextCursor: doneCursor2(archive), done: true };
+          return;
+        }
+        const address = options.accountAddress ?? exportAddress(archive);
+        if (!address)
+          throw new Error("This export is not one Gmail account's: nothing of it is read into Gmail.");
+        const labels = options.labels ? await options.labels() : { kind: "none" };
+        if (labels.kind === "unavailable") {
+          archive.waitForProvider?.(labels.reason, labels.minimum !== undefined ? { minimum: labels.minimum } : undefined);
+          return;
+        }
+        const labelsByName = labels.kind === "map" ? labels.byName : undefined;
+        const limit = listOptions?.limit !== undefined && listOptions.limit > 0 ? listOptions.limit : Number.POSITIVE_INFINITY;
+        const pageSize = Math.max(1, Math.min(pageSizeDefault, limit));
+        let bytesRead = 0;
+        for (let fileIndex = start.fileIndex;fileIndex < archive.files.length; fileIndex += 1) {
+          const file = archive.files[fileIndex];
+          let reader;
+          try {
+            reader = archive.root.openFile(file.relPath, { expected: file.version });
+          } catch (error) {
+            throw stoppedFrom(error, file.relPath);
+          }
+          const current = () => {
+            try {
+              reader.assertCurrent();
+            } catch (error) {
+              throw stoppedFrom(error, file.relPath);
+            }
+          };
+          try {
+            const splitter = new MboxSplitter(reader, {
+              start: fileIndex === start.fileIndex ? start.offset : 0,
+              maxMessageBytes: MBOX_DEFAULT_MAX_MESSAGE_BYTES
+            });
+            let page = [];
+            let positions = [];
+            let pending = false;
+            const out = (nextOffset, last) => {
+              current();
+              archive.reportItemPositions?.(positions);
+              if (last)
+                return { records: page, nextCursor: doneCursor2(archive), done: true };
+              archive.reportPosition?.({ fileIndex, offset: nextOffset });
+              return { records: page, nextCursor: cursorAt2(archive, fileIndex, nextOffset), done: false };
+            };
+            for (;; ) {
+              if (!archive.shouldContinue()) {
+                if (pending)
+                  yield out(splitter.position, false);
+                return;
+              }
+              const before = splitter.position;
+              let span;
+              try {
+                span = splitter.next();
+              } catch (error) {
+                throw stoppedFrom(error, file.relPath);
+              }
+              if (!span)
+                break;
+              bytesRead += span.length;
+              const report = (kind, findingClass, count) => {
+                archive.report({ kind, class: findingClass, fileIndex, offset: span.offset, ...count !== undefined ? { count } : {} });
+              };
+              if (span.tooLarge) {
+                report(MBOX_FINDINGS.tooLarge, "gap");
+              } else {
+                const parsed = await parseMboxMessage(span.raw, { rfc822AsAttachments: children });
+                if (!parsed)
+                  report(MBOX_FINDINGS.unreadable, "gap");
+                else if (parsed.spamOrTrash)
+                  report(MBOX_FINDINGS.spamOrTrash, "skipped");
+                else if (parsed.deliveredTo !== undefined && bareAddress(parsed.deliveredTo) !== address) {
+                  report(MBOX_FINDINGS.otherAccount, "gap");
+                } else {
+                  let id = takeoutMessageId(span.separator);
+                  if (id === undefined && options.match) {
+                    const matched = await options.match({
+                      ...parsed.messageId ? { messageId: parsed.messageId } : {},
+                      ...parsed.dateHeader ? { date: parsed.dateHeader } : {},
+                      from: parsed.from,
+                      ...parsed.subject ? { subject: parsed.subject } : {}
+                    });
+                    if (matched !== "none" && "later" in matched) {
+                      if (pending)
+                        yield out(before, false);
+                      archive.waitForProvider?.(matched.later, matched.minimum !== undefined ? { minimum: matched.minimum } : undefined);
+                      return;
+                    }
+                    if (matched !== "none")
+                      id = matched.id;
+                  }
+                  const record = recordOf(children, archive.archiveId, parsed, span, fileIndex, id ?? ownId(parsed), labelsByName);
+                  page.push(record);
+                  positions.push({ fileIndex, offset: span.offset });
+                  pending = true;
+                  const named = record.attachments.filter((attachment) => attachment.nested !== true).length;
+                  if (named > 0 && !children)
+                    report(MBOX_FINDINGS.attachments, "gap", named);
+                  if (parsed.charsetNotDecoded)
+                    report(MBOX_FINDINGS.charset, "gap");
+                }
+              }
+              if (page.length >= pageSize || bytesRead >= byteBudget) {
+                const last = fileIndex === archive.files.length - 1 && splitter.done;
+                yield out(splitter.position, last);
+                if (last)
+                  return;
+                page = [];
+                positions = [];
+                pending = false;
+                if (bytesRead >= byteBudget)
+                  return;
+              }
+            }
+            if (fileIndex === archive.files.length - 1) {
+              yield out(splitter.position, true);
+              return;
+            }
+            if (pending) {
+              current();
+              archive.reportItemPositions?.(positions);
+              archive.reportPosition?.({ fileIndex: fileIndex + 1, offset: 0 });
+              yield { records: page, nextCursor: cursorAt2(archive, fileIndex + 1, 0), done: false };
+            }
+          } finally {
+            reader.close();
+          }
+        }
+      }();
+    }
+  };
+}
+var TAKEOUT_ID, MAX_GMAIL_ID, MBOX_PART_LOCATOR_PREFIX = "mbox-part1:", SYSTEM_LABELS, exportAddresses;
+var init_gmail_input = __esm(() => {
+  init_gmail_mail_record();
+  init_state();
+  init_connector5();
+  init_gmail_account();
+  init_mime_parts();
+  init_parse2();
+  init_split();
+  TAKEOUT_ID = /^From (\d{1,20})@xxx(?:\s|$)/;
+  MAX_GMAIL_ID = (1n << 64n) - 1n;
+  SYSTEM_LABELS = new Map([
+    ["inbox", "INBOX"],
+    ["sent", "SENT"],
+    ["important", "IMPORTANT"],
+    ["starred", "STARRED"],
+    ["unread", "UNREAD"],
+    ["draft", "DRAFT"],
+    ["drafts", "DRAFT"],
+    ["chat", "CHAT"],
+    ["spam", "SPAM"],
+    ["trash", "TRASH"],
+    ["category personal", "CATEGORY_PERSONAL"],
+    ["category social", "CATEGORY_SOCIAL"],
+    ["category promotions", "CATEGORY_PROMOTIONS"],
+    ["category updates", "CATEGORY_UPDATES"],
+    ["category forums", "CATEGORY_FORUMS"],
+    ["opened", null],
+    ["archived", null]
+  ]);
+  exportAddresses = new Map;
+});
+
+// src/workers/google-connectors/gmail-archive-target.ts
+function gmailItemAccountScope(stores, roleScope) {
+  const held = new Set(stores.flatMap((store) => store.itemAccountScopes(GMAIL_PROVIDER_ID, 3)));
+  if (held.size !== 1 || held.has(roleScope))
+    return roleScope;
+  return [...held][0];
+}
+function gmailHoldsImportedHistory(stores) {
+  return stores.some((store) => store?.holdsItemsMatching(GMAIL_IMPORTED_FILTERS) === true);
+}
+function gmailRecordBuilder(account, build = {}) {
+  return {
+    family: "email",
+    entriesOf: (record) => gmailMailEntries(record, account, build),
+    compareVersions: compareGmailMailVersions,
+    build: (record, wanted) => gmailMailItems(record, account, build, wanted),
+    fetchItem: () => Promise.reject(new Error("An imported message is read only while its archive is listed.")),
+    classificationSignals: gmailClassificationSignals
+  };
+}
+function gmailExportEvidence(archive) {
+  const found = identifyGmailExport(archive.root, archiveFileEntries(archive.files));
+  return found.kind === "gmail" ? { kind: "account", importAccountId: googleAccountIdFromAddress(found.address) } : { kind: "archives" };
+}
+async function gmailLabelLookup(lane) {
+  const rules = lane.set.classification()?.rules ?? [];
+  if (!rules.some((rule) => rule.match.kind === "label" && (rule.source === undefined || rule.source === GMAIL_PROVIDER_ID)))
+    return { kind: "none" };
+  let found;
+  try {
+    found = await lane.labelIds?.();
+  } catch {
+    found = undefined;
+  }
+  if (found instanceof Map)
+    return { kind: "map", byName: found };
+  if (found && "unavailable" in found) {
+    return { kind: "unavailable", reason: found.unavailable, ...found.minimum !== undefined ? { minimum: found.minimum } : {} };
+  }
+  return { kind: "unavailable", reason: "gmail_labels_unavailable" };
+}
+function gmailArchiveTarget(options) {
+  let current;
+  const laneNow = () => {
+    current = options.lane();
+    return current;
+  };
+  return {
+    sourceId: GMAIL_ARCHIVE_SOURCE_ID,
+    label: GMAIL_ARCHIVE_LABEL,
+    formats: ["mbox"],
+    concurrencyKey: options.concurrencyKey,
+    identify: gmailExportEvidence,
+    input(archive) {
+      const lane = current ?? laneNow();
+      return mboxGmailInput({ ...archive, waitForProvider: (reason, detail) => {
+        lane.reportWait?.(reason);
+        archive.waitForProvider?.(reason, detail);
+      } }, {
+        ...lane.build ? { build: lane.build } : {},
+        ...lane.match ? { match: lane.match } : {},
+        labels: () => gmailLabelLookup(lane)
+      });
+    },
+    lane() {
+      const lane = laneNow();
+      const builder = gmailRecordBuilder(lane.account, lane.build);
+      const connector = {
+        id: GMAIL_PROVIDER_ID,
+        family: "email",
+        authenticate: () => Promise.resolve(),
+        listItems: () => {
+          throw new Error("Gmail lists live mail through its own lane.");
+        },
+        fetchItem: (localItemId, fetchOptions) => builder.fetchItem(localItemId, fetchOptions),
+        classificationSignals: (item) => builder.classificationSignals(item),
+        forInput: (input) => inputConnector(builder, input)
+      };
+      return { set: lane.set, sync: lane.sync, connector };
+    },
+    exclusive: (task) => options.exclusive(task)
+  };
+}
+var GMAIL_ARCHIVE_SOURCE_ID = "gmail.email", GMAIL_ARCHIVE_LABEL = "Gmail", GMAIL_PROVIDER_ID = "gmail", GMAIL_IMPORT_CONNECTOR_PREFIX = "archive.", GMAIL_IMPORTED_FILTERS;
+var init_gmail_archive_target = __esm(() => {
+  init_provider_account_identity();
+  init_source_inputs();
+  init_manifest3();
+  init_gmail_account();
+  init_gmail_input();
+  init_gmail_mail_record();
+  GMAIL_IMPORTED_FILTERS = Object.freeze({ provider: GMAIL_PROVIDER_ID, observedConnectorIdPrefix: GMAIL_IMPORT_CONNECTOR_PREFIX });
+});
+
 // src/workers/google-connectors/gmail-live-sync.ts
-import { createHash as createHash77 } from "node:crypto";
+import { createHash as createHash79 } from "node:crypto";
+function gmailConfirmationReserve(dailyLimit) {
+  return Math.min(500, Math.ceil(dailyLimit / 10));
+}
 function gmailLaneSyncOptions(ownerRules = []) {
   return {
     fetchContent: true,
@@ -137575,8 +144183,7 @@ function createGmailConnectorStoreSyncHandler(options) {
   const env = options.env ?? process.env;
   const config = options.config ?? defaultGmailLiveSyncConfig(env);
   const account = options.account?.trim() || accountFromGoogleHandle(options.credentialHandle);
-  const connectorId = gmailCursorConnectorId(account, options.scopeApproval);
-  const scopeTag = options.scopeApproval ? connectorId.slice(GMAIL_SCOPED_CONNECTOR_PREFIX.length) : undefined;
+  const { connectorId, previousId, scopeTag } = gmailScopeKeys(account, options.scopeApproval);
   if (options.secureEmbeddingProvider && !isApprovedSecureSourceEmbeddingProvider(options.secureEmbeddingProvider)) {
     throw new Error("Gmail secure_local embeddings require a local/private or approved Venice embedding provider.");
   }
@@ -137585,35 +144192,53 @@ function createGmailConnectorStoreSyncHandler(options) {
   const tierClassification = {
     ...ownerRules.length > 0 ? { rules: ownerRules } : {}
   };
-  const storedItem = (providerItemId) => {
+  const stores = [options.internalStore, options.secureStore];
+  const needsConfirmation = (store, identity) => {
+    if (store.itemOwnerPresent(identity, connectorId, "observed"))
+      return false;
+    if (!store.itemMatchesSearchFilters(identity.localItemId, account, { provider: GMAIL_PROVIDER, observedConnectorId: connectorId }))
+      return true;
+    options.assertScopeCurrent?.();
+    store.observeStoredItemOwner(identity, connectorId);
+    return false;
+  };
+  const storedItem = (providerItemId, confirming = false) => {
     const identity = { family: "email", provider: GMAIL_PROVIDER, accountScope: account, providerItemId, localItemId: `${account}:${providerItemId}` };
-    const copies = [options.internalStore.itemStoredContent(identity), options.secureStore.itemStoredContent(identity)].filter((copy) => copy !== undefined);
+    const copies = stores.flatMap((store) => {
+      const content = store.itemStoredContent(identity);
+      return content ? [{ store, content }] : [];
+    });
     if (copies.length === 0)
       return;
     return {
-      hasContent: copies.some((copy) => copy.chunkCount > 0),
-      ...options.confirmStoredPrivateScope && options.scopeApproval && options.secureStore.itemStoredContent(identity)?.chunkCount && !options.secureStore.itemOwnerPresent(identity, connectorId, "observed") ? { needsScopeObservation: true } : {}
+      hasContent: copies.some(({ content }) => content.chunkCount > 0),
+      ...confirming && copies.some(({ store, content }) => content.chunkCount > 0 && needsConfirmation(store, identity)) ? { needsScopeObservation: true } : {}
     };
   };
-  const scope = options.scope ? {
-    ...options.scope,
-    storedItem,
-    ...options.confirmStoredPrivateScope && options.scopeApproval ? {
-      storedItemObserved: (item) => {
-        options.assertScopeCurrent?.();
-        options.secureStore.observeStoredItemOwner(item.identity, connectorId);
-      }
-    } : {}
-  } : undefined;
+  const scope = options.scope ? { ...options.scope, storedItem } : undefined;
   const buildConnector = (overrides = {}) => new GoogleGmailSourceConnector({
     ...options,
+    ...options.confirmationRegistryPath ? {
+      confirmationAccountId: () => {
+        const read = readSourceAccountBindings(sourceAccountBindingsPath(options.confirmationRegistryPath));
+        const binding = read.kind === "ok" ? read.bindings.sources["gmail.email"] : undefined;
+        return binding && !binding.purge_required && !binding.reconnected_at ? binding.provider_account_id : undefined;
+      }
+    } : {},
     ...overrides.scope ? { scope: overrides.scope } : scope ? { scope } : {},
+    ...overrides.requestBudget ? { requestBudget: overrides.requestBudget } : {},
+    ...options.assertScopeCurrent ? {
+      beforeEachRequest: () => {
+        options.assertScopeCurrent?.();
+        options.beforeEachRequest?.();
+      }
+    } : {},
     ...overrides.maxMessages !== undefined ? { maxMessages: overrides.maxMessages } : {},
     ...overrides.query ? { query: overrides.query } : {},
     provenance: sourceInvocationProvenance(overrides.provenance)
   });
   const tierSet = options.tierSet ?? createLaneTieredStoreSet({
-    setId: connectorId,
+    setId: previousId,
     internalStore: options.internalStore,
     secureStore: options.secureStore,
     ...options.publicStore ? { publicLeg: { corpusId: GMAIL_PUBLIC_CONNECTOR_CORPUS_ID, ...options.publicStore } } : {},
@@ -137651,6 +144276,9 @@ function createGmailConnectorStoreSyncHandler(options) {
     }
   };
   const runBothStores = async (input) => {
+    if (previousId !== connectorId && !tierSet.ledger.listingCaughtUp(connectorId) && tierSet.ledger.listingCaughtUp(previousId)) {
+      tierSet.ledger.markListingCaughtUp(connectorId);
+    }
     const traversal = scopedTraversal(input.connector, connectorId, options.assertScopeCurrent);
     const sync = {
       fetchContent: true,
@@ -137673,38 +144301,87 @@ function createGmailConnectorStoreSyncHandler(options) {
     };
   };
   return {
-    ...options.confirmStoredPrivateScope && options.scopeApproval && scope ? {
+    ...options.scopeApproval && scope ? {
       confirmPrivateScope: async (request = {}) => {
-        const confirmationScope = `private-confirmation-v1:${connectorId}`;
+        const confirmationScope = `${CONFIRMATION_SCOPE_PREFIX}${connectorId}`;
         const complete = `${confirmationScope}:done`;
-        if (request.checkpoint === complete)
-          return { confirmed: 0, done: true, checkpoint: complete };
-        const resume = decodeCheckpoint(request.checkpoint, confirmationScope).head;
+        const saved = decodeCheckpoint(request.checkpoint, confirmationScope);
+        const confirmedBefore = saved.confirmed ?? 0;
+        if (request.checkpoint === complete || saved.head === complete) {
+          return { confirmed: 0, confirmedTotal: confirmedBefore, done: true, checkpoint: request.checkpoint };
+        }
+        let head = saved.head;
         options.assertScopeCurrent?.();
+        let waitReason = request.yieldReason?.();
+        if (waitReason) {
+          return { confirmed: 0, confirmedTotal: confirmedBefore, done: false, waitReason, checkpoint: request.checkpoint ?? null };
+        }
         let confirmed = 0;
-        const maxItems = Math.min(request.max_items ?? config.storePullMaxItems, GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS);
+        const maxItems = boundedMaxItems2(request.max_items, config.storePullMaxItems);
+        const budget = options.requestBudget;
         const connector = buildConnector({
           maxMessages: maxItems,
-          scope: { ...scope, confirmationOnly: true, storedItemObserved: (item) => {
-            scope.storedItemObserved?.(item);
-            if (options.secureStore.itemOwnerPresent(item.identity, connectorId, "observed"))
-              confirmed++;
-          } }
+          ...budget ? { requestBudget: {
+            reserve: () => budget.reserve("scheduled", gmailConfirmationReserve),
+            status: () => budget.status()
+          } } : {},
+          scope: {
+            ...scope,
+            storedItem: (id) => storedItem(id, true),
+            confirmStoredItem: (item, passesIngestFilter) => {
+              let observed = false;
+              for (const store of stores) {
+                if (!needsConfirmation(store, item.identity))
+                  continue;
+                const text = store.releaseItemChunks(item.identity)?.chunks.map((chunk) => chunk.text).join("");
+                if (!text?.trim() || !passesIngestFilter(text))
+                  continue;
+                options.assertScopeCurrent?.();
+                store.observeStoredItemOwner(item.identity, connectorId);
+                if (store.itemOwnerPresent(item.identity, connectorId, "observed"))
+                  observed = true;
+              }
+              if (observed)
+                confirmed++;
+            }
+          }
         });
         let done = false;
-        let checkpoint = resume ? encodeCheckpoint({ head: resume, scope: confirmationScope }) : null;
+        let refusal;
+        let cursorRejected;
         try {
-          for await (const page of connector.listItems({ limit: maxItems, ...resume ? { cursor: resume } : {} })) {
+          for await (const page of connector.listItems({ limit: maxItems, ...head ? { cursor: head } : {} })) {
             done = page.done;
-            checkpoint = done ? complete : page.nextCursor ? encodeCheckpoint({ head: page.nextCursor, scope: confirmationScope }) : checkpoint;
+            head = done ? complete : page.nextCursor ?? head;
+            if (!done) {
+              waitReason = request.yieldReason?.();
+              if (waitReason)
+                break;
+            }
           }
         } catch (error) {
-          if (!resume || !isRejectedCursorError2(error))
+          if (error instanceof GoogleRequestBudgetError) {
+            refusal = error;
+            head = connector.interruptedConfirmationCursor() ?? head;
+          } else if (head && isRejectedCursorError2(error)) {
+            head = undefined;
+            cursorRejected = true;
+          } else
             throw error;
-          checkpoint = null;
         }
+        const remaining = refusal ? (await Promise.all(stores.map((store) => store.unobservedContentCount(GMAIL_PROVIDER, account, connectorId, GMAIL_IMPORT_CONNECTOR_PREFIX)))).reduce((sum, count) => sum + count, 0) : undefined;
         options.assertScopeCurrent?.();
-        return { confirmed, done, checkpoint };
+        const confirmedTotal = confirmedBefore + confirmed;
+        const checkpoint = encodeCheckpoint({ ...head ? { head } : {}, scope: confirmationScope, confirmed: confirmedTotal });
+        return {
+          confirmed,
+          confirmedTotal,
+          done,
+          checkpoint,
+          ...waitReason ? { waitReason } : {},
+          ...refusal && remaining !== undefined ? { hold: { error: refusal, remaining } } : {},
+          ...cursorRejected ? { cursorRejected } : {}
+        };
       }
     } : {},
     async sync(request = {}) {
@@ -137729,7 +144406,7 @@ function createGmailConnectorStoreSyncHandler(options) {
       const maxItems = boundedMaxItems2(request.max_items, config.storePullMaxItems);
       const warnings = [];
       const resume = decodeCheckpoint(request.checkpoint, scopeTag);
-      const headStoreCursor = tierSet.committedCursor(connectorId)?.cursor ?? options.secureStore.lastCompletedSyncRun(connectorId)?.cursor;
+      const headStoreCursor = tierSet.committedCursor(connectorId)?.cursor ?? (options.scopeApproval ? tierSet.committedCursor(previousId)?.cursor : undefined) ?? options.secureStore.lastCompletedSyncRun(connectorId)?.cursor ?? (options.scopeApproval ? options.secureStore.lastCompletedSyncRun(previousId)?.cursor : undefined);
       let headResume = resume.head ?? (isGmailConnectorCursor(headStoreCursor) ? headStoreCursor : undefined);
       if (resume.headRejected)
         warnings.push(GMAIL_RESUME_REJECTED_WARNING);
@@ -137905,13 +144582,17 @@ function scopedTraversal(connector, connectorId, assertScopeCurrent) {
   };
 }
 function gmailCursorConnectorId(account, scope) {
+  return gmailScopeKeys(account, scope).connectorId;
+}
+function gmailScopeKeys(account, scope) {
   if (!scope)
-    return GMAIL_PROVIDER;
-  const digest = createHash77("sha256").update(`${account}\x00${scope.generation}\x00${scope.revision}`).digest("hex").slice(0, 24);
-  return `${GMAIL_SCOPED_CONNECTOR_PREFIX}${digest}`;
+    return { connectorId: GMAIL_PROVIDER, previousId: GMAIL_PROVIDER, scopeTag: undefined };
+  const scopeTag = createHash79("sha256").update(`${account}\x00${scope.generation}\x00${scope.revision}`).digest("hex").slice(0, 24);
+  const previousId = GMAIL_SCOPED_CONNECTOR_PREFIX + scopeTag;
+  return { connectorId: verifiedObservationConnectorId(previousId), previousId, scopeTag };
 }
 function encodeCheckpoint(envelope) {
-  if (!envelope.head)
+  if (!envelope.head && envelope.confirmed === undefined)
     return null;
   return `${CHECKPOINT_PREFIX}${Buffer.from(JSON.stringify(envelope)).toString("base64url")}`;
 }
@@ -137934,9 +144615,12 @@ function decodeCheckpoint(value, scopeTag) {
   if (checkpointScope !== scopeTag)
     return {};
   const head = typeof parsed.head === "string" ? parsed.head : undefined;
+  const confirmation = scopeTag?.startsWith(CONFIRMATION_SCOPE_PREFIX) === true;
+  const validHead = head !== undefined && (isGmailConnectorCursor(head) || confirmation && head === `${scopeTag}:done`);
   return {
-    ...head !== undefined && isGmailConnectorCursor(head) ? { head } : {},
-    ...head !== undefined && !isGmailConnectorCursor(head) ? { headRejected: true } : {}
+    ...validHead ? { head } : {},
+    ...head !== undefined && !validHead ? { headRejected: true } : {},
+    ...confirmation && typeof parsed.confirmed === "number" && Number.isSafeInteger(parsed.confirmed) && parsed.confirmed >= 0 ? { confirmed: parsed.confirmed } : {}
   };
 }
 function taskOutcome2(input) {
@@ -138003,16 +144687,12 @@ function taskOutcome2(input) {
   };
 }
 function gmailReceiptDigest(receipt) {
-  return createHash77("sha256").update(JSON.stringify(receipt)).digest("hex");
+  return createHash79("sha256").update(JSON.stringify(receipt)).digest("hex");
 }
 function isRejectedCursorError2(error) {
   if (error instanceof TypeError)
     return /cursor is invalid/i.test(error.message);
-  if (!(error instanceof Error))
-    return false;
-  const match = /Gmail API request failed \((\d{3})\)/.exec(error.message);
-  const status = match?.[1] ? Number(match[1]) : undefined;
-  return status !== undefined && status >= 400 && status < 500 && status !== 401 && status !== 403 && status !== 429;
+  return error instanceof GmailPageTokenRejectedError;
 }
 function boundedMaxItems2(value, fallback) {
   if (value === undefined)
@@ -138025,14 +144705,18 @@ function boundedMaxItems2(value, fallback) {
 function latestCompletedAt(values) {
   return values.filter((value) => Boolean(value)).sort().at(-1);
 }
-var GMAIL_STORE_PULL_RECEIPT_KIND = "gmail_connector_store_pull_receipt", GMAIL_STORE_RECONCILE_RECEIPT_KIND = "gmail_connector_store_reconcile_receipt", GMAIL_RESUME_REJECTED_WARNING = "gmail_store_resume_cursor_rejected", GMAIL_ATTACHMENTS_NOT_INGESTED_WARNING = "gmail_attachments_not_ingested", GMAIL_INGEST_FILTERED_WARNING = "gmail_ingest_filtered_items", GMAIL_LABEL_RULES_PENDING_WARNING = "gmail_label_rules_pending", CHECKPOINT_PREFIX = "gmp1:", MAX_CHECKPOINT_CHARS = 16384, MAX_RECONCILE_MESSAGES = 1000, GMAIL_CHILDREN_BACKFILL_SET = "gmail.email", GMAIL_CHILDREN_BACKFILL_CONNECTOR = "gmail.children-backfill.v1", GMAIL_CHILDREN_BACKFILL_PER_PASS = 20, GMAIL_ATTACHMENT_LINE = "Attachment: ", gmailContentArrivesLater = (item) => item.deferredBytes !== undefined, GMAIL_SCOPED_CONNECTOR_PREFIX;
+var GMAIL_STORE_PULL_RECEIPT_KIND = "gmail_connector_store_pull_receipt", GMAIL_STORE_RECONCILE_RECEIPT_KIND = "gmail_connector_store_reconcile_receipt", GMAIL_RESUME_REJECTED_WARNING = "gmail_store_resume_cursor_rejected", GMAIL_ATTACHMENTS_NOT_INGESTED_WARNING = "gmail_attachments_not_ingested", GMAIL_INGEST_FILTERED_WARNING = "gmail_ingest_filtered_items", GMAIL_LABEL_RULES_PENDING_WARNING = "gmail_label_rules_pending", GMAIL_CONFIRMATION_RESERVE_REASON = "gmail_confirmation_live_request_reserve", CHECKPOINT_PREFIX = "gmp1:", MAX_CHECKPOINT_CHARS = 16384, CONFIRMATION_SCOPE_PREFIX = "private-confirmation-v3:", MAX_RECONCILE_MESSAGES = 1000, GMAIL_CHILDREN_BACKFILL_SET = "gmail.email", GMAIL_CHILDREN_BACKFILL_CONNECTOR = "gmail.children-backfill.v1", GMAIL_CHILDREN_BACKFILL_PER_PASS = 20, GMAIL_ATTACHMENT_LINE = "Attachment: ", gmailContentArrivesLater = (item) => item.deferredBytes !== undefined, GMAIL_SCOPED_CONNECTOR_PREFIX;
 var init_gmail_live_sync = __esm(() => {
+  init_source_account_binding();
+  init_local_index();
   init_tiered_store_set();
   init_tier_rules_sweep();
   init_embeddings();
+  init_gmail_archive_target();
   init_gmail_mail_record();
   init_gmail();
   init_gmail_live_control();
+  init_request_budget();
   GMAIL_SCOPED_CONNECTOR_PREFIX = `${GMAIL_PROVIDER}.scope.`;
 });
 
@@ -138072,7 +144756,7 @@ var init_drive_live_control = __esm(() => {
 });
 
 // src/workers/google-connectors/drive-live-sync.ts
-import { createHash as createHash78 } from "node:crypto";
+import { createHash as createHash80 } from "node:crypto";
 function createGoogleDriveLaneTierSet(options) {
   return createLaneTieredStoreSet({
     ...options,
@@ -138230,7 +144914,7 @@ function scopedTraversal2(connector, connectorId) {
 function googleDriveCursorConnectorId(account, scope) {
   if (!scope)
     return GOOGLE_DRIVE_PROVIDER;
-  const digest = createHash78("sha256").update(`${account}\x00${scope.generation}\x00${scope.revision}`).digest("hex").slice(0, 24);
+  const digest = createHash80("sha256").update(`${account}\x00${scope.generation}\x00${scope.revision}`).digest("hex").slice(0, 24);
   return `${GOOGLE_DRIVE_PROVIDER}.scope.${digest}`;
 }
 function googleDriveScopedCheckpoint(cursor, connectorId) {
@@ -138319,7 +145003,7 @@ function taskOutcome3(input) {
   };
 }
 function googleDriveReceiptDigest(receipt) {
-  return createHash78("sha256").update(JSON.stringify(receipt)).digest("hex");
+  return createHash80("sha256").update(JSON.stringify(receipt)).digest("hex");
 }
 function isRejectedCursorError3(error) {
   if (error instanceof TypeError)
@@ -143784,7 +150468,7 @@ var init_judge_check = __esm(() => {
 
 // src/workers/classification/judge-second-round.ts
 import { Database as Database26 } from "bun:sqlite";
-import { createHash as createHash79 } from "node:crypto";
+import { createHash as createHash81 } from "node:crypto";
 import { chmodSync as chmodSync29, existsSync as existsSync77, readFileSync as readFileSync62, rmSync as rmSync31 } from "node:fs";
 import { dirname as dirname82, join as join106, sep as sep20 } from "node:path";
 function judgeObservationsPath(env) {
@@ -143808,7 +150492,7 @@ class SecondRoundConfirmed {
     this.db.run("CREATE TABLE IF NOT EXISTS confirmed (digest TEXT PRIMARY KEY)");
   }
   static digest(request) {
-    return createHash79("sha256").update(`${request.system}
+    return createHash81("sha256").update(`${request.system}
 ${request.prompt}`).digest("hex");
   }
   has(digest) {
@@ -144594,7 +151278,7 @@ var init_tier_rules = __esm(() => {
 });
 
 // src/workers/classification/privacy-profile.ts
-import { createHash as createHash80 } from "node:crypto";
+import { createHash as createHash82 } from "node:crypto";
 import { mkdirSync as mkdirSync52 } from "node:fs";
 import { dirname as dirname84 } from "node:path";
 function defaultPrivacyProfilePath(env = process.env) {
@@ -144736,7 +151420,7 @@ function privacyRuleToTierRule(rule) {
 }
 function privacyRuleId(rule) {
   const matched = rule.kind === "sender" ? rule.value ?? "" : rule.key ?? "";
-  const digest = createHash80("sha256").update(`${rule.kind}\x00${rule.source_id}\x00${matched}`).digest("hex").slice(0, 16);
+  const digest = createHash82("sha256").update(`${rule.kind}\x00${rule.source_id}\x00${matched}`).digest("hex").slice(0, 16);
   return `${PRIVACY_RULE_ID_PREFIX}${rule.kind}-${digest}`;
 }
 function writePrivacyProfile(update, options = {}) {
@@ -145156,7 +151840,7 @@ var init_source_dispositions = __esm(() => {
 
 // src/data-lifecycle.ts
 import { spawnSync as spawnSync13 } from "node:child_process";
-import { createHash as createHash81, randomUUID as randomUUID29 } from "node:crypto";
+import { createHash as createHash83, randomUUID as randomUUID29 } from "node:crypto";
 import {
   chmodSync as chmodSync32,
   closeSync as closeSync29,
@@ -146291,7 +152975,7 @@ function fileArtifact(exportRoot, path, sourceId, role) {
   };
 }
 function sha256File3(path) {
-  const hash = createHash81("sha256");
+  const hash = createHash83("sha256");
   const descriptor = openSync29(path, "r");
   const buffer = Buffer.allocUnsafe(1024 * 1024);
   try {
@@ -148882,7 +155566,7 @@ var init_update_check = __esm(() => {
 
 // src/core/managed-tools.ts
 import { execFile as execFile3 } from "node:child_process";
-import { createHash as createHash82, randomUUID as randomUUID30 } from "node:crypto";
+import { createHash as createHash84, randomUUID as randomUUID30 } from "node:crypto";
 import {
   accessSync as accessSync9,
   constants as constants16,
@@ -149328,7 +156012,7 @@ async function installOne(tool, pin, platformKey, root, uid, options, lease) {
   }
 }
 function fileSha256(path) {
-  return createHash82("sha256").update(readFileSync69(path)).digest("hex");
+  return createHash84("sha256").update(readFileSync69(path)).digest("hex");
 }
 function verifyPinnedFiles(staging, asset, uid, label, tool) {
   for (const pinned of asset.pinnedFiles ?? []) {
@@ -149393,7 +156077,7 @@ async function downloadStream(path, asset, fetchImpl, signal, stillArriving, onB
     });
     throw new ManagedToolsError("size_mismatch", `The ${label} download is not the pinned size, so nothing was installed.`, tool);
   }
-  const hash = createHash82("sha256");
+  const hash = createHash84("sha256");
   const file = await open6(path, "wx", 384);
   let received = 0;
   let lastReport = 0;
@@ -151128,7 +157812,7 @@ main().catch(() => process.exit(1));
 import { execFile as execFile4 } from "node:child_process";
 import { promisify as promisify2 } from "node:util";
 import { readFile as readFile15, stat as fileStat } from "node:fs/promises";
-import { createHash as createHash83 } from "node:crypto";
+import { createHash as createHash85 } from "node:crypto";
 import { lstatSync as lstatSync42, readFileSync as readFileSync71, readlinkSync as readlinkSync4, readdirSync as readdirSync24, realpathSync as realpathSync21 } from "node:fs";
 import { dirname as dirname89, join as join114 } from "node:path";
 function record(value) {
@@ -151305,7 +157989,7 @@ async function launcherPath(env) {
           break;
         current = dirname89(current);
       }
-      if (!lstatSync42(path).isFile() || createHash83("sha256").update(await readFile15(path)).digest("hex") !== ZKAPI_CONFINE_SHA256)
+      if (!lstatSync42(path).isFile() || createHash85("sha256").update(await readFile15(path)).digest("hex") !== ZKAPI_CONFINE_SHA256)
         continue;
       return path;
     } catch {}
@@ -151316,7 +158000,7 @@ async function launcherIdentity(path) {
   const info = await fileStat(path);
   if (!info.isFile())
     throw new Error("not a launcher");
-  const hash = createHash83("sha256").update(await readFile15(path)).digest("hex");
+  const hash = createHash85("sha256").update(await readFile15(path)).digest("hex");
   return [info.dev, info.ino, info.size, info.mtimeMs, info.ctimeMs, info.mode, hash].join(":");
 }
 function linuxZkapiConfinement(deps = {}) {
@@ -151477,7 +158161,7 @@ var init_zkapi_confinement_linux = __esm(() => {
 
 // src/core/consult-transport-zkapi.ts
 import { spawn as spawn7, execFileSync as execFileSync5 } from "node:child_process";
-import { createHash as createHash84, randomUUID as randomUUID31 } from "node:crypto";
+import { createHash as createHash86, randomUUID as randomUUID31 } from "node:crypto";
 import { accessSync as accessSync10, chmodSync as chmodSync35, closeSync as closeSync30, constants as constants17, existsSync as existsSync82, mkdirSync as mkdirSync56, mkdtempSync as mkdtempSync4, readdirSync as readdirSync25, readFileSync as readFileSync72, readlinkSync as readlinkSync5, realpathSync as realpathSync22, rmSync as rmSync35, statSync as statSync37, writeFileSync as writeFileSync21 } from "node:fs";
 import { createConnection as createConnection4, createServer as createServer4 } from "node:net";
 import { homedir as homedir32, tmpdir as tmpdir12 } from "node:os";
@@ -151753,7 +158437,7 @@ function zkapiWalletDirectory(env) {
   }
 }
 function zkapiFenceScope(input) {
-  return createHash84("sha256").update(zkapiWalletDirectory(input.env)).digest("hex").slice(0, 32);
+  return createHash86("sha256").update(zkapiWalletDirectory(input.env)).digest("hex").slice(0, 32);
 }
 function abandonZkapiFence(path, scope, now) {
   let found = false;
@@ -153756,7 +160440,7 @@ setInterval(() => { if (process.ppid !== expectedParent) cleanup(); }, 500);
 
 // src/core/engine-service.ts
 import { spawn as spawn8, spawnSync as spawnSync14 } from "node:child_process";
-import { createHash as createHash85, randomBytes as randomBytes25 } from "node:crypto";
+import { createHash as createHash87, randomBytes as randomBytes25 } from "node:crypto";
 import { existsSync as existsSync83, lstatSync as lstatSync43, readdirSync as readdirSync26, readFileSync as readFileSync73, renameSync as renameSync16, rmSync as rmSync36, statSync as statSync38 } from "node:fs";
 import { homedir as homedir33, platform as osPlatform3 } from "node:os";
 import { basename as basename18, dirname as dirname91, isAbsolute as isAbsolute34, join as join116, resolve as resolvePath2 } from "node:path";
@@ -153851,7 +160535,7 @@ function engineBuildIdentity(packageRoot) {
     if (typeof manifest.version === "string" && /^[0-9A-Za-z.+-]{1,64}$/.test(manifest.version))
       version = manifest.version;
   } catch {}
-  const hash = createHash85("sha256");
+  const hash = createHash87("sha256");
   for (const name of BUILD_DIGEST_FILES) {
     try {
       const bytes = readFileSync73(join116(packageRoot, "dist", name));
@@ -155357,7 +162041,7 @@ import { chmodSync as chmodSync36, closeSync as closeSync31, constants as consta
 import { createRequire as createRequire7 } from "node:module";
 import { basename as basename19, dirname as dirname92, join as join117, relative as relative19, resolve as resolve25, sep as sep23 } from "node:path";
 import { userInfo as userInfo2 } from "node:os";
-import { randomBytes as randomBytes26, createHash as createHash86, randomUUID as randomUUID32 } from "node:crypto";
+import { randomBytes as randomBytes26, createHash as createHash88, randomUUID as randomUUID32 } from "node:crypto";
 function linuxEngineExec(command, args) {
   const r = spawnSync15(command, args, { encoding: "utf8", timeout: 35000, env: { ...process.env, SYSTEMD_PAGER: "", SYSTEMD_COLORS: "0" } });
   return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? r.error?.message ?? "" };
@@ -155710,7 +162394,7 @@ function hashFile(path) {
   const info = lstatSync44(path);
   if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1)
     throw new Error(`${path} must be a singly-linked regular file.`);
-  return createHash86("sha256").update(readFileSync74(path)).digest("hex");
+  return createHash88("sha256").update(readFileSync74(path)).digest("hex");
 }
 function linuxMachineArtifactDigest(path, kind) {
   if (kind === "file")
@@ -155719,13 +162403,13 @@ function linuxMachineArtifactDigest(path, kind) {
     const info = lstatSync44(path);
     if (!info.isSymbolicLink())
       throw new Error(`${path} is not a symbolic link.`);
-    return createHash86("sha256").update(readlinkSync6(path)).digest("hex");
+    return createHash88("sha256").update(readlinkSync6(path)).digest("hex");
   }
   const root = resolve25(path);
   const rootInfo = lstatSync44(root);
   if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink())
     throw new Error(`${path} is not a real directory tree.`);
-  const hash = createHash86("sha256");
+  const hash = createHash88("sha256");
   const walk = (dir) => {
     for (const name of readdirSync27(dir).sort()) {
       const full = join117(dir, name);
@@ -155807,7 +162491,7 @@ function durableProgram(layout, source, transaction, options) {
   syncCopiedFile(runtime);
   syncDirectorySync(runtimeDir);
   syncDirectorySync(staging);
-  const custodyToken = createHash86("sha256").update(`olympus.engine.generation.v1\x00${linuxMachineArtifactDigest(app, "tree")}\x00${hashFile(runtime)}`).digest("hex");
+  const custodyToken = createHash88("sha256").update(`olympus.engine.generation.v1\x00${linuxMachineArtifactDigest(app, "tree")}\x00${hashFile(runtime)}`).digest("hex");
   writePrivateFileAtomicSync(join117(staging, ".olympus-generation.json"), `${JSON.stringify({ schema: "olympus.engine.generation.v1", token: custodyToken, build: source.build ?? null })}
 `);
   syncDirectorySync(staging);
@@ -156880,7 +163564,7 @@ async function rollbackLinuxEngine(options) {
       throw new Error("The current service generation is unknown; rollback refused.");
     for (const p of [previous.program.runtimePath, previous.program.entryPath, current.runtimePath, current.entryPath])
       assertLinuxManagedPath(p);
-    if (!previous.program.runtimeDigest || createHash86("sha256").update(readFileSync74(previous.program.runtimePath)).digest("hex") !== previous.program.runtimeDigest)
+    if (!previous.program.runtimeDigest || createHash88("sha256").update(readFileSync74(previous.program.runtimePath)).digest("hex") !== previous.program.runtimeDigest)
       throw new Error("The previous Bun runtime has changed; rollback refused.");
     if (engineBuildIdentity(previous.program.workingDirectory) !== previous.program.build)
       throw new Error("The previous package has changed; rollback refused.");
@@ -157110,7 +163794,7 @@ var init_setup_preflight = __esm(() => {
 });
 
 // src/workers/credential-degradation.ts
-import { createHash as createHash87 } from "node:crypto";
+import { createHash as createHash89 } from "node:crypto";
 function credentialConfigFingerprint(profileId, profile) {
   const material = JSON.stringify({
     version: 1,
@@ -157122,7 +163806,7 @@ function credentialConfigFingerprint(profileId, profile) {
     secret_ref: profile.secretRef ?? null,
     purpose: profile.purpose ?? null
   });
-  return createHash87("sha256").update(material, "utf8").digest("hex");
+  return createHash89("sha256").update(material, "utf8").digest("hex");
 }
 
 class WorkerBootSecretResolver {
@@ -157321,7 +164005,7 @@ var init_credential_degradation = __esm(() => {
 });
 
 // src/core/consult-gate.ts
-import { createHash as createHash88 } from "node:crypto";
+import { createHash as createHash90 } from "node:crypto";
 import { existsSync as existsSync86, readFileSync as readFileSync76, statSync as statSync40 } from "node:fs";
 import { homedir as homedir34 } from "node:os";
 import { basename as basename20, dirname as dirname94, join as join119 } from "node:path";
@@ -157835,7 +164519,7 @@ function verifiedPackFile(path, sha256) {
     if (statSync40(path).size > CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES)
       return "too_large";
     const gz = readFileSync76(path);
-    return createHash88("sha256").update(gz).digest("hex") === sha256 ? gz : "hash_mismatch";
+    return createHash90("sha256").update(gz).digest("hex") === sha256 ? gz : "hash_mismatch";
   } catch {
     return "unreadable";
   }
@@ -163979,7 +170663,7 @@ var init_installed_sniffer_runtime = __esm(() => {
 });
 
 // src/workers/classification/tier-migration.ts
-import { createHash as createHash91 } from "node:crypto";
+import { createHash as createHash93 } from "node:crypto";
 import { chmodSync as chmodSync38, existsSync as existsSync92, mkdirSync as mkdirSync59, readFileSync as readFileSync82, renameSync as renameSync19, writeFileSync as writeFileSync24 } from "node:fs";
 import { dirname as dirname96, join as join125 } from "node:path";
 function domainTier(domain) {
@@ -164024,11 +170708,11 @@ function findPlan(statePath, planId) {
     throw new OperationError("invalid_params", `No tier migration plan ${planId}.`, "Run olympus tier migrate plan.");
   return plan;
 }
-function sha2569(text) {
-  return createHash91("sha256").update(text, "utf8").digest("hex");
+function sha25610(text) {
+  return createHash93("sha256").update(text, "utf8").digest("hex");
 }
 function tierMigrationBatchKey(selector) {
-  return sha2569(`tier-migration-batch\x00${normalizeSelector(selector)}`).slice(0, 32);
+  return sha25610(`tier-migration-batch\x00${normalizeSelector(selector)}`).slice(0, 32);
 }
 function normalizeSelector(selector) {
   const trimmed = selector.trim();
@@ -164204,8 +170888,8 @@ function laneLedgerProposals(lane, planId) {
   return lane.set.ledger.migrationProposals(planId);
 }
 function tierMigrationInputsRevision(lanes, inputs) {
-  const overrides = lanes.map((lane) => `${lane.sourceId}:${sha2569(lane.set.ledger.overridesCanonical())}`).sort().join("|");
-  return sha2569([
+  const overrides = lanes.map((lane) => `${lane.sourceId}:${sha25610(lane.set.ledger.overridesCanonical())}`).sort().join("|");
+  return sha25610([
     TIER_CLASSIFIER_VERSION,
     inputs.revision,
     inputs.snifferId ? `sniffer:${inputs.snifferId}` : inputs.sniffer ? `sniffer:${inputs.sniffer.id}` : "sniffer:none",
@@ -164328,7 +171012,7 @@ async function planTierMigration(options) {
   finishTotals(totals, planned, options.prices);
   totals.domainIdentities = domainIdentityDigest(options.domainIdentity);
   const countsSha256 = tierMigrationCountsSha256(totals);
-  const planId = `tm-${sha2569([
+  const planId = `tm-${sha25610([
     inputsRevision,
     ...planned.map((entry) => [
       entry.lane.sourceId,
@@ -164549,7 +171233,7 @@ function domainIdentityDigest(domainIdentity) {
   }));
 }
 function tierMigrationCountsSha256(totals) {
-  return sha2569(JSON.stringify(canonical(totals)));
+  return sha25610(JSON.stringify(canonical(totals)));
 }
 function canonical(value) {
   if (Array.isArray(value))
@@ -165246,7 +171930,7 @@ function purgeTargets(plan, lanes) {
   }
   const copies = targets.reduce((sum, target) => sum + target.superseded.length, 0);
   const namesOnly = targets.reduce((sum, target) => sum + target.namesOnly.length, 0);
-  const digest = sha2569(JSON.stringify(canonical({ planId: plan.planId, copies, chunks, namesOnly, namesOnlyChunks }))).slice(0, 16);
+  const digest = sha25610(JSON.stringify(canonical({ planId: plan.planId, copies, chunks, namesOnly, namesOnlyChunks }))).slice(0, 16);
   return { targets, chunks, namesOnlyChunks, digest };
 }
 function chunkCountIn(lane, corpusId, proposal) {
@@ -165784,7 +172468,7 @@ var init_tier_migration_lanes = __esm(() => {
 });
 
 // src/workers/classification/tier-migration-cli.ts
-import { createHash as createHash92 } from "node:crypto";
+import { createHash as createHash94 } from "node:crypto";
 async function runTierMigrateCommand(args, context = {}) {
   const [command, ...rest] = args;
   const flags = parseFlags(rest);
@@ -165953,7 +172637,7 @@ async function withLanes(context, env, mode, inputs, run) {
 }
 async function installedInputs(env, options) {
   const rules = loadOwnerTierRules({ env, allowMissing: true });
-  const rulesDigest = createHash92("sha256").update(JSON.stringify(rules)).digest("hex").slice(0, 16);
+  const rulesDigest = createHash94("sha256").update(JSON.stringify(rules)).digest("hex").slice(0, 16);
   const revision = `map:${TIER_MAP_REVISION};rules:${rules.length > 0 ? rulesDigest : "none"}`;
   const base = {
     ...rules.length > 0 ? { rules } : {},
@@ -167447,7 +174131,7 @@ var init_judge_boost = __esm(() => {
 });
 
 // src/workers/classification/sniffer-resolver.ts
-import { createHash as createHash93 } from "node:crypto";
+import { createHash as createHash95 } from "node:crypto";
 import { mkdirSync as mkdirSync61, readFileSync as readFileSync84 } from "node:fs";
 import { dirname as dirname98 } from "node:path";
 
@@ -167545,7 +174229,7 @@ function slotWaitOf(error) {
 }
 function materialCarriesSecret(question) {
   const own = snifferOwnMaterial(question.material);
-  const key = createHash93("sha256").update(own).digest("base64");
+  const key = createHash95("sha256").update(own).digest("base64");
   const known = secretScreenCache.get(key);
   if (known !== undefined)
     return known;
@@ -168672,7 +175356,7 @@ var init_data_restore = __esm(() => {
 });
 
 // src/data-backup.ts
-import { createCipheriv as createCipheriv2, createDecipheriv as createDecipheriv2, createHash as createHash94, createHmac as createHmac6, randomBytes as randomBytes27, randomUUID as randomUUID36, scryptSync as scryptSync2, timingSafeEqual as timingSafeEqual8 } from "node:crypto";
+import { createCipheriv as createCipheriv2, createDecipheriv as createDecipheriv2, createHash as createHash96, createHmac as createHmac6, randomBytes as randomBytes27, randomUUID as randomUUID36, scryptSync as scryptSync2, timingSafeEqual as timingSafeEqual8 } from "node:crypto";
 import { closeSync as closeSync35, existsSync as existsSync98, lstatSync as lstatSync48, mkdirSync as mkdirSync62, openSync as openSync34, readdirSync as readdirSync29, readSync as readSync12, renameSync as renameSync21, rmSync as rmSync40, statSync as statSync43, unlinkSync as unlinkSync6, writeSync as writeSync9, chmodSync as chmodSync40, fsyncSync as fsyncSync11 } from "node:fs";
 import { open as openAsync } from "node:fs/promises";
 import { basename as basename22, dirname as dirname100, join as join127, resolve as resolve27, sep as sep24 } from "node:path";
@@ -168792,7 +175476,7 @@ class BodyWriter {
       this.cipher = createCipheriv2("aes-256-gcm", key, nonce, { authTagLength: TAG_BYTES });
       this.cipher.setAAD(header);
     } else {
-      this.hash = createHash94("sha256").update(header);
+      this.hash = createHash96("sha256").update(header);
     }
   }
   async write(plain) {
@@ -168904,7 +175588,7 @@ function readBackupHeader(path) {
     if (lead.length < MAGIC.length + 4 || !lead.subarray(0, MAGIC.length).equals(MAGIC))
       throw notABackup(path);
     const length = lead.readUInt32BE(MAGIC.length);
-    if (length === 0 || length > MAX_HEADER_BYTES)
+    if (length === 0 || length > MAX_HEADER_BYTES3)
       throw notABackup(path);
     const json = readExactly(fd, length, MAGIC.length + 4);
     if (json.length !== length)
@@ -169079,7 +175763,7 @@ function openBackupFile(options) {
     decipher = createDecipheriv2("aes-256-gcm", key, nonce, { authTagLength: TAG_BYTES });
     decipher.setAAD(headerBytes);
   } else {
-    hash = createHash94("sha256").update(headerBytes);
+    hash = createHash96("sha256").update(headerBytes);
   }
   const into = resolve27(options.into);
   if (existsSync98(into))
@@ -169219,7 +175903,7 @@ function restoreOlympusBackup(options) {
     rmSync40(staging, { recursive: true, force: true });
   }
 }
-var BACKUP_FILE_EXTENSION = ".olympusbackup", BACKUP_FORMAT_VERSION = 1, BACKUP_KEEP = 7, MAGIC, KEY_CHECK_LABEL = "olympus-backup-key-check-v1", CHUNK, TAG_BYTES = 16, DIGEST_BYTES = 32, MAX_HEADER_BYTES, BACKUP_NAME2, DEFAULT_SCRYPT, MIN_SCRYPT_N = 16384, MAX_SCRYPT_N = 1048576, USTAR_MAX_SIZE = 8589934591, BACKUP_WRONG_PASSPHRASE = "That passphrase does not open this backup.", BACKUP_CHANGED = "This backup has been changed or damaged since it was made, so nothing was restored.";
+var BACKUP_FILE_EXTENSION = ".olympusbackup", BACKUP_FORMAT_VERSION = 1, BACKUP_KEEP = 7, MAGIC, KEY_CHECK_LABEL = "olympus-backup-key-check-v1", CHUNK, TAG_BYTES = 16, DIGEST_BYTES = 32, MAX_HEADER_BYTES3, BACKUP_NAME2, DEFAULT_SCRYPT, MIN_SCRYPT_N = 16384, MAX_SCRYPT_N = 1048576, USTAR_MAX_SIZE = 8589934591, BACKUP_WRONG_PASSPHRASE = "That passphrase does not open this backup.", BACKUP_CHANGED = "This backup has been changed or damaged since it was made, so nothing was restored.";
 var init_data_backup = __esm(() => {
   init_operation_error();
   init_atomic_file();
@@ -169229,7 +175913,7 @@ var init_data_backup = __esm(() => {
   MAGIC = Buffer.from(`OLYMPUS-BACKUP
 `, "ascii");
   CHUNK = 1024 * 1024;
-  MAX_HEADER_BYTES = 64 * 1024;
+  MAX_HEADER_BYTES3 = 64 * 1024;
   BACKUP_NAME2 = /^olympus-backup-\d{4}-\d{2}-\d{2}-\d{4}(?:-\d{1,3})?\.olympusbackup$/;
   DEFAULT_SCRYPT = { N: 131072, r: 8, p: 1 };
 });
@@ -171016,7 +177700,7 @@ var initializer = (inst, def) => {
     enumerable: false
   });
 }, $ZodError, $ZodRealError;
-var init_errors4 = __esm(() => {
+var init_errors5 = __esm(() => {
   init_core();
   init_util();
   $ZodError = $constructor("$ZodError", initializer);
@@ -171087,9 +177771,9 @@ var _parse = (_Err) => (schema, value, _ctx, _params) => {
 }, _safeDecodeAsync = (_Err) => async (schema, value, _ctx) => {
   return _safeParseAsync(_Err)(schema, value, _ctx);
 };
-var init_parse2 = __esm(() => {
+var init_parse3 = __esm(() => {
   init_core();
-  init_errors4();
+  init_errors5();
   init_util();
   safeParse = /* @__PURE__ */ _safeParse($ZodRealError);
   safeParseAsync = /* @__PURE__ */ _safeParseAsync($ZodRealError);
@@ -171878,7 +178562,7 @@ var $ZodType, $ZodString, $ZodStringFormat, $ZodGUID, $ZodUUID, $ZodEmail, $ZodU
 var init_schemas = __esm(() => {
   init_checks();
   init_core();
-  init_parse2();
+  init_parse3();
   init_regexes();
   init_util();
   init_versions();
@@ -174412,8 +181096,8 @@ var init_core2 = __esm(() => {
   init_locales();
   init_json_schema();
   init_core();
-  init_parse2();
-  init_errors4();
+  init_parse3();
+  init_errors5();
   init_schemas();
   init_checks();
   init_versions();
@@ -174423,7 +181107,7 @@ var init_core2 = __esm(() => {
 });
 
 // node_modules/zod/v4/mini/parse.js
-var init_parse3 = __esm(() => {
+var init_parse4 = __esm(() => {
   init_core2();
 });
 
@@ -174445,7 +181129,7 @@ var init_external = __esm(() => {
   init_locales();
   init_iso();
   init_coerce();
-  init_parse3();
+  init_parse4();
   init_schemas2();
   init_checks2();
 });
@@ -174591,7 +181275,7 @@ var initializer2 = (inst, issues) => {
     }
   });
 }, ZodRealError;
-var init_errors5 = __esm(() => {
+var init_errors6 = __esm(() => {
   init_core2();
   init_core2();
   init_util();
@@ -174602,9 +181286,9 @@ var init_errors5 = __esm(() => {
 
 // node_modules/zod/v4/classic/parse.js
 var parse6, parseAsync2, safeParse3, safeParseAsync2, encode3, decode2, encodeAsync2, decodeAsync2, safeEncode2, safeDecode2, safeEncodeAsync2, safeDecodeAsync2;
-var init_parse4 = __esm(() => {
+var init_parse5 = __esm(() => {
   init_core2();
-  init_errors5();
+  init_errors6();
   parse6 = /* @__PURE__ */ _parse(ZodRealError);
   parseAsync2 = /* @__PURE__ */ _parseAsync(ZodRealError);
   safeParse3 = /* @__PURE__ */ _safeParse(ZodRealError);
@@ -174848,7 +181532,7 @@ var init_schemas3 = __esm(() => {
   init_to_json_schema();
   init_checks3();
   init_iso2();
-  init_parse4();
+  init_parse5();
   _installedGroups = /* @__PURE__ */ new WeakMap;
   ZodType = /* @__PURE__ */ $constructor("ZodType", (inst, def) => {
     $ZodType.init(inst, def);
@@ -175520,8 +182204,8 @@ var init_external2 = __esm(() => {
   init_coerce2();
   init_schemas3();
   init_checks3();
-  init_errors5();
-  init_parse4();
+  init_errors6();
+  init_parse5();
   init_compat();
   config(en_default());
 });
@@ -185761,7 +192445,7 @@ var init_engine_host = __esm(() => {
 });
 
 // connect-relay/shared/protocol.ts
-import { createHash as createHash95, createPublicKey, randomBytes as randomBytes29, sign, verify } from "node:crypto";
+import { createHash as createHash97, createPublicKey, randomBytes as randomBytes29, sign, verify } from "node:crypto";
 function parseSurfacesMessage(message) {
   if (message.type !== "surfaces" || message.v !== 1 || !Array.isArray(message.entries))
     return;
@@ -185813,7 +192497,7 @@ function base32(data) {
   return out;
 }
 function installIdForPublicKey(spkiDer) {
-  return base32(createHash95("sha256").update(spkiDer).digest().subarray(0, 20));
+  return base32(createHash97("sha256").update(spkiDer).digest().subarray(0, 20));
 }
 function spkiOf(key) {
   return key.export({ format: "der", type: "spki" });
@@ -185827,7 +192511,7 @@ function signInstallMessage(privateKey, kind, nonce, installId, relayHost, schem
   return base64url2(sign(null, signedPayload(kind, nonce, installId, relayHost, scheme), privateKey));
 }
 function powDigest(nonce, installId, relayHost, counter) {
-  return createHash95("sha256").update(`${POW_DOMAIN}
+  return createHash97("sha256").update(`${POW_DOMAIN}
 ${nonce}
 ${installId}
 ${relayHost.toLowerCase()}
@@ -188789,7 +195473,7 @@ var DictionarySplitter = class {
   clear() {
     this.cache.clear();
   }
-}, LRUCache_default, BPE, BPE_default, Legacy, Legacy_default, create_tokenizer_model_default, PostProcessor, PostProcessor_default, TemplateProcessing, TemplateProcessing_default, ByteLevel2, ByteLevel_default2, BertProcessing, BertProcessing_default, RobertaProcessing, RobertaProcessing_default, Sequence3, Sequence_default3, create_post_processor_default, Decoder, Decoder_default, ByteLevel3, ByteLevel_default3, WordPiece, WordPiece_default2, Metaspace2, Metaspace_default2, BPE2, BPE_default2, CTC, CTC_default, Sequence4, Sequence_default4, Replace3, Replace_default3, Fuse, Fuse_default, Strip2, Strip_default2, ByteFallback, ByteFallback_default, create_decoder_default, Tokenizer2 = class {
+}, LRUCache_default, BPE, BPE_default, Legacy, Legacy_default, create_tokenizer_model_default, PostProcessor, PostProcessor_default, TemplateProcessing, TemplateProcessing_default, ByteLevel2, ByteLevel_default2, BertProcessing, BertProcessing_default, RobertaProcessing, RobertaProcessing_default, Sequence3, Sequence_default3, create_post_processor_default, Decoder, Decoder_default, ByteLevel3, ByteLevel_default3, WordPiece, WordPiece_default2, Metaspace2, Metaspace_default2, BPE2, BPE_default2, CTC, CTC_default, Sequence4, Sequence_default4, Replace3, Replace_default3, Fuse, Fuse_default, Strip2, Strip_default2, ByteFallback, ByteFallback_default, create_decoder_default, Tokenizer3 = class {
   constructor(tokenizer, config) {
     const tokenizer_error = validate_object(tokenizer, "Tokenizer", [
       "model",
@@ -190051,7 +196735,7 @@ var init_tokenizers = __esm(() => {
   };
   ByteFallback_default = ByteFallback;
   create_decoder_default = create_decoder;
-  Tokenizer_default = Tokenizer2;
+  Tokenizer_default = Tokenizer3;
 });
 
 // src/workers/source-index/built-in-embedding/precompiled-charsmap.ts
@@ -190376,7 +197060,7 @@ var init_built_in_reranker = __esm(() => {
 
 // src/workers/classification/judge-pacing.ts
 import { AsyncLocalStorage as AsyncLocalStorage14 } from "node:async_hooks";
-import { createHash as createHash96 } from "node:crypto";
+import { createHash as createHash98 } from "node:crypto";
 function header(response, name) {
   const raw = response.headers.get(name);
   if (raw === null || raw.trim() === "")
@@ -190474,7 +197158,7 @@ var JUDGE_SAMPLING, JUDGE_PROMPT_CACHE_KEY, DEFAULT_VENICE_JUDGE_CONCURRENT_CALL
 var init_judge_pacing = __esm(() => {
   init_sniffer();
   JUDGE_SAMPLING = Object.freeze({ temperature: 0, seed: 883 });
-  JUDGE_PROMPT_CACHE_KEY = `olympus-judge-${createHash96("sha256").update(SNIFFER_SYSTEM_PROMPT).digest("hex").slice(0, 16)}`;
+  JUDGE_PROMPT_CACHE_KEY = `olympus-judge-${createHash98("sha256").update(SNIFFER_SYSTEM_PROMPT).digest("hex").slice(0, 16)}`;
   realClock = {
     now: () => Date.now(),
     sleep: (ms, signal) => new Promise((resolve, reject) => {
@@ -192349,7 +199033,7 @@ var init_local_private_answers = __esm(() => {
 });
 
 // src/core/release-signing.ts
-import { createHash as createHash97, createPublicKey as createPublicKey3, verify as verify2 } from "node:crypto";
+import { createHash as createHash99, createPublicKey as createPublicKey3, verify as verify2 } from "node:crypto";
 function releaseManifestUrl(installerUrl) {
   return `${installerUrl}.release.json`;
 }
@@ -192357,7 +199041,7 @@ function releasePlatformFor(platform) {
   return platform === "darwin" ? "darwin-arm64" : platform === "linux" ? "linux-x64" : undefined;
 }
 function sha256Hex(bytes) {
-  return createHash97("sha256").update(bytes).digest("hex");
+  return createHash99("sha256").update(bytes).digest("hex");
 }
 function releasePublicKey(...given) {
   const pem = given.length ? given[0] : RELEASE_SIGNING_PUBLIC_KEY;
@@ -198216,8 +204900,8 @@ dialog.msgdialog > .messaging-card { margin: 0; border: 0; border-radius: 12px; 
 });
 
 // src/workers/dashboard/components.ts
-import { createHash as createHash98 } from "node:crypto";
-function escapeHtml2(value) {
+import { createHash as createHash100 } from "node:crypto";
+function escapeHtml3(value) {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 }
 function escapeScriptJson(value) {
@@ -198263,17 +204947,17 @@ function externalLink(input) {
   const href = safeExternalHref(input.url);
   if (href === undefined)
     return "";
-  return `<a class="ext" href="${escapeHtml2(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml2(input.label)}</a>`;
+  return `<a class="ext" href="${escapeHtml3(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml3(input.label)}</a>`;
 }
 function dashboardPageSignature(body) {
   const normalised = body.replace(/<span id="dashboard-poll-signature"[^>]*><\/span>/g, "").replace(/\b\d+s\b/g, "0s");
-  return createHash98("sha256").update(normalised).digest("hex");
+  return createHash100("sha256").update(normalised).digest("hex");
 }
 function pageShell(input) {
   const crumb = (input.crumb ?? "").trim();
   const documentTitle = crumb === "" ? input.title : `${input.title} / ${crumb}`;
   const leadHref = safeHref(input.basePath) ?? "/dashboard";
-  const brand = crumb === "" ? escapeHtml2(input.title) : `<a class="lead" href="${escapeHtml2(leadHref)}">${escapeHtml2(input.title)}</a> <span class="crumb">/</span> ${escapeHtml2(crumb)}`;
+  const brand = crumb === "" ? escapeHtml3(input.title) : `<a class="lead" href="${escapeHtml3(leadHref)}">${escapeHtml3(input.title)}</a> <span class="crumb">/</span> ${escapeHtml3(crumb)}`;
   const sessionMarker = input.poll?.controlSessionCsrfToken === undefined ? "" : dashboardSessionMarker(input.poll.controlSessionCsrfToken);
   const useController = input.controller !== undefined || input.poll !== undefined;
   const controller = !useController ? [] : [standaloneDashboardControllerScript({
@@ -198293,9 +204977,9 @@ function pageShell(input) {
   const content = `<div class="frame">
       <div class="page">
       ${input.nav ? `${input.nav}
-      <div class="top subtop"><span class="meta" data-computer-identity>${escapeHtml2(dashboardComputerIdentity())}</span>${input.meta ? `<span class="meta">${escapeHtml2(input.meta)}</span>` : ""}</div>` : `<div class="top">
-        <span class="brand">${brand}</span><span class="meta" data-computer-identity>${escapeHtml2(dashboardComputerIdentity())}</span>${input.meta ? `
-        <span class="meta">${escapeHtml2(input.meta)}</span>` : ""}
+      <div class="top subtop"><span class="meta" data-computer-identity>${escapeHtml3(dashboardComputerIdentity())}</span>${input.meta ? `<span class="meta">${escapeHtml3(input.meta)}</span>` : ""}</div>` : `<div class="top">
+        <span class="brand">${brand}</span><span class="meta" data-computer-identity>${escapeHtml3(dashboardComputerIdentity())}</span>${input.meta ? `
+        <span class="meta">${escapeHtml3(input.meta)}</span>` : ""}
       </div>`}
       ${input.body}
       </div>
@@ -198307,11 +204991,11 @@ function pageShell(input) {
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>${escapeHtml2(documentTitle)}</title>
+    <title>${escapeHtml3(documentTitle)}</title>
     <style>${styles}</style>
   </head>
   <body>
-    <div data-olympus-dashboard-root data-signature="${escapeHtml2(dashboardPageSignature(input.body))}" data-unlocked="${input.poll?.unlocked === true ? "true" : "false"}" data-session="${escapeHtml2(sessionMarker)}">${content}</div>
+    <div data-olympus-dashboard-root data-signature="${escapeHtml3(dashboardPageSignature(input.body))}" data-unlocked="${input.poll?.unlocked === true ? "true" : "false"}" data-session="${escapeHtml3(sessionMarker)}">${content}</div>
     ${scripts}
   </body>
 </html>`;
@@ -198345,20 +205029,20 @@ function statusGlyph(status, fraction) {
 function actionButton(input) {
   const action = input === undefined ? undefined : { ...input, label: dashboardActionLabel(input.label) };
   if (action?.blockedReason !== undefined && (action.kind !== "none" || action.sheet !== undefined)) {
-    return `<span class="blocked"><button class="btn" type="button" disabled aria-disabled="true">${escapeHtml2(action.label)}</button>` + `<span class="hint">${escapeHtml2(action.blockedReason)}</span></span>`;
+    return `<span class="blocked"><button class="btn" type="button" disabled aria-disabled="true">${escapeHtml3(action.label)}</button>` + `<span class="hint">${escapeHtml3(action.blockedReason)}</span></span>`;
   }
   if (action?.kind === "link") {
     const href = safeHref(action.href);
-    return href === undefined ? "" : `<a class="btn${action.primary ? " primary" : ""}" href="${escapeHtml2(href)}">${escapeHtml2(action.label)}</a>`;
+    return href === undefined ? "" : `<a class="btn${action.primary ? " primary" : ""}" href="${escapeHtml3(href)}">${escapeHtml3(action.label)}</a>`;
   }
   if (action === undefined || action.kind === "none") {
     if (action?.sheet === undefined)
       return "";
     const sheetId = safeId2(action.sheet);
-    return `<button class="btn${action.primary ? " primary" : ""}" type="button" data-sheet-toggle="#${sheetId}" aria-controls="${sheetId}" aria-expanded="false">${escapeHtml2(action.label)}</button>`;
+    return `<button class="btn${action.primary ? " primary" : ""}" type="button" data-sheet-toggle="#${sheetId}" aria-controls="${sheetId}" aria-expanded="false">${escapeHtml3(action.label)}</button>`;
   }
-  const button = `<button class="btn${action.primary ? " primary" : ""}" type="submit">${escapeHtml2(action.label)}</button>`;
-  const source = `<input type="hidden" name="source" value="${escapeHtml2(action.source ?? "")}">`;
+  const button = `<button class="btn${action.primary ? " primary" : ""}" type="submit">${escapeHtml3(action.label)}</button>`;
+  const source = `<input type="hidden" name="source" value="${escapeHtml3(action.source ?? "")}">`;
   const message = `<span class="actmsg" data-action-message role="status"></span>`;
   const key = action.kind === "api_key" ? `<input class="keyfield" type="password" name="api_key" required placeholder="API key" aria-label="API key">` : "";
   return `<form class="rowform" data-connect-kind="${action.kind}">${source}${key}${button}${message}</form>`;
@@ -198369,42 +205053,42 @@ function dashboardControlGate(input) {
   }
   const sheetId = `${DASHBOARD_CONTROL_GATE_ID}-how`;
   const promptId = `${sheetId}-prompt`;
-  return `<div class="sect" id="${DASHBOARD_CONTROL_GATE_ID}">Dashboard controls</div>` + `<div class="attncard" data-dashboard-control-gate data-state="locked">` + `<div class="grow"><span class="name">Open dashboard controls</span>` + `<span class="why"> — ask your agent for a fresh opening link. No token copying needed.</span></div>` + `<button class="btn primary" type="button" data-sheet-toggle="#${sheetId}" aria-controls="${sheetId}" aria-expanded="false">Get opening link</button></div>` + `<div class="sheet gate" id="${sheetId}" aria-hidden="true">` + `<h4>Open dashboard controls</h4>` + `<p>Copy this request to your agent, then open the link it gives you. The link works once and expires after fifteen minutes.</p>` + `<div class="promptbox" id="${promptId}">${escapeHtml2(DASHBOARD_WORKER_TOKEN_AGENT_PROMPT)}</div>` + `<button class="btn" type="button" data-copy-target="#${promptId}">Copy prompt</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `<details><summary>Advanced: use a worker token</summary>` + `<form class="rowform" data-control-session-kind="unlock" method="post" action="/dashboard/control/session">` + `<input class="keyfield" data-dashboard-control-token type="password"` + ` required autocomplete="off" placeholder="Worker token" aria-label="Worker token">` + `<button class="btn" type="submit">Unlock</button>` + `<span class="actmsg" data-action-message role="status"></span></form></details></div>`;
+  return `<div class="sect" id="${DASHBOARD_CONTROL_GATE_ID}">Dashboard controls</div>` + `<div class="attncard" data-dashboard-control-gate data-state="locked">` + `<div class="grow"><span class="name">Open dashboard controls</span>` + `<span class="why"> — ask your agent for a fresh opening link. No token copying needed.</span></div>` + `<button class="btn primary" type="button" data-sheet-toggle="#${sheetId}" aria-controls="${sheetId}" aria-expanded="false">Get opening link</button></div>` + `<div class="sheet gate" id="${sheetId}" aria-hidden="true">` + `<h4>Open dashboard controls</h4>` + `<p>Copy this request to your agent, then open the link it gives you. The link works once and expires after fifteen minutes.</p>` + `<div class="promptbox" id="${promptId}">${escapeHtml3(DASHBOARD_WORKER_TOKEN_AGENT_PROMPT)}</div>` + `<button class="btn" type="button" data-copy-target="#${promptId}">Copy prompt</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `<details><summary>Advanced: use a worker token</summary>` + `<form class="rowform" data-control-session-kind="unlock" method="post" action="/dashboard/control/session">` + `<input class="keyfield" data-dashboard-control-token type="password"` + ` required autocomplete="off" placeholder="Worker token" aria-label="Worker token">` + `<button class="btn" type="submit">Unlock</button>` + `<span class="actmsg" data-action-message role="status"></span></form></details></div>`;
 }
 function rowMenu(label, itemsHtml) {
   if (itemsHtml.trim() === "")
     return "";
-  return `<details class="rowmenu"><summary class="btn" aria-label="${escapeHtml2(`More actions for ${label}`)}">⋯</summary>` + `<div class="menu">${itemsHtml}</div></details>`;
+  return `<details class="rowmenu"><summary class="btn" aria-label="${escapeHtml3(`More actions for ${label}`)}">⋯</summary>` + `<div class="menu">${itemsHtml}</div></details>`;
 }
 function setupRow(input) {
   const href = safeHref(input.href);
   const blurb = input.blurb.trim();
   const link = input.blurbLink === undefined ? "" : externalLink(input.blurbLink);
-  const blurbText = blurb === "" ? "" : escapeHtml2(blurb);
+  const blurbText = blurb === "" ? "" : escapeHtml3(blurb);
   const instructions = [blurbText, link].filter((part) => part !== "").join(" ");
   const summary = (input.summary ?? "").trim();
   const caveat = (input.caveat ?? "").trim();
   const lead = [
-    caveat === "" ? "" : `<span class="caveat">${escapeHtml2(caveat)}.</span>`,
-    summary === "" ? "" : escapeHtml2(summary)
+    caveat === "" ? "" : `<span class="caveat">${escapeHtml3(caveat)}.</span>`,
+    summary === "" ? "" : escapeHtml3(summary)
   ].filter((part) => part !== "").join(" ");
   const blurbBody = lead === "" ? instructions : `${lead}${instructions === "" ? "" : detailsDisclosure("How to set this up", `<p>${instructions}</p>`)}`;
   const blurbSpan = blurbBody === "" ? "" : `<span class="blurb">${blurbBody}</span>`;
-  const sourceId = input.sourceId ? ` data-source-id="${escapeHtml2(input.sourceId)}"` : "";
-  return `<div class="${blurbBody === "" ? "setrow noblurb" : "setrow"}"${sourceId}${href ? ` data-dashboard-href="${escapeHtml2(href)}"` : ""}>` + `${statusGlyph("Off")}` + (href ? `<a class="name" href="${escapeHtml2(href)}">${escapeHtml2(input.label)}</a>` : `<span class="name">${escapeHtml2(input.label)}</span>`) + `${blurbSpan}` + `${actionButton({ ...input.action, primary: input.action.primary ?? false })}` + `</div>`;
+  const sourceId = input.sourceId ? ` data-source-id="${escapeHtml3(input.sourceId)}"` : "";
+  return `<div class="${blurbBody === "" ? "setrow noblurb" : "setrow"}"${sourceId}${href ? ` data-dashboard-href="${escapeHtml3(href)}"` : ""}>` + `${statusGlyph("Off")}` + (href ? `<a class="name" href="${escapeHtml3(href)}">${escapeHtml3(input.label)}</a>` : `<span class="name">${escapeHtml3(input.label)}</span>`) + `${blurbSpan}` + `${actionButton({ ...input.action, primary: input.action.primary ?? false })}` + `</div>`;
 }
 function blockerBanner(input) {
-  return `<div class="attncard banner blocker" role="status" data-blocker>` + `<div class="grow"><span class="name">${escapeHtml2(input.sentence)}</span></div>` + `${input.controlHtml ?? actionButton(input.action)}` + `</div>`;
+  return `<div class="attncard banner blocker" role="status" data-blocker>` + `<div class="grow"><span class="name">${escapeHtml3(input.sentence)}</span></div>` + `${input.controlHtml ?? actionButton(input.action)}` + `</div>`;
 }
 function detailsDisclosure(summary, body) {
   if (body.trim() === "")
     return "";
-  return `<details class="howto"><summary>${escapeHtml2(summary)}</summary>${body}</details>`;
+  return `<details class="howto"><summary>${escapeHtml3(summary)}</summary>${body}</details>`;
 }
 function connectorSheet(input) {
   const id = safeId2(input.id);
   const promptId = `${id}-prompt`;
-  return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml2(input.heading)}</h4>` + `<p>${escapeHtml2(input.intro)}</p>` + `<div class="promptbox" id="${promptId}">${escapeHtml2(input.promptText)}</div>` + `<button class="btn" type="button" data-copy-target="#${promptId}">${escapeHtml2(input.copyButtonLabel)}</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `</div>`;
+  return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml3(input.heading)}</h4>` + `<p>${escapeHtml3(input.intro)}</p>` + `<div class="promptbox" id="${promptId}">${escapeHtml3(input.promptText)}</div>` + `<button class="btn" type="button" data-copy-target="#${promptId}">${escapeHtml3(input.copyButtonLabel)}</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `</div>`;
 }
 function setupStepsSheet(input) {
   const id = safeId2(input.id);
@@ -198412,24 +205096,24 @@ function setupStepsSheet(input) {
   const current = input.initialStep ?? 0;
   const redirectStep = input.steps.findIndex((step) => step.redirect_uri && input.redirect);
   const shortcutTarget = redirectStep >= 0 ? redirectStep : count - 1;
-  const shortcut = input.shortcut && shortcutTarget > 0 ? `<p class="setupshortcut"><button class="btn" type="button" data-setup-jump="${shortcutTarget}">${escapeHtml2(input.shortcut)}</button></p>` : "";
+  const shortcut = input.shortcut && shortcutTarget > 0 ? `<p class="setupshortcut"><button class="btn" type="button" data-setup-jump="${shortcutTarget}">${escapeHtml3(input.shortcut)}</button></p>` : "";
   const formId = `${id}-form`;
   const initialAction = input.stepActions?.[0];
   const panels = input.steps.map((step, index) => {
     const url = step.link && safeExternalHref(step.link.url);
-    const link = url ? `<button type="button" class="btn primary" data-setup-open="${escapeHtml2(url)}">${escapeHtml2(step.button_label ?? `Open this page in ${input.provider}${input.guided ? " ↗" : ""}`)}</button>` : "";
+    const link = url ? `<button type="button" class="btn primary" data-setup-open="${escapeHtml3(url)}">${escapeHtml3(step.button_label ?? `Open this page in ${input.provider}${input.guided ? " ↗" : ""}`)}</button>` : "";
     const extraLinks = (step.links ?? []).map((link) => {
       const href = safeExternalHref(link.url);
-      return href ? `<p><a class="ext" href="${escapeHtml2(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml2(link.label)} ↗</a></p>` : "";
+      return href ? `<p><a class="ext" href="${escapeHtml3(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml3(link.label)} ↗</a></p>` : "";
     }).join("");
-    const redirect = step.redirect_uri && input.redirect ? `<div class="promptbox" id="${id}-redirect">${escapeHtml2(input.redirect)}</div><button class="btn" type="button" data-copy-target="#${id}-redirect">Copy redirect URI</button><span data-copy-status aria-live="polite"></span>` : "";
+    const redirect = step.redirect_uri && input.redirect ? `<div class="promptbox" id="${id}-redirect">${escapeHtml3(input.redirect)}</div><button class="btn" type="button" data-copy-target="#${id}-redirect">Copy redirect URI</button><span data-copy-status aria-live="polite"></span>` : "";
     const action = input.stepActions?.[index];
-    const instructions = step.instructions ? `<ol class="steps">${step.instructions.map((click) => `<li>${escapeHtml2(click).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")}</li>`).join("")}</ol>` : step.text ? `<p>${escapeHtml2(step.text)}</p>` : "";
+    const instructions = step.instructions ? `<ol class="steps">${step.instructions.map((click) => `<li>${escapeHtml3(click).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")}</li>`).join("")}</ol>` : step.text ? `<p>${escapeHtml3(step.text)}</p>` : "";
     const heading = input.guided ? "h2" : "h4";
-    return `<div data-setup-panel${action ? ` data-setup-form="${escapeHtml2(action.formId)}" data-setup-label="${escapeHtml2(action.label)}"` : ""}${index !== current ? " hidden" : ""}><${heading}>${escapeHtml2(step.title ?? `Step ${index + 1}`)}</${heading}>${instructions}${link}${extraLinks}${redirect}${step.return_note ? `<p class="setupnote">${escapeHtml2(step.return_note)}</p>` : ""}${index === 0 ? shortcut : ""}${input.stepContent?.[index] ?? ""}${index === count - 1 ? input.finalForm(formId) : ""}</div>`;
+    return `<div data-setup-panel${action ? ` data-setup-form="${escapeHtml3(action.formId)}" data-setup-label="${escapeHtml3(action.label)}"` : ""}${index !== current ? " hidden" : ""}><${heading}>${escapeHtml3(step.title ?? `Step ${index + 1}`)}</${heading}>${instructions}${link}${extraLinks}${redirect}${step.return_note ? `<p class="setupnote">${escapeHtml3(step.return_note)}</p>` : ""}${index === 0 ? shortcut : ""}${input.stepContent?.[index] ?? ""}${index === count - 1 ? input.finalForm(formId) : ""}</div>`;
   }).join("");
   const progress = input.guided ? `<div class="setupsegments" role="progressbar" aria-label="Setup progress" aria-valuemin="1" aria-valuemax="${count}" aria-valuenow="${current + 1}">${input.steps.map((_, i) => `<span data-setup-segment${i <= current ? ' class="filled"' : ""}></span>`).join("")}</div>` : `<progress data-setup-progress max="${count}" value="${current + 1}"></progress>`;
-  return `<div data-setup-steps${input.guided ? " data-setup-guided" : ""}>${progress}<p data-setup-counter>${input.guided ? `STEP ${current + 1} OF ${count}` : `Step ${current + 1} of ${count}`}</p>${panels}<div class="setupactions actionrow" data-setup-actions><button class="btn" type="button" data-setup-back${current === 0 ? " disabled" : ""}>Back</button><button class="btn primary" type="button" data-setup-next${current === count - 1 || initialAction ? " hidden" : ""}>I've done this, next</button><button class="btn primary" type="submit" form="${escapeHtml2(initialAction?.formId ?? formId)}" data-setup-submit${current === count - 1 || initialAction ? "" : " hidden"}>${escapeHtml2(initialAction?.label ?? input.submitLabel ?? "Connect")}</button>${input.footerContent ?? ""}</div>${input.footer ? `<p class="setupfooter">${escapeHtml2(input.footer)}</p>` : ""}</div>`;
+  return `<div data-setup-steps${input.guided ? " data-setup-guided" : ""}>${progress}<p data-setup-counter>${input.guided ? `STEP ${current + 1} OF ${count}` : `Step ${current + 1} of ${count}`}</p>${panels}<div class="setupactions actionrow" data-setup-actions><button class="btn" type="button" data-setup-back${current === 0 ? " disabled" : ""}>Back</button><button class="btn primary" type="button" data-setup-next${current === count - 1 || initialAction ? " hidden" : ""}>I've done this, next</button><button class="btn primary" type="submit" form="${escapeHtml3(initialAction?.formId ?? formId)}" data-setup-submit${current === count - 1 || initialAction ? "" : " hidden"}>${escapeHtml3(initialAction?.label ?? input.submitLabel ?? "Connect")}</button>${input.footerContent ?? ""}</div>${input.footer ? `<p class="setupfooter">${escapeHtml3(input.footer)}</p>` : ""}</div>`;
 }
 function connectSetupSheet(input) {
   const id = safeId2(input.id);
@@ -198437,41 +205121,41 @@ function connectSetupSheet(input) {
   const inputs = input.fields.map((field) => {
     const value = field.secret && input.savedSecrets?.includes(field.name) ? DASHBOARD_SAVED_SECRET_FIELD_VALUE : input.values?.[field.name];
     const placeholder = input.placeholders?.[field.name] ?? field.label;
-    return `<input class="keyfield" type="${field.secret ? "password" : "text"}" name="${escapeHtml2(field.name)}"` + `${field.required ? " required" : ""} autocomplete="off"` + `${value === undefined ? "" : ` value="${escapeHtml2(value)}"`}` + ` placeholder="${escapeHtml2(placeholder)}" aria-label="${escapeHtml2(field.label)}">`;
+    return `<input class="keyfield" type="${field.secret ? "password" : "text"}" name="${escapeHtml3(field.name)}"` + `${field.required ? " required" : ""} autocomplete="off"` + `${value === undefined ? "" : ` value="${escapeHtml3(value)}"`}` + ` placeholder="${escapeHtml3(placeholder)}" aria-label="${escapeHtml3(field.label)}">`;
   }).join("");
   const hasError = Boolean(input.notice?.trim());
-  const notice = hasError ? `<div data-connect-error><p class="why" role="alert">${escapeHtml2(input.notice)}</p>` + detailsDisclosure("How to fix", input.noticeDetail ? `<p class="hint">${escapeHtml2(input.noticeDetail)}</p>` : "") + `<button class="btn" type="button" data-connect-retry>Back to setup</button></div>` : "";
-  const providerNote = input.providerNote?.trim() && (!input.credentialFile || input.publisher) ? `<p class="providernote"${input.credentialFile ? " data-shared-app-note" : ""}>${escapeHtml2(input.providerNote)}</p>` : "";
+  const notice = hasError ? `<div data-connect-error><p class="why" role="alert">${escapeHtml3(input.notice)}</p>` + detailsDisclosure("How to fix", input.noticeDetail ? `<p class="hint">${escapeHtml3(input.noticeDetail)}</p>` : "") + `<button class="btn" type="button" data-connect-retry>Back to setup</button></div>` : "";
+  const providerNote = input.providerNote?.trim() && (!input.credentialFile || input.publisher) ? `<p class="providernote"${input.credentialFile ? " data-shared-app-note" : ""}>${escapeHtml3(input.providerNote)}</p>` : "";
   const registration = callbackRegistrationSteps(id, input.registration);
-  const redirect = input.registration !== undefined || input.redirectUri === undefined ? "" : `<p class="hint">Redirect URI</p>` + `<div class="promptbox" id="${id}-redirect">${escapeHtml2(input.redirectUri.uri)}</div>` + `<button class="btn" type="button" data-copy-target="#${id}-redirect">Copy redirect URI</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `${input.redirectUri.guidance === undefined ? "" : `<p class="hint">${escapeHtml2(input.redirectUri.guidance)}</p>`}`;
-  const cancel = input.cancellable !== true ? "" : `<form class="rowform" data-connect-kind="oauth_cancel" style="margin-top:8px">` + `<input type="hidden" name="source" value="${escapeHtml2(input.source)}">` + `<button class="btn" type="submit">Cancel connection attempt</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>`;
-  const prompt = `<details class="agentprompt">` + `<summary>Ask your agent to walk you through it</summary>` + `<div class="promptbox" id="${promptId}">${escapeHtml2(input.promptText)}</div>` + `<button class="btn" type="button" data-copy-target="#${promptId}">Copy prompt</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `</details>`;
-  const submitLabel = escapeHtml2(input.submitLabel ?? "Connect");
-  const sourceField = `<input type="hidden" name="source" value="${escapeHtml2(input.source)}">`;
-  const byoForm = (formId) => `<form${formId ? ` id="${formId}" class="setupfields"` : ' class="rowform"'} data-connect-kind="oauth" style="margin-top:12px">` + sourceField + (input.credentialFile ? `<input type="hidden" name="google_desktop" value="true"><input type="hidden" name="client_file_revision" value="0"><div data-client-file-drop tabindex="0" role="button" aria-label="Drop the downloaded file here"><p>Drop the downloaded file here</p><p class="hint">client_secret_….json, or choose it from Downloads</p><input type="file" accept=".json,application/json" data-client-file hidden aria-label="Choose the downloaded file"><p data-client-file-status role="status"></p></div>${hasError ? `<div data-setup-error><p class="why" role="alert">${escapeHtml2(input.notice)}</p>${detailsDisclosure("How to fix", input.noticeDetail ? `<p class="hint">${escapeHtml2(input.noticeDetail)}</p>` : "")}</div>` : ""}<p class="hint">The file stays on this computer. Olympus reads the key from it, checks your app is ready, and opens Google's sign-in. Drive uses the same app.</p><details data-client-paste><summary>Paste the ID and secret instead</summary>${inputs.replace(/<input /g, "<input disabled ")}</details>` : inputs) + (formId ? "" : `<button class="btn primary" type="submit">${submitLabel}</button>`) + `<span class="actmsg" data-action-message role="status"></span>` + `<span class="authfallback" data-authorization-fallback></span>` + `</form>`;
+  const redirect = input.registration !== undefined || input.redirectUri === undefined ? "" : `<p class="hint">Redirect URI</p>` + `<div class="promptbox" id="${id}-redirect">${escapeHtml3(input.redirectUri.uri)}</div>` + `<button class="btn" type="button" data-copy-target="#${id}-redirect">Copy redirect URI</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `${input.redirectUri.guidance === undefined ? "" : `<p class="hint">${escapeHtml3(input.redirectUri.guidance)}</p>`}`;
+  const cancel = input.cancellable !== true ? "" : `<form class="rowform" data-connect-kind="oauth_cancel" style="margin-top:8px">` + `<input type="hidden" name="source" value="${escapeHtml3(input.source)}">` + `<button class="btn" type="submit">Cancel connection attempt</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>`;
+  const prompt = `<details class="agentprompt">` + `<summary>Ask your agent to walk you through it</summary>` + `<div class="promptbox" id="${promptId}">${escapeHtml3(input.promptText)}</div>` + `<button class="btn" type="button" data-copy-target="#${promptId}">Copy prompt</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `</details>`;
+  const submitLabel = escapeHtml3(input.submitLabel ?? "Connect");
+  const sourceField = `<input type="hidden" name="source" value="${escapeHtml3(input.source)}">`;
+  const byoForm = (formId) => `<form${formId ? ` id="${formId}" class="setupfields"` : ' class="rowform"'} data-connect-kind="oauth" style="margin-top:12px">` + sourceField + (input.credentialFile ? `<input type="hidden" name="google_desktop" value="true"><input type="hidden" name="client_file_revision" value="0"><div data-client-file-drop tabindex="0" role="button" aria-label="Drop the downloaded file here"><p>Drop the downloaded file here</p><p class="hint">client_secret_….json, or choose it from Downloads</p><input type="file" accept=".json,application/json" data-client-file hidden aria-label="Choose the downloaded file"><p data-client-file-status role="status"></p></div>${hasError ? `<div data-setup-error><p class="why" role="alert">${escapeHtml3(input.notice)}</p>${detailsDisclosure("How to fix", input.noticeDetail ? `<p class="hint">${escapeHtml3(input.noticeDetail)}</p>` : "")}</div>` : ""}<p class="hint">The file stays on this computer. Olympus reads the key from it, checks your app is ready, and opens Google's sign-in. Drive uses the same app.</p><details data-client-paste><summary>Paste the ID and secret instead</summary>${inputs.replace(/<input /g, "<input disabled ")}</details>` : inputs) + (formId ? "" : `<button class="btn primary" type="submit">${submitLabel}</button>`) + `<span class="actmsg" data-action-message role="status"></span>` + `<span class="authfallback" data-authorization-fallback></span>` + `</form>`;
   const walkthroughBody = input.steps?.length && input.provider ? setupStepsSheet({ id, provider: input.provider, steps: input.steps, finalForm: byoForm, submitLabel: input.submitLabel ?? "Connect", ...input.credentialFile ? { guided: true, initialStep: hasError ? input.steps.length - 1 : 0, footer: "Steps: project · turn on Gmail and Drive · sign-in screen · publish · make the key · paste it here" } : {}, ...input.redirectUri ? { redirect: input.redirectUri.uri } : {}, ...input.shortcut ? { shortcut: input.shortcut } : {} }) : `${registration}${redirect}${byoForm()}`;
-  const walkthrough = input.credentialFile ? `<div class="setupheader"><h2>${escapeHtml2(input.setupHeading ?? input.heading)}</h2><button class="btn setupclose" type="button" data-sheet-toggle="#${id}" aria-label="Close setup">×</button></div><p class="setupintro">${escapeHtml2(input.intro)}</p>${walkthroughBody}` : `${input.setupHeading ? `<h4>${escapeHtml2(input.setupHeading)}</h4>` : ""}${walkthroughBody}`;
-  const lead = input.lead ? `<div data-setup-lead><h4>${escapeHtml2(input.lead.title)}</h4><p>${escapeHtml2(input.lead.body)}</p><button type="button" class="btn primary" data-setup-begin>${escapeHtml2(input.lead.button)}</button>${input.lead.notes.map((note) => `<p class="hint">${escapeHtml2(note)}</p>`).join("")}</div>` : "";
+  const walkthrough = input.credentialFile ? `<div class="setupheader"><h2>${escapeHtml3(input.setupHeading ?? input.heading)}</h2><button class="btn setupclose" type="button" data-sheet-toggle="#${id}" aria-label="Close setup">×</button></div><p class="setupintro">${escapeHtml3(input.intro)}</p>${walkthroughBody}` : `${input.setupHeading ? `<h4>${escapeHtml3(input.setupHeading)}</h4>` : ""}${walkthroughBody}`;
+  const lead = input.lead ? `<div data-setup-lead><h4>${escapeHtml3(input.lead.title)}</h4><p>${escapeHtml3(input.lead.body)}</p><button type="button" class="btn primary" data-setup-begin>${escapeHtml3(input.lead.button)}</button>${input.lead.notes.map((note) => `<p class="hint">${escapeHtml3(note)}</p>`).join("")}</div>` : "";
   if (input.publisher) {
     const publisherForm = `<form class="rowform" data-connect-kind="oauth"${input.cancellable ? "" : " data-oauth-autostart"} style="margin-top:12px">` + sourceField + `<button class="btn primary" type="submit">${submitLabel}</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `<span class="authfallback" data-authorization-fallback></span>` + `</form>`;
     if (input.credentialFile)
-      return `<div class="sheet" id="${id}" aria-hidden="true"><div data-connect-content><div data-setup-choice${hasError ? " hidden" : ""}><h4>${escapeHtml2(input.heading)}</h4>${providerNote}<p>${escapeHtml2(input.publisher.intro)}</p><div class="actionrow">${publisherForm}<button type="button" class="btn" data-setup-begin>${escapeHtml2(input.publisher.byoSummary)}</button></div>${cancel}</div><div data-setup-walkthrough${hasError ? "" : " hidden"}>${walkthrough}</div></div></div>`;
-    return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml2(input.heading)}</h4>` + `${notice}<div data-connect-content${hasError ? " hidden" : ""}>${providerNote}` + `<p>${escapeHtml2(input.publisher.intro)}</p>` + `${publisherForm}` + `${cancel}` + `<details class="agentprompt"><summary>${escapeHtml2(input.publisher.byoSummary)}</summary><p>${escapeHtml2(input.intro)}</p>${walkthrough}${prompt}</details>` + `</div>` + `</div>`;
+      return `<div class="sheet" id="${id}" aria-hidden="true"><div data-connect-content><div data-setup-choice${hasError ? " hidden" : ""}><h4>${escapeHtml3(input.heading)}</h4>${providerNote}<p>${escapeHtml3(input.publisher.intro)}</p><div class="actionrow">${publisherForm}<button type="button" class="btn" data-setup-begin>${escapeHtml3(input.publisher.byoSummary)}</button></div>${cancel}</div><div data-setup-walkthrough${hasError ? "" : " hidden"}>${walkthrough}</div></div></div>`;
+    return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml3(input.heading)}</h4>` + `${notice}<div data-connect-content${hasError ? " hidden" : ""}>${providerNote}` + `<p>${escapeHtml3(input.publisher.intro)}</p>` + `${publisherForm}` + `${cancel}` + `<details class="agentprompt"><summary>${escapeHtml3(input.publisher.byoSummary)}</summary><p>${escapeHtml3(input.intro)}</p>${walkthrough}${prompt}</details>` + `</div>` + `</div>`;
   }
   if (input.credentialFile)
     return `<div class="sheet" id="${id}" aria-hidden="true"><div data-connect-content>${lead}<div data-setup-walkthrough${input.lead && !hasError ? " hidden" : ""}>${walkthrough}</div>${cancel}</div></div>`;
-  return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml2(input.heading)}</h4>` + `${notice}<div data-connect-content${hasError ? " hidden" : ""}>${providerNote}` + `${lead}<div data-setup-walkthrough${input.lead ? " hidden" : ""}><p>${escapeHtml2(input.intro)}</p>${walkthrough}${prompt}</div>` + `${cancel}</div>` + `</div>`;
+  return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml3(input.heading)}</h4>` + `${notice}<div data-connect-content${hasError ? " hidden" : ""}>${providerNote}` + `${lead}<div data-setup-walkthrough${input.lead ? " hidden" : ""}><p>${escapeHtml3(input.intro)}</p>${walkthrough}${prompt}</div>` + `${cancel}</div>` + `</div>`;
 }
 function callbackRegistrationSteps(id, registration) {
   if (registration === undefined)
     return "";
-  const uriBlock = `<div class="promptbox" id="${id}-redirect">${escapeHtml2(registration.redirect_uri)}</div>` + `<button class="btn" type="button" data-copy-target="#${id}-redirect">Copy redirect URI</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>`;
+  const uriBlock = `<div class="promptbox" id="${id}-redirect">${escapeHtml3(registration.redirect_uri)}</div>` + `<button class="btn" type="button" data-copy-target="#${id}-redirect">Copy redirect URI</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>`;
   if (!registration.required) {
-    return `<p class="hint">${escapeHtml2(registration.skip_note ?? "No registration needed on this machine.")}</p>` + `<p class="hint">Redirect URI</p>` + uriBlock;
+    return `<p class="hint">${escapeHtml3(registration.skip_note ?? "No registration needed on this machine.")}</p>` + `<p class="hint">Redirect URI</p>` + uriBlock;
   }
   const consoleUrl = safeExternalHref(registration.console.url);
-  const consoleStep = consoleUrl === undefined ? escapeHtml2(registration.console.label) : `${escapeHtml2(registration.console.label)}: ` + `<a class="ext" href="${escapeHtml2(consoleUrl)}" target="_blank" rel="noreferrer">${escapeHtml2(new URL(consoleUrl).host)} →</a>`;
-  return `<ol class="steps">` + `<li>${consoleStep}</li>` + `<li>${escapeHtml2(registration.app_requirements)}</li>` + `<li>In <b>${escapeHtml2(registration.setting_label)}</b>, add this exact URL:${uriBlock}</li>` + `<li>${escapeHtml2(registration.finish)}</li>` + `</ol>`;
+  const consoleStep = consoleUrl === undefined ? escapeHtml3(registration.console.label) : `${escapeHtml3(registration.console.label)}: ` + `<a class="ext" href="${escapeHtml3(consoleUrl)}" target="_blank" rel="noreferrer">${escapeHtml3(new URL(consoleUrl).host)} →</a>`;
+  return `<ol class="steps">` + `<li>${consoleStep}</li>` + `<li>${escapeHtml3(registration.app_requirements)}</li>` + `<li>In <b>${escapeHtml3(registration.setting_label)}</b>, add this exact URL:${uriBlock}</li>` + `<li>${escapeHtml3(registration.finish)}</li>` + `</ol>`;
 }
 function dashboardNeedsSetupSheet(source, action, options = {}) {
   const sheetId = `setup-${source.source_id.replace(/[^A-Za-z0-9_-]+/g, "-")}`;
@@ -198561,7 +205245,7 @@ function redirectUriInput(action) {
 }
 function standaloneLockedNotice() {
   const C = DASHBOARD_HOST_GATE_COPY;
-  return `<div class="attncard" data-dashboard-control-gate data-state="locked"><div class="grow">` + `<span class="name">${escapeHtml2(C.title)}</span>` + `<span class="why"> — <a href="${escapeHtml2(olympusOpenUrl({ kind: "dashboard" }))}">${escapeHtml2(C.open)}</a> ` + `${escapeHtml2(C.fallbackBefore)}<code>${escapeHtml2(C.fallbackCommand)}</code>${escapeHtml2(C.fallbackAfter)}</span></div></div>`;
+  return `<div class="attncard" data-dashboard-control-gate data-state="locked"><div class="grow">` + `<span class="name">${escapeHtml3(C.title)}</span>` + `<span class="why"> — <a href="${escapeHtml3(olympusOpenUrl({ kind: "dashboard" }))}">${escapeHtml3(C.open)}</a> ` + `${escapeHtml3(C.fallbackBefore)}<code>${escapeHtml3(C.fallbackCommand)}</code>${escapeHtml3(C.fallbackAfter)}</span></div></div>`;
 }
 function standaloneDashboardControllerScript(input) {
   const mountSource = mountDashboardController.toString().replaceAll("</script", "<\\/script");
@@ -206001,10 +212685,10 @@ function progressLine(install) {
   if (install.state === "running") {
     const phase = fill(C.phase[install.phase], { tool: install.tool });
     const percent = install.phase === "downloading" && install.percent !== undefined ? ` ${fill(C.percent, { percent: String(install.percent) })}` : "";
-    return `<p class="pnote" data-outside-install-progress role="status">${escapeHtml2(phase + percent)}</p>`;
+    return `<p class="pnote" data-outside-install-progress role="status">${escapeHtml3(phase + percent)}</p>`;
   }
   if (install.state === "failed") {
-    return `<p class="pnote ohwarn" data-outside-install-failed="${escapeHtml2(install.code)}" role="status">${escapeHtml2(`${C.failedPrefix} ${install.message}`)}</p>`;
+    return `<p class="pnote ohwarn" data-outside-install-failed="${escapeHtml3(install.code)}" role="status">${escapeHtml3(`${C.failedPrefix} ${install.message}`)}</p>`;
   }
   return "";
 }
@@ -206017,7 +212701,7 @@ function installButton(tools, canEdit, replacing) {
     return "";
   const label = tools.install.state === "failed" ? C.retry : missing ? C.install : outdated.length > 0 ? fill(C.update, { tools: outdated.join(" and ") }) : fill(C.installOwn, { tools: replacing.label });
   const disabled = canEdit ? "" : ' disabled aria-disabled="true"';
-  return `<form class="ohform" data-outside-tools-form><div class="pbuttons">` + `<button type="submit" class="btn primary"${disabled}>${escapeHtml2(label)}</button></div>` + `<span class="actmsg" data-action-message role="status"></span></form>`;
+  return `<form class="ohform" data-outside-tools-form><div class="pbuttons">` + `<button type="submit" class="btn primary"${disabled}>${escapeHtml3(label)}</button></div>` + `<span class="actmsg" data-action-message role="status"></span></form>`;
 }
 function sourceWords(entry) {
   return fill(C.source[entry.source], { path: entry.path ?? "", installed: entry.installedVersion ?? "", version: entry.version ?? "" });
@@ -206026,21 +212710,21 @@ function renderOutsideHelpTools(tools, input) {
   if (!tools)
     return "";
   const install = tools.install;
-  const lines = tools.tools.map((entry) => `<li data-outside-tool="${escapeHtml2(entry.tool)}" data-outside-tool-source="${escapeHtml2(entry.source)}">` + `${escapeHtml2(fill(C.line, { tool: entry.label, state: sourceWords(entry) }))}</li>`).join("");
+  const lines = tools.tools.map((entry) => `<li data-outside-tool="${escapeHtml3(entry.tool)}" data-outside-tool-source="${escapeHtml3(entry.source)}">` + `${escapeHtml3(fill(C.line, { tool: entry.label, state: sourceWords(entry) }))}</li>`).join("");
   const launcher = input.requireLauncher ? tools.tools.find((entry) => entry.tool === "zkapi-clientd" && entry.offered === true) : undefined;
   const missing = Boolean(launcher) || tools.tools.some(installable);
   const parts = [
-    `<p class="pnote"><strong>${escapeHtml2(C.title)}</strong></p>`,
-    `<p class="pnote">${escapeHtml2(C.intro)}</p>`,
+    `<p class="pnote"><strong>${escapeHtml3(C.title)}</strong></p>`,
+    `<p class="pnote">${escapeHtml3(C.intro)}</p>`,
     `<ul class="ohfacts" data-outside-tool-list>${lines}</ul>`,
     progressLine(install)
   ];
   if (install.state === "done" && !missing)
-    parts.push(`<p class="pnote" data-outside-install-done role="status">${escapeHtml2(C.done)}</p>`);
+    parts.push(`<p class="pnote" data-outside-install-done role="status">${escapeHtml3(C.done)}</p>`);
   if (!missing && install.state !== "running")
-    parts.push(`<p class="pnote ohsmall">${escapeHtml2(C.allInstalled)}</p>`);
+    parts.push(`<p class="pnote ohsmall">${escapeHtml3(C.allInstalled)}</p>`);
   parts.push(installButton(tools, input.canEdit, launcher));
-  return `<div class="ohtools" data-outside-tools="setup" data-install-state="${escapeHtml2(install.state)}">${parts.join("")}</div>`;
+  return `<div class="ohtools" data-outside-tools="setup" data-install-state="${escapeHtml3(install.state)}">${parts.join("")}</div>`;
 }
 function renderOutsideHelpToolsFix(tools, input) {
   if (!tools || !outsideHelpToolsNeedAttention(tools))
@@ -206052,13 +212736,13 @@ function renderOutsideHelpToolsFix(tools, input) {
     ...outdated.length > 0 ? [fill(C.fixOutdated, { tools: outdated.join(" and ") })] : []
   ];
   const text = said.length === 0 ? C.fixWorking : said.join(" ");
-  return `<li data-outside-tools="fix" data-install-state="${escapeHtml2(tools.install.state)}"><span>${escapeHtml2(text)}</span>` + `${progressLine(tools.install)}${installButton(tools, input.canEdit)}</li>`;
+  return `<li data-outside-tools="fix" data-install-state="${escapeHtml3(tools.install.state)}"><span>${escapeHtml3(text)}</span>` + `${progressLine(tools.install)}${installButton(tools, input.canEdit)}</li>`;
 }
 function renderOutsideHelpToolsReplace(tools, tool, input) {
   const entry = tools?.tools.find((item) => item.tool === tool);
   if (!tools || entry?.source !== "system" || entry.offered !== true)
     return "";
-  return `<li${input.attrs} data-outside-tools="replace" data-install-state="${escapeHtml2(tools.install.state)}"><span>${escapeHtml2(fill(C.systemOld, { tool: entry.label, version: entry.version ?? "" }))}</span>` + `${progressLine(tools.install)}${installButton(tools, input.canEdit, entry)}</li>`;
+  return `<li${input.attrs} data-outside-tools="replace" data-install-state="${escapeHtml3(tools.install.state)}"><span>${escapeHtml3(fill(C.systemOld, { tool: entry.label, version: entry.version ?? "" }))}</span>` + `${progressLine(tools.install)}${installButton(tools, input.canEdit, entry)}</li>`;
 }
 function renderOutsideHelpToolsScript(tools, input) {
   if (!tools || !input.canEdit || input.csrfToken === undefined)
@@ -206228,9 +212912,9 @@ function renderOutsideHelpCard(status, input) {
   const unavailable = summary.state === "unavailable";
   const parts = [];
   if (input.untitled !== true)
-    parts.push(`<h2 class="ptitle">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.title)}</h2>`);
+    parts.push(`<h2 class="ptitle">${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.title)}</h2>`);
   if (canUnlock && (on || !unavailable || status.confinementInstallRequired)) {
-    parts.push(`<form class="ohform ohunlock" data-outside-form="unlock" data-outside-unlock>` + `<button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unlock)}</button><span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unlockIntro)}</span>` + `<span class="actmsg" data-action-message role="status"></span></form>`);
+    parts.push(`<form class="ohform ohunlock" data-outside-form="unlock" data-outside-unlock>` + `<button type="submit" class="btn primary">${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.unlock)}</button><span class="hint">${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.unlockIntro)}</span>` + `<span class="actmsg" data-action-message role="status"></span></form>`);
   }
   const access = canEdit ? "edit" : canUnlock ? "unlock" : "read";
   const missingRoute = !unavailable && route.state === "not_configured";
@@ -206239,13 +212923,13 @@ function renderOutsideHelpCard(status, input) {
     parts.push(renderProblems(status, access, writerHref));
   parts.push(renderStatusBlock(status, summary, access));
   if (status.restartPending)
-    parts.push(`<p class="pnote ohwarn" data-outside-restart-pending>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.restartPending)}</p>`);
+    parts.push(`<p class="pnote ohwarn" data-outside-restart-pending>${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.restartPending)}</p>`);
   if (unavailable) {
     if (status.confinementInstallRequired)
       parts.push(renderOutsideHelpTools(status.tools, { canEdit, requireLauncher: true }));
     const toolsScript = status.confinementInstallRequired ? renderOutsideHelpToolsScript(status.tools, { canEdit, ...input.csrfToken !== undefined ? { csrfToken: input.csrfToken } : {} }) : "";
     const script = (canEdit || canUnlock) && (on || status.confinementInstallRequired) ? `<script data-dashboard-rerun>${outsideHelpClientScript(outsideHelpScriptConfig(input.csrfToken))}</script>` : "";
-    return `<div class="privacy outside" data-outside-help data-outside-confinement="unavailable" data-revision="${escapeHtml2(String(status.settings.revision))}">${parts.join("")}</div>${script}${toolsScript}`;
+    return `<div class="privacy outside" data-outside-help data-outside-confinement="unavailable" data-revision="${escapeHtml3(String(status.settings.revision))}">${parts.join("")}</div>${script}${toolsScript}`;
   }
   if (!missingRoute)
     parts.push(renderProblems(status, access, writerHref));
@@ -206257,7 +212941,7 @@ function renderOutsideHelpCard(status, input) {
   if (input.part === "account") {
     parts.push(savedLanguagesForSwitch(status));
     if (input.otherPartHref)
-      more.push(`<p class="pnote" data-outside-privacy-link><a href="${escapeHtml2(input.otherPartHref)}">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.privacyChoicesLink)}</a></p>`);
+      more.push(`<p class="pnote" data-outside-privacy-link><a href="${escapeHtml3(input.otherPartHref)}">${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.privacyChoicesLink)}</a></p>`);
   } else {
     more.push(renderLevel(status, canEdit));
     if (status.standard)
@@ -206275,11 +212959,11 @@ function renderOutsideHelpCard(status, input) {
   parts.push(`<div class="ohmore">${more.join("")}</div>`);
   const script = canEdit || canUnlock ? `<script data-dashboard-rerun>${outsideHelpClientScript(outsideHelpScriptConfig(input.csrfToken))}</script>` : "";
   const toolsScript = renderOutsideHelpToolsScript(status.tools, { canEdit, ...input.csrfToken !== undefined ? { csrfToken: input.csrfToken } : {} });
-  return `<div class="privacy outside" data-outside-help data-revision="${escapeHtml2(String(status.settings.revision))}">${parts.join("")}</div>${script}${toolsScript}`;
+  return `<div class="privacy outside" data-outside-help data-revision="${escapeHtml3(String(status.settings.revision))}">${parts.join("")}</div>${script}${toolsScript}`;
 }
 function savedLanguagesForSwitch(status) {
   const chosen = new Set(status.settings.languages);
-  return `<div hidden data-outside-saved-languages>${status.languages.filter((entry) => entry.installed && chosen.has(entry.language)).map((entry) => `<input type="checkbox" name="languages" value="${escapeHtml2(entry.language)}" checked tabindex="-1" aria-hidden="true">`).join("")}</div>`;
+  return `<div hidden data-outside-saved-languages>${status.languages.filter((entry) => entry.installed && chosen.has(entry.language)).map((entry) => `<input type="checkbox" name="languages" value="${escapeHtml3(entry.language)}" checked tabindex="-1" aria-hidden="true">`).join("")}</div>`;
 }
 function renderOutsideHelpPrivacyPart(status, input) {
   const canEdit = input.csrfToken !== undefined && input.localSession === true;
@@ -206288,12 +212972,12 @@ function renderOutsideHelpPrivacyPart(status, input) {
   const on = status.settings.state === "on";
   const parts = [];
   if (canUnlock) {
-    parts.push(`<form class="ohform ohunlock" data-outside-form="unlock" data-outside-unlock>` + `<button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unlock)}</button><span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unlockIntro)}</span>` + `<span class="actmsg" data-action-message role="status"></span></form>`);
+    parts.push(`<form class="ohform ohunlock" data-outside-form="unlock" data-outside-unlock>` + `<button type="submit" class="btn primary">${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.unlock)}</button><span class="hint">${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.unlockIntro)}</span>` + `<span class="actmsg" data-action-message role="status"></span></form>`);
   }
   const tone = summary.state === "on" ? "on" : summary.state === "off" || summary.state === "unavailable" ? "off" : "attn";
-  parts.push(`<p class="ohstate" data-outside-privacy-state><span class="dot ${tone}" aria-hidden="true"></span><span>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.row[summary.state])}.</span>` + (input.otherPartHref ? ` <a href="${escapeHtml2(input.otherPartHref)}">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.accountLink)}</a>` : "") + "</p>");
+  parts.push(`<p class="ohstate" data-outside-privacy-state><span class="dot ${tone}" aria-hidden="true"></span><span>${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.row[summary.state])}.</span>` + (input.otherPartHref ? ` <a href="${escapeHtml3(input.otherPartHref)}">${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.accountLink)}</a>` : "") + "</p>");
   if (status.writer?.modelProblem) {
-    parts.push(`<ul class="ohfix" data-outside-blockers aria-label="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.problemsTitle)}">${problemLine(status.writer.modelProblem.message, { kind: "open", section: "writer", label: DASHBOARD_OUTSIDE_HELP_COPY.chooseModel, focus: "chatgpt_frontier_model" }, canEdit ? "edit" : canUnlock ? "unlock" : "read", { attrs: " data-outside-model-problem" })}</ul>`);
+    parts.push(`<ul class="ohfix" data-outside-blockers aria-label="${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.problemsTitle)}">${problemLine(status.writer.modelProblem.message, { kind: "open", section: "writer", label: DASHBOARD_OUTSIDE_HELP_COPY.chooseModel, focus: "chatgpt_frontier_model" }, canEdit ? "edit" : canUnlock ? "unlock" : "read", { attrs: " data-outside-model-problem" })}</ul>`);
   }
   const more = [renderLevel(status, canEdit)];
   if (status.standard)
@@ -206301,11 +212985,11 @@ function renderOutsideHelpPrivacyPart(status, input) {
   if (status.writer)
     more.push(renderWriter(status.writer, canEdit));
   const invalid = status.settings.state === "invalid";
-  const save = canEdit && !invalid ? `<form class="ohform" data-outside-form="enable" data-outside-save-languages data-outside-current="${on ? "on" : "off"}" data-outside-invalid="no"><button type="submit" class="btn" data-outside-enabled="${on ? "true" : "false"}">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.saveLanguages)}</button><span class="actmsg" data-action-message role="status"></span></form>` : "";
+  const save = canEdit && !invalid ? `<form class="ohform" data-outside-form="enable" data-outside-save-languages data-outside-current="${on ? "on" : "off"}" data-outside-invalid="no"><button type="submit" class="btn" data-outside-enabled="${on ? "true" : "false"}">${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.saveLanguages)}</button><span class="actmsg" data-action-message role="status"></span></form>` : "";
   more.push(renderLanguages(status, canEdit).replace(/<\/div><\/details>$/, `${save}</div></details>`));
   parts.push(`<div class="ohmore">${more.join("")}</div>`);
   const script = canEdit || canUnlock ? `<script data-dashboard-rerun>${outsideHelpClientScript(outsideHelpScriptConfig(input.csrfToken))}</script>` : "";
-  return `<div class="privacy outside" data-outside-help data-outside-part="privacy" data-revision="${escapeHtml2(String(status.settings.revision))}">${parts.join("")}</div>${script}`;
+  return `<div class="privacy outside" data-outside-help data-outside-part="privacy" data-revision="${escapeHtml3(String(status.settings.revision))}">${parts.join("")}</div>${script}`;
 }
 function outsideHelpScriptConfig(csrfToken) {
   return {
@@ -206331,10 +213015,10 @@ function renderStatusBlock(status, summary, access) {
   const invalid = status.settings.state === "invalid";
   const unavailable = summary.state === "unavailable";
   const blockedReason = invalid ? undefined : route.state === "not_configured" ? DASHBOARD_OUTSIDE_HELP_COPY.enableBlockedRoute : !route.acknowledgements.complete ? DASHBOARD_OUTSIDE_HELP_COPY.enableBlockedAcks : undefined;
-  const button = access === "read" || unavailable && !on ? "" : access === "unlock" ? unlockFirst(invalid ? DASHBOARD_OUTSIDE_HELP_COPY.replaceFile : on ? DASHBOARD_OUTSIDE_HELP_COPY.turnOff : DASHBOARD_OUTSIDE_HELP_COPY.turnOn, !on) : invalid ? `<button type="submit" class="btn primary" data-outside-replace>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.replaceFile)}</button>` : on ? `<button type="submit" class="btn" data-outside-enabled="false">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOff)}</button>` : blockedReason ? `<span class="blocked"><button type="button" class="btn primary" disabled aria-disabled="true">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button><span class="hint">${escapeHtml2(blockedReason)}</span></span>` : `<button type="submit" class="btn primary" data-outside-enabled="true">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button>`;
+  const button = access === "read" || unavailable && !on ? "" : access === "unlock" ? unlockFirst(invalid ? DASHBOARD_OUTSIDE_HELP_COPY.replaceFile : on ? DASHBOARD_OUTSIDE_HELP_COPY.turnOff : DASHBOARD_OUTSIDE_HELP_COPY.turnOn, !on) : invalid ? `<button type="submit" class="btn primary" data-outside-replace>${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.replaceFile)}</button>` : on ? `<button type="submit" class="btn" data-outside-enabled="false">${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.turnOff)}</button>` : blockedReason ? `<span class="blocked"><button type="button" class="btn primary" disabled aria-disabled="true">${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button><span class="hint">${escapeHtml3(blockedReason)}</span></span>` : `<button type="submit" class="btn primary" data-outside-enabled="true">${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button>`;
   const tone = summary.state === "on" ? "on" : summary.state === "off" || summary.state === "unavailable" ? "off" : "attn";
   const usage = !unavailable && route.state === "configured" && route.readiness ? usageLine(route.readiness) : "";
-  const head = `<div class="ohhead"><div class="ohstatewrap"><p class="ohstate"><span class="dot ${tone}" aria-hidden="true"></span>` + `<span data-outside-state-text data-outside-state="${escapeHtml2(summary.state)}">${escapeHtml2(outsideHelpStateLine(summary))}</span></p>` + (usage ? `<p class="ohline" data-outside-usage>${escapeHtml2(usage)}</p>` : "") + (!unavailable && route.state === "configured" && route.readiness?.torMode === "off" ? `<p class="ohline attn" data-outside-address-visible>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.addressVisible)}</p>` : "") + `</div>${button ? `<div class="pbuttons">${button}</div>` : ""}</div>`;
+  const head = `<div class="ohhead"><div class="ohstatewrap"><p class="ohstate"><span class="dot ${tone}" aria-hidden="true"></span>` + `<span data-outside-state-text data-outside-state="${escapeHtml3(summary.state)}">${escapeHtml3(outsideHelpStateLine(summary))}</span></p>` + (usage ? `<p class="ohline" data-outside-usage>${escapeHtml3(usage)}</p>` : "") + (!unavailable && route.state === "configured" && route.readiness?.torMode === "off" ? `<p class="ohline attn" data-outside-address-visible>${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.addressVisible)}</p>` : "") + `</div>${button ? `<div class="pbuttons">${button}</div>` : ""}</div>`;
   return `<form class="ohpanel" data-outside-form="enable" data-outside-current="${on ? "on" : "off"}" data-outside-invalid="${invalid ? "yes" : "no"}">` + head + `<span class="actmsg" data-action-message role="status"></span></form>`;
 }
 function usageLine(ready) {
@@ -206344,7 +213028,7 @@ function usageLine(ready) {
   return expiry ? `${today} · ${expiry}` : today;
 }
 function unlockFirst(label, primary = true) {
-  return `<button type="button" class="btn${primary ? " primary" : ""}" data-outside-needs-unlock>${escapeHtml2(label)}</button>`;
+  return `<button type="button" class="btn${primary ? " primary" : ""}" data-outside-needs-unlock>${escapeHtml3(label)}</button>`;
 }
 function problemLine(words, fix, access, input = {}) {
   const canEdit = access === "edit";
@@ -206352,13 +213036,13 @@ function problemLine(words, fix, access, input = {}) {
   if (fix?.kind === "post" && access === "unlock") {
     action = unlockFirst(fix.label, fix.primary !== false);
   } else if (fix?.kind === "post" && canEdit) {
-    action = `<form class="ohform ohinline" data-outside-form="${escapeHtml2(fix.form)}"${fix.attrs ?? ""}>` + `<button type="submit" class="btn${fix.primary === false ? "" : " primary"}">${escapeHtml2(fix.label)}</button>` + `${input.extra ?? ""}<span class="actmsg" data-action-message role="status"></span></form>`;
+    action = `<form class="ohform ohinline" data-outside-form="${escapeHtml3(fix.form)}"${fix.attrs ?? ""}>` + `<button type="submit" class="btn${fix.primary === false ? "" : " primary"}">${escapeHtml3(fix.label)}</button>` + `${input.extra ?? ""}<span class="actmsg" data-action-message role="status"></span></form>`;
   } else if (fix?.kind === "open") {
-    action = `<button type="button" class="btn" data-outside-open="${escapeHtml2(fix.section)}"${fix.focus ? ` data-outside-focus="${escapeHtml2(fix.focus)}"` : ""}>${escapeHtml2(fix.label)}</button>`;
+    action = `<button type="button" class="btn" data-outside-open="${escapeHtml3(fix.section)}"${fix.focus ? ` data-outside-focus="${escapeHtml3(fix.focus)}"` : ""}>${escapeHtml3(fix.label)}</button>`;
   } else if (fix?.kind === "recheck") {
-    action = `<button type="button" class="btn" data-outside-recheck>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.checkAgain)}</button>`;
+    action = `<button type="button" class="btn" data-outside-recheck>${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.checkAgain)}</button>`;
   }
-  return `<li${input.attrs ?? ""}><span>${escapeHtml2(words)}</span>${action}</li>`;
+  return `<li${input.attrs ?? ""}><span>${escapeHtml3(words)}</span>${action}</li>`;
 }
 function renderProblems(status, access, writerHref) {
   const canEdit = access === "edit";
@@ -206368,7 +213052,7 @@ function renderProblems(status, access, writerHref) {
   if (tools)
     items.push(tools);
   if (route.state === "not_configured") {
-    items.push(route.policyWritable ? problemLine(DASHBOARD_OUTSIDE_HELP_COPY.routeMissing, { kind: "post", form: "add-route", label: DASHBOARD_OUTSIDE_HELP_COPY.addRoute, attrs: ` data-outside-confirm="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.addRouteConfirm)}"` }, access, { attrs: " data-outside-route-missing" }) : problemLine(DASHBOARD_OUTSIDE_HELP_COPY.policyNotFile, { kind: "open", section: "steps", label: DASHBOARD_OUTSIDE_HELP_COPY.showSteps }, access, { attrs: " data-outside-route-missing" }));
+    items.push(route.policyWritable ? problemLine(DASHBOARD_OUTSIDE_HELP_COPY.routeMissing, { kind: "post", form: "add-route", label: DASHBOARD_OUTSIDE_HELP_COPY.addRoute, attrs: ` data-outside-confirm="${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.addRouteConfirm)}"` }, access, { attrs: " data-outside-route-missing" }) : problemLine(DASHBOARD_OUTSIDE_HELP_COPY.policyNotFile, { kind: "open", section: "steps", label: DASHBOARD_OUTSIDE_HELP_COPY.showSteps }, access, { attrs: " data-outside-route-missing" }));
   } else if (route.readinessUnavailable || !route.readiness) {
     items.push(problemLine(DASHBOARD_OUTSIDE_HELP_COPY.routeUnknown, { kind: "recheck" }, access, { attrs: ' data-outside-blocker="readiness_unavailable"' }));
   } else {
@@ -206381,7 +213065,7 @@ function renderProblems(status, access, writerHref) {
         continue;
       if (CAP_BLOCKERS.has(code) && code !== caps[0])
         continue;
-      const attrs = ` data-outside-blocker="${escapeHtml2(code)}"`;
+      const attrs = ` data-outside-blocker="${escapeHtml3(code)}"`;
       const tool = TOOL_BLOCKERS.get(code);
       const entry = tool ? status.tools?.tools.find((item) => item.tool === tool) : undefined;
       if (entry?.source === "missing" || entry?.source === "outdated")
@@ -206408,7 +213092,7 @@ function renderProblems(status, access, writerHref) {
         continue;
       }
       if (code === "unresolved_session_other_wallet") {
-        items.push(...ready.fences.filter((fence) => !fence.thisWallet).map((fence) => problemLine(fill(DASHBOARD_OUTSIDE_HELP_COPY.blockers.unresolved_session_other_wallet, { at: shortTime(fence.at) }), { kind: "post", form: "abandon", label: DASHBOARD_OUTSIDE_HELP_COPY.abandon, primary: false, attrs: ` data-outside-scope="${escapeHtml2(fence.scope)}" data-outside-confirm="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.abandonConfirm)}"` }, access, { attrs })));
+        items.push(...ready.fences.filter((fence) => !fence.thisWallet).map((fence) => problemLine(fill(DASHBOARD_OUTSIDE_HELP_COPY.blockers.unresolved_session_other_wallet, { at: shortTime(fence.at) }), { kind: "post", form: "abandon", label: DASHBOARD_OUTSIDE_HELP_COPY.abandon, primary: false, attrs: ` data-outside-scope="${escapeHtml3(fence.scope)}" data-outside-confirm="${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.abandonConfirm)}"` }, access, { attrs })));
         continue;
       }
       const words = CAP_BLOCKERS.has(code) && caps.length > 1 ? DASHBOARD_OUTSIDE_HELP_COPY.capsReached : outsideHelpBlockerWords(code);
@@ -206419,30 +213103,30 @@ function renderProblems(status, access, writerHref) {
   if (status.writer?.modelProblem && writerHref === undefined) {
     items.push(problemLine(status.writer.modelProblem.message, { kind: "open", section: "writer", label: DASHBOARD_OUTSIDE_HELP_COPY.chooseModel, focus: "chatgpt_frontier_model" }, access, { attrs: " data-outside-model-problem" }));
   } else if (status.writer?.modelProblem && writerHref !== undefined) {
-    items.push(`<li data-outside-model-problem><span>${escapeHtml2(status.writer.modelProblem.message)}</span><a class="btn" href="${escapeHtml2(writerHref)}">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.chooseModel)}</a></li>`);
+    items.push(`<li data-outside-model-problem><span>${escapeHtml3(status.writer.modelProblem.message)}</span><a class="btn" href="${escapeHtml3(writerHref)}">${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.chooseModel)}</a></li>`);
   }
   if (items.length === 0)
     return "";
-  return `<ul class="ohfix" data-outside-blockers aria-label="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.problemsTitle)}">${items.join("")}</ul>`;
+  return `<ul class="ohfix" data-outside-blockers aria-label="${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.problemsTitle)}">${items.join("")}</ul>`;
 }
 function renderFenceLine(ready, access) {
   const canEdit = access === "edit";
   const mine = ready.fences.find((fence) => fence.thisWallet);
   const words = fill(DASHBOARD_OUTSIDE_HELP_COPY.blockers.unresolved_session, { at: mine ? shortTime(mine.at) : "" });
   if (access === "unlock")
-    return `<li data-outside-blocker="unresolved_session" data-outside-fence><span>${escapeHtml2(words)}</span>${unlockFirst(DASHBOARD_OUTSIDE_HELP_COPY.recover)}</li>`;
-  const abandon = mine && canEdit ? `<form class="ohform ohinline" data-outside-form="abandon" data-outside-scope="${escapeHtml2(mine.scope)}" data-outside-confirm="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.abandonConfirm)}">` + `<button type="submit" class="btn quiet" title="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.abandonHint)}">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.abandon)}</button><span class="actmsg" data-action-message role="status"></span></form>` : "";
-  const recover = canEdit ? `<form class="ohform ohinline" data-outside-form="recover" data-outside-confirm="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.recoverConfirm)}">` + `<button type="submit" class="btn primary" title="${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.recoverHint)}">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.recover)}</button><span class="actmsg" data-action-message role="status"></span></form>` : "";
-  return `<li data-outside-blocker="unresolved_session" data-outside-fence><span>${escapeHtml2(words)}</span>${recover || abandon ? `<span class="ohactions">${recover}${abandon}</span>` : ""}</li>`;
+    return `<li data-outside-blocker="unresolved_session" data-outside-fence><span>${escapeHtml3(words)}</span>${unlockFirst(DASHBOARD_OUTSIDE_HELP_COPY.recover)}</li>`;
+  const abandon = mine && canEdit ? `<form class="ohform ohinline" data-outside-form="abandon" data-outside-scope="${escapeHtml3(mine.scope)}" data-outside-confirm="${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.abandonConfirm)}">` + `<button type="submit" class="btn quiet" title="${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.abandonHint)}">${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.abandon)}</button><span class="actmsg" data-action-message role="status"></span></form>` : "";
+  const recover = canEdit ? `<form class="ohform ohinline" data-outside-form="recover" data-outside-confirm="${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.recoverConfirm)}">` + `<button type="submit" class="btn primary" title="${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.recoverHint)}">${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.recover)}</button><span class="actmsg" data-action-message role="status"></span></form>` : "";
+  return `<li data-outside-blocker="unresolved_session" data-outside-fence><span>${escapeHtml3(words)}</span>${recover || abandon ? `<span class="ohactions">${recover}${abandon}</span>` : ""}</li>`;
 }
 function renderSection(input) {
-  return `<details class="ohsect" id="outside-${escapeHtml2(input.id)}" data-outside-section="${escapeHtml2(input.id)}"${input.open ? " open" : ""}>` + `<summary><span class="ohsect-title">${escapeHtml2(input.title)}</span><span class="ohsect-sum">${escapeHtml2(input.summary)}</span></summary>` + `<div class="ohsect-body">${input.body}</div></details>`;
+  return `<details class="ohsect" id="outside-${escapeHtml3(input.id)}" data-outside-section="${escapeHtml3(input.id)}"${input.open ? " open" : ""}>` + `<summary><span class="ohsect-title">${escapeHtml3(input.title)}</span><span class="ohsect-sum">${escapeHtml3(input.summary)}</span></summary>` + `<div class="ohsect-body">${input.body}</div></details>`;
 }
 function renderStatements(inputs) {
-  return `<ul class="ohlist" data-outside-statements>${ZKAPI_RISK_ACKNOWLEDGEMENTS.map((entry) => `<li data-statement="${escapeHtml2(entry.id)}">${escapeHtml2(entry.statement)}</li>`).join("")}</ul>` + (inputs ? ZKAPI_RISK_ACKNOWLEDGEMENTS.map((entry) => `<input type="hidden" name="acknowledged" value="${escapeHtml2(entry.id)}">`).join("") : "");
+  return `<ul class="ohlist" data-outside-statements>${ZKAPI_RISK_ACKNOWLEDGEMENTS.map((entry) => `<li data-statement="${escapeHtml3(entry.id)}">${escapeHtml3(entry.statement)}</li>`).join("")}</ul>` + (inputs ? ZKAPI_RISK_ACKNOWLEDGEMENTS.map((entry) => `<input type="hidden" name="acknowledged" value="${escapeHtml3(entry.id)}">`).join("") : "");
 }
 function renderStatementsToAccept(access) {
-  return `<form class="ohform ohaccept" data-outside-form="route" data-outside-accept data-outside-acknowledged="no">` + `<div class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.costTitle)}</div><p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.costIntro)}</p>${renderStatements(true)}` + (access === "edit" ? `<div class="pbuttons"><button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.accept)}</button><span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.saveRestarts)}</span></div>` : access === "unlock" ? `<div class="pbuttons">${unlockFirst(DASHBOARD_OUTSIDE_HELP_COPY.accept)}</div>` : "") + `<span class="actmsg" data-action-message role="status"></span></form>`;
+  return `<form class="ohform ohaccept" data-outside-form="route" data-outside-accept data-outside-acknowledged="no">` + `<div class="sect">${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.costTitle)}</div><p class="pnote">${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.costIntro)}</p>${renderStatements(true)}` + (access === "edit" ? `<div class="pbuttons"><button type="submit" class="btn primary">${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.accept)}</button><span class="hint">${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.saveRestarts)}</span></div>` : access === "unlock" ? `<div class="pbuttons">${unlockFirst(DASHBOARD_OUTSIDE_HELP_COPY.accept)}</div>` : "") + `<span class="actmsg" data-action-message role="status"></span></form>`;
 }
 function renderAccepted() {
   return renderSection({
@@ -206457,7 +213141,7 @@ function renderBeforeTurningOn() {
     id: "before",
     title: DASHBOARD_OUTSIDE_HELP_COPY.disclosureTitle,
     summary: "",
-    body: `<p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.intro)}</p>` + `<ul class="ohshort" data-outside-disclosure>${DASHBOARD_OUTSIDE_HELP_COPY.disclosureShort.map((line) => `<li>${escapeHtml2(line)}</li>`).join("")}</ul>` + `<p class="pnote" data-outside-privacy>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.privacy)}</p>` + `<p class="pnote" data-outside-cost>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.costLine)}</p>`
+    body: `<p class="pnote">${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.intro)}</p>` + `<ul class="ohshort" data-outside-disclosure>${DASHBOARD_OUTSIDE_HELP_COPY.disclosureShort.map((line) => `<li>${escapeHtml3(line)}</li>`).join("")}</ul>` + `<p class="pnote" data-outside-privacy>${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.privacy)}</p>` + `<p class="pnote" data-outside-cost>${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.costLine)}</p>`
   });
 }
 function renderLevel(status, canEdit) {
@@ -206466,9 +213150,9 @@ function renderLevel(status, canEdit) {
   const blocked = !canEdit || invalid ? ' disabled aria-disabled="true"' : "";
   const options = ["unnamed", "general"].map((level) => {
     const copy = DASHBOARD_OUTSIDE_HELP_COPY.levels[level];
-    return `<label class="ohack ohlevel"><input type="radio" name="level" value="${level}"${level === current ? " checked" : ""}${blocked}>` + `<span><strong>${escapeHtml2(copy.title)}</strong> ${escapeHtml2(copy.body)}</span></label>`;
+    return `<label class="ohack ohlevel"><input type="radio" name="level" value="${level}"${level === current ? " checked" : ""}${blocked}>` + `<span><strong>${escapeHtml3(copy.title)}</strong> ${escapeHtml3(copy.body)}</span></label>`;
   }).join("");
-  const body = `<form class="ohform" data-outside-form="level" data-outside-level="${escapeHtml2(current)}" data-outside-current="${status.settings.state === "on" ? "on" : "off"}">` + options + (canEdit && !invalid ? `<div class="pbuttons"><button type="submit" class="btn" data-outside-level-save>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.levelSave)}</button></div>` : "") + `<span class="actmsg" data-action-message role="status"></span></form>`;
+  const body = `<form class="ohform" data-outside-form="level" data-outside-level="${escapeHtml3(current)}" data-outside-current="${status.settings.state === "on" ? "on" : "off"}">` + options + (canEdit && !invalid ? `<div class="pbuttons"><button type="submit" class="btn" data-outside-level-save>${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.levelSave)}</button></div>` : "") + `<span class="actmsg" data-action-message role="status"></span></form>`;
   return renderSection({ id: "level", title: DASHBOARD_OUTSIDE_HELP_COPY.levelTitle, summary: DASHBOARD_OUTSIDE_HELP_COPY.levels[current].short, body });
 }
 function renderStandard(standard, level, canEdit) {
@@ -206476,10 +213160,10 @@ function renderStandard(standard, level, canEdit) {
   const disabled = canEdit ? "" : ' disabled aria-disabled="true"';
   const options = ["as_written", "light_cleanup", "custom"].map((mode) => {
     const copy = C.modes[mode];
-    return `<label class="ohack ohlevel"><input type="radio" name="standard_mode" value="${mode}"${mode === standard.mode ? " checked" : ""}${disabled}>` + `<span><strong>${escapeHtml2(copy.title)}</strong> ${escapeHtml2(copy.body)}</span></label>`;
+    return `<label class="ohack ohlevel"><input type="radio" name="standard_mode" value="${mode}"${mode === standard.mode ? " checked" : ""}${disabled}>` + `<span><strong>${escapeHtml3(copy.title)}</strong> ${escapeHtml3(copy.body)}</span></label>`;
   }).join("");
   const text = standard.mode === "custom" && standard.instruction !== undefined ? standard.instruction : standard.preset;
-  const body = `<form class="ohform" data-outside-form="standard" data-outside-standard="${escapeHtml2(standard.mode)}" data-outside-preset="${escapeHtml2(standard.preset)}">` + `<p class="pnote">${escapeHtml2(C.intro)}</p>${options}` + `<label class="plabel" for="outside-standard-instruction">${escapeHtml2(C.instructionLabel)}</label>` + `<textarea class="keyfield" id="outside-standard-instruction" name="standard_instruction" rows="5" maxlength="${standard.maxChars}" data-outside-standard-instruction${disabled}>${escapeHtml2(text)}</textarea>` + (canEdit ? `<div class="pbuttons"><button type="submit" class="btn">${escapeHtml2(C.save)}</button></div>` : "") + `<span class="actmsg" data-action-message role="status"></span></form>`;
+  const body = `<form class="ohform" data-outside-form="standard" data-outside-standard="${escapeHtml3(standard.mode)}" data-outside-preset="${escapeHtml3(standard.preset)}">` + `<p class="pnote">${escapeHtml3(C.intro)}</p>${options}` + `<label class="plabel" for="outside-standard-instruction">${escapeHtml3(C.instructionLabel)}</label>` + `<textarea class="keyfield" id="outside-standard-instruction" name="standard_instruction" rows="5" maxlength="${standard.maxChars}" data-outside-standard-instruction${disabled}>${escapeHtml3(text)}</textarea>` + (canEdit ? `<div class="pbuttons"><button type="submit" class="btn">${escapeHtml3(C.save)}</button></div>` : "") + `<span class="actmsg" data-action-message role="status"></span></form>`;
   const summary = level === "general" ? fill(C.unusedAtStrict, { mode: C.modes[standard.mode].short }) : C.modes[standard.mode].short;
   return renderSection({ id: "standard", title: C.title, summary, body });
 }
@@ -206490,7 +213174,7 @@ function renderSetupSteps(secretRef, toolsHtml, daemon) {
     id: "steps",
     title: DASHBOARD_OUTSIDE_HELP_COPY.stepsTitle,
     summary: "",
-    body: `${toolsHtml}<div data-outside-steps><p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.stepsIntro)}</p><ol class="ohsteps">${steps.map((step) => `<li>${escapeHtml2(step)}</li>`).join("")}</ol></div>`
+    body: `${toolsHtml}<div data-outside-steps><p class="pnote">${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.stepsIntro)}</p><ol class="ohsteps">${steps.map((step) => `<li>${escapeHtml3(step)}</li>`).join("")}</ol></div>`
   });
 }
 function renderLimits(route, canEdit) {
@@ -206501,9 +213185,9 @@ function renderLimits(route, canEdit) {
     ...route.dailySpendCapUsd !== undefined ? [fill(DASHBOARD_OUTSIDE_HELP_COPY.limitsUsd, { usd: String(route.dailySpendCapUsd) })] : []
   ].join(", ") : DASHBOARD_OUTSIDE_HELP_COPY.limitsNone;
   const funded = route.fundingDate ? fill(DASHBOARD_OUTSIDE_HELP_COPY.fundedOn, { date: shortDate(route.fundingDate) }) : DASHBOARD_OUTSIDE_HELP_COPY.notFunded;
-  const noLimit = capped && canEdit ? `<form class="ohform ohinline" data-outside-form="route" data-outside-nolimit>` + `<div class="pbuttons"><button type="submit" class="btn">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.removeLimits)}</button><span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.removeLimitsHint)}</span></div>` + `<span class="actmsg" data-action-message role="status"></span></form>` : "";
-  const today = route.readiness && route.readiness.requestsToday.count > 0 ? `<p class="pnote" data-outside-limits-today>${escapeHtml2(fill(DASHBOARD_OUTSIDE_HELP_COPY.limitsToday, { n: String(route.readiness.requestsToday.count), usd: route.readiness.spendToday.reservedUsd.toFixed(0) }))}</p>` : "";
-  const body = `<p class="pnote" data-outside-cost-line>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.costLine)} ${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.noLimitIntro)}</p>` + today + noLimit + `<form class="ohform" data-outside-form="route">` + `<label class="plabel" for="outside-funding-date">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.fundingDate)}</label>` + `<input class="keyfield ptextline" id="outside-funding-date" name="funding_date" type="text" inputmode="numeric" autocomplete="off" placeholder="YYYY-MM-DD" value="${escapeHtml2(route.fundingDate ?? "")}"${disabled}>` + `<label class="plabel" for="outside-cap-requests">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.capRequests)}</label>` + `<input class="keyfield ptextline" id="outside-cap-requests" name="daily_request_cap" type="number" min="1" step="1" value="${route.dailyRequestCap !== undefined ? escapeHtml2(String(route.dailyRequestCap)) : ""}"${disabled}>` + `<label class="plabel" for="outside-cap-usd">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.capUsd)}</label>` + `<input class="keyfield ptextline" id="outside-cap-usd" name="daily_spend_cap_usd" type="number" min="1" step="1" value="${route.dailySpendCapUsd !== undefined ? escapeHtml2(String(route.dailySpendCapUsd)) : ""}"${disabled}>` + (canEdit ? `<div class="pbuttons"><button type="submit" class="btn" data-outside-save-limits>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.saveRoute)}</button><span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.saveRestarts)}</span></div>` : "") + `<span class="actmsg" data-action-message role="status"></span></form>`;
+  const noLimit = capped && canEdit ? `<form class="ohform ohinline" data-outside-form="route" data-outside-nolimit>` + `<div class="pbuttons"><button type="submit" class="btn">${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.removeLimits)}</button><span class="hint">${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.removeLimitsHint)}</span></div>` + `<span class="actmsg" data-action-message role="status"></span></form>` : "";
+  const today = route.readiness && route.readiness.requestsToday.count > 0 ? `<p class="pnote" data-outside-limits-today>${escapeHtml3(fill(DASHBOARD_OUTSIDE_HELP_COPY.limitsToday, { n: String(route.readiness.requestsToday.count), usd: route.readiness.spendToday.reservedUsd.toFixed(0) }))}</p>` : "";
+  const body = `<p class="pnote" data-outside-cost-line>${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.costLine)} ${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.noLimitIntro)}</p>` + today + noLimit + `<form class="ohform" data-outside-form="route">` + `<label class="plabel" for="outside-funding-date">${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.fundingDate)}</label>` + `<input class="keyfield ptextline" id="outside-funding-date" name="funding_date" type="text" inputmode="numeric" autocomplete="off" placeholder="YYYY-MM-DD" value="${escapeHtml3(route.fundingDate ?? "")}"${disabled}>` + `<label class="plabel" for="outside-cap-requests">${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.capRequests)}</label>` + `<input class="keyfield ptextline" id="outside-cap-requests" name="daily_request_cap" type="number" min="1" step="1" value="${route.dailyRequestCap !== undefined ? escapeHtml3(String(route.dailyRequestCap)) : ""}"${disabled}>` + `<label class="plabel" for="outside-cap-usd">${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.capUsd)}</label>` + `<input class="keyfield ptextline" id="outside-cap-usd" name="daily_spend_cap_usd" type="number" min="1" step="1" value="${route.dailySpendCapUsd !== undefined ? escapeHtml3(String(route.dailySpendCapUsd)) : ""}"${disabled}>` + (canEdit ? `<div class="pbuttons"><button type="submit" class="btn" data-outside-save-limits>${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.saveRoute)}</button><span class="hint">${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.saveRestarts)}</span></div>` : "") + `<span class="actmsg" data-action-message role="status"></span></form>`;
   return renderSection({ id: "limits", title: DASHBOARD_OUTSIDE_HELP_COPY.limitsTitle, summary: `${limit} · ${funded}`, body });
 }
 function openAiModel(model) {
@@ -206518,11 +213202,11 @@ function renderWriter(writer, canEdit) {
   const choice = writer.choice;
   const effectiveModel = writer.effectiveChatgptModel ?? writer.chatgptFrontierModel;
   const effectiveClaudeModel = writer.effectiveClaudeModel ?? writer.claudeFrontierModel;
-  const parts = [`<p class="pnote">${escapeHtml2(C.intro)}</p>`];
-  parts.push(`<p class="pnote" data-outside-writer-current="${choice ? "own" : "built_in"}">${escapeHtml2(choice ? fill(C.currentOwn, { model: choice.model, address: choice.baseUrl }) : C.currentBuiltIn)}</p>`);
+  const parts = [`<p class="pnote">${escapeHtml3(C.intro)}</p>`];
+  parts.push(`<p class="pnote" data-outside-writer-current="${choice ? "own" : "built_in"}">${escapeHtml3(choice ? fill(C.currentOwn, { model: choice.model, address: choice.baseUrl }) : C.currentBuiltIn)}</p>`);
   if (choice?.secretRef && choice.keyPresent === false)
-    parts.push(`<p class="pnote ohwarn" data-outside-writer-key-missing>${escapeHtml2(fill(C.keyMissing, { secretRef: choice.secretRef }))}</p>`);
-  parts.push(`<form class="ohform" data-outside-form="writer">` + `<label class="plabel" for="outside-writer-url">${escapeHtml2(C.baseUrl)}</label>` + `<input class="keyfield ptextline" id="outside-writer-url" name="writer_base_url" type="url" autocomplete="off" placeholder="http://127.0.0.1:11434/v1" value="${escapeHtml2(choice?.baseUrl ?? "")}"${disabled}>` + `<label class="plabel" for="outside-writer-model">${escapeHtml2(C.model)}</label>` + `<input class="keyfield ptextline" id="outside-writer-model" name="writer_model" type="text" autocomplete="off" value="${escapeHtml2(choice?.model ?? "")}"${disabled}>` + `<label class="plabel" for="outside-writer-key">${escapeHtml2(C.secretRef)}</label>` + `<input class="keyfield ptextline" id="outside-writer-key" name="writer_secret_ref" type="text" autocomplete="off" placeholder="env:NAME" value="${escapeHtml2(choice?.secretRef ?? "")}"${disabled}>` + `<p class="pnote ohsmall">${escapeHtml2(C.where)}</p>` + `<label class="plabel" for="outside-frontier-model">${escapeHtml2(C.frontierModel)}</label>` + `<input class="keyfield ptextline" id="outside-frontier-model" name="chatgpt_frontier_model" type="text" autocomplete="off" placeholder="${escapeHtml2(writer.effectiveChatgptModel ?? "")}" value="${escapeHtml2(writer.chatgptFrontierModel ?? "")}"${disabled}>` + `<p class="pnote ohsmall">${escapeHtml2(C.frontierHint)}</p>` + (openAiModel(effectiveModel) ? `<p class="pnote ohwarn" data-outside-writer-openai>${escapeHtml2(fill(C.openAiNote, { model: effectiveModel ?? "" }))}</p>` : "") + `<label class="plabel" for="outside-claude-frontier-model">${escapeHtml2(C.claudeFrontierModel)}</label>` + `<input class="keyfield ptextline" id="outside-claude-frontier-model" name="claude_frontier_model" type="text" autocomplete="off" placeholder="${escapeHtml2(writer.effectiveClaudeModel ?? "")}" value="${escapeHtml2(writer.claudeFrontierModel ?? "")}"${disabled}>` + `<p class="pnote ohsmall">${escapeHtml2(C.claudeFrontierHint)}</p>` + (anthropicModel(effectiveClaudeModel) ? `<p class="pnote ohwarn" data-outside-writer-anthropic>${escapeHtml2(fill(C.anthropicNote, { model: effectiveClaudeModel ?? "" }))}</p>` : "") + `<div class="pbuttons"><button type="submit" class="btn primary" data-outside-writer-save${disabled}>${escapeHtml2(C.save)}</button>` + (choice ? `<button type="submit" class="btn quiet" data-outside-writer-clear${disabled}>${escapeHtml2(C.useBuiltIn)}</button>` : "") + `</div><span class="actmsg" data-action-message role="status"></span></form>`);
+    parts.push(`<p class="pnote ohwarn" data-outside-writer-key-missing>${escapeHtml3(fill(C.keyMissing, { secretRef: choice.secretRef }))}</p>`);
+  parts.push(`<form class="ohform" data-outside-form="writer">` + `<label class="plabel" for="outside-writer-url">${escapeHtml3(C.baseUrl)}</label>` + `<input class="keyfield ptextline" id="outside-writer-url" name="writer_base_url" type="url" autocomplete="off" placeholder="http://127.0.0.1:11434/v1" value="${escapeHtml3(choice?.baseUrl ?? "")}"${disabled}>` + `<label class="plabel" for="outside-writer-model">${escapeHtml3(C.model)}</label>` + `<input class="keyfield ptextline" id="outside-writer-model" name="writer_model" type="text" autocomplete="off" value="${escapeHtml3(choice?.model ?? "")}"${disabled}>` + `<label class="plabel" for="outside-writer-key">${escapeHtml3(C.secretRef)}</label>` + `<input class="keyfield ptextline" id="outside-writer-key" name="writer_secret_ref" type="text" autocomplete="off" placeholder="env:NAME" value="${escapeHtml3(choice?.secretRef ?? "")}"${disabled}>` + `<p class="pnote ohsmall">${escapeHtml3(C.where)}</p>` + `<label class="plabel" for="outside-frontier-model">${escapeHtml3(C.frontierModel)}</label>` + `<input class="keyfield ptextline" id="outside-frontier-model" name="chatgpt_frontier_model" type="text" autocomplete="off" placeholder="${escapeHtml3(writer.effectiveChatgptModel ?? "")}" value="${escapeHtml3(writer.chatgptFrontierModel ?? "")}"${disabled}>` + `<p class="pnote ohsmall">${escapeHtml3(C.frontierHint)}</p>` + (openAiModel(effectiveModel) ? `<p class="pnote ohwarn" data-outside-writer-openai>${escapeHtml3(fill(C.openAiNote, { model: effectiveModel ?? "" }))}</p>` : "") + `<label class="plabel" for="outside-claude-frontier-model">${escapeHtml3(C.claudeFrontierModel)}</label>` + `<input class="keyfield ptextline" id="outside-claude-frontier-model" name="claude_frontier_model" type="text" autocomplete="off" placeholder="${escapeHtml3(writer.effectiveClaudeModel ?? "")}" value="${escapeHtml3(writer.claudeFrontierModel ?? "")}"${disabled}>` + `<p class="pnote ohsmall">${escapeHtml3(C.claudeFrontierHint)}</p>` + (anthropicModel(effectiveClaudeModel) ? `<p class="pnote ohwarn" data-outside-writer-anthropic>${escapeHtml3(fill(C.anthropicNote, { model: effectiveClaudeModel ?? "" }))}</p>` : "") + `<div class="pbuttons"><button type="submit" class="btn primary" data-outside-writer-save${disabled}>${escapeHtml3(C.save)}</button>` + (choice ? `<button type="submit" class="btn quiet" data-outside-writer-clear${disabled}>${escapeHtml3(C.useBuiltIn)}</button>` : "") + `</div><span class="actmsg" data-action-message role="status"></span></form>`);
   parts.push(renderWriterCheck(writer, canEdit));
   const summary = choice ? choice.model : C.builtInShort;
   return renderSection({ id: "writer", title: C.title, summary, open: writer.check.state !== "idle", body: `<div data-outside-writer>${parts.join("")}</div>` });
@@ -206533,16 +213217,16 @@ function renderWriterCheck(writer, canEdit) {
     return "";
   const disabled = canEdit && writer.choice && writer.check.state !== "running" ? "" : ' disabled aria-disabled="true"';
   const check = writer.check;
-  const parts = [`<div class="sect">${escapeHtml2(C.testTitle)}</div>`, `<p class="pnote">${escapeHtml2(C.testIntro)}</p>`];
+  const parts = [`<div class="sect">${escapeHtml3(C.testTitle)}</div>`, `<p class="pnote">${escapeHtml3(C.testIntro)}</p>`];
   if (!writer.choice)
-    parts.push(`<p class="pnote ohsmall">${escapeHtml2(C.testNeedsChoice)}</p>`);
+    parts.push(`<p class="pnote ohsmall">${escapeHtml3(C.testNeedsChoice)}</p>`);
   if (check.state === "running") {
-    parts.push(`<p class="pnote" role="status">${escapeHtml2(check.total > 0 ? fill(C.testProgress, { done: String(check.done), total: String(check.total) }) : C.testStarting)}</p>`);
+    parts.push(`<p class="pnote" role="status">${escapeHtml3(check.total > 0 ? fill(C.testProgress, { done: String(check.done), total: String(check.total) }) : C.testStarting)}</p>`);
   } else if (check.state === "failed") {
-    parts.push(`<p class="pnote ohwarn" role="status">${escapeHtml2(check.message)}</p>`);
+    parts.push(`<p class="pnote ohwarn" role="status">${escapeHtml3(check.message)}</p>`);
   } else if (check.state === "done") {
     const report = check.report;
-    parts.push(`<p class="pnote" data-outside-writer-summary>${escapeHtml2(fill(C.testSummary, {
+    parts.push(`<p class="pnote" data-outside-writer-summary>${escapeHtml3(fill(C.testSummary, {
       cases: String(report.cases),
       written: String(report.written),
       declined: String(report.declined),
@@ -206550,18 +213234,18 @@ function renderWriterCheck(writer, canEdit) {
       passed: String(report.gatePassed),
       refused: String(report.gateRefused)
     }))}</p>`);
-    parts.push(report.canaryLeaks.length === 0 ? `<p class="pnote good" data-outside-writer-leaks="0">${escapeHtml2(C.testNoLeaks)}</p>` : `<p class="pnote ohwarn" data-outside-writer-leaks="${report.canaryLeaks.length}">${escapeHtml2(fill(C.testLeaks, { n: String(report.canaryLeaks.length) }))}</p>`);
+    parts.push(report.canaryLeaks.length === 0 ? `<p class="pnote good" data-outside-writer-leaks="0">${escapeHtml3(C.testNoLeaks)}</p>` : `<p class="pnote ohwarn" data-outside-writer-leaks="${report.canaryLeaks.length}">${escapeHtml3(fill(C.testLeaks, { n: String(report.canaryLeaks.length) }))}</p>`);
     if (report.documentQuestions.length > 0)
-      parts.push(`<p class="pnote ohwarn" data-outside-writer-document-questions>${escapeHtml2(fill(C.testDocumentQuestions, { n: String(report.documentQuestions.length) }))}</p>`);
+      parts.push(`<p class="pnote ohwarn" data-outside-writer-document-questions>${escapeHtml3(fill(C.testDocumentQuestions, { n: String(report.documentQuestions.length) }))}</p>`);
     const rows = report.results.map((result) => {
       const verdict = result.outcome === "questions" ? result.gate === "pass" ? C.testPassed : fill(C.testRefused, { reasons: result.gateReasons.join(", ") }) : result.outcome === "declined" ? C.testDeclined : fill(C.testFailed, { reason: result.reason ?? result.outcome });
-      const questions = result.questions.map((question) => `<li>${escapeHtml2(question)}</li>`).join("");
-      return `<li data-outside-writer-case="${escapeHtml2(result.id)}"><strong>${escapeHtml2(result.id)}</strong>: ${escapeHtml2(verdict)}${result.canaryLeak ? ` <span class="attn">${escapeHtml2(C.testLeakMark)}</span>` : ""}` + `${result.asksAboutDocuments ? ` <span class="attn">${escapeHtml2(C.testDocumentMark)}</span>` : ""}${questions ? `<ul class="ohlist">${questions}</ul>` : ""}</li>`;
+      const questions = result.questions.map((question) => `<li>${escapeHtml3(question)}</li>`).join("");
+      return `<li data-outside-writer-case="${escapeHtml3(result.id)}"><strong>${escapeHtml3(result.id)}</strong>: ${escapeHtml3(verdict)}${result.canaryLeak ? ` <span class="attn">${escapeHtml3(C.testLeakMark)}</span>` : ""}` + `${result.asksAboutDocuments ? ` <span class="attn">${escapeHtml3(C.testDocumentMark)}</span>` : ""}${questions ? `<ul class="ohlist">${questions}</ul>` : ""}</li>`;
     }).join("");
     parts.push(`<ul class="ohfacts" data-outside-writer-results>${rows}</ul>`);
   }
-  parts.push(`<form class="ohform" data-outside-form="writer-test"><div class="pbuttons"><button type="submit" class="btn"${disabled}>${escapeHtml2(check.state === "done" || check.state === "failed" ? C.testAgain : C.test)}</button></div>` + `<span class="actmsg" data-action-message role="status"></span></form>`);
-  return `<div data-outside-writer-check="${escapeHtml2(check.state)}">${parts.join("")}</div>`;
+  parts.push(`<form class="ohform" data-outside-form="writer-test"><div class="pbuttons"><button type="submit" class="btn"${disabled}>${escapeHtml3(check.state === "done" || check.state === "failed" ? C.testAgain : C.test)}</button></div>` + `<span class="actmsg" data-action-message role="status"></span></form>`);
+  return `<div data-outside-writer-check="${escapeHtml3(check.state)}">${parts.join("")}</div>`;
 }
 function renderLanguages(status, canEdit) {
   const disabled = canEdit ? "" : ' disabled aria-disabled="true"';
@@ -206569,25 +213253,25 @@ function renderLanguages(status, canEdit) {
   const languages = status.languages.map((entry) => {
     const name = LANGUAGE_NAMES[entry.language];
     const off = !entry.installed;
-    return `<label class="ohack${off ? " ohoff" : ""}"><input type="checkbox" name="languages" value="${escapeHtml2(entry.language)}"` + `${chosen.has(entry.language) && !off ? " checked" : ""}${off ? ' disabled aria-disabled="true"' : disabled}>` + `<span>${escapeHtml2(name)}${off ? ` <span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.packMissing)}</span>` : ""}</span></label>`;
+    return `<label class="ohack${off ? " ohoff" : ""}"><input type="checkbox" name="languages" value="${escapeHtml3(entry.language)}"` + `${chosen.has(entry.language) && !off ? " checked" : ""}${off ? ' disabled aria-disabled="true"' : disabled}>` + `<span>${escapeHtml3(name)}${off ? ` <span class="hint">${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.packMissing)}</span>` : ""}</span></label>`;
   }).join("");
   const domainNames = DASHBOARD_OUTSIDE_HELP_COPY.domainNames;
   const domainsOn = Object.entries(status.settings.domains).filter(([, on]) => on).map(([key]) => domainNames[key] ?? key);
   const domainsOff = Object.entries(status.settings.domains).filter(([, on]) => !on).map(([key]) => domainNames[key] ?? key);
-  const domains = `<p class="pnote" data-outside-domains="${escapeHtml2(Object.entries(status.settings.domains).filter(([, on]) => on).map(([key]) => key).join(","))}">` + `${escapeHtml2(fill(DASHBOARD_OUTSIDE_HELP_COPY.domainsOn, { list: domainsOn.join(", ") || DASHBOARD_OUTSIDE_HELP_COPY.domainsNone }))}` + `${domainsOff.length > 0 ? ` ${escapeHtml2(fill(DASHBOARD_OUTSIDE_HELP_COPY.domainsOff, { list: domainsOff.join(", ") }))}` : ""}</p>`;
+  const domains = `<p class="pnote" data-outside-domains="${escapeHtml3(Object.entries(status.settings.domains).filter(([, on]) => on).map(([key]) => key).join(","))}">` + `${escapeHtml3(fill(DASHBOARD_OUTSIDE_HELP_COPY.domainsOn, { list: domainsOn.join(", ") || DASHBOARD_OUTSIDE_HELP_COPY.domainsNone }))}` + `${domainsOff.length > 0 ? ` ${escapeHtml3(fill(DASHBOARD_OUTSIDE_HELP_COPY.domainsOff, { list: domainsOff.join(", ") }))}` : ""}</p>`;
   const named = status.languages.filter((entry) => entry.installed && chosen.has(entry.language)).map((entry) => LANGUAGE_NAMES[entry.language]);
   return renderSection({
     id: "languages",
     title: DASHBOARD_OUTSIDE_HELP_COPY.languagesTitle,
     summary: named.join(", "),
     open: false,
-    body: `<p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.languagesIntro)}</p><div class="ohgrid" data-outside-languages>${languages}</div>${domains}`
+    body: `<p class="pnote">${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.languagesIntro)}</p><div class="ohgrid" data-outside-languages>${languages}</div>${domains}`
   });
 }
 function renderDetails(status) {
   const route = status.route;
-  const about = (status.settings.state === "on" ? `<p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.intro)}</p><p class="pnote" data-outside-privacy>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.privacy)}</p>` : "") + `<p class="pnote ohsmall">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.experimental)}</p>`;
-  const more = `<div class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.disclosureMore)}</div>` + `<ul class="ohlist" data-outside-disclosure-more>${DASHBOARD_OUTSIDE_HELP_COPY.disclosure.map((line) => `<li>${escapeHtml2(line)}</li>`).join("")}</ul>`;
+  const about = (status.settings.state === "on" ? `<p class="pnote">${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.intro)}</p><p class="pnote" data-outside-privacy>${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.privacy)}</p>` : "") + `<p class="pnote ohsmall">${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.experimental)}</p>`;
+  const more = `<div class="sect">${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.disclosureMore)}</div>` + `<ul class="ohlist" data-outside-disclosure-more>${DASHBOARD_OUTSIDE_HELP_COPY.disclosure.map((line) => `<li>${escapeHtml3(line)}</li>`).join("")}</ul>`;
   let facts = "";
   if (route.state === "configured" && route.readiness && !route.readinessUnavailable) {
     const ready = route.readiness;
@@ -206601,7 +213285,7 @@ function renderDetails(status) {
       ...ready.fences.map((fence) => fill(fence.thisWallet ? DASHBOARD_OUTSIDE_HELP_COPY.fenceThis : DASHBOARD_OUTSIDE_HELP_COPY.fenceOther, { at: shortTime(fence.at) })),
       ...ready.lastSession ? [fill(DASHBOARD_OUTSIDE_HELP_COPY.lastSession, { at: shortTime(ready.lastSession.at), result: ready.lastSession.result })] : []
     ];
-    facts = `<div class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.factsTitle)}</div><ul class="ohfacts" data-outside-facts>${list.map((fact) => `<li>${escapeHtml2(fact)}</li>`).join("")}</ul>`;
+    facts = `<div class="sect">${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.factsTitle)}</div><ul class="ohfacts" data-outside-facts>${list.map((fact) => `<li>${escapeHtml3(fact)}</li>`).join("")}</ul>`;
   }
   return renderSection({ id: "details", title: DASHBOARD_OUTSIDE_HELP_COPY.detailsTitle, summary: "", body: about + more + facts });
 }
@@ -207356,7 +214040,7 @@ function sourceLogoTile(sourceId, status) {
   const brand = BRANDS[sourceId];
   const glyph = GLYPHS[sourceId];
   const letter = LETTERS[sourceId];
-  const inner = brand ? `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="${brand.color}" d="${brand.path}"/></svg>` : glyph ? `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" fill-rule="evenodd" d="${glyph}"/></svg>` : `<span class="logoletter" style="background:${letter?.color ?? "#5b5bd6"}">${escapeHtml2(letter?.letter ?? (sourceId[0] ?? "?").toUpperCase())}</span>`;
+  const inner = brand ? `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="${brand.color}" d="${brand.path}"/></svg>` : glyph ? `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" fill-rule="evenodd" d="${glyph}"/></svg>` : `<span class="logoletter" style="background:${letter?.color ?? "#5b5bd6"}">${escapeHtml3(letter?.letter ?? (sourceId[0] ?? "?").toUpperCase())}</span>`;
   const kind = brand ? "brand" : glyph ? "glyph" : "letter";
   return `<span class="logotile ${kind}" aria-hidden="true">${inner}${status ? `<span class="logodot ${status}"></span>` : ""}</span>`;
 }
@@ -207422,11 +214106,11 @@ function renderMessagingCard(source, localSession, connection = { paired: false 
   const paired = connection.paired;
   const pairedOnly = paired ? " data-paired-only" : " data-paired-only hidden";
   const unpairedOnly = paired ? " data-unpaired-only hidden" : " data-unpaired-only";
-  const accountLine = paired ? connection.account ? `Linked account: ${escapeHtml2(connection.account)}` : `Your linked ${label} account` : "Not paired yet";
+  const accountLine = paired ? connection.account ? `Linked account: ${escapeHtml3(connection.account)}` : `Your linked ${label} account` : "Not paired yet";
   const close = options.closable ? '<button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button>' : "";
   const pairAgain = source === "telegram" ? '<button class="btn" type="button" data-sheet-toggle="#telegram-setup" aria-controls="telegram-setup" aria-expanded="false">Pair again</button>' : '<form method="dialog" data-messaging-kind="start"><button class="btn" type="submit">Pair again</button></form>';
   const menu = localSession ? `<details class="rowmenu msgmenu"${pairedOnly}><summary class="btn" aria-label="More actions for ${label}">⋯</summary><div class="menu">` + '<form method="dialog" data-messaging-kind="status"><button class="btn" type="submit">Check connection</button></form>' + pairAgain + "</div></details>" : "";
-  const head = `<div class="msghead">${sourceLogoTile(sourceId)}<div class="msgtitle"><h3>${escapeHtml2(label)}</h3><p class="pnote" data-messaging-account>${accountLine}</p></div>${menu}${close}</div>`;
+  const head = `<div class="msghead">${sourceLogoTile(sourceId)}<div class="msgtitle"><h3>${escapeHtml3(label)}</h3><p class="pnote" data-messaging-account>${accountLine}</p></div>${menu}${close}</div>`;
   const intro = source === "telegram" ? "Pair once with your Telegram app keys and a login code. Then choose which chats Olympus reads. Nothing is read until you choose." : "Pair once with a QR code from WhatsApp on your phone. Then choose which chats Olympus reads. Nothing is read until you choose.";
   const open = `<section id="agent-${source}-personal" class="messaging-card" aria-hidden="false" data-source="${sourceId}" data-source-id="${sourceId}" data-messaging-source="${source}"${paired ? " data-messaging-paired" : ""}>${head}`;
   if (!localSession) {
@@ -207457,8 +214141,8 @@ function dashboardTabHref(tab, token) {
 }
 function dashboardTopNav(input) {
   const tabs = DASHBOARD_TABS.map((tab) => {
-    const href = escapeHtml2(dashboardTabHref(tab.id, input.token));
-    return tab.id === input.active ? `<a class="navtab on" aria-current="page" href="${href}">${escapeHtml2(tab.label)}</a>` : `<a class="navtab" href="${href}">${escapeHtml2(tab.label)}</a>`;
+    const href = escapeHtml3(dashboardTabHref(tab.id, input.token));
+    return tab.id === input.active ? `<a class="navtab on" aria-current="page" href="${href}">${escapeHtml3(tab.label)}</a>` : `<a class="navtab" href="${href}">${escapeHtml3(tab.label)}</a>`;
   }).join("");
   const lock = !input.unlocked ? '<span class="navlock" data-state="locked"><span aria-hidden="true">\uD83D\uDD12</span> Locked</span>' : input.lockable === false ? '<span class="navlock" data-state="connected"><span aria-hidden="true">\uD83D\uDD13</span> Unlocked</span>' : `<div class="navlock" id="${DASHBOARD_CONTROL_GATE_ID}" data-dashboard-control-gate data-state="connected"><span aria-hidden="true">\uD83D\uDD13</span> Unlocked<span class="navsep" aria-hidden="true">·</span>` + '<form class="navlockform" data-control-session-kind="lock" method="post" action="/dashboard/control/session/lock">' + '<button class="navlockbtn" type="submit">Lock</button><span class="actmsg" data-action-message role="status"></span></form></div>';
   return `<header class="topnav"><span class="navbrand">Olympus</span><nav class="navtabs" aria-label="Olympus">${tabs}</nav><span class="navgrow"></span>${lock}</header>`;
@@ -207509,7 +214193,7 @@ function sanitizeUploadPath(raw) {
   if (raw.startsWith("/") || raw.startsWith("\\") || /^[A-Za-z]:/.test(raw))
     return bad();
   const parts = raw.split("/");
-  if (parts.length > MAX_DEPTH2)
+  if (parts.length > MAX_DEPTH3)
     return bad();
   for (const part of parts) {
     if (part === "" || part === "." || part === "..")
@@ -207877,7 +214561,7 @@ function createArchiveUploads(options) {
     }
   };
 }
-var ARCHIVE_UPLOAD_SPACE_HEADROOM_BYTES, ARCHIVE_UPLOAD_CHUNK_BYTES, ARCHIVE_UPLOAD_MAX_CHUNK_BYTES, SPACE_CHECK_EVERY_BYTES, SPACE_POLL_MS = 2000, ARCHIVE_UPLOAD_IDLE_MS, MAX_DEPTH2 = 64, MAX_PATH_CHARS = 4096, MAX_NAME_BYTES = 255, ID3, ArchiveUploadError, ARCHIVE_UPLOAD_COPY, ARCHIVE_STAGING_REMOVING_PREFIX = ".removing-", REMOVING_PREFIX, removing;
+var ARCHIVE_UPLOAD_SPACE_HEADROOM_BYTES, ARCHIVE_UPLOAD_CHUNK_BYTES, ARCHIVE_UPLOAD_MAX_CHUNK_BYTES, SPACE_CHECK_EVERY_BYTES, SPACE_POLL_MS = 2000, ARCHIVE_UPLOAD_IDLE_MS, MAX_DEPTH3 = 64, MAX_PATH_CHARS = 4096, MAX_NAME_BYTES = 255, ID3, ArchiveUploadError, ARCHIVE_UPLOAD_COPY, ARCHIVE_STAGING_REMOVING_PREFIX = ".removing-", REMOVING_PREFIX, removing;
 var init_staging = __esm(() => {
   ARCHIVE_UPLOAD_SPACE_HEADROOM_BYTES = 2 * 1024 ** 3;
   ARCHIVE_UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
@@ -208733,17 +215417,17 @@ function renderDashboardPeoplePage(options) {
   const csrf = options?.controlSessionCsrfToken;
   const sourcesHref = dashboardLocalPageHref("connect", token);
   const view = csrf !== undefined && options?.peopleLocalSession === true ? options.people : undefined;
-  const sub = view ? `${escapeHtml2(C3.breadcrumbSources)} › ${escapeHtml2(C3.title)} · ${escapeHtml2(C3.count(view.total, view.sourceCount))}` : `${escapeHtml2(C3.breadcrumbSources)} › ${escapeHtml2(C3.title)}`;
-  const head = `<div class="pphead"><div class="ppgrow"><h2>${escapeHtml2(C3.title)}</h2><p class="ppsub">${sub}</p></div>` + `<a class="ppclose" href="${escapeHtml2(sourcesHref)}" aria-label="${escapeHtml2(C3.close)}">✕</a></div>`;
+  const sub = view ? `${escapeHtml3(C3.breadcrumbSources)} › ${escapeHtml3(C3.title)} · ${escapeHtml3(C3.count(view.total, view.sourceCount))}` : `${escapeHtml3(C3.breadcrumbSources)} › ${escapeHtml3(C3.title)}`;
+  const head = `<div class="pphead"><div class="ppgrow"><h2>${escapeHtml3(C3.title)}</h2><p class="ppsub">${sub}</p></div>` + `<a class="ppclose" href="${escapeHtml3(sourcesHref)}" aria-label="${escapeHtml3(C3.close)}">✕</a></div>`;
   let inner;
   if (csrf === undefined || options?.peopleLocalSession !== true) {
-    inner = `<p class="ppempty">${escapeHtml2(C3.locked)} <a href="${escapeHtml2(sourcesHref)}">${escapeHtml2(C3.lockedLink)}</a></p>`;
+    inner = `<p class="ppempty">${escapeHtml3(C3.locked)} <a href="${escapeHtml3(sourcesHref)}">${escapeHtml3(C3.lockedLink)}</a></p>`;
   } else if (!view) {
-    inner = `<p class="ppempty">${escapeHtml2(C3.unavailable)}</p>`;
+    inner = `<p class="ppempty">${escapeHtml3(C3.unavailable)}</p>`;
   } else {
     inner = peopleBody(view);
   }
-  const body = `<section class="pp" data-people>${`<div class="ppsheet">${head}<div class="ppbody">${inner}` + `<p class="ppmsg" data-pp-msg role="status"></p>` + `<p class="ppnote">${escapeHtml2(C3.privacy)}</p></div></div>`}</section>`;
+  const body = `<section class="pp" data-people>${`<div class="ppsheet">${head}<div class="ppbody">${inner}` + `<p class="ppmsg" data-pp-msg role="status"></p>` + `<p class="ppnote">${escapeHtml3(C3.privacy)}</p></div></div>`}</section>`;
   return pageShell({
     title: "Olympus",
     crumb: C3.crumb,
@@ -208756,41 +215440,41 @@ function renderDashboardPeoplePage(options) {
   });
 }
 function dashboardPeopleRow(token) {
-  return `<div class="srow nodot" data-people-row><div class="smain"><b>${escapeHtml2(C3.row)}</b><p class="pnote">${escapeHtml2(C3.rowLine)}</p></div>` + `<div class="sact"><a class="btn" href="${escapeHtml2(dashboardLocalPageHref("people", token))}">${escapeHtml2(C3.rowOpen)}</a></div></div>`;
+  return `<div class="srow nodot" data-people-row><div class="smain"><b>${escapeHtml3(C3.row)}</b><p class="pnote">${escapeHtml3(C3.rowLine)}</p></div>` + `<div class="sact"><a class="btn" href="${escapeHtml3(dashboardLocalPageHref("people", token))}">${escapeHtml3(C3.rowOpen)}</a></div></div>`;
 }
 function peopleBody(view) {
   const parts = [];
   if (view.suggestions.length > 0) {
-    const asks = view.suggestions.slice(0, 3).map((suggestion) => `<div class="ppask" data-pp-ask>` + `<p>${escapeHtml2(C3.question)} <b>${escapeHtml2(suggestion.a.name)}</b> ${escapeHtml2(C3.on)} ${escapeHtml2(suggestion.a.source)} ${escapeHtml2(C3.sameAs)} <b>${escapeHtml2(suggestion.b.name)}</b> (${escapeHtml2(suggestion.b.detail)}) ${escapeHtml2(C3.in)} ${escapeHtml2(suggestion.b.source)}?` + `<span class="hint">${escapeHtml2(C3.onlyName)}</span></p>` + `<div class="ppaskbtns">` + `<button class="btn" type="button" data-pp-op="not_same" data-identity-a="${escapeHtml2(suggestion.identityA)}" data-identity-b="${escapeHtml2(suggestion.identityB)}">${escapeHtml2(C3.notSame)}</button>` + `<button class="btn primary" type="button" data-pp-op="same" data-identity-a="${escapeHtml2(suggestion.identityA)}" data-identity-b="${escapeHtml2(suggestion.identityB)}">${escapeHtml2(C3.same)}</button>` + `</div></div>`).join("");
-    parts.push(`<div class="ppcard" data-pp-suggestions><h3>${escapeHtml2(C3.samePerson)}<span class="hint">${escapeHtml2(C3.toCheck(view.suggestions.length))}</span></h3>${asks}</div>`);
+    const asks = view.suggestions.slice(0, 3).map((suggestion) => `<div class="ppask" data-pp-ask>` + `<p>${escapeHtml3(C3.question)} <b>${escapeHtml3(suggestion.a.name)}</b> ${escapeHtml3(C3.on)} ${escapeHtml3(suggestion.a.source)} ${escapeHtml3(C3.sameAs)} <b>${escapeHtml3(suggestion.b.name)}</b> (${escapeHtml3(suggestion.b.detail)}) ${escapeHtml3(C3.in)} ${escapeHtml3(suggestion.b.source)}?` + `<span class="hint">${escapeHtml3(C3.onlyName)}</span></p>` + `<div class="ppaskbtns">` + `<button class="btn" type="button" data-pp-op="not_same" data-identity-a="${escapeHtml3(suggestion.identityA)}" data-identity-b="${escapeHtml3(suggestion.identityB)}">${escapeHtml3(C3.notSame)}</button>` + `<button class="btn primary" type="button" data-pp-op="same" data-identity-a="${escapeHtml3(suggestion.identityA)}" data-identity-b="${escapeHtml3(suggestion.identityB)}">${escapeHtml3(C3.same)}</button>` + `</div></div>`).join("");
+    parts.push(`<div class="ppcard" data-pp-suggestions><h3>${escapeHtml3(C3.samePerson)}<span class="hint">${escapeHtml3(C3.toCheck(view.suggestions.length))}</span></h3>${asks}</div>`);
   }
   const me = view.people.find((person) => person.isOwner);
   if (me)
-    parts.push(`<div class="ppcard" data-pp-you><p class="ppname">${escapeHtml2(C3.you)}</p>${chips(me)}</div>`);
+    parts.push(`<div class="ppcard" data-pp-you><p class="ppname">${escapeHtml3(C3.you)}</p>${chips(me)}</div>`);
   const others = view.people.filter((person) => !person.isOwner);
   if (others.length === 0) {
-    parts.push(`<p class="ppempty">${escapeHtml2(C3.empty)}</p>`);
+    parts.push(`<p class="ppempty">${escapeHtml3(C3.empty)}</p>`);
     return parts.join("");
   }
-  parts.push(`<input class="ppfind" type="search" data-pp-find placeholder="${escapeHtml2(C3.find)}" aria-label="${escapeHtml2(C3.find)}">`);
-  const mergeOptions = others.map((person) => `<option value="${escapeHtml2(person.identities[0]?.identityKey ?? "")}">${escapeHtml2(`${person.displayName} · ${[...new Set(person.identities.map((chip) => chip.source))].join(", ")}`)}</option>`).join("");
+  parts.push(`<input class="ppfind" type="search" data-pp-find placeholder="${escapeHtml3(C3.find)}" aria-label="${escapeHtml3(C3.find)}">`);
+  const mergeOptions = others.map((person) => `<option value="${escapeHtml3(person.identities[0]?.identityKey ?? "")}">${escapeHtml3(`${person.displayName} · ${[...new Set(person.identities.map((chip) => chip.source))].join(", ")}`)}</option>`).join("");
   parts.push(`<template data-pp-merge-options>${mergeOptions}</template>`);
   for (const person of others)
     parts.push(personRow(person));
-  parts.push(`<p class="ppempty" data-pp-nomatch hidden>${escapeHtml2(C3.noMatch)}</p>`);
+  parts.push(`<p class="ppempty" data-pp-nomatch hidden>${escapeHtml3(C3.noMatch)}</p>`);
   return parts.join("");
 }
 function chips(person) {
-  return `<div class="ppchips">${person.identities.map((chip) => `<span class="ppchip" title="${escapeHtml2(`${chip.source} ${chip.detail}`)}"><i class="ppdot" style="background:${SOURCE_DOTS[chip.provider] ?? "var(--t3)"}"></i><span>${escapeHtml2(chip.source === chip.detail ? chip.source : `${chip.source} ${chip.detail}`)}</span></span>`).join("")}</div>`;
+  return `<div class="ppchips">${person.identities.map((chip) => `<span class="ppchip" title="${escapeHtml3(`${chip.source} ${chip.detail}`)}"><i class="ppdot" style="background:${SOURCE_DOTS[chip.provider] ?? "var(--t3)"}"></i><span>${escapeHtml3(chip.source === chip.detail ? chip.source : `${chip.source} ${chip.detail}`)}</span></span>`).join("")}</div>`;
 }
 function personRow(person) {
   const first = person.identities[0]?.identityKey ?? "";
   const linked = linkedSentence(person.linkedBy);
   const why = person.named ? [linked || C3.onlyOneSource, C3.messages(person.messages)].join(" · ") : [C3.noName, ...linked ? [linked] : [], C3.messages(person.messages)].join(" · ");
   const search = [person.displayName, ...person.identities.map((chip) => `${chip.source} ${chip.detail}`)].join(" ").toLowerCase();
-  const splits = person.identities.length > 1 ? person.identities.map((chip) => `<button class="btn" type="button" data-pp-op="split" data-identity="${escapeHtml2(chip.identityKey)}">${escapeHtml2(C3.split(`${chip.source} ${chip.detail}`))}</button>`).join("") : "";
-  const menu = `<details class="rowmenu"><summary aria-label="${escapeHtml2(C3.more)}">⋯</summary><div class="menu">` + `<form class="ppedit" data-pp-rename><label class="hint" for="rn-${escapeHtml2(person.personId)}">${escapeHtml2(C3.renamePrompt)}</label>` + `<input id="rn-${escapeHtml2(person.personId)}" name="name" maxlength="160" value="${escapeHtml2(person.named ? person.displayName : "")}">` + `<input type="hidden" name="identity" value="${escapeHtml2(first)}"><button class="btn" type="submit">${escapeHtml2(C3.rename)}</button></form>` + `<form class="ppedit" data-pp-merge><label class="hint" for="mg-${escapeHtml2(person.personId)}">${escapeHtml2(C3.mergeWith)}</label>` + `<select id="mg-${escapeHtml2(person.personId)}" name="identity_b" required></select>` + `<input type="hidden" name="identity_a" value="${escapeHtml2(first)}"><button class="btn" type="submit">${escapeHtml2(C3.merge)}</button></form>` + splits + "</div></details>";
-  return `<div class="ppcard pprow" data-pp-person="${escapeHtml2(person.personId)}" data-pp-search="${escapeHtml2(search)}">` + `<div><p class="ppname">${escapeHtml2(person.displayName)}</p>${chips(person)}<p class="ppwhy">${escapeHtml2(why)}</p></div>${menu}</div>`;
+  const splits = person.identities.length > 1 ? person.identities.map((chip) => `<button class="btn" type="button" data-pp-op="split" data-identity="${escapeHtml3(chip.identityKey)}">${escapeHtml3(C3.split(`${chip.source} ${chip.detail}`))}</button>`).join("") : "";
+  const menu = `<details class="rowmenu"><summary aria-label="${escapeHtml3(C3.more)}">⋯</summary><div class="menu">` + `<form class="ppedit" data-pp-rename><label class="hint" for="rn-${escapeHtml3(person.personId)}">${escapeHtml3(C3.renamePrompt)}</label>` + `<input id="rn-${escapeHtml3(person.personId)}" name="name" maxlength="160" value="${escapeHtml3(person.named ? person.displayName : "")}">` + `<input type="hidden" name="identity" value="${escapeHtml3(first)}"><button class="btn" type="submit">${escapeHtml3(C3.rename)}</button></form>` + `<form class="ppedit" data-pp-merge><label class="hint" for="mg-${escapeHtml3(person.personId)}">${escapeHtml3(C3.mergeWith)}</label>` + `<select id="mg-${escapeHtml3(person.personId)}" name="identity_b" required></select>` + `<input type="hidden" name="identity_a" value="${escapeHtml3(first)}"><button class="btn" type="submit">${escapeHtml3(C3.merge)}</button></form>` + splits + "</div></details>";
+  return `<div class="ppcard pprow" data-pp-person="${escapeHtml3(person.personId)}" data-pp-search="${escapeHtml3(search)}">` + `<div><p class="ppname">${escapeHtml3(person.displayName)}</p>${chips(person)}<p class="ppwhy">${escapeHtml3(why)}</p></div>${menu}</div>`;
 }
 function linkedSentence(reasons) {
   const prefix = "Linked by ";
@@ -209120,7 +215804,7 @@ var init_write_routes = __esm(() => {
 });
 
 // src/workers/source-watch-runtime.ts
-import { createHash as createHash99 } from "node:crypto";
+import { createHash as createHash101 } from "node:crypto";
 import { readFileSync as readFileSync101 } from "node:fs";
 import { request as httpsRequest2 } from "node:https";
 import { isIP as isIP3 } from "node:net";
@@ -209173,7 +215857,7 @@ function createSourceWatchSearchFromAnalystLanes(lanes) {
         ref: {
           corpusId: hit.corpusId,
           localItemId: hit.sourceItem.localItemId,
-          sourceVersion: hit.sourceItem.sourceVersion ?? hit.provenance?.chunk?.contentHash ?? sha25610(JSON.stringify(hit.sourceItem))
+          sourceVersion: hit.sourceItem.sourceVersion ?? hit.provenance?.chunk?.contentHash ?? sha25611(JSON.stringify(hit.sourceItem))
         },
         sourceObservedAt: observedAt(hit)
       }));
@@ -209184,7 +215868,7 @@ function sourceWatchPublicView(watch, delivery) {
   return {
     watch_id: watch.watchId,
     corpus_id: watch.corpusId,
-    query_sha256: sha25610(watch.queryText),
+    query_sha256: sha25611(watch.queryText),
     mode: watch.mode,
     status: watch.status,
     created_at: watch.createdAt,
@@ -209428,7 +216112,7 @@ async function runSourceWatchDeliveryPass(input) {
         ...leaseFence(lease),
         retryAfterMs: input.retryAfterMs ?? SOURCE_WATCH_DELIVERY_RETRY_MS,
         errorKind: safeErrorKind(result.errorKind),
-        errorHash: sha25610(result.errorKind)
+        errorHash: sha25611(result.errorKind)
       });
       if (failure.status === "dead_letter")
         counts.deliveries_dead_lettered += 1;
@@ -209613,8 +216297,8 @@ function compareHits(left, right) {
 function compareToWatermark(hit, watermark) {
   return hit.sourceObservedAt.localeCompare(watermark.sourceObservedAt) || hit.ref.localItemId.localeCompare(watermark.ref.localItemId) || hit.ref.sourceVersion.localeCompare(watermark.ref.sourceVersion);
 }
-function sha25610(value) {
-  return createHash99("sha256").update(value, "utf8").digest("hex");
+function sha25611(value) {
+  return createHash101("sha256").update(value, "utf8").digest("hex");
 }
 function leaseFence(lease) {
   return {
@@ -209866,26 +216550,26 @@ function backupWhere(folder) {
 }
 function renderBackupSection(input) {
   const C = BACKUP_COPY;
-  const head = `<h3 class="sect">${escapeHtml2(C.title)}</h3><p class="pnote">${escapeHtml2(C.intro)}</p>`;
+  const head = `<h3 class="sect">${escapeHtml3(C.title)}</h3><p class="pnote">${escapeHtml3(C.intro)}</p>`;
   const status = input.status;
   if (input.csrfToken !== undefined && !input.local) {
-    return `<section class="setpane" id="${DASHBOARD_SETTINGS_BACKUP_ID}" data-backup-section>${head}<form class="bkunlock" data-backup-unlock>` + `<button type="submit" class="btn primary">${escapeHtml2(C.unlock)}</button><span class="pnote">${escapeHtml2(C.unlockIntro)}</span>` + `<span class="pnote" data-backup-unlock-msg role="status"></span></form>` + `<script>${backupUnlockScript(input.csrfToken)}</script></section>`;
+    return `<section class="setpane" id="${DASHBOARD_SETTINGS_BACKUP_ID}" data-backup-section>${head}<form class="bkunlock" data-backup-unlock>` + `<button type="submit" class="btn primary">${escapeHtml3(C.unlock)}</button><span class="pnote">${escapeHtml3(C.unlockIntro)}</span>` + `<span class="pnote" data-backup-unlock-msg role="status"></span></form>` + `<script>${backupUnlockScript(input.csrfToken)}</script></section>`;
   }
   if (!input.local || !status || input.csrfToken === undefined) {
-    return `<section class="setpane" id="${DASHBOARD_SETTINGS_BACKUP_ID}">${head}<p class="pnote" data-backup-locked>${escapeHtml2(C.locked)}</p></section>`;
+    return `<section class="setpane" id="${DASHBOARD_SETTINGS_BACKUP_ID}">${head}<p class="pnote" data-backup-locked>${escapeHtml3(C.locked)}</p></section>`;
   }
-  const last = status.last ? `${escapeHtml2(backupWhen(status.last.at, input.now))} · ${escapeHtml2(formatBytes2(status.last.bytes))}${status.folder ? ` · ${escapeHtml2(backupWhere(status.folder))}` : ""}${status.last.encrypted ? "" : " · not encrypted"}` : escapeHtml2(C.none);
-  const error = status.lastError ? `<p class="bkerr" role="alert">The last backup didn't finish (${escapeHtml2(backupWhen(status.lastError.at, input.now))}): ${escapeHtml2(status.lastError.message)}</p>` : "";
+  const last = status.last ? `${escapeHtml3(backupWhen(status.last.at, input.now))} · ${escapeHtml3(formatBytes2(status.last.bytes))}${status.folder ? ` · ${escapeHtml3(backupWhere(status.folder))}` : ""}${status.last.encrypted ? "" : " · not encrypted"}` : escapeHtml3(C.none);
+  const error = status.lastError ? `<p class="bkerr" role="alert">The last backup didn't finish (${escapeHtml3(backupWhen(status.lastError.at, input.now))}): ${escapeHtml3(status.lastError.message)}</p>` : "";
   const off = status.folder ? "" : " disabled";
-  const lastRow = `<div class="bklast"><p><b>${escapeHtml2(C.lastBackup)}</b> — <span data-backup-last>${last}</span></p>` + `<button class="btn primaryline" type="button" data-backup-run${off || (status.running ? " disabled" : "")}>${escapeHtml2(status.running ? C.backingUp : C.backUpNow)}</button></div>` + `${error}<p class="pnote" data-backup-msg role="status" aria-live="polite"></p>`;
-  const where = `<h4 class="bkh">${escapeHtml2(C.where)}</h4><div class="bkwhere">` + (status.folder ? `<span class="bkpath" data-backup-folder>${escapeHtml2(status.folder)}</span>` : `<span class="pnote" data-backup-folder>${escapeHtml2(C.noFolder)}</span>`) + `<button class="btn primaryline" type="button" data-backup-browse="folder">${escapeHtml2(C.chooseFolder)}</button></div>`;
-  const radio = (value, label) => `<label class="bkradio"><input type="radio" name="schedule" value="${value}"${status.schedule === value ? " checked" : ""}${off}> ${escapeHtml2(label)}</label>`;
-  const when = `<fieldset class="bkwhen" data-backup-schedule><legend class="bkh">${escapeHtml2(C.when)}</legend>${radio("manual", C.manual)}${radio("nightly", C.nightly)}${radio("weekly", C.weekly)}<p class="pnote">${escapeHtml2(C.keep)}</p></fieldset>`;
-  const passphrase = `<h4 class="bkh">${escapeHtml2(C.passphrase)}</h4><p>${escapeHtml2(C.passphraseLine)}</p>` + `<p>${status.passphraseProblem ? "" : status.passphraseSet ? `✓ ${escapeHtml2(C.set)} · ` : `${escapeHtml2(C.notSet)} · `}<button class="linkbtn" type="button" data-dialog-open="backup-passphrase">${escapeHtml2(status.passphraseProblem ? "Set the passphrase again" : status.passphraseSet ? C.change : C.setOne)}</button></p>` + (status.passphraseProblem ? `<p class="bkerr" role="alert" data-backup-key-problem>The key kept for your passphrase can't be read, so backups stop until you set the passphrase again.</p>` : status.passphraseSet ? `<p class="pnote">${escapeHtml2(C.passphraseKept)}</p>` : "");
+  const lastRow = `<div class="bklast"><p><b>${escapeHtml3(C.lastBackup)}</b> — <span data-backup-last>${last}</span></p>` + `<button class="btn primaryline" type="button" data-backup-run${off || (status.running ? " disabled" : "")}>${escapeHtml3(status.running ? C.backingUp : C.backUpNow)}</button></div>` + `${error}<p class="pnote" data-backup-msg role="status" aria-live="polite"></p>`;
+  const where = `<h4 class="bkh">${escapeHtml3(C.where)}</h4><div class="bkwhere">` + (status.folder ? `<span class="bkpath" data-backup-folder>${escapeHtml3(status.folder)}</span>` : `<span class="pnote" data-backup-folder>${escapeHtml3(C.noFolder)}</span>`) + `<button class="btn primaryline" type="button" data-backup-browse="folder">${escapeHtml3(C.chooseFolder)}</button></div>`;
+  const radio = (value, label) => `<label class="bkradio"><input type="radio" name="schedule" value="${value}"${status.schedule === value ? " checked" : ""}${off}> ${escapeHtml3(label)}</label>`;
+  const when = `<fieldset class="bkwhen" data-backup-schedule><legend class="bkh">${escapeHtml3(C.when)}</legend>${radio("manual", C.manual)}${radio("nightly", C.nightly)}${radio("weekly", C.weekly)}<p class="pnote">${escapeHtml3(C.keep)}</p></fieldset>`;
+  const passphrase = `<h4 class="bkh">${escapeHtml3(C.passphrase)}</h4><p>${escapeHtml3(C.passphraseLine)}</p>` + `<p>${status.passphraseProblem ? "" : status.passphraseSet ? `✓ ${escapeHtml3(C.set)} · ` : `${escapeHtml3(C.notSet)} · `}<button class="linkbtn" type="button" data-dialog-open="backup-passphrase">${escapeHtml3(status.passphraseProblem ? "Set the passphrase again" : status.passphraseSet ? C.change : C.setOne)}</button></p>` + (status.passphraseProblem ? `<p class="bkerr" role="alert" data-backup-key-problem>The key kept for your passphrase can't be read, so backups stop until you set the passphrase again.</p>` : status.passphraseSet ? `<p class="pnote">${escapeHtml3(C.passphraseKept)}</p>` : "");
   const restoreState = status.restore;
-  const restoreNote = restoreState?.state === "done" ? `<p class="bkok" role="status" data-backup-restored>Restored ${escapeHtml2(backupWhen(restoreState.at, input.now))}.${restoreState.sign_in_again?.length ? ` Sign in again to: ${escapeHtml2(restoreState.sign_in_again.join(", "))}.` : ""} <a href="/dashboard?connect">Open Sources</a></p>` : restoreState?.state === "failed" ? `<p class="bkerr" role="alert">The restore didn't finish: ${escapeHtml2(restoreState.message ?? "")}</p>` : restoreState?.state === "restarting" ? '<p role="status">Olympus is restarting to restore…</p>' : "";
-  const restore = `<h4 class="bkh">${escapeHtml2(C.restore)}</h4><p>${escapeHtml2(C.restoreLine)}</p>${restoreNote}` + (status.restoreAvailable ? `<button class="btn primaryline" type="button" data-backup-browse="restore">${escapeHtml2(C.restoreButton)}</button>` : `<p class="pnote">On this install Olympus can't restart itself. Stop Olympus, then run <code>olympus data restore --input &lt;file&gt; --passphrase-stdin</code>.</p>`);
-  const dialogs = `<dialog class="adddialog" id="backup-passphrase" data-closable aria-labelledby="backup-passphrase-title"><div class="adddialoghead"><h3 id="backup-passphrase-title">${escapeHtml2(status.passphraseSet ? "Change the passphrase" : C.setOne)}</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>` + `<form data-backup-passphrase><p class="pnote">${escapeHtml2(C.passphraseLine)}</p><label class="bkfield">New passphrase <input type="password" name="passphrase" autocomplete="new-password" minlength="8" required></label><label class="bkfield">Type it again <input type="password" name="again" autocomplete="new-password" minlength="8" required></label>` + `<p class="pnote">${escapeHtml2(C.passphraseKept)} Backups made before keep their old passphrase.</p><div class="pickbar"><button class="btn primary" type="submit">Save passphrase</button>${status.passphraseSet ? '<button class="btn" type="button" data-backup-nopass>Back up without a passphrase</button>' : ""}</div><p class="pnote" data-backup-dialog-msg role="status"></p></form></dialog>` + `<dialog class="adddialog bkbrowser" id="backup-browser" data-closable aria-labelledby="backup-browser-title"><div class="adddialoghead"><h3 id="backup-browser-title">Choose a folder</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>` + '<p class="bkpath" data-browser-path></p><div class="bklist" data-browser-files></div><div class="bklist" data-browser-folders></div><p class="bkmore"><button class="btn" type="button" data-browser-more hidden>Show more</button></p>' + '<form data-backup-restore hidden><label class="bkfield">Passphrase <input type="password" name="passphrase" autocomplete="off"></label><p class="pnote">Restoring stops Olympus, puts the backup in place and starts Olympus again. It only works on a computer that holds no Olympus data yet.</p></form>' + '<div class="pickbar"><button class="btn" type="button" data-browser-up>Up</button><button class="btn primary" type="button" data-browser-use>Use this folder</button></div><p class="pnote" data-backup-dialog-msg role="status"></p></dialog>';
+  const restoreNote = restoreState?.state === "done" ? `<p class="bkok" role="status" data-backup-restored>Restored ${escapeHtml3(backupWhen(restoreState.at, input.now))}.${restoreState.sign_in_again?.length ? ` Sign in again to: ${escapeHtml3(restoreState.sign_in_again.join(", "))}.` : ""} <a href="/dashboard?connect">Open Sources</a></p>` : restoreState?.state === "failed" ? `<p class="bkerr" role="alert">The restore didn't finish: ${escapeHtml3(restoreState.message ?? "")}</p>` : restoreState?.state === "restarting" ? '<p role="status">Olympus is restarting to restore…</p>' : "";
+  const restore = `<h4 class="bkh">${escapeHtml3(C.restore)}</h4><p>${escapeHtml3(C.restoreLine)}</p>${restoreNote}` + (status.restoreAvailable ? `<button class="btn primaryline" type="button" data-backup-browse="restore">${escapeHtml3(C.restoreButton)}</button>` : `<p class="pnote">On this install Olympus can't restart itself. Stop Olympus, then run <code>olympus data restore --input &lt;file&gt; --passphrase-stdin</code>.</p>`);
+  const dialogs = `<dialog class="adddialog" id="backup-passphrase" data-closable aria-labelledby="backup-passphrase-title"><div class="adddialoghead"><h3 id="backup-passphrase-title">${escapeHtml3(status.passphraseSet ? "Change the passphrase" : C.setOne)}</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>` + `<form data-backup-passphrase><p class="pnote">${escapeHtml3(C.passphraseLine)}</p><label class="bkfield">New passphrase <input type="password" name="passphrase" autocomplete="new-password" minlength="8" required></label><label class="bkfield">Type it again <input type="password" name="again" autocomplete="new-password" minlength="8" required></label>` + `<p class="pnote">${escapeHtml3(C.passphraseKept)} Backups made before keep their old passphrase.</p><div class="pickbar"><button class="btn primary" type="submit">Save passphrase</button>${status.passphraseSet ? '<button class="btn" type="button" data-backup-nopass>Back up without a passphrase</button>' : ""}</div><p class="pnote" data-backup-dialog-msg role="status"></p></form></dialog>` + `<dialog class="adddialog bkbrowser" id="backup-browser" data-closable aria-labelledby="backup-browser-title"><div class="adddialoghead"><h3 id="backup-browser-title">Choose a folder</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>` + '<p class="bkpath" data-browser-path></p><div class="bklist" data-browser-files></div><div class="bklist" data-browser-folders></div><p class="bkmore"><button class="btn" type="button" data-browser-more hidden>Show more</button></p>' + '<form data-backup-restore hidden><label class="bkfield">Passphrase <input type="password" name="passphrase" autocomplete="off"></label><p class="pnote">Restoring stops Olympus, puts the backup in place and starts Olympus again. It only works on a computer that holds no Olympus data yet.</p></form>' + '<div class="pickbar"><button class="btn" type="button" data-browser-up>Up</button><button class="btn primary" type="button" data-browser-use>Use this folder</button></div><p class="pnote" data-backup-dialog-msg role="status"></p></dialog>';
   return `<section class="setpane" id="${DASHBOARD_SETTINGS_BACKUP_ID}" data-backup-section>${head}${lastRow}${where}${when}${passphrase}${restore}${dialogs}` + `<script>${backupClientScript(input.csrfToken, status.folder ?? null)}</script></section>`;
 }
 function backupUnlockScript(csrfToken) {
@@ -210453,7 +217137,7 @@ function renderDashboardAgentsSection(input) {
   };
   return [
     '<div class="sect" id="agents">Agents</div>',
-    `<p class="pnote">${escapeHtml2(platform === "linux" ? "ChatGPT, Claude, Grok or a coding agent can ask Olympus, under the same privacy rules on this computer." : "ChatGPT, Claude, Grok or a coding agent can ask Olympus, under the same privacy rules as your OpenClaw agent.")}</p>`,
+    `<p class="pnote">${escapeHtml3(platform === "linux" ? "ChatGPT, Claude, Grok or a coding agent can ask Olympus, under the same privacy rules on this computer." : "ChatGPT, Claude, Grok or a coding agent can ask Olympus, under the same privacy rules as your OpenClaw agent.")}</p>`,
     remoteAccessRow(view.remoteAccess, view.remoteAccessManual),
     `<div data-agent-connections-list>${connectionList(view, input.now)}</div>`,
     renderConnectionRequests(view),
@@ -210463,10 +217147,10 @@ function renderDashboardAgentsSection(input) {
 }
 function remoteAccessRow(access, manual) {
   const why = access.state === "on" ? `On. Agents in the cloud reach Olympus at ${hostOf2(access.mcpUrl)}.` : access.state === "off" ? "Off. Agents in the cloud cannot ask Olympus. Connections on this computer and your tailnet work separately." : access.state === "not_connected" ? "On, but not connected. Agents in the cloud cannot reach Olympus until it is." : `Not set up correctly. ${access.detail}`;
-  const next = access.state === "not_connected" && access.detail ? `<span class="hint" data-remote-next-step> ${escapeHtml2(access.detail)}</span>` : access.state === "on" && access.setBy === "worker_env" ? `<span class="hint" data-remote-set-by="worker_env"> ${escapeHtml2(WORKER_ENV_ADDRESS_MESSAGE)}</span>` : "";
+  const next = access.state === "not_connected" && access.detail ? `<span class="hint" data-remote-next-step> ${escapeHtml3(access.detail)}</span>` : access.state === "on" && access.setBy === "worker_env" ? `<span class="hint" data-remote-set-by="worker_env"> ${escapeHtml3(WORKER_ENV_ADDRESS_MESSAGE)}</span>` : "";
   const workerEnv = access.state === "on" && access.setBy === "worker_env";
-  const how = manual !== undefined && !workerEnv ? `<span class="hint" data-remote-manual> ${escapeHtml2(manual)}</span>` : "";
-  return `<div class="attncard plain" data-remote-access="${access.state}">` + `<div class="grow"><span class="name">Remote access</span><span class="why"> — ${escapeHtml2(why)}</span>${next}${how}</div>` + (manual === undefined ? remoteAccessControls(access) : "") + `</div>` + (access.state === "off" || access.state === "not_connected" && access.needsTerms ? termsPanel() : "");
+  const how = manual !== undefined && !workerEnv ? `<span class="hint" data-remote-manual> ${escapeHtml3(manual)}</span>` : "";
+  return `<div class="attncard plain" data-remote-access="${access.state}">` + `<div class="grow"><span class="name">Remote access</span><span class="why"> — ${escapeHtml3(why)}</span>${next}${how}</div>` + (manual === undefined ? remoteAccessControls(access) : "") + `</div>` + (access.state === "off" || access.state === "not_connected" && access.needsTerms ? termsPanel() : "");
 }
 function remoteAccessControls(access) {
   const status = `<span class="actmsg" data-action-message role="status"></span>`;
@@ -210477,7 +217161,7 @@ function remoteAccessControls(access) {
   }
   const review = access.state === "not_connected" && access.needsTerms ? `<form class="rowform" data-agent-kind="remote-on"><button class="btn primary" type="submit">Review agreement</button>${status}</form>` : "";
   const confirmation = "Turn off remote access? Agents in the cloud will no longer reach Olympus until you turn it on again. Agents on this computer are unaffected.";
-  return review + `<form class="rowform" data-agent-kind="remote-off" data-confirmation="${escapeHtml2(confirmation)}">` + `<button class="btn" type="submit">Turn off remote access</button>${status}` + `</form>`;
+  return review + `<form class="rowform" data-agent-kind="remote-off" data-confirmation="${escapeHtml3(confirmation)}">` + `<button class="btn" type="submit">Turn off remote access</button>${status}` + `</form>`;
 }
 function termsPanel() {
   return `<div class="remoteterms" data-remote-terms hidden>` + `<p><b>Before remote access turns on</b></p>` + `<p>So that agents in the cloud reach this computer over an encrypted connection only this computer can open, Olympus gets a free certificate from Let's Encrypt. Getting one means agreeing to Let's Encrypt's Subscriber Agreement.</p>` + `<p>In short: the certificate is only for this Olympus's own address; its private key never leaves this computer and must be kept secret; Let's Encrypt may revoke the certificate if the key is exposed or the certificate is misused; and the service comes without warranties. You don't sign up for anything or share an email address. This is a summary, not the agreement: read the agreement itself before you accept.</p>` + `<p><a data-remote-terms-link href="${LETS_ENCRYPT_REPOSITORY_URL}" target="_blank" rel="noopener noreferrer">Read the Let's Encrypt Subscriber Agreement</a></p>` + `<form class="rowform" data-agent-kind="remote-accept">` + `<button class="btn primary" type="submit">I accept, turn on remote access</button>` + `<button class="btn" type="button" data-remote-terms-cancel>Not now</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>` + `</div>`;
@@ -210502,14 +217186,14 @@ function privateChoices(access) {
   return ["loopback", "tailnet"].map((route) => {
     const status = access[route];
     const label = route === "loopback" ? "Agent on another account of this computer" : "Agent on my tailnet";
-    const body = status.state !== "available" ? `<p>${escapeHtml2(status.message ?? "This connection is not ready. Try again.")}</p>` : `<p>${route === "loopback" ? "For an agent using another account on this computer. It does not need access to your Olympus files." : "For an agent on your Tailscale network. Keep Tailscale running on both computers. This address follows this computer’s Tailscale connection."}</p>` + status.urls.map((url, i) => copyBox(`agent-private-${route}-url-${i}`, url, "Copy address")).join("") + "<p>Name the agent, then choose Create key. Creating the key approves this connection. Copy the setup line into your agent; no separate sign-in is needed. Revoke the key below to stop its access.</p>" + `<div data-agent-step><form class="rowform" data-agent-kind="key" data-private-route="${route}">` + `<input class="keyfield" name="name" value="My agent" required maxlength="64" aria-label="Connection name" autocomplete="off">` + `<button class="btn primary" type="submit">Create key</button><span class="actmsg" data-action-message role="status"></span></form>` + secretSlot(`agent-private-${route}-key`, "Key", true) + "</div>" + instructionsStep({ id: `private-${route}`, label, method: "key", instructionsWhere: "Paste this wherever the agent keeps its instructions." }, false);
+    const body = status.state !== "available" ? `<p>${escapeHtml3(status.message ?? "This connection is not ready. Try again.")}</p>` : `<p>${route === "loopback" ? "For an agent using another account on this computer. It does not need access to your Olympus files." : "For an agent on your Tailscale network. Keep Tailscale running on both computers. This address follows this computer’s Tailscale connection."}</p>` + status.urls.map((url, i) => copyBox(`agent-private-${route}-url-${i}`, url, "Copy address")).join("") + "<p>Name the agent, then choose Create key. Creating the key approves this connection. Copy the setup line into your agent; no separate sign-in is needed. Revoke the key below to stop its access.</p>" + `<div data-agent-step><form class="rowform" data-agent-kind="key" data-private-route="${route}">` + `<input class="keyfield" name="name" value="My agent" required maxlength="64" aria-label="Connection name" autocomplete="off">` + `<button class="btn primary" type="submit">Create key</button><span class="actmsg" data-action-message role="status"></span></form>` + secretSlot(`agent-private-${route}-key`, "Key", true) + "</div>" + instructionsStep({ id: `private-${route}`, label, method: "key", instructionsWhere: "Paste this wherever the agent keeps its instructions." }, false);
     return `<details class="agentchoice" data-poll-key="agent-private-${route}" data-agent="private-${route}">` + `<summary><span class="name">${label}</span></summary><div class="agentbody">${body}</div></details>`;
   }).join("");
 }
 function agentChoice(agent, access, host, privateAvailable) {
   const hints = [agent.detail, needsOwnTunnel(agent, access) ? "needs your own tunnel" : undefined].filter(Boolean).join(" · ");
-  const detail = hints ? ` <span class="hint">${escapeHtml2(hints)}</span>` : "";
-  return `<details class="agentchoice" data-poll-key="agent-${agent.id}" data-agent="${agent.id}">` + `<summary><span class="name">${escapeHtml2(agent.label)}</span>${detail}</summary>` + `<div class="agentbody">${agentBody(agent, access, host, privateAvailable)}</div>` + `</details>`;
+  const detail = hints ? ` <span class="hint">${escapeHtml3(hints)}</span>` : "";
+  return `<details class="agentchoice" data-poll-key="agent-${agent.id}" data-agent="${agent.id}">` + `<summary><span class="name">${escapeHtml3(agent.label)}</span>${detail}</summary>` + `<div class="agentbody">${agentBody(agent, access, host, privateAvailable)}</div>` + `</details>`;
 }
 function ownTunnel(access) {
   return access.state === "on" && (access.ownTunnel === true || access.setBy === "worker_env");
@@ -210525,22 +217209,22 @@ function agentBody(agent, access, host, privateAvailable) {
   if (access.state !== "on")
     return remoteUnavailable(access, privateAvailable) + instructionsStep(agent, false);
   if (agent.method === "oauth" && !ownTunnel(access) && agent.approveViaRelay) {
-    return `<ol class="steps">` + `<li>${escapeHtml2(agent.add ?? "")}${copyBox(`agent-${agent.id}-url`, access.mcpUrl, "Copy address")}</li>` + `<li>${approvalStep(agent, host)}</li>` + `<li>${instructionsStep(agent, true)}</li>` + `</ol>`;
+    return `<ol class="steps">` + `<li>${escapeHtml3(agent.add ?? "")}${copyBox(`agent-${agent.id}-url`, access.mcpUrl, "Copy address")}</li>` + `<li>${approvalStep(agent, host)}</li>` + `<li>${instructionsStep(agent, true)}</li>` + `</ol>`;
   }
   if (agent.method === "oauth") {
-    return `<ol class="steps">` + `<li>${escapeHtml2(agent.add ?? "")}${copyBox(`agent-${agent.id}-url`, access.mcpUrl, "Copy address")}</li>` + `<li>${host.platform === "linux" ? approvalStep(agent, host, true) : escapeHtml2(agent.approve ?? "")}</li>` + `<li data-agent-step>On that page, type a pairing code from here.${pairForm(agent.id)}</li>` + `<li>${instructionsStep(agent, true)}</li>` + `</ol>`;
+    return `<ol class="steps">` + `<li>${escapeHtml3(agent.add ?? "")}${copyBox(`agent-${agent.id}-url`, access.mcpUrl, "Copy address")}</li>` + `<li>${host.platform === "linux" ? approvalStep(agent, host, true) : escapeHtml3(agent.approve ?? "")}</li>` + `<li data-agent-step>On that page, type a pairing code from here.${pairForm(agent.id)}</li>` + `<li>${instructionsStep(agent, true)}</li>` + `</ol>`;
   }
   if (agent.method === "key") {
     const url = agent.address === "openapi" ? access.openapiUrl : access.mcpUrl;
-    return `<ol class="steps">` + `<li>${escapeHtml2(agent.add ?? "")}${copyBox(`agent-${agent.id}-url`, url, "Copy address")}</li>` + `<li data-agent-step>Create a key for it. ${escapeHtml2(agent.keyUse ?? "")}${keyForm(agent.id, agent.keyName ?? agent.label)}</li>` + `<li>${instructionsStep(agent, true)}</li>` + `</ol>`;
+    return `<ol class="steps">` + `<li>${escapeHtml3(agent.add ?? "")}${copyBox(`agent-${agent.id}-url`, url, "Copy address")}</li>` + `<li data-agent-step>Create a key for it. ${escapeHtml3(agent.keyUse ?? "")}${keyForm(agent.id, agent.keyName ?? agent.label)}</li>` + `<li>${instructionsStep(agent, true)}</li>` + `</ol>`;
   }
   return `<p>If the agent can add a connector that signs in, use the connector address and a pairing code. If it takes an address and a key, create a key.</p>` + `<ol class="steps">` + `<li>Connector (MCP) address:${copyBox("agent-other-url", access.mcpUrl, "Copy address")}` + `OpenAPI address, for agents that read an API description:${copyBox("agent-other-openapi", access.openapiUrl, "Copy address")}</li>` + (host.platform === "linux" ? `<li>${approvalStep(agent, host, true)}</li>` : "") + `<li data-agent-step>Approve a connector with a pairing code.${pairForm(agent.id)}</li>` + `<li data-agent-step>Or create a key and give it to the agent as a bearer token.${keyForm(agent.id, "Agent")}</li>` + `<li>${instructionsStep(agent, true)}</li>` + `</ol>`;
 }
 function approvalStep(agent, host, pairing = false) {
   if (host.platform !== "linux")
-    return escapeHtml2(agent.approveViaRelay ?? "");
+    return escapeHtml3(agent.approveViaRelay ?? "");
   if (!host.headless)
-    return pairing ? "Open the Olympus approval page in this computer's browser, through the owner's approval route." : escapeHtml2(agent.approveViaRelay ?? "");
+    return pairing ? "Open the Olympus approval page in this computer's browser, through the owner's approval route." : escapeHtml3(agent.approveViaRelay ?? "");
   const handoff = host.approvalHandoff?.();
   if (!handoff)
     return "Approval on this computer is not ready. Configure the owner-only SSH socket forward on the Olympus host, then return here.";
@@ -210553,34 +217237,34 @@ function localBody(agent, host) {
 }
 function tunnelNeeded(host, privateAvailable) {
   const text = (host.platform === "linux" ? "Olympus's relay connects ChatGPT, Claude, Grok, Grok Bot and Cursor. " : "Olympus's relay connects only ChatGPT, Claude and Grok. ") + (privateAvailable ? "For OpenClaw, Hermes or another agent on this computer, choose Agent on another account of this computer. " + "For an agent on your Tailscale network, choose Agent on my tailnet. " : "") + "Other agents in the cloud need a tunnel you run yourself; ask the person who manages that agent to connect it. " + "Claude Code and Codex on this computer need no tunnel.";
-  return `<p class="why" data-agent-needs-tunnel>${escapeHtml2(text)}</p>`;
+  return `<p class="why" data-agent-needs-tunnel>${escapeHtml3(text)}</p>`;
 }
 function remoteUnavailable(access, privateAvailable) {
   const text = access.state === "not_connected" ? "Remote access is on but not connected, so this agent cannot reach Olympus right now. The Remote access line above says why." : access.state === "invalid" ? `Remote access is not set up correctly, so this agent cannot reach Olympus yet. ${access.detail}` : "This agent runs in the cloud, and remote access is off, so it cannot reach Olympus on this computer yet. Turn on remote access above first. Claude Code and Codex on this computer work now.";
-  return `<p class="why" data-remote-unavailable>${escapeHtml2(text)}${privateAvailable ? " For an agent on another account or your Tailscale network, use the choices below." : ""}</p>`;
+  return `<p class="why" data-remote-unavailable>${escapeHtml3(text)}${privateAvailable ? " For an agent on another account or your Tailscale network, use the choices below." : ""}</p>`;
 }
 function instructionsStep(agent, inStep) {
   const lead = inStep ? `Tell it when to ask Olympus. ${agent.instructionsWhere}` : `To have it ask Olympus on its own, ${agent.instructionsWhere.charAt(0).toLowerCase()}${agent.instructionsWhere.slice(1)}`;
-  const body = `${escapeHtml2(lead)}${copyBox(`agent-${agent.id}-instructions`, AGENT_INSTRUCTION_TEXT, "Copy instructions", true)}`;
-  const skill = agent.id === "claude" || agent.id === "local" ? `<span class="hint">The Olympus skill is the folder ${escapeHtml2(AGENT_SKILL_PATH.replace(/\/SKILL\.md$/, ""))} inside the plugin folder.</span>` : "";
-  const tip = agent.id === "claude" ? `<span class="hint">${escapeHtml2(CLAUDE_NO_TOOLS_TIP)}</span>` : "";
+  const body = `${escapeHtml3(lead)}${copyBox(`agent-${agent.id}-instructions`, AGENT_INSTRUCTION_TEXT, "Copy instructions", true)}`;
+  const skill = agent.id === "claude" || agent.id === "local" ? `<span class="hint">The Olympus skill is the folder ${escapeHtml3(AGENT_SKILL_PATH.replace(/\/SKILL\.md$/, ""))} inside the plugin folder.</span>` : "";
+  const tip = agent.id === "claude" ? `<span class="hint">${escapeHtml3(CLAUDE_NO_TOOLS_TIP)}</span>` : "";
   return inStep ? `${body}${skill}${tip}` : `<p>${body}</p>${skill}${tip}`;
 }
 function copyBox(id, text, label, primary = false) {
   const prose = text.includes(" ") && !text.startsWith("http") ? " prose" : "";
-  return `<div class="promptbox${prose}" id="${id}">${escapeHtml2(text)}</div>` + `<button class="btn${primary ? " primary" : ""}" type="button" data-copy-target="#${id}">${escapeHtml2(label)}</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>`;
+  return `<div class="promptbox${prose}" id="${id}">${escapeHtml3(text)}</div>` + `<button class="btn${primary ? " primary" : ""}" type="button" data-copy-target="#${id}">${escapeHtml3(label)}</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>`;
 }
 function pairForm(agentId) {
   return `<form class="rowform" data-agent-kind="pair">` + `<button class="btn primary" type="submit">Get pairing code</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>` + secretSlot(`agent-${agentId}-code`, "Pairing code");
 }
 function keyForm(agentId, name) {
-  return `<form class="rowform" data-agent-kind="key">` + `<input class="keyfield" type="text" name="name" value="${escapeHtml2(name)}" required maxlength="64" aria-label="Connection name" autocomplete="off">` + `<button class="btn primary" type="submit">Create key</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>` + secretSlot(`agent-${agentId}-key`, "Key");
+  return `<form class="rowform" data-agent-kind="key">` + `<input class="keyfield" type="text" name="name" value="${escapeHtml3(name)}" required maxlength="64" aria-label="Connection name" autocomplete="off">` + `<button class="btn primary" type="submit">Create key</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>` + secretSlot(`agent-${agentId}-key`, "Key");
 }
 function secretSlot(id, label, setup = false) {
-  return `<div class="agentsecret" data-agent-secret-slot hidden>` + `<input class="keyfield" id="${id}" data-agent-secret type="text" readonly autocomplete="off" spellcheck="false" aria-label="${escapeHtml2(label)}">` + `<button class="btn primary" type="button" data-copy-target="#${id}">Copy</button>` + `<button class="btn" type="button" data-agent-secret-done>Done</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + (setup ? ["OpenClaw", "Hermes", "Other MCP client"].map((client, i) => `<label>${client}<input class="keyfield" id="${id}-setup-${i}" data-agent-setup="${client}" data-agent-secret type="text" readonly autocomplete="off" spellcheck="false" aria-label="${client} setup line"></label>` + `<button class="btn" type="button" data-copy-target="#${id}-setup-${i}">Copy setup line</button>`).join("") : "") + `<span class="hint" data-agent-secret-note></span>` + `</div>`;
+  return `<div class="agentsecret" data-agent-secret-slot hidden>` + `<input class="keyfield" id="${id}" data-agent-secret type="text" readonly autocomplete="off" spellcheck="false" aria-label="${escapeHtml3(label)}">` + `<button class="btn primary" type="button" data-copy-target="#${id}">Copy</button>` + `<button class="btn" type="button" data-agent-secret-done>Done</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + (setup ? ["OpenClaw", "Hermes", "Other MCP client"].map((client, i) => `<label>${client}<input class="keyfield" id="${id}-setup-${i}" data-agent-setup="${client}" data-agent-secret type="text" readonly autocomplete="off" spellcheck="false" aria-label="${client} setup line"></label>` + `<button class="btn" type="button" data-copy-target="#${id}-setup-${i}">Copy setup line</button>`).join("") : "") + `<span class="hint" data-agent-secret-note></span>` + `</div>`;
 }
 function connectAgentButton(label, primary) {
-  return `<p class="agentconnect"><button class="btn${primary ? " primary" : ""}" type="button" data-sheet-toggle="#${AGENT_CONNECT_SHEET_ID}" aria-controls="${AGENT_CONNECT_SHEET_ID}" aria-expanded="false">${escapeHtml2(label)}</button></p>`;
+  return `<p class="agentconnect"><button class="btn${primary ? " primary" : ""}" type="button" data-sheet-toggle="#${AGENT_CONNECT_SHEET_ID}" aria-controls="${AGENT_CONNECT_SHEET_ID}" aria-expanded="false">${escapeHtml3(label)}</button></p>`;
 }
 function connectionList(view, now) {
   if (view.unavailable) {
@@ -210599,7 +217283,7 @@ function connectionRow(connection, now) {
   const route = connection.route === "loopback" ? "another account of this computer" : connection.route === "tailnet" ? "my tailnet" : "relay or own tunnel";
   const why = `${route} · added ${calendarDate(connection.createdAt)} · ${used}`;
   const confirmation = `Revoke ${connection.name}? It will no longer be able to ask Olympus. You can connect it again later.`;
-  return `<div class="attncard plain" data-agent-connection="${escapeHtml2(connection.id)}">` + `<div class="grow"><span class="name">${escapeHtml2(connection.name)}</span><span class="why"> — ${escapeHtml2(why)}</span></div>` + `<form class="rowform" data-agent-kind="revoke" data-confirmation="${escapeHtml2(confirmation)}">` + `<input type="hidden" name="connection_id" value="${escapeHtml2(connection.id)}">` + `<button class="btn" type="submit">Revoke</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>` + `</div>`;
+  return `<div class="attncard plain" data-agent-connection="${escapeHtml3(connection.id)}">` + `<div class="grow"><span class="name">${escapeHtml3(connection.name)}</span><span class="why"> — ${escapeHtml3(why)}</span></div>` + `<form class="rowform" data-agent-kind="revoke" data-confirmation="${escapeHtml3(confirmation)}">` + `<input type="hidden" name="connection_id" value="${escapeHtml3(connection.id)}">` + `<button class="btn" type="submit">Revoke</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>` + `</div>`;
 }
 function calendarDate(iso) {
   const date = new Date(iso);
@@ -210633,9 +217317,9 @@ function renderConnectionRequests(view) {
   const history = view.requests;
   if (!history)
     return "";
-  const readings = history.readings.map((line) => `<p class="pnote">${escapeHtml2(line)}</p>`).join("");
-  const rows = history.requests.map((entry) => `<div class="attncard plain"><div class="grow"><span class="name">${escapeHtml2(entry.app)}</span><div class="why"><time datetime="${escapeHtml2(entry.at)}">${escapeHtml2(new Date(entry.at).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }))}</time> · ${escapeHtml2(entry.asked)} · ${escapeHtml2(entry.result)}</div></div></div>`).join("");
-  return `<section data-connection-requests><div class="sect">${escapeHtml2(history.title)}</div>${readings}${rows || '<p class="pnote">No requests recorded yet.</p>'}<p class="foot">Showing retained history only. Relay and engine observations appear separately; a relay line alone does not show that the request reached this computer.</p></section>`;
+  const readings = history.readings.map((line) => `<p class="pnote">${escapeHtml3(line)}</p>`).join("");
+  const rows = history.requests.map((entry) => `<div class="attncard plain"><div class="grow"><span class="name">${escapeHtml3(entry.app)}</span><div class="why"><time datetime="${escapeHtml3(entry.at)}">${escapeHtml3(new Date(entry.at).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }))}</time> · ${escapeHtml3(entry.asked)} · ${escapeHtml3(entry.result)}</div></div></div>`).join("");
+  return `<section data-connection-requests><div class="sect">${escapeHtml3(history.title)}</div>${readings}${rows || '<p class="pnote">No requests recorded yet.</p>'}<p class="foot">Showing retained history only. Relay and engine observations appear separately; a relay line alone does not show that the request reached this computer.</p></section>`;
 }
 var AGENT_CONNECT_SHEET_ID = "agent-connect", AGENTS, LOCAL_AGENT_PROMPT, CLAUDE_CODE_SNIPPET = "claude mcp add olympus -- <olympus path> serve", CODEX_SNIPPET, CLAUDE_NO_TOOLS_TIP = "If Claude says Olympus has no tools, Claude did not ask Olympus for them. In that chat, turn Olympus off and on in the tools menu under the message box, then ask again.", MONTHS4;
 var init_agents = __esm(() => {
@@ -210990,8 +217674,8 @@ function renderDashboardPrivateAnswersPage(options) {
   });
 }
 function dashboardPrivacyTabs(active, token) {
-  const tab = (id, href, label) => id === active ? `<a class="ptab on" aria-current="page" href="${escapeHtml2(href)}">${escapeHtml2(label)}</a>` : `<a class="ptab" href="${escapeHtml2(href)}">${escapeHtml2(label)}</a>`;
-  return `<nav class="ptabs" aria-label="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.tabsLabel)}">` + tab("questions", dashboardLocalPageHref("privateAnswers", token), DASHBOARD_PRIVATE_ANSWERS_COPY.tabQuestions) + tab("settings", dashboardLocalPageHref("keys", token), DASHBOARD_PRIVATE_ANSWERS_COPY.tabSettings) + tab("items", dashboardLocalPageHref("privacyItems", token), DASHBOARD_PRIVACY_ITEMS_COPY.tab) + tab("apps", dashboardLocalPageHref("appsReceived", token), DASHBOARD_PRIVATE_ANSWERS_COPY.tabApps) + "</nav>";
+  const tab = (id, href, label) => id === active ? `<a class="ptab on" aria-current="page" href="${escapeHtml3(href)}">${escapeHtml3(label)}</a>` : `<a class="ptab" href="${escapeHtml3(href)}">${escapeHtml3(label)}</a>`;
+  return `<nav class="ptabs" aria-label="${escapeHtml3(DASHBOARD_PRIVATE_ANSWERS_COPY.tabsLabel)}">` + tab("questions", dashboardLocalPageHref("privateAnswers", token), DASHBOARD_PRIVATE_ANSWERS_COPY.tabQuestions) + tab("settings", dashboardLocalPageHref("keys", token), DASHBOARD_PRIVATE_ANSWERS_COPY.tabSettings) + tab("items", dashboardLocalPageHref("privacyItems", token), DASHBOARD_PRIVACY_ITEMS_COPY.tab) + tab("apps", dashboardLocalPageHref("appsReceived", token), DASHBOARD_PRIVATE_ANSWERS_COPY.tabApps) + "</nav>";
 }
 function readToken2(basePath) {
   if (!basePath)
@@ -211009,12 +217693,12 @@ function renderPrivateAnswersBody(options) {
   let ready = false;
   if (csrfToken === undefined) {
     const gate = `${dashboardLocalPageHref("keys", readToken2(options?.basePath))}#${DASHBOARD_CONTROL_GATE_ID}`;
-    notes.push(`<p class="pnote" data-pa-locked>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.locked)} <a href="${escapeHtml2(gate)}">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.openControls)}</a></p>`);
+    notes.push(`<p class="pnote" data-pa-locked>${escapeHtml3(DASHBOARD_PRIVATE_ANSWERS_COPY.locked)} <a href="${escapeHtml3(gate)}">${escapeHtml3(DASHBOARD_PRIVATE_ANSWERS_COPY.openControls)}</a></p>`);
   } else if (!localSession) {
-    notes.push(`<form class="paunlock" data-pa-unlock>` + `<button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.unlock)}</button><span class="hint">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.unlockIntro)}</span>` + `<span class="pamsg" data-pa-msg role="status"></span></form>`);
+    notes.push(`<form class="paunlock" data-pa-unlock>` + `<button type="submit" class="btn primary">${escapeHtml3(DASHBOARD_PRIVATE_ANSWERS_COPY.unlock)}</button><span class="hint">${escapeHtml3(DASHBOARD_PRIVATE_ANSWERS_COPY.unlockIntro)}</span>` + `<span class="pamsg" data-pa-msg role="status"></span></form>`);
     script = `<script>${privateAnswersClientScript({ csrfToken, unlockOnly: true })}</script>`;
   } else if (options?.privateAnswers?.available !== true) {
-    notes.push(`<p class="pnote" data-pa-unavailable>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.unavailable)}</p>`);
+    notes.push(`<p class="pnote" data-pa-unavailable>${escapeHtml3(DASHBOARD_PRIVATE_ANSWERS_COPY.unavailable)}</p>`);
   } else {
     ready = true;
     const startup = options.privateAnswers.waiting?.startup;
@@ -211042,51 +217726,51 @@ function renderAsk(options, enabled, inbox) {
   const cards = destinations.map((d) => {
     const actions = {
       ready: "",
-      not_set_up: `<a class="btn" href="${escapeHtml2(d.href)}">${escapeHtml2(d.setup)}</a><span class="pareason" role="status">${escapeHtml2(d.reason)}</span>`,
-      not_allowed: `<a class="btn" href="${escapeHtml2(models + "#private-routing")}">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.changePrivacy)}</a><span class="pareason" role="status">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceNotAllowed)}</span>`,
-      busy: `<span class="pareason" role="status">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.destinationBusy)}</span>`
+      not_set_up: `<a class="btn" href="${escapeHtml3(d.href)}">${escapeHtml3(d.setup)}</a><span class="pareason" role="status">${escapeHtml3(d.reason)}</span>`,
+      not_allowed: `<a class="btn" href="${escapeHtml3(models + "#private-routing")}">${escapeHtml3(DASHBOARD_PRIVATE_ANSWERS_COPY.changePrivacy)}</a><span class="pareason" role="status">${escapeHtml3(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceNotAllowed)}</span>`,
+      busy: `<span class="pareason" role="status">${escapeHtml3(DASHBOARD_PRIVATE_ANSWERS_COPY.destinationBusy)}</span>`
     };
     const state = d.state;
     const action = enabled ? actions[state] : "";
     const notReadyLabel = d.id === "computer" ? d.reason === DASHBOARD_PRIVATE_ANSWERS_COPY.downloading ? DASHBOARD_PRIVATE_ANSWERS_COPY.downloadingStatus : DASHBOARD_PRIVATE_ANSWERS_COPY.notSetUpStatus : d.id === "anonymous" && zkState === "off" ? DASHBOARD_PRIVATE_ANSWERS_COPY.offStatus : d.id === "anonymous" && zkPaused ? DASHBOARD_PRIVATE_ANSWERS_COPY.pausedStatus : DASHBOARD_PRIVATE_ANSWERS_COPY.notConnectedStatus;
     const notReadyDot = notReadyLabel === DASHBOARD_PRIVATE_ANSWERS_COPY.downloadingStatus ? "run" : notReadyLabel === DASHBOARD_PRIVATE_ANSWERS_COPY.pausedStatus ? "pause" : "hollow";
-    const statuses = [["ready", DASHBOARD_PRIVATE_ANSWERS_COPY.readyStatus, "ok"], ["not_set_up", notReadyLabel, notReadyDot], ["not_allowed", DASHBOARD_PRIVATE_ANSWERS_COPY.offStatus, "hollow"], ["busy", DASHBOARD_PRIVATE_ANSWERS_COPY.answering, "run"]].map(([key, text, dot]) => `<span class="pastatus" data-pa-status="${key}"><span class="dot ${dot}" aria-hidden="true"></span>${escapeHtml2(text)}</span>`).join("");
-    const radio = `<input type="radio" name="pa-destination" value="${d.id}" data-pa-pick data-pa-action="${d.action}" data-pa-label="${escapeHtml2(label(d))}"${d === first ? " checked" : ""}${enabled && state === "ready" ? "" : " disabled"}>`;
-    return `<section class="padestination" id="${d.id}" data-pa-card="${d.id}" data-pa-state="${state}">` + `<label class="papick">${radio}<span class="paname"><b class="pacardname">${escapeHtml2(d.name)}</b>${d.model ? ` <span class="pamodel">· ${escapeHtml2(d.model)}</span>` : ""}${d.model && enabled ? ` <span class="pamodel">·</span> <a class="pamodelchange" href="${escapeHtml2(d.id === "anonymous" ? zkModelHref : `${models}#private-routing`)}">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiChangeModel)}</a>` : ""}<span class="pnote paline">${escapeHtml2(d.line)}</span></span></label>` + `<div class="pastate">${statuses}</div>` + (d.id === "anonymous" && enabled ? renderLevelChoice(zk?.settings.level === "general" ? "strict" : "standard", `${models}#outside-level`) : "") + `<div class="paaction">${action}</div>${Object.entries(actions).map(([key, html]) => `<template data-pa-template="${key}">${html}</template>`).join("")}</section>`;
+    const statuses = [["ready", DASHBOARD_PRIVATE_ANSWERS_COPY.readyStatus, "ok"], ["not_set_up", notReadyLabel, notReadyDot], ["not_allowed", DASHBOARD_PRIVATE_ANSWERS_COPY.offStatus, "hollow"], ["busy", DASHBOARD_PRIVATE_ANSWERS_COPY.answering, "run"]].map(([key, text, dot]) => `<span class="pastatus" data-pa-status="${key}"><span class="dot ${dot}" aria-hidden="true"></span>${escapeHtml3(text)}</span>`).join("");
+    const radio = `<input type="radio" name="pa-destination" value="${d.id}" data-pa-pick data-pa-action="${d.action}" data-pa-label="${escapeHtml3(label(d))}"${d === first ? " checked" : ""}${enabled && state === "ready" ? "" : " disabled"}>`;
+    return `<section class="padestination" id="${d.id}" data-pa-card="${d.id}" data-pa-state="${state}">` + `<label class="papick">${radio}<span class="paname"><b class="pacardname">${escapeHtml3(d.name)}</b>${d.model ? ` <span class="pamodel">· ${escapeHtml3(d.model)}</span>` : ""}${d.model && enabled ? ` <span class="pamodel">·</span> <a class="pamodelchange" href="${escapeHtml3(d.id === "anonymous" ? zkModelHref : `${models}#private-routing`)}">${escapeHtml3(DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiChangeModel)}</a>` : ""}<span class="pnote paline">${escapeHtml3(d.line)}</span></span></label>` + `<div class="pastate">${statuses}</div>` + (d.id === "anonymous" && enabled ? renderLevelChoice(zk?.settings.level === "general" ? "strict" : "standard", `${models}#outside-level`) : "") + `<div class="paaction">${action}</div>${Object.entries(actions).map(([key, html]) => `<template data-pa-template="${key}">${html}</template>`).join("")}</section>`;
   }).join("");
   const answeredBy = first ? DASHBOARD_PRIVATE_ANSWERS_COPY.answeredBy.replace("{name}", label(first)) : DASHBOARD_PRIVATE_ANSWERS_COPY.noneReady;
-  const button = `<button type="submit" class="btn primary" data-pa-ask-button${first ? ` data-pa-destination="${first.id}" data-pa-action="${first.action}"` : " disabled"}>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.ask)}</button>`;
-  return `<form class="paask pagrid" data-pa-ask data-pa-answered-template="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.answeredBy)}">` + `<div class="pamain"><h3 class="sect pahead">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.title)}</h3><p class="pnote paintro">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.intro)}</p>` + `<textarea id="pa-question" name="question" maxlength="2000" aria-label="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.askLabel)}" placeholder="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.askPlaceholder)}"${enabled ? "" : " disabled"}></textarea>` + `<div class="pasend"><span class="pnote" data-pa-answered-by>${escapeHtml2(answeredBy)}</span><span class="pareason" role="status"></span>${enabled ? button : ""}</div>` + `<div class="paout" data-pa-out aria-live="polite"></div>${inbox}</div>` + `<aside class="paside"><p class="pachooser" id="pa-chooser">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.chooserLabel)}</p><div class="paasks" role="radiogroup" aria-labelledby="pa-chooser">${cards}</div></aside>` + "</form>";
+  const button = `<button type="submit" class="btn primary" data-pa-ask-button${first ? ` data-pa-destination="${first.id}" data-pa-action="${first.action}"` : " disabled"}>${escapeHtml3(DASHBOARD_PRIVATE_ANSWERS_COPY.ask)}</button>`;
+  return `<form class="paask pagrid" data-pa-ask data-pa-answered-template="${escapeHtml3(DASHBOARD_PRIVATE_ANSWERS_COPY.answeredBy)}">` + `<div class="pamain"><h3 class="sect pahead">${escapeHtml3(DASHBOARD_PRIVATE_ANSWERS_COPY.title)}</h3><p class="pnote paintro">${escapeHtml3(DASHBOARD_PRIVATE_ANSWERS_COPY.intro)}</p>` + `<textarea id="pa-question" name="question" maxlength="2000" aria-label="${escapeHtml3(DASHBOARD_PRIVATE_ANSWERS_COPY.askLabel)}" placeholder="${escapeHtml3(DASHBOARD_PRIVATE_ANSWERS_COPY.askPlaceholder)}"${enabled ? "" : " disabled"}></textarea>` + `<div class="pasend"><span class="pnote" data-pa-answered-by>${escapeHtml3(answeredBy)}</span><span class="pareason" role="status"></span>${enabled ? button : ""}</div>` + `<div class="paout" data-pa-out aria-live="polite"></div>${inbox}</div>` + `<aside class="paside"><p class="pachooser" id="pa-chooser">${escapeHtml3(DASHBOARD_PRIVATE_ANSWERS_COPY.chooserLabel)}</p><div class="paasks" role="radiogroup" aria-labelledby="pa-chooser">${cards}</div></aside>` + "</form>";
 }
 function renderLevelChoice(level, settingsHref) {
-  const option = (value, label, hint) => `<label class="palevelopt"><input type="radio" name="level" value="${value}"${value === level ? " checked" : ""}><span><b>${escapeHtml2(label)}</b><span class="palevelhint">${hint}</span></span></label>`;
-  const standardHint = escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.levelStandardHint).replace("{models}", `<a href="${escapeHtml2(settingsHref)}">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.levelModelsLink)}</a>`);
-  return `<fieldset class="palevel" data-pa-level><legend>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.levelLegend)}</legend>` + option("strict", DASHBOARD_PRIVATE_ANSWERS_COPY.levelStrict, escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.levelStrictHint)) + option("standard", DASHBOARD_PRIVATE_ANSWERS_COPY.levelStandard, standardHint) + "</fieldset>";
+  const option = (value, label, hint) => `<label class="palevelopt"><input type="radio" name="level" value="${value}"${value === level ? " checked" : ""}><span><b>${escapeHtml3(label)}</b><span class="palevelhint">${hint}</span></span></label>`;
+  const standardHint = escapeHtml3(DASHBOARD_PRIVATE_ANSWERS_COPY.levelStandardHint).replace("{models}", `<a href="${escapeHtml3(settingsHref)}">${escapeHtml3(DASHBOARD_PRIVATE_ANSWERS_COPY.levelModelsLink)}</a>`);
+  return `<fieldset class="palevel" data-pa-level><legend>${escapeHtml3(DASHBOARD_PRIVATE_ANSWERS_COPY.levelLegend)}</legend>` + option("strict", DASHBOARD_PRIVATE_ANSWERS_COPY.levelStrict, escapeHtml3(DASHBOARD_PRIVATE_ANSWERS_COPY.levelStrictHint)) + option("standard", DASHBOARD_PRIVATE_ANSWERS_COPY.levelStandard, standardHint) + "</fieldset>";
 }
 function renderFailureNotice(reason) {
   const failure = privateAnswerFailure(reason);
-  return `<p class="pamsg" data-pa-failure><span data-pa-warning aria-hidden="true"></span>${escapeHtml2(failure.message)} ${failure.href ? `<a href="${escapeHtml2(failure.href)}">${escapeHtml2(failure.action)}</a>` : escapeHtml2(failure.action)}</p>`;
+  return `<p class="pamsg" data-pa-failure><span data-pa-warning aria-hidden="true"></span>${escapeHtml3(failure.message)} ${failure.href ? `<a href="${escapeHtml3(failure.href)}">${escapeHtml3(failure.action)}</a>` : escapeHtml3(failure.action)}</p>`;
 }
 function renderWaiting(waiting, now) {
-  const deleteAll = waiting ? `<button type="button" class="palink" data-pa-delete-all${waiting.questions.length ? "" : " hidden"}>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.deleteAll)}</button>` : "";
-  const parts = [`<section class="pasection" aria-labelledby="waiting"><div class="pawaithead"><h3 class="sect" id="waiting">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.waitingTitle)}</h3>${deleteAll}</div>`];
+  const deleteAll = waiting ? `<button type="button" class="palink" data-pa-delete-all${waiting.questions.length ? "" : " hidden"}>${escapeHtml3(DASHBOARD_PRIVATE_ANSWERS_COPY.deleteAll)}</button>` : "";
+  const parts = [`<section class="pasection" aria-labelledby="waiting"><div class="pawaithead"><h3 class="sect" id="waiting">${escapeHtml3(DASHBOARD_PRIVATE_ANSWERS_COPY.waitingTitle)}</h3>${deleteAll}</div>`];
   if (!waiting) {
-    parts.push(`<p class="pnote" data-pa-unreadable>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.unavailable)}</p>`);
+    parts.push(`<p class="pnote" data-pa-unreadable>${escapeHtml3(DASHBOARD_PRIVATE_ANSWERS_COPY.unavailable)}</p>`);
     return parts.join("") + "</section>";
   }
-  parts.push(`<p class="pnote" data-pa-none${waiting.questions.length ? " hidden" : ""}>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.noneWaiting)}</p>`);
-  parts.push(`<p class="pnote">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.waitingIntro)}</p>`);
-  const starting = escapeHtml2(startupWaitingLine(waiting.startup, now.getTime()));
+  parts.push(`<p class="pnote" data-pa-none${waiting.questions.length ? " hidden" : ""}>${escapeHtml3(DASHBOARD_PRIVATE_ANSWERS_COPY.noneWaiting)}</p>`);
+  parts.push(`<p class="pnote">${escapeHtml3(DASHBOARD_PRIVATE_ANSWERS_COPY.waitingIntro)}</p>`);
+  const starting = escapeHtml3(startupWaitingLine(waiting.startup, now.getTime()));
   const rows = [...waiting.questions].sort((a, b) => Date.parse(b.askedAt) - Date.parse(a.askedAt)).map((question) => {
     const asked = Date.parse(question.askedAt);
     const when = Number.isFinite(asked) ? dashboardRelativeFromMs(now.getTime() - asked) : "";
     const state = question.state ?? (question.unchecked ? "unchecked" : "answering");
     const status = state === "failed" ? "" : state === "changed" ? DASHBOARD_PRIVATE_ANSWERS_COPY.changed : state === "queued" ? DASHBOARD_PRIVATE_ANSWERS_COPY.queued : state === "retrying" ? DASHBOARD_PRIVATE_ANSWERS_COPY.retrying : state === "answering" ? DASHBOARD_PRIVATE_ANSWERS_COPY.answering : state === "unchecked" ? DASHBOARD_PRIVATE_ANSWERS_COPY.unchecked : "";
     const from = [question.path === "venice" ? DASHBOARD_PRIVATE_ANSWERS_COPY.veniceName : question.path === "anonymous" ? DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousPath : DASHBOARD_PRIVATE_ANSWERS_COPY.privatePath, question.from, when, status].filter(Boolean).join(" · ");
-    return `<li class="srow nodot${state === "failed" ? " pa-failed" : ""}${question.unread ? " unread" : ""}" id="${escapeHtml2(question.id)}" data-pa-question="${escapeHtml2(question.id)}">` + `<div class="smain"><button type="button" class="pa-read" data-pa-read><span class="paq">${escapeHtml2(question.question)}</span><span class="pafrom" title="${escapeHtml2(question.askedAt)}"> · ${escapeHtml2(from)}</span></button>` + (starting && status && state !== "changed" ? `<p class="pamsg" data-pa-startup>${starting}</p>` : "") + "</div>" + `<div class="sact"><button type="button" class="btn" data-pa-delete>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.delete)}</button></div>` + (state === "failed" ? renderFailureNotice(question.failureReason) : "") + `<div class="paout" data-pa-out aria-live="polite"></div></li>`;
+    return `<li class="srow nodot${state === "failed" ? " pa-failed" : ""}${question.unread ? " unread" : ""}" id="${escapeHtml3(question.id)}" data-pa-question="${escapeHtml3(question.id)}">` + `<div class="smain"><button type="button" class="pa-read" data-pa-read><span class="paq">${escapeHtml3(question.question)}</span><span class="pafrom" title="${escapeHtml3(question.askedAt)}"> · ${escapeHtml3(from)}</span></button>` + (starting && status && state !== "changed" ? `<p class="pamsg" data-pa-startup>${starting}</p>` : "") + "</div>" + `<div class="sact"><button type="button" class="btn" data-pa-delete>${escapeHtml3(DASHBOARD_PRIVATE_ANSWERS_COPY.delete)}</button></div>` + (state === "failed" ? renderFailureNotice(question.failureReason) : "") + `<div class="paout" data-pa-out aria-live="polite"></div></li>`;
   });
   parts.push(`<ul class="srows palist" data-pa-list>${rows.join("")}</ul>`);
-  parts.push(`<p class="pnote hint" data-pa-older-removed${waiting.olderRemoved ? "" : " hidden"}>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.olderRemoved)}</p>`);
+  parts.push(`<p class="pnote hint" data-pa-older-removed${waiting.olderRemoved ? "" : " hidden"}>${escapeHtml3(DASHBOARD_PRIVATE_ANSWERS_COPY.olderRemoved)}</p>`);
   parts.push('<p class="pnote" data-pa-missing hidden role="status"></p>');
   return parts.join("") + "</section>";
 }
@@ -211697,16 +218381,16 @@ function picker(list, disabled) {
   const radios = list.options.map((option) => {
     const inUse = option.value === list.current;
     const now = inUse && option.value === "strongest" && list.strongestNow ? ` · now ${list.strongestNow}` : "";
-    const note = option.value === "strongest" ? `${inUse ? " · in use" : ""}${now}</span><span class="picknote">${escapeHtml2(option.note ?? "")}` : `${inUse && option.note !== "in use" ? " · in use" : ""}${option.note ? ` · ${escapeHtml2(option.note)}` : ""}`;
-    return `<label class="pickopt${option.value === "strongest" ? " strong" : ""}"><input type="radio" name="model" value="${escapeHtml2(option.value)}"${inUse ? " checked" : ""}${off}> <span><b>${escapeHtml2(option.label)}</b><span class="pnote">${note}</span></span></label>`;
+    const note = option.value === "strongest" ? `${inUse ? " · in use" : ""}${now}</span><span class="picknote">${escapeHtml3(option.note ?? "")}` : `${inUse && option.note !== "in use" ? " · in use" : ""}${option.note ? ` · ${escapeHtml3(option.note)}` : ""}`;
+    return `<label class="pickopt${option.value === "strongest" ? " strong" : ""}"><input type="radio" name="model" value="${escapeHtml3(option.value)}"${inUse ? " checked" : ""}${off}> <span><b>${escapeHtml3(option.label)}</b><span class="pnote">${note}</span></span></label>`;
   }).join("");
-  return `<div class="sheet pickpanel" id="${id}" aria-hidden="true"><h4>${escapeHtml2(t.pick)}</h4><p class="pnote">${escapeHtml2(t.intro)}</p>` + `<form data-model-choice><input type="hidden" name="provider" value="${list.provider}"><fieldset${off}><legend class="sr">${escapeHtml2(t.pick)}</legend>${radios}</fieldset>` + `<div class="pickbar"><button class="btn primary" type="submit"${off}>Use this model</button><button class="btn" type="button" data-sheet-toggle="#${id}">Cancel</button>` + `<button class="btn addmodel" type="button" data-add-model-open="${list.provider}"${off}>${escapeHtml2(t.add)}</button></div>` + '<span data-action-message role="status"></span></form></div>';
+  return `<div class="sheet pickpanel" id="${id}" aria-hidden="true"><h4>${escapeHtml3(t.pick)}</h4><p class="pnote">${escapeHtml3(t.intro)}</p>` + `<form data-model-choice><input type="hidden" name="provider" value="${list.provider}"><fieldset${off}><legend class="sr">${escapeHtml3(t.pick)}</legend>${radios}</fieldset>` + `<div class="pickbar"><button class="btn primary" type="submit"${off}>Use this model</button><button class="btn" type="button" data-sheet-toggle="#${id}">Cancel</button>` + `<button class="btn addmodel" type="button" data-add-model-open="${list.provider}"${off}>${escapeHtml3(t.add)}</button></div>` + '<span data-action-message role="status"></span></form></div>';
 }
 function addDialog(provider) {
   const t = TITLES[provider];
-  const head = `<dialog class="adddialog" data-add-model="${provider}" aria-labelledby="add-model-${provider}"><div class="adddialoghead"><h3 id="add-model-${provider}">${escapeHtml2(t.addTitle)}</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>`;
+  const head = `<dialog class="adddialog" data-add-model="${provider}" aria-labelledby="add-model-${provider}"><div class="adddialoghead"><h3 id="add-model-${provider}">${escapeHtml3(t.addTitle)}</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>`;
   if (provider === "local") {
-    return head + `<p class="pnote">Olympus doesn't install or download models itself.</p>` + '<section class="addbox"><h4>Find a model you already run</h4><p class="pnote">Olympus looks for Ollama and LM Studio on this computer. If your model server uses another port, enter its address.</p>' + '<form data-local-models-discover class="addrow"><button class="btn primary" type="submit">Look on this computer</button><input class="keyfield" name="base_url" type="url" placeholder="http://127.0.0.1:1234/v1 (optional)" aria-label="Model server address on this computer (optional)"><span data-action-message role="status"></span></form>' + '<div data-local-models-results></div><form data-local-models-test hidden><input type="hidden" name="base_url"><label>Answer model<select name="answer_model" required></select></label><button class="btn primary" type="submit">Test and add</button><span data-action-message role="status"></span></form>' + '<p class="pnote">Olympus tests each model it finds with made-up text before adding it.</p></section>' + `<section class="addbox"><h4>Get a new model with your agent's help</h4><p class="pnote">Your agent can pick a model that fits this computer, download it and connect it. Copy this request into your agent.</p>` + `<div class="promptbox" id="add-model-request" hidden>${escapeHtml2(LOCAL_MODEL_AGENT_REQUEST)}</div><button class="btn" type="button" data-copy-target="#add-model-request">Copy request</button><span class="copystatus" data-copy-status aria-live="polite"></span></section>` + "</dialog>";
+    return head + `<p class="pnote">Olympus doesn't install or download models itself.</p>` + '<section class="addbox"><h4>Find a model you already run</h4><p class="pnote">Olympus looks for Ollama and LM Studio on this computer. If your model server uses another port, enter its address.</p>' + '<form data-local-models-discover class="addrow"><button class="btn primary" type="submit">Look on this computer</button><input class="keyfield" name="base_url" type="url" placeholder="http://127.0.0.1:1234/v1 (optional)" aria-label="Model server address on this computer (optional)"><span data-action-message role="status"></span></form>' + '<div data-local-models-results></div><form data-local-models-test hidden><input type="hidden" name="base_url"><label>Answer model<select name="answer_model" required></select></label><button class="btn primary" type="submit">Test and add</button><span data-action-message role="status"></span></form>' + '<p class="pnote">Olympus tests each model it finds with made-up text before adding it.</p></section>' + `<section class="addbox"><h4>Get a new model with your agent's help</h4><p class="pnote">Your agent can pick a model that fits this computer, download it and connect it. Copy this request into your agent.</p>` + `<div class="promptbox" id="add-model-request" hidden>${escapeHtml3(LOCAL_MODEL_AGENT_REQUEST)}</div><button class="btn" type="button" data-copy-target="#add-model-request">Copy request</button><span class="copystatus" data-copy-status aria-live="polite"></span></section>` + "</dialog>";
   }
   if (provider === "tinfoil")
     return head + "<p>Choose one of the three Tinfoil answer models in the picker. Add your key in Keys.</p></dialog>";
@@ -211718,7 +218402,7 @@ function addDialog(provider) {
 function pickerRow(list, disabled, extra = "") {
   const t = TITLES[list.provider];
   const id = `model-pick-${list.provider}`;
-  return `<div class="pickrow" data-model-pick="${list.provider}"><div class="pickhead"><span class="dot ok" aria-hidden="true"></span><b>${escapeHtml2(t.row)}</b><span class="pnote"> · ${escapeHtml2(currentLabel(list))}</span>` + `<span class="grow"></span><button class="btn" type="button" data-sheet-toggle="#${id}" aria-controls="${id}" aria-expanded="false"${disabled ? " disabled" : ""}>Change model</button>${extra}</div>` + picker(list, disabled) + addDialog(list.provider) + "</div>";
+  return `<div class="pickrow" data-model-pick="${list.provider}"><div class="pickhead"><span class="dot ok" aria-hidden="true"></span><b>${escapeHtml3(t.row)}</b><span class="pnote"> · ${escapeHtml3(currentLabel(list))}</span>` + `<span class="grow"></span><button class="btn" type="button" data-sheet-toggle="#${id}" aria-controls="${id}" aria-expanded="false"${disabled ? " disabled" : ""}>Change model</button>${extra}</div>` + picker(list, disabled) + addDialog(list.provider) + "</div>";
 }
 function renderAnswerModelPickers(choices, unlocked) {
   if (!choices)
@@ -211771,7 +218455,7 @@ import { totalmem as totalmem5 } from "node:os";
 function renderModelSetup(view, options = {}) {
   if (!view)
     return "";
-  const status = `<span hidden data-model-setup-status="${escapeHtml2(JSON.stringify(view))}"></span>`;
+  const status = `<span hidden data-model-setup-status="${escapeHtml3(JSON.stringify(view))}"></span>`;
   if (view.computer_use_pending)
     return status + renderComputerUseChoice(view);
   const engine = renderEngineServerMode(view);
@@ -211792,14 +218476,14 @@ function renderModelSetup(view, options = {}) {
     } else {
       action = modelKeyAction(card, card.state === "applying" ? '<span class="modelnote">Key saved. Olympus is applying the configuration or waiting for another required key.</span>' : modelKeyForm(card));
     }
-    return `<section class="modelcard" data-model-card="${card.id}"><header><b>${escapeHtml2(card.label)}</b><span role="status">${escapeHtml2(state)}</span></header>` + `<p>${escapeHtml2(card.detail)}</p>${action}</section>${sheet}`;
+    return `<section class="modelcard" data-model-card="${card.id}"><header><b>${escapeHtml3(card.label)}</b><span role="status">${escapeHtml3(state)}</span></header>` + `<p>${escapeHtml3(card.detail)}</p>${action}</section>${sheet}`;
   }).join("");
   const localCard = view.cards.some((card) => card.id === "local");
   const extras = view.ready ? '<div class="modelextras">' + (localCard ? "" : `<button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}`) + `${CHECK_FORM_OPEN}<button class="btn" type="submit">Check readiness</button>${CHECK_FORM_TAIL}` + "</div>" + (localCard ? "" : localModelsSheet()) : localCard ? "" : '<div class="modeltools">' + `<p>Optional: your agent can help connect models you already run and review the matching privacy choice.</p><button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}` + `${CHECK_FORM_OPEN}<button class="btn" type="submit">Check readiness</button>${CHECK_FORM_TAIL}` + "</div>" + localModelsSheet();
-  return status + engine + (view.ready ? privateModelProgress(view) : "") + `<section aria-label="Models">${options.heading === false ? "" : '<div class="sect">Models</div>'}` + (view.ready ? `<p class="quiet" role="status">${options.heading === false ? "Models are ready." : "Models are ready. You can connect sources below."}</p>` : '<p class="modelintro">Add the keys required by your privacy choice. Olympus checks them and updates this page when they are ready. Saved keys are not displayed.</p>') + (view.migration_notes ?? []).map((note) => `<p role="status" data-embedding-migration>${escapeHtml2(note)} See "Legacy embedding migration" in docs/SOVEREIGNTY_CONFIG.md.</p>`).join("") + (view.attention ? `<p role="status">${escapeHtml2(view.attention)}</p>` : "") + `<div class="modelcards">${cards}</div>` + extras + "</section>";
+  return status + engine + (view.ready ? privateModelProgress(view) : "") + `<section aria-label="Models">${options.heading === false ? "" : '<div class="sect">Models</div>'}` + (view.ready ? `<p class="quiet" role="status">${options.heading === false ? "Models are ready." : "Models are ready. You can connect sources below."}</p>` : '<p class="modelintro">Add the keys required by your privacy choice. Olympus checks them and updates this page when they are ready. Saved keys are not displayed.</p>') + (view.migration_notes ?? []).map((note) => `<p role="status" data-embedding-migration>${escapeHtml3(note)} See "Legacy embedding migration" in docs/SOVEREIGNTY_CONFIG.md.</p>`).join("") + (view.attention ? `<p role="status">${escapeHtml3(view.attention)}</p>` : "") + `<div class="modelcards">${cards}</div>` + extras + "</section>";
 }
 function renderFirstRunPrivacyChoice(options) {
-  const choices = privateAnswerOptions(options.totalMemoryBytes ?? totalmem5()).map((option) => `<label class="modelcard"><input type="radio" name="choice" value="${escapeHtml2(option.id)}"${option.recommended ? " checked" : ""}> <b>${escapeHtml2(option.label)}${option.recommended ? " — Recommended" : ""}</b><p>${escapeHtml2(option.description)}</p>${option.reason ? `<p data-memory-reason>${escapeHtml2(option.reason)}</p>` : ""}</label>`).join("");
+  const choices = privateAnswerOptions(options.totalMemoryBytes ?? totalmem5()).map((option) => `<label class="modelcard"><input type="radio" name="choice" value="${escapeHtml3(option.id)}"${option.recommended ? " checked" : ""}> <b>${escapeHtml3(option.label)}${option.recommended ? " — Recommended" : ""}</b><p>${escapeHtml3(option.description)}</p>${option.reason ? `<p data-memory-reason>${escapeHtml3(option.reason)}</p>` : ""}</label>`).join("");
   const choice = `<form id="first-run-privacy-choice" data-first-run-privacy>${choices}<span data-action-message role="status"></span></form>`;
   const connect = '<div data-first-run-venice hidden><h4>Add a Venice key</h4><p data-first-run-venice-help></p><button class="btn" type="button" data-focus-target="#venice-setup input[name=api_key]">Go to the Venice key field</button></div>' + `<div data-first-run-local hidden><h4>Connect my local models</h4><p>The built-in model is already included. Connect a model you run, or continue with the built-in model.</p><button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}${localModelsSheet()}</div>`;
   const verify = `<form id="first-run-privacy-form" method="post" action="/dashboard/models/check" data-model-check>${CHECK_FORM_TAIL}` + '<p data-first-run-result role="status">Run the readiness check to verify your setup.</p><button class="btn" type="button" data-first-run-redo hidden></button><button class="btn" type="button" data-first-run-keys hidden>Continue setup in Keys</button>';
@@ -211831,7 +218515,7 @@ function firstRunJudgeForm(options) {
   const estimate = judgeArchiveEstimate(1000, options.judgeSetup?.cloudModel ?? DEFAULT_VENICE_JUDGE_MODEL, observed);
   const count = judgeCount(estimate.items);
   const localTime = estimate.measuredHours !== undefined ? `${judgeDuration(estimate.measuredHours)} for ${count} items, measured on this computer (${judgeCount(estimate.measuredPerMinute)} items a minute).` : `Time for ${count} items: not measured yet.${archive?.gpu === false ? " The built-in privacy checker uses only the CPU on this computer and may be slow." : ""}`;
-  return '<form id="first-run-judge-form" method="post" action="/dashboard/models/judge" data-judge-choice data-first-run-judge>' + `<label class="modelcard"><input type="radio" name="choice" value="local"${slow ? "" : " checked"}> <b>This computer</b><p>Free. ${escapeHtml2(localTime)}</p></label>` + `<label class="modelcard"><input type="radio" name="choice" value="venice"${slow ? " checked" : ""}> <b>Venice${slow ? " — Recommended" : ""}</b><p>${escapeHtml2(judgeDuration(estimate.cloudHours))} and ${escapeHtml2(judgeMoney(estimate.cloudDollars).toLowerCase())} for ${count} items, charged to your Venice account.</p></label>` + `<label class="modelcard"><input type="radio" name="choice" value="tinfoil"> <b>Tinfoil Decision medium</b><p>Experimental at Tinfoil. 89% agreement with the owner's labels in our tests, 15 Nov 2026. Attested encrypted requests. About $0.05 per 1,000 items (800 input tokens each), charged to your Tinfoil account. Add your Tinfoil key in Keys.</p></label>` + "<p>Choosing Venice lets it read every item, including Private items, to check privacy. End-to-end encryption is not available yet.</p>" + `<label>Total cloud judge spending limit in dollars<input class="keyfield" type="number" name="cap_dollars" min="0" step="0.01" value="${judgeDefaultCapDollars(estimate.cloudDollars)}"></label>` + "<p>Olympus stops sending privacy checks to Venice at this limit. You can change your choice and limit later in Privacy settings.</p>" + '<span data-action-message role="status"></span></form>';
+  return '<form id="first-run-judge-form" method="post" action="/dashboard/models/judge" data-judge-choice data-first-run-judge>' + `<label class="modelcard"><input type="radio" name="choice" value="local"${slow ? "" : " checked"}> <b>This computer</b><p>Free. ${escapeHtml3(localTime)}</p></label>` + `<label class="modelcard"><input type="radio" name="choice" value="venice"${slow ? " checked" : ""}> <b>Venice${slow ? " — Recommended" : ""}</b><p>${escapeHtml3(judgeDuration(estimate.cloudHours))} and ${escapeHtml3(judgeMoney(estimate.cloudDollars).toLowerCase())} for ${count} items, charged to your Venice account.</p></label>` + `<label class="modelcard"><input type="radio" name="choice" value="tinfoil"> <b>Tinfoil Decision medium</b><p>Experimental at Tinfoil. 89% agreement with the owner's labels in our tests, 15 Nov 2026. Attested encrypted requests. About $0.05 per 1,000 items (800 input tokens each), charged to your Tinfoil account. Add your Tinfoil key in Keys.</p></label>` + "<p>Choosing Venice lets it read every item, including Private items, to check privacy. End-to-end encryption is not available yet.</p>" + `<label>Total cloud judge spending limit in dollars<input class="keyfield" type="number" name="cap_dollars" min="0" step="0.01" value="${judgeDefaultCapDollars(estimate.cloudDollars)}"></label>` + "<p>Olympus stops sending privacy checks to Venice at this limit. You can change your choice and limit later in Privacy settings.</p>" + '<span data-action-message role="status"></span></form>';
 }
 function localModelsSheet() {
   const controls = '<form data-local-models-discover><label>OpenAI-compatible URL (optional)<input class="keyfield" name="base_url" type="url" placeholder="http://127.0.0.1:1234/v1"></label><p>Leave blank to detect Ollama and LM Studio on this computer. Only loopback URLs are accepted.</p><button class="btn primary" type="submit">Detect local models</button><span data-action-message role="status"></span></form>' + '<div data-local-models-results></div><form data-local-models-test hidden><input type="hidden" name="base_url"><label>Answer model<select name="answer_model" required></select></label><p>Olympus tests the answer model before saving it. Your existing search index stays unchanged.</p><button class="btn primary" type="submit">Connect answer model</button><span data-action-message role="status"></span></form>';
@@ -211845,7 +218529,7 @@ function blockerOwnsLocalToggle(view) {
   return card?.id === "local" && card.state === "not_configured";
 }
 function readyModelRow(card) {
-  const label = escapeHtml2(card.label);
+  const label = escapeHtml3(card.label);
   const state = card.id === "local" ? "Ready" : "Ready · key connected";
   const head = `<div class="attncard plain modelrow" data-model-card="${card.id}">` + `<div class="grow"><span class="name">${label}</span><span class="why"> — ${state}</span></div>`;
   if (card.id === "local") {
@@ -211853,7 +218537,7 @@ function readyModelRow(card) {
   }
   const sheetId = `model-key-${card.id.replace(/[^A-Za-z0-9_-]+/g, "-")}`;
   const toggle = `<button type="button" class="btn" data-sheet-toggle="#${sheetId}" aria-controls="${sheetId}" aria-expanded="false">Replace key</button>`;
-  return `${head}${rowMenu(card.label, toggle)}</div>` + `<div class="sheet" id="${sheetId}" aria-hidden="true"><h4>Replace the ${label} key</h4>` + `<p>${escapeHtml2(card.detail)} Saved keys are not displayed.</p>${modelKeyAction(card, modelKeyForm(card))}</div>`;
+  return `${head}${rowMenu(card.label, toggle)}</div>` + `<div class="sheet" id="${sheetId}" aria-hidden="true"><h4>Replace the ${label} key</h4>` + `<p>${escapeHtml3(card.detail)} Saved keys are not displayed.</p>${modelKeyAction(card, modelKeyForm(card))}</div>`;
 }
 function modelStateWord(card) {
   if (card.state === "applying")
@@ -211895,7 +218579,7 @@ function renderModelSetupBlocker(view, options = {}) {
     return blockerBanner({ sentence: card.detail });
   return blockerBanner({
     sentence: `Add your ${card.label} API key to start connecting sources.`,
-    controlHtml: options.keysHref ? `<a class="btn primary" href="${escapeHtml2(`${options.keysHref}#${card.id === "venice" ? "venice-setup" : modelKeyFieldId(card)}`)}">Add ${escapeHtml2(card.label)} key</a>` : `<button type="button" class="btn primary" data-focus-target="#${card.id === "venice" ? "model-venice-start" : modelKeyFieldId(card)}">Add ${escapeHtml2(card.label)} key</button>`
+    controlHtml: options.keysHref ? `<a class="btn primary" href="${escapeHtml3(`${options.keysHref}#${card.id === "venice" ? "venice-setup" : modelKeyFieldId(card)}`)}">Add ${escapeHtml3(card.label)} key</a>` : `<button type="button" class="btn primary" data-focus-target="#${card.id === "venice" ? "model-venice-start" : modelKeyFieldId(card)}">Add ${escapeHtml3(card.label)} key</button>`
   });
 }
 function modelKeyFieldId(card) {
@@ -211915,13 +218599,13 @@ function modelKeyAction(card, lead) {
 }
 function renderComputerUseChoice(view) {
   const pending = view.engine_server_mode?.pending === true;
-  return '<section aria-label="Computer setup" data-first-run-computer><h3>How will this computer run?</h3>' + "<form data-computer-use><fieldset" + (pending ? " disabled" : "") + "><legend>Choose how you use this Mac</legend>" + '<label class="modelcard"><input type="radio" name="choice" value="everyday" checked> My everyday computer <span>Recommended</span></label>' + '<label class="modelcard"><input type="radio" name="choice" value="server"> Always on, as a server</label>' + "<p>" + escapeHtml2(SERVER_MODE_HELP) + "</p>" + SERVER_CHECKLIST + '<button type="submit" class="btn primary">Continue</button></fieldset><span data-action-message role="status">' + escapeHtml2(view.engine_server_mode?.notice ?? "") + "</span></form></section>";
+  return '<section aria-label="Computer setup" data-first-run-computer><h3>How will this computer run?</h3>' + "<form data-computer-use><fieldset" + (pending ? " disabled" : "") + "><legend>Choose how you use this Mac</legend>" + '<label class="modelcard"><input type="radio" name="choice" value="everyday" checked> My everyday computer <span>Recommended</span></label>' + '<label class="modelcard"><input type="radio" name="choice" value="server"> Always on, as a server</label>' + "<p>" + escapeHtml3(SERVER_MODE_HELP) + "</p>" + SERVER_CHECKLIST + '<button type="submit" class="btn primary">Continue</button></fieldset><span data-action-message role="status">' + escapeHtml3(view.engine_server_mode?.notice ?? "") + "</span></form></section>";
 }
 function renderEngineServerMode(view) {
   const mode = view.engine_server_mode;
   if (!mode)
     return "";
-  return '<section aria-label="Engine" id="engine-settings"><h3 class="sect">Engine</h3><form data-computer-use data-server-mode>' + '<label><input type="checkbox" role="switch" name="server"' + (mode.enabled ? " checked" : "") + (mode.pending ? " disabled" : "") + "> Keep Olympus running when no one is logged in</label><p>" + escapeHtml2(SERVER_MODE_HELP) + "</p>" + '<p role="status">' + (mode.enabled ? "On — starts once the disk is unlocked." : "Off — runs when this account is signed in.") + "</p>" + (mode.enabled ? SERVER_CHECKLIST : "") + '<button type="submit" class="btn"' + (mode.pending ? " disabled" : "") + '>Save</button><span data-action-message role="status">' + escapeHtml2(mode.notice ?? "") + "</span></form></section>";
+  return '<section aria-label="Engine" id="engine-settings"><h3 class="sect">Engine</h3><form data-computer-use data-server-mode>' + '<label><input type="checkbox" role="switch" name="server"' + (mode.enabled ? " checked" : "") + (mode.pending ? " disabled" : "") + "> Keep Olympus running when no one is logged in</label><p>" + escapeHtml3(SERVER_MODE_HELP) + "</p>" + '<p role="status">' + (mode.enabled ? "On — starts once the disk is unlocked." : "Off — runs when this account is signed in.") + "</p>" + (mode.enabled ? SERVER_CHECKLIST : "") + '<button type="submit" class="btn"' + (mode.pending ? " disabled" : "") + '>Save</button><span data-action-message role="status">' + escapeHtml3(mode.notice ?? "") + "</span></form></section>";
 }
 function privateModelWords(view) {
   const model = view?.private_model;
@@ -211947,7 +218631,7 @@ function retryPrivateModel() {
 }
 function privateModelProgress(view) {
   const words = privateModelWords(view);
-  return words ? `<div data-private-model-progress role="status"><p>${escapeHtml2(words)}</p>${view.private_model?.state === "failed" ? retryPrivateModel() : ""}</div>` : "";
+  return words ? `<div data-private-model-progress role="status"><p>${escapeHtml3(words)}</p>${view.private_model?.state === "failed" ? retryPrivateModel() : ""}</div>` : "";
 }
 var LOCAL_MODELS_SETUP_PROMPT = "Connect my existing local models to Olympus. Read the installed docs/SOVEREIGNTY_CONFIG.md, inspect the current Olympus policy, and help identify the running answer endpoint and its exact model ID on the machine hosting Olympus. Do not install or maintain model software, download models, change network access, or replace existing vectors. Explain any needed configuration changes before applying them. After an approved policy change, use olympus worker restart to apply it. Use synthetic text to verify the configured answer model, run olympus doctor, then send me back to the Keys page of the Olympus dashboard and its Check readiness button. If the server is on another machine or needs unsupported settings, explain that specific limit rather than inventing a working configuration.", LOCAL_MODELS_TOGGLE = 'data-sheet-toggle="#local-model-setup-sheet" aria-expanded="false">Connect existing local models</button>', CHECK_FORM_OPEN = '<form method="post" action="/dashboard/models/check" data-model-check>', CHECK_FORM_TAIL = '<span data-action-message role="status"></span></form>', SERVER_MODE_HELP = "Olympus starts by itself after a restart, once the disk is unlocked. Your Mac asks for an administrator's password once.", SERVER_CHECKLIST = "<ul data-server-checklist><li>Use a wired network.</li><li>Give this Mac a fixed network address in System Settings.</li><li>After a restart, someone must unlock the disk in person, or use Screen Sharing or SSH unlock on a wired network. After that, Olympus starts by itself.</li></ul>";
 var init_model_setup2 = __esm(() => {
@@ -211991,10 +218675,10 @@ function renderDashboardKeysPage(view, options) {
   const body = [
     lockedGate2(options),
     dashboardPrivacyTabs("settings", token),
-    `<section id="whats-private"><h3 class="sect">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.whatsPrivate)}</h3><p class="pnote">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.intro)}</p>` + `<div class="srow nodot"><div class="smain"><b>${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.wordsTitle)}</b><p class="pnote">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.wordsLine)}</p></div><div class="sact"><a class="btn" href="${escapeHtml2(`${home}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${DASHBOARD_PRIVACY_LANDING}`)}" data-privacy-open>${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.wordsOpen)}</a></div></div></section>`,
-    `<section id="private-routing"><h3 class="sect">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.answeredTitle)}</h3><p class="pnote">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.answeredIntro)}</p>` + (mode ? `<div class="srow nodot" data-answer-mode="${escapeHtml2(mode.id)}"><div class="smain"><b>${escapeHtml2(mode.label)}</b>${mode.id === "local-first" ? ` <span class="pnote">· ${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.recommended)}</span>` : ""}</div><div class="sact"><a class="btn" href="${escapeHtml2(home)}">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.change)}</a></div></div>` : "") + renderModelSetupBlocker(view.model_setup) + `<div${view.model_setup?.cards.some((card) => card.id === "venice") ? ' id="venice-setup"' : ""}>${renderModelSetup(view.model_setup, { heading: false, judgeSetup: options?.judgeSetup })}</div>` + renderAnswerModelPickers(options?.modelChoices, unlocked(options)) + "</section>",
+    `<section id="whats-private"><h3 class="sect">${escapeHtml3(DASHBOARD_PRIVACY_SETTINGS_COPY.whatsPrivate)}</h3><p class="pnote">${escapeHtml3(DASHBOARD_PRIVACY_SETTINGS_COPY.intro)}</p>` + `<div class="srow nodot"><div class="smain"><b>${escapeHtml3(DASHBOARD_PRIVACY_SETTINGS_COPY.wordsTitle)}</b><p class="pnote">${escapeHtml3(DASHBOARD_PRIVACY_SETTINGS_COPY.wordsLine)}</p></div><div class="sact"><a class="btn" href="${escapeHtml3(`${home}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${DASHBOARD_PRIVACY_LANDING}`)}" data-privacy-open>${escapeHtml3(DASHBOARD_PRIVACY_SETTINGS_COPY.wordsOpen)}</a></div></div></section>`,
+    `<section id="private-routing"><h3 class="sect">${escapeHtml3(DASHBOARD_PRIVACY_SETTINGS_COPY.answeredTitle)}</h3><p class="pnote">${escapeHtml3(DASHBOARD_PRIVACY_SETTINGS_COPY.answeredIntro)}</p>` + (mode ? `<div class="srow nodot" data-answer-mode="${escapeHtml3(mode.id)}"><div class="smain"><b>${escapeHtml3(mode.label)}</b>${mode.id === "local-first" ? ` <span class="pnote">· ${escapeHtml3(DASHBOARD_PRIVACY_SETTINGS_COPY.recommended)}</span>` : ""}</div><div class="sact"><a class="btn" href="${escapeHtml3(home)}">${escapeHtml3(DASHBOARD_PRIVACY_SETTINGS_COPY.change)}</a></div></div>` : "") + renderModelSetupBlocker(view.model_setup) + `<div${view.model_setup?.cards.some((card) => card.id === "venice") ? ' id="venice-setup"' : ""}>${renderModelSetup(view.model_setup, { heading: false, judgeSetup: options?.judgeSetup })}</div>` + renderAnswerModelPickers(options?.modelChoices, unlocked(options)) + "</section>",
     renderZkapiPrivacy(options, token),
-    view.model_setup?.cards.some((card) => card.id === "venice") ? "" : `<section id="venice-setup"><h3 class="sect">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.setUpVenice)}</h3><p class="pnote">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceSetupHelp)}</p><div class="modelaction"><form method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="venice"><input type="hidden" name="source" value="venice"><input class="keyfield" type="password" name="api_key" required autocomplete="new-password" placeholder="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}" aria-label="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}"><button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.connectVenice)}</button><span data-action-message role="status"></span></form></div></section>`,
+    view.model_setup?.cards.some((card) => card.id === "venice") ? "" : `<section id="venice-setup"><h3 class="sect">${escapeHtml3(DASHBOARD_PRIVATE_ANSWERS_COPY.setUpVenice)}</h3><p class="pnote">${escapeHtml3(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceSetupHelp)}</p><div class="modelaction"><form method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="venice"><input type="hidden" name="source" value="venice"><input class="keyfield" type="password" name="api_key" required autocomplete="new-password" placeholder="${escapeHtml3(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}" aria-label="${escapeHtml3(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}"><button type="submit" class="btn primary">${escapeHtml3(DASHBOARD_PRIVATE_ANSWERS_COPY.connectVenice)}</button><span data-action-message role="status"></span></form></div></section>`,
     view.model_setup?.cards.some((card) => card.id === "tinfoil") ? "" : '<section id="tinfoil-setup"><h3 class="sect">Tinfoil</h3><p class="pnote">Bring your own key. Choose Tinfoil in Privacy settings for answers or privacy checks; adding a key alone sends no items.</p><form method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="tinfoil"><input type="hidden" name="source" value="tinfoil"><input class="keyfield" type="password" name="api_key" required autocomplete="new-password" aria-label="Tinfoil API key" placeholder="Tinfoil API key"><button class="btn primary" type="submit">Connect Tinfoil</button><span data-action-message role="status"></span></form></section>',
     renderJudgeChoice(view, options)
   ].filter((block) => block !== "").join(`
@@ -212014,7 +218698,7 @@ function renderZkapiPrivacy(options, token) {
   const card = options?.outsideHelp ? renderOutsideHelpCard(options.outsideHelp, { ...csrfToken !== undefined ? { csrfToken } : {}, localSession: options.outsideHelpLocalSession === true, untitled: true, part: "privacy", otherPartHref: `${dashboardLocalPageHref("settings", token)}#${DASHBOARD_SETTINGS_ZKAPI_ID}` }) : "";
   if (!picker && !card)
     return "";
-  return `<section id="zkapi-model"><h3 class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.settingsTitle)}</h3>${picker}${card}</section>`;
+  return `<section id="zkapi-model"><h3 class="sect">${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.settingsTitle)}</h3>${picker}${card}</section>`;
 }
 function sourceDomId(sourceId) {
   return sourceId.replace(/[^A-Za-z0-9_-]+/g, "-");
@@ -212038,18 +218722,18 @@ function needsSetupAgain(source) {
 }
 function connectedSourceRow(source, messagingLocalSession, off, kept = false, basePath = "/dashboard") {
   const id = sourceDomId(source.source_id);
-  const label = escapeHtml2(source.label);
+  const label = escapeHtml3(source.label);
   const items = [];
   const dialogs = [];
   const sync = kept ? undefined : SYNC_ROUTE_SOURCES[source.source_id];
   if (!kept)
-    items.push(`<a class="menuitem" href="${escapeHtml2(`${basePath}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${dashboardSourceLandingToken(source.source_id)}`)}" data-source-details>Details</a>`);
+    items.push(`<a class="menuitem" href="${escapeHtml3(`${basePath}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${dashboardSourceLandingToken(source.source_id)}`)}" data-source-details>Details</a>`);
   if (sync)
-    items.push(`<form data-source-action="sync_now"><input type="hidden" name="source" value="${escapeHtml2(sync)}"><button class="menuitem" type="submit"${off}>Sync now</button><span data-action-message role="status"></span></form>`);
+    items.push(`<form data-source-action="sync_now"><input type="hidden" name="source" value="${escapeHtml3(sync)}"><button class="menuitem" type="submit"${off}>Sync now</button><span data-action-message role="status"></span></form>`);
   const confirm = (kind, title, line, button, danger, menuLabel = title.endsWith("?") ? title.slice(0, -1) : title) => {
     const dialogId = `${kind === "disconnect_source" ? "disconnect" : "delete"}-${id}`;
-    dialogs.push(`<dialog class="adddialog" id="${dialogId}" data-closable aria-labelledby="${dialogId}-title"><div class="adddialoghead"><h3 id="${dialogId}-title">${escapeHtml2(title)}</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>` + `<p class="pnote">${escapeHtml2(line)}</p><form data-source-action="${kind}"><input type="hidden" name="source_id" value="${escapeHtml2(source.source_id)}"><div class="pickbar"><button class="btn${danger ? " danger" : " primary"}" type="submit"${off}>${escapeHtml2(button)}</button></div><span data-action-message role="status"></span></form></dialog>`);
-    return `<button class="menuitem${danger ? " danger" : ""}" type="button" data-dialog-open="${dialogId}"${off}>${escapeHtml2(menuLabel)}${danger ? "…" : ""}</button>`;
+    dialogs.push(`<dialog class="adddialog" id="${dialogId}" data-closable aria-labelledby="${dialogId}-title"><div class="adddialoghead"><h3 id="${dialogId}-title">${escapeHtml3(title)}</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>` + `<p class="pnote">${escapeHtml3(line)}</p><form data-source-action="${kind}"><input type="hidden" name="source_id" value="${escapeHtml3(source.source_id)}"><div class="pickbar"><button class="btn${danger ? " danger" : " primary"}" type="submit"${off}>${escapeHtml3(button)}</button></div><span data-action-message role="status"></span></form></dialog>`);
+    return `<button class="menuitem${danger ? " danger" : ""}" type="button" data-dialog-open="${dialogId}"${off}>${escapeHtml3(menuLabel)}${danger ? "…" : ""}</button>`;
   };
   if (kept) {} else if (MESSAGING_SOURCES.has(source.source_id)) {
     const dialogId = `pairing-${id}`;
@@ -212062,9 +218746,9 @@ function connectedSourceRow(source, messagingLocalSession, off, kept = false, ba
     items.push(confirm("delete_source_data", `Delete what Olympus indexed from ${source.label}?`, `Olympus deletes what it indexed from ${source.label}. Your ${source.label} account and files are not touched. This cannot be undone.`, "Delete indexed data", true, "Delete indexed data"));
   const fixLabel = kept ? "Reconnect" : source.connection.state === "reauth_required" ? "Sign in" : needsSetupAgain(source) && ("label" in source.connection.action) ? dashboardActionLabel(source.connection.action.label) : "";
   const action = source.connection.action;
-  const needs = !fixLabel ? "" : action.kind === "oauth" && dashboardOAuthOneClickReconnect(source) ? `<form class="rowform" data-connect-kind="oauth" data-one-click-reconnect><input type="hidden" name="source" value="${escapeHtml2(action.source)}">` + `<button class="btn${kept ? "" : " primary"}" type="submit"${off}>${escapeHtml2(fixLabel)}</button>` + '<span class="actmsg" data-action-message role="status"></span><span class="authfallback" data-authorization-fallback></span></form>' : `<button class="btn${kept ? "" : " primary"}" type="button" data-dialog-open="add-source" data-source-open="${escapeHtml2(source.source_id)}"${off}>${escapeHtml2(fixLabel)}</button>`;
+  const needs = !fixLabel ? "" : action.kind === "oauth" && dashboardOAuthOneClickReconnect(source) ? `<form class="rowform" data-connect-kind="oauth" data-one-click-reconnect><input type="hidden" name="source" value="${escapeHtml3(action.source)}">` + `<button class="btn${kept ? "" : " primary"}" type="submit"${off}>${escapeHtml3(fixLabel)}</button>` + '<span class="actmsg" data-action-message role="status"></span><span class="authfallback" data-authorization-fallback></span></form>' : `<button class="btn${kept ? "" : " primary"}" type="button" data-dialog-open="add-source" data-source-open="${escapeHtml3(source.source_id)}"${off}>${escapeHtml3(fixLabel)}</button>`;
   const facts = kept ? `${DASHBOARD_DISCONNECTED_DATA_KEPT} · ${(source.coverage?.indexed_items ?? 0).toLocaleString("en-US")} items` : sourceFacts(source);
-  const row = `<div class="srcrow${kept ? " kept" : ""}" data-source-row="${escapeHtml2(source.source_id)}"${kept ? " data-source-kept" : ""}>${sourceLogoTile(source.source_id, kept ? "off" : sourceStatus(source))}` + `<div class="srcmain"><b>${label}</b>${facts ? `<span class="pnote"> · ${escapeHtml2(facts)}</span>` : ""}</div>` + `<div class="srcact">${needs}${items.length ? rowMenu(source.label, items.join("")) : ""}</div></div>`;
+  const row = `<div class="srcrow${kept ? " kept" : ""}" data-source-row="${escapeHtml3(source.source_id)}"${kept ? " data-source-kept" : ""}>${sourceLogoTile(source.source_id, kept ? "off" : sourceStatus(source))}` + `<div class="srcmain"><b>${label}</b>${facts ? `<span class="pnote"> · ${escapeHtml3(facts)}</span>` : ""}</div>` + `<div class="srcact">${needs}${items.length ? rowMenu(source.label, items.join("")) : ""}</div></div>`;
   return { row, dialogs: dialogs.join("") };
 }
 function renderDashboardConnectPage(view, options) {
@@ -212077,14 +218761,14 @@ function renderDashboardConnectPage(view, options) {
   const setupable = sources.filter((source) => source.connection.state === "reauth_required" || needsSetupAgain(source) || !CONNECTED_STATES.has(source.connection.state) && (source.connection.action.kind !== "none" || MESSAGING_SOURCES.has(source.source_id)));
   const kept = sources.filter((source) => !CONNECTED_STATES.has(source.connection.state) && (source.coverage?.indexed_items ?? 0) > 0 && source.connection.action.kind !== "archive_import");
   const rows = connected.map((source) => connectedSourceRow(source, options?.messagingLocalSession === true, off, false, basePath)).concat(kept.map((source) => connectedSourceRow(source, false, off, true, basePath)));
-  const tiles = setupable.filter((source) => !CONNECTED_STATES.has(source.connection.state)).map((source) => `<button class="srctile" type="button" data-source-pick="${escapeHtml2(source.source_id)}">${sourceLogoTile(source.source_id)}<span><b>${escapeHtml2(source.label)}</b><span class="pnote">${escapeHtml2(SOURCE_TILE_LINES[source.source_id] ?? "")}</span></span></button>`).join("");
-  const panels = setupable.map((source) => `<div class="srcsetup" data-source-setup="${escapeHtml2(source.source_id)}" hidden><button class="btn plainlink" type="button" data-source-back>← All sources</button>` + renderSetupRow(source, view, blocked, basePath, options?.messagingLocalSession === true) + sourceSupportBlock(source) + "</div>").join("");
-  const sheet = '<dialog class="srcsheet" id="add-source" data-add-source data-closable data-open-hash aria-labelledby="add-source-title">' + '<div class="adddialoghead"><h3 id="add-source-title">Add a source</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>' + `<div data-source-catalog><input class="keyfield srcsearch" type="search" data-source-search placeholder="Search sources…" aria-label="Search sources">` + (tiles ? `<div class="srctiles">${tiles}</div>` : `<p class="pnote">${escapeHtml2(W.connect.empty)}</p>`) + `<p class="pnote">Sources you've already connected aren't listed.</p><p class="pnote">Not listed? ${CONNECTOR_OPENER}</p></div>` + panels + "</dialog>";
+  const tiles = setupable.filter((source) => !CONNECTED_STATES.has(source.connection.state)).map((source) => `<button class="srctile" type="button" data-source-pick="${escapeHtml3(source.source_id)}">${sourceLogoTile(source.source_id)}<span><b>${escapeHtml3(source.label)}</b><span class="pnote">${escapeHtml3(SOURCE_TILE_LINES[source.source_id] ?? "")}</span></span></button>`).join("");
+  const panels = setupable.map((source) => `<div class="srcsetup" data-source-setup="${escapeHtml3(source.source_id)}" hidden><button class="btn plainlink" type="button" data-source-back>← All sources</button>` + renderSetupRow(source, view, blocked, basePath, options?.messagingLocalSession === true) + sourceSupportBlock(source) + "</div>").join("");
+  const sheet = '<dialog class="srcsheet" id="add-source" data-add-source data-closable data-open-hash aria-labelledby="add-source-title">' + '<div class="adddialoghead"><h3 id="add-source-title">Add a source</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>' + `<div data-source-catalog><input class="keyfield srcsearch" type="search" data-source-search placeholder="Search sources…" aria-label="Search sources">` + (tiles ? `<div class="srctiles">${tiles}</div>` : `<p class="pnote">${escapeHtml3(W.connect.empty)}</p>`) + `<p class="pnote">Sources you've already connected aren't listed.</p><p class="pnote">Not listed? ${CONNECTOR_OPENER}</p></div>` + panels + "</dialog>";
   const body = [
     lockedGate2(options),
     renderModelSetupBlocker(view.model_setup, { keysHref: dashboardLocalPageHref("keys", token) }),
     `<div class="srcrows" id="sources">${rows.map((entry) => entry.row).join("") || '<p class="pnote">No sources connected yet.</p>'}</div>`,
-    `<div class="srcbar"><button class="btn primary" type="button" data-dialog-open="add-source">+ Add a source</button><span class="pnote">Not listed? ${CONNECTOR_OPENER} · <a href="${escapeHtml2(`${basePath}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${DASHBOARD_ALL_SOURCES_LANDING}`)}" data-all-sources>Imported archives and details</a></span></div>`,
+    `<div class="srcbar"><button class="btn primary" type="button" data-dialog-open="add-source">+ Add a source</button><span class="pnote">Not listed? ${CONNECTOR_OPENER} · <a href="${escapeHtml3(`${basePath}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${DASHBOARD_ALL_SOURCES_LANDING}`)}" data-all-sources>Imported archives and details</a></span></div>`,
     dashboardPeopleRow(token),
     rows.map((entry) => entry.dialogs).join(""),
     sheet,
@@ -212101,8 +218785,8 @@ function renderDashboardConnectPage(view, options) {
   });
 }
 function renderModelsOnComputer(models, token) {
-  const rules = escapeHtml2(`${dashboardLocalPageHref("keys", token)}#private-routing`);
-  const row = (key, title, line, extra = "") => `<div class="srow nodot" data-model-row="${key}"><div class="smain"><b>${escapeHtml2(title)}</b> — ${escapeHtml2(line)}${extra}</div></div>`;
+  const rules = escapeHtml3(`${dashboardLocalPageHref("keys", token)}#private-routing`);
+  const row = (key, title, line, extra = "") => `<div class="srow nodot" data-model-row="${key}"><div class="smain"><b>${escapeHtml3(title)}</b> — ${escapeHtml3(line)}${extra}</div></div>`;
   const rows = [];
   const answers = models?.privateAnswers;
   const change = ` <a href="${rules}">Change on Privacy rules</a>`;
@@ -212142,7 +218826,7 @@ function renderDashboardAgentsPage(options) {
 }
 function connectorDialog() {
   const id = CONNECTOR_DIALOG_ID;
-  return `<dialog class="adddialog" id="${id}" data-closable data-open-hash aria-labelledby="${id}-title">` + `<div class="adddialoghead"><h3 id="${id}-title">${escapeHtml2(CONNECTOR_DIALOG_HEADING)}</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>` + `<p class="pnote">${escapeHtml2(CONNECTOR_DIALOG_INTRO)}</p>` + `<div class="promptbox" id="${id}-prompt">${escapeHtml2(CONNECTOR_PROMPT)}</div>` + `<div class="pickbar"><button class="btn primary" type="button" data-copy-target="#${id}-prompt">Copy prompt</button>` + '<button class="btn" type="button" data-dialog-close>Close</button>' + '<span class="copystatus" data-copy-status aria-live="polite"></span></div></dialog>';
+  return `<dialog class="adddialog" id="${id}" data-closable data-open-hash aria-labelledby="${id}-title">` + `<div class="adddialoghead"><h3 id="${id}-title">${escapeHtml3(CONNECTOR_DIALOG_HEADING)}</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>` + `<p class="pnote">${escapeHtml3(CONNECTOR_DIALOG_INTRO)}</p>` + `<div class="promptbox" id="${id}-prompt">${escapeHtml3(CONNECTOR_PROMPT)}</div>` + `<div class="pickbar"><button class="btn primary" type="button" data-copy-target="#${id}-prompt">Copy prompt</button>` + '<button class="btn" type="button" data-dialog-close>Close</button>' + '<span class="copystatus" data-copy-status aria-live="polite"></span></div></dialog>';
 }
 function refusalNotice(source) {
   if (!source.connection.provider_refusal)
@@ -212286,11 +218970,11 @@ function renderDashboardSettingsPage(options) {
   const now = options?.now ?? new Date;
   const token = readToken3(options?.basePath);
   const settings = options?.settings;
-  const side = `<nav class="setside" aria-label="Settings">${SETTINGS_SECTIONS.map((section) => `<a href="#${section.id}">${escapeHtml2(section.label)}</a>`).join("")}</nav>`;
+  const side = `<nav class="setside" aria-label="Settings">${SETTINGS_SECTIONS.map((section) => `<a href="#${section.id}">${escapeHtml3(section.label)}</a>`).join("")}</nav>`;
   const agents = `<section class="setpane" id="agents">${options?.agents ? renderDashboardAgentsSection({ ...options.agentConnectHost, view: options.agents, now }).replace('<div class="sect" id="agents">Agents</div>', '<h3 class="sect">Agents and access</h3>') : '<h3 class="sect">Agents and access</h3><p class="pnote">Agent connections are not available on this install.</p>'}</section>`;
   const models = renderModelsOnComputer(settings?.models, token);
   const csrfToken = options?.controlSessionCsrfToken;
-  const zkapi = `<section class="setpane" id="${DASHBOARD_SETTINGS_ZKAPI_ID}"><h3 class="sect">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.settingsTitle)}</h3><p class="pnote">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.settingsIntro)}</p>` + (options?.outsideHelp ? renderOutsideHelpCard(options.outsideHelp, { ...csrfToken !== undefined ? { csrfToken } : {}, localSession: options.outsideHelpLocalSession === true, untitled: true, part: "account", otherPartHref: `${dashboardLocalPageHref("keys", token)}#zkapi-model` }) : `<p class="pnote" data-outside-unavailable>${escapeHtml2(csrfToken === undefined ? DASHBOARD_PRIVATE_ANSWERS_COPY.locked : DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousNotSetUp)}</p>`) + "</section>";
+  const zkapi = `<section class="setpane" id="${DASHBOARD_SETTINGS_ZKAPI_ID}"><h3 class="sect">${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.settingsTitle)}</h3><p class="pnote">${escapeHtml3(DASHBOARD_OUTSIDE_HELP_COPY.settingsIntro)}</p>` + (options?.outsideHelp ? renderOutsideHelpCard(options.outsideHelp, { ...csrfToken !== undefined ? { csrfToken } : {}, localSession: options.outsideHelpLocalSession === true, untitled: true, part: "account", otherPartHref: `${dashboardLocalPageHref("keys", token)}#zkapi-model` }) : `<p class="pnote" data-outside-unavailable>${escapeHtml3(csrfToken === undefined ? DASHBOARD_PRIVATE_ANSWERS_COPY.locked : DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousNotSetUp)}</p>`) + "</section>";
   const backup = renderBackupSection({
     ...options?.backup ? { status: options.backup } : {},
     local: options?.outsideHelpLocalSession === true,
@@ -212309,7 +218993,7 @@ function renderDashboardSettingsPage(options) {
     idPrefix: "settings-update"
   }) : update ? renderUpdateNotice({ command: update.command, available: { version: update.version }, selfUpdate: false, idPrefix: "settings-update" }) : "";
   const updates = '<section class="setpane" id="updates"><h3 class="sect">Updates</h3>' + (notice || '<p class="pnote">Olympus is up to date.</p>') + "</section>";
-  const help = '<section class="setpane" id="help"><h3 class="sect">Help</h3><p class="pnote">If something is not working, copy the system report and send it to support. It holds only system states and error codes.</p>' + `<div class="pickbar"><a class="btn" href="${escapeHtml2(dashboardLocalPageHref("help", token))}">Copy a system report</a><a class="btn" href="https://olympusplugin.ai/support" target="_blank" rel="noopener noreferrer">Contact support</a></div></section>`;
+  const help = '<section class="setpane" id="help"><h3 class="sect">Help</h3><p class="pnote">If something is not working, copy the system report and send it to support. It holds only system states and error codes.</p>' + `<div class="pickbar"><a class="btn" href="${escapeHtml3(dashboardLocalPageHref("help", token))}">Copy a system report</a><a class="btn" href="https://olympusplugin.ai/support" target="_blank" rel="noopener noreferrer">Contact support</a></div></section>`;
   const proposal = renderSettingsProposal(options?.settingsProposal);
   const body = lockedGate2(options) + proposal + `<div class="setlayout">${side}<div class="setmain">${agents}${models}${zkapi}${backup}${updates}${help}</div></div>`;
   return localShell({ crumb: "Settings", tab: "settings", meta: "", body, styles: [AGENT_CONNECT_CSS, DASHBOARD_OUTSIDE_HELP_CSS, SETTINGS_CSS, BACKUP_SECTION_CSS, UPDATE_NOTICE_CSS], options });
@@ -212317,17 +219001,17 @@ function renderDashboardSettingsPage(options) {
 function renderSettingsProposal(state) {
   const proposal = state?.current;
   if (proposal) {
-    const who = proposal.from ? escapeHtml2(proposal.from) : "An agent on this computer";
+    const who = proposal.from ? escapeHtml3(proposal.from) : "An agent on this computer";
     const judge = proposal.input.privacy_judge;
     const veniceJudge = judge?.choice === "venice" ? `$${judge.spending_limit_dollars}` : undefined;
-    const rows = proposal.rows.map((row) => `<tr><th scope="row">${escapeHtml2(row.label)}</th><td>${escapeHtml2(row.current)}</td><td><b>${escapeHtml2(row.proposed)}</b></td></tr>`).join("");
-    const form = (kind, label, primary) => `<form data-settings-proposal="${kind}"><input type="hidden" name="id" value="${escapeHtml2(proposal.id)}"><button type="submit" class="btn${primary ? " primary" : ""}">${label}</button><span class="pnote" data-action-message aria-live="polite"></span></form>`;
-    return `<section class="propcard" aria-label="Proposed settings" id="proposed-settings"><h3 class="sect">Proposed settings</h3>` + `<p>${who} proposed ${proposal.rows.length === 1 ? "this change" : `these ${proposal.rows.length} changes`}. Nothing changes until you apply ${proposal.rows.length === 1 ? "it" : "them"}.</p>` + `<table class="proptable"><thead><tr><th scope="col">Setting</th><th scope="col">Now</th><th scope="col">Proposed</th></tr></thead><tbody>${rows}</tbody></table>` + (veniceJudge ? `<p class="propnote"><b>Before you apply:</b> Venice will read each item it sorts, including items it marks Private, and charge your own Venice account, up to the ${escapeHtml2(veniceJudge)} limit above. Applying approves this, as Use Venice under Privacy judge does.</p>` : "") + `<div class="pickbar">${form("apply", "Apply all", true)}${form("discard", "Discard", false)}</div></section>`;
+    const rows = proposal.rows.map((row) => `<tr><th scope="row">${escapeHtml3(row.label)}</th><td>${escapeHtml3(row.current)}</td><td><b>${escapeHtml3(row.proposed)}</b></td></tr>`).join("");
+    const form = (kind, label, primary) => `<form data-settings-proposal="${kind}"><input type="hidden" name="id" value="${escapeHtml3(proposal.id)}"><button type="submit" class="btn${primary ? " primary" : ""}">${label}</button><span class="pnote" data-action-message aria-live="polite"></span></form>`;
+    return `<section class="propcard" aria-label="Proposed settings" id="proposed-settings"><h3 class="sect">Proposed settings</h3>` + `<p>${who} proposed ${proposal.rows.length === 1 ? "this change" : `these ${proposal.rows.length} changes`}. Nothing changes until you apply ${proposal.rows.length === 1 ? "it" : "them"}.</p>` + `<table class="proptable"><thead><tr><th scope="col">Setting</th><th scope="col">Now</th><th scope="col">Proposed</th></tr></thead><tbody>${rows}</tbody></table>` + (veniceJudge ? `<p class="propnote"><b>Before you apply:</b> Venice will read each item it sorts, including items it marks Private, and charge your own Venice account, up to the ${escapeHtml3(veniceJudge)} limit above. Applying approves this, as Use Venice under Privacy judge does.</p>` : "") + `<div class="pickbar">${form("apply", "Apply all", true)}${form("discard", "Discard", false)}</div></section>`;
   }
   const applied = state?.lastApplied;
   if (!applied)
     return "";
-  const rows = applied.rows.map((row) => `<tr><th scope="row">${escapeHtml2(row.label)}</th><td>${escapeHtml2(row.proposed)}</td><td>${row.applied ? "Applied" : `Not applied: ${escapeHtml2(row.message ?? "not saved")}`}</td></tr>`).join("");
+  const rows = applied.rows.map((row) => `<tr><th scope="row">${escapeHtml3(row.label)}</th><td>${escapeHtml3(row.proposed)}</td><td>${row.applied ? "Applied" : `Not applied: ${escapeHtml3(row.message ?? "not saved")}`}</td></tr>`).join("");
   return `<section class="propcard" aria-label="Applied settings" id="proposed-settings"><h3 class="sect">${applied.ok ? "Settings applied" : "Some settings were not applied"}</h3>` + `<table class="proptable"><tbody>${rows}</tbody></table></section>`;
 }
 function renderDashboardHelpPage(options) {
@@ -212338,7 +219022,7 @@ function renderDashboardHelpPage(options) {
     meta: "",
     options,
     styles: [],
-    body: lockedGate2(options) + "<h3>Help with Olympus</h3><p>If something is not working, copy the system report and send it to support.</p>" + (report ? `<pre id="system-report" class="promptbox">${escapeHtml2(report)}</pre><p>Only system states and error codes: no names, numbers, emails, chats, notebook or folder titles, or home folder paths.</p><button type="button" class="btn" data-copy-target="#system-report">Copy system report</button><span data-copy-status aria-live="polite"></span>` : unlocked(options) ? "<p>Olympus could not read the system report. Try again, or contact support.</p>" : "<p>Open dashboard controls on this computer to copy a system report.</p>") + '<p><a href="https://olympusplugin.ai/support" target="_blank" rel="noopener noreferrer">Contact support</a></p>'
+    body: lockedGate2(options) + "<h3>Help with Olympus</h3><p>If something is not working, copy the system report and send it to support.</p>" + (report ? `<pre id="system-report" class="promptbox">${escapeHtml3(report)}</pre><p>Only system states and error codes: no names, numbers, emails, chats, notebook or folder titles, or home folder paths.</p><button type="button" class="btn" data-copy-target="#system-report">Copy system report</button><span data-copy-status aria-live="polite"></span>` : unlocked(options) ? "<p>Olympus could not read the system report. Try again, or contact support.</p>" : "<p>Open dashboard controls on this computer to copy a system report.</p>") + '<p><a href="https://olympusplugin.ai/support" target="_blank" rel="noopener noreferrer">Contact support</a></p>'
   });
 }
 function sourceSupportBlock(source) {
@@ -212346,7 +219030,7 @@ function sourceSupportBlock(source) {
     return "";
   const id = `source-support-${source.source_id.replace(/[^a-z0-9-]/gi, "-")}`;
   const report = sourceSupportDetails({ sourceId: source.source_id, state: source.connection.state, failure: sourceFailureKind(source.schedule?.last_error_kind, source.schedule?.degraded_reason), ref: source.schedule?.last_error_hash });
-  return `<details><summary>Details for support</summary><pre class="promptbox" id="${id}">${escapeHtml2(report)}</pre><button type="button" class="btn" data-copy-target="#${id}">Copy details</button><span data-copy-status aria-live="polite"></span><p>No names, numbers, emails, chats or folder titles.</p></details>`;
+  return `<details><summary>Details for support</summary><pre class="promptbox" id="${id}">${escapeHtml3(report)}</pre><button type="button" class="btn" data-copy-target="#${id}">Copy details</button><span data-copy-status aria-live="polite"></span><p>No names, numbers, emails, chats or folder titles.</p></details>`;
 }
 function renderJudgeChoice(view, options) {
   const status = options?.judgeSetup;
@@ -212358,46 +219042,46 @@ function renderJudgeChoice(view, options) {
   const cloud = status.stop !== "storage" && status.cloudAvailable && estimate.cloudDollars !== null;
   const tinfoilChosen = status.choice === "tinfoil";
   const stopped = tinfoilChosen && status.stop === "payment" ? '<p role="alert">Tinfoil stopped at a payment or account usage limit (HTTP 402/403). <a href="https://tinfoil.sh" target="_blank" rel="noopener noreferrer">Check your Tinfoil account</a>, then save your choice to retry. Remaining items stay Private.</p>' : tinfoilChosen && status.stop === "cap" ? '<p role="status">Tinfoil reached your spending limit. Remaining items stay Private. Raise the total limit to continue with Tinfoil.</p>' : status.stop === "storage" ? '<p role="alert">The saved spending record cannot be read. Cloud judging is off; local judging can continue. Restore the spending record from a backup or repair its access, then restart Olympus. <a href="/dashboard?help">Open Help</a></p>' : status.stop === "payment" ? '<p role="alert">Cloud judging stopped because your account needs credit (HTTP 402). <a href="https://venice.ai/settings/api" target="_blank" rel="noopener noreferrer">Check your Venice credit or account</a>, then approve cloud judging again below. Your remaining items stay Private and use the free local judge when available.</p>' : status.stop === "cap" ? '<p role="status">Cloud judging reached your spending limit. Remaining items stay Private and use the free local judge when available. Raise the total limit below to continue with your chosen provider.</p>' : "";
-  const row = (term, value) => `<span class="judgeterm">${escapeHtml2(term)}</span><span>${value}</span>`;
-  const note = (text) => `<br><small class="judgenote">${escapeHtml2(text)}</small>`;
+  const row = (term, value) => `<span class="judgeterm">${escapeHtml3(term)}</span><span>${value}</span>`;
+  const note = (text) => `<br><small class="judgenote">${escapeHtml3(text)}</small>`;
   const measured = estimate.measuredHours !== undefined;
   const localRange = `About ${judgeHours(estimate.shortHours / 8)} to ${judgeHours(estimate.longHours / 8)} nights`;
   const localTime = measured ? `${judgeDuration(estimate.measuredHours)}${note(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeMeasuredHere.replace("{n}", judgeCount(estimate.measuredPerMinute)))}` : `${localRange} (${judgeHours(estimate.shortHours)} to ${judgeHours(estimate.longHours)} hours)` + note(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeMeasuredElsewhere.replace("{computer}", LOCAL_JUDGE_MEASUREMENT.computer).replace("{date}", LOCAL_JUDGE_MEASUREMENT.date));
   const localThen = measured ? judgeDuration(estimate.measuredHours).replace(/ \(.*\)$/, "") : localRange;
   const second = estimate.secondRound;
-  const option = (id, title, lead, rows, fit, enabled) => `<label class="judgeopt"><span class="judgehead"><input type="radio" name="choice" value="${id}"${status.choice === id ? " checked" : ""}${enabled ? "" : " disabled"}> <b>${escapeHtml2(title)}</b>${status.choice === id ? ` <span class="judgenow">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeNow)}</span>` : ""}</span>` + `<span class="judgelead">${escapeHtml2(lead)}</span><span class="judgerows">${rows}</span><span class="judgefit">${escapeHtml2(fit)}</span></label>`;
-  const local = option("local", DASHBOARD_PRIVACY_SETTINGS_COPY.judgeLocal, DASHBOARD_PRIVACY_SETTINGS_COPY.judgeLocalLead, row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeCost, "Free") + row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeTime, localTime) + row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeWhen, escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeLocalWhen)), DASHBOARD_PRIVACY_SETTINGS_COPY.judgeLocalFit, true);
-  const doubleCheck = option("local-then-venice", DASHBOARD_PRIVACY_SETTINGS_COPY.judgeSecond, DASHBOARD_PRIVACY_SETTINGS_COPY.judgeSecondLead, row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeCost, `${judgeMoney(second.dollars)}, on your own Venice account`) + row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeTime, `${localThen}, then ${judgeDuration(second.hours).toLowerCase()}`) + row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeWhen, escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeSecondWhen.replace("{n}", judgeCount(second.items))) + note(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeSecondWhenNote)), DASHBOARD_PRIVACY_SETTINGS_COPY.judgeSecondFit, cloud);
-  const venice = option("venice", DASHBOARD_PRIVACY_SETTINGS_COPY.judgeVenice, DASHBOARD_PRIVACY_SETTINGS_COPY.judgeVeniceLead, row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeCost, `${judgeMoney(estimate.cloudDollars)}, on your own Venice account`) + row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeTime, judgeDuration(estimate.cloudHours)) + row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeWhen, escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeVeniceWhen)), DASHBOARD_PRIVACY_SETTINGS_COPY.judgeVeniceFit, cloud);
+  const option = (id, title, lead, rows, fit, enabled) => `<label class="judgeopt"><span class="judgehead"><input type="radio" name="choice" value="${id}"${status.choice === id ? " checked" : ""}${enabled ? "" : " disabled"}> <b>${escapeHtml3(title)}</b>${status.choice === id ? ` <span class="judgenow">${escapeHtml3(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeNow)}</span>` : ""}</span>` + `<span class="judgelead">${escapeHtml3(lead)}</span><span class="judgerows">${rows}</span><span class="judgefit">${escapeHtml3(fit)}</span></label>`;
+  const local = option("local", DASHBOARD_PRIVACY_SETTINGS_COPY.judgeLocal, DASHBOARD_PRIVACY_SETTINGS_COPY.judgeLocalLead, row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeCost, "Free") + row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeTime, localTime) + row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeWhen, escapeHtml3(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeLocalWhen)), DASHBOARD_PRIVACY_SETTINGS_COPY.judgeLocalFit, true);
+  const doubleCheck = option("local-then-venice", DASHBOARD_PRIVACY_SETTINGS_COPY.judgeSecond, DASHBOARD_PRIVACY_SETTINGS_COPY.judgeSecondLead, row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeCost, `${judgeMoney(second.dollars)}, on your own Venice account`) + row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeTime, `${localThen}, then ${judgeDuration(second.hours).toLowerCase()}`) + row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeWhen, escapeHtml3(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeSecondWhen.replace("{n}", judgeCount(second.items))) + note(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeSecondWhenNote)), DASHBOARD_PRIVACY_SETTINGS_COPY.judgeSecondFit, cloud);
+  const venice = option("venice", DASHBOARD_PRIVACY_SETTINGS_COPY.judgeVenice, DASHBOARD_PRIVACY_SETTINGS_COPY.judgeVeniceLead, row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeCost, `${judgeMoney(estimate.cloudDollars)}, on your own Venice account`) + row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeTime, judgeDuration(estimate.cloudHours)) + row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeWhen, escapeHtml3(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeVeniceWhen)), DASHBOARD_PRIVACY_SETTINGS_COPY.judgeVeniceFit, cloud);
   const tinfoil = option("tinfoil", "Tinfoil Decision medium", "Experimental at Tinfoil. 89% agreement with the owner's labels in our tests, 15 Nov 2026.", row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeCost, `${judgeMoney(tinfoilEstimate.cloudDollars)}, on your own Tinfoil account`) + row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeWhen, "Attested enclaves; encrypted requests") + row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeModel, "decision-medium"), "P(Private) ≥ 0.5 holds Private. Add your Tinfoil key in Keys.", status.tinfoilAvailable === true && status.stop !== "storage");
   const defaults = { tinfoil: judgeDefaultCapDollars(tinfoilEstimate.cloudDollars), "local-then-venice": judgeDefaultCapDollars(second.dollars), venice: judgeDefaultCapDollars(estimate.cloudDollars) };
   const ownCap = judgeChoiceUsesCloud(status.choice) && !status.uncapped && status.stop !== "storage" ? status.capDollars : undefined;
   const capValue = ownCap ?? (status.uncapped ? undefined : defaults[status.choice === "tinfoil" ? "tinfoil" : status.choice === "venice" ? "venice" : "local-then-venice"] ?? undefined);
   const spent = status.uncapped ? "No spending limit is set, so Olympus isn't tracking cloud spending yet. Your Venice account shows what you've spent." : ownCap !== undefined ? `Spent or reserved: ${judgeMoney(status.spentDollars, true)}. Remaining: ${judgeMoney(status.remainingDollars, true)}. ${DASHBOARD_PRIVACY_SETTINGS_COPY.judgeCapStops}` : status.stop === "storage" ? `Spending amounts are unavailable. ${DASHBOARD_PRIVACY_SETTINGS_COPY.judgeCapStops}` : DASHBOARD_PRIVACY_SETTINGS_COPY.judgeCapDefault;
   const capAttrs = ownCap === undefined && !status.uncapped ? ` data-cap-auto="true" data-cap-local-then-venice="${defaults["local-then-venice"] ?? ""}" data-cap-venice="${defaults.venice ?? ""}" data-cap-tinfoil="${defaults.tinfoil}"` : "";
-  const capBox = `<div class="judgecapbox"><label class="judgecap">${escapeHtml2("Cloud judge spending limit (total) $")} <input type="number" name="cap_dollars" min="0" step="0.01" value="${capValue ?? ""}"${capAttrs}></label>` + `<p class="pnote">${escapeHtml2(spent)}</p>${judgeChoiceUsesCloud(status.choice) ? `<button class="btn" type="submit">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeSaveLimit)}</button>` : ""}</div>`;
+  const capBox = `<div class="judgecapbox"><label class="judgecap">${escapeHtml3("Cloud judge spending limit (total) $")} <input type="number" name="cap_dollars" min="0" step="0.01" value="${capValue ?? ""}"${capAttrs}></label>` + `<p class="pnote">${escapeHtml3(spent)}</p>${judgeChoiceUsesCloud(status.choice) ? `<button class="btn" type="submit">${escapeHtml3(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeSaveLimit)}</button>` : ""}</div>`;
   const idleModeSlot = options?.goEasy === undefined ? "" : `<div class="judgeeasy"><label class="judgecap"><input type="checkbox" data-go-easy${options.goEasy ? " checked" : ""}> <b>Go easy on this computer</b></label><p class="pnote">Sort at full speed only when you're away or it's plugged in overnight, and slowly while you work. Leave it plugged in and open overnight.</p><p class="pnote" data-go-easy-message role="status"></p></div>`;
   const reply = '<span data-action-message role="status"></span>';
-  const dialog = (pick, title, body, button) => `<dialog class="judgedialog" data-judge-dialog="${pick}" aria-labelledby="judge-dialog-${pick}"><h3 id="judge-dialog-${pick}">${escapeHtml2(title)}</h3>${body}<p class="pnote" data-action-message role="status"></p>` + `<div class="judgedialogbar"><button class="btn" type="button" data-judge-cancel>${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeCancel)}</button><button class="btn primary" type="submit">${escapeHtml2(button)}</button></div></dialog>`;
+  const dialog = (pick, title, body, button) => `<dialog class="judgedialog" data-judge-dialog="${pick}" aria-labelledby="judge-dialog-${pick}"><h3 id="judge-dialog-${pick}">${escapeHtml3(title)}</h3>${body}<p class="pnote" data-action-message role="status"></p>` + `<div class="judgedialogbar"><button class="btn" type="button" data-judge-cancel>${escapeHtml3(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeCancel)}</button><button class="btn primary" type="submit">${escapeHtml3(button)}</button></div></dialog>`;
   const limitLine = (pick) => {
     const cap = ownCap ?? defaults[pick];
     return `<p>Spending limit: <span data-judge-cap-echo>${judgeMoney(cap, true)}</span> in total. You can change it under the choices at any time.</p>`;
   };
   const found = `the ${items.toLocaleString("en-US")} items found so far`;
-  const dialogs = (status.choice === "tinfoil" ? "" : dialog("tinfoil", "Use Tinfoil Decision medium?", `<p>Tinfoil will read each item through verified attestation and encrypted requests. Experimental at Tinfoil. 89% agreement with the owner's labels in our tests, 15 Nov 2026.</p>${limitLine("tinfoil")}`, "Use Tinfoil")) + (status.choice === "local" ? "" : dialog("local", DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToLocal, `<p>${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToLocalLine)}</p>`, DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToLocalButton)) + (status.choice === "local-then-venice" ? "" : dialog("local-then-venice", DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToSecond, `<p>${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToSecondLine)}</p><p>It charges your Venice account${second.dollars === null ? "" : `: ${judgeMoney(second.dollars).toLowerCase()} for ${found}, about ${judgeCount(second.items)} of them sent to Venice`}.</p>${limitLine("local-then-venice")}`, DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToSecondButton)) + (status.choice === "venice" ? "" : dialog("venice", DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToVenice, `<p>Venice will read each item it sorts, including items it marks Private, and charge your Venice account${estimate.cloudDollars === null ? "" : `: ${judgeMoney(estimate.cloudDollars).toLowerCase()} for ${found}`}.</p>${limitLine("venice")}`, DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToVeniceButton));
+  const dialogs = (status.choice === "tinfoil" ? "" : dialog("tinfoil", "Use Tinfoil Decision medium?", `<p>Tinfoil will read each item through verified attestation and encrypted requests. Experimental at Tinfoil. 89% agreement with the owner's labels in our tests, 15 Nov 2026.</p>${limitLine("tinfoil")}`, "Use Tinfoil")) + (status.choice === "local" ? "" : dialog("local", DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToLocal, `<p>${escapeHtml3(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToLocalLine)}</p>`, DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToLocalButton)) + (status.choice === "local-then-venice" ? "" : dialog("local-then-venice", DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToSecond, `<p>${escapeHtml3(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToSecondLine)}</p><p>It charges your Venice account${second.dollars === null ? "" : `: ${judgeMoney(second.dollars).toLowerCase()} for ${found}, about ${judgeCount(second.items)} of them sent to Venice`}.</p>${limitLine("local-then-venice")}`, DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToSecondButton)) + (status.choice === "venice" ? "" : dialog("venice", DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToVenice, `<p>Venice will read each item it sorts, including items it marks Private, and charge your Venice account${estimate.cloudDollars === null ? "" : `: ${judgeMoney(estimate.cloudDollars).toLowerCase()} for ${found}`}.</p>${limitLine("venice")}`, DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToVeniceButton));
   const recommended = !cloud ? "the free judge on this computer" : estimate.recommended === "venice" ? "Venice for this archive size, if you choose to send it to the cloud" : "this computer, with Venice double-checking what it keeps Private";
   const held = second.observed ? `On this computer the free judge has kept ${Math.round(second.heldFraction * 100)}% of items Private so far, so about that share goes to Venice.` : `About ${Math.round(second.heldFraction * 100)}% of items go to Venice: the share the free judge kept Private in a test on labelled items (5 Nov 2026). Your archive may differ.`;
-  return `<section id="privacy-judge"><h3 class="sect">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeTitle)}</h3><p class="pnote">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeIntro)}</p>
-    <form data-judge-choice data-judge-current="${status.choice}"><fieldset${unlocked(options) ? "" : " disabled"}><legend class="judgelegend">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeLegend)}</legend>
+  return `<section id="privacy-judge"><h3 class="sect">${escapeHtml3(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeTitle)}</h3><p class="pnote">${escapeHtml3(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeIntro)}</p>
+    <form data-judge-choice data-judge-current="${status.choice}"><fieldset${unlocked(options) ? "" : " disabled"}><legend class="judgelegend">${escapeHtml3(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeLegend)}</legend>
     ${status.upgradeNote ? '<p role="status">You can now set a spending limit for cloud judging. Venice keeps sorting your items as you approved, with no limit, until you set one.</p>' : ""}${stopped}
-    <div class="judgeopts">${local}${doubleCheck}${venice}${tinfoil}</div>${status.tinfoilStatus ? `<p role="status">Tinfoil: ${escapeHtml2(status.tinfoilStatus.reason)}${status.tinfoilStatus.retryAt ? ` Retry at ${escapeHtml2(status.tinfoilStatus.retryAt)}.` : ""}</p>` : ""}
+    <div class="judgeopts">${local}${doubleCheck}${venice}${tinfoil}</div>${status.tinfoilStatus ? `<p role="status">Tinfoil: ${escapeHtml3(status.tinfoilStatus.reason)}${status.tinfoilStatus.retryAt ? ` Retry at ${escapeHtml3(status.tinfoilStatus.retryAt)}.` : ""}</p>` : ""}
     ${cloud || status.stop === "storage" ? "" : '<p class="pnote">To use Venice, connect your Venice key under How Private items are answered. Venice needs a model with a listed price.</p>'}
     ${idleModeSlot}${capBox}
-    <p class="pnote judgeorder">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeOrder)}</p>
+    <p class="pnote judgeorder">${escapeHtml3(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeOrder)}</p>
     ${dialogs}${reply}
     <p class="pnote">Estimates for ${found}. Recommended: ${recommended}. Cloud stays off until you choose and approve it.</p>
     <details class="judgehow"><summary>How these estimates are made</summary>
-    <p>Counts grow as Olympus reads more, and long documents take longer and cost more. This computer: ${measured ? `measured from its own recent sorting, ${judgeCount(estimate.measuredPerMinute)} items a minute while it sorts.` : `not measured here yet, so the range is from an ${LOCAL_JUDGE_MEASUREMENT.computer} with a ${LOCAL_JUDGE_MEASUREMENT.model}, ${LOCAL_JUDGE_MEASUREMENT.shortPerMinute} short or ${LOCAL_JUDGE_MEASUREMENT.longPerMinute} long items a minute (${LOCAL_JUDGE_MEASUREMENT.date}); yours may differ.`} Times assume this computer sorts about 8 hours a night. ${held} Venice${status.cloudModel ? ` (${escapeHtml2(status.cloudModel)})` : ""}: 800 input and 80 output tokens per item, one call per item, about ${VENICE_JUDGE_ESTIMATE.itemsPerMinute} items a minute (${VENICE_JUDGE_ESTIMATE.date}); listed prices checked ${JUDGE_PRICE_DATE}. Your account limits and extra privacy checks can change both. Olympus reserves an estimated maximum before each Venice call, and your Venice bill may differ from these estimates.</p>
+    <p>Counts grow as Olympus reads more, and long documents take longer and cost more. This computer: ${measured ? `measured from its own recent sorting, ${judgeCount(estimate.measuredPerMinute)} items a minute while it sorts.` : `not measured here yet, so the range is from an ${LOCAL_JUDGE_MEASUREMENT.computer} with a ${LOCAL_JUDGE_MEASUREMENT.model}, ${LOCAL_JUDGE_MEASUREMENT.shortPerMinute} short or ${LOCAL_JUDGE_MEASUREMENT.longPerMinute} long items a minute (${LOCAL_JUDGE_MEASUREMENT.date}); yours may differ.`} Times assume this computer sorts about 8 hours a night. ${held} Venice${status.cloudModel ? ` (${escapeHtml3(status.cloudModel)})` : ""}: 800 input and 80 output tokens per item, one call per item, about ${VENICE_JUDGE_ESTIMATE.itemsPerMinute} items a minute (${VENICE_JUDGE_ESTIMATE.date}); listed prices checked ${JUDGE_PRICE_DATE}. Your account limits and extra privacy checks can change both. Olympus reserves an estimated maximum before each Venice call, and your Venice bill may differ from these estimates.</p>
     <p>Venice uses your own account and API key, and you pay Venice; Olympus pays for nothing. An end-to-end encrypted option is not available yet.</p></details>
     </fieldset></form></section>`;
 }
@@ -212548,19 +219232,19 @@ function readToken4(basePath) {
 function renderBody(options) {
   const csrfToken = options?.controlSessionCsrfToken;
   const local = csrfToken !== undefined && options?.outsideHelpLocalSession === true;
-  const head = `<h3 class="sect arhead">${escapeHtml2(DASHBOARD_APPS_RECEIVED_COPY.title)}</h3><p class="pnote arintro">${escapeHtml2(DASHBOARD_APPS_RECEIVED_COPY.intro)}</p>`;
+  const head = `<h3 class="sect arhead">${escapeHtml3(DASHBOARD_APPS_RECEIVED_COPY.title)}</h3><p class="pnote arintro">${escapeHtml3(DASHBOARD_APPS_RECEIVED_COPY.intro)}</p>`;
   if (csrfToken === undefined) {
     const gate = `${dashboardLocalPageHref("keys", readToken4(options?.basePath))}#${DASHBOARD_CONTROL_GATE_ID}`;
-    return `<div class="privacy ar" data-apps-received>${head}<p class="pnote" data-ar-locked>${escapeHtml2(DASHBOARD_APPS_RECEIVED_COPY.locked)} <a href="${escapeHtml2(gate)}">${escapeHtml2(DASHBOARD_APPS_RECEIVED_COPY.openControls)}</a></p></div>`;
+    return `<div class="privacy ar" data-apps-received>${head}<p class="pnote" data-ar-locked>${escapeHtml3(DASHBOARD_APPS_RECEIVED_COPY.locked)} <a href="${escapeHtml3(gate)}">${escapeHtml3(DASHBOARD_APPS_RECEIVED_COPY.openControls)}</a></p></div>`;
   }
   if (!local) {
-    return `<div class="privacy ar" data-apps-received>${head}<form class="arunlock" data-ar-unlock>` + `<button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_APPS_RECEIVED_COPY.unlock)}</button><span class="hint">${escapeHtml2(DASHBOARD_APPS_RECEIVED_COPY.unlockIntro)}</span>` + `<span class="armsg" data-ar-msg role="status"></span></form></div>` + `<script>${clientScript(csrfToken, true)}</script>`;
+    return `<div class="privacy ar" data-apps-received>${head}<form class="arunlock" data-ar-unlock>` + `<button type="submit" class="btn primary">${escapeHtml3(DASHBOARD_APPS_RECEIVED_COPY.unlock)}</button><span class="hint">${escapeHtml3(DASHBOARD_APPS_RECEIVED_COPY.unlockIntro)}</span>` + `<span class="armsg" data-ar-msg role="status"></span></form></div>` + `<script>${clientScript(csrfToken, true)}</script>`;
   }
   if (options?.appsReceivedAvailable !== true) {
-    return `<div class="privacy ar" data-apps-received>${head}<p class="pnote" data-ar-unavailable>${escapeHtml2(DASHBOARD_APPS_RECEIVED_COPY.unavailable)}</p></div>`;
+    return `<div class="privacy ar" data-apps-received>${head}<p class="pnote" data-ar-unavailable>${escapeHtml3(DASHBOARD_APPS_RECEIVED_COPY.unavailable)}</p></div>`;
   }
-  const choices = [7, 30, 90, 0].map((days) => `<option value="${days}"${days === 30 ? " selected" : ""}>${escapeHtml2(DASHBOARD_APPS_RECEIVED_COPY.retention[String(days)])}</option>`).join("");
-  return `<div class="privacy ar" data-apps-received>${head}` + `<div class="arbar"><span class="arkept"><label for="ar-retention">${escapeHtml2(DASHBOARD_APPS_RECEIVED_COPY.keptFor)}</label>` + `<select id="ar-retention" data-ar-retention aria-label="${escapeHtml2(DASHBOARD_APPS_RECEIVED_COPY.keptLabel)}" disabled>${choices}</select>` + `<span>· ${escapeHtml2(DASHBOARD_APPS_RECEIVED_COPY.includedInDeleteAll)}</span></span>` + `<button type="button" class="arclear" data-ar-clear hidden>${escapeHtml2(DASHBOARD_APPS_RECEIVED_COPY.clear)}</button></div>` + `<p class="pnote" data-ar-none hidden></p>` + `<ul class="arlist" data-ar-list aria-live="polite"></ul>` + `<p class="armsg" data-ar-msg role="status"></p></div>` + `<script>${clientScript(csrfToken, false)}</script>`;
+  const choices = [7, 30, 90, 0].map((days) => `<option value="${days}"${days === 30 ? " selected" : ""}>${escapeHtml3(DASHBOARD_APPS_RECEIVED_COPY.retention[String(days)])}</option>`).join("");
+  return `<div class="privacy ar" data-apps-received>${head}` + `<div class="arbar"><span class="arkept"><label for="ar-retention">${escapeHtml3(DASHBOARD_APPS_RECEIVED_COPY.keptFor)}</label>` + `<select id="ar-retention" data-ar-retention aria-label="${escapeHtml3(DASHBOARD_APPS_RECEIVED_COPY.keptLabel)}" disabled>${choices}</select>` + `<span>· ${escapeHtml3(DASHBOARD_APPS_RECEIVED_COPY.includedInDeleteAll)}</span></span>` + `<button type="button" class="arclear" data-ar-clear hidden>${escapeHtml3(DASHBOARD_APPS_RECEIVED_COPY.clear)}</button></div>` + `<p class="pnote" data-ar-none hidden></p>` + `<ul class="arlist" data-ar-list aria-live="polite"></ul>` + `<p class="armsg" data-ar-msg role="status"></p></div>` + `<script>${clientScript(csrfToken, false)}</script>`;
 }
 function clientScript(csrfToken, unlockOnly) {
   const config = { csrfToken, path: POST_PATH2, unlockPath: DASHBOARD_OUTSIDE_HELP_PATHS.unlock, unlockOnly, copy: DASHBOARD_APPS_RECEIVED_COPY };
@@ -212966,15 +219650,15 @@ function readToken5(basePath) {
 }
 function renderBody2(options, token) {
   const csrfToken = options?.controlSessionCsrfToken;
-  const head = `<h3 class="sect">${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.title)}</h3><p class="pnote">${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.intro)}</p>`;
+  const head = `<h3 class="sect">${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.title)}</h3><p class="pnote">${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.intro)}</p>`;
   if (csrfToken === undefined) {
     const gate = `${dashboardLocalPageHref("keys", token)}#${DASHBOARD_CONTROL_GATE_ID}`;
-    return `<div class="pi">${head}<p class="pnote" data-pi-locked>${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.locked)} <a href="${escapeHtml2(gate)}">${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.openControls)}</a></p></div>`;
+    return `<div class="pi">${head}<p class="pnote" data-pi-locked>${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.locked)} <a href="${escapeHtml3(gate)}">${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.openControls)}</a></p></div>`;
   }
   if (options?.outsideHelpLocalSession !== true) {
-    return `<div class="pi" data-privacy-items>${head}<form class="paunlock" data-pi-unlock>` + `<button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.unlock)}</button><span class="hint">${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.unlockIntro)}</span>` + `<span class="pimsg" data-pi-msg role="status"></span></form></div>` + `<script>${privacyItemsClientScript({ csrfToken: "", unlockOnly: true })}</script>`;
+    return `<div class="pi" data-privacy-items>${head}<form class="paunlock" data-pi-unlock>` + `<button type="submit" class="btn primary">${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.unlock)}</button><span class="hint">${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.unlockIntro)}</span>` + `<span class="pimsg" data-pi-msg role="status"></span></form></div>` + `<script>${privacyItemsClientScript({ csrfToken: "", unlockOnly: true })}</script>`;
   }
-  return `<div class="pi" data-privacy-items>${JUDGE_CHECK_MOUNT}<div class="pigrid" id="${PRIVACY_ITEMS_LIST_ID}"><div class="pimain">${head}` + `<label class="pifind"><span aria-hidden="true">⌕</span><input type="search" data-pi-search maxlength="200" autocomplete="off" aria-label="${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.searchLabel)}" placeholder="${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.searchPlaceholder)}"></label>` + `<div class="pichips" data-pi-filters role="group" aria-label="${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.filtersLabel)}">` + `<button type="button" class="pichip" data-pi-filter="" aria-pressed="true">${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.recentHeading)}</button>` + `<button type="button" class="pichip" data-pi-filter="private" aria-pressed="false">Private<i data-pi-count="private"></i></button>` + `<button type="button" class="pichip" data-pi-filter="personal" aria-pressed="false">Personal<i data-pi-count="personal"></i></button>` + `<button type="button" class="pichip" data-pi-filter="changed" aria-pressed="false">${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.changedByYou)}<i data-pi-count="changed"></i></button></div>` + `<p class="picap" data-pi-heading hidden>${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.resultsHeading)}</p>` + `<p class="pimsg" data-pi-msg role="status">${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.loading)}</p>` + `<ul class="pilist" data-pi-list></ul>` + `<p class="pnote piapps" data-pi-apps>${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.apps)}</p></div>` + `<div class="piside" data-pi-side></div></div>` + `<dialog class="judgedialog pidialog" data-pi-confirm aria-labelledby="pi-confirm-title"><div class="pidbody">` + `<div class="pidtop"><h3 id="pi-confirm-title">${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.confirmTitle)}</h3><button type="button" class="pix" data-pi-confirm-close aria-label="${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.close)}">✕</button></div>` + `<div class="piitem" data-pi-confirm-item></div>` + `<div class="piarrow"><div class="piopt"><b><span class="pipill Private">Private</span> ${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.now)}</b><span>${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.privateLine)}</span></div><i aria-hidden="true">→</i>` + `<div class="piopt on"><b><span class="pipill Personal">Personal</span> ${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.after)}</b><span>${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.afterPersonalLine)}</span></div></div>` + `<p class="pionly">${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.confirmOnly)}</p>` + `<div class="judgedialogbar"><button type="button" class="btn" data-pi-confirm-cancel>${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.cancel)}</button><button type="button" class="btn primary" data-pi-confirm-ok>${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.makePersonal)}</button></div>` + `</div></dialog>` + `<div class="pitoast" data-pi-toast role="status" hidden><span data-pi-toast-text></span><button type="button" data-pi-toast-undo>${escapeHtml2(DASHBOARD_PRIVACY_ITEMS_COPY.undo)}</button></div>` + `</div><script>${privacyItemsClientScript({ csrfToken, unlockOnly: false })}</script>` + `<script>${judgeCheckClientScript({ csrfToken, itemsHref: `#${PRIVACY_ITEMS_LIST_ID}` })}</script>`;
+  return `<div class="pi" data-privacy-items>${JUDGE_CHECK_MOUNT}<div class="pigrid" id="${PRIVACY_ITEMS_LIST_ID}"><div class="pimain">${head}` + `<label class="pifind"><span aria-hidden="true">⌕</span><input type="search" data-pi-search maxlength="200" autocomplete="off" aria-label="${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.searchLabel)}" placeholder="${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.searchPlaceholder)}"></label>` + `<div class="pichips" data-pi-filters role="group" aria-label="${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.filtersLabel)}">` + `<button type="button" class="pichip" data-pi-filter="" aria-pressed="true">${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.recentHeading)}</button>` + `<button type="button" class="pichip" data-pi-filter="private" aria-pressed="false">Private<i data-pi-count="private"></i></button>` + `<button type="button" class="pichip" data-pi-filter="personal" aria-pressed="false">Personal<i data-pi-count="personal"></i></button>` + `<button type="button" class="pichip" data-pi-filter="changed" aria-pressed="false">${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.changedByYou)}<i data-pi-count="changed"></i></button></div>` + `<p class="picap" data-pi-heading hidden>${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.resultsHeading)}</p>` + `<p class="pimsg" data-pi-msg role="status">${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.loading)}</p>` + `<ul class="pilist" data-pi-list></ul>` + `<p class="pnote piapps" data-pi-apps>${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.apps)}</p></div>` + `<div class="piside" data-pi-side></div></div>` + `<dialog class="judgedialog pidialog" data-pi-confirm aria-labelledby="pi-confirm-title"><div class="pidbody">` + `<div class="pidtop"><h3 id="pi-confirm-title">${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.confirmTitle)}</h3><button type="button" class="pix" data-pi-confirm-close aria-label="${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.close)}">✕</button></div>` + `<div class="piitem" data-pi-confirm-item></div>` + `<div class="piarrow"><div class="piopt"><b><span class="pipill Private">Private</span> ${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.now)}</b><span>${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.privateLine)}</span></div><i aria-hidden="true">→</i>` + `<div class="piopt on"><b><span class="pipill Personal">Personal</span> ${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.after)}</b><span>${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.afterPersonalLine)}</span></div></div>` + `<p class="pionly">${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.confirmOnly)}</p>` + `<div class="judgedialogbar"><button type="button" class="btn" data-pi-confirm-cancel>${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.cancel)}</button><button type="button" class="btn primary" data-pi-confirm-ok>${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.makePersonal)}</button></div>` + `</div></dialog>` + `<div class="pitoast" data-pi-toast role="status" hidden><span data-pi-toast-text></span><button type="button" data-pi-toast-undo>${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.undo)}</button></div>` + `</div><script>${privacyItemsClientScript({ csrfToken, unlockOnly: false })}</script>` + `<script>${judgeCheckClientScript({ csrfToken, itemsHref: `#${PRIVACY_ITEMS_LIST_ID}` })}</script>`;
 }
 function privacyItemsClientScript(input) {
   const config = {
@@ -213575,9 +220259,9 @@ var init_dashboard = __esm(() => {
 });
 
 // src/workers/chatgpt/dashboard-resource.ts
-import { createHash as createHash100 } from "node:crypto";
+import { createHash as createHash102 } from "node:crypto";
 function versionedResourceUri(base, html) {
-  return `${base}?v=${createHash100("sha256").update(html).digest("hex").slice(0, 12)}`;
+  return `${base}?v=${createHash102("sha256").update(html).digest("hex").slice(0, 12)}`;
 }
 function matchesResourceUri(uri, base) {
   return uri === base || uri.startsWith(`${base}?v=`) && /^[0-9a-f]{12}$/.test(uri.slice(base.length + 3));
@@ -213629,7 +220313,7 @@ var init_locations = __esm(() => {
 });
 
 // src/workers/local-files/volume-identity.ts
-import { createHash as createHash101 } from "node:crypto";
+import { createHash as createHash103 } from "node:crypto";
 import { execFileSync as execFileSync7 } from "node:child_process";
 import { existsSync as existsSync110, lstatSync as lstatSync53, readFileSync as readFileSync102, readdirSync as readdirSync32, realpathSync as realpathSync25 } from "node:fs";
 import { homedir as homedir45 } from "node:os";
@@ -213793,7 +220477,7 @@ function labelFor2(mountPoint) {
   return mountPoint.slice(mountPoint.lastIndexOf("/") + 1) || mountPoint;
 }
 function shortHash2(value) {
-  return createHash101("sha256").update(value).digest("hex").slice(0, 16);
+  return createHash103("sha256").update(value).digest("hex").slice(0, 16);
 }
 function normalizeNetworkSource(source) {
   return source.trim().toLowerCase().replace(/^\/\/[^@/]*@/, "//").replace(/\/+$/, "");
@@ -215570,7 +222254,7 @@ var init_locator_result_projector2 = __esm(() => {
 });
 
 // src/workers/chat/chat-scope-filter.ts
-import { createHash as createHash102 } from "node:crypto";
+import { createHash as createHash104 } from "node:crypto";
 function parseStructuredChatScope(value) {
   const parts = value.split(":");
   if (parts.length !== 3 || parts[1] !== "chat")
@@ -215598,7 +222282,7 @@ function unresolvedChatTitleResolution(value) {
   };
 }
 function safeDigest(value) {
-  return createHash102("sha256").update(value).digest("hex");
+  return createHash104("sha256").update(value).digest("hex");
 }
 function conversationTitleTerms(value) {
   const seen = new Set;
@@ -216386,7 +223070,7 @@ function isMcpSourceError(error, kind) {
   return error instanceof McpSourceError && (kind === undefined || error.kind === kind);
 }
 var MCP_SOURCE_DASHBOARD_STATE, MESSAGES2, McpSourceError;
-var init_errors6 = __esm(() => {
+var init_errors7 = __esm(() => {
   MCP_SOURCE_DASHBOARD_STATE = {
     auth_missing: "reconnect_required",
     auth_expired: "reconnect_required",
@@ -216638,7 +223322,7 @@ function checkResourceAllowed({ requestedResource, configuredResource }) {
 
 // node_modules/@modelcontextprotocol/sdk/dist/esm/server/auth/errors.js
 var OAuthError, InvalidRequestError, InvalidClientError, InvalidGrantError, UnauthorizedClientError, UnsupportedGrantTypeError, InvalidScopeError, AccessDeniedError, ServerError, TemporarilyUnavailableError, UnsupportedResponseTypeError, UnsupportedTokenTypeError, InvalidTokenError2, MethodNotAllowedError, TooManyRequestsError, InvalidClientMetadataError, InsufficientScopeError, InvalidTargetError, OAUTH_ERRORS;
-var init_errors7 = __esm(() => {
+var init_errors8 = __esm(() => {
   OAuthError = class OAuthError extends Error {
     constructor(message, errorUri) {
       super(message);
@@ -217277,7 +223961,7 @@ var init_auth2 = __esm(() => {
   init_types5();
   init_auth();
   init_auth();
-  init_errors7();
+  init_errors8();
   UnauthorizedError = class UnauthorizedError extends Error {
     constructor(message) {
       super(message ?? "Unauthorized");
@@ -217502,8 +224186,8 @@ function mcpAuthorizedFetch(tokens, serverUrl, baseFetch = fetch) {
 var REFRESH_SKEW_MS = 60000;
 var init_oauth = __esm(() => {
   init_auth2();
+  init_errors8();
   init_errors7();
-  init_errors6();
 });
 
 // node_modules/@modelcontextprotocol/sdk/dist/esm/experimental/tasks/client.js
@@ -218113,7 +224797,7 @@ function createParser(callbacks) {
         const firstCharCode = chunk.charCodeAt(searchIndex);
         if (isDataPrefix(chunk, searchIndex, firstCharCode)) {
           const valueStart = chunk.charCodeAt(searchIndex + 5) === SPACE2 ? searchIndex + 6 : searchIndex + 5, value = chunk.slice(valueStart, lfIndex);
-          if (dataLines === 0 && chunk.charCodeAt(lfIndex + 1) === LF) {
+          if (dataLines === 0 && chunk.charCodeAt(lfIndex + 1) === LF2) {
             onEvent({ id, event: eventType, data: value }), id = undefined, data = "", eventType = undefined, searchIndex = lfIndex + 2, lfIndex = chunk.indexOf(`
 `, searchIndex);
             continue;
@@ -218133,7 +224817,7 @@ ${value}`, dataLines++;
       let lineEnd = -1;
       if (crIndex !== -1 && lfIndex !== -1 ? lineEnd = crIndex < lfIndex ? crIndex : lfIndex : crIndex !== -1 ? crIndex === chunk.length - 1 ? lineEnd = -1 : lineEnd = crIndex : lfIndex !== -1 && (lineEnd = lfIndex), lineEnd === -1)
         break;
-      parseLine(chunk, searchIndex, lineEnd), searchIndex = lineEnd + 1, chunk.charCodeAt(searchIndex - 1) === CR && chunk.charCodeAt(searchIndex) === LF && searchIndex++;
+      parseLine(chunk, searchIndex, lineEnd), searchIndex = lineEnd + 1, chunk.charCodeAt(searchIndex - 1) === CR2 && chunk.charCodeAt(searchIndex) === LF2 && searchIndex++;
     }
     return chunk.slice(searchIndex);
   }
@@ -218219,7 +224903,7 @@ function isDataPrefix(chunk, i, firstCharCode) {
 function isEventPrefix(chunk, i, firstCharCode) {
   return firstCharCode === 101 && chunk.charCodeAt(i + 1) === 118 && chunk.charCodeAt(i + 2) === 101 && chunk.charCodeAt(i + 3) === 110 && chunk.charCodeAt(i + 4) === 116 && chunk.charCodeAt(i + 5) === 58;
 }
-var ParseError, LF = 10, CR = 13, SPACE2 = 32;
+var ParseError, LF2 = 10, CR2 = 13, SPACE2 = 32;
 var init_dist5 = __esm(() => {
   ParseError = class ParseError extends Error {
     constructor(message, options) {
@@ -218831,14 +225515,14 @@ var MCP_SOURCE_DEFAULT_RATE_LIMIT_RETRIES = 3, MCP_SOURCE_DEFAULT_RATE_LIMIT_BAC
 var init_session = __esm(() => {
   init_client4();
   init_streamableHttp();
-  init_errors6();
+  init_errors7();
   init_pacer();
   RATE_LIMIT_TEXT = /rate.?limit|too many requests|\b429\b/i;
   PERMISSION_TEXT = /permission denied|insufficient[_ ]scope|wasn't granted|was not granted|\bforbidden\b/i;
 });
 
 // src/workers/archive-import/notes/note.ts
-import { createHash as createHash103 } from "node:crypto";
+import { createHash as createHash105 } from "node:crypto";
 function isRecord12(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -218891,8 +225575,8 @@ function cleanTags(tags) {
   }
   return out;
 }
-function sha25611(value) {
-  return createHash103("sha256").update(value).digest("hex");
+function sha25612(value) {
+  return createHash105("sha256").update(value).digest("hex");
 }
 function buildNoteItem(input, draft, place, savedAt) {
   const title = draft.title.trim().slice(0, MAX_TITLE_CHARS);
@@ -218908,8 +225592,8 @@ function buildNoteItem(input, draft, place, savedAt) {
 `), draft.body].filter((part) => part !== "").join(`
 
 `);
-  const providerItemId = sha25611(`${place.fileIndex}\x00${place.member}\x00${place.ordinal}\x00${draft.key ?? ""}`).slice(0, 32);
-  const contentHash = sha25611(text);
+  const providerItemId = sha25612(`${place.fileIndex}\x00${place.member}\x00${place.ordinal}\x00${draft.key ?? ""}`).slice(0, 32);
+  const contentHash = sha25612(text);
   const conversation = draft.conversation;
   const threadId = conversation ? `conversation:${providerItemId}` : undefined;
   const item = {
@@ -219265,7 +225949,7 @@ var init_listing = __esm(() => {
 });
 
 // src/workers/evernote/connector.ts
-import { createHash as createHash104 } from "node:crypto";
+import { createHash as createHash106 } from "node:crypto";
 function evernoteDeletionCap(storedNotes) {
   return Math.max(EVERNOTE_DELETION_FLOOR, Math.ceil(storedNotes * EVERNOTE_DELETION_SHARE));
 }
@@ -219372,7 +226056,7 @@ function createEvernoteSourceConnector(options) {
         ...createdAt ? { createdAt } : {},
         ...updatedAt ? { updatedAt } : {},
         attachmentCount: resources.length,
-        contentHash: createHash104("sha256").update(text).digest("hex")
+        contentHash: createHash106("sha256").update(text).digest("hex")
       }),
       fetchedAt: now().toISOString()
     };
@@ -219665,7 +226349,7 @@ function createEvernoteSourceConnector(options) {
       bytes.set(chunk, at);
       at += chunk.byteLength;
     }
-    if (createHash104("md5").update(bytes).digest("hex") !== hash)
+    if (createHash106("md5").update(bytes).digest("hex") !== hash)
       throw new FileExtractionSourceError("source_content_unavailable");
     allowed();
     const mimeType = fileMimeTypeFromBytes(bytes) ?? "application/octet-stream";
@@ -219706,11 +226390,11 @@ function createEvernoteSourceConnector(options) {
     lastOutcome: () => outcome
   };
 }
-var EVERNOTE_SOURCE_ID = "evernote.notes", EVERNOTE_PROVIDER = "evernote", EVERNOTE_CONNECTOR_ID = "evernote_live", EVERNOTE_MCP_SERVER_URL = "https://mcp.evernote.com/mcp", EVERNOTE_MCP_SCOPE = "read", EVERNOTE_AUTHORIZATION_HOSTS, EVERNOTE_DOWNLOAD_HOSTS, EVERNOTE_READ_TOOLS, EVERNOTE_PASS_CALL_BUDGET = 3000, EVERNOTE_ATTACHMENT_LOCATOR_PREFIX = "evernote-res1:", PAGE_ITEMS = 50, MAX_TITLE_CHARS2 = 500, EVERNOTE_DELETION_FLOOR = 50, EVERNOTE_DELETION_SHARE = 0.1, digest5 = (value) => createHash104("sha256").update(value).digest("hex").slice(0, 16), record7 = (value) => value && typeof value === "object" && !Array.isArray(value) ? value : undefined, PASS_STOPS, MCP_TO_SOURCE_ERROR;
-var init_connector5 = __esm(() => {
+var EVERNOTE_SOURCE_ID = "evernote.notes", EVERNOTE_PROVIDER = "evernote", EVERNOTE_CONNECTOR_ID = "evernote_live", EVERNOTE_MCP_SERVER_URL = "https://mcp.evernote.com/mcp", EVERNOTE_MCP_SCOPE = "read", EVERNOTE_AUTHORIZATION_HOSTS, EVERNOTE_DOWNLOAD_HOSTS, EVERNOTE_READ_TOOLS, EVERNOTE_PASS_CALL_BUDGET = 3000, EVERNOTE_ATTACHMENT_LOCATOR_PREFIX = "evernote-res1:", PAGE_ITEMS = 50, MAX_TITLE_CHARS2 = 500, EVERNOTE_DELETION_FLOOR = 50, EVERNOTE_DELETION_SHARE = 0.1, digest5 = (value) => createHash106("sha256").update(value).digest("hex").slice(0, 16), record7 = (value) => value && typeof value === "object" && !Array.isArray(value) ? value : undefined, PASS_STOPS, MCP_TO_SOURCE_ERROR;
+var init_connector6 = __esm(() => {
   init_file_extraction_source();
   init_file_mime();
-  init_errors6();
+  init_errors7();
   init_note();
   init_enml();
   init_listing();
@@ -220054,7 +226738,7 @@ var EVERNOTE_SECURE_CORPUS_ID = "secure_local.evernote.notes", EVERNOTE_INTERNAL
 var init_live_sync3 = __esm(() => {
   init_atomic_file();
   init_provider_rate_limits();
-  init_errors6();
+  init_errors7();
   init_oauth();
   init_session();
   init_source_placement();
@@ -220062,7 +226746,7 @@ var init_live_sync3 = __esm(() => {
   init_source_ingestion_exclusions();
   init_tiered_store_set();
   init_connected_handles();
-  init_connector5();
+  init_connector6();
   init_listing();
   EVERNOTE_TIER_CORPUS_IDS = Object.freeze({
     secure_local: EVERNOTE_SECURE_CORPUS_ID,
@@ -220080,7 +226764,7 @@ var init_live_sync3 = __esm(() => {
 });
 
 // src/workers/engine/http/dashboard-oauth-attempts.ts
-import { randomBytes as randomBytes36, timingSafeEqual as timingSafeEqual9, createHash as createHash105 } from "node:crypto";
+import { randomBytes as randomBytes36, timingSafeEqual as timingSafeEqual9, createHash as createHash107 } from "node:crypto";
 function createDashboardOAuthCallbackRateLimiter() {
   const buckets = new Map;
   return (key, now) => {
@@ -220151,7 +226835,7 @@ function dashboardOAuthStateMatches(attempt, state) {
   const expected = attempt.pending.state;
   if (typeof expected !== "string" || expected.length === 0)
     return false;
-  return timingSafeEqual9(createHash105("sha256").update(expected).digest(), createHash105("sha256").update(state).digest());
+  return timingSafeEqual9(createHash107("sha256").update(expected).digest(), createHash107("sha256").update(state).digest());
 }
 function dashboardOAuthAttemptExpired(attempt, now) {
   const expiresAt = Date.parse(attempt.expiresAt);
@@ -221492,7 +228176,7 @@ function hostnameOf(host) {
     return host;
   }
 }
-function escapeHtml3(value) {
+function escapeHtml4(value) {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 function consentSecurityHeaders(nonce, redirectOrigin, referrerPolicy = "no-referrer") {
@@ -221515,12 +228199,12 @@ function consentSecurityHeaders(nonce, redirectOrigin, referrerPolicy = "no-refe
 }
 function renderConsentPage(input) {
   const nonce = randomBytes37(16).toString("base64");
-  const name = escapeHtml3(input.clientName);
-  const provenance = input.verifiedHost ? `<div class="host">${escapeHtml3(input.verifiedHost)}</div><p class="meta">Identity published by this website</p>` : '<div class="host unverified">Not verified</div><p class="meta">The app named itself; no website vouches for it</p>';
+  const name = escapeHtml4(input.clientName);
+  const provenance = input.verifiedHost ? `<div class="host">${escapeHtml4(input.verifiedHost)}</div><p class="meta">Identity published by this website</p>` : '<div class="host unverified">Not verified</div><p class="meta">The app named itself; no website vouches for it</p>';
   const redirectHostname = hostnameOf(input.redirectHost);
-  const mismatchWarning = input.verifiedHost && !input.loopbackRedirect && redirectHostname !== input.verifiedHost ? `<div class="warn">This app is published by <strong>${escapeHtml3(input.verifiedHost)}</strong> but sends you back to <strong>${escapeHtml3(input.redirectHost)}</strong>. Approve only if you expected that.</div>` : "";
-  const loopbackWarning = input.loopbackRedirect ? `<div class="warn">This app returns to <strong>${escapeHtml3(input.redirectHost)}</strong>, a program on a computer rather than a website. Approve only if you started this from an app on your own computer.</div>` : "";
-  const error = input.error ? `<p class="err" role="alert">${escapeHtml3(input.error)}${input.attemptsLeft !== undefined ? ` ${input.attemptsLeft} ${input.attemptsLeft === 1 ? "try" : "tries"} left.` : ""}</p>` : "";
+  const mismatchWarning = input.verifiedHost && !input.loopbackRedirect && redirectHostname !== input.verifiedHost ? `<div class="warn">This app is published by <strong>${escapeHtml4(input.verifiedHost)}</strong> but sends you back to <strong>${escapeHtml4(input.redirectHost)}</strong>. Approve only if you expected that.</div>` : "";
+  const loopbackWarning = input.loopbackRedirect ? `<div class="warn">This app returns to <strong>${escapeHtml4(input.redirectHost)}</strong>, a program on a computer rather than a website. Approve only if you started this from an app on your own computer.</div>` : "";
+  const error = input.error ? `<p class="err" role="alert">${escapeHtml4(input.error)}${input.attemptsLeft !== undefined ? ` ${input.attemptsLeft} ${input.attemptsLeft === 1 ? "try" : "tries"} left.` : ""}</p>` : "";
   const body = `<!doctype html>
 <html lang="en">
 <head>
@@ -221536,13 +228220,13 @@ function renderConsentPage(input) {
 <div class="card">
 <div class="name">${name}</div>
 ${provenance}
-<p class="meta">After you approve, you return to <strong>${escapeHtml3(input.redirectHost)}</strong></p>
+<p class="meta">After you approve, you return to <strong>${escapeHtml4(input.redirectHost)}</strong></p>
 </div>
 ${mismatchWarning}${loopbackWarning}
 <p>${name} will be able to ask Olympus questions under your privacy rules. For Private items it gets only answers written from them, which can repeat what they say, and nothing Olympus recognizes as a Secret. Labels are automatic and can be wrong. You can remove it any time with <code>olympus connections revoke</code>.</p>
 <form method="post" action="/connect/authorize">
-<input type="hidden" name="request_id" value="${escapeHtml3(input.requestId)}">
-<input type="hidden" name="csrf" value="${escapeHtml3(input.csrf)}">
+<input type="hidden" name="request_id" value="${escapeHtml4(input.requestId)}">
+<input type="hidden" name="csrf" value="${escapeHtml4(input.csrf)}">
 ${error}
 <label for="pairing_code">Pairing code</label>
 <input type="text" id="pairing_code" name="pairing_code" autocomplete="one-time-code" autocapitalize="characters" autocorrect="off" spellcheck="false" inputmode="text" maxlength="20" placeholder="ABCD-EFGH-JKMN" required>
@@ -221561,7 +228245,7 @@ ${TERMS_ASSENT}
 }
 function renderLoopbackConsentPage(input) {
   const nonce = randomBytes37(16).toString("base64");
-  const name = escapeHtml3(input.clientName);
+  const name = escapeHtml4(input.clientName);
   const computer = (input.platform ?? process.platform) === "linux" ? "computer" : "Mac";
   const ownerNeeded = input.ownerNeeded ? `<p class="err" role="alert">Open the Olympus dashboard in this browser first, then click Connect again.</p>
 <p>${computer === "Mac" ? '<a href="olympus://open/dashboard">Open the dashboard</a>, or run <code>olympus dashboard</code>.' : "Run <code>olympus dashboard</code> and open its link here."} This shows Olympus that you, not another account on this ${computer}, are approving.</p>
@@ -221580,18 +228264,18 @@ function renderLoopbackConsentPage(input) {
 <h1>Connect ${name} to Olympus?</h1>
 <div class="card">
 <div class="name">${name}</div>
-${input.verifiedHost ? `<div class="host">${escapeHtml3(input.verifiedHost)}</div>` : '<div class="host unverified">Not verified</div><p class="meta">A program on this computer named itself</p>'}
-<p class="meta">After you approve, you return to <strong>${escapeHtml3(input.redirectHost)}</strong></p>
+${input.verifiedHost ? `<div class="host">${escapeHtml4(input.verifiedHost)}</div>` : '<div class="host unverified">Not verified</div><p class="meta">A program on this computer named itself</p>'}
+<p class="meta">After you approve, you return to <strong>${escapeHtml4(input.redirectHost)}</strong></p>
 </div>
-${input.loopbackRedirect ? `<div class="warn">This app returns to <strong>${escapeHtml3(input.redirectHost)}</strong>, a program on a computer rather than a website. Approve only if you started this from an app on your own computer.</div>` : ""}
+${input.loopbackRedirect ? `<div class="warn">This app returns to <strong>${escapeHtml4(input.redirectHost)}</strong>, a program on a computer rather than a website. Approve only if you started this from an app on your own computer.</div>` : ""}
 <p><strong>Connecting links Olympus on this ${computer} to the ${name} account that started this sign-in.</strong> Olympus cannot see which account that is. Connect only if you just chose to connect Olympus in ${name} yourself, signed in to your own account; otherwise click Cancel.</p>
 <p>${name} will be able to ask Olympus questions and read the answers, with where each answer came from.</p>
 ${input.chatgpt ? `<p><strong>When Private items match, ${name}'s model is told only that they do.</strong> The answer from them appears in a private Olympus panel and is not given to ${name}'s model. The names and titles of Private items can still show.</p>` : `<p><strong>For Private items, ${name} gets answers written from them by a model on this ${computer} or by Venice, with each item's title and source.</strong> Those answers can repeat what the items say.</p>`}
 <p>Olympus never sends what it recognizes as a Secret to ${name}, and never answers from it. Olympus labels items automatically, and labels can be wrong.</p>
 <p>You can disconnect ${name} at any time from the Olympus dashboard, or with <code>olympus connections revoke</code>.</p>
-<form method="post" action="${escapeHtml3(input.action ?? "/connect/authorize")}">
-<input type="hidden" name="request_id" value="${escapeHtml3(input.requestId)}">
-<input type="hidden" name="csrf" value="${escapeHtml3(input.csrf)}">
+<form method="post" action="${escapeHtml4(input.action ?? "/connect/authorize")}">
+<input type="hidden" name="request_id" value="${escapeHtml4(input.requestId)}">
+<input type="hidden" name="csrf" value="${escapeHtml4(input.csrf)}">
 ${ownerNeeded}${TERMS_ASSENT}
 <div class="actions">
 <button class="approve" type="submit" name="action" value="approve">Connect</button>
@@ -221606,8 +228290,8 @@ ${ownerNeeded}${TERMS_ASSENT}
 }
 function renderDemoSignInPage(input) {
   const nonce = randomBytes37(16).toString("base64");
-  const name = escapeHtml3(input.clientName);
-  const error = input.error ? `<p class="err" role="alert">${escapeHtml3(input.error)}</p>` : "";
+  const name = escapeHtml4(input.clientName);
+  const error = input.error ? `<p class="err" role="alert">${escapeHtml4(input.error)}</p>` : "";
   const body = `<!doctype html>
 <html lang="en">
 <head>
@@ -221623,11 +228307,11 @@ function renderDemoSignInPage(input) {
 <div class="warn">This is a demo of Olympus with made-up sample data, for reviewers. A real Olympus is approved only on the owner's own Mac, never with a password.</div>
 <div class="card">
 <div class="name">${name}</div>
-<p class="meta">After you sign in, you return to <strong>${escapeHtml3(input.redirectHost)}</strong></p>
+<p class="meta">After you sign in, you return to <strong>${escapeHtml4(input.redirectHost)}</strong></p>
 </div>
-<form method="post" action="${escapeHtml3(`/connect/demo/authorize?${new URLSearchParams({ client_id: input.clientId })}`)}">
-<input type="hidden" name="request_id" value="${escapeHtml3(input.requestId)}">
-<input type="hidden" name="csrf" value="${escapeHtml3(input.csrf)}">
+<form method="post" action="${escapeHtml4(`/connect/demo/authorize?${new URLSearchParams({ client_id: input.clientId })}`)}">
+<input type="hidden" name="request_id" value="${escapeHtml4(input.requestId)}">
+<input type="hidden" name="csrf" value="${escapeHtml4(input.csrf)}">
 ${error}
 <label for="username">Username</label>
 <input class="plain" type="text" id="username" name="username" autocomplete="username" autocapitalize="off" autocorrect="off" spellcheck="false" maxlength="128" required>
@@ -221657,7 +228341,7 @@ function renderConsentErrorPage(message) {
 <body>
 <main>
 <h1>Olympus could not connect this app</h1>
-<div class="card"><p>${escapeHtml3(message)}</p></div>
+<div class="card"><p>${escapeHtml4(message)}</p></div>
 <p class="small">Close this page and try adding the connector again.</p>
 </main>
 </body>
@@ -221722,12 +228406,12 @@ p.small a { color: var(--accent); }
 var init_consent_page = () => {};
 
 // src/core/google-pilot-client.ts
-import { createHash as createHash106 } from "node:crypto";
+import { createHash as createHash108 } from "node:crypto";
 function isRetiredGooglePilotClientId(clientId) {
   const trimmed = clientId?.trim();
   if (!trimmed)
     return false;
-  return RETIRED_GOOGLE_PILOT_CLIENT_ID_SHA256.has(createHash106("sha256").update(trimmed).digest("hex"));
+  return RETIRED_GOOGLE_PILOT_CLIENT_ID_SHA256.has(createHash108("sha256").update(trimmed).digest("hex"));
 }
 function resolveGooglePilotClientId(packaged, shipped) {
   const substituted = packaged.trim();
@@ -221943,10 +228627,10 @@ var init_dashboard_oauth_clients = __esm(() => {
 });
 
 // src/workers/engine/http/dashboard-oauth-pages.ts
-import { createHash as createHash107 } from "node:crypto";
+import { createHash as createHash109 } from "node:crypto";
 function dashboardPanelOpener(request) {
   const csrf = request.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER);
-  return csrf ? `session:${createHash107("sha256").update(csrf).digest("base64url")}` : "bearer";
+  return csrf ? `session:${createHash109("sha256").update(csrf).digest("base64url")}` : "bearer";
 }
 function dashboardPanelCallContext(url, request) {
   const gateway = request.headers.get(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER)?.trim();
@@ -222080,30 +228764,30 @@ function dashboardOAuthCompleteHtml(options) {
   });
 }
 function dashboardOAuthLandingHtml(options) {
-  const paragraphs = options.paragraphs.map((paragraph) => `      <p>${escapeHtml4(paragraph)}</p>`).join(`
+  const paragraphs = options.paragraphs.map((paragraph) => `      <p>${escapeHtml5(paragraph)}</p>`).join(`
 `);
   return html2(`<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>${escapeHtml4(options.title)}</title>
+    <title>${escapeHtml5(options.title)}</title>
     <style>${CONSENT_PAGE_STYLE}
 a.back { display: inline-block; margin-top: .5rem; padding: .7rem 1rem; border: 1px solid var(--line); border-radius: 10px;
   color: var(--fg); text-decoration: none; font-weight: 600; }</style>
   </head>
   <body>
     <main>
-      <h1>${escapeHtml4(options.heading)}</h1>
+      <h1>${escapeHtml5(options.heading)}</h1>
 ${paragraphs}
-      <p><a class="back" href="${escapeHtml4(options.returnTo)}">${escapeHtml4(options.returnLabel)}</a></p>
+      <p><a class="back" href="${escapeHtml5(options.returnTo)}">${escapeHtml5(options.returnLabel)}</a></p>
     </main>
   </body>
 </html>`, options.status, {
     "Referrer-Policy": "no-referrer"
   });
 }
-function escapeHtml4(value) {
+function escapeHtml5(value) {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 }
 var init_dashboard_oauth_pages = __esm(() => {
@@ -226307,7 +232991,7 @@ var init_watch_hub = __esm(() => {
 });
 
 // src/workers/local-files/connector.ts
-import { createHash as createHash108, randomUUID as randomUUID40 } from "node:crypto";
+import { createHash as createHash110, randomUUID as randomUUID40 } from "node:crypto";
 import { realpathSync as realpathSync27, rmSync as rmSync47, readdirSync as readdirSync35 } from "node:fs";
 import { join as join150, posix as posix4 } from "node:path";
 function nameAsOnDisk(scopeRoot, rel) {
@@ -226322,7 +233006,7 @@ function nameAsOnDisk(scopeRoot, rel) {
   return dir;
 }
 function localFilesItemId(scopePath) {
-  return `f1.${createHash108("sha256").update(scopePath.normalize("NFC")).digest("hex").slice(0, 32)}`;
+  return `f1.${createHash110("sha256").update(scopePath.normalize("NFC")).digest("hex").slice(0, 32)}`;
 }
 function identityFor(scopePath, version) {
   const providerItemId = localFilesItemId(scopePath);
@@ -226864,7 +233548,7 @@ function createLocalFilesSourceConnector(options) {
   };
 }
 var LOCAL_FILES_CURSOR_PREFIX = "lf1:", LOCAL_FILES_POLL_CURSOR, DEFAULT_PAGE_SIZE2 = 500, DELETED_DESCENDANT_BATCH = 2000, DELETED_DESCENDANT_MAX_BATCHES = 200, MAX_FOLDER_KEYS = 32, MAX_EVENT_PATHS = 200000, ABSENCE_SCAN_LIMIT = 250000, LocalFilesRootMissingError, LocalFilesRootPermissionError, LocalFilesHistoryResetError;
-var init_connector6 = __esm(() => {
+var init_connector7 = __esm(() => {
   init_source_size_limits();
   init_file_extraction_source();
   init_file_mime();
@@ -226939,7 +233623,7 @@ function createLocalFilesDeletionGuards(options = {}) {
 var LOCAL_FILES_DELETION_SHARE = 0.2, LOCAL_FILES_DELETION_MIN_HELD = 5, LOCAL_FILES_DELETION_CONFIRM_MS = 60000;
 
 // src/workers/local-files/provider-store-sync.ts
-import { createHash as createHash109 } from "node:crypto";
+import { createHash as createHash111 } from "node:crypto";
 function localFilesRootOfApprovedScopeKey(approvedScopeKey) {
   const prefix = `${LOCAL_FILES_POLICY_SOURCE}:`;
   if (!approvedScopeKey.startsWith(prefix))
@@ -226949,7 +233633,7 @@ function localFilesRootOfApprovedScopeKey(approvedScopeKey) {
   return root;
 }
 function localFilesConnectorIdForScope(approvedScopeKey, scope) {
-  const hash = createHash109("sha256").update(`${LOCAL_FILES_ACCOUNT_SCOPE}\x00${approvedScopeKey}\x00${scope.generation}\x00${scope.revision}`).digest("hex").slice(0, 24);
+  const hash = createHash111("sha256").update(`${LOCAL_FILES_ACCOUNT_SCOPE}\x00${approvedScopeKey}\x00${scope.generation}\x00${scope.revision}`).digest("hex").slice(0, 24);
   return `local.files.${hash}`;
 }
 function localFilesStoreView(tierSet) {
@@ -227108,7 +233792,7 @@ function createLocalFilesProviderStoreSyncHandler(options) {
       return {
         receipt: {
           ...receiptWithoutDigest,
-          receipt_sha256: createHash109("sha256").update(JSON.stringify(receiptWithoutDigest)).digest("hex")
+          receipt_sha256: createHash111("sha256").update(JSON.stringify(receiptWithoutDigest)).digest("hex")
         },
         checkpoint: scopedCheckpoint(sync.cursor, connectorId)
       };
@@ -227153,7 +233837,7 @@ var LOCAL_FILES_PROVIDER_STORE_RECEIPT_KIND = "local_files_provider_connector_st
 var init_provider_store_sync2 = __esm(() => {
   init_embeddings();
   init_tiered_store_set();
-  init_connector6();
+  init_connector7();
   init_paths();
   init_scope();
   init_store2();
@@ -227404,7 +234088,7 @@ function createLocalFilesOwnRootsRecovery(options) {
 var LOCAL_FILES_OWN_ROOTS_CLEANUP_CONNECTOR_ID = "local.files.own-roots-cleanup", DEFAULT_MAX_ITEMS = 5000, DEFAULT_MAX_MS = 1e4, DEFAULT_BATCH = 200, DEFAULT_PAGE = 1000, DEFAULT_MAX_SCANNED = 1e6;
 var init_own_roots_cleanup = __esm(() => {
   init_tiered_store_set();
-  init_connector6();
+  init_connector7();
   init_paths();
   init_provider_store_sync2();
   init_scope();
@@ -227717,7 +234401,7 @@ var init_local_pacing = __esm(() => {
 });
 
 // src/workers/source-scheduler.ts
-import { createHash as createHash110 } from "node:crypto";
+import { createHash as createHash112 } from "node:crypto";
 function sourceSchedulerConstructionLogLines(input) {
   const constructed = input.decisions.filter((decision) => decision.outcome === "constructed");
   const constructedIds = new Set(constructed.map((decision) => decision.sourceId));
@@ -228055,6 +234739,10 @@ class SourceScheduler {
     const dueAt = now.getTime();
     this.applyPendingUnparks(dueAt);
     if (this.askHolds()) {
+      for (const state of this.states) {
+        if (isGmailConfirmationTask(state.task) && !state.running && state.nextRunAt <= dueAt && taskCadence(state.source, state.task) === "continuous")
+          state.waitReason = "owner_ask";
+      }
       this.scheduleContinueWake(dueAt + SOURCE_SCHEDULER_ASK_RECHECK_MS);
       return this.status(now);
     }
@@ -228202,7 +234890,8 @@ class SourceScheduler {
           const ran = new Set(group);
           const now = this.now().getTime();
           const sources = new Set(group.map((state) => state.source));
-          const due = this.states.filter((state) => !ran.has(state) && !state.running && taskCadence(state.source, state.task) === "continuous" && (taskConcurrencyKey(state.source, state.task) === concurrencyKey || sources.has(state.source) && state.task.kind === "embed") && state.nextRunAt <= now);
+          const ranGmailConfirmation = group.some((state) => isGmailConfirmationTask(state.task));
+          const due = this.states.filter((state) => (!ran.has(state) || ranGmailConfirmation && state.task.metadataWalkRole === "primary") && !state.running && taskCadence(state.source, state.task) === "continuous" && (taskConcurrencyKey(state.source, state.task) === concurrencyKey || sources.has(state.source) && state.task.kind === "embed") && state.nextRunAt <= now);
           for (const state of due) {
             if (state.running)
               continue;
@@ -228245,6 +234934,14 @@ class SourceScheduler {
       }
       if (this.stops !== stops)
         return;
+    }
+    if (isGmailConfirmationTask(state.task)) {
+      if (provenance === "scheduled" && this.askHolds()) {
+        state.waitReason = "owner_ask";
+        this.scheduleContinueWake(this.now().getTime() + SOURCE_SCHEDULER_ASK_RECHECK_MS);
+        return;
+      }
+      delete state.waitReason;
     }
     this.executingStates.add(state);
     changeMemoryCounter(`tasks_${state.task.kind}`, 1);
@@ -228347,6 +235044,8 @@ class SourceScheduler {
       }
       state.nextRunAt = nextRunAt;
       state.retryNotBeforeAt = retryAt ? nextRunAt : undefined;
+      if (result.gmailConfirmationWaitReason)
+        state.waitReason = result.gmailConfirmationWaitReason;
       state.embeddingSweep = result.embeddingSweep;
       for (const { counts, ...store } of result.embeddingSweep ?? []) {
         console.info(`[olympus:embedding-sweep] ${JSON.stringify({
@@ -228361,7 +235060,7 @@ class SourceScheduler {
         this.scheduleContinueWake(nextRunAt);
       else if (retryAt && nextRunAt - Date.parse(completedAt) < this.tickMs)
         this.scheduleContinueWake(nextRunAt);
-      if (result.status === "progress" && !retryAt)
+      if (result.status === "progress" && (!retryAt || isGmailConfirmationTask(runningTask)))
         this.wakeDownstream(state, continueAt);
     } catch (error) {
       delete state.wakeAfterRun;
@@ -228453,6 +235152,12 @@ ${request.taskId}`);
           attemptedAt,
           consecutiveFailures: state.consecutiveFailures,
           ...provenance === "operator" ? { provenance } : {},
+          ...isGmailConfirmationTask(task) ? { yieldGmailConfirmation: () => {
+            if (this.askHolds())
+              return "owner_ask";
+            const liveDue = this.states.some((sibling) => sibling.source.sourceId === state.source.sourceId && sibling.source.corpusId === state.source.corpusId && sibling.task.metadataWalkRole === "primary" && sibling.nextRunAt <= this.now().getTime());
+            return liveDue ? "live_pull_due" : undefined;
+          } } : {},
           ...state.checkpoint ? { checkpoint: state.checkpoint } : {},
           ...state.lastSuccessAt ? { lastSuccessAt: state.lastSuccessAt } : {},
           effectiveIntervalMs: state.effectiveIntervalMs ?? taskIntervalMs(state.source, task),
@@ -228867,7 +235572,7 @@ function fileExtractionSchedulerTask(input) {
   };
 }
 function schedulerScopeHash(approvedScopeKey) {
-  return createHash110("sha256").update(approvedScopeKey).digest("hex").slice(0, 16);
+  return createHash112("sha256").update(approvedScopeKey).digest("hex").slice(0, 16);
 }
 function createReadwiseSchedulerSource(input) {
   if (!input.liveSync)
@@ -228982,7 +235687,7 @@ function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_
   };
   const idleBackoff = process.env[EMBEDDING_SWEEP_IDLE_BACKOFF_ENV]?.trim() !== "off";
   const quiet = new WeakMap;
-  const quietSlot = (target) => createHash110("sha256").update(JSON.stringify([
+  const quietSlot = (target) => createHash112("sha256").update(JSON.stringify([
     target.provider.modelId,
     target.provider.epochId ?? null,
     target.wholeStore === true,
@@ -229001,14 +235706,14 @@ function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_
       const visibility = target.store.embeddingSweepVisibilityMarker(target.provider, durable);
       if (visibility === undefined)
         return;
-      const key = createHash110("sha256").update(JSON.stringify([
+      const key = createHash112("sha256").update(JSON.stringify([
         EMBEDDING_SWEEP_BUILD,
         PUBLIC_RUNTIME_BUILD,
         slot,
         writes,
         visibility
       ])).digest("hex");
-      return { key, writes, visibilityHash: createHash110("sha256").update(visibility).digest("hex").slice(0, 16) };
+      return { key, writes, visibilityHash: createHash112("sha256").update(visibility).digest("hex").slice(0, 16) };
     } catch {
       console.warn("[olympus:embedding-sweep] idle markers unreadable; walking store");
       return;
@@ -229380,6 +236085,9 @@ function createXBookmarksSchedulerSource(input) {
     ]
   };
 }
+function isGmailConfirmationTask(task) {
+  return task.id === GMAIL_CONFIRMATION_TASK_ID || task.id.startsWith(`${GMAIL_CONFIRMATION_TASK_ID}:scope:`);
+}
 function createGmailConnectorStoreSchedulerSource(input) {
   if (!input.sync)
     return;
@@ -229435,19 +236143,37 @@ function createGmailConnectorStoreSchedulerSource(input) {
         }
       },
       ...input.sync.confirmPrivateScope ? [{
-        id: "gmail.email_private_scope_confirmation_v1",
+        id: GMAIL_CONFIRMATION_TASK_ID,
         kind: "sync",
         writer: true,
         intervalMs: liveConfig.storePullIntervalMs,
         freshnessThresholdMs: liveConfig.storePullFreshnessThresholdMs,
         run: async (context) => {
           try {
-            const result = await input.sync.confirmPrivateScope({ max_items: Math.min(liveConfig.storePullMaxItems, GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS), ...context?.checkpoint ? { checkpoint: context.checkpoint } : {} });
+            const result = await input.sync.confirmPrivateScope({
+              max_items: liveConfig.storePullMaxItems,
+              ...context?.checkpoint ? { checkpoint: context.checkpoint } : {},
+              ...context?.yieldGmailConfirmation ? { yieldReason: context.yieldGmailConfirmation } : {}
+            });
+            const hold = result.hold;
             return {
               status: result.confirmed > 0 ? "progress" : "idle",
-              counts: { private_scope_confirmed: result.confirmed, items_seen: result.confirmed, items_changed: result.confirmed },
+              counts: {
+                private_scope_confirmed: result.confirmed,
+                private_scope_confirmed_total: result.confirmedTotal,
+                items_seen: result.confirmed,
+                items_changed: result.confirmed,
+                traversal_complete: Number(result.done),
+                ...hold ? { private_scope_remaining: hold.remaining } : {},
+                ...hold?.error.amounts ? {
+                  limit_stop_limit: hold.error.amounts.limit,
+                  ...hold.error.amounts.used !== undefined ? { limit_stop_used: hold.error.amounts.used } : {}
+                } : {}
+              },
               checkpoint: result.checkpoint,
-              ...!result.done ? { continueSoon: true } : {}
+              ...result.waitReason ? { gmailConfirmationWaitReason: result.waitReason } : {},
+              ...result.cursorRejected ? { warnings: [GMAIL_RESUME_REJECTED_WARNING] } : {},
+              ...hold ? { retryAt: { at: hold.error.retryAt, degradedReason: gmailConfirmationHoldReason(hold.error) } } : !result.done ? { continueSoon: true } : {}
             };
           } catch (error) {
             throw gmailSchedulerFailure(error);
@@ -229622,6 +236348,18 @@ function gmailStoreProgress(outcome) {
     checkpoint: outcome.checkpoint,
     ...outcome.backlog ? { continueSoon: true } : {}
   };
+}
+function gmailConfirmationHoldReason(error) {
+  switch (error.reason) {
+    case "request_reserve":
+      return GMAIL_CONFIRMATION_RESERVE_REASON;
+    case "future_utc_day":
+      return GMAIL_REQUEST_BUDGET_CLOCK_REGRESSION;
+    case "ledger_busy":
+      return GMAIL_REQUEST_BUDGET_LEDGER_BUSY;
+    case "daily_api_request_guard":
+      return GMAIL_DAILY_REQUEST_GUARD_REASON;
+  }
 }
 function gmailSchedulerFailure(error) {
   if (!(error instanceof GoogleRequestBudgetError))
@@ -229821,7 +236559,7 @@ function normalizeRetryAt(retryAt, completedAt) {
   };
 }
 function hash(value) {
-  return createHash110("sha256").update(value).digest("hex").slice(0, 16);
+  return createHash112("sha256").update(value).digest("hex").slice(0, 16);
 }
 function reportedDegradedReason(degradedReason, lastCompletedAt, now) {
   if (!degradedReason || !UTC_DAY_SCOPED_DEGRADED_REASONS.has(degradedReason))
@@ -229969,7 +236707,7 @@ function accountFromApprovedScope(scope) {
   const match = /^dropbox\.([a-z0-9_-]+):/i.exec(scope ?? "");
   return match?.[1];
 }
-var SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS, SOURCE_SCHEDULER_CONTINUE_AFTER_MS = 5000, SOURCE_SCHEDULER_ASK_RECHECK_MS = 1000, SOURCE_SCHEDULER_SOURCE_IDS_ENV = "OLYMPUS_WORKER_SCHEDULER_SOURCE_IDS", GMAIL_REQUEST_BUDGET_CLOCK_REGRESSION = "gmail_request_budget_clock_regression", GOOGLE_DRIVE_REQUEST_BUDGET_CLOCK_REGRESSION = "google_drive_request_budget_clock_regression", GMAIL_REQUEST_BUDGET_LEDGER_BUSY = "gmail_request_budget_ledger_busy", GOOGLE_DRIVE_REQUEST_BUDGET_LEDGER_BUSY = "google_drive_request_budget_ledger_busy", SCHEDULER_SOURCE_IDS, SOURCE_SCHEDULER_CHANGE_DEBOUNCE_MS = 500, SOURCE_ARRIVAL_TARGET_MS, SourceSchedulerTaskDeferral, SourceSchedulerTaskFailure, FILE_EXTRACTION_MAX_PLAN_PAGES_PER_PASS = 40, FILE_EXTRACTION_PASS_BUDGET_MS = 20000, FILE_EXTRACTION_MAX_BATCHES_PER_PASS = 25, EMBEDDING_SWEEP_INTERVAL_MS = 60000, EMBEDDING_SWEEP_MAX_BACKOFF_MS, EMBEDDING_SWEEP_IDLE_BACKOFF_ENV = "OLYMPUS_EMBEDDING_SWEEP_IDLE_BACKOFF", EMBEDDING_SWEEP_IDLE_FULL_PASS_MS, EMBEDDING_SWEEP_RULES_VERSION = 1, EMBEDDING_SWEEP_BUILD, EMBEDDING_SWEEP_MAX_ITEMS = 32, EMBEDDING_SWEEP_MAX_ITEMS_ENV = "OLYMPUS_EMBEDDING_SWEEP_MAX_ITEMS", EMBEDDING_SWEEP_MAX_ITEMS_CEILING = 1024, EMBEDDING_SWEEP_STORE_DEADLINE_MS, EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS, DEFAULT_ZERO_CHANGE_DEGRADE_RUNS = 5, LANE_NOT_ADVANCING_DEGRADED_REASON = "traversal_not_advancing", HONEST_SCHEDULER_ERROR_KINDS, UTC_DAY_SCOPED_DEGRADED_REASONS, SCHEDULER_PARK_REASONS, EXTRACTION_JOBS_REFUSED_WARNING = "extraction_jobs_refused", LOCAL_FILES_SCHEDULER_WARNINGS, VERBATIM_SCHEDULER_WARNINGS;
+var SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS, SOURCE_SCHEDULER_CONTINUE_AFTER_MS = 5000, SOURCE_SCHEDULER_ASK_RECHECK_MS = 1000, SOURCE_SCHEDULER_SOURCE_IDS_ENV = "OLYMPUS_WORKER_SCHEDULER_SOURCE_IDS", GMAIL_REQUEST_BUDGET_CLOCK_REGRESSION = "gmail_request_budget_clock_regression", GOOGLE_DRIVE_REQUEST_BUDGET_CLOCK_REGRESSION = "google_drive_request_budget_clock_regression", GMAIL_REQUEST_BUDGET_LEDGER_BUSY = "gmail_request_budget_ledger_busy", GOOGLE_DRIVE_REQUEST_BUDGET_LEDGER_BUSY = "google_drive_request_budget_ledger_busy", SCHEDULER_SOURCE_IDS, SOURCE_SCHEDULER_CHANGE_DEBOUNCE_MS = 500, SOURCE_ARRIVAL_TARGET_MS, SourceSchedulerTaskDeferral, SourceSchedulerTaskFailure, FILE_EXTRACTION_MAX_PLAN_PAGES_PER_PASS = 40, FILE_EXTRACTION_PASS_BUDGET_MS = 20000, FILE_EXTRACTION_MAX_BATCHES_PER_PASS = 25, EMBEDDING_SWEEP_INTERVAL_MS = 60000, EMBEDDING_SWEEP_MAX_BACKOFF_MS, EMBEDDING_SWEEP_IDLE_BACKOFF_ENV = "OLYMPUS_EMBEDDING_SWEEP_IDLE_BACKOFF", EMBEDDING_SWEEP_IDLE_FULL_PASS_MS, EMBEDDING_SWEEP_RULES_VERSION = 1, EMBEDDING_SWEEP_BUILD, EMBEDDING_SWEEP_MAX_ITEMS = 32, EMBEDDING_SWEEP_MAX_ITEMS_ENV = "OLYMPUS_EMBEDDING_SWEEP_MAX_ITEMS", EMBEDDING_SWEEP_MAX_ITEMS_CEILING = 1024, EMBEDDING_SWEEP_STORE_DEADLINE_MS, EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS, GMAIL_CONFIRMATION_TASK_ID = "gmail.email_private_scope_confirmation_v1", DEFAULT_ZERO_CHANGE_DEGRADE_RUNS = 5, LANE_NOT_ADVANCING_DEGRADED_REASON = "traversal_not_advancing", HONEST_SCHEDULER_ERROR_KINDS, UTC_DAY_SCOPED_DEGRADED_REASONS, SCHEDULER_PARK_REASONS, EXTRACTION_JOBS_REFUSED_WARNING = "extraction_jobs_refused", LOCAL_FILES_SCHEDULER_WARNINGS, VERBATIM_SCHEDULER_WARNINGS;
 var init_source_scheduler = __esm(() => {
   init_memory_counters();
   init_provider_rate_limits();
@@ -229985,6 +236723,7 @@ var init_source_scheduler = __esm(() => {
   init_runner();
   init_drive_extraction_source();
   init_connector_store();
+  init_gmail_live_sync();
   init_google_connectors();
   init_readwise();
   init_x_bookmarks();
@@ -230072,6 +236811,7 @@ var init_source_scheduler = __esm(() => {
     "reconcile_cost_to_finish_guard",
     READWISE_DAILY_REQUEST_GUARD_REASON,
     GMAIL_DAILY_REQUEST_GUARD_REASON,
+    GMAIL_CONFIRMATION_RESERVE_REASON,
     GOOGLE_DRIVE_DAILY_REQUEST_GUARD_REASON
   ]);
   SCHEDULER_PARK_REASONS = new Set([
@@ -230218,5556 +236958,13 @@ var DAY_MS4, PERMISSION_RETRY_MS;
 var init_scheduler_source = __esm(() => {
   init_source_scheduler();
   init_mac_permissions();
-  init_connector6();
+  init_connector7();
   init_locations();
   init_paths();
   init_scope();
   init_watch_hub();
   DAY_MS4 = 24 * 60 * 60 * 1000;
   PERMISSION_RETRY_MS = 10 * 60 * 1000;
-});
-
-// src/workers/archive-import/mbox/split.ts
-class MboxSplitter {
-  source;
-  maxMessageBytes;
-  buffer = Buffer.alloc(0);
-  bufferStart;
-  next_;
-  maxReadBytes;
-  bytesRead = 0;
-  constructor(source, options = {}) {
-    this.source = source;
-    this.maxReadBytes = options.maxReadBytes ?? Number.POSITIVE_INFINITY;
-    this.maxMessageBytes = Math.max(1, options.maxMessageBytes ?? MBOX_DEFAULT_MAX_MESSAGE_BYTES);
-    this.next_ = options.start ?? 0;
-    this.bufferStart = this.next_;
-  }
-  get position() {
-    return this.next_;
-  }
-  get done() {
-    return this.next_ >= this.source.size;
-  }
-  next() {
-    const start = this.next_;
-    if (start >= this.source.size)
-      return;
-    this.dropBefore(start);
-    this.ensure(start, FROM.length);
-    if (!this.bytesAt(start).subarray(0, FROM.length).equals(FROM))
-      throw new MboxFormatError(start);
-    let scanFrom = start + 1;
-    for (;; ) {
-      const found = this.indexOfSeparator(scanFrom);
-      if (found !== undefined) {
-        const end = found + 1;
-        this.next_ = end;
-        return this.span(start, end);
-      }
-      const buffered = this.bufferStart + this.buffer.length;
-      if (buffered >= this.source.size) {
-        this.next_ = this.source.size;
-        return this.span(start, this.source.size);
-      }
-      if (buffered - start > this.maxMessageBytes)
-        return this.skipTooLarge(start);
-      scanFrom = Math.max(start + 1, buffered - SEPARATOR2.length + 1);
-      this.readMore(Math.max(MIN_READ_BYTES, this.buffer.length));
-    }
-  }
-  span(start, end) {
-    const length = end - start;
-    if (length > this.maxMessageBytes)
-      return { offset: start, length, tooLarge: true };
-    const bytes = this.bytesAt(start).subarray(0, length);
-    return { offset: start, length, raw: unquote(stripSeparatorLines(bytes)), separator: separatorLine(bytes), tooLarge: false };
-  }
-  skipTooLarge(start) {
-    let scanFrom = this.bufferStart + Math.max(0, this.buffer.length - SEPARATOR2.length + 1);
-    for (;; ) {
-      const keepFrom = Math.max(this.bufferStart, scanFrom - SEPARATOR2.length);
-      this.dropBefore(keepFrom);
-      const buffered = this.bufferStart + this.buffer.length;
-      if (buffered >= this.source.size) {
-        this.next_ = this.source.size;
-        return { offset: start, length: this.source.size - start, tooLarge: true };
-      }
-      this.readMore(MIN_READ_BYTES);
-      const found = this.indexOfSeparator(Math.max(start + 1, scanFrom));
-      if (found !== undefined) {
-        this.next_ = found + 1;
-        return { offset: start, length: found + 1 - start, tooLarge: true };
-      }
-      scanFrom = Math.max(start + 1, this.bufferStart + this.buffer.length - SEPARATOR2.length + 1);
-    }
-  }
-  indexOfSeparator(fromOffset) {
-    const index = this.buffer.indexOf(SEPARATOR2, Math.max(0, fromOffset - this.bufferStart));
-    return index < 0 ? undefined : this.bufferStart + index;
-  }
-  bytesAt(offset) {
-    return this.buffer.subarray(offset - this.bufferStart);
-  }
-  dropBefore(offset) {
-    if (offset < this.bufferStart) {
-      this.buffer = Buffer.alloc(0);
-      this.bufferStart = offset;
-      return;
-    }
-    const drop = offset - this.bufferStart;
-    if (drop >= this.buffer.length) {
-      this.buffer = Buffer.alloc(0);
-      this.bufferStart = offset;
-    } else if (drop > 0) {
-      this.buffer = this.buffer.subarray(drop);
-      this.bufferStart = offset;
-    }
-  }
-  ensure(offset, length) {
-    while (this.bufferStart + this.buffer.length < Math.min(offset + length, this.source.size)) {
-      this.readMore(MIN_READ_BYTES);
-    }
-  }
-  readMore(length) {
-    const from = this.bufferStart + this.buffer.length;
-    const allowed = this.maxReadBytes - this.bytesRead;
-    if (allowed <= 0)
-      throw new MboxReadBoundError;
-    const chunk = this.source.readAt(from, Math.min(length, allowed, Math.max(0, this.source.size - from)));
-    this.bytesRead += chunk.length;
-    if (chunk.length === 0)
-      throw new MboxFormatError(from);
-    this.buffer = this.buffer.length === 0 ? Buffer.from(chunk.buffer, chunk.byteOffset, chunk.length) : Buffer.concat([this.buffer, chunk]);
-  }
-}
-function separatorLine(bytes) {
-  const end = bytes.indexOf(LF2);
-  const line = bytes.subarray(0, Math.min(end < 0 ? bytes.length : end, MAX_SEPARATOR_CHARS)).toString("latin1");
-  return line.endsWith("\r") ? line.slice(0, -1) : line;
-}
-function stripSeparatorLines(bytes) {
-  const firstLineEnd = bytes.indexOf(LF2);
-  let body = firstLineEnd < 0 ? Buffer.alloc(0) : bytes.subarray(firstLineEnd + 1);
-  const n = body.length;
-  if (n >= 4 && body[n - 4] === CR2 && body[n - 3] === LF2 && body[n - 2] === CR2 && body[n - 1] === LF2) {
-    body = body.subarray(0, n - 2);
-  } else if (n >= 2 && body[n - 2] === LF2 && body[n - 1] === LF2) {
-    body = body.subarray(0, n - 1);
-  } else if (n === 1 && body[0] === LF2) {
-    body = body.subarray(0, 0);
-  }
-  return body;
-}
-function unquote(bytes) {
-  const out = [];
-  let copied = 0;
-  let lineStart = 0;
-  while (lineStart < bytes.length) {
-    if (bytes[lineStart] === GT) {
-      let index = lineStart;
-      while (index < bytes.length && bytes[index] === GT)
-        index += 1;
-      if (bytes.subarray(index, index + FROM.length).equals(FROM)) {
-        out.push(bytes.subarray(copied, lineStart));
-        copied = lineStart + 1;
-      }
-    }
-    const next = bytes.indexOf(LF2, lineStart);
-    if (next < 0)
-      break;
-    lineStart = next + 1;
-  }
-  if (copied === 0)
-    return bytes;
-  out.push(bytes.subarray(copied));
-  return Buffer.concat(out);
-}
-var SEPARATOR2, FROM, LF2 = 10, CR2 = 13, GT = 62, MBOX_DEFAULT_MAX_MESSAGE_BYTES, MIN_READ_BYTES, MAX_SEPARATOR_CHARS = 1024, MboxFormatError, MboxReadBoundError;
-var init_split = __esm(() => {
-  SEPARATOR2 = Buffer.from(`
-From `, "latin1");
-  FROM = Buffer.from("From ", "latin1");
-  MBOX_DEFAULT_MAX_MESSAGE_BYTES = 32 * 1024 * 1024;
-  MIN_READ_BYTES = 1024 * 1024;
-  MboxFormatError = class MboxFormatError extends Error {
-    offset;
-    constructor(offset) {
-      super("No message starts at this position of the mail file.");
-      this.name = "MboxFormatError";
-      this.offset = offset;
-    }
-  };
-  MboxReadBoundError = class MboxReadBoundError extends Error {
-    constructor() {
-      super("The mail file was read as far as this look may read.");
-      this.name = "MboxReadBoundError";
-    }
-  };
-});
-
-// node_modules/postal-mime/dist/esm/decode-strings.js
-function decodeBase642(base64) {
-  let len = base64.length;
-  while (len > 0 && base64.charAt(len - 1) === "=") {
-    len--;
-  }
-  if (len % 4 === 1) {
-    len--;
-  }
-  const remainder = len % 4;
-  const bufferLength = Math.floor(len / 4) * 3 + (remainder ? remainder - 1 : 0);
-  const arrayBuffer = new ArrayBuffer(bufferLength);
-  const bytes = new Uint8Array(arrayBuffer);
-  let p = 0;
-  for (let i = 0;i < len; i += 4) {
-    let encoded1 = base64Lookup[base64.charCodeAt(i)];
-    let encoded2 = base64Lookup[base64.charCodeAt(i + 1)];
-    let encoded3 = base64Lookup[base64.charCodeAt(i + 2)];
-    let encoded4 = base64Lookup[base64.charCodeAt(i + 3)];
-    bytes[p++] = encoded1 << 2 | encoded2 >> 4;
-    if (p < bufferLength) {
-      bytes[p++] = (encoded2 & 15) << 4 | encoded3 >> 2;
-    }
-    if (p < bufferLength) {
-      bytes[p++] = (encoded3 & 3) << 6 | encoded4 & 63;
-    }
-  }
-  return arrayBuffer;
-}
-function normalizeCharset(charset) {
-  return charset.replace(/^(?:x-ms-|x-|cs)/, "").replace(/[\s._-]+/g, "");
-}
-function resolveLabel(charset) {
-  charset = (charset || "utf8").trim().toLowerCase();
-  if (ENCODING_LABELS.has(charset)) {
-    return charset;
-  }
-  const utf16 = UTF16_LABELS.get(charset);
-  if (utf16) {
-    return utf16;
-  }
-  const normalized = normalizeCharset(charset);
-  const codePage = normalized.match(codePagePattern);
-  const alias = codePage && codePageAliases.get(codePage[1]) || charsetAliases.get(normalized) || normalized;
-  return ENCODING_LABELS.has(alias) ? alias : null;
-}
-function tryDecoder(label) {
-  if (REPLACEMENT_LABELS.has(label)) {
-    return replacementDecoder;
-  }
-  let decoder = decoders.get(label);
-  if (decoder === undefined) {
-    decoder = null;
-    try {
-      decoder = new TextDecoder(label);
-    } catch {}
-    decoders.set(label, decoder);
-  }
-  return decoder;
-}
-function findDecoder(charset) {
-  const label = resolveLabel(charset);
-  return label ? tryDecoder(label) : null;
-}
-function getDecoder2(charset) {
-  return findDecoder(charset) || tryDecoder("windows-1252") || utf8Decoder;
-}
-function bomByteOrder(bytes) {
-  if (bytes[0] === 254 && bytes[1] === 255) {
-    return "utf-16be";
-  }
-  if (bytes[0] === 255 && bytes[1] === 254) {
-    return "utf-16le";
-  }
-  return null;
-}
-function isUtf8(bytes) {
-  for (let i = 0;i < bytes.length; ) {
-    const lead = bytes[i];
-    if (lead < 128) {
-      i++;
-      continue;
-    }
-    let count;
-    if (lead >= 194 && lead <= 223) {
-      count = 1;
-    } else if (lead >= 224 && lead <= 239) {
-      count = 2;
-    } else if (lead >= 240 && lead <= 244) {
-      count = 3;
-    } else {
-      return false;
-    }
-    if (i + count >= bytes.length) {
-      return false;
-    }
-    const second = bytes[i + 1];
-    const min = lead === 224 ? 160 : lead === 240 ? 144 : 128;
-    const max = lead === 237 ? 159 : lead === 244 ? 143 : 191;
-    if (second < min || second > max) {
-      return false;
-    }
-    for (let k = 2;k <= count; k++) {
-      if ((bytes[i + k] & 192) !== 128) {
-        return false;
-      }
-    }
-    i += count + 1;
-  }
-  return true;
-}
-function decodeUtf8OrWindows1252(bytes, utf8 = utf8Decoder) {
-  const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-  return isUtf8(view) ? utf8.decode(view) : getDecoder2("windows-1252").decode(view);
-}
-function decodeCharset(bytes, charset) {
-  const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-  const label = resolveLabel(charset);
-  let decoder = label ? tryDecoder(label) : null;
-  if (label && UTF16_UNORDERED_LABELS.has(label)) {
-    const order = bomByteOrder(view);
-    decoder = order && tryDecoder(order) || decoder;
-  }
-  return decoder ? decoder.decode(view) : decodeUtf8OrWindows1252(view);
-}
-function sniffHtmlCharset(bytes) {
-  const head = utf8Decoder.decode(bytes.subarray(0, META_PRESCAN_BYTES)).toLowerCase();
-  let pos = 0;
-  while ((pos = head.indexOf("<meta", pos)) >= 0) {
-    let end = head.indexOf(">", pos);
-    if (end < 0) {
-      end = head.length;
-    }
-    const match = CHARSET_ATTRIBUTE.exec(head.slice(pos, end));
-    if (match) {
-      return match[1];
-    }
-    pos = end;
-  }
-  return null;
-}
-function decodeText(bytes, charset, html) {
-  const view = new Uint8Array(bytes);
-  if (charset) {
-    return decodeCharset(view, charset);
-  }
-  const sniffed = html ? sniffHtmlCharset(view) : null;
-  const decoder = sniffed ? findDecoder(sniffed) : null;
-  if (!decoder || UTF16_ENCODINGS.has(decoder.encoding)) {
-    return decodeUtf8OrWindows1252(view);
-  }
-  return (decoder.encoding === "x-user-defined" ? getDecoder2("windows-1252") : decoder).decode(view);
-}
-async function blobToArrayBuffer(blob) {
-  if ("arrayBuffer" in blob) {
-    return await blob.arrayBuffer();
-  }
-  const fr = new FileReader;
-  return new Promise((resolve, reject) => {
-    fr.onload = () => {
-      resolve(fr.result);
-    };
-    fr.onerror = () => {
-      reject(fr.error);
-    };
-    fr.readAsArrayBuffer(blob);
-  });
-}
-function hexNibble(c) {
-  if (c >= 48 && c <= 57) {
-    return c - 48;
-  }
-  if (c >= 97 && c <= 102) {
-    return c - 97 + 10;
-  }
-  if (c >= 65 && c <= 70) {
-    return c - 65 + 10;
-  }
-  return -1;
-}
-function foldLineBreaks(str) {
-  return str.replace(/[\r\n]+/g, " ");
-}
-function decodeWord(charset, encoding, str) {
-  let splitPos = charset.indexOf("*");
-  if (splitPos >= 0) {
-    charset = charset.slice(0, splitPos);
-  }
-  encoding = encoding.toUpperCase();
-  let byteStr;
-  if (encoding === "Q") {
-    str = str.replace(/=\s+([0-9a-fA-F])/g, "=$1").replace(/[_\s]/g, " ");
-    let buf = textEncoder.encode(str);
-    let encodedBytes = [];
-    for (let i = 0, len = buf.length;i < len; i++) {
-      let c = buf[i];
-      if (i <= len - 2 && c === 61) {
-        let high = hexNibble(buf[i + 1]);
-        let low = hexNibble(buf[i + 2]);
-        if (high >= 0 && low >= 0) {
-          encodedBytes.push(high << 4 | low);
-          i += 2;
-          continue;
-        }
-      }
-      encodedBytes.push(c);
-    }
-    byteStr = new ArrayBuffer(encodedBytes.length);
-    let dataView = new DataView(byteStr);
-    for (let i = 0, len = encodedBytes.length;i < len; i++) {
-      dataView.setUint8(i, encodedBytes[i]);
-    }
-  } else if (encoding === "B") {
-    byteStr = decodeBase642(str.replace(/[^a-zA-Z0-9\+\/=]+/g, ""));
-  } else {
-    byteStr = textEncoder.encode(str);
-  }
-  return foldLineBreaks(decodeCharset(byteStr, charset));
-}
-function isEncodedWordsOnly(str) {
-  return ENCODED_WORDS_ONLY_REGEX.test(str);
-}
-function splitEncodedWords(str) {
-  const tokens = [];
-  ENCODED_WORD_REGEX.lastIndex = 0;
-  let pos = 0;
-  let match;
-  while (match = ENCODED_WORD_REGEX.exec(str)) {
-    if (match.index > pos) {
-      tokens.push({ text: str.substring(pos, match.index) });
-    }
-    tokens.push({ charset: match[1], encoding: match[2], encodedText: match[3] });
-    pos = match.index + match[0].length;
-  }
-  if (pos < str.length) {
-    tokens.push({ text: str.substring(pos) });
-  }
-  return tokens;
-}
-function canJoinWords(left, right) {
-  const encoding = left.encoding.toUpperCase();
-  if (left.charset !== right.charset || encoding !== right.encoding.toUpperCase()) {
-    return false;
-  }
-  if (encoding === "B") {
-    return left.encodedText.length % 4 === 0 && !left.padded;
-  }
-  return true;
-}
-function renderTokens(tokens, joinWords) {
-  let result = "";
-  let pending = null;
-  for (let i = 0;i < tokens.length; i++) {
-    const token = tokens[i];
-    if (token.text !== undefined) {
-      const nextToken = tokens[i + 1];
-      if (pending && nextToken && nextToken.text === undefined && WORD_SEPARATOR_REGEX.test(token.text)) {
-        continue;
-      }
-      if (pending) {
-        result += decodeWord(pending.charset, pending.encoding, pending.encodedText);
-        pending = null;
-      }
-      result += token.text;
-      continue;
-    }
-    if (pending && joinWords && canJoinWords(pending, token)) {
-      pending.encodedText += token.encodedText;
-      pending.padded = token.encodedText.endsWith("=");
-      continue;
-    }
-    if (pending) {
-      result += decodeWord(pending.charset, pending.encoding, pending.encodedText);
-    }
-    pending = {
-      charset: token.charset,
-      encoding: token.encoding,
-      encodedText: token.encodedText,
-      padded: token.encodedText.endsWith("=")
-    };
-  }
-  if (pending) {
-    result += decodeWord(pending.charset, pending.encoding, pending.encodedText);
-  }
-  return result;
-}
-function decodeWords(str) {
-  const tokens = splitEncodedWords((str || "").toString());
-  const result = renderTokens(tokens, true);
-  return result.indexOf("�") < 0 ? result : renderTokens(tokens, false);
-}
-function decodeURIComponentWithCharset(encodedStr, charset) {
-  charset = charset || "utf-8";
-  let encodedBytes = [];
-  for (let i = 0;i < encodedStr.length; i++) {
-    let c = encodedStr.charAt(i);
-    const high = c === "%" ? hexNibble(encodedStr.charCodeAt(i + 1)) : -1;
-    const low = high >= 0 ? hexNibble(encodedStr.charCodeAt(i + 2)) : -1;
-    if (low >= 0) {
-      encodedBytes.push(high << 4 | low);
-      i += 2;
-    } else if (c.charCodeAt(0) > 126) {
-      const bytes = textEncoder.encode(c);
-      for (let j = 0;j < bytes.length; j++) {
-        encodedBytes.push(bytes[j]);
-      }
-    } else {
-      encodedBytes.push(c.charCodeAt(0));
-    }
-  }
-  const byteStr = new ArrayBuffer(encodedBytes.length);
-  const dataView = new DataView(byteStr);
-  for (let i = 0, len = encodedBytes.length;i < len; i++) {
-    dataView.setUint8(i, encodedBytes[i]);
-  }
-  return decodeCharset(byteStr, charset);
-}
-function decodeParameterValueContinuations(header) {
-  let paramKeys = new Map;
-  Object.keys(header.params).forEach((key) => {
-    let match = key.match(/\*((\d+)\*?)?$/);
-    if (!match) {
-      return;
-    }
-    let actualKey = key.slice(0, match.index).toLowerCase();
-    let nr = Number(match[2]) || 0;
-    let paramVal = paramKeys.get(actualKey);
-    if (!paramVal) {
-      paramVal = {
-        charset: null,
-        values: []
-      };
-      paramKeys.set(actualKey, paramVal);
-    }
-    let value = header.params[key];
-    let encoded = match[0].charAt(match[0].length - 1) === "*";
-    if (nr === 0 && encoded && (match = value.match(/^([^']*)'[^']*'(.*)$/))) {
-      paramVal.charset = match[1] || "utf-8";
-      value = match[2];
-    }
-    paramVal.values.push({ nr, value, encoded });
-    delete header.params[key];
-  });
-  paramKeys.forEach((paramVal, key) => {
-    if (Object.prototype.hasOwnProperty.call(header.params, key)) {
-      return;
-    }
-    let result = "";
-    let pending = "";
-    for (let part of paramVal.values.sort((a, b) => a.nr - b.nr)) {
-      if (part.encoded) {
-        pending += part.value;
-        continue;
-      }
-      if (pending) {
-        result += decodeURIComponentWithCharset(pending, paramVal.charset);
-        pending = "";
-      }
-      result += part.value;
-    }
-    if (pending) {
-      result += decodeURIComponentWithCharset(pending, paramVal.charset);
-    }
-    header.params[key] = result;
-  });
-}
-var textEncoder, isWsp = (c) => c === 32 || c === 9, base64Chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/", base64Lookup, charsetAliases, codePageAliases, codePagePattern, ENCODING_LABELS, REPLACEMENT_LABELS, replacementDecoder, UTF16_LABELS, decoders, utf8Decoder, UTF16_ENCODINGS, UTF16_UNORDERED_LABELS, META_PRESCAN_BYTES = 1024, CHARSET_ATTRIBUTE, ENCODED_WORD_PATTERN = "=\\?([^?\\s]+)\\?([QqBb])\\?([^?]*)\\?=", ENCODED_WORD_REGEX, WORD_SEPARATOR_REGEX, ENCODED_WORDS_ONLY_REGEX;
-var init_decode_strings = __esm(() => {
-  textEncoder = new TextEncoder;
-  base64Lookup = new Uint8Array(256);
-  for (let i = 0;i < base64Chars.length; i++) {
-    base64Lookup[base64Chars.charCodeAt(i)] = i;
-  }
-  charsetAliases = new Map([
-    ["iso88598i", "iso-8859-8"],
-    ["iso88598e", "iso-8859-8"],
-    ["shiftjis", "shift_jis"],
-    ["windows31j", "shift_jis"],
-    ["mskanji", "shift_jis"],
-    ["eucjp", "euc-jp"],
-    ["iso2022jp", "iso-2022-jp"],
-    ["iso2022jp1", "iso-2022-jp"],
-    ["iso2022jp2", "iso-2022-jp"],
-    ["junet", "iso-2022-jp"],
-    ["euckr", "euc-kr"],
-    ["uhc", "euc-kr"],
-    ["tis620", "windows-874"]
-  ]);
-  codePageAliases = new Map([
-    ["932", "shift_jis"],
-    ["936", "gbk"],
-    ["949", "euc-kr"],
-    ["950", "big5"],
-    ["874", "windows-874"],
-    ["51932", "euc-jp"],
-    ["50220", "iso-2022-jp"],
-    ["50221", "iso-2022-jp"],
-    ["50222", "iso-2022-jp"]
-  ]);
-  codePagePattern = /^(?:cp|windows|ms|ibm)(\d+)$/;
-  ENCODING_LABELS = new Set([
-    "unicode-1-1-utf-8 unicode11utf8 unicode20utf8 utf-8 utf8 x-unicode20utf8",
-    "866 cp866 csibm866 ibm866",
-    "csisolatin2 iso-8859-2 iso-ir-101 iso8859-2 iso88592 iso_8859-2 iso_8859-2:1987 l2 latin2",
-    "csisolatin3 iso-8859-3 iso-ir-109 iso8859-3 iso88593 iso_8859-3 iso_8859-3:1988 l3 latin3",
-    "csisolatin4 iso-8859-4 iso-ir-110 iso8859-4 iso88594 iso_8859-4 iso_8859-4:1988 l4 latin4",
-    "csisolatincyrillic cyrillic iso-8859-5 iso-ir-144 iso8859-5 iso88595 iso_8859-5 iso_8859-5:1988",
-    "arabic asmo-708 csiso88596e csiso88596i csisolatinarabic ecma-114 iso-8859-6 iso-8859-6-e",
-    "iso-8859-6-i iso-ir-127 iso8859-6 iso88596 iso_8859-6 iso_8859-6:1987",
-    "csisolatingreek ecma-118 elot_928 greek greek8 iso-8859-7 iso-ir-126 iso8859-7 iso88597 iso_8859-7",
-    "iso_8859-7:1987 sun_eu_greek",
-    "csiso88598e csisolatinhebrew hebrew iso-8859-8 iso-8859-8-e iso-ir-138 iso8859-8 iso88598 iso_8859-8",
-    "iso_8859-8:1988 visual",
-    "csiso88598i iso-8859-8-i logical",
-    "csisolatin6 iso-8859-10 iso-ir-157 iso8859-10 iso885910 l6 latin6",
-    "iso-8859-13 iso8859-13 iso885913",
-    "iso-8859-14 iso8859-14 iso885914",
-    "csisolatin9 iso-8859-15 iso8859-15 iso885915 iso_8859-15 l9",
-    "iso-8859-16",
-    "cskoi8r koi koi8 koi8-r koi8_r",
-    "koi8-ru koi8-u",
-    "csmacintosh mac macintosh x-mac-roman",
-    "dos-874 iso-8859-11 iso8859-11 iso885911 tis-620 windows-874",
-    "cp1250 windows-1250 x-cp1250",
-    "cp1251 windows-1251 x-cp1251",
-    "ansi_x3.4-1968 ascii cp1252 cp819 csisolatin1 ibm819 iso-8859-1 iso-ir-100 iso8859-1 iso88591",
-    "iso_8859-1 iso_8859-1:1987 l1 latin1 us-ascii windows-1252 x-cp1252",
-    "cp1253 windows-1253 x-cp1253",
-    "cp1254 csisolatin5 iso-8859-9 iso-ir-148 iso8859-9 iso88599 iso_8859-9 iso_8859-9:1989 l5 latin5",
-    "windows-1254 x-cp1254",
-    "cp1255 windows-1255 x-cp1255",
-    "cp1256 windows-1256 x-cp1256",
-    "cp1257 windows-1257 x-cp1257",
-    "cp1258 windows-1258 x-cp1258",
-    "x-mac-cyrillic x-mac-ukrainian",
-    "chinese csgb2312 csiso58gb231280 gb2312 gb_2312 gb_2312-80 gbk iso-ir-58 x-gbk",
-    "gb18030",
-    "big5 big5-hkscs cn-big5 csbig5 x-x-big5",
-    "cseucpkdfmtjapanese euc-jp x-euc-jp",
-    "csiso2022jp iso-2022-jp",
-    "csshiftjis ms932 ms_kanji shift-jis shift_jis sjis windows-31j x-sjis",
-    "cseuckr csksc56011987 euc-kr iso-ir-149 korean ks_c_5601-1987 ks_c_5601-1989 ksc5601 ksc_5601",
-    "windows-949",
-    "csiso2022kr hz-gb-2312 iso-2022-cn iso-2022-cn-ext iso-2022-kr replacement",
-    "x-user-defined"
-  ].join(" ").split(" "));
-  REPLACEMENT_LABELS = new Set([
-    "csiso2022kr",
-    "hz-gb-2312",
-    "iso-2022-cn",
-    "iso-2022-cn-ext",
-    "iso-2022-kr",
-    "replacement"
-  ]);
-  replacementDecoder = {
-    encoding: "replacement",
-    decode: (input) => input && input.byteLength ? "�" : ""
-  };
-  UTF16_LABELS = new Map([
-    ["utf-16", "utf-16"],
-    ["utf16", "utf-16"],
-    ["utf_16", "utf-16"],
-    ["utf-16le", "utf-16le"],
-    ["utf-16be", "utf-16be"]
-  ]);
-  decoders = new Map;
-  utf8Decoder = new TextDecoder;
-  UTF16_ENCODINGS = new Set(["utf-16le", "utf-16be"]);
-  UTF16_UNORDERED_LABELS = new Set(["utf-16"]);
-  CHARSET_ATTRIBUTE = /charset\s*=\s*["']?\s*([^\s"';>]+)/;
-  ENCODED_WORD_REGEX = new RegExp(ENCODED_WORD_PATTERN, "g");
-  WORD_SEPARATOR_REGEX = /^[ \t\r\n]+$/;
-  ENCODED_WORDS_ONLY_REGEX = new RegExp(`^(?:${ENCODED_WORD_PATTERN}\\s*)+$`);
-});
-
-// node_modules/postal-mime/dist/esm/pass-through-decoder.js
-class PassThroughDecoder {
-  constructor() {
-    this.chunks = [];
-    this.runBuffer = null;
-    this.runStart = 0;
-    this.runEnd = 0;
-    this.pendingLineBreak = null;
-  }
-  continuesRun(bytes) {
-    return bytes.buffer === this.runBuffer && bytes.byteOffset === this.runEnd;
-  }
-  flushRun() {
-    if (this.runBuffer && this.runEnd > this.runStart) {
-      this.chunks.push(new Uint8Array(this.runBuffer, this.runStart, this.runEnd - this.runStart));
-    }
-    this.runBuffer = null;
-  }
-  update(line, lineBreak) {
-    const pending = this.pendingLineBreak;
-    if (pending && this.continuesRun(pending) && line.buffer === this.runBuffer && line.byteOffset === this.runEnd + pending.byteLength) {
-      this.runEnd = line.byteOffset + line.byteLength;
-    } else {
-      this.flushRun();
-      if (pending) {
-        this.chunks.push(pending);
-      }
-      this.runBuffer = line.buffer;
-      this.runStart = line.byteOffset;
-      this.runEnd = line.byteOffset + line.byteLength;
-    }
-    this.pendingLineBreak = lineBreak;
-  }
-  finalize(boundaryEnded = false) {
-    const pending = this.pendingLineBreak;
-    if (!boundaryEnded && pending) {
-      if (this.continuesRun(pending)) {
-        this.runEnd += pending.byteLength;
-      } else {
-        this.flushRun();
-        this.chunks.push(pending);
-      }
-    }
-    this.flushRun();
-    return blobToArrayBuffer(new Blob(this.chunks, { type: "application/octet-stream" }));
-  }
-}
-var init_pass_through_decoder = __esm(() => {
-  init_decode_strings();
-});
-
-// node_modules/postal-mime/dist/esm/chunk-writer.js
-class ChunkWriter {
-  constructor(maxChunkSize = 100 * 1024) {
-    this.maxChunkSize = maxChunkSize;
-    this.buffer = null;
-    this.bufferPos = 0;
-    this.chunks = [];
-  }
-  writeByte(byte) {
-    if (!this.buffer || this.bufferPos >= this.buffer.length) {
-      this.flush();
-      this.buffer ??= new Uint8Array(this.maxChunkSize);
-    }
-    this.buffer[this.bufferPos++] = byte;
-  }
-  writeBytes(bytes, start = 0, end = bytes.length) {
-    while (start < end) {
-      if (!this.buffer || this.bufferPos >= this.buffer.length) {
-        this.flush();
-        this.buffer ??= new Uint8Array(this.maxChunkSize);
-      }
-      const count = Math.min(end - start, this.buffer.length - this.bufferPos);
-      this.buffer.set(bytes.subarray(start, start + count), this.bufferPos);
-      this.bufferPos += count;
-      start += count;
-    }
-  }
-  append(bytes) {
-    if (bytes.length >= this.maxChunkSize / 2) {
-      this.flush();
-      this.chunks.push(bytes);
-    } else {
-      this.writeBytes(bytes);
-    }
-  }
-  flush() {
-    if (this.buffer && this.bufferPos) {
-      this.chunks.push(this.buffer.slice(0, this.bufferPos));
-      this.bufferPos = 0;
-    }
-  }
-  finalize() {
-    this.flush();
-    return blobToArrayBuffer(new Blob(this.chunks, { type: "application/octet-stream" }));
-  }
-}
-var init_chunk_writer = __esm(() => {
-  init_decode_strings();
-});
-
-// node_modules/postal-mime/dist/esm/base64-decoder.js
-class Base64Decoder {
-  constructor(opts) {
-    opts = opts || {};
-    this.decoder = opts.decoder || new TextDecoder;
-    this.maxChunkSize = 100 * 1024;
-    this.output = new ChunkWriter;
-    this.remainder = "";
-  }
-  pushChunk(base64Str) {
-    if (base64Str.length) {
-      this.output.append(new Uint8Array(decodeBase642(base64Str)));
-    }
-  }
-  flushRemainder() {
-    this.pushChunk(this.remainder);
-    this.remainder = "";
-  }
-  update(buffer) {
-    let str = this.decoder.decode(buffer).replace(/[^a-zA-Z0-9+/=]+/g, "");
-    let start = 0;
-    let end;
-    while ((end = str.indexOf("=", start)) >= 0) {
-      this.remainder += str.substring(start, end);
-      this.flushRemainder();
-      start = end + 1;
-    }
-    this.remainder += str.substring(start);
-    if (this.remainder.length >= this.maxChunkSize) {
-      const alignedLength = Math.floor(this.remainder.length / 4) * 4;
-      this.pushChunk(this.remainder.substring(0, alignedLength));
-      this.remainder = this.remainder.substring(alignedLength);
-    }
-  }
-  finalize() {
-    this.flushRemainder();
-    return this.output.finalize();
-  }
-}
-var init_base64_decoder = __esm(() => {
-  init_decode_strings();
-  init_chunk_writer();
-});
-
-// node_modules/postal-mime/dist/esm/qp-decoder.js
-class QPDecoder {
-  constructor() {
-    this.output = new ChunkWriter;
-    this.pendingLineBreak = null;
-  }
-  writeLineBreak() {
-    if (this.pendingLineBreak) {
-      this.output.writeBytes(this.pendingLineBreak);
-    }
-  }
-  update(line, lineBreak) {
-    this.writeLineBreak();
-    let len = line.length;
-    while (len > 0 && isWsp(line[len - 1])) {
-      len--;
-    }
-    const softBreak = len > 0 && line[len - 1] === CHR_EQUALS;
-    if (softBreak) {
-      len--;
-    }
-    let literalStart = 0;
-    for (let i = 0;i < len; i++) {
-      if (line[i] !== CHR_EQUALS || i + 2 >= len) {
-        continue;
-      }
-      const high = hexNibble(line[i + 1]);
-      const low = hexNibble(line[i + 2]);
-      if (high < 0 || low < 0) {
-        continue;
-      }
-      this.output.writeBytes(line, literalStart, i);
-      this.output.writeByte(high << 4 | low);
-      i += 2;
-      literalStart = i + 1;
-    }
-    this.output.writeBytes(line, literalStart, len);
-    this.pendingLineBreak = softBreak ? null : lineBreak;
-  }
-  finalize(boundaryEnded = false) {
-    if (!boundaryEnded) {
-      this.writeLineBreak();
-    }
-    return this.output.finalize();
-  }
-}
-var CHR_EQUALS = 61;
-var init_qp_decoder = __esm(() => {
-  init_decode_strings();
-  init_chunk_writer();
-});
-
-// node_modules/postal-mime/dist/esm/errors.js
-function createError(code, message) {
-  const error = new ERROR_TYPES[code](message);
-  error.code = code;
-  return error;
-}
-var ERROR_TYPES;
-var init_errors8 = __esm(() => {
-  ERROR_TYPES = {
-    EINVALIDOPTION: TypeError,
-    EINVALIDINPUT: TypeError,
-    EPARSERREUSED: Error,
-    EMAXNESTINGDEPTH: Error,
-    EMAXHEADERSIZE: Error,
-    EMAXPARTCOUNT: Error,
-    EMAXFORWARDEDADDRESSES: Error
-  };
-});
-
-// node_modules/postal-mime/dist/esm/mime-node.js
-class MimeNode {
-  constructor(options) {
-    this.options = options;
-    this.postalMime = options.postalMime;
-    const limits = this.postalMime.limits;
-    this.postalMime.counters.partCount++;
-    if (this.postalMime.counters.partCount > limits.maxPartCount) {
-      throw createError("EMAXPARTCOUNT", `Maximum MIME part count of ${limits.maxPartCount} parts exceeded`);
-    }
-    this.childNodes = [];
-    this.finalizedChildCount = 0;
-    if (options.parentNode) {
-      this.parentNode = options.parentNode;
-      this.depth = this.parentNode.depth + 1;
-      if (this.depth > limits.maxNestingDepth) {
-        throw createError("EMAXNESTINGDEPTH", `Maximum MIME nesting depth of ${limits.maxNestingDepth} levels exceeded`);
-      }
-      options.parentNode.childNodes.push(this);
-    } else {
-      this.depth = 0;
-    }
-    this.state = "header";
-    this.headerLines = [];
-    const parentMultipartType = options.parentMultipartType || null;
-    const defaultContentType = parentMultipartType === "digest" ? "message/rfc822" : "text/plain";
-    this.contentType = {
-      value: defaultContentType,
-      parsed: { value: defaultContentType, params: {} },
-      multipart: false
-    };
-    this.contentTransferEncoding = {
-      value: "8bit",
-      encoding: ""
-    };
-    this.contentDisposition = {
-      value: "",
-      parsed: { value: "", params: {} }
-    };
-    this.headers = [];
-    this.rawHeaderLines = [];
-    this.contentDecoder = null;
-    this.content = null;
-  }
-  setupContentDecoder(transferEncoding) {
-    if (transferEncoding === "base64") {
-      this.contentDecoder = new Base64Decoder;
-    } else if (transferEncoding === "quoted-printable") {
-      this.contentDecoder = new QPDecoder;
-    } else {
-      this.contentDecoder = new PassThroughDecoder;
-    }
-  }
-  async finalize(boundaryEnded = false) {
-    if (this.state === "finished") {
-      return;
-    }
-    if (this.state === "header") {
-      this.endHeaders();
-    }
-    let boundaries = this.postalMime.boundaries;
-    for (let i = boundaries.length - 1;i >= 0; i--) {
-      let boundary = boundaries[i];
-      if (boundary.node === this) {
-        boundaries.splice(i, 1);
-        break;
-      }
-    }
-    await this.finalizeChildNodes(boundaryEnded);
-    this.content = this.contentDecoder ? await this.contentDecoder.finalize(boundaryEnded) : null;
-    this.contentDecoder = null;
-    this.state = "finished";
-  }
-  async finalizeChildNodes(boundaryEnded = false) {
-    while (this.finalizedChildCount < this.childNodes.length) {
-      await this.childNodes[this.finalizedChildCount++].finalize(boundaryEnded);
-    }
-  }
-  stripComments(str) {
-    let result = "";
-    let depth = 0;
-    let escaped = false;
-    let inQuote = false;
-    let commentStart = -1;
-    let inParameterValue = false;
-    let runStart = 0;
-    const drop = (i) => {
-      result += str.slice(runStart, i);
-      runStart = i + 1;
-    };
-    let keptAny = false;
-    let endsWithWsp = false;
-    const keep = (i) => {
-      keptAny = true;
-      endsWithWsp = isWsp(str.charCodeAt(i));
-    };
-    const opensComment = () => !inParameterValue || !keptAny || endsWithWsp;
-    for (let i = 0;i < str.length; i++) {
-      const chr = str.charAt(i);
-      if (escaped) {
-        escaped = false;
-      } else if (chr === "\\") {
-        escaped = true;
-      } else if (chr === '"' && depth === 0) {
-        inQuote = !inQuote;
-      } else if (!inQuote) {
-        if (chr === "(" && opensComment()) {
-          if (depth === 0) {
-            commentStart = i;
-          }
-          depth++;
-          drop(i);
-          continue;
-        }
-        if (chr === ")" && depth > 0) {
-          depth--;
-          drop(i);
-          continue;
-        }
-        if (depth === 0) {
-          if (chr === "=") {
-            inParameterValue = true;
-          } else if (chr === ";") {
-            inParameterValue = false;
-          }
-        }
-      }
-      if (depth === 0) {
-        keep(i);
-      } else {
-        drop(i);
-      }
-    }
-    if (depth === 0) {
-      return result + str.slice(runStart);
-    }
-    return str.indexOf(";", commentStart) < 0 ? result + str.slice(runStart) : str;
-  }
-  parseStructuredHeader(str) {
-    str = this.stripComments(str);
-    let response = {
-      value: "",
-      params: {}
-    };
-    let key = false;
-    let value = "";
-    let stage = "value";
-    let pendingSpace = "";
-    let quoteClosed = false;
-    let quote = false;
-    let escaped = false;
-    let chr;
-    const flushSpace = () => {
-      if (value.length) {
-        value += pendingSpace;
-      }
-      pendingSpace = "";
-    };
-    let runStart = -1;
-    const closeRun = (end) => {
-      if (runStart >= 0) {
-        value += str.slice(runStart, end);
-        runStart = -1;
-      }
-    };
-    const addChr = (i) => {
-      if (runStart < 0) {
-        flushSpace();
-        runStart = i;
-      }
-    };
-    const takeValue = () => {
-      const result = value;
-      value = "";
-      pendingSpace = "";
-      quoteClosed = false;
-      return result;
-    };
-    const storeParam = (name, result) => {
-      if (name && !Object.prototype.hasOwnProperty.call(response.params, name)) {
-        response.params[name] = result;
-      }
-    };
-    const storeValue = () => {
-      const result = takeValue();
-      if (key === false) {
-        response.value = result;
-      } else {
-        storeParam(key, result);
-      }
-    };
-    const storeEmptyKey = () => {
-      storeParam(takeValue().trim().toLowerCase(), "");
-    };
-    for (let i = 0, len = str.length;i < len; i++) {
-      chr = str.charAt(i);
-      switch (stage) {
-        case "key":
-          if (chr === "=") {
-            closeRun(i);
-            key = takeValue().trim().toLowerCase();
-            stage = "value";
-            break;
-          }
-          if (chr === ";") {
-            closeRun(i);
-            storeEmptyKey();
-            break;
-          }
-          if (runStart < 0) {
-            runStart = i;
-          }
-          break;
-        case "value":
-          if (quoteClosed && chr !== ";") {
-            escaped = false;
-            break;
-          }
-          if (escaped) {
-            addChr(i);
-          } else if (quote && chr === "\\") {
-            closeRun(i);
-            escaped = true;
-            continue;
-          } else if (quote && chr === quote) {
-            closeRun(i);
-            quote = false;
-            quoteClosed = true;
-          } else if (!quote && chr === '"') {
-            closeRun(i);
-            quote = chr;
-            flushSpace();
-          } else if (!quote && chr === ";") {
-            closeRun(i);
-            storeValue();
-            stage = "key";
-          } else if (!quote && (chr === " " || chr === "\t")) {
-            closeRun(i);
-            pendingSpace += chr;
-          } else {
-            addChr(i);
-          }
-          escaped = false;
-          break;
-      }
-    }
-    closeRun(str.length);
-    if (stage === "value") {
-      storeValue();
-    } else {
-      storeEmptyKey();
-    }
-    if (response.value) {
-      response.value = response.value.toLowerCase();
-    }
-    decodeParameterValueContinuations(response);
-    return response;
-  }
-  decodeFlowedText(str, delSp) {
-    const chunks = [];
-    let parts = [];
-    let flowed = false;
-    let depth = 0;
-    for (let lineStart = 0;lineStart <= str.length; ) {
-      let lineEnd = str.indexOf(`
-`, lineStart);
-      if (lineEnd < 0) {
-        lineEnd = str.length;
-      }
-      const line = str.slice(lineStart, lineEnd);
-      let quoteDepth = 0;
-      while (line.charCodeAt(quoteDepth) === 62) {
-        quoteDepth++;
-      }
-      const contentStart = line.charCodeAt(quoteDepth) === 32 ? quoteDepth + 1 : quoteDepth;
-      const content = line.slice(contentStart);
-      const isSignature = content === "-- ";
-      if (flowed && quoteDepth === depth && !isSignature) {
-        if (delSp) {
-          const last = parts[parts.length - 1];
-          parts[parts.length - 1] = last.slice(0, -1);
-        }
-        parts.push(content);
-      } else {
-        if (lineStart) {
-          parts.push(`
-`);
-        }
-        parts.push(quoteDepth ? line : content);
-      }
-      flowed = !isSignature && content.endsWith(" ");
-      depth = quoteDepth;
-      if (parts.length >= FLOWED_JOIN_INTERVAL) {
-        const last = parts.pop();
-        chunks.push(parts.join(""));
-        parts = [last];
-      }
-      lineStart = lineEnd + 1;
-    }
-    chunks.push(parts.join(""));
-    return chunks.join("");
-  }
-  getTextContent() {
-    if (!this.content) {
-      return "";
-    }
-    let str = decodeText(this.content, this.contentType.parsed.params.charset, this.contentType.parsed.value === "text/html").replace(/\r\n/g, `
-`);
-    if (this.contentType.parsed.value === "text/plain" && /^flowed$/i.test(this.contentType.parsed.params.format)) {
-      str = this.decodeFlowedText(str, /^yes$/i.test(this.contentType.parsed.params.delsp));
-    }
-    return str;
-  }
-  processHeaders() {
-    let foldedLines = [];
-    for (let line of this.headerLines) {
-      if (foldedLines.length && /^[ \t]/.test(line)) {
-        foldedLines[foldedLines.length - 1].push(line);
-      } else {
-        foldedLines.push([line]);
-      }
-    }
-    let seenContentHeaders = new Set;
-    for (let parts of foldedLines) {
-      let rawLine = parts.join(`
-`);
-      let sep = rawLine.indexOf(":");
-      let rawKey = sep < 0 ? rawLine : rawLine.slice(0, sep);
-      this.rawHeaderLines.push({
-        key: rawKey.toLowerCase(),
-        line: rawLine
-      });
-      let unfoldedLine = parts.join("");
-      sep = unfoldedLine.indexOf(":");
-      let key = sep < 0 ? unfoldedLine : unfoldedLine.slice(0, sep);
-      let value = sep < 0 ? "" : trimWsp(foldLineBreaks(unfoldedLine.slice(sep + 1)));
-      this.headers.push({ key: key.toLowerCase(), originalKey: key, value });
-      const lowerKey = key.toLowerCase();
-      if (CONTENT_HEADERS.has(lowerKey) && !seenContentHeaders.has(lowerKey)) {
-        seenContentHeaders.add(lowerKey);
-        switch (lowerKey) {
-          case "content-type":
-            this.contentType.value = value;
-            break;
-          case "content-transfer-encoding":
-            this.contentTransferEncoding.value = value;
-            break;
-          case "content-disposition":
-            this.contentDisposition.value = value;
-            break;
-          case "content-id":
-            this.contentId = value;
-            break;
-          case "content-description":
-            this.contentDescription = value;
-            break;
-        }
-      }
-    }
-    this.contentType.parsed = this.parseStructuredHeader(this.contentType.value);
-    this.contentType.multipart = /^multipart\//i.test(this.contentType.parsed.value) ? this.contentType.parsed.value.slice(this.contentType.parsed.value.indexOf("/") + 1) : false;
-    let boundary = this.contentType.multipart ? (this.contentType.parsed.params.boundary || "").trimEnd() : "";
-    if (/[^\x00-\x7f]/.test(boundary)) {
-      boundary = "";
-    }
-    if (this.contentType.multipart && !boundary) {
-      this.contentType.parsed.value = "text/plain";
-      this.contentType.multipart = false;
-    }
-    if (this.contentType.multipart) {
-      this.postalMime.boundaries.push({
-        value: textEncoder.encode(boundary),
-        node: this
-      });
-    }
-    this.contentDisposition.parsed = this.parseStructuredHeader(this.contentDisposition.value);
-    const disposition = this.contentDisposition.parsed.value;
-    const dispositionEnd = disposition.search(/[ \t]/);
-    if (dispositionEnd >= 0) {
-      this.contentDisposition.parsed.value = disposition.slice(0, dispositionEnd);
-    }
-    this.contentTransferEncoding.encoding = (this.stripComments(this.contentTransferEncoding.value).toLowerCase().match(/^[ \t]*([\w-]+)/) || ["", ""])[1];
-    this.setupContentDecoder(this.contentTransferEncoding.encoding);
-    this.headerLines = [];
-  }
-  endHeaders() {
-    this.state = "body";
-    this.processHeaders();
-  }
-  feed(line, lineBreak) {
-    switch (this.state) {
-      case "header": {
-        if (!line.length) {
-          this.endHeaders();
-          return false;
-        }
-        this.postalMime.counters.headerSize += Math.max(line.length, HEADER_LINE_MIN_COST);
-        const maxHeadersSize = this.postalMime.limits.maxHeadersSize;
-        if (this.postalMime.counters.headerSize > maxHeadersSize) {
-          throw createError("EMAXHEADERSIZE", `Maximum header size of ${maxHeadersSize} bytes exceeded`);
-        }
-        const text = decodeUtf8OrWindows1252(line, headerDecoder);
-        if (!isWsp(line[0]) && !FIELD_START.test(text)) {
-          this.endHeaders();
-          return true;
-        }
-        this.headerLines.push(text);
-        break;
-      }
-      case "body":
-        if (this.contentDecoder) {
-          this.contentDecoder.update(line, lineBreak);
-        }
-        break;
-    }
-    return false;
-  }
-}
-var headerDecoder, FLOWED_JOIN_INTERVAL = 4096, HEADER_LINE_MIN_COST = 64, trimWsp = (str) => {
-  let start = 0;
-  let end = str.length;
-  while (start < end && isWsp(str.charCodeAt(start))) {
-    start++;
-  }
-  while (end > start && isWsp(str.charCodeAt(end - 1))) {
-    end--;
-  }
-  return str.slice(start, end);
-}, FIELD_START, CONTENT_HEADERS;
-var init_mime_node = __esm(() => {
-  init_decode_strings();
-  init_pass_through_decoder();
-  init_base64_decoder();
-  init_qp_decoder();
-  init_errors8();
-  headerDecoder = new TextDecoder("utf-8", { ignoreBOM: true });
-  FIELD_START = /^(?:From |[!-9;-~]*[ \t]*:)/;
-  CONTENT_HEADERS = new Set([
-    "content-type",
-    "content-transfer-encoding",
-    "content-disposition",
-    "content-id",
-    "content-description"
-  ]);
-});
-
-// node_modules/postal-mime/dist/esm/html-entities.js
-var htmlEntities;
-var init_html_entities = __esm(() => {
-  htmlEntities = {
-    "&AElig": "Æ",
-    "&AElig;": "Æ",
-    "&AMP": "&",
-    "&AMP;": "&",
-    "&Aacute": "Á",
-    "&Aacute;": "Á",
-    "&Abreve;": "Ă",
-    "&Acirc": "Â",
-    "&Acirc;": "Â",
-    "&Acy;": "А",
-    "&Afr;": "\uD835\uDD04",
-    "&Agrave": "À",
-    "&Agrave;": "À",
-    "&Alpha;": "Α",
-    "&Amacr;": "Ā",
-    "&And;": "⩓",
-    "&Aogon;": "Ą",
-    "&Aopf;": "\uD835\uDD38",
-    "&ApplyFunction;": "⁡",
-    "&Aring": "Å",
-    "&Aring;": "Å",
-    "&Ascr;": "\uD835\uDC9C",
-    "&Assign;": "≔",
-    "&Atilde": "Ã",
-    "&Atilde;": "Ã",
-    "&Auml": "Ä",
-    "&Auml;": "Ä",
-    "&Backslash;": "∖",
-    "&Barv;": "⫧",
-    "&Barwed;": "⌆",
-    "&Bcy;": "Б",
-    "&Because;": "∵",
-    "&Bernoullis;": "ℬ",
-    "&Beta;": "Β",
-    "&Bfr;": "\uD835\uDD05",
-    "&Bopf;": "\uD835\uDD39",
-    "&Breve;": "˘",
-    "&Bscr;": "ℬ",
-    "&Bumpeq;": "≎",
-    "&CHcy;": "Ч",
-    "&COPY": "©",
-    "&COPY;": "©",
-    "&Cacute;": "Ć",
-    "&Cap;": "⋒",
-    "&CapitalDifferentialD;": "ⅅ",
-    "&Cayleys;": "ℭ",
-    "&Ccaron;": "Č",
-    "&Ccedil": "Ç",
-    "&Ccedil;": "Ç",
-    "&Ccirc;": "Ĉ",
-    "&Cconint;": "∰",
-    "&Cdot;": "Ċ",
-    "&Cedilla;": "¸",
-    "&CenterDot;": "·",
-    "&Cfr;": "ℭ",
-    "&Chi;": "Χ",
-    "&CircleDot;": "⊙",
-    "&CircleMinus;": "⊖",
-    "&CirclePlus;": "⊕",
-    "&CircleTimes;": "⊗",
-    "&ClockwiseContourIntegral;": "∲",
-    "&CloseCurlyDoubleQuote;": "”",
-    "&CloseCurlyQuote;": "’",
-    "&Colon;": "∷",
-    "&Colone;": "⩴",
-    "&Congruent;": "≡",
-    "&Conint;": "∯",
-    "&ContourIntegral;": "∮",
-    "&Copf;": "ℂ",
-    "&Coproduct;": "∐",
-    "&CounterClockwiseContourIntegral;": "∳",
-    "&Cross;": "⨯",
-    "&Cscr;": "\uD835\uDC9E",
-    "&Cup;": "⋓",
-    "&CupCap;": "≍",
-    "&DD;": "ⅅ",
-    "&DDotrahd;": "⤑",
-    "&DJcy;": "Ђ",
-    "&DScy;": "Ѕ",
-    "&DZcy;": "Џ",
-    "&Dagger;": "‡",
-    "&Darr;": "↡",
-    "&Dashv;": "⫤",
-    "&Dcaron;": "Ď",
-    "&Dcy;": "Д",
-    "&Del;": "∇",
-    "&Delta;": "Δ",
-    "&Dfr;": "\uD835\uDD07",
-    "&DiacriticalAcute;": "´",
-    "&DiacriticalDot;": "˙",
-    "&DiacriticalDoubleAcute;": "˝",
-    "&DiacriticalGrave;": "`",
-    "&DiacriticalTilde;": "˜",
-    "&Diamond;": "⋄",
-    "&DifferentialD;": "ⅆ",
-    "&Dopf;": "\uD835\uDD3B",
-    "&Dot;": "¨",
-    "&DotDot;": "⃜",
-    "&DotEqual;": "≐",
-    "&DoubleContourIntegral;": "∯",
-    "&DoubleDot;": "¨",
-    "&DoubleDownArrow;": "⇓",
-    "&DoubleLeftArrow;": "⇐",
-    "&DoubleLeftRightArrow;": "⇔",
-    "&DoubleLeftTee;": "⫤",
-    "&DoubleLongLeftArrow;": "⟸",
-    "&DoubleLongLeftRightArrow;": "⟺",
-    "&DoubleLongRightArrow;": "⟹",
-    "&DoubleRightArrow;": "⇒",
-    "&DoubleRightTee;": "⊨",
-    "&DoubleUpArrow;": "⇑",
-    "&DoubleUpDownArrow;": "⇕",
-    "&DoubleVerticalBar;": "∥",
-    "&DownArrow;": "↓",
-    "&DownArrowBar;": "⤓",
-    "&DownArrowUpArrow;": "⇵",
-    "&DownBreve;": "̑",
-    "&DownLeftRightVector;": "⥐",
-    "&DownLeftTeeVector;": "⥞",
-    "&DownLeftVector;": "↽",
-    "&DownLeftVectorBar;": "⥖",
-    "&DownRightTeeVector;": "⥟",
-    "&DownRightVector;": "⇁",
-    "&DownRightVectorBar;": "⥗",
-    "&DownTee;": "⊤",
-    "&DownTeeArrow;": "↧",
-    "&Downarrow;": "⇓",
-    "&Dscr;": "\uD835\uDC9F",
-    "&Dstrok;": "Đ",
-    "&ENG;": "Ŋ",
-    "&ETH": "Ð",
-    "&ETH;": "Ð",
-    "&Eacute": "É",
-    "&Eacute;": "É",
-    "&Ecaron;": "Ě",
-    "&Ecirc": "Ê",
-    "&Ecirc;": "Ê",
-    "&Ecy;": "Э",
-    "&Edot;": "Ė",
-    "&Efr;": "\uD835\uDD08",
-    "&Egrave": "È",
-    "&Egrave;": "È",
-    "&Element;": "∈",
-    "&Emacr;": "Ē",
-    "&EmptySmallSquare;": "◻",
-    "&EmptyVerySmallSquare;": "▫",
-    "&Eogon;": "Ę",
-    "&Eopf;": "\uD835\uDD3C",
-    "&Epsilon;": "Ε",
-    "&Equal;": "⩵",
-    "&EqualTilde;": "≂",
-    "&Equilibrium;": "⇌",
-    "&Escr;": "ℰ",
-    "&Esim;": "⩳",
-    "&Eta;": "Η",
-    "&Euml": "Ë",
-    "&Euml;": "Ë",
-    "&Exists;": "∃",
-    "&ExponentialE;": "ⅇ",
-    "&Fcy;": "Ф",
-    "&Ffr;": "\uD835\uDD09",
-    "&FilledSmallSquare;": "◼",
-    "&FilledVerySmallSquare;": "▪",
-    "&Fopf;": "\uD835\uDD3D",
-    "&ForAll;": "∀",
-    "&Fouriertrf;": "ℱ",
-    "&Fscr;": "ℱ",
-    "&GJcy;": "Ѓ",
-    "&GT": ">",
-    "&GT;": ">",
-    "&Gamma;": "Γ",
-    "&Gammad;": "Ϝ",
-    "&Gbreve;": "Ğ",
-    "&Gcedil;": "Ģ",
-    "&Gcirc;": "Ĝ",
-    "&Gcy;": "Г",
-    "&Gdot;": "Ġ",
-    "&Gfr;": "\uD835\uDD0A",
-    "&Gg;": "⋙",
-    "&Gopf;": "\uD835\uDD3E",
-    "&GreaterEqual;": "≥",
-    "&GreaterEqualLess;": "⋛",
-    "&GreaterFullEqual;": "≧",
-    "&GreaterGreater;": "⪢",
-    "&GreaterLess;": "≷",
-    "&GreaterSlantEqual;": "⩾",
-    "&GreaterTilde;": "≳",
-    "&Gscr;": "\uD835\uDCA2",
-    "&Gt;": "≫",
-    "&HARDcy;": "Ъ",
-    "&Hacek;": "ˇ",
-    "&Hat;": "^",
-    "&Hcirc;": "Ĥ",
-    "&Hfr;": "ℌ",
-    "&HilbertSpace;": "ℋ",
-    "&Hopf;": "ℍ",
-    "&HorizontalLine;": "─",
-    "&Hscr;": "ℋ",
-    "&Hstrok;": "Ħ",
-    "&HumpDownHump;": "≎",
-    "&HumpEqual;": "≏",
-    "&IEcy;": "Е",
-    "&IJlig;": "Ĳ",
-    "&IOcy;": "Ё",
-    "&Iacute": "Í",
-    "&Iacute;": "Í",
-    "&Icirc": "Î",
-    "&Icirc;": "Î",
-    "&Icy;": "И",
-    "&Idot;": "İ",
-    "&Ifr;": "ℑ",
-    "&Igrave": "Ì",
-    "&Igrave;": "Ì",
-    "&Im;": "ℑ",
-    "&Imacr;": "Ī",
-    "&ImaginaryI;": "ⅈ",
-    "&Implies;": "⇒",
-    "&Int;": "∬",
-    "&Integral;": "∫",
-    "&Intersection;": "⋂",
-    "&InvisibleComma;": "⁣",
-    "&InvisibleTimes;": "⁢",
-    "&Iogon;": "Į",
-    "&Iopf;": "\uD835\uDD40",
-    "&Iota;": "Ι",
-    "&Iscr;": "ℐ",
-    "&Itilde;": "Ĩ",
-    "&Iukcy;": "І",
-    "&Iuml": "Ï",
-    "&Iuml;": "Ï",
-    "&Jcirc;": "Ĵ",
-    "&Jcy;": "Й",
-    "&Jfr;": "\uD835\uDD0D",
-    "&Jopf;": "\uD835\uDD41",
-    "&Jscr;": "\uD835\uDCA5",
-    "&Jsercy;": "Ј",
-    "&Jukcy;": "Є",
-    "&KHcy;": "Х",
-    "&KJcy;": "Ќ",
-    "&Kappa;": "Κ",
-    "&Kcedil;": "Ķ",
-    "&Kcy;": "К",
-    "&Kfr;": "\uD835\uDD0E",
-    "&Kopf;": "\uD835\uDD42",
-    "&Kscr;": "\uD835\uDCA6",
-    "&LJcy;": "Љ",
-    "&LT": "<",
-    "&LT;": "<",
-    "&Lacute;": "Ĺ",
-    "&Lambda;": "Λ",
-    "&Lang;": "⟪",
-    "&Laplacetrf;": "ℒ",
-    "&Larr;": "↞",
-    "&Lcaron;": "Ľ",
-    "&Lcedil;": "Ļ",
-    "&Lcy;": "Л",
-    "&LeftAngleBracket;": "⟨",
-    "&LeftArrow;": "←",
-    "&LeftArrowBar;": "⇤",
-    "&LeftArrowRightArrow;": "⇆",
-    "&LeftCeiling;": "⌈",
-    "&LeftDoubleBracket;": "⟦",
-    "&LeftDownTeeVector;": "⥡",
-    "&LeftDownVector;": "⇃",
-    "&LeftDownVectorBar;": "⥙",
-    "&LeftFloor;": "⌊",
-    "&LeftRightArrow;": "↔",
-    "&LeftRightVector;": "⥎",
-    "&LeftTee;": "⊣",
-    "&LeftTeeArrow;": "↤",
-    "&LeftTeeVector;": "⥚",
-    "&LeftTriangle;": "⊲",
-    "&LeftTriangleBar;": "⧏",
-    "&LeftTriangleEqual;": "⊴",
-    "&LeftUpDownVector;": "⥑",
-    "&LeftUpTeeVector;": "⥠",
-    "&LeftUpVector;": "↿",
-    "&LeftUpVectorBar;": "⥘",
-    "&LeftVector;": "↼",
-    "&LeftVectorBar;": "⥒",
-    "&Leftarrow;": "⇐",
-    "&Leftrightarrow;": "⇔",
-    "&LessEqualGreater;": "⋚",
-    "&LessFullEqual;": "≦",
-    "&LessGreater;": "≶",
-    "&LessLess;": "⪡",
-    "&LessSlantEqual;": "⩽",
-    "&LessTilde;": "≲",
-    "&Lfr;": "\uD835\uDD0F",
-    "&Ll;": "⋘",
-    "&Lleftarrow;": "⇚",
-    "&Lmidot;": "Ŀ",
-    "&LongLeftArrow;": "⟵",
-    "&LongLeftRightArrow;": "⟷",
-    "&LongRightArrow;": "⟶",
-    "&Longleftarrow;": "⟸",
-    "&Longleftrightarrow;": "⟺",
-    "&Longrightarrow;": "⟹",
-    "&Lopf;": "\uD835\uDD43",
-    "&LowerLeftArrow;": "↙",
-    "&LowerRightArrow;": "↘",
-    "&Lscr;": "ℒ",
-    "&Lsh;": "↰",
-    "&Lstrok;": "Ł",
-    "&Lt;": "≪",
-    "&Map;": "⤅",
-    "&Mcy;": "М",
-    "&MediumSpace;": " ",
-    "&Mellintrf;": "ℳ",
-    "&Mfr;": "\uD835\uDD10",
-    "&MinusPlus;": "∓",
-    "&Mopf;": "\uD835\uDD44",
-    "&Mscr;": "ℳ",
-    "&Mu;": "Μ",
-    "&NJcy;": "Њ",
-    "&Nacute;": "Ń",
-    "&Ncaron;": "Ň",
-    "&Ncedil;": "Ņ",
-    "&Ncy;": "Н",
-    "&NegativeMediumSpace;": "​",
-    "&NegativeThickSpace;": "​",
-    "&NegativeThinSpace;": "​",
-    "&NegativeVeryThinSpace;": "​",
-    "&NestedGreaterGreater;": "≫",
-    "&NestedLessLess;": "≪",
-    "&NewLine;": `
-`,
-    "&Nfr;": "\uD835\uDD11",
-    "&NoBreak;": "⁠",
-    "&NonBreakingSpace;": " ",
-    "&Nopf;": "ℕ",
-    "&Not;": "⫬",
-    "&NotCongruent;": "≢",
-    "&NotCupCap;": "≭",
-    "&NotDoubleVerticalBar;": "∦",
-    "&NotElement;": "∉",
-    "&NotEqual;": "≠",
-    "&NotEqualTilde;": "≂̸",
-    "&NotExists;": "∄",
-    "&NotGreater;": "≯",
-    "&NotGreaterEqual;": "≱",
-    "&NotGreaterFullEqual;": "≧̸",
-    "&NotGreaterGreater;": "≫̸",
-    "&NotGreaterLess;": "≹",
-    "&NotGreaterSlantEqual;": "⩾̸",
-    "&NotGreaterTilde;": "≵",
-    "&NotHumpDownHump;": "≎̸",
-    "&NotHumpEqual;": "≏̸",
-    "&NotLeftTriangle;": "⋪",
-    "&NotLeftTriangleBar;": "⧏̸",
-    "&NotLeftTriangleEqual;": "⋬",
-    "&NotLess;": "≮",
-    "&NotLessEqual;": "≰",
-    "&NotLessGreater;": "≸",
-    "&NotLessLess;": "≪̸",
-    "&NotLessSlantEqual;": "⩽̸",
-    "&NotLessTilde;": "≴",
-    "&NotNestedGreaterGreater;": "⪢̸",
-    "&NotNestedLessLess;": "⪡̸",
-    "&NotPrecedes;": "⊀",
-    "&NotPrecedesEqual;": "⪯̸",
-    "&NotPrecedesSlantEqual;": "⋠",
-    "&NotReverseElement;": "∌",
-    "&NotRightTriangle;": "⋫",
-    "&NotRightTriangleBar;": "⧐̸",
-    "&NotRightTriangleEqual;": "⋭",
-    "&NotSquareSubset;": "⊏̸",
-    "&NotSquareSubsetEqual;": "⋢",
-    "&NotSquareSuperset;": "⊐̸",
-    "&NotSquareSupersetEqual;": "⋣",
-    "&NotSubset;": "⊂⃒",
-    "&NotSubsetEqual;": "⊈",
-    "&NotSucceeds;": "⊁",
-    "&NotSucceedsEqual;": "⪰̸",
-    "&NotSucceedsSlantEqual;": "⋡",
-    "&NotSucceedsTilde;": "≿̸",
-    "&NotSuperset;": "⊃⃒",
-    "&NotSupersetEqual;": "⊉",
-    "&NotTilde;": "≁",
-    "&NotTildeEqual;": "≄",
-    "&NotTildeFullEqual;": "≇",
-    "&NotTildeTilde;": "≉",
-    "&NotVerticalBar;": "∤",
-    "&Nscr;": "\uD835\uDCA9",
-    "&Ntilde": "Ñ",
-    "&Ntilde;": "Ñ",
-    "&Nu;": "Ν",
-    "&OElig;": "Œ",
-    "&Oacute": "Ó",
-    "&Oacute;": "Ó",
-    "&Ocirc": "Ô",
-    "&Ocirc;": "Ô",
-    "&Ocy;": "О",
-    "&Odblac;": "Ő",
-    "&Ofr;": "\uD835\uDD12",
-    "&Ograve": "Ò",
-    "&Ograve;": "Ò",
-    "&Omacr;": "Ō",
-    "&Omega;": "Ω",
-    "&Omicron;": "Ο",
-    "&Oopf;": "\uD835\uDD46",
-    "&OpenCurlyDoubleQuote;": "“",
-    "&OpenCurlyQuote;": "‘",
-    "&Or;": "⩔",
-    "&Oscr;": "\uD835\uDCAA",
-    "&Oslash": "Ø",
-    "&Oslash;": "Ø",
-    "&Otilde": "Õ",
-    "&Otilde;": "Õ",
-    "&Otimes;": "⨷",
-    "&Ouml": "Ö",
-    "&Ouml;": "Ö",
-    "&OverBar;": "‾",
-    "&OverBrace;": "⏞",
-    "&OverBracket;": "⎴",
-    "&OverParenthesis;": "⏜",
-    "&PartialD;": "∂",
-    "&Pcy;": "П",
-    "&Pfr;": "\uD835\uDD13",
-    "&Phi;": "Φ",
-    "&Pi;": "Π",
-    "&PlusMinus;": "±",
-    "&Poincareplane;": "ℌ",
-    "&Popf;": "ℙ",
-    "&Pr;": "⪻",
-    "&Precedes;": "≺",
-    "&PrecedesEqual;": "⪯",
-    "&PrecedesSlantEqual;": "≼",
-    "&PrecedesTilde;": "≾",
-    "&Prime;": "″",
-    "&Product;": "∏",
-    "&Proportion;": "∷",
-    "&Proportional;": "∝",
-    "&Pscr;": "\uD835\uDCAB",
-    "&Psi;": "Ψ",
-    "&QUOT": '"',
-    "&QUOT;": '"',
-    "&Qfr;": "\uD835\uDD14",
-    "&Qopf;": "ℚ",
-    "&Qscr;": "\uD835\uDCAC",
-    "&RBarr;": "⤐",
-    "&REG": "®",
-    "&REG;": "®",
-    "&Racute;": "Ŕ",
-    "&Rang;": "⟫",
-    "&Rarr;": "↠",
-    "&Rarrtl;": "⤖",
-    "&Rcaron;": "Ř",
-    "&Rcedil;": "Ŗ",
-    "&Rcy;": "Р",
-    "&Re;": "ℜ",
-    "&ReverseElement;": "∋",
-    "&ReverseEquilibrium;": "⇋",
-    "&ReverseUpEquilibrium;": "⥯",
-    "&Rfr;": "ℜ",
-    "&Rho;": "Ρ",
-    "&RightAngleBracket;": "⟩",
-    "&RightArrow;": "→",
-    "&RightArrowBar;": "⇥",
-    "&RightArrowLeftArrow;": "⇄",
-    "&RightCeiling;": "⌉",
-    "&RightDoubleBracket;": "⟧",
-    "&RightDownTeeVector;": "⥝",
-    "&RightDownVector;": "⇂",
-    "&RightDownVectorBar;": "⥕",
-    "&RightFloor;": "⌋",
-    "&RightTee;": "⊢",
-    "&RightTeeArrow;": "↦",
-    "&RightTeeVector;": "⥛",
-    "&RightTriangle;": "⊳",
-    "&RightTriangleBar;": "⧐",
-    "&RightTriangleEqual;": "⊵",
-    "&RightUpDownVector;": "⥏",
-    "&RightUpTeeVector;": "⥜",
-    "&RightUpVector;": "↾",
-    "&RightUpVectorBar;": "⥔",
-    "&RightVector;": "⇀",
-    "&RightVectorBar;": "⥓",
-    "&Rightarrow;": "⇒",
-    "&Ropf;": "ℝ",
-    "&RoundImplies;": "⥰",
-    "&Rrightarrow;": "⇛",
-    "&Rscr;": "ℛ",
-    "&Rsh;": "↱",
-    "&RuleDelayed;": "⧴",
-    "&SHCHcy;": "Щ",
-    "&SHcy;": "Ш",
-    "&SOFTcy;": "Ь",
-    "&Sacute;": "Ś",
-    "&Sc;": "⪼",
-    "&Scaron;": "Š",
-    "&Scedil;": "Ş",
-    "&Scirc;": "Ŝ",
-    "&Scy;": "С",
-    "&Sfr;": "\uD835\uDD16",
-    "&ShortDownArrow;": "↓",
-    "&ShortLeftArrow;": "←",
-    "&ShortRightArrow;": "→",
-    "&ShortUpArrow;": "↑",
-    "&Sigma;": "Σ",
-    "&SmallCircle;": "∘",
-    "&Sopf;": "\uD835\uDD4A",
-    "&Sqrt;": "√",
-    "&Square;": "□",
-    "&SquareIntersection;": "⊓",
-    "&SquareSubset;": "⊏",
-    "&SquareSubsetEqual;": "⊑",
-    "&SquareSuperset;": "⊐",
-    "&SquareSupersetEqual;": "⊒",
-    "&SquareUnion;": "⊔",
-    "&Sscr;": "\uD835\uDCAE",
-    "&Star;": "⋆",
-    "&Sub;": "⋐",
-    "&Subset;": "⋐",
-    "&SubsetEqual;": "⊆",
-    "&Succeeds;": "≻",
-    "&SucceedsEqual;": "⪰",
-    "&SucceedsSlantEqual;": "≽",
-    "&SucceedsTilde;": "≿",
-    "&SuchThat;": "∋",
-    "&Sum;": "∑",
-    "&Sup;": "⋑",
-    "&Superset;": "⊃",
-    "&SupersetEqual;": "⊇",
-    "&Supset;": "⋑",
-    "&THORN": "Þ",
-    "&THORN;": "Þ",
-    "&TRADE;": "™",
-    "&TSHcy;": "Ћ",
-    "&TScy;": "Ц",
-    "&Tab;": "\t",
-    "&Tau;": "Τ",
-    "&Tcaron;": "Ť",
-    "&Tcedil;": "Ţ",
-    "&Tcy;": "Т",
-    "&Tfr;": "\uD835\uDD17",
-    "&Therefore;": "∴",
-    "&Theta;": "Θ",
-    "&ThickSpace;": "  ",
-    "&ThinSpace;": " ",
-    "&Tilde;": "∼",
-    "&TildeEqual;": "≃",
-    "&TildeFullEqual;": "≅",
-    "&TildeTilde;": "≈",
-    "&Topf;": "\uD835\uDD4B",
-    "&TripleDot;": "⃛",
-    "&Tscr;": "\uD835\uDCAF",
-    "&Tstrok;": "Ŧ",
-    "&Uacute": "Ú",
-    "&Uacute;": "Ú",
-    "&Uarr;": "↟",
-    "&Uarrocir;": "⥉",
-    "&Ubrcy;": "Ў",
-    "&Ubreve;": "Ŭ",
-    "&Ucirc": "Û",
-    "&Ucirc;": "Û",
-    "&Ucy;": "У",
-    "&Udblac;": "Ű",
-    "&Ufr;": "\uD835\uDD18",
-    "&Ugrave": "Ù",
-    "&Ugrave;": "Ù",
-    "&Umacr;": "Ū",
-    "&UnderBar;": "_",
-    "&UnderBrace;": "⏟",
-    "&UnderBracket;": "⎵",
-    "&UnderParenthesis;": "⏝",
-    "&Union;": "⋃",
-    "&UnionPlus;": "⊎",
-    "&Uogon;": "Ų",
-    "&Uopf;": "\uD835\uDD4C",
-    "&UpArrow;": "↑",
-    "&UpArrowBar;": "⤒",
-    "&UpArrowDownArrow;": "⇅",
-    "&UpDownArrow;": "↕",
-    "&UpEquilibrium;": "⥮",
-    "&UpTee;": "⊥",
-    "&UpTeeArrow;": "↥",
-    "&Uparrow;": "⇑",
-    "&Updownarrow;": "⇕",
-    "&UpperLeftArrow;": "↖",
-    "&UpperRightArrow;": "↗",
-    "&Upsi;": "ϒ",
-    "&Upsilon;": "Υ",
-    "&Uring;": "Ů",
-    "&Uscr;": "\uD835\uDCB0",
-    "&Utilde;": "Ũ",
-    "&Uuml": "Ü",
-    "&Uuml;": "Ü",
-    "&VDash;": "⊫",
-    "&Vbar;": "⫫",
-    "&Vcy;": "В",
-    "&Vdash;": "⊩",
-    "&Vdashl;": "⫦",
-    "&Vee;": "⋁",
-    "&Verbar;": "‖",
-    "&Vert;": "‖",
-    "&VerticalBar;": "∣",
-    "&VerticalLine;": "|",
-    "&VerticalSeparator;": "❘",
-    "&VerticalTilde;": "≀",
-    "&VeryThinSpace;": " ",
-    "&Vfr;": "\uD835\uDD19",
-    "&Vopf;": "\uD835\uDD4D",
-    "&Vscr;": "\uD835\uDCB1",
-    "&Vvdash;": "⊪",
-    "&Wcirc;": "Ŵ",
-    "&Wedge;": "⋀",
-    "&Wfr;": "\uD835\uDD1A",
-    "&Wopf;": "\uD835\uDD4E",
-    "&Wscr;": "\uD835\uDCB2",
-    "&Xfr;": "\uD835\uDD1B",
-    "&Xi;": "Ξ",
-    "&Xopf;": "\uD835\uDD4F",
-    "&Xscr;": "\uD835\uDCB3",
-    "&YAcy;": "Я",
-    "&YIcy;": "Ї",
-    "&YUcy;": "Ю",
-    "&Yacute": "Ý",
-    "&Yacute;": "Ý",
-    "&Ycirc;": "Ŷ",
-    "&Ycy;": "Ы",
-    "&Yfr;": "\uD835\uDD1C",
-    "&Yopf;": "\uD835\uDD50",
-    "&Yscr;": "\uD835\uDCB4",
-    "&Yuml;": "Ÿ",
-    "&ZHcy;": "Ж",
-    "&Zacute;": "Ź",
-    "&Zcaron;": "Ž",
-    "&Zcy;": "З",
-    "&Zdot;": "Ż",
-    "&ZeroWidthSpace;": "​",
-    "&Zeta;": "Ζ",
-    "&Zfr;": "ℨ",
-    "&Zopf;": "ℤ",
-    "&Zscr;": "\uD835\uDCB5",
-    "&aacute": "á",
-    "&aacute;": "á",
-    "&abreve;": "ă",
-    "&ac;": "∾",
-    "&acE;": "∾̳",
-    "&acd;": "∿",
-    "&acirc": "â",
-    "&acirc;": "â",
-    "&acute": "´",
-    "&acute;": "´",
-    "&acy;": "а",
-    "&aelig": "æ",
-    "&aelig;": "æ",
-    "&af;": "⁡",
-    "&afr;": "\uD835\uDD1E",
-    "&agrave": "à",
-    "&agrave;": "à",
-    "&alefsym;": "ℵ",
-    "&aleph;": "ℵ",
-    "&alpha;": "α",
-    "&amacr;": "ā",
-    "&amalg;": "⨿",
-    "&amp": "&",
-    "&amp;": "&",
-    "&and;": "∧",
-    "&andand;": "⩕",
-    "&andd;": "⩜",
-    "&andslope;": "⩘",
-    "&andv;": "⩚",
-    "&ang;": "∠",
-    "&ange;": "⦤",
-    "&angle;": "∠",
-    "&angmsd;": "∡",
-    "&angmsdaa;": "⦨",
-    "&angmsdab;": "⦩",
-    "&angmsdac;": "⦪",
-    "&angmsdad;": "⦫",
-    "&angmsdae;": "⦬",
-    "&angmsdaf;": "⦭",
-    "&angmsdag;": "⦮",
-    "&angmsdah;": "⦯",
-    "&angrt;": "∟",
-    "&angrtvb;": "⊾",
-    "&angrtvbd;": "⦝",
-    "&angsph;": "∢",
-    "&angst;": "Å",
-    "&angzarr;": "⍼",
-    "&aogon;": "ą",
-    "&aopf;": "\uD835\uDD52",
-    "&ap;": "≈",
-    "&apE;": "⩰",
-    "&apacir;": "⩯",
-    "&ape;": "≊",
-    "&apid;": "≋",
-    "&apos;": "'",
-    "&approx;": "≈",
-    "&approxeq;": "≊",
-    "&aring": "å",
-    "&aring;": "å",
-    "&ascr;": "\uD835\uDCB6",
-    "&ast;": "*",
-    "&asymp;": "≈",
-    "&asympeq;": "≍",
-    "&atilde": "ã",
-    "&atilde;": "ã",
-    "&auml": "ä",
-    "&auml;": "ä",
-    "&awconint;": "∳",
-    "&awint;": "⨑",
-    "&bNot;": "⫭",
-    "&backcong;": "≌",
-    "&backepsilon;": "϶",
-    "&backprime;": "‵",
-    "&backsim;": "∽",
-    "&backsimeq;": "⋍",
-    "&barvee;": "⊽",
-    "&barwed;": "⌅",
-    "&barwedge;": "⌅",
-    "&bbrk;": "⎵",
-    "&bbrktbrk;": "⎶",
-    "&bcong;": "≌",
-    "&bcy;": "б",
-    "&bdquo;": "„",
-    "&becaus;": "∵",
-    "&because;": "∵",
-    "&bemptyv;": "⦰",
-    "&bepsi;": "϶",
-    "&bernou;": "ℬ",
-    "&beta;": "β",
-    "&beth;": "ℶ",
-    "&between;": "≬",
-    "&bfr;": "\uD835\uDD1F",
-    "&bigcap;": "⋂",
-    "&bigcirc;": "◯",
-    "&bigcup;": "⋃",
-    "&bigodot;": "⨀",
-    "&bigoplus;": "⨁",
-    "&bigotimes;": "⨂",
-    "&bigsqcup;": "⨆",
-    "&bigstar;": "★",
-    "&bigtriangledown;": "▽",
-    "&bigtriangleup;": "△",
-    "&biguplus;": "⨄",
-    "&bigvee;": "⋁",
-    "&bigwedge;": "⋀",
-    "&bkarow;": "⤍",
-    "&blacklozenge;": "⧫",
-    "&blacksquare;": "▪",
-    "&blacktriangle;": "▴",
-    "&blacktriangledown;": "▾",
-    "&blacktriangleleft;": "◂",
-    "&blacktriangleright;": "▸",
-    "&blank;": "␣",
-    "&blk12;": "▒",
-    "&blk14;": "░",
-    "&blk34;": "▓",
-    "&block;": "█",
-    "&bne;": "=⃥",
-    "&bnequiv;": "≡⃥",
-    "&bnot;": "⌐",
-    "&bopf;": "\uD835\uDD53",
-    "&bot;": "⊥",
-    "&bottom;": "⊥",
-    "&bowtie;": "⋈",
-    "&boxDL;": "╗",
-    "&boxDR;": "╔",
-    "&boxDl;": "╖",
-    "&boxDr;": "╓",
-    "&boxH;": "═",
-    "&boxHD;": "╦",
-    "&boxHU;": "╩",
-    "&boxHd;": "╤",
-    "&boxHu;": "╧",
-    "&boxUL;": "╝",
-    "&boxUR;": "╚",
-    "&boxUl;": "╜",
-    "&boxUr;": "╙",
-    "&boxV;": "║",
-    "&boxVH;": "╬",
-    "&boxVL;": "╣",
-    "&boxVR;": "╠",
-    "&boxVh;": "╫",
-    "&boxVl;": "╢",
-    "&boxVr;": "╟",
-    "&boxbox;": "⧉",
-    "&boxdL;": "╕",
-    "&boxdR;": "╒",
-    "&boxdl;": "┐",
-    "&boxdr;": "┌",
-    "&boxh;": "─",
-    "&boxhD;": "╥",
-    "&boxhU;": "╨",
-    "&boxhd;": "┬",
-    "&boxhu;": "┴",
-    "&boxminus;": "⊟",
-    "&boxplus;": "⊞",
-    "&boxtimes;": "⊠",
-    "&boxuL;": "╛",
-    "&boxuR;": "╘",
-    "&boxul;": "┘",
-    "&boxur;": "└",
-    "&boxv;": "│",
-    "&boxvH;": "╪",
-    "&boxvL;": "╡",
-    "&boxvR;": "╞",
-    "&boxvh;": "┼",
-    "&boxvl;": "┤",
-    "&boxvr;": "├",
-    "&bprime;": "‵",
-    "&breve;": "˘",
-    "&brvbar": "¦",
-    "&brvbar;": "¦",
-    "&bscr;": "\uD835\uDCB7",
-    "&bsemi;": "⁏",
-    "&bsim;": "∽",
-    "&bsime;": "⋍",
-    "&bsol;": "\\",
-    "&bsolb;": "⧅",
-    "&bsolhsub;": "⟈",
-    "&bull;": "•",
-    "&bullet;": "•",
-    "&bump;": "≎",
-    "&bumpE;": "⪮",
-    "&bumpe;": "≏",
-    "&bumpeq;": "≏",
-    "&cacute;": "ć",
-    "&cap;": "∩",
-    "&capand;": "⩄",
-    "&capbrcup;": "⩉",
-    "&capcap;": "⩋",
-    "&capcup;": "⩇",
-    "&capdot;": "⩀",
-    "&caps;": "∩︀",
-    "&caret;": "⁁",
-    "&caron;": "ˇ",
-    "&ccaps;": "⩍",
-    "&ccaron;": "č",
-    "&ccedil": "ç",
-    "&ccedil;": "ç",
-    "&ccirc;": "ĉ",
-    "&ccups;": "⩌",
-    "&ccupssm;": "⩐",
-    "&cdot;": "ċ",
-    "&cedil": "¸",
-    "&cedil;": "¸",
-    "&cemptyv;": "⦲",
-    "&cent": "¢",
-    "&cent;": "¢",
-    "&centerdot;": "·",
-    "&cfr;": "\uD835\uDD20",
-    "&chcy;": "ч",
-    "&check;": "✓",
-    "&checkmark;": "✓",
-    "&chi;": "χ",
-    "&cir;": "○",
-    "&cirE;": "⧃",
-    "&circ;": "ˆ",
-    "&circeq;": "≗",
-    "&circlearrowleft;": "↺",
-    "&circlearrowright;": "↻",
-    "&circledR;": "®",
-    "&circledS;": "Ⓢ",
-    "&circledast;": "⊛",
-    "&circledcirc;": "⊚",
-    "&circleddash;": "⊝",
-    "&cire;": "≗",
-    "&cirfnint;": "⨐",
-    "&cirmid;": "⫯",
-    "&cirscir;": "⧂",
-    "&clubs;": "♣",
-    "&clubsuit;": "♣",
-    "&colon;": ":",
-    "&colone;": "≔",
-    "&coloneq;": "≔",
-    "&comma;": ",",
-    "&commat;": "@",
-    "&comp;": "∁",
-    "&compfn;": "∘",
-    "&complement;": "∁",
-    "&complexes;": "ℂ",
-    "&cong;": "≅",
-    "&congdot;": "⩭",
-    "&conint;": "∮",
-    "&copf;": "\uD835\uDD54",
-    "&coprod;": "∐",
-    "&copy": "©",
-    "&copy;": "©",
-    "&copysr;": "℗",
-    "&crarr;": "↵",
-    "&cross;": "✗",
-    "&cscr;": "\uD835\uDCB8",
-    "&csub;": "⫏",
-    "&csube;": "⫑",
-    "&csup;": "⫐",
-    "&csupe;": "⫒",
-    "&ctdot;": "⋯",
-    "&cudarrl;": "⤸",
-    "&cudarrr;": "⤵",
-    "&cuepr;": "⋞",
-    "&cuesc;": "⋟",
-    "&cularr;": "↶",
-    "&cularrp;": "⤽",
-    "&cup;": "∪",
-    "&cupbrcap;": "⩈",
-    "&cupcap;": "⩆",
-    "&cupcup;": "⩊",
-    "&cupdot;": "⊍",
-    "&cupor;": "⩅",
-    "&cups;": "∪︀",
-    "&curarr;": "↷",
-    "&curarrm;": "⤼",
-    "&curlyeqprec;": "⋞",
-    "&curlyeqsucc;": "⋟",
-    "&curlyvee;": "⋎",
-    "&curlywedge;": "⋏",
-    "&curren": "¤",
-    "&curren;": "¤",
-    "&curvearrowleft;": "↶",
-    "&curvearrowright;": "↷",
-    "&cuvee;": "⋎",
-    "&cuwed;": "⋏",
-    "&cwconint;": "∲",
-    "&cwint;": "∱",
-    "&cylcty;": "⌭",
-    "&dArr;": "⇓",
-    "&dHar;": "⥥",
-    "&dagger;": "†",
-    "&daleth;": "ℸ",
-    "&darr;": "↓",
-    "&dash;": "‐",
-    "&dashv;": "⊣",
-    "&dbkarow;": "⤏",
-    "&dblac;": "˝",
-    "&dcaron;": "ď",
-    "&dcy;": "д",
-    "&dd;": "ⅆ",
-    "&ddagger;": "‡",
-    "&ddarr;": "⇊",
-    "&ddotseq;": "⩷",
-    "&deg": "°",
-    "&deg;": "°",
-    "&delta;": "δ",
-    "&demptyv;": "⦱",
-    "&dfisht;": "⥿",
-    "&dfr;": "\uD835\uDD21",
-    "&dharl;": "⇃",
-    "&dharr;": "⇂",
-    "&diam;": "⋄",
-    "&diamond;": "⋄",
-    "&diamondsuit;": "♦",
-    "&diams;": "♦",
-    "&die;": "¨",
-    "&digamma;": "ϝ",
-    "&disin;": "⋲",
-    "&div;": "÷",
-    "&divide": "÷",
-    "&divide;": "÷",
-    "&divideontimes;": "⋇",
-    "&divonx;": "⋇",
-    "&djcy;": "ђ",
-    "&dlcorn;": "⌞",
-    "&dlcrop;": "⌍",
-    "&dollar;": "$",
-    "&dopf;": "\uD835\uDD55",
-    "&dot;": "˙",
-    "&doteq;": "≐",
-    "&doteqdot;": "≑",
-    "&dotminus;": "∸",
-    "&dotplus;": "∔",
-    "&dotsquare;": "⊡",
-    "&doublebarwedge;": "⌆",
-    "&downarrow;": "↓",
-    "&downdownarrows;": "⇊",
-    "&downharpoonleft;": "⇃",
-    "&downharpoonright;": "⇂",
-    "&drbkarow;": "⤐",
-    "&drcorn;": "⌟",
-    "&drcrop;": "⌌",
-    "&dscr;": "\uD835\uDCB9",
-    "&dscy;": "ѕ",
-    "&dsol;": "⧶",
-    "&dstrok;": "đ",
-    "&dtdot;": "⋱",
-    "&dtri;": "▿",
-    "&dtrif;": "▾",
-    "&duarr;": "⇵",
-    "&duhar;": "⥯",
-    "&dwangle;": "⦦",
-    "&dzcy;": "џ",
-    "&dzigrarr;": "⟿",
-    "&eDDot;": "⩷",
-    "&eDot;": "≑",
-    "&eacute": "é",
-    "&eacute;": "é",
-    "&easter;": "⩮",
-    "&ecaron;": "ě",
-    "&ecir;": "≖",
-    "&ecirc": "ê",
-    "&ecirc;": "ê",
-    "&ecolon;": "≕",
-    "&ecy;": "э",
-    "&edot;": "ė",
-    "&ee;": "ⅇ",
-    "&efDot;": "≒",
-    "&efr;": "\uD835\uDD22",
-    "&eg;": "⪚",
-    "&egrave": "è",
-    "&egrave;": "è",
-    "&egs;": "⪖",
-    "&egsdot;": "⪘",
-    "&el;": "⪙",
-    "&elinters;": "⏧",
-    "&ell;": "ℓ",
-    "&els;": "⪕",
-    "&elsdot;": "⪗",
-    "&emacr;": "ē",
-    "&empty;": "∅",
-    "&emptyset;": "∅",
-    "&emptyv;": "∅",
-    "&emsp13;": " ",
-    "&emsp14;": " ",
-    "&emsp;": " ",
-    "&eng;": "ŋ",
-    "&ensp;": " ",
-    "&eogon;": "ę",
-    "&eopf;": "\uD835\uDD56",
-    "&epar;": "⋕",
-    "&eparsl;": "⧣",
-    "&eplus;": "⩱",
-    "&epsi;": "ε",
-    "&epsilon;": "ε",
-    "&epsiv;": "ϵ",
-    "&eqcirc;": "≖",
-    "&eqcolon;": "≕",
-    "&eqsim;": "≂",
-    "&eqslantgtr;": "⪖",
-    "&eqslantless;": "⪕",
-    "&equals;": "=",
-    "&equest;": "≟",
-    "&equiv;": "≡",
-    "&equivDD;": "⩸",
-    "&eqvparsl;": "⧥",
-    "&erDot;": "≓",
-    "&erarr;": "⥱",
-    "&escr;": "ℯ",
-    "&esdot;": "≐",
-    "&esim;": "≂",
-    "&eta;": "η",
-    "&eth": "ð",
-    "&eth;": "ð",
-    "&euml": "ë",
-    "&euml;": "ë",
-    "&euro;": "€",
-    "&excl;": "!",
-    "&exist;": "∃",
-    "&expectation;": "ℰ",
-    "&exponentiale;": "ⅇ",
-    "&fallingdotseq;": "≒",
-    "&fcy;": "ф",
-    "&female;": "♀",
-    "&ffilig;": "ﬃ",
-    "&fflig;": "ﬀ",
-    "&ffllig;": "ﬄ",
-    "&ffr;": "\uD835\uDD23",
-    "&filig;": "ﬁ",
-    "&fjlig;": "fj",
-    "&flat;": "♭",
-    "&fllig;": "ﬂ",
-    "&fltns;": "▱",
-    "&fnof;": "ƒ",
-    "&fopf;": "\uD835\uDD57",
-    "&forall;": "∀",
-    "&fork;": "⋔",
-    "&forkv;": "⫙",
-    "&fpartint;": "⨍",
-    "&frac12": "½",
-    "&frac12;": "½",
-    "&frac13;": "⅓",
-    "&frac14": "¼",
-    "&frac14;": "¼",
-    "&frac15;": "⅕",
-    "&frac16;": "⅙",
-    "&frac18;": "⅛",
-    "&frac23;": "⅔",
-    "&frac25;": "⅖",
-    "&frac34": "¾",
-    "&frac34;": "¾",
-    "&frac35;": "⅗",
-    "&frac38;": "⅜",
-    "&frac45;": "⅘",
-    "&frac56;": "⅚",
-    "&frac58;": "⅝",
-    "&frac78;": "⅞",
-    "&frasl;": "⁄",
-    "&frown;": "⌢",
-    "&fscr;": "\uD835\uDCBB",
-    "&gE;": "≧",
-    "&gEl;": "⪌",
-    "&gacute;": "ǵ",
-    "&gamma;": "γ",
-    "&gammad;": "ϝ",
-    "&gap;": "⪆",
-    "&gbreve;": "ğ",
-    "&gcirc;": "ĝ",
-    "&gcy;": "г",
-    "&gdot;": "ġ",
-    "&ge;": "≥",
-    "&gel;": "⋛",
-    "&geq;": "≥",
-    "&geqq;": "≧",
-    "&geqslant;": "⩾",
-    "&ges;": "⩾",
-    "&gescc;": "⪩",
-    "&gesdot;": "⪀",
-    "&gesdoto;": "⪂",
-    "&gesdotol;": "⪄",
-    "&gesl;": "⋛︀",
-    "&gesles;": "⪔",
-    "&gfr;": "\uD835\uDD24",
-    "&gg;": "≫",
-    "&ggg;": "⋙",
-    "&gimel;": "ℷ",
-    "&gjcy;": "ѓ",
-    "&gl;": "≷",
-    "&glE;": "⪒",
-    "&gla;": "⪥",
-    "&glj;": "⪤",
-    "&gnE;": "≩",
-    "&gnap;": "⪊",
-    "&gnapprox;": "⪊",
-    "&gne;": "⪈",
-    "&gneq;": "⪈",
-    "&gneqq;": "≩",
-    "&gnsim;": "⋧",
-    "&gopf;": "\uD835\uDD58",
-    "&grave;": "`",
-    "&gscr;": "ℊ",
-    "&gsim;": "≳",
-    "&gsime;": "⪎",
-    "&gsiml;": "⪐",
-    "&gt": ">",
-    "&gt;": ">",
-    "&gtcc;": "⪧",
-    "&gtcir;": "⩺",
-    "&gtdot;": "⋗",
-    "&gtlPar;": "⦕",
-    "&gtquest;": "⩼",
-    "&gtrapprox;": "⪆",
-    "&gtrarr;": "⥸",
-    "&gtrdot;": "⋗",
-    "&gtreqless;": "⋛",
-    "&gtreqqless;": "⪌",
-    "&gtrless;": "≷",
-    "&gtrsim;": "≳",
-    "&gvertneqq;": "≩︀",
-    "&gvnE;": "≩︀",
-    "&hArr;": "⇔",
-    "&hairsp;": " ",
-    "&half;": "½",
-    "&hamilt;": "ℋ",
-    "&hardcy;": "ъ",
-    "&harr;": "↔",
-    "&harrcir;": "⥈",
-    "&harrw;": "↭",
-    "&hbar;": "ℏ",
-    "&hcirc;": "ĥ",
-    "&hearts;": "♥",
-    "&heartsuit;": "♥",
-    "&hellip;": "…",
-    "&hercon;": "⊹",
-    "&hfr;": "\uD835\uDD25",
-    "&hksearow;": "⤥",
-    "&hkswarow;": "⤦",
-    "&hoarr;": "⇿",
-    "&homtht;": "∻",
-    "&hookleftarrow;": "↩",
-    "&hookrightarrow;": "↪",
-    "&hopf;": "\uD835\uDD59",
-    "&horbar;": "―",
-    "&hscr;": "\uD835\uDCBD",
-    "&hslash;": "ℏ",
-    "&hstrok;": "ħ",
-    "&hybull;": "⁃",
-    "&hyphen;": "‐",
-    "&iacute": "í",
-    "&iacute;": "í",
-    "&ic;": "⁣",
-    "&icirc": "î",
-    "&icirc;": "î",
-    "&icy;": "и",
-    "&iecy;": "е",
-    "&iexcl": "¡",
-    "&iexcl;": "¡",
-    "&iff;": "⇔",
-    "&ifr;": "\uD835\uDD26",
-    "&igrave": "ì",
-    "&igrave;": "ì",
-    "&ii;": "ⅈ",
-    "&iiiint;": "⨌",
-    "&iiint;": "∭",
-    "&iinfin;": "⧜",
-    "&iiota;": "℩",
-    "&ijlig;": "ĳ",
-    "&imacr;": "ī",
-    "&image;": "ℑ",
-    "&imagline;": "ℐ",
-    "&imagpart;": "ℑ",
-    "&imath;": "ı",
-    "&imof;": "⊷",
-    "&imped;": "Ƶ",
-    "&in;": "∈",
-    "&incare;": "℅",
-    "&infin;": "∞",
-    "&infintie;": "⧝",
-    "&inodot;": "ı",
-    "&int;": "∫",
-    "&intcal;": "⊺",
-    "&integers;": "ℤ",
-    "&intercal;": "⊺",
-    "&intlarhk;": "⨗",
-    "&intprod;": "⨼",
-    "&iocy;": "ё",
-    "&iogon;": "į",
-    "&iopf;": "\uD835\uDD5A",
-    "&iota;": "ι",
-    "&iprod;": "⨼",
-    "&iquest": "¿",
-    "&iquest;": "¿",
-    "&iscr;": "\uD835\uDCBE",
-    "&isin;": "∈",
-    "&isinE;": "⋹",
-    "&isindot;": "⋵",
-    "&isins;": "⋴",
-    "&isinsv;": "⋳",
-    "&isinv;": "∈",
-    "&it;": "⁢",
-    "&itilde;": "ĩ",
-    "&iukcy;": "і",
-    "&iuml": "ï",
-    "&iuml;": "ï",
-    "&jcirc;": "ĵ",
-    "&jcy;": "й",
-    "&jfr;": "\uD835\uDD27",
-    "&jmath;": "ȷ",
-    "&jopf;": "\uD835\uDD5B",
-    "&jscr;": "\uD835\uDCBF",
-    "&jsercy;": "ј",
-    "&jukcy;": "є",
-    "&kappa;": "κ",
-    "&kappav;": "ϰ",
-    "&kcedil;": "ķ",
-    "&kcy;": "к",
-    "&kfr;": "\uD835\uDD28",
-    "&kgreen;": "ĸ",
-    "&khcy;": "х",
-    "&kjcy;": "ќ",
-    "&kopf;": "\uD835\uDD5C",
-    "&kscr;": "\uD835\uDCC0",
-    "&lAarr;": "⇚",
-    "&lArr;": "⇐",
-    "&lAtail;": "⤛",
-    "&lBarr;": "⤎",
-    "&lE;": "≦",
-    "&lEg;": "⪋",
-    "&lHar;": "⥢",
-    "&lacute;": "ĺ",
-    "&laemptyv;": "⦴",
-    "&lagran;": "ℒ",
-    "&lambda;": "λ",
-    "&lang;": "⟨",
-    "&langd;": "⦑",
-    "&langle;": "⟨",
-    "&lap;": "⪅",
-    "&laquo": "«",
-    "&laquo;": "«",
-    "&larr;": "←",
-    "&larrb;": "⇤",
-    "&larrbfs;": "⤟",
-    "&larrfs;": "⤝",
-    "&larrhk;": "↩",
-    "&larrlp;": "↫",
-    "&larrpl;": "⤹",
-    "&larrsim;": "⥳",
-    "&larrtl;": "↢",
-    "&lat;": "⪫",
-    "&latail;": "⤙",
-    "&late;": "⪭",
-    "&lates;": "⪭︀",
-    "&lbarr;": "⤌",
-    "&lbbrk;": "❲",
-    "&lbrace;": "{",
-    "&lbrack;": "[",
-    "&lbrke;": "⦋",
-    "&lbrksld;": "⦏",
-    "&lbrkslu;": "⦍",
-    "&lcaron;": "ľ",
-    "&lcedil;": "ļ",
-    "&lceil;": "⌈",
-    "&lcub;": "{",
-    "&lcy;": "л",
-    "&ldca;": "⤶",
-    "&ldquo;": "“",
-    "&ldquor;": "„",
-    "&ldrdhar;": "⥧",
-    "&ldrushar;": "⥋",
-    "&ldsh;": "↲",
-    "&le;": "≤",
-    "&leftarrow;": "←",
-    "&leftarrowtail;": "↢",
-    "&leftharpoondown;": "↽",
-    "&leftharpoonup;": "↼",
-    "&leftleftarrows;": "⇇",
-    "&leftrightarrow;": "↔",
-    "&leftrightarrows;": "⇆",
-    "&leftrightharpoons;": "⇋",
-    "&leftrightsquigarrow;": "↭",
-    "&leftthreetimes;": "⋋",
-    "&leg;": "⋚",
-    "&leq;": "≤",
-    "&leqq;": "≦",
-    "&leqslant;": "⩽",
-    "&les;": "⩽",
-    "&lescc;": "⪨",
-    "&lesdot;": "⩿",
-    "&lesdoto;": "⪁",
-    "&lesdotor;": "⪃",
-    "&lesg;": "⋚︀",
-    "&lesges;": "⪓",
-    "&lessapprox;": "⪅",
-    "&lessdot;": "⋖",
-    "&lesseqgtr;": "⋚",
-    "&lesseqqgtr;": "⪋",
-    "&lessgtr;": "≶",
-    "&lesssim;": "≲",
-    "&lfisht;": "⥼",
-    "&lfloor;": "⌊",
-    "&lfr;": "\uD835\uDD29",
-    "&lg;": "≶",
-    "&lgE;": "⪑",
-    "&lhard;": "↽",
-    "&lharu;": "↼",
-    "&lharul;": "⥪",
-    "&lhblk;": "▄",
-    "&ljcy;": "љ",
-    "&ll;": "≪",
-    "&llarr;": "⇇",
-    "&llcorner;": "⌞",
-    "&llhard;": "⥫",
-    "&lltri;": "◺",
-    "&lmidot;": "ŀ",
-    "&lmoust;": "⎰",
-    "&lmoustache;": "⎰",
-    "&lnE;": "≨",
-    "&lnap;": "⪉",
-    "&lnapprox;": "⪉",
-    "&lne;": "⪇",
-    "&lneq;": "⪇",
-    "&lneqq;": "≨",
-    "&lnsim;": "⋦",
-    "&loang;": "⟬",
-    "&loarr;": "⇽",
-    "&lobrk;": "⟦",
-    "&longleftarrow;": "⟵",
-    "&longleftrightarrow;": "⟷",
-    "&longmapsto;": "⟼",
-    "&longrightarrow;": "⟶",
-    "&looparrowleft;": "↫",
-    "&looparrowright;": "↬",
-    "&lopar;": "⦅",
-    "&lopf;": "\uD835\uDD5D",
-    "&loplus;": "⨭",
-    "&lotimes;": "⨴",
-    "&lowast;": "∗",
-    "&lowbar;": "_",
-    "&loz;": "◊",
-    "&lozenge;": "◊",
-    "&lozf;": "⧫",
-    "&lpar;": "(",
-    "&lparlt;": "⦓",
-    "&lrarr;": "⇆",
-    "&lrcorner;": "⌟",
-    "&lrhar;": "⇋",
-    "&lrhard;": "⥭",
-    "&lrm;": "‎",
-    "&lrtri;": "⊿",
-    "&lsaquo;": "‹",
-    "&lscr;": "\uD835\uDCC1",
-    "&lsh;": "↰",
-    "&lsim;": "≲",
-    "&lsime;": "⪍",
-    "&lsimg;": "⪏",
-    "&lsqb;": "[",
-    "&lsquo;": "‘",
-    "&lsquor;": "‚",
-    "&lstrok;": "ł",
-    "&lt": "<",
-    "&lt;": "<",
-    "&ltcc;": "⪦",
-    "&ltcir;": "⩹",
-    "&ltdot;": "⋖",
-    "&lthree;": "⋋",
-    "&ltimes;": "⋉",
-    "&ltlarr;": "⥶",
-    "&ltquest;": "⩻",
-    "&ltrPar;": "⦖",
-    "&ltri;": "◃",
-    "&ltrie;": "⊴",
-    "&ltrif;": "◂",
-    "&lurdshar;": "⥊",
-    "&luruhar;": "⥦",
-    "&lvertneqq;": "≨︀",
-    "&lvnE;": "≨︀",
-    "&mDDot;": "∺",
-    "&macr": "¯",
-    "&macr;": "¯",
-    "&male;": "♂",
-    "&malt;": "✠",
-    "&maltese;": "✠",
-    "&map;": "↦",
-    "&mapsto;": "↦",
-    "&mapstodown;": "↧",
-    "&mapstoleft;": "↤",
-    "&mapstoup;": "↥",
-    "&marker;": "▮",
-    "&mcomma;": "⨩",
-    "&mcy;": "м",
-    "&mdash;": "—",
-    "&measuredangle;": "∡",
-    "&mfr;": "\uD835\uDD2A",
-    "&mho;": "℧",
-    "&micro": "µ",
-    "&micro;": "µ",
-    "&mid;": "∣",
-    "&midast;": "*",
-    "&midcir;": "⫰",
-    "&middot": "·",
-    "&middot;": "·",
-    "&minus;": "−",
-    "&minusb;": "⊟",
-    "&minusd;": "∸",
-    "&minusdu;": "⨪",
-    "&mlcp;": "⫛",
-    "&mldr;": "…",
-    "&mnplus;": "∓",
-    "&models;": "⊧",
-    "&mopf;": "\uD835\uDD5E",
-    "&mp;": "∓",
-    "&mscr;": "\uD835\uDCC2",
-    "&mstpos;": "∾",
-    "&mu;": "μ",
-    "&multimap;": "⊸",
-    "&mumap;": "⊸",
-    "&nGg;": "⋙̸",
-    "&nGt;": "≫⃒",
-    "&nGtv;": "≫̸",
-    "&nLeftarrow;": "⇍",
-    "&nLeftrightarrow;": "⇎",
-    "&nLl;": "⋘̸",
-    "&nLt;": "≪⃒",
-    "&nLtv;": "≪̸",
-    "&nRightarrow;": "⇏",
-    "&nVDash;": "⊯",
-    "&nVdash;": "⊮",
-    "&nabla;": "∇",
-    "&nacute;": "ń",
-    "&nang;": "∠⃒",
-    "&nap;": "≉",
-    "&napE;": "⩰̸",
-    "&napid;": "≋̸",
-    "&napos;": "ŉ",
-    "&napprox;": "≉",
-    "&natur;": "♮",
-    "&natural;": "♮",
-    "&naturals;": "ℕ",
-    "&nbsp": " ",
-    "&nbsp;": " ",
-    "&nbump;": "≎̸",
-    "&nbumpe;": "≏̸",
-    "&ncap;": "⩃",
-    "&ncaron;": "ň",
-    "&ncedil;": "ņ",
-    "&ncong;": "≇",
-    "&ncongdot;": "⩭̸",
-    "&ncup;": "⩂",
-    "&ncy;": "н",
-    "&ndash;": "–",
-    "&ne;": "≠",
-    "&neArr;": "⇗",
-    "&nearhk;": "⤤",
-    "&nearr;": "↗",
-    "&nearrow;": "↗",
-    "&nedot;": "≐̸",
-    "&nequiv;": "≢",
-    "&nesear;": "⤨",
-    "&nesim;": "≂̸",
-    "&nexist;": "∄",
-    "&nexists;": "∄",
-    "&nfr;": "\uD835\uDD2B",
-    "&ngE;": "≧̸",
-    "&nge;": "≱",
-    "&ngeq;": "≱",
-    "&ngeqq;": "≧̸",
-    "&ngeqslant;": "⩾̸",
-    "&nges;": "⩾̸",
-    "&ngsim;": "≵",
-    "&ngt;": "≯",
-    "&ngtr;": "≯",
-    "&nhArr;": "⇎",
-    "&nharr;": "↮",
-    "&nhpar;": "⫲",
-    "&ni;": "∋",
-    "&nis;": "⋼",
-    "&nisd;": "⋺",
-    "&niv;": "∋",
-    "&njcy;": "њ",
-    "&nlArr;": "⇍",
-    "&nlE;": "≦̸",
-    "&nlarr;": "↚",
-    "&nldr;": "‥",
-    "&nle;": "≰",
-    "&nleftarrow;": "↚",
-    "&nleftrightarrow;": "↮",
-    "&nleq;": "≰",
-    "&nleqq;": "≦̸",
-    "&nleqslant;": "⩽̸",
-    "&nles;": "⩽̸",
-    "&nless;": "≮",
-    "&nlsim;": "≴",
-    "&nlt;": "≮",
-    "&nltri;": "⋪",
-    "&nltrie;": "⋬",
-    "&nmid;": "∤",
-    "&nopf;": "\uD835\uDD5F",
-    "&not": "¬",
-    "&not;": "¬",
-    "&notin;": "∉",
-    "&notinE;": "⋹̸",
-    "&notindot;": "⋵̸",
-    "&notinva;": "∉",
-    "&notinvb;": "⋷",
-    "&notinvc;": "⋶",
-    "&notni;": "∌",
-    "&notniva;": "∌",
-    "&notnivb;": "⋾",
-    "&notnivc;": "⋽",
-    "&npar;": "∦",
-    "&nparallel;": "∦",
-    "&nparsl;": "⫽⃥",
-    "&npart;": "∂̸",
-    "&npolint;": "⨔",
-    "&npr;": "⊀",
-    "&nprcue;": "⋠",
-    "&npre;": "⪯̸",
-    "&nprec;": "⊀",
-    "&npreceq;": "⪯̸",
-    "&nrArr;": "⇏",
-    "&nrarr;": "↛",
-    "&nrarrc;": "⤳̸",
-    "&nrarrw;": "↝̸",
-    "&nrightarrow;": "↛",
-    "&nrtri;": "⋫",
-    "&nrtrie;": "⋭",
-    "&nsc;": "⊁",
-    "&nsccue;": "⋡",
-    "&nsce;": "⪰̸",
-    "&nscr;": "\uD835\uDCC3",
-    "&nshortmid;": "∤",
-    "&nshortparallel;": "∦",
-    "&nsim;": "≁",
-    "&nsime;": "≄",
-    "&nsimeq;": "≄",
-    "&nsmid;": "∤",
-    "&nspar;": "∦",
-    "&nsqsube;": "⋢",
-    "&nsqsupe;": "⋣",
-    "&nsub;": "⊄",
-    "&nsubE;": "⫅̸",
-    "&nsube;": "⊈",
-    "&nsubset;": "⊂⃒",
-    "&nsubseteq;": "⊈",
-    "&nsubseteqq;": "⫅̸",
-    "&nsucc;": "⊁",
-    "&nsucceq;": "⪰̸",
-    "&nsup;": "⊅",
-    "&nsupE;": "⫆̸",
-    "&nsupe;": "⊉",
-    "&nsupset;": "⊃⃒",
-    "&nsupseteq;": "⊉",
-    "&nsupseteqq;": "⫆̸",
-    "&ntgl;": "≹",
-    "&ntilde": "ñ",
-    "&ntilde;": "ñ",
-    "&ntlg;": "≸",
-    "&ntriangleleft;": "⋪",
-    "&ntrianglelefteq;": "⋬",
-    "&ntriangleright;": "⋫",
-    "&ntrianglerighteq;": "⋭",
-    "&nu;": "ν",
-    "&num;": "#",
-    "&numero;": "№",
-    "&numsp;": " ",
-    "&nvDash;": "⊭",
-    "&nvHarr;": "⤄",
-    "&nvap;": "≍⃒",
-    "&nvdash;": "⊬",
-    "&nvge;": "≥⃒",
-    "&nvgt;": ">⃒",
-    "&nvinfin;": "⧞",
-    "&nvlArr;": "⤂",
-    "&nvle;": "≤⃒",
-    "&nvlt;": "<⃒",
-    "&nvltrie;": "⊴⃒",
-    "&nvrArr;": "⤃",
-    "&nvrtrie;": "⊵⃒",
-    "&nvsim;": "∼⃒",
-    "&nwArr;": "⇖",
-    "&nwarhk;": "⤣",
-    "&nwarr;": "↖",
-    "&nwarrow;": "↖",
-    "&nwnear;": "⤧",
-    "&oS;": "Ⓢ",
-    "&oacute": "ó",
-    "&oacute;": "ó",
-    "&oast;": "⊛",
-    "&ocir;": "⊚",
-    "&ocirc": "ô",
-    "&ocirc;": "ô",
-    "&ocy;": "о",
-    "&odash;": "⊝",
-    "&odblac;": "ő",
-    "&odiv;": "⨸",
-    "&odot;": "⊙",
-    "&odsold;": "⦼",
-    "&oelig;": "œ",
-    "&ofcir;": "⦿",
-    "&ofr;": "\uD835\uDD2C",
-    "&ogon;": "˛",
-    "&ograve": "ò",
-    "&ograve;": "ò",
-    "&ogt;": "⧁",
-    "&ohbar;": "⦵",
-    "&ohm;": "Ω",
-    "&oint;": "∮",
-    "&olarr;": "↺",
-    "&olcir;": "⦾",
-    "&olcross;": "⦻",
-    "&oline;": "‾",
-    "&olt;": "⧀",
-    "&omacr;": "ō",
-    "&omega;": "ω",
-    "&omicron;": "ο",
-    "&omid;": "⦶",
-    "&ominus;": "⊖",
-    "&oopf;": "\uD835\uDD60",
-    "&opar;": "⦷",
-    "&operp;": "⦹",
-    "&oplus;": "⊕",
-    "&or;": "∨",
-    "&orarr;": "↻",
-    "&ord;": "⩝",
-    "&order;": "ℴ",
-    "&orderof;": "ℴ",
-    "&ordf": "ª",
-    "&ordf;": "ª",
-    "&ordm": "º",
-    "&ordm;": "º",
-    "&origof;": "⊶",
-    "&oror;": "⩖",
-    "&orslope;": "⩗",
-    "&orv;": "⩛",
-    "&oscr;": "ℴ",
-    "&oslash": "ø",
-    "&oslash;": "ø",
-    "&osol;": "⊘",
-    "&otilde": "õ",
-    "&otilde;": "õ",
-    "&otimes;": "⊗",
-    "&otimesas;": "⨶",
-    "&ouml": "ö",
-    "&ouml;": "ö",
-    "&ovbar;": "⌽",
-    "&par;": "∥",
-    "&para": "¶",
-    "&para;": "¶",
-    "&parallel;": "∥",
-    "&parsim;": "⫳",
-    "&parsl;": "⫽",
-    "&part;": "∂",
-    "&pcy;": "п",
-    "&percnt;": "%",
-    "&period;": ".",
-    "&permil;": "‰",
-    "&perp;": "⊥",
-    "&pertenk;": "‱",
-    "&pfr;": "\uD835\uDD2D",
-    "&phi;": "φ",
-    "&phiv;": "ϕ",
-    "&phmmat;": "ℳ",
-    "&phone;": "☎",
-    "&pi;": "π",
-    "&pitchfork;": "⋔",
-    "&piv;": "ϖ",
-    "&planck;": "ℏ",
-    "&planckh;": "ℎ",
-    "&plankv;": "ℏ",
-    "&plus;": "+",
-    "&plusacir;": "⨣",
-    "&plusb;": "⊞",
-    "&pluscir;": "⨢",
-    "&plusdo;": "∔",
-    "&plusdu;": "⨥",
-    "&pluse;": "⩲",
-    "&plusmn": "±",
-    "&plusmn;": "±",
-    "&plussim;": "⨦",
-    "&plustwo;": "⨧",
-    "&pm;": "±",
-    "&pointint;": "⨕",
-    "&popf;": "\uD835\uDD61",
-    "&pound": "£",
-    "&pound;": "£",
-    "&pr;": "≺",
-    "&prE;": "⪳",
-    "&prap;": "⪷",
-    "&prcue;": "≼",
-    "&pre;": "⪯",
-    "&prec;": "≺",
-    "&precapprox;": "⪷",
-    "&preccurlyeq;": "≼",
-    "&preceq;": "⪯",
-    "&precnapprox;": "⪹",
-    "&precneqq;": "⪵",
-    "&precnsim;": "⋨",
-    "&precsim;": "≾",
-    "&prime;": "′",
-    "&primes;": "ℙ",
-    "&prnE;": "⪵",
-    "&prnap;": "⪹",
-    "&prnsim;": "⋨",
-    "&prod;": "∏",
-    "&profalar;": "⌮",
-    "&profline;": "⌒",
-    "&profsurf;": "⌓",
-    "&prop;": "∝",
-    "&propto;": "∝",
-    "&prsim;": "≾",
-    "&prurel;": "⊰",
-    "&pscr;": "\uD835\uDCC5",
-    "&psi;": "ψ",
-    "&puncsp;": " ",
-    "&qfr;": "\uD835\uDD2E",
-    "&qint;": "⨌",
-    "&qopf;": "\uD835\uDD62",
-    "&qprime;": "⁗",
-    "&qscr;": "\uD835\uDCC6",
-    "&quaternions;": "ℍ",
-    "&quatint;": "⨖",
-    "&quest;": "?",
-    "&questeq;": "≟",
-    "&quot": '"',
-    "&quot;": '"',
-    "&rAarr;": "⇛",
-    "&rArr;": "⇒",
-    "&rAtail;": "⤜",
-    "&rBarr;": "⤏",
-    "&rHar;": "⥤",
-    "&race;": "∽̱",
-    "&racute;": "ŕ",
-    "&radic;": "√",
-    "&raemptyv;": "⦳",
-    "&rang;": "⟩",
-    "&rangd;": "⦒",
-    "&range;": "⦥",
-    "&rangle;": "⟩",
-    "&raquo": "»",
-    "&raquo;": "»",
-    "&rarr;": "→",
-    "&rarrap;": "⥵",
-    "&rarrb;": "⇥",
-    "&rarrbfs;": "⤠",
-    "&rarrc;": "⤳",
-    "&rarrfs;": "⤞",
-    "&rarrhk;": "↪",
-    "&rarrlp;": "↬",
-    "&rarrpl;": "⥅",
-    "&rarrsim;": "⥴",
-    "&rarrtl;": "↣",
-    "&rarrw;": "↝",
-    "&ratail;": "⤚",
-    "&ratio;": "∶",
-    "&rationals;": "ℚ",
-    "&rbarr;": "⤍",
-    "&rbbrk;": "❳",
-    "&rbrace;": "}",
-    "&rbrack;": "]",
-    "&rbrke;": "⦌",
-    "&rbrksld;": "⦎",
-    "&rbrkslu;": "⦐",
-    "&rcaron;": "ř",
-    "&rcedil;": "ŗ",
-    "&rceil;": "⌉",
-    "&rcub;": "}",
-    "&rcy;": "р",
-    "&rdca;": "⤷",
-    "&rdldhar;": "⥩",
-    "&rdquo;": "”",
-    "&rdquor;": "”",
-    "&rdsh;": "↳",
-    "&real;": "ℜ",
-    "&realine;": "ℛ",
-    "&realpart;": "ℜ",
-    "&reals;": "ℝ",
-    "&rect;": "▭",
-    "&reg": "®",
-    "&reg;": "®",
-    "&rfisht;": "⥽",
-    "&rfloor;": "⌋",
-    "&rfr;": "\uD835\uDD2F",
-    "&rhard;": "⇁",
-    "&rharu;": "⇀",
-    "&rharul;": "⥬",
-    "&rho;": "ρ",
-    "&rhov;": "ϱ",
-    "&rightarrow;": "→",
-    "&rightarrowtail;": "↣",
-    "&rightharpoondown;": "⇁",
-    "&rightharpoonup;": "⇀",
-    "&rightleftarrows;": "⇄",
-    "&rightleftharpoons;": "⇌",
-    "&rightrightarrows;": "⇉",
-    "&rightsquigarrow;": "↝",
-    "&rightthreetimes;": "⋌",
-    "&ring;": "˚",
-    "&risingdotseq;": "≓",
-    "&rlarr;": "⇄",
-    "&rlhar;": "⇌",
-    "&rlm;": "‏",
-    "&rmoust;": "⎱",
-    "&rmoustache;": "⎱",
-    "&rnmid;": "⫮",
-    "&roang;": "⟭",
-    "&roarr;": "⇾",
-    "&robrk;": "⟧",
-    "&ropar;": "⦆",
-    "&ropf;": "\uD835\uDD63",
-    "&roplus;": "⨮",
-    "&rotimes;": "⨵",
-    "&rpar;": ")",
-    "&rpargt;": "⦔",
-    "&rppolint;": "⨒",
-    "&rrarr;": "⇉",
-    "&rsaquo;": "›",
-    "&rscr;": "\uD835\uDCC7",
-    "&rsh;": "↱",
-    "&rsqb;": "]",
-    "&rsquo;": "’",
-    "&rsquor;": "’",
-    "&rthree;": "⋌",
-    "&rtimes;": "⋊",
-    "&rtri;": "▹",
-    "&rtrie;": "⊵",
-    "&rtrif;": "▸",
-    "&rtriltri;": "⧎",
-    "&ruluhar;": "⥨",
-    "&rx;": "℞",
-    "&sacute;": "ś",
-    "&sbquo;": "‚",
-    "&sc;": "≻",
-    "&scE;": "⪴",
-    "&scap;": "⪸",
-    "&scaron;": "š",
-    "&sccue;": "≽",
-    "&sce;": "⪰",
-    "&scedil;": "ş",
-    "&scirc;": "ŝ",
-    "&scnE;": "⪶",
-    "&scnap;": "⪺",
-    "&scnsim;": "⋩",
-    "&scpolint;": "⨓",
-    "&scsim;": "≿",
-    "&scy;": "с",
-    "&sdot;": "⋅",
-    "&sdotb;": "⊡",
-    "&sdote;": "⩦",
-    "&seArr;": "⇘",
-    "&searhk;": "⤥",
-    "&searr;": "↘",
-    "&searrow;": "↘",
-    "&sect": "§",
-    "&sect;": "§",
-    "&semi;": ";",
-    "&seswar;": "⤩",
-    "&setminus;": "∖",
-    "&setmn;": "∖",
-    "&sext;": "✶",
-    "&sfr;": "\uD835\uDD30",
-    "&sfrown;": "⌢",
-    "&sharp;": "♯",
-    "&shchcy;": "щ",
-    "&shcy;": "ш",
-    "&shortmid;": "∣",
-    "&shortparallel;": "∥",
-    "&shy": "­",
-    "&shy;": "­",
-    "&sigma;": "σ",
-    "&sigmaf;": "ς",
-    "&sigmav;": "ς",
-    "&sim;": "∼",
-    "&simdot;": "⩪",
-    "&sime;": "≃",
-    "&simeq;": "≃",
-    "&simg;": "⪞",
-    "&simgE;": "⪠",
-    "&siml;": "⪝",
-    "&simlE;": "⪟",
-    "&simne;": "≆",
-    "&simplus;": "⨤",
-    "&simrarr;": "⥲",
-    "&slarr;": "←",
-    "&smallsetminus;": "∖",
-    "&smashp;": "⨳",
-    "&smeparsl;": "⧤",
-    "&smid;": "∣",
-    "&smile;": "⌣",
-    "&smt;": "⪪",
-    "&smte;": "⪬",
-    "&smtes;": "⪬︀",
-    "&softcy;": "ь",
-    "&sol;": "/",
-    "&solb;": "⧄",
-    "&solbar;": "⌿",
-    "&sopf;": "\uD835\uDD64",
-    "&spades;": "♠",
-    "&spadesuit;": "♠",
-    "&spar;": "∥",
-    "&sqcap;": "⊓",
-    "&sqcaps;": "⊓︀",
-    "&sqcup;": "⊔",
-    "&sqcups;": "⊔︀",
-    "&sqsub;": "⊏",
-    "&sqsube;": "⊑",
-    "&sqsubset;": "⊏",
-    "&sqsubseteq;": "⊑",
-    "&sqsup;": "⊐",
-    "&sqsupe;": "⊒",
-    "&sqsupset;": "⊐",
-    "&sqsupseteq;": "⊒",
-    "&squ;": "□",
-    "&square;": "□",
-    "&squarf;": "▪",
-    "&squf;": "▪",
-    "&srarr;": "→",
-    "&sscr;": "\uD835\uDCC8",
-    "&ssetmn;": "∖",
-    "&ssmile;": "⌣",
-    "&sstarf;": "⋆",
-    "&star;": "☆",
-    "&starf;": "★",
-    "&straightepsilon;": "ϵ",
-    "&straightphi;": "ϕ",
-    "&strns;": "¯",
-    "&sub;": "⊂",
-    "&subE;": "⫅",
-    "&subdot;": "⪽",
-    "&sube;": "⊆",
-    "&subedot;": "⫃",
-    "&submult;": "⫁",
-    "&subnE;": "⫋",
-    "&subne;": "⊊",
-    "&subplus;": "⪿",
-    "&subrarr;": "⥹",
-    "&subset;": "⊂",
-    "&subseteq;": "⊆",
-    "&subseteqq;": "⫅",
-    "&subsetneq;": "⊊",
-    "&subsetneqq;": "⫋",
-    "&subsim;": "⫇",
-    "&subsub;": "⫕",
-    "&subsup;": "⫓",
-    "&succ;": "≻",
-    "&succapprox;": "⪸",
-    "&succcurlyeq;": "≽",
-    "&succeq;": "⪰",
-    "&succnapprox;": "⪺",
-    "&succneqq;": "⪶",
-    "&succnsim;": "⋩",
-    "&succsim;": "≿",
-    "&sum;": "∑",
-    "&sung;": "♪",
-    "&sup1": "¹",
-    "&sup1;": "¹",
-    "&sup2": "²",
-    "&sup2;": "²",
-    "&sup3": "³",
-    "&sup3;": "³",
-    "&sup;": "⊃",
-    "&supE;": "⫆",
-    "&supdot;": "⪾",
-    "&supdsub;": "⫘",
-    "&supe;": "⊇",
-    "&supedot;": "⫄",
-    "&suphsol;": "⟉",
-    "&suphsub;": "⫗",
-    "&suplarr;": "⥻",
-    "&supmult;": "⫂",
-    "&supnE;": "⫌",
-    "&supne;": "⊋",
-    "&supplus;": "⫀",
-    "&supset;": "⊃",
-    "&supseteq;": "⊇",
-    "&supseteqq;": "⫆",
-    "&supsetneq;": "⊋",
-    "&supsetneqq;": "⫌",
-    "&supsim;": "⫈",
-    "&supsub;": "⫔",
-    "&supsup;": "⫖",
-    "&swArr;": "⇙",
-    "&swarhk;": "⤦",
-    "&swarr;": "↙",
-    "&swarrow;": "↙",
-    "&swnwar;": "⤪",
-    "&szlig": "ß",
-    "&szlig;": "ß",
-    "&target;": "⌖",
-    "&tau;": "τ",
-    "&tbrk;": "⎴",
-    "&tcaron;": "ť",
-    "&tcedil;": "ţ",
-    "&tcy;": "т",
-    "&tdot;": "⃛",
-    "&telrec;": "⌕",
-    "&tfr;": "\uD835\uDD31",
-    "&there4;": "∴",
-    "&therefore;": "∴",
-    "&theta;": "θ",
-    "&thetasym;": "ϑ",
-    "&thetav;": "ϑ",
-    "&thickapprox;": "≈",
-    "&thicksim;": "∼",
-    "&thinsp;": " ",
-    "&thkap;": "≈",
-    "&thksim;": "∼",
-    "&thorn": "þ",
-    "&thorn;": "þ",
-    "&tilde;": "˜",
-    "&times": "×",
-    "&times;": "×",
-    "&timesb;": "⊠",
-    "&timesbar;": "⨱",
-    "&timesd;": "⨰",
-    "&tint;": "∭",
-    "&toea;": "⤨",
-    "&top;": "⊤",
-    "&topbot;": "⌶",
-    "&topcir;": "⫱",
-    "&topf;": "\uD835\uDD65",
-    "&topfork;": "⫚",
-    "&tosa;": "⤩",
-    "&tprime;": "‴",
-    "&trade;": "™",
-    "&triangle;": "▵",
-    "&triangledown;": "▿",
-    "&triangleleft;": "◃",
-    "&trianglelefteq;": "⊴",
-    "&triangleq;": "≜",
-    "&triangleright;": "▹",
-    "&trianglerighteq;": "⊵",
-    "&tridot;": "◬",
-    "&trie;": "≜",
-    "&triminus;": "⨺",
-    "&triplus;": "⨹",
-    "&trisb;": "⧍",
-    "&tritime;": "⨻",
-    "&trpezium;": "⏢",
-    "&tscr;": "\uD835\uDCC9",
-    "&tscy;": "ц",
-    "&tshcy;": "ћ",
-    "&tstrok;": "ŧ",
-    "&twixt;": "≬",
-    "&twoheadleftarrow;": "↞",
-    "&twoheadrightarrow;": "↠",
-    "&uArr;": "⇑",
-    "&uHar;": "⥣",
-    "&uacute": "ú",
-    "&uacute;": "ú",
-    "&uarr;": "↑",
-    "&ubrcy;": "ў",
-    "&ubreve;": "ŭ",
-    "&ucirc": "û",
-    "&ucirc;": "û",
-    "&ucy;": "у",
-    "&udarr;": "⇅",
-    "&udblac;": "ű",
-    "&udhar;": "⥮",
-    "&ufisht;": "⥾",
-    "&ufr;": "\uD835\uDD32",
-    "&ugrave": "ù",
-    "&ugrave;": "ù",
-    "&uharl;": "↿",
-    "&uharr;": "↾",
-    "&uhblk;": "▀",
-    "&ulcorn;": "⌜",
-    "&ulcorner;": "⌜",
-    "&ulcrop;": "⌏",
-    "&ultri;": "◸",
-    "&umacr;": "ū",
-    "&uml": "¨",
-    "&uml;": "¨",
-    "&uogon;": "ų",
-    "&uopf;": "\uD835\uDD66",
-    "&uparrow;": "↑",
-    "&updownarrow;": "↕",
-    "&upharpoonleft;": "↿",
-    "&upharpoonright;": "↾",
-    "&uplus;": "⊎",
-    "&upsi;": "υ",
-    "&upsih;": "ϒ",
-    "&upsilon;": "υ",
-    "&upuparrows;": "⇈",
-    "&urcorn;": "⌝",
-    "&urcorner;": "⌝",
-    "&urcrop;": "⌎",
-    "&uring;": "ů",
-    "&urtri;": "◹",
-    "&uscr;": "\uD835\uDCCA",
-    "&utdot;": "⋰",
-    "&utilde;": "ũ",
-    "&utri;": "▵",
-    "&utrif;": "▴",
-    "&uuarr;": "⇈",
-    "&uuml": "ü",
-    "&uuml;": "ü",
-    "&uwangle;": "⦧",
-    "&vArr;": "⇕",
-    "&vBar;": "⫨",
-    "&vBarv;": "⫩",
-    "&vDash;": "⊨",
-    "&vangrt;": "⦜",
-    "&varepsilon;": "ϵ",
-    "&varkappa;": "ϰ",
-    "&varnothing;": "∅",
-    "&varphi;": "ϕ",
-    "&varpi;": "ϖ",
-    "&varpropto;": "∝",
-    "&varr;": "↕",
-    "&varrho;": "ϱ",
-    "&varsigma;": "ς",
-    "&varsubsetneq;": "⊊︀",
-    "&varsubsetneqq;": "⫋︀",
-    "&varsupsetneq;": "⊋︀",
-    "&varsupsetneqq;": "⫌︀",
-    "&vartheta;": "ϑ",
-    "&vartriangleleft;": "⊲",
-    "&vartriangleright;": "⊳",
-    "&vcy;": "в",
-    "&vdash;": "⊢",
-    "&vee;": "∨",
-    "&veebar;": "⊻",
-    "&veeeq;": "≚",
-    "&vellip;": "⋮",
-    "&verbar;": "|",
-    "&vert;": "|",
-    "&vfr;": "\uD835\uDD33",
-    "&vltri;": "⊲",
-    "&vnsub;": "⊂⃒",
-    "&vnsup;": "⊃⃒",
-    "&vopf;": "\uD835\uDD67",
-    "&vprop;": "∝",
-    "&vrtri;": "⊳",
-    "&vscr;": "\uD835\uDCCB",
-    "&vsubnE;": "⫋︀",
-    "&vsubne;": "⊊︀",
-    "&vsupnE;": "⫌︀",
-    "&vsupne;": "⊋︀",
-    "&vzigzag;": "⦚",
-    "&wcirc;": "ŵ",
-    "&wedbar;": "⩟",
-    "&wedge;": "∧",
-    "&wedgeq;": "≙",
-    "&weierp;": "℘",
-    "&wfr;": "\uD835\uDD34",
-    "&wopf;": "\uD835\uDD68",
-    "&wp;": "℘",
-    "&wr;": "≀",
-    "&wreath;": "≀",
-    "&wscr;": "\uD835\uDCCC",
-    "&xcap;": "⋂",
-    "&xcirc;": "◯",
-    "&xcup;": "⋃",
-    "&xdtri;": "▽",
-    "&xfr;": "\uD835\uDD35",
-    "&xhArr;": "⟺",
-    "&xharr;": "⟷",
-    "&xi;": "ξ",
-    "&xlArr;": "⟸",
-    "&xlarr;": "⟵",
-    "&xmap;": "⟼",
-    "&xnis;": "⋻",
-    "&xodot;": "⨀",
-    "&xopf;": "\uD835\uDD69",
-    "&xoplus;": "⨁",
-    "&xotime;": "⨂",
-    "&xrArr;": "⟹",
-    "&xrarr;": "⟶",
-    "&xscr;": "\uD835\uDCCD",
-    "&xsqcup;": "⨆",
-    "&xuplus;": "⨄",
-    "&xutri;": "△",
-    "&xvee;": "⋁",
-    "&xwedge;": "⋀",
-    "&yacute": "ý",
-    "&yacute;": "ý",
-    "&yacy;": "я",
-    "&ycirc;": "ŷ",
-    "&ycy;": "ы",
-    "&yen": "¥",
-    "&yen;": "¥",
-    "&yfr;": "\uD835\uDD36",
-    "&yicy;": "ї",
-    "&yopf;": "\uD835\uDD6A",
-    "&yscr;": "\uD835\uDCCE",
-    "&yucy;": "ю",
-    "&yuml": "ÿ",
-    "&yuml;": "ÿ",
-    "&zacute;": "ź",
-    "&zcaron;": "ž",
-    "&zcy;": "з",
-    "&zdot;": "ż",
-    "&zeetrf;": "ℨ",
-    "&zeta;": "ζ",
-    "&zfr;": "\uD835\uDD37",
-    "&zhcy;": "ж",
-    "&zigrarr;": "⇝",
-    "&zopf;": "\uD835\uDD6B",
-    "&zscr;": "\uD835\uDCCF",
-    "&zwj;": "‍",
-    "&zwnj;": "‌"
-  };
-});
-
-// node_modules/postal-mime/dist/esm/text-format.js
-function decodeHTMLEntities(str) {
-  return str.replace(/&(#\d+|#x[a-f0-9]+|[a-z]+\d*);?/gi, (match, entity) => {
-    if (typeof htmlEntities[match] === "string") {
-      return htmlEntities[match];
-    }
-    if (entity.charAt(0) !== "#" || match.charAt(match.length - 1) !== ";") {
-      return match;
-    }
-    let codePoint;
-    if (entity.charAt(1).toLowerCase() === "x") {
-      codePoint = parseInt(entity.slice(2), 16);
-    } else {
-      codePoint = parseInt(entity.slice(1), 10);
-    }
-    let output = "";
-    if (codePoint === 0 || codePoint >= 55296 && codePoint <= 57343 || codePoint > 1114111) {
-      return "�";
-    }
-    codePoint = C1_ENTITY_REPLACEMENTS.get(codePoint) ?? codePoint;
-    if (codePoint > 65535) {
-      codePoint -= 65536;
-      output += String.fromCharCode(codePoint >>> 10 & 1023 | 55296);
-      codePoint = 56320 | codePoint & 1023;
-    }
-    output += String.fromCharCode(codePoint);
-    return output;
-  });
-}
-function escapeHtml5(str) {
-  return str.trim().replace(/[<>"'?&]/g, (c) => "&#x" + hexByte(c.charCodeAt(0)) + ";");
-}
-function encodeMailto(address) {
-  return address.replace(MAILTO_UNSAFE, (run) => Array.from(textEncoder.encode(run), (byte) => PERCENT_ENCODED[byte]).join(""));
-}
-function textToHtml(str) {
-  let html = escapeHtml5(str).replace(/\n/g, "<br />");
-  return "<div>" + html + "</div>";
-}
-function createFinder(str, regex) {
-  let searchedFrom = Infinity;
-  let found = null;
-  return (pos) => {
-    if (pos < searchedFrom || found && pos > found.index) {
-      regex.lastIndex = pos;
-      found = regex.exec(str);
-      searchedFrom = pos;
-    }
-    return found;
-  };
-}
-function throughLastTag(str, process2) {
-  const end = str.lastIndexOf(">") + 1;
-  return process2(str.slice(0, end)) + str.slice(end);
-}
-function replaceClosedTags(str, pattern, replacement) {
-  return throughLastTag(str, (head) => head.replace(pattern, replacement));
-}
-function replaceTags(str, prefix, pattern, replacement) {
-  const parts = [];
-  let copied = 0;
-  let searchFrom = 0;
-  while (true) {
-    prefix.lastIndex = searchFrom;
-    const candidate = prefix.exec(str);
-    if (!candidate) {
-      break;
-    }
-    const start = candidate.index;
-    const gt = str.indexOf(">", start);
-    if (gt < 0) {
-      break;
-    }
-    pattern.lastIndex = start;
-    const match = pattern.exec(str);
-    if (!match) {
-      searchFrom = gt + 1;
-      continue;
-    }
-    parts.push(str.slice(copied, start), replacement(...match));
-    copied = searchFrom = start + match[0].length;
-  }
-  parts.push(str.slice(copied));
-  return parts.join("");
-}
-function replaceBlocks(str, open, openToGt, close, closeToGt, replacement) {
-  const nextGt = createFinder(str, />/g);
-  const nextClose = createFinder(str, close);
-  const parts = [];
-  let copied = 0;
-  let searchFrom = 0;
-  while (true) {
-    open.lastIndex = searchFrom;
-    const opener = open.exec(str);
-    if (!opener) {
-      break;
-    }
-    const start = opener.index;
-    searchFrom = start + 1;
-    let from = start + opener[0].length;
-    if (openToGt) {
-      const gt = nextGt(from);
-      if (!gt) {
-        break;
-      }
-      from = gt.index + 1;
-    }
-    const closer = nextClose(from);
-    if (!closer) {
-      break;
-    }
-    let end = closer.index + closer[0].length;
-    if (closeToGt) {
-      const gt = nextGt(end);
-      if (!gt) {
-        break;
-      }
-      end = gt.index + 1;
-    }
-    parts.push(str.slice(copied, start), replacement);
-    copied = searchFrom = end;
-  }
-  parts.push(str.slice(copied));
-  return parts.join("");
-}
-function stripThroughLastTag(str, prefix) {
-  const limit = str.lastIndexOf(">");
-  let last = -1;
-  prefix.lastIndex = 0;
-  let match;
-  while ((match = prefix.exec(str)) && match.index < limit) {
-    last = match.index;
-  }
-  return last < 0 ? str : str.slice(str.indexOf(">", last) + 1);
-}
-function stripFromFirstTag(str, prefix) {
-  prefix.lastIndex = 0;
-  const match = prefix.exec(str);
-  return match && match.index < str.lastIndexOf(">") ? str.slice(0, match.index) : str;
-}
-function htmlToText(str) {
-  str = str.replace(/\r\n|[\n\r\u2028\u2029]/g, "\x01");
-  str = replaceBlocks(str, /<!--/g, false, /-->/g, false, " ");
-  str = replaceClosedTags(str, /<br\b[^>]*>/gi, `
-`);
-  str = replaceClosedTags(str, /<\/?(p|div|table|tr|td|th)\b[^>]*>/gi, `
-
-`);
-  str = replaceBlocks(str, /<script\b/gi, true, /<\/script\b/gi, true, " ");
-  str = replaceBlocks(str, /<style\b/gi, true, /<\/style\b/gi, true, " ");
-  str = stripThroughLastTag(str, /<body\b/gi);
-  str = stripThroughLastTag(str, /<\/head\b/gi);
-  str = stripThroughLastTag(str, /<!doctype\b/gi);
-  str = stripFromFirstTag(str, /<\/body\b/gi);
-  str = stripFromFirstTag(str, /<\/html\b/gi);
-  str = throughLastTag(str, (head) => replaceTags(head, /<a\b/gi, /<a\b[^>]*href\s*=\s*["']?([^\s"']+)[^>]*>/iy, (match, href) => ` (${href}) `));
-  str = replaceClosedTags(str, /<\/?(span|em|i|strong|b|u|a)\b[^>]*>/gi, "");
-  str = replaceTags(str, /<li\b/gi, /<li\b[^>]*>[\n\u0001\s]*/iy, () => "* ");
-  str = replaceClosedTags(str, /<hr\b[^>]*>/g, `
--------------
-`);
-  str = replaceClosedTags(str, /<[^>]*>/g, " ");
-  str = str.replace(/\u0001/g, `
-`).replace(/[ \t]+/g, " ").replace(/^\s+$/gm, "").replace(/\n\n+/g, `
-
-`).replace(/^\n+/, `
-`).replace(/\n+$/, `
-`);
-  str = decodeHTMLEntities(str);
-  return str;
-}
-function formatDate(date) {
-  if (typeof Intl === "undefined") {
-    return date;
-  }
-  const parsed = new Date(date);
-  if (isNaN(parsed.getTime())) {
-    return date;
-  }
-  dateFormatter ??= new Intl.DateTimeFormat("default", {
-    year: "numeric",
-    month: "numeric",
-    day: "numeric",
-    hour: "numeric",
-    minute: "numeric",
-    second: "numeric",
-    hour12: false
-  });
-  return dateFormatter.format(parsed);
-}
-function formatTextAddress(address) {
-  return (address.name ? [address.name, `<${address.address}>`] : [address.address]).join(" ");
-}
-function formatTextAddresses(addresses) {
-  let parts = [];
-  let processAddress = (address, partCounter) => {
-    if (partCounter) {
-      parts.push(", ");
-    }
-    if (address.group) {
-      let groupStart = `${address.name}:`;
-      let groupEnd = `;`;
-      parts.push(groupStart);
-      address.group.forEach(processAddress);
-      parts.push(groupEnd);
-    } else {
-      parts.push(formatTextAddress(address));
-    }
-  };
-  addresses.forEach(processAddress);
-  return parts.join("");
-}
-function formatHtmlAddress(address) {
-  return `<a href="mailto:${escapeHtml5(encodeMailto(address.address))}" class="postal-email-address">${escapeHtml5(address.name || `<${address.address}>`)}</a>`;
-}
-function formatHtmlAddresses(addresses) {
-  let parts = [];
-  let processAddress = (address, partCounter) => {
-    if (partCounter) {
-      parts.push('<span class="postal-email-address-separator">, </span>');
-    }
-    if (address.group) {
-      let groupStart = `<span class="postal-email-address-group">${escapeHtml5(address.name)}:</span>`;
-      let groupEnd = `<span class="postal-email-address-group">;</span>`;
-      parts.push(groupStart);
-      address.group.forEach(processAddress);
-      parts.push(groupEnd);
-    } else {
-      parts.push(formatHtmlAddress(address));
-    }
-  };
-  addresses.forEach(processAddress);
-  return parts.join(" ");
-}
-function foldLines(str, lineLength, afterSpace) {
-  str = (str || "").toString();
-  lineLength = lineLength || 76;
-  let pos = 0, len = str.length, result = "", line, match;
-  while (pos < len) {
-    line = str.slice(pos, pos + lineLength);
-    if (line.length < lineLength) {
-      result += line;
-      break;
-    }
-    if (match = line.match(/^[^\n\r]*(\r?\n|\r)/)) {
-      line = match[0];
-      result += line;
-      pos += line.length;
-      continue;
-    } else if ((match = line.match(/(\s+)[^\s]*$/)) && match[0].length - (afterSpace ? (match[1] || "").length : 0) < line.length) {
-      line = line.slice(0, line.length - (match[0].length - (afterSpace ? (match[1] || "").length : 0)));
-    } else if (match = str.slice(pos + line.length).match(/^[^\s]+(\s*)/)) {
-      line = line + match[0].slice(0, match[0].length - (!afterSpace ? (match[1] || "").length : 0));
-    }
-    result += line;
-    pos += line.length;
-    if (pos < len) {
-      result += `\r
-`;
-    }
-  }
-  return result;
-}
-function formatTextHeader(message) {
-  let rows = [];
-  if (message.from) {
-    rows.push({ key: "From", val: formatTextAddresses([message.from]) });
-  }
-  if (message.subject) {
-    rows.push({ key: "Subject", val: message.subject });
-  }
-  if (message.date) {
-    rows.push({ key: "Date", val: formatDate(message.date) });
-  }
-  if (message.to && message.to.length) {
-    rows.push({ key: "To", val: formatTextAddresses(message.to) });
-  }
-  if (message.cc && message.cc.length) {
-    rows.push({ key: "Cc", val: formatTextAddresses(message.cc) });
-  }
-  if (message.bcc && message.bcc.length) {
-    rows.push({ key: "Bcc", val: formatTextAddresses(message.bcc) });
-  }
-  let maxKeyLength = rows.map((r) => r.key.length).reduce((acc, cur) => {
-    return cur > acc ? cur : acc;
-  }, 0);
-  const lines = rows.flatMap((row) => {
-    let sepLen = maxKeyLength - row.key.length;
-    let prefix = `${row.key}: ${" ".repeat(sepLen)}`;
-    let emptyPrefix = `${" ".repeat(row.key.length + 1)} ${" ".repeat(sepLen)}`;
-    let foldedLines = foldLines(row.val, 80, true).split(/\r?\n/).map((line) => line.trim());
-    return foldedLines.map((line, i) => `${i ? emptyPrefix : prefix}${line}`);
-  });
-  let maxLineLength = lines.map((r) => r.length).reduce((acc, cur) => {
-    return cur > acc ? cur : acc;
-  }, 0);
-  let lineMarker = "-".repeat(maxLineLength);
-  let template = `
-${lineMarker}
-${lines.join(`
-`)}
-${lineMarker}
-`;
-  return template;
-}
-function formatHtmlHeader(message) {
-  let rows = [];
-  if (message.from) {
-    rows.push(`<div class="postal-email-header-key">From</div><div class="postal-email-header-value">${formatHtmlAddresses([message.from])}</div>`);
-  }
-  if (message.subject) {
-    rows.push(`<div class="postal-email-header-key">Subject</div><div class="postal-email-header-value postal-email-header-subject">${escapeHtml5(message.subject)}</div>`);
-  }
-  if (message.date) {
-    rows.push(`<div class="postal-email-header-key">Date</div><div class="postal-email-header-value postal-email-header-date" data-date="${escapeHtml5(message.date)}">${escapeHtml5(formatDate(message.date))}</div>`);
-  }
-  if (message.to && message.to.length) {
-    rows.push(`<div class="postal-email-header-key">To</div><div class="postal-email-header-value">${formatHtmlAddresses(message.to)}</div>`);
-  }
-  if (message.cc && message.cc.length) {
-    rows.push(`<div class="postal-email-header-key">Cc</div><div class="postal-email-header-value">${formatHtmlAddresses(message.cc)}</div>`);
-  }
-  if (message.bcc && message.bcc.length) {
-    rows.push(`<div class="postal-email-header-key">Bcc</div><div class="postal-email-header-value">${formatHtmlAddresses(message.bcc)}</div>`);
-  }
-  let template = `<div class="postal-email-header">${rows.length ? '<div class="postal-email-header-row">' : ""}${rows.join(`</div>
-<div class="postal-email-header-row">`)}${rows.length ? "</div>" : ""}</div>`;
-  return template;
-}
-var C1_ENTITY_REPLACEMENTS, hexByte = (value) => value.toString(16).toUpperCase().padStart(2, "0"), MAILTO_UNSAFE, PERCENT_ENCODED, dateFormatter = null;
-var init_text_format = __esm(() => {
-  init_html_entities();
-  init_decode_strings();
-  C1_ENTITY_REPLACEMENTS = new Map([
-    [128, 8364],
-    [130, 8218],
-    [131, 402],
-    [132, 8222],
-    [133, 8230],
-    [134, 8224],
-    [135, 8225],
-    [136, 710],
-    [137, 8240],
-    [138, 352],
-    [139, 8249],
-    [140, 338],
-    [142, 381],
-    [145, 8216],
-    [146, 8217],
-    [147, 8220],
-    [148, 8221],
-    [149, 8226],
-    [150, 8211],
-    [151, 8212],
-    [152, 732],
-    [153, 8482],
-    [154, 353],
-    [155, 8250],
-    [156, 339],
-    [158, 382],
-    [159, 376]
-  ]);
-  MAILTO_UNSAFE = /[^A-Za-z0-9\-._~!$'()*+,;:@]+/g;
-  PERCENT_ENCODED = Array.from({ length: 256 }, (_, byte) => "%" + hexByte(byte));
-});
-
-// node_modules/postal-mime/dist/esm/address-parser.js
-class TokenList {
-  constructor(str) {
-    this.str = str;
-    this.slots = new Int32Array(48);
-    this.length = 0;
-    this.cleaned = new Map;
-  }
-  push(kind, start, end) {
-    if ((this.length + 1) * 3 > this.slots.length) {
-      const grown = new Int32Array(this.slots.length * 2);
-      grown.set(this.slots);
-      this.slots = grown;
-    }
-    const at = this.length * 3;
-    this.slots[at] = kind;
-    this.slots[at + 1] = start;
-    this.slots[at + 2] = end;
-    return this.length++;
-  }
-  operatorAt(index) {
-    const at = index * 3;
-    return this.slots[at] & TOKEN_OPERATOR ? this.str.charAt(this.slots[at + 1]) : "";
-  }
-  isOperator(index) {
-    return (this.slots[index * 3] & TOKEN_OPERATOR) !== 0;
-  }
-  noBreak(index) {
-    return (this.slots[index * 3] & TOKEN_NO_BREAK) !== 0;
-  }
-  value(index) {
-    const cleaned = this.cleaned.get(index);
-    if (cleaned !== undefined) {
-      return cleaned;
-    }
-    return this.str.slice(this.slots[index * 3 + 1], this.slots[index * 3 + 2]);
-  }
-}
-function isAddrSpec(value) {
-  return ADDR_SPEC.test(value) || LITERAL_ADDR_SPEC.test(value);
-}
-function domainAt(address) {
-  const literal = address.charAt(address.length - 1) === "]" ? DOMAIN_LITERAL_TAIL.exec(address) : null;
-  return literal ? address.length - literal[1].length - 1 : address.lastIndexOf("@");
-}
-function quoteLocalPart(address) {
-  const lastAt = domainAt(address);
-  if (lastAt < 0) {
-    return address;
-  }
-  const user = address.substring(0, lastAt);
-  if (/^[^\s"(),:;<>@[\\\]]+$/.test(user) || /^"(?:[^"\\]|\\[\s\S])*"$/.test(user)) {
-    return address;
-  }
-  return '"' + user.replace(/["\\]/g, "\\$&") + '"@' + address.substring(lastAt + 1);
-}
-function isSpaceCode(code) {
-  return code === 32 || code >= 9 && code <= 13 || code === 160 || code === 5760 || code >= 8192 && code <= 8202 || code === 8232 || code === 8233 || code === 8239 || code === 8287 || code === 12288 || code === 65279;
-}
-function isWordCode(code) {
-  return code >= 48 && code <= 57 || code >= 65 && code <= 90 || code >= 97 && code <= 122 || code === 95;
-}
-function isBoundary(text, at) {
-  return isWordCode(text.charCodeAt(at - 1)) !== isWordCode(text.charCodeAt(at));
-}
-function indexOfAt(text, from, to) {
-  for (let i = from;i < to; i++) {
-    if (text.charCodeAt(i) === 64) {
-      return i;
-    }
-  }
-  return -1;
-}
-function joinAtSpacing(value, at) {
-  if (at < 0) {
-    return value;
-  }
-  let start = at;
-  while (start > 0 && isSpaceCode(value.charCodeAt(start - 1))) {
-    start--;
-  }
-  let end = at + 1;
-  while (end < value.length && isSpaceCode(value.charCodeAt(end))) {
-    end++;
-  }
-  return start === at && end === at + 1 ? value : value.slice(0, start) + "@" + value.slice(end);
-}
-function collapseAtSpacing(value) {
-  const quoted = LEADING_QUOTED_STRING.exec(value);
-  if (quoted) {
-    let at = quoted[0].length;
-    while (at < value.length && isSpaceCode(value.charCodeAt(at))) {
-      at++;
-    }
-    if (value.charAt(at) === "@" && value.indexOf("@", at + 1) < 0) {
-      return joinAtSpacing(value, at);
-    }
-  }
-  const at = value.indexOf("@");
-  if (at < 0 || value.indexOf("@", at + 1) >= 0 || value.lastIndexOf('"') > at) {
-    return value;
-  }
-  return joinAtSpacing(value, at);
-}
-function looseAddressStart(text) {
-  const len = text.length;
-  let pos = 0;
-  while (pos < len) {
-    while (pos < len && isSpaceCode(text.charCodeAt(pos))) {
-      pos++;
-    }
-    if (pos >= len) {
-      break;
-    }
-    const runStart = pos;
-    let runEnd = pos;
-    while (runEnd < len && !isSpaceCode(text.charCodeAt(runEnd))) {
-      runEnd++;
-    }
-    let at = indexOfAt(text, runStart, runEnd);
-    if (at >= 0) {
-      let lastBoundary = -1;
-      for (let k = runEnd;k > runStart; k--) {
-        if (isBoundary(text, k)) {
-          lastBoundary = k;
-          break;
-        }
-      }
-      let atomStart = runStart;
-      while (lastBoundary >= 0 && at >= 0) {
-        if (at > atomStart && runEnd > at + 1 && lastBoundary > at + 1) {
-          for (let start = atomStart;start < at; start++) {
-            if (isBoundary(text, start)) {
-              if (start > runStart) {
-                return start;
-              }
-              let padded = runStart;
-              while (padded > 0 && isSpaceCode(text.charCodeAt(padded - 1))) {
-                padded--;
-              }
-              return padded;
-            }
-          }
-        }
-        atomStart = at + 1;
-        at = indexOfAt(text, atomStart, runEnd);
-      }
-    }
-    pos = runEnd;
-  }
-  return -1;
-}
-function recoverAddrSpec(address, text) {
-  address = collapseAtSpacing(address);
-  if (!HAS_WHITESPACE.test(address)) {
-    return { address, text };
-  }
-  let rest;
-  const quoted = address.match(QUOTED_LOCAL_ADDR);
-  if (quoted) {
-    if (!quoted[2]) {
-      return { address, text };
-    }
-    address = quoted[1];
-    rest = [quoted[2]];
-  } else {
-    if (address.indexOf('"') >= 0) {
-      return { address, text };
-    }
-    const parts = address.split(/\s+/);
-    let addrIndex = parts.findIndex(isAddrSpec);
-    if (addrIndex < 0) {
-      addrIndex = parts.findIndex((part) => LOOSE_ADDR_SPEC.test(part));
-    }
-    if (addrIndex < 0) {
-      return { address, text };
-    }
-    address = parts.splice(addrIndex, 1)[0];
-    rest = parts;
-  }
-  return {
-    address,
-    text: [text, ...rest].filter((part) => part).join(" ")
-  };
-}
-function stripAddressComments(address) {
-  const comments = [];
-  let result = "";
-  let comment = "";
-  let depth = 0;
-  let closer = "";
-  let lastChar = "";
-  let pendingSpace = false;
-  let firstChar = "";
-  let quoteSeen = false;
-  let routeEnd = -1;
-  for (let i = 0, len = address.length;i < len; i++) {
-    const chr = address.charAt(i);
-    if (depth) {
-      if (chr === "\\" && i < len - 1) {
-        comment += address.charAt(++i);
-      } else if (chr === "(") {
-        depth++;
-        comment += chr;
-      } else if (chr === ")" && !--depth) {
-        comments.push(comment.trim());
-        comment = "";
-        pendingSpace = lastChar !== "@";
-      } else {
-        comment += chr;
-      }
-      continue;
-    }
-    if (pendingSpace && chr !== "(") {
-      pendingSpace = false;
-      if (chr !== "@" && chr !== "<" && !isSpaceCode(address.charCodeAt(i))) {
-        result += " ";
-        lastChar = " ";
-      }
-    }
-    if (closer) {
-      if (chr === "\\" && closer === '"' && i < len - 1) {
-        result += chr + address.charAt(++i);
-        lastChar = address.charAt(i);
-        continue;
-      }
-      if (chr === closer) {
-        closer = "";
-      }
-    } else if (chr === '"') {
-      closer = '"';
-      quoteSeen = true;
-    } else if (chr === ":" && routeEnd < 0 && firstChar === "@" && !quoteSeen) {
-      routeEnd = result.length + 1;
-    } else if (chr === "[") {
-      closer = "]";
-    } else if (chr === "(") {
-      depth = 1;
-      continue;
-    } else if (chr === "<") {
-      result = "";
-      lastChar = "";
-      comments.length = 0;
-      firstChar = "";
-      quoteSeen = false;
-      routeEnd = -1;
-      continue;
-    }
-    result += chr;
-    lastChar = chr;
-    if (!firstChar && !isSpaceCode(address.charCodeAt(i))) {
-      firstChar = chr;
-    }
-  }
-  if (routeEnd >= 0 && result.indexOf("@", routeEnd) >= 0) {
-    result = result.slice(routeEnd);
-  }
-  if (depth) {
-    comments.push(comment.trim());
-  }
-  return { address: result.trim(), comments: comments.filter((text) => text) };
-}
-function collectAddressParts(tokens, from, to) {
-  let state = "text";
-  let data = {
-    address: [],
-    comment: [],
-    text: [],
-    textWasQuoted: [],
-    quotedLocalAt: []
-  };
-  let lastTextPureQuoted = false;
-  let i;
-  let insideQuotes = false;
-  const lastChars = { address: "", comment: "", text: "" };
-  for (i = from;i < to; i++) {
-    const value = tokens.value(i);
-    const prevOperator = i > from ? tokens.operatorAt(i - 1) : "";
-    const prevNoBreak = i > from && tokens.noBreak(i - 1);
-    if (tokens.isOperator(i)) {
-      switch (value) {
-        case "<":
-          state = "address";
-          insideQuotes = false;
-          break;
-        case "(":
-          state = "comment";
-          insideQuotes = false;
-          break;
-        case '"':
-          insideQuotes = !insideQuotes;
-          state = "text";
-          break;
-        default:
-          state = "text";
-          insideQuotes = false;
-          break;
-      }
-    } else {
-      const opensAfterEmptyQuotedString = prevOperator === '"' && prevNoBreak && i > from + 1 && tokens.operatorAt(i - 2) === '"';
-      const joins = prevNoBreak && data[state].length && (prevOperator !== ")" || lastChars[state] === "@" || value.charAt(0) === "@");
-      if (joins) {
-        const last = data[state].length - 1;
-        if (state === "text" && !insideQuotes) {
-          if (lastTextPureQuoted && value.charAt(0) === "@") {
-            data.quotedLocalAt[last] = data.text[last].length;
-          }
-          lastTextPureQuoted = false;
-        }
-        data[state][last] += value;
-        if (state === "text" && insideQuotes) {
-          data.textWasQuoted[last] = true;
-        }
-      } else {
-        data[state].push(value);
-        if (state === "text") {
-          data.textWasQuoted.push(insideQuotes || opensAfterEmptyQuotedString);
-          data.quotedLocalAt.push(opensAfterEmptyQuotedString && value.charAt(0) === "@" ? 0 : -1);
-          lastTextPureQuoted = insideQuotes;
-        }
-      }
-      lastChars[state] = value.charAt(value.length - 1);
-    }
-  }
-  let textFromComment = false;
-  if (!data.text.length && data.comment.length) {
-    data.text = data.comment;
-    data.comment = [];
-    textFromComment = true;
-  }
-  return { data, textFromComment };
-}
-function groupName(tokens, from, to) {
-  return decodeWords(collectAddressParts(tokens, from, to).data.text.join(" "));
-}
-function _handleAddress(tokens, from, to) {
-  const collected = collectAddressParts(tokens, from, to);
-  const data = collected.data;
-  let textFromComment = collected.textFromComment;
-  let i;
-  const addressComments = [];
-  const addressParts = [];
-  for (const part of data.address) {
-    const stripped = stripAddressComments(part);
-    for (const comment of stripped.comments) {
-      addressComments.push(comment);
-    }
-    if (stripped.address) {
-      addressParts.push(stripped.address);
-    }
-  }
-  data.address = addressParts;
-  if (!data.address.length && data.text.length && !textFromComment) {
-    const candidates = data.text.map((part) => collapseAtSpacing(part));
-    for (i = 0;i < data.text.length; i++) {
-      const local = data.quotedLocalAt[i];
-      const quotedLocal = data.textWasQuoted[i] && local >= 0 && QUOTED_LOCAL_DOMAIN.test(data.text[i].slice(local)) ? quoteLocalPart(data.text[i]) : "";
-      if (quotedLocal || !data.textWasQuoted[i] && isAddrSpec(candidates[i])) {
-        data.address = [quotedLocal || candidates[i]];
-        data.text.splice(i, 1);
-        data.textWasQuoted.splice(i, 1);
-        data.quotedLocalAt.splice(i, 1);
-        break;
-      }
-    }
-    if (!data.address.length) {
-      for (i = 0;i < data.text.length; i++) {
-        if (!data.textWasQuoted[i]) {
-          const part = candidates[i];
-          const start = looseAddressStart(part);
-          if (start >= 0) {
-            LOOSE_TEXT_ADDR.lastIndex = start;
-            const match = LOOSE_TEXT_ADDR.exec(part);
-            if (match) {
-              data.address = [match[0].trim()];
-              data.text[i] = (part.slice(0, start) + " " + part.slice(start + match[0].length)).trim();
-              break;
-            }
-          }
-          data.text[i] = data.text[i].trim();
-        }
-      }
-    }
-  }
-  if (!data.text.length && data.comment.length) {
-    data.text = data.comment;
-    data.comment = [];
-  }
-  if (data.address.length > 1) {
-    data.text = data.text.concat(data.address.splice(1));
-  }
-  const addressFromQuotedText = !data.address.length && data.textWasQuoted.some((wasQuoted) => wasQuoted);
-  let text = data.text.join(" ");
-  let addressValue = data.address.join(" ");
-  if (!addressValue && isEncodedWordsOnly(text.trim())) {
-    return { address: "", name: decodeWords(text) };
-  }
-  if (addressFromQuotedText && text.indexOf("@") >= 0) {
-    addressValue = quoteLocalPart(joinAtSpacing(text, domainAt(text)));
-    text = "";
-  }
-  ({ address: addressValue, text } = recoverAddrSpec(addressValue, text));
-  if (!text && addressComments.length) {
-    text = addressComments.join(" ");
-    textFromComment = true;
-  }
-  const rawName = text || addressValue || "";
-  const address = {
-    address: addressValue || (textFromComment ? "" : text) || "",
-    name: decodeWords(rawName)
-  };
-  if (address.address === rawName || address.address === address.name) {
-    if (address.address.match(/@/)) {
-      address.name = "";
-    } else {
-      address.address = "";
-    }
-  }
-  return address;
-}
-
-class Tokenizer3 {
-  constructor(str) {
-    this.str = (str || "").toString();
-    this.operatorCurrent = "";
-    this.operatorExpecting = "";
-    this.node = -1;
-    this.escaped = false;
-    this.inDomainLiteral = false;
-    this.afterAt = false;
-    this.inGroup = false;
-    this.innerQuoted = false;
-    this.innerComment = 0;
-    this.innerLiteral = false;
-    this.innerEscaped = false;
-    this.list = new TokenList(this.str);
-    this.operators = {
-      '"': '"',
-      "(": ")",
-      "<": ">",
-      ",": "",
-      ":": "",
-      ";": ""
-    };
-  }
-  tokenize() {
-    const str = this.str;
-    const len = str.length;
-    for (let i = 0;i < len; i++) {
-      this.checkChar(str.charAt(i), i);
-    }
-    this.closeText(len);
-    const list = this.list;
-    const slots = list.slots;
-    let kept = 0;
-    for (let i = 0, count = list.length;i < count; i++) {
-      const kind = slots[i * 3];
-      let start = slots[i * 3 + 1];
-      let end = slots[i * 3 + 2];
-      if (kind & TOKEN_DIRTY) {
-        const value = this.cleanValue(start, end, kind).trim();
-        if (!value) {
-          continue;
-        }
-        list.cleaned.set(kept, value);
-      } else if (!(kind & TOKEN_OPERATOR)) {
-        while (start < end && isSpaceCode(str.charCodeAt(start))) {
-          start++;
-        }
-        while (end > start && isSpaceCode(str.charCodeAt(end - 1))) {
-          end--;
-        }
-        if (start === end) {
-          continue;
-        }
-      }
-      slots[kept * 3] = kind;
-      slots[kept * 3 + 1] = start;
-      slots[kept * 3 + 2] = end;
-      kept++;
-    }
-    list.length = kept;
-    return list;
-  }
-  closeText(end) {
-    if (this.node >= 0) {
-      this.list.slots[this.node * 3 + 2] = end;
-      this.node = -1;
-    }
-  }
-  cleanValue(start, end, kind) {
-    const str = this.str;
-    const escapes = (kind & TOKEN_ESCAPES) !== 0;
-    let escaped = (kind & TOKEN_STARTS_ESCAPED) !== 0;
-    let value = "";
-    for (let i = start;i < end; i++) {
-      const chr = str.charAt(i);
-      if (escapes && !escaped && chr === "\\") {
-        escaped = true;
-        continue;
-      }
-      escaped = false;
-      if (chr === `
-`) {
-        value += " ";
-      } else if (chr.charCodeAt(0) >= 33 || chr === " " || chr === "\t") {
-        value += chr;
-      }
-    }
-    return value;
-  }
-  checkChar(chr, i) {
-    if (!this.escaped && !this.operatorExpecting) {
-      if (!this.inDomainLiteral && chr === "[" && this.afterAt) {
-        this.inDomainLiteral = true;
-      } else if (this.inDomainLiteral && (chr === "]" || chr === "," || chr === ";")) {
-        this.inDomainLiteral = false;
-      }
-    }
-    let nested = false;
-    if (this.operatorExpecting === ">") {
-      nested = this.trackInner(chr);
-      if (!nested && chr === ";" && this.inGroup) {
-        this.closeText(i);
-        this.operatorExpecting = "";
-        this.resetInner();
-      }
-    } else if (this.operatorExpecting === ")" && !this.escaped) {
-      if (chr === "(") {
-        this.innerComment++;
-      } else if (chr === ")" && this.innerComment) {
-        this.innerComment--;
-        nested = true;
-      }
-    }
-    if (this.escaped) {} else if (chr === this.operatorExpecting && !nested) {
-      const nextChr = this.str.charAt(i + 1);
-      this.closeText(i);
-      this.list.push(nextChr && ![" ", "\t", "\r", `
-`, ",", ";"].includes(nextChr) ? TOKEN_OPERATOR | TOKEN_NO_BREAK : TOKEN_OPERATOR, i, i + 1);
-      if (chr !== ")") {
-        this.afterAt = false;
-      }
-      this.operatorExpecting = "";
-      this.escaped = false;
-      this.resetInner();
-      return;
-    } else if (!this.operatorExpecting && !(this.inDomainLiteral && chr === ":") && chr in this.operators) {
-      this.closeText(i);
-      this.list.push(TOKEN_OPERATOR, i, i + 1);
-      if (chr === ":") {
-        this.inGroup = true;
-      } else if (chr === ";") {
-        this.inGroup = false;
-      }
-      if (chr !== "(") {
-        this.afterAt = false;
-      }
-      this.operatorExpecting = this.operators[chr];
-      this.escaped = false;
-      this.resetInner();
-      return;
-    } else if ((this.operatorExpecting === '"' || this.operatorExpecting === ")") && chr === "\\") {
-      this.escaped = true;
-      if (this.node >= 0) {
-        this.list.slots[this.node * 3] |= TOKEN_DIRTY;
-      }
-      return;
-    }
-    if (this.node < 0) {
-      this.node = this.list.push((this.operatorExpecting === '"' || this.operatorExpecting === ")" ? TOKEN_ESCAPES : 0) | (this.escaped ? TOKEN_STARTS_ESCAPED : 0), i, i);
-    }
-    if (chr === `
-`) {
-      chr = " ";
-      this.list.slots[this.node * 3] |= TOKEN_DIRTY;
-    }
-    if (chr.charCodeAt(0) >= 33 || chr === " " || chr === "\t") {
-      if (!this.operatorExpecting && chr !== " " && chr !== "\t") {
-        this.afterAt = chr === "@";
-      }
-    } else {
-      this.list.slots[this.node * 3] |= TOKEN_DIRTY;
-    }
-    this.escaped = false;
-  }
-  trackInner(chr) {
-    if (this.innerEscaped) {
-      this.innerEscaped = false;
-      return true;
-    }
-    if (this.innerQuoted) {
-      if (chr === "\\") {
-        this.innerEscaped = true;
-      } else if (chr === '"') {
-        this.innerQuoted = false;
-      }
-      return true;
-    }
-    if (this.innerComment) {
-      if (chr === "\\") {
-        this.innerEscaped = true;
-      } else if (chr === "(") {
-        this.innerComment++;
-      } else if (chr === ")") {
-        this.innerComment--;
-      }
-      return true;
-    }
-    if (this.innerLiteral) {
-      if (chr === "]") {
-        this.innerLiteral = false;
-      }
-      return true;
-    }
-    if (chr === '"') {
-      this.innerQuoted = true;
-      return true;
-    }
-    if (chr === "(") {
-      this.innerComment = 1;
-      return true;
-    }
-    if (chr === "[" && this.afterAt) {
-      this.innerLiteral = true;
-      return true;
-    }
-    if (!isSpaceCode(chr.charCodeAt(0))) {
-      this.afterAt = chr === "@";
-    }
-    return false;
-  }
-  resetInner() {
-    this.innerQuoted = false;
-    this.innerComment = 0;
-    this.innerLiteral = false;
-    this.innerEscaped = false;
-  }
-}
-function mergeNameFragments(list) {
-  const merged = [];
-  for (let i = list.length - 1;i >= 0; i--) {
-    const current = list[i];
-    const next = merged.length ? merged[merged.length - 1] : null;
-    if (next && current.address === "" && current.name && !current.group && next.address && next.name) {
-      next.name = current.name + ", " + next.name;
-    } else {
-      merged.push(current);
-    }
-  }
-  return merged.reverse();
-}
-function parseAddressList(str) {
-  const tokens = new Tokenizer3(str).tokenize();
-  const parsedAddresses = [];
-  let group = null;
-  let members = [];
-  let from = 0;
-  for (let i = 0, len = tokens.length;i <= len; i++) {
-    const operator = i < len ? tokens.operatorAt(i) : "";
-    if (i < len && operator !== "," && operator !== ";" && operator !== ":") {
-      continue;
-    }
-    if (operator === ":") {
-      if (!group) {
-        group = { name: groupName(tokens, from, i), group: [] };
-        members = [];
-      }
-      from = i + 1;
-      continue;
-    }
-    if (i > from) {
-      (group ? members : parsedAddresses).push(_handleAddress(tokens, from, i));
-    }
-    from = i + 1;
-    if (group && (operator === ";" || i === len)) {
-      group.group = mergeNameFragments(members);
-      parsedAddresses.push(group);
-      group = null;
-    }
-  }
-  return mergeNameFragments(parsedAddresses);
-}
-function addressParser(str, options) {
-  const parsedAddresses = parseAddressList(str);
-  if (options && options.flatten) {
-    let addresses = [];
-    let walkAddressList = (list) => {
-      list.forEach((address) => {
-        if (address.group) {
-          return walkAddressList(address.group);
-        } else {
-          addresses.push(address);
-        }
-      });
-    };
-    walkAddressList(parsedAddresses);
-    return addresses;
-  }
-  return parsedAddresses;
-}
-var TOKEN_OPERATOR = 1, TOKEN_NO_BREAK = 2, TOKEN_DIRTY = 4, TOKEN_ESCAPES = 8, TOKEN_STARTS_ESCAPED = 16, HAS_WHITESPACE, QUOTED_LOCAL_ADDR, ADDR_SPEC, LITERAL_ADDR_SPEC, QUOTED_LOCAL_DOMAIN, LOOSE_ADDR_SPEC, LOOSE_TEXT_ADDR, DOMAIN_LITERAL_TAIL, LEADING_QUOTED_STRING, address_parser_default;
-var init_address_parser = __esm(() => {
-  init_decode_strings();
-  HAS_WHITESPACE = /\s/;
-  QUOTED_LOCAL_ADDR = /^("(?:[^"\\]|\\[\s\S])*"@\S+)(?:\s+([\s\S]+))?$/;
-  ADDR_SPEC = /^[^@\s]+@[^@\s]+$/;
-  LITERAL_ADDR_SPEC = /^[^@\s]+@\[[^[\]\\\s]*\]$/;
-  QUOTED_LOCAL_DOMAIN = /^@(?:[^@\s"]+|\[[^[\]\\\s]*\])$/;
-  LOOSE_ADDR_SPEC = /^[^@\s]+@\S+$/;
-  LOOSE_TEXT_ADDR = /\s*\b[^@\s]+@[^\s]+\b\s*/y;
-  DOMAIN_LITERAL_TAIL = /@(\[[^[\]\\]*\])$/;
-  LEADING_QUOTED_STRING = /^"(?:[^"\\]|\\[\s\S])*"/;
-  address_parser_default = addressParser;
-});
-
-// node_modules/postal-mime/dist/esm/base64-encoder.js
-function base64ArrayBuffer(arrayBuffer) {
-  let base64 = "";
-  const encodings = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  const bytes = new Uint8Array(arrayBuffer);
-  const byteLength = bytes.byteLength;
-  const byteRemainder = byteLength % 3;
-  const mainLength = byteLength - byteRemainder;
-  let a, b, c, d;
-  let chunk;
-  for (let i = 0;i < mainLength; i = i + 3) {
-    chunk = bytes[i] << 16 | bytes[i + 1] << 8 | bytes[i + 2];
-    a = (chunk & 16515072) >> 18;
-    b = (chunk & 258048) >> 12;
-    c = (chunk & 4032) >> 6;
-    d = chunk & 63;
-    base64 += encodings[a] + encodings[b] + encodings[c] + encodings[d];
-  }
-  if (byteRemainder === 1) {
-    chunk = bytes[mainLength];
-    a = (chunk & 252) >> 2;
-    b = (chunk & 3) << 4;
-    base64 += encodings[a] + encodings[b] + "==";
-  } else if (byteRemainder === 2) {
-    chunk = bytes[mainLength] << 8 | bytes[mainLength + 1];
-    a = (chunk & 64512) >> 10;
-    b = (chunk & 1008) >> 4;
-    c = (chunk & 15) << 2;
-    base64 += encodings[a] + encodings[b] + encodings[c] + "=";
-  }
-  return base64;
-}
-
-// node_modules/postal-mime/dist/esm/postal-mime.js
-function isReadableStream(value) {
-  return !!value && typeof value.getReader === "function";
-}
-function isBlob(value) {
-  return value instanceof Blob || Object.prototype.toString.call(value) === "[object Blob]";
-}
-function isArrayBuffer(value) {
-  const tag = Object.prototype.toString.call(value);
-  return tag === "[object ArrayBuffer]" || tag === "[object SharedArrayBuffer]";
-}
-function parseAttachmentEncoding(value) {
-  const encoding = String(value || "").replace(/[-_\s]/g, "").toLowerCase() || "arraybuffer";
-  if (!ATTACHMENT_ENCODINGS.has(encoding)) {
-    throw createError("EINVALIDOPTION", `Unknown attachment encoding ${encoding}`);
-  }
-  return encoding;
-}
-function renderEntry(textEntry, textType, convert) {
-  if (textEntry.type === "subMessage") {
-    return textType === "html" ? formatHtmlHeader(textEntry.value) : formatTextHeader(textEntry.value);
-  }
-  if (!convert) {
-    return textEntry.value;
-  }
-  return textType === "html" ? textToHtml(textEntry.value) : htmlToText(textEntry.value);
-}
-function countAddresses(addresses) {
-  if (!addresses) {
-    return 0;
-  }
-  let count = 0;
-  for (const address of Array.isArray(addresses) ? addresses : [addresses]) {
-    count += 1 + (address.group ? address.group.length : 0);
-  }
-  return count;
-}
-function parseLimitOption(value, defaultValue, name, min = 0) {
-  if (value === undefined || value === null) {
-    return defaultValue;
-  }
-  if (typeof value !== "number" || !Number.isInteger(value) || value < min) {
-    throw createError("EINVALIDOPTION", `${name} must be a ${min ? "positive" : "non-negative"} integer`);
-  }
-  return value;
-}
-function parseLimits(options) {
-  return {
-    maxNestingDepth: parseLimitOption(options.maxNestingDepth, MAX_NESTING_DEPTH, "maxNestingDepth"),
-    maxHeadersSize: parseLimitOption(options.maxHeadersSize, MAX_HEADERS_SIZE, "maxHeadersSize"),
-    maxPartCount: parseLimitOption(options.maxPartCount, MAX_PART_COUNT, "maxPartCount", 1),
-    maxRfc822NestingDepth: parseLimitOption(options.maxRfc822NestingDepth, MAX_RFC822_NESTING_DEPTH, "maxRfc822NestingDepth"),
-    maxForwardedAddresses: parseLimitOption(options.maxForwardedAddresses, MAX_FORWARDED_ADDRESSES, "maxForwardedAddresses")
-  };
-}
-
-class PostalMime {
-  static async parse(buf, options) {
-    const parser = new PostalMime(options);
-    return parser.parse(buf);
-  }
-  constructor(options, parent) {
-    this.options = options || {};
-    this.rfc822NestingDepth = parent ? parent.rfc822NestingDepth + 1 : 0;
-    this.limits = parent ? parent.limits : parseLimits(this.options);
-    this.counters = parent ? parent.counters : { headerSize: 0, partCount: 0, forwardedAddresses: 0 };
-    this.root = this.currentNode = new MimeNode({ postalMime: this });
-    this.boundaries = [];
-    this.textContent = {};
-    this.textMap = new Map;
-    this.textTypes = new Set;
-    this.attachments = [];
-    this.forceRfc822Attachments = false;
-    this.attachmentEncoding = parseAttachmentEncoding(this.options.attachmentEncoding);
-    this.started = false;
-  }
-  async finalize() {
-    await this.root.finalize();
-  }
-  async processLine(line, lineBreak, isFinal) {
-    let boundaries = this.boundaries;
-    if (boundaries.length && line.length > 2 && line[0] === 45 && line[1] === 45) {
-      for (let i = 0;i < boundaries.length; i++) {
-        let boundary = boundaries[i];
-        if (line.length < boundary.value.length + 2) {
-          continue;
-        }
-        let boundaryMatches = true;
-        for (let j = 0;j < boundary.value.length; j++) {
-          if (line[j + 2] !== boundary.value[j]) {
-            boundaryMatches = false;
-            break;
-          }
-        }
-        if (!boundaryMatches) {
-          continue;
-        }
-        let boundaryEnd = boundary.value.length + 2;
-        let isTerminator = false;
-        if (line.length >= boundary.value.length + 4 && line[boundary.value.length + 2] === 45 && line[boundary.value.length + 3] === 45) {
-          isTerminator = true;
-          boundaryEnd = boundary.value.length + 4;
-        }
-        let hasValidTrailing = true;
-        for (let j = boundaryEnd;j < line.length; j++) {
-          if (!isWsp(line[j])) {
-            hasValidTrailing = false;
-            break;
-          }
-        }
-        if (!hasValidTrailing) {
-          continue;
-        }
-        if (isTerminator) {
-          await boundary.node.finalize(true);
-          this.currentNode = boundary.node.parentNode || this.root;
-        } else {
-          await boundary.node.finalizeChildNodes(true);
-          this.currentNode = new MimeNode({
-            postalMime: this,
-            parentNode: boundary.node,
-            parentMultipartType: boundary.node.contentType.multipart
-          });
-        }
-        if (isFinal) {
-          return this.finalize();
-        }
-        return;
-      }
-    }
-    if (this.currentNode.feed(line, lineBreak)) {
-      return this.processLine(line, lineBreak, isFinal);
-    }
-    if (isFinal) {
-      return this.finalize();
-    }
-  }
-  readLine() {
-    let startPos = this.readPos;
-    let endPos = this.readPos;
-    while (this.readPos < this.av.length) {
-      const c = this.av[this.readPos++];
-      if (c !== 13 && c !== 10) {
-        endPos = this.readPos;
-      }
-      if (c === 10) {
-        return {
-          bytes: new Uint8Array(this.buf, startPos, endPos - startPos),
-          lineBreak: this.av.subarray(endPos, this.readPos),
-          done: this.readPos >= this.av.length
-        };
-      }
-    }
-    return {
-      bytes: new Uint8Array(this.buf, startPos, endPos - startPos),
-      lineBreak: LINE_FEED,
-      done: this.readPos >= this.av.length
-    };
-  }
-  addTextEntry(selector, textType, item) {
-    let textEntry = this.textMap.get(selector);
-    if (!textEntry) {
-      textEntry = {};
-      this.textMap.set(selector, textEntry);
-    }
-    const entries = textEntry[textType] || [];
-    textEntry[textType] = entries;
-    entries.push(item);
-    this.textTypes.add(textType);
-  }
-  async collectNode(node, alternative, related) {
-    if (!node.contentType.multipart) {
-      const inlineRfc822 = this.isInlineMessageRfc822(node);
-      const rfc822DepthExceeded = inlineRfc822 && this.rfc822NestingDepth >= this.limits.maxRfc822NestingDepth;
-      if (inlineRfc822 && !rfc822DepthExceeded) {
-        await this.collectSubMessage(node);
-      } else if (this.isInlineTextNode(node)) {
-        const textType = node.contentType.parsed.value === "text/html" ? "html" : "plain";
-        this.addTextEntry(alternative || node, textType, { type: "text", value: node.getTextContent() });
-      } else if (node.content) {
-        this.collectAttachment(node, node.content, related, rfc822DepthExceeded);
-      }
-    } else if (node.contentType.multipart === "alternative") {
-      alternative = node;
-    } else if (node.contentType.multipart === "related") {
-      related = true;
-    }
-    for (let childNode of node.childNodes) {
-      await this.collectNode(childNode, alternative, related);
-    }
-  }
-  async collectSubMessage(node) {
-    const subParser = new PostalMime({
-      attachmentEncoding: "arraybuffer"
-    }, this);
-    const subMessage = await subParser.parse(node.content || new ArrayBuffer(0));
-    this.counters.forwardedAddresses += countAddresses(subMessage.from) + countAddresses(subMessage.to) + countAddresses(subMessage.cc) + countAddresses(subMessage.bcc);
-    if (this.counters.forwardedAddresses > this.limits.maxForwardedAddresses) {
-      throw createError("EMAXFORWARDEDADDRESSES", `Maximum forwarded address count of ${this.limits.maxForwardedAddresses} addresses exceeded`);
-    }
-    const hasPlain = subParser.textTypes.has("plain");
-    const hasHtml = subParser.textTypes.has("html");
-    if (hasPlain || !hasHtml) {
-      this.addTextEntry(node, "plain", { type: "subMessage", value: subMessage });
-    }
-    if (hasHtml) {
-      this.addTextEntry(node, "html", { type: "subMessage", value: subMessage });
-    }
-    subParser.textMap.forEach((subTextEntry, subTextNode) => {
-      this.textMap.set(subTextNode, subTextEntry);
-    });
-    for (let attachment of subMessage.attachments) {
-      this.attachments.push(attachment);
-    }
-  }
-  collectAttachment(node, content, related, rfc822DepthExceeded) {
-    const filename = node.contentDisposition.parsed.params.filename || node.contentType.parsed.params.name || null;
-    const attachment = {
-      filename: filename ? decodeWords(foldLineBreaks(filename)) : null,
-      mimeType: node.contentType.parsed.value,
-      disposition: node.contentDisposition.parsed.value || null
-    };
-    if (related && node.contentId && !rfc822DepthExceeded) {
-      attachment.related = true;
-    }
-    if (rfc822DepthExceeded) {
-      attachment.rfc822DepthExceeded = true;
-    }
-    if (node.contentDescription) {
-      attachment.description = decodeWords(node.contentDescription);
-    }
-    if (node.contentId) {
-      attachment.contentId = node.contentId;
-    }
-    switch (node.contentType.parsed.value) {
-      case "text/calendar":
-      case "application/ics": {
-        if (node.contentType.parsed.params.method) {
-          attachment.method = node.contentType.parsed.params.method.toString().toUpperCase().trim();
-        }
-        const decodedText = node.getTextContent();
-        let end = decodedText.length;
-        while (end > 0 && decodedText.charCodeAt(end - 1) === 10) {
-          end--;
-        }
-        attachment.content = textEncoder.encode(decodedText.slice(0, end) + `
-`);
-        break;
-      }
-      default:
-        attachment.content = content;
-    }
-    this.attachments.push(attachment);
-  }
-  renderTextContent() {
-    const textContent = {};
-    this.textMap.forEach((mapEntry) => {
-      this.textTypes.forEach((textType) => {
-        const output = textContent[textType] || [];
-        textContent[textType] = output;
-        const ownEntries = mapEntry[textType];
-        const entries = ownEntries || mapEntry[textType === "html" ? "plain" : "html"] || [];
-        for (const textEntry of entries) {
-          output.push(renderEntry(textEntry, textType, !ownEntries));
-        }
-      });
-    });
-    Object.keys(textContent).forEach((textType) => {
-      this.textContent[textType] = textContent[textType].join(`
-`);
-    });
-  }
-  isInlineTextNode(node) {
-    if (node.contentDisposition.parsed.value === "attachment") {
-      return false;
-    }
-    switch (node.contentType.parsed.value) {
-      case "text/html":
-      case "text/plain":
-        return true;
-      case "text/calendar":
-      case "text/csv":
-      default:
-        return false;
-    }
-  }
-  isInlineMessageRfc822(node) {
-    if (this.forceRfc822Attachments || node.contentType.parsed.value !== "message/rfc822") {
-      return false;
-    }
-    const encoding = node.contentTransferEncoding.encoding;
-    if (encoding === "base64" || encoding === "quoted-printable") {
-      return false;
-    }
-    let disposition = node.contentDisposition.parsed.value || (this.options.rfc822Attachments ? "attachment" : "inline");
-    return disposition === "inline";
-  }
-  hasReportParts() {
-    let found = false;
-    let walk = (node) => {
-      if (!node.contentType.multipart) {
-        if (["message/delivery-status", "message/feedback-report"].includes(node.contentType.parsed.value)) {
-          found = true;
-        }
-      }
-      for (let childNode of node.childNodes) {
-        walk(childNode);
-      }
-    };
-    walk(this.root);
-    return found;
-  }
-  async resolveStream(stream) {
-    let chunkLen = 0;
-    let chunks = [];
-    const reader = stream.getReader();
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) {
-        break;
-      }
-      if (!ArrayBuffer.isView(value)) {
-        const error = createError("EINVALIDINPUT", "Stream chunks must be Uint8Array values");
-        reader.cancel(error).catch(() => {});
-        throw error;
-      }
-      chunks.push(new Uint8Array(value.buffer, value.byteOffset, value.byteLength));
-      chunkLen += value.byteLength;
-    }
-    const result = new Uint8Array(chunkLen);
-    let chunkPointer = 0;
-    for (let chunk of chunks) {
-      result.set(chunk, chunkPointer);
-      chunkPointer += chunk.length;
-    }
-    return result;
-  }
-  async resolveInput(buf) {
-    let input = buf;
-    if (isReadableStream(input)) {
-      input = await this.resolveStream(input);
-    }
-    input = input || new ArrayBuffer(0);
-    if (typeof input === "string") {
-      input = textEncoder.encode(input);
-    }
-    if (isBlob(input)) {
-      input = await blobToArrayBuffer(input);
-    }
-    if (ArrayBuffer.isView(input)) {
-      return input.buffer.slice(input.byteOffset, input.byteOffset + input.byteLength);
-    }
-    if (!isArrayBuffer(input)) {
-      throw createError("EINVALIDINPUT", "Unsupported email input type");
-    }
-    return input;
-  }
-  buildMessage() {
-    const headers = this.root.headers;
-    const message = {
-      headers: headers.map((entry) => ({
-        key: entry.key,
-        originalKey: entry.originalKey,
-        value: entry.value
-      }))
-    };
-    for (const key of ["from", "sender"]) {
-      const addressHeader = headers.find((line) => line.key === key);
-      if (addressHeader && addressHeader.value) {
-        const addresses = address_parser_default(addressHeader.value);
-        if (addresses && addresses.length) {
-          message[key] = addresses[0];
-        }
-      }
-    }
-    for (const [key, camelKey] of [
-      ["delivered-to", "deliveredTo"],
-      ["return-path", "returnPath"]
-    ]) {
-      const addressHeader = headers.find((line) => line.key === key);
-      if (addressHeader && addressHeader.value) {
-        const addresses = address_parser_default(addressHeader.value);
-        if (addresses && addresses.length && addresses[0].address) {
-          message[camelKey] = addresses[0].address;
-        }
-      }
-    }
-    for (const [key, camelKey] of [
-      ["to", "to"],
-      ["cc", "cc"],
-      ["bcc", "bcc"],
-      ["reply-to", "replyTo"]
-    ]) {
-      const addresses = [];
-      for (const entry of headers) {
-        if (entry.key === key && entry.value) {
-          for (const address of address_parser_default(entry.value)) {
-            addresses.push(address);
-          }
-        }
-      }
-      if (addresses.length) {
-        message[camelKey] = addresses;
-      }
-    }
-    for (const [key, camelKey] of [
-      ["subject", "subject"],
-      ["message-id", "messageId"],
-      ["in-reply-to", "inReplyTo"],
-      ["references", "references"]
-    ]) {
-      const header = headers.find((line) => line.key === key);
-      if (header && header.value) {
-        message[camelKey] = decodeWords(header.value);
-      }
-    }
-    let dateHeader = headers.find((line) => line.key === "date");
-    if (dateHeader) {
-      let date = new Date(dateHeader.value);
-      message.date = date.toString() === "Invalid Date" ? dateHeader.value : date.toISOString();
-    }
-    if (this.textContent.html) {
-      message.html = this.textContent.html;
-    }
-    if (this.textContent.plain) {
-      message.text = this.textContent.plain;
-    }
-    message.attachments = this.attachments;
-    message.headerLines = this.root.rawHeaderLines.slice();
-    return message;
-  }
-  encodeAttachments() {
-    switch (this.attachmentEncoding) {
-      case "arraybuffer":
-        break;
-      case "base64":
-        for (let attachment of this.attachments) {
-          if (attachment.content && typeof attachment.content !== "string") {
-            attachment.content = base64ArrayBuffer(attachment.content);
-            attachment.encoding = "base64";
-          }
-        }
-        break;
-      case "utf8": {
-        let attachmentDecoder = new TextDecoder("utf8");
-        for (let attachment of this.attachments) {
-          if (attachment.content && typeof attachment.content !== "string") {
-            attachment.content = attachmentDecoder.decode(attachment.content);
-            attachment.encoding = "utf8";
-          }
-        }
-        break;
-      }
-    }
-  }
-  async parse(buf) {
-    if (this.started) {
-      throw createError("EPARSERREUSED", "Can not reuse parser, create a new PostalMime object");
-    }
-    this.started = true;
-    this.buf = await this.resolveInput(buf);
-    this.av = new Uint8Array(this.buf);
-    this.readPos = 0;
-    while (this.readPos < this.av.length) {
-      const line = this.readLine();
-      await this.processLine(line.bytes, line.lineBreak, line.done);
-    }
-    this.forceRfc822Attachments = Boolean(this.options.forceRfc822Attachments) || this.hasReportParts();
-    await this.collectNode(this.root, false, false);
-    if (this.rfc822NestingDepth === 0) {
-      this.renderTextContent();
-    }
-    const message = this.buildMessage();
-    this.encodeAttachments();
-    return message;
-  }
-}
-var ATTACHMENT_ENCODINGS, LINE_FEED, MAX_NESTING_DEPTH = 256, MAX_HEADERS_SIZE, MAX_PART_COUNT = 1e4, MAX_RFC822_NESTING_DEPTH = 10, MAX_FORWARDED_ADDRESSES = 1e4;
-var init_postal_mime = __esm(() => {
-  init_mime_node();
-  init_text_format();
-  init_address_parser();
-  init_decode_strings();
-  init_errors8();
-  ATTACHMENT_ENCODINGS = new Set(["arraybuffer", "base64", "utf8"]);
-  LINE_FEED = new Uint8Array([10]);
-  MAX_HEADERS_SIZE = 2 * 1024 * 1024;
-});
-
-// src/workers/archive-import/mbox/parse.ts
-import { createHash as createHash111 } from "node:crypto";
-function sha25612(value) {
-  return createHash111("sha256").update(value).digest("hex");
-}
-function headerValue(email, key) {
-  const value = email.headers.find((header) => header.key === key)?.value?.trim();
-  return value ? value : undefined;
-}
-function decoded(value) {
-  if (!value)
-    return;
-  try {
-    return decodeWords(value).trim() || undefined;
-  } catch {
-    return value;
-  }
-}
-function bareMessageId2(value) {
-  const trimmed = value?.trim();
-  if (!trimmed)
-    return;
-  const inner = trimmed.startsWith("<") && trimmed.endsWith(">") ? trimmed.slice(1, -1).trim() : trimmed;
-  return inner || undefined;
-}
-function firstMessageId(value) {
-  const match = value ? /<([^<>\s]+)>/.exec(value) : null;
-  return match?.[1] ?? bareMessageId2(value?.split(/\s+/)[0]);
-}
-function isoDate(value) {
-  if (!value)
-    return;
-  const ms = Date.parse(value);
-  return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined;
-}
-function stripHtml2(value) {
-  return value.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-}
-function charsetDecodable(charset) {
-  const label = charset.trim().toLowerCase();
-  if (!label)
-    return true;
-  const cached = decodableCharsets.get(label);
-  if (cached !== undefined)
-    return cached;
-  const stripped = label.replace(/^(?:x-ms-|x-|cs)/, "");
-  let ok = false;
-  for (const candidate of [label, stripped, stripped.replace(/[\s._-]+/g, "")]) {
-    try {
-      new TextDecoder(candidate);
-      ok = true;
-      break;
-    } catch {}
-  }
-  decodableCharsets.set(label, ok);
-  return ok;
-}
-function declaredCharsets(raw) {
-  const text = Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength).toString("latin1");
-  const found = new Set;
-  for (const match of text.matchAll(/^content-type:[^\n]*(?:\n[ \t][^\n]*)*/gim)) {
-    const param = /charset\s*=\s*"?([^";\s]+)/i.exec(match[0]);
-    if (param?.[1])
-      found.add(param[1].toLowerCase());
-  }
-  const headerEnd = text.search(/\r?\n\r?\n/);
-  const headers = headerEnd < 0 ? text : text.slice(0, headerEnd);
-  for (const match of headers.matchAll(/=\?([^?*\s]+)(?:\*[^?]*)?\?[bq]\?/gi)) {
-    if (match[1])
-      found.add(match[1].toLowerCase());
-  }
-  return [...found];
-}
-async function parseMboxMessage(raw, options = {}) {
-  let email;
-  try {
-    email = await PostalMime.parse(raw, {
-      ...options.rfc822AsAttachments ? { forceRfc822Attachments: true } : {},
-      maxHeadersSize: 1024 * 1024,
-      maxPartCount: 2000,
-      maxNestingDepth: 64,
-      maxRfc822NestingDepth: 4
-    });
-  } catch {
-    return;
-  }
-  const labels = (headerValue(email, "x-gmail-labels") ?? "").split(",").map((label) => decoded(label.trim()) ?? "").filter((label) => label !== "");
-  const dateHeader = headerValue(email, "date");
-  const authoredAt = isoDate(email.date) ?? isoDate(dateHeader);
-  const to = decoded(headerValue(email, "to"));
-  const messageId = bareMessageId2(email.messageId ?? headerValue(email, "message-id"));
-  const thread = headerValue(email, "x-gm-thrid");
-  const deliveredTo = headerValue(email, "delivered-to");
-  const threadRoot = firstMessageId(email.references) ?? firstMessageId(email.inReplyTo) ?? messageId;
-  return {
-    email,
-    labels,
-    spamOrTrash: labels.some((label) => MBOX_SKIPPED_LABELS.has(label.toLowerCase())),
-    ...email.subject?.trim() ? { subject: email.subject.trim() } : {},
-    from: decoded(headerValue(email, "from")) ?? "",
-    ...to ? { to } : {},
-    ...dateHeader ? { dateHeader } : {},
-    ...authoredAt ? { authoredAt } : {},
-    ...messageId ? { messageId } : {},
-    body: email.text?.trim() || (email.html ? stripHtml2(email.html) : ""),
-    messageHash: sha25612(raw),
-    ...thread && /^\d{1,20}$/.test(thread) ? { gmailThread: thread } : {},
-    ...threadRoot ? { threadRoot } : {},
-    charsetNotDecoded: declaredCharsets(raw).some((charset) => !charsetDecodable(charset)),
-    ...deliveredTo ? { deliveredTo } : {}
-  };
-}
-var MBOX_SKIPPED_LABELS, decodableCharsets;
-var init_parse5 = __esm(() => {
-  init_postal_mime();
-  MBOX_SKIPPED_LABELS = new Set(["spam", "trash"]);
-  decodableCharsets = new Map;
-});
-
-// src/workers/archive-import/mbox/connector.ts
-function manifestTag2(input) {
-  return input.manifestSha256.slice(0, 16);
-}
-function cursorAt2(input, fileIndex, offset) {
-  return `${MBOX_CURSOR_PREFIX}${manifestTag2(input)}:${fileIndex}:${offset}`;
-}
-function doneCursor2(input) {
-  return `${MBOX_CURSOR_PREFIX}${manifestTag2(input)}:done`;
-}
-function parseCursor2(input, cursor) {
-  if (!cursor)
-    return { fileIndex: 0, offset: 0, done: false };
-  const prefix = `${MBOX_CURSOR_PREFIX}${manifestTag2(input)}:`;
-  if (!cursor.startsWith(prefix)) {
-    throw new ArchiveImportStoppedError("resume_point_invalid", "The resume point belongs to other files than this archive's.");
-  }
-  const rest = cursor.slice(prefix.length);
-  if (rest === "done")
-    return { fileIndex: input.files.length, offset: 0, done: true };
-  const [fileText, offsetText, extra] = rest.split(":");
-  const fileIndex = Number(fileText);
-  const offset = Number(offsetText);
-  if (extra !== undefined || !Number.isSafeInteger(fileIndex) || !Number.isSafeInteger(offset) || fileIndex < 0 || offset < 0 || fileIndex >= input.files.length || offset > input.files[fileIndex].version.size) {
-    throw new ArchiveImportStoppedError("resume_point_invalid", "The resume point is not a position in this archive.");
-  }
-  return { fileIndex, offset, done: false };
-}
-function stoppedFrom(error, relPath) {
-  if (error instanceof MboxFormatError) {
-    return new ArchiveImportStoppedError("resume_point_invalid", "No message starts where this import was to resume.", relPath);
-  }
-  return archiveStopFromScopeError(error, relPath);
-}
-function attachmentInventory(email) {
-  const inventory = { count: 0, bytes: 0, lines: [] };
-  for (const attachment of email.attachments) {
-    const name = attachment.filename?.trim();
-    if (!name && attachment.disposition !== "attachment")
-      continue;
-    const content = attachment.content;
-    const size = typeof content === "string" ? undefined : content.byteLength;
-    inventory.count += 1;
-    inventory.bytes += size ?? 0;
-    const details = [attachment.mimeType || undefined, size !== undefined ? `${size} bytes` : undefined].filter((value) => Boolean(value));
-    const label = (name || "unnamed attachment").slice(0, MAX_ATTACHMENT_NAME_CHARS2);
-    inventory.lines.push(`Attachment: ${label}${details.length > 0 ? ` (${details.join(", ")})` : ""}`);
-  }
-  return inventory;
-}
-async function messageOutcome2(input, span) {
-  const raw = span.raw;
-  const parsed = await parseMboxMessage(raw);
-  if (!parsed)
-    return { kind: "unreadable" };
-  const { email, labels } = parsed;
-  if (parsed.spamOrTrash)
-    return { kind: "skipped", reason: MBOX_FINDINGS.spamOrTrash };
-  const findings = [];
-  const subject = parsed.subject ?? "(no subject)";
-  const rawFrom = parsed.from;
-  const from = rawFrom.length > MAX_FROM_HEADER_CHARS ? `${rawFrom.slice(0, MAX_FROM_HEADER_CHARS)}…` : rawFrom;
-  const to = parsed.to;
-  const dateHeader = parsed.dateHeader;
-  const authoredAt = parsed.authoredAt;
-  const attachments = attachmentInventory(email);
-  if (attachments.count > 0)
-    findings.push({ kind: MBOX_FINDINGS.attachments, count: attachments.count });
-  if (parsed.charsetNotDecoded)
-    findings.push({ kind: MBOX_FINDINGS.charset });
-  const summary = [
-    email.subject?.trim() ? `Subject: ${email.subject.trim()}` : undefined,
-    from ? `From: ${from}` : undefined,
-    to ? `To: ${to}` : undefined,
-    dateHeader ? `Date: ${dateHeader}` : undefined
-  ].filter(Boolean).join(`
-`);
-  const body = parsed.body;
-  const text = [summary, body, attachments.lines.join(`
-`)].filter((part) => part !== "").join(`
-
-`) || `Subject: ${subject}`;
-  const messageId = parsed.messageId;
-  const messageHash = parsed.messageHash;
-  const providerItemId = sha25612(`${messageId ?? ""}\x00${messageHash}`).slice(0, 32);
-  const gmailThread = parsed.gmailThread;
-  const threadRoot = parsed.threadRoot;
-  const providerThreadId = gmailThread ? `gm:${gmailThread}` : threadRoot ? `mid:${sha25612(threadRoot).slice(0, 24)}` : undefined;
-  const item = {
-    identity: {
-      family: input.format.family,
-      provider: input.format.provider,
-      accountScope: input.accountScope,
-      providerItemId,
-      ...providerThreadId ? { providerThreadId } : {},
-      localItemId: `${input.accountScope}:${providerItemId}`,
-      sourceVersion: messageHash.slice(0, 32)
-    },
-    mimeType: "message/rfc822",
-    content: { kind: "text", text },
-    metadata: Object.freeze({
-      title: subject,
-      subject,
-      from,
-      ...to ? { to } : {},
-      ...authoredAt ? { authoredAt } : {},
-      ...messageId ? { messageId } : {},
-      labels,
-      attachmentCount: attachments.count,
-      attachmentBytesDeclared: attachments.bytes,
-      ...attachments.lines.length > 0 ? { attachments: attachments.lines } : {},
-      attachmentsNotIngested: attachments.count,
-      contentHash: sha25612(text)
-    }),
-    fetchedAt: new Date().toISOString()
-  };
-  return { kind: "item", item, findings };
-}
-function createMboxArchiveConnector(input) {
-  const pageSizeDefault = Math.max(1, input.pageSize ?? MBOX_DEFAULT_PAGE_SIZE);
-  const byteBudget = Math.max(1, input.maxBytesPerListing ?? MBOX_DEFAULT_MAX_BYTES_PER_LISTING);
-  return {
-    id: input.connectorId,
-    family: input.format.family,
-    async authenticate() {},
-    listItems(options) {
-      return async function* () {
-        const start = parseCursor2(input, options?.cursor);
-        if (start.done) {
-          yield { items: [], nextCursor: doneCursor2(input), done: true };
-          return;
-        }
-        const limit = options?.limit !== undefined && options.limit > 0 ? options.limit : Number.POSITIVE_INFINITY;
-        let emitted = 0;
-        let bytesRead = 0;
-        for (let fileIndex = start.fileIndex;fileIndex < input.files.length; fileIndex += 1) {
-          const file = input.files[fileIndex];
-          let reader;
-          try {
-            reader = input.root.openFile(file.relPath, { expected: file.version });
-          } catch (error) {
-            throw stoppedFrom(error, file.relPath);
-          }
-          const current = () => {
-            try {
-              reader.assertCurrent();
-            } catch (error) {
-              throw stoppedFrom(error, file.relPath);
-            }
-          };
-          try {
-            const splitter = new MboxSplitter(reader, {
-              start: fileIndex === start.fileIndex ? start.offset : 0,
-              maxMessageBytes: MBOX_DEFAULT_MAX_MESSAGE_BYTES
-            });
-            let page = [];
-            let pending = false;
-            for (;; ) {
-              if (!input.shouldContinue()) {
-                if (pending) {
-                  current();
-                  input.reportPosition?.({ fileIndex, offset: splitter.position });
-                  yield { items: page, nextCursor: cursorAt2(input, fileIndex, splitter.position), done: false };
-                }
-                return;
-              }
-              let span;
-              try {
-                span = splitter.next();
-              } catch (error) {
-                throw stoppedFrom(error, file.relPath);
-              }
-              if (!span)
-                break;
-              pending = true;
-              bytesRead += span.length;
-              const report = (kind, findingClass, count) => {
-                input.report({ kind, class: findingClass, fileIndex, offset: span.offset, ...count !== undefined ? { count } : {} });
-              };
-              if (span.tooLarge) {
-                report(MBOX_FINDINGS.tooLarge, "gap");
-              } else {
-                const outcome = await messageOutcome2(input, span);
-                if (outcome.kind === "unreadable")
-                  report(MBOX_FINDINGS.unreadable, "gap");
-                else if (outcome.kind === "skipped")
-                  report(outcome.reason, "skipped");
-                else {
-                  page.push(outcome.item);
-                  for (const finding of outcome.findings)
-                    report(finding.kind, "gap", finding.count);
-                }
-              }
-              const budgetLeft = limit - emitted;
-              if (page.length >= Math.min(pageSizeDefault, budgetLeft) || bytesRead >= byteBudget) {
-                current();
-                const last = fileIndex === input.files.length - 1 && splitter.done;
-                if (last) {
-                  yield { items: page, nextCursor: doneCursor2(input), done: true };
-                  return;
-                }
-                input.reportPosition?.({ fileIndex, offset: splitter.position });
-                yield { items: page, nextCursor: cursorAt2(input, fileIndex, splitter.position), done: false };
-                emitted += page.length;
-                page = [];
-                pending = false;
-                if (emitted >= limit || bytesRead >= byteBudget)
-                  return;
-              }
-            }
-            current();
-            if (fileIndex === input.files.length - 1) {
-              yield { items: page, nextCursor: doneCursor2(input), done: true };
-              return;
-            }
-            if (pending) {
-              input.reportPosition?.({ fileIndex: fileIndex + 1, offset: 0 });
-              yield { items: page, nextCursor: cursorAt2(input, fileIndex + 1, 0), done: false };
-              emitted += page.length;
-              if (emitted >= limit)
-                return;
-            }
-          } finally {
-            reader.close();
-          }
-        }
-      }();
-    },
-    async fetchItem() {
-      throw new Error("An imported message is read only while its archive is listed.");
-    },
-    classificationSignals(item) {
-      const subject = typeof item.metadata.subject === "string" ? item.metadata.subject : undefined;
-      const sender = typeof item.metadata.from === "string" && item.metadata.from ? item.metadata.from : undefined;
-      const labels = Array.isArray(item.metadata.labels) ? item.metadata.labels.filter((label) => typeof label === "string") : [];
-      return {
-        ...subject ? { title: subject } : {},
-        ...sender ? { sender } : {},
-        ...labels.length > 0 ? { labels } : {}
-      };
-    }
-  };
-}
-function registerMboxArchiveConnector() {
-  registerArchiveFormatConnector("mbox", createMboxArchiveConnector);
-}
-var MBOX_CURSOR_PREFIX = "mbox1:", MBOX_DEFAULT_PAGE_SIZE = 100, MBOX_DEFAULT_MAX_BYTES_PER_LISTING, MAX_ATTACHMENT_NAME_CHARS2 = 256, MBOX_FINDINGS;
-var init_connector7 = __esm(() => {
-  init_archive_formats();
-  init_stop_errors();
-  init_sender_rules();
-  init_split();
-  init_parse5();
-  MBOX_DEFAULT_MAX_BYTES_PER_LISTING = 256 * 1024 * 1024;
-  MBOX_FINDINGS = {
-    tooLarge: "message_too_large",
-    unreadable: "message_unreadable",
-    charset: "charset_not_decoded",
-    attachments: "attachments_not_read",
-    textCut: "text_cut",
-    spamOrTrash: "spam_or_trash",
-    otherAccount: "mail_for_another_account"
-  };
 });
 
 // src/workers/archive-import/whatsapp/grammar.ts
@@ -236442,9 +237639,9 @@ var init_place = __esm(() => {
 });
 
 // src/workers/archive-import/whatsapp/connector.ts
-import { createHash as createHash112 } from "node:crypto";
+import { createHash as createHash113 } from "node:crypto";
 function sha25613(value) {
-  return createHash112("sha256").update(value).digest("hex");
+  return createHash113("sha256").update(value).digest("hex");
 }
 function stoppedFrom2(error, relPath) {
   if (error instanceof WhatsAppFormatError) {
@@ -238763,9 +239960,9 @@ var init_xml_stream = __esm(() => {
 });
 
 // src/workers/archive-import/evernote/connector.ts
-import { createHash as createHash113 } from "node:crypto";
+import { createHash as createHash114 } from "node:crypto";
 function sha25614(value) {
-  return createHash113("sha256").update(value).digest("hex");
+  return createHash114("sha256").update(value).digest("hex");
 }
 function enexTime(value) {
   const match = /^\s*(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z\s*$/.exec(value ?? "");
@@ -238842,7 +240039,7 @@ function decodeBase64Range(reader, start, end, cap) {
   return bytes;
 }
 function md5OfBase64Range(reader, start, end) {
-  const hash = createHash113("md5");
+  const hash = createHash114("md5");
   decodeBase64Chunks(reader, start, end, Number.MAX_SAFE_INTEGER, (chunk) => hash.update(chunk));
   return hash.digest("hex");
 }
@@ -239484,7 +240681,7 @@ function registerArchiveFormatConnectors() {
   registerAiChatArchiveConnectors();
 }
 var init_format_connectors = __esm(() => {
-  init_connector7();
+  init_connector5();
   init_connector8();
   init_connector9();
   init_connector10();
@@ -241497,7 +242694,7 @@ var init_extraction_runtime = __esm(() => {
 });
 
 // src/workers/archive-import/sync.ts
-import { createHash as createHash114 } from "node:crypto";
+import { createHash as createHash115 } from "node:crypto";
 function tally(values) {
   return Object.values(values).reduce((total, value) => total + value, 0);
 }
@@ -241523,7 +242720,7 @@ function receiptOf(record, input) {
   };
   return {
     ...withoutDigest,
-    receipt_sha256: createHash114("sha256").update(JSON.stringify(withoutDigest)).digest("hex")
+    receipt_sha256: createHash115("sha256").update(JSON.stringify(withoutDigest)).digest("hex")
   };
 }
 function stopFrom(error, at) {
@@ -242312,728 +243509,6 @@ var init_source_answer_lanes = __esm(() => {
   init_connector_store();
 });
 
-// src/workers/archive-import/mbox/gmail-account.ts
-function topHeaders(raw) {
-  const text = Buffer.from(raw.buffer, raw.byteOffset, Math.min(raw.byteLength, MAX_HEADER_BYTES2)).toString("latin1");
-  const end = text.search(/\r?\n\r?\n/);
-  const block = (end < 0 ? text : text.slice(0, end)).replace(/\r?\n[ \t]+/g, " ");
-  const headers = new Map;
-  for (const line of block.split(/\r?\n/)) {
-    const colon = line.indexOf(":");
-    if (colon <= 0)
-      continue;
-    const name = line.slice(0, colon).trim().toLowerCase();
-    if (!headers.has(name))
-      headers.set(name, line.slice(colon + 1).trim());
-  }
-  return headers;
-}
-function bareAddress(value) {
-  if (!value)
-    return;
-  const inner = /<([^<>\s]+)>/.exec(value)?.[1] ?? value.trim();
-  return /^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/.test(inner) ? inner.toLowerCase() : undefined;
-}
-function identifyGmailExport(root, files, limits = {}) {
-  const MAX_MESSAGES = limits.maxMessages ?? DEFAULT_MAX_MESSAGES;
-  const MAX_BYTES = limits.maxBytes ?? DEFAULT_MAX_BYTES;
-  const addresses = new Set;
-  let messages = 0;
-  let bytes = 0;
-  for (const file of files) {
-    const reader = root.openFile(file.relPath, { expected: file.version });
-    try {
-      const splitter = new MboxSplitter(reader, { maxMessageBytes: MAX_MESSAGE_BYTES, maxReadBytes: MAX_BYTES - bytes });
-      for (;; ) {
-        if (messages >= MAX_MESSAGES || bytes >= MAX_BYTES)
-          break;
-        let span;
-        try {
-          span = splitter.next();
-        } catch (error) {
-          if (!(error instanceof MboxReadBoundError))
-            throw error;
-          bytes = MAX_BYTES;
-          break;
-        }
-        if (!span)
-          break;
-        bytes += span.length;
-        if (!span.raw)
-          continue;
-        messages += 1;
-        const headers = topHeaders(span.raw);
-        if (!headers.has("x-gm-thrid") && !headers.has("x-gmail-labels"))
-          return { kind: "not_gmail", reason: "no_markers" };
-        const delivered = headers.get("delivered-to");
-        if (delivered === undefined)
-          continue;
-        const address = bareAddress(delivered);
-        if (!address)
-          return { kind: "not_gmail", reason: "several_addresses" };
-        addresses.add(address);
-        if (addresses.size > 1)
-          return { kind: "not_gmail", reason: "several_addresses" };
-      }
-    } finally {
-      reader.close();
-    }
-    if (messages >= MAX_MESSAGES || bytes >= MAX_BYTES)
-      break;
-  }
-  if (messages === 0)
-    return { kind: "not_gmail", reason: "empty" };
-  const [address] = [...addresses];
-  return address ? { kind: "gmail", address } : { kind: "not_gmail", reason: "no_address" };
-}
-var DEFAULT_MAX_MESSAGES = 500, DEFAULT_MAX_BYTES, MAX_HEADER_BYTES2, MAX_MESSAGE_BYTES;
-var init_gmail_account = __esm(() => {
-  init_split();
-  DEFAULT_MAX_BYTES = 64 * 1024 * 1024;
-  MAX_HEADER_BYTES2 = 256 * 1024;
-  MAX_MESSAGE_BYTES = 32 * 1024 * 1024;
-});
-
-// src/workers/archive-import/mbox/mime-parts.ts
-function headerBlockEnd(text, from, to) {
-  const window2 = text.slice(from, Math.min(to, from + MAX_HEADER_BYTES3));
-  if (window2.startsWith(`\r
-`))
-    return { headersEnd: from, bodyStart: from + 2 };
-  if (window2.startsWith(`
-`))
-    return { headersEnd: from, bodyStart: from + 1 };
-  const crlf = window2.indexOf(`\r
-\r
-`);
-  const lf = window2.indexOf(`
-
-`);
-  if (crlf < 0 && lf < 0)
-    return { headersEnd: Math.min(to, from + window2.length), bodyStart: Math.min(to, from + window2.length) };
-  if (lf >= 0 && (crlf < 0 || lf < crlf))
-    return { headersEnd: from + lf, bodyStart: from + lf + 2 };
-  return { headersEnd: from + crlf, bodyStart: from + crlf + 4 };
-}
-function parseHeaders(block) {
-  const map = new Map;
-  const unfolded = block.replace(/\r?\n[ \t]+/g, " ");
-  for (const line of unfolded.split(/\r?\n/)) {
-    const colon = line.indexOf(":");
-    if (colon <= 0)
-      continue;
-    const name = line.slice(0, colon).trim().toLowerCase();
-    if (!map.has(name))
-      map.set(name, line.slice(colon + 1).trim());
-  }
-  return { get: (name) => map.get(name) };
-}
-function splitParams(header) {
-  const pieces = [];
-  let current = "";
-  let quoted = false;
-  for (let index = 0;index < header.length; index += 1) {
-    const char = header[index];
-    if (char === '"' && header[index - 1] !== "\\")
-      quoted = !quoted;
-    if (char === ";" && !quoted) {
-      pieces.push(current);
-      current = "";
-    } else {
-      current += char;
-    }
-  }
-  pieces.push(current);
-  const params = new Map;
-  for (const piece of pieces.slice(1)) {
-    const eq = piece.indexOf("=");
-    if (eq <= 0)
-      continue;
-    const name = piece.slice(0, eq).trim().toLowerCase();
-    let value = piece.slice(eq + 1).trim();
-    if (value.startsWith('"') && value.endsWith('"') && value.length >= 2)
-      value = value.slice(1, -1).replace(/\\(.)/g, "$1");
-    if (!params.has(name))
-      params.set(name, value);
-  }
-  return { value: (pieces[0] ?? "").trim(), params };
-}
-function percentDecode(value, charset) {
-  const bytes = [];
-  for (let index = 0;index < value.length; index += 1) {
-    const char = value[index];
-    if (char === "%" && /^[0-9a-fA-F]{2}$/.test(value.slice(index + 1, index + 3))) {
-      bytes.push(Number.parseInt(value.slice(index + 1, index + 3), 16));
-      index += 2;
-    } else {
-      bytes.push(...Buffer.from(char, "latin1"));
-    }
-  }
-  try {
-    return new TextDecoder(charset || "utf-8").decode(new Uint8Array(bytes));
-  } catch {
-    return new TextDecoder("utf-8").decode(new Uint8Array(bytes));
-  }
-}
-function paramValue(params, name) {
-  const extended = params.get(`${name}*`);
-  if (extended !== undefined) {
-    const match = /^([^']*)'[^']*'(.*)$/.exec(extended);
-    return match ? percentDecode(match[2], match[1]) : extended;
-  }
-  const sections = [];
-  let charset = "";
-  for (let index = 0;index < 1000; index += 1) {
-    const encoded = params.get(`${name}*${index}*`);
-    const plain = params.get(`${name}*${index}`);
-    if (encoded === undefined && plain === undefined)
-      break;
-    if (encoded !== undefined) {
-      let value = encoded;
-      if (index === 0) {
-        const match = /^([^']*)'[^']*'(.*)$/.exec(encoded);
-        if (match) {
-          charset = match[1];
-          value = match[2];
-        }
-      }
-      sections.push(percentDecode(value, charset));
-    } else {
-      sections.push(plain);
-    }
-  }
-  if (sections.length > 0)
-    return sections.join("");
-  const plain = params.get(name);
-  if (plain === undefined)
-    return;
-  try {
-    return decodeWords(plain);
-  } catch {
-    return plain;
-  }
-}
-function decodedSize(body, encoding) {
-  if (encoding === "base64") {
-    const clean = body.replace(/[^A-Za-z0-9+/=]/g, "");
-    const padding = clean.endsWith("==") ? 2 : clean.endsWith("=") ? 1 : 0;
-    return Math.max(0, Math.floor(clean.length * 3 / 4) - padding);
-  }
-  if (encoding === "quoted-printable") {
-    const softBreaks = body.replace(/=\r?\n/g, "");
-    return Buffer.byteLength(softBreaks.replace(/=[0-9A-Fa-f]{2}/g, "x"), "latin1");
-  }
-  return body.length;
-}
-function multipartBodies(text, from, to, boundary) {
-  const delimiter = `--${boundary}`;
-  const bodies = [];
-  let partStart;
-  let lineStart = from;
-  while (lineStart < to) {
-    let lineEnd = text.indexOf(`
-`, lineStart);
-    if (lineEnd < 0 || lineEnd >= to)
-      lineEnd = to;
-    const line = text.slice(lineStart, lineEnd).replace(/\r$/, "").trimEnd();
-    if (line === delimiter || line === `${delimiter}--`) {
-      if (partStart !== undefined) {
-        let end = lineStart;
-        if (end > partStart && text[end - 1] === `
-`)
-          end -= 1;
-        if (end > partStart && text[end - 1] === "\r")
-          end -= 1;
-        bodies.push({ start: partStart, end });
-      }
-      if (line !== delimiter)
-        return bodies;
-      partStart = lineEnd + 1;
-    }
-    lineStart = lineEnd + 1;
-  }
-  if (partStart !== undefined && partStart < to)
-    bodies.push({ start: partStart, end: to });
-  return bodies;
-}
-function decodeBody(body, encoding) {
-  if (encoding === "base64")
-    return new Uint8Array(Buffer.from(body.replace(/[^A-Za-z0-9+/=]/g, ""), "base64"));
-  if (encoding === "quoted-printable") {
-    const joined = body.replace(/=\r?\n/g, "");
-    const bytes = [];
-    for (let index = 0;index < joined.length; index += 1) {
-      const hex = joined.slice(index + 1, index + 3);
-      if (joined[index] === "=" && /^[0-9A-Fa-f]{2}$/.test(hex)) {
-        bytes.push(Number.parseInt(hex, 16));
-        index += 2;
-      } else {
-        bytes.push(joined.charCodeAt(index) & 255);
-      }
-    }
-    return new Uint8Array(bytes);
-  }
-  return new Uint8Array(Buffer.from(body, "latin1"));
-}
-function mimePartBytes(raw, partId, maxBytes = Number.POSITIVE_INFINITY) {
-  const text = Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength).toString("latin1");
-  let parts = 0;
-  const find = (from, to, path, depth) => {
-    parts += 1;
-    if (parts > MAX_PARTS)
-      return;
-    const { headersEnd, bodyStart } = headerBlockEnd(text, from, to);
-    const headers = parseHeaders(text.slice(from, headersEnd));
-    const type = splitParams(headers.get("content-type") ?? "text/plain");
-    const mimeType = type.value.toLowerCase() || "text/plain";
-    if (path === partId) {
-      const encoding = (headers.get("content-transfer-encoding") ?? "").trim().toLowerCase();
-      const body = text.slice(bodyStart, to);
-      if (decodedSize(body, encoding) > maxBytes)
-        throw new MimePartTooLargeError;
-      return { bytes: decodeBody(body, encoding), mimeType };
-    }
-    if (depth >= MAX_DEPTH3)
-      return;
-    if (path !== "" && !partId.startsWith(`${path}.`))
-      return;
-    if (mimeType === "message/rfc822") {
-      for (const inner of encapsulatedParts(text, bodyStart, to, path === "" ? "0" : path)) {
-        if (partId === inner.path || partId.startsWith(`${inner.path}.`))
-          return find(inner.start, inner.end, inner.path, depth + 1);
-      }
-      return;
-    }
-    const boundary = type.params.get("boundary");
-    if (!mimeType.startsWith("multipart/") || !boundary)
-      return;
-    const bodies = multipartBodies(text, bodyStart, to, boundary);
-    for (const [index, body] of bodies.entries()) {
-      const childPath = path === "" ? String(index) : `${path}.${index}`;
-      if (partId === childPath || partId.startsWith(`${childPath}.`))
-        return find(body.start, body.end, childPath, depth + 1);
-    }
-    return;
-  };
-  return find(0, text.length, "", 0);
-}
-function encapsulatedParts(text, from, to, path) {
-  const { headersEnd, bodyStart } = headerBlockEnd(text, from, to);
-  const type = splitParams(parseHeaders(text.slice(from, headersEnd)).get("content-type") ?? "text/plain");
-  const boundary = type.params.get("boundary");
-  if (type.value.toLowerCase().startsWith("multipart/") && boundary) {
-    return multipartBodies(text, bodyStart, to, boundary).map((body, index) => ({ ...body, path: `${path}.${index}` }));
-  }
-  return [{ start: from, end: to, path: `${path}.0` }];
-}
-function mimeAttachments(raw, options = {}) {
-  const text = Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength).toString("latin1");
-  const children = options.children === true;
-  const found = [];
-  let parts = 0;
-  const walk = (from, to, partId, depth, inside) => {
-    parts += 1;
-    if (parts > MAX_PARTS)
-      return;
-    const { headersEnd, bodyStart } = headerBlockEnd(text, from, to);
-    const headers = parseHeaders(text.slice(from, headersEnd));
-    const type = splitParams(headers.get("content-type") ?? "text/plain");
-    const mimeType = type.value.toLowerCase() || "text/plain";
-    const disposition = splitParams(headers.get("content-disposition") ?? "");
-    const filename = (paramValue(disposition.params, "filename") ?? paramValue(type.params, "name"))?.trim();
-    const attachment = children ? isGmailAttachmentPart({ mimeType, ...filename ? { filename } : {}, ...disposition.value ? { disposition: disposition.value } : {} }) : Boolean(filename);
-    if (attachment) {
-      const encoding = (headers.get("content-transfer-encoding") ?? "").trim().toLowerCase();
-      const contentId = headers.get("content-id");
-      found.push({
-        partId,
-        filename: children ? gmailAttachmentPartName({ partId, mimeType, ...filename ? { filename } : {}, ...contentId ? { contentId } : {} }) : filename,
-        mimeType,
-        size: decodedSize(text.slice(bodyStart, to), encoding),
-        ...inside ? { nested: true } : {}
-      });
-    }
-    if (depth >= MAX_DEPTH3)
-      return;
-    const boundary = type.params.get("boundary");
-    if (mimeType.startsWith("multipart/") && boundary) {
-      multipartBodies(text, bodyStart, to, boundary).forEach((body, index) => {
-        walk(body.start, body.end, partId === "" ? String(index) : `${partId}.${index}`, depth + 1, inside || attachment);
-      });
-    } else if (children && mimeType === "message/rfc822") {
-      for (const inner of encapsulatedParts(text, bodyStart, to, partId === "" ? "0" : partId)) {
-        walk(inner.start, inner.end, inner.path, depth + 1, true);
-      }
-    }
-  };
-  walk(0, text.length, "", 0, false);
-  return found;
-}
-var MAX_PARTS = 2000, MAX_DEPTH3 = 64, MAX_HEADER_BYTES3, MimePartTooLargeError;
-var init_mime_parts = __esm(() => {
-  init_postal_mime();
-  init_gmail_mail_record();
-  MAX_HEADER_BYTES3 = 256 * 1024;
-  MimePartTooLargeError = class MimePartTooLargeError extends Error {
-    constructor() {
-      super("The part is larger than this read may take.");
-      this.name = "MimePartTooLargeError";
-    }
-  };
-});
-
-// src/workers/archive-import/mbox/gmail-input.ts
-function gmailIdFromDecimal(decimal) {
-  if (!decimal || !/^\d{1,20}$/.test(decimal))
-    return;
-  const value = BigInt(decimal);
-  return value > 0n && value <= MAX_GMAIL_ID ? value.toString(16) : undefined;
-}
-function takeoutMessageId(separator) {
-  return gmailIdFromDecimal(separator ? TAKEOUT_ID.exec(separator)?.[1] : undefined);
-}
-function gmailLabelIds(names, byName) {
-  const ids = [];
-  const add = (value) => {
-    if (value && !ids.includes(value))
-      ids.push(value);
-  };
-  for (const name of names) {
-    const trimmed = name.trim();
-    const system = SYSTEM_LABELS.get(trimmed.toLowerCase());
-    if (system !== undefined) {
-      add(system);
-      continue;
-    }
-    add(byName?.get(trimmed.toLowerCase()));
-    add(trimmed);
-  }
-  return ids;
-}
-function mboxPartLocator(archiveId, fileIndex, offset, digest, parentId, partId) {
-  return `${MBOX_PART_LOCATOR_PREFIX}${archiveId}:${fileIndex}:${offset}:${digest}:${parentId}:${partId}`;
-}
-function mboxMessageDigest(raw) {
-  return sha25612(raw).slice(0, 32);
-}
-function parseMboxPartLocator(locator) {
-  if (!locator.startsWith(MBOX_PART_LOCATOR_PREFIX))
-    return;
-  const match = /^([0-9a-f-]{36}):(\d{1,6}):(\d{1,15}):([0-9a-f]{32}):([A-Za-z0-9_-]{1,128}):([0-9.]{0,64})$/.exec(locator.slice(MBOX_PART_LOCATOR_PREFIX.length));
-  if (!match)
-    return;
-  return { archiveId: match[1], fileIndex: Number(match[2]), offset: Number(match[3]), digest: match[4], parentId: match[5], partId: match[6] };
-}
-function recordOf(children, archiveId, parsed, span, fileIndex, id, labelsByName) {
-  const threadId = parsed.gmailThread ? gmailIdFromDecimal(parsed.gmailThread) : parsed.threadRoot ? `mid:${sha25612(parsed.threadRoot).slice(0, 24)}` : undefined;
-  return {
-    id,
-    ...threadId ? { threadId } : {},
-    labelIds: gmailLabelIds(parsed.labels, labelsByName),
-    headers: {
-      ...parsed.subject ? { subject: parsed.subject } : {},
-      ...parsed.from ? { from: parsed.from } : {},
-      ...parsed.to ? { to: parsed.to } : {},
-      ...parsed.dateHeader ? { date: parsed.dateHeader } : {},
-      ...parsed.messageId ? { messageId: parsed.messageId } : {}
-    },
-    body: parsed.body,
-    metadataOnly: false,
-    attachments: mimeAttachments(span.raw, { children }).map((part) => ({
-      partId: part.partId,
-      filename: part.filename,
-      ...part.mimeType ? { mimeType: part.mimeType } : {},
-      size: part.size,
-      locator: mboxPartLocator(archiveId, fileIndex, span.offset, mboxMessageDigest(span.raw), id, part.partId),
-      ...part.nested ? { nested: true } : {}
-    })),
-    sourceVersion: parsed.messageHash.slice(0, 32)
-  };
-}
-function ownId(parsed) {
-  return `${GMAIL_OWN_ID_PREFIX}${sha25612(`${parsed.messageId ?? ""}\x00${parsed.messageHash}`).slice(0, 32)}`;
-}
-function exportAddress(archive) {
-  if (!exportAddresses.has(archive.manifestSha256)) {
-    const found = identifyGmailExport(archive.root, archive.files);
-    if (exportAddresses.size > 64)
-      exportAddresses.clear();
-    exportAddresses.set(archive.manifestSha256, found.kind === "gmail" ? found.address : undefined);
-  }
-  return exportAddresses.get(archive.manifestSha256);
-}
-function mboxGmailInput(archive, options = {}) {
-  const pageSizeDefault = Math.max(1, archive.pageSize ?? MBOX_DEFAULT_PAGE_SIZE);
-  const byteBudget = Math.max(1, archive.maxBytesPerListing ?? MBOX_DEFAULT_MAX_BYTES_PER_LISTING);
-  const children = options.build?.children === true;
-  return {
-    inputId: archiveConnectorId(archive.archiveId),
-    kind: "archive",
-    records(listOptions) {
-      return async function* () {
-        const start = parseCursor2(archive, listOptions?.cursor);
-        if (start.done || archive.files.length === 0) {
-          yield { records: [], nextCursor: doneCursor2(archive), done: true };
-          return;
-        }
-        const address = options.accountAddress ?? exportAddress(archive);
-        if (!address)
-          throw new Error("This export is not one Gmail account's: nothing of it is read into Gmail.");
-        const labels = options.labels ? await options.labels() : { kind: "none" };
-        if (labels.kind === "unavailable") {
-          archive.waitForProvider?.(labels.reason, labels.minimum !== undefined ? { minimum: labels.minimum } : undefined);
-          return;
-        }
-        const labelsByName = labels.kind === "map" ? labels.byName : undefined;
-        const limit = listOptions?.limit !== undefined && listOptions.limit > 0 ? listOptions.limit : Number.POSITIVE_INFINITY;
-        const pageSize = Math.max(1, Math.min(pageSizeDefault, limit));
-        let bytesRead = 0;
-        for (let fileIndex = start.fileIndex;fileIndex < archive.files.length; fileIndex += 1) {
-          const file = archive.files[fileIndex];
-          let reader;
-          try {
-            reader = archive.root.openFile(file.relPath, { expected: file.version });
-          } catch (error) {
-            throw stoppedFrom(error, file.relPath);
-          }
-          const current = () => {
-            try {
-              reader.assertCurrent();
-            } catch (error) {
-              throw stoppedFrom(error, file.relPath);
-            }
-          };
-          try {
-            const splitter = new MboxSplitter(reader, {
-              start: fileIndex === start.fileIndex ? start.offset : 0,
-              maxMessageBytes: MBOX_DEFAULT_MAX_MESSAGE_BYTES
-            });
-            let page = [];
-            let positions = [];
-            let pending = false;
-            const out = (nextOffset, last) => {
-              current();
-              archive.reportItemPositions?.(positions);
-              if (last)
-                return { records: page, nextCursor: doneCursor2(archive), done: true };
-              archive.reportPosition?.({ fileIndex, offset: nextOffset });
-              return { records: page, nextCursor: cursorAt2(archive, fileIndex, nextOffset), done: false };
-            };
-            for (;; ) {
-              if (!archive.shouldContinue()) {
-                if (pending)
-                  yield out(splitter.position, false);
-                return;
-              }
-              const before = splitter.position;
-              let span;
-              try {
-                span = splitter.next();
-              } catch (error) {
-                throw stoppedFrom(error, file.relPath);
-              }
-              if (!span)
-                break;
-              bytesRead += span.length;
-              const report = (kind, findingClass, count) => {
-                archive.report({ kind, class: findingClass, fileIndex, offset: span.offset, ...count !== undefined ? { count } : {} });
-              };
-              if (span.tooLarge) {
-                report(MBOX_FINDINGS.tooLarge, "gap");
-              } else {
-                const parsed = await parseMboxMessage(span.raw, { rfc822AsAttachments: children });
-                if (!parsed)
-                  report(MBOX_FINDINGS.unreadable, "gap");
-                else if (parsed.spamOrTrash)
-                  report(MBOX_FINDINGS.spamOrTrash, "skipped");
-                else if (parsed.deliveredTo !== undefined && bareAddress(parsed.deliveredTo) !== address) {
-                  report(MBOX_FINDINGS.otherAccount, "gap");
-                } else {
-                  let id = takeoutMessageId(span.separator);
-                  if (id === undefined && options.match) {
-                    const matched = await options.match({
-                      ...parsed.messageId ? { messageId: parsed.messageId } : {},
-                      ...parsed.dateHeader ? { date: parsed.dateHeader } : {},
-                      from: parsed.from,
-                      ...parsed.subject ? { subject: parsed.subject } : {}
-                    });
-                    if (matched !== "none" && "later" in matched) {
-                      if (pending)
-                        yield out(before, false);
-                      archive.waitForProvider?.(matched.later, matched.minimum !== undefined ? { minimum: matched.minimum } : undefined);
-                      return;
-                    }
-                    if (matched !== "none")
-                      id = matched.id;
-                  }
-                  const record = recordOf(children, archive.archiveId, parsed, span, fileIndex, id ?? ownId(parsed), labelsByName);
-                  page.push(record);
-                  positions.push({ fileIndex, offset: span.offset });
-                  pending = true;
-                  const named = record.attachments.filter((attachment) => attachment.nested !== true).length;
-                  if (named > 0 && !children)
-                    report(MBOX_FINDINGS.attachments, "gap", named);
-                  if (parsed.charsetNotDecoded)
-                    report(MBOX_FINDINGS.charset, "gap");
-                }
-              }
-              if (page.length >= pageSize || bytesRead >= byteBudget) {
-                const last = fileIndex === archive.files.length - 1 && splitter.done;
-                yield out(splitter.position, last);
-                if (last)
-                  return;
-                page = [];
-                positions = [];
-                pending = false;
-                if (bytesRead >= byteBudget)
-                  return;
-              }
-            }
-            if (fileIndex === archive.files.length - 1) {
-              yield out(splitter.position, true);
-              return;
-            }
-            if (pending) {
-              current();
-              archive.reportItemPositions?.(positions);
-              archive.reportPosition?.({ fileIndex: fileIndex + 1, offset: 0 });
-              yield { records: page, nextCursor: cursorAt2(archive, fileIndex + 1, 0), done: false };
-            }
-          } finally {
-            reader.close();
-          }
-        }
-      }();
-    }
-  };
-}
-var TAKEOUT_ID, MAX_GMAIL_ID, MBOX_PART_LOCATOR_PREFIX = "mbox-part1:", SYSTEM_LABELS, exportAddresses;
-var init_gmail_input = __esm(() => {
-  init_gmail_mail_record();
-  init_state();
-  init_connector7();
-  init_gmail_account();
-  init_mime_parts();
-  init_parse5();
-  init_split();
-  TAKEOUT_ID = /^From (\d{1,20})@xxx(?:\s|$)/;
-  MAX_GMAIL_ID = (1n << 64n) - 1n;
-  SYSTEM_LABELS = new Map([
-    ["inbox", "INBOX"],
-    ["sent", "SENT"],
-    ["important", "IMPORTANT"],
-    ["starred", "STARRED"],
-    ["unread", "UNREAD"],
-    ["draft", "DRAFT"],
-    ["drafts", "DRAFT"],
-    ["chat", "CHAT"],
-    ["spam", "SPAM"],
-    ["trash", "TRASH"],
-    ["category personal", "CATEGORY_PERSONAL"],
-    ["category social", "CATEGORY_SOCIAL"],
-    ["category promotions", "CATEGORY_PROMOTIONS"],
-    ["category updates", "CATEGORY_UPDATES"],
-    ["category forums", "CATEGORY_FORUMS"],
-    ["opened", null],
-    ["archived", null]
-  ]);
-  exportAddresses = new Map;
-});
-
-// src/workers/google-connectors/gmail-archive-target.ts
-function gmailItemAccountScope(stores, roleScope) {
-  const held = new Set(stores.flatMap((store) => store.itemAccountScopes(GMAIL_PROVIDER_ID, 3)));
-  if (held.size !== 1 || held.has(roleScope))
-    return roleScope;
-  return [...held][0];
-}
-function gmailHoldsImportedHistory(stores) {
-  return stores.some((store) => store?.holdsItemsMatching(GMAIL_IMPORTED_FILTERS) === true);
-}
-function gmailRecordBuilder(account, build = {}) {
-  return {
-    family: "email",
-    entriesOf: (record) => gmailMailEntries(record, account, build),
-    compareVersions: compareGmailMailVersions,
-    build: (record, wanted) => gmailMailItems(record, account, build, wanted),
-    fetchItem: () => Promise.reject(new Error("An imported message is read only while its archive is listed.")),
-    classificationSignals: gmailClassificationSignals
-  };
-}
-function gmailExportEvidence(archive) {
-  const found = identifyGmailExport(archive.root, archiveFileEntries(archive.files));
-  return found.kind === "gmail" ? { kind: "account", importAccountId: googleAccountIdFromAddress(found.address) } : { kind: "archives" };
-}
-async function gmailLabelLookup(lane) {
-  const rules = lane.set.classification()?.rules ?? [];
-  if (!rules.some((rule) => rule.match.kind === "label" && (rule.source === undefined || rule.source === GMAIL_PROVIDER_ID)))
-    return { kind: "none" };
-  let found;
-  try {
-    found = await lane.labelIds?.();
-  } catch {
-    found = undefined;
-  }
-  if (found instanceof Map)
-    return { kind: "map", byName: found };
-  if (found && "unavailable" in found) {
-    return { kind: "unavailable", reason: found.unavailable, ...found.minimum !== undefined ? { minimum: found.minimum } : {} };
-  }
-  return { kind: "unavailable", reason: "gmail_labels_unavailable" };
-}
-function gmailArchiveTarget(options) {
-  let current;
-  const laneNow = () => {
-    current = options.lane();
-    return current;
-  };
-  return {
-    sourceId: GMAIL_ARCHIVE_SOURCE_ID,
-    label: GMAIL_ARCHIVE_LABEL,
-    formats: ["mbox"],
-    concurrencyKey: options.concurrencyKey,
-    identify: gmailExportEvidence,
-    input(archive) {
-      const lane = current ?? laneNow();
-      return mboxGmailInput({ ...archive, waitForProvider: (reason, detail) => {
-        lane.reportWait?.(reason);
-        archive.waitForProvider?.(reason, detail);
-      } }, {
-        ...lane.build ? { build: lane.build } : {},
-        ...lane.match ? { match: lane.match } : {},
-        labels: () => gmailLabelLookup(lane)
-      });
-    },
-    lane() {
-      const lane = laneNow();
-      const builder = gmailRecordBuilder(lane.account, lane.build);
-      const connector = {
-        id: GMAIL_PROVIDER_ID,
-        family: "email",
-        authenticate: () => Promise.resolve(),
-        listItems: () => {
-          throw new Error("Gmail lists live mail through its own lane.");
-        },
-        fetchItem: (localItemId, fetchOptions) => builder.fetchItem(localItemId, fetchOptions),
-        classificationSignals: (item) => builder.classificationSignals(item),
-        forInput: (input) => inputConnector(builder, input)
-      };
-      return { set: lane.set, sync: lane.sync, connector };
-    },
-    exclusive: (task) => options.exclusive(task)
-  };
-}
-var GMAIL_ARCHIVE_SOURCE_ID = "gmail.email", GMAIL_ARCHIVE_LABEL = "Gmail", GMAIL_PROVIDER_ID = "gmail", GMAIL_IMPORT_CONNECTOR_PREFIX = "archive.", GMAIL_IMPORTED_FILTERS;
-var init_gmail_archive_target = __esm(() => {
-  init_provider_account_identity();
-  init_source_inputs();
-  init_manifest3();
-  init_gmail_account();
-  init_gmail_input();
-  init_gmail_mail_record();
-  GMAIL_IMPORTED_FILTERS = Object.freeze({ provider: GMAIL_PROVIDER_ID, observedConnectorIdPrefix: GMAIL_IMPORT_CONNECTOR_PREFIX });
-});
-
 // src/workers/email-source/gmail-status-scope.ts
 function contentWindow(contentAfter) {
   return contentAfter ? { contentNotBefore: contentAfter } : {};
@@ -243260,11 +243735,11 @@ function evernoteDashboardPass(status) {
 var providerStops3, EVERNOTE_ATTACHMENT_EXTRACTION_PROVIDER = "evernote.attachments", EVERNOTE_ATTACHMENT_EXTRACTION_SCOPE_KEY = "evernote.attachments:extraction", EVERNOTE_ATTACHMENT_PLAN_LIMIT = 200, EVERNOTE_ATTACHMENT_BATCH_SIZE = 10, EVERNOTE_RATE_LIMIT_RETRY_MS, AUTH_KINDS2, PASS_ERROR_KIND;
 var init_runtime3 = __esm(() => {
   init_provider_rate_limits();
-  init_errors6();
+  init_errors7();
   init_child_extraction_runtime();
   init_source_scheduler();
   init_source_placement();
-  init_connector5();
+  init_connector6();
   init_live_sync3();
   providerStops3 = createProviderRateLimitReporter("evernote");
   EVERNOTE_RATE_LIMIT_RETRY_MS = 15 * 60000;
@@ -243979,11 +244454,11 @@ var init_export_zone = __esm(() => {
 });
 
 // src/workers/whatsapp/archive-input.ts
-import { createHash as createHash115 } from "node:crypto";
+import { createHash as createHash116 } from "node:crypto";
 import { existsSync as existsSync120 } from "node:fs";
 import { posix as posix8 } from "node:path";
 function hash2(value) {
-  return createHash115("sha256").update(value).digest("hex").slice(0, 24);
+  return createHash116("sha256").update(value).digest("hex").slice(0, 24);
 }
 function encodeCursor4(state, inner) {
   return `${CURSOR_PREFIX}${Buffer.from(JSON.stringify(state)).toString("base64url")}~${inner ?? ""}`;
@@ -244775,7 +245250,7 @@ var init_part_reader = __esm(() => {
   init_manifest3();
   init_gmail_mail_record();
   init_gmail_input();
-  init_parse5();
+  init_parse2();
   init_mime_parts();
   init_split();
 });
@@ -244875,7 +245350,7 @@ function createGmailAttachmentExtractionRuntime(input) {
 var GMAIL_ATTACHMENT_EXTRACTION_PROVIDER = "gmail.attachments", GMAIL_ATTACHMENT_EXTRACTION_SCOPE_KEY = "gmail.attachments:extraction", GMAIL_ATTACHMENT_EXTRACTION_PLAN_LIMIT = 200, GMAIL_ATTACHMENT_CORPUS_IDS, GMAIL_ATTACHMENT_EXTRACTION_BATCH_SIZE = 10;
 var init_gmail_attachment_extraction = __esm(() => {
   init_file_extraction_source();
-  init_parse5();
+  init_parse2();
   init_part_reader();
   init_child_extraction_runtime();
   init_gmail();
@@ -244883,244 +245358,6 @@ var init_gmail_attachment_extraction = __esm(() => {
   init_request_budget();
   init_gmail_input();
   GMAIL_ATTACHMENT_CORPUS_IDS = [GMAIL_SECURE_CONNECTOR_CORPUS_ID, GMAIL_INTERNAL_CONNECTOR_CORPUS_ID];
-});
-
-// src/workers/source-account-guard.ts
-import { createHash as createHash116 } from "node:crypto";
-function createExclusiveRunner() {
-  let tail = Promise.resolve();
-  return (task) => {
-    const run = tail.then(task, task);
-    tail = run.catch(() => {
-      return;
-    });
-    return run;
-  };
-}
-function runExclusiveForSource(registryPath, sourceId, task) {
-  return sourceExclusiveRunner(sourceAccountBindingsPath(registryPath), sourceId)(task);
-}
-function sourceExclusiveRunner(bindingsPath, sourceId) {
-  const key = `${bindingsPath}
-${sourceId}`;
-  let runner = sourceExclusiveRunners.get(key);
-  if (!runner) {
-    runner = createExclusiveRunner();
-    sourceExclusiveRunners.set(key, runner);
-  }
-  return runner;
-}
-function runGuarded(guard, task) {
-  return guard.run ? guard.run(task) : guard.assertAccount().then(task);
-}
-function createSourceAccountGuard(options) {
-  const broker = options.broker ?? createEnvCredentialBroker();
-  const now = options.now ?? (() => new Date);
-  const bindingsPath = sourceAccountBindingsPath(options.registryPath);
-  const exclusive = options.exclusive ?? sourceExclusiveRunner(bindingsPath, options.sourceId);
-  const verified = new Map;
-  let lastAccessToken;
-  const evidenceChecked = new Map;
-  const evidenceOpens = async (accessToken, folderIds) => {
-    const key = createHash116("sha256").update(`${accessToken}
-${folderIds.join(",")}`).digest("hex");
-    const known = evidenceChecked.get(key);
-    if (known !== undefined)
-      return known;
-    const answer = await options.ownAccountEvidence?.check(accessToken, folderIds).catch(() => {
-      return;
-    });
-    if (answer !== undefined) {
-      if (evidenceChecked.size >= 8)
-        evidenceChecked.clear();
-      evidenceChecked.set(key, answer);
-    }
-    return answer;
-  };
-  let evidenceRecordAttempted = false;
-  let historyRecorded;
-  const unreadableHistory = (error) => new SourceAccountChangedError("source_account_unverified", `${options.sourceId}: could not read which account its stored items belong to (${error instanceof Error ? error.message : String(error)}); nothing was synced this run.`);
-  const historyAccountId = () => {
-    try {
-      return options.historyAccount?.read();
-    } catch (error) {
-      throw unreadableHistory(error);
-    }
-  };
-  const agreeWithHistory = () => {
-    if (!options.historyAccount)
-      return;
-    const read = readSourceAccountBindings(bindingsPath);
-    const bound = read.kind === "ok" ? read.bindings.sources[options.sourceId] : undefined;
-    if (!bound?.provider_account_id || bound.purge_required || bound.provider_account_id === historyRecorded)
-      return;
-    let recorded;
-    try {
-      recorded = options.historyAccount.record(bound.provider_account_id, { historyEmpty: !options.laneHoldsItems() });
-    } catch (error) {
-      throw unreadableHistory(error);
-    }
-    if (recorded === "different" || recorded === "unproven") {
-      throw new SourceAccountChangedError("source_account_changed", `${options.sourceId}'s stored items belong to another account than the connected one, so nothing syncs: one source never holds two accounts. ` + "To keep them, reconnect the account they came from. " + `To replace them, Disconnect the source, run \`olympus data delete --source ${options.sourceId}\` (preview with --dry-run), then connect again.`);
-    }
-    historyRecorded = bound.provider_account_id;
-  };
-  const tokenAccountId = async () => {
-    const handle = readConnectedHandleRegistry(options.registryPath).handles.find((entry) => entry.handle === options.handle);
-    if (options.readAccountId) {
-      return handle?.providerAccountId?.trim() ? options.readAccountId()?.trim() || undefined : undefined;
-    }
-    const session = await broker.issueSession({
-      handle: options.handle,
-      provider: options.provider,
-      capability: options.capability,
-      ...handle?.trustDomain ? { trustDomain: handle.trustDomain } : {},
-      purpose: "Confirm which provider account the source credential belongs to before syncing."
-    });
-    if (session.kind !== "bearer_token")
-      return;
-    lastAccessToken = session.token;
-    const key = createHash116("sha256").update(session.token).digest("hex");
-    const known = verified.get(key);
-    if (known)
-      return known;
-    try {
-      const id = await fetchProviderAccountId({
-        provider: options.provider,
-        accessToken: session.token,
-        ...options.fetch ? { fetchImpl: options.fetch } : {},
-        ...options.identityEndpoints ? { endpoints: options.identityEndpoints } : {},
-        ...options.identityTimeoutMs ? { timeoutMs: options.identityTimeoutMs } : {}
-      });
-      if (verified.size >= 8)
-        verified.clear();
-      verified.set(key, id);
-      return id;
-    } catch {
-      return;
-    }
-  };
-  const guard = {
-    run(task) {
-      const checked = async () => {
-        await guard.assertAccount();
-        return task();
-      };
-      return exclusive(checked);
-    },
-    async assertAccount() {
-      await verifyAccount();
-      agreeWithHistory();
-    }
-  };
-  async function verifyAccount() {
-    const handle = readConnectedHandleRegistry(options.registryPath).handles.find((entry) => entry.handle === options.handle);
-    if (!handle) {
-      throw new SourceAccountChangedError("source_account_unverified", `${options.sourceId} is not connected.`);
-    }
-    if (options.laneStoresStale?.()) {
-      const restarting = options.requestStoreReopen?.() ?? false;
-      throw new SourceAccountChangedError("source_stores_reopen_required", restarting ? `${options.sourceId}'s stored data was deleted while the worker was running; the worker is restarting to reopen it.` : `${options.sourceId}'s stored data was deleted while the worker was running. Restart the Olympus worker so it reopens the source's stores before syncing.`);
-    }
-    const token = await tokenAccountId();
-    const history = historyAccountId();
-    const decide = (binding) => decideSourceAccountAction({
-      binding: binding?.provider_account_id || !history ? binding : { ...binding, provider_account_id: history },
-      grantAccountId: handle.providerAccountId,
-      grantConnectedAt: handle.connectedAt,
-      tokenAccountId: token,
-      laneHoldsItems: options.laneHoldsItems(),
-      now: now()
-    });
-    const read = readSourceAccountBindings(bindingsPath);
-    if (read.kind === "malformed")
-      throw new SourceAccountBindingsUnreadableError(bindingsPath);
-    let decision = decide(read.bindings.sources[options.sourceId]);
-    const current = read.bindings.sources[options.sourceId];
-    if (decision.action === "purge" && decision.reason === "previous_account_unknown" && token && lastAccessToken && current?.previous_account_folders?.length && await evidenceOpens(lastAccessToken, current.previous_account_folders) === true) {
-      let bound = false;
-      updateSourceAccountBinding(bindingsPath, options.sourceId, (latest) => {
-        const grantNow = readConnectedHandleRegistry(options.registryPath).handles.find((entry) => entry.handle === options.handle);
-        if (JSON.stringify(latest ?? null) !== JSON.stringify(current ?? null) || grantNow?.connectedAt !== handle.connectedAt || grantNow?.providerAccountId !== handle.providerAccountId)
-          return latest;
-        bound = true;
-        return { provider_account_id: token, bound_at: now().toISOString(), bound_grant: handle.connectedAt };
-      });
-      if (bound)
-        return;
-      throw new SourceAccountChangedError("source_account_unverified", `${options.sourceId} was reconnected while its account was being confirmed; it is checked again on the next run.`);
-    }
-    if (decision.action === "proceed" && decision.write === undefined && !token && lastAccessToken && options.ownAccountEvidence && !evidenceRecordAttempted && !current?.provider_account_id && !current?.reconnected_at && !current?.previous_account_folders?.length) {
-      const folders = await options.ownAccountEvidence.record(lastAccessToken).catch(() => {
-        return;
-      });
-      if (folders !== undefined)
-        evidenceRecordAttempted = true;
-      if (folders?.length) {
-        updateSourceAccountBinding(bindingsPath, options.sourceId, (latest) => latest?.provider_account_id || latest?.reconnected_at || latest?.purge_required ? latest : { ...latest, previous_account_folders: folders.slice(0, 5) });
-      }
-    }
-    if (decision.action === "proceed" && decision.write === undefined)
-      return;
-    if (decision.action !== "refuse") {
-      updateSourceAccountBinding(bindingsPath, options.sourceId, (current) => {
-        decision = decide(current);
-        if (decision.action === "proceed") {
-          return decision.write === undefined ? current : decision.write ?? undefined;
-        }
-        if (decision.action === "purge") {
-          return current?.purge_required ? current : { ...current, purge_required: { reason: decision.reason, detected_at: now().toISOString() } };
-        }
-        return current;
-      });
-    }
-    if (decision.action === "proceed")
-      return;
-    if (decision.action === "refuse" && decision.reason === "token_account_mismatch" && options.readAccountId) {
-      throw new SourceAccountChangedError("source_account_token_mismatch", `${options.sourceId}: this source is set to read a different account than the connected credential's, so nothing was synced. This clears once the worker picks up a reconnect; if it stays, remove the account override from the worker's environment.`);
-    }
-    if (decision.action === "refuse" && decision.reason === "token_account_mismatch") {
-      invalidateMintedCredentialSessions(options.handle);
-      verified.clear();
-      throw new SourceAccountChangedError("source_account_token_mismatch", `${options.sourceId}: the access token in use belongs to a different account than the connected credential; it was discarded and nothing was synced. If a Connect for this source just failed, connect it again.`);
-    }
-    if (decision.action === "refuse") {
-      throw new SourceAccountChangedError("source_account_unverified", `${options.sourceId}: could not confirm which account the credential belongs to; nothing was synced this run.`);
-    }
-    throw new SourceAccountChangedError("source_account_changed", `${options.sourceId} is now connected to ${decision.reason === "account_changed" ? "a different account" : "an account that could not be matched to the one its items came from"}, ` + "so nothing syncs: one source never holds two accounts. To keep the items already stored, reconnect the previous account. " + `To replace them, Disconnect the source, run \`olympus data delete --source ${options.sourceId}\` (preview with --dry-run), then connect again.`);
-  }
-  return guard;
-}
-function guardAccountBoundLanes(sources, guards) {
-  return sources.map((source) => {
-    const guard = guards.get(source.sourceId);
-    return guard ? accountBoundSchedulerSource({ source, guard }) : source;
-  });
-}
-function accountBoundSchedulerSource(input) {
-  return {
-    ...input.source,
-    tasks: input.source.tasks.map((task) => ({
-      ...task,
-      run: (context) => runGuarded(input.guard, () => task.run(context))
-    }))
-  };
-}
-var SourceAccountChangedError, sourceExclusiveRunners;
-var init_source_account_guard = __esm(() => {
-  init_provider_account_identity();
-  init_source_account_binding();
-  init_connected_handles();
-  init_credential_broker();
-  SourceAccountChangedError = class SourceAccountChangedError extends Error {
-    code;
-    constructor(code, message) {
-      super(message);
-      this.name = "SourceAccountChangedError";
-      this.code = code;
-    }
-  };
-  sourceExclusiveRunners = new Map;
 });
 
 // src/workers/classification/installed-tier-classification.ts
@@ -276772,15 +277009,13 @@ ${key}`;
   const createGmailConnectorStoreSyncForHandle = (handle) => {
     const scopeRef = handle && fileSourceScopeAuthority ? fileSourceScopeAuthority.mailPolicyRef() : undefined;
     const approval = scopeRef && fileSourceScopeAuthority ? fileSourceScopeAuthority.assertCurrentMail(scopeRef) : undefined;
-    const privateCorpusId = gmailSecureConnectorStore?.corpusId;
-    const privateDefinition = privateCorpusId && sourceCorpusRegistry.definitions().find((entry) => entry.corpusId === privateCorpusId);
     return handle && scopeRef && approval && fileSourceScopeAuthority && gmailInternalConnectorStore && gmailSecureConnectorStore && gmailRequestBudget ? createGmailConnectorStoreSyncHandler({
       internalStore: gmailInternalConnectorStore,
       secureStore: gmailSecureConnectorStore,
       requestBudget: gmailRequestBudget,
       scope: gmailConnectorScopeFromApproval(approval),
       scopeApproval: { generation: scopeRef.accountGeneration, revision: scopeRef.revision },
-      confirmStoredPrivateScope: !!privateDefinition && secureLocalPolicyEmbeddingProvider?.provider === "built-in" && secureLocalPolicyEmbeddingProvider.backend === "local" && privateDefinition?.activationMode !== "lexical_only" && privateDefinition?.embeddingPolicy !== "disabled" && (sovereigntyEngine.config.retrieval.trustDomains.secure_local?.activationMode === "hybrid_shadow" || sovereigntyEngine.config.retrieval.trustDomains.secure_local?.activationMode === "hybrid_primary"),
+      confirmationRegistryPath: connectedHandleRegistryPath ?? fileSourceScopeAuthority.registryPath,
       assertScopeCurrent: () => {
         fileSourceScopeAuthority.assertCurrentMail(scopeRef);
       },
@@ -280041,7 +280276,7 @@ var init_server5 = __esm(async () => {
   init_front_mount_changes();
   init_extraction_runtime();
   init_scheduler_source2();
-  init_connector6();
+  init_connector7();
   init_open_target2();
   init_paths();
   init_source_ingestion_policy();
@@ -280059,7 +280294,7 @@ var init_server5 = __esm(async () => {
   init_gmail_status_scope();
   init_tiered_store_set();
   init_archive_target();
-  init_connector5();
+  init_connector6();
   init_live_sync3();
   init_runtime3();
   init_tier_set2();
@@ -281048,7 +281283,7 @@ init_engine_heartbeat();
 init_upgrade_store_copies();
 init_put_back_manifest();
 init_engine_store_copies();
-import { createHash as createHash90 } from "node:crypto";
+import { createHash as createHash92 } from "node:crypto";
 import { spawnSync as spawnSync18 } from "node:child_process";
 import { existsSync as existsSync91, lstatSync as lstatSync47, mkdirSync as mkdirSync58, readFileSync as readFileSync81 } from "node:fs";
 import { homedir as homedir36, platform as osPlatform4 } from "node:os";
@@ -281057,7 +281292,7 @@ import { dirname as dirname95, isAbsolute as isAbsolute36, join as join124 } fro
 // src/core/lifecycle-artifact.ts
 init_atomic_file();
 init_operation_error();
-import { createHash as createHash89, randomUUID as randomUUID33 } from "node:crypto";
+import { createHash as createHash91, randomUUID as randomUUID33 } from "node:crypto";
 import { spawnSync as spawnSync17 } from "node:child_process";
 import {
   chmodSync as chmodSync37,
@@ -281085,7 +281320,7 @@ function prepareWorkerUpgradeArtifact(options) {
   if (artifactBytes.byteLength <= 0 || artifactBytes.byteLength > MAX_UPGRADE_ARTIFACT_BYTES) {
     throw new OperationError("invalid_params", `Upgrade artifact must be between 1 byte and ${MAX_UPGRADE_ARTIFACT_BYTES} bytes.`);
   }
-  const artifactSha256 = createHash89("sha256").update(artifactBytes).digest("hex");
+  const artifactSha256 = createHash91("sha256").update(artifactBytes).digest("hex");
   const snapshotDir = mkdtempSync5(join122(tmpdir13(), ".olympus-artifact-snapshot-"));
   const artifactPath = join122(snapshotDir, "artifact.tgz");
   const descriptor = openSync32(artifactPath, "wx", 384);
@@ -281335,7 +281570,7 @@ function syncVersionTree(root) {
   syncDirectorySync(root);
 }
 function versionTreeDigest(root) {
-  const digest = createHash89("sha256");
+  const digest = createHash91("sha256");
   hashVersionTree(root, "", digest);
   return digest.digest("hex");
 }
@@ -281838,11 +282073,11 @@ function beginTransaction(action, options, preview, previousServiceState, prepar
     previous_unit_present: previousUnit !== undefined,
     previous_env_present: previousEnv !== undefined,
     ...previousLauncher !== null ? { previous_launcher_present: previousLauncher !== undefined } : {},
-    ...previousLauncher != null ? { previous_launcher_sha256: sha2568(previousLauncher) } : {},
+    ...previousLauncher != null ? { previous_launcher_sha256: sha2569(previousLauncher) } : {},
     previous_service_state: previousServiceState,
-    ...previousUnit !== undefined ? { previous_unit_sha256: sha2568(previousUnit) } : {},
-    ...previousEnv !== undefined ? { previous_env_sha256: sha2568(previousEnv) } : {},
-    desired_unit_sha256: sha2568(preview.unit),
+    ...previousUnit !== undefined ? { previous_unit_sha256: sha2569(previousUnit) } : {},
+    ...previousEnv !== undefined ? { previous_env_sha256: sha2569(previousEnv) } : {},
+    desired_unit_sha256: sha2569(preview.unit),
     ...prepared ? {
       artifact_sha256: prepared.artifactSha256,
       package_version: prepared.packageVersion,
@@ -281893,7 +282128,7 @@ function rollbackTransaction(options, intent) {
     let previousLauncher;
     if (transaction.previous_launcher_present) {
       previousLauncher = readManagedFileSnapshot(paths.launcherBackup);
-      if (previousLauncher === undefined || sha2568(previousLauncher) !== transaction.previous_launcher_sha256) {
+      if (previousLauncher === undefined || sha2569(previousLauncher) !== transaction.previous_launcher_sha256) {
         throw new OperationError("config_error", "Lifecycle CLI launcher rollback backup integrity check failed.");
       }
     }
@@ -282082,7 +282317,7 @@ function restoreManagedFile(homeDir, path, backupPath, previousPresent, expected
   }
   assertRegularFile2(backupPath, "lifecycle backup");
   const text = readFileSync81(backupPath, "utf8");
-  if (!expectedDigest || sha2568(text) !== expectedDigest) {
+  if (!expectedDigest || sha2569(text) !== expectedDigest) {
     throw new OperationError("config_error", "Lifecycle rollback backup integrity check failed.");
   }
   if (pathIsWithin(homeDir, path))
@@ -282389,8 +282624,8 @@ function assertRegularFile2(path, label) {
   } catch {}
   throw new OperationError("config_error", `Refusing a non-regular ${label}: ${path}`);
 }
-function sha2568(value) {
-  return createHash90("sha256").update(value).digest("hex");
+function sha2569(value) {
+  return createHash92("sha256").update(value).digest("hex");
 }
 
 // src/cli.ts

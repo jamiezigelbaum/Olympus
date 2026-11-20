@@ -3520,8 +3520,6 @@ export async function main(): Promise<void> {
   ) => {
     const scopeRef = handle && fileSourceScopeAuthority ? fileSourceScopeAuthority.mailPolicyRef() : undefined;
     const approval = scopeRef && fileSourceScopeAuthority ? fileSourceScopeAuthority.assertCurrentMail(scopeRef) : undefined;
-    const privateCorpusId = gmailSecureConnectorStore?.corpusId;
-    const privateDefinition = privateCorpusId && sourceCorpusRegistry.definitions().find(entry => entry.corpusId === privateCorpusId);
     return handle && scopeRef && approval && fileSourceScopeAuthority
       && gmailInternalConnectorStore && gmailSecureConnectorStore && gmailRequestBudget
     ? createGmailConnectorStoreSyncHandler({
@@ -3530,11 +3528,7 @@ export async function main(): Promise<void> {
       requestBudget: gmailRequestBudget,
       scope: gmailConnectorScopeFromApproval(approval),
       scopeApproval: { generation: scopeRef.accountGeneration, revision: scopeRef.revision },
-      confirmStoredPrivateScope: !!privateDefinition && secureLocalPolicyEmbeddingProvider?.provider === 'built-in'
-        && secureLocalPolicyEmbeddingProvider.backend === 'local'
-        && privateDefinition?.activationMode !== 'lexical_only' && privateDefinition?.embeddingPolicy !== 'disabled'
-        && (sovereigntyEngine.config.retrieval.trustDomains.secure_local?.activationMode === 'hybrid_shadow'
-          || sovereigntyEngine.config.retrieval.trustDomains.secure_local?.activationMode === 'hybrid_primary'),
+      confirmationRegistryPath: connectedHandleRegistryPath ?? fileSourceScopeAuthority.registryPath,
       assertScopeCurrent: () => {
         fileSourceScopeAuthority.assertCurrentMail(scopeRef);
       },
