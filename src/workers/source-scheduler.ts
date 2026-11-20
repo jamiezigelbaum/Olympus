@@ -31,7 +31,7 @@ import {
   type ConnectorStoreEmbeddingTarget,
   type LocalConnectorStore,
 } from './connector-store/index.ts';
-import { GMAIL_CONFIRMATION_RESERVE_REASON, type GmailConfirmationYieldReason } from './google-connectors/gmail-live-sync.ts';
+import { GMAIL_CONFIRMATION_RESERVE_REASON, type GmailConfirmationYieldCheck, type GmailConfirmationYieldReason } from './google-connectors/gmail-live-sync.ts';
 import {
   GMAIL_DAILY_REQUEST_GUARD_REASON,
   GMAIL_RESUME_REJECTED_WARNING,
@@ -252,7 +252,7 @@ export interface SourceSchedulerTaskRunContext {
   degradedReason?: string;
   provenance?: SourceSchedulerRunProvenance;
   /** Gmail confirmation checks this at provider page boundaries. */
-  yieldGmailConfirmation?: () => GmailConfirmationYieldReason | undefined;
+  yieldGmailConfirmation?: GmailConfirmationYieldCheck;
 }
 
 export interface SourceSchedulerTask {
@@ -532,6 +532,8 @@ export interface SourceSchedulerTaskStatus {
 }
 
 interface SchedulerTaskState {
+  /** A due confirmation lost an open scheduler share before its first page. */
+  confirmationPageOwed?: boolean;
   waitReason?: SourceSchedulerTaskStatus['wait_reason'];
   task: SourceSchedulerTask;
   source: SourceSchedulerSource;
@@ -1105,6 +1107,10 @@ export class SourceScheduler {
       if (this.busyConcurrencyKeys.has(concurrencyKey)) return;
       this.busyConcurrencyKeys.add(concurrencyKey);
       try {
+        if (provenance === 'scheduled') {
+          const owed = group.findIndex(state => state.confirmationPageOwed);
+          if (owed > 0) group.unshift(...group.splice(owed, 1));
+        }
         for (const state of group) {
           if (state.running) continue;
           state.running = true;
@@ -1182,6 +1188,7 @@ export class SourceScheduler {
     }
     if (isGmailConfirmationTask(state.task)) {
       if (provenance === 'scheduled' && this.askHolds()) {
+        state.confirmationPageOwed = true;
         state.waitReason = 'owner_ask';
         this.scheduleContinueWake(this.now().getTime() + SOURCE_SCHEDULER_ASK_RECHECK_MS);
         return;
@@ -1465,8 +1472,17 @@ export class SourceScheduler {
           // byte-identical to what tasks received before provenance existed,
           // and the X adapter reads a missing marker as scheduled (R62).
           ...(provenance === 'operator' ? { provenance } : {}),
-          ...(isGmailConfirmationTask(task) ? { yieldGmailConfirmation: () => {
-            if (this.askHolds()) return 'owner_ask';
+          ...(isGmailConfirmationTask(task) ? { yieldGmailConfirmation: boundary => {
+            if (this.askHolds()) {
+              if (boundary === 'start' && provenance === 'scheduled') state.confirmationPageOwed = true;
+              return 'owner_ask';
+            }
+            // Repay one missed share. A due pull gets the account back at the
+            // first page boundary, even when the Ask share is still open.
+            if (boundary === 'start' && state.confirmationPageOwed) {
+              delete state.confirmationPageOwed;
+              return undefined;
+            }
             const liveDue = this.states.some(sibling => sibling.source.sourceId === state.source.sourceId
               && sibling.source.corpusId === state.source.corpusId
               && sibling.task.metadataWalkRole === 'primary' && sibling.nextRunAt <= this.now().getTime());

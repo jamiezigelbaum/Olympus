@@ -2028,6 +2028,8 @@ export interface ConnectorStoreEmbedOptions {
   filters?: ConnectorStoreSearchFilters;
   /** Revalidates dynamic authorization immediately before every provider call. */
   assertAuthorized?: () => void | Promise<void>;
+  /** A queued provider can differ from the provider bound to this sweep's scope. */
+  assertSweepBindingCurrent?: () => void;
   /** Optional item selection for latency-sensitive incremental ingest. */
   localItemIds?: readonly string[];
   /**
@@ -2241,6 +2243,8 @@ export async function embedPendingChunks(
       }
       const outcome = await embedItemsIsolated(store, group.provider, group.localItemIds, {
         ...target,
+        ...(group.provider !== target.provider && target.provider.assertBindingCurrent
+          ? { assertSweepBindingCurrent: () => target.provider.assertBindingCurrent!() } : {}),
         ...(onBatchWritten ? { onBatchWritten } : {}),
         ...(options.stopAtMs !== undefined ? { stopAtMs: options.stopAtMs } : {}),
         ...(options.shouldStop ? { shouldStop: options.shouldStop } : {}),
@@ -2298,7 +2302,7 @@ async function embedItemsIsolated(
   store: LocalConnectorStore,
   provider: SourceEmbeddingProvider,
   localItemIds: readonly string[],
-  scope: Pick<ConnectorStoreEmbedOptions, 'accountScope' | 'filters' | 'assertAuthorized' | 'stopAtMs' | 'shouldStop' | 'onBatchWritten'> = {},
+  scope: Pick<ConnectorStoreEmbedOptions, 'accountScope' | 'filters' | 'assertAuthorized' | 'assertSweepBindingCurrent' | 'stopAtMs' | 'shouldStop' | 'onBatchWritten'> = {},
 ): Promise<{ chunksEmbedded: number; itemsFailed: number; deferredReason?: string; busy?: boolean; stoppedAtDeadline?: boolean }> {
   try {
     const embed = await store.embedChunks({
@@ -2307,6 +2311,7 @@ async function embedItemsIsolated(
       ...(scope.accountScope ? { accountScope: scope.accountScope } : {}),
       ...(scope.filters ? { filters: scope.filters } : {}),
       ...(scope.assertAuthorized ? { assertAuthorized: scope.assertAuthorized } : {}),
+      ...(scope.assertSweepBindingCurrent ? { assertSweepBindingCurrent: scope.assertSweepBindingCurrent } : {}),
       ...(scope.stopAtMs !== undefined ? { stopAtMs: scope.stopAtMs } : {}),
       ...(scope.shouldStop ? { shouldStop: scope.shouldStop } : {}),
     });
@@ -2317,6 +2322,11 @@ async function embedItemsIsolated(
     return { chunksEmbedded: embed.chunksEmbedded, itemsFailed: 0 };
   } catch (error) {
     if (error instanceof FileLeaseBusyError) return { chunksEmbedded: 0, itemsFailed: 0, busy: true };
+    // An expired approval applies to the whole dispatch. Marking individual
+    // items failed would hide their debt even after a fresh approval.
+    if (error instanceof OperationError && error.code === 'source_index_policy_violation') {
+      return { chunksEmbedded: 0, itemsFailed: 0, deferredReason: error.code };
+    }
     if (error instanceof TransientSourceEmbeddingError) {
       return { chunksEmbedded: 0, itemsFailed: 0, deferredReason: connectorStoreEmbeddingDeferredReason(error) };
     }
@@ -14342,6 +14352,7 @@ export class LocalConnectorStore {
         && batch.some((row) => row.media_sha256 && !this.mediaJudgmentSettled(row.media_sha256, mediaJudgeId(judging)));
       let judgedBatch: Map<number, MediaJudgment> | undefined;
       try {
+        options.assertSweepBindingCurrent?.();
         if (judgeNow) {
           const returned = await judging!.embedWithImageVectors!(inputsFor(batch));
           vectors = returned.vectors;
@@ -14387,6 +14398,7 @@ export class LocalConnectorStore {
         staleSkipped += recheck.notVisible + recheck.privateTier;
         batch = recheck.kept;
         if (batch.length === 0) continue;
+        options.assertSweepBindingCurrent?.();
         vectors = await provider.embed(inputsFor(batch), { taskType: 'RETRIEVAL_DOCUMENT' });
       }
       const onDemandItems = this.db.query(`SELECT COUNT(*) AS n FROM items i JOIN on_demand_item_reads r ON r.local_item_id = i.local_item_id
@@ -14497,6 +14509,10 @@ export class LocalConnectorStore {
           epochId: provider.epochId,
           configHash: provider.configHash,
         }, now);
+        // The provider round trip can outlive its approval. Throwing here
+        // rolls back the whole batch, including its maintenance checkpoint.
+        provider.assertBindingCurrent?.();
+        options.assertSweepBindingCurrent?.();
       })();
       if (nextJournalSha256) activeJournalSha256 = nextJournalSha256;
       if (writtenItemPks?.length) options.onBatchWritten?.(writtenItemPks);
@@ -20894,32 +20910,12 @@ export function identityRowsSql(extraSql: string): string {
     `;
 }
 
-// A new observation namespace admits earlier ordinary ingestion only when its
-// origin is provable. Tier moves copy the keys but replace the run links. A
-// sole inherited owner still proves ingestion: confirmation could only add a
-// second key to an already-owned copy, and a move carries *all* its owners.
-const VERIFIED_OBSERVATION_PREFIX = 'verified-observation.v1:';
-
-export function verifiedObservationConnectorId(previousId: string): string {
-  return VERIFIED_OBSERVATION_PREFIX + previousId;
-}
-
 function observedOwnerPredicate(exact?: string, prefix?: string): { sql: string; params: string[] } {
   const keys: string[] = [];
   const params: string[] = [];
   if (exact) {
     keys.push('o.connector_id = ?');
     params.push(exact);
-    if (exact.startsWith(VERIFIED_OBSERVATION_PREFIX)) {
-      keys.push(`(o.connector_id = ? AND EXISTS (
-        SELECT 1 FROM sync_runs r
-        WHERE r.sync_run_id IN (o.first_seen_sync_run_id, o.last_seen_sync_run_id)
-          AND (r.connector_id = o.connector_id OR (r.connector_id = ? AND NOT EXISTS (
-            SELECT 1 FROM item_owners other WHERE other.item_pk = o.item_pk AND other.connector_id <> o.connector_id
-          )))
-      ))`);
-      params.push(exact.slice(VERIFIED_OBSERVATION_PREFIX.length), TIER_MOVE_CONNECTOR_ID);
-    }
   }
   if (prefix) {
     keys.push('substr(o.connector_id, 1, length(?)) = ?');
