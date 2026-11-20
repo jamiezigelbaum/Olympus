@@ -17,8 +17,9 @@ import {
 } from '../src/core/mail-source-scope.ts';
 import type { CredentialBroker } from '../src/workers/credential-broker/index.ts';
 import type { SourceConnectorListPage, RawItem } from '../src/core/contracts.ts';
+import { SourceScopeApprovalRequiredError } from '../src/core/operation-error.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
-import { planStoreEmbedding } from '../src/workers/connector-store/embedding-plan.ts';
+import { planStoreEmbedding, scopedEmbeddingOptions } from '../src/workers/connector-store/embedding-plan.ts';
 import { automaticTierMoveOptions, automaticTierMovesAllowed } from '../src/workers/connector-store/tier-auto-move.ts';
 import { moveTieredItem, TIER_MOVE_CONNECTOR_ID } from '../src/workers/connector-store/tier-move.ts';
 import { createLaneTieredStoreSet } from '../src/workers/connector-store/tiered-store-set.ts';
@@ -287,6 +288,45 @@ test.each(['admitted', 'operator query', 'version changed', 'body-only OTP', 'na
   expect(stores.secureStore.itemOwnerPresent(child, id, 'observed')).toBe(false);
 });
 
+test('attachment backfill retries a parent whose historyId changes between metadata and full GET', async () => {
+  const stores = fileStores(tempDir());
+  const mail = attachmentMessage('changing-parent', NOW.getTime() - DAY);
+  const client = fakeClient([mail]);
+  const common = { ...stores, apiClient: client, credentialBroker: OFFLINE_BROKER, account: 'personal', env: {} };
+  await createGmailConnectorStoreSyncHandler({
+    ...common, scope: {}, scopeApproval: { generation: 'legacy', revision: 'legacy' },
+  }).pull();
+  expect(stores.internalStore.itemStoredContent(identity(mail.id))?.chunkCount).toBe(1);
+
+  let changedOnce = false;
+  const get = client.getMessage;
+  client.getMessage = async (id, request) => {
+    if (request?.format !== 'metadata' && !changedOnce) {
+      changedOnce = true;
+      mail.historyId = '1001';
+    }
+    return get(id, request);
+  };
+  const scopeApproval = { generation: 'current', revision: 'current' };
+  const lane = createGmailConnectorStoreSyncHandler({
+    ...common, build: { children: true }, scope: {}, scopeApproval,
+  });
+  const id = gmailCursorConnectorId('personal', scopeApproval);
+  const child = identity(gmailChildProviderId(mail.id, '1'));
+
+  client.formats.length = 0;
+  expect(await lane.backfillChildren!()).toEqual({ examined: 1, listed: 0, done: false });
+  expect(client.formats).toEqual(['metadata', 'full']);
+  expect(stores.internalStore.itemOwnerPresent(child, id, 'observed')).toBe(false);
+  expect(stores.secureStore.itemOwnerPresent(child, id, 'observed')).toBe(false);
+
+  client.formats.length = 0;
+  expect(await lane.backfillChildren!()).toEqual({ examined: 1, listed: 1, done: true });
+  expect(client.formats).toEqual(['metadata', 'full']);
+  expect(stores.internalStore.itemOwnerPresent(child, id, 'observed')).toBe(true);
+  expect(await lane.backfillChildren!()).toEqual({ examined: 0, listed: 0, done: true });
+});
+
 test('deferred attachment reads never request a body or part when the operator query excludes its parent', async () => {
   const mail = attachmentMessage('unstarred', NOW.getTime() - DAY);
   mail.payload!.parts![1]!.body = { size: 4, attachmentId: 'fixture-child' };
@@ -311,7 +351,28 @@ test('deferred attachment reads never request a body or part when the operator q
   expect(attachmentIds).toEqual([]);
 });
 
-async function retainedPersonalMail() {
+function seedRetiredBodyBlindOwner(dbPath: string, item: ReturnType<typeof identity>, connectorId: string): void {
+  const db = new Database(dbPath);
+  try {
+    const row = db.query(`
+      SELECT item_pk, sync_run_id FROM items
+      WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND tombstoned = 0
+    `).get(item.provider, item.accountScope, item.providerItemId) as { item_pk: number; sync_run_id: string } | null;
+    if (!row) throw new Error(`Missing stored item ${item.providerItemId} in ${dbPath}`);
+    const now = NOW.toISOString();
+    db.query(`
+      INSERT INTO item_owners (
+        item_pk, connector_id, ownership_kind, first_seen_sync_run_id,
+        last_seen_sync_run_id, first_seen_at, last_seen_at
+      ) VALUES (?, ?, 'observed', ?, ?, ?, ?)
+    `).run(row.item_pk, connectorId, row.sync_run_id, row.sync_run_id, now, now);
+    db.query("INSERT INTO store_totals (name, n) VALUES ('writes', 1) ON CONFLICT(name) DO UPDATE SET n = n + 1").run();
+  } finally {
+    closeSqliteStore(db, { checkpoint: false });
+  }
+}
+
+async function retainedPersonalMail(options: { legacyUnscoped?: boolean; bodyOnlyCode?: boolean } = {}) {
   const dir = tempDir();
   const stores = fileStores(dir);
   const connectedAt = NOW.toISOString();
@@ -329,6 +390,9 @@ async function retainedPersonalMail() {
     return authority.mailPolicyRef()!;
   };
   const mail = message('retained', NOW.getTime() - DAY);
+  if (options.bodyOnlyCode) {
+    mail.payload!.body!.data = Buffer.from('Use 123456. This code expires in 5 minutes.').toString('base64url');
+  }
   const client = fakeClient([mail]);
   const inputs: string[] = [];
   const personal = { ...recordingProvider('local'), provider: 'built-in', modelId: 'fixture-personal', runsOnThisComputer: () => true,
@@ -346,16 +410,16 @@ async function retainedPersonalMail() {
       assertScopeCurrent: () => { authority.assertCurrentMail(ref); },
     } : {}),
   });
-  await lane(approve()).pull({ max_items: 50 });
+  await lane(options.legacyUnscoped ? undefined : approve(), options.bodyOnlyCode ? { OLYMPUS_EMAIL_INGEST_SKIP_OTP: 'false' } : {}).pull({ max_items: 50 });
   expect(stores.internalStore.copyContentState(identity(mail.id))).toMatchObject({ chunks: 1, vectors: 1 });
-  const scope = (store: LocalConnectorStore, ref: MailSourceScopePolicyRef | undefined) => storeEmbeddingScope({
+  const scope = (store: LocalConnectorStore, ref: MailSourceScopePolicyRef | undefined, provider: SourceEmbeddingProvider = privateProvider) => storeEmbeddingScope({
     store, sourceId: 'gmail.email', scopeRef: ref, authority,
     readScope: () => ({ allowed: true, contentAllowed: true }),
-    provider: privateProvider, gmailLiveProcessorVerified: () => true, gmailRetainedAccountScope: () => 'personal',
+    provider, gmailLiveProcessorVerified: () => true, gmailRetainedAccountScope: () => 'personal',
   });
-  const privateSweep = (ref: MailSourceScopePolicyRef | undefined) => {
+  const privateSweep = (ref: MailSourceScopePolicyRef | undefined, provider: SourceEmbeddingProvider = privateProvider) => {
     const store = stores.secureStore;
-    const target = planStoreEmbedding({ store, provider: privateProvider, servedByMeaning: true, scope: scope(store, ref) })!;
+    const target = planStoreEmbedding({ store, provider, servedByMeaning: true, scope: scope(store, ref, provider) })!;
     return withEmbeddingSweep([{
       sourceId: 'gmail.email', corpusId: store.corpusId, cadence: 'continuous', intervalMs: 1_000, freshnessThresholdHours: 1, tasks: [],
     }], () => () => [target])[0]!.tasks[0]!;
@@ -373,7 +437,7 @@ async function retainedPersonalMail() {
     expect(stores.secureStore.searchItems('retained', 5).map(row => row.sourceItem.providerItemId)).toEqual([mail.id]);
     return result.destinations.find(copy => copy.corpusId === stores.secureStore.corpusId);
   };
-  return { ...stores, approve, inputs, move, privateProvider, privateSweep };
+  return { ...stores, dir, mail, approve, inputs, move, privateProvider, privateSweep };
 }
 
 test('the upgraded live pull honors the committed legacy watermark ahead of a single newer store run', async () => {
@@ -398,6 +462,131 @@ test('the upgraded live pull honors the committed legacy watermark ahead of a si
   await lane.pull();
   expect(client.queries[0]).toBe(`after:${watermarkMs / 1_000}`);
   expect(stores.internalStore.itemStoredContent(identity('since-commit'))?.chunkCount).toBe(1);
+});
+
+test.each([1, 2])('a retired v%i body-blind observation cannot authorize Private embedding for an off-device provider', async version => {
+  const f = await retainedPersonalMail({ legacyUnscoped: true, bodyOnlyCode: true });
+  const current = f.approve([{ id: 'Label_1', name: 'Family' }]);
+  const approval = { generation: current.accountGeneration, revision: current.revision };
+  const oldKey = legacyOwnerId(approval);
+  const currentId = gmailCursorConnectorId('personal', approval);
+  const item = identity(f.mail.id);
+  // v1 only confirmed Private copies. v2 could confirm a Personal copy before its move.
+  if (version === 1) await f.move();
+  seedRetiredBodyBlindOwner(join(f.dir, version === 1 ? 'secure.sqlite' : 'internal.sqlite'), item, oldKey);
+  if (version === 2) {
+    expect(f.internalStore.itemMatchesSearchFilters(item.localItemId, 'personal', {
+      observedConnectorId: currentId,
+      previousObservedConnectorId: oldKey,
+    })).toBe(false);
+    await f.move();
+  }
+  expect(f.secureStore.itemOwnerPresent(item, oldKey, 'observed')).toBe(true);
+  expect(f.secureStore.itemOwnerPresent(item, currentId, 'observed')).toBe(false);
+  expect(f.secureStore.copyContentState(item)).toMatchObject({ chunks: 1 });
+  const offDeviceInputs: string[] = [];
+  const offDeviceProvider: SourceEmbeddingProvider = {
+    provider: 'venice',
+    backend: 'cloud',
+    modelId: 'fixture-private-venice',
+    dimension: 2,
+    configHash: 'fixture-private-venice',
+    epochId: 'fixture-private-venice',
+    async embed(batch) {
+      offDeviceInputs.push(...batch.map(entry => entry.text));
+      return batch.map(() => [1, 0]);
+    },
+  };
+  f.secureStore.queueEmbedding([item.localItemId], offDeviceProvider);
+  expect(await f.privateSweep(current, offDeviceProvider).run()).toMatchObject({ counts: { chunks_embedded: 0 } });
+  expect(await f.privateSweep(current, offDeviceProvider).run()).toMatchObject({ counts: { chunks_embedded: 0 } });
+  expect(offDeviceInputs).toEqual([]);
+});
+
+test('an off-device Gmail embedding pass rechecks the live credential witness on every batch and commit', async () => {
+  const dir = tempDir();
+  const stores = fileStores(dir);
+  const connectedAt = NOW.toISOString();
+  const authority = new FileSourceScopeAuthority({
+    registryPath: join(dir, 'handles.json'),
+    readRegistry: () => ({ version: 1, handles: [{
+      handle: 'gmail.personal', provider: 'gmail', accountRole: 'personal', scopes: [],
+      allowedCapabilities: ['gmail.email.sync'], connectedAt,
+    }] }),
+  });
+  const state = authority.mailSnapshot();
+  authority.approveMail({
+    accountGeneration: state.accountGeneration!, expectedRevision: state.revision,
+    scope: { ...defaultMailScopeSelection(), window: 'all' },
+  });
+  const ref = authority.mailPolicyRef()!;
+  const messages = Array.from({ length: 33 }, (_, index) => message(`batch-${String(index).padStart(2, '0')}`, NOW.getTime() - DAY - index * 1_000));
+  await createGmailConnectorStoreSyncHandler({
+    ...stores, account: 'personal', apiClient: fakeClient(messages), credentialBroker: OFFLINE_BROKER, env: {},
+    scope: gmailConnectorScopeFromApproval(authority.assertCurrentMail(ref)),
+    scopeApproval: { generation: ref.accountGeneration, revision: ref.revision },
+  }).pull({ max_items: 50 });
+
+  let verified = true;
+  const dispatchedBatches: number[] = [];
+  const provider: SourceEmbeddingProvider = {
+    provider: 'venice',
+    backend: 'cloud',
+    modelId: 'fixture-venice',
+    dimension: 2,
+    configHash: 'fixture-venice',
+    epochId: 'fixture-venice',
+    async embed(batch) {
+      dispatchedBatches.push(batch.length);
+      return batch.map(() => [1, 0]);
+    },
+  };
+  const scope = storeEmbeddingScope({
+    store: stores.internalStore,
+    sourceId: 'gmail.email',
+    scopeRef: ref,
+    authority,
+    readScope: () => ({ allowed: true, contentAllowed: true }),
+    provider,
+    gmailRetainedAccountScope: () => 'personal',
+    gmailLiveProcessorVerified: () => verified,
+  });
+  expect(scope.allowed).toBe(true);
+  if (!scope.allowed) throw new Error('expected allowed scope');
+
+  await expect(stores.internalStore.embedChunks({
+    ...scopedEmbeddingOptions(scope, provider),
+    onBatchWritten: () => { verified = false; },
+  })).rejects.toThrow(SourceScopeApprovalRequiredError);
+  expect(dispatchedBatches).toEqual([32]);
+  expect(vectors(join(dir, 'internal.sqlite'))).toHaveLength(32);
+
+  // Also verify the commit fence: flipping during an in-flight dispatch rolls back that batch's commit.
+  verified = true;
+  const commitFlipProvider: SourceEmbeddingProvider = {
+    ...provider,
+    async embed(batch) {
+      dispatchedBatches.push(batch.length);
+      verified = false;
+      return batch.map(() => [1, 0]);
+    },
+  };
+  const commitScope = storeEmbeddingScope({
+    store: stores.internalStore,
+    sourceId: 'gmail.email',
+    scopeRef: ref,
+    authority,
+    readScope: () => ({ allowed: true, contentAllowed: true }),
+    provider: commitFlipProvider,
+    gmailRetainedAccountScope: () => 'personal',
+    gmailLiveProcessorVerified: () => verified,
+  });
+  expect(commitScope.allowed).toBe(true);
+  if (!commitScope.allowed) throw new Error('expected allowed scope');
+  await expect(stores.internalStore.embedChunks(scopedEmbeddingOptions(commitScope, commitFlipProvider)))
+    .rejects.toThrow(SourceScopeApprovalRequiredError);
+  expect(dispatchedBatches).toEqual([32, 1]);
+  expect(vectors(join(dir, 'internal.sqlite'))).toHaveLength(32);
 });
 
 test('the Private sweep embeds already queued live mail before retained backlog', async () => {

@@ -317,17 +317,11 @@ export function storeEmbeddingScope(input: {
       ...population, allowed: true,
       bind(provider) {
         if (provider !== input.provider) throw new SourceScopeApprovalRequiredError('The selected mail processor changed before embedding.');
-        // A live acquisition verifies its bearer token. Consume that proof
-        // once per pass, then fence every dispatch and commit on its grant.
-        let verifiedForPass = false;
         return checkedEmbeddingProvider(provider, () => {
           if (account() !== accountScope) throw new SourceScopeApprovalRequiredError('The retained mail belongs to another or unverified account.');
           if (!ref || population.excludeAllEmbeddingHolds) return;
           authority!.assertCurrentMail(ref);
-          if (!verifiedForPass) {
-            if (!input.gmailLiveProcessorVerified?.()) throw new SourceScopeApprovalRequiredError('The connected Gmail credential is awaiting account verification.');
-            verifiedForPass = true;
-          }
+          if (!input.gmailLiveProcessorVerified?.()) throw new SourceScopeApprovalRequiredError('The connected Gmail credential is awaiting account verification.');
         });
       },
     };
