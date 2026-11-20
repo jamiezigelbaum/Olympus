@@ -1078,7 +1078,7 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
   const port = portProbe.port; portProbe.stop(true);
   const env = { PATH: process.env.PATH ?? '', ...environment(dir), HOME: runDir, XDG_CONFIG_HOME: join(runDir, 'c'), XDG_STATE_HOME: join(runDir, 's'), XDG_RUNTIME_DIR: runDir,
     // The arm's file-map setting for the whole engine (front, background and their read workers inherit it); 'on' is the default.
-    ...(options.sqliteMmap && options.sqliteMmap !== 'on' ? { OLYMPUS_SQLITE_MMAP: options.sqliteMmap } : {}),
+    ...(options.sqliteMmap ? { OLYMPUS_SQLITE_MMAP: options.sqliteMmap } : {}),
     OLYMPUS_EMAIL_SOURCE_PORT: String(port), OLYMPUS_WORKER_AUTH_TOKEN: 'synthetic-loop-stall-token',
     OLYMPUS_ENGINE_BACKGROUND_SOCKET: join(runDir, 'background.sock'), OLYMPUS_WORKER_SCHEDULER_ENABLED: 'false',
     OLYMPUS_TIER_SNIFFER_ENABLED: 'false', OLYMPUS_UPDATE_CHECK: 'off', OLYMPUS_BUILT_IN_ANALYST: 'false',
