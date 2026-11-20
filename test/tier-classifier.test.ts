@@ -11,6 +11,7 @@ import type { SourceClassificationSignals } from '../src/core/contracts.ts';
 import {
   SNIFFER_EXCERPT_MAX_CHARS,
   TIER_MAP_REVISION,
+  contentDigestReason,
   classifyContentTier,
   classifyItemTiers,
   type OwnerTierRule,
@@ -168,7 +169,7 @@ describe('per-item owner override', () => {
     expect(decision.decidedBy).toBe('override');
   });
 
-  test.each(['private', 'public'] as const)('Secret findings beat a sticky %s override on a replacement body', (tier) => {
+  test.each(['private', 'public'] as const)('a changed body with a Secret finding waits for the owner under a sticky %s override', (tier) => {
     const options = { override: { kind: 'tier', tier } } as const;
     const clean = classify({ title: 'Notes' }, BENIGN, options);
     expect(clean).toMatchObject({ contentTier: tier, decidedBy: 'override' });
@@ -179,9 +180,12 @@ describe('per-item owner override', () => {
       text, metadataTier: clean.metadataTier, metadataForced: clean.metadataForced, metadataFlagged: clean.metadataFlagged,
     }, options);
     for (const decision of [listing, extraction]) {
-      expect(decision).toMatchObject({ contentTier: 'secrets', decidedBy: 'secret_detector' });
+      expect(decision).toMatchObject({ contentTier: 'secure', decidedBy: 'override' });
       expect(decision.reasons).toContain('content:secret:aws_access_key_id');
     }
+    const confirmed = { override: { ...options.override, confirmedDigest: contentDigestReason(text) } };
+    expect(classify({ title: 'Notes' }, text, confirmed)).toMatchObject({ contentTier: tier, decidedBy: 'override' });
+    expect(classify({ title: 'Notes' }, `${text} updated`, confirmed)).toMatchObject({ contentTier: 'secure' });
   });
 
   test('"not a secret" sends the item back through normal classification', () => {

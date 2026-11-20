@@ -302,9 +302,9 @@ import {
 } from '../x-bookmarks/tier-set.ts';
 import { createParentLabelResolver } from '../connector-store/parent-label.ts';
 import { createUnreadableLocators } from '../connector-store/unreadable-locators.ts';
-import { hiddenProbesByParentIdentity } from '../connector-store/child-visibility.ts';
+import { hiddenProbesByParentIdentity, ledgerReadOffThread } from '../connector-store/child-visibility.ts';
 import { sqliteFilesHealth, startSqliteWalSampler } from './sqlite-wal-sampler.ts';
-import { readPoolDiagnostics, readPoolMemoryCounts, sampleReadPoolMemory, setAskBenchReadPoolSqlDir } from '../connector-store/off-thread-reads.ts';
+import { BACKGROUND_READS, readPoolDiagnostics, readPoolMemoryCounts, sampleReadPoolMemory, setAskBenchReadPoolSqlDir } from '../connector-store/off-thread-reads.ts';
 import { startSqliteCheckpointer } from './sqlite-checkpointer.ts';
 import { setSqliteCheckpointsOffLoop, sqliteFilesForOffLoopCheckpoints } from '../../core/sqlite-store.ts';
 import { tierSnifferPathForLedger } from '../classification/tier-ledger-path.ts';
@@ -6553,6 +6553,11 @@ export async function main(): Promise<void> {
     },
     unreadableFiles: () => unreadableFiles,
     waitingPrivateQuestions: () => localPrivateAnswers?.waitingCount() ?? 0,
+    overrideReviewKinds: async () => {
+      const ledgers = [...new Set(tierScopes().map(scope => scope.ledger))];
+      const kinds = await Promise.all(ledgers.map(ledger => ledgerReadOffThread(ledger, ledger.ownerOverrideReviewKindsSteps(), BACKGROUND_READS)));
+      return [...new Set(kinds.flat())].sort();
+    },
     archives: () => archiveViews.view(),
     sourceImports: () => archiveViews.sourceImports(),
     archiveSources: () => archiveViews.archiveSources(),

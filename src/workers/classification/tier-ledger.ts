@@ -33,11 +33,13 @@ import { assertWritableStoreOpenAllowed } from '../../core/store-write-guard.ts'
 import { tierSetPlannerForLedger } from './installed-tier-classification-registry.ts';
 import {
   NAMES_INPUT_REASON_PREFIX,
+  OWNER_OVERRIDE_SECRET_REVIEW_REASON,
   PERSONAL_FIRST_REASON,
   TIER_KEYS,
   contentHeldForJudgment,
   contentJudgeVerdictReason,
   maxTier,
+  ownerOverrideSecretReview,
   tierRank,
   type ContentTierDecision,
   type ItemTierOverride,
@@ -460,6 +462,18 @@ const LIST_ROUTED_OVERRIDES_SQL = `
         AND i.conversation_key = o.conversation_key AND i.provider_item_id = o.provider_item_id
       WHERE i.routed = 1
       ORDER BY o.provider, o.account_scope, o.conversation_key, o.provider_item_id
+    `;
+
+function pendingOverrideReview(record: TierLedgerRecord | undefined, override: ItemTierOverride | undefined) {
+  if (record?.state !== 'current' || !record.contentRead || override?.kind !== 'tier'
+    || (override.tier !== 'private' && override.tier !== 'public')) return undefined;
+  const review = ownerOverrideSecretReview(record.reasons);
+  return review && review.digest !== override.confirmedDigest ? review : undefined;
+}
+
+const WRITE_INTENT_SQL = `
+      SELECT * FROM tier_write_intents
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
     `;
 
 function routedOverridesFromRows(rows: Array<TierItemRow & { override_json: string }>): Array<{ record: TierLedgerRecord; override: ItemTierOverride }> {
@@ -2179,6 +2193,35 @@ export class TierLedger {
       `).run(...idParams(identity), JSON.stringify(override), this.now().toISOString());
       this.settleRevokedOwnerMove(identity);
     })();
+  }
+
+  ownerOverrideReview(identity: TierLedgerIdentity, record = this.getCurrent(identity), override = this.getOverride(identity)):
+    ReturnType<typeof ownerOverrideSecretReview> {
+    const review = pendingOverrideReview(record, override);
+    return review && !this.writeIntent(identity) ? review : undefined;
+  }
+
+  /** The local dashboard reads only current questions, on its ledger read worker. */
+  *ownerOverrideReviewKindsSteps(): Generator<LedgerRead, string[], unknown> {
+    const kinds = new Set<string>();
+    for (const { record, override } of yield* this.listRoutedOverridesSteps()) {
+      const review = pendingOverrideReview(record, override);
+      if (!review) continue;
+      const intent = yield { sql: WRITE_INTENT_SQL, params: idParams(tierLedgerIdentityOfRecord(record)), mode: 'get' };
+      if (!intent) for (const kind of review.kinds) kinds.add(kind);
+    }
+    return [...kinds];
+  }
+
+  /** Apply an answer only while this exact body is still waiting for the owner. */
+  resolveOwnerOverrideReview(identity: TierLedgerIdentity, digest: string, choice: 'personal' | 'judge'): boolean {
+    return this.db.transaction(() => {
+      const override = this.getOverride(identity);
+      if (override?.kind !== 'tier' || this.ownerOverrideReview(identity)?.digest !== digest) return false;
+      if (choice === 'judge') return this.clearOverride(identity);
+      this.setOverride(identity, { kind: 'tier', tier: 'private', confirmedDigest: digest });
+      return true;
+    }).immediate();
   }
 
   /**
@@ -4343,10 +4386,7 @@ export class TierLedger {
   }
 
   writeIntent(identity: TierLedgerIdentity): TierWriteIntent | undefined {
-    const row = this.db.query(`
-      SELECT * FROM tier_write_intents
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-    `).get(...idParams(identity)) as TierWriteIntentRow | null;
+    const row = this.db.query(WRITE_INTENT_SQL).get(...idParams(identity)) as TierWriteIntentRow | null;
     return row ? writeIntentFromRow(row) : undefined;
   }
 
@@ -5908,6 +5948,7 @@ const STALE_EMBED_HOLD_DECIDED = `EXISTS (
           AND t.state = 'current' AND t.metadata_pending = 0 AND t.content_pending = 0
           AND t.metadata_tier <> 'secrets' AND t.content_tier <> 'secrets'
           AND t.target_metadata_tier IS NULL AND t.target_content_tier IS NULL
+          AND instr(t.reasons_json, '"${OWNER_OVERRIDE_SECRET_REVIEW_REASON}"') = 0
           -- A re-judgment still open on this decision keeps the hold.
           AND NOT (t.rejudge_json IS NOT NULL
             AND json_extract(t.rejudge_json, '$.generation') = t.generation

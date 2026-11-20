@@ -217,13 +217,17 @@ import {
   mediaJudgeId,
   type MediaJudgment,
 } from '../source-index/media-judge.ts';
-import type {
-  SourceIndexCorpusSearchAdapter,
-  SourceIndexCorpusSearchRequest,
-  SourceIndexCorpusMatchCount,
-  SourceIndexCorpusSearchResponse,
-  SourceIndexSearchHit,
-  SourceIndexStoreRelevance,
+import {
+  deliverCorpusSearch,
+  ROUTER_DELIVERS_SEARCH,
+  SEARCH_GRANT_DELIVERY,
+  SEARCH_GRANT_MATCH,
+  type SourceIndexCorpusSearchAdapter,
+  type SourceIndexCorpusSearchRequest,
+  type SourceIndexCorpusMatchCount,
+  type SourceIndexCorpusSearchResponse,
+  type SourceIndexSearchHit,
+  type SourceIndexStoreRelevance,
 } from '../../core/source-index/router.ts';
 import {
   buildSourceIndexStorageProfile,
@@ -2405,6 +2409,8 @@ export interface ConnectorStoreSearchRow {
    * text, and no chunk was read to say where.
    */
   contentMatched?: true;
+  /** The independently matching metadata row of this candidate version. */
+  metadataFallback?: ConnectorStoreSearchRow;
 }
 
 export interface ConnectorStoreScoredSearchRow extends ConnectorStoreSearchRow {
@@ -2422,13 +2428,14 @@ export interface ConnectorStoreKeywordFtsOptions {
   contentOnly?: boolean;
   /** Match only the metadata FTS rows of these candidate versions. */
   metadataCandidates?: SourceItemIdentity[];
+  prepareGrantFallbacks?: boolean;
   locate?: boolean;
   relaxed?: boolean;
   privatePrecision?: boolean;
   /** One lane's item-level group answers; stays on this thread, never sent to the read pool. */
   conceptHitMemo?: ConnectorStoreConceptHitMemo;
   // A tier-checked prefix, before remaining reads or chunk location finish.
-  onPartialRows?: ((rows: readonly ConnectorStoreSearchRow[]) => void) | undefined;
+  onPartialRows?: ((rows: readonly ConnectorStoreSearchRow[], contentOnly?: boolean) => void) | undefined;
 }
 
 type ConnectorStoreConceptHitMemo = Map<string, Map<number, {
@@ -15770,42 +15777,34 @@ export class LocalConnectorStore {
   }
 
   async stillVisibleSearchRowsOffThread<T extends Pick<ConnectorStoreSearchRow, 'sourceItem' | 'chunk' | 'contentMatched'>>(
-    rows: readonly T[], filters?: ConnectorStoreSearchFilters,
+    rows: readonly T[],
   ): Promise<T[]> {
-    return visibilityAwaited(() => this.stillVisibleSearchRowsSteps(rows, filters), this.childVisibilityLane());
+    return visibilityAwaited(() => this.stillVisibleSearchRowsSteps(rows), this.childVisibilityLane());
   }
 
   private *stillVisibleSearchRowsSteps<T extends Pick<ConnectorStoreSearchRow, 'sourceItem' | 'chunk' | 'contentMatched'>>(
-    rows: readonly T[], filters?: ConnectorStoreSearchFilters,
+    rows: readonly T[],
   ): Generator<VisibilityRead, T[], unknown> {
-    const visible = yield* this.tierVisibleRowsSteps(rows, row => row.sourceItem,
+    return yield* this.tierVisibleRowsSteps(rows, row => row.sourceItem,
       row => connectorStoreRowHasContent(row) ? 'content' : 'metadata');
-    return yield* this.keywordGrantVisibleRowsSteps(visible, filters);
   }
 
-  /** Recheck the bounded prefix on this connection when an idle read worker cannot finish its lane. */
-  grantedPartialRows<T extends ConnectorStoreSearchRow>(rows: T[], filters: ConnectorStoreSearchFilters): T[] {
-    return this.closedForPoolReads ? [] : visibilityHere(this.keywordGrantVisibleRowsSteps(rows, filters));
-  }
-
-  /** A body match in a metadata-only scope needs a current grant when its row is emitted. */
-  private *keywordGrantVisibleRowsSteps<T extends Pick<ConnectorStoreSearchRow, 'sourceItem' | 'chunk' | 'contentMatched'>>(
-    rows: T[], filters: ConnectorStoreSearchFilters | undefined,
-  ): Generator<VisibilityRead, T[], unknown> {
-    if (!filters?.metadataOnlyLocatorPathScopes?.length && !filters?.metadataOnlySourceScopeFolderKeys?.length) return rows;
-    const content = rows.filter(connectorStoreRowHasContent);
-    if (content.length === 0) return rows;
+  /** Resolve the serving layer for the bounded set of matched item versions. */
+  searchGrantLayers(
+    hits: readonly SourceIndexSearchHit[], filters: ConnectorStoreSearchFilters | undefined,
+  ): ReadonlyMap<SourceIndexSearchHit, 'metadata' | 'content'> {
+    if (this.closedForPoolReads) return new Map();
     const metadataOnly = connectorStoreMetadataOnlySql(filters, this.onDemandReadsTablePresent);
-    if (!metadataOnly.sql) return rows;
-    const allowed = (yield* this.visibilityStoreRead({
+    const read: StoreRead = {
       mode: 'all',
-      sql: `SELECT candidate.key AS idx FROM json_each(?) candidate CROSS JOIN items i
+      sql: `SELECT candidate.key AS idx, ${metadataOnly.sql} AS names_only
+        FROM json_each(?) candidate CROSS JOIN items i
         WHERE ${FTS_CANDIDATE_IDENTITY_SQL}
-          AND i.tombstoned = 0 AND NOT ${metadataOnly.sql}`,
-      params: [JSON.stringify(content.map(row => row.sourceItem)), ...metadataOnly.params],
-    })) as Array<{ idx: number }>;
-    const served = new Set(allowed.map(row => content[row.idx]));
-    return rows.filter(row => !connectorStoreRowHasContent(row) || served.has(row));
+          AND i.tombstoned = 0`,
+      params: [...metadataOnly.params, JSON.stringify(hits.map(hit => hit.sourceItem))],
+    };
+    const allowed = visibilityHere(this.visibilityStoreRead(read)) as Array<{ idx: number; names_only: number }>;
+    return new Map(allowed.map(row => [hits[row.idx]!, row.names_only ? 'metadata' : 'content']));
   }
 
   private closedForPoolReads = false;
@@ -15949,6 +15948,7 @@ export class LocalConnectorStore {
     // filters themselves are unchanged: this decides how many candidates are
     // looked at, never which of them may be served.
     const selected: ItemRow[] = [];
+    const fallbackRows = new Map<number, ConnectorStoreSearchRow>();
     const seen = new Set<number>();
     let scanned = 0;
     let pageSize = fetchLimit;
@@ -16093,12 +16093,28 @@ export class LocalConnectorStore {
         (row) => (row.chunk_pk === null || row.chunk_pk === undefined ? 'metadata' : 'content'),
       );
       selected.push(...visible);
+      if (ftsOptions.prepareGrantFallbacks && visible.length > 0) {
+        const pageBodies = visible.filter(row => row.chunk_pk != null);
+        if (pageBodies.length > 0) {
+          const metadataCandidates = pageBodies.map(row => searchRowFromItemRow(row).sourceItem);
+          const metadata = yield* this.searchItemsSteps(query, MAX_SEARCH_RESULTS, accountScope, filters, {
+            ...ftsOptions, contentOnly: false, locate: false, onPartialRows: undefined,
+            prepareGrantFallbacks: false, metadataCandidates,
+          });
+          const byVersion = new Map(metadata.rows.map(row => [searchGrantIdentityKey(row.sourceItem), row]));
+          for (const [index, candidate] of metadataCandidates.entries()) {
+            const fallback = byVersion.get(searchGrantIdentityKey(candidate));
+            if (fallback) fallbackRows.set(pageBodies[index]!.item_pk, fallback);
+          }
+        }
+      }
       if (visible.length > 0 && ftsOptions.onPartialRows) {
         const partial = selected.slice(0, limit).map(row => ({
           ...searchRowFromItemRow(row),
           ...(row.chunk_pk != null ? { contentMatched: true as const } : {}),
+          ...(fallbackRows.has(row.item_pk) ? { metadataFallback: fallbackRows.get(row.item_pk)! } : {}),
         }));
-        ftsOptions.onPartialRows(yield* this.keywordGrantVisibleRowsSteps(partial, filters));
+        ftsOptions.onPartialRows(partial, ftsOptions.contentOnly);
       }
       // Only rows the tier filter hid earn another page. A page it hid nothing
       // from was cut by the minimum-signal filter alone, which has always
@@ -16118,7 +16134,8 @@ export class LocalConnectorStore {
       ? new Map<number, ConnectorStoreChunkMatch | undefined>()
       : yield* this.keywordChunkMatchesSteps(kept, spanTerms);
     for (const [index, row] of kept.entries()) {
-      const base = searchRowFromItemRow(row);
+      const fallback = fallbackRows.get(row.item_pk);
+      const base = { ...searchRowFromItemRow(row), ...(fallback ? { metadataFallback: fallback } : {}) };
       if (ftsOptions.locate === false || row.chunk_pk === null || row.chunk_pk === undefined) {
         located.push(row.chunk_pk === null || row.chunk_pk === undefined || ftsOptions.locate !== false ? base : { ...base, contentMatched: true as const });
         locatedRows.push(row);
@@ -18071,13 +18088,14 @@ export interface ConnectorStoreCorpusAdapterOptions {
 function publishPartialRows<T extends ConnectorStoreSearchRow>(
   store: LocalConnectorStore, request: SourceIndexCorpusSearchRequest, rows: readonly T[],
   filters: ConnectorStoreSearchFilters | undefined, score: (row: T) => number, projector?: ConnectorStoreResultProjector,
+  lane: NonNullable<Parameters<NonNullable<SourceIndexCorpusSearchRequest['onPartialResponse']>>[1]> = 'keyword',
 ): void {
   if (!request.onPartialResponse) return;
   const prefix = rows.slice(0, request.maxResults);
-  const hits = (current: T[]) => current.map(row => connectorStoreHitFromRow(store, row, score(row), projector, filters?.locatorPathScope));
-  const currentHits = filters?.metadataOnlyLocatorPathScopes?.length || filters?.metadataOnlySourceScopeFolderKeys?.length
-    ? () => hits(store.grantedPartialRows(prefix, filters)) : undefined;
-  request.onPartialResponse({ hits: hits(prefix), latencyMs: 0, incomplete: true, rawExposed: false }, currentHits);
+  const hits = prefix.map(row => connectorStoreHitFromRow(store, row, score(row), projector, filters?.locatorPathScope));
+  const response = withSearchGrantDelivery(store, filters,
+    { hits, latencyMs: 0, incomplete: true, rawExposed: false }, prefix);
+  request.onPartialResponse(request[ROUTER_DELIVERS_SEARCH] ? response : deliverCorpusSearch([response], request.maxResults), lane);
 }
 
 function partialKeywordRows(
@@ -18085,7 +18103,75 @@ function partialKeywordRows(
   projector?: ConnectorStoreResultProjector,
 ): ConnectorStoreKeywordFtsOptions['onPartialRows'] {
   return request.onPartialResponse
-    ? rows => publishPartialRows(store, request, rows, filters, row => -row.rank, projector) : undefined;
+    ? (rows, contentOnly) => publishPartialRows(store, request, rows, filters, row => -row.rank, projector,
+      contentOnly ? 'keyword_content' : 'keyword') : undefined;
+}
+
+function publishKeywordLane(
+  emit: ConnectorStoreKeywordFtsOptions['onPartialRows'], rows: readonly ConnectorStoreSearchRow[],
+): void {
+  if (!emit) return;
+  emit(rows);
+  emit([], true);
+}
+
+function usesSearchGrants(filters: ConnectorStoreSearchFilters | undefined): boolean {
+  return Boolean(filters?.metadataOnlyLocatorPathScopes?.length || filters?.metadataOnlySourceScopeFolderKeys?.length);
+}
+
+function withSearchGrantDelivery(
+  store: LocalConnectorStore,
+  filters: ConnectorStoreSearchFilters | undefined,
+  response: SourceIndexCorpusSearchResponse,
+  matches: readonly ConnectorStoreSearchRow[],
+): SourceIndexCorpusSearchResponse {
+  if (!usesSearchGrants(filters)) return response;
+  return {
+    ...response,
+    [SEARCH_GRANT_DELIVERY]: {
+      check: hits => store.searchGrantLayers(hits, filters),
+      matches: matches.map(row => ({
+        sourceItem: row.sourceItem,
+        candidateId: `${store.corpusId}:${row.sourceItem.localItemId}`,
+        trustTier: row.trustTier,
+        ...searchGrantMatch(store, row),
+        rawExposed: false,
+      })),
+    },
+  };
+}
+
+function searchGrantMatch(
+  store: LocalConnectorStore,
+  row: ConnectorStoreSearchRow,
+  projection?: Readonly<Record<string, unknown>>,
+): Pick<SourceIndexSearchHit, typeof SEARCH_GRANT_MATCH> {
+  if (!connectorStoreRowHasContent(row)) return {};
+  return {
+    [SEARCH_GRANT_MATCH]: row.metadataFallback
+      ? { metadataFallback: { ...projection, ...connectorStoreHitFromRow(store, row.metadataFallback, -row.metadataFallback.rank) } }
+      : {},
+  };
+}
+
+function searchGrantIdentityKey(identity: SourceItemIdentity): string {
+  return JSON.stringify([identity.provider, identity.accountScope, identity.providerItemId,
+    identity.providerConversationId, identity.localItemId, identity.sourceVersion]);
+}
+
+async function withVectorMetadataFallbacks<T extends ConnectorStoreSearchRow>(
+  store: LocalConnectorStore, request: SourceIndexCorpusSearchRequest, rows: readonly T[],
+  accountScope: string | undefined, filters: ConnectorStoreSearchFilters | undefined,
+): Promise<T[]> {
+  if (!usesSearchGrants(filters) || rows.length === 0) return [...rows];
+  const metadata = await store.searchItemsDetailedOffThread(request.query, MAX_SEARCH_RESULTS, accountScope, filters, {
+    prefix: false, locate: false, metadataCandidates: rows.map(row => row.sourceItem),
+  }, request.deadlineAtMs !== undefined ? { deadlineAtMs: request.deadlineAtMs } : {});
+  const byVersion = new Map(metadata.rows.map(row => [searchGrantIdentityKey(row.sourceItem), row]));
+  return rows.map(row => {
+    const metadataFallback = byVersion.get(searchGrantIdentityKey(row.sourceItem));
+    return metadataFallback ? { ...row, metadataFallback } : row;
+  });
 }
 
 export function createConnectorStoreCorpusAdapter(
@@ -18116,16 +18202,18 @@ export function createConnectorStoreCorpusAdapter(
 
     if (!embeddingProvider || useHybrid !== 'hybrid' || semanticSkippedReason) return (async (): Promise<SourceIndexCorpusSearchResponse> => {
       const markStage = startStoreStageClock(stages);
+      const emitPartial = partialKeywordRows(store, request, filters, options.resultProjector);
       let keywordLane = await connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters,
-        { onPartialRows: partialKeywordRows(store, request, filters, options.resultProjector) }, request.deadlineAtMs);
+        { onPartialRows: emitPartial }, request.deadlineAtMs);
       markStage?.('keyword_lane_ms');
       keywordLane = await relaxEmptyLocalKeywordLane(store, request.query, request.maxResults, options.accountScope, filters,
         keywordLane, options.localKeywordFallback, {}, request.deadlineAtMs);
+      publishKeywordLane(emitPartial, keywordLane.rows);
       markStage?.('keyword_relaxation_ms');
       let recencyCut = false;
       const recencyRows = await chatRecencyLaneRows(store, options.accountScope, filters, request.deadlineAtMs, () => { recencyCut = true; });
       markStage?.('recency_read_ms');
-      keywordLane = (await revalidateSearchLanes(store, keywordLane, [], filters)).keyword;
+      keywordLane = (await refreshSearchTierVisibility(store, keywordLane, [])).keyword;
       markStage?.('keyword_revalidation_ms');
       const rows = keywordLane.rows;
       if (recencyRows.length === 0) {
@@ -18151,7 +18239,7 @@ export function createConnectorStoreCorpusAdapter(
           rawExposed: false,
         };
         markStage?.('finalize_ms');
-        return response;
+        return withSearchGrantDelivery(store, filters, response, keywordLane.allRows);
       }
       const lanes = [
         { name: 'keyword', items: rows },
@@ -18200,7 +18288,7 @@ export function createConnectorStoreCorpusAdapter(
         rawExposed: false,
       };
       markStage?.('finalize_ms');
-      return response;
+      return withSearchGrantDelivery(store, filters, response, keywordLane.allRows);
     })();
 
     return hybridConnectorStoreSearch(
@@ -18266,7 +18354,7 @@ export function createConnectorStoreCorpusAdapter(
       filters,
       request.deadlineAtMs,
     );
-    return {
+    const response: SourceIndexCorpusSearchResponse = {
       hits: lane.rows.map((row) => connectorStoreHitFromRow(
         store,
         row,
@@ -18289,6 +18377,8 @@ export function createConnectorStoreCorpusAdapter(
       matchCount: none,
       rawExposed: false,
     };
+    const pending = withSearchGrantDelivery(store, filters, response, []);
+    return request[ROUTER_DELIVERS_SEARCH] ? pending : deliverCorpusSearch([pending]);
   };
   // Metadata-only matching (router.ts metadataMatches): the items that match
   // the query, lexically or above the semantic relevance bar, as identity-only
@@ -18301,7 +18391,8 @@ export function createConnectorStoreCorpusAdapter(
       && (options.retrievalMode ?? 'hybrid') === 'hybrid'
       && (store.trustDomain !== 'secure_local' || isApprovedSecureSourceEmbeddingProvider(embeddingProvider))
       && store.vectorLaneServable(embeddingProvider.modelId);
-    const ftsOptions = { ...(hybrid ? { prefix: false } : {}), locate: false, onPartialRows: partialKeywordRows(store, request, filters) };
+    const emitPartial = partialKeywordRows(store, request, filters);
+    const ftsOptions = { ...(hybrid ? { prefix: false } : {}), locate: false, onPartialRows: emitPartial };
     // The words alone: the same keyword lane a hybrid match runs, without the query embedding.
     const meaningLane = hybrid && request.context.lexicalOnly !== true;
     const readKeywordLane = await relaxEmptyLocalKeywordLane(
@@ -18309,6 +18400,7 @@ export function createConnectorStoreCorpusAdapter(
       await connectorStoreKeywordLaneRows(store, request.query, maxResults, options.accountScope, filters, ftsOptions, request.deadlineAtMs),
       options.localKeywordFallback, ftsOptions, request.deadlineAtMs,
     );
+    publishKeywordLane(emitPartial, readKeywordLane.rows);
     const semanticRows: ConnectorStoreSearchRow[] = [];
     // A semantic lane that should have run and did not (query embedding
     // outage, vectors unreadable or of the wrong width, the deadline): what
@@ -18327,18 +18419,17 @@ export function createConnectorStoreCorpusAdapter(
           { locate: false },
         );
         if (lane.skippedReason !== undefined) incomplete = true;
-        for (const row of lane.rows) {
-          if (row.bestCosine < bar) continue;
-          semanticRows.push(row);
-        }
+        const rows = lane.rows.filter(row => row.bestCosine >= bar);
+        const matches = await withVectorMetadataFallbacks(store, request, rows, options.accountScope, filters);
+        semanticRows.push(...matches);
+        publishPartialRows(store, request, matches, filters, row => -row.rank, undefined, 'vector');
       }
     }
-    // Checked again after the last read, right before the hits and counts go out.
-    const { keyword: keywordLane, vectors } = await revalidateSearchLanes(store, readKeywordLane, semanticRows, filters);
+    const { keyword: keywordLane, vectors } = await refreshSearchTierVisibility(store, readKeywordLane, semanticRows);
     const visibleSemanticRows = vectors.filter(row => !keywordLane.matchedItemIds.has(row.sourceItem.localItemId));
     const rows: ConnectorStoreSearchRow[] = [...keywordLane.rows, ...visibleSemanticRows];
     const semanticOnly = visibleSemanticRows.length;
-    return {
+    return withSearchGrantDelivery(store, filters, {
       hits: rows.slice(0, maxResults).map((row) => connectorStoreHitFromRow(store, row, -row.rank)),
       latencyMs: Date.now() - startedAt,
       matchCount: {
@@ -18348,20 +18439,24 @@ export function createConnectorStoreCorpusAdapter(
       },
       ...(incomplete ? { incomplete: true } : {}),
       rawExposed: false,
-    };
+    }, [...keywordLane.allRows, ...visibleSemanticRows]);
   };
   const expanded: SourceIndexCorpusSearchAdapter = (request) => {
     const timing = beginSourceAnswerStoreTiming();
     assertConnectorStoreCorpusRequest(store, request);
     const response = withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), () => adapter(request, timing?.stages), store);
-    return timing ? response.then((result) => {
-      timing.finish();
-      return result;
-    }) : response;
+    if (!timing && request[ROUTER_DELIVERS_SEARCH]) return response;
+    return response.then(result => {
+      timing?.finish();
+      return request[ROUTER_DELIVERS_SEARCH] ? result : deliverCorpusSearch([result]);
+    });
   };
   expanded.metadataMatches = (request) => {
     assertConnectorStoreCorpusRequest(store, request);
-    return withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), () => metadataMatches(request), store);
+    return withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), async () => {
+      const response = await metadataMatches(request);
+      return request[ROUTER_DELIVERS_SEARCH] ? response : deliverCorpusSearch([response]);
+    }, store);
   };
   expanded.selectedItemServable = (sourceItem) => store.selectedItemServable(sourceItem, options.accountScope, filters);
   expanded.prepareKeywords = async (query) => {
@@ -18416,7 +18511,8 @@ async function chatRecencyLaneRows(
   // without one, it held the whole lane past the router's cut and the keyword
   // rows already read were dropped with it (#1305). Busy, it is left out and
   // its audit says so, so the answer names the source (#1460).
-  return store.recentItemsOffThread(CHAT_RECENCY_LANE_LIMIT, accountScope, filters, deadlineAtMs, onCutShort);
+  const rows = await store.recentItemsOffThread(CHAT_RECENCY_LANE_LIMIT, accountScope, filters, deadlineAtMs, onCutShort);
+  return rows.map(row => ({ ...row, contentMatched: true }));
 }
 
 function connectorStoreHitFromRow(
@@ -18440,6 +18536,7 @@ function connectorStoreHitFromRow(
   });
   return {
     ...(projection ?? {}),
+    ...searchGrantMatch(store, row, projection),
     sourceItem: row.sourceItem,
     provenance: provenanceFromSearchRow(store.corpusId, row, store.personCitationName(row)),
     candidateId: `${store.corpusId}:${row.sourceItem.localItemId}`,
@@ -18545,15 +18642,15 @@ async function hybridConnectorStoreSearch(
   // lane the remainder of the budget, and it missed the deadline on every
   // question (Sparta 2026-11-10, #1242).
   const markStage = startStoreStageClock(stages);
+  const emitPartial = partialKeywordRows(store, request, filters, resultProjector);
   const keywordWork = (async () => {
     const laneStartedAt = stages ? performance.now() : 0;
     const keywordStartedAt = Date.now();
-    const emitPartial = partialKeywordRows(store, request, filters, resultProjector);
     const lane = await connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false, onPartialRows: emitPartial }, request.deadlineAtMs);
     const baseline = keywordAlternatives(request.query)?.size
       ? lane.baseline ?? await withKeywordExpansionDisabled(() => connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, {prefix:false}, request.deadlineAtMs))
       : undefined;
-    if (emitPartial) emitPartial(await store.stillVisibleSearchRowsOffThread(lane.rows, filters));
+    publishKeywordLane(emitPartial, lane.rows);
     if (stages) stages.keyword_lane_ms = performance.now() - laneStartedAt;
     return { lane, baseline, elapsedMs: Date.now() - keywordStartedAt };
   })();
@@ -18569,13 +18666,13 @@ async function hybridConnectorStoreSearch(
       request.deadlineAtMs,
     );
     const bar = semanticRelevanceBarFor(provider.modelId, semanticRelevanceBar);
-    const rows = bar === undefined ? lane.rows : lane.rows.filter(row => row.bestCosine >= bar);
-    if (request.onPartialResponse) {
-      const visible = await store.stillVisibleSearchRowsOffThread(rows, filters);
-      publishPartialRows(store, request, visible, filters, row => row.bestCosine, resultProjector);
-    }
+    const vetted = bar === undefined ? [] : lane.rows.filter(row => row.bestCosine >= bar);
+    const rows = await withVectorMetadataFallbacks(store, request, vetted, accountScope, filters);
+    publishPartialRows(store, request, rows, filters, row => row.bestCosine, resultProjector, 'vector');
+    const byVersion = new Map(rows.map(row => [searchGrantIdentityKey(row.sourceItem), row]));
     if (stages) stages.vector_lane_ms = performance.now() - laneStartedAt;
-    return { lane, elapsedMs: Date.now() - vectorStartedAt };
+    return { lane: { ...lane, rows: lane.rows.map(row => byVersion.get(searchGrantIdentityKey(row.sourceItem)) ?? row) },
+      elapsedMs: Date.now() - vectorStartedAt };
   })();
   const [keywordResult, vectorResult] = await Promise.all([keywordWork, vectorWork]);
   markStage?.('join_wait_ms');
@@ -18609,12 +18706,13 @@ async function hybridConnectorStoreSearch(
   // The relaxed retry also counts toward the existing keyword lane audit.
   const relaxStartedAt = Date.now();
   keywordLane = await relaxEmptyLocalKeywordLane(store, request.query, laneLimit, accountScope, filters, keywordLane, localKeywordFallback, {}, request.deadlineAtMs);
+  if (keywordLane !== keywordResult.lane) publishKeywordLane(emitPartial, keywordLane.rows);
   keywordElapsedMs += Date.now() - relaxStartedAt;
   markStage?.('keyword_relaxation_ms');
   let recencyCut = false;
   const recencyRows = await chatRecencyLaneRows(store, accountScope, filters, request.deadlineAtMs, () => { recencyCut = true; });
   markStage?.('recency_read_ms');
-  const checked = await revalidateSearchLanes(store, keywordLane, vectorLane.rows, filters);
+  const checked = await refreshSearchTierVisibility(store, keywordLane, vectorLane.rows);
   keywordLane = checked.keyword;
   markStage?.('keyword_revalidation_ms');
   const scoredVectorRows = checked.vectors;
@@ -18739,7 +18837,8 @@ async function hybridConnectorStoreSearch(
     rawExposed: false,
   };
   markStage?.('finalize_ms');
-  return response;
+  return withSearchGrantDelivery(store, filters, response,
+    gateArmed ? [...keywordLane.allRows, ...vectorRows] : keywordLane.allRows);
 }
 
 // Lexical matches always count. A vector row counts only when a relevance
@@ -18811,7 +18910,6 @@ function normalizeSemanticRelevanceBar(value: number | undefined): number | unde
 type ConnectorStoreKeywordLane = {
   rows: ConnectorStoreSearchRow[];
   matchCount: SourceIndexCorpusMatchCount;
-  readMetadataMatches?: (items: SourceItemIdentity[]) => Promise<ConnectorStoreKeywordSearch>;
   matchedItemIds: ReadonlySet<string>;
   completeItemIds: ReadonlySet<string>;
   /** The plain search's bm25 leader when it is a partial, title-only match: it keeps the lead among partial matches. */
@@ -18836,7 +18934,11 @@ async function connectorStoreKeywordLaneRows(
   ftsOptions: ConnectorStoreKeywordFtsOptions = {},
   deadlineAtMs?: number,
 ): Promise<ConnectorStoreKeywordLane> {
-  ftsOptions = { ...ftsOptions, conceptHitMemo: ftsOptions.conceptHitMemo ?? new Map() };
+  ftsOptions = {
+    ...ftsOptions,
+    conceptHitMemo: ftsOptions.conceptHitMemo ?? new Map(),
+    prepareGrantFallbacks: usesSearchGrants(filters),
+  };
   const pool = deadlineAtMs !== undefined ? { deadlineAtMs } : {};
   const plain = await store.searchItemsDetailedOffThread(query, MAX_SEARCH_RESULTS, accountScope, filters, ftsOptions, pool);
   const rows = plain.rows;
@@ -18897,7 +18999,7 @@ async function connectorStoreKeywordLaneRows(
   const baseline = keywordExpansionDisabled() || ftsOptions.relaxed || !keywordExpansionChangesSearch(query, ftsOptions)
     ? undefined
     : await withKeywordExpansionDisabled(
-      () => connectorStoreKeywordLaneRows(store,query,limit,accountScope,filters,ftsOptions,deadlineAtMs),
+      () => connectorStoreKeywordLaneRows(store,query,limit,accountScope,filters,{ ...ftsOptions, onPartialRows: undefined },deadlineAtMs),
     );
   const enriched = new Map(ordered.map(row=>[row.sourceItem.localItemId,row]));
   const allRows = baseline
@@ -18914,10 +19016,6 @@ async function connectorStoreKeywordLaneRows(
       saturated: plain.saturated || content.saturated || (baseline?.matchCount.saturated ?? false),
       secureMatchedItems: allRows.filter(connectorStoreRowIsSecureTier).length,
     },
-    ...(filters?.metadataOnlyLocatorPathScopes?.length || filters?.metadataOnlySourceScopeFolderKeys?.length ? {
-      readMetadataMatches: (items: SourceItemIdentity[]) => store.searchItemsDetailedOffThread(query, MAX_SEARCH_RESULTS, accountScope, filters,
-        { ...ftsOptions, locate: false, metadataCandidates: items, onPartialRows: undefined }, pool),
-    } : {}),
     matchedItemIds: allIds,
     completeItemIds: new Set([...complete, ...(baseline?.completeItemIds ?? [])]),
     ...((baseline?.nameLeaderItemId ?? nameLeader) !== undefined ? { nameLeaderItemId: (baseline?.nameLeaderItemId ?? nameLeader)! } : {}),
@@ -18965,47 +19063,24 @@ function keywordExpansionChangesSearch(query: string, ftsOptions: ConnectorStore
   return shape() !== withKeywordExpansionDisabled(shape);
 }
 
-/** Check both lanes in one visibility pass. A withdrawn keyword candidate can still match on its metadata row. */
-async function revalidateSearchLanes<V extends ConnectorStoreSearchRow>(
-  store: LocalConnectorStore, lane: ConnectorStoreKeywordLane, vectors: readonly V[], filters: ConnectorStoreSearchFilters | undefined,
+/** Refresh tier and child visibility after the lane's store reads. */
+async function refreshSearchTierVisibility<V extends ConnectorStoreSearchRow>(
+  store: LocalConnectorStore, lane: ConnectorStoreKeywordLane, vectors: readonly V[],
 ): Promise<{ keyword: ConnectorStoreKeywordLane; vectors: V[] }> {
   const candidates = [...lane.allRows, ...vectors];
-  let visible = new Set(await store.stillVisibleSearchRowsOffThread(candidates, filters));
+  const visible = new Set(await store.stillVisibleSearchRowsOffThread(candidates));
   if (visible.size === candidates.length) return { keyword: lane, vectors: [...vectors] };
-
-  const withdrawn = lane.allRows.filter(row => !visible.has(row) && connectorStoreRowHasContent(row));
-  const metadata = withdrawn.length ? await lane.readMetadataMatches?.(withdrawn.map(row => row.sourceItem)) : undefined;
-  if (metadata) {
-    visible = new Set(await store.stillVisibleSearchRowsOffThread([...candidates, ...metadata.rows], filters));
-  }
   const retained = lane.allRows.filter(row => visible.has(row));
   const served = new Set(retained.map(row => row.sourceItem.localItemId));
-  const complete = new Set([...lane.completeItemIds].filter(id => served.has(id)));
-  const shares = new Map([...(lane.conceptShare ?? [])].filter(([id]) => served.has(id)));
-  if (metadata) {
-    const { rows, concepts } = metadata;
-    for (const row of rows) {
-      const id = row.sourceItem.localItemId;
-      if (!visible.has(row) || served.has(id)) continue;
-      retained.push(row);
-      served.add(id);
-      const total = concepts.total;
-      const matched = concepts.matched.get(id) ?? 0;
-      if (total > 0) {
-        shares.set(id, matched / total);
-        if (matched >= total) complete.add(id);
-      }
-    }
-  }
   return {
     vectors: vectors.filter(row => visible.has(row)),
     keyword: {
       rows: retained.slice(0, lane.rows.length),
       allRows: retained,
       matchedItemIds: served,
-      completeItemIds: complete,
+      completeItemIds: new Set([...lane.completeItemIds].filter(id => served.has(id))),
       ...(lane.nameLeaderItemId !== undefined && served.has(lane.nameLeaderItemId) ? { nameLeaderItemId: lane.nameLeaderItemId } : {}),
-      conceptShare: shares,
+      conceptShare: new Map([...(lane.conceptShare ?? [])].filter(([id]) => served.has(id))),
       matchCount: {
         matchedItems: retained.length,
         contentMatchedItems: retained.filter(connectorStoreRowHasContent).length,

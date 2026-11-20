@@ -628,6 +628,101 @@ describe('read on demand', () => {
     expect(response.matchingCandidateIds).toEqual([]);
   });
 
+  test('uncalibrated vector neighbours do not become timeout matches or readWide ids', async () => {
+    const { store, filters, request } = await searchableGrantFixture();
+    const provider: SourceEmbeddingProvider = { provider: 'built-in', backend: 'local', modelId: 'test-uncalibrated', dimension: 2,
+      configHash: '1', epochId: '1', async embed(inputs) { return inputs.map(() => [1, 0]); } };
+    await store.embedChunks({ provider });
+    const adapter = createConnectorStoreCorpusAdapter({ store, filters, embeddingProvider: provider });
+    spyOn(store, 'searchItemsDetailedOffThread').mockImplementationOnce(() => new Promise(() => {}));
+    const clock = createTestClock();
+    let published = false;
+    const routed = routeSourceIndexSearch({
+      registry: buildSourceIndexCorpusRegistry([request.corpus]),
+      adapters: {
+        [store.corpusId]: corpusRequest => adapter({
+          ...corpusRequest,
+          onPartialResponse(response, lane) {
+            published = true;
+            corpusRequest.onPartialResponse?.(response, lane);
+          },
+        }),
+      },
+      laneClock: clock, request: { ...request, query: 'unrelatedquery', readWide: true },
+    });
+    await waitFor(() => published);
+    await clock.advance(20_000);
+    const response = await routed;
+    expect(response.skippedCorpora[0]?.reason).toBe('lane_timeout');
+    expect(response.hits).toEqual([]);
+    expect(response.matchingCandidateIds).toEqual([]);
+    expect(response.matchCounts?.[0]).toMatchObject({ matchedItems: 0, contentMatchedItems: 0, saturated: true });
+  });
+
+  test.each(['quartzneedle', 'orchard'] as const)('a grant revoked after one corpus completes revalidates routed hits, counts and readWide matches (%s)', async query => {
+    const { store, filters, request, revoke } = await searchableGrantFixture();
+    const adapter = createConnectorStoreCorpusAdapter({ store, filters,
+      resultProjector: { project: ({ sourceItem }) => ({ locator: { id: sourceItem.localItemId } }) },
+    });
+    const other = { ...request.corpus, corpusId: 'internal.fixture.slow' };
+    const { promise: completed, resolve: complete } = Promise.withResolvers<void>();
+    const response = await routeSourceIndexSearch({
+      registry: buildSourceIndexCorpusRegistry([request.corpus, other]),
+      adapters: {
+        [store.corpusId]: async corpusRequest => {
+          const result = await adapter(corpusRequest);
+          expect(result.hits).toHaveLength(1);
+          complete();
+          return result;
+        },
+        [other.corpusId]: async () => {
+          await completed;
+          revoke();
+          return { hits: [], latencyMs: 0, rawExposed: false };
+        },
+      },
+      request: { ...request, query, readWide: true },
+    });
+    const titleMatches = query === 'orchard';
+    expect(response.hits.map(hit => hit.sourceItem.providerItemId)).toEqual(titleMatches ? ['report'] : []);
+    if (titleMatches) expect(response.hits[0]).toMatchObject({ locator: { id: 'personal:report' } });
+    expect(response.hits[0]?.provenance?.chunk).toBeUndefined();
+    expect(response.matchingCandidateIds).toHaveLength(titleMatches ? 1 : 0);
+    expect(response.matchCounts?.[0]).toMatchObject({ matchedItems: titleMatches ? 1 : 0, contentMatchedItems: 0 });
+  });
+
+  test.each(['same-version title', 'replacement version'] as const)('a timeout recovers a revoked body match only from an independent same-version title (%s)', async version => {
+    const { store, filters, request, revoke, sync } = await searchableGrantFixture();
+    const read = store.searchItemsDetailedOffThread.bind(store);
+    let stalled = false;
+    spyOn(store, 'searchItemsDetailedOffThread').mockImplementationOnce(async (...args) => {
+      const page = await read(...args);
+      expect(page.rows[0]?.chunk).toBeDefined();
+      revoke();
+      if (version === 'replacement version') {
+        await sync('v2', 'different contents');
+        store.grantOnDemandRead('personal:report', 'v2');
+      }
+      stalled = true;
+      return new Promise(() => {});
+    });
+    const clock = createTestClock();
+    const routed = routeSourceIndexSearch({
+      registry: buildSourceIndexCorpusRegistry([request.corpus]),
+      adapters: { [store.corpusId]: createConnectorStoreCorpusAdapter({ store, filters }) },
+      laneClock: clock, request: { ...request, query: 'orchard', readWide: true },
+    });
+    await waitFor(() => stalled);
+    await clock.advance(20_000);
+    const response = await routed;
+    expect(response.skippedCorpora[0]?.reason).toBe('lane_timeout');
+    const sameVersion = version === 'same-version title';
+    expect(response.hits.map(hit => hit.sourceItem.providerItemId)).toEqual(sameVersion ? ['report'] : []);
+    expect(response.hits[0]?.provenance?.chunk).toBeUndefined();
+    expect(response.matchingCandidateIds).toHaveLength(sameVersion ? 1 : 0);
+    expect(response.matchCounts?.[0]).toMatchObject({ matchedItems: sameVersion ? 1 : 0, contentMatchedItems: 0, saturated: true });
+  });
+
   test('a replacement version grant cannot release an earlier body match', async () => {
     const { store, filters, request, sync } = await searchableGrantFixture();
     const adapter = createConnectorStoreCorpusAdapter({ store, filters });

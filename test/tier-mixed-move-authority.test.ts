@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from 'bun:test';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { clearInstalledTierClassification, configureInstalledTierClassification } from '../src/workers/classification/installed-tier-classification.ts';
 import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
@@ -70,6 +71,43 @@ for (const checkpoint of ['before copy', 'after reopening a verified receipt', '
       { corpusId: CORPORA.secure_local, layers: 'content' },
     ]);
     expect(fixture.stores.secure_local!.localContent(localId('orchard'))?.chunks.join('')).toBe(body);
+    expect(fixture.stores.internal!.exportItemCopy(identity)?.chunks).toEqual([]);
+    expect(fixture.stores.public_safe?.exportItemCopy(identity)).toBeUndefined();
+  });
+}
+
+for (const phase of ['before staging', 'beforeCopy', 'beforeFlip'] as const) {
+  test(`unresolved owner policy preserves a mixed move's body raise ${phase}`, async () => {
+    const tmp = tempDir();
+    const fixture = openTierFixture(tmp.dir, { embed: false });
+    cleanup.push(() => { fixture.close(); tmp.cleanup(); });
+    const identity = identityOf('orchard');
+    const text = 'Orchard inventory and planting notes.';
+    const target = { metadataTier: 'public', contentTier: 'secure' } as const;
+    const decision = { ...classifyItemTiers({ signals: { title: 'Inventory' }, text }), ...target };
+    await fixture.set.sync(fixtureConnector(() => [{ id: identity.providerItemId, name: 'Inventory', text }]),
+      { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    const path = join(tmp.dir, 'tier-rules.json');
+    configureInstalledTierClassification({ env: { OLYMPUS_TIER_RULES_PATH: path } });
+    const makePolicyUnavailable = () => writeFileSync(path, '{');
+    if (phase === 'before staging') makePolicyUnavailable();
+    expect(fixture.ledger.recordRoutedPlacement(identity, decision, fixture.set.placementFor(decision)).outcome).toBe('queued_move');
+    const generation = fixture.ledger.getCurrent(identity)!.generation;
+
+    await expect(moveTieredItem({ set: fixture.set, identity, target, expectedGeneration: generation,
+      ...(phase === 'before staging' ? {} : { [phase]: makePolicyUnavailable }),
+    })).rejects.toMatchObject({ code: 'rule_policy_unavailable' });
+
+    const retained = { metadataTier: 'private', contentTier: 'secure' } as const;
+    expect(fixture.ledger.getCurrent(identity)).toMatchObject({
+      generation: generation + 1, state: 'moving', targetMetadataTier: retained.metadataTier, targetContentTier: retained.contentTier,
+    });
+    await moveTieredItem({ set: fixture.set, identity, target: retained, expectedGeneration: generation + 1 });
+    expect(fixture.ledger.copies(identity).filter(copy => copy.state === 'current')).toMatchObject([
+      { corpusId: CORPORA.internal, layers: 'metadata' },
+      { corpusId: CORPORA.secure_local, layers: 'content' },
+    ]);
+    expect(fixture.stores.secure_local!.localContent(localId('orchard'))?.chunks.join('')).toBe(text);
     expect(fixture.stores.internal!.exportItemCopy(identity)?.chunks).toEqual([]);
     expect(fixture.stores.public_safe?.exportItemCopy(identity)).toBeUndefined();
   });

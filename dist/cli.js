@@ -40910,7 +40910,7 @@ function arrivalOrderedSniffer(sniffer, newArrival) {
   };
 }
 function contentHeldForJudgment(decision) {
-  return decision.contentPending;
+  return decision.contentPending || decision.reasons?.includes(OWNER_OVERRIDE_SECRET_REVIEW_REASON) === true;
 }
 function heldUntilJudged(reasons) {
   return reasons?.includes(HELD_UNTIL_JUDGED_REASON) === true;
@@ -40918,13 +40918,26 @@ function heldUntilJudged(reasons) {
 function contentDigestReason(text) {
   return `content:sha256:${createHash15("sha256").update(text.trim()).digest("hex")}`;
 }
+function ownerConfirmedSecretFinding(override, text) {
+  return override?.kind === "tier" && (override.tier === "private" || override.tier === "public") && override.confirmedDigest !== undefined && override.confirmedDigest === contentDigestReason(text);
+}
+function personalOverrideAllowsText(override, text) {
+  return override?.kind === "tier" && (override.tier === "private" || override.tier === "public") && (ownerConfirmedSecretFinding(override, text) || contentSecretReasons(text).length === 0);
+}
+function ownerOverrideSecretReview(reasons) {
+  if (!reasons.includes(OWNER_OVERRIDE_SECRET_REVIEW_REASON))
+    return;
+  const digest = reasons.find((reason) => reason.startsWith("content:sha256:"));
+  const kinds = reasons.filter((reason) => reason.startsWith("content:secret:")).map((reason) => reason.slice("content:secret:".length));
+  return digest && kinds.length > 0 ? { digest, kinds } : undefined;
+}
 function contentJudgeVerdictReason(reason, tier, digest) {
   return `content:judge_verdict:${tier}:${createHash15("sha256").update(JSON.stringify([reason, digest])).digest("hex")}`;
 }
 function hasContentJudgeVerdict(reasons, tier, digest) {
   return reasons.some((reason) => reason.startsWith("content:sniffer:") && (!reason.includes(":rule:") || reason.includes(":rule:duplicate_model:")) && !reason.includes(":fail_safe:") && !reason.endsWith(":fail_safe") && !reason.includes(":injection:") && !reason.endsWith(":undecided") && !reason.endsWith(":unresolved:0.00") && !reason.endsWith(":union:decision:failed") && reasons.includes(contentJudgeVerdictReason(reason, tier, digest)));
 }
-function personalContentAuthorized(evidence, text, notSecret) {
+function personalContentAuthorized(evidence, text, notSecret, override) {
   if (!evidence.contentRead || evidence.contentPending)
     return false;
   const { reasons } = evidence;
@@ -40937,7 +40950,7 @@ function personalContentAuthorized(evidence, text, notSecret) {
   const trivialSettled = trivial !== undefined && reasons.includes(`content:rule:${trivial}`);
   if (!ownerDecided && !trivialSettled && !hasContentJudgeVerdict(reasons, "private", digest))
     return false;
-  return notSecret && reasons.includes("override:item:not_secret") || contentSecretReasons(text).length === 0;
+  return ownerDecided && reasons.includes(OWNER_OVERRIDE_SECRET_CONFIRMED_REASON) && ownerConfirmedSecretFinding(override, text) || notSecret && reasons.includes("override:item:not_secret") || contentSecretReasons(text).length === 0;
 }
 function contentNamesReason(names, parentContext) {
   const parts = [names.title, names.path, names.sender, parentContext].map((part) => part?.trim() ?? "");
@@ -41080,12 +41093,15 @@ function classifyItemTiersWithPublic(input, options) {
     const personal = tier === "private" || tier === "public";
     const findings = text !== undefined && personal ? contentSecretReasons(text) : [];
     const stillUnread = personal && input.heldSecret === true && !text?.trim();
+    const confirmed = text !== undefined && ownerConfirmedSecretFinding(options.override, text);
+    const review = findings.length > 0 && !confirmed;
+    const staysSecret = review && input.heldSecret === true;
     return {
       ...base,
-      metadataTier: tier,
-      contentTier: findings.length > 0 ? "secrets" : tier,
-      decidedBy: findings.length > 0 ? "secret_detector" : "override",
-      reasons: findings.length > 0 ? findings : [`override:item:${tier}`, ...heldMark(holdUntilJudged, tier)],
+      metadataTier: review && !staysSecret ? "secure" : tier,
+      contentTier: staysSecret ? "secrets" : review ? "secure" : tier,
+      decidedBy: staysSecret ? "secret_detector" : "override",
+      reasons: staysSecret ? findings : ownerOverrideReasons(tier, holdUntilJudged, findings, confirmed),
       state: stillUnread ? "pending" : "current",
       contentRead: !stillUnread,
       metadataPending: false,
@@ -41160,16 +41176,17 @@ function classifyContentTier(input, options = {}) {
     const tier = options.retirePublic && options.override.tier === "public" ? "private" : options.override.tier;
     const lower = tier === "private" || tier === "public";
     const findings = lower ? contentSecretReasons(input.text) : [];
-    if (findings.length > 0)
+    const confirmed = ownerConfirmedSecretFinding(options.override, input.text);
+    const review = findings.length > 0 && !confirmed;
+    if (review && input.heldSecret)
       return { ...base, contentTier: "secrets", decidedBy: "secret_detector", reasons: findings, contentPending: false };
     return {
       ...base,
-      contentTier: tier,
+      contentTier: review ? "secure" : tier,
       decidedBy: "override",
       reasons: [
-        `override:item:${options.override.tier}`,
+        ...ownerOverrideReasons(options.override.tier, holdUntilJudged, findings, confirmed),
         ...tier !== options.override.tier ? [PUBLIC_RETIRED_REASON] : [],
-        ...heldMark(holdUntilJudged, tier),
         contentDigestReason(input.text),
         contentNamesReason(input, input.parentContext)
       ],
@@ -41481,6 +41498,13 @@ function contentSecretReasons(text) {
     kinds.push("credential_assignment");
   return kinds.map((kind) => `content:secret:${kind}`);
 }
+function ownerOverrideReasons(tier, holdUntilJudged, findings, confirmed) {
+  return [
+    `override:item:${tier}`,
+    ...heldMark(holdUntilJudged, tier),
+    ...confirmed ? [OWNER_OVERRIDE_SECRET_CONFIRMED_REASON] : findings.length > 0 ? [OWNER_OVERRIDE_SECRET_REVIEW_REASON, ...findings] : []
+  ];
+}
 function heldMark(holdUntilJudged, tier) {
   return holdUntilJudged && tier !== "secrets" ? [HELD_UNTIL_JUDGED_REASON] : [];
 }
@@ -41635,7 +41659,7 @@ function namesOf(signals) {
 function slug(value) {
   return SLUG.test(value) ? value : "invalid";
 }
-var CONTENT_NAMES_ONLY_REASON = "content:names_only", CONTENT_NAMES_ONLY_LIFTED_REASON = "content:names_only_lifted", TIER_CLASSIFIER_VERSION = "2026-10-29.p8", TIER_MAP_REVISION = "none", TIER_KEYS, TIER_RANK, HELD_RECORD_PRIORITY = 10, HELD_UNTIL_JUDGED_PRIORITY = -1, NEW_ARRIVAL_PRIORITY = 50, UNDECIDED_TIER_SNIFFER, SNIFFER_NAMES_MAX_CHARS = 400, SNIFFER_EXCERPT_MAX_CHARS = 1200, CONTENT_READ_SNIFFER_FLAG = "content:read", PERSONAL_FIRST_REASON = "content:personal_first", HELD_UNTIL_JUDGED_REASON = "content:held_until_judged", PARENT_CONTEXT_MARKER = `
+var CONTENT_NAMES_ONLY_REASON = "content:names_only", CONTENT_NAMES_ONLY_LIFTED_REASON = "content:names_only_lifted", TIER_CLASSIFIER_VERSION = "2026-10-29.p8", TIER_MAP_REVISION = "none", TIER_KEYS, TIER_RANK, HELD_RECORD_PRIORITY = 10, HELD_UNTIL_JUDGED_PRIORITY = -1, NEW_ARRIVAL_PRIORITY = 50, UNDECIDED_TIER_SNIFFER, SNIFFER_NAMES_MAX_CHARS = 400, SNIFFER_EXCERPT_MAX_CHARS = 1200, CONTENT_READ_SNIFFER_FLAG = "content:read", PERSONAL_FIRST_REASON = "content:personal_first", HELD_UNTIL_JUDGED_REASON = "content:held_until_judged", OWNER_OVERRIDE_SECRET_REVIEW_REASON = "content:owner_override_secret_review", OWNER_OVERRIDE_SECRET_CONFIRMED_REASON = "content:owner_override_secret_confirmed", PARENT_CONTEXT_MARKER = `
 Parent names (context only): `, PARENT_CONTEXT_MAX_CHARS = 200, NAMES_INPUT_REASON_PREFIX = "metadata:names_input:", NAMES_INPUT_KEYS, FRONT_MATTER_PRIVATE_REASON = "content:rule:front_matter_private", FRONT_MATTER_MAX_LINES = 100, IMAGE_PRIVATE_DEFAULT_REASON = "content:image_private_default", IMAGE_SENSITIVE_REASON_PREFIX = "content:image_sensitive:", IMAGE_ORDINARY_REASON = "content:image_ordinary", IMAGE_TEXT_DECIDES_REASON_PREFIX = "content:image_text_decides:", IMAGE_TEXT_DECIDES_MIN_WORDS = 8, PUBLIC_RETIRED_REASON = "tier:public_retired", RETIRED_SOURCE_PRIOR_REASON = "metadata:prior:source_", SNIFFER_EXCERPT_HEAD_CHARS = 600, SNIFFER_EXCERPT_MAX_FOCUS = 2, SNIFFER_EXCERPT_GAP = " … ", SLUG;
 var init_tier_classifier = __esm(() => {
   init_secret_patterns();
@@ -42788,6 +42812,12 @@ function listRoutedRead(options) {
     mode: "all"
   };
 }
+function pendingOverrideReview(record, override) {
+  if (record?.state !== "current" || !record.contentRead || override?.kind !== "tier" || override.tier !== "private" && override.tier !== "public")
+    return;
+  const review = ownerOverrideSecretReview(record.reasons);
+  return review && review.digest !== override.confirmedDigest ? review : undefined;
+}
 function routedOverridesFromRows(rows) {
   const result = [];
   for (const row of rows) {
@@ -43764,6 +43794,34 @@ class TierLedger {
       `).run(...idParams(identity), JSON.stringify(override), this.now().toISOString());
       this.settleRevokedOwnerMove(identity);
     })();
+  }
+  ownerOverrideReview(identity, record = this.getCurrent(identity), override = this.getOverride(identity)) {
+    const review = pendingOverrideReview(record, override);
+    return review && !this.writeIntent(identity) ? review : undefined;
+  }
+  *ownerOverrideReviewKindsSteps() {
+    const kinds = new Set;
+    for (const { record, override } of yield* this.listRoutedOverridesSteps()) {
+      const review = pendingOverrideReview(record, override);
+      if (!review)
+        continue;
+      const intent = yield { sql: WRITE_INTENT_SQL, params: idParams(tierLedgerIdentityOfRecord(record)), mode: "get" };
+      if (!intent)
+        for (const kind of review.kinds)
+          kinds.add(kind);
+    }
+    return [...kinds];
+  }
+  resolveOwnerOverrideReview(identity, digest, choice) {
+    return this.db.transaction(() => {
+      const override = this.getOverride(identity);
+      if (override?.kind !== "tier" || this.ownerOverrideReview(identity)?.digest !== digest)
+        return false;
+      if (choice === "judge")
+        return this.clearOverride(identity);
+      this.setOverride(identity, { kind: "tier", tier: "private", confirmedDigest: digest });
+      return true;
+    }).immediate();
   }
   classificationRead(identity) {
     return this.db.transaction(() => ({
@@ -45189,10 +45247,7 @@ class TierLedger {
     `).run(...idParams(intent.identity), intent.identity.localItemId ?? "", intent.version ?? null, intent.kind, intent.location === true ? 1 : 0, intent.connectorId, this.now().toISOString(), intent.bodyVersion ?? null, intent.itemFamily ?? null);
   }
   writeIntent(identity) {
-    const row = this.db.query(`
-      SELECT * FROM tier_write_intents
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-    `).get(...idParams(identity));
+    const row = this.db.query(WRITE_INTENT_SQL).get(...idParams(identity));
     return row ? writeIntentFromRow(row) : undefined;
   }
   markUnseenDeletion(identity) {
@@ -46817,6 +46872,9 @@ var TIER_LEDGER_SCHEMA_VERSION = 18, RETIRED_EMBEDDING_CLEARANCE_REASON = "conte
         AND i.conversation_key = o.conversation_key AND i.provider_item_id = o.provider_item_id
       WHERE i.routed = 1
       ORDER BY o.provider, o.account_scope, o.conversation_key, o.provider_item_id
+    `, WRITE_INTENT_SQL = `
+      SELECT * FROM tier_write_intents
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
     `, CLEARED_OVERRIDE_FINGERPRINT_SQL = `
       SELECT (SELECT count(*) || ':' || ifnull(sum(rowid), 0) FROM tier_overrides)
         || '|' || (SELECT count(*) || ':' || ifnull(sum(rowid), 0) || ':' || ifnull(sum(length(value)), 0)
@@ -46875,39 +46933,7 @@ var TIER_LEDGER_SCHEMA_VERSION = 18, RETIRED_EMBEDDING_CLEARANCE_REASON = "conte
       EXISTS (SELECT 1 FROM tier_items t WHERE t.provider = c.provider AND t.account_scope = c.account_scope
         AND t.conversation_key = c.conversation_key AND t.provider_item_id = c.provider_item_id AND t.state = 'moving') AS moving`, CORPUS_COPY_FLAGS_PAGE_SQL, CORPUS_INTENT_ID_SQL = "w.provider, w.account_scope, w.conversation_key, w.provider_item_id", CORPUS_INTENT_OTHER_FLAGS_SQL = "0 AS held, 0 AS held_for_judgment, 0 AS metadata_layer, 0 AS metadata_unread, 0 AS moving", CORPUS_INTENT_WITHOUT_COPY_SQL = `w.kind IN ('deletion', 'secret') AND NOT EXISTS (
   SELECT 1 FROM tier_copies c WHERE c.provider = w.provider AND c.account_scope = w.account_scope
-    AND c.conversation_key = w.conversation_key AND c.provider_item_id = w.provider_item_id AND c.corpus_id = ?)`, CORPUS_INTENT_FLAGS_PAGE_SQL, DEFAULT_REJUDGE_SCAN_ROWS = 2000, REJUDGE_UNAVAILABLE_RETRY_MS, REJUDGE_UNAVAILABLE_MAX_RETRY_MS, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TierLedgerSchemaError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, STALE_EMBED_HOLD_DECIDED = `EXISTS (
-        SELECT 1 FROM tier_items t
-        WHERE t.provider = tier_copies.provider AND t.account_scope = tier_copies.account_scope
-          AND t.conversation_key = tier_copies.conversation_key AND t.provider_item_id = tier_copies.provider_item_id
-          AND t.state = 'current' AND t.metadata_pending = 0 AND t.content_pending = 0
-          AND t.metadata_tier <> 'secrets' AND t.content_tier <> 'secrets'
-          AND t.target_metadata_tier IS NULL AND t.target_content_tier IS NULL
-          -- A re-judgment still open on this decision keeps the hold.
-          AND NOT (t.rejudge_json IS NOT NULL
-            AND json_extract(t.rejudge_json, '$.generation') = t.generation
-            AND json_extract(t.rejudge_json, '$.decidedAt') = t.decided_at
-            AND json_extract(t.rejudge_json, '$.reasonsJson') = t.reasons_json
-            AND json_extract(t.rejudge_json, '$.decidedBy') = t.decided_by)
-          -- The store must be at least as private as the verdict for each layer
-          -- the copy serves (same ranks as the tier exposure count).
-          AND (tier_copies.layers NOT IN ('content', 'both')
-            OR (CASE tier_copies.trust_domain WHEN 'secure_local' THEN 2 WHEN 'internal' THEN 1 ELSE 0 END)
-              >= (CASE WHEN t.content_tier = 'secure' OR t.metadata_tier = 'secure' THEN 2
-                       WHEN t.content_tier = 'private' OR t.metadata_tier = 'private' THEN 1 ELSE 0 END))
-          AND (tier_copies.layers NOT IN ('metadata', 'both')
-            OR (CASE tier_copies.trust_domain WHEN 'secure_local' THEN 2 WHEN 'internal' THEN 1 ELSE 0 END)
-              >= (CASE t.metadata_tier WHEN 'secure' THEN 2 WHEN 'private' THEN 1 ELSE 0 END))
-      ) AND NOT EXISTS (
-        SELECT 1 FROM tier_overrides o
-        WHERE o.provider = tier_copies.provider AND o.account_scope = tier_copies.account_scope
-          AND o.conversation_key = tier_copies.conversation_key AND o.provider_item_id = tier_copies.provider_item_id
-          AND json_extract(o.override_json, '$.kind') = 'tier' AND json_extract(o.override_json, '$.tier') = 'secrets'
-      ) AND NOT EXISTS (
-        SELECT 1 FROM tier_write_intents w
-        WHERE w.provider = tier_copies.provider AND w.account_scope = tier_copies.account_scope
-          AND w.conversation_key = tier_copies.conversation_key AND w.provider_item_id = tier_copies.provider_item_id
-          AND w.kind IN ('secret', 'deletion')
-      )`, TIER_RECHECK_META_PREFIX = "recheck:", STORED_NAMES_REASON = "metadata:names_from_store", STORED_NAMES_ASKED_REASON = "metadata:names_from_store:asked", TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
+    AND c.conversation_key = w.conversation_key AND c.provider_item_id = w.provider_item_id AND c.corpus_id = ?)`, CORPUS_INTENT_FLAGS_PAGE_SQL, DEFAULT_REJUDGE_SCAN_ROWS = 2000, REJUDGE_UNAVAILABLE_RETRY_MS, REJUDGE_UNAVAILABLE_MAX_RETRY_MS, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TierLedgerSchemaError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, STALE_EMBED_HOLD_DECIDED, TIER_RECHECK_META_PREFIX = "recheck:", STORED_NAMES_REASON = "metadata:names_from_store", STORED_NAMES_ASKED_REASON = "metadata:names_from_store:asked", TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
   init_operation_error();
   init_sqlite_migrations();
@@ -46963,6 +46989,40 @@ var init_tier_ledger = __esm(() => {
     internal: 1,
     secure_local: 2
   };
+  STALE_EMBED_HOLD_DECIDED = `EXISTS (
+        SELECT 1 FROM tier_items t
+        WHERE t.provider = tier_copies.provider AND t.account_scope = tier_copies.account_scope
+          AND t.conversation_key = tier_copies.conversation_key AND t.provider_item_id = tier_copies.provider_item_id
+          AND t.state = 'current' AND t.metadata_pending = 0 AND t.content_pending = 0
+          AND t.metadata_tier <> 'secrets' AND t.content_tier <> 'secrets'
+          AND t.target_metadata_tier IS NULL AND t.target_content_tier IS NULL
+          AND instr(t.reasons_json, '"${OWNER_OVERRIDE_SECRET_REVIEW_REASON}"') = 0
+          -- A re-judgment still open on this decision keeps the hold.
+          AND NOT (t.rejudge_json IS NOT NULL
+            AND json_extract(t.rejudge_json, '$.generation') = t.generation
+            AND json_extract(t.rejudge_json, '$.decidedAt') = t.decided_at
+            AND json_extract(t.rejudge_json, '$.reasonsJson') = t.reasons_json
+            AND json_extract(t.rejudge_json, '$.decidedBy') = t.decided_by)
+          -- The store must be at least as private as the verdict for each layer
+          -- the copy serves (same ranks as the tier exposure count).
+          AND (tier_copies.layers NOT IN ('content', 'both')
+            OR (CASE tier_copies.trust_domain WHEN 'secure_local' THEN 2 WHEN 'internal' THEN 1 ELSE 0 END)
+              >= (CASE WHEN t.content_tier = 'secure' OR t.metadata_tier = 'secure' THEN 2
+                       WHEN t.content_tier = 'private' OR t.metadata_tier = 'private' THEN 1 ELSE 0 END))
+          AND (tier_copies.layers NOT IN ('metadata', 'both')
+            OR (CASE tier_copies.trust_domain WHEN 'secure_local' THEN 2 WHEN 'internal' THEN 1 ELSE 0 END)
+              >= (CASE t.metadata_tier WHEN 'secure' THEN 2 WHEN 'private' THEN 1 ELSE 0 END))
+      ) AND NOT EXISTS (
+        SELECT 1 FROM tier_overrides o
+        WHERE o.provider = tier_copies.provider AND o.account_scope = tier_copies.account_scope
+          AND o.conversation_key = tier_copies.conversation_key AND o.provider_item_id = tier_copies.provider_item_id
+          AND json_extract(o.override_json, '$.kind') = 'tier' AND json_extract(o.override_json, '$.tier') = 'secrets'
+      ) AND NOT EXISTS (
+        SELECT 1 FROM tier_write_intents w
+        WHERE w.provider = tier_copies.provider AND w.account_scope = tier_copies.account_scope
+          AND w.conversation_key = tier_copies.conversation_key AND w.provider_item_id = tier_copies.provider_item_id
+          AND w.kind IN ('secret', 'deletion')
+      )`;
 });
 
 // src/workers/classification/tier-set-binding.ts
@@ -57260,7 +57320,7 @@ function decideItemTiers(connector, item, text, options, ledger, extra = {}) {
     ledger?.markNewArrival(item.identity);
   const sniffer = cacheAware && arrivalOrderedSniffer(conversationOrderedSniffer(recordedContentVerdictSniffer(cacheAware, recorded, text, namesReceipt, namesInputReason(signals, parentContext)), item.metadata), newArrival);
   const holdUntilJudged = extra.requireContentVerdict === true || options?.holdContentUntilJudged === true || item.holdContentUntilJudged === true || heldUntilJudged(recorded?.reasons);
-  return classifyItemTiers({
+  const decision = classifyItemTiers({
     signals,
     locators: ["locatorUri", "url", "pathDisplay"].map((key) => item.metadata[key]).filter((value) => typeof value === "string"),
     provider: item.identity.provider,
@@ -57271,7 +57331,7 @@ function decideItemTiers(connector, item, text, options, ledger, extra = {}) {
     mimeType: item.mimeType,
     hasNonTextContent: itemHasNonTextContent(item),
     titleIsConversation: item.metadata.titleIsConversation === true,
-    ...read?.secret ? { heldSecret: true } : {},
+    ...read?.secret && !extra.freshSecretReplacement ? { heldSecret: true } : {},
     subject: item.identity
   }, {
     ...options?.rules ? { rules: options.rules } : {},
@@ -57279,6 +57339,14 @@ function decideItemTiers(connector, item, text, options, ledger, extra = {}) {
     ...override ? { override } : {},
     ...options?.retirePublic ? { retirePublic: true } : {}
   });
+  const unread = text === undefined || extra.contentFetchFailed === true;
+  if (unread && override?.kind === "tier" && recorded?.reasons.includes(OWNER_OVERRIDE_SECRET_REVIEW_REASON)) {
+    return { ...decision, metadataTier: recorded.metadataTier, contentTier: recorded.contentTier, contentRead: false };
+  }
+  if (unread && override?.kind === "tier" && recorded?.reasons.includes(OWNER_OVERRIDE_SECRET_CONFIRMED_REASON)) {
+    return { ...decision, contentRead: false };
+  }
+  return decision;
 }
 function recordedContentVerdictSniffer(sniffer, recorded, text, names, namesInput) {
   if (!recorded || !text?.trim() || recorded.contentPending || !recorded.contentRead || recorded.reasons.includes(RETAINED_MOVE_SOURCE_REASON))
@@ -60370,11 +60438,12 @@ function rejudgeStoredContent(set, record, options) {
     snifferId: content.snifferId
   };
   if (content.contentTier === "secrets") {
-    settleRoutedSecrets(set, identity, decision, exported, {
+    const settled = settleRoutedSecrets(set, identity, decision, exported, {
       text,
       findingKinds: content.reasons.filter((reason) => reason.startsWith("content:secret:")).map((reason) => reason.slice("content:secret:".length))
-    });
-    report.secrets += 1;
+    }, { guard: { generation: record.generation, override: undefined } });
+    if (settled)
+      report.secrets += 1;
     return;
   }
   if (questionNotQueued) {
@@ -62931,8 +63000,8 @@ function promoteLowerTierContent(options, source) {
   return moveTieredItemNow({ ...options, target: { metadataTier: record.metadataTier, contentTier: record.contentTier } }, source);
 }
 function moveRestoredItemToHold(options) {
-  if (!options.decision.contentPending)
-    throw new Error("A restored body must remain pending.");
+  if (!contentHeldForJudgment(options.decision))
+    throw new Error("A restored body must remain held.");
   return moveTieredItemNow(options);
 }
 function moveTieredItemNow(options, repairSource) {
@@ -63014,10 +63083,18 @@ function stageTieredMove(options, repairSource, loweringOnly = false) {
   const contentDestination = copyServingLayer(placement.copies, "content");
   const loweredLayers = loweredCopyLayers(sources, placement.copies);
   const lowering = loweredLayers.length > 0 || tiersLower(record, target) || hasNewLowerLayer(sources, placement.copies);
-  assertLoweringPolicyAvailable(set, lowering);
+  const policyRefusal = unavailableLoweringPolicy(set, lowering);
+  if (policyRefusal) {
+    if (record.targetMetadataTier === target.metadataTier && record.targetContentTier === target.contentTier) {
+      retainAuthorizedRaise(set, identity, record, target, sources, placement.copies);
+    }
+    return () => {
+      throw policyRefusal;
+    };
+  }
   const imports = plannedLowerImports(record.generation, target, sources, placement.copies);
   if (contentDestination && needsContentMoveAuthority(contentSource, contentDestination)) {
-    const refusal = contentMoveRefusal(decision ?? record, exportFrom(contentSource ?? sources[0]), contentDestination.trustDomain, ledger.getOverride(identity)?.kind === "not_secret");
+    const refusal = contentMoveRefusal(decision ?? record, exportFrom(contentSource ?? sources[0]), contentDestination.trustDomain, ledger.getOverride(identity));
     if (refusal) {
       if (record.state === "moving")
         ledger.withGenerationFence(identity, record.generation, () => {
@@ -63104,16 +63181,18 @@ function stageTieredMove(options, repairSource, loweringOnly = false) {
             throw new Error("Source store unavailable.");
           return store.withItemCopyWriteFence(identity, () => copyWithLockedSources(index + 1));
         }
-        assertLoweringPolicyAvailable(set, lowering);
-        const ruleRevision = tierMoveRuleAuthorization(set, now, target, sources, placement.copies);
+        const policyRefusal = unavailableLoweringPolicy(set, lowering);
+        if (policyRefusal && !raise)
+          return policyRefusal;
+        const ruleRevision = policyRefusal ? undefined : tierMoveRuleAuthorization(set, now, target, sources, placement.copies);
         if (ruleRevision === undefined) {
           retainAuthorizedRaise(set, identity, now, target, sources, placement.copies);
           discardTierMoveImports(ledger, identity, imports);
-          return authorityRefusal(set, now, target, sources, placement.copies);
+          return policyRefusal ?? authorityRefusal(set, now, target, sources, placement.copies);
         }
         exports.clear();
         if (contentDestination && needsContentMoveAuthority(contentSource, contentDestination)) {
-          const refusal = contentMoveRefusal(decision ?? now, exportFrom(contentSource ?? sources[0]), contentDestination.trustDomain, ledger.getOverride(identity)?.kind === "not_secret");
+          const refusal = contentMoveRefusal(decision ?? now, exportFrom(contentSource ?? sources[0]), contentDestination.trustDomain, ledger.getOverride(identity));
           if (refusal) {
             retainAuthorizedRaise(set, identity, now, target, sources, placement.copies);
             discardTierMoveImports(ledger, identity, imports);
@@ -63231,18 +63310,16 @@ function resumeVerifiedTierMove(set, identity, embeddingLedger) {
 function needsContentMoveAuthority(source, destination) {
   return destination.trustDomain === "internal" && source?.corpusId !== destination.corpusId || source !== undefined && trustDomainRank(destination.trustDomain) < trustDomainRank(source.trustDomain);
 }
-function contentMoveRefusal(evidence, copy, destination, notSecret) {
+function contentMoveRefusal(evidence, copy, destination, override) {
   if (destination === "internal" && copy?.chunks.length === 0)
     return;
   const text = copy?.chunks.map((chunk) => chunk.boundedText).join("");
   const receipts = evidence.reasons.filter((reason) => reason.startsWith("content:sha256:"));
-  const code = text === undefined ? "content_no_copy" : evidence.contentPending ? "content_still_pending" : receipts.length === 0 ? "content_no_receipt" : receipts.length > 1 ? "content_several_receipts" : receipts[0] !== contentDigestReason(text) ? "content_receipt_mismatch" : destination === "internal" && !personalContentAuthorized(evidence, text, notSecret) ? "content_no_authority" : undefined;
+  const code = text === undefined ? "content_no_copy" : evidence.contentPending ? "content_still_pending" : receipts.length === 0 ? "content_no_receipt" : receipts.length > 1 ? "content_several_receipts" : receipts[0] !== contentDigestReason(text) ? "content_receipt_mismatch" : destination === "internal" && !personalContentAuthorized(evidence, text, override?.kind === "not_secret", override) ? "content_no_authority" : undefined;
   return code && new TierMoveContentChangedError("Stored content requires a matching settled verdict before moving.", code);
 }
-function assertLoweringPolicyAvailable(set, lowering) {
-  if (lowering && currentTierRulePolicy(set).unavailable) {
-    throw new TierMoveRefusedError("The owner policy is pending resolution.", "rule_policy_unavailable");
-  }
+function unavailableLoweringPolicy(set, lowering) {
+  return lowering && currentTierRulePolicy(set).unavailable ? new TierMoveRefusedError("The owner policy is pending resolution.", "rule_policy_unavailable") : undefined;
 }
 function authorityRefusal(set, record, target, sources, destination) {
   const override = set.ledger.getOverride(tierLedgerIdentityOfRecord(record));
@@ -63451,6 +63528,11 @@ function settleDiscardedTierMoveImports(set, identity) {
           if (!retainedNames && !stagedDestination)
             continue;
           const store = set.store(copy.trustDomain);
+          const leg = set.legSpec(copy.trustDomain);
+          if (!store && stagedDestination && copy.state === "superseded" && leg?.corpusId === copy.corpusId && leg.exists?.() === false) {
+            ledger.removeSupersededCopy(identity, copy.corpusId);
+            continue;
+          }
           if (!store)
             throw new Error("Move destination unavailable; staged import cleanup remains pending.");
           store.bindTierSet(ledger);
@@ -63608,8 +63690,10 @@ function flipVerifiedMove(options, receipt) {
     return store.withItemCopyWriteFence(identity, () => withCopyFences(index + 1, work));
   };
   const outcome = withTierRuleFence(set, () => withCopyFences(0, () => {
-    assertLoweringPolicyAvailable(set, lowering);
-    const destinationValid = timed(options.timings, "verifyMs", () => {
+    const policyRefusal = unavailableLoweringPolicy(set, lowering);
+    if (policyRefusal && !receipt.raise)
+      return policyRefusal;
+    const destinationValid = !policyRefusal && timed(options.timings, "verifyMs", () => {
       for (const copy of receipt.placement)
         set.store(copy.trustDomain)?.durabilityBarrier();
       return receipt.placement.every((copy) => {
@@ -63617,7 +63701,7 @@ function flipVerifiedMove(options, receipt) {
         return stored && copyFingerprint(stored, copy.layers) === receipt.fingerprints[copy.corpusId];
       });
     });
-    const sourceValid = timed(options.timings, "verifyMs", () => loweredLayers.every((layer) => {
+    const sourceValid = !policyRefusal && timed(options.timings, "verifyMs", () => loweredLayers.every((layer) => {
       const source = copyServingLayer(receipt.sources, layer);
       const exported = set.store(source.trustDomain)?.exportItemCopy(identity);
       if (!exported)
@@ -63638,11 +63722,11 @@ function flipVerifiedMove(options, receipt) {
         throw new TierLedgerGenerationConflictError;
       if (lowering && ledger.writeIntent(identity))
         throw new TierLedgerGenerationConflictError;
-      const revision = tierMoveRuleAuthorization(set, record, receipt.target, receipt.sources, receipt.placement);
+      const revision = policyRefusal ? undefined : tierMoveRuleAuthorization(set, record, receipt.target, receipt.sources, receipt.placement);
       if (revision === undefined) {
         retainAuthorizedRaise(set, identity, record, receipt.target, receipt.sources, receipt.placement, receipt);
         discardTierMoveImports(ledger, identity, imports);
-        return authorityRefusal(set, record, receipt.target, receipt.sources, receipt.placement);
+        return policyRefusal ?? authorityRefusal(set, record, receipt.target, receipt.sources, receipt.placement);
       }
       if (!sourceValid) {
         retainAuthorizedRaise(set, identity, record, receipt.target, receipt.sources, receipt.placement, receipt);
@@ -63654,7 +63738,7 @@ function flipVerifiedMove(options, receipt) {
       if (contentDestination && needsContentMoveAuthority(copyServingLayer(receipt.sources, "content"), contentDestination)) {
         const { decision, decidedBy, reasons } = receipt.flipOptions;
         const evidence = { ...record, ...decision, reasons: reasons ?? record.reasons, decidedBy: decidedBy ?? record.decidedBy };
-        const refusal = contentMoveRefusal(evidence, set.store(contentDestination.trustDomain)?.exportItemCopy(identity), contentDestination.trustDomain, ledger.getOverride(identity)?.kind === "not_secret");
+        const refusal = contentMoveRefusal(evidence, set.store(contentDestination.trustDomain)?.exportItemCopy(identity), contentDestination.trustDomain, ledger.getOverride(identity));
         if (refusal) {
           retainAuthorizedRaise(set, identity, record, receipt.target, receipt.sources, receipt.placement);
           discardTierMoveImports(ledger, identity, imports);
@@ -65620,7 +65704,8 @@ async function inspectChunks(inputs, scopes, check, options = {}) {
       continue;
     const override = scope.ledger.getOverride(input);
     const overrideKey = JSON.stringify(override);
-    const ownerRead = override?.kind === "tier" && (override.tier === "public" || override.tier === "private") || record.decidedBy === "owner_rule" && record.reasons.some((reason) => reason.startsWith("metadata:owner_rule:"));
+    const fullText = snapshot.chunks.map((chunk) => chunk.text).join("");
+    const ownerRead = personalOverrideAllowsText(override, fullText) || record.decidedBy === "owner_rule" && record.reasons.some((reason) => reason.startsWith("metadata:owner_rule:"));
     const names = JSON.stringify([snapshot.title, snapshot.path, snapshot.sender]);
     const parentContext = set ? parentNamesContext(set, input) : undefined;
     snapshots.set(index, () => {
@@ -65629,7 +65714,6 @@ async function inspectChunks(inputs, scopes, check, options = {}) {
       const currentReader = currentClassification?.releaseWindows ?? currentClassification?.releaseJudge;
       return scopesNow().find((now) => now.corpusIds.has(input.corpusId))?.ledger === scope.ledger && !!current && JSON.stringify([current.title, current.path, current.sender]) === names && JSON.stringify(scope.ledger.getOverride(input)) === overrideKey && scope.ledger.getCurrent(input)?.generation === record.generation && (!set || parentNamesContext(set, input) === parentContext) && currentReader?.modelId === reader?.modelId && currentReader?.promptVersion === reader?.promptVersion && allowed[index].every((hash) => current.chunks.some((chunk) => chunk.contentHash === hash));
     });
-    const fullText = snapshot.chunks.map((chunk) => chunk.text).join("");
     const shortRead = normalize5(fullText).length <= SNIFFER_EXCERPT_MAX_CHARS && record.reasons.includes(contentDigestReason(fullText)) && record.reasons.some((reason) => reason.startsWith(sniffer && sniffer.id !== "no_judge" ? `content:sniffer:${sniffer.id}:` : "content:sniffer:") && !reason.endsWith(":undecided"));
     for (const hash of new Set(input.chunkHashes ?? [])) {
       const chunk = snapshot.chunks.find((chunk) => chunk.contentHash === hash);
@@ -66556,6 +66640,747 @@ var init_reactions = __esm(() => {
       this.refusal = refusal;
     }
   };
+});
+
+// src/core/source-index/router.ts
+function applySourceIndexVisibilityGate(gate, hits, report) {
+  return gate.offThread ? gate.offThread(hits, report) : Promise.resolve(gate(hits, report));
+}
+function distinctSearchMatches(hits) {
+  const matches = new Map;
+  for (const hit of hits) {
+    const key = hit.candidateId ?? JSON.stringify(hit.sourceItem);
+    const prior = matches.get(key);
+    if (!prior || !prior[SEARCH_GRANT_MATCH] && hit[SEARCH_GRANT_MATCH])
+      matches.set(key, hit);
+  }
+  return [...matches.values()];
+}
+function deliverCorpusSearch(responses, maxPartialResults) {
+  const first = responses[0];
+  const delivery = first[SEARCH_GRANT_DELIVERY] ?? responses.find((response) => response[SEARCH_GRANT_DELIVERY])?.[SEARCH_GRANT_DELIVERY];
+  const partial = maxPartialResults !== undefined;
+  if (!partial && !delivery)
+    return first;
+  const grantMatches = responses.flatMap((response) => response[SEARCH_GRANT_DELIVERY]?.matches ?? []);
+  const hits = responses.flatMap((response) => response.hits);
+  const candidates = [...hits, ...grantMatches, ...first.semanticNeighbourHits ?? [], ...first.semanticRows?.hits ?? []];
+  const scoped = candidates.filter((hit) => hit[SEARCH_GRANT_MATCH] !== undefined);
+  const visible = scoped.length > 0 ? delivery?.check(scoped) : undefined;
+  const keep = (hit) => !delivery || !hit[SEARCH_GRANT_MATCH] || visible?.get(hit) === "content";
+  const current = (rows, metadata) => rows.flatMap((hit) => {
+    if (keep(hit))
+      return [hit];
+    const fallback = metadata && visible?.get(hit) === "metadata" && hit[SEARCH_GRANT_MATCH]?.metadataFallback;
+    return fallback ? [fallback] : [];
+  });
+  const retained = current(hits, true);
+  const matchCount = delivery && (partial || grantMatches.some((hit) => !keep(hit))) ? (() => {
+    const matches = distinctSearchMatches(current(grantMatches, true));
+    return {
+      matchedItems: matches.length,
+      contentMatchedItems: matches.filter((hit) => hit[SEARCH_GRANT_MATCH]).length,
+      secureMatchedItems: matches.filter((hit) => hit.trustTier !== undefined && isSecureTrustTier(hit.trustTier)).length,
+      saturated: partial || first.matchCount?.saturated === true
+    };
+  })() : first.matchCount;
+  const { [SEARCH_GRANT_DELIVERY]: _delivery, ...response } = first;
+  return {
+    ...response,
+    hits: partial ? distinctSearchMatches(retained).slice(0, maxPartialResults) : retained,
+    ...partial ? { incomplete: true } : {},
+    ...matchCount ? { matchCount } : {},
+    ...first.semanticNeighbourHits ? { semanticNeighbourHits: current(first.semanticNeighbourHits, false) } : {},
+    ...first.semanticRows ? { semanticRows: { ...first.semanticRows, hits: current(first.semanticRows.hits, false) } } : {}
+  };
+}
+function poolHitKey(hit) {
+  return `${hit.sourceItem.providerItemId}\x00${hit.sourceItem.localItemId ?? ""}`;
+}
+function routeHit(hit, corpus) {
+  const { [SEARCH_GRANT_MATCH]: _grant, ...candidate } = hit;
+  return { ...candidate, corpusId: corpus.corpusId, trustDomain: corpus.trustDomain };
+}
+async function routeSourceIndexSearch(options) {
+  return withKeywordRequestScope(() => routePreparedSourceIndexSearch(options));
+}
+async function routePreparedSourceIndexSearch(options) {
+  const request = normalizeSearchRequest(options.request);
+  const candidateCorpora = options.registry.list();
+  const skippedCorpora = [];
+  const searchedCorpora = [];
+  const laneAudits = [];
+  const degradations = [];
+  const corpusTimings = [];
+  const lanes = [];
+  const matchCounts = [];
+  const incompleteCorpora = [];
+  let encounteredSecureLocal = false;
+  const secureLaneAudits = [];
+  const startedAt = Date.now();
+  const searchableCorpora = [];
+  for (const corpus of candidateCorpora) {
+    const skipReason = skipReasonForCorpus(corpus, request);
+    if (skipReason) {
+      skippedCorpora.push({ corpusId: corpus.corpusId, trustDomain: corpus.trustDomain, reason: skipReason });
+      continue;
+    }
+    const adapter = options.adapters[corpus.corpusId];
+    if (!adapter) {
+      skippedCorpora.push({ corpusId: corpus.corpusId, trustDomain: corpus.trustDomain, reason: "no_adapter" });
+      degradations.push({
+        laneName: corpus.corpusId,
+        laneType: "keyword",
+        reason: "lane_no_adapter",
+        occurrences: 1
+      });
+      continue;
+    }
+    if (request.context.metadataOnly === true && !adapter.metadataMatches) {
+      skippedCorpora.push({ corpusId: corpus.corpusId, trustDomain: corpus.trustDomain, reason: "metadata_search_unsupported" });
+      continue;
+    }
+    searchableCorpora.push(corpus);
+  }
+  const retrievalStates = new Map(searchableCorpora.map((corpus) => [
+    corpus.corpusId,
+    retrievalStateForAdapter(options.adapters[corpus.corpusId], {
+      query: request.query,
+      maxResults: request.maxResults,
+      corpus,
+      context: request.context
+    })
+  ]));
+  const semanticPrepareBudgetMs = options.semanticPrepareBudgetMs ?? DEFAULT_SEMANTIC_PREPARE_BUDGET_MS;
+  let prepareKeywordsMaxMs = 0;
+  let keywordModel;
+  let prepareSemanticMaxMs = 0;
+  const timed = async (run) => {
+    const started = Date.now();
+    try {
+      await run();
+    } catch {}
+    return Date.now() - started;
+  };
+  const prepareStartedAt = Date.now();
+  await Promise.all(searchableCorpora.map(async (corpus) => {
+    const adapter = options.adapters[corpus.corpusId];
+    const semantic = adapter.prepareSemantic && semanticPrepareBudgetMs > 0 && request.context.metadataOnly !== true && retrievalStates.get(corpus.corpusId).hybridServable;
+    const [keywordsMs, semanticMs] = await Promise.all([
+      timed(async () => {
+        const prepared = await adapter.prepareKeywords?.(request.query).catch(() => ({ incomplete: true }));
+        if (prepared?.keyword_model && (!keywordModel || keywordModel === "ready" || prepared.keyword_model === "cold")) {
+          keywordModel = prepared.keyword_model;
+        }
+        if (prepared?.incomplete)
+          degradations.push({ laneName: `${corpus.corpusId}:keywords`, laneType: "keyword", reason: "lane_timeout", detail: "keyword_preparation_incomplete", occurrences: 1 });
+      }),
+      semantic ? timed(() => adapter.prepareSemantic(request.query, semanticPrepareBudgetMs)) : Promise.resolve(0)
+    ]);
+    prepareKeywordsMaxMs = Math.max(prepareKeywordsMaxMs, keywordsMs);
+    prepareSemanticMaxMs = Math.max(prepareSemanticMaxMs, semanticMs);
+  }));
+  const lanesStartedAt = Date.now();
+  const laneTimeoutMs = resolveLaneTimeoutMs(options.laneTimeoutMs);
+  const matchingIds = new Set;
+  const laneOutcomes = await Promise.all(searchableCorpora.map(async (corpus) => {
+    const adapter = options.adapters[corpus.corpusId];
+    let progress = () => {};
+    const partials = new Map;
+    const corpusRequest = {
+      query: request.query,
+      maxResults: options.storeSearchDepth ?? request.maxResults,
+      corpus,
+      context: request.context,
+      onProgress: () => progress(),
+      [ROUTER_DELIVERS_SEARCH]: true,
+      onPartialResponse: (response, lane = "keyword") => {
+        assertSafeCorpusSearchResponse(response);
+        partials.set(lane, response);
+      }
+    };
+    const retrievalState = retrievalStates.get(corpus.corpusId).state;
+    const metadataMatches = request.context.metadataOnly === true ? adapter.metadataMatches : undefined;
+    const outcome = await runCorpusLaneUntilIdle((report) => {
+      progress = report;
+      return withSourceIndexReadProgress(report, () => runInSourceAnswerLane(corpus.corpusId, () => (metadataMatches ?? adapter)(corpusRequest)));
+    }, laneTimeoutMs, corpus.corpusId, options.laneClock ?? REAL_LANE_CLOCK);
+    const responses = outcome.kind === "response" ? [outcome.response] : [...partials.values()];
+    return { corpus, outcome, retrievalState, responses, maxResults: corpusRequest.maxResults };
+  }));
+  const lanesSettledAt = Date.now();
+  const visibilityRejected = new Map;
+  if (options.visibilityGate) {
+    const candidates = new Map;
+    for (const { corpus, responses } of laneOutcomes) {
+      for (const response of responses) {
+        const depth = request.context.metadataOnly ? undefined : request.poolAllocation?.storeDepth;
+        const mayFillNeighbours = depth !== undefined && (response.hits.length < depth || response[SEARCH_GRANT_DELIVERY]);
+        for (const hit of [
+          ...response.hits,
+          ...mayFillNeighbours ? response.semanticNeighbourHits ?? [] : [],
+          ...request.poolAllocation?.semanticSeats ? response.semanticRows?.hits ?? [] : []
+        ]) {
+          for (const option of [hit, hit[SEARCH_GRANT_MATCH]?.metadataFallback]) {
+            if (!option)
+              continue;
+            candidates.set(routeHit(option, corpus), option);
+          }
+        }
+      }
+    }
+    const unchecked = new Set;
+    const visible = new Set(await applySourceIndexVisibilityGate(options.visibilityGate, [...candidates.keys()], {
+      onUnchecked: (corpusIds) => {
+        for (const corpusId of corpusIds)
+          unchecked.add(corpusId);
+      }
+    }));
+    for (const [routed, hit] of candidates) {
+      if (visible.has(routed))
+        continue;
+      const rejected = visibilityRejected.get(routed.corpusId) ?? new Set;
+      rejected.add(hit);
+      visibilityRejected.set(routed.corpusId, rejected);
+    }
+    for (const corpusId of [...unchecked].sort())
+      degradations.push(visibilityCheckDegradation(corpusId));
+  }
+  for (const { corpus, outcome, retrievalState, responses, maxResults } of laneOutcomes) {
+    if (outcome.kind === "timeout") {
+      skippedCorpora.push({ corpusId: corpus.corpusId, trustDomain: corpus.trustDomain, reason: "lane_timeout" });
+      degradations.push({
+        laneName: corpus.corpusId,
+        laneType: "keyword",
+        reason: "lane_timeout",
+        occurrences: 1
+      });
+      corpusTimings.push({
+        corpusId: corpus.corpusId,
+        elapsedMs: outcome.elapsedMs,
+        outcome: "timeout"
+      });
+      if (responses.length === 0)
+        continue;
+      incompleteCorpora.push(corpus.corpusId);
+    }
+    const response = deliverCorpusSearch(responses, outcome.kind === "timeout" ? maxResults : undefined);
+    assertSafeCorpusSearchResponse(response);
+    const rejected = visibilityRejected.get(corpus.corpusId);
+    const visible = (hit) => !rejected?.has(hit);
+    const matches = response.hits.filter(visible);
+    if (request.readWide) {
+      for (const hit of matches) {
+        matchingIds.add(routedHitCandidateId(routeHit(hit, corpus)));
+      }
+    }
+    if (outcome.kind === "response")
+      corpusTimings.push({
+        corpusId: corpus.corpusId,
+        elapsedMs: outcome.elapsedMs,
+        adapterReportedMs: response.latencyMs,
+        outcome: "success"
+      });
+    searchedCorpora.push(corpus.corpusId);
+    if (response.incomplete === true && !incompleteCorpora.includes(corpus.corpusId))
+      incompleteCorpora.push(corpus.corpusId);
+    const corpusLaneAuditsStart = laneAudits.length;
+    laneAudits.push(...response.laneAudits ?? []);
+    const contributedSecure = corpusContributedSecure(corpus, response);
+    if (contributedSecure)
+      encounteredSecureLocal = true;
+    if (response.matchCount) {
+      matchCounts.push({
+        corpusId: corpus.corpusId,
+        family: corpus.family,
+        trustDomain: corpus.trustDomain,
+        trustTier: corpus.defaultSensitivity.trustTier,
+        matchedItems: response.matchCount.matchedItems,
+        contentMatchedItems: response.matchCount.contentMatchedItems,
+        saturated: response.matchCount.saturated,
+        ...response.matchCount.secureMatchedItems !== undefined ? { secureMatchedItems: response.matchCount.secureMatchedItems } : {}
+      });
+    }
+    if (corpus.activationMode !== "lexical_only") {
+      laneAudits.push(sourceIndexRetrievalStateLaneAudit({
+        corpusId: corpus.corpusId,
+        localOnly: corpus.storageProfile.placement === "local_private",
+        state: retrievalState
+      }));
+      const semanticLoss = semanticLaneDegradation(corpus.corpusId, retrievalState, response);
+      if (semanticLoss)
+        degradations.push(semanticLoss);
+    }
+    const newestLoss = recentItemsLaneDegradation(corpus.corpusId, response);
+    if (newestLoss)
+      degradations.push(newestLoss);
+    if (contributedSecure)
+      secureLaneAudits.push(...laneAudits.slice(corpusLaneAuditsStart));
+    const depth = request.context.metadataOnly ? undefined : request.poolAllocation?.storeDepth;
+    const seen = new Set(matches.map(poolHitKey));
+    const neighbours = depth !== undefined && matches.length < depth && (response.hits.length < depth || responses.some((row) => row[SEARCH_GRANT_DELIVERY])) ? (response.semanticNeighbourHits ?? []).filter((hit) => visible(hit) && !seen.has(poolHitKey(hit))).slice(0, depth - matches.length) : [];
+    lanes.push({
+      name: corpus.corpusId,
+      ...response.storeRelevance ? { relevance: response.storeRelevance } : {},
+      ...request.readWide ? { matchingIds } : {},
+      items: [...matches, ...neighbours].map((hit) => routeHit(hit, corpus)),
+      ...request.poolAllocation?.semanticSeats && response.semanticRows?.hits.length ? { semantic: response.semanticRows.hits.filter(visible).map((hit) => ({
+        hit: routeHit(hit, corpus),
+        margin: (hit.score ?? Number.NEGATIVE_INFINITY) - response.semanticRows.bar
+      })) } : {}
+    });
+  }
+  options.onSeatingLanes?.(lanes);
+  const recency = seatRoutedLanes(lanes, request);
+  const { hits: fused, degradations: budgetDegradations } = recency;
+  const result = {
+    hits: fused,
+    ...request.readWide ? { matchingCandidateIds: [...matchingIds] } : {},
+    searchedCorpora,
+    skippedCorpora,
+    laneAudits,
+    degradations: mergeRetrievalDegradations(degradations, budgetDegradations),
+    corpusTimings,
+    ...matchCounts.length > 0 ? { matchCounts } : {},
+    ...incompleteCorpora.length > 0 ? { incompleteCorpora } : {},
+    encounteredSecureLocal,
+    secureLaneAudits,
+    ...recency.recencySeats > 0 ? { recencySeats: recency.recencySeats } : {},
+    ...recency.semanticSeats?.length ? { semanticSeats: recency.semanticSeats } : {},
+    latencyMs: Date.now() - startedAt,
+    rawExposed: false
+  };
+  assertSafeRoutedSearchResponse(result);
+  recordSourceAnswerQueryStages({
+    prepare_ms: lanesStartedAt - prepareStartedAt,
+    prepare_keywords_max_ms: prepareKeywordsMaxMs,
+    ...keywordModel && { keyword_model: keywordModel },
+    prepare_semantic_max_ms: prepareSemanticMaxMs,
+    lanes_ms: lanesSettledAt - lanesStartedAt,
+    after_lanes_ms: Date.now() - lanesSettledAt
+  });
+  return result;
+}
+function withSemanticPoolSeats(hits, lanes, seats) {
+  if (seats <= 0)
+    return { hits: [...hits], seated: [] };
+  const taken = new Set(hits.map(routedHitCandidateId));
+  const offered = lanes.flatMap((lane) => lane.semantic ?? []).filter((seat) => Number.isFinite(seat.margin)).sort((left, right) => right.margin - left.margin);
+  const perStore = new Map;
+  const seated = [];
+  for (const seat of offered) {
+    if (seated.length >= seats)
+      break;
+    const id = routedHitCandidateId(seat.hit);
+    const used = perStore.get(seat.hit.corpusId) ?? 0;
+    if (taken.has(id) || used >= SEMANTIC_POOL_SEATS_PER_STORE)
+      continue;
+    taken.add(id);
+    perStore.set(seat.hit.corpusId, used + 1);
+    seated.push(seat);
+  }
+  return { hits: [...hits, ...seated.map((seat) => seat.hit)], seated };
+}
+function seatRoutedLanes(lanes, options) {
+  const laneOrder = storeOrderForQuestion(lanes);
+  const fusedAll = fuseRankedCandidateLanes({
+    lanes,
+    getId: routedHitCandidateId,
+    limit: lanes.reduce((total, lane) => total + lane.items.length, 0),
+    tieBreaker: (left, right) => compareTiedRoutedCandidates(left, right, laneOrder)
+  });
+  const budgeted = options.poolAllocation ? applyStrengthPoolBudget(fusedAll, options.maxResults, laneOrder, options.poolAllocation.storeDepth) : applyPerCorpusResultBudget(fusedAll, options.maxResults);
+  const pool = fusedAll.map((candidate) => candidate.item);
+  const leadered = withReservedLeaderSeats(budgeted, pool, options.maxResults);
+  const recency = options.temporalIntent ? withReservedRecencySeats(leadered, pool, options.maxResults) : { ...leadered, recencySeats: 0 };
+  if (options.readWide) {
+    const taken = new Set(recency.hits.map(routedHitCandidateId));
+    const matches = fusedAll.map((candidate) => candidate.item).filter((hit) => lanes.some((lane) => lane.name === hit.corpusId && (!lane.matchingIds || lane.matchingIds.has(routedHitCandidateId(hit)))));
+    let matching = recency.hits.filter((hit) => matches.some((match) => routedHitCandidateId(match) === routedHitCandidateId(hit))).length;
+    for (const hit of matches) {
+      if (matching >= READ_WIDE_MATCH_LIMIT)
+        break;
+      const id = routedHitCandidateId(hit);
+      if (taken.has(id))
+        continue;
+      taken.add(id);
+      recency.hits.push(hit);
+      matching += 1;
+    }
+    const represented = new Set(recency.hits.map((hit) => hit.corpusId));
+    recency.degradations = recency.degradations.filter((loss) => loss.reason !== "lane_budget_cut" || !represented.has(loss.laneName));
+  }
+  const seats = options.poolAllocation?.semanticSeats ?? 0;
+  if (seats <= 0)
+    return recency;
+  const semantic = withSemanticPoolSeats(recency.hits, lanes, seats);
+  return { ...recency, hits: semantic.hits, ...semantic.seated.length ? { semanticSeats: semantic.seated } : {} };
+}
+function corpusContributedSecure(corpus, response) {
+  const count = response.matchCount;
+  const positiveCount = count !== undefined && (count.matchedItems > 0 || count.saturated);
+  if (response.hits.length === 0 && !positiveCount)
+    return false;
+  if (isSecureSensitivity(corpus.defaultSensitivity))
+    return true;
+  if (response.hits.some((hit) => hit.trustTier !== undefined && isSecureSensitivity({ trustDomain: corpus.trustDomain, trustTier: hit.trustTier }))) {
+    return true;
+  }
+  return positiveCount && (count.secureMatchedItems === undefined || count.secureMatchedItems > 0);
+}
+function storeOrderForQuestion(lanes) {
+  const keyword = (lane) => {
+    const share = lane.relevance?.conceptShare ?? 0;
+    return share >= STORE_ORDER_MIN_CONCEPT_SHARE ? share : 0;
+  };
+  const vector = (lane) => lane.relevance?.vectorMargin ?? Number.NEGATIVE_INFINITY;
+  const ordered = lanes.map((lane, index) => ({ lane, index })).sort((left, right) => keyword(right.lane) - keyword(left.lane) || (vector(right.lane) === vector(left.lane) ? 0 : vector(right.lane) > vector(left.lane) ? 1 : -1) || left.index - right.index);
+  return new Map(ordered.map(({ lane }, index) => [lane.name, index]));
+}
+function compareTiedRoutedCandidates(left, right, laneOrder) {
+  const bestRank = bestLaneRank(left) - bestLaneRank(right);
+  if (bestRank !== 0)
+    return bestRank;
+  const laneCount = right.laneRanks.size - left.laneRanks.size;
+  if (laneCount !== 0)
+    return laneCount;
+  const position = laneIndex(laneOrder, left.item.corpusId) - laneIndex(laneOrder, right.item.corpusId);
+  if (position !== 0)
+    return position;
+  const corpus = left.item.corpusId.localeCompare(right.item.corpusId);
+  if (corpus !== 0)
+    return corpus;
+  return String(left.id).localeCompare(String(right.id));
+}
+function bestLaneRank(candidate) {
+  let best = Number.MAX_SAFE_INTEGER;
+  for (const rank of candidate.laneRanks.values()) {
+    if (rank < best)
+      best = rank;
+  }
+  return best;
+}
+function laneIndex(laneOrder, corpusId) {
+  return laneOrder.get(corpusId) ?? Number.MAX_SAFE_INTEGER;
+}
+function recentItemsLaneDegradation(corpusId, response) {
+  const cut = (response.laneAudits ?? []).find((audit) => audit.skippedReason === RECENT_ITEMS_CUT_SHORT);
+  if (!cut)
+    return;
+  return {
+    laneName: `${corpusId}:recency`,
+    laneType: cut.laneType,
+    reason: "lane_timeout",
+    detail: RECENT_ITEMS_CUT_SHORT,
+    occurrences: 1
+  };
+}
+function visibilityCheckDegradation(corpusId) {
+  return {
+    laneName: `${corpusId}:visibility`,
+    laneType: "keyword",
+    reason: "lane_timeout",
+    detail: VISIBILITY_CHECK_CUT_SHORT,
+    occurrences: 1
+  };
+}
+function semanticLaneDegradation(corpusId, state, response) {
+  if (state.health === "degraded") {
+    return {
+      laneName: `${corpusId}:semantic`,
+      laneType: "semantic",
+      reason: "semantic_lane_unservable",
+      ...state.reason ? { detail: state.reason } : {},
+      occurrences: 1
+    };
+  }
+  const laneAudits = response.laneAudits ?? [];
+  const skippedSemantic = laneAudits.find((audit) => audit.laneType === "semantic" && audit.skippedReason !== undefined && audit.skippedReason !== "semantic_below_relevance_bar");
+  if (skippedSemantic?.skippedReason) {
+    return {
+      laneName: `${corpusId}:semantic`,
+      laneType: "semantic",
+      reason: "semantic_lane_skipped",
+      detail: skippedSemantic.skippedReason,
+      occurrences: 1
+    };
+  }
+  const ranSemantic = laneAudits.some((audit) => audit.laneType === "semantic" || audit.laneType === "hybrid");
+  if (ranSemantic)
+    return;
+  return {
+    laneName: `${corpusId}:semantic`,
+    laneType: "semantic",
+    reason: "semantic_lane_not_run",
+    occurrences: 1
+  };
+}
+function retrievalStateForAdapter(adapter, request) {
+  let hybridAvailability;
+  try {
+    hybridAvailability = adapter.hybridAvailability?.(request);
+  } catch {
+    hybridAvailability = { servable: false, reason: "hybrid_capability_unreported" };
+  }
+  return {
+    state: assessSourceIndexRetrievalState({
+      declaredMode: request.corpus.activationMode,
+      ...hybridAvailability ? { hybridAvailability } : {}
+    }),
+    hybridServable: hybridAvailability?.servable === true
+  };
+}
+function normalizeSearchRequest(request) {
+  const query = request.query.trim();
+  if (!query) {
+    throw new Error("Source-index routed search requires a non-empty query.");
+  }
+  if (!Number.isFinite(request.maxResults) || request.maxResults < 0) {
+    throw new Error("Source-index routed search maxResults must be a non-negative number.");
+  }
+  return {
+    ...request,
+    query,
+    maxResults: Math.floor(request.maxResults)
+  };
+}
+async function runCorpusLaneUntilIdle(run, timeoutMs, corpusId, clock = REAL_LANE_CLOCK) {
+  const startedAt = Date.now();
+  let active = true;
+  let lastProgressAt = clock.now();
+  let reading = 0;
+  const report = Object.assign(() => {
+    if (!active)
+      return;
+    lastProgressAt = clock.now();
+    noteSourceAnswerProgress("searching");
+  }, {
+    began: () => {
+      reading += 1;
+      report();
+    },
+    ended: () => {
+      reading = Math.max(0, reading - 1);
+      report();
+    }
+  });
+  const runValidated = async () => {
+    const response = await run(report);
+    assertSafeCorpusSearchResponse(response);
+    return response;
+  };
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    try {
+      const response = await runValidated();
+      const elapsedMs = Math.max(0, Date.now() - startedAt);
+      recordSourceAnswerCorpusTiming({
+        corpus_id: corpusId,
+        elapsed_ms: elapsedMs,
+        adapter_reported_ms: response.latencyMs,
+        outcome: "success"
+      });
+      return { kind: "response", response, elapsedMs };
+    } catch (error) {
+      if (isSourceIndexLaneBusyError(error)) {
+        const elapsedMs = Math.max(0, Date.now() - startedAt);
+        recordSourceAnswerCorpusTiming({ corpus_id: corpusId, elapsed_ms: elapsedMs, outcome: "timeout" });
+        return { kind: "timeout", elapsedMs };
+      }
+      recordSourceAnswerCorpusTiming({
+        corpus_id: corpusId,
+        elapsed_ms: Math.max(0, Date.now() - startedAt),
+        outcome: "error",
+        error_class: sourceAnswerTraceErrorClass(error)
+      });
+      throw error;
+    } finally {
+      active = false;
+    }
+  }
+  let timer;
+  const laneSettled = runValidated().then((response) => ({ kind: "response", response }), (error) => ({ kind: "error", error }));
+  const deadline = new Promise((resolve) => {
+    const arm = (delayMs) => {
+      const dueAtMs = clock.now() + delayMs;
+      timer = clock.setTimeout(() => {
+        if (reading > 0)
+          report();
+        const now = clock.now();
+        const remaining = timeoutMs - (now - lastProgressAt);
+        if (remaining > 0) {
+          arm(remaining);
+          return;
+        }
+        if (now - dueAtMs >= HELD_THREAD_LATE_TIMER_MS) {
+          arm(HELD_THREAD_GRACE_MS);
+          return;
+        }
+        resolve({ kind: "timeout" });
+      }, delayMs);
+    };
+    arm(timeoutMs);
+  });
+  try {
+    const settled = await Promise.race([laneSettled, deadline]);
+    if (settled.kind === "timeout") {
+      laneSettled.then((late) => {
+        if (late.kind === "error") {
+          console.error(`[source-index-router] lane=${corpusId} outcome=late_error error_class=${sourceAnswerTraceErrorClass(late.error)}`);
+        }
+      });
+      const elapsedMs = Math.max(0, Date.now() - startedAt);
+      recordSourceAnswerCorpusTiming({
+        corpus_id: corpusId,
+        elapsed_ms: elapsedMs,
+        outcome: "timeout"
+      });
+      return { kind: "timeout", elapsedMs };
+    }
+    if (settled.kind === "error" && isSourceIndexLaneBusyError(settled.error)) {
+      const elapsedMs = Math.max(0, Date.now() - startedAt);
+      recordSourceAnswerCorpusTiming({ corpus_id: corpusId, elapsed_ms: elapsedMs, outcome: "timeout" });
+      return { kind: "timeout", elapsedMs };
+    }
+    if (settled.kind === "error") {
+      recordSourceAnswerCorpusTiming({
+        corpus_id: corpusId,
+        elapsed_ms: Math.max(0, Date.now() - startedAt),
+        outcome: "error",
+        error_class: sourceAnswerTraceErrorClass(settled.error)
+      });
+      throw settled.error;
+    }
+    const elapsedMs = Math.max(0, Date.now() - startedAt);
+    recordSourceAnswerCorpusTiming({
+      corpus_id: corpusId,
+      elapsed_ms: elapsedMs,
+      adapter_reported_ms: settled.response.latencyMs,
+      outcome: "success"
+    });
+    return { kind: "response", response: settled.response, elapsedMs };
+  } finally {
+    active = false;
+    if (timer !== undefined)
+      clock.clearTimeout(timer);
+  }
+}
+function resolveLaneTimeoutMs(explicit) {
+  if (explicit !== undefined)
+    return explicit;
+  const raw = process.env.OLYMPUS_SOURCE_ANSWER_LANE_TIMEOUT_MS?.trim();
+  if (!raw)
+    return DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed))
+    return DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS;
+  return parsed;
+}
+function skipReasonForCorpus(corpus, request) {
+  if (!corpusMatchesRequestedSelection(corpus, request))
+    return "not_requested";
+  if (!request.context.allowedTrustDomains.includes(corpus.trustDomain))
+    return "trust_domain_not_allowed";
+  if (request.context.allowedCorpusIds && !request.context.allowedCorpusIds.includes(corpus.corpusId))
+    return "corpus_not_allowed";
+  if (corpus.storageProfile.cloudQueryEligible && request.context.allowCloudQueries !== true)
+    return "cloud_query_not_allowed";
+  return;
+}
+function corpusMatchesRequestedSelection(corpus, selection) {
+  if (selection.corpusIds && !selection.corpusIds.includes(corpus.corpusId))
+    return false;
+  if (selection.families && !selection.families.includes(corpus.family))
+    return false;
+  return true;
+}
+function routedHitCandidateId(hit) {
+  return hit.candidateId ?? `${hit.corpusId}:${hit.sourceItem.localItemId || hit.sourceItem.providerItemId}`;
+}
+function assertSafeCorpusSearchResponse(response) {
+  if (response.rawExposed !== false) {
+    throw new Error("Source-index corpus adapter reported raw source exposure.");
+  }
+  for (const hit of response.hits) {
+    if (hit.rawExposed !== false) {
+      throw new Error("Source-index corpus adapter returned a hit with raw source exposure.");
+    }
+  }
+  assertNoForbiddenRouterResultKeys(response, []);
+}
+function assertSafeRoutedSearchResponse(response) {
+  if (response.rawExposed !== false) {
+    throw new Error("Source-index router reported raw source exposure.");
+  }
+  assertNoForbiddenRouterResultKeys(response, []);
+}
+function assertNoForbiddenRouterResultKeys(value, path) {
+  if (!value || typeof value !== "object")
+    return;
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => assertNoForbiddenRouterResultKeys(item, [...path, String(index)]));
+    return;
+  }
+  for (const [key, child] of Object.entries(value)) {
+    if (NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS.has(normalizeRouterResultKey(key))) {
+      const location = [...path, key].join(".");
+      throw new Error(`Source-index routed search output included forbidden raw field "${location}".`);
+    }
+    assertNoForbiddenRouterResultKeys(child, [...path, key]);
+  }
+}
+function normalizeRouterResultKey(key) {
+  return key.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+var ROUTER_DELIVERS_SEARCH, SEARCH_GRANT_MATCH, SEARCH_GRANT_DELIVERY, REAL_LANE_CLOCK, DEFAULT_SEMANTIC_PREPARE_BUDGET_MS = 15000, DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS = 20000, HELD_THREAD_LATE_TIMER_MS = 500, HELD_THREAD_GRACE_MS = 1000, FORBIDDEN_ROUTER_RESULT_KEYS, NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS, SEMANTIC_POOL_SEATS_PER_STORE = 2, STORE_ORDER_MIN_CONCEPT_SHARE;
+var init_router = __esm(() => {
+  init_read_progress();
+  init_source_answer_jobs();
+  init_read_wide();
+  init_partial_search();
+  init_keyword_context();
+  init_types();
+  init_answer_latency_trace();
+  ROUTER_DELIVERS_SEARCH = Symbol("router delivers search");
+  SEARCH_GRANT_MATCH = Symbol("search grant match");
+  SEARCH_GRANT_DELIVERY = Symbol("search grant delivery");
+  REAL_LANE_CLOCK = {
+    now: () => Date.now(),
+    setTimeout: (callback, ms) => setTimeout(callback, ms),
+    clearTimeout: (timer) => clearTimeout(timer)
+  };
+  FORBIDDEN_ROUTER_RESULT_KEYS = new Set([
+    "body",
+    "bodies",
+    "content",
+    "contents",
+    "message",
+    "messages",
+    "raw",
+    "raw_packet",
+    "rawPacket",
+    "raw_source",
+    "rawSource",
+    "sanitized_text",
+    "sanitizedText",
+    "snippet",
+    "snippets",
+    "source_text",
+    "sourceText",
+    "raw_source_text",
+    "rawSourceText",
+    "text",
+    "access_token",
+    "accessToken",
+    "api_key",
+    "apiKey",
+    "approved_scope_key",
+    "approvedScopeKey",
+    "refresh_token",
+    "refreshToken",
+    "token"
+  ]);
+  NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS = new Set([...FORBIDDEN_ROUTER_RESULT_KEYS].map(normalizeRouterResultKey));
+  STORE_ORDER_MIN_CONCEPT_SHARE = RESERVED_LEADER_MIN_CONCEPT_SHARE;
 });
 
 // src/workers/connector-store/local-index.ts
@@ -67771,16 +68596,73 @@ function defineConnectorCorpus(options) {
     description: "Shared connector-store corpus: generic local index over a Contract 1 SourceConnector."
   });
 }
-function publishPartialRows(store, request, rows, filters, score, projector) {
+function publishPartialRows(store, request, rows, filters, score, projector, lane = "keyword") {
   if (!request.onPartialResponse)
     return;
   const prefix = rows.slice(0, request.maxResults);
-  const hits = (current) => current.map((row) => connectorStoreHitFromRow(store, row, score(row), projector, filters?.locatorPathScope));
-  const currentHits = filters?.metadataOnlyLocatorPathScopes?.length || filters?.metadataOnlySourceScopeFolderKeys?.length ? () => hits(store.grantedPartialRows(prefix, filters)) : undefined;
-  request.onPartialResponse({ hits: hits(prefix), latencyMs: 0, incomplete: true, rawExposed: false }, currentHits);
+  const hits = prefix.map((row) => connectorStoreHitFromRow(store, row, score(row), projector, filters?.locatorPathScope));
+  const response = withSearchGrantDelivery(store, filters, { hits, latencyMs: 0, incomplete: true, rawExposed: false }, prefix);
+  request.onPartialResponse(request[ROUTER_DELIVERS_SEARCH] ? response : deliverCorpusSearch([response], request.maxResults), lane);
 }
 function partialKeywordRows(store, request, filters, projector) {
-  return request.onPartialResponse ? (rows) => publishPartialRows(store, request, rows, filters, (row) => -row.rank, projector) : undefined;
+  return request.onPartialResponse ? (rows, contentOnly) => publishPartialRows(store, request, rows, filters, (row) => -row.rank, projector, contentOnly ? "keyword_content" : "keyword") : undefined;
+}
+function publishKeywordLane(emit, rows) {
+  if (!emit)
+    return;
+  emit(rows);
+  emit([], true);
+}
+function usesSearchGrants(filters) {
+  return Boolean(filters?.metadataOnlyLocatorPathScopes?.length || filters?.metadataOnlySourceScopeFolderKeys?.length);
+}
+function withSearchGrantDelivery(store, filters, response, matches) {
+  if (!usesSearchGrants(filters))
+    return response;
+  return {
+    ...response,
+    [SEARCH_GRANT_DELIVERY]: {
+      check: (hits) => store.searchGrantLayers(hits, filters),
+      matches: matches.map((row) => ({
+        sourceItem: row.sourceItem,
+        candidateId: `${store.corpusId}:${row.sourceItem.localItemId}`,
+        trustTier: row.trustTier,
+        ...searchGrantMatch(store, row),
+        rawExposed: false
+      }))
+    }
+  };
+}
+function searchGrantMatch(store, row, projection) {
+  if (!connectorStoreRowHasContent(row))
+    return {};
+  return {
+    [SEARCH_GRANT_MATCH]: row.metadataFallback ? { metadataFallback: { ...projection, ...connectorStoreHitFromRow(store, row.metadataFallback, -row.metadataFallback.rank) } } : {}
+  };
+}
+function searchGrantIdentityKey(identity) {
+  return JSON.stringify([
+    identity.provider,
+    identity.accountScope,
+    identity.providerItemId,
+    identity.providerConversationId,
+    identity.localItemId,
+    identity.sourceVersion
+  ]);
+}
+async function withVectorMetadataFallbacks(store, request, rows, accountScope, filters) {
+  if (!usesSearchGrants(filters) || rows.length === 0)
+    return [...rows];
+  const metadata = await store.searchItemsDetailedOffThread(request.query, MAX_SEARCH_RESULTS, accountScope, filters, {
+    prefix: false,
+    locate: false,
+    metadataCandidates: rows.map((row) => row.sourceItem)
+  }, request.deadlineAtMs !== undefined ? { deadlineAtMs: request.deadlineAtMs } : {});
+  const byVersion = new Map(metadata.rows.map((row) => [searchGrantIdentityKey(row.sourceItem), row]));
+  return rows.map((row) => {
+    const metadataFallback = byVersion.get(searchGrantIdentityKey(row.sourceItem));
+    return metadataFallback ? { ...row, metadataFallback } : row;
+  });
 }
 function createConnectorStoreCorpusAdapter(options) {
   const { store, embeddingProvider } = options;
@@ -67801,16 +68683,18 @@ function createConnectorStoreCorpusAdapter(options) {
     if (!embeddingProvider || useHybrid !== "hybrid" || semanticSkippedReason)
       return (async () => {
         const markStage = startStoreStageClock(stages);
-        let keywordLane = await connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters, { onPartialRows: partialKeywordRows(store, request, filters, options.resultProjector) }, request.deadlineAtMs);
+        const emitPartial = partialKeywordRows(store, request, filters, options.resultProjector);
+        let keywordLane = await connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters, { onPartialRows: emitPartial }, request.deadlineAtMs);
         markStage?.("keyword_lane_ms");
         keywordLane = await relaxEmptyLocalKeywordLane(store, request.query, request.maxResults, options.accountScope, filters, keywordLane, options.localKeywordFallback, {}, request.deadlineAtMs);
+        publishKeywordLane(emitPartial, keywordLane.rows);
         markStage?.("keyword_relaxation_ms");
         let recencyCut = false;
         const recencyRows = await chatRecencyLaneRows(store, options.accountScope, filters, request.deadlineAtMs, () => {
           recencyCut = true;
         });
         markStage?.("recency_read_ms");
-        keywordLane = (await revalidateSearchLanes(store, keywordLane, [], filters)).keyword;
+        keywordLane = (await refreshSearchTierVisibility(store, keywordLane, [])).keyword;
         markStage?.("keyword_revalidation_ms");
         const rows = keywordLane.rows;
         if (recencyRows.length === 0) {
@@ -67828,7 +68712,7 @@ function createConnectorStoreCorpusAdapter(options) {
             rawExposed: false
           };
           markStage?.("finalize_ms");
-          return response;
+          return withSearchGrantDelivery(store, filters, response, keywordLane.allRows);
         }
         const lanes = [
           { name: "keyword", items: rows },
@@ -67868,7 +68752,7 @@ function createConnectorStoreCorpusAdapter(options) {
           rawExposed: false
         };
         markStage?.("finalize_ms");
-        return response;
+        return withSearchGrantDelivery(store, filters, response, keywordLane.allRows);
       })();
     return hybridConnectorStoreSearch(store, embeddingProvider, request, startedAt, stages, options.accountScope, filters, semanticRelevanceBar, options.resultProjector, options.localKeywordFallback);
   };
@@ -67903,7 +68787,7 @@ function createConnectorStoreCorpusAdapter(options) {
     }
     const maxResults = Math.max(1, Math.min(Math.floor(request.maxResults), MAX_SEARCH_RESULTS));
     const lane = await store.vectorSearchLane(request.query, embeddingProvider, maxResults, options.accountScope, filters, request.deadlineAtMs);
-    return {
+    const response = {
       hits: lane.rows.map((row) => connectorStoreHitFromRow(store, row, row.bestCosine, options.resultProjector, filters?.locatorPathScope)),
       latencyMs: Date.now() - startedAt,
       laneAudits: [{
@@ -67920,14 +68804,18 @@ function createConnectorStoreCorpusAdapter(options) {
       matchCount: none,
       rawExposed: false
     };
+    const pending = withSearchGrantDelivery(store, filters, response, []);
+    return request[ROUTER_DELIVERS_SEARCH] ? pending : deliverCorpusSearch([pending]);
   };
   const metadataMatches = async (request) => {
     const startedAt = Date.now();
     const maxResults = Math.max(1, Math.min(Math.floor(request.maxResults), MAX_SEARCH_RESULTS));
     const hybrid = embeddingProvider !== undefined && (options.retrievalMode ?? "hybrid") === "hybrid" && (store.trustDomain !== "secure_local" || isApprovedSecureSourceEmbeddingProvider(embeddingProvider)) && store.vectorLaneServable(embeddingProvider.modelId);
-    const ftsOptions = { ...hybrid ? { prefix: false } : {}, locate: false, onPartialRows: partialKeywordRows(store, request, filters) };
+    const emitPartial = partialKeywordRows(store, request, filters);
+    const ftsOptions = { ...hybrid ? { prefix: false } : {}, locate: false, onPartialRows: emitPartial };
     const meaningLane = hybrid && request.context.lexicalOnly !== true;
     const readKeywordLane = await relaxEmptyLocalKeywordLane(store, request.query, maxResults, options.accountScope, filters, await connectorStoreKeywordLaneRows(store, request.query, maxResults, options.accountScope, filters, ftsOptions, request.deadlineAtMs), options.localKeywordFallback, ftsOptions, request.deadlineAtMs);
+    publishKeywordLane(emitPartial, readKeywordLane.rows);
     const semanticRows = [];
     let incomplete = false;
     if (meaningLane) {
@@ -67936,18 +68824,17 @@ function createConnectorStoreCorpusAdapter(options) {
         const lane = await store.vectorSearchLane(request.query, embeddingProvider, maxResults, options.accountScope, filters, request.deadlineAtMs, { locate: false });
         if (lane.skippedReason !== undefined)
           incomplete = true;
-        for (const row of lane.rows) {
-          if (row.bestCosine < bar)
-            continue;
-          semanticRows.push(row);
-        }
+        const rows = lane.rows.filter((row) => row.bestCosine >= bar);
+        const matches = await withVectorMetadataFallbacks(store, request, rows, options.accountScope, filters);
+        semanticRows.push(...matches);
+        publishPartialRows(store, request, matches, filters, (row) => -row.rank, undefined, "vector");
       }
     }
-    const { keyword: keywordLane, vectors } = await revalidateSearchLanes(store, readKeywordLane, semanticRows, filters);
+    const { keyword: keywordLane, vectors } = await refreshSearchTierVisibility(store, readKeywordLane, semanticRows);
     const visibleSemanticRows = vectors.filter((row) => !keywordLane.matchedItemIds.has(row.sourceItem.localItemId));
     const rows = [...keywordLane.rows, ...visibleSemanticRows];
     const semanticOnly = visibleSemanticRows.length;
-    return {
+    return withSearchGrantDelivery(store, filters, {
       hits: rows.slice(0, maxResults).map((row) => connectorStoreHitFromRow(store, row, -row.rank)),
       latencyMs: Date.now() - startedAt,
       matchCount: {
@@ -67957,20 +68844,25 @@ function createConnectorStoreCorpusAdapter(options) {
       },
       ...incomplete ? { incomplete: true } : {},
       rawExposed: false
-    };
+    }, [...keywordLane.allRows, ...visibleSemanticRows]);
   };
   const expanded = (request) => {
     const timing = beginSourceAnswerStoreTiming();
     assertConnectorStoreCorpusRequest(store, request);
     const response = withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), () => adapter(request, timing?.stages), store);
-    return timing ? response.then((result) => {
-      timing.finish();
-      return result;
-    }) : response;
+    if (!timing && request[ROUTER_DELIVERS_SEARCH])
+      return response;
+    return response.then((result) => {
+      timing?.finish();
+      return request[ROUTER_DELIVERS_SEARCH] ? result : deliverCorpusSearch([result]);
+    });
   };
   expanded.metadataMatches = (request) => {
     assertConnectorStoreCorpusRequest(store, request);
-    return withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), () => metadataMatches(request), store);
+    return withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), async () => {
+      const response = await metadataMatches(request);
+      return request[ROUTER_DELIVERS_SEARCH] ? response : deliverCorpusSearch([response]);
+    }, store);
   };
   expanded.selectedItemServable = (sourceItem) => store.selectedItemServable(sourceItem, options.accountScope, filters);
   expanded.prepareKeywords = async (query) => {
@@ -67988,7 +68880,8 @@ function createConnectorStoreCorpusAdapter(options) {
 async function chatRecencyLaneRows(store, accountScope, filters, deadlineAtMs, onCutShort) {
   if (store.family !== "chat")
     return [];
-  return store.recentItemsOffThread(CHAT_RECENCY_LANE_LIMIT, accountScope, filters, deadlineAtMs, onCutShort);
+  const rows = await store.recentItemsOffThread(CHAT_RECENCY_LANE_LIMIT, accountScope, filters, deadlineAtMs, onCutShort);
+  return rows.map((row) => ({ ...row, contentMatched: true }));
 }
 function connectorStoreHitFromRow(store, row, score, resultProjector, locatorPathScope) {
   let locatorRead = false;
@@ -68005,6 +68898,7 @@ function connectorStoreHitFromRow(store, row, score, resultProjector, locatorPat
   });
   return {
     ...projection ?? {},
+    ...searchGrantMatch(store, row, projection),
     sourceItem: row.sourceItem,
     provenance: provenanceFromSearchRow(store.corpusId, row, store.personCitationName(row)),
     candidateId: `${store.corpusId}:${row.sourceItem.localItemId}`,
@@ -68067,14 +68961,13 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, s
   const maxResults = Math.max(1, Math.min(Math.floor(request.maxResults), MAX_SEARCH_RESULTS));
   const laneLimit = Math.min(maxResults * 6, MAX_SEARCH_RESULTS);
   const markStage = startStoreStageClock(stages);
+  const emitPartial = partialKeywordRows(store, request, filters, resultProjector);
   const keywordWork = (async () => {
     const laneStartedAt = stages ? performance.now() : 0;
     const keywordStartedAt = Date.now();
-    const emitPartial = partialKeywordRows(store, request, filters, resultProjector);
     const lane = await connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false, onPartialRows: emitPartial }, request.deadlineAtMs);
     const baseline = keywordAlternatives(request.query)?.size ? lane.baseline ?? await withKeywordExpansionDisabled(() => connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false }, request.deadlineAtMs)) : undefined;
-    if (emitPartial)
-      emitPartial(await store.stillVisibleSearchRowsOffThread(lane.rows, filters));
+    publishKeywordLane(emitPartial, lane.rows);
     if (stages)
       stages.keyword_lane_ms = performance.now() - laneStartedAt;
     return { lane, baseline, elapsedMs: Date.now() - keywordStartedAt };
@@ -68084,14 +68977,16 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, s
     const vectorStartedAt = Date.now();
     const lane = await store.vectorSearchLane(request.query, provider, laneLimit, accountScope, filters, request.deadlineAtMs);
     const bar = semanticRelevanceBarFor(provider.modelId, semanticRelevanceBar);
-    const rows = bar === undefined ? lane.rows : lane.rows.filter((row) => row.bestCosine >= bar);
-    if (request.onPartialResponse) {
-      const visible = await store.stillVisibleSearchRowsOffThread(rows, filters);
-      publishPartialRows(store, request, visible, filters, (row) => row.bestCosine, resultProjector);
-    }
+    const vetted = bar === undefined ? [] : lane.rows.filter((row) => row.bestCosine >= bar);
+    const rows = await withVectorMetadataFallbacks(store, request, vetted, accountScope, filters);
+    publishPartialRows(store, request, rows, filters, (row) => row.bestCosine, resultProjector, "vector");
+    const byVersion = new Map(rows.map((row) => [searchGrantIdentityKey(row.sourceItem), row]));
     if (stages)
       stages.vector_lane_ms = performance.now() - laneStartedAt;
-    return { lane, elapsedMs: Date.now() - vectorStartedAt };
+    return {
+      lane: { ...lane, rows: lane.rows.map((row) => byVersion.get(searchGrantIdentityKey(row.sourceItem)) ?? row) },
+      elapsedMs: Date.now() - vectorStartedAt
+    };
   })();
   const [keywordResult, vectorResult] = await Promise.all([keywordWork, vectorWork]);
   markStage?.("join_wait_ms");
@@ -68116,6 +69011,8 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, s
   markStage?.("post_join_setup_ms");
   const relaxStartedAt = Date.now();
   keywordLane = await relaxEmptyLocalKeywordLane(store, request.query, laneLimit, accountScope, filters, keywordLane, localKeywordFallback, {}, request.deadlineAtMs);
+  if (keywordLane !== keywordResult.lane)
+    publishKeywordLane(emitPartial, keywordLane.rows);
   keywordElapsedMs += Date.now() - relaxStartedAt;
   markStage?.("keyword_relaxation_ms");
   let recencyCut = false;
@@ -68123,7 +69020,7 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, s
     recencyCut = true;
   });
   markStage?.("recency_read_ms");
-  const checked = await revalidateSearchLanes(store, keywordLane, vectorLane.rows, filters);
+  const checked = await refreshSearchTierVisibility(store, keywordLane, vectorLane.rows);
   keywordLane = checked.keyword;
   markStage?.("keyword_revalidation_ms");
   const scoredVectorRows = checked.vectors;
@@ -68207,7 +69104,7 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, s
     rawExposed: false
   };
   markStage?.("finalize_ms");
-  return response;
+  return withSearchGrantDelivery(store, filters, response, gateArmed ? [...keywordLane.allRows, ...vectorRows] : keywordLane.allRows);
 }
 function hybridMatchCount(keyword, lexicalItemIds, vectorRows, gateArmed) {
   if (!gateArmed)
@@ -68239,7 +69136,11 @@ function normalizeSemanticRelevanceBar(value) {
   return value;
 }
 async function connectorStoreKeywordLaneRows(store, query, limit, accountScope, filters, ftsOptions = {}, deadlineAtMs) {
-  ftsOptions = { ...ftsOptions, conceptHitMemo: ftsOptions.conceptHitMemo ?? new Map };
+  ftsOptions = {
+    ...ftsOptions,
+    conceptHitMemo: ftsOptions.conceptHitMemo ?? new Map,
+    prepareGrantFallbacks: usesSearchGrants(filters)
+  };
   const pool = deadlineAtMs !== undefined ? { deadlineAtMs } : {};
   const plain = await store.searchItemsDetailedOffThread(query, MAX_SEARCH_RESULTS, accountScope, filters, ftsOptions, pool);
   const rows = plain.rows;
@@ -68280,7 +69181,7 @@ async function connectorStoreKeywordLaneRows(store, query, limit, accountScope, 
       readable: connectorStoreRowHasContent
     });
   }
-  const baseline = keywordExpansionDisabled() || ftsOptions.relaxed || !keywordExpansionChangesSearch(query, ftsOptions) ? undefined : await withKeywordExpansionDisabled(() => connectorStoreKeywordLaneRows(store, query, limit, accountScope, filters, ftsOptions, deadlineAtMs));
+  const baseline = keywordExpansionDisabled() || ftsOptions.relaxed || !keywordExpansionChangesSearch(query, ftsOptions) ? undefined : await withKeywordExpansionDisabled(() => connectorStoreKeywordLaneRows(store, query, limit, accountScope, filters, { ...ftsOptions, onPartialRows: undefined }, deadlineAtMs));
   const enriched = new Map(ordered.map((row) => [row.sourceItem.localItemId, row]));
   const allRows = baseline ? [
     ...baseline.allRows.map((row) => complete.has(row.sourceItem.localItemId) ? enriched.get(row.sourceItem.localItemId) ?? row : row),
@@ -68296,9 +69197,6 @@ async function connectorStoreKeywordLaneRows(store, query, limit, accountScope, 
       saturated: plain.saturated || content.saturated || (baseline?.matchCount.saturated ?? false),
       secureMatchedItems: allRows.filter(connectorStoreRowIsSecureTier).length
     },
-    ...filters?.metadataOnlyLocatorPathScopes?.length || filters?.metadataOnlySourceScopeFolderKeys?.length ? {
-      readMetadataMatches: (items) => store.searchItemsDetailedOffThread(query, MAX_SEARCH_RESULTS, accountScope, filters, { ...ftsOptions, locate: false, metadataCandidates: items, onPartialRows: undefined }, pool)
-    } : {},
     matchedItemIds: allIds,
     completeItemIds: new Set([...complete, ...baseline?.completeItemIds ?? []]),
     ...(baseline?.nameLeaderItemId ?? nameLeader) !== undefined ? { nameLeaderItemId: baseline?.nameLeaderItemId ?? nameLeader } : {},
@@ -68331,46 +69229,22 @@ function keywordExpansionChangesSearch(query, ftsOptions) {
   const shape = () => JSON.stringify([toFtsQuery(query, ftsOptions), sourceIndexFtsTermGroups(query), sourceIndexTopicTokens(query)]);
   return shape() !== withKeywordExpansionDisabled(shape);
 }
-async function revalidateSearchLanes(store, lane, vectors, filters) {
+async function refreshSearchTierVisibility(store, lane, vectors) {
   const candidates = [...lane.allRows, ...vectors];
-  let visible = new Set(await store.stillVisibleSearchRowsOffThread(candidates, filters));
+  const visible = new Set(await store.stillVisibleSearchRowsOffThread(candidates));
   if (visible.size === candidates.length)
     return { keyword: lane, vectors: [...vectors] };
-  const withdrawn = lane.allRows.filter((row) => !visible.has(row) && connectorStoreRowHasContent(row));
-  const metadata = withdrawn.length ? await lane.readMetadataMatches?.(withdrawn.map((row) => row.sourceItem)) : undefined;
-  if (metadata) {
-    visible = new Set(await store.stillVisibleSearchRowsOffThread([...candidates, ...metadata.rows], filters));
-  }
   const retained = lane.allRows.filter((row) => visible.has(row));
   const served = new Set(retained.map((row) => row.sourceItem.localItemId));
-  const complete = new Set([...lane.completeItemIds].filter((id) => served.has(id)));
-  const shares = new Map([...lane.conceptShare ?? []].filter(([id]) => served.has(id)));
-  if (metadata) {
-    const { rows, concepts } = metadata;
-    for (const row of rows) {
-      const id = row.sourceItem.localItemId;
-      if (!visible.has(row) || served.has(id))
-        continue;
-      retained.push(row);
-      served.add(id);
-      const total = concepts.total;
-      const matched = concepts.matched.get(id) ?? 0;
-      if (total > 0) {
-        shares.set(id, matched / total);
-        if (matched >= total)
-          complete.add(id);
-      }
-    }
-  }
   return {
     vectors: vectors.filter((row) => visible.has(row)),
     keyword: {
       rows: retained.slice(0, lane.rows.length),
       allRows: retained,
       matchedItemIds: served,
-      completeItemIds: complete,
+      completeItemIds: new Set([...lane.completeItemIds].filter((id) => served.has(id))),
       ...lane.nameLeaderItemId !== undefined && served.has(lane.nameLeaderItemId) ? { nameLeaderItemId: lane.nameLeaderItemId } : {},
-      conceptShare: shares,
+      conceptShare: new Map([...lane.conceptShare ?? []].filter(([id]) => served.has(id))),
       matchCount: {
         matchedItems: retained.length,
         contentMatchedItems: retained.filter(connectorStoreRowHasContent).length,
@@ -70805,6 +71679,7 @@ var init_local_index = __esm(() => {
   init_embeddings();
   init_manifest();
   init_media_judge();
+  init_router();
   init_types();
   init_sqlite_store();
   CONCEPT_COUNT_MAX_AGE_MS = 5 * 60000;
@@ -78781,34 +79656,26 @@ ${parentKey(ref)}`, { ref, origin });
     stillVisibleSearchRows(rows) {
       return visibilityHere(this.stillVisibleSearchRowsSteps(rows));
     }
-    async stillVisibleSearchRowsOffThread(rows, filters) {
-      return visibilityAwaited(() => this.stillVisibleSearchRowsSteps(rows, filters), this.childVisibilityLane());
+    async stillVisibleSearchRowsOffThread(rows) {
+      return visibilityAwaited(() => this.stillVisibleSearchRowsSteps(rows), this.childVisibilityLane());
     }
-    *stillVisibleSearchRowsSteps(rows, filters) {
-      const visible = yield* this.tierVisibleRowsSteps(rows, (row) => row.sourceItem, (row) => connectorStoreRowHasContent(row) ? "content" : "metadata");
-      return yield* this.keywordGrantVisibleRowsSteps(visible, filters);
+    *stillVisibleSearchRowsSteps(rows) {
+      return yield* this.tierVisibleRowsSteps(rows, (row) => row.sourceItem, (row) => connectorStoreRowHasContent(row) ? "content" : "metadata");
     }
-    grantedPartialRows(rows, filters) {
-      return this.closedForPoolReads ? [] : visibilityHere(this.keywordGrantVisibleRowsSteps(rows, filters));
-    }
-    *keywordGrantVisibleRowsSteps(rows, filters) {
-      if (!filters?.metadataOnlyLocatorPathScopes?.length && !filters?.metadataOnlySourceScopeFolderKeys?.length)
-        return rows;
-      const content = rows.filter(connectorStoreRowHasContent);
-      if (content.length === 0)
-        return rows;
+    searchGrantLayers(hits, filters) {
+      if (this.closedForPoolReads)
+        return new Map;
       const metadataOnly = connectorStoreMetadataOnlySql(filters, this.onDemandReadsTablePresent);
-      if (!metadataOnly.sql)
-        return rows;
-      const allowed = yield* this.visibilityStoreRead({
+      const read = {
         mode: "all",
-        sql: `SELECT candidate.key AS idx FROM json_each(?) candidate CROSS JOIN items i
+        sql: `SELECT candidate.key AS idx, ${metadataOnly.sql} AS names_only
+        FROM json_each(?) candidate CROSS JOIN items i
         WHERE ${FTS_CANDIDATE_IDENTITY_SQL}
-          AND i.tombstoned = 0 AND NOT ${metadataOnly.sql}`,
-        params: [JSON.stringify(content.map((row) => row.sourceItem)), ...metadataOnly.params]
-      });
-      const served = new Set(allowed.map((row) => content[row.idx]));
-      return rows.filter((row) => !connectorStoreRowHasContent(row) || served.has(row));
+          AND i.tombstoned = 0`,
+        params: [...metadataOnly.params, JSON.stringify(hits.map((hit) => hit.sourceItem))]
+      };
+      const allowed = visibilityHere(this.visibilityStoreRead(read));
+      return new Map(allowed.map((row) => [hits[row.idx], row.names_only ? "metadata" : "content"]));
     }
     closedForPoolReads = false;
     conceptCountMemo;
@@ -78906,6 +79773,7 @@ ${parentKey(ref)}`, { ref, origin });
       const matchedGroupIndexes = new Map;
       let conceptWeights;
       const selected = [];
+      const fallbackRows = new Map;
       const seen = new Set;
       let scanned = 0;
       let pageSize = fetchLimit;
@@ -79011,12 +79879,33 @@ ${parentKey(ref)}`, { ref, origin });
           ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
         }), (row) => row.chunk_pk === null || row.chunk_pk === undefined ? "metadata" : "content");
         selected.push(...visible);
+        if (ftsOptions.prepareGrantFallbacks && visible.length > 0) {
+          const pageBodies = visible.filter((row) => row.chunk_pk != null);
+          if (pageBodies.length > 0) {
+            const metadataCandidates = pageBodies.map((row) => searchRowFromItemRow(row).sourceItem);
+            const metadata = yield* this.searchItemsSteps(query, MAX_SEARCH_RESULTS, accountScope, filters, {
+              ...ftsOptions,
+              contentOnly: false,
+              locate: false,
+              onPartialRows: undefined,
+              prepareGrantFallbacks: false,
+              metadataCandidates
+            });
+            const byVersion = new Map(metadata.rows.map((row) => [searchGrantIdentityKey(row.sourceItem), row]));
+            for (const [index, candidate] of metadataCandidates.entries()) {
+              const fallback = byVersion.get(searchGrantIdentityKey(candidate));
+              if (fallback)
+                fallbackRows.set(pageBodies[index].item_pk, fallback);
+            }
+          }
+        }
         if (visible.length > 0 && ftsOptions.onPartialRows) {
           const partial = selected.slice(0, limit).map((row) => ({
             ...searchRowFromItemRow(row),
-            ...row.chunk_pk != null ? { contentMatched: true } : {}
+            ...row.chunk_pk != null ? { contentMatched: true } : {},
+            ...fallbackRows.has(row.item_pk) ? { metadataFallback: fallbackRows.get(row.item_pk) } : {}
           }));
-          ftsOptions.onPartialRows(yield* this.keywordGrantVisibleRowsSteps(partial, filters));
+          ftsOptions.onPartialRows(partial, ftsOptions.contentOnly);
         }
         if (exhausted || selected.length >= limit || visible.length === signalled.length || scanned >= KEYWORD_CANDIDATE_SCAN_CAP)
           break;
@@ -79028,7 +79917,8 @@ ${parentKey(ref)}`, { ref, origin });
       const locatedRows = [];
       const chunks = ftsOptions.locate === false ? new Map : yield* this.keywordChunkMatchesSteps(kept, spanTerms);
       for (const [index, row] of kept.entries()) {
-        const base = searchRowFromItemRow(row);
+        const fallback = fallbackRows.get(row.item_pk);
+        const base = { ...searchRowFromItemRow(row), ...fallback ? { metadataFallback: fallback } : {} };
         if (ftsOptions.locate === false || row.chunk_pk === null || row.chunk_pk === undefined) {
           located.push(row.chunk_pk === null || row.chunk_pk === undefined || ftsOptions.locate !== false ? base : { ...base, contentMatched: true });
           locatedRows.push(row);
@@ -98022,6 +98912,10 @@ var init_vocabulary = __esm(() => {
       privateAnswers: { title: "Privacy", line: "Ask privately, your private inbox, and how Private items are answered" },
       connector: { title: "Build a connector", line: "For a source Olympus does not have yet" }
     },
+    overrideReview: {
+      sentence: "Text you marked Personal changed. Olympus found a possible secret ({kinds}) and is holding the text Private.",
+      open: "Review changed items"
+    },
     waiting: { one: "1 unread private answer", many: "{count} unread private answers" },
     locked: "Open dashboard controls first",
     readOnlyOpenClaw: "Reconnect OpenClaw with operator.write access to change this",
@@ -98959,6 +99853,11 @@ var init_vocabulary = __esm(() => {
     noMatch: "No items match. Try part of a title, a sender or a file name.",
     apps: "An AI app can ask to make an item Private. Only you, here on this computer, can make one Personal.",
     changedByYou: "Changed by you",
+    reviewFilter: "Needs your review",
+    reviewEmpty: "No Personal overrides need your review.",
+    reviewReason: "You marked this item Personal. Its text changed and may contain a secret ({kinds}). Olympus is holding this version Private.",
+    confirmReview: "Confirm Personal for this text",
+    liftOverride: "Lift Personal override",
     notSorted: "Not sorted yet",
     moving: "Moving to {tier}",
     untitled: "Untitled item",
@@ -104336,6 +105235,18 @@ function restoreClearedOverride(set, record) {
   }
   if (ledger.rejudgeQuestion(identity))
     return false;
+  if (ownerOverrideSecretReview(record.reasons) || record.reasons.includes(OWNER_OVERRIDE_SECRET_CONFIRMED_REASON)) {
+    if (ledger.writeIntent(identity))
+      return false;
+    const report = emptyTierRejudgeReport();
+    rejudgeStoredContent(set, record, { report, autoMoves: true, preserveMetadata: true });
+    if (report.secrets > 0 || report.updated > 0 || report.movesQueued > 0) {
+      if (request)
+        ledger.completeOverrideRestore(identity, request.receipt);
+      return true;
+    }
+    return false;
+  }
   const before = ledger.settledDecisionBeforeOverride(identity);
   if (!before || before.metadataTier === "secrets" || before.contentTier === "secrets")
     return false;
@@ -104435,9 +105346,15 @@ function applyOne(set, record, tier, retirePublic, report, guard) {
   const ledger = set.ledger;
   const identity = identityOf3(record);
   const lowerOverride = tier === "private" || tier === "public";
+  const override = guard.override;
+  const review = ownerOverrideSecretReview(record.reasons);
+  if (lowerOverride && review && (override?.kind !== "tier" || override.confirmedDigest !== review.digest))
+    return;
   const source = copyServingLayer(ledger.copies(identity).filter((copy) => copy.state === "current"), "content");
   const stored = lowerOverride && source ? set.store(source.trustDomain)?.exportItemCopy(identity) : undefined;
   const text = stored?.chunks.length ? stored.chunks.map((chunk) => chunk.boundedText).join("") : undefined;
+  if (lowerOverride && review && (text === undefined || review.digest !== contentDigestReason(text) || ledger.writeIntent(identity)))
+    return;
   if (lowerOverride && record.contentTier === "secrets" && !text?.trim())
     return;
   const holdUntilJudged = set.holdsContentUntilJudged() || heldUntilJudged(record.reasons);
@@ -104446,8 +105363,9 @@ function applyOne(set, record, tier, retirePublic, report, guard) {
     provider: record.provider,
     subject: identity,
     ...text !== undefined ? { text } : {},
+    ...record.contentTier === "secrets" ? { heldSecret: true } : {},
     ...holdUntilJudged ? { holdUntilJudged: true } : {}
-  }, { override: { kind: "tier", tier }, ...retirePublic ? { retirePublic: true } : {} });
+  }, { ...override ? { override } : {}, ...retirePublic ? { retirePublic: true } : {} });
   const secrets = decision.contentTier === "secrets";
   if (record.state === "moving" && !secrets) {
     const outcome = ledger.queueOwnerRaise(identity, decision, leastPrivateDomain(set, decision), { guard });
@@ -104651,8 +105569,8 @@ function raiseRoutedItem(set, record, rules, inputs, extraSignals = {}) {
   if (matched.length === 0)
     return "unchanged";
   const ruleTier = matched.reduce((tier, rule) => maxTier(tier, rule.tier), "public");
-  const metadataTier = maxTier(maxTier(record.metadataTier, record.targetMetadataTier ?? record.metadataTier), ruleTier);
   const moving = record.state === "moving";
+  const metadataTier = maxTier(record.targetMetadataTier ?? record.metadataTier, ruleTier);
   if (!moving && tierRank(metadataTier) <= tierRank(record.metadataTier))
     return "unchanged";
   const classified = classifyItemTiers({ signals, provider: record.provider, subject: identity }, {
@@ -104660,7 +105578,7 @@ function raiseRoutedItem(set, record, rules, inputs, extraSignals = {}) {
     ...inputs.retirePublic ? { retirePublic: true } : {}
   });
   const ruleReasons = classified.reasons.filter((reason) => reason.startsWith("metadata:owner_rule:"));
-  const contentTier = maxTier(maxTier(record.contentTier, record.targetContentTier ?? record.contentTier), metadataTier);
+  const contentTier = maxTier(record.targetContentTier ?? record.contentTier, ruleTier);
   const contentPending = record.contentPending && tierRank(contentTier) < tierRank("secure");
   const decision = {
     metadataTier,
@@ -104684,7 +105602,8 @@ function raiseRoutedItem(set, record, rules, inputs, extraSignals = {}) {
     return settleRoutedSecrets(set, identity, decision, exported, { findingKinds: ["owner_marked_secret"] }) ? "secrets" : "unchanged";
   }
   if (moving) {
-    return set.ledger.queueOwnerRaise(identity, decision, leastPrivateDomain(set, decision)) === "none" ? "unchanged" : "raised";
+    const floor = leastPrivateDomain(set, { ...decision, metadataTier: ruleTier, contentTier: ruleTier });
+    return set.ledger.queueOwnerRaise(identity, decision, floor) === "none" ? "unchanged" : "raised";
   }
   set.ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision));
   return "raised";
@@ -105664,7 +106583,8 @@ class TieredStoreSet {
     if (decision.contentPending)
       return decision;
     const destination = copyServingLayer(this.placementFor(decision).copies, "content");
-    return destination?.trustDomain === "internal" && !personalContentAuthorized(decision, text, this.ledger.getOverride(identity)?.kind === "not_secret") ? { ...decision, state: "pending", contentPending: true } : decision;
+    const override = this.ledger.getOverride(identity);
+    return destination?.trustDomain === "internal" && !personalContentAuthorized(decision, text, override?.kind === "not_secret", override) ? { ...decision, state: "pending", contentPending: true } : decision;
   }
   declarePrivateEmbedder(provider, options = {}) {
     this.privateEmbedder = provider;
@@ -106467,11 +107387,19 @@ class TieredRoutingRun {
     const promoted = TIER_DOMAIN_ORDER.some((domain) => this.set.store(domain)?.readOnDemand(item.identity.localItemId, item.identity.sourceVersion ?? ""));
     const namesOnly = deferred && !promoted && (input.metadataOnly || CONTAINER_MIME_TYPES.includes(item.mimeType?.trim().toLowerCase() ?? "") || this.set.ownerKeepsNamesOnly(pathOf(sourceExclusionFactsFromMetadata(item.metadata).path)));
     const text = namesOnly ? undefined : connectorStoreItemText(item);
+    const override = before?.contentTier === "secrets" && text?.trim() && !input.contentFetchFailed ? ledger.getOverride(identity) : undefined;
+    let freshSecretReplacement = false;
+    if (override?.kind === "tier" && (override.tier === "private" || override.tier === "public") && text !== undefined) {
+      const oldHash = this.set.secrets()?.get(identity)?.contentHash;
+      const sourceVersion = typeof item.metadata.contentVersion === "string" ? item.metadata.contentVersion : identity.sourceVersion;
+      freshSecretReplacement = oldHash !== undefined && oldHash !== null ? oldHash !== createHash53("sha256").update(text).digest("hex") : sourceVersion === undefined || !TIER_DOMAIN_ORDER.some((domain) => this.set.store(domain)?.storedItemState(identity)?.version === sourceVersion);
+    }
     const classification = this.classification;
     let decision = decideItemTiers(connector, item, text, classification, ledger, {
       namesOnly,
       requireContentVerdict: hasRow && !routed,
       afterFirstImport: ledger.listingCaughtUp(connector.id),
+      ...freshSecretReplacement ? { freshSecretReplacement: true } : {},
       ...input.contentFetchFailed ? { contentFetchFailed: true } : {},
       storedContentNames: () => {
         const serving = copyServingLayer(ledger.copies(identity).filter((copy) => copy.state === "current"), "content");
@@ -106552,7 +107480,8 @@ class TieredRoutingRun {
     const firstPrivateWrite = legacyRaise || replacingLowerBody;
     const priorIntent = before?.state === "moving" ? ledger.writeIntent(identity) : undefined;
     const holdsReplacement = (routed || hasRow) && contentRead && (firstPrivateWrite || item.holdContentUntilJudged === true || contentHeldForJudgment(decision)) && decision.contentTier !== "secrets" && before?.state !== "moving";
-    const replacesInPlace = holdsReplacement && currentCopies.length > 0 && (!routed || placementIsRaise(currentCopies, placement.copies));
+    const restoresChangedSecret = before?.contentTier === "secrets" && decision.reasons.includes(OWNER_OVERRIDE_SECRET_REVIEW_REASON);
+    const replacesInPlace = holdsReplacement && (restoresChangedSecret || currentCopies.length > 0 && (!routed || placementIsRaise(currentCopies, placement.copies)));
     const legacyLanding = firstPrivateWrite && !contentHeldForJudgment(decision) ? this.set.placementFor({ ...decision, metadataPending: true }) : undefined;
     const writes = legacyLanding ?? placement;
     const placedDomains = new Set(writes.copies.map((copy) => copy.trustDomain));
@@ -109761,692 +110690,6 @@ var init_analyst_openclaw_infer = __esm(() => {
       this.safeReason = message;
     }
   };
-});
-
-// src/core/source-index/router.ts
-function applySourceIndexVisibilityGate(gate, hits, report) {
-  return gate.offThread ? gate.offThread(hits, report) : Promise.resolve(gate(hits, report));
-}
-async function routeSourceIndexSearch(options) {
-  return withKeywordRequestScope(() => routePreparedSourceIndexSearch(options));
-}
-async function routePreparedSourceIndexSearch(options) {
-  const request = normalizeSearchRequest(options.request);
-  const candidateCorpora = options.registry.list();
-  const skippedCorpora = [];
-  const searchedCorpora = [];
-  const laneAudits = [];
-  const degradations = [];
-  const corpusTimings = [];
-  const lanes = [];
-  const matchCounts = [];
-  const incompleteCorpora = [];
-  let encounteredSecureLocal = false;
-  const secureLaneAudits = [];
-  const startedAt = Date.now();
-  const searchableCorpora = [];
-  for (const corpus of candidateCorpora) {
-    const skipReason = skipReasonForCorpus(corpus, request);
-    if (skipReason) {
-      skippedCorpora.push({ corpusId: corpus.corpusId, trustDomain: corpus.trustDomain, reason: skipReason });
-      continue;
-    }
-    const adapter = options.adapters[corpus.corpusId];
-    if (!adapter) {
-      skippedCorpora.push({ corpusId: corpus.corpusId, trustDomain: corpus.trustDomain, reason: "no_adapter" });
-      degradations.push({
-        laneName: corpus.corpusId,
-        laneType: "keyword",
-        reason: "lane_no_adapter",
-        occurrences: 1
-      });
-      continue;
-    }
-    if (request.context.metadataOnly === true && !adapter.metadataMatches) {
-      skippedCorpora.push({ corpusId: corpus.corpusId, trustDomain: corpus.trustDomain, reason: "metadata_search_unsupported" });
-      continue;
-    }
-    searchableCorpora.push(corpus);
-  }
-  const retrievalStates = new Map(searchableCorpora.map((corpus) => [
-    corpus.corpusId,
-    retrievalStateForAdapter(options.adapters[corpus.corpusId], {
-      query: request.query,
-      maxResults: request.maxResults,
-      corpus,
-      context: request.context
-    })
-  ]));
-  const semanticPrepareBudgetMs = options.semanticPrepareBudgetMs ?? DEFAULT_SEMANTIC_PREPARE_BUDGET_MS;
-  let prepareKeywordsMaxMs = 0;
-  let keywordModel;
-  let prepareSemanticMaxMs = 0;
-  const timed = async (run) => {
-    const started = Date.now();
-    try {
-      await run();
-    } catch {}
-    return Date.now() - started;
-  };
-  const prepareStartedAt = Date.now();
-  await Promise.all(searchableCorpora.map(async (corpus) => {
-    const adapter = options.adapters[corpus.corpusId];
-    const semantic = adapter.prepareSemantic && semanticPrepareBudgetMs > 0 && request.context.metadataOnly !== true && retrievalStates.get(corpus.corpusId).hybridServable;
-    const [keywordsMs, semanticMs] = await Promise.all([
-      timed(async () => {
-        const prepared = await adapter.prepareKeywords?.(request.query).catch(() => ({ incomplete: true }));
-        if (prepared?.keyword_model && (!keywordModel || keywordModel === "ready" || prepared.keyword_model === "cold")) {
-          keywordModel = prepared.keyword_model;
-        }
-        if (prepared?.incomplete)
-          degradations.push({ laneName: `${corpus.corpusId}:keywords`, laneType: "keyword", reason: "lane_timeout", detail: "keyword_preparation_incomplete", occurrences: 1 });
-      }),
-      semantic ? timed(() => adapter.prepareSemantic(request.query, semanticPrepareBudgetMs)) : Promise.resolve(0)
-    ]);
-    prepareKeywordsMaxMs = Math.max(prepareKeywordsMaxMs, keywordsMs);
-    prepareSemanticMaxMs = Math.max(prepareSemanticMaxMs, semanticMs);
-  }));
-  const lanesStartedAt = Date.now();
-  const laneTimeoutMs = resolveLaneTimeoutMs(options.laneTimeoutMs);
-  const matchingIds = new Set;
-  const laneOutcomes = await Promise.all(searchableCorpora.map(async (corpus) => {
-    const adapter = options.adapters[corpus.corpusId];
-    let progress = () => {};
-    let partial;
-    const corpusRequest = {
-      query: request.query,
-      maxResults: options.storeSearchDepth ?? request.maxResults,
-      corpus,
-      context: request.context,
-      onProgress: () => progress(),
-      onPartialResponse: (response, currentHits) => {
-        assertSafeCorpusSearchResponse(response);
-        partial = () => {
-          const hits = (currentHits?.() ?? response.hits).slice(0, corpusRequest.maxResults);
-          const prefix = { hits, latencyMs: response.latencyMs, incomplete: true, rawExposed: false };
-          assertSafeCorpusSearchResponse(prefix);
-          return prefix;
-        };
-      }
-    };
-    let finalMatches = [];
-    const retrievalState = retrievalStates.get(corpus.corpusId).state;
-    const metadataMatches = request.context.metadataOnly === true ? adapter.metadataMatches : undefined;
-    const outcome = await runCorpusLaneUntilIdle((report) => {
-      progress = report;
-      return withSourceIndexReadProgress(report, () => runInSourceAnswerLane(corpus.corpusId, async () => {
-        const response = await (metadataMatches ?? adapter)(corpusRequest);
-        if (request.readWide)
-          finalMatches = response.hits;
-        if (metadataMatches)
-          return response;
-        const depth = request.poolAllocation?.storeDepth;
-        const neighbours = response.semanticNeighbourHits;
-        if (depth === undefined || !neighbours?.length || response.hits.length >= depth)
-          return response;
-        const key = (hit) => `${hit.sourceItem.providerItemId}\x00${hit.sourceItem.localItemId ?? ""}`;
-        const seen = new Set(response.hits.map(key));
-        const added = neighbours.filter((hit) => !seen.has(key(hit))).slice(0, depth - response.hits.length);
-        return added.length === 0 ? response : { ...response, hits: [...response.hits, ...added] };
-      }));
-    }, laneTimeoutMs, corpus.corpusId, options.laneClock ?? REAL_LANE_CLOCK);
-    return { corpus, outcome, retrievalState, partial, finalMatches };
-  }));
-  for (const { corpus, outcome, retrievalState, partial, finalMatches } of laneOutcomes) {
-    if (outcome.kind === "timeout") {
-      skippedCorpora.push({ corpusId: corpus.corpusId, trustDomain: corpus.trustDomain, reason: "lane_timeout" });
-      degradations.push({
-        laneName: corpus.corpusId,
-        laneType: "keyword",
-        reason: "lane_timeout",
-        occurrences: 1
-      });
-      corpusTimings.push({
-        corpusId: corpus.corpusId,
-        elapsedMs: outcome.elapsedMs,
-        outcome: "timeout"
-      });
-      if (!partial)
-        continue;
-      incompleteCorpora.push(corpus.corpusId);
-    }
-    const response = outcome.kind === "response" ? outcome.response : partial();
-    if (request.readWide) {
-      for (const hit of outcome.kind === "response" ? finalMatches : response.hits) {
-        matchingIds.add(routedHitCandidateId({ ...hit, corpusId: corpus.corpusId, trustDomain: corpus.trustDomain }));
-      }
-    }
-    if (outcome.kind === "response")
-      corpusTimings.push({
-        corpusId: corpus.corpusId,
-        elapsedMs: outcome.elapsedMs,
-        adapterReportedMs: response.latencyMs,
-        outcome: "success"
-      });
-    searchedCorpora.push(corpus.corpusId);
-    if (response.incomplete === true && !incompleteCorpora.includes(corpus.corpusId))
-      incompleteCorpora.push(corpus.corpusId);
-    const corpusLaneAuditsStart = laneAudits.length;
-    laneAudits.push(...response.laneAudits ?? []);
-    const contributedSecure = corpusContributedSecure(corpus, response);
-    if (contributedSecure)
-      encounteredSecureLocal = true;
-    if (response.matchCount) {
-      matchCounts.push({
-        corpusId: corpus.corpusId,
-        family: corpus.family,
-        trustDomain: corpus.trustDomain,
-        trustTier: corpus.defaultSensitivity.trustTier,
-        matchedItems: response.matchCount.matchedItems,
-        contentMatchedItems: response.matchCount.contentMatchedItems,
-        saturated: response.matchCount.saturated,
-        ...response.matchCount.secureMatchedItems !== undefined ? { secureMatchedItems: response.matchCount.secureMatchedItems } : {}
-      });
-    }
-    if (corpus.activationMode !== "lexical_only") {
-      laneAudits.push(sourceIndexRetrievalStateLaneAudit({
-        corpusId: corpus.corpusId,
-        localOnly: corpus.storageProfile.placement === "local_private",
-        state: retrievalState
-      }));
-      const semanticLoss = semanticLaneDegradation(corpus.corpusId, retrievalState, response);
-      if (semanticLoss)
-        degradations.push(semanticLoss);
-    }
-    const newestLoss = recentItemsLaneDegradation(corpus.corpusId, response);
-    if (newestLoss)
-      degradations.push(newestLoss);
-    if (contributedSecure)
-      secureLaneAudits.push(...laneAudits.slice(corpusLaneAuditsStart));
-    lanes.push({
-      name: corpus.corpusId,
-      ...response.storeRelevance ? { relevance: response.storeRelevance } : {},
-      ...request.readWide ? { matchingIds } : {},
-      items: response.hits.map((hit) => ({
-        ...hit,
-        corpusId: corpus.corpusId,
-        trustDomain: corpus.trustDomain
-      })),
-      ...request.poolAllocation?.semanticSeats && response.semanticRows?.hits.length ? { semantic: response.semanticRows.hits.map((hit) => ({
-        hit: { ...hit, corpusId: corpus.corpusId, trustDomain: corpus.trustDomain },
-        margin: (hit.score ?? Number.NEGATIVE_INFINITY) - response.semanticRows.bar
-      })) } : {}
-    });
-  }
-  const lanesSettledAt = Date.now();
-  if (options.visibilityGate) {
-    const unchecked = new Set;
-    const kept = new Set(await applySourceIndexVisibilityGate(options.visibilityGate, lanes.flatMap((lane) => [
-      ...lane.items,
-      ...(lane.semantic ?? []).map((seat) => seat.hit)
-    ]), {
-      onUnchecked: (corpusIds) => {
-        for (const corpusId of corpusIds)
-          unchecked.add(corpusId);
-      }
-    }));
-    for (const lane of lanes) {
-      lane.items = lane.items.filter((hit) => {
-        if (kept.has(hit))
-          return true;
-        if (request.readWide)
-          matchingIds.delete(routedHitCandidateId(hit));
-        return false;
-      });
-      if (lane.semantic)
-        lane.semantic = lane.semantic.filter((seat) => kept.has(seat.hit));
-    }
-    for (const corpusId of [...unchecked].sort())
-      degradations.push(visibilityCheckDegradation(corpusId));
-  }
-  options.onSeatingLanes?.(lanes);
-  const recency = seatRoutedLanes(lanes, request);
-  const { hits: fused, degradations: budgetDegradations } = recency;
-  const result = {
-    hits: fused,
-    ...request.readWide ? { matchingCandidateIds: [...matchingIds] } : {},
-    searchedCorpora,
-    skippedCorpora,
-    laneAudits,
-    degradations: mergeRetrievalDegradations(degradations, budgetDegradations),
-    corpusTimings,
-    ...matchCounts.length > 0 ? { matchCounts } : {},
-    ...incompleteCorpora.length > 0 ? { incompleteCorpora } : {},
-    encounteredSecureLocal,
-    secureLaneAudits,
-    ...recency.recencySeats > 0 ? { recencySeats: recency.recencySeats } : {},
-    ...recency.semanticSeats?.length ? { semanticSeats: recency.semanticSeats } : {},
-    latencyMs: Date.now() - startedAt,
-    rawExposed: false
-  };
-  assertSafeRoutedSearchResponse(result);
-  recordSourceAnswerQueryStages({
-    prepare_ms: lanesStartedAt - prepareStartedAt,
-    prepare_keywords_max_ms: prepareKeywordsMaxMs,
-    ...keywordModel && { keyword_model: keywordModel },
-    prepare_semantic_max_ms: prepareSemanticMaxMs,
-    lanes_ms: lanesSettledAt - lanesStartedAt,
-    after_lanes_ms: Date.now() - lanesSettledAt
-  });
-  return result;
-}
-function withSemanticPoolSeats(hits, lanes, seats) {
-  if (seats <= 0)
-    return { hits: [...hits], seated: [] };
-  const taken = new Set(hits.map(routedHitCandidateId));
-  const offered = lanes.flatMap((lane) => lane.semantic ?? []).filter((seat) => Number.isFinite(seat.margin)).sort((left, right) => right.margin - left.margin);
-  const perStore = new Map;
-  const seated = [];
-  for (const seat of offered) {
-    if (seated.length >= seats)
-      break;
-    const id = routedHitCandidateId(seat.hit);
-    const used = perStore.get(seat.hit.corpusId) ?? 0;
-    if (taken.has(id) || used >= SEMANTIC_POOL_SEATS_PER_STORE)
-      continue;
-    taken.add(id);
-    perStore.set(seat.hit.corpusId, used + 1);
-    seated.push(seat);
-  }
-  return { hits: [...hits, ...seated.map((seat) => seat.hit)], seated };
-}
-function seatRoutedLanes(lanes, options) {
-  const laneOrder = storeOrderForQuestion(lanes);
-  const fusedAll = fuseRankedCandidateLanes({
-    lanes,
-    getId: routedHitCandidateId,
-    limit: lanes.reduce((total, lane) => total + lane.items.length, 0),
-    tieBreaker: (left, right) => compareTiedRoutedCandidates(left, right, laneOrder)
-  });
-  const budgeted = options.poolAllocation ? applyStrengthPoolBudget(fusedAll, options.maxResults, laneOrder, options.poolAllocation.storeDepth) : applyPerCorpusResultBudget(fusedAll, options.maxResults);
-  const pool = fusedAll.map((candidate) => candidate.item);
-  const leadered = withReservedLeaderSeats(budgeted, pool, options.maxResults);
-  const recency = options.temporalIntent ? withReservedRecencySeats(leadered, pool, options.maxResults) : { ...leadered, recencySeats: 0 };
-  if (options.readWide) {
-    const taken = new Set(recency.hits.map(routedHitCandidateId));
-    const matches = fusedAll.map((candidate) => candidate.item).filter((hit) => lanes.some((lane) => lane.name === hit.corpusId && (!lane.matchingIds || lane.matchingIds.has(routedHitCandidateId(hit)))));
-    let matching = recency.hits.filter((hit) => matches.some((match) => routedHitCandidateId(match) === routedHitCandidateId(hit))).length;
-    for (const hit of matches) {
-      if (matching >= READ_WIDE_MATCH_LIMIT)
-        break;
-      const id = routedHitCandidateId(hit);
-      if (taken.has(id))
-        continue;
-      taken.add(id);
-      recency.hits.push(hit);
-      matching += 1;
-    }
-    const represented = new Set(recency.hits.map((hit) => hit.corpusId));
-    recency.degradations = recency.degradations.filter((loss) => loss.reason !== "lane_budget_cut" || !represented.has(loss.laneName));
-  }
-  const seats = options.poolAllocation?.semanticSeats ?? 0;
-  if (seats <= 0)
-    return recency;
-  const semantic = withSemanticPoolSeats(recency.hits, lanes, seats);
-  return { ...recency, hits: semantic.hits, ...semantic.seated.length ? { semanticSeats: semantic.seated } : {} };
-}
-function corpusContributedSecure(corpus, response) {
-  const count = response.matchCount;
-  const positiveCount = count !== undefined && (count.matchedItems > 0 || count.saturated);
-  if (response.hits.length === 0 && !positiveCount)
-    return false;
-  if (isSecureSensitivity(corpus.defaultSensitivity))
-    return true;
-  if (response.hits.some((hit) => hit.trustTier !== undefined && isSecureSensitivity({ trustDomain: corpus.trustDomain, trustTier: hit.trustTier }))) {
-    return true;
-  }
-  return positiveCount && (count.secureMatchedItems === undefined || count.secureMatchedItems > 0);
-}
-function storeOrderForQuestion(lanes) {
-  const keyword = (lane) => {
-    const share = lane.relevance?.conceptShare ?? 0;
-    return share >= STORE_ORDER_MIN_CONCEPT_SHARE ? share : 0;
-  };
-  const vector = (lane) => lane.relevance?.vectorMargin ?? Number.NEGATIVE_INFINITY;
-  const ordered = lanes.map((lane, index) => ({ lane, index })).sort((left, right) => keyword(right.lane) - keyword(left.lane) || (vector(right.lane) === vector(left.lane) ? 0 : vector(right.lane) > vector(left.lane) ? 1 : -1) || left.index - right.index);
-  return new Map(ordered.map(({ lane }, index) => [lane.name, index]));
-}
-function compareTiedRoutedCandidates(left, right, laneOrder) {
-  const bestRank = bestLaneRank(left) - bestLaneRank(right);
-  if (bestRank !== 0)
-    return bestRank;
-  const laneCount = right.laneRanks.size - left.laneRanks.size;
-  if (laneCount !== 0)
-    return laneCount;
-  const position = laneIndex(laneOrder, left.item.corpusId) - laneIndex(laneOrder, right.item.corpusId);
-  if (position !== 0)
-    return position;
-  const corpus = left.item.corpusId.localeCompare(right.item.corpusId);
-  if (corpus !== 0)
-    return corpus;
-  return String(left.id).localeCompare(String(right.id));
-}
-function bestLaneRank(candidate) {
-  let best = Number.MAX_SAFE_INTEGER;
-  for (const rank of candidate.laneRanks.values()) {
-    if (rank < best)
-      best = rank;
-  }
-  return best;
-}
-function laneIndex(laneOrder, corpusId) {
-  return laneOrder.get(corpusId) ?? Number.MAX_SAFE_INTEGER;
-}
-function recentItemsLaneDegradation(corpusId, response) {
-  const cut = (response.laneAudits ?? []).find((audit) => audit.skippedReason === RECENT_ITEMS_CUT_SHORT);
-  if (!cut)
-    return;
-  return {
-    laneName: `${corpusId}:recency`,
-    laneType: cut.laneType,
-    reason: "lane_timeout",
-    detail: RECENT_ITEMS_CUT_SHORT,
-    occurrences: 1
-  };
-}
-function visibilityCheckDegradation(corpusId) {
-  return {
-    laneName: `${corpusId}:visibility`,
-    laneType: "keyword",
-    reason: "lane_timeout",
-    detail: VISIBILITY_CHECK_CUT_SHORT,
-    occurrences: 1
-  };
-}
-function semanticLaneDegradation(corpusId, state, response) {
-  if (state.health === "degraded") {
-    return {
-      laneName: `${corpusId}:semantic`,
-      laneType: "semantic",
-      reason: "semantic_lane_unservable",
-      ...state.reason ? { detail: state.reason } : {},
-      occurrences: 1
-    };
-  }
-  const laneAudits = response.laneAudits ?? [];
-  const skippedSemantic = laneAudits.find((audit) => audit.laneType === "semantic" && audit.skippedReason !== undefined && audit.skippedReason !== "semantic_below_relevance_bar");
-  if (skippedSemantic?.skippedReason) {
-    return {
-      laneName: `${corpusId}:semantic`,
-      laneType: "semantic",
-      reason: "semantic_lane_skipped",
-      detail: skippedSemantic.skippedReason,
-      occurrences: 1
-    };
-  }
-  const ranSemantic = laneAudits.some((audit) => audit.laneType === "semantic" || audit.laneType === "hybrid");
-  if (ranSemantic)
-    return;
-  return {
-    laneName: `${corpusId}:semantic`,
-    laneType: "semantic",
-    reason: "semantic_lane_not_run",
-    occurrences: 1
-  };
-}
-function retrievalStateForAdapter(adapter, request) {
-  let hybridAvailability;
-  try {
-    hybridAvailability = adapter.hybridAvailability?.(request);
-  } catch {
-    hybridAvailability = { servable: false, reason: "hybrid_capability_unreported" };
-  }
-  return {
-    state: assessSourceIndexRetrievalState({
-      declaredMode: request.corpus.activationMode,
-      ...hybridAvailability ? { hybridAvailability } : {}
-    }),
-    hybridServable: hybridAvailability?.servable === true
-  };
-}
-function normalizeSearchRequest(request) {
-  const query = request.query.trim();
-  if (!query) {
-    throw new Error("Source-index routed search requires a non-empty query.");
-  }
-  if (!Number.isFinite(request.maxResults) || request.maxResults < 0) {
-    throw new Error("Source-index routed search maxResults must be a non-negative number.");
-  }
-  return {
-    ...request,
-    query,
-    maxResults: Math.floor(request.maxResults)
-  };
-}
-async function runCorpusLaneUntilIdle(run, timeoutMs, corpusId, clock = REAL_LANE_CLOCK) {
-  const startedAt = Date.now();
-  let active = true;
-  let lastProgressAt = clock.now();
-  let reading = 0;
-  const report = Object.assign(() => {
-    if (!active)
-      return;
-    lastProgressAt = clock.now();
-    noteSourceAnswerProgress("searching");
-  }, {
-    began: () => {
-      reading += 1;
-      report();
-    },
-    ended: () => {
-      reading = Math.max(0, reading - 1);
-      report();
-    }
-  });
-  const runValidated = async () => {
-    const response = await run(report);
-    assertSafeCorpusSearchResponse(response);
-    return response;
-  };
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-    try {
-      const response = await runValidated();
-      const elapsedMs = Math.max(0, Date.now() - startedAt);
-      recordSourceAnswerCorpusTiming({
-        corpus_id: corpusId,
-        elapsed_ms: elapsedMs,
-        adapter_reported_ms: response.latencyMs,
-        outcome: "success"
-      });
-      return { kind: "response", response, elapsedMs };
-    } catch (error) {
-      if (isSourceIndexLaneBusyError(error)) {
-        const elapsedMs = Math.max(0, Date.now() - startedAt);
-        recordSourceAnswerCorpusTiming({ corpus_id: corpusId, elapsed_ms: elapsedMs, outcome: "timeout" });
-        return { kind: "timeout", elapsedMs };
-      }
-      recordSourceAnswerCorpusTiming({
-        corpus_id: corpusId,
-        elapsed_ms: Math.max(0, Date.now() - startedAt),
-        outcome: "error",
-        error_class: sourceAnswerTraceErrorClass(error)
-      });
-      throw error;
-    } finally {
-      active = false;
-    }
-  }
-  let timer;
-  const laneSettled = runValidated().then((response) => ({ kind: "response", response }), (error) => ({ kind: "error", error }));
-  const deadline = new Promise((resolve) => {
-    const arm = (delayMs) => {
-      const dueAtMs = clock.now() + delayMs;
-      timer = clock.setTimeout(() => {
-        if (reading > 0)
-          report();
-        const now = clock.now();
-        const remaining = timeoutMs - (now - lastProgressAt);
-        if (remaining > 0) {
-          arm(remaining);
-          return;
-        }
-        if (now - dueAtMs >= HELD_THREAD_LATE_TIMER_MS) {
-          arm(HELD_THREAD_GRACE_MS);
-          return;
-        }
-        resolve({ kind: "timeout" });
-      }, delayMs);
-    };
-    arm(timeoutMs);
-  });
-  try {
-    const settled = await Promise.race([laneSettled, deadline]);
-    if (settled.kind === "timeout") {
-      laneSettled.then((late) => {
-        if (late.kind === "error") {
-          console.error(`[source-index-router] lane=${corpusId} outcome=late_error error_class=${sourceAnswerTraceErrorClass(late.error)}`);
-        }
-      });
-      const elapsedMs = Math.max(0, Date.now() - startedAt);
-      recordSourceAnswerCorpusTiming({
-        corpus_id: corpusId,
-        elapsed_ms: elapsedMs,
-        outcome: "timeout"
-      });
-      return { kind: "timeout", elapsedMs };
-    }
-    if (settled.kind === "error" && isSourceIndexLaneBusyError(settled.error)) {
-      const elapsedMs = Math.max(0, Date.now() - startedAt);
-      recordSourceAnswerCorpusTiming({ corpus_id: corpusId, elapsed_ms: elapsedMs, outcome: "timeout" });
-      return { kind: "timeout", elapsedMs };
-    }
-    if (settled.kind === "error") {
-      recordSourceAnswerCorpusTiming({
-        corpus_id: corpusId,
-        elapsed_ms: Math.max(0, Date.now() - startedAt),
-        outcome: "error",
-        error_class: sourceAnswerTraceErrorClass(settled.error)
-      });
-      throw settled.error;
-    }
-    const elapsedMs = Math.max(0, Date.now() - startedAt);
-    recordSourceAnswerCorpusTiming({
-      corpus_id: corpusId,
-      elapsed_ms: elapsedMs,
-      adapter_reported_ms: settled.response.latencyMs,
-      outcome: "success"
-    });
-    return { kind: "response", response: settled.response, elapsedMs };
-  } finally {
-    active = false;
-    if (timer !== undefined)
-      clock.clearTimeout(timer);
-  }
-}
-function resolveLaneTimeoutMs(explicit) {
-  if (explicit !== undefined)
-    return explicit;
-  const raw = process.env.OLYMPUS_SOURCE_ANSWER_LANE_TIMEOUT_MS?.trim();
-  if (!raw)
-    return DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS;
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed))
-    return DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS;
-  return parsed;
-}
-function skipReasonForCorpus(corpus, request) {
-  if (!corpusMatchesRequestedSelection(corpus, request))
-    return "not_requested";
-  if (!request.context.allowedTrustDomains.includes(corpus.trustDomain))
-    return "trust_domain_not_allowed";
-  if (request.context.allowedCorpusIds && !request.context.allowedCorpusIds.includes(corpus.corpusId))
-    return "corpus_not_allowed";
-  if (corpus.storageProfile.cloudQueryEligible && request.context.allowCloudQueries !== true)
-    return "cloud_query_not_allowed";
-  return;
-}
-function corpusMatchesRequestedSelection(corpus, selection) {
-  if (selection.corpusIds && !selection.corpusIds.includes(corpus.corpusId))
-    return false;
-  if (selection.families && !selection.families.includes(corpus.family))
-    return false;
-  return true;
-}
-function routedHitCandidateId(hit) {
-  return hit.candidateId ?? `${hit.corpusId}:${hit.sourceItem.localItemId || hit.sourceItem.providerItemId}`;
-}
-function assertSafeCorpusSearchResponse(response) {
-  if (response.rawExposed !== false) {
-    throw new Error("Source-index corpus adapter reported raw source exposure.");
-  }
-  for (const hit of response.hits) {
-    if (hit.rawExposed !== false) {
-      throw new Error("Source-index corpus adapter returned a hit with raw source exposure.");
-    }
-  }
-  assertNoForbiddenRouterResultKeys(response, []);
-}
-function assertSafeRoutedSearchResponse(response) {
-  if (response.rawExposed !== false) {
-    throw new Error("Source-index router reported raw source exposure.");
-  }
-  assertNoForbiddenRouterResultKeys(response, []);
-}
-function assertNoForbiddenRouterResultKeys(value, path) {
-  if (!value || typeof value !== "object")
-    return;
-  if (Array.isArray(value)) {
-    value.forEach((item, index) => assertNoForbiddenRouterResultKeys(item, [...path, String(index)]));
-    return;
-  }
-  for (const [key, child] of Object.entries(value)) {
-    if (NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS.has(normalizeRouterResultKey(key))) {
-      const location = [...path, key].join(".");
-      throw new Error(`Source-index routed search output included forbidden raw field "${location}".`);
-    }
-    assertNoForbiddenRouterResultKeys(child, [...path, key]);
-  }
-}
-function normalizeRouterResultKey(key) {
-  return key.toLowerCase().replace(/[^a-z0-9]+/g, "");
-}
-var REAL_LANE_CLOCK, DEFAULT_SEMANTIC_PREPARE_BUDGET_MS = 15000, DEFAULT_SOURCE_ANSWER_LANE_TIMEOUT_MS = 20000, HELD_THREAD_LATE_TIMER_MS = 500, HELD_THREAD_GRACE_MS = 1000, FORBIDDEN_ROUTER_RESULT_KEYS, NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS, SEMANTIC_POOL_SEATS_PER_STORE = 2, STORE_ORDER_MIN_CONCEPT_SHARE;
-var init_router = __esm(() => {
-  init_read_progress();
-  init_source_answer_jobs();
-  init_read_wide();
-  init_partial_search();
-  init_keyword_context();
-  init_types();
-  init_answer_latency_trace();
-  REAL_LANE_CLOCK = {
-    now: () => Date.now(),
-    setTimeout: (callback, ms) => setTimeout(callback, ms),
-    clearTimeout: (timer) => clearTimeout(timer)
-  };
-  FORBIDDEN_ROUTER_RESULT_KEYS = new Set([
-    "body",
-    "bodies",
-    "content",
-    "contents",
-    "message",
-    "messages",
-    "raw",
-    "raw_packet",
-    "rawPacket",
-    "raw_source",
-    "rawSource",
-    "sanitized_text",
-    "sanitizedText",
-    "snippet",
-    "snippets",
-    "source_text",
-    "sourceText",
-    "raw_source_text",
-    "rawSourceText",
-    "text",
-    "access_token",
-    "accessToken",
-    "api_key",
-    "apiKey",
-    "approved_scope_key",
-    "approvedScopeKey",
-    "refresh_token",
-    "refreshToken",
-    "token"
-  ]);
-  NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS = new Set([...FORBIDDEN_ROUTER_RESULT_KEYS].map(normalizeRouterResultKey));
-  STORE_ORDER_MIN_CONCEPT_SHARE = RESERVED_LEADER_MIN_CONCEPT_SHARE;
 });
 
 // src/core/evidence-pack.ts
@@ -117449,7 +117692,27 @@ function createConnectorStoreExtractionSink(options) {
         };
       }
       const writeClaim = extractionWriteClaim(request);
-      if (options.secretsFloor !== false && plan.item.content.kind === "text" && secretsFloorHolds(store, plan.item, plan.item.content.text)) {
+      if (!options.route && options.recordContentTier !== false && !standaloneRoute) {
+        const ledger = store.tierLedger();
+        if (ledger) {
+          const registered = tierSetForLedger(ledger.dbPath);
+          const set = registered?.store(store.trustDomain) === store ? registered : store.trustDomain === "secure_local" ? new TieredStoreSet({
+            setId: store.corpusId,
+            ledger,
+            registerWithLedger: false,
+            legs: [{ trustDomain: "secure_local", corpusId: store.corpusId, store, legacy: true }],
+            ...options.tierClassification ? { tierClassification: options.tierClassification } : {}
+          }) : undefined;
+          if (set)
+            standaloneRoute = tieredRepresentationLanding({
+              set,
+              anchor: store,
+              replaceStoredContent: !registered
+            });
+        }
+      }
+      const route = options.route ?? standaloneRoute;
+      if (options.secretsFloor !== false && plan.item.content.kind === "text" && secretsFloorHolds(store, plan.item, plan.item.content.text, route !== undefined)) {
         const settled = settleUntrackedSecretsCopy({
           store,
           identity: plan.item.identity,
@@ -117478,26 +117741,6 @@ function createConnectorStoreExtractionSink(options) {
           skippedReason: secretsSkip[settled]
         };
       }
-      if (!options.route && options.recordContentTier !== false && !standaloneRoute) {
-        const ledger = store.tierLedger();
-        if (ledger) {
-          const registered = tierSetForLedger(ledger.dbPath);
-          const set = registered?.store(store.trustDomain) === store ? registered : store.trustDomain === "secure_local" ? new TieredStoreSet({
-            setId: store.corpusId,
-            ledger,
-            registerWithLedger: false,
-            legs: [{ trustDomain: "secure_local", corpusId: store.corpusId, store, legacy: true }],
-            ...options.tierClassification ? { tierClassification: options.tierClassification } : {}
-          }) : undefined;
-          if (set)
-            standaloneRoute = tieredRepresentationLanding({
-              set,
-              anchor: store,
-              replaceStoredContent: !registered
-            });
-        }
-      }
-      const route = options.route ?? standaloneRoute;
       if (!route && options.recordContentTier !== false) {
         return { accepted: false, chunksIndexed: 0, chunksAwaitingEmbedding: 0, skippedReason: EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE };
       }
@@ -117578,15 +117821,19 @@ function extractionWriteClaim(request) {
     generation: hashString2(request.claim.leaseToken)
   } : undefined;
 }
-function secretsFloorHolds(store, item, text) {
+function secretsFloorHolds(store, item, text, routed) {
   let override;
   try {
     override = store.tierLedger()?.getOverride(item.identity);
   } catch {
     override = undefined;
   }
-  if (override?.kind === "tier" && override.tier !== "private")
-    return override.tier === "secrets";
+  if (override?.kind === "tier") {
+    if (override.tier === "secrets")
+      return true;
+    if (override.tier === "secure" || routed)
+      return false;
+  }
   if (override?.kind === "not_secret")
     return false;
   return detectSecretFindingKinds(text).length > 0;
@@ -117722,6 +117969,10 @@ function createTieredStoreExtractionSink(options) {
         ...override ? { override } : {},
         ...tierClassification?.retirePublic ? { retirePublic: true } : {}
       });
+      if (content.reasons.includes(OWNER_OVERRIDE_SECRET_REVIEW_REASON)) {
+        const route = tieredRepresentationLanding({ set, anchor: anchorStore, classification: classificationNow, replaceStoredContent: true });
+        return sinkFor(anchorStore, route).accept(request);
+      }
       if (!content.contentPending && anchorStore.readOnDemand(ref.localItemId, ref.sourceVersion ?? "")) {
         console.info(`[olympus:on-demand] step=judge count=1 ms=${Math.max(0, Date.now() - judgeStarted)}`);
       }
@@ -157539,11 +157790,11 @@ function placeRestoredBodies(set, personal, queue) {
         });
         continue;
       }
-      const resuming = current?.state === "moving" && copy?.state === "superseded" && copy.supersededByGeneration === current.generation + 1 && current.reasons.includes(HELD_UNTIL_JUDGED_REASON) && current.contentPending;
+      const resuming = current?.state === "moving" && copy?.state === "superseded" && copy.supersededByGeneration === current.generation + 1 && (current.reasons.includes(HELD_UNTIL_JUDGED_REASON) && current.contentPending || !!ownerOverrideSecretReview(current.reasons));
       if (current?.routed && !resuming && copy?.state !== "current")
         continue;
       const ownerTier = override?.kind === "tier" ? override.tier : undefined;
-      if (current?.state === "current" && !current.metadataPending && (current.contentTier === "private" || current.contentTier === "public") && (current.metadataTier === "private" || current.metadataTier === "public") && ownerTier !== "secure" && (current.decidedBy !== "override" || ownerTier !== undefined) && personalContentAuthorized(current, text, override?.kind === "not_secret"))
+      if (current?.state === "current" && !current.metadataPending && (current.contentTier === "private" || current.contentTier === "public") && (current.metadataTier === "private" || current.metadataTier === "public") && ownerTier !== "secure" && (current.decidedBy !== "override" || ownerTier !== undefined) && personalContentAuthorized(current, text, override?.kind === "not_secret", override))
         continue;
       const record = set.adoptLegacyItem(identity);
       const privateCopy = ledger.copies(identity).find((copy) => copy.trustDomain === "secure_local" && copy.state === "current" && copy.layers !== "metadata");
@@ -157553,7 +157804,12 @@ function placeRestoredBodies(set, personal, queue) {
       }
       queue?.deleteItemQuestions(identity);
       const floor = ownerTier === "secure" ? "secure" : "public";
-      const decision = {
+      const names = ownerTier === "private" || ownerTier === "public" ? personal.exportItemNames(identity) : undefined;
+      const scanned = names && override ? classifyItemTiers({ signals: storedSignals(names), text }, { override }) : undefined;
+      const decision = scanned && ownerOverrideSecretReview(scanned.reasons) ? {
+        ...scanned,
+        metadataTier: maxTier(record.metadataTier, scanned.metadataTier)
+      } : {
         metadataTier: heldTier(floor, record.metadataTier, record.targetMetadataTier),
         contentTier: heldTier(floor, record.contentTier, record.targetContentTier),
         decidedBy: "default",
@@ -157598,6 +157854,7 @@ var init_restore_held_content = __esm(() => {
   init_tier_migration_lanes();
   init_local_index();
   init_secrets_disposition();
+  init_stored_names();
   init_tier_move();
   init_tiered_store_set();
 });
@@ -195591,7 +195848,7 @@ function parseOwnerTierItemId(itemId) {
 }
 function namesAbovePersonal(state) {
   const { record } = state;
-  if (!record || state.namesHeld)
+  if (!record || state.namesHeld || state.reviewHeld)
     return true;
   return [record.metadataTier, record.targetMetadataTier, state.ownerTier].some((tier) => tier !== null && tier !== undefined && tierRank(tier) > tierRank("private"));
 }
@@ -195604,10 +195861,10 @@ function findOwnerTierItems(input, context = {}) {
     throw new OperationError("invalid_params", "Give words to search for, or ask for the recently sorted items.");
   if (input.recent && query)
     throw new OperationError("invalid_params", "Search, or list the recently sorted items, not both.");
-  if (input.filter !== undefined && (!input.recent || !["personal", "private", "changed"].includes(input.filter))) {
-    throw new OperationError("invalid_params", "filter is personal, private or changed, with the recently sorted items.");
+  if (input.filter !== undefined && (!input.recent || !["personal", "private", "changed", "override_review"].includes(input.filter) || input.personalNamesOnly && input.filter === "override_review")) {
+    throw new OperationError("invalid_params", "Use an available filter with the recently sorted items.");
   }
-  if (input.before !== undefined && (!input.recent || input.filter === "changed" || Number.isNaN(Date.parse(input.before)))) {
+  if (input.before !== undefined && (!input.recent || input.filter === "changed" || input.filter === "override_review" || Number.isNaN(Date.parse(input.before)))) {
     throw new OperationError("invalid_params", "before is a time, with the recently sorted items.");
   }
   if (input.beforeItem !== undefined && input.before === undefined) {
@@ -195625,9 +195882,15 @@ function findOwnerTierItems(input, context = {}) {
       continue;
     if (input.personalNamesOnly && namesAbovePersonal(state))
       continue;
+    if (input.filter === "override_review" && !state.overrideReview)
+      continue;
     const item = view3(row, state, context);
-    if (input.withPreview && !input.personalNamesOnly)
-      item.preview = previewOf(identity, context);
+    if (!input.personalNamesOnly) {
+      if (state.overrideReview)
+        item.override_review = state.overrideReview;
+      if (input.withPreview && !state.reviewHeld)
+        item.preview = previewOf(identity, context);
+    }
     items.push(item);
   }
   return { items };
@@ -195672,7 +195935,7 @@ function recentRows(limit, context, filter, before, beforeItem) {
   for (const ledger of knownTierLedgers(context)) {
     let records = [];
     try {
-      records = withLedgerAt(ledger.path, context.now, (opened) => filter === "changed" ? opened.listRoutedOverrides().filter(({ override }) => override.kind === "tier").map(({ record }) => record).sort((left, right) => right.decidedAt.localeCompare(left.decidedAt)).slice(0, limit) : opened.recentDecisions(limit, filter === "personal" ? "private" : filter === "private" ? "secure" : undefined, before, beforeItem), ledger.boundLedgerId, "read-only-on-front");
+      records = withLedgerAt(ledger.path, context.now, (opened) => filter === "changed" || filter === "override_review" ? opened.listRoutedOverrides().filter(({ record, override }) => override.kind === "tier" && (filter === "changed" || opened.ownerOverrideReview(identityOfRecord2(record), record, override))).map(({ record }) => record).sort((left, right) => right.decidedAt.localeCompare(left.decidedAt)).slice(0, limit) : opened.recentDecisions(limit, filter === "personal" ? "private" : filter === "private" ? "secure" : undefined, before, beforeItem), ledger.boundLedgerId, "read-only-on-front");
     } catch {}
     for (const record of records) {
       const key = tierLedgerIdentityKey(identityOfRecord2(record));
@@ -195769,6 +196032,9 @@ function readLocatedState(items, context) {
         state.ownerSet = true;
         state.ownerTier = override.tier;
       }
+      state.overrideReview ??= ledger.ownerOverrideReview(item.identity, record, override);
+      if (record?.reasons.includes(OWNER_OVERRIDE_SECRET_REVIEW_REASON))
+        state.reviewHeld = true;
       if (ledger.itemIsSecret(item.identity))
         state.secret = true;
     }, item.boundLedgerId, "read-only-on-front");
@@ -195801,14 +196067,15 @@ function judgeReason(record) {
 function view3(row, state, context) {
   const { record } = state;
   const identity = identityOfRow2(row);
+  const screenName = (value) => state.reviewHeld ? screenedSecretLocator(value) : value;
   const hold = record?.state === "current" && record.contentTier === "secure" && !record.contentRead && record.reasons.some(isFailSafeMissingContentQuestion) ? unreadHoldDisposition(context.extractionOutcome?.(row.family ?? undefined, identity, row.local_item_id ?? undefined), context.contentAllowed?.(identity, row.local_item_id, row.locator_uri)) : undefined;
   return {
     item_id: ownerTierItemId(identityOfRow2(row)),
     source: row.provider,
     family: row.family,
-    title: row.title,
-    sender: row.sender_label?.trim() || row.sender_id?.trim() || null,
-    location: row.locator_uri,
+    title: screenName(row.title),
+    sender: screenName(row.sender_label?.trim() || row.sender_id?.trim() || null),
+    location: screenName(row.locator_uri),
     tier: record ? tierDisplayName(record.contentTier) : null,
     names_tier: record ? tierDisplayName(record.metadataTier) : null,
     ...record?.state === "moving" && record.targetContentTier ? { moving_to: tierDisplayName(record.targetContentTier) } : {},
@@ -195836,7 +196103,9 @@ function getOwnerTierItem(itemId, context = {}, options = {}) {
   if (state.secret)
     return;
   const item = view3(storedRowFor(identity, located, context), state, context);
-  if (options.withPreview)
+  if (state.overrideReview)
+    item.override_review = state.overrideReview;
+  if (options.withPreview && !state.reviewHeld)
     item.preview = previewOf(identity, context);
   return item;
 }
@@ -195868,7 +196137,17 @@ function setOwnerTierItem(input, context = {}) {
   }
   let results;
   let changed;
-  if (choice === "judge") {
+  if (before.reviewHeld || input.reviewDigest !== undefined) {
+    const staleReview = { ok: false, code: "override_review_changed", message: "Open the current review before changing this item." };
+    if (!input.allowLower || !input.reviewDigest || before.overrideReview?.digest !== input.reviewDigest || choice === "private")
+      return staleReview;
+    const digest = input.reviewDigest;
+    const answered = located.map((item) => withLedgerAt(item.ledgerPath, context.now, (ledger) => ledger.resolveOwnerOverrideReview(item.identity, digest, choice), item.boundLedgerId));
+    if (!answered.some(Boolean))
+      return staleReview;
+    results = [];
+    changed = choice === "judge" ? "cleared" : "set";
+  } else if (choice === "judge") {
     if (!before.ownerSet) {
       return { ok: false, code: "not_owner_set", message: "This item already has the judge's label: nobody changed it by hand." };
     }
@@ -195927,6 +196206,7 @@ var init_tier_owner_items = __esm(() => {
   init_tier_ledger();
   init_unreadable_files();
   init_tier_rules();
+  init_secret_locations();
 });
 
 // src/workers/engine/dashboard/dashboard-people.ts
@@ -207241,7 +207521,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     state.hostReadOnly = value.readOnly === true;
     const links = {};
     const given = value.links && typeof value.links === "object" ? value.links : {};
-    for (const key of ["keys", "agents", "privateAnswers", "connector", "help"]) {
+    for (const key of ["keys", "agents", "privateAnswers", "overrideReviews", "connector", "help"]) {
       const href = given[key];
       if (typeof href === "string" && /^https?:\/\//.test(href))
         links[key] = href;
@@ -208038,6 +208318,18 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const body = add(el("div", "need-body"), el("p", "row-text", sentence), add(el("span", "fix"), open));
     const row = add(el("li", "row need"), body);
     row.setAttribute("data-waiting-private", String(Math.floor(count)));
+    return row;
+  }
+  function overrideReviewRow() {
+    const kinds = state.computerMeta?.overrideReviewKinds;
+    const href = state.hostLinks.overrideReviews;
+    if (!onComputer() || !href || !Array.isArray(kinds) || kinds.length === 0)
+      return null;
+    const copy = H.copy.overrideReview;
+    const sentence = fill(copy.sentence, { kinds: kinds.join(", ").replace(/_/g, " ") });
+    const open = button(copy.open, "need:override-review", () => openLink(href), "warn");
+    const row = add(el("li", "row need"), add(el("div", "need-body"), el("p", "row-text", sentence), add(el("span", "fix"), open)));
+    row.setAttribute("data-override-review", "");
     return row;
   }
   function sourceItem(source) {
@@ -209429,7 +209721,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     page.className += " home-page";
     const all = Array.isArray(data.sources) ? data.sources : [];
     const needs = Array.isArray(data.needsYou) ? data.needsYou.filter((item) => !!item) : [];
-    const extra = [transcriptionNeedRow(data.models)].filter((row) => !!row);
+    const extra = [overrideReviewRow(), transcriptionNeedRow(data.models)].filter((row) => !!row);
     const waiting = waitingRow() ? 1 : 0;
     add(page, homeStatus(data, needs.length + extra.length + waiting + (data.blocker ? 1 : 0), all.filter((source) => !isArchivesCard(source))));
     add(page, staleLine());
@@ -216746,6 +217038,7 @@ function renderComputerHostPage(input) {
   for (const page of Object.keys(DASHBOARD_LOCAL_PAGES)) {
     links[page] = `${input.origin}${dashboardLocalPageHref(page, token)}`;
   }
+  links.overrideReviews = `${links.privacyItems}#override-review`;
   const bridge = {
     contextKey: OLYMPUS_HOST_CONTEXT_KEY,
     kind: "computer",
@@ -221280,7 +221573,7 @@ function renderBody2(options, token) {
   if (options?.outsideHelpLocalSession !== true) {
     return `<div class="pi" data-privacy-items>${head}<form class="paunlock" data-pi-unlock>` + `<button type="submit" class="btn primary">${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.unlock)}</button><span class="hint">${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.unlockIntro)}</span>` + `<span class="pimsg" data-pi-msg role="status"></span></form></div>` + `<script>${privacyItemsClientScript({ csrfToken: "", unlockOnly: true })}</script>`;
   }
-  return `<div class="pi" data-privacy-items>${JUDGE_CHECK_MOUNT}<div class="pigrid" id="${PRIVACY_ITEMS_LIST_ID}"><div class="pimain">${head}` + `<label class="pifind"><span aria-hidden="true">⌕</span><input type="search" data-pi-search maxlength="200" autocomplete="off" aria-label="${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.searchLabel)}" placeholder="${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.searchPlaceholder)}"></label>` + `<div class="pichips" data-pi-filters role="group" aria-label="${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.filtersLabel)}">` + `<button type="button" class="pichip" data-pi-filter="" aria-pressed="true">${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.recentHeading)}</button>` + `<button type="button" class="pichip" data-pi-filter="private" aria-pressed="false">Private<i data-pi-count="private"></i></button>` + `<button type="button" class="pichip" data-pi-filter="personal" aria-pressed="false">Personal<i data-pi-count="personal"></i></button>` + `<button type="button" class="pichip" data-pi-filter="changed" aria-pressed="false">${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.changedByYou)}<i data-pi-count="changed"></i></button></div>` + `<p class="picap" data-pi-heading hidden>${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.resultsHeading)}</p>` + `<p class="pimsg" data-pi-msg role="status">${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.loading)}</p>` + `<ul class="pilist" data-pi-list></ul>` + `<p class="pnote piapps" data-pi-apps>${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.apps)}</p></div>` + `<div class="piside" data-pi-side></div></div>` + `<dialog class="judgedialog pidialog" data-pi-confirm aria-labelledby="pi-confirm-title"><div class="pidbody">` + `<div class="pidtop"><h3 id="pi-confirm-title">${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.confirmTitle)}</h3><button type="button" class="pix" data-pi-confirm-close aria-label="${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.close)}">✕</button></div>` + `<div class="piitem" data-pi-confirm-item></div>` + `<div class="piarrow"><div class="piopt"><b><span class="pipill Private">Private</span> ${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.now)}</b><span>${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.privateLine)}</span></div><i aria-hidden="true">→</i>` + `<div class="piopt on"><b><span class="pipill Personal">Personal</span> ${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.after)}</b><span>${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.afterPersonalLine)}</span></div></div>` + `<p class="pionly">${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.confirmOnly)}</p>` + `<div class="judgedialogbar"><button type="button" class="btn" data-pi-confirm-cancel>${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.cancel)}</button><button type="button" class="btn primary" data-pi-confirm-ok>${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.makePersonal)}</button></div>` + `</div></dialog>` + `<div class="pitoast" data-pi-toast role="status" hidden><span data-pi-toast-text></span><button type="button" data-pi-toast-undo>${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.undo)}</button></div>` + `</div><script>${privacyItemsClientScript({ csrfToken, unlockOnly: false })}</script>` + `<script>${judgeCheckClientScript({ csrfToken, itemsHref: `#${PRIVACY_ITEMS_LIST_ID}` })}</script>`;
+  return `<div class="pi" data-privacy-items>${JUDGE_CHECK_MOUNT}<div class="pigrid" id="${PRIVACY_ITEMS_LIST_ID}"><div class="pimain">${head}` + `<label class="pifind"><span aria-hidden="true">⌕</span><input type="search" data-pi-search maxlength="200" autocomplete="off" aria-label="${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.searchLabel)}" placeholder="${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.searchPlaceholder)}"></label>` + `<div class="pichips" data-pi-filters role="group" aria-label="${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.filtersLabel)}">` + `<button type="button" class="pichip" data-pi-filter="" aria-pressed="true">${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.recentHeading)}</button>` + `<button type="button" class="pichip" data-pi-filter="private" aria-pressed="false">Private<i data-pi-count="private"></i></button>` + `<button type="button" class="pichip" data-pi-filter="personal" aria-pressed="false">Personal<i data-pi-count="personal"></i></button>` + `<button type="button" class="pichip" data-pi-filter="changed" aria-pressed="false">${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.changedByYou)}<i data-pi-count="changed"></i></button>` + `<button type="button" class="pichip" data-pi-filter="override_review" aria-pressed="false">${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.reviewFilter)}</button></div>` + `<p class="picap" data-pi-heading hidden>${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.resultsHeading)}</p>` + `<p class="pimsg" data-pi-msg role="status">${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.loading)}</p>` + `<ul class="pilist" data-pi-list></ul>` + `<p class="pnote piapps" data-pi-apps>${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.apps)}</p></div>` + `<div class="piside" data-pi-side></div></div>` + `<dialog class="judgedialog pidialog" data-pi-confirm aria-labelledby="pi-confirm-title"><div class="pidbody">` + `<div class="pidtop"><h3 id="pi-confirm-title">${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.confirmTitle)}</h3><button type="button" class="pix" data-pi-confirm-close aria-label="${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.close)}">✕</button></div>` + `<div class="piitem" data-pi-confirm-item></div>` + `<div class="piarrow"><div class="piopt"><b><span class="pipill Private">Private</span> ${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.now)}</b><span>${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.privateLine)}</span></div><i aria-hidden="true">→</i>` + `<div class="piopt on"><b><span class="pipill Personal">Personal</span> ${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.after)}</b><span>${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.afterPersonalLine)}</span></div></div>` + `<p class="pionly">${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.confirmOnly)}</p>` + `<div class="judgedialogbar"><button type="button" class="btn" data-pi-confirm-cancel>${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.cancel)}</button><button type="button" class="btn primary" data-pi-confirm-ok>${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.makePersonal)}</button></div>` + `</div></dialog>` + `<div class="pitoast" data-pi-toast role="status" hidden><span data-pi-toast-text></span><button type="button" data-pi-toast-undo>${escapeHtml3(DASHBOARD_PRIVACY_ITEMS_COPY.undo)}</button></div>` + `</div><script>${privacyItemsClientScript({ csrfToken, unlockOnly: false })}</script>` + `<script>${judgeCheckClientScript({ csrfToken, itemsHref: `#${PRIVACY_ITEMS_LIST_ID}` })}</script>`;
 }
 function privacyItemsClientScript(input) {
   const config = {
@@ -221333,7 +221626,7 @@ function privacyItemsClientScript(input) {
   var items = [];
   var selected = null;
   var query = '';
-  var filter = '';
+  var filter = window.location.hash === '#override-review' ? 'override_review' : '';
   var counts = null;
   var seq = 0;
   var debounce = null;
@@ -221368,8 +221661,10 @@ function privacyItemsClientScript(input) {
     return { ok: false, retry: restarting, unknown: result.unknown === true, message: message };
   }
 
-  async function save(id, tier) {
-    var response = await post(config.paths.set, { item_id: id, tier: tier });
+  async function save(id, tier, digest) {
+    var body = { item_id: id, tier: tier };
+    if (digest) body.review_digest = digest;
+    var response = await post(config.paths.set, body);
     if (!response.ok || response.result.state !== 'pending') return response;
     var requestId = response.result.request_id;
     saving[id] = 'pending';
@@ -221384,7 +221679,7 @@ function privacyItemsClientScript(input) {
   function narrow() { return !!(window.matchMedia && window.matchMedia('(max-width: 719px)').matches); }
   function find(id) { for (var i = 0; i < items.length; i += 1) if (items[i].item_id === id) return items[i]; return null; }
   // The owner's latest choice wins over the recorded label while it waits for the next pass.
-  function shown(item) { var change = changes[item.item_id]; return change ? change.chosen : (item.owner_choice || item.tier); }
+  function shown(item) { if (item.override_review) return 'Private'; var change = changes[item.item_id]; return change ? change.chosen : (item.owner_choice || item.tier); }
   function changedByYou(item) { return !!changes[item.item_id] || item.owner_set === true; }
   function logo(item, small) {
     var tile = config.logos[item.source];
@@ -221415,7 +221710,7 @@ function privacyItemsClientScript(input) {
   function row(item) {
     var open = selected === item.item_id;
     var tier = shown(item);
-    var note = saving[item.item_id] ? C.saving : changedByYou(item) ? C.changedByYou
+    var note = saving[item.item_id] ? C.saving : item.override_review ? C.reviewFilter : changedByYou(item) ? C.changedByYou
       : item.moving_to ? fill(C.moving, { tier: item.moving_to }) : '';
     return '<li><button type="button" class="pirow" data-pi-item="' + esc(item.item_id) + '" aria-expanded="' + (open ? 'true' : 'false') + '">'
       + logo(item) + '<span class="grow"><span class="pititle">' + esc(title(item)) + '</span><span class="pimeta">' + esc(meta(item)) + '</span></span>'
@@ -221436,7 +221731,11 @@ function privacyItemsClientScript(input) {
     var foot = '';
     var busy = saving[item.item_id];
     var status = busy === 'pending' ? C.pendingRestart : busy ? C.saving : statusFor[item.item_id] || '';
-    if (changedByYou(item)) {
+    if (item.override_review) {
+      why = '<p class="piwhy">' + esc(fill(C.reviewReason, { kinds: item.override_review.kinds.join(', ').replace(/_/g, ' ') })) + '</p>'
+        + '<div class="piundo"><button type="button" class="btn primary" data-pi-choose="Personal"' + (busy ? ' disabled' : '') + '>' + esc(C.confirmReview) + '</button>'
+        + '<button type="button" class="btn" data-pi-undo' + (busy ? ' disabled' : '') + '>' + esc(C.liftOverride) + '</button></div>';
+    } else if (changedByYou(item)) {
       var said = change && change.judge ? ' ' + esc(fill(C.judgeSaid, { tier: change.judge })) : '';
       why = '<div class="piundo" data-pi-undo-row><p class="piwhy"><b>' + esc(fill(C.youChose, { tier: tier || '' })) + '</b>' + (change ? ' ' + esc(C.justNow) + '.' : '.') + said + '</p>'
         + '<button type="button" class="btn" data-pi-undo' + (busy ? ' disabled' : '') + '>' + esc(C.undo) + '</button></div>';
@@ -221457,13 +221756,13 @@ function privacyItemsClientScript(input) {
     return '<section class="pidetail" data-pi-detail="' + esc(item.item_id) + '" aria-label="' + esc(title(item)) + '">'
       + '<div class="pidhead">' + logo(item, true) + '<div class="grow"><h4>' + esc(title(item)) + '</h4><span class="pimeta">' + esc(meta(item)) + '</span></div>'
       + '<button type="button" class="pix" data-pi-close aria-label="' + esc(C.close) + '">✕</button></div>'
-      + '<p class="pidcap">' + esc(C.previewCaption) + '</p>' + preview
+      + (item.override_review ? '' : '<p class="pidcap">' + esc(C.previewCaption) + '</p>' + preview
       + (item.family === 'file' && (item.names_only || item.not_read && item.not_read.kind === 'by_choice') ? '<button type="button" class="btn" data-pi-read>Read this file</button>' : '')
       + '<p class="pidcap" id="pi-who">' + esc(C.whoCaption) + '</p>'
-      + '<div class="pipair" role="radiogroup" aria-labelledby="pi-who">' + option(item, 'Personal', C.personalLine) + option(item, 'Private', C.privateLine) + '</div>'
+      + '<div class="pipair" role="radiogroup" aria-labelledby="pi-who">' + option(item, 'Personal', C.personalLine) + option(item, 'Private', C.privateLine) + '</div>')
       + why
       + '<p class="pistatus" data-pi-status role="status"' + (busy ? ' data-saving' : '') + '>' + esc(status) + '</p>'
-      + '<p class="pifoot" data-pi-foot>' + foot + '</p></section>';
+      + (foot ? '<p class="pifoot" data-pi-foot>' + foot + '</p>' : '') + '</section>';
   }
 
   function render() {
@@ -221506,7 +221805,7 @@ function privacyItemsClientScript(input) {
     items = Array.isArray(response.result.items) ? response.result.items : [];
     if (response.result.counts) counts = response.result.counts;
     renderFilters();
-    setMessage(items.length ? '' : words ? C.noMatch : C.empty, false);
+    setMessage(items.length ? '' : words ? C.noMatch : filter === 'override_review' ? C.reviewEmpty : C.empty, false);
     render();
   }
 
@@ -221550,7 +221849,7 @@ function privacyItemsClientScript(input) {
     render();
   }
 
-  async function choose(id, tier) {
+  async function choose(id, tier, digest) {
     var item = find(id);
     if (!item || saving[id]) return;
     delete statusFor[id];
@@ -221558,11 +221857,12 @@ function privacyItemsClientScript(input) {
     render();
     var response;
     try {
-      response = await save(id, tier === 'Personal' ? 'personal' : 'private');
+      response = await save(id, tier === 'Personal' ? 'personal' : 'private', digest);
     } finally {
       delete saving[id];
     }
     if (!response.ok) { await saveFailed(id, response, tier); return; }
+    if (item.override_review && filter === 'override_review') await load();
     var previous = changes[id];
     if (counts && !previous && !item.owner_set) { counts.changed += 1; renderFilters(); }
     // What the judge had said: the label before this visit's first change, if nobody had set it before.
@@ -221583,7 +221883,7 @@ function privacyItemsClientScript(input) {
     if (item) render();
     var response;
     try {
-      response = await save(id, 'judge');
+      response = await save(id, 'judge', item && item.override_review && item.override_review.digest);
     } finally {
       delete saving[id];
     }
@@ -221592,6 +221892,7 @@ function privacyItemsClientScript(input) {
     if (counts && counts.changed > 0) { counts.changed -= 1; renderFilters(); }
     if (item) merge(response.result.item, item);
     // Listed under Changed by you, it is no longer changed by you.
+    if (item && item.override_review && filter === 'override_review') await load();
     if (!query && filter === 'changed') items = items.filter(function (listed) { return listed.item_id !== id; });
     render();
     showToast(C.toastJudge, null);
@@ -221600,7 +221901,7 @@ function privacyItemsClientScript(input) {
   function openConfirm(id) {
     var item = find(id);
     if (!item) return;
-    pendingLower = id;
+    pendingLower = { id: id, digest: item.override_review && item.override_review.digest };
     dialog.querySelector('[data-pi-confirm-item]').innerHTML = logo(item, true) + '<span class="grow"><span class="pititle">' + esc(title(item)) + '</span><span class="pimeta">' + esc(meta(item)) + '</span></span>';
     if (typeof dialog.showModal === 'function') dialog.showModal(); else dialog.setAttribute('open', '');
   }
@@ -221656,9 +221957,9 @@ function privacyItemsClientScript(input) {
     if (!target) return;
     if (target.closest('[data-pi-confirm-close]') || target.closest('[data-pi-confirm-cancel]')) { closeConfirm(); return; }
     if (target.closest('[data-pi-confirm-ok]')) {
-      var id = pendingLower;
+      var pending = pendingLower;
       closeConfirm();
-      if (id) choose(id, 'Personal');
+      if (pending) choose(pending.id, 'Personal', pending.digest);
     }
   });
   // Esc: the browser closes the dialog and sends cancel.
@@ -232803,8 +233104,8 @@ function createEmailSourceWorker(options = {}) {
             const recent = asOptionalBoolean(record.recent);
             const limit = asOptionalNumber(record.limit, "limit");
             const filter = asOptionalString(record.filter);
-            if (filter !== undefined && filter !== "personal" && filter !== "private" && filter !== "changed") {
-              throw new EmailSourceWorkerError(400, "invalid_request", 'filter must be "personal", "private" or "changed".');
+            if (filter !== undefined && filter !== "personal" && filter !== "private" && filter !== "changed" && filter !== "override_review") {
+              throw new EmailSourceWorkerError(400, "invalid_request", 'filter must be "personal", "private", "changed" or "override_review".');
             }
             return json({ ok: true, ...ownerTierItems.find({
               ...query !== undefined ? { query } : {},
@@ -232830,7 +233131,13 @@ function createEmailSourceWorker(options = {}) {
             if (tier !== "personal" && tier !== "private" && tier !== "judge") {
               throw new EmailSourceWorkerError(400, "invalid_request", 'tier must be "personal", "private" or "judge".');
             }
-            return json(ownerTierItems.set({ itemId, choice: tier, allowLower: true }));
+            const reviewDigest = asOptionalString(record.review_digest);
+            return json(ownerTierItems.set({
+              itemId,
+              choice: tier,
+              allowLower: true,
+              ...reviewDigest !== undefined ? { reviewDigest } : {}
+            }));
           }
           throw new EmailSourceWorkerError(404, "not_found", "No such privacy item route.");
         }
@@ -248652,10 +248959,17 @@ class TierSnifferService {
         report.notEligible += queued.length;
         continue;
       }
+      const deferRetry = (identity, generation) => {
+        try {
+          set.ledger.recordMoveFailure(identity, { expectedGeneration: generation });
+        } catch {}
+      };
       const failure = (record, error) => {
         const identity = recordIdentity2(record);
         const failureKey = `${ledgerPath}\x00${tierLedgerIdentityKey(identity)}\x00${record.generation}`;
         if (error instanceof TierMoveRefusedError && error.code === "rule_policy_unavailable") {
+          if (direction === "raise")
+            deferRetry(identity, record.generation);
           this.moveFailures.delete(failureKey);
           report.notEligible++;
           return;
@@ -248692,9 +249006,7 @@ class TierSnifferService {
           this.moveFailures.delete(failureKey);
           return;
         }
-        try {
-          set.ledger.recordMoveFailure(identity, { expectedGeneration: record.generation });
-        } catch {}
+        deferRetry(identity, record.generation);
         const firstFailedAt = this.moveFailures.get(failureKey) ?? now;
         this.moveFailures.set(failureKey, firstFailedAt);
         if (now - firstFailedAt >= staleAfterMs && this.settleStaleMove(set, record, report)) {
@@ -276120,13 +276432,14 @@ function createDashboardPanelTools(options) {
       const missingFolders = (view?.sources ?? []).flatMap((source) => source.schedule?.missing_folders?.length ? [{ sourceId: source.source_id, paths: source.schedule.missing_folders }] : []);
       const permissionSettings = process.platform === "darwin" ? (view?.sources ?? []).flatMap((source) => source.schedule?.degraded_reason === "scope_root_permission_needed" ? [{ sourceId: source.source_id, url: FILES_AND_FOLDERS_URL }] : []) : [];
       const waiting = context.localSession === true ? waitingCount(options) : 0;
+      const reviewKinds = context.localSession === true ? await options.overrideReviewKinds?.() ?? [] : [];
       const indexedItems = (view?.sources ?? []).reduce((sum, source) => sum + (Number.isFinite(source.coverage?.indexed_items) ? Math.max(0, source.coverage.indexed_items) : 0), 0);
       const archives = archivesMeta(options);
       const sourceImports = sourceImportsMeta(options);
       const archiveSources = archiveSourcesMeta(options);
       const archiveCards = archiveCardsMeta(options);
       const setup = setupMeta(options, view);
-      if (on === undefined && !setup && unpair.length === 0 && unreadable.length === 0 && waiting === 0 && indexedItems === 0 && missingFolders.length === 0 && permissionSettings.length === 0 && !archives && !sourceImports && !archiveSources && !archiveCards)
+      if (on === undefined && !setup && unpair.length === 0 && unreadable.length === 0 && waiting === 0 && reviewKinds.length === 0 && indexedItems === 0 && missingFolders.length === 0 && permissionSettings.length === 0 && !archives && !sourceImports && !archiveSources && !archiveCards)
         return result;
       const meta = {
         ...missingFolders.length ? { missingFolders } : {},
@@ -276135,6 +276448,7 @@ function createDashboardPanelTools(options) {
         ...unpair.length > 0 ? { unpair } : {},
         ...unreadable.length > 0 ? { unreadable } : {},
         ...waiting > 0 ? { waitingPrivateQuestions: waiting } : {},
+        ...reviewKinds.length ? { overrideReviewKinds: reviewKinds } : {},
         ...indexedItems > 0 ? { indexedItems } : {},
         ...setup ? { setup } : {},
         ...archives ? { archives, archiveGuideLinks: archiveExportGuideLinks() } : {},
@@ -280979,6 +281293,11 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     },
     unreadableFiles: () => unreadableFiles,
     waitingPrivateQuestions: () => localPrivateAnswers?.waitingCount() ?? 0,
+    overrideReviewKinds: async () => {
+      const ledgers = [...new Set(tierScopes().map((scope) => scope.ledger))];
+      const kinds = await Promise.all(ledgers.map((ledger) => ledgerReadOffThread(ledger, ledger.ownerOverrideReviewKindsSteps(), BACKGROUND_READS)));
+      return [...new Set(kinds.flat())].sort();
+    },
     archives: () => archiveViews.view(),
     sourceImports: () => archiveViews.sourceImports(),
     archiveSources: () => archiveViews.archiveSources(),

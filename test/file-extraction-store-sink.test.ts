@@ -679,6 +679,24 @@ describe('extraction factory store sink: the Secrets floor', () => {
     }
   });
 
+  test('local extraction keeps the changed body of a Personal override for review', async () => {
+    const store = await seededStore();
+    try {
+      const { identity } = seededItem();
+      const ledger = store.tierLedger()!;
+      ledger.setOverride(identity, { kind: 'tier', tier: 'private' });
+      const sink = sinkFor(store);
+      expect((await sink.accept(requestFor('The original report.'))).accepted).toBe(true);
+      const text = `Updated fixture report ${STRIPE_LIVE_KEY}`;
+      expect((await sink.accept(requestFor(text))).accepted).toBe(true);
+      expect(ledger.getCurrent(identity)).toMatchObject({ state: 'current', contentTier: 'secure' });
+      expect(ledger.ownerOverrideReview(identity)?.kinds).toEqual(['api_secret_token']);
+      expect(store.exportItemCopy(identity)?.chunks.map(chunk => chunk.boundedText).join('')).toBe(text);
+    } finally {
+      store.close();
+    }
+  });
+
   test("the owner's Secrets override holds even for text the detector finds clean", async () => {
     const store = await seededStore();
     try {

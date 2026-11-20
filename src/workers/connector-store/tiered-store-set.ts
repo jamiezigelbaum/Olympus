@@ -64,6 +64,7 @@ import type { SecretLocationsIndex } from '../classification/secret-locations.ts
 import {
   CONTENT_NAMES_ONLY_LIFTED_REASON,
   CONTENT_NAMES_ONLY_REASON,
+  OWNER_OVERRIDE_SECRET_REVIEW_REASON,
   contentDigestReason,
   maxTier,
   hasCredentialUrl,
@@ -744,7 +745,8 @@ export class TieredStoreSet {
   checkedBodyDecision(identity: SourceItemIdentity, decision: TierDecision, text: string): TierDecision {
     if (decision.contentPending) return decision;
     const destination = copyServingLayer(this.placementFor(decision).copies, 'content');
-    return destination?.trustDomain === 'internal' && !personalContentAuthorized(decision, text, this.ledger.getOverride(identity)?.kind === 'not_secret')
+    const override = this.ledger.getOverride(identity);
+    return destination?.trustDomain === 'internal' && !personalContentAuthorized(decision, text, override?.kind === 'not_secret', override)
       ? { ...decision, state: 'pending', contentPending: true } : decision;
   }
 
@@ -2013,6 +2015,16 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
       && (input.metadataOnly || CONTAINER_MIME_TYPES.includes(item.mimeType?.trim().toLowerCase() ?? '')
         || this.set.ownerKeepsNamesOnly(pathOf(sourceExclusionFactsFromMetadata(item.metadata).path)));
     const text = namesOnly ? undefined : connectorStoreItemText(item);
+    const override = before?.contentTier === 'secrets' && text?.trim() && !input.contentFetchFailed
+      ? ledger.getOverride(identity) : undefined;
+    let freshSecretReplacement = false;
+    if (override?.kind === 'tier' && (override.tier === 'private' || override.tier === 'public') && text !== undefined) {
+      const oldHash = this.set.secrets()?.get(identity)?.contentHash;
+      const sourceVersion = typeof item.metadata.contentVersion === 'string' ? item.metadata.contentVersion : identity.sourceVersion;
+      freshSecretReplacement = oldHash !== undefined && oldHash !== null
+        ? oldHash !== createHash('sha256').update(text).digest('hex')
+        : sourceVersion === undefined || !TIER_DOMAIN_ORDER.some(domain => this.set.store(domain)?.storedItemState(identity)?.version === sourceVersion);
+    }
     // The owner's installed inputs (map, rules file, sniffer) merged with the
     // set's own (TieredStoreSet.classification()), resolved once per run.
     const classification = this.classification;
@@ -2022,6 +2034,7 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
       namesOnly,
       requireContentVerdict: hasRow && !routed,
       afterFirstImport: ledger.listingCaughtUp(connector.id),
+      ...(freshSecretReplacement ? { freshSecretReplacement: true } : {}),
       ...(input.contentFetchFailed ? { contentFetchFailed: true } : {}),
       storedContentNames: () => {
         const serving = copyServingLayer(ledger.copies(identity).filter(copy => copy.state === 'current'), 'content');
@@ -2150,8 +2163,9 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
       && before?.state !== 'moving';
     // A legacy source can already be in Private with embedding enabled.
     // Publishing its held placement installs the embedding hold before writing its replacement text.
-    const replacesInPlace = holdsReplacement && currentCopies.length > 0
-      && (!routed || placementIsRaise(currentCopies, placement.copies));
+    const restoresChangedSecret = before?.contentTier === 'secrets' && decision.reasons.includes(OWNER_OVERRIDE_SECRET_REVIEW_REASON);
+    const replacesInPlace = holdsReplacement && (restoresChangedSecret || (currentCopies.length > 0
+      && (!routed || placementIsRaise(currentCopies, placement.copies))));
     const legacyLanding = firstPrivateWrite && !contentHeldForJudgment(decision)
       ? this.set.placementFor({ ...decision, metadataPending: true }) : undefined;
     const writes = legacyLanding ?? placement;

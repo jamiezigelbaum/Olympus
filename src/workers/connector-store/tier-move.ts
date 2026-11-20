@@ -25,7 +25,7 @@
 import { createHash } from 'node:crypto';
 import type { SourceItemIdentity, SourceTrustDomain } from '../../core/source-index/types.ts';
 import { detectSecretFindingKinds } from '../classification/engine.ts';
-import { contentDigestReason, maxTier, personalContentAuthorized, tierRank, type TierDecision, type TierKey } from '../classification/tier-classifier.ts';
+import { contentDigestReason, contentHeldForJudgment, maxTier, personalContentAuthorized, tierRank, type ItemTierOverride, type TierDecision, type TierKey } from '../classification/tier-classifier.ts';
 import {
   copyServingLayer,
   loweredCopyLayers,
@@ -323,7 +323,7 @@ export function promoteLowerTierContent(
 export function moveRestoredItemToHold(
   options: Pick<TierMoveOptions, 'set' | 'identity' | 'expectedGeneration'> & { decision: TierDecision },
 ): TierMoveResult {
-  if (!options.decision.contentPending) throw new Error('A restored body must remain pending.');
+  if (!contentHeldForJudgment(options.decision)) throw new Error('A restored body must remain held.');
   return moveTieredItemNow(options);
 }
 
@@ -425,10 +425,16 @@ function stageTieredMove(options: TierMoveOptions, repairSource?: TierCopy, lowe
   const contentDestination = copyServingLayer(placement.copies, 'content');
   const loweredLayers = loweredCopyLayers(sources, placement.copies);
   const lowering = loweredLayers.length > 0 || tiersLower(record, target) || hasNewLowerLayer(sources, placement.copies);
-  assertLoweringPolicyAvailable(set, lowering);
+  const policyRefusal = unavailableLoweringPolicy(set, lowering);
+  if (policyRefusal) {
+    if (record.targetMetadataTier === target.metadataTier && record.targetContentTier === target.contentTier) {
+      retainAuthorizedRaise(set, identity, record, target, sources, placement.copies);
+    }
+    return () => { throw policyRefusal; };
+  }
   const imports = plannedLowerImports(record.generation, target, sources, placement.copies);
   if (contentDestination && needsContentMoveAuthority(contentSource, contentDestination)) {
-    const refusal = contentMoveRefusal(decision ?? record, exportFrom(contentSource ?? sources[0]!), contentDestination.trustDomain, ledger.getOverride(identity)?.kind === 'not_secret');
+    const refusal = contentMoveRefusal(decision ?? record, exportFrom(contentSource ?? sources[0]!), contentDestination.trustDomain, ledger.getOverride(identity));
     if (refusal) {
       if (record.state === 'moving') ledger.withGenerationFence(identity, record.generation, () => {
         const pending = ledger.readMeta(moveImportsKey(identity));
@@ -519,16 +525,17 @@ function stageTieredMove(options: TierMoveOptions, repairSource?: TierCopy, lowe
           if (!store) throw new Error('Source store unavailable.');
           return store.withItemCopyWriteFence(identity, () => copyWithLockedSources(index + 1));
         }
-        assertLoweringPolicyAvailable(set, lowering);
-        const ruleRevision = tierMoveRuleAuthorization(set, now, target, sources, placement.copies);
+        const policyRefusal = unavailableLoweringPolicy(set, lowering);
+        if (policyRefusal && !raise) return policyRefusal;
+        const ruleRevision = policyRefusal ? undefined : tierMoveRuleAuthorization(set, now, target, sources, placement.copies);
         if (ruleRevision === undefined) {
           retainAuthorizedRaise(set, identity, now, target, sources, placement.copies);
           discardTierMoveImports(ledger, identity, imports);
-          return authorityRefusal(set, now, target, sources, placement.copies);
+          return policyRefusal ?? authorityRefusal(set, now, target, sources, placement.copies);
         }
         exports.clear();
         if (contentDestination && needsContentMoveAuthority(contentSource, contentDestination)) {
-          const refusal = contentMoveRefusal(decision ?? now, exportFrom(contentSource ?? sources[0]!), contentDestination.trustDomain, ledger.getOverride(identity)?.kind === 'not_secret');
+          const refusal = contentMoveRefusal(decision ?? now, exportFrom(contentSource ?? sources[0]!), contentDestination.trustDomain, ledger.getOverride(identity));
           if (refusal) {
             retainAuthorizedRaise(set, identity, now, target, sources, placement.copies);
             discardTierMoveImports(ledger, identity, imports);
@@ -678,7 +685,7 @@ function contentMoveRefusal(
   evidence: Pick<TierLedgerRecord, 'contentRead' | 'contentPending' | 'decidedBy'> & { reasons: readonly string[] },
   copy: ConnectorStoreItemCopy | undefined,
   destination: SourceTrustDomain,
-  notSecret: boolean,
+  override: ItemTierOverride | undefined,
 ): TierMoveContentChangedError | undefined {
   if (destination === 'internal' && copy?.chunks.length === 0) return undefined;
   const text = copy?.chunks.map(chunk => chunk.boundedText).join('');
@@ -688,15 +695,15 @@ function contentMoveRefusal(
     : receipts.length === 0 ? 'content_no_receipt'
     : receipts.length > 1 ? 'content_several_receipts'
     : receipts[0] !== contentDigestReason(text) ? 'content_receipt_mismatch'
-    : destination === 'internal' && !personalContentAuthorized(evidence, text, notSecret) ? 'content_no_authority'
+    : destination === 'internal' && !personalContentAuthorized(evidence, text, override?.kind === 'not_secret', override) ? 'content_no_authority'
     : undefined;
   return code && new TierMoveContentChangedError('Stored content requires a matching settled verdict before moving.', code);
 }
 
-function assertLoweringPolicyAvailable(set: TieredStoreSet, lowering: boolean): void {
-  if (lowering && currentTierRulePolicy(set).unavailable) {
-    throw new TierMoveRefusedError('The owner policy is pending resolution.', 'rule_policy_unavailable');
-  }
+function unavailableLoweringPolicy(set: TieredStoreSet, lowering: boolean): TierMoveRefusedError | undefined {
+  return lowering && currentTierRulePolicy(set).unavailable
+    ? new TierMoveRefusedError('The owner policy is pending resolution.', 'rule_policy_unavailable')
+    : undefined;
 }
 
 function authorityRefusal(
@@ -949,6 +956,13 @@ export function settleDiscardedTierMoveImports(set: TieredStoreSet, identity: Ti
             || (copy.state === 'superseded' && (revoked || copy.supersededByGeneration !== null)));
           if (!retainedNames && !stagedDestination) continue;
           const store = set.store(copy.trustDomain);
+          // The marker can commit before the first lazy destination is opened.
+          const leg = set.legSpec(copy.trustDomain);
+          if (!store && stagedDestination && copy.state === 'superseded'
+            && leg?.corpusId === copy.corpusId && leg.exists?.() === false) {
+            ledger.removeSupersededCopy(identity, copy.corpusId);
+            continue;
+          }
           if (!store) throw new Error('Move destination unavailable; staged import cleanup remains pending.');
           store.bindTierSet(ledger);
           if (discarded.retainMetadata) store.stripCopyContent(identity, { keepMetadata: true });
@@ -1142,9 +1156,10 @@ function flipVerifiedMove(options: VerifiedMoveOptions, receipt: VerifiedMove): 
     return store.withItemCopyWriteFence(identity, () => withCopyFences(index + 1, work));
   };
   const outcome = withTierRuleFence(set, () => withCopyFences(0, () => {
-    assertLoweringPolicyAvailable(set, lowering);
+    const policyRefusal = unavailableLoweringPolicy(set, lowering);
+    if (policyRefusal && !receipt.raise) return policyRefusal;
     // The stores are fenced while the proof is read, then through the flip.
-    const destinationValid = timed(options.timings, 'verifyMs', () => {
+    const destinationValid = !policyRefusal && timed(options.timings, 'verifyMs', () => {
       // The destination's writes are durable before the ledger (FULL) can
       // flip on them: a store (NORMAL) never rolls back under a flip.
       for (const copy of receipt.placement) set.store(copy.trustDomain)?.durabilityBarrier();
@@ -1153,7 +1168,7 @@ function flipVerifiedMove(options: VerifiedMoveOptions, receipt: VerifiedMove): 
         return stored && copyFingerprint(stored, copy.layers) === receipt.fingerprints[copy.corpusId];
       });
     });
-    const sourceValid = timed(options.timings, 'verifyMs', () => loweredLayers.every(layer => {
+    const sourceValid = !policyRefusal && timed(options.timings, 'verifyMs', () => loweredLayers.every(layer => {
       const source = copyServingLayer(receipt.sources, layer)!;
       const exported = set.store(source.trustDomain)?.exportItemCopy(identity);
       if (!exported) return false;
@@ -1172,11 +1187,11 @@ function flipVerifiedMove(options: VerifiedMoveOptions, receipt: VerifiedMove): 
       if (record.state !== 'moving' || record.targetMetadataTier !== receipt.target.metadataTier
         || record.targetContentTier !== receipt.target.contentTier) throw new TierLedgerGenerationConflictError();
       if (lowering && ledger.writeIntent(identity)) throw new TierLedgerGenerationConflictError();
-      const revision = tierMoveRuleAuthorization(set, record, receipt.target, receipt.sources, receipt.placement);
+      const revision = policyRefusal ? undefined : tierMoveRuleAuthorization(set, record, receipt.target, receipt.sources, receipt.placement);
       if (revision === undefined) {
         retainAuthorizedRaise(set, identity, record, receipt.target, receipt.sources, receipt.placement, receipt);
         discardTierMoveImports(ledger, identity, imports);
-        return authorityRefusal(set, record, receipt.target, receipt.sources, receipt.placement);
+        return policyRefusal ?? authorityRefusal(set, record, receipt.target, receipt.sources, receipt.placement);
       }
       if (!sourceValid) {
         retainAuthorizedRaise(set, identity, record, receipt.target, receipt.sources, receipt.placement, receipt);
@@ -1188,7 +1203,7 @@ function flipVerifiedMove(options: VerifiedMoveOptions, receipt: VerifiedMove): 
         const { decision, decidedBy, reasons } = receipt.flipOptions;
         const evidence = { ...record, ...decision, reasons: reasons ?? record.reasons, decidedBy: decidedBy ?? record.decidedBy };
         const refusal = contentMoveRefusal(evidence,
-          set.store(contentDestination.trustDomain)?.exportItemCopy(identity), contentDestination.trustDomain, ledger.getOverride(identity)?.kind === 'not_secret');
+          set.store(contentDestination.trustDomain)?.exportItemCopy(identity), contentDestination.trustDomain, ledger.getOverride(identity));
         if (refusal) {
           retainAuthorizedRaise(set, identity, record, receipt.target, receipt.sources, receipt.placement);
           discardTierMoveImports(ledger, identity, imports);

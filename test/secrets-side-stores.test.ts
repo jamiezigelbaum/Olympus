@@ -23,10 +23,12 @@ import { TierSnifferService } from '../src/workers/classification/sniffer-servic
 import type { AnalystModel } from '../src/core/analyst.ts';
 import type { SnifferLane } from '../src/workers/classification/sniffer-lane.ts';
 import { runTierSet } from '../src/workers/classification/tier-cli.ts';
+import { createOwnerTierItems } from '../src/workers/classification/tier-owner-items.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { TIER_LEDGER_SQLITE_STORE_ID, tierSnifferPathForLedger } from '../src/workers/classification/tier-ledger-path.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { applyOwnerOverrides } from '../src/workers/connector-store/tier-override-settle.ts';
+import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { secretFencedSniffer } from '../src/workers/connector-store/tier-placement.ts';
 import { forgetSecretInSideStores, retireSecretRedactions, retrySecretSideStoreDebts, settleUntrackedSecretsCopy } from '../src/workers/connector-store/secrets-disposition.ts';
 import type { AppRequestRecord, ReleasedItem } from '../src/core/app-release-capture.ts';
@@ -44,6 +46,7 @@ import {
   ACCOUNT,
   CORPORA,
   FIXTURE_PLACEMENT,
+  JUDGED_PERSONAL_SNIFFER,
   PROVIDER,
   fixtureConnector,
   fixtureLocalId,
@@ -555,10 +558,63 @@ describe('the extraction job ledger keeps no name of an item that becomes Secret
     expect(jobs.record({ jobId: job!, status: 'indexed', leaseToken: lease!.leaseToken, derivations: [sheet] }).artifactsRecorded).toBe(1);
   });
 
-  test('a Personal override keeps a body with a Secret finding out of Personal search after re-listing', async () => {
+  test.each(['personal', 'judge'] as const)('a changed Personal override waits in Private for the owner to choose %s', async (choice) => {
+    const fx = fixture(workspace('olympus-secret-override-'));
+    const identity = identityOf('garden');
+    const owner = createOwnerTierItems({ storePaths: Object.values(fx.paths) });
+    const classification = spyOn(fx.set, 'classification').mockReturnValue({ sniffer: JUDGED_PERSONAL_SNIFFER });
+    cleanups.push(() => classification.mockRestore());
+    let row = GARDEN;
+    const sync = () => fx.set.sync(fixtureConnector(() => [row]), {
+      fetchContent: true, placement: FIXTURE_PLACEMENT,
+    });
+    await sync();
+    fx.ledger.setOverride(identity, { kind: 'tier', tier: 'private' });
+    applyOwnerOverrides({ set: fx.set });
+    row = { ...GARDEN, name: `Garden ${FAKE_AWS_KEY}`, version: 'v2', text: `The orchard marker came next to a credential ${FAKE_AWS_KEY}.` };
+    await sync();
+    expect(fx.ledger.getCurrent(identity)).toMatchObject({ state: 'current', contentTier: 'secure' });
+    expect(fx.ledger.getOverride(identity)).toEqual({ kind: 'tier', tier: 'private' });
+    expect(fx.stores.internal?.searchItems('orchard', 10) ?? []).toEqual([]);
+    expect(fx.stores.secure_local?.exportItemCopy(identity)?.chunks.map(chunk => chunk.boundedText).join('')).toBe(row.text!);
+    applyOwnerOverrides({ set: fx.set });
+    const [item] = owner.find({ recent: true, filter: 'override_review', withPreview: true }).items;
+    expect(item?.override_review?.kinds).toEqual(['aws_access_key_id']);
+    expect(fx.ledger.readSteps(fx.ledger.ownerOverrideReviewKindsSteps())).toEqual(item!.override_review!.kinds);
+    expect(item?.preview).toBeUndefined();
+    expect(item?.title).toBeNull();
+    expect(item?.location).toBeNull();
+    const reviewDigest = item!.override_review!.digest;
+    row = { ...row, version: 'v3', text: `Updated ${row.text}` };
+    await sync();
+    expect(owner.set({ itemId: item!.item_id, choice, allowLower: true, reviewDigest })).toMatchObject({ ok: false, code: 'override_review_changed' });
+    const [updated] = owner.find({ recent: true, filter: 'override_review' }).items;
+    expect(owner.set({ itemId: item!.item_id, choice, allowLower: true, reviewDigest: updated!.override_review!.digest })).toMatchObject({ ok: true });
+    expect(fx.ledger.readSteps(fx.ledger.ownerOverrideReviewKindsSteps())).toEqual([]);
+    applyOwnerOverrides({ set: fx.set });
+    if (choice === 'personal') {
+      const record = fx.ledger.getCurrent(identity)!;
+      expect(record).toMatchObject({ state: 'moving', targetContentTier: 'private' });
+      await moveTieredItem({ set: fx.set, identity, target: { metadataTier: 'private', contentTier: 'private' }, expectedGeneration: record.generation });
+      expect(fx.ledger.getCurrent(identity)).toMatchObject({ state: 'current', contentTier: 'private' });
+      expect(fx.stores.internal?.searchItems('orchard', 10)).toHaveLength(1);
+      expect(owner.find({ recent: true, filter: 'override_review' }).items).toEqual([]);
+      row = { ...row, version: 'v4', text: `Further changes ${row.text}` };
+      await sync();
+      expect(fx.ledger.getCurrent(identity)).toMatchObject({ state: 'current', contentTier: 'secure' });
+      expect(fx.ledger.getOverride(identity)).toMatchObject({ kind: 'tier', tier: 'private', confirmedDigest: updated!.override_review!.digest });
+      expect(owner.find({ recent: true, filter: 'override_review' }).items).toHaveLength(1);
+    } else {
+      expect(fx.ledger.getOverride(identity)).toBeUndefined();
+      expect(fx.ledger.itemIsSecret(identity)).toBe(true);
+      expect(owner.find({ recent: true, filter: 'override_review' }).items).toEqual([]);
+    }
+  });
+
+  test('a Personal override keeps an unchanged Secret hidden and holds its replacement for review', async () => {
     const dir = workspace('olympus-secret-side-jobs-');
     const fx = fixture(dir);
-    const row = { ...GARDEN, text: `The old orchard marker came next to a credential ${FAKE_AWS_KEY}.` };
+    let row = { ...GARDEN, text: `The old orchard marker came next to a credential ${FAKE_AWS_KEY}.` };
     const sync = () => fx.set.sync(fixtureConnector(() => [row]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
     await sync();
     const identity = identityOf('garden');
@@ -568,6 +624,11 @@ describe('the extraction job ledger keeps no name of an item that becomes Secret
     await sync();
     expect(fx.ledger.getCurrent(identity)?.contentTier).toBe('secrets');
     expect(fx.stores.internal?.searchItems('orchard', 10) ?? []).toEqual([]);
+    row = { ...row, version: 'v2', text: `An edited note. ${row.text}` };
+    await sync();
+    expect(fx.ledger.getCurrent(identity)).toMatchObject({ state: 'current', contentTier: 'secure' });
+    expect(fx.ledger.getOverride(identity)).toEqual({ kind: 'tier', tier: 'private' });
+    expect(fx.ledger.ownerOverrideReview(identity)?.kinds).toEqual(['aws_access_key_id']);
   });
 
   for (const restoreBeforeRecord of [false, true]) for (const errorKind of ['store_item_secrets', 'store_item_not_eligible', 'source_scope_superseded', 'egress_policy_trust_tier']) {

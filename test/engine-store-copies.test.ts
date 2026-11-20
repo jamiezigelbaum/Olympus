@@ -11,7 +11,7 @@ import { commitEngineStores, copyEngineStores, restoreEngineStores } from '../sr
 import { olympusDataRoot, sharedDataPath } from '../src/core/olympus-layout.ts';
 import { resolvedStorePath } from '../src/core/source-placement.ts';
 import { storeFileSchemaVersion } from '../src/core/source-storage.ts';
-import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
+import { classifyItemTiers, contentDigestReason, ownerOverrideSecretReview } from '../src/workers/classification/tier-classifier.ts';
 import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts';
 import { TIER_LEDGER_SQLITE_STORE_ID, TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { TIER_SNIFFER_SQLITE_STORE_ID, tierSnifferPathForLedger } from '../src/workers/classification/tier-ledger-path.ts';
@@ -95,6 +95,7 @@ describe('the copy of the data an engine install takes', () => {
       { id: 'edited', name: 'Updated picnic list', text: 'Pack the blue cooler and apples under the updatedorchardmarker.' },
       { id: 'judged', name: 'Checked picnic list', text: 'Pack the sandwiches and water under the judgedorchardmarker.' },
       { id: 'secret', name: 'Unsuitable picnic list', text: 'This old copy was marked Secrets under the secretorchardmarker.' },
+      { id: 'owner-edit', name: 'Owner picnic list', text: 'Review the picnic key ' + '-----BEGIN ' + 'PRIVATE KEY-----' },
     ];
     const ledgerSchema = schema === 15 ? 12 : 18;
     const openLedger = () => new TierLedger({ dbPath: receipts, restoreSchemaVersion: ledgerSchema });
@@ -114,9 +115,11 @@ describe('the copy of the data an engine install takes', () => {
       await personal.syncFromConnector(connector, { fetchContent: true });
       for (const row of rows.slice(1)) {
         const item = fixtureItem(row);
-        const text = row.id === 'edited' ? 'An earlier copy of the picnic list.' : row.text;
+        const text = row.id === 'edited' || row.id === 'owner-edit' ? 'An earlier copy of the picnic list.' : row.text;
+        const override = row.id === 'owner-edit' ? { kind: 'tier', tier: 'private' } as const : undefined;
+        if (override) ledger.setOverride(item.identity, override);
         const decision = classifyItemTiers({ signals: connector.classificationSignals(item), text },
-          row.id === 'secret' ? { override: { kind: 'tier', tier: 'secrets' } } : { sniffer: JUDGED_PERSONAL_SNIFFER });
+          row.id === 'secret' ? { override: { kind: 'tier', tier: 'secrets' } } : override ? { override } : { sniffer: JUDGED_PERSONAL_SNIFFER });
         ledger.recordDecision(item.identity, decision, { trustDomain: 'internal', trustTier: 'S3' });
       }
       expect(personal.searchItems('legacyorchardmarker', 10)).toHaveLength(1);
@@ -166,6 +169,13 @@ describe('the copy of the data an engine install takes', () => {
       expect(restored.searchItems('secretorchardmarker', 10)).toEqual([]);
       expect(restored.exportItemCopy(fixtureItem(rows[3]!).identity)).toBeUndefined();
       secure = openPrivate(restoredLedger);
+      const edited = rows[4]!;
+      const identity = fixtureItem(edited).identity;
+      expect(restoredLedger.getOverride(identity)).toMatchObject({ tier: 'private' });
+      expect(ownerOverrideSecretReview(restoredLedger.getCurrent(identity)!.reasons)).toEqual({
+        kinds: ['private_key_material'], digest: contentDigestReason(edited.text),
+      });
+      expect(secure.exportItemCopy(identity)?.chunks.map(chunk => chunk.boundedText).join('')).toBe(edited.text);
       for (const row of rows.slice(0, 2)) {
         const identity = fixtureItem(row).identity;
         expect(secure.exportItemCopy(identity)?.chunks.map(chunk => chunk.boundedText).join('')).toBe(row.text);

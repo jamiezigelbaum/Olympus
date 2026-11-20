@@ -30,6 +30,9 @@ import {
   contentNamesReason,
   heldUntilJudged,
   maxTier,
+  ownerOverrideSecretReview,
+  contentDigestReason,
+  OWNER_OVERRIDE_SECRET_CONFIRMED_REASON,
   ownerRuleMatches,
   tierRank,
   type TierDecision,
@@ -213,6 +216,17 @@ function restoreClearedOverride(set: TieredStoreSet, record: TierLedgerRecord): 
     return false;
   }
   if (ledger.rejudgeQuestion(identity)) return false;
+  if (ownerOverrideSecretReview(record.reasons) || record.reasons.includes(OWNER_OVERRIDE_SECRET_CONFIRMED_REASON)) {
+    // The current body is the subject of the undo, so judge it with the override lifted.
+    if (ledger.writeIntent(identity)) return false;
+    const report = emptyTierRejudgeReport();
+    rejudgeStoredContent(set, record, { report, autoMoves: true, preserveMetadata: true });
+    if (report.secrets > 0 || report.updated > 0 || report.movesQueued > 0) {
+      if (request) ledger.completeOverrideRestore(identity, request.receipt);
+      return true;
+    }
+    return false;
+  }
   const before = ledger.settledDecisionBeforeOverride(identity);
   if (!before || before.metadataTier === 'secrets' || before.contentTier === 'secrets') return false;
   // Rules that cannot be trusted now: wait, rather than restore without them.
@@ -333,15 +347,21 @@ function applyOne(
   const ledger = set.ledger;
   const identity = identityOf(record);
   const lowerOverride = tier === 'private' || tier === 'public';
+  const override = guard.override;
+  const review = ownerOverrideSecretReview(record.reasons);
+  if (lowerOverride && review && (override?.kind !== 'tier' || override.confirmedDigest !== review.digest)) return;
   const source = copyServingLayer(ledger.copies(identity).filter(copy => copy.state === 'current'), 'content');
   const stored = lowerOverride && source ? set.store(source.trustDomain)?.exportItemCopy(identity) : undefined;
   const text = stored?.chunks.length ? stored.chunks.map(chunk => chunk.boundedText).join('') : undefined;
+  // Only let a review settle from the exact body that opened it.
+  if (lowerOverride && review && (text === undefined || review.digest !== contentDigestReason(text) || ledger.writeIntent(identity))) return;
   if (lowerOverride && record.contentTier === 'secrets' && !text?.trim()) return;
   const holdUntilJudged = set.holdsContentUntilJudged() || heldUntilJudged(record.reasons);
   const decision: TierDecision = classifyItemTiers(
     { signals: {}, provider: record.provider, subject: identity, ...(text !== undefined ? { text } : {}),
+      ...(record.contentTier === 'secrets' ? { heldSecret: true } : {}),
       ...(holdUntilJudged ? { holdUntilJudged: true } : {}) },
-    { override: { kind: 'tier', tier }, ...(retirePublic ? { retirePublic: true } : {}) },
+    { ...(override ? { override } : {}), ...(retirePublic ? { retirePublic: true } : {}) },
   );
   const secrets = decision.contentTier === 'secrets';
   if (record.state === 'moving' && !secrets) {

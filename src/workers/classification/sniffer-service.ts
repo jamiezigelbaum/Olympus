@@ -2237,10 +2237,19 @@ export class TierSnifferService {
         .filter(isAutoMoveCandidate);
       if (set.openStores().some(store => store.reclaiming)) continue;
       if (!setEmbedsWithBuiltInOnly(set)) { report.notEligible += queued.length; continue; }
+      // Reorder retries within a bounded page while their generation is queued.
+      const deferRetry = (identity: TierLedgerIdentity, generation: number) => {
+        try {
+          set.ledger.recordMoveFailure(identity, { expectedGeneration: generation });
+        } catch {
+          // Counting is best effort.
+        }
+      };
       const failure = (record: TierLedgerRecord, error: unknown) => {
         const identity = recordIdentity(record);
         const failureKey = `${ledgerPath}\u0000${tierLedgerIdentityKey(identity)}\u0000${record.generation}`;
         if (error instanceof TierMoveRefusedError && error.code === 'rule_policy_unavailable') {
+          if (direction === 'raise') deferRetry(identity, record.generation);
           this.moveFailures.delete(failureKey);
           report.notEligible++;
           return;
@@ -2280,13 +2289,7 @@ export class TierSnifferService {
           this.moveFailures.delete(failureKey);
           return;
         }
-        // To the back of the queue: a move that keeps failing never holds
-        // the head of a page while moves behind it could land.
-        try {
-          set.ledger.recordMoveFailure(identity, { expectedGeneration: record.generation });
-        } catch {
-          // Counting is best effort.
-        }
+        deferRetry(identity, record.generation);
         const firstFailedAt = this.moveFailures.get(failureKey) ?? now;
         this.moveFailures.set(failureKey, firstFailedAt);
         if (now - firstFailedAt >= staleAfterMs && this.settleStaleMove(set, record, report)) {

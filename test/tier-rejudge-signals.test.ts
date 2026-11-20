@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from 'bun:test';
+import { afterEach, expect, spyOn, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { join } from 'node:path';
 import { registerInstalledTierClassification } from '../src/workers/classification/installed-tier-classification-registry.ts';
@@ -12,7 +12,7 @@ import { classifyItemTiers, tierSnifferInputHash, type TierSnifferRequest } from
 import { emptyTierRejudgeReport, rejudgeStoredContent, settleRoutedSecrets, settleLegacySecrets } from '../src/workers/connector-store/tier-rejudge.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { storedSignals } from '../src/workers/connector-store/stored-names.ts';
-import { FIXTURE_PLACEMENT, fixtureConnector, identityOf, localId, openTierFixture, tempDir } from './helpers/tier-fixtures.ts';
+import { FIXTURE_PLACEMENT, JUDGED_PERSONAL_SNIFFER, fixtureConnector, identityOf, localId, openTierFixture, tempDir } from './helpers/tier-fixtures.ts';
 
 const cleanup: Array<() => void> = [];
 afterEach(() => { for (const close of cleanup.splice(0)) close(); });
@@ -142,19 +142,24 @@ test('a chat key with no letters is left out of the names the sniffer reads, but
 
 test('a Personal answer cannot lower an old names verdict when labels were not stored; a relist can reassess it', async () => {
   const f = await storedPrivate();
-  rejudgeStoredContent(f.set, f.ledger.getCurrent(identity)!, { autoMoves: true, report: emptyTierRejudgeReport(),
-    sniffer: { id: 'new-prompt', judge: () => ({ verdict: 'decided', tier: 'private', code: 'ordinary' }) },
+  rejudgeStoredContent(f.set, f.ledger.getCurrent(identity)!, {
+    autoMoves: true, report: emptyTierRejudgeReport(), sniffer: JUDGED_PERSONAL_SNIFFER,
   });
   expect(f.ledger.getCurrent(identity)).toMatchObject({ state: 'current', metadataTier: 'secure', contentTier: 'secure' });
   expect(f.stores.internal!.localContent(localId('record'))).toBeUndefined();
-  await f.set.sync(fixtureConnector(() => [{ id: 'record', name: 'Notes', text, version: 'v2' }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+  const classification = spyOn(f.set, 'classification').mockReturnValue({ sniffer: JUDGED_PERSONAL_SNIFFER });
+  try {
+    await f.set.sync(fixtureConnector(() => [{ id: 'record', name: 'Notes', text, version: 'v2' }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+  } finally {
+    classification.mockRestore();
+  }
   await moveTieredItem({ set: f.set, identity, target: { metadataTier: 'private', contentTier: 'private' } });
   expect(f.stores.internal!.localContent(localId('record'))?.chunks.join('')).toBe(text);
 });
 
 const judging = (id: string, tier: 'private' | 'secure') => ({ id, judge: (request: TierSnifferRequest) =>
   request.pass === 'metadata' ? { verdict: 'decided' as const, tier, code: tier === 'secure' ? 'identity' : 'ordinary' }
-    : { verdict: 'decided' as const, tier: 'private' as const, code: 'ordinary' } });
+    : { verdict: 'decided' as const, tier: 'private' as const, code: 'ordinary', origin: 'model' as const } });
 
 test('names held Private by labels the store lacks stay Private across repeated Personal re-judges', async () => {
   const f = await storedPrivate();

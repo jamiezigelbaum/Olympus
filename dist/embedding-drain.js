@@ -14071,7 +14071,7 @@ var SNIFFER_EXCERPT_MAX_CHARS = 1200;
 var CONTENT_READ_SNIFFER_FLAG = "content:read";
 var PERSONAL_FIRST_REASON = "content:personal_first";
 function contentHeldForJudgment(decision) {
-  return decision.contentPending;
+  return decision.contentPending || decision.reasons?.includes(OWNER_OVERRIDE_SECRET_REVIEW_REASON) === true;
 }
 var HELD_UNTIL_JUDGED_REASON = "content:held_until_judged";
 function heldUntilJudged(reasons) {
@@ -14079,6 +14079,18 @@ function heldUntilJudged(reasons) {
 }
 function contentDigestReason(text) {
   return `content:sha256:${createHash8("sha256").update(text.trim()).digest("hex")}`;
+}
+var OWNER_OVERRIDE_SECRET_REVIEW_REASON = "content:owner_override_secret_review";
+var OWNER_OVERRIDE_SECRET_CONFIRMED_REASON = "content:owner_override_secret_confirmed";
+function ownerConfirmedSecretFinding(override, text) {
+  return override?.kind === "tier" && (override.tier === "private" || override.tier === "public") && override.confirmedDigest !== undefined && override.confirmedDigest === contentDigestReason(text);
+}
+function ownerOverrideSecretReview(reasons) {
+  if (!reasons.includes(OWNER_OVERRIDE_SECRET_REVIEW_REASON))
+    return;
+  const digest = reasons.find((reason) => reason.startsWith("content:sha256:"));
+  const kinds = reasons.filter((reason) => reason.startsWith("content:secret:")).map((reason) => reason.slice("content:secret:".length));
+  return digest && kinds.length > 0 ? { digest, kinds } : undefined;
 }
 function contentJudgeVerdictReason(reason, tier, digest) {
   return `content:judge_verdict:${tier}:${createHash8("sha256").update(JSON.stringify([reason, digest])).digest("hex")}`;
@@ -14220,12 +14232,15 @@ function classifyItemTiersWithPublic(input, options) {
     const personal = tier === "private" || tier === "public";
     const findings = text !== undefined && personal ? contentSecretReasons(text) : [];
     const stillUnread = personal && input.heldSecret === true && !text?.trim();
+    const confirmed = text !== undefined && ownerConfirmedSecretFinding(options.override, text);
+    const review = findings.length > 0 && !confirmed;
+    const staysSecret = review && input.heldSecret === true;
     return {
       ...base,
-      metadataTier: tier,
-      contentTier: findings.length > 0 ? "secrets" : tier,
-      decidedBy: findings.length > 0 ? "secret_detector" : "override",
-      reasons: findings.length > 0 ? findings : [`override:item:${tier}`, ...heldMark(holdUntilJudged, tier)],
+      metadataTier: review && !staysSecret ? "secure" : tier,
+      contentTier: staysSecret ? "secrets" : review ? "secure" : tier,
+      decidedBy: staysSecret ? "secret_detector" : "override",
+      reasons: staysSecret ? findings : ownerOverrideReasons(tier, holdUntilJudged, findings, confirmed),
       state: stillUnread ? "pending" : "current",
       contentRead: !stillUnread,
       metadataPending: false,
@@ -14300,16 +14315,17 @@ function classifyContentTier(input, options = {}) {
     const tier = options.retirePublic && options.override.tier === "public" ? "private" : options.override.tier;
     const lower = tier === "private" || tier === "public";
     const findings = lower ? contentSecretReasons(input.text) : [];
-    if (findings.length > 0)
+    const confirmed = ownerConfirmedSecretFinding(options.override, input.text);
+    const review = findings.length > 0 && !confirmed;
+    if (review && input.heldSecret)
       return { ...base, contentTier: "secrets", decidedBy: "secret_detector", reasons: findings, contentPending: false };
     return {
       ...base,
-      contentTier: tier,
+      contentTier: review ? "secure" : tier,
       decidedBy: "override",
       reasons: [
-        `override:item:${options.override.tier}`,
+        ...ownerOverrideReasons(options.override.tier, holdUntilJudged, findings, confirmed),
         ...tier !== options.override.tier ? [PUBLIC_RETIRED_REASON] : [],
-        ...heldMark(holdUntilJudged, tier),
         contentDigestReason(input.text),
         contentNamesReason(input, input.parentContext)
       ],
@@ -14617,6 +14633,13 @@ function contentSecretReasons(text) {
   if (hasCredentialUrl(text) && !kinds.includes("credential_assignment"))
     kinds.push("credential_assignment");
   return kinds.map((kind) => `content:secret:${kind}`);
+}
+function ownerOverrideReasons(tier, holdUntilJudged, findings, confirmed) {
+  return [
+    `override:item:${tier}`,
+    ...heldMark(holdUntilJudged, tier),
+    ...confirmed ? [OWNER_OVERRIDE_SECRET_CONFIRMED_REASON] : findings.length > 0 ? [OWNER_OVERRIDE_SECRET_REVIEW_REASON, ...findings] : []
+  ];
 }
 function heldMark(holdUntilJudged, tier) {
   return holdUntilJudged && tier !== "secrets" ? [HELD_UNTIL_JUDGED_REASON] : [];
@@ -16818,6 +16841,14 @@ function* routedWithoutCopiesSteps(list) {
   }
   return result;
 }
+function tierLedgerIdentityOfRecord(record) {
+  return {
+    provider: record.provider,
+    accountScope: record.accountScope,
+    providerItemId: record.providerItemId,
+    ...record.conversationKey ? { providerConversationId: record.conversationKey } : {}
+  };
+}
 var AWAITING_TEXT_WHERE = `routed = 1 AND content_read = 0 AND metadata_pending = 0
         AND ((state = 'pending' AND content_pending = 1)
           OR (state = 'current' AND EXISTS (SELECT 1 FROM json_each(reasons_json) r
@@ -16907,6 +16938,16 @@ var LIST_ROUTED_OVERRIDES_SQL = `
         AND i.conversation_key = o.conversation_key AND i.provider_item_id = o.provider_item_id
       WHERE i.routed = 1
       ORDER BY o.provider, o.account_scope, o.conversation_key, o.provider_item_id
+    `;
+function pendingOverrideReview(record, override) {
+  if (record?.state !== "current" || !record.contentRead || override?.kind !== "tier" || override.tier !== "private" && override.tier !== "public")
+    return;
+  const review = ownerOverrideSecretReview(record.reasons);
+  return review && review.digest !== override.confirmedDigest ? review : undefined;
+}
+var WRITE_INTENT_SQL = `
+      SELECT * FROM tier_write_intents
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
     `;
 function routedOverridesFromRows(rows) {
   const result = [];
@@ -17998,6 +18039,34 @@ class TierLedger {
       `).run(...idParams(identity), JSON.stringify(override), this.now().toISOString());
       this.settleRevokedOwnerMove(identity);
     })();
+  }
+  ownerOverrideReview(identity, record = this.getCurrent(identity), override = this.getOverride(identity)) {
+    const review = pendingOverrideReview(record, override);
+    return review && !this.writeIntent(identity) ? review : undefined;
+  }
+  *ownerOverrideReviewKindsSteps() {
+    const kinds = new Set;
+    for (const { record, override } of yield* this.listRoutedOverridesSteps()) {
+      const review = pendingOverrideReview(record, override);
+      if (!review)
+        continue;
+      const intent = yield { sql: WRITE_INTENT_SQL, params: idParams(tierLedgerIdentityOfRecord(record)), mode: "get" };
+      if (!intent)
+        for (const kind of review.kinds)
+          kinds.add(kind);
+    }
+    return [...kinds];
+  }
+  resolveOwnerOverrideReview(identity, digest, choice) {
+    return this.db.transaction(() => {
+      const override = this.getOverride(identity);
+      if (override?.kind !== "tier" || this.ownerOverrideReview(identity)?.digest !== digest)
+        return false;
+      if (choice === "judge")
+        return this.clearOverride(identity);
+      this.setOverride(identity, { kind: "tier", tier: "private", confirmedDigest: digest });
+      return true;
+    }).immediate();
   }
   classificationRead(identity) {
     return this.db.transaction(() => ({
@@ -19423,10 +19492,7 @@ class TierLedger {
     `).run(...idParams(intent.identity), intent.identity.localItemId ?? "", intent.version ?? null, intent.kind, intent.location === true ? 1 : 0, intent.connectorId, this.now().toISOString(), intent.bodyVersion ?? null, intent.itemFamily ?? null);
   }
   writeIntent(identity) {
-    const row = this.db.query(`
-      SELECT * FROM tier_write_intents
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-    `).get(...idParams(identity));
+    const row = this.db.query(WRITE_INTENT_SQL).get(...idParams(identity));
     return row ? writeIntentFromRow(row) : undefined;
   }
   markUnseenDeletion(identity) {
@@ -20438,6 +20504,7 @@ var STALE_EMBED_HOLD_DECIDED = `EXISTS (
           AND t.state = 'current' AND t.metadata_pending = 0 AND t.content_pending = 0
           AND t.metadata_tier <> 'secrets' AND t.content_tier <> 'secrets'
           AND t.target_metadata_tier IS NULL AND t.target_content_tier IS NULL
+          AND instr(t.reasons_json, '"${OWNER_OVERRIDE_SECRET_REVIEW_REASON}"') = 0
           -- A re-judgment still open on this decision keeps the hold.
           AND NOT (t.rejudge_json IS NOT NULL
             AND json_extract(t.rejudge_json, '$.generation') = t.generation
@@ -21773,7 +21840,7 @@ function decideItemTiers(connector, item, text, options, ledger, extra = {}) {
     ledger?.markNewArrival(item.identity);
   const sniffer = cacheAware && arrivalOrderedSniffer(conversationOrderedSniffer(recordedContentVerdictSniffer(cacheAware, recorded, text, namesReceipt, namesInputReason(signals, parentContext)), item.metadata), newArrival);
   const holdUntilJudged = extra.requireContentVerdict === true || options?.holdContentUntilJudged === true || item.holdContentUntilJudged === true || heldUntilJudged(recorded?.reasons);
-  return classifyItemTiers({
+  const decision = classifyItemTiers({
     signals,
     locators: ["locatorUri", "url", "pathDisplay"].map((key) => item.metadata[key]).filter((value) => typeof value === "string"),
     provider: item.identity.provider,
@@ -21784,7 +21851,7 @@ function decideItemTiers(connector, item, text, options, ledger, extra = {}) {
     mimeType: item.mimeType,
     hasNonTextContent: itemHasNonTextContent(item),
     titleIsConversation: item.metadata.titleIsConversation === true,
-    ...read?.secret ? { heldSecret: true } : {},
+    ...read?.secret && !extra.freshSecretReplacement ? { heldSecret: true } : {},
     subject: item.identity
   }, {
     ...options?.rules ? { rules: options.rules } : {},
@@ -21792,6 +21859,14 @@ function decideItemTiers(connector, item, text, options, ledger, extra = {}) {
     ...override ? { override } : {},
     ...options?.retirePublic ? { retirePublic: true } : {}
   });
+  const unread = text === undefined || extra.contentFetchFailed === true;
+  if (unread && override?.kind === "tier" && recorded?.reasons.includes(OWNER_OVERRIDE_SECRET_REVIEW_REASON)) {
+    return { ...decision, metadataTier: recorded.metadataTier, contentTier: recorded.contentTier, contentRead: false };
+  }
+  if (unread && override?.kind === "tier" && recorded?.reasons.includes(OWNER_OVERRIDE_SECRET_CONFIRMED_REASON)) {
+    return { ...decision, contentRead: false };
+  }
+  return decision;
 }
 function recordedContentVerdictSniffer(sniffer, recorded, text, names, namesInput) {
   if (!recorded || !text?.trim() || recorded.contentPending || !recorded.contentRead || recorded.reasons.includes(RETAINED_MOVE_SOURCE_REASON))
@@ -24837,6 +24912,46 @@ function compareStrings(left, right) {
   if (left === right)
     return 0;
   return left < right ? -1 : 1;
+}
+
+// src/core/source-index/router.ts
+var ROUTER_DELIVERS_SEARCH = Symbol("router delivers search");
+var SEARCH_GRANT_MATCH = Symbol("search grant match");
+var SEARCH_GRANT_DELIVERY = Symbol("search grant delivery");
+var FORBIDDEN_ROUTER_RESULT_KEYS = new Set([
+  "body",
+  "bodies",
+  "content",
+  "contents",
+  "message",
+  "messages",
+  "raw",
+  "raw_packet",
+  "rawPacket",
+  "raw_source",
+  "rawSource",
+  "sanitized_text",
+  "sanitizedText",
+  "snippet",
+  "snippets",
+  "source_text",
+  "sourceText",
+  "raw_source_text",
+  "rawSourceText",
+  "text",
+  "access_token",
+  "accessToken",
+  "api_key",
+  "apiKey",
+  "approved_scope_key",
+  "approvedScopeKey",
+  "refresh_token",
+  "refreshToken",
+  "token"
+]);
+var NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS = new Set([...FORBIDDEN_ROUTER_RESULT_KEYS].map(normalizeRouterResultKey));
+function normalizeRouterResultKey(key) {
+  return key.toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
 
 // src/workers/connector-store/local-index.ts
@@ -33871,34 +33986,26 @@ ${parentKey(ref)}`, { ref, origin });
   stillVisibleSearchRows(rows) {
     return visibilityHere(this.stillVisibleSearchRowsSteps(rows));
   }
-  async stillVisibleSearchRowsOffThread(rows, filters) {
-    return visibilityAwaited(() => this.stillVisibleSearchRowsSteps(rows, filters), this.childVisibilityLane());
+  async stillVisibleSearchRowsOffThread(rows) {
+    return visibilityAwaited(() => this.stillVisibleSearchRowsSteps(rows), this.childVisibilityLane());
   }
-  *stillVisibleSearchRowsSteps(rows, filters) {
-    const visible = yield* this.tierVisibleRowsSteps(rows, (row) => row.sourceItem, (row) => connectorStoreRowHasContent(row) ? "content" : "metadata");
-    return yield* this.keywordGrantVisibleRowsSteps(visible, filters);
+  *stillVisibleSearchRowsSteps(rows) {
+    return yield* this.tierVisibleRowsSteps(rows, (row) => row.sourceItem, (row) => connectorStoreRowHasContent(row) ? "content" : "metadata");
   }
-  grantedPartialRows(rows, filters) {
-    return this.closedForPoolReads ? [] : visibilityHere(this.keywordGrantVisibleRowsSteps(rows, filters));
-  }
-  *keywordGrantVisibleRowsSteps(rows, filters) {
-    if (!filters?.metadataOnlyLocatorPathScopes?.length && !filters?.metadataOnlySourceScopeFolderKeys?.length)
-      return rows;
-    const content = rows.filter(connectorStoreRowHasContent);
-    if (content.length === 0)
-      return rows;
+  searchGrantLayers(hits, filters) {
+    if (this.closedForPoolReads)
+      return new Map;
     const metadataOnly = connectorStoreMetadataOnlySql(filters, this.onDemandReadsTablePresent);
-    if (!metadataOnly.sql)
-      return rows;
-    const allowed = yield* this.visibilityStoreRead({
+    const read = {
       mode: "all",
-      sql: `SELECT candidate.key AS idx FROM json_each(?) candidate CROSS JOIN items i
+      sql: `SELECT candidate.key AS idx, ${metadataOnly.sql} AS names_only
+        FROM json_each(?) candidate CROSS JOIN items i
         WHERE ${FTS_CANDIDATE_IDENTITY_SQL}
-          AND i.tombstoned = 0 AND NOT ${metadataOnly.sql}`,
-      params: [JSON.stringify(content.map((row) => row.sourceItem)), ...metadataOnly.params]
-    });
-    const served = new Set(allowed.map((row) => content[row.idx]));
-    return rows.filter((row) => !connectorStoreRowHasContent(row) || served.has(row));
+          AND i.tombstoned = 0`,
+      params: [...metadataOnly.params, JSON.stringify(hits.map((hit) => hit.sourceItem))]
+    };
+    const allowed = visibilityHere(this.visibilityStoreRead(read));
+    return new Map(allowed.map((row) => [hits[row.idx], row.names_only ? "metadata" : "content"]));
   }
   closedForPoolReads = false;
   conceptCountMemo;
@@ -33996,6 +34103,7 @@ ${parentKey(ref)}`, { ref, origin });
     const matchedGroupIndexes = new Map;
     let conceptWeights;
     const selected = [];
+    const fallbackRows = new Map;
     const seen = new Set;
     let scanned = 0;
     let pageSize = fetchLimit;
@@ -34101,12 +34209,33 @@ ${parentKey(ref)}`, { ref, origin });
         ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
       }), (row) => row.chunk_pk === null || row.chunk_pk === undefined ? "metadata" : "content");
       selected.push(...visible);
+      if (ftsOptions.prepareGrantFallbacks && visible.length > 0) {
+        const pageBodies = visible.filter((row) => row.chunk_pk != null);
+        if (pageBodies.length > 0) {
+          const metadataCandidates = pageBodies.map((row) => searchRowFromItemRow(row).sourceItem);
+          const metadata = yield* this.searchItemsSteps(query, MAX_SEARCH_RESULTS, accountScope, filters, {
+            ...ftsOptions,
+            contentOnly: false,
+            locate: false,
+            onPartialRows: undefined,
+            prepareGrantFallbacks: false,
+            metadataCandidates
+          });
+          const byVersion = new Map(metadata.rows.map((row) => [searchGrantIdentityKey(row.sourceItem), row]));
+          for (const [index, candidate] of metadataCandidates.entries()) {
+            const fallback = byVersion.get(searchGrantIdentityKey(candidate));
+            if (fallback)
+              fallbackRows.set(pageBodies[index].item_pk, fallback);
+          }
+        }
+      }
       if (visible.length > 0 && ftsOptions.onPartialRows) {
         const partial = selected.slice(0, limit).map((row) => ({
           ...searchRowFromItemRow(row),
-          ...row.chunk_pk != null ? { contentMatched: true } : {}
+          ...row.chunk_pk != null ? { contentMatched: true } : {},
+          ...fallbackRows.has(row.item_pk) ? { metadataFallback: fallbackRows.get(row.item_pk) } : {}
         }));
-        ftsOptions.onPartialRows(yield* this.keywordGrantVisibleRowsSteps(partial, filters));
+        ftsOptions.onPartialRows(partial, ftsOptions.contentOnly);
       }
       if (exhausted || selected.length >= limit || visible.length === signalled.length || scanned >= KEYWORD_CANDIDATE_SCAN_CAP)
         break;
@@ -34118,7 +34247,8 @@ ${parentKey(ref)}`, { ref, origin });
     const locatedRows = [];
     const chunks = ftsOptions.locate === false ? new Map : yield* this.keywordChunkMatchesSteps(kept, spanTerms);
     for (const [index, row] of kept.entries()) {
-      const base = searchRowFromItemRow(row);
+      const fallback = fallbackRows.get(row.item_pk);
+      const base = { ...searchRowFromItemRow(row), ...fallback ? { metadataFallback: fallback } : {} };
       if (ftsOptions.locate === false || row.chunk_pk === null || row.chunk_pk === undefined) {
         located.push(row.chunk_pk === null || row.chunk_pk === undefined || ftsOptions.locate !== false ? base : { ...base, contentMatched: true });
         locatedRows.push(row);
@@ -35385,6 +35515,16 @@ ${parentKey(ref)}`, { ref, origin });
     `).get(connectorId);
     return row ? syncRunFromRow(row) : undefined;
   }
+}
+function searchGrantIdentityKey(identity) {
+  return JSON.stringify([
+    identity.provider,
+    identity.accountScope,
+    identity.providerItemId,
+    identity.providerConversationId,
+    identity.localItemId,
+    identity.sourceVersion
+  ]);
 }
 function connectorStoreVectorDeadlineExpired(deadlineAtMs) {
   return deadlineAtMs !== undefined && Number.isFinite(deadlineAtMs) && Date.now() >= deadlineAtMs;
@@ -38882,43 +39022,6 @@ var utf8 = new TextEncoder;
 // src/core/analyst-openclaw-infer.ts
 var MAX_PROMPT_BYTES = 1e5;
 var OPENCLAW_INFER_MAX_PROMPT_BYTES = MAX_PROMPT_BYTES;
-
-// src/core/source-index/router.ts
-var FORBIDDEN_ROUTER_RESULT_KEYS = new Set([
-  "body",
-  "bodies",
-  "content",
-  "contents",
-  "message",
-  "messages",
-  "raw",
-  "raw_packet",
-  "rawPacket",
-  "raw_source",
-  "rawSource",
-  "sanitized_text",
-  "sanitizedText",
-  "snippet",
-  "snippets",
-  "source_text",
-  "sourceText",
-  "raw_source_text",
-  "rawSourceText",
-  "text",
-  "access_token",
-  "accessToken",
-  "api_key",
-  "apiKey",
-  "approved_scope_key",
-  "approvedScopeKey",
-  "refresh_token",
-  "refreshToken",
-  "token"
-]);
-var NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS = new Set([...FORBIDDEN_ROUTER_RESULT_KEYS].map(normalizeRouterResultKey));
-function normalizeRouterResultKey(key) {
-  return key.toLowerCase().replace(/[^a-z0-9]+/g, "");
-}
 
 // src/core/evidence-pack.ts
 var utf82 = new TextEncoder;

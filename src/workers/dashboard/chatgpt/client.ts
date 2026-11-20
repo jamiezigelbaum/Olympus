@@ -339,7 +339,7 @@ export function chatgptDashboardClient(
     state.hostReadOnly = value.readOnly === true;
     const links: Record<string, string> = {};
     const given = value.links && typeof value.links === 'object' ? value.links : {};
-    for (const key of ['keys', 'agents', 'privateAnswers', 'connector', 'help']) {
+    for (const key of ['keys', 'agents', 'privateAnswers', 'overrideReviews', 'connector', 'help']) {
       const href = given[key];
       if (typeof href === 'string' && /^https?:\/\//.test(href)) links[key] = href;
     }
@@ -1249,6 +1249,18 @@ export function chatgptDashboardClient(
     const body = add(el('div', 'need-body'), el('p', 'row-text', sentence), add(el('span', 'fix'), open));
     const row = add(el('li', 'row need'), body);
     row.setAttribute('data-waiting-private', String(Math.floor(count)));
+    return row;
+  }
+
+  function overrideReviewRow(): HTMLElement | null {
+    const kinds = state.computerMeta?.overrideReviewKinds;
+    const href = state.hostLinks.overrideReviews;
+    if (!onComputer() || !href || !Array.isArray(kinds) || kinds.length === 0) return null;
+    const copy = H.copy.overrideReview;
+    const sentence = fill(copy.sentence, { kinds: kinds.join(', ').replace(/_/g, ' ') });
+    const open = button(copy.open, 'need:override-review', () => openLink(href), 'warn');
+    const row = add(el('li', 'row need'), add(el('div', 'need-body'), el('p', 'row-text', sentence), add(el('span', 'fix'), open)));
+    row.setAttribute('data-override-review', '');
     return row;
   }
 
@@ -2918,7 +2930,7 @@ export function chatgptDashboardClient(
     page.className += ' home-page';
     const all = Array.isArray(data.sources) ? data.sources : [];
     const needs = Array.isArray(data.needsYou) ? data.needsYou.filter((item: Any) => !!item) : [];
-    const extra = [transcriptionNeedRow(data.models)].filter((row) => !!row) as HTMLElement[];
+    const extra = [overrideReviewRow(), transcriptionNeedRow(data.models)].filter((row) => !!row) as HTMLElement[];
     const waiting = waitingRow() ? 1 : 0;
     add(page, homeStatus(data, needs.length + extra.length + waiting + (data.blocker ? 1 : 0), all.filter((source: Any) => !isArchivesCard(source))));
     add(page, staleLine());

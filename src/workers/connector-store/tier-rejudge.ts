@@ -441,13 +441,13 @@ export function rejudgeStoredContent(
     snifferId: content.snifferId,
   };
   if (content.contentTier === 'secrets') {
-    settleRoutedSecrets(set, identity, decision, exported, {
+    const settled = settleRoutedSecrets(set, identity, decision, exported, {
       text,
       findingKinds: content.reasons
         .filter((reason) => reason.startsWith('content:secret:'))
         .map((reason) => reason.slice('content:secret:'.length)),
-    });
-    report.secrets += 1;
+    }, { guard: { generation: record.generation, override: undefined } });
+    if (settled) report.secrets += 1;
     return;
   }
   if (questionNotQueued) {

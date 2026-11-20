@@ -170,7 +170,8 @@ function renderBody(options: DashboardPageOptions | undefined, token: string | u
     + `<button type="button" class="pichip" data-pi-filter="" aria-pressed="true">${escapeHtml(C.recentHeading)}</button>`
     + `<button type="button" class="pichip" data-pi-filter="private" aria-pressed="false">Private<i data-pi-count="private"></i></button>`
     + `<button type="button" class="pichip" data-pi-filter="personal" aria-pressed="false">Personal<i data-pi-count="personal"></i></button>`
-    + `<button type="button" class="pichip" data-pi-filter="changed" aria-pressed="false">${escapeHtml(C.changedByYou)}<i data-pi-count="changed"></i></button></div>`
+    + `<button type="button" class="pichip" data-pi-filter="changed" aria-pressed="false">${escapeHtml(C.changedByYou)}<i data-pi-count="changed"></i></button>`
+    + `<button type="button" class="pichip" data-pi-filter="override_review" aria-pressed="false">${escapeHtml(C.reviewFilter)}</button></div>`
     + `<p class="picap" data-pi-heading hidden>${escapeHtml(C.resultsHeading)}</p>`
     + `<p class="pimsg" data-pi-msg role="status">${escapeHtml(C.loading)}</p>`
     + `<ul class="pilist" data-pi-list></ul>`
@@ -244,7 +245,7 @@ export function privacyItemsClientScript(input: { csrfToken: string; unlockOnly:
   var items = [];
   var selected = null;
   var query = '';
-  var filter = '';
+  var filter = window.location.hash === '#override-review' ? 'override_review' : '';
   var counts = null;
   var seq = 0;
   var debounce = null;
@@ -279,8 +280,10 @@ export function privacyItemsClientScript(input: { csrfToken: string; unlockOnly:
     return { ok: false, retry: restarting, unknown: result.unknown === true, message: message };
   }
 
-  async function save(id, tier) {
-    var response = await post(config.paths.set, { item_id: id, tier: tier });
+  async function save(id, tier, digest) {
+    var body = { item_id: id, tier: tier };
+    if (digest) body.review_digest = digest;
+    var response = await post(config.paths.set, body);
     if (!response.ok || response.result.state !== 'pending') return response;
     var requestId = response.result.request_id;
     saving[id] = 'pending';
@@ -295,7 +298,7 @@ export function privacyItemsClientScript(input: { csrfToken: string; unlockOnly:
   function narrow() { return !!(window.matchMedia && window.matchMedia('(max-width: 719px)').matches); }
   function find(id) { for (var i = 0; i < items.length; i += 1) if (items[i].item_id === id) return items[i]; return null; }
   // The owner's latest choice wins over the recorded label while it waits for the next pass.
-  function shown(item) { var change = changes[item.item_id]; return change ? change.chosen : (item.owner_choice || item.tier); }
+  function shown(item) { if (item.override_review) return 'Private'; var change = changes[item.item_id]; return change ? change.chosen : (item.owner_choice || item.tier); }
   function changedByYou(item) { return !!changes[item.item_id] || item.owner_set === true; }
   function logo(item, small) {
     var tile = config.logos[item.source];
@@ -326,7 +329,7 @@ export function privacyItemsClientScript(input: { csrfToken: string; unlockOnly:
   function row(item) {
     var open = selected === item.item_id;
     var tier = shown(item);
-    var note = saving[item.item_id] ? C.saving : changedByYou(item) ? C.changedByYou
+    var note = saving[item.item_id] ? C.saving : item.override_review ? C.reviewFilter : changedByYou(item) ? C.changedByYou
       : item.moving_to ? fill(C.moving, { tier: item.moving_to }) : '';
     return '<li><button type="button" class="pirow" data-pi-item="' + esc(item.item_id) + '" aria-expanded="' + (open ? 'true' : 'false') + '">'
       + logo(item) + '<span class="grow"><span class="pititle">' + esc(title(item)) + '</span><span class="pimeta">' + esc(meta(item)) + '</span></span>'
@@ -347,7 +350,11 @@ export function privacyItemsClientScript(input: { csrfToken: string; unlockOnly:
     var foot = '';
     var busy = saving[item.item_id];
     var status = busy === 'pending' ? C.pendingRestart : busy ? C.saving : statusFor[item.item_id] || '';
-    if (changedByYou(item)) {
+    if (item.override_review) {
+      why = '<p class="piwhy">' + esc(fill(C.reviewReason, { kinds: item.override_review.kinds.join(', ').replace(/_/g, ' ') })) + '</p>'
+        + '<div class="piundo"><button type="button" class="btn primary" data-pi-choose="Personal"' + (busy ? ' disabled' : '') + '>' + esc(C.confirmReview) + '</button>'
+        + '<button type="button" class="btn" data-pi-undo' + (busy ? ' disabled' : '') + '>' + esc(C.liftOverride) + '</button></div>';
+    } else if (changedByYou(item)) {
       var said = change && change.judge ? ' ' + esc(fill(C.judgeSaid, { tier: change.judge })) : '';
       why = '<div class="piundo" data-pi-undo-row><p class="piwhy"><b>' + esc(fill(C.youChose, { tier: tier || '' })) + '</b>' + (change ? ' ' + esc(C.justNow) + '.' : '.') + said + '</p>'
         + '<button type="button" class="btn" data-pi-undo' + (busy ? ' disabled' : '') + '>' + esc(C.undo) + '</button></div>';
@@ -368,13 +375,13 @@ export function privacyItemsClientScript(input: { csrfToken: string; unlockOnly:
     return '<section class="pidetail" data-pi-detail="' + esc(item.item_id) + '" aria-label="' + esc(title(item)) + '">'
       + '<div class="pidhead">' + logo(item, true) + '<div class="grow"><h4>' + esc(title(item)) + '</h4><span class="pimeta">' + esc(meta(item)) + '</span></div>'
       + '<button type="button" class="pix" data-pi-close aria-label="' + esc(C.close) + '">✕</button></div>'
-      + '<p class="pidcap">' + esc(C.previewCaption) + '</p>' + preview
+      + (item.override_review ? '' : '<p class="pidcap">' + esc(C.previewCaption) + '</p>' + preview
       + (item.family === 'file' && (item.names_only || item.not_read && item.not_read.kind === 'by_choice') ? '<button type="button" class="btn" data-pi-read>Read this file</button>' : '')
       + '<p class="pidcap" id="pi-who">' + esc(C.whoCaption) + '</p>'
-      + '<div class="pipair" role="radiogroup" aria-labelledby="pi-who">' + option(item, 'Personal', C.personalLine) + option(item, 'Private', C.privateLine) + '</div>'
+      + '<div class="pipair" role="radiogroup" aria-labelledby="pi-who">' + option(item, 'Personal', C.personalLine) + option(item, 'Private', C.privateLine) + '</div>')
       + why
       + '<p class="pistatus" data-pi-status role="status"' + (busy ? ' data-saving' : '') + '>' + esc(status) + '</p>'
-      + '<p class="pifoot" data-pi-foot>' + foot + '</p></section>';
+      + (foot ? '<p class="pifoot" data-pi-foot>' + foot + '</p>' : '') + '</section>';
   }
 
   function render() {
@@ -417,7 +424,7 @@ export function privacyItemsClientScript(input: { csrfToken: string; unlockOnly:
     items = Array.isArray(response.result.items) ? response.result.items : [];
     if (response.result.counts) counts = response.result.counts;
     renderFilters();
-    setMessage(items.length ? '' : words ? C.noMatch : C.empty, false);
+    setMessage(items.length ? '' : words ? C.noMatch : filter === 'override_review' ? C.reviewEmpty : C.empty, false);
     render();
   }
 
@@ -461,7 +468,7 @@ export function privacyItemsClientScript(input: { csrfToken: string; unlockOnly:
     render();
   }
 
-  async function choose(id, tier) {
+  async function choose(id, tier, digest) {
     var item = find(id);
     if (!item || saving[id]) return;
     delete statusFor[id];
@@ -469,11 +476,12 @@ export function privacyItemsClientScript(input: { csrfToken: string; unlockOnly:
     render();
     var response;
     try {
-      response = await save(id, tier === 'Personal' ? 'personal' : 'private');
+      response = await save(id, tier === 'Personal' ? 'personal' : 'private', digest);
     } finally {
       delete saving[id];
     }
     if (!response.ok) { await saveFailed(id, response, tier); return; }
+    if (item.override_review && filter === 'override_review') await load();
     var previous = changes[id];
     if (counts && !previous && !item.owner_set) { counts.changed += 1; renderFilters(); }
     // What the judge had said: the label before this visit's first change, if nobody had set it before.
@@ -494,7 +502,7 @@ export function privacyItemsClientScript(input: { csrfToken: string; unlockOnly:
     if (item) render();
     var response;
     try {
-      response = await save(id, 'judge');
+      response = await save(id, 'judge', item && item.override_review && item.override_review.digest);
     } finally {
       delete saving[id];
     }
@@ -503,6 +511,7 @@ export function privacyItemsClientScript(input: { csrfToken: string; unlockOnly:
     if (counts && counts.changed > 0) { counts.changed -= 1; renderFilters(); }
     if (item) merge(response.result.item, item);
     // Listed under Changed by you, it is no longer changed by you.
+    if (item && item.override_review && filter === 'override_review') await load();
     if (!query && filter === 'changed') items = items.filter(function (listed) { return listed.item_id !== id; });
     render();
     showToast(C.toastJudge, null);
@@ -511,7 +520,7 @@ export function privacyItemsClientScript(input: { csrfToken: string; unlockOnly:
   function openConfirm(id) {
     var item = find(id);
     if (!item) return;
-    pendingLower = id;
+    pendingLower = { id: id, digest: item.override_review && item.override_review.digest };
     dialog.querySelector('[data-pi-confirm-item]').innerHTML = logo(item, true) + '<span class="grow"><span class="pititle">' + esc(title(item)) + '</span><span class="pimeta">' + esc(meta(item)) + '</span></span>';
     if (typeof dialog.showModal === 'function') dialog.showModal(); else dialog.setAttribute('open', '');
   }
@@ -567,9 +576,9 @@ export function privacyItemsClientScript(input: { csrfToken: string; unlockOnly:
     if (!target) return;
     if (target.closest('[data-pi-confirm-close]') || target.closest('[data-pi-confirm-cancel]')) { closeConfirm(); return; }
     if (target.closest('[data-pi-confirm-ok]')) {
-      var id = pendingLower;
+      var pending = pendingLower;
       closeConfirm();
-      if (id) choose(id, 'Personal');
+      if (pending) choose(pending.id, 'Personal', pending.digest);
     }
   });
   // Esc: the browser closes the dialog and sends cancel.

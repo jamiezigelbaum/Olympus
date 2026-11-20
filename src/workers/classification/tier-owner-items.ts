@@ -28,11 +28,12 @@ import {
   type LocatedItem,
   type TierCliContext,
 } from './tier-cli.ts';
-import { CONTENT_NAMES_ONLY_REASON, tierRank, type TierKey } from './tier-classifier.ts';
+import { CONTENT_NAMES_ONLY_REASON, OWNER_OVERRIDE_SECRET_REVIEW_REASON, tierRank, type TierKey } from './tier-classifier.ts';
 import { isFailSafeMissingContentQuestion, itemNamesHeldForJudgment, tierLedgerIdentityKey, type TierLedgerIdentity, type TierLedgerRecord } from './tier-ledger.ts';
 import type { ItemExtractionOutcome } from '../file-extraction/job-store.ts';
 import { unreadHoldDisposition, type UnreadableFileReason } from '../file-extraction/unreadable-files.ts';
 import { tierDisplayName } from './tier-rules.ts';
+import { screenedSecretLocator } from './secret-locations.ts';
 
 /** What the owner can choose for one item. `judge`: clear the owner's word and go back to the judge's verdict. */
 export type OwnerItemChoice = 'personal' | 'private' | 'judge';
@@ -86,6 +87,8 @@ export interface OwnerTierItem {
    * Only when the dashboard on this computer asks (`withPreview`); never for an agent.
    */
   preview?: string | null;
+  /** A changed body awaiting the owner's decision, with its finding kinds and receipt. */
+  override_review?: { kinds: string[]; digest: string };
 }
 
 export interface OwnerTierItemFindInput {
@@ -119,7 +122,7 @@ export interface OwnerTierItemFindInput {
   withPreview?: boolean;
 }
 
-export type OwnerTierItemFilter = 'personal' | 'private' | 'changed';
+export type OwnerTierItemFilter = 'personal' | 'private' | 'changed' | 'override_review';
 
 /** How many items carry each label, and how many the owner changed by hand: the dashboard's filter counts. */
 export interface OwnerTierItemCounts {
@@ -133,11 +136,13 @@ export interface OwnerTierItemSetInput {
   choice: OwnerItemChoice;
   /** The dashboard on this computer: Personal and the judge's verdict are allowed. An agent: Private only. */
   allowLower: boolean;
+  /** Receipt of the body the owner reviewed on the computer. */
+  reviewDigest?: string;
 }
 
 export type OwnerTierItemSetResult =
   | { ok: true; item: OwnerTierItem; changed: 'set' | 'cleared' | 'unchanged'; applies: 'now' | 'next_pass'; results: Array<Record<string, unknown>> }
-  | { ok: false; code: 'not_found' | 'secret_item' | 'dashboard_only' | 'not_owner_set'; message: string };
+  | { ok: false; code: 'not_found' | 'secret_item' | 'dashboard_only' | 'not_owner_set' | 'override_review_changed'; message: string };
 
 /** The bound engine the worker serves (engine/index.ts). */
 export interface OwnerTierItems {
@@ -203,6 +208,8 @@ interface ItemState {
   ownerSet: boolean;
   /** The owner's tier override, when one is set. */
   ownerTier?: TierKey;
+  overrideReview?: OwnerTierItem['override_review'];
+  reviewHeld?: true;
   secret: boolean;
 }
 
@@ -213,7 +220,7 @@ interface ItemState {
  */
 function namesAbovePersonal(state: ItemState): boolean {
   const { record } = state;
-  if (!record || state.namesHeld) return true;
+  if (!record || state.namesHeld || state.reviewHeld) return true;
   return [record.metadataTier, record.targetMetadataTier, state.ownerTier]
     .some((tier) => tier !== null && tier !== undefined && tierRank(tier) > tierRank('private'));
 }
@@ -224,10 +231,11 @@ export function findOwnerTierItems(input: OwnerTierItemFindInput, context: Owner
   if (query.length > OWNER_ITEM_QUERY_MAX) throw new OperationError('invalid_params', `query is at most ${OWNER_ITEM_QUERY_MAX} characters.`);
   if (!input.recent && !query) throw new OperationError('invalid_params', 'Give words to search for, or ask for the recently sorted items.');
   if (input.recent && query) throw new OperationError('invalid_params', 'Search, or list the recently sorted items, not both.');
-  if (input.filter !== undefined && (!input.recent || !['personal', 'private', 'changed'].includes(input.filter))) {
-    throw new OperationError('invalid_params', 'filter is personal, private or changed, with the recently sorted items.');
+  if (input.filter !== undefined && (!input.recent || !['personal', 'private', 'changed', 'override_review'].includes(input.filter)
+    || (input.personalNamesOnly && input.filter === 'override_review'))) {
+    throw new OperationError('invalid_params', 'Use an available filter with the recently sorted items.');
   }
-  if (input.before !== undefined && (!input.recent || input.filter === 'changed' || Number.isNaN(Date.parse(input.before)))) {
+  if (input.before !== undefined && (!input.recent || input.filter === 'changed' || input.filter === 'override_review' || Number.isNaN(Date.parse(input.before)))) {
     throw new OperationError('invalid_params', 'before is a time, with the recently sorted items.');
   }
   if (input.beforeItem !== undefined && input.before === undefined) {
@@ -242,8 +250,12 @@ export function findOwnerTierItems(input: OwnerTierItemFindInput, context: Owner
     const state = readItemState(identity, context);
     if (state.secret) continue;
     if (input.personalNamesOnly && namesAbovePersonal(state)) continue;
+    if (input.filter === 'override_review' && !state.overrideReview) continue;
     const item = view(row, state, context);
-    if (input.withPreview && !input.personalNamesOnly) item.preview = previewOf(identity, context);
+    if (!input.personalNamesOnly) {
+      if (state.overrideReview) item.override_review = state.overrideReview;
+      if (input.withPreview && !state.reviewHeld) item.preview = previewOf(identity, context);
+    }
     items.push(item);
   }
   return { items };
@@ -293,8 +305,9 @@ function recentRows(limit: number, context: TierCliContext, filter?: OwnerTierIt
   for (const ledger of knownTierLedgers(context)) {
     let records: TierLedgerRecord[] = [];
     try {
-      records = withLedgerAt(ledger.path, context.now, (opened) => filter === 'changed'
-        ? opened.listRoutedOverrides().filter(({ override }) => override.kind === 'tier').map(({ record }) => record)
+      records = withLedgerAt(ledger.path, context.now, (opened) => filter === 'changed' || filter === 'override_review'
+        ? opened.listRoutedOverrides().filter(({ record, override }) => override.kind === 'tier'
+          && (filter === 'changed' || opened.ownerOverrideReview(identityOfRecord(record), record, override))).map(({ record }) => record)
           .sort((left, right) => right.decidedAt.localeCompare(left.decidedAt)).slice(0, limit)
         : opened.recentDecisions(limit, filter === 'personal' ? 'private' : filter === 'private' ? 'secure' : undefined, before, beforeItem), ledger.boundLedgerId, 'read-only-on-front');
     } catch {
@@ -402,6 +415,8 @@ function readLocatedState(items: readonly LocatedItem[], context: TierCliContext
         state.ownerSet = true;
         state.ownerTier = override.tier;
       }
+      state.overrideReview ??= ledger.ownerOverrideReview(item.identity, record, override);
+      if (record?.reasons.includes(OWNER_OVERRIDE_SECRET_REVIEW_REASON)) state.reviewHeld = true;
       if (ledger.itemIsSecret(item.identity)) state.secret = true;
     }, item.boundLedgerId, 'read-only-on-front');
   }
@@ -435,6 +450,7 @@ function judgeReason(record: TierLedgerRecord | undefined): string | null {
 function view(row: StoredItemRow, state: ItemState, context: OwnerTierItemsContext): OwnerTierItem {
   const { record } = state;
   const identity = identityOfRow(row);
+  const screenName = (value: string | null) => state.reviewHeld ? screenedSecretLocator(value) : value;
   const hold = record?.state === 'current' && record.contentTier === 'secure' && !record.contentRead
     && record.reasons.some(isFailSafeMissingContentQuestion)
     ? unreadHoldDisposition(context.extractionOutcome?.(row.family ?? undefined, identity, row.local_item_id ?? undefined), context.contentAllowed?.(identity, row.local_item_id, row.locator_uri))
@@ -443,9 +459,9 @@ function view(row: StoredItemRow, state: ItemState, context: OwnerTierItemsConte
     item_id: ownerTierItemId(identityOfRow(row)),
     source: row.provider,
     family: row.family,
-    title: row.title,
-    sender: row.sender_label?.trim() || row.sender_id?.trim() || null,
-    location: row.locator_uri,
+    title: screenName(row.title),
+    sender: screenName(row.sender_label?.trim() || row.sender_id?.trim() || null),
+    location: screenName(row.locator_uri),
     tier: record ? tierDisplayName(record.contentTier) : null,
     names_tier: record ? tierDisplayName(record.metadataTier) : null,
     ...(record?.state === 'moving' && record.targetContentTier ? { moving_to: tierDisplayName(record.targetContentTier) } : {}),
@@ -485,7 +501,8 @@ export function getOwnerTierItem(itemId: string, context: OwnerTierItemsContext 
   const state = readLocatedState(located, context);
   if (state.secret) return undefined;
   const item = view(storedRowFor(identity, located, context), state, context);
-  if (options.withPreview) item.preview = previewOf(identity, context);
+  if (state.overrideReview) item.override_review = state.overrideReview;
+  if (options.withPreview && !state.reviewHeld) item.preview = previewOf(identity, context);
   return item;
 }
 
@@ -521,7 +538,16 @@ export function setOwnerTierItem(input: OwnerTierItemSetInput, context: OwnerTie
   }
   let results: Array<Record<string, unknown>>;
   let changed: 'set' | 'cleared' | 'unchanged';
-  if (choice === 'judge') {
+  if (before.reviewHeld || input.reviewDigest !== undefined) {
+    const staleReview = { ok: false, code: 'override_review_changed', message: 'Open the current review before changing this item.' } as const;
+    if (!input.allowLower || !input.reviewDigest || before.overrideReview?.digest !== input.reviewDigest || choice === 'private') return staleReview;
+    const digest = input.reviewDigest;
+    const answered = located.map(item => withLedgerAt(item.ledgerPath, context.now,
+      ledger => ledger.resolveOwnerOverrideReview(item.identity, digest, choice), item.boundLedgerId));
+    if (!answered.some(Boolean)) return staleReview;
+    results = [];
+    changed = choice === 'judge' ? 'cleared' : 'set';
+  } else if (choice === 'judge') {
     if (!before.ownerSet) {
       return { ok: false, code: 'not_owner_set', message: 'This item already has the judge\'s label: nobody changed it by hand.' };
     }

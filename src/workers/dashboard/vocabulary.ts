@@ -2826,6 +2826,10 @@ export const DASHBOARD_COMPUTER_PANEL_COPY = {
    * background-agents.md, "Dashboard changes" 2). Only the computer's meta
    * carries the count; ChatGPT never sees this line.
    */
+  overrideReview: {
+    sentence: 'Text you marked Personal changed. Olympus found a possible secret ({kinds}) and is holding the text Private.',
+    open: 'Review changed items',
+  },
   waiting: { one: '1 unread private answer', many: '{count} unread private answers' },
   locked: 'Open dashboard controls first',
   /** The OpenClaw tab for a connection without operator.write. */
@@ -4031,6 +4035,11 @@ export const DASHBOARD_PRIVACY_ITEMS_COPY = {
   noMatch: 'No items match. Try part of a title, a sender or a file name.',
   apps: 'An AI app can ask to make an item Private. Only you, here on this computer, can make one Personal.',
   changedByYou: 'Changed by you',
+  reviewFilter: 'Needs your review',
+  reviewEmpty: 'No Personal overrides need your review.',
+  reviewReason: 'You marked this item Personal. Its text changed and may contain a secret ({kinds}). Olympus is holding this version Private.',
+  confirmReview: 'Confirm Personal for this text',
+  liftOverride: 'Lift Personal override',
   notSorted: 'Not sorted yet',
   moving: 'Moving to {tier}',
   untitled: 'Untitled item',

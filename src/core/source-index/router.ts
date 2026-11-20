@@ -15,7 +15,7 @@ import type {
   SourceTrustDomain,
   SourceTrustTier,
 } from './types.ts';
-import { isSecureSensitivity } from './types.ts';
+import { isSecureSensitivity, isSecureTrustTier } from './types.ts';
 import type {
   SourceIndexCorpusDefinition,
   SourceIndexCorpusRegistry,
@@ -89,9 +89,14 @@ export interface SourceIndexCorpusSearchRequest {
   // lanes use batch progress instead of imposing a total deadline.
   deadlineAtMs?: number;
   onProgress?: () => void;
-  // Each prefix replaces the preceding one. On timeout, currentHits rechecks its grants before routing.
-  onPartialResponse?: (response: SourceIndexCorpusSearchResponse, currentHits?: () => readonly SourceIndexSearchHit[]) => void;
+  // Each prefix replaces the preceding one from the same lane.
+  onPartialResponse?: (response: SourceIndexCorpusSearchResponse, lane?: 'keyword' | 'vector' | 'keyword_content') => void;
+  [ROUTER_DELIVERS_SEARCH]?: true;
 }
+
+export const ROUTER_DELIVERS_SEARCH = Symbol('router delivers search');
+export const SEARCH_GRANT_MATCH = Symbol('search grant match');
+export const SEARCH_GRANT_DELIVERY = Symbol('search grant delivery');
 
 export interface SourceIndexSearchHit {
   sourceItem: SourceItemIdentity;
@@ -118,6 +123,7 @@ export interface SourceIndexSearchHit {
   // was appended to the cut, so a smaller cut places it again (eval pool
   // replay, laneAtDepth). Search routes never return it.
   pinAppended?: true;
+  [SEARCH_GRANT_MATCH]?: { metadataFallback?: SourceIndexSearchHit };
   rawExposed: false;
 }
 
@@ -179,6 +185,10 @@ export interface SourceIndexCorpusSearchResponse {
    * neighbours they are never matches and never counted.
    */
   semanticRows?: { hits: readonly SourceIndexSearchHit[]; bar: number };
+  [SEARCH_GRANT_DELIVERY]?: {
+    check: (hits: readonly SourceIndexSearchHit[]) => ReadonlyMap<SourceIndexSearchHit, 'metadata' | 'content'>;
+    matches: readonly SourceIndexSearchHit[];
+  };
   rawExposed: false;
 }
 
@@ -469,6 +479,66 @@ const NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS = new Set(
   [...FORBIDDEN_ROUTER_RESULT_KEYS].map(normalizeRouterResultKey),
 );
 
+function distinctSearchMatches(hits: readonly SourceIndexSearchHit[]): SourceIndexSearchHit[] {
+  const matches = new Map<SourceIndexCandidateId, SourceIndexSearchHit>();
+  for (const hit of hits) {
+    const key = hit.candidateId ?? JSON.stringify(hit.sourceItem);
+    const prior = matches.get(key);
+    if (!prior || (!prior[SEARCH_GRANT_MATCH] && hit[SEARCH_GRANT_MATCH])) matches.set(key, hit);
+  }
+  return [...matches.values()];
+}
+
+// Resolve grant-dependent results against the current item versions in one corpus.
+export function deliverCorpusSearch(
+  responses: readonly SourceIndexCorpusSearchResponse[],
+  maxPartialResults?: number,
+): SourceIndexCorpusSearchResponse {
+  const first = responses[0]!;
+  const delivery = first[SEARCH_GRANT_DELIVERY] ?? responses.find(response => response[SEARCH_GRANT_DELIVERY])?.[SEARCH_GRANT_DELIVERY];
+  const partial = maxPartialResults !== undefined;
+  if (!partial && !delivery) return first;
+  const grantMatches = responses.flatMap(response => response[SEARCH_GRANT_DELIVERY]?.matches ?? []);
+  const hits = responses.flatMap(response => response.hits);
+  const candidates = [...hits, ...grantMatches, ...(first.semanticNeighbourHits ?? []), ...(first.semanticRows?.hits ?? [])];
+  const scoped = candidates.filter(hit => hit[SEARCH_GRANT_MATCH] !== undefined);
+  const visible = scoped.length > 0 ? delivery?.check(scoped) : undefined;
+  const keep = (hit: SourceIndexSearchHit) => !delivery || !hit[SEARCH_GRANT_MATCH] || visible?.get(hit) === 'content';
+  const current = (rows: readonly SourceIndexSearchHit[], metadata: boolean) => rows.flatMap(hit => {
+    if (keep(hit)) return [hit];
+    const fallback = metadata && visible?.get(hit) === 'metadata' && hit[SEARCH_GRANT_MATCH]?.metadataFallback;
+    return fallback ? [fallback] : [];
+  });
+  const retained = current(hits, true);
+  const matchCount = delivery && (partial || grantMatches.some(hit => !keep(hit))) ? (() => {
+    const matches = distinctSearchMatches(current(grantMatches, true));
+    return {
+      matchedItems: matches.length,
+      contentMatchedItems: matches.filter(hit => hit[SEARCH_GRANT_MATCH]).length,
+      secureMatchedItems: matches.filter(hit => hit.trustTier !== undefined && isSecureTrustTier(hit.trustTier)).length,
+      saturated: partial || first.matchCount?.saturated === true,
+    };
+  })() : first.matchCount;
+  const { [SEARCH_GRANT_DELIVERY]: _delivery, ...response } = first;
+  return {
+    ...response,
+    hits: partial ? distinctSearchMatches(retained).slice(0, maxPartialResults) : retained,
+    ...(partial ? { incomplete: true } : {}),
+    ...(matchCount ? { matchCount } : {}),
+    ...(first.semanticNeighbourHits ? { semanticNeighbourHits: current(first.semanticNeighbourHits, false) } : {}),
+    ...(first.semanticRows ? { semanticRows: { ...first.semanticRows, hits: current(first.semanticRows.hits, false) } } : {}),
+  };
+}
+
+function poolHitKey(hit: SourceIndexSearchHit): string {
+  return `${hit.sourceItem.providerItemId}\u0000${hit.sourceItem.localItemId ?? ''}`;
+}
+
+function routeHit(hit: SourceIndexSearchHit, corpus: SourceIndexCorpusDefinition): SourceIndexRoutedSearchHit {
+  const { [SEARCH_GRANT_MATCH]: _grant, ...candidate } = hit;
+  return { ...candidate, corpusId: corpus.corpusId, trustDomain: corpus.trustDomain };
+}
+
 export async function routeSourceIndexSearch(options: RouteSourceIndexSearchOptions): Promise<SourceIndexRoutedSearchResponse> {
   return withKeywordRequestScope(() => routePreparedSourceIndexSearch(options));
 }
@@ -572,52 +642,67 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
   const laneOutcomes = await Promise.all(searchableCorpora.map(async (corpus) => {
     const adapter = options.adapters[corpus.corpusId]!;
     let progress: SourceIndexReadProgress = () => {};
-    let partial: (() => SourceIndexCorpusSearchResponse) | undefined;
+    const partials = new Map<string, SourceIndexCorpusSearchResponse>();
     const corpusRequest: SourceIndexCorpusSearchRequest = {
       query: request.query,
       maxResults: options.storeSearchDepth ?? request.maxResults,
       corpus,
       context: request.context,
       onProgress: () => progress(),
-      onPartialResponse: (response, currentHits) => {
+      [ROUTER_DELIVERS_SEARCH]: true,
+      onPartialResponse: (response, lane = 'keyword') => {
         assertSafeCorpusSearchResponse(response);
-        partial = () => {
-          const hits = (currentHits?.() ?? response.hits).slice(0, corpusRequest.maxResults);
-          const prefix = { hits, latencyMs: response.latencyMs, incomplete: true, rawExposed: false as const };
-          assertSafeCorpusSearchResponse(prefix);
-          return prefix;
-        };
+        partials.set(lane, response);
       },
     };
-    let finalMatches: readonly SourceIndexSearchHit[] = [];
     const retrievalState = retrievalStates.get(corpus.corpusId)!.state;
     const metadataMatches = request.context.metadataOnly === true ? adapter.metadataMatches : undefined;
     const outcome = await runCorpusLaneUntilIdle(
-      (report) => { progress = report; return withSourceIndexReadProgress(report, () => runInSourceAnswerLane(corpus.corpusId, async () => {
-        const response = await (metadataMatches ?? adapter)(corpusRequest);
-        if (request.readWide) finalMatches = response.hits;
-        if (metadataMatches) return response;
-        // A reranked pool draws each store's share from its matches first,
-        // then its nearest semantic neighbours from the same search: a
-        // below-bar vector hit can still be the answer, and the reranker
-        // decides. Neighbours are never matches, so match counts stay the
-        // store's own.
-        const depth = request.poolAllocation?.storeDepth;
-        const neighbours = response.semanticNeighbourHits;
-        if (depth === undefined || !neighbours?.length || response.hits.length >= depth) return response;
-        const key = (hit: SourceIndexSearchHit) => `${hit.sourceItem.providerItemId}\u0000${hit.sourceItem.localItemId ?? ''}`;
-        const seen = new Set(response.hits.map(key));
-        const added = neighbours.filter((hit) => !seen.has(key(hit))).slice(0, depth - response.hits.length);
-        return added.length === 0 ? response : { ...response, hits: [...response.hits, ...added] };
-      })); },
+      (report) => { progress = report; return withSourceIndexReadProgress(report, () =>
+        runInSourceAnswerLane(corpus.corpusId, () => (metadataMatches ?? adapter)(corpusRequest))); },
       laneTimeoutMs,
       corpus.corpusId,
       options.laneClock ?? REAL_LANE_CLOCK,
     );
-    return { corpus, outcome, retrievalState, partial, finalMatches };
+    const responses = outcome.kind === 'response' ? [outcome.response] : [...partials.values()];
+    return { corpus, outcome, retrievalState, responses, maxResults: corpusRequest.maxResults };
   }));
 
-  for (const { corpus, outcome, retrievalState, partial, finalMatches } of laneOutcomes) {
+  const lanesSettledAt = Date.now();
+  const visibilityRejected = new Map<string, Set<SourceIndexSearchHit>>();
+  if (options.visibilityGate) {
+    // Both layers are submitted to the gate before the current grants select a result.
+    const candidates = new Map<SourceIndexRoutedSearchHit, SourceIndexSearchHit>();
+    for (const { corpus, responses } of laneOutcomes) {
+      for (const response of responses) {
+        const depth = request.context.metadataOnly ? undefined : request.poolAllocation?.storeDepth;
+        const mayFillNeighbours = depth !== undefined && (response.hits.length < depth || response[SEARCH_GRANT_DELIVERY]);
+        for (const hit of [
+          ...response.hits,
+          ...(mayFillNeighbours ? response.semanticNeighbourHits ?? [] : []),
+          ...(request.poolAllocation?.semanticSeats ? response.semanticRows?.hits ?? [] : []),
+        ]) {
+          for (const option of [hit, hit[SEARCH_GRANT_MATCH]?.metadataFallback]) {
+            if (!option) continue;
+            candidates.set(routeHit(option, corpus), option);
+          }
+        }
+      }
+    }
+    const unchecked = new Set<string>();
+    const visible = new Set(await applySourceIndexVisibilityGate(options.visibilityGate, [...candidates.keys()], {
+      onUnchecked: (corpusIds) => { for (const corpusId of corpusIds) unchecked.add(corpusId); },
+    }));
+    for (const [routed, hit] of candidates) {
+      if (visible.has(routed)) continue;
+      const rejected = visibilityRejected.get(routed.corpusId) ?? new Set<SourceIndexSearchHit>();
+      rejected.add(hit);
+      visibilityRejected.set(routed.corpusId, rejected);
+    }
+    for (const corpusId of [...unchecked].sort()) degradations.push(visibilityCheckDegradation(corpusId));
+  }
+
+  for (const { corpus, outcome, retrievalState, responses, maxResults } of laneOutcomes) {
     if (outcome.kind === 'timeout') {
       // An idle read keeps its available prefix and names the unfinished store.
       skippedCorpora.push({ corpusId: corpus.corpusId, trustDomain: corpus.trustDomain, reason: 'lane_timeout' });
@@ -632,13 +717,17 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
         elapsedMs: outcome.elapsedMs,
         outcome: 'timeout',
       });
-      if (!partial) continue;
+      if (responses.length === 0) continue;
       incompleteCorpora.push(corpus.corpusId);
     }
-    const response = outcome.kind === 'response' ? outcome.response : partial!();
+    const response = deliverCorpusSearch(responses, outcome.kind === 'timeout' ? maxResults : undefined);
+    assertSafeCorpusSearchResponse(response);
+    const rejected = visibilityRejected.get(corpus.corpusId);
+    const visible = (hit: SourceIndexSearchHit) => !rejected?.has(hit);
+    const matches = response.hits.filter(visible);
     if (request.readWide) {
-      for (const hit of outcome.kind === 'response' ? finalMatches : response.hits) {
-        matchingIds.add(routedHitCandidateId({ ...hit, corpusId: corpus.corpusId, trustDomain: corpus.trustDomain }));
+      for (const hit of matches) {
+        matchingIds.add(routedHitCandidateId(routeHit(hit, corpus)));
       }
     }
     if (outcome.kind === 'response') corpusTimings.push({
@@ -679,43 +768,25 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
     const newestLoss = recentItemsLaneDegradation(corpus.corpusId, response);
     if (newestLoss) degradations.push(newestLoss);
     if (contributedSecure) secureLaneAudits.push(...laneAudits.slice(corpusLaneAuditsStart));
+    // Pool neighbours fill unused seats without becoming query matches.
+    const depth = request.context.metadataOnly ? undefined : request.poolAllocation?.storeDepth;
+    const seen = new Set(matches.map(poolHitKey));
+    const neighbours = depth !== undefined && matches.length < depth
+      && (response.hits.length < depth || responses.some(row => row[SEARCH_GRANT_DELIVERY]))
+      ? (response.semanticNeighbourHits ?? []).filter(hit => visible(hit) && !seen.has(poolHitKey(hit))).slice(0, depth - matches.length)
+      : [];
     lanes.push({
       name: corpus.corpusId,
       ...(response.storeRelevance ? { relevance: response.storeRelevance } : {}),
       ...(request.readWide ? { matchingIds } : {}),
-      items: response.hits.map((hit) => ({
-        ...hit,
-        corpusId: corpus.corpusId,
-        trustDomain: corpus.trustDomain,
-      })),
+      items: [...matches, ...neighbours].map(hit => routeHit(hit, corpus)),
       ...(request.poolAllocation?.semanticSeats && response.semanticRows?.hits.length
-        ? { semantic: response.semanticRows.hits.map((hit) => ({
-            hit: { ...hit, corpusId: corpus.corpusId, trustDomain: corpus.trustDomain },
+        ? { semantic: response.semanticRows.hits.filter(visible).map((hit) => ({
+            hit: routeHit(hit, corpus),
             margin: (hit.score ?? Number.NEGATIVE_INFINITY) - response.semanticRows!.bar,
           })) }
         : {}),
     });
-  }
-
-  const lanesSettledAt = Date.now();
-  if (options.visibilityGate) {
-    // One call for every lane's hits: one snapshot decides them all.
-    const unchecked = new Set<string>();
-    const kept = new Set(await applySourceIndexVisibilityGate(options.visibilityGate, lanes.flatMap((lane) => [
-      ...lane.items, ...(lane.semantic ?? []).map((seat) => seat.hit),
-    ]), {
-      onUnchecked: (corpusIds) => { for (const corpusId of corpusIds) unchecked.add(corpusId); },
-    }));
-    for (const lane of lanes) {
-      lane.items = lane.items.filter((hit) => {
-        if (kept.has(hit)) return true;
-        if (request.readWide) matchingIds.delete(routedHitCandidateId(hit));
-        return false;
-      });
-      if (lane.semantic) lane.semantic = lane.semantic.filter((seat) => kept.has(seat.hit));
-    }
-    // A source whose hits the gate could not judge is named, never thinner in silence (#1460).
-    for (const corpusId of [...unchecked].sort()) degradations.push(visibilityCheckDegradation(corpusId));
   }
 
   options.onSeatingLanes?.(lanes);

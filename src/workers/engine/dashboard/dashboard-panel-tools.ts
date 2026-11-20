@@ -126,6 +126,7 @@ export interface DashboardPanelToolsOptions {
    * session, or a locked reader, and never in anything ChatGPT receives.
    */
   waitingPrivateQuestions?: () => number;
+  overrideReviewKinds?: () => Promise<string[]>;
   /**
    * The Archives row's list (archive-import/dashboard.ts): the person's
    * imported archives and the imports waiting on them. Names and folders of
@@ -648,13 +649,14 @@ export function createDashboardPanelTools(options: DashboardPanelToolsOptions): 
           ? [{ sourceId: source.source_id, url: FILES_AND_FOLDERS_URL }] : [])
         : [];
       const waiting = context.localSession === true ? waitingCount(options) : 0;
+      const reviewKinds = context.localSession === true ? await options.overrideReviewKinds?.() ?? [] : [];
       const indexedItems = (view?.sources ?? []).reduce((sum, source) => sum + (Number.isFinite(source.coverage?.indexed_items) ? Math.max(0, source.coverage.indexed_items) : 0), 0);
       const archives = archivesMeta(options);
       const sourceImports = sourceImportsMeta(options);
       const archiveSources = archiveSourcesMeta(options);
       const archiveCards = archiveCardsMeta(options);
       const setup = setupMeta(options, view);
-      if (on === undefined && !setup && unpair.length === 0 && unreadable.length === 0 && waiting === 0 && indexedItems === 0 && missingFolders.length === 0 && permissionSettings.length === 0 && !archives && !sourceImports && !archiveSources && !archiveCards) return result;
+      if (on === undefined && !setup && unpair.length === 0 && unreadable.length === 0 && waiting === 0 && reviewKinds.length === 0 && indexedItems === 0 && missingFolders.length === 0 && permissionSettings.length === 0 && !archives && !sourceImports && !archiveSources && !archiveCards) return result;
       const meta: ComputerDashboardMeta = {
         ...(missingFolders.length ? { missingFolders } : {}),
         ...(permissionSettings.length ? { permissionSettings } : {}),
@@ -662,6 +664,7 @@ export function createDashboardPanelTools(options: DashboardPanelToolsOptions): 
         ...(unpair.length > 0 ? { unpair } : {}),
         ...(unreadable.length > 0 ? { unreadable } : {}),
         ...(waiting > 0 ? { waitingPrivateQuestions: waiting } : {}),
+        ...(reviewKinds.length ? { overrideReviewKinds: reviewKinds } : {}),
         ...(indexedItems > 0 ? { indexedItems } : {}),
         ...(setup ? { setup } : {}),
         ...(archives ? { archives, archiveGuideLinks: archiveExportGuideLinks() } : {}),

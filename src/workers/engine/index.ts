@@ -3039,8 +3039,8 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             const recent = asOptionalBoolean(record.recent);
             const limit = asOptionalNumber(record.limit, 'limit');
             const filter = asOptionalString(record.filter);
-            if (filter !== undefined && filter !== 'personal' && filter !== 'private' && filter !== 'changed') {
-              throw new EmailSourceWorkerError(400, 'invalid_request', 'filter must be "personal", "private" or "changed".');
+            if (filter !== undefined && filter !== 'personal' && filter !== 'private' && filter !== 'changed' && filter !== 'override_review') {
+              throw new EmailSourceWorkerError(400, 'invalid_request', 'filter must be "personal", "private", "changed" or "override_review".');
             }
             return json({ ok: true, ...ownerTierItems.find({
               ...(query !== undefined ? { query } : {}),
@@ -3064,7 +3064,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             if (tier !== 'personal' && tier !== 'private' && tier !== 'judge') {
               throw new EmailSourceWorkerError(400, 'invalid_request', 'tier must be "personal", "private" or "judge".');
             }
-            return json(ownerTierItems.set({ itemId, choice: tier satisfies OwnerItemChoice, allowLower: true }));
+            const reviewDigest = asOptionalString(record.review_digest);
+            return json(ownerTierItems.set({ itemId, choice: tier satisfies OwnerItemChoice, allowLower: true,
+              ...(reviewDigest !== undefined ? { reviewDigest } : {}) }));
           }
           throw new EmailSourceWorkerError(404, 'not_found', 'No such privacy item route.');
         }

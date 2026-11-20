@@ -394,16 +394,33 @@ export function createConnectorStoreExtractionSink(
       // THE DECIDING HALF of the fence (extractionWriteClaim).
       const writeClaim = extractionWriteClaim(request);
 
+      if (!options.route && options.recordContentTier !== false && !standaloneRoute) {
+        const ledger = store.tierLedger();
+        if (ledger) {
+          const registered = tierSetForLedger(ledger.dbPath);
+          const set = registered?.store(store.trustDomain) === store ? registered
+            : store.trustDomain === 'secure_local' ? new TieredStoreSet({
+                setId: store.corpusId, ledger, registerWithLedger: false,
+                legs: [{ trustDomain: 'secure_local', corpusId: store.corpusId, store, legacy: true }],
+                ...(options.tierClassification ? { tierClassification: options.tierClassification } : {}),
+              }) : undefined;
+          if (set) standaloneRoute = tieredRepresentationLanding({
+            set, anchor: store, replaceStoredContent: !registered,
+          });
+        }
+      }
+      const route = options.route ?? standaloneRoute;
+
       // THE SECRETS FLOOR, before anything is written. A Secret is stored
       // nowhere: the copy this store already holds (an earlier version's text)
       // goes, and only the location is kept, per the one Secrets policy
-      // (connector-store/secrets-disposition.ts). An explicit per-item owner
-      // override outranks the detector, as it does in the shared classifier.
+      // (connector-store/secrets-disposition.ts). Classified landings handle an
+      // owner's Personal choice and review of changed text in the classifier.
       // The tombstone is fenced inside the store exactly as the write it
       // replaces: an item another owner claims is left alone, and a superseded
       // worker changes nothing.
       if (options.secretsFloor !== false && plan.item.content.kind === 'text'
-        && secretsFloorHolds(store, plan.item, plan.item.content.text)) {
+        && secretsFloorHolds(store, plan.item, plan.item.content.text, route !== undefined)) {
         const settled = settleUntrackedSecretsCopy({
           store,
           identity: plan.item.identity,
@@ -433,22 +450,6 @@ export function createConnectorStoreExtractionSink(
         };
       }
 
-      if (!options.route && options.recordContentTier !== false && !standaloneRoute) {
-        const ledger = store.tierLedger();
-        if (ledger) {
-          const registered = tierSetForLedger(ledger.dbPath);
-          const set = registered?.store(store.trustDomain) === store ? registered
-            : store.trustDomain === 'secure_local' ? new TieredStoreSet({
-                setId: store.corpusId, ledger, registerWithLedger: false,
-                legs: [{ trustDomain: 'secure_local', corpusId: store.corpusId, store, legacy: true }],
-                ...(options.tierClassification ? { tierClassification: options.tierClassification } : {}),
-              }) : undefined;
-          if (set) standaloneRoute = tieredRepresentationLanding({
-            set, anchor: store, replaceStoredContent: !registered,
-          });
-        }
-      }
-      const route = options.route ?? standaloneRoute;
       if (!route && options.recordContentTier !== false) {
         return { accepted: false, chunksIndexed: 0, chunksAwaitingEmbedding: 0, skippedReason: EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE };
       }
@@ -573,19 +574,21 @@ export function extractionWriteClaim(request: ExtractionSinkRequest): ConnectorS
 }
 
 /**
- * Whether the item's text is Secrets: an owner's tier override decides
- * outright, an owner's not-secret override clears the detector, and otherwise
- * any secret finding in the text holds. An unreadable ledger reads as no
- * override, so the detector still decides.
+ * Whether the extraction sink must settle Secrets before a classified landing.
+ * The landing screens text under a Personal override. An unreadable ledger
+ * supplies no override to this check.
  */
-function secretsFloorHolds(store: LocalConnectorStore, item: RawItem, text: string): boolean {
+function secretsFloorHolds(store: LocalConnectorStore, item: RawItem, text: string, routed: boolean): boolean {
   let override: ItemTierOverride | undefined;
   try {
     override = store.tierLedger()?.getOverride(item.identity);
   } catch {
     override = undefined;
   }
-  if (override?.kind === 'tier' && override.tier !== 'private') return override.tier === 'secrets';
+  if (override?.kind === 'tier') {
+    if (override.tier === 'secrets') return true;
+    if (override.tier === 'secure' || routed) return false;
+  }
   if (override?.kind === 'not_secret') return false;
   return detectSecretFindingKinds(text).length > 0;
 }

@@ -200,6 +200,24 @@ function searchIds(store: LocalConnectorStore | undefined, term: string): string
 }
 
 describe('P1c: content that lands after listing', () => {
+  test('replacement extraction under a Personal override lands the body in Private for review', async () => {
+    const lane = openLane(workspace());
+    cleanups.push(() => lane.close());
+    const spec = NEW[0]!;
+    const identity = identityOf(spec.id);
+    lane.ledger.setOverride(identity, { kind: 'tier', tier: 'private' });
+    await listAll(lane, [spec]);
+    expect((await lane.sink.accept(request(spec.id, spec.body))).accepted).toBe(true);
+    expect(lane.ledger.getCurrent(identity)?.contentTier).toBe('private');
+
+    const text = `The replacement report includes ${FAKE_AWS_KEY}.`;
+    expect((await lane.sink.accept(request(spec.id, text))).accepted).toBe(true);
+    expect(lane.ledger.getCurrent(identity)).toMatchObject({ state: 'current', contentTier: 'secure' });
+    expect(lane.ledger.ownerOverrideReview(identity)?.kinds).toEqual(['aws_access_key_id']);
+    expect(lane.stores.secure_local?.exportItemCopy(identity)?.chunks.map(chunk => chunk.boundedText).join('')).toBe(text);
+    expect(searchIds(lane.stores.internal, 'replacement')).toEqual([]);
+  });
+
   test('existing items stay byte-identical, keep the legacy path, and are never routed', async () => {
     const dir = workspace();
     await populateLegacy(dir);

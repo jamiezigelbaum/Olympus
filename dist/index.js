@@ -9178,7 +9178,7 @@ var init_answer_latency_trace = __esm(() => {
 function normalizeRouterResultKey(key) {
   return key.toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
-var FORBIDDEN_ROUTER_RESULT_KEYS, NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS;
+var ROUTER_DELIVERS_SEARCH, SEARCH_GRANT_MATCH, SEARCH_GRANT_DELIVERY, FORBIDDEN_ROUTER_RESULT_KEYS, NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS;
 var init_router = __esm(() => {
   init_read_progress();
   init_source_answer_jobs();
@@ -9187,6 +9187,9 @@ var init_router = __esm(() => {
   init_keyword_context();
   init_types();
   init_answer_latency_trace();
+  ROUTER_DELIVERS_SEARCH = Symbol("router delivers search");
+  SEARCH_GRANT_MATCH = Symbol("search grant match");
+  SEARCH_GRANT_DELIVERY = Symbol("search grant delivery");
   FORBIDDEN_ROUTER_RESULT_KEYS = new Set([
     "body",
     "bodies",
@@ -10966,7 +10969,7 @@ var init_engine = __esm(() => {
 // src/core/sender-rules.ts
 var init_sender_rules = () => {};
 // src/workers/classification/tier-classifier.ts
-var UNDECIDED_TIER_SNIFFER;
+var UNDECIDED_TIER_SNIFFER, OWNER_OVERRIDE_SECRET_REVIEW_REASON = "content:owner_override_secret_review";
 var init_tier_classifier = __esm(() => {
   init_secret_patterns();
   init_secret_patterns();
@@ -11064,7 +11067,7 @@ var RELABEL_UNREAD_WHERE = `content_read = 0 AND instr(reasons_json, ':fail_safe
       EXISTS (SELECT 1 FROM tier_items t WHERE t.provider = c.provider AND t.account_scope = c.account_scope
         AND t.conversation_key = c.conversation_key AND t.provider_item_id = c.provider_item_id AND t.state = 'moving') AS moving`, CORPUS_COPY_FLAGS_PAGE_SQL, CORPUS_INTENT_ID_SQL = "w.provider, w.account_scope, w.conversation_key, w.provider_item_id", CORPUS_INTENT_OTHER_FLAGS_SQL = "0 AS held, 0 AS held_for_judgment, 0 AS metadata_layer, 0 AS metadata_unread, 0 AS moving", CORPUS_INTENT_WITHOUT_COPY_SQL = `w.kind IN ('deletion', 'secret') AND NOT EXISTS (
   SELECT 1 FROM tier_copies c WHERE c.provider = w.provider AND c.account_scope = w.account_scope
-    AND c.conversation_key = w.conversation_key AND c.provider_item_id = w.provider_item_id AND c.corpus_id = ?)`, CORPUS_INTENT_FLAGS_PAGE_SQL, REJUDGE_UNAVAILABLE_RETRY_MS, REJUDGE_UNAVAILABLE_MAX_RETRY_MS;
+    AND c.conversation_key = w.conversation_key AND c.provider_item_id = w.provider_item_id AND c.corpus_id = ?)`, CORPUS_INTENT_FLAGS_PAGE_SQL, REJUDGE_UNAVAILABLE_RETRY_MS, REJUDGE_UNAVAILABLE_MAX_RETRY_MS, STALE_EMBED_HOLD_DECIDED;
 var init_tier_ledger = __esm(() => {
   init_operation_error();
   init_sqlite_migrations();
@@ -11080,6 +11083,40 @@ var init_tier_ledger = __esm(() => {
   FROM tier_write_intents w WHERE w.rowid > ? ORDER BY w.rowid LIMIT 500`;
   REJUDGE_UNAVAILABLE_RETRY_MS = 60 * 60 * 1000;
   REJUDGE_UNAVAILABLE_MAX_RETRY_MS = 24 * 60 * 60 * 1000;
+  STALE_EMBED_HOLD_DECIDED = `EXISTS (
+        SELECT 1 FROM tier_items t
+        WHERE t.provider = tier_copies.provider AND t.account_scope = tier_copies.account_scope
+          AND t.conversation_key = tier_copies.conversation_key AND t.provider_item_id = tier_copies.provider_item_id
+          AND t.state = 'current' AND t.metadata_pending = 0 AND t.content_pending = 0
+          AND t.metadata_tier <> 'secrets' AND t.content_tier <> 'secrets'
+          AND t.target_metadata_tier IS NULL AND t.target_content_tier IS NULL
+          AND instr(t.reasons_json, '"${OWNER_OVERRIDE_SECRET_REVIEW_REASON}"') = 0
+          -- A re-judgment still open on this decision keeps the hold.
+          AND NOT (t.rejudge_json IS NOT NULL
+            AND json_extract(t.rejudge_json, '$.generation') = t.generation
+            AND json_extract(t.rejudge_json, '$.decidedAt') = t.decided_at
+            AND json_extract(t.rejudge_json, '$.reasonsJson') = t.reasons_json
+            AND json_extract(t.rejudge_json, '$.decidedBy') = t.decided_by)
+          -- The store must be at least as private as the verdict for each layer
+          -- the copy serves (same ranks as the tier exposure count).
+          AND (tier_copies.layers NOT IN ('content', 'both')
+            OR (CASE tier_copies.trust_domain WHEN 'secure_local' THEN 2 WHEN 'internal' THEN 1 ELSE 0 END)
+              >= (CASE WHEN t.content_tier = 'secure' OR t.metadata_tier = 'secure' THEN 2
+                       WHEN t.content_tier = 'private' OR t.metadata_tier = 'private' THEN 1 ELSE 0 END))
+          AND (tier_copies.layers NOT IN ('metadata', 'both')
+            OR (CASE tier_copies.trust_domain WHEN 'secure_local' THEN 2 WHEN 'internal' THEN 1 ELSE 0 END)
+              >= (CASE t.metadata_tier WHEN 'secure' THEN 2 WHEN 'private' THEN 1 ELSE 0 END))
+      ) AND NOT EXISTS (
+        SELECT 1 FROM tier_overrides o
+        WHERE o.provider = tier_copies.provider AND o.account_scope = tier_copies.account_scope
+          AND o.conversation_key = tier_copies.conversation_key AND o.provider_item_id = tier_copies.provider_item_id
+          AND json_extract(o.override_json, '$.kind') = 'tier' AND json_extract(o.override_json, '$.tier') = 'secrets'
+      ) AND NOT EXISTS (
+        SELECT 1 FROM tier_write_intents w
+        WHERE w.provider = tier_copies.provider AND w.account_scope = tier_copies.account_scope
+          AND w.conversation_key = tier_copies.conversation_key AND w.provider_item_id = tier_copies.provider_item_id
+          AND w.kind IN ('secret', 'deletion')
+      )`;
 });
 
 // src/workers/classification/tier-set-binding.ts
@@ -12639,6 +12676,7 @@ var init_local_index = __esm(() => {
   init_embeddings();
   init_manifest();
   init_media_judge();
+  init_router();
   init_types();
   init_sqlite_store();
   CONCEPT_COUNT_MAX_AGE_MS = 5 * 60000;
@@ -27560,6 +27598,7 @@ init_secret_locations();
 // src/core/restore-held-content.ts
 init_local_index();
 init_secrets_disposition();
+init_stored_names();
 init_tier_move();
 init_tiered_store_set();
 

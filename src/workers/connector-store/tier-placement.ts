@@ -29,6 +29,8 @@ import {
   contentNamesReason,
   hasContentJudgeVerdict,
   namesInputReason,
+  OWNER_OVERRIDE_SECRET_REVIEW_REASON,
+  OWNER_OVERRIDE_SECRET_CONFIRMED_REASON,
   tierSnifferInputHash,
   arrivalOrderedSniffer,
   conversationOrderedSniffer,
@@ -208,6 +210,8 @@ export function decideItemTiers(
     namesOnly?: boolean;
     requireContentVerdict?: boolean;
     contentFetchFailed?: boolean;
+    /** The source read a replacement for the Secret body recorded previously. */
+    freshSecretReplacement?: true;
     /** The names the current content copy gives a re-judge, read only on a cache miss. */
     storedContentNames?: () => { title?: string; path?: string; sender?: string } | undefined;
     /**
@@ -267,7 +271,7 @@ export function decideItemTiers(
     || options?.holdContentUntilJudged === true
     || item.holdContentUntilJudged === true
     || heldUntilJudged(recorded?.reasons);
-  return classifyItemTiers(
+  const decision = classifyItemTiers(
     {
       signals,
       locators: ['locatorUri', 'url', 'pathDisplay'].map(key => item.metadata[key])
@@ -280,7 +284,7 @@ export function decideItemTiers(
       mimeType: item.mimeType,
       hasNonTextContent: itemHasNonTextContent(item),
       titleIsConversation: item.metadata.titleIsConversation === true,
-      ...(read?.secret ? { heldSecret: true } : {}),
+      ...(read?.secret && !extra.freshSecretReplacement ? { heldSecret: true } : {}),
       subject: item.identity,
     },
     {
@@ -290,6 +294,16 @@ export function decideItemTiers(
       ...(options?.retirePublic ? { retirePublic: true } : {}),
     },
   );
+  // A names-only observation cannot answer a question about the stored body.
+  const unread = text === undefined || extra.contentFetchFailed === true;
+  if (unread && override?.kind === 'tier' && recorded?.reasons.includes(OWNER_OVERRIDE_SECRET_REVIEW_REASON)) {
+    return { ...decision, metadataTier: recorded.metadataTier, contentTier: recorded.contentTier, contentRead: false };
+  }
+  // A names-only observation retains the confirmation receipt with the body.
+  if (unread && override?.kind === 'tier' && recorded?.reasons.includes(OWNER_OVERRIDE_SECRET_CONFIRMED_REASON)) {
+    return { ...decision, contentRead: false };
+  }
+  return decision;
 }
 
 /**

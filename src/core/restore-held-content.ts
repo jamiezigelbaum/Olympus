@@ -8,7 +8,7 @@ import { declaredConnectorStoreMountPaths, hasFolderLayout, placedRosterStores }
 import { DEFAULT_ACCOUNT_SLOT, readSourceRegistry } from './source-registry.ts';
 import { openConnectorStore, openTierLedger, openTierSniffer, restoredConnectorStoreHasBody, storeFileSchemaVersion, type StorageAccount } from './source-storage.ts';
 import {
-  HELD_UNTIL_JUDGED_REASON, maxTier, personalContentAuthorized,
+  classifyItemTiers, HELD_UNTIL_JUDGED_REASON, maxTier, ownerOverrideSecretReview, personalContentAuthorized,
   TIER_CLASSIFIER_VERSION, TIER_MAP_REVISION, type TierDecision, type TierKey,
 } from '../workers/classification/tier-classifier.ts';
 import { TIER_LEDGER_SQLITE_STORE_ID } from '../workers/classification/tier-ledger.ts';
@@ -18,6 +18,7 @@ import { tierLedgerIsWithin, tierStoreDataRoot } from '../workers/classification
 import { installedTierMigrationLaneSpecs, type TierMigrationLaneSpec, type TierMigrationLegSpec } from '../workers/classification/tier-migration-lanes.ts';
 import { CONNECTOR_STORE_SQLITE_STORE_ID, type LocalConnectorStore } from '../workers/connector-store/local-index.ts';
 import { settleSecretsCopies } from '../workers/connector-store/secrets-disposition.ts';
+import { storedSignals } from '../workers/connector-store/stored-names.ts';
 import { moveRestoredItemToHold, TIER_MOVE_CONNECTOR_ID } from '../workers/connector-store/tier-move.ts';
 import { TieredStoreSet, tieredStoreSetLedgerPath, type TieredStoreLegSpec } from '../workers/connector-store/tiered-store-set.ts';
 import type { SourceTrustDomain } from './source-index/types.ts';
@@ -185,24 +186,29 @@ function placeRestoredBodies(set: TieredStoreSet, personal: LocalConnectorStore,
       }
       const resuming = current?.state === 'moving' && copy?.state === 'superseded'
         && copy.supersededByGeneration === current.generation + 1
-        && current.reasons.includes(HELD_UNTIL_JUDGED_REASON) && current.contentPending;
+        && ((current.reasons.includes(HELD_UNTIL_JUDGED_REASON) && current.contentPending) || !!ownerOverrideSecretReview(current.reasons));
       if (current?.routed && !resuming && copy?.state !== 'current') continue;
       const ownerTier = override?.kind === 'tier' ? override.tier : undefined;
       if (current?.state === 'current' && !current.metadataPending
         && (current.contentTier === 'private' || current.contentTier === 'public')
         && (current.metadataTier === 'private' || current.metadataTier === 'public')
         && ownerTier !== 'secure' && (current.decidedBy !== 'override' || ownerTier !== undefined)
-        && personalContentAuthorized(current, text, override?.kind === 'not_secret')) continue;
+        && personalContentAuthorized(current, text, override?.kind === 'not_secret', override)) continue;
       const record = set.adoptLegacyItem(identity)!;
       const privateCopy = ledger.copies(identity).find(copy => copy.trustDomain === 'secure_local' && copy.state === 'current' && copy.layers !== 'metadata');
       const privateText = privateCopy && set.store('secure_local')?.exportItemCopy(identity)?.chunks.map(chunk => chunk.boundedText).join('');
       if (privateText && privateText !== text) {
         throw new OperationError('config_error', 'The restored tier stores contain different active bodies for the same item.');
       }
-      // The next pass builds a question and a receipt from the held body.
+      // The restored body replaces any judge question about the previous text.
       queue?.deleteItemQuestions(identity);
       const floor = ownerTier === 'secure' ? 'secure' : 'public';
-      const decision: TierDecision = {
+      const names = ownerTier === 'private' || ownerTier === 'public' ? personal.exportItemNames(identity) : undefined;
+      const scanned = names && override ? classifyItemTiers({ signals: storedSignals(names), text }, { override }) : undefined;
+      const decision: TierDecision = scanned && ownerOverrideSecretReview(scanned.reasons) ? {
+        ...scanned,
+        metadataTier: maxTier(record.metadataTier, scanned.metadataTier),
+      } : {
         metadataTier: heldTier(floor, record.metadataTier, record.targetMetadataTier),
         contentTier: heldTier(floor, record.contentTier, record.targetContentTier),
         decidedBy: 'default',

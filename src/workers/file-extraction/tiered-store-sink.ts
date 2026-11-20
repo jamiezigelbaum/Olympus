@@ -28,7 +28,7 @@ import {
   type SourceTrustDomain,
 } from '../../core/source-index/types.ts';
 import { detectSecretFindingKinds } from '../classification/engine.ts';
-import { CONTENT_NAMES_ONLY_LIFTED_REASON, CONTENT_NAMES_ONLY_REASON, arrivalOrderedSniffer, classifyContentTier, heldUntilJudged, maxTier, namesDecidedByOwner, type TierDecision, type TierKey } from '../classification/tier-classifier.ts';
+import { CONTENT_NAMES_ONLY_LIFTED_REASON, CONTENT_NAMES_ONLY_REASON, OWNER_OVERRIDE_SECRET_REVIEW_REASON, arrivalOrderedSniffer, classifyContentTier, heldUntilJudged, maxTier, namesDecidedByOwner, type TierDecision, type TierKey } from '../classification/tier-classifier.ts';
 import { copyServingLayer, isFailSafeMissingContentQuestion, placementIsRaise, trustDomainRank, type TierCopy, type TierLedgerRecord, type TierPlacementPlan } from '../classification/tier-ledger.ts';
 import type { ConnectorStoreOwnershipKind, LocalConnectorStore } from '../connector-store/index.ts';
 import { parentNamesContext } from '../connector-store/parent-context.ts';
@@ -201,6 +201,11 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
           ...(tierClassification?.retirePublic ? { retirePublic: true } : {}),
         },
       );
+      if (content.reasons.includes(OWNER_OVERRIDE_SECRET_REVIEW_REASON)) {
+        // Stage the changed body directly in Private under the representation write fence.
+        const route = tieredRepresentationLanding({ set, anchor: anchorStore, classification: classificationNow, replaceStoredContent: true });
+        return sinkFor(anchorStore, route).accept(request);
+      }
       if (!content.contentPending && anchorStore.readOnDemand(ref.localItemId, ref.sourceVersion ?? '')) {
         console.info(`[olympus:on-demand] step=judge count=1 ms=${Math.max(0, Date.now() - judgeStarted)}`);
       }
