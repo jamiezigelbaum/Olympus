@@ -401,10 +401,6 @@ function* sweepPage(set: TieredStoreSet, options: {
  */
 export function startSupersededSweepTicker(options: {
   active?: () => boolean;
-  holds?: (set: TieredStoreSet) => boolean;
-  idle?: () => boolean;
-  forget?: (set: TieredStoreSet) => void;
-  canReclaim?: (set: TieredStoreSet) => boolean;
   reclaimStore?: ReclaimStore;
   intervalMs?: number;
   ownerQuestionEndedAt?: () => number | undefined;
@@ -420,8 +416,6 @@ export function startSupersededSweepTicker(options: {
   let stopped = false;
   let slicing = false;
   const finished = new WeakSet<TieredStoreSet>();
-  const pruned = new WeakSet<TieredStoreSet>();
-  const heldSets = new Set<TieredStoreSet>();
   const reclaiming = new WeakSet<TieredStoreSet>();
   const sets = options.sets ?? registeredTierSets;
   const every = options.every ?? ((tick, ms) => {
@@ -433,9 +427,8 @@ export function startSupersededSweepTicker(options: {
   const tick = () => {
     if (stopped) return;
     const active = !options.active || options.active();
-    const idle = active && (options.idle?.() ?? true);
     const idleSince = Math.max(started, options.ownerQuestionEndedAt?.() ?? started);
-    const cadence = options.intervalMs ?? (idle && now() - idleSince >= SUPERSEDED_SWEEP_IDLE_AFTER_MS
+    const cadence = options.intervalMs ?? (active && now() - idleSince >= SUPERSEDED_SWEEP_IDLE_AFTER_MS
       ? SUPERSEDED_SWEEP_IDLE_TICK_MS : SUPERSEDED_SWEEP_TICK_MS);
     if (cadence !== interval) {
       cancel();
@@ -448,62 +441,33 @@ export function startSupersededSweepTicker(options: {
     // A slice still finding or pruning (it gives turns): the next waits for it.
     if (!active || slicing) return;
     const all = sets();
-    for (const set of heldSets) {
-      if (all.includes(set)) continue;
-      heldSets.delete(set);
-      options.forget?.(set);
-    }
     // One set per callback: several slices must not stack up in front of an
     // Ask queued on the event loop. Round-robin prevents starvation.
     for (let checked = 0; checked < all.length; checked++) {
       const set = all[nextSet++ % all.length]!;
       if (finished.has(set) || reclaiming.has(set)) continue;
-      if (pruned.has(set)) {
-        if (tryReclaim(set)) return;
-        continue;
-      }
-      if (options.holds?.(set)) {
-        heldSets.add(set);
-        continue;
-      }
-      heldSets.delete(set);
       const complete = set.sweepSupersededSlice();
       if (typeof complete === 'boolean') {
-        if (complete) afterPrune(set);
+        if (complete) reclaim(set);
         return;
       }
       slicing = true;
-      void complete.then((done) => { if (done && !stopped) afterPrune(set); }, () => {
+      void complete.then((done) => { if (done && !stopped) reclaim(set); }, () => {
         // The sweep keeps its own cursor; a later tick retries.
       }).finally(() => { slicing = false; });
       return;
     }
   };
-  const afterPrune = (set: TieredStoreSet) => {
-    pruned.add(set);
-    tryReclaim(set);
-  };
-  const tryReclaim = (set: TieredStoreSet) => {
-    if (options.canReclaim?.(set) === false) {
-      heldSets.add(set);
-      return false;
-    }
-    heldSets.delete(set);
+  const reclaim = (set: TieredStoreSet) => {
     reclaiming.add(set);
     void reclaimAutomaticSupersededCopies(set, options.reclaimStore).then(done => {
       if (done) finished.add(set);
     }).catch(() => {
       // A closed/busy store or interrupted worker retains its durable intent.
     }).finally(() => { reclaiming.delete(set); });
-    return true;
   };
   cancel = every(tick, interval);
-  return () => {
-    stopped = true;
-    cancel();
-    for (const set of heldSets) options.forget?.(set);
-    heldSets.clear();
-  };
+  return () => { stopped = true; cancel(); };
 }
 
 /** SQLite's fixed, content-free messages, which say why a pass failed without naming anything of the owner's. */

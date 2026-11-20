@@ -3,31 +3,22 @@ import { afterEach, expect, spyOn, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { copyFileSync, existsSync, renameSync, writeFileSync } from 'node:fs';
 import { embedPendingChunks, LocalConnectorStore } from '../src/workers/connector-store/index.ts';
-import { CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX } from '../src/workers/connector-store/local-index.ts';
 import { setReadPoolObserverForTests } from '../src/workers/connector-store/off-thread-reads.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { SecretLocationsIndex } from '../src/workers/classification/secret-locations.ts';
 import { TieredStoreSet } from '../src/workers/connector-store/tiered-store-set.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
-import { createExclusiveRunner, guardAccountBoundLanes } from '../src/workers/source-account-guard.ts';
-import { EMBEDDING_SWEEP_IDLE_BACKOFF_ENV, EMBEDDING_SWEEP_IDLE_FULL_PASS_MS, SourceScheduler, withEmbeddingSweep, type SourceSchedulerTask } from '../src/workers/source-scheduler.ts';
+import { EMBEDDING_SWEEP_IDLE_BACKOFF_ENV, EMBEDDING_SWEEP_IDLE_FULL_PASS_MS, SourceScheduler, withEmbeddingSweep } from '../src/workers/source-scheduler.ts';
 import { TransientSourceEmbeddingError } from '../src/workers/source-index/embeddings.ts';
-import { fileLeaseHeld, FileLeaseBusyError } from '../src/core/file-lease.ts';
+import { FileLeaseBusyError } from '../src/core/file-lease.ts';
 import { EMBEDDING_SWEEP_IDLE_SUFFIX, readEmbeddingSweepIdle, writeEmbeddingSweepIdle } from '../src/core/embedding-sweep-idle.ts';
 import { CORPORA, FIXTURE_PLACEMENT, fixtureConnector, identityOf, localId, localProvider, RecordingProvider, tempDir } from './helpers/tier-fixtures.ts';
-import { createTestClock, waitFor } from './helpers/test-clock.ts';
+import { createTestClock } from './helpers/test-clock.ts';
 
 const cleanups: Array<() => void> = [];
 afterEach(() => { for (const cleanup of cleanups.splice(0).reverse()) cleanup(); });
 
-async function fixture(options: {
-  accountScope?: string;
-  empty?: boolean;
-  holdForAsk?: () => boolean;
-  operatorItemId?: string;
-  storeDeadlineMs?: number;
-  guard?: ReturnType<typeof createExclusiveRunner>;
-} = {}) {
+async function fixture(options: { accountScope?: string; empty?: boolean } = {}) {
   const tmp = tempDir();
   const dbPath = `${tmp.dir}/private.sqlite`;
   const open = (provider: RecordingProvider) => {
@@ -52,31 +43,12 @@ async function fixture(options: {
   const log = spyOn(console, 'info').mockImplementation(() => {});
   cleanups.push(() => log.mockRestore());
   let now = new Date('2026-11-07T15:00:00Z');
-  const sourceId = 'synthetic-source-id';
   const createScheduler = () => {
-    const { store, provider, set } = runtime;
-    const tasks: SourceSchedulerTask[] = [];
-    const item = options.operatorItemId;
-    if (item) tasks.push({
-      id: 'pull', kind: 'sync', writer: true, cadence: 'manual',
-      async run() {
-        await set.sync(fixtureConnector(() => [{ id: item, name: 'Pulled.txt', text: 'A newly pulled body.' }]),
-          { fetchContent: true, placement: FIXTURE_PLACEMENT }, { embed: false });
-        return { status: 'progress' };
-      },
-    });
-    if (options.holdForAsk) tasks.push({
-      id: 'watch', kind: 'watch', writer: true,
-      async run() { return { status: 'idle' }; },
-    });
-    let sources = withEmbeddingSweep([{ sourceId, corpusId: store.corpusId, cadence: 'continuous', intervalMs: 60_000, freshnessThresholdHours: 24, tasks }], () => () => [{
+    const { store, provider } = runtime;
+    const sources = withEmbeddingSweep([{ sourceId: 'synthetic-source-id', corpusId: store.corpusId, cadence: 'continuous', intervalMs: 60_000, freshnessThresholdHours: 24, tasks: [] }], () => () => [{
       store, provider, wholeStore: true, ...(options.accountScope !== undefined ? { accountScope: options.accountScope } : {}),
-    }], options.storeDeadlineMs === undefined ? {} : { storeDeadlineMs: options.storeDeadlineMs });
-    if (options.guard) sources = guardAccountBoundLanes(sources, new Map([[sourceId, { run: options.guard, assertAccount: async () => {} }]]));
-    return new SourceScheduler({
-      enabled: true, tickMs: 60_000, errorBackoffMs: 1_000, maxTransientRetries: 1,
-      sources, now: () => now, ...(options.holdForAsk ? { holdForAsk: options.holdForAsk } : {}),
-    });
+    }]);
+    return new SourceScheduler({ enabled: true, tickMs: 60_000, errorBackoffMs: 1_000, maxTransientRetries: 1, sources, now: () => now });
   };
   let scheduler = createScheduler();
   const restart = (provider = localProvider(), whileClosed?: () => void) => {
@@ -86,7 +58,7 @@ async function fixture(options: {
     scheduler = createScheduler();
   };
   const walks = { inventory: 0, workList: 0 };
-  const pass = async (provenance: 'scheduled' | 'operator' = 'scheduled') => {
+  const pass = async () => {
     log.mockClear();
     walks.inventory = 0;
     walks.workList = 0;
@@ -95,16 +67,14 @@ async function fixture(options: {
       if (read.sql.includes('AS in_scope')) walks.inventory++;
       if (read.sql.includes('AS first_chunk_pk')) walks.workList++;
     }, { snapshots: true });
-    const running = provenance === 'operator' ? scheduler.runSource(sourceId, now, provenance) : scheduler.runDueTasks();
-    const status = await running.finally(() => setReadPoolObserverForTests());
+    const status = await scheduler.runDueTasks().finally(() => setReadPoolObserverForTests());
     const lines = log.mock.calls.map(call => String(call[0])).filter(line => line.startsWith('[olympus:embedding-sweep] '));
     expect(lines).toHaveLength(1);
     expect(lines[0]).not.toMatch(/synthetic|fixture|personal:|corpus|source_id|item_id/);
     const record = JSON.parse(lines[0]!.slice('[olympus:embedding-sweep] '.length));
     expect(record).toMatchObject({ source_index: 0, store_index: 0 });
-    const embed = status.sources[0]!.tasks.find(task => task.kind === 'embed')!;
-    expect(record.next_run_at).toBe(embed.next_run_at);
-    const sweep = embed.embedding_sweep?.[0];
+    expect(record.next_run_at).toBe(status.sources[0]!.tasks[0]!.next_run_at);
+    const sweep = status.sources[0]!.tasks[0]!.embedding_sweep?.[0];
     expect(sweep?.counts).toBeDefined();
     expect(record).toMatchObject(sweep!.counts);
     now = new Date(record.next_run_at);
@@ -117,7 +87,7 @@ async function fixture(options: {
     get provider() { return runtime.provider; },
     get set() { return runtime.set; },
     statePath: `${dbPath}${EMBEDDING_SWEEP_IDLE_SUFFIX}`,
-    pass, restart, walks, status: () => scheduler.status(),
+    pass, restart, walks,
   };
 }
 
@@ -511,7 +481,6 @@ test('with the idle back-off switched off, every pass walks the store', async ()
     const record = await f.pass();
     expect(record).not.toHaveProperty('wake');
     expect(record).not.toHaveProperty('not_resting');
-    expect(record.rested).toBe(0);
     expect(f.walks).toEqual({ inventory: 1, workList: 0 });
   }
 });
@@ -566,87 +535,4 @@ test('an item that failed for good does not keep its store walked, stays reporte
     { id: 'synthetic-id-3', name: 'synthetic-name-3.txt', text: 'A third synthetic body.' },
   ]), { fetchContent: true, placement: FIXTURE_PLACEMENT }, { embed: false });
   expect(await f.pass()).toMatchObject({ chunks_embedded: 1, rested: 0 });
-});
-
-test('a store overrun releases the account without reporting a provider outage', async () => {
-  const guard = createExclusiveRunner();
-  const f = await fixture({ guard, storeDeadlineMs: 1_000 });
-  const lease = f.store.dbPath + CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX;
-  const embed = f.provider.embed.bind(f.provider);
-  let sent = false;
-  let release!: () => void;
-  const gate = new Promise<void>(resolve => { release = resolve; });
-  const stalled = spyOn(f.provider, 'embed').mockImplementationOnce(async inputs => {
-    sent = true;
-    await gate;
-    return embed(inputs);
-  });
-  const sweep = f.pass();
-  try {
-    await waitFor(() => sent, { description: 'the guarded pass entered the provider' });
-    expect(await sweep).toMatchObject({
-      pass_overran: 1, stores_deferred: 0, rested: 0, wake: 'none_remembered', not_resting: 'overrun', backoff_ms: 0,
-    });
-    expect(f.status().sources[0]!.tasks.find(task => task.kind === 'embed')).toMatchObject({
-      next_run_at: '2026-11-07T15:01:00.000Z', last_result: { counts: { stores_overran: 1 } },
-    });
-    expect(f.store.embeddingDeferredReason()).toBeUndefined();
-    expect(await guard(async () => fileLeaseHeld(lease))).toBe(true);
-    expect(f.store.exportItemCopy(identityOf('synthetic-id'))!.vectors).toHaveLength(0);
-  } finally {
-    release();
-    await sweep;
-    await waitFor(() => !fileLeaseHeld(lease), { description: 'the unfinished batch released its store lease' });
-    stalled.mockRestore();
-  }
-  expect(f.store.exportItemCopy(identityOf('synthetic-id'))!.vectors).toHaveLength(1);
-  expect(await f.pass()).toMatchObject({ chunks_embedded: 0, stores_deferred: 0, backoff_ms: 0 });
-  expect(f.provider.inputs).toHaveLength(1);
-}, 25_000);
-
-test('a continuing Ask allows the mixed sweep and a same-account operator pull with a first vector', async () => {
-  const f = await fixture({
-    operatorItemId: 'operator-arrival', guard: createExclusiveRunner(), holdForAsk: () => true,
-  });
-  f.store.completeQueuedEmbedding([localId('synthetic-id')]);
-  await f.set.sync(fixtureConnector(() => [{ id: 'arrival', name: 'Arrival.txt', text: 'A fresh note.' }]),
-    { fetchContent: true, placement: FIXTURE_PLACEMENT }, { embed: false });
-  expect(f.store.queuedEmbeddingItemIds()).toEqual([localId('arrival')]);
-
-  expect(await f.pass()).toMatchObject({ queued_first_items: 1, chunks_embedded: 2, rested: 0 });
-  expect(f.status().sources[0]!.tasks.find(task => task.kind === 'watch')).toMatchObject({ wait_reason: 'owner_ask' });
-  expect(f.provider.inputs).toEqual([expect.stringContaining('A fresh note.'), expect.stringContaining('Synthetic body marker.')]);
-  expect(f.store.exportItemCopy(identityOf('arrival'))!.vectors).toHaveLength(1);
-  expect(f.store.exportItemCopy(identityOf('synthetic-id'))!.vectors).toHaveLength(1);
-
-  expect(await f.pass('operator')).toMatchObject({ queued_first_items: 1, chunks_embedded: 1, rested: 0 });
-  expect(f.store.exportItemCopy(identityOf('operator-arrival'))!.vectors).toHaveLength(1);
-});
-
-test('the stop callback preserves committed backlog batches and gives back the store lease', async () => {
-  const f = await fixture({ empty: true });
-  const embed = f.provider.embed.bind(f.provider);
-  let stop = false;
-  const firstBatch = spyOn(f.provider, 'embed').mockImplementationOnce(async inputs => {
-    stop = true;
-    return embed(inputs);
-  });
-  const target = { store: f.store, provider: f.provider, wholeStore: true };
-  await f.set.sync(fixtureConnector(() => [{
-    id: 'long', name: 'long.txt', text: Array.from({ length: 100 }, () => 'word '.repeat(790)).join('\n\n'),
-  }]), { fetchContent: true, placement: FIXTURE_PLACEMENT }, { embed: false });
-  f.store.completeQueuedEmbedding([localId('long')]);
-  try {
-    const [stopped] = await embedPendingChunks([target], { maxItems: 1, shouldStop: () => stop });
-    expect(stopped).toMatchObject({ queued_first_items: 0, chunksEmbedded: 32, stoppedAtDeadline: true });
-    expect(firstBatch).toHaveBeenCalledTimes(1);
-    expect(f.store.exportItemCopy(identityOf('long'))!.vectors).toHaveLength(32);
-    expect(fileLeaseHeld(f.store.dbPath + CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX)).toBe(false);
-    // The caller can resume the backlog in another turn.
-    stop = false;
-    const [resumed] = await embedPendingChunks([target], { maxItems: 1 });
-    expect(resumed!.chunksEmbedded).toBeGreaterThan(0);
-  } finally {
-    firstBatch.mockRestore();
-  }
 });

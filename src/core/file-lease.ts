@@ -1,10 +1,9 @@
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { dirname } from 'node:path';
-import { untilAborted } from './http-timeout.ts';
 
 export interface FileLeaseOptions {
   /** Readers may coexist; an exclusive maintenance lease excludes all readers. */
@@ -18,8 +17,6 @@ export interface FileLeaseOptions {
   /** Async only: wait on this holder's heartbeat instead of a total acquire timeout.
    * A missing heartbeat for stallMs returns busy; it never revokes a live kernel lock. */
   heartbeat?: { stallMs: number; intervalMs: number };
-  /** Cancels acquisition without affecting the current holder. Async only. */
-  signal?: AbortSignal;
   /** Clock seam for the asynchronous wait and opt-in heartbeat. */
   timers?: FileLeaseTimers;
 }
@@ -37,7 +34,6 @@ interface NormalizedFileLeaseOptions {
   pollIntervalMs: number;
   heartbeat?: { stallMs: number; intervalMs: number };
   timers: FileLeaseTimers;
-  signal?: AbortSignal;
 }
 
 export interface ProcessInstanceIdentity {
@@ -130,7 +126,6 @@ export async function withFileLease<T>(
   const owner = await acquireFileLease(targetPath, normalized);
   let stopHeartbeat: (() => void) | undefined;
   try {
-    normalized.signal?.throwIfAborted();
     if (normalized.heartbeat) stopHeartbeat = startLeaseHeartbeat(targetPath, normalized);
     return await callback(owner);
   } finally {
@@ -151,22 +146,6 @@ export function withFileLeaseSync<T>(
   } finally {
     owner.release();
   }
-}
-
-/** Hold a shared lock across an independently scoped lifetime. */
-export async function holdSharedFileLease(targetPath: string, signal?: AbortSignal): Promise<() => void> {
-  const owner = await acquireFileLease(targetPath, normalizeOptions({ mode: 'shared', ...(signal ? { signal } : {}) }));
-  return () => owner.release();
-}
-
-/** Probe an existing lease with a single attempt. An unused lease needs no file. */
-export function fileLeaseHeld(targetPath: string): boolean {
-  const path = lockPathFor(targetPath);
-  if (!readUnlessMissing(() => statSync(path))) return false;
-  const lock = tryKernelLock(path, 'exclusive');
-  if (!lock) return true;
-  lock.release();
-  return false;
 }
 
 /**
@@ -243,14 +222,12 @@ async function acquireFileLease(
   options: NormalizedFileLeaseOptions,
 ): Promise<AsyncFileLeaseOwner> {
   const lockPath = lockPathFor(targetPath);
-  const { signal, timers } = options;
-  signal?.throwIfAborted();
+  const { timers } = options;
   let lastProgressAt = timers.now();
   let lastHeartbeat: string | undefined;
   const deadline = lastProgressAt + options.acquireTimeoutMs;
   await mkdir(dirname(lockPath), { recursive: true, mode: 0o700 });
   while (true) {
-    signal?.throwIfAborted();
     const lock = tryKernelLock(lockPath, options.mode);
     if (lock) return new AsyncFileLeaseOwner(targetPath, lockPath, lock);
     if (options.heartbeat) {
@@ -261,17 +238,12 @@ async function acquireFileLease(
       }
       if (timers.now() - lastProgressAt >= options.heartbeat.stallMs) throw new FileLeaseBusyError(targetPath);
     } else if (timers.now() >= deadline) throw new FileLeaseBusyError(targetPath);
-    const delay = timers.sleep(options.pollIntervalMs);
-    await (signal ? untilAborted(delay, signal) : delay);
+    await timers.sleep(options.pollIntervalMs);
   }
 }
 
 function readLeaseHeartbeat(targetPath: string): string | undefined {
-  return readUnlessMissing(() => readFileSync(`${targetPath}.lock`, 'utf8'));
-}
-
-function readUnlessMissing<T>(read: () => T): T | undefined {
-  try { return read(); }
+  try { return readFileSync(`${targetPath}.lock`, 'utf8'); }
   catch (error) {
     if (isNodeErrorWithCode(error, 'ENOENT')) return undefined;
     throw error;
@@ -703,7 +675,6 @@ function lockPathFor(targetPath: string): string {
 function normalizeOptions(options: FileLeaseOptions): NormalizedFileLeaseOptions {
   return {
     mode: options.mode ?? 'exclusive',
-    ...(options.signal ? { signal: options.signal } : {}),
     acquireTimeoutMs: positiveInteger(options.acquireTimeoutMs, DEFAULT_OPTIONS.acquireTimeoutMs),
     pollIntervalMs: positiveInteger(options.pollIntervalMs, DEFAULT_OPTIONS.pollIntervalMs),
     ...(options.heartbeat ? { heartbeat: {

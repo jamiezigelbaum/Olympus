@@ -46,6 +46,7 @@ import {
 } from '../src/workers/google-connectors/gmail-scope-browser.ts';
 import { GoogleDailyRequestBudget } from '../src/workers/google-connectors/request-budget.ts';
 import { FileSourceScopeAuthority, gmailConnectorScopeFromApproval, scopeBoundSchedulerSource, type MailSourceScopePolicyRef } from '../src/workers/source-scope-runtime.ts';
+import { gmailChildProviderId } from '../src/workers/google-connectors/gmail-mail-record.ts';
 import { promotedWatermark } from '../src/workers/google-connectors/gmail.ts';
 import { MAX_FROM_HEADER_CHARS, ownerSenderRuleMatches, senderAddress, senderMatchesRule } from '../src/core/sender-rules.ts';
 import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
@@ -407,11 +408,112 @@ async function retainedPersonalMail(options: { sameIdentity?: boolean; legacyUns
   return { ...stores, authority, approve, reconnect, lane, client, mail, inputs, move, meaning, privateProvider, privateSweep };
 }
 
+test('TRASH on the first full GET admits neither the message nor its attachment', async () => {
+  const dir = tempDir();
+  const stores = fileStores(dir);
+  const mail = message('listed-in-inbox', NOW.getTime() - DAY);
+  mail.payload!.parts = [{ partId: '1', mimeType: 'text/plain', filename: 'child.txt', body: { size: 4, data: 'dGVzdA' } }];
+  const client = fakeClient([mail]);
+  const get = client.getMessage;
+  client.getMessage = (id, request) => {
+    mail.labelIds = ['TRASH'];
+    return get(id, request);
+  };
+  const inputs: string[] = [];
+  const scopeApproval = { generation: 'current', revision: 'current' };
+  const lane = createGmailConnectorStoreSyncHandler({
+    ...stores, apiClient: client, credentialBroker: OFFLINE_BROKER, account: 'personal', env: {}, build: { children: true },
+    scope: gmailConnectorScopeFromApproval({ mailScope: withCutoff({ alwaysPrivateSenders: ['alex@example.com'] }) }),
+    scopeApproval, internalEmbeddingProvider: recordingProvider('cloud', inputs), secureEmbeddingProvider: recordingProvider('local', inputs),
+  });
+  await lane.pull();
+  expect(client.formats).toEqual(['full']);
+  expect(inputs).toEqual([]);
+  for (const name of ['secure', 'internal']) {
+    readDb(join(dir, name + '.sqlite'), db => {
+      for (const table of ['items', 'item_owners', 'chunks', 'chunk_embeddings']) {
+        expect(db.query(`SELECT count(*) AS n FROM ${table}`).get()).toEqual({ n: 0 });
+      }
+    });
+  }
+});
+
+test('a legacy ordinary run cannot approve Promotions for a Private sweep', async () => {
+  const f = await retainedPersonalMail({ legacyUnscoped: true });
+  const ref = f.approve();
+  const approval = { generation: ref.accountGeneration, revision: ref.revision };
+  const currentId = gmailCursorConnectorId('personal', approval);
+  const scope = gmailConnectorScopeFromApproval(f.authority.assertCurrentMail(ref));
+  expect(scope.skippedCategoryLabelIds).toContain('CATEGORY_PROMOTIONS');
+  const oldKey = legacyOwnerId(approval);
+  const env = { OLYMPUS_EMAIL_INGEST_SKIP_CATEGORIES: 'CATEGORY_SOCIAL' };
+  const mails = [message('promo-legacy', NOW.getTime() - DAY), message('promo-v1', NOW.getTime() - DAY)];
+  const keys = [oldKey, 'verified-observation.v1:' + oldKey];
+  const part = (mail: GmailMessage) => identity(gmailChildProviderId(mail.id, '1'));
+  // Each historical key gets a separate message and a genuine ordinary run.
+  for (const [index, mail] of mails.entries()) {
+    mail.labelIds = ['CATEGORY_PROMOTIONS'];
+    mail.payload!.parts = [{ partId: '1', mimeType: 'text/plain', filename: 'offer.txt' }];
+    const seed = fakeClient([mail]);
+    const id = keys[index]!;
+    const reader = Object.assign(new GoogleGmailSourceConnector({
+      account: 'personal', credentialBroker: OFFLINE_BROKER, apiClient: seed, env, build: { children: true },
+    }), { id });
+    await f.secureStore.syncFromConnector(reader, { fetchContent: true });
+    expect(seed.formats).toEqual(['full']);
+    expect(f.secureStore.itemOwnerPresent(identity(mail.id), id, 'observed')).toBe(true);
+    expect(f.secureStore.itemOwnerPresent(part(mail), id, 'observed')).toBe(true);
+  }
+  const client = fakeClient(mails);
+  const lane = createGmailConnectorStoreSyncHandler({ internalStore: f.internalStore, secureStore: f.secureStore,
+    account: 'personal', credentialBroker: OFFLINE_BROKER, apiClient: client, env, scope, scopeApproval: approval, build: { children: true } });
+  const eligible = (mail: GmailMessage) => f.secureStore.itemMatchesSearchFilters(identity(mail.id).localItemId, 'personal', { observedConnectorId: currentId });
+  expect(await f.privateSweep(ref).run()).toMatchObject({ counts: { chunks_embedded: 0 } });
+  expect(mails.map(eligible)).toEqual([false, false]);
+  const oldDone = 'private-confirmation-v3:verified-observation.v1:' + oldKey + ':done';
+  expect(await lane.confirmPrivateScope!({ checkpoint: oldDone })).toMatchObject({ confirmed: 0, done: true });
+  expect(client.formats).toEqual(['metadata', 'metadata']);
+  expect(await f.privateSweep(ref).run()).toMatchObject({ counts: { chunks_embedded: 0 } });
+  expect(f.inputs).toEqual([]);
+  for (const mail of mails) {
+    expect(f.secureStore.copyContentState(identity(mail.id))).toMatchObject({ chunks: 1, vectors: 0 });
+    expect(f.secureStore.itemOwnerPresent(part(mail), currentId, 'observed')).toBe(false);
+  }
+  // Only the message Gmail now returns in scope regains its observation and
+  // that of the immutable attachment the old live GET listed.
+  mails[0]!.labelIds = ['INBOX'];
+  expect(await lane.confirmPrivateScope!()).toMatchObject({ confirmed: 1 });
+  expect(mails.map(eligible)).toEqual([true, false]);
+  expect(mails.map(mail => f.secureStore.itemOwnerPresent(part(mail), currentId, 'observed'))).toEqual([true, false]);
+});
+
+test.each(['backlog', 'queue'])('revocation inside the Private embedder rolls back its returned %s batch and leaves the chunks owed', async origin => {
+  const f = await retainedPersonalMail();
+  const ref = f.approve([{ id: 'Label_1', name: 'Family' }]);
+  await f.move();
+  expect(await f.lane(ref).confirmPrivateScope!()).toMatchObject({ confirmed: 1 });
+  const embed = f.privateProvider.embed;
+  f.privateProvider.embed = async batch => {
+    const vectors = await embed(batch);
+    expect(forgetMailSourceScopeApproval(f.authority.mailStatePath, ['gmail.email'])).toBe(1);
+    return vectors;
+  };
+  if (origin === 'queue') f.secureStore.queueEmbedding([identity(f.mail.id).localItemId], f.privateProvider);
+  expect(await f.privateSweep(ref).run()).toMatchObject({ counts: { chunks_embedded: 0, items_failed: 0 } });
+  expect(f.secureStore.embeddingFailedItemCount()).toBe(0);
+  expect(f.inputs.join('')).toContain('Body of retained');
+  expect(f.secureStore.copyContentState(identity(f.mail.id))).toMatchObject({ chunks: 1, vectors: 0 });
+  f.privateProvider.embed = embed;
+  const renewed = f.approve();
+  await f.lane(renewed).confirmPrivateScope!();
+  expect(await f.privateSweep(renewed).run()).toMatchObject({ counts: { chunks_embedded: 1 } });
+});
+
 test('current Gmail approval follows confirmed Personal mail into Private and the Private provider restores meaning', async () => {
   const f = await retainedPersonalMail();
   const current = f.approve([{ id: 'Label_1', name: 'Family' }]);
   const connectorId = gmailCursorConnectorId('personal', { generation: current.accountGeneration, revision: current.revision });
-  expect(connectorId).toBe('verified-observation.v1:' + legacyOwnerId({ generation: current.accountGeneration, revision: current.revision }));
+  expect(connectorId).toBe('verified-observation.v2:' + legacyOwnerId({ generation: current.accountGeneration, revision: current.revision }));
   const formatsBefore = f.client.formats.length;
   // A deployment may already have completed the Private-only walk for this approval.
   const confirmed = await f.lane(current).confirmPrivateScope!({ checkpoint: `private-confirmation-v1:${connectorId}:done` });
@@ -538,24 +640,28 @@ test('a partial version 1 walk restarts at the head and preserves ordinary inges
   expect(stores.secureStore.itemStoredContent(identity('private'))?.chunkCount).toBe(1);
   const currentId = gmailCursorConnectorId('personal', scopeApproval);
   const eligible = () => stores.secureStore.itemMatchesSearchFilters('personal:private', 'personal', { observedConnectorId: currentId });
-  expect(eligible()).toBe(true);
+  expect(eligible()).toBe(false);
   const moved = fileStores(tempDir()).secureStore;
   moved.importItemCopy(stores.secureStore.exportItemCopy(identity('private'))!, {
     syncConnectorId: TIER_MOVE_CONNECTOR_ID, trustTier: 'S4',
   });
-  expect(moved.itemMatchesSearchFilters('personal:private', 'personal', { observedConnectorId: currentId })).toBe(true);
+  expect(moved.itemMatchesSearchFilters('personal:private', 'personal', { observedConnectorId: currentId })).toBe(false);
   const partial = encodeGmailStoreCheckpoint({
     scope: `private-confirmation-v1:${oldKey}`,
     head: `gm1:${Buffer.from(JSON.stringify({ pageToken: '2' })).toString('base64url')}`,
   })!;
   const mailbox = fakeClient([ordinary, personal]);
   const lane = createGmailConnectorStoreSyncHandler({ ...common, scopeApproval, apiClient: mailbox });
-  expect(await lane.confirmPrivateScope!({ checkpoint: partial })).toMatchObject({ confirmed: 1, done: true });
+  expect(await lane.confirmPrivateScope!({ checkpoint: partial })).toMatchObject({ confirmed: 2, done: true });
   expect(stores.internalStore.itemOwnerPresent(identity('personal'), currentId, 'observed')).toBe(true);
   expect(stores.secureStore.itemOwnerPresent(identity('private'), oldKey, 'observed')).toBe(true);
   expect(eligible()).toBe(true);
   expect(stores.secureStore.itemOwnerPresent(identity('private'), currentId, 'observed')).toBe(true);
-  expect(mailbox.formats).toEqual(['metadata']);
+  expect(mailbox.formats).toEqual(['metadata', 'metadata']);
+  moved.importItemCopy(stores.secureStore.exportItemCopy(identity('private'))!, {
+    syncConnectorId: TIER_MOVE_CONNECTOR_ID, trustTier: 'S4',
+  });
+  expect(moved.itemMatchesSearchFilters('personal:private', 'personal', { observedConnectorId: currentId })).toBe(true);
 });
 
 test('the upgraded live pull honors the committed legacy watermark ahead of a single newer store run', async () => {
@@ -940,7 +1046,7 @@ test.each(['live', 'ask'] as const)('a multi-page confirmation yields at a page 
   expect(reads.slice(-2)).toEqual(['metadata:two', 'metadata:three']);
 });
 
-test('live mail keeps arriving during a continuous Ask; confirmation resumes in the 15-second share', async () => {
+test('live mail and confirmation resume in the existing 15-second scheduler share during a continuous Ask', async () => {
   const start = NOW.getTime();
   const clock = createTestClock(start);
   const stores = fileStores(tempDir());
@@ -973,8 +1079,7 @@ test('live mail keeps arriving during a continuous Ask; confirmation resumes in 
   expect((await tick(0)).wait_reason).toBe('owner_ask');
   mails.push(message('live', start + 1_000));
   expect((await tick(30_000)).wait_reason).toBe('owner_ask');
-  // Live intake is never held for an Ask; only the confirmation walk waits.
-  expect(stores.internalStore.itemStoredContent(identity('live'))?.chunkCount).toBe(1);
+  expect(stores.internalStore.itemStoredContent(identity('live'))).toBeUndefined();
   expect((await tick(59_999)).wait_reason).toBe('owner_ask');
   expect(reads).toEqual([]);
   const share = await tick(60_000);
@@ -987,6 +1092,45 @@ test('live mail keeps arriving during a continuous Ask; confirmation resumes in 
   expect(heldAgain.wait_reason).toBe('owner_ask');
   expect(heldAgain.last_result).toEqual(share.last_result);
   expect(reads).toHaveLength(3);
+});
+
+test('four continuous Ask windows give missed confirmation one page before the next 20-second live pull', async () => {
+  const clock = createTestClock(NOW.getTime());
+  const stores = fileStores(tempDir());
+  const client = fakeClient(['one', 'two', 'three', 'four'].map(id => message(id, clock.now() - DAY)));
+  const common = { ...stores, account: 'personal', apiClient: client, credentialBroker: OFFLINE_BROKER, env: {}, scope: {} };
+  await createGmailConnectorStoreSyncHandler({ ...common, scopeApproval: { generation: 'old', revision: 'old' } }).pull();
+  const list = client.listMessages;
+  client.listMessages = request => list({ ...request, maxResults: 1 });
+  const order: string[] = [];
+  const get = client.getMessage;
+  client.getMessage = (id, request) => {
+    expect(request?.format).toBe('metadata');
+    order.push(id);
+    return get(id, request);
+  };
+  const lane = createGmailConnectorStoreSyncHandler({ ...common, scopeApproval: { generation: 'new', revision: 'new' } });
+  const source = createGmailConnectorStoreSchedulerSource({ config: defaultConfig(), sync: lane })!;
+  const primary = source.tasks.find(task => task.metadataWalkRole === 'primary')!;
+  const confirm = source.tasks.find(task => task.id.includes('scope_confirmation'))!;
+  const accountTurn = createExclusiveRunner();
+  const guarded = accountBoundSchedulerSource({
+    source: { ...source, tasks: [{ ...primary, run: async () => {
+      order.push('live');
+      clock.set(clock.now() + 20_000);
+      return { status: 'progress', continueSoon: true };
+    } }, confirm] },
+    guard: { assertAccount: async () => {}, run: accountTurn },
+  });
+  const standBack = createStandBack({ reason: () => "owner's Ask", now: clock.now });
+  const scheduler = confirmationScheduler([guarded], clock, () => standBack.holds('import'));
+  for (let window = 0; window < 4; window++) {
+    await scheduler.runDueTasks(); // start or continue standing back
+    expect(await accountTurn(async () => standBack.holds('import'))).toBe(true);
+    clock.set(clock.now() + 60_000);
+    await scheduler.runDueTasks();
+  }
+  expect(order).toEqual(['live', 'one', 'live', 'live', 'two', 'live']);
 });
 
 describe('a dormant mailbox is not re-read forever', () => {

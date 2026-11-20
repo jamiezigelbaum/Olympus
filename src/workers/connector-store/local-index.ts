@@ -139,7 +139,7 @@ import {
   visibilityAwaited,
   judgedAwaited,
   VisibilityChangedError,
-  parentVerdictsOffThread,
+  parentVerdictsSteps,
   CHILD_PARENT_CHAIN_LIMIT,
   hiddenChildKeysSteps,
   ledgerVisibilityOffThread,
@@ -2028,6 +2028,8 @@ export interface ConnectorStoreEmbedOptions {
   filters?: ConnectorStoreSearchFilters;
   /** Revalidates dynamic authorization immediately before every provider call. */
   assertAuthorized?: () => void | Promise<void>;
+  /** A queued provider can differ from the provider bound to this sweep's scope. */
+  assertSweepBindingCurrent?: () => void;
   /** Optional item selection for latency-sensitive incremental ingest. */
   localItemIds?: readonly string[];
   /**
@@ -2190,7 +2192,7 @@ export async function embedPendingChunks(
   targets: readonly ConnectorStoreEmbeddingTarget[],
   // stopAtMs: no batch starts after it (the first always runs). Items count
   // badly as work: one long file can hold more chunks than a pass has time for.
-  // shouldStop: lets a caller stop dispatching independently deferrable work.
+  // shouldStop: polled with stopAtMs, and before the first batch too (the owner's Ask).
   options: {
     maxItems: number; stopAtMs?: number; diagnostics?: boolean; shouldStop?: () => boolean;
     /** Lets a scheduler that reaches its hard deadline report already committed queue work. */
@@ -2241,6 +2243,8 @@ export async function embedPendingChunks(
       }
       const outcome = await embedItemsIsolated(store, group.provider, group.localItemIds, {
         ...target,
+        ...(group.provider !== target.provider && target.provider.assertBindingCurrent
+          ? { assertSweepBindingCurrent: () => target.provider.assertBindingCurrent!() } : {}),
         ...(onBatchWritten ? { onBatchWritten } : {}),
         ...(options.stopAtMs !== undefined ? { stopAtMs: options.stopAtMs } : {}),
         ...(options.shouldStop ? { shouldStop: options.shouldStop } : {}),
@@ -2298,7 +2302,7 @@ async function embedItemsIsolated(
   store: LocalConnectorStore,
   provider: SourceEmbeddingProvider,
   localItemIds: readonly string[],
-  scope: Pick<ConnectorStoreEmbedOptions, 'accountScope' | 'filters' | 'assertAuthorized' | 'stopAtMs' | 'shouldStop' | 'onBatchWritten'> = {},
+  scope: Pick<ConnectorStoreEmbedOptions, 'accountScope' | 'filters' | 'assertAuthorized' | 'assertSweepBindingCurrent' | 'stopAtMs' | 'shouldStop' | 'onBatchWritten'> = {},
 ): Promise<{ chunksEmbedded: number; itemsFailed: number; deferredReason?: string; busy?: boolean; stoppedAtDeadline?: boolean }> {
   try {
     const embed = await store.embedChunks({
@@ -2307,6 +2311,7 @@ async function embedItemsIsolated(
       ...(scope.accountScope ? { accountScope: scope.accountScope } : {}),
       ...(scope.filters ? { filters: scope.filters } : {}),
       ...(scope.assertAuthorized ? { assertAuthorized: scope.assertAuthorized } : {}),
+      ...(scope.assertSweepBindingCurrent ? { assertSweepBindingCurrent: scope.assertSweepBindingCurrent } : {}),
       ...(scope.stopAtMs !== undefined ? { stopAtMs: scope.stopAtMs } : {}),
       ...(scope.shouldStop ? { shouldStop: scope.shouldStop } : {}),
     });
@@ -2317,6 +2322,11 @@ async function embedItemsIsolated(
     return { chunksEmbedded: embed.chunksEmbedded, itemsFailed: 0 };
   } catch (error) {
     if (error instanceof FileLeaseBusyError) return { chunksEmbedded: 0, itemsFailed: 0, busy: true };
+    // An expired approval applies to the whole dispatch. Marking individual
+    // items failed would hide their debt even after a fresh approval.
+    if (error instanceof OperationError && error.code === 'source_index_policy_violation') {
+      return { chunksEmbedded: 0, itemsFailed: 0, deferredReason: error.code };
+    }
     if (error instanceof TransientSourceEmbeddingError) {
       return { chunksEmbedded: 0, itemsFailed: 0, deferredReason: connectorStoreEmbeddingDeferredReason(error) };
     }
@@ -2720,10 +2730,8 @@ const VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS = 250;
  * which background answers keep busy too, so a backfill on a busy install
  * never finished and its store stayed on the slow exact scan.
  */
-let clearDigestHold: ((store: LocalConnectorStore) => void) | undefined;
-let vectorDigestBackfillHold: (store: LocalConnectorStore) => boolean = () => false;
-export function setVectorDigestBackfillHold(hold?: (store: LocalConnectorStore) => boolean, clear?: (store: LocalConnectorStore) => void): void {
-  clearDigestHold = clear;
+let vectorDigestBackfillHold: () => boolean = () => false;
+export function setVectorDigestBackfillHold(hold?: () => boolean): void {
   vectorDigestBackfillHold = hold ?? (() => false);
 }
 /**
@@ -3875,11 +3883,10 @@ function spawnConnectorStoreMaintenance(dbPath: string, source: string, args: re
   });
 }
 
-type RecencyIndexAdmission = (work: () => Promise<boolean>, preempt: () => void, store: LocalConnectorStore) => Promise<boolean | undefined>;
+type RecencyIndexAdmission = (work: () => Promise<boolean>, preempt: () => void) => Promise<boolean | undefined>;
 // No admission, no build: only the engine's background role installs one, so a
 // command-line open or a test never starts a child that takes a live store's
 // write lock outside the engine's coordination.
-let clearRecencyHold: ((store: LocalConnectorStore) => void) | undefined;
 let admitRecencyIndexBuild: RecencyIndexAdmission | undefined;
 let recencyIndexBuilding = false;
 /** After a build that lost the write lock or was stopped for ingest. */
@@ -3890,8 +3897,7 @@ const RECENCY_INDEX_BUSY_RETRY_MS = 2_000;
 const RECENCY_INDEX_NOT_ADMITTED_RETRY_MS = 30_000;
 
 /** The engine uses the same ingest admission as store reclaim for this write lock. */
-export function setConnectorStoreRecencyIndexAdmission(admit?: RecencyIndexAdmission, clear?: (store: LocalConnectorStore) => void): void {
-  clearRecencyHold = clear;
+export function setConnectorStoreRecencyIndexAdmission(admit?: RecencyIndexAdmission): void {
   admitRecencyIndexBuild = admit;
 }
 
@@ -4163,16 +4169,10 @@ export class LocalConnectorStore {
 
   private async buildRecencyIndex(): Promise<void> {
     const admit = admitRecencyIndexBuild;
-    if (!admit || this.closedForPoolReads || this.fileReplacedOrRemoved()) {
-      clearRecencyHold?.(this);
-      return;
-    }
+    if (!admit || this.closedForPoolReads || this.fileReplacedOrRemoved()) return;
     // Another process (the background role, seen from the front) may have built them since.
     if ((this.db.query("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name IN (?, ?)")
-      .get(CONNECTOR_STORE_RECENCY_INDEX, CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX) as { n: number }).n >= 2) {
-      clearRecencyHold?.(this);
-      return;
-    }
+      .get(CONNECTOR_STORE_RECENCY_INDEX, CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX) as { n: number }).n >= 2) return;
     if (recencyIndexBuilding || this.reclaimProcess || this.vectorDigestBackfillReading || this.visibilityPublishing || storeReadHasPriority()) {
       this.scheduleRecencyIndexBuild(RECENCY_INDEX_BUSY_RETRY_MS);
       return;
@@ -4204,7 +4204,7 @@ export class LocalConnectorStore {
       }, () => {
         preempted = true;
         this.reclaimProcess?.kill('SIGKILL');
-      }, this);
+      });
       if (!complete && !this.closedForPoolReads) {
         this.scheduleRecencyIndexBuild(complete === undefined ? RECENCY_INDEX_NOT_ADMITTED_RETRY_MS : RECENCY_INDEX_RETRY_MS);
       }
@@ -4236,7 +4236,7 @@ export class LocalConnectorStore {
       if (!model) return;
       // The owner's Ask goes first, for at most the stand-back's bound.
       let held = false;
-      try { held = !this.reclaimProcess && vectorDigestBackfillHold(this); } catch { held = false; }
+      try { held = vectorDigestBackfillHold(); } catch { held = false; }
       if (this.reclaimProcess || held) { this.scheduleVectorDigestBackfill(undefined, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS); return; }
       if (offThreadReadsSupported(this.dbPath)) { void this.backfillVectorDigestTurnOnPool(model); return; }
       try {
@@ -4322,8 +4322,6 @@ export class LocalConnectorStore {
     this.reclaimProcess?.kill('SIGKILL');
     clearTimeout(this.recencyIndexTimer);
     clearTimeout(this.vectorDigestBackfillTimer);
-    clearDigestHold?.(this);
-    clearRecencyHold?.(this);
     this.stopVisibilityPublisher();
     try {
       // SIGKILL releases the worker's write lock asynchronously. Media cleanup
@@ -5178,20 +5176,16 @@ export class LocalConnectorStore {
   }
 
   /** Capture both cursors before yielding either feed, as the original build does. */
-  private hiddenChangeFinders(ledger: TierLedger, ledgerAfter?: number, storeAfter?: number, pinCursor = false): {
+  private hiddenChangeFinders(ledger: TierLedger, ledgerAfter?: number, storeAfter?: number): {
     ledger: LoopFinder<VisibilityChanges>; store: LoopFinder<VisibilityChanges>;
   } {
     const ledgerCursor = ledger.readSteps(hiddenVisibilityFeedReads('tier_visibility_changes')).cursor;
     const storeCursor = this.visibilityFeedPresent
       ? this.readHere(hiddenVisibilityFeedReads('main.item_visibility_feed')).cursor : 0;
     return {
-      ledger: this.incrementalHiddenFinder(ledger, () => pinCursor
-        ? ledger.readSteps(hiddenVisibilityFeedReads('tier_visibility_changes', ledgerAfter, ledgerCursor))
-        : ledger.visibilityChangesSince(ledgerAfter),
+      ledger: this.incrementalHiddenFinder(ledger, () => ledger.visibilityChangesSince(ledgerAfter),
         () => ledgerReadOffThread(ledger, hiddenVisibilityFeedReads('tier_visibility_changes', ledgerAfter, ledgerCursor), BACKGROUND_READS)),
-      store: this.incrementalHiddenFinder(ledger, () => pinCursor
-        ? this.readHere(hiddenVisibilityFeedReads('main.item_visibility_feed', storeAfter, storeCursor))
-        : this.itemVisibilityChangesSince(storeAfter),
+      store: this.incrementalHiddenFinder(ledger, () => this.itemVisibilityChangesSince(storeAfter),
         () => this.visibilityFeedPresent
           ? withOffThreadSnapshot(this.dbPath, async read => {
             const steps = hiddenVisibilityFeedReads('main.item_visibility_feed', storeAfter, storeCursor);
@@ -6381,7 +6375,6 @@ export class LocalConnectorStore {
   private *hiddenChildReadSteps(): Generator<VisibilityRead, number[], unknown> {
     if (!this.childItemColumnsPresent) return [];
     const lane = this.childVisibilityLane();
-    const attachedLane = this.childLane;
     const prior = this.hiddenChildMemo;
     let ledger: TierLedger | undefined;
     let stores: LocalConnectorStore[] = [];
@@ -6389,7 +6382,7 @@ export class LocalConnectorStore {
     const storeChanges = new Map<LocalConnectorStore, { cursor: number; identities?: TierLedgerIdentity[] }>();
     try {
       ledger = lane.ledger();
-      const members = [...lane.stores()];
+      const members = lane.stores();
       if (!ledger || this.visibilityLedger() !== ledger
         || !members.includes(this) || !members.every(store => store instanceof LocalConnectorStore && store.visibilityFeedPresent)) {
         this.hiddenChildMemo = undefined;
@@ -6402,7 +6395,7 @@ export class LocalConnectorStore {
         // All lane cursors precede every awaited feed read, including those
         // of other stores (a parent can live on any leg).
         const finders = stores.map(store => [store, store.hiddenChangeFinders(ledger!,
-          same ? prior.ledgerCursor : undefined, same ? prior.storeCursors.get(store) : undefined, true)] as const);
+          same ? prior.ledgerCursor : undefined, same ? prior.storeCursors.get(store) : undefined)] as const);
         const ledgerFinder = finders[0]![1].ledger;
         ledgerChanges = (yield ledgerFinder) as VisibilityChanges;
         for (const [store, finder] of finders) storeChanges.set(store, (yield finder.store) as VisibilityChanges);
@@ -6458,10 +6451,7 @@ export class LocalConnectorStore {
         const parents = [...affected.values()];
         for (let offset = 0; offset < parents.length; offset += HIDDEN_CHILD_PARENT_SLICE) {
           const slice = parents.slice(offset, offset + HIDDEN_CHILD_PARENT_SLICE);
-          const verdicts = yield* visibilityRead(
-            () => parentVerdicts(lane, slice),
-            () => parentVerdictsOffThread(lane, slice),
-          );
+          const verdicts = yield* parentVerdictsSteps(lane, slice);
           for (const [key, value] of yield* this.hiddenChildParentEntriesSteps(lane, slice, verdicts)) updates.set(key, value);
         }
       }
@@ -6478,7 +6468,7 @@ export class LocalConnectorStore {
     let stable = false;
     try {
       const current = lane.stores();
-      stable = this.childLane === attachedLane && lane.ledger() === ledger && this.visibilityLedger() === ledger
+      stable = lane.ledger() === ledger && this.visibilityLedger() === ledger
         && current.length === stores.length && stores.every(store => current.includes(store)
           && store.visibilityFeedPresent);
     } catch { /* An unverifiable build is never installed. */ }
@@ -6624,10 +6614,7 @@ export class LocalConnectorStore {
           ...(group.provider_conversation_id ? { providerConversationId: group.provider_conversation_id } : {}),
         }),
       }));
-      const verdicts = yield* visibilityRead(
-        () => parentVerdicts(lane, slice),
-        () => parentVerdictsOffThread(lane, slice),
-      );
+      const verdicts = yield* parentVerdictsSteps(lane, slice);
       if (entries) for (const [key, value] of yield* this.hiddenChildParentEntriesSteps(lane, slice, verdicts)) entries.set(key, value);
       for (const parent of slice) if (verdicts.get(parentKey(parent))?.visible !== true) hiddenParents.push(parent);
       if (window.length < HIDDEN_CHILD_PARENT_SLICE) break;
@@ -14365,6 +14352,7 @@ export class LocalConnectorStore {
         && batch.some((row) => row.media_sha256 && !this.mediaJudgmentSettled(row.media_sha256, mediaJudgeId(judging)));
       let judgedBatch: Map<number, MediaJudgment> | undefined;
       try {
+        options.assertSweepBindingCurrent?.();
         if (judgeNow) {
           const returned = await judging!.embedWithImageVectors!(inputsFor(batch));
           vectors = returned.vectors;
@@ -14410,6 +14398,7 @@ export class LocalConnectorStore {
         staleSkipped += recheck.notVisible + recheck.privateTier;
         batch = recheck.kept;
         if (batch.length === 0) continue;
+        options.assertSweepBindingCurrent?.();
         vectors = await provider.embed(inputsFor(batch), { taskType: 'RETRIEVAL_DOCUMENT' });
       }
       const onDemandItems = this.db.query(`SELECT COUNT(*) AS n FROM items i JOIN on_demand_item_reads r ON r.local_item_id = i.local_item_id
@@ -14520,6 +14509,10 @@ export class LocalConnectorStore {
           epochId: provider.epochId,
           configHash: provider.configHash,
         }, now);
+        // The provider round trip can outlive its approval. Throwing here
+        // rolls back the whole batch, including its maintenance checkpoint.
+        provider.assertBindingCurrent?.();
+        options.assertSweepBindingCurrent?.();
       })();
       if (nextJournalSha256) activeJournalSha256 = nextJournalSha256;
       if (writtenItemPks?.length) options.onBatchWritten?.(writtenItemPks);
@@ -20917,32 +20910,12 @@ export function identityRowsSql(extraSql: string): string {
     `;
 }
 
-// A new observation namespace admits earlier ordinary ingestion only when its
-// origin is provable. Tier moves copy the keys but replace the run links. A
-// sole inherited owner still proves ingestion: confirmation could only add a
-// second key to an already-owned copy, and a move carries *all* its owners.
-const VERIFIED_OBSERVATION_PREFIX = 'verified-observation.v1:';
-
-export function verifiedObservationConnectorId(previousId: string): string {
-  return VERIFIED_OBSERVATION_PREFIX + previousId;
-}
-
 function observedOwnerPredicate(exact?: string, prefix?: string): { sql: string; params: string[] } {
   const keys: string[] = [];
   const params: string[] = [];
   if (exact) {
     keys.push('o.connector_id = ?');
     params.push(exact);
-    if (exact.startsWith(VERIFIED_OBSERVATION_PREFIX)) {
-      keys.push(`(o.connector_id = ? AND EXISTS (
-        SELECT 1 FROM sync_runs r
-        WHERE r.sync_run_id IN (o.first_seen_sync_run_id, o.last_seen_sync_run_id)
-          AND (r.connector_id = o.connector_id OR (r.connector_id = ? AND NOT EXISTS (
-            SELECT 1 FROM item_owners other WHERE other.item_pk = o.item_pk AND other.connector_id <> o.connector_id
-          )))
-      ))`);
-      params.push(exact.slice(VERIFIED_OBSERVATION_PREFIX.length), TIER_MOVE_CONNECTOR_ID);
-    }
   }
   if (prefix) {
     keys.push('substr(o.connector_id, 1, length(?)) = ?');

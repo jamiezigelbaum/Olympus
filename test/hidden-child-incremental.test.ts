@@ -329,26 +329,3 @@ test('an empty child memo skips unrelated identities and still sees its first ne
   const pk = h.put('parent#child:new', 'parent')!;
   h.assertHidden(pk, 'parent#child:new');
 });
-
-test('a child verdict retries when the parent row goes away between its standing and ledger reads', async () => {
-  const h = await setup();
-  h.target.hiddenChildMemo = undefined;
-  const standings = h.store.parentStandingsOffThread.bind(h.store);
-  const read = spyOn(h.store, 'parentStandingsOffThread').mockImplementationOnce(async parents => {
-    const rows = await standings(parents);
-    expect(rows.some(row => row.active)).toBe(true);
-    h.db.query('UPDATE items SET tombstoned = 1 WHERE local_item_id = ?').run(identityOf('parent').localItemId);
-    // Advance the ledger without superseding the parent's recorded current
-    // copy. Its stale standing would still make that copy look visible.
-    const template = identityOf('template');
-    h.ledgerDb.query(`UPDATE tier_copies SET copy_state = 'superseded'
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?`)
-      .run(template.provider, template.accountScope, template.providerConversationId ?? '', template.providerItemId);
-    return rows;
-  });
-  try {
-    expect(await h.target.hiddenChildItemPksInTurns()).toContain(h.child);
-    expect(read.mock.calls.length).toBeGreaterThan(1);
-    h.assertHidden();
-  } finally { read.mockRestore(); }
-});

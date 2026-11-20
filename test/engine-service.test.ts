@@ -620,24 +620,6 @@ if (env.LAUNCH === '0') {
     expect(report.missing).toContain('The engine agent is not installed: run olympus engine install.');
   });
 
-  test('engine status keeps current and unavailable owner Ask readings from worker health', async () => {
-    const { home } = fixture();
-    const standBack = {
-      status: {
-        work_kind: 'status', reason: 'question in the front', wait_reason: 'owner_ask',
-        held_count: 1, holds: 2, held_ms: 1_250, bound_reached: 1, holding: true,
-      },
-    };
-    let health: Record<string, unknown> = { stand_back: standBack, background_state_age_ms: 900, owner_ask_probe_failures: 0, owner_ask_lease_failures: 1 };
-    const report = () => engineStatusReport({
-      homeDir: home, platform: 'darwin', env: { HOME: home }, exec: fakeLaunchctl().exec, openclawPath: () => undefined,
-      fetchImpl: (async () => Response.json(health)) as unknown as typeof fetch,
-    });
-    expect((await report()).worker).toMatchObject(health);
-    health = { stand_back: 'unavailable', background_state_age_ms: 45_000 };
-    expect((await report()).worker).toMatchObject(health);
-  });
-
   test('engine status says when remote access is on but the relay is not running, whatever the service health says', async () => {
     const { home, checkout, bun } = fixture();
     const launchctl = fakeLaunchctl();

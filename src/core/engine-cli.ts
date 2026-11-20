@@ -42,7 +42,6 @@ import { installOpenHandler, uninstallOpenHandler, type OpenHandlerOptions, type
 import { resolveOpenClawExecutable } from './openclaw-executable.ts';
 import { OperationError } from './operation-error.ts';
 import { readRemoteAccessStatus, relayProcessRunning, remoteAccessDirForCli, resolveRemoteAccessMode } from './remote-access.ts';
-import type { OwnerAskAdmissionStatus } from '../workers/engine-split/snapshot.ts';
 
 export const ENGINE_CLI_USAGE = {
   'engine install': 'olympus engine install [--from-checkout <path>] [--bun <path>] [--restart] [--now] [--dry-run]',
@@ -338,32 +337,14 @@ function readEngineStatusFile(statusPath: string): EngineStatusFile | undefined 
   }
 }
 
-interface WorkerHealth extends Partial<OwnerAskAdmissionStatus> {
-  built_in_models?: unknown;
-  desktop_bridge?: unknown;
-  update_available?: { version?: unknown };
-  owner_ask_lease_failures?: number;
-}
-
-async function probeWorker(fetchImpl: typeof fetch, baseUrl: string, socket?: string): Promise<Omit<WorkerHealth, 'update_available'> & {
-  reachable: boolean; detail: string; update_available?: { version: string };
-}> {
+async function probeWorker(fetchImpl: typeof fetch, baseUrl: string, socket?: string): Promise<{ reachable: boolean; detail: string; built_in_models?: unknown; desktop_bridge?: unknown; update_available?: { version: string } }> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 1_500);
   try {
     const response = await fetchImpl(`${baseUrl.replace(/\/$/, '')}/health`, { method: 'GET', signal: controller.signal, ...(socket ? { unix: socket } : {}) });
-    const health = response.ok ? await response.json().catch(() => undefined) as WorkerHealth | undefined : undefined;
+    const health = response.ok ? await response.json().catch(() => undefined) as { built_in_models?: unknown; desktop_bridge?: unknown; update_available?: { version?: unknown } } : undefined;
     await response.body?.cancel().catch(() => undefined);
-    return {
-      reachable: response.ok, detail: `HTTP ${response.status}`,
-      ...(health?.built_in_models ? { built_in_models: health.built_in_models } : {}),
-      ...(health?.desktop_bridge ? { desktop_bridge: health.desktop_bridge } : {}),
-      ...(typeof health?.update_available?.version === 'string' ? { update_available: { version: health.update_available.version } } : {}),
-      ...(health?.stand_back !== undefined ? { stand_back: health.stand_back } : {}),
-      ...(typeof health?.background_state_age_ms === 'number' ? { background_state_age_ms: health.background_state_age_ms } : {}),
-      ...(typeof health?.owner_ask_probe_failures === 'number' ? { owner_ask_probe_failures: health.owner_ask_probe_failures } : {}),
-      ...(typeof health?.owner_ask_lease_failures === 'number' ? { owner_ask_lease_failures: health.owner_ask_lease_failures } : {}),
-    };
+    return { reachable: response.ok, detail: `HTTP ${response.status}`, ...(health?.built_in_models ? { built_in_models: health.built_in_models } : {}), ...(health?.desktop_bridge ? { desktop_bridge: health.desktop_bridge } : {}), ...(typeof health?.update_available?.version === 'string' ? { update_available: { version: health.update_available.version } } : {}) };
   } catch {
     return { reachable: false, detail: 'no answer' };
   } finally {

@@ -5,7 +5,7 @@
 // serves no HTTP, only its command socket. Spawning tests carry an explicit
 // timeout (test/spawn-timeout-guard.test.ts).
 import { afterEach, describe, expect, test } from 'bun:test';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { connectThisComputerSource } from '../src/core/this-computer.ts';
 import { resolvedStorePath } from '../src/core/source-placement.ts';
@@ -14,7 +14,6 @@ import { LocalConnectorStore } from '../src/workers/connector-store/local-index.
 import { FileSourceScopeAuthority } from '../src/workers/source-scope-runtime.ts';
 import { FIXTURE_PLACEMENT, fixtureConnector } from './helpers/tier-fixtures.ts';
 import { ENGINE_BACKGROUND_ORIGIN } from '../src/core/engine-split.ts';
-import { holdOwnerAsk } from '../src/core/owner-ask-admission.ts';
 import { createUnixSocketFetch, createWorkerFetch, prepareWorkerSocket, workerFrontSocketPath, WORKER_LISTEN_SOCKET_ENV } from '../src/core/worker-transport.ts';
 import { readEngineStatusSnapshot } from '../src/workers/engine-split/snapshot.ts';
 import { engineStatusSnapshotPath } from '../src/workers/engine-split/runtime.ts';
@@ -23,14 +22,11 @@ import { waitFor } from './helpers/test-clock.ts';
 const SERVER = join(import.meta.dir, '..', 'src', 'workers', 'engine', 'server.ts');
 const REPO = join(import.meta.dir, '..');
 const TOKEN = 'engine-split-boot-token';
-const SOCKET_TEST_TMP = realpathSync('/tmp');
 
 const roots: string[] = [];
 const children: Array<ReturnType<typeof Bun.spawn>> = [];
-const releaseLeases: Array<() => void> = [];
 afterEach(async () => {
   for (const child of children.splice(0)) { child.kill('SIGKILL'); await child.exited; }
-  for (const release of releaseLeases.splice(0)) release();
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
@@ -55,7 +51,7 @@ function spawnWorker(env: Record<string, string>, role: 'background' | 'front', 
 describe('the engine split boots as two processes', () => {
   test('the front waits for the background, then serves; the background serves only its socket', async () => {
     // Short paths: a unix socket path has a length limit.
-    const home = mkdtempSync(join(SOCKET_TEST_TMP, 'oes-'));
+    const home = mkdtempSync(join('/tmp', 'oes-'));
     roots.push(home);
     mkdirSync(join(home, 'run'), { mode: 0o700 });
     const port = (() => { const server = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: { data() {} } }); const value = server.port; server.stop(true); return value; })();
@@ -67,12 +63,10 @@ describe('the engine split boots as two processes', () => {
       XDG_RUNTIME_DIR: join(home, 'run'),
       OLYMPUS_EMAIL_SOURCE_PORT: String(port),
       OLYMPUS_WORKER_SCHEDULER_ENABLED: 'false',
-      OLYMPUS_SOURCE_INDEX_ENABLED: 'true',
       OLYMPUS_WORKER_AUTH_TOKEN: TOKEN,
       OLYMPUS_ENGINE_BACKGROUND_SOCKET: join(home, 'run', 'olympus', 'background.sock'),
       NODE_ENV: 'test',
     };
-    releaseLeases.push(await holdOwnerAsk(env));
     const front = spawnWorker(env, 'front');
     // Without a background the front has not brought up its real routes.
     expect(front.output()).not.toContain('worker listening');
@@ -82,32 +76,13 @@ describe('the engine split boots as two processes', () => {
     await waitFor(() => front.output().includes('worker listening'), { timeoutMs: 60_000 });
     expect(front.output()).not.toContain('FrontStoreWriteError');
 
-    const workerFetch = createWorkerFetch({ platform: process.platform, env });
+    const workerFetch = createWorkerFetch({ platform: 'linux', env });
     const health = await workerFetch(`http://127.0.0.1:${port}/v1/health`, { headers: { Authorization: `Bearer ${TOKEN}` } });
     expect(health.status).toBe(200);
     // The front reports its background, so an upgrade or rollback never calls a crash-looping background healthy (#1563 review).
     expect(await health.json()).toMatchObject({
       reachable: true, engine_background: 'ready', tier_classification: { over_private: { state: 'counting' } },
     });
-    const admission = await waitFor(async () => {
-      const response = await workerFetch(`http://127.0.0.1:${port}/v1/health`, { headers: { Authorization: `Bearer ${TOKEN}` } });
-      const state = await response.json();
-      return state.stand_back?.status?.held_count === 1 ? state : undefined;
-    }, { description: 'Ask hold is published by the background and returned by front health' });
-    const heldStatus = {
-      work_kind: 'status', wait_reason: 'owner_ask', reason: 'question in the front',
-      held_count: 1, holds: 1, held_ms: expect.any(Number), bound_reached: 0,
-    };
-    const reportedAdmission = {
-      background_state_age_ms: expect.any(Number), owner_ask_probe_failures: 0,
-      stand_back: { status: heldStatus },
-    };
-    expect(admission).toMatchObject(reportedAdmission);
-    const sourceStatus = await workerFetch(`http://127.0.0.1:${port}/v1/source/index/status`, {
-      method: 'POST', headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' }, body: '{}',
-    });
-    expect(sourceStatus.status).toBe(200);
-    expect(await sourceStatus.json()).toMatchObject(reportedAdmission);
     // Source watches are the background's: a create is answered by its route, not refused.
     const watch = await workerFetch(`http://127.0.0.1:${port}/v1/source/watch/create`, { method: 'POST', headers: { Authorization: `Bearer ${TOKEN}` }, body: '{}' });
     expect(watch.status).not.toBe(503);

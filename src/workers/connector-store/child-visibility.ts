@@ -366,7 +366,7 @@ export interface ChildVisibilityLane {
 // across them before serving any result; a tombstone during a pool wait must
 // hide the child just as it does for a synchronous reader.
 export function childVisibilityUnchanged(lane: ChildVisibilityLane): () => boolean {
-  const stores = [...lane.stores()];
+  const stores = lane.stores();
   const ledger = lane.ledger();
   const ledgerMarker = ledger?.changeMarker();
   const markers = stores.map(store => store.childVisibilityMarker?.());
@@ -400,11 +400,6 @@ const HIDDEN: ParentVerdict = { visible: false, gone: false };
  */
 export function parentVerdicts(lane: ChildVisibilityLane, parents: readonly ParentRef[]): Map<string, ParentVerdict> {
   return visibilityHere(parentVerdictsSteps(lane, parents));
-}
-
-/** A window's standings and ledger decisions must describe the same generation. */
-export function parentVerdictsOffThread(lane: ChildVisibilityLane, parents: readonly ParentRef[]): Promise<Map<string, ParentVerdict>> {
-  return visibilityAwaited(() => parentVerdictsSteps(lane, parents), lane);
 }
 
 export function* parentVerdictsSteps(lane: ChildVisibilityLane, parents: readonly ParentRef[]): Generator<VisibilityRead, Map<string, ParentVerdict>, unknown> {

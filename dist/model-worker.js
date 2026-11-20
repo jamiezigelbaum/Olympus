@@ -873,7 +873,7 @@ import { dirname as dirname6, isAbsolute as isAbsolute4, join as join5, relative
 
 // src/core/file-lease.ts
 import { execFileSync as execFileSync2 } from "node:child_process";
-import { closeSync as closeSync3, existsSync as existsSync4, mkdirSync as mkdirSync2, openSync as openSync3, readFileSync as readFileSync3, statSync as statSync2, writeFileSync as writeFileSync2 } from "node:fs";
+import { closeSync as closeSync3, existsSync as existsSync4, mkdirSync as mkdirSync2, openSync as openSync3, readFileSync as readFileSync3, writeFileSync as writeFileSync2 } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname as dirname5 } from "node:path";
 var DEFAULT_OPTIONS = {
@@ -1021,7 +1021,6 @@ function lockPathFor(targetPath) {
 function normalizeOptions(options) {
   return {
     mode: options.mode ?? "exclusive",
-    ...options.signal ? { signal: options.signal } : {},
     acquireTimeoutMs: positiveInteger(options.acquireTimeoutMs, DEFAULT_OPTIONS.acquireTimeoutMs),
     pollIntervalMs: positiveInteger(options.pollIntervalMs, DEFAULT_OPTIONS.pollIntervalMs),
     ...options.heartbeat ? { heartbeat: {
@@ -1562,7 +1561,7 @@ function ingestionTurn() {
 }
 
 // src/workers/source-index/pinned-download.ts
-import { closeSync as closeSync4, createReadStream, existsSync as existsSync5, openSync as openSync4, renameSync as renameSync2, rmSync as rmSync2, statSync as statSync3, writeSync } from "node:fs";
+import { closeSync as closeSync4, createReadStream, existsSync as existsSync5, openSync as openSync4, renameSync as renameSync2, rmSync as rmSync2, statSync as statSync2, writeSync } from "node:fs";
 var REQUEST_BYTES = 256 * 1024 ** 2;
 var WRITE_SLICE_BYTES = 64 * 1024;
 var READ_RETRIES = 3;
@@ -1595,7 +1594,7 @@ async function downloadPinnedFile(options) {
   };
   try {
     if (existsSync5(partial)) {
-      const size = statSync3(partial).size;
+      const size = statSync2(partial).size;
       if (size > 0 && size < expectedBytes) {
         await hashPartial(partial, hash, options.verifyStallMs);
         received = size;
@@ -1768,7 +1767,7 @@ import {
   readFileSync as readFileSync4,
   renameSync as renameSync3,
   rmSync as rmSync3,
-  statSync as statSync4,
+  statSync as statSync3,
   writeFileSync as writeFileSync3,
   writeSync as writeSync2
 } from "node:fs";
@@ -2326,7 +2325,7 @@ async function verifyModelFiles(dir, files, reporter, useCache = true) {
     verifiedThisProcess ??= new Set;
     if (useCache && verifiedThisProcess.has(key))
       continue;
-    const size = statSync4(path).size;
+    const size = statSync3(path).size;
     const digest = size === file.bytes ? await sha256File(path) : undefined;
     if (digest !== file.sha256) {
       rmSync3(path, { force: true });
@@ -2487,7 +2486,7 @@ function lockIsStale(lockPath) {
     return false;
   } catch {
     try {
-      return Date.now() - statSync4(lockPath).mtimeMs > STALE_LOCK_MS;
+      return Date.now() - statSync3(lockPath).mtimeMs > STALE_LOCK_MS;
     } catch {
       return true;
     }
@@ -2746,7 +2745,7 @@ import {
   renameSync as renameSync4,
   rmSync as rmSync4,
   rmdirSync,
-  statSync as statSync5,
+  statSync as statSync4,
   writeFileSync as writeFileSync4
 } from "node:fs";
 import { basename as basename3, dirname as dirname9, isAbsolute as isAbsolute7, join as join8, resolve as resolve4 } from "node:path";
@@ -3297,7 +3296,7 @@ function isMediaCachePath(path, sha256, dir) {
 import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
 
 // src/core/owner-config-read.ts
-import { chmodSync as chmodSync2, linkSync, readFileSync as readFileSync6, statSync as statSync6, lstatSync as lstatSync3 } from "node:fs";
+import { chmodSync as chmodSync2, linkSync, readFileSync as readFileSync6, statSync as statSync5, lstatSync as lstatSync3 } from "node:fs";
 import { randomUUID as randomUUID3 } from "node:crypto";
 import { homedir as homedir5 } from "node:os";
 import { dirname as dirname10, join as join9 } from "node:path";
@@ -3368,7 +3367,7 @@ function defaultSovereigntyConfigPath(env = process.env) {
 function readOwnerConfigFile(path) {
   let before;
   try {
-    before = statSync6(path);
+    before = statSync5(path);
   } catch (error) {
     return error.code === "ENOENT" ? { status: "missing" } : { status: "refused", reason: "unreadable", stamp: "unreadable" };
   }
@@ -3384,7 +3383,7 @@ function readOwnerConfigFile(path) {
   }
   let after;
   try {
-    after = statSync6(path);
+    after = statSync5(path);
   } catch {
     return { status: "refused", reason: "torn_read", stamp };
   }
@@ -3402,7 +3401,7 @@ function ownedByThisUser(stat) {
 }
 
 // src/core/zkapi-consult-settings.ts
-import { readFileSync as readFileSync7, statSync as statSync7 } from "node:fs";
+import { readFileSync as readFileSync7, statSync as statSync6 } from "node:fs";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 var ZKAPI_DAEMON_DEFAULT_PORT = 8787;
@@ -3454,7 +3453,7 @@ function refreshZkapiPortsFromPolicyFile(env = process.env) {
   }
   let stamp;
   try {
-    const stat = statSync7(path);
+    const stat = statSync6(path);
     stamp = `${path}:${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
   } catch (error) {
     if (error.code === "ENOENT") {
@@ -7274,7 +7273,7 @@ import {
   readdirSync as readdirSync3,
   renameSync as renameSync5,
   rmSync as rmSync5,
-  statSync as statSync8,
+  statSync as statSync7,
   statfsSync,
   writeFileSync as writeFileSync5,
   writeSync as writeSync3
@@ -7562,7 +7561,7 @@ function volumeFreeBytes(path) {
 }
 function fileSize(path) {
   try {
-    return statSync8(path).size;
+    return statSync7(path).size;
   } catch {
     return 0;
   }
@@ -7610,7 +7609,7 @@ async function verifyPinnedFile(path, file, noun, reporter, timeoutMs) {
   verifiedThisProcess2 ??= new Set;
   if (verifiedThisProcess2.has(key))
     return;
-  const size = statSync8(path).size;
+  const size = statSync7(path).size;
   const label = `Checking the ${noun}`;
   reporter.verifying(label, 0, file.bytes);
   const digest = size === file.bytes ? await sha256File2(path, timeoutMs, (done) => reporter.verifying(label, done, file.bytes)) : undefined;
@@ -7715,7 +7714,7 @@ function locateFile(root, name, depth = 0, prefix = "") {
   if (entries.includes(name)) {
     const relative = prefix ? `${prefix}/${name}` : name;
     try {
-      if (statSync8(join13(root, relative)).isFile())
+      if (statSync7(join13(root, relative)).isFile())
         return relative;
     } catch {}
   }
@@ -7724,7 +7723,7 @@ function locateFile(root, name, depth = 0, prefix = "") {
   for (const entry of entries) {
     const child = prefix ? `${prefix}/${entry}` : entry;
     try {
-      if (!statSync8(join13(root, child)).isDirectory())
+      if (!statSync7(join13(root, child)).isDirectory())
         continue;
     } catch {
       continue;
@@ -7857,7 +7856,7 @@ function lockIsStale2(lockPath) {
     return typeof holder.at === "number" && Date.now() - holder.at > STALE_LOCK_MS2;
   } catch {
     try {
-      return Date.now() - statSync8(lockPath).mtimeMs > STALE_LOCK_MS2;
+      return Date.now() - statSync7(lockPath).mtimeMs > STALE_LOCK_MS2;
     } catch {
       return true;
     }

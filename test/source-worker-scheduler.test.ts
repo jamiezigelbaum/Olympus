@@ -15,7 +15,6 @@ import {
   sourceSchedulerSourceIdsFromEnv,
   withEmbeddingSweep,
   type SourceSchedulerSource,
-  type SourceSchedulerTask,
   type SourceSchedulerTaskRunResult,
 } from '../src/workers/source-scheduler.ts';
 import { createTestClock } from './helpers/test-clock.ts';
@@ -50,84 +49,6 @@ import type {
 import { XBookmarksLiveSyncError } from '../src/workers/x-bookmarks/index.ts';
 
 describe('source worker scheduler', () => {
-  test('owner Ask holds only scheduled watch evaluation and leaves it due', async () => {
-    const clock = createTestClock();
-    const ran: string[] = [];
-    const heldKeys: string[] = [];
-    const clearedKeys: string[] = [];
-    let asking = true;
-    const task = (id: string, kind: SourceSchedulerTask['kind'], metadataWalkRole?: SourceSchedulerTask['metadataWalkRole']): SourceSchedulerTask => ({
-      id, kind, ...(metadataWalkRole ? { metadataWalkRole } : {}), writer: true,
-      async run() { ran.push(id); return { status: 'idle' }; },
-    });
-    const scheduler = new SourceScheduler({
-      enabled: true, tickMs: 1_000, errorBackoffMs: 1_000, maxTransientRetries: 1,
-      now: clock.date,
-      holdForAsk: key => { heldKeys.push(key); return asking; },
-      clearAskHold: key => { clearedKeys.push(key); },
-      sources: [{
-        sourceId: 'fixture.files', corpusId: 'internal.fixture.files', cadence: 'continuous',
-        intervalMs: 60_000, freshnessThresholdHours: 1,
-        tasks: [task('discover', 'sync', 'primary'), task('extract', 'extract'),
-          task('reconcile', 'sync', 'maintenance'), task('watch', 'watch')],
-      }],
-    });
-    const watch = (status: Awaited<ReturnType<typeof scheduler.runDueTasks>>) => status.sources[0]!.tasks.find(task => task.id === 'watch')!;
-    const held = watch(await scheduler.runDueTasks());
-    expect(ran).toEqual(['discover', 'extract', 'reconcile']);
-    expect(held).toMatchObject({
-      wait_reason: 'owner_ask', next_run_at: clock.date().toISOString(), running: false, consecutive_failures: 0,
-    });
-    expect(held).not.toHaveProperty('last_attempt_at');
-    expect(held).not.toHaveProperty('last_result');
-    expect(watch(await scheduler.runDueTasks())).toEqual(held);
-    expect(heldKeys).toHaveLength(2);
-    expect(heldKeys[1]).toBe(heldKeys[0]);
-
-    const operator = watch(await scheduler.runSource('fixture.files', clock.date(), 'operator'));
-    expect(ran).toEqual(['discover', 'extract', 'reconcile', 'discover', 'extract', 'reconcile', 'watch']);
-    expect(operator).not.toHaveProperty('wait_reason');
-    expect(operator).toMatchObject({ last_attempt_at: clock.date().toISOString(), consecutive_failures: 0 });
-    expect(heldKeys).toHaveLength(2);
-    expect(clearedKeys).toEqual(heldKeys.slice(0, 1));
-
-    await clock.advance(60_000);
-    expect(watch(await scheduler.runDueTasks())).toMatchObject({ wait_reason: 'owner_ask' });
-    asking = false;
-    expect(watch(await scheduler.runDueTasks())).not.toHaveProperty('wait_reason');
-    expect(ran.filter(id => id === 'watch')).toHaveLength(2);
-  });
-
-  test('a watch that comes due during another task uses the same admission on follow-on dispatch', async () => {
-    const clock = createTestClock();
-    let asking = false;
-    let watchRuns = 0;
-    const scheduler = new SourceScheduler({
-      enabled: true, tickMs: 1_000, errorBackoffMs: 1_000, maxTransientRetries: 1,
-      now: clock.date, holdForAsk: () => asking,
-      sources: [{
-        sourceId: 'fixture.files', corpusId: 'internal.fixture.files', cadence: 'continuous',
-        intervalMs: 60_000, freshnessThresholdHours: 1,
-        tasks: [
-          { id: 'head', kind: 'sync', writer: true, intervalMs: 59_000, async run() {
-            if (asking) await clock.advance(1_000);
-            return { status: 'idle' };
-          } },
-          { id: 'watch', kind: 'watch', writer: true, async run() { watchRuns++; return { status: 'idle' }; } },
-        ],
-      }],
-    });
-    await scheduler.runDueTasks();
-    expect(watchRuns).toBe(1);
-    await clock.advance(59_000);
-    asking = true;
-    const { sources } = await scheduler.runDueTasks();
-    expect(sources[0]!.tasks.find(task => task.id === 'watch')).toMatchObject({
-      wait_reason: 'owner_ask', next_run_at: clock.date().toISOString(), consecutive_failures: 0,
-    });
-    expect(watchRuns).toBe(1);
-  });
-
   for (const durable of [false, true]) {
     test(`X usage guards park both tasks without a failure streak (durable=${durable})`, async () => {
       const clock = createTestClock(Date.parse('2026-11-12T12:00:00.000Z'));

@@ -189,11 +189,13 @@ export interface PrivateAnswerJobsOptions {
   /** Local audit log (default: one line on stderr). */
   audit?: (event: PrivateAnswerAuditEvent) => void;
   /**
-   * `begin` marks analysis activity. Claims use `beginClaim` when supplied,
-   * including when they attach to an existing analysis. Each activity ends
-   * exactly once through its own release function or the fallback `end`.
+   * Answer activity: `begin` when an analysis starts or a job is claimed,
+   * `end` once it finishes or the claim settles (exactly once each). The
+   * worker pauses the tier sniffer and other background model work in
+   * between, so the answer never waits on it. A `begin` that returns a
+   * release is ended through it, so one job never ends another's lease.
    */
-  activity?: { begin(): (() => void) | void; beginClaim?(): (() => void) | void; end(): void };
+  activity?: { begin(): (() => void) | void; end(): void };
   /** The per-claim stage timing line (default: stdout). Counts and milliseconds only. */
   log?: (line: string) => void;
   /**
@@ -1014,7 +1016,7 @@ export class PrivateAnswerJobs {
     const { abort } = analysis;
     analysis.state = 'running';
     analysis.startedAt = this.now();
-    const endActivity = this.beginActivity('analysis');
+    const endActivity = this.beginActivity();
     let freed = false;
     // Frees the slot exactly once, and starts the next analysis.
     const free = () => {
@@ -1128,7 +1130,7 @@ export class PrivateAnswerJobs {
     let settled = false;
     // Answers come first: the sniffer and other background model work yield
     // from the claim until this job settles, however it settles.
-    const endActivity = this.beginActivity('claim');
+    const endActivity = this.beginActivity();
     const settle = (outcome: Job['outcome'], reason?: AnalysisTiming['reason']) => {
       if (settled) return;
       settled = true;
@@ -1320,11 +1322,10 @@ export class PrivateAnswerJobs {
   }
 
   /** Begins one answer activity; the returned function ends exactly that one, once. */
-  private beginActivity(kind: 'analysis' | 'claim'): () => void {
-    const activity = this.options.activity;
+  private beginActivity(): () => void {
     let release: (() => void) | void;
     try {
-      release = kind === 'claim' && activity?.beginClaim ? activity.beginClaim() : activity?.begin();
+      release = this.options.activity?.begin();
     } catch {
       // A hook never fails a job.
       return () => undefined;

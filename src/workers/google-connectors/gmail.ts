@@ -365,24 +365,11 @@ export class GoogleGmailSourceConnector implements SourceConnector {
     this.beforeEachRequest = options.beforeEachRequest;
     this.confirmationAccountId = options.confirmationAccountId;
     const ingestFilterOptions = options.ingestFilterOptions ?? parseEmailIngestFilterOptionsFromEnv(env);
-    // The approved scope says which categories are skipped. An explicit
-    // operator setting still wins; otherwise the scope replaces the built-in
-    // Promotions default, so a category the owner chose to include is read.
+    // Operator ingest filters can narrow the approval. When no category
+    // filter is configured the approval supplies the default.
     this.ingestFilterOptions = this.scope && ingestFilterOptions.skipCategories === undefined
       ? { ...ingestFilterOptions, skipCategories: [...(this.scope.skippedCategoryLabelIds ?? [])] }
       : ingestFilterOptions;
-    // Skipped labels are enforced by id after the fetch too, whatever the
-    // category setting: a rename or an odd character in a label name cannot
-    // make the query miss what the owner skipped.
-    if (this.scope?.skippedLabelIds?.length) {
-      this.ingestFilterOptions = {
-        ...this.ingestFilterOptions,
-        skipCategories: [
-          ...(this.ingestFilterOptions.skipCategories ?? ['CATEGORY_PROMOTIONS']),
-          ...this.scope.skippedLabelIds,
-        ],
-      };
-    }
   }
 
   async authenticate(): Promise<void> {
@@ -519,18 +506,13 @@ export class GoogleGmailSourceConnector implements SourceConnector {
           message.id,
           metadataLeg ? { format: 'metadata', metadataHeaders: GMAIL_METADATA_HEADERS } : undefined,
         );
-        const fetchedDateMs = internalDateNumber({ internalDate: fetched.internalDate });
-        const beforeCutoff = cutoffMs !== undefined && fetchedDateMs !== undefined && fetchedDateMs < cutoffMs;
-        // The content leg owns everything at or after the cutoff. Gmail's date
-        // operators are second-granular, so a boundary message the metadata
-        // leg also lists is left to the leg that stores its body.
-        if (metadataLeg && !beforeCutoff) continue;
-        // Older than the window but already stored in some form: leave it be.
-        if (beforeCutoff && stored) {
-          this.itemsSkippedStored += 1;
-          continue;
+        if (fetched.id !== message.id) continue;
+        if (this.scope) {
+          const approvedLeg = gmailMessageScopeLeg(fetched, this.scope);
+          if (!approvedLeg) this.itemsSkippedCategory += 1;
+          if (approvedLeg !== (metadataLeg ? 'metadata' : 'content')) continue;
         }
-        const record = gmailMailRecordFromMessage(fetched, { metadataOnly: metadataLeg || beforeCutoff, children: this.build.children === true });
+        const record = gmailMailRecordFromMessage(fetched, { metadataOnly: metadataLeg, children: this.build.children === true });
         const [item, ...children] = gmailMailItems(record, this.account, this.build) as [RawItem, ...RawItem[]];
         this.attachmentsDeclared += metadataCount(item.metadata, 'attachmentCount');
         this.attachmentBytesDeclared += metadataCount(item.metadata, 'attachmentBytesDeclared');
@@ -543,15 +525,9 @@ export class GoogleGmailSourceConnector implements SourceConnector {
           // must not push the next bound past mail that has yet to arrive.
           highWaterMs = Math.min(internalDateMs, nowMs);
         }
-        const from = metadataString(item.metadata, 'from');
-        if (this.scope?.skipSenders?.some((rule) => senderMatchesRule(from, rule))) {
-          this.itemsSkippedCategory += 1;
-          continue;
-        }
         const body = item.content.kind === 'text' ? item.content.text : metadataString(item.metadata, 'snippet');
         // Metadata-only items carry no body and no snippet, so the OTP filter
-        // judges them by subject alone. Skipped labels are checked here by id
-        // as well as in the query, so a renamed label cannot slip past.
+        // judges them by subject alone.
         const skip = this.ingestSkip(item, body);
         if (skip) {
           if (skip === 'otp') this.itemsSkippedOtp += 1;
@@ -780,6 +756,7 @@ export class GoogleGmailSourceConnector implements SourceConnector {
     room: number,
   ): Promise<{ items: RawItem[]; next?: number }> {
     const message = await client.getMessage(at.id);
+    if (message.id !== at.id || (this.scope && !gmailMessageInScope(message, this.scope))) return { items: [] };
     this.messagesById.set(at.id, message);
     const [, ...children] = gmailMailItems(gmailMailRecordFromMessage(message, { children: this.build.children === true }), this.account, this.build);
     const items = children.slice(at.from, at.from + Math.max(1, room));
@@ -1448,16 +1425,22 @@ export function bareMessageId(value: string | undefined): string | undefined {
  * override is not re-checked here; it only narrows what is listed.)
  */
 export function gmailMessageInScope(message: GmailMessage, scope: GmailConnectorScope): boolean {
+  return gmailMessageScopeLeg(message, scope) === 'content';
+}
+
+/** Only the receipt-time cutoff can admit an otherwise excluded message as names only. */
+function gmailMessageScopeLeg(message: GmailMessage, scope: GmailConnectorScope): 'content' | 'metadata' | undefined {
   const labels = new Set((message.labelIds ?? []).map((label) => label.toUpperCase()));
-  if (labels.has('SPAM') || labels.has('TRASH')) return false;
+  if (labels.has('SPAM') || labels.has('TRASH')) return undefined;
   for (const skipped of [...(scope.skippedCategoryLabelIds ?? []), ...(scope.skippedLabelIds ?? [])]) {
-    if (labels.has(skipped.toUpperCase())) return false;
+    if (labels.has(skipped.toUpperCase())) return undefined;
   }
-  const received = internalDateNumber({ internalDate: message.internalDate });
-  if (scope.contentAfterMs !== undefined && (received === undefined || received < scope.contentAfterMs)) return false;
   const from = headersFromPart(message.payload).get('from');
-  if (scope.skipSenders?.some((rule) => senderMatchesRule(from, rule))) return false;
-  return true;
+  if (scope.skipSenders?.some((rule) => senderMatchesRule(from, rule))) return undefined;
+  if (scope.contentAfterMs === undefined) return 'content';
+  const received = internalDateNumber({ internalDate: message.internalDate });
+  if (received === undefined) return undefined;
+  return received < scope.contentAfterMs ? 'metadata' : 'content';
 }
 
 /** The locator of one MIME part of a Gmail message: what a later read of its bytes needs. */

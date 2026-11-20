@@ -1,7 +1,6 @@
 {
   "_readme": "One-line catches in src/ that carry on with nothing, per file (test/silent-fallback-allowance.test.ts). Counts only go down: a fix waits while the work progresses, or names what was left out (core/limit-stops.ts).",
   "logged_fallbacks": {
-    "src/core/owner-ask-admission.ts": "Failed owner-Ask lease probes increment the background health failure count and leave the independent command mark available for admission.",
     "src/workers/engine-split/front-history.ts": "A failed SQLite history open or read leaves Home's current counts available. Log the SQLite code once per interval and retry history on the next render.",
     "src/workers/classification/sniffer-service.ts": "Unverifiable walker inputs prevent idle skips. Failed walker reads keep their cursor for retry and appear in backlog health as read_failed.",
     "src/workers/classification/tier-over-private.ts": "Failed ledger counts are logged and retried on the background cadence. The previous measurement keeps its timestamp, or health shows counting until the first successful read."
@@ -258,7 +257,7 @@
     "src/workers/source-index/pinned-download.ts": 2,
     "src/workers/source-index/status.ts": 6,
     "src/workers/source-scheduler-state.ts": 2,
-    "src/workers/source-scheduler.ts": 3,
+    "src/workers/source-scheduler.ts": 4,
     "src/workers/source-scope-runtime.ts": 2,
     "src/workers/source-watch-runtime.ts": 3,
     "src/workers/telegram-messages/archive-target.ts": 1,

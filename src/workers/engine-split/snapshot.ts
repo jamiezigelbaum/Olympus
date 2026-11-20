@@ -1,6 +1,5 @@
 import type { MemoryActivity } from '../../core/memory-counters.ts';
 import type { TierOverPrivateStatus } from '../classification/tier-over-private.ts';
-import type { StandBackCounts, StandBackWork } from '../engine/stand-back.ts';
 /**
  * State the background publishes for the front (docs/design/engine-split.md,
  * part 3, "State from background to front"): scheduler status, the judge's
@@ -80,10 +79,6 @@ export interface EngineStatusSnapshot {
   stores_opened?: number;
   /** The background's paced status recount (status-recount.ts). */
   status_recount?: { runs: number; failures: number; last_ms?: number; age_ms?: number; counting: boolean };
-  /** Failed reads of the front's kernel lease. */
-  owner_ask_probe_failures?: number;
-  /** Admission counts collected by the background, independently of the source status recount. */
-  stand_back?: Partial<Record<StandBackWork, StandBackCounts>>;
 }
 
 export interface EngineManualSyncRun {
@@ -111,24 +106,6 @@ export interface EngineStatusRead {
    * its last state, and `state_age_ms` says how old that is.
    */
   stale: boolean;
-}
-
-export interface OwnerAskAdmissionStatus {
-  stand_back: NonNullable<EngineStatusSnapshot['stand_back']> | 'unavailable';
-  background_state_age_ms?: number;
-  owner_ask_probe_failures?: number;
-}
-
-export function backgroundOwnerAskAdmission(read: EngineStatusRead | undefined): OwnerAskAdmissionStatus {
-  if (!read) return { stand_back: 'unavailable' };
-  const age = read.state_age_ms ?? read.age_ms;
-  const stateAge = { background_state_age_ms: Math.round(age) };
-  // A control thread's heartbeat can be fresh while its engine state is old.
-  if (read.stale || age > ENGINE_STATUS_STALE_MS || read.snapshot.stand_back === undefined) {
-    return { ...stateAge, stand_back: 'unavailable' };
-  }
-  const { stand_back, owner_ask_probe_failures } = read.snapshot;
-  return { ...stateAge, stand_back, ...(owner_ask_probe_failures !== undefined ? { owner_ask_probe_failures } : {}) };
 }
 
 export function writeEngineStatusSnapshot(path: string, snapshot: EngineStatusSnapshot): void {

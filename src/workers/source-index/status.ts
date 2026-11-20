@@ -49,7 +49,6 @@ import { readFile, stat } from 'node:fs/promises';
 import { writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
 import { ingestionTurn } from '../control-path-headroom.ts';
 import { SecretLocationsIndex, secretLocationsPathForStore } from '../classification/secret-locations.ts';
-import type { OwnerAskAdmissionStatus } from '../engine-split/snapshot.ts';
 
 /**
  * Per-ITEM embedding parity: files whose every chunk carries a current vector.
@@ -86,7 +85,7 @@ export interface SourceIndexStatusRequest {
   query?: string;
 }
 
-export interface SourceIndexStatusResult extends Partial<OwnerAskAdmissionStatus> {
+export interface SourceIndexStatusResult {
   kind: 'source_index_status';
   generated_at: string;
   /**
@@ -343,8 +342,6 @@ export interface SourceIndexStatusHandlerOptions {
    * refreshes behind each read.
    */
   snapshotRole?: 'writer' | 'reader';
-  /** Current admission facts, overlaid on each served result without recounting it. */
-  ownerAskAdmission?: () => OwnerAskAdmissionStatus;
   /** Live, deduplicated unreadable population when the problem list is wired. */
   // Undefined: no recount yet, so the ledger's own count stands.
   unreadableCount?: (corpusId: string) => number | undefined;
@@ -617,10 +614,6 @@ export function createSourceIndexStatusHandler(
     return readingPublished;
   };
   void refreshPublished();
-  const countingStatus = (): SourceIndexStatusResult => ({
-    kind: 'source_index_status', generated_at: new Date().toISOString(), corpora: [], counting: true,
-    policy: { read_only: true, raw_source_exposed: false, source_packets_exposed: false, source_text_returned: false, secure_local_item_metadata_exposed: false, castor_visible: true },
-  });
   // The split's front never counts a store, whatever the reason the
   // background has no entry for this exact read: a store the front mounted
   // first, a scope that moved, a front started before the background's first
@@ -630,10 +623,10 @@ export function createSourceIndexStatusHandler(
   // the newest for the same request at any allowance; the newest whole-store
   // count of any request, narrowed to the corpus asked for; else "counting"
   // with no numbers.
-  const servedSnapshot = (request: SourceIndexStatusRequest, countsMaxAgeMs: number, keptEntries: Map<string, KeptStatus> | undefined): SourceIndexStatusResult => {
+  const servedOnFront = (request: SourceIndexStatusRequest, countsMaxAgeMs: number): SourceIndexStatusResult => {
     const key = snapshotKey(request, countsMaxAgeMs);
-    const exact = keptEntries?.get(key);
-    const entries = [...(keptEntries ?? [])];
+    const exact = published?.entries.get(key);
+    const entries = [...(published?.entries ?? new Map<string, KeptStatus>())];
     const newest = (match: (other: Record<string, unknown>) => boolean): KeptStatus | undefined => {
       let found: KeptStatus | undefined;
       for (const [other, kept] of entries) {
@@ -649,12 +642,17 @@ export function createSourceIndexStatusHandler(
       ?? newest((other) => JSON.stringify(other) === sameRequest)
       ?? newest((other) => other.corpus_id === undefined && JSON.stringify({ ...other }) === JSON.stringify({ ...wholeStore }))
       ?? newest((other) => other.corpus_id === undefined);
-    if (!kept) return countingStatus();
+    if (!kept) {
+      return {
+        kind: 'source_index_status', generated_at: new Date().toISOString(), corpora: [], counting: true,
+        policy: { read_only: true, raw_source_exposed: false, source_packets_exposed: false, source_text_returned: false, secure_local_item_metadata_exposed: false, castor_visible: true },
+      };
+    }
     const canonical = typeof corpusId === 'string' ? canonicalSourceCorpusId(corpusId) : undefined;
     // A store whose scope has moved since that count is left out until the
     // background counts it under the new scope: rows the owner just took out
     // of scope are never shown from an older count.
-    const keptKey = entries.find(([, entry]) => entry === kept)?.[0];
+    const keptKey = [...(published?.entries ?? [])].find(([, entry]) => entry === kept)?.[0];
     const now = scopesOf(key);
     const then = keptKey ? scopesOf(keptKey) : new Map<string, string>();
     const moved = (id: string): boolean => now.has(id) && then.has(id) && now.get(id) !== then.get(id);
@@ -718,10 +716,9 @@ export function createSourceIndexStatusHandler(
   ): Promise<SourceIndexStatusResult> => {
     const key = snapshotKey(request, countsMaxAgeMs);
     const last = snapshots.get(key);
-    // Only the paced writer refreshes a split snapshot, including on a
-    // cold boot or scope change while Ask holds the next refresh.
-    if (!last) return role === 'writer' ? Promise.resolve(servedSnapshot(request, countsMaxAgeMs, snapshots)) : refreshKept(key, compute);
-    // A single engine refreshes a reusable count behind the read.
+    if (!last) return refreshKept(key, compute);
+    // The split's background recounts on its own pace. In a single engine,
+    // a request with a reusable count refreshes behind the read.
     if (role === undefined && nowMs() - last.atMs >= STATUS_SNAPSHOT_REFRESH_MS) void refreshKept(key, compute).catch(() => undefined);
     return Promise.resolve({ ...last.result, snapshot_age_ms: snapshotAge(last) });
   };
@@ -906,10 +903,6 @@ export function createSourceIndexStatusHandler(
       return { atMs: nowMs(), countedAt, result };
   };
 
-  const withLiveStatus = (result: SourceIndexStatusResult): SourceIndexStatusResult => ({
-    ...withLiveTotals(result),
-    ...options.ownerAskAdmission?.(),
-  });
   return {
     async status(request: SourceIndexStatusRequest = {}, snapshot: { countsMaxAgeMs?: number } = {}): Promise<SourceIndexStatusResult> {
       const countsMaxAgeMs = snapshot.countsMaxAgeMs ?? 0;
@@ -918,13 +911,13 @@ export function createSourceIndexStatusHandler(
       if (role === 'reader' && !request.include_sender_aggregation) {
         assertSupportedStatusRequest(request);
         void refreshPublished();
-        return withLiveStatus(servedSnapshot(request, countsMaxAgeMs, published?.entries));
+        return withLiveTotals(servedOnFront(request, countsMaxAgeMs));
       }
       // A live read (no allowance), or one that asks for a conversation's
       // senders, is read now as before.
-      if (countsMaxAgeMs <= 0 || request.include_sender_aggregation) return withLiveStatus((await computeStatus(request, snapshot)).result);
+      if (countsMaxAgeMs <= 0 || request.include_sender_aggregation) return withLiveTotals((await computeStatus(request, snapshot)).result);
       assertSupportedStatusRequest(request);
-      return withLiveStatus(await snapshotStatus(() => computeStatus(request, snapshot), request, countsMaxAgeMs));
+      return withLiveTotals(await snapshotStatus(() => computeStatus(request, snapshot), request, countsMaxAgeMs));
     },
     async settled() {
       if (readingPublished) await readingPublished;
