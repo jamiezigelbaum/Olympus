@@ -25,6 +25,8 @@ export interface EngineStatusSnapshot {
   schema: typeof ENGINE_STATUS_SNAPSHOT_SCHEMA;
   /** Fixed activity word shared with the memory diagnostic; no store reads. */
   activity?: MemoryActivity;
+  /** The built-in server whose endpoint the background verified. Absent while cold. */
+  built_in_serving_pid?: number | undefined;
   /** The background instance that wrote it; a new one means it restarted. */
   instance_id: string;
   written_at: string;

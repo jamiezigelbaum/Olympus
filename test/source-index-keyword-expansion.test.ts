@@ -1,8 +1,9 @@
+import { createTestClock } from './helpers/test-clock.ts';
 import { afterEach, expect, setSystemTime, test } from 'bun:test';
 import { sourceIndexFtsQuery, sourceIndexFtsTermGroups } from '../src/core/source-index/fts.ts';
 import { sourceIndexChunkQueryTerms } from '../src/core/source-index/chunk-selection.ts';
 import { withKeywordAlternatives, withKeywordRequestScope } from '../src/core/source-index/keyword-context.ts';
-import { expandSourceIndexKeywords, parseKeywordExpansion, withExpandedSourceIndexKeywords } from '../src/core/source-index/keyword-expansion.ts';
+import { expandSourceIndexKeywords, parseKeywordExpansion, withExpandedSourceIndexKeywords, type KeywordPreparation } from '../src/core/source-index/keyword-expansion.ts';
 import { registerBuiltInPrivateModel } from '../src/workers/classification/built-in-sniffer.ts';
 import type { AnalystModelRequest } from '../src/core/analyst.ts';
 import { Database } from 'bun:sqlite';
@@ -59,7 +60,9 @@ test('absent, unavailable and failing built-in model leave the original search i
   let calls = 0;
   const model = {async complete() { calls++; throw new Error('offline'); }};
   registerBuiltInPrivateModel({available: () => false, model});
-  await expandSourceIndexKeywords('asteroid', ['spa']);
+  const status: KeywordPreparation = { incomplete: false };
+  await expandSourceIndexKeywords('asteroid', ['spa'], {}, { waitMs: 4_000, status });
+  expect(status).toEqual({ incomplete: true, keyword_model: 'unavailable' });
   expect(calls).toBe(0);
   registerBuiltInPrivateModel({available: () => true, model});
   const result = await withExpandedSourceIndexKeywords('asteroid', ['spa'], () => sourceIndexFtsTermGroups('asteroid'));
@@ -275,22 +278,37 @@ test('a corpus prepares its keywords and its query embedding at once, and the qu
   const started: string[] = [];
   let releaseKeywords!: () => void;
   const keywordsWait = new Promise<void>((resolve) => { releaseKeywords = resolve; });
+  let finishTranslation!: (text: string) => void;
+  const translation = new Promise<string>(resolve => { finishTranslation = resolve; });
+  registerBuiltInPrivateModel({ available: () => true, serverReady: () => false,
+    model: { complete: async () => ({ modelId: 'fixture', text: await translation }) },
+  });
   const adapter = Object.assign(() => ({hits:[],latencyMs:0,rawExposed:false as const}), {
     hybridAvailability: () => ({servable: true, modelId: 'm1', backend: 'local'}),
-    prepareKeywords: async () => { started.push('keywords'); await keywordsWait; },
+    prepareKeywords: async (query: string) => {
+      started.push('keywords');
+      await keywordsWait;
+      const status: KeywordPreparation = { incomplete: false };
+      await expandSourceIndexKeywords(query, ['spa'], {}, { waitMs: 4_000, status });
+      return status;
+    },
     // The query embedding only finishes once it has started alongside the translation.
     prepareSemantic: async () => { started.push('semantic'); releaseKeywords(); },
   });
   const t = trace.createSourceAnswerTrace();
-  const snapshot = await trace.runWithSourceAnswerTrace(t, () => trace.observeSourceAnswerRetrievalAttempt('hybrid', () =>
+  const routed = await trace.runWithSourceAnswerTrace(t, () => trace.observeSourceAnswerRetrievalAttempt('hybrid', () =>
     trace.observeSourceAnswerRoutedQuery(1, () => routeSourceIndexSearch({
       registry: buildSourceIndexCorpusRegistry([corpus]), adapters: {[corpus.corpusId]: adapter},
-      request: {query:'notary',maxResults:4,context:{allowedTrustDomains:['internal']}}, laneTimeoutMs: 1000,
-    })))).then(() => trace.snapshotSourceAnswerTrace(t));
+      request: {query:'asteroid notary',maxResults:4,context:{allowedTrustDomains:['internal']}}, laneTimeoutMs: 1000,
+    }))));
+  finishTranslation(reply(['asteroide']));
+  expect(routed.degradations).toContainEqual({ laneName: corpus.corpusId + ':keywords', laneType: 'keyword', reason: 'lane_timeout', detail: 'keyword_preparation_incomplete', occurrences: 1 });
+  const snapshot = trace.snapshotSourceAnswerTrace(t);
   expect(started).toEqual(['keywords', 'semantic']);
   const stages = snapshot.retrievalAttempts[0]?.queries[0]?.stages;
   expect(stages).toBeDefined();
-  expect(Object.keys(stages!).sort()).toEqual(['after_lanes_ms', 'lanes_ms', 'prepare_keywords_max_ms', 'prepare_ms', 'prepare_semantic_max_ms']);
+  expect(stages?.keyword_model).toBe('cold');
+  expect(Object.keys(stages!).sort()).toEqual(['after_lanes_ms', 'keyword_model', 'lanes_ms', 'prepare_keywords_max_ms', 'prepare_ms', 'prepare_semantic_max_ms']);
 });
 
 test('a search stops waiting for a slow translation, uses the static equivalents, and the translation is cached for later (#1305)', async () => {
@@ -317,6 +335,63 @@ test('a search stops waiting for a slow translation, uses the static equivalents
     expect(later.get('asteroid')).toContain('asteroide');
   });
   expect(calls).toBe(1);
+});
+
+test('boot and idle exit skip keyword patience, and a slow startup leaves the next ready translation eligible', async () => {
+  const clock = createTestClock();
+  let ready = false;
+  let starts = 0;
+  let calls = 0;
+  registerBuiltInPrivateModel({ available: () => true, serverReady: () => ready, model: {
+    async complete() {
+      calls++;
+      if (!ready) {
+        starts++;
+        await clock.sleep(5_000);
+        ready = true;
+      }
+      return { modelId: 'fixture', text: reply(['astral']) };
+    },
+  } });
+  const ask = (query: string) => withKeywordRequestScope(async () => {
+    const status: KeywordPreparation = { incomplete: false };
+    const owner = {};
+    const words = await expandSourceIndexKeywords(query, ['spa'], owner, { waitMs: 4_000, status });
+    const pinned = await expandSourceIndexKeywords(query, ['spa'], owner);
+    expect(pinned).toBe(words);
+    return { words, status };
+  });
+  const coldAsk = async () => {
+    let result: Awaited<ReturnType<typeof ask>> | undefined;
+    const before = clock.now();
+    const pending = ask('asteroid notary').then(value => { result = value; });
+    await clock.advance(49);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(result?.status).toEqual({ incomplete: true, keyword_model: 'cold' });
+    expect(clock.now() - before).toBeLessThan(50);
+    expect(result?.words.get('notary')).toContain('notario');
+    expect(result?.words.has('asteroid')).toBe(false);
+    await pending;
+  };
+  try {
+    setSystemTime(clock.now());
+    await Promise.all([coldAsk(), ask('asteroid notary')]);
+    expect(starts).toBe(1);
+    expect(calls).toBe(1);
+    setSystemTime(clock.now() + 5_000);
+    await clock.advance(5_000);
+    const warm = await ask('comet notary');
+    expect(warm.status).toEqual({ incomplete: false, keyword_model: 'ready' });
+    expect(warm.words.get('comet')).toContain('astral');
+    expect(calls).toBe(2);
+    await clock.advance(600_000);
+    setSystemTime(clock.now());
+    ready = false;
+    await coldAsk();
+    expect(starts).toBe(2);
+    expect(calls).toBe(3);
+    await clock.advance(5_000);
+  } finally { setSystemTime(); }
 });
 
 test('once a translation has outlasted the wait, later searches start at once on the static equivalents; a quick one restores the wait', async () => {

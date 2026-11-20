@@ -2406,8 +2406,8 @@ function withSqliteFiles(path) {
 
 // scripts/source-embedding-drain.ts
 import { createHash as createHash14 } from "node:crypto";
-import { existsSync as existsSync24, lstatSync as lstatSync11, mkdirSync as mkdirSync14, writeFileSync as writeFileSync7 } from "node:fs";
-import { dirname as dirname26, isAbsolute as isAbsolute15 } from "node:path";
+import { existsSync as existsSync23, lstatSync as lstatSync10, mkdirSync as mkdirSync14, writeFileSync as writeFileSync7 } from "node:fs";
+import { dirname as dirname24, isAbsolute as isAbsolute15 } from "node:path";
 
 // src/core/config.ts
 import { existsSync as existsSync8, readFileSync as readFileSync9 } from "node:fs";
@@ -9111,21 +9111,6 @@ function compactPassageWhitespace(text) {
 
 // src/core/source-index/partial-search.ts
 var SEMANTIC_TIMEOUT_REASONS = new Set(["vector_scan_deadline_exceeded", "vector_scan_store_busy"]);
-var KEYWORD_PREPARATION_INCOMPLETE = "keyword_preparation_incomplete";
-var KEYWORDS_PREFIX = "Keyword preparation unfinished for ";
-function keywordPreparationGap(corpusId) {
-  return `${KEYWORDS_PREFIX}${corpusId}; this answer uses the available keyword equivalents, so matches in other languages may be missing.`;
-}
-var RECENT_ITEMS_CUT_SHORT = "recent_items_cut_short";
-var RECENT_PREFIX = "Ran out of time reading the newest items in ";
-function recentItemsTimeoutGap(corpusId) {
-  return `${RECENT_PREFIX}${corpusId}; its newest items may be missing from this search. Ask again in a moment.`;
-}
-var VISIBILITY_CHECK_CUT_SHORT = "visibility_check_cut_short";
-var UNCHECKED_PREFIX = "Ran out of time checking the privacy of matches in ";
-function visibilityCheckTimeoutGap(corpusId) {
-  return `${UNCHECKED_PREFIX}${corpusId}; they were left out of this search. Ask again in a moment.`;
-}
 
 // src/core/evidence-versions.ts
 var DOCUMENT_FAMILIES = new Set(["file", "note"]);
@@ -9855,1470 +9840,10 @@ function assertLocalModelIdNotCloudForwarding(label, modelId) {
 // src/core/sovereignty.ts
 var BUILT_IN_EMBEDDING_MODEL_ID = BUILT_IN_EMBEDDING_ENV_DEFAULT_MODEL.modelId;
 
-// src/core/file-scope-sources.ts
-var definitions = new Map;
-var builtInIds = new Set;
-function registerFileScopeSource(definition) {
-  const { sourceId, provider } = definition;
-  if (!sourceId || !provider)
-    throw new Error("A file-scope source needs a source id and a provider.");
-  if (definition.account === "provider_account" && !definition.credentialCapability) {
-    throw new Error(`File-scope source ${sourceId} binds to a provider account and needs a credential capability.`);
-  }
-  if (definition.account === "this_computer" && definition.credentialCapability) {
-    throw new Error(`File-scope source ${sourceId} binds to this computer and must not name a credential capability.`);
-  }
-  if (definitions.has(sourceId))
-    throw new Error(`File-scope source ${sourceId} is already registered.`);
-  for (const other of definitions.values()) {
-    if (other.provider === provider) {
-      throw new Error(`File-scope provider ${provider} is already registered by ${other.sourceId}.`);
-    }
-  }
-  definitions.set(sourceId, definition);
-}
-function registerBuiltIn(definition) {
-  registerFileScopeSource(definition);
-  builtInIds.add(definition.sourceId);
-}
-registerBuiltIn({
-  sourceId: "google_drive.docs",
-  provider: "google_drive",
-  account: "provider_account",
-  credentialCapability: "google_drive.docs.sync",
-  pinEnvName: "OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CREDENTIAL_HANDLE",
-  corpusIdsToInvalidate: ["internal.drive.docs", "secure_local.drive.docs"],
-  filterFamily: "folder_id",
-  normalizeKey: (key) => key.trim(),
-  rootKeys: ["/", "root"],
-  label: "Google Drive",
-  dispositionSourceId: "google_drive.personal"
-});
-registerBuiltIn({
-  sourceId: "dropbox.files",
-  provider: "dropbox",
-  account: "provider_account",
-  credentialCapability: "dropbox.files.sync",
-  pinEnvName: "OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_CREDENTIAL_HANDLE",
-  corpusIdsToInvalidate: ["secure_local.dropbox.files"],
-  filterFamily: "locator_path",
-  normalizeKey: (key) => key.trim().toLowerCase(),
-  rootKeys: ["/"],
-  label: "Dropbox",
-  dispositionSourceId: "dropbox.personal"
-});
-registerBuiltIn({
-  sourceId: "local.files",
-  provider: "local_files",
-  account: "this_computer",
-  corpusIdsToInvalidate: ["secure_local.local.files"],
-  filterFamily: "locator_path",
-  normalizeKey: (key) => {
-    const trimmed = key.trim().normalize("NFC");
-    return trimmed.length > 1 ? trimmed.replace(/\/+$/, "") : trimmed;
-  },
-  rootKeys: ["/"],
-  label: "Files on this computer",
-  dispositionSourceId: "local.files",
-  wholeScopeWords: {
-    row: "Everything on this computer",
-    prompt: "Olympus will read every folder on this computer, now and later, except folders you set to Names only or Skip.",
-    confirm: "Yes, use the whole computer",
-    summary: "Everything else on this computer: fully indexed, including folders added later.",
-    onlyFull: "The whole computer is all or nothing. Set Names only or Skip on folders instead.",
-    needConfirm: "Confirm the whole computer first."
-  }
-});
-registerBuiltIn({
-  sourceId: "evernote.notes",
-  provider: "evernote",
-  account: "provider_account",
-  credentialCapability: "evernote.notes.sync",
-  pinEnvName: "OLYMPUS_SOURCE_INDEX_EVERNOTE_CREDENTIAL_HANDLE",
-  corpusIdsToInvalidate: ["secure_local.evernote.notes", "internal.evernote.notes"],
-  filterFamily: "folder_id",
-  itemKeysExact: true,
-  normalizeKey: (key) => key.trim(),
-  rootKeys: ["/"],
-  label: "Evernote",
-  dispositionSourceId: "evernote.notes",
-  wholeScopeWords: {
-    row: "All notebooks",
-    prompt: "Olympus will read every notebook you own, including notebooks added later, except notebooks you set to Names only or Skip.",
-    confirm: "Yes, read all my notebooks",
-    summary: "Every other notebook you own: fully read, including notebooks added later.",
-    onlyFull: "All notebooks is all or nothing. Set Names only or Skip on notebooks instead.",
-    needConfirm: "Confirm all notebooks first."
-  }
-});
-
-// src/core/mail-source-scope.ts
-var GMAIL_SCOPE_SENDER_SAMPLE = 100;
-var GMAIL_SCOPE_BROWSE_MAX_REQUESTS = 1 + 5 + 2 + GMAIL_SCOPE_SENDER_SAMPLE;
-
-// src/core/provider-account-identity.ts
-var DEFAULT_PROVIDER_IDENTITY_ENDPOINTS = {
-  dropbox: "https://api.dropboxapi.com/2/users/get_current_account",
-  gmail: new URL("users/me/profile", "https://gmail.googleapis.com/gmail/v1/").toString(),
-  google_drive: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress,permissionId)",
-  x: "https://api.x.com/2/users/me",
-  google_tokeninfo: "https://oauth2.googleapis.com/tokeninfo"
-};
-var IDENTITY_RESPONSE_LIMIT_BYTES = 64 * 1024;
-var IMMUTABLE_LABEL_KINDS = ["dbid", "google-sub", "google-perm"];
-var LABEL = /^([a-z-]+):[A-Za-z0-9_-]{1,150}$/;
-function parseProviderAccountId(id) {
-  const labels = new Map;
-  for (const label of id.trim().split(".")) {
-    const kind = LABEL.exec(label)?.[1];
-    if (!kind || kind !== "google" && !IMMUTABLE_LABEL_KINDS.includes(kind))
-      return;
-    if (labels.has(kind))
-      return;
-    labels.set(kind, label);
-  }
-  return labels.size > 0 ? labels : undefined;
-}
-function compareProviderAccounts(recorded, observed) {
-  const a = parseProviderAccountId(recorded);
-  const b = parseProviderAccountId(observed);
-  if (!a || !b)
-    return recorded.trim() === observed.trim() ? "same" : "different";
-  let shared = false;
-  for (const kind of IMMUTABLE_LABEL_KINDS) {
-    const left = a.get(kind);
-    const right = b.get(kind);
-    if (left === undefined || right === undefined)
-      continue;
-    if (left !== right)
-      return "different";
-    shared = true;
-  }
-  if (shared)
-    return "same";
-  if (hasImmutableAccountLabel(recorded))
-    return "unproven";
-  const address = a.get("google");
-  return address !== undefined && address === b.get("google") ? "same" : "different";
-}
-function hasImmutableAccountLabel(id) {
-  const labels = parseProviderAccountId(id);
-  return labels !== undefined && IMMUTABLE_LABEL_KINDS.some((kind) => labels.has(kind));
-}
-
-// src/core/sender-rules.ts
-var MAX_FROM_HEADER_CHARS = 4096;
-var LOCAL_CHAR = /[^\s<>"(),;:@[\]\\]/;
-var DOMAIN_CHAR = /[a-z0-9.-]/i;
-function validDomain(raw) {
-  let end = raw.length;
-  while (end > 0 && (raw[end - 1] === "." || raw[end - 1] === "-"))
-    end -= 1;
-  const domain = raw.slice(0, end).toLowerCase();
-  const labels = domain.split(".");
-  if (labels.length < 2 || labels.some((label) => !label || label.startsWith("-") || label.endsWith("-")))
-    return;
-  return domain;
-}
-function scanHeader(value) {
-  let out = "";
-  let depth = 0;
-  let quoted = false;
-  let angleOpens = 0;
-  let comma = false;
-  for (let index = 0;index < value.length; index += 1) {
-    const char = value[index];
-    if (char === "\\" && index + 1 < value.length) {
-      if (depth === 0)
-        out += char + value[index + 1];
-      index += 1;
-      continue;
-    }
-    if (depth === 0 && char === '"')
-      quoted = !quoted;
-    if (!quoted && char === "(") {
-      depth += 1;
-      continue;
-    }
-    if (!quoted && char === ")" && depth > 0) {
-      depth -= 1;
-      continue;
-    }
-    if (depth > 0)
-      continue;
-    if (!quoted && char === "<")
-      angleOpens += 1;
-    if (!quoted && char === ",")
-      comma = true;
-    out += char;
-  }
-  return { text: out, angleOpens, comma };
-}
-function parseAddrSpec(value) {
-  const spec = value.trim();
-  let local;
-  let rest;
-  if (spec.startsWith('"')) {
-    let index = 1;
-    while (index < spec.length && spec[index] !== '"')
-      index += spec[index] === "\\" ? 2 : 1;
-    if (index >= spec.length || spec[index + 1] !== "@")
-      return;
-    local = spec.slice(0, index + 1);
-    rest = spec.slice(index + 2);
-  } else {
-    const at = spec.indexOf("@");
-    if (at <= 0)
-      return;
-    local = spec.slice(0, at);
-    rest = spec.slice(at + 1);
-    for (const char of local)
-      if (!LOCAL_CHAR.test(char))
-        return;
-  }
-  for (const char of rest)
-    if (!DOMAIN_CHAR.test(char))
-      return;
-  const domain = validDomain(rest);
-  if (!domain || domain !== rest.toLowerCase())
-    return;
-  return { address: `${local.toLowerCase()}@${domain}`, domain };
-}
-function senderAddress(from) {
-  if (!from || from.length > MAX_FROM_HEADER_CHARS)
-    return;
-  const scanned = scanHeader(from);
-  if (scanned.angleOpens > 1 || scanned.comma)
-    return;
-  if (scanned.angleOpens === 1) {
-    const open = scanned.text.indexOf("<");
-    const close = scanned.text.indexOf(">", open + 1);
-    if (close < 0 || scanned.text.slice(close + 1).trim() !== "")
-      return;
-    return parseAddrSpec(scanned.text.slice(open + 1, close));
-  }
-  return parseAddrSpec(scanned.text);
-}
-function everyAddressIn(from) {
-  if (!from)
-    return [];
-  return addressSpansIn(from.slice(0, MAX_FROM_HEADER_CHARS)).map(({ address, domain }) => ({ address, domain }));
-}
-function addressSpansIn(text) {
-  const found = [];
-  for (let at = text.indexOf("@");at >= 0; at = text.indexOf("@", at + 1)) {
-    let start = at;
-    while (start > 0 && LOCAL_CHAR.test(text[start - 1]))
-      start -= 1;
-    let end = at + 1;
-    while (end < text.length && DOMAIN_CHAR.test(text[end]))
-      end += 1;
-    if (start === at)
-      continue;
-    const domain = validDomain(text.slice(at + 1, end));
-    if (!domain)
-      continue;
-    const local = text.slice(start, at).toLowerCase();
-    found.push({ address: `${local}@${domain}`, domain, local, start, end: at + 1 + domain.length });
-  }
-  return found;
-}
-function addressMatches(sender, normalizedRule) {
-  if (normalizedRule.startsWith("@")) {
-    const domain = normalizedRule.slice(1);
-    return domain !== "" && (sender.domain === domain || sender.domain.endsWith(`.${domain}`));
-  }
-  return sender.address === normalizedRule;
-}
-function ownerSenderRuleMatches(from, value, raises) {
-  const normalized = value.trim().toLowerCase();
-  if (!normalized)
-    return false;
-  if (!normalized.includes("@"))
-    return raises && (from ?? "").slice(0, MAX_FROM_HEADER_CHARS).toLowerCase().includes(normalized);
-  const sender = senderAddress(from);
-  if (sender)
-    return addressMatches(sender, normalized);
-  return raises && everyAddressIn(from).some((candidate) => addressMatches(candidate, normalized));
-}
-
-// src/core/file-extraction-source.ts
-var FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS = Object.freeze({
-  source_item_not_found: "failed_terminal",
-  source_permission_denied: "failed_terminal",
-  source_version_gone: "failed_terminal",
-  source_content_unavailable: "skipped_unsupported",
-  source_request_rejected: "failed_terminal",
-  source_too_large: "skipped_too_large",
-  source_rate_limited: "failed_retryable",
-  source_unavailable: "failed_retryable",
-  source_auth_expired: "failed_retryable",
-  source_budget_exhausted: "failed_retryable",
-  network_unreachable: "failed_retryable",
-  network_socket_closed: "failed_retryable"
-});
-
-// src/core/build-flavor.ts
-var PUBLIC_RUNTIME_BUILD = false;
-
-// src/core/google-service-account.ts
-var GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token";
-
-// src/core/oauth-relay.ts
-var OAUTH_RELAY_STATE_TTL_MS = 10 * 60 * 1000;
-
-// src/workers/credential-broker/index.ts
-var PUBLIC_CREDENTIAL_PROVIDERS = [
-  "readwise",
-  "gmail",
-  "google_drive",
-  "dropbox",
-  "telegram",
-  "whatsapp_personal",
-  "x",
-  "evernote"
-];
-var PRIVATE_CREDENTIAL_PROVIDERS = [
-  "notion",
-  "google_calendar",
-  "gcp",
-  "whatsapp_business",
-  "apple_messages",
-  "reflect",
-  "roam"
-];
-var CREDENTIAL_PROVIDERS = [
-  ...PUBLIC_CREDENTIAL_PROVIDERS,
-  ...PUBLIC_RUNTIME_BUILD ? [] : PRIVATE_CREDENTIAL_PROVIDERS
-];
-var GOOGLE_GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
-var GOOGLE_DRIVE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly";
-var GOOGLE_CALENDAR_READONLY_SCOPE = "https://www.googleapis.com/auth/calendar.readonly";
-var GOOGLE_SHARED_SERVICE_ACCOUNT_JSON_ENV_NAME = "OLYMPUS_CREDENTIAL_GOOGLE_OLYMPUS_SERVICE_ACCOUNT_JSON";
-function delegatedGoogleHandle(options) {
-  return {
-    handle: options.handle,
-    provider: options.provider,
-    accountRole: options.accountRole,
-    trustDomain: options.trustDomain,
-    allowedCapabilities: [options.capability],
-    scopes: [...options.scopes],
-    tokenEnvNames: [],
-    serviceAccountJwt: {
-      tokenUrl: GOOGLE_OAUTH_TOKEN_URL,
-      credentialJsonEnvNames: [
-        ...options.credentialJsonEnvNames,
-        GOOGLE_SHARED_SERVICE_ACCOUNT_JSON_ENV_NAME
-      ],
-      impersonatedSubjectEnvNames: [...options.impersonatedSubjectEnvNames],
-      scopes: [...options.scopes]
-    },
-    expiresInSeconds: 3600
-  };
-}
-var DEFAULT_ENV_HANDLES = [
-  {
-    handle: "gmail.personal",
-    provider: "gmail",
-    accountRole: "personal",
-    trustDomain: "secure_local",
-    allowedCapabilities: ["gmail.email.sync"],
-    scopes: [GOOGLE_GMAIL_READONLY_SCOPE],
-    tokenEnvNames: [],
-    oauth2Refresh: {
-      tokenUrl: GOOGLE_OAUTH_TOKEN_URL,
-      clientIdEnvNames: [
-        "OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_OAUTH2_CLIENT_ID",
-        ...PUBLIC_RUNTIME_BUILD ? [] : ["OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_CLIENT_ID"]
-      ],
-      clientSecretEnvNames: [
-        "OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_OAUTH2_CLIENT_SECRET",
-        ...PUBLIC_RUNTIME_BUILD ? [] : ["OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_CLIENT_SECRET"]
-      ],
-      refreshTokenEnvNames: [
-        "OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_OAUTH2_REFRESH_TOKEN",
-        ...PUBLIC_RUNTIME_BUILD ? [] : ["OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_REFRESH_TOKEN"]
-      ],
-      scopes: [GOOGLE_GMAIL_READONLY_SCOPE]
-    },
-    expiresInSeconds: 3600
-  },
-  ...PUBLIC_RUNTIME_BUILD ? [] : [
-    delegatedGoogleHandle({
-      handle: "gmail.business_ocu",
-      provider: "gmail",
-      accountRole: "business_ocu",
-      trustDomain: "secure_local",
-      capability: "gmail.email.sync",
-      scopes: [GOOGLE_GMAIL_READONLY_SCOPE],
-      impersonatedSubjectEnvNames: [
-        "OLYMPUS_CREDENTIAL_GMAIL_BUSINESS_OCU_SUBJECT",
-        "OLYMPUS_CREDENTIAL_GOOGLE_BUSINESS_SUBJECT"
-      ],
-      credentialJsonEnvNames: ["OLYMPUS_CREDENTIAL_GMAIL_BUSINESS_OCU_SERVICE_ACCOUNT_JSON"]
-    }),
-    {
-      handle: "gmail.personal.direct",
-      provider: "gmail",
-      accountRole: "personal",
-      trustDomain: "secure_local",
-      allowedCapabilities: ["gmail.email.sync"],
-      scopes: [GOOGLE_GMAIL_READONLY_SCOPE],
-      tokenEnvNames: [],
-      oauth2Refresh: {
-        tokenUrl: GOOGLE_OAUTH_TOKEN_URL,
-        clientIdEnvNames: [
-          "OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_DIRECT_OAUTH2_CLIENT_ID",
-          "OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_CLIENT_ID"
-        ],
-        clientSecretEnvNames: [
-          "OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_DIRECT_OAUTH2_CLIENT_SECRET",
-          "OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_CLIENT_SECRET"
-        ],
-        refreshTokenEnvNames: [
-          "OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_DIRECT_OAUTH2_REFRESH_TOKEN",
-          "OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_REFRESH_TOKEN"
-        ],
-        scopes: [GOOGLE_GMAIL_READONLY_SCOPE]
-      },
-      expiresInSeconds: 3600
-    }
-  ],
-  {
-    handle: "google_drive.personal",
-    provider: "google_drive",
-    accountRole: "personal",
-    trustDomain: "internal",
-    allowedCapabilities: ["google_drive.docs.sync"],
-    scopes: [GOOGLE_DRIVE_READONLY_SCOPE],
-    tokenEnvNames: [],
-    oauth2Refresh: {
-      tokenUrl: GOOGLE_OAUTH_TOKEN_URL,
-      clientIdEnvNames: [
-        "OLYMPUS_CREDENTIAL_GOOGLE_DRIVE_PERSONAL_OAUTH2_CLIENT_ID",
-        ...PUBLIC_RUNTIME_BUILD ? [] : ["OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_CLIENT_ID"]
-      ],
-      clientSecretEnvNames: [
-        "OLYMPUS_CREDENTIAL_GOOGLE_DRIVE_PERSONAL_OAUTH2_CLIENT_SECRET",
-        ...PUBLIC_RUNTIME_BUILD ? [] : ["OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_CLIENT_SECRET"]
-      ],
-      refreshTokenEnvNames: [
-        "OLYMPUS_CREDENTIAL_GOOGLE_DRIVE_PERSONAL_OAUTH2_REFRESH_TOKEN",
-        ...PUBLIC_RUNTIME_BUILD ? [] : ["OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_REFRESH_TOKEN"]
-      ],
-      scopes: [GOOGLE_DRIVE_READONLY_SCOPE]
-    },
-    expiresInSeconds: 3600
-  },
-  ...PUBLIC_RUNTIME_BUILD ? [] : [
-    delegatedGoogleHandle({
-      handle: "gmail.personal.delegated",
-      provider: "gmail",
-      accountRole: "personal",
-      trustDomain: "secure_local",
-      capability: "gmail.email.sync",
-      scopes: [GOOGLE_GMAIL_READONLY_SCOPE],
-      impersonatedSubjectEnvNames: [
-        "OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_SUBJECT",
-        "OLYMPUS_CREDENTIAL_GOOGLE_PERSONAL_SUBJECT"
-      ],
-      credentialJsonEnvNames: ["OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_SERVICE_ACCOUNT_JSON"]
-    }),
-    delegatedGoogleHandle({
-      handle: "gmail.business_ocu.delegated",
-      provider: "gmail",
-      accountRole: "business_ocu",
-      trustDomain: "secure_local",
-      capability: "gmail.email.sync",
-      scopes: [GOOGLE_GMAIL_READONLY_SCOPE],
-      impersonatedSubjectEnvNames: [
-        "OLYMPUS_CREDENTIAL_GMAIL_BUSINESS_OCU_SUBJECT",
-        "OLYMPUS_CREDENTIAL_GOOGLE_BUSINESS_SUBJECT"
-      ],
-      credentialJsonEnvNames: ["OLYMPUS_CREDENTIAL_GMAIL_BUSINESS_OCU_SERVICE_ACCOUNT_JSON"]
-    }),
-    delegatedGoogleHandle({
-      handle: "google_drive.personal.delegated",
-      provider: "google_drive",
-      accountRole: "personal",
-      trustDomain: "internal",
-      capability: "google_drive.docs.sync",
-      scopes: [GOOGLE_DRIVE_READONLY_SCOPE],
-      impersonatedSubjectEnvNames: [
-        "OLYMPUS_CREDENTIAL_GOOGLE_DRIVE_PERSONAL_SUBJECT",
-        "OLYMPUS_CREDENTIAL_GOOGLE_PERSONAL_SUBJECT"
-      ],
-      credentialJsonEnvNames: ["OLYMPUS_CREDENTIAL_GOOGLE_DRIVE_PERSONAL_SERVICE_ACCOUNT_JSON"]
-    }),
-    delegatedGoogleHandle({
-      handle: "google_calendar.personal.delegated",
-      provider: "google_calendar",
-      accountRole: "personal",
-      trustDomain: "secure_local",
-      capability: "google_calendar.events.read",
-      scopes: [GOOGLE_CALENDAR_READONLY_SCOPE],
-      impersonatedSubjectEnvNames: [
-        "OLYMPUS_CREDENTIAL_GOOGLE_CALENDAR_PERSONAL_SUBJECT",
-        "OLYMPUS_CREDENTIAL_GOOGLE_PERSONAL_SUBJECT"
-      ],
-      credentialJsonEnvNames: ["OLYMPUS_CREDENTIAL_GOOGLE_CALENDAR_PERSONAL_SERVICE_ACCOUNT_JSON"]
-    })
-  ],
-  {
-    handle: "readwise.personal",
-    provider: "readwise",
-    accountRole: "personal",
-    trustDomain: "internal",
-    allowedCapabilities: ["readwise.sync"],
-    scopes: ["readwise.export:read", "readwise.reader:read"],
-    tokenEnvNames: [
-      "OLYMPUS_CREDENTIAL_READWISE_PERSONAL_TOKEN",
-      ...PUBLIC_RUNTIME_BUILD ? [] : ["OLYMPUS_CREDENTIAL_READWISE_CASTOR_RUNTIME_TOKEN"],
-      "OLYMPUS_SOURCE_INDEX_READWISE_TOKEN",
-      "READWISE_TOKEN"
-    ],
-    expiresInSeconds: 3600
-  },
-  {
-    handle: "evernote.personal",
-    provider: "evernote",
-    accountRole: "personal",
-    trustDomain: "secure_local",
-    allowedCapabilities: ["evernote.notes.sync"],
-    scopes: ["read"],
-    tokenEnvNames: [],
-    expiresInSeconds: 3600
-  },
-  {
-    handle: "dropbox.personal",
-    provider: "dropbox",
-    accountRole: "personal",
-    trustDomain: "secure_local",
-    allowedCapabilities: ["dropbox.files.sync"],
-    scopes: ["files.metadata.read", "files.content.read", "sharing.read"],
-    tokenEnvNames: [
-      "OLYMPUS_CREDENTIAL_DROPBOX_PERSONAL_ACCESS_TOKEN",
-      "OLYMPUS_SOURCE_INDEX_DROPBOX_TOKEN",
-      "DROPBOX_ACCESS_TOKEN"
-    ],
-    oauth2Refresh: {
-      tokenUrl: "https://api.dropboxapi.com/oauth2/token",
-      clientIdEnvNames: [
-        "OLYMPUS_CREDENTIAL_DROPBOX_PERSONAL_OAUTH2_CLIENT_ID",
-        "OLYMPUS_CREDENTIAL_DROPBOX_PERSONAL_APP_KEY"
-      ],
-      clientSecretEnvNames: [
-        "OLYMPUS_CREDENTIAL_DROPBOX_PERSONAL_OAUTH2_CLIENT_SECRET",
-        "OLYMPUS_CREDENTIAL_DROPBOX_PERSONAL_APP_SECRET"
-      ],
-      refreshTokenEnvNames: [
-        "OLYMPUS_CREDENTIAL_DROPBOX_PERSONAL_OAUTH2_REFRESH_TOKEN",
-        "OLYMPUS_CREDENTIAL_DROPBOX_PERSONAL_REFRESH_TOKEN"
-      ],
-      scopes: ["files.metadata.read", "files.content.read", "sharing.read"]
-    },
-    expiresInSeconds: 3600
-  },
-  {
-    handle: "telegram.personal",
-    provider: "telegram",
-    sessionKind: "mtproto_session",
-    accountRole: "personal",
-    trustDomain: "secure_local",
-    allowedCapabilities: ["telegram.messages.sync"],
-    scopes: [],
-    tokenEnvNames: [],
-    statusEnvNames: [
-      "OLYMPUS_CREDENTIAL_TELEGRAM_PERSONAL_MTPROTO_SESSION_READY",
-      "OLYMPUS_CREDENTIAL_TELEGRAM_PERSONAL_TDLIB_SESSION_READY"
-    ],
-    expiresInSeconds: 3600,
-    backendState: {
-      kind: "mtproto_session",
-      mtprotoProfileId: "telegram_personal",
-      runtimeEndpointId: "telegram_local_telethon_reader",
-      library: "telethon",
-      leaseId: "telegram_personal_mtproto_readonly_lease",
-      backendLabel: "local_private:telegram_telethon_reader"
-    }
-  },
-  ...PUBLIC_RUNTIME_BUILD ? [] : [{
-    handle: "whatsapp.business",
-    provider: "whatsapp_business",
-    sessionKind: "webhook_token",
-    accountRole: "business",
-    trustDomain: "secure_local",
-    allowedCapabilities: ["whatsapp.business.messages.sync"],
-    scopes: ["whatsapp_business_messaging", "whatsapp_business_management"],
-    tokenEnvNames: [],
-    statusEnvNames: ["OLYMPUS_CREDENTIAL_WHATSAPP_BUSINESS_RUNTIME_READY"],
-    expiresInSeconds: 900,
-    backendState: {
-      kind: "webhook_token",
-      webhookIntegrationId: "twilio_whatsapp_business",
-      validationMode: "broker_verified_event",
-      verifierReference: "twilio_whatsapp_business_verifier",
-      leaseId: "twilio_whatsapp_business_webhook_lease",
-      backendLabel: "twilio:whatsapp_business_gateway"
-    }
-  }],
-  {
-    handle: "whatsapp.personal_local",
-    provider: "whatsapp_personal",
-    sessionKind: "local_app_database",
-    accountRole: "personal_local",
-    trustDomain: "secure_local",
-    allowedCapabilities: ["whatsapp.personal.messages.sync"],
-    scopes: [],
-    tokenEnvNames: [],
-    statusEnvNames: ["OLYMPUS_CREDENTIAL_WHATSAPP_PERSONAL_LOCAL_DB_READY"],
-    expiresInSeconds: 3600,
-    backendState: {
-      kind: "local_app_database",
-      databaseSourceId: "whatsapp_personal_local",
-      readerWorker: "whatsapp_local_reader",
-      databaseRole: "messages_readonly",
-      scopeLabel: "personal_messages",
-      backendLabel: "local_private:whatsapp_local_app_reader"
-    }
-  },
-  ...PUBLIC_RUNTIME_BUILD ? [] : [{
-    handle: "apple_messages.local",
-    provider: "apple_messages",
-    sessionKind: "local_app_database",
-    accountRole: "local",
-    trustDomain: "secure_local",
-    allowedCapabilities: ["apple_messages.messages.sync"],
-    scopes: [],
-    tokenEnvNames: [],
-    statusEnvNames: ["OLYMPUS_CREDENTIAL_APPLE_MESSAGES_LOCAL_DB_READY"],
-    expiresInSeconds: 3600,
-    backendState: {
-      kind: "local_app_database",
-      databaseSourceId: "apple_messages_local",
-      readerWorker: "apple_messages_reader",
-      databaseRole: "messages_readonly",
-      scopeLabel: "local_messages",
-      backendLabel: "local_private:apple_messages_reader"
-    }
-  }],
-  {
-    handle: "x.bookmarks.personal",
-    provider: "x",
-    accountRole: "personal",
-    trustDomain: "internal",
-    allowedCapabilities: ["x.bookmarks.sync"],
-    scopes: ["tweet.read", "users.read", "bookmark.read", "offline.access"],
-    tokenEnvNames: [
-      "OLYMPUS_CREDENTIAL_X_BOOKMARKS_PERSONAL_ACCESS_TOKEN",
-      "OLYMPUS_CREDENTIAL_X_BOOKMARKS_PERSONAL_TOKEN"
-    ],
-    oauth2Refresh: {
-      tokenUrl: "https://api.x.com/2/oauth2/token",
-      clientIdEnvNames: [
-        "OLYMPUS_CREDENTIAL_X_BOOKMARKS_PERSONAL_OAUTH2_CLIENT_ID",
-        "OLYMPUS_SOURCE_INDEX_X_OAUTH2_CLIENT_ID",
-        "X_OAUTH2_CLIENT_ID"
-      ],
-      clientSecretEnvNames: [
-        "OLYMPUS_CREDENTIAL_X_BOOKMARKS_PERSONAL_OAUTH2_CLIENT_SECRET",
-        "OLYMPUS_SOURCE_INDEX_X_OAUTH2_CLIENT_SECRET",
-        "X_OAUTH2_CLIENT_SECRET"
-      ],
-      refreshTokenEnvNames: [
-        "OLYMPUS_CREDENTIAL_X_BOOKMARKS_PERSONAL_OAUTH2_REFRESH_TOKEN",
-        "OLYMPUS_SOURCE_INDEX_X_OAUTH2_REFRESH_TOKEN",
-        "X_OAUTH2_REFRESH_TOKEN"
-      ],
-      scopes: ["tweet.read", "users.read", "bookmark.read", "offline.access"]
-    },
-    expiresInSeconds: 3600
-  },
-  ...PUBLIC_RUNTIME_BUILD ? [] : [
-    {
-      handle: "reflect.archive",
-      provider: "reflect",
-      sessionKind: "archive_path",
-      accountRole: "archive",
-      trustDomain: "internal",
-      allowedCapabilities: ["reflect.archive.import"],
-      scopes: [],
-      tokenEnvNames: [],
-      statusEnvNames: ["OLYMPUS_CREDENTIAL_REFLECT_ARCHIVE_READY"],
-      expiresInSeconds: 3600,
-      backendState: {
-        kind: "archive_path",
-        archiveRootAlias: "reflect_archive",
-        readerWorker: "archive_import_reader",
-        contentBounds: "approved_archive_root",
-        backendLabel: "local_private:archive_import"
-      }
-    },
-    {
-      handle: "roam.archive",
-      provider: "roam",
-      sessionKind: "archive_path",
-      accountRole: "archive",
-      trustDomain: "internal",
-      allowedCapabilities: ["roam.archive.import"],
-      scopes: [],
-      tokenEnvNames: [],
-      statusEnvNames: ["OLYMPUS_CREDENTIAL_ROAM_ARCHIVE_READY"],
-      expiresInSeconds: 3600,
-      backendState: {
-        kind: "archive_path",
-        archiveRootAlias: "roam_archive",
-        readerWorker: "archive_import_reader",
-        contentBounds: "approved_archive_root",
-        backendLabel: "local_private:archive_import"
-      }
-    },
-    {
-      handle: "evernote.archive",
-      provider: "evernote",
-      sessionKind: "archive_path",
-      accountRole: "archive",
-      trustDomain: "internal",
-      allowedCapabilities: ["evernote.archive.import"],
-      scopes: [],
-      tokenEnvNames: [],
-      statusEnvNames: ["OLYMPUS_CREDENTIAL_EVERNOTE_ARCHIVE_READY"],
-      expiresInSeconds: 3600,
-      backendState: {
-        kind: "archive_path",
-        archiveRootAlias: "evernote_archive",
-        readerWorker: "archive_import_reader",
-        contentBounds: "approved_archive_root",
-        backendLabel: "local_private:archive_import"
-      }
-    }
-  ]
-];
-var SERVICE_ACCOUNT_CREDENTIAL_HANDLES = new Set(DEFAULT_ENV_HANDLES.filter((definition) => definition.serviceAccountJwt !== undefined).map((definition) => definition.handle));
-var PROCESS_MINTED_SESSION_CACHE = new Map;
-var PROCESS_MINT_IN_FLIGHT = new Map;
-var PROCESS_MINT_FAILURE_BACKOFF = new Map;
-var OAUTH2_TOKEN_RESPONSE_LIMIT_BYTES = 64 * 1024;
-var TOKEN_UNISSUED_STATUSES = new Set([401, 403, 404, 405, 415, 429]);
-
-// src/workers/source-account-guard.ts
-var sourceExclusiveRunners = new Map;
-
-// src/workers/email-source/ingest-filter.ts
-var OTP_SUBJECT = new RegExp([
-  "verification code",
-  "security code",
-  "one[- ]?time (pass)?(word|code)",
-  "login code",
-  "sign[- ]?in code",
-  "access code",
-  "confirmation code",
-  "your (\\w+ )?code is",
-  "\\botp\\b",
-  "2fa code"
-].join("|"), "i");
-
-// src/core/boot-progress.ts
-import { existsSync as existsSync11, lstatSync as lstatSync6, mkdirSync as mkdirSync8, readdirSync, readFileSync as readFileSync13, realpathSync as realpathSync4, rmSync as rmSync6 } from "node:fs";
-import { basename as basename3, dirname as dirname13, isAbsolute as isAbsolute9, join as join16, resolve as resolve6 } from "node:path";
-var WRITE_INTERVAL_MS = 1000;
-var current2;
-var front;
-function reportFrontStoreOpened(now = Date.now) {
-  stepFront(true, now);
-}
-function stepFront(storeOpened, now) {
-  try {
-    if (!front)
-      return;
-    front.progress = {
-      ...front.progress,
-      updatedAt: new Date(now()).toISOString(),
-      completedStores: front.progress.completedStores + (storeOpened ? 1 : 0)
-    };
-    write(front, now(), false);
-  } catch {}
-}
-function reportBootStep(env, event, now = Date.now) {
-  try {
-    if (!current2 || bootProgressPath(env) !== bootProgressPath(current2.env))
-      return;
-    const phaseChanged = event.phase !== current2.progress.phase || event.completedStore === true;
-    current2.progress = {
-      ...current2.progress,
-      phase: event.phase,
-      updatedAt: new Date(now()).toISOString(),
-      completedStores: current2.progress.completedStores + (event.completedStore ? 1 : 0)
-    };
-    if (event.storeId)
-      current2.progress.storeId = event.storeId;
-    else
-      delete current2.progress.storeId;
-    write(current2, now(), phaseChanged);
-  } catch {}
-}
-function write(target, nowMs, force) {
-  if (!force && nowMs - target.lastWriteMs < WRITE_INTERVAL_MS)
-    return;
-  try {
-    const path = sharedDataPath(target.file, target.env);
-    mkdirSync8(dirname13(path), { recursive: true, mode: 448 });
-    writePrivateFileAtomicSync(path, `${JSON.stringify(target.progress)}
-`);
-    target.lastWriteMs = nowMs;
-  } catch {}
-}
-function bootProgressPath(env) {
-  return sharedDataPath("boot-progress", env);
-}
-var STORELESS_FOLDERS = new Set(["models", "backup-staging"]);
-
-// src/core/engine-heartbeat.ts
-var ENGINE_HEARTBEAT_SCHEMA = "olympus.engine-heartbeat.v1";
-var LOOP_TICK_MS = 250;
-var STEP_BYTES = 200;
-var LOOP_LAG_BUCKETS_MS = [10, 25, 50, 100, 200, 300, 500, 1000, 2000, 5000, 1e4];
-var beat;
-var HEARTBEAT_WORKER_SOURCE = `
-import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
-self.onmessage = ({ data }) => {
-  const { sab, path, pid, role, writeMs, startedAt, metrics, tickMs, budgetMs } = data;
-  const ints = new Int32Array(sab, 0, 8);
-  const bytes = new Uint8Array(sab, 32, ${STEP_BYTES});
-  const buckets = new Int32Array(sab, 32 + ${STEP_BYTES}, ${LOOP_LAG_BUCKETS_MS.length + 1});
-  const decoder = new TextDecoder();
-  let lastTick = -1, lastTickAt = Date.now(), lastChange = -1, stepSince = Date.now();
-  let maxLag = 0;
-  // A loop held for good never reaches its own freeze log. This thread says
-  // so while it lasts: at 10 s, at a minute, then every five minutes.
-  let saidAt = 0, heldSaid = 0;
-  const sayHeld = (now, blockedMs, step) => {
-    if (blockedMs < 10000) { if (heldSaid) console.error(new Date(now).toISOString() + ' [olympus:control-path] ' + role + ' loop turned again after ' + Math.round(heldSaid / 1000) + ' s or more'); heldSaid = 0; saidAt = 0; return; }
-    const due = heldSaid === 0 || (heldSaid < 60000 && blockedMs >= 60000) || now - saidAt >= 300000;
-    if (!due) return;
-    heldSaid = blockedMs; saidAt = now;
-    console.error(new Date(now).toISOString() + ' [olympus:control-path] ' + role + ' loop held for ' + Math.round(blockedMs / 1000) + ' s and still held; step: ' + (step || 'none said'));
-  };
-  const write = () => {
-    const now = Date.now();
-    const tick = Atomics.load(ints, 0);
-    if (tick !== lastTick) { lastTick = tick; lastTickAt = now; }
-    const change = Atomics.load(ints, 2);
-    if (change !== lastChange) { lastChange = change; stepSince = now; }
-    const length = Atomics.load(ints, 1);
-    const step = length > 0 ? decoder.decode(bytes.slice(0, length)) : undefined;
-    // The open interval matters too: a loop may still be frozen when the
-    // harness ends. The low 32 wall-clock bits wrap safely over this short run.
-    const openLag = metrics ? Math.max(0, ((now - Atomics.load(ints, 6)) >>> 0) - tickMs) : 0;
-    maxLag = Math.max(maxLag, openLag, Atomics.load(ints, 3) / 1000);
-    const body = { schema: '${ENGINE_HEARTBEAT_SCHEMA}', pid, role, startedAt, writtenAt: new Date(now).toISOString(),
-      ...(metrics ? { loop_lag: { max_ms: maxLag, over_budget: Atomics.load(ints, 4) + (openLag >= budgetMs ? 1 : 0), beats: Atomics.load(ints, 5), buckets: Array.from(buckets, (_, i) => Atomics.load(buckets, i)) } } : {}),
-      blockedMs: Math.max(0, now - lastTickAt - ${LOOP_TICK_MS}),
-      ...(step ? { step, stepSince: new Date(stepSince).toISOString() } : {}) };
-    sayHeld(now, body.blockedMs, step);
-    try {
-      const partial = path + '.' + pid + '.tmp';
-      writeFileSync(partial, JSON.stringify(body) + '\\n', { mode: 0o600 });
-      renameSync(partial, path);
-    } catch {}
-  };
-  try { mkdirSync(dirname(path), { recursive: true, mode: 0o700 }); } catch {}
-  write();
-  setInterval(write, writeMs);
-};
-`;
-function setEngineStep(step) {
-  if (!beat)
-    return;
-  const encoded = new TextEncoder().encode(step ?? "").slice(0, STEP_BYTES);
-  beat.bytes.set(encoded);
-  Atomics.store(beat.ints, 1, encoded.length);
-  Atomics.add(beat.ints, 2, 1);
-}
-var STARTUP_CAP_BASE_MS = 30 * 60000;
-
-// src/core/sqlite-migrations.ts
-var SQLITE_SCHEMA_VERSION_TABLE = "schema_version";
-var CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION = 1;
-var ADDITIVE_MIGRATIONS = new WeakSet;
-var NAME = "[A-Za-z_][A-Za-z0-9_]*";
-var NEW_TABLE = new RegExp(`^CREATE\\s+TABLE\\s+(IF\\s+NOT\\s+EXISTS\\s+)?${NAME}\\s*\\(`, "i");
-var NEW_INDEX = new RegExp(`^CREATE\\s+INDEX\\s+(IF\\s+NOT\\s+EXISTS\\s+)?${NAME}\\s+ON\\s+${NAME}\\s*\\(\\s*${NAME}(\\s+(ASC|DESC))?(\\s*,\\s*${NAME}(\\s+(ASC|DESC))?)*\\s*\\)$`, "i");
-var NEW_COLUMN = new RegExp(`^ALTER\\s+TABLE\\s+${NAME}\\s+ADD\\s+(COLUMN\\s+)?${NAME}(\\s+(TEXT|INTEGER|REAL|BLOB|NUMERIC))?(\\s+DEFAULT\\s+(NULL|-?[0-9]+(\\.[0-9]+)?|'[^']*'))?$`, "i");
-function isAdditiveMigration(migration) {
-  return ADDITIVE_MIGRATIONS.has(migration);
-}
-function currentStoreMigrations() {
-  return [
-    {
-      version: CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION,
-      name: "record_existing_v1_schema",
-      up() {}
-    }
-  ];
-}
-function assertSqliteSchemaCanOpen(db, storeId, knownVersion = CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION) {
-  const currentVersion = readSqliteSchemaVersion(db, storeId);
-  if (currentVersion > knownVersion && readSqliteCompatibleVersion(db, storeId) > knownVersion) {
-    throw new OperationError("config_error", `SQLite store "${storeId}" is at schema_version ${currentVersion}, but this Olympus build only knows schema_version ${knownVersion}.`, "Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.");
-  }
-}
-function runSqliteMigrations(db, storeId, migrations = currentStoreMigrations(), options = {}) {
-  const ordered = validateMigrations(migrations);
-  const targetVersion = options.knownVersion ?? ordered.at(-1)?.version ?? CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION;
-  const currentVersion = readSqliteSchemaVersion(db, storeId);
-  if (currentVersion > targetVersion) {
-    if (readSqliteCompatibleVersion(db, storeId) <= targetVersion) {
-      return { storeId, currentVersion, targetVersion, dryRun: options.dryRun === true, applied: [], pending: [] };
-    }
-    throw new OperationError("config_error", `SQLite store "${storeId}" is at schema_version ${currentVersion}, but this Olympus build only knows schema_version ${targetVersion}.`, "Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.");
-  }
-  const pending = ordered.filter((migration) => migration.version > currentVersion).map(({ version, name }) => ({ version, name }));
-  if (options.dryRun === true) {
-    return {
-      storeId,
-      currentVersion,
-      targetVersion,
-      dryRun: true,
-      applied: [],
-      pending
-    };
-  }
-  const env = options.env ?? process.env;
-  const report = options.report ?? ((event) => reportBootStep(env, event));
-  const log = options.log ?? ((line) => console.error(line));
-  report({ phase: "starting", storeId });
-  ensureSchemaVersionTable(db);
-  const applied = [];
-  if (pending.length > 0) {
-    const toVersion = pending.at(-1).version;
-    const label = `[storage] ${storeId} schema ${currentVersion} to ${toVersion}`;
-    const logged = currentVersion > 0;
-    if (logged)
-      log(`${label}: updating`);
-    report({ phase: "migrating", storeId });
-    setEngineStep(`updating ${storeId}`);
-    const migrateStarted = performance.now();
-    db.transaction(() => {
-      const lockedVersion = readSqliteSchemaVersion(db, storeId);
-      if (lockedVersion > targetVersion && readSqliteCompatibleVersion(db, storeId) <= targetVersion)
-        return;
-      if (lockedVersion > targetVersion) {
-        throw new OperationError("config_error", `SQLite store "${storeId}" is at schema_version ${lockedVersion}, but this Olympus build only knows schema_version ${targetVersion}.`, "Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.");
-      }
-      let compatible = storedCompatibleVersion(db, storeId) ?? lockedVersion;
-      for (const migration of ordered.filter((entry) => entry.version > lockedVersion)) {
-        migration.up(db);
-        if (!isAdditiveMigration(migration))
-          compatible = migration.version;
-        writeSqliteSchemaVersion(db, storeId, migration.version, compatible);
-        applied.push({ version: migration.version, name: migration.name });
-      }
-    }).immediate();
-    const migrateMs = Math.round(performance.now() - migrateStarted);
-    setEngineStep(undefined);
-    report({ phase: "starting", storeId, completedStore: true });
-    if (logged && applied.length > 0) {
-      log(`${label}: migrated in ${migrateMs} ms`);
-    }
-  }
-  return {
-    storeId,
-    currentVersion,
-    targetVersion,
-    dryRun: false,
-    applied,
-    pending: applied
-  };
-}
-function readSqliteSchemaVersion(db, storeId) {
-  if (!schemaVersionTableExists(db))
-    return 0;
-  const row = db.query(`SELECT version FROM ${SQLITE_SCHEMA_VERSION_TABLE} WHERE store_id = ?`).get(storeId);
-  return typeof row?.version === "number" && Number.isInteger(row.version) ? row.version : 0;
-}
-function sqliteSchemaUsable(db, storeId, knownVersion) {
-  const version = readSqliteSchemaVersion(db, storeId);
-  return version === knownVersion || version > knownVersion && readSqliteCompatibleVersion(db, storeId) <= knownVersion;
-}
-function readSqliteCompatibleVersion(db, storeId) {
-  return storedCompatibleVersion(db, storeId) ?? readSqliteSchemaVersion(db, storeId);
-}
-function storedCompatibleVersion(db, storeId) {
-  if (!schemaVersionTableExists(db) || !compatibleVersionColumnExists(db))
-    return;
-  const row = db.query(`SELECT compatible_version FROM ${SQLITE_SCHEMA_VERSION_TABLE} WHERE store_id = ?`).get(storeId);
-  return typeof row?.compatible_version === "number" && Number.isInteger(row.compatible_version) ? row.compatible_version : undefined;
-}
-function compatibleVersionColumnExists(db) {
-  return db.query(`SELECT COUNT(*) AS n FROM pragma_table_info('${SQLITE_SCHEMA_VERSION_TABLE}') WHERE name = 'compatible_version'`).get().n > 0;
-}
-function ensureSchemaVersionTable(db) {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS ${SQLITE_SCHEMA_VERSION_TABLE} (
-      store_id TEXT PRIMARY KEY,
-      version INTEGER NOT NULL,
-      applied_at TEXT NOT NULL,
-      compatible_version INTEGER
-    );
-  `);
-  if (compatibleVersionColumnExists(db))
-    return;
-  try {
-    db.exec(`ALTER TABLE ${SQLITE_SCHEMA_VERSION_TABLE} ADD COLUMN compatible_version INTEGER`);
-  } catch (error) {
-    if (!compatibleVersionColumnExists(db))
-      throw error;
-  }
-}
-function writeSqliteSchemaVersion(db, storeId, version, compatible) {
-  db.query(`
-    INSERT INTO ${SQLITE_SCHEMA_VERSION_TABLE} (store_id, version, applied_at, compatible_version)
-    VALUES (?, ?, ?, ?)
-    ON CONFLICT(store_id) DO UPDATE SET
-      version = excluded.version,
-      applied_at = excluded.applied_at,
-      compatible_version = excluded.compatible_version
-  `).run(storeId, version, new Date().toISOString(), compatible);
-}
-function schemaVersionTableExists(db) {
-  const row = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(SQLITE_SCHEMA_VERSION_TABLE);
-  return row?.name === SQLITE_SCHEMA_VERSION_TABLE;
-}
-function validateMigrations(migrations) {
-  const ordered = [...migrations].sort((left, right) => left.version - right.version);
-  let previous = 0;
-  for (const migration of ordered) {
-    if (!Number.isInteger(migration.version) || migration.version <= 0) {
-      throw new OperationError("config_error", `SQLite migration "${migration.name}" must use a positive integer version.`);
-    }
-    if (migration.version === previous) {
-      throw new OperationError("config_error", `Duplicate SQLite migration version ${migration.version}.`);
-    }
-    previous = migration.version;
-  }
-  return ordered;
-}
-
-// src/core/sqlite-store.ts
-import { existsSync as existsSync12 } from "node:fs";
-function closeSqliteStore(db, options = {}) {
-  if (options.checkpoint ?? !checkpointsOffLoop) {
-    try {
-      db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
-    } catch {}
-  } else if (openCloseReader && !options.readOnly && db.filename && existsSync12(`${db.filename}-wal`)) {
-    let reader;
-    try {
-      reader = openCloseReader(db.filename);
-    } catch {}
-    try {
-      db.close();
-    } finally {
-      reader?.close();
-    }
-    return;
-  }
-  db.close();
-}
-var checkpointsOffLoop = false;
-var openCloseReader;
-var checkpointFiles = new Map;
-function loopWalAutocheckpointPragma(dbPath, kind = "store") {
-  if (!checkpointsOffLoop)
-    return "";
-  if (dbPath && dbPath !== ":memory:" && !checkpointFiles.has(dbPath)) {
-    checkpointFiles.set(dbPath, { label: `${kind}-open-${checkpointFiles.size + 1}`, dbPath, truncateIdleWal: kind === "tier-ledger" });
-  }
-  return " PRAGMA wal_autocheckpoint = 0;";
-}
-
-// src/core/store-write-guard.ts
-class FrontStoreWriteError extends Error {
-  code = "front_store_write";
-  constructor(kind) {
-    super(`The engine front opened a ${kind} for writing; only the background process writes it.`);
-    this.name = "FrontStoreWriteError";
-  }
-}
-var forbidden = false;
-function writableStoreOpensForbidden() {
-  return forbidden;
-}
-function assertWritableStoreOpenAllowed(kind, dbPath) {
-  if (forbidden && dbPath !== ":memory:")
-    throw new FrontStoreWriteError(kind);
-}
-
-// src/core/people-index.ts
-var PEOPLE_LINK_REASON_TEXT = Object.freeze({
-  owner: "You on every source",
-  phone: "Linked by phone number",
-  email: "Linked by email address",
-  contacts: "Linked by your contacts",
-  name_and_shared_conversation: "Linked by name and a shared conversation",
-  name_and_shared_group: "Linked by name and shared group chat",
-  merged_by_owner: "Merged by you"
-});
-var PEOPLE_AUTHORED_FAMILIES = new Set(["chat", "email"]);
-
-// src/core/classification-signals.ts
-var CONTENT_SCOPE_METADATA_KEY = "contentScope";
-var CONTENT_SCOPE_NAMES_ONLY = "names_only";
-function itemContentKeptNamesOnly(item) {
-  return item.metadata[CONTENT_SCOPE_METADATA_KEY] === CONTENT_SCOPE_NAMES_ONLY;
-}
-
-// src/core/child-item-id.ts
-var CHILD_ITEM_ID_SEPARATOR = "#child:";
-
-// src/workers/google-connectors/gmail.ts
-var GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private";
-var GMAIL_PROVIDER = "gmail";
-// src/workers/live-source-cadence.ts
-var LIVE_NEW_ITEMS_INTERVAL_MS = 5 * 60000;
-
-// src/workers/google-connectors/gmail-live-control.ts
-var GMAIL_STORE_PULL_FRESHNESS_THRESHOLD_MS = 2 * 60 * 60000;
-var GMAIL_STORE_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
-var GMAIL_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
-var GMAIL_DAILY_REQUEST_GUARD_REASON = "gmail_daily_api_request_guard";
-// src/core/embedding-sweep-idle.ts
-var EMBEDDING_HOLD_REASONS = [
-  "held_for_judgment",
-  "held_after_decision",
-  "held_while_text_is_unread",
-  "held_while_moving",
-  "held_for_other_reasons"
-];
-var INVENTORY_FIELDS = [
-  "pending_chunks",
-  "eligible_chunks",
-  "skipped_held_chunks",
-  "skipped_moving_chunks",
-  "skipped_hidden_chunks",
-  "skipped_metadata_chunks",
-  "skipped_failed_chunks",
-  "skipped_out_of_scope_chunks",
-  "skipped_held_recent_chunks",
-  "skipped_out_of_scope_recent_chunks",
-  "skipped_private_tier_chunks",
-  "skipped_retired_chunks",
-  "inventory_complete",
-  "inventory_ms",
-  ...EMBEDDING_HOLD_REASONS.flatMap((reason) => [`${reason}_chunks`, `${reason}_items`])
-];
-
-// src/workers/engine-split/sqlite-memory.ts
-var stores = new Set;
-var byDatabase = new WeakMap;
-function trackSqliteStoreMemory(db, hasTempStore) {
-  const store = { db: new WeakRef(db), hasTempStore };
-  byDatabase.set(db, store);
-  stores.add(store);
-}
-function untrackSqliteStoreMemory(db) {
-  const store = byDatabase.get(db);
-  if (store)
-    stores.delete(store);
-  byDatabase.delete(db);
-}
-
-// src/core/source-index/read-progress.ts
-import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
-var progress2 = new AsyncLocalStorage7;
-function noteSourceIndexReadProgress() {
-  const report = progress2.getStore();
-  if (!report)
-    return;
-  report();
-}
-function currentSourceIndexReadProgress() {
-  return progress2.getStore();
-}
-
-// src/core/source-size-limits.ts
-import { createHash as createHash3 } from "node:crypto";
-
-// src/core/limit-stops.ts
-var limits = new Map;
-function registerLimit(input) {
-  const prior = limits.get(input.id);
-  if (prior && Object.keys({ ...prior, ...input }).some((key) => prior[key] !== input[key])) {
-    throw new Error(`Limit already registered differently: ${input.id}`);
-  }
-  limits.set(input.id, Object.freeze({ ...input }));
-}
-var stopHooks;
-var stopGenerations = new Map;
-function createLimitStopReporter() {
-  const reported = new Map;
-  return {
-    report(stop) {
-      const key = JSON.stringify([stop.id, stop.subject]);
-      const signature = JSON.stringify([{ ...stop, since: undefined }, stopGenerations.get(key) ?? 0]);
-      if (stopHooks && reported.get(key) !== signature) {
-        stopHooks.record(stop);
-        reported.set(key, signature);
-      }
-    },
-    clear(id, subject) {
-      const key = JSON.stringify([id, subject]);
-      if (stopHooks && reported.get(key) !== "") {
-        stopHooks.clear(id, subject);
-        reported.set(key, "");
-      }
-    }
-  };
-}
-
-// src/core/source-size-limits.ts
-var SOURCE_FILE_SIZE_CEILING = 256 * 1024 * 1024;
-var SOURCE_SIZE_LIMITS = [
-  { id: "dropbox.max_file_bytes", subject: "dropbox.files", providers: ["dropbox"], defaultBytes: 8000000, ceilingBytes: SOURCE_FILE_SIZE_CEILING },
-  { id: "local_files.max_file_bytes", subject: "local.files", providers: ["local_files"], defaultBytes: 64000000, ceilingBytes: SOURCE_FILE_SIZE_CEILING },
-  { id: "telegram.media_quota", subject: "telegram.messages", providers: ["telegram", "telegram.media"], bytesOnly: true, defaultBytes: 64 * 1024 * 1024, ceilingBytes: SOURCE_FILE_SIZE_CEILING }
-];
-registerLimit({ id: "dropbox.max_file_bytes", kind: "size", scope: "extraction", label: "Dropbox file size", unit: "bytes", continue: "raise" });
-registerLimit({ id: "local_files.max_file_bytes", kind: "size", scope: "extraction", label: "Local file size", unit: "bytes", continue: "raise" });
-registerLimit({ id: "telegram.media_quota", kind: "size", scope: "extraction", label: "Telegram media read size", unit: "bytes", continue: "raise" });
-function sizeHeldItemKey(ref) {
-  return createHash3("sha256").update(JSON.stringify([ref.provider, ref.accountScope, ref.providerItemId, ref.localItemId ?? "", ref.sourceVersion ?? "", ref.contentHash ?? ""])).digest("hex");
-}
-
-// src/workers/connector-store/sqlite-mmap.ts
-var SQLITE_MMAP_BYTES = 2147418112;
-function sqliteMmapPolicy(env = process.env) {
-  const setting = env.OLYMPUS_SQLITE_MMAP;
-  if (setting === "off")
-    return { enabled: false, reason: "OLYMPUS_SQLITE_MMAP=off" };
-  if (process.platform !== "linux")
-    return { enabled: false, reason: "Linux only" };
-  if (setting === "on")
-    return { enabled: true, reason: "OLYMPUS_SQLITE_MMAP=on" };
-  return { enabled: false, reason: "default" };
-}
-function sqliteMmapEnabled(env = process.env) {
-  return sqliteMmapPolicy(env).enabled;
-}
-function sqliteMmapWorkerSource(source) {
-  const pragma = sqliteMmapEnabled() ? `
-    try { db.exec('PRAGMA mmap_size = ${SQLITE_MMAP_BYTES}'); }
-    catch { console.warn('[olympus] SQLite worker could not enable the file map.'); }
-  ` : "";
-  return source.replace("/*olympus-mmap-pragma*/", pragma);
-}
-function applySqliteMmap(db, env = process.env) {
-  if (!sqliteMmapEnabled(env))
-    return;
-  try {
-    db.exec(`PRAGMA mmap_size = ${SQLITE_MMAP_BYTES}`);
-  } catch {}
-}
-
-// src/workers/connector-store/store-totals.ts
-var WALK_OWED_LATER = -1;
-var WALK_OWED_NOW = -2;
-var STORE_TOTALS_TRIGGERS = [
-  "connector_store_totals_item_insert",
-  "connector_store_totals_item_delete",
-  "connector_store_totals_item_tombstone",
-  "connector_store_totals_chunk_insert",
-  "connector_store_totals_chunk_delete",
-  "connector_store_totals_vector_insert",
-  "connector_store_totals_vector_delete",
-  "connector_store_totals_vector_model",
-  "connector_store_totals_sync_insert",
-  "connector_store_totals_sync_delete",
-  ...["items", "chunks", "chunk_embeddings", "sync_runs"].flatMap((table) => ["insert", "update", "delete"].map((op) => `connector_store_totals_writes_${table}_${op}`))
-];
-var STORE_TOTALS_WRITES = "writes";
-var bump = (name, by) => `
-  INSERT INTO store_totals (name, n) VALUES (${name}, ${by})
-    ON CONFLICT(name) DO UPDATE SET n = n + excluded.n;`;
-function createStoreTotals(db, nonSyncConnectorsSql) {
-  const owed = !storeTotalsInstalled(db);
-  const real = (row) => `${row}.connector_id NOT IN ${nonSyncConnectorsSql}`;
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS store_totals (
-      name TEXT PRIMARY KEY,
-      n INTEGER NOT NULL
-    ) WITHOUT ROWID;
-    CREATE TABLE IF NOT EXISTS store_totals_state (
-      id INTEGER PRIMARY KEY CHECK (id = 1),
-      reconciled_at TEXT NOT NULL,
-      drift INTEGER NOT NULL
-    );
-    CREATE TRIGGER IF NOT EXISTS connector_store_totals_item_insert AFTER INSERT ON items BEGIN
-      ${bump("CASE WHEN NEW.tombstoned = 0 THEN 'items' ELSE 'tombstoned_items' END", "1")}
-    END;
-    CREATE TRIGGER IF NOT EXISTS connector_store_totals_item_delete AFTER DELETE ON items BEGIN
-      ${bump("CASE WHEN OLD.tombstoned = 0 THEN 'items' ELSE 'tombstoned_items' END", "-1")}
-    END;
-    CREATE TRIGGER IF NOT EXISTS connector_store_totals_item_tombstone AFTER UPDATE OF tombstoned ON items
-      WHEN (OLD.tombstoned = 0) <> (NEW.tombstoned = 0) BEGIN
-      ${bump("CASE WHEN OLD.tombstoned = 0 THEN 'items' ELSE 'tombstoned_items' END", "-1")}
-      ${bump("CASE WHEN NEW.tombstoned = 0 THEN 'items' ELSE 'tombstoned_items' END", "1")}
-    END;
-    CREATE TRIGGER IF NOT EXISTS connector_store_totals_chunk_insert AFTER INSERT ON chunks BEGIN
-      ${bump("'chunks'", "1")}
-    END;
-    CREATE TRIGGER IF NOT EXISTS connector_store_totals_chunk_delete AFTER DELETE ON chunks BEGIN
-      ${bump("'chunks'", "-1")}
-    END;
-    CREATE TRIGGER IF NOT EXISTS connector_store_totals_vector_insert AFTER INSERT ON chunk_embeddings BEGIN
-      ${bump("'vectors:' || NEW.model_id", "1")}
-    END;
-    CREATE TRIGGER IF NOT EXISTS connector_store_totals_vector_delete AFTER DELETE ON chunk_embeddings BEGIN
-      ${bump("'vectors:' || OLD.model_id", "-1")}
-    END;
-    CREATE TRIGGER IF NOT EXISTS connector_store_totals_vector_model AFTER UPDATE OF model_id ON chunk_embeddings
-      WHEN OLD.model_id <> NEW.model_id BEGIN
-      ${bump("'vectors:' || OLD.model_id", "-1")}
-      ${bump("'vectors:' || NEW.model_id", "1")}
-    END;
-    CREATE TRIGGER IF NOT EXISTS connector_store_totals_sync_insert AFTER INSERT ON sync_runs WHEN ${real("NEW")} BEGIN
-      ${bump("'sync_runs'", "1")}
-    END;
-    CREATE TRIGGER IF NOT EXISTS connector_store_totals_sync_delete AFTER DELETE ON sync_runs WHEN ${real("OLD")} BEGIN
-      ${bump("'sync_runs'", "-1")}
-    END;
-  `);
-  for (const table of ["items", "chunks", "chunk_embeddings", "sync_runs"]) {
-    for (const op of ["insert", "update", "delete"]) {
-      db.exec(`CREATE TRIGGER IF NOT EXISTS connector_store_totals_writes_${table}_${op} AFTER ${op.toUpperCase()} ON ${table} BEGIN
-        ${bump(`'${STORE_TOTALS_WRITES}'`, "1")}
-      END;`);
-    }
-  }
-  if (owed)
-    db.query("UPDATE store_totals_state SET drift = ? WHERE id = 1").run(WALK_OWED_NOW);
-}
-function storeTotalsInstalled(db) {
-  if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'store_totals_state'").get())
-    return false;
-  const row = db.query(`SELECT COUNT(*) AS n FROM sqlite_master
-    WHERE (type = 'table' AND name IN ('store_totals', 'store_totals_state'))
-      OR (type = 'trigger' AND name IN (SELECT value FROM json_each(?)))`).get(JSON.stringify(STORE_TOTALS_TRIGGERS));
-  return row.n === 2 + STORE_TOTALS_TRIGGERS.length;
-}
-function readStoreTotals(db) {
-  const state = db.query("SELECT reconciled_at, drift FROM store_totals_state WHERE id = 1").get();
-  if (!state)
-    return;
-  const rows = db.query("SELECT name, n FROM store_totals").all();
-  const totals = storeTotalsFromRows(rows, state.reconciled_at);
-  if (state.drift === WALK_OWED_NOW || rows.some(({ name, n }) => name !== STORE_TOTALS_WRITES && n < 0))
-    totals.walkOwed = "now";
-  else if (state.drift === WALK_OWED_LATER)
-    totals.walkOwed = "later";
-  return totals;
-}
-function storeTotalsFromRows(rows, reconciledAt) {
-  const totals = { items: 0, tombstonedItems: 0, chunks: 0, syncRuns: 0, vectorsByModel: {}, reconciledAt };
-  for (const { name, n } of rows) {
-    const value = Number(n);
-    if (name === "items")
-      totals.items = value;
-    else if (name === "tombstoned_items")
-      totals.tombstonedItems = value;
-    else if (name === "chunks")
-      totals.chunks = value;
-    else if (name === "sync_runs")
-      totals.syncRuns = value;
-    else if (name.startsWith("vectors:") && value !== 0)
-      totals.vectorsByModel[name.slice("vectors:".length)] = value;
-  }
-  return totals;
-}
-var STORE_TOTALS_WALK_KEYS = 20000;
-function* storeTotalsWalkSteps(nonSyncConnectorsSql, pageKeys = STORE_TOTALS_WALK_KEYS) {
-  const start = yield { sql: `SELECT
-      (SELECT MAX(item_pk) FROM items) AS items,
-      (SELECT MAX(chunk_pk) FROM chunks) AS chunks,
-      (SELECT MAX(rowid) FROM sync_runs) AS runs,
-      (SELECT n FROM store_totals WHERE name = '${STORE_TOTALS_WRITES}') AS writes,
-      (SELECT json_group_object(name, n) FROM store_totals) AS kept_json`, params: [], mode: "get" };
-  const count = { items: 0, tombstoned_items: 0, chunks: 0, sync_runs: 0, vectors_json: null, kept_json: start.kept_json };
-  const vectors = new Map;
-  const pages = (last) => {
-    const out = [];
-    for (let lo = 0;lo < Number(last ?? 0); lo += pageKeys)
-      out.push([lo, Math.min(lo + pageKeys, Number(last))]);
-    return out;
-  };
-  for (const [lo, hi] of pages(start.items)) {
-    const row = yield { sql: `SELECT COALESCE(SUM(tombstoned = 0), 0) AS live, COALESCE(SUM(tombstoned <> 0), 0) AS gone
-      FROM items WHERE item_pk > ? AND item_pk <= ?`, params: [lo, hi], mode: "get" };
-    count.items += Number(row.live);
-    count.tombstoned_items += Number(row.gone);
-  }
-  for (const [lo, hi] of pages(start.chunks)) {
-    count.chunks += Number((yield { sql: "SELECT COUNT(*) AS n FROM chunks WHERE chunk_pk > ? AND chunk_pk <= ?", params: [lo, hi], mode: "get" }).n);
-    for (const row of yield {
-      sql: `SELECT model_id, COUNT(*) AS n FROM chunk_embeddings WHERE chunk_pk > ? AND chunk_pk <= ? GROUP BY model_id`,
-      params: [lo, hi],
-      mode: "all"
-    }) {
-      vectors.set(row.model_id, (vectors.get(row.model_id) ?? 0) + Number(row.n));
-    }
-  }
-  for (const [lo, hi] of pages(start.runs)) {
-    count.sync_runs += Number((yield {
-      sql: `SELECT COUNT(*) AS n FROM sync_runs WHERE rowid > ? AND rowid <= ? AND connector_id NOT IN ${nonSyncConnectorsSql}`,
-      params: [lo, hi],
-      mode: "get"
-    }).n);
-  }
-  count.vectors_json = JSON.stringify(Object.fromEntries(vectors));
-  const end = yield { sql: `SELECT n AS writes FROM store_totals WHERE name = '${STORE_TOTALS_WRITES}'`, params: [], mode: "get" };
-  return { count, quiet: Number(end?.writes ?? 0) === Number(start.writes ?? 0) };
-}
-function applyStoreTotalsCount(db, count, nowIso, options = {}) {
-  const counted = new Map([
-    ["items", Number(count.items)],
-    ["tombstoned_items", Number(count.tombstoned_items)],
-    ["chunks", Number(count.chunks)],
-    ["sync_runs", Number(count.sync_runs)]
-  ]);
-  for (const [model, n] of Object.entries(JSON.parse(count.vectors_json ?? "{}")))
-    counted.set(`vectors:${model}`, Number(n));
-  const keptThen = new Map(Object.entries(JSON.parse(count.kept_json ?? "{}")).map(([k, v]) => [k, Number(v)]));
-  let drift = 0;
-  db.transaction(() => {
-    const keptNow = new Map(db.query("SELECT name, n FROM store_totals").all().map((row) => [row.name, Number(row.n)]));
-    const names = new Set([...counted.keys(), ...keptThen.keys(), ...keptNow.keys()]);
-    const write = db.query("INSERT INTO store_totals (name, n) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET n = excluded.n");
-    const remove = db.query("DELETE FROM store_totals WHERE name = ?");
-    names.delete(STORE_TOTALS_WRITES);
-    for (const name of names) {
-      const since = (keptNow.get(name) ?? 0) - (keptThen.get(name) ?? 0);
-      const exact = (counted.get(name) ?? 0) + since;
-      drift += Math.abs((keptNow.get(name) ?? 0) - exact);
-      if (exact === 0 && name.startsWith("vectors:"))
-        remove.run(name);
-      else
-        write.run(name, exact);
-    }
-    db.query(`INSERT INTO store_totals_state (id, reconciled_at, drift) VALUES (1, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET reconciled_at = excluded.reconciled_at, drift = excluded.drift`).run(nowIso, options.exact === false ? WALK_OWED_LATER : drift);
-  })();
-  return drift;
-}
-var STORE_TOTALS_QUIET_MS = 60 * 60000;
-function deferStoreTotalsWalk(db) {
-  db.query("UPDATE store_totals_state SET drift = ? WHERE id = 1").run(WALK_OWED_LATER);
-}
-function readStoreWriteSequence(db) {
-  const row = db.query("SELECT n FROM store_totals WHERE name = ?").get(STORE_TOTALS_WRITES);
-  return row ? Number(row.n) : undefined;
-}
-
 // src/workers/source-index/embeddings.ts
 import { Buffer as Buffer2 } from "node:buffer";
-import { AsyncLocalStorage as AsyncLocalStorage8 } from "node:async_hooks";
-import { createHash as createHash4 } from "node:crypto";
+import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
+import { createHash as createHash3 } from "node:crypto";
 import { lookup as lookup2 } from "node:dns/promises";
 import { request as httpsRequest } from "node:https";
 import { isIP as isIP2 } from "node:net";
@@ -11457,7 +9982,7 @@ function contaminatedEmbeddingEpoch(modelId, epochId) {
 }
 
 // src/workers/source-index/embeddings.ts
-var priorityQueryEmbedding = new AsyncLocalStorage8;
+var priorityQueryEmbedding = new AsyncLocalStorage7;
 function priorityQueryEmbeddingRequested() {
   return priorityQueryEmbedding.getStore() === true;
 }
@@ -12269,1091 +10794,2375 @@ function normalizeOutputDimensionality(value) {
   return value;
 }
 function hashString(value) {
-  return createHash4("sha256").update(value).digest("hex");
+  return createHash3("sha256").update(value).digest("hex");
 }
 
-// src/workers/source-index/vector-digest.ts
-function encodeVectorDigest(vector) {
-  const size = Math.min(256, vector.length);
-  const bytes = new Uint8Array(size + 4);
-  let norm = 0;
-  let max = 0;
-  for (let i = 0;i < size; i++) {
-    const value = Number.isFinite(vector[i]) ? vector[i] : 0;
-    norm += value * value;
-    max = Math.max(max, Math.abs(value));
-  }
-  const scale = norm > 0 ? max / Math.sqrt(norm) / 127 : 0;
-  new DataView(bytes.buffer).setFloat32(0, scale, true);
-  const signed = new Int8Array(bytes.buffer, 4);
-  for (let i = 0;i < size; i++)
-    signed[i] = max > 0 ? Math.round((vector[i] || 0) / max * 127) : 0;
-  return bytes;
-}
-function scoreVectorDigest(query, document) {
-  if (query.length !== document.length || query.length < 4)
-    return -Infinity;
-  const q = new Int8Array(query.buffer, query.byteOffset + 4, query.length - 4);
-  const d = new Int8Array(document.buffer, document.byteOffset + 4, document.length - 4);
-  let dot = 0;
-  for (let i = 0;i < q.length; i++)
-    dot += q[i] * d[i];
-  return dot * new DataView(query.buffer, query.byteOffset, 4).getFloat32(0, true) * new DataView(document.buffer, document.byteOffset, 4).getFloat32(0, true);
-}
+// src/workers/source-index/built-in-embedding/provider.ts
+import { isMainThread as isMainThread5 } from "node:worker_threads";
+import { createHash as createHash5 } from "node:crypto";
+import { readFileSync as readFileSync16 } from "node:fs";
+import { availableParallelism } from "node:os";
+import { dirname as dirname16, join as join20 } from "node:path";
 
-class VectorDigestHeap {
-  pks = [];
-  scores = [];
-  get length() {
-    return this.pks.length;
-  }
-  append(pk, score) {
-    this.pks.push(pk);
-    this.scores.push(score);
-  }
-  better(a, b) {
-    return this.scores[a] > this.scores[b] || this.scores[a] === this.scores[b] && this.pks[a] < this.pks[b];
-  }
-  swap(a, b) {
-    [this.pks[a], this.pks[b]] = [this.pks[b], this.pks[a]];
-    [this.scores[a], this.scores[b]] = [this.scores[b], this.scores[a]];
-  }
-  siftDown(index) {
-    while (2 * index + 1 < this.length) {
-      let child = 2 * index + 1;
-      if (child + 1 < this.length && this.better(child + 1, child))
-        child++;
-      if (!this.better(child, index))
-        return;
-      this.swap(index, child);
-      index = child;
-    }
-  }
-  peekScore() {
-    return this.length ? this.scores[0] : -Infinity;
-  }
-  pop() {
-    const pk = this.pks[0];
-    const last = this.length - 1;
-    this.swap(0, last);
-    this.pks.pop();
-    this.scores.pop();
-    if (this.length)
-      this.siftDown(0);
-    return pk;
-  }
-}
+// src/core/media-cache.ts
+import { createHash as createHash4, randomUUID as randomUUID6 } from "node:crypto";
+import {
+  chmodSync as chmodSync3,
+  closeSync as closeSync7,
+  existsSync as existsSync12,
+  fsyncSync as fsyncSync2,
+  mkdirSync as mkdirSync8,
+  lstatSync as lstatSync6,
+  openSync as openSync7,
+  readFileSync as readFileSync13,
+  readdirSync,
+  realpathSync as realpathSync5,
+  renameSync as renameSync5,
+  rmSync as rmSync6,
+  rmdirSync,
+  statSync as statSync9,
+  writeFileSync as writeFileSync6
+} from "node:fs";
+import { basename as basename4, dirname as dirname14, isAbsolute as isAbsolute10, join as join17, resolve as resolve7 } from "node:path";
 
-// src/workers/connector-store/vector-digest.ts
-function createVectorDigestSchema(db) {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS chunk_vector_digest (
-      chunk_pk INTEGER PRIMARY KEY,
-      model_id TEXT NOT NULL,
-      item_pk INTEGER NOT NULL,
-      account_scope TEXT,
-      digest BLOB NOT NULL,
-      FOREIGN KEY(chunk_pk) REFERENCES chunks(chunk_pk) ON DELETE CASCADE
-    );
-    -- Per-model store metadata: physical rowid cursor resumes without the
-    -- random primary-key-index reads that made the old lane IO-bound.
-    CREATE TABLE IF NOT EXISTS chunk_vector_digest_meta (
-      model_id TEXT PRIMARY KEY, cursor_rowid INTEGER NOT NULL, completed INTEGER NOT NULL
-    );
-    CREATE TRIGGER IF NOT EXISTS connector_store_vector_digest_delete
-    AFTER DELETE ON chunk_embeddings BEGIN
-      DELETE FROM chunk_vector_digest WHERE chunk_pk = OLD.chunk_pk AND model_id = OLD.model_id;
-    END;
-    CREATE TRIGGER IF NOT EXISTS connector_store_vector_digest_account
-    AFTER UPDATE OF account_scope ON items WHEN OLD.account_scope IS NOT NEW.account_scope BEGIN
-      UPDATE chunk_vector_digest SET account_scope = NEW.account_scope
-        WHERE chunk_pk IN (SELECT chunk_pk FROM chunks WHERE item_pk = NEW.item_pk);
-    END;
-  `);
-}
-function vectorDigestState(db, modelId) {
-  const row = db.query("SELECT cursor_rowid, completed FROM chunk_vector_digest_meta WHERE model_id = ?").get(modelId);
-  return { cursorRowid: row?.cursor_rowid ?? 0, completed: row?.completed === 1 };
-}
-function writeVectorDigest(db, chunkPk, modelId, itemPk, embedding) {
-  db.query(`UPDATE chunk_vector_digest_meta SET completed = 0, cursor_rowid = 0
-    WHERE model_id = (SELECT model_id FROM chunk_vector_digest WHERE chunk_pk = ? AND model_id <> ?)`).run(chunkPk, modelId);
-  db.query(`INSERT INTO chunk_vector_digest(chunk_pk, model_id, item_pk, account_scope, digest)
-    SELECT ?, ?, ?, account_scope, ? FROM items WHERE item_pk = ?
-    ON CONFLICT(chunk_pk) DO UPDATE SET model_id = excluded.model_id,
-      item_pk = excluded.item_pk, account_scope = excluded.account_scope, digest = excluded.digest`).run(chunkPk, modelId, itemPk, encodeVectorDigest(decodeEmbedding(embedding)), itemPk);
-  db.query(`INSERT OR IGNORE INTO chunk_vector_digest_meta(model_id, cursor_rowid, completed)
-    SELECT ?, 0, NOT EXISTS(
-      SELECT 1 FROM chunk_embeddings WHERE model_id = ? AND chunk_pk <> ? LIMIT 1
-    )`).run(modelId, modelId, chunkPk);
-}
-function vectorDigestSourceQuery(cursorRowid, maxRows) {
-  if (!Number.isInteger(maxRows) || maxRows < 1 || maxRows > 256)
-    throw new Error("Vector digest slice must contain 1 to 256 rows.");
-  return {
-    sql: `SELECT rowid, chunk_pk, model_id, item_pk, embedding, content_hash, embedded_at FROM chunk_embeddings
-      WHERE rowid > ? ORDER BY rowid LIMIT ?`,
-    params: [cursorRowid, maxRows]
-  };
-}
-function applyVectorDigestWindow(db, modelId, readFromCursor, rows, maxRows) {
-  const timeout = db.query("PRAGMA busy_timeout").get().timeout;
-  db.exec("PRAGMA busy_timeout = 25");
-  try {
-    return db.transaction(() => {
-      const state = vectorDigestState(db, modelId);
-      if (state.completed || state.cursorRowid !== readFromCursor)
-        return { ...state, scanned: 0 };
-      const current = db.query(`SELECT 1 AS present FROM chunk_embeddings
-        WHERE chunk_pk = ? AND model_id = ? AND content_hash = ? AND embedded_at = ?`);
-      for (const row of rows) {
-        if (row.model_id !== modelId)
-          continue;
-        if (!current.get(row.chunk_pk, modelId, row.content_hash, row.embedded_at))
-          continue;
-        writeVectorDigest(db, row.chunk_pk, modelId, row.item_pk, row.embedding);
-      }
-      const cursorRowid = rows.at(-1)?.rowid ?? state.cursorRowid;
-      const completed = rows.length < maxRows;
-      db.query(`INSERT INTO chunk_vector_digest_meta (model_id, cursor_rowid, completed) VALUES (?, ?, ?)
-        ON CONFLICT(model_id) DO UPDATE SET cursor_rowid = excluded.cursor_rowid, completed = excluded.completed`).run(modelId, cursorRowid, Number(completed));
-      return { cursorRowid, completed, scanned: rows.length };
-    })();
-  } finally {
-    db.exec(`PRAGMA busy_timeout = ${timeout}`);
-  }
-}
-function backfillVectorDigests(db, modelId, maxRows = 128) {
-  const state = vectorDigestState(db, modelId);
-  if (state.completed)
-    return { ...state, scanned: 0 };
-  const query = vectorDigestSourceQuery(state.cursorRowid, maxRows);
-  const rows = db.query(query.sql).all(...query.params);
-  return applyVectorDigestWindow(db, modelId, state.cursorRowid, rows, maxRows);
-}
+// src/core/remote-access.ts
+import { isAbsolute as raIsAbsolute, join as raJoin } from "node:path";
 
-// src/workers/source-index/status-count-reuse.ts
-var STORE_UNCHANGED_REUSE_MS = 30 * 60000;
-
-// src/core/sqlite-rows.ts
-function* iterateRows(db, sql, ...params) {
-  const statement = db.prepare(sql);
-  try {
-    yield* statement.iterate(...params);
-  } finally {
-    statement.finalize();
-  }
-}
-
-// src/workers/connector-store/main-thread-sql-trace.ts
-import { Database } from "bun:sqlite";
-import { isMainThread as isMainThread4 } from "node:worker_threads";
-
-// src/core/front-loop-sql-guard.ts
-class FrontLoopSqlError extends Error {
-  code = "front_loop_sql";
-  constructor(site) {
-    super(`The engine front ran SQLite on its loop${site ? ` (${site})` : ""}; the front reads through the read pool and writes through its stores thread.`);
-    this.name = "FrontLoopSqlError";
-  }
-}
-var UNLISTED_KEPT = 50;
-var watch;
-function frontLoopSqlWatched() {
-  return watch !== undefined;
-}
-function noteFrontLoopStatement(dbPath, site) {
-  const state = watch;
-  if (!state || dbPath === ":memory:" || dbPath === "" || dbPath?.startsWith("file::memory:"))
-    return;
-  if (state.mode === "throw")
-    throw new FrontLoopSqlError(site());
-  state.statements += 1;
-  if (!state.allowed)
-    return;
-  const at = site() || "(no source frame)";
-  const count = state.seen.get(at);
-  state.seen.set(at, (count ?? 0) + 1);
-  if (count !== undefined || state.allowed.has(at))
-    return;
-  if (state.unlisted.length < UNLISTED_KEPT)
-    state.unlisted.push(at);
-  state.log(`[olympus] front loop sql: unlisted site ${at}`);
-}
-
-// src/workers/source-index/answer-latency-trace.ts
-import { AsyncLocalStorage as AsyncLocalStorage9 } from "node:async_hooks";
-import { createHash as createHash5, randomUUID as randomUUID6 } from "node:crypto";
-
-// src/core/store-reclaim-admission.ts
-import { join as join17 } from "node:path";
-import { closeSync as closeSync7, openSync as openSync7, futimesSync, statSync as statSync8 } from "node:fs";
-var probe = { acquireTimeoutMs: 1, pollIntervalMs: 1 };
-var target = (name) => join17(sharedDataPath("engine-run"), `store-reclaim-${name}`);
-function storeReadHasPriority() {
-  try {
-    return withFileLeaseSync(target("readers"), () => false, probe);
-  } catch (error) {
-    if (error instanceof FileLeaseBusyError)
-      return true;
-    throw error;
-  }
-}
-function storeOwnerIdleMs(now = Date.now()) {
-  try {
-    return Math.max(0, now - statSync8(target("last-ask")).mtimeMs);
-  } catch (error) {
-    if (error.code === "ENOENT")
-      return Number.POSITIVE_INFINITY;
-    throw error;
-  }
-}
-
-// src/workers/source-index/answer-latency-trace.ts
-var POOL_SQL_SITE_CHARS = 120;
-var poolSqlSites = new WeakMap;
-function poolSqlSite(sql) {
-  const shape = sql.replace(/'(?:[^']|'')*'|"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]*\]|--[^\r\n]*|\/\*[\s\S]*?\*\//g, (token) => token.startsWith("--") || token.startsWith("/*") ? " " : "?").replace(/\b(?:0x[\da-f]+|\d+(?:\.\d+)?(?:e[+-]?\d+)?)\b/gi, "N").replace(/\s+/g, " ").trim();
-  const hash = createHash5("sha256").update(shape).digest("hex").slice(0, 16);
-  const prefix = shape.replace(/\(\s*(?:\?|N)(?:\s*,\s*(?:\?|N))+\s*\)/g, "(…)");
-  return `${prefix.slice(0, POOL_SQL_SITE_CHARS)} #${hash}`;
-}
-var SLOW_MAIN_THREAD_SQL_MS = 250;
-var SLOW_MAIN_THREAD_SQL_KEPT = 20;
-var SITE_TALLY_MS = 25;
-var storage2 = new AsyncLocalStorage9;
-var queryStorage = new AsyncLocalStorage9;
-var laneStorage = new AsyncLocalStorage9;
-function poolReads(query, corpusId) {
-  let reads = query.poolByCorpus.get(corpusId);
-  if (!reads) {
-    reads = {
-      reads: 0,
-      queue_wait_ms: 0,
-      queue_wait_max_ms: 0,
-      run_ms: 0,
-      run_max_ms: 0,
-      sql_ms: 0,
-      sql_max_ms: 0,
-      snapshot_reads: 0,
-      snapshot_sql_ms: 0,
-      refused: 0,
-      dropped_queued: 0,
-      past_deadline_running: 0,
-      errors: 0
-    };
-    query.poolByCorpus.set(corpusId, reads);
-  }
-  return reads;
-}
-function sourceAnswerVectorWork() {
-  const query = queryStorage.getStore();
-  const corpusId = laneStorage.getStore();
-  if (!query || corpusId === undefined)
-    return;
-  return poolReads(query, corpusId).vector_work ??= {
-    digest_pages_read: 0,
-    digest_rows_scanned: 0,
-    full_vectors_rescored: 0,
-    digest_unpack_score_ms: 0
-  };
-}
-function beginSourceAnswerConceptCounts() {
-  const query = queryStorage.getStore();
-  const corpusId = laneStorage.getStore();
-  if (!query || corpusId === undefined)
-    return;
-  const passes = poolReads(query, corpusId).keyword_concept_counts ??= [];
-  const pass = [];
-  passes.push(pass);
-  return pass;
-}
-function beginSourceAnswerPoolRead(statement, label) {
-  const query = queryStorage.getStore();
-  const corpusId = laneStorage.getStore();
-  if (!query || corpusId === undefined)
-    return;
-  let site = query.sqlShapes.get(statement);
-  if (site === undefined) {
-    site = poolSqlSite(statement);
-    query.sqlShapes.set(statement, site);
-  }
-  const key = label ? `${label}\x00${site}` : site;
-  return ({ queueWaitMs, runMs, sqlMs, cpuMs, outcome, snapshot }) => {
-    const reads = poolReads(query, corpusId);
-    if (sqlMs !== undefined) {
-      reads.thread_cpu_available = reads.thread_cpu_available === true || cpuMs !== undefined;
-    }
-    const wait = unroundedMs(queueWaitMs);
-    const ran = unroundedMs(runMs);
-    reads.reads += 1;
-    reads.queue_wait_ms += wait;
-    reads.queue_wait_max_ms = Math.max(reads.queue_wait_max_ms, wait);
-    reads.run_ms += ran;
-    reads.run_max_ms = Math.max(reads.run_max_ms, ran);
-    const sql = unroundedMs(sqlMs ?? 0);
-    reads.sql_ms += sql;
-    reads.sql_max_ms = Math.max(reads.sql_max_ms, sql);
-    if (snapshot) {
-      reads.snapshot_reads += 1;
-      reads.snapshot_sql_ms += sql;
-    }
-    let sites = poolSqlSites.get(reads);
-    if (!sites)
-      poolSqlSites.set(reads, sites = new Map);
-    const entry = sites.get(key) ?? { site, ...label ? { label } : {}, reads: 0, sql_ms: 0, sql_max_ms: 0 };
-    entry.reads += 1;
-    entry.sql_ms += sql;
-    entry.sql_max_ms = Math.max(entry.sql_max_ms, sql);
-    if (cpuMs !== undefined) {
-      const cpu = unroundedMs(cpuMs);
-      entry.sql_cpu_ms = (entry.sql_cpu_ms ?? 0) + cpu;
-      entry.sql_cpu_max_ms = Math.max(entry.sql_cpu_max_ms ?? 0, cpu);
-    }
-    sites.set(key, entry);
-    if (outcome === "refused")
-      reads.refused += 1;
-    else if (outcome === "dropped_queued")
-      reads.dropped_queued += 1;
-    else if (outcome === "past_deadline_running")
-      reads.past_deadline_running += 1;
-    else if (outcome === "error")
-      reads.errors += 1;
-  };
-}
-var CONTENT_FREE_ERROR_CLASSES = new Set([
-  "AbortError",
-  "AnalystUnavailable",
-  "AnalystCircuitOpen",
-  "EmailSourceWorkerError",
-  "Error",
-  "LocalTrustProviderMismatch",
-  "OperationError",
-  "RangeError",
-  "SourceModelPolicyDeniedError",
-  "SecureEvidencePolicySkip",
-  "SecureAnalystPoolE2EEGateError",
-  "SyntaxError",
-  "TrustedAnalystTimeoutError",
-  "TypeError"
+// connect-relay/shared/directory-tools.ts
+var DEMO_GRANT_REMOTE_TOOLS = Object.freeze(["olympus_search", "source_index_status"]);
+var DIRECTORY_TOOL_NAMES = Object.freeze([
+  "olympus_dashboard",
+  "olympus_search",
+  "source_index_status",
+  "source_answer",
+  "source_answer_result",
+  "ask_anonymously",
+  "open_private_question",
+  "olympus_connect_source",
+  "olympus_scope_list",
+  "olympus_scope_set",
+  "olympus_disconnect_source",
+  "olympus_delete_source_data",
+  "olympus_model_set",
+  "olympus_model_retry",
+  "olympus_privacy_get",
+  "olympus_privacy_set",
+  "olympus_privacy_questions",
+  "olympus_privacy_check",
+  "olympus_sync_source"
 ]);
-function currentSourceAnswerTrace() {
-  return storage2.getStore();
-}
-function sourceAnswerTraceActive() {
-  return storage2.getStore() !== undefined;
-}
-function recordSourceAnswerMainThreadSql(elapsedMs, site) {
-  const trace = currentSourceAnswerTrace();
-  if (!trace)
-    return;
-  const ms = unroundedMs(elapsedMs);
-  const sql = trace.mainThreadSql;
-  sql.statements += 1;
-  sql.total_ms += ms;
-  sql.max_ms = Math.max(sql.max_ms, ms);
-  if (ms < SITE_TALLY_MS)
-    return;
-  const where = site();
-  const tally = sql.by_site.find((entry) => entry.site === where);
-  if (tally) {
-    tally.statements += 1;
-    tally.ms += ms;
-  } else {
-    sql.by_site.push({ site: where, statements: 1, ms });
-  }
-  if (ms < SLOW_MAIN_THREAD_SQL_MS)
-    return;
-  sql.slow.push({ ms: nonNegativeMs(ms), site: where });
-  if (sql.slow.length > SLOW_MAIN_THREAD_SQL_KEPT) {
-    sql.slow.sort((left, right) => right.ms - left.ms);
-    sql.slow.length = SLOW_MAIN_THREAD_SQL_KEPT;
-  }
-}
-function unroundedMs(value) {
-  return Number.isFinite(value) ? Math.max(0, value) : 0;
-}
-function nonNegativeMs(value) {
-  return Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
+var DIRECTORY_TOOLS = new Set(DIRECTORY_TOOL_NAMES);
+
+// src/core/remote-public-url.ts
+var LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
+
+// src/core/remote-access.ts
+var LOOPBACK_HOSTNAMES2 = new Set(["127.0.0.1", "localhost", "[::1]"]);
+function olympusDataDir(env = process.env) {
+  const root = olympusDataRoot(env);
+  if (!raIsAbsolute(root))
+    throw new TypeError("XDG_DATA_HOME must be an absolute private data root.");
+  return root;
 }
 
-// src/workers/connector-store/main-thread-sql-trace.ts
-var TIMED = "__olympusMainThreadSqlTimed";
-var STATEMENT_METHODS = ["all", "get", "run", "values"];
-var SITE_FRAMES = 3;
-var installed = false;
-var SINGLE_WRITE = /^\s*(UPDATE|DELETE|INSERT)\b[^;]*;?\s*$/i;
-var sliceTiming;
-var benchSql;
-function installMainThreadSqlTrace() {
-  if (installed || !isMainThread4)
+// src/core/store-identity.ts
+import { existsSync as existsSync11, realpathSync as realpathSync4, statSync as statSync8 } from "node:fs";
+import { basename as basename3, dirname as dirname13, isAbsolute as isAbsolute9, join as join16, relative as relative5, resolve as resolve6, sep as sep5 } from "node:path";
+var LAYOUTS2 = ["folder", "legacy"];
+function layoutPath(identity, layout, env) {
+  if (layout === "legacy" && identity.slot !== DEFAULT_ACCOUNT_SLOT)
     return;
-  installed = true;
-  const exec = Database.prototype.exec;
-  Database.prototype.exec = function(...args) {
-    if (planRecorder && !planRecorder.explaining && typeof args[0] === "string" && SINGLE_WRITE.test(args[0])) {
-      recordPlan({ [SQL]: args[0], [DB]: this });
+  try {
+    return accountStorePath({ source_id: identity.sourceId, slot: identity.slot, layout }, identity.store, env);
+  } catch {
+    return;
+  }
+}
+function storePathKey(path) {
+  try {
+    return realpathSync4(path);
+  } catch {}
+  const folder = dirname13(path);
+  let real = resolve6(folder);
+  try {
+    real = realpathSync4(folder);
+  } catch {}
+  return join16(real, basename3(path));
+}
+function registryKey(env = process.env) {
+  const path = sourceRegistryPath(env);
+  let folder = resolve6(dirname13(path));
+  try {
+    folder = realpathSync4.native(folder);
+  } catch {}
+  return join16(folder, basename3(path));
+}
+function matchStore(sourceId, slot, dbPath, names, env) {
+  const wanted = storePathKey(dbPath);
+  for (const store of names) {
+    const identity = { sourceId, slot, store };
+    const paths = LAYOUTS2.flatMap((layout) => layoutPath(identity, layout, env) ?? []);
+    if (paths.some((path) => storePathKey(path) === wanted)) {
+      return { identity, others: paths.filter((path) => storePathKey(path) !== wanted) };
     }
-    if (frontLoopSqlWatched())
-      noteFrontLoopStatement(this.filename, sourceSite);
-    if (siteCounts)
-      countSite();
-    if (!sliceTiming && !slowLog)
-      return exec.apply(this, args);
-    const before = benchSql?.sample();
-    const started = performance.now();
+  }
+  return;
+}
+function placedStoreHolder(account, store, env = process.env, registry) {
+  if (store.dbPath === ":memory:" || !FOLDER_LAYOUT_SOURCES.includes(account.sourceId))
+    return;
+  const slot = account.slot ?? DEFAULT_ACCOUNT_SLOT;
+  try {
+    const entry = findRegistryAccount(registry ?? readSourceRegistry(env), account.sourceId, slot);
+    if (entry?.state !== "active")
+      return;
+    const names = [store.trustDomain, `${store.family}.${store.trustDomain}`];
+    const matched = matchStore(account.sourceId, slot, store.dbPath, names, env);
+    return matched && {
+      ...matched,
+      identity: { ...matched.identity, incarnation: entry.created_at },
+      path: store.dbPath,
+      registry: registryKey(env)
+    };
+  } catch {
+    return;
+  }
+}
+function storePlacementView(env = process.env) {
+  let registryPath;
+  let registryName;
+  let root;
+  try {
+    registryPath = sourceRegistryPath(env);
+    registryName = registryKey(env);
+    root = olympusDataRoot(env);
+  } catch {}
+  let loaded;
+  const registry = () => {
+    if (loaded)
+      return loaded;
+    if (registryPath === undefined)
+      return loaded = { kind: "unreadable" };
     try {
-      return exec.apply(this, args);
-    } finally {
-      const ms = performance.now() - started;
-      if (before)
-        benchSql?.record(before, ms, this.filename, slowSite);
-      if (sliceTiming)
-        sliceTiming.maxStatementMs = Math.max(sliceTiming.maxStatementMs, ms);
-      if (slowLog && ms >= slowLog.thresholdMs)
-        noteSlowStatement(ms, typeof args[0] === "string" ? args[0] : undefined);
+      const read = readSourceRegistry(env);
+      loaded = existsSync11(registryPath) ? { kind: "read", registry: read } : { kind: "missing" };
+    } catch {
+      loaded = { kind: "unreadable" };
+    }
+    return loaded;
+  };
+  const absentForSure = (path) => isMissing(path) && !isMissing(dirname13(path));
+  const verdicts = new Map;
+  const storeGone = (identity, seen) => {
+    const key = JSON.stringify([identity.sourceId, identity.slot, identity.store, identity.incarnation, ...seen]);
+    const known = verdicts.get(key);
+    if (known !== undefined)
+      return known;
+    const gone = judgeStoreGone(identity, seen);
+    verdicts.set(key, gone);
+    return gone;
+  };
+  const judgeStoreGone = (identity, seen) => {
+    const state = registry();
+    if (state.kind !== "read")
+      return false;
+    const entry = findRegistryAccount(state.registry, identity.sourceId, identity.slot);
+    if (!entry)
+      return true;
+    if (identity.incarnation !== undefined && isEarlier(identity.incarnation, entry.created_at))
+      return true;
+    if (entry.state === "deleted")
+      return true;
+    if (entry.state === "deleting")
+      return false;
+    const own = layoutPath(identity, entry.layout, env);
+    if (own === undefined)
+      return false;
+    const other = layoutPath(identity, entry.layout === "folder" ? "legacy" : "folder", env);
+    return [own, ...seen].every(absentForSure) && (other === undefined || isMissing(other));
+  };
+  const folderRoots = () => {
+    const roots = new Set;
+    try {
+      roots.add(resolve6(accountFoldersRoot(env)));
+      if (root !== undefined)
+        roots.add(join16(realpathSync4(root), ACCOUNT_FOLDERS_DIR));
+    } catch {}
+    return [...roots];
+  };
+  const folderPlace = (path) => {
+    for (const folders of folderRoots()) {
+      const inside = relative5(folders, path);
+      if (inside.startsWith("..") || isAbsolute9(inside))
+        continue;
+      const [sourceId, slot, stores, file, ...rest] = inside.split(sep5);
+      if (!sourceId || !slot || stores !== "stores" || !file?.endsWith(".sqlite") || rest.length > 0)
+        continue;
+      return { sourceId, slot, store: file.slice(0, -".sqlite".length) };
+    }
+    return;
+  };
+  let legacyPlaces;
+  const legacyPlaced = (key) => {
+    if (!legacyPlaces) {
+      legacyPlaces = new Set;
+      const families = archiveImportFamilies();
+      for (const sourceId of FOLDER_LAYOUT_SOURCES) {
+        for (const store of accountStoreNames(sourceId, families)) {
+          const path = layoutPath({ sourceId, slot: DEFAULT_ACCOUNT_SLOT, store }, "legacy", env);
+          if (path !== undefined)
+            legacyPlaces.add(storePathKey(path));
+        }
+      }
+    }
+    return legacyPlaces.has(key);
+  };
+  let placed;
+  const placedAt = (known) => {
+    if (placed)
+      return placed;
+    placed = new Map;
+    const families = archiveImportFamilies();
+    for (const account of known.accounts) {
+      if (!FOLDER_LAYOUT_SOURCES.includes(account.source_id))
+        continue;
+      for (const store of accountStoreNames(account.source_id, families)) {
+        const identity = { sourceId: account.source_id, slot: account.slot, store };
+        for (const layout of LAYOUTS2) {
+          const path = layoutPath(identity, layout, env);
+          if (path !== undefined && !placed.has(storePathKey(path)))
+            placed.set(storePathKey(path), identity);
+        }
+      }
+    }
+    return placed;
+  };
+  const pathVerdicts = new Map;
+  const judgePathMarker = (path) => {
+    const state = registry();
+    if (state.kind === "unreadable")
+      return "kept";
+    try {
+      const key = storePathKey(path);
+      const inFolder = folderPlace(key) ?? folderPlace(resolve6(path));
+      if (state.kind === "missing")
+        return inFolder !== undefined || legacyPlaced(key) ? "kept" : "unplaced";
+      const identity = placedAt(state.registry).get(key);
+      if (identity)
+        return storeGone(identity, [path]) ? "gone" : "kept";
+      if (!inFolder)
+        return "unplaced";
+      return storeGone(inFolder, [path]) ? "gone" : "kept";
+    } catch {
+      return "kept";
     }
   };
-  for (const name of ["query", "prepare"]) {
-    const original = Database.prototype[name];
-    Database.prototype[name] = function(...args) {
-      const statement = timeStatement(original.apply(this, args));
-      if (statement && typeof args[0] === "string") {
-        const held = statement;
-        held[SQL] = args[0];
-        held[DB] = this;
+  return {
+    registry: registryName,
+    storeGone,
+    pathMarker(path) {
+      let verdict = pathVerdicts.get(path);
+      if (!verdict) {
+        verdict = judgePathMarker(path);
+        pathVerdicts.set(path, verdict);
       }
-      return statement;
-    };
-  }
-}
-function timeStatement(statement) {
-  const held = statement;
-  if (!statement || held[TIMED])
-    return statement;
-  for (const method of STATEMENT_METHODS) {
-    const call = held[method];
-    if (typeof call !== "function")
-      continue;
-    held[method] = function(...args) {
-      if (planRecorder && !planRecorder.explaining)
-        recordPlan(held);
-      if (frontLoopSqlWatched())
-        noteFrontLoopStatement(held[DB]?.filename, sourceSite);
-      if (siteCounts)
-        countSite();
-      const answer = sourceAnswerTraceActive();
-      if (!answer && !sliceTiming && !slowLog)
-        return call.apply(this, args);
-      const before = benchSql?.sample();
-      const started = performance.now();
-      try {
-        return call.apply(this, args);
-      } finally {
-        const ms = performance.now() - started;
-        if (before)
-          benchSql?.record(before, ms, held[DB]?.filename ?? "", slowSite);
-        if (sliceTiming)
-          sliceTiming.maxStatementMs = Math.max(sliceTiming.maxStatementMs, ms);
-        if (answer)
-          recordSourceAnswerMainThreadSql(ms, callSite);
-        if (slowLog && ms >= slowLog.thresholdMs)
-          noteSlowStatement(ms, typeof held[SQL] === "string" ? held[SQL] : undefined);
-      }
-    };
-  }
-  const iterate = held.iterate;
-  if (typeof iterate === "function")
-    held.iterate = function(...args) {
-      const iterator = iterate.apply(this, args);
-      if (!sliceTiming && !slowLog)
-        return iterator;
-      return function* () {
-        let count = 1;
-        try {
-          for (;; ) {
-            const before = benchSql?.sample();
-            const started = performance.now();
-            let next;
-            try {
-              next = iterator.next();
-            } finally {
-              const ms = performance.now() - started;
-              if (before) {
-                benchSql?.record(before, ms, held[DB]?.filename ?? "", slowSite, count);
-                count = 0;
-              }
-              if (sliceTiming)
-                sliceTiming.maxStatementMs = Math.max(sliceTiming.maxStatementMs, ms);
-              if (slowLog && ms >= slowLog.thresholdMs)
-                noteSlowStatement(ms, typeof held[SQL] === "string" ? held[SQL] : undefined);
-            }
-            if (next.done)
-              return;
-            yield next.value;
-          }
-        } finally {
-          iterator.return?.();
-        }
-      }();
-    };
-  held[TIMED] = true;
-  return statement;
-}
-var SQL = "__olympusMainThreadSql";
-var DB = "__olympusMainThreadSqlDb";
-var planRecorder;
-function recordPlan(held) {
-  const recorder = planRecorder;
-  const sql = held[SQL];
-  const db = held[DB];
-  if (typeof sql !== "string" || !db)
-    return;
-  let scans = recorder.plans.get(sql);
-  if (!scans) {
-    scans = [];
-    recorder.explaining = true;
-    try {
-      scans = largeTableScans(db, sql, recorder.large);
-    } finally {
-      recorder.explaining = false;
+      return verdict;
     }
-    recorder.plans.set(sql, scans);
-  }
-  if (scans.length === 0)
-    return;
-  const site = sourceSite();
-  if (site === "")
-    return;
-  if (inMemory(db) && /OffThread\b/.test(site))
-    return;
-  for (const scan of scans) {
-    const key = `${site}|${scan.table}`;
-    if (!recorder.finders.has(key))
-      recorder.finders.set(key, { ...scan, site, sql: sql.replace(/\s+/g, " ").trim().slice(0, 160) });
-  }
+  };
 }
-function largeTableScans(db, sql, large) {
-  const scans = [];
+function isEarlier(held, current) {
+  const before = Date.parse(held);
+  const after = Date.parse(current);
+  return Number.isFinite(before) && Number.isFinite(after) && before < after;
+}
+function isMissing(path) {
   try {
-    const explain = db.prepare(`EXPLAIN QUERY PLAN ${sql}`);
-    let rows;
+    statSync8(path);
+    return false;
+  } catch (error) {
+    const code = error?.code;
+    return code === "ENOENT" || code === "ENOTDIR";
+  }
+}
+
+// src/core/media-cache.ts
+var MEDIA_CACHE_ORPHAN_AGE_MS = 24 * 60 * 60000;
+function mediaCacheDir(env = process.env) {
+  const configured = env[MEDIA_CACHE_DIR_ENV]?.trim();
+  if (configured && !isAbsolute10(configured))
+    throw new TypeError(`${MEDIA_CACHE_DIR_ENV} must be an absolute path.`);
+  if (!configured)
+    olympusDataDir(env);
+  return mediaCacheRoot(env);
+}
+function isSha256(value) {
+  if (value.length !== 64)
+    return false;
+  for (const character of value) {
+    if (!"0123456789abcdef".includes(character))
+      return false;
+  }
+  return true;
+}
+var MEDIA_CACHE_DIR_NAMES = new Set(["media-cache", "olympus-media"]);
+function isMediaCachePath(path, sha256, dir) {
+  if (!isAbsolute10(path) || !isSha256(sha256) || resolve7(path) !== path)
+    return false;
+  if (basename4(path) !== `${sha256}.jpg` || !MEDIA_CACHE_DIR_NAMES.has(basename4(dirname14(path))))
+    return false;
+  if (dir !== undefined && dirname14(path) !== resolve7(dir))
+    return false;
+  try {
+    const stat = lstatSync6(path);
+    if (!stat.isFile())
+      return false;
+  } catch {}
+  return true;
+}
+function mediaHolderName(holder) {
+  if (holder.startsWith("staging:") || holder.startsWith("memory:"))
+    return holder;
+  try {
+    return realpathSync5(holder);
+  } catch {
+    return resolve7(holder);
+  }
+}
+function mediaHolderKey(holder) {
+  return typeof holder === "string" ? holder : `${storeMarkerName(holder)}@${holder.path}@${holder.identity.incarnation ?? ""}`;
+}
+function retainMediaCacheFile(path, sha256, holder, dir) {
+  if (!isMediaCachePath(path, sha256, dir))
+    return false;
+  try {
+    addMarker(path, holder);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function releaseMediaCacheFile(path, sha256, holder, dir) {
+  if (!isMediaCachePath(path, sha256, dir))
+    return false;
+  try {
+    const refs = refsDir(path);
+    for (const name of markerNames(holder))
+      rmSync6(join17(refs, name), { force: true });
+    const remaining = existsSync12(refs) ? readdirSync(refs) : [];
+    if (remaining.length > 0)
+      return false;
+    if (existsSync12(refs))
+      rmdirSync(refs);
+    rmSync6(path, { force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+function sweepMediaCache(dir, options = {}) {
+  const maxAgeMs = options.maxAgeMs ?? MEDIA_CACHE_ORPHAN_AGE_MS;
+  const now = options.now ?? Date.now();
+  const placement = storePlacementView(options.env ?? process.env);
+  const old = (path) => {
     try {
-      rows = explain.all();
-    } finally {
-      explain.finalize();
+      return now - statSync9(path).mtimeMs > maxAgeMs;
+    } catch {
+      return false;
     }
-    const aliases = tableAliases(sql);
-    for (const { detail } of rows) {
-      const scan = /^SCAN (\S+)/.exec(detail);
-      if (!scan)
+  };
+  let removed = 0;
+  let entries;
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    return 0;
+  }
+  for (const name of entries) {
+    const path = join17(dir, name);
+    try {
+      if (name.startsWith(".") && name.endsWith(".tmp")) {
+        if (old(path))
+          rmSync6(path, { force: true });
         continue;
-      const name = aliases.get(scan[1]) ?? scan[1];
-      if (large.has(name))
-        scans.push({ table: name, plan: detail });
+      }
+      if (!name.endsWith(".jpg") || !isSha256(name.slice(0, -4)))
+        continue;
+      const refs = refsDir(path);
+      if (existsSync12(refs)) {
+        for (const marker of readdirSync(refs)) {
+          const markerPath = join17(refs, marker);
+          const gone = marker.startsWith("staging-") || marker.endsWith(".tmp") ? old(markerPath) : marker.startsWith(STORE_MARKER_PREFIX) ? storeHolderGone(markerPath, placement) : holderGone(markerPath, marker, placement);
+          if (gone)
+            rmSync6(markerPath, { force: true });
+        }
+        if (readdirSync(refs).length > 0)
+          continue;
+        rmdirSync(refs);
+      }
+      if (old(path)) {
+        rmSync6(path, { force: true });
+        removed += 1;
+      }
+    } catch {}
+  }
+  return removed;
+}
+function addMarker(path, holder) {
+  const refs = refsDir(path);
+  ensureOwnerOnlyDir(refs);
+  if (typeof holder !== "string") {
+    addStoreMarker(refs, holder);
+    return;
+  }
+  const marker = join17(refs, holderName(holder));
+  const name = mediaHolderName(holder);
+  if (readMarker(marker) !== name)
+    writeFileSync6(marker, name, { mode: 384 });
+  const legacy = legacyHolderName(holder);
+  if (legacy)
+    rmSync6(join17(refs, legacy), { force: true });
+}
+function addStoreMarker(refs, holder) {
+  const marker = join17(refs, storeMarkerName(holder));
+  const text = storeMarkerText(holder);
+  if (readMarker(marker) !== text)
+    writePrivateFileAtomicSync(marker, text);
+  else
+    flushMarker(marker, refs);
+  for (const name of pathMarkerNames(holder))
+    rmSync6(join17(refs, name), { force: true });
+}
+function flushMarker(marker, refs) {
+  const descriptor = openSync7(marker, "r");
+  try {
+    fsyncSync2(descriptor);
+  } finally {
+    closeSync7(descriptor);
+  }
+  syncDirectorySync(refs);
+}
+function readMarker(marker) {
+  try {
+    return readFileSync13(marker, "utf8");
+  } catch {
+    return;
+  }
+}
+function holderGone(marker, markerName, placement) {
+  const name = readMarker(marker);
+  if (!name || !isAbsolute10(name) || holderDigest(name) !== markerName)
+    return false;
+  if (existsSync12(name))
+    return false;
+  const verdict = placement.pathMarker(name);
+  if (verdict !== "unplaced")
+    return verdict === "gone";
+  return existsSync12(dirname14(name));
+}
+var STORE_MARKER_PREFIX = "store-";
+function storeHolderGone(marker, placement) {
+  const recorded = parseStoreMarker(readMarker(marker));
+  if (!recorded || recorded.registry !== placement.registry)
+    return false;
+  return placement.storeGone(recorded.identity, [recorded.seen]);
+}
+function storeMarkerName(holder) {
+  const { sourceId, slot, store } = holder.identity;
+  return `${STORE_MARKER_PREFIX}${holderDigest(JSON.stringify([holder.registry, sourceId, slot, store]))}`;
+}
+function storeMarkerText(holder) {
+  return JSON.stringify({
+    version: 1,
+    sourceId: holder.identity.sourceId,
+    slot: holder.identity.slot,
+    store: holder.identity.store,
+    ...holder.identity.incarnation === undefined ? {} : { incarnation: holder.identity.incarnation },
+    seen: mediaHolderName(holder.path),
+    registry: holder.registry
+  });
+}
+function parseStoreMarker(text) {
+  if (!text)
+    return;
+  try {
+    const parsed = JSON.parse(text);
+    const { version, sourceId, slot, store, incarnation, seen, registry } = parsed;
+    if (version !== 1 || typeof sourceId !== "string" || typeof slot !== "string" || typeof store !== "string")
+      return;
+    if (typeof seen !== "string" || typeof registry !== "string" || !sourceId || !slot || !store)
+      return;
+    if (incarnation !== undefined && typeof incarnation !== "string")
+      return;
+    return { identity: { sourceId, slot, store, ...incarnation === undefined ? {} : { incarnation } }, seen, registry };
+  } catch {
+    return;
+  }
+}
+function refsDir(path) {
+  return join17(dirname14(path), `${basename4(path)}.refs`);
+}
+function holderDigest(name) {
+  return createHash4("sha256").update(name).digest("hex").slice(0, 32);
+}
+function holderName(holder) {
+  const digest = holderDigest(mediaHolderName(holder));
+  return holder.startsWith("staging:") ? `staging-${digest}` : digest;
+}
+function markerNames(holder) {
+  if (typeof holder !== "string")
+    return [storeMarkerName(holder), ...pathMarkerNames(holder)];
+  const legacy = legacyHolderName(holder);
+  return legacy ? [holderName(holder), legacy] : [holderName(holder)];
+}
+function pathMarkerNames(holder) {
+  return [...markerNames(holder.path), ...holder.others.map((other) => holderDigest(storePathKey(other)))];
+}
+function legacyHolderName(holder) {
+  if (holder.startsWith("staging:") || holder.startsWith("memory:"))
+    return;
+  const legacy = holderDigest(holder);
+  return legacy === holderName(holder) ? undefined : legacy;
+}
+function ensureOwnerOnlyDir(dir) {
+  mkdirSync8(dir, { recursive: true, mode: 448 });
+  chmodSync3(dir, 448);
+}
+
+// src/workers/source-index/built-in-embedding/litert-runtime.ts
+import { isMainThread as isMainThread4 } from "node:worker_threads";
+import { execFileSync as execFileSync2, spawn } from "node:child_process";
+import { closeSync as closeSync8, constants as constants5, existsSync as existsSync13, fstatSync as fstatSync2, openSync as openSync8, readdirSync as readdirSync2, readFileSync as readFileSync14, statSync as statSync10 } from "node:fs";
+import { homedir as homedir9 } from "node:os";
+import { delimiter as delimiter2, dirname as dirname15, isAbsolute as isAbsolute11, join as join18 } from "node:path";
+import { createInterface } from "node:readline";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
+
+class LiteRtImagesUnavailableError extends Error {
+  indexes;
+  constructor(indexes) {
+    super("The built-in search model is running without its image encoder.");
+    this.name = "LiteRtImagesUnavailableError";
+    this.indexes = indexes;
+  }
+}
+
+class LiteRtPictureEngineFaultError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "LiteRtPictureEngineFaultError";
+  }
+}
+
+class LiteRtHelperReplacedError extends Error {
+  done;
+  reason;
+  constructor(message, reason, done) {
+    super(message);
+    this.name = "LiteRtHelperReplacedError";
+    this.reason = reason;
+    this.done = done;
+  }
+}
+var helperReplacements = 0;
+var REQUEST_TIMEOUT_MS = 3 * 60000;
+var HELPER_WORKING_CPU_MS = 1000;
+function helperCpuMs(pid, platform = process.platform) {
+  if (pid === undefined)
+    return;
+  try {
+    if (platform === "linux") {
+      const stat = readFileSync14(`/proc/${pid}/stat`, "utf8");
+      const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+      const ticks = Number(fields[11]) + Number(fields[12]);
+      return Number.isFinite(ticks) ? ticks * 10 : undefined;
+    }
+    if (platform === "darwin") {
+      const text = execFileSync2("/bin/ps", ["-o", "time=", "-p", String(pid)], { encoding: "utf8", timeout: 2000 }).trim();
+      const [days, clock] = text.includes("-") ? text.split("-") : ["0", text];
+      const parts = clock.split(":").map(Number);
+      const seconds = parts.reduce((sum, part) => sum * 60 + part, 0) + Number(days) * 86400;
+      return Number.isFinite(seconds) ? seconds * 1000 : undefined;
     }
   } catch {}
-  return scans;
+  return;
 }
-function inMemory(db) {
-  const name = db.filename;
-  return name === undefined || name === "" || name === ":memory:";
-}
-function tableAliases(sql) {
-  const aliases = new Map;
-  const keywords = new Set(["WHERE", "ON", "JOIN", "LEFT", "INNER", "CROSS", "GROUP", "ORDER", "LIMIT", "INDEXED", "NOT", "USING", "UNION", "SET", "AND"]);
-  for (const match of sql.matchAll(/\b(?:FROM|JOIN|UPDATE|INTO)\s+(?:\w+\.)?(\w+)(?:\s+(?:AS\s+)?(\w+))?/gi)) {
-    const table = match[1];
-    aliases.set(table, table);
-    const alias = match[2];
-    if (alias && !keywords.has(alias.toUpperCase()))
-      aliases.set(alias, table);
+function helperEnvironment() {
+  const env = {};
+  for (const [name, value] of Object.entries(process.env)) {
+    if (value === undefined)
+      continue;
+    if (["PATH", "HOME", "TMPDIR", "XDG_RUNTIME_DIR", "DISPLAY", "WAYLAND_DISPLAY"].includes(name) || name.startsWith("VK_")) {
+      env[name] = value;
+    }
   }
-  return aliases;
-}
-function sourceSite(depth = 2) {
-  const frames = (new Error().stack ?? "").split(`
-`).slice(1).map((line) => line.trim().replace(/^at /, ""));
-  const mine = frames.filter((frame) => /\/src\//.test(frame) && !frame.includes("main-thread-sql-trace") && !frame.includes("front-loop-sql-guard"));
-  return mine.slice(0, depth).map((frame) => shortFrame(frame).replace(/:\d+$/, "")).join(" < ");
-}
-var siteCounts;
-var siteDepth = 2;
-function countSite() {
-  const site = sourceSite(siteDepth) || "(no source frame)";
-  siteCounts.set(site, (siteCounts.get(site) ?? 0) + 1);
-}
-var slowLog;
-var SLOW_RECENT = 10;
-function noteSlowStatement(ms, sql) {
-  const log = slowLog;
-  log.count += 1;
-  log.maxMs = Math.max(log.maxMs, ms);
-  const site = slowSite();
-  const sqlId = sql === undefined ? "exec" : shortHash(sql.replace(/\s+/g, " ").trim());
-  const entry = { at: new Date().toISOString(), ms: Math.round(ms), site, sql_id: sqlId };
-  log.recent.push(entry);
-  if (log.recent.length > SLOW_RECENT)
-    log.recent.shift();
-  log.log(`[olympus] slow loop sql: ${Math.round(ms)} ms at ${site} (sql ${sqlId})`, entry);
-}
-function slowSite() {
-  const frames = (new Error().stack ?? "").split(`
-`).slice(1).map((line) => line.trim().replace(/^at /, "")).filter((frame) => frame.length > 0 && !frame.includes("main-thread-sql-trace") && !frame.includes("ask-bench-sql"));
-  return frames.slice(0, SITE_FRAMES).map(shortFrame).join(" < ");
-}
-function shortHash(text) {
-  let hash = 2166136261;
-  for (let index = 0;index < text.length; index += 1) {
-    hash ^= text.charCodeAt(index);
-    hash = Math.imul(hash, 16777619) >>> 0;
-  }
-  return hash.toString(16).padStart(8, "0");
-}
-function callSite() {
-  const frames = (new Error().stack ?? "").split(`
-`).slice(1).map((line) => line.trim()).map((line) => line.startsWith("at ") ? line.slice(3) : line).filter((line) => line.length > 0);
-  const recorder = frames.findIndex((frame) => frame.startsWith("recordSourceAnswerMainThreadSql"));
-  const caller = recorder >= 0 ? recorder + 2 : 3;
-  return frames.slice(caller, caller + SITE_FRAMES).map(shortFrame).join(" < ");
-}
-function shortFrame(frame) {
-  const open = frame.lastIndexOf("(");
-  const name = open > 0 ? frame.slice(0, open).trim() : "<anonymous>";
-  const where = (open > 0 ? frame.slice(open + 1, frame.lastIndexOf(")")) : frame).split("/").at(-1) ?? "";
-  const [file, line] = where.split(":");
-  return `${name} ${file}${line ? `:${line}` : ""}`;
+  env.HOME ??= homedir9();
+  return env;
 }
 
-// src/workers/file-extraction/unreadable-files.ts
-var UNREAD_PRIVACY_CHECK_MISSING_KIND = "privacy_check_missing";
-function unreadableFileReason(errorKind) {
-  const kind = (errorKind ?? "").toLowerCase();
-  if (!kind)
-    return "other";
-  if (kind === UNREAD_PRIVACY_CHECK_MISSING_KIND)
-    return "privacy_check_missing";
-  if (kind.includes("encrypted") || kind.includes("password"))
-    return "password";
-  if (kind.includes("too_large"))
-    return "too_large";
-  if (kind.includes("timeout"))
-    return "timed_out";
-  if (kind.includes("not_found") || kind.includes("content_unavailable") || kind.includes("missing_bytes"))
-    return "missing";
-  if (kind.includes("permission") || kind.includes("auth"))
-    return "no_access";
-  if (kind.includes("unsupported") || kind === "extractor_kind_unknown" || kind === "no_extractor")
-    return "unsupported";
-  if (kind.includes("empty"))
-    return "no_text";
-  if (kind.includes("invalid") || kind.includes("undecodable") || kind.includes("corrupt") || kind.includes("damaged"))
-    return "damaged";
-  return "other";
-}
-var NO_EXTRACTION_JOB_OUTCOME = Object.freeze({
-  status: "skipped_unsupported",
-  lastErrorKind: "no_extractor",
-  warnings: [],
-  policyDecision: "index_allowed"
-});
-function unreadHoldDisposition(outcome, contentAllowed = true) {
-  if (!contentAllowed)
-    return { kind: "by_choice" };
-  if (!outcome || outcome.status === "indexed")
-    return { kind: "waiting" };
-  if (outcome.status === "blocked_policy" || outcome.status === "metadata_only" && (outcome.policyDecision === "metadata_only" || outcome.lastErrorKind === "store_item_metadata_only")) {
-    return { kind: "by_choice" };
+class HelperProcess {
+  child;
+  device = "cpu";
+  vision = false;
+  nextId = 1;
+  pending = new Map;
+  stderr = "";
+  requestTimeoutMs;
+  stopTimeoutMs;
+  exited = false;
+  constructor(child, options) {
+    this.child = child;
+    this.requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
+    this.stopTimeoutMs = options.stopTimeoutMs ?? 5000;
   }
-  const specific = (kind) => !["other", "no_text"].includes(unreadableFileReason(kind));
-  const errorKind = [outcome.lastErrorKind, ...outcome.warnings, outcome.status].find((kind) => kind !== undefined && specific(kind)) ?? outcome.lastErrorKind ?? outcome.warnings[0] ?? outcome.status;
-  return { kind: "cannot_read", errorKind, reason: unreadableFileReason(errorKind) };
+  failAll(reason, why = "stopped") {
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+      helperReplacements += 1;
+      console.warn(`[built-in embedding] helper replaced (${why}) after ${Math.round((Date.now() - pending.startedAt) / 1000)} s on a batch of ${pending.count} item(s), ${pending.pictures} with a picture, ${pending.done.size} already answered; replacement ${helperReplacements} in this process.`);
+      pending.reject(new LiteRtHelperReplacedError(reason.message, why, pending.done));
+    }
+    this.pending.clear();
+  }
+  static start(options, device) {
+    const settings = {
+      library: options.library,
+      model: options.model,
+      cacheDir: options.cacheDir,
+      threads: options.threads,
+      device,
+      maxInputTokens: options.maxInputTokens,
+      ...options.visionTokensPerImage !== undefined ? { visionTokensPerImage: options.visionTokensPerImage } : {}
+    };
+    const child = spawn(options.bunPath ?? resolveBun(), [options.helperPath ?? helperPath(), JSON.stringify(settings)], {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: helperEnvironment()
+    });
+    const helper = new HelperProcess(child, options);
+    child.stdin.on("error", (error) => {
+      helper.exited = true;
+      helper.failAll(new Error(`The built-in search model stopped: ${error.message}.`));
+      child.kill("SIGKILL");
+    });
+    return new Promise((resolve, reject) => {
+      let started = false;
+      const timer = setTimeout(() => {
+        if (started)
+          return;
+        child.kill("SIGKILL");
+        reject(new Error("The built-in search model took too long to start."));
+      }, options.startTimeoutMs ?? 5 * 60000);
+      child.stderr.on("data", (chunk) => {
+        helper.stderr = (helper.stderr + chunk.toString("utf8")).slice(-4000);
+      });
+      createInterface({ input: child.stdout }).on("line", (line) => {
+        let message;
+        try {
+          message = JSON.parse(line);
+        } catch {
+          return;
+        }
+        if (!started) {
+          if (message.ready) {
+            started = true;
+            clearTimeout(timer);
+            helper.device = message.device === "gpu" ? "gpu" : "cpu";
+            helper.vision = message.vision === true;
+            resolve(helper);
+          } else if (message.fatal) {
+            started = true;
+            clearTimeout(timer);
+            reject(Object.assign(new Error(message.fatal), { fatal: true }));
+          }
+          return;
+        }
+        helper.settle(message);
+      });
+      child.on("error", (error) => {
+        if (!started) {
+          started = true;
+          clearTimeout(timer);
+          reject(error);
+        }
+      });
+      child.on("exit", () => {
+        helper.exited = true;
+      });
+      child.on("close", (code, signal) => {
+        helper.exited = true;
+        const reason = new Error(`The built-in search model stopped (${signal ?? `exit ${code}`})${helper.stderr ? `: ${helper.stderr.trim().split(`
+`).at(-1)}` : ""}.`);
+        if (!started) {
+          started = true;
+          clearTimeout(timer);
+          reject(reason);
+        }
+        if (helper.replacing)
+          return;
+        helper.failAll(reason, signal ?? `exit ${code}`);
+      });
+    });
+  }
+  replacing = false;
+  watch(id) {
+    return setTimeout(() => {
+      const pending = this.pending.get(id);
+      if (!pending)
+        return;
+      const cpuMs = helperCpuMs(this.child.pid);
+      const working = pending.progressed || cpuMs !== undefined && pending.cpuMs !== undefined && cpuMs - pending.cpuMs >= Math.min(HELPER_WORKING_CPU_MS, this.requestTimeoutMs / 4);
+      if (working) {
+        pending.progressed = false;
+        pending.cpuMs = cpuMs;
+        pending.timer = this.watch(id);
+        return;
+      }
+      this.replacing = true;
+      this.exited = true;
+      this.child.kill("SIGKILL");
+      this.failAll(new Error("The built-in search model stopped responding and was restarted."), "no answer and no processor time for a whole window");
+    }, this.requestTimeoutMs);
+  }
+  embed(items) {
+    if (this.exited)
+      return Promise.reject(new Error("The built-in search model is not running."));
+    const id = this.nextId++;
+    return withMemoryPayload("embed", () => new Promise((resolve, reject) => {
+      const pictures = items.filter((item) => typeof item !== "string" && item.image).length;
+      this.pending.set(id, {
+        resolve,
+        reject,
+        count: items.length,
+        pictures,
+        timer: this.watch(id),
+        startedAt: Date.now(),
+        done: new Map,
+        progressed: false,
+        cpuMs: helperCpuMs(this.child.pid)
+      });
+      const request = items.every((item) => typeof item === "string") ? { id, texts: items } : { id, items: items.map((item) => typeof item === "string" ? { text: item } : item) };
+      this.child.stdin.write(`${memoryPayloadJson(request)}
+`);
+    }));
+  }
+  settle(message) {
+    const pending = message.id === undefined ? undefined : this.pending.get(message.id);
+    if (!pending || message.id === undefined)
+      return;
+    if (typeof message.progress === "number") {
+      pending.progressed = true;
+      if (message.itemFailed)
+        pending.done.set(message.progress, new Float32Array(0));
+      else if (message.vector) {
+        const bytes = Buffer.from(message.vector, "base64");
+        pending.done.set(message.progress, new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)));
+      }
+      return;
+    }
+    this.pending.delete(message.id);
+    clearTimeout(pending.timer);
+    if (!message.error && Array.isArray(message.unsupported) && message.unsupported.length > 0) {
+      pending.reject(new LiteRtImagesUnavailableError(message.unsupported));
+      return;
+    }
+    const failed = new Set(Array.isArray(message.failed) ? message.failed : []);
+    if (!message.error && failed.size === pending.count) {
+      pending.resolve(Array.from({ length: pending.count }, () => new Float32Array(0)));
+      return;
+    }
+    if (message.error || !message.vectors || !message.dimension) {
+      pending.reject(message.error && message.pictures ? new LiteRtPictureEngineFaultError(message.error) : new Error(message.error ?? "The built-in search model returned no vectors."));
+      if (message.native) {
+        this.exited = true;
+        this.child.kill("SIGKILL");
+      }
+      return;
+    }
+    const bytes = Buffer.from(message.vectors, "base64");
+    const all = new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+    const vectors = Array.from({ length: pending.count }, (_, index) => failed.has(index) ? new Float32Array(0) : all.subarray(index * message.dimension, (index + 1) * message.dimension));
+    if (vectors.some((vector, index) => !failed.has(index) && vector.length !== message.dimension)) {
+      pending.reject(new Error("The built-in search model returned the wrong number of values."));
+      return;
+    }
+    pending.resolve(vectors);
+  }
+  async stop() {
+    if (this.exited)
+      return;
+    const exited = new Promise((resolve) => this.child.once("close", () => resolve()));
+    this.child.stdin.end();
+    const timer = setTimeout(() => this.child.kill("SIGKILL"), this.stopTimeoutMs);
+    await exited;
+    clearTimeout(timer);
+  }
 }
-var TOKEN_ALPHABET = new Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_");
-var DEFAULT_TOKEN_TTL_MS = 30 * 60000;
-var CURSOR_TIME_ALPHABET = new Set("0123456789TZ:.+-");
-
-// src/workers/file-extraction/job-names.ts
-import { existsSync as existsSync13 } from "node:fs";
-import { Database as Database2 } from "bun:sqlite";
-var CLEAR_NAMES_BUSY_TIMEOUT_MS = 1e4;
-function defaultFileExtractionJobsDbPath(env = process.env) {
-  return sharedDataPath("file-extraction-jobs", env);
-}
-var SECRET_ITEM_REDACTIONS_TABLE = "secret_item_redactions";
-var SECRET_ITEM_REDACTION_CLAIMS_TABLE = "secret_item_redaction_claims";
-var SECRET_RESTORED_REREADS_TABLE = "secret_restored_rereads";
-var REREAD_AFTER_REVIVE = "revived";
-var openLedgerPaths = new Map;
-function extractionJobsDbPaths(env = process.env) {
-  return [...new Set([defaultFileExtractionJobsDbPath(env), ...openLedgerPaths.keys()])];
-}
-function jobLedgerPathsToVisit(recorded, env = process.env) {
-  const root = olympusDataRoot(env);
-  const inside = (path) => path === ":memory:" || openLedgerPaths.has(path) || pathResolvesWithin(root, path);
-  const unique = [...new Set(recorded)];
+async function startLiteRtEmbedder(options) {
+  if (isMainThread4 && !options.gpuAvailable) {
+    const handle = modelThreadHandleId();
+    let state = await modelThread().call({ kind: "litert-start", handle, options });
+    return {
+      get device() {
+        return state.device;
+      },
+      get vision() {
+        return state.vision;
+      },
+      async embed(items) {
+        try {
+          const result = await modelThread().call({ kind: "litert-run", handle, items });
+          state = result;
+          return result.vectors;
+        } catch (error) {
+          const failure = error;
+          if (failure.device !== undefined && failure.vision !== undefined)
+            state = { device: failure.device, vision: failure.vision };
+          if (failure.name === "LiteRtImagesUnavailableError")
+            throw new LiteRtImagesUnavailableError(failure.indexes ?? []);
+          if (failure.name === "LiteRtPictureEngineFaultError")
+            throw new LiteRtPictureEngineFaultError(failure.message);
+          throw error;
+        }
+      },
+      async release() {
+        await modelThread().call({ kind: "litert-release", handle });
+      }
+    };
+  }
+  let device = options.device === "auto" && process.platform === "linux" && !(options.gpuAvailable ?? linuxGpuAvailable)() ? "cpu" : options.device;
+  let helper;
+  try {
+    helper = await HelperProcess.start(options, device);
+  } catch (error) {
+    if (device === "cpu" || error.fatal)
+      throw error;
+    device = "cpu";
+    helper = await HelperProcess.start(options, device);
+  }
+  const releaseAtExit = () => {
+    if (!helper.exited)
+      helper.child.kill("SIGKILL");
+  };
+  process.once("exit", releaseAtExit);
   return {
-    visit: [...new Set([...extractionJobsDbPaths(env), ...unique.filter(inside)])],
-    outside: unique.filter((path) => !inside(path))
+    get device() {
+      return helper.device;
+    },
+    get vision() {
+      return helper.vision;
+    },
+    async embed(items) {
+      if (helper.exited) {
+        if (helper.device === "gpu")
+          device = "cpu";
+        helper = await HelperProcess.start(options, device);
+      }
+      const pictures = items.flatMap((item, index) => typeof item !== "string" && item.image ? [index] : []);
+      if (pictures.length > 0 && !helper.vision)
+        throw new LiteRtImagesUnavailableError(pictures);
+      try {
+        return await helper.embed(items);
+      } catch (error) {
+        if (!(error instanceof LiteRtHelperReplacedError))
+          throw error;
+        if (helper.device === "gpu")
+          device = "cpu";
+        helper = await HelperProcess.start(options, device);
+        const rest = items.map((_, index) => index).filter((index) => !error.done.has(index));
+        const restPictures = rest.filter((index) => pictures.includes(index));
+        if (restPictures.length > 0 && !helper.vision)
+          throw new LiteRtImagesUnavailableError(restPictures);
+        const vectors = rest.length > 0 ? await helper.embed(rest.map((index) => items[index])) : [];
+        const resumed = new Map(rest.map((index, row) => [index, vectors[row]]));
+        return items.map((_, index) => error.done.get(index) ?? resumed.get(index));
+      }
+    },
+    async release() {
+      process.removeListener("exit", releaseAtExit);
+      await helper.stop();
+    }
   };
 }
-function clearExtractionJobNames(dbPath, item, options = {}) {
-  if (dbPath === ":memory:" || !existsSync13(dbPath))
-    return { cleared: 0, durable: true };
-  const db = new Database2(dbPath, { readwrite: true, create: false });
+function linuxGpuAvailable(deviceDirectory = "/dev/dri") {
   try {
-    db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
-    const table = db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'extraction_jobs'`).get();
-    if (!table)
-      return { cleared: 0, durable: true };
-    return db.transaction(() => {
-      if (options.proceed && !options.proceed())
-        return { cleared: 0, durable: true };
-      const claims = claimsTableExists(db);
-      const durable = redactionsTableExists(db) && (options.claimant === undefined || claims);
-      const now = new Date().toISOString();
-      if (redactionsTableExists(db)) {
-        db.query(`
-          INSERT OR IGNORE INTO ${SECRET_ITEM_REDACTIONS_TABLE} (provider, account_scope, provider_item_id, local_item_id, redacted_at)
-          VALUES (?, ?, ?, ?, ?)
-        `).run(item.provider, item.accountScope, item.providerItemId, item.localItemId ?? "", now);
+    return readdirSync2(deviceDirectory).some((name) => {
+      if (!/^renderD[0-9]+$/.test(name))
+        return false;
+      let fd;
+      try {
+        fd = openSync8(join18(deviceDirectory, name), constants5.O_RDWR | constants5.O_NONBLOCK);
+        return fstatSync2(fd).isCharacterDevice();
+      } catch {
+        return false;
+      } finally {
+        if (fd !== undefined)
+          closeSync8(fd);
       }
-      if (options.claimant !== undefined && claims) {
-        db.query(`
-          INSERT OR IGNORE INTO ${SECRET_ITEM_REDACTION_CLAIMS_TABLE} (provider, account_scope, provider_item_id, claimant, claimed_at)
-          VALUES (?, ?, ?, ?, ?)
-        `).run(item.provider, item.accountScope, item.providerItemId, options.claimant, now);
-      }
-      const artifactItems = item.localItemId !== undefined ? "provider = ? AND account_scope = ? AND provider_item_id = ? AND local_item_id = ?" : "provider = ? AND account_scope = ? AND provider_item_id = ?";
-      const itemParams = item.localItemId !== undefined ? [item.provider, item.accountScope, item.providerItemId, item.localItemId] : [item.provider, item.accountScope, item.providerItemId];
-      if (artifactsTableExists(db)) {
-        db.query(`
-          DELETE FROM extraction_artifacts
-          WHERE (corpus_id, local_item_id) IN (SELECT corpus_id, local_item_id FROM extraction_jobs WHERE ${artifactItems})
-        `).run(...itemParams);
-      }
-      const cleared = item.localItemId !== undefined ? db.query(`
-            UPDATE extraction_jobs SET name = NULL
-            WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND local_item_id = ? AND name IS NOT NULL
-          `).run(item.provider, item.accountScope, item.providerItemId, item.localItemId).changes : db.query(`
-            UPDATE extraction_jobs SET name = NULL
-            WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND name IS NOT NULL
-          `).run(item.provider, item.accountScope, item.providerItemId).changes;
-      return { cleared, durable };
-    }).immediate();
-  } finally {
-    closeSqliteStore(db);
+    });
+  } catch {
+    return false;
   }
 }
-function retireExtractionJobRedaction(dbPath, item, claimant, stillSecret) {
-  if (dbPath === ":memory:" || !existsSync13(dbPath))
-    return { retired: 0, stillSecret: false };
-  const db = new Database2(dbPath, { readwrite: true, create: false });
-  try {
-    db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
-    if (!redactionsTableExists(db))
-      return { retired: 0, stillSecret: false };
-    return db.transaction(() => {
-      if (stillSecret())
-        return { retired: 0, stillSecret: true };
-      if (claimsTableExists(db)) {
-        db.query(`
-          DELETE FROM ${SECRET_ITEM_REDACTION_CLAIMS_TABLE}
-          WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND claimant = ?
-        `).run(item.provider, item.accountScope, item.providerItemId, claimant);
-        const heldElsewhere = db.query(`
-          SELECT 1 FROM ${SECRET_ITEM_REDACTION_CLAIMS_TABLE}
-          WHERE provider = ? AND account_scope = ? AND provider_item_id = ? LIMIT 1
-        `).get(item.provider, item.accountScope, item.providerItemId) !== null;
-        if (heldElsewhere)
-          return { retired: 0, stillSecret: false };
-      }
-      const retired = db.query(`
-        DELETE FROM ${SECRET_ITEM_REDACTIONS_TABLE}
-        WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
-      `).run(item.provider, item.accountScope, item.providerItemId).changes;
-      if (retired > 0 && rereadsTableExists(db)) {
-        db.query(`
-          INSERT INTO ${SECRET_RESTORED_REREADS_TABLE} (job_id)
-          SELECT job_id FROM extraction_jobs
-          WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
-            AND (status IN ('indexed', 'leased')
-              OR (status = 'blocked_policy' AND last_error_kind = 'store_item_secrets'))
-          ${rereadsHaveReason(db) ? "ON CONFLICT(job_id) DO UPDATE SET reason = NULL" : "ON CONFLICT(job_id) DO NOTHING"}
-        `).run(item.provider, item.accountScope, item.providerItemId);
-      }
-      return { retired, stillSecret: false };
-    }).immediate();
-  } finally {
-    closeSqliteStore(db);
+function helperPath() {
+  const here = dirname15(fileURLToPath2(import.meta.url));
+  for (const name of ["litert-helper.js", "litert-helper.ts"]) {
+    const candidate = join18(here, name);
+    if (existsSync13(candidate))
+      return candidate;
   }
+  throw new Error("The built-in search model helper is missing from this install.");
 }
-function artifactsTableExists(db) {
-  return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'extraction_artifacts'`).get() !== null;
-}
-function oweExtractionRereadAfterRevive(dbPath, item) {
-  if (dbPath === ":memory:" || !existsSync13(dbPath))
-    return 0;
-  const db = new Database2(dbPath, { readwrite: true, create: false });
-  try {
-    db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
-    if (!rereadsTableExists(db) || !rereadsHaveReason(db))
-      return 0;
-    return db.query(`
-      INSERT OR IGNORE INTO ${SECRET_RESTORED_REREADS_TABLE} (job_id, reason)
-      SELECT job_id, ? FROM extraction_jobs
-      WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
-        AND status IN ('indexed', 'leased')
-    `).run(REREAD_AFTER_REVIVE, item.provider, item.accountScope, item.providerItemId).changes;
-  } finally {
-    closeSqliteStore(db);
+function resolveBun() {
+  const bunName = process.platform === "win32" ? "bun.exe" : "bun";
+  const candidates = [
+    process.versions.bun ? process.execPath : undefined,
+    process.env.BUN_INSTALL ? join18(process.env.BUN_INSTALL, "bin", bunName) : undefined,
+    ...(process.env.PATH ?? "").split(delimiter2).filter(Boolean).map((directory) => join18(directory, bunName)),
+    join18(homedir9(), ".bun", "bin", bunName)
+  ];
+  for (const candidate of candidates) {
+    if (!candidate || !isAbsolute11(candidate))
+      continue;
+    try {
+      if (statSync10(candidate).isFile())
+        return candidate;
+    } catch {}
   }
-}
-function rereadsHaveReason(db) {
-  return db.query(`PRAGMA table_info(${SECRET_RESTORED_REREADS_TABLE})`).all().some((column) => column.name === "reason");
-}
-function rereadsTableExists(db) {
-  return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(SECRET_RESTORED_REREADS_TABLE) !== null;
-}
-function claimsTableExists(db) {
-  return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(SECRET_ITEM_REDACTION_CLAIMS_TABLE) !== null;
-}
-function redactionsTableExists(db) {
-  return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(SECRET_ITEM_REDACTIONS_TABLE) !== null;
+  throw new Error("The built-in search model needs Bun, and none was found.");
 }
 
-// src/core/source-index/keyword-languages.ts
-var profiles = new WeakMap;
-var SAMPLE_TARGET = 1024;
-var SAMPLE_LIMIT = 2048;
-var READ_BATCH = 500;
-var PROFILE_REUSE_MS = 10 * 60000;
-var DETECT_SLICE_MS = 15;
-function detectLanguage(text) {
-  return franc(text, { minLength: 40 });
+// src/workers/source-index/built-in-embedding/remote-litert-runtime.ts
+import { readFileSync as readFileSync15 } from "node:fs";
+
+class RemoteLiteRtEmbedder {
+  options;
+  device = "cpu";
+  vision = false;
+  verified = false;
+  retryAt = 0;
+  state = "unused";
+  slot = Promise.resolve();
+  url;
+  constructor(options) {
+    this.options = options;
+    try {
+      this.url = new URL(options.url);
+    } catch {
+      throw new Error("Invalid built-in embedding remote URL.");
+    }
+    const loopback = this.url.hostname === "localhost" || this.url.hostname === "[::1]" || /^127(?:\.\d{1,3}){3}$/.test(this.url.hostname);
+    if (this.url.protocol !== "https:" && !(this.url.protocol === "http:" && loopback) || this.url.username || this.url.password || this.url.search || this.url.hash) {
+      throw new Error("Built-in embedding remote requires HTTPS or loopback HTTP, without URL credentials, query or fragment.");
+    }
+  }
+  get active() {
+    return this.state === "remote";
+  }
+  async embed(items) {
+    const previous = this.slot;
+    let unlock;
+    this.slot = new Promise((resolve) => {
+      unlock = resolve;
+    });
+    await previous;
+    try {
+      const now = this.options.now ?? Date.now;
+      if (now() < this.retryAt)
+        throw new Error("Remote embedding cooling down.");
+      try {
+        if (items.length === 0 || items.length > 8 || items.some((item) => typeof item !== "string")) {
+          throw new Error("Remote embedding requires a text-only batch.");
+        }
+        if (!this.verified) {
+          const handshake = await this.request("/v1/handshake");
+          for (const [field, value] of Object.entries(this.options.identity)) {
+            if (handshake[field] !== value)
+              throw new Error("Remote embedding identity mismatch.");
+          }
+          if (handshake.device !== "cpu" && handshake.device !== "gpu")
+            throw new Error("Invalid remote device.");
+          if (handshake.vision !== false)
+            throw new Error("Invalid remote vision capability.");
+          this.device = handshake.device;
+          this.verified = true;
+        }
+        const response = await withMemoryPayload("embed", () => this.request("/v1/embed", items));
+        const identity = this.options.identity;
+        if (typeof response.vectors !== "string" || Object.entries(identity).some(([field, value]) => response[field] !== value)) {
+          throw new Error("Remote embedding identity mismatch.");
+        }
+        const bytes = Buffer.from(response.vectors, "base64");
+        if (bytes.length !== items.length * identity.dimension * 4)
+          throw new Error("Invalid remote vector length.");
+        const vectors = items.map((_, row) => Float32Array.from({ length: identity.dimension }, (_, column) => bytes.readFloatLE((row * identity.dimension + column) * 4)));
+        if (vectors.some((vector) => vector.some((value) => !Number.isFinite(value)) || !vector.some((value) => value !== 0))) {
+          throw new Error("Invalid remote vector values.");
+        }
+        this.transition("remote");
+        return vectors;
+      } catch {
+        this.verified = false;
+        this.retryAt = now() + 60000;
+        this.transition("local");
+        throw new Error("Remote embedding unavailable; using local helper.");
+      }
+    } finally {
+      unlock();
+    }
+  }
+  async release() {
+    this.verified = false;
+  }
+  transition(state) {
+    if (this.state === state)
+      return;
+    this.state = state;
+    console.warn(state === "remote" ? "[built-in embedding] document text embedding is using the remote helper." : "[built-in embedding] remote helper unavailable; document text embedding is using the local helper.");
+  }
+  async request(path, texts) {
+    const headers = {};
+    if (this.options.tokenFile) {
+      const token = readFileSync15(this.options.tokenFile, "utf8").trim();
+      if (!token)
+        throw new Error("Empty remote token file.");
+      headers.Authorization = `Bearer ${token}`;
+    }
+    if (texts)
+      headers["Content-Type"] = "application/json";
+    const response = await fetch(new URL(path, this.url), {
+      method: texts ? "POST" : "GET",
+      headers,
+      ...texts ? { body: memoryPayloadJson({ texts }) } : {},
+      signal: AbortSignal.timeout(this.options.requestTimeoutMs ?? 30000),
+      redirect: "error"
+    });
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new Error("Remote request failed.");
+    }
+    noteMemoryPayloadResponse(response);
+    return await response.json();
+  }
 }
-function storeKeywordLanguages(db) {
-  const steps = profileSteps(db);
-  let next = steps.next();
-  while (!next.done) {
-    const step = next.value;
-    if ("detect" in step) {
-      next = steps.next(step.detect.map(detectLanguage));
+
+// src/workers/source-index/built-in-embedding/runtime.ts
+import { realpathSync as realpathSync6 } from "node:fs";
+import { createRequire as createRequire5 } from "node:module";
+import { join as join19, sep as sep6 } from "node:path";
+function onnxRuntimeFromDirectory(runtimeDir) {
+  return {
+    async createSession(modelPath, options) {
+      const ort = requireOnnxRuntimeFromPack(runtimeDir);
+      const session = await ort.InferenceSession.create(modelPath, {
+        executionProviders: ["cpu"],
+        intraOpNumThreads: options.threads,
+        interOpNumThreads: 1,
+        executionMode: "sequential",
+        graphOptimizationLevel: "all",
+        enableCpuMemArena: false
+      });
+      const releaseAtExit = () => {
+        session.release().catch(() => {
+          return;
+        });
+      };
+      process.once("exit", releaseAtExit);
+      const wantsTokenTypes = session.inputNames.includes("token_type_ids");
+      const outputName = session.outputNames.includes("last_hidden_state") ? "last_hidden_state" : session.outputNames[0];
+      if (!outputName)
+        throw new Error("The built-in search model has no outputs.");
+      return {
+        async run(batch) {
+          const dims = [batch.batchSize, batch.sequenceLength];
+          const feeds = {
+            input_ids: new ort.Tensor("int64", batch.inputIds, dims),
+            attention_mask: new ort.Tensor("int64", batch.attentionMask, dims)
+          };
+          if (wantsTokenTypes)
+            feeds.token_type_ids = new ort.Tensor("int64", batch.tokenTypeIds, dims);
+          const output = (await session.run(feeds))[outputName];
+          if (!output || !(output.data instanceof Float32Array)) {
+            throw new Error("The built-in search model returned an unexpected output.");
+          }
+          return { data: output.data, dims: output.dims };
+        },
+        release: () => {
+          process.removeListener("exit", releaseAtExit);
+          return session.release();
+        }
+      };
+    }
+  };
+}
+function requireOnnxRuntimeFromPack(runtimeDir) {
+  const missing = () => new Error(`The ONNX Runtime pack is not installed in ${runtimeDir}.`);
+  let root;
+  let resolved;
+  const requireFromPack = createRequire5(join19(runtimeDir, "olympus-runtime.json"));
+  try {
+    root = realpathSync6(join19(runtimeDir, "node_modules"));
+    resolved = realpathSync6(requireFromPack.resolve("onnxruntime-node"));
+  } catch {
+    throw missing();
+  }
+  if (!resolved.startsWith(root + sep6))
+    throw missing();
+  return requireFromPack(resolved);
+}
+
+// src/workers/source-index/built-in-embedding/pair-tokenizer.ts
+function truncatePair(a, b, room, tiePolicy = "wordpiece") {
+  let keepA = a.length;
+  let keepB = b.length;
+  room = Math.max(0, room);
+  while (keepA + keepB > room) {
+    if (keepB > keepA || keepB === keepA && (tiePolicy === "wordpiece" || a.length > b.length))
+      keepB -= 1;
+    else
+      keepA -= 1;
+  }
+  return { a: a.slice(0, keepA), b: b.slice(0, keepB), truncated: keepA < a.length || keepB < b.length };
+}
+function pairWindows(a, b, room, overlap, tiePolicy = "wordpiece") {
+  const first = truncatePair(a, b, room, tiePolicy);
+  const size = first.b.length;
+  if (size === 0 || size >= b.length)
+    return { a: first.a, windows: [first.b], truncated: first.truncated };
+  const step = Math.max(1, size - Math.max(0, Math.min(Math.floor(overlap), size - 1)));
+  const windows = [];
+  for (let start = 0;; start += step) {
+    if (start + size >= b.length) {
+      windows.push(b.slice(b.length - size));
+      break;
+    }
+    windows.push(b.slice(start, start + size));
+  }
+  return { a: first.a, windows, truncated: first.a.length < a.length };
+}
+
+// src/workers/source-index/built-in-embedding/wordpiece.ts
+var MAX_INPUT_CHARS_PER_WORD = 100;
+var CONTINUING_SUBWORD_PREFIX = "##";
+
+class WordPieceTokenizer {
+  vocab;
+  clsId;
+  sepId;
+  unkId;
+  padId;
+  constructor(vocabText) {
+    const vocab = new Map;
+    const lines = vocabText.split(`
+`);
+    for (let index = 0;index < lines.length; index += 1) {
+      const token = lines[index].replace(/\r$/, "");
+      if (token.length === 0 && index === lines.length - 1)
+        continue;
+      if (!vocab.has(token))
+        vocab.set(token, index);
+    }
+    this.vocab = vocab;
+    this.clsId = requireToken(vocab, "[CLS]");
+    this.sepId = requireToken(vocab, "[SEP]");
+    this.unkId = requireToken(vocab, "[UNK]");
+    this.padId = requireToken(vocab, "[PAD]");
+  }
+  tokenize(text) {
+    const ids = [];
+    for (const word of preTokenize(normalize3(text))) {
+      this.wordPiece(word, ids);
+    }
+    return ids;
+  }
+  encode(text, maxLength) {
+    const content = this.tokenize(text);
+    const room = Math.max(0, maxLength - 2);
+    const truncated = content.length > room;
+    return {
+      ids: [this.clsId, ...truncated ? content.slice(0, room) : content, this.sepId],
+      truncated
+    };
+  }
+  encodePair(first, second, maxLength) {
+    const { a, b, truncated } = truncatePair(this.tokenize(first), this.tokenize(second), maxLength - 3);
+    const ids = [this.clsId, ...a, this.sepId, ...b, this.sepId];
+    const typeIds = ids.map((_, index) => index < a.length + 2 ? 0 : 1);
+    return { ids, typeIds, truncated };
+  }
+  encodePairWindows(first, second, maxLength, overlap) {
+    const { a, windows, truncated } = pairWindows(this.tokenize(first), this.tokenize(second), maxLength - 3, overlap);
+    return windows.map((b) => {
+      const ids = [this.clsId, ...a, this.sepId, ...b, this.sepId];
+      return { ids, typeIds: ids.map((_, index) => index < a.length + 2 ? 0 : 1), truncated };
+    });
+  }
+  wordPiece(word, out) {
+    const chars = Array.from(word);
+    if (chars.length > MAX_INPUT_CHARS_PER_WORD) {
+      out.push(this.unkId);
+      return;
+    }
+    const pieces = [];
+    let start = 0;
+    while (start < chars.length) {
+      let end = chars.length;
+      let found;
+      while (start < end) {
+        const piece = (start > 0 ? CONTINUING_SUBWORD_PREFIX : "") + chars.slice(start, end).join("");
+        const id = this.vocab.get(piece);
+        if (id !== undefined) {
+          found = id;
+          break;
+        }
+        end -= 1;
+      }
+      if (found === undefined) {
+        out.push(this.unkId);
+        return;
+      }
+      pieces.push(found);
+      start = end;
+    }
+    out.push(...pieces);
+  }
+}
+function requireToken(vocab, token) {
+  const id = vocab.get(token);
+  if (id === undefined)
+    throw new Error(`WordPiece vocabulary is missing ${token}.`);
+  return id;
+}
+var CONTROL = /[\p{Cc}\p{Cf}\p{Co}\p{Cn}]/u;
+var WHITESPACE = /[\s\p{Zs}]/u;
+var COMBINING_MARK = /\p{Mn}/gu;
+var PUNCTUATION = /\p{P}/u;
+function normalize3(text) {
+  let cleaned = "";
+  for (const char of text) {
+    const code = char.codePointAt(0);
+    if (code === 0 || code === 65533)
+      continue;
+    if (char === "\t" || char === `
+` || char === "\r") {
+      cleaned += " ";
       continue;
     }
-    const statement = db.query(step.sql);
-    next = steps.next(step.mode === "get" ? statement.get(...step.params) : statement.all(...step.params));
-  }
-  return next.value;
-}
-async function detectInSlices(texts) {
-  const out = [];
-  let sliceStart = performance.now();
-  for (const text of texts) {
-    if (performance.now() - sliceStart >= DETECT_SLICE_MS) {
-      await new Promise((resolve) => {
-        setImmediate(resolve);
-      });
-      sliceStart = performance.now();
+    if (CONTROL.test(char))
+      continue;
+    if (WHITESPACE.test(char)) {
+      cleaned += " ";
+      continue;
     }
-    out.push(detectLanguage(text));
+    cleaned += isChineseChar(code) ? ` ${char} ` : char;
   }
+  return cleaned.toLowerCase().normalize("NFD").replace(COMBINING_MARK, "");
+}
+function preTokenize(text) {
+  const words = [];
+  let current = "";
+  for (const char of text) {
+    if (char === " " || WHITESPACE.test(char)) {
+      if (current)
+        words.push(current);
+      current = "";
+    } else if (isPunctuation(char)) {
+      if (current)
+        words.push(current);
+      words.push(char);
+      current = "";
+    } else {
+      current += char;
+    }
+  }
+  if (current)
+    words.push(current);
+  return words;
+}
+function isPunctuation(char) {
+  const code = char.codePointAt(0);
+  if (code >= 33 && code <= 47 || code >= 58 && code <= 64 || code >= 91 && code <= 96 || code >= 123 && code <= 126) {
+    return true;
+  }
+  return PUNCTUATION.test(char);
+}
+function isChineseChar(code) {
+  return code >= 19968 && code <= 40959 || code >= 13312 && code <= 19903 || code >= 131072 && code <= 173791 || code >= 173824 && code <= 177983 || code >= 177984 && code <= 178207 || code >= 178208 && code <= 183983 || code >= 63744 && code <= 64255 || code >= 194560 && code <= 195103;
+}
+
+// src/workers/source-index/built-in-embedding/provider.ts
+var BUILT_IN_EMBEDDING_PROVIDER = "built-in";
+var BUILT_IN_EMBEDDING_THREADS_ENV = "OLYMPUS_BUILT_IN_EMBEDDING_THREADS";
+var BUILT_IN_EMBEDDING_DEVICE_ENV = "OLYMPUS_BUILT_IN_EMBEDDING_DEVICE";
+var BUILT_IN_EMBEDDING_REMOTE_URL_ENV = "OLYMPUS_BUILT_IN_EMBEDDING_REMOTE_URL";
+var BUILT_IN_EMBEDDING_REMOTE_TOKEN_FILE_ENV = "OLYMPUS_BUILT_IN_EMBEDDING_REMOTE_TOKEN_FILE";
+var MAX_WINDOWS_PER_DOCUMENT = 8;
+var MAX_BATCH_TOKENS = 2048;
+var MAX_BATCH_ROWS = 32;
+var LITERT_BATCH = 8;
+var RETRY_AFTER_FAILURE_MS = 2 * 60000;
+var PICTURE_ENGINE_FAULT_LIMIT = 2;
+var PICTURE_HOLD_MS = 60 * 60000;
+class BuiltInSourceEmbeddingProvider {
+  provider;
+  modelId;
+  dimension;
+  configHash;
+  epochId;
+  backend;
+  threads;
+  device;
+  remote;
+  spec;
+  env;
+  onnxOffThread;
+  runtimeFactory;
+  liteRtFactory;
+  install;
+  installerOptions;
+  now;
+  loading;
+  loaded;
+  priorityLoaded;
+  prioritySlotBusy = false;
+  priorityWaiting = [];
+  lastFailure;
+  slotBusy = false;
+  imageSupportWarned = false;
+  pictureFaults;
+  waiting = { query: [], document: [] };
+  runsOnThisComputer() {
+    return this.remote === undefined;
+  }
+  constructor(options = {}) {
+    this.spec = options.model ?? BUILT_IN_EMBEDDING_MODEL;
+    this.env = options.env ?? process.env;
+    this.provider = BUILT_IN_EMBEDDING_PROVIDER;
+    this.backend = "local";
+    this.modelId = this.spec.modelId;
+    this.dimension = this.spec.dimension;
+    this.threads = resolveThreads(options.threads, this.env);
+    this.device = resolveDevice(this.env);
+    this.onnxOffThread = isMainThread5 && !options.runtime;
+    this.runtimeFactory = options.runtime ?? ((installed) => onnxRuntimeFromDirectory(installed.runtimeDir));
+    this.liteRtFactory = options.liteRt ?? startLiteRtEmbedder;
+    this.install = options.install ?? installBuiltInEmbedding;
+    this.installerOptions = options.installerOptions ?? {};
+    this.now = options.now ?? Date.now;
+    const remoteUrl = this.env[BUILT_IN_EMBEDDING_REMOTE_URL_ENV]?.trim();
+    if (remoteUrl && this.spec.runtime === "litert") {
+      this.remote = new RemoteLiteRtEmbedder({
+        url: remoteUrl,
+        tokenFile: this.env[BUILT_IN_EMBEDDING_REMOTE_TOKEN_FILE_ENV],
+        now: this.now,
+        requestTimeoutMs: options.remoteRequestTimeoutMs,
+        identity: {
+          modelId: this.modelId,
+          weightsSha256: this.spec.model.sha256,
+          runtime: `litert-lm-${LITERT_RUNTIME_PACK.version}`,
+          dimension: this.dimension,
+          maxTokens: this.spec.maxTokens,
+          overflow: "chunk-and-average"
+        }
+      });
+    }
+    this.epochId = resolveEmbeddingEpoch({
+      provider: this.provider,
+      modelId: this.modelId,
+      dimension: this.dimension,
+      backend: this.backend,
+      ...options.epochId ? { epochOverride: options.epochId } : {}
+    });
+    this.configHash = createHash5("sha256").update(JSON.stringify({
+      provider: this.provider,
+      model: this.modelId,
+      repository: this.spec.repository,
+      revision: this.spec.revision,
+      weights: this.spec.model.sha256,
+      ...this.spec.vocabulary ? { vocabulary: this.spec.vocabulary.sha256 } : {},
+      ...this.spec.runtime === "litert" ? { runtime: `litert-lm-${LITERT_RUNTIME_PACK.version}` } : {},
+      dimension: this.dimension,
+      maxTokens: this.spec.maxTokens,
+      pooling: this.spec.pooling,
+      queryPrefix: this.spec.queryPrefix,
+      documentPrefix: this.spec.documentPrefix,
+      ...this.spec.runtime === "litert" ? { overflow: "chunk-and-average" } : { windows: MAX_WINDOWS_PER_DOCUMENT },
+      backend: this.backend
+    })).digest("hex");
+  }
+  status() {
+    const status = readBuiltInEmbeddingStatus(this.env, this.spec);
+    return this.remote ? { ...status, remoteDocuments: this.remote.active } : status;
+  }
+  async prepare() {
+    await this.load();
+  }
+  async warm() {
+    await this.load();
+    await this.embed([{ text: "warm up" }], { taskType: "RETRIEVAL_QUERY" });
+  }
+  async imageSupport() {
+    if (this.spec.runtime !== "litert" || !this.spec.vision)
+      return false;
+    if (this.picturesHeld())
+      return false;
+    const model = await this.ready();
+    const supported = model.kind === "litert" && model.embedder.vision;
+    if (!supported && !this.imageSupportWarned) {
+      this.imageSupportWarned = true;
+      console.warn("[built-in embedding] the image encoder could not start on this machine; photos keep keyword search and wait for their picture vectors.");
+    }
+    return supported;
+  }
+  async retry() {
+    if (!this.loading)
+      this.lastFailure = undefined;
+    await this.load();
+  }
+  async embed(inputs, options) {
+    if (inputs.length === 0)
+      return [];
+    if (options.taskType === "RETRIEVAL_QUERY" && !this.loaded) {
+      const status = this.status();
+      if (this.spec.runtime === "litert" || status.state !== "ready" && status.state !== "loading") {
+        this.load().catch(() => {
+          return;
+        });
+        const now = this.status();
+        throw new BuiltInEmbeddingNotReadyError(now, undefined, {
+          modelStarting: this.loading !== undefined && (now.state === "ready" || now.state === "loading")
+        });
+      }
+    }
+    const model = await this.ready();
+    return this.embedLoaded(model, inputs, options.taskType);
+  }
+  loadedOnly() {
+    return {
+      provider: this.provider,
+      modelId: this.modelId,
+      dimension: this.dimension,
+      configHash: this.configHash,
+      epochId: this.epochId,
+      backend: this.backend,
+      embed: async (inputs, options) => {
+        if (inputs.length === 0)
+          return [];
+        const model = this.loaded;
+        if (!model)
+          throw new BuiltInEmbeddingNotReadyError(this.status());
+        return this.embedLoaded(model, inputs, options.taskType);
+      }
+    };
+  }
+  async ready() {
+    if (this.loaded)
+      return this.loaded;
+    try {
+      return await this.load();
+    } catch (error) {
+      throw new BuiltInEmbeddingNotReadyError(this.status(), error);
+    }
+  }
+  load() {
+    if (this.loading)
+      return this.loading;
+    if (this.lastFailure && this.now() - this.lastFailure.atMs < RETRY_AFTER_FAILURE_MS) {
+      return Promise.reject(this.lastFailure.error);
+    }
+    const loading = this.loadOnce();
+    this.loading = loading;
+    loading.then((model) => {
+      this.loaded = model;
+      this.lastFailure = undefined;
+    }, (error) => {
+      this.lastFailure = { atMs: this.now(), error };
+      if (this.loading === loading)
+        this.loading = undefined;
+    });
+    return loading;
+  }
+  async loadOnce() {
+    const reporterOptions = {
+      env: this.env,
+      model: this.spec,
+      ...this.installerOptions.now ? { now: this.installerOptions.now } : {},
+      ...this.installerOptions.onProgress ? { onProgress: this.installerOptions.onProgress } : {}
+    };
+    let installed;
+    try {
+      installed = await this.install({ ...this.installerOptions, env: this.env, model: this.spec });
+    } catch (error) {
+      throw builtInEmbeddingOperationError(error);
+    }
+    try {
+      reportBuiltInEmbeddingState(reporterOptions, "loading");
+      let model;
+      if (this.spec.runtime === "litert") {
+        if (!installed.libraryPath)
+          throw new Error("the LiteRT-LM runtime is not installed.");
+        const settings = {
+          library: installed.libraryPath,
+          model: installed.modelPath,
+          cacheDir: join20(dirname16(installed.modelPath), "cache"),
+          threads: this.threads,
+          device: this.device,
+          maxInputTokens: this.spec.maxTokens,
+          ...this.spec.vision ? { visionTokensPerImage: this.spec.vision.tokensPerImage } : {}
+        };
+        const embedder = await this.liteRtFactory(settings);
+        model = { kind: "litert", embedder };
+        try {
+          const { visionTokensPerImage: _vision, ...querySettings } = settings;
+          this.priorityLoaded = { kind: "litert", embedder: await this.liteRtFactory(querySettings) };
+        } catch (error) {
+          await embedder.release().catch(() => {
+            return;
+          });
+          throw error;
+        }
+        if (this.spec.vision)
+          reportBuiltInEmbeddingVision(embedder.vision, { env: this.env, model: this.spec });
+      } else if (this.onnxOffThread) {
+        const handle = modelThreadHandleId();
+        await modelThread().call({ kind: "embedding-load", handle, installed, model: this.spec, env: this.env, threads: this.threads });
+        model = { kind: "thread", handle };
+      } else {
+        if (!installed.vocabularyPath)
+          throw new Error("the model vocabulary is not installed.");
+        const tokenizer = loadTokenizer(installed.vocabularyPath);
+        const session = await this.runtimeFactory(installed).createSession(installed.modelPath, { threads: this.threads });
+        model = { kind: "onnx", session, tokenizer };
+        try {
+          const querySession = await this.runtimeFactory(installed).createSession(installed.modelPath, { threads: this.threads });
+          this.priorityLoaded = { kind: "onnx", session: querySession, tokenizer };
+        } catch (error) {
+          await session.release?.().catch(() => {
+            return;
+          });
+          throw error;
+        }
+      }
+      reportBuiltInEmbeddingState(reporterOptions, "ready");
+      return model;
+    } catch (error) {
+      const failure = new BuiltInEmbeddingInstallError("runtime_load_failed", `The built-in search model could not start: ${error instanceof Error ? error.message : String(error)}`);
+      reportBuiltInEmbeddingState(reporterOptions, "failed", { reason: failure.reason, message: failure.message });
+      throw builtInEmbeddingOperationError(failure);
+    }
+  }
+  async withSlot(taskType, run) {
+    if (taskType === "RETRIEVAL_QUERY" && priorityQueryEmbeddingRequested()) {
+      if (this.prioritySlotBusy)
+        await new Promise((resolve) => this.priorityWaiting.push(resolve));
+      else
+        this.prioritySlotBusy = true;
+      try {
+        return await run();
+      } finally {
+        const next = this.priorityWaiting.shift();
+        if (next)
+          next();
+        else
+          this.prioritySlotBusy = false;
+      }
+    }
+    if (this.slotBusy) {
+      await new Promise((resolve) => this.waiting[taskType === "RETRIEVAL_QUERY" ? "query" : "document"].push(resolve));
+    } else {
+      this.slotBusy = true;
+    }
+    try {
+      return await run();
+    } finally {
+      const next = this.waiting.query.shift() ?? this.waiting.document.shift();
+      if (next)
+        next();
+      else
+        this.slotBusy = false;
+    }
+  }
+  async embedLoaded(model, inputs, taskType) {
+    if (model.kind === "thread") {
+      return modelThread().call({ kind: "embedding-run", handle: model.handle, inputs, taskType, priority: priorityQueryEmbeddingRequested() });
+    }
+    if (taskType === "RETRIEVAL_QUERY" && priorityQueryEmbeddingRequested()) {
+      if (!this.priorityLoaded)
+        throw new BuiltInEmbeddingNotReadyError(this.status());
+      model = this.priorityLoaded;
+    }
+    if (model.kind === "litert")
+      return this.embedLiteRt(model.embedder, inputs, taskType);
+    return withMemoryPayload("embed", () => this.embedOnnx(model, inputs, taskType));
+  }
+  async embedOnnx(model, inputs, taskType) {
+    const windowTokens = this.spec.maxTokens - 2;
+    const windows = [];
+    inputs.forEach((input, index) => {
+      const text = promptText(this.spec, input, taskType);
+      addMemoryPayloadText(text);
+      const ids = model.tokenizer.tokenize(text);
+      const maxWindows = taskType === "RETRIEVAL_QUERY" ? 1 : MAX_WINDOWS_PER_DOCUMENT;
+      const count = Math.max(1, Math.min(maxWindows, Math.ceil(ids.length / windowTokens)));
+      for (let window = 0;window < count; window += 1) {
+        windows.push({
+          input: index,
+          ids: [model.tokenizer.startId, ...ids.slice(window * windowTokens, (window + 1) * windowTokens), model.tokenizer.endId]
+        });
+      }
+    });
+    const sums = inputs.map(() => new Float64Array(this.dimension));
+    for (const batch of planBatches(windows)) {
+      const vectors = await this.withSlot(taskType, () => this.forward(model, batch));
+      batch.forEach((window, row) => {
+        const vector = vectors[row];
+        const weight = window.ids.length - 2;
+        const sum = sums[window.input];
+        for (let d = 0;d < this.dimension; d += 1)
+          sum[d] += vector[d] * Math.max(1, weight);
+      });
+    }
+    return sums.map((sum) => normalize4(sum));
+  }
+  async embedWithImageVectors(inputs) {
+    if (inputs.length === 0)
+      return { vectors: [], imageVectors: [] };
+    const model = await this.ready();
+    if (model.kind !== "litert" || !this.spec.vision) {
+      return { vectors: await this.embedLoaded(model, inputs, "RETRIEVAL_DOCUMENT"), imageVectors: inputs.map(() => {
+        return;
+      }) };
+    }
+    const extra = inputs.flatMap((input, index) => input.image && isMediaCachePath(input.image.path, input.image.sha256) ? [index] : []);
+    const { vectors, failed } = await this.liteRtVectors(model.embedder, [...this.liteRtItems(inputs, "RETRIEVAL_DOCUMENT"), ...extra.map((index) => ({ text: "", image: inputs[index].image.path }))], "RETRIEVAL_DOCUMENT", new Set(this.refusedPictures(inputs)));
+    const documentFailures = failed.filter((index) => index < inputs.length);
+    if (documentFailures.length > 0)
+      throw new SourceEmbeddingInputsFailedError(documentFailures, "image_unreadable");
+    const imageVectors = inputs.map(() => {
+      return;
+    });
+    extra.forEach((input, row) => {
+      imageVectors[input] = vectors[inputs.length + row];
+    });
+    return { vectors: vectors.slice(0, inputs.length), imageVectors };
+  }
+  async embedImageVectors(images) {
+    if (images.length === 0)
+      return [];
+    const model = await this.ready();
+    if (model.kind !== "litert" || !this.spec.vision) {
+      throw new SourceEmbeddingInputsFailedError(images.map((_, index) => index), "image_encoder_unavailable", "held");
+    }
+    const refused = new Set(images.flatMap((image, index) => isMediaCachePath(image.path, image.sha256) ? [] : [index]));
+    const live = images.flatMap((image, index) => refused.has(index) ? [] : [{ index, image }]);
+    const out = images.map(() => {
+      return;
+    });
+    if (live.length === 0)
+      return out;
+    const { vectors } = await this.liteRtVectors(model.embedder, live.map(({ image }) => ({ text: "", image: image.path })), "RETRIEVAL_DOCUMENT", new Set);
+    live.forEach(({ index }, row) => {
+      out[index] = vectors[row];
+    });
+    return out;
+  }
+  async embedPromptTexts(texts) {
+    if (texts.length === 0)
+      return [];
+    const model = await this.ready();
+    if (model.kind !== "litert")
+      throw new Error("The photo judge needs the LiteRT model.");
+    const { vectors, failed } = await this.liteRtVectors(model.embedder, texts, "RETRIEVAL_DOCUMENT", new Set);
+    if (failed.length > 0)
+      throw new Error("The photo judge's descriptions could not be embedded.");
+    return vectors;
+  }
+  refusedPictures(inputs) {
+    if (!this.spec.vision)
+      return [];
+    return inputs.flatMap((input, index) => input.image && !isMediaCachePath(input.image.path, input.image.sha256) ? [index] : []);
+  }
+  liteRtItems(inputs, taskType) {
+    return inputs.map((input) => {
+      const text = promptText(this.spec, input, taskType);
+      if (taskType !== "RETRIEVAL_DOCUMENT" || !this.spec.vision || !input.image)
+        return text;
+      return { text, image: input.image.path };
+    });
+  }
+  async embedLiteRt(embedder, inputs, taskType) {
+    const { vectors, failed } = await this.liteRtVectors(embedder, this.liteRtItems(inputs, taskType), taskType, new Set(taskType === "RETRIEVAL_DOCUMENT" ? this.refusedPictures(inputs) : []), new Set(inputs.flatMap((input, index) => input.image ? [index] : [])));
+    if (failed.length > 0)
+      throw new SourceEmbeddingInputsFailedError(failed, "image_unreadable");
+    return vectors;
+  }
+  async liteRtVectors(embedder, prompts, taskType, refused, localOnly = new Set) {
+    const out = [];
+    const pictures = prompts.flatMap((prompt, index) => typeof prompt !== "string" && !refused.has(index) ? [index] : []);
+    if (pictures.length > 0 && this.picturesHeld()) {
+      throw new SourceEmbeddingInputsFailedError(pictures, "image_encoder_failing", "held");
+    }
+    const failed = [...refused];
+    for (let offset = 0;offset < prompts.length; offset += LITERT_BATCH) {
+      const batch = prompts.slice(offset, offset + LITERT_BATCH).map((prompt, row) => refused.has(offset + row) && typeof prompt !== "string" ? prompt.text : prompt);
+      const batchPictures = batch.flatMap((prompt, row) => typeof prompt !== "string" ? [offset + row] : []);
+      let vectors;
+      try {
+        let remoteVectors;
+        if (this.remote && taskType === "RETRIEVAL_DOCUMENT" && batch.every((prompt) => typeof prompt === "string") && !prompts.slice(offset, offset + LITERT_BATCH).some((prompt, row) => typeof prompt !== "string" || localOnly.has(offset + row))) {
+          try {
+            remoteVectors = await this.remote.embed(batch);
+          } catch {}
+        }
+        vectors = remoteVectors ?? await this.withSlot(taskType, () => embedder.embed(batch));
+        if (batchPictures.length > 0)
+          this.pictureFaults = undefined;
+      } catch (error) {
+        if (error instanceof LiteRtPictureEngineFaultError) {
+          const count = (this.pictureFaults?.count ?? 0) + 1;
+          if (count < PICTURE_ENGINE_FAULT_LIMIT) {
+            this.pictureFaults = { count };
+            offset -= LITERT_BATCH;
+            continue;
+          }
+          this.pictureFaults = { count: 0, heldUntilMs: this.now() + PICTURE_HOLD_MS };
+          console.warn(`[built-in embedding] the image encoder keeps failing a known-good picture; photos wait ${PICTURE_HOLD_MS / 60000} minutes while text keeps embedding.`);
+          throw new SourceEmbeddingInputsFailedError(pictures, "image_encoder_failing", "held");
+        }
+        if (error instanceof LiteRtImagesUnavailableError) {
+          throw new SourceEmbeddingInputsFailedError(error.indexes.map((index) => offset + index), "image_encoder_unavailable", "held");
+        }
+        throw new OperationError("source_index_error", `The built-in search model failed while embedding: ${error instanceof Error ? error.message : String(error)}`, "This is a local runtime failure; Olympus restarts the model on the next try.");
+      }
+      for (const [row, vector] of vectors.entries()) {
+        if (vector.length === 0) {
+          failed.push(offset + row);
+          out.push(undefined);
+          continue;
+        }
+        if (vector.length !== this.dimension) {
+          throw new OperationError("source_index_error", `The built-in search model returned ${vector.length} values, expected ${this.dimension}.`);
+        }
+        out.push(refused.has(offset + row) ? undefined : normalize4(vector));
+      }
+    }
+    return { vectors: out, failed: [...new Set(failed)].sort((left, right) => left - right) };
+  }
+  picturesHeld() {
+    const heldUntilMs = this.pictureFaults?.heldUntilMs;
+    return heldUntilMs !== undefined && this.now() < heldUntilMs;
+  }
+  async forward(model, batch) {
+    const rows = batch.length;
+    const length = Math.max(...batch.map((window) => window.ids.length));
+    const inputIds = new BigInt64Array(rows * length);
+    const attentionMask = new BigInt64Array(rows * length);
+    const tokenTypeIds = new BigInt64Array(rows * length);
+    if (model.tokenizer.padId !== 0)
+      inputIds.fill(BigInt(model.tokenizer.padId));
+    batch.forEach((window, row) => {
+      window.ids.forEach((id, column) => {
+        inputIds[row * length + column] = BigInt(id);
+        attentionMask[row * length + column] = 1n;
+      });
+    });
+    let output;
+    try {
+      output = await model.session.run({ inputIds, attentionMask, tokenTypeIds, batchSize: rows, sequenceLength: length });
+    } catch (error) {
+      throw new OperationError("source_index_error", `The built-in search model failed while embedding: ${error instanceof Error ? error.message : String(error)}`, "This is a local runtime failure; restarting Olympus reloads the model.");
+    }
+    const expected = [rows, length, this.dimension];
+    if (output.dims.length !== expected.length || output.dims.some((size, axis) => size !== expected[axis])) {
+      throw new OperationError("source_index_error", `The built-in search model returned shape [${output.dims.join(", ")}], expected [${expected.join(", ")}].`);
+    }
+    const hidden = this.dimension;
+    return batch.map((window, row) => {
+      const vector = new Float64Array(hidden);
+      const base = row * length * hidden;
+      if (this.spec.pooling === "cls") {
+        for (let d = 0;d < hidden; d += 1)
+          vector[d] = output.data[base + d];
+      } else {
+        for (let token = 0;token < window.ids.length; token += 1) {
+          const offset = base + token * hidden;
+          for (let d = 0;d < hidden; d += 1)
+            vector[d] += output.data[offset + d];
+        }
+        for (let d = 0;d < hidden; d += 1)
+          vector[d] /= window.ids.length;
+      }
+      return Float64Array.from(normalize4(vector));
+    });
+  }
+}
+function loadTokenizer(path) {
+  const tokenizer = new WordPieceTokenizer(readFileSync16(path, "utf8"));
+  return {
+    tokenize: (text) => tokenizer.tokenize(text),
+    startId: tokenizer.clsId,
+    endId: tokenizer.sepId,
+    padId: tokenizer.padId
+  };
+}
+function promptText(spec, input, taskType) {
+  if (taskType === "RETRIEVAL_QUERY")
+    return `${spec.queryPrefix}${input.title ? `${input.title}
+` : ""}${input.text}`;
+  if (spec.documentPrefix.includes("{title}")) {
+    const title = input.title?.replace(/\s+/g, " ").trim() || "none";
+    return `${spec.documentPrefix.replace("{title}", () => title)}${input.text}`;
+  }
+  return `${spec.documentPrefix}${input.title ? `${input.title}
+` : ""}${input.text}`;
+}
+
+class BuiltInEmbeddingNotReadyError extends TransientSourceEmbeddingError {
+  status;
+  constructor(status, cause, options = {}) {
+    super(BUILT_IN_EMBEDDING_PROVIDER, "timeout", 0, 0, options);
+    this.name = "BuiltInEmbeddingNotReadyError";
+    this.status = status;
+    this.message = status.state === "failed" ? `The built-in search model is not available: ${status.failure?.message ?? "install failed"}.` : cause !== undefined ? `The built-in search model is not available: ${cause instanceof Error ? cause.message : String(cause)}.` : `The built-in search model is still being prepared (${status.percent}%).`;
+    this.suggestion = "Answers use keyword search until it is ready; nothing needs to be done.";
+  }
+}
+function builtInEmbeddingOperationError(error) {
+  if (error instanceof OperationError)
+    return error;
+  const message = error instanceof Error ? error.message : String(error);
+  const reason = error instanceof BuiltInEmbeddingInstallError ? error.reason : undefined;
+  return new OperationError("source_index_error", message, reason === "unsupported_platform" ? "Choose another embedding provider for this machine in the model settings." : reason === "download_failed" ? "Check the internet connection; Olympus tries the download again automatically." : reason === "disk_write_failed" ? "Free some disk space; Olympus tries again automatically." : "Olympus removes the bad file and downloads it again automatically.");
+}
+function planBatches(windows) {
+  const ordered = [...windows].sort((left, right) => right.ids.length - left.ids.length);
+  const batches = [];
+  let current = [];
+  let currentLength = 0;
+  for (const window of ordered) {
+    const length = Math.max(currentLength, window.ids.length);
+    if (current.length > 0 && (current.length >= MAX_BATCH_ROWS || length * (current.length + 1) > MAX_BATCH_TOKENS)) {
+      batches.push(current);
+      current = [];
+      currentLength = 0;
+    }
+    current.push(window);
+    currentLength = Math.max(currentLength, window.ids.length);
+  }
+  if (current.length > 0)
+    batches.push(current);
+  return batches;
+}
+function normalize4(vector) {
+  let norm = 0;
+  for (let index = 0;index < vector.length; index += 1)
+    norm += vector[index] * vector[index];
+  norm = Math.sqrt(norm);
+  const out = new Array(vector.length);
+  for (let index = 0;index < vector.length; index += 1)
+    out[index] = norm > 0 ? vector[index] / norm : 0;
   return out;
 }
-var sampling = new WeakMap;
-function storeKeywordLanguagesWith(db, read) {
-  const steps = profileSteps(db);
-  const first = steps.next();
-  if (first.done)
-    return Promise.resolve(first.value);
-  const pending = sampling.get(db);
-  if (pending)
-    return pending;
-  const run = (async () => {
-    let next = first;
-    while (!next.done) {
-      const step = next.value;
-      next = steps.next("detect" in step ? await detectInSlices(step.detect) : await read(step));
+function resolveDevice(env) {
+  const configured = env[BUILT_IN_EMBEDDING_DEVICE_ENV]?.trim().toLowerCase();
+  if (configured && configured !== "cpu" && configured !== "auto") {
+    throw new OperationError("config_error", `${BUILT_IN_EMBEDDING_DEVICE_ENV} must be "auto" or "cpu".`);
+  }
+  return configured === "cpu" ? "cpu" : "auto";
+}
+function resolveThreads(explicit, env) {
+  const configured = explicit ?? (env[BUILT_IN_EMBEDDING_THREADS_ENV]?.trim() ? Number(env[BUILT_IN_EMBEDDING_THREADS_ENV]) : undefined);
+  if (configured !== undefined) {
+    if (!Number.isSafeInteger(configured) || configured < 1) {
+      throw new OperationError("config_error", `${BUILT_IN_EMBEDDING_THREADS_ENV} must be a positive whole number.`);
     }
-    return next.value;
-  })().finally(() => sampling.delete(db));
-  sampling.set(db, run);
-  return run;
+    return configured;
+  }
+  return Math.max(1, Math.min(4, Math.floor(availableParallelism() / 2)));
 }
-function lastKeywordLanguages(db) {
-  return profiles.get(db)?.languages ?? [];
+var sharedProviders;
+function sharedBuiltInSourceEmbeddingProvider(options) {
+  const model = builtInEmbeddingModel(options.modelId);
+  if (!model) {
+    throw new OperationError("config_error", `This version of Olympus does not include the built-in embedding model "${options.modelId}".`, `Use one of ${BUILT_IN_EMBEDDING_MODELS.map((spec) => `"${spec.modelId}"`).join(", ")} for the built-in profile, or update Olympus.`);
+  }
+  const env = options.env ?? process.env;
+  const key = `${builtInEmbeddingPaths(env).root}\x00${options.modelId}`;
+  sharedProviders ??= new Map;
+  let provider = sharedProviders.get(key);
+  if (!provider) {
+    provider = new BuiltInSourceEmbeddingProvider({ env, model });
+    sharedProviders.set(key, provider);
+  }
+  return provider;
 }
-function* profileSteps(db) {
-  const revision = JSON.stringify([db.query("PRAGMA data_version").get(), db.query("SELECT total_changes() AS n").get()]);
-  const cached = profiles.get(db);
-  if (cached?.revision === revision)
-    return cached.languages;
-  if (cached && cached.large && Date.now() - cached.sampledAtMs < PROFILE_REUSE_MS)
-    return cached.languages;
-  const maxRowid = (yield { sql: "SELECT max(rowid) AS n FROM chunks", params: [], mode: "get" })?.n ?? 0;
-  const large = maxRowid > SAMPLE_LIMIT;
-  if (large && cached && Date.now() - cached.sampledAtMs < PROFILE_REUSE_MS)
-    return cached.languages;
-  const live = `SELECT c.rowid AS pk, c.content_hash AS hash FROM chunks c
-    JOIN items i ON i.item_pk = c.item_pk WHERE i.tombstoned = 0`;
-  let rows;
-  if (!large) {
-    rows = yield { sql: `${live} ORDER BY c.rowid LIMIT ${SAMPLE_LIMIT}`, params: [], mode: "all" };
-  } else {
-    const step = maxRowid / SAMPLE_TARGET;
-    const ids = Array.from({ length: SAMPLE_TARGET }, (_, k) => Math.min(maxRowid, Math.max(1, Math.floor(k * step + k * 0.6180339887 % 1 * step) + 1)));
-    rows = [];
-    for (let at = 0;at < ids.length; at += READ_BATCH) {
-      const batch = ids.slice(at, at + READ_BATCH);
-      rows.push(...yield { sql: `${live} AND c.rowid IN (${batch.map(() => "?").join(",")}) ORDER BY c.rowid`, params: batch, mode: "all" });
-    }
-  }
-  const signature = JSON.stringify(rows);
-  if (cached?.signature === signature) {
-    profiles.set(db, { ...cached, revision, large, sampledAtMs: Date.now() });
-    return cached.languages;
-  }
-  const detected = new Map;
-  for (const row of rows) {
-    const known = cached?.detected.get(row.hash);
-    if (known !== undefined)
-      detected.set(row.hash, known);
-  }
-  const unread = [...new Map(rows.filter((row) => !detected.has(row.hash)).map((row) => [row.hash, row.pk])).values()];
-  for (let at = 0;at < unread.length; at += READ_BATCH) {
-    const batch = unread.slice(at, at + READ_BATCH);
-    const texts = yield { sql: `SELECT c.rowid AS pk, c.content_hash AS hash, substr(c.bounded_text, 1, 1000) AS text FROM chunks c WHERE c.rowid IN (${batch.map(() => "?").join(",")})`, params: batch, mode: "all" };
-    const found = yield { detect: texts.map((text) => text.text ?? "") };
-    texts.forEach((text, index) => detected.set(text.hash, found[index] ?? "und"));
-  }
-  const counts = new Map;
-  for (const row of rows) {
-    const language = detected.get(row.hash) ?? "und";
-    if (language !== "und")
-      counts.set(language, (counts.get(language) ?? 0) + 1);
-  }
-  const languages = [...counts].filter(([, count]) => count / Math.max(1, rows.length) >= 0.05).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 6).map(([language]) => language).sort();
-  profiles.set(db, { revision, signature, languages, detected, sampledAtMs: Date.now(), large });
-  return languages;
-}
-// src/core/analyst-tinfoil.ts
-var TINFOIL_MODELS = ["kimi-k3-1-pro", "glm-5-3", "deepseek-v4-1-flash"];
-var DEFAULT_TINFOIL_MODEL = TINFOIL_MODELS[0];
-var TINFOIL_PRICES = Object.freeze({
-  "kimi-k3-1-pro": { input: 4, output: 20, cached: 0.4 },
-  "glm-5-3": { input: 1.8, output: 5.75, cached: 0.45 },
-  "deepseek-v4-1-flash": { input: 0.6, output: 1.45, cached: 0.01 },
-  "decision-medium": { input: 0.06, output: 0 }
+
+// src/workers/file-extraction/extractors/bounded-text.ts
+var DOC_MIME_TYPE = "application/msword";
+var XLS_MIME_TYPE = "application/vnd.ms-excel";
+var ODT_MIME_TYPE = "application/vnd.oasis.opendocument.text";
+var ODS_MIME_TYPE = "application/vnd.oasis.opendocument.spreadsheet";
+var ODP_MIME_TYPE = "application/vnd.oasis.opendocument.presentation";
+var EPUB_MIME_TYPE = "application/epub+zip";
+var TEXT_MIME_TYPES = new Set([
+  "application/json",
+  "application/x-ndjson",
+  "application/xml",
+  "text/csv",
+  "text/html",
+  "text/markdown",
+  "text/plain",
+  "text/tab-separated-values",
+  "text/xml"
+]);
+var TABLE_MIME_TYPES = new Set([
+  "text/csv",
+  "text/tab-separated-values"
+]);
+var IMAGE_MIME_TYPES = new Set([
+  "image/bmp",
+  "image/gif",
+  "image/heic",
+  "image/heif",
+  "image/jpeg",
+  "image/png",
+  "image/tiff",
+  "image/webp"
+]);
+var GENERIC_MIME_TYPES = new Set([
+  "application/octet-stream",
+  "binary/octet-stream",
+  "application/binary"
+]);
+
+// src/workers/file-extraction/extractors/command-runner.ts
+import { execFile, spawn as spawn2 } from "node:child_process";
+import { promisify } from "node:util";
+var execFileAsync = promisify(execFile);
+var resolvedCommands = new Map;
+
+// src/workers/file-extraction/extractors/compound-file.ts
+var MAX_READ_BYTES = 64 * 1024 * 1024;
+
+// src/workers/file-extraction/extractors/package-documents.ts
+var VOID_ELEMENTS = new Set([
+  "area",
+  "base",
+  "br",
+  "col",
+  "embed",
+  "hr",
+  "img",
+  "input",
+  "link",
+  "meta",
+  "param",
+  "source",
+  "track",
+  "wbr"
+]);
+var MARKUP_ENTITIES = Object.freeze({
+  AElig: "Æ",
+  Aacute: "Á",
+  Acirc: "Â",
+  Agrave: "À",
+  Alpha: "Α",
+  Aring: "Å",
+  Atilde: "Ã",
+  Auml: "Ä",
+  Beta: "Β",
+  Ccedil: "Ç",
+  Chi: "Χ",
+  Dagger: "‡",
+  Delta: "Δ",
+  ETH: "Ð",
+  Eacute: "É",
+  Ecirc: "Ê",
+  Egrave: "È",
+  Epsilon: "Ε",
+  Eta: "Η",
+  Euml: "Ë",
+  Gamma: "Γ",
+  Iacute: "Í",
+  Icirc: "Î",
+  Igrave: "Ì",
+  Iota: "Ι",
+  Iuml: "Ï",
+  Kappa: "Κ",
+  Lambda: "Λ",
+  Mu: "Μ",
+  Ntilde: "Ñ",
+  Nu: "Ν",
+  OElig: "Œ",
+  Oacute: "Ó",
+  Ocirc: "Ô",
+  Ograve: "Ò",
+  Omega: "Ω",
+  Omicron: "Ο",
+  Oslash: "Ø",
+  Otilde: "Õ",
+  Ouml: "Ö",
+  Phi: "Φ",
+  Pi: "Π",
+  Prime: "″",
+  Psi: "Ψ",
+  Rho: "Ρ",
+  Scaron: "Š",
+  Sigma: "Σ",
+  THORN: "Þ",
+  Tau: "Τ",
+  Theta: "Θ",
+  Uacute: "Ú",
+  Ucirc: "Û",
+  Ugrave: "Ù",
+  Upsilon: "Υ",
+  Uuml: "Ü",
+  Xi: "Ξ",
+  Yacute: "Ý",
+  Yuml: "Ÿ",
+  Zeta: "Ζ",
+  aacute: "á",
+  acirc: "â",
+  acute: "´",
+  aelig: "æ",
+  agrave: "à",
+  alefsym: "ℵ",
+  alpha: "α",
+  amp: "&",
+  and: "∧",
+  ang: "∠",
+  aring: "å",
+  asymp: "≈",
+  atilde: "ã",
+  auml: "ä",
+  bdquo: "„",
+  beta: "β",
+  brvbar: "¦",
+  bull: "•",
+  cap: "∩",
+  ccedil: "ç",
+  cedil: "¸",
+  cent: "¢",
+  chi: "χ",
+  circ: "ˆ",
+  clubs: "♣",
+  cong: "≅",
+  copy: "©",
+  crarr: "↵",
+  cup: "∪",
+  curren: "¤",
+  dArr: "⇓",
+  dagger: "†",
+  darr: "↓",
+  deg: "°",
+  delta: "δ",
+  diams: "♦",
+  divide: "÷",
+  eacute: "é",
+  ecirc: "ê",
+  egrave: "è",
+  empty: "∅",
+  emsp: " ",
+  ensp: " ",
+  epsilon: "ε",
+  equiv: "≡",
+  eta: "η",
+  eth: "ð",
+  euml: "ë",
+  euro: "€",
+  exist: "∃",
+  fnof: "ƒ",
+  forall: "∀",
+  frac12: "½",
+  frac14: "¼",
+  frac34: "¾",
+  frasl: "⁄",
+  gamma: "γ",
+  ge: "≥",
+  gt: ">",
+  hArr: "⇔",
+  harr: "↔",
+  hearts: "♥",
+  hellip: "…",
+  iacute: "í",
+  icirc: "î",
+  iexcl: "¡",
+  igrave: "ì",
+  image: "ℑ",
+  infin: "∞",
+  int: "∫",
+  iota: "ι",
+  iquest: "¿",
+  isin: "∈",
+  iuml: "ï",
+  kappa: "κ",
+  lArr: "⇐",
+  lambda: "λ",
+  lang: "〈",
+  laquo: "«",
+  larr: "←",
+  lceil: "⌈",
+  ldquo: "“",
+  le: "≤",
+  lfloor: "⌊",
+  lowast: "∗",
+  loz: "◊",
+  lrm: "‎",
+  lsaquo: "‹",
+  lsquo: "‘",
+  lt: "<",
+  macr: "¯",
+  mdash: "—",
+  micro: "µ",
+  middot: "·",
+  minus: "−",
+  mu: "μ",
+  nabla: "∇",
+  nbsp: " ",
+  ndash: "–",
+  ne: "≠",
+  ni: "∋",
+  not: "¬",
+  notin: "∉",
+  nsub: "⊄",
+  ntilde: "ñ",
+  nu: "ν",
+  oacute: "ó",
+  ocirc: "ô",
+  oelig: "œ",
+  ograve: "ò",
+  oline: "‾",
+  omega: "ω",
+  omicron: "ο",
+  oplus: "⊕",
+  or: "∨",
+  ordf: "ª",
+  ordm: "º",
+  oslash: "ø",
+  otilde: "õ",
+  otimes: "⊗",
+  ouml: "ö",
+  para: "¶",
+  part: "∂",
+  permil: "‰",
+  perp: "⊥",
+  phi: "φ",
+  pi: "π",
+  piv: "ϖ",
+  plusmn: "±",
+  pound: "£",
+  prime: "′",
+  prod: "∏",
+  prop: "∝",
+  psi: "ψ",
+  quot: '"',
+  rArr: "⇒",
+  radic: "√",
+  rang: "〉",
+  raquo: "»",
+  rarr: "→",
+  rceil: "⌉",
+  rdquo: "”",
+  real: "ℜ",
+  reg: "®",
+  rfloor: "⌋",
+  rho: "ρ",
+  rlm: "‏",
+  rsaquo: "›",
+  rsquo: "’",
+  sbquo: "‚",
+  scaron: "š",
+  sdot: "⋅",
+  sect: "§",
+  shy: "­",
+  sigma: "σ",
+  sigmaf: "ς",
+  sim: "∼",
+  spades: "♠",
+  sub: "⊂",
+  sube: "⊆",
+  sum: "∑",
+  sup: "⊃",
+  sup1: "¹",
+  sup2: "²",
+  sup3: "³",
+  supe: "⊇",
+  szlig: "ß",
+  tau: "τ",
+  there4: "∴",
+  theta: "θ",
+  thetasym: "ϑ",
+  thinsp: " ",
+  thorn: "þ",
+  tilde: "˜",
+  times: "×",
+  trade: "™",
+  uArr: "⇑",
+  uacute: "ú",
+  uarr: "↑",
+  ucirc: "û",
+  ugrave: "ù",
+  uml: "¨",
+  upsih: "ϒ",
+  upsilon: "υ",
+  uuml: "ü",
+  weierp: "℘",
+  xi: "ξ",
+  yacute: "ý",
+  yen: "¥",
+  yuml: "ÿ",
+  zeta: "ζ",
+  zwj: "‍",
+  zwnj: "‌",
+  apos: "'"
 });
 
-// src/workers/classification/sniffer.ts
-import { createHash as createHash10 } from "node:crypto";
+// src/workers/file-extraction/extractors/rtf.ts
+var RTF_MIME_TYPES = new Set(["application/rtf", "text/rtf"]);
+var SKIPPED_DESTINATIONS = new Set([
+  "fonttbl",
+  "colortbl",
+  "stylesheet",
+  "info",
+  "pict",
+  "object",
+  "listtable",
+  "listoverridetable",
+  "rsidtbl",
+  "generator",
+  "themedata",
+  "colorschememapping",
+  "datastore",
+  "latentstyles",
+  "xmlnstbl",
+  "header",
+  "headerl",
+  "headerr",
+  "headerf",
+  "footer",
+  "footerl",
+  "footerr",
+  "footerf",
+  "filetbl",
+  "revtbl",
+  "mmathPr",
+  "pgdsctbl",
+  "fldinst"
+]);
+var CODE_PAGE_LABELS = new Map([
+  [866, "ibm866"],
+  [874, "windows-874"],
+  [932, "shift_jis"],
+  [936, "gbk"],
+  [949, "euc-kr"],
+  [950, "big5"],
+  [1250, "windows-1250"],
+  [1251, "windows-1251"],
+  [1252, "windows-1252"],
+  [1253, "windows-1253"],
+  [1254, "windows-1254"],
+  [1255, "windows-1255"],
+  [1256, "windows-1256"],
+  [1257, "windows-1257"],
+  [1258, "windows-1258"],
+  [1e4, "macintosh"],
+  [10007, "x-mac-cyrillic"],
+  [20866, "koi8-r"],
+  [28591, "iso-8859-1"],
+  [28592, "iso-8859-2"],
+  [28595, "iso-8859-5"],
+  [54936, "gb18030"],
+  [65001, "utf-8"]
+]);
 
-// src/workers/source-index/built-in-reasoning/manifest.ts
-var GIB = 1024 ** 3;
-function unslothQwen(size, revision, bytes, sha256) {
-  const name = `Qwen3.5-${size}-Q4_K_M.gguf`;
-  return {
-    name,
-    url: `https://huggingface.co/unsloth/Qwen3.5-${size}-GGUF/resolve/${revision}/${name}`,
-    bytes,
-    sha256
-  };
-}
-var QWEN35_2B_REVISION = "f6d5376be1edb4d416d56da11e5397a961aca8ae";
-var QWEN35_4B_REVISION = "e87f176479d0855a907a41277aca2f8ee7a09523";
-var QWEN35_9B_REVISION = "3885219b6810b007914f3a7950a8d1b469d598a5";
-var QWEN35_2B = {
-  modelId: "qwen3.5-2b-q4_k_m-f6d5376",
-  displayName: "Qwen3.5 2B",
-  sizeClass: "small",
-  baseRepository: "Qwen/Qwen3.5-2B",
-  license: "Apache-2.0",
-  repository: "unsloth/Qwen3.5-2B-GGUF",
-  revision: QWEN35_2B_REVISION,
-  file: unslothQwen("2B", QWEN35_2B_REVISION, 1280835840, "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223"),
-  minimumMemoryBytes: 7 * GIB,
-  contextTokens: 12288
-};
-var QWEN35_4B = {
-  modelId: "qwen3.5-4b-q4_k_m-e87f176",
-  displayName: "Qwen3.5 4B",
-  sizeClass: "standard",
-  baseRepository: "Qwen/Qwen3.5-4B",
-  license: "Apache-2.0",
-  repository: "unsloth/Qwen3.5-4B-GGUF",
-  revision: QWEN35_4B_REVISION,
-  file: unslothQwen("4B", QWEN35_4B_REVISION, 2740937888, "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4"),
-  minimumMemoryBytes: 15 * GIB,
-  contextTokens: 12288
-};
-var QWEN35_9B = {
-  modelId: "qwen3.5-9b-q4_k_m-3885219",
-  displayName: "Qwen3.5 9B",
-  sizeClass: "large",
-  baseRepository: "Qwen/Qwen3.5-9B",
-  license: "Apache-2.0",
-  repository: "unsloth/Qwen3.5-9B-GGUF",
-  revision: QWEN35_9B_REVISION,
-  file: unslothQwen("9B", QWEN35_9B_REVISION, 5680522464, "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8"),
-  minimumMemoryBytes: 15 * GIB,
-  contextTokens: 12288
-};
-var LLAMA_CPP_RELEASE = "b11320";
-var LLAMA_CPP_BASE = `https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_CPP_RELEASE}`;
-var LLAMA_SERVER_RUNTIME = {
-  release: LLAMA_CPP_RELEASE,
-  license: "MIT",
-  archives: [
-    {
-      platform: "darwin-arm64",
-      name: `llama-${LLAMA_CPP_RELEASE}-bin-macos-arm64.tar.gz`,
-      url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-macos-arm64.tar.gz`,
-      bytes: 11827796,
-      sha256: "f6f337fc7d2ff9260f53177cf4fe6bbf6b0f7faa75a49fb224aaf66885a5c956",
-      gpu: true
-    },
-    {
-      platform: "linux-x64",
-      name: `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz`,
-      url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz`,
-      bytes: 17544875,
-      sha256: "ef1856938dc1434138ce53688791eb0d2d64cf46e309a0942a12bba3366c0919",
-      gpu: false
-    },
-    {
-      platform: "linux-arm64",
-      name: `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-arm64.tar.gz`,
-      url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-arm64.tar.gz`,
-      bytes: 13590823,
-      sha256: "88589b963d8e2ffd2d4df2f542ed7e301fb636b637c99081f5d58646aee20a9a",
-      gpu: false
-    }
-  ]
-};
-var QWEN3_ASR_06B_REVISION = "928ab958557df9aa2ef1c93e0e83c7ad0933fae2";
-function ggmlOrgAsrFile(name, bytes, sha256) {
-  return {
-    name,
-    url: `https://huggingface.co/ggml-org/Qwen3-ASR-0.6B-GGUF/resolve/${QWEN3_ASR_06B_REVISION}/${name}`,
-    bytes,
-    sha256
-  };
-}
-var QWEN3_ASR_06B = {
-  modelId: "qwen3-asr-0.6b-q8_0-928ab95",
-  displayName: "Qwen3-ASR 0.6B",
-  baseRepository: "Qwen/Qwen3-ASR-0.6B",
-  license: "Apache-2.0",
-  repository: "ggml-org/Qwen3-ASR-0.6B-GGUF",
-  revision: QWEN3_ASR_06B_REVISION,
-  files: [
-    ggmlOrgAsrFile("Qwen3-ASR-0.6B-Q8_0.gguf", 804749248, "bca259818b50ca7c4c05e9bdb35a5dc04fa039653a6d6f3f0f331f96f6aa1971"),
-    ggmlOrgAsrFile("mmproj-Qwen3-ASR-0.6B-Q8_0.gguf", 214392480, "41a342b5e4c514e968cb756de6cd1b7be39eff43c44c57a2ef5fc6522e36603d")
-  ],
-  minimumMemoryBytes: 7 * GIB,
-  contextTokens: 4096
-};
+// src/workers/file-extraction/extractors/apple-vision-ocr.ts
+var DEFAULT_APPLE_VISION_FILE_DEADLINE_MS = Number.POSITIVE_INFINITY;
+
+// src/workers/file-extraction/extractors/ocr-probe-fixture.ts
+var OCR_PROBE_IMAGE_BASE64 = [
+  "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYn",
+  "KSopGR8tMC0oMCUoKSj/wAALCABgAWgBAREA/8QAHAABAQEBAQEBAQEAAAAAAAAAAAgHBgkFBAMB/8QATxAAAQIFAQMGCAcLCwUA",
+  "AAAAAQIDAAQFBhEHCBIhEzFBUWFxFBUiNjd1gbMWGDJSkaHTVVZydJKUpLGywsMjJEJEYoKEk6K0wRcoQ+Hw/9oACAEBAAA/AKph",
+  "CEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQh",
+  "CEIQhCEIQhCEIQj89QnZanSMxOz77cvKS6C4664rdShIGSSeqJJ1P2nqpNTr0lYLTclIoJSJ+YaC3nf7SUK8lA7wT3c0Y7OaqX5O",
+  "Olx2766lROcMzq2h9CCBH17d1x1Cob6Ft3FMzrYPlNT+JhKx1Eq8oewgxU2iWuVL1DWml1FlFMuIJKgxvZbmABxLZPHI5yk8ccxO",
+  "DjY4lPaR1YvWztSV0q2614HICUad5LwVhzylZycrQT0DpjRNlu9bgvi0atO3RUPDplie5FtfIttbqOTScYQlIPEmNohGM7SlVvq2",
+  "Lel7isirrlpOWPJz8sJVl3CSfJdBWgngTukZxxB6CYw3TbaLu2XvKnfDOrieoLq+SmUmVZbLYVwDgKEA+ScEjpGenEWuhaXEJW2o",
+  "KQoZSpJyCOsR8a87jkbSteo1yqL3ZWSaLhAOCtXMlA7VEgDtMRE/tCamzc+4ZSuhoPOnkpdqQl17mTwQnLZUcZAGSTFcUdd1UXR+",
+  "dnroqhmrnbpz84t3kGkBhzkypKAlKQk7uBnIOTnowIj/AOMHqf8AfN+gSv2ca/syav3Nd18TdFu6qidQ9Jqdlf5u00UuIUCR5CU5",
+  "ykqPHPyYqCJe2mdYLntK+pai2jVRJNsyaXJr+btOlTiySB5aVYwkJPD50ZD8YPU/75v0CV+zi6LOnH6jaNDnZxzlJmZkWHnV4A3l",
+  "qbSScDgOJPNEh6ra26g0HUi4qXSrg5CQlJxbTLXgUurcSDwGVNkn2mOT+MHqf9836BK/Zx/VnaH1MbUCu4G3R1LkJf8A4QI1HSva",
+  "dfmaoxTb+lpVth5QQmpSySgNk8xcRkjd/tDGOo88VQkhSQpJBSRkEdMRXqprbqFQtR7jpdKuDkJGUnXGWWvApdW4gHgMqbJPtMUt",
+  "oLcFUurSehVmvTXhVSmeX5V7k0o3t19xCfJSAB5KQOA6I7+Jc2nNVLysrUGUpls1jwKSXTm31N+CsuZWXHATlaCeZI4Zxwjstle+",
+  "rjvmiV6Yumo+HPSsw220rkG2t1JSSR5CU59sahf13Uyx7Xm65WnCJZgAJbR8t1Z+ShI6SfqGSeAiML22iL4uGbd8WzoocgSdxiTA",
+  "3wOjecI3ie7dHZHFo1OvpDm+LxuDe6jUHSPoKsRodg7SV30KdaRcbia7TCcOJdSlD6R1pWkDJ/CBz1jnizbYr1PuegSVZoz4fkJt",
+  "vlG14weogjoIIII6CDH1IQhCEIRLG2ffD7Rp1myDpQ26gTs9un5Y3iG0HsykqI/BjKdnjTBOpF0veMi4ihU5KXJsoOFOlRO60D0Z",
+  "wST0AHmJEXPQLbotvSSJSiUuTkZdI3QlhoJz3nnJ7TkmOK1W0ety/KRMDwKWkK2Eky8+w2EKC+gOY+WnrzkjoxEEuJqVr3GtAU5J",
+  "1amTRTvJOFNOtqxwPYRHovpddSL1sGjV5ISl2aZ/lkJ5kupJSsDs3knHZiJD2wfTCv8AEGP3o1zYl8wq96z/AISIoqEfwn5SXqEj",
+  "MSc6yh+VmG1NOtLGUrQoYIPYQY87daLBmNPL4m6UoLXT3P5eReV/5GSeAJ+cn5J7RnmIim9krUT4R2qq2Km9vVWjoHIlR4uy3Mn2",
+  "oOE9xT2xm+1/qH43rzVn0x7MjTVcpOFJ4OTGOCe5AP0qPVH89kfTXx3XVXfV2c06mubsmhY4OzA473cjn/CI6jFVah+YFzerJn3S",
+  "o82KLIKqlZkKe2oJXNzDbCVHoKlBOfrjpdJ60u0tUrfqL+WRLTyWpjPApQo8m5nuSpUekUebuq1aXd2qVfqDGXhNTympfHEqQk8m",
+  "3j+6lMc1WpFVLrM/T1qC1ykw4wVDpKVFOfqj0o0+8wra9WS3ukxAmufpgu71g7+uKk2b7Ktar6M2/O1a2qJPTrpmOUmJmQadcXiY",
+  "cAypSSTgADuEdrcWjVg1ynvSrts06TUtJCX5FhMu42eggoA5uo5HWIgS8KI5bV1VeivOB1dPmnJYuAYC91RAVjoyBn2xeWzjWH63",
+  "ozbkxNrK32mlypUTkkNOKQn/AEpTEW64el67vWT37UWRsuegq2f8T/unY1SIm20PSvI+qGfevRoWxB5t3R+NtfsGPnbcc7MpbtGR",
+  "CiJRZmX1DoUtPJgfQFH8qOL2RpG0p68qgi6G5N6pBps0xqbAKFKyd/dCuBWPIwOfnI5otOYp8nMyhlZiUl3ZYjdLLjaVII6t0jES",
+  "HrPs+V9d8TEzp7QkvUSZbS9yaJllpLDpJCkJStYOOAUMcBvYHNiNc2XbVuyzLXq1Iu6nmSb8KD8oDMNO5Ck4WBuKVgZSk4OOc9sb",
+  "TCEIQhCPPvaZnFzmttylZJS0tplI6gllA/Xk+2KK2MpFuX0sm5oJ/lZqpOqUrsShCQPqP0xvUI8/9p+RbkdbbhDSd1DxZfx2qZQV",
+  "fXkxQOxbOLf0wqMsskiWqjgR2JU22cfTvH2xjG2D6YV/iDH70a5sS+YVe9Z/wkRRUIRmev2nSNQ7HeYlkJ8dSOZiQWeBKseU2T1L",
+  "Ax3hJ6IhS07iq9k3OxVqSsy1Sk1KTuuJ4cQUqQpJ5xzjEfqsm26pqDe8rSpVa3Z2feK35heVbic7zjqj2cT2nhzmPRm1qDI2xb0h",
+  "RaS1yUlJNBptPSetR6yTkk9JJj8eofmBc3qyZ90qPOiwvPm3fWUt71MdJr7Qvg9q9csolG6y7MmbaxzbroDnDsBUR7Ir34e/9uPw",
+  "v5X+deJ/l5/rOOS97Eh6AUL4Q6v21KKRvMszIm3c8260C5x7CUge2Oavvz4uL1jMe9VHoxp95hW16slvdJiBNc/TBd3rB39cULoH",
+  "rFYlq6T0SjV6ueCVKWL/ACrPgj7m7vPuKT5SUEHyVA8D0x09y7S1iU6nPOUeYm6vOBJ5JluWW0lSujeU4BgdoBPZEU16qTVer0/V",
+  "J0hU5PTC5hzdHDfWok4HVkx6E6GW3MWnpTb9KnkFucSyXn0HnQtxanCk9o3seyIe1w9L13esnv2osjZc9BVs/wCJ/wB07GqRE22h",
+  "6V5H1Qz716NC2IPNu6Pxtr9gxom0Rpw5qJZQap26K1T1mYk944DmRhTZPRvADB60jPDMQRUpCcpU+9JVKWelJxhW64y8goWg9RB4",
+  "iO0tXV++7YShum3FOLl0cAxNETDYHUAvO6O7EbdYm1VvvNS170dDaFEAztOzhPappRJ7yFdwim6LVZGt0qWqVJmmpuRmUb7TzRyl",
+  "Q/8AuBHODwj9sIQhCEI8/wDaekFyGtlw76SETBZmGz1hTSM/6goeyN+2Laq1NacVOm7w8Ikqgpak54hDiElJ9pSv6IoKEee+0jVG",
+  "qvrTcr0uoKaZdRKgg54ttpQr/UlUUdsZU9crpXOTTiSBOVN1xB60pQ2j9pKoxPbB9MK/xBj96Nc2JfMKves/4SIoqEIRBu1fSpOl",
+  "awzpkGUsicl2pp5KeYuKyFKx24ye0k9MaxsR0mSFAuGscik1BU0mU5U84aCEq3R1ZJyevA6opqOf1D8wLm9WTPulR50WF58276yl",
+  "vepjedtuhchclv11tPkzcsuUcI+c2reGe0hw/kxmovw/9ADZvKnwjxxyu7n+rbm/j/N4xpmxJQuXuK4a84jyZWWRKNk/OcVvKx2g",
+  "Nj8qMEvvz4uL1jMe9VHoxp95hW16slvdJiBNc/TBd3rB39cdLYOgF03vacjcNJn6IzJTfKcmiZedS4NxakHIS2RzpPTzR08tspXe",
+  "pY8JrVAbT0ltx5Z+gtiNa0p2daHZ1SYq1bmzW6owoLZCmuTYZUOZQTklSh0EnHTjODG6R5za6tlvWG7UnnNQcV9PH/mLD2WlBWhV",
+  "tgc6TMg/nLsatESbZygrVmTA/o0lkH/MdP8AzGj7EKCLVuVfQZ1tP0I/9xRU9UpGnp3p+dlpVPPl51KB9Zjmq1bllakU8rn5Wk11",
+  "hBLQmWVpWpsjiUh1B3kniOAPTGQ3Vsq29OBblt1iepjp4hqYSJhruHyVDvJMTdqjprXtN6qzKV1DLjMyFKlpqXUVNugYzjIBBGRk",
+  "EdPTG2bE1zzJqNctd5xS5XkPGDCSeDagpKF4799H5PfFZQhCEIQibNsTT9+rUuTu+lsl1+nNlieQgZPIZJSvuSSrPYrPMDE+aM6j",
+  "zmmt2JqTDZmZB9IZnZUKxyjecgjqUk8Qe8dMWpb2s1gVyRRMs3NT5QkZUzPuiWcQeohZGT3Ejtjh9W9oi3qFSJiUs6cbq9cdSUNu",
+  "sjeYlyf6ZVzKI5wBntxEd0Ok1S7LjlqdTm3JyqT72E5JJUonJUo9XOSTzDJj0fsK2pez7OpNAlCFNyLAbK8Y31niteO1RUfbEcbY",
+  "PphX+IMfvR1Oy3qbaNj2jVpK6Kv4DMvz3LNo8Ged3kcmkZyhCgOIMbR8YPTD75v0Ca+zh8YPTD75v0Ca+zjTabPS9Tp0rPyLnKyk",
+  "00h9le6U7yFAKScHBGQRzx+iIb2w/TAfV7H61xrOxL5h171l/CRFFxz+ofmBc3qyZ90qPOiwvPm3fWUt71MWftb0LxvpDMzaEbz1",
+  "LmWpsY590nk1ezC8/wB2ITi7dkqheJ9IJSaWjdeqkw7OKzz7ueTT7MIz/eiL778+Li9YzHvVR6MafeYVterJb3SYgTXP0wXd6wd/",
+  "XFibLXoKtvvmf9y7GrQhEIbWFvv0fV6fnVtkSlVabmmV44EhAQsZ6wpJOOpQ647XZf1ko1s0Ry1rrmPApdLynpOcUklsb3FTa8fJ",
+  "45IPNxOcYGaDqGrFgyEkqaeu6irbSM7rE0l5Z7kIJVn2RDetN7Iv/UKoVuXaWzJEJYlkL+UGkDAJ7ScnHRnEVbshUF+j6TibmkFC",
+  "6pOOTbYUMHkwEoT9O4SOwiMl2z7Wfkrxp9ytNkyVQYEu6sDgl5vOAT2oxj8E9UfJ2ZdXZKwZmdotxqcRRJ5wPJmEJK/B3sBJJSOJ",
+  "SoBOcZI3Rw54qsap2GZXwgXhQuTxnBnW9/8AIzvfVEpbUOqVKv6p0ynW4VPU2mlxZm1IKeWcVgeSDx3QE85xknsBPT7EtvTC69Xr",
+  "kWhSZRqWEg2ojgta1JWrH4IQnP4YiuYQhCEIR/i0JcQpDiQpChhSVDII6jE36nbMUhV5t6oWROtUp9wlSpGYBMvk/MUMlA7MKHVg",
+  "cIxud2c9SZd4oZo0vNpB+WzPMgH8tST9UfVt3ZjvqovoFVNOpDGfLU6+HVgdiW8gnvI74pvSXSS39NpVaqeFTlWeTuvVB9I31D5q",
+  "BzITnoHE9JOBGixOGvOhlzag36qt0aeozEoZZtncm3nUr3k5zwS2oY49cZ18VS+Purbf5w/9jD4ql8fdW2/zh/7GHxVL4+6tt/nD",
+  "/wBjFfWjTXqNalFpk0ptcxJSTEs4pskpKkNpSSCQDjI6hH1onHXrQ25dQb88d0Weo7Er4K2xuTbzqV7ySrPBLahjj1x2+ztpzV9N",
+  "raqdOrsxITD8zN+EIVJrWtITuJTg7yUnOQeiNXj5d1U92rWxWKbLKQl+ck3pdtThISFLQUgnAJxk9USjbOzHedLuSlVCYqdvKZlJ",
+  "tp9aUTDxUUoWFEDLQGcDrirLtozdw2tV6O7uhE/KOy2TzJK0kA+wnPsiQfiqXx91bb/OH/sYsC1KO3b9sUmjs4LchKtSwI6dxITn",
+  "24zEo3Lsx3nVLjqtQl6nbyWZubdfQlcw8FBKllQBw0eODFX2tT3aTbNIp0ypCn5OTZl3FNklJUhASSMgHGR1RMWpGzjd1z35Xa3I",
+  "VGgtys9NLfbQ8+8FhJPAKAaIz3ExvWjFqT1kabUi3qs7LPTsoXuUXLKUps77y1jBUAeZQ6OeO2hCOR1MsCi6h2+aXXG1BSCVy8y1",
+  "gOMLxzpPUekHgfYCJSuXZgvWnzKxRXqfV5bPkKS6GHCP7SV8Ae5Rj4DWzxqYtwJVb7bY+eqfl8fUsn6o07TfZbfbnmZ2/Z9hUugh",
+  "Xi+SUVFzsW4QMDrCc56xFUSzDMrLNS8s0hlhpAbbbQndShIGAABzACPl3bbdLuygzVHrsqmZkZgYUk8Ck9CknoUOgxKN57LFfk5p",
+  "xy0qlKVGTJJQ1NK5F5I6BnG6rvynuji/i8amcpu/B9vd+f4fL4/bz9UdpZmyxX5yabcu2pSlOkgQVtSquWfUOrON1PflXdFYWpbt",
+  "MtWgylHocsmWkJZO6hA4knpUo9KieJMfWhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhC",
+  "EIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQj//Z"
+].join("");
+
+// src/workers/file-extraction/extractors/ocr-capability.ts
+var OCR_READY_TTL_MS = 10 * 60000;
+
+// src/workers/file-extraction/extractors/input-limits.ts
+var DOCUMENT_READER_MAX_INPUT_BYTES = 256 * 1024 * 1024;
+var IMAGE_READER_MAX_INPUT_BYTES = 64 * 1024 * 1024;
+
+// src/workers/file-extraction/extractors/text.ts
+var ADDITIONAL_DOCUMENT_MIME_TYPES = new Set([
+  DOC_MIME_TYPE,
+  XLS_MIME_TYPE,
+  ODT_MIME_TYPE,
+  ODS_MIME_TYPE,
+  ODP_MIME_TYPE,
+  EPUB_MIME_TYPE
+]);
 
 // src/workers/classification/engine.ts
 import { createHash as createHash7 } from "node:crypto";
@@ -13898,6 +13707,1780 @@ function isShortPleasantry(haystack) {
   return PLEASANTRY_PATTERN.test(text);
 }
 
+// src/workers/file-extraction/extractors/remote-vlm.ts
+var DEFAULT_REMOTE_EXTRACTION_PROMPT = [
+  "Extract concise evidence text from this secure-local document for private indexing.",
+  "Return only visible or directly readable content.",
+  "For tables, reports, receipts, screenshots, or scans, preserve labels, values, dates, units, and row context.",
+  "Do not infer private facts beyond the document."
+].join(" ");
+
+// src/workers/file-extraction/extractors/vlm.ts
+var DEFAULT_VLM_PROMPT = [
+  "Describe the visible content for secure-local retrieval.",
+  "Focus on document layout, headings, labels, diagrams, tables, handwriting, screenshots, and any clearly legible text.",
+  "Do not infer private facts beyond what is visible."
+].join(" ");
+var DEFAULT_VLM_PDF_PROMPT = [
+  "Faithfully transcribe this scanned PDF page for secure-local indexing.",
+  "Return visible text only. Preserve headings, table rows, amounts, dates, identifiers, labels, and row/column relationships.",
+  "Do not summarize, omit low-confidence visible text, or infer facts that are not visible."
+].join(" ");
+var VLM_PDF_PROBE_IMAGE_DATA_URL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+var VLM_PDF_PROBE_IMAGE_BASE64 = stripDataUrlPrefix(VLM_PDF_PROBE_IMAGE_DATA_URL);
+function stripDataUrlPrefix(dataUrl) {
+  return dataUrl.replace(/^data:[^,]+,/, "");
+}
+
+// src/workers/local-pacing.ts
+var GO_EASY_IDLE_FULL_SPEED_MS = 5 * 60000;
+var GO_EASY_LOCAL_WORK_RECENT_MS = 3 * 60000;
+
+// src/core/embedding-sweep-idle.ts
+var EMBEDDING_HOLD_REASONS = [
+  "held_for_judgment",
+  "held_after_decision",
+  "held_while_text_is_unread",
+  "held_while_moving",
+  "held_for_other_reasons"
+];
+var INVENTORY_FIELDS = [
+  "pending_chunks",
+  "eligible_chunks",
+  "skipped_held_chunks",
+  "skipped_moving_chunks",
+  "skipped_hidden_chunks",
+  "skipped_metadata_chunks",
+  "skipped_failed_chunks",
+  "skipped_out_of_scope_chunks",
+  "skipped_held_recent_chunks",
+  "skipped_out_of_scope_recent_chunks",
+  "skipped_private_tier_chunks",
+  "skipped_retired_chunks",
+  "inventory_complete",
+  "inventory_ms",
+  ...EMBEDDING_HOLD_REASONS.flatMap((reason) => [`${reason}_chunks`, `${reason}_items`])
+];
+
+// src/workers/engine-split/sqlite-memory.ts
+var stores = new Set;
+var byDatabase = new WeakMap;
+function trackSqliteStoreMemory(db, hasTempStore) {
+  const store = { db: new WeakRef(db), hasTempStore };
+  byDatabase.set(db, store);
+  stores.add(store);
+}
+function untrackSqliteStoreMemory(db) {
+  const store = byDatabase.get(db);
+  if (store)
+    stores.delete(store);
+  byDatabase.delete(db);
+}
+
+// src/core/source-index/read-progress.ts
+import { AsyncLocalStorage as AsyncLocalStorage8 } from "node:async_hooks";
+var progress2 = new AsyncLocalStorage8;
+function noteSourceIndexReadProgress() {
+  const report = progress2.getStore();
+  if (!report)
+    return;
+  report();
+}
+function currentSourceIndexReadProgress() {
+  return progress2.getStore();
+}
+
+// src/core/source-size-limits.ts
+import { createHash as createHash8 } from "node:crypto";
+
+// src/core/boot-progress.ts
+import { existsSync as existsSync14, lstatSync as lstatSync7, mkdirSync as mkdirSync9, readdirSync as readdirSync3, readFileSync as readFileSync17, realpathSync as realpathSync7, rmSync as rmSync7 } from "node:fs";
+import { basename as basename5, dirname as dirname17, isAbsolute as isAbsolute12, join as join21, resolve as resolve8 } from "node:path";
+var WRITE_INTERVAL_MS = 1000;
+var current2;
+var front;
+function reportFrontStoreOpened(now = Date.now) {
+  stepFront(true, now);
+}
+function stepFront(storeOpened, now) {
+  try {
+    if (!front)
+      return;
+    front.progress = {
+      ...front.progress,
+      updatedAt: new Date(now()).toISOString(),
+      completedStores: front.progress.completedStores + (storeOpened ? 1 : 0)
+    };
+    write(front, now(), false);
+  } catch {}
+}
+function reportBootStep(env, event, now = Date.now) {
+  try {
+    if (!current2 || bootProgressPath(env) !== bootProgressPath(current2.env))
+      return;
+    const phaseChanged = event.phase !== current2.progress.phase || event.completedStore === true;
+    current2.progress = {
+      ...current2.progress,
+      phase: event.phase,
+      updatedAt: new Date(now()).toISOString(),
+      completedStores: current2.progress.completedStores + (event.completedStore ? 1 : 0)
+    };
+    if (event.storeId)
+      current2.progress.storeId = event.storeId;
+    else
+      delete current2.progress.storeId;
+    write(current2, now(), phaseChanged);
+  } catch {}
+}
+function write(target, nowMs, force) {
+  if (!force && nowMs - target.lastWriteMs < WRITE_INTERVAL_MS)
+    return;
+  try {
+    const path = sharedDataPath(target.file, target.env);
+    mkdirSync9(dirname17(path), { recursive: true, mode: 448 });
+    writePrivateFileAtomicSync(path, `${JSON.stringify(target.progress)}
+`);
+    target.lastWriteMs = nowMs;
+  } catch {}
+}
+function bootProgressPath(env) {
+  return sharedDataPath("boot-progress", env);
+}
+var STORELESS_FOLDERS = new Set(["models", "backup-staging"]);
+
+// src/core/engine-heartbeat.ts
+var ENGINE_HEARTBEAT_SCHEMA = "olympus.engine-heartbeat.v1";
+var LOOP_TICK_MS = 250;
+var STEP_BYTES = 200;
+var LOOP_LAG_BUCKETS_MS = [10, 25, 50, 100, 200, 300, 500, 1000, 2000, 5000, 1e4];
+var beat;
+var HEARTBEAT_WORKER_SOURCE = `
+import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
+self.onmessage = ({ data }) => {
+  const { sab, path, pid, role, writeMs, startedAt, metrics, tickMs, budgetMs } = data;
+  const ints = new Int32Array(sab, 0, 8);
+  const bytes = new Uint8Array(sab, 32, ${STEP_BYTES});
+  const buckets = new Int32Array(sab, 32 + ${STEP_BYTES}, ${LOOP_LAG_BUCKETS_MS.length + 1});
+  const decoder = new TextDecoder();
+  let lastTick = -1, lastTickAt = Date.now(), lastChange = -1, stepSince = Date.now();
+  let maxLag = 0;
+  // A loop held for good never reaches its own freeze log. This thread says
+  // so while it lasts: at 10 s, at a minute, then every five minutes.
+  let saidAt = 0, heldSaid = 0;
+  const sayHeld = (now, blockedMs, step) => {
+    if (blockedMs < 10000) { if (heldSaid) console.error(new Date(now).toISOString() + ' [olympus:control-path] ' + role + ' loop turned again after ' + Math.round(heldSaid / 1000) + ' s or more'); heldSaid = 0; saidAt = 0; return; }
+    const due = heldSaid === 0 || (heldSaid < 60000 && blockedMs >= 60000) || now - saidAt >= 300000;
+    if (!due) return;
+    heldSaid = blockedMs; saidAt = now;
+    console.error(new Date(now).toISOString() + ' [olympus:control-path] ' + role + ' loop held for ' + Math.round(blockedMs / 1000) + ' s and still held; step: ' + (step || 'none said'));
+  };
+  const write = () => {
+    const now = Date.now();
+    const tick = Atomics.load(ints, 0);
+    if (tick !== lastTick) { lastTick = tick; lastTickAt = now; }
+    const change = Atomics.load(ints, 2);
+    if (change !== lastChange) { lastChange = change; stepSince = now; }
+    const length = Atomics.load(ints, 1);
+    const step = length > 0 ? decoder.decode(bytes.slice(0, length)) : undefined;
+    // The open interval matters too: a loop may still be frozen when the
+    // harness ends. The low 32 wall-clock bits wrap safely over this short run.
+    const openLag = metrics ? Math.max(0, ((now - Atomics.load(ints, 6)) >>> 0) - tickMs) : 0;
+    maxLag = Math.max(maxLag, openLag, Atomics.load(ints, 3) / 1000);
+    const body = { schema: '${ENGINE_HEARTBEAT_SCHEMA}', pid, role, startedAt, writtenAt: new Date(now).toISOString(),
+      ...(metrics ? { loop_lag: { max_ms: maxLag, over_budget: Atomics.load(ints, 4) + (openLag >= budgetMs ? 1 : 0), beats: Atomics.load(ints, 5), buckets: Array.from(buckets, (_, i) => Atomics.load(buckets, i)) } } : {}),
+      blockedMs: Math.max(0, now - lastTickAt - ${LOOP_TICK_MS}),
+      ...(step ? { step, stepSince: new Date(stepSince).toISOString() } : {}) };
+    sayHeld(now, body.blockedMs, step);
+    try {
+      const partial = path + '.' + pid + '.tmp';
+      writeFileSync(partial, JSON.stringify(body) + '\\n', { mode: 0o600 });
+      renameSync(partial, path);
+    } catch {}
+  };
+  try { mkdirSync(dirname(path), { recursive: true, mode: 0o700 }); } catch {}
+  write();
+  setInterval(write, writeMs);
+};
+`;
+function setEngineStep(step) {
+  if (!beat)
+    return;
+  const encoded = new TextEncoder().encode(step ?? "").slice(0, STEP_BYTES);
+  beat.bytes.set(encoded);
+  Atomics.store(beat.ints, 1, encoded.length);
+  Atomics.add(beat.ints, 2, 1);
+}
+var STARTUP_CAP_BASE_MS = 30 * 60000;
+
+// src/core/sqlite-migrations.ts
+var SQLITE_SCHEMA_VERSION_TABLE = "schema_version";
+var CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION = 1;
+var ADDITIVE_MIGRATIONS = new WeakSet;
+var NAME = "[A-Za-z_][A-Za-z0-9_]*";
+var NEW_TABLE = new RegExp(`^CREATE\\s+TABLE\\s+(IF\\s+NOT\\s+EXISTS\\s+)?${NAME}\\s*\\(`, "i");
+var NEW_INDEX = new RegExp(`^CREATE\\s+INDEX\\s+(IF\\s+NOT\\s+EXISTS\\s+)?${NAME}\\s+ON\\s+${NAME}\\s*\\(\\s*${NAME}(\\s+(ASC|DESC))?(\\s*,\\s*${NAME}(\\s+(ASC|DESC))?)*\\s*\\)$`, "i");
+var NEW_COLUMN = new RegExp(`^ALTER\\s+TABLE\\s+${NAME}\\s+ADD\\s+(COLUMN\\s+)?${NAME}(\\s+(TEXT|INTEGER|REAL|BLOB|NUMERIC))?(\\s+DEFAULT\\s+(NULL|-?[0-9]+(\\.[0-9]+)?|'[^']*'))?$`, "i");
+function isAdditiveMigration(migration) {
+  return ADDITIVE_MIGRATIONS.has(migration);
+}
+function currentStoreMigrations() {
+  return [
+    {
+      version: CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION,
+      name: "record_existing_v1_schema",
+      up() {}
+    }
+  ];
+}
+function assertSqliteSchemaCanOpen(db, storeId, knownVersion = CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION) {
+  const currentVersion = readSqliteSchemaVersion(db, storeId);
+  if (currentVersion > knownVersion && readSqliteCompatibleVersion(db, storeId) > knownVersion) {
+    throw new OperationError("config_error", `SQLite store "${storeId}" is at schema_version ${currentVersion}, but this Olympus build only knows schema_version ${knownVersion}.`, "Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.");
+  }
+}
+function runSqliteMigrations(db, storeId, migrations = currentStoreMigrations(), options = {}) {
+  const ordered = validateMigrations(migrations);
+  const targetVersion = options.knownVersion ?? ordered.at(-1)?.version ?? CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION;
+  const currentVersion = readSqliteSchemaVersion(db, storeId);
+  if (currentVersion > targetVersion) {
+    if (readSqliteCompatibleVersion(db, storeId) <= targetVersion) {
+      return { storeId, currentVersion, targetVersion, dryRun: options.dryRun === true, applied: [], pending: [] };
+    }
+    throw new OperationError("config_error", `SQLite store "${storeId}" is at schema_version ${currentVersion}, but this Olympus build only knows schema_version ${targetVersion}.`, "Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.");
+  }
+  const pending = ordered.filter((migration) => migration.version > currentVersion).map(({ version, name }) => ({ version, name }));
+  if (options.dryRun === true) {
+    return {
+      storeId,
+      currentVersion,
+      targetVersion,
+      dryRun: true,
+      applied: [],
+      pending
+    };
+  }
+  const env = options.env ?? process.env;
+  const report = options.report ?? ((event) => reportBootStep(env, event));
+  const log = options.log ?? ((line) => console.error(line));
+  report({ phase: "starting", storeId });
+  ensureSchemaVersionTable(db);
+  const applied = [];
+  if (pending.length > 0) {
+    const toVersion = pending.at(-1).version;
+    const label = `[storage] ${storeId} schema ${currentVersion} to ${toVersion}`;
+    const logged = currentVersion > 0;
+    if (logged)
+      log(`${label}: updating`);
+    report({ phase: "migrating", storeId });
+    setEngineStep(`updating ${storeId}`);
+    const migrateStarted = performance.now();
+    db.transaction(() => {
+      const lockedVersion = readSqliteSchemaVersion(db, storeId);
+      if (lockedVersion > targetVersion && readSqliteCompatibleVersion(db, storeId) <= targetVersion)
+        return;
+      if (lockedVersion > targetVersion) {
+        throw new OperationError("config_error", `SQLite store "${storeId}" is at schema_version ${lockedVersion}, but this Olympus build only knows schema_version ${targetVersion}.`, "Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.");
+      }
+      let compatible = storedCompatibleVersion(db, storeId) ?? lockedVersion;
+      for (const migration of ordered.filter((entry) => entry.version > lockedVersion)) {
+        migration.up(db);
+        if (!isAdditiveMigration(migration))
+          compatible = migration.version;
+        writeSqliteSchemaVersion(db, storeId, migration.version, compatible);
+        applied.push({ version: migration.version, name: migration.name });
+      }
+    }).immediate();
+    const migrateMs = Math.round(performance.now() - migrateStarted);
+    setEngineStep(undefined);
+    report({ phase: "starting", storeId, completedStore: true });
+    if (logged && applied.length > 0) {
+      log(`${label}: migrated in ${migrateMs} ms`);
+    }
+  }
+  return {
+    storeId,
+    currentVersion,
+    targetVersion,
+    dryRun: false,
+    applied,
+    pending: applied
+  };
+}
+function readSqliteSchemaVersion(db, storeId) {
+  if (!schemaVersionTableExists(db))
+    return 0;
+  const row = db.query(`SELECT version FROM ${SQLITE_SCHEMA_VERSION_TABLE} WHERE store_id = ?`).get(storeId);
+  return typeof row?.version === "number" && Number.isInteger(row.version) ? row.version : 0;
+}
+function sqliteSchemaUsable(db, storeId, knownVersion) {
+  const version = readSqliteSchemaVersion(db, storeId);
+  return version === knownVersion || version > knownVersion && readSqliteCompatibleVersion(db, storeId) <= knownVersion;
+}
+function readSqliteCompatibleVersion(db, storeId) {
+  return storedCompatibleVersion(db, storeId) ?? readSqliteSchemaVersion(db, storeId);
+}
+function storedCompatibleVersion(db, storeId) {
+  if (!schemaVersionTableExists(db) || !compatibleVersionColumnExists(db))
+    return;
+  const row = db.query(`SELECT compatible_version FROM ${SQLITE_SCHEMA_VERSION_TABLE} WHERE store_id = ?`).get(storeId);
+  return typeof row?.compatible_version === "number" && Number.isInteger(row.compatible_version) ? row.compatible_version : undefined;
+}
+function compatibleVersionColumnExists(db) {
+  return db.query(`SELECT COUNT(*) AS n FROM pragma_table_info('${SQLITE_SCHEMA_VERSION_TABLE}') WHERE name = 'compatible_version'`).get().n > 0;
+}
+function ensureSchemaVersionTable(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS ${SQLITE_SCHEMA_VERSION_TABLE} (
+      store_id TEXT PRIMARY KEY,
+      version INTEGER NOT NULL,
+      applied_at TEXT NOT NULL,
+      compatible_version INTEGER
+    );
+  `);
+  if (compatibleVersionColumnExists(db))
+    return;
+  try {
+    db.exec(`ALTER TABLE ${SQLITE_SCHEMA_VERSION_TABLE} ADD COLUMN compatible_version INTEGER`);
+  } catch (error) {
+    if (!compatibleVersionColumnExists(db))
+      throw error;
+  }
+}
+function writeSqliteSchemaVersion(db, storeId, version, compatible) {
+  db.query(`
+    INSERT INTO ${SQLITE_SCHEMA_VERSION_TABLE} (store_id, version, applied_at, compatible_version)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(store_id) DO UPDATE SET
+      version = excluded.version,
+      applied_at = excluded.applied_at,
+      compatible_version = excluded.compatible_version
+  `).run(storeId, version, new Date().toISOString(), compatible);
+}
+function schemaVersionTableExists(db) {
+  const row = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(SQLITE_SCHEMA_VERSION_TABLE);
+  return row?.name === SQLITE_SCHEMA_VERSION_TABLE;
+}
+function validateMigrations(migrations) {
+  const ordered = [...migrations].sort((left, right) => left.version - right.version);
+  let previous = 0;
+  for (const migration of ordered) {
+    if (!Number.isInteger(migration.version) || migration.version <= 0) {
+      throw new OperationError("config_error", `SQLite migration "${migration.name}" must use a positive integer version.`);
+    }
+    if (migration.version === previous) {
+      throw new OperationError("config_error", `Duplicate SQLite migration version ${migration.version}.`);
+    }
+    previous = migration.version;
+  }
+  return ordered;
+}
+
+// src/core/limit-stops.ts
+var limits = new Map;
+function registerLimit(input) {
+  const prior = limits.get(input.id);
+  if (prior && Object.keys({ ...prior, ...input }).some((key) => prior[key] !== input[key])) {
+    throw new Error(`Limit already registered differently: ${input.id}`);
+  }
+  limits.set(input.id, Object.freeze({ ...input }));
+}
+var stopGenerations = new Map;
+
+// src/core/source-size-limits.ts
+var SOURCE_FILE_SIZE_CEILING = 256 * 1024 * 1024;
+var SOURCE_SIZE_LIMITS = [
+  { id: "dropbox.max_file_bytes", subject: "dropbox.files", providers: ["dropbox"], defaultBytes: 8000000, ceilingBytes: SOURCE_FILE_SIZE_CEILING },
+  { id: "local_files.max_file_bytes", subject: "local.files", providers: ["local_files"], defaultBytes: 64000000, ceilingBytes: SOURCE_FILE_SIZE_CEILING },
+  { id: "telegram.media_quota", subject: "telegram.messages", providers: ["telegram", "telegram.media"], bytesOnly: true, defaultBytes: 64 * 1024 * 1024, ceilingBytes: SOURCE_FILE_SIZE_CEILING }
+];
+registerLimit({ id: "dropbox.max_file_bytes", kind: "size", scope: "extraction", label: "Dropbox file size", unit: "bytes", continue: "raise" });
+registerLimit({ id: "local_files.max_file_bytes", kind: "size", scope: "extraction", label: "Local file size", unit: "bytes", continue: "raise" });
+registerLimit({ id: "telegram.media_quota", kind: "size", scope: "extraction", label: "Telegram media read size", unit: "bytes", continue: "raise" });
+function sizeHeldItemKey(ref) {
+  return createHash8("sha256").update(JSON.stringify([ref.provider, ref.accountScope, ref.providerItemId, ref.localItemId ?? "", ref.sourceVersion ?? "", ref.contentHash ?? ""])).digest("hex");
+}
+
+// src/workers/connector-store/sqlite-mmap.ts
+var SQLITE_MMAP_BYTES = 2147418112;
+function sqliteMmapPolicy(env = process.env) {
+  const setting = env.OLYMPUS_SQLITE_MMAP;
+  if (setting === "off")
+    return { enabled: false, reason: "OLYMPUS_SQLITE_MMAP=off" };
+  if (process.platform !== "linux")
+    return { enabled: false, reason: "Linux only" };
+  if (setting === "on")
+    return { enabled: true, reason: "OLYMPUS_SQLITE_MMAP=on" };
+  return { enabled: false, reason: "default" };
+}
+function sqliteMmapEnabled(env = process.env) {
+  return sqliteMmapPolicy(env).enabled;
+}
+function sqliteMmapWorkerSource(source) {
+  const pragma = sqliteMmapEnabled() ? `
+    try { db.exec('PRAGMA mmap_size = ${SQLITE_MMAP_BYTES}'); }
+    catch { console.warn('[olympus] SQLite worker could not enable the file map.'); }
+  ` : "";
+  return source.replace("/*olympus-mmap-pragma*/", pragma);
+}
+function applySqliteMmap(db, env = process.env) {
+  if (!sqliteMmapEnabled(env))
+    return;
+  try {
+    db.exec(`PRAGMA mmap_size = ${SQLITE_MMAP_BYTES}`);
+  } catch {}
+}
+
+// src/workers/connector-store/store-totals.ts
+var WALK_OWED_LATER = -1;
+var WALK_OWED_NOW = -2;
+var STORE_TOTALS_TRIGGERS = [
+  "connector_store_totals_item_insert",
+  "connector_store_totals_item_delete",
+  "connector_store_totals_item_tombstone",
+  "connector_store_totals_chunk_insert",
+  "connector_store_totals_chunk_delete",
+  "connector_store_totals_vector_insert",
+  "connector_store_totals_vector_delete",
+  "connector_store_totals_vector_model",
+  "connector_store_totals_sync_insert",
+  "connector_store_totals_sync_delete",
+  ...["items", "chunks", "chunk_embeddings", "sync_runs"].flatMap((table) => ["insert", "update", "delete"].map((op) => `connector_store_totals_writes_${table}_${op}`))
+];
+var STORE_TOTALS_WRITES = "writes";
+var bump = (name, by) => `
+  INSERT INTO store_totals (name, n) VALUES (${name}, ${by})
+    ON CONFLICT(name) DO UPDATE SET n = n + excluded.n;`;
+function createStoreTotals(db, nonSyncConnectorsSql) {
+  const owed = !storeTotalsInstalled(db);
+  const real = (row) => `${row}.connector_id NOT IN ${nonSyncConnectorsSql}`;
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS store_totals (
+      name TEXT PRIMARY KEY,
+      n INTEGER NOT NULL
+    ) WITHOUT ROWID;
+    CREATE TABLE IF NOT EXISTS store_totals_state (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      reconciled_at TEXT NOT NULL,
+      drift INTEGER NOT NULL
+    );
+    CREATE TRIGGER IF NOT EXISTS connector_store_totals_item_insert AFTER INSERT ON items BEGIN
+      ${bump("CASE WHEN NEW.tombstoned = 0 THEN 'items' ELSE 'tombstoned_items' END", "1")}
+    END;
+    CREATE TRIGGER IF NOT EXISTS connector_store_totals_item_delete AFTER DELETE ON items BEGIN
+      ${bump("CASE WHEN OLD.tombstoned = 0 THEN 'items' ELSE 'tombstoned_items' END", "-1")}
+    END;
+    CREATE TRIGGER IF NOT EXISTS connector_store_totals_item_tombstone AFTER UPDATE OF tombstoned ON items
+      WHEN (OLD.tombstoned = 0) <> (NEW.tombstoned = 0) BEGIN
+      ${bump("CASE WHEN OLD.tombstoned = 0 THEN 'items' ELSE 'tombstoned_items' END", "-1")}
+      ${bump("CASE WHEN NEW.tombstoned = 0 THEN 'items' ELSE 'tombstoned_items' END", "1")}
+    END;
+    CREATE TRIGGER IF NOT EXISTS connector_store_totals_chunk_insert AFTER INSERT ON chunks BEGIN
+      ${bump("'chunks'", "1")}
+    END;
+    CREATE TRIGGER IF NOT EXISTS connector_store_totals_chunk_delete AFTER DELETE ON chunks BEGIN
+      ${bump("'chunks'", "-1")}
+    END;
+    CREATE TRIGGER IF NOT EXISTS connector_store_totals_vector_insert AFTER INSERT ON chunk_embeddings BEGIN
+      ${bump("'vectors:' || NEW.model_id", "1")}
+    END;
+    CREATE TRIGGER IF NOT EXISTS connector_store_totals_vector_delete AFTER DELETE ON chunk_embeddings BEGIN
+      ${bump("'vectors:' || OLD.model_id", "-1")}
+    END;
+    CREATE TRIGGER IF NOT EXISTS connector_store_totals_vector_model AFTER UPDATE OF model_id ON chunk_embeddings
+      WHEN OLD.model_id <> NEW.model_id BEGIN
+      ${bump("'vectors:' || OLD.model_id", "-1")}
+      ${bump("'vectors:' || NEW.model_id", "1")}
+    END;
+    CREATE TRIGGER IF NOT EXISTS connector_store_totals_sync_insert AFTER INSERT ON sync_runs WHEN ${real("NEW")} BEGIN
+      ${bump("'sync_runs'", "1")}
+    END;
+    CREATE TRIGGER IF NOT EXISTS connector_store_totals_sync_delete AFTER DELETE ON sync_runs WHEN ${real("OLD")} BEGIN
+      ${bump("'sync_runs'", "-1")}
+    END;
+  `);
+  for (const table of ["items", "chunks", "chunk_embeddings", "sync_runs"]) {
+    for (const op of ["insert", "update", "delete"]) {
+      db.exec(`CREATE TRIGGER IF NOT EXISTS connector_store_totals_writes_${table}_${op} AFTER ${op.toUpperCase()} ON ${table} BEGIN
+        ${bump(`'${STORE_TOTALS_WRITES}'`, "1")}
+      END;`);
+    }
+  }
+  if (owed)
+    db.query("UPDATE store_totals_state SET drift = ? WHERE id = 1").run(WALK_OWED_NOW);
+}
+function storeTotalsInstalled(db) {
+  if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'store_totals_state'").get())
+    return false;
+  const row = db.query(`SELECT COUNT(*) AS n FROM sqlite_master
+    WHERE (type = 'table' AND name IN ('store_totals', 'store_totals_state'))
+      OR (type = 'trigger' AND name IN (SELECT value FROM json_each(?)))`).get(JSON.stringify(STORE_TOTALS_TRIGGERS));
+  return row.n === 2 + STORE_TOTALS_TRIGGERS.length;
+}
+function readStoreTotals(db) {
+  const state = db.query("SELECT reconciled_at, drift FROM store_totals_state WHERE id = 1").get();
+  if (!state)
+    return;
+  const rows = db.query("SELECT name, n FROM store_totals").all();
+  const totals = storeTotalsFromRows(rows, state.reconciled_at);
+  if (state.drift === WALK_OWED_NOW || rows.some(({ name, n }) => name !== STORE_TOTALS_WRITES && n < 0))
+    totals.walkOwed = "now";
+  else if (state.drift === WALK_OWED_LATER)
+    totals.walkOwed = "later";
+  return totals;
+}
+function storeTotalsFromRows(rows, reconciledAt) {
+  const totals = { items: 0, tombstonedItems: 0, chunks: 0, syncRuns: 0, vectorsByModel: {}, reconciledAt };
+  for (const { name, n } of rows) {
+    const value = Number(n);
+    if (name === "items")
+      totals.items = value;
+    else if (name === "tombstoned_items")
+      totals.tombstonedItems = value;
+    else if (name === "chunks")
+      totals.chunks = value;
+    else if (name === "sync_runs")
+      totals.syncRuns = value;
+    else if (name.startsWith("vectors:") && value !== 0)
+      totals.vectorsByModel[name.slice("vectors:".length)] = value;
+  }
+  return totals;
+}
+var STORE_TOTALS_WALK_KEYS = 20000;
+function* storeTotalsWalkSteps(nonSyncConnectorsSql, pageKeys = STORE_TOTALS_WALK_KEYS) {
+  const start = yield { sql: `SELECT
+      (SELECT MAX(item_pk) FROM items) AS items,
+      (SELECT MAX(chunk_pk) FROM chunks) AS chunks,
+      (SELECT MAX(rowid) FROM sync_runs) AS runs,
+      (SELECT n FROM store_totals WHERE name = '${STORE_TOTALS_WRITES}') AS writes,
+      (SELECT json_group_object(name, n) FROM store_totals) AS kept_json`, params: [], mode: "get" };
+  const count = { items: 0, tombstoned_items: 0, chunks: 0, sync_runs: 0, vectors_json: null, kept_json: start.kept_json };
+  const vectors = new Map;
+  const pages = (last) => {
+    const out = [];
+    for (let lo = 0;lo < Number(last ?? 0); lo += pageKeys)
+      out.push([lo, Math.min(lo + pageKeys, Number(last))]);
+    return out;
+  };
+  for (const [lo, hi] of pages(start.items)) {
+    const row = yield { sql: `SELECT COALESCE(SUM(tombstoned = 0), 0) AS live, COALESCE(SUM(tombstoned <> 0), 0) AS gone
+      FROM items WHERE item_pk > ? AND item_pk <= ?`, params: [lo, hi], mode: "get" };
+    count.items += Number(row.live);
+    count.tombstoned_items += Number(row.gone);
+  }
+  for (const [lo, hi] of pages(start.chunks)) {
+    count.chunks += Number((yield { sql: "SELECT COUNT(*) AS n FROM chunks WHERE chunk_pk > ? AND chunk_pk <= ?", params: [lo, hi], mode: "get" }).n);
+    for (const row of yield {
+      sql: `SELECT model_id, COUNT(*) AS n FROM chunk_embeddings WHERE chunk_pk > ? AND chunk_pk <= ? GROUP BY model_id`,
+      params: [lo, hi],
+      mode: "all"
+    }) {
+      vectors.set(row.model_id, (vectors.get(row.model_id) ?? 0) + Number(row.n));
+    }
+  }
+  for (const [lo, hi] of pages(start.runs)) {
+    count.sync_runs += Number((yield {
+      sql: `SELECT COUNT(*) AS n FROM sync_runs WHERE rowid > ? AND rowid <= ? AND connector_id NOT IN ${nonSyncConnectorsSql}`,
+      params: [lo, hi],
+      mode: "get"
+    }).n);
+  }
+  count.vectors_json = JSON.stringify(Object.fromEntries(vectors));
+  const end = yield { sql: `SELECT n AS writes FROM store_totals WHERE name = '${STORE_TOTALS_WRITES}'`, params: [], mode: "get" };
+  return { count, quiet: Number(end?.writes ?? 0) === Number(start.writes ?? 0) };
+}
+function applyStoreTotalsCount(db, count, nowIso, options = {}) {
+  const counted = new Map([
+    ["items", Number(count.items)],
+    ["tombstoned_items", Number(count.tombstoned_items)],
+    ["chunks", Number(count.chunks)],
+    ["sync_runs", Number(count.sync_runs)]
+  ]);
+  for (const [model, n] of Object.entries(JSON.parse(count.vectors_json ?? "{}")))
+    counted.set(`vectors:${model}`, Number(n));
+  const keptThen = new Map(Object.entries(JSON.parse(count.kept_json ?? "{}")).map(([k, v]) => [k, Number(v)]));
+  let drift = 0;
+  db.transaction(() => {
+    const keptNow = new Map(db.query("SELECT name, n FROM store_totals").all().map((row) => [row.name, Number(row.n)]));
+    const names = new Set([...counted.keys(), ...keptThen.keys(), ...keptNow.keys()]);
+    const write = db.query("INSERT INTO store_totals (name, n) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET n = excluded.n");
+    const remove = db.query("DELETE FROM store_totals WHERE name = ?");
+    names.delete(STORE_TOTALS_WRITES);
+    for (const name of names) {
+      const since = (keptNow.get(name) ?? 0) - (keptThen.get(name) ?? 0);
+      const exact = (counted.get(name) ?? 0) + since;
+      drift += Math.abs((keptNow.get(name) ?? 0) - exact);
+      if (exact === 0 && name.startsWith("vectors:"))
+        remove.run(name);
+      else
+        write.run(name, exact);
+    }
+    db.query(`INSERT INTO store_totals_state (id, reconciled_at, drift) VALUES (1, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET reconciled_at = excluded.reconciled_at, drift = excluded.drift`).run(nowIso, options.exact === false ? WALK_OWED_LATER : drift);
+  })();
+  return drift;
+}
+var STORE_TOTALS_QUIET_MS = 60 * 60000;
+function deferStoreTotalsWalk(db) {
+  db.query("UPDATE store_totals_state SET drift = ? WHERE id = 1").run(WALK_OWED_LATER);
+}
+function readStoreWriteSequence(db) {
+  const row = db.query("SELECT n FROM store_totals WHERE name = ?").get(STORE_TOTALS_WRITES);
+  return row ? Number(row.n) : undefined;
+}
+
+// src/workers/source-index/vector-digest.ts
+function encodeVectorDigest(vector) {
+  const size = Math.min(256, vector.length);
+  const bytes = new Uint8Array(size + 4);
+  let norm = 0;
+  let max = 0;
+  for (let i = 0;i < size; i++) {
+    const value = Number.isFinite(vector[i]) ? vector[i] : 0;
+    norm += value * value;
+    max = Math.max(max, Math.abs(value));
+  }
+  const scale = norm > 0 ? max / Math.sqrt(norm) / 127 : 0;
+  new DataView(bytes.buffer).setFloat32(0, scale, true);
+  const signed = new Int8Array(bytes.buffer, 4);
+  for (let i = 0;i < size; i++)
+    signed[i] = max > 0 ? Math.round((vector[i] || 0) / max * 127) : 0;
+  return bytes;
+}
+function scoreVectorDigest(query, document) {
+  if (query.length !== document.length || query.length < 4)
+    return -Infinity;
+  const q = new Int8Array(query.buffer, query.byteOffset + 4, query.length - 4);
+  const d = new Int8Array(document.buffer, document.byteOffset + 4, document.length - 4);
+  let dot = 0;
+  for (let i = 0;i < q.length; i++)
+    dot += q[i] * d[i];
+  return dot * new DataView(query.buffer, query.byteOffset, 4).getFloat32(0, true) * new DataView(document.buffer, document.byteOffset, 4).getFloat32(0, true);
+}
+
+class VectorDigestHeap {
+  pks = [];
+  scores = [];
+  get length() {
+    return this.pks.length;
+  }
+  append(pk, score) {
+    this.pks.push(pk);
+    this.scores.push(score);
+  }
+  better(a, b) {
+    return this.scores[a] > this.scores[b] || this.scores[a] === this.scores[b] && this.pks[a] < this.pks[b];
+  }
+  swap(a, b) {
+    [this.pks[a], this.pks[b]] = [this.pks[b], this.pks[a]];
+    [this.scores[a], this.scores[b]] = [this.scores[b], this.scores[a]];
+  }
+  siftDown(index) {
+    while (2 * index + 1 < this.length) {
+      let child = 2 * index + 1;
+      if (child + 1 < this.length && this.better(child + 1, child))
+        child++;
+      if (!this.better(child, index))
+        return;
+      this.swap(index, child);
+      index = child;
+    }
+  }
+  peekScore() {
+    return this.length ? this.scores[0] : -Infinity;
+  }
+  pop() {
+    const pk = this.pks[0];
+    const last = this.length - 1;
+    this.swap(0, last);
+    this.pks.pop();
+    this.scores.pop();
+    if (this.length)
+      this.siftDown(0);
+    return pk;
+  }
+}
+
+// src/workers/connector-store/vector-digest.ts
+function createVectorDigestSchema(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS chunk_vector_digest (
+      chunk_pk INTEGER PRIMARY KEY,
+      model_id TEXT NOT NULL,
+      item_pk INTEGER NOT NULL,
+      account_scope TEXT,
+      digest BLOB NOT NULL,
+      FOREIGN KEY(chunk_pk) REFERENCES chunks(chunk_pk) ON DELETE CASCADE
+    );
+    -- Per-model store metadata: physical rowid cursor resumes without the
+    -- random primary-key-index reads that made the old lane IO-bound.
+    CREATE TABLE IF NOT EXISTS chunk_vector_digest_meta (
+      model_id TEXT PRIMARY KEY, cursor_rowid INTEGER NOT NULL, completed INTEGER NOT NULL
+    );
+    CREATE TRIGGER IF NOT EXISTS connector_store_vector_digest_delete
+    AFTER DELETE ON chunk_embeddings BEGIN
+      DELETE FROM chunk_vector_digest WHERE chunk_pk = OLD.chunk_pk AND model_id = OLD.model_id;
+    END;
+    CREATE TRIGGER IF NOT EXISTS connector_store_vector_digest_account
+    AFTER UPDATE OF account_scope ON items WHEN OLD.account_scope IS NOT NEW.account_scope BEGIN
+      UPDATE chunk_vector_digest SET account_scope = NEW.account_scope
+        WHERE chunk_pk IN (SELECT chunk_pk FROM chunks WHERE item_pk = NEW.item_pk);
+    END;
+  `);
+}
+function vectorDigestState(db, modelId) {
+  const row = db.query("SELECT cursor_rowid, completed FROM chunk_vector_digest_meta WHERE model_id = ?").get(modelId);
+  return { cursorRowid: row?.cursor_rowid ?? 0, completed: row?.completed === 1 };
+}
+function writeVectorDigest(db, chunkPk, modelId, itemPk, embedding) {
+  db.query(`UPDATE chunk_vector_digest_meta SET completed = 0, cursor_rowid = 0
+    WHERE model_id = (SELECT model_id FROM chunk_vector_digest WHERE chunk_pk = ? AND model_id <> ?)`).run(chunkPk, modelId);
+  db.query(`INSERT INTO chunk_vector_digest(chunk_pk, model_id, item_pk, account_scope, digest)
+    SELECT ?, ?, ?, account_scope, ? FROM items WHERE item_pk = ?
+    ON CONFLICT(chunk_pk) DO UPDATE SET model_id = excluded.model_id,
+      item_pk = excluded.item_pk, account_scope = excluded.account_scope, digest = excluded.digest`).run(chunkPk, modelId, itemPk, encodeVectorDigest(decodeEmbedding(embedding)), itemPk);
+  db.query(`INSERT OR IGNORE INTO chunk_vector_digest_meta(model_id, cursor_rowid, completed)
+    SELECT ?, 0, NOT EXISTS(
+      SELECT 1 FROM chunk_embeddings WHERE model_id = ? AND chunk_pk <> ? LIMIT 1
+    )`).run(modelId, modelId, chunkPk);
+}
+function vectorDigestSourceQuery(cursorRowid, maxRows) {
+  if (!Number.isInteger(maxRows) || maxRows < 1 || maxRows > 256)
+    throw new Error("Vector digest slice must contain 1 to 256 rows.");
+  return {
+    sql: `SELECT rowid, chunk_pk, model_id, item_pk, embedding, content_hash, embedded_at FROM chunk_embeddings
+      WHERE rowid > ? ORDER BY rowid LIMIT ?`,
+    params: [cursorRowid, maxRows]
+  };
+}
+function applyVectorDigestWindow(db, modelId, readFromCursor, rows, maxRows) {
+  const timeout = db.query("PRAGMA busy_timeout").get().timeout;
+  db.exec("PRAGMA busy_timeout = 25");
+  try {
+    return db.transaction(() => {
+      const state = vectorDigestState(db, modelId);
+      if (state.completed || state.cursorRowid !== readFromCursor)
+        return { ...state, scanned: 0 };
+      const current = db.query(`SELECT 1 AS present FROM chunk_embeddings
+        WHERE chunk_pk = ? AND model_id = ? AND content_hash = ? AND embedded_at = ?`);
+      for (const row of rows) {
+        if (row.model_id !== modelId)
+          continue;
+        if (!current.get(row.chunk_pk, modelId, row.content_hash, row.embedded_at))
+          continue;
+        writeVectorDigest(db, row.chunk_pk, modelId, row.item_pk, row.embedding);
+      }
+      const cursorRowid = rows.at(-1)?.rowid ?? state.cursorRowid;
+      const completed = rows.length < maxRows;
+      db.query(`INSERT INTO chunk_vector_digest_meta (model_id, cursor_rowid, completed) VALUES (?, ?, ?)
+        ON CONFLICT(model_id) DO UPDATE SET cursor_rowid = excluded.cursor_rowid, completed = excluded.completed`).run(modelId, cursorRowid, Number(completed));
+      return { cursorRowid, completed, scanned: rows.length };
+    })();
+  } finally {
+    db.exec(`PRAGMA busy_timeout = ${timeout}`);
+  }
+}
+function backfillVectorDigests(db, modelId, maxRows = 128) {
+  const state = vectorDigestState(db, modelId);
+  if (state.completed)
+    return { ...state, scanned: 0 };
+  const query = vectorDigestSourceQuery(state.cursorRowid, maxRows);
+  const rows = db.query(query.sql).all(...query.params);
+  return applyVectorDigestWindow(db, modelId, state.cursorRowid, rows, maxRows);
+}
+
+// src/workers/source-index/status-count-reuse.ts
+var STORE_UNCHANGED_REUSE_MS = 30 * 60000;
+
+// src/core/sqlite-rows.ts
+function* iterateRows(db, sql, ...params) {
+  const statement = db.prepare(sql);
+  try {
+    yield* statement.iterate(...params);
+  } finally {
+    statement.finalize();
+  }
+}
+
+// src/workers/connector-store/main-thread-sql-trace.ts
+import { Database } from "bun:sqlite";
+import { isMainThread as isMainThread6 } from "node:worker_threads";
+
+// src/core/front-loop-sql-guard.ts
+class FrontLoopSqlError extends Error {
+  code = "front_loop_sql";
+  constructor(site) {
+    super(`The engine front ran SQLite on its loop${site ? ` (${site})` : ""}; the front reads through the read pool and writes through its stores thread.`);
+    this.name = "FrontLoopSqlError";
+  }
+}
+var UNLISTED_KEPT = 50;
+var watch;
+function frontLoopSqlWatched() {
+  return watch !== undefined;
+}
+function noteFrontLoopStatement(dbPath, site) {
+  const state = watch;
+  if (!state || dbPath === ":memory:" || dbPath === "" || dbPath?.startsWith("file::memory:"))
+    return;
+  if (state.mode === "throw")
+    throw new FrontLoopSqlError(site());
+  state.statements += 1;
+  if (!state.allowed)
+    return;
+  const at = site() || "(no source frame)";
+  const count = state.seen.get(at);
+  state.seen.set(at, (count ?? 0) + 1);
+  if (count !== undefined || state.allowed.has(at))
+    return;
+  if (state.unlisted.length < UNLISTED_KEPT)
+    state.unlisted.push(at);
+  state.log(`[olympus] front loop sql: unlisted site ${at}`);
+}
+
+// src/workers/source-index/answer-latency-trace.ts
+import { AsyncLocalStorage as AsyncLocalStorage9 } from "node:async_hooks";
+import { createHash as createHash9, randomUUID as randomUUID7 } from "node:crypto";
+
+// src/core/store-reclaim-admission.ts
+import { join as join22 } from "node:path";
+import { closeSync as closeSync9, openSync as openSync9, futimesSync, statSync as statSync11 } from "node:fs";
+var probe = { acquireTimeoutMs: 1, pollIntervalMs: 1 };
+var target = (name) => join22(sharedDataPath("engine-run"), `store-reclaim-${name}`);
+function storeReadHasPriority() {
+  try {
+    return withFileLeaseSync(target("readers"), () => false, probe);
+  } catch (error) {
+    if (error instanceof FileLeaseBusyError)
+      return true;
+    throw error;
+  }
+}
+function storeOwnerIdleMs(now = Date.now()) {
+  try {
+    return Math.max(0, now - statSync11(target("last-ask")).mtimeMs);
+  } catch (error) {
+    if (error.code === "ENOENT")
+      return Number.POSITIVE_INFINITY;
+    throw error;
+  }
+}
+
+// src/workers/source-index/answer-latency-trace.ts
+var POOL_SQL_SITE_CHARS = 120;
+var poolSqlSites = new WeakMap;
+function poolSqlSite(sql) {
+  const shape = sql.replace(/'(?:[^']|'')*'|"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]*\]|--[^\r\n]*|\/\*[\s\S]*?\*\//g, (token) => token.startsWith("--") || token.startsWith("/*") ? " " : "?").replace(/\b(?:0x[\da-f]+|\d+(?:\.\d+)?(?:e[+-]?\d+)?)\b/gi, "N").replace(/\s+/g, " ").trim();
+  const hash = createHash9("sha256").update(shape).digest("hex").slice(0, 16);
+  const prefix = shape.replace(/\(\s*(?:\?|N)(?:\s*,\s*(?:\?|N))+\s*\)/g, "(…)");
+  return `${prefix.slice(0, POOL_SQL_SITE_CHARS)} #${hash}`;
+}
+var SLOW_MAIN_THREAD_SQL_MS = 250;
+var SLOW_MAIN_THREAD_SQL_KEPT = 20;
+var SITE_TALLY_MS = 25;
+var storage2 = new AsyncLocalStorage9;
+var queryStorage = new AsyncLocalStorage9;
+var laneStorage = new AsyncLocalStorage9;
+function poolReads(query, corpusId) {
+  let reads = query.poolByCorpus.get(corpusId);
+  if (!reads) {
+    reads = {
+      reads: 0,
+      queue_wait_ms: 0,
+      queue_wait_max_ms: 0,
+      run_ms: 0,
+      run_max_ms: 0,
+      sql_ms: 0,
+      sql_max_ms: 0,
+      snapshot_reads: 0,
+      snapshot_sql_ms: 0,
+      refused: 0,
+      dropped_queued: 0,
+      past_deadline_running: 0,
+      errors: 0
+    };
+    query.poolByCorpus.set(corpusId, reads);
+  }
+  return reads;
+}
+function sourceAnswerVectorWork() {
+  const query = queryStorage.getStore();
+  const corpusId = laneStorage.getStore();
+  if (!query || corpusId === undefined)
+    return;
+  return poolReads(query, corpusId).vector_work ??= {
+    digest_pages_read: 0,
+    digest_rows_scanned: 0,
+    full_vectors_rescored: 0,
+    digest_unpack_score_ms: 0
+  };
+}
+function beginSourceAnswerConceptCounts() {
+  const query = queryStorage.getStore();
+  const corpusId = laneStorage.getStore();
+  if (!query || corpusId === undefined)
+    return;
+  const passes = poolReads(query, corpusId).keyword_concept_counts ??= [];
+  const pass = [];
+  passes.push(pass);
+  return pass;
+}
+function beginSourceAnswerPoolRead(statement, label) {
+  const query = queryStorage.getStore();
+  const corpusId = laneStorage.getStore();
+  if (!query || corpusId === undefined)
+    return;
+  let site = query.sqlShapes.get(statement);
+  if (site === undefined) {
+    site = poolSqlSite(statement);
+    query.sqlShapes.set(statement, site);
+  }
+  const key = label ? `${label}\x00${site}` : site;
+  return ({ queueWaitMs, runMs, sqlMs, cpuMs, outcome, snapshot }) => {
+    const reads = poolReads(query, corpusId);
+    if (sqlMs !== undefined) {
+      reads.thread_cpu_available = reads.thread_cpu_available === true || cpuMs !== undefined;
+    }
+    const wait = unroundedMs(queueWaitMs);
+    const ran = unroundedMs(runMs);
+    reads.reads += 1;
+    reads.queue_wait_ms += wait;
+    reads.queue_wait_max_ms = Math.max(reads.queue_wait_max_ms, wait);
+    reads.run_ms += ran;
+    reads.run_max_ms = Math.max(reads.run_max_ms, ran);
+    const sql = unroundedMs(sqlMs ?? 0);
+    reads.sql_ms += sql;
+    reads.sql_max_ms = Math.max(reads.sql_max_ms, sql);
+    if (snapshot) {
+      reads.snapshot_reads += 1;
+      reads.snapshot_sql_ms += sql;
+    }
+    let sites = poolSqlSites.get(reads);
+    if (!sites)
+      poolSqlSites.set(reads, sites = new Map);
+    const entry = sites.get(key) ?? { site, ...label ? { label } : {}, reads: 0, sql_ms: 0, sql_max_ms: 0 };
+    entry.reads += 1;
+    entry.sql_ms += sql;
+    entry.sql_max_ms = Math.max(entry.sql_max_ms, sql);
+    if (cpuMs !== undefined) {
+      const cpu = unroundedMs(cpuMs);
+      entry.sql_cpu_ms = (entry.sql_cpu_ms ?? 0) + cpu;
+      entry.sql_cpu_max_ms = Math.max(entry.sql_cpu_max_ms ?? 0, cpu);
+    }
+    sites.set(key, entry);
+    if (outcome === "refused")
+      reads.refused += 1;
+    else if (outcome === "dropped_queued")
+      reads.dropped_queued += 1;
+    else if (outcome === "past_deadline_running")
+      reads.past_deadline_running += 1;
+    else if (outcome === "error")
+      reads.errors += 1;
+  };
+}
+var CONTENT_FREE_ERROR_CLASSES = new Set([
+  "AbortError",
+  "AnalystUnavailable",
+  "AnalystCircuitOpen",
+  "EmailSourceWorkerError",
+  "Error",
+  "LocalTrustProviderMismatch",
+  "OperationError",
+  "RangeError",
+  "SourceModelPolicyDeniedError",
+  "SecureEvidencePolicySkip",
+  "SecureAnalystPoolE2EEGateError",
+  "SyntaxError",
+  "TrustedAnalystTimeoutError",
+  "TypeError"
+]);
+function currentSourceAnswerTrace() {
+  return storage2.getStore();
+}
+function sourceAnswerTraceActive() {
+  return storage2.getStore() !== undefined;
+}
+function recordSourceAnswerMainThreadSql(elapsedMs, site) {
+  const trace = currentSourceAnswerTrace();
+  if (!trace)
+    return;
+  const ms = unroundedMs(elapsedMs);
+  const sql = trace.mainThreadSql;
+  sql.statements += 1;
+  sql.total_ms += ms;
+  sql.max_ms = Math.max(sql.max_ms, ms);
+  if (ms < SITE_TALLY_MS)
+    return;
+  const where = site();
+  const tally = sql.by_site.find((entry) => entry.site === where);
+  if (tally) {
+    tally.statements += 1;
+    tally.ms += ms;
+  } else {
+    sql.by_site.push({ site: where, statements: 1, ms });
+  }
+  if (ms < SLOW_MAIN_THREAD_SQL_MS)
+    return;
+  sql.slow.push({ ms: nonNegativeMs(ms), site: where });
+  if (sql.slow.length > SLOW_MAIN_THREAD_SQL_KEPT) {
+    sql.slow.sort((left, right) => right.ms - left.ms);
+    sql.slow.length = SLOW_MAIN_THREAD_SQL_KEPT;
+  }
+}
+function unroundedMs(value) {
+  return Number.isFinite(value) ? Math.max(0, value) : 0;
+}
+function nonNegativeMs(value) {
+  return Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
+}
+
+// src/workers/connector-store/main-thread-sql-trace.ts
+var TIMED = "__olympusMainThreadSqlTimed";
+var STATEMENT_METHODS = ["all", "get", "run", "values"];
+var SITE_FRAMES = 3;
+var installed = false;
+var SINGLE_WRITE = /^\s*(UPDATE|DELETE|INSERT)\b[^;]*;?\s*$/i;
+var sliceTiming;
+var benchSql;
+function installMainThreadSqlTrace() {
+  if (installed || !isMainThread6)
+    return;
+  installed = true;
+  const exec = Database.prototype.exec;
+  Database.prototype.exec = function(...args) {
+    if (planRecorder && !planRecorder.explaining && typeof args[0] === "string" && SINGLE_WRITE.test(args[0])) {
+      recordPlan({ [SQL]: args[0], [DB]: this });
+    }
+    if (frontLoopSqlWatched())
+      noteFrontLoopStatement(this.filename, sourceSite);
+    if (siteCounts)
+      countSite();
+    if (!sliceTiming && !slowLog)
+      return exec.apply(this, args);
+    const before = benchSql?.sample();
+    const started = performance.now();
+    try {
+      return exec.apply(this, args);
+    } finally {
+      const ms = performance.now() - started;
+      if (before)
+        benchSql?.record(before, ms, this.filename, slowSite);
+      if (sliceTiming)
+        sliceTiming.maxStatementMs = Math.max(sliceTiming.maxStatementMs, ms);
+      if (slowLog && ms >= slowLog.thresholdMs)
+        noteSlowStatement(ms, typeof args[0] === "string" ? args[0] : undefined);
+    }
+  };
+  for (const name of ["query", "prepare"]) {
+    const original = Database.prototype[name];
+    Database.prototype[name] = function(...args) {
+      const statement = timeStatement(original.apply(this, args));
+      if (statement && typeof args[0] === "string") {
+        const held = statement;
+        held[SQL] = args[0];
+        held[DB] = this;
+      }
+      return statement;
+    };
+  }
+}
+function busyAfter(error, started) {
+  if (error instanceof Error && /database is locked|SQLITE_BUSY/i.test(error.message) && !/ after \d+ ms$/.test(error.message)) {
+    error.message += ` after ${Math.round(performance.now() - started)} ms`;
+  }
+  return error;
+}
+function timeStatement(statement) {
+  const held = statement;
+  if (!statement || held[TIMED])
+    return statement;
+  for (const method of STATEMENT_METHODS) {
+    const call = held[method];
+    if (typeof call !== "function")
+      continue;
+    held[method] = function(...args) {
+      if (planRecorder && !planRecorder.explaining)
+        recordPlan(held);
+      if (frontLoopSqlWatched())
+        noteFrontLoopStatement(held[DB]?.filename, sourceSite);
+      if (siteCounts)
+        countSite();
+      const answer = sourceAnswerTraceActive();
+      if (!answer && !sliceTiming && !slowLog) {
+        const at = performance.now();
+        try {
+          return call.apply(this, args);
+        } catch (error) {
+          throw busyAfter(error, at);
+        }
+      }
+      const before = benchSql?.sample();
+      const started = performance.now();
+      try {
+        return call.apply(this, args);
+      } catch (error) {
+        throw busyAfter(error, started);
+      } finally {
+        const ms = performance.now() - started;
+        if (before)
+          benchSql?.record(before, ms, held[DB]?.filename ?? "", slowSite);
+        if (sliceTiming)
+          sliceTiming.maxStatementMs = Math.max(sliceTiming.maxStatementMs, ms);
+        if (answer)
+          recordSourceAnswerMainThreadSql(ms, callSite);
+        if (slowLog && ms >= slowLog.thresholdMs)
+          noteSlowStatement(ms, typeof held[SQL] === "string" ? held[SQL] : undefined);
+      }
+    };
+  }
+  const iterate = held.iterate;
+  if (typeof iterate === "function")
+    held.iterate = function(...args) {
+      const iterator = iterate.apply(this, args);
+      if (!sliceTiming && !slowLog)
+        return iterator;
+      return function* () {
+        let count = 1;
+        try {
+          for (;; ) {
+            const before = benchSql?.sample();
+            const started = performance.now();
+            let next;
+            try {
+              next = iterator.next();
+            } finally {
+              const ms = performance.now() - started;
+              if (before) {
+                benchSql?.record(before, ms, held[DB]?.filename ?? "", slowSite, count);
+                count = 0;
+              }
+              if (sliceTiming)
+                sliceTiming.maxStatementMs = Math.max(sliceTiming.maxStatementMs, ms);
+              if (slowLog && ms >= slowLog.thresholdMs)
+                noteSlowStatement(ms, typeof held[SQL] === "string" ? held[SQL] : undefined);
+            }
+            if (next.done)
+              return;
+            yield next.value;
+          }
+        } finally {
+          iterator.return?.();
+        }
+      }();
+    };
+  held[TIMED] = true;
+  return statement;
+}
+var SQL = "__olympusMainThreadSql";
+var DB = "__olympusMainThreadSqlDb";
+var planRecorder;
+function recordPlan(held) {
+  const recorder = planRecorder;
+  const sql = held[SQL];
+  const db = held[DB];
+  if (typeof sql !== "string" || !db)
+    return;
+  let scans = recorder.plans.get(sql);
+  if (!scans) {
+    scans = [];
+    recorder.explaining = true;
+    try {
+      scans = largeTableScans(db, sql, recorder.large);
+    } finally {
+      recorder.explaining = false;
+    }
+    recorder.plans.set(sql, scans);
+  }
+  if (scans.length === 0)
+    return;
+  const site = sourceSite();
+  if (site === "")
+    return;
+  if (inMemory(db) && /OffThread\b/.test(site))
+    return;
+  for (const scan of scans) {
+    const key = `${site}|${scan.table}`;
+    if (!recorder.finders.has(key))
+      recorder.finders.set(key, { ...scan, site, sql: sql.replace(/\s+/g, " ").trim().slice(0, 160) });
+  }
+}
+function largeTableScans(db, sql, large) {
+  const scans = [];
+  try {
+    const explain = db.prepare(`EXPLAIN QUERY PLAN ${sql}`);
+    let rows;
+    try {
+      rows = explain.all();
+    } finally {
+      explain.finalize();
+    }
+    const aliases = tableAliases(sql);
+    for (const { detail } of rows) {
+      const scan = /^SCAN (\S+)/.exec(detail);
+      if (!scan)
+        continue;
+      const name = aliases.get(scan[1]) ?? scan[1];
+      if (large.has(name))
+        scans.push({ table: name, plan: detail });
+    }
+  } catch {}
+  return scans;
+}
+function inMemory(db) {
+  const name = db.filename;
+  return name === undefined || name === "" || name === ":memory:";
+}
+function tableAliases(sql) {
+  const aliases = new Map;
+  const keywords = new Set(["WHERE", "ON", "JOIN", "LEFT", "INNER", "CROSS", "GROUP", "ORDER", "LIMIT", "INDEXED", "NOT", "USING", "UNION", "SET", "AND"]);
+  for (const match of sql.matchAll(/\b(?:FROM|JOIN|UPDATE|INTO)\s+(?:\w+\.)?(\w+)(?:\s+(?:AS\s+)?(\w+))?/gi)) {
+    const table = match[1];
+    aliases.set(table, table);
+    const alias = match[2];
+    if (alias && !keywords.has(alias.toUpperCase()))
+      aliases.set(alias, table);
+  }
+  return aliases;
+}
+function sourceSite(depth = 2) {
+  const frames = (new Error().stack ?? "").split(`
+`).slice(1).map((line) => line.trim().replace(/^at /, ""));
+  const mine = frames.filter((frame) => /\/src\//.test(frame) && !frame.includes("main-thread-sql-trace") && !frame.includes("front-loop-sql-guard"));
+  return mine.slice(0, depth).map((frame) => shortFrame(frame).replace(/:\d+$/, "")).join(" < ");
+}
+var siteCounts;
+var siteDepth = 2;
+function countSite() {
+  const site = sourceSite(siteDepth) || "(no source frame)";
+  siteCounts.set(site, (siteCounts.get(site) ?? 0) + 1);
+}
+var slowLog;
+var SLOW_RECENT = 10;
+function noteSlowStatement(ms, sql) {
+  const log = slowLog;
+  log.count += 1;
+  log.maxMs = Math.max(log.maxMs, ms);
+  const site = slowSite();
+  const sqlId = sql === undefined ? "exec" : shortHash(sql.replace(/\s+/g, " ").trim());
+  const entry = { at: new Date().toISOString(), ms: Math.round(ms), site, sql_id: sqlId };
+  log.recent.push(entry);
+  if (log.recent.length > SLOW_RECENT)
+    log.recent.shift();
+  log.log(`[olympus] slow loop sql: ${Math.round(ms)} ms at ${site} (sql ${sqlId})`, entry);
+}
+function slowSite() {
+  const frames = (new Error().stack ?? "").split(`
+`).slice(1).map((line) => line.trim().replace(/^at /, "")).filter((frame) => frame.length > 0 && !frame.includes("main-thread-sql-trace") && !frame.includes("ask-bench-sql"));
+  return frames.slice(0, SITE_FRAMES).map(shortFrame).join(" < ");
+}
+function shortHash(text) {
+  let hash = 2166136261;
+  for (let index = 0;index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619) >>> 0;
+  }
+  return hash.toString(16).padStart(8, "0");
+}
+function callSite() {
+  const frames = (new Error().stack ?? "").split(`
+`).slice(1).map((line) => line.trim()).map((line) => line.startsWith("at ") ? line.slice(3) : line).filter((line) => line.length > 0);
+  const recorder = frames.findIndex((frame) => frame.startsWith("recordSourceAnswerMainThreadSql"));
+  const caller = recorder >= 0 ? recorder + 2 : 3;
+  return frames.slice(caller, caller + SITE_FRAMES).map(shortFrame).join(" < ");
+}
+function shortFrame(frame) {
+  const open = frame.lastIndexOf("(");
+  const name = open > 0 ? frame.slice(0, open).trim() : "<anonymous>";
+  const where = (open > 0 ? frame.slice(open + 1, frame.lastIndexOf(")")) : frame).split("/").at(-1) ?? "";
+  const [file, line] = where.split(":");
+  return `${name} ${file}${line ? `:${line}` : ""}`;
+}
+
+// src/core/store-write-guard.ts
+class FrontStoreWriteError extends Error {
+  code = "front_store_write";
+  constructor(kind) {
+    super(`The engine front opened a ${kind} for writing; only the background process writes it.`);
+    this.name = "FrontStoreWriteError";
+  }
+}
+var forbidden = false;
+function writableStoreOpensForbidden() {
+  return forbidden;
+}
+function assertWritableStoreOpenAllowed(kind, dbPath) {
+  if (forbidden && dbPath !== ":memory:")
+    throw new FrontStoreWriteError(kind);
+}
+
+// src/workers/file-extraction/unreadable-files.ts
+var UNREAD_PRIVACY_CHECK_MISSING_KIND = "privacy_check_missing";
+function unreadableFileReason(errorKind) {
+  const kind = (errorKind ?? "").toLowerCase();
+  if (!kind)
+    return "other";
+  if (kind === UNREAD_PRIVACY_CHECK_MISSING_KIND)
+    return "privacy_check_missing";
+  if (kind.includes("encrypted") || kind.includes("password"))
+    return "password";
+  if (kind.includes("too_large"))
+    return "too_large";
+  if (kind.includes("timeout"))
+    return "timed_out";
+  if (kind.includes("not_found") || kind.includes("content_unavailable") || kind.includes("missing_bytes"))
+    return "missing";
+  if (kind.includes("permission") || kind.includes("auth"))
+    return "no_access";
+  if (kind.includes("unsupported") || kind === "extractor_kind_unknown" || kind === "no_extractor")
+    return "unsupported";
+  if (kind.includes("empty"))
+    return "no_text";
+  if (kind.includes("invalid") || kind.includes("undecodable") || kind.includes("corrupt") || kind.includes("damaged"))
+    return "damaged";
+  return "other";
+}
+var NO_EXTRACTION_JOB_OUTCOME = Object.freeze({
+  status: "skipped_unsupported",
+  lastErrorKind: "no_extractor",
+  warnings: [],
+  policyDecision: "index_allowed"
+});
+function unreadHoldDisposition(outcome, contentAllowed = true) {
+  if (!contentAllowed)
+    return { kind: "by_choice" };
+  if (!outcome || outcome.status === "indexed")
+    return { kind: "waiting" };
+  if (outcome.status === "blocked_policy" || outcome.status === "metadata_only" && (outcome.policyDecision === "metadata_only" || outcome.lastErrorKind === "store_item_metadata_only")) {
+    return { kind: "by_choice" };
+  }
+  const specific = (kind) => !["other", "no_text"].includes(unreadableFileReason(kind));
+  const errorKind = [outcome.lastErrorKind, ...outcome.warnings, outcome.status].find((kind) => kind !== undefined && specific(kind)) ?? outcome.lastErrorKind ?? outcome.warnings[0] ?? outcome.status;
+  return { kind: "cannot_read", errorKind, reason: unreadableFileReason(errorKind) };
+}
+var TOKEN_ALPHABET = new Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_");
+var DEFAULT_TOKEN_TTL_MS = 30 * 60000;
+var CURSOR_TIME_ALPHABET = new Set("0123456789TZ:.+-");
+
+// src/workers/file-extraction/job-names.ts
+import { existsSync as existsSync16 } from "node:fs";
+import { Database as Database2 } from "bun:sqlite";
+
+// src/core/sqlite-store.ts
+import { existsSync as existsSync15 } from "node:fs";
+function closeSqliteStore(db, options = {}) {
+  if (options.checkpoint ?? !checkpointsOffLoop) {
+    try {
+      db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+    } catch {}
+  } else if (openCloseReader && !options.readOnly && db.filename && existsSync15(`${db.filename}-wal`)) {
+    let reader;
+    try {
+      reader = openCloseReader(db.filename);
+    } catch {}
+    try {
+      db.close();
+    } finally {
+      reader?.close();
+    }
+    return;
+  }
+  db.close();
+}
+var checkpointsOffLoop = false;
+var openCloseReader;
+var checkpointFiles = new Map;
+function loopWalAutocheckpointPragma(dbPath, kind = "store") {
+  if (!checkpointsOffLoop)
+    return "";
+  if (dbPath && dbPath !== ":memory:" && !checkpointFiles.has(dbPath)) {
+    checkpointFiles.set(dbPath, { label: `${kind}-open-${checkpointFiles.size + 1}`, dbPath, truncateIdleWal: kind === "tier-ledger" });
+  }
+  return " PRAGMA wal_autocheckpoint = 0;";
+}
+
+// src/workers/file-extraction/job-names.ts
+var CLEAR_NAMES_BUSY_TIMEOUT_MS = 1e4;
+function defaultFileExtractionJobsDbPath(env = process.env) {
+  return sharedDataPath("file-extraction-jobs", env);
+}
+var SECRET_ITEM_REDACTIONS_TABLE = "secret_item_redactions";
+var SECRET_ITEM_REDACTION_CLAIMS_TABLE = "secret_item_redaction_claims";
+var SECRET_RESTORED_REREADS_TABLE = "secret_restored_rereads";
+var REREAD_AFTER_REVIVE = "revived";
+var openLedgerPaths = new Map;
+function extractionJobsDbPaths(env = process.env) {
+  return [...new Set([defaultFileExtractionJobsDbPath(env), ...openLedgerPaths.keys()])];
+}
+function jobLedgerPathsToVisit(recorded, env = process.env) {
+  const root = olympusDataRoot(env);
+  const inside = (path) => path === ":memory:" || openLedgerPaths.has(path) || pathResolvesWithin(root, path);
+  const unique = [...new Set(recorded)];
+  return {
+    visit: [...new Set([...extractionJobsDbPaths(env), ...unique.filter(inside)])],
+    outside: unique.filter((path) => !inside(path))
+  };
+}
+function clearExtractionJobNames(dbPath, item, options = {}) {
+  if (dbPath === ":memory:" || !existsSync16(dbPath))
+    return { cleared: 0, durable: true };
+  const db = new Database2(dbPath, { readwrite: true, create: false });
+  try {
+    db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
+    const table = db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'extraction_jobs'`).get();
+    if (!table)
+      return { cleared: 0, durable: true };
+    return db.transaction(() => {
+      if (options.proceed && !options.proceed())
+        return { cleared: 0, durable: true };
+      const claims = claimsTableExists(db);
+      const durable = redactionsTableExists(db) && (options.claimant === undefined || claims);
+      const now = new Date().toISOString();
+      if (redactionsTableExists(db)) {
+        db.query(`
+          INSERT OR IGNORE INTO ${SECRET_ITEM_REDACTIONS_TABLE} (provider, account_scope, provider_item_id, local_item_id, redacted_at)
+          VALUES (?, ?, ?, ?, ?)
+        `).run(item.provider, item.accountScope, item.providerItemId, item.localItemId ?? "", now);
+      }
+      if (options.claimant !== undefined && claims) {
+        db.query(`
+          INSERT OR IGNORE INTO ${SECRET_ITEM_REDACTION_CLAIMS_TABLE} (provider, account_scope, provider_item_id, claimant, claimed_at)
+          VALUES (?, ?, ?, ?, ?)
+        `).run(item.provider, item.accountScope, item.providerItemId, options.claimant, now);
+      }
+      const artifactItems = item.localItemId !== undefined ? "provider = ? AND account_scope = ? AND provider_item_id = ? AND local_item_id = ?" : "provider = ? AND account_scope = ? AND provider_item_id = ?";
+      const itemParams = item.localItemId !== undefined ? [item.provider, item.accountScope, item.providerItemId, item.localItemId] : [item.provider, item.accountScope, item.providerItemId];
+      if (artifactsTableExists(db)) {
+        db.query(`
+          DELETE FROM extraction_artifacts
+          WHERE (corpus_id, local_item_id) IN (SELECT corpus_id, local_item_id FROM extraction_jobs WHERE ${artifactItems})
+        `).run(...itemParams);
+      }
+      const cleared = item.localItemId !== undefined ? db.query(`
+            UPDATE extraction_jobs SET name = NULL
+            WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND local_item_id = ? AND name IS NOT NULL
+          `).run(item.provider, item.accountScope, item.providerItemId, item.localItemId).changes : db.query(`
+            UPDATE extraction_jobs SET name = NULL
+            WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND name IS NOT NULL
+          `).run(item.provider, item.accountScope, item.providerItemId).changes;
+      return { cleared, durable };
+    }).immediate();
+  } finally {
+    closeSqliteStore(db);
+  }
+}
+function retireExtractionJobRedaction(dbPath, item, claimant, stillSecret) {
+  if (dbPath === ":memory:" || !existsSync16(dbPath))
+    return { retired: 0, stillSecret: false };
+  const db = new Database2(dbPath, { readwrite: true, create: false });
+  try {
+    db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
+    if (!redactionsTableExists(db))
+      return { retired: 0, stillSecret: false };
+    return db.transaction(() => {
+      if (stillSecret())
+        return { retired: 0, stillSecret: true };
+      if (claimsTableExists(db)) {
+        db.query(`
+          DELETE FROM ${SECRET_ITEM_REDACTION_CLAIMS_TABLE}
+          WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND claimant = ?
+        `).run(item.provider, item.accountScope, item.providerItemId, claimant);
+        const heldElsewhere = db.query(`
+          SELECT 1 FROM ${SECRET_ITEM_REDACTION_CLAIMS_TABLE}
+          WHERE provider = ? AND account_scope = ? AND provider_item_id = ? LIMIT 1
+        `).get(item.provider, item.accountScope, item.providerItemId) !== null;
+        if (heldElsewhere)
+          return { retired: 0, stillSecret: false };
+      }
+      const retired = db.query(`
+        DELETE FROM ${SECRET_ITEM_REDACTIONS_TABLE}
+        WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
+      `).run(item.provider, item.accountScope, item.providerItemId).changes;
+      if (retired > 0 && rereadsTableExists(db)) {
+        db.query(`
+          INSERT INTO ${SECRET_RESTORED_REREADS_TABLE} (job_id)
+          SELECT job_id FROM extraction_jobs
+          WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
+            AND (status IN ('indexed', 'leased')
+              OR (status = 'blocked_policy' AND last_error_kind = 'store_item_secrets'))
+          ${rereadsHaveReason(db) ? "ON CONFLICT(job_id) DO UPDATE SET reason = NULL" : "ON CONFLICT(job_id) DO NOTHING"}
+        `).run(item.provider, item.accountScope, item.providerItemId);
+      }
+      return { retired, stillSecret: false };
+    }).immediate();
+  } finally {
+    closeSqliteStore(db);
+  }
+}
+function artifactsTableExists(db) {
+  return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'extraction_artifacts'`).get() !== null;
+}
+function oweExtractionRereadAfterRevive(dbPath, item) {
+  if (dbPath === ":memory:" || !existsSync16(dbPath))
+    return 0;
+  const db = new Database2(dbPath, { readwrite: true, create: false });
+  try {
+    db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
+    if (!rereadsTableExists(db) || !rereadsHaveReason(db))
+      return 0;
+    return db.query(`
+      INSERT OR IGNORE INTO ${SECRET_RESTORED_REREADS_TABLE} (job_id, reason)
+      SELECT job_id, ? FROM extraction_jobs
+      WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
+        AND status IN ('indexed', 'leased')
+    `).run(REREAD_AFTER_REVIVE, item.provider, item.accountScope, item.providerItemId).changes;
+  } finally {
+    closeSqliteStore(db);
+  }
+}
+function rereadsHaveReason(db) {
+  return db.query(`PRAGMA table_info(${SECRET_RESTORED_REREADS_TABLE})`).all().some((column) => column.name === "reason");
+}
+function rereadsTableExists(db) {
+  return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(SECRET_RESTORED_REREADS_TABLE) !== null;
+}
+function claimsTableExists(db) {
+  return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(SECRET_ITEM_REDACTION_CLAIMS_TABLE) !== null;
+}
+function redactionsTableExists(db) {
+  return db.query(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(SECRET_ITEM_REDACTIONS_TABLE) !== null;
+}
+
+// src/core/child-item-id.ts
+var CHILD_ITEM_ID_SEPARATOR = "#child:";
+
+// src/core/source-index/keyword-languages.ts
+var profiles = new WeakMap;
+var SAMPLE_TARGET = 1024;
+var SAMPLE_LIMIT = 2048;
+var READ_BATCH = 500;
+var PROFILE_REUSE_MS = 10 * 60000;
+var DETECT_SLICE_MS = 15;
+function detectLanguage(text) {
+  return franc(text, { minLength: 40 });
+}
+function storeKeywordLanguages(db) {
+  const steps = profileSteps(db);
+  let next = steps.next();
+  while (!next.done) {
+    const step = next.value;
+    if ("detect" in step) {
+      next = steps.next(step.detect.map(detectLanguage));
+      continue;
+    }
+    const statement = db.query(step.sql);
+    next = steps.next(step.mode === "get" ? statement.get(...step.params) : statement.all(...step.params));
+  }
+  return next.value;
+}
+async function detectInSlices(texts) {
+  const out = [];
+  let sliceStart = performance.now();
+  for (const text of texts) {
+    if (performance.now() - sliceStart >= DETECT_SLICE_MS) {
+      await new Promise((resolve) => {
+        setImmediate(resolve);
+      });
+      sliceStart = performance.now();
+    }
+    out.push(detectLanguage(text));
+  }
+  return out;
+}
+var sampling = new WeakMap;
+function storeKeywordLanguagesWith(db, read) {
+  const steps = profileSteps(db);
+  const first = steps.next();
+  if (first.done)
+    return Promise.resolve(first.value);
+  const pending = sampling.get(db);
+  if (pending)
+    return pending;
+  const run = (async () => {
+    let next = first;
+    while (!next.done) {
+      const step = next.value;
+      next = steps.next("detect" in step ? await detectInSlices(step.detect) : await read(step));
+    }
+    return next.value;
+  })().finally(() => sampling.delete(db));
+  sampling.set(db, run);
+  return run;
+}
+function lastKeywordLanguages(db) {
+  return profiles.get(db)?.languages ?? [];
+}
+function* profileSteps(db) {
+  const revision = JSON.stringify([db.query("PRAGMA data_version").get(), db.query("SELECT total_changes() AS n").get()]);
+  const cached = profiles.get(db);
+  if (cached?.revision === revision)
+    return cached.languages;
+  if (cached && cached.large && Date.now() - cached.sampledAtMs < PROFILE_REUSE_MS)
+    return cached.languages;
+  const maxRowid = (yield { sql: "SELECT max(rowid) AS n FROM chunks", params: [], mode: "get" })?.n ?? 0;
+  const large = maxRowid > SAMPLE_LIMIT;
+  if (large && cached && Date.now() - cached.sampledAtMs < PROFILE_REUSE_MS)
+    return cached.languages;
+  const live = `SELECT c.rowid AS pk, c.content_hash AS hash FROM chunks c
+    JOIN items i ON i.item_pk = c.item_pk WHERE i.tombstoned = 0`;
+  let rows;
+  if (!large) {
+    rows = yield { sql: `${live} ORDER BY c.rowid LIMIT ${SAMPLE_LIMIT}`, params: [], mode: "all" };
+  } else {
+    const step = maxRowid / SAMPLE_TARGET;
+    const ids = Array.from({ length: SAMPLE_TARGET }, (_, k) => Math.min(maxRowid, Math.max(1, Math.floor(k * step + k * 0.6180339887 % 1 * step) + 1)));
+    rows = [];
+    for (let at = 0;at < ids.length; at += READ_BATCH) {
+      const batch = ids.slice(at, at + READ_BATCH);
+      rows.push(...yield { sql: `${live} AND c.rowid IN (${batch.map(() => "?").join(",")}) ORDER BY c.rowid`, params: batch, mode: "all" });
+    }
+  }
+  const signature = JSON.stringify(rows);
+  if (cached?.signature === signature) {
+    profiles.set(db, { ...cached, revision, large, sampledAtMs: Date.now() });
+    return cached.languages;
+  }
+  const detected = new Map;
+  for (const row of rows) {
+    const known = cached?.detected.get(row.hash);
+    if (known !== undefined)
+      detected.set(row.hash, known);
+  }
+  const unread = [...new Map(rows.filter((row) => !detected.has(row.hash)).map((row) => [row.hash, row.pk])).values()];
+  for (let at = 0;at < unread.length; at += READ_BATCH) {
+    const batch = unread.slice(at, at + READ_BATCH);
+    const texts = yield { sql: `SELECT c.rowid AS pk, c.content_hash AS hash, substr(c.bounded_text, 1, 1000) AS text FROM chunks c WHERE c.rowid IN (${batch.map(() => "?").join(",")})`, params: batch, mode: "all" };
+    const found = yield { detect: texts.map((text) => text.text ?? "") };
+    texts.forEach((text, index) => detected.set(text.hash, found[index] ?? "und"));
+  }
+  const counts = new Map;
+  for (const row of rows) {
+    const language = detected.get(row.hash) ?? "und";
+    if (language !== "und")
+      counts.set(language, (counts.get(language) ?? 0) + 1);
+  }
+  const languages = [...counts].filter(([, count]) => count / Math.max(1, rows.length) >= 0.05).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 6).map(([language]) => language).sort();
+  profiles.set(db, { revision, signature, languages, detected, sampledAtMs: Date.now(), large });
+  return languages;
+}
+// src/core/analyst-tinfoil.ts
+var TINFOIL_MODELS = ["kimi-k3-1-pro", "glm-5-3", "deepseek-v4-1-flash"];
+var DEFAULT_TINFOIL_MODEL = TINFOIL_MODELS[0];
+var TINFOIL_PRICES = Object.freeze({
+  "kimi-k3-1-pro": { input: 4, output: 20, cached: 0.4 },
+  "glm-5-3": { input: 1.8, output: 5.75, cached: 0.45 },
+  "deepseek-v4-1-flash": { input: 0.6, output: 1.45, cached: 0.01 },
+  "decision-medium": { input: 0.06, output: 0 }
+});
+
+// src/workers/classification/sniffer.ts
+import { createHash as createHash12 } from "node:crypto";
+
+// src/workers/source-index/built-in-reasoning/manifest.ts
+var GIB = 1024 ** 3;
+function unslothQwen(size, revision, bytes, sha256) {
+  const name = `Qwen3.5-${size}-Q4_K_M.gguf`;
+  return {
+    name,
+    url: `https://huggingface.co/unsloth/Qwen3.5-${size}-GGUF/resolve/${revision}/${name}`,
+    bytes,
+    sha256
+  };
+}
+var QWEN35_2B_REVISION = "f6d5376be1edb4d416d56da11e5397a961aca8ae";
+var QWEN35_4B_REVISION = "e87f176479d0855a907a41277aca2f8ee7a09523";
+var QWEN35_9B_REVISION = "3885219b6810b007914f3a7950a8d1b469d598a5";
+var QWEN35_2B = {
+  modelId: "qwen3.5-2b-q4_k_m-f6d5376",
+  displayName: "Qwen3.5 2B",
+  sizeClass: "small",
+  baseRepository: "Qwen/Qwen3.5-2B",
+  license: "Apache-2.0",
+  repository: "unsloth/Qwen3.5-2B-GGUF",
+  revision: QWEN35_2B_REVISION,
+  file: unslothQwen("2B", QWEN35_2B_REVISION, 1280835840, "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223"),
+  minimumMemoryBytes: 7 * GIB,
+  contextTokens: 12288
+};
+var QWEN35_4B = {
+  modelId: "qwen3.5-4b-q4_k_m-e87f176",
+  displayName: "Qwen3.5 4B",
+  sizeClass: "standard",
+  baseRepository: "Qwen/Qwen3.5-4B",
+  license: "Apache-2.0",
+  repository: "unsloth/Qwen3.5-4B-GGUF",
+  revision: QWEN35_4B_REVISION,
+  file: unslothQwen("4B", QWEN35_4B_REVISION, 2740937888, "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4"),
+  minimumMemoryBytes: 15 * GIB,
+  contextTokens: 12288
+};
+var QWEN35_9B = {
+  modelId: "qwen3.5-9b-q4_k_m-3885219",
+  displayName: "Qwen3.5 9B",
+  sizeClass: "large",
+  baseRepository: "Qwen/Qwen3.5-9B",
+  license: "Apache-2.0",
+  repository: "unsloth/Qwen3.5-9B-GGUF",
+  revision: QWEN35_9B_REVISION,
+  file: unslothQwen("9B", QWEN35_9B_REVISION, 5680522464, "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8"),
+  minimumMemoryBytes: 15 * GIB,
+  contextTokens: 12288
+};
+var LLAMA_CPP_RELEASE = "b11320";
+var LLAMA_CPP_BASE = `https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_CPP_RELEASE}`;
+var LLAMA_SERVER_RUNTIME = {
+  release: LLAMA_CPP_RELEASE,
+  license: "MIT",
+  archives: [
+    {
+      platform: "darwin-arm64",
+      name: `llama-${LLAMA_CPP_RELEASE}-bin-macos-arm64.tar.gz`,
+      url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-macos-arm64.tar.gz`,
+      bytes: 11827796,
+      sha256: "f6f337fc7d2ff9260f53177cf4fe6bbf6b0f7faa75a49fb224aaf66885a5c956",
+      gpu: true
+    },
+    {
+      platform: "linux-x64",
+      name: `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz`,
+      url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz`,
+      bytes: 17544875,
+      sha256: "ef1856938dc1434138ce53688791eb0d2d64cf46e309a0942a12bba3366c0919",
+      gpu: false
+    },
+    {
+      platform: "linux-arm64",
+      name: `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-arm64.tar.gz`,
+      url: `${LLAMA_CPP_BASE}/llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-arm64.tar.gz`,
+      bytes: 13590823,
+      sha256: "88589b963d8e2ffd2d4df2f542ed7e301fb636b637c99081f5d58646aee20a9a",
+      gpu: false
+    }
+  ]
+};
+var QWEN3_ASR_06B_REVISION = "928ab958557df9aa2ef1c93e0e83c7ad0933fae2";
+function ggmlOrgAsrFile(name, bytes, sha256) {
+  return {
+    name,
+    url: `https://huggingface.co/ggml-org/Qwen3-ASR-0.6B-GGUF/resolve/${QWEN3_ASR_06B_REVISION}/${name}`,
+    bytes,
+    sha256
+  };
+}
+var QWEN3_ASR_06B = {
+  modelId: "qwen3-asr-0.6b-q8_0-928ab95",
+  displayName: "Qwen3-ASR 0.6B",
+  baseRepository: "Qwen/Qwen3-ASR-0.6B",
+  license: "Apache-2.0",
+  repository: "ggml-org/Qwen3-ASR-0.6B-GGUF",
+  revision: QWEN3_ASR_06B_REVISION,
+  files: [
+    ggmlOrgAsrFile("Qwen3-ASR-0.6B-Q8_0.gguf", 804749248, "bca259818b50ca7c4c05e9bdb35a5dc04fa039653a6d6f3f0f331f96f6aa1971"),
+    ggmlOrgAsrFile("mmproj-Qwen3-ASR-0.6B-Q8_0.gguf", 214392480, "41a342b5e4c514e968cb756de6cd1b7be39eff43c44c57a2ef5fc6522e36603d")
+  ],
+  minimumMemoryBytes: 7 * GIB,
+  contextTokens: 4096
+};
+
 // src/workers/classification/delphi-scorer.ts
 var SCORER_SYSTEM_PROMPT = [
   "You are a privacy tier scorer for a personal email index.",
@@ -13924,12 +15507,148 @@ var SCORER_SYSTEM_PROMPT = [
 
 // src/workers/classification/sniffer-store.ts
 import { Database as Database3 } from "bun:sqlite";
-import { createHash as createHash9 } from "node:crypto";
-import { chmodSync as chmodSync3, existsSync as existsSync14, mkdirSync as mkdirSync9 } from "node:fs";
-import { dirname as dirname14 } from "node:path";
+import { createHash as createHash11 } from "node:crypto";
+import { chmodSync as chmodSync4, existsSync as existsSync17, mkdirSync as mkdirSync10 } from "node:fs";
+import { dirname as dirname18 } from "node:path";
 
 // src/workers/classification/tier-classifier.ts
-import { createHash as createHash8 } from "node:crypto";
+import { createHash as createHash10 } from "node:crypto";
+
+// src/core/sender-rules.ts
+var MAX_FROM_HEADER_CHARS = 4096;
+var LOCAL_CHAR = /[^\s<>"(),;:@[\]\\]/;
+var DOMAIN_CHAR = /[a-z0-9.-]/i;
+function validDomain(raw) {
+  let end = raw.length;
+  while (end > 0 && (raw[end - 1] === "." || raw[end - 1] === "-"))
+    end -= 1;
+  const domain = raw.slice(0, end).toLowerCase();
+  const labels = domain.split(".");
+  if (labels.length < 2 || labels.some((label) => !label || label.startsWith("-") || label.endsWith("-")))
+    return;
+  return domain;
+}
+function scanHeader(value) {
+  let out = "";
+  let depth = 0;
+  let quoted = false;
+  let angleOpens = 0;
+  let comma = false;
+  for (let index = 0;index < value.length; index += 1) {
+    const char = value[index];
+    if (char === "\\" && index + 1 < value.length) {
+      if (depth === 0)
+        out += char + value[index + 1];
+      index += 1;
+      continue;
+    }
+    if (depth === 0 && char === '"')
+      quoted = !quoted;
+    if (!quoted && char === "(") {
+      depth += 1;
+      continue;
+    }
+    if (!quoted && char === ")" && depth > 0) {
+      depth -= 1;
+      continue;
+    }
+    if (depth > 0)
+      continue;
+    if (!quoted && char === "<")
+      angleOpens += 1;
+    if (!quoted && char === ",")
+      comma = true;
+    out += char;
+  }
+  return { text: out, angleOpens, comma };
+}
+function parseAddrSpec(value) {
+  const spec = value.trim();
+  let local;
+  let rest;
+  if (spec.startsWith('"')) {
+    let index = 1;
+    while (index < spec.length && spec[index] !== '"')
+      index += spec[index] === "\\" ? 2 : 1;
+    if (index >= spec.length || spec[index + 1] !== "@")
+      return;
+    local = spec.slice(0, index + 1);
+    rest = spec.slice(index + 2);
+  } else {
+    const at = spec.indexOf("@");
+    if (at <= 0)
+      return;
+    local = spec.slice(0, at);
+    rest = spec.slice(at + 1);
+    for (const char of local)
+      if (!LOCAL_CHAR.test(char))
+        return;
+  }
+  for (const char of rest)
+    if (!DOMAIN_CHAR.test(char))
+      return;
+  const domain = validDomain(rest);
+  if (!domain || domain !== rest.toLowerCase())
+    return;
+  return { address: `${local.toLowerCase()}@${domain}`, domain };
+}
+function senderAddress(from) {
+  if (!from || from.length > MAX_FROM_HEADER_CHARS)
+    return;
+  const scanned = scanHeader(from);
+  if (scanned.angleOpens > 1 || scanned.comma)
+    return;
+  if (scanned.angleOpens === 1) {
+    const open = scanned.text.indexOf("<");
+    const close = scanned.text.indexOf(">", open + 1);
+    if (close < 0 || scanned.text.slice(close + 1).trim() !== "")
+      return;
+    return parseAddrSpec(scanned.text.slice(open + 1, close));
+  }
+  return parseAddrSpec(scanned.text);
+}
+function everyAddressIn(from) {
+  if (!from)
+    return [];
+  return addressSpansIn(from.slice(0, MAX_FROM_HEADER_CHARS)).map(({ address, domain }) => ({ address, domain }));
+}
+function addressSpansIn(text) {
+  const found = [];
+  for (let at = text.indexOf("@");at >= 0; at = text.indexOf("@", at + 1)) {
+    let start = at;
+    while (start > 0 && LOCAL_CHAR.test(text[start - 1]))
+      start -= 1;
+    let end = at + 1;
+    while (end < text.length && DOMAIN_CHAR.test(text[end]))
+      end += 1;
+    if (start === at)
+      continue;
+    const domain = validDomain(text.slice(at + 1, end));
+    if (!domain)
+      continue;
+    const local = text.slice(start, at).toLowerCase();
+    found.push({ address: `${local}@${domain}`, domain, local, start, end: at + 1 + domain.length });
+  }
+  return found;
+}
+function addressMatches(sender, normalizedRule) {
+  if (normalizedRule.startsWith("@")) {
+    const domain = normalizedRule.slice(1);
+    return domain !== "" && (sender.domain === domain || sender.domain.endsWith(`.${domain}`));
+  }
+  return sender.address === normalizedRule;
+}
+function ownerSenderRuleMatches(from, value, raises) {
+  const normalized = value.trim().toLowerCase();
+  if (!normalized)
+    return false;
+  if (!normalized.includes("@"))
+    return raises && (from ?? "").slice(0, MAX_FROM_HEADER_CHARS).toLowerCase().includes(normalized);
+  const sender = senderAddress(from);
+  if (sender)
+    return addressMatches(sender, normalized);
+  return raises && everyAddressIn(from).some((candidate) => addressMatches(candidate, normalized));
+}
 
 // src/core/location-rules.ts
 function normalizeLocationPath(value) {
@@ -14078,14 +15797,14 @@ function heldUntilJudged(reasons) {
   return reasons?.includes(HELD_UNTIL_JUDGED_REASON) === true;
 }
 function contentDigestReason(text) {
-  return `content:sha256:${createHash8("sha256").update(text.trim()).digest("hex")}`;
+  return `content:sha256:${createHash10("sha256").update(text.trim()).digest("hex")}`;
 }
 function contentJudgeVerdictReason(reason, tier, digest) {
-  return `content:judge_verdict:${tier}:${createHash8("sha256").update(JSON.stringify([reason, digest])).digest("hex")}`;
+  return `content:judge_verdict:${tier}:${createHash10("sha256").update(JSON.stringify([reason, digest])).digest("hex")}`;
 }
 function contentNamesReason(names, parentContext) {
   const parts = [names.title, names.path, names.sender, parentContext].map((part) => part?.trim() ?? "");
-  return `content:names:${createHash8("sha256").update(JSON.stringify(parts)).digest("hex").slice(0, 16)}`;
+  return `content:names:${createHash10("sha256").update(JSON.stringify(parts)).digest("hex").slice(0, 16)}`;
 }
 function snifferContentMaterial(names, excerpt, parentContext) {
   const trimmed = names.trim();
@@ -14110,7 +15829,7 @@ function namesWithParentContext(names, parentContext) {
 }
 function tierSnifferInputHash(pass, signals, text, parentContext) {
   const context = parentContext?.replace(/\s+/g, " ").trim().slice(0, PARENT_CONTEXT_MAX_CHARS);
-  return createHash8("sha256").update(JSON.stringify([
+  return createHash10("sha256").update(JSON.stringify([
     pass,
     signals.title ?? null,
     signals.path ?? null,
@@ -14139,7 +15858,7 @@ function textOnlyMime(mimeType) {
   return mimeType === undefined || ["text/plain", "text/markdown", "message/rfc822"].includes(mimeType.split(";")[0].trim().toLowerCase());
 }
 function normalizedContentHash(text) {
-  return createHash8("sha256").update(text.normalize("NFC").replace(/\r\n?/g, `
+  return createHash10("sha256").update(text.normalize("NFC").replace(/\r\n?/g, `
 `).trim()).digest("hex");
 }
 var FRONT_MATTER_PRIVATE_REASON = "content:rule:front_matter_private";
@@ -14755,11 +16474,11 @@ function slug(value) {
 
 // src/workers/classification/sniffer-store.ts
 function snifferMaterialHash(pass, material) {
-  return createHash9("sha256").update(`${pass}
+  return createHash11("sha256").update(`${pass}
 ${material}`).digest("hex");
 }
 function snifferSubjectKey(subject) {
-  return createHash9("sha256").update(JSON.stringify([subject.provider, subject.accountScope, subject.providerConversationId ?? "", subject.providerItemId])).digest("hex");
+  return createHash11("sha256").update(JSON.stringify([subject.provider, subject.accountScope, subject.providerConversationId ?? "", subject.providerItemId])).digest("hex");
 }
 class TierSnifferStore {
   dbPath;
@@ -14784,7 +16503,7 @@ class TierSnifferStore {
     assertWritableStoreOpenAllowed("sniffer store", this.dbPath);
     const onDisk = this.dbPath !== ":memory:";
     if (onDisk)
-      mkdirSync9(dirname14(this.dbPath), { recursive: true, mode: 448 });
+      mkdirSync10(dirname18(this.dbPath), { recursive: true, mode: 448 });
     const previousUmask = onDisk ? process.umask(63) : undefined;
     let db;
     try {
@@ -15134,8 +16853,8 @@ function subjectParams(subject) {
 }
 function restrictFiles(dbPath) {
   for (const path of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
-    if (existsSync14(path))
-      chmodSync3(path, 384);
+    if (existsSync17(path))
+      chmodSync4(path, 384);
   }
 }
 function snifferMigrations() {
@@ -15370,8 +17089,8 @@ function boundedOwnerContext(ownerContext) {
   const trimmed = ownerContext?.replace(/\s+/g, " ").trim();
   return trimmed ? trimmed.slice(0, SNIFFER_OWNER_CONTEXT_MAX_CHARS) : undefined;
 }
-var SNIFFER_PROMPT_VERSION = `p-${createHash10("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }])).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }])).digest("hex").slice(0, 12)}`;
-var SNIFFER_OWNER_CONTEXT_PROMPT_VERSION = `p-${createHash10("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }], "template")).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }], "template")).digest("hex").slice(0, 12)}`;
+var SNIFFER_PROMPT_VERSION = `p-${createHash12("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }])).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }])).digest("hex").slice(0, 12)}`;
+var SNIFFER_OWNER_CONTEXT_PROMPT_VERSION = `p-${createHash12("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }], "template")).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }], "template")).digest("hex").slice(0, 12)}`;
 // src/workers/classification/judge-spending.ts
 registerLimit({ id: "judge.spend_cap", kind: "cost", scope: "judge", label: "Privacy judge spending cap reached", unit: "usd", continue: "raise" });
 registerLimit({ id: "judge.payment", kind: "funding", scope: "judge", label: "Privacy judge provider refused payment (402)", unit: "usd", continue: "refill" });
@@ -16120,6 +17839,56 @@ function dispatch() {
   }
 }
 
+// src/core/provider-account-identity.ts
+var DEFAULT_PROVIDER_IDENTITY_ENDPOINTS = {
+  dropbox: "https://api.dropboxapi.com/2/users/get_current_account",
+  gmail: new URL("users/me/profile", "https://gmail.googleapis.com/gmail/v1/").toString(),
+  google_drive: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress,permissionId)",
+  x: "https://api.x.com/2/users/me",
+  google_tokeninfo: "https://oauth2.googleapis.com/tokeninfo"
+};
+var IDENTITY_RESPONSE_LIMIT_BYTES = 64 * 1024;
+var IMMUTABLE_LABEL_KINDS = ["dbid", "google-sub", "google-perm"];
+var LABEL = /^([a-z-]+):[A-Za-z0-9_-]{1,150}$/;
+function parseProviderAccountId(id) {
+  const labels = new Map;
+  for (const label of id.trim().split(".")) {
+    const kind = LABEL.exec(label)?.[1];
+    if (!kind || kind !== "google" && !IMMUTABLE_LABEL_KINDS.includes(kind))
+      return;
+    if (labels.has(kind))
+      return;
+    labels.set(kind, label);
+  }
+  return labels.size > 0 ? labels : undefined;
+}
+function compareProviderAccounts(recorded, observed) {
+  const a = parseProviderAccountId(recorded);
+  const b = parseProviderAccountId(observed);
+  if (!a || !b)
+    return recorded.trim() === observed.trim() ? "same" : "different";
+  let shared = false;
+  for (const kind of IMMUTABLE_LABEL_KINDS) {
+    const left = a.get(kind);
+    const right = b.get(kind);
+    if (left === undefined || right === undefined)
+      continue;
+    if (left !== right)
+      return "different";
+    shared = true;
+  }
+  if (shared)
+    return "same";
+  if (hasImmutableAccountLabel(recorded))
+    return "unproven";
+  const address = a.get("google");
+  return address !== undefined && address === b.get("google") ? "same" : "different";
+}
+function hasImmutableAccountLabel(id) {
+  const labels = parseProviderAccountId(id);
+  return labels !== undefined && IMMUTABLE_LABEL_KINDS.some((kind) => labels.has(kind));
+}
+
 // src/workers/connector-store/local-index.ts
 import { createHash as createHash13, randomUUID as randomUUID9 } from "node:crypto";
 import { closeSync as closeSync11, existsSync as existsSync22, fsyncSync as fsyncSync3, lstatSync as lstatSync9, mkdirSync as mkdirSync13, openSync as openSync11, statSync as statSync13, statfsSync } from "node:fs";
@@ -16127,535 +17896,18 @@ import { open as openFile } from "node:fs/promises";
 import { basename as basename7, dirname as dirname23 } from "node:path";
 import { Database as Database6 } from "bun:sqlite";
 
-// src/core/media-cache.ts
-import { createHash as createHash11, randomUUID as randomUUID7 } from "node:crypto";
-import {
-  chmodSync as chmodSync4,
-  closeSync as closeSync8,
-  existsSync as existsSync16,
-  fsyncSync as fsyncSync2,
-  mkdirSync as mkdirSync10,
-  lstatSync as lstatSync7,
-  openSync as openSync8,
-  readFileSync as readFileSync14,
-  readdirSync as readdirSync2,
-  realpathSync as realpathSync6,
-  renameSync as renameSync5,
-  rmSync as rmSync7,
-  rmdirSync,
-  statSync as statSync10,
-  writeFileSync as writeFileSync6
-} from "node:fs";
-import { basename as basename5, dirname as dirname16, isAbsolute as isAbsolute11, join as join19, resolve as resolve8 } from "node:path";
-
-// src/core/remote-access.ts
-import { isAbsolute as raIsAbsolute, join as raJoin } from "node:path";
-
-// connect-relay/shared/directory-tools.ts
-var DEMO_GRANT_REMOTE_TOOLS = Object.freeze(["olympus_search", "source_index_status"]);
-var DIRECTORY_TOOL_NAMES = Object.freeze([
-  "olympus_dashboard",
-  "olympus_search",
-  "source_index_status",
-  "source_answer",
-  "source_answer_result",
-  "ask_anonymously",
-  "open_private_question",
-  "olympus_connect_source",
-  "olympus_scope_list",
-  "olympus_scope_set",
-  "olympus_disconnect_source",
-  "olympus_delete_source_data",
-  "olympus_model_set",
-  "olympus_model_retry",
-  "olympus_privacy_get",
-  "olympus_privacy_set",
-  "olympus_privacy_questions",
-  "olympus_privacy_check",
-  "olympus_sync_source"
-]);
-var DIRECTORY_TOOLS = new Set(DIRECTORY_TOOL_NAMES);
-
-// src/core/remote-public-url.ts
-var LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
-
-// src/core/remote-access.ts
-var LOOPBACK_HOSTNAMES2 = new Set(["127.0.0.1", "localhost", "[::1]"]);
-function olympusDataDir(env = process.env) {
-  const root = olympusDataRoot(env);
-  if (!raIsAbsolute(root))
-    throw new TypeError("XDG_DATA_HOME must be an absolute private data root.");
-  return root;
-}
-
-// src/core/store-identity.ts
-import { existsSync as existsSync15, realpathSync as realpathSync5, statSync as statSync9 } from "node:fs";
-import { basename as basename4, dirname as dirname15, isAbsolute as isAbsolute10, join as join18, relative as relative5, resolve as resolve7, sep as sep5 } from "node:path";
-var LAYOUTS2 = ["folder", "legacy"];
-function layoutPath(identity, layout, env) {
-  if (layout === "legacy" && identity.slot !== DEFAULT_ACCOUNT_SLOT)
-    return;
-  try {
-    return accountStorePath({ source_id: identity.sourceId, slot: identity.slot, layout }, identity.store, env);
-  } catch {
-    return;
-  }
-}
-function storePathKey(path) {
-  try {
-    return realpathSync5(path);
-  } catch {}
-  const folder = dirname15(path);
-  let real = resolve7(folder);
-  try {
-    real = realpathSync5(folder);
-  } catch {}
-  return join18(real, basename4(path));
-}
-function registryKey(env = process.env) {
-  const path = sourceRegistryPath(env);
-  let folder = resolve7(dirname15(path));
-  try {
-    folder = realpathSync5.native(folder);
-  } catch {}
-  return join18(folder, basename4(path));
-}
-function matchStore(sourceId, slot, dbPath, names, env) {
-  const wanted = storePathKey(dbPath);
-  for (const store of names) {
-    const identity = { sourceId, slot, store };
-    const paths = LAYOUTS2.flatMap((layout) => layoutPath(identity, layout, env) ?? []);
-    if (paths.some((path) => storePathKey(path) === wanted)) {
-      return { identity, others: paths.filter((path) => storePathKey(path) !== wanted) };
-    }
-  }
-  return;
-}
-function placedStoreHolder(account, store, env = process.env, registry) {
-  if (store.dbPath === ":memory:" || !FOLDER_LAYOUT_SOURCES.includes(account.sourceId))
-    return;
-  const slot = account.slot ?? DEFAULT_ACCOUNT_SLOT;
-  try {
-    const entry = findRegistryAccount(registry ?? readSourceRegistry(env), account.sourceId, slot);
-    if (entry?.state !== "active")
-      return;
-    const names = [store.trustDomain, `${store.family}.${store.trustDomain}`];
-    const matched = matchStore(account.sourceId, slot, store.dbPath, names, env);
-    return matched && {
-      ...matched,
-      identity: { ...matched.identity, incarnation: entry.created_at },
-      path: store.dbPath,
-      registry: registryKey(env)
-    };
-  } catch {
-    return;
-  }
-}
-function storePlacementView(env = process.env) {
-  let registryPath;
-  let registryName;
-  let root;
-  try {
-    registryPath = sourceRegistryPath(env);
-    registryName = registryKey(env);
-    root = olympusDataRoot(env);
-  } catch {}
-  let loaded;
-  const registry = () => {
-    if (loaded)
-      return loaded;
-    if (registryPath === undefined)
-      return loaded = { kind: "unreadable" };
-    try {
-      const read = readSourceRegistry(env);
-      loaded = existsSync15(registryPath) ? { kind: "read", registry: read } : { kind: "missing" };
-    } catch {
-      loaded = { kind: "unreadable" };
-    }
-    return loaded;
-  };
-  const absentForSure = (path) => isMissing(path) && !isMissing(dirname15(path));
-  const verdicts = new Map;
-  const storeGone = (identity, seen) => {
-    const key = JSON.stringify([identity.sourceId, identity.slot, identity.store, identity.incarnation, ...seen]);
-    const known = verdicts.get(key);
-    if (known !== undefined)
-      return known;
-    const gone = judgeStoreGone(identity, seen);
-    verdicts.set(key, gone);
-    return gone;
-  };
-  const judgeStoreGone = (identity, seen) => {
-    const state = registry();
-    if (state.kind !== "read")
-      return false;
-    const entry = findRegistryAccount(state.registry, identity.sourceId, identity.slot);
-    if (!entry)
-      return true;
-    if (identity.incarnation !== undefined && isEarlier(identity.incarnation, entry.created_at))
-      return true;
-    if (entry.state === "deleted")
-      return true;
-    if (entry.state === "deleting")
-      return false;
-    const own = layoutPath(identity, entry.layout, env);
-    if (own === undefined)
-      return false;
-    const other = layoutPath(identity, entry.layout === "folder" ? "legacy" : "folder", env);
-    return [own, ...seen].every(absentForSure) && (other === undefined || isMissing(other));
-  };
-  const folderRoots = () => {
-    const roots = new Set;
-    try {
-      roots.add(resolve7(accountFoldersRoot(env)));
-      if (root !== undefined)
-        roots.add(join18(realpathSync5(root), ACCOUNT_FOLDERS_DIR));
-    } catch {}
-    return [...roots];
-  };
-  const folderPlace = (path) => {
-    for (const folders of folderRoots()) {
-      const inside = relative5(folders, path);
-      if (inside.startsWith("..") || isAbsolute10(inside))
-        continue;
-      const [sourceId, slot, stores, file, ...rest] = inside.split(sep5);
-      if (!sourceId || !slot || stores !== "stores" || !file?.endsWith(".sqlite") || rest.length > 0)
-        continue;
-      return { sourceId, slot, store: file.slice(0, -".sqlite".length) };
-    }
-    return;
-  };
-  let legacyPlaces;
-  const legacyPlaced = (key) => {
-    if (!legacyPlaces) {
-      legacyPlaces = new Set;
-      const families = archiveImportFamilies();
-      for (const sourceId of FOLDER_LAYOUT_SOURCES) {
-        for (const store of accountStoreNames(sourceId, families)) {
-          const path = layoutPath({ sourceId, slot: DEFAULT_ACCOUNT_SLOT, store }, "legacy", env);
-          if (path !== undefined)
-            legacyPlaces.add(storePathKey(path));
-        }
-      }
-    }
-    return legacyPlaces.has(key);
-  };
-  let placed;
-  const placedAt = (known) => {
-    if (placed)
-      return placed;
-    placed = new Map;
-    const families = archiveImportFamilies();
-    for (const account of known.accounts) {
-      if (!FOLDER_LAYOUT_SOURCES.includes(account.source_id))
-        continue;
-      for (const store of accountStoreNames(account.source_id, families)) {
-        const identity = { sourceId: account.source_id, slot: account.slot, store };
-        for (const layout of LAYOUTS2) {
-          const path = layoutPath(identity, layout, env);
-          if (path !== undefined && !placed.has(storePathKey(path)))
-            placed.set(storePathKey(path), identity);
-        }
-      }
-    }
-    return placed;
-  };
-  const pathVerdicts = new Map;
-  const judgePathMarker = (path) => {
-    const state = registry();
-    if (state.kind === "unreadable")
-      return "kept";
-    try {
-      const key = storePathKey(path);
-      const inFolder = folderPlace(key) ?? folderPlace(resolve7(path));
-      if (state.kind === "missing")
-        return inFolder !== undefined || legacyPlaced(key) ? "kept" : "unplaced";
-      const identity = placedAt(state.registry).get(key);
-      if (identity)
-        return storeGone(identity, [path]) ? "gone" : "kept";
-      if (!inFolder)
-        return "unplaced";
-      return storeGone(inFolder, [path]) ? "gone" : "kept";
-    } catch {
-      return "kept";
-    }
-  };
-  return {
-    registry: registryName,
-    storeGone,
-    pathMarker(path) {
-      let verdict = pathVerdicts.get(path);
-      if (!verdict) {
-        verdict = judgePathMarker(path);
-        pathVerdicts.set(path, verdict);
-      }
-      return verdict;
-    }
-  };
-}
-function isEarlier(held, current) {
-  const before = Date.parse(held);
-  const after = Date.parse(current);
-  return Number.isFinite(before) && Number.isFinite(after) && before < after;
-}
-function isMissing(path) {
-  try {
-    statSync9(path);
-    return false;
-  } catch (error) {
-    const code = error?.code;
-    return code === "ENOENT" || code === "ENOTDIR";
-  }
-}
-
-// src/core/media-cache.ts
-var MEDIA_CACHE_ORPHAN_AGE_MS = 24 * 60 * 60000;
-function mediaCacheDir(env = process.env) {
-  const configured = env[MEDIA_CACHE_DIR_ENV]?.trim();
-  if (configured && !isAbsolute11(configured))
-    throw new TypeError(`${MEDIA_CACHE_DIR_ENV} must be an absolute path.`);
-  if (!configured)
-    olympusDataDir(env);
-  return mediaCacheRoot(env);
-}
-function isSha256(value) {
-  if (value.length !== 64)
-    return false;
-  for (const character of value) {
-    if (!"0123456789abcdef".includes(character))
-      return false;
-  }
-  return true;
-}
-var MEDIA_CACHE_DIR_NAMES = new Set(["media-cache", "olympus-media"]);
-function isMediaCachePath(path, sha256, dir) {
-  if (!isAbsolute11(path) || !isSha256(sha256) || resolve8(path) !== path)
-    return false;
-  if (basename5(path) !== `${sha256}.jpg` || !MEDIA_CACHE_DIR_NAMES.has(basename5(dirname16(path))))
-    return false;
-  if (dir !== undefined && dirname16(path) !== resolve8(dir))
-    return false;
-  try {
-    const stat = lstatSync7(path);
-    if (!stat.isFile())
-      return false;
-  } catch {}
-  return true;
-}
-function mediaHolderName(holder) {
-  if (holder.startsWith("staging:") || holder.startsWith("memory:"))
-    return holder;
-  try {
-    return realpathSync6(holder);
-  } catch {
-    return resolve8(holder);
-  }
-}
-function mediaHolderKey(holder) {
-  return typeof holder === "string" ? holder : `${storeMarkerName(holder)}@${holder.path}@${holder.identity.incarnation ?? ""}`;
-}
-function retainMediaCacheFile(path, sha256, holder, dir) {
-  if (!isMediaCachePath(path, sha256, dir))
-    return false;
-  try {
-    addMarker(path, holder);
-    return true;
-  } catch {
-    return false;
-  }
-}
-function releaseMediaCacheFile(path, sha256, holder, dir) {
-  if (!isMediaCachePath(path, sha256, dir))
-    return false;
-  try {
-    const refs = refsDir(path);
-    for (const name of markerNames(holder))
-      rmSync7(join19(refs, name), { force: true });
-    const remaining = existsSync16(refs) ? readdirSync2(refs) : [];
-    if (remaining.length > 0)
-      return false;
-    if (existsSync16(refs))
-      rmdirSync(refs);
-    rmSync7(path, { force: true });
-    return true;
-  } catch {
-    return false;
-  }
-}
-function sweepMediaCache(dir, options = {}) {
-  const maxAgeMs = options.maxAgeMs ?? MEDIA_CACHE_ORPHAN_AGE_MS;
-  const now = options.now ?? Date.now();
-  const placement = storePlacementView(options.env ?? process.env);
-  const old = (path) => {
-    try {
-      return now - statSync10(path).mtimeMs > maxAgeMs;
-    } catch {
-      return false;
-    }
-  };
-  let removed = 0;
-  let entries;
-  try {
-    entries = readdirSync2(dir);
-  } catch {
-    return 0;
-  }
-  for (const name of entries) {
-    const path = join19(dir, name);
-    try {
-      if (name.startsWith(".") && name.endsWith(".tmp")) {
-        if (old(path))
-          rmSync7(path, { force: true });
-        continue;
-      }
-      if (!name.endsWith(".jpg") || !isSha256(name.slice(0, -4)))
-        continue;
-      const refs = refsDir(path);
-      if (existsSync16(refs)) {
-        for (const marker of readdirSync2(refs)) {
-          const markerPath = join19(refs, marker);
-          const gone = marker.startsWith("staging-") || marker.endsWith(".tmp") ? old(markerPath) : marker.startsWith(STORE_MARKER_PREFIX) ? storeHolderGone(markerPath, placement) : holderGone(markerPath, marker, placement);
-          if (gone)
-            rmSync7(markerPath, { force: true });
-        }
-        if (readdirSync2(refs).length > 0)
-          continue;
-        rmdirSync(refs);
-      }
-      if (old(path)) {
-        rmSync7(path, { force: true });
-        removed += 1;
-      }
-    } catch {}
-  }
-  return removed;
-}
-function addMarker(path, holder) {
-  const refs = refsDir(path);
-  ensureOwnerOnlyDir(refs);
-  if (typeof holder !== "string") {
-    addStoreMarker(refs, holder);
-    return;
-  }
-  const marker = join19(refs, holderName(holder));
-  const name = mediaHolderName(holder);
-  if (readMarker(marker) !== name)
-    writeFileSync6(marker, name, { mode: 384 });
-  const legacy = legacyHolderName(holder);
-  if (legacy)
-    rmSync7(join19(refs, legacy), { force: true });
-}
-function addStoreMarker(refs, holder) {
-  const marker = join19(refs, storeMarkerName(holder));
-  const text = storeMarkerText(holder);
-  if (readMarker(marker) !== text)
-    writePrivateFileAtomicSync(marker, text);
-  else
-    flushMarker(marker, refs);
-  for (const name of pathMarkerNames(holder))
-    rmSync7(join19(refs, name), { force: true });
-}
-function flushMarker(marker, refs) {
-  const descriptor = openSync8(marker, "r");
-  try {
-    fsyncSync2(descriptor);
-  } finally {
-    closeSync8(descriptor);
-  }
-  syncDirectorySync(refs);
-}
-function readMarker(marker) {
-  try {
-    return readFileSync14(marker, "utf8");
-  } catch {
-    return;
-  }
-}
-function holderGone(marker, markerName, placement) {
-  const name = readMarker(marker);
-  if (!name || !isAbsolute11(name) || holderDigest(name) !== markerName)
-    return false;
-  if (existsSync16(name))
-    return false;
-  const verdict = placement.pathMarker(name);
-  if (verdict !== "unplaced")
-    return verdict === "gone";
-  return existsSync16(dirname16(name));
-}
-var STORE_MARKER_PREFIX = "store-";
-function storeHolderGone(marker, placement) {
-  const recorded = parseStoreMarker(readMarker(marker));
-  if (!recorded || recorded.registry !== placement.registry)
-    return false;
-  return placement.storeGone(recorded.identity, [recorded.seen]);
-}
-function storeMarkerName(holder) {
-  const { sourceId, slot, store } = holder.identity;
-  return `${STORE_MARKER_PREFIX}${holderDigest(JSON.stringify([holder.registry, sourceId, slot, store]))}`;
-}
-function storeMarkerText(holder) {
-  return JSON.stringify({
-    version: 1,
-    sourceId: holder.identity.sourceId,
-    slot: holder.identity.slot,
-    store: holder.identity.store,
-    ...holder.identity.incarnation === undefined ? {} : { incarnation: holder.identity.incarnation },
-    seen: mediaHolderName(holder.path),
-    registry: holder.registry
-  });
-}
-function parseStoreMarker(text) {
-  if (!text)
-    return;
-  try {
-    const parsed = JSON.parse(text);
-    const { version, sourceId, slot, store, incarnation, seen, registry } = parsed;
-    if (version !== 1 || typeof sourceId !== "string" || typeof slot !== "string" || typeof store !== "string")
-      return;
-    if (typeof seen !== "string" || typeof registry !== "string" || !sourceId || !slot || !store)
-      return;
-    if (incarnation !== undefined && typeof incarnation !== "string")
-      return;
-    return { identity: { sourceId, slot, store, ...incarnation === undefined ? {} : { incarnation } }, seen, registry };
-  } catch {
-    return;
-  }
-}
-function refsDir(path) {
-  return join19(dirname16(path), `${basename5(path)}.refs`);
-}
-function holderDigest(name) {
-  return createHash11("sha256").update(name).digest("hex").slice(0, 32);
-}
-function holderName(holder) {
-  const digest = holderDigest(mediaHolderName(holder));
-  return holder.startsWith("staging:") ? `staging-${digest}` : digest;
-}
-function markerNames(holder) {
-  if (typeof holder !== "string")
-    return [storeMarkerName(holder), ...pathMarkerNames(holder)];
-  const legacy = legacyHolderName(holder);
-  return legacy ? [holderName(holder), legacy] : [holderName(holder)];
-}
-function pathMarkerNames(holder) {
-  return [...markerNames(holder.path), ...holder.others.map((other) => holderDigest(storePathKey(other)))];
-}
-function legacyHolderName(holder) {
-  if (holder.startsWith("staging:") || holder.startsWith("memory:"))
-    return;
-  const legacy = holderDigest(holder);
-  return legacy === holderName(holder) ? undefined : legacy;
-}
-function ensureOwnerOnlyDir(dir) {
-  mkdirSync10(dir, { recursive: true, mode: 448 });
-  chmodSync4(dir, 448);
+// src/core/classification-signals.ts
+var CONTENT_SCOPE_METADATA_KEY = "contentScope";
+var CONTENT_SCOPE_NAMES_ONLY = "names_only";
+function itemContentKeptNamesOnly(item) {
+  return item.metadata[CONTENT_SCOPE_METADATA_KEY] === CONTENT_SCOPE_NAMES_ONLY;
 }
 
 // src/workers/classification/tier-ledger.ts
 import { Database as Database4 } from "bun:sqlite";
 import { randomUUID as randomUUID8 } from "node:crypto";
-import { chmodSync as chmodSync5, closeSync as closeSync9, existsSync as existsSync17, mkdirSync as mkdirSync11, openSync as openSync9, statSync as statSync11 } from "node:fs";
-import { dirname as dirname17 } from "node:path";
+import { chmodSync as chmodSync5, closeSync as closeSync10, existsSync as existsSync18, mkdirSync as mkdirSync11, openSync as openSync10, statSync as statSync12 } from "node:fs";
+import { dirname as dirname19 } from "node:path";
 var TIER_LEDGER_SCHEMA_VERSION = 17;
 var RETIRED_EMBEDDING_CLEARANCE_REASON = "content:sniffer:retired_embedding_clearance:undecided";
 function isFailSafeMissingContentQuestion(reason) {
@@ -17105,9 +18357,9 @@ class TierLedger {
     if (onDisk)
       TierLedger.assertSchemaCanOpen(this.dbPath, this.readOnly, options.allowWalLessRead);
     if (onDisk && !this.readOnly && options.expectedLedgerId === undefined) {
-      mkdirSync11(dirname17(this.dbPath), { recursive: true, mode: 448 });
-      if (!existsSync17(this.dbPath))
-        closeSync9(openSync9(this.dbPath, "a", 384));
+      mkdirSync11(dirname19(this.dbPath), { recursive: true, mode: 448 });
+      if (!existsSync18(this.dbPath))
+        closeSync10(openSync10(this.dbPath, "a", 384));
       restrictLedgerFiles(this.dbPath);
     }
     let db;
@@ -17146,7 +18398,7 @@ class TierLedger {
     this.db = db;
   }
   static assertSchemaCanOpen(dbPath, readOnly = false, allowWalLessRead = false) {
-    if (dbPath === ":memory:" || !existsSync17(dbPath))
+    if (dbPath === ":memory:" || !existsSync18(dbPath))
       return;
     const read = readSqliteWithoutWriting(dbPath, 1e4, (db) => ({
       version: readSqliteSchemaVersion(db, TIER_LEDGER_SQLITE_STORE_ID),
@@ -18205,7 +19457,7 @@ class TierLedger {
     return row.value;
   }
   static readLedgerId(dbPath, options = {}) {
-    if (dbPath === ":memory:" || !existsSync17(dbPath))
+    if (dbPath === ":memory:" || !existsSync18(dbPath))
       return;
     const busyTimeoutMs = Math.max(0, Math.trunc(options.busyTimeoutMs ?? 1e4));
     return readSqliteWithoutWriting(dbPath, busyTimeoutMs, (db) => {
@@ -19733,7 +20985,7 @@ function newArrivalKey(identity) {
   return `new_arrival:${tierLedgerIdentityKey(identity)}`;
 }
 function readStoreBindingCursor(storeDbPath, runId, connectorId) {
-  if (storeDbPath === ":memory:" || !existsSync17(storeDbPath))
+  if (storeDbPath === ":memory:" || !existsSync18(storeDbPath))
     return;
   return readSqliteWithoutWriting(storeDbPath, 1e4, (db) => {
     if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sync_runs'").get())
@@ -19767,10 +21019,10 @@ function isSqliteBusy2(error) {
 }
 function hasUnmergedWrites(dbPath) {
   try {
-    if (statSync11(`${dbPath}-wal`).size > 0)
+    if (statSync12(`${dbPath}-wal`).size > 0)
       return true;
   } catch {}
-  return existsSync17(`${dbPath}-journal`);
+  return existsSync18(`${dbPath}-journal`);
 }
 function proposalFromRow(row) {
   return {
@@ -20256,7 +21508,7 @@ function decisionFlags(decision) {
 }
 function restrictLedgerFiles(dbPath) {
   for (const path of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
-    if (existsSync17(path))
+    if (existsSync18(path))
       chmodSync5(path, 384);
   }
 }
@@ -21352,11 +22604,11 @@ var STOP_WORDS2 = new Set([
 ]);
 
 // src/workers/classification/tier-set-binding.ts
-import { existsSync as existsSync18 } from "node:fs";
-import { basename as basename6, dirname as dirname18, join as join20, resolve as resolve9 } from "node:path";
+import { existsSync as existsSync19 } from "node:fs";
+import { basename as basename6, dirname as dirname20, join as join23, resolve as resolve9 } from "node:path";
 function tierStoreDataRoot(storeDbPath) {
-  const folder = dirname18(resolve9(storeDbPath));
-  return accountSiblingStorePath(storeDbPath, "secure_local") ? dirname18(dirname18(dirname18(dirname18(folder)))) : folder;
+  const folder = dirname20(resolve9(storeDbPath));
+  return accountSiblingStorePath(storeDbPath, "secure_local") ? dirname20(dirname20(dirname20(dirname20(folder)))) : folder;
 }
 var tierLedgerIsWithin = pathResolvesWithin;
 function readTierSetBinding(storeDbPath) {
@@ -21383,13 +22635,13 @@ function tierSetLedgerCandidates(storeDbPath, recordedLedgerPath) {
   const secure = accountSiblingStorePath(storeDbPath, "secure_local");
   if (secure)
     candidates.push(tierLedgerPathForStore(secure));
-  candidates.push(join20(dirname18(storeDbPath), basename6(recordedLedgerPath)));
+  candidates.push(join23(dirname20(storeDbPath), basename6(recordedLedgerPath)));
   candidates.push(recordedLedgerPath);
   return [...new Set(candidates)].filter((path) => tierLedgerIsWithin(tierStoreDataRoot(storeDbPath), path));
 }
 function findTierSetLedger(storeDbPath, binding) {
   for (const candidate of tierSetLedgerCandidates(storeDbPath, binding.ledgerPath)) {
-    if (candidate === ":memory:" || !existsSync18(candidate))
+    if (candidate === ":memory:" || !existsSync19(candidate))
       continue;
     if (TierLedger.readLedgerId(candidate) === binding.ledgerId)
       return candidate;
@@ -22045,17 +23297,17 @@ var FINDER_IDLE_ROUND_LOG_MS = 10 * 60000;
 var lastRoundLogged = new Map;
 
 // src/workers/connector-store/secrets-disposition.ts
-import { existsSync as existsSync20 } from "node:fs";
+import { existsSync as existsSync21 } from "node:fs";
 
 // src/core/app-release-log.ts
 import { Database as Database5 } from "bun:sqlite";
 import { randomBytes } from "node:crypto";
-import { chmodSync as chmodSync6, existsSync as existsSync19, lstatSync as lstatSync8, mkdirSync as mkdirSync12 } from "node:fs";
-import { homedir as homedir9 } from "node:os";
-import { dirname as dirname20, isAbsolute as isAbsolute13, join as join21 } from "node:path";
+import { chmodSync as chmodSync6, existsSync as existsSync20, lstatSync as lstatSync8, mkdirSync as mkdirSync12 } from "node:fs";
+import { homedir as homedir10 } from "node:os";
+import { dirname as dirname22, isAbsolute as isAbsolute14, join as join24 } from "node:path";
 
 // src/core/remote-connections.ts
-import { dirname as dirname19, isAbsolute as isAbsolute12 } from "node:path";
+import { dirname as dirname21, isAbsolute as isAbsolute13 } from "node:path";
 
 // src/core/operation-caller.ts
 var inProcessRemoteRequests = new WeakSet;
@@ -22107,7 +23359,7 @@ function resolveRemoteConnectionsDbPath(env = process.env) {
 }
 function defaultRemoteConnectionsDbPath(env = process.env) {
   const path = sharedDataPath("remote-connections", env);
-  if (!isAbsolute12(path)) {
+  if (!isAbsolute13(path)) {
     throw new TypeError("Remote connections XDG_DATA_HOME must be an absolute private data root.");
   }
   return path;
@@ -22123,7 +23375,7 @@ var LIST_LIMIT = 200;
 var DAY_MS = 24 * 60 * 60000;
 var RETENTION_KEY = "retention_days";
 function appReleaseLogDbPath(remoteConnectionsDbPath) {
-  return join21(dirname20(remoteConnectionsDbPath), SHARED_DATA_FILES["app-release-log"]);
+  return join24(dirname22(remoteConnectionsDbPath), SHARED_DATA_FILES["app-release-log"]);
 }
 var openLogPaths = new Map;
 function appReleaseLogDbPaths(env = process.env) {
@@ -22286,7 +23538,7 @@ function openAppReleaseLog(dbPath, options = {}) {
   };
 }
 function forgetSecretAppReleaseItem(dbPath, item, options = {}) {
-  if (!existsSync19(dbPath))
+  if (!existsSync20(dbPath))
     return 0;
   const store = openAppReleaseLog(dbPath);
   try {
@@ -22296,7 +23548,7 @@ function forgetSecretAppReleaseItem(dbPath, item, options = {}) {
   }
 }
 function retireSecretAppReleaseItem(dbPath, item, options = {}) {
-  if (!existsSync19(dbPath))
+  if (!existsSync20(dbPath))
     return;
   const store = openAppReleaseLog(dbPath);
   try {
@@ -22370,10 +23622,10 @@ function migrations() {
   }];
 }
 function hardenPrivatePath(dbPath) {
-  if (!isAbsolute13(dbPath))
+  if (!isAbsolute14(dbPath))
     throw new TypeError("The AI apps log path must be absolute.");
-  const leafDir = dirname20(dbPath);
-  if (new Set(["/", "/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp", homedir9()]).has(leafDir)) {
+  const leafDir = dirname22(dbPath);
+  if (new Set(["/", "/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp", homedir10()]).has(leafDir)) {
     throw new Error("The AI apps log must live inside a dedicated private directory.");
   }
   mkdirSync12(leafDir, { recursive: true, mode: 448 });
@@ -22381,7 +23633,7 @@ function hardenPrivatePath(dbPath) {
   if (dirStat.isSymbolicLink() || !dirStat.isDirectory())
     throw new Error("The AI apps log must live in a real private directory.");
   chmodSync6(leafDir, 448);
-  if (existsSync19(dbPath)) {
+  if (existsSync20(dbPath)) {
     const fileStat = lstatSync8(dbPath);
     if (fileStat.isSymbolicLink() || !fileStat.isFile())
       throw new Error("The AI apps log must be a regular file, not a symlink.");
@@ -22414,7 +23666,7 @@ function forgetSecretInSideStores(options) {
     result.failed += 1;
   }
   const snifferPath = tierSnifferPathForLedger(ledger.dbPath);
-  if (snifferPath !== ":memory:" && existsSync20(snifferPath)) {
+  if (snifferPath !== ":memory:" && existsSync21(snifferPath)) {
     try {
       const sniffer = new TierSnifferStore({ dbPath: snifferPath });
       try {
@@ -22471,7 +23723,7 @@ function forgetSecretInSideStores(options) {
     }
   }
   try {
-    ledger.noteJobLedgerPaths(jobLedgers.filter((path) => path !== ":memory:" && existsSync20(path)));
+    ledger.noteJobLedgerPaths(jobLedgers.filter((path) => path !== ":memory:" && existsSync21(path)));
   } catch {}
   try {
     if (result.failed > 0 || result.notDurable > 0 || options.confirmInWorker) {
@@ -22542,1379 +23794,8 @@ function retireSecretRedactions(ledger, options = {}) {
   return retired;
 }
 
-// src/workers/source-index/built-in-embedding/provider.ts
-import { isMainThread as isMainThread6 } from "node:worker_threads";
-import { createHash as createHash12 } from "node:crypto";
-import { readFileSync as readFileSync17 } from "node:fs";
-import { availableParallelism } from "node:os";
-import { dirname as dirname22, join as join24 } from "node:path";
-
-// src/workers/source-index/built-in-embedding/litert-runtime.ts
-import { isMainThread as isMainThread5 } from "node:worker_threads";
-import { execFileSync as execFileSync2, spawn } from "node:child_process";
-import { closeSync as closeSync10, constants as constants5, existsSync as existsSync21, fstatSync as fstatSync2, openSync as openSync10, readdirSync as readdirSync3, readFileSync as readFileSync15, statSync as statSync12 } from "node:fs";
-import { homedir as homedir10 } from "node:os";
-import { delimiter as delimiter2, dirname as dirname21, isAbsolute as isAbsolute14, join as join22 } from "node:path";
-import { createInterface } from "node:readline";
-import { fileURLToPath as fileURLToPath2 } from "node:url";
-
-class LiteRtImagesUnavailableError extends Error {
-  indexes;
-  constructor(indexes) {
-    super("The built-in search model is running without its image encoder.");
-    this.name = "LiteRtImagesUnavailableError";
-    this.indexes = indexes;
-  }
-}
-
-class LiteRtPictureEngineFaultError extends Error {
-  constructor(message) {
-    super(message);
-    this.name = "LiteRtPictureEngineFaultError";
-  }
-}
-
-class LiteRtHelperReplacedError extends Error {
-  done;
-  reason;
-  constructor(message, reason, done) {
-    super(message);
-    this.name = "LiteRtHelperReplacedError";
-    this.reason = reason;
-    this.done = done;
-  }
-}
-var helperReplacements = 0;
-var REQUEST_TIMEOUT_MS = 3 * 60000;
-var HELPER_WORKING_CPU_MS = 1000;
-function helperCpuMs(pid, platform = process.platform) {
-  if (pid === undefined)
-    return;
-  try {
-    if (platform === "linux") {
-      const stat = readFileSync15(`/proc/${pid}/stat`, "utf8");
-      const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
-      const ticks = Number(fields[11]) + Number(fields[12]);
-      return Number.isFinite(ticks) ? ticks * 10 : undefined;
-    }
-    if (platform === "darwin") {
-      const text = execFileSync2("/bin/ps", ["-o", "time=", "-p", String(pid)], { encoding: "utf8", timeout: 2000 }).trim();
-      const [days, clock] = text.includes("-") ? text.split("-") : ["0", text];
-      const parts = clock.split(":").map(Number);
-      const seconds = parts.reduce((sum, part) => sum * 60 + part, 0) + Number(days) * 86400;
-      return Number.isFinite(seconds) ? seconds * 1000 : undefined;
-    }
-  } catch {}
-  return;
-}
-function helperEnvironment() {
-  const env = {};
-  for (const [name, value] of Object.entries(process.env)) {
-    if (value === undefined)
-      continue;
-    if (["PATH", "HOME", "TMPDIR", "XDG_RUNTIME_DIR", "DISPLAY", "WAYLAND_DISPLAY"].includes(name) || name.startsWith("VK_")) {
-      env[name] = value;
-    }
-  }
-  env.HOME ??= homedir10();
-  return env;
-}
-
-class HelperProcess {
-  child;
-  device = "cpu";
-  vision = false;
-  nextId = 1;
-  pending = new Map;
-  stderr = "";
-  requestTimeoutMs;
-  stopTimeoutMs;
-  exited = false;
-  constructor(child, options) {
-    this.child = child;
-    this.requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
-    this.stopTimeoutMs = options.stopTimeoutMs ?? 5000;
-  }
-  failAll(reason, why = "stopped") {
-    for (const pending of this.pending.values()) {
-      clearTimeout(pending.timer);
-      helperReplacements += 1;
-      console.warn(`[built-in embedding] helper replaced (${why}) after ${Math.round((Date.now() - pending.startedAt) / 1000)} s on a batch of ${pending.count} item(s), ${pending.pictures} with a picture, ${pending.done.size} already answered; replacement ${helperReplacements} in this process.`);
-      pending.reject(new LiteRtHelperReplacedError(reason.message, why, pending.done));
-    }
-    this.pending.clear();
-  }
-  static start(options, device) {
-    const settings = {
-      library: options.library,
-      model: options.model,
-      cacheDir: options.cacheDir,
-      threads: options.threads,
-      device,
-      maxInputTokens: options.maxInputTokens,
-      ...options.visionTokensPerImage !== undefined ? { visionTokensPerImage: options.visionTokensPerImage } : {}
-    };
-    const child = spawn(options.bunPath ?? resolveBun(), [options.helperPath ?? helperPath(), JSON.stringify(settings)], {
-      stdio: ["pipe", "pipe", "pipe"],
-      env: helperEnvironment()
-    });
-    const helper = new HelperProcess(child, options);
-    child.stdin.on("error", (error) => {
-      helper.exited = true;
-      helper.failAll(new Error(`The built-in search model stopped: ${error.message}.`));
-      child.kill("SIGKILL");
-    });
-    return new Promise((resolve, reject) => {
-      let started = false;
-      const timer = setTimeout(() => {
-        if (started)
-          return;
-        child.kill("SIGKILL");
-        reject(new Error("The built-in search model took too long to start."));
-      }, options.startTimeoutMs ?? 5 * 60000);
-      child.stderr.on("data", (chunk) => {
-        helper.stderr = (helper.stderr + chunk.toString("utf8")).slice(-4000);
-      });
-      createInterface({ input: child.stdout }).on("line", (line) => {
-        let message;
-        try {
-          message = JSON.parse(line);
-        } catch {
-          return;
-        }
-        if (!started) {
-          if (message.ready) {
-            started = true;
-            clearTimeout(timer);
-            helper.device = message.device === "gpu" ? "gpu" : "cpu";
-            helper.vision = message.vision === true;
-            resolve(helper);
-          } else if (message.fatal) {
-            started = true;
-            clearTimeout(timer);
-            reject(Object.assign(new Error(message.fatal), { fatal: true }));
-          }
-          return;
-        }
-        helper.settle(message);
-      });
-      child.on("error", (error) => {
-        if (!started) {
-          started = true;
-          clearTimeout(timer);
-          reject(error);
-        }
-      });
-      child.on("exit", () => {
-        helper.exited = true;
-      });
-      child.on("close", (code, signal) => {
-        helper.exited = true;
-        const reason = new Error(`The built-in search model stopped (${signal ?? `exit ${code}`})${helper.stderr ? `: ${helper.stderr.trim().split(`
-`).at(-1)}` : ""}.`);
-        if (!started) {
-          started = true;
-          clearTimeout(timer);
-          reject(reason);
-        }
-        if (helper.replacing)
-          return;
-        helper.failAll(reason, signal ?? `exit ${code}`);
-      });
-    });
-  }
-  replacing = false;
-  watch(id) {
-    return setTimeout(() => {
-      const pending = this.pending.get(id);
-      if (!pending)
-        return;
-      const cpuMs = helperCpuMs(this.child.pid);
-      const working = pending.progressed || cpuMs !== undefined && pending.cpuMs !== undefined && cpuMs - pending.cpuMs >= Math.min(HELPER_WORKING_CPU_MS, this.requestTimeoutMs / 4);
-      if (working) {
-        pending.progressed = false;
-        pending.cpuMs = cpuMs;
-        pending.timer = this.watch(id);
-        return;
-      }
-      this.replacing = true;
-      this.exited = true;
-      this.child.kill("SIGKILL");
-      this.failAll(new Error("The built-in search model stopped responding and was restarted."), "no answer and no processor time for a whole window");
-    }, this.requestTimeoutMs);
-  }
-  embed(items) {
-    if (this.exited)
-      return Promise.reject(new Error("The built-in search model is not running."));
-    const id = this.nextId++;
-    return withMemoryPayload("embed", () => new Promise((resolve, reject) => {
-      const pictures = items.filter((item) => typeof item !== "string" && item.image).length;
-      this.pending.set(id, {
-        resolve,
-        reject,
-        count: items.length,
-        pictures,
-        timer: this.watch(id),
-        startedAt: Date.now(),
-        done: new Map,
-        progressed: false,
-        cpuMs: helperCpuMs(this.child.pid)
-      });
-      const request = items.every((item) => typeof item === "string") ? { id, texts: items } : { id, items: items.map((item) => typeof item === "string" ? { text: item } : item) };
-      this.child.stdin.write(`${memoryPayloadJson(request)}
-`);
-    }));
-  }
-  settle(message) {
-    const pending = message.id === undefined ? undefined : this.pending.get(message.id);
-    if (!pending || message.id === undefined)
-      return;
-    if (typeof message.progress === "number") {
-      pending.progressed = true;
-      if (message.itemFailed)
-        pending.done.set(message.progress, new Float32Array(0));
-      else if (message.vector) {
-        const bytes = Buffer.from(message.vector, "base64");
-        pending.done.set(message.progress, new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)));
-      }
-      return;
-    }
-    this.pending.delete(message.id);
-    clearTimeout(pending.timer);
-    if (!message.error && Array.isArray(message.unsupported) && message.unsupported.length > 0) {
-      pending.reject(new LiteRtImagesUnavailableError(message.unsupported));
-      return;
-    }
-    const failed = new Set(Array.isArray(message.failed) ? message.failed : []);
-    if (!message.error && failed.size === pending.count) {
-      pending.resolve(Array.from({ length: pending.count }, () => new Float32Array(0)));
-      return;
-    }
-    if (message.error || !message.vectors || !message.dimension) {
-      pending.reject(message.error && message.pictures ? new LiteRtPictureEngineFaultError(message.error) : new Error(message.error ?? "The built-in search model returned no vectors."));
-      if (message.native) {
-        this.exited = true;
-        this.child.kill("SIGKILL");
-      }
-      return;
-    }
-    const bytes = Buffer.from(message.vectors, "base64");
-    const all = new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
-    const vectors = Array.from({ length: pending.count }, (_, index) => failed.has(index) ? new Float32Array(0) : all.subarray(index * message.dimension, (index + 1) * message.dimension));
-    if (vectors.some((vector, index) => !failed.has(index) && vector.length !== message.dimension)) {
-      pending.reject(new Error("The built-in search model returned the wrong number of values."));
-      return;
-    }
-    pending.resolve(vectors);
-  }
-  async stop() {
-    if (this.exited)
-      return;
-    const exited = new Promise((resolve) => this.child.once("close", () => resolve()));
-    this.child.stdin.end();
-    const timer = setTimeout(() => this.child.kill("SIGKILL"), this.stopTimeoutMs);
-    await exited;
-    clearTimeout(timer);
-  }
-}
-async function startLiteRtEmbedder(options) {
-  if (isMainThread5 && !options.gpuAvailable) {
-    const handle = modelThreadHandleId();
-    let state = await modelThread().call({ kind: "litert-start", handle, options });
-    return {
-      get device() {
-        return state.device;
-      },
-      get vision() {
-        return state.vision;
-      },
-      async embed(items) {
-        try {
-          const result = await modelThread().call({ kind: "litert-run", handle, items });
-          state = result;
-          return result.vectors;
-        } catch (error) {
-          const failure = error;
-          if (failure.device !== undefined && failure.vision !== undefined)
-            state = { device: failure.device, vision: failure.vision };
-          if (failure.name === "LiteRtImagesUnavailableError")
-            throw new LiteRtImagesUnavailableError(failure.indexes ?? []);
-          if (failure.name === "LiteRtPictureEngineFaultError")
-            throw new LiteRtPictureEngineFaultError(failure.message);
-          throw error;
-        }
-      },
-      async release() {
-        await modelThread().call({ kind: "litert-release", handle });
-      }
-    };
-  }
-  let device = options.device === "auto" && process.platform === "linux" && !(options.gpuAvailable ?? linuxGpuAvailable)() ? "cpu" : options.device;
-  let helper;
-  try {
-    helper = await HelperProcess.start(options, device);
-  } catch (error) {
-    if (device === "cpu" || error.fatal)
-      throw error;
-    device = "cpu";
-    helper = await HelperProcess.start(options, device);
-  }
-  const releaseAtExit = () => {
-    if (!helper.exited)
-      helper.child.kill("SIGKILL");
-  };
-  process.once("exit", releaseAtExit);
-  return {
-    get device() {
-      return helper.device;
-    },
-    get vision() {
-      return helper.vision;
-    },
-    async embed(items) {
-      if (helper.exited) {
-        if (helper.device === "gpu")
-          device = "cpu";
-        helper = await HelperProcess.start(options, device);
-      }
-      const pictures = items.flatMap((item, index) => typeof item !== "string" && item.image ? [index] : []);
-      if (pictures.length > 0 && !helper.vision)
-        throw new LiteRtImagesUnavailableError(pictures);
-      try {
-        return await helper.embed(items);
-      } catch (error) {
-        if (!(error instanceof LiteRtHelperReplacedError))
-          throw error;
-        if (helper.device === "gpu")
-          device = "cpu";
-        helper = await HelperProcess.start(options, device);
-        const rest = items.map((_, index) => index).filter((index) => !error.done.has(index));
-        const restPictures = rest.filter((index) => pictures.includes(index));
-        if (restPictures.length > 0 && !helper.vision)
-          throw new LiteRtImagesUnavailableError(restPictures);
-        const vectors = rest.length > 0 ? await helper.embed(rest.map((index) => items[index])) : [];
-        const resumed = new Map(rest.map((index, row) => [index, vectors[row]]));
-        return items.map((_, index) => error.done.get(index) ?? resumed.get(index));
-      }
-    },
-    async release() {
-      process.removeListener("exit", releaseAtExit);
-      await helper.stop();
-    }
-  };
-}
-function linuxGpuAvailable(deviceDirectory = "/dev/dri") {
-  try {
-    return readdirSync3(deviceDirectory).some((name) => {
-      if (!/^renderD[0-9]+$/.test(name))
-        return false;
-      let fd;
-      try {
-        fd = openSync10(join22(deviceDirectory, name), constants5.O_RDWR | constants5.O_NONBLOCK);
-        return fstatSync2(fd).isCharacterDevice();
-      } catch {
-        return false;
-      } finally {
-        if (fd !== undefined)
-          closeSync10(fd);
-      }
-    });
-  } catch {
-    return false;
-  }
-}
-function helperPath() {
-  const here = dirname21(fileURLToPath2(import.meta.url));
-  for (const name of ["litert-helper.js", "litert-helper.ts"]) {
-    const candidate = join22(here, name);
-    if (existsSync21(candidate))
-      return candidate;
-  }
-  throw new Error("The built-in search model helper is missing from this install.");
-}
-function resolveBun() {
-  const bunName = process.platform === "win32" ? "bun.exe" : "bun";
-  const candidates = [
-    process.versions.bun ? process.execPath : undefined,
-    process.env.BUN_INSTALL ? join22(process.env.BUN_INSTALL, "bin", bunName) : undefined,
-    ...(process.env.PATH ?? "").split(delimiter2).filter(Boolean).map((directory) => join22(directory, bunName)),
-    join22(homedir10(), ".bun", "bin", bunName)
-  ];
-  for (const candidate of candidates) {
-    if (!candidate || !isAbsolute14(candidate))
-      continue;
-    try {
-      if (statSync12(candidate).isFile())
-        return candidate;
-    } catch {}
-  }
-  throw new Error("The built-in search model needs Bun, and none was found.");
-}
-
-// src/workers/source-index/built-in-embedding/remote-litert-runtime.ts
-import { readFileSync as readFileSync16 } from "node:fs";
-
-class RemoteLiteRtEmbedder {
-  options;
-  device = "cpu";
-  vision = false;
-  verified = false;
-  retryAt = 0;
-  state = "unused";
-  slot = Promise.resolve();
-  url;
-  constructor(options) {
-    this.options = options;
-    try {
-      this.url = new URL(options.url);
-    } catch {
-      throw new Error("Invalid built-in embedding remote URL.");
-    }
-    const loopback = this.url.hostname === "localhost" || this.url.hostname === "[::1]" || /^127(?:\.\d{1,3}){3}$/.test(this.url.hostname);
-    if (this.url.protocol !== "https:" && !(this.url.protocol === "http:" && loopback) || this.url.username || this.url.password || this.url.search || this.url.hash) {
-      throw new Error("Built-in embedding remote requires HTTPS or loopback HTTP, without URL credentials, query or fragment.");
-    }
-  }
-  get active() {
-    return this.state === "remote";
-  }
-  async embed(items) {
-    const previous = this.slot;
-    let unlock;
-    this.slot = new Promise((resolve) => {
-      unlock = resolve;
-    });
-    await previous;
-    try {
-      const now = this.options.now ?? Date.now;
-      if (now() < this.retryAt)
-        throw new Error("Remote embedding cooling down.");
-      try {
-        if (items.length === 0 || items.length > 8 || items.some((item) => typeof item !== "string")) {
-          throw new Error("Remote embedding requires a text-only batch.");
-        }
-        if (!this.verified) {
-          const handshake = await this.request("/v1/handshake");
-          for (const [field, value] of Object.entries(this.options.identity)) {
-            if (handshake[field] !== value)
-              throw new Error("Remote embedding identity mismatch.");
-          }
-          if (handshake.device !== "cpu" && handshake.device !== "gpu")
-            throw new Error("Invalid remote device.");
-          if (handshake.vision !== false)
-            throw new Error("Invalid remote vision capability.");
-          this.device = handshake.device;
-          this.verified = true;
-        }
-        const response = await withMemoryPayload("embed", () => this.request("/v1/embed", items));
-        const identity = this.options.identity;
-        if (typeof response.vectors !== "string" || Object.entries(identity).some(([field, value]) => response[field] !== value)) {
-          throw new Error("Remote embedding identity mismatch.");
-        }
-        const bytes = Buffer.from(response.vectors, "base64");
-        if (bytes.length !== items.length * identity.dimension * 4)
-          throw new Error("Invalid remote vector length.");
-        const vectors = items.map((_, row) => Float32Array.from({ length: identity.dimension }, (_, column) => bytes.readFloatLE((row * identity.dimension + column) * 4)));
-        if (vectors.some((vector) => vector.some((value) => !Number.isFinite(value)) || !vector.some((value) => value !== 0))) {
-          throw new Error("Invalid remote vector values.");
-        }
-        this.transition("remote");
-        return vectors;
-      } catch {
-        this.verified = false;
-        this.retryAt = now() + 60000;
-        this.transition("local");
-        throw new Error("Remote embedding unavailable; using local helper.");
-      }
-    } finally {
-      unlock();
-    }
-  }
-  async release() {
-    this.verified = false;
-  }
-  transition(state) {
-    if (this.state === state)
-      return;
-    this.state = state;
-    console.warn(state === "remote" ? "[built-in embedding] document text embedding is using the remote helper." : "[built-in embedding] remote helper unavailable; document text embedding is using the local helper.");
-  }
-  async request(path, texts) {
-    const headers = {};
-    if (this.options.tokenFile) {
-      const token = readFileSync16(this.options.tokenFile, "utf8").trim();
-      if (!token)
-        throw new Error("Empty remote token file.");
-      headers.Authorization = `Bearer ${token}`;
-    }
-    if (texts)
-      headers["Content-Type"] = "application/json";
-    const response = await fetch(new URL(path, this.url), {
-      method: texts ? "POST" : "GET",
-      headers,
-      ...texts ? { body: memoryPayloadJson({ texts }) } : {},
-      signal: AbortSignal.timeout(this.options.requestTimeoutMs ?? 30000),
-      redirect: "error"
-    });
-    if (!response.ok) {
-      await response.body?.cancel();
-      throw new Error("Remote request failed.");
-    }
-    noteMemoryPayloadResponse(response);
-    return await response.json();
-  }
-}
-
-// src/workers/source-index/built-in-embedding/runtime.ts
-import { realpathSync as realpathSync7 } from "node:fs";
-import { createRequire as createRequire5 } from "node:module";
-import { join as join23, sep as sep6 } from "node:path";
-function onnxRuntimeFromDirectory(runtimeDir) {
-  return {
-    async createSession(modelPath, options) {
-      const ort = requireOnnxRuntimeFromPack(runtimeDir);
-      const session = await ort.InferenceSession.create(modelPath, {
-        executionProviders: ["cpu"],
-        intraOpNumThreads: options.threads,
-        interOpNumThreads: 1,
-        executionMode: "sequential",
-        graphOptimizationLevel: "all",
-        enableCpuMemArena: false
-      });
-      const releaseAtExit = () => {
-        session.release().catch(() => {
-          return;
-        });
-      };
-      process.once("exit", releaseAtExit);
-      const wantsTokenTypes = session.inputNames.includes("token_type_ids");
-      const outputName = session.outputNames.includes("last_hidden_state") ? "last_hidden_state" : session.outputNames[0];
-      if (!outputName)
-        throw new Error("The built-in search model has no outputs.");
-      return {
-        async run(batch) {
-          const dims = [batch.batchSize, batch.sequenceLength];
-          const feeds = {
-            input_ids: new ort.Tensor("int64", batch.inputIds, dims),
-            attention_mask: new ort.Tensor("int64", batch.attentionMask, dims)
-          };
-          if (wantsTokenTypes)
-            feeds.token_type_ids = new ort.Tensor("int64", batch.tokenTypeIds, dims);
-          const output = (await session.run(feeds))[outputName];
-          if (!output || !(output.data instanceof Float32Array)) {
-            throw new Error("The built-in search model returned an unexpected output.");
-          }
-          return { data: output.data, dims: output.dims };
-        },
-        release: () => {
-          process.removeListener("exit", releaseAtExit);
-          return session.release();
-        }
-      };
-    }
-  };
-}
-function requireOnnxRuntimeFromPack(runtimeDir) {
-  const missing = () => new Error(`The ONNX Runtime pack is not installed in ${runtimeDir}.`);
-  let root;
-  let resolved;
-  const requireFromPack = createRequire5(join23(runtimeDir, "olympus-runtime.json"));
-  try {
-    root = realpathSync7(join23(runtimeDir, "node_modules"));
-    resolved = realpathSync7(requireFromPack.resolve("onnxruntime-node"));
-  } catch {
-    throw missing();
-  }
-  if (!resolved.startsWith(root + sep6))
-    throw missing();
-  return requireFromPack(resolved);
-}
-
-// src/workers/source-index/built-in-embedding/pair-tokenizer.ts
-function truncatePair(a, b, room, tiePolicy = "wordpiece") {
-  let keepA = a.length;
-  let keepB = b.length;
-  room = Math.max(0, room);
-  while (keepA + keepB > room) {
-    if (keepB > keepA || keepB === keepA && (tiePolicy === "wordpiece" || a.length > b.length))
-      keepB -= 1;
-    else
-      keepA -= 1;
-  }
-  return { a: a.slice(0, keepA), b: b.slice(0, keepB), truncated: keepA < a.length || keepB < b.length };
-}
-function pairWindows(a, b, room, overlap, tiePolicy = "wordpiece") {
-  const first = truncatePair(a, b, room, tiePolicy);
-  const size = first.b.length;
-  if (size === 0 || size >= b.length)
-    return { a: first.a, windows: [first.b], truncated: first.truncated };
-  const step = Math.max(1, size - Math.max(0, Math.min(Math.floor(overlap), size - 1)));
-  const windows = [];
-  for (let start = 0;; start += step) {
-    if (start + size >= b.length) {
-      windows.push(b.slice(b.length - size));
-      break;
-    }
-    windows.push(b.slice(start, start + size));
-  }
-  return { a: first.a, windows, truncated: first.a.length < a.length };
-}
-
-// src/workers/source-index/built-in-embedding/wordpiece.ts
-var MAX_INPUT_CHARS_PER_WORD = 100;
-var CONTINUING_SUBWORD_PREFIX = "##";
-
-class WordPieceTokenizer {
-  vocab;
-  clsId;
-  sepId;
-  unkId;
-  padId;
-  constructor(vocabText) {
-    const vocab = new Map;
-    const lines = vocabText.split(`
-`);
-    for (let index = 0;index < lines.length; index += 1) {
-      const token = lines[index].replace(/\r$/, "");
-      if (token.length === 0 && index === lines.length - 1)
-        continue;
-      if (!vocab.has(token))
-        vocab.set(token, index);
-    }
-    this.vocab = vocab;
-    this.clsId = requireToken(vocab, "[CLS]");
-    this.sepId = requireToken(vocab, "[SEP]");
-    this.unkId = requireToken(vocab, "[UNK]");
-    this.padId = requireToken(vocab, "[PAD]");
-  }
-  tokenize(text) {
-    const ids = [];
-    for (const word of preTokenize(normalize3(text))) {
-      this.wordPiece(word, ids);
-    }
-    return ids;
-  }
-  encode(text, maxLength) {
-    const content = this.tokenize(text);
-    const room = Math.max(0, maxLength - 2);
-    const truncated = content.length > room;
-    return {
-      ids: [this.clsId, ...truncated ? content.slice(0, room) : content, this.sepId],
-      truncated
-    };
-  }
-  encodePair(first, second, maxLength) {
-    const { a, b, truncated } = truncatePair(this.tokenize(first), this.tokenize(second), maxLength - 3);
-    const ids = [this.clsId, ...a, this.sepId, ...b, this.sepId];
-    const typeIds = ids.map((_, index) => index < a.length + 2 ? 0 : 1);
-    return { ids, typeIds, truncated };
-  }
-  encodePairWindows(first, second, maxLength, overlap) {
-    const { a, windows, truncated } = pairWindows(this.tokenize(first), this.tokenize(second), maxLength - 3, overlap);
-    return windows.map((b) => {
-      const ids = [this.clsId, ...a, this.sepId, ...b, this.sepId];
-      return { ids, typeIds: ids.map((_, index) => index < a.length + 2 ? 0 : 1), truncated };
-    });
-  }
-  wordPiece(word, out) {
-    const chars = Array.from(word);
-    if (chars.length > MAX_INPUT_CHARS_PER_WORD) {
-      out.push(this.unkId);
-      return;
-    }
-    const pieces = [];
-    let start = 0;
-    while (start < chars.length) {
-      let end = chars.length;
-      let found;
-      while (start < end) {
-        const piece = (start > 0 ? CONTINUING_SUBWORD_PREFIX : "") + chars.slice(start, end).join("");
-        const id = this.vocab.get(piece);
-        if (id !== undefined) {
-          found = id;
-          break;
-        }
-        end -= 1;
-      }
-      if (found === undefined) {
-        out.push(this.unkId);
-        return;
-      }
-      pieces.push(found);
-      start = end;
-    }
-    out.push(...pieces);
-  }
-}
-function requireToken(vocab, token) {
-  const id = vocab.get(token);
-  if (id === undefined)
-    throw new Error(`WordPiece vocabulary is missing ${token}.`);
-  return id;
-}
-var CONTROL = /[\p{Cc}\p{Cf}\p{Co}\p{Cn}]/u;
-var WHITESPACE = /[\s\p{Zs}]/u;
-var COMBINING_MARK = /\p{Mn}/gu;
-var PUNCTUATION = /\p{P}/u;
-function normalize3(text) {
-  let cleaned = "";
-  for (const char of text) {
-    const code = char.codePointAt(0);
-    if (code === 0 || code === 65533)
-      continue;
-    if (char === "\t" || char === `
-` || char === "\r") {
-      cleaned += " ";
-      continue;
-    }
-    if (CONTROL.test(char))
-      continue;
-    if (WHITESPACE.test(char)) {
-      cleaned += " ";
-      continue;
-    }
-    cleaned += isChineseChar(code) ? ` ${char} ` : char;
-  }
-  return cleaned.toLowerCase().normalize("NFD").replace(COMBINING_MARK, "");
-}
-function preTokenize(text) {
-  const words = [];
-  let current = "";
-  for (const char of text) {
-    if (char === " " || WHITESPACE.test(char)) {
-      if (current)
-        words.push(current);
-      current = "";
-    } else if (isPunctuation(char)) {
-      if (current)
-        words.push(current);
-      words.push(char);
-      current = "";
-    } else {
-      current += char;
-    }
-  }
-  if (current)
-    words.push(current);
-  return words;
-}
-function isPunctuation(char) {
-  const code = char.codePointAt(0);
-  if (code >= 33 && code <= 47 || code >= 58 && code <= 64 || code >= 91 && code <= 96 || code >= 123 && code <= 126) {
-    return true;
-  }
-  return PUNCTUATION.test(char);
-}
-function isChineseChar(code) {
-  return code >= 19968 && code <= 40959 || code >= 13312 && code <= 19903 || code >= 131072 && code <= 173791 || code >= 173824 && code <= 177983 || code >= 177984 && code <= 178207 || code >= 178208 && code <= 183983 || code >= 63744 && code <= 64255 || code >= 194560 && code <= 195103;
-}
-
-// src/workers/source-index/built-in-embedding/provider.ts
-var BUILT_IN_EMBEDDING_PROVIDER = "built-in";
-var BUILT_IN_EMBEDDING_THREADS_ENV = "OLYMPUS_BUILT_IN_EMBEDDING_THREADS";
-var BUILT_IN_EMBEDDING_DEVICE_ENV = "OLYMPUS_BUILT_IN_EMBEDDING_DEVICE";
-var BUILT_IN_EMBEDDING_REMOTE_URL_ENV = "OLYMPUS_BUILT_IN_EMBEDDING_REMOTE_URL";
-var BUILT_IN_EMBEDDING_REMOTE_TOKEN_FILE_ENV = "OLYMPUS_BUILT_IN_EMBEDDING_REMOTE_TOKEN_FILE";
-var MAX_WINDOWS_PER_DOCUMENT = 8;
-var MAX_BATCH_TOKENS = 2048;
-var MAX_BATCH_ROWS = 32;
-var LITERT_BATCH = 8;
-var RETRY_AFTER_FAILURE_MS = 2 * 60000;
-var PICTURE_ENGINE_FAULT_LIMIT = 2;
-var PICTURE_HOLD_MS = 60 * 60000;
-class BuiltInSourceEmbeddingProvider {
-  provider;
-  modelId;
-  dimension;
-  configHash;
-  epochId;
-  backend;
-  threads;
-  device;
-  remote;
-  spec;
-  env;
-  onnxOffThread;
-  runtimeFactory;
-  liteRtFactory;
-  install;
-  installerOptions;
-  now;
-  loading;
-  loaded;
-  priorityLoaded;
-  prioritySlotBusy = false;
-  priorityWaiting = [];
-  lastFailure;
-  slotBusy = false;
-  imageSupportWarned = false;
-  pictureFaults;
-  waiting = { query: [], document: [] };
-  runsOnThisComputer() {
-    return this.remote === undefined;
-  }
-  constructor(options = {}) {
-    this.spec = options.model ?? BUILT_IN_EMBEDDING_MODEL;
-    this.env = options.env ?? process.env;
-    this.provider = BUILT_IN_EMBEDDING_PROVIDER;
-    this.backend = "local";
-    this.modelId = this.spec.modelId;
-    this.dimension = this.spec.dimension;
-    this.threads = resolveThreads(options.threads, this.env);
-    this.device = resolveDevice(this.env);
-    this.onnxOffThread = isMainThread6 && !options.runtime;
-    this.runtimeFactory = options.runtime ?? ((installed) => onnxRuntimeFromDirectory(installed.runtimeDir));
-    this.liteRtFactory = options.liteRt ?? startLiteRtEmbedder;
-    this.install = options.install ?? installBuiltInEmbedding;
-    this.installerOptions = options.installerOptions ?? {};
-    this.now = options.now ?? Date.now;
-    const remoteUrl = this.env[BUILT_IN_EMBEDDING_REMOTE_URL_ENV]?.trim();
-    if (remoteUrl && this.spec.runtime === "litert") {
-      this.remote = new RemoteLiteRtEmbedder({
-        url: remoteUrl,
-        tokenFile: this.env[BUILT_IN_EMBEDDING_REMOTE_TOKEN_FILE_ENV],
-        now: this.now,
-        requestTimeoutMs: options.remoteRequestTimeoutMs,
-        identity: {
-          modelId: this.modelId,
-          weightsSha256: this.spec.model.sha256,
-          runtime: `litert-lm-${LITERT_RUNTIME_PACK.version}`,
-          dimension: this.dimension,
-          maxTokens: this.spec.maxTokens,
-          overflow: "chunk-and-average"
-        }
-      });
-    }
-    this.epochId = resolveEmbeddingEpoch({
-      provider: this.provider,
-      modelId: this.modelId,
-      dimension: this.dimension,
-      backend: this.backend,
-      ...options.epochId ? { epochOverride: options.epochId } : {}
-    });
-    this.configHash = createHash12("sha256").update(JSON.stringify({
-      provider: this.provider,
-      model: this.modelId,
-      repository: this.spec.repository,
-      revision: this.spec.revision,
-      weights: this.spec.model.sha256,
-      ...this.spec.vocabulary ? { vocabulary: this.spec.vocabulary.sha256 } : {},
-      ...this.spec.runtime === "litert" ? { runtime: `litert-lm-${LITERT_RUNTIME_PACK.version}` } : {},
-      dimension: this.dimension,
-      maxTokens: this.spec.maxTokens,
-      pooling: this.spec.pooling,
-      queryPrefix: this.spec.queryPrefix,
-      documentPrefix: this.spec.documentPrefix,
-      ...this.spec.runtime === "litert" ? { overflow: "chunk-and-average" } : { windows: MAX_WINDOWS_PER_DOCUMENT },
-      backend: this.backend
-    })).digest("hex");
-  }
-  status() {
-    const status = readBuiltInEmbeddingStatus(this.env, this.spec);
-    return this.remote ? { ...status, remoteDocuments: this.remote.active } : status;
-  }
-  async prepare() {
-    await this.load();
-  }
-  async warm() {
-    await this.load();
-    await this.embed([{ text: "warm up" }], { taskType: "RETRIEVAL_QUERY" });
-  }
-  async imageSupport() {
-    if (this.spec.runtime !== "litert" || !this.spec.vision)
-      return false;
-    if (this.picturesHeld())
-      return false;
-    const model = await this.ready();
-    const supported = model.kind === "litert" && model.embedder.vision;
-    if (!supported && !this.imageSupportWarned) {
-      this.imageSupportWarned = true;
-      console.warn("[built-in embedding] the image encoder could not start on this machine; photos keep keyword search and wait for their picture vectors.");
-    }
-    return supported;
-  }
-  async retry() {
-    if (!this.loading)
-      this.lastFailure = undefined;
-    await this.load();
-  }
-  async embed(inputs, options) {
-    if (inputs.length === 0)
-      return [];
-    if (options.taskType === "RETRIEVAL_QUERY" && !this.loaded) {
-      const status = this.status();
-      if (this.spec.runtime === "litert" || status.state !== "ready" && status.state !== "loading") {
-        this.load().catch(() => {
-          return;
-        });
-        const now = this.status();
-        throw new BuiltInEmbeddingNotReadyError(now, undefined, {
-          modelStarting: this.loading !== undefined && (now.state === "ready" || now.state === "loading")
-        });
-      }
-    }
-    const model = await this.ready();
-    return this.embedLoaded(model, inputs, options.taskType);
-  }
-  loadedOnly() {
-    return {
-      provider: this.provider,
-      modelId: this.modelId,
-      dimension: this.dimension,
-      configHash: this.configHash,
-      epochId: this.epochId,
-      backend: this.backend,
-      embed: async (inputs, options) => {
-        if (inputs.length === 0)
-          return [];
-        const model = this.loaded;
-        if (!model)
-          throw new BuiltInEmbeddingNotReadyError(this.status());
-        return this.embedLoaded(model, inputs, options.taskType);
-      }
-    };
-  }
-  async ready() {
-    if (this.loaded)
-      return this.loaded;
-    try {
-      return await this.load();
-    } catch (error) {
-      throw new BuiltInEmbeddingNotReadyError(this.status(), error);
-    }
-  }
-  load() {
-    if (this.loading)
-      return this.loading;
-    if (this.lastFailure && this.now() - this.lastFailure.atMs < RETRY_AFTER_FAILURE_MS) {
-      return Promise.reject(this.lastFailure.error);
-    }
-    const loading = this.loadOnce();
-    this.loading = loading;
-    loading.then((model) => {
-      this.loaded = model;
-      this.lastFailure = undefined;
-    }, (error) => {
-      this.lastFailure = { atMs: this.now(), error };
-      if (this.loading === loading)
-        this.loading = undefined;
-    });
-    return loading;
-  }
-  async loadOnce() {
-    const reporterOptions = {
-      env: this.env,
-      model: this.spec,
-      ...this.installerOptions.now ? { now: this.installerOptions.now } : {},
-      ...this.installerOptions.onProgress ? { onProgress: this.installerOptions.onProgress } : {}
-    };
-    let installed;
-    try {
-      installed = await this.install({ ...this.installerOptions, env: this.env, model: this.spec });
-    } catch (error) {
-      throw builtInEmbeddingOperationError(error);
-    }
-    try {
-      reportBuiltInEmbeddingState(reporterOptions, "loading");
-      let model;
-      if (this.spec.runtime === "litert") {
-        if (!installed.libraryPath)
-          throw new Error("the LiteRT-LM runtime is not installed.");
-        const settings = {
-          library: installed.libraryPath,
-          model: installed.modelPath,
-          cacheDir: join24(dirname22(installed.modelPath), "cache"),
-          threads: this.threads,
-          device: this.device,
-          maxInputTokens: this.spec.maxTokens,
-          ...this.spec.vision ? { visionTokensPerImage: this.spec.vision.tokensPerImage } : {}
-        };
-        const embedder = await this.liteRtFactory(settings);
-        model = { kind: "litert", embedder };
-        try {
-          const { visionTokensPerImage: _vision, ...querySettings } = settings;
-          this.priorityLoaded = { kind: "litert", embedder: await this.liteRtFactory(querySettings) };
-        } catch (error) {
-          await embedder.release().catch(() => {
-            return;
-          });
-          throw error;
-        }
-        if (this.spec.vision)
-          reportBuiltInEmbeddingVision(embedder.vision, { env: this.env, model: this.spec });
-      } else if (this.onnxOffThread) {
-        const handle = modelThreadHandleId();
-        await modelThread().call({ kind: "embedding-load", handle, installed, model: this.spec, env: this.env, threads: this.threads });
-        model = { kind: "thread", handle };
-      } else {
-        if (!installed.vocabularyPath)
-          throw new Error("the model vocabulary is not installed.");
-        const tokenizer = loadTokenizer(installed.vocabularyPath);
-        const session = await this.runtimeFactory(installed).createSession(installed.modelPath, { threads: this.threads });
-        model = { kind: "onnx", session, tokenizer };
-        try {
-          const querySession = await this.runtimeFactory(installed).createSession(installed.modelPath, { threads: this.threads });
-          this.priorityLoaded = { kind: "onnx", session: querySession, tokenizer };
-        } catch (error) {
-          await session.release?.().catch(() => {
-            return;
-          });
-          throw error;
-        }
-      }
-      reportBuiltInEmbeddingState(reporterOptions, "ready");
-      return model;
-    } catch (error) {
-      const failure = new BuiltInEmbeddingInstallError("runtime_load_failed", `The built-in search model could not start: ${error instanceof Error ? error.message : String(error)}`);
-      reportBuiltInEmbeddingState(reporterOptions, "failed", { reason: failure.reason, message: failure.message });
-      throw builtInEmbeddingOperationError(failure);
-    }
-  }
-  async withSlot(taskType, run) {
-    if (taskType === "RETRIEVAL_QUERY" && priorityQueryEmbeddingRequested()) {
-      if (this.prioritySlotBusy)
-        await new Promise((resolve) => this.priorityWaiting.push(resolve));
-      else
-        this.prioritySlotBusy = true;
-      try {
-        return await run();
-      } finally {
-        const next = this.priorityWaiting.shift();
-        if (next)
-          next();
-        else
-          this.prioritySlotBusy = false;
-      }
-    }
-    if (this.slotBusy) {
-      await new Promise((resolve) => this.waiting[taskType === "RETRIEVAL_QUERY" ? "query" : "document"].push(resolve));
-    } else {
-      this.slotBusy = true;
-    }
-    try {
-      return await run();
-    } finally {
-      const next = this.waiting.query.shift() ?? this.waiting.document.shift();
-      if (next)
-        next();
-      else
-        this.slotBusy = false;
-    }
-  }
-  async embedLoaded(model, inputs, taskType) {
-    if (model.kind === "thread") {
-      return modelThread().call({ kind: "embedding-run", handle: model.handle, inputs, taskType, priority: priorityQueryEmbeddingRequested() });
-    }
-    if (taskType === "RETRIEVAL_QUERY" && priorityQueryEmbeddingRequested()) {
-      if (!this.priorityLoaded)
-        throw new BuiltInEmbeddingNotReadyError(this.status());
-      model = this.priorityLoaded;
-    }
-    if (model.kind === "litert")
-      return this.embedLiteRt(model.embedder, inputs, taskType);
-    return withMemoryPayload("embed", () => this.embedOnnx(model, inputs, taskType));
-  }
-  async embedOnnx(model, inputs, taskType) {
-    const windowTokens = this.spec.maxTokens - 2;
-    const windows = [];
-    inputs.forEach((input, index) => {
-      const text = promptText(this.spec, input, taskType);
-      addMemoryPayloadText(text);
-      const ids = model.tokenizer.tokenize(text);
-      const maxWindows = taskType === "RETRIEVAL_QUERY" ? 1 : MAX_WINDOWS_PER_DOCUMENT;
-      const count = Math.max(1, Math.min(maxWindows, Math.ceil(ids.length / windowTokens)));
-      for (let window = 0;window < count; window += 1) {
-        windows.push({
-          input: index,
-          ids: [model.tokenizer.startId, ...ids.slice(window * windowTokens, (window + 1) * windowTokens), model.tokenizer.endId]
-        });
-      }
-    });
-    const sums = inputs.map(() => new Float64Array(this.dimension));
-    for (const batch of planBatches(windows)) {
-      const vectors = await this.withSlot(taskType, () => this.forward(model, batch));
-      batch.forEach((window, row) => {
-        const vector = vectors[row];
-        const weight = window.ids.length - 2;
-        const sum = sums[window.input];
-        for (let d = 0;d < this.dimension; d += 1)
-          sum[d] += vector[d] * Math.max(1, weight);
-      });
-    }
-    return sums.map((sum) => normalize4(sum));
-  }
-  async embedWithImageVectors(inputs) {
-    if (inputs.length === 0)
-      return { vectors: [], imageVectors: [] };
-    const model = await this.ready();
-    if (model.kind !== "litert" || !this.spec.vision) {
-      return { vectors: await this.embedLoaded(model, inputs, "RETRIEVAL_DOCUMENT"), imageVectors: inputs.map(() => {
-        return;
-      }) };
-    }
-    const extra = inputs.flatMap((input, index) => input.image && isMediaCachePath(input.image.path, input.image.sha256) ? [index] : []);
-    const { vectors, failed } = await this.liteRtVectors(model.embedder, [...this.liteRtItems(inputs, "RETRIEVAL_DOCUMENT"), ...extra.map((index) => ({ text: "", image: inputs[index].image.path }))], "RETRIEVAL_DOCUMENT", new Set(this.refusedPictures(inputs)));
-    const documentFailures = failed.filter((index) => index < inputs.length);
-    if (documentFailures.length > 0)
-      throw new SourceEmbeddingInputsFailedError(documentFailures, "image_unreadable");
-    const imageVectors = inputs.map(() => {
-      return;
-    });
-    extra.forEach((input, row) => {
-      imageVectors[input] = vectors[inputs.length + row];
-    });
-    return { vectors: vectors.slice(0, inputs.length), imageVectors };
-  }
-  async embedImageVectors(images) {
-    if (images.length === 0)
-      return [];
-    const model = await this.ready();
-    if (model.kind !== "litert" || !this.spec.vision) {
-      throw new SourceEmbeddingInputsFailedError(images.map((_, index) => index), "image_encoder_unavailable", "held");
-    }
-    const refused = new Set(images.flatMap((image, index) => isMediaCachePath(image.path, image.sha256) ? [] : [index]));
-    const live = images.flatMap((image, index) => refused.has(index) ? [] : [{ index, image }]);
-    const out = images.map(() => {
-      return;
-    });
-    if (live.length === 0)
-      return out;
-    const { vectors } = await this.liteRtVectors(model.embedder, live.map(({ image }) => ({ text: "", image: image.path })), "RETRIEVAL_DOCUMENT", new Set);
-    live.forEach(({ index }, row) => {
-      out[index] = vectors[row];
-    });
-    return out;
-  }
-  async embedPromptTexts(texts) {
-    if (texts.length === 0)
-      return [];
-    const model = await this.ready();
-    if (model.kind !== "litert")
-      throw new Error("The photo judge needs the LiteRT model.");
-    const { vectors, failed } = await this.liteRtVectors(model.embedder, texts, "RETRIEVAL_DOCUMENT", new Set);
-    if (failed.length > 0)
-      throw new Error("The photo judge's descriptions could not be embedded.");
-    return vectors;
-  }
-  refusedPictures(inputs) {
-    if (!this.spec.vision)
-      return [];
-    return inputs.flatMap((input, index) => input.image && !isMediaCachePath(input.image.path, input.image.sha256) ? [index] : []);
-  }
-  liteRtItems(inputs, taskType) {
-    return inputs.map((input) => {
-      const text = promptText(this.spec, input, taskType);
-      if (taskType !== "RETRIEVAL_DOCUMENT" || !this.spec.vision || !input.image)
-        return text;
-      return { text, image: input.image.path };
-    });
-  }
-  async embedLiteRt(embedder, inputs, taskType) {
-    const { vectors, failed } = await this.liteRtVectors(embedder, this.liteRtItems(inputs, taskType), taskType, new Set(taskType === "RETRIEVAL_DOCUMENT" ? this.refusedPictures(inputs) : []), new Set(inputs.flatMap((input, index) => input.image ? [index] : [])));
-    if (failed.length > 0)
-      throw new SourceEmbeddingInputsFailedError(failed, "image_unreadable");
-    return vectors;
-  }
-  async liteRtVectors(embedder, prompts, taskType, refused, localOnly = new Set) {
-    const out = [];
-    const pictures = prompts.flatMap((prompt, index) => typeof prompt !== "string" && !refused.has(index) ? [index] : []);
-    if (pictures.length > 0 && this.picturesHeld()) {
-      throw new SourceEmbeddingInputsFailedError(pictures, "image_encoder_failing", "held");
-    }
-    const failed = [...refused];
-    for (let offset = 0;offset < prompts.length; offset += LITERT_BATCH) {
-      const batch = prompts.slice(offset, offset + LITERT_BATCH).map((prompt, row) => refused.has(offset + row) && typeof prompt !== "string" ? prompt.text : prompt);
-      const batchPictures = batch.flatMap((prompt, row) => typeof prompt !== "string" ? [offset + row] : []);
-      let vectors;
-      try {
-        let remoteVectors;
-        if (this.remote && taskType === "RETRIEVAL_DOCUMENT" && batch.every((prompt) => typeof prompt === "string") && !prompts.slice(offset, offset + LITERT_BATCH).some((prompt, row) => typeof prompt !== "string" || localOnly.has(offset + row))) {
-          try {
-            remoteVectors = await this.remote.embed(batch);
-          } catch {}
-        }
-        vectors = remoteVectors ?? await this.withSlot(taskType, () => embedder.embed(batch));
-        if (batchPictures.length > 0)
-          this.pictureFaults = undefined;
-      } catch (error) {
-        if (error instanceof LiteRtPictureEngineFaultError) {
-          const count = (this.pictureFaults?.count ?? 0) + 1;
-          if (count < PICTURE_ENGINE_FAULT_LIMIT) {
-            this.pictureFaults = { count };
-            offset -= LITERT_BATCH;
-            continue;
-          }
-          this.pictureFaults = { count: 0, heldUntilMs: this.now() + PICTURE_HOLD_MS };
-          console.warn(`[built-in embedding] the image encoder keeps failing a known-good picture; photos wait ${PICTURE_HOLD_MS / 60000} minutes while text keeps embedding.`);
-          throw new SourceEmbeddingInputsFailedError(pictures, "image_encoder_failing", "held");
-        }
-        if (error instanceof LiteRtImagesUnavailableError) {
-          throw new SourceEmbeddingInputsFailedError(error.indexes.map((index) => offset + index), "image_encoder_unavailable", "held");
-        }
-        throw new OperationError("source_index_error", `The built-in search model failed while embedding: ${error instanceof Error ? error.message : String(error)}`, "This is a local runtime failure; Olympus restarts the model on the next try.");
-      }
-      for (const [row, vector] of vectors.entries()) {
-        if (vector.length === 0) {
-          failed.push(offset + row);
-          out.push(undefined);
-          continue;
-        }
-        if (vector.length !== this.dimension) {
-          throw new OperationError("source_index_error", `The built-in search model returned ${vector.length} values, expected ${this.dimension}.`);
-        }
-        out.push(refused.has(offset + row) ? undefined : normalize4(vector));
-      }
-    }
-    return { vectors: out, failed: [...new Set(failed)].sort((left, right) => left - right) };
-  }
-  picturesHeld() {
-    const heldUntilMs = this.pictureFaults?.heldUntilMs;
-    return heldUntilMs !== undefined && this.now() < heldUntilMs;
-  }
-  async forward(model, batch) {
-    const rows = batch.length;
-    const length = Math.max(...batch.map((window) => window.ids.length));
-    const inputIds = new BigInt64Array(rows * length);
-    const attentionMask = new BigInt64Array(rows * length);
-    const tokenTypeIds = new BigInt64Array(rows * length);
-    if (model.tokenizer.padId !== 0)
-      inputIds.fill(BigInt(model.tokenizer.padId));
-    batch.forEach((window, row) => {
-      window.ids.forEach((id, column) => {
-        inputIds[row * length + column] = BigInt(id);
-        attentionMask[row * length + column] = 1n;
-      });
-    });
-    let output;
-    try {
-      output = await model.session.run({ inputIds, attentionMask, tokenTypeIds, batchSize: rows, sequenceLength: length });
-    } catch (error) {
-      throw new OperationError("source_index_error", `The built-in search model failed while embedding: ${error instanceof Error ? error.message : String(error)}`, "This is a local runtime failure; restarting Olympus reloads the model.");
-    }
-    const expected = [rows, length, this.dimension];
-    if (output.dims.length !== expected.length || output.dims.some((size, axis) => size !== expected[axis])) {
-      throw new OperationError("source_index_error", `The built-in search model returned shape [${output.dims.join(", ")}], expected [${expected.join(", ")}].`);
-    }
-    const hidden = this.dimension;
-    return batch.map((window, row) => {
-      const vector = new Float64Array(hidden);
-      const base = row * length * hidden;
-      if (this.spec.pooling === "cls") {
-        for (let d = 0;d < hidden; d += 1)
-          vector[d] = output.data[base + d];
-      } else {
-        for (let token = 0;token < window.ids.length; token += 1) {
-          const offset = base + token * hidden;
-          for (let d = 0;d < hidden; d += 1)
-            vector[d] += output.data[offset + d];
-        }
-        for (let d = 0;d < hidden; d += 1)
-          vector[d] /= window.ids.length;
-      }
-      return Float64Array.from(normalize4(vector));
-    });
-  }
-}
-function loadTokenizer(path) {
-  const tokenizer = new WordPieceTokenizer(readFileSync17(path, "utf8"));
-  return {
-    tokenize: (text) => tokenizer.tokenize(text),
-    startId: tokenizer.clsId,
-    endId: tokenizer.sepId,
-    padId: tokenizer.padId
-  };
-}
-function promptText(spec, input, taskType) {
-  if (taskType === "RETRIEVAL_QUERY")
-    return `${spec.queryPrefix}${input.title ? `${input.title}
-` : ""}${input.text}`;
-  if (spec.documentPrefix.includes("{title}")) {
-    const title = input.title?.replace(/\s+/g, " ").trim() || "none";
-    return `${spec.documentPrefix.replace("{title}", () => title)}${input.text}`;
-  }
-  return `${spec.documentPrefix}${input.title ? `${input.title}
-` : ""}${input.text}`;
-}
-
-class BuiltInEmbeddingNotReadyError extends TransientSourceEmbeddingError {
-  status;
-  constructor(status, cause, options = {}) {
-    super(BUILT_IN_EMBEDDING_PROVIDER, "timeout", 0, 0, options);
-    this.name = "BuiltInEmbeddingNotReadyError";
-    this.status = status;
-    this.message = status.state === "failed" ? `The built-in search model is not available: ${status.failure?.message ?? "install failed"}.` : cause !== undefined ? `The built-in search model is not available: ${cause instanceof Error ? cause.message : String(cause)}.` : `The built-in search model is still being prepared (${status.percent}%).`;
-    this.suggestion = "Answers use keyword search until it is ready; nothing needs to be done.";
-  }
-}
-function builtInEmbeddingOperationError(error) {
-  if (error instanceof OperationError)
-    return error;
-  const message = error instanceof Error ? error.message : String(error);
-  const reason = error instanceof BuiltInEmbeddingInstallError ? error.reason : undefined;
-  return new OperationError("source_index_error", message, reason === "unsupported_platform" ? "Choose another embedding provider for this machine in the model settings." : reason === "download_failed" ? "Check the internet connection; Olympus tries the download again automatically." : reason === "disk_write_failed" ? "Free some disk space; Olympus tries again automatically." : "Olympus removes the bad file and downloads it again automatically.");
-}
-function planBatches(windows) {
-  const ordered = [...windows].sort((left, right) => right.ids.length - left.ids.length);
-  const batches = [];
-  let current = [];
-  let currentLength = 0;
-  for (const window of ordered) {
-    const length = Math.max(currentLength, window.ids.length);
-    if (current.length > 0 && (current.length >= MAX_BATCH_ROWS || length * (current.length + 1) > MAX_BATCH_TOKENS)) {
-      batches.push(current);
-      current = [];
-      currentLength = 0;
-    }
-    current.push(window);
-    currentLength = Math.max(currentLength, window.ids.length);
-  }
-  if (current.length > 0)
-    batches.push(current);
-  return batches;
-}
-function normalize4(vector) {
-  let norm = 0;
-  for (let index = 0;index < vector.length; index += 1)
-    norm += vector[index] * vector[index];
-  norm = Math.sqrt(norm);
-  const out = new Array(vector.length);
-  for (let index = 0;index < vector.length; index += 1)
-    out[index] = norm > 0 ? vector[index] / norm : 0;
-  return out;
-}
-function resolveDevice(env) {
-  const configured = env[BUILT_IN_EMBEDDING_DEVICE_ENV]?.trim().toLowerCase();
-  if (configured && configured !== "cpu" && configured !== "auto") {
-    throw new OperationError("config_error", `${BUILT_IN_EMBEDDING_DEVICE_ENV} must be "auto" or "cpu".`);
-  }
-  return configured === "cpu" ? "cpu" : "auto";
-}
-function resolveThreads(explicit, env) {
-  const configured = explicit ?? (env[BUILT_IN_EMBEDDING_THREADS_ENV]?.trim() ? Number(env[BUILT_IN_EMBEDDING_THREADS_ENV]) : undefined);
-  if (configured !== undefined) {
-    if (!Number.isSafeInteger(configured) || configured < 1) {
-      throw new OperationError("config_error", `${BUILT_IN_EMBEDDING_THREADS_ENV} must be a positive whole number.`);
-    }
-    return configured;
-  }
-  return Math.max(1, Math.min(4, Math.floor(availableParallelism() / 2)));
-}
-var sharedProviders;
-function sharedBuiltInSourceEmbeddingProvider(options) {
-  const model = builtInEmbeddingModel(options.modelId);
-  if (!model) {
-    throw new OperationError("config_error", `This version of Olympus does not include the built-in embedding model "${options.modelId}".`, `Use one of ${BUILT_IN_EMBEDDING_MODELS.map((spec) => `"${spec.modelId}"`).join(", ")} for the built-in profile, or update Olympus.`);
-  }
-  const env = options.env ?? process.env;
-  const key = `${builtInEmbeddingPaths(env).root}\x00${options.modelId}`;
-  sharedProviders ??= new Map;
-  let provider = sharedProviders.get(key);
-  if (!provider) {
-    provider = new BuiltInSourceEmbeddingProvider({ env, model });
-    sharedProviders.set(key, provider);
-  }
-  return provider;
-}
+// src/core/build-flavor.ts
+var PUBLIC_RUNTIME_BUILD = false;
 
 // src/workers/embedding-ledger.ts
 var EMBEDDING_LEDGER_OWNER_APPROVAL = PUBLIC_RUNTIME_BUILD ? "owner" : "jamie";
@@ -25073,6 +24954,16 @@ var VISIBILITY_HOLD_WAIT_MS = 10;
 function visibilityFlagged(row) {
   return row.moving || row.hidden || row.held || row.heldForJudgment || row.metadataLayer || row.metadataLayerContentUnread;
 }
+function describeSyncRunBusy(db, site, startedAt, error) {
+  const code = String(error?.code ?? "");
+  if (process.env.OLYMPUS_SQLITE_BUSY_DIAGNOSTIC !== "1" || !code.startsWith("SQLITE_BUSY") || !(error instanceof Error))
+    return;
+  let timeout = "unknown";
+  try {
+    timeout = String(db.query("PRAGMA busy_timeout").get().timeout);
+  } catch {}
+  error.message += ` (sync_runs ${site}: ${code} after ${Math.round(performance.now() - startedAt)} ms, in_transaction=${db.inTransaction}, busy_timeout=${timeout})`;
+}
 function runHiddenStepsHere(steps) {
   let step = steps.next();
   while (!step.done) {
@@ -25242,7 +25133,7 @@ var CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
     AND emb.content_hash = c.embedding_input_hash
 `;
 function connectorStoreCurrentEmbeddingRowsQuery(options, ordered, page) {
-  const modelId = requireNonEmpty(options.modelId, "Connector store embedding model id");
+  const modelId = requireNonEmpty2(options.modelId, "Connector store embedding model id");
   const accountScope = normalizeOptionalAccountScope(options.accountScope);
   const selectedFilters = connectorStoreFilterSql(options.filters);
   const metadataOnly = connectorStoreMetadataOnlySql(options.filters, options.onDemandReadsTablePresent);
@@ -25745,8 +25636,8 @@ class LocalConnectorStore {
       clearInterval: (timer) => clearInterval(timer)
     };
     this.readOnly = options.readOnly === true;
-    this.corpusId = requireNonEmpty(options.corpusId, "Connector store corpus id");
-    this.dbPath = requireNonEmpty(options.dbPath, "Connector store db path");
+    this.corpusId = requireNonEmpty2(options.corpusId, "Connector store corpus id");
+    this.dbPath = requireNonEmpty2(options.dbPath, "Connector store db path");
     this.mediaHolder = this.dbPath === ":memory:" ? `memory:${randomUUID9()}` : options.mediaHolder ?? this.dbPath;
     const configuredFormats = options.stillImagesRead === undefined ? undefined : resolveStillImageFormats(options.stillImagesRead);
     this.stillImageFormatsRead = configuredFormats ? () => configuredFormats : () => readyStillImageFormats();
@@ -27875,18 +27766,6 @@ ${parentKey(ref)}`, { ref, origin });
     `).all(parent.parentLocalItemId, parent.provider, parent.accountScope);
     return rows.map((row) => sourceItemFromRow({ ...row, rank: 0 }));
   }
-  observeStoredItemOwner(identity, connectorId) {
-    this.db.transaction(() => {
-      const row = this.db.query(`
-        SELECT item_pk, sync_run_id FROM items
-        WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ? AND tombstoned = 0
-      `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
-      if (row) {
-        this.rememberItemOwner(row.item_pk, connectorId, "observed", row.sync_run_id, nowIso(), "provider_listing");
-        this.db.query("INSERT INTO store_totals (name, n) VALUES (?, 1) ON CONFLICT(name) DO UPDATE SET n = n + 1").run(STORE_TOTALS_WRITES);
-      }
-    })();
-  }
   reobserveRoutedCopy(item, connectorId, ownershipKind, syncRunId) {
     const row = this.db.query(`
       SELECT item_pk FROM items
@@ -29194,16 +29073,6 @@ ${parentKey(ref)}`, { ref, origin });
       return;
     return { chunkCount: row.chunk_count, ...row.authored_at ? { authoredAt: row.authored_at } : {} };
   }
-  async unobservedContentCount(provider, account, connectorId, connectorIdPrefix) {
-    const owner = observedOwnerPredicate(connectorId, connectorIdPrefix);
-    const sql = `SELECT COUNT(*) AS n FROM items i
-      WHERE i.provider = ? AND i.account_scope = ? AND i.tombstoned = 0 AND i.parent_local_item_id IS NULL
-        AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
-        AND NOT ${owner.sql}`;
-    const params = [provider, account, ...owner.params];
-    const row = offThreadReadsSupported(this.dbPath) ? await readInBackground(this.dbPath, { sql, params, mode: "get" }) : this.db.query(sql).get(...params);
-    return row.n;
-  }
   storedItemState(identity) {
     const row = this.db.query(`
       SELECT source_version, tombstoned,
@@ -29783,7 +29652,7 @@ ${parentKey(ref)}`, { ref, origin });
     return format === undefined || this.stillImageFormatsRead().has(format);
   }
   itemOwnerPresent(identity, connectorIdValue, ownershipKind) {
-    const connectorId = requireNonEmpty(connectorIdValue, "Connector owner id");
+    const connectorId = requireNonEmpty2(connectorIdValue, "Connector owner id");
     const row = this.db.query(`
       SELECT 1 AS present
       FROM items i
@@ -29898,7 +29767,7 @@ ${parentKey(ref)}`, { ref, origin });
     };
   }
   verifyCorpusIntegrity(options) {
-    const embeddingModelId = requireNonEmpty(options.embeddingModelId, "Connector store integrity embedding model id");
+    const embeddingModelId = requireNonEmpty2(options.embeddingModelId, "Connector store integrity embedding model id");
     const sampleLimit = normalizeIntegritySampleLimit(options.sampleLimit);
     const counts = {
       itemsWithFtsDeficiency: 0,
@@ -30011,8 +29880,8 @@ ${parentKey(ref)}`, { ref, origin });
     };
   }
   restoreItemRepresentations(options) {
-    const syncConnectorId = requireNonEmpty(options.syncConnectorId, "Representation restore sync connector id");
-    const ownerConnectorId = requireNonEmpty(options.ownerConnectorId, "Representation restore owner connector id");
+    const syncConnectorId = requireNonEmpty2(options.syncConnectorId, "Representation restore sync connector id");
+    const ownerConnectorId = requireNonEmpty2(options.ownerConnectorId, "Representation restore owner connector id");
     const maxChunkChars = normalizeMaxChunkChars(options.maxChunkChars);
     const seenIdentities = new Set;
     for (const record of options.items) {
@@ -30366,8 +30235,8 @@ ${parentKey(ref)}`, { ref, origin });
     }
   }
   relinquishItemsHeld(options) {
-    const syncConnectorId = requireNonEmpty(options.syncConnectorId, "Relinquish sync connector id");
-    const ownerConnectorId = requireNonEmpty(options.ownerConnectorId, "Relinquish owner connector id");
+    const syncConnectorId = requireNonEmpty2(options.syncConnectorId, "Relinquish sync connector id");
+    const ownerConnectorId = requireNonEmpty2(options.ownerConnectorId, "Relinquish owner connector id");
     return this.db.transaction(() => {
       const considered = new Set;
       const doomed = [];
@@ -30466,7 +30335,7 @@ ${parentKey(ref)}`, { ref, origin });
         throw new Error("Connector store trust reconciliation refuses one database as both stores.");
       }
     }
-    const reconcileConnectorId = requireNonEmpty(options.reconcileConnectorId, "Trust reconciliation connector id");
+    const reconcileConnectorId = requireNonEmpty2(options.reconcileConnectorId, "Trust reconciliation connector id");
     const maxItems = normalizeLocatorIdentityBackfillItems(options.maxItems);
     const maxWindows = normalizeTrustReconciliationWindows(options.maxWindows);
     let position = this.trustReconciliationPosition(reconcileConnectorId);
@@ -30857,7 +30726,7 @@ ${parentKey(ref)}`, { ref, origin });
     };
   }
   repairSearchTextFromChunks(options) {
-    const provider = requireNonEmpty(options.provider, "Connector store search-text repair provider");
+    const provider = requireNonEmpty2(options.provider, "Connector store search-text repair provider");
     const startAfter = normalizeRepairCursor(options.cursor);
     const maxItems = normalizeMaxItems(options.maxItems);
     const batchSize = normalizeRepairBatchSize(options.batchSize);
@@ -31220,12 +31089,18 @@ ${parentKey(ref)}`, { ref, origin });
     await connector.authenticate();
     const syncRunId = `connector-sync-${randomUUID9()}`;
     const startedAt = nowIso();
-    this.db.query(`
-      INSERT INTO sync_runs (
-        sync_run_id, corpus_id, connector_id, status, cursor, items_seen,
-        items_indexed, started_at, audit_receipt_sha256
-      ) VALUES (?, ?, ?, 'running', ?, 0, 0, ?, ?)
-    `).run(syncRunId, this.corpusId, connector.id, options?.cursor ?? null, startedAt, auditReceiptSha256 ?? null);
+    const startWriteAt = performance.now();
+    try {
+      this.db.query(`
+        INSERT INTO sync_runs (
+          sync_run_id, corpus_id, connector_id, status, cursor, items_seen,
+          items_indexed, started_at, audit_receipt_sha256
+        ) VALUES (?, ?, ?, 'running', ?, 0, 0, ?, ?)
+      `).run(syncRunId, this.corpusId, connector.id, options?.cursor ?? null, startedAt, auditReceiptSha256 ?? null);
+    } catch (error) {
+      describeSyncRunBusy(this.db, "start", startWriteAt, error);
+      throw error;
+    }
     let itemsSeen = 0;
     let itemsIndexed = 0;
     let itemsChanged = 0;
@@ -31467,11 +31342,17 @@ ${parentKey(ref)}`, { ref, origin });
         }
       }
     } catch (error) {
-      this.db.query(`
-        UPDATE sync_runs
-        SET status = 'failed', cursor = ?, items_seen = ?, items_indexed = ?, completed_at = ?, error = ?
-        WHERE sync_run_id = ?
-      `).run(checkpoint ?? null, itemsSeen, itemsIndexed, nowIso(), errorMessage(error), syncRunId);
+      const failedWriteAt = performance.now();
+      try {
+        this.db.query(`
+          UPDATE sync_runs
+          SET status = 'failed', cursor = ?, items_seen = ?, items_indexed = ?, completed_at = ?, error = ?
+          WHERE sync_run_id = ?
+        `).run(checkpoint ?? null, itemsSeen, itemsIndexed, nowIso(), errorMessage(error), syncRunId);
+      } catch (failedWriteError) {
+        describeSyncRunBusy(this.db, "failed", failedWriteAt, failedWriteError);
+        throw failedWriteError;
+      }
       throw error;
     }
     this.db.query(`
@@ -31540,10 +31421,10 @@ ${parentKey(ref)}`, { ref, origin });
     const meta = item.metadata;
     const title = itemTitle(item);
     const sender = senderMetadataFromRawItem(item);
-    const locatorUri = metadataString2(meta, "locatorUri") ?? metadataString2(meta, "pathDisplay") ?? metadataString2(meta, "url");
-    const authoredAt = metadataString2(meta, "authoredAt") ?? metadataString2(meta, "sentAt") ?? metadataString2(meta, "clientModifiedAt");
-    const updatedAt = metadataString2(meta, "updatedAt") ?? metadataString2(meta, "serverModifiedAt");
-    const emittedContentHash = metadataString2(meta, "contentHash") ?? (item.content.kind === "text" ? hashString2(item.content.text) : undefined);
+    const locatorUri = metadataString(meta, "locatorUri") ?? metadataString(meta, "pathDisplay") ?? metadataString(meta, "url");
+    const authoredAt = metadataString(meta, "authoredAt") ?? metadataString(meta, "sentAt") ?? metadataString(meta, "clientModifiedAt");
+    const updatedAt = metadataString(meta, "updatedAt") ?? metadataString(meta, "serverModifiedAt");
+    const emittedContentHash = metadataString(meta, "contentHash") ?? (item.content.kind === "text" ? hashString2(item.content.text) : undefined);
     const now = nowIso();
     const suppliedReactions = normalizeSourceReactions(meta["reactions"]);
     const existing = this.db.query(`
@@ -31871,7 +31752,7 @@ ${parentKey(ref)}`, { ref, origin });
           WHEN ? = 1 THEN excluded.last_seen_at
           ELSE item_owners.last_seen_at
         END
-    `).run(itemPk, requireNonEmpty(connectorId, "Connector owner id"), ownershipKind, syncRunId, syncRunId, observedAt, observedAt, observation === "provider_listing" ? 1 : 0);
+    `).run(itemPk, requireNonEmpty2(connectorId, "Connector owner id"), ownershipKind, syncRunId, syncRunId, observedAt, observedAt, observation === "provider_listing" ? 1 : 0);
   }
   async indexItemContent(connector, place, recordDecision, item, itemPk, maxChunkChars, gaps, onContentFetchFailure, onContentFetchSuccess) {
     let text = textFromRawItem(item);
@@ -31914,8 +31795,8 @@ ${parentKey(ref)}`, { ref, origin });
       title,
       search_text: itemSearchText(item, title ?? undefined) ?? null,
       mime_type: item.mimeType,
-      authored_at: metadataString2(item.metadata, "authoredAt") ?? metadataString2(item.metadata, "sentAt") ?? metadataString2(item.metadata, "clientModifiedAt") ?? null,
-      updated_at: metadataString2(item.metadata, "updatedAt") ?? metadataString2(item.metadata, "serverModifiedAt") ?? null
+      authored_at: metadataString(item.metadata, "authoredAt") ?? metadataString(item.metadata, "sentAt") ?? metadataString(item.metadata, "clientModifiedAt") ?? null,
+      updated_at: metadataString(item.metadata, "updatedAt") ?? metadataString(item.metadata, "serverModifiedAt") ?? null
     };
   }
   indexItemText(item, itemPk, maxChunkChars, text, media) {
@@ -32119,7 +32000,7 @@ ${parentKey(ref)}`, { ref, origin });
     const accountScope = normalizeOptionalAccountScope(scope.accountScope);
     const scoped = connectorStoreFilterSql(scope.filters);
     const failed = this.embeddingFailureState;
-    const tierExclusion = this.embeddingWorkListExclusionFilter(0, tierHidden, this.canEmbedHeld(embedder));
+    const tierExclusion = this.embeddingWorkListExclusionFilter(0, tierHidden, !scope.excludeAllEmbeddingHolds && this.canEmbedHeld(embedder));
     const privateTier = this.privateTierEmbeddingFilter(embedder);
     const filter = `${tierExclusion.filter} ${privateTier.filter} ${accountScope ? "AND i.account_scope = ?" : ""} ${scoped.sql}`;
     const params = [...tierExclusion.params, ...privateTier.params, ...accountScope ? [accountScope] : [], ...scoped.params];
@@ -32145,7 +32026,7 @@ ${parentKey(ref)}`, { ref, origin });
     const accountScope = normalizeOptionalAccountScope(scope.accountScope);
     const scoped = connectorStoreFilterSql(scope.filters);
     const failed = this.embeddingFailureState;
-    const allowHeld = this.canEmbedHeld(embedder);
+    const allowHeld = !scope.excludeAllEmbeddingHolds && this.canEmbedHeld(embedder);
     const privateTier = this.privateTierEmbeddingFilter(embedder);
     const offThread = offThreadReadsSupported(this.dbPath);
     const tierExclusion = offThread ? { filter: "", params: [] } : this.embeddingWorkListExclusionFilter(0, tierHidden, allowHeld);
@@ -32249,7 +32130,7 @@ ${parentKey(ref)}`, { ref, origin });
     const tier = await this.tierHiddenItemPksInTurns();
     const hidden = await pkSetInTurns([tier.hidden]);
     const held = await pkSetInTurns([tier.held]);
-    const heldForJudgment = this.canEmbedHeld(provider) ? await pkSetInTurns([tier.heldForJudgment]) : new Set;
+    const heldForJudgment = !scope.excludeAllEmbeddingHolds && this.canEmbedHeld(provider) ? await pkSetInTurns([tier.heldForJudgment]) : new Set;
     const namesOnly = await pkSetInTurns([tier.metadataLayer]);
     const moving = new Set;
     let walked = 0;
@@ -32402,14 +32283,14 @@ ${parentKey(ref)}`, { ref, origin });
     const excludedPks = [...tierExcluded.hidden, ...tierExcluded.held.filter((pk) => !eligibleHeld?.has(pk)), ...tierExcluded.metadataLayer];
     return excludedPks.length > 0 ? { filter: "AND i.item_pk NOT IN (SELECT value FROM json_each(?))", params: [JSON.stringify(excludedPks)] } : { filter: "", params: [] };
   }
-  embeddingBatchRecheck(batch, embeddableTiers, provider) {
+  embeddingBatchRecheck(batch, embeddableTiers, allowHeld, scope) {
     const itemPks = [...new Set(batch.map((row) => row.item_pk))];
     const currentRows = this.db.query(`
-      SELECT item_pk, trust_tier, tombstoned, provider, account_scope, provider_item_id, provider_conversation_id FROM items
-      WHERE item_pk IN (SELECT value FROM json_each(?))
-    `).all(JSON.stringify(itemPks));
+      SELECT item_pk, trust_tier, tombstoned, provider, account_scope, provider_item_id, provider_conversation_id FROM items i
+      WHERE item_pk IN (SELECT value FROM json_each(?)) ${scope.filter}
+    `).all(JSON.stringify(itemPks), ...scope.params);
     const current = new Map(currentRows.map((row) => [row.item_pk, row]));
-    const hidden = this.embeddingHiddenAmong(currentRows, this.canEmbedHeld(provider));
+    const hidden = this.embeddingHiddenAmong(currentRows, allowHeld);
     const verdicts = this.effectiveItemTiers(currentRows.map((item) => ({
       provider: item.provider,
       accountScope: item.account_scope,
@@ -32517,11 +32398,16 @@ ${parentKey(ref)}`, { ref, origin });
   }
   async embedChunksUnderLease(options) {
     const provider = options.provider;
+    const assertBindingCurrent = () => {
+      provider.assertBindingCurrent?.();
+      options.assertSweepBindingCurrent?.();
+    };
     if (options.modelId && options.modelId !== provider.modelId) {
       throw new Error(`Connector store ${this.corpusId} embedding provider is ${provider.modelId}, ` + `not requested model ${options.modelId}.`);
     }
     assertConnectorStoreEmbeddingProvider(this.trustDomain, provider);
     await options.assertAuthorized?.();
+    assertBindingCurrent();
     this.releaseUnreferencedChunkMedia();
     this.reassertChunkMediaHolds();
     sweepMediaCacheThrottled();
@@ -32557,7 +32443,12 @@ ${parentKey(ref)}`, { ref, origin });
       throw new Error("Connector store embedding journal provider changed.");
     }
     const tierHidden = await this.tierHiddenItemPksInTurns();
-    const selectedRows = await this.embeddingWorkRows(provider.modelId, options.localItemIds, options.accountScope, options.filters, tierHidden, this.canEmbedHeld(provider));
+    const allowHeld = () => !options.excludeAllEmbeddingHolds && this.canEmbedHeld(provider);
+    const dispatchScope = statusScopeContentFilter({
+      ...options.accountScope ? { accountScope: options.accountScope } : {},
+      ...options.filters ? { contentFilters: options.filters } : {}
+    });
+    const selectedRows = await this.embeddingWorkRows(provider.modelId, options.localItemIds, options.accountScope, options.filters, tierHidden, allowHeld());
     const embeddableTiers = connectorStoreEmbeddableRowTiers(this.trustDomain, provider);
     const rows = embeddableTiers === undefined ? selectedRows : selectedRows.filter((row) => embeddableTiers.includes(row.trust_tier));
     let privateTierWithheldChunks = 0;
@@ -32579,12 +32470,14 @@ ${parentKey(ref)}`, { ref, origin });
     }
     if (!(priorJournal && priorCounts) && this.embeddingRebindWouldInvalidateCurrency(provider)) {
       await options.assertAuthorized?.();
+      assertBindingCurrent();
       await assertEmbeddingProviderCanEmbed(provider);
     }
     let activeJournalSha256 = priorJournal?.audit_receipt_sha256 ?? undefined;
     let providerEpoch;
     if (priorJournal && priorCounts) {
       this.db.transaction(() => {
+        assertBindingCurrent();
         providerEpoch = priorCounts.providerEpoch ?? this.bindEmbeddingWriteAuthority(provider, {
           mode: "match",
           invalidateOnCreate: false
@@ -32605,11 +32498,13 @@ ${parentKey(ref)}`, { ref, origin });
         if (claimed.changes !== 1) {
           throw new Error("Connector store embedding journal lease generation was superseded.");
         }
+        assertBindingCurrent();
         activeJournalSha256 = claimedSha256;
       })();
     } else if (journalId) {
       const startedAt = this.now().toISOString();
       this.db.transaction(() => {
+        assertBindingCurrent();
         providerEpoch = this.bindEmbeddingWriteAuthority(provider, {
           mode: "rebind",
           invalidateOnCreate: invalidateCurrentModelEmbeddings
@@ -32624,9 +32519,10 @@ ${parentKey(ref)}`, { ref, origin });
             audit_receipt_sha256
           ) VALUES (?, ?, ?, 'running', ?, ?, 0, ?, NULL, ?)
         `).run(journalId, this.corpusId, "connector_store_embedding_maintenance", cursor, rows.length, startedAt, journalSha256);
+        assertBindingCurrent();
       })();
     } else {
-      providerEpoch = this.db.transaction(() => this.bindEmbeddingWriteAuthority(provider, { mode: "rebind", invalidateOnCreate: false }))();
+      providerEpoch = this.db.transaction(() => this.bindEmbeddingWriteAuthority(provider, { mode: "rebind", invalidateOnCreate: false, assertAuthorized: assertBindingCurrent }))();
     }
     if (priorJournal?.status === "completed" && priorCounts) {
       return connectorStoreEmbedSummary(this.corpusId, this.trustDomain, provider, priorCounts.chunksSeen, priorCounts.chunksEmbedded, priorCounts.chunksSeen - priorCounts.chunksEmbedded);
@@ -32685,7 +32581,7 @@ ${parentKey(ref)}`, { ref, origin });
         }
       }
       {
-        const recheck = this.embeddingBatchRecheck(batch, embeddableTiers, provider);
+        const recheck = this.embeddingBatchRecheck(batch, embeddableTiers, allowHeld(), dispatchScope);
         privateTierWithheldChunks += recheck.privateTier;
         staleSkipped += recheck.notVisible + recheck.privateTier;
         batch = recheck.kept;
@@ -32709,6 +32605,7 @@ ${parentKey(ref)}`, { ref, origin });
       const judgeNow = readsImages === true && judging !== undefined && judging.embedWithImageVectors !== undefined && batch.some((row) => row.media_sha256 && !this.mediaJudgmentSettled(row.media_sha256, mediaJudgeId(judging)));
       let judgedBatch;
       try {
+        assertBindingCurrent();
         if (judgeNow) {
           const returned = await judging.embedWithImageVectors(inputsFor(batch));
           vectors = returned.vectors;
@@ -32745,12 +32642,13 @@ ${parentKey(ref)}`, { ref, origin });
         batch = batch.filter((row) => !failedRows.has(row));
         if (batch.length === 0)
           continue;
-        const recheck = this.embeddingBatchRecheck(batch, embeddableTiers, provider);
+        const recheck = this.embeddingBatchRecheck(batch, embeddableTiers, allowHeld(), dispatchScope);
         privateTierWithheldChunks += recheck.privateTier;
         staleSkipped += recheck.notVisible + recheck.privateTier;
         batch = recheck.kept;
         if (batch.length === 0)
           continue;
+        assertBindingCurrent();
         vectors = await provider.embed(inputsFor(batch), { taskType: "RETRIEVAL_DOCUMENT" });
       }
       const onDemandItems = this.db.query(`SELECT COUNT(*) AS n FROM items i JOIN on_demand_item_reads r ON r.local_item_id = i.local_item_id
@@ -32766,7 +32664,7 @@ ${parentKey(ref)}`, { ref, origin });
       const writtenItemPks = options.onBatchWritten ? [] : undefined;
       this.db.transaction(() => {
         this.assertEmbeddingWriteAuthority(provider, providerEpoch);
-        const stillEligible = new Set(this.embeddingBatchRecheck(batch, embeddableTiers, provider).kept);
+        const stillEligible = new Set(this.embeddingBatchRecheck(batch, embeddableTiers, allowHeld(), dispatchScope).kept);
         for (let index = 0;index < batch.length; index += 1) {
           const row = batch[index];
           if (!stillEligible.has(row))
@@ -32827,6 +32725,7 @@ ${parentKey(ref)}`, { ref, origin });
           epochId: provider.epochId,
           configHash: provider.configHash
         }, now);
+        assertBindingCurrent();
       })();
       if (nextJournalSha256)
         activeJournalSha256 = nextJournalSha256;
@@ -32846,6 +32745,7 @@ ${parentKey(ref)}`, { ref, origin });
       const cursor = embeddingMaintenanceJournal(provider, selectionSha256, inputSha256, rows.length, embedded, journalLeaseGeneration, providerEpoch, invalidateCurrentModelEmbeddings);
       const completedSha256 = hashString2(cursor);
       this.db.transaction(() => {
+        assertBindingCurrent();
         this.assertEmbeddingWriteAuthority(provider, providerEpoch);
         const completed = this.db.query(`
           UPDATE sync_runs
@@ -32857,10 +32757,11 @@ ${parentKey(ref)}`, { ref, origin });
         if (completed.changes !== 1) {
           throw new Error("Connector store embedding journal lease generation was superseded.");
         }
+        assertBindingCurrent();
       })();
       skipped = rows.length - embedded;
     }
-    this.clearEmbeddingCurrencyRebuildDebt(provider, providerEpoch);
+    this.clearEmbeddingCurrencyRebuildDebt(provider, providerEpoch, assertBindingCurrent);
     const summary = connectorStoreEmbedSummary(this.corpusId, this.trustDomain, provider, rows.length, embedded, skipped);
     if (stoppedAtDeadline)
       summary.stoppedAtDeadline = true;
@@ -32873,6 +32774,7 @@ ${parentKey(ref)}`, { ref, origin });
     } : summary;
   }
   bindEmbeddingWriteAuthority(provider, options) {
+    options.assertAuthorized?.();
     assertConnectorStoreEmbeddingAuthorityProviderDimension(provider);
     const authorityId = connectorStoreEmbeddingWriteAuthorityId(provider.modelId);
     const existing = this.db.query(`
@@ -32904,6 +32806,7 @@ ${parentKey(ref)}`, { ref, origin });
           audit_receipt_sha256
         ) VALUES (?, ?, ?, 'running', ?, 0, 0, ?, NULL, ?)
       `).run(authorityId, this.corpusId, "connector_store_embedding_write_authority", cursor, startedAt, hashString2(cursor));
+      options.assertAuthorized?.();
       return providerEpoch;
     }
     if (existing.status !== "running" || existing.audit_receipt_sha256 !== hashString2(existing.cursor ?? "")) {
@@ -32931,6 +32834,7 @@ ${parentKey(ref)}`, { ref, origin });
         throw new Error("Connector store embedding write authority was superseded.");
       }
       this.invalidateEmbeddingModelCurrency(provider.modelId);
+      options.assertAuthorized?.();
       return providerEpoch;
     }
     if (current.modelId !== provider.modelId) {
@@ -32958,6 +32862,7 @@ ${parentKey(ref)}`, { ref, origin });
     }
     if (!providerMatches)
       this.invalidateEmbeddingModelCurrency(provider.modelId);
+    options.assertAuthorized?.();
     return providerEpoch;
   }
   assertEmbeddingWriteAuthority(provider, providerEpoch) {
@@ -33001,7 +32906,7 @@ ${parentKey(ref)}`, { ref, origin });
       return false;
     return !connectorStoreEmbeddingWriteAuthorityMatches(current, provider);
   }
-  clearEmbeddingCurrencyRebuildDebt(provider, providerEpoch) {
+  clearEmbeddingCurrencyRebuildDebt(provider, providerEpoch, assertBindingCurrent) {
     this.db.transaction(() => {
       const authorityId = connectorStoreEmbeddingWriteAuthorityId(provider.modelId);
       const existing = this.db.query(`
@@ -33015,6 +32920,7 @@ ${parentKey(ref)}`, { ref, origin });
         return;
       if (this.embeddingModelCurrencyIncomplete(provider))
         return;
+      assertBindingCurrent();
       this.assertEmbeddingWriteAuthority(provider, providerEpoch);
       const cursor = connectorStoreEmbeddingWriteAuthority(provider, providerEpoch);
       const cleared = this.db.query(`
@@ -35030,7 +34936,7 @@ function trustTierRank(tier) {
   return SOURCE_TRUST_TIERS.indexOf(tier);
 }
 function placementSignalsFromRawItem(item) {
-  const sender = metadataString2(item.metadata, "sender") ?? metadataString2(item.metadata, "from");
+  const sender = metadataString(item.metadata, "sender") ?? metadataString(item.metadata, "from");
   const labels = item.metadata["labels"];
   return {
     ...sender ? { sender } : {},
@@ -35038,13 +34944,13 @@ function placementSignalsFromRawItem(item) {
   };
 }
 function classificationInputFromRawItem(item) {
-  const subject = metadataString2(item.metadata, "subject");
-  const sender = metadataString2(item.metadata, "sender") ?? metadataString2(item.metadata, "from");
+  const subject = metadataString(item.metadata, "subject");
+  const sender = metadataString(item.metadata, "sender") ?? metadataString(item.metadata, "from");
   const text = textFromRawItem(item);
   const title = itemTitle(item) ?? subject;
-  const labels = metadataStringArray2(item.metadata, "labels");
+  const labels = metadataStringArray(item.metadata, "labels");
   const path = [
-    metadataString2(item.metadata, "pathDisplay") ?? metadataString2(item.metadata, "locatorUri") ?? metadataString2(item.metadata, "url"),
+    metadataString(item.metadata, "pathDisplay") ?? metadataString(item.metadata, "locatorUri") ?? metadataString(item.metadata, "url"),
     title
   ].filter((part) => Boolean(part)).join(`
 `);
@@ -35057,27 +34963,27 @@ function classificationInputFromRawItem(item) {
     text: text ?? ""
   };
 }
-function metadataStringArray2(metadata, key) {
+function metadataStringArray(metadata, key) {
   const value = metadata[key];
   if (!Array.isArray(value))
     return [];
   return value.map((entry) => typeof entry === "string" ? entry.trim() : "").filter(Boolean);
 }
 function itemTitle(item) {
-  return metadataString2(item.metadata, "name") ?? metadataString2(item.metadata, "title") ?? (item.identity.family === "chat" ? metadataString2(item.metadata, "chat") : undefined);
+  return metadataString(item.metadata, "name") ?? metadataString(item.metadata, "title") ?? (item.identity.family === "chat" ? metadataString(item.metadata, "chat") : undefined);
 }
 function itemSearchText(item, title, reactionLine) {
-  const explicit = metadataString2(item.metadata, "searchText");
+  const explicit = metadataString(item.metadata, "searchText");
   const parts = explicit ? [explicit, reactionLine] : [
     title,
     ...item.identity.family === "chat" ? [
-      metadataString2(item.metadata, "chat"),
-      metadataString2(item.metadata, "sender"),
-      metadataString2(item.metadata, "from")
+      metadataString(item.metadata, "chat"),
+      metadataString(item.metadata, "sender"),
+      metadataString(item.metadata, "from")
     ] : [],
     ...item.identity.family === "email" ? [
-      metadataString2(item.metadata, "from"),
-      metadataString2(item.metadata, "to")
+      metadataString(item.metadata, "from"),
+      metadataString(item.metadata, "to")
     ] : [],
     ...metadataStringList(item.metadata, "identityAliases"),
     ...metadataStringList(item.metadata, "aliases"),
@@ -35485,7 +35391,7 @@ function decodeTextBytes(bytes, mimeType) {
   }
 }
 function isTextualMimeType2(mimeType) {
-  const normalized = normalizeMimeType(mimeType);
+  const normalized = normalizeMimeType2(mimeType);
   return normalized.startsWith("text/") || normalized === "application/json" || normalized === "application/xml" || normalized.endsWith("+json") || normalized.endsWith("+xml");
 }
 function chunkText(text, maxChunkChars) {
@@ -35816,8 +35722,9 @@ function normalizeConnectorStoreSearchFilters(value) {
   const metadataOnlySourceScopeFolderKeys = normalizeScopeFolderKeys(value.metadataOnlySourceScopeFolderKeys);
   const normalized = {
     ...provider ? { provider } : {},
-    ...value.observedConnectorId ? { observedConnectorId: requireNonEmpty(value.observedConnectorId, "Observed connector id") } : {},
-    ...value.observedConnectorIdPrefix ? { observedConnectorIdPrefix: requireNonEmpty(value.observedConnectorIdPrefix, "Observed connector id prefix") } : {},
+    ...value.observedConnectorId ? { observedConnectorId: requireNonEmpty2(value.observedConnectorId, "Observed connector id") } : {},
+    ...value.previousObservedConnectorId ? { previousObservedConnectorId: requireNonEmpty2(value.previousObservedConnectorId, "Previous observed connector id") } : {},
+    ...value.observedConnectorIdPrefix ? { observedConnectorIdPrefix: requireNonEmpty2(value.observedConnectorIdPrefix, "Observed connector id prefix") } : {},
     ...locatorPathScope ? { locatorPathScope } : {},
     ...locatorPathScopes.length > 0 ? { locatorPathScopes } : {},
     ...locatorPathExcludedScopes.length > 0 ? { locatorPathExcludedScopes } : {},
@@ -35853,23 +35760,22 @@ function identityRowsSql(extraSql) {
       ORDER BY j.key
     `;
 }
-var VERIFIED_OBSERVATION_PREFIX = "verified-observation.v1:";
-function observedOwnerPredicate(exact, prefix) {
+function observedOwnerPredicate(exact, prefix, previous) {
   const keys = [];
   const params = [];
   if (exact) {
     keys.push("o.connector_id = ?");
     params.push(exact);
-    if (exact.startsWith(VERIFIED_OBSERVATION_PREFIX)) {
-      keys.push(`(o.connector_id = ? AND EXISTS (
-        SELECT 1 FROM sync_runs r
-        WHERE r.sync_run_id IN (o.first_seen_sync_run_id, o.last_seen_sync_run_id)
-          AND (r.connector_id = o.connector_id OR (r.connector_id = ? AND NOT EXISTS (
-            SELECT 1 FROM item_owners other WHERE other.item_pk = o.item_pk AND other.connector_id <> o.connector_id
-          )))
-      ))`);
-      params.push(exact.slice(VERIFIED_OBSERVATION_PREFIX.length), TIER_MOVE_CONNECTOR_ID);
-    }
+  }
+  if (exact && previous) {
+    keys.push(`(o.connector_id = ? AND EXISTS (
+      SELECT 1 FROM sync_runs r
+      WHERE r.sync_run_id IN (o.first_seen_sync_run_id, o.last_seen_sync_run_id)
+        AND (r.connector_id = o.connector_id OR (r.connector_id = ? AND NOT EXISTS (
+          SELECT 1 FROM item_owners other WHERE other.item_pk = o.item_pk AND other.connector_id <> o.connector_id
+        )))
+    ))`);
+    params.push(previous, TIER_MOVE_CONNECTOR_ID);
   }
   if (prefix) {
     keys.push("substr(o.connector_id, 1, length(?)) = ?");
@@ -35889,7 +35795,7 @@ function connectorStoreFilterSql(filters) {
     params.push(normalized.provider);
   }
   if (normalized.observedConnectorId || normalized.observedConnectorIdPrefix) {
-    const owner = observedOwnerPredicate(normalized.observedConnectorId, normalized.observedConnectorIdPrefix);
+    const owner = observedOwnerPredicate(normalized.observedConnectorId, normalized.observedConnectorIdPrefix, normalized.previousObservedConnectorId);
     clauses.push(`AND ${owner.sql}`);
     params.push(...owner.params);
   }
@@ -36284,7 +36190,7 @@ function assertContentFetchFailureBudget(consecutiveFailures) {
 function itemIdHash(item) {
   return hashString2(item.identity.localItemId).slice(0, 16);
 }
-function metadataString2(metadata, key) {
+function metadataString(metadata, key) {
   const value = metadata[key];
   if (typeof value !== "string")
     return;
@@ -36296,7 +36202,7 @@ function metadataStringList(metadata, key) {
   if (Array.isArray(value)) {
     return value.flatMap((entry) => typeof entry === "string" && entry.trim() ? [entry.trim()] : []);
   }
-  const single = metadataString2(metadata, key);
+  const single = metadataString(metadata, key);
   return single ? [single] : [];
 }
 function metadataBoolean(metadata, key) {
@@ -36304,8 +36210,8 @@ function metadataBoolean(metadata, key) {
   return typeof value === "boolean" ? value : undefined;
 }
 function senderMetadataFromRawItem(item) {
-  const senderId = metadataString2(item.metadata, "senderId") ?? metadataString2(item.metadata, "sender_id");
-  const senderLabel = metadataString2(item.metadata, "senderLabel") ?? metadataString2(item.metadata, "senderDisplayName") ?? metadataString2(item.metadata, "sender") ?? metadataString2(item.metadata, "from");
+  const senderId = metadataString(item.metadata, "senderId") ?? metadataString(item.metadata, "sender_id");
+  const senderLabel = metadataString(item.metadata, "senderLabel") ?? metadataString(item.metadata, "senderDisplayName") ?? metadataString(item.metadata, "sender") ?? metadataString(item.metadata, "from");
   const senderIsOwner = metadataBoolean(item.metadata, "senderIsOwner") ?? metadataBoolean(item.metadata, "fromMe");
   return normalizeSenderMetadata({
     ...senderId ? { senderId } : {},
@@ -37247,7 +37153,7 @@ function buildMimeTypeMatcher(mimeTypes) {
   const exact = new Set;
   const prefixes = [];
   for (const entry of mimeTypes) {
-    const normalized = normalizeMimeType(entry);
+    const normalized = normalizeMimeType2(entry);
     if (!normalized) {
       throw new Error("Connector store extraction candidate media types must be non-empty.");
     }
@@ -37264,7 +37170,7 @@ function buildMimeTypeMatcher(mimeTypes) {
     throw new Error("Connector store extraction candidate media types must not be empty.");
   }
   return (value) => {
-    const normalized = normalizeMimeType(value ?? "");
+    const normalized = normalizeMimeType2(value ?? "");
     if (!normalized)
       return false;
     if (exact.has(normalized))
@@ -37272,7 +37178,7 @@ function buildMimeTypeMatcher(mimeTypes) {
     return prefixes.some((prefix) => normalized.startsWith(prefix));
   };
 }
-function normalizeMimeType(value) {
+function normalizeMimeType2(value) {
   return value.split(";")[0]?.trim().toLowerCase() ?? "";
 }
 function normalizeConnectorStoreItemWriteClaim(claim) {
@@ -37280,11 +37186,11 @@ function normalizeConnectorStoreItemWriteClaim(claim) {
     throw new Error("Connector store item write claim ordinal must be a positive integer.");
   }
   return {
-    scope: requireNonEmpty(claim.scope, "Connector store item write claim scope"),
-    authority: requireNonEmpty(claim.authority, "Connector store item write claim authority"),
+    scope: requireNonEmpty2(claim.scope, "Connector store item write claim scope"),
+    authority: requireNonEmpty2(claim.authority, "Connector store item write claim authority"),
     ordinal: claim.ordinal,
-    holder: requireNonEmpty(claim.holder, "Connector store item write claim holder"),
-    generation: requireNonEmpty(claim.generation, "Connector store item write claim generation")
+    holder: requireNonEmpty2(claim.holder, "Connector store item write claim holder"),
+    generation: requireNonEmpty2(claim.generation, "Connector store item write claim generation")
   };
 }
 function normalizeMaxChunkChars(value) {
@@ -37304,7 +37210,7 @@ function normalizeOptionalSha256(value, label) {
   }
   return normalized;
 }
-function requireNonEmpty(value, label) {
+function requireNonEmpty2(value, label) {
   const text = value.trim();
   if (!text)
     throw new Error(`${label} is required.`);
@@ -37336,921 +37242,6 @@ function sqliteJournalSettingsOf(db) {
     wal_autocheckpoint: db.query("PRAGMA wal_autocheckpoint").get().wal_autocheckpoint
   };
 }
-
-// src/workers/connector-store/tier-auto-prune-sweep.ts
-var RECLAIM_MAX_RETAINED_FREE_BYTES = 64 * 1024 * 1024;
-var sweeping = new WeakSet;
-var SQLITE_FIXED_MESSAGES = new Set([
-  "Database has closed",
-  "database is locked",
-  "database table is locked",
-  "disk I/O error",
-  "database or disk is full",
-  "attempt to write a readonly database",
-  "database disk image is malformed"
-]);
-
-// src/workers/connector-store/tier-row-rehome.ts
-var MOVE_WHY = "Automatic re-home of a Private row found in a Personal or Public store: the owner approved on 2026-10-07 " + "that moved items are re-embedded by the local Private embedder (the move itself makes no provider call).";
-
-// src/workers/connector-store/tier-override-settle.ts
-var CLEARED_RECHECK_MS = 10 * 60000;
-var clearedChecks = new WeakMap;
-var running = new WeakMap;
-
-// src/workers/connector-store/tiered-store-set.ts
-var LOWER_CONTENT_REPAIR_INTERVAL_MS = 5 * 60000;
-
-// src/core/scope-safe-fs.ts
-import { createRequire as createRequire6 } from "node:module";
-var runtimeRequire3 = createRequire6(import.meta.url);
-var SCOPE_FILE_MAX_RANGE_BYTES = 64 * 1024 * 1024;
-
-// src/workers/archive-import/byte-source.ts
-var ARCHIVE_SOURCE_CHUNK_BYTES = 1024 * 1024;
-
-// node_modules/@streamparser/json/dist/mjs/utils/types/tokenType.js
-var TokenType;
-(function(TokenType) {
-  TokenType[TokenType["LEFT_BRACE"] = 0] = "LEFT_BRACE";
-  TokenType[TokenType["RIGHT_BRACE"] = 1] = "RIGHT_BRACE";
-  TokenType[TokenType["LEFT_BRACKET"] = 2] = "LEFT_BRACKET";
-  TokenType[TokenType["RIGHT_BRACKET"] = 3] = "RIGHT_BRACKET";
-  TokenType[TokenType["COLON"] = 4] = "COLON";
-  TokenType[TokenType["COMMA"] = 5] = "COMMA";
-  TokenType[TokenType["TRUE"] = 6] = "TRUE";
-  TokenType[TokenType["FALSE"] = 7] = "FALSE";
-  TokenType[TokenType["NULL"] = 8] = "NULL";
-  TokenType[TokenType["STRING"] = 9] = "STRING";
-  TokenType[TokenType["NUMBER"] = 10] = "NUMBER";
-  TokenType[TokenType["SEPARATOR"] = 11] = "SEPARATOR";
-})(TokenType || (TokenType = {}));
-
-// node_modules/@streamparser/json/dist/mjs/utils/utf-8.js
-var charset;
-(function(charset) {
-  charset[charset["BACKSPACE"] = 8] = "BACKSPACE";
-  charset[charset["FORM_FEED"] = 12] = "FORM_FEED";
-  charset[charset["NEWLINE"] = 10] = "NEWLINE";
-  charset[charset["CARRIAGE_RETURN"] = 13] = "CARRIAGE_RETURN";
-  charset[charset["TAB"] = 9] = "TAB";
-  charset[charset["SPACE"] = 32] = "SPACE";
-  charset[charset["EXCLAMATION_MARK"] = 33] = "EXCLAMATION_MARK";
-  charset[charset["QUOTATION_MARK"] = 34] = "QUOTATION_MARK";
-  charset[charset["NUMBER_SIGN"] = 35] = "NUMBER_SIGN";
-  charset[charset["DOLLAR_SIGN"] = 36] = "DOLLAR_SIGN";
-  charset[charset["PERCENT_SIGN"] = 37] = "PERCENT_SIGN";
-  charset[charset["AMPERSAND"] = 38] = "AMPERSAND";
-  charset[charset["APOSTROPHE"] = 39] = "APOSTROPHE";
-  charset[charset["LEFT_PARENTHESIS"] = 40] = "LEFT_PARENTHESIS";
-  charset[charset["RIGHT_PARENTHESIS"] = 41] = "RIGHT_PARENTHESIS";
-  charset[charset["ASTERISK"] = 42] = "ASTERISK";
-  charset[charset["PLUS_SIGN"] = 43] = "PLUS_SIGN";
-  charset[charset["COMMA"] = 44] = "COMMA";
-  charset[charset["HYPHEN_MINUS"] = 45] = "HYPHEN_MINUS";
-  charset[charset["FULL_STOP"] = 46] = "FULL_STOP";
-  charset[charset["SOLIDUS"] = 47] = "SOLIDUS";
-  charset[charset["DIGIT_ZERO"] = 48] = "DIGIT_ZERO";
-  charset[charset["DIGIT_ONE"] = 49] = "DIGIT_ONE";
-  charset[charset["DIGIT_TWO"] = 50] = "DIGIT_TWO";
-  charset[charset["DIGIT_THREE"] = 51] = "DIGIT_THREE";
-  charset[charset["DIGIT_FOUR"] = 52] = "DIGIT_FOUR";
-  charset[charset["DIGIT_FIVE"] = 53] = "DIGIT_FIVE";
-  charset[charset["DIGIT_SIX"] = 54] = "DIGIT_SIX";
-  charset[charset["DIGIT_SEVEN"] = 55] = "DIGIT_SEVEN";
-  charset[charset["DIGIT_EIGHT"] = 56] = "DIGIT_EIGHT";
-  charset[charset["DIGIT_NINE"] = 57] = "DIGIT_NINE";
-  charset[charset["COLON"] = 58] = "COLON";
-  charset[charset["SEMICOLON"] = 59] = "SEMICOLON";
-  charset[charset["LESS_THAN_SIGN"] = 60] = "LESS_THAN_SIGN";
-  charset[charset["EQUALS_SIGN"] = 61] = "EQUALS_SIGN";
-  charset[charset["GREATER_THAN_SIGN"] = 62] = "GREATER_THAN_SIGN";
-  charset[charset["QUESTION_MARK"] = 63] = "QUESTION_MARK";
-  charset[charset["COMMERCIAL_AT"] = 64] = "COMMERCIAL_AT";
-  charset[charset["LATIN_CAPITAL_LETTER_A"] = 65] = "LATIN_CAPITAL_LETTER_A";
-  charset[charset["LATIN_CAPITAL_LETTER_B"] = 66] = "LATIN_CAPITAL_LETTER_B";
-  charset[charset["LATIN_CAPITAL_LETTER_C"] = 67] = "LATIN_CAPITAL_LETTER_C";
-  charset[charset["LATIN_CAPITAL_LETTER_D"] = 68] = "LATIN_CAPITAL_LETTER_D";
-  charset[charset["LATIN_CAPITAL_LETTER_E"] = 69] = "LATIN_CAPITAL_LETTER_E";
-  charset[charset["LATIN_CAPITAL_LETTER_F"] = 70] = "LATIN_CAPITAL_LETTER_F";
-  charset[charset["LATIN_CAPITAL_LETTER_G"] = 71] = "LATIN_CAPITAL_LETTER_G";
-  charset[charset["LATIN_CAPITAL_LETTER_H"] = 72] = "LATIN_CAPITAL_LETTER_H";
-  charset[charset["LATIN_CAPITAL_LETTER_I"] = 73] = "LATIN_CAPITAL_LETTER_I";
-  charset[charset["LATIN_CAPITAL_LETTER_J"] = 74] = "LATIN_CAPITAL_LETTER_J";
-  charset[charset["LATIN_CAPITAL_LETTER_K"] = 75] = "LATIN_CAPITAL_LETTER_K";
-  charset[charset["LATIN_CAPITAL_LETTER_L"] = 76] = "LATIN_CAPITAL_LETTER_L";
-  charset[charset["LATIN_CAPITAL_LETTER_M"] = 77] = "LATIN_CAPITAL_LETTER_M";
-  charset[charset["LATIN_CAPITAL_LETTER_N"] = 78] = "LATIN_CAPITAL_LETTER_N";
-  charset[charset["LATIN_CAPITAL_LETTER_O"] = 79] = "LATIN_CAPITAL_LETTER_O";
-  charset[charset["LATIN_CAPITAL_LETTER_P"] = 80] = "LATIN_CAPITAL_LETTER_P";
-  charset[charset["LATIN_CAPITAL_LETTER_Q"] = 81] = "LATIN_CAPITAL_LETTER_Q";
-  charset[charset["LATIN_CAPITAL_LETTER_R"] = 82] = "LATIN_CAPITAL_LETTER_R";
-  charset[charset["LATIN_CAPITAL_LETTER_S"] = 83] = "LATIN_CAPITAL_LETTER_S";
-  charset[charset["LATIN_CAPITAL_LETTER_T"] = 84] = "LATIN_CAPITAL_LETTER_T";
-  charset[charset["LATIN_CAPITAL_LETTER_U"] = 85] = "LATIN_CAPITAL_LETTER_U";
-  charset[charset["LATIN_CAPITAL_LETTER_V"] = 86] = "LATIN_CAPITAL_LETTER_V";
-  charset[charset["LATIN_CAPITAL_LETTER_W"] = 87] = "LATIN_CAPITAL_LETTER_W";
-  charset[charset["LATIN_CAPITAL_LETTER_X"] = 88] = "LATIN_CAPITAL_LETTER_X";
-  charset[charset["LATIN_CAPITAL_LETTER_Y"] = 89] = "LATIN_CAPITAL_LETTER_Y";
-  charset[charset["LATIN_CAPITAL_LETTER_Z"] = 90] = "LATIN_CAPITAL_LETTER_Z";
-  charset[charset["LEFT_SQUARE_BRACKET"] = 91] = "LEFT_SQUARE_BRACKET";
-  charset[charset["REVERSE_SOLIDUS"] = 92] = "REVERSE_SOLIDUS";
-  charset[charset["RIGHT_SQUARE_BRACKET"] = 93] = "RIGHT_SQUARE_BRACKET";
-  charset[charset["CIRCUMFLEX_ACCENT"] = 94] = "CIRCUMFLEX_ACCENT";
-  charset[charset["LOW_LINE"] = 95] = "LOW_LINE";
-  charset[charset["GRAVE_ACCENT"] = 96] = "GRAVE_ACCENT";
-  charset[charset["LATIN_SMALL_LETTER_A"] = 97] = "LATIN_SMALL_LETTER_A";
-  charset[charset["LATIN_SMALL_LETTER_B"] = 98] = "LATIN_SMALL_LETTER_B";
-  charset[charset["LATIN_SMALL_LETTER_C"] = 99] = "LATIN_SMALL_LETTER_C";
-  charset[charset["LATIN_SMALL_LETTER_D"] = 100] = "LATIN_SMALL_LETTER_D";
-  charset[charset["LATIN_SMALL_LETTER_E"] = 101] = "LATIN_SMALL_LETTER_E";
-  charset[charset["LATIN_SMALL_LETTER_F"] = 102] = "LATIN_SMALL_LETTER_F";
-  charset[charset["LATIN_SMALL_LETTER_G"] = 103] = "LATIN_SMALL_LETTER_G";
-  charset[charset["LATIN_SMALL_LETTER_H"] = 104] = "LATIN_SMALL_LETTER_H";
-  charset[charset["LATIN_SMALL_LETTER_I"] = 105] = "LATIN_SMALL_LETTER_I";
-  charset[charset["LATIN_SMALL_LETTER_J"] = 106] = "LATIN_SMALL_LETTER_J";
-  charset[charset["LATIN_SMALL_LETTER_K"] = 107] = "LATIN_SMALL_LETTER_K";
-  charset[charset["LATIN_SMALL_LETTER_L"] = 108] = "LATIN_SMALL_LETTER_L";
-  charset[charset["LATIN_SMALL_LETTER_M"] = 109] = "LATIN_SMALL_LETTER_M";
-  charset[charset["LATIN_SMALL_LETTER_N"] = 110] = "LATIN_SMALL_LETTER_N";
-  charset[charset["LATIN_SMALL_LETTER_O"] = 111] = "LATIN_SMALL_LETTER_O";
-  charset[charset["LATIN_SMALL_LETTER_P"] = 112] = "LATIN_SMALL_LETTER_P";
-  charset[charset["LATIN_SMALL_LETTER_Q"] = 113] = "LATIN_SMALL_LETTER_Q";
-  charset[charset["LATIN_SMALL_LETTER_R"] = 114] = "LATIN_SMALL_LETTER_R";
-  charset[charset["LATIN_SMALL_LETTER_S"] = 115] = "LATIN_SMALL_LETTER_S";
-  charset[charset["LATIN_SMALL_LETTER_T"] = 116] = "LATIN_SMALL_LETTER_T";
-  charset[charset["LATIN_SMALL_LETTER_U"] = 117] = "LATIN_SMALL_LETTER_U";
-  charset[charset["LATIN_SMALL_LETTER_V"] = 118] = "LATIN_SMALL_LETTER_V";
-  charset[charset["LATIN_SMALL_LETTER_W"] = 119] = "LATIN_SMALL_LETTER_W";
-  charset[charset["LATIN_SMALL_LETTER_X"] = 120] = "LATIN_SMALL_LETTER_X";
-  charset[charset["LATIN_SMALL_LETTER_Y"] = 121] = "LATIN_SMALL_LETTER_Y";
-  charset[charset["LATIN_SMALL_LETTER_Z"] = 122] = "LATIN_SMALL_LETTER_Z";
-  charset[charset["LEFT_CURLY_BRACKET"] = 123] = "LEFT_CURLY_BRACKET";
-  charset[charset["VERTICAL_LINE"] = 124] = "VERTICAL_LINE";
-  charset[charset["RIGHT_CURLY_BRACKET"] = 125] = "RIGHT_CURLY_BRACKET";
-  charset[charset["TILDE"] = 126] = "TILDE";
-})(charset || (charset = {}));
-
-// node_modules/@streamparser/json/dist/mjs/tokenizer.js
-var TokenizerStates;
-(function(TokenizerStates) {
-  TokenizerStates[TokenizerStates["START"] = 0] = "START";
-  TokenizerStates[TokenizerStates["ENDED"] = 1] = "ENDED";
-  TokenizerStates[TokenizerStates["ERROR"] = 2] = "ERROR";
-  TokenizerStates[TokenizerStates["TRUE1"] = 3] = "TRUE1";
-  TokenizerStates[TokenizerStates["TRUE2"] = 4] = "TRUE2";
-  TokenizerStates[TokenizerStates["TRUE3"] = 5] = "TRUE3";
-  TokenizerStates[TokenizerStates["FALSE1"] = 6] = "FALSE1";
-  TokenizerStates[TokenizerStates["FALSE2"] = 7] = "FALSE2";
-  TokenizerStates[TokenizerStates["FALSE3"] = 8] = "FALSE3";
-  TokenizerStates[TokenizerStates["FALSE4"] = 9] = "FALSE4";
-  TokenizerStates[TokenizerStates["NULL1"] = 10] = "NULL1";
-  TokenizerStates[TokenizerStates["NULL2"] = 11] = "NULL2";
-  TokenizerStates[TokenizerStates["NULL3"] = 12] = "NULL3";
-  TokenizerStates[TokenizerStates["STRING_DEFAULT"] = 13] = "STRING_DEFAULT";
-  TokenizerStates[TokenizerStates["STRING_AFTER_BACKSLASH"] = 14] = "STRING_AFTER_BACKSLASH";
-  TokenizerStates[TokenizerStates["STRING_UNICODE_DIGIT_1"] = 15] = "STRING_UNICODE_DIGIT_1";
-  TokenizerStates[TokenizerStates["STRING_UNICODE_DIGIT_2"] = 16] = "STRING_UNICODE_DIGIT_2";
-  TokenizerStates[TokenizerStates["STRING_UNICODE_DIGIT_3"] = 17] = "STRING_UNICODE_DIGIT_3";
-  TokenizerStates[TokenizerStates["STRING_UNICODE_DIGIT_4"] = 18] = "STRING_UNICODE_DIGIT_4";
-  TokenizerStates[TokenizerStates["STRING_INCOMPLETE_CHAR"] = 19] = "STRING_INCOMPLETE_CHAR";
-  TokenizerStates[TokenizerStates["NUMBER_AFTER_INITIAL_MINUS"] = 20] = "NUMBER_AFTER_INITIAL_MINUS";
-  TokenizerStates[TokenizerStates["NUMBER_AFTER_INITIAL_ZERO"] = 21] = "NUMBER_AFTER_INITIAL_ZERO";
-  TokenizerStates[TokenizerStates["NUMBER_AFTER_INITIAL_NON_ZERO"] = 22] = "NUMBER_AFTER_INITIAL_NON_ZERO";
-  TokenizerStates[TokenizerStates["NUMBER_AFTER_FULL_STOP"] = 23] = "NUMBER_AFTER_FULL_STOP";
-  TokenizerStates[TokenizerStates["NUMBER_AFTER_DECIMAL"] = 24] = "NUMBER_AFTER_DECIMAL";
-  TokenizerStates[TokenizerStates["NUMBER_AFTER_E"] = 25] = "NUMBER_AFTER_E";
-  TokenizerStates[TokenizerStates["NUMBER_AFTER_E_AND_SIGN"] = 26] = "NUMBER_AFTER_E_AND_SIGN";
-  TokenizerStates[TokenizerStates["NUMBER_AFTER_E_AND_DIGIT"] = 27] = "NUMBER_AFTER_E_AND_DIGIT";
-  TokenizerStates[TokenizerStates["SEPARATOR"] = 28] = "SEPARATOR";
-  TokenizerStates[TokenizerStates["BOM_OR_START"] = 29] = "BOM_OR_START";
-  TokenizerStates[TokenizerStates["BOM"] = 30] = "BOM";
-})(TokenizerStates || (TokenizerStates = {}));
-
-// src/workers/archive-import/json-stream.ts
-var EMPTY_FRAME = Object.freeze({});
-var MAX_SAFE_DIGITS = String(Number.MAX_SAFE_INTEGER);
-
-// src/workers/archive-import/record-probe.ts
-var RECORD_PROBE_MAX_VALUE_BYTES = 16 * 1024;
-var RECORD_PROBE_MAX_SCAN_BYTES = 64 * 1024 * 1024;
-var RECORD_PROBE_MAX_FOLDER_SCAN_BYTES = 256 * 1024 * 1024;
-
-// src/workers/archive-import/zip-reader.ts
-var ZIP_READ_CHUNK_BYTES = 1024 * 1024;
-var ZIP_COMPRESSED_BLOCK_BYTES = 256 * 1024;
-var ZIP_INFLATE_PUSH_BYTES = 16 * 1024;
-var ZIP_REPLAY_STEP_BYTES = 16 * 1024 * 1024;
-var ZIP_CONTINUATION_MAX_PENDING_BYTES = 8 * 1024 * 1024;
-var ZIP_INFLATER_OVERHEAD_BYTES = 128 * 1024;
-var ZIP_NEIGHBOR_READ_BYTES = 64 * 1024;
-var MAX_END_SEARCH_BYTES = 22 + 65535 + 20;
-var strictUtf8 = new TextDecoder("utf-8", { fatal: true });
-var lenientUtf8 = new TextDecoder("utf-8");
-
-// src/workers/archive-import/manifest.ts
-var ARCHIVE_FINGERPRINT_BYTES = 1024 * 1024;
-var ARCHIVE_DIGEST_RANGE_BYTES = 8 * 1024 * 1024;
-
-// src/workers/archive-import/mbox/split.ts
-var SEPARATOR2 = Buffer.from(`
-From `, "latin1");
-var FROM = Buffer.from("From ", "latin1");
-var MBOX_DEFAULT_MAX_MESSAGE_BYTES = 32 * 1024 * 1024;
-var MIN_READ_BYTES = 1024 * 1024;
-
-// src/workers/archive-import/mbox/gmail-account.ts
-var DEFAULT_MAX_BYTES = 64 * 1024 * 1024;
-var MAX_HEADER_BYTES = 256 * 1024;
-var MAX_MESSAGE_BYTES = 32 * 1024 * 1024;
-
-// src/core/source-storage.ts
-var DEFAULT_STORAGE_SLOT = DEFAULT_ACCOUNT_SLOT;
-
-class SourceStorageUnavailableError extends Error {
-  code = "source_storage_unavailable";
-  sourceId;
-  slot;
-  state;
-  constructor(sourceId, slot, state) {
-    const account = slot === DEFAULT_STORAGE_SLOT ? sourceId : `${sourceId} (account ${slot})`;
-    super(`${account} is not available: ${unavailableStateReason(state)}.`);
-    this.name = "SourceStorageUnavailableError";
-    this.sourceId = sourceId;
-    this.slot = slot;
-    this.state = state;
-  }
-}
-var adoptionEnabled = false;
-var storeOpens2 = 0;
-function frontReadOnly(options) {
-  storeOpens2 += 1;
-  return writableStoreOpensForbidden() && options.readOnly !== true ? { ...options, readOnly: true } : options;
-}
-function openConnectorStore(account, requested, env = process.env) {
-  const options = frontReadOnly(requested);
-  const slot = account.slot ?? DEFAULT_STORAGE_SLOT;
-  let registry = readSourceRegistry(env);
-  assertOpenable(registry, account.sourceId, slot);
-  if (!options.readOnly)
-    assertStoreTierLedgerCanOpen(options.dbPath);
-  if (adoptionEnabled && options.readOnly !== true) {
-    const entry = findRegistryAccount(registry, account.sourceId, slot);
-    if (!entry?.corpus_ids.includes(options.corpusId)) {
-      adopt(env, account.sourceId, slot, options.dbPath, options.corpusId);
-      registry = readSourceRegistry(env);
-    }
-  }
-  const mediaHolder = placedStoreHolder({ sourceId: account.sourceId, slot }, options, env, registry);
-  return new LocalConnectorStore(mediaHolder ? { ...options, mediaHolder } : options);
-}
-var CAPTURE_CLAIM_RECLAIM_AGE_MS = 60 * 60000;
-function unavailableStateReason(state) {
-  if (state === "moving")
-    return "its files are being moved into its folder";
-  return state === "deleting" ? "its data is being deleted" : "its data was deleted";
-}
-function unavailableState(entry) {
-  if (entry === undefined)
-    return;
-  if (entry.state !== "active")
-    return entry.state;
-  return sourceAccountMovePending(entry) ? "moving" : undefined;
-}
-function assertOpenable(registry, sourceId, slot) {
-  const state = unavailableState(findRegistryAccount(registry, sourceId, slot));
-  if (state !== undefined)
-    throw new SourceStorageUnavailableError(sourceId, slot, state);
-}
-function adopt(env, sourceId, slot, dbPath, corpusId) {
-  updateSourceRegistry(env, (registry) => {
-    assertOpenable(registry, sourceId, slot);
-    const entry = findRegistryAccount(registry, sourceId, slot);
-    if (!entry) {
-      registry.accounts.push({
-        source_id: sourceId,
-        slot,
-        state: "active",
-        layout: adoptedLayout(env, sourceId, slot, dbPath),
-        corpus_ids: corpusId === undefined ? [] : [corpusId],
-        created_at: new Date().toISOString()
-      });
-    } else if (corpusId !== undefined && !entry.corpus_ids.includes(corpusId)) {
-      entry.corpus_ids.push(corpusId);
-    }
-  });
-}
-function adoptedLayout(env, sourceId, slot, dbPath) {
-  if (decideAccountLayout(sourceId, env).layout !== "folder")
-    return "legacy";
-  return isInsideAccountFolder(dbPath, { source_id: sourceId, slot }, env) ? "folder" : "legacy";
-}
-
-// node_modules/postal-mime/dist/esm/decode-strings.js
-var textEncoder = new TextEncoder;
-var base64Chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-var base64Lookup = new Uint8Array(256);
-for (let i = 0;i < base64Chars.length; i++) {
-  base64Lookup[base64Chars.charCodeAt(i)] = i;
-}
-var charsetAliases = new Map([
-  ["iso88598i", "iso-8859-8"],
-  ["iso88598e", "iso-8859-8"],
-  ["shiftjis", "shift_jis"],
-  ["windows31j", "shift_jis"],
-  ["mskanji", "shift_jis"],
-  ["eucjp", "euc-jp"],
-  ["iso2022jp", "iso-2022-jp"],
-  ["iso2022jp1", "iso-2022-jp"],
-  ["iso2022jp2", "iso-2022-jp"],
-  ["junet", "iso-2022-jp"],
-  ["euckr", "euc-kr"],
-  ["uhc", "euc-kr"],
-  ["tis620", "windows-874"]
-]);
-var codePageAliases = new Map([
-  ["932", "shift_jis"],
-  ["936", "gbk"],
-  ["949", "euc-kr"],
-  ["950", "big5"],
-  ["874", "windows-874"],
-  ["51932", "euc-jp"],
-  ["50220", "iso-2022-jp"],
-  ["50221", "iso-2022-jp"],
-  ["50222", "iso-2022-jp"]
-]);
-var ENCODING_LABELS = new Set([
-  "unicode-1-1-utf-8 unicode11utf8 unicode20utf8 utf-8 utf8 x-unicode20utf8",
-  "866 cp866 csibm866 ibm866",
-  "csisolatin2 iso-8859-2 iso-ir-101 iso8859-2 iso88592 iso_8859-2 iso_8859-2:1987 l2 latin2",
-  "csisolatin3 iso-8859-3 iso-ir-109 iso8859-3 iso88593 iso_8859-3 iso_8859-3:1988 l3 latin3",
-  "csisolatin4 iso-8859-4 iso-ir-110 iso8859-4 iso88594 iso_8859-4 iso_8859-4:1988 l4 latin4",
-  "csisolatincyrillic cyrillic iso-8859-5 iso-ir-144 iso8859-5 iso88595 iso_8859-5 iso_8859-5:1988",
-  "arabic asmo-708 csiso88596e csiso88596i csisolatinarabic ecma-114 iso-8859-6 iso-8859-6-e",
-  "iso-8859-6-i iso-ir-127 iso8859-6 iso88596 iso_8859-6 iso_8859-6:1987",
-  "csisolatingreek ecma-118 elot_928 greek greek8 iso-8859-7 iso-ir-126 iso8859-7 iso88597 iso_8859-7",
-  "iso_8859-7:1987 sun_eu_greek",
-  "csiso88598e csisolatinhebrew hebrew iso-8859-8 iso-8859-8-e iso-ir-138 iso8859-8 iso88598 iso_8859-8",
-  "iso_8859-8:1988 visual",
-  "csiso88598i iso-8859-8-i logical",
-  "csisolatin6 iso-8859-10 iso-ir-157 iso8859-10 iso885910 l6 latin6",
-  "iso-8859-13 iso8859-13 iso885913",
-  "iso-8859-14 iso8859-14 iso885914",
-  "csisolatin9 iso-8859-15 iso8859-15 iso885915 iso_8859-15 l9",
-  "iso-8859-16",
-  "cskoi8r koi koi8 koi8-r koi8_r",
-  "koi8-ru koi8-u",
-  "csmacintosh mac macintosh x-mac-roman",
-  "dos-874 iso-8859-11 iso8859-11 iso885911 tis-620 windows-874",
-  "cp1250 windows-1250 x-cp1250",
-  "cp1251 windows-1251 x-cp1251",
-  "ansi_x3.4-1968 ascii cp1252 cp819 csisolatin1 ibm819 iso-8859-1 iso-ir-100 iso8859-1 iso88591",
-  "iso_8859-1 iso_8859-1:1987 l1 latin1 us-ascii windows-1252 x-cp1252",
-  "cp1253 windows-1253 x-cp1253",
-  "cp1254 csisolatin5 iso-8859-9 iso-ir-148 iso8859-9 iso88599 iso_8859-9 iso_8859-9:1989 l5 latin5",
-  "windows-1254 x-cp1254",
-  "cp1255 windows-1255 x-cp1255",
-  "cp1256 windows-1256 x-cp1256",
-  "cp1257 windows-1257 x-cp1257",
-  "cp1258 windows-1258 x-cp1258",
-  "x-mac-cyrillic x-mac-ukrainian",
-  "chinese csgb2312 csiso58gb231280 gb2312 gb_2312 gb_2312-80 gbk iso-ir-58 x-gbk",
-  "gb18030",
-  "big5 big5-hkscs cn-big5 csbig5 x-x-big5",
-  "cseucpkdfmtjapanese euc-jp x-euc-jp",
-  "csiso2022jp iso-2022-jp",
-  "csshiftjis ms932 ms_kanji shift-jis shift_jis sjis windows-31j x-sjis",
-  "cseuckr csksc56011987 euc-kr iso-ir-149 korean ks_c_5601-1987 ks_c_5601-1989 ksc5601 ksc_5601",
-  "windows-949",
-  "csiso2022kr hz-gb-2312 iso-2022-cn iso-2022-cn-ext iso-2022-kr replacement",
-  "x-user-defined"
-].join(" ").split(" "));
-var REPLACEMENT_LABELS = new Set([
-  "csiso2022kr",
-  "hz-gb-2312",
-  "iso-2022-cn",
-  "iso-2022-cn-ext",
-  "iso-2022-kr",
-  "replacement"
-]);
-var UTF16_LABELS = new Map([
-  ["utf-16", "utf-16"],
-  ["utf16", "utf-16"],
-  ["utf_16", "utf-16"],
-  ["utf-16le", "utf-16le"],
-  ["utf-16be", "utf-16be"]
-]);
-var decoders = new Map;
-var utf8Decoder = new TextDecoder;
-var UTF16_ENCODINGS = new Set(["utf-16le", "utf-16be"]);
-var UTF16_UNORDERED_LABELS = new Set(["utf-16"]);
-var ENCODED_WORD_PATTERN = "=\\?([^?\\s]+)\\?([QqBb])\\?([^?]*)\\?=";
-var ENCODED_WORD_REGEX = new RegExp(ENCODED_WORD_PATTERN, "g");
-var ENCODED_WORDS_ONLY_REGEX = new RegExp(`^(?:${ENCODED_WORD_PATTERN}\\s*)+$`);
-
-// node_modules/postal-mime/dist/esm/mime-node.js
-var headerDecoder = new TextDecoder("utf-8", { ignoreBOM: true });
-var CONTENT_HEADERS = new Set([
-  "content-type",
-  "content-transfer-encoding",
-  "content-disposition",
-  "content-id",
-  "content-description"
-]);
-
-// node_modules/postal-mime/dist/esm/text-format.js
-var C1_ENTITY_REPLACEMENTS = new Map([
-  [128, 8364],
-  [130, 8218],
-  [131, 402],
-  [132, 8222],
-  [133, 8230],
-  [134, 8224],
-  [135, 8225],
-  [136, 710],
-  [137, 8240],
-  [138, 352],
-  [139, 8249],
-  [140, 338],
-  [142, 381],
-  [145, 8216],
-  [146, 8217],
-  [147, 8220],
-  [148, 8221],
-  [149, 8226],
-  [150, 8211],
-  [151, 8212],
-  [152, 732],
-  [153, 8482],
-  [154, 353],
-  [155, 8250],
-  [156, 339],
-  [158, 382],
-  [159, 376]
-]);
-var hexByte = (value) => value.toString(16).toUpperCase().padStart(2, "0");
-var PERCENT_ENCODED = Array.from({ length: 256 }, (_, byte) => "%" + hexByte(byte));
-
-// node_modules/postal-mime/dist/esm/postal-mime.js
-var ATTACHMENT_ENCODINGS = new Set(["arraybuffer", "base64", "utf8"]);
-var LINE_FEED = new Uint8Array([10]);
-var MAX_HEADERS_SIZE = 2 * 1024 * 1024;
-
-// src/workers/archive-import/mbox/parse.ts
-var MBOX_SKIPPED_LABELS = new Set(["spam", "trash"]);
-var decodableCharsets = new Map;
-
-// src/workers/archive-import/mbox/connector.ts
-var MBOX_DEFAULT_MAX_BYTES_PER_LISTING = 256 * 1024 * 1024;
-
-// src/workers/archive-import/mbox/mime-parts.ts
-var MAX_HEADER_BYTES2 = 256 * 1024;
-
-// src/workers/archive-import/mbox/gmail-input.ts
-var MAX_GMAIL_ID = (1n << 64n) - 1n;
-var SYSTEM_LABELS = new Map([
-  ["inbox", "INBOX"],
-  ["sent", "SENT"],
-  ["important", "IMPORTANT"],
-  ["starred", "STARRED"],
-  ["unread", "UNREAD"],
-  ["draft", "DRAFT"],
-  ["drafts", "DRAFT"],
-  ["chat", "CHAT"],
-  ["spam", "SPAM"],
-  ["trash", "TRASH"],
-  ["category personal", "CATEGORY_PERSONAL"],
-  ["category social", "CATEGORY_SOCIAL"],
-  ["category promotions", "CATEGORY_PROMOTIONS"],
-  ["category updates", "CATEGORY_UPDATES"],
-  ["category forums", "CATEGORY_FORUMS"],
-  ["opened", null],
-  ["archived", null]
-]);
-var exportAddresses = new Map;
-
-// src/workers/google-connectors/gmail-archive-target.ts
-var GMAIL_PROVIDER_ID = "gmail";
-var GMAIL_IMPORT_CONNECTOR_PREFIX = "archive.";
-var GMAIL_IMPORTED_FILTERS = Object.freeze({ provider: GMAIL_PROVIDER_ID, observedConnectorIdPrefix: GMAIL_IMPORT_CONNECTOR_PREFIX });
-
-// src/workers/google-connectors/gmail-live-sync.ts
-var GMAIL_CONFIRMATION_RESERVE_REASON = "gmail_confirmation_live_request_reserve";
-var GMAIL_SCOPED_CONNECTOR_PREFIX = `${GMAIL_PROVIDER}.scope.`;
-// src/workers/google-connectors/drive.ts
-var GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID = "internal.drive.docs";
-var FOLDER_LOOKUP_FAILED = Symbol("google-drive-folder-lookup-failed");
-// src/workers/google-connectors/drive-live-control.ts
-var GOOGLE_DRIVE_STORE_PULL_FRESHNESS_THRESHOLD_MS = 2 * 60 * 60000;
-var GOOGLE_DRIVE_STORE_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
-var GOOGLE_DRIVE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
-var GOOGLE_DRIVE_DAILY_REQUEST_GUARD_REASON = "google_drive_daily_api_request_guard";
-// src/core/privacy-language.ts
-var PRIVACY_PRESET_LABELS = {
-  "local-first": "Local models with Venice fallback",
-  "local-only": "Local models",
-  "private-cloud-only": "Venice",
-  "no-sensitive": "Private answers only in Olympus"
-};
-var PRIVATE_ANSWER_OPTIONS = [
-  { id: "local-first", label: PRIVACY_PRESET_LABELS["local-first"], description: "The built-in model answers on this computer. Venice can help only after you add a Venice key. Venice is a privacy-focused cloud provider whose policy says it does not retain conversations or train on them; it can read the content.", recommended: true },
-  { id: "local-only", label: PRIVACY_PRESET_LABELS["local-only"], description: "The built-in model answers on this computer. You can connect your own local models; Private items stay on this computer.", recommended: false },
-  { id: "private-cloud-only", label: PRIVACY_PRESET_LABELS["private-cloud-only"], description: "Use Venice for Private answers after you add its key. Venice is a privacy-focused cloud provider whose policy says it does not retain conversations or train on them; it can read the content.", recommended: false },
-  { id: "no-sensitive", label: PRIVACY_PRESET_LABELS["no-sensitive"], description: "Search Private items and use Ask privately on this computer. Connected agents cannot use Private items to answer.", recommended: false }
-];
-var LOCAL_PRIVATE_MODEL_MIN_MEMORY_BYTES = 12 * 1024 ** 3;
-// src/core/provider-rate-limits.ts
-registerLimit({ id: "x.rate_limit", kind: "requests", scope: "source", label: "X is limiting requests", unit: "requests", continue: "none" });
-registerLimit({ id: "evernote.rate_limit", kind: "requests", scope: "source", label: "Evernote is limiting requests", unit: "requests", continue: "none" });
-registerLimit({ id: "readwise.rate_limit", kind: "requests", scope: "source", label: "Readwise is limiting requests", unit: "requests", continue: "none" });
-var PROVIDERS = {
-  x: { id: "x.rate_limit", subject: "x.bookmarks", name: "X" },
-  evernote: { id: "evernote.rate_limit", subject: "evernote.notes", name: "Evernote" },
-  readwise: { id: "readwise.rate_limit", subject: "readwise.library", name: "Readwise" }
-};
-var reporters = {};
-function createProviderRateLimitReporter(provider) {
-  return reporters[provider] ??= buildProviderRateLimitReporter(provider);
-}
-function buildProviderRateLimitReporter(provider) {
-  const registration = PROVIDERS[provider];
-  const stops = createLimitStopReporter();
-  let resumesAt;
-  return {
-    report(at, now, amounts) {
-      if (!Number.isFinite(Date.parse(at)) || Date.parse(at) - now.getTime() <= 60000)
-        return;
-      resumesAt = at;
-      stops.report({
-        id: registration.id,
-        subject: registration.subject,
-        since: now.toISOString(),
-        resumesAt: at,
-        limit: amounts?.limit ?? null,
-        used: amounts?.used ?? null
-      });
-    },
-    success() {
-      stops.clear(registration.id, registration.subject);
-      resumesAt = undefined;
-    },
-    resume(now) {
-      if (resumesAt && Date.parse(resumesAt) <= now.getTime())
-        this.success();
-    }
-  };
-}
-
-// src/core/update-check.ts
-import { readFileSync as readFileSync19 } from "node:fs";
-import { join as join26 } from "node:path";
-
-// src/core/package-root.ts
-import { readFileSync as readFileSync18 } from "node:fs";
-import { dirname as dirname24, join as join25 } from "node:path";
-import { fileURLToPath as fileURLToPath3 } from "node:url";
-function olympusPackageRoot() {
-  let directory = dirname24(fileURLToPath3(import.meta.url));
-  for (let depth = 0;depth < 6; depth++) {
-    try {
-      const manifest = JSON.parse(readFileSync18(join25(directory, "package.json"), "utf8"));
-      if (manifest.name === "olympus" || manifest.name === "olympus-source-checkout")
-        return directory;
-    } catch {}
-    const parent = dirname24(directory);
-    if (parent === directory)
-      break;
-    directory = parent;
-  }
-  throw new Error("The Olympus package root could not be resolved.");
-}
-
-// src/core/update-check.ts
-var UPDATE_MAX_BYTES = 512 * 1024;
-function runningOlympusVersion() {
-  try {
-    const value = JSON.parse(readFileSync19(join26(olympusPackageRoot(), "package.json"), "utf8")).version;
-    return typeof value === "string" ? value : "unknown";
-  } catch {
-    return "unknown";
-  }
-}
-
-// src/core/file-mime.ts
-var MIME_BY_EXTENSION = Object.freeze({
-  pdf: "application/pdf",
-  txt: "text/plain",
-  text: "text/plain",
-  md: "text/plain",
-  markdown: "text/plain",
-  log: "text/plain",
-  rst: "text/plain",
-  org: "text/plain",
-  tex: "text/plain",
-  srt: "text/plain",
-  vtt: "text/plain",
-  csv: "text/csv",
-  tsv: "text/tab-separated-values",
-  json: "application/json",
-  yaml: "text/plain",
-  yml: "text/plain",
-  toml: "text/plain",
-  xml: "application/xml",
-  html: "text/html",
-  htm: "text/html",
-  rtf: "application/rtf",
-  doc: "application/msword",
-  xls: "application/vnd.ms-excel",
-  odt: "application/vnd.oasis.opendocument.text",
-  ods: "application/vnd.oasis.opendocument.spreadsheet",
-  odp: "application/vnd.oasis.opendocument.presentation",
-  epub: "application/epub+zip",
-  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-  jpg: "image/jpeg",
-  jpeg: "image/jpeg",
-  png: "image/png",
-  gif: "image/gif",
-  webp: "image/webp",
-  heic: "image/heic",
-  heif: "image/heif",
-  tif: "image/tiff",
-  tiff: "image/tiff",
-  bmp: "image/bmp",
-  mp3: "audio/mpeg",
-  m4a: "audio/mp4",
-  wav: "audio/wav",
-  flac: "audio/flac",
-  ogg: "audio/ogg",
-  aac: "audio/aac",
-  mp4: "video/mp4",
-  m4v: "video/x-m4v",
-  mov: "video/quicktime",
-  mkv: "video/x-matroska",
-  webm: "video/webm",
-  avi: "video/x-msvideo",
-  mpg: "video/mpeg",
-  mpeg: "video/mpeg",
-  "3gp": "video/3gpp"
-});
-var SOURCE_CODE_EXTENSIONS = new Set([
-  "ts",
-  "tsx",
-  "js",
-  "jsx",
-  "mjs",
-  "cjs",
-  "py",
-  "rb",
-  "go",
-  "rs",
-  "java",
-  "kt",
-  "swift",
-  "c",
-  "h",
-  "cc",
-  "cpp",
-  "hpp",
-  "cs",
-  "php",
-  "sh",
-  "bash",
-  "zsh",
-  "sql",
-  "css",
-  "scss",
-  "lua",
-  "pl",
-  "r",
-  "scala",
-  "ini",
-  "cfg",
-  "conf",
-  "env"
-]);
-
-// src/workers/dropbox-files/provider-client.ts
-var DROPBOX_CONTENT_DOWNLOAD_TIMEOUT_MS = 2 * 60000;
-// src/workers/connector-store/file-ingestion-matcher.ts
-var POLICY_ADMITTED = Object.freeze({
-  excluded: false,
-  disposition: "admit",
-  outcome: "admitted"
-});
-
-// src/workers/dropbox-files/corpus-adapter.ts
-var DROPBOX_FILES_CORPUS_ID = "secure_local.dropbox.files";
-var DROPBOX_FILES_SOURCE_ID = "dropbox.files";
-
-// src/workers/dropbox-files/connector-store.ts
-var DROPBOX_INTERNAL_FILES_CORPUS_ID = "internal.dropbox.files";
-var DROPBOX_PUBLIC_FILES_CORPUS_ID = "public_safe.dropbox.files";
-var DROPBOX_TIER_CORPUS_IDS = Object.freeze({
-  public_safe: DROPBOX_PUBLIC_FILES_CORPUS_ID,
-  internal: DROPBOX_INTERNAL_FILES_CORPUS_ID,
-  secure_local: DROPBOX_FILES_CORPUS_ID
-});
-var DROPBOX_STORE_PLACEMENT = Object.freeze({
-  trustTier: "S4",
-  trustDomain: "secure_local",
-  secretsInContent: true
-});
-// src/workers/connector-store/locator-path-scope-codec.ts
-var MAX_APPROVED_SCOPE_KEY_LENGTH = 4096;
-var UNSAFE_SCOPE_CHARACTERS = new RegExp("[\\x00-\\x1f\\x7f-\\x9f" + String.fromCharCode(8232, 8233) + "]");
-function locatorPathApprovedScopeCodec(sourceLabel) {
-  const invalid = (expectedPrefix) => ({
-    kind: "invalid",
-    message: `"approved_scope_key" must exactly match "${expectedPrefix}:<rooted path>" with no surrounding whitespace.`
-  });
-  return Object.freeze({
-    resolveLocatorPath(value, principal) {
-      const expectedPrefix = `${principal.provider}.${principal.accountScope}`;
-      const separator = value.indexOf(":");
-      const prefix = separator < 0 ? undefined : value.slice(0, separator);
-      const scopedValue = separator < 0 ? undefined : value.slice(separator + 1);
-      if (value.length === 0 || value.length > MAX_APPROVED_SCOPE_KEY_LENGTH || value !== value.trim() || UNSAFE_SCOPE_CHARACTERS.test(value) || prefix !== expectedPrefix || scopedValue === undefined || scopedValue.length === 0) {
-        return invalid(expectedPrefix);
-      }
-      if (scopedValue.startsWith("folder_id:")) {
-        return {
-          kind: "invalid",
-          message: `The "approved_scope_key" folder_id form cannot be served from connector-store data because ancestor folder ids are not persisted. Use a path-form ${sourceLabel} scope.`
-        };
-      }
-      if (!scopedValue.startsWith("/") || scopedValue !== scopedValue.trim() || scopedValue !== "/" && scopedValue.endsWith("/")) {
-        return invalid(expectedPrefix);
-      }
-      return { kind: "path", accountScope: principal.accountScope, locatorPath: scopedValue };
-    }
-  });
-}
-
-// src/workers/dropbox-files/approved-scope-filter.ts
-var DROPBOX_APPROVED_SCOPE_FILTER_CODEC = locatorPathApprovedScopeCodec("Dropbox");
-// src/workers/dropbox-files/locator-result-projector.ts
-import { join as join27 } from "node:path";
-import { pathToFileURL } from "node:url";
-
-// src/workers/dropbox-files/local-file-resolver.ts
-function parseDropboxLocalFileRootsFromEnv(env = process.env) {
-  const raw = env.OLYMPUS_SOURCE_INDEX_DROPBOX_LOCAL_ROOTS_JSON;
-  if (!raw?.trim())
-    return [];
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    throw new Error("OLYMPUS_SOURCE_INDEX_DROPBOX_LOCAL_ROOTS_JSON must be a JSON array.");
-  }
-  if (!Array.isArray(parsed)) {
-    throw new Error("OLYMPUS_SOURCE_INDEX_DROPBOX_LOCAL_ROOTS_JSON must be a JSON array.");
-  }
-  return parsed.map((item, index) => {
-    if (!item || typeof item !== "object" || Array.isArray(item)) {
-      throw new Error(`Dropbox local root ${index} must be an object.`);
-    }
-    const record = item;
-    const rootPath = optionalString(record.rootPath) ?? optionalString(record.root_path);
-    if (!rootPath) {
-      throw new Error(`Dropbox local root ${index} requires rootPath.`);
-    }
-    const account = optionalString(record.account);
-    const approvedScopeKey = optionalString(record.approvedScopeKey) ?? optionalString(record.approved_scope_key);
-    const dropboxPathPrefix = normalizeDropboxPath(optionalString(record.dropboxPathPrefix) ?? optionalString(record.dropbox_path_prefix));
-    const rootId = optionalString(record.rootId) ?? optionalString(record.root_id);
-    const root = { rootPath };
-    if (account)
-      root.account = account;
-    if (approvedScopeKey)
-      root.approvedScopeKey = approvedScopeKey;
-    if (dropboxPathPrefix)
-      root.dropboxPathPrefix = dropboxPathPrefix;
-    if (rootId)
-      root.rootId = rootId;
-    return root;
-  });
-}
-function normalizeDropboxPath(path) {
-  const trimmed = path?.trim().replace(/\\/g, "/").replace(/\/+/g, "/");
-  if (!trimmed)
-    return;
-  return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
-}
-function optionalString(value) {
-  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
-}
-
-// src/workers/dropbox-files/locator-result-projector.ts
-var DROPBOX_LOCATOR_RESULT_PROJECTOR_CODEC = Object.freeze({
-  create(input) {
-    const localMapping = configuredStrictLocalMapping({
-      accountScope: input.principal.accountScope,
-      ...input.approvedScopeKey !== undefined ? { approvedScopeKey: input.approvedScopeKey } : {}
-    });
-    return Object.freeze({
-      project(candidate) {
-        if (input.principal.provider !== "dropbox" || candidate.sourceItem.family !== "file" || candidate.sourceItem.provider !== input.principal.provider || candidate.sourceItem.accountScope !== input.principal.accountScope) {
-          return;
-        }
-        const locator = locatorFromRootedDropboxPath(candidate.readLocatorUri(), localMapping);
-        return locator ? { locator } : undefined;
-      }
-    });
-  }
-});
-function locatorFromRootedDropboxPath(value, localMapping) {
-  const displayPath = normalizeRootedDropboxDisplayPath(value);
-  if (!displayPath)
-    return;
-  const segments = dropboxPathSegments(displayPath);
-  if (segments.length === 0)
-    return;
-  const parentDisplayPath = segments.length === 1 ? "/" : `/${segments.slice(0, -1).join("/")}`;
-  const locator = {
-    display_path: displayPath,
-    parent_display_path: parentDisplayPath,
-    dropbox_web_url: dropboxHomeUrlForSegments(segments),
-    parent_dropbox_web_url: dropboxHomeUrlForSegments(segments.slice(0, -1))
-  };
-  if (localMapping) {
-    const finderUrl = finderUrlForDropboxPath(localMapping, displayPath);
-    if (finderUrl)
-      locator.finder_url = finderUrl;
-    const parentFinderUrl = finderUrlForDropboxPath(localMapping, parentDisplayPath);
-    if (parentFinderUrl)
-      locator.parent_finder_url = parentFinderUrl;
-  }
-  return locator;
-}
-function normalizeRootedDropboxDisplayPath(value) {
-  if (!value)
-    return;
-  const trimmed = value.trim();
-  if (!trimmed || trimmed === "/" || !trimmed.startsWith("/"))
-    return;
-  return trimmed;
-}
-function dropboxPathSegments(displayPath) {
-  return displayPath.split("/").map((segment) => segment.trim()).filter((segment) => segment.length > 0 && segment !== "." && segment !== "..");
-}
-function dropboxHomeUrlForSegments(segments) {
-  if (segments.length === 0)
-    return "https://www.dropbox.com/home";
-  return `https://www.dropbox.com/home/${segments.map(encodeURIComponent).join("/")}`;
-}
-function finderUrlForDropboxPath(mapping, displayPath) {
-  const relativeSegments = localRelativeDropboxPathSegments(displayPath, mapping.dropboxPathPrefix);
-  if (!relativeSegments)
-    return;
-  return pathToFileURL(join27(mapping.rootPath, ...relativeSegments)).href;
-}
-function localRelativeDropboxPathSegments(displayPath, dropboxPathPrefix) {
-  const normalizedPrefix = normalizeOptionalDropboxPrefix(dropboxPathPrefix);
-  if (!normalizedPrefix)
-    return dropboxPathSegments(displayPath);
-  if (displayPath === normalizedPrefix)
-    return [];
-  if (!displayPath.startsWith(`${normalizedPrefix}/`))
-    return;
-  return dropboxPathSegments(displayPath.slice(normalizedPrefix.length));
-}
-function normalizeOptionalDropboxPrefix(value) {
-  if (!value)
-    return;
-  const trimmed = value.trim();
-  if (!trimmed || trimmed === "/")
-    return;
-  return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
-}
-function configuredStrictLocalMapping(input) {
-  const explicitRoot = optionalEnvironmentString(process.env.OLYMPUS_SOURCE_INDEX_DROPBOX_LOCATOR_LOCAL_ROOT);
-  if (explicitRoot)
-    return { rootPath: explicitRoot };
-  const legacyRoot = optionalEnvironmentString(process.env.DROPBOX_LOCAL_ROOT);
-  if (legacyRoot)
-    return { rootPath: legacyRoot };
-  try {
-    return parseDropboxLocalFileRootsFromEnv().find((root) => (root.account === undefined || root.account === input.accountScope) && (root.approvedScopeKey === undefined || input.approvedScopeKey !== undefined && root.approvedScopeKey === input.approvedScopeKey));
-  } catch {
-    return;
-  }
-}
-function optionalEnvironmentString(value) {
-  if (!value)
-    return;
-  const trimmed = value.trim();
-  return trimmed || undefined;
-}
-// src/workers/dropbox-files/dropbox-content-hash.ts
-var DROPBOX_CONTENT_HASH_BLOCK_SIZE = 4 * 1024 * 1024;
-// src/workers/file-extraction/extractors/command-runner.ts
-import { execFile, spawn as spawn2 } from "node:child_process";
-import { promisify } from "node:util";
-var execFileAsync = promisify(execFile);
-var resolvedCommands = new Map;
 // src/workers/connector-store/filter-capabilities.ts
 var CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS = [
   "corpus_id",
@@ -38284,1294 +37275,6 @@ var CONNECTOR_STORE_SEARCH_REQUEST_FIELDS = new Set([
   ...CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS,
   ...CONNECTOR_STORE_DECLARED_FILTER_FIELDS
 ]);
-// src/workers/source-index/local-analyst-window.ts
-registerLimit({ id: "answer.local_prompt_bytes", kind: "size", scope: "answer", label: "Local analyst prompt clamp", unit: "bytes", continue: "none" });
-var caches2 = new WeakMap;
-var LOCAL_ANALYST_WINDOW_RETRY_INTERVAL_MS = 10 * 60000;
-var windows = new WeakMap;
-var routeFitters = new WeakMap;
-var reports = new Map;
-
-// src/workers/classification/sniffer-decision.ts
-var endpoints = new Map;
-
-// src/workers/source-index/built-in-reasoning/install.ts
-var STALE_LOCK_MS2 = 60 * 60000;
-var BUILT_IN_REASONING_SPACE_HEADROOM_BYTES = 2 * 1024 ** 3;
-var SPACE_BACKOFF_MS = 15 * 60000;
-var DOWNLOAD_STALL_MS2 = 2 * 60000;
-var VERIFY_STALL_MS = 2 * 60000;
-var EXTRACT_STALL_MS = 2 * 60000;
-
-// src/core/analyst-built-in.ts
-var GAP_GENERIC_WORDS = new Set([
-  "the",
-  "and",
-  "for",
-  "are",
-  "was",
-  "were",
-  "with",
-  "from",
-  "that",
-  "this",
-  "these",
-  "those",
-  "not",
-  "any",
-  "all",
-  "its",
-  "their",
-  "there",
-  "which",
-  "what",
-  "when",
-  "where",
-  "who",
-  "whom",
-  "how",
-  "why",
-  "does",
-  "did",
-  "has",
-  "have",
-  "had",
-  "been",
-  "being",
-  "into",
-  "about",
-  "than",
-  "then",
-  "also",
-  "such",
-  "other",
-  "only",
-  "more",
-  "most",
-  "some",
-  "can",
-  "could",
-  "would",
-  "should",
-  "may",
-  "might",
-  "will",
-  "shall",
-  "but",
-  "nor",
-  "yet",
-  "per",
-  "via",
-  "each",
-  "your",
-  "you",
-  "user",
-  "his",
-  "her",
-  "our",
-  "they",
-  "them",
-  "one",
-  "out",
-  "over",
-  "under",
-  "between",
-  "within",
-  "specific",
-  "exact",
-  "precise",
-  "actual",
-  "value",
-  "values",
-  "level",
-  "levels",
-  "number",
-  "numbers",
-  "amount",
-  "detail",
-  "details",
-  "detailed",
-  "information",
-  "info",
-  "result",
-  "results",
-  "data",
-  "figure",
-  "figures",
-  "provided",
-  "provide",
-  "evidence",
-  "found",
-  "find",
-  "missing",
-  "available",
-  "unavailable",
-  "mentioned",
-  "mention",
-  "listed",
-  "list",
-  "given",
-  "give",
-  "stated",
-  "state",
-  "states",
-  "shown",
-  "show",
-  "shows",
-  "included",
-  "include",
-  "includes",
-  "contain",
-  "contains",
-  "contained",
-  "reported",
-  "report",
-  "reports",
-  "document",
-  "documents",
-  "item",
-  "items",
-  "text",
-  "source",
-  "sources",
-  "record",
-  "records",
-  "file",
-  "files",
-  "full",
-  "complete",
-  "entire",
-  "whole",
-  "unknown",
-  "unclear",
-  "unspecified",
-  "specified",
-  "answer",
-  "question",
-  "none",
-  "no",
-  "citations",
-  "citation",
-  "unanswered",
-  "sufficient",
-  "insufficient",
-  "claim",
-  "claims"
-]);
-var utf8 = new TextEncoder;
-
-// src/core/analyst-openclaw-infer.ts
-var MAX_PROMPT_BYTES = 1e5;
-var OPENCLAW_INFER_MAX_PROMPT_BYTES = MAX_PROMPT_BYTES;
-
-// src/core/source-index/router.ts
-var FORBIDDEN_ROUTER_RESULT_KEYS = new Set([
-  "body",
-  "bodies",
-  "content",
-  "contents",
-  "message",
-  "messages",
-  "raw",
-  "raw_packet",
-  "rawPacket",
-  "raw_source",
-  "rawSource",
-  "sanitized_text",
-  "sanitizedText",
-  "snippet",
-  "snippets",
-  "source_text",
-  "sourceText",
-  "raw_source_text",
-  "rawSourceText",
-  "text",
-  "access_token",
-  "accessToken",
-  "api_key",
-  "apiKey",
-  "approved_scope_key",
-  "approvedScopeKey",
-  "refresh_token",
-  "refreshToken",
-  "token"
-]);
-var NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS = new Set([...FORBIDDEN_ROUTER_RESULT_KEYS].map(normalizeRouterResultKey));
-function normalizeRouterResultKey(key) {
-  return key.toLowerCase().replace(/[^a-z0-9]+/g, "");
-}
-
-// src/core/evidence-pack.ts
-var utf82 = new TextEncoder;
-var CUT_SHORT_LANES = new Map([
-  [KEYWORD_PREPARATION_INCOMPLETE, { suffix: ":keywords", gap: keywordPreparationGap }],
-  [RECENT_ITEMS_CUT_SHORT, { suffix: ":recency", gap: recentItemsTimeoutGap }],
-  [VISIBILITY_CHECK_CUT_SHORT, { suffix: ":visibility", gap: visibilityCheckTimeoutGap }]
-]);
-// src/workers/source-index/analyst-answer.ts
-var CLOUD_ANALYST_PROMPT_BYTES = OPENCLAW_INFER_MAX_PROMPT_BYTES - 1e4;
-var promptFitNotes = new WeakMap;
-// src/workers/file-extraction/extractors/bounded-text.ts
-var DOC_MIME_TYPE = "application/msword";
-var XLS_MIME_TYPE = "application/vnd.ms-excel";
-var ODT_MIME_TYPE = "application/vnd.oasis.opendocument.text";
-var ODS_MIME_TYPE = "application/vnd.oasis.opendocument.spreadsheet";
-var ODP_MIME_TYPE = "application/vnd.oasis.opendocument.presentation";
-var EPUB_MIME_TYPE = "application/epub+zip";
-var TEXT_MIME_TYPES = new Set([
-  "application/json",
-  "application/x-ndjson",
-  "application/xml",
-  "text/csv",
-  "text/html",
-  "text/markdown",
-  "text/plain",
-  "text/tab-separated-values",
-  "text/xml"
-]);
-var TABLE_MIME_TYPES = new Set([
-  "text/csv",
-  "text/tab-separated-values"
-]);
-var IMAGE_MIME_TYPES = new Set([
-  "image/bmp",
-  "image/gif",
-  "image/heic",
-  "image/heif",
-  "image/jpeg",
-  "image/png",
-  "image/tiff",
-  "image/webp"
-]);
-var GENERIC_MIME_TYPES = new Set([
-  "application/octet-stream",
-  "binary/octet-stream",
-  "application/binary"
-]);
-
-// src/workers/file-extraction/job-store.ts
-var NETWORK_ERROR_KINDS = new Set([
-  "network_unreachable",
-  "network_socket_closed"
-]);
-var POLICY_DECISIONS = new Set([
-  "index_allowed",
-  "index_redacted",
-  "metadata_only",
-  "blocked_sensitive",
-  "needs_review"
-]);
-var TERMINAL_STATUSES = new Set([
-  "indexed",
-  "metadata_only",
-  "skipped_unsupported",
-  "skipped_too_large",
-  "blocked_policy",
-  "failed_retryable",
-  "failed_terminal"
-]);
-
-// src/workers/file-extraction/store-sink.ts
-var EXTRACTION_SINK_SKIPPED_ITEM_MISSING = "store_item_missing";
-var EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE = "store_item_not_eligible";
-var EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE = "store_item_owned_elsewhere";
-var EXTRACTION_SINK_SKIPPED_EMPTY_TEXT = "extracted_text_empty";
-var EXTRACTION_SINK_SKIPPED_IDENTITY_AMBIGUOUS = "store_identity_ambiguous";
-var EXTRACTION_SINK_SKIPPED_METADATA_ONLY = "store_item_metadata_only";
-var EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED = "store_item_tier_move_queued";
-var EXTRACTION_SINK_SKIPPED_SECRETS = "store_item_secrets";
-var EXTRACTION_SINK_SKIPPED_SOURCE_VERSION_STALE = "store_item_source_version_stale";
-var EXTRACTION_SINK_SKIPPED_IMAGE_PRIVATE_ONLY = "store_image_content_private_only";
-
-// src/workers/file-extraction/runner.ts
-var SOURCE_PARK_FALLBACK_MS = 60 * 60000;
-var SINK_SKIP_SETTLEMENTS = Object.freeze({
-  [EXTRACTION_SINK_SKIPPED_ITEM_MISSING]: "failed_terminal",
-  [EXTRACTION_SINK_SKIPPED_IDENTITY_AMBIGUOUS]: "failed_terminal",
-  [EXTRACTION_SINK_SKIPPED_SOURCE_VERSION_STALE]: "failed_terminal",
-  [EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE]: "blocked_policy",
-  [EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE]: "blocked_policy",
-  [EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED]: "blocked_policy",
-  [EXTRACTION_SINK_SKIPPED_SECRETS]: "blocked_policy",
-  [EXTRACTION_SINK_SKIPPED_EMPTY_TEXT]: "metadata_only",
-  [EXTRACTION_SINK_SKIPPED_METADATA_ONLY]: "metadata_only",
-  [EXTRACTION_SINK_SKIPPED_IMAGE_PRIVATE_ONLY]: "metadata_only"
-});
-var ITEM_REF_FIELDS = new Set([
-  "corpusId",
-  "provider",
-  "accountScope",
-  "approvedScopeKey",
-  "providerItemId",
-  "localItemId",
-  "sourceVersion",
-  "contentHash",
-  "name",
-  "mimeType",
-  "sizeBytes"
-]);
-var PDF_MIME_TYPES = Object.freeze(["application/pdf"]);
-
-// src/workers/google-connectors/drive-extraction-source.ts
-var GOOGLE_DRIVE_EXTRACTION_MIME_TYPES = Object.freeze([
-  "application/pdf",
-  "image/jpeg",
-  "image/png",
-  "image/gif",
-  "image/tiff",
-  "image/webp",
-  "image/heic",
-  "image/heif"
-]);
-// src/workers/readwise/connector.ts
-var READWISE_STORE_PLACEMENT = Object.freeze({
-  trustTier: "S1",
-  trustDomain: "internal"
-});
-// src/workers/readwise/live-control.ts
-var READWISE_STORE_PULL_FRESHNESS_THRESHOLD_MS = 60 * 60000;
-var READWISE_STORE_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
-var READWISE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
-var READWISE_DAILY_REQUEST_GUARD_REASON = "readwise_daily_api_request_guard";
-// src/workers/x-bookmarks/folder-facets.ts
-var X_FOLDER_NAME_FACET_PREFIX = "x-folder-name:v1:";
-var X_FOLDER_NAME_LITERAL_ESCAPE_PREFIX = "x-literal:v1:";
-var X_FOLDER_SEARCH_TEXT_LITERAL_ESCAPES = Object.freeze([Object.freeze({
-  reservedPrefix: X_FOLDER_NAME_FACET_PREFIX,
-  literalEscapePrefix: X_FOLDER_NAME_LITERAL_ESCAPE_PREFIX,
-  encodedValue: "base64url-utf8",
-  decodedValueLineRequired: true
-})]);
-function xBookmarkFolderNameFacet(folderName) {
-  const normalized = requireExactSearchTextLine(folderName, "X bookmark folder name");
-  return `${X_FOLDER_NAME_FACET_PREFIX}${Buffer.from(normalized, "utf8").toString("base64url")}`;
-}
-var X_BOOKMARKS_FOLDER_FILTER_CODEC = Object.freeze({
-  folderIdExactLine(value) {
-    return requireExactSearchTextLine(`x-folder:${value}`, "X bookmark folder id facet");
-  },
-  folderNameExactLine(value) {
-    return xBookmarkFolderNameFacet(value);
-  }
-});
-function requireExactSearchTextLine(value, label) {
-  if (typeof value !== "string" || !value.trim() || value.length > 1000 || /[\u0000-\u001f\u007f]/.test(value)) {
-    throw new TypeError(`${label} must be a non-empty safe string of at most 1,000 characters.`);
-  }
-  assertWellFormedUtf16(value, label);
-  return value;
-}
-function assertWellFormedUtf16(value, label) {
-  for (let index = 0;index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    if (code >= 55296 && code <= 56319) {
-      const next = value.charCodeAt(index + 1);
-      if (!(next >= 56320 && next <= 57343)) {
-        throw new TypeError(`${label} must contain well-formed UTF-16.`);
-      }
-      index += 1;
-    } else if (code >= 56320 && code <= 57343) {
-      throw new TypeError(`${label} must contain well-formed UTF-16.`);
-    }
-  }
-}
-
-// src/workers/x-bookmarks/connector.ts
-var X_BOOKMARKS_STORE_PLACEMENT = Object.freeze({
-  trustTier: "S1",
-  trustDomain: "internal"
-});
-// src/workers/x-bookmarks/live-control.ts
-var providerStops = createProviderRateLimitReporter("x");
-var X_BOOKMARKS_HEAD_INTERVAL_MS = 15 * 60000;
-var X_BOOKMARKS_HEAD_FRESHNESS_THRESHOLD_MS = 2 * X_BOOKMARKS_HEAD_INTERVAL_MS + 5 * 60000;
-var X_BOOKMARKS_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
-var X_BOOKMARKS_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
-var EMPTY_SHA256 = "0".repeat(64);
-var UNDISPATCHED_RESERVATION_LEASE_MS = 5 * 60000;
-var IN_FLIGHT_RESERVATION_LEASE_MS = 15 * 60000;
-var DEFAULT_X_HEAD_PAGE_SIZE_LADDER = Object.freeze([10, 20, 40, 80, 100]);
-
-// src/workers/x-bookmarks/reconcile-state.ts
-var X_BOOKMARKS_WINDOW_BOUNDARY_ALGORITHM_VERSION = 2;
-var FOLDER_FACET_REFRESH_LEASE_MS = 5 * 60000;
-// src/workers/x-bookmarks/api-connector.ts
-var providerStops2 = createProviderRateLimitReporter("x");
-var X_BOOKMARKS_NO_APPROVED_WINDOW_BOUNDARY = Object.freeze({
-  algorithmVersion: X_BOOKMARKS_WINDOW_BOUNDARY_ALGORITHM_VERSION,
-  approvedProviderErrorTypes: Object.freeze([]),
-  approvedProviderErrorCodes: Object.freeze([])
-});
-var X_BOOKMARKS_RECONCILE_PAGE_SIZE_LADDER = Object.freeze([80, 50, 20]);
-// src/workers/scheduler-limit-stops.ts
-var DAILY_LIMITS = new Map(Object.entries({
-  daily_cost_guard: { id: "x.daily_cost", kind: "cost", label: "daily X spending budget used" },
-  daily_api_request_guard: { id: "x.daily_requests", kind: "requests", label: "daily X request budget used" },
-  daily_resource_read_guard: { id: "x.daily_resource_reads", kind: "requests", label: "daily X resource-read budget used" },
-  head_api_request_reserve_guard: { id: "x.head_reserve_requests", kind: "requests", label: "X request reserve for new bookmarks reached" },
-  head_resource_read_reserve_guard: { id: "x.head_reserve_reads", kind: "requests", label: "X resource-read reserve for new bookmarks reached" },
-  head_cost_reserve_guard: { id: "x.head_reserve_cost", kind: "cost", label: "X spending reserve for new bookmarks reached" },
-  reconcile_cost_to_finish_guard: { id: "x.reconcile_to_finish", kind: "cost", label: "X full bookmark check costs more than today's budget left" },
-  readwise_daily_api_request_guard: { id: "readwise.daily_requests", kind: "requests", label: "daily Readwise API budget used" },
-  gmail_daily_api_request_guard: { id: "gmail.daily_requests", kind: "requests", label: "daily Gmail API budget used" },
-  google_drive_daily_api_request_guard: { id: "drive.daily_requests", kind: "requests", label: "daily Google Drive API budget used" }
-}));
-var RAISABLE_SPEND_LIMITS = new Set(["x.daily_cost", "x.head_reserve_cost"]);
-for (const limit of DAILY_LIMITS.values()) {
-  registerLimit({ ...limit, scope: "source", unit: limit.kind === "cost" ? "usd" : "requests", continue: RAISABLE_SPEND_LIMITS.has(limit.id) ? "raise" : "run_once" });
-}
-
-// src/workers/x-bookmarks/content-recovery.ts
-var X_CONTENT_RECOVERY_LIMIT_SUBJECT = JSON.stringify(["x.bookmarks", "internal.x.bookmarks", "content_recovery"]);
-// src/workers/connector-store/capture-spool-secrets.ts
-var SPOOL_SCAN_CHUNK_BYTES = 1 << 20;
-var SPOOL_MAX_LINE_BYTES = 32 * 1024 * 1024;
-
-// src/workers/connector-store/spool-file-identity.ts
-var SPOOL_IDENTITY_HEAD_BYTES = 4 * 1024;
-var SPOOL_BOUNDARY_WINDOW_BYTES = 4 * 1024;
-
-// src/workers/file-extraction/spool.ts
-var EXTRACTION_SPOOL_STALE_MS = 24 * 60 * 60 * 1000;
-
-// src/workers/whatsapp/child-media.ts
-var COPY_CHUNK_BYTES = 1024 * 1024;
-
-// src/workers/whatsapp/spool-reader.ts
-var WHATSAPP_SPOOL_MAX_RECORD_BYTES = 1024 * 1024;
-var CHUNK_BYTES = 256 * 1024;
-var FINISH_STEP_BYTES = 4 * 1024;
-var NEWEST_RECORD_SCAN_BYTES = 4 * 1024 * 1024;
-var CAPTURE_STATUS_MAX_BYTES = 64 * 1024;
-
-// src/workers/whatsapp/live-connector.ts
-var DEFAULT_PASS_BYTE_BUDGET = 64 * 1024 * 1024;
-var TARGET_READ_CHUNK_BYTES = 4 * 1024;
-var CHILD_MEDIA_TYPES = new Set(["image", "video", "video_note"]);
-var WHATSAPP_FETCHED_MEDIA_TYPES = new Set([...CHILD_MEDIA_TYPES, "audio"]);
-var MEDIA_TEMP_MAX_AGE_MS = 30 * 60 * 1000;
-// src/workers/whatsapp/media-fetch.ts
-var DISK_FLOOR_MIN_BYTES = 5 * 1024 * 1024 * 1024;
-var ANSWER_HEAD_MAX_BYTES = 64 * 1024;
-
-// src/workers/whatsapp/store-sync.ts
-var WHATSAPP_PERSONAL_SOURCE_ID = "whatsapp.personal.messages";
-var WHATSAPP_STORE_PLACEMENT = Object.freeze({
-  trustTier: "S4",
-  trustDomain: "secure_local"
-});
-var WHATSAPP_SPOOL_REDACTION_STATE_KEY = "capture_spool_secret_redaction:whatsapp";
-var WHATSAPP_SPOOL_AHEAD_CLEAR_BYTES = 32 * 1024 * 1024;
-var CLEARED_FILES_KEY = `${WHATSAPP_SPOOL_REDACTION_STATE_KEY}:cleared_files`;
-// src/workers/file-extraction/extractors/built-in-transcriber.ts
-var DEFAULT_FILE_DEADLINE_MS = Number.POSITIVE_INFINITY;
-var DEFAULT_CONVERT_TIMEOUT_MS = 5 * 60000;
-var DEFAULT_INSTALL_RETRY_MS = 15 * 60000;
-var DEFAULT_INSTALL_RETRY_CEILING_MS = 24 * 60 * 60000;
-var DEFAULT_VERIFY_WAIT_MS = 5 * 60000;
-
-// src/workers/file-extraction/extractors/compound-file.ts
-var MAX_READ_BYTES = 64 * 1024 * 1024;
-
-// src/workers/file-extraction/extractors/package-documents.ts
-var VOID_ELEMENTS = new Set([
-  "area",
-  "base",
-  "br",
-  "col",
-  "embed",
-  "hr",
-  "img",
-  "input",
-  "link",
-  "meta",
-  "param",
-  "source",
-  "track",
-  "wbr"
-]);
-var MARKUP_ENTITIES = Object.freeze({
-  AElig: "Æ",
-  Aacute: "Á",
-  Acirc: "Â",
-  Agrave: "À",
-  Alpha: "Α",
-  Aring: "Å",
-  Atilde: "Ã",
-  Auml: "Ä",
-  Beta: "Β",
-  Ccedil: "Ç",
-  Chi: "Χ",
-  Dagger: "‡",
-  Delta: "Δ",
-  ETH: "Ð",
-  Eacute: "É",
-  Ecirc: "Ê",
-  Egrave: "È",
-  Epsilon: "Ε",
-  Eta: "Η",
-  Euml: "Ë",
-  Gamma: "Γ",
-  Iacute: "Í",
-  Icirc: "Î",
-  Igrave: "Ì",
-  Iota: "Ι",
-  Iuml: "Ï",
-  Kappa: "Κ",
-  Lambda: "Λ",
-  Mu: "Μ",
-  Ntilde: "Ñ",
-  Nu: "Ν",
-  OElig: "Œ",
-  Oacute: "Ó",
-  Ocirc: "Ô",
-  Ograve: "Ò",
-  Omega: "Ω",
-  Omicron: "Ο",
-  Oslash: "Ø",
-  Otilde: "Õ",
-  Ouml: "Ö",
-  Phi: "Φ",
-  Pi: "Π",
-  Prime: "″",
-  Psi: "Ψ",
-  Rho: "Ρ",
-  Scaron: "Š",
-  Sigma: "Σ",
-  THORN: "Þ",
-  Tau: "Τ",
-  Theta: "Θ",
-  Uacute: "Ú",
-  Ucirc: "Û",
-  Ugrave: "Ù",
-  Upsilon: "Υ",
-  Uuml: "Ü",
-  Xi: "Ξ",
-  Yacute: "Ý",
-  Yuml: "Ÿ",
-  Zeta: "Ζ",
-  aacute: "á",
-  acirc: "â",
-  acute: "´",
-  aelig: "æ",
-  agrave: "à",
-  alefsym: "ℵ",
-  alpha: "α",
-  amp: "&",
-  and: "∧",
-  ang: "∠",
-  aring: "å",
-  asymp: "≈",
-  atilde: "ã",
-  auml: "ä",
-  bdquo: "„",
-  beta: "β",
-  brvbar: "¦",
-  bull: "•",
-  cap: "∩",
-  ccedil: "ç",
-  cedil: "¸",
-  cent: "¢",
-  chi: "χ",
-  circ: "ˆ",
-  clubs: "♣",
-  cong: "≅",
-  copy: "©",
-  crarr: "↵",
-  cup: "∪",
-  curren: "¤",
-  dArr: "⇓",
-  dagger: "†",
-  darr: "↓",
-  deg: "°",
-  delta: "δ",
-  diams: "♦",
-  divide: "÷",
-  eacute: "é",
-  ecirc: "ê",
-  egrave: "è",
-  empty: "∅",
-  emsp: " ",
-  ensp: " ",
-  epsilon: "ε",
-  equiv: "≡",
-  eta: "η",
-  eth: "ð",
-  euml: "ë",
-  euro: "€",
-  exist: "∃",
-  fnof: "ƒ",
-  forall: "∀",
-  frac12: "½",
-  frac14: "¼",
-  frac34: "¾",
-  frasl: "⁄",
-  gamma: "γ",
-  ge: "≥",
-  gt: ">",
-  hArr: "⇔",
-  harr: "↔",
-  hearts: "♥",
-  hellip: "…",
-  iacute: "í",
-  icirc: "î",
-  iexcl: "¡",
-  igrave: "ì",
-  image: "ℑ",
-  infin: "∞",
-  int: "∫",
-  iota: "ι",
-  iquest: "¿",
-  isin: "∈",
-  iuml: "ï",
-  kappa: "κ",
-  lArr: "⇐",
-  lambda: "λ",
-  lang: "〈",
-  laquo: "«",
-  larr: "←",
-  lceil: "⌈",
-  ldquo: "“",
-  le: "≤",
-  lfloor: "⌊",
-  lowast: "∗",
-  loz: "◊",
-  lrm: "‎",
-  lsaquo: "‹",
-  lsquo: "‘",
-  lt: "<",
-  macr: "¯",
-  mdash: "—",
-  micro: "µ",
-  middot: "·",
-  minus: "−",
-  mu: "μ",
-  nabla: "∇",
-  nbsp: " ",
-  ndash: "–",
-  ne: "≠",
-  ni: "∋",
-  not: "¬",
-  notin: "∉",
-  nsub: "⊄",
-  ntilde: "ñ",
-  nu: "ν",
-  oacute: "ó",
-  ocirc: "ô",
-  oelig: "œ",
-  ograve: "ò",
-  oline: "‾",
-  omega: "ω",
-  omicron: "ο",
-  oplus: "⊕",
-  or: "∨",
-  ordf: "ª",
-  ordm: "º",
-  oslash: "ø",
-  otilde: "õ",
-  otimes: "⊗",
-  ouml: "ö",
-  para: "¶",
-  part: "∂",
-  permil: "‰",
-  perp: "⊥",
-  phi: "φ",
-  pi: "π",
-  piv: "ϖ",
-  plusmn: "±",
-  pound: "£",
-  prime: "′",
-  prod: "∏",
-  prop: "∝",
-  psi: "ψ",
-  quot: '"',
-  rArr: "⇒",
-  radic: "√",
-  rang: "〉",
-  raquo: "»",
-  rarr: "→",
-  rceil: "⌉",
-  rdquo: "”",
-  real: "ℜ",
-  reg: "®",
-  rfloor: "⌋",
-  rho: "ρ",
-  rlm: "‏",
-  rsaquo: "›",
-  rsquo: "’",
-  sbquo: "‚",
-  scaron: "š",
-  sdot: "⋅",
-  sect: "§",
-  shy: "­",
-  sigma: "σ",
-  sigmaf: "ς",
-  sim: "∼",
-  spades: "♠",
-  sub: "⊂",
-  sube: "⊆",
-  sum: "∑",
-  sup: "⊃",
-  sup1: "¹",
-  sup2: "²",
-  sup3: "³",
-  supe: "⊇",
-  szlig: "ß",
-  tau: "τ",
-  there4: "∴",
-  theta: "θ",
-  thetasym: "ϑ",
-  thinsp: " ",
-  thorn: "þ",
-  tilde: "˜",
-  times: "×",
-  trade: "™",
-  uArr: "⇑",
-  uacute: "ú",
-  uarr: "↑",
-  ucirc: "û",
-  ugrave: "ù",
-  uml: "¨",
-  upsih: "ϒ",
-  upsilon: "υ",
-  uuml: "ü",
-  weierp: "℘",
-  xi: "ξ",
-  yacute: "ý",
-  yen: "¥",
-  yuml: "ÿ",
-  zeta: "ζ",
-  zwj: "‍",
-  zwnj: "‌",
-  apos: "'"
-});
-
-// src/workers/file-extraction/extractors/rtf.ts
-var RTF_MIME_TYPES = new Set(["application/rtf", "text/rtf"]);
-var SKIPPED_DESTINATIONS = new Set([
-  "fonttbl",
-  "colortbl",
-  "stylesheet",
-  "info",
-  "pict",
-  "object",
-  "listtable",
-  "listoverridetable",
-  "rsidtbl",
-  "generator",
-  "themedata",
-  "colorschememapping",
-  "datastore",
-  "latentstyles",
-  "xmlnstbl",
-  "header",
-  "headerl",
-  "headerr",
-  "headerf",
-  "footer",
-  "footerl",
-  "footerr",
-  "footerf",
-  "filetbl",
-  "revtbl",
-  "mmathPr",
-  "pgdsctbl",
-  "fldinst"
-]);
-var CODE_PAGE_LABELS = new Map([
-  [866, "ibm866"],
-  [874, "windows-874"],
-  [932, "shift_jis"],
-  [936, "gbk"],
-  [949, "euc-kr"],
-  [950, "big5"],
-  [1250, "windows-1250"],
-  [1251, "windows-1251"],
-  [1252, "windows-1252"],
-  [1253, "windows-1253"],
-  [1254, "windows-1254"],
-  [1255, "windows-1255"],
-  [1256, "windows-1256"],
-  [1257, "windows-1257"],
-  [1258, "windows-1258"],
-  [1e4, "macintosh"],
-  [10007, "x-mac-cyrillic"],
-  [20866, "koi8-r"],
-  [28591, "iso-8859-1"],
-  [28592, "iso-8859-2"],
-  [28595, "iso-8859-5"],
-  [54936, "gb18030"],
-  [65001, "utf-8"]
-]);
-
-// src/workers/file-extraction/extractors/apple-vision-ocr.ts
-var DEFAULT_APPLE_VISION_FILE_DEADLINE_MS = Number.POSITIVE_INFINITY;
-
-// src/workers/file-extraction/extractors/ocr-probe-fixture.ts
-var OCR_PROBE_IMAGE_BASE64 = [
-  "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYn",
-  "KSopGR8tMC0oMCUoKSj/wAALCABgAWgBAREA/8QAHAABAQEBAQEBAQEAAAAAAAAAAAgHBgkFBAMB/8QATxAAAQIFAQMGCAcLCwUA",
-  "AAAAAQIDAAQFBhEHCBIhEzFBUWFxFBUiNjd1gbMWGDJSkaHTVVZydJKUpLGywsMjJEJEYoKEk6K0wRcoQ+Hw/9oACAEBAAA/AKph",
-  "CEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQh",
-  "CEIQhCEIQhCEIQj89QnZanSMxOz77cvKS6C4664rdShIGSSeqJJ1P2nqpNTr0lYLTclIoJSJ+YaC3nf7SUK8lA7wT3c0Y7OaqX5O",
-  "Olx2766lROcMzq2h9CCBH17d1x1Cob6Ft3FMzrYPlNT+JhKx1Eq8oewgxU2iWuVL1DWml1FlFMuIJKgxvZbmABxLZPHI5yk8ccxO",
-  "DjY4lPaR1YvWztSV0q2614HICUad5LwVhzylZycrQT0DpjRNlu9bgvi0atO3RUPDplie5FtfIttbqOTScYQlIPEmNohGM7SlVvq2",
-  "Lel7isirrlpOWPJz8sJVl3CSfJdBWgngTukZxxB6CYw3TbaLu2XvKnfDOrieoLq+SmUmVZbLYVwDgKEA+ScEjpGenEWuhaXEJW2o",
-  "KQoZSpJyCOsR8a87jkbSteo1yqL3ZWSaLhAOCtXMlA7VEgDtMRE/tCamzc+4ZSuhoPOnkpdqQl17mTwQnLZUcZAGSTFcUdd1UXR+",
-  "dnroqhmrnbpz84t3kGkBhzkypKAlKQk7uBnIOTnowIj/AOMHqf8AfN+gSv2ca/syav3Nd18TdFu6qidQ9Jqdlf5u00UuIUCR5CU5",
-  "ykqPHPyYqCJe2mdYLntK+pai2jVRJNsyaXJr+btOlTiySB5aVYwkJPD50ZD8YPU/75v0CV+zi6LOnH6jaNDnZxzlJmZkWHnV4A3l",
-  "qbSScDgOJPNEh6ra26g0HUi4qXSrg5CQlJxbTLXgUurcSDwGVNkn2mOT+MHqf9836BK/Zx/VnaH1MbUCu4G3R1LkJf8A4QI1HSva",
-  "dfmaoxTb+lpVth5QQmpSySgNk8xcRkjd/tDGOo88VQkhSQpJBSRkEdMRXqprbqFQtR7jpdKuDkJGUnXGWWvApdW4gHgMqbJPtMUt",
-  "oLcFUurSehVmvTXhVSmeX5V7k0o3t19xCfJSAB5KQOA6I7+Jc2nNVLysrUGUpls1jwKSXTm31N+CsuZWXHATlaCeZI4Zxwjstle+",
-  "rjvmiV6Yumo+HPSsw220rkG2t1JSSR5CU59sahf13Uyx7Xm65WnCJZgAJbR8t1Z+ShI6SfqGSeAiML22iL4uGbd8WzoocgSdxiTA",
-  "3wOjecI3ie7dHZHFo1OvpDm+LxuDe6jUHSPoKsRodg7SV30KdaRcbia7TCcOJdSlD6R1pWkDJ/CBz1jnizbYr1PuegSVZoz4fkJt",
-  "vlG14weogjoIIII6CDH1IQhCEIRLG2ffD7Rp1myDpQ26gTs9un5Y3iG0HsykqI/BjKdnjTBOpF0veMi4ihU5KXJsoOFOlRO60D0Z",
-  "wST0AHmJEXPQLbotvSSJSiUuTkZdI3QlhoJz3nnJ7TkmOK1W0ety/KRMDwKWkK2Eky8+w2EKC+gOY+WnrzkjoxEEuJqVr3GtAU5J",
-  "1amTRTvJOFNOtqxwPYRHovpddSL1sGjV5ISl2aZ/lkJ5kupJSsDs3knHZiJD2wfTCv8AEGP3o1zYl8wq96z/AISIoqEfwn5SXqEj",
-  "MSc6yh+VmG1NOtLGUrQoYIPYQY87daLBmNPL4m6UoLXT3P5eReV/5GSeAJ+cn5J7RnmIim9krUT4R2qq2Km9vVWjoHIlR4uy3Mn2",
-  "oOE9xT2xm+1/qH43rzVn0x7MjTVcpOFJ4OTGOCe5AP0qPVH89kfTXx3XVXfV2c06mubsmhY4OzA473cjn/CI6jFVah+YFzerJn3S",
-  "o82KLIKqlZkKe2oJXNzDbCVHoKlBOfrjpdJ60u0tUrfqL+WRLTyWpjPApQo8m5nuSpUekUebuq1aXd2qVfqDGXhNTympfHEqQk8m",
-  "3j+6lMc1WpFVLrM/T1qC1ykw4wVDpKVFOfqj0o0+8wra9WS3ukxAmufpgu71g7+uKk2b7Ktar6M2/O1a2qJPTrpmOUmJmQadcXiY",
-  "cAypSSTgADuEdrcWjVg1ynvSrts06TUtJCX5FhMu42eggoA5uo5HWIgS8KI5bV1VeivOB1dPmnJYuAYC91RAVjoyBn2xeWzjWH63",
-  "ozbkxNrK32mlypUTkkNOKQn/AEpTEW64el67vWT37UWRsuegq2f8T/unY1SIm20PSvI+qGfevRoWxB5t3R+NtfsGPnbcc7MpbtGR",
-  "CiJRZmX1DoUtPJgfQFH8qOL2RpG0p68qgi6G5N6pBps0xqbAKFKyd/dCuBWPIwOfnI5otOYp8nMyhlZiUl3ZYjdLLjaVII6t0jES",
-  "HrPs+V9d8TEzp7QkvUSZbS9yaJllpLDpJCkJStYOOAUMcBvYHNiNc2XbVuyzLXq1Iu6nmSb8KD8oDMNO5Ck4WBuKVgZSk4OOc9sb",
-  "TCEIQhCPPvaZnFzmttylZJS0tplI6gllA/Xk+2KK2MpFuX0sm5oJ/lZqpOqUrsShCQPqP0xvUI8/9p+RbkdbbhDSd1DxZfx2qZQV",
-  "fXkxQOxbOLf0wqMsskiWqjgR2JU22cfTvH2xjG2D6YV/iDH70a5sS+YVe9Z/wkRRUIRmev2nSNQ7HeYlkJ8dSOZiQWeBKseU2T1L",
-  "Ax3hJ6IhS07iq9k3OxVqSsy1Sk1KTuuJ4cQUqQpJ5xzjEfqsm26pqDe8rSpVa3Z2feK35heVbic7zjqj2cT2nhzmPRm1qDI2xb0h",
-  "RaS1yUlJNBptPSetR6yTkk9JJj8eofmBc3qyZ90qPOiwvPm3fWUt71MdJr7Qvg9q9csolG6y7MmbaxzbroDnDsBUR7Ir34e/9uPw",
-  "v5X+deJ/l5/rOOS97Eh6AUL4Q6v21KKRvMszIm3c8260C5x7CUge2Oavvz4uL1jMe9VHoxp95hW16slvdJiBNc/TBd3rB39cULoH",
-  "rFYlq6T0SjV6ueCVKWL/ACrPgj7m7vPuKT5SUEHyVA8D0x09y7S1iU6nPOUeYm6vOBJ5JluWW0lSujeU4BgdoBPZEU16qTVer0/V",
-  "J0hU5PTC5hzdHDfWok4HVkx6E6GW3MWnpTb9KnkFucSyXn0HnQtxanCk9o3seyIe1w9L13esnv2osjZc9BVs/wCJ/wB07GqRE22h",
-  "6V5H1Qz716NC2IPNu6Pxtr9gxom0Rpw5qJZQap26K1T1mYk944DmRhTZPRvADB60jPDMQRUpCcpU+9JVKWelJxhW64y8goWg9RB4",
-  "iO0tXV++7YShum3FOLl0cAxNETDYHUAvO6O7EbdYm1VvvNS170dDaFEAztOzhPappRJ7yFdwim6LVZGt0qWqVJmmpuRmUb7TzRyl",
-  "Q/8AuBHODwj9sIQhCEI8/wDaekFyGtlw76SETBZmGz1hTSM/6goeyN+2Laq1NacVOm7w8Ikqgpak54hDiElJ9pSv6IoKEee+0jVG",
-  "qvrTcr0uoKaZdRKgg54ttpQr/UlUUdsZU9crpXOTTiSBOVN1xB60pQ2j9pKoxPbB9MK/xBj96Nc2JfMKves/4SIoqEIRBu1fSpOl",
-  "awzpkGUsicl2pp5KeYuKyFKx24ye0k9MaxsR0mSFAuGscik1BU0mU5U84aCEq3R1ZJyevA6opqOf1D8wLm9WTPulR50WF58276yl",
-  "vepjedtuhchclv11tPkzcsuUcI+c2reGe0hw/kxmovw/9ADZvKnwjxxyu7n+rbm/j/N4xpmxJQuXuK4a84jyZWWRKNk/OcVvKx2g",
-  "Nj8qMEvvz4uL1jMe9VHoxp95hW16slvdJiBNc/TBd3rB39cdLYOgF03vacjcNJn6IzJTfKcmiZedS4NxakHIS2RzpPTzR08tspXe",
-  "pY8JrVAbT0ltx5Z+gtiNa0p2daHZ1SYq1bmzW6owoLZCmuTYZUOZQTklSh0EnHTjODG6R5za6tlvWG7UnnNQcV9PH/mLD2WlBWhV",
-  "tgc6TMg/nLsatESbZygrVmTA/o0lkH/MdP8AzGj7EKCLVuVfQZ1tP0I/9xRU9UpGnp3p+dlpVPPl51KB9Zjmq1bllakU8rn5Wk11",
-  "hBLQmWVpWpsjiUh1B3kniOAPTGQ3Vsq29OBblt1iepjp4hqYSJhruHyVDvJMTdqjprXtN6qzKV1DLjMyFKlpqXUVNugYzjIBBGRk",
-  "EdPTG2bE1zzJqNctd5xS5XkPGDCSeDagpKF4799H5PfFZQhCEIQibNsTT9+rUuTu+lsl1+nNlieQgZPIZJSvuSSrPYrPMDE+aM6j",
-  "zmmt2JqTDZmZB9IZnZUKxyjecgjqUk8Qe8dMWpb2s1gVyRRMs3NT5QkZUzPuiWcQeohZGT3Ejtjh9W9oi3qFSJiUs6cbq9cdSUNu",
-  "sjeYlyf6ZVzKI5wBntxEd0Ok1S7LjlqdTm3JyqT72E5JJUonJUo9XOSTzDJj0fsK2pez7OpNAlCFNyLAbK8Y31niteO1RUfbEcbY",
-  "PphX+IMfvR1Oy3qbaNj2jVpK6Kv4DMvz3LNo8Ged3kcmkZyhCgOIMbR8YPTD75v0Ca+zh8YPTD75v0Ca+zjTabPS9Tp0rPyLnKyk",
-  "00h9le6U7yFAKScHBGQRzx+iIb2w/TAfV7H61xrOxL5h171l/CRFFxz+ofmBc3qyZ90qPOiwvPm3fWUt71MWftb0LxvpDMzaEbz1",
-  "LmWpsY590nk1ezC8/wB2ITi7dkqheJ9IJSaWjdeqkw7OKzz7ueTT7MIz/eiL778+Li9YzHvVR6MafeYVterJb3SYgTXP0wXd6wd/",
-  "XFibLXoKtvvmf9y7GrQhEIbWFvv0fV6fnVtkSlVabmmV44EhAQsZ6wpJOOpQ647XZf1ko1s0Ry1rrmPApdLynpOcUklsb3FTa8fJ",
-  "45IPNxOcYGaDqGrFgyEkqaeu6irbSM7rE0l5Z7kIJVn2RDetN7Iv/UKoVuXaWzJEJYlkL+UGkDAJ7ScnHRnEVbshUF+j6TibmkFC",
-  "6pOOTbYUMHkwEoT9O4SOwiMl2z7Wfkrxp9ytNkyVQYEu6sDgl5vOAT2oxj8E9UfJ2ZdXZKwZmdotxqcRRJ5wPJmEJK/B3sBJJSOJ",
-  "SoBOcZI3Rw54qsap2GZXwgXhQuTxnBnW9/8AIzvfVEpbUOqVKv6p0ynW4VPU2mlxZm1IKeWcVgeSDx3QE85xknsBPT7EtvTC69Xr",
-  "kWhSZRqWEg2ojgta1JWrH4IQnP4YiuYQhCEIR/i0JcQpDiQpChhSVDII6jE36nbMUhV5t6oWROtUp9wlSpGYBMvk/MUMlA7MKHVg",
-  "cIxud2c9SZd4oZo0vNpB+WzPMgH8tST9UfVt3ZjvqovoFVNOpDGfLU6+HVgdiW8gnvI74pvSXSS39NpVaqeFTlWeTuvVB9I31D5q",
-  "BzITnoHE9JOBGixOGvOhlzag36qt0aeozEoZZtncm3nUr3k5zwS2oY49cZ18VS+Purbf5w/9jD4ql8fdW2/zh/7GHxVL4+6tt/nD",
-  "/wBjFfWjTXqNalFpk0ptcxJSTEs4pskpKkNpSSCQDjI6hH1onHXrQ25dQb88d0Weo7Er4K2xuTbzqV7ySrPBLahjj1x2+ztpzV9N",
-  "raqdOrsxITD8zN+EIVJrWtITuJTg7yUnOQeiNXj5d1U92rWxWKbLKQl+ck3pdtThISFLQUgnAJxk9USjbOzHedLuSlVCYqdvKZlJ",
-  "tp9aUTDxUUoWFEDLQGcDrirLtozdw2tV6O7uhE/KOy2TzJK0kA+wnPsiQfiqXx91bb/OH/sYsC1KO3b9sUmjs4LchKtSwI6dxITn",
-  "24zEo3Lsx3nVLjqtQl6nbyWZubdfQlcw8FBKllQBw0eODFX2tT3aTbNIp0ypCn5OTZl3FNklJUhASSMgHGR1RMWpGzjd1z35Xa3I",
-  "VGgtys9NLfbQ8+8FhJPAKAaIz3ExvWjFqT1kabUi3qs7LPTsoXuUXLKUps77y1jBUAeZQ6OeO2hCOR1MsCi6h2+aXXG1BSCVy8y1",
-  "gOMLxzpPUekHgfYCJSuXZgvWnzKxRXqfV5bPkKS6GHCP7SV8Ae5Rj4DWzxqYtwJVb7bY+eqfl8fUsn6o07TfZbfbnmZ2/Z9hUugh",
-  "Xi+SUVFzsW4QMDrCc56xFUSzDMrLNS8s0hlhpAbbbQndShIGAABzACPl3bbdLuygzVHrsqmZkZgYUk8Ck9CknoUOgxKN57LFfk5p",
-  "xy0qlKVGTJJQ1NK5F5I6BnG6rvynuji/i8amcpu/B9vd+f4fL4/bz9UdpZmyxX5yabcu2pSlOkgQVtSquWfUOrON1PflXdFYWpbt",
-  "MtWgylHocsmWkJZO6hA4knpUo9KieJMfWhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhC",
-  "EIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQhCEIQj//Z"
-].join("");
-
-// src/workers/file-extraction/extractors/ocr-capability.ts
-var OCR_READY_TTL_MS = 10 * 60000;
-
-// src/workers/file-extraction/extractors/input-limits.ts
-var DOCUMENT_READER_MAX_INPUT_BYTES = 256 * 1024 * 1024;
-var IMAGE_READER_MAX_INPUT_BYTES = 64 * 1024 * 1024;
-
-// src/workers/file-extraction/extractors/text.ts
-var ADDITIONAL_DOCUMENT_MIME_TYPES = new Set([
-  DOC_MIME_TYPE,
-  XLS_MIME_TYPE,
-  ODT_MIME_TYPE,
-  ODS_MIME_TYPE,
-  ODP_MIME_TYPE,
-  EPUB_MIME_TYPE
-]);
-
-// src/workers/file-extraction/extractors/transcription.ts
-var DEFAULT_TRANSCRIBE_TIMEOUT_MS = 5 * 60000;
-// src/workers/telegram-messages/spool-lines.ts
-var CHUNK_BYTES2 = 1 << 20;
-var hints = new Map;
-
-// src/workers/archive-import/telegram/message.ts
-var TELEGRAM_MEDIA_KEYS = new Set([
-  "photo",
-  "file",
-  "media_type",
-  "file_name",
-  "sticker_emoji",
-  "performer",
-  "title",
-  "duration_seconds"
-]);
-var READ_OBJECTS = new Set([
-  "contact_information",
-  "location_information",
-  "poll",
-  "todo_list",
-  "invoice_information",
-  "text",
-  "text_entities",
-  "reactions",
-  "inline_bot_buttons"
-]);
-
-// src/workers/telegram-messages/media-child.ts
-var TELEGRAM_CHILD_KEY = "media";
-var TELEGRAM_MEDIA_CHILD_SUFFIX = `${CHILD_ITEM_ID_SEPARATOR}${TELEGRAM_CHILD_KEY}`;
-var MEDIA_DISK_FLOOR_BYTES = 5 * 1024 * 1024 * 1024;
-
-// src/workers/telegram-messages/capture-spool-connector.ts
-var TELEGRAM_CAPTURE_CONNECTOR_ID = "telegram_capture_spool";
-var TELEGRAM_CAPTURE_CONNECTOR_IDS = {
-  internal: `${TELEGRAM_CAPTURE_CONNECTOR_ID}_internal`,
-  secure_local: `${TELEGRAM_CAPTURE_CONNECTOR_ID}_secure_local`
-};
-var TELEGRAM_TRUST_EVICTION_CONNECTOR_ID = `${TELEGRAM_CAPTURE_CONNECTOR_ID}_trust_eviction`;
-var TELEGRAM_TRUST_RECONCILIATION_CONNECTOR_ID = `${TELEGRAM_CAPTURE_CONNECTOR_ID}_trust_reconciliation`;
-var MAX_READ_BYTES2 = 64 * 1024 * 1024;
-var MAX_RECORD_BYTES = 32 * 1024 * 1024;
-var MAX_TAIL_SCAN_BYTES = 16 * 1024 * 1024;
-var SERVICE_FIELDS = new Set([
-  "title",
-  "new_title",
-  "members",
-  "duration_seconds",
-  "duration",
-  "discard_reason",
-  "period",
-  "amount",
-  "currency",
-  "boosts",
-  "inviter"
-]);
-// src/workers/archive-import/telegram/account.ts
-var ACCOUNT_SECTIONS = [
-  { name: "personal_information", path: ["personal_information"], label: "profile", whole: true },
-  { name: "profile_pictures", path: ["profile_pictures"], label: "profile pictures", whole: false },
-  { name: "stories", path: ["stories"], label: "stories", whole: false },
-  { name: "profile_music", path: ["profile_music"], label: "profile music", whole: false },
-  { name: "contacts", path: ["contacts", "list"], label: "contacts", whole: false },
-  { name: "frequent_contacts", path: ["frequent_contacts", "list"], label: "frequent contacts", whole: false },
-  { name: "sessions", path: ["sessions", "list"], label: "sessions", whole: false },
-  { name: "web_sessions", path: ["web_sessions", "list"], label: "web sessions", whole: false },
-  { name: "other_data", path: ["other_data"], label: "other data", whole: true }
-];
-
-// src/workers/archive-import/telegram/connector.ts
-var TELEGRAM_DEFAULT_MAX_BYTES_PER_LISTING = 256 * 1024 * 1024;
-var TELEGRAM_MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
-var MESSAGE_PATHS = [
-  ["chats", "list", "*", "messages"],
-  ["left_chats", "list", "*", "messages"],
-  ["messages"]
-];
-var ITEM_PATHS = [...MESSAGE_PATHS, ...ACCOUNT_SECTIONS.map((section) => section.path)];
-var SECTION_ROOTS = new Set(ACCOUNT_SECTIONS.map((section) => section.path[0]));
-var LISTED_SECTIONS = new Set(ACCOUNT_SECTIONS.filter((section) => section.path.length === 2).map((section) => section.path[0]));
-
-// src/workers/telegram-messages/export-facts.ts
-var SCAN_CHUNK_BYTES = 1 << 20;
-var remembered = new Map;
-
-// src/workers/telegram-messages/archive-target.ts
-var PROFILE_SCAN_BYTES = 16 * 1024 * 1024;
-
-// src/workers/file-extraction/size-limit-stops.ts
-var reporter = createLimitStopReporter();
-
-// src/core/notes-app-folders.ts
-import { existsSync as existsSync23, lstatSync as lstatSync10, readdirSync as readdirSync4, readFileSync as readFileSync20 } from "node:fs";
-import { homedir as homedir11 } from "node:os";
-import { dirname as dirname25, join as join28, relative as relative6, sep as sep7 } from "node:path";
-var OBSIDIAN_SETTINGS_FOLDER = ".obsidian";
-var REFLECT_SETTINGS_FOLDER = ".reflect";
-var NOTES_APPS = Object.freeze([
-  { id: "obsidian", settingsFolder: OBSIDIAN_SETTINGS_FOLDER, knownFolders: (lookup) => obsidianVaultFolders(lookup) },
-  { id: "reflect", settingsFolder: REFLECT_SETTINGS_FOLDER, knownFolders: (lookup) => reflectGraphFolders(lookup) }
-]);
-var NOTES_APP_SETTINGS_FOLDERS = Object.freeze([OBSIDIAN_SETTINGS_FOLDER, REFLECT_SETTINGS_FOLDER]);
-function realFolder(path) {
-  try {
-    const stat = lstatSync10(path);
-    return stat.isDirectory() && !stat.isSymbolicLink();
-  } catch {
-    return false;
-  }
-}
-function readTextFile(path) {
-  try {
-    return readFileSync20(path, "utf8");
-  } catch {
-    return;
-  }
-}
-function obsidianConfigFiles(lookup = {}) {
-  const home = lookup.home ?? homedir11();
-  const platform = lookup.platform ?? process.platform;
-  const env = lookup.env ?? process.env;
-  if (platform === "darwin")
-    return [join28(home, "Library/Application Support/obsidian/obsidian.json")];
-  if (platform === "win32") {
-    return env.APPDATA ? [join28(env.APPDATA, "obsidian", "obsidian.json")] : [];
-  }
-  const config = env.XDG_CONFIG_HOME?.trim() || join28(home, ".config");
-  return [
-    join28(config, "obsidian/obsidian.json"),
-    join28(home, ".var/app/md.obsidian.Obsidian/config/obsidian/obsidian.json"),
-    join28(home, "snap/obsidian/current/.config/obsidian/obsidian.json")
-  ];
-}
-function obsidianVaultFolders(lookup = {}) {
-  const readText = lookup.readText ?? readTextFile;
-  const isFolder = lookup.isFolder ?? realFolder;
-  const found = [];
-  for (const file of obsidianConfigFiles(lookup)) {
-    const text = readText(file);
-    if (!text)
-      continue;
-    let parsed;
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-      continue;
-    }
-    const vaults = parsed?.vaults;
-    if (!vaults || typeof vaults !== "object")
-      continue;
-    for (const entry of Object.values(vaults)) {
-      const path = entry?.path;
-      if (typeof path !== "string" || !path.startsWith("/") || path.includes("\x00"))
-        continue;
-      const folder = path.length > 1 && path.endsWith("/") ? path.slice(0, -1) : path;
-      if (found.includes(folder))
-        continue;
-      if (isFolder(folder) && isFolder(join28(folder, OBSIDIAN_SETTINGS_FOLDER)))
-        found.push(folder);
-    }
-  }
-  return found;
-}
-function reflectGraphFolders(lookup = {}) {
-  const home = lookup.home ?? homedir11();
-  if ((lookup.platform ?? process.platform) !== "darwin")
-    return [];
-  const readText = lookup.readText ?? readTextFile;
-  const isFolder = lookup.isFolder ?? realFolder;
-  const listFolder = lookup.listFolder ?? listChildren;
-  const candidates = [];
-  const recent = readText(join28(home, "Library/Application Support/reflect-open/recent-graphs.json"));
-  if (recent) {
-    try {
-      const parsed = JSON.parse(recent);
-      const entries = Array.isArray(parsed) ? parsed : parsed?.graphs;
-      if (Array.isArray(entries)) {
-        for (const entry of entries) {
-          const root = entry?.root;
-          if (typeof root === "string" && root.startsWith("/") && !root.includes("\x00"))
-            candidates.push(root);
-        }
-      }
-    } catch {}
-  }
-  const icloud = join28(home, "Library/Mobile Documents/iCloud~app~reflect/Documents");
-  for (const name of listFolder(icloud))
-    if (!name.startsWith("."))
-      candidates.push(join28(icloud, name));
-  const found = [];
-  for (const candidate of candidates) {
-    const folder = candidate.length > 1 && candidate.endsWith("/") ? candidate.slice(0, -1) : candidate;
-    if (found.includes(folder))
-      continue;
-    if (isFolder(folder) && isFolder(join28(folder, REFLECT_SETTINGS_FOLDER)))
-      found.push(folder);
-  }
-  return found;
-}
-function listChildren(path) {
-  try {
-    return readdirSync4(path);
-  } catch {
-    return [];
-  }
-}
-
-// src/workers/local-files/paths.ts
-var UNSAFE_PATH_CHARACTERS = new RegExp("[\\x00-\\x1f\\x7f-\\x9f" + String.fromCharCode(8232, 8233) + "]");
-var DEFAULT_EXCLUSION_LABELS = Object.freeze({
-  system_library: "Application data",
-  trash: "Trash",
-  cache: "Caches",
-  version_control: "Version control",
-  dependencies: "Installed dependencies",
-  build_output: "Build output",
-  app_bundle: "Application",
-  app_settings: "App settings",
-  olympus_data: "Olympus's own data",
-  synced_by_another_source: "Already indexed through its own source"
-});
-var CACHE_SEGMENTS = new Set(["caches", ".cache", ".npm", ".bun", ".yarn", ".pnpm-store", ".gradle", ".m2"]);
-var TRASH_SEGMENTS = new Set([".trash", ".trashes", ".trash-1000"]);
-var VCS_SEGMENTS = new Set([".git", ".hg", ".svn"]);
-var DEPENDENCY_SEGMENTS = new Set(["node_modules", ".venv", "venv", "bower_components", "pods"]);
-var BUILD_SEGMENTS = new Set([
-  "dist",
-  "build",
-  "target",
-  ".next",
-  ".nuxt",
-  ".svelte-kit",
-  "__pycache__",
-  "deriveddata",
-  ".build",
-  ".tox"
-]);
-var APP_SETTINGS_SEGMENTS = new Set(NOTES_APP_SETTINGS_FOLDERS);
-var SYNCED_FOLDER_NAMES = new Set(["dropbox", "google drive"]);
-var ownRootIndexes = new WeakMap;
-
-// src/workers/local-files/scope.ts
-var LOCAL_FILES_PROVIDER = "local_files";
-var LOCAL_FILES_ACCOUNT_SCOPE = "this_computer";
-var LOCAL_FILES_POLICY_SOURCE = `${LOCAL_FILES_PROVIDER}.${LOCAL_FILES_ACCOUNT_SCOPE}`;
-
-// src/workers/local-files/store.ts
-var LOCAL_FILES_CORPUS_ID = "secure_local.local.files";
-var LOCAL_FILES_INTERNAL_CORPUS_ID = "internal.local.files";
-var LOCAL_FILES_PUBLIC_CORPUS_ID = "public_safe.local.files";
-var LOCAL_FILES_TIER_CORPUS_IDS = Object.freeze({
-  public_safe: LOCAL_FILES_PUBLIC_CORPUS_ID,
-  internal: LOCAL_FILES_INTERNAL_CORPUS_ID,
-  secure_local: LOCAL_FILES_CORPUS_ID
-});
-var LOCAL_FILES_STORE_PLACEMENT = Object.freeze({
-  trustTier: "S4",
-  trustDomain: "secure_local",
-  secretsInContent: true
-});
-
-// src/workers/file-extraction/connector-source.ts
-var unavailableCauseLoggedAt = new Map;
-
-// src/workers/file-extraction/extractors/remote-vlm.ts
-var DEFAULT_REMOTE_EXTRACTION_PROMPT = [
-  "Extract concise evidence text from this secure-local document for private indexing.",
-  "Return only visible or directly readable content.",
-  "For tables, reports, receipts, screenshots, or scans, preserve labels, values, dates, units, and row context.",
-  "Do not infer private facts beyond the document."
-].join(" ");
-
-// src/workers/file-extraction/extractors/vlm.ts
-var DEFAULT_VLM_PROMPT = [
-  "Describe the visible content for secure-local retrieval.",
-  "Focus on document layout, headings, labels, diagrams, tables, handwriting, screenshots, and any clearly legible text.",
-  "Do not infer private facts beyond what is visible."
-].join(" ");
-var DEFAULT_VLM_PDF_PROMPT = [
-  "Faithfully transcribe this scanned PDF page for secure-local indexing.",
-  "Return visible text only. Preserve headings, table rows, amounts, dates, identifiers, labels, and row/column relationships.",
-  "Do not summarize, omit low-confidence visible text, or infer facts that are not visible."
-].join(" ");
-var VLM_PDF_PROBE_IMAGE_DATA_URL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
-var VLM_PDF_PROBE_IMAGE_BASE64 = stripDataUrlPrefix(VLM_PDF_PROBE_IMAGE_DATA_URL);
-function stripDataUrlPrefix(dataUrl) {
-  return dataUrl.replace(/^data:[^,]+,/, "");
-}
-
-// src/workers/telegram-messages/store-sync.ts
-var TELEGRAM_MESSAGES_SOURCE_ID = "telegram.messages";
-var TELEGRAM_SPOOL_REDACTION_STATE_KEY = "capture_spool_secret_redaction:telegram";
-var TELEGRAM_SPOOL_CLEARED_KEY = `${TELEGRAM_SPOOL_REDACTION_STATE_KEY}:cleared_through`;
-// src/workers/local-pacing.ts
-var GO_EASY_IDLE_FULL_SPEED_MS = 5 * 60000;
-var GO_EASY_LOCAL_WORK_RECENT_MS = 3 * 60000;
-
-// src/workers/source-scheduler.ts
-var SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS = 48 * 60 * 60 * 1000;
-var GMAIL_REQUEST_BUDGET_CLOCK_REGRESSION = "gmail_request_budget_clock_regression";
-var GOOGLE_DRIVE_REQUEST_BUDGET_CLOCK_REGRESSION = "google_drive_request_budget_clock_regression";
-var GMAIL_REQUEST_BUDGET_LEDGER_BUSY = "gmail_request_budget_ledger_busy";
-var GOOGLE_DRIVE_REQUEST_BUDGET_LEDGER_BUSY = "google_drive_request_budget_ledger_busy";
-var SCHEDULER_SOURCE_IDS = {
-  gmail: "gmail.email",
-  googleDrive: "google_drive.docs",
-  dropbox: DROPBOX_FILES_SOURCE_ID,
-  localFiles: "local.files",
-  readwise: "readwise.library",
-  xBookmarks: "x.bookmarks",
-  telegram: TELEGRAM_MESSAGES_SOURCE_ID,
-  whatsapp: WHATSAPP_PERSONAL_SOURCE_ID,
-  archiveImports: "archive.imports",
-  evernote: "evernote.notes"
-};
-var SOURCE_ARRIVAL_TARGET_MS = 10 * 60000;
-var EMBEDDING_SWEEP_MAX_BACKOFF_MS = 5 * 60000;
-var EMBEDDING_SWEEP_IDLE_FULL_PASS_MS = 30 * 60000;
-var EMBEDDING_SWEEP_RULES_VERSION = 1;
-var EMBEDDING_SWEEP_BUILD = `${EMBEDDING_SWEEP_RULES_VERSION}:${runningOlympusVersion()}`;
-var EMBEDDING_SWEEP_STORE_DEADLINE_MS = 10 * 60000;
-var EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
-var HONEST_SCHEDULER_ERROR_KINDS = new Set([
-  "api_request_guard",
-  "config_missing_folder_argument",
-  "scope_root_missing",
-  "scope_root_permission_needed",
-  "scope_root_helper_needed",
-  "scope_root_unreadable",
-  "credential_missing",
-  "credential_reauth_required",
-  "credential_refresh_busy",
-  "credential_session_latched",
-  "reconcile_incomplete",
-  READWISE_DAILY_REQUEST_GUARD_REASON,
-  GMAIL_DAILY_REQUEST_GUARD_REASON,
-  GOOGLE_DRIVE_DAILY_REQUEST_GUARD_REASON,
-  GMAIL_REQUEST_BUDGET_CLOCK_REGRESSION,
-  GOOGLE_DRIVE_REQUEST_BUDGET_CLOCK_REGRESSION,
-  GMAIL_REQUEST_BUDGET_LEDGER_BUSY,
-  GOOGLE_DRIVE_REQUEST_BUDGET_LEDGER_BUSY
-]);
-var UTC_DAY_SCOPED_DEGRADED_REASONS = new Set([
-  "daily_api_request_guard",
-  "daily_resource_read_guard",
-  "daily_cost_guard",
-  "head_api_request_reserve_guard",
-  "head_resource_read_reserve_guard",
-  "head_cost_reserve_guard",
-  "reconcile_cost_to_finish_guard",
-  READWISE_DAILY_REQUEST_GUARD_REASON,
-  GMAIL_DAILY_REQUEST_GUARD_REASON,
-  GMAIL_CONFIRMATION_RESERVE_REASON,
-  GOOGLE_DRIVE_DAILY_REQUEST_GUARD_REASON
-]);
-var SCHEDULER_PARK_REASONS = new Set([
-  ...UTC_DAY_SCOPED_DEGRADED_REASONS,
-  "provider_rate_limit",
-  "provider_rate_limited",
-  "x.rate_limit",
-  "evernote.rate_limit",
-  "readwise.rate_limit"
-]);
-var EXTRACTION_JOBS_REFUSED_WARNING = "extraction_jobs_refused";
-var LOCAL_FILES_SCHEDULER_WARNINGS = [
-  "local_files_unreadable_folders",
-  "local_files_watch_limit_reached",
-  "local_files_live_updates_off",
-  "local_files_deletions_held"
-];
-var VERBATIM_SCHEDULER_WARNINGS = new Set([
-  EXTRACTION_JOBS_REFUSED_WARNING,
-  ...LOCAL_FILES_SCHEDULER_WARNINGS
-]);
-
 // src/workers/engine/runtime/environment.ts
 function parseOptionalTimeoutSeconds(value, name) {
   if (value === undefined || value.trim().length === 0)
@@ -39715,18 +37418,734 @@ function createSourceIndexEmbeddingProviderFromEnv(env = process.env) {
     ...env.OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_EPOCH ? { epochId: env.OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_EPOCH } : {}
   });
 }
-var SCOPE_APPROVED_SOURCE_IDS = new Set([
-  SCHEDULER_SOURCE_IDS.gmail,
-  SCHEDULER_SOURCE_IDS.googleDrive,
-  SCHEDULER_SOURCE_IDS.dropbox,
-  SCHEDULER_SOURCE_IDS.localFiles
+
+// src/core/source-storage.ts
+var DEFAULT_STORAGE_SLOT = DEFAULT_ACCOUNT_SLOT;
+
+class SourceStorageUnavailableError extends Error {
+  code = "source_storage_unavailable";
+  sourceId;
+  slot;
+  state;
+  constructor(sourceId, slot, state) {
+    const account = slot === DEFAULT_STORAGE_SLOT ? sourceId : `${sourceId} (account ${slot})`;
+    super(`${account} is not available: ${unavailableStateReason(state)}.`);
+    this.name = "SourceStorageUnavailableError";
+    this.sourceId = sourceId;
+    this.slot = slot;
+    this.state = state;
+  }
+}
+var adoptionEnabled = false;
+var storeOpens2 = 0;
+function frontReadOnly(options) {
+  storeOpens2 += 1;
+  return writableStoreOpensForbidden() && options.readOnly !== true ? { ...options, readOnly: true } : options;
+}
+function openConnectorStore(account, requested, env = process.env) {
+  const options = frontReadOnly(requested);
+  const slot = account.slot ?? DEFAULT_STORAGE_SLOT;
+  let registry = readSourceRegistry(env);
+  assertOpenable(registry, account.sourceId, slot);
+  if (!options.readOnly)
+    assertStoreTierLedgerCanOpen(options.dbPath);
+  if (adoptionEnabled && options.readOnly !== true) {
+    const entry = findRegistryAccount(registry, account.sourceId, slot);
+    if (!entry?.corpus_ids.includes(options.corpusId)) {
+      adopt(env, account.sourceId, slot, options.dbPath, options.corpusId);
+      registry = readSourceRegistry(env);
+    }
+  }
+  const mediaHolder = placedStoreHolder({ sourceId: account.sourceId, slot }, options, env, registry);
+  return new LocalConnectorStore(mediaHolder ? { ...options, mediaHolder } : options);
+}
+var CAPTURE_CLAIM_RECLAIM_AGE_MS = 60 * 60000;
+function unavailableStateReason(state) {
+  if (state === "moving")
+    return "its files are being moved into its folder";
+  return state === "deleting" ? "its data is being deleted" : "its data was deleted";
+}
+function unavailableState(entry) {
+  if (entry === undefined)
+    return;
+  if (entry.state !== "active")
+    return entry.state;
+  return sourceAccountMovePending(entry) ? "moving" : undefined;
+}
+function assertOpenable(registry, sourceId, slot) {
+  const state = unavailableState(findRegistryAccount(registry, sourceId, slot));
+  if (state !== undefined)
+    throw new SourceStorageUnavailableError(sourceId, slot, state);
+}
+function adopt(env, sourceId, slot, dbPath, corpusId) {
+  updateSourceRegistry(env, (registry) => {
+    assertOpenable(registry, sourceId, slot);
+    const entry = findRegistryAccount(registry, sourceId, slot);
+    if (!entry) {
+      registry.accounts.push({
+        source_id: sourceId,
+        slot,
+        state: "active",
+        layout: adoptedLayout(env, sourceId, slot, dbPath),
+        corpus_ids: corpusId === undefined ? [] : [corpusId],
+        created_at: new Date().toISOString()
+      });
+    } else if (corpusId !== undefined && !entry.corpus_ids.includes(corpusId)) {
+      entry.corpus_ids.push(corpusId);
+    }
+  });
+}
+function adoptedLayout(env, sourceId, slot, dbPath) {
+  if (decideAccountLayout(sourceId, env).layout !== "folder")
+    return "legacy";
+  return isInsideAccountFolder(dbPath, { source_id: sourceId, slot }, env) ? "folder" : "legacy";
+}
+
+// src/core/file-scope-sources.ts
+var definitions = new Map;
+var builtInIds = new Set;
+function registerFileScopeSource(definition) {
+  const { sourceId, provider } = definition;
+  if (!sourceId || !provider)
+    throw new Error("A file-scope source needs a source id and a provider.");
+  if (definition.account === "provider_account" && !definition.credentialCapability) {
+    throw new Error(`File-scope source ${sourceId} binds to a provider account and needs a credential capability.`);
+  }
+  if (definition.account === "this_computer" && definition.credentialCapability) {
+    throw new Error(`File-scope source ${sourceId} binds to this computer and must not name a credential capability.`);
+  }
+  if (definitions.has(sourceId))
+    throw new Error(`File-scope source ${sourceId} is already registered.`);
+  for (const other of definitions.values()) {
+    if (other.provider === provider) {
+      throw new Error(`File-scope provider ${provider} is already registered by ${other.sourceId}.`);
+    }
+  }
+  definitions.set(sourceId, definition);
+}
+function registerBuiltIn(definition) {
+  registerFileScopeSource(definition);
+  builtInIds.add(definition.sourceId);
+}
+registerBuiltIn({
+  sourceId: "google_drive.docs",
+  provider: "google_drive",
+  account: "provider_account",
+  credentialCapability: "google_drive.docs.sync",
+  pinEnvName: "OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CREDENTIAL_HANDLE",
+  corpusIdsToInvalidate: ["internal.drive.docs", "secure_local.drive.docs"],
+  filterFamily: "folder_id",
+  normalizeKey: (key) => key.trim(),
+  rootKeys: ["/", "root"],
+  label: "Google Drive",
+  dispositionSourceId: "google_drive.personal"
+});
+registerBuiltIn({
+  sourceId: "dropbox.files",
+  provider: "dropbox",
+  account: "provider_account",
+  credentialCapability: "dropbox.files.sync",
+  pinEnvName: "OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_CREDENTIAL_HANDLE",
+  corpusIdsToInvalidate: ["secure_local.dropbox.files"],
+  filterFamily: "locator_path",
+  normalizeKey: (key) => key.trim().toLowerCase(),
+  rootKeys: ["/"],
+  label: "Dropbox",
+  dispositionSourceId: "dropbox.personal"
+});
+registerBuiltIn({
+  sourceId: "local.files",
+  provider: "local_files",
+  account: "this_computer",
+  corpusIdsToInvalidate: ["secure_local.local.files"],
+  filterFamily: "locator_path",
+  normalizeKey: (key) => {
+    const trimmed = key.trim().normalize("NFC");
+    return trimmed.length > 1 ? trimmed.replace(/\/+$/, "") : trimmed;
+  },
+  rootKeys: ["/"],
+  label: "Files on this computer",
+  dispositionSourceId: "local.files",
+  wholeScopeWords: {
+    row: "Everything on this computer",
+    prompt: "Olympus will read every folder on this computer, now and later, except folders you set to Names only or Skip.",
+    confirm: "Yes, use the whole computer",
+    summary: "Everything else on this computer: fully indexed, including folders added later.",
+    onlyFull: "The whole computer is all or nothing. Set Names only or Skip on folders instead.",
+    needConfirm: "Confirm the whole computer first."
+  }
+});
+registerBuiltIn({
+  sourceId: "evernote.notes",
+  provider: "evernote",
+  account: "provider_account",
+  credentialCapability: "evernote.notes.sync",
+  pinEnvName: "OLYMPUS_SOURCE_INDEX_EVERNOTE_CREDENTIAL_HANDLE",
+  corpusIdsToInvalidate: ["secure_local.evernote.notes", "internal.evernote.notes"],
+  filterFamily: "folder_id",
+  itemKeysExact: true,
+  normalizeKey: (key) => key.trim(),
+  rootKeys: ["/"],
+  label: "Evernote",
+  dispositionSourceId: "evernote.notes",
+  wholeScopeWords: {
+    row: "All notebooks",
+    prompt: "Olympus will read every notebook you own, including notebooks added later, except notebooks you set to Names only or Skip.",
+    confirm: "Yes, read all my notebooks",
+    summary: "Every other notebook you own: fully read, including notebooks added later.",
+    onlyFull: "All notebooks is all or nothing. Set Names only or Skip on notebooks instead.",
+    needConfirm: "Confirm all notebooks first."
+  }
+});
+
+// src/core/mail-source-scope.ts
+var GMAIL_SCOPE_SENDER_SAMPLE = 100;
+var GMAIL_SCOPE_BROWSE_MAX_REQUESTS = 1 + 5 + 2 + GMAIL_SCOPE_SENDER_SAMPLE;
+
+// src/core/file-extraction-source.ts
+var FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS = Object.freeze({
+  source_item_not_found: "failed_terminal",
+  source_permission_denied: "failed_terminal",
+  source_version_gone: "failed_terminal",
+  source_content_unavailable: "skipped_unsupported",
+  source_request_rejected: "failed_terminal",
+  source_too_large: "skipped_too_large",
+  source_rate_limited: "failed_retryable",
+  source_unavailable: "failed_retryable",
+  source_auth_expired: "failed_retryable",
+  source_budget_exhausted: "failed_retryable",
+  network_unreachable: "failed_retryable",
+  network_socket_closed: "failed_retryable"
+});
+
+// src/core/google-service-account.ts
+var GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token";
+
+// src/core/oauth-relay.ts
+var OAUTH_RELAY_STATE_TTL_MS = 10 * 60 * 1000;
+
+// src/workers/credential-broker/index.ts
+var PUBLIC_CREDENTIAL_PROVIDERS = [
+  "readwise",
+  "gmail",
+  "google_drive",
+  "dropbox",
+  "telegram",
+  "whatsapp_personal",
+  "x",
+  "evernote"
+];
+var PRIVATE_CREDENTIAL_PROVIDERS = [
+  "notion",
+  "google_calendar",
+  "gcp",
+  "whatsapp_business",
+  "apple_messages",
+  "reflect",
+  "roam"
+];
+var CREDENTIAL_PROVIDERS = [
+  ...PUBLIC_CREDENTIAL_PROVIDERS,
+  ...PUBLIC_RUNTIME_BUILD ? [] : PRIVATE_CREDENTIAL_PROVIDERS
+];
+var GOOGLE_GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
+var GOOGLE_DRIVE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly";
+var GOOGLE_CALENDAR_READONLY_SCOPE = "https://www.googleapis.com/auth/calendar.readonly";
+var GOOGLE_SHARED_SERVICE_ACCOUNT_JSON_ENV_NAME = "OLYMPUS_CREDENTIAL_GOOGLE_OLYMPUS_SERVICE_ACCOUNT_JSON";
+function delegatedGoogleHandle(options) {
+  return {
+    handle: options.handle,
+    provider: options.provider,
+    accountRole: options.accountRole,
+    trustDomain: options.trustDomain,
+    allowedCapabilities: [options.capability],
+    scopes: [...options.scopes],
+    tokenEnvNames: [],
+    serviceAccountJwt: {
+      tokenUrl: GOOGLE_OAUTH_TOKEN_URL,
+      credentialJsonEnvNames: [
+        ...options.credentialJsonEnvNames,
+        GOOGLE_SHARED_SERVICE_ACCOUNT_JSON_ENV_NAME
+      ],
+      impersonatedSubjectEnvNames: [...options.impersonatedSubjectEnvNames],
+      scopes: [...options.scopes]
+    },
+    expiresInSeconds: 3600
+  };
+}
+var DEFAULT_ENV_HANDLES = [
+  {
+    handle: "gmail.personal",
+    provider: "gmail",
+    accountRole: "personal",
+    trustDomain: "secure_local",
+    allowedCapabilities: ["gmail.email.sync"],
+    scopes: [GOOGLE_GMAIL_READONLY_SCOPE],
+    tokenEnvNames: [],
+    oauth2Refresh: {
+      tokenUrl: GOOGLE_OAUTH_TOKEN_URL,
+      clientIdEnvNames: [
+        "OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_OAUTH2_CLIENT_ID",
+        ...PUBLIC_RUNTIME_BUILD ? [] : ["OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_CLIENT_ID"]
+      ],
+      clientSecretEnvNames: [
+        "OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_OAUTH2_CLIENT_SECRET",
+        ...PUBLIC_RUNTIME_BUILD ? [] : ["OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_CLIENT_SECRET"]
+      ],
+      refreshTokenEnvNames: [
+        "OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_OAUTH2_REFRESH_TOKEN",
+        ...PUBLIC_RUNTIME_BUILD ? [] : ["OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_REFRESH_TOKEN"]
+      ],
+      scopes: [GOOGLE_GMAIL_READONLY_SCOPE]
+    },
+    expiresInSeconds: 3600
+  },
+  ...PUBLIC_RUNTIME_BUILD ? [] : [
+    delegatedGoogleHandle({
+      handle: "gmail.business_ocu",
+      provider: "gmail",
+      accountRole: "business_ocu",
+      trustDomain: "secure_local",
+      capability: "gmail.email.sync",
+      scopes: [GOOGLE_GMAIL_READONLY_SCOPE],
+      impersonatedSubjectEnvNames: [
+        "OLYMPUS_CREDENTIAL_GMAIL_BUSINESS_OCU_SUBJECT",
+        "OLYMPUS_CREDENTIAL_GOOGLE_BUSINESS_SUBJECT"
+      ],
+      credentialJsonEnvNames: ["OLYMPUS_CREDENTIAL_GMAIL_BUSINESS_OCU_SERVICE_ACCOUNT_JSON"]
+    }),
+    {
+      handle: "gmail.personal.direct",
+      provider: "gmail",
+      accountRole: "personal",
+      trustDomain: "secure_local",
+      allowedCapabilities: ["gmail.email.sync"],
+      scopes: [GOOGLE_GMAIL_READONLY_SCOPE],
+      tokenEnvNames: [],
+      oauth2Refresh: {
+        tokenUrl: GOOGLE_OAUTH_TOKEN_URL,
+        clientIdEnvNames: [
+          "OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_DIRECT_OAUTH2_CLIENT_ID",
+          "OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_CLIENT_ID"
+        ],
+        clientSecretEnvNames: [
+          "OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_DIRECT_OAUTH2_CLIENT_SECRET",
+          "OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_CLIENT_SECRET"
+        ],
+        refreshTokenEnvNames: [
+          "OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_DIRECT_OAUTH2_REFRESH_TOKEN",
+          "OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_REFRESH_TOKEN"
+        ],
+        scopes: [GOOGLE_GMAIL_READONLY_SCOPE]
+      },
+      expiresInSeconds: 3600
+    }
+  ],
+  {
+    handle: "google_drive.personal",
+    provider: "google_drive",
+    accountRole: "personal",
+    trustDomain: "internal",
+    allowedCapabilities: ["google_drive.docs.sync"],
+    scopes: [GOOGLE_DRIVE_READONLY_SCOPE],
+    tokenEnvNames: [],
+    oauth2Refresh: {
+      tokenUrl: GOOGLE_OAUTH_TOKEN_URL,
+      clientIdEnvNames: [
+        "OLYMPUS_CREDENTIAL_GOOGLE_DRIVE_PERSONAL_OAUTH2_CLIENT_ID",
+        ...PUBLIC_RUNTIME_BUILD ? [] : ["OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_CLIENT_ID"]
+      ],
+      clientSecretEnvNames: [
+        "OLYMPUS_CREDENTIAL_GOOGLE_DRIVE_PERSONAL_OAUTH2_CLIENT_SECRET",
+        ...PUBLIC_RUNTIME_BUILD ? [] : ["OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_CLIENT_SECRET"]
+      ],
+      refreshTokenEnvNames: [
+        "OLYMPUS_CREDENTIAL_GOOGLE_DRIVE_PERSONAL_OAUTH2_REFRESH_TOKEN",
+        ...PUBLIC_RUNTIME_BUILD ? [] : ["OLYMPUS_CREDENTIAL_GOOGLE_CASTOR_OAUTH2_REFRESH_TOKEN"]
+      ],
+      scopes: [GOOGLE_DRIVE_READONLY_SCOPE]
+    },
+    expiresInSeconds: 3600
+  },
+  ...PUBLIC_RUNTIME_BUILD ? [] : [
+    delegatedGoogleHandle({
+      handle: "gmail.personal.delegated",
+      provider: "gmail",
+      accountRole: "personal",
+      trustDomain: "secure_local",
+      capability: "gmail.email.sync",
+      scopes: [GOOGLE_GMAIL_READONLY_SCOPE],
+      impersonatedSubjectEnvNames: [
+        "OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_SUBJECT",
+        "OLYMPUS_CREDENTIAL_GOOGLE_PERSONAL_SUBJECT"
+      ],
+      credentialJsonEnvNames: ["OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_SERVICE_ACCOUNT_JSON"]
+    }),
+    delegatedGoogleHandle({
+      handle: "gmail.business_ocu.delegated",
+      provider: "gmail",
+      accountRole: "business_ocu",
+      trustDomain: "secure_local",
+      capability: "gmail.email.sync",
+      scopes: [GOOGLE_GMAIL_READONLY_SCOPE],
+      impersonatedSubjectEnvNames: [
+        "OLYMPUS_CREDENTIAL_GMAIL_BUSINESS_OCU_SUBJECT",
+        "OLYMPUS_CREDENTIAL_GOOGLE_BUSINESS_SUBJECT"
+      ],
+      credentialJsonEnvNames: ["OLYMPUS_CREDENTIAL_GMAIL_BUSINESS_OCU_SERVICE_ACCOUNT_JSON"]
+    }),
+    delegatedGoogleHandle({
+      handle: "google_drive.personal.delegated",
+      provider: "google_drive",
+      accountRole: "personal",
+      trustDomain: "internal",
+      capability: "google_drive.docs.sync",
+      scopes: [GOOGLE_DRIVE_READONLY_SCOPE],
+      impersonatedSubjectEnvNames: [
+        "OLYMPUS_CREDENTIAL_GOOGLE_DRIVE_PERSONAL_SUBJECT",
+        "OLYMPUS_CREDENTIAL_GOOGLE_PERSONAL_SUBJECT"
+      ],
+      credentialJsonEnvNames: ["OLYMPUS_CREDENTIAL_GOOGLE_DRIVE_PERSONAL_SERVICE_ACCOUNT_JSON"]
+    }),
+    delegatedGoogleHandle({
+      handle: "google_calendar.personal.delegated",
+      provider: "google_calendar",
+      accountRole: "personal",
+      trustDomain: "secure_local",
+      capability: "google_calendar.events.read",
+      scopes: [GOOGLE_CALENDAR_READONLY_SCOPE],
+      impersonatedSubjectEnvNames: [
+        "OLYMPUS_CREDENTIAL_GOOGLE_CALENDAR_PERSONAL_SUBJECT",
+        "OLYMPUS_CREDENTIAL_GOOGLE_PERSONAL_SUBJECT"
+      ],
+      credentialJsonEnvNames: ["OLYMPUS_CREDENTIAL_GOOGLE_CALENDAR_PERSONAL_SERVICE_ACCOUNT_JSON"]
+    })
+  ],
+  {
+    handle: "readwise.personal",
+    provider: "readwise",
+    accountRole: "personal",
+    trustDomain: "internal",
+    allowedCapabilities: ["readwise.sync"],
+    scopes: ["readwise.export:read", "readwise.reader:read"],
+    tokenEnvNames: [
+      "OLYMPUS_CREDENTIAL_READWISE_PERSONAL_TOKEN",
+      ...PUBLIC_RUNTIME_BUILD ? [] : ["OLYMPUS_CREDENTIAL_READWISE_CASTOR_RUNTIME_TOKEN"],
+      "OLYMPUS_SOURCE_INDEX_READWISE_TOKEN",
+      "READWISE_TOKEN"
+    ],
+    expiresInSeconds: 3600
+  },
+  {
+    handle: "evernote.personal",
+    provider: "evernote",
+    accountRole: "personal",
+    trustDomain: "secure_local",
+    allowedCapabilities: ["evernote.notes.sync"],
+    scopes: ["read"],
+    tokenEnvNames: [],
+    expiresInSeconds: 3600
+  },
+  {
+    handle: "dropbox.personal",
+    provider: "dropbox",
+    accountRole: "personal",
+    trustDomain: "secure_local",
+    allowedCapabilities: ["dropbox.files.sync"],
+    scopes: ["files.metadata.read", "files.content.read", "sharing.read"],
+    tokenEnvNames: [
+      "OLYMPUS_CREDENTIAL_DROPBOX_PERSONAL_ACCESS_TOKEN",
+      "OLYMPUS_SOURCE_INDEX_DROPBOX_TOKEN",
+      "DROPBOX_ACCESS_TOKEN"
+    ],
+    oauth2Refresh: {
+      tokenUrl: "https://api.dropboxapi.com/oauth2/token",
+      clientIdEnvNames: [
+        "OLYMPUS_CREDENTIAL_DROPBOX_PERSONAL_OAUTH2_CLIENT_ID",
+        "OLYMPUS_CREDENTIAL_DROPBOX_PERSONAL_APP_KEY"
+      ],
+      clientSecretEnvNames: [
+        "OLYMPUS_CREDENTIAL_DROPBOX_PERSONAL_OAUTH2_CLIENT_SECRET",
+        "OLYMPUS_CREDENTIAL_DROPBOX_PERSONAL_APP_SECRET"
+      ],
+      refreshTokenEnvNames: [
+        "OLYMPUS_CREDENTIAL_DROPBOX_PERSONAL_OAUTH2_REFRESH_TOKEN",
+        "OLYMPUS_CREDENTIAL_DROPBOX_PERSONAL_REFRESH_TOKEN"
+      ],
+      scopes: ["files.metadata.read", "files.content.read", "sharing.read"]
+    },
+    expiresInSeconds: 3600
+  },
+  {
+    handle: "telegram.personal",
+    provider: "telegram",
+    sessionKind: "mtproto_session",
+    accountRole: "personal",
+    trustDomain: "secure_local",
+    allowedCapabilities: ["telegram.messages.sync"],
+    scopes: [],
+    tokenEnvNames: [],
+    statusEnvNames: [
+      "OLYMPUS_CREDENTIAL_TELEGRAM_PERSONAL_MTPROTO_SESSION_READY",
+      "OLYMPUS_CREDENTIAL_TELEGRAM_PERSONAL_TDLIB_SESSION_READY"
+    ],
+    expiresInSeconds: 3600,
+    backendState: {
+      kind: "mtproto_session",
+      mtprotoProfileId: "telegram_personal",
+      runtimeEndpointId: "telegram_local_telethon_reader",
+      library: "telethon",
+      leaseId: "telegram_personal_mtproto_readonly_lease",
+      backendLabel: "local_private:telegram_telethon_reader"
+    }
+  },
+  ...PUBLIC_RUNTIME_BUILD ? [] : [{
+    handle: "whatsapp.business",
+    provider: "whatsapp_business",
+    sessionKind: "webhook_token",
+    accountRole: "business",
+    trustDomain: "secure_local",
+    allowedCapabilities: ["whatsapp.business.messages.sync"],
+    scopes: ["whatsapp_business_messaging", "whatsapp_business_management"],
+    tokenEnvNames: [],
+    statusEnvNames: ["OLYMPUS_CREDENTIAL_WHATSAPP_BUSINESS_RUNTIME_READY"],
+    expiresInSeconds: 900,
+    backendState: {
+      kind: "webhook_token",
+      webhookIntegrationId: "twilio_whatsapp_business",
+      validationMode: "broker_verified_event",
+      verifierReference: "twilio_whatsapp_business_verifier",
+      leaseId: "twilio_whatsapp_business_webhook_lease",
+      backendLabel: "twilio:whatsapp_business_gateway"
+    }
+  }],
+  {
+    handle: "whatsapp.personal_local",
+    provider: "whatsapp_personal",
+    sessionKind: "local_app_database",
+    accountRole: "personal_local",
+    trustDomain: "secure_local",
+    allowedCapabilities: ["whatsapp.personal.messages.sync"],
+    scopes: [],
+    tokenEnvNames: [],
+    statusEnvNames: ["OLYMPUS_CREDENTIAL_WHATSAPP_PERSONAL_LOCAL_DB_READY"],
+    expiresInSeconds: 3600,
+    backendState: {
+      kind: "local_app_database",
+      databaseSourceId: "whatsapp_personal_local",
+      readerWorker: "whatsapp_local_reader",
+      databaseRole: "messages_readonly",
+      scopeLabel: "personal_messages",
+      backendLabel: "local_private:whatsapp_local_app_reader"
+    }
+  },
+  ...PUBLIC_RUNTIME_BUILD ? [] : [{
+    handle: "apple_messages.local",
+    provider: "apple_messages",
+    sessionKind: "local_app_database",
+    accountRole: "local",
+    trustDomain: "secure_local",
+    allowedCapabilities: ["apple_messages.messages.sync"],
+    scopes: [],
+    tokenEnvNames: [],
+    statusEnvNames: ["OLYMPUS_CREDENTIAL_APPLE_MESSAGES_LOCAL_DB_READY"],
+    expiresInSeconds: 3600,
+    backendState: {
+      kind: "local_app_database",
+      databaseSourceId: "apple_messages_local",
+      readerWorker: "apple_messages_reader",
+      databaseRole: "messages_readonly",
+      scopeLabel: "local_messages",
+      backendLabel: "local_private:apple_messages_reader"
+    }
+  }],
+  {
+    handle: "x.bookmarks.personal",
+    provider: "x",
+    accountRole: "personal",
+    trustDomain: "internal",
+    allowedCapabilities: ["x.bookmarks.sync"],
+    scopes: ["tweet.read", "users.read", "bookmark.read", "offline.access"],
+    tokenEnvNames: [
+      "OLYMPUS_CREDENTIAL_X_BOOKMARKS_PERSONAL_ACCESS_TOKEN",
+      "OLYMPUS_CREDENTIAL_X_BOOKMARKS_PERSONAL_TOKEN"
+    ],
+    oauth2Refresh: {
+      tokenUrl: "https://api.x.com/2/oauth2/token",
+      clientIdEnvNames: [
+        "OLYMPUS_CREDENTIAL_X_BOOKMARKS_PERSONAL_OAUTH2_CLIENT_ID",
+        "OLYMPUS_SOURCE_INDEX_X_OAUTH2_CLIENT_ID",
+        "X_OAUTH2_CLIENT_ID"
+      ],
+      clientSecretEnvNames: [
+        "OLYMPUS_CREDENTIAL_X_BOOKMARKS_PERSONAL_OAUTH2_CLIENT_SECRET",
+        "OLYMPUS_SOURCE_INDEX_X_OAUTH2_CLIENT_SECRET",
+        "X_OAUTH2_CLIENT_SECRET"
+      ],
+      refreshTokenEnvNames: [
+        "OLYMPUS_CREDENTIAL_X_BOOKMARKS_PERSONAL_OAUTH2_REFRESH_TOKEN",
+        "OLYMPUS_SOURCE_INDEX_X_OAUTH2_REFRESH_TOKEN",
+        "X_OAUTH2_REFRESH_TOKEN"
+      ],
+      scopes: ["tweet.read", "users.read", "bookmark.read", "offline.access"]
+    },
+    expiresInSeconds: 3600
+  },
+  ...PUBLIC_RUNTIME_BUILD ? [] : [
+    {
+      handle: "reflect.archive",
+      provider: "reflect",
+      sessionKind: "archive_path",
+      accountRole: "archive",
+      trustDomain: "internal",
+      allowedCapabilities: ["reflect.archive.import"],
+      scopes: [],
+      tokenEnvNames: [],
+      statusEnvNames: ["OLYMPUS_CREDENTIAL_REFLECT_ARCHIVE_READY"],
+      expiresInSeconds: 3600,
+      backendState: {
+        kind: "archive_path",
+        archiveRootAlias: "reflect_archive",
+        readerWorker: "archive_import_reader",
+        contentBounds: "approved_archive_root",
+        backendLabel: "local_private:archive_import"
+      }
+    },
+    {
+      handle: "roam.archive",
+      provider: "roam",
+      sessionKind: "archive_path",
+      accountRole: "archive",
+      trustDomain: "internal",
+      allowedCapabilities: ["roam.archive.import"],
+      scopes: [],
+      tokenEnvNames: [],
+      statusEnvNames: ["OLYMPUS_CREDENTIAL_ROAM_ARCHIVE_READY"],
+      expiresInSeconds: 3600,
+      backendState: {
+        kind: "archive_path",
+        archiveRootAlias: "roam_archive",
+        readerWorker: "archive_import_reader",
+        contentBounds: "approved_archive_root",
+        backendLabel: "local_private:archive_import"
+      }
+    },
+    {
+      handle: "evernote.archive",
+      provider: "evernote",
+      sessionKind: "archive_path",
+      accountRole: "archive",
+      trustDomain: "internal",
+      allowedCapabilities: ["evernote.archive.import"],
+      scopes: [],
+      tokenEnvNames: [],
+      statusEnvNames: ["OLYMPUS_CREDENTIAL_EVERNOTE_ARCHIVE_READY"],
+      expiresInSeconds: 3600,
+      backendState: {
+        kind: "archive_path",
+        archiveRootAlias: "evernote_archive",
+        readerWorker: "archive_import_reader",
+        contentBounds: "approved_archive_root",
+        backendLabel: "local_private:archive_import"
+      }
+    }
+  ]
+];
+var SERVICE_ACCOUNT_CREDENTIAL_HANDLES = new Set(DEFAULT_ENV_HANDLES.filter((definition) => definition.serviceAccountJwt !== undefined).map((definition) => definition.handle));
+var PROCESS_MINTED_SESSION_CACHE = new Map;
+var PROCESS_MINT_IN_FLIGHT = new Map;
+var PROCESS_MINT_FAILURE_BACKOFF = new Map;
+var OAUTH2_TOKEN_RESPONSE_LIMIT_BYTES = 64 * 1024;
+var TOKEN_UNISSUED_STATUSES = new Set([401, 403, 404, 405, 415, 429]);
+
+// src/workers/email-source/ingest-filter.ts
+var OTP_SUBJECT = new RegExp([
+  "verification code",
+  "security code",
+  "one[- ]?time (pass)?(word|code)",
+  "login code",
+  "sign[- ]?in code",
+  "access code",
+  "confirmation code",
+  "your (\\w+ )?code is",
+  "\\botp\\b",
+  "2fa code"
+].join("|"), "i");
+
+// src/core/people-index.ts
+var PEOPLE_LINK_REASON_TEXT = Object.freeze({
+  owner: "You on every source",
+  phone: "Linked by phone number",
+  email: "Linked by email address",
+  contacts: "Linked by your contacts",
+  name_and_shared_conversation: "Linked by name and a shared conversation",
+  name_and_shared_group: "Linked by name and shared group chat",
+  merged_by_owner: "Merged by you"
+});
+var PEOPLE_AUTHORED_FAMILIES = new Set(["chat", "email"]);
+
+// src/workers/google-connectors/gmail.ts
+var GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private";
+var GMAIL_PROVIDER = "gmail";
+// src/workers/live-source-cadence.ts
+var LIVE_NEW_ITEMS_INTERVAL_MS = 5 * 60000;
+
+// src/workers/google-connectors/gmail-live-control.ts
+var GMAIL_STORE_PULL_FRESHNESS_THRESHOLD_MS = 2 * 60 * 60000;
+var GMAIL_STORE_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
+var GMAIL_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
+// src/workers/connector-store/tier-auto-prune-sweep.ts
+var RECLAIM_MAX_RETAINED_FREE_BYTES = 64 * 1024 * 1024;
+var sweeping = new WeakSet;
+var SQLITE_FIXED_MESSAGES = new Set([
+  "Database has closed",
+  "database is locked",
+  "database table is locked",
+  "disk I/O error",
+  "database or disk is full",
+  "attempt to write a readonly database",
+  "database disk image is malformed"
 ]);
 
+// src/workers/connector-store/tier-row-rehome.ts
+var MOVE_WHY = "Automatic re-home of a Private row found in a Personal or Public store: the owner approved on 2026-10-07 " + "that moved items are re-embedded by the local Private embedder (the move itself makes no provider call).";
+
+// src/workers/connector-store/tier-override-settle.ts
+var CLEARED_RECHECK_MS = 10 * 60000;
+var clearedChecks = new WeakMap;
+var running = new WeakMap;
+
+// src/workers/connector-store/tiered-store-set.ts
+var LOWER_CONTENT_REPAIR_INTERVAL_MS = 5 * 60000;
+
+// src/workers/google-connectors/gmail-live-sync.ts
+var GMAIL_SCOPED_CONNECTOR_PREFIX = `${GMAIL_PROVIDER}.scope.`;
+// src/workers/google-connectors/drive.ts
+var GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID = "internal.drive.docs";
+var FOLDER_LOOKUP_FAILED = Symbol("google-drive-folder-lookup-failed");
+// src/workers/google-connectors/drive-live-control.ts
+var GOOGLE_DRIVE_STORE_PULL_FRESHNESS_THRESHOLD_MS = 2 * 60 * 60000;
+var GOOGLE_DRIVE_STORE_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
+var GOOGLE_DRIVE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
+// src/core/privacy-language.ts
+var PRIVACY_PRESET_LABELS = {
+  "local-first": "Local models with Venice fallback",
+  "local-only": "Local models",
+  "private-cloud-only": "Venice",
+  "no-sensitive": "Private answers only in Olympus"
+};
+var PRIVATE_ANSWER_OPTIONS = [
+  { id: "local-first", label: PRIVACY_PRESET_LABELS["local-first"], description: "The built-in model answers on this computer. Venice can help only after you add a Venice key. Venice is a privacy-focused cloud provider whose policy says it does not retain conversations or train on them; it can read the content.", recommended: true },
+  { id: "local-only", label: PRIVACY_PRESET_LABELS["local-only"], description: "The built-in model answers on this computer. You can connect your own local models; Private items stay on this computer.", recommended: false },
+  { id: "private-cloud-only", label: PRIVACY_PRESET_LABELS["private-cloud-only"], description: "Use Venice for Private answers after you add its key. Venice is a privacy-focused cloud provider whose policy says it does not retain conversations or train on them; it can read the content.", recommended: false },
+  { id: "no-sensitive", label: PRIVACY_PRESET_LABELS["no-sensitive"], description: "Search Private items and use Ask privately on this computer. Connected agents cannot use Private items to answer.", recommended: false }
+];
+var LOCAL_PRIVATE_MODEL_MIN_MEMORY_BYTES = 12 * 1024 ** 3;
 // scripts/source-embedding-drain.ts
 var DROPBOX_CORPUS_ID = "secure_local.dropbox.files";
 var EMAIL_CORPUS_ID = GMAIL_SECURE_CONNECTOR_CORPUS_ID;
 var WHATSAPP_CORPUS_ID = "secure_local.whatsapp.messages";
-var X_BOOKMARKS_CORPUS_ID2 = "internal.x.bookmarks";
+var X_BOOKMARKS_CORPUS_ID = "internal.x.bookmarks";
 var INTERNAL_TELEGRAM_CORPUS_ID = "internal.telegram.messages";
 var PROTECTED_TELEGRAM_CORPUS_ID = "secure_local.telegram.protected.messages";
 var READWISE_CORPUS_ID = "internal.readwise.library";
@@ -40036,7 +38455,7 @@ function secureLocalBackfillDryRunFromEnv(env = process.env) {
   ];
   const force = env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_FORCE === "true";
   const corpora = configs.flatMap((config) => {
-    if (!config.dbPath || !existsSync24(config.dbPath))
+    if (!config.dbPath || !existsSync23(config.dbPath))
       return [];
     const store = openConnectorStore(storageAccountForCorpus(config), { ...config, dbPath: config.dbPath, readOnly: true }, env);
     try {
@@ -40092,7 +38511,7 @@ var CONNECTOR_STORE_LANES = [
   { corpusId: PROTECTED_TELEGRAM_CORPUS_ID, envName: "PROTECTED_TELEGRAM", trustDomain: "secure_local" },
   { corpusId: READWISE_CORPUS_ID, envName: "READWISE", trustDomain: "internal" },
   {
-    corpusId: X_BOOKMARKS_CORPUS_ID2,
+    corpusId: X_BOOKMARKS_CORPUS_ID,
     envName: "X_BOOKMARKS",
     trustDomain: "internal"
   }
@@ -40388,9 +38807,9 @@ function publishNativeEmbeddingDrainReadiness(env = process.env, pid = process.p
   if (!readinessPath || !isAbsolute15(readinessPath)) {
     throw new Error(`${NATIVE_SERVICE_READINESS_PATH_ENV} must be an absolute path for native startup.`);
   }
-  const directory = dirname26(readinessPath);
+  const directory = dirname24(readinessPath);
   mkdirSync14(directory, { recursive: true, mode: 448 });
-  const parent = lstatSync11(directory);
+  const parent = lstatSync10(directory);
   if (!parent.isDirectory() || process.platform !== "win32" && (parent.uid !== process.getuid?.() || (parent.mode & 18) !== 0)) {
     throw new Error("Native embedding readiness requires an owner-controlled report directory.");
   }
@@ -40419,7 +38838,7 @@ if (__require.main == __require.module) {
     }
     const json = JSON.stringify(report, null, 2);
     if (args.reportPath) {
-      mkdirSync14(dirname26(args.reportPath), { recursive: true });
+      mkdirSync14(dirname24(args.reportPath), { recursive: true });
       writeFileSync7(args.reportPath, `${json}
 `);
     }
@@ -40429,7 +38848,7 @@ if (__require.main == __require.module) {
   const options = optionsFromEnv(process.env);
   try {
     if (args.reportPath) {
-      mkdirSync14(dirname26(args.reportPath), { recursive: true });
+      mkdirSync14(dirname24(args.reportPath), { recursive: true });
       options.onProgress = (report) => {
         writeFileSync7(args.reportPath, `${JSON.stringify(report, null, 2)}
 `);

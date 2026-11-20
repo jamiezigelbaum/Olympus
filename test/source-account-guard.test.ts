@@ -13,7 +13,7 @@ import {
   updateSourceAccountBinding,
 } from '../src/core/source-account-binding.ts';
 import { upsertConnectedHandle } from '../src/workers/credential-broker/connected-handles.ts';
-import type { CredentialBroker, CredentialSessionRequest } from '../src/workers/credential-broker/index.ts';
+import { createEnvCredentialBroker, type CredentialBroker, type CredentialSessionRequest } from '../src/workers/credential-broker/index.ts';
 import {
   accountBoundSchedulerSource,
   createSourceAccountGuard,
@@ -558,7 +558,7 @@ describe('the account guard for a Google source known by its subject (independen
   const RENAMED = googleAccountIdFromAddress('renamed@example.test');
   const GRANTED = '2026-10-10T22:42:00.000Z';
 
-  function gmailGuard(registryPath: string, token: { address: string; sub?: string }) {
+  function gmailGuard(registryPath: string, token: { address: string; sub?: string }, directRef?: string) {
     upsertConnectedHandle({
       handle: 'gmail.personal',
       provider: 'gmail',
@@ -568,6 +568,7 @@ describe('the account guard for a Google source known by its subject (independen
       scopes: ['https://www.googleapis.com/auth/gmail.readonly', 'openid'],
       connectedAt: GRANTED,
       providerAccountId: `${SUB}.${OLD}`,
+      ...(directRef ? { tokenSecretRefs: [directRef] } : {}),
     }, registryPath);
     updateSourceAccountBinding(sourceAccountBindingsPath(registryPath), 'gmail.email', () => ({
       provider_account_id: `${SUB}.${OLD}`,
@@ -637,6 +638,91 @@ describe('the account guard for a Google source known by its subject (independen
     await accountBoundSchedulerSource({ source: lane(() => { ran += 1; }), guard }).tasks[0]!.run();
     expect(ran).toBe(1);
     expect(gmailBinding(registryPath)).toEqual({ provider_account_id: `${SUB}.${RENAMED}`, bound_grant: GRANTED });
+  });
+
+  test.each(['OAuth mint', 'local bearer secret'])('the offline witness checks the current %s against the token proved by acquisition', async (credential) => {
+    const registryPath = join(tempDir(), 'handles.json');
+    const direct = credential === 'local bearer secret';
+    const directRef = 'store:gmail.personal.test-bearer';
+    // Start with the original persisted grant and binding, including its
+    // immutable subject. A cold guard must still verify its live token.
+    gmailGuard(registryPath, { address: 'owner@example.test' }, direct ? directRef : undefined);
+    const now = new Date('2026-10-11T00:00:00.000Z');
+    let mintCalls = 0;
+    let identityCalls = 0;
+    let useOtherAccount = false;
+    let directToken: string | undefined = 'direct-fixture-access';
+    const broker = createEnvCredentialBroker({
+      handleRegistryPath: registryPath,
+      env: {
+        OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_OAUTH2_CLIENT_ID: 'fixture-client',
+        OLYMPUS_CREDENTIAL_GMAIL_PERSONAL_OAUTH2_REFRESH_TOKEN: 'fixture-refresh',
+      },
+      oauth2CacheNamespace: registryPath,
+      secretStore: {
+        label: 'fixture',
+        async get() { return directToken; },
+        getSync() { return directToken; },
+        async set() {},
+        async delete() {},
+        async list() { return []; },
+      },
+      now: () => now,
+      fetch: async () => {
+        mintCalls++;
+        return Response.json({ access_token: `fixture-access-${mintCalls}`, expires_in: 3600, token_type: 'Bearer' });
+      },
+    });
+    const makeGuard = () => createSourceAccountGuard({
+      sourceId: 'gmail.email',
+      provider: 'gmail',
+      handle: 'gmail.personal',
+      capability: 'gmail.email.sync',
+      registryPath,
+      laneHoldsItems: () => true,
+      broker,
+      fetch: async (url) => {
+        identityCalls++;
+        if (url === DEFAULT_PROVIDER_IDENTITY_ENDPOINTS.google_tokeninfo) {
+          return Response.json({ sub: useOtherAccount ? '109876543210987654322' : '109876543210987654321',
+            scope: 'openid https://www.googleapis.com/auth/gmail.readonly' });
+        }
+        return Response.json({ emailAddress: 'owner@example.test' });
+      },
+      now: () => now,
+    });
+    const guard = makeGuard();
+    expect(guard.hasVerifiedCurrentAccount?.()).toBe(false);
+    expect([mintCalls, identityCalls]).toEqual([0, 0]);
+    await guard.assertAccount();
+    const warmCounts = [mintCalls, identityCalls];
+    expect(warmCounts).toEqual([direct ? 0 : 1, 2]);
+    expect(guard.hasVerifiedCurrentAccount?.()).toBe(true);
+    expect(makeGuard().hasVerifiedCurrentAccount?.()).toBe(false);
+    expect([mintCalls, identityCalls]).toEqual(warmCounts);
+
+    if (!direct) {
+      // An unavailable direct ref can outrank the still-reusable OAuth
+      // mint, including when Keychain surfaces a failure as a missing item.
+      directToken = undefined;
+      gmailGuard(registryPath, { address: 'owner@example.test' }, directRef);
+      expect(guard.hasVerifiedCurrentAccount?.()).toBe(false);
+      expect([mintCalls, identityCalls]).toEqual(warmCounts);
+      gmailGuard(registryPath, { address: 'owner@example.test' });
+    }
+    // Even the same displayed address is insufficient for a different
+    // subject. Expiry or replacement invalidates the witness offline.
+    if (direct) directToken = 'direct-fixture-replacement';
+    else now.setUTCHours(1);
+    useOtherAccount = true;
+    expect(guard.hasVerifiedCurrentAccount?.()).toBe(false);
+    expect([mintCalls, identityCalls]).toEqual(warmCounts);
+    await expect(guard.assertAccount()).rejects.toMatchObject({ code: 'source_account_token_mismatch' });
+    const mismatchCounts = [mintCalls, identityCalls];
+    expect(mismatchCounts).toEqual([direct ? 0 : 2, 4]);
+    expect(gmailBinding(registryPath)).toEqual({ provider_account_id: `${SUB}.${OLD}`, bound_grant: GRANTED });
+    expect(guard.hasVerifiedCurrentAccount?.()).toBe(false);
+    expect([mintCalls, identityCalls]).toEqual(mismatchCounts);
   });
 });
 

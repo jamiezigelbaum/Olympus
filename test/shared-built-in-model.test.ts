@@ -82,6 +82,7 @@ function fakeBackground() {
   let prepares = 0;
   return {
     background: {
+      servingPid: () => 4321,
       complete: async (request: unknown) => { requests.push(request); return { text: 'from the background', modelId: 'built-in' }; },
       prepare: () => { prepares += 1; },
     },
@@ -116,6 +117,7 @@ test('the front verifies an install the background finished, once, and then answ
   await settle();
   expect(fake.prepares()).toBe(1);
   expect(front.available()).toBe(true);
+  expect(front.model.servingPid?.()).toBe(4321);
   front.startIfIdle();
   await settle();
   expect(fake.prepares()).toBe(1);

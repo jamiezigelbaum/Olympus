@@ -545,14 +545,23 @@ export function scopeBoundEmbeddingProvider(
   authority: FileSourceScopeAuthority,
   ref: SourceScopePolicyRef,
 ): SourceEmbeddingProvider {
+  return checkedEmbeddingProvider(provider, () => authority.assertRefCurrent(ref));
+}
+
+/** Recheck the processor's permission before dispatch and inside the vector write transaction. */
+export function checkedEmbeddingProvider(provider: SourceEmbeddingProvider, check: () => void): SourceEmbeddingProvider {
+  const assertCurrent = () => {
+    provider.assertBindingCurrent?.();
+    check();
+  };
   return {
     ...provider,
     async embed(inputs, options) {
-      authority.assertRefCurrent(ref);
+      assertCurrent();
       return provider.embed(inputs, options);
     },
     assertBindingCurrent() {
-      authority.assertRefCurrent(ref);
+      assertCurrent();
     },
     // A class method is not an own property, so the spread above drops it.
     ...(provider.imageSupport ? { imageSupport: () => provider.imageSupport!() } : {}),
@@ -560,13 +569,13 @@ export function scopeBoundEmbeddingProvider(
     // embed lane already hands over; they check the approval the same way.
     ...(provider.embedWithImageVectors ? {
       embedWithImageVectors: (inputs: Parameters<NonNullable<SourceEmbeddingProvider['embedWithImageVectors']>>[0]) => {
-        authority.assertRefCurrent(ref);
+        assertCurrent();
         return provider.embedWithImageVectors!(inputs);
       },
     } : {}),
     ...(provider.embedImageVectors ? {
       embedImageVectors: (images: Parameters<NonNullable<SourceEmbeddingProvider['embedImageVectors']>>[0]) => {
-        authority.assertRefCurrent(ref);
+        assertCurrent();
         return provider.embedImageVectors!(images);
       },
     } : {}),

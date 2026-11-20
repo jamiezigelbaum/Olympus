@@ -15,7 +15,6 @@ import {
   type SourceInvocationProvenance,
 } from '../../core/invocation-provenance.ts';
 import { gmailAfterBound, gmailBeforeBound } from '../../core/mail-source-scope.ts';
-import { compareProviderAccounts, fetchProviderAccountId } from '../../core/provider-account-identity.ts';
 import { senderMatchesRule } from '../../core/sender-rules.ts';
 import { FileExtractionSourceError } from '../../core/file-extraction-source.ts';
 import type { OwnerTierRule } from '../classification/tier-classifier.ts';
@@ -26,7 +25,6 @@ import {
   type CredentialBrokerFetch,
 } from '../credential-broker/index.ts';
 import type { ConnectorStoreClassificationOptions } from '../connector-store/index.ts';
-import { SourceAccountChangedError } from '../source-account-guard.ts';
 import {
   classifyEmailIngestSkip,
   parseEmailIngestFilterOptionsFromEnv,
@@ -134,16 +132,11 @@ export interface GoogleGmailSourceConnectorOptions {
    * Rechecks the approval before a provider request (including retries).
    */
   beforeEachRequest?: () => void;
-  /** The history's verified provider account, read under the source account guard. */
-  confirmationAccountId?: () => string | undefined;
 }
-
-/** Metadata reads for retained mail scope confirmation per connector pass. */
-export const GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS = 32;
 
 /**
  * An approved mail scope, compiled (src/core/mail-source-scope.ts). The
- * connector only ANDs it with the operator's hidden query override and splits
+ * connector only ANDs it with the operator's query override and splits
  * the first traversal at the full-content cutoff.
  */
 export interface GmailConnectorScope {
@@ -166,17 +159,14 @@ export interface GmailConnectorScope {
   ownerTierRules?: readonly OwnerTierRule[];
   /**
    * Whether Olympus already holds this message (in either Gmail store). Held
-   * mail is never re-observed under a scope; see listItems.
+   * bodies are never re-read by the listing; see listItems.
    */
   storedItem?: (providerItemId: string) => GmailStoredItem | undefined;
-  /** A resumable confirmation walk. The store checks each retained copy's text. */
-  confirmStoredItem?: (item: RawItem, passesIngestFilter: (text: string) => boolean) => void;
 }
 
 export interface GmailStoredItem {
   /** True when a stored copy has chunks (a body), false for a metadata-only row. */
   hasContent: boolean;
-  needsScopeObservation?: boolean;
 }
 
 /**
@@ -331,12 +321,10 @@ export class GoogleGmailSourceConnector implements SourceConnector {
   private itemsSkippedOtp = 0;
   private itemsSkippedCategory = 0;
   private itemsSkippedStored = 0;
-  private confirmationPagePrefix: GmailCursor | undefined;
   private readonly ingestFilterOptions: EmailIngestFilterOptions;
   private readonly itemsByLocalId = new Map<string, RawItem>();
   private readonly build: GmailMailBuild;
   private readonly beforeEachRequest: (() => void) | undefined;
-  private readonly confirmationAccountId: (() => string | undefined) | undefined;
   /** The messages this run read whole, so an attachment of one is read without asking for it again. */
   private readonly messagesById = new Map<string, GmailMessage>();
 
@@ -363,7 +351,6 @@ export class GoogleGmailSourceConnector implements SourceConnector {
     this.now = options.now ?? (() => Date.now());
     this.build = options.build ?? {};
     this.beforeEachRequest = options.beforeEachRequest;
-    this.confirmationAccountId = options.confirmationAccountId;
     const ingestFilterOptions = options.ingestFilterOptions ?? parseEmailIngestFilterOptionsFromEnv(env);
     // The approved scope says which categories are skipped. An explicit
     // operator setting still wins; otherwise the scope replaces the built-in
@@ -371,18 +358,6 @@ export class GoogleGmailSourceConnector implements SourceConnector {
     this.ingestFilterOptions = this.scope && ingestFilterOptions.skipCategories === undefined
       ? { ...ingestFilterOptions, skipCategories: [...(this.scope.skippedCategoryLabelIds ?? [])] }
       : ingestFilterOptions;
-    // Skipped labels are enforced by id after the fetch too, whatever the
-    // category setting: a rename or an odd character in a label name cannot
-    // make the query miss what the owner skipped.
-    if (this.scope?.skippedLabelIds?.length) {
-      this.ingestFilterOptions = {
-        ...this.ingestFilterOptions,
-        skipCategories: [
-          ...(this.ingestFilterOptions.skipCategories ?? ['CATEGORY_PROMOTIONS']),
-          ...this.scope.skippedLabelIds,
-        ],
-      };
-    }
   }
 
   async authenticate(): Promise<void> {
@@ -391,22 +366,18 @@ export class GoogleGmailSourceConnector implements SourceConnector {
 
   async *listItems(options: SourceConnectorListOptions = {}): AsyncIterable<SourceConnectorListPage> {
     const client = await this.clientForRequest();
-    const confirmation = this.scope?.confirmStoredItem;
-    const requested = normalizeGmailMaxMessages(options.limit ?? this.defaultMaxMessages);
-    const limit = confirmation && requested > GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS
-      ? GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS : requested;
-    let remaining = limit;
+    let remaining = normalizeGmailMaxMessages(options.limit ?? this.defaultMaxMessages);
     const resume = decodeGmailCursor(options.cursor);
     const cutoffMs = this.scope?.contentAfterMs;
     // The metadata leg exists only under a scope with a cutoff; a phase marker
     // arriving without one is a stale cursor and restarts the content leg.
-    let metadataLeg = !confirmation && resume.phase === 'metadata' && cutoffMs !== undefined;
+    let metadataLeg = resume.phase === 'metadata' && cutoffMs !== undefined;
     const staleLeg = resume.phase === 'metadata' && !metadataLeg;
     const watermarkMs = metadataLeg || staleLeg ? undefined : resume.watermarkMs;
     let query = metadataLeg && cutoffMs !== undefined ? this.metadataLegQuery(cutoffMs) : this.queryForWatermark(watermarkMs);
     // A scoped first traversal is two legs: full content after the cutoff,
     // then metadata-only before it. Incremental passes read only new mail.
-    const splitsAtCutoff = !confirmation && !metadataLeg && cutoffMs !== undefined && watermarkMs === undefined;
+    const splitsAtCutoff = !metadataLeg && cutoffMs !== undefined && watermarkMs === undefined;
     let highWaterMs = staleLeg ? undefined : resume.highWaterMs;
     const nowMs = this.now();
     // Carried from the first page of a scoped traversal to its last; a fresh
@@ -423,7 +394,6 @@ export class GoogleGmailSourceConnector implements SourceConnector {
     if (resume.childOf && !staleLeg) {
       // The last pass stopped inside a message's attachments (more than one pass may hold): the rest first.
       const rest = await this.attachmentsFrom(client, resume.childOf, itemRoom);
-      this.providerRequests += 1;
       remaining -= 1;
       itemRoom -= rest.items.length;
       const cursorFields = {
@@ -446,13 +416,11 @@ export class GoogleGmailSourceConnector implements SourceConnector {
     const requestedPageTokens = new Set<string>();
     let listPages = 0;
     while (remaining > 0 && itemRoom > 0 && listPages < MAX_GMAIL_LIST_PAGES_PER_RUN) {
-      this.confirmationPagePrefix = undefined;
       if (pageToken) assertNewProviderPage(requestedPageTokens, pageToken);
       this.providerRequests += 1;
       listPages += 1;
       const page = await listGmailMessagePage(client, {
-        // Resuming inside a confirmation page uses the same page size.
-        maxResults: Math.min(DEFAULT_GMAIL_PAGE_SIZE, confirmation ? limit : remaining),
+        maxResults: Math.min(DEFAULT_GMAIL_PAGE_SIZE, remaining),
         ...(pageToken ? { pageToken } : {}),
         ...(query ? { query } : {}),
       });
@@ -479,30 +447,9 @@ export class GoogleGmailSourceConnector implements SourceConnector {
       let childOf: { id: string; from: number } | undefined;
       for (const message of listed.slice(baseSkip)) {
         if (messagesFetched >= remaining || items.length >= itemRoom) break;
-        const prior = confirmation ? examinedIds.at(-1) : undefined;
-        if (prior !== undefined) {
-          this.confirmationPagePrefix = { ...(pageToken ? { pageToken } : {}), after: prior };
-        }
         messagesExamined += 1;
         examinedIds.push(message.id);
         const stored = this.scope?.storedItem?.(message.id);
-        if (confirmation) {
-          if (!stored?.needsScopeObservation) continue;
-          this.beforeEachRequest?.();
-          messagesFetched += 1;
-          this.providerRequests += 1;
-          const metadata = await client.getMessage(message.id, { format: 'metadata', metadataHeaders: GMAIL_METADATA_HEADERS })
-            .catch(error => {
-              // A message can disappear after listing. Only messages.list can reject its cursor.
-              if (gmailHttpStatus(error) === 404) return undefined;
-              throw error;
-            });
-          if (metadata?.id === message.id && gmailMessageInScope(metadata, this.scope!)) {
-            const item = gmailMessageItem(gmailMailRecordFromMessage(metadata, { metadataOnly: true }), this.account);
-            confirmation(item, text => !this.ingestSkip(item, text));
-          }
-          continue;
-        }
         // Keep immutable stored bodies and their vectors. The content leg
         // can upgrade a previously names-only message.
         if (stored && (metadataLeg || stored.hasContent)) {
@@ -519,18 +466,13 @@ export class GoogleGmailSourceConnector implements SourceConnector {
           message.id,
           metadataLeg ? { format: 'metadata', metadataHeaders: GMAIL_METADATA_HEADERS } : undefined,
         );
-        const fetchedDateMs = internalDateNumber({ internalDate: fetched.internalDate });
-        const beforeCutoff = cutoffMs !== undefined && fetchedDateMs !== undefined && fetchedDateMs < cutoffMs;
-        // The content leg owns everything at or after the cutoff. Gmail's date
-        // operators are second-granular, so a boundary message the metadata
-        // leg also lists is left to the leg that stores its body.
-        if (metadataLeg && !beforeCutoff) continue;
-        // Older than the window but already stored in some form: leave it be.
-        if (beforeCutoff && stored) {
-          this.itemsSkippedStored += 1;
-          continue;
+        if (fetched.id !== message.id) continue;
+        if (this.scope) {
+          const approvedLeg = gmailMessageScopeLeg(fetched, this.scope);
+          if (!approvedLeg) this.itemsSkippedCategory += 1;
+          if (approvedLeg !== (metadataLeg ? 'metadata' : 'content')) continue;
         }
-        const record = gmailMailRecordFromMessage(fetched, { metadataOnly: metadataLeg || beforeCutoff, children: this.build.children === true });
+        const record = gmailMailRecordFromMessage(fetched, { metadataOnly: metadataLeg, children: this.build.children === true });
         const [item, ...children] = gmailMailItems(record, this.account, this.build) as [RawItem, ...RawItem[]];
         this.attachmentsDeclared += metadataCount(item.metadata, 'attachmentCount');
         this.attachmentBytesDeclared += metadataCount(item.metadata, 'attachmentBytesDeclared');
@@ -543,16 +485,8 @@ export class GoogleGmailSourceConnector implements SourceConnector {
           // must not push the next bound past mail that has yet to arrive.
           highWaterMs = Math.min(internalDateMs, nowMs);
         }
-        const from = metadataString(item.metadata, 'from');
-        if (this.scope?.skipSenders?.some((rule) => senderMatchesRule(from, rule))) {
-          this.itemsSkippedCategory += 1;
-          continue;
-        }
-        const body = item.content.kind === 'text' ? item.content.text : metadataString(item.metadata, 'snippet');
-        // Metadata-only items carry no body and no snippet, so the OTP filter
-        // judges them by subject alone. Skipped labels are checked here by id
-        // as well as in the query, so a renamed label cannot slip past.
-        const skip = this.ingestSkip(item, body);
+        // Metadata-only items have no body or snippet. The OTP filter checks their subject.
+        const skip = this.ingestSkip(item);
         if (skip) {
           if (skip === 'otp') this.itemsSkippedOtp += 1;
           else this.itemsSkippedCategory += 1;
@@ -657,12 +591,8 @@ export class GoogleGmailSourceConnector implements SourceConnector {
     }
   }
 
-  /** Resume after the last examined message if a request guard stopped inside a page. */
-  interruptedConfirmationCursor(): string | undefined {
-    return this.confirmationPagePrefix && encodeGmailCursor(this.confirmationPagePrefix);
-  }
-
-  private ingestSkip(item: RawItem, body: string | undefined) {
+  private ingestSkip(item: RawItem) {
+    const body = item.content.kind === 'text' ? item.content.text : metadataString(item.metadata, 'snippet');
     const subject = metadataString(item.metadata, 'subject') ?? metadataString(item.metadata, 'title');
     const from = metadataString(item.metadata, 'from');
     return classifyEmailIngestSkip({
@@ -672,6 +602,80 @@ export class GoogleGmailSourceConnector implements SourceConnector {
       labels: metadataStringArray(item.metadata, 'labels'),
     }, this.ingestFilterOptions);
   }
+
+  private admittedContent(message: GmailMessage, expectedId: string): RawItem[] {
+    if (message.id !== expectedId || (this.scope && !gmailMessageInScope(message, this.scope))) return [];
+    const items = gmailMailItems(gmailMailRecordFromMessage(message, { children: true }), this.account, { children: true });
+    return items[0] && !this.ingestSkip(items[0]) ? items : [];
+  }
+
+  private async readParent(client: GmailApiClient, id: string, metadataOnly: boolean): Promise<GmailMessage> {
+    this.beforeEachRequest?.();
+    this.providerRequests++;
+    const message = await client.getMessage(id, metadataOnly ? { format: 'metadata', metadataHeaders: GMAIL_METADATA_HEADERS } : undefined);
+    this.beforeEachRequest?.();
+    return message;
+  }
+
+  private acceptsParentMetadata(message: GmailMessage, id: string): boolean {
+    if (message.id !== id || (this.scope && !gmailMessageInScope(message, this.scope))) return false;
+    return !this.ingestSkip(gmailMessageItem(gmailMailRecordFromMessage(message, { metadataOnly: true }), this.account));
+  }
+
+  /** Check a locally enumerated parent without fetching its body or attachment bytes. */
+  private async admittedParentMetadata(client: GmailApiClient, id: string): Promise<GmailMessage | undefined> {
+    const metadata = await this.readParent(client, id, true);
+    if (!this.acceptsParentMetadata(metadata, id)) return undefined;
+    if (!this.query) return metadata;
+
+    // Ask Gmail to evaluate the operator's query in the parent's receipt
+    // second. Only this exact id can authorize the ensuing body or part read.
+    const received = internalDateNumber({ internalDate: metadata.internalDate });
+    if (!metadata.historyId || received === undefined) return undefined;
+    const second = Math.floor(received / 1_000);
+    const query = this.scopedQuery(`after:${second - 1} before:${second + 1}`);
+    const seen = new Set<string>();
+    let pageToken: string | undefined;
+    do {
+      if (pageToken) assertNewProviderPage(seen, pageToken);
+      this.beforeEachRequest?.();
+      this.providerRequests++;
+      const page = await client.listMessages({ maxResults: DEFAULT_GMAIL_PAGE_SIZE,
+        ...(query ? { query } : {}), ...(pageToken ? { pageToken } : {}) });
+      this.beforeEachRequest?.();
+      if (page.messages.some(candidate => candidate.id === id)) return metadata;
+      pageToken = page.nextPageToken;
+    } while (pageToken);
+    return undefined;
+  }
+
+  /** Legacy attachment backfill starts from a local row, outside the normal Gmail listing. */
+  async backfillAttachmentsOf(id: string): Promise<{ status: 'admitted'; items: RawItem[] } | { status: 'retry' }> {
+    const client = await this.clientForRequest();
+    const metadata = await this.admittedParentMetadata(client, id);
+    if (!metadata) return { status: 'admitted', items: [] };
+    const message = await this.readParent(client, id, false);
+    if (message.historyId !== metadata.historyId) return { status: 'retry' };
+    return { status: 'admitted', items: this.admittedContent(message, id).slice(1) };
+  }
+
+  private async readAttachmentParent(client: GmailApiClient, id: string): Promise<GmailMessage | undefined> {
+    const cached = this.messagesById.get(id);
+    if (!cached && !this.scope && !this.query) return this.readParent(client, id, false);
+    const metadata = await this.admittedParentMetadata(client, id);
+    if (!metadata) return undefined;
+    if (!cached) {
+      const message = await this.readParent(client, id, false);
+      return message.historyId === metadata.historyId ? message : undefined;
+    }
+    if (this.query) {
+      // Labels may have changed while Gmail evaluated the query.
+      const current = await this.readParent(client, id, true);
+      if (current.historyId !== metadata.historyId || !this.acceptsParentMetadata(current, id)) return undefined;
+    }
+    return cached;
+  }
+
   /**
    * In-run cache, never a second provider round trip. Listing already fetched
    * the full message for every id it emitted, so asking Gmail again is pure
@@ -737,24 +741,13 @@ export class GoogleGmailSourceConnector implements SourceConnector {
       if (error instanceof Error && /Gmail API request failed \(404\)/.test(error.message)) throw new FileExtractionSourceError('source_item_not_found');
       throw error;
     };
-    let message = this.messagesById.get(where.messageId);
-    if (message) {
-      // The message's parts are known; its labels may have changed since (moved to Trash, a skipped label):
-      // the parent is checked against the scope as it is now, by a fresh metadata read, before any part.
-      this.beforeEachRequest?.();
-      this.providerRequests += 1;
-      const current = await client.getMessage(where.messageId, { format: 'metadata', metadataHeaders: ['From'] }).catch(gone);
-      if (this.scope && !gmailMessageInScope(current, this.scope)) throw new FileExtractionSourceError('source_permission_denied');
-    } else {
-      this.beforeEachRequest?.();
-      this.providerRequests += 1;
-      message = await client.getMessage(where.messageId).catch(gone);
-      this.messagesById.set(where.messageId, message);
-    }
-    if (this.scope && !gmailMessageInScope(message, this.scope)) throw new FileExtractionSourceError('source_permission_denied');
+    const message = await this.readAttachmentParent(client, where.messageId).catch(gone);
+    if (!message) throw new FileExtractionSourceError('source_permission_denied');
+    const [parent, ...children] = this.admittedContent(message, where.messageId);
+    if (!parent) throw new FileExtractionSourceError('source_permission_denied');
+    this.messagesById.set(where.messageId, message);
     const part = gmailPartAt(message.payload, where.partId);
-    const record = gmailMailRecordFromMessage(message, { children: true });
-    const child = gmailMailItems(record, this.account, { children: true }).find((item) => item.identity.localItemId === wanted);
+    const child = children.find((item) => item.identity.localItemId === wanted);
     if (!part || !child) throw new FileExtractionSourceError('source_version_gone');
     const declared = part.body?.size;
     if (maxBytes !== undefined && typeof declared === 'number' && declared > maxBytes) throw new FileExtractionSourceError('source_too_large');
@@ -770,6 +763,7 @@ export class GoogleGmailSourceConnector implements SourceConnector {
     if (maxBytes !== undefined && Math.floor((data.length * 3) / 4) > maxBytes + 3) throw new FileExtractionSourceError('source_too_large');
     const bytes = new Uint8Array(Buffer.from(data.replace(/-/g, '+').replace(/_/g, '/'), 'base64'));
     if (maxBytes !== undefined && bytes.byteLength > maxBytes) throw new FileExtractionSourceError('source_too_large');
+    this.beforeEachRequest?.();
     return { ...child, content: { kind: 'bytes', mimeType: child.mimeType, bytes } };
   }
 
@@ -779,9 +773,12 @@ export class GoogleGmailSourceConnector implements SourceConnector {
     at: { id: string; from: number },
     room: number,
   ): Promise<{ items: RawItem[]; next?: number }> {
-    const message = await client.getMessage(at.id);
+    if (this.build.children !== true) return { items: [] };
+    const message = await this.readAttachmentParent(client, at.id);
+    if (!message) return { items: [] };
+    const [parent, ...children] = this.admittedContent(message, at.id);
+    if (!parent) return { items: [] };
     this.messagesById.set(at.id, message);
-    const [, ...children] = gmailMailItems(gmailMailRecordFromMessage(message, { children: this.build.children === true }), this.account, this.build);
     const items = children.slice(at.from, at.from + Math.max(1, room));
     for (const item of items) this.itemsByLocalId.set(item.identity.localItemId, item);
     const next = at.from + items.length;
@@ -844,7 +841,6 @@ export class GoogleGmailSourceConnector implements SourceConnector {
       capability: 'gmail.email.sync',
       trustDomain: 'secure_local',
     }), this.credentialHandle);
-    if (this.scope?.confirmStoredItem) await this.verifyConfirmationAccount(session.token);
     return new RestGmailApiClient({
       token: session.token,
       fetch: this.fetchImpl,
@@ -856,33 +852,6 @@ export class GoogleGmailSourceConnector implements SourceConnector {
       // The approval is asked before every HTTP attempt, retries included: a backoff can outlast it.
       ...(this.beforeEachRequest ? { beforeEachAttempt: this.beforeEachRequest } : {}),
     });
-  }
-
-  private async verifyConfirmationAccount(token: string): Promise<void> {
-    const expected = this.confirmationAccountId?.();
-    if (!expected) {
-      throw new SourceAccountChangedError('source_account_unverified', 'Gmail confirmation requires a verified account for the stored mail.');
-    }
-    let refused: unknown;
-    const observed = await fetchProviderAccountId({
-      provider: GMAIL_PROVIDER, accessToken: token,
-      endpoints: { gmail: `${this.apiBaseUrl}/users/me/profile` },
-      fetchImpl: (url, init) => {
-        try {
-          this.beforeEachRequest?.();
-          this.requestBudget?.reserve(this.provenance);
-        } catch (error) {
-          // Keep a local refusal distinguishable from a failed identity request.
-          refused = error;
-          throw error;
-        }
-        return this.fetchImpl(url, init);
-      },
-    }).finally(() => { if (refused !== undefined) throw refused; });
-    if (compareProviderAccounts(expected, observed) !== 'same') {
-      throw new SourceAccountChangedError('source_account_token_mismatch', 'Gmail confirmation could not match the mailbox to the stored mail.');
-    }
-    this.beforeEachRequest?.();
   }
 
   /**
@@ -1448,16 +1417,22 @@ export function bareMessageId(value: string | undefined): string | undefined {
  * override is not re-checked here; it only narrows what is listed.)
  */
 export function gmailMessageInScope(message: GmailMessage, scope: GmailConnectorScope): boolean {
+  return gmailMessageScopeLeg(message, scope) === 'content';
+}
+
+/** The receipt-time cutoff can admit an otherwise eligible message as names only. */
+function gmailMessageScopeLeg(message: GmailMessage, scope: GmailConnectorScope): 'content' | 'metadata' | undefined {
   const labels = new Set((message.labelIds ?? []).map((label) => label.toUpperCase()));
-  if (labels.has('SPAM') || labels.has('TRASH')) return false;
+  if (labels.has('SPAM') || labels.has('TRASH')) return undefined;
   for (const skipped of [...(scope.skippedCategoryLabelIds ?? []), ...(scope.skippedLabelIds ?? [])]) {
-    if (labels.has(skipped.toUpperCase())) return false;
+    if (labels.has(skipped.toUpperCase())) return undefined;
   }
-  const received = internalDateNumber({ internalDate: message.internalDate });
-  if (scope.contentAfterMs !== undefined && (received === undefined || received < scope.contentAfterMs)) return false;
   const from = headersFromPart(message.payload).get('from');
-  if (scope.skipSenders?.some((rule) => senderMatchesRule(from, rule))) return false;
-  return true;
+  if (scope.skipSenders?.some((rule) => senderMatchesRule(from, rule))) return undefined;
+  if (scope.contentAfterMs === undefined) return 'content';
+  const received = internalDateNumber({ internalDate: message.internalDate });
+  if (received === undefined) return undefined;
+  return received < scope.contentAfterMs ? 'metadata' : 'content';
 }
 
 /** The locator of one MIME part of a Gmail message: what a later read of its bytes needs. */

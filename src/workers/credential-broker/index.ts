@@ -33,6 +33,7 @@ import {
   createDefaultSecretStore,
   normalizeSecretRef,
   resolveSecretRefValue,
+  resolveSecretRefValueSync,
   type SecretStore,
 } from '../../core/secret-store.ts';
 import type { SourceTrustDomain } from '../../core/source-index/types.ts';
@@ -257,6 +258,8 @@ export interface CredentialBroker {
    * fence. Undefined for a handle with no recorded grant.
    */
   grantGeneration?(handle: string): string | undefined;
+  /** Fingerprint only, using local credential state without minting a session. */
+  currentBearerTokenFingerprint?(handle: string, capability: string): string | undefined;
 }
 
 export interface CredentialOAuth2HandleState {
@@ -1213,6 +1216,37 @@ export class EnvCredentialBroker implements CredentialBroker {
 
   grantGeneration(handle: string): string | undefined {
     return this.findHandle(handle)?.grantGeneration;
+  }
+
+  currentBearerTokenFingerprint(handle: string, capability: string): string | undefined {
+    const definition = this.findHandle(handle);
+    if (!definition?.grantGeneration || !definition.allowedCapabilities.includes(capability)
+      || sessionKindFromDefinition(definition) !== 'bearer_token' || registryMarksReauthRequired(definition)) return undefined;
+    const pinnedToken = firstNonEmptyEnv(this.env, definition.tokenEnvNames);
+    if (pinnedToken) return createHash('sha256').update(pinnedToken).digest('hex');
+    // Direct tokens outrank a cached mint in issueSession. Read the same
+    // local sources here, in the same order, without returning a bearer token.
+    // An unreadable direct credential may outrank the mint, so fail closed.
+    const directRefs = definition.tokenSecretRefs ?? [];
+    try {
+      for (const ref of directRefs) {
+        const token = resolveSecretRefValueSync(ref, {
+          env: this.env,
+          ...(this.secretStore ? { secretStore: this.secretStore } : {}),
+        })?.trim();
+        if (token) return createHash('sha256').update(token).digest('hex');
+      }
+    } catch {
+      console.warn('[olympus:credential-broker] offline_bearer_proof_unavailable');
+      return undefined;
+    }
+    // Keychain can report an unavailable key as absent. If a direct token
+    // could take precedence, an older mint cannot prove today's credential.
+    if (directRefs.length > 0) return undefined;
+    const key = mintedSessionCacheKey(this.oauth2CacheNamespace, definition, capability, this.env);
+    const cached = PROCESS_MINTED_SESSION_CACHE.get(key);
+    return cached?.kind === 'bearer_token' && isReusableMintedSession(cached, this.now())
+      ? createHash('sha256').update(cached.token).digest('hex') : undefined;
   }
 
   private requireHandle(request: CredentialSessionRequest): EnvCredentialHandleDefinition {

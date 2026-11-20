@@ -204,7 +204,8 @@ export interface EmailSourceWorkerOptions {
   connectorStorePrincipals?: ReadonlyMap<string, ConnectorStoreDeclaredPrincipal>;
   /** Test/integration override; shipped declarations use the module registry above. */
   connectorStoreFilterCapabilities?: ConnectorStoreFilterCapabilityRegistry;
-  /** Mandatory account-bound retrieval scope for mounted file corpora. */
+  embeddingScopeFor?: (store: LocalConnectorStore, provider: SourceEmbeddingProvider) => import('../../connector-store/embedding-plan.ts').StoreEmbeddingScope;
+  /** Mandatory account-bound retrieval scope for mounted corpora. */
   connectorStoreReadScope?: (
     store: LocalConnectorStore,
   ) => { allowed: false } | {

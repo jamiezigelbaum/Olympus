@@ -22,7 +22,7 @@ export function probeFailure(result: { code: number; stdout: string; timedOut: b
   return new LimitsReason(`limits probe failed at ${reply.failed}${why ? `: ${why}` : ''}`);
 }
 export async function openLimitsMachine(machine: Machine, transport: Machine = machine): Promise<LimitsMachine> {
-  if (!machine.disposable || !transport.disposable) throw new Error('limits requires driver provision');
+  if (!machine.disposable) throw new Error('limits requires driver provision');
   const work = mkdtempSync(join(tmpdir(), 'olympus-limits-'));
   const remote = `/tmp/olympus-limits-${crypto.randomUUID()}.js`;
   const scratch = `${remote}.work`;

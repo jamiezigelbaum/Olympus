@@ -31,6 +31,7 @@ import {
   type MailScopeSelection,
 } from '../../core/mail-source-scope.ts';
 import type { CredentialBroker, CredentialBrokerFetch } from '../credential-broker/index.ts';
+import { parseEmailIngestFilterOptionsFromEnv } from '../email-source/ingest-filter.ts';
 import {
   GoogleGmailSourceConnector,
   type GmailApiClient,
@@ -80,6 +81,12 @@ export interface GmailMailScopeSummary {
   categories: GmailMailScopeCategoryView[];
   sender_suggestions: GmailMailScopeSenderSuggestion[];
   sample_size: number;
+  operator_exclusions: {
+    gmail_query: boolean;
+    categories: GmailScopeCategory[];
+    other_labels: boolean;
+    verification_codes: boolean;
+  };
   /** Omitted when either query needs pagination; Gmail's list estimates can be capped. */
   estimate?: MailScopeEstimate;
   /** Requests this summary actually spent. Never above GMAIL_SCOPE_BROWSE_MAX_REQUESTS. */
@@ -119,6 +126,11 @@ export function createGmailMailScopeBrowser(options: {
   });
   return {
     async summarize(input) {
+      const env = options.env ?? process.env;
+      const operatorQuery = input.operatorQuery?.trim() || env.OLYMPUS_SOURCE_INDEX_GMAIL_QUERY?.trim();
+      const ingest = parseEmailIngestFilterOptionsFromEnv(env);
+      const skipped = new Set(ingest.skipCategories?.map(label => label.toUpperCase()));
+      const excludedCategories = GMAIL_SCOPE_CATEGORIES.filter(category => skipped.delete(GMAIL_SCOPE_CATEGORY_LABEL_IDS[category]));
       const client = await connector.apiClientForTooling();
       let requests = 0;
       const count = <T>(promise: Promise<T>): Promise<T> => {
@@ -140,7 +152,7 @@ export function createGmailMailScopeBrowser(options: {
       const contentAfter = mailScopeContentAfter(input.scope.window, input.now ?? new Date());
       const compiled = compileGmailMailScope(
         { ...input.scope, ...(contentAfter ? { contentAfter } : {}) },
-        { operatorQuery: input.operatorQuery },
+        { operatorQuery },
       );
       const contentPage = await count(client.listMessages({
         maxResults: GMAIL_SCOPE_SENDER_SAMPLE,
@@ -171,6 +183,14 @@ export function createGmailMailScopeBrowser(options: {
           .slice(0, MAX_SENDER_SUGGESTIONS)
           .map(([sender, messages]) => ({ sender, sample_messages: messages })),
         sample_size: sample.length,
+        // Report effective restrictions without returning a query or custom
+        // label ids, which can contain information about Secret locations.
+        operator_exclusions: {
+          gmail_query: Boolean(operatorQuery),
+          categories: excludedCategories,
+          other_labels: skipped.size > 0,
+          verification_codes: ingest.skipOtp ?? true,
+        },
         // resultSizeEstimate can report ~201 for tens of thousands of matches.
         // Only count results we have completely listed. Whole-mailbox category
         // totals cannot tell us how many match a date window or exclusions.

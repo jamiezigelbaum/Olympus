@@ -1214,7 +1214,7 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
       timing[role].spawnedAt = nowMs();
       enginesStartedAt ??= timing[role].spawnedAt;
       const child = Bun.spawn([process.execPath, '--preload', preload, join(import.meta.dir, '../src/workers/engine/server.ts')], {
-        env: { ...env, OLYMPUS_WORKER_ENGINE_ROLE: role, OLYMPUS_LOOP_STALL_PROFILE: profile, OLYMPUS_MAIN_THREAD_SQL_LOG: `${profile}.sql.jsonl`, OLYMPUS_CPU_SAMPLE_LOG: `${profile}.cpu.jsonl` },
+        env: { ...env, OLYMPUS_WORKER_ENGINE_ROLE: role, OLYMPUS_LOOP_STALL_PROFILE: profile, OLYMPUS_MAIN_THREAD_SQL_LOG: `${profile}.sql.jsonl`, OLYMPUS_CPU_SAMPLE_LOG: `${profile}.cpu.jsonl`, OLYMPUS_SQLITE_BUSY_DIAGNOSTIC: '1' },
         stdout: 'pipe', stderr: 'pipe',
       });
       children.push(child);

@@ -65,6 +65,7 @@ const BUILT_IN_MODEL_REVERIFY_MS = 30_000;
 /** How the engine split's front reaches the model the background holds. */
 export interface BackgroundBuiltInModel {
   complete(request: AnalystModelRequest): Promise<AnalystModelCompletion>;
+  servingPid(): number | undefined;
   /** Ask the background to install or re-arm the model (a wake, no answer awaited). */
   prepare(): void;
 }
@@ -208,6 +209,7 @@ export function frontBuiltInModel(
     },
     // The front never starts a model server, so it has none to stop.
     async stop() {},
+    servingPid: () => background.servingPid(),
     complete: (request) => background.complete(request),
   };
   if (installed()) void verify();

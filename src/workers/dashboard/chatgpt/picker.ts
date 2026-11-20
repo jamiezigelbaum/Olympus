@@ -2189,6 +2189,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     p.labels = Array.isArray(body.labels)
       ? body.labels.filter((label: Any) => label && typeof label.id === 'string' && typeof label.name === 'string') : [];
     p.categories = Array.isArray(body.categories) ? body.categories : [];
+    p.operatorExclusions = body.operator_exclusions;
     p.suggestions = Array.isArray(body.sender_suggestions)
       ? body.sender_suggestions.filter((entry: Any) => entry && typeof entry.sender === 'string') : [];
     p.sampleSize = typeof body.sample_size === 'number' ? body.sample_size : 0;
@@ -2292,6 +2293,10 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       return;
     }
     const draft = p.draft;
+    const exclusions = p.operatorExclusions;
+    if (exclusions?.gmail_query === true) add(page, el('p', 'muted', Q.mailOperatorQuery));
+    if (exclusions?.other_labels === true) add(page, el('p', 'muted', Q.mailOperatorLabels));
+    if (exclusions?.verification_codes === true) add(page, el('p', 'muted', Q.mailVerificationCodes));
     const windows = group(Q.mailWindow, Q.mailWindowHelp);
     for (const value of WINDOWS) {
       add(windows, option('radio', 'mail-window', 'picker:window:' + value, draft.window === value,
@@ -2305,8 +2310,9 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     for (const category of CATEGORIES) {
       const words = (Q.mailCategoryNames as Any)[category];
       const known = p.categories.filter((entry: Any) => entry && entry.category === category)[0];
-      const hint = known && typeof known.messages_total === 'number'
+      const details = known && typeof known.messages_total === 'number'
         ? words[1] + ' · ' + fill(Q.mailCategoryCount, { count: kit.count(known.messages_total) }) : words[1];
+      const hint = strings(exclusions?.categories).includes(category) ? details + ' · ' + Q.mailOperatorCategory : details;
       add(categories, option('checkbox', '', 'picker:category:' + category, draft.skipped_categories.indexOf(category) < 0,
         words[0], hint, (input) => {
           const rest = draft.skipped_categories.filter((entry: string) => entry !== category);

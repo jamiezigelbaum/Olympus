@@ -10,8 +10,8 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
 import { defaultMailScopeSelection } from '../src/core/mail-source-scope.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
-import { gmailInternalStoreStatusScope, gmailPrivateStoreStatusScope } from '../src/workers/email-source/gmail-status-scope.ts';
-import { defineInternalEmailCorpus, gmailCursorConnectorId } from '../src/workers/google-connectors/index.ts';
+import { gmailInternalStoreStatusScope, gmailPrivateStoreStatusScope, gmailRetainedAccountMatches } from '../src/workers/email-source/gmail-status-scope.ts';
+import { defineInternalEmailCorpus, gmailCursorConnectorIds } from '../src/workers/google-connectors/index.ts';
 import { createSourceIndexStatusHandler } from '../src/workers/source-index/status.ts';
 import { FileSourceScopeAuthority } from '../src/workers/source-scope-runtime.ts';
 
@@ -59,6 +59,25 @@ function approve(subject: FileSourceScopeAuthority, window: '6m' | '1y' | '2y' |
   });
 }
 
+test('a verified rename of an address-only grant can use its own retained account', () => {
+  const connectedAt = '2026-10-01T10:00:00.000Z';
+  const account = {
+    handle: { connectedAt, providerAccountId: 'google:oldaddress' },
+    binding: { bound_grant: connectedAt, provider_account_id: 'google-sub:owner.google:newaddress' },
+    historyAccountId: 'google-sub:owner.google:newaddress',
+  };
+  expect(gmailRetainedAccountMatches({ ...account, currentGrantVerified: () => true })).toBe(true);
+  expect(gmailRetainedAccountMatches({ ...account, currentGrantVerified: () => false })).toBe(false);
+  expect(gmailRetainedAccountMatches({ ...account, handle: { ...account.handle, connectedAt: 'another grant' }, currentGrantVerified: () => true })).toBe(false);
+});
+
+test('disconnecting a refused mailbox leaves the retained library available locally', () => {
+  const binding = { provider_account_id: 'google-sub:owner', purge_required: { reason: 'account_changed' as const, detected_at: '2026-10-01' } };
+  const handle = { providerAccountId: 'google-sub:other', connectedAt: '2026-10-01' };
+  expect(gmailRetainedAccountMatches({ binding, historyAccountId: binding.provider_account_id, handle })).toBe(false);
+  expect(gmailRetainedAccountMatches({ binding, historyAccountId: binding.provider_account_id, handle: undefined })).toBe(true);
+});
+
 describe('Gmail store status scope: the approved window', () => {
   test('a 2-year window passes the approval\'s own cutoff to the Personal store', () => {
     const subject = authority();
@@ -89,13 +108,14 @@ describe('Gmail store status scope: the approved window', () => {
     approve(subject, '6m');
     const ref = subject.mailPolicyRef()!;
     const cutoff = subject.mailSnapshot().mailScope?.contentAfter;
+    const ids = gmailCursorConnectorIds('personal', { generation: ref.accountGeneration, revision: ref.revision });
     const observed = {
       provider: 'gmail',
-      observedConnectorId: gmailCursorConnectorId('personal', { generation: ref.accountGeneration, revision: ref.revision }),
+      observedConnectorId: ids.connectorId, previousObservedConnectorId: ids.previousId,
       // Mail an import brought into the account is in the approved scope too.
       observedConnectorIdPrefix: 'archive.',
     };
-    expect(gmailPrivateStoreStatusScope({ authority: subject, handle: { accountRole: 'personal' } })).toEqual({
+    expect(gmailPrivateStoreStatusScope({ authority: subject, handle: { accountRole: 'personal' }, gmailRetainedAccountScope: () => 'personal' })).toEqual({
       accountScope: 'personal',
       scopeRevision: ref.revision,
       itemFilters: observed,
@@ -108,21 +128,21 @@ describe('Gmail store status scope: the approved window', () => {
   test('the Private store under "everything" is exactly its approved-observation scope, with no window', () => {
     const subject = authority();
     approve(subject, 'all');
-    const scope = gmailPrivateStoreStatusScope({ authority: subject, handle: { accountRole: 'personal' } });
+    const scope = gmailPrivateStoreStatusScope({ authority: subject, handle: { accountRole: 'personal' }, gmailRetainedAccountScope: () => 'personal' });
     expect(scope.contentAllowed).toBe(true);
     expect(scope.scopeRevision).toBe(subject.mailPolicyRef()!.revision);
     expect('contentNotBefore' in scope).toBe(false);
   });
 
-  test('the Private store counts nothing without an approval or a connected account', () => {
+  test('the Private store counts nothing for an unverified mail account', () => {
     const pending = authority();
-    expect(gmailPrivateStoreStatusScope({ authority: pending, handle: { accountRole: 'personal' } }))
+    expect(gmailPrivateStoreStatusScope({ authority: pending, handle: { accountRole: 'personal' }, gmailRetainedAccountScope: () => undefined }))
       .toEqual({ itemsAllowed: false, contentAllowed: false });
     const approved = authority();
     approve(approved, '2y');
-    expect(gmailPrivateStoreStatusScope({ authority: approved, handle: undefined }))
+    expect(gmailPrivateStoreStatusScope({ authority: approved, handle: undefined, gmailRetainedAccountScope: () => undefined }))
       .toEqual({ itemsAllowed: false, contentAllowed: false });
-    expect(gmailPrivateStoreStatusScope({ authority: undefined, handle: { accountRole: 'personal' } }))
+    expect(gmailPrivateStoreStatusScope({ authority: undefined, handle: { accountRole: 'personal' }, gmailRetainedAccountScope: () => undefined }))
       .toEqual({ itemsAllowed: false, contentAllowed: false });
   });
 });
