@@ -1,4 +1,5 @@
 import { changeMemoryActivity, changeMemoryCounter } from '../../core/memory-counters.ts';
+import { EMBEDDING_HOLD_REASONS, type EmbeddingHoldReason } from '../../core/embedding-sweep-idle.ts';
 import { trackSqliteStoreMemory, untrackSqliteStoreMemory } from '../engine-split/sqlite-memory.ts';
 import { noteSourceIndexReadProgress } from '../../core/source-index/read-progress.ts';
 import { sizeHeldItemKey } from '../../core/source-size-limits.ts';
@@ -2485,6 +2486,7 @@ function connectorStoreCurrentEmbeddingRowsQuery(
   const accountScope = normalizeOptionalAccountScope(options.accountScope);
   const selectedFilters = connectorStoreFilterSql(options.filters);
   const metadataOnly = connectorStoreMetadataOnlySql(options.filters, options.onDemandReadsTablePresent);
+  const chunkContentHash = page ? ', c.content_hash AS chunk_content_hash' : '';
   if (options.chunkPks) {
     // A re-score names its chunks: the plan must start from that list and
     // seek each chunk's vector by key. Left to the planner, an account scope
@@ -2494,7 +2496,7 @@ function connectorStoreCurrentEmbeddingRowsQuery(
     // 15 Nov). CROSS JOIN fixes SQLite's join order to the order written.
     return {
       sql: `
-        SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding
+        SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding${chunkContentHash}
         FROM json_each(?) pick
         CROSS JOIN chunk_embeddings emb ON emb.chunk_pk = pick.value AND emb.model_id = ?
         CROSS JOIN chunks c ON c.chunk_pk = emb.chunk_pk
@@ -2520,7 +2522,7 @@ function connectorStoreCurrentEmbeddingRowsQuery(
   }
   return {
     sql: `
-      SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding
+      SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding${chunkContentHash}
       ${CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER}
         -- Unary + avoids the model index + repeated whole-model sort (#1242).
         AND ${page ? '+emb.model_id' : 'emb.model_id'} = ?
@@ -2574,10 +2576,13 @@ export function* connectorStoreCurrentEmbeddingRowsIterator(
   }
 }
 
+type VectorWinners = Map<number, { bestCosine: number; bestChunkPk: number; bestChunkContentHash: string; localItemId: string }>;
 type VectorScan =
   | {
-    bestByItem: Map<number, { bestCosine: number; bestChunkPk: number; localItemId: string }>;
+    bestByItem: VectorWinners;
     dimensionMismatches: number;
+    /** Lets the existing winner query read live grants on stores that support them. */
+    onDemandReadsTablePresent?: boolean;
     /** False when the digest pass stopped with candidates left unread. */
     exhausted?: boolean;
     /** The scan ran out of time after ranking began: these are the winners found so far. */
@@ -2585,8 +2590,7 @@ type VectorScan =
   }
   | { skippedReason: string };
 
-type VectorScoreRow = { item_pk: number; chunk_pk: number; local_item_id: string; embedding: unknown };
-type VectorWinners = Extract<VectorScan, { bestByItem: unknown }>['bestByItem'];
+type VectorScoreRow = { item_pk: number; chunk_pk: number; local_item_id: string; embedding: unknown; chunk_content_hash: string };
 
 /** Shared exact scoring preserves the winning chunk and deterministic ties. */
 function foldVectorScore(bestByItem: VectorWinners, row: VectorScoreRow, queryVector: readonly number[]): { mismatch: number; qualified: number; score?: number } {
@@ -2597,7 +2601,9 @@ function foldVectorScore(bestByItem: VectorWinners, row: VectorScoreRow, queryVe
   let qualified = 0;
   if (!prior || score > prior.bestCosine || (score === prior.bestCosine && row.chunk_pk < prior.bestChunkPk)) {
     qualified = Number(score >= MIN_VECTOR_SCORE && (!prior || prior.bestCosine < MIN_VECTOR_SCORE));
-    bestByItem.set(row.item_pk, { bestCosine: score, bestChunkPk: row.chunk_pk, localItemId: row.local_item_id });
+    bestByItem.set(row.item_pk, {
+      bestCosine: score, bestChunkPk: row.chunk_pk, bestChunkContentHash: row.chunk_content_hash, localItemId: row.local_item_id,
+    });
   }
   return { mismatch: 0, qualified, score };
 }
@@ -2631,30 +2637,29 @@ async function scanVectorPages(
     pageOptions = { ...pageOptions, onDemandReadsTablePresent: Boolean(await read({ mode: 'get',
       sql: "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'", params: [] })) };
   }
+  const onDemandReadsTablePresent = pageOptions.onDemandReadsTablePresent ?? false;
   // Old/read-only schemas and incomplete backfills retain the exact scan, as
   // does every store with OLYMPUS_VECTOR_DIGEST=off (see
   // vectorDigestSearchDisabled).
   const digestTable = !vectorDigestSearchDisabled() && await read({ mode: 'get', sql: "SELECT 1 FROM sqlite_master WHERE name = 'chunk_vector_digest_meta'", params: [] });
   const digestReady = digestTable && await read({ mode: 'get', sql: 'SELECT 1 FROM chunk_vector_digest_meta WHERE model_id = ? AND completed = 1', params: [pageOptions.modelId] });
-  if (digestReady) return scanDigestPages(read, queryVector, pageOptions, deadlineAtMs, resultLimit, VECTOR_DIGEST_MAX_CANDIDATES, sideReaders);
-  const bestByItem = new Map<number, { bestCosine: number; bestChunkPk: number; localItemId: string }>();
+  if (digestReady) {
+    const scanned = await scanDigestPages(read, queryVector, pageOptions, deadlineAtMs, resultLimit, VECTOR_DIGEST_MAX_CANDIDATES, sideReaders);
+    return 'skippedReason' in scanned ? scanned : { ...scanned, onDemandReadsTablePresent };
+  }
+  const bestByItem: VectorWinners = new Map();
   let dimensionMismatches = 0;
   let afterChunkPk = 0;
   let pagesScanned = 0;
   const excluded = pageOptions.excludedItemPks;
   // Out of time: the winners scored so far are kept, with the cut named.
   const cutExact = (): VectorScan => (bestByItem.size > 0
-    ? { bestByItem, dimensionMismatches, exhausted: false, cutReason: 'vector_scan_deadline_exceeded' }
+    ? { bestByItem, dimensionMismatches, onDemandReadsTablePresent, exhausted: false, cutReason: 'vector_scan_deadline_exceeded' }
     : { skippedReason: 'vector_scan_deadline_exceeded' });
   while (true) {
     if (connectorStoreVectorDeadlineExpired(deadlineAtMs)) return cutExact();
     const { sql, params } = connectorStoreCurrentEmbeddingPageQuery(pageOptions, afterChunkPk, pageSize);
-    const page = await read({ mode: 'all', sql, params }) as Array<{
-      item_pk: number;
-      chunk_pk: number;
-      local_item_id: string;
-      embedding: unknown;
-    }>;
+    const page = await read({ mode: 'all', sql, params }) as VectorScoreRow[];
     if (page.length === 0) break;
     // The winning CHUNK is kept, not just its score. A cosine is a
     // chunk-level measurement, so the chunk that produced the item's best
@@ -2669,7 +2674,7 @@ async function scanVectorPages(
     if (page.length < pageSize) break;
     if (pagesScanned++ % CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD === 0) await yieldConnectorStoreVectorScan();
   }
-  return { bestByItem, dimensionMismatches };
+  return { bestByItem, dimensionMismatches, onDemandReadsTablePresent };
 }
 
 /**
@@ -2772,7 +2777,7 @@ export async function scanDigestPages(
     heap.siftDown(index);
     if (index > 0 && (index & 65535) === 0) { if (expired()) return cut; await yieldConnectorStoreVectorScan(); }
   }
-  const bestByItem: Extract<VectorScan, { bestByItem: unknown }>['bestByItem'] = new Map();
+  const bestByItem: VectorWinners = new Map();
   let dimensionMismatches = 0;
   // Out of time once ranking has begun: the winners found so far are kept,
   // with the cut named so coverage still says the search was partial.
@@ -6108,7 +6113,7 @@ export class LocalConnectorStore {
   // on the store's pool, including cold lookups on a million-item store.
   parentLinksOfOffThread(identities: readonly ChildProbe[]): Promise<Map<string, ParentRef>> {
     return memoVisibilityItems(this, 'parentLinksOf', () => this.childVisibilityMarker(), identities, tierLedgerIdentityKey,
-      missing => this.readOffThread(this.parentLinksOfSteps(missing)));
+      missing => this.readOffThread(this.parentLinksOfSteps(missing)), () => this.db.inTransaction);
   }
 
   childVisibilityMarker(): string {
@@ -6181,7 +6186,7 @@ export class LocalConnectorStore {
     const rows = await memoVisibilityItems(this, 'parentStandings', () => this.childVisibilityMarker(), parents, parentKey,
       async missing => {
         return this.parentStandingGroups(await this.readOffThread(this.parentStandingsSteps(missing)));
-      });
+      }, () => this.db.inTransaction);
     return [...rows.values()].flat();
   }
 
@@ -6251,7 +6256,7 @@ export class LocalConnectorStore {
   // on the store's pool, including cold lookups on a million-item store.
   itemStandingsOffThread(identities: readonly ChildProbe[]): Promise<Map<string, ParentStandingRow>> {
     return memoVisibilityItems(this, 'itemStandings', () => this.childVisibilityMarker(), identities, tierLedgerIdentityKey,
-      missing => this.readOffThread(this.itemStandingsSteps(missing)));
+      missing => this.readOffThread(this.itemStandingsSteps(missing)), () => this.db.inTransaction);
   }
 
   private *itemStandingsSteps(identities: readonly ChildProbe[]): Generator<StoreRead, Map<string, ParentStandingRow>, unknown> {
@@ -13508,6 +13513,39 @@ export class LocalConnectorStore {
     };
   }
 
+  private async countEmbeddingHolds(
+    visibility: TierVisibilityMemo,
+    counts: Record<string, number>,
+    read: (query: StoreRead) => Promise<unknown>,
+    stopAtMs?: number,
+  ): Promise<void> {
+    const { ledger, members } = visibility;
+    let after = 0;
+    while (stopAtMs === undefined || Date.now() < stopAtMs) {
+      const page = await ledgerReadOffThread(ledger, ledger.embeddingHoldReasonSteps(this.corpusId, after), BACKGROUND_READS);
+      if (page.length === 0) break;
+      const reasons = new Map<number, EmbeddingHoldReason>();
+      for (const { key, reason } of page) for (const pk of members.get(key)?.pks ?? []) reasons.set(pk, reason);
+      if (reasons.size) {
+        // Held items can already have vectors, or have no text yet. Count the
+        // entire live copy using the item and chunk indexes.
+        const rows = await read({
+          sql: `SELECT i.item_pk, (SELECT COUNT(*) FROM chunks c WHERE c.item_pk = i.item_pk) AS chunks
+            FROM json_each(?) ids CROSS JOIN items i ON i.item_pk = ids.value
+            WHERE i.tombstoned = 0 AND i.trust_tier <> 'S5'`,
+          params: [JSON.stringify([...reasons.keys()])], mode: 'all',
+        }) as Array<{ item_pk: number; chunks: number }>;
+        for (const row of rows) {
+          const reason = reasons.get(row.item_pk)!;
+          counts[`${reason}_chunks`]! += row.chunks;
+          counts[`${reason}_items`]! += 1;
+        }
+      }
+      after = page[page.length - 1]!.rowId;
+      await ingestionTurn();
+    }
+  }
+
   /**
    * Missing vectors are not necessarily work: superseded copies deliberately
    * retain chunks. Report the reasons without reading text or returning ids.
@@ -13531,7 +13569,8 @@ export class LocalConnectorStore {
     const namesOnly = await pkSetInTurns([tier.metadataLayer]);
     const moving = new Set<number>();
     let walked = 0;
-    for (const member of this.tierLedgerHiddenMemo?.members.values() ?? []) {
+    const visibility = this.tierLedgerHiddenMemo;
+    for (const member of visibility?.members.values() ?? []) {
       if (member.flags.moving) for (const pk of member.pks) moving.add(pk);
       if (++walked % 2_000 === 0) await ingestionTurn();
     }
@@ -13547,6 +13586,12 @@ export class LocalConnectorStore {
       skipped_held_recent_chunks: 0, skipped_out_of_scope_recent_chunks: 0,
       skipped_private_tier_chunks: 0, skipped_retired_chunks: 0, inventory_complete: 0,
     };
+    for (const reason of EMBEDDING_HOLD_REASONS) {
+      counts[`${reason}_chunks`] = 0;
+      counts[`${reason}_items`] = 0;
+    }
+    const read = this.embeddingSweepRead(offThreadReadsSupported(this.dbPath));
+    if (visibility && held.size) await this.countEmbeddingHolds(visibility, counts, read, stopAtMs);
     // Only chunks that owe a vector come back: the rest count for nothing.
     const windowSql = `
       SELECT c.chunk_pk, i.item_pk, i.local_item_id, i.tombstoned, i.trust_tier, i.indexed_at,
@@ -13558,7 +13603,6 @@ export class LocalConnectorStore {
       ORDER BY c.chunk_pk
     `;
     const recentSince = new Date(started - 3 * 24 * 60 * 60_000).toISOString();
-    const read = this.embeddingSweepRead(offThreadReadsSupported(this.dbPath));
     const maxChunkPk = (await read({ sql: 'SELECT COALESCE(MAX(chunk_pk), 0) AS n FROM chunks', params: [], mode: 'get' }) as { n: number }).n;
     let after = 0;
     while (stopAtMs === undefined || Date.now() < stopAtMs) {
@@ -15115,7 +15159,7 @@ export class LocalConnectorStore {
       ? await scanVectorPagesOnPool(this.dbPath, provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit)
       : await this.scanVectorPagesInThread(provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit);
     if ('skippedReason' in scanned) return { rows: [], skippedReason: scanned.skippedReason };
-    const { bestByItem, dimensionMismatches } = scanned;
+    const { bestByItem, dimensionMismatches, onDemandReadsTablePresent } = scanned;
     // Ties break on item_pk, explicitly: exactly-equal cosines are common in
     // a real corpus (duplicated and forwarded content), and the ranking must
     // not depend on whatever plan SQLite chooses. Validate in rank order.
@@ -15137,14 +15181,14 @@ export class LocalConnectorStore {
         if (visibleInBatch.length === 0) {
           const batch = candidates.slice(candidateOffset, candidateOffset + VECTOR_VISIBILITY_BATCH_SIZE);
           candidateOffset += batch.length;
-          const visible = this.visibleVectorItemPks(batch.map(([itemPk]) => itemPk), selectedAccount, filters);
+          const visible = this.visibleVectorItemPks(batch.map(([itemPk]) => itemPk), selectedAccount, filters, onDemandReadsTablePresent);
           visibleInBatch = batch.filter(([itemPk]) => visible.has(itemPk));
         }
         // Keep the rest of this batch in rank order for a refill after the recheck.
         rankedItems.push(...visibleInBatch.splice(0, limit - rankedItems.length));
         continue;
       }
-      const stillVisible = this.visibleVectorItemPks(rankedItems.map(([itemPk]) => itemPk), selectedAccount, filters);
+      const stillVisible = this.visibleVectorItemPks(rankedItems.map(([itemPk]) => itemPk), selectedAccount, filters, onDemandReadsTablePresent);
       rankedItems = rankedItems.filter(([itemPk]) => stillVisible.has(itemPk));
       if (!canFill()) break;
     }
@@ -15156,14 +15200,11 @@ export class LocalConnectorStore {
       selectedAccount,
       filters,
     );
-    const winnersByLocalItemId = new Map(
-      rankedItems.map(([, candidate]) => [candidate.localItemId, candidate]),
-    );
-    const laneRows = searchRows.flatMap((row) => {
-      const winner = winnersByLocalItemId.get(row.sourceItem.localItemId);
-      if (winner === undefined) return [];
+    const laneRows = rankedItems.flatMap(([itemPk, winner]) => {
+      const row = searchRows.get(itemPk);
+      if (!row || row.sourceItem.localItemId !== winner.localItemId) return [];
       if (!input.locate) return [{ ...row, contentMatched: true as const, bestCosine: winner.bestCosine }];
-      const chunk = this.chunkMatchForChunkPk(winner.bestChunkPk, 'semantic');
+      const chunk = this.chunkMatchForChunkPk(winner.bestChunkPk, itemPk, winner.bestChunkContentHash);
       return [{ ...row, ...(chunk ? { chunk } : {}), bestCosine: winner.bestCosine }];
     });
     return {
@@ -15455,18 +15496,21 @@ export class LocalConnectorStore {
     }>;
   }
 
-  // Hydrates membrane-safe search rows for ranked item pks, preserving order.
   // Exact item PKs avoid local-id aliases across providers/accounts. Batches
   // keep candidate validation below SQLite's bind-variable ceiling.
-  private visibleVectorItemPks(itemPks: readonly number[], accountScope?: string, filters?: ConnectorStoreSearchFilters): Set<number> {
+  private visibleVectorItemPks(
+    itemPks: readonly number[], accountScope?: string, filters?: ConnectorStoreSearchFilters, onDemandReadsTablePresent = false,
+  ): Set<number> {
     const visible = new Set<number>();
     const selectedFilters = connectorStoreFilterSql(filters);
+    const metadataOnly = connectorStoreMetadataOnlySql(filters, onDemandReadsTablePresent);
     for (let offset = 0; offset < itemPks.length; offset += VECTOR_VISIBILITY_BATCH_SIZE) {
       const batch = itemPks.slice(offset, offset + VECTOR_VISIBILITY_BATCH_SIZE);
       const rows = this.db.query(`SELECT i.item_pk, i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id
         FROM items i WHERE i.item_pk IN (${batch.map(() => '?').join(',')}) AND i.tombstoned = 0
-        ${accountScope ? 'AND i.account_scope = ?' : ''} ${selectedFilters.sql}`)
-        .all(...batch, ...(accountScope ? [accountScope] : []), ...selectedFilters.params) as Array<{
+        ${accountScope ? 'AND i.account_scope = ?' : ''} ${selectedFilters.sql}
+        ${metadataOnly.sql ? `AND NOT ${metadataOnly.sql}` : ''}`)
+        .all(...batch, ...(accountScope ? [accountScope] : []), ...selectedFilters.params, ...metadataOnly.params) as Array<{
           item_pk: number; provider: string; account_scope: string; provider_item_id: string; provider_conversation_id: string | null;
         }>;
       // Embedding admission never releases a vector to search: the copy's
@@ -15485,8 +15529,8 @@ export class LocalConnectorStore {
     itemPks: number[],
     accountScope?: string,
     filters?: ConnectorStoreSearchFilters,
-  ): ConnectorStoreSearchRow[] {
-    if (itemPks.length === 0) return [];
+  ): Map<number, ConnectorStoreSearchRow> {
+    if (itemPks.length === 0) return new Map();
     const placeholders = itemPks.map(() => '?').join(', ');
     const selectedAccount = normalizeOptionalAccountScope(accountScope);
     const selectedFilters = connectorStoreFilterSql(filters);
@@ -15508,11 +15552,7 @@ export class LocalConnectorStore {
       ...(selectedAccount ? [selectedAccount] : []),
       ...selectedFilters.params,
     ) as ItemRow[];
-    const byPk = new Map(rows.map((row) => [row.item_pk, row]));
-    return itemPks.flatMap((itemPk) => {
-      const row = byPk.get(itemPk);
-      return row ? [searchRowFromItemRow(row)] : [];
-    });
+    return new Map(rows.map((row) => [row.item_pk, searchRowFromItemRow(row)]));
   }
 
   /**
@@ -16103,27 +16143,26 @@ export class LocalConnectorStore {
    * so the added work is a fraction of a lane that is already dominated by the
    * vector scan.
    *
-   * `queryTerms` narrows the span for the keyword lane. A semantic lane passes
-   * none: its signal is a whole-chunk cosine, and inventing a tighter span from
-   * it would be a claim the score cannot support.
+   * The chunk must still belong to the scored item and have the scored text.
+   * A semantic match spans the whole chunk.
    */
   private chunkMatchForChunkPk(
     chunkPk: number,
-    lane: 'keyword' | 'semantic',
-    queryTerms?: readonly string[],
+    itemPk: number,
+    contentHash: string,
   ): ConnectorStoreChunkMatch | undefined {
     const row = this.db.query(
-      'SELECT item_pk, chunk_index, content_hash, bounded_text FROM chunks WHERE chunk_pk = ?',
-    ).get(chunkPk) as
-      | { item_pk: number; chunk_index: number; content_hash: string; bounded_text: string }
+      'SELECT chunk_index, content_hash, bounded_text FROM chunks WHERE chunk_pk = ? AND item_pk = ? AND content_hash = ?',
+    ).get(chunkPk, itemPk, contentHash) as
+      | { chunk_index: number; content_hash: string; bounded_text: string }
       | null;
     if (!row) return undefined;
 
     const priorRows = this.db.query(
       'SELECT bounded_text FROM chunks WHERE item_pk = ? AND chunk_index < ? ORDER BY chunk_index',
-    ).all(row.item_pk, row.chunk_index) as Array<{ bounded_text: string }>;
+    ).all(itemPk, row.chunk_index) as Array<{ bounded_text: string }>;
     const itemOffset = priorRows.reduce((sum, prior) => sum + prior.bounded_text.length, 0);
-    return chunkMatchFromRows(chunkPk, row, itemOffset, lane, queryTerms);
+    return chunkMatchFromRows(chunkPk, row, itemOffset, 'semantic');
   }
 
   /**

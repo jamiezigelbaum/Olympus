@@ -14,6 +14,11 @@ export interface IdleEmbeddingSweep {
 /** Rebuildable counts beside the store, kept out of its SQLite transactions. */
 export const EMBEDDING_SWEEP_IDLE_SUFFIX = '.embedding-sweep-idle.json';
 
+export const EMBEDDING_HOLD_REASONS = [
+  'held_for_judgment', 'held_after_decision', 'held_while_text_is_unread', 'held_while_moving', 'held_for_other_reasons',
+] as const;
+export type EmbeddingHoldReason = typeof EMBEDDING_HOLD_REASONS[number];
+
 // The scheduler spreads these fields into its counts-only log. Validate the
 // names as well as the numbers before replaying a receipt from disk.
 const INVENTORY_FIELDS = [
@@ -21,6 +26,7 @@ const INVENTORY_FIELDS = [
   'skipped_hidden_chunks', 'skipped_metadata_chunks', 'skipped_failed_chunks', 'skipped_out_of_scope_chunks',
   'skipped_held_recent_chunks', 'skipped_out_of_scope_recent_chunks',
   'skipped_private_tier_chunks', 'skipped_retired_chunks', 'inventory_complete', 'inventory_ms',
+  ...EMBEDDING_HOLD_REASONS.flatMap(reason => [`${reason}_chunks`, `${reason}_items`]),
 ] as const;
 
 export async function readEmbeddingSweepIdle(path: string): Promise<Map<string, IdleEmbeddingSweep>> {

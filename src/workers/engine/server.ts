@@ -302,7 +302,7 @@ import {
 } from '../x-bookmarks/tier-set.ts';
 import { createParentLabelResolver } from '../connector-store/parent-label.ts';
 import { createUnreadableLocators } from '../connector-store/unreadable-locators.ts';
-import { hiddenProbesByParentIdentity, settleStaleEmbedHolds } from '../connector-store/child-visibility.ts';
+import { hiddenProbesByParentIdentity } from '../connector-store/child-visibility.ts';
 import { sqliteFilesHealth, startSqliteWalSampler } from './sqlite-wal-sampler.ts';
 import { readPoolDiagnostics, readPoolMemoryCounts, sampleReadPoolMemory, setAskBenchReadPoolSqlDir } from '../connector-store/off-thread-reads.ts';
 import { startSqliteCheckpointer } from './sqlite-checkpointer.ts';
@@ -481,7 +481,7 @@ import {
   localModelResourceKey,
 } from '../answer-activity.ts';
 import { privacyOwnerContext } from '../classification/privacy-profile.ts';
-import { TierSnifferService, tierSnifferServiceEnv } from '../classification/sniffer-service.ts';
+import { runUnattendedStaleEmbedHoldWalk, TierSnifferService, tierSnifferServiceEnv } from '../classification/sniffer-service.ts';
 import { TierOverPrivateMonitor, type TierOverPrivateStatus } from '../classification/tier-over-private.ts';
 import { SNIFFER_MAX_CONCURRENT_CALLS, completeAfterSlot } from '../classification/sniffer-resolver.ts';
 import { approveClassifier, resolveClassificationLedgerPath, readClassificationLedger, isClassifierApproved } from '../classification-ledger.ts';
@@ -7306,14 +7306,14 @@ export async function main(): Promise<void> {
             }
             for (const ledger of new Set(tierLanes.map((lane) => lane.ledger))) {
               await pause();
-              changeMemoryActivity('embedding_settlement', 1);
+              if (standBack.holds('status')) break;
+              // The judge walks its own ledgers, except while a spending stop
+              // pauses it: then this pass takes the walk so holds still settle.
+              if (tierSniffer && tierSetForLedger(ledger.dbPath) && tierSniffer.status().waiting?.reason !== 'cloud_stopped') continue;
               try {
-                const settled = await settleStaleEmbedHolds(ledger);
-                if (settled) console.warn(`[olympus] tier ledger: released ${settled} decided copies an older build left held.`);
+                await runUnattendedStaleEmbedHoldWalk(ledger, (line) => console.warn(line));
               } catch (error) {
-                console.warn(`[olympus] tier ledger: settling held copies failed (${error instanceof Error ? error.message : String(error)}); tried again next pass.`);
-              } finally {
-                changeMemoryActivity('embedding_settlement', -1);
+                console.warn(`[olympus] tier ledger: held copy check failed (${error instanceof Error ? error.name : 'unknown'}). The next pass will retry.`);
               }
             }
             for (const request of [PLAIN_STATUS_REQUEST, DASHBOARD_STATUS_REQUEST]) {

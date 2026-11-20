@@ -2,7 +2,9 @@ import { expect, test } from 'bun:test';
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parseFreeze, parseSchedstat, parseStat, summarizeFreeze, TimelineOutput } from '../scripts/front-thread-timeline.ts';
+import { readFileSync } from 'node:fs';
+import { waitFor } from './helpers/test-clock.ts';
+import { describeSyscall, parseFreeze, parseSchedstat, parseStat, summarizeFreeze, TimelineOutput } from '../scripts/front-thread-timeline.ts';
 
 test('parses Linux main-thread stat and schedstat fixtures', () => {
   // Fields 4 through 52. Distinct child counters catch off-by-one errors.
@@ -46,8 +48,8 @@ test('reports the observed split over the 30 s before a front freeze', () => {
     sample(-10, { dRunNs: 20_000_000 }), // Outside the window.
     sample(10, { dRunNs: 20_000_000 }), // Half inside the window.
     sample(30, { dRunNs: 8_000_000, dWaitNs: 12_000_000 }),
-    sample(50, { state: 'D', wchan: 'folio_wait_bit_common' }),
-    sample(70, { state: 'D', wchan: 'folio_wait_bit_common' }),
+    sample(50, { state: 'D', wchan: 'folio_wait_bit_common', syscall: 'pwrite64 file' }),
+    sample(70, { state: 'D', wchan: 'folio_wait_bit_common', syscall: 'pwrite64 file' }),
     sample(90, { dRunNs: 15_000_000, dMajflt: 1, dBlkioTicks: 1 }),
     sample(110, { state: 'D', wchan: 'io_schedule', dBlkioTicks: 1 }),
     sample(130, { state: 'S', wchan: 'futex_wait_queue' }),
@@ -69,8 +71,38 @@ test('reports the observed split over the 30 s before a front freeze', () => {
     runningMs: 47, runQueueMs: 94, blockedMajfltMs: 45, blockedBlkioMs: 20, blockedOtherMs: 20,
     topWchan: 'folio_wait_bit_common', topWchanMs: 45, coveredMs: 1_000, covered_ms: 1_000, lateTicks: 2, lateMs: 380,
     waitChannelsMs: { folio_wait_bit_common: 45, futex_wait_queue: 20, io_schedule: 20 },
+    syscallsMs: { 'pwrite64 file': 40 },
   });
 });
+
+test('names the system call a waiting thread is in, and the kind of file, never a path unless asked', () => {
+  const fd = (n: number) => ({ 2: '/home/u/.openclaw/olympus/logs/worker.err', 9: 'socket:[123]', 4: 'pipe:[9]', 7: 'anon_inode:[eventfd]' } as Record<number, string>)[n] ?? null;
+  expect(describeSyscall('1 0x2 0x7f 0x10 0 0 0 0x7ffd 0x7f', fd, false)).toBe('write file');
+  expect(describeSyscall('1 0x2 0x7f 0x10 0 0 0 0x7ffd 0x7f', fd, true)).toBe('write worker.err');
+  expect(describeSyscall('74 0x9 0 0 0 0 0 0x7ffd 0x7f', fd, true)).toBe('fsync socket');
+  expect(describeSyscall('0 0x4 0x7f 0x10 0 0 0 0x7ffd 0x7f', fd, false)).toBe('read pipe');
+  expect(describeSyscall('257 0xffffff9c 0x7f 0x80000 0 0 0 0x7ffd 0x7f', fd, true)).toBe('openat');
+  expect(describeSyscall('999 0x1 0 0 0 0 0 0 0', fd, false)).toBe('syscall 999');
+  expect(describeSyscall('running', fd, false)).toBeNull();
+  expect(describeSyscall(null, fd, false)).toBeNull();
+});
+
+test('a real thread blocked in a read on its stdin is named while it waits', async () => {
+  if (process.platform !== 'linux') return;
+  const dir = await mkdtemp(join(tmpdir(), 'timeline-syscall-'));
+  const reader = Bun.spawn(['cat'], { stdin: 'pipe', stdout: 'ignore' });
+  try {
+    await waitFor(() => { try { return readFileSync(`/proc/${reader.pid}/task/${reader.pid}/syscall`, 'utf8').startsWith('0 ') || null; } catch { return null; } });
+    const out = join(dir, 'timeline.jsonl');
+    const run = Bun.spawnSync([process.execPath, join(import.meta.dir, '..', 'scripts', 'front-thread-timeline.ts'), '--pid', String(reader.pid), '--out', out, '--seconds', '0.5', '--interval-ms', '50']);
+    expect(run.exitCode).toBe(0);
+    const rows = (await readFile(out, 'utf8')).split('\n').filter(Boolean).map((line) => JSON.parse(line));
+    expect(rows.some((row) => row.kind === 'sample' && /^read (pipe|socket)$/.test(row.syscall ?? ''))).toBe(true);
+  } finally {
+    reader.kill();
+    await rm(dir, { recursive: true, force: true });
+  }
+}, 15_000);
 
 test('filters freeze frames and heartbeat holds by role', () => {
   const prefix = `${clockAt(250_000).at} [olympus:control-path]`;
