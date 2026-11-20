@@ -14,7 +14,9 @@ import { readSourceAccountBindings, sourceAccountBindingsPath, type SourceAccoun
 import { compareProviderAccounts, namesAccountByAddressOnly } from '../../core/provider-account-identity.ts';
 import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
 import { embedsOnThisComputer } from '../local-pacing.ts';
-import type { FileSourceScopeAuthority, MailSourceScopePolicyRef } from '../source-scope-runtime.ts';
+import type { SourceEmbeddingScopePolicy } from '../connector-store/embedding-scope.ts';
+import { SourceScopeApprovalRequiredError } from '../../core/operation-error.ts';
+import { checkedEmbeddingProvider, isMailSourceScopePolicyRef, type FileSourceScopeAuthority, type MailSourceScopePolicyRef } from '../source-scope-runtime.ts';
 
 /** `{ contentNotBefore }` when the approval names a window, else nothing ("everything" has none). */
 function contentWindow(contentAfter: string | undefined): Pick<ConnectorStoreStatusScope, 'contentNotBefore'> {
@@ -52,6 +54,34 @@ export function gmailRetainedAccountMatches(input: {
   // An address-only grant can predate a verified rename of its bound account.
   return (!observed || namesAccountByAddressOnly(observed)) && binding?.bound_grant === handle.connectedAt
     && input.currentGrantVerified?.() === true;
+}
+
+/** Keep imports readable when the connected mailbox cannot claim the live history. */
+export function gmailStoreReadScope(input: {
+  registryPath: string;
+  historyAccountId: () => string | undefined;
+}): {
+  allowed: true;
+  contentAllowed: true;
+  filters?: typeof GMAIL_IMPORTED_FILTERS;
+  contentFilters?: typeof GMAIL_IMPORTED_FILTERS;
+} {
+  const open = { allowed: true, contentAllowed: true } as const;
+  const imports = { ...open, filters: GMAIL_IMPORTED_FILTERS, contentFilters: GMAIL_IMPORTED_FILTERS };
+  try {
+    const registry = readConnectedHandleRegistry(input.registryPath);
+    const handles = registry.handles.filter((handle) => handle.provider === 'gmail');
+    if (registry.dropped?.length || handles.length > 1) return imports;
+    if (handles.length === 0) return open;
+    const observed = handles[0]?.providerAccountId;
+    const record = readSourceAccountBindings(sourceAccountBindingsPath(input.registryPath));
+    if (!observed || record.kind !== 'ok') return imports;
+    const binding = record.bindings.sources['gmail.email'];
+    const owners = [binding?.provider_account_id, input.historyAccountId()].filter((id): id is string => Boolean(id));
+    return owners.length > 0 && owners.every((id) => compareProviderAccounts(id, observed) === 'same') ? open : imports;
+  } catch {
+    return imports;
+  }
 }
 
 /** Verify a selected mailbox without opening a token session or contacting Google. */
@@ -117,5 +147,34 @@ export function gmailPrivateStoreStatusScope(input: {
     ...(filters ? { itemFilters: filters, contentFilters: filters } : {}),
     ...(ref ? { scopeRevision: ref.revision } : {}),
     ...contentWindow(approval?.mailScope.contentAfter),
+  };
+}
+
+/** Select the retained population and recheck its account at each dispatch and write. */
+export function gmailStoreEmbeddingScope(deps: {
+  gmailRetainedAccountScope?: () => string | undefined;
+  gmailLiveProcessorVerified?: () => boolean;
+}): SourceEmbeddingScopePolicy {
+  return (input) => {
+    const { store, scopeRef: ref, authority } = input;
+    const account = deps.gmailRetainedAccountScope;
+    const accountScope = account?.();
+    if (!account || !accountScope) return { allowed: false, skipQueue: true };
+    if (ref && (!isMailSourceScopePolicyRef(ref) || !authority)) return { allowed: false, skipQueue: true };
+    const population = gmailEmbeddingPopulation({
+      provider: input.provider, accountScope, ref, privateStore: store.trustDomain === 'secure_local',
+    });
+    return {
+      ...population, allowed: true,
+      bind(provider) {
+        if (provider !== input.provider) throw new SourceScopeApprovalRequiredError('The selected mail processor changed before embedding.');
+        return checkedEmbeddingProvider(provider, () => {
+          if (account() !== accountScope) throw new SourceScopeApprovalRequiredError('The retained mail belongs to another or unverified account.');
+          if (!ref || population.excludeAllEmbeddingHolds) return;
+          authority!.assertCurrentMail(ref);
+          if (!deps.gmailLiveProcessorVerified?.()) throw new SourceScopeApprovalRequiredError('The connected Gmail credential is awaiting account verification.');
+        });
+      },
+    };
   };
 }

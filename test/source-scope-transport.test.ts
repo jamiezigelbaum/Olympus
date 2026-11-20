@@ -8,7 +8,9 @@ import { dashboardQueryTokenFromWorkerAuthToken } from '../src/core/worker-auth.
 import type { OlympusFolderScopeBrowseResult } from '../src/control-ui-contract.ts';
 import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
 import type { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
+import { storeEmbeddingScope, type EmbeddingReadScope } from '../src/workers/connector-store/embedding-scope.ts';
 import type { SourceEmbeddingInput, SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
+import type { FileSourceScopeAuthority } from '../src/workers/source-scope-runtime.ts';
 
 const cleanups: Array<() => void> = [];
 afterEach(() => { cleanups.splice(0).reverse().forEach((close) => close()); });
@@ -122,13 +124,14 @@ test('file embedding refuses a revoked scope before an approved remote provider 
     providerCalls += 1;
     return inputs.map(() => [1, 0]);
   });
+  const readScope = () => {
+    scopeChecks += 1;
+    return { allowed: false as const };
+  };
   const worker = createEmailSourceWorker({
     connectorStores: [store],
     connectorStoreEmbeddingProviders: new Map([[store.corpusId, provider]]),
-    connectorStoreReadScope: () => {
-      scopeChecks += 1;
-      return { allowed: false };
-    },
+    embeddingScopeFor: embeddingScopeFor(readScope),
   });
   cleanups.push(() => worker.close());
 
@@ -147,16 +150,16 @@ test('file embedding filters retained chunks from an earlier approval before rem
     return inputs.map(() => [1, 0]);
   });
   const currentRevision = '22222222-2222-4222-8222-222222222222';
+  const readScope = () => ({
+    allowed: true as const,
+    accountScope: 'personal',
+    contentAllowed: true,
+    contentFilters: { provider: 'dropbox', sourceScopeGeneration: generation, sourceScopeRevision: currentRevision },
+  });
   const worker = createEmailSourceWorker({
     connectorStores: [store],
     connectorStoreEmbeddingProviders: new Map([[store.corpusId, provider]]),
-    connectorStoreReadScope: () => ({
-      allowed: true,
-      accountScope: 'personal',
-      filters: { provider: 'dropbox', sourceScopeGeneration: generation, sourceScopeRevision: currentRevision },
-      contentAllowed: true,
-      contentFilters: { provider: 'dropbox', sourceScopeGeneration: generation, sourceScopeRevision: currentRevision },
-    }),
+    embeddingScopeFor: embeddingScopeFor(readScope, currentRevision),
   });
   cleanups.push(() => worker.close());
 
@@ -178,21 +181,21 @@ test('file embedding rechecks scope between batches and never dispatches retaine
     approved = false;
     return inputs.map(() => [1, 0]);
   });
+  const readScope: EmbeddingReadScope = () => {
+    scopeChecks += 1;
+    return approved
+      ? {
+          allowed: true,
+          accountScope: 'personal',
+          contentAllowed: true,
+          contentFilters: { provider: 'dropbox', sourceScopeGeneration: generation, sourceScopeRevision: revision },
+        }
+      : { allowed: false };
+  };
   const worker = createEmailSourceWorker({
     connectorStores: [store],
     connectorStoreEmbeddingProviders: new Map([[store.corpusId, provider]]),
-    connectorStoreReadScope: () => {
-      scopeChecks += 1;
-      return approved
-        ? {
-            allowed: true,
-            accountScope: 'personal',
-            filters: { provider: 'dropbox', sourceScopeGeneration: generation, sourceScopeRevision: revision },
-            contentAllowed: true,
-            contentFilters: { provider: 'dropbox', sourceScopeGeneration: generation, sourceScopeRevision: revision },
-          }
-        : { allowed: false };
-    },
+    embeddingScopeFor: embeddingScopeFor(readScope),
   });
   cleanups.push(() => worker.close());
 
@@ -204,6 +207,14 @@ test('file embedding rechecks scope between batches and never dispatches retaine
   expect(dispatched[0]).toHaveLength(32);
   expect(dispatched.flat().join('\n')).not.toContain('never-send-after-revocation');
 });
+
+function embeddingScopeFor(readScope: EmbeddingReadScope, scopeRevision = revision) {
+  const authority = { assertRefCurrent() {} } as unknown as FileSourceScopeAuthority;
+  return (store: LocalConnectorStore, provider: SourceEmbeddingProvider) => storeEmbeddingScope({
+    store, provider, policy: 'approval', authority, readScope,
+    scopeRef: { sourceId: 'dropbox.files', accountGeneration: generation, revision: scopeRevision },
+  });
+}
 
 async function scopedEmbeddingStore(bodies: string[]): Promise<LocalConnectorStore> {
   const { LocalConnectorStore } = await import('../src/workers/connector-store/index.ts');

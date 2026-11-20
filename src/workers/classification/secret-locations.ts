@@ -114,6 +114,9 @@ export interface SecretLocationScope {
   accountScope?: string;
   filters?: {
     provider?: string;
+    observedConnectorId?: string;
+    previousObservedConnectorId?: string;
+    observedConnectorIdPrefix?: string;
     conversationId?: string;
     locatorPathScope?: string;
     locatorPathScopes?: readonly string[];
@@ -374,14 +377,16 @@ export function secretLocationRef(location: Pick<SecretLocation, 'source' | 'acc
 
 /**
  * Whether a located Secret falls inside a read scope. Every filter the index
- * records a fact for is evaluated; a filter it holds no fact for (sender,
- * authored time, facet lines) excludes everything, fail closed.
+ * records a fact for is evaluated; a filter it holds no fact for (connector
+ * observation, sender, authored time, facet lines) excludes everything.
  */
 export function secretLocationWithinScope(location: SecretLocation, scope: SecretLocationScope): boolean {
   if (scope.accountScope && location.accountScope !== scope.accountScope) return false;
   const filters = scope.filters;
   if (!filters) return true;
-  if (filters.senderId || filters.senderLabel || filters.authoredAfter || filters.authoredBefore
+  if (filters.observedConnectorId !== undefined || filters.previousObservedConnectorId !== undefined
+    || filters.observedConnectorIdPrefix !== undefined
+    || filters.senderId || filters.senderLabel || filters.authoredAfter || filters.authoredBefore
     || (filters.searchTextExactLines?.length ?? 0) > 0) {
     return false;
   }
