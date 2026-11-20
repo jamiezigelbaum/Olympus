@@ -109,7 +109,7 @@ import {
   DASHBOARD_STATUS_REQUEST,
   PLAIN_STATUS_REQUEST,
 } from '../source-index/status.ts';
-import { startPacedStatusRecount, type PacedStatusRecount } from './status-recount.ts';
+import { createStatusRecountPass, startPacedStatusRecount, type PacedStatusRecount } from './status-recount.ts';
 import { LOOP_SLOW_SQL_MS, setAskBenchLoopSqlRecorder, slowMainThreadSqlHealth, startMainThreadSqlSiteCount, startSlowMainThreadSqlLog } from '../connector-store/main-thread-sql-trace.ts';
 import {
   dashboardOwnerSessionCheck,
@@ -511,7 +511,7 @@ import {
 } from '../engine-split/runtime.ts';
 import { forwardedRecordId, forwardedRequestToRequest, responseToForwarded, tagForwardedRequest, type EngineForwardedRequest } from '../engine-split/commands.ts';
 import { frontCaptureRuntime, frontCaptureStop, frontDataExport, frontEngineState, frontJudgeBoost, frontJudgeState, frontModelReload, frontSetItemPrivate, frontUnreadableFiles } from '../engine-split/front-state.ts';
-import { readEngineStatusSnapshot, type EngineManualSyncRun } from '../engine-split/snapshot.ts';
+import { backgroundOwnerAskAdmission, readEngineStatusSnapshot, type EngineManualSyncRun } from '../engine-split/snapshot.ts';
 import { engineRssRestartsFrom, startEngineRssRestart } from '../engine-split/rss-restart.ts';
 import { createFrontScheduler } from '../engine-split/front-scheduler.ts';
 import { createFrontDashboardHistory, openWritableDashboardHistory } from '../engine-split/front-history.ts';
@@ -971,14 +971,13 @@ export async function main(): Promise<void> {
   const standBack = createStandBack({
     reason: () => ownerAskReason(ownerQuestions, frontOwnerBusy),
   });
-  const pauseStatusWalk = () => standBack.pause('status');
-  setVectorDigestBackfillHold(() => standBack.holds('digest'));
+  setVectorDigestBackfillHold(store => standBack.holds('digest', store), store => standBack.clear('digest', store));
   let recencyIndexMaintenanceReady = false;
   // Only the background role builds: the front never takes a store's write lock for it.
-  if (!engineFront) setConnectorStoreRecencyIndexAdmission(async (work, preempt) => {
-    if (!recencyIndexMaintenanceReady || ownerQuestions.busy || remoteOwnerBusy(OWNER_QUESTION_RESOURCE)) return undefined;
+  if (!engineFront) setConnectorStoreRecencyIndexAdmission(async (work, preempt, store) => {
+    if (!recencyIndexMaintenanceReady || standBack.holds('recency', store)) return undefined;
     return sourceScheduler ? sourceScheduler.withIdleTasks(work, { preempt }) : work();
-  });
+  }, store => standBack.clear('recency', store));
   // UI answer leases coordinate owner/background jobs. Actual local model
   // dispatches have separate leases; cloud searches never preempt sorting.
   const answerActivity = createAnswerActivity(() => undefined, {
@@ -1614,7 +1613,7 @@ export async function main(): Promise<void> {
   let chunkJudgmentsInFlight = 0;
   const runChunkJudgment: NonNullable<import('../classification/chunk-release.ts').ChunkReleaseOptions['judgeNow']> = async (items, budgetMs) => {
     chunkJudgmentsInFlight++;
-    tierSniffer?.preempt();
+    tierSniffer?.preempt('after_call');
     try { return await judgeNow(items, tierScopes(), createReleaseTierCheck(tierScopes, () => secureDerivativeDefault ?? 'allow'), { budgetMs }); }
     finally { chunkJudgmentsInFlight--; tierSniffer?.wake(); }
   };
@@ -2580,9 +2579,7 @@ export async function main(): Promise<void> {
   // it, answers keep each item's own sender label and filters match labels.
   // In the engine split the background rebuilds it; the front reads each rebuild.
   let peopleIndex = openPeopleIndexOrUndefined(engineFront ? { readOnly: true } : {});
-  const peopleRefresher = !engineFront && peopleIndex
-    ? new PeopleIndexRefresher(peopleIndex, () => connectorStores, { pause: pauseStatusWalk })
-    : undefined;
+  const peopleRefresher = !engineFront && peopleIndex ? new PeopleIndexRefresher(peopleIndex, () => connectorStores) : undefined;
   // After every scheduler tick (below) and on a one-minute check: a
   // rebuild only after a sync or a tier visibility change, at most once a
   // minute (the markers are cheap to read), reading only the stores that
@@ -4065,6 +4062,9 @@ export async function main(): Promise<void> {
       // background counts and writes it and the front only reads it.
       snapshotPath: sharedDataPath('source-status-snapshot'),
       ...(engineRole === 'background' ? { snapshotRole: 'writer' as const } : engineFront ? { snapshotRole: 'reader' as const } : {}),
+      ownerAskAdmission: () => engineFront
+        ? backgroundOwnerAskAdmission(engineFront.status())
+        : { stand_back: standBack.counts(), owner_ask_probe_failures: ownerAskProbeFailures },
       // Read per request: a per-tier store its tier set creates while the
       // runtime is up is reported from that moment, with no restart.
       corpusDefinitions: () => {
@@ -4721,8 +4721,6 @@ export async function main(): Promise<void> {
     }, {
       trickle: (target) => embedsOnThisComputer(target.provider) && localPacer.trickle(),
       onProgress: (target) => { if (embedsOnThisComputer(target.provider)) localPacer.noteLocalWork(); },
-      pauseForAsk: () => standBack.pause('embed'),
-      holdForAsk: () => standBack.holds('embed'),
     });
     // Guarded with its sweep; the watch task attached next rides on one host
     // lane but serves every source, so it stays outside any one lane's guard.
@@ -4749,7 +4747,8 @@ export async function main(): Promise<void> {
     ? createSourceSchedulerFromConfig({
       config: olympusConfig,
       sources: schedulerSources,
-      holdForAsk: () => standBack.holds('import'),
+      holdForAsk: key => standBack.holds('watch', key),
+      clearAskHold: key => standBack.clear('watch', key),
       ...(!(sourceIndexStatus && sourceIngestionLedger)
         ? {
             afterTickMinIntervalMs: SOURCE_STATUS_PUBLISH_MIN_INTERVAL_MS,
@@ -6679,8 +6678,6 @@ export async function main(): Promise<void> {
     const backgroundSnapshot = backgroundStatus?.snapshot;
     const backgroundLoopLag = backgroundSnapshot?.loop_lag;
     if ((path === '/v1/health' || path === '/health') && response?.ok) {
-      const standBackCounts = engineFront ? backgroundSnapshot?.stand_back : standBack.counts();
-      const leaseProbeFailures = engineFront ? backgroundSnapshot?.owner_ask_probe_failures ?? 0 : ownerAskProbeFailures;
       const windowNotices = localPromptBudgets.map(localAnalystWindowNotice).filter(notice => notice !== undefined);
       return Response.json({
         ...await response.json() as object,
@@ -6704,9 +6701,8 @@ export async function main(): Promise<void> {
           mount_problems: Object.fromEntries([...frontMountProblems.values()].map(({ label, reason }) => [label, reason])),
         } : {}),
         owner_ask_lease_failures: ownerQuestions.leaseFailures,
-        owner_ask_probe_failures: leaseProbeFailures,
-        // Background work that stood back for the owner's Ask: never silent.
-        ...(standBackCounts && Object.keys(standBackCounts).length > 0 ? { stand_back: standBackCounts } : {}),
+        ...(engineFront ? backgroundOwnerAskAdmission(backgroundStatus)
+          : { stand_back: standBack.counts(), owner_ask_probe_failures: ownerAskProbeFailures }),
         // The background's paced recount of what the dashboard shows: how long the last took and how old it is.
         ...(statusRecountHealth ?? backgroundSnapshot?.status_recount ? { status_recount: statusRecountHealth ?? backgroundSnapshot?.status_recount } : {}),
         loop_lag: loopLag,
@@ -6716,7 +6712,6 @@ export async function main(): Promise<void> {
         // How old the background's published state is and how long its loop has been held: a busy
         // background keeps publishing its last state (engine-split/control-plane.ts), so its age is said, never hidden.
         ...(backgroundStatus && !backgroundStatus.stale ? {
-          background_state_age_ms: Math.round(backgroundStatus.state_age_ms ?? backgroundStatus.age_ms),
           ...(typeof backgroundSnapshot?.loop_held_ms === 'number' ? { background_loop_held_ms: backgroundSnapshot.loop_held_ms } : {}),
           ...(backgroundSnapshot?.state_error ? { background_state_error: backgroundSnapshot.state_error } : {}),
         } : {}),
@@ -6854,8 +6849,13 @@ export async function main(): Promise<void> {
   // Admit one bounded prune slice at a time. Reclaim starts only while the owner is idle.
   const stopSupersededSweep = startSupersededSweepTicker({
     active: () => !engineFront,
-    holds: () => standBack.holds('prune'),
-    canReclaim: () => !ownerQuestions.busy && !frontOwnerBusy(),
+    holds: (set) => standBack.holds('prune', set),
+    idle: () => !ownerQuestions.busy && !frontOwnerBusy(),
+    canReclaim: set => !standBack.holds('reclaim', set),
+    forget: set => {
+      standBack.clear('prune', set);
+      standBack.clear('reclaim', set);
+    },
     ownerQuestionEndedAt: () => Math.max(ownerQuestions.lastEndedAt ?? 0, remoteOwnerMarks.lastEndedAt(OWNER_QUESTION_RESOURCE) ?? 0),
     // Ingest first: a conversion starts only in a quiet window and stops when a task comes due.
     reclaimStore: (store, work) => sourceScheduler
@@ -6945,9 +6945,9 @@ export async function main(): Promise<void> {
         ...(snifferEnv.maxCallsPerDay !== undefined ? { maxCallsPerDay: snifferEnv.maxCallsPerDay } : snifferLane.kind === 'local' || !judgeSpending.status().uncapped ? { maxCallsPerDay: Number.MAX_SAFE_INTEGER } : {}),
         // Its own parallel calls are not answers: only someone else's call holds it back.
         answersInFlight: () => snifferResource !== undefined && (localModelActivity.busyExcept(snifferResource, 'tier_sniffer') || remoteOwnerBusy(snifferResource)),
-        ownerInFlight: () => standBack.holds('judge') || (snifferResource !== undefined && (localModelActivity.ownerInFlight(snifferResource) || remoteOwnerBusy(snifferResource))),
+        ownerInFlight: () => snifferResource !== undefined && (localModelActivity.ownerInFlight(snifferResource) || remoteOwnerBusy(snifferResource)),
         // A ready Inbox question stops the pass, so its answer runs, then classification resumes.
-        shouldYield: () => chunkJudgmentsInFlight > 0 || (localPrivateAnswers?.overdue() ?? false) || standBack.holds('judge'),
+        shouldYield: () => chunkJudgmentsInFlight > 0 || (localPrivateAnswers?.overdue() ?? false),
         // The service applies it to the built-in judge only, never Venice or a remote judge.
         pacing: localPacer,
         breakerOpen: () => secureAnalystPoolState.isBreakerOpen('secure_local', snifferLane.profileId),
@@ -6970,7 +6970,7 @@ export async function main(): Promise<void> {
       })
     : undefined;
   if (tierSniffer && snifferResource) {
-    localModelActivity.onBusy(snifferResource, () => tierSniffer.preempt());
+    localModelActivity.onBusy(snifferResource, () => tierSniffer.preempt('after_call'));
     localModelActivity.onIdle(snifferResource, () => tierSniffer.wake());
   }
   if (engineFront && snifferResource) {
@@ -7177,9 +7177,8 @@ export async function main(): Promise<void> {
         // A stale change (older than the last applied for that resource) changes nothing.
         owner_busy: (change) => {
           if (!remoteOwnerMarks.apply(change)) return { busy: remoteOwnerMarks.busy(change.resource), stale: true };
-          // An Ask alone gates the next background judge dispatch. Actual
-          // contention for the same model has its own preemption signal.
-          if (change.resource === snifferResource) tierSniffer?.preempt();
+          // Only contention for the same model gives its next turn to the owner.
+          if (change.resource === snifferResource) tierSniffer?.preempt('after_call');
           return { busy: true };
         },
         owner_idle: (change) => {
@@ -7276,24 +7275,24 @@ export async function main(): Promise<void> {
     // What the dashboard and status show, recounted here on its own pace and
     // kept for the front, which never counts (status-recount.ts).
     const refreshSnapshot = sourceIndexStatus?.refreshSnapshot;
+    const optionalStatusPass = createStatusRecountPass(
+      key => standBack.holds('status', key),
+      key => standBack.clear('status', key),
+    );
     statusRecount = refreshSnapshot
       ? startPacedStatusRecount({
-          holds: () => standBack.holds('status'),
-          pause: pauseStatusWalk,
-          recount: async (pause) => {
-            // Fill or repair the kept totals first. Changed inputs and quiet
-            // retries are walked by key range on the read thread.
-            for (const store of connectorStores) {
-              await pause();
+          recount: async () => {
+            for (const ledger of new Set(tierLanes.map((lane) => lane.ledger))) {
+              // The judge walks its own ledgers, except while a spending stop
+              // pauses it: then this pass takes the walk so holds still settle.
+              if (tierSniffer && tierSetForLedger(ledger.dbPath) && tierSniffer.status().waiting?.reason !== 'cloud_stopped') continue;
               try {
-                const drift = await store.reconcileTotals({ background: true });
-                if (drift) console.warn(`[olympus] store totals: ${store.corpusId} adjusted by ${drift}.`);
+                await runUnattendedStaleEmbedHoldWalk(ledger, (line) => console.warn(line));
               } catch (error) {
-                console.warn(`[olympus] store totals: ${store.corpusId} count failed (${error instanceof Error ? error.message : String(error)}); tried again next pass.`);
+                console.warn(`[olympus] tier ledger: held copy check failed (${error instanceof Error ? error.name : 'unknown'}). The next pass will retry.`);
               }
             }
             for (const store of connectorStores) {
-              await pause();
               changeMemoryActivity('embedding_repair', 1);
               try {
                 const set = await store.repairEmbeddingInputHashes();
@@ -7304,22 +7303,22 @@ export async function main(): Promise<void> {
                 changeMemoryActivity('embedding_repair', -1);
               }
             }
-            for (const ledger of new Set(tierLanes.map((lane) => lane.ledger))) {
-              await pause();
-              if (standBack.holds('status')) break;
-              // The judge walks its own ledgers, except while a spending stop
-              // pauses it: then this pass takes the walk so holds still settle.
-              if (tierSniffer && tierSetForLedger(ledger.dbPath) && tierSniffer.status().waiting?.reason !== 'cloud_stopped') continue;
-              try {
-                await runUnattendedStaleEmbedHoldWalk(ledger, (line) => console.warn(line));
-              } catch (error) {
-                console.warn(`[olympus] tier ledger: held copy check failed (${error instanceof Error ? error.name : 'unknown'}). The next pass will retry.`);
-              }
-            }
-            for (const request of [PLAIN_STATUS_REQUEST, DASHBOARD_STATUS_REQUEST]) {
-              await pause();
-              await refreshSnapshot({ ...request }, { countsMaxAgeMs: STATUS_COUNTS_MAX_AGE_MS, reuseCounts: true });
-            }
+            return optionalStatusPass([
+              // Fill or repair the kept totals before building the snapshots.
+              ...connectorStores.map(store => ({
+                key: `totals:${store.corpusId}`,
+                run: async () => {
+                  try {
+                    const drift = await store.reconcileTotals({ background: true });
+                    if (drift) console.warn(`[olympus] store totals: ${store.corpusId} adjusted by ${drift}.`);
+                  } catch (error) {
+                    console.warn(`[olympus] store totals: ${store.corpusId} count failed (${error instanceof Error ? error.message : String(error)}); tried again next pass.`);
+                  }
+                },
+              })),
+              { key: 'snapshot:plain', run: () => refreshSnapshot({ ...PLAIN_STATUS_REQUEST }, { countsMaxAgeMs: STATUS_COUNTS_MAX_AGE_MS, reuseCounts: true }) },
+              { key: 'snapshot:dashboard', run: () => refreshSnapshot({ ...DASHBOARD_STATUS_REQUEST }, { countsMaxAgeMs: STATUS_COUNTS_MAX_AGE_MS, reuseCounts: true }) },
+            ]);
           },
           log: (line) => console.warn(line),
         })

@@ -8,9 +8,8 @@
  * The front never waits on the background to answer a page: callers that
  * only need the wake delivered use `post` (receipt only).
  *
- * OwnerBusyRelay carries owner-busy signals for questions and shared local models
- * (`localModelActivity.onBusy → tierSniffer.preempt()`, server.ts) across the
- * split, and sends it again when a new background instance appears.
+ * OwnerBusyRelay carries owner-busy signals for questions and shared local
+ * models across the split, and renews them while they are active.
  */
 import { ENGINE_BACKGROUND_ORIGIN, ENGINE_COMMANDS_PATH } from '../../core/engine-split.ts';
 import { randomUUID } from 'node:crypto';

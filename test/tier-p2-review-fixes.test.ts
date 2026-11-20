@@ -241,6 +241,40 @@ describe('2. an answer preempts the sniffer', () => {
     service.stop();
   });
 
+  test('an owner requesting the next model turn lets the issued verdict settle and leaves the next item due', async () => {
+    const dir = workspace();
+    const ledger = new TierLedger({ dbPath: join(dir, 'store.tier-ledger.sqlite') });
+    const installed = new InstalledTierClassification({ env: {}, lane: LANE });
+    cleanups.push(() => ledger.close(), () => installed.close());
+    const store = installed.snifferStoreForLedger(ledger.dbPath);
+    const sniffer = new CachedTierSniffer(store, LANE);
+    for (let n = 0; n < 2; n++) {
+      ledger.recordDecision(subject(n), classifyItemTiers({
+        signals: { title: `bank ${n}`, labels: [STRUCTURED_METADATA_LABEL] }, subject: subject(n),
+      }, { sniffer }));
+    }
+    const classificationLedgerPath = join(dir, 'classification-ledger.jsonl');
+    await appendClassificationLedgerEntry(classificationLedgerPath, {
+      recorded_at: new Date().toISOString(), kind: 'classifier_model_decision', what: 'approved',
+      model_id: LANE.modelId, prompt_version: SNIFFER_PROMPT_VERSION, lane: LANE.kind,
+      profile_id: LANE.profileId, approved_by: 'owner', status: 'complete',
+    });
+    const answer = answering(() => ({ tier: 'personal', category: 'other', confidence: 0.9 }));
+    let ownerArrives = true;
+    const service = new TierSnifferService({
+      installed, lane: LANE, classificationLedgerPath, stores: () => [{ dbPath: join(dir, 'store.sqlite') }],
+      model: { complete(request) {
+        if (ownerArrives) service.preempt('after_call');
+        expect(request.signal?.aborted).toBe(false);
+        return answer.complete(request);
+      } },
+    });
+    cleanups.push(() => service.stop());
+    expect(await service.runOnce()).toMatchObject({ state: 'ran', report: { calls: 1, verdictsApplied: 1, failedCalls: 0, stoppedBy: 'yield' } });
+    ownerArrives = false;
+    expect(await service.runOnce()).toMatchObject({ state: 'ran', report: { calls: 1, verdictsApplied: 1, failedCalls: 0 } });
+  });
+
   test('answers that never stop hold back backlog work, but a new arrival gets one call within the bound, not interrupted', async () => {
     const dir = workspace();
     const ledgerPath = join(dir, 'store.tier-ledger.sqlite');

@@ -1156,7 +1156,6 @@ export interface PeopleObservationSource {
    * being shareable.
    */
   visibilityMarker?(): string;
-  writeSequence?(): number | undefined;
   setPeopleNames?(resolver: ((provider: string, senderId: string | undefined, senderLabel: string | undefined) => PeopleCitationName | undefined) | undefined): void;
 }
 
@@ -1218,7 +1217,6 @@ export class PeopleIndexRefresher {
   private lastFingerprint: string | undefined;
   private lastRefreshAt: number | undefined;
   private readonly now: () => number;
-  private readonly pause: (() => Promise<void> | undefined) | undefined;
   /** Per current store: the fingerprint part its senders were read at. A store that leaves the list leaves this. */
   private observed = new Map<PeopleObservationSource, { part: string; observations: PeopleSenderObservation[] }>();
   private inFlight: Promise<PeoplePerson[]> | undefined;
@@ -1226,10 +1224,9 @@ export class PeopleIndexRefresher {
   constructor(
     private readonly index: LocalPeopleIndex,
     private readonly stores: () => readonly PeopleObservationSource[],
-    options: { now?: () => number; pause?: () => Promise<void> | undefined } = {},
+    options: { now?: () => number } = {},
   ) {
     this.now = options.now ?? (() => Date.now());
-    this.pause = options.pause;
   }
 
   /** Rebuild now, reading every store again. */
@@ -1257,9 +1254,9 @@ export class PeopleIndexRefresher {
   }
 
   /**
-   * Link again from the senders already read, without reading any store: an
-   * owner's correction or contact card applies at once. Undefined before the
-   * first rebuild has read anything.
+   * Apply an owner's correction or contact card from cached sender reads
+   * whose store fingerprints are still current. Undefined before the first
+   * rebuild has read anything.
    */
   relink(): PeoplePerson[] | undefined {
     if (this.lastRefreshAt === undefined) return undefined;
@@ -1267,8 +1264,9 @@ export class PeopleIndexRefresher {
     const current = authoredStores(stores);
     const parts = fingerprintParts(current);
     const observations = current.flatMap((store, position) => {
+      const part = parts[position]!;
       const entry = this.observed.get(store);
-      return entry && entry.part === parts[position] ? entry.observations : [];
+      return entry?.part === part && !part.endsWith(UNREADABLE_VISIBILITY) ? entry.observations : [];
     });
     return linkStores(this.index, stores, observations);
   }
@@ -1285,67 +1283,35 @@ export class PeopleIndexRefresher {
   }
 
   private async rebuild(force: boolean): Promise<PeoplePerson[]> {
-    let reread = force;
-    rebuild: for (;;) {
-      const stores = [...this.stores()];
-      const authored = authoredStores(stores);
-      // Taken before the reads: a store that moves during one is read again next time.
-      const markers = fingerprintParts(authored);
-      const parts = [...markers];
-      const writes = this.pause ? authored.map(store => store.writeSequence?.()) : [];
-      const unchanged = () => {
-        const current = this.stores();
-        return current.length === stores.length && current.every((store, i) => store === stores[i])
-          && fingerprintParts(authored).every((part, i) => part === markers[i]
-            && authored[i]!.writeSequence?.() === writes[i]);
-      };
-      let parked = false;
-      const observed = new Map<PeopleObservationSource, { part: string; observations: PeopleSenderObservation[] }>();
-      for (const [position, store] of authored.entries()) {
-        const part = parts[position]!;
-        const kept = this.observed.get(store);
-        if (!reread && kept && kept.part === part && !part.endsWith(UNREADABLE_VISIBILITY)) {
-          observed.set(store, kept);
-          continue;
-        }
-        const waiting = this.pause?.();
-        if (waiting) {
-          parked = true;
-          await waiting;
-          if (!unchanged()) {
-            reread = true;
-            continue rebuild;
-          }
-        }
-        try {
-          observed.set(store, { part, observations: await readStoreObservations(store) });
-        } catch {
-          // Unreadable now (a busy pool, a store mid-restore): its senders drop
-          // out, and its part is recorded as failed so the next change check
-          // reads it again, even for a store whose markers never move.
-          parts[position] = `${part}${READ_FAILED}`;
-        }
-      }
-      // Only the stores in the list now: a deleted source's senders are not kept.
-      if (parked && !unchanged()) {
-        reread = true;
+    const stores = this.stores();
+    const authored = authoredStores(stores);
+    // Taken before the reads: a store that moves during one is read again next time.
+    const parts = fingerprintParts(authored);
+    this.lastRefreshAt = this.now();
+    const observed = new Map<PeopleObservationSource, { part: string; observations: PeopleSenderObservation[] }>();
+    for (const [position, store] of authored.entries()) {
+      const part = parts[position]!;
+      const kept = this.observed.get(store);
+      if (!force && kept && kept.part === part && !part.endsWith(UNREADABLE_VISIBILITY)) {
+        observed.set(store, kept);
         continue;
       }
-      if (parked) {
-        for (const [position, store] of authored.entries()) {
-          if (!markers[position]!.endsWith(UNREADABLE_VISIBILITY)) continue;
-          observed.delete(store);
-          parts[position] = `${markers[position]}${READ_FAILED}`;
-        }
+      try {
+        observed.set(store, { part, observations: await readStoreObservations(store) });
+      } catch {
+        // Unreadable now (a busy pool, a store mid-restore): its senders drop
+        // out, and its part is recorded as failed so the next change check
+        // reads it again, even for a store whose markers never move.
+        parts[position] = `${part}${READ_FAILED}`;
       }
-      this.observed = observed;
-      const people = linkStores(this.index, stores, [...observed.values()].flatMap((entry) => entry.observations));
-      // Recorded only once the index is rebuilt: a rebuild that failed (a busy
-      // index file) is tried again at the next check, from the senders kept.
-      this.lastRefreshAt = this.now();
-      this.lastFingerprint = parts.join('|');
-      return people;
     }
+    // Only the stores in the list now: a deleted source's senders are not kept.
+    this.observed = observed;
+    const people = linkStores(this.index, stores, [...observed.values()].flatMap((entry) => entry.observations));
+    // Recorded only once the index is rebuilt: a rebuild that failed (a busy
+    // index file) is tried again at the next check, from the senders kept.
+    this.lastFingerprint = parts.join('|');
+    return people;
   }
 }
 

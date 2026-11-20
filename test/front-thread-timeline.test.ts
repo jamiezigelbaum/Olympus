@@ -90,9 +90,17 @@ test('names the system call a waiting thread is in, and the kind of file, never 
 test('a real thread blocked in a read on its stdin is named while it waits', async () => {
   if (process.platform !== 'linux') return;
   const dir = await mkdtemp(join(tmpdir(), 'timeline-syscall-'));
-  const reader = Bun.spawn(['cat'], { stdin: 'pipe', stdout: 'ignore' });
+  // The shell's read builtin calls read(2) on stdin; cat can use splice or copy_file_range (CI's coreutils did).
+  const reader = Bun.spawn(['sh', '-c', 'read line'], { stdin: 'pipe', stdout: 'ignore' });
   try {
-    await waitFor(() => { try { return readFileSync(`/proc/${reader.pid}/task/${reader.pid}/syscall`, 'utf8').startsWith('0 ') || null; } catch { return null; } });
+    const syscallFile = `/proc/${reader.pid}/task/${reader.pid}/syscall`;
+    // Some hosts (a hardened ptrace scope) refuse /proc/<pid>/syscall; the sampler then records no call, and there is
+    // nothing to observe here.
+    const readable = await waitFor(() => { try { return readFileSync(syscallFile, 'utf8').startsWith('0 ') ? 'yes' : null; } catch (error) { return (error as NodeJS.ErrnoException).code === 'ENOENT' ? null : 'no'; } }, { timeoutMs: 5_000 });
+    // The sampler is a sibling of the reader, not its parent, and Yama's ptrace scope 1 (Ubuntu, GitHub runners)
+    // refuses a sibling's read of that file, so check from a sibling as well.
+    const sibling = Bun.spawnSync(['cat', syscallFile], { stdout: 'ignore', stderr: 'ignore' }).exitCode === 0;
+    if (readable === 'no' || !sibling) { console.log(`front-thread-timeline: ${syscallFile} is not readable by a sibling here; skipped`); return; }
     const out = join(dir, 'timeline.jsonl');
     const run = Bun.spawnSync([process.execPath, join(import.meta.dir, '..', 'scripts', 'front-thread-timeline.ts'), '--pid', String(reader.pid), '--out', out, '--seconds', '0.5', '--interval-ms', '50']);
     expect(run.exitCode).toBe(0);

@@ -56,7 +56,7 @@ import { createGmailConnectorStoreSchedulerSource, SourceScheduler, withEmbeddin
 import { defaultGmailLiveSyncConfig } from '../src/workers/google-connectors/gmail-live-control.ts';
 import { googleAccountIdFromAddress } from '../src/core/provider-account-identity.ts';
 import { createTestClock, type TestClock } from './helpers/test-clock.ts';
-import { accountBoundSchedulerSource, createSourceAccountGuard } from '../src/workers/source-account-guard.ts';
+import { accountBoundSchedulerSource, createExclusiveRunner, createSourceAccountGuard } from '../src/workers/source-account-guard.ts';
 import { createStandBack } from '../src/workers/engine/stand-back.ts';
 import { defaultConfig } from '../src/core/config.ts';
 
@@ -411,6 +411,7 @@ test('current Gmail approval follows confirmed Personal mail into Private and th
   const f = await retainedPersonalMail();
   const current = f.approve([{ id: 'Label_1', name: 'Family' }]);
   const connectorId = gmailCursorConnectorId('personal', { generation: current.accountGeneration, revision: current.revision });
+  expect(connectorId).toBe('verified-observation.v1:' + legacyOwnerId({ generation: current.accountGeneration, revision: current.revision }));
   const formatsBefore = f.client.formats.length;
   // A deployment may already have completed the Private-only walk for this approval.
   const confirmed = await f.lane(current).confirmPrivateScope!({ checkpoint: `private-confirmation-v1:${connectorId}:done` });
@@ -618,12 +619,13 @@ test('confirmation alone wakes a resting Private sweep', async () => {
   await f.move();
   const sweep = f.privateSweep(current);
   expect(await sweep.run()).toMatchObject({ counts: { chunks_embedded: 0 },
-    embeddingSweep: [{ counts: { skipped_out_of_scope_recent_chunks: 1 } }] });
+    embeddingSweep: [{ counts: { skipped_out_of_scope_chunks: 1, skipped_out_of_scope_recent_chunks: 1 } }] });
   // A second call uses the idle receipt, proving this is the same resting sweep.
   expect(await sweep.run()).toMatchObject({ embeddingSweep: [{ counts: { rested: 1 } }] });
   expect(await f.lane(current).confirmPrivateScope!()).toMatchObject({ confirmed: 1, done: true });
   expect(f.secureStore.queuedEmbeddingItemIds()).toEqual([]);
-  expect(await sweep.run()).toMatchObject({ counts: { chunks_embedded: 1 }, embeddingSweep: [{ counts: { rested: 0 } }] });
+  expect(await sweep.run()).toMatchObject({ counts: { chunks_embedded: 1 },
+    embeddingSweep: [{ counts: { rested: 0, skipped_out_of_scope_chunks: 0, skipped_out_of_scope_recent_chunks: 0 } }] });
   expect(f.inputs.join('')).toContain('Body of retained');
 });
 
@@ -642,7 +644,7 @@ test('the Private sweep embeds already queued live mail before confirmed backlog
   f.secureStore.queueEmbedding([identity(live.id).localItemId], f.privateProvider);
   expect(await f.lane(current).confirmPrivateScope!()).toMatchObject({ confirmed: 1, done: true });
   expect(f.secureStore.queuedEmbeddingItemIds()).toEqual([identity(live.id).localItemId]);
-  expect(await f.privateSweep(current).run()).toMatchObject({ counts: { chunks_embedded: 2 } });
+  expect(await f.privateSweep(current).run()).toMatchObject({ counts: { chunks_embedded: 2, queued_first_items: 1 } });
   expect(f.inputs[0]).toContain('Body of new-live');
   expect(f.inputs.join('')).toContain('Body of retained');
 });
@@ -823,6 +825,23 @@ test('an archive-owned Private copy is excluded from private_scope_remaining', a
   expect(await f.privateSweep(current).run()).toMatchObject({ counts: { chunks_embedded: 1 } });
 });
 
+test('confirmation leaves the final 500 daily requests available to live mail', async () => {
+  const f = await retainedPersonalMail({ legacyUnscoped: true });
+  const current = f.approve();
+  const budget = new GoogleDailyRequestBudget({ provider: 'Gmail', dailyRequestBudget: 6_000, now: () => NOW });
+  for (let used = 0; used < 5_499; used++) budget.reserve();
+  const lane = createGmailConnectorStoreSyncHandler({
+    internalStore: f.internalStore, secureStore: f.secureStore, account: 'personal',
+    apiClient: f.client, credentialBroker: OFFLINE_BROKER, env: {}, requestBudget: budget,
+    scope: gmailConnectorScopeFromApproval(f.authority.assertCurrentMail(current)),
+    scopeApproval: { generation: current.accountGeneration, revision: current.revision },
+  });
+  expect(await lane.confirmPrivateScope!()).toMatchObject({ confirmed: 0, done: false,
+    hold: { error: { reason: 'request_reserve', amounts: { limit: 5_500, used: 5_500 } } } });
+  for (let live = 0; live < 500; live++) budget.reserve();
+  expect(() => budget.reserve()).toThrow('daily_api_request_guard');
+});
+
 test.each([
   [7, 'gmail_confirmation_live_request_reserve', 1, 2],
   [10, 'gmail_daily_api_request_guard', 0, 3],
@@ -894,8 +913,12 @@ test.each(['live', 'ask'] as const)('a multi-page confirmation yields at a page 
   const standBack = createStandBack({ reason: () => ask ? "owner's Ask" : undefined, now: clock.now });
   const lane = createGmailConnectorStoreSyncHandler({ ...common, scopeApproval: { generation: 'new', revision: 'new' } });
   const source = createGmailConnectorStoreSchedulerSource({ config: defaultConfig(), sync: lane, liveConfig })!;
-  const scheduler = confirmationScheduler([{ ...source, tasks: source.tasks.filter(task => !task.id.includes('reconcile')) }],
-    clock, () => standBack.holds('import'));
+  const accountTurn = createExclusiveRunner();
+  const guarded = accountBoundSchedulerSource({
+    source: { ...source, tasks: source.tasks.filter(task => !task.id.includes('reconcile')) },
+    guard: { assertAccount: async () => {}, run: accountTurn },
+  });
+  const scheduler = confirmationScheduler([guarded], clock, () => standBack.holds('import'));
   const tick = async () => (await scheduler.runDueTasks()).sources[0]!.tasks.find(task => task.id.includes('scope_confirmation'))!;
   expect(await tick()).toMatchObject({
     wait_reason: competingWork === 'live' ? 'live_pull_due' : 'owner_ask',
@@ -903,6 +926,7 @@ test.each(['live', 'ask'] as const)('a multi-page confirmation yields at a page 
   });
   expect(reads).toEqual(competingWork === 'live' ? ['metadata:one', 'full:live'] : ['metadata:one']);
   if (competingWork === 'ask') {
+    expect(await accountTurn(async () => ask)).toBe(true);
     clock.set(clock.now() + 5_000);
     await scheduler.runDueTasks();
     expect(reads).toEqual(['metadata:one']);
@@ -916,7 +940,7 @@ test.each(['live', 'ask'] as const)('a multi-page confirmation yields at a page 
   expect(reads.slice(-2)).toEqual(['metadata:two', 'metadata:three']);
 });
 
-test('a continuous Ask lets live mail through and confirmation runs during its 15-second share', async () => {
+test('live mail keeps arriving during a continuous Ask; confirmation resumes in the 15-second share', async () => {
   const start = NOW.getTime();
   const clock = createTestClock(start);
   const stores = fileStores(tempDir());
@@ -949,10 +973,12 @@ test('a continuous Ask lets live mail through and confirmation runs during its 1
   expect((await tick(0)).wait_reason).toBe('owner_ask');
   mails.push(message('live', start + 1_000));
   expect((await tick(30_000)).wait_reason).toBe('owner_ask');
+  // Live intake is never held for an Ask; only the confirmation walk waits.
   expect(stores.internalStore.itemStoredContent(identity('live'))?.chunkCount).toBe(1);
   expect((await tick(59_999)).wait_reason).toBe('owner_ask');
   expect(reads).toEqual([]);
   const share = await tick(60_000);
+  expect(stores.internalStore.itemStoredContent(identity('live'))?.chunkCount).toBe(1);
   expect(clock.now() - start).toBe(75_000);
   expect(share.wait_reason).toBe('owner_ask');
   expect(share.last_result?.counts).toMatchObject({ private_scope_confirmed_total: 3, traversal_complete: 0 });

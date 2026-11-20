@@ -172,17 +172,6 @@ describe('the totals walk', () => {
     } finally { query.mockRestore(); store.close(); ledger.close(); }
   });
 
-  test('two quiet repairs install the same count even though the first fixes drift', async () => {
-    const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: CORPUS_ID, family: 'file', trustDomain: 'secure_local' });
-    const db = (store as unknown as { db: Database }).db;
-    try {
-      await store.syncFromConnector(connector([file('a.txt', 'alpha')]), { fetchContent: true });
-      db.exec("UPDATE store_totals SET n = -2 WHERE name = 'chunks'");
-      await Promise.all([store.reconcileTotals(), store.reconcileTotals()]);
-      expect(withoutStamp(store.totals())).toEqual(recount(store));
-    } finally { store.close(); }
-  });
-
   test('retries after a quiet hour and repairs a provably wrong total immediately', async () => {
     const clock = createTestClock();
     const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: CORPUS_ID, family: 'file', trustDomain: 'secure_local', now: clock.date });

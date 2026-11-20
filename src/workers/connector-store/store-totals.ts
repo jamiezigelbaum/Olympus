@@ -261,15 +261,12 @@ export function applyStoreTotalsCount(db: Database, count: StoreTotalsCount, now
   db.transaction(() => {
     const keptNow = new Map((db.query('SELECT name, n FROM store_totals').all() as Array<{ name: string; n: number }>)
       .map((row) => [row.name, Number(row.n)]));
-    // Two repairs can count the same quiet store. A previous repair's correction
-    // is not a trigger delta when no source writes occurred since the snapshot.
-    const writesChanged = keptNow.get(STORE_TOTALS_WRITES) !== keptThen.get(STORE_TOTALS_WRITES);
     const names = new Set([...counted.keys(), ...keptThen.keys(), ...keptNow.keys()]);
     const write = db.query('INSERT INTO store_totals (name, n) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET n = excluded.n');
     const remove = db.query('DELETE FROM store_totals WHERE name = ?');
     names.delete(STORE_TOTALS_WRITES);
     for (const name of names) {
-      const since = writesChanged ? (keptNow.get(name) ?? 0) - (keptThen.get(name) ?? 0) : 0;
+      const since = (keptNow.get(name) ?? 0) - (keptThen.get(name) ?? 0);
       const exact = (counted.get(name) ?? 0) + since;
       drift += Math.abs((keptNow.get(name) ?? 0) - exact);
       if (exact === 0 && name.startsWith('vectors:')) remove.run(name);

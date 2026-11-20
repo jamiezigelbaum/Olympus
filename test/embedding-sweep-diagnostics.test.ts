@@ -2,19 +2,18 @@
 import { afterEach, expect, spyOn, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { copyFileSync, existsSync, renameSync, writeFileSync } from 'node:fs';
-import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
+import { embedPendingChunks, LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX } from '../src/workers/connector-store/local-index.ts';
 import { setReadPoolObserverForTests } from '../src/workers/connector-store/off-thread-reads.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { SecretLocationsIndex } from '../src/workers/classification/secret-locations.ts';
 import { TieredStoreSet } from '../src/workers/connector-store/tiered-store-set.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
-import { EMBEDDING_SWEEP_IDLE_BACKOFF_ENV, EMBEDDING_SWEEP_IDLE_FULL_PASS_MS, SourceScheduler, withEmbeddingSweep } from '../src/workers/source-scheduler.ts';
+import { createExclusiveRunner, guardAccountBoundLanes } from '../src/workers/source-account-guard.ts';
+import { EMBEDDING_SWEEP_IDLE_BACKOFF_ENV, EMBEDDING_SWEEP_IDLE_FULL_PASS_MS, SourceScheduler, withEmbeddingSweep, type SourceSchedulerTask } from '../src/workers/source-scheduler.ts';
 import { TransientSourceEmbeddingError } from '../src/workers/source-index/embeddings.ts';
 import { fileLeaseHeld, FileLeaseBusyError } from '../src/core/file-lease.ts';
 import { EMBEDDING_SWEEP_IDLE_SUFFIX, readEmbeddingSweepIdle, writeEmbeddingSweepIdle } from '../src/core/embedding-sweep-idle.ts';
-import type { BackgroundWalkPause } from '../src/workers/engine/stand-back.ts';
-import { createExclusiveRunner, guardAccountBoundLanes } from '../src/workers/source-account-guard.ts';
 import { CORPORA, FIXTURE_PLACEMENT, fixtureConnector, identityOf, localId, localProvider, RecordingProvider, tempDir } from './helpers/tier-fixtures.ts';
 import { createTestClock, waitFor } from './helpers/test-clock.ts';
 
@@ -24,8 +23,8 @@ afterEach(() => { for (const cleanup of cleanups.splice(0).reverse()) cleanup();
 async function fixture(options: {
   accountScope?: string;
   empty?: boolean;
-  pauseForAsk?: BackgroundWalkPause;
   holdForAsk?: () => boolean;
+  operatorItemId?: string;
   storeDeadlineMs?: number;
   guard?: ReturnType<typeof createExclusiveRunner>;
 } = {}) {
@@ -53,17 +52,31 @@ async function fixture(options: {
   const log = spyOn(console, 'info').mockImplementation(() => {});
   cleanups.push(() => log.mockRestore());
   let now = new Date('2026-11-07T15:00:00Z');
+  const sourceId = 'synthetic-source-id';
   const createScheduler = () => {
-    const { store, provider } = runtime;
-    let sources = withEmbeddingSweep([{ sourceId: 'synthetic-source-id', corpusId: store.corpusId, cadence: 'continuous', intervalMs: 60_000, freshnessThresholdHours: 24, tasks: [] }], () => () => [{
-      store, provider, wholeStore: true, ...(options.accountScope !== undefined ? { accountScope: options.accountScope } : {}),
-    }], {
-      ...(options.pauseForAsk ? { pauseForAsk: options.pauseForAsk } : {}),
-      ...(options.holdForAsk ? { holdForAsk: options.holdForAsk } : {}),
-      ...(options.storeDeadlineMs ? { storeDeadlineMs: options.storeDeadlineMs } : {}),
+    const { store, provider, set } = runtime;
+    const tasks: SourceSchedulerTask[] = [];
+    const item = options.operatorItemId;
+    if (item) tasks.push({
+      id: 'pull', kind: 'sync', writer: true, cadence: 'manual',
+      async run() {
+        await set.sync(fixtureConnector(() => [{ id: item, name: 'Pulled.txt', text: 'A newly pulled body.' }]),
+          { fetchContent: true, placement: FIXTURE_PLACEMENT }, { embed: false });
+        return { status: 'progress' };
+      },
     });
-    if (options.guard) sources = guardAccountBoundLanes(sources, new Map([['synthetic-source-id', { run: options.guard, assertAccount: async () => {} }]]));
-    return new SourceScheduler({ enabled: true, tickMs: 60_000, errorBackoffMs: 1_000, maxTransientRetries: 1, sources, now: () => now });
+    if (options.holdForAsk) tasks.push({
+      id: 'watch', kind: 'watch', writer: true,
+      async run() { return { status: 'idle' }; },
+    });
+    let sources = withEmbeddingSweep([{ sourceId, corpusId: store.corpusId, cadence: 'continuous', intervalMs: 60_000, freshnessThresholdHours: 24, tasks }], () => () => [{
+      store, provider, wholeStore: true, ...(options.accountScope !== undefined ? { accountScope: options.accountScope } : {}),
+    }], options.storeDeadlineMs === undefined ? {} : { storeDeadlineMs: options.storeDeadlineMs });
+    if (options.guard) sources = guardAccountBoundLanes(sources, new Map([[sourceId, { run: options.guard, assertAccount: async () => {} }]]));
+    return new SourceScheduler({
+      enabled: true, tickMs: 60_000, errorBackoffMs: 1_000, maxTransientRetries: 1,
+      sources, now: () => now, ...(options.holdForAsk ? { holdForAsk: options.holdForAsk } : {}),
+    });
   };
   let scheduler = createScheduler();
   const restart = (provider = localProvider(), whileClosed?: () => void) => {
@@ -73,7 +86,7 @@ async function fixture(options: {
     scheduler = createScheduler();
   };
   const walks = { inventory: 0, workList: 0 };
-  const pass = async () => {
+  const pass = async (provenance: 'scheduled' | 'operator' = 'scheduled') => {
     log.mockClear();
     walks.inventory = 0;
     walks.workList = 0;
@@ -82,15 +95,16 @@ async function fixture(options: {
       if (read.sql.includes('AS in_scope')) walks.inventory++;
       if (read.sql.includes('AS first_chunk_pk')) walks.workList++;
     }, { snapshots: true });
-    const status = await scheduler.runDueTasks().finally(() => setReadPoolObserverForTests());
+    const running = provenance === 'operator' ? scheduler.runSource(sourceId, now, provenance) : scheduler.runDueTasks();
+    const status = await running.finally(() => setReadPoolObserverForTests());
     const lines = log.mock.calls.map(call => String(call[0])).filter(line => line.startsWith('[olympus:embedding-sweep] '));
     expect(lines).toHaveLength(1);
     expect(lines[0]).not.toMatch(/synthetic|fixture|personal:|corpus|source_id|item_id/);
     const record = JSON.parse(lines[0]!.slice('[olympus:embedding-sweep] '.length));
     expect(record).toMatchObject({ source_index: 0, store_index: 0 });
-    const embedTask = status.sources[0]!.tasks.find(task => task.kind === 'embed')!;
-    expect(record.next_run_at).toBe(embedTask.next_run_at);
-    const sweep = embedTask.embedding_sweep?.[0];
+    const embed = status.sources[0]!.tasks.find(task => task.kind === 'embed')!;
+    expect(record.next_run_at).toBe(embed.next_run_at);
+    const sweep = embed.embedding_sweep?.[0];
     expect(sweep?.counts).toBeDefined();
     expect(record).toMatchObject(sweep!.counts);
     now = new Date(record.next_run_at);
@@ -103,9 +117,58 @@ async function fixture(options: {
     get provider() { return runtime.provider; },
     get set() { return runtime.set; },
     statePath: `${dbPath}${EMBEDDING_SWEEP_IDLE_SUFFIX}`,
-    pass, restart, walks,
+    pass, restart, walks, status: () => scheduler.status(),
   };
 }
+
+test('a queued vector is committed before inventory and before a finder that outlasts the pass budget', async () => {
+  const f = await fixture();
+  const queued = localId('synthetic-id');
+  await f.set.sync(fixtureConnector(() => [{ id: 'older', name: 'older.txt', text: 'Older note.' }]),
+    { fetchContent: true, placement: FIXTURE_PLACEMENT }, { embed: false });
+  f.store.completeQueuedEmbedding([localId('older')]);
+  expect(f.store.queuedEmbeddingItemIds()).toEqual([queued]);
+  const inventory = f.store.embeddingSweepInventory.bind(f.store);
+  const vectorCount = () => f.store.exportItemCopy(identityOf('synthetic-id'))!.vectors.length;
+  let vectorsAtInventory: number | undefined;
+  f.store.embeddingSweepInventory = (...args) => {
+    vectorsAtInventory = vectorCount();
+    return inventory(...args);
+  };
+  const stopAtMs = Date.now() + 60_000;
+  let vectorsAtDeadline: number | undefined;
+  f.store.missingEmbeddingItemIdsInTurns = async () => {
+    const now = spyOn(Date, 'now').mockReturnValue(stopAtMs);
+    cleanups.push(() => now.mockRestore());
+    vectorsAtDeadline = vectorCount();
+    return [localId('older')];
+  };
+  const [run] = await embedPendingChunks([{ store: f.store, provider: f.provider, wholeStore: true }],
+    { maxItems: 3, stopAtMs, diagnostics: true });
+  expect(vectorsAtDeadline).toBe(1);
+  expect(vectorsAtInventory).toBe(1);
+  expect(run).toMatchObject({ queued_first_items: 1, itemsAttempted: 1, chunksEmbedded: 1, stoppedAtDeadline: true });
+  expect(f.store.exportItemCopy(identityOf('older'))!.vectors).toHaveLength(0);
+});
+
+test('a finder that returns a queued item again dispatches only the other item', async () => {
+  const f = await fixture();
+  const queued = localId('synthetic-id');
+  const older = localId('older');
+  await f.set.sync(fixtureConnector(() => [{ id: 'older', name: 'older.txt', text: 'Older note.' }]),
+    { fetchContent: true, placement: FIXTURE_PLACEMENT }, { embed: false });
+  f.store.completeQueuedEmbedding([localId('older')]);
+  expect(f.store.queuedEmbeddingItemIds()).toEqual([queued]);
+  const selections = spyOn(f.store, 'embedChunks');
+  const finder = spyOn(f.store, 'missingEmbeddingItemIdsInTurns').mockResolvedValue([queued, older]);
+  expect(await f.pass()).toMatchObject({ queued_first_items: 1, chunks_embedded: 2, items_attempted: 2,
+    rested: 0, not_resting: 'items_attempted' });
+  expect(finder).toHaveBeenCalledTimes(1);
+  expect(selections.mock.calls.map(([options]) => options.localItemIds)).toEqual([[queued], [older]]);
+  expect(f.provider.inputs).toHaveLength(2);
+  expect(await f.pass()).toMatchObject({ queued_first_items: 0, rested: 0 });
+  expect(await f.pass()).toMatchObject({ queued_first_items: 0, rested: 1 });
+});
 
 test('a superseded-only Private backlog is an explained idle pass, never revived or sent', async () => {
   const f = await fixture();
@@ -126,7 +189,8 @@ test('a superseded-only Private backlog is an explained idle pass, never revived
 
 test('pending judgments embed early under the shared local identity and idle is still logged after completion', async () => {
   const f = await fixture();
-  expect(await f.pass()).toMatchObject({ eligible_chunks: 1, pending_chunks: 1, skipped_held_chunks: 0, held_for_judgment_chunks: 1, chunks_embedded: 1 });
+  expect(await f.store.embeddingSweepInventory(f.provider)).toMatchObject({ eligible_chunks: 1, pending_chunks: 1 });
+  expect(await f.pass()).toMatchObject({ eligible_chunks: 0, pending_chunks: 0, skipped_held_chunks: 0, held_for_judgment_chunks: 1, queued_first_items: 1, chunks_embedded: 1 });
   expect(await f.pass()).toMatchObject({ eligible_chunks: 0, pending_chunks: 0, chunks_embedded: 0, held_for_judgment_chunks: 1, held_for_judgment_items: 1 });
   expect(f.ledger.getCurrent(identityOf('synthetic-id'))?.contentPending).toBe(true);
 });
@@ -170,7 +234,8 @@ test('held, moving and failed reasons remain distinct', async () => {
 
 test('a scope exclusion is counted without widening the embedding scope', async () => {
   const f = await fixture({ accountScope: 'outside-synthetic-scope' });
-  expect(await f.pass()).toMatchObject({ skipped_out_of_scope_chunks: 1, skipped_out_of_scope_recent_chunks: 1, eligible_chunks: 0, chunks_embedded: 0 });
+  f.store.queueEmbedding([localId('synthetic-id')], f.provider);
+  expect(await f.pass()).toMatchObject({ items_attempted: 1, queued_first_items: 0, skipped_out_of_scope_chunks: 1, skipped_out_of_scope_recent_chunks: 1, eligible_chunks: 0, chunks_embedded: 0 });
   expect(f.provider.inputs).toHaveLength(0);
 });
 
@@ -182,7 +247,8 @@ test('a moving item whose current copy remains eligible is not reported as skipp
   const record = f.ledger.getCurrent(identityOf('synthetic-id'))!;
   f.ledger.beginMove(identityOf('synthetic-id'), { metadataTier: 'private', contentTier: 'private' }, record.generation);
   expect(f.ledger.copies(identityOf('synthetic-id')).some(copy => copy.state === 'current' && !copy.embedHold)).toBe(true);
-  expect(await f.pass()).toMatchObject({ skipped_moving_chunks: 0, eligible_chunks: 1, chunks_embedded: 1 });
+  expect(await f.store.embeddingSweepInventory(f.provider)).toMatchObject({ skipped_moving_chunks: 0, eligible_chunks: 1 });
+  expect(await f.pass()).toMatchObject({ skipped_moving_chunks: 0, eligible_chunks: 0, queued_first_items: 1, chunks_embedded: 1 });
 });
 
 test('a spent diagnostic budget explicitly reports an incomplete inventory', async () => {
@@ -248,7 +314,8 @@ test('the quiet sweep ignores another leg but wakes for a local ledger-only visi
 
 async function catchUp(f: Awaited<ReturnType<typeof fixture>>): Promise<void> {
   expect(await f.pass()).toMatchObject({ chunks_embedded: 1, rested: 0, wake: 'none_remembered', not_resting: 'items_attempted' });
-  expect(f.walks).toEqual({ inventory: 1, workList: 1 });
+  expect(f.walks).toEqual({ inventory: 1, workList: 0 });
+  expect(existsSync(f.statePath)).toBe(false);
   const idle = await f.pass();
   expect(idle).toMatchObject({ inventory_complete: 1, pending_chunks: 0, rested: 0, wake: 'none_remembered' });
   expect(idle).not.toHaveProperty('not_resting');
@@ -444,6 +511,7 @@ test('with the idle back-off switched off, every pass walks the store', async ()
     const record = await f.pass();
     expect(record).not.toHaveProperty('wake');
     expect(record).not.toHaveProperty('not_resting');
+    expect(record.rested).toBe(0);
     expect(f.walks).toEqual({ inventory: 1, workList: 0 });
   }
 });
@@ -500,7 +568,7 @@ test('an item that failed for good does not keep its store walked, stays reporte
   expect(await f.pass()).toMatchObject({ chunks_embedded: 1, rested: 0 });
 });
 
-test('a store overrun defers the pass and releases the account while the store lease protects the unfinished batch', async () => {
+test('a store overrun releases the account without reporting a provider outage', async () => {
   const guard = createExclusiveRunner();
   const f = await fixture({ guard, storeDeadlineMs: 1_000 });
   const lease = f.store.dbPath + CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX;
@@ -515,8 +583,14 @@ test('a store overrun defers the pass and releases the account while the store l
   });
   const sweep = f.pass();
   try {
-    await waitFor(() => sent, { description: 'guarded pass entered the provider' });
-    expect(await sweep).toMatchObject({ pass_overran: 1, stores_deferred: 1, rested: 0, wake: 'none_remembered', not_resting: 'deferred' });
+    await waitFor(() => sent, { description: 'the guarded pass entered the provider' });
+    expect(await sweep).toMatchObject({
+      pass_overran: 1, stores_deferred: 0, rested: 0, wake: 'none_remembered', not_resting: 'overrun', backoff_ms: 0,
+    });
+    expect(f.status().sources[0]!.tasks.find(task => task.kind === 'embed')).toMatchObject({
+      next_run_at: '2026-11-07T15:01:00.000Z', last_result: { counts: { stores_overran: 1 } },
+    });
+    expect(f.store.embeddingDeferredReason()).toBeUndefined();
     expect(await guard(async () => fileLeaseHeld(lease))).toBe(true);
     expect(f.store.exportItemCopy(identityOf('synthetic-id'))!.vectors).toHaveLength(0);
   } finally {
@@ -525,56 +599,54 @@ test('a store overrun defers the pass and releases the account while the store l
     await waitFor(() => !fileLeaseHeld(lease), { description: 'the unfinished batch released its store lease' });
     stalled.mockRestore();
   }
-  expect(f.provider.inputs).toHaveLength(1);
   expect(f.store.exportItemCopy(identityOf('synthetic-id'))!.vectors).toHaveLength(1);
-}, 15_000);
-
-test('the sweep enters the account runner before store admission or any store work', async () => {
-  const exclusive = createExclusiveRunner();
-  let queued = false;
-  const guard: typeof exclusive = work => { queued = true; return exclusive(work); };
-  let admitted = 0;
-  const f = await fixture({ guard, pauseForAsk: () => { admitted++; return undefined; } });
-  let release!: () => void;
-  const gate = new Promise<void>(resolve => { release = resolve; });
-  const prior = exclusive(() => gate);
-  const sweep = f.pass();
-  try {
-    await waitFor(() => queued, { description: 'the sweep queued at the account runner' });
-    expect(admitted).toBe(0);
-    expect(f.walks).toEqual({ inventory: 0, workList: 0 });
-    expect(f.provider.inputs).toEqual([]);
-  } finally {
-    release();
-    await prior;
-    await sweep;
-  }
-  expect(admitted).toBe(1);
+  expect(await f.pass()).toMatchObject({ chunks_embedded: 0, stores_deferred: 0, backoff_ms: 0 });
   expect(f.provider.inputs).toHaveLength(1);
+}, 25_000);
+
+test('a continuing Ask allows the mixed sweep and a same-account operator pull with a first vector', async () => {
+  const f = await fixture({
+    operatorItemId: 'operator-arrival', guard: createExclusiveRunner(), holdForAsk: () => true,
+  });
+  f.store.completeQueuedEmbedding([localId('synthetic-id')]);
+  await f.set.sync(fixtureConnector(() => [{ id: 'arrival', name: 'Arrival.txt', text: 'A fresh note.' }]),
+    { fetchContent: true, placement: FIXTURE_PLACEMENT }, { embed: false });
+  expect(f.store.queuedEmbeddingItemIds()).toEqual([localId('arrival')]);
+
+  expect(await f.pass()).toMatchObject({ queued_first_items: 1, chunks_embedded: 2, rested: 0 });
+  expect(f.status().sources[0]!.tasks.find(task => task.kind === 'watch')).toMatchObject({ wait_reason: 'owner_ask' });
+  expect(f.provider.inputs).toEqual([expect.stringContaining('A fresh note.'), expect.stringContaining('Synthetic body marker.')]);
+  expect(f.store.exportItemCopy(identityOf('arrival'))!.vectors).toHaveLength(1);
+  expect(f.store.exportItemCopy(identityOf('synthetic-id'))!.vectors).toHaveLength(1);
+
+  expect(await f.pass('operator')).toMatchObject({ queued_first_items: 1, chunks_embedded: 1, rested: 0 });
+  expect(f.store.exportItemCopy(identityOf('operator-arrival'))!.vectors).toHaveLength(1);
 });
 
-test('an Ask between batches ends the pass and leaves the remaining chunks for the next pass', async () => {
-  let asking = false;
-  let entered = 0;
-  const guard = createExclusiveRunner();
-  const f = await fixture({ empty: true, guard, holdForAsk: () => asking });
-  const original = f.provider.embed.bind(f.provider);
-  const embed = spyOn(f.provider, 'embed').mockImplementation(async inputs => {
-    if (++entered === 1) asking = true;
-    return original(inputs);
+test('the stop callback preserves committed backlog batches and gives back the store lease', async () => {
+  const f = await fixture({ empty: true });
+  const embed = f.provider.embed.bind(f.provider);
+  let stop = false;
+  const firstBatch = spyOn(f.provider, 'embed').mockImplementationOnce(async inputs => {
+    stop = true;
+    return embed(inputs);
   });
-  // One item with enough chunks for two batches stays queued when the first ends.
-  await f.set.sync(fixtureConnector(() => [{ id: 'long', name: 'long.txt', text: Array.from({ length: 100 }, () => 'word '.repeat(790)).join('\n\n') }]),
-    { fetchContent: true, placement: FIXTURE_PLACEMENT }, { embed: false });
+  const target = { store: f.store, provider: f.provider, wholeStore: true };
+  await f.set.sync(fixtureConnector(() => [{
+    id: 'long', name: 'long.txt', text: Array.from({ length: 100 }, () => 'word '.repeat(790)).join('\n\n'),
+  }]), { fetchContent: true, placement: FIXTURE_PLACEMENT }, { embed: false });
+  f.store.completeQueuedEmbedding([localId('long')]);
   try {
-    expect(await f.pass()).toMatchObject({ chunks_embedded: 32, stopped_at_deadline: 1, rested: 0, not_resting: 'stopped_at_deadline' });
-    expect(entered).toBe(1);
+    const [stopped] = await embedPendingChunks([target], { maxItems: 1, shouldStop: () => stop });
+    expect(stopped).toMatchObject({ queued_first_items: 0, chunksEmbedded: 32, stoppedAtDeadline: true });
+    expect(firstBatch).toHaveBeenCalledTimes(1);
     expect(f.store.exportItemCopy(identityOf('long'))!.vectors).toHaveLength(32);
-    expect(await guard(async () => fileLeaseHeld(f.store.dbPath + CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX))).toBe(false);
-    asking = false;
-    expect((await f.pass()).chunks_embedded).toBeGreaterThan(0);
-    expect(entered).toBeGreaterThan(1);
+    expect(fileLeaseHeld(f.store.dbPath + CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX)).toBe(false);
+    // The caller can resume the backlog in another turn.
+    stop = false;
+    const [resumed] = await embedPendingChunks([target], { maxItems: 1 });
+    expect(resumed!.chunksEmbedded).toBeGreaterThan(0);
   } finally {
-    embed.mockRestore();
+    firstBatch.mockRestore();
   }
-}, 15_000);
+});

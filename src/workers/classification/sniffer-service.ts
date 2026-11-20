@@ -609,6 +609,7 @@ export class TierSnifferService {
   private heldBackSinceMs: number | undefined;
   /** This pass is an arrival's bounded turn: it asks one new arrival and does not give way. */
   private arrivalTurn = false;
+  private yieldAfterCall = false;
   private backlogRefresh: Promise<void> | undefined;
   private waiting: TierSnifferWaiting | undefined;
   /** When each queued move (ledger, item, generation) first failed in this process. */
@@ -720,20 +721,20 @@ export class TierSnifferService {
   }
 
   /**
-   * An answer needs the private pool (the worker calls this when answers in
-   * flight go from 0 to 1, and when an answer is queued behind a running
-   * call): abort the sniffer's in-flight call at once. The pass stops as
-   * `preempted`; nothing is counted against any item, and the sniffer never
-   * records anything in the answer pool's breakers.
+   * Give the next model turn to an answer. The worker uses after_call so
+   * an issued judgment can finish and apply its verdict. Explicit immediate
+   * preemption still aborts the pass without charging the item a failure.
    */
-  preempt(): void {
+  preempt(when: 'now' | 'after_call' = 'now'): void {
     // The owner's own answer ends a fair turn too, lowering slice included:
     // only other answers are outlasted, never the owner (#1030 review).
     this.fairTurn = false;
     this.yieldingSinceMs = undefined;
     // An arrival's turn is one short call: it finishes, then the pass ends.
     if (this.arrivalTurn) return;
-    this.abort?.abort();
+    // A request for the next model turn leaves every issued call to settle.
+    if (when === 'after_call') this.yieldAfterCall = this.running;
+    else this.abort?.abort();
   }
 
   /**
@@ -870,11 +871,11 @@ export class TierSnifferService {
   private noteUnreadable(path: string, what: string): void {
     if (this.unreadable.get(path) === what) return;
     this.unreadable.set(path, what);
-    this.options.log?.(`Olympus tier sniffer: could not read ${what} for ${this.sourceLabel(path)}; its items stay held and are not counted until it can be read.`);
+    this.options.log?.(`Olympus tier sniffer: could not read ${what} for ${this.sourceLabel(path)}; its items stay held and are not counted until it can be read; at=${new Date(this.clockMs()).toISOString()}.`);
   }
 
   private noteReadable(path: string): void {
-    if (this.unreadable.delete(path)) this.options.log?.(`Olympus tier sniffer: ${this.sourceLabel(path)} can be read again.`);
+    if (this.unreadable.delete(path)) this.options.log?.(`Olympus tier sniffer: ${this.sourceLabel(path)} can be read again; at=${new Date(this.clockMs()).toISOString()}.`);
   }
 
   /** The sources behind a ledger or store path, by corpus; never item content. */
@@ -1172,7 +1173,7 @@ export class TierSnifferService {
         this.overrunReported = true;
         this.overrunAbortedAtMs = nowMs;
         this.abort?.abort();
-        this.options.log?.(`Olympus tier sniffer: a pass made no progress for ${Math.round(stalledMs / 60_000)} min while ${this.passStep}; it was stopped. Its items stay held and are asked again.`);
+        this.options.log?.(`Olympus tier sniffer: a pass made no progress for ${Math.round(stalledMs / 60_000)} min while ${this.passStep}; it was stopped. Its items stay held and are asked again; at=${new Date(this.clockMs()).toISOString()}.`);
         this.setWaiting('pass_stuck');
         return { state: 'skipped_running' };
       }
@@ -1185,6 +1186,7 @@ export class TierSnifferService {
       this.running = false;
     }
     const generation = ++this.passGeneration;
+    this.yieldAfterCall = false;
     this.arrivalTurn = this.arrivalTurnDue();
     if (this.arrivalTurn) this.heldBackSinceMs = undefined;
     this.running = true;
@@ -1251,7 +1253,7 @@ export class TierSnifferService {
     if (this.options.log && this.clockMs() - this.lastBacklogLogMs >= 60_000) {
       this.lastBacklogLogMs = this.clockMs();
       const backlog = this.backlog();
-      if (backlog.checkingItems > 0) this.options.log(`Olympus tier sniffer: pending=${backlog.pendingItems} questions=${backlog.remainingQuestions} pending_without_question=${backlog.pendingWithoutQuestion} oldest_pending_ms=${backlog.oldestPendingAgeMs}.`);
+      if (backlog.checkingItems > 0) this.options.log(`Olympus tier sniffer: pending=${backlog.pendingItems} questions=${backlog.remainingQuestions} pending_without_question=${backlog.pendingWithoutQuestion} oldest_pending_ms=${backlog.oldestPendingAgeMs} at=${new Date(this.clockMs()).toISOString()}.`);
     }
     // Going easy: the pass made its one call; the next scheduled one waits.
     if (tick.state === 'ran' && tick.report.calls > 0 && this.trickle()) this.pacedUntilMs = this.clockMs() + (this.options.pacing?.trickleGapMs ?? 0);
@@ -1339,7 +1341,7 @@ export class TierSnifferService {
     // A pass in progress is normal; only an overrun or a stop is worth a line
     // (pass_stuck logs its own).
     if (reason === 'pass_running' || reason === 'pass_stuck') return;
-    this.options.log?.(`Olympus tier sniffer: questions are waiting, nothing asked: ${label}.`);
+    this.options.log?.(`Olympus tier sniffer: questions are waiting, nothing asked: ${label}; at=${new Date(this.clockMs()).toISOString()}.`);
   }
 
   private waitLabel(reason: TierSnifferWaitReason, tick?: TierSnifferTick): string {
@@ -1380,7 +1382,7 @@ export class TierSnifferService {
   private yieldNow(): boolean {
     if (this.breakerOpen()) { this.lastYieldReason = 'breaker'; return true; }
     if (this.running && this.arrivalTurn) return false;
-    const held = this.holdsBack();
+    const held = (this.running && this.yieldAfterCall) || this.holdsBack();
     if (this.running) this.heldBackSinceMs = held ? this.heldBackSinceMs ?? this.clockMs() : undefined;
     return held;
   }
@@ -1892,7 +1894,7 @@ export class TierSnifferService {
         if (lastProcessed) cursorLedger.writeSettleProgress(cursorKey,
           processed < rows.length || rows.length === 100 ? JSON.stringify(lastProcessed) : '');
         else if (rows.length === 0 && saved) cursorLedger.writeSettleProgress(cursorKey, '');
-        if (settled || retired) this.options.log?.(`Olympus tier sniffer: recovered ${settled} pending item(s) as fail-safe Private; retired ${retired} missing item(s).`);
+        if (settled || retired) this.options.log?.(`Olympus tier sniffer: recovered ${settled} pending item(s) as fail-safe Private; retired ${retired} missing item(s); at=${new Date(this.clockMs()).toISOString()}.`);
       } catch {
         // A queue/ledger that cannot be read remains held, retried next tick.
       }
@@ -1976,7 +1978,7 @@ export class TierSnifferService {
       }
       return await this.moving;
     } catch (error) {
-      this.options.log?.(`Olympus tier sniffer: move drain failed (${error instanceof Error ? error.name : 'unknown'}); queued moves will retry.`);
+      this.options.log?.(`Olympus tier sniffer: move drain failed (${error instanceof Error ? error.name : 'unknown'}); queued moves will retry; at=${new Date(this.clockMs()).toISOString()}.`);
       return undefined;
     }
   }

@@ -189,11 +189,9 @@ export interface PrivateAnswerJobsOptions {
   /** Local audit log (default: one line on stderr). */
   audit?: (event: PrivateAnswerAuditEvent) => void;
   /**
-   * Answer activity: `begin` when an analysis starts or a job is claimed,
-   * `end` once it finishes or the claim settles (exactly once each). The
-   * worker pauses the tier sniffer and other background model work in
-   * between, so the answer never waits on it. A `begin` that returns a
-   * release is ended through it, so one job never ends another's lease.
+   * `begin` marks analysis activity. Claims use `beginClaim` when supplied,
+   * including when they attach to an existing analysis. Each activity ends
+   * exactly once through its own release function or the fallback `end`.
    */
   activity?: { begin(): (() => void) | void; beginClaim?(): (() => void) | void; end(): void };
   /** The per-claim stage timing line (default: stdout). Counts and milliseconds only. */
