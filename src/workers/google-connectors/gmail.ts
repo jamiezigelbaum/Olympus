@@ -650,13 +650,13 @@ export class GoogleGmailSourceConnector implements SourceConnector {
   }
 
   /** Legacy attachment backfill starts from a local row, outside the normal Gmail listing. */
-  async backfillAttachmentsOf(id: string): Promise<RawItem[]> {
+  async backfillAttachmentsOf(id: string): Promise<{ status: 'admitted'; items: RawItem[] } | { status: 'retry' }> {
     const client = await this.clientForRequest();
     const metadata = await this.admittedParentMetadata(client, id);
-    if (!metadata) return [];
+    if (!metadata) return { status: 'admitted', items: [] };
     const message = await this.readParent(client, id, false);
-    if (message.historyId !== metadata.historyId) return [];
-    return this.admittedContent(message, id).slice(1);
+    if (message.historyId !== metadata.historyId) return { status: 'retry' };
+    return { status: 'admitted', items: this.admittedContent(message, id).slice(1) };
   }
 
   private async readAttachmentParent(client: GmailApiClient, id: string): Promise<GmailMessage | undefined> {
