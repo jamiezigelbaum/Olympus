@@ -1027,6 +1027,24 @@ function tierSnifferPathForStore(storeDbPath) {
   return `${base}${TIER_SNIFFER_FILE_SUFFIX}`;
 }
 
+// src/core/source-connector-labels.ts
+var NOTE_TAGS_METADATA_KEY = "tags";
+var GMAIL_LABEL_CAPABILITY = { provider: "gmail", metadataKey: "labels" };
+var MBOX_LABEL_CAPABILITY = { provider: "mbox", metadataKey: "labels" };
+var EVERNOTE_LABEL_CAPABILITY = { provider: "evernote", metadataKey: NOTE_TAGS_METADATA_KEY };
+var READWISE_LABEL_CAPABILITY = { provider: "readwise", metadataKey: NOTE_TAGS_METADATA_KEY };
+var REFLECT_LABEL_CAPABILITY = { provider: "reflect", metadataKey: NOTE_TAGS_METADATA_KEY };
+var TELEGRAM_LABEL_CAPABILITY = { provider: "telegram" };
+var capabilities = [
+  GMAIL_LABEL_CAPABILITY,
+  MBOX_LABEL_CAPABILITY,
+  EVERNOTE_LABEL_CAPABILITY,
+  READWISE_LABEL_CAPABILITY,
+  REFLECT_LABEL_CAPABILITY,
+  TELEGRAM_LABEL_CAPABILITY
+];
+var byProvider = new Map(capabilities.map((capability) => [capability.provider, capability]));
+
 // src/core/archive-formats.ts
 var FROM_LINE = [70, 114, 111, 109, 32];
 function startsWithFromLine(head) {
@@ -1038,7 +1056,7 @@ var MBOX_ARCHIVE_FORMAT = Object.freeze({
   id: "mbox",
   label: "Mail (mbox)",
   family: "email",
-  provider: "mbox",
+  provider: MBOX_LABEL_CAPABILITY.provider,
   chooseHint: "a mail export (an .mbox file from Google Takeout or Thunderbird, or an .mbox folder from Apple Mail)",
   citationLabel: "Imported mail",
   exportGuide: Object.freeze({
@@ -1305,7 +1323,7 @@ var REFLECT_JSON_ARCHIVE_FORMAT = Object.freeze({
   id: "reflect-json",
   label: "Reflect notes (JSON)",
   family: "note",
-  provider: "reflect",
+  provider: REFLECT_LABEL_CAPABILITY.provider,
   chooseHint: "a Reflect export in JSON (the .json file, or the .zip that holds it)",
   citationLabel: "Reflect",
   sourceCard: Object.freeze({ id: "reflect.archive", label: "Reflect" }),
@@ -1324,7 +1342,7 @@ var REFLECT_MARKDOWN_ARCHIVE_FORMAT = Object.freeze({
   id: "reflect-markdown",
   label: "Reflect notes (Markdown zip)",
   family: "note",
-  provider: "reflect",
+  provider: REFLECT_LABEL_CAPABILITY.provider,
   chooseHint: "a Reflect export as Markdown (the .zip file)",
   citationLabel: "Reflect",
   sourceCard: Object.freeze({ id: "reflect.archive", label: "Reflect" }),
@@ -1398,7 +1416,7 @@ var EVERNOTE_ENEX_ARCHIVE_FORMAT = Object.freeze({
   id: "evernote-enex",
   label: "Evernote export (.enex)",
   family: "note",
-  provider: "evernote",
+  provider: EVERNOTE_LABEL_CAPABILITY.provider,
   chooseHint: "an Evernote export (the .enex file, or a folder of them)",
   citationLabel: "Evernote",
   sourceCard: Object.freeze({ id: "evernote.notes", label: "Evernote" }),
@@ -10999,6 +11017,9 @@ function itemContentKeptNamesOnly(item) {
 // src/core/child-item-id.ts
 var CHILD_ITEM_ID_SEPARATOR = "#child:";
 
+// src/workers/google-connectors/gmail-mail-record.ts
+var GMAIL_MAIL_PROVIDER = GMAIL_LABEL_CAPABILITY.provider;
+
 // src/workers/google-connectors/gmail.ts
 var GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private";
 var GMAIL_PROVIDER = "gmail";
@@ -14637,7 +14658,7 @@ function contentPass(args) {
       reasons.splice(0, reasons.length, ...decided.reasons);
       if (verdict.origin === "model")
         reasons.push("content:provenance:model");
-      if (verdict.origin === "model" || verdict.rule === "duplicate_model")
+      if (verdict.origin === "model" || verdict.rule === "duplicate_model" || textDecides && verdict.origin === undefined)
         reasons.push(contentJudgeVerdictReason(`content:sniffer:${args.sniffer.id}:${verdict.code}`, verdict.tier, contentDigestReason(text)));
       if (verdict.origin === "rule" && verdict.rule)
         reasons.push(`content:rule:${verdict.rule}`);
@@ -18100,7 +18121,7 @@ class TierLedger {
     const override = overrideFromJson(row.override_json);
     if (override?.kind !== "tier" || override.tier !== "private" && override.tier !== "public" || override.setDigest !== undefined)
       return override;
-    const setDigest = this.overrideHistoryDigest(identity, row.set_at) ?? override.confirmedDigest ?? (!this.readOnly && text.trim() ? contentDigestReason(text) : undefined);
+    const setDigest = this.overrideHistoryDigest(identity, row.set_at) ?? override.confirmedDigest ?? (!this.readOnly && text?.trim() ? contentDigestReason(text) : undefined);
     if (!setDigest)
       return override;
     const bound = { ...override, setDigest };
@@ -39426,6 +39447,7 @@ var GOOGLE_DRIVE_EXTRACTION_MIME_TYPES = Object.freeze([
   "image/heif"
 ]);
 // src/workers/readwise/connector.ts
+var READWISE_PROVIDER = READWISE_LABEL_CAPABILITY.provider;
 var READWISE_STORE_PLACEMENT = Object.freeze({
   trustTier: "S1",
   trustDomain: "internal"

@@ -2781,6 +2781,24 @@ var LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
 // src/core/remote-access.ts
 var LOOPBACK_HOSTNAMES2 = new Set(["127.0.0.1", "localhost", "[::1]"]);
 
+// src/core/source-connector-labels.ts
+var NOTE_TAGS_METADATA_KEY = "tags";
+var GMAIL_LABEL_CAPABILITY = { provider: "gmail", metadataKey: "labels" };
+var MBOX_LABEL_CAPABILITY = { provider: "mbox", metadataKey: "labels" };
+var EVERNOTE_LABEL_CAPABILITY = { provider: "evernote", metadataKey: NOTE_TAGS_METADATA_KEY };
+var READWISE_LABEL_CAPABILITY = { provider: "readwise", metadataKey: NOTE_TAGS_METADATA_KEY };
+var REFLECT_LABEL_CAPABILITY = { provider: "reflect", metadataKey: NOTE_TAGS_METADATA_KEY };
+var TELEGRAM_LABEL_CAPABILITY = { provider: "telegram" };
+var capabilities = [
+  GMAIL_LABEL_CAPABILITY,
+  MBOX_LABEL_CAPABILITY,
+  EVERNOTE_LABEL_CAPABILITY,
+  READWISE_LABEL_CAPABILITY,
+  REFLECT_LABEL_CAPABILITY,
+  TELEGRAM_LABEL_CAPABILITY
+];
+var byProvider = new Map(capabilities.map((capability) => [capability.provider, capability]));
+
 // src/core/archive-formats.ts
 var FROM_LINE = [70, 114, 111, 109, 32];
 function startsWithFromLine(head) {
@@ -2792,7 +2810,7 @@ var MBOX_ARCHIVE_FORMAT = Object.freeze({
   id: "mbox",
   label: "Mail (mbox)",
   family: "email",
-  provider: "mbox",
+  provider: MBOX_LABEL_CAPABILITY.provider,
   chooseHint: "a mail export (an .mbox file from Google Takeout or Thunderbird, or an .mbox folder from Apple Mail)",
   citationLabel: "Imported mail",
   exportGuide: Object.freeze({
@@ -3059,7 +3077,7 @@ var REFLECT_JSON_ARCHIVE_FORMAT = Object.freeze({
   id: "reflect-json",
   label: "Reflect notes (JSON)",
   family: "note",
-  provider: "reflect",
+  provider: REFLECT_LABEL_CAPABILITY.provider,
   chooseHint: "a Reflect export in JSON (the .json file, or the .zip that holds it)",
   citationLabel: "Reflect",
   sourceCard: Object.freeze({ id: "reflect.archive", label: "Reflect" }),
@@ -3078,7 +3096,7 @@ var REFLECT_MARKDOWN_ARCHIVE_FORMAT = Object.freeze({
   id: "reflect-markdown",
   label: "Reflect notes (Markdown zip)",
   family: "note",
-  provider: "reflect",
+  provider: REFLECT_LABEL_CAPABILITY.provider,
   chooseHint: "a Reflect export as Markdown (the .zip file)",
   citationLabel: "Reflect",
   sourceCard: Object.freeze({ id: "reflect.archive", label: "Reflect" }),
@@ -3152,7 +3170,7 @@ var EVERNOTE_ENEX_ARCHIVE_FORMAT = Object.freeze({
   id: "evernote-enex",
   label: "Evernote export (.enex)",
   family: "note",
-  provider: "evernote",
+  provider: EVERNOTE_LABEL_CAPABILITY.provider,
   chooseHint: "an Evernote export (the .enex file, or a folder of them)",
   citationLabel: "Evernote",
   sourceCard: Object.freeze({ id: "evernote.notes", label: "Evernote" }),

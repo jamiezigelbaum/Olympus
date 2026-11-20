@@ -8285,6 +8285,26 @@ var init_tier_ledger_path = __esm(() => {
   init_olympus_layout();
 });
 
+// src/core/source-connector-labels.ts
+var NOTE_TAGS_METADATA_KEY = "tags", GMAIL_LABEL_CAPABILITY, MBOX_LABEL_CAPABILITY, EVERNOTE_LABEL_CAPABILITY, READWISE_LABEL_CAPABILITY, REFLECT_LABEL_CAPABILITY, TELEGRAM_LABEL_CAPABILITY, capabilities, byProvider;
+var init_source_connector_labels = __esm(() => {
+  GMAIL_LABEL_CAPABILITY = { provider: "gmail", metadataKey: "labels" };
+  MBOX_LABEL_CAPABILITY = { provider: "mbox", metadataKey: "labels" };
+  EVERNOTE_LABEL_CAPABILITY = { provider: "evernote", metadataKey: NOTE_TAGS_METADATA_KEY };
+  READWISE_LABEL_CAPABILITY = { provider: "readwise", metadataKey: NOTE_TAGS_METADATA_KEY };
+  REFLECT_LABEL_CAPABILITY = { provider: "reflect", metadataKey: NOTE_TAGS_METADATA_KEY };
+  TELEGRAM_LABEL_CAPABILITY = { provider: "telegram" };
+  capabilities = [
+    GMAIL_LABEL_CAPABILITY,
+    MBOX_LABEL_CAPABILITY,
+    EVERNOTE_LABEL_CAPABILITY,
+    READWISE_LABEL_CAPABILITY,
+    REFLECT_LABEL_CAPABILITY,
+    TELEGRAM_LABEL_CAPABILITY
+  ];
+  byProvider = new Map(capabilities.map((capability) => [capability.provider, capability]));
+});
+
 // src/core/archive-formats.ts
 function startsWithFromLine(head) {
   if (!head || head.length < FROM_LINE.length)
@@ -8527,12 +8547,13 @@ function archiveImportFamilies(formats = ARCHIVE_FORMATS) {
 }
 var FROM_LINE, MBOX_ARCHIVE_FORMAT, WHATSAPP_DATE, WHATSAPP_TIME, WHATSAPP_FIRST_LINE, WHATSAPP_LINE_NOISE, WHATSAPP_NARROW_SPACES, WHATSAPP_TEXT_NAME, WHATSAPP_ARCHIVE_FORMAT, leniencyDecoder, WEEKDAYS, MONTHS, DAILY_NOTE_FILE, REFLECT_NOTES_LIST_KEY = "notes", REFLECT_BODY_KEYS, REFLECT_NOTE_KEYS, ROAM_TIME_KEYS, JSON_EXPORT_RECORDS, SCANNED, REFLECT_JSON_ARCHIVE_FORMAT, REFLECT_MARKDOWN_ARCHIVE_FORMAT, ROAM_JSON_ARCHIVE_FORMAT, AI_CONVERSATION_NAMES, CHATGPT_ARCHIVE_FORMAT, CLAUDE_ARCHIVE_FORMAT, EVERNOTE_ENEX_ARCHIVE_FORMAT, JSON_STRING, TELEGRAM_EXPORT_SECTIONS, TELEGRAM_FULL_HEAD, TELEGRAM_CHAT_HEAD, TELEGRAM_HTML_NAME, TELEGRAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, ARCHIVE_NEUTRAL_PROVIDER = "archive", CONNECTOR_FACTORIES;
 var init_archive_formats = __esm(() => {
+  init_source_connector_labels();
   FROM_LINE = [70, 114, 111, 109, 32];
   MBOX_ARCHIVE_FORMAT = Object.freeze({
     id: "mbox",
     label: "Mail (mbox)",
     family: "email",
-    provider: "mbox",
+    provider: MBOX_LABEL_CAPABILITY.provider,
     chooseHint: "a mail export (an .mbox file from Google Takeout or Thunderbird, or an .mbox folder from Apple Mail)",
     citationLabel: "Imported mail",
     exportGuide: Object.freeze({
@@ -8607,7 +8628,7 @@ var init_archive_formats = __esm(() => {
     id: "reflect-json",
     label: "Reflect notes (JSON)",
     family: "note",
-    provider: "reflect",
+    provider: REFLECT_LABEL_CAPABILITY.provider,
     chooseHint: "a Reflect export in JSON (the .json file, or the .zip that holds it)",
     citationLabel: "Reflect",
     sourceCard: Object.freeze({ id: "reflect.archive", label: "Reflect" }),
@@ -8626,7 +8647,7 @@ var init_archive_formats = __esm(() => {
     id: "reflect-markdown",
     label: "Reflect notes (Markdown zip)",
     family: "note",
-    provider: "reflect",
+    provider: REFLECT_LABEL_CAPABILITY.provider,
     chooseHint: "a Reflect export as Markdown (the .zip file)",
     citationLabel: "Reflect",
     sourceCard: Object.freeze({ id: "reflect.archive", label: "Reflect" }),
@@ -8689,7 +8710,7 @@ var init_archive_formats = __esm(() => {
     id: "evernote-enex",
     label: "Evernote export (.enex)",
     family: "note",
-    provider: "evernote",
+    provider: EVERNOTE_LABEL_CAPABILITY.provider,
     chooseHint: "an Evernote export (the .enex file, or a folder of them)",
     citationLabel: "Evernote",
     sourceCard: Object.freeze({ id: "evernote.notes", label: "Evernote" }),
@@ -12559,19 +12580,11 @@ var init_tier_rules = __esm(() => {
   init_tier_classifier();
 });
 
-// src/workers/classification/privacy-profile.ts
-var init_privacy_profile = __esm(() => {
-  init_atomic_file();
-  init_operation_error();
-  init_owner_config_read();
-  init_tier_rules();
-});
-
 // src/workers/connector-store/tier-move-rule-policy.ts
 var heldPolicyFences;
 var init_tier_move_rule_policy = __esm(() => {
   init_owner_config_read();
-  init_privacy_profile();
+  init_source_connector_labels();
   init_tier_classifier();
   init_tier_ledger();
   init_tier_rules();
@@ -12585,6 +12598,7 @@ var init_tier_move = __esm(() => {
   init_tier_classifier();
   init_tier_ledger();
   init_embedding_ledger();
+  init_media_judge();
   init_local_index();
   init_secrets_disposition();
   init_job_names();
@@ -13686,6 +13700,7 @@ var init_tier_override_settle = __esm(() => {
   init_loop_pass();
   init_parent_context();
   init_stored_names();
+  init_tier_move_rule_policy();
   init_tier_rejudge();
   init_tier_rules_sweep();
   CLEARED_RECHECK_MS = 10 * 60000;
@@ -13962,9 +13977,12 @@ var init_people_index = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail-mail-record.ts
+var GMAIL_MAIL_PROVIDER;
 var init_gmail_mail_record = __esm(() => {
   init_people_index();
+  init_source_connector_labels();
   init_sender_rules();
+  GMAIL_MAIL_PROVIDER = GMAIL_LABEL_CAPABILITY.provider;
 });
 
 // src/workers/google-connectors/gmail.ts
@@ -14041,15 +14059,17 @@ var init_corpus_adapter2 = __esm(() => {
 });
 
 // src/workers/readwise/connector.ts
-var READWISE_STORE_PLACEMENT;
+var READWISE_PROVIDER, READWISE_STORE_PLACEMENT;
 var init_connector = __esm(() => {
   init_olympus_layout();
   init_source_placement();
   init_atomic_file();
+  init_source_connector_labels();
   init_credential_broker();
   init_source_storage();
   init_api();
   init_corpus_adapter2();
+  READWISE_PROVIDER = READWISE_LABEL_CAPABILITY.provider;
   READWISE_STORE_PLACEMENT = Object.freeze({
     trustTier: "S1",
     trustDomain: "internal"
@@ -14137,6 +14157,7 @@ var init_record_builder = __esm(() => {
 var TELEGRAM_CAPTURE_CONNECTOR_ID = "telegram_capture_spool", TELEGRAM_CAPTURE_CONNECTOR_IDS, TELEGRAM_TRUST_EVICTION_CONNECTOR_ID, TELEGRAM_TRUST_RECONCILIATION_CONNECTOR_ID, MAX_READ_BYTES, MAX_RECORD_BYTES, MAX_TAIL_SCAN_BYTES, SERVICE_FIELDS;
 var init_capture_spool_connector = __esm(() => {
   init_olympus_layout();
+  init_source_connector_labels();
   init_source_placement();
   init_source_inputs();
   init_capture_spool_secrets();
@@ -21827,6 +21848,7 @@ var init_parse = __esm(() => {
 // src/workers/archive-import/mbox/connector.ts
 var MBOX_DEFAULT_MAX_BYTES_PER_LISTING;
 var init_connector5 = __esm(() => {
+  init_source_connector_labels();
   init_archive_formats();
   init_stop_errors();
   init_sender_rules();
@@ -22187,6 +22209,33 @@ var init_source_forget_registry = __esm(() => {
   init_olympus_layout();
   init_live_control2();
   init_tier_migration_reports();
+});
+
+// src/workers/classification/privacy-profile.ts
+var RULE_SOURCES;
+var init_privacy_profile = __esm(() => {
+  init_atomic_file();
+  init_operation_error();
+  init_owner_config_read();
+  init_source_connector_labels();
+  init_tier_rules();
+  RULE_SOURCES = {
+    folder: {
+      "dropbox.files": { provider: "dropbox", match: "pathPrefix" },
+      "google_drive.docs": { provider: "google_drive", match: "folderKey" },
+      "evernote.notes": { provider: "evernote", match: "folderKey" }
+    },
+    label: {
+      "gmail.email": { provider: GMAIL_LABEL_CAPABILITY.provider, match: "label" }
+    },
+    sender: {
+      "gmail.email": { provider: "gmail", match: "sender" }
+    },
+    chat: {
+      "telegram.messages": { provider: "telegram", match: "chat" },
+      "whatsapp.personal.messages": { provider: "whatsapp", match: "chat" }
+    }
+  };
 });
 
 // src/core/source-disposition-tree.ts
@@ -27635,6 +27684,7 @@ init_secrets_disposition();
 init_stored_names();
 init_tier_move();
 init_tiered_store_set();
+init_media_judge();
 
 // src/core/linux-engine-service.ts
 init_file_lease();
