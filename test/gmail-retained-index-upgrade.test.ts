@@ -12,14 +12,14 @@ import { recordFileSourceConnect, recordFileSourceConnectIntent, sourceAccountBi
 import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';
 import { LocalConnectorStore, defineConnectorCorpus } from '../src/workers/connector-store/index.ts';
 import { planStoreEmbedding } from '../src/workers/connector-store/embedding-plan.ts';
+import { storeEmbeddingScope } from '../src/workers/connector-store/embedding-scope.ts';
 import { automaticTierMoveOptions } from '../src/workers/connector-store/tier-auto-move.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { createLaneTieredStoreSet } from '../src/workers/connector-store/tiered-store-set.ts';
 import { createReleaseTierCheck, createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
 import { readConnectedHandleRegistry, writeConnectedHandleRegistry, type ConnectedCredentialHandle } from '../src/workers/credential-broker/connected-handles.ts';
 import type { CredentialBroker } from '../src/workers/credential-broker/index.ts';
-import { gmailPrivateStoreStatusScope, readGmailRetainedAccountScope } from '../src/workers/email-source/gmail-status-scope.ts';
-import { storeEmbeddingScope } from '../src/workers/engine/runtime/embedding-providers.ts';
+import { gmailPrivateStoreStatusScope, gmailStoreEmbeddingScope, readGmailRetainedAccountScope } from '../src/workers/email-source/gmail-status-scope.ts';
 import { createLocalAnswerPath } from '../src/workers/engine/runtime/local-private-answers.ts';
 import { createSourceAnswerLanes } from '../src/workers/engine/runtime/source-answer-lanes.ts';
 import { createGmailConnectorStoreSyncHandler, GMAIL_INTERNAL_CONNECTOR_CORPUS_ID, GMAIL_SECURE_CONNECTOR_CORPUS_ID } from '../src/workers/google-connectors/index.ts';
@@ -240,8 +240,8 @@ async function upgradeFixture(options: { matching?: boolean; archiveOverlap?: bo
       const plan = planStoreEmbedding({
         store, provider: privateProvider, servedByMeaning: true,
         scope: storeEmbeddingScope({
-          store, provider: privateProvider, sourceId: source.sourceId, scopeRef: liveRef, authority: runtime.authority, readScope,
-          gmailRetainedAccountScope: retainedAccountScope,
+          store, provider: privateProvider, scopeRef: liveRef, authority: runtime.authority, readScope,
+          policy: gmailStoreEmbeddingScope({ gmailRetainedAccountScope: retainedAccountScope }),
         }),
       });
       return plan ? [plan] : [];
