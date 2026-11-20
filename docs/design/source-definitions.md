@@ -244,10 +244,10 @@ searchability, and the spine never branches on kit.
 
 | Step | What | When |
 |---|---|---|
-| 1.5 fixes | Small, surgical fixes for the real bugs: A1 (Evernote in embedding scope), A2 (manual embed scope for every family), A3, A6 (scoped answer skips corpora that can't enforce scope), A7 (Readwise registered as searchable), A8, A9; lane 3's privacy batch with A4/A5 and its revocation design; lane 2's Gmail redesign; mismatched-mailbox deny keyed on the mailbox address, not `connectedAt` | before the 1.5 candidate |
+| 1.5 fixes | Small, surgical fixes for the real bugs: A1 (Evernote in embedding scope), A2 (manual embed scope for every family), A3, A6 (scoped answer skips corpora that can't enforce scope), A7 (Readwise registered as searchable), A8, A9; lane 3's privacy batch with A4/A5 and its revocation design; lane 2's Gmail redesign | before the 1.5 candidate |
 | G0 | `admission.ts` in **shadow**: computes verdicts beside today's checks and logs disagreements; parity tests against `connectorStoreReadScope`, `storeEmbeddingScope`, `connectorStoreStatusScope` across every corpus, Gmail imports and local-files cleanup included | in parallel, ships dark in 1.5 if green |
 | G1 | Sealed views; cut search, answer, preview, deep read, people index and counts over to the policy; `item_scope_keys` index; parity and latency proof first | right after 1.5 |
-| G2 | Acquisition, placement and delivery boundaries; revocation across processes; provenance and account identity | after G1 |
+| G2 | Acquisition, placement and delivery boundaries; revocation across processes; provenance and account identity, including the mismatched-mailbox deny (pulled from 1.5 on 20 Nov: a partial deny hid the owner's own mail on installs without a recorded account id and missed four read paths; olympus-ops#236) | after G1 |
 | D1 to D4 | `SourceDefinition` catalog with independent capabilities; derive rosters in batches (stores and extraction; scheduler tasks; owner-rule kinds; search, status, display) | after G1, in parallel with G2 |
 | S1, K1 to K3 | Move shared machinery into the spine; then files, messaging and mail kits, one demonstrated duplication at a time | after D1 |
 
