@@ -11,11 +11,13 @@ import { markInProcessRemoteRequest } from '../src/core/operation-caller.ts';
 import type { OperationContext } from '../src/core/operations.ts';
 import { privacyBacklogCoverageNote, withCoverageNote } from '../src/core/privacy-backlog-coverage.ts';
 import { recordReleaseManifest } from '../src/core/release-manifest.ts';
+import { SEMANTIC_SEARCH_STARTING, semanticStartupGap } from '../src/core/source-index/partial-search.ts';
 import { handleMcpCallTool } from '../src/mcp/server.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
 import type { SourceIndexAnswerResult } from '../src/workers/source-index/answer-types.ts';
 import { scriptedSearchReleaseCheck } from './helpers/scripted-search-release.ts';
+import { localProvider } from './helpers/tier-fixtures.ts';
 
 const LOCAL_NOTE = 'Olympus is still checking 7 new items for privacy. Until then they are found by exact words only, not by meaning. This can take a while on this computer.';
 const REMOTE_NOTE = 'Olympus is still checking 7 new items for privacy before they can be searched. This can take a while on this computer.';
@@ -37,14 +39,24 @@ function answerFixture(answer = 'I have no matching evidence for this question.'
   } as unknown as SourceIndexAnswerResult;
 }
 
-function harness(pending: number | undefined, answer?: string) {
+function harness(pending: number | undefined, answer?: string, deferred = false) {
   const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: 'internal.email', family: 'email', trustDomain: 'internal', tierLedger: null });
+  if (deferred) store.deferVectorSearchUntilVisibilityBuilt();
   const worker = createEmailSourceWorker({
     connectorStores: [store],
+    ...(deferred ? { connectorStoreEmbeddingProviders: new Map([[store.corpusId, localProvider()]]) } : {}),
     sourceAnswer: {
       async answer() {
         recordReleaseManifest({ inputs: [], constraints: { secureDerivativeDefault: 'allow', includeSecureLocalContent: false } });
-        return answerFixture(answer);
+        const result = answerFixture(answer);
+        if (deferred) result.audit.lane_audits = [{
+          laneName: 'internal.email:keyword', laneType: 'keyword',
+          candidateCount: 0, returnedCount: 0, localOnly: true, rawExposed: false,
+        }, {
+          laneName: 'internal.email:connector_store_vector', laneType: 'semantic',
+          candidateCount: 0, returnedCount: 0, localOnly: true, rawExposed: false, skippedReason: SEMANTIC_SEARCH_STARTING,
+        }];
+        return result;
       },
     },
     sourceAnswerReleaseCheck: scriptedSearchReleaseCheck,
@@ -148,6 +160,29 @@ describe('privacy backlog note on the local paths', () => {
     try {
       const result = await handleMcpCallTool({ method: 'tools/call', params: { name: 'source_index_search', arguments: { corpus_id: 'internal.email', query: 'invoice' } } } as never, context, 'mcp');
       expect((result.content as Array<{ text: string }>)[0]!.text).not.toContain('still checking');
+    } finally { close(); }
+  });
+
+  test('native MCP search turns the worker startup audit into a plain coverage note beside the privacy backlog', async () => {
+    const { context, close } = harness(7, undefined, true);
+    try {
+      const result = await handleMcpCallTool({ method: 'tools/call', params: { name: 'source_index_search', arguments: { corpus_id: 'internal.email', query: 'invoice' } } } as never, context, 'mcp');
+      const text = (result.content as Array<{ text: string }>)[0]!.text;
+      expect(JSON.parse(text).coverage_notes).toEqual([semanticStartupGap('internal.email'), LOCAL_NOTE]);
+      expect(text).not.toContain(SEMANTIC_SEARCH_STARTING);
+    } finally { close(); }
+  });
+
+  test('native MCP answer preserves ordinary lane audits and keeps the startup token out of the result', async () => {
+    const note = semanticStartupGap('internal.email');
+    const { context, close } = harness(0, `No evidence.\n\nCoverage notes:\n- ${note}`, true);
+    try {
+      const result = await handleMcpCallTool({ method: 'tools/call', params: { name: 'source_answer', arguments: { question: 'q' } } } as never, context, 'mcp');
+      const text = (result.content as Array<{ text: string }>)[0]!.text;
+      const parsed = JSON.parse(text);
+      expect(parsed.answer).toContain(note);
+      expect(parsed.audit.lane_audits).toContainEqual(expect.objectContaining({ laneName: 'internal.email:keyword' }));
+      expect(text).not.toContain(SEMANTIC_SEARCH_STARTING);
     } finally { close(); }
   });
 });

@@ -1,7 +1,7 @@
 import { READ_WIDE_MATCH_LIMIT, markReadWidePack, readWideEnabled, scoresHaveNoLeader } from './read-wide.ts';
 import { withKeywordRequestScope } from './source-index/keyword-context.ts';
 import { bindReleaseChunks, copyReleaseChunks } from './release-manifest.ts';
-import { KEYWORD_PREPARATION_INCOMPLETE, keywordPreparationGap, RECENT_ITEMS_CUT_SHORT, RERANK_FALLBACK_GAP, STARTUP_SEARCH_GAP, VISIBILITY_CHECK_CUT_SHORT, recentItemsTimeoutGap, semanticSearchTimedOut, semanticTimeoutGap, visibilityCheckTimeoutGap } from './source-index/partial-search.ts';
+import { KEYWORD_PREPARATION_INCOMPLETE, keywordPreparationGap, RECENT_ITEMS_CUT_SHORT, RERANK_FALLBACK_GAP, SEMANTIC_SEARCH_STARTING, STARTUP_SEARCH_GAP, VISIBILITY_CHECK_CUT_SHORT, recentItemsTimeoutGap, semanticSearchTimedOut, semanticStartupGap, semanticTimeoutGap, visibilityCheckTimeoutGap } from './source-index/partial-search.ts';
 import { startupProgress } from './startup-progress.ts';
 import {
   rerankCandidates,
@@ -1265,6 +1265,7 @@ function hitProvenance(hit: SourceIndexRoutedSearchHit): SourceIndexProvenance {
  * Counts only: the corpus id and the lane's own stable reason token.
  */
 export function semanticLaneSkippedGap(corpusId: string, detail: string | undefined): string {
+  if (detail === SEMANTIC_SEARCH_STARTING) return semanticStartupGap(corpusId);
   if (semanticSearchTimedOut(detail)) return semanticTimeoutGap(corpusId);
   return `${corpusId}: the meaning-based search was skipped for this question`
     + `${detail ? ` (${detail})` : ''}; only keyword matches were searched, so related items may be missing.`;

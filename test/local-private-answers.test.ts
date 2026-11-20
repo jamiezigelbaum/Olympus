@@ -49,6 +49,9 @@ import type { AnalystModelRequest } from '../src/core/analyst.ts';
 import { createRemotePrivateParts } from '../src/core/remote-private-part.ts';
 import { buildSourceIndexCorpusRegistry, defineSourceIndexCorpus } from '../src/core/source-index/corpus.ts';
 import { routeSourceIndexSearch } from '../src/core/source-index/router.ts';
+import { buildEvidencePackDetailed, semanticLaneSkippedGap } from '../src/core/evidence-pack.ts';
+import { SEMANTIC_SEARCH_STARTING, semanticStartupGap, STARTUP_SEARCH_GAP } from '../src/core/source-index/partial-search.ts';
+import { beginStartupProgress, startupWaitingLine, type StartupProgress } from '../src/core/startup-progress.ts';
 import { createSovereigntyEngine, loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 import { openWaitingPrivateQuestionStore, type WaitingQuestionStore } from '../src/core/waiting-private-questions.ts';
 import { buildDashboardPreviewView, DASHBOARD_PREVIEW_NOW } from '../scripts/dashboard-preview.ts';
@@ -59,7 +62,7 @@ import { NoPrivateEvidenceError, type PrivateAnswerModel, type PrivateEvidenceIt
 import { generatePanelKeyPair, openPrivateAnswer, type SealedPrivateAnswer } from '../src/workers/chatgpt/private-answer-crypto.ts';
 import { PrivateAnswerJobs } from '../src/workers/chatgpt/private-answer-jobs.ts';
 import { VERSIONED_FIXTURE_ITEMS, versionedFixtureHits } from '../eval/fixtures/versioned-documents.ts';
-import { defineConnectorCorpus } from '../src/workers/connector-store/index.ts';
+import { createConnectorStoreContentProvider, createConnectorStoreCorpusAdapter, defineConnectorCorpus, LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { createReleaseTierCheck, createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
 import { DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT, DASHBOARD_SETTINGS_ZKAPI_ID, renderDashboardPrivateAnswersPage } from '../src/workers/dashboard/pages/private-answers.ts';
@@ -321,6 +324,7 @@ async function localFixture(options: {
   limits?: Partial<PanelAnswerLimits>;
   duringSynthesis?: (fixture: TierFixture) => Promise<void>;
   keywordOnly?: boolean;
+  mountedStores?: (fixture: TierFixture) => LocalConnectorStore[];
   meaningEmbeddings?: boolean;
   realEmbeddings?: boolean;
   /** Both stores hold the built-in model's vectors and are searched with it. */
@@ -346,7 +350,7 @@ async function localFixture(options: {
     await fixture.stores.internal!.embedChunks({ provider: options.oneModel ? builtIn.vectors : fixture.cloud });
   }
   const lanes = createSourceAnswerLanes({
-    stores: () => fixture.set.openStores(),
+    stores: () => options.mountedStores?.(fixture) ?? fixture.set.openStores(),
     registry: () => buildSourceIndexCorpusRegistry([
       ...fixture.set.openStores().map((store) => defineConnectorCorpus({ corpusId: store.corpusId, family: store.family, trustDomain: store.trustDomain })),
       // Searchable only by a cloud query, and registered with no store here.
@@ -384,6 +388,226 @@ function waitingStore(): WaitingQuestionStore {
   });
   return store;
 }
+
+describe('split front vector admission', () => {
+  function openReader(source: LocalConnectorStore): LocalConnectorStore {
+    const { dbPath, corpusId, trustDomain, family } = source;
+    const reader = new LocalConnectorStore({ dbPath, corpusId, trustDomain, family, readOnly: true });
+    cleanups.push(() => reader.close());
+    return reader;
+  }
+
+  test('deferred search keeps keyword hits, reports the semantic coverage gap, and issues no vector SQL', async () => {
+    const local = await localFixture({ meaningEmbeddings: true });
+    const source = local.fixture.stores.secure_local!;
+    const reader = openReader(source);
+    reader.deferVectorSearchUntilVisibilityBuilt();
+    const corpus = defineConnectorCorpus({
+      corpusId: reader.corpusId, family: reader.family, trustDomain: reader.trustDomain, activationMode: 'hybrid_primary',
+    });
+    const registry = buildSourceIndexCorpusRegistry([corpus]);
+    const embeddingProvider = local.builtIn.provider;
+    const adapter = createConnectorStoreCorpusAdapter({ store: reader, embeddingProvider });
+    const keyword = createConnectorStoreCorpusAdapter({ store: reader, retrievalMode: 'keyword' });
+    const query = 'paid';
+    const context = { allowedTrustDomains: ['secure_local' as const], allowCloudQueries: false };
+    const request = { query, maxResults: 10, context, corpus };
+    const db = (reader as unknown as { db: Database }).db;
+    const storeQuery = spyOn(db, 'query');
+    const currency = spyOn(reader as unknown as { embeddingCurrencyRebuildPending(modelId: string): boolean }, 'embeddingCurrencyRebuildPending');
+    const authority = spyOn(reader as unknown as { embeddingReadAuthority(provider: SourceEmbeddingProvider): unknown }, 'embeddingReadAuthority');
+    const availability = spyOn(reader, 'vectorLaneServable');
+    const embed = spyOn(embeddingProvider, 'embed');
+    try {
+      const response = await adapter(request);
+      expect(response.hits).toEqual((await keyword(request)).hits);
+      expect(response.hits.map(hit => hit.sourceItem.providerItemId)).toEqual(['deposit']);
+      expect(await reader.vectorSearchLane(query, embeddingProvider, 10)).toEqual({ rows: [], skippedReason: SEMANTIC_SEARCH_STARTING });
+      expect(await adapter.metadataMatches!({ ...request, context: { ...context, metadataOnly: true } })).toMatchObject({ incomplete: true });
+      expect((await adapter.semanticNeighbours!(request)).hits).toEqual([]);
+      const detail = await buildEvidencePackDetailed({
+        question: query, maxResults: 10, searchContext: context, registry, adapters: { [corpus.corpusId]: adapter },
+        contentProviders: { [corpus.corpusId]: createConnectorStoreContentProvider({ store: reader, embeddingProvider }) },
+      });
+      expect(detail.pack.coverage).toMatchObject({
+        searchedCorpora: [corpus.corpusId], skippedCorpora: [],
+        extractionGaps: [semanticLaneSkippedGap(corpus.corpusId, SEMANTIC_SEARCH_STARTING)],
+      });
+      expect(detail.pack.candidates.map(candidate => candidate.provenance.sourceItem.providerItemId)).toEqual(['deposit']);
+      expect(storeQuery.mock.calls.filter(([sql]) => /chunk_embeddings|chunk_vector_digest/i.test(sql))).toEqual([]);
+      expect(currency).not.toHaveBeenCalled();
+      expect(authority).not.toHaveBeenCalled();
+      // The direct call for semantic neighbours hits the servability guard but does not query.
+      expect(availability.mock.results).toEqual([{ type: 'return', value: false }]);
+      expect(embed).not.toHaveBeenCalled();
+    } finally {
+      storeQuery.mockRestore();
+      currency.mockRestore();
+      authority.mockRestore();
+      availability.mockRestore();
+      embed.mockRestore();
+    }
+
+    const main = openReader(source);
+    await main.keepVisibilityCurrentInTurns();
+    await reader.keepVisibilityCurrentInTurns();
+    const expected = await createConnectorStoreCorpusAdapter({ store: main, embeddingProvider })(request);
+    const actual = await adapter(request);
+    expect(actual.hits).toEqual(expected.hits);
+    expect(actual.laneAudits?.map(({ elapsedMs: _elapsed, ...audit }) => audit))
+      .toEqual(expected.laneAudits?.map(({ elapsedMs: _elapsed, ...audit }) => audit));
+    expect(actual.matchCount).toEqual(expected.matchCount);
+    expect(actual.laneAudits).toContainEqual(expect.objectContaining({ laneType: 'semantic', returnedCount: 2 }));
+  });
+
+  test('a failed first build defers only its own handle and a new mount needs its own success', async () => {
+    const local = await localFixture();
+    const privateStore = openReader(local.fixture.stores.secure_local!);
+    const personalStore = openReader(local.fixture.stores.internal!);
+    privateStore.deferVectorSearchUntilVisibilityBuilt();
+    personalStore.deferVectorSearchUntilVisibilityBuilt();
+    const failure = spyOn(privateStore as unknown as { hiddenChildItemPksInTurns(): Promise<number[]> }, 'hiddenChildItemPksInTurns')
+      .mockRejectedValueOnce(new Error('fixture build failed'));
+    try {
+      await expect(privateStore.keepVisibilityCurrentInTurns()).rejects.toThrow('fixture build failed');
+      await personalStore.keepVisibilityCurrentInTurns();
+      expect(privateStore.vectorSearchStartup).toBeUndefined();
+      expect(privateStore.vectorSearchDeferred).toBe(true);
+      expect(privateStore.vectorLaneServable(local.builtIn.provider.modelId)).toBe(false);
+      expect(personalStore.vectorSearchStartup).toBeUndefined();
+      expect(personalStore.vectorLaneServable(local.fixture.cloud.modelId)).toBe(true);
+    } finally { failure.mockRestore(); }
+    await privateStore.keepVisibilityCurrentInTurns();
+    expect(privateStore.vectorSearchStartup).toBeUndefined();
+
+    const remounted = openReader(privateStore);
+    remounted.deferVectorSearchUntilVisibilityBuilt();
+    expect(remounted.vectorLaneServable(local.builtIn.provider.modelId)).toBe(false);
+    await remounted.keepVisibilityCurrentInTurns();
+    expect(remounted.vectorLaneServable(local.builtIn.provider.modelId)).toBe(true);
+  });
+
+  test('an accepted Ask shows startup progress and finishes the same request after admission', async () => {
+    const local = await localFixture();
+    const source = local.fixture.stores.secure_local!;
+    source.deferVectorSearchUntilVisibilityBuilt();
+    const store = waitingStore();
+    const controller = createLocalPrivateAnswers({
+      localConnectionId: '@local:You', answer: local.answer, eligible: local.eligible, store: () => store,
+      startup: () => source.vectorSearchStartup ? { stores_done: 0, stores_total: 1 } : undefined,
+    });
+    cleanups.push(() => controller.close());
+
+    // The loop's progress flag can be cleared after a failed build attempt.
+    const progress = beginStartupProgress([source.dbPath]);
+    progress.finish();
+    const pending = controller.handle({ action: 'ask', question: 'When does the orchard flat lease end?' }, 'session:owner');
+    const listed = await controller.handle({ action: 'list' }, 'session:owner');
+    expect(listed.body).toMatchObject({ startup: { stores_done: 0, stores_total: 1 }, questions: [{ state: 'answering' }] });
+    expect(startupWaitingLine(listed.body.startup as StartupProgress)).toContain('Olympus is still starting');
+    expect(local.stub.requests).toEqual([]);
+    await source.keepVisibilityCurrentInTurns();
+    expect(await pending).toMatchObject({
+      status: 200,
+      body: {
+        ok: true, status: 'answered', answer: 'The orchard flat lease ends on 31 May 2027.',
+        unanswered: [STARTUP_SEARCH_GAP],
+      },
+    });
+    expect(store.list().questions).toHaveLength(1);
+  });
+
+  test('retirement wakes the Ask to reselect current handles while another original build is still pending', async () => {
+    let mounted: LocalConnectorStore[] | undefined;
+    let selections = 0;
+    const local = await localFixture({ oneModel: true, mountedStores: fixture => {
+      selections += 1;
+      return mounted ?? fixture.set.openStores();
+    } });
+    const personal = local.fixture.stores.internal!;
+    const original = openReader(local.fixture.stores.secure_local!);
+    const replacement = openReader(original);
+    original.deferVectorSearchUntilVisibilityBuilt();
+    replacement.deferVectorSearchUntilVisibilityBuilt();
+    personal.deferVectorSearchUntilVisibilityBuilt();
+    mounted = [personal, original];
+    const pending = local.answer({ question: 'When does the orchard flat lease end?' });
+    expect(selections).toBe(1);
+    mounted = [personal, replacement];
+    original.close();
+    await waitFor(() => selections >= 2);
+    expect(local.stub.requests).toEqual([]);
+    await personal.keepVisibilityCurrentInTurns();
+    await waitFor(() => selections >= 3);
+    expect(local.stub.requests).toEqual([]);
+    await replacement.keepVisibilityCurrentInTurns();
+    expect(await pending).toMatchObject({ status: 'answered', unanswered: [STARTUP_SEARCH_GAP] });
+  });
+
+  test('an actual build failure releases Ask on keywords and later requests can use the same interactive slot', async () => {
+    const local = await localFixture({ meaningEmbeddings: true });
+    const source = local.fixture.stores.secure_local!;
+    source.deferVectorSearchUntilVisibilityBuilt();
+    const failed = spyOn(source as unknown as { hiddenChildItemPksInTurns(): Promise<number[]> }, 'hiddenChildItemPksInTurns')
+      .mockRejectedValue(new Error('fixture build failed'));
+    const store = waitingStore();
+    const controller = createLocalPrivateAnswers({
+      localConnectionId: '@local:You', answer: local.answer, eligible: local.eligible, store: () => store,
+      startup: () => source.vectorSearchStartup ? { stores_done: 0, stores_total: 1 } : undefined,
+    });
+    cleanups.push(() => controller.close(), () => failed.mockRestore());
+    const ask = () => controller.handle({ action: 'ask', question: 'When does the orchard flat lease end?' }, 'session:owner');
+    const pending = ask();
+    expect((await ask()).status).toBe(429);
+    expect(local.stub.requests).toEqual([]);
+    await expect(source.keepVisibilityCurrentInTurns()).rejects.toThrow('fixture build failed');
+    expect(await pending).toMatchObject({
+      status: 200, body: { status: 'answered', unanswered: [STARTUP_SEARCH_GAP, semanticStartupGap(source.corpusId)] },
+    });
+    await expect(source.keepVisibilityCurrentInTurns()).rejects.toThrow('fixture build failed');
+    expect(await ask()).toMatchObject({
+      status: 200, body: { status: 'answered', unanswered: [semanticStartupGap(source.corpusId)] },
+    });
+    expect(source.vectorSearchDeferred).toBe(true);
+    expect((await controller.handle({ action: 'list' }, 'session:owner')).body.startup).toBeUndefined();
+  });
+
+  test('a keyword-only adapter is searchable without waiting for its pending visibility build', async () => {
+    const local = await localFixture({ keywordOnly: true });
+    const source = local.fixture.stores.secure_local!;
+    source.deferVectorSearchUntilVisibilityBuilt();
+    const startup = source.vectorSearchStartup;
+    expect(await local.answer({ question: 'When does the orchard flat lease end?' }))
+      .toMatchObject({ status: 'answered', unanswered: [] });
+    expect(source.vectorSearchStartup).toBe(startup);
+    expect(source.vectorSearchDeferred).toBe(true);
+  });
+
+  test('membership changing during the child build keeps vectors deferred until the next build installs', async () => {
+    const local = await localFixture();
+    const source = local.fixture.stores.secure_local!;
+    const reader = openReader(source);
+    const sibling = local.fixture.stores.internal!;
+    let members = [reader];
+    reader.useChildVisibility({
+      ledger: () => reader.governingTierLedger(),
+      stores: () => {
+        queueMicrotask(() => { members = [reader, sibling]; });
+        return members;
+      },
+    });
+    reader.deferVectorSearchUntilVisibilityBuilt();
+    const startup = reader.vectorSearchStartup;
+    await reader.keepVisibilityCurrentInTurns();
+    expect(members).toEqual([reader, sibling]);
+    expect(reader.vectorSearchStartup).toBe(startup);
+    expect(reader.vectorLaneServable(local.builtIn.provider.modelId)).toBe(false);
+    await reader.keepVisibilityCurrentInTurns();
+    await startup;
+    expect(reader.vectorSearchDeferred).toBe(false);
+    expect(reader.vectorLaneServable(local.builtIn.provider.modelId)).toBe(true);
+  });
+});
 
 // ---- zero egress -----------------------------------------------------------------
 

@@ -2503,6 +2503,7 @@ export async function main(): Promise<void> {
     ...configuredConnectorStores,
     ...laneConnectorStores,
   ]);
+  if (engineFront) for (const store of connectorStores) store.deferVectorSearchUntilVisibilityBuilt();
   configuredMountStores = connectorStores;
   const readConnectorStores = connectorStores;
   // The background's SQLite files, sampled for the loop-stall receipt
@@ -2529,8 +2530,8 @@ export async function main(): Promise<void> {
     ? await ((await import(loopStallModule)) as typeof import('../../../scripts/loop-stall-test.ts')).attachEngineFixture(connectorStores, engineRole)
     : undefined;
   // Every store's hidden-copy set, built and then kept current on a timer.
-  // The front does it before it reports ready, so an Ask (the first included)
-  // applies a small delta at most instead of building a set on its thread.
+  // The front starts it before serving and admits each store to vector search
+  // as its own build succeeds, even if the listener started serving earlier.
   // The background (or the single worker) does it after it starts and saves
   // each set, so the front's start reads from a saved set inside the ledger's
   // feed. A store mounted later is built on the next tick.
@@ -2549,7 +2550,7 @@ export async function main(): Promise<void> {
           console.warn(`[olympus] ${engineRole}: a store's hidden-copy set could not be built yet: ${error instanceof Error ? error.message : String(error)}`);
           continue;
         }
-        progress?.storeReady(index);
+        if (!store.vectorSearchDeferred) progress?.storeReady(index);
       }
     } finally {
       progress?.finish();
@@ -3172,6 +3173,7 @@ export async function main(): Promise<void> {
   registerTierLegStore = (store, siblingCorpusId, embeddingProvider) => {
     frontMountProblems.delete(store.dbPath);
     if (!connectorStores.includes(store)) {
+      if (engineFront) store.deferVectorSearchUntilVisibilityBuilt();
       connectorStores.push(store);
       // A new store shows on the dashboard at the background's next count: the
       // split's front serves that count and never counts a store itself.
@@ -5952,6 +5954,15 @@ export async function main(): Promise<void> {
     }) : undefined;
     localPrivateAnswers = createLocalPrivateAnswers({
       destinations, ...(veniceAnswer ? { veniceAnswer } : {}),
+      ...(engineFront ? { startup: () => {
+        // Count the current roster. A failed handle is no longer a source
+        // Ask waits for, and must not be counted as ready for vector search.
+        const stores = connectorStores.filter(store => !store.vectorSearchDeferred || store.vectorSearchStartup);
+        const total = stores.length;
+        const done = stores.filter(store => !store.vectorSearchStartup).length;
+        if (done === total) return undefined;
+        return { stores_done: done, stores_total: total };
+      } } : {}),
       localConnectionId: '@local:You',
       anonymousAsk: localAnonymousAsk,
       // The built-in model serves one question at once: an answer preempts the sniffer.

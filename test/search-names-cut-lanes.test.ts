@@ -13,13 +13,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
 import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';
-import { laneTimeoutGap, recentItemsTimeoutGap, semanticTimeoutGap, visibilityCheckTimeoutGap } from '../src/core/source-index/partial-search.ts';
+import { laneTimeoutGap, recentItemsTimeoutGap, SEMANTIC_SEARCH_STARTING, semanticStartupGap, semanticTimeoutGap, visibilityCheckTimeoutGap } from '../src/core/source-index/partial-search.ts';
 import { LocalConnectorStore, createConnectorStoreContentProvider, createConnectorStoreCorpusAdapter, defineConnectorCorpus } from '../src/workers/connector-store/index.ts';
 import { OffThreadReadBusyError, setReadPoolClockForTests, setReadPoolObserverForTests } from '../src/workers/connector-store/off-thread-reads.ts';
 import { searchToolResult } from '../src/workers/chatgpt/response-builder.ts';
 import { searchReleasedEvidence } from '../src/workers/source-index/analyst-answer.ts';
 import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
-import { CORPORA, FIXTURE_PLACEMENT, fixtureConnector, openTierFixture, tempDir } from './helpers/tier-fixtures.ts';
+import { CORPORA, FIXTURE_PLACEMENT, fixtureConnector, localProvider, openTierFixture, tempDir } from './helpers/tier-fixtures.ts';
 
 const READ = 'internal.fake.notes';
 const HELD = 'internal.fake.chats';
@@ -148,6 +148,28 @@ describe('olympus_search names every lane it cut short', () => {
     expect(notes(partly)).toContain(semanticTimeoutGap(HELD));
     const full = searchToolResult({ evidence: [], coverage: { searched_corpora: 2 } });
     expect(notes(full).join(' ')).not.toContain('Ran out of time');
+  });
+
+  test('released evidence search and the ChatGPT result name a deferred vector lane', async () => {
+    const store = await noteStore();
+    store.deferVectorSearchUntilVisibilityBuilt();
+    try {
+      const raw = await searchReleasedEvidence({
+        releaseCheck: provedReleaseCheck, question: 'orchard', maxResults: 10,
+        lanes: () => ({
+          registry: buildSourceIndexCorpusRegistry([defineConnectorCorpus({ corpusId: READ, family: 'file', trustDomain: 'internal' })]),
+          adapters: { [READ]: createConnectorStoreCorpusAdapter({ store, embeddingProvider: localProvider() }) },
+          contentProviders: { [READ]: createConnectorStoreContentProvider({ store }) },
+        }),
+      });
+      const note = semanticStartupGap(READ);
+      expect(raw.evidence.length).toBeGreaterThan(0);
+      expect(raw.coverage.cut_short).toEqual([note]);
+      const result = searchToolResult(raw);
+      expect(notes(result)).toContain(note);
+      expect(result.content[0]!.text).toContain(note);
+      expect(JSON.stringify(result)).not.toContain(SEMANTIC_SEARCH_STARTING);
+    } finally { store.close(); }
   });
 });
 
