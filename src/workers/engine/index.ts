@@ -3563,6 +3563,10 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
         if (request.method === 'POST' && url.pathname === `${basePath}/source/index/search`) {
           const record = await parseObjectBody(request);
           assertSourceIndexSearchQuery(record.query);
+          const personalNamesOnly = record.personal_names_only !== undefined;
+          if (personalNamesOnly && record.personal_names_only !== true) {
+            throw new EmailSourceWorkerError(400, 'invalid_request', 'personal_names_only must be true when provided.');
+          }
           const corpusId = canonicalRequestCorpusId(record);
           const connectorStore = corpusId ? connectorStoresByCorpusId.get(corpusId) : undefined;
           if (connectorStore) {
@@ -3695,7 +3699,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 unreadCorpora.add(store.corpusId);
               }
             }
-            const privateNames = new Set<(typeof tagged)[number]>();
+            // Legacy hits without a names verdict keep their stored sensitivity.
+            const privateNames = new Set(tagged.filter(hit => hit.trustTier === undefined
+              || isSecureSensitivity({ trustDomain: hit.trustDomain, trustTier: hit.trustTier })));
             // Secret, pending deletion and unverified names are withheld from every caller.
             const hiddenNames = new Set(tagged.filter(hit => unreadCorpora.has(hit.corpusId)));
             for (const scope of verdictScopes.values()) {
@@ -3706,31 +3712,24 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 }))));
                 governed.forEach((hit, index) => {
                   const verdict = verdicts[index]!;
-                  if (verdict.tier === 'secret' || verdict.tier === 'unknown' || verdict.pendingDeletion) hiddenNames.add(hit);
+                  if (verdict.tier === 'secret' || verdict.tier === 'unknown' || verdict.pendingDeletion
+                    || (personalNamesOnly && verdict.gone)) hiddenNames.add(hit);
                   else if (verdict.tier === 'private') privateNames.add(hit);
+                  // A whole item can live in Private solely because of its body.
+                  else if (personalNamesOnly && verdict.tier === 'public_or_personal'
+                    && hit.trustTier !== undefined && hit.trustTier !== 'S5') privateNames.delete(hit);
                 });
               } catch {
                 // Only this ledger's names fail closed; other corpora keep their verdicts.
                 for (const hit of governed) hiddenNames.add(hit);
               }
             }
-            // Names are at least as private as their ledger verdict and the
-            // existing stored sensitivity. A hit with no tier is Private too
-            // (every connector-store hit carries one).
-            const hitIsPrivate = (hit: (typeof tagged)[number]): boolean => privateNames.has(hit) || hit.trustTier === undefined
-              || isSecureSensitivity({ trustDomain: hit.trustDomain, trustTier: hit.trustTier });
-            // A search that read no secure_local store did not ask for Private
-            // results, so a Personal store's row that is Private by its own
-            // tier (an S4 row a lane placed there) is withheld from it, as
-            // olympus_search withholds it: counted, never listed. A search
-            // that did read a secure_local store already returns Private
-            // titles under local_only, and returns this one the same way.
             const searchedSecureLocal = runs.some((run) => run.store.trustDomain === 'secure_local');
             let privateTierWithheld = 0;
             for (const hit of hiddenNames) visible.delete(hit);
-            if (!searchedSecureLocal) {
-              for (const hit of [...visible]) {
-                if (!hitIsPrivate(hit)) continue;
+            if (personalNamesOnly || !searchedSecureLocal) {
+              for (const hit of visible) {
+                if (!privateNames.has(hit)) continue;
                 visible.delete(hit);
                 privateTierWithheld += 1;
               }
@@ -3800,7 +3799,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 // stripped, not from store domains alone.
                 local_only: searchRequest.explicitEmptyChatScope
                   || searchedSecureLocal
-                  || hits.some(hitIsPrivate),
+                  || hits.some(hit => privateNames.has(hit)),
                 // The most private tier this search read, not the named
                 // corpus's: a tiered result may carry Private hits.
                 trust_domain: mostPrivateTrustDomain(runs.map((run) => run.store.trustDomain)),

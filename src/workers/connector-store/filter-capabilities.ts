@@ -82,6 +82,7 @@ const CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS = [
   'trust_domain',
   // Per-tier stores (P1b): false pins the search to the one named corpus.
   'all_tiers',
+  'personal_names_only',
 ] as const;
 
 export const CONNECTOR_STORE_DECLARED_FILTER_FIELDS = [

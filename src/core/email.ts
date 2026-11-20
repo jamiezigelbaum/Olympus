@@ -836,7 +836,10 @@ export class EmailClient {
     return result;
   }
 
-  async sourceIndexSearch(options: SourceIndexSearchOptions): Promise<SourceIndexSearchResult> {
+  async sourceIndexSearch(
+    options: SourceIndexSearchOptions,
+    audience: 'calling_model' | 'private_answer' = 'calling_model',
+  ): Promise<SourceIndexSearchResult> {
     if (!isSourceIndexReadSurfaceEnabled(this.config)) {
       throw new OperationError(
         'source_index_not_enabled',
@@ -860,6 +863,8 @@ export class EmailClient {
       body: JSON.stringify({
         query: options.query,
         corpus_id: corpusId,
+        // Tool results go straight to the calling model, including searches of a named Private store.
+        ...(audience === 'calling_model' ? { personal_names_only: true } : {}),
         ...(options.retrievalMode ? { retrieval_mode: options.retrievalMode } : {}),
         ...(options.account ? { account: options.account } : {}),
         ...(options.folderId ? { folder_id: options.folderId } : {}),
