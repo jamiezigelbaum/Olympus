@@ -15968,6 +15968,10 @@ var init_vocabulary = __esm(() => {
       promotions: ["Promotions", "Marketing and offers"]
     },
     mailCategoryCount: "{count} in your mailbox",
+    mailOperatorCategory: "Excluded by this computer’s settings",
+    mailOperatorQuery: "A Gmail search filter in this computer’s settings also applies.",
+    mailOperatorLabels: "This computer’s settings also exclude additional Gmail labels.",
+    mailVerificationCodes: "Olympus filters out verification-code messages.",
     mailLabels: "Labels",
     mailLabelsHelp: "Checked labels are read. Uncheck a label to skip all mail that has it.",
     mailLabelsEmpty: "This mailbox has no labels of its own.",
@@ -16457,16 +16461,6 @@ var init_file_extraction_source = __esm(() => {
   });
 });
 
-// src/workers/source-account-guard.ts
-var sourceExclusiveRunners;
-var init_source_account_guard = __esm(() => {
-  init_provider_account_identity();
-  init_source_account_binding();
-  init_connected_handles();
-  init_credential_broker();
-  sourceExclusiveRunners = new Map;
-});
-
 // src/workers/email-source/ingest-filter.ts
 var OTP_SUBJECT;
 var init_ingest_filter = __esm(() => {
@@ -16523,11 +16517,9 @@ var init_gmail = __esm(() => {
   init_owner_limit_settings();
   init_olympus_layout();
   init_mail_source_scope();
-  init_provider_account_identity();
   init_sender_rules();
   init_file_extraction_source();
   init_credential_broker();
-  init_source_account_guard();
   init_ingest_filter();
   init_gmail_mail_record();
   init_request_budget();
@@ -16704,6 +16696,14 @@ var init_tier_set_binding = __esm(() => {
   init_olympus_layout();
   init_tier_ledger();
   init_tier_ledger_path();
+});
+
+// src/workers/local-pacing.ts
+var GO_EASY_IDLE_FULL_SPEED_MS, GO_EASY_LOCAL_WORK_RECENT_MS;
+var init_local_pacing = __esm(() => {
+  init_atomic_file();
+  GO_EASY_IDLE_FULL_SPEED_MS = 5 * 60000;
+  GO_EASY_LOCAL_WORK_RECENT_MS = 3 * 60000;
 });
 
 // src/core/embedding-sweep-idle.ts
@@ -17672,6 +17672,7 @@ function connectorStoreContentPreference(vettedVectorItemIds) {
 var CONCEPT_COUNT_MAX_AGE_MS, CONNECTOR_STORE_CONVERSATION_INDEX = "idx_connector_store_items_conversation_time", CONNECTOR_STORE_CONVERSATION_INDEX_SQL, CONNECTOR_STORE_RECENCY_INDEX = "idx_connector_store_items_recent_live", CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX = "idx_connector_store_items_recent_account_live", RECENCY_LIVE_SQL = "tombstoned IS 0", ACCOUNT_RECENCY_LIVE_SQL = "+tombstoned IS 0", CONNECTOR_STORE_RECENCY_INDEX_SQL, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, CHUNK_MEDIA_RETRY_BASE_MS, CONNECTOR_STORE_FTS_MIGRATION, STATUS_COUNTS_MAX_AGE_MS, TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, lexicalContentPreference, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, LOCAL_RELAXED_STOPWORDS;
 var init_local_index = __esm(() => {
   init_memory_counters();
+  init_local_pacing();
   init_embedding_sweep_idle();
   init_sqlite_memory();
   init_read_progress();
@@ -21445,334 +21446,15 @@ var init_gmail_live_control = __esm(() => {
   GMAIL_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
 });
 
-// src/workers/archive-import/record-probe.ts
-var RECORD_PROBE_MAX_VALUE_BYTES, RECORD_PROBE_MAX_SCAN_BYTES, RECORD_PROBE_MAX_FOLDER_SCAN_BYTES;
-var init_record_probe = __esm(() => {
-  init_json_stream();
-  RECORD_PROBE_MAX_VALUE_BYTES = 16 * 1024;
-  RECORD_PROBE_MAX_SCAN_BYTES = 64 * 1024 * 1024;
-  RECORD_PROBE_MAX_FOLDER_SCAN_BYTES = 256 * 1024 * 1024;
-});
-
-// src/workers/archive-import/manifest.ts
-var ARCHIVE_FINGERPRINT_BYTES, ARCHIVE_DIGEST_RANGE_BYTES;
-var init_manifest3 = __esm(() => {
-  init_archive_formats();
-  init_scope_safe_fs();
-  init_byte_source();
-  init_record_probe();
-  init_zip_reader();
-  ARCHIVE_FINGERPRINT_BYTES = 1024 * 1024;
-  ARCHIVE_DIGEST_RANGE_BYTES = 8 * 1024 * 1024;
-});
-
-// src/workers/archive-import/mbox/split.ts
-var SEPARATOR2, FROM, MBOX_DEFAULT_MAX_MESSAGE_BYTES, MIN_READ_BYTES;
-var init_split = __esm(() => {
-  SEPARATOR2 = Buffer.from(`
-From `, "latin1");
-  FROM = Buffer.from("From ", "latin1");
-  MBOX_DEFAULT_MAX_MESSAGE_BYTES = 32 * 1024 * 1024;
-  MIN_READ_BYTES = 1024 * 1024;
-});
-
-// src/workers/archive-import/mbox/gmail-account.ts
-var DEFAULT_MAX_BYTES, MAX_HEADER_BYTES, MAX_MESSAGE_BYTES;
-var init_gmail_account = __esm(() => {
-  init_split();
-  DEFAULT_MAX_BYTES = 64 * 1024 * 1024;
-  MAX_HEADER_BYTES = 256 * 1024;
-  MAX_MESSAGE_BYTES = 32 * 1024 * 1024;
-});
-
-// node_modules/postal-mime/dist/esm/decode-strings.js
-var textEncoder, base64Chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/", base64Lookup, charsetAliases, codePageAliases, ENCODING_LABELS, REPLACEMENT_LABELS, UTF16_LABELS, decoders, utf8Decoder, UTF16_ENCODINGS, UTF16_UNORDERED_LABELS, ENCODED_WORD_PATTERN = "=\\?([^?\\s]+)\\?([QqBb])\\?([^?]*)\\?=", ENCODED_WORD_REGEX, ENCODED_WORDS_ONLY_REGEX;
-var init_decode_strings = __esm(() => {
-  textEncoder = new TextEncoder;
-  base64Lookup = new Uint8Array(256);
-  for (let i = 0;i < base64Chars.length; i++) {
-    base64Lookup[base64Chars.charCodeAt(i)] = i;
-  }
-  charsetAliases = new Map([
-    ["iso88598i", "iso-8859-8"],
-    ["iso88598e", "iso-8859-8"],
-    ["shiftjis", "shift_jis"],
-    ["windows31j", "shift_jis"],
-    ["mskanji", "shift_jis"],
-    ["eucjp", "euc-jp"],
-    ["iso2022jp", "iso-2022-jp"],
-    ["iso2022jp1", "iso-2022-jp"],
-    ["iso2022jp2", "iso-2022-jp"],
-    ["junet", "iso-2022-jp"],
-    ["euckr", "euc-kr"],
-    ["uhc", "euc-kr"],
-    ["tis620", "windows-874"]
-  ]);
-  codePageAliases = new Map([
-    ["932", "shift_jis"],
-    ["936", "gbk"],
-    ["949", "euc-kr"],
-    ["950", "big5"],
-    ["874", "windows-874"],
-    ["51932", "euc-jp"],
-    ["50220", "iso-2022-jp"],
-    ["50221", "iso-2022-jp"],
-    ["50222", "iso-2022-jp"]
-  ]);
-  ENCODING_LABELS = new Set([
-    "unicode-1-1-utf-8 unicode11utf8 unicode20utf8 utf-8 utf8 x-unicode20utf8",
-    "866 cp866 csibm866 ibm866",
-    "csisolatin2 iso-8859-2 iso-ir-101 iso8859-2 iso88592 iso_8859-2 iso_8859-2:1987 l2 latin2",
-    "csisolatin3 iso-8859-3 iso-ir-109 iso8859-3 iso88593 iso_8859-3 iso_8859-3:1988 l3 latin3",
-    "csisolatin4 iso-8859-4 iso-ir-110 iso8859-4 iso88594 iso_8859-4 iso_8859-4:1988 l4 latin4",
-    "csisolatincyrillic cyrillic iso-8859-5 iso-ir-144 iso8859-5 iso88595 iso_8859-5 iso_8859-5:1988",
-    "arabic asmo-708 csiso88596e csiso88596i csisolatinarabic ecma-114 iso-8859-6 iso-8859-6-e",
-    "iso-8859-6-i iso-ir-127 iso8859-6 iso88596 iso_8859-6 iso_8859-6:1987",
-    "csisolatingreek ecma-118 elot_928 greek greek8 iso-8859-7 iso-ir-126 iso8859-7 iso88597 iso_8859-7",
-    "iso_8859-7:1987 sun_eu_greek",
-    "csiso88598e csisolatinhebrew hebrew iso-8859-8 iso-8859-8-e iso-ir-138 iso8859-8 iso88598 iso_8859-8",
-    "iso_8859-8:1988 visual",
-    "csiso88598i iso-8859-8-i logical",
-    "csisolatin6 iso-8859-10 iso-ir-157 iso8859-10 iso885910 l6 latin6",
-    "iso-8859-13 iso8859-13 iso885913",
-    "iso-8859-14 iso8859-14 iso885914",
-    "csisolatin9 iso-8859-15 iso8859-15 iso885915 iso_8859-15 l9",
-    "iso-8859-16",
-    "cskoi8r koi koi8 koi8-r koi8_r",
-    "koi8-ru koi8-u",
-    "csmacintosh mac macintosh x-mac-roman",
-    "dos-874 iso-8859-11 iso8859-11 iso885911 tis-620 windows-874",
-    "cp1250 windows-1250 x-cp1250",
-    "cp1251 windows-1251 x-cp1251",
-    "ansi_x3.4-1968 ascii cp1252 cp819 csisolatin1 ibm819 iso-8859-1 iso-ir-100 iso8859-1 iso88591",
-    "iso_8859-1 iso_8859-1:1987 l1 latin1 us-ascii windows-1252 x-cp1252",
-    "cp1253 windows-1253 x-cp1253",
-    "cp1254 csisolatin5 iso-8859-9 iso-ir-148 iso8859-9 iso88599 iso_8859-9 iso_8859-9:1989 l5 latin5",
-    "windows-1254 x-cp1254",
-    "cp1255 windows-1255 x-cp1255",
-    "cp1256 windows-1256 x-cp1256",
-    "cp1257 windows-1257 x-cp1257",
-    "cp1258 windows-1258 x-cp1258",
-    "x-mac-cyrillic x-mac-ukrainian",
-    "chinese csgb2312 csiso58gb231280 gb2312 gb_2312 gb_2312-80 gbk iso-ir-58 x-gbk",
-    "gb18030",
-    "big5 big5-hkscs cn-big5 csbig5 x-x-big5",
-    "cseucpkdfmtjapanese euc-jp x-euc-jp",
-    "csiso2022jp iso-2022-jp",
-    "csshiftjis ms932 ms_kanji shift-jis shift_jis sjis windows-31j x-sjis",
-    "cseuckr csksc56011987 euc-kr iso-ir-149 korean ks_c_5601-1987 ks_c_5601-1989 ksc5601 ksc_5601",
-    "windows-949",
-    "csiso2022kr hz-gb-2312 iso-2022-cn iso-2022-cn-ext iso-2022-kr replacement",
-    "x-user-defined"
-  ].join(" ").split(" "));
-  REPLACEMENT_LABELS = new Set([
-    "csiso2022kr",
-    "hz-gb-2312",
-    "iso-2022-cn",
-    "iso-2022-cn-ext",
-    "iso-2022-kr",
-    "replacement"
-  ]);
-  UTF16_LABELS = new Map([
-    ["utf-16", "utf-16"],
-    ["utf16", "utf-16"],
-    ["utf_16", "utf-16"],
-    ["utf-16le", "utf-16le"],
-    ["utf-16be", "utf-16be"]
-  ]);
-  decoders = new Map;
-  utf8Decoder = new TextDecoder;
-  UTF16_ENCODINGS = new Set(["utf-16le", "utf-16be"]);
-  UTF16_UNORDERED_LABELS = new Set(["utf-16"]);
-  ENCODED_WORD_REGEX = new RegExp(ENCODED_WORD_PATTERN, "g");
-  ENCODED_WORDS_ONLY_REGEX = new RegExp(`^(?:${ENCODED_WORD_PATTERN}\\s*)+$`);
-});
-
-// node_modules/postal-mime/dist/esm/pass-through-decoder.js
-var init_pass_through_decoder = __esm(() => {
-  init_decode_strings();
-});
-
-// node_modules/postal-mime/dist/esm/chunk-writer.js
-var init_chunk_writer = __esm(() => {
-  init_decode_strings();
-});
-
-// node_modules/postal-mime/dist/esm/base64-decoder.js
-var init_base64_decoder = __esm(() => {
-  init_decode_strings();
-  init_chunk_writer();
-});
-
-// node_modules/postal-mime/dist/esm/qp-decoder.js
-var init_qp_decoder = __esm(() => {
-  init_decode_strings();
-  init_chunk_writer();
-});
-
-// node_modules/postal-mime/dist/esm/errors.js
-var init_errors = () => {};
-
-// node_modules/postal-mime/dist/esm/mime-node.js
-var headerDecoder, CONTENT_HEADERS;
-var init_mime_node = __esm(() => {
-  init_decode_strings();
-  init_pass_through_decoder();
-  init_base64_decoder();
-  init_qp_decoder();
-  init_errors();
-  headerDecoder = new TextDecoder("utf-8", { ignoreBOM: true });
-  CONTENT_HEADERS = new Set([
-    "content-type",
-    "content-transfer-encoding",
-    "content-disposition",
-    "content-id",
-    "content-description"
-  ]);
-});
-
-// node_modules/postal-mime/dist/esm/html-entities.js
-var init_html_entities = () => {};
-
-// node_modules/postal-mime/dist/esm/text-format.js
-var C1_ENTITY_REPLACEMENTS, hexByte = (value) => value.toString(16).toUpperCase().padStart(2, "0"), PERCENT_ENCODED;
-var init_text_format = __esm(() => {
-  init_html_entities();
-  init_decode_strings();
-  C1_ENTITY_REPLACEMENTS = new Map([
-    [128, 8364],
-    [130, 8218],
-    [131, 402],
-    [132, 8222],
-    [133, 8230],
-    [134, 8224],
-    [135, 8225],
-    [136, 710],
-    [137, 8240],
-    [138, 352],
-    [139, 8249],
-    [140, 338],
-    [142, 381],
-    [145, 8216],
-    [146, 8217],
-    [147, 8220],
-    [148, 8221],
-    [149, 8226],
-    [150, 8211],
-    [151, 8212],
-    [152, 732],
-    [153, 8482],
-    [154, 353],
-    [155, 8250],
-    [156, 339],
-    [158, 382],
-    [159, 376]
-  ]);
-  PERCENT_ENCODED = Array.from({ length: 256 }, (_, byte) => "%" + hexByte(byte));
-});
-
-// node_modules/postal-mime/dist/esm/address-parser.js
-var init_address_parser = __esm(() => {
-  init_decode_strings();
-});
-// node_modules/postal-mime/dist/esm/postal-mime.js
-var ATTACHMENT_ENCODINGS, LINE_FEED, MAX_HEADERS_SIZE;
-var init_postal_mime = __esm(() => {
-  init_mime_node();
-  init_text_format();
-  init_address_parser();
-  init_decode_strings();
-  init_errors();
-  ATTACHMENT_ENCODINGS = new Set(["arraybuffer", "base64", "utf8"]);
-  LINE_FEED = new Uint8Array([10]);
-  MAX_HEADERS_SIZE = 2 * 1024 * 1024;
-});
-
-// src/workers/archive-import/mbox/parse.ts
-var MBOX_SKIPPED_LABELS, decodableCharsets;
-var init_parse = __esm(() => {
-  init_postal_mime();
-  MBOX_SKIPPED_LABELS = new Set(["spam", "trash"]);
-  decodableCharsets = new Map;
-});
-
-// src/workers/archive-import/mbox/connector.ts
-var MBOX_DEFAULT_MAX_BYTES_PER_LISTING;
-var init_connector5 = __esm(() => {
-  init_archive_formats();
-  init_stop_errors();
-  init_sender_rules();
-  init_split();
-  init_parse();
-  MBOX_DEFAULT_MAX_BYTES_PER_LISTING = 256 * 1024 * 1024;
-});
-
-// src/workers/archive-import/mbox/mime-parts.ts
-var MAX_HEADER_BYTES2;
-var init_mime_parts = __esm(() => {
-  init_postal_mime();
-  init_gmail_mail_record();
-  MAX_HEADER_BYTES2 = 256 * 1024;
-});
-
-// src/workers/archive-import/mbox/gmail-input.ts
-var MAX_GMAIL_ID, SYSTEM_LABELS, exportAddresses;
-var init_gmail_input = __esm(() => {
-  init_gmail_mail_record();
-  init_state();
-  init_connector5();
-  init_gmail_account();
-  init_mime_parts();
-  init_parse();
-  init_split();
-  MAX_GMAIL_ID = (1n << 64n) - 1n;
-  SYSTEM_LABELS = new Map([
-    ["inbox", "INBOX"],
-    ["sent", "SENT"],
-    ["important", "IMPORTANT"],
-    ["starred", "STARRED"],
-    ["unread", "UNREAD"],
-    ["draft", "DRAFT"],
-    ["drafts", "DRAFT"],
-    ["chat", "CHAT"],
-    ["spam", "SPAM"],
-    ["trash", "TRASH"],
-    ["category personal", "CATEGORY_PERSONAL"],
-    ["category social", "CATEGORY_SOCIAL"],
-    ["category promotions", "CATEGORY_PROMOTIONS"],
-    ["category updates", "CATEGORY_UPDATES"],
-    ["category forums", "CATEGORY_FORUMS"],
-    ["opened", null],
-    ["archived", null]
-  ]);
-  exportAddresses = new Map;
-});
-
-// src/workers/google-connectors/gmail-archive-target.ts
-var GMAIL_PROVIDER_ID = "gmail", GMAIL_IMPORT_CONNECTOR_PREFIX = "archive.", GMAIL_IMPORTED_FILTERS;
-var init_gmail_archive_target = __esm(() => {
-  init_provider_account_identity();
-  init_source_inputs();
-  init_manifest3();
-  init_gmail_account();
-  init_gmail_input();
-  init_gmail_mail_record();
-  GMAIL_IMPORTED_FILTERS = Object.freeze({ provider: GMAIL_PROVIDER_ID, observedConnectorIdPrefix: GMAIL_IMPORT_CONNECTOR_PREFIX });
-});
-
 // src/workers/google-connectors/gmail-live-sync.ts
 var GMAIL_SCOPED_CONNECTOR_PREFIX;
 var init_gmail_live_sync = __esm(() => {
-  init_source_account_binding();
-  init_local_index();
   init_tiered_store_set();
   init_tier_rules_sweep();
   init_embeddings();
-  init_gmail_archive_target();
   init_gmail_mail_record();
   init_gmail();
   init_gmail_live_control();
-  init_request_budget();
   GMAIL_SCOPED_CONNECTOR_PREFIX = `${GMAIL_PROVIDER}.scope.`;
 });
 
@@ -21879,6 +21561,27 @@ var init_account_files = __esm(() => {
   SOURCE_ALIASES = {
     [WHATSAPP_SOURCE_ID]: ["whatsapp.messages"]
   };
+});
+
+// src/workers/archive-import/record-probe.ts
+var RECORD_PROBE_MAX_VALUE_BYTES, RECORD_PROBE_MAX_SCAN_BYTES, RECORD_PROBE_MAX_FOLDER_SCAN_BYTES;
+var init_record_probe = __esm(() => {
+  init_json_stream();
+  RECORD_PROBE_MAX_VALUE_BYTES = 16 * 1024;
+  RECORD_PROBE_MAX_SCAN_BYTES = 64 * 1024 * 1024;
+  RECORD_PROBE_MAX_FOLDER_SCAN_BYTES = 256 * 1024 * 1024;
+});
+
+// src/workers/archive-import/manifest.ts
+var ARCHIVE_FINGERPRINT_BYTES, ARCHIVE_DIGEST_RANGE_BYTES;
+var init_manifest3 = __esm(() => {
+  init_archive_formats();
+  init_scope_safe_fs();
+  init_byte_source();
+  init_record_probe();
+  init_zip_reader();
+  ARCHIVE_FINGERPRINT_BYTES = 1024 * 1024;
+  ARCHIVE_DIGEST_RANGE_BYTES = 8 * 1024 * 1024;
 });
 
 // src/workers/archive-import/requests.ts
