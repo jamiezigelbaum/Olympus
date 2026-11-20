@@ -66063,33 +66063,32 @@ async function embedPendingChunks(targets, options) {
     const run = {
       corpusId: store.corpusId,
       itemsAttempted: 0,
+      queued_first_items: 0,
       chunksEmbedded: 0,
       itemsFailed: 0,
       itemsOutOfScope: 0
     };
     runs.push(run);
-    const inventoryWrites = options.diagnostics && target.wholeStore === true ? store.writeSequence() : undefined;
-    if (options.diagnostics)
-      run.inventory = await store.embeddingSweepInventory(target.provider, target, options.stopAtMs);
     const groups = store.queuedEmbeddingGroups(options.maxItems).filter((group) => {
       if (target.wholeStore !== true || sameEmbeddingIdentity(group.provider, target.provider))
         return true;
       store.completeQueuedEmbedding(group.localItemIds);
       return false;
     });
-    const queued = groups.reduce((sum, group) => sum + group.localItemIds.length, 0);
-    const noMissingVectors = run.inventory?.inventory_complete === 1 && run.inventory.pending_chunks === 0 && inventoryWrites !== undefined && store.writeSequence() === inventoryWrites && !store.fileReplacedOrRemoved();
-    if (target.wholeStore === true && queued < options.maxItems && !noMissingVectors) {
-      const queuedIds = new Set(groups.flatMap((group) => group.localItemIds));
-      const missing = (await store.missingEmbeddingItemIdsInTurns(target.provider, options.maxItems - queued, target)).filter((localItemId) => !queuedIds.has(localItemId));
-      if (missing.length > 0)
-        groups.push({ provider: target.provider, localItemIds: missing });
-    }
+    const queuedIds = new Set(groups.flatMap((group) => group.localItemIds));
+    const writtenItems = new Set;
+    const recordQueuedBatch = (itemPks) => {
+      for (const pk of itemPks)
+        writtenItems.add(pk);
+      run.queued_first_items = writtenItems.size;
+      options.onQueuedFirstItems?.(writtenItems.size);
+    };
     let answered = false;
-    for (const group of groups) {
-      if (answered && options.stopAtMs !== undefined && Date.now() >= options.stopAtMs || options.shouldStop?.() === true) {
+    const budgetSpent = () => options.stopAtMs !== undefined && Date.now() >= options.stopAtMs;
+    const dispatch = async (group, onBatchWritten) => {
+      if (answered && budgetSpent() || options.shouldStop?.() === true) {
         run.stoppedAtDeadline = true;
-        break;
+        return;
       }
       try {
         group.provider.assertBindingCurrent?.();
@@ -66097,10 +66096,11 @@ async function embedPendingChunks(targets, options) {
       } catch {
         store.completeQueuedEmbedding(group.localItemIds);
         run.itemsOutOfScope += group.localItemIds.length;
-        continue;
+        return;
       }
       const outcome = await embedItemsIsolated(store, group.provider, group.localItemIds, {
         ...target,
+        ...onBatchWritten ? { onBatchWritten } : {},
         ...options.stopAtMs !== undefined ? { stopAtMs: options.stopAtMs } : {},
         ...options.shouldStop ? { shouldStop: options.shouldStop } : {}
       });
@@ -66109,16 +66109,32 @@ async function embedPendingChunks(targets, options) {
       run.itemsFailed += outcome.itemsFailed;
       if (outcome.busy) {
         run.busy = true;
-        break;
+        return;
       }
       if (outcome.deferredReason) {
         run.deferredReason = outcome.deferredReason;
-        break;
+        return;
       }
       answered = true;
-      if (outcome.stoppedAtDeadline) {
+      if (outcome.stoppedAtDeadline)
         run.stoppedAtDeadline = true;
+    };
+    for (const group of groups) {
+      await dispatch(group, recordQueuedBatch);
+      if (run.busy || run.deferredReason || run.stoppedAtDeadline)
         break;
+    }
+    const inventoryWrites = options.diagnostics && target.wholeStore === true ? store.writeSequence() : undefined;
+    if (options.diagnostics)
+      run.inventory = await store.embeddingSweepInventory(target.provider, target, options.stopAtMs);
+    const noMissingVectors = run.inventory?.inventory_complete === 1 && run.inventory.pending_chunks === 0 && inventoryWrites !== undefined && store.writeSequence() === inventoryWrites && !store.fileReplacedOrRemoved();
+    if (target.wholeStore && queuedIds.size < options.maxItems && !noMissingVectors && !run.busy && !run.deferredReason && !run.stoppedAtDeadline) {
+      if (budgetSpent()) {
+        run.stoppedAtDeadline = true;
+      } else {
+        const missing = (await store.missingEmbeddingItemIdsInTurns(target.provider, options.maxItems - queuedIds.size, target)).filter((id) => !queuedIds.has(id));
+        if (missing.length)
+          await dispatch({ provider: target.provider, localItemIds: missing });
       }
     }
     if (run.deferredReason)
@@ -66136,6 +66152,7 @@ async function embedItemsIsolated(store, provider, localItemIds, scope = {}) {
     const embed = await store.embedChunks({
       provider,
       localItemIds: [...localItemIds],
+      ...scope.onBatchWritten ? { onBatchWritten: scope.onBatchWritten } : {},
       ...scope.accountScope ? { accountScope: scope.accountScope } : {},
       ...scope.filters ? { filters: scope.filters } : {},
       ...scope.assertAuthorized ? { assertAuthorized: scope.assertAuthorized } : {},
@@ -76306,24 +76323,6 @@ ${parentKey(ref)}`, { ref, origin });
     }
     async embeddingSweepInventory(provider, scope = {}, stopAtMs, windowChunks = MISSING_EMBEDDING_CHUNK_WINDOW) {
       const started = Date.now();
-      const tier = await this.tierHiddenItemPksInTurns();
-      const hidden = await pkSetInTurns([tier.hidden]);
-      const held = await pkSetInTurns([tier.held]);
-      const heldForJudgment = this.canEmbedHeld(provider) ? await pkSetInTurns([tier.heldForJudgment]) : new Set;
-      const namesOnly = await pkSetInTurns([tier.metadataLayer]);
-      const moving = new Set;
-      let walked = 0;
-      const visibility = this.tierLedgerHiddenMemo;
-      for (const member of visibility?.members.values() ?? []) {
-        if (member.flags.moving)
-          for (const pk of member.pks)
-            moving.add(pk);
-        if (++walked % 2000 === 0)
-          await ingestionTurn();
-      }
-      const tiers = connectorStoreEmbeddableRowTiers(this.trustDomain, provider);
-      const account = normalizeOptionalAccountScope(scope.accountScope);
-      const scoped = connectorStoreFilterSql(scope.filters);
       const counts = {
         pending_chunks: 0,
         eligible_chunks: 0,
@@ -76343,6 +76342,26 @@ ${parentKey(ref)}`, { ref, origin });
         counts[`${reason}_chunks`] = 0;
         counts[`${reason}_items`] = 0;
       }
+      if (stopAtMs !== undefined && started >= stopAtMs)
+        return { ...counts, inventory_ms: 0 };
+      const tier = await this.tierHiddenItemPksInTurns();
+      const hidden = await pkSetInTurns([tier.hidden]);
+      const held = await pkSetInTurns([tier.held]);
+      const heldForJudgment = this.canEmbedHeld(provider) ? await pkSetInTurns([tier.heldForJudgment]) : new Set;
+      const namesOnly = await pkSetInTurns([tier.metadataLayer]);
+      const moving = new Set;
+      let walked = 0;
+      const visibility = this.tierLedgerHiddenMemo;
+      for (const member of visibility?.members.values() ?? []) {
+        if (member.flags.moving)
+          for (const pk of member.pks)
+            moving.add(pk);
+        if (++walked % 2000 === 0)
+          await ingestionTurn();
+      }
+      const tiers = connectorStoreEmbeddableRowTiers(this.trustDomain, provider);
+      const account = normalizeOptionalAccountScope(scope.accountScope);
+      const scoped = connectorStoreFilterSql(scope.filters);
       const read = this.embeddingSweepRead(offThreadReadsSupported(this.dbPath));
       if (visibility && held.size)
         await this.countEmbeddingHolds(visibility, counts, read, stopAtMs);
@@ -76842,6 +76861,7 @@ ${parentKey(ref)}`, { ref, origin });
         const now = nowIso();
         let nextJournalSha256;
         let written = 0;
+        const writtenItemPks = options.onBatchWritten ? [] : undefined;
         this.db.transaction(() => {
           this.assertEmbeddingWriteAuthority(provider, providerEpoch);
           const stillEligible = new Set(this.embeddingBatchRecheck(batch, embeddableTiers, provider).kept);
@@ -76874,6 +76894,7 @@ ${parentKey(ref)}`, { ref, origin });
             if (write.changes > 0) {
               writeVectorDigest(this.db, row.chunk_pk, provider.modelId, row.item_pk, embedding);
               written += 1;
+              writtenItemPks?.push(row.item_pk);
               this.scheduleVectorDigestBackfill(provider.modelId);
               const judgment = judgedBatch?.get(row.chunk_pk);
               if (judgment && row.media_sha256 && !judgedThisPass.has(row.media_sha256)) {
@@ -76907,6 +76928,8 @@ ${parentKey(ref)}`, { ref, origin });
         })();
         if (nextJournalSha256)
           activeJournalSha256 = nextJournalSha256;
+        if (writtenItemPks?.length)
+          options.onBatchWritten?.(writtenItemPks);
         embedded += written;
         staleSkipped += batch.length - written;
       }
@@ -229058,6 +229081,7 @@ function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_
           runs.push({
             corpusId: store.corpusId,
             itemsAttempted: 0,
+            queued_first_items: 0,
             chunksEmbedded: 0,
             itemsFailed: 0,
             itemsOutOfScope: 0,
@@ -229072,8 +229096,17 @@ function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_
         const overran = Symbol("overran");
         let timer;
         const stopAtMs = Date.now() + Math.floor(deadlineMs / 2);
+        let queuedFirstItems = 0;
         const result = await Promise.race([
-          embedPendingChunks([target], { maxItems: paced ? GO_EASY_TRICKLE_EMBED_ITEMS : maxItems, stopAtMs, diagnostics: true, ...holdForAsk ? { shouldStop: askHolds } : {} }),
+          embedPendingChunks([target], {
+            maxItems: paced ? GO_EASY_TRICKLE_EMBED_ITEMS : maxItems,
+            stopAtMs,
+            diagnostics: true,
+            onQueuedFirstItems: (count) => {
+              queuedFirstItems = count;
+            },
+            ...holdForAsk ? { shouldStop: askHolds } : {}
+          }),
           new Promise((resolve) => {
             timer = setTimeout(() => resolve(overran), deadlineMs);
           })
@@ -229097,6 +229130,7 @@ function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_
         runs.push({
           corpusId: target.store.corpusId,
           itemsAttempted: 0,
+          queued_first_items: queuedFirstItems,
           chunksEmbedded: 0,
           itemsFailed: 0,
           itemsOutOfScope: 0,
@@ -229108,6 +229142,7 @@ function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_
       }
       const deferred = runs.filter((run) => run.deferredReason !== undefined).length;
       const counts = {
+        queued_first_items: runs.reduce((sum, run) => sum + run.queued_first_items, 0),
         chunks_embedded: runs.reduce((sum, run) => sum + run.chunksEmbedded, 0),
         items_queued: passTargets.reduce((sum, target) => sum + target.store.queuedEmbeddingItemIds().length, 0),
         items_failed: passTargets.reduce((sum, target) => sum + target.store.embeddingFailedItemCount(), 0),
@@ -229126,6 +229161,7 @@ function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_
           ...run.inventory,
           whole_store: passTargets[index].wholeStore ? 1 : 0,
           queued_items: passTargets[index].store.queuedEmbeddingItemIds().length,
+          queued_first_items: run.queued_first_items,
           items_attempted: run.itemsAttempted,
           chunks_embedded: run.chunksEmbedded,
           items_failed: run.itemsFailed,

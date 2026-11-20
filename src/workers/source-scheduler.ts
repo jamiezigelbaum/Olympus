@@ -2311,7 +2311,7 @@ function embeddingSweepTask(
         const rested = quiet.get(store)?.get(slot) ?? receipts?.get(slot);
         const wake = idleBackoff ? embeddingSweepWake(store, rested, keyBefore) : undefined;
         if (rested && wake === undefined) {
-          runs.push({ corpusId: store.corpusId, itemsAttempted: 0, chunksEmbedded: 0, itemsFailed: 0, itemsOutOfScope: 0,
+          runs.push({ corpusId: store.corpusId, itemsAttempted: 0, queued_first_items: 0, chunksEmbedded: 0, itemsFailed: 0, itemsOutOfScope: 0,
             inventory: rested.inventory });
           continue;
         }
@@ -2328,8 +2328,10 @@ function embeddingSweepTask(
         // provider were down (Sparta, 2026-11-06: 94 overruns, 70 of them
         // Dropbox, whose Private store then embedded nothing for an hour).
         const stopAtMs = Date.now() + Math.floor(deadlineMs / 2);
+        let queuedFirstItems = 0;
         const result = await Promise.race([
-          embedPendingChunks([target], { maxItems: paced ? GO_EASY_TRICKLE_EMBED_ITEMS : maxItems, stopAtMs, diagnostics: true, ...(holdForAsk ? { shouldStop: askHolds } : {}) }),
+          embedPendingChunks([target], { maxItems: paced ? GO_EASY_TRICKLE_EMBED_ITEMS : maxItems, stopAtMs, diagnostics: true,
+            onQueuedFirstItems: (count) => { queuedFirstItems = count; }, ...(holdForAsk ? { shouldStop: askHolds } : {}) }),
           new Promise<typeof overran>((resolve) => { timer = setTimeout(() => resolve(overran), deadlineMs); }),
         ]).finally(() => clearTimeout(timer));
         if (result !== overran) {
@@ -2350,13 +2352,14 @@ function embeddingSweepTask(
           continue;
         }
         target.store.setEmbeddingDeferral(EMBEDDING_PROVIDER_UNAVAILABLE_REASON);
-        runs.push({ corpusId: target.store.corpusId, itemsAttempted: 0, chunksEmbedded: 0, itemsFailed: 0, itemsOutOfScope: 0,
+        runs.push({ corpusId: target.store.corpusId, itemsAttempted: 0, queued_first_items: queuedFirstItems, chunksEmbedded: 0, itemsFailed: 0, itemsOutOfScope: 0,
           inventory: { inventory_complete: 0, pass_overran: 1 },
           deferredReason: EMBEDDING_PROVIDER_UNAVAILABLE_REASON });
         if (wake) walks.set(runIndex, { wake, not_resting: 'deferred' });
       }
       const deferred = runs.filter((run) => run.deferredReason !== undefined).length;
       const counts = {
+        queued_first_items: runs.reduce((sum, run) => sum + run.queued_first_items, 0),
         chunks_embedded: runs.reduce((sum, run) => sum + run.chunksEmbedded, 0),
         items_queued: passTargets.reduce((sum, target) => sum + target.store.queuedEmbeddingItemIds().length, 0),
         items_failed: passTargets.reduce((sum, target) => sum + target.store.embeddingFailedItemCount(), 0),
@@ -2375,6 +2378,7 @@ function embeddingSweepTask(
           ...run.inventory,
           whole_store: passTargets[index]!.wholeStore ? 1 : 0,
           queued_items: passTargets[index]!.store.queuedEmbeddingItemIds().length,
+          queued_first_items: run.queued_first_items,
           items_attempted: run.itemsAttempted, chunks_embedded: run.chunksEmbedded,
           items_failed: run.itemsFailed, skipped_out_of_scope_items: run.itemsOutOfScope,
           skipped_lease_busy_items: run.busy ? run.itemsAttempted : 0,

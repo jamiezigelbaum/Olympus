@@ -32193,24 +32193,6 @@ ${parentKey(ref)}`, { ref, origin });
   }
   async embeddingSweepInventory(provider, scope = {}, stopAtMs, windowChunks = MISSING_EMBEDDING_CHUNK_WINDOW) {
     const started = Date.now();
-    const tier = await this.tierHiddenItemPksInTurns();
-    const hidden = await pkSetInTurns([tier.hidden]);
-    const held = await pkSetInTurns([tier.held]);
-    const heldForJudgment = this.canEmbedHeld(provider) ? await pkSetInTurns([tier.heldForJudgment]) : new Set;
-    const namesOnly = await pkSetInTurns([tier.metadataLayer]);
-    const moving = new Set;
-    let walked = 0;
-    const visibility = this.tierLedgerHiddenMemo;
-    for (const member of visibility?.members.values() ?? []) {
-      if (member.flags.moving)
-        for (const pk of member.pks)
-          moving.add(pk);
-      if (++walked % 2000 === 0)
-        await ingestionTurn();
-    }
-    const tiers = connectorStoreEmbeddableRowTiers(this.trustDomain, provider);
-    const account = normalizeOptionalAccountScope(scope.accountScope);
-    const scoped = connectorStoreFilterSql(scope.filters);
     const counts = {
       pending_chunks: 0,
       eligible_chunks: 0,
@@ -32230,6 +32212,26 @@ ${parentKey(ref)}`, { ref, origin });
       counts[`${reason}_chunks`] = 0;
       counts[`${reason}_items`] = 0;
     }
+    if (stopAtMs !== undefined && started >= stopAtMs)
+      return { ...counts, inventory_ms: 0 };
+    const tier = await this.tierHiddenItemPksInTurns();
+    const hidden = await pkSetInTurns([tier.hidden]);
+    const held = await pkSetInTurns([tier.held]);
+    const heldForJudgment = this.canEmbedHeld(provider) ? await pkSetInTurns([tier.heldForJudgment]) : new Set;
+    const namesOnly = await pkSetInTurns([tier.metadataLayer]);
+    const moving = new Set;
+    let walked = 0;
+    const visibility = this.tierLedgerHiddenMemo;
+    for (const member of visibility?.members.values() ?? []) {
+      if (member.flags.moving)
+        for (const pk of member.pks)
+          moving.add(pk);
+      if (++walked % 2000 === 0)
+        await ingestionTurn();
+    }
+    const tiers = connectorStoreEmbeddableRowTiers(this.trustDomain, provider);
+    const account = normalizeOptionalAccountScope(scope.accountScope);
+    const scoped = connectorStoreFilterSql(scope.filters);
     const read = this.embeddingSweepRead(offThreadReadsSupported(this.dbPath));
     if (visibility && held.size)
       await this.countEmbeddingHolds(visibility, counts, read, stopAtMs);
@@ -32729,6 +32731,7 @@ ${parentKey(ref)}`, { ref, origin });
       const now = nowIso();
       let nextJournalSha256;
       let written = 0;
+      const writtenItemPks = options.onBatchWritten ? [] : undefined;
       this.db.transaction(() => {
         this.assertEmbeddingWriteAuthority(provider, providerEpoch);
         const stillEligible = new Set(this.embeddingBatchRecheck(batch, embeddableTiers, provider).kept);
@@ -32761,6 +32764,7 @@ ${parentKey(ref)}`, { ref, origin });
           if (write.changes > 0) {
             writeVectorDigest(this.db, row.chunk_pk, provider.modelId, row.item_pk, embedding);
             written += 1;
+            writtenItemPks?.push(row.item_pk);
             this.scheduleVectorDigestBackfill(provider.modelId);
             const judgment = judgedBatch?.get(row.chunk_pk);
             if (judgment && row.media_sha256 && !judgedThisPass.has(row.media_sha256)) {
@@ -32794,6 +32798,8 @@ ${parentKey(ref)}`, { ref, origin });
       })();
       if (nextJournalSha256)
         activeJournalSha256 = nextJournalSha256;
+      if (writtenItemPks?.length)
+        options.onBatchWritten?.(writtenItemPks);
       embedded += written;
       staleSkipped += batch.length - written;
     }

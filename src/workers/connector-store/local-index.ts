@@ -2041,6 +2041,8 @@ export interface ConnectorStoreEmbedOptions {
    * pass the same way (the owner's Ask is running). Not with a journal.
    */
   shouldStop?: () => boolean;
+  /** Sweep accounting for distinct items with a committed vector, including partial batches. */
+  onBatchWritten?: (itemPks: readonly number[]) => void;
   /** Durable idempotency key for a maintenance page's embedding phase. */
   journalId?: string;
   /** Monotonic owner generation used to fence a superseded maintenance run. */
@@ -2149,6 +2151,7 @@ export interface ConnectorStoreEmbeddingTarget {
 export interface ConnectorStoreEmbedStoreRun {
   corpusId: string;
   itemsAttempted: number;
+  queued_first_items: number;
   chunksEmbedded: number;
   /** Items skipped this pass because their embedding failed for a reason no retry fixes. */
   itemsFailed: number;
@@ -2160,7 +2163,7 @@ export interface ConnectorStoreEmbedStoreRun {
   busy?: boolean;
   /** The pass reached its time budget with chunks still owed; they wait for the next pass. */
   stoppedAtDeadline?: boolean;
-  /** Counts-only pre-pass inventory; omitted outside scheduler diagnostics. */
+  /** Counts-only inventory taken before missing-vector discovery; omitted outside scheduler diagnostics. */
   inventory?: Record<string, number>;
 }
 
@@ -2188,7 +2191,11 @@ export async function embedPendingChunks(
   // stopAtMs: no batch starts after it (the first always runs). Items count
   // badly as work: one long file can hold more chunks than a pass has time for.
   // shouldStop: polled with stopAtMs, and before the first batch too (the owner's Ask).
-  options: { maxItems: number; stopAtMs?: number; diagnostics?: boolean; shouldStop?: () => boolean },
+  options: {
+    maxItems: number; stopAtMs?: number; diagnostics?: boolean; shouldStop?: () => boolean;
+    /** Lets a scheduler that reaches its hard deadline report already committed queue work. */
+    onQueuedFirstItems?: (count: number) => void;
+  },
 ): Promise<ConnectorStoreEmbedStoreRun[]> {
   const runs: ConnectorStoreEmbedStoreRun[] = [];
   for (const target of targets) {
@@ -2196,13 +2203,12 @@ export async function embedPendingChunks(
     const run: ConnectorStoreEmbedStoreRun = {
       corpusId: store.corpusId,
       itemsAttempted: 0,
+      queued_first_items: 0,
       chunksEmbedded: 0,
       itemsFailed: 0,
       itemsOutOfScope: 0,
     };
     runs.push(run);
-    const inventoryWrites = options.diagnostics && target.wholeStore === true ? store.writeSequence() : undefined;
-    if (options.diagnostics) run.inventory = await store.embeddingSweepInventory(target.provider, target, options.stopAtMs);
     const groups = store.queuedEmbeddingGroups(options.maxItems).filter((group) => {
       // A store that catches up never replays a queue left under another
       // identity (the owner changed the tier's model): its items are missing
@@ -2211,24 +2217,19 @@ export async function embedPendingChunks(
       store.completeQueuedEmbedding(group.localItemIds);
       return false;
     });
-    const queued = groups.reduce((sum, group) => sum + group.localItemIds.length, 0);
-    // The inventory tests vector currency over a superset of the work list.
-    // A complete zero-pending inventory can stand in for the list's walk
-    // when every window saw the same store. Partial inventories and any
-    // missing vectors still use the work list's own selection and ordering.
-    const noMissingVectors = run.inventory?.inventory_complete === 1 && run.inventory.pending_chunks === 0
-      && inventoryWrites !== undefined && store.writeSequence() === inventoryWrites && !store.fileReplacedOrRemoved();
-    if (target.wholeStore === true && queued < options.maxItems && !noMissingVectors) {
-      const queuedIds = new Set(groups.flatMap((group) => group.localItemIds));
-      const missing = (await store.missingEmbeddingItemIdsInTurns(target.provider, options.maxItems - queued, target))
-        .filter((localItemId) => !queuedIds.has(localItemId));
-      if (missing.length > 0) groups.push({ provider: target.provider, localItemIds: missing });
-    }
+    const queuedIds = new Set(groups.flatMap((group) => group.localItemIds));
+    const writtenItems = new Set<number>();
+    const recordQueuedBatch = (itemPks: readonly number[]) => {
+      for (const pk of itemPks) writtenItems.add(pk);
+      run.queued_first_items = writtenItems.size;
+      options.onQueuedFirstItems?.(writtenItems.size);
+    };
     let answered = false;
-    for (const group of groups) {
-      if ((answered && options.stopAtMs !== undefined && Date.now() >= options.stopAtMs) || options.shouldStop?.() === true) {
+    const budgetSpent = () => options.stopAtMs !== undefined && Date.now() >= options.stopAtMs;
+    const dispatch = async (group: (typeof groups)[number], onBatchWritten?: ConnectorStoreEmbedOptions['onBatchWritten']) => {
+      if ((answered && budgetSpent()) || options.shouldStop?.() === true) {
         run.stoppedAtDeadline = true;
-        break;
+        return;
       }
       try {
         group.provider.assertBindingCurrent?.();
@@ -2236,10 +2237,11 @@ export async function embedPendingChunks(
       } catch {
         store.completeQueuedEmbedding(group.localItemIds);
         run.itemsOutOfScope += group.localItemIds.length;
-        continue;
+        return;
       }
       const outcome = await embedItemsIsolated(store, group.provider, group.localItemIds, {
         ...target,
+        ...(onBatchWritten ? { onBatchWritten } : {}),
         ...(options.stopAtMs !== undefined ? { stopAtMs: options.stopAtMs } : {}),
         ...(options.shouldStop ? { shouldStop: options.shouldStop } : {}),
       });
@@ -2248,16 +2250,33 @@ export async function embedPendingChunks(
       run.itemsFailed += outcome.itemsFailed;
       if (outcome.busy) {
         run.busy = true;
-        break;
+        return;
       }
       if (outcome.deferredReason) {
         run.deferredReason = outcome.deferredReason;
-        break;
+        return;
       }
       answered = true;
-      if (outcome.stoppedAtDeadline) {
+      if (outcome.stoppedAtDeadline) run.stoppedAtDeadline = true;
+    };
+    for (const group of groups) {
+      await dispatch(group, recordQueuedBatch);
+      if (run.busy || run.deferredReason || run.stoppedAtDeadline) break;
+    }
+
+    const inventoryWrites = options.diagnostics && target.wholeStore === true ? store.writeSequence() : undefined;
+    if (options.diagnostics) run.inventory = await store.embeddingSweepInventory(target.provider, target, options.stopAtMs);
+    // A stable, complete zero-pending inventory replaces the work-list walk.
+    const noMissingVectors = run.inventory?.inventory_complete === 1 && run.inventory.pending_chunks === 0
+      && inventoryWrites !== undefined && store.writeSequence() === inventoryWrites && !store.fileReplacedOrRemoved();
+    if (target.wholeStore && queuedIds.size < options.maxItems && !noMissingVectors
+      && !run.busy && !run.deferredReason && !run.stoppedAtDeadline) {
+      if (budgetSpent()) {
         run.stoppedAtDeadline = true;
-        break;
+      } else {
+        const missing = (await store.missingEmbeddingItemIdsInTurns(target.provider, options.maxItems - queuedIds.size, target))
+          .filter((id) => !queuedIds.has(id));
+        if (missing.length) await dispatch({ provider: target.provider, localItemIds: missing });
       }
     }
     if (run.deferredReason) store.setEmbeddingDeferral(run.deferredReason);
@@ -2279,11 +2298,12 @@ async function embedItemsIsolated(
   store: LocalConnectorStore,
   provider: SourceEmbeddingProvider,
   localItemIds: readonly string[],
-  scope: Pick<ConnectorStoreEmbedOptions, 'accountScope' | 'filters' | 'assertAuthorized' | 'stopAtMs' | 'shouldStop'> = {},
+  scope: Pick<ConnectorStoreEmbedOptions, 'accountScope' | 'filters' | 'assertAuthorized' | 'stopAtMs' | 'shouldStop' | 'onBatchWritten'> = {},
 ): Promise<{ chunksEmbedded: number; itemsFailed: number; deferredReason?: string; busy?: boolean; stoppedAtDeadline?: boolean }> {
   try {
     const embed = await store.embedChunks({
       provider, localItemIds: [...localItemIds],
+      ...(scope.onBatchWritten ? { onBatchWritten: scope.onBatchWritten } : {}),
       ...(scope.accountScope ? { accountScope: scope.accountScope } : {}),
       ...(scope.filters ? { filters: scope.filters } : {}),
       ...(scope.assertAuthorized ? { assertAuthorized: scope.assertAuthorized } : {}),
@@ -13533,6 +13553,20 @@ export class LocalConnectorStore {
     windowChunks = MISSING_EMBEDDING_CHUNK_WINDOW,
   ): Promise<Record<string, number>> {
     const started = Date.now();
+    const counts: Record<string, number> = {
+      pending_chunks: 0, eligible_chunks: 0, skipped_held_chunks: 0,
+      skipped_moving_chunks: 0, skipped_hidden_chunks: 0, skipped_metadata_chunks: 0,
+      skipped_failed_chunks: 0, skipped_out_of_scope_chunks: 0,
+      // Of the held and out-of-scope chunks, those whose item was indexed in the
+      // last three days: new items that are not becoming searchable show here.
+      skipped_held_recent_chunks: 0, skipped_out_of_scope_recent_chunks: 0,
+      skipped_private_tier_chunks: 0, skipped_retired_chunks: 0, inventory_complete: 0,
+    };
+    for (const reason of EMBEDDING_HOLD_REASONS) {
+      counts[`${reason}_chunks`] = 0;
+      counts[`${reason}_items`] = 0;
+    }
+    if (stopAtMs !== undefined && started >= stopAtMs) return { ...counts, inventory_ms: 0 };
     const tier = await this.tierHiddenItemPksInTurns();
     const hidden = await pkSetInTurns([tier.hidden]);
     const held = await pkSetInTurns([tier.held]);
@@ -13548,19 +13582,6 @@ export class LocalConnectorStore {
     const tiers = connectorStoreEmbeddableRowTiers(this.trustDomain, provider);
     const account = normalizeOptionalAccountScope(scope.accountScope);
     const scoped = connectorStoreFilterSql(scope.filters);
-    const counts: Record<string, number> = {
-      pending_chunks: 0, eligible_chunks: 0, skipped_held_chunks: 0,
-      skipped_moving_chunks: 0, skipped_hidden_chunks: 0, skipped_metadata_chunks: 0,
-      skipped_failed_chunks: 0, skipped_out_of_scope_chunks: 0,
-      // Of the held and out-of-scope chunks, those whose item was indexed in the
-      // last three days: new items that are not becoming searchable show here.
-      skipped_held_recent_chunks: 0, skipped_out_of_scope_recent_chunks: 0,
-      skipped_private_tier_chunks: 0, skipped_retired_chunks: 0, inventory_complete: 0,
-    };
-    for (const reason of EMBEDDING_HOLD_REASONS) {
-      counts[`${reason}_chunks`] = 0;
-      counts[`${reason}_items`] = 0;
-    }
     const read = this.embeddingSweepRead(offThreadReadsSupported(this.dbPath));
     if (visibility && held.size) await this.countEmbeddingHolds(visibility, counts, read, stopAtMs);
     // Only chunks that owe a vector come back: the rest count for nothing.
@@ -14360,6 +14381,7 @@ export class LocalConnectorStore {
       const now = nowIso();
       let nextJournalSha256: string | undefined;
       let written = 0;
+      const writtenItemPks: number[] | undefined = options.onBatchWritten ? [] : undefined;
       this.db.transaction(() => {
         this.assertEmbeddingWriteAuthority(provider, providerEpoch);
         const stillEligible = new Set(this.embeddingBatchRecheck(batch, embeddableTiers, provider).kept);
@@ -14408,6 +14430,7 @@ export class LocalConnectorStore {
           if (write.changes > 0) {
             writeVectorDigest(this.db, row.chunk_pk, provider.modelId, row.item_pk, embedding);
             written += 1;
+            writtenItemPks?.push(row.item_pk);
             this.scheduleVectorDigestBackfill(provider.modelId);
             const judgment = judgedBatch?.get(row.chunk_pk);
             // Unjudged: nothing for the tier set to change unless it replaces
@@ -14458,6 +14481,7 @@ export class LocalConnectorStore {
         }, now);
       })();
       if (nextJournalSha256) activeJournalSha256 = nextJournalSha256;
+      if (writtenItemPks?.length) options.onBatchWritten?.(writtenItemPks);
       embedded += written;
       staleSkipped += batch.length - written;
     }
