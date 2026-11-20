@@ -1,7 +1,7 @@
 // Upgrade repair: ledger identities are the work list, never scans of item rows.
 import { copyServingLayer, trustDomainRank, tierLedgerIdentityKey, type TierLedgerIdentity } from '../classification/tier-ledger.ts';
 import { resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
-import { promoteLowerTierContent, resumeVerifiedTierMove, type TierMoveOptions } from './tier-move.ts';
+import { promoteLowerTierContent, resumeVerifiedTierMove, settleDiscardedTierMoveImports, TIER_MOVE_IMPORTS_PREFIX, type TierMoveOptions } from './tier-move.ts';
 import type { LocalConnectorStore } from './local-index.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
 
@@ -10,6 +10,7 @@ const DONE = 'lower-content-purge-done-v2';
 const FAILED = 'lower-content-purge-failed-v2';
 const VERIFIED = 'tier-move-verified:';
 const RECEIPT_CURSOR = 'lower-content-purge-receipt-cursor-v2';
+const IMPORT_CURSOR = 'lower-content-purge-import-cursor';
 export const LOWER_CONTENT_PURGE_BATCH = 200;
 
 /** One bounded startup/maintenance page. Completed upgrades persistently idle. */
@@ -27,25 +28,31 @@ export function purgeLowerTierContent(set: TieredStoreSet, options: {
   const note = options.embeddingLedger ?? { path: resolveEmbeddingLedgerPath(), approvedBy: 'system-automatic' as const };
   // Interrupted NEW moves are obligations even after the historical sweep is done.
   const resumed = new Set<string>();
-  // Reserve half the page for historical repair, and rotate failures instead
-  // of letting the first unavailable destinations starve every later receipt.
+  // Rotate each bounded page so a failed destination cannot starve later receipts.
   const receiptBudget = Math.max(1, Math.floor(limit / 2));
-  const receiptAfter = set.ledger.readMeta(RECEIPT_CURSOR) || undefined;
-  let receipts = set.ledger.metaEntries(VERIFIED, { ...(receiptAfter ? { after: receiptAfter } : {}), limit: receiptBudget });
-  if (!receipts.length && receiptAfter) receipts = set.ledger.metaEntries(VERIFIED, { limit: receiptBudget });
-  for (const { key } of receipts) {
-    const [provider, accountScope, conversation, providerItemId] = key.slice(VERIFIED.length).split('\0');
-    if (!provider || !accountScope || !providerItemId) continue;
-    const identity = { provider, accountScope, providerItemId, ...(conversation ? { providerConversationId: conversation } : {}) };
-    report.checked++;
-    try {
-      if (resumeVerifiedTierMove(set, identity, note)) report.resumed++;
-      resumed.add(tierLedgerIdentityKey(identity));
-    } catch { report.failed++; }
-  }
-  set.ledger.writeSettleProgress(RECEIPT_CURSOR, receipts.at(-1)?.key ?? '');
-  const receiptsComplete = receipts.length < receiptBudget;
-  if (options.maintenance && set.ledger.readMeta(DONE) === '1') return { ...report, complete: receiptsComplete };
+  const resumePage = (prefix: string, cursor: string, work: (identity: TierLedgerIdentity) => boolean): boolean => {
+    const pageLimit = Math.min(receiptBudget, limit - report.checked);
+    if (pageLimit === 0) return false;
+    const after = set.ledger.readMeta(cursor) || undefined;
+    let receipts = set.ledger.metaEntries(prefix, { ...(after ? { after } : {}), limit: pageLimit });
+    if (!receipts.length && after) receipts = set.ledger.metaEntries(prefix, { limit: pageLimit });
+    for (const { key } of receipts) {
+      const [provider, accountScope, conversation, providerItemId] = key.slice(prefix.length).split('\0');
+      if (!provider || !accountScope || !providerItemId) continue;
+      const identity = { provider, accountScope, providerItemId, ...(conversation ? { providerConversationId: conversation } : {}) };
+      if (resumed.has(tierLedgerIdentityKey(identity))) continue;
+      report.checked++;
+      try {
+        if (work(identity)) report.resumed++;
+        resumed.add(tierLedgerIdentityKey(identity));
+      } catch { report.failed++; }
+    }
+    set.ledger.writeSettleProgress(cursor, receipts.at(-1)?.key ?? '');
+    return receipts.length < pageLimit;
+  };
+  const receiptsComplete = resumePage(VERIFIED, RECEIPT_CURSOR, identity => resumeVerifiedTierMove(set, identity, note));
+  const importsComplete = resumePage(TIER_MOVE_IMPORTS_PREFIX, IMPORT_CURSOR, identity => settleDiscardedTierMoveImports(set, identity));
+  if (options.maintenance && set.ledger.readMeta(DONE) === '1') return { ...report, complete: receiptsComplete && importsComplete };
   const raw = set.ledger.readMeta(CURSOR);
   const after = raw ? JSON.parse(raw) as TierLedgerIdentity : undefined;
   const stores = (['public_safe', 'internal'] as const).flatMap(domain => {
@@ -168,7 +175,7 @@ export function purgeLowerTierContent(set: TieredStoreSet, options: {
     }));
     if (finished) {
       const historyComplete = set.ledger.readMeta(FAILED) !== '1';
-      report.complete = historyComplete && receiptsComplete;
+      report.complete = historyComplete && receiptsComplete && importsComplete;
       set.ledger.writeSettleProgress(DONE, historyComplete ? '1' : '');
       set.ledger.writeSettleProgress(FAILED, '');
     }

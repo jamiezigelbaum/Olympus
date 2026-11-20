@@ -1,0 +1,181 @@
+import { createHash } from 'node:crypto';
+import { resolve } from 'node:path';
+import { withOwnerConfigLease } from '../../core/owner-config-read.ts';
+import { registeredInstalledTierClassification } from '../classification/installed-tier-classification-registry.ts';
+import { ownerRuleMatches, tierRank, type OwnerTierRule, type TierKey } from '../classification/tier-classifier.ts';
+import { copyServingLayer, labelSweepMetaKey, tierLedgerIdentityOfRecord, tierMoveOverrideConflict, trustDomainRank, type TierCopyPlan, type TierLedgerRecord } from '../classification/tier-ledger.ts';
+import { readDecisionRules, OLYMPUS_TIER_RULES_ENV, resolveTierRulesPath, tierRulesFileStamp } from '../classification/tier-rules.ts';
+import { storedSignals } from './stored-names.ts';
+import type { TieredStoreSet } from './tiered-store-set.ts';
+
+export interface TierRulePolicy {
+  revision: string;
+  rules: readonly OwnerTierRule[];
+  retirePublic: boolean;
+  unavailable: boolean;
+}
+
+interface PolicyFence {
+  rulesPath?: string;
+  policy?: TierRulePolicy;
+}
+
+const heldPolicyFences = new WeakMap<TieredStoreSet, PolicyFence>();
+
+/** Keep the active rule files stable until the caller's outer transaction commits. */
+export function withTierRuleFence<T>(set: TieredStoreSet, work: () => T): T {
+  if (heldPolicyFences.has(set)) return work();
+  const rulesPath = set.ownerRulesPath ?? registeredInstalledTierClassification()?.ownerTierRulesPath
+    ?? (process.env[OLYMPUS_TIER_RULES_ENV] ? resolveTierRulesPath() : undefined);
+  const paths = [...new Set([rulesPath, set.ownerRuleSource?.path].filter((path): path is string => !!path).map((path) => resolve(path)))].sort();
+  const take = (index: number): T => {
+    const path = paths[index];
+    if (path) return withOwnerConfigLease(path, 'shared', () => take(index + 1));
+    heldPolicyFences.set(set, rulesPath ? { rulesPath } : {});
+    try {
+      return work();
+    } finally {
+      heldPolicyFences.delete(set);
+    }
+  };
+  return take(0);
+}
+
+/** The active policy snapshot for a synchronous fenced operation. */
+export function currentTierRulePolicy(set: TieredStoreSet): TierRulePolicy {
+  const fence = heldPolicyFences.get(set);
+  if (!fence) throw new Error('Tier rule policy requires the rule fence.');
+  if (fence.policy) return fence.policy;
+  const source = set.ownerRuleSource?.read();
+  const classification = set.classification(source);
+  const stamp = fence.rulesPath ? tierRulesFileStamp({ path: fence.rulesPath }) : '';
+  const direct = fence.rulesPath && fence.rulesPath !== registeredInstalledTierClassification()?.ownerTierRulesPath
+    ? readDecisionRules(fence.rulesPath) : undefined;
+  const unavailable = !!(classification?.unavailableReason || source?.unavailable || direct?.unavailable);
+  const keyedRules = new Map<string, OwnerTierRule>();
+  for (const rule of [...(classification?.rules ?? []), ...(direct?.rules ?? [])]) keyedRules.set(ruleKey(rule), rule);
+  const keys = [...keyedRules.keys()].sort();
+  const rules = keys.map((key) => keyedRules.get(key)!);
+  const retirePublic = classification?.retirePublic === true;
+  const revision = digest([stamp, source?.revision, keys]);
+  fence.policy = { revision, rules, retirePublic, unavailable };
+  return fence.policy;
+}
+
+/** Current authority for each layer being lowered, including its actual trust domain. */
+export function tierMoveRuleAuthorization(
+  set: TieredStoreSet,
+  record: TierLedgerRecord,
+  target: { metadataTier: TierKey; contentTier: TierKey },
+  sources: readonly Pick<TierCopyPlan, 'trustDomain' | 'layers'>[],
+  destination: readonly Pick<TierCopyPlan, 'trustDomain' | 'layers'>[],
+): string | undefined {
+  const policy = currentTierRulePolicy(set);
+  const identity = tierLedgerIdentityOfRecord(record);
+  const override = set.ledger.getOverride(identity);
+  if (tierMoveOverrideConflict(override, record, target, sources, destination)) return undefined;
+  let ceiling = Number.POSITIVE_INFINITY;
+  for (const layer of ['metadata', 'content'] as const) {
+    const from = copyServingLayer(sources, layer);
+    const to = copyServingLayer(destination, layer);
+    const fromTier = layer === 'metadata' ? record.metadataTier : record.contentTier;
+    const toTier = layer === 'metadata' ? target.metadataTier : target.contentTier;
+    if (to && (tierRank(toTier) < tierRank(fromTier)
+      || (from ? trustDomainRank(to.trustDomain) < trustDomainRank(from.trustDomain) : trustDomainRank(to.trustDomain) < tierRank('secure')))) {
+      ceiling = Math.min(ceiling, tierRank(toTier), trustDomainRank(to.trustDomain));
+    }
+  }
+  if (!Number.isFinite(ceiling)) return policy.revision;
+  if (policy.unavailable || (policy.retirePublic && ceiling < tierRank('private'))) return undefined;
+  const rules = policy.rules.filter((rule) => tierRank(rule.tier) > ceiling
+    && (rule.source === undefined || rule.source === record.provider)
+    && (override?.kind !== 'tier' || rule.tier === 'secrets'));
+  if (rules.length === 0) return policy.revision;
+  const storedRules = rules.filter((rule) => rule.match.kind !== 'label');
+  if (storedRules.length > 0) {
+    const copies = set.ledger.copies(identity);
+    const source = copyServingLayer(copies.filter((copy) => copy.state === 'current'), 'metadata')
+      ?? (record.state === 'moving' ? copyServingLayer(copies.filter((copy) => copy.state === 'superseded'
+        && copy.supersededByGeneration === record.generation + 1), 'metadata') : undefined);
+    const names = source && set.store(source.trustDomain)?.exportItemNames(identity);
+    if (!names) return undefined;
+    const signals = storedSignals(names);
+    if (storedRules.some((rule) => ownerRuleMatches(rule, signals, record.provider))) return undefined;
+  }
+  const labelRules = rules.filter((rule) => rule.match.kind === 'label');
+  if (labelRules.length > 0) {
+    const { provider, accountScope, providerItemId } = identity;
+    const progress = readLabelState(set.ledger.readMeta(labelSweepMetaKey(provider, accountScope)));
+    if (!labelSweepHasPolicy(progress, policy, provider, accountScope)) return undefined;
+    const itemKey = labelEvidenceItemKey(providerItemId);
+    for (const rule of labelRules) {
+      const key = ruleKey(rule);
+      const walkId = progress.completed?.[key];
+      if (!walkId || !progress.done.includes(key) || progress.walks?.[key]
+        || set.ledger.labelRuleMatched(provider, accountScope, key, walkId, itemKey)) return undefined;
+    }
+  }
+  return policy.revision;
+}
+
+export interface LabelSweepState {
+  /** The effective policy read before requesting the provider's first page. */
+  revision?: string;
+  provider?: string;
+  accountScope?: string;
+  done: string[];
+  /** Per-rule walk IDs whose positive item evidence is complete. */
+  completed?: Record<string, string>;
+  walks?: Record<string, { id: string; pageToken?: string; deferred?: boolean }>;
+  order?: string[];
+}
+
+export function labelSweepHasPolicy(state: LabelSweepState, policy: TierRulePolicy, provider: string, accountScope: string): boolean {
+  return state.revision === policy.revision && state.provider === provider && state.accountScope === accountScope;
+}
+
+export function readLabelState(raw: string | undefined): LabelSweepState {
+  if (!raw) return { done: [] };
+  try {
+    const parsed = JSON.parse(raw) as Partial<LabelSweepState>;
+    const walks: NonNullable<LabelSweepState['walks']> = {};
+    for (const [key, walk] of Object.entries(parsed.walks ?? {})) {
+      if (walk && isWalkId(walk.id)) {
+        walks[key] = {
+          id: walk.id,
+          ...(typeof walk.pageToken === 'string' && walk.pageToken ? { pageToken: walk.pageToken } : {}),
+          ...(walk.deferred === true ? { deferred: true } : {}),
+        };
+      }
+    }
+    const completed = Object.fromEntries(Object.entries(parsed.completed ?? {}).filter(([, id]) => isWalkId(id)));
+    const strings = (value: unknown) => Array.isArray(value) ? value.filter((key): key is string => typeof key === 'string') : [];
+    return {
+      ...(typeof parsed.revision === 'string' ? { revision: parsed.revision } : {}),
+      ...(typeof parsed.provider === 'string' ? { provider: parsed.provider } : {}),
+      ...(typeof parsed.accountScope === 'string' ? { accountScope: parsed.accountScope } : {}),
+      done: strings(parsed.done),
+      completed,
+      walks,
+      order: strings(parsed.order),
+    };
+  } catch {
+    return { done: [] };
+  }
+}
+
+function isWalkId(value: unknown): value is string {
+  return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
+}
+
+export function ruleKey(rule: OwnerTierRule): string {
+  return digest([rule.id, rule.source ?? '', rule.match.kind, rule.match.value, rule.tier, rule.strength]).slice(0, 24);
+}
+
+export function labelEvidenceItemKey(providerItemId: string): string {
+  return digest(providerItemId);
+}
+
+function digest(value: unknown): string {
+  return createHash('sha256').update(JSON.stringify(value)).digest('hex');
+}

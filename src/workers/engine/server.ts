@@ -412,6 +412,7 @@ import {
   scopeBoundEmbeddingProvider,
   scopeBoundSchedulerSource,
   gmailConnectorScopeFromApproval,
+  mailScopeTierOwnerRuleSource,
   type SourceScopePolicyRef,
 } from '../source-scope-runtime.ts';
 import {
@@ -1060,6 +1061,7 @@ export async function main(): Promise<void> {
         mailPinnedHandle: () => process.env.OLYMPUS_SOURCE_INDEX_GMAIL_CREDENTIAL_HANDLE,
       })
     : undefined;
+  const gmailTierOwnerRuleSource = fileSourceScopeAuthority ? mailScopeTierOwnerRuleSource(fileSourceScopeAuthority) : undefined;
   const dropboxHandle = selectedSourceCredentialHandle({
     env: process.env,
     pinEnvName: 'OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_CREDENTIAL_HANDLE',
@@ -1880,7 +1882,7 @@ export async function main(): Promise<void> {
               secureStore: gmailSecureConnectorStore,
               ...(gmailTierLane?.publicStore ? { publicLeg: gmailTierLane.publicStore } : {}),
               ...(gmailTierLane?.secrets ? { secretLocations: gmailTierLane.secrets } : {}),
-              tierClassification: { ...(ownerRules.length > 0 ? { rules: [...ownerRules] } : {}) },
+              ...(gmailTierOwnerRuleSource ? { ownerRuleSource: gmailTierOwnerRuleSource } : { tierClassification: { rules: ownerRules } }),
               ...(internalEmbedder ? { internalEmbeddingProvider: internalEmbedder } : {}),
               ...(secureEmbedder ? { secureEmbeddingProvider: secureEmbedder } : {}),
               contentArrivesLaterFor: gmailContentArrivesLater,
@@ -3385,6 +3387,7 @@ export async function main(): Promise<void> {
         setId: GMAIL_SOURCE_ID,
         internalStore: gmailInternalConnectorStore,
         secureStore: gmailSecureConnectorStore,
+        ...(gmailTierOwnerRuleSource ? { ownerRuleSource: gmailTierOwnerRuleSource } : {}),
         ...(gmailTierLane?.publicStore ? { publicLeg: gmailTierLane.publicStore } : {}),
         ...(gmailTierLane?.secrets ? { secretLocations: gmailTierLane.secrets } : {}),
         contentArrivesLaterFor: gmailContentArrivesLater,
@@ -3536,6 +3539,7 @@ export async function main(): Promise<void> {
       secureStore: gmailSecureConnectorStore,
       requestBudget: gmailRequestBudget,
       scope: gmailConnectorScopeFromApproval(approval),
+      ...(gmailTierOwnerRuleSource ? { ownerRuleSource: gmailTierOwnerRuleSource } : {}),
       scopeApproval: { generation: scopeRef.accountGeneration, revision: scopeRef.revision },
       confirmationRegistryPath: connectedHandleRegistryPath ?? fileSourceScopeAuthority.registryPath,
       assertScopeCurrent: () => {

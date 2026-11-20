@@ -93,6 +93,11 @@ export type OwnerConfigRead =
   | { status: 'ok'; text: string; stamp: string }
   | { status: 'refused'; reason: 'unsafe_permissions' | 'torn_read' | 'unreadable'; stamp: string };
 
+/** Order policy decisions with managed owner-config writes to the same path. */
+export function withOwnerConfigLease<T>(path: string, mode: 'shared' | 'exclusive', work: () => T): T {
+  return withFileLeaseSync(path, lease => lease.commit(work), { mode });
+}
+
 export function ownerConfigStamp(path: string): string {
   try {
     return stampOf(statSync(path));

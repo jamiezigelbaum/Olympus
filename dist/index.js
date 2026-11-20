@@ -16651,7 +16651,6 @@ var init_sniffer_store = __esm(() => {
   init_tier_classifier();
   init_tier_ledger_path();
 });
-
 // src/workers/classification/tier-ledger.ts
 var RELABEL_UNREAD_WHERE = `content_read = 0 AND instr(reasons_json, ':fail_safe:missing_question"') > 0
           AND EXISTS (SELECT 1 FROM json_each(reasons_json) r WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question')`, RELABEL_UNREAD_CANDIDATES_SQL, CORPUS_VISIBILITY_FLAGS_SQL = `c.provider, c.account_scope, c.conversation_key, c.provider_item_id,
@@ -17272,6 +17271,7 @@ var init_remote_access_recheck = __esm(() => {
   init_remote_result();
   readAuthorization = new AsyncLocalStorage11;
 });
+
 // src/workers/connector-store/tier-placement.ts
 var init_tier_placement = __esm(() => {
   init_types();
@@ -17606,6 +17606,25 @@ var init_embedding_ledger = __esm(() => {
   ];
 });
 
+// src/workers/classification/tier-rules.ts
+var init_tier_rules = __esm(() => {
+  init_atomic_file();
+  init_operation_error();
+  init_owner_config_read();
+  init_tier_classifier();
+});
+
+// src/workers/connector-store/tier-move-rule-policy.ts
+var heldPolicyFences;
+var init_tier_move_rule_policy = __esm(() => {
+  init_owner_config_read();
+  init_tier_classifier();
+  init_tier_ledger();
+  init_tier_rules();
+  init_stored_names();
+  heldPolicyFences = new WeakMap;
+});
+
 // src/workers/connector-store/tier-move.ts
 var init_tier_move = __esm(() => {
   init_engine();
@@ -17616,6 +17635,7 @@ var init_tier_move = __esm(() => {
   init_secrets_disposition();
   init_job_names();
   init_tier_placement();
+  init_tier_move_rule_policy();
 });
 
 // src/workers/answer-activity.ts
@@ -18009,10 +18029,12 @@ var init_tier_override_settle = __esm(() => {
 // src/workers/connector-store/tier-rules-sweep.ts
 var init_tier_rules_sweep = __esm(() => {
   init_tier_classifier();
+  init_tier_ledger();
   init_stored_names();
   init_tier_override_settle();
   init_tier_rejudge();
   init_loop_pass();
+  init_tier_move_rule_policy();
 });
 
 // src/workers/connector-store/tier-image-content-sweep.ts
@@ -22081,14 +22103,6 @@ var init_source_forget_registry = __esm(() => {
   init_olympus_layout();
   init_live_control2();
   init_tier_migration_reports();
-});
-
-// src/workers/classification/tier-rules.ts
-var init_tier_rules = __esm(() => {
-  init_atomic_file();
-  init_operation_error();
-  init_owner_config_read();
-  init_tier_classifier();
 });
 
 // src/workers/classification/privacy-profile.ts

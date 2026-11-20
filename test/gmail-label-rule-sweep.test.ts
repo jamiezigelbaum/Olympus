@@ -10,7 +10,8 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
+import { FileLeaseBusyError, withFileLeaseSync } from '../src/core/file-lease.ts';
 import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';
 import { searchToolResult } from '../src/workers/chatgpt/response-builder.ts';
 import {
@@ -18,7 +19,7 @@ import {
   configureInstalledTierClassification,
 } from '../src/workers/classification/installed-tier-classification.ts';
 import { writePrivacyProfile } from '../src/workers/classification/privacy-profile.ts';
-import { classifyItemTiers, type OwnerTierRule, type TierDecision } from '../src/workers/classification/tier-classifier.ts';
+import { classifyItemTiers, contentDigestReason, type OwnerTierRule, type TierDecision, type TierSniffer } from '../src/workers/classification/tier-classifier.ts';
 import { writeOwnerTierRules } from '../src/workers/classification/tier-rules.ts';
 import {
   createConnectorStoreContentProvider,
@@ -27,6 +28,7 @@ import {
   LocalConnectorStore,
 } from '../src/workers/connector-store/index.ts';
 import { sweepOwnerRuleRaises, sweepLabelRuleRaises, LabelPageRejectedError, reopenLabelRuleSweep } from '../src/workers/connector-store/tier-rules-sweep.ts';
+import { moveTieredItem, moveTieredItemsLowering, resumeVerifiedTierMove } from '../src/workers/connector-store/tier-move.ts';
 import { createLaneTieredStoreSet } from '../src/workers/connector-store/tiered-store-set.ts';
 import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
 import type { CredentialBroker } from '../src/workers/credential-broker/index.ts';
@@ -149,7 +151,7 @@ function fakeGmail(messages: GmailMessage[]): FakeGmail {
 const identity = (id: string) => ({ provider: 'gmail', accountScope: ACCOUNT, providerItemId: id });
 const itemIdentity = (id: string) => ({ family: 'email' as const, ...identity(id), localItemId: `${ACCOUNT}:${id}` });
 
-function openLane(client: FakeGmail, options: { ownerRules?: OwnerTierRule[] } = {}) {
+function openLane(client: FakeGmail, options: { ownerRules?: OwnerTierRule[]; sniffer?: TierSniffer } = {}) {
   const internalStore = new LocalConnectorStore({
     dbPath: join(root, 'internal.sqlite'), corpusId: GMAIL_INTERNAL_CONNECTOR_CORPUS_ID, family: 'email', trustDomain: 'internal',
   });
@@ -163,7 +165,7 @@ function openLane(client: FakeGmail, options: { ownerRules?: OwnerTierRule[] } =
     internalStore,
     secureStore,
     // The judge has cleared this mail as Personal: these tests are about the label rule, not judging.
-    tierClassification: { sniffer: JUDGED_PERSONAL_SNIFFER, ...(ownerRules.length > 0 ? { rules: ownerRules } : {}) },
+    tierClassification: { sniffer: options.sniffer ?? JUDGED_PERSONAL_SNIFFER, ...(ownerRules.length > 0 ? { rules: ownerRules } : {}) },
   });
   const handler = createGmailConnectorStoreSyncHandler({
     internalStore,
@@ -219,6 +221,110 @@ async function ingestTwo(client = fakeGmail([
   expect(await olympusSearch(lane, 'apple pruning cellar')).toContain('Pruning the apple trees');
   return { client, lane };
 }
+
+describe('owner rules on a queued Personal verdict', () => {
+  const body = 'Water the orchard on Tuesday.';
+  const held = { sniffer: { id: 'orchard', judge: () => ({ verdict: 'undecided' as const }) } };
+  const id = itemIdentity('orchard');
+  const target = { metadataTier: 'private' as const, contentTier: 'private' as const };
+  const saveSenderRule = () => writeOwnerTierRules([{
+    id: 'orchard-sender', source: 'gmail', match: { kind: 'sender', value: 'alex@example.com' }, tier: 'secure', strength: 'force',
+  }], { env });
+
+  async function queued() {
+    const client = fakeGmail([message(id.providerItemId, { subject: 'Tuesday rota', body, labels: ['INBOX', 'Label_7'] })]);
+    const lane = openLane(client, held);
+    await lane.handler.pull({ max_items: 50 });
+    const verdict = lane.ledger.applySnifferVerdict(id, {
+      pass: 'content', tier: 'private', reason: 'content:sniffer:orchard:personal', modelId: 'orchard',
+    }, { placementFor: decision => lane.tierSet.placementFor(decision) });
+    expect(verdict?.outcome).toBe('queued_move');
+    expect(lane.ledger.getCurrent(id)).toMatchObject({ state: 'moving' });
+    return { lane, client };
+  }
+
+  function checkHeld(lane: Lane) {
+    expect(lane.internalStore.localContent(id.localItemId)?.chunks ?? []).toEqual([]);
+    expect(lane.secureStore.exportItemCopy(id)?.chunks.map(chunk => chunk.boundedText).join('')).toContain(body);
+  }
+
+  for (const kind of ['sender', 'label'] as const) {
+    test(`a saved ${kind} rule is effective before the lowering drain`, async () => {
+      const { lane } = await queued();
+      if (kind === 'sender') saveSenderRule();
+      else saveLabelRule();
+      const results = moveTieredItemsLowering([{ set: lane.tierSet, identity: id, target }]);
+      expect(results[0]).toHaveProperty('error');
+      checkHeld(lane);
+      expect(lane.internalStore.exportItemCopy(id)?.chunks ?? []).toEqual([]);
+    });
+  }
+
+  test('rule writers serialize with destination import and publication', async () => {
+    const { lane } = await queued();
+    const checkWriter = () => expect(() =>
+      withFileLeaseSync(env.OLYMPUS_TIER_RULES_PATH!, () => undefined, { acquireTimeoutMs: 1 })
+    ).toThrow(FileLeaseBusyError);
+    const importCopy = lane.internalStore.importItemCopy.bind(lane.internalStore);
+    const flip = lane.ledger.completeMove.bind(lane.ledger);
+    const imported = spyOn(lane.internalStore, 'importItemCopy').mockImplementation((...args) => {
+      checkWriter();
+      return importCopy(...args);
+    });
+    const flipped = spyOn(lane.ledger, 'completeMove').mockImplementation((...args) => {
+      checkWriter();
+      return flip(...args);
+    });
+    try {
+      expect(moveTieredItemsLowering([{ set: lane.tierSet, identity: id, target }])[0]).toHaveProperty('result');
+      expect(imported).toHaveBeenCalled();
+      expect(flipped).toHaveBeenCalled();
+    } finally {
+      imported.mockRestore();
+      flipped.mockRestore();
+    }
+    saveSenderRule();
+  });
+
+  test('a saved per-item tier takes effect before the override pass queues its placement', async () => {
+    const { lane } = await queued();
+    lane.ledger.setOverride(id, { kind: 'tier', tier: 'secure' });
+    expect(lane.ledger.getCurrent(id)).toMatchObject({ state: 'moving', targetContentTier: 'private' });
+    expect(moveTieredItemsLowering([{ set: lane.tierSet, identity: id, target }])[0]).toHaveProperty('error');
+    checkHeld(lane);
+    expect(lane.internalStore.exportItemCopy(id)?.chunks ?? []).toEqual([]);
+  });
+
+  test('a saved per-item tier retires a staged destination from an earlier verdict', async () => {
+    const { lane } = await queued();
+    await expect(moveTieredItem({
+      set: lane.tierSet, identity: id, target, afterVerified() { throw new Error('checkpoint'); },
+    })).rejects.toThrow('checkpoint');
+    expect(lane.internalStore.exportItemCopy(id)?.chunks.length).toBeGreaterThan(0);
+    lane.ledger.setOverride(id, { kind: 'tier', tier: 'secure' });
+    expect(resumeVerifiedTierMove(lane.tierSet, id)).toBe(false);
+    checkHeld(lane);
+    expect(lane.internalStore.exportItemCopy(id)?.chunks ?? []).toEqual([]);
+  });
+
+  test('a verified lowering rechecks the current rules after reopen', async () => {
+    const { lane, client } = await queued();
+    await expect(moveTieredItem({
+      set: lane.tierSet, identity: id, target, afterVerified() { throw new Error('checkpoint'); },
+    })).rejects.toThrow('checkpoint');
+    expect(lane.internalStore.exportItemCopy(id)?.chunks.map(chunk => chunk.boundedText).join('')).toContain(body);
+    checkHeld(lane);
+    for (const close of closers.splice(0).reverse()) close();
+    lane.ledger.close();
+    clearInstalledTierClassification();
+    saveSenderRule();
+    configureInstalledTierClassification({ env });
+    const reopened = openLane(client, held);
+    await reopened.tierSet.repairLowerContent();
+    checkHeld(reopened);
+    expect(reopened.internalStore.exportItemCopy(id)?.chunks ?? []).toEqual([]);
+  });
+});
 
 describe('a Gmail label saved as always Private after the mail was stored', () => {
   test('raises the stored mail under the label, hidden at once, and leaves unlabelled mail alone', async () => {
@@ -691,4 +797,47 @@ describe('rechecking a rule that was already applied', () => {
     expect(recovered.receipt.warnings ?? []).not.toContain(GMAIL_LABEL_RULES_PENDING_WARNING);
     expect(JSON.parse(lane.ledger.readMeta(LABEL_STATE_KEY)!).done).toHaveLength(1);
   });
+});
+
+test('a completed label walk distinguishes a match that was already Private from a nonmatch', async () => {
+  writeOwnerTierRules([orchardSender], { env });
+  const lane = openLane(fakeGmail([
+    orchardMail('matched', 'Orchard fence', 'Check the fence on Tuesday.', ['INBOX', 'Label_7']),
+    orchardMail('unmatched', 'Orchard rota', 'Water the orchard on Tuesday.'),
+  ]));
+  await lane.handler.pull({ max_items: 50 });
+  const matched = itemIdentity('matched');
+  const unmatched = itemIdentity('unmatched');
+  for (const item of [matched, unmatched]) {
+    expect(lane.ledger.getCurrent(item)).toMatchObject({ state: 'current', metadataTier: 'secure', contentTier: 'secure' });
+  }
+  writeOwnerTierRules([], { env });
+  saveLabelRule();
+  const sweep = (accountScope = ACCOUNT, ids = [matched.providerItemId]) => sweepLabelRuleRaises({
+    set: lane.tierSet, provider: 'gmail', accountScope, source: { listLabelled: async () => ({ ids }) },
+  });
+  expect(await sweep()).toMatchObject({ scanned: 1, raised: 0, pending: 0 });
+
+  const decision = movingTo('private');
+  const target = { metadataTier: decision.metadataTier, contentTier: decision.contentTier };
+  const move = (item: typeof matched) => ({ set: lane.tierSet, identity: item, target });
+  for (const item of [matched, unmatched]) {
+    const body = lane.secureStore.exportItemCopy(item)!.chunks.map((chunk) => chunk.boundedText).join('');
+    const judged = { ...decision, reasons: [...decision.reasons, contentDigestReason(body)] };
+    expect(lane.ledger.recordRoutedPlacement(item, judged, lane.tierSet.placementFor(judged)).outcome).toBe('queued_move');
+  }
+  const [kept, lowered] = moveTieredItemsLowering([move(matched), move(unmatched)]);
+  expect(kept).toHaveProperty('error');
+  expect(lowered).toHaveProperty('result');
+  expect(lane.internalStore.exportItemCopy(matched)?.chunks ?? []).toEqual([]);
+  expect(lane.internalStore.exportItemCopy(unmatched)?.chunks.length).toBeGreaterThan(0);
+
+  // Removing and adding back the same rule requires a walk for the new revision.
+  // A walk of a different mailbox cannot provide that account's evidence.
+  writeOwnerTierRules([], { env });
+  saveLabelRule();
+  expect(await sweep('other-account', [])).toMatchObject({ pending: 0 });
+  expect(moveTieredItemsLowering([move(matched)])[0]).toHaveProperty('error');
+  expect(await sweep(ACCOUNT, [])).toMatchObject({ pending: 0 });
+  expect(moveTieredItemsLowering([move(matched)])[0]).toHaveProperty('result');
 });

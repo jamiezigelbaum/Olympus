@@ -39,6 +39,8 @@ export interface InstalledStoreTierClassification {
 }
 
 export interface InstalledTierClassificationProvider {
+  /** Path shared with managed rule writers. */
+  readonly ownerTierRulesPath?: string;
   /** Engine move context inherited by every set, including sets opened lazily. */
   readonly automaticMoveContext?: AutomaticTierMoveContext | undefined;
   /**

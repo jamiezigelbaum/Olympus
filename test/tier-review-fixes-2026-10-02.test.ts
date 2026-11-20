@@ -1174,8 +1174,9 @@ describe('12d. a revoked owner move is cancelled or replanned, never stranded (r
     ledger.copies(id).filter((copy) => copy.state === 'current')
       .map((copy) => ({ corpusId: copy.corpusId, layers: copy.layers }))
       .sort((left, right) => left.corpusId.localeCompare(right.corpusId));
+  const body = 'Plain notes about the spring beds.';
   const judged = (metadataTier: 'public' | 'private' | 'secure', contentTier: 'private' | 'secure'): TierDecision => ({
-    ...classifyItemTiers({ signals: { title: 'notes.txt' }, text: 'x' }),
+    ...classifyItemTiers({ signals: { title: 'notes.txt' }, text: body }),
     metadataTier, contentTier, decidedBy: 'sniffer', state: 'current',
     contentRead: true, contentPending: false, metadataPending: false,
   });
@@ -1186,7 +1187,7 @@ describe('12d. a revoked owner move is cancelled or replanned, never stranded (r
     closers.push(cleanup);
     const fx = openTierFixture(dir, { embed: false });
     closers.push(() => fx.close());
-    await fx.set.sync(fixtureConnector(() => [{ id: 'd1', name: 'notes.txt', text: 'Plain notes about the spring beds.' }]));
+    await fx.set.sync(fixtureConnector(() => [{ id: 'd1', name: 'notes.txt', text: body }]), { fetchContent: true });
     const d1 = fixtureIdentityOf('d1');
     const decision = judged(metadataTier, contentTier);
     if (fx.ledger.recordRoutedPlacement(d1, decision, fx.set.placementFor(decision)).outcome === 'queued_move') {
@@ -1237,6 +1238,7 @@ describe('12d. a revoked owner move is cancelled or replanned, never stranded (r
       { corpusId: CORPORA.secure_local, layers: 'content' },
     ].sort((left, right) => left.corpusId.localeCompare(right.corpusId)));
     expect(fx.stores.internal!.exportItemCopy(d1)?.chunks ?? []).toEqual([]);
+    expect(fx.stores.secure_local!.localContent(d1.localItemId)?.chunks.join('')).toBe(body);
     // Nothing left mid-move, and nothing for the override pass to do.
     expect(fx.ledger.listMoving()).toEqual([]);
     expect(applyOwnerOverrides({ set: fx.set })).toMatchObject({ checked: 0 });

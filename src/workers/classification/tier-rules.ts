@@ -34,7 +34,7 @@ import { chmodSync, lstatSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
 import { OperationError } from '../../core/operation-error.ts';
-import { defaultOwnerConfigPath, ownerConfigStamp, readOwnerConfigFile } from '../../core/owner-config-read.ts';
+import { defaultOwnerConfigPath, ownerConfigStamp, readOwnerConfigFile, withOwnerConfigLease } from '../../core/owner-config-read.ts';
 import { TIER_KEYS, type OwnerTierRule, type TierKey } from './tier-classifier.ts';
 
 export const TIER_RULES_SCHEMA_VERSION = 1;
@@ -104,6 +104,15 @@ export function loadOwnerTierRules(options: TierRulesLoadOptions = {}): OwnerTie
     throw new OperationError('config_error', `Tier rules at ${path} are not valid JSON.`, tierRulesRemedy(path));
   }
   return parseOwnerTierRules(raw, path);
+}
+
+/** An unusable policy holds decisions pending until its next successful read. */
+export function readDecisionRules(path: string): { rules: OwnerTierRule[]; unavailable: boolean } {
+  try {
+    return { rules: loadOwnerTierRules({ path, allowMissing: true }), unavailable: false };
+  } catch {
+    return { rules: [], unavailable: true };
+  }
 }
 
 /** The file's modification stamp, for callers that reload only when it changes. */
@@ -215,6 +224,10 @@ export function serializeOwnerTierRule(rule: OwnerTierRule): Record<string, unkn
 /** Write the rules file atomically, owner-only (0600) inside an owner-only directory. */
 export function writeOwnerTierRules(rules: readonly OwnerTierRule[], options: Pick<TierRulesLoadOptions, 'path' | 'env'> = {}): string {
   const path = resolveTierRulesPath(options);
+  return withOwnerConfigLease(path, 'exclusive', () => writeRulesAt(path, rules));
+}
+
+function writeRulesAt(path: string, rules: readonly OwnerTierRule[]): string {
   // Round-trip through the validator so the CLI can never write a file the
   // loader would refuse.
   const document = { schemaVersion: TIER_RULES_SCHEMA_VERSION, rules: rules.map(serializeOwnerTierRule) };
@@ -224,20 +237,37 @@ export function writeOwnerTierRules(rules: readonly OwnerTierRule[], options: Pi
   return path;
 }
 
+/** Edit the validated list under the same lease used for a full replacement. */
+export function updateOwnerTierRules(
+  update: (rules: OwnerTierRule[]) => OwnerTierRule[],
+  options: Pick<TierRulesLoadOptions, 'path' | 'env'> = {},
+): { path: string; rules: OwnerTierRule[]; changed: boolean } {
+  const path = resolveTierRulesPath(options);
+  return withOwnerConfigLease(path, 'exclusive', () => {
+    const previous = loadOwnerTierRules({ path, allowMissing: true });
+    const rules = update(previous);
+    const changed = rules !== previous;
+    if (changed) writeRulesAt(path, rules);
+    return { path, rules, changed };
+  });
+}
+
 export function addOwnerTierRule(rule: OwnerTierRule, options: Pick<TierRulesLoadOptions, 'path' | 'env'> = {}): { path: string; rules: OwnerTierRule[] } {
-  const existing = loadOwnerTierRules({ ...options, allowMissing: true });
-  if (existing.some((candidate) => candidate.id === rule.id)) {
-    throw new OperationError('invalid_params', `A tier rule with id "${rule.id}" already exists.`, 'Remove it first or choose another id.');
-  }
-  const rules = [...existing, rule];
-  return { path: writeOwnerTierRules(rules, options), rules };
+  const { path, rules } = updateOwnerTierRules((existing) => {
+    if (existing.some((candidate) => candidate.id === rule.id)) {
+      throw new OperationError('invalid_params', `A tier rule with id "${rule.id}" already exists.`, 'Remove it first or choose another id.');
+    }
+    return [...existing, rule];
+  }, options);
+  return { path, rules };
 }
 
 export function removeOwnerTierRule(id: string, options: Pick<TierRulesLoadOptions, 'path' | 'env'> = {}): { path: string; removed: boolean; rules: OwnerTierRule[] } {
-  const existing = loadOwnerTierRules({ ...options, allowMissing: true });
-  const rules = existing.filter((rule) => rule.id !== id);
-  if (rules.length === existing.length) return { path: resolveTierRulesPath(options), removed: false, rules: existing };
-  return { path: writeOwnerTierRules(rules, options), removed: true, rules };
+  const { path, rules, changed: removed } = updateOwnerTierRules((existing) => {
+    const kept = existing.filter((rule) => rule.id !== id);
+    return kept.length === existing.length ? existing : kept;
+  }, options);
+  return { path, removed, rules };
 }
 
 /**

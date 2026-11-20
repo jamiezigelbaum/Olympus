@@ -29,7 +29,7 @@ import {
 
 export type { InstalledStoreTierClassification };
 import type { OwnerTierRule, TierSniffer, TierSnifferRequest, TierSnifferVerdict } from './tier-classifier.ts';
-import { loadOwnerTierRules, tierRulesFileStamp } from './tier-rules.ts';
+import { readDecisionRules, resolveTierRulesPath, tierRulesFileStamp } from './tier-rules.ts';
 
 
 /**
@@ -92,6 +92,10 @@ export class InstalledTierClassification implements InstalledTierClassificationP
     this.retirePublic = options.retirePublic === true;
     this.ownerContext = options.ownerContext;
     this.now = options.now;
+  }
+
+  get ownerTierRulesPath(): string {
+    return resolveTierRulesPath({ env: this.env });
   }
 
   /**
@@ -168,15 +172,11 @@ export class InstalledTierClassification implements InstalledTierClassificationP
   private currentRules(): OwnerTierRule[] {
     const stamp = tierRulesFileStamp({ env: this.env });
     if (stamp !== this.rulesStamp) {
-      try {
-        this.rules = loadOwnerTierRules({ env: this.env, allowMissing: true });
-        this.rulesInvalid = false;
-        this.rulesStamp = stamp;
-      } catch {
-        this.rulesInvalid = true;
-        // Not kept: a torn or mid-edit read is retried at the next call.
-        this.rulesStamp = undefined;
-      }
+      const result = readDecisionRules(this.ownerTierRulesPath);
+      this.rulesInvalid = result.unavailable;
+      if (!result.unavailable) this.rules = result.rules;
+      // An interrupted read is retried on the next call.
+      this.rulesStamp = result.unavailable ? undefined : stamp;
     }
     return this.rules;
   }

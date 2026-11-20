@@ -37,6 +37,7 @@ import {
   type TieredStoreSetRun,
 } from '../connector-store/tiered-store-set.ts';
 import type { OwnerTierRule } from '../classification/tier-classifier.ts';
+import type { TierOwnerRuleSource } from '../connector-store/tier-placement.ts';
 import type { SecretLocationsIndex } from '../classification/secret-locations.ts';
 import { LabelPageRejectedError, sweepLabelRuleRaises } from '../connector-store/tier-rules-sweep.ts';
 import {
@@ -250,6 +251,7 @@ export interface GmailConnectorStoreSyncOptions extends GoogleGmailSourceConnect
    * one's watermark. The compiled query itself rides `scope`.
    */
   scopeApproval?: { generation: string; revision: string };
+  ownerRuleSource?: TierOwnerRuleSource;
   requestBudget?: GoogleDailyRequestBudget;
   /** Registry path used by the scheduler's source account guard. */
   confirmationRegistryPath?: string;
@@ -393,7 +395,7 @@ export function createGmailConnectorStoreSyncHandler(
       : {}),
     ...(options.internalEmbeddingProvider ? { internalEmbeddingProvider: options.internalEmbeddingProvider } : {}),
     ...(options.secureEmbeddingProvider ? { secureEmbeddingProvider: options.secureEmbeddingProvider } : {}),
-    tierClassification,
+    ...(options.ownerRuleSource ? { ownerRuleSource: options.ownerRuleSource } : { tierClassification }),
     ...(options.secretLocations ? { secretLocations: options.secretLocations } : {}),
     ...(options.onTierLegOpened ? { onLegOpened: (store) => options.onTierLegOpened!(store) } : {}),
     // An attachment child's text lands later, read by the extraction factory: its names are placed now.

@@ -24,7 +24,7 @@
 // keeps its own record and finishes a rule only once the provider has answered
 // for every page; the stored-names pass above never completes one.
 
-import { createHash } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import {
   classifyItemTiers,
   maxTier,
@@ -36,6 +36,7 @@ import {
 } from '../classification/tier-classifier.ts';
 import {
   copyServingLayer,
+  labelSweepMetaKey,
   type TierCopy,
   type TierLedgerIdentity,
   type TierLedgerRecord,
@@ -45,12 +46,20 @@ import { storedCopyOf, storedSignals } from './stored-names.ts';
 import { leastPrivateDomain } from './tier-override-settle.ts';
 import { settleRoutedSecrets } from './tier-rejudge.ts';
 import { findInLedger, runPassHere, runPassOffThread, turn, type LoopPass } from './loop-pass.ts';
+import {
+  currentTierRulePolicy,
+  labelEvidenceItemKey,
+  labelSweepHasPolicy,
+  readLabelState,
+  ruleKey,
+  withTierRuleFence,
+  type LabelSweepState,
+} from './tier-move-rule-policy.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
 
 /** Routed ledger rows read per call. */
 export const DEFAULT_RULES_SWEEP_ROWS = 1_000;
 const SWEEP_META_KEY = 'owner_rules_sweep';
-const LABEL_SWEEP_META_KEY = 'owner_rules_label_sweep';
 /** Provider pages one label-rule call reads before it hands back (the rest resumes next call). */
 export const DEFAULT_LABEL_SWEEP_PAGES = 20;
 
@@ -203,7 +212,7 @@ function raiseRoutedItem(
   set: TieredStoreSet,
   record: TierLedgerRecord,
   rules: readonly OwnerTierRule[],
-  inputs: NonNullable<ReturnType<TieredStoreSet['classification']>>,
+  inputs: Pick<NonNullable<ReturnType<TieredStoreSet['classification']>>, 'rules' | 'retirePublic'>,
   extraSignals: Pick<SourceClassificationSignals, 'labels'> = {},
 ): RaiseOutcome {
   if (record.contentTier === 'secrets' || record.metadataTier === 'secrets') return 'unchanged';
@@ -304,25 +313,6 @@ export interface LabelRuleSweepReport {
   pending: number;
 }
 
-interface LabelSweepState {
-  /** Label rules every labelled stored item was raised for (and, at the last recheck, still is). */
-  done: string[];
-  /**
-   * Walks in progress, one per rule: the provider page to resume at, and
-   * whether an item the rule could not act on yet was seen earlier in the walk.
-   * Kept for applied rules too, so a recheck of a large label covers it over
-   * successive runs instead of re-reading its first pages every time.
-   */
-  walks?: Record<string, { pageToken: string; deferred?: boolean }> | undefined;
-  /**
-   * Rule keys by when their last walk finished, least recently first. A run
-   * starts with the rule walked longest ago, so a rule that fills the page
-   * budget on its own cannot keep the rules behind it from ever being reached.
-   * A rule that has not finished a walk yet is ahead of every one that has.
-   */
-  order?: string[] | undefined;
-}
-
 /**
  * Applies raising label rules (an "always Private" label from the privacy
  * profile, or any owner label rule to Private or Secrets) to the items a
@@ -354,26 +344,31 @@ export async function sweepLabelRuleRaises(options: {
 }): Promise<LabelRuleSweepReport> {
   const report: LabelRuleSweepReport = { rules: 0, scanned: 0, raised: 0, secrets: 0, pending: 0 };
   const { set, provider, accountScope, source } = options;
-  const classification = set.classification();
-  // Unusable rules or map: nothing is judged from rules that cannot be trusted.
-  if (!classification || classification.unavailableReason) return report;
+  const policy = withTierRuleFence(set, () => currentTierRulePolicy(set));
+  if (policy.unavailable) return report;
   const ledger = set.ledger;
   const keyed = new Map<string, OwnerTierRule>();
-  for (const rule of classification.rules ?? []) {
-    if (!isRaisingRule(rule) || !isLabelRule(rule)) continue;
+  for (const rule of policy.rules) {
+    if (tierRank(rule.tier) <= tierRank('public') || !isLabelRule(rule)) continue;
     if (rule.source !== undefined && rule.source !== provider) continue;
     keyed.set(ruleKey(rule), rule);
   }
-  const metaKey = `${LABEL_SWEEP_META_KEY}:${provider}:${accountScope}`;
+  const metaKey = labelSweepMetaKey(provider, accountScope);
   let written = ledger.readMeta(metaKey);
-  const stored = readLabelState(written);
+  const previous = readLabelState(written);
+  const stored: LabelSweepState = labelSweepHasPolicy(previous, policy, provider, accountScope) ? previous : { done: [] };
   // A removed rule is forgotten, so adding it back sweeps again.
   const done = new Set(stored.done.filter((key) => keyed.has(key)));
+  const completed = new Map(Object.entries(stored.completed ?? {}).filter(([key]) => keyed.has(key)));
   const walks = new Map(Object.entries(stored.walks ?? {}).filter(([key]) => keyed.has(key)));
   const order = (stored.order ?? []).filter((key, at, all) => keyed.has(key) && all.indexOf(key) === at);
   const save = () => {
     const state: LabelSweepState = {
+      revision: policy.revision,
+      provider,
+      accountScope,
       done: [...done].sort(),
+      ...(completed.size > 0 ? { completed: Object.fromEntries(completed) } : {}),
       ...(order.length > 0 ? { order: [...order] } : {}),
       ...(walks.size > 0 ? { walks: Object.fromEntries([...walks].sort(([left], [right]) => (left < right ? -1 : 1))) } : {}),
     };
@@ -381,6 +376,18 @@ export async function sweepLabelRuleRaises(options: {
     if (next === written || (written === undefined && done.size === 0 && walks.size === 0 && order.length === 0)) return;
     ledger.writeMeta(metaKey, next);
     written = next;
+  };
+  // A page, its positive evidence and the cursor that includes it commit together.
+  const applyCurrent = (work: () => void): boolean => withTierRuleFence(set, () => ledger.withMoveBatch(() => {
+    const current = currentTierRulePolicy(set);
+    if (current.unavailable || current.revision !== policy.revision || ledger.readMeta(metaKey) !== written) return false;
+    work();
+    save();
+    return true;
+  }));
+  const stale = (): LabelRuleSweepReport => {
+    report.pending = keyed.size;
+    return report;
   };
   // The rule whose walk finished longest ago goes first (one that never has,
   // first of all): the page budget is shared, so a fixed order would let an
@@ -393,10 +400,15 @@ export async function sweepLabelRuleRaises(options: {
     if (pagesLeft <= 0) break;
     const rule = keyed.get(key)!;
     const resumed = walks.get(key);
+    const walkId = resumed?.id ?? randomUUID();
     let pageToken = resumed?.pageToken;
     let deferred = resumed?.deferred === true;
     report.rules += 1;
     let finished = false;
+    if (!applyCurrent(() => {
+      done.delete(key);
+      if (!resumed) walks.set(key, { id: walkId });
+    })) return stale();
     try {
       let firstPage = true;
       while (pagesLeft > 0) {
@@ -407,44 +419,42 @@ export async function sweepLabelRuleRaises(options: {
         } catch (error) {
           // A refused resume token restarts the walk; any other failure keeps
           // the last good page so the next call picks up there.
-          if (error instanceof LabelPageRejectedError && firstPage && resumed) walks.delete(key);
+          if (error instanceof LabelPageRejectedError && firstPage && resumed && !applyCurrent(() => { walks.delete(key); })) return stale();
           throw error;
         }
         firstPage = false;
-        for (const id of page.ids) {
-          report.scanned += 1;
-          const outcome = raiseLabelled(set, { provider, accountScope, providerItemId: id }, rule, classification);
-          if (outcome === 'raised') report.raised += 1;
-          else if (outcome === 'secrets') report.secrets += 1;
-          else if (outcome === 'deferred') deferred = true;
-        }
-        pageToken = page.nextPageToken || undefined;
-        if (pageToken === undefined) {
-          finished = true;
-          break;
-        }
-        walks.set(key, { pageToken, ...(deferred ? { deferred: true } : {}) });
-        save();
+        if (!applyCurrent(() => {
+          ledger.recordLabelRuleMatches(provider, accountScope, key, walkId, page.ids.map(labelEvidenceItemKey));
+          for (const id of page.ids) {
+            report.scanned += 1;
+            const outcome = raiseLabelled(set, { provider, accountScope, providerItemId: id }, rule, policy);
+            if (outcome === 'raised') report.raised += 1;
+            else if (outcome === 'secrets') report.secrets += 1;
+            else if (outcome === 'deferred') deferred = true;
+          }
+          pageToken = page.nextPageToken || undefined;
+          finished = pageToken === undefined;
+          if (!finished) {
+            walks.set(key, { id: walkId, pageToken: pageToken!, ...(deferred ? { deferred: true } : {}) });
+          } else {
+            walks.delete(key);
+            if (!deferred) {
+              done.add(key);
+              completed.set(key, walkId);
+              ledger.retirePreviousLabelRuleMatches(provider, accountScope, key, walkId);
+            }
+            order.splice(0, order.length, ...order.filter((entry) => entry !== key), key);
+          }
+        })) return stale();
+        if (finished) break;
       }
     } catch {
       // The provider could not answer: the rule is not (or no longer) applied,
       // the last page stays saved, and the next call retries.
     }
-    if (!finished) {
-      done.delete(key);
-      save();
-      break;
-    }
-    // Every page answered. An item the rule could not act on yet (a move it
-    // could not settle) keeps the rule pending: the next call walks it again.
-    if (deferred) done.delete(key);
-    else done.add(key);
-    walks.delete(key);
-    // Only a finished walk counts as this rule's turn.
-    order.splice(0, order.length, ...order.filter((entry) => entry !== key), key);
-    save();
+    if (!finished) break;
   }
-  save();
+  if (!applyCurrent(() => {})) return stale();
   report.pending = [...keyed.keys()].filter((key) => !done.has(key)).length;
   return report;
 }
@@ -454,7 +464,7 @@ function raiseLabelled(
   set: TieredStoreSet,
   identity: TierLedgerIdentity,
   rule: OwnerTierRule,
-  classification: NonNullable<ReturnType<TieredStoreSet['classification']>>,
+  classification: Pick<NonNullable<ReturnType<TieredStoreSet['classification']>>, 'rules' | 'retirePublic'>,
 ): RaiseOutcome {
   try {
     const record = set.ledger.getCurrent(identity);
@@ -466,30 +476,6 @@ function raiseLabelled(
   }
 }
 
-function readLabelState(raw: string | undefined): LabelSweepState {
-  if (!raw) return { done: [] };
-  try {
-    const parsed = JSON.parse(raw) as { done?: unknown; walks?: unknown; order?: unknown };
-    const walks: Record<string, { pageToken: string; deferred?: boolean }> = {};
-    if (parsed.walks && typeof parsed.walks === 'object' && !Array.isArray(parsed.walks)) {
-      for (const [key, walk] of Object.entries(parsed.walks as Record<string, unknown>)) {
-        const entry = walk as { pageToken?: unknown; deferred?: unknown } | null;
-        if (entry && typeof entry.pageToken === 'string' && entry.pageToken) {
-          walks[key] = { pageToken: entry.pageToken, ...(entry.deferred === true ? { deferred: true } : {}) };
-        }
-      }
-    }
-    const order = Array.isArray(parsed.order) ? parsed.order.filter((key): key is string => typeof key === 'string') : [];
-    return {
-      done: Array.isArray(parsed.done) ? parsed.done.filter((key): key is string => typeof key === 'string') : [],
-      ...(Object.keys(walks).length > 0 ? { walks } : {}),
-      ...(order.length > 0 ? { order } : {}),
-    };
-  } catch {
-    return { done: [] };
-  }
-}
-
 /**
  * Makes the provider account's raising label rules pending again, so the next
  * label sweep asks the provider which stored items carry each label and raises
@@ -498,7 +484,7 @@ function readLabelState(raw: string | undefined): LabelSweepState {
  * instead of a rule being assumed to match. Walks in progress are kept.
  */
 export function reopenLabelRuleSweep(ledger: TieredStoreSet['ledger'], provider: string, accountScope: string): void {
-  const metaKey = `${LABEL_SWEEP_META_KEY}:${provider}:${accountScope}`;
+  const metaKey = labelSweepMetaKey(provider, accountScope);
   const written = ledger.readMeta(metaKey);
   const state = readLabelState(written);
   if (state.done.length === 0) return;
@@ -514,13 +500,6 @@ function isLabelRule(rule: OwnerTierRule): boolean {
 /** A rule that can raise an item above Personal: always Private, or Secrets. */
 function isRaisingRule(rule: OwnerTierRule): boolean {
   return tierRank(rule.tier) > tierRank('private');
-}
-
-function ruleKey(rule: OwnerTierRule): string {
-  return createHash('sha256')
-    .update(JSON.stringify([rule.id, rule.source ?? '', rule.match.kind, rule.match.value, rule.tier, rule.strength]))
-    .digest('hex')
-    .slice(0, 24);
 }
 
 function readState(raw: string | undefined): SweepState {

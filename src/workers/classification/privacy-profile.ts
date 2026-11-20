@@ -35,7 +35,7 @@ import { writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
 import { OperationError } from '../../core/operation-error.ts';
 import { defaultOwnerConfigPath, ownerConfigStamp, readOwnerConfigFile } from '../../core/owner-config-read.ts';
 import type { OwnerTierRule } from './tier-classifier.ts';
-import { loadOwnerTierRules, writeOwnerTierRules } from './tier-rules.ts';
+import { updateOwnerTierRules } from './tier-rules.ts';
 
 export const PRIVACY_PROFILE_SCHEMA_VERSION = 1;
 export const OLYMPUS_PRIVACY_PROFILE_ENV = 'OLYMPUS_PRIVACY_PROFILE_PATH';
@@ -293,12 +293,13 @@ export function writePrivacyProfile(
     updatedAt: (options.now?.() ?? new Date()).toISOString(),
   };
   const rulesOptions = { ...(options.tierRulesPath ? { path: options.tierRulesPath } : {}), ...(options.env ? { env: options.env } : {}) };
-  const existing = loadOwnerTierRules({ ...rulesOptions, allowMissing: true });
-  const kept = existing.filter((rule) => !rule.id.startsWith(PRIVACY_RULE_ID_PREFIX));
   const owned = next.rules.map(privacyRuleToTierRule);
-  const unchanged = existing.length === kept.length + owned.length
-    && owned.every((rule) => existing.some((candidate) => candidate.id === rule.id));
-  if (!unchanged) writeOwnerTierRules([...kept, ...owned], rulesOptions);
+  updateOwnerTierRules((existing) => {
+    const kept = existing.filter((rule) => !rule.id.startsWith(PRIVACY_RULE_ID_PREFIX));
+    const unchanged = existing.length === kept.length + owned.length
+      && owned.every((rule) => existing.some((candidate) => candidate.id === rule.id));
+    return unchanged ? existing : [...kept, ...owned];
+  }, rulesOptions);
 
   const path = resolvePrivacyProfilePath(options);
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });

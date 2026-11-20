@@ -16656,13 +16656,29 @@ import { Database as Database4 } from "bun:sqlite";
 import { randomUUID as randomUUID8 } from "node:crypto";
 import { chmodSync as chmodSync5, closeSync as closeSync9, existsSync as existsSync17, mkdirSync as mkdirSync11, openSync as openSync9, statSync as statSync11 } from "node:fs";
 import { dirname as dirname17 } from "node:path";
-var TIER_LEDGER_SCHEMA_VERSION = 17;
+
+// src/workers/classification/installed-tier-classification-registry.ts
+var registered;
+function registeredInstalledTierClassification() {
+  return registered;
+}
+var tierSetPlanners;
+function tierSetPlannerForLedger(ledgerPath) {
+  return tierSetPlanners?.get(ledgerPath);
+}
+
+// src/workers/classification/tier-ledger.ts
+var TIER_LEDGER_SCHEMA_VERSION = 18;
 var RETIRED_EMBEDDING_CLEARANCE_REASON = "content:sniffer:retired_embedding_clearance:undecided";
+var RETAINED_MOVE_SOURCE_REASON = "content:retained_move_source";
 function isFailSafeMissingContentQuestion(reason) {
   return reason.startsWith("content:sniffer:") && (reason.endsWith(":fail_safe:missing_question") || reason.endsWith(":fail_safe:unread"));
 }
 function tierLedgerConversationKey(identity) {
   return identity.providerConversationId ?? "";
+}
+function labelSweepMetaKey(provider, accountScope) {
+  return `owner_rules_label_sweep:${provider}:${accountScope}`;
 }
 function writeIntentFromRow(row) {
   return {
@@ -17174,16 +17190,17 @@ class TierLedger {
         restrictLedgerFiles(this.dbPath);
     }
   }
-  recordDecision(identity, decision, stored) {
+  recordDecision(identity, decision, stored, options = {}) {
     let outcome = "unchanged";
     this.db.transaction(() => {
       const existing = this.readRow(identity);
+      const next = existing?.state === "moving" ? rowOfDecision(movingObservation(existing, decision, options)) : effectiveRow(existing, decision);
       if (existing?.state === "moving") {
-        outcome = "held_moving";
+        outcome = this.recordMovingDecision(identity, existing, next);
         return;
       }
-      outcome = this.writeRow(identity, effectiveRow(existing, decision), stored, existing);
-    })();
+      outcome = this.writeRow(identity, next, stored, existing);
+    }).immediate();
     return { outcome, record: this.getCurrent(identity) };
   }
   recordContentDecision(identity, content, stored) {
@@ -17192,18 +17209,15 @@ class TierLedger {
       const existing = this.readRow(identity);
       if (!existing)
         return;
-      if (existing.state === "moving") {
-        outcome = "held_moving";
-        return;
-      }
       if (existing.decidedBy === "override" || this.getOverride(identity)?.kind === "tier") {
         outcome = "unchanged";
         return;
       }
-      const metadataReasons = existing.reasons.filter((reason) => !reason.startsWith("content:"));
-      const contentTier = maxTier(content.contentTier, existing.metadataTier);
+      const names = queuedDecisionRecord(existing);
+      const metadataReasons = names.reasons.filter((reason) => !reason.startsWith("content:"));
+      const contentTier = maxTier(content.contentTier, names.metadataTier);
       const next = {
-        metadataTier: existing.metadataTier,
+        metadataTier: names.metadataTier,
         contentTier,
         decidedBy: content.decidedBy,
         reasons: [...metadataReasons, ...content.reasons],
@@ -17215,9 +17229,31 @@ class TierLedger {
         metadataForced: existing.metadataForced,
         metadataFlagged: existing.metadataFlagged
       };
-      outcome = this.writeRow(identity, next, stored, existing);
-    })();
+      outcome = existing.state === "moving" ? this.recordMovingDecision(identity, existing, next) : this.writeRow(identity, next, stored, existing);
+    }).immediate();
     return outcome === undefined ? undefined : { outcome, record: this.getCurrent(identity) };
+  }
+  recordMovingDecision(identity, existing, next) {
+    const sources = this.moveSources(identity, existing.generation + 1);
+    const planner = tierSetPlannerForLedger(this.dbPath);
+    let decision = decisionOfRow(next);
+    if (!observationSupersedesMove(existing, decision, sources, planner))
+      return "held_moving";
+    if (existing.routed && (planner || next.contentTier === "secrets")) {
+      const placement = planner?.(decision) ?? { copies: [], embedHold: false };
+      const { outcome } = this.recordRoutedPlacement(identity, decision, placement);
+      return outcome === "held_moving" ? outcome : "updated";
+    }
+    const decidedAt = this.now().toISOString();
+    const advanced = this.advanceMoveGeneration(identity, existing, decidedAt);
+    decision = retainHiddenRaise(existing, decision, sources, undefined, undefined);
+    if (existing.routed && placementRaisesSource(decision, sources)) {
+      this.queueMoveRow(identity, advanced, decision, { hide: true, decidedAt });
+      return "updated";
+    }
+    this.cancelSupersededMove(identity, advanced, decidedAt);
+    this.writeRow(identity, rowOfDecision(decision), undefined, this.readRow(identity));
+    return "updated";
   }
   applySnifferVerdict(identity, verdict, options = {}) {
     assertTier(verdict.tier);
@@ -18095,14 +18131,16 @@ class TierLedger {
     const rawReceipt = this.readMeta(`tier-move-verified:${tierLedgerIdentityKey(identity)}`);
     const receipt = rawReceipt ? JSON.parse(rawReceipt) : undefined;
     const verified = receipt?.generation === existing.generation && receipt.raise && receipt.target.metadataTier === targetMetadata && receipt.target.contentTier === targetContent;
+    const staleFlip = existing.generation + 1;
+    const copies = this.copies(identity);
+    const original = copies.filter((copy) => copy.state === "current" || copy.state === "superseded" && copy.supersededByGeneration === staleFlip);
+    const mixed = verified && loweredCopyLayers(original, receipt.placement).length > 0;
     const override = this.getOverride(identity);
-    if (verified && tierRank(targetMetadata) >= tierRank(existing.metadataTier) && tierRank(targetContent) >= tierRank(existing.contentTier) && (override?.kind !== "tier" || tierRank(targetMetadata) >= tierRank(override.tier) && tierRank(targetContent) >= tierRank(override.tier))) {
+    if (verified && !mixed && tierRank(targetMetadata) >= tierRank(existing.metadataTier) && tierRank(targetContent) >= tierRank(existing.contentTier) && (override?.kind !== "tier" || tierRank(targetMetadata) >= tierRank(override.tier) && tierRank(targetContent) >= tierRank(override.tier))) {
       return "none";
     }
     const decidedAt = this.now().toISOString();
     const prior = this.decisionBeforeOverride(identity, existing);
-    const staleFlip = existing.generation + 1;
-    const copies = this.copies(identity);
     const hidden = copies.some((copy) => copy.state === "superseded" && copy.supersededByGeneration === staleFlip);
     if (!hidden) {
       this.db.query(`
@@ -18124,36 +18162,19 @@ class TierLedger {
       this.appendHistory(identity, staleFlip, existing.metadataTier, existing.contentTier, prior.decidedBy, reasonsJson, state, decidedAt);
       return "cancelled";
     }
-    const nextFlip = existing.generation + 2;
-    this.db.query(`
-      UPDATE tier_copies SET superseded_by_generation = ?, updated_at = ?
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-        AND copy_state = 'superseded' AND superseded_by_generation = ?
-    `).run(nextFlip, decidedAt, ...idParams(identity), staleFlip);
-    this.db.query(`
-      UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = ?, updated_at = ?
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'staged'
-    `).run(staleFlip, decidedAt, ...idParams(identity));
-    this.db.query(`
-      UPDATE tier_items SET generation = ?
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-    `).run(staleFlip, ...idParams(identity));
-    if (verified) {
-      for (const copy of receipt.placement) {
-        this.db.query(`
-          UPDATE tier_copies SET copy_state = 'superseded', layers = ?, superseded_by_generation = ?, updated_at = ?
-          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
-        `).run(copy.layers, nextFlip, decidedAt, ...idParams(identity), copy.corpusId);
-      }
-      for (const copy of copies.filter((copy) => !receipt.placement.some((dest) => dest.corpusId === copy.corpusId))) {
-        this.db.query(`
-          UPDATE tier_copies SET superseded_by_generation = ?
-          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
-        `).run(staleFlip, ...idParams(identity), copy.corpusId);
+    const advanced = this.advanceMoveGeneration(identity, existing, decidedAt);
+    if (verified && (!mixed || receipt.ruleRevision === undefined)) {
+      for (const layer of ["metadata", "content"]) {
+        const from = copyServingLayer(original, layer);
+        const to = copyServingLayer(receipt.placement, layer);
+        if (from && to && trustDomainRank(to.trustDomain) > trustDomainRank(from.trustDomain)) {
+          this.carryVerifiedLayer(identity, advanced.generation, layer, from.corpusId, to.corpusId, decidedAt);
+        }
       }
     }
-    this.writeMeta(`tier-move-verified:${tierLedgerIdentityKey(identity)}`, "");
-    this.queueMoveRow(identity, { ...existing, generation: staleFlip }, {
+    if (verified && !mixed)
+      this.writeMeta(`tier-move-verified:${tierLedgerIdentityKey(identity)}`, "");
+    this.queueMoveRow(identity, advanced, {
       ...prior,
       metadataTier: maxTier(existing.metadataTier, targetMetadata),
       contentTier: maxTier(existing.contentTier, targetContent)
@@ -18234,6 +18255,26 @@ class TierLedger {
   }
   writeMeta(key, value) {
     this.setMeta(key, value);
+  }
+  recordLabelRuleMatches(provider, accountScope, ruleKey, walkId, itemKeys) {
+    if (itemKeys.length === 0)
+      return;
+    this.db.query(`
+      INSERT INTO tier_label_rule_matches (provider, account_scope, rule_key, item_key, walk_id)
+      SELECT ?, ?, ?, value, ? FROM json_each(?) WHERE true
+      ON CONFLICT(provider, account_scope, rule_key, item_key) DO UPDATE SET walk_id = excluded.walk_id
+    `).run(provider, accountScope, ruleKey, walkId, JSON.stringify(itemKeys));
+  }
+  labelRuleMatched(provider, accountScope, ruleKey, walkId, itemKey) {
+    return this.db.query(`
+      SELECT 1 FROM tier_label_rule_matches
+      WHERE provider = ? AND account_scope = ? AND rule_key = ? AND item_key = ? AND walk_id = ?
+    `).get(provider, accountScope, ruleKey, itemKey, walkId) !== null;
+  }
+  retirePreviousLabelRuleMatches(provider, accountScope, ruleKey, walkId) {
+    this.db.query(`
+      DELETE FROM tier_label_rule_matches WHERE provider = ? AND account_scope = ? AND rule_key = ? AND walk_id <> ?
+    `).run(provider, accountScope, ruleKey, walkId);
   }
   writeSettleProgress(key, value) {
     if ((this.readMeta(key) ?? "") === value)
@@ -18422,7 +18463,7 @@ class TierLedger {
   }
   recordRoutedPlacement(identity, decision, plan, options = {}) {
     const decidedAt = this.now().toISOString();
-    const reasonsJson = JSON.stringify(decision.reasons);
+    let reasonsJson = JSON.stringify(decision.reasons);
     for (const copy of plan.copies)
       assertCopyPlan(copy);
     if (new Set(plan.copies.map((copy) => copy.corpusId)).size !== plan.copies.length) {
@@ -18432,7 +18473,7 @@ class TierLedger {
     let raise = false;
     let previousCopies = [];
     this.db.transaction(() => {
-      const existing = this.readRow(identity);
+      let existing = this.readRow(identity);
       if (options.guard)
         this.assertOverrideGuard(identity, existing, options.guard);
       previousCopies = this.copies(identity);
@@ -18474,17 +18515,42 @@ class TierLedger {
         return;
       }
       const emptyMove = existing.state === "moving" && options.staleCopiesGone === true && previousCopies.length === 0;
+      let superseded = false;
       if (existing.state === "moving" && !emptyMove) {
-        outcome = "held_moving";
-        return;
+        const sources = this.moveSources(identity, existing.generation + 1);
+        const planner = tierSetPlannerForLedger(this.dbPath);
+        if (!observationSupersedesMove(existing, decision, sources, planner)) {
+          outcome = "held_moving";
+          return;
+        }
+        const safeDecision = retainHiddenRaise(existing, decision, sources, planner, plan);
+        const safePlan = safeDecision === decision ? plan : planner?.(safeDecision);
+        existing = this.advanceMoveGeneration(identity, existing, decidedAt);
+        if (!safePlan || placementIsRaise(sources, safePlan.copies)) {
+          raise = true;
+          this.queueMoveRow(identity, existing, safeDecision, {
+            hide: true,
+            ...safePlan ? { placement: safePlan.copies } : {},
+            decidedAt
+          });
+          outcome = "queued_move";
+          return;
+        }
+        decision = safeDecision;
+        plan = safePlan;
+        reasonsJson = JSON.stringify(decision.reasons);
+        this.cancelSupersededMove(identity, existing, decidedAt);
+        existing = this.readRow(identity);
+        superseded = true;
       }
       const tiersChanged = existing.metadataTier !== decision.metadataTier || existing.contentTier !== decision.contentTier;
-      const current = previousCopies.filter((copy) => copy.state === "current");
-      const staged = previousCopies.some((copy) => copy.state === "staged") && !(options.stagedLandingAllowed === true && !existing.contentRead);
+      const copies = superseded ? this.copies(identity) : previousCopies;
+      const current = copies.filter((copy) => copy.state === "current");
+      const staged = copies.some((copy) => copy.state === "staged") && !(options.stagedLandingAllowed === true && !existing.contentRead);
       const firstPlacement = !existing.routed || options.staleCopiesGone === true;
       if (secrets || firstPlacement || samePlan(current, plan.copies) && !staged) {
-        const generation = tiersChanged || emptyMove ? existing.generation + 1 : existing.generation;
-        const detailChanged = tiersChanged || firstPlacement || JSON.stringify(existing.reasons) !== reasonsJson || existing.decidedBy !== decision.decidedBy || existing.state !== decision.state || existing.engineVersion !== decision.engineVersion || existing.mapRevision !== decision.mapRevision;
+        const generation = tiersChanged && !superseded || emptyMove ? existing.generation + 1 : existing.generation;
+        const detailChanged = tiersChanged || superseded || firstPlacement || JSON.stringify(existing.reasons) !== reasonsJson || existing.decidedBy !== decision.decidedBy || existing.state !== decision.state || existing.engineVersion !== decision.engineVersion || existing.mapRevision !== decision.mapRevision || existing.contentRead !== decision.contentRead || existing.metadataPending !== decision.metadataPending || existing.contentPending !== decision.contentPending || existing.metadataForced !== decision.metadataForced || existing.metadataFlagged !== decision.metadataFlagged;
         if (detailChanged) {
           this.db.query(`
             UPDATE tier_items SET
@@ -18522,9 +18588,9 @@ class TierLedger {
         return;
       }
       raise = placementIsRaise(current, plan.copies);
-      this.queueMoveRow(identity, existing, decision, { hide: raise && options.queueWithoutHiding !== true, decidedAt });
+      this.queueMoveRow(identity, existing, decision, { hide: raise && options.queueWithoutHiding !== true, placement: plan.copies, decidedAt });
       outcome = "queued_move";
-    })();
+    }).immediate();
     return { outcome, record: this.getCurrent(identity), previousCopies, raise };
   }
   queueOwnerRaise(identity, decision, trustDomain, options = {}) {
@@ -18559,25 +18625,39 @@ class TierLedger {
         result = "hidden";
         return;
       }
-      const staleFlip = existing.generation + 1;
-      const nextFlip = existing.generation + 2;
-      this.db.query(`
-        UPDATE tier_copies SET superseded_by_generation = ?, updated_at = ?
-        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-          AND copy_state = 'superseded' AND superseded_by_generation = ?
-      `).run(nextFlip, decidedAt, ...idParams(identity), staleFlip);
-      this.db.query(`
-        UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = ?, updated_at = ?
-        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'staged'
-      `).run(staleFlip, decidedAt, ...idParams(identity));
-      this.db.query(`
-        UPDATE tier_items SET generation = ?
-        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-      `).run(staleFlip, ...idParams(identity));
-      this.queueMoveRow(identity, { ...existing, generation: staleFlip }, decision, { hide: unsafe, decidedAt });
+      const advanced = this.advanceMoveGeneration(identity, existing, decidedAt);
+      this.queueMoveRow(identity, advanced, decision, { hide: unsafe, decidedAt });
       result = unsafe ? "hidden" : "retargeted";
     })();
     return result;
+  }
+  advanceMoveGeneration(identity, existing, decidedAt) {
+    const generation = existing.generation + 1;
+    this.db.query(`
+        UPDATE tier_copies SET superseded_by_generation = ?, updated_at = ?
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+          AND copy_state = 'superseded' AND superseded_by_generation = ?
+    `).run(generation + 1, decidedAt, ...idParams(identity), generation);
+    this.db.query(`
+        UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = ?, updated_at = ?
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'staged'
+    `).run(existing.generation, decidedAt, ...idParams(identity));
+    this.db.query(`
+        UPDATE tier_items SET generation = ?
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).run(generation, ...idParams(identity));
+    return { ...existing, generation };
+  }
+  cancelSupersededMove(identity, existing, decidedAt) {
+    this.db.query(`
+      UPDATE tier_copies SET copy_state = 'current', superseded_by_generation = NULL, updated_at = ?
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+        AND copy_state = 'superseded' AND superseded_by_generation = ?
+    `).run(decidedAt, ...idParams(identity), existing.generation + 1);
+    this.db.query(`
+      UPDATE tier_items SET state = 'current', target_metadata_tier = NULL, target_content_tier = NULL, move_attempts = 0
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).run(...idParams(identity));
   }
   assertOverrideGuard(identity, existing, guard) {
     if (!existing || existing.generation !== guard.generation)
@@ -18783,8 +18863,12 @@ class TierLedger {
       `).run(JSON.stringify(prior), ...idParams(identity));
     }
     this.appendHistory(identity, existing.generation, decision.metadataTier, decision.contentTier, decision.decidedBy, reasonsJson, "moving", options.decidedAt);
-    if (options.hide)
-      this.supersedeCurrentCopies(identity, existing.generation + 1, options.decidedAt);
+    if (options.hide) {
+      if (options.placement && decision.decidedBy !== "override")
+        this.hideMoveSources(identity, existing.generation + 1, options.placement, options.decidedAt);
+      else
+        this.supersedeCurrentCopies(identity, existing.generation + 1, options.decidedAt);
+    }
   }
   stageLandingCopy(identity, copy, options) {
     assertCopyPlan(copy);
@@ -18926,7 +19010,7 @@ class TierLedger {
         WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
       `).run(options.target.metadataTier, options.target.contentTier, ...idParams(identity));
       if (options.hideSource)
-        this.supersedeCurrentCopies(identity, nextGeneration, now);
+        this.hideMoveSources(identity, nextGeneration, options.destination, now);
       const staged = options.destination.filter((copy) => !sources.some((source) => source.corpusId === copy.corpusId));
       for (const destination of staged) {
         this.db.query(`
@@ -18940,6 +19024,50 @@ class TierLedger {
   }
   moveSources(identity, moveGeneration) {
     return this.copies(identity).filter((copy) => copy.state === "current" || copy.state === "superseded" && copy.supersededByGeneration === moveGeneration);
+  }
+  hideMoveSources(identity, generation, destination, now) {
+    const sources = this.moveSources(identity, generation);
+    if (loweredCopyLayers(sources, destination).length === 0) {
+      this.supersedeCurrentCopies(identity, generation, now);
+      return;
+    }
+    for (const copy of sources) {
+      if (copy.state !== "current" || !placementIsRaise([copy], destination))
+        continue;
+      this.db.query(`
+        UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = ?, updated_at = ?
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
+      `).run(generation, now, ...idParams(identity), copy.corpusId);
+    }
+  }
+  retainMoveRaise(identity, options) {
+    this.withGenerationFence(identity, options.expectedGeneration, () => {
+      const record = this.readRow(identity);
+      if (!record || record.state !== "moving")
+        return;
+      const decidedAt = this.now().toISOString();
+      const advanced = this.advanceMoveGeneration(identity, record, decidedAt);
+      for (const { layer, from, to } of options.recoverLayers ?? []) {
+        this.carryVerifiedLayer(identity, advanced.generation, layer, from, to, decidedAt);
+      }
+      this.queueMoveRow(identity, advanced, { ...record, ...options.target }, { hide: false, decidedAt });
+    });
+  }
+  carryVerifiedLayer(identity, generation, layer, from, to, now) {
+    this.db.query(`
+      UPDATE tier_copies SET
+        layers = CASE WHEN layers = 'both' THEN ? ELSE layers END,
+        copy_state = CASE WHEN layers = 'both' THEN copy_state ELSE 'superseded' END,
+        superseded_by_generation = CASE WHEN layers = 'both' THEN superseded_by_generation ELSE ? END,
+        updated_at = ?
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
+    `).run(layer === "content" ? "metadata" : "content", generation - 1, now, ...idParams(identity), from);
+    this.db.query(`
+      UPDATE tier_copies SET
+        layers = CASE WHEN (copy_state = 'current' OR superseded_by_generation = ?) AND layers <> ? THEN 'both' ELSE ? END,
+        copy_state = 'superseded', superseded_by_generation = ?, updated_at = ?
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
+    `).run(generation + 1, layer, layer, generation + 1, now, ...idParams(identity), to);
   }
   completeMove(identity, options) {
     for (const copy of options.destination)
@@ -18956,11 +19084,11 @@ class TierLedger {
       const override = this.getOverride(identity);
       const targetMetadataTier = existing.targetMetadataTier;
       const targetContentTier = existing.targetContentTier;
-      if (override?.kind === "tier" && (tierRank(targetMetadataTier) < tierRank(override.tier) || tierRank(targetContentTier) < tierRank(override.tier)) && !overrideAuthorizes(override, targetMetadataTier, targetContentTier)) {
+      const conflict = tierMoveOverrideConflict(override, existing, { metadataTier: targetMetadataTier, contentTier: targetContentTier }, sources, options.destination);
+      if (conflict === "tier_floor") {
         throw new TierLedgerGenerationConflictError("The owner has since set this item more private; the move may not land below it.");
       }
-      const lowersLayer = tierRank(targetMetadataTier) < tierRank(existing.metadataTier) || tierRank(targetContentTier) < tierRank(existing.contentTier);
-      if (existing.decidedBy === "override" && lowersLayer && !overrideAuthorizes(override, targetMetadataTier, targetContentTier)) {
+      if (conflict === "override_changed") {
         throw new TierLedgerGenerationConflictError("The owner override behind this move changed; re-read it before landing.");
       }
       for (const planned of options.destination) {
@@ -19042,6 +19170,16 @@ class TierLedger {
       const relayered = copies.filter((copy) => copy.state === "current" && copy.generation === flipGeneration && copy.previousLayers !== null);
       if (restore.length === 0 && relayered.length === 0) {
         throw new Error("Nothing to roll back to: the last flip superseded or re-layered no copy.");
+      }
+      const sources = copies.filter((copy) => copy.state === "current");
+      const destination = [
+        ...restore,
+        ...sources.filter((copy) => copy.generation !== flipGeneration),
+        ...relayered.map((copy) => ({ ...copy, layers: copy.previousLayers }))
+      ];
+      const target = { metadataTier: existing.previousMetadataTier, contentTier: existing.previousContentTier };
+      if (tierMoveOverrideConflict(this.getOverride(identity), existing, target, sources, destination) || options.authorize && !options.authorize(existing, target, sources, destination)) {
+        throw new TierLedgerGenerationConflictError;
       }
       const generation = flipGeneration + 1;
       for (const copy of copies) {
@@ -19664,10 +19802,12 @@ class TierLedger {
         "tier_migration_proposals",
         "secret_side_store_debt",
         "secret_side_store_scrubs",
-        "secret_redaction_retirement"
+        "secret_redaction_retirement",
+        "tier_label_rule_matches"
       ]) {
         this.db.query(`DELETE FROM ${table} WHERE provider = ? AND account_scope = ?`).run(provider, accountScope);
       }
+      this.db.query("DELETE FROM tier_ledger_meta WHERE key = ?").run(labelSweepMetaKey(provider, accountScope));
       return { items, copies };
     })();
   }
@@ -20026,6 +20166,18 @@ function overrideAuthorizes(override, metadataTier, contentTier) {
   const allowed = (tier) => tier === override.tier || override.tier === "public" && tier === "private";
   return allowed(metadataTier) && allowed(contentTier);
 }
+function tierMoveOverrideConflict(override, record, target, sources, destination) {
+  const authorized = overrideAuthorizes(override, target.metadataTier, target.contentTier);
+  if (override?.kind === "tier") {
+    const floor = tierRank(override.tier);
+    const belowTier = tierRank(target.metadataTier) < floor || tierRank(target.contentTier) < floor;
+    if (belowTier && !authorized || destination.some((copy) => trustDomainRank(copy.trustDomain) < floor))
+      return "tier_floor";
+  }
+  if (record.decidedBy !== "override" || authorized)
+    return;
+  return tierRank(target.metadataTier) < tierRank(record.metadataTier) || tierRank(target.contentTier) < tierRank(record.contentTier) || loweredCopyLayers(sources, destination).length > 0 ? "override_changed" : undefined;
+}
 function samePlan(current, planned) {
   if (current.length !== planned.length)
     return false;
@@ -20041,6 +20193,13 @@ function placementIsRaise(current, planned) {
       return true;
   }
   return false;
+}
+function loweredCopyLayers(sources, destination) {
+  return ["metadata", "content"].filter((layer) => {
+    const from = copyServingLayer(sources, layer);
+    const to = copyServingLayer(destination, layer);
+    return from && to && trustDomainRank(to.trustDomain) < trustDomainRank(from.trustDomain);
+  });
 }
 function assertCopyPlan(copy) {
   if (!copy.corpusId?.trim())
@@ -20160,6 +20319,83 @@ function rowOf(record) {
     metadataFlagged: record.metadataFlagged
   };
 }
+function queuedDecisionRecord(record) {
+  return {
+    ...record,
+    metadataTier: record.targetMetadataTier ?? record.metadataTier,
+    contentTier: record.targetContentTier ?? record.contentTier
+  };
+}
+function movingObservation(record, observed, options = {}) {
+  if (record.state !== "moving" || observed.contentRead || observed.contentTier === "secrets")
+    return observed;
+  const queued = queuedDecisionRecord(record);
+  const next = effectiveRow(queued, observed);
+  const body = observed.reasons.find((reason) => reason.startsWith("content:sha256:"));
+  if (body && !queued.reasons.includes(body)) {
+    next.reasons = next.reasons.filter((reason) => !reason.startsWith("content:sha256:"));
+    next.reasons.push(body);
+  }
+  if (queued.contentRead && (options.contentFetchOwed || tierRank(queued.contentTier) < tierRank("secure") && tierRank(next.contentTier) < tierRank("secure") && observationMaterialChanged(queued, observed))) {
+    next.contentPending = true;
+    next.reasons = next.reasons.filter((reason) => !reason.startsWith("content:sniffer:") && !reason.startsWith("content:judge_verdict:"));
+    next.reasons.push(`content:sniffer:${observed.snifferId}:undecided`);
+  }
+  return { ...observed, ...decisionOfRow(next), snifferId: observed.snifferId };
+}
+function retainHiddenRaise(existing, next, sources, planner, nextPlacement) {
+  if (!sources.some((copy) => copy.state === "superseded"))
+    return next;
+  const queued = queuedDecisionRecord(existing);
+  const previousPlacement = planner?.(decisionOfRow(rowOf(queued)));
+  const floor = (layer) => {
+    const source = copyServingLayer(sources, layer);
+    if (!source || source.state !== "superseded")
+      return "public";
+    const raised = previousPlacement && copyServingLayer(previousPlacement.copies, layer);
+    const raisedRank = raised ? trustDomainRank(raised.trustDomain) : decisionLayerRank(queued, layer);
+    if (raisedRank <= trustDomainRank(source.trustDomain))
+      return "public";
+    const planned = nextPlacement && copyServingLayer(nextPlacement.copies, layer);
+    const plannedRank = planned ? trustDomainRank(planned.trustDomain) : decisionLayerRank(next, layer);
+    return plannedRank < raisedRank ? TIER_KEYS[raisedRank] : "public";
+  };
+  const metadataTier = maxTier(next.metadataTier, floor("metadata"));
+  const contentTier = maxTier(maxTier(next.contentTier, floor("content")), metadataTier);
+  if (metadataTier === next.metadataTier && contentTier === next.contentTier)
+    return next;
+  return { ...next, metadataTier, contentTier, reasons: [...next.reasons, RETAINED_MOVE_SOURCE_REASON] };
+}
+function decisionLayerRank(decision, layer) {
+  if (decision.metadataPending || layer === "content" && contentHeldForJudgment(decision))
+    return tierRank("secure");
+  return tierRank(layer === "metadata" ? decision.metadataTier : decision.contentTier);
+}
+function placementRaisesSource(decision, sources) {
+  return ["metadata", "content"].some((layer) => {
+    const source = copyServingLayer(sources, layer);
+    return source !== undefined && decisionLayerRank(decision, layer) > trustDomainRank(source.trustDomain);
+  });
+}
+function observationSupersedesMove(existing, next, sources, planner) {
+  if (existing.targetMetadataTier === null || existing.targetContentTier === null || existing.targetMetadataTier === "secrets" || existing.targetContentTier === "secrets")
+    return false;
+  const queued = queuedDecisionRecord(existing);
+  const placement = planner?.(decisionOfRow(rowOf(queued)));
+  const lowers = tierRank(queued.metadataTier) < tierRank(existing.metadataTier) || tierRank(queued.contentTier) < tierRank(existing.contentTier) || ["metadata", "content"].some((layer) => {
+    const from = copyServingLayer(sources, layer);
+    const to = placement && copyServingLayer(placement.copies, layer);
+    return from !== undefined && (to ? trustDomainRank(to.trustDomain) : decisionLayerRank(queued, layer)) < trustDomainRank(from.trustDomain);
+  });
+  if (!lowers)
+    return false;
+  if (tierRank(next.metadataTier) > tierRank(queued.metadataTier) || tierRank(next.contentTier) > tierRank(queued.contentTier) || next.metadataPending && !queued.metadataPending || next.contentPending && !queued.contentPending || next.engineVersion !== queued.engineVersion || next.mapRevision !== queued.mapRevision || next.metadataForced !== queued.metadataForced || next.metadataFlagged !== queued.metadataFlagged)
+    return true;
+  return observationMaterialChanged(queued, next);
+}
+function observationMaterialChanged(queued, next) {
+  return [NAMES_INPUT_REASON_PREFIX, "content:sha256:", "content:names:"].some((prefix) => next.reasons.some((reason) => reason.startsWith(prefix) && !queued.reasons.includes(reason)));
+}
 var STALE_EMBED_HOLD_DECIDED = `EXISTS (
         SELECT 1 FROM tier_items t
         WHERE t.provider = tier_copies.provider AND t.account_scope = tier_copies.account_scope
@@ -20216,19 +20452,7 @@ function isOpenSnifferReason(reason, pass) {
   return reason.startsWith("content:sniffer:") && reason.endsWith(":undecided");
 }
 function effectiveRow(existing, decision) {
-  const fresh = {
-    metadataTier: decision.metadataTier,
-    contentTier: decision.contentTier,
-    decidedBy: decision.decidedBy,
-    reasons: decision.reasons,
-    engineVersion: decision.engineVersion,
-    mapRevision: decision.mapRevision,
-    contentRead: decision.contentRead,
-    metadataPending: decision.metadataPending,
-    contentPending: decision.contentPending,
-    metadataForced: decision.metadataForced,
-    metadataFlagged: decision.metadataFlagged
-  };
+  const fresh = rowOfDecision(decision);
   if (!existing || decision.contentRead)
     return fresh;
   if (existing.contentRead) {
@@ -20244,6 +20468,21 @@ function effectiveRow(existing, decision) {
     };
   }
   return { ...fresh, contentTier: maxTier(existing.contentTier, decision.contentTier) };
+}
+function rowOfDecision(decision) {
+  return {
+    metadataTier: decision.metadataTier,
+    contentTier: decision.contentTier,
+    decidedBy: decision.decidedBy,
+    reasons: decision.reasons,
+    engineVersion: decision.engineVersion,
+    mapRevision: decision.mapRevision,
+    contentRead: decision.contentRead,
+    metadataPending: decision.metadataPending,
+    contentPending: decision.contentPending,
+    metadataForced: decision.metadataForced,
+    metadataFlagged: decision.metadataFlagged
+  };
 }
 function decisionFlags(decision) {
   return [
@@ -20749,7 +20988,7 @@ function tierLedgerMigrations() {
       }
     },
     {
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 17,
       name: "visibility_feed_copy_corpus",
       up(db) {
         if (!db.query("SELECT 1 FROM pragma_table_info('tier_visibility_changes') WHERE name = 'corpus_id'").get()) {
@@ -20780,6 +21019,22 @@ function tierLedgerMigrations() {
               BEGIN ${note("OLD", changed)} ${note("NEW", changed)} END;
           `);
         }
+      }
+    },
+    {
+      version: TIER_LEDGER_SCHEMA_VERSION,
+      name: "provider_label_rule_matches",
+      up(db) {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS tier_label_rule_matches (
+            provider TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            rule_key TEXT NOT NULL,
+            item_key TEXT NOT NULL,
+            walk_id TEXT NOT NULL,
+            PRIMARY KEY (provider, account_scope, rule_key, item_key)
+          ) WITHOUT ROWID
+        `);
       }
     }
   ];
@@ -21397,12 +21652,6 @@ function findTierSetLedger(storeDbPath, binding) {
   return;
 }
 
-// src/workers/classification/installed-tier-classification-registry.ts
-var registered;
-function registeredInstalledTierClassification() {
-  return registered;
-}
-
 // src/workers/connector-store/tier-placement.ts
 function resolveStoreTierClassification(explicit, ledgerPath) {
   const installed = registeredInstalledTierClassification()?.forLedger(ledgerPath);
@@ -21487,7 +21736,7 @@ function decideItemTiers(connector, item, text, options, ledger, extra = {}) {
   const newArrival = extra.afterFirstImport === true && recorded === undefined;
   if (newArrival && text === undefined)
     ledger?.markNewArrival(item.identity);
-  const sniffer = cacheAware && arrivalOrderedSniffer(conversationOrderedSniffer(recordedContentVerdictSniffer(cacheAware, recorded, text, namesReceipt), item.metadata), newArrival);
+  const sniffer = cacheAware && arrivalOrderedSniffer(conversationOrderedSniffer(recordedContentVerdictSniffer(cacheAware, recorded, text, namesReceipt, namesInputReason(signals, parentContext)), item.metadata), newArrival);
   const holdUntilJudged = options?.holdContentUntilJudged === true || item.holdContentUntilJudged === true || heldUntilJudged(recorded?.reasons);
   return classifyItemTiers({
     signals,
@@ -21509,12 +21758,14 @@ function decideItemTiers(connector, item, text, options, ledger, extra = {}) {
     ...options?.retirePublic ? { retirePublic: true } : {}
   });
 }
-function recordedContentVerdictSniffer(sniffer, recorded, text, names) {
-  if (!recorded || !text?.trim() || recorded.state !== "current" || recorded.contentPending || !recorded.contentRead)
+function recordedContentVerdictSniffer(sniffer, recorded, text, names, namesInput) {
+  if (!recorded || !text?.trim() || recorded.contentPending || !recorded.contentRead || recorded.reasons.includes(RETAINED_MOVE_SOURCE_REASON))
+    return sniffer;
+  if (recorded.state !== "current" && (recorded.state !== "moving" || !namesInput || !recorded.reasons.includes(namesInput)))
     return sniffer;
   if (recorded.engineVersion !== TIER_CLASSIFIER_VERSION || !recorded.reasons.includes(contentDigestReason(text)) || !recorded.reasons.includes(names))
     return sniffer;
-  const tier = recorded.contentTier;
+  const tier = recorded.targetContentTier ?? recorded.contentTier;
   const prefix = `content:sniffer:${sniffer.id}:`;
   const code = recorded.reasons.find((reason) => reason.startsWith(prefix))?.slice(prefix.length);
   if (tier !== "private" && tier !== "secure" || !code || code === "undecided" || isFailSafeMissingContentQuestion(`${prefix}${code}`))
@@ -24040,6 +24291,9 @@ var EMBEDDING_LEDGER_BACKFILL = PUBLIC_RUNTIME_BUILD ? [] : [
     status: "complete"
   }
 ];
+
+// src/workers/connector-store/tier-move-rule-policy.ts
+var heldPolicyFences = new WeakMap;
 
 // src/workers/answer-activity.ts
 var DEFAULT_ANSWER_LEASE_MS = 20 * 60000;

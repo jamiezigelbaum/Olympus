@@ -22,7 +22,7 @@ import { CachedTierSniffer, SNIFFER_PROMPT_VERSION, snifferId } from './sniffer.
 import { installedSnifferRuntime } from './installed-sniffer-runtime.ts';
 import { TierSnifferStore } from './sniffer-store.ts';
 import { tierSnifferPathForLedger } from './tier-ledger-path.ts';
-import { loadOwnerTierRules } from './tier-rules.ts';
+import { loadOwnerTierRules, resolveTierRulesPath } from './tier-rules.ts';
 import { loadSovereigntyEngine } from '../../core/sovereignty.ts';
 import { TIER_MAP_REVISION } from './tier-classifier.ts';
 import type { SourceTrustDomain } from '../../core/source-index/types.ts';
@@ -243,7 +243,8 @@ async function withLanes<T>(
 ): Promise<T> {
   const opened = openTierMigrationLanes(context.laneSpecs ?? installedTierMigrationLaneSpecs(env), {
     mode,
-    ...(inputs.rules ? { tierClassification: { rules: inputs.rules } } : {}),
+    ownerRulesPath: resolveTierRulesPath({ env }),
+    ...(context.inputs?.rules ? { tierClassification: { rules: context.inputs.rules } } : {}),
   });
   try {
     return await run(opened);

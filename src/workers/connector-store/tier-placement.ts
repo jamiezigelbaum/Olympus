@@ -27,6 +27,7 @@ import {
   itemHasNonTextContent,
   contentDigestReason,
   contentNamesReason,
+  namesInputReason,
   tierSnifferInputHash,
   arrivalOrderedSniffer,
   conversationOrderedSniffer,
@@ -35,7 +36,7 @@ import {
   type TierDecision,
   type TierSniffer,
 } from '../classification/tier-classifier.ts';
-import { isFailSafeMissingContentQuestion, type TierLedger, type TierLedgerIdentity, type TierLedgerRecord } from '../classification/tier-ledger.ts';
+import { RETAINED_MOVE_SOURCE_REASON, isFailSafeMissingContentQuestion, type TierLedger, type TierLedgerIdentity, type TierLedgerRecord } from '../classification/tier-ledger.ts';
 import { registeredInstalledTierClassification } from '../classification/installed-tier-classification-registry.ts';
 
 /**
@@ -95,6 +96,12 @@ export interface ConnectorStoreTierClassification {
    * Supplied by the tiered store set, which can see the parent's stored names.
    */
   parentNamesContext?: (child: TierLedgerIdentity, parentLink?: string) => string | undefined;
+}
+
+/** Live lane rules read while holding the same lease as their writer. */
+export interface TierOwnerRuleSource {
+  path: string;
+  read(): { rules: readonly OwnerTierRule[]; revision: string; unavailable?: boolean };
 }
 
 /**
@@ -248,7 +255,7 @@ export function decideItemTiers(
   // Its text, read later, is judged ahead as well (tiered-store-sink.ts, local-index.ts).
   if (newArrival && text === undefined) ledger?.markNewArrival(item.identity);
   const sniffer = cacheAware && arrivalOrderedSniffer(conversationOrderedSniffer(
-    recordedContentVerdictSniffer(cacheAware, recorded, text, namesReceipt), item.metadata,
+    recordedContentVerdictSniffer(cacheAware, recorded, text, namesReceipt, namesInputReason(signals, parentContext)), item.metadata,
   ), newArrival);
   // The lane's hold, the item's own (an item built from an archive record
   // carries it: contracts.ts, 2.2.0), or the one its stored decision carries
@@ -297,12 +304,16 @@ export function recordedContentVerdictSniffer(
   recorded: TierLedgerRecord | undefined,
   text: string | undefined,
   names: string,
+  namesInput?: string,
 ): TierSniffer {
-  if (!recorded || !text?.trim() || recorded.state !== 'current' || recorded.contentPending || !recorded.contentRead) return sniffer;
+  if (!recorded || !text?.trim() || recorded.contentPending || !recorded.contentRead
+    || recorded.reasons.includes(RETAINED_MOVE_SOURCE_REASON)) return sniffer;
+  if (recorded.state !== 'current' && (recorded.state !== 'moving'
+    || !namesInput || !recorded.reasons.includes(namesInput))) return sniffer;
   if (recorded.engineVersion !== TIER_CLASSIFIER_VERSION || !recorded.reasons.includes(contentDigestReason(text))
     || !recorded.reasons.includes(names)) return sniffer;
   // The sniffer's verdict is the content tier, unless something else raised it: kept as recorded, never lower.
-  const tier = recorded.contentTier;
+  const tier = recorded.targetContentTier ?? recorded.contentTier;
   const prefix = `content:sniffer:${sniffer.id}:`;
   const code = recorded.reasons.find((reason) => reason.startsWith(prefix))?.slice(prefix.length);
   if ((tier !== 'private' && tier !== 'secure') || !code || code === 'undecided'
