@@ -35,8 +35,8 @@ import { privacyChoicePending } from '../../core/first-run-privacy.ts';
 import { LocalModelDiscovery, saveLocalAnswerModel } from '../../core/local-model-discovery.ts';
 import { saveFirstRunPrivacyChoice, savePrivateAnswerMode } from '../../core/first-run-privacy.ts';
 import { createSpoolChangeSubscription } from '../messaging-spool-wake.ts';
-import { declaredConnectorStoreMountPaths, declaredConnectorStoreMounts, resolvedStorePath, retiredPathSettings } from '../../core/source-placement.ts';
-import { DASHBOARD_PRIVATE_ANSWERS_COPY as PRIVATE_ANSWERS_COPY, type PrivacyJudgeStopReason } from '../dashboard/vocabulary.ts';
+import { declaredConnectorStoreMountPaths, resolvedStorePath, retiredPathSettings } from '../../core/source-placement.ts';
+import { DASHBOARD_PRIVATE_ANSWERS_COPY as PRIVATE_ANSWERS_COPY } from '../dashboard/vocabulary.ts';
 import { anonymousInboxConnectionId, localInboxLabel, askWithAnonymousInbox } from './runtime/local-private-answers.ts';
 import { installWorkerShutdownSignals } from '../../core/worker-shutdown.ts';
 import { connectLinuxOwnerBridgeHost, OWNER_BRIDGE_HOST_ENV } from '../../core/linux-owner-bridge-host.ts';
@@ -66,9 +66,8 @@ import { environmentWithWorkerSetupEnv, mergeWorkerSetupEnv, readWorkerSetupEnv,
 import { remoteOpenInstructions, resolveServerMode, resolveAgentApprovalHost } from '../../core/remote-open.ts';
 import { loadOrCreateDashboardSessionSecret } from '../../core/dashboard-session-secret.ts';
 import { execFile } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { appendFileSync, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { appendFile, stat, writeFile } from 'node:fs/promises';
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import {
@@ -111,7 +110,6 @@ import {
   PLAIN_STATUS_REQUEST,
 } from '../source-index/status.ts';
 import { startPacedStatusRecount, type PacedStatusRecount } from './status-recount.ts';
-import { heldCountFilesCurrent, heldCountPlan, heldGoogleAccount, heldSourceMountsComplete, startHeldItemStatus, type HeldCountPlan } from './held-item-status.ts';
 import { LOOP_SLOW_SQL_MS, setAskBenchLoopSqlRecorder, slowMainThreadSqlHealth, startMainThreadSqlSiteCount, startSlowMainThreadSqlLog } from '../connector-store/main-thread-sql-trace.ts';
 import {
   dashboardOwnerSessionCheck,
@@ -241,7 +239,7 @@ import { accountRawPath, accountStoreNames, accountStorePath, hasLegacyLayout, l
 import { ARCHIVE_IMPORTS_SOURCE_ID } from '../archive-import/state.ts';
 import { archiveImportFamilies } from '../../core/archive-formats.ts';
 import { captureGrantPathFromEnv } from '../../core/messaging-capture-grant-file.ts';
-import { readUnpairedSources, unpairedSourcesPath, withoutUnpairedLaneHandles } from '../credential-broker/unpaired-sources.ts';
+import { unpairedSourcesPath } from '../credential-broker/unpaired-sources.ts';
 import { createFrontMountChanges } from './runtime/front-mount-changes.ts';
 import { createArchiveExtractionRuntime } from '../archive-import/extraction-runtime.ts';
 import { createArchiveImportsSchedulerSource } from '../archive-import/scheduler-source.ts';
@@ -326,7 +324,7 @@ import {
 import { recordedProviderAccount } from '../../core/provider-account-history.ts';
 import { takeWorkerDataOwnerLock, type HeldDataOwnerLock } from '../../core/data-owner-lock.ts';
 import { exportOlympusData, lifecycleStoreFileOwner } from '../../data-lifecycle.ts';
-import { heldCountFileIdentity, TierLedger, TierLedgerSchemaError, type TierLedgerIdentity } from '../classification/tier-ledger.ts';
+import { TierLedger, TierLedgerSchemaError, type TierLedgerIdentity } from '../classification/tier-ledger.ts';
 import { resolveSecretRefValueSync } from '../../core/secret-store.ts';
 import {
   WorkerBootSecretResolver,
@@ -399,9 +397,6 @@ import {
 } from '../source-ingestion-ledger.ts';
 import {
   handleRegistryPathFromEnv,
-  connectedHandleGrantEpochPath,
-  readConnectedHandleGrantEpoch,
-  readConnectedHandleRegistry,
   type ConnectedCredentialHandle,
 } from '../credential-broker/connected-handles.ts';
 import {
@@ -443,7 +438,7 @@ import {
   gmailImportWait,
 } from '../google-connectors/gmail-import-allowance.ts';
 import type { GmailApiClient } from '../google-connectors/gmail.ts';
-import { DEFAULT_ACCOUNT_SLOT, findRegistryAccount, readSourceRegistry, sourceAccountMovePending, sourceRegistryPath } from '../../core/source-registry.ts';
+import { DEFAULT_ACCOUNT_SLOT, readSourceRegistry, sourceRegistryPath } from '../../core/source-registry.ts';
 import { gmailContentArrivesLater, gmailLaneSyncOptions } from '../google-connectors/gmail-live-sync.ts';
 import {
   GMAIL_ATTACHMENT_EXTRACTION_BATCH_SIZE,
@@ -494,7 +489,7 @@ import { resolveTierMigrationPaths, tierMigrationStatusSummary } from '../classi
 import { resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
 import { controlPathHeadroom, ingestionTurn, serializeDiagnosticWrites, startCpuSampleLog } from '../control-path-headroom.ts';
 import { setEngineStep, startEngineHeartbeat } from '../../core/engine-heartbeat.ts';
-import { withdrawBootProgress, beginBootProgress, beginFrontProgress, failFrontProgress, finishBootProgress, finishFrontProgress, identifyBootProgressPublisher, reportBootStep, reportFrontStep } from '../../core/boot-progress.ts';
+import { withdrawBootProgress, beginBootProgress, beginFrontProgress, failFrontProgress, finishBootProgress, finishFrontProgress, reportBootStep, reportFrontStep } from '../../core/boot-progress.ts';
 import { beginStartupProgress } from '../../core/startup-progress.ts';
 import { ENGINE_BACKGROUND_INSTANCE_ENV, engineRoleFromEnv } from '../../core/engine-split.ts';
 import { forbidWritableStoreOpens } from '../../core/store-write-guard.ts';
@@ -580,8 +575,6 @@ import {
 import {
   readActiveConnectedHandles,
   selectedSourceCredentialHandle,
-  selectCredentialHandle,
-  SOURCE_REGISTRY_LANE_DECISION,
   sourceIndexLaneEnabled,
   sourceIndexLaneAccountDecision,
   sourceIndexLaneStorageDecision,
@@ -767,9 +760,6 @@ export async function main(): Promise<void> {
   }
   const engineSocketPath = engineRole === 'single' ? undefined : engineBackgroundSocketFromEnv(process.env);
   let engineFront: EngineFront | undefined;
-  let frontHeldPlan: HeldCountPlan | undefined;
-  let frontHeldChangedAt: number | undefined;
-  let heldScopeChanged = (): void => {};
   let frontStarting: ReturnType<typeof listenWhileStarting>;
   if (engineRole === 'front') {
     // The front does none of the boot work that needs the data root to
@@ -792,12 +782,7 @@ export async function main(): Promise<void> {
     });
     await waitForBackgroundBootDone({ env: process.env });
     reportFrontStep();
-    engineFront = createEngineFront({
-      env: process.env, socketPath: engineSocketPath!, authToken: frontToken,
-      heldView: () => frontHeldPlan?.mountsCurrent()
-        ? { scope: frontHeldPlan.scope, ...(frontHeldChangedAt === undefined ? {} : { changedAt: frontHeldChangedAt }) }
-        : undefined,
-    });
+    engineFront = createEngineFront({ env: process.env, socketPath: engineSocketPath!, authToken: frontToken });
     void engineFront.refreshStatus();
     refreshSetupEnv();
     // The previous front's hold died with it. Let its accepted Private
@@ -978,7 +963,6 @@ export async function main(): Promise<void> {
   // leg, 15 Nov).
   // The split background's paced status recount, once it starts (health shows it).
   let statusRecount: PacedStatusRecount | undefined;
-  let heldItemStatus: ReturnType<typeof startHeldItemStatus> | undefined;
   const standBack = createStandBack({
     reason: () => ownerAskReason(ownerQuestions, () => remoteOwnerBusy(OWNER_QUESTION_RESOURCE)),
   });
@@ -1413,7 +1397,6 @@ export async function main(): Promise<void> {
     const reason = mountFailureReason(error);
     if (frontMountProblems.get(id)?.reason !== reason) console.warn(`[olympus] the front could not open a source's stores yet (${label}): ${reason}`);
     frontMountProblems.set(id, { label, reason, lastAttemptAt: Date.now() });
-    heldScopeChanged();
   };
   const attemptFrontMount = (id: string, attempt: () => boolean, label = id): void => {
     try {
@@ -1432,12 +1415,6 @@ export async function main(): Promise<void> {
     }
     tierLedgerProblems.delete(sourceId);
     return true;
-  };
-  // Mounted identities are kept with the existing in-memory mount state.
-  const heldSourceByCorpus = new Map<string, string>();
-  const identifyHeldCorpus = (sourceId: string, corpusIds: Iterable<string>): void => {
-    for (const id of corpusIds) heldSourceByCorpus.set(id, sourceId);
-    heldScopeChanged();
   };
   const tierLanes: Array<{
     ledger: TierLedger;
@@ -1511,7 +1488,6 @@ export async function main(): Promise<void> {
   // P1c: a lane whose tier set its own module builds (Dropbox, Readwise, X,
   // WhatsApp) registers its ledger and its on-demand stores here.
   const adoptTierLane = (input: {
-    sourceId: string;
     ledger: TierLedger;
     /** The lane's Private corpus: its Secrets are located only when it was searched. */
     secureCorpusId: string;
@@ -1519,7 +1495,6 @@ export async function main(): Promise<void> {
     onDemand: readonly OnDemandTierStore[];
     secrets?: SecretLocationsIndex;
   }): void => {
-    identifyHeldCorpus(input.sourceId, input.corpusIds);
     tierLanes.push({
       ledger: input.ledger,
       secureCorpusId: input.secureCorpusId,
@@ -1563,7 +1538,6 @@ export async function main(): Promise<void> {
       ...(input.publicStore ? { publicStore: input.publicStore } : {}),
       onDemand: input.publicStore ? [input.publicStore] : [],
     };
-    identifyHeldCorpus(input.account.sourceId, lane.corpusIds);
     tierLanes.push(lane);
     return lane;
   };
@@ -1618,7 +1592,6 @@ export async function main(): Promise<void> {
     tierLanes,
     (store, ledger) => ({ ledger, secureCorpusId: store.corpusId, corpusIds: new Set([store.corpusId]), onDemand: [] }),
     (line) => console.warn(line),
-    () => heldScopeChanged(),
   );
   const tierScopes = (): TierVisibilityScope[] => (pendingGovernance.retry(), tierLanes).map((lane) => ({
     ledger: lane.ledger,
@@ -1673,13 +1646,11 @@ export async function main(): Promise<void> {
   // Per-tier stores (P1c) of a lane that has had one store: that store keeps
   // every existing item, and each new store is created on first need.
   const existingStoreTierSet = (
-    sourceId: string,
     lane: ExistingStoreTierLane,
     input: { store: LocalConnectorStore; secrets?: SecretLocationsIndex },
   ): TieredStoreSet => {
     const newStores = Object.values(lane.newStores).filter((store): store is OnDemandTierStore => store !== undefined);
     adoptTierLane({
-      sourceId,
       ledger: lane.ledger,
       secureCorpusId: lane.set.legSpec('secure_local')!.corpusId,
       corpusIds: [input.store.corpusId, ...newStores.map((store) => store.corpusId)],
@@ -1705,7 +1676,7 @@ export async function main(): Promise<void> {
           resolvedStorePath(READWISE_SOURCE_ID, 'secure_local', process.env),
           READWISE_SECURE_LIBRARY_CORPUS_ID,
         );
-        return existingStoreTierSet(READWISE_SOURCE_ID, createReadwiseTierLane({
+        return existingStoreTierSet(createReadwiseTierLane({
           store,
           env: process.env,
           ...(readwiseEmbeddingProvider ? { embeddingProvider: readwiseEmbeddingProvider } : {}),
@@ -1752,7 +1723,7 @@ export async function main(): Promise<void> {
           onStoreOpened: (opened) => registerTierLegStore(opened, store.corpusId, tierSecureEmbeddingProvider ?? null),
         });
         xBookmarksTierStores = Object.values(lane.newStores).filter((leg): leg is OnDemandTierStore => leg !== undefined);
-        return existingStoreTierSet(X_BOOKMARKS_SOURCE_ID, lane, { store, ...(secrets ? { secrets } : {}) });
+        return existingStoreTierSet(lane, { store, ...(secrets ? { secrets } : {}) });
       },
     });
     xBookmarksConnectorStore = refreshableXBookmarksRuntime?.store;
@@ -2082,7 +2053,6 @@ export async function main(): Promise<void> {
     }
     if (dropboxTierLane && dropboxConnectorStore) {
       adoptTierLane({
-        sourceId: DROPBOX_FILES_SOURCE_ID,
         ledger: dropboxTierLane.ledger,
         secureCorpusId: dropboxConnectorStore.corpusId,
         corpusIds: [dropboxConnectorStore.corpusId, dropboxTierLane.internal.corpusId, dropboxTierLane.public.corpusId],
@@ -2153,7 +2123,6 @@ export async function main(): Promise<void> {
     }
     if (localFilesTierLane && localFilesConnectorStore) {
       adoptTierLane({
-        sourceId: LOCAL_FILES_SOURCE_ID,
         ledger: localFilesTierLane.ledger,
         secureCorpusId: localFilesConnectorStore.corpusId,
         corpusIds: [localFilesConnectorStore.corpusId, localFilesTierLane.internal.corpusId, localFilesTierLane.public.corpusId],
@@ -2268,7 +2237,7 @@ export async function main(): Promise<void> {
           WHATSAPP_PERSONAL_SOURCE_ID,
           WHATSAPP_LIVE_CORPUS_ID,
           () => createWhatsAppConnectorStore(process.env),
-          (store, secretLocations) => existingStoreTierSet(WHATSAPP_PERSONAL_SOURCE_ID, createWhatsAppTierLane({
+          (store, secretLocations) => existingStoreTierSet(createWhatsAppTierLane({
             store,
             env: process.env,
             ...(sourceIndexEmbeddingProvider ? { internalEmbeddingProvider: sourceIndexEmbeddingProvider } : {}),
@@ -2308,7 +2277,7 @@ export async function main(): Promise<void> {
       const store = createWhatsAppConnectorStore(process.env);
       const secrets = openTierSecretLocations({ sourceId: WHATSAPP_PERSONAL_SOURCE_ID }, store.dbPath, WHATSAPP_LIVE_CORPUS_ID);
       registerTierLegStore(store, WHATSAPP_LIVE_CORPUS_ID, tierSecureEmbeddingProvider ?? null);
-      whatsappImportTierSet = existingStoreTierSet(WHATSAPP_PERSONAL_SOURCE_ID, createWhatsAppTierLane({
+      whatsappImportTierSet = existingStoreTierSet(createWhatsAppTierLane({
         store,
         env: process.env,
         ...(sourceIndexEmbeddingProvider ? { internalEmbeddingProvider: sourceIndexEmbeddingProvider } : {}),
@@ -2401,14 +2370,14 @@ export async function main(): Promise<void> {
   const storeAt = (sourceId: string, domain: 'internal' | 'secure_local'): string =>
     resolvedStorePath(sourceId, domain, process.env);
   const sourceMounts = [
-    { id: GMAIL_SOURCE_ID, enabled: gmailConnectorStoreLane.enabled, mountBlocked: gmailConnectorStoreLane.decidedBy === SOURCE_REGISTRY_LANE_DECISION, pending: () => !gmailInternalConnectorStore && gmailConnectorStoreLane.enabled, provider: 'gmail', capability: 'gmail.email.sync', pin: 'OLYMPUS_SOURCE_INDEX_GMAIL_CREDENTIAL_HANDLE', stores: ['internal', 'secure_local'], open: mountGmail },
-    { id: GOOGLE_DRIVE_SOURCE_ID, enabled: googleDriveConnectorStoreLane.enabled, mountBlocked: googleDriveConnectorStoreLane.decidedBy === SOURCE_REGISTRY_LANE_DECISION, pending: () => !googleDriveInternalConnectorStore && googleDriveConnectorStoreLane.enabled, provider: 'google_drive', capability: 'google_drive.docs.sync', pin: 'OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CREDENTIAL_HANDLE', stores: ['internal', 'secure_local'], open: mountGoogleDrive },
-    { id: DROPBOX_FILES_SOURCE_ID, enabled: dropboxConnectorStoreLane.enabled, mountBlocked: dropboxConnectorStoreLane.decidedBy === SOURCE_REGISTRY_LANE_DECISION, pending: () => !dropboxConnectorStore && dropboxConnectorStoreLane.enabled, provider: 'dropbox', capability: 'dropbox.files.sync', pin: 'OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_CREDENTIAL_HANDLE', stores: ['secure_local'], open: mountDropbox },
-    { id: LOCAL_FILES_SOURCE_ID, enabled: localFilesConnectorStoreLane.enabled, mountBlocked: localFilesConnectorStoreLane.decidedBy === SOURCE_REGISTRY_LANE_DECISION, pending: () => !localFilesConnectorStore && localFilesConnectorStoreLane.enabled, stores: ['secure_local'], open: mountLocalFiles },
-    { id: WHATSAPP_PERSONAL_SOURCE_ID, enabled: whatsappConnectorStoreLane.enabled, mountBlocked: whatsappConnectorStoreLane.decidedBy === SOURCE_REGISTRY_LANE_DECISION, pending: () => !whatsappConnectorStore && whatsappConnectorStoreLane.enabled, provider: 'whatsapp_personal', capability: 'whatsapp.personal.messages.sync', pin: 'OLYMPUS_SOURCE_INDEX_WHATSAPP_CREDENTIAL_HANDLE', stores: ['secure_local'], open: mountWhatsApp },
-    { id: TELEGRAM_MESSAGES_SOURCE_ID, enabled: telegramConnectorStoreLane.enabled, mountBlocked: telegramConnectorStoreLane.decidedBy === SOURCE_REGISTRY_LANE_DECISION, pending: () => !telegramConnectorStores && telegramConnectorStoreLane.enabled, provider: 'telegram', capability: 'telegram.messages.sync', pin: 'OLYMPUS_SOURCE_INDEX_TELEGRAM_CREDENTIAL_HANDLE', stores: ['internal', 'secure_local'], open: mountTelegram },
-    { id: READWISE_SOURCE_ID, enabled: readwiseConnectorStoreLane.enabled, mountBlocked: readwiseConnectorStoreLane.decidedBy === SOURCE_REGISTRY_LANE_DECISION, pending: () => !readwiseConnectorStore && readwiseConnectorStoreLane.enabled, provider: 'readwise', capability: 'readwise.sync', pin: 'OLYMPUS_SOURCE_INDEX_READWISE_CREDENTIAL_HANDLE', stores: ['internal'], open: mountReadwise },
-    { id: X_BOOKMARKS_SOURCE_ID, enabled: xBookmarksConnectorStoreLane.enabled, mountBlocked: xBookmarksConnectorStoreLane.decidedBy === SOURCE_REGISTRY_LANE_DECISION, pending: () => !xBookmarksConnectorStore && xBookmarksConnectorStoreLane.enabled, provider: 'x', capability: 'x.bookmarks.sync', pin: 'OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CREDENTIAL_HANDLE', stores: ['internal'], open: mountXBookmarks },
+    { id: GMAIL_SOURCE_ID, pending: () => !gmailInternalConnectorStore && gmailConnectorStoreLane.enabled, provider: 'gmail', capability: 'gmail.email.sync', stores: ['internal', 'secure_local'], open: mountGmail },
+    { id: GOOGLE_DRIVE_SOURCE_ID, pending: () => !googleDriveInternalConnectorStore && googleDriveConnectorStoreLane.enabled, provider: 'google_drive', capability: 'google_drive.docs.sync', stores: ['internal', 'secure_local'], open: mountGoogleDrive },
+    { id: DROPBOX_FILES_SOURCE_ID, pending: () => !dropboxConnectorStore && dropboxConnectorStoreLane.enabled, provider: 'dropbox', capability: 'dropbox.files.sync', stores: ['secure_local'], open: mountDropbox },
+    { id: LOCAL_FILES_SOURCE_ID, pending: () => !localFilesConnectorStore && localFilesConnectorStoreLane.enabled, stores: ['secure_local'], open: mountLocalFiles },
+    { id: WHATSAPP_PERSONAL_SOURCE_ID, pending: () => !whatsappConnectorStore && whatsappConnectorStoreLane.enabled, provider: 'whatsapp_personal', capability: 'whatsapp.personal.messages.sync', stores: ['secure_local'], open: mountWhatsApp },
+    { id: TELEGRAM_MESSAGES_SOURCE_ID, pending: () => !telegramConnectorStores && telegramConnectorStoreLane.enabled, provider: 'telegram', capability: 'telegram.messages.sync', stores: ['internal', 'secure_local'], open: mountTelegram },
+    { id: READWISE_SOURCE_ID, pending: () => !readwiseConnectorStore && readwiseConnectorStoreLane.enabled, provider: 'readwise', capability: 'readwise.sync', stores: ['internal'], open: mountReadwise },
+    { id: X_BOOKMARKS_SOURCE_ID, pending: () => !xBookmarksConnectorStore && xBookmarksConnectorStoreLane.enabled, provider: 'x', capability: 'x.bookmarks.sync', stores: ['internal'], open: mountXBookmarks },
   ] as const;
   const mountSourceLanes = (handles: readonly ConnectedCredentialHandle[], changed?: ReadonlySet<string>): void => {
     if (sourceRuntimeClosed) return;
@@ -3207,7 +3176,6 @@ export async function main(): Promise<void> {
       // A new store shows on the dashboard at the background's next count: the
       // split's front serves that count and never counts a store itself.
       statusRecount?.soon();
-      heldScopeChanged();
       if (engineFront) console.log(`[olympus] front: mounted ${store.corpusId}`);
     }
     probeExtractionEnded(store);
@@ -3279,7 +3247,6 @@ export async function main(): Promise<void> {
     onLane: (lane) => {
       if (tierSecureEmbeddingProvider) lane.set.declarePrivateEmbedder(tierSecureEmbeddingProvider);
       adoptTierLane({
-        sourceId: ARCHIVE_IMPORTS_SOURCE_ID,
         ledger: lane.ledger,
         secureCorpusId: lane.secure.corpusId,
         corpusIds: archiveLaneLegs(lane).map((leg) => leg.corpusId),
@@ -3335,7 +3302,6 @@ export async function main(): Promise<void> {
     onLane: (lane) => {
       if (tierSecureEmbeddingProvider) lane.set.declarePrivateEmbedder(tierSecureEmbeddingProvider);
       adoptTierLane({
-        sourceId: EVERNOTE_SOURCE_ID,
         ledger: lane.ledger,
         secureCorpusId: lane.secure.corpusId,
         corpusIds: [lane.secure.corpusId, lane.internal.corpusId],
@@ -4790,7 +4756,6 @@ export async function main(): Promise<void> {
               refreshPeople();
               // And new counts: the split's background counts them at its next paced turn.
               statusRecount?.soon();
-              heldItemStatus?.soon();
               const status = await sourceIndexStatus.status({ ...PLAIN_STATUS_REQUEST }, { countsMaxAgeMs: STATUS_COUNTS_MAX_AGE_MS });
               sourceIngestionLedger.record(buildSourceIngestionLedgerSnapshot(status, {
                 schedulerStatus,
@@ -4835,7 +4800,6 @@ export async function main(): Promise<void> {
         console.warn(`[olympus] the front could not open a source's stores yet: ${mountFailureReason(error)}`);
       }
     }
-    heldScopeChanged();
   };
   const archiveImportDashboard = createArchiveImportDashboard({
     runtime: archiveImports,
@@ -6250,209 +6214,31 @@ export async function main(): Promise<void> {
   const { createChatGptHandoffs, createChatGptHandoffHandler, withChatGptHandoffRoutes } = await import('../chatgpt/handoff.ts');
   const { createChatGptSetupBackend, readChatGptPrivacySettings } = await import('../chatgpt/setup-backend.ts');
   const chatgptHandoffs = createChatGptHandoffs();
-  // The front derives its view on mount/selection changes. Only the writer
-  // resolves Gmail's retained item scope from the stores.
-  const heldSelectionFiles = [
-    sourceRegistryPath(),
-    ...(connectedHandleRegistryPath ? [
-      connectedHandleRegistryPath, unpairedSourcesPath(connectedHandleRegistryPath),
-      connectedHandleGrantEpochPath(connectedHandleRegistryPath),
-      defaultFileSourceScopeStatePath(connectedHandleRegistryPath),
-    ] : []),
-    captureGrantPathFromEnv('telegram', process.env),
-    captureGrantPathFromEnv('whatsapp', process.env),
-  ];
-  const heldSelectionStamp = (file: { dev: bigint; ino: bigint; ctimeNs: bigint } | undefined) =>
-    file ? `${file.dev}:${file.ino}:${file.ctimeNs}` : null;
-  const warnHeldScope = (error: unknown) => {
-    console.warn(`[held items] could not verify the mounted view (${error instanceof Error ? error.name : 'error'}).`);
-  };
-  const heldSelectionRevision = () => {
-    try {
-      return JSON.stringify(heldSelectionFiles.map(path => heldSelectionStamp(statSync(path, { bigint: true, throwIfNoEntry: false }))));
-    } catch (error) {
-      warnHeldScope(error);
-      return undefined;
-    }
-  };
-  const heldSelectionRevisionAsync = async () => {
-    try {
-      return JSON.stringify(await Promise.all(heldSelectionFiles.map(async path => {
-        try { return heldSelectionStamp(await stat(path, { bigint: true })); }
-        catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }
-      })));
-    } catch (error) {
-      warnHeldScope(error);
-      return undefined;
-    }
-  };
-  const currentHeldCountPlan = (): HeldCountPlan | undefined => {
-    try {
-      if (sourceRuntimeClosed || tierLedgerProblems.size || frontMountProblems.size || pendingGovernance.waiting().length) return undefined;
-      const revision = heldSelectionRevision();
-      if (revision === undefined) return undefined;
-      const registry = readSourceRegistry();
-      const openable = (sourceId: string): boolean => {
-        const entry = findRegistryAccount(registry, sourceId, DEFAULT_ACCOUNT_SLOT);
-        return !entry || (entry.state === 'active' && !sourceAccountMovePending(entry));
-      };
-      const grantEpoch = connectedHandleRegistryPath ? readConnectedHandleGrantEpoch(connectedHandleRegistryPath) : undefined;
-      if (connectedHandleRegistryPath && readUnpairedSources(connectedHandleRegistryPath).status === 'unreadable') return undefined;
-      const handles = connectedHandleRegistryPath
-        ? withoutUnpairedLaneHandles(readConnectedHandleRegistry(connectedHandleRegistryPath).handles, connectedHandleRegistryPath)
-        : [];
-      const mounted = new Map(connectorStores.map(store => [store.corpusId, store]));
-      const mountedSources = new Set(heldSourceByCorpus.values());
-      if (!heldSourceMountsComplete(sourceMounts, mountedSources, openable, lane =>
-        sourceHasStores(lane.id) || ('provider' in lane
-          ? activeCredentialHandle(handles, lane) !== undefined
-          : fileSourceScopeAuthority?.policyRef(LOCAL_FILES_SOURCE_ID) !== undefined))) return undefined;
-      if (openable(EVERNOTE_SOURCE_ID) && !mountedSources.has(EVERNOTE_SOURCE_ID) && sourceHasStores(EVERNOTE_SOURCE_ID)) return undefined;
-      if (openable(ARCHIVE_IMPORTS_SOURCE_ID) && archiveFamilies.some(family => !archiveImports.laneMounted(family)
-        && accountStoreNames(ARCHIVE_IMPORTS_SOURCE_ID, [family]).some(name => {
-          const path = resolvedStorePath(ARCHIVE_IMPORTS_SOURCE_ID, name, process.env);
-          return existsSync(path) || existsSync(tieredStoreSetLedgerPath(path));
-        }))) return undefined;
-      const declared = declaredConnectorStoreMounts();
-      if (declared === 'unreadable' || declared.some(({ sourceId, corpusId }) => openable(sourceId) && !mounted.has(corpusId))) return undefined;
-      if ([...mountedSources, ...declared.filter(({ corpusId }) => mounted.has(corpusId)).map(mount => mount.sourceId)]
-        .some(sourceId => !openable(sourceId))) return undefined;
-
-      const selected = new Map<string, string | null>();
-      const retainedSelections = new Map<string, string>();
-      for (const lane of sourceMounts) {
-        if (!mountedSources.has(lane.id) || !('provider' in lane)) continue;
-        const pin = process.env[lane.pin]?.trim();
-        const choice = selectCredentialHandle(handles, { ...lane, ...(pin ? { pinnedHandle: pin } : {}) });
-        if (choice.reason === 'ambiguous' || choice.reason === 'pinned_missing') return undefined;
-        const role = choice.handle?.accountRole?.trim();
-        switch (lane.id) {
-          case GMAIL_SOURCE_ID:
-          case GOOGLE_DRIVE_SOURCE_ID: {
-            const gmail = lane.id === GMAIL_SOURCE_ID;
-            const accountScope = heldGoogleAccount(choice.handle, gmail && !engineFront ? gmailItemScopeFor : undefined);
-            if (accountScope === undefined) return undefined;
-            // Both roles attest the selected Gmail handle and its mounts. The
-            // writer also resolves the retained item scope through Gmail's view.
-            if (gmail) retainedSelections.set(lane.id, choice.handle!.handle);
-            selected.set(lane.id, accountScope);
-            break;
-          }
-          case DROPBOX_FILES_SOURCE_ID:
-            selected.set(lane.id, role || dropboxFilesAccount || 'personal');
-            break;
-          case WHATSAPP_PERSONAL_SOURCE_ID:
-            selected.set(lane.id, WHATSAPP_PERSONAL_ACCOUNT_SCOPE);
-            break;
-          case TELEGRAM_MESSAGES_SOURCE_ID:
-            selected.set(lane.id, telegramConnectorAccountScope);
-            break;
-          default:
-            selected.set(lane.id, sourceIndexAccount?.trim() || role || 'personal');
-        }
-      }
-      selected.set(LOCAL_FILES_SOURCE_ID, LOCAL_FILES_ACCOUNT_SCOPE);
-      selected.set(ARCHIVE_IMPORTS_SOURCE_ID, null);
-      if (mountedSources.has(EVERNOTE_SOURCE_ID)) {
-        const handle = fileScopeCredentialHandle(requireFileScopeSource(EVERNOTE_SOURCE_ID));
-        if (!handle) return undefined;
-        selected.set(EVERNOTE_SOURCE_ID, handle.accountRole?.trim() || 'personal');
-      }
-
-      const onDemand = new Map(tierLanes.flatMap(lane => lane.onDemand.map(store => [store.corpusId, store] as const)));
-      const selection = createHash('sha256').update(JSON.stringify([revision, grantEpoch])).digest('hex');
-      const configured = new Set(declared.map(mount => mount.corpusId));
-      const plan = heldCountPlan(tierLanes, corpusId => {
-        const store = mounted.get(corpusId);
-        const mount = store?.statusMount;
-        const path = store?.dbPath ?? onDemand.get(corpusId)?.dbPath;
-        if (!path || (store && !mount)) return undefined;
-        const file = mount?.file ?? null;
-        const stillAtPath = () => file === null
-          ? statSync(path, { throwIfNoEntry: false }) === undefined
-          : heldCountFileIdentity(path) === file;
-        if (!stillAtPath()) return undefined;
-        const sourceId = heldSourceByCorpus.get(corpusId);
-        const accountScope = sourceId ? selected.get(sourceId)
-          : connectorStorePrincipals.get(corpusId)?.accountScope ?? connectorStoreAccountScopes.get(corpusId)
-            ?? (configured.has(corpusId) ? null : undefined);
-        if (accountScope === undefined) return undefined;
-        const retainedSelection = sourceId && retainedSelections.get(sourceId);
-        return {
-          corpusId, accountScope, file, path, generation: mount?.generation ?? null,
-          ...(retainedSelection ? { selection: retainedSelection } : {}),
-          current: stillAtPath,
-          mounted: () => !store || store.statusMount?.generation === mount?.generation,
-        };
-      }, selection, connectorStores.length === 0);
-      // Configuration can change while its separate files are being read.
-      const selectionCurrent = () => revision === heldSelectionRevision()
-        && (!connectedHandleRegistryPath || grantEpoch === readConnectedHandleGrantEpoch(connectedHandleRegistryPath));
-      if (!plan || !selectionCurrent()) return undefined;
-      return {
-        ...plan,
-        current: () => {
-          try { return !sourceRuntimeClosed && selectionCurrent() && plan.current(); }
-          catch (error) {
-            warnHeldScope(error);
-            return false;
-          }
-        },
-      };
-    } catch {
-      // An unreadable configuration or mount cannot establish a complete scope.
-      return undefined;
-    }
-  };
-  // The unsplit engine keeps its existing one-minute request-side count.
+  // Items held for the privacy check (pending, Private, not embedded), each
+  // item once per tier ledger (heldItemCount). Counts only.
+  // Reused for a minute: each count reads every copy the tier ledgers hold,
+  // and the dashboard's privacy panel asks on every poll (Sparta, 2026-11-05:
+  // about a tenth of the sampled freezes).
   let pendingClassificationCounted: { at: number; total: number } | undefined;
-  const legacyPendingClassificationCount = (): number => {
+  const pendingClassificationCount = (): number => {
     if (pendingClassificationCounted && Date.now() - pendingClassificationCounted.at < 60_000) return pendingClassificationCounted.total;
-    let total = 0;
-    for (const lane of tierLanes) {
-      try {
-        total += lane.ledger.heldItemCount([...lane.corpusIds]);
-      } catch {
-        // Preserve the single-process engine's existing best-effort count.
-      }
-    }
+    const total = countPendingClassification();
     pendingClassificationCounted = { at: Date.now(), total };
     return total;
   };
-  let heldViewQueued = false;
-  let frontHeldRevision: string | undefined;
-  const refreshHeldView = () => {
-    frontHeldRevision = heldSelectionRevision();
-    frontHeldPlan = currentHeldCountPlan();
-    void engineFront?.refreshStatus();
+  const countPendingClassification = (): number => {
+    let total = 0;
+    for (const lane of tierLanes) {
+      try {
+        // Each item once, also one recorded Personal-first before #1316.
+        total += lane.ledger.heldItemCount([...lane.corpusIds]);
+      } catch {
+        // An unreadable ledger contributes nothing to a count.
+      }
+    }
+    return total;
   };
-  heldScopeChanged = () => {
-    heldItemStatus?.invalidate();
-    if (!engineFront) return;
-    frontHeldPlan = undefined;
-    frontHeldChangedAt = Date.now();
-    if (heldViewQueued) return;
-    heldViewQueued = true;
-    setImmediate(() => {
-      heldViewQueued = false;
-      if (!sourceRuntimeClosed) refreshHeldView();
-    });
-  };
-  if (engineFront) refreshHeldView();
-  const heldItemCount = engineFront
-    ? engineFront.heldItems
-    : () => {
-        const held = heldItemStatus?.observation();
-        return held && { pendingCount: held.count, pendingCountObservedAt: held.observed_at };
-      };
-  const pendingClassificationCount = engineRole === 'single' ? legacyPendingClassificationCount : heldItemCount;
-  const privacyJudgeStop = (waiting = tierSnifferBacklog?.()?.waiting) => (
-    waiting && DASHBOARD_JUDGE_STOP_REASONS.has(waiting.reason)
-      ? { judgeStopped: waiting.reason as PrivacyJudgeStopReason, ...(engineFront ? { judgeStoppedAt: waiting.since } : {}) }
-      : {}
-  );
   const chatgptSetup = createChatGptSetupBackend({
-    judgeStop: () => privacyJudgeStop(),
     privacyQuestionEngine: createPrivacyQuestionEngine({ runtime: async () => {
       if (!snifferModel || !snifferLane || !snifferEnv.enabled || snifferRuntime.source === 'off') return undefined;
       if (snifferRuntime.source === 'built_in' && !snifferRuntime.builtIn.available()) return undefined;
@@ -6466,7 +6252,7 @@ export async function main(): Promise<void> {
           ? localModelActivity.track(snifferResource, snifferModel) : snifferModel).complete(request)),
       } };
     } }),
-    ...(engineRole === 'single' ? { pendingClassificationCount: legacyPendingClassificationCount } : { heldItemCount }),
+    pendingClassificationCount,
     workerFetch: workerFetchInProcess,
     handoffs: chatgptHandoffs,
     publicUrls: remotePublicUrls,
@@ -6712,13 +6498,12 @@ export async function main(): Promise<void> {
       const backlog = tierSnifferBacklog?.();
       const missing = judgeMissing();
       return {
-        configured: settings.configured, ruleCount: settings.rules.length,
-        ...(settings.pendingCount === undefined ? {} : { pendingCount: settings.pendingCount }),
-        ...(settings.pendingCountObservedAt ? { pendingCountObservedAt: settings.pendingCountObservedAt } : {}),
+        configured: settings.configured, pendingCount: settings.pendingCount, ruleCount: settings.rules.length,
         classifierAwaitingApproval: backlog?.awaitingOwnerApproval === true,
         // No judge: every new item waits, held, until one is set up (#1316).
         ...(missing ? { judgeMissing: missing } : {}),
-        ...privacyJudgeStop(backlog?.waiting),
+        ...(backlog?.waiting && DASHBOARD_JUDGE_STOP_REASONS.has(backlog.waiting.reason)
+          ? { judgeStopped: backlog.waiting.reason as 'model_not_answering' | 'cloud_stopped' | 'failed' } : {}),
         ...((rate) => (rate !== undefined ? { judgePerMinute: rate } : {}))(judgePerMinute()),
         ...(backlog?.awaitingApproval ? { classifierWaiting: { lane: backlog.awaitingApproval.lane, modelId: backlog.awaitingApproval.modelId } } : {}),
       };
@@ -7202,18 +6987,9 @@ export async function main(): Promise<void> {
     if (checkingFrontMounts) return;
     const probeDue = now < frontMountsLookUntil || now - frontMountsLastLook >= FRONT_MOUNT_LOOK_QUIET_MS;
     const retryDue = ({ lastAttemptAt }: { lastAttemptAt: number }) => now - lastAttemptAt >= FRONT_MOUNT_FAILURE_RETRY_MS;
+    if (!probeDue && ![...frontMountProblems.values()].some(retryDue)) return;
     checkingFrontMounts = true;
     try {
-      // Check selection changes even for stores that are already mounted. When
-      // a ledger or corpus path no longer names its handle, drop the view too.
-      const heldPlan = frontHeldPlan;
-      const [heldRevision, heldFilesMatch] = await Promise.all([
-        heldSelectionRevisionAsync(),
-        heldPlan ? heldCountFilesCurrent(heldPlan.files) : true,
-      ]);
-      if (heldRevision !== frontHeldRevision
-        || (heldPlan && heldPlan === frontHeldPlan && (!heldFilesMatch || !heldPlan.mountsCurrent()))) heldScopeChanged();
-      if (!probeDue && ![...frontMountProblems.values()].some(retryDue)) return;
       const changed = new Set<string>();
       if (probeDue) {
         frontMountsLastLook = now;
@@ -7252,7 +7028,7 @@ export async function main(): Promise<void> {
   visibilityRefresh.unref?.();
   if (engineFront) {
     // The judge runs in the background: the front shows what it last published.
-    const judge = frontJudgeState(engineFront.cachedStatus);
+    const judge = frontJudgeState(() => engineFront!.status());
     classificationBusy = judge.busy;
     tierSnifferBacklog = judge.backlog as typeof tierSnifferBacklog;
     tierOverPrivate = judge.overPrivate;
@@ -7298,7 +7074,6 @@ export async function main(): Promise<void> {
       ).sources);
       // A source connected or removed shows on the dashboard at the next count, not after the rest.
       statusRecount?.soon();
-      heldItemStatus?.soon();
     };
     // A forwarded owner action runs as the route that served it before, behind
     // the front's authorization: the route's handler checks the body itself.
@@ -7439,41 +7214,37 @@ export async function main(): Promise<void> {
     const status = startEngineBackgroundStatus({
       env: process.env,
       instanceId: commands.instanceId,
-      collect: () => {
-        heldItemStatus?.check();
-        return {
-          activity: statusMemoryActivity(tierSniffer?.passRunning ?? false, statusRecount?.health().counting ?? false),
-          scheduler: sourceScheduler?.status() ?? null,
-          judge: (() => {
-            const backlog = tierSniffer?.backlog();
-            return {
-              backlog: backlog ?? null,
-              over_private: tierOverPrivate(),
-              pending: backlog?.pendingItems ?? null,
-              spending: judgeSpending.status(),
-              busy: tierSniffer?.hasPriority ?? false,
-              archive_private_model: archivePrivateModelState(),
-            };
-          })(),
-          captures: dashboardCaptureRuntime(),
-          ...((held) => held ? { held_items: held } : {})(heldItemStatus?.observation()),
-          ...(localUnreadableFiles ? {
-            unreadable: Object.fromEntries(sourceCorpusRegistry.definitions('status', fullCorpusDefinitions).flatMap((definition) => {
-              const counted = localUnreadableFiles.recheck(definition.corpusId);
-              return counted ? [[definition.corpusId, counted]] : [];
-            })),
-          } : {}),
-          manual_syncs: Object.fromEntries(manualSyncRuns),
-          rss_restarts: rssRestart.restarts(),
-          loop_lag: (({ lagMs, maxLagMs, overBudget }) => ({ last_ms: lagMs, max_ms: maxLagMs, over_budget: overBudget }))(controlPathHeadroom.snapshot()),
-          stores_opened: storeOpensSoFar(),
-          ...(statusRecount ? { status_recount: statusRecount.health() } : {}),
-          ...((slow) => (slow ? { loop_slow_sql: slow } : {}))(slowMainThreadSqlHealth()),
-          ...((files) => (files ? { sqlite_files: files } : {}))(sqliteFilesHealth()),
-          // Read workers retired for a reply they finished and never delivered, requests run again on a fresh one, and replies that came for nothing.
-          read_pool: (({ lostReplies, retries, lateReplies, terminations }) => ({ lost_replies: lostReplies, retries, late_replies: lateReplies, retired: terminations }))(readPoolDiagnostics()),
-        };
-      },
+      collect: () => ({
+        activity: statusMemoryActivity(tierSniffer?.passRunning ?? false, statusRecount?.health().counting ?? false),
+        scheduler: sourceScheduler?.status() ?? null,
+        judge: (() => {
+          const backlog = tierSniffer?.backlog();
+          return {
+            backlog: backlog ?? null,
+            over_private: tierOverPrivate(),
+            pending: backlog?.pendingItems ?? null,
+            spending: judgeSpending.status(),
+            busy: tierSniffer?.hasPriority ?? false,
+            archive_private_model: archivePrivateModelState(),
+          };
+        })(),
+        captures: dashboardCaptureRuntime(),
+        ...(localUnreadableFiles ? {
+          unreadable: Object.fromEntries(sourceCorpusRegistry.definitions('status', fullCorpusDefinitions).flatMap((definition) => {
+            const counted = localUnreadableFiles.recheck(definition.corpusId);
+            return counted ? [[definition.corpusId, counted]] : [];
+          })),
+        } : {}),
+        manual_syncs: Object.fromEntries(manualSyncRuns),
+        rss_restarts: rssRestart.restarts(),
+        loop_lag: (({ lagMs, maxLagMs, overBudget }) => ({ last_ms: lagMs, max_ms: maxLagMs, over_budget: overBudget }))(controlPathHeadroom.snapshot()),
+        stores_opened: storeOpensSoFar(),
+        ...(statusRecount ? { status_recount: statusRecount.health() } : {}),
+        ...((slow) => (slow ? { loop_slow_sql: slow } : {}))(slowMainThreadSqlHealth()),
+        ...((files) => (files ? { sqlite_files: files } : {}))(sqliteFilesHealth()),
+        // Read workers retired for a reply they finished and never delivered, requests run again on a fresh one, and replies that came for nothing.
+        read_pool: (({ lostReplies, retries, lateReplies, terminations }) => ({ lost_replies: lostReplies, retries, late_replies: lateReplies, retired: terminations }))(readPoolDiagnostics()),
+      }),
     });
     // A delete the front forwarded: stop answering ready (so no new front
     // starts against this background), wait out the front that asked, which
@@ -7484,15 +7255,9 @@ export async function main(): Promise<void> {
       if (frontPid === undefined) return requestModelReload(request);
       return restartAfterFront({ frontPid, markStopping: () => { commands.markStopping(); withdrawBootProgress(process.env); }, restart: () => requestModelReload(request), log: (line) => console.warn(line) });
     };
-    identifyBootProgressPublisher(commands.instanceId);
     commands.markReady();
     finishBootProgress();
     setEngineStep(undefined);
-    heldItemStatus = startHeldItemStatus({
-      plan: () => { pendingGovernance.retry(); return currentHeldCountPlan(); },
-      holds: () => standBack.holds('status'),
-      log: (line) => console.warn(`[held items] ${line}`),
-    });
     // What the dashboard and status show, recounted here on its own pace and
     // kept for the front, which never counts (status-recount.ts).
     const refreshSnapshot = sourceIndexStatus?.refreshSnapshot;
@@ -7572,7 +7337,6 @@ export async function main(): Promise<void> {
     shuttingDown = true;
     privateAgentListeners?.close();
     sourceRuntimeClosed = true;
-    heldItemStatus?.stop();
     loopStallFixture?.stop();
     localFilesCleanupRecovery?.close();
     recencyIndexMaintenanceReady = false;

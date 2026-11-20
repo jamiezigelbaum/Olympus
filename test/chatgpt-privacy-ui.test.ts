@@ -1246,7 +1246,7 @@ describe('the dashboard Privacy row', () => {
     const dashboard = model({ configured: true, pendingCount: 0, ruleCount: 0 });
     const host = mount({ olympus_dashboard: () => ({ structuredContent: dashboard }) });
     host.push({ structuredContent: dashboard });
-    expect(host.doc.querySelector('.privacy-row .row-text')!.textContent).toBe('Uses your description. No always-private rules.0 items waiting for the private model');
+    expect(host.doc.querySelector('.privacy-row .row-text')!.textContent).toBe('Uses your description. No always-private rules.');
     expect(host.text()).not.toContain('0 always-private');
   });
 
@@ -1257,33 +1257,6 @@ describe('the dashboard Privacy row', () => {
     expect(host.doc.querySelector('.privacy-row')).toBeNull();
     expect(host.hasButton(W.edit)).toBe(false);
     expect(host.button('Set up').className).toContain('warnfill');
-  });
-
-  test('unknown and stopped observations carry the same count words and action into setup', async () => {
-    const observed = new Date(Date.now() - 180_000).toISOString();
-    const stopped = {
-      judgeStopped: 'failed', judgeStoppedAt: new Date(Date.now() - 30_000).toISOString(),
-    } as const;
-    const scratch = { configured: true, ruleCount: 0 };
-    const unknownHost = mount({});
-    unknownHost.push({ structuredContent: model(scratch) });
-    expect(unknownHost.doc.querySelector('.privacy-row .row-text')!.textContent).toContain('Items waiting for the private model: counting');
-
-    const held = { pendingCount: 0, pendingCountObservedAt: observed, ...stopped };
-    const host = mount({
-      [P.get]: () => privacyToolResult({ configured: true, description: '', rules: [], ...held }, 'current'),
-    });
-    host.push({ structuredContent: model({ ...scratch, ...held }) });
-    const line = '0 items are waiting (as of 3 min ago) because the privacy check stopped: its last pass failed';
-    expect(host.doc.querySelector('.privacy-row .row-text')!.textContent).toContain(line);
-    expect(host.hasButton('Check the private model')).toBe(true);
-    host.button(W.editLabel).click();
-    await host.settle();
-    expect(host.text()).toContain(line);
-    const action = host.button('Check the private model');
-    expect(action.disabled).toBe(false);
-    action.click();
-    expect(host.calls).toContainEqual(['openExternal', { href: 'https://olympusplugin.ai/open/fix/models/' }]);
   });
 
   test('without a count from the dashboard the row names no number until a save tells it', async () => {

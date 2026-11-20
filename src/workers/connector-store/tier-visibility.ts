@@ -432,15 +432,12 @@ export function createPendingGovernance<L extends { ledger: TierLedger; corpusId
   lanes: L[],
   newLane: (store: { corpusId: string }, ledger: TierLedger) => L,
   log: (line: string) => void = () => {},
-  onChange: () => void = () => {},
 ) {
   const waiting = new Map<string, { corpusId: string; governingTierLedger(): TierLedger | undefined }>();
   const attempt = (store: { corpusId: string; governingTierLedger(): TierLedger | undefined }): void => {
-    const wasWaiting = waiting.has(store.corpusId);
     const outcome = registerGovernedStore(lanes, store, (ledger) => newLane(store, ledger), log);
     if (outcome === 'no_ledger' || outcome === 'unavailable') waiting.set(store.corpusId, store);
     else waiting.delete(store.corpusId);
-    if (outcome === 'registered' || outcome === 'joined' || wasWaiting !== waiting.has(store.corpusId)) onChange();
   };
   return {
     add: attempt,

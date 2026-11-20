@@ -1,4 +1,3 @@
-import { engineRoleFromEnv } from '../../core/engine-split.ts';
 import { changeMemoryActivity, changeMemoryCounter } from '../../core/memory-counters.ts';
 import { EMBEDDING_HOLD_REASONS, type EmbeddingHoldReason } from '../../core/embedding-sweep-idle.ts';
 import { trackSqliteStoreMemory, untrackSqliteStoreMemory } from '../engine-split/sqlite-memory.ts';
@@ -3912,12 +3911,6 @@ export class LocalConnectorStore {
   readonly dbPath: string;
   /** The file this store opened, so a later delete or replace of it is seen. */
   private readonly openedFile: ReturnType<typeof fileIdentity>;
-  private readonly statusFile?: string;
-  get statusMount(): { file: string; generation: string } | undefined {
-    return !this.closedForPoolReads && this.statusFile
-      ? { file: this.statusFile, generation: this.visibilityOwner }
-      : undefined;
-  }
   readonly corpusId: string;
   readonly family: SourceFamily;
   readonly trustDomain: SourceTrustDomain;
@@ -4045,11 +4038,6 @@ export class LocalConnectorStore {
       if (this.dbPath !== ':memory:') mkdirSync(dirname(this.dbPath), { recursive: true, mode: 0o700 });
     }
     const creatingFile = this.dbPath === ':memory:' || !existsSync(this.dbPath);
-    const trackMount = this.dbPath !== ':memory:' && engineRoleFromEnv() !== 'single';
-    // Anchor a new file before SQLite opens it, so a replacement cannot be
-    // attributed to the store handle. Existing files are never touched here.
-    if (trackMount && creatingFile && !this.readOnly) closeSync(openSync(this.dbPath, 'a', 0o600));
-    const openingFile = trackMount ? fileIdentity(this.dbPath) : undefined;
     this.db = new Database(this.dbPath, options.readOnly === true
       ? { readonly: true, create: false, strict: true }
       : { create: true });
@@ -4065,11 +4053,6 @@ export class LocalConnectorStore {
         : creatingFile
         ? 'PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA auto_vacuum = INCREMENTAL; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA journal_size_limit = 67108864;' + loopWalAutocheckpointPragma(this.dbPath)
         : 'PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA journal_size_limit = 67108864;' + loopWalAutocheckpointPragma(this.dbPath));
-      const opened = this.openedFile;
-      if (opened && openingFile && opened.dev === openingFile.dev && opened.ino === openingFile.ino
-        && opened.birthtimeNs === openingFile.birthtimeNs) {
-        this.statusFile = `${opened.dev}:${opened.ino}:${opened.birthtimeNs}`;
-      }
       applySqliteMmap(this.db);
       // New stores need no conversion. Existing stores are converted only by
       // background reclaim, after the sweep, never by opening a request's store.
