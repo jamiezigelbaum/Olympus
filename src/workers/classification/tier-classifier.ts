@@ -179,6 +179,8 @@ export const HELD_UNTIL_JUDGED_PRIORITY = -1;
 export const NEW_ARRIVAL_PRIORITY = 50;
 
 export interface TierSnifferRequest {
+  /** Order this earlier-build hold was discovered, newest first. Scheduling only. */
+  legacyHoldOrder?: number;
   /** Scheduling only; excluded from verdict inputs and cache keys. */
   conversationOrder?: -1 | 0 | 1;
   pass: 'metadata' | 'content';
@@ -304,6 +306,8 @@ export function contentHeldForJudgment(
  * (`heldUntilJudged`) and holds the same way.
  */
 export const HELD_UNTIL_JUDGED_REASON = 'content:held_until_judged';
+/** An active Personal body discovered by the one-time earlier-build repair. */
+export const LEGACY_PERSONAL_BODY_REASON = 'content:legacy_personal_body';
 
 /** Whether recorded reasons say the item's lane holds its content until judged. */
 export function heldUntilJudged(reasons: readonly string[] | undefined): boolean {

@@ -301,6 +301,7 @@ export const CONNECTOR_STORE_CONVERSATION_INDEX_SQL = `CREATE INDEX IF NOT EXIST
   ON items(provider_conversation_id, authored_at) WHERE provider_conversation_id IS NOT NULL`;
 const CONNECTOR_STORE_RECENCY_INDEX = 'idx_connector_store_items_recent_live';
 const CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX = 'idx_connector_store_items_recent_account_live';
+const CONNECTOR_STORE_PERSONAL_BODY_INDEX = 'idx_connector_store_personal_body_order';
 // Distinct partial predicates let each bounded read use just its own index.
 // The ordinary tombstoned = 0 queries can use neither. A reverse scan also
 // reverses the implicit rowid (item_pk), so the index keys need no extra column.
@@ -312,6 +313,14 @@ const CONNECTOR_STORE_RECENCY_INDEX_SQL = `
   CREATE INDEX IF NOT EXISTS ${CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX}
     ON items(account_scope, COALESCE(authored_at, updated_at, indexed_at)) WHERE ${ACCOUNT_RECENCY_LIVE_SQL};
 `;
+// Valid ISO source dates compare by instant. The prefix guard excludes SQLite's
+// nondeterministic date keywords. Undated rows share a key and sort by item_pk.
+const PERSONAL_BODY_DATE_SQL = `COALESCE(
+  CASE WHEN authored_at GLOB '[0-9][0-9][0-9][0-9]-*' THEN julianday(authored_at) END,
+  CASE WHEN updated_at GLOB '[0-9][0-9][0-9][0-9]-*' THEN julianday(updated_at) END,
+  0)`;
+const CONNECTOR_STORE_PERSONAL_BODY_INDEX_SQL = `CREATE INDEX IF NOT EXISTS ${CONNECTOR_STORE_PERSONAL_BODY_INDEX}
+  ON items(${PERSONAL_BODY_DATE_SQL}, item_pk) WHERE ${RECENCY_LIVE_SQL};`;
 // The most query concepts a keyword match must contain (see searchItemsDetailed).
 const MAX_REQUIRED_CONCEPTS = 3;
 // Or the share of the query's concept weight (IDF) a keyword match must carry.
@@ -1676,6 +1685,36 @@ export interface ConnectorStoreMigrationItem {
   fingerprint: string;
   /** Whether the store's exclusion gate admits the row today. */
   admitted: boolean;
+}
+
+export interface PersonalBodyCursor {
+  date: number;
+  itemPk: number;
+}
+
+export interface PersonalBodyCandidate {
+  identity: SourceItemIdentity;
+  mimeType?: string;
+  text: string;
+  fingerprint: string;
+}
+
+interface PersonalBodyPage {
+  items: PersonalBodyCandidate[];
+  next?: PersonalBodyCursor;
+}
+
+interface PersonalBodyRow {
+  item_pk: number;
+  source_date: number;
+  family: SourceFamily;
+  provider: string;
+  account_scope: string;
+  provider_item_id: string;
+  provider_conversation_id: string | null;
+  local_item_id: string;
+  mime_type: string | null;
+  content_hash: string | null;
 }
 
 export interface ConnectorStoreEmbeddingAuthoritySnapshot {
@@ -3920,7 +3959,8 @@ self.onmessage = ({ data: [path, budgetMs, pagesPerStep] }) => {
 };`;
 }
 
-function connectorRecencyIndexWorkerSource(): string {
+function connectorRecencyIndexWorkerSource(includePersonalBodyIndex: boolean): string {
+  const sql = CONNECTOR_STORE_RECENCY_INDEX_SQL + (includePersonalBodyIndex ? CONNECTOR_STORE_PERSONAL_BODY_INDEX_SQL : '');
   return `
 import { Database } from 'bun:sqlite';
 ${INLINE_CLOSE_SQLITE_STORE}
@@ -3929,7 +3969,7 @@ self.onmessage = ({ data: [path] }) => {
   let result;
   try {
     db.exec('PRAGMA busy_timeout = 0; PRAGMA synchronous = NORMAL; PRAGMA wal_autocheckpoint = 0;');
-    db.transaction(() => db.exec(${JSON.stringify(CONNECTOR_STORE_RECENCY_INDEX_SQL)})).immediate();
+    db.transaction(() => db.exec(${JSON.stringify(sql)})).immediate();
     result = { done: true };
   } catch (error) {
     result = { busy: /^SQLITE_(BUSY|LOCKED)(_|$)/.test(error.code) };
@@ -4201,7 +4241,13 @@ export class LocalConnectorStore {
           && (this.db.query('PRAGMA user_version').get() as { user_version: number }).user_version === connectorStoreOpenStamp(this.db);
         if (!current) {
           applyConnectorStoreOpenSchema(this.db);
-          if (creatingFile) this.db.exec(CONNECTOR_STORE_RECENCY_INDEX_SQL);
+          if (creatingFile) {
+            this.db.exec(CONNECTOR_STORE_RECENCY_INDEX_SQL);
+            if (this.trustDomain === 'internal') {
+              this.db.exec(CONNECTOR_STORE_PERSONAL_BODY_INDEX_SQL);
+              this.personalBodyIndexReady = true;
+            }
+          }
           if (this.dbPath !== ':memory:') this.db.exec(`PRAGMA user_version = ${connectorStoreOpenStamp(this.db)}`);
         }
         if (migrating) {
@@ -4246,10 +4292,8 @@ export class LocalConnectorStore {
         const model = (this.db.query('SELECT model_id FROM chunk_embeddings ORDER BY rowid DESC LIMIT 1').get() as { model_id: string } | null)?.model_id;
         if (model && !vectorDigestState(this.db, model).completed) this.scheduleVectorDigestBackfill(model, VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS);
       }
-      if (!this.readOnly && options.restoreSchemaVersion === undefined && !creatingFile && (this.db.query(
-        "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name IN (?, ?)",
-      ).get(CONNECTOR_STORE_RECENCY_INDEX, CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX) as { n: number }).n < 2) {
-        if (admitRecencyIndexBuild) this.scheduleRecencyIndexBuild();
+      if (!this.readOnly && options.restoreSchemaVersion === undefined && !creatingFile) {
+        if (!this.recencyIndexesReady() && admitRecencyIndexBuild) this.scheduleRecencyIndexBuild();
       }
       // The split front's start moves one store at a time; the upgrade's wait reads it (#1563).
       reportFrontStoreOpened();
@@ -4262,6 +4306,15 @@ export class LocalConnectorStore {
   }
 
   private recencyIndexTimer: ReturnType<typeof setTimeout> | undefined;
+  private personalBodyIndexReady = false;
+
+  private recencyIndexesReady(): boolean {
+    const indexes = this.db.query("SELECT name FROM sqlite_master WHERE type = 'index' AND name IN (?, ?, ?)")
+      .all(CONNECTOR_STORE_RECENCY_INDEX, CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX, CONNECTOR_STORE_PERSONAL_BODY_INDEX) as Array<{ name: string }>;
+    this.personalBodyIndexReady = indexes.some(index => index.name === CONNECTOR_STORE_PERSONAL_BODY_INDEX);
+    const recencyIndexes = indexes.length - Number(this.personalBodyIndexReady);
+    return recencyIndexes === 2 && (this.trustDomain !== 'internal' || this.personalBodyIndexReady);
+  }
 
   private scheduleRecencyIndexBuild(delayMs = 0): void {
     this.recencyIndexTimer = setTimeout(() => {
@@ -4275,8 +4328,7 @@ export class LocalConnectorStore {
     const admit = admitRecencyIndexBuild;
     if (!admit || this.closedForPoolReads || this.fileReplacedOrRemoved()) return;
     // Another process (the background role, seen from the front) may have built them since.
-    if ((this.db.query("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name IN (?, ?)")
-      .get(CONNECTOR_STORE_RECENCY_INDEX, CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX) as { n: number }).n >= 2) return;
+    if (this.recencyIndexesReady()) return;
     if (recencyIndexBuilding || this.reclaimProcess || this.vectorDigestBackfillReading || this.visibilityPublishing || storeReadHasPriority()) {
       this.scheduleRecencyIndexBuild(RECENCY_INDEX_BUSY_RETRY_MS);
       return;
@@ -4290,7 +4342,7 @@ export class LocalConnectorStore {
         // Existing store maintenance writers stand back from the child.
         assertWritableStoreOpenAllowed('connector store recency index', this.dbPath);
         const buildStarted = Date.now();
-        const child = spawnConnectorStoreMaintenance(this.dbPath, connectorRecencyIndexWorkerSource());
+        const child = spawnConnectorStoreMaintenance(this.dbPath, connectorRecencyIndexWorkerSource(this.trustDomain === 'internal'));
         this.reclaimProcess = child;
         child.unref();
         try {
@@ -7767,6 +7819,84 @@ export class LocalConnectorStore {
       };
     });
     return { items, ...(rows.length === limit ? { nextAfterItemPk: rows[rows.length - 1]!.item_pk } : {}) };
+  }
+
+  /**
+   * The one-time Personal body walk. Advance by the last item examined even
+   * when the page has no text. On an older store, the recency-index worker
+   * builds the order index before the first page so a lap never sorts the store.
+   */
+  personalBodyPageFinder(after: PersonalBodyCursor | undefined, limit: number): LoopFinder<PersonalBodyPage | undefined> {
+    return {
+      here: () => this.readHere(this.personalBodyPageSteps(after, limit)),
+      offThread: () => this.readStepsInBackground(this.personalBodyPageSteps(after, limit)),
+    };
+  }
+
+  private *personalBodyPageSteps(after: PersonalBodyCursor | undefined, limit: number): Generator<StoreRead, PersonalBodyPage | undefined, unknown> {
+    if (!this.personalBodyIndexReady) {
+      this.personalBodyIndexReady = Boolean(yield {
+        mode: 'get',
+        sql: "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?",
+        params: [CONNECTOR_STORE_PERSONAL_BODY_INDEX],
+      });
+      if (!this.personalBodyIndexReady) return undefined;
+    }
+    const pageSize = Math.max(1, Math.floor(limit));
+    const select = `
+      SELECT item_pk, ${PERSONAL_BODY_DATE_SQL} AS source_date, family, provider, account_scope, provider_item_id,
+        provider_conversation_id, local_item_id, mime_type, content_hash
+      FROM items INDEXED BY ${CONNECTOR_STORE_PERSONAL_BODY_INDEX}
+      WHERE ${RECENCY_LIVE_SQL}`;
+    const order = `ORDER BY ${PERSONAL_BODY_DATE_SQL} DESC, item_pk DESC LIMIT ?`;
+    // SQLite can seek both keys when the date is fixed. A tuple comparison
+    // over the date expression would scan the index again from the top.
+    const sameDate = after ? (yield {
+      mode: 'all',
+      sql: `${select} AND ${PERSONAL_BODY_DATE_SQL} = ? AND item_pk < ? ORDER BY item_pk DESC LIMIT ?`,
+      params: [after.date, after.itemPk, pageSize],
+    }) as PersonalBodyRow[] : [];
+    const older = sameDate.length < pageSize && after?.date !== 0 ? (yield {
+      mode: 'all',
+      sql: `${select} AND ${PERSONAL_BODY_DATE_SQL} ${after ? '< ?' : '>= 0'} ${order}`,
+      params: after ? [after.date, pageSize - sameDate.length] : [pageSize],
+    }) as PersonalBodyRow[] : [];
+    const rows = [...sameDate, ...older];
+    if (rows.length === 0) return { items: [] };
+    const chunks = (yield {
+      mode: 'all',
+      sql: `SELECT item_pk, bounded_text, content_hash FROM chunks
+        WHERE item_pk IN (SELECT value FROM json_each(?)) ORDER BY item_pk, chunk_index`,
+      params: [JSON.stringify(rows.map(row => row.item_pk))],
+    }) as Array<{ item_pk: number; bounded_text: string; content_hash: string }>;
+    const byItem = new Map<number, typeof chunks>();
+    for (const chunk of chunks) {
+      const parts = byItem.get(chunk.item_pk) ?? [];
+      parts.push(chunk);
+      byItem.set(chunk.item_pk, parts);
+    }
+    const items: PersonalBodyCandidate[] = [];
+    for (const row of rows) {
+      const parts = byItem.get(row.item_pk);
+      if (!parts) continue;
+      const text = parts.map(part => part.bounded_text).join('');
+      if (!text.trim()) continue;
+      items.push({
+        identity: {
+          family: row.family,
+          provider: row.provider,
+          accountScope: row.account_scope,
+          providerItemId: row.provider_item_id,
+          localItemId: row.local_item_id,
+          ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
+        },
+        ...(row.mime_type ? { mimeType: row.mime_type } : {}),
+        text,
+        fingerprint: migrationFingerprint(row.content_hash, parts.map(part => part.content_hash)),
+      });
+    }
+    const last = rows.at(-1)!;
+    return { items, ...(rows.length === pageSize ? { next: { date: last.source_date, itemPk: last.item_pk } } : {}) };
   }
 
   /**
@@ -22696,7 +22826,8 @@ export function connectorStoreOpenStamp(db: Database): number {
   let hash = connectorStoreOpenShape() >>> 0;
   for (const row of rows) {
     // These optional indexes commit off-thread, independently of open.
-    if (row.type === 'index' && (row.name === CONNECTOR_STORE_RECENCY_INDEX || row.name === CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX)) continue;
+    if (row.type === 'index' && (row.name === CONNECTOR_STORE_RECENCY_INDEX || row.name === CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX
+      || row.name === CONNECTOR_STORE_PERSONAL_BODY_INDEX)) continue;
     const text = `${row.type}\u0000${row.name}\u0000${row.tbl_name}\u0000${row.sql ?? ''}\n`;
     for (let index = 0; index < text.length; index += 1) {
       hash ^= text.charCodeAt(index);

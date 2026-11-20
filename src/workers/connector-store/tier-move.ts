@@ -25,7 +25,7 @@
 import { createHash } from 'node:crypto';
 import type { SourceItemIdentity, SourceTrustDomain } from '../../core/source-index/types.ts';
 import { detectSecretFindingKinds } from '../classification/engine.ts';
-import { contentDigestReason, contentHeldForJudgment, maxTier, personalContentAuthorized, tierRank, type ItemTierOverride, type TierDecision, type TierKey } from '../classification/tier-classifier.ts';
+import { contentDigestReason, contentHeldForJudgment, LEGACY_PERSONAL_BODY_REASON, maxTier, personalContentAuthorized, tierRank, type ItemTierOverride, type TierDecision, type TierKey } from '../classification/tier-classifier.ts';
 import {
   copyServingLayer,
   loweredCopyLayers,
@@ -85,7 +85,7 @@ export class TierMoveRefusedError extends Error {
 }
 
 export type TierMoveRefusal = 'refused' | 'mixed_sets' | 'secrets_in_lowering' | 'raise_in_lowering' | 'resumed_raise_in_lowering'
-  | 'repair_not_settled_private' | 'secrets_in_repair' | 'repair_lower_destination' | 'superseded_copy_kept'
+  | 'conflicting_legacy_bodies' | 'repair_not_settled_private' | 'secrets_in_repair' | 'repair_lower_destination' | 'superseded_copy_kept'
   | 'secrets_identity' | 'content_changed' | 'content_no_copy' | 'content_no_receipt' | 'content_several_receipts'
   | 'content_receipt_mismatch' | 'content_still_pending' | 'content_no_authority' | 'rule_authority' | 'rule_policy_unavailable';
 
@@ -536,6 +536,15 @@ function stageTieredMove(options: TierMoveOptions, repairSource?: TierCopy, lowe
           return policyRefusal ?? authorityRefusal(set, now, target, sources, placement.copies);
         }
         exports.clear();
+        if (now.reasons.includes(LEGACY_PERSONAL_BODY_REASON)) {
+          const bodies = sources.filter(copy => copy.layers !== 'metadata');
+          if (bodies.length > 1) {
+            const texts = bodies.map(copy => exportFrom(copy)?.chunks.map(chunk => chunk.boundedText).join(''));
+            if (new Set(texts.filter(Boolean)).size > 1) {
+              throw new TierMoveRefusedError('The source stores hold different active bodies for the same item.', 'conflicting_legacy_bodies');
+            }
+          }
+        }
         if (contentDestination && needsContentMoveAuthority(contentSource, contentDestination)) {
           const refusal = contentMoveRefusal(decision ?? now, exportFrom(contentSource ?? sources[0]!), contentDestination.trustDomain, ledger.getOverride(identity));
           if (refusal) {

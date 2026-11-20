@@ -312,15 +312,22 @@ export class TierSnifferStore {
     mapRevision: string;
     flags: readonly string[];
     priority?: number;
+    legacyHoldOrder?: number;
     conversationOrder?: -1 | 0 | 1;
     stillAsk?: () => boolean;
   }): boolean {
     const materialHash = question.materialHash ?? snifferMaterialHash(question.pass, question.material);
     // From the held-until-judged floor (an imported archive, behind all live
     // work) to 100; anything else is the ordinary 0.
-    const priority = Number.isFinite(question.priority)
+    const requestedPriority = Number.isFinite(question.priority)
       ? Math.max(HELD_UNTIL_JUDGED_PRIORITY, Math.min(100, Math.floor(question.priority!)))
       : 0;
+    // Rebuilding missing questions visits ledger keys, which can invert the
+    // order of the original holds. Keep the walk's order below live work.
+    // queued_at remains the actual queue time for the reserved aging slot.
+    const order = question.legacyHoldOrder;
+    const priority = requestedPriority === HELD_UNTIL_JUDGED_PRIORITY && order !== undefined && Number.isSafeInteger(order) && order > 0
+      ? HELD_UNTIL_JUDGED_PRIORITY - order : requestedPriority;
     // A caller with no size hint (a re-judge of a stored item) keeps the
     // order an earlier enqueue gave the question; a new one starts at 0.
     const hinted = question.conversationOrder !== undefined;

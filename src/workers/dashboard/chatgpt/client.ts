@@ -2547,9 +2547,10 @@ export function chatgptDashboardClient(
     const W = config.privacy.copy;
     const configured = info.configured === true;
     const pending = typeof info.pendingCount === 'number' && isFinite(info.pendingCount) ? Math.max(0, Math.round(info.pendingCount)) : 0;
+    const earlier = legacyPersonalProgressText(info);
     const asked = (Array.isArray(data.needsYou) ? data.needsYou : [])
       .some((item: Any) => item && item.fix && privacy!.handles(item.fix));
-    if (!configured && (asked || !pending)) return null;
+    if (!configured && !earlier && (asked || !pending)) return null;
     const section = add(el('section', 'section privacy-row'), el('h2', '', W.section));
     const row = el('li', 'row');
     const text = el('div', 'row-text');
@@ -2559,6 +2560,7 @@ export function chatgptDashboardClient(
       add(text, el('p', '', rules >= 0 ? fill(words, { n: count(rules) }) : W.rowNoCount));
     }
     if (pending > 0) add(text, el('p', 'muted', fill(pending === 1 ? W.dashboardPending.one : W.dashboardPending.many, { n: count(pending) })));
+    if (earlier) add(text, el('p', 'muted', earlier));
     add(row, text);
     if (configured) {
       const blocked = globalReason();
@@ -2893,9 +2895,18 @@ export function chatgptDashboardClient(
     const dot = el('span', 'dot tone-' + (needs > 0 ? 'warn' : running ? 'run' : 'good'));
     dot.setAttribute('aria-hidden', 'true');
     const text = add(el('div', 'row-text'), el('p', 'home-title', title), el('p', 'muted', facts.join(' · ')));
+    const earlier = legacyPersonalProgressText(data.privacy);
+    if (earlier) add(text, el('p', 'muted', earlier));
     const card = add(el('section', 'home-status'), dot, text);
     card.setAttribute('data-home-status', needs > 0 ? 'needs' : running ? 'running' : 'ok');
     return card;
+  }
+
+  function legacyPersonalProgressText(info: Any): string | undefined {
+    const progress = info?.legacyPersonalBodies;
+    if (!progress || typeof progress.held !== 'number' || !isFinite(progress.held) || progress.held <= 0
+      || typeof progress.judged !== 'number' || !isFinite(progress.judged)) return undefined;
+    return fill(config.privacy.copy.legacyPersonalBodies, { held: count(progress.held), judged: count(progress.judged) });
   }
 
   /**

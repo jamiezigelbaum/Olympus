@@ -16742,7 +16742,9 @@ class TierSnifferStore {
   }
   enqueue(question) {
     const materialHash = question.materialHash ?? snifferMaterialHash(question.pass, question.material);
-    const priority = Number.isFinite(question.priority) ? Math.max(HELD_UNTIL_JUDGED_PRIORITY, Math.min(100, Math.floor(question.priority))) : 0;
+    const requestedPriority = Number.isFinite(question.priority) ? Math.max(HELD_UNTIL_JUDGED_PRIORITY, Math.min(100, Math.floor(question.priority))) : 0;
+    const order = question.legacyHoldOrder;
+    const priority = requestedPriority === HELD_UNTIL_JUDGED_PRIORITY && order !== undefined && Number.isSafeInteger(order) && order > 0 ? HELD_UNTIL_JUDGED_PRIORITY - order : requestedPriority;
     const hinted = question.conversationOrder !== undefined;
     const hint = question.conversationOrder === 1 ? 1 : question.conversationOrder === -1 ? -1 : 0;
     return this.db.transaction(() => {
@@ -18035,6 +18037,11 @@ function tierSetPlannerForLedger(ledgerPath) {
 var TIER_LEDGER_SCHEMA_VERSION = 18;
 var RETIRED_EMBEDDING_CLEARANCE_REASON = "content:sniffer:retired_embedding_clearance:undecided";
 var RETAINED_MOVE_SOURCE_REASON = "content:retained_move_source";
+var LEGACY_PERSONAL_BODIES_HELD = "legacy-personal-bodies:held";
+var LEGACY_PERSONAL_BODIES_JUDGED = "legacy-personal-bodies:judged";
+var LEGACY_PERSONAL_BODY_PROGRESS_SQL = `SELECT
+  CAST(COALESCE((SELECT value FROM tier_ledger_meta WHERE key = '${LEGACY_PERSONAL_BODIES_HELD}'), 0) AS INTEGER) AS held,
+  CAST(COALESCE((SELECT value FROM tier_ledger_meta WHERE key = '${LEGACY_PERSONAL_BODIES_JUDGED}'), 0) AS INTEGER) AS judged`;
 function isFailSafeMissingContentQuestion(reason) {
   return reason.startsWith("content:sniffer:") && (reason.endsWith(":fail_safe:missing_question") || reason.endsWith(":fail_safe:unread"));
 }
@@ -19792,6 +19799,39 @@ class TierLedger {
   writeMeta(key, value) {
     this.setMeta(key, value);
   }
+  recordLegacyPersonalHold(identity, decision, plan, digest, guard) {
+    return this.db.transaction(() => {
+      const result = this.recordRoutedPlacement(identity, decision, plan, { guard });
+      if (result.outcome !== "queued_move")
+        return result;
+      if (!result.raise) {
+        for (const copy of result.previousCopies) {
+          if (copy.trustDomain !== "internal" || copy.state !== "current" || copy.layers === "metadata")
+            continue;
+          if (this.supersedeCurrentCopy(identity, copy.corpusId, result.record.generation + 1, result.record.decidedAt)) {
+            result.raise = true;
+          }
+        }
+      }
+      const key = legacyPersonalBodyKey(identity);
+      if (result.raise && this.readMeta(key) === undefined) {
+        const order = this.incrementLegacyPersonalProgress(LEGACY_PERSONAL_BODIES_HELD);
+        this.writeMeta(key, JSON.stringify({ digest, order }));
+      }
+      return result;
+    }).immediate();
+  }
+  legacyPersonalBodyHold(identity) {
+    const saved = this.readMeta(legacyPersonalBodyKey(identity));
+    return saved && saved !== "judged" ? JSON.parse(saved) : undefined;
+  }
+  incrementLegacyPersonalProgress(key) {
+    const row = this.db.query(`
+      INSERT INTO tier_ledger_meta (key, value) VALUES (?, '1')
+      ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1 RETURNING value
+    `).get(key);
+    return Number(row.value);
+  }
   recordLabelRuleMatches(provider, accountScope, ruleKey, walkId, itemKeys) {
     if (itemKeys.length === 0)
       return;
@@ -20570,10 +20610,7 @@ class TierLedger {
     for (const copy of sources) {
       if (copy.state !== "current" || !placementIsRaise([copy], destination))
         continue;
-      this.db.query(`
-        UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = ?, updated_at = ?
-        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
-      `).run(generation, now, ...idParams(identity), copy.corpusId);
+      this.supersedeCurrentCopy(identity, copy.corpusId, generation, now);
     }
   }
   retainMoveRaise(identity, options) {
@@ -20789,6 +20826,8 @@ class TierLedger {
     let copies = [];
     this.db.transaction(() => {
       const existing = this.readRow(identity);
+      if (options.guard)
+        this.assertOverrideGuard(identity, existing, options.guard);
       if (!existing || existing.generation !== options.expectedGeneration) {
         throw new TierLedgerGenerationConflictError;
       }
@@ -21370,6 +21409,13 @@ class TierLedger {
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'current'
     `).run(byGeneration, now, ...idParams(identity));
   }
+  supersedeCurrentCopy(identity, corpusId, byGeneration, now) {
+    return this.db.query(`
+      UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = ?, updated_at = ?
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+        AND corpus_id = ? AND copy_state = 'current'
+    `).run(byGeneration, now, ...idParams(identity), corpusId).changes > 0;
+  }
   flipTiers(identity, existing, next) {
     const reasonsJson = JSON.stringify(next.reasons);
     const state = next.state ?? "current";
@@ -21391,6 +21437,16 @@ class TierLedger {
   appendHistory(identity, generation, metadataTier, contentTier, decidedBy, reasonsJson, state, decidedAt) {
     if (metadataTier === "secrets" || contentTier === "secrets")
       this.writeMeta(overrideRestoreKey(identity), "");
+    if (reasonsJson.includes('"content:judge_verdict:')) {
+      const digest = this.legacyPersonalBodyHold(identity)?.digest;
+      if (digest) {
+        const reasons = JSON.parse(reasonsJson);
+        if (hasContentJudgeVerdict(reasons, "private", digest) || hasContentJudgeVerdict(reasons, "secure", digest)) {
+          this.writeMeta(legacyPersonalBodyKey(identity), "judged");
+          this.incrementLegacyPersonalProgress(LEGACY_PERSONAL_BODIES_JUDGED);
+        }
+      }
+    }
     this.db.query(`
       INSERT INTO tier_history (
         provider, account_scope, conversation_key, provider_item_id, generation,
@@ -21404,6 +21460,9 @@ function caughtUpKey(connectorId) {
 }
 function newArrivalKey(identity) {
   return `new_arrival:${tierLedgerIdentityKey(identity)}`;
+}
+function legacyPersonalBodyKey(identity) {
+  return `legacy-personal-body:${tierLedgerIdentityKey(identity)}`;
 }
 function readStoreBindingCursor(storeDbPath, runId, connectorId) {
   if (storeDbPath === ":memory:" || !existsSync18(storeDbPath))
@@ -25061,6 +25120,7 @@ var CONNECTOR_STORE_CONVERSATION_INDEX_SQL = `CREATE INDEX IF NOT EXISTS ${CONNE
   ON items(provider_conversation_id, authored_at) WHERE provider_conversation_id IS NOT NULL`;
 var CONNECTOR_STORE_RECENCY_INDEX = "idx_connector_store_items_recent_live";
 var CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX = "idx_connector_store_items_recent_account_live";
+var CONNECTOR_STORE_PERSONAL_BODY_INDEX = "idx_connector_store_personal_body_order";
 var RECENCY_LIVE_SQL = "tombstoned IS 0";
 var ACCOUNT_RECENCY_LIVE_SQL = "+tombstoned IS 0";
 var CONNECTOR_STORE_RECENCY_INDEX_SQL = `
@@ -25069,6 +25129,12 @@ var CONNECTOR_STORE_RECENCY_INDEX_SQL = `
   CREATE INDEX IF NOT EXISTS ${CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX}
     ON items(account_scope, COALESCE(authored_at, updated_at, indexed_at)) WHERE ${ACCOUNT_RECENCY_LIVE_SQL};
 `;
+var PERSONAL_BODY_DATE_SQL = `COALESCE(
+  CASE WHEN authored_at GLOB '[0-9][0-9][0-9][0-9]-*' THEN julianday(authored_at) END,
+  CASE WHEN updated_at GLOB '[0-9][0-9][0-9][0-9]-*' THEN julianday(updated_at) END,
+  0)`;
+var CONNECTOR_STORE_PERSONAL_BODY_INDEX_SQL = `CREATE INDEX IF NOT EXISTS ${CONNECTOR_STORE_PERSONAL_BODY_INDEX}
+  ON items(${PERSONAL_BODY_DATE_SQL}, item_pk) WHERE ${RECENCY_LIVE_SQL};`;
 var MAX_REQUIRED_CONCEPTS = 3;
 var RARE_CONCEPT_WEIGHT_SHARE = 0.6;
 var READ_RESULT_PROJECTION_LOCATOR_URI = Symbol("connector-store-result-projection-locator-uri");
@@ -26169,7 +26235,8 @@ self.onmessage = ({ data: [path, budgetMs, pagesPerStep] }) => {
   }
 };`;
 }
-function connectorRecencyIndexWorkerSource() {
+function connectorRecencyIndexWorkerSource(includePersonalBodyIndex) {
+  const sql = CONNECTOR_STORE_RECENCY_INDEX_SQL + (includePersonalBodyIndex ? CONNECTOR_STORE_PERSONAL_BODY_INDEX_SQL : "");
   return `
 import { Database } from 'bun:sqlite';
 ${INLINE_CLOSE_SQLITE_STORE}
@@ -26178,7 +26245,7 @@ self.onmessage = ({ data: [path] }) => {
   let result;
   try {
     db.exec('PRAGMA busy_timeout = 0; PRAGMA synchronous = NORMAL; PRAGMA wal_autocheckpoint = 0;');
-    db.transaction(() => db.exec(${JSON.stringify(CONNECTOR_STORE_RECENCY_INDEX_SQL)})).immediate();
+    db.transaction(() => db.exec(${JSON.stringify(sql)})).immediate();
     result = { done: true };
   } catch (error) {
     result = { busy: /^SQLITE_(BUSY|LOCKED)(_|$)/.test(error.code) };
@@ -26330,8 +26397,13 @@ class LocalConnectorStore {
         const current = !migrating && !creatingFile && this.db.query("PRAGMA user_version").get().user_version === connectorStoreOpenStamp(this.db);
         if (!current) {
           applyConnectorStoreOpenSchema(this.db);
-          if (creatingFile)
+          if (creatingFile) {
             this.db.exec(CONNECTOR_STORE_RECENCY_INDEX_SQL);
+            if (this.trustDomain === "internal") {
+              this.db.exec(CONNECTOR_STORE_PERSONAL_BODY_INDEX_SQL);
+              this.personalBodyIndexReady = true;
+            }
+          }
           if (this.dbPath !== ":memory:")
             this.db.exec(`PRAGMA user_version = ${connectorStoreOpenStamp(this.db)}`);
         }
@@ -26361,8 +26433,8 @@ class LocalConnectorStore {
         if (model && !vectorDigestState(this.db, model).completed)
           this.scheduleVectorDigestBackfill(model, VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS);
       }
-      if (!this.readOnly && options.restoreSchemaVersion === undefined && !creatingFile && this.db.query("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name IN (?, ?)").get(CONNECTOR_STORE_RECENCY_INDEX, CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX).n < 2) {
-        if (admitRecencyIndexBuild)
+      if (!this.readOnly && options.restoreSchemaVersion === undefined && !creatingFile) {
+        if (!this.recencyIndexesReady() && admitRecencyIndexBuild)
           this.scheduleRecencyIndexBuild();
       }
       reportFrontStoreOpened();
@@ -26374,6 +26446,13 @@ class LocalConnectorStore {
     }
   }
   recencyIndexTimer;
+  personalBodyIndexReady = false;
+  recencyIndexesReady() {
+    const indexes = this.db.query("SELECT name FROM sqlite_master WHERE type = 'index' AND name IN (?, ?, ?)").all(CONNECTOR_STORE_RECENCY_INDEX, CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX, CONNECTOR_STORE_PERSONAL_BODY_INDEX);
+    this.personalBodyIndexReady = indexes.some((index) => index.name === CONNECTOR_STORE_PERSONAL_BODY_INDEX);
+    const recencyIndexes = indexes.length - Number(this.personalBodyIndexReady);
+    return recencyIndexes === 2 && (this.trustDomain !== "internal" || this.personalBodyIndexReady);
+  }
   scheduleRecencyIndexBuild(delayMs = 0) {
     this.recencyIndexTimer = setTimeout(() => {
       this.recencyIndexTimer = undefined;
@@ -26385,7 +26464,7 @@ class LocalConnectorStore {
     const admit = admitRecencyIndexBuild;
     if (!admit || this.closedForPoolReads || this.fileReplacedOrRemoved())
       return;
-    if (this.db.query("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name IN (?, ?)").get(CONNECTOR_STORE_RECENCY_INDEX, CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX).n >= 2)
+    if (this.recencyIndexesReady())
       return;
     if (recencyIndexBuilding || this.reclaimProcess || this.vectorDigestBackfillReading || this.visibilityPublishing || storeReadHasPriority()) {
       this.scheduleRecencyIndexBuild(RECENCY_INDEX_BUSY_RETRY_MS);
@@ -26399,7 +26478,7 @@ class LocalConnectorStore {
           return false;
         assertWritableStoreOpenAllowed("connector store recency index", this.dbPath);
         const buildStarted = Date.now();
-        const child = spawnConnectorStoreMaintenance(this.dbPath, connectorRecencyIndexWorkerSource());
+        const child = spawnConnectorStoreMaintenance(this.dbPath, connectorRecencyIndexWorkerSource(this.trustDomain === "internal"));
         this.reclaimProcess = child;
         child.unref();
         try {
@@ -29038,6 +29117,79 @@ ${parentKey(ref)}`, { ref, origin });
       };
     });
     return { items, ...rows.length === limit ? { nextAfterItemPk: rows[rows.length - 1].item_pk } : {} };
+  }
+  personalBodyPageFinder(after, limit) {
+    return {
+      here: () => this.readHere(this.personalBodyPageSteps(after, limit)),
+      offThread: () => this.readStepsInBackground(this.personalBodyPageSteps(after, limit))
+    };
+  }
+  *personalBodyPageSteps(after, limit) {
+    if (!this.personalBodyIndexReady) {
+      this.personalBodyIndexReady = Boolean(yield {
+        mode: "get",
+        sql: "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?",
+        params: [CONNECTOR_STORE_PERSONAL_BODY_INDEX]
+      });
+      if (!this.personalBodyIndexReady)
+        return;
+    }
+    const pageSize = Math.max(1, Math.floor(limit));
+    const select = `
+      SELECT item_pk, ${PERSONAL_BODY_DATE_SQL} AS source_date, family, provider, account_scope, provider_item_id,
+        provider_conversation_id, local_item_id, mime_type, content_hash
+      FROM items INDEXED BY ${CONNECTOR_STORE_PERSONAL_BODY_INDEX}
+      WHERE ${RECENCY_LIVE_SQL}`;
+    const order = `ORDER BY ${PERSONAL_BODY_DATE_SQL} DESC, item_pk DESC LIMIT ?`;
+    const sameDate = after ? yield {
+      mode: "all",
+      sql: `${select} AND ${PERSONAL_BODY_DATE_SQL} = ? AND item_pk < ? ORDER BY item_pk DESC LIMIT ?`,
+      params: [after.date, after.itemPk, pageSize]
+    } : [];
+    const older = sameDate.length < pageSize && after?.date !== 0 ? yield {
+      mode: "all",
+      sql: `${select} AND ${PERSONAL_BODY_DATE_SQL} ${after ? "< ?" : ">= 0"} ${order}`,
+      params: after ? [after.date, pageSize - sameDate.length] : [pageSize]
+    } : [];
+    const rows = [...sameDate, ...older];
+    if (rows.length === 0)
+      return { items: [] };
+    const chunks = yield {
+      mode: "all",
+      sql: `SELECT item_pk, bounded_text, content_hash FROM chunks
+        WHERE item_pk IN (SELECT value FROM json_each(?)) ORDER BY item_pk, chunk_index`,
+      params: [JSON.stringify(rows.map((row) => row.item_pk))]
+    };
+    const byItem = new Map;
+    for (const chunk of chunks) {
+      const parts = byItem.get(chunk.item_pk) ?? [];
+      parts.push(chunk);
+      byItem.set(chunk.item_pk, parts);
+    }
+    const items = [];
+    for (const row of rows) {
+      const parts = byItem.get(row.item_pk);
+      if (!parts)
+        continue;
+      const text = parts.map((part) => part.bounded_text).join("");
+      if (!text.trim())
+        continue;
+      items.push({
+        identity: {
+          family: row.family,
+          provider: row.provider,
+          accountScope: row.account_scope,
+          providerItemId: row.provider_item_id,
+          localItemId: row.local_item_id,
+          ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
+        },
+        ...row.mime_type ? { mimeType: row.mime_type } : {},
+        text,
+        fingerprint: migrationFingerprint(row.content_hash, parts.map((part) => part.content_hash))
+      });
+    }
+    const last = rows.at(-1);
+    return { items, ...rows.length === pageSize ? { next: { date: last.source_date, itemPk: last.item_pk } } : {} };
   }
   itemMigrationFingerprint(identity) {
     const row = this.db.query(`
@@ -37761,7 +37913,7 @@ function connectorStoreOpenStamp(db) {
   const rows = db.query("SELECT type, name, tbl_name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name").all();
   let hash = connectorStoreOpenShape() >>> 0;
   for (const row of rows) {
-    if (row.type === "index" && (row.name === CONNECTOR_STORE_RECENCY_INDEX || row.name === CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX))
+    if (row.type === "index" && (row.name === CONNECTOR_STORE_RECENCY_INDEX || row.name === CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX || row.name === CONNECTOR_STORE_PERSONAL_BODY_INDEX))
       continue;
     const text = `${row.type}\x00${row.name}\x00${row.tbl_name}\x00${row.sql ?? ""}
 `;

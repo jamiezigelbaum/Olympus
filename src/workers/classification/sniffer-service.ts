@@ -24,6 +24,7 @@ import type { LocalConnectorStore } from '../connector-store/local-index.ts';
 import type { TieredStoreSet } from '../connector-store/tiered-store-set.ts';
 import { AUTO_MOVE_WHY, automaticTierMoveOptions, automaticTierMovesAllowed, setEmbedsWithBuiltInOnly } from '../connector-store/tier-auto-move.ts';
 import { BUILT_IN_SNIFFER_LANE } from './built-in-sniffer.ts';
+import { LEGACY_PERSONAL_BODY_REASON } from './tier-classifier.ts';
 import type { InstalledTierClassification } from './installed-tier-classification.ts';
 import { snifferId, snifferMaterialCarriesSecret, snifferPromptVersions, type SnifferLaneKind } from './sniffer.ts';
 import type { SnifferLane } from './sniffer-lane.ts';
@@ -54,6 +55,7 @@ import {
   type TierRejudgeReport,
 } from '../connector-store/tier-rejudge.ts';
 import { settleNamesOnlyItemsOffThread } from '../connector-store/tier-names-only-settle.ts';
+import { settleLegacyPersonalBodiesOffThread } from '../connector-store/legacy-personal-bodies.ts';
 import { settlePersonalFirstItemsOffThread } from '../connector-store/tier-held-settle.ts';
 import { ownerRuleSweepsComplete, sweepOwnerRuleRaisesOffThread } from '../connector-store/tier-rules-sweep.ts';
 import { applyOwnerOverridesOffThread } from '../connector-store/tier-override-settle.ts';
@@ -67,10 +69,12 @@ import {
   TierLedgerRaiseAbandonRefusedError,
   TIER_LEDGER_UNREAD_RELABEL_DONE,
   RETIRED_EMBEDDING_CLEARANCE_REASON,
+  LEGACY_PERSONAL_BODY_PROGRESS_SQL,
   copyServingLayer,
   tierLedgerIdentityKey,
   tierLedgerPathForStore,
   tierMovingDirectionClause,
+  type LegacyPersonalBodyProgress,
   type TierLedgerIdentity,
   type TierLedgerRecord,
 } from './tier-ledger.ts';
@@ -326,10 +330,18 @@ export interface TierAutoMoveReport {
   failedBy?: Record<string, number>;
 }
 
-type BacklogCounts = Pick<TierClassificationBacklog, 'checkingItems' | 'remainingQuestions' | 'pendingItems' | 'pendingWithoutQuestion' | 'oldestPendingAgeMs'>;
+type BacklogCounts = Pick<TierClassificationBacklog, 'checkingItems' | 'remainingQuestions' | 'pendingItems'
+  | 'pendingWithoutQuestion' | 'oldestPendingAgeMs' | 'legacyPersonalBodies'>;
 
 function emptyBacklogCounts(): BacklogCounts {
   return { checkingItems: 0, remainingQuestions: 0, pendingItems: 0, pendingWithoutQuestion: 0, oldestPendingAgeMs: 0 };
+}
+
+function addLegacyPersonalProgress(counts: BacklogCounts, progress: LegacyPersonalBodyProgress): void {
+  if (progress.held === 0) return;
+  const total = counts.legacyPersonalBodies ??= { held: 0, judged: 0 };
+  total.held += progress.held;
+  total.judged += progress.judged;
 }
 
 /**
@@ -347,7 +359,7 @@ const BACKLOG_REFRESH_MS = 60_000;
 const BACKLOG_SLICE_ROWS = 5_000;
 const STORED_WALK_BACKSTOP_MS = 60 * 60_000;
 
-type StoredWalker = 'ownerOverrides' | 'ownerRules' | 'imageContent' | 'mediaJudgments' | 'namesOnly' | 'personalFirst' | 'rejudge' | 'staleEmbedHolds' | 'personalLowerings';
+type StoredWalker = 'ownerOverrides' | 'ownerRules' | 'imageContent' | 'mediaJudgments' | 'namesOnly' | 'personalFirst' | 'legacyPersonalBodies' | 'rejudge' | 'staleEmbedHolds' | 'personalLowerings';
 type StoredWalkResult = 'no_work' | 'changed' | 'more_rows' | 'read_failed' | 'inputs_unavailable' | 'queue_full' | 'retired';
 interface StoredWalkStatus {
   lastRanAt: string;
@@ -494,6 +506,8 @@ export interface TierClassificationBacklog {
    * Reasons are fixed words (tier-move.ts `TierMoveRefusal`), never item data.
    */
   movesRefused?: { items: number; attempts: number; byReason: Record<string, number> };
+  /** Cumulative earlier-build Personal text holds and their completed body verdicts. */
+  legacyPersonalBodies?: LegacyPersonalBodyProgress;
   /**
    * Sources whose privacy records could not be read: their items are held,
    * are not in the counts above, and wait until they can be read. Content-free.
@@ -977,21 +991,22 @@ export class TierSnifferService {
 
   /** Index-only counts for the first read of a large backlog, before its first full count lands. */
   private roughBacklog(): BacklogCounts {
-    let pendingItems = 0;
-    let remainingQuestions = 0;
+    const counts = emptyBacklogCounts();
     for (const ledgerPath of this.ledgerPaths()) {
       const opened = this.openBacklogLedger(ledgerPath);
       if (!opened) continue;
       try {
-        pendingItems += (opened.db.query(`SELECT COUNT(*) AS n FROM tier_items WHERE state = 'pending'`).get() as { n: number }).n;
-        if (opened.hasQueue) remainingQuestions += (opened.db.query('SELECT COUNT(*) AS n FROM queue.sniffer_questions').get() as { n: number }).n;
+        counts.pendingItems += (opened.db.query(`SELECT COUNT(*) AS n FROM tier_items WHERE state = 'pending'`).get() as { n: number }).n;
+        if (opened.hasQueue) counts.remainingQuestions += (opened.db.query('SELECT COUNT(*) AS n FROM queue.sniffer_questions').get() as { n: number }).n;
+        addLegacyPersonalProgress(counts, opened.db.query(LEGACY_PERSONAL_BODY_PROGRESS_SQL).get() as LegacyPersonalBodyProgress);
         this.noteReadable(ledgerPath);
       } catch {
         // No writes, migrations, or invented zero-valued rows on a status read.
         this.noteUnreadable(ledgerPath, 'its privacy ledger');
       } finally { opened.db.close(); }
     }
-    return { checkingItems: Math.max(pendingItems, remainingQuestions ? 1 : 0), remainingQuestions, pendingItems, pendingWithoutQuestion: 0, oldestPendingAgeMs: 0 };
+    counts.checkingItems = Math.max(counts.pendingItems, counts.remainingQuestions ? 1 : 0);
+    return counts;
   }
 
   private countBacklogNow(): BacklogCounts {
@@ -1002,6 +1017,7 @@ export class TierSnifferService {
       try {
         this.addPendingSlice(counts, opened, undefined);
         if (opened.hasQueue) this.addQuestionSlice(counts, opened.db, undefined);
+        addLegacyPersonalProgress(counts, opened.db.query(LEGACY_PERSONAL_BODY_PROGRESS_SQL).get() as LegacyPersonalBodyProgress);
         this.noteReadable(ledgerPath);
       } catch {
         // No writes, migrations, or invented zero-valued rows on a status read.
@@ -1022,7 +1038,8 @@ export class TierSnifferService {
       const queue = tierSnifferPathForLedger(path);
       return { path, expectedId: this.boundLedgerIds.get(path) ?? null, queue: existsSync(queue) ? queue : null };
     });
-    const sql = { pendingQueued: pendingCountSql(true), pendingAlone: pendingCountSql(false), questions: questionCountSql() };
+    const sql = { pendingQueued: pendingCountSql(true), pendingAlone: pendingCountSql(false),
+      questions: questionCountSql(), legacyPersonalBodies: LEGACY_PERSONAL_BODY_PROGRESS_SQL };
     const results = await runBacklogCountWorker({ ledgers, sql });
     if (!results || this.stopped) return undefined;
     const counts = emptyBacklogCounts();
@@ -1037,6 +1054,7 @@ export class TierSnifferService {
       counts.pendingWithoutQuestion += result.missing ?? 0;
       counts.checkingItems += result.n + (result.other ?? 0);
       counts.remainingQuestions += result.questions;
+      addLegacyPersonalProgress(counts, result.legacyPersonalBodies);
       if (result.oldest) counts.oldestPendingAgeMs = Math.max(counts.oldestPendingAgeMs, this.clockMs() - Date.parse(result.oldest));
     }
     for (const path of read) this.noteReadable(path);
@@ -1080,6 +1098,7 @@ export class TierSnifferService {
             if (this.stopped) return undefined;
           }
         }
+        addLegacyPersonalProgress(counts, opened.db.query(LEGACY_PERSONAL_BODY_PROGRESS_SQL).get() as LegacyPersonalBodyProgress);
         this.noteReadable(ledgerPath);
       } catch {
         // No writes, migrations, or invented zero-valued rows on a status read.
@@ -1495,6 +1514,11 @@ export class TierSnifferService {
           paths.add(bound);
           if (binding?.ledgerId) this.boundLedgerIds.set(bound, binding.ledgerId);
         }
+        // A set can own a pre-routing store before its first durable copy binding.
+        if (!binding) {
+          const path = store.tierLedgerPathInUse?.();
+          if (path && path !== ':memory:' && tierSetForLedger(path) && existsSync(path)) paths.add(path);
+        }
         this.noteReadable(store.dbPath);
       } catch {
         // Fails closed elsewhere; the sniffer skips it, and says so.
@@ -1885,9 +1909,10 @@ export class TierSnifferService {
             // body and configured classifier can reconstruct the question.
             const classification = set?.classification();
             const retiredClearance = row.reasons.includes(RETIRED_EMBEDDING_CLEARANCE_REASON);
+            const legacyHold = row.contentPending && row.reasons.includes(LEGACY_PERSONAL_BODY_REASON);
             if (set && row.contentRead && row.contentPending && !row.metadataPending
               && (row.contentTier === 'private' || row.contentTier === 'public'
-                || (retiredClearance && row.contentTier === 'secure'))
+                || ((retiredClearance || legacyHold) && row.contentTier === 'secure'))
               && classification?.sniffer && !classification.unavailableReason) {
               // Cached verdicts and reconstructed questions use the approved
               // pass; only conservative Private settlement precedes approval.
@@ -1898,12 +1923,12 @@ export class TierSnifferService {
               if (ledger.getCurrent(identity)?.state !== 'pending'
                 || queue.questionFor(identity, 'metadata') || queue.questionFor(identity, 'content')) continue;
             }
-            // Retired clearances must keep their tier until a judge answers.
-            // A missing question/material waits for reconstruction or the next sync.
-            if (retiredClearance) continue;
+            // Previously cleared or newly held legacy bodies wait for the
+            // judge. If names are also missing, recover just that pass.
+            if (retiredClearance || (legacyHold && !missingMetadata)) continue;
             const planner = tierSetPlannerForLedger(ledgerPath);
             if (ledger.settleMissingQuestions(row, {
-              missingMetadata, missingContent: missingContent && !waitingForText,
+              missingMetadata, missingContent: missingContent && !waitingForText && !legacyHold,
               snifferId: snifferId(this.options.lane, snifferPromptVersions(this.options.ownerContext?.()).cache),
               stillMissing: () => (!missingMetadata || !queue.questionFor(identity, 'metadata'))
                 && (!missingContent || !queue.questionFor(identity, 'content')),
@@ -2128,6 +2153,13 @@ export class TierSnifferService {
           this.options.log?.(`Olympus tier hold: ${held.settled} item(s) recorded before every open question held text are held now (${held.movesQueued} move(s) to Private queued).`);
         }
         return { retired: held.retired, complete: held.retired, changed: held.settled > 0, failed: held.failed > 0 };
+      });
+      await this.runStoredWalker(set, 'legacyPersonalBodies', undefined, async () => {
+        const page = await settleLegacyPersonalBodiesOffThread({
+          set, queue: this.options.installed.snifferStoreForLedger(ledgerPath), turn,
+        });
+        if (page.held > 0) this.options.log?.(`Olympus tier hold: ${page.held} item(s) from earlier builds held for judgment, moves to Private queued.`);
+        return { retired: page.retired, complete: page.retired, changed: page.held + page.secrets > 0, failed: page.failed > 0 };
       });
       await this.runStoredWalker(set, 'personalLowerings', this.storedWalkInputs(set, true), async after => {
         const page = await storedPersonalLoweringLap(set, after, turn);
@@ -2599,7 +2631,8 @@ self.onmessage = ({ data }) => {
       if (ledger.queue) db.query('ATTACH DATABASE ? AS queue').run(ledger.queue);
       const pending = db.query(ledger.queue ? data.sql.pendingQueued : data.sql.pendingAlone).get();
       const questions = ledger.queue ? db.query(data.sql.questions).get() : { n: 0, other: 0 };
-      out.push({ n: pending.n, missing: pending.missing, oldest: pending.oldest, questions: questions.n, other: questions.other });
+      const legacyPersonalBodies = db.query(data.sql.legacyPersonalBodies).get();
+      out.push({ n: pending.n, missing: pending.missing, oldest: pending.oldest, questions: questions.n, other: questions.other, legacyPersonalBodies });
     } catch {
       out.push({ unreadable: ledger.path });
     } finally { try { db?.close(); } catch {} }
@@ -2609,7 +2642,10 @@ self.onmessage = ({ data }) => {
 
 const BACKLOG_COUNT_WORKER_TIMEOUT_MS = 10 * 60_000;
 
-type BacklogWorkerResult = { n: number; missing: number | null; oldest: string | null; questions: number; other: number | null }
+type BacklogWorkerResult = {
+  n: number; missing: number | null; oldest: string | null; questions: number; other: number | null;
+  legacyPersonalBodies: LegacyPersonalBodyProgress;
+}
   | { unreadable: string; mismatch?: boolean };
 
 function runBacklogCountWorker(message: unknown): Promise<BacklogWorkerResult[] | undefined> {

@@ -51,6 +51,7 @@ import {
   HELD_RECORD_PRIORITY,
   HELD_UNTIL_JUDGED_PRIORITY,
   heldUntilJudged,
+  LEGACY_PERSONAL_BODY_REASON,
   SNIFFER_NAMES_MAX_CHARS,
   snifferFolderKeyNames,
   tierSnifferInputHash,
@@ -347,7 +348,12 @@ export function rejudgeStoredContent(
   const ledger = set.ledger;
   const identity = identityOf(record);
   const read = ledger.classificationRead(identity);
-  if (read.override) {
+  const legacyHold = record.state === 'pending' && record.contentPending
+    && record.reasons.includes(LEGACY_PERSONAL_BODY_REASON);
+  // "Not Secret" clears the detector, but does not settle this pending
+  // first judgment. Tier overrides still own the placement.
+  const notSecret = legacyHold && read.override?.kind === 'not_secret' ? read.override : undefined;
+  if (read.override && !notSecret) {
     if (key) ledger.markRejudged(identity, key);
     report.skipped += 1;
     return;
@@ -367,6 +373,7 @@ export function rejudgeStoredContent(
     return;
   }
   const imageJudgment = exported.chunks.find((chunk) => chunk.mediaJudgment)?.mediaJudgment;
+  const guard = { generation: record.generation, override: read.override };
   const title = columnString(exported.columns['title']);
   const path = columnString(exported.columns['locator_uri']);
   const sender = columnString(exported.columns['sender_label']);
@@ -378,12 +385,15 @@ export function rejudgeStoredContent(
   let questionNotQueued = false;
   // Fenced for both passes: a pass that began before the item became
   // Secrets queues none of its names or excerpt (tier-placement.ts).
+  const legacyHoldOrder = legacyHold ? ledger.legacyPersonalBodyHold(identity)?.order : undefined;
   const counting: TierSniffer | undefined = options.sniffer && {
     id: options.sniffer.id,
     judge(request) {
       const upgrade = !options.recheck && key && isSnifferUnionUpgrade(record.reasons, key.snifferId);
-      const verdict = options.sniffer!.judge(upgrade
-        ? { ...request, priority: HELD_UNTIL_JUDGED_PRIORITY } : request);
+      const verdict = options.sniffer!.judge({
+        ...request, ...(upgrade ? { priority: HELD_UNTIL_JUDGED_PRIORITY } : {}),
+        ...(legacyHoldOrder !== undefined ? { legacyHoldOrder } : {}),
+      });
       if (verdict.verdict === 'undecided' && verdict.queued !== true) questionNotQueued = true;
       return verdict;
     },
@@ -414,6 +424,7 @@ export function rejudgeStoredContent(
     },
     {
       ...(sniffer ? { sniffer } : {}),
+      ...(notSecret ? { override: notSecret } : {}),
       ...(options.retirePublic ? { retirePublic: true } : {}),
     },
   );
@@ -424,6 +435,8 @@ export function rejudgeStoredContent(
     reasons: [
       ...metadata.reasons,
       ...content.reasons,
+      ...(legacyHold ? [LEGACY_PERSONAL_BODY_REASON] : []),
+      ...(notSecret && !metadata.reasons.includes('override:item:not_secret') ? ['override:item:not_secret'] : []),
       // Stored names omit some connector signals and may use the citation
       // locator as the path. Keep the listing's names receipt for these same
       // bytes: a later unchanged listing must still recognize its verdict.
@@ -446,7 +459,7 @@ export function rejudgeStoredContent(
       findingKinds: content.reasons
         .filter((reason) => reason.startsWith('content:secret:'))
         .map((reason) => reason.slice('content:secret:'.length)),
-    }, { guard: { generation: record.generation, override: undefined } });
+    }, { guard });
     if (settled) report.secrets += 1;
     return;
   }
@@ -466,7 +479,7 @@ export function rejudgeStoredContent(
       reasons: retiredClearance ? [...decision.reasons, RETIRED_EMBEDDING_CLEARANCE_REASON] : decision.reasons,
     }, {
       copies: current, embedHold: current.some(copy => copy.embedHold),
-    }, { guard: { generation: record.generation, override: undefined } });
+    }, { guard });
     if (key) ledger.markHeldRejudged(ledger.getCurrent(identity)!, key);
     report.asked += 1;
     return;
@@ -482,8 +495,8 @@ export function rejudgeStoredContent(
     return;
   }
   // The row this decision was made from must still be the row it writes:
-  // the same generation and still no owner override (re-judge candidates
-  // have none). An owner who set the item meanwhile decides it, not this pass.
+  // the same generation and the same override, if any. An owner who set
+  // the item meanwhile decides it, not this pass.
   if (holdSnifferLowering(record, decision)) {
     // No stamp: turning the switch off makes the same cached answer eligible.
     report.heldLowering += 1;
@@ -495,7 +508,7 @@ export function rejudgeStoredContent(
     set.placementFor(decision),
     {
       ...(autoMoves || options.hideRaises === true ? {} : { queueWithoutHiding: true }),
-      guard: { generation: record.generation, override: undefined },
+      guard,
     },
   );
   if (key) ledger.markRejudged(identity, key);
@@ -645,9 +658,9 @@ export function settleRoutedSecrets(
   return true;
 }
 
-function recordSecretLocation(
+export function recordSecretLocation(
   locations: SecretLocationsIndex,
-  decision: TierDecision,
+  decision: Pick<TierDecision, 'metadataTier'>,
   exported: ConnectorStoreItemNames,
   finding: { text?: string; findingKinds: readonly string[] },
 ): void {

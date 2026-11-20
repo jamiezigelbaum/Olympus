@@ -41756,7 +41756,7 @@ function namesOf(signals) {
 function slug(value) {
   return SLUG.test(value) ? value : "invalid";
 }
-var CONTENT_NAMES_ONLY_REASON = "content:names_only", CONTENT_NAMES_ONLY_LIFTED_REASON = "content:names_only_lifted", TIER_CLASSIFIER_VERSION = "2026-10-29.p8", TIER_MAP_REVISION = "none", TIER_KEYS, TIER_RANK, HELD_RECORD_PRIORITY = 10, HELD_UNTIL_JUDGED_PRIORITY = -1, NEW_ARRIVAL_PRIORITY = 50, UNDECIDED_TIER_SNIFFER, SNIFFER_NAMES_MAX_CHARS = 400, SNIFFER_EXCERPT_MAX_CHARS = 1200, CONTENT_READ_SNIFFER_FLAG = "content:read", PERSONAL_FIRST_REASON = "content:personal_first", HELD_UNTIL_JUDGED_REASON = "content:held_until_judged", OWNER_OVERRIDE_SECRET_REVIEW_REASON = "content:owner_override_secret_review", OWNER_OVERRIDE_SECRET_CONFIRMED_REASON = "content:owner_override_secret_confirmed", PARENT_CONTEXT_MARKER = `
+var CONTENT_NAMES_ONLY_REASON = "content:names_only", CONTENT_NAMES_ONLY_LIFTED_REASON = "content:names_only_lifted", TIER_CLASSIFIER_VERSION = "2026-10-29.p8", TIER_MAP_REVISION = "none", TIER_KEYS, TIER_RANK, HELD_RECORD_PRIORITY = 10, HELD_UNTIL_JUDGED_PRIORITY = -1, NEW_ARRIVAL_PRIORITY = 50, UNDECIDED_TIER_SNIFFER, SNIFFER_NAMES_MAX_CHARS = 400, SNIFFER_EXCERPT_MAX_CHARS = 1200, CONTENT_READ_SNIFFER_FLAG = "content:read", PERSONAL_FIRST_REASON = "content:personal_first", HELD_UNTIL_JUDGED_REASON = "content:held_until_judged", LEGACY_PERSONAL_BODY_REASON = "content:legacy_personal_body", OWNER_OVERRIDE_SECRET_REVIEW_REASON = "content:owner_override_secret_review", OWNER_OVERRIDE_SECRET_CONFIRMED_REASON = "content:owner_override_secret_confirmed", PARENT_CONTEXT_MARKER = `
 Parent names (context only): `, PARENT_CONTEXT_MAX_CHARS = 200, NAMES_INPUT_REASON_PREFIX = "metadata:names_input:", NAMES_INPUT_KEYS, FRONT_MATTER_PRIVATE_REASON = "content:rule:front_matter_private", FRONT_MATTER_MAX_LINES = 100, IMAGE_PRIVATE_DEFAULT_REASON = "content:image_private_default", IMAGE_SENSITIVE_REASON_PREFIX = "content:image_sensitive:", IMAGE_ORDINARY_REASON = "content:image_ordinary", IMAGE_TEXT_DECIDES_REASON_PREFIX = "content:image_text_decides:", IMAGE_TEXT_DECIDES_MIN_WORDS = 8, PUBLIC_RETIRED_REASON = "tier:public_retired", RETIRED_SOURCE_PRIOR_REASON = "metadata:prior:source_", SNIFFER_EXCERPT_HEAD_CHARS = 600, SNIFFER_EXCERPT_MAX_FOCUS = 2, SNIFFER_EXCERPT_GAP = " … ", SLUG;
 var init_tier_classifier = __esm(() => {
   init_secret_patterns();
@@ -42293,7 +42293,9 @@ class TierSnifferStore {
   }
   enqueue(question) {
     const materialHash = question.materialHash ?? snifferMaterialHash(question.pass, question.material);
-    const priority = Number.isFinite(question.priority) ? Math.max(HELD_UNTIL_JUDGED_PRIORITY, Math.min(100, Math.floor(question.priority))) : 0;
+    const requestedPriority = Number.isFinite(question.priority) ? Math.max(HELD_UNTIL_JUDGED_PRIORITY, Math.min(100, Math.floor(question.priority))) : 0;
+    const order = question.legacyHoldOrder;
+    const priority = requestedPriority === HELD_UNTIL_JUDGED_PRIORITY && order !== undefined && Number.isSafeInteger(order) && order > 0 ? HELD_UNTIL_JUDGED_PRIORITY - order : requestedPriority;
     const hinted = question.conversationOrder !== undefined;
     const hint = question.conversationOrder === 1 ? 1 : question.conversationOrder === -1 ? -1 : 0;
     return this.db.transaction(() => {
@@ -44302,6 +44304,39 @@ class TierLedger {
   writeMeta(key, value) {
     this.setMeta(key, value);
   }
+  recordLegacyPersonalHold(identity, decision, plan, digest, guard) {
+    return this.db.transaction(() => {
+      const result = this.recordRoutedPlacement(identity, decision, plan, { guard });
+      if (result.outcome !== "queued_move")
+        return result;
+      if (!result.raise) {
+        for (const copy of result.previousCopies) {
+          if (copy.trustDomain !== "internal" || copy.state !== "current" || copy.layers === "metadata")
+            continue;
+          if (this.supersedeCurrentCopy(identity, copy.corpusId, result.record.generation + 1, result.record.decidedAt)) {
+            result.raise = true;
+          }
+        }
+      }
+      const key = legacyPersonalBodyKey(identity);
+      if (result.raise && this.readMeta(key) === undefined) {
+        const order = this.incrementLegacyPersonalProgress(LEGACY_PERSONAL_BODIES_HELD);
+        this.writeMeta(key, JSON.stringify({ digest, order }));
+      }
+      return result;
+    }).immediate();
+  }
+  legacyPersonalBodyHold(identity) {
+    const saved = this.readMeta(legacyPersonalBodyKey(identity));
+    return saved && saved !== "judged" ? JSON.parse(saved) : undefined;
+  }
+  incrementLegacyPersonalProgress(key) {
+    const row = this.db.query(`
+      INSERT INTO tier_ledger_meta (key, value) VALUES (?, '1')
+      ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1 RETURNING value
+    `).get(key);
+    return Number(row.value);
+  }
   recordLabelRuleMatches(provider, accountScope, ruleKey, walkId, itemKeys) {
     if (itemKeys.length === 0)
       return;
@@ -45080,10 +45115,7 @@ class TierLedger {
     for (const copy of sources) {
       if (copy.state !== "current" || !placementIsRaise([copy], destination))
         continue;
-      this.db.query(`
-        UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = ?, updated_at = ?
-        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
-      `).run(generation, now, ...idParams(identity), copy.corpusId);
+      this.supersedeCurrentCopy(identity, copy.corpusId, generation, now);
     }
   }
   retainMoveRaise(identity, options) {
@@ -45299,6 +45331,8 @@ class TierLedger {
     let copies = [];
     this.db.transaction(() => {
       const existing = this.readRow(identity);
+      if (options.guard)
+        this.assertOverrideGuard(identity, existing, options.guard);
       if (!existing || existing.generation !== options.expectedGeneration) {
         throw new TierLedgerGenerationConflictError;
       }
@@ -45880,6 +45914,13 @@ class TierLedger {
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'current'
     `).run(byGeneration, now, ...idParams(identity));
   }
+  supersedeCurrentCopy(identity, corpusId, byGeneration, now) {
+    return this.db.query(`
+      UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = ?, updated_at = ?
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+        AND corpus_id = ? AND copy_state = 'current'
+    `).run(byGeneration, now, ...idParams(identity), corpusId).changes > 0;
+  }
   flipTiers(identity, existing, next) {
     const reasonsJson = JSON.stringify(next.reasons);
     const state = next.state ?? "current";
@@ -45901,6 +45942,16 @@ class TierLedger {
   appendHistory(identity, generation, metadataTier, contentTier, decidedBy, reasonsJson, state, decidedAt) {
     if (metadataTier === "secrets" || contentTier === "secrets")
       this.writeMeta(overrideRestoreKey(identity), "");
+    if (reasonsJson.includes('"content:judge_verdict:')) {
+      const digest = this.legacyPersonalBodyHold(identity)?.digest;
+      if (digest) {
+        const reasons = JSON.parse(reasonsJson);
+        if (hasContentJudgeVerdict(reasons, "private", digest) || hasContentJudgeVerdict(reasons, "secure", digest)) {
+          this.writeMeta(legacyPersonalBodyKey(identity), "judged");
+          this.incrementLegacyPersonalProgress(LEGACY_PERSONAL_BODIES_JUDGED);
+        }
+      }
+    }
     this.db.query(`
       INSERT INTO tier_history (
         provider, account_scope, conversation_key, provider_item_id, generation,
@@ -45914,6 +45965,9 @@ function caughtUpKey(connectorId) {
 }
 function newArrivalKey(identity) {
   return `new_arrival:${tierLedgerIdentityKey(identity)}`;
+}
+function legacyPersonalBodyKey(identity) {
+  return `legacy-personal-body:${tierLedgerIdentityKey(identity)}`;
 }
 function readStoreBindingCursor(storeDbPath, runId, connectorId) {
   if (storeDbPath === ":memory:" || !existsSync25(storeDbPath))
@@ -47054,7 +47108,7 @@ function overrideFromJson(json) {
     return parsed;
   return;
 }
-var TIER_LEDGER_SCHEMA_VERSION = 18, RETIRED_EMBEDDING_CLEARANCE_REASON = "content:sniffer:retired_embedding_clearance:undecided", RETAINED_MOVE_SOURCE_REASON = "content:retained_move_source", TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_safe_unread_relabel_v1", IDENTITY_BATCH = 200, AWAITING_TEXT_WHERE = `routed = 1 AND content_read = 0 AND metadata_pending = 0
+var TIER_LEDGER_SCHEMA_VERSION = 18, RETIRED_EMBEDDING_CLEARANCE_REASON = "content:sniffer:retired_embedding_clearance:undecided", RETAINED_MOVE_SOURCE_REASON = "content:retained_move_source", LEGACY_PERSONAL_BODIES_HELD = "legacy-personal-bodies:held", LEGACY_PERSONAL_BODIES_JUDGED = "legacy-personal-bodies:judged", LEGACY_PERSONAL_BODY_PROGRESS_SQL, TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_safe_unread_relabel_v1", IDENTITY_BATCH = 200, AWAITING_TEXT_WHERE = `routed = 1 AND content_read = 0 AND metadata_pending = 0
         AND ((state = 'pending' AND content_pending = 1)
           OR (state = 'current' AND EXISTS (SELECT 1 FROM json_each(reasons_json) r
             WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
@@ -47147,6 +47201,9 @@ var init_tier_ledger = __esm(() => {
   init_store_write_guard();
   init_tier_classifier();
   init_tier_ledger_path();
+  LEGACY_PERSONAL_BODY_PROGRESS_SQL = `SELECT
+  CAST(COALESCE((SELECT value FROM tier_ledger_meta WHERE key = '${LEGACY_PERSONAL_BODIES_HELD}'), 0) AS INTEGER) AS held,
+  CAST(COALESCE((SELECT value FROM tier_ledger_meta WHERE key = '${LEGACY_PERSONAL_BODIES_JUDGED}'), 0) AS INTEGER) AS judged`;
   STORED_PERSONAL_LOWERING = `routed = 1 AND state = 'current' AND content_read = 1
   AND metadata_pending = 0 AND content_pending = 0 AND move_attempts = 0
   AND target_metadata_tier IS NULL AND target_content_tier IS NULL
@@ -53231,6 +53288,7 @@ class CachedTierSniffer {
           mapRevision,
           ...request.conversationOrder !== undefined ? { conversationOrder: request.conversationOrder } : {},
           flags: request.flags,
+          ...request.legacyHoldOrder !== undefined ? { legacyHoldOrder: request.legacyHoldOrder } : {},
           ...request.priority !== undefined ? { priority: request.priority } : {},
           ...request.stillAsk ? { stillAsk: request.stillAsk } : {}
         });
@@ -60909,7 +60967,9 @@ function rejudgeStoredContent(set, record, options) {
   const ledger = set.ledger;
   const identity = identityOf(record);
   const read = ledger.classificationRead(identity);
-  if (read.override) {
+  const legacyHold = record.state === "pending" && record.contentPending && record.reasons.includes(LEGACY_PERSONAL_BODY_REASON);
+  const notSecret = legacyHold && read.override?.kind === "not_secret" ? read.override : undefined;
+  if (read.override && !notSecret) {
     if (key)
       ledger.markRejudged(identity, key);
     report.skipped += 1;
@@ -60927,17 +60987,23 @@ function rejudgeStoredContent(set, record, options) {
     return;
   }
   const imageJudgment = exported.chunks.find((chunk) => chunk.mediaJudgment)?.mediaJudgment;
+  const guard = { generation: record.generation, override: read.override };
   const title = columnString(exported.columns["title"]);
   const path = columnString(exported.columns["locator_uri"]);
   const sender = columnString(exported.columns["sender_label"]);
   const mimeType = columnString(exported.columns["mime_type"]);
   const folderKeys = [...storedSignals(exported).folderKeys ?? []];
   let questionNotQueued = false;
+  const legacyHoldOrder = legacyHold ? ledger.legacyPersonalBodyHold(identity)?.order : undefined;
   const counting = options.sniffer && {
     id: options.sniffer.id,
     judge(request) {
       const upgrade = !options.recheck && key && isSnifferUnionUpgrade(record.reasons, key.snifferId);
-      const verdict = options.sniffer.judge(upgrade ? { ...request, priority: HELD_UNTIL_JUDGED_PRIORITY } : request);
+      const verdict = options.sniffer.judge({
+        ...request,
+        ...upgrade ? { priority: HELD_UNTIL_JUDGED_PRIORITY } : {},
+        ...legacyHoldOrder !== undefined ? { legacyHoldOrder } : {}
+      });
       if (verdict.verdict === "undecided" && verdict.queued !== true)
         questionNotQueued = true;
       return verdict;
@@ -60964,6 +61030,7 @@ function rejudgeStoredContent(set, record, options) {
     subject: identity
   }, {
     ...sniffer ? { sniffer } : {},
+    ...notSecret ? { override: notSecret } : {},
     ...options.retirePublic ? { retirePublic: true } : {}
   });
   const decision = {
@@ -60973,6 +61040,8 @@ function rejudgeStoredContent(set, record, options) {
     reasons: [
       ...metadata.reasons,
       ...content.reasons,
+      ...legacyHold ? [LEGACY_PERSONAL_BODY_REASON] : [],
+      ...notSecret && !metadata.reasons.includes("override:item:not_secret") ? ["override:item:not_secret"] : [],
       ...record.reasons.includes(contentDigestReason(text)) ? record.reasons.filter((reason) => reason.startsWith("content:names:") && !content.reasons.includes(reason)) : []
     ],
     state: metadata.metadataPending || content.contentPending ? "pending" : "current",
@@ -60989,7 +61058,7 @@ function rejudgeStoredContent(set, record, options) {
     const settled = settleRoutedSecrets(set, identity, decision, exported, {
       text,
       findingKinds: content.reasons.filter((reason) => reason.startsWith("content:secret:")).map((reason) => reason.slice("content:secret:".length))
-    }, { guard: { generation: record.generation, override: undefined } });
+    }, { guard });
     if (settled)
       report.secrets += 1;
     return;
@@ -61008,7 +61077,7 @@ function rejudgeStoredContent(set, record, options) {
     }, {
       copies: current,
       embedHold: current.some((copy) => copy.embedHold)
-    }, { guard: { generation: record.generation, override: undefined } });
+    }, { guard });
     if (key)
       ledger.markHeldRejudged(ledger.getCurrent(identity), key);
     report.asked += 1;
@@ -61031,7 +61100,7 @@ function rejudgeStoredContent(set, record, options) {
   }
   const recorded = ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), {
     ...autoMoves || options.hideRaises === true ? {} : { queueWithoutHiding: true },
-    guard: { generation: record.generation, override: undefined }
+    guard
   });
   if (key)
     ledger.markRejudged(identity, key);
@@ -63749,6 +63818,15 @@ function stageTieredMove(options, repairSource, loweringOnly = false) {
           return policyRefusal ?? authorityRefusal(set, now, target, sources, placement.copies);
         }
         exports.clear();
+        if (now.reasons.includes(LEGACY_PERSONAL_BODY_REASON)) {
+          const bodies = sources.filter((copy) => copy.layers !== "metadata");
+          if (bodies.length > 1) {
+            const texts = bodies.map((copy) => exportFrom(copy)?.chunks.map((chunk) => chunk.boundedText).join(""));
+            if (new Set(texts.filter(Boolean)).size > 1) {
+              throw new TierMoveRefusedError("The source stores hold different active bodies for the same item.", "conflicting_legacy_bodies");
+            }
+          }
+        }
         if (contentDestination && needsContentMoveAuthority(contentSource, contentDestination)) {
           const refusal = contentMoveRefusal(decision ?? now, exportFrom(contentSource ?? sources[0]), contentDestination.trustDomain, ledger.getOverride(identity));
           if (refusal) {
@@ -69115,7 +69193,8 @@ self.onmessage = ({ data: [path, budgetMs, pagesPerStep] }) => {
   }
 };`;
 }
-function connectorRecencyIndexWorkerSource() {
+function connectorRecencyIndexWorkerSource(includePersonalBodyIndex) {
+  const sql = CONNECTOR_STORE_RECENCY_INDEX_SQL + (includePersonalBodyIndex ? CONNECTOR_STORE_PERSONAL_BODY_INDEX_SQL : "");
   return `
 import { Database } from 'bun:sqlite';
 ${INLINE_CLOSE_SQLITE_STORE}
@@ -69124,7 +69203,7 @@ self.onmessage = ({ data: [path] }) => {
   let result;
   try {
     db.exec('PRAGMA busy_timeout = 0; PRAGMA synchronous = NORMAL; PRAGMA wal_autocheckpoint = 0;');
-    db.transaction(() => db.exec(${JSON.stringify(CONNECTOR_STORE_RECENCY_INDEX_SQL)})).immediate();
+    db.transaction(() => db.exec(${JSON.stringify(sql)})).immediate();
     result = { done: true };
   } catch (error) {
     result = { busy: /^SQLITE_(BUSY|LOCKED)(_|$)/.test(error.code) };
@@ -71885,7 +71964,7 @@ function connectorStoreOpenStamp(db) {
   const rows = db.query("SELECT type, name, tbl_name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name").all();
   let hash = connectorStoreOpenShape() >>> 0;
   for (const row of rows) {
-    if (row.type === "index" && (row.name === CONNECTOR_STORE_RECENCY_INDEX || row.name === CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX))
+    if (row.type === "index" && (row.name === CONNECTOR_STORE_RECENCY_INDEX || row.name === CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX || row.name === CONNECTOR_STORE_PERSONAL_BODY_INDEX))
       continue;
     const text = `${row.type}\x00${row.name}\x00${row.tbl_name}\x00${row.sql ?? ""}
 `;
@@ -72286,7 +72365,10 @@ function sqliteJournalSettingsOf(db) {
     wal_autocheckpoint: db.query("PRAGMA wal_autocheckpoint").get().wal_autocheckpoint
   };
 }
-var TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff", DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, KEYWORD_CANDIDATE_SCAN_CAP = 1000, KEYWORD_RANKED_BOUND_MIN = 256, KEYWORD_RANKED_BOUND_MAX = 8192, KEYWORD_RANKED_BOUND_ROWS_PER_ITEM = 8, CONCEPT_COUNT_MAX_AGE_MS, KEYWORD_POPULATION_SQL = "SELECT COUNT(*) AS count FROM items WHERE tombstoned = 0", CONCEPT_COUNT_MEMO_LIMIT = 512, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, VECTOR_VISIBILITY_BATCH_SIZE = 200, VECTOR_VISIBILITY_SLICE_MS = 50, CONNECTOR_STORE_CONVERSATION_INDEX = "idx_connector_store_items_conversation_time", CONNECTOR_STORE_CONVERSATION_INDEX_SQL, CONNECTOR_STORE_RECENCY_INDEX = "idx_connector_store_items_recent_live", CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX = "idx_connector_store_items_recent_account_live", RECENCY_LIVE_SQL = "tombstoned IS 0", ACCOUNT_RECENCY_LIVE_SQL = "+tombstoned IS 0", CONNECTOR_STORE_RECENCY_INDEX_SQL, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 17, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, ITEM_VISIBILITY_FEED_RETENTION = 65536, CONNECTOR_STORE_VISIBILITY_TRIGGERS, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, SEARCH_VECTOR_LANE_MEMO_MS = 60000, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, MISSING_EMBEDDING_CHUNK_WINDOW = 20000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 500, EMBEDDING_WORK_PAGE_ROWS = 5000, VISIBILITY_HOLD_WAITS = 100, VISIBILITY_HOLD_WAIT_MS = 10, PK_SET_SLICE = 20000, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, VISIBILITY_MEMBER_BITS, VISIBILITY_PUBLISH_CHUNK = 4096, VISIBILITY_BACKSTOP_MS = 5000, VISIBILITY_LEASE_MS = 30000, VISIBILITY_RETRY_MIN_MS = 1000, VISIBILITY_RETRY_MAX_MS = 60000, LEDGER_VISIBILITY_FEED_RETENTION = 8192, VISIBILITY_TICK_ITEMS = 256, visibilityWritersByLedger, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_RUN_ID = "restored-source-scope", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE = 512, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff", DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, KEYWORD_CANDIDATE_SCAN_CAP = 1000, KEYWORD_RANKED_BOUND_MIN = 256, KEYWORD_RANKED_BOUND_MAX = 8192, KEYWORD_RANKED_BOUND_ROWS_PER_ITEM = 8, CONCEPT_COUNT_MAX_AGE_MS, KEYWORD_POPULATION_SQL = "SELECT COUNT(*) AS count FROM items WHERE tombstoned = 0", CONCEPT_COUNT_MEMO_LIMIT = 512, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, VECTOR_VISIBILITY_BATCH_SIZE = 200, VECTOR_VISIBILITY_SLICE_MS = 50, CONNECTOR_STORE_CONVERSATION_INDEX = "idx_connector_store_items_conversation_time", CONNECTOR_STORE_CONVERSATION_INDEX_SQL, CONNECTOR_STORE_RECENCY_INDEX = "idx_connector_store_items_recent_live", CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX = "idx_connector_store_items_recent_account_live", CONNECTOR_STORE_PERSONAL_BODY_INDEX = "idx_connector_store_personal_body_order", RECENCY_LIVE_SQL = "tombstoned IS 0", ACCOUNT_RECENCY_LIVE_SQL = "+tombstoned IS 0", CONNECTOR_STORE_RECENCY_INDEX_SQL, PERSONAL_BODY_DATE_SQL = `COALESCE(
+  CASE WHEN authored_at GLOB '[0-9][0-9][0-9][0-9]-*' THEN julianday(authored_at) END,
+  CASE WHEN updated_at GLOB '[0-9][0-9][0-9][0-9]-*' THEN julianday(updated_at) END,
+  0)`, CONNECTOR_STORE_PERSONAL_BODY_INDEX_SQL, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 17, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, ITEM_VISIBILITY_FEED_RETENTION = 65536, CONNECTOR_STORE_VISIBILITY_TRIGGERS, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, SEARCH_VECTOR_LANE_MEMO_MS = 60000, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, MISSING_EMBEDDING_CHUNK_WINDOW = 20000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 500, EMBEDDING_WORK_PAGE_ROWS = 5000, VISIBILITY_HOLD_WAITS = 100, VISIBILITY_HOLD_WAIT_MS = 10, PK_SET_SLICE = 20000, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, VISIBILITY_MEMBER_BITS, VISIBILITY_PUBLISH_CHUNK = 4096, VISIBILITY_BACKSTOP_MS = 5000, VISIBILITY_LEASE_MS = 30000, VISIBILITY_RETRY_MIN_MS = 1000, VISIBILITY_RETRY_MAX_MS = 60000, LEDGER_VISIBILITY_FEED_RETENTION = 8192, VISIBILITY_TICK_ITEMS = 256, visibilityWritersByLedger, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_RUN_ID = "restored-source-scope", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE = 512, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
@@ -72391,6 +72473,8 @@ var init_local_index = __esm(() => {
   CREATE INDEX IF NOT EXISTS ${CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX}
     ON items(account_scope, COALESCE(authored_at, updated_at, indexed_at)) WHERE ${ACCOUNT_RECENCY_LIVE_SQL};
 `;
+  CONNECTOR_STORE_PERSONAL_BODY_INDEX_SQL = `CREATE INDEX IF NOT EXISTS ${CONNECTOR_STORE_PERSONAL_BODY_INDEX}
+  ON items(${PERSONAL_BODY_DATE_SQL}, item_pk) WHERE ${RECENCY_LIVE_SQL};`;
   READ_RESULT_PROJECTION_LOCATOR_URI = Symbol("connector-store-result-projection-locator-uri");
   CALIBRATED_CONTENT_PREFERENCE_BARS = new Map([
     ["gemini-embedding-2", DEFAULT_SEMANTIC_RELEVANCE_BAR],
@@ -72599,8 +72683,13 @@ var init_local_index = __esm(() => {
           const current = !migrating && !creatingFile && this.db.query("PRAGMA user_version").get().user_version === connectorStoreOpenStamp(this.db);
           if (!current) {
             applyConnectorStoreOpenSchema(this.db);
-            if (creatingFile)
+            if (creatingFile) {
               this.db.exec(CONNECTOR_STORE_RECENCY_INDEX_SQL);
+              if (this.trustDomain === "internal") {
+                this.db.exec(CONNECTOR_STORE_PERSONAL_BODY_INDEX_SQL);
+                this.personalBodyIndexReady = true;
+              }
+            }
             if (this.dbPath !== ":memory:")
               this.db.exec(`PRAGMA user_version = ${connectorStoreOpenStamp(this.db)}`);
           }
@@ -72630,8 +72719,8 @@ var init_local_index = __esm(() => {
           if (model && !vectorDigestState(this.db, model).completed)
             this.scheduleVectorDigestBackfill(model, VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS);
         }
-        if (!this.readOnly && options.restoreSchemaVersion === undefined && !creatingFile && this.db.query("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name IN (?, ?)").get(CONNECTOR_STORE_RECENCY_INDEX, CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX).n < 2) {
-          if (admitRecencyIndexBuild)
+        if (!this.readOnly && options.restoreSchemaVersion === undefined && !creatingFile) {
+          if (!this.recencyIndexesReady() && admitRecencyIndexBuild)
             this.scheduleRecencyIndexBuild();
         }
         reportFrontStoreOpened();
@@ -72643,6 +72732,13 @@ var init_local_index = __esm(() => {
       }
     }
     recencyIndexTimer;
+    personalBodyIndexReady = false;
+    recencyIndexesReady() {
+      const indexes = this.db.query("SELECT name FROM sqlite_master WHERE type = 'index' AND name IN (?, ?, ?)").all(CONNECTOR_STORE_RECENCY_INDEX, CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX, CONNECTOR_STORE_PERSONAL_BODY_INDEX);
+      this.personalBodyIndexReady = indexes.some((index) => index.name === CONNECTOR_STORE_PERSONAL_BODY_INDEX);
+      const recencyIndexes = indexes.length - Number(this.personalBodyIndexReady);
+      return recencyIndexes === 2 && (this.trustDomain !== "internal" || this.personalBodyIndexReady);
+    }
     scheduleRecencyIndexBuild(delayMs = 0) {
       this.recencyIndexTimer = setTimeout(() => {
         this.recencyIndexTimer = undefined;
@@ -72654,7 +72750,7 @@ var init_local_index = __esm(() => {
       const admit = admitRecencyIndexBuild;
       if (!admit || this.closedForPoolReads || this.fileReplacedOrRemoved())
         return;
-      if (this.db.query("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name IN (?, ?)").get(CONNECTOR_STORE_RECENCY_INDEX, CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX).n >= 2)
+      if (this.recencyIndexesReady())
         return;
       if (recencyIndexBuilding || this.reclaimProcess || this.vectorDigestBackfillReading || this.visibilityPublishing || storeReadHasPriority()) {
         this.scheduleRecencyIndexBuild(RECENCY_INDEX_BUSY_RETRY_MS);
@@ -72668,7 +72764,7 @@ var init_local_index = __esm(() => {
             return false;
           assertWritableStoreOpenAllowed("connector store recency index", this.dbPath);
           const buildStarted = Date.now();
-          const child = spawnConnectorStoreMaintenance(this.dbPath, connectorRecencyIndexWorkerSource());
+          const child = spawnConnectorStoreMaintenance(this.dbPath, connectorRecencyIndexWorkerSource(this.trustDomain === "internal"));
           this.reclaimProcess = child;
           child.unref();
           try {
@@ -75307,6 +75403,79 @@ ${parentKey(ref)}`, { ref, origin });
         };
       });
       return { items, ...rows.length === limit ? { nextAfterItemPk: rows[rows.length - 1].item_pk } : {} };
+    }
+    personalBodyPageFinder(after, limit) {
+      return {
+        here: () => this.readHere(this.personalBodyPageSteps(after, limit)),
+        offThread: () => this.readStepsInBackground(this.personalBodyPageSteps(after, limit))
+      };
+    }
+    *personalBodyPageSteps(after, limit) {
+      if (!this.personalBodyIndexReady) {
+        this.personalBodyIndexReady = Boolean(yield {
+          mode: "get",
+          sql: "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?",
+          params: [CONNECTOR_STORE_PERSONAL_BODY_INDEX]
+        });
+        if (!this.personalBodyIndexReady)
+          return;
+      }
+      const pageSize = Math.max(1, Math.floor(limit));
+      const select = `
+      SELECT item_pk, ${PERSONAL_BODY_DATE_SQL} AS source_date, family, provider, account_scope, provider_item_id,
+        provider_conversation_id, local_item_id, mime_type, content_hash
+      FROM items INDEXED BY ${CONNECTOR_STORE_PERSONAL_BODY_INDEX}
+      WHERE ${RECENCY_LIVE_SQL}`;
+      const order = `ORDER BY ${PERSONAL_BODY_DATE_SQL} DESC, item_pk DESC LIMIT ?`;
+      const sameDate = after ? yield {
+        mode: "all",
+        sql: `${select} AND ${PERSONAL_BODY_DATE_SQL} = ? AND item_pk < ? ORDER BY item_pk DESC LIMIT ?`,
+        params: [after.date, after.itemPk, pageSize]
+      } : [];
+      const older = sameDate.length < pageSize && after?.date !== 0 ? yield {
+        mode: "all",
+        sql: `${select} AND ${PERSONAL_BODY_DATE_SQL} ${after ? "< ?" : ">= 0"} ${order}`,
+        params: after ? [after.date, pageSize - sameDate.length] : [pageSize]
+      } : [];
+      const rows = [...sameDate, ...older];
+      if (rows.length === 0)
+        return { items: [] };
+      const chunks = yield {
+        mode: "all",
+        sql: `SELECT item_pk, bounded_text, content_hash FROM chunks
+        WHERE item_pk IN (SELECT value FROM json_each(?)) ORDER BY item_pk, chunk_index`,
+        params: [JSON.stringify(rows.map((row) => row.item_pk))]
+      };
+      const byItem = new Map;
+      for (const chunk of chunks) {
+        const parts = byItem.get(chunk.item_pk) ?? [];
+        parts.push(chunk);
+        byItem.set(chunk.item_pk, parts);
+      }
+      const items = [];
+      for (const row of rows) {
+        const parts = byItem.get(row.item_pk);
+        if (!parts)
+          continue;
+        const text = parts.map((part) => part.bounded_text).join("");
+        if (!text.trim())
+          continue;
+        items.push({
+          identity: {
+            family: row.family,
+            provider: row.provider,
+            accountScope: row.account_scope,
+            providerItemId: row.provider_item_id,
+            localItemId: row.local_item_id,
+            ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
+          },
+          ...row.mime_type ? { mimeType: row.mime_type } : {},
+          text,
+          fingerprint: migrationFingerprint(row.content_hash, parts.map((part) => part.content_hash))
+        });
+      }
+      const last = rows.at(-1);
+      return { items, ...rows.length === pageSize ? { next: { date: last.source_date, itemPk: last.item_pk } } : {} };
     }
     itemMigrationFingerprint(identity) {
       const row = this.db.query(`
@@ -100108,7 +100277,8 @@ var init_vocabulary = __esm(() => {
     dashboardPending: {
       one: "{n} item waiting for the private model",
       many: "{n} items waiting for the private model"
-    }
+    },
+    legacyPersonalBodies: "Held for a privacy check from earlier builds: {held} · Checked so far: {judged}"
   };
   DASHBOARD_CHATGPT_PRIVACY_JUDGE_STOPPED_COPY = {
     sentence: "{n} items are waiting because the privacy check stopped: {reason}",
@@ -144039,10 +144209,12 @@ function backgroundWorkFrom(status, ledger) {
   const embeddingBacklog = embeddingBacklogFromCorpora(status.corpora);
   const laneState = status.embedding_lane?.state ?? (status.corpora.some((corpus) => corpus.embedding_lane?.state === "embedding_lane_disabled") ? "embedding_lane_disabled" : undefined);
   const vlmQueued = ledger?.rows.map((row) => vlmExtractionQueued(row)).filter((value) => value !== undefined);
+  const legacy = status.tier_classification?.legacy_personal_bodies;
   return {
     ...embeddingBacklog ? { embedding_backlog: embeddingBacklog } : {},
     ...laneState ? { embedding_lane_state: laneState } : {},
-    ...vlmQueued?.length ? { vlm_extraction_queued: vlmQueued.reduce((sum, value) => sum + value, 0) } : {}
+    ...vlmQueued?.length ? { vlm_extraction_queued: vlmQueued.reduce((sum, value) => sum + value, 0) } : {},
+    ...legacy ? { legacy_personal_bodies: legacy } : {}
   };
 }
 function withoutCustodialDoubleCount(cards, _corpora) {
@@ -152016,6 +152188,126 @@ var init_tier_migration_lanes = __esm(() => {
   init_secret_locations();
 });
 
+// src/workers/connector-store/place-personal-body.ts
+function placePersonalBody(set, personal, item, queue, mode) {
+  const { ledger } = set;
+  const { identity, text } = item;
+  if (!text.trim())
+    return "unchanged";
+  const current = ledger.getCurrent(identity);
+  const override = ledger.observeOverrideText(identity);
+  const copies = ledger.copies(identity);
+  const copy = copies.find((copy) => copy.corpusId === personal.corpusId && copy.layers !== "metadata");
+  if (override?.kind !== "not_secret" && (override?.tier === "secrets" || current?.metadataTier === "secrets" || current?.contentTier === "secrets" || current?.targetMetadataTier === "secrets" || current?.targetContentTier === "secrets")) {
+    const record = set.adoptLegacyItem(identity);
+    const { copies: hidden } = ledger.flipToSecrets(identity, {
+      expectedGeneration: record.generation,
+      ...mode === "walk" ? { guard: { generation: record.generation, override } } : {}
+    });
+    const locations = mode === "walk" ? set.secrets() : undefined;
+    if (locations && !locations.get(identity)) {
+      const names = personal.exportItemNames(identity);
+      if (names)
+        recordSecretLocation(locations, { metadataTier: "secrets" }, names, { text, findingKinds: detectSecretFindingKinds(text) });
+    }
+    if (!hidden.some((copy) => copy.corpusId === personal.corpusId)) {
+      personal.tombstoneCopy(identity, { trustTier: "S5", connectorId: TIER_MOVE_CONNECTOR_ID });
+      personal.durabilityBarrier();
+    }
+    settleSecretsCopies({
+      ledger,
+      identity,
+      copies: hidden,
+      connectorId: TIER_MOVE_CONNECTOR_ID,
+      ...mode === "restore" ? { restoreQueue: true } : {},
+      storeFor: (corpusId) => {
+        const domain = set.domainForCorpus(corpusId);
+        return domain && set.store(domain);
+      }
+    });
+    return "secrets";
+  }
+  const resuming = mode === "restore" && current?.state === "moving" && copy?.state === "superseded" && copy.supersededByGeneration === current.generation + 1 && (current.reasons.includes(HELD_UNTIL_JUDGED_REASON) && current.contentPending || !!ownerOverrideSecretReview(current.reasons));
+  if (current?.routed && !resuming && copy?.state !== "current")
+    return "unchanged";
+  const ownerTier = override?.kind === "tier" ? override.tier : undefined;
+  const photo = isImageMediaType(item.mimeType) ? personal.imageJudgmentForItem(identity) : undefined;
+  if (current?.state === "current" && !current.metadataPending && (current.contentTier === "private" || current.contentTier === "public") && (current.metadataTier === "private" || current.metadataTier === "public") && ownerTier !== "secure" && (current.decidedBy !== "override" || ownerTier !== undefined) && personalContentAuthorized(current, text, override?.kind === "not_secret", override, photo && imageJudgmentSignal(photo)))
+    return "unchanged";
+  const record = set.adoptLegacyItem(identity);
+  const conflictingBody = ledger.copies(identity).some((other) => {
+    if (other.corpusId === personal.corpusId || other.state !== "current" || other.layers === "metadata" || mode === "restore" && other.trustDomain !== "secure_local")
+      return false;
+    const otherText = set.store(other.trustDomain)?.exportItemCopy(identity)?.chunks.map((chunk) => chunk.boundedText).join("");
+    return !!otherText && otherText !== text;
+  });
+  if (mode === "restore" && conflictingBody) {
+    throw new OperationError("config_error", "The restored tier stores contain different active bodies for the same item.");
+  }
+  const needsNames = mode === "walk" || ownerTier === "private" || ownerTier === "public";
+  const names = needsNames ? personal.exportItemNames(identity) : undefined;
+  const scanned = names ? classifyItemTiers({ signals: storedSignals(names), text }, override ? { override } : {}) : undefined;
+  if (mode === "walk" && !names)
+    return "retry";
+  if (mode === "walk" && !conflictingBody && names && scanned?.contentTier === "secrets") {
+    const settled = settleRoutedSecrets(set, identity, { ...scanned, metadataTier: maxTier(record.metadataTier, scanned.metadataTier) }, names, {
+      text,
+      findingKinds: contentSecretFindingKinds(scanned.reasons)
+    }, { guard: { generation: record.generation, override } });
+    return settled ? "secrets" : "retry";
+  }
+  queue?.deleteItemQuestions(identity);
+  const floor = ownerTier === "secure" ? "secure" : "public";
+  const decision = scanned && ownerOverrideSecretReview(scanned.reasons) ? {
+    ...scanned,
+    metadataTier: maxTier(record.metadataTier, scanned.metadataTier)
+  } : {
+    metadataTier: heldTier(floor, record.metadataTier, record.targetMetadataTier),
+    contentTier: heldTier(floor, record.contentTier, record.targetContentTier),
+    decidedBy: "default",
+    reasons: [
+      ...record.reasons.filter((reason) => !reason.startsWith("content:") && !reason.startsWith("override:")),
+      HELD_UNTIL_JUDGED_REASON,
+      "content:sniffer:undecided:undecided"
+    ],
+    state: "pending",
+    contentRead: true,
+    metadataPending: record.metadataPending,
+    contentPending: true,
+    metadataForced: record.metadataForced && record.decidedBy !== "override",
+    metadataFlagged: record.metadataFlagged,
+    engineVersion: TIER_CLASSIFIER_VERSION,
+    mapRevision: TIER_MAP_REVISION,
+    snifferId: "undecided"
+  };
+  const placement = set.placementFor(decision);
+  if (mode === "walk") {
+    const digest = contentDigestReason(text);
+    decision.reasons.push(LEGACY_PERSONAL_BODY_REASON);
+    if (!decision.reasons.includes(digest))
+      decision.reasons.push(digest);
+    const { outcome } = ledger.recordLegacyPersonalHold(identity, decision, placement, digest, { generation: record.generation, override });
+    return outcome === "queued_move" ? "held" : "retry";
+  }
+  const pending = resuming ? record : ledger.recordRoutedPlacement(identity, decision, placement).record;
+  moveRestoredItemToHold({ set, identity, decision, expectedGeneration: pending.generation });
+  return "held";
+}
+function heldTier(floor, current, target) {
+  const tier = maxTier(floor, maxTier(current, target ?? current));
+  return tier === "secrets" ? "secure" : tier;
+}
+var init_place_personal_body = __esm(() => {
+  init_operation_error();
+  init_tier_classifier();
+  init_engine();
+  init_media_judge();
+  init_secrets_disposition();
+  init_stored_names();
+  init_tier_move();
+  init_tier_rejudge();
+});
+
 // src/core/restore-held-content.ts
 import { existsSync as existsSync84, realpathSync as realpathSync20 } from "node:fs";
 import { resolve as resolve27 } from "node:path";
@@ -152172,87 +152464,14 @@ function holdLaneContent(env, account, spec, ledgerPath, ledgerSchema, holdBodie
   }
 }
 function placeRestoredBodies(set, personal, queue) {
-  const { ledger } = set;
   let afterItemPk;
   do {
     const page = personal.migrationItemsPage(afterItemPk === undefined ? {} : { afterItemPk });
     for (const item of page.items) {
-      const { identity } = item;
-      const text = item.chunks.map((chunk) => chunk.text).join("");
-      if (!text.trim())
-        continue;
-      const current = ledger.getCurrent(identity);
-      const override = ledger.observeOverrideText(identity);
-      const copies = ledger.copies(identity);
-      const copy = copies.find((copy) => copy.corpusId === personal.corpusId && copy.layers !== "metadata");
-      if (override?.kind !== "not_secret" && (override?.tier === "secrets" || current?.metadataTier === "secrets" || current?.contentTier === "secrets" || current?.targetMetadataTier === "secrets" || current?.targetContentTier === "secrets")) {
-        const record = set.adoptLegacyItem(identity);
-        const { copies: hidden } = ledger.flipToSecrets(identity, { expectedGeneration: record.generation });
-        if (!hidden.some((copy) => copy.corpusId === personal.corpusId)) {
-          personal.tombstoneCopy(identity, { trustTier: "S5", connectorId: TIER_MOVE_CONNECTOR_ID });
-          personal.durabilityBarrier();
-        }
-        settleSecretsCopies({
-          ledger,
-          identity,
-          copies: hidden,
-          connectorId: TIER_MOVE_CONNECTOR_ID,
-          restoreQueue: true,
-          storeFor: (corpusId) => {
-            const domain = set.domainForCorpus(corpusId);
-            return domain && set.store(domain);
-          }
-        });
-        continue;
-      }
-      const resuming = current?.state === "moving" && copy?.state === "superseded" && copy.supersededByGeneration === current.generation + 1 && (current.reasons.includes(HELD_UNTIL_JUDGED_REASON) && current.contentPending || !!ownerOverrideSecretReview(current.reasons));
-      if (current?.routed && !resuming && copy?.state !== "current")
-        continue;
-      const ownerTier = override?.kind === "tier" ? override.tier : undefined;
-      const photo = isImageMediaType(item.mimeType) ? personal.imageJudgmentForItem(identity) : undefined;
-      if (current?.state === "current" && !current.metadataPending && (current.contentTier === "private" || current.contentTier === "public") && (current.metadataTier === "private" || current.metadataTier === "public") && ownerTier !== "secure" && (current.decidedBy !== "override" || ownerTier !== undefined) && personalContentAuthorized(current, text, override?.kind === "not_secret", override, photo && imageJudgmentSignal(photo)))
-        continue;
-      const record = set.adoptLegacyItem(identity);
-      const privateCopy = ledger.copies(identity).find((copy) => copy.trustDomain === "secure_local" && copy.state === "current" && copy.layers !== "metadata");
-      const privateText = privateCopy && set.store("secure_local")?.exportItemCopy(identity)?.chunks.map((chunk) => chunk.boundedText).join("");
-      if (privateText && privateText !== text) {
-        throw new OperationError("config_error", "The restored tier stores contain different active bodies for the same item.");
-      }
-      queue?.deleteItemQuestions(identity);
-      const floor = ownerTier === "secure" ? "secure" : "public";
-      const names = ownerTier === "private" || ownerTier === "public" ? personal.exportItemNames(identity) : undefined;
-      const scanned = names && override ? classifyItemTiers({ signals: storedSignals(names), text }, { override }) : undefined;
-      const decision = scanned && ownerOverrideSecretReview(scanned.reasons) ? {
-        ...scanned,
-        metadataTier: maxTier(record.metadataTier, scanned.metadataTier)
-      } : {
-        metadataTier: heldTier(floor, record.metadataTier, record.targetMetadataTier),
-        contentTier: heldTier(floor, record.contentTier, record.targetContentTier),
-        decidedBy: "default",
-        reasons: [
-          ...record.reasons.filter((reason) => !reason.startsWith("content:") && !reason.startsWith("override:")),
-          HELD_UNTIL_JUDGED_REASON,
-          "content:sniffer:undecided:undecided"
-        ],
-        state: "pending",
-        contentRead: true,
-        metadataPending: record.metadataPending,
-        contentPending: true,
-        metadataForced: record.metadataForced && record.decidedBy !== "override",
-        metadataFlagged: record.metadataFlagged,
-        engineVersion: TIER_CLASSIFIER_VERSION,
-        mapRevision: TIER_MAP_REVISION,
-        snifferId: "undecided"
-      };
-      const pending = resuming ? record : ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision)).record;
-      moveRestoredItemToHold({ set, identity, decision, expectedGeneration: pending.generation });
+      placePersonalBody(set, personal, { ...item, text: item.chunks.map((chunk) => chunk.text).join("") }, queue, "restore");
     }
     afterItemPk = page.nextAfterItemPk;
   } while (afterItemPk !== undefined);
-}
-function heldTier(floor, current, target) {
-  const tier = maxTier(floor, maxTier(current, target ?? current));
-  return tier === "secrets" ? "secure" : tier;
 }
 var INITIAL_RESTORED_LEDGER_SCHEMA = 12;
 var init_restore_held_content = __esm(() => {
@@ -152263,17 +152482,14 @@ var init_restore_held_content = __esm(() => {
   init_source_placement();
   init_source_registry();
   init_source_storage();
-  init_tier_classifier();
   init_tier_ledger();
   init_tier_ledger_path();
   init_tier_set_binding();
   init_tier_migration_lanes();
   init_local_index();
-  init_secrets_disposition();
-  init_stored_names();
+  init_place_personal_body();
   init_tier_move();
   init_tiered_store_set();
-  init_media_judge();
 });
 
 // src/core/engine-store-copies.ts
@@ -203926,8 +204142,9 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const W = config.privacy.copy;
     const configured = info.configured === true;
     const pending = typeof info.pendingCount === "number" && isFinite(info.pendingCount) ? Math.max(0, Math.round(info.pendingCount)) : 0;
+    const earlier = legacyPersonalProgressText(info);
     const asked = (Array.isArray(data.needsYou) ? data.needsYou : []).some((item) => item && item.fix && privacy.handles(item.fix));
-    if (!configured && (asked || !pending))
+    if (!configured && !earlier && (asked || !pending))
       return null;
     const section = add(el("section", "section privacy-row"), el("h2", "", W.section));
     const row = el("li", "row");
@@ -203939,6 +204156,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     }
     if (pending > 0)
       add(text, el("p", "muted", fill(pending === 1 ? W.dashboardPending.one : W.dashboardPending.many, { n: count(pending) })));
+    if (earlier)
+      add(text, el("p", "muted", earlier));
     add(row, text);
     if (configured) {
       const blocked = globalReason();
@@ -204249,9 +204468,18 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const dot = el("span", "dot tone-" + (needs > 0 ? "warn" : running ? "run" : "good"));
     dot.setAttribute("aria-hidden", "true");
     const text = add(el("div", "row-text"), el("p", "home-title", title), el("p", "muted", facts.join(" · ")));
+    const earlier = legacyPersonalProgressText(data.privacy);
+    if (earlier)
+      add(text, el("p", "muted", earlier));
     const card = add(el("section", "home-status"), dot, text);
     card.setAttribute("data-home-status", needs > 0 ? "needs" : running ? "running" : "ok");
     return card;
+  }
+  function legacyPersonalProgressText(info) {
+    const progress = info?.legacyPersonalBodies;
+    if (!progress || typeof progress.held !== "number" || !isFinite(progress.held) || progress.held <= 0 || typeof progress.judged !== "number" || !isFinite(progress.judged))
+      return;
+    return fill(config.privacy.copy.legacyPersonalBodies, { held: count(progress.held), judged: count(progress.judged) });
   }
   function openModels(inPlace) {
     const href = onComputer() ? state.hostLinks.keys : "";
@@ -248191,6 +248419,71 @@ var init_installed_tier_classification = __esm(() => {
   };
 });
 
+// src/workers/connector-store/legacy-personal-bodies.ts
+function settleLegacyPersonalBodiesOffThread(options) {
+  return runPassOffThread(walk(options), { family: "legacy-personal-bodies", ...options.turn ? { turn: options.turn } : {} });
+}
+function* walk({ set, queue, limit = LEGACY_PERSONAL_BODY_PAGE_SIZE }) {
+  const { ledger } = set;
+  const report = { checked: 0, held: 0, secrets: 0, failed: 0, retired: false };
+  if (ledger.readMeta(DONE2) === "1")
+    return { ...report, retired: true };
+  const personal = set.store("internal");
+  const saved = ledger.readMeta(CURSOR3);
+  const checkpoint = saved ? JSON.parse(saved) : undefined;
+  let dirty = checkpoint?.dirty ?? false;
+  if (personal) {
+    const binding = personal.tierSetBinding();
+    if (binding && binding.ledgerId !== ledger.ledgerId())
+      return { ...report, failed: 1 };
+    const page = yield* find(personal.personalBodyPageFinder(checkpoint?.after, limit));
+    if (!page)
+      return report;
+    for (const item of page.items) {
+      yield* turn();
+      report.checked++;
+      if (secretScanReusable(item.text)) {
+        yield* find({ here: () => {
+          return;
+        }, offThread: () => scanSecretsAhead(item.text) });
+      }
+      if (personal.itemMigrationFingerprint(item.identity) !== item.fingerprint) {
+        dirty = true;
+        continue;
+      }
+      try {
+        const disposition = placePersonalBody(set, personal, item, queue, "walk");
+        if (disposition === "held")
+          report.held++;
+        if (disposition === "secrets")
+          report.secrets++;
+        if (disposition === "retry")
+          report.failed++;
+      } catch {
+        report.failed++;
+      }
+    }
+    dirty ||= report.held + report.secrets + report.failed > 0;
+    if (page.next) {
+      ledger.writeSettleProgress(CURSOR3, JSON.stringify({ after: page.next, dirty }));
+      return report;
+    }
+  }
+  ledger.writeSettleProgress(CURSOR3, "");
+  if (!dirty) {
+    ledger.writeSettleProgress(DONE2, "1");
+    report.retired = true;
+  }
+  return report;
+}
+var CURSOR3 = "legacy_personal_bodies_cursor", DONE2 = "legacy_personal_bodies_done", LEGACY_PERSONAL_BODY_PAGE_SIZE = 25;
+var init_legacy_personal_bodies = __esm(() => {
+  init_engine();
+  init_secret_scan_off_thread();
+  init_loop_pass();
+  init_place_personal_body();
+});
+
 // src/workers/classification/sniffer-service.ts
 import { Database as Database30 } from "bun:sqlite";
 import { existsSync as existsSync122, rmSync as rmSync48 } from "node:fs";
@@ -248200,6 +248493,13 @@ function unrefTimer(timer) {
 }
 function emptyBacklogCounts() {
   return { checkingItems: 0, remainingQuestions: 0, pendingItems: 0, pendingWithoutQuestion: 0, oldestPendingAgeMs: 0 };
+}
+function addLegacyPersonalProgress(counts, progress) {
+  if (progress.held === 0)
+    return;
+  const total = counts.legacyPersonalBodies ??= { held: 0, judged: 0 };
+  total.held += progress.held;
+  total.judged += progress.judged;
 }
 function newStoredWalk(now) {
   return { active: false, status: { lastRanAt: new Date(now).toISOString(), reason: "working" } };
@@ -248625,16 +248925,16 @@ class TierSnifferService {
     return rows;
   }
   roughBacklog() {
-    let pendingItems = 0;
-    let remainingQuestions = 0;
+    const counts = emptyBacklogCounts();
     for (const ledgerPath of this.ledgerPaths()) {
       const opened = this.openBacklogLedger(ledgerPath);
       if (!opened)
         continue;
       try {
-        pendingItems += opened.db.query(`SELECT COUNT(*) AS n FROM tier_items WHERE state = 'pending'`).get().n;
+        counts.pendingItems += opened.db.query(`SELECT COUNT(*) AS n FROM tier_items WHERE state = 'pending'`).get().n;
         if (opened.hasQueue)
-          remainingQuestions += opened.db.query("SELECT COUNT(*) AS n FROM queue.sniffer_questions").get().n;
+          counts.remainingQuestions += opened.db.query("SELECT COUNT(*) AS n FROM queue.sniffer_questions").get().n;
+        addLegacyPersonalProgress(counts, opened.db.query(LEGACY_PERSONAL_BODY_PROGRESS_SQL).get());
         this.noteReadable(ledgerPath);
       } catch {
         this.noteUnreadable(ledgerPath, "its privacy ledger");
@@ -248642,7 +248942,8 @@ class TierSnifferService {
         opened.db.close();
       }
     }
-    return { checkingItems: Math.max(pendingItems, remainingQuestions ? 1 : 0), remainingQuestions, pendingItems, pendingWithoutQuestion: 0, oldestPendingAgeMs: 0 };
+    counts.checkingItems = Math.max(counts.pendingItems, counts.remainingQuestions ? 1 : 0);
+    return counts;
   }
   countBacklogNow() {
     const counts = emptyBacklogCounts();
@@ -248654,6 +248955,7 @@ class TierSnifferService {
         this.addPendingSlice(counts, opened, undefined);
         if (opened.hasQueue)
           this.addQuestionSlice(counts, opened.db, undefined);
+        addLegacyPersonalProgress(counts, opened.db.query(LEGACY_PERSONAL_BODY_PROGRESS_SQL).get());
         this.noteReadable(ledgerPath);
       } catch {
         this.noteUnreadable(ledgerPath, "its privacy ledger");
@@ -248668,7 +248970,12 @@ class TierSnifferService {
       const queue = tierSnifferPathForLedger(path);
       return { path, expectedId: this.boundLedgerIds.get(path) ?? null, queue: existsSync122(queue) ? queue : null };
     });
-    const sql = { pendingQueued: pendingCountSql(true), pendingAlone: pendingCountSql(false), questions: questionCountSql() };
+    const sql = {
+      pendingQueued: pendingCountSql(true),
+      pendingAlone: pendingCountSql(false),
+      questions: questionCountSql(),
+      legacyPersonalBodies: LEGACY_PERSONAL_BODY_PROGRESS_SQL
+    };
     const results = await runBacklogCountWorker({ ledgers, sql });
     if (!results || this.stopped)
       return;
@@ -248684,6 +248991,7 @@ class TierSnifferService {
       counts.pendingWithoutQuestion += result.missing ?? 0;
       counts.checkingItems += result.n + (result.other ?? 0);
       counts.remainingQuestions += result.questions;
+      addLegacyPersonalProgress(counts, result.legacyPersonalBodies);
       if (result.oldest)
         counts.oldestPendingAgeMs = Math.max(counts.oldestPendingAgeMs, this.clockMs() - Date.parse(result.oldest));
     }
@@ -248728,6 +249036,7 @@ class TierSnifferService {
               return;
           }
         }
+        addLegacyPersonalProgress(counts, opened.db.query(LEGACY_PERSONAL_BODY_PROGRESS_SQL).get());
         this.noteReadable(ledgerPath);
       } catch {
         this.noteUnreadable(ledgerPath, "its privacy ledger");
@@ -249092,6 +249401,11 @@ class TierSnifferService {
           if (binding?.ledgerId)
             this.boundLedgerIds.set(bound, binding.ledgerId);
         }
+        if (!binding) {
+          const path = store.tierLedgerPathInUse?.();
+          if (path && path !== ":memory:" && tierSetForLedger(path) && existsSync122(path))
+            paths.add(path);
+        }
         this.noteReadable(store.dbPath);
       } catch {
         this.noteUnreadable(store.dbPath, "which privacy ledger the store is bound to");
@@ -249427,7 +249741,8 @@ class TierSnifferService {
               continue;
             const classification = set?.classification();
             const retiredClearance = row.reasons.includes(RETIRED_EMBEDDING_CLEARANCE_REASON);
-            if (set && row.contentRead && row.contentPending && !row.metadataPending && (row.contentTier === "private" || row.contentTier === "public" || retiredClearance && row.contentTier === "secure") && classification?.sniffer && !classification.unavailableReason) {
+            const legacyHold = row.contentPending && row.reasons.includes(LEGACY_PERSONAL_BODY_REASON);
+            if (set && row.contentRead && row.contentPending && !row.metadataPending && (row.contentTier === "private" || row.contentTier === "public" || (retiredClearance || legacyHold) && row.contentTier === "secure") && classification?.sniffer && !classification.unavailableReason) {
               if (!allowReask)
                 continue;
               rejudgeStoredContent(set, row, {
@@ -249440,12 +249755,12 @@ class TierSnifferService {
               if (ledger.getCurrent(identity)?.state !== "pending" || queue.questionFor(identity, "metadata") || queue.questionFor(identity, "content"))
                 continue;
             }
-            if (retiredClearance)
+            if (retiredClearance || legacyHold && !missingMetadata)
               continue;
             const planner = tierSetPlannerForLedger(ledgerPath);
             if (ledger.settleMissingQuestions(row, {
               missingMetadata,
-              missingContent: missingContent && !waitingForText,
+              missingContent: missingContent && !waitingForText && !legacyHold,
               snifferId: snifferId(this.options.lane, snifferPromptVersions(this.options.ownerContext?.()).cache),
               stillMissing: () => (!missingMetadata || !queue.questionFor(identity, "metadata")) && (!missingContent || !queue.questionFor(identity, "content")),
               ...planner ? { placementFor: planner } : {}
@@ -249654,6 +249969,16 @@ class TierSnifferService {
           this.options.log?.(`Olympus tier hold: ${held.settled} item(s) recorded before every open question held text are held now (${held.movesQueued} move(s) to Private queued).`);
         }
         return { retired: held.retired, complete: held.retired, changed: held.settled > 0, failed: held.failed > 0 };
+      });
+      await this.runStoredWalker(set, "legacyPersonalBodies", undefined, async () => {
+        const page = await settleLegacyPersonalBodiesOffThread({
+          set,
+          queue: this.options.installed.snifferStoreForLedger(ledgerPath),
+          turn
+        });
+        if (page.held > 0)
+          this.options.log?.(`Olympus tier hold: ${page.held} item(s) from earlier builds held for judgment, moves to Private queued.`);
+        return { retired: page.retired, complete: page.retired, changed: page.held + page.secrets > 0, failed: page.failed > 0 };
       });
       await this.runStoredWalker(set, "personalLowerings", this.storedWalkInputs(set, true), async (after) => {
         const page = await storedPersonalLoweringLap(set, after, turn);
@@ -250071,7 +250396,8 @@ self.onmessage = ({ data }) => {
       if (ledger.queue) db.query('ATTACH DATABASE ? AS queue').run(ledger.queue);
       const pending = db.query(ledger.queue ? data.sql.pendingQueued : data.sql.pendingAlone).get();
       const questions = ledger.queue ? db.query(data.sql.questions).get() : { n: 0, other: 0 };
-      out.push({ n: pending.n, missing: pending.missing, oldest: pending.oldest, questions: questions.n, other: questions.other });
+      const legacyPersonalBodies = db.query(data.sql.legacyPersonalBodies).get();
+      out.push({ n: pending.n, missing: pending.missing, oldest: pending.oldest, questions: questions.n, other: questions.other, legacyPersonalBodies });
     } catch {
       out.push({ unreadable: ledger.path });
     } finally { try { db?.close(); } catch {} }
@@ -250088,12 +250414,14 @@ var init_sniffer_service = __esm(() => {
   init_engine_heartbeat();
   init_tier_auto_move();
   init_built_in_sniffer();
+  init_tier_classifier();
   init_sniffer();
   init_sniffer_resolver();
   init_boot_progress();
   init_tier_ledger_path();
   init_tier_rejudge();
   init_tier_names_only_settle();
+  init_legacy_personal_bodies();
   init_tier_held_settle();
   init_tier_rules_sweep();
   init_tier_override_settle();
@@ -256168,6 +256496,7 @@ function buildChatGptDashboardViewModel(view, options = {}) {
         configured: options.privacy.configured,
         pendingCount: Math.max(0, Math.floor(options.privacy.pendingCount)),
         ruleCount: Math.max(0, Math.floor(options.privacy.ruleCount)),
+        ...view.background_work?.legacy_personal_bodies ? { legacyPersonalBodies: view.background_work.legacy_personal_bodies } : {},
         ...typeof options.privacy.judgePerMinute === "number" && Number.isFinite(options.privacy.judgePerMinute) && options.privacy.judgePerMinute > 0 ? { judgePerMinute: options.privacy.judgePerMinute } : {}
       }
     } : {},
@@ -259600,6 +259929,12 @@ function copyDashboardViewModel(view) {
       configured: view.privacy.configured === true,
       pendingCount: whole(view.privacy.pendingCount),
       ruleCount: whole(view.privacy.ruleCount),
+      ...view.privacy.legacyPersonalBodies ? {
+        legacyPersonalBodies: {
+          held: whole(view.privacy.legacyPersonalBodies.held),
+          judged: whole(view.privacy.legacyPersonalBodies.judged)
+        }
+      } : {},
       ...typeof view.privacy.judgePerMinute === "number" && Number.isFinite(view.privacy.judgePerMinute) && view.privacy.judgePerMinute > 0 ? { judgePerMinute: Math.round(view.privacy.judgePerMinute * 10) / 10 } : {}
     };
   }
@@ -280221,6 +280556,7 @@ ${key}`;
         awaiting_owner_approval: backlog.awaitingOwnerApproval,
         ...backlog.waiting ? { waiting_reason: backlog.waiting.reason, waiting_label: backlog.waiting.label, waiting_since: backlog.waiting.since } : {},
         ...backlog.storedWalks?.length ? { stored_walks: backlog.storedWalks } : {},
+        ...backlog.legacyPersonalBodies ? { legacy_personal_bodies: backlog.legacyPersonalBodies } : {},
         over_private: tierOverPrivate()
       } : undefined;
     },

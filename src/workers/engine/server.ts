@@ -4088,6 +4088,7 @@ export async function main(): Promise<void> {
                 ? { waiting_reason: backlog.waiting.reason, waiting_label: backlog.waiting.label, waiting_since: backlog.waiting.since }
                 : {}),
               ...(backlog.storedWalks?.length ? { stored_walks: backlog.storedWalks } : {}),
+              ...(backlog.legacyPersonalBodies ? { legacy_personal_bodies: backlog.legacyPersonalBodies } : {}),
               over_private: tierOverPrivate(),
             }
           : undefined;

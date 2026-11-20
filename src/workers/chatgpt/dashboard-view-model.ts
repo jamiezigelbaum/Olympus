@@ -463,6 +463,8 @@ export function buildChatGptDashboardViewModel(
             configured: options.privacy.configured,
             pendingCount: Math.max(0, Math.floor(options.privacy.pendingCount)),
             ruleCount: Math.max(0, Math.floor(options.privacy.ruleCount)),
+            ...(view.background_work?.legacy_personal_bodies
+              ? { legacyPersonalBodies: view.background_work.legacy_personal_bodies } : {}),
             ...(typeof options.privacy.judgePerMinute === 'number' && Number.isFinite(options.privacy.judgePerMinute) && options.privacy.judgePerMinute > 0
               ? { judgePerMinute: options.privacy.judgePerMinute } : {}),
           },

@@ -633,6 +633,18 @@ describe('the panel on the computer', () => {
     expect(doc.querySelector('[data-home-status]')!.textContent).toContain('1 thing needs you');
   });
 
+  test('Home shows the earlier-build privacy check counts after the last verdict', async () => {
+    const data = model({
+      sources: [TELEGRAM],
+      privacy: { configured: true, ruleCount: 0, pendingCount: 0, legacyPersonalBodies: { held: 12, judged: 12 } },
+    });
+    delete data.progress;
+    const page = await onHost(COMPUTER, data);
+    expect(page.win.document.querySelector('.home-progress')).toBeNull();
+    expect(page.win.document.querySelector('[data-home-status]')?.textContent)
+      .toContain('Held for a privacy check from earlier builds: 12 · Checked so far: 12');
+  });
+
   test('a transcription model not needed yet is not Needs you: its optional Download now stays in Settings, and Home stays up to date (#1163 review)', async () => {
     const calm = model({
       sources: [TELEGRAM],
