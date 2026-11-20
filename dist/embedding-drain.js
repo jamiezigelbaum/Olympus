@@ -11089,8 +11089,25 @@ function sizeHeldItemKey(ref) {
 
 // src/workers/connector-store/sqlite-mmap.ts
 var SQLITE_MMAP_BYTES = 2147418112;
+function sqliteMmapPolicy(env = process.env) {
+  const setting = env.OLYMPUS_SQLITE_MMAP;
+  if (setting === "off")
+    return { enabled: false, reason: "OLYMPUS_SQLITE_MMAP=off" };
+  if (process.platform !== "linux")
+    return { enabled: false, reason: "Linux only" };
+  if (setting === "on")
+    return { enabled: true, reason: "OLYMPUS_SQLITE_MMAP=on" };
+  return { enabled: false, reason: "default" };
+}
 function sqliteMmapEnabled(env = process.env) {
-  return process.platform === "linux" && env.OLYMPUS_SQLITE_MMAP !== "off";
+  return sqliteMmapPolicy(env).enabled;
+}
+function sqliteMmapWorkerSource(source) {
+  const pragma = sqliteMmapEnabled() ? `
+    try { db.exec('PRAGMA mmap_size = ${SQLITE_MMAP_BYTES}'); }
+    catch { console.warn('[olympus] SQLite worker could not enable the file map.'); }
+  ` : "";
+  return source.replace("/*olympus-mmap-pragma*/", pragma);
 }
 function applySqliteMmap(db, env = process.env) {
   if (!sqliteMmapEnabled(env))
@@ -15431,8 +15448,6 @@ var clock2 = REAL_CLOCK;
 var observer;
 var observeSnapshots = false;
 var workerFactory = (url) => new Worker(url);
-var MMAP_PRAGMA_SLOT = "/*olympus-mmap-pragma*/";
-var mmapPragma = () => sqliteMmapEnabled() ? `try { db.exec('PRAGMA mmap_size = ${SQLITE_MMAP_BYTES}'); } catch {}` : "";
 var benchSqlDir;
 function instrumentBenchWorker(source, dir, store) {
   const module = new URL("./ask-bench-sql.ts", import.meta.url).href;
@@ -15614,7 +15629,7 @@ function startThread(store, lane = "shared") {
   if (threads.filter((reader) => reader.store === store && reader.lane === lane).length >= limit || !runtimeHasWorkers())
     return;
   try {
-    const source = WORKER_SOURCE.replace(MMAP_PRAGMA_SLOT, mmapPragma());
+    const source = sqliteMmapWorkerSource(WORKER_SOURCE);
     const url = URL.createObjectURL(new Blob([benchSqlDir ? instrumentBenchWorker(source, benchSqlDir, store) : source], { type: "application/javascript" }));
     const worker = workerFactory(url);
     worker.unref?.();

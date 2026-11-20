@@ -72,11 +72,16 @@ describe('the engine split boots as two processes', () => {
     expect(front.output()).not.toContain('worker listening');
     const background = spawnWorker(env, 'background');
     await waitFor(() => background.output().includes('engine background ready'), { timeoutMs: 60_000 });
+    const reason = process.platform === 'linux' ? 'default' : 'Linux only';
+    expect(background.output().match(/^\[olympus\] engine \S+ SQLite file map .+$/gm))
+      .toEqual([`[olympus] engine background SQLite file map off (${reason})`]);
     expect(background.output()).not.toContain('worker listening');
     await waitFor(() => front.output().includes('worker listening'), { timeoutMs: 60_000 });
+    expect(front.output().match(/^\[olympus\] engine \S+ SQLite file map .+$/gm))
+      .toEqual([`[olympus] engine front SQLite file map off (${reason})`]);
     expect(front.output()).not.toContain('FrontStoreWriteError');
 
-    const workerFetch = createWorkerFetch({ platform: 'linux', env });
+    const workerFetch = createWorkerFetch({ env });
     const health = await workerFetch(`http://127.0.0.1:${port}/v1/health`, { headers: { Authorization: `Bearer ${TOKEN}` } });
     expect(health.status).toBe(200);
     // The front reports its background, so an upgrade or rollback never calls a crash-looping background healthy (#1563 review).

@@ -516,6 +516,7 @@ import { engineRssRestartsFrom, startEngineRssRestart } from '../engine-split/rs
 import { createFrontScheduler } from '../engine-split/front-scheduler.ts';
 import { createFrontDashboardHistory, openWritableDashboardHistory } from '../engine-split/front-history.ts';
 import { tierSetForLedger } from '../connector-store/tier-set-registry.ts';
+import { sqliteMmapPolicy } from '../connector-store/sqlite-mmap.ts';
 import { startSupersededSweepTicker } from '../connector-store/tier-auto-prune-sweep.ts';
 import { withStoreReadPriority } from '../../core/store-reclaim-admission.ts';
 import { createStandBack, ownerAskReason } from './stand-back.ts';
@@ -665,6 +666,8 @@ export async function main(): Promise<void> {
   // split's front (core/engine-split.ts) takes no lock: its background holds it.
   dataOwnerLock = takeWorkerDataOwnerLock(process.env, { engineRole: engineRoleFromEnv(process.env) });
   const engineRole = engineRoleFromEnv(process.env);
+  const { enabled: sqliteMmapOn, reason: sqliteMmapReason } = sqliteMmapPolicy();
+  console.log(`[olympus] engine ${engineRole} SQLite file map ${sqliteMmapOn ? 'on' : 'off'} (${sqliteMmapReason})`);
   const askBench = process.env.NODE_ENV === 'test' && process.env.OLYMPUS_ASK_BENCH === '1';
   if (askBench && process.env.OLYMPUS_ASK_BENCH_SQL_DIR) {
     const dir = process.env.OLYMPUS_ASK_BENCH_SQL_DIR;
