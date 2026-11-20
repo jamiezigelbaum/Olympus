@@ -772,7 +772,7 @@ describe('bounds and the owner-approval gate', () => {
       });
       await reasons.runOnce();
       expect(reasons.status().waiting?.reason).toBe('breaker_open');
-      expect(lines).toContain('Olympus tier sniffer: questions are waiting, nothing asked: the private model is resting after failures.');
+      expect(lines.some((line) => line.startsWith('Olympus tier sniffer: questions are waiting, nothing asked: the private model is resting after failures; at='))).toBe(true);
       breaker = false;
       answers = true;
       await reasons.runOnce();
@@ -923,7 +923,7 @@ describe('bounds and the owner-approval gate', () => {
       expect(service.status().waiting).toMatchObject({ reason: 'model_not_answering', label: 'the private model is not answering' });
       expect(service.backlog().waiting?.reason).toBe('model_not_answering');
       expect(service.backlog().summary).toContain('Nothing asked now: the private model is not answering.');
-      expect(lines).toContain('Olympus tier sniffer: questions are waiting, nothing asked: the private model is not answering.');
+      expect(lines.some((line) => line.startsWith('Olympus tier sniffer: questions are waiting, nothing asked: the private model is not answering; at='))).toBe(true);
       // The Archives row reads the same status: held mail waits, never "ready".
       expect(archivePrivateModelFromSniffer(service)).toBe('waiting');
 

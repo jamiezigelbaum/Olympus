@@ -245570,11 +245570,11 @@ class TierSnifferService {
     if (this.unreadable.get(path) === what)
       return;
     this.unreadable.set(path, what);
-    this.options.log?.(`Olympus tier sniffer: could not read ${what} for ${this.sourceLabel(path)}; its items stay held and are not counted until it can be read.`);
+    this.options.log?.(`Olympus tier sniffer: could not read ${what} for ${this.sourceLabel(path)}; its items stay held and are not counted until it can be read; at=${new Date(this.clockMs()).toISOString()}.`);
   }
   noteReadable(path) {
     if (this.unreadable.delete(path))
-      this.options.log?.(`Olympus tier sniffer: ${this.sourceLabel(path)} can be read again.`);
+      this.options.log?.(`Olympus tier sniffer: ${this.sourceLabel(path)} can be read again; at=${new Date(this.clockMs()).toISOString()}.`);
   }
   sourceLabel(path) {
     try {
@@ -245844,7 +245844,7 @@ class TierSnifferService {
         this.overrunReported = true;
         this.overrunAbortedAtMs = nowMs;
         this.abort?.abort();
-        this.options.log?.(`Olympus tier sniffer: a pass made no progress for ${Math.round(stalledMs / 60000)} min while ${this.passStep}; it was stopped. Its items stay held and are asked again.`);
+        this.options.log?.(`Olympus tier sniffer: a pass made no progress for ${Math.round(stalledMs / 60000)} min while ${this.passStep}; it was stopped. Its items stay held and are asked again; at=${new Date(this.clockMs()).toISOString()}.`);
         this.setWaiting("pass_stuck");
         return { state: "skipped_running" };
       }
@@ -245917,7 +245917,7 @@ class TierSnifferService {
       this.lastBacklogLogMs = this.clockMs();
       const backlog = this.backlog();
       if (backlog.checkingItems > 0)
-        this.options.log(`Olympus tier sniffer: pending=${backlog.pendingItems} questions=${backlog.remainingQuestions} pending_without_question=${backlog.pendingWithoutQuestion} oldest_pending_ms=${backlog.oldestPendingAgeMs}.`);
+        this.options.log(`Olympus tier sniffer: pending=${backlog.pendingItems} questions=${backlog.remainingQuestions} pending_without_question=${backlog.pendingWithoutQuestion} oldest_pending_ms=${backlog.oldestPendingAgeMs} at=${new Date(this.clockMs()).toISOString()}.`);
     }
     if (tick.state === "ran" && tick.report.calls > 0 && this.trickle())
       this.pacedUntilMs = this.clockMs() + (this.options.pacing?.trickleGapMs ?? 0);
@@ -245981,7 +245981,7 @@ class TierSnifferService {
     this.waitingReason = reason;
     if (reason === "pass_running" || reason === "pass_stuck")
       return;
-    this.options.log?.(`Olympus tier sniffer: questions are waiting, nothing asked: ${label}.`);
+    this.options.log?.(`Olympus tier sniffer: questions are waiting, nothing asked: ${label}; at=${new Date(this.clockMs()).toISOString()}.`);
   }
   waitLabel(reason, tick) {
     switch (reason) {
@@ -246476,7 +246476,7 @@ class TierSnifferService {
         else if (rows.length === 0 && saved)
           cursorLedger.writeSettleProgress(cursorKey, "");
         if (settled || retired)
-          this.options.log?.(`Olympus tier sniffer: recovered ${settled} pending item(s) as fail-safe Private; retired ${retired} missing item(s).`);
+          this.options.log?.(`Olympus tier sniffer: recovered ${settled} pending item(s) as fail-safe Private; retired ${retired} missing item(s); at=${new Date(this.clockMs()).toISOString()}.`);
       } catch {}
     }
   }
@@ -246548,7 +246548,7 @@ class TierSnifferService {
       }
       return await this.moving;
     } catch (error) {
-      this.options.log?.(`Olympus tier sniffer: move drain failed (${error instanceof Error ? error.name : "unknown"}); queued moves will retry.`);
+      this.options.log?.(`Olympus tier sniffer: move drain failed (${error instanceof Error ? error.name : "unknown"}); queued moves will retry; at=${new Date(this.clockMs()).toISOString()}.`);
       return;
     }
   }
