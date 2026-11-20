@@ -22740,7 +22740,7 @@ function decideItemTiers(connector, item, text, options, ledger, extra = {}) {
   if (newArrival && text === undefined)
     ledger?.markNewArrival(item.identity);
   const sniffer = cacheAware && arrivalOrderedSniffer(conversationOrderedSniffer(recordedContentVerdictSniffer(cacheAware, recorded, text, namesReceipt), item.metadata), newArrival);
-  const holdUntilJudged = options?.holdContentUntilJudged === true || item.holdContentUntilJudged === true || heldUntilJudged(recorded?.reasons);
+  const holdUntilJudged = options?.holdContentUntilJudged === true || item.identity.parent !== undefined || item.holdContentUntilJudged === true || heldUntilJudged(recorded?.reasons);
   return classifyItemTiers({
     signals,
     locators: ["locatorUri", "url", "pathDisplay"].map((key) => item.metadata[key]).filter((value) => typeof value === "string"),
@@ -33952,18 +33952,21 @@ ${parentKey(ref)}`, { ref, origin });
       ...resume < top ? { next: resume } : {}
     };
   }
-  selectedItemServable(identity, accountScope, filters) {
+  selectedItemServable(identity, accountScope, filters, layer = "content") {
     try {
       const localItemId = typeof identity.localItemId === "string" ? identity.localItemId.trim() : "";
       if (!localItemId)
         return false;
       const row = this.activeLocalItemRow(localItemId);
-      if (!row)
+      if (!row || identity.family !== this.family || row.trustTier === "S5")
         return false;
       if (row.identity.provider !== identity.provider || row.identity.accountScope !== identity.accountScope || row.identity.providerItemId !== identity.providerItemId || normalizeConversationId(row.identity.providerConversationId) !== normalizeConversationId(identity.providerConversationId))
         return false;
       if (!this.itemMatchesSearchFilters(localItemId, normalizeOptionalAccountScope(accountScope), filters))
         return false;
+      if (layer === "metadata") {
+        return this.tierVisibleRows([row.identity], (entry) => entry, () => "metadata").length > 0;
+      }
       return this.contentServedNow(localItemId);
     } catch {
       return false;

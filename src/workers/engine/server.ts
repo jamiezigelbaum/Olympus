@@ -3352,6 +3352,7 @@ export async function main(): Promise<void> {
   // lane's stores change, with the same extractor configuration as the main runtime.
   const archiveExtraction = createArchiveExtractionRuntime({
     runtime: archiveImports,
+    configuredCorpora: configuredFileExtractionCorpora,
     env: process.env,
     extractors: fileExtractionExtractors,
   });

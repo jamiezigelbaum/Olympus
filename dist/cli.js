@@ -57308,7 +57308,7 @@ function decideItemTiers(connector, item, text, options, ledger, extra = {}) {
   if (newArrival && text === undefined)
     ledger?.markNewArrival(item.identity);
   const sniffer = cacheAware && arrivalOrderedSniffer(conversationOrderedSniffer(recordedContentVerdictSniffer(cacheAware, recorded, text, namesReceipt), item.metadata), newArrival);
-  const holdUntilJudged = options?.holdContentUntilJudged === true || item.holdContentUntilJudged === true || heldUntilJudged(recorded?.reasons);
+  const holdUntilJudged = options?.holdContentUntilJudged === true || item.identity.parent !== undefined || item.holdContentUntilJudged === true || heldUntilJudged(recorded?.reasons);
   return classifyItemTiers({
     signals,
     locators: ["locatorUri", "url", "pathDisplay"].map((key) => item.metadata[key]).filter((value) => typeof value === "string"),
@@ -67331,7 +67331,7 @@ function createConnectorStoreCorpusAdapter(options) {
     assertConnectorStoreCorpusRequest(store, request);
     return withExpandedSourceIndexKeywords(request.query, () => store.keywordLanguages(), () => metadataMatches(request), store);
   };
-  expanded.selectedItemServable = (sourceItem) => store.selectedItemServable(sourceItem, options.accountScope, filters);
+  expanded.selectedItemServable = (sourceItem, layer) => store.selectedItemServable(sourceItem, options.accountScope, filters, layer);
   expanded.prepareKeywords = async (query) => {
     const status = { incomplete: false };
     await expandSourceIndexKeywords(query, () => store.keywordLanguages(), store, { waitMs: keywordPrepareWaitMs(), status });
@@ -78592,18 +78592,21 @@ ${parentKey(ref)}`, { ref, origin });
         ...resume < top ? { next: resume } : {}
       };
     }
-    selectedItemServable(identity, accountScope, filters) {
+    selectedItemServable(identity, accountScope, filters, layer = "content") {
       try {
         const localItemId = typeof identity.localItemId === "string" ? identity.localItemId.trim() : "";
         if (!localItemId)
           return false;
         const row = this.activeLocalItemRow(localItemId);
-        if (!row)
+        if (!row || identity.family !== this.family || row.trustTier === "S5")
           return false;
         if (row.identity.provider !== identity.provider || row.identity.accountScope !== identity.accountScope || row.identity.providerItemId !== identity.providerItemId || normalizeConversationId(row.identity.providerConversationId) !== normalizeConversationId(identity.providerConversationId))
           return false;
         if (!this.itemMatchesSearchFilters(localItemId, normalizeOptionalAccountScope(accountScope), filters))
           return false;
+        if (layer === "metadata") {
+          return this.tierVisibleRows([row.identity], (entry) => entry, () => "metadata").length > 0;
+        }
         return this.contentServedNow(localItemId);
       } catch {
         return false;
@@ -105412,7 +105415,7 @@ class TieredRoutingRun {
     if (contentRead && decision.contentPending && fromContent && toContent && trustDomainRank(toContent.trustDomain) < trustDomainRank(fromContent.trustDomain) && !placementIsRaise(currentCopies, placement.copies)) {
       placement = { copies: currentCopies, embedHold: true };
     }
-    const holdsReplacement = routed && contentRead && (item.holdContentUntilJudged === true || contentHeldForJudgment(decision)) && decision.contentTier !== "secrets" && ledger.getCurrent(identity)?.state !== "moving";
+    const holdsReplacement = routed && contentRead && (heldUntilJudged(decision.reasons) || contentHeldForJudgment(decision)) && decision.contentTier !== "secrets" && ledger.getCurrent(identity)?.state !== "moving";
     const replacesInPlace = holdsReplacement && currentCopies.length > 0 && placementIsRaise(currentCopies, placement.copies);
     const placedDomains = new Set(placement.copies.map((copy) => copy.trustDomain));
     const staleDomains = holdsReplacement ? TIER_DOMAIN_ORDER.filter((domain) => !placedDomains.has(domain) && this.set.store(domain)?.itemPresence(identity).active === true) : [];
@@ -109630,6 +109633,9 @@ function selectedItemsToRoutedSlice(input) {
       skippedCorpora.push({ corpusId: corpus.corpusId, trustDomain: corpus.trustDomain, reason: skipReason });
       continue;
     }
+    if (input.requireScopedSelection && input.adapters[corpus.corpusId]?.selectedItemServable?.(selected.sourceItem, "metadata") !== true) {
+      continue;
+    }
     searched.add(corpus.corpusId);
     if (isSecureSensitivity(corpus.defaultSensitivity))
       encounteredSecureLocal = true;
@@ -110294,6 +110300,7 @@ function createAnalystSourceIndexAnswerHandler(options) {
         ...build,
         ...request.query?.trim() ? { searchQuery: request.query.trim() } : {},
         ...request.selected_items?.length ? { selectedItems: selectedEvidenceItemsFromRequest(request) } : {},
+        requireScopedSelection: Boolean(request.approved_scope_key),
         ...options.queryPlanner ? { queryPlanner: options.queryPlanner } : {},
         ...reranker ? { reranker } : {},
         maxResults,
@@ -136399,7 +136406,7 @@ function createTieredStoreExtractionSink(options) {
       const itemPath = stringMetadata2(plan.item, ["locatorUri", "pathDisplay"]);
       const imageJudgment = plan.media ? setMediaJudgment(set, plan.media.sha256) : undefined;
       const settledUnread = !record.contentRead && record.reasons.some(isFailSafeMissingContentQuestion) || record.reasons.some((reason) => reason === CONTENT_NAMES_ONLY_REASON || reason === CONTENT_NAMES_ONLY_LIFTED_REASON);
-      const holdUntilJudged = tierClassification?.holdContentUntilJudged === true || set.holdsContentUntilJudged() || heldUntilJudged(record.reasons) || settledUnread;
+      const holdUntilJudged = tierClassification?.holdContentUntilJudged === true || set.holdsContentUntilJudged() || heldUntilJudged(record.reasons) || settledUnread || anchorStore.parentLocalItemIdOf(identity) !== undefined;
       const parentContext = tierClassification?.sniffer ? parentNamesContext(set, identity) : undefined;
       const judgeStarted = Date.now();
       const content = classifyContentTier({
@@ -137272,11 +137279,8 @@ function createFileExtractionRuntime(options) {
   };
 }
 function fileExtractionCorporaRoster(input) {
-  const configuredDropbox = input.configured.find((corpus) => corpus.corpusId === DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID);
-  const canonicalIds = new Set;
   const canonical = [];
   if (input.dropbox && (input.dropbox.extractionScopes.length > 0 || input.dropbox.resolveExtractionScopes !== undefined || input.dropbox.resolveReadScopes !== undefined)) {
-    canonicalIds.add(DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID);
     canonical.push({
       corpusId: DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID,
       provider: "dropbox",
@@ -137285,15 +137289,10 @@ function fileExtractionCorporaRoster(input) {
       ...input.dropbox.resolveReadScopes ? { resolveReadScopes: input.dropbox.resolveReadScopes } : {},
       ...input.dropbox.resolveCandidateFilters ? { resolveCandidateFilters: input.dropbox.resolveCandidateFilters } : {},
       resolveCredentialHandle: input.dropbox.resolveCredentialHandle,
-      ownerConnectorId: "dropbox",
-      ...configuredDropbox?.maxTrustTierForRemote ? {
-        maxTrustTierForRemote: configuredDropbox.maxTrustTierForRemote,
-        allowDefaultDeferred: configuredDropbox.allowDefaultDeferred === true
-      } : {}
+      ownerConnectorId: "dropbox"
     });
   }
   if (input.localFiles) {
-    canonicalIds.add(LOCAL_FILES_CORPUS_ID);
     canonical.push({
       corpusId: LOCAL_FILES_CORPUS_ID,
       provider: LOCAL_FILES_PROVIDER,
@@ -137306,7 +137305,6 @@ function fileExtractionCorporaRoster(input) {
     });
   }
   if (input.whatsapp === true) {
-    canonicalIds.add(WHATSAPP_LIVE_CORPUS_ID);
     canonical.push({
       corpusId: WHATSAPP_LIVE_CORPUS_ID,
       provider: "whatsapp",
@@ -137314,12 +137312,8 @@ function fileExtractionCorporaRoster(input) {
       ownerConnectorId: WHATSAPP_PRODUCT_CONNECTOR_ID
     });
   }
-  for (const corpus of input.archive ?? []) {
-    canonicalIds.add(corpus.corpusId);
-    canonical.push(corpus);
-  }
+  canonical.push(...input.archive ?? []);
   for (const corpusId of input.googleDrive?.corpusIds ?? []) {
-    canonicalIds.add(corpusId);
     canonical.push({
       corpusId,
       provider: GOOGLE_DRIVE_PROVIDER,
@@ -137329,9 +137323,14 @@ function fileExtractionCorporaRoster(input) {
       ownerConnectorId: GOOGLE_DRIVE_PROVIDER
     });
   }
+  const canonicalIds = new Set(canonical.map((corpus) => corpus.corpusId));
+  function withConfiguredEgress(corpus) {
+    const policy = input.configured.find((entry) => entry.corpusId === corpus.corpusId);
+    return policy?.maxTrustTierForRemote ? { ...corpus, maxTrustTierForRemote: policy.maxTrustTierForRemote, allowDefaultDeferred: policy.allowDefaultDeferred === true } : corpus;
+  }
   return [
     ...input.configured.filter((corpus) => !canonicalIds.has(corpus.corpusId)),
-    ...canonical
+    ...canonical.map(withConfiguredEgress)
   ];
 }
 function pdfExtractionLanes(roster, servedCorpusIds) {
@@ -192067,6 +192066,7 @@ async function answerOnThisComputer(input, options) {
     question,
     ...explicitQuery ? { searchQuery: explicitQuery } : {},
     ...selectedItems.length > 0 ? { selectedItems } : {},
+    requireScopedSelection: Boolean(request.approved_scope_key),
     maxResults: LOCAL_MAX_RESULTS,
     searchContext: {
       allowedTrustDomains: LOCAL_TRUST_DOMAINS,
@@ -241639,14 +241639,15 @@ function createArchiveExtractionRuntime(input) {
     if (built?.key === key)
       return built.runtime;
     const previous = built?.runtime;
-    const families = served.map(({ lane }) => lane.family);
-    const runtime = families.length === 0 ? undefined : createFileExtractionRuntime({
+    const archive = archiveFileExtractionCorpora({ state: input.runtime.state, families: served.map(({ lane }) => lane.family) });
+    const archiveIds = new Set(archive.map((corpus) => corpus.corpusId));
+    const runtime = archive.length === 0 ? undefined : createFileExtractionRuntime({
       ...input.env ? { env: input.env } : {},
       enabled: true,
       connectorStores: served.flatMap(({ stores }) => stores),
       corpora: fileExtractionCorporaRoster({
-        configured: [],
-        archive: archiveFileExtractionCorpora({ state: input.runtime.state, families })
+        configured: (input.configuredCorpora ?? []).filter((corpus) => archiveIds.has(corpus.corpusId)),
+        archive
       }),
       extraSourceFactories: new Map([[
         ARCHIVE_EXTRACTION_PROVIDER,
@@ -242494,6 +242495,8 @@ function createSourceAnswerLanes(deps) {
       })),
       excludedCorpusIds,
       contentProviders: Object.fromEntries(stores.flatMap((store) => {
+        if (excludedCorpusIds.has(store.corpusId))
+          return [];
         const mandatoryScope = deps.readScope(store);
         const passageEmbedding = request.retrieval_mode === "hybrid" ? requestEmbedding(store) : undefined;
         return mandatoryScope.allowed ? [[store.corpusId, createConnectorStoreContentProvider({
@@ -252359,7 +252362,9 @@ function connectorStoreAnswerScope(input) {
   let provider;
   let locatorPathScope;
   let scopedConversationId = conversationId;
-  if (approvedScopeKey && capabilities?.approvedScope) {
+  if (approvedScopeKey) {
+    if (!capabilities?.approvedScope)
+      return { kind: "skip", reason: "approved_scope_key_unsupported" };
     if (!principal)
       return { kind: "skip", reason: "approved_scope_key_no_principal" };
     const resolution = capabilities.approvedScope.resolveLocatorPath(approvedScopeKey, principal);
@@ -277000,6 +277005,7 @@ ${key}`;
   mountEvernote();
   const archiveExtraction = createArchiveExtractionRuntime({
     runtime: archiveImports,
+    configuredCorpora: configuredFileExtractionCorpora,
     env: process.env,
     extractors: fileExtractionExtractors
   });

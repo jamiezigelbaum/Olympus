@@ -500,6 +500,7 @@ export function createAnalystSourceIndexAnswerHandler(
           ...build,
           ...(request.query?.trim() ? { searchQuery: request.query.trim() } : {}),
           ...(request.selected_items?.length ? { selectedItems: selectedEvidenceItemsFromRequest(request) } : {}),
+          requireScopedSelection: Boolean(request.approved_scope_key),
           ...(options.queryPlanner ? { queryPlanner: options.queryPlanner } : {}),
           ...(reranker ? { reranker } : {}),
           maxResults,

@@ -192,7 +192,9 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
       const settledUnread = (!record.contentRead && record.reasons.some(isFailSafeMissingContentQuestion))
         || record.reasons.some((reason) => reason === CONTENT_NAMES_ONLY_REASON || reason === CONTENT_NAMES_ONLY_LIFTED_REASON);
       const holdUntilJudged = tierClassification?.holdContentUntilJudged === true
-        || set.holdsContentUntilJudged() || heldUntilJudged(record.reasons) || settledUnread;
+        || set.holdsContentUntilJudged() || heldUntilJudged(record.reasons) || settledUnread
+        // A child listed before placement recorded its hold still has its parent link.
+        || anchorStore.parentLocalItemIdOf(identity) !== undefined;
       const parentContext = tierClassification?.sniffer ? parentNamesContext(set, identity) : undefined;
       const judgeStarted = Date.now();
       const content = classifyContentTier(
