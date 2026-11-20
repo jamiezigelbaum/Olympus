@@ -1,3 +1,4 @@
+import { freshMachine } from '../scripts/release-check/fresh-install.ts';
 import { expect, test } from 'bun:test';
 import { judgeRaiseTarget, runFreshLimits, LIMITS_HOME, type FreshLimitsOptions, type LimitsHome, type LimitsMachine, type LimitsStop } from '../scripts/release-check/fresh-limits.ts';
 import type { Machine } from '../scripts/release-check/machine.ts';
@@ -165,6 +166,14 @@ test('limits refuses an existing machine before executing anything', async () =>
   const result = await runFreshLimits(existing, r.options);
   expect(result.checks).toEqual([{ id: 'limits.setup', title: 'limits: setup', status: 'fail', detail: 'requires a throwaway machine from driver provision', ms: 0 }]);
   expect(r.events).toEqual([]); expect(r.commands).toEqual([]);
+}, 30_000);
+
+test('the fresh leg\'s throwaway account runs limits over the laptop\'s own account as transport', async () => {
+  const r = rig();
+  const { disposable, ...laptop } = r.machine;
+  expect(freshMachine(laptop).disposable).toBe(true);
+  const result = await runFreshLimits(r.machine, r.options, laptop);
+  expect(result.checks[0]).toMatchObject({ id: 'limits.setup', status: 'pass' });
 }, 30_000);
 
 test('a probe failure names its step and nothing the machine printed', () => {

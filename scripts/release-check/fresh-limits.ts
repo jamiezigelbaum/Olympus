@@ -101,7 +101,9 @@ export async function runFreshLimits(machine: Machine, options: FreshLimitsOptio
   };
   try {
     if (!await check('setup', async () => {
-      assert(machine.disposable === true && transport.disposable === true, 'requires a throwaway machine from driver provision');
+      // The engine the probe drives must be a throwaway; the transport only copies the probe into /tmp (the fresh leg's
+      // transport is the laptop's own account, its machine the throwaway olyfresh account: nightly #231).
+      assert(machine.disposable === true, 'requires a throwaway machine from driver provision');
       diagnostics = await (options.diagnostics ?? openLimitsMachine)(machine, transport);
       await diagnostics.prepare();
       assert(await diagnostics.seed() >= 2, 'fewer than 2 synthetic judgment items seeded');
