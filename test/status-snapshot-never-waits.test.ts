@@ -83,6 +83,7 @@ describe('status snapshot for the dashboard', () => {
     const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: CORPUS_ID, family: 'file', trustDomain: 'secure_local' });
     let now = 1_000_000;
     try {
+      await store.syncFromConnector(connector([file('a.txt', 'alpha')]), { fetchContent: true });
       const background = createSourceIndexStatusHandler({ corpusDefinitions: [defineDropboxFilesCorpus()], connectorStores: [store], nowMs: () => now, snapshotPath, snapshotRole: 'writer' });
       const counted = await background.refreshSnapshot!({ ...DASHBOARD_STATUS_REQUEST }, SNAPSHOT);
       // A background snapshot read serves what it kept and starts no recount: only its paced recount counts.
@@ -106,8 +107,15 @@ describe('status snapshot for the dashboard', () => {
       }
       await front.settled!();
       expect(counts).toBe(0);
-      // The background's next recount reaches the front with a fresh age.
+      // A paced republish keeps the age of the actual count across disk.
       store.prepareStatusCounts = realPrepare;
+      await background.refreshSnapshot!({ ...DASHBOARD_STATUS_REQUEST }, { ...SNAPSHOT, reuseCounts: true });
+      now += 1_000;
+      await front.status({ ...DASHBOARD_STATUS_REQUEST }, SNAPSHOT);
+      await front.settled!();
+      expect((await front.status({ ...DASHBOARD_STATUS_REQUEST }, SNAPSHOT)).snapshot_age_ms).toBe(STORE_STATUS_REUSE_MS + 7_001);
+      await front.settled!();
+      // An explicit recount starts a new count age.
       await background.refreshSnapshot!({ ...DASHBOARD_STATUS_REQUEST }, SNAPSHOT);
       now += 1_000;
       await front.status({ ...DASHBOARD_STATUS_REQUEST }, SNAPSHOT);
@@ -123,6 +131,41 @@ describe('status snapshot for the dashboard', () => {
       store.close();
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  test('first counts stay one store at a time even for concurrent snapshot requests', async () => {
+    const { defineLocalFilesCorpus } = await import('../src/workers/local-files/store.ts');
+    const definitions = [defineDropboxFilesCorpus(), defineLocalFilesCorpus()];
+    const stores = definitions.map(definition => new LocalConnectorStore({
+      dbPath: ':memory:', corpusId: definition.corpusId, family: 'file', trustDomain: definition.trustDomain,
+    }));
+    const started: string[] = [];
+    const firstCount = Promise.withResolvers<void>();
+    let secondRequested = false;
+    stores[1]!.writeSequence = () => { secondRequested = true; return 0; };
+    for (const [index, store] of stores.entries()) {
+      store.prepareStatusCounts = async () => {};
+      const read = store.statusOffThread.bind(store);
+      store.statusOffThread = async (...args) => {
+        started.push(store.corpusId);
+        if (index === 0) await firstCount.promise;
+        return read(...args);
+      };
+    }
+    const background = createSourceIndexStatusHandler({ corpusDefinitions: definitions, connectorStores: stores, snapshotRole: 'writer' });
+    try {
+      const first = background.refreshSnapshot!({ corpus_id: stores[0]!.corpusId }, SNAPSHOT);
+      const next = background.refreshSnapshot!({ corpus_id: stores[1]!.corpusId }, SNAPSHOT);
+      try {
+        await waitFor(() => started.length > 0 && secondRequested);
+        await flushMicrotasks();
+        expect(started).toEqual([stores[0]!.corpusId]);
+      } finally {
+        firstCount.resolve();
+        await Promise.all([first, next]);
+      }
+      expect(started).toEqual(stores.map(store => store.corpusId));
+    } finally { for (const store of stores) store.close(); }
   });
 
   test("a store the front mounted before the background counted it never makes the front count (rc.20 leg, 16 Nov)", async () => {
@@ -216,7 +259,7 @@ describe('a busy read pool', () => {
 });
 
 describe('live totals beside kept counts', () => {
-  test("the front's dashboard shows a write in the totals at once, while the counts keep their age", async () => {
+  test("the front's dashboard shows live totals when the store mounted after startup", async () => {
     const dir = mkdtempSync(join(tmpdir(), 'status-totals-'));
     const snapshotPath = join(dir, 'source-status-snapshot.json');
     const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: CORPUS_ID, family: 'file', trustDomain: 'secure_local' });
@@ -226,8 +269,10 @@ describe('live totals beside kept counts', () => {
       await store.syncFromConnector(connector([file('a.txt', 'alpha')]), { fetchContent: true });
       const background = createSourceIndexStatusHandler({ corpusDefinitions: [defineDropboxFilesCorpus()], connectorStores: [store], nowMs: () => now, snapshotPath, snapshotRole: 'writer' });
       await background.refreshSnapshot!({ ...DASHBOARD_STATUS_REQUEST }, SNAPSHOT);
-      const front = createSourceIndexStatusHandler({ corpusDefinitions: [defineDropboxFilesCorpus()], connectorStores: [store], nowMs: () => now, snapshotPath, snapshotRole: 'reader' });
+      const mounted: LocalConnectorStore[] = [];
+      const front = createSourceIndexStatusHandler({ corpusDefinitions: [defineDropboxFilesCorpus()], connectorStores: mounted, nowMs: () => now, snapshotPath, snapshotRole: 'reader' });
       await front.settled!();
+      mounted.push(store);
       const before = (await front.status({ ...DASHBOARD_STATUS_REQUEST }, SNAPSHOT)).corpora[0] as { counts: Record<string, number>; totals?: { items: number; sync_runs: number } };
       expect(before.totals).toMatchObject({ items: 1, sync_runs: 1 });
       await store.syncFromConnector(connector([file('a.txt', 'alpha'), file('b.txt', 'beta')]), { fetchContent: true });
@@ -245,6 +290,23 @@ describe('live totals beside kept counts', () => {
     } finally {
       store.close();
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a newer store recount replaces dashboard counts during the readiness cache window', async () => {
+    const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: CORPUS_ID, family: 'file', trustDomain: 'secure_local' });
+    let now = 1_000_000;
+    try {
+      await store.reconcileTotals();
+      const background = createSourceIndexStatusHandler({ corpusDefinitions: [defineDropboxFilesCorpus()], connectorStores: [store], nowMs: () => now, snapshotRole: 'writer' });
+      const first = await background.refreshSnapshot!({ ...DASHBOARD_STATUS_REQUEST }, SNAPSHOT);
+      expect(first.corpora.find(corpus => corpus.corpus_id === CORPUS_ID)).toMatchObject({ counts: { items_with_text: 0 } });
+      await store.syncFromConnector(connector([file('a.txt', 'alpha')]), { fetchContent: true });
+      now += 30_000;
+      const updated = await background.refreshSnapshot!({ ...DASHBOARD_STATUS_REQUEST }, SNAPSHOT);
+      expect(updated.corpora.find(corpus => corpus.corpus_id === CORPUS_ID)).toMatchObject({ counts: { items_with_text: 1 } });
+    } finally {
+      store.close();
     }
   });
 });

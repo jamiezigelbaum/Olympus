@@ -2,6 +2,8 @@ import { changeMemoryCounter } from '../core/memory-counters.ts';
 import { SOURCE_RATE_LIMITED } from '../core/provider-rate-limits.ts';
 import { ReadwiseApiError } from './readwise/api.ts';
 import { createHash } from 'node:crypto';
+import { PUBLIC_RUNTIME_BUILD } from '../core/build-flavor.ts';
+import { runningOlympusVersion } from '../core/update-check.ts';
 import { parseSchedulerSourceIds, type OlympusConfig } from '../core/config.ts';
 import { boundedLogErrorMessage } from '../core/log-redaction.ts';
 import { controlPathHeadroom } from './control-path-headroom.ts';
@@ -25,12 +27,14 @@ import {
   EMBEDDING_ITEMS_FAILED_REASON,
   EMBEDDING_PROVIDER_UNAVAILABLE_REASON,
   embedPendingChunks,
+  type ConnectorStoreEmbedStoreRun,
   type ConnectorStoreEmbeddingTarget,
   type LocalConnectorStore,
 } from './connector-store/index.ts';
+import { GMAIL_CONFIRMATION_RESERVE_REASON, type GmailConfirmationYieldReason } from './google-connectors/gmail-live-sync.ts';
 import {
   GMAIL_DAILY_REQUEST_GUARD_REASON,
-  GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS,
+  GMAIL_RESUME_REJECTED_WARNING,
   GMAIL_INTERNAL_CONNECTOR_CORPUS_ID,
   GOOGLE_DRIVE_DAILY_REQUEST_GUARD_REASON,
   GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID,
@@ -90,6 +94,7 @@ import {
 } from './credential-broker/index.ts';
 import { GO_EASY_TRICKLE_EMBED_ITEMS } from './local-pacing.ts';
 import { LIVE_NEW_ITEMS_INTERVAL_MS } from './live-source-cadence.ts';
+import { EMBEDDING_SWEEP_IDLE_SUFFIX, readEmbeddingSweepIdle, writeEmbeddingSweepIdle, type IdleEmbeddingSweep } from '../core/embedding-sweep-idle.ts';
 
 export type SourceSchedulerTaskKind = 'sync' | 'extract' | 'embed' | 'watch';
 export type SourceSchedulerCadence = 'manual' | 'continuous';
@@ -246,6 +251,8 @@ export interface SourceSchedulerTaskRunContext {
   effectiveIntervalMs: number;
   degradedReason?: string;
   provenance?: SourceSchedulerRunProvenance;
+  /** Gmail confirmation checks this at provider page boundaries. */
+  yieldGmailConfirmation?: () => GmailConfirmationYieldReason | undefined;
 }
 
 export interface SourceSchedulerTask {
@@ -284,15 +291,18 @@ export interface SourceSchedulerTask {
 }
 
 export interface SourceSchedulerTaskRunResult {
+  gmailConfirmationWaitReason?: GmailConfirmationYieldReason;
   status: 'progress' | 'idle';
   counts?: Record<string, number>;
   warnings?: string[];
-  /** Ephemeral counts-only sweep receipts. Logged once the actual next run is known, never persisted. */
+  /** Ephemeral sweep counts and reason labels, logged once the actual next run is known. */
   embeddingSweep?: Array<{
     source_index: number;
     store_index: number;
     trust_domain: LocalConnectorStore['trustDomain'];
     family: LocalConnectorStore['family'];
+    wake?: EmbeddingSweepWake;
+    not_resting?: EmbeddingSweepRestBlocker;
     counts: Record<string, number>;
   }>;
   /** Omitted preserves the durable checkpoint; null clears it. */
@@ -496,7 +506,7 @@ export interface SourceSchedulerTaskStatus {
   /** Computer dashboard only; never persisted in scheduler state. */
   missing_scope_path?: string;
   /** Short maintenance hold, never persisted as a failure or provider deferral. */
-  wait_reason?: 'store_reclaim';
+  wait_reason?: 'store_reclaim' | GmailConfirmationYieldReason;
   id: string;
   kind: SourceSchedulerTaskKind;
   metadata_walk_role?: SourceSchedulerTask['metadataWalkRole'];
@@ -513,6 +523,7 @@ export interface SourceSchedulerTaskStatus {
   last_error_hash?: string;
   last_error_kind?: string;
   degraded_reason?: string;
+  embedding_sweep?: SourceSchedulerTaskRunResult['embeddingSweep'];
   last_result?: {
     status: 'progress' | 'idle' | 'failed';
     counts?: Record<string, number>;
@@ -521,7 +532,7 @@ export interface SourceSchedulerTaskStatus {
 }
 
 interface SchedulerTaskState {
-  waitReason?: 'store_reclaim';
+  waitReason?: SourceSchedulerTaskStatus['wait_reason'];
   task: SourceSchedulerTask;
   source: SourceSchedulerSource;
   running: boolean;
@@ -537,6 +548,7 @@ interface SchedulerTaskState {
   lastErrorKind?: string;
   effectiveIntervalMs?: number;
   degradedReason?: string;
+  embeddingSweep?: SourceSchedulerTaskRunResult['embeddingSweep'];
   lastResult?: SourceSchedulerTaskStatus['last_result'];
   pendingUnpark?: PendingSourceSchedulerUnpark;
   /** Woken while running: run again within seconds of completing. */
@@ -661,11 +673,14 @@ export class SourceScheduler {
   updateSources(sources: SourceSchedulerSource[], now: Date = this.now()): void {
     const existing = new Map(this.states.map((state) => [schedulerStateKey(state.source, state.task), state]));
     const firstRun = now.getTime();
+    let newWorkDue = false;
     this.sources = this.filterAllowedSources(sources);
     this.states = this.sources.flatMap((source) => source.tasks.map((task) => {
       const previous = existing.get(schedulerStateKey(source, task));
       if (!previous) {
-        return this.createTaskState(source, task, firstRun);
+        const state = this.createTaskState(source, task, firstRun);
+        newWorkDue ||= taskCadence(source, task) === 'continuous' && state.nextRunAt <= firstRun;
+        return state;
       }
       // Preserve object identity while a task is running. The active execution
       // and future ticks must observe one shared `running` bit across refreshes.
@@ -675,6 +690,9 @@ export class SourceScheduler {
     }));
     if (this.timer) this.refreshFastWakeTimers();
     this.syncChangeSubscriptions();
+    // A source admitted after boot is already due. The split front may not
+    // see it in the background's status snapshot when it requests first sync.
+    if (newWorkDue) this.scheduleContinueWake(firstRun);
   }
 
   private filterAllowedSources(sources: SourceSchedulerSource[]): SourceSchedulerSource[] {
@@ -864,15 +882,20 @@ export class SourceScheduler {
    * Brings every task of `kind` forward to run within seconds, for when
    * something those tasks wait on has just become available (a built-in
    * reader finished installing, so extraction can read what it left unread).
-   * Generic: no source is named. A task running right now is marked and runs
+   * A readiness event may name the affected sources. A task running right now is marked and runs
    * again within seconds of completing. A task in a failure backoff keeps its
    * backoff, and a manual-cadence task runs only when the owner runs it.
    * Returns how many tasks were woken.
    */
-  wakeTasksOfKind(kind: SourceSchedulerTaskKind, at: number = this.now().getTime()): number {
+  wakeTasksOfKind(
+    kind: SourceSchedulerTaskKind,
+    at: number = this.now().getTime(),
+    sourceIds?: ReadonlySet<string>,
+  ): number {
     let woke = 0;
     for (const state of this.states) {
       if (state.task.kind !== kind || state.consecutiveFailures > 0) continue;
+      if (sourceIds && !sourceIds.has(state.source.sourceId)) continue;
       if (taskCadence(state.source, state.task) !== 'continuous') continue;
       if ((state.retryNotBeforeAt ?? 0) > at) continue;
       if (state.running) {
@@ -880,8 +903,7 @@ export class SourceScheduler {
         woke += 1;
         continue;
       }
-      if (state.nextRunAt <= at) continue;
-      state.nextRunAt = at;
+      state.nextRunAt = Math.min(state.nextRunAt, at);
       woke += 1;
     }
     if (woke > 0) this.scheduleContinueWake(at);
@@ -912,6 +934,10 @@ export class SourceScheduler {
     const dueAt = now.getTime();
     this.applyPendingUnparks(dueAt);
     if (this.askHolds()) {
+      for (const state of this.states) {
+        if (isGmailConfirmationTask(state.task) && !state.running && state.nextRunAt <= dueAt
+          && taskCadence(state.source, state.task) === 'continuous') state.waitReason = 'owner_ask';
+      }
       this.scheduleContinueWake(dueAt + SOURCE_SCHEDULER_ASK_RECHECK_MS);
       return this.status(now);
     }
@@ -1100,7 +1126,11 @@ export class SourceScheduler {
           // waits out a listing), but when the listing ends it still follows
           // at once, as it did when the two shared the key.
           const sources = new Set(group.map((state) => state.source));
-          const due = this.states.filter((state) => !ran.has(state)
+          const ranGmailConfirmation = group.some(state => isGmailConfirmationTask(state.task));
+          // A live pull can come due again while confirmation holds the lane,
+          // even if the same tick already ran it before confirmation started.
+          const due = this.states.filter((state) => (!ran.has(state)
+              || (ranGmailConfirmation && state.task.metadataWalkRole === 'primary'))
             && !state.running
             && taskCadence(state.source, state.task) === 'continuous'
             && (taskConcurrencyKey(state.source, state.task) === concurrencyKey
@@ -1149,6 +1179,14 @@ export class SourceScheduler {
       try { await Promise.all(holds.map(hold => hold.done)); }
       finally { delete state.waitReason; }
       if (this.stops !== stops) return;
+    }
+    if (isGmailConfirmationTask(state.task)) {
+      if (provenance === 'scheduled' && this.askHolds()) {
+        state.waitReason = 'owner_ask';
+        this.scheduleContinueWake(this.now().getTime() + SOURCE_SCHEDULER_ASK_RECHECK_MS);
+        return;
+      }
+      delete state.waitReason;
     }
     this.executingStates.add(state);
     changeMemoryCounter(`tasks_${state.task.kind}`, 1);
@@ -1281,6 +1319,8 @@ export class SourceScheduler {
       }
       state.nextRunAt = nextRunAt;
       state.retryNotBeforeAt = retryAt ? nextRunAt : undefined;
+      if (result.gmailConfirmationWaitReason) state.waitReason = result.gmailConfirmationWaitReason;
+      state.embeddingSweep = result.embeddingSweep;
       for (const { counts, ...store } of result.embeddingSweep ?? []) {
         console.info(`[olympus:embedding-sweep] ${JSON.stringify({
           ...store, ...counts,
@@ -1293,7 +1333,7 @@ export class SourceScheduler {
       // A retry due before the next regular tick gets its own wake, or the tick
       // would round it up (an embedding backlog asking for 5 s waited 60 s).
       else if (retryAt && nextRunAt - Date.parse(completedAt) < this.tickMs) this.scheduleContinueWake(nextRunAt);
-      if (result.status === 'progress' && !retryAt) this.wakeDownstream(state, continueAt);
+      if (result.status === 'progress' && (!retryAt || isGmailConfirmationTask(runningTask))) this.wakeDownstream(state, continueAt);
     } catch (error) {
       delete state.wakeAfterRun;
       if (this.stops !== stopsAtStart) {
@@ -1425,6 +1465,13 @@ export class SourceScheduler {
           // byte-identical to what tasks received before provenance existed,
           // and the X adapter reads a missing marker as scheduled (R62).
           ...(provenance === 'operator' ? { provenance } : {}),
+          ...(isGmailConfirmationTask(task) ? { yieldGmailConfirmation: () => {
+            if (this.askHolds()) return 'owner_ask';
+            const liveDue = this.states.some(sibling => sibling.source.sourceId === state.source.sourceId
+              && sibling.source.corpusId === state.source.corpusId
+              && sibling.task.metadataWalkRole === 'primary' && sibling.nextRunAt <= this.now().getTime());
+            return liveDue ? 'live_pull_due' : undefined;
+          } } : {}),
           ...(state.checkpoint ? { checkpoint: state.checkpoint } : {}),
           ...(state.lastSuccessAt ? { lastSuccessAt: state.lastSuccessAt } : {}),
           effectiveIntervalMs: state.effectiveIntervalMs ?? taskIntervalMs(state.source, task),
@@ -1655,6 +1702,7 @@ export class SourceScheduler {
         ? { degraded_reason: state.degradedReason }
         : {}),
       ...(state.lastResult ? { last_result: state.lastResult } : {}),
+      ...(state.embeddingSweep ? { embedding_sweep: state.embeddingSweep } : {}),
     };
   }
 }
@@ -2047,6 +2095,15 @@ export const EMBEDDING_SWEEP_MAX_BACKOFF_MS = 5 * 60_000;
 export const EMBEDDING_SWEEP_IDLE_BACKOFF_ENV = 'OLYMPUS_EMBEDDING_SWEEP_IDLE_BACKOFF';
 /** A resting store is still walked in full this often. */
 export const EMBEDDING_SWEEP_IDLE_FULL_PASS_MS = 30 * 60_000;
+/**
+ * Raise this with any change to what a chunk's vector is made from or to which
+ * chunks a sweep takes, so a remembered idle pass from older rules is not
+ * reused. The running package version is part of the key too: an installed
+ * build walks every store once. A remembered pass is at most
+ * EMBEDDING_SWEEP_IDLE_FULL_PASS_MS old, which bounds a missed bump.
+ */
+const EMBEDDING_SWEEP_RULES_VERSION = 1;
+const EMBEDDING_SWEEP_BUILD = `${EMBEDDING_SWEEP_RULES_VERSION}:${runningOlympusVersion()}`;
 /** Items per store per sweep pass. */
 export const EMBEDDING_SWEEP_MAX_ITEMS = 32;
 /**
@@ -2140,6 +2197,37 @@ export function embeddingSweepConcurrencyKey(source: Pick<SourceSchedulerSource,
   return `${source.corpusId}.embeddings`;
 }
 
+type EmbeddingSweepKey = Required<Pick<IdleEmbeddingSweep, 'key' | 'writes' | 'visibilityHash'>>;
+type EmbeddingSweepWake = 'none_remembered' | 'writes' | 'visibility' | 'build' | 'expired'
+  | 'queued' | 'deferred' | 'marker_unavailable' | 'key_changed';
+type EmbeddingSweepRestBlocker = 'busy' | 'deferred' | 'stopped_at_deadline' | 'items_attempted'
+  | 'chunks_embedded' | 'items_failed' | 'items_out_of_scope' | 'inventory_incomplete'
+  | 'queued' | 'marker_moved_during_pass' | 'marker_unavailable';
+
+function freshEmbeddingSweep(receipt: IdleEmbeddingSweep, now: number): boolean {
+  return now >= receipt.at && now - receipt.at < EMBEDDING_SWEEP_IDLE_FULL_PASS_MS;
+}
+
+function embeddingSweepWake(
+  store: LocalConnectorStore,
+  receipt: IdleEmbeddingSweep | undefined,
+  current: EmbeddingSweepKey | undefined,
+): EmbeddingSweepWake | undefined {
+  if (!current) return 'marker_unavailable';
+  if (!receipt) return 'none_remembered';
+  if (receipt.key !== current.key) {
+    if (receipt.writes === undefined || receipt.visibilityHash === undefined) return 'key_changed';
+    if (receipt.writes !== current.writes) return 'writes';
+    if (receipt.visibilityHash !== current.visibilityHash) return 'visibility';
+    // For the same slot, the build identifiers are the remaining key inputs.
+    return 'build';
+  }
+  if (!freshEmbeddingSweep(receipt, Date.now())) return 'expired';
+  if (store.queuedEmbeddingItemIds().length > 0) return 'queued';
+  if (store.embeddingDeferredReason() !== undefined) return 'deferred';
+  return undefined;
+}
+
 function embeddingSweepTask(
   source: SourceSchedulerSource,
   targets: () => readonly ConnectorStoreEmbeddingTarget[],
@@ -2156,24 +2244,71 @@ function embeddingSweepTask(
   const tricklingTarget = (target: ConnectorStoreEmbeddingTarget): boolean => {
     try { return trickle?.(target) === true; } catch { return false; }
   };
-  // Idle back-off (OLYMPUS_EMBEDDING_SWEEP_IDLE_BACKOFF=off turns it off): a pass over a caught-up store walks
-  // every chunk twice (the inventory, then the search for missing vectors),
-  // once a minute, and finds nothing. A store whose last pass found nothing
-  // to do is not walked again until something that could give it work moved:
-  // a write to its items, chunks or vectors, its tier visibility, its queue,
-  // or the target's model and scope. A new item moves the write sequence, so
-  // it is embedded on the next pass as before. A full pass still runs every
-  // EMBEDDING_SWEEP_IDLE_FULL_PASS_MS for anything the markers do not see.
+  // A caught-up store's inventory still walks every chunk. Reuse its last
+  // complete idle pass until a write, visibility, queue, model or scope
+  // change gives it work. The full-pass interval bounds reuse when the
+  // markers stay steady.
   const idleBackoff = process.env[EMBEDDING_SWEEP_IDLE_BACKOFF_ENV]?.trim() !== 'off';
-  // Remembered per store and per target: one store can be swept under two targets.
-  const quiet = new WeakMap<object, Map<string, { key: string; at: number; run: Awaited<ReturnType<typeof embedPendingChunks>>[number] }>>();
-  const quietSlot = (target: ConnectorStoreEmbeddingTarget): string => JSON.stringify([target.provider.modelId, target.provider.epochId ?? null,
-    target.wholeStore === true, target.accountScope ?? null, target.filters ?? null]);
-  const quietKey = (target: ConnectorStoreEmbeddingTarget): string | undefined => {
-    // A store that cannot say whether it was written to never rests.
-    const writes = target.store.writeSequence?.();
-    if (writes === undefined || typeof target.store.visibilityMarker !== 'function') return undefined;
-    return JSON.stringify([writes, target.store.visibilityMarker()]);
+  // File stores remember the pass beside SQLite. In-memory stores and passes
+  // that relied on process-local failed-item exclusions can rest here only.
+  const quiet = new WeakMap<LocalConnectorStore, Map<string, IdleEmbeddingSweep>>();
+  const quietSlot = (target: ConnectorStoreEmbeddingTarget): string => createHash('sha256').update(JSON.stringify([
+    target.provider.modelId, target.provider.epochId ?? null, target.wholeStore === true,
+    target.accountScope ?? null, target.filters ?? null,
+    target.provider.provider, target.provider.backend, target.provider.dimension, target.provider.configHash,
+  ])).digest('hex');
+  const quietKey = (target: ConnectorStoreEmbeddingTarget, slot: string, durable: boolean): EmbeddingSweepKey | undefined => {
+    try {
+      const writes = target.store.writeSequence?.();
+      if (writes === undefined || !Number.isSafeInteger(writes)) return undefined;
+      const visibility = target.store.embeddingSweepVisibilityMarker(target.provider, durable);
+      if (visibility === undefined) return undefined;
+      const key = createHash('sha256').update(JSON.stringify([
+        EMBEDDING_SWEEP_BUILD, PUBLIC_RUNTIME_BUILD, slot, writes, visibility,
+      ])).digest('hex');
+      return { key, writes, visibilityHash: createHash('sha256').update(visibility).digest('hex').slice(0, 16) };
+    } catch {
+      console.warn('[olympus:embedding-sweep] idle markers unreadable; walking store');
+      return undefined;
+    }
+  };
+  const remember = async (
+    target: ConnectorStoreEmbeddingTarget,
+    slot: string,
+    before: EmbeddingSweepKey | undefined,
+    run: ConnectorStoreEmbedStoreRun | undefined,
+    deferred: boolean,
+    path: string | undefined,
+    receipts: Map<string, IdleEmbeddingSweep> | undefined,
+  ): Promise<EmbeddingSweepRestBlocker | undefined> => {
+    if (run?.busy) return 'busy';
+    if (deferred || run?.deferredReason !== undefined) return 'deferred';
+    if (run?.stoppedAtDeadline) return 'stopped_at_deadline';
+    if (run && run.itemsAttempted !== 0) return 'items_attempted';
+    if (run && run.chunksEmbedded !== 0) return 'chunks_embedded';
+    if (run && run.itemsFailed !== 0) return 'items_failed';
+    if (run && run.itemsOutOfScope !== 0) return 'items_out_of_scope';
+    if (run?.inventory?.inventory_complete !== 1) return 'inventory_incomplete';
+    const { store } = target;
+    if (store.queuedEmbeddingItemIds().length > 0) return 'queued';
+    if (!before) return 'marker_unavailable';
+    const after = quietKey(target, quietSlot(target), path !== undefined);
+    if (!after) return 'marker_unavailable';
+    if (after.key !== before.key) return 'marker_moved_during_pass';
+
+    const receipt = { ...before, at: Date.now(), inventory: run.inventory };
+    // Failed-item exclusions disappear on restart. Remember those only in memory.
+    if (path && receipts && store.embeddingFailedItemCount() === 0) {
+      for (const [otherSlot, other] of receipts) {
+        if (!freshEmbeddingSweep(other, receipt.at)) receipts.delete(otherSlot);
+      }
+      receipts.set(slot, receipt);
+      await writeEmbeddingSweepIdle(path, receipts);
+    } else {
+      const slots = quiet.get(store) ?? new Map();
+      quiet.set(store, slots.set(slot, receipt));
+    }
+    return undefined;
   };
   return {
     id: `${source.sourceId}_embeddings`,
@@ -2191,20 +2326,28 @@ function embeddingSweepTask(
       const passTargets = targets();
       const runs: Awaited<ReturnType<typeof embedPendingChunks>> = [];
       let trickled = false;
-      const restedRuns = new Set<number>();
+      const walks = new Map<number, { wake: EmbeddingSweepWake; not_resting?: EmbeddingSweepRestBlocker }>();
       for (const target of passTargets) {
         const paced = tricklingTarget(target);
         trickled ||= paced;
-        const keyBefore = idleBackoff ? quietKey(target) : undefined;
+        const store = target.store;
+        const path = idleBackoff && store.dbPath && store.dbPath !== ':memory:' && !store.dbPath.startsWith('file::memory:')
+          ? `${store.dbPath}${EMBEDDING_SWEEP_IDLE_SUFFIX}` : undefined;
         const slot = idleBackoff ? quietSlot(target) : '';
-        const rested = keyBefore === undefined ? undefined : quiet.get(target.store)?.get(slot);
-        if (rested && rested.key === keyBefore && Date.now() - rested.at < EMBEDDING_SWEEP_IDLE_FULL_PASS_MS
-          && target.store.queuedEmbeddingItemIds().length === 0 && target.store.embeddingDeferredReason() === undefined) {
-          runs.push(rested.run);
-          restedRuns.add(runs.length - 1);
+        const receipts = path ? await readEmbeddingSweepIdle(path) : undefined;
+        const keyBefore = idleBackoff ? quietKey(target, slot, path !== undefined) : undefined;
+        const rested = quiet.get(store)?.get(slot) ?? receipts?.get(slot);
+        const wake = idleBackoff ? embeddingSweepWake(store, rested, keyBefore) : undefined;
+        if (rested && wake === undefined) {
+          runs.push({ corpusId: store.corpusId, itemsAttempted: 0, queued_first_items: 0, chunksEmbedded: 0, itemsFailed: 0, itemsOutOfScope: 0,
+            inventory: rested.inventory });
           continue;
         }
-        quiet.get(target.store)?.delete(slot);
+        const runIndex = runs.length;
+        quiet.get(store)?.delete(slot);
+        // Invalidate before walking. A failed pass must not revive an older
+        // proof if its in-memory queue or deferral is lost on the next start.
+        if (path && receipts?.delete(slot)) await writeEmbeddingSweepIdle(path, receipts);
         const overran = Symbol('overran');
         let timer: ReturnType<typeof setTimeout> | undefined;
         // The pass stops starting batches at half the deadline, so a store
@@ -2213,8 +2356,10 @@ function embeddingSweepTask(
         // provider were down (Sparta, 2026-11-06: 94 overruns, 70 of them
         // Dropbox, whose Private store then embedded nothing for an hour).
         const stopAtMs = Date.now() + Math.floor(deadlineMs / 2);
+        let queuedFirstItems = 0;
         const result = await Promise.race([
-          embedPendingChunks([target], { maxItems: paced ? GO_EASY_TRICKLE_EMBED_ITEMS : maxItems, stopAtMs, diagnostics: true, ...(holdForAsk ? { shouldStop: askHolds } : {}) }),
+          embedPendingChunks([target], { maxItems: paced ? GO_EASY_TRICKLE_EMBED_ITEMS : maxItems, stopAtMs, diagnostics: true,
+            onQueuedFirstItems: (count) => { queuedFirstItems = count; }, ...(holdForAsk ? { shouldStop: askHolds } : {}) }),
           new Promise<typeof overran>((resolve) => { timer = setTimeout(() => resolve(overran), deadlineMs); }),
         ]).finally(() => clearTimeout(timer));
         if (result !== overran) {
@@ -2227,27 +2372,22 @@ function embeddingSweepTask(
           const outage = target.store.embeddingDeferredReason();
           runs.push(...result.map((run) => run.busy === true && run.deferredReason === undefined && outage !== undefined
             ? { ...run, deferredReason: outage } : run));
-          // Nothing to do and nothing moved while the pass ran: the store rests until a marker moves.
-          const only = result.length === 1 ? result[0]! : undefined;
-          if (keyBefore !== undefined && only && outage === undefined && only.busy !== true && only.deferredReason === undefined
-            && only.stoppedAtDeadline !== true && only.itemsAttempted === 0 && only.chunksEmbedded === 0 && only.itemsFailed === 0
-            && only.itemsOutOfScope === 0 && only.inventory?.inventory_complete === 1
-            // An item whose embedding failed for good is skipped by every pass and
-            // stays reported as failed: it is not work, so it does not keep the
-            // store walked. A change to it moves the write sequence and wakes the store.
-            && quietKey(target) === keyBefore) {
-            const slots = quiet.get(target.store) ?? new Map();
-            quiet.set(target.store, slots.set(slot, { key: keyBefore, at: Date.now(), run: only }));
+          if (wake) {
+            const only = result.length === 1 ? result[0] : undefined;
+            const blocker = await remember(target, slot, keyBefore, only, outage !== undefined, path, receipts);
+            walks.set(runIndex, { wake, ...(blocker ? { not_resting: blocker } : {}) });
           }
           continue;
         }
         target.store.setEmbeddingDeferral(EMBEDDING_PROVIDER_UNAVAILABLE_REASON);
-        runs.push({ corpusId: target.store.corpusId, itemsAttempted: 0, chunksEmbedded: 0, itemsFailed: 0, itemsOutOfScope: 0,
+        runs.push({ corpusId: target.store.corpusId, itemsAttempted: 0, queued_first_items: queuedFirstItems, chunksEmbedded: 0, itemsFailed: 0, itemsOutOfScope: 0,
           inventory: { inventory_complete: 0, pass_overran: 1 },
           deferredReason: EMBEDDING_PROVIDER_UNAVAILABLE_REASON });
+        if (wake) walks.set(runIndex, { wake, not_resting: 'deferred' });
       }
       const deferred = runs.filter((run) => run.deferredReason !== undefined).length;
       const counts = {
+        queued_first_items: runs.reduce((sum, run) => sum + run.queued_first_items, 0),
         chunks_embedded: runs.reduce((sum, run) => sum + run.chunksEmbedded, 0),
         items_queued: passTargets.reduce((sum, target) => sum + target.store.queuedEmbeddingItemIds().length, 0),
         items_failed: passTargets.reduce((sum, target) => sum + target.store.embeddingFailedItemCount(), 0),
@@ -2261,17 +2401,19 @@ function embeddingSweepTask(
         store_index: index,
         trust_domain: passTargets[index]!.store.trustDomain,
         family: passTargets[index]!.store.family,
+        ...walks.get(index),
         counts: {
           ...run.inventory,
           whole_store: passTargets[index]!.wholeStore ? 1 : 0,
           queued_items: passTargets[index]!.store.queuedEmbeddingItemIds().length,
+          queued_first_items: run.queued_first_items,
           items_attempted: run.itemsAttempted, chunks_embedded: run.chunksEmbedded,
           items_failed: run.itemsFailed, skipped_out_of_scope_items: run.itemsOutOfScope,
           skipped_lease_busy_items: run.busy ? run.itemsAttempted : 0,
           skipped_deferred_items: run.deferredReason ? run.itemsAttempted : 0,
           stores_deferred: run.deferredReason ? 1 : 0, stores_lease_busy: run.busy ? 1 : 0,
           stopped_at_deadline: run.stoppedAtDeadline ? 1 : 0,
-          ...(idleBackoff ? { rested: restedRuns.has(index) ? 1 : 0 } : {}),
+          ...(idleBackoff ? { rested: walks.has(index) ? 0 : 1 } : {}),
         },
       }));
       const attemptedAt = Date.parse(context?.attemptedAt ?? '') || Date.now();
@@ -2514,6 +2656,12 @@ export function createXBookmarksSchedulerSource(input: {
   };
 }
 
+const GMAIL_CONFIRMATION_TASK_ID = 'gmail.email_private_scope_confirmation_v1';
+
+function isGmailConfirmationTask(task: SourceSchedulerTask): boolean {
+  return task.id === GMAIL_CONFIRMATION_TASK_ID || task.id.startsWith(`${GMAIL_CONFIRMATION_TASK_ID}:scope:`);
+}
+
 export function createGmailConnectorStoreSchedulerSource(input: {
   config: OlympusConfig;
   sync?: GmailConnectorStoreSyncHandler;
@@ -2584,17 +2732,36 @@ export function createGmailConnectorStoreSchedulerSource(input: {
         },
       },
       ...(input.sync.confirmPrivateScope ? [{
-        id: 'gmail.email_private_scope_confirmation_v1', kind: 'sync' as const, writer: true as const,
+        id: GMAIL_CONFIRMATION_TASK_ID, kind: 'sync' as const, writer: true as const,
         intervalMs: liveConfig.storePullIntervalMs,
         freshnessThresholdMs: liveConfig.storePullFreshnessThresholdMs,
         run: async (context?: SourceSchedulerTaskRunContext): Promise<SourceSchedulerTaskRunResult> => {
           try {
-            const result = await input.sync!.confirmPrivateScope!({ max_items: Math.min(liveConfig.storePullMaxItems, GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS), ...(context?.checkpoint ? { checkpoint: context.checkpoint } : {}) });
+            const result = await input.sync!.confirmPrivateScope!({
+              max_items: liveConfig.storePullMaxItems,
+              ...(context?.checkpoint ? { checkpoint: context.checkpoint } : {}),
+              ...(context?.yieldGmailConfirmation ? { yieldReason: context.yieldGmailConfirmation } : {}),
+            });
+            const hold = result.hold;
             return {
               status: result.confirmed > 0 ? 'progress' : 'idle',
-              counts: { private_scope_confirmed: result.confirmed, items_seen: result.confirmed, items_changed: result.confirmed },
+              counts: {
+                private_scope_confirmed: result.confirmed,
+                private_scope_confirmed_total: result.confirmedTotal,
+                items_seen: result.confirmed,
+                items_changed: result.confirmed,
+                traversal_complete: Number(result.done),
+                ...(hold ? { private_scope_remaining: hold.remaining } : {}),
+                ...(hold?.error.amounts ? {
+                  limit_stop_limit: hold.error.amounts.limit,
+                  ...(hold.error.amounts.used !== undefined ? { limit_stop_used: hold.error.amounts.used } : {}),
+                } : {}),
+              },
               checkpoint: result.checkpoint,
-              ...(!result.done ? { continueSoon: true } : {}),
+              ...(result.waitReason ? { gmailConfirmationWaitReason: result.waitReason } : {}),
+              ...(result.cursorRejected ? { warnings: [GMAIL_RESUME_REJECTED_WARNING] } : {}),
+              ...(hold ? { retryAt: { at: hold.error.retryAt, degradedReason: gmailConfirmationHoldReason(hold.error) } }
+                : !result.done ? { continueSoon: true } : {}),
             };
           } catch (error) { throw gmailSchedulerFailure(error); }
         },
@@ -2822,6 +2989,15 @@ function gmailStoreProgress(
     // A walk in progress continues within seconds, not at the next interval.
     ...(outcome.backlog ? { continueSoon: true } : {}),
   };
+}
+
+function gmailConfirmationHoldReason(error: GoogleRequestBudgetError): string {
+  switch (error.reason) {
+    case 'request_reserve': return GMAIL_CONFIRMATION_RESERVE_REASON;
+    case 'future_utc_day': return GMAIL_REQUEST_BUDGET_CLOCK_REGRESSION;
+    case 'ledger_busy': return GMAIL_REQUEST_BUDGET_LEDGER_BUSY;
+    case 'daily_api_request_guard': return GMAIL_DAILY_REQUEST_GUARD_REASON;
+  }
 }
 
 /**
@@ -3194,6 +3370,7 @@ const UTC_DAY_SCOPED_DEGRADED_REASONS: ReadonlySet<string> = new Set([
   'reconcile_cost_to_finish_guard',
   READWISE_DAILY_REQUEST_GUARD_REASON,
   GMAIL_DAILY_REQUEST_GUARD_REASON,
+  GMAIL_CONFIRMATION_RESERVE_REASON,
   GOOGLE_DRIVE_DAILY_REQUEST_GUARD_REASON,
 ]);
 

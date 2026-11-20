@@ -12,6 +12,7 @@ import { Database } from 'bun:sqlite';
 import { isMainThread } from 'node:worker_threads';
 import { frontLoopSqlWatched, noteFrontLoopStatement } from '../../core/front-loop-sql-guard.ts';
 import { recordSourceAnswerMainThreadSql, sourceAnswerTraceActive } from '../source-index/answer-latency-trace.ts';
+import type { createAskBenchSqlRecorder } from './ask-bench-sql.ts';
 
 // A plain key, not a Symbol: a module-level call would keep the plugin
 // bundle from tree-shaking this module (test/plugin-bundle-no-bun-sqlite).
@@ -22,6 +23,12 @@ let installed = false;
 // One UPDATE, DELETE or INSERT ... SELECT, with no second statement after it.
 const SINGLE_WRITE = /^\s*(UPDATE|DELETE|INSERT)\b[^;]*;?\s*$/i;
 let sliceTiming: { maxStatementMs: number } | undefined;
+let benchSql: ReturnType<typeof createAskBenchSqlRecorder> | undefined;
+
+/** Enabled by the engine's Ask benchmark gate, alongside the slow SQL log. */
+export function setAskBenchLoopSqlRecorder(recorder: ReturnType<typeof createAskBenchSqlRecorder>): void {
+  benchSql = recorder;
+}
 
 /** Synchronous scope: also measures ledger, proof reads and store commits in a sweep. */
 export function withMainThreadSqlTiming<T>(timing: { maxStatementMs: number }, work: () => T): T {
@@ -46,10 +53,12 @@ export function installMainThreadSqlTrace(): void {
     if (frontLoopSqlWatched()) noteFrontLoopStatement(this.filename, sourceSite);
     if (siteCounts) countSite();
     if (!sliceTiming && !slowLog) return exec.apply(this, args);
+    const before = benchSql?.sample();
     const started = performance.now();
     try { return exec.apply(this, args); }
     finally {
       const ms = performance.now() - started;
+      if (before) benchSql?.record(before, ms, this.filename, slowSite);
       if (sliceTiming) sliceTiming.maxStatementMs = Math.max(sliceTiming.maxStatementMs, ms);
       if (slowLog && ms >= slowLog.thresholdMs) noteSlowStatement(ms, typeof args[0] === 'string' ? args[0] : undefined);
     }
@@ -81,11 +90,13 @@ function timeStatement<T>(statement: T): T {
       if (siteCounts) countSite();
       const answer = sourceAnswerTraceActive();
       if (!answer && !sliceTiming && !slowLog) return call.apply(this, args);
+      const before = benchSql?.sample();
       const started = performance.now();
       try {
         return call.apply(this, args);
       } finally {
         const ms = performance.now() - started;
+        if (before) benchSql?.record(before, ms, (held[DB] as Database | undefined)?.filename ?? '', slowSite);
         if (sliceTiming) sliceTiming.maxStatementMs = Math.max(sliceTiming.maxStatementMs, ms);
         if (answer) recordSourceAnswerMainThreadSql(ms, callSite);
         if (slowLog && ms >= slowLog.thresholdMs) noteSlowStatement(ms, typeof held[SQL] === 'string' ? held[SQL] as string : undefined);
@@ -98,13 +109,19 @@ function timeStatement<T>(statement: T): T {
     const iterator = iterate.apply(this, args) as IterableIterator<unknown>;
     if (!sliceTiming && !slowLog) return iterator;
     return (function* () {
+      let count = 1;
       try {
         for (;;) {
+          const before = benchSql?.sample();
           const started = performance.now();
           let next: IteratorResult<unknown>;
           try { next = iterator.next(); }
           finally {
             const ms = performance.now() - started;
+            if (before) {
+              benchSql?.record(before, ms, (held[DB] as Database | undefined)?.filename ?? '', slowSite, count);
+              count = 0;
+            }
             if (sliceTiming) sliceTiming.maxStatementMs = Math.max(sliceTiming.maxStatementMs, ms);
             if (slowLog && ms >= slowLog.thresholdMs) noteSlowStatement(ms, typeof held[SQL] === 'string' ? held[SQL] as string : undefined);
           }
@@ -324,7 +341,7 @@ function noteSlowStatement(ms: number, sql: string | undefined): void {
 // <anonymous>; its file and line still place it.
 function slowSite(): string {
   const frames = (new Error().stack ?? '').split('\n').slice(1).map((line) => line.trim().replace(/^at /, ''))
-    .filter((frame) => frame.length > 0 && !frame.includes('main-thread-sql-trace'));
+    .filter((frame) => frame.length > 0 && !frame.includes('main-thread-sql-trace') && !frame.includes('ask-bench-sql'));
   return frames.slice(0, SITE_FRAMES).map(shortFrame).join(' < ');
 }
 

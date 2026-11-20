@@ -1,0 +1,125 @@
+name: loop-stall bench
+
+# The 600k loop-stall gate and the cold start-up case on a GitHub runner (plan, 19 Nov 2026): a second bench beside Sparta,
+# valid only where it reproduces what Sparta showed. Dispatch only; never a required check. The fixture is built on the
+# runner's large /mnt disk each run, then restored pristine before the case, as on Sparta.
+on:
+  workflow_dispatch:
+    inputs:
+      case:
+        description: steady (the gate) or cold-start (start-up bench)
+        type: choice
+        default: steady
+        options: [steady, cold-start]
+      sqlite_mmap:
+        description: File map for the whole engine; empty is the product default
+        type: choice
+        default: ''
+        options: ['', 'on', 'off', bounded]
+      items:
+        description: Fixture items
+        type: string
+        default: '600000'
+      memory_max:
+        type: string
+        default: 8G
+      memory_swap_max:
+        description: 0 for a gate pass; anything else is a swap reading
+        type: string
+        default: '0'
+      io_throttle:
+        description: With cold-start, IOReadBandwidthMax and IOWriteBandwidthMax on the fixture disk (e.g. 40M); empty is none
+        type: string
+        default: ''
+      engine_env:
+        description: "Space-separated OLYMPUS_KEY=VALUE pairs for both roles"
+        type: string
+        default: ''
+      seconds:
+        type: string
+        default: '300'
+      ref:
+        description: Branch, tag, or commit to measure
+        type: string
+        default: main
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    name: ${{ inputs.case }} map=${{ inputs.sqlite_mmap || 'default' }} ${{ inputs.engine_env }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    env:
+      LS_DIR: /mnt/loop-stall
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref || github.sha }}
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.4
+      - run: bun install --frozen-lockfile
+      - name: Runner
+        run: |
+          nproc; free -g; df -h / /mnt; cat /proc/swaps
+          sudo swapoff -a || true
+          # The thread sampler reads /proc/<pid>/task/<tid>/syscall to name the call a waiting loop thread is in, which
+          # Ubuntu's Yama scope 1 refuses for a process that is not its descendant. This runner is a throwaway VM.
+          echo "ptrace_scope was $(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null)"; sudo sysctl -w kernel.yama.ptrace_scope=0 || true
+          sudo mkdir -p "$LS_DIR" && sudo chown "$(id -u):$(id -g)" "$LS_DIR"
+      - name: Build the fixture
+        env:
+          ITEMS: ${{ inputs.items }}
+        run: |
+          export HOME="$(mktemp -d)" TMPDIR="$LS_DIR/tmp" SQLITE_TMPDIR="$LS_DIR/tmp"
+          mkdir -p "$TMPDIR"
+          start=$(date +%s)
+          bun scripts/loop-stall-test.ts build --dir "$LS_DIR/fixture" --items "$ITEMS"
+          echo "built in $(( $(date +%s) - start )) s"; du -sh "$LS_DIR/fixture"
+          bun scripts/loop-stall-test.ts restore --dir "$LS_DIR/fixture"
+      - name: Run the case
+        env:
+          CASE: ${{ inputs.case }}
+          MMAP: ${{ inputs.sqlite_mmap }}
+          MEMORY_MAX: ${{ inputs.memory_max }}
+          SWAP_MAX: ${{ inputs.memory_swap_max }}
+          IO_THROTTLE: ${{ inputs.io_throttle }}
+          ENGINE_ENV: ${{ inputs.engine_env }}
+          SECONDS_RUN: ${{ inputs.seconds }}
+        run: |
+          export HOME="$(mktemp -d)"
+          scope=(-p "MemoryMax=$MEMORY_MAX" -p "MemorySwapMax=$SWAP_MAX" -p OOMPolicy=continue)
+          args=(--dir "$LS_DIR/fixture" --seconds "$SECONDS_RUN" --memory-max "$MEMORY_MAX" --case "$CASE")
+          if [ -n "$MMAP" ]; then args+=(--sqlite-mmap "$MMAP"); fi
+          if [ "$SWAP_MAX" != 0 ]; then
+            sudo fallocate -l 4G /mnt/bench.swap && sudo chmod 600 /mnt/bench.swap && sudo mkswap /mnt/bench.swap && sudo swapon /mnt/bench.swap
+            args+=(--swap-reading)
+          fi
+          if [ -n "$ENGINE_ENV" ]; then args+=(--engine-env "$ENGINE_ENV"); fi
+          if [ -n "$IO_THROTTLE" ]; then
+            device=$(findmnt -n --nofsroot -o SOURCE --target "$LS_DIR/fixture")
+            scope+=(-p "IOReadBandwidthMax=$device $IO_THROTTLE" -p "IOWriteBandwidthMax=$device $IO_THROTTLE")
+          fi
+          set +e
+          sudo systemd-run --scope --quiet --uid="$(id -u)" --gid="$(id -g)" "${scope[@]}" \
+            --setenv=HOME="$HOME" --setenv=PATH="$PATH" --setenv=TMPDIR="$LS_DIR/tmp" --setenv=SQLITE_TMPDIR="$LS_DIR/tmp" -- \
+            "$(command -v bun)" scripts/loop-stall-test.ts run "${args[@]}" | tee "$LS_DIR/run.out"
+          code=${PIPESTATUS[0]}
+          echo "exit $code (0 pass, 1 fail, 3 host busy, 4 not run)"
+          # A swap reading or the start-up bench measures; its verdict is in the receipt, not the exit.
+          if [ "$SWAP_MAX" != 0 ] || [ "$CASE" = cold-start ]; then [ "$code" -le 1 ]; else [ "$code" -eq 0 ]; fi
+      - name: Say what killed it
+        if: failure()
+        run: sudo dmesg -T | grep -iE 'oom|killed process|memory cgroup' | tail -20 || true
+      - name: Upload the receipt
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: loop-stall-bench-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.LS_DIR }}/run.out
+            ${{ env.LS_DIR }}/fixture/last-run.json
+          if-no-files-found: ignore

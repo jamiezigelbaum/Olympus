@@ -8,6 +8,7 @@
  */
 import type { ArchivePrivateModelState } from '../archive-import/dashboard.ts';
 import type { TierClassificationBacklog } from '../classification/sniffer-service.ts';
+import type { TierOverPrivateStatus } from '../classification/tier-over-private.ts';
 import type { UnreadableFiles } from '../file-extraction/unreadable-files.ts';
 import type { EngineCommandClient } from './client.ts';
 import { DATA_EXPORT_WAIT_MS, OWNER_ACTION_WAIT_MS } from './runtime.ts';
@@ -61,6 +62,7 @@ function isBacklog(value: unknown): value is TierClassificationBacklog {
 /** The judge as the front shows it: its backlog, whether it is ahead of the lanes, and whether it takes archive items. */
 export function frontJudgeState(snapshot: Snapshot): {
   backlog: () => TierClassificationBacklog | undefined;
+  overPrivate: () => TierOverPrivateStatus;
   busy: () => boolean;
   archivePrivateModel: () => ArchivePrivateModelState;
 } {
@@ -69,6 +71,7 @@ export function frontJudgeState(snapshot: Snapshot): {
       const backlog = current(snapshot)?.snapshot.judge.backlog;
       return isBacklog(backlog) ? backlog : undefined;
     },
+    overPrivate: () => current(snapshot)?.snapshot.judge.over_private ?? { state: 'counting' },
     busy: () => current(snapshot)?.snapshot.judge.busy === true,
     archivePrivateModel: () => (current(snapshot)?.snapshot.judge.archive_private_model as ArchivePrivateModelState | undefined) ?? 'waiting',
   };

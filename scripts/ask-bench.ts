@@ -2,7 +2,7 @@
 /** Synthetic Ask benchmark. Build outside the memory scope, then run both engine roles inside it. */
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import type { Database } from 'bun:sqlite';
 import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
 import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
@@ -17,6 +17,7 @@ import { engineStatusSnapshotPath } from '../src/workers/engine-split/runtime.ts
 import { readEngineStatusSnapshot } from '../src/workers/engine-split/snapshot.ts';
 import type { SourceSchedulerStatus } from '../src/workers/source-scheduler.ts';
 import type { ConnectorStoreItemCopy } from '../src/workers/connector-store/local-index.ts';
+import type { AskBenchSqlRow, AskBenchSqlThread } from '../src/workers/connector-store/ask-bench-sql.ts';
 import type { SourceAnswerLatencyLedgerRecord, SourceAnswerLatencyTraceRecord } from '../src/workers/source-index/answer-latency-log.ts';
 import type { SourceIndexAnswerResult } from '../src/workers/source-index/answer-types.ts';
 import { BUILT_IN_EMBEDDING_MODEL } from '../src/workers/source-index/built-in-embedding/manifest.ts';
@@ -258,6 +259,8 @@ async function buildStore(dir: string, scale: number, index: number) {
     const digests = db(store).query('SELECT count(*) AS n FROM chunk_vector_digest').get() as { n: number };
     digestRows = digests.n;
     if (digestRows !== (spec.vector ? count : 0)) throw new Error(`Incorrect digest row count for ${spec.corpusId}`);
+    // An installed store's totals are present and exact; a fresh one owes a walk on its first start.
+    await store.reconcileTotals();
     for (const handle of [store, ledger]) db(handle).query('PRAGMA wal_checkpoint(TRUNCATE)').all();
   } finally {
     store.close();
@@ -340,8 +343,8 @@ function procNumber(text: string | undefined, key: string): number | null {
   return value === undefined ? null : Number(value);
 }
 
-function majorFaults(pid: number): number | null {
-  const stat = optionalText(`/proc/${pid}/stat`);
+function majorFaults(proc: string): number | null {
+  const stat = optionalText(`${proc}/stat`);
   if (!stat) return null;
   // comm is parenthesized and can contain spaces. The first suffix field is state (3), majflt is field 12.
   const value = stat.slice(stat.lastIndexOf(')') + 2).split(' ')[9];
@@ -452,14 +455,94 @@ function limitsFor(build: BuildReceipt, args: Args): Limits {
   return { memory_max, memory_swap_max };
 }
 
-let idleLog: string[] | undefined;
-function threadReads(pid: number): Array<{ tid: string; comm: string; read_bytes: number; rchar: number }> {
+function threadReads(pid: number) {
   const tasks = `/proc/${pid}/task`;
   if (!existsSync(tasks)) return [];
   return readdirSync(tasks).map((tid) => {
-    const io = optionalText(`${tasks}/${tid}/io`);
-    return { tid, comm: optionalText(`${tasks}/${tid}/comm`)?.trim() ?? '', read_bytes: procNumber(io, 'read_bytes') ?? 0, rchar: procNumber(io, 'rchar') ?? 0 };
+    const task = `${tasks}/${tid}`;
+    const io = optionalText(`${task}/io`);
+    return { tid, comm: optionalText(`${task}/comm`)?.trim() ?? '', read_bytes: procNumber(io, 'read_bytes') ?? 0,
+      majflt: majorFaults(task) ?? 0, rchar: procNumber(io, 'rchar') ?? 0 };
   }).sort((left, right) => right.read_bytes - left.read_bytes);
+}
+
+function diskSample(pid: number) {
+  const readBytes = procNumber(optionalText(`/proc/${pid}/io`), 'read_bytes');
+  return { at: Date.now(), readBytes, threads: threadReads(pid) };
+}
+
+type DiskSample = ReturnType<typeof diskSample>;
+type SiteTotals = Omit<AskBenchSqlRow, 'at'>;
+
+function sqlAttribution(dir: string, pid: number, storeIds: Map<string, string>) {
+  const offsets = new Map<string, number>();
+  const workers = new Map<string, string>();
+  const storeId = (path: string) => storeIds.get(path) ?? (basename(path) || '(unknown)');
+
+  // Keep the cursor at the first row beyond the cutoff for the next window.
+  // Stream the new records so a long measuring run can stay inside its cap.
+  async function collect(file: string, from: number, to: number, sites: Map<string, SiteTotals>): Promise<void> {
+    let offset = offsets.get(file) ?? 0;
+    const source = Bun.file(join(dir, file));
+    if (offset >= source.size) return;
+    const decoder = new TextDecoder();
+    let partial = '';
+    for await (const chunk of source.slice(offset, source.size).stream()) {
+      const lines = (partial + decoder.decode(chunk, { stream: true })).split('\n');
+      partial = lines.pop()!;
+      for (const line of lines) {
+        const row = JSON.parse(line) as AskBenchSqlRow | AskBenchSqlThread;
+        if ('at' in row && row.at >= to) return;
+        offset += Buffer.byteLength(line) + 1;
+        offsets.set(file, offset);
+        if (!('at' in row)) {
+          if (row.db_path) workers.set(row.tid, row.db_path);
+          continue;
+        }
+        if (row.at < from) continue;
+        const { db_path, site, count, ms, read_bytes, majflt } = row;
+        const key = JSON.stringify([db_path, site]);
+        const total = sites.get(key) ?? { db_path, site, count: 0, ms: 0, read_bytes: 0, majflt: 0 };
+        total.count += count;
+        total.ms += ms;
+        total.read_bytes += read_bytes;
+        total.majflt += majflt;
+        sites.set(key, total);
+      }
+    }
+  }
+
+  return async (role: typeof roles[number], phase: string, before: DiskSample, after: DiskSample, sites: Map<string, SiteTotals>) => {
+    for (const file of readdirSync(dir).filter(name => name.startsWith(`${pid}.`) && name.endsWith('.sql.jsonl'))) {
+      await collect(file, before.at, after.at, sites);
+    }
+    const ranked = [...sites.values()].sort((a, b) => b.read_bytes - a.read_bytes || b.majflt - a.majflt || b.ms - a.ms);
+    const top = ranked.slice(0, 15).map(row => ({ ...row, store: storeId(row.db_path) }));
+    const attributed = ranked.reduce((sum, row) => sum + row.read_bytes, 0);
+    const topBytes = top.reduce((sum, row) => sum + row.read_bytes, 0);
+    const processBytes = before.readBytes === null || after.readBytes === null ? null : after.readBytes - before.readBytes;
+    const coverage = processBytes !== null && processBytes > 0 ? attributed / processBytes : null;
+    const share = (bytes: number) => processBytes !== null && processBytes > 0 ? `${(100 * bytes / processBytes).toFixed(1)}%` : 'n/a';
+    const lines = [
+      `Idle sites ${role} ${phase} process_read_bytes=${processBytes ?? 'n/a'} top_read_bytes=${topBytes} top_share=${share(topBytes)} attributed_read_bytes=${attributed} attributed_share=${share(attributed)}`,
+      'store\tcount\tms\tread_bytes\tmajflt\tsite',
+      ...top.map(row => [row.store, row.count, row.ms.toFixed(2), row.read_bytes, row.majflt, row.site].join('\t')),
+    ];
+    let threads;
+    if (coverage !== null && coverage < 0.7) {
+      const start = new Map(before.threads.map(thread => [thread.tid, thread]));
+      threads = after.threads.map(thread => {
+        const base = start.get(thread.tid);
+        const dbPath = workers.get(thread.tid);
+        return { ...thread, read_bytes: thread.read_bytes - (base?.read_bytes ?? 0), majflt: thread.majflt - (base?.majflt ?? 0),
+          rchar: thread.rchar - (base?.rchar ?? 0), ...(dbPath ? { store: storeId(dbPath), db_path: dbPath } : {}) };
+      }).sort((a, b) => b.read_bytes - a.read_bytes);
+      lines.push(`Idle sites ${role} ${phase} attributed under 70% of process read_bytes`);
+      lines.push(`Idle threads ${role} ${phase} ${JSON.stringify(threads)}`);
+    }
+    return { role, phase, process_read_bytes: processBytes, attributed_read_bytes: attributed, attributed_share: coverage,
+      top_read_bytes: topBytes, top_share: processBytes ? topBytes / processBytes : null, top, threads, lines };
+  };
 }
 
 function idleSample(pid: number, scope: string | undefined, readyAt: number) {
@@ -558,6 +641,29 @@ async function run(args: Args, build: BuildReceipt, limits: Limits) {
       if (realpathSync(path) !== path) throw new Error(`Expected a fixture file without symlinks: ${path}`);
     }
   }
+  const RECENCY_INDEXES = ['idx_connector_store_items_recent_live', 'idx_connector_store_items_recent_account_live'];
+  // An upgraded store arrives without the recency indexes; the background role builds them.
+  const dropRecencyIndexes = args.extraEnv.ASK_BENCH_DROP_RECENCY_INDEXES === '1';
+  const recencyBuilt: { store: string; ms: number; at_s: number }[] = [];
+  let recencyClock = Date.now();
+  if (dropRecencyIndexes) {
+    const dropEnv = { HOME: dir, XDG_DATA_HOME: join(dir, 'data'), XDG_STATE_HOME: join(dir, 'state'), XDG_CONFIG_HOME: join(dir, 'config') };
+    for (const store of stores) {
+      const dbPath = storePath(dir, store);
+      const account = storageAccountForCorpus(store);
+      const ledger = openTierLedger(account, { dbPath: tierLedgerPathForStore(dbPath) }, dropEnv);
+      const handle = openConnectorStore(account, { ...store, dbPath, tierLedger: ledger }, dropEnv);
+      try {
+        for (const name of RECENCY_INDEXES) db(handle).exec(`DROP INDEX IF EXISTS ${name}`);
+        db(handle).query('PRAGMA wal_checkpoint(TRUNCATE)').all();
+      } finally {
+        handle.close();
+        ledger.close();
+      }
+    }
+    console.log(`Recency indexes dropped from ${stores.length} stores`);
+  }
+  const recencyIndexState = () => ({ stores: stores.length, built: recencyBuilt.length, builds: recencyBuilt });
   const temp = mkdtempSync('/tmp/oab-'); // Keep the Unix socket path short.
   const { server: stub, calls } = fixtureStub();
   const portProbe = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: { data() {} } });
@@ -576,6 +682,7 @@ async function run(args: Args, build: BuildReceipt, limits: Limits) {
     OLYMPUS_CONFIG: join(temp, 'engine.json'),
     OLYMPUS_SOVEREIGNTY_CONFIG: join(temp, 'sovereignty.json'),
     OLYMPUS_ASK_BENCH: '1',
+    OLYMPUS_ASK_BENCH_SQL_DIR: temp,
     OLYMPUS_LOOP_STALL_DIR: '',
     OLYMPUS_EMAIL_SOURCE_HOST: '127.0.0.1', OLYMPUS_EMAIL_SOURCE_PORT: String(port),
     OLYMPUS_WORKER_AUTH_TOKEN: token, OLYMPUS_ENGINE_BACKGROUND_SOCKET: join(temp, 'worker.sock'),
@@ -600,6 +707,7 @@ async function run(args: Args, build: BuildReceipt, limits: Limits) {
   const tails = { front: '', background: '' };
   const pumps: Promise<void>[] = [];
   const idle: ReturnType<typeof idleSample>[] = [];
+  const diskReports: Awaited<ReturnType<ReturnType<typeof sqlAttribution>>>[] = [];
   const asks: Ask[] = [];
   const cache = { before_boot: dropFixtureCache(dir), after_q3: null as ReturnType<typeof dropFixtureCache> | null };
   const checkEngines = () => {
@@ -612,6 +720,7 @@ async function run(args: Args, build: BuildReceipt, limits: Limits) {
   let frontThreads: number | null = null;
   let listening = false;
   let scheduler: SourceSchedulerStatus | undefined;
+  let idleLog: string[] | undefined;
   try {
     const policy = buildEnvBridgeSovereigntyConfig(env);
     // The fixture alone approves this loopback judge through the normal
@@ -631,20 +740,26 @@ async function run(args: Args, build: BuildReceipt, limits: Limits) {
         pumps.push((async () => {
           const decoder = new TextDecoder();
           let partial = '';
+          const acceptLine = (line: string) => {
+            tails[role] = (tails[role] + line + '\n').slice(-16_000);
+            if (role === 'background' && idleLog) idleLog.push(line);
+            const built = /\[store-recency-index\] built store=(\S+) ms=(\d+)/.exec(line);
+            if (built) recencyBuilt.push({ store: built[1]!, ms: Number(built[2]), at_s: Math.round((Date.now() - recencyClock) / 1000) });
+            if (line.startsWith('[ask-bench] SQL disk sampling stopped')) console.error(`${role}: ${line}`);
+            if (line.includes("a store's hidden-copy set could not be built yet")) error = line;
+            if (line.includes(`${role}: built ${stores.length} stores' hidden-copy sets`)) {
+              ready[role] = { at: new Date().toISOString(), line };
+              console.log(line);
+            }
+            if (role === 'front' && line.includes('source worker listening')) listening = true;
+          };
           for await (const chunk of stream) {
             const lines = (partial + decoder.decode(chunk, { stream: true })).split('\n');
             partial = lines.pop() ?? '';
-            for (const line of lines) {
-              tails[role] = (tails[role] + line + '\n').slice(-16_000);
-              if (role === 'background' && idleLog) idleLog.push(line);
-              if (line.includes("a store's hidden-copy set could not be built yet")) error = line;
-              if (line.includes(`${role}: built ${stores.length} stores' hidden-copy sets`)) {
-                ready[role] = { at: new Date().toISOString(), line };
-                console.log(line);
-              }
-              if (role === 'front' && line.includes('source worker listening')) listening = true;
-            }
+            for (const line of lines) acceptLine(line);
           }
+          partial += decoder.decode();
+          if (partial) acceptLine(partial);
         })());
       }
     }
@@ -656,19 +771,38 @@ async function run(args: Args, build: BuildReceipt, limits: Limits) {
       if (Date.now() - started >= BOOT_TIMEOUT_MS) throw new Error('Timed out waiting for both hidden-copy sets.');
       await Bun.sleep(100);
     }
+    const storeIds = new Map(stores.flatMap(store => {
+      const path = storePath(dir, store);
+      return [[path, store.corpusId], [tierLedgerPathForStore(path), `${store.corpusId} (tier ledger)`]] as const;
+    }));
+    const reporters = children.map(child => sqlAttribution(temp, child.pid, storeIds));
+    const takeDiskSamples = () => children.map(child => diskSample(child.pid));
+    const newSiteTotals = () => roles.map(() => new Map<string, SiteTotals>());
+    const reportDisk = async (phase: string, start: DiskSample[], end: DiskSample[], sites: Map<string, SiteTotals>[]) => {
+      for (const [index, role] of roles.entries()) {
+        const report = await reporters[index]!(role, phase, start[index]!, end[index]!, sites[index]!);
+        diskReports.push(report);
+        console.log(report.lines.join('\n'));
+      }
+    };
     const readyAt = Date.now();
+    recencyClock = readyAt;
+    const idleStart = takeDiskSamples();
+    const idleSites = newSiteTotals();
     idleLog = [];
     console.log(`READY after ${readyAt - started} ms, idle ${args.secondsIdle} s, scope=systemd`);
-    for (let offset = 0; offset <= args.secondsIdle * 1000; offset += MINUTE_MS) {
+    const idleMs = args.secondsIdle * 1000;
+    for (let offset = 0; ; offset = Math.min(offset + MINUTE_MS, idleMs)) {
       await Bun.sleep(Math.max(0, readyAt + offset - Date.now()));
       checkEngines();
       const sample = idleSample(background.pid, scope, readyAt);
       idle.push(sample);
       console.log(`Idle ${JSON.stringify(sample)}`);
+      if (dropRecencyIndexes) console.log(`Recency indexes +${offset / 1000}s ${JSON.stringify(recencyIndexState())}`);
+      if (offset > 0 || offset === idleMs) await reportDisk(`idle +${offset / 1000}s`, idleStart, takeDiskSamples(), idleSites);
+      if (offset === idleMs) break;
     }
-    // Who read the disk while nothing was asked: the background's threads by
-    // bytes read, and what it logged, each distinct line shape once with a count.
-    console.log(`Idle threads ${JSON.stringify(threadReads(background.pid).slice(0, 10))}`);
+    // Keep each distinct background log shape, with its count.
     const shapes = new Map<string, { n: number; last: string }>();
     for (const line of idleLog) {
       const shape = line.replace(/\d{4}-\d\d-\d\dT[\d:.]+Z/g, '').replace(/[\d.]+/g, '#').slice(0, 120);
@@ -676,46 +810,58 @@ async function run(args: Args, build: BuildReceipt, limits: Limits) {
     }
     idleLog = undefined;
     for (const { n, last } of [...shapes.values()].sort((left, right) => right.n - left.n).slice(0, 60)) console.log(`Idle log x${n} ${last.slice(0, 600)}`);
-    await Bun.sleep(Math.max(0, readyAt + args.secondsIdle * 1000 - Date.now()));
     const workerFetch = createWorkerFetch({ platform: 'linux', env });
-    for (const [label, index] of [['q1-new', 0], ['q1-repeat', 0], ['q2-new', 1], ['q3-new', 2], ['q4-new', 3], ['q5-new', 4]] as const) {
-      checkEngines();
-      if (index === 3) {
-        cache.after_q3 = dropFixtureCache(dir);
-        console.log(`Cache before q4 ${JSON.stringify(cache.after_q3)}`);
+    // The same Asks with the background stopped: what the Ask costs on its own.
+    const holdBackground = args.extraEnv.ASK_BENCH_HOLD_BACKGROUND === '1';
+    if (holdBackground) {
+      process.kill(background.pid, 'SIGSTOP');
+      console.log('Background held (SIGSTOP) for the six Asks');
+    }
+    const askStart = takeDiskSamples();
+    try {
+      for (const [label, index] of [['q1-new', 0], ['q1-repeat', 0], ['q2-new', 1], ['q3-new', 2], ['q4-new', 3], ['q5-new', 4]] as const) {
+        checkEngines();
+        if (index === 3) {
+          cache.after_q3 = dropFixtureCache(dir);
+          console.log(`Cache before q4 ${JSON.stringify(cache.after_q3)}`);
+        }
+        const { question, expected } = questions[index]!;
+        const beforeFaults = majorFaults(`/proc/${front.pid}`);
+        const sentAt = Date.now();
+        const response = await workerFetch(`${origin}/v1/source/answer`, {
+          method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ question, corpus_ids: stores.map(store => store.corpusId) }),
+          signal: AbortSignal.timeout(ASK_TIMEOUT_MS),
+        });
+        if (!response.ok) throw new Error(`${label} HTTP ${response.status}: ${await response.text()}`);
+        const answer = await response.json() as SourceIndexAnswerResult;
+        const afterFaults = majorFaults(`/proc/${front.pid}`);
+        const scopeSwap = scopeBytes(scope, 'memory.swap.current');
+        const http_ms = Date.now() - sentAt;
+        const data = readFileSync(tracePath);
+        const rows = data.subarray(lastTraceSize).toString('utf8').trim().split('\n').filter(Boolean)
+          .map(line => JSON.parse(line) as SourceAnswerLatencyLedgerRecord);
+        lastTraceSize = data.length;
+        const ask: Ask = {
+          label, ready: sentAt >= readyAt ? 'after' : 'before', expected, http_ms,
+          expected_item_cited: answer.evidence.some(item => item.corpus_id === expected.corpus_id && item.provider_item_id === expected.provider_item_id),
+          front_majflt: beforeFaults === null || afterFaults === null ? null : afterFaults - beforeFaults,
+          scope_swap_used_bytes: scopeSwap, searched_corpora: answer.audit.searched_corpora,
+          ...askTimings(rows, answer),
+        };
+        asks.push(ask);
+        console.log(askLines(ask).join('\n'));
+        if (dropRecencyIndexes) console.log(`Recency indexes after ${label} ${JSON.stringify(recencyIndexState())}`);
       }
-      const { question, expected } = questions[index]!;
-      const beforeFaults = majorFaults(front.pid);
-      const sentAt = Date.now();
-      const response = await workerFetch(`${origin}/v1/source/answer`, {
-        method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question, corpus_ids: stores.map(store => store.corpusId) }),
-        signal: AbortSignal.timeout(ASK_TIMEOUT_MS),
-      });
-      if (!response.ok) throw new Error(`${label} HTTP ${response.status}: ${await response.text()}`);
-      const answer = await response.json() as SourceIndexAnswerResult;
-      const afterFaults = majorFaults(front.pid);
-      const scopeSwap = scopeBytes(scope, 'memory.swap.current');
-      const http_ms = Date.now() - sentAt;
-      const data = readFileSync(tracePath);
-      const rows = data.subarray(lastTraceSize).toString('utf8').trim().split('\n').filter(Boolean)
-        .map(line => JSON.parse(line) as SourceAnswerLatencyLedgerRecord);
-      lastTraceSize = data.length;
-      const ask: Ask = {
-        label, ready: sentAt >= readyAt ? 'after' : 'before', expected, http_ms,
-        expected_item_cited: answer.evidence.some(item => item.corpus_id === expected.corpus_id && item.provider_item_id === expected.provider_item_id),
-        front_majflt: beforeFaults === null || afterFaults === null ? null : afterFaults - beforeFaults,
-        scope_swap_used_bytes: scopeSwap, searched_corpora: answer.audit.searched_corpora,
-        ...askTimings(rows, answer),
-      };
-      asks.push(ask);
-      console.log(askLines(ask).join('\n'));
+    } finally {
+      if (holdBackground) process.kill(background.pid, 'SIGCONT');
+      await reportDisk('six Asks', askStart, takeDiskSamples(), newSiteTotals());
     }
     frontThreads = procNumber(optionalText(`/proc/${front.pid}/status`), 'Threads');
     scheduler = readEngineStatusSnapshot(engineStatusSnapshotPath(env))?.snapshot.scheduler as SourceSchedulerStatus | undefined;
   } catch (cause) {
     error = cause instanceof Error ? cause.message : String(cause);
-    console.error(error);
+    console.error('Ask benchmark run failed:', cause);
   } finally {
     stopChildren();
     await Promise.all(children.map(child => child.exited));
@@ -728,7 +874,7 @@ async function run(args: Args, build: BuildReceipt, limits: Limits) {
     sha: Bun.spawnSync(['git', 'rev-parse', 'HEAD']).stdout.toString().trim(),
     build, scope, limits, actual, swap_devices: optionalText('/proc/swaps')?.trim().split('\n').slice(1).length ?? null,
     seconds_idle: args.secondsIdle, extra_env_keys: Object.keys(args.extraEnv), ready, cache,
-    questions, idle, asks, front_threads: frontThreads, model_calls: calls, scheduler, reproduction: reproduction(asks),
+    questions, idle, asks, disk_attribution: diskReports.map(({ lines, ...report }) => report), front_threads: frontThreads, model_calls: calls, scheduler, reproduction: reproduction(asks),
     ...(error ? { error, engine_log_tails: tails } : {}),
   };
   const verdict = `${result.reproduction.verdict} ${JSON.stringify(result.reproduction.observations)}`;
@@ -743,6 +889,7 @@ async function run(args: Args, build: BuildReceipt, limits: Limits) {
     '', '## Reproduction measurements', '', '~~~text', verdict, '~~~',
     '', '## Ready, idle, and cache', '', '~~~text', ...Object.values(ready).map(value => value.line),
     ...idle.map(sample => JSON.stringify(sample)), JSON.stringify(cache), '~~~',
+    '', '## SQL disk attribution', '', '~~~text', ...diskReports.flatMap(report => report.lines), '~~~',
     '', '## Asks', '', '~~~text', ...asks.map(ask => askLines(ask)[0]!), '~~~',
     '', '<details><summary>Per-store trace fields</summary>', '', '~~~text', ...asks.flatMap(askLines), '~~~', '', '</details>', '',
   ].join('\n');
@@ -754,7 +901,7 @@ async function run(args: Args, build: BuildReceipt, limits: Limits) {
   }
 }
 
-if (import.meta.main) {
+async function main(): Promise<void> {
   const [command, ...rawArgs] = process.argv.slice(2);
   if (command !== 'build' && command !== 'run' && command !== 'build-store') {
     throw new Error('Usage: ask-bench.ts build|run --dir /tmp/PATH [--scale 1.0] [--seconds-idle 300] [--memory-max SIZE] [--memory-swap-max SIZE] [--extra-env "KEY=VALUE ..."] [--scope user|system]');
@@ -779,7 +926,20 @@ if (import.meta.main) {
         ...manager, '--scope', '--quiet', '-p', `MemoryMax=${limits.memory_max}`, '-p', `MemorySwapMax=${limits.memory_swap_max}`, '-p', 'OOMPolicy=continue', '--',
         process.execPath, import.meta.path, 'run', ...inner, '--scope', 'inside',
       ], { stdin: 'inherit', stdout: 'inherit', stderr: 'inherit' });
-      process.exitCode = await child.exited;
+      const code = await child.exited;
+      if (code !== 0) {
+        console.error(`Ask benchmark scope command failed (${child.signalCode ?? `exit code ${code}`}). See the command and engine errors above.`);
+        process.exitCode = code;
+      }
     }
+  }
+}
+
+if (import.meta.main) {
+  try {
+    await main();
+  } catch (error) {
+    console.error('Ask benchmark failed:', error);
+    process.exitCode = 1;
   }
 }

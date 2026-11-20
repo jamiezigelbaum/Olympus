@@ -22,7 +22,7 @@
  * empty and may only shrink. Synthetic data and loopback stub HTTP only.
  */
 import { createHash } from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, writeFileSync, writeSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, write, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { join, resolve, relative } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { Database } from 'bun:sqlite';
@@ -397,13 +397,45 @@ export function summarizeBeats(role: Role, beats: readonly Beat[], samples: read
   };
 }
 
+/**
+ * Appends lines to a file off the event loop: each write runs on the thread pool, one at a time, in order. The probe's
+ * own beat log was a synchronous write on the measured loop, and on a journal under fsync pressure that write parked
+ * the front for 1 to 3 s (GitHub runner, 40M throttle, 20 Nov 2026: "write front.beats.jsonl" was the whole wait in
+ * every front hold), so the gate measured its own probe. `drainSync` writes what is left once nothing is in flight.
+ */
+export class OffLoopAppender {
+  private queue: string[] = [];
+  private writing = false;
+  private onIdle: (() => void) | undefined;
+  constructor(private readonly fd: number) {}
+  append(line: string): void { this.queue.push(line); this.pump(); }
+  private pump(): void {
+    if (this.writing) return;
+    if (!this.queue.length) { const idle = this.onIdle; this.onIdle = undefined; idle?.(); return; }
+    const data = Buffer.from(this.queue.join('')); this.queue = [];
+    this.writing = true;
+    const writeAll = (offset: number) => write(this.fd, data, offset, data.length - offset, null, (error, written) => {
+      if (!error && offset + written < data.length) return writeAll(offset + written);
+      this.writing = false;
+      this.pump();
+    });
+    writeAll(0);
+  }
+  /** Runs `then` once every queued line is in the file. */
+  whenIdle(then: () => void): void {
+    if (!this.writing && !this.queue.length) return then();
+    this.onIdle = then;
+  }
+}
+
 /** Preloaded in the engine subprocess so both clocks run during startup. */
 export function measureEngine(role: Role, path: string, cpuPath: string,
   samplingProfilerStackTraces?: () => { traces?: CpuTraces; sources?: CpuSources },
 ) {
   // The harness drains this profiler itself so it can keep each sample's beat.
   process.env.OLYMPUS_CPU_SAMPLE_LOG = 'off';
-  const fd = openSync(`${path}.beats.jsonl`, 'w', 0o600);
+  const beatLog = new OffLoopAppender(openSync(`${path}.beats.jsonl`, 'a', 0o600));
+  const cpuLog = new OffLoopAppender(openSync(cpuPath, 'a', 0o600));
   let expected = performance.timeOrigin + BEAT_MS;
   let lastFlush = nowMs();
   let readyAt: number | undefined;
@@ -411,7 +443,7 @@ export function measureEngine(role: Role, path: string, cpuPath: string,
   let flushRequested = false;
   const record = (now: number) => {
     const beat = { startMs: Math.min(expected, now), endMs: now };
-    writeSync(fd, JSON.stringify(beat) + '\n');
+    beatLog.append(JSON.stringify(beat) + '\n');
     pending.push(beat);
     expected = now + BEAT_MS;
   };
@@ -448,8 +480,8 @@ export function measureEngine(role: Role, path: string, cpuPath: string,
       ...summarizeCpuSamples(Number.isFinite(newest) ? tracesInStalls(traces, stalled, offset) : [], undefined, sources),
     };
     const at = new Date(now).toISOString();
-    appendFileSync(cpuPath, JSON.stringify({ at, pid: process.pid, role, windowMs: Math.round(now - lastFlush), headroom: controlPathHeadroom.snapshot(),
-      ...summarizeCpuSamples(traces, undefined, sources), freezes, beat_sites }) + '\n', { mode: 0o600 });
+    cpuLog.append(JSON.stringify({ at, pid: process.pid, role, windowMs: Math.round(now - lastFlush), headroom: controlPathHeadroom.snapshot(),
+      ...summarizeCpuSamples(traces, undefined, sources), freezes, beat_sites }) + '\n');
     if (freezes.count) console.error(freezeLogLine(at, role, freezes));
     lastFlush = now;
   };
@@ -458,8 +490,11 @@ export function measureEngine(role: Role, path: string, cpuPath: string,
     record(now);
     if (flushRequested) {
       flush(now);
-      // The last measured tick precedes the shutdown-only profiler work.
-      writeFileSync(`${path}.sampled`, String(now), { mode: 0o600 });
+      // The last measured tick precedes the shutdown-only profiler work. The harness kills the engine once this file
+      // exists, so it is written only after both logs hold every line.
+      // No beat after this one is read (stoppedAt is this tick), and new beats would keep the log from going idle.
+      clearInterval(timer);
+      beatLog.whenIdle(() => cpuLog.whenIdle(() => writeFileSync(`${path}.sampled`, String(now), { mode: 0o600 })));
     } else if (now - lastFlush >= CPU_FLUSH_MS) flush(now);
   };
   let timer = setInterval(tick, BEAT_MS).unref();
@@ -662,7 +697,10 @@ function readCgroupMemory(): Record<string, number | string> {
   } catch (error) { return { error: String(error).slice(0, 200) }; }
 }
 
-/** Per engine role: read() copying (rchar, syscr, read_bytes from /proc/PID/io) from readiness to the end, and the process's own memory at the end. */
+/**
+ * Per engine role: read() copying (rchar, syscr, read_bytes from /proc/PID/io) from readiness to the end, bytes read from disk
+ * before readiness and in the first 60 s after it (plan, 19 Nov: a number for the start-up bench), and the process's own memory at the end.
+ */
 function sampleProcessIo(pids: () => Array<{ role: string; pid: number }>, ready: (role: string) => boolean) {
   type Io = Record<string, number>;
   const readIo = (pid: number): Io | undefined => {
@@ -675,13 +713,15 @@ function sampleProcessIo(pids: () => Array<{ role: string; pid: number }>, ready
       return { rss_anon_mib: mib('RssAnon'), rss_file_mib: mib('RssFile'), vm_swap_mib: mib('VmSwap') };
     } catch { return undefined; }
   };
-  const state: Record<string, { atReady?: Io; last?: Io; status?: ReturnType<typeof readStatus> }> = {};
+  const state: Record<string, { first?: Io; atReady?: Io; readyMs?: number; after60?: Io; last?: Io; status?: ReturnType<typeof readStatus> }> = {};
   const tick = () => {
     for (const { role, pid } of pids()) {
       const entry = state[role] ??= {};
       const io = readIo(pid);
       if (!io) continue;
-      if (!entry.atReady && ready(role)) entry.atReady = io;
+      entry.first ??= io;
+      if (!entry.atReady && ready(role)) { entry.atReady = io; entry.readyMs = Date.now(); }
+      if (entry.readyMs !== undefined && !entry.after60 && Date.now() - entry.readyMs >= 60_000) entry.after60 = io;
       entry.last = io;
       entry.status = readStatus(pid) ?? entry.status;
     }
@@ -691,7 +731,8 @@ function sampleProcessIo(pids: () => Array<{ role: string; pid: number }>, ready
     stop: () => { tick(); clearInterval(timer); },
     summary: () => Object.fromEntries(Object.entries(state).map(([role, entry]) => {
       const delta = (key: string) => entry.atReady && entry.last ? (entry.last[key] ?? 0) - (entry.atReady[key] ?? 0) : null;
-      return [role, { from_ready: Boolean(entry.atReady), rchar_gb: delta('rchar') === null ? null : Math.round(delta('rchar')! / 1e7) / 100, syscr: delta('syscr'), read_bytes_gb: delta('read_bytes') === null ? null : Math.round(delta('read_bytes')! / 1e7) / 100, at_end: entry.status ?? null }];
+      const gb = (from?: Io, to?: Io) => from && to ? Math.round(((to.read_bytes ?? 0) - (from.read_bytes ?? 0)) / 1e7) / 100 : null;
+      return [role, { from_ready: Boolean(entry.atReady), read_bytes_gb_before_ready: gb(entry.first, entry.atReady), read_bytes_gb_first_60s_after_ready: gb(entry.atReady, entry.after60), rchar_gb: delta('rchar') === null ? null : Math.round(delta('rchar')! / 1e7) / 100, syscr: delta('syscr'), read_bytes_gb: delta('read_bytes') === null ? null : Math.round(delta('read_bytes')! / 1e7) / 100, at_end: entry.status ?? null }];
     })),
   };
 }
@@ -714,7 +755,7 @@ function readVmstat(): Record<string, number> {
  */
 function startThreadTimeline(pid: number, out: string): { stop(): Promise<void> } | undefined {
   if (process.platform !== 'linux') return undefined;
-  const child = Bun.spawn([process.execPath, join(import.meta.dir, 'front-thread-timeline.ts'), '--pid', String(pid), '--out', out, '--seconds', '14400'], { stdout: 'ignore', stderr: 'ignore' });
+  const child = Bun.spawn([process.execPath, join(import.meta.dir, 'front-thread-timeline.ts'), '--pid', String(pid), '--out', out, '--seconds', '14400', '--fd-names'], { stdout: 'ignore', stderr: 'ignore' });
   return { stop: async () => { child.kill('SIGTERM'); await child.exited; } };
 }
 
@@ -729,6 +770,41 @@ function summarizeThreadTimeline(role: Role, timeline: string, freezes: Array<{ 
 
 const STARTUP_PAGES = ['Home', 'Sources'] as const;
 const STARTUP_PROBE_MS = 250;
+// Start-up search traffic (start-up freezes thread, 19 Nov): an agent's hybrid search every 5 s, one at a time, from the front's first
+// answer until 2 minutes after READY, cycling fixed fixture queries on the Personal store; a search still running when the next is
+// due is skipped and counted. Post-READY result ids are kept so arms (and commits) can be compared for identical results.
+const STARTUP_SEARCH_MS = 5_000;
+const STARTUP_SEARCH_AFTER_READY_MS = 120_000;
+const STARTUP_QUERIES = ['orchard harbor', 'quarterly invoice', 'policy coverage renewal', 'deductible premium claim', 'travel notes',
+  'meeting draft budget', 'contract clause schedule', 'review letter', 'summary report plan', 'ledger renewal'];
+type StartupSearch = { at: string; query: string; phase: 'before_ready' | 'after_ready'; ms: number; status: number; ids: string[]; outcome: string };
+function resultIds(json: unknown): string[] {
+  const record = json as Record<string, unknown> | null;
+  const list = [record?.results, record?.items, record?.hits].find(Array.isArray) as unknown[] | undefined;
+  return (list ?? []).map(entry => {
+    const item = entry as Record<string, any>;
+    return String(item?.local_item_id ?? item?.item?.local_item_id ?? item?.selected_item?.local_item_id ?? item?.provider_item_id ?? item?.id ?? '?');
+  });
+}
+export function summarizeStartupSearches(searches: readonly StartupSearch[], skipped: number) {
+  const before = searches.filter(entry => entry.phase === 'before_ready');
+  const after = searches.filter(entry => entry.phase === 'after_ready');
+  const outcomes: Record<string, number> = {};
+  for (const entry of before) outcomes[entry.outcome] = (outcomes[entry.outcome] ?? 0) + 1;
+  const sorted = after.map(entry => entry.ms).sort((a, b) => a - b);
+  const results: Record<string, string[]> = {};
+  for (const entry of after) if (entry.status === 200) {
+    const key = entry.ids.join(',');
+    const seen = results[entry.query] ??= [];
+    if (!seen.includes(key)) seen.push(key);
+  }
+  return {
+    sent: searches.length, skipped, before_ready: { count: before.length, outcomes, max_ms: Math.max(0, ...before.map(entry => entry.ms)) },
+    after_ready: { count: after.length, ok: after.filter(entry => entry.status === 200).length, p50_ms: sorted[Math.floor(sorted.length / 2)] ?? null, max_ms: sorted.at(-1) ?? null, over_1s: sorted.filter(ms => ms > 1000).length },
+    // Per query, each distinct ordered list of result ids seen after READY (one entry = stable results).
+    after_ready_results: results,
+  };
+}
 type PageSample = Awaited<ReturnType<typeof samplePage>>;
 type StartupGap = { page: PageSample['page']; start_at: string; end_at: string; ms: number };
 type ThreadSplit = ReturnType<typeof summarizeFreeze>;
@@ -760,11 +836,13 @@ export function summarizeStartupGaps(samples: readonly PageSample[], firstAnswer
 }
 
 export function coldStartVerdict(longest: StartupGap | null, split: Pick<ThreadSplit,
-  'runningMs' | 'runQueueMs' | 'blockedMajfltMs' | 'blockedBlkioMs' | 'blockedOtherMs'> | undefined) {
+  'runningMs' | 'runQueueMs' | 'blockedMajfltMs' | 'blockedBlkioMs' | 'blockedOtherMs'> & { waitChannelsMs?: Record<string, number> } | undefined) {
   if (!longest || !split || longest.ms <= 10_000) return 'NOT REPRODUCED';
-  const ioMs = split.blockedBlkioMs + split.blockedMajfltMs;
+  // A read() that waits for a page coming off disk sleeps in folio_wait_bit_common without a major fault (map off): disk wait too.
+  const diskOtherMs = Math.min(split.blockedOtherMs, split.waitChannelsMs?.folio_wait_bit_common ?? 0);
+  const ioMs = split.blockedBlkioMs + split.blockedMajfltMs + diskOtherMs;
   // Idle or unsampled time is unattributed, so it cannot strengthen the IO finding.
-  const otherMs = Math.max(split.blockedOtherMs, longest.ms - ioMs - split.runningMs - split.runQueueMs);
+  const otherMs = Math.max(split.blockedOtherMs - diskOtherMs, longest.ms - ioMs - split.runningMs - split.runQueueMs);
   return ioMs > Math.max(split.runningMs, split.runQueueMs, otherMs) ? 'REPRODUCED' : 'NOT REPRODUCED';
 }
 
@@ -962,7 +1040,7 @@ function readIoThrottle(): string {
 
 const RUN_CASES = ['steady', 'boot-after-upgrade', 'cold-start'] as const;
 type RunCase = typeof RUN_CASES[number];
-async function run(dir: string, seconds: number, memoryMax: string, options: { runCase: RunCase; walBytes: number; ioFloorMs: number; ioWaitSeconds: number; quick?: boolean; sqliteMmap?: 'on' | 'off' | 'bounded'; swapReading?: boolean; ioThrottleUnavailable?: boolean }) {
+async function run(dir: string, seconds: number, memoryMax: string, options: { runCase: RunCase; walBytes: number; ioFloorMs: number; ioWaitSeconds: number; quick?: boolean; sqliteMmap?: 'on' | 'off' | 'bounded'; swapReading?: boolean; ioThrottleUnavailable?: boolean; engineEnv?: Record<string, string> }) {
   const shape = JSON.parse(readFileSync(join(dir, 'shape.json'), 'utf8')) as { shape: { version: number; items: number } };
   if (shape.shape.version !== VERSION) throw new Error('Build the current synthetic fixture shape before running.');
   const isCapped = capped(memoryMaxBytes(memoryMax));
@@ -971,6 +1049,7 @@ async function run(dir: string, seconds: number, memoryMax: string, options: { r
     firstAnswerAt: undefined as number | undefined,
     readyAt: undefined as number | undefined,
     samples: [] as PageSample[],
+    searches: [] as StartupSearch[], searchesSkipped: 0,
     io_throttle: options.ioThrottleUnavailable ? 'unavailable: io controller not delegated' : readIoThrottle(),
   } : undefined;
   if (!isCapped) console.error(`WARNING: run is not under MemoryMax<=${memoryMax} and MemorySwapMax=0; this is not a qualified receipt. Use: systemd-run --user --scope -p MemoryMax=${memoryMax} -p MemorySwapMax=0 -- bun scripts/loop-stall-test.ts run --dir ${JSON.stringify(dir)} --memory-max ${memoryMax}`);
@@ -1009,6 +1088,8 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
     // An untimed count of every statement the loops run (each pays for a stack): never set it on a timed run.
     ...(process.env.OLYMPUS_MAIN_THREAD_SQL_SITES ? { OLYMPUS_MAIN_THREAD_SQL_SITES: process.env.OLYMPUS_MAIN_THREAD_SQL_SITES } : {}),
     OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON: JSON.stringify(DOMAINS.map(domain => ({ dbPath: storePath(dir, domain), corpusId: corpus(domain), family: 'file', trustDomain: domain }))),
+    // An arm's own product switches (--engine-env), for both roles; recorded in the receipt as engine_env.
+    ...options.engineEnv,
   };
   const children: ReturnType<typeof Bun.spawn>[] = [];
   // A stopped job leaves its engines orphaned and still writing the fixture (43847681247, 16 Nov 2026). Kill any a previous
@@ -1164,6 +1245,37 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
       if (coldStart) coldStart.firstAnswerAt ??= Math.round(nowMs());
       return response;
     };
+    let searchDriver: Promise<void> | undefined;
+    if (coldStart) searchDriver = (async () => {
+      let inFlight = false, sequence = 0;
+      const pending: Promise<void>[] = [];
+      while (!children.some(child => child.exitCode !== null || child.signalCode !== null)) {
+        if (coldStart.readyAt !== undefined && nowMs() > coldStart.readyAt + STARTUP_SEARCH_AFTER_READY_MS) break;
+        if (coldStart.firstAnswerAt !== undefined) {
+          if (inFlight) coldStart.searchesSkipped++;
+          else {
+            inFlight = true;
+            const query = STARTUP_QUERIES[sequence++ % STARTUP_QUERIES.length]!;
+            const phase = coldStart.readyAt === undefined ? 'before_ready' as const : 'after_ready' as const;
+            const at = new Date().toISOString();
+            const start = performance.now();
+            pending.push(workerFetch(`${origin}/v1/source/index/search`, { method: 'POST', headers: { ...bearer, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ query, corpus_id: corpus('internal'), retrieval_mode: 'hybrid' }), signal: AbortSignal.timeout(120_000) })
+              .then(async response => {
+                const json = await response.json().catch(() => null);
+                const error = (json as Record<string, unknown> | null)?.error;
+                coldStart.searches.push({ at, query, phase, ms: Math.round(performance.now() - start), status: response.status, ids: response.status === 200 ? resultIds(json) : [],
+                  outcome: response.status === 200 ? 'ok' : `http_${response.status}${typeof error === 'string' ? `:${error.slice(0, 60)}` : ''}` });
+              })
+              .catch(error => { coldStart.searches.push({ at, query, phase, ms: Math.round(performance.now() - start), status: 0, ids: [], outcome: `error:${String(error?.message ?? error).slice(0, 60)}` }); })
+              .finally(() => { inFlight = false; }));
+          }
+        }
+        await Bun.sleep(coldStart.firstAnswerAt === undefined ? STARTUP_PROBE_MS : STARTUP_SEARCH_MS);
+      }
+      await Promise.all(pending);
+    })();
+    if (searchDriver) requests.push(searchDriver);
     const bootDeadline = Date.now() + (coldStart ? 600 : seconds) * 1000;
     const engineExited = () => children.some(child => child.exitCode !== null || child.signalCode !== null);
     // The starting server can answer before the regular front is listening.
@@ -1376,13 +1488,14 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
     first_answer_ms: coldStart.firstAnswerAt === undefined ? null : Math.round(coldStart.firstAnswerAt - spawnedAt),
     ready_ms: coldStart.readyAt === undefined ? null : Math.round(coldStart.readyAt - spawnedAt),
     builds: coldStart.builds, gaps: startupGaps, front_thread: split,
+    searches: summarizeStartupSearches(coldStart.searches, coldStart.searchesSkipped), search_log: coldStart.searches.slice(0, 300),
     verdict: startupGaps ? coldStartVerdict(startupGaps.longest, split && typeof split === 'object' ? split : undefined) : null,
   } : null;
   // Retired as a bar (owner, 16 Nov 2026); kept in the receipt for comparison with earlier runs.
   const strict_1s = background.beats > 0 && front.beats > 0 && background.max_ms < LOOP_STALL_LIMIT_MS && front.max_ms < LOOP_STALL_LIMIT_MS;
   const sha = spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
   const receipt = { phase: 'run', case: options.runCase, sha, pass, strict_1s, restore_ms, restored_outside: restoredOutside, padded_wal_level_s, judged: modelCalls.judge, host_busy: false, host, qualified: isCapped, memory_max: memoryMax, elapsed_ms: Date.now() - started, background, front, slow_sql, forwarded, asks, workloads, workload_ok, model_calls: modelCalls, privacy_click: clickSummary, privacy_restart, command_ack: ackSummary, ack_ok, control_ok, typical, front_loop_sql: seen.frontLoopSql, request_errors: requestErrors, errors, cpu_freezes: cpuFreezes.slice(0, 60), pressure: pressureSummary(pressureSampler.samples), anon_memory: anonSampler.peaks,
-    sqlite_mmap: options.sqliteMmap ?? 'default', sqlite_mmap_boot: fileMapLines, process_io: ioSampler.summary(), meminfo: { start: meminfoAtStart, end: meminfoAtEnd }, cgroup_memory_end: cgroupAtEnd, cgroup_memory_samples: cgroupSamples,
+    sqlite_mmap: options.sqliteMmap ?? 'default', engine_env: options.engineEnv ?? {}, sqlite_mmap_boot: fileMapLines, process_io: ioSampler.summary(), meminfo: { start: meminfoAtStart, end: meminfoAtEnd }, cgroup_memory_end: cgroupAtEnd, cgroup_memory_samples: cgroupSamples,
     ...(options.swapReading ? { swap_reading: true, counts_as_gate: false } : {}),
     ...(coldStart ? { counts_as_gate: false, cold_start: startup, io_throttle: coldStart.io_throttle } : {}),
     vmstat: Object.fromEntries(Object.entries(readVmstat()).map(([key, value]) => [key, value - (vmstatAtStart[key] ?? value)])),
@@ -1408,9 +1521,11 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
     const gap = startup.gaps?.longest;
     const thread = startup.front_thread;
     const detail = thread && typeof thread === 'object'
-      ? `running ${thread.runningMs} ms, run queue ${thread.runQueueMs} ms, page faults ${thread.blockedMajfltMs} ms, block IO ${thread.blockedBlkioMs} ms, other waits ${thread.blockedOtherMs} ms, wait channels ${JSON.stringify(thread.waitChannelsMs)}`
+      ? `running ${thread.runningMs} ms, run queue ${thread.runQueueMs} ms, page faults ${thread.blockedMajfltMs} ms, block IO ${thread.blockedBlkioMs} ms, other waits ${thread.blockedOtherMs} ms, wait channels ${JSON.stringify(thread.waitChannelsMs)}${(thread as any).syscallsMs && Object.keys((thread as any).syscallsMs).length ? `, in calls ${JSON.stringify((thread as any).syscallsMs)}` : ''}`
       : thread ?? 'no thread window';
     console.log(`cold-start: ${startup.verdict} — longest ${gap?.ms ?? 0} ms${gap ? ` (${gap.page})` : ''}; ${detail}; READY ${startup.ready_ms} ms from spawn`);
+    const searches = startup.searches;
+    console.log(`cold-start searches: ${searches.sent} sent, ${searches.skipped} skipped; before READY ${JSON.stringify(searches.before_ready.outcomes)} max ${searches.before_ready.max_ms} ms; after READY ${searches.after_ready.ok}/${searches.after_ready.count} ok, p50 ${searches.after_ready.p50_ms} ms, max ${searches.after_ready.max_ms} ms, ${searches.after_ready.over_1s} over 1 s`);
     return true;
   }
   // One line per engine per run (plan, 16 Nov 2026): worst stall and its site, then pass or fail; then a per-site table.
@@ -1447,14 +1562,19 @@ if (import.meta.main) {
   const number = (name: string, fallback: string) => { const n = Number(flag(name, fallback)); if (!Number.isSafeInteger(n) || n < 1) throw new Error(`Invalid --${name}`); return n; };
   if (dir && command === 'pad-wal') padWal(resolve(dir), number('wal-mb', '2048'));
   if (dir && command === 'restore') { restorePristine(resolve(dir)); writeFileSync(join(resolve(dir), 'restored'), new Date().toISOString()); process.exit(0); }
-  if (!dir || !['build', 'run'].includes(command ?? '')) throw new Error(`Usage: loop-stall-test.ts build|restore|run --dir PATH [--items N] [--chunks-per-item N] [--seconds N] [--memory-max 2G] [--case ${RUN_CASES.join('|')}] [--wal-mb 2048] [--io-floor-ms 50] [--io-wait-seconds 600] [--sqlite-mmap on|off|bounded] [--swap-reading] [--io-throttle-unavailable]`);
+  if (!dir || !['build', 'run'].includes(command ?? '')) throw new Error(`Usage: loop-stall-test.ts build|restore|run --dir PATH [--items N] [--chunks-per-item N] [--seconds N] [--memory-max 2G] [--case ${RUN_CASES.join('|')}] [--wal-mb 2048] [--io-floor-ms 50] [--io-wait-seconds 600] [--sqlite-mmap on|off|bounded] [--swap-reading] [--io-throttle-unavailable] [--engine-env 'OLYMPUS_X=1 OLYMPUS_Y=2']`);
   const runCase = flag('case', 'steady') as RunCase;
   const sqliteMmap = flag('sqlite-mmap') as 'on' | 'off' | 'bounded' | undefined;
   if (sqliteMmap !== undefined && !['on', 'off', 'bounded'].includes(sqliteMmap)) throw new Error('Invalid --sqlite-mmap; use on, off or bounded');
+  const engineEnv = Object.fromEntries((flag('engine-env') ?? '').split(/\s+/).filter(Boolean).map(pair => {
+    const match = /^(OLYMPUS_[A-Z0-9_]+)=(.*)$/.exec(pair);
+    if (!match) throw new Error(`Invalid --engine-env entry ${pair}; use OLYMPUS_NAME=value`);
+    return [match[1]!, match[2]!];
+  }));
   if (!RUN_CASES.includes(runCase)) throw new Error(`Invalid --case; use ${RUN_CASES.join(', ')}`);
   if (command === 'build') await build(resolve(dir), number('items', '600000'), number('chunks-per-item', '1'));
   else {
-    const result = await run(resolve(dir), number('seconds', '300'), flag('memory-max', '2G')!, { runCase, walBytes: number('wal-mb', '2048') * 1024 * 1024, ioFloorMs: number('io-floor-ms', '50'), ioWaitSeconds: number('io-wait-seconds', '600'), quick: args.includes('--quick'), ...(sqliteMmap ? { sqliteMmap } : {}), swapReading: args.includes('--swap-reading'), ioThrottleUnavailable: args.includes('--io-throttle-unavailable') });
+    const result = await run(resolve(dir), number('seconds', '300'), flag('memory-max', '2G')!, { runCase, walBytes: number('wal-mb', '2048') * 1024 * 1024, ioFloorMs: number('io-floor-ms', '50'), ioWaitSeconds: number('io-wait-seconds', '600'), quick: args.includes('--quick'), ...(sqliteMmap ? { sqliteMmap } : {}), swapReading: args.includes('--swap-reading'), ioThrottleUnavailable: args.includes('--io-throttle-unavailable'), engineEnv });
     // Exit 3 is "host busy" and 4 "not run": neither completed measurement.
     process.exitCode = result === 'host_busy' ? 3 : result === 'not_run' ? 4 : result ? 0 : 1;
   }

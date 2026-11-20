@@ -3,6 +3,7 @@
 import { describe, expect, test } from 'bun:test';
 import { FIXTURE_ITEMS, PRIVATE_FACTS, PRIVATE_MARKER, SECRET_MARKER, SUITE_QUESTIONS, fixtureItemTiers, forbiddenMarkers } from '../scripts/release-check/fixture.ts';
 import { citedEvidenceIds, evaluateArtifactScan, evaluateObservation, evaluateSmokeVerdict, type QuestionObservation } from '../scripts/release-check/suite.ts';
+import { missingFactsWhere } from '../scripts/release-check/suite.ts';
 
 const markers = forbiddenMarkers();
 const q = (id: string) => SUITE_QUESTIONS.find((x) => x.id === id)!;
@@ -169,4 +170,13 @@ describe('ingest.tiers names each fixture item', () => {
     expect(detail).toContain(`${manual} (meant personal): secure by move, in readwise-secure-connector-store`);
     expect(fixtureItemTiers(null)).toBe('the stored items could not be read');
   });
+});
+
+test('a missing fact says whether the tool returned it', () => {
+  const question = { citedTitle: 'Garden newsletter' } as never;
+  const visible = [{ label: 'tool', text: 'E1 Garden newsletter: the swap is on 24 October at the hall' }, { label: 'reply', text: 'The swap is at the hall [E1].' }];
+  expect(missingFactsWhere({ visible, evidenceTitles: ['Garden newsletter'], question }, ['24 October']))
+    .toBe('24 October was in what the tool returned; 1 evidence item(s) returned, longest tool text naming the cited item 59 characters');
+  expect(missingFactsWhere({ visible: visible.slice(1), evidenceTitles: ['Garden newsletter'], question }, ['24 October']))
+    .toContain('24 October was not in what the tool returned');
 });

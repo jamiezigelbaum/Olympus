@@ -110,8 +110,7 @@ import {
   PLAIN_STATUS_REQUEST,
 } from '../source-index/status.ts';
 import { startPacedStatusRecount, type PacedStatusRecount } from './status-recount.ts';
-import { storeTotalsReconcileDue } from '../connector-store/store-totals.ts';
-import { LOOP_SLOW_SQL_MS, slowMainThreadSqlHealth, startMainThreadSqlSiteCount, startSlowMainThreadSqlLog } from '../connector-store/main-thread-sql-trace.ts';
+import { LOOP_SLOW_SQL_MS, setAskBenchLoopSqlRecorder, slowMainThreadSqlHealth, startMainThreadSqlSiteCount, startSlowMainThreadSqlLog } from '../connector-store/main-thread-sql-trace.ts';
 import {
   dashboardOwnerSessionCheck,
   resolveWorkerBindHost,
@@ -277,7 +276,7 @@ import {
 import { canonicalConnectorStoreChatPrincipal } from '../connector-store/principal.ts';
 import { createOwnerQuestionActivity, createSourceAnswerLanes, OWNER_QUESTION_RESOURCE } from './runtime/source-answer-lanes.ts';
 import type { ConnectorStoreStatusScope } from '../connector-store/local-index.ts';
-import { setVectorDigestBackfillHold } from '../connector-store/local-index.ts';
+import { setConnectorStoreRecencyIndexAdmission, setVectorDigestBackfillHold } from '../connector-store/local-index.ts';
 import type { ExtractionUnreadableItem } from '../file-extraction/job-store.ts';
 import { gmailInternalStoreStatusScope, gmailPrivateStoreStatusScope } from '../email-source/gmail-status-scope.ts';
 import {
@@ -303,9 +302,9 @@ import {
 } from '../x-bookmarks/tier-set.ts';
 import { createParentLabelResolver } from '../connector-store/parent-label.ts';
 import { createUnreadableLocators } from '../connector-store/unreadable-locators.ts';
-import { hiddenProbesByParentIdentity, settleStaleEmbedHolds } from '../connector-store/child-visibility.ts';
+import { hiddenProbesByParentIdentity } from '../connector-store/child-visibility.ts';
 import { sqliteFilesHealth, startSqliteWalSampler } from './sqlite-wal-sampler.ts';
-import { readPoolDiagnostics, readPoolMemoryCounts, sampleReadPoolMemory } from '../connector-store/off-thread-reads.ts';
+import { readPoolDiagnostics, readPoolMemoryCounts, sampleReadPoolMemory, setAskBenchReadPoolSqlDir } from '../connector-store/off-thread-reads.ts';
 import { startSqliteCheckpointer } from './sqlite-checkpointer.ts';
 import { setSqliteCheckpointsOffLoop, sqliteFilesForOffLoopCheckpoints } from '../../core/sqlite-store.ts';
 import { tierSnifferPathForLedger } from '../classification/tier-ledger-path.ts';
@@ -482,7 +481,8 @@ import {
   localModelResourceKey,
 } from '../answer-activity.ts';
 import { privacyOwnerContext } from '../classification/privacy-profile.ts';
-import { TierSnifferService, tierSnifferServiceEnv } from '../classification/sniffer-service.ts';
+import { runUnattendedStaleEmbedHoldWalk, TierSnifferService, tierSnifferServiceEnv } from '../classification/sniffer-service.ts';
+import { TierOverPrivateMonitor, type TierOverPrivateStatus } from '../classification/tier-over-private.ts';
 import { SNIFFER_MAX_CONCURRENT_CALLS, completeAfterSlot } from '../classification/sniffer-resolver.ts';
 import { approveClassifier, resolveClassificationLedgerPath, readClassificationLedger, isClassifierApproved } from '../classification-ledger.ts';
 import { resolveTierMigrationPaths, tierMigrationStatusSummary } from '../classification/tier-migration.ts';
@@ -668,6 +668,13 @@ export async function main(): Promise<void> {
   const engineRole = engineRoleFromEnv(process.env);
   const { enabled: sqliteMmapOn, reason: sqliteMmapReason } = sqliteMmapPolicy();
   console.log(`[olympus] engine ${engineRole} SQLite file map ${sqliteMmapOn ? 'on' : 'off'} (${sqliteMmapReason})`);
+  const askBench = process.env.NODE_ENV === 'test' && process.env.OLYMPUS_ASK_BENCH === '1';
+  if (askBench && process.env.OLYMPUS_ASK_BENCH_SQL_DIR) {
+    const dir = process.env.OLYMPUS_ASK_BENCH_SQL_DIR;
+    const { createAskBenchSqlRecorder } = await import('../connector-store/ask-bench-sql.ts');
+    setAskBenchLoopSqlRecorder(createAskBenchSqlRecorder(dir));
+    setAskBenchReadPoolSqlDir(dir);
+  }
   const setupEnvPath = engineRole === 'front' ? workerSetupEnvPath() : undefined;
   const freshSetupEnv = setupEnvPath ? () => readWorkerSetupEnvAsync({ workerEnvPath: setupEnvPath }) : undefined;
   let frontSetupEnv: Record<string, string> | undefined;
@@ -756,7 +763,7 @@ export async function main(): Promise<void> {
   }
   const engineSocketPath = engineRole === 'single' ? undefined : engineBackgroundSocketFromEnv(process.env);
   let engineFront: EngineFront | undefined;
-  let frontStarting: { stop(): void } | undefined;
+  let frontStarting: ReturnType<typeof listenWhileStarting>;
   if (engineRole === 'front') {
     // The front does none of the boot work that needs the data root to
     // itself: it waits until the background has done it, and from then on
@@ -963,6 +970,12 @@ export async function main(): Promise<void> {
     reason: () => ownerAskReason(ownerQuestions, () => remoteOwnerBusy(OWNER_QUESTION_RESOURCE)),
   });
   setVectorDigestBackfillHold(() => standBack.holds('digest'));
+  let recencyIndexMaintenanceReady = false;
+  // Only the background role builds: the front never takes a store's write lock for it.
+  if (!engineFront) setConnectorStoreRecencyIndexAdmission(async (work, preempt) => {
+    if (!recencyIndexMaintenanceReady || ownerQuestions.busy || remoteOwnerBusy(OWNER_QUESTION_RESOURCE)) return undefined;
+    return sourceScheduler ? sourceScheduler.withIdleTasks(work, { preempt }) : work();
+  });
   // UI answer leases coordinate owner/background jobs. Actual local model
   // dispatches have separate leases; cloud searches never preempt sorting.
   const answerActivity = createAnswerActivity(() => undefined, {
@@ -971,6 +984,7 @@ export async function main(): Promise<void> {
   // Set once the sniffer runs: its backlog, for the status surface.
   let classificationBusy = () => false;
   let tierSnifferBacklog: (() => ReturnType<TierSnifferService['backlog']>) | undefined;
+  let tierOverPrivate: () => TierOverPrivateStatus = () => ({ state: 'counting' });
   // Set once the sniffer is built: whether it can judge imported items now.
   let archivePrivateModelState: () => ArchivePrivateModelState = () => 'waiting';
   const connector = createEmailSourceConnectorFromEnv();
@@ -1587,6 +1601,10 @@ export async function main(): Promise<void> {
     corpusIds: lane.corpusIds,
     stores: () => connectorStores.filter((store) => lane.corpusIds.has(store.corpusId)),
   }));
+  const overPrivate = engineFront ? undefined : new TierOverPrivateMonitor(
+    () => tierScopes().map(scope => scope.ledger),
+    line => console.warn(line),
+  );
   // A query's matches still waiting for their privacy judgment are judged next (#1062).
   // The judge runs in the background in the split: raise its boosts there.
   const raiseJudgeBoosts = engineFront ? frontJudgeBoost(engineFront.client) : (identities: Parameters<typeof judgeBoosts.raise>[0]) => judgeBoosts.raise(identities);
@@ -3505,8 +3523,6 @@ export async function main(): Promise<void> {
   ) => {
     const scopeRef = handle && fileSourceScopeAuthority ? fileSourceScopeAuthority.mailPolicyRef() : undefined;
     const approval = scopeRef && fileSourceScopeAuthority ? fileSourceScopeAuthority.assertCurrentMail(scopeRef) : undefined;
-    const privateCorpusId = gmailSecureConnectorStore?.corpusId;
-    const privateDefinition = privateCorpusId && sourceCorpusRegistry.definitions().find(entry => entry.corpusId === privateCorpusId);
     return handle && scopeRef && approval && fileSourceScopeAuthority
       && gmailInternalConnectorStore && gmailSecureConnectorStore && gmailRequestBudget
     ? createGmailConnectorStoreSyncHandler({
@@ -3515,11 +3531,7 @@ export async function main(): Promise<void> {
       requestBudget: gmailRequestBudget,
       scope: gmailConnectorScopeFromApproval(approval),
       scopeApproval: { generation: scopeRef.accountGeneration, revision: scopeRef.revision },
-      confirmStoredPrivateScope: !!privateDefinition && secureLocalPolicyEmbeddingProvider?.provider === 'built-in'
-        && secureLocalPolicyEmbeddingProvider.backend === 'local'
-        && privateDefinition?.activationMode !== 'lexical_only' && privateDefinition?.embeddingPolicy !== 'disabled'
-        && (sovereigntyEngine.config.retrieval.trustDomains.secure_local?.activationMode === 'hybrid_shadow'
-          || sovereigntyEngine.config.retrieval.trustDomains.secure_local?.activationMode === 'hybrid_primary'),
+      confirmationRegistryPath: connectedHandleRegistryPath ?? fileSourceScopeAuthority.registryPath,
       assertScopeCurrent: () => {
         fileSourceScopeAuthority.assertCurrentMail(scopeRef);
       },
@@ -4072,6 +4084,8 @@ export async function main(): Promise<void> {
               ...(backlog.waiting
                 ? { waiting_reason: backlog.waiting.reason, waiting_label: backlog.waiting.label, waiting_since: backlog.waiting.since }
                 : {}),
+              ...(backlog.storedWalks?.length ? { stored_walks: backlog.storedWalks } : {}),
+              over_private: tierOverPrivate(),
             }
           : undefined;
       },
@@ -4609,7 +4623,7 @@ export async function main(): Promise<void> {
     ].filter((source): source is SourceSchedulerSource => source !== undefined);
     // The Ask benchmark mounts completed synthetic stores without connecting
     // accounts. Give those stores the same idle embedding sweep as live lanes.
-    if (process.env.NODE_ENV === 'test' && process.env.OLYMPUS_ASK_BENCH === '1') {
+    if (askBench) {
       for (const { corpusId, sourceId } of sourceCorpusRegistry.list('search')) {
         if (!sourceId.startsWith('ask-bench.')) continue;
         sources.push({ corpusId, sourceId, cadence: 'continuous', intervalMs: olympusConfig.worker.scheduler.syncIntervalSeconds * 1_000,
@@ -6581,10 +6595,8 @@ export async function main(): Promise<void> {
     ? async (request: Request): Promise<Response> => (await frontRoutes(request)) ?? worker.fetch(request)
     : worker.fetch;
   inProcessFetch = frontWorkerFetch;
-  // The front's "starting" answer gives way to its own server here.
-  frontStarting?.stop();
-  if (listens && releaseSystemdWorkerSocket()) console.warn('[olympus:worker] removed the socket left by the previous worker run');
-  const socketPath = listens ? prepareWorkerSocket() : undefined;
+  if (!frontStarting && listens && releaseSystemdWorkerSocket()) console.warn('[olympus:worker] removed the socket left by the previous worker run');
+  const socketPath = frontStarting ? frontStarting.socketPath : listens ? prepareWorkerSocket() : undefined;
   const serverOptions = {
     // Remote agent routes authenticate connection credentials only (bearer
     // connection tokens, or OAuth access tokens bound to this resource); the
@@ -6665,6 +6677,7 @@ export async function main(): Promise<void> {
       const windowNotices = localPromptBudgets.map(localAnalystWindowNotice).filter(notice => notice !== undefined);
       return Response.json({
         ...await response.json() as object,
+        tier_classification: { over_private: tierOverPrivate() },
         ...(windowNotices.length ? { degraded_conditions: windowNotices } : {}),
         ...(rerankOutcomes ? {
           rerank_outcomes: rerankOutcomes,
@@ -6723,35 +6736,36 @@ export async function main(): Promise<void> {
   // Nothing is answered from the local files index before what an earlier version
   // indexed inside Olympus's own folders is gone (own-roots-cleanup.ts).
   await localFilesInitialCleanup;
+  const fetchOnWorkerSocket = (request: Request, server: Bun.Server<undefined>) => {
+    server.timeout(request, 0);
+    if (new URL(request.url).pathname === DESKTOP_OWNER_OPEN_PATH) {
+      if (request.method !== 'POST' || !authToken || request.headers.get('authorization') !== `Bearer ${authToken}`) return new Response(null, { status: 403 });
+      return (async () => {
+        const status = desktopBridge?.status();
+        if (!status || status.state === 'headless') return Response.json({ state: 'headless' });
+        if (status.state !== 'listening') return Response.json(status, { status: 503 });
+        try {
+          const base = `http://127.0.0.1:${port}`;
+          const open = new URL(await mintDashboardOpeningUrl(base, authToken));
+          const requestedTarget = new URL(request.url).searchParams.get('target');
+          const target = requestedTarget ? parseOlympusOpenUrl(`olympus://open/${requestedTarget}`) : undefined;
+          if (requestedTarget && !target) return new Response(null, { status: 400 });
+          if (target) open.hash += `&olympus_open=${openTargetToken(target)}`;
+          const origin = await desktopBridge!.open(open.pathname + open.search + open.hash);
+          return Response.json({ state: 'listening', opened: true, url: origin + '/dashboard', hint: 'A private owner ticket was opened in your desktop browser. If *.localhost resolution fails, use the owner SSH socket forward; never use the fixed origin.' });
+        } catch { return Response.json({ error: 'Owner ticket could not open. Wait ten seconds and retry, or use the owner SSH socket forward.' }, { status: 503 }); }
+      })();
+    }
+    const response = serverOptions.fetch(request, server);
+    const path = new URL(request.url).pathname;
+    if (path === '/v1/health' || path === '/health') return Promise.resolve(response).then(async value => {
+      if (!value.ok) return value;
+      return Response.json({ ...await value.json() as object, built_in_models: linuxModelReadiness(process.env), desktop_bridge: desktopBridge?.status() }, { status: value.status, headers: value.headers });
+    });
+    return response;
+  };
   const startServer = () => socketPath
-    ? Bun.serve(workerSocketServe({ unix: socketPath, fetch(request, server) {
-        server.timeout(request, 0);
-        if (new URL(request.url).pathname === DESKTOP_OWNER_OPEN_PATH) {
-          if (request.method !== 'POST' || !authToken || request.headers.get('authorization') !== `Bearer ${authToken}`) return new Response(null, { status: 403 });
-          return (async () => {
-            const status = desktopBridge?.status();
-            if (!status || status.state === 'headless') return Response.json({ state: 'headless' });
-            if (status.state !== 'listening') return Response.json(status, { status: 503 });
-            try {
-              const base = `http://127.0.0.1:${port}`;
-              const open = new URL(await mintDashboardOpeningUrl(base, authToken));
-              const requestedTarget = new URL(request.url).searchParams.get('target');
-              const target = requestedTarget ? parseOlympusOpenUrl(`olympus://open/${requestedTarget}`) : undefined;
-              if (requestedTarget && !target) return new Response(null, { status: 400 });
-              if (target) open.hash += `&olympus_open=${openTargetToken(target)}`;
-              const origin = await desktopBridge!.open(open.pathname + open.search + open.hash);
-              return Response.json({ state: 'listening', opened: true, url: origin + '/dashboard', hint: 'A private owner ticket was opened in your desktop browser. If *.localhost resolution fails, use the owner SSH socket forward; never use the fixed origin.' });
-            } catch { return Response.json({ error: 'Owner ticket could not open. Wait ten seconds and retry, or use the owner SSH socket forward.' }, { status: 503 }); }
-          })();
-        }
-        const response = serverOptions.fetch(request, server);
-        const path = new URL(request.url).pathname;
-        if (path === '/v1/health' || path === '/health') return Promise.resolve(response).then(async value => {
-          if (!value.ok) return value;
-          return Response.json({ ...await value.json() as object, built_in_models: linuxModelReadiness(process.env), desktop_bridge: desktopBridge?.status() }, { status: value.status, headers: value.headers });
-        });
-        return response;
-      } }))
+    ? Bun.serve(workerSocketServe({ unix: socketPath, fetch: fetchOnWorkerSocket }))
     : Bun.serve({ hostname, port: workerListenPort(port), idleTimeout: 0, ...serverOptions });
   // Only the wait is bounded: Promise.race does not cancel `warming`. A set
   // rebuilt from the ledger keeps building after the front listens, in turns.
@@ -6761,7 +6775,11 @@ export async function main(): Promise<void> {
     await Promise.race([warming, new Promise<void>((resolve) => { bound = setTimeout(resolve, FRONT_VISIBILITY_READY_BOUND_MS); })]);
     clearTimeout(bound);
   }
-  const server = !listens ? undefined : socketPath ? bindWorkerSocket(socketPath, startServer) : startServer();
+  // Keep the front's listener and in-flight starting responses. Both transports
+  // already have the real server's bind options; only the fetch handler changes.
+  const server = frontStarting
+    ? frontStarting.server.reload({ fetch: socketPath ? fetchOnWorkerSocket : serverOptions.fetch })
+    : !listens ? undefined : socketPath ? bindWorkerSocket(socketPath, startServer) : startServer();
   // The single worker's boot work ends when it listens; the background's when it is ready on its socket.
   if (engineRole === 'single') { finishBootProgress(); setEngineStep(undefined); }
   if (engineFront) finishFrontProgress();
@@ -6928,7 +6946,17 @@ export async function main(): Promise<void> {
         // for the sniffer by default, and a Personal verdict's queued move
         // runs at once while every embedding is the built-in local model.
         ...(snifferRuntime.source === 'built_in' ? { autoApproveBuiltIn: true } : {}),
-        autoMoves: automaticMoveContext,
+        autoMoves: {
+          ...automaticMoveContext,
+          onPlacementChecked: (paths) => { void overPrivate?.refresh(paths); },
+          // A sweep may have visited the destination while the item was held
+          // or moving. Wake its source once the new copy is visible.
+          onEmbeddingNeeded: (corpora) => {
+            const sourceIds = new Set(sourceCorpusRegistry.list()
+              .filter(({ corpusId }) => corpora.has(corpusId)).map(({ sourceId }) => sourceId));
+            sourceScheduler?.wakeTasksOfKind('embed', undefined, sourceIds);
+          },
+        },
       })
     : undefined;
   if (tierSniffer && snifferResource) {
@@ -6992,18 +7020,26 @@ export async function main(): Promise<void> {
   }, 2_000) : undefined;
   frontMountRetry?.unref?.();
   // Keeps each store's set current, and saved by a writer; see keepVisibilityCurrent.
-  if (!engineFront) void keepVisibilityCurrent('after start');
-  const visibilityRefresh = setInterval(() => { void keepVisibilityCurrent('refresh'); }, VISIBILITY_REFRESH_MS);
+  if (!engineFront) {
+    void keepVisibilityCurrent('after start');
+    void overPrivate?.refresh();
+  }
+  const visibilityRefresh = setInterval(() => {
+    void keepVisibilityCurrent('refresh');
+    void overPrivate?.refresh();
+  }, VISIBILITY_REFRESH_MS);
   visibilityRefresh.unref?.();
   if (engineFront) {
     // The judge runs in the background: the front shows what it last published.
     const judge = frontJudgeState(() => engineFront!.status());
     classificationBusy = judge.busy;
     tierSnifferBacklog = judge.backlog as typeof tierSnifferBacklog;
+    tierOverPrivate = judge.overPrivate;
     archivePrivateModelState = judge.archivePrivateModel;
   } else {
     classificationBusy = () => tierSniffer?.hasPriority ?? false;
     tierSnifferBacklog = tierSniffer ? () => tierSniffer.backlog() : undefined;
+    if (overPrivate) tierOverPrivate = () => overPrivate.status();
     archivePrivateModelState = () => archivePrivateModelFromSniffer(tierSniffer);
   }
   tierSniffer?.start();
@@ -7188,6 +7224,7 @@ export async function main(): Promise<void> {
           const backlog = tierSniffer?.backlog();
           return {
             backlog: backlog ?? null,
+            over_private: tierOverPrivate(),
             pending: backlog?.pendingItems ?? null,
             spending: judgeSpending.status(),
             busy: tierSniffer?.hasPriority ?? false,
@@ -7231,15 +7268,13 @@ export async function main(): Promise<void> {
       ? startPacedStatusRecount({
           holds: () => standBack.holds('status'),
           recount: async () => {
-            // The kept totals first, walked by key ranges on the read thread only when owed (never
-            // filled, a trigger put back, or an hour after a walk that saw writes), so a fresh install
-            // shows live totals before its first recount ends.
+            // Fill or repair the kept totals first. Changed inputs and quiet
+            // retries are walked by key range on the read thread.
             for (const store of connectorStores) {
               if (standBack.holds('status')) break;
-              if (!storeTotalsReconcileDue(store.totals(), Date.now())) continue;
               try {
-                const drift = await store.reconcileTotals();
-                if (drift) console.warn(`[olympus] store totals: ${store.corpusId} was off by ${drift}; put right from an exact count.`);
+                const drift = await store.reconcileTotals({ background: true });
+                if (drift) console.warn(`[olympus] store totals: ${store.corpusId} adjusted by ${drift}.`);
               } catch (error) {
                 console.warn(`[olympus] store totals: ${store.corpusId} count failed (${error instanceof Error ? error.message : String(error)}); tried again next pass.`);
               }
@@ -7258,18 +7293,17 @@ export async function main(): Promise<void> {
             }
             for (const ledger of new Set(tierLanes.map((lane) => lane.ledger))) {
               if (standBack.holds('status')) break;
-              changeMemoryActivity('embedding_settlement', 1);
+              // The judge walks its own ledgers, except while a spending stop
+              // pauses it: then this pass takes the walk so holds still settle.
+              if (tierSniffer && tierSetForLedger(ledger.dbPath) && tierSniffer.status().waiting?.reason !== 'cloud_stopped') continue;
               try {
-                const settled = await settleStaleEmbedHolds(ledger);
-                if (settled) console.warn(`[olympus] tier ledger: released ${settled} decided copies an older build left held.`);
+                await runUnattendedStaleEmbedHoldWalk(ledger, (line) => console.warn(line));
               } catch (error) {
-                console.warn(`[olympus] tier ledger: settling held copies failed (${error instanceof Error ? error.message : String(error)}); tried again next pass.`);
-              } finally {
-                changeMemoryActivity('embedding_settlement', -1);
+                console.warn(`[olympus] tier ledger: held copy check failed (${error instanceof Error ? error.name : 'unknown'}). The next pass will retry.`);
               }
             }
             for (const request of [PLAIN_STATUS_REQUEST, DASHBOARD_STATUS_REQUEST]) {
-              await refreshSnapshot({ ...request }, { countsMaxAgeMs: STATUS_COUNTS_MAX_AGE_MS });
+              await refreshSnapshot({ ...request }, { countsMaxAgeMs: STATUS_COUNTS_MAX_AGE_MS, reuseCounts: true });
             }
           },
           log: (line) => console.warn(line),
@@ -7308,6 +7342,7 @@ export async function main(): Promise<void> {
     sourceRuntimeClosed = true;
     loopStallFixture?.stop();
     localFilesCleanupRecovery?.close();
+    recencyIndexMaintenanceReady = false;
     sourceScheduler?.stop();
     worker.close();
     updateChecker.stop();
@@ -7412,6 +7447,7 @@ export async function main(): Promise<void> {
       ? `Connector: gogcli command adapter with Argus local/private reasoning${parseOptionalBooleanEnv(process.env.OLYMPUS_EMAIL_SOURCE_ENABLE_PLANNER, 'OLYMPUS_EMAIL_SOURCE_ENABLE_PLANNER') ? ' and retrieval planning' : ''}.`
       : 'Connector: gogcli stub, not configured. Set OLYMPUS_EMAIL_SOURCE_CONNECTOR=gogcli to use the command adapter.',
   );
+  recencyIndexMaintenanceReady = !engineFront;
 }
 
 /** The port this process binds: the worker's, or the front's own under the engine host's split off Linux. */

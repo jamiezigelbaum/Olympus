@@ -152,7 +152,7 @@
     "test/sqlite-busy-timeout-contention.test.ts": 1,
     "test/telegram-setup-sheet.test.ts": 2,
     "test/test-lane-pool.test.ts": 5,
-    "test/tier-p1b-review-fixes.test.ts": 2,
+    "test/tier-p1b-review-fixes.test.ts": 1,
     "test/tier-p1b-visibility-and-moves.test.ts": 2,
     "test/tier-p2-review-fixes.test.ts": 1,
     "test/transcribe-wrapper-template.test.ts": 1,

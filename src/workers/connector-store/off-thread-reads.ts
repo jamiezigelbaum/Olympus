@@ -155,9 +155,31 @@ export function setReadPoolWorkerFactoryForTests(factory?: (url: string) => Work
 // connection is reopened when the path names a different file, and closed
 // when the store releases it.
 // The worker's connections use the engine's mmap policy (sqlite-mmap.ts).
+let benchSqlDir: string | undefined;
+
+/** Enabled by the engine's Ask benchmark gate, before starting any readers. */
+export function setAskBenchReadPoolSqlDir(dir: string): void {
+  benchSqlDir = dir;
+}
+
+function instrumentBenchWorker(source: string, dir: string, store: string): string {
+  const module = new URL('./ask-bench-sql.ts', import.meta.url).href;
+  return source
+    .replace('/*ask-bench-init*/', () => `
+import { createAskBenchSqlRecorder } from ${JSON.stringify(module)};
+const benchStore = ${JSON.stringify(store)};
+const benchSql = createAskBenchSqlRecorder(${JSON.stringify(dir)}, benchStore);
+let benchSample;
+let benchSite;
+`)
+    .replace('/*ask-bench-before*/', "benchSite = event.data.site ?? '(unlabelled pool read)'; benchSample = benchSql.sample();")
+    .replace('/*ask-bench-after*/', 'benchSql.record(benchSample, ms, benchStore, benchSite); benchSample = undefined;');
+}
+
 const WORKER_SOURCE = `
 import { Database } from 'bun:sqlite';
 import { statSync } from 'node:fs';
+/*ask-bench-init*/
 const snapshots = new Map();
 const connections = new Map();
 const openDatabases = new Map();
@@ -215,6 +237,7 @@ const connection = (path) => {
 const statementTiming = (started, cpuStarted) => {
   if (started === undefined) return {};
   const ms = performance.now() - started;
+  /*ask-bench-after*/
   if (cpuStarted === undefined) return { ms };
   const cpu = process.threadCpuUsage(cpuStarted);
   return { ms, cpuMs: (cpu.user + cpu.system) / 1000 };
@@ -284,6 +307,7 @@ self.onmessage = (event) => {
       const db = op === 'query' ? connection(path) : snapshots.get(snapshot)?.db;
       if (!db) throw new Error('unknown snapshot');
       cpuStarted = measureCpu ? process.threadCpuUsage?.() : undefined;
+      /*ask-bench-before*/
       started = performance.now();
       const query = db.query(sql);
       const rows = mode === 'all' ? query.all(...params) : query.get(...params);
@@ -329,6 +353,8 @@ interface ReaderThread {
 interface PoolJob {
   store: string;
   read: StoreRead;
+  /** The benchmark's label for an unlabelled read, captured before it queues. */
+  benchSite?: string;
   deadlineAtMs: number;
   resolve: (rows: unknown) => void;
   reject: (error: Error) => void;
@@ -434,7 +460,8 @@ function startThread(store: string, lane: ReadPoolLane = 'shared'): ReaderThread
   const limit = lane === 'shared' ? READ_POOL_SIZE : lane === 'rescore' ? READ_POOL_RESCORE_READERS : 1;
   if (threads.filter(reader => reader.store === store && reader.lane === lane).length >= limit || !runtimeHasWorkers()) return undefined;
   try {
-    const url = URL.createObjectURL(new Blob([sqliteMmapWorkerSource(WORKER_SOURCE)], { type: 'application/javascript' }));
+    const source = sqliteMmapWorkerSource(WORKER_SOURCE);
+    const url = URL.createObjectURL(new Blob([benchSqlDir ? instrumentBenchWorker(source, benchSqlDir, store) : source], { type: 'application/javascript' }));
     const worker = workerFactory(url);
     // The reader never keeps a finished command alive.
     (worker as Worker & { unref?: () => void }).unref?.();
@@ -658,7 +685,9 @@ export async function withOffThreadSnapshot<T>(
         let cpuMs: number | undefined;
         const once = async (): Promise<unknown> => {
           if (moving) await moving;
-          return send(reader!, { op: 'read', snapshot, sql: query.sql, params: query.params, mode: query.mode }, report && ((ms, cpu) => {
+          return send(reader!, {
+            op: 'read', snapshot, sql: query.sql, params: query.params, mode: query.mode, ...(benchSqlDir && { site: query.site ?? site }),
+          }, report && ((ms, cpu) => {
             sqlMs = ms;
             cpuMs = cpu;
           }));
@@ -819,6 +848,7 @@ export function readOnPool(dbPath: string, read: StoreRead, options: { deadlineA
   }
   return new Promise<unknown>((resolve, reject) => {
     const job: PoolJob = { store: dbPath, read, deadlineAtMs, resolve, reject, timer: undefined, lane: currentSourceIndexReadProgress(), enqueuedAtMs: clock.now(), report };
+    if (benchSqlDir && !read.site) job.benchSite = callerSite();
     if (Number.isFinite(deadlineAtMs)) job.timer = clock.setTimeout(() => missedDeadline(job), deadlineAtMs - clock.now());
     waiting.push(job);
     if (!queues.has(dbPath)) {
@@ -940,7 +970,8 @@ function dispatch(): void {
     // SQLite answers. A reply lost on its way back would hold it for good,
     // so a lost one retires the worker (it keeps its slot until it has
     // stopped) and, if the caller still waits, the query runs again once.
-    send(reader, { op: 'query', path: job.store, sql: job.read.sql, params: job.read.params, mode: job.read.mode }, job.report && ((ms, cpuMs) => {
+    const { sql, params, mode, site } = job.read;
+    send(reader, { op: 'query', path: job.store, sql, params, mode, ...(benchSqlDir && { site: site ?? job.benchSite }) }, job.report && ((ms, cpuMs) => {
       job.sqlMs = ms;
       job.cpuMs = cpuMs;
     }))

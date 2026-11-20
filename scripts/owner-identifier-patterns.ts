@@ -84,7 +84,9 @@ export interface OwnerIdentifierPattern {
 // concatenates the two names, so a word-boundary form silently misses every
 // `jamiezigelbaum` in the tree.
 export const OWNER_IDENTIFIER_PATTERNS: ReadonlyArray<OwnerIdentifierPattern> = [
-  { label: 'an absolute path inside a person\'s home directory', pattern: /\/(?:Users|home)\/[a-z][a-z0-9._-]*\//i, severity: 'identity' },
+  // `/users/me/` is the Google and Microsoft APIs' "the signed-in account" path (Gmail's users/me/profile), never a
+  // home directory: no account is named "me". Every other /Users/<name>/ or /home/<name>/ still blocks, in any case.
+  { label: 'an absolute path inside a person\'s home directory', pattern: /\/(?!users\/me\/)(?:Users|home)\/[a-z][a-z0-9._-]*\//i, severity: 'identity' },
   { label: 'a tenant email identity', pattern: /\bjamie@[a-z0-9.-]+\.[a-z]{2,}\b/i, severity: 'identity' },
   { label: 'a tenant or host identity', pattern: /\bjamie\b|\w*zigelbaum\w*|\bsparta\b/i, severity: 'identity' },
   { label: 'a Google service-account address', pattern: /[a-z0-9][a-z0-9-]*@[a-z0-9-]+\.iam\.gserviceaccount\.com/i, severity: 'identity' },

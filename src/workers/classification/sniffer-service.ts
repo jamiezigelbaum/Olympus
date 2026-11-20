@@ -1,5 +1,5 @@
 import type { SnifferQuestion } from './sniffer-store.ts';
-import { emptyTierMoveTimings, moveTieredItemsLowering, flushTierMoveNotes, type TierMoveOptions } from '../connector-store/tier-move.ts';
+import { emptyTierMoveTimings, moveTieredItemsLowering, flushTierMoveNotes, type TierMoveOptions, type TierMoveResult } from '../connector-store/tier-move.ts';
 import { controlPathHeadroom, ingestionTurn } from '../control-path-headroom.ts';
 // The worker's background tick for the privacy-safe sniffer: a bounded
 // `runSnifferPass` over every connector store, continuously while work remains.
@@ -58,7 +58,7 @@ import { settlePersonalFirstItemsOffThread } from '../connector-store/tier-held-
 import { sweepOwnerRuleRaisesOffThread } from '../connector-store/tier-rules-sweep.ts';
 import { applyOwnerOverridesOffThread } from '../connector-store/tier-override-settle.ts';
 import { retireSecretRedactions, retrySecretSideStoreDebtsOffThread } from '../connector-store/secrets-disposition.ts';
-import { ledgerReadOffThread } from '../connector-store/child-visibility.ts';
+import { ledgerReadOffThread, settleStaleEmbedHolds } from '../connector-store/child-visibility.ts';
 import { sqliteMmapWorkerSource } from '../connector-store/sqlite-mmap.ts';
 import { sweepImageContentToPrivateOffThread } from '../connector-store/tier-image-content-sweep.ts';
 import { applyMediaJudgmentsOffThread } from '../connector-store/tier-media-judgment-sweep.ts';
@@ -251,6 +251,10 @@ export interface TierSnifferServiceOptions {
    */
   autoMoves?: AutomaticTierMoveContext & {
     maxPerPass?: number;
+    /** Destinations with newly visible chunks that still need vectors. */
+    onEmbeddingNeeded?: (corpora: ReadonlySet<string>) => void;
+    /** Ledgers where this drain moved an item or refused a move. */
+    onPlacementChecked?: (ledgerPaths: ReadonlySet<string>) => void;
     /** Fixed lowering slice override; still capped at 25% of judge + moves. Default adapts to backlog. */
     lowerSliceMs?: number;
     /** Maximum synchronous copy batch. Default 25 items / 25 ms. */
@@ -343,7 +347,7 @@ const BACKLOG_REFRESH_MS = 60_000;
 const BACKLOG_SLICE_ROWS = 5_000;
 const STORED_WALK_BACKSTOP_MS = 60 * 60_000;
 
-type StoredWalker = 'ownerOverrides' | 'ownerRules' | 'imageContent' | 'mediaJudgments' | 'namesOnly' | 'personalFirst' | 'rejudge';
+type StoredWalker = 'ownerOverrides' | 'ownerRules' | 'imageContent' | 'mediaJudgments' | 'namesOnly' | 'personalFirst' | 'rejudge' | 'staleEmbedHolds';
 type StoredWalkResult = 'no_work' | 'changed' | 'more_rows' | 'read_failed' | 'inputs_unavailable' | 'queue_full' | 'retired';
 interface StoredWalkStatus {
   lastRanAt: string;
@@ -366,6 +370,68 @@ interface StoredWalkPage {
   retired?: boolean;
   next?: TierLedgerIdentity;
   blocked?: 'queue_full';
+}
+
+function newStoredWalk(now: number): StoredWalkState {
+  return { active: false, status: { lastRanAt: new Date(now).toISOString(), reason: 'working' } };
+}
+
+async function runStoredWalk(
+  walk: StoredWalkState,
+  inputs: string | undefined,
+  readPage: (after: TierLedgerIdentity | undefined) => Promise<StoredWalkPage>,
+  clockMs: () => number,
+): Promise<void> {
+  if (walk.active || walk.status.reason === 'retired') return;
+  const now = clockMs();
+  const unchanged = walk.clean !== undefined && walk.clean.inputs === inputs;
+  const backstop = unchanged && now - walk.clean!.at >= STORED_WALK_BACKSTOP_MS;
+  if (unchanged && !backstop) return;
+
+  walk.clean = undefined;
+  const lap = walk.lap ??= { inputs };
+  if (lap.inputs !== inputs) lap.inputs = undefined;
+  walk.active = true;
+  walk.status.lastRanAt = new Date(now).toISOString();
+  walk.status.reason = backstop ? 'backstop_due' : 'working';
+  try {
+    const page = await readPage(walk.after);
+    walk.after = page.next;
+    if (page.changed || page.failed) lap.inputs = undefined;
+    walk.status.lastResult = page.retired ? 'retired'
+      : page.failed ? 'read_failed'
+      : page.blocked ?? (page.changed ? 'changed' : page.complete === false ? 'more_rows' : inputs === undefined ? 'inputs_unavailable' : 'no_work');
+    if (page.retired) walk.status.reason = 'retired';
+    else if (page.complete !== false && lap.inputs !== undefined) {
+      walk.clean = { inputs: lap.inputs, at: clockMs() };
+      walk.status.reason = 'idle_unchanged';
+    } else walk.status.reason = 'working';
+    if (page.complete !== false) walk.lap = undefined;
+  } catch {
+    // Keep the cursor for retry and invalidate this lap's clean result.
+    lap.inputs = undefined;
+    walk.status = { ...walk.status, reason: 'working', lastResult: 'read_failed' };
+  } finally {
+    walk.active = false;
+  }
+}
+
+async function staleEmbedHoldLap(ledger: TierLedger, turn: () => Promise<void> | undefined, log?: (line: string) => void): Promise<StoredWalkPage> {
+  const settled = await settleStaleEmbedHolds(ledger, undefined, turn);
+  if (settled) log?.(`Olympus embedding: released holds on ${settled} decided copies.`);
+  return { changed: settled > 0 };
+}
+
+// Status maintenance takes the same walk for ledgers without a judge walk.
+const unattendedEmbedHoldWalks = new WeakMap<TierLedger, StoredWalkState>();
+export async function runUnattendedStaleEmbedHoldWalk(ledger: TierLedger, log: (line: string) => void): Promise<void> {
+  let walk = unattendedEmbedHoldWalks.get(ledger);
+  if (!walk) {
+    walk = newStoredWalk(Date.now());
+    unattendedEmbedHoldWalks.set(ledger, walk);
+  }
+  await runStoredWalk(walk, ledger.changeMarker({ ignoreSettleProgress: true }), () => staleEmbedHoldLap(ledger, ingestionTurn, log), Date.now);
+  if (walk.status.lastResult === 'read_failed') log('Olympus embedding: could not check held copies. The next pass will retry.');
 }
 
 export interface TierClassificationBacklog {
@@ -805,11 +871,11 @@ export class TierSnifferService {
   private noteUnreadable(path: string, what: string): void {
     if (this.unreadable.get(path) === what) return;
     this.unreadable.set(path, what);
-    this.options.log?.(`Olympus tier sniffer: could not read ${what} for ${this.sourceLabel(path)}; its items stay held and are not counted until it can be read.`);
+    this.options.log?.(`Olympus tier sniffer: could not read ${what} for ${this.sourceLabel(path)}; its items stay held and are not counted until it can be read; at=${new Date(this.clockMs()).toISOString()}.`);
   }
 
   private noteReadable(path: string): void {
-    if (this.unreadable.delete(path)) this.options.log?.(`Olympus tier sniffer: ${this.sourceLabel(path)} can be read again.`);
+    if (this.unreadable.delete(path)) this.options.log?.(`Olympus tier sniffer: ${this.sourceLabel(path)} can be read again; at=${new Date(this.clockMs()).toISOString()}.`);
   }
 
   /** The sources behind a ledger or store path, by corpus; never item content. */
@@ -1107,7 +1173,7 @@ export class TierSnifferService {
         this.overrunReported = true;
         this.overrunAbortedAtMs = nowMs;
         this.abort?.abort();
-        this.options.log?.(`Olympus tier sniffer: a pass made no progress for ${Math.round(stalledMs / 60_000)} min while ${this.passStep}; it was stopped. Its items stay held and are asked again.`);
+        this.options.log?.(`Olympus tier sniffer: a pass made no progress for ${Math.round(stalledMs / 60_000)} min while ${this.passStep}; it was stopped. Its items stay held and are asked again; at=${new Date(this.clockMs()).toISOString()}.`);
         this.setWaiting('pass_stuck');
         return { state: 'skipped_running' };
       }
@@ -1186,7 +1252,7 @@ export class TierSnifferService {
     if (this.options.log && this.clockMs() - this.lastBacklogLogMs >= 60_000) {
       this.lastBacklogLogMs = this.clockMs();
       const backlog = this.backlog();
-      if (backlog.checkingItems > 0) this.options.log(`Olympus tier sniffer: pending=${backlog.pendingItems} questions=${backlog.remainingQuestions} pending_without_question=${backlog.pendingWithoutQuestion} oldest_pending_ms=${backlog.oldestPendingAgeMs}.`);
+      if (backlog.checkingItems > 0) this.options.log(`Olympus tier sniffer: pending=${backlog.pendingItems} questions=${backlog.remainingQuestions} pending_without_question=${backlog.pendingWithoutQuestion} oldest_pending_ms=${backlog.oldestPendingAgeMs} at=${new Date(this.clockMs()).toISOString()}.`);
     }
     // Going easy: the pass made its one call; the next scheduled one waits.
     if (tick.state === 'ran' && tick.report.calls > 0 && this.trickle()) this.pacedUntilMs = this.clockMs() + (this.options.pacing?.trickleGapMs ?? 0);
@@ -1274,7 +1340,7 @@ export class TierSnifferService {
     // A pass in progress is normal; only an overrun or a stop is worth a line
     // (pass_stuck logs its own).
     if (reason === 'pass_running' || reason === 'pass_stuck') return;
-    this.options.log?.(`Olympus tier sniffer: questions are waiting, nothing asked: ${label}.`);
+    this.options.log?.(`Olympus tier sniffer: questions are waiting, nothing asked: ${label}; at=${new Date(this.clockMs()).toISOString()}.`);
   }
 
   private waitLabel(reason: TierSnifferWaitReason, tick?: TierSnifferTick): string {
@@ -1827,7 +1893,7 @@ export class TierSnifferService {
         if (lastProcessed) cursorLedger.writeSettleProgress(cursorKey,
           processed < rows.length || rows.length === 100 ? JSON.stringify(lastProcessed) : '');
         else if (rows.length === 0 && saved) cursorLedger.writeSettleProgress(cursorKey, '');
-        if (settled || retired) this.options.log?.(`Olympus tier sniffer: recovered ${settled} pending item(s) as fail-safe Private; retired ${retired} missing item(s).`);
+        if (settled || retired) this.options.log?.(`Olympus tier sniffer: recovered ${settled} pending item(s) as fail-safe Private; retired ${retired} missing item(s); at=${new Date(this.clockMs()).toISOString()}.`);
       } catch {
         // A queue/ledger that cannot be read remains held, retried next tick.
       }
@@ -1900,12 +1966,18 @@ export class TierSnifferService {
         if (this.stopped) return undefined;
         this.movingDirection = direction;
         if (direction === 'lower') this.lowerMovePreempted = false;
-        this.moving = this.runAutoMoves(this.options.autoMoves, this.moveAbort.signal, direction)
-          .finally(() => { this.moving = undefined; this.movingDirection = undefined; });
+        const changedPaths = new Set<string>();
+        const options = this.options.autoMoves;
+        this.moving = this.runAutoMoves(options, this.moveAbort.signal, direction, changedPaths)
+          .finally(() => {
+            this.moving = undefined;
+            this.movingDirection = undefined;
+            if (!this.stopped && changedPaths.size > 0) options.onPlacementChecked?.(changedPaths);
+          });
       }
       return await this.moving;
     } catch (error) {
-      this.options.log?.(`Olympus tier sniffer: move drain failed (${error instanceof Error ? error.name : 'unknown'}); queued moves will retry.`);
+      this.options.log?.(`Olympus tier sniffer: move drain failed (${error instanceof Error ? error.name : 'unknown'}); queued moves will retry; at=${new Date(this.clockMs()).toISOString()}.`);
       return undefined;
     }
   }
@@ -1927,14 +1999,16 @@ export class TierSnifferService {
   }
 
   /** The inputs shared by the stored walks, before their first read of a page. */
-  private storedWalkInputs(set: TieredStoreSet): string | undefined {
+  private storedWalkInputs(set: TieredStoreSet, ledgerOnly = false): string | undefined {
     try {
+      const ledger = set.ledger.changeMarker({ ignoreSettleProgress: true });
+      if (ledgerOnly) return ledger;
       const classification = set.classification();
       if (classification?.unavailableReason) return undefined;
       const folderRevision = set.namesOnlyOwnerRevision();
       if (folderRevision === undefined) return undefined;
       return JSON.stringify([
-        set.ledger.changeMarker({ ignoreSettleProgress: true }),
+        ledger,
         this.options.installed.snifferStoreForLedger(set.ledger.dbPath).changeMarker({ ignoreScanProgress: true }),
         classification?.rules, classification?.retirePublic, classification?.sniffer?.id, classification?.sniffer?.rejudgeReady,
         folderRevision,
@@ -1958,43 +2032,12 @@ export class TierSnifferService {
       entry = { set, walks: new Map() };
       this.storedWalks.set(path, entry);
     }
-    const now = this.clockMs();
     let walk = entry.walks.get(name);
     if (!walk) {
-      walk = { active: false, status: { lastRanAt: new Date(now).toISOString(), reason: 'working' } };
+      walk = newStoredWalk(this.clockMs());
       entry.walks.set(name, walk);
     }
-    if (walk.active || walk.status.reason === 'retired') return;
-    const unchanged = walk.clean !== undefined && walk.clean.inputs === inputs;
-    const backstop = unchanged && now - walk.clean!.at >= STORED_WALK_BACKSTOP_MS;
-    if (unchanged && !backstop) return;
-
-    walk.clean = undefined;
-    const lap = walk.lap ??= { inputs };
-    if (lap.inputs !== inputs) lap.inputs = undefined;
-    walk.active = true;
-    walk.status.lastRanAt = new Date(now).toISOString();
-    walk.status.reason = backstop ? 'backstop_due' : 'working';
-    try {
-      const page = await readPage(walk.after);
-      walk.after = page.next;
-      if (page.changed || page.failed) lap.inputs = undefined;
-      walk.status.lastResult = page.retired ? 'retired'
-        : page.failed ? 'read_failed'
-        : page.blocked ?? (page.changed ? 'changed' : page.complete === false ? 'more_rows' : inputs === undefined ? 'inputs_unavailable' : 'no_work');
-      if (page.retired) walk.status.reason = 'retired';
-      else if (page.complete !== false && lap.inputs !== undefined) {
-        walk.clean = { inputs: lap.inputs, at: this.clockMs() };
-        walk.status.reason = 'idle_unchanged';
-      } else walk.status.reason = 'working';
-      if (page.complete !== false) walk.lap = undefined;
-    } catch {
-      // Keep the cursor for retry and invalidate this lap's clean result.
-      lap.inputs = undefined;
-      walk.status = { ...walk.status, reason: 'working', lastResult: 'read_failed' };
-    } finally {
-      walk.active = false;
-    }
+    await runStoredWalk(walk, inputs, readPage, () => this.clockMs());
   }
 
   /** Settles stored items even while model availability or approval is pending. */
@@ -2061,6 +2104,8 @@ export class TierSnifferService {
         }
         return { retired: held.retired, complete: held.retired, changed: held.settled > 0, failed: held.failed > 0 };
       });
+      await this.runStoredWalker(set, 'staleEmbedHolds', this.storedWalkInputs(set, true),
+        () => staleEmbedHoldLap(set.ledger, turn, this.options.log));
     }
   }
 
@@ -2148,6 +2193,7 @@ export class TierSnifferService {
     options: NonNullable<TierSnifferServiceOptions['autoMoves']>,
     signal: AbortSignal,
     direction: 'raise' | 'lower',
+    changedPaths: Set<string>,
   ): Promise<TierAutoMoveReport> {
     const timings = emptyTierMoveTimings();
     const started = this.monotonicNow();
@@ -2172,6 +2218,7 @@ export class TierSnifferService {
     const shouldStop = () => signal.aborted || (direction === 'lower'
       && (this.monotonicNow() >= deadline || this.lowerMovePreempted || this.yieldNow()));
     const report: TierAutoMoveReport = { moved: 0, failed: 0, notEligible: 0, timings };
+    const embeddingCorpora = new Set<string>();
     const staleAfterMs = Math.max(0, options.staleAfterMs ?? DEFAULT_STALE_MOVE_MS);
     const now = (this.options.now ?? (() => new Date()))().getTime();
     let budget = Math.max(0, options.maxPerPass ?? (direction === 'raise' ? 25 : DEFAULT_AUTO_MOVES_PER_PASS));
@@ -2202,6 +2249,7 @@ export class TierSnifferService {
         // the same move again (the content check) is one item refused twice.
         const refusedKey = `${ledgerPath}\u0000${tierLedgerIdentityKey(identity)}`;
         if (error instanceof TierMoveRefusedError) {
+          changedPaths.add(ledgerPath);
           this.moveRefusalAttempts += 1;
           this.movesRefusedNow.set(refusedKey, why);
         } else this.movesRefusedNow.delete(refusedKey);
@@ -2240,8 +2288,12 @@ export class TierSnifferService {
           this.moveFailures.delete(failureKey);
         }
       };
-      const succeeded = (record: TierLedgerRecord) => {
+      const succeeded = (record: TierLedgerRecord, result: TierMoveResult) => {
+        changedPaths.add(ledgerPath);
         report.moved++;
+        for (const destination of result.destinations) {
+          if (destination.chunksToEmbed > 0) embeddingCorpora.add(destination.corpusId);
+        }
         const key = `${ledgerPath}\u0000${tierLedgerIdentityKey(recordIdentity(record))}\u0000${record.generation}`;
         this.moveFailures.delete(key);
         this.movesRefusedNow.delete(`${ledgerPath}\u0000${tierLedgerIdentityKey(recordIdentity(record))}`);
@@ -2262,7 +2314,7 @@ export class TierSnifferService {
         }
         if (direction === 'raise') {
           for (const { record, move } of pending) {
-            try { await moveTieredItem(move); succeeded(record); }
+            try { succeeded(record, await moveTieredItem(move)); }
             catch (error) { failure(record, error); }
           }
         } else if (pending.length) {
@@ -2274,7 +2326,7 @@ export class TierSnifferService {
             });
             for (const [index, result] of results.entries()) {
               const entry = pending[index]!;
-              if (!('error' in result)) { succeeded(entry.record); continue; }
+              if (!('error' in result)) { succeeded(entry.record, result.result); continue; }
               failure(entry.record, result.error);
             }
             // Unstarted candidates still belong to the queue; use the rest of
@@ -2290,6 +2342,7 @@ export class TierSnifferService {
       // every move, leaving no queued row to trigger a write.
       await flushTierMoveNotes(set.ledger, { timings, shouldStop });
     }
+    if (embeddingCorpora.size > 0) options.onEmbeddingNeeded?.(embeddingCorpora);
     report.elapsedMs = this.monotonicNow() - started;
     const didWork = report.moved > 0 || report.failed > 0 || (report.abandoned ?? 0) > 0
       || (report.staleRaises ?? 0) > 0 || (report.retiredAbsent ?? 0) > 0;

@@ -40,7 +40,7 @@ import { classifyItemTiers, type ItemTierOverride, type OwnerTierRule } from './
 import { TierLedger, TierLedgerSchemaError, tierLedgerIdentityKey, type TierLedgerIdentity, type TierRecheckScope } from './tier-ledger.ts';
 import { tierLedgerPathForStore, tierSnifferPathForLedger } from './tier-ledger-path.ts';
 import { findTierSetLedger } from './tier-set-binding.ts';
-import { TIER_SET_BINDING_CONNECTOR_ID, TIER_SET_BINDING_RUN_ID } from '../connector-store/local-index.ts';
+import { normalizeConversationId, TIER_SET_BINDING_CONNECTOR_ID, TIER_SET_BINDING_RUN_ID } from '../connector-store/local-index.ts';
 import { forgetSecretInSideStores } from '../connector-store/secrets-disposition.ts';
 import { TIER_KEY_TRUST_DOMAIN } from '../connector-store/tiered-store-set.ts';
 import {
@@ -151,6 +151,30 @@ interface StoreMatch {
 /** Which stored rows a locator names: its locator URI or provider item id, or one exact identity. */
 type StoreNeedle = { locator: string } | { identity: TierLedgerIdentity };
 
+function storeItemColumns(db: Database): Set<string> {
+  // table_info omits the generated normalized_conversation column.
+  return new Set((db.query('PRAGMA table_xinfo(items)').all() as Array<{ name: string }>).map((column) => column.name));
+}
+
+export function storeItemIdentityPredicate(identity: TierLedgerIdentity, columns: Set<string>, prefix: '' | 'i.' = '') {
+  const keyed = columns.has('normalized_conversation');
+  const conversation = normalizeConversationId(identity.providerConversationId);
+  return {
+    sql: `${prefix}tombstoned = 0 AND ${prefix}provider = ? AND ${prefix}account_scope = ? AND ${prefix}provider_item_id = ?
+      AND COALESCE(${prefix}provider_conversation_id, '') = ?${keyed ? ` AND ${prefix}normalized_conversation = ?` : ''}`,
+    params: [identity.provider, identity.accountScope, identity.providerItemId, conversation, ...(keyed ? [conversation] : [])],
+  };
+}
+
+function matchStoreIdentity(db: Database, identity: TierLedgerIdentity): unknown[] {
+  const predicate = storeItemIdentityPredicate(identity, storeItemColumns(db));
+  return db.query(`
+    SELECT provider, family, account_scope, provider_item_id, provider_conversation_id, local_item_id FROM items
+    WHERE ${predicate.sql}
+    LIMIT 5
+  `).all(...predicate.params);
+}
+
 function matchStore(dbPath: string, needle: StoreNeedle): StoreMatch[] {
   const db = new Database(dbPath, { readonly: true });
   try {
@@ -161,17 +185,7 @@ function matchStore(dbPath: string, needle: StoreNeedle): StoreMatch[] {
         WHERE tombstoned = 0 AND (LOWER(locator_uri) = LOWER(?) OR provider_item_id = ?)
         LIMIT 5
       `).all(needle.locator, needle.locator)
-      : db.query(`
-        SELECT provider, family, account_scope, provider_item_id, provider_conversation_id, local_item_id FROM items
-        WHERE tombstoned = 0 AND provider = ? AND account_scope = ? AND provider_item_id = ?
-          AND COALESCE(provider_conversation_id, '') = ?
-        LIMIT 5
-      `).all(
-        needle.identity.provider,
-        needle.identity.accountScope,
-        needle.identity.providerItemId,
-        needle.identity.providerConversationId ?? '',
-      )) as Array<{
+      : matchStoreIdentity(db, needle.identity)) as Array<{
       provider: string;
       family: SourceFamily;
       account_scope: string;
@@ -340,7 +354,7 @@ export function withStore<T>(dbPath: string, fallback: T, run: (db: Database, co
   try {
     db = new Database(dbPath, { readonly: true });
     db.exec('PRAGMA busy_timeout = 10000;');
-    const columns = new Set((db.query('PRAGMA table_info(items)').all() as Array<{ name: string }>).map((column) => column.name));
+    const columns = storeItemColumns(db);
     if (!columns.has('provider_item_id')) return fallback;
     return run(db, columns);
   } catch {

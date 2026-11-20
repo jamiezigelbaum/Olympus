@@ -56,6 +56,18 @@ export function citedEvidenceIds(reply: string): Set<string> {
   return ids;
 }
 
+/**
+ * Whose miss a missing fact is: whether the text the tool handed the agent held it (the agent dropped it) or not (the excerpt
+ * left it out), with how many evidence items came back and how long the cited item's excerpt was (Mac 44582149730).
+ */
+export function missingFactsWhere(obs: Pick<QuestionObservation, 'visible' | 'evidenceTitles' | 'question'>, missing: readonly string[]): string {
+  const tool = obs.visible.map((entry) => entry.text.toLowerCase());
+  const where = missing.map((fact) => `${fact} ${tool.some((text) => text.includes(fact.toLowerCase())) ? 'was' : 'was not'} in what the tool returned`);
+  const cited = obs.question.citedTitle;
+  const excerpt = cited ? Math.max(0, ...obs.visible.filter((entry) => entry.text.includes(cited)).map((entry) => entry.text.length)) : 0;
+  return `${where.join('; ')}; ${obs.evidenceTitles.length} evidence item(s) returned${cited ? `, longest tool text naming the cited item ${excerpt} characters` : ''}`;
+}
+
 function check(id: string, title: string, ok: boolean, detail: string, ms?: number): CheckResult {
   return { id, title, status: ok ? 'pass' : 'fail', detail, ...(ms === undefined ? {} : { ms }) };
 }
@@ -92,7 +104,7 @@ export function evaluateObservation(obs: QuestionObservation, markers: readonly 
       `${prefix}.facts`,
       `${q.id}: the answer states the expected facts`,
       !obs.error && missing.length === 0,
-      obs.error ? 'No answer to check.' : missing.length === 0 ? `${q.facts.length} of ${q.facts.length} facts stated` : `missing: ${missing.join(', ')}`,
+      obs.error ? 'No answer to check.' : missing.length === 0 ? `${q.facts.length} of ${q.facts.length} facts stated` : `missing: ${missing.join(', ')}; ${missingFactsWhere(obs, missing)}`,
       obs.ms,
     ));
     const returned = q.citedTitle !== undefined && obs.evidenceTitles.some((title) => title.includes(q.citedTitle!));

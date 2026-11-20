@@ -2,9 +2,9 @@
 import { expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import { tmpdir, userInfo } from 'node:os';
-import { mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, openSync, readFileSync, rmSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { Database } from 'bun:sqlite';
-import { beatP95, coldStartVerdict, gate, memoryMaxBytes, sampledBeatSite, sqliteGuards, summarizeBeats, summarizeStartupGaps } from '../scripts/loop-stall-test.ts';
+import { OffLoopAppender, beatP95, coldStartVerdict, gate, memoryMaxBytes, sampledBeatSite, sqliteGuards, summarizeBeats, summarizeStartupGaps, summarizeStartupSearches } from '../scripts/loop-stall-test.ts';
 import { join } from 'node:path';
 import { waitFor } from './helpers/test-clock.ts';
 
@@ -98,6 +98,14 @@ test.each([
   expect(gaps.pages.Sources.longest?.ms).toBe(3_000);
   expect(gaps.pages.Sources.over_1s.at(-1)?.end_at).toBe(new Date(readyAt).toISOString());
   expect(coldStartVerdict(gaps.longest, { ...split, runQueueMs: 100, blockedOtherMs: 500 })).toBe(verdict);
+});
+
+test('cold-start verdict counts a read() waiting on disk (folio wait without a fault) as IO', () => {
+  const gap = { page: 'Home' as const, start_at: '2026-11-19T12:00:00.000Z', end_at: '2026-11-19T12:00:12.876Z', ms: 12_876 };
+  const split = { runningMs: 1_098, runQueueMs: 34, blockedMajfltMs: 69, blockedBlkioMs: 0, blockedOtherMs: 10_533 };
+  expect(coldStartVerdict(gap, split)).toBe('NOT REPRODUCED');
+  expect(coldStartVerdict(gap, { ...split, waitChannelsMs: { folio_wait_bit_common: 10_148 } })).toBe('REPRODUCED');
+  expect(coldStartVerdict(gap, { ...split, waitChannelsMs: { futex_do_wait: 10_148 } })).toBe('NOT REPRODUCED');
 });
 
 test('memory cap accepts the default and warm-cache sizes and rejects invalid caps', () => {
@@ -253,3 +261,31 @@ test('heartbeat reports a front that has not resumed from its freeze', async () 
     rmSync(dir, { recursive: true, force: true });
   }
 }, 10_000);
+
+test('start-up searches: outcomes before READY, latency and stable result lists after it', () => {
+  const entry = (phase: 'before_ready' | 'after_ready', query: string, ms: number, status: number, ids: string[], outcome = status === 200 ? 'ok' : `http_${status}`) =>
+    ({ at: '2026-11-19T12:00:00.000Z', query, phase, ms, status, ids, outcome });
+  const summary = summarizeStartupSearches([
+    entry('before_ready', 'a', 300, 503, []), entry('before_ready', 'b', 2_500, 200, ['1']),
+    entry('after_ready', 'a', 200, 200, ['1', '2']), entry('after_ready', 'a', 1_500, 200, ['1', '2']), entry('after_ready', 'b', 400, 200, ['3']), entry('after_ready', 'b', 300, 200, ['4']),
+  ], 2);
+  expect(summary).toMatchObject({ sent: 6, skipped: 2, before_ready: { count: 2, outcomes: { http_503: 1, ok: 1 }, max_ms: 2_500 },
+    after_ready: { count: 4, ok: 4, max_ms: 1_500, over_1s: 1 }, after_ready_results: { a: ['1,2'], b: ['3', '4'] } });
+});
+
+test('the probe writes its beat log off the loop, in order, and says when every line is in the file', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'off-loop-'));
+  try {
+    const path = join(dir, 'front.beats.jsonl');
+    const log = new OffLoopAppender(openSync(path, 'a', 0o600));
+    const lines = Array.from({ length: 2000 }, (_, i) => `{"n":${i}}\n`);
+    for (const line of lines) log.append(line);
+    // append returns before the bytes are written: the loop never waits on the file system.
+    expect(readFileSync(path, 'utf8').length).toBeLessThan(lines.join('').length);
+    await new Promise<void>(resolve => log.whenIdle(resolve));
+    expect(readFileSync(path, 'utf8')).toBe(lines.join(''));
+    let idle = false;
+    log.whenIdle(() => { idle = true; });
+    expect(idle).toBe(true);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

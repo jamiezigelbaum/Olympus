@@ -46,7 +46,7 @@ import {
 import { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore } from './tier-ledger-path.ts';
 
 export { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore };
-export const TIER_LEDGER_SCHEMA_VERSION = 16;
+export const TIER_LEDGER_SCHEMA_VERSION = 17;
 export const RETIRED_EMBEDDING_CLEARANCE_REASON = 'content:sniffer:retired_embedding_clearance:undecided';
 
 /** A scrub's start: the revision it took and the item's generation then. */
@@ -56,6 +56,12 @@ export interface SecretScrubMark {
 }
 
 export type TierLedgerState = 'pending' | 'current' | 'moving';
+
+export interface TierLedgerOverPrivateCount {
+  provider: string;
+  items: number;
+  oldest_since: string;
+}
 
 /**
  * An item's ledger identity. The conversation is part of it: chat providers
@@ -2035,6 +2041,43 @@ export class TierLedger {
     })();
   }
 
+  /** Count each item once even if several of its current copies qualify. */
+  *overPrivateCountSteps(): Generator<LedgerRead, TierLedgerOverPrivateCount[], unknown> {
+    return (yield { mode: 'all', params: [], sql: `
+      WITH verdicts AS (
+        SELECT provider, account_scope, conversation_key, provider_item_id, decided_at,
+          CASE WHEN state = 'moving' THEN target_metadata_tier ELSE metadata_tier END AS vm,
+          CASE WHEN state = 'moving' THEN target_content_tier ELSE content_tier END AS vc
+        FROM tier_items
+        -- A pending item is held at least Private, regardless of either layer's verdict.
+        WHERE state <> 'pending' AND metadata_pending = 0 AND content_pending = 0
+      ), needs AS (
+        SELECT *,
+          CASE vm WHEN 'secrets' THEN 3 WHEN 'secure' THEN 2 WHEN 'private' THEN 1 ELSE 0 END AS need_m,
+          CASE WHEN vc = 'secrets' OR vm = 'secrets' THEN 3
+               WHEN vc = 'secure' OR vm = 'secure' THEN 2
+               WHEN vc = 'private' OR vm = 'private' THEN 1 ELSE 0 END AS need_c
+        FROM verdicts
+      )
+      SELECT n.provider, COUNT(*) AS items, MIN(n.decided_at) AS oldest_since
+      FROM needs n
+      WHERE EXISTS (
+        SELECT 1 FROM tier_copies c
+        WHERE c.provider = n.provider AND c.account_scope = n.account_scope
+          AND c.conversation_key = n.conversation_key AND c.provider_item_id = n.provider_item_id
+          AND c.copy_state = 'current'
+          AND (
+            (c.layers IN ('metadata', 'both') AND
+              (CASE c.trust_domain WHEN 'secure_local' THEN 2 WHEN 'internal' THEN 1 ELSE 0 END) > n.need_m)
+            OR (c.layers IN ('content', 'both') AND
+              (CASE c.trust_domain WHEN 'secure_local' THEN 2 WHEN 'internal' THEN 1 ELSE 0 END) > n.need_c)
+          )
+      )
+      GROUP BY n.provider
+      ORDER BY n.provider
+    ` }) as TierLedgerOverPrivateCount[];
+  }
+
   /** Content-free counts for status surfaces. */
   counts(): { items: number; byState: Record<TierLedgerState, number>; byContentTier: Record<TierKey, number> } {
     const byState: Record<TierLedgerState, number> = { pending: 0, current: 0, moving: 0 };
@@ -2391,6 +2434,9 @@ export class TierLedger {
         state, staleFlip, prior.decidedBy, reasonsJson, prior.engineVersion, prior.mapRevision, decidedAt,
         ...decisionFlags(prior), ...idParams(identity),
       );
+      if (state === 'current' && copies.some(copy => copy.state === 'current' && copy.embedHold)) {
+        this.releaseDecidedEmbedHolds(identity, decidedAt);
+      }
       this.appendHistory(identity, staleFlip, existing.metadataTier, existing.contentTier, prior.decidedBy, reasonsJson, state, decidedAt);
       return 'cancelled';
     }
@@ -3682,9 +3728,8 @@ export class TierLedger {
       >;
       /**
        * The placement's embedding hold, applied to every copy the flip makes
-       * current. A source copy re-layered in place otherwise keeps the hold
-       * an earlier pending decision put on it, and a decided item stays
-       * "awaiting classification" and unembedded forever.
+       * current. A decided flip also clears holds inherited from its source
+       * copies or from an older receipt without a placement hold.
        */
       embedHold?: boolean;
     },
@@ -3782,6 +3827,10 @@ export class TierLedger {
           ...idParams(identity),
         );
       }
+      const finalDecision = options.decision ?? existing;
+      if (options.embedHold !== false && !finalDecision.metadataPending && !finalDecision.contentPending) {
+        this.releaseDecidedEmbedHolds(identity, now);
+      }
     })();
     return this.getCurrent(identity)!;
   }
@@ -3845,6 +3894,7 @@ export class TierLedger {
         reasons: existing.reasons,
         decidedAt: now,
       });
+      if (!existing.metadataPending && !existing.contentPending) this.releaseDecidedEmbedHolds(identity, now);
     })();
     return this.getCurrent(identity)!;
   }
@@ -3890,6 +3940,9 @@ export class TierLedger {
         UPDATE tier_items SET state = ?, target_metadata_tier = NULL, target_content_tier = NULL
         WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND generation = ?
       `).run(state, ...idParams(identity), existing.generation);
+      if (state === 'current' && copies.some(copy => copy.state === 'current' && copy.embedHold)) {
+        this.releaseDecidedEmbedHolds(identity, now);
+      }
       this.appendHistory(
         identity,
         existing.generation,
@@ -4319,15 +4372,24 @@ export class TierLedger {
    * transaction. A reader that fell behind retention must rebuild; it may
    * never treat a gap as evidence that its old visible set is current.
    */
-  visibilityChangesSince(after?: number): { cursor: number; identities?: TierLedgerIdentity[] } {
+  visibilityChangesSince(after?: number, scope?: { corpusId: string; maxEntries: number }): {
+    cursor: number; identities?: TierLedgerIdentity[]; corpusChanged?: boolean;
+  } {
     return this.db.transaction(() => {
-      const bounds = this.db.query('SELECT (SELECT MIN(seq) FROM tier_visibility_changes) AS first, (SELECT MAX(seq) FROM tier_visibility_changes) AS last')
-        .get() as { first: number | null; last: number | null };
-      const cursor = bounds.last ?? 0;
-      if (after === undefined || after > cursor || (bounds.first !== null && after < bounds.first - 1)) return { cursor };
-      const rows = this.db.query(`SELECT DISTINCT provider, account_scope, conversation_key, provider_item_id
-        FROM tier_visibility_changes WHERE seq > ?`).all(after) as TierIdentityRow[];
-      return { cursor, identities: rows.map(identityFromRow) };
+      const bounds = this.db.query(`SELECT (SELECT MIN(seq) FROM tier_visibility_changes) AS first,
+        (SELECT seq FROM sqlite_sequence WHERE name = 'tier_visibility_changes') AS issued`)
+        .get() as { first: number | null; issued: number | null };
+      const cursor = bounds.issued ?? 0;
+      if (after === undefined || after > cursor || after < (bounds.first ?? cursor + 1) - 1
+        || (scope && cursor - after > scope.maxEntries)) return { cursor };
+      if (after === cursor) return { cursor, identities: [] };
+      const rows = this.db.query(`SELECT DISTINCT provider, account_scope, conversation_key, provider_item_id,
+        ${scope ? 'corpus_id, affects, seq' : 'NULL AS corpus_id, 1 AS affects, NULL AS seq'}
+        FROM tier_visibility_changes WHERE seq > ?`).all(after) as Array<TierIdentityRow & { corpus_id: string | null; affects: number }>;
+      if (scope && rows.length !== cursor - after) return { cursor };
+      const relevant = scope ? rows.filter(row => row.affects === 1) : rows;
+      return { cursor, identities: relevant.map(identityFromRow),
+        ...(scope ? { corpusChanged: relevant.some(row => row.corpus_id === scope.corpusId) } : {}) };
     })();
   }
 
@@ -4417,11 +4479,6 @@ export class TierLedger {
     };
   }
 
-  /** True once this ledger's stale embedding holds were settled. One keyed read. */
-  staleEmbedHoldsSettled(): boolean {
-    return this.db.query('SELECT 1 FROM tier_ledger_meta WHERE key = ?').get(STALE_EMBED_HOLDS_SETTLED) !== null;
-  }
-
   /**
    * Reads for the read worker: up to `limit` rowids of current copies still
    * held on a decided item, after `after` (corpus, rowid), each corpus
@@ -4453,19 +4510,45 @@ export class TierLedger {
     }
   }
 
+  /** Reads the reasons for current holds in one store, in copy row order. */
+  *embeddingHoldReasonSteps(corpusId: string, after: number): Generator<LedgerRead, Array<{
+    rowId: number; key: string; reason: EmbeddingHoldReason;
+  }>, unknown> {
+    const rows = (yield {
+      sql: `SELECT tier_copies.rowid AS row_id, tier_copies.provider, tier_copies.account_scope,
+          tier_copies.conversation_key, tier_copies.provider_item_id,
+          CASE
+            WHEN t.state = 'moving' THEN 'held_while_moving'
+            WHEN ${STALE_EMBED_HOLD_DECIDED} THEN 'held_after_decision'
+            WHEN t.content_read = 0 THEN 'held_while_text_is_unread'
+            WHEN t.state = 'pending' OR t.metadata_pending = 1 OR t.content_pending = 1 THEN 'held_for_judgment'
+            ELSE 'held_for_other_reasons'
+          END AS reason
+        FROM tier_copies LEFT JOIN tier_items t USING (provider, account_scope, conversation_key, provider_item_id)
+        WHERE corpus_id = ? AND copy_state = 'current' AND embed_hold = 1 AND tier_copies.rowid > ?
+        ORDER BY tier_copies.rowid LIMIT 500`,
+      params: [corpusId, after], mode: 'all',
+    }) as Array<TierIdentityRow & { row_id: number; reason: EmbeddingHoldReason }>;
+    return rows.map(row => ({ rowId: row.row_id, key: tierLedgerIdentityKey(identityFromRow(row)), reason: row.reason }));
+  }
+
   /** Clears these copies' holds by key, where they are still current, held and decided. Returns how many. */
   settleStaleEmbedHoldRows(rowIds: readonly number[]): number {
     if (this.readOnly || rowIds.length === 0) return 0;
-    return this.db.query(`
+    const released = this.db.query(`
       UPDATE tier_copies SET embed_hold = 0, updated_at = ?
       WHERE rowid IN (SELECT value FROM json_each(?)) AND copy_state = 'current' AND embed_hold = 1 AND ${STALE_EMBED_HOLD_DECIDED}
-    `).run(this.now().toISOString(), JSON.stringify(rowIds)).changes;
+      RETURNING rowid
+    `).all(this.now().toISOString(), JSON.stringify(rowIds));
+    return released.length;
   }
 
-  /** Records that every stale hold was settled, so no later boot looks again. */
-  markStaleEmbedHoldsSettled(): void {
-    if (this.readOnly) return;
-    this.db.query('INSERT OR REPLACE INTO tier_ledger_meta (key, value) VALUES (?, ?)').run(STALE_EMBED_HOLDS_SETTLED, this.now().toISOString());
+  private releaseDecidedEmbedHolds(identity: TierLedgerIdentity, now: string): void {
+    this.db.query(`
+      UPDATE tier_copies SET embed_hold = 0, updated_at = ?
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+        AND copy_state = 'current' AND embed_hold = 1 AND ${STALE_EMBED_HOLD_DECIDED}
+    `).run(now, ...idParams(identity));
   }
 
   *corpusCopyIdentitiesSteps(
@@ -5509,27 +5592,43 @@ function rowOf(record: TierLedgerRecord): EffectiveRow {
   };
 }
 
-/**
- * An embedding hold belongs only to an item with an open question (state
- * pending, or a pending flag): placementFor holds a copy for nothing else.
- * Before completeMove applied the placement's hold, a move flip kept the hold
- * an earlier pending decision had put on a re-layered source copy, so a
- * decided item stayed held, unembedded and counted as "awaiting privacy
- * classification" with nothing left to decide it. This settles such copies at
- * open: idempotent, and it touches only decided items' current copies (the
- * hold is cleared where the decision already placed the copy).
- */
-// Copies left held on a decided item. completeMove applies the placement's
-// hold, so no build since makes one; the ones older builds left are settled
-// once per ledger, found off the loop and set by key (settleStaleEmbedHolds
-// in child-visibility.ts). Settling them at every open walked every held
-// copy on the loop: 49 s, then 10.5 s, on lane 6's fixture (16 Nov).
-const STALE_EMBED_HOLDS_SETTLED = 'settled:stale_embed_holds:v1';
+// Recheck the same conditions when writing, since the finder reads a snapshot.
+/** Held-copy reasons as embedding status reports them (core/embedding-sweep-idle.ts lists the same words). */
+export type EmbeddingHoldReason = 'held_for_judgment' | 'held_after_decision' | 'held_while_text_is_unread'
+  | 'held_while_moving' | 'held_for_other_reasons';
+
 const STALE_EMBED_HOLD_DECIDED = `EXISTS (
         SELECT 1 FROM tier_items t
         WHERE t.provider = tier_copies.provider AND t.account_scope = tier_copies.account_scope
           AND t.conversation_key = tier_copies.conversation_key AND t.provider_item_id = tier_copies.provider_item_id
           AND t.state = 'current' AND t.metadata_pending = 0 AND t.content_pending = 0
+          AND t.metadata_tier <> 'secrets' AND t.content_tier <> 'secrets'
+          AND t.target_metadata_tier IS NULL AND t.target_content_tier IS NULL
+          -- A re-judgment still open on this decision keeps the hold.
+          AND NOT (t.rejudge_json IS NOT NULL
+            AND json_extract(t.rejudge_json, '$.generation') = t.generation
+            AND json_extract(t.rejudge_json, '$.decidedAt') = t.decided_at
+            AND json_extract(t.rejudge_json, '$.reasonsJson') = t.reasons_json
+            AND json_extract(t.rejudge_json, '$.decidedBy') = t.decided_by)
+          -- The store must be at least as private as the verdict for each layer
+          -- the copy serves (same ranks as the tier exposure count).
+          AND (tier_copies.layers NOT IN ('content', 'both')
+            OR (CASE tier_copies.trust_domain WHEN 'secure_local' THEN 2 WHEN 'internal' THEN 1 ELSE 0 END)
+              >= (CASE WHEN t.content_tier = 'secure' OR t.metadata_tier = 'secure' THEN 2
+                       WHEN t.content_tier = 'private' OR t.metadata_tier = 'private' THEN 1 ELSE 0 END))
+          AND (tier_copies.layers NOT IN ('metadata', 'both')
+            OR (CASE tier_copies.trust_domain WHEN 'secure_local' THEN 2 WHEN 'internal' THEN 1 ELSE 0 END)
+              >= (CASE t.metadata_tier WHEN 'secure' THEN 2 WHEN 'private' THEN 1 ELSE 0 END))
+      ) AND NOT EXISTS (
+        SELECT 1 FROM tier_overrides o
+        WHERE o.provider = tier_copies.provider AND o.account_scope = tier_copies.account_scope
+          AND o.conversation_key = tier_copies.conversation_key AND o.provider_item_id = tier_copies.provider_item_id
+          AND json_extract(o.override_json, '$.kind') = 'tier' AND json_extract(o.override_json, '$.tier') = 'secrets'
+      ) AND NOT EXISTS (
+        SELECT 1 FROM tier_write_intents w
+        WHERE w.provider = tier_copies.provider AND w.account_scope = tier_copies.account_scope
+          AND w.conversation_key = tier_copies.conversation_key AND w.provider_item_id = tier_copies.provider_item_id
+          AND w.kind IN ('secret', 'deletion')
       )`;
 
 /** One chat (`conversationKey`) or one source (`provider`, optionally one account) the owner asked to re-check. */
@@ -6176,7 +6275,7 @@ function tierLedgerMigrations(): SqliteMigration[] {
       },
     },
     {
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 16,
       name: 'superseded_copy_walk',
       up(db) {
         // The superseded-copy sweep pages identities that still hold a
@@ -6186,6 +6285,43 @@ function tierLedgerMigrations(): SqliteMigration[] {
         db.exec(`CREATE INDEX IF NOT EXISTS tier_copies_superseded_walk
           ON tier_copies (provider, account_scope, conversation_key, provider_item_id)
           WHERE copy_state = 'superseded';`);
+      },
+    },
+    {
+      version: TIER_LEDGER_SCHEMA_VERSION,
+      name: 'visibility_feed_copy_corpus',
+      up(db) {
+        if (!db.query("SELECT 1 FROM pragma_table_info('tier_visibility_changes') WHERE name = 'corpus_id'").get()) {
+          db.exec(`
+            ALTER TABLE tier_visibility_changes ADD COLUMN corpus_id TEXT;
+            ALTER TABLE tier_visibility_changes ADD COLUMN affects INTEGER NOT NULL DEFAULT 1;
+          `);
+        }
+        // A moving copy counts even before a local row exists. Preserve the
+        // old corpus on delete and relocation so its marker can see it leave.
+        for (const [table, columns] of [
+          ['tier_copies', 'copy_state, embed_hold, layers, corpus_id, trust_domain'],
+          ['tier_items', 'state, routed, content_read, metadata_pending, content_pending, metadata_tier, content_tier, target_metadata_tier, target_content_tier'],
+          ['tier_overrides', 'override_json'],
+        ] as const) {
+          const updated = `${columns}, provider, account_scope, conversation_key, provider_item_id`;
+          const changed = updated.split(', ').map(column => `OLD.${column} IS NOT NEW.${column}`).join(' OR ');
+          // Keep the full feed's cursor semantics for existing readers.
+          const note = (row: 'NEW' | 'OLD', affects = '1') => `
+            INSERT INTO tier_visibility_changes (provider, account_scope, conversation_key, provider_item_id, corpus_id, affects)
+            VALUES (${row}.provider, ${row}.account_scope, ${row}.conversation_key, ${row}.provider_item_id,
+              ${table === 'tier_copies' ? `${row}.corpus_id` : 'NULL'}, ${affects});
+            DELETE FROM tier_visibility_changes WHERE seq <= (SELECT MAX(seq) - 8192 FROM tier_visibility_changes);`;
+          db.exec(`
+            DROP TRIGGER IF EXISTS ${table}_visibility_insert;
+            DROP TRIGGER IF EXISTS ${table}_visibility_delete;
+            DROP TRIGGER IF EXISTS ${table}_visibility_update;
+            CREATE TRIGGER ${table}_visibility_insert AFTER INSERT ON ${table} BEGIN ${note('NEW')} END;
+            CREATE TRIGGER ${table}_visibility_delete AFTER DELETE ON ${table} BEGIN ${note('OLD')} END;
+            CREATE TRIGGER ${table}_visibility_update AFTER UPDATE OF ${updated} ON ${table}
+              BEGIN ${note('OLD', changed)} ${note('NEW', changed)} END;
+          `);
+        }
       },
     },
   ];

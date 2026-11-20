@@ -59,6 +59,16 @@ describe('public flip owner-identifier scan', () => {
     expect(surfaceLabels).toContain('a private protocol');
   });
 
+  test('a home-directory path blocks in any case, the APIs\' /users/me/ does not', () => {
+    const home = OWNER_IDENTIFIER_PATTERNS.find((p) => p.label.includes('home directory'))!.pattern;
+    for (const path of ['/Users/someone/Code', '/home/someone/.config', '/users/someone/x', '/HOME/someone/x']) {
+      expect(home.test(path)).toBe(true);
+    }
+    for (const api of ['https://gmail.googleapis.com/gmail/v1/users/me/profile', '${base}/users/me/profile']) {
+      expect(home.test(api)).toBe(false);
+    }
+  });
+
   test('an unsanctioned identity in any file is a blocker', () => {
     const { root, paths } = fixtureTree({
       'src/anything.ts': "export const host = 'ssh sparta';\n",

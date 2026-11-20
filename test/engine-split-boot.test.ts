@@ -1,19 +1,20 @@
 // The engine split booted for real (docs/design/engine-split.md, part 3): the
 // worker's own entry run twice, as the background and as the front, on a
-// fresh home. The front does not serve until the background is ready, takes
+// fresh home. The front answers "starting" until it is ready, takes
 // no data-owner lock, and serves with its write guard on; the background
 // serves no HTTP, only its command socket. Spawning tests carry an explicit
 // timeout (test/spawn-timeout-guard.test.ts).
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { connectThisComputerSource } from '../src/core/this-computer.ts';
 import { resolvedStorePath } from '../src/core/source-placement.ts';
+import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/local-index.ts';
 import { FileSourceScopeAuthority } from '../src/workers/source-scope-runtime.ts';
 import { FIXTURE_PLACEMENT, fixtureConnector } from './helpers/tier-fixtures.ts';
 import { ENGINE_BACKGROUND_ORIGIN } from '../src/core/engine-split.ts';
-import { createUnixSocketFetch, createWorkerFetch } from '../src/core/worker-transport.ts';
+import { createUnixSocketFetch, createWorkerFetch, prepareWorkerSocket, workerFrontSocketPath, WORKER_LISTEN_SOCKET_ENV } from '../src/core/worker-transport.ts';
 import { readEngineStatusSnapshot } from '../src/workers/engine-split/snapshot.ts';
 import { engineStatusSnapshotPath } from '../src/workers/engine-split/runtime.ts';
 import { waitFor } from './helpers/test-clock.ts';
@@ -29,10 +30,12 @@ afterEach(async () => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-function spawnWorker(env: Record<string, string>, role: 'background' | 'front'): { output: () => string } {
-  const child = Bun.spawn([process.execPath, SERVER], {
+function spawnWorker(env: Record<string, string>, role: 'background' | 'front', preload?: string) {
+  const messages = new Set<unknown>();
+  const child = Bun.spawn([process.execPath, ...(preload ? ['--preload', preload] : []), SERVER], {
     env: { PATH: process.env.PATH ?? '', ...env, OLYMPUS_WORKER_ENGINE_ROLE: role },
     cwd: REPO, stdout: 'pipe', stderr: 'pipe',
+    ...(preload ? { ipc: (message: unknown) => { messages.add(message); } } : {}),
   });
   children.push(child);
   let output = '';
@@ -42,7 +45,7 @@ function spawnWorker(env: Record<string, string>, role: 'background' | 'front'):
       for await (const chunk of stream as ReadableStream<Uint8Array>) output += decoder.decode(chunk);
     })();
   }
-  return { output: () => output };
+  return { child, messages, output: () => output };
 }
 
 describe('the engine split boots as two processes', () => {
@@ -65,7 +68,7 @@ describe('the engine split boots as two processes', () => {
       NODE_ENV: 'test',
     };
     const front = spawnWorker(env, 'front');
-    // Without a background the front opens nothing and does not listen.
+    // Without a background the front has not brought up its real routes.
     expect(front.output()).not.toContain('worker listening');
     const background = spawnWorker(env, 'background');
     await waitFor(() => background.output().includes('engine background ready'), { timeoutMs: 60_000 });
@@ -82,7 +85,9 @@ describe('the engine split boots as two processes', () => {
     const health = await workerFetch(`http://127.0.0.1:${port}/v1/health`, { headers: { Authorization: `Bearer ${TOKEN}` } });
     expect(health.status).toBe(200);
     // The front reports its background, so an upgrade or rollback never calls a crash-looping background healthy (#1563 review).
-    expect(await health.json()).toMatchObject({ reachable: true, engine_background: 'ready' });
+    expect(await health.json()).toMatchObject({
+      reachable: true, engine_background: 'ready', tier_classification: { over_private: { state: 'counting' } },
+    });
     // Source watches are the background's: a create is answered by its route, not refused.
     const watch = await workerFetch(`http://127.0.0.1:${port}/v1/source/watch/create`, { method: 'POST', headers: { Authorization: `Bearer ${TOKEN}` }, body: '{}' });
     expect(watch.status).not.toBe(503);
@@ -124,7 +129,7 @@ describe('the engine split boots as two processes', () => {
     expect(await alone.json()).toMatchObject({ engine_background: 'unreachable' });
   }, 120_000);
 
-  test('with a connected source, the front reads its stores read-only and serves them', async () => {
+  test('the front answers through cleanup and visibility warm-up, then serves its read-only stores on the same socket', async () => {
     const home = mkdtempSync(join('/tmp', 'oes-'));
     roots.push(home);
     mkdirSync(join(home, 'run'), { mode: 0o700 });
@@ -141,6 +146,7 @@ describe('the engine split boots as two processes', () => {
       OLYMPUS_WORKER_AUTH_TOKEN: TOKEN,
       OLYMPUS_ENGINE_BACKGROUND_SOCKET: join(home, 'run', 'olympus', 'background.sock'),
       OLYMPUS_SOURCE_INDEX_LOCAL_FILES_CONNECTOR_STORE_ENABLED: 'true',
+      OLYMPUS_TIER_SNIFFER_ENABLED: 'false',
       OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH: registryPath,
       NODE_ENV: 'test',
     };
@@ -156,22 +162,116 @@ describe('the engine split boots as two processes', () => {
     mkdirSync(dirname(storePath), { recursive: true });
     const seeded = new LocalConnectorStore({ dbPath: storePath, corpusId: 'secure_local.local.files', family: 'file', trustDomain: 'secure_local' });
     await seeded.syncFromConnector(fixtureConnector(() => [{ id: 'orchard', name: 'orchard-lab.txt', text: 'The orchard lab note.', legacyDomain: 'secure_local' }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    const ledger = seeded.tierLedger()!;
+    const item = { provider: 'local.files', accountScope: 'test', providerItemId: 'over-private', family: 'file' as const };
+    const personal = classifyItemTiers({ signals: { title: 'Orchard plan' }, text: 'Order seeds.' });
+    expect(personal).toMatchObject({ metadataTier: 'private', contentTier: 'private' });
+    const secure = { copies: [{ corpusId: seeded.corpusId, trustDomain: 'secure_local', layers: 'both' }], embedHold: false } as const;
+    const { record } = ledger.recordRoutedPlacement(item, personal, secure);
+    ledger.recordRoutedPlacement({ ...item, providerItemId: 'correct' }, personal, {
+      copies: [{ corpusId: 'internal.local.files', trustDomain: 'internal', layers: 'both' }], embedHold: false,
+    });
+    ledger.recordRoutedPlacement({ ...item, providerItemId: 'pending' }, { ...personal, state: 'pending', contentPending: true }, secure);
     seeded.close();
 
-    const background = spawnWorker(env, 'background');
-    await waitFor(() => background.output().includes('engine background ready'), { timeoutMs: 60_000 });
-    const front = spawnWorker(env, 'front');
-    await waitFor(() => front.output().includes('worker listening') || /FrontStoreWriteError|error/i.test(front.output()), { timeoutMs: 60_000 });
-    expect(front.output()).not.toContain('FrontStoreWriteError');
-    expect(front.output()).toContain('worker listening');
+    const socketPath = workerFrontSocketPath({ env })!;
+    const frontEnv = { ...env, [WORKER_LISTEN_SOCKET_ENV]: socketPath };
+    const front = spawnWorker(frontEnv, 'front', join(import.meta.dir, 'helpers', 'engine-split-boot-preload.ts'));
+    await waitFor(() => existsSync(socketPath), { description: 'front starting socket' });
+    const initialSocket = lstatSync(socketPath);
+    const checkSocket = () => {
+      const socket = lstatSync(socketPath);
+      expect(socket.isSocket()).toBe(true);
+      expect(socket.ino).toBe(initialSocket.ino);
+      expect(socket.mode & 0o777).toBe(0o600);
+    };
+    checkSocket();
+    expect(() => prepareWorkerSocket({ env: frontEnv })).toThrow('Worker socket path is occupied');
 
-    const workerFetch = createWorkerFetch({ env });
-    const status = await workerFetch(`http://127.0.0.1:${port}/v1/source/index/status`, {
-      method: 'POST', headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' }, body: '{}',
+    const workerFetch = createUnixSocketFetch(socketPath);
+    const origin = `http://127.0.0.1:${port}`;
+    const get = (path: string, headers: Record<string, string> = {}) => workerFetch(`${origin}${path}`, {
+      headers: { Authorization: `Bearer ${TOKEN}`, Connection: 'close', ...headers },
+      signal: AbortSignal.timeout(10_000),
+    }).catch((error: unknown) => {
+      throw new Error(`GET ${path} failed at front boot gates ${[...front.messages].join(', ')}`, { cause: error });
     });
-    const body = JSON.stringify(await status.json());
-    expect(status.status, body).toBe(200);
+    const expectStarting = async (pending: Promise<Response>) => {
+      const response = await pending;
+      expect(response.status).toBe(503);
+      expect(await response.text()).toContain('Olympus is starting');
+      checkSocket();
+    };
+    const waitForGate = (name: string) => waitFor(() => front.messages.has(name), { description: `front reached ${name}` });
+    const dashboardHeaders = { Accept: 'text/html' };
+    await expectStarting(get('/dashboard', dashboardHeaders));
+
+    const background = spawnWorker(env, 'background');
+    await waitFor(() => background.output().includes('engine background ready'), { timeoutMs: 60_000, description: 'background boot' });
+    await waitForGate('cleanup');
+    await expectStarting(get('/dashboard', dashboardHeaders));
+
+    let finished = false;
+    let readyAllowed = false;
+    // Each iteration waits for a fresh HTTP connection and its complete response.
+    const traffic = (async () => {
+      while (!finished) {
+        const response = await get('/v1/health');
+        const body = await response.json();
+        checkSocket();
+        if (response.status === 503) {
+          expect(body).toMatchObject({ status: 'starting' });
+          continue;
+        }
+        expect(readyAllowed).toBe(true);
+        expect(response.status).toBe(200);
+        expect(body).toMatchObject({ reachable: true, engine_background: 'ready' });
+        return;
+      }
+    })();
+    void traffic.catch(() => {});
+    let inFlight: Promise<void> | undefined;
+    try {
+      front.child.send('cleanup');
+      await Promise.race([waitForGate('visibility'), traffic]);
+      await expectStarting(get('/dashboard', dashboardHeaders));
+      expect(() => prepareWorkerSocket({ env: frontEnv })).toThrow('Worker socket path is occupied');
+      inFlight = expectStarting(get('/dashboard', { ...dashboardHeaders, 'X-Test-Hold-Starting-Response': '1' }));
+      void inFlight.catch(() => {});
+      await waitForGate('response');
+      readyAllowed = true;
+      front.child.send('visibility');
+      await traffic;
+      front.child.send('response');
+      await inFlight;
+      const dashboard = await get('/dashboard', dashboardHeaders);
+      expect(dashboard.status).toBe(200);
+      await dashboard.body?.cancel();
+    } finally {
+      finished = true;
+      await Promise.allSettled([traffic, inFlight]);
+    }
+
+    // The first status after the switch can still be counting (no corpora yet); wait for the counted one.
+    const body = await waitFor(async () => {
+      const status = await workerFetch(`http://127.0.0.1:${port}/v1/source/index/status`, {
+        method: 'POST', headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' }, body: '{}',
+      });
+      const text = JSON.stringify(await status.json());
+      expect(status.status, text).toBe(200);
+      return text.includes('secure_local.local.files') ? text : undefined;
+    }, { timeoutMs: 60_000, description: 'the front counted its local-files store' });
     expect(body).toContain('secure_local.local.files');
+    const measured = await waitFor(async () => {
+      const response = await get('/v1/health');
+      const health = await response.json();
+      const count = health.tier_classification?.over_private;
+      return count?.state === 'measured' ? count : undefined;
+    }, { description: 'the front received the measured privacy count' });
+    expect(measured).toEqual({
+      state: 'measured', items: 1, by_provider: { 'local.files': 1 },
+      oldest_since: record.decidedAt, measured_at: expect.any(String),
+    });
     expect(front.output()).not.toContain('FrontStoreWriteError');
   }, 180_000);
 });

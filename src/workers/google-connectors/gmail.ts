@@ -15,6 +15,7 @@ import {
   type SourceInvocationProvenance,
 } from '../../core/invocation-provenance.ts';
 import { gmailAfterBound, gmailBeforeBound } from '../../core/mail-source-scope.ts';
+import { compareProviderAccounts, fetchProviderAccountId } from '../../core/provider-account-identity.ts';
 import { senderMatchesRule } from '../../core/sender-rules.ts';
 import { FileExtractionSourceError } from '../../core/file-extraction-source.ts';
 import type { OwnerTierRule } from '../classification/tier-classifier.ts';
@@ -25,6 +26,7 @@ import {
   type CredentialBrokerFetch,
 } from '../credential-broker/index.ts';
 import type { ConnectorStoreClassificationOptions } from '../connector-store/index.ts';
+import { SourceAccountChangedError } from '../source-account-guard.ts';
 import {
   classifyEmailIngestSkip,
   parseEmailIngestFilterOptionsFromEnv,
@@ -129,13 +131,14 @@ export interface GoogleGmailSourceConnectorOptions {
   /** How mail is built into items (gmail-mail-record.ts): attachments as children of their message. */
   build?: GmailMailBuild;
   /**
-   * Asked before every provider request an attachment read makes: throws when
-   * the mail approval is no longer current, so nothing more is asked.
+   * Rechecks the approval before a provider request (including retries).
    */
   beforeEachRequest?: () => void;
+  /** The history's verified provider account, read under the source account guard. */
+  confirmationAccountId?: () => string | undefined;
 }
 
-/** Metadata reads for retained Private scope confirmation per connector pass. */
+/** Metadata reads for retained mail scope confirmation per connector pass. */
 export const GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS = 32;
 
 /**
@@ -166,10 +169,8 @@ export interface GmailConnectorScope {
    * mail is never re-observed under a scope; see listItems.
    */
   storedItem?: (providerItemId: string) => GmailStoredItem | undefined;
-  /** A metadata-only scope confirmation for an already-stored Private body; never a body re-read. */
-  storedItemObserved?: (item: RawItem) => void;
-  /** One resumable scope-confirmation walk: no new items or bodies are fetched. */
-  confirmationOnly?: boolean;
+  /** A resumable confirmation walk. The store checks each retained copy's text. */
+  confirmStoredItem?: (item: RawItem, passesIngestFilter: (text: string) => boolean) => void;
 }
 
 export interface GmailStoredItem {
@@ -330,10 +331,12 @@ export class GoogleGmailSourceConnector implements SourceConnector {
   private itemsSkippedOtp = 0;
   private itemsSkippedCategory = 0;
   private itemsSkippedStored = 0;
+  private confirmationPagePrefix: GmailCursor | undefined;
   private readonly ingestFilterOptions: EmailIngestFilterOptions;
   private readonly itemsByLocalId = new Map<string, RawItem>();
   private readonly build: GmailMailBuild;
   private readonly beforeEachRequest: (() => void) | undefined;
+  private readonly confirmationAccountId: (() => string | undefined) | undefined;
   /** The messages this run read whole, so an attachment of one is read without asking for it again. */
   private readonly messagesById = new Map<string, GmailMessage>();
 
@@ -360,6 +363,7 @@ export class GoogleGmailSourceConnector implements SourceConnector {
     this.now = options.now ?? (() => Date.now());
     this.build = options.build ?? {};
     this.beforeEachRequest = options.beforeEachRequest;
+    this.confirmationAccountId = options.confirmationAccountId;
     const ingestFilterOptions = options.ingestFilterOptions ?? parseEmailIngestFilterOptionsFromEnv(env);
     // The approved scope says which categories are skipped. An explicit
     // operator setting still wins; otherwise the scope replaces the built-in
@@ -387,19 +391,22 @@ export class GoogleGmailSourceConnector implements SourceConnector {
 
   async *listItems(options: SourceConnectorListOptions = {}): AsyncIterable<SourceConnectorListPage> {
     const client = await this.clientForRequest();
-    let scopeConfirmationsFetched = 0;
-    let remaining = normalizeGmailMaxMessages(options.limit ?? this.defaultMaxMessages);
+    const confirmation = this.scope?.confirmStoredItem;
+    const requested = normalizeGmailMaxMessages(options.limit ?? this.defaultMaxMessages);
+    const limit = confirmation && requested > GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS
+      ? GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS : requested;
+    let remaining = limit;
     const resume = decodeGmailCursor(options.cursor);
     const cutoffMs = this.scope?.contentAfterMs;
     // The metadata leg exists only under a scope with a cutoff; a phase marker
     // arriving without one is a stale cursor and restarts the content leg.
-    let metadataLeg = !this.scope?.confirmationOnly && resume.phase === 'metadata' && cutoffMs !== undefined;
+    let metadataLeg = !confirmation && resume.phase === 'metadata' && cutoffMs !== undefined;
     const staleLeg = resume.phase === 'metadata' && !metadataLeg;
     const watermarkMs = metadataLeg || staleLeg ? undefined : resume.watermarkMs;
     let query = metadataLeg && cutoffMs !== undefined ? this.metadataLegQuery(cutoffMs) : this.queryForWatermark(watermarkMs);
     // A scoped first traversal is two legs: full content after the cutoff,
     // then metadata-only before it. Incremental passes read only new mail.
-    const splitsAtCutoff = !this.scope?.confirmationOnly && !metadataLeg && cutoffMs !== undefined && watermarkMs === undefined;
+    const splitsAtCutoff = !confirmation && !metadataLeg && cutoffMs !== undefined && watermarkMs === undefined;
     let highWaterMs = staleLeg ? undefined : resume.highWaterMs;
     const nowMs = this.now();
     // Carried from the first page of a scoped traversal to its last; a fresh
@@ -439,11 +446,13 @@ export class GoogleGmailSourceConnector implements SourceConnector {
     const requestedPageTokens = new Set<string>();
     let listPages = 0;
     while (remaining > 0 && itemRoom > 0 && listPages < MAX_GMAIL_LIST_PAGES_PER_RUN) {
+      this.confirmationPagePrefix = undefined;
       if (pageToken) assertNewProviderPage(requestedPageTokens, pageToken);
       this.providerRequests += 1;
       listPages += 1;
-      const page = await client.listMessages({
-        maxResults: Math.min(DEFAULT_GMAIL_PAGE_SIZE, remaining),
+      const page = await listGmailMessagePage(client, {
+        // Resuming inside a confirmation page uses the same page size.
+        maxResults: Math.min(DEFAULT_GMAIL_PAGE_SIZE, confirmation ? limit : remaining),
         ...(pageToken ? { pageToken } : {}),
         ...(query ? { query } : {}),
       });
@@ -470,33 +479,33 @@ export class GoogleGmailSourceConnector implements SourceConnector {
       let childOf: { id: string; from: number } | undefined;
       for (const message of listed.slice(baseSkip)) {
         if (messagesFetched >= remaining || items.length >= itemRoom) break;
+        const prior = confirmation ? examinedIds.at(-1) : undefined;
+        if (prior !== undefined) {
+          this.confirmationPagePrefix = { ...(pageToken ? { pageToken } : {}), after: prior };
+        }
         messagesExamined += 1;
         examinedIds.push(message.id);
-        // Mail Olympus already holds is never observed again under a scope.
-        // Gmail messages are immutable, so a re-read could only replace a
-        // stored body with a body-less metadata row (the window moved) or
-        // re-classify an item whose vectors already exist; either would throw
-        // away existing chunks and embeddings. The one exception is mail
-        // stored metadata-only that the content leg may now store in full.
         const stored = this.scope?.storedItem?.(message.id);
-        if (this.scope?.confirmationOnly && (!stored || !stored.hasContent)) continue;
-        if (stored && (metadataLeg || stored.hasContent)) {
-          if (!metadataLeg && stored.needsScopeObservation && this.scope?.storedItemObserved
-            && scopeConfirmationsFetched < GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS) {
-            // Only unconfirmed Private copies need this request, once per
-            // approval. It consumes the same bounded message/request budget.
-            scopeConfirmationsFetched += 1;
-            messagesFetched += 1;
-            this.providerRequests += 1;
-            const metadata = await client.getMessage(message.id, { format: 'metadata', metadataHeaders: GMAIL_METADATA_HEADERS });
-            const received = internalDateNumber({ internalDate: metadata.internalDate });
+        if (confirmation) {
+          if (!stored?.needsScopeObservation) continue;
+          this.beforeEachRequest?.();
+          messagesFetched += 1;
+          this.providerRequests += 1;
+          const metadata = await client.getMessage(message.id, { format: 'metadata', metadataHeaders: GMAIL_METADATA_HEADERS })
+            .catch(error => {
+              // A message can disappear after listing. Only messages.list can reject its cursor.
+              if (gmailHttpStatus(error) === 404) return undefined;
+              throw error;
+            });
+          if (metadata?.id === message.id && gmailMessageInScope(metadata, this.scope!)) {
             const item = gmailMessageItem(gmailMailRecordFromMessage(metadata, { metadataOnly: true }), this.account);
-            const subject = metadataString(item.metadata, 'subject');
-            const from = metadataString(item.metadata, 'from');
-            const skipped = this.scope.skipSenders?.some(rule => senderMatchesRule(from, rule))
-              || classifyEmailIngestSkip({ ...(subject ? { subject } : {}), ...(from ? { from } : {}), labels: metadataStringArray(item.metadata, 'labels') }, this.ingestFilterOptions);
-            if (!skipped && (cutoffMs === undefined || (received !== undefined && received >= cutoffMs))) this.scope.storedItemObserved(item);
+            confirmation(item, text => !this.ingestSkip(item, text));
           }
+          continue;
+        }
+        // Keep immutable stored bodies and their vectors. The content leg
+        // can upgrade a previously names-only message.
+        if (stored && (metadataLeg || stored.hasContent)) {
           // Held mail never moves the high-water mark: its stored date is the
           // sender's Date header, which can say anything (a spam dated 2036
           // would park every later query past all real mail). The traversal's
@@ -534,7 +543,6 @@ export class GoogleGmailSourceConnector implements SourceConnector {
           // must not push the next bound past mail that has yet to arrive.
           highWaterMs = Math.min(internalDateMs, nowMs);
         }
-        const subject = metadataString(item.metadata, 'subject') ?? metadataString(item.metadata, 'title');
         const from = metadataString(item.metadata, 'from');
         if (this.scope?.skipSenders?.some((rule) => senderMatchesRule(from, rule))) {
           this.itemsSkippedCategory += 1;
@@ -544,12 +552,7 @@ export class GoogleGmailSourceConnector implements SourceConnector {
         // Metadata-only items carry no body and no snippet, so the OTP filter
         // judges them by subject alone. Skipped labels are checked here by id
         // as well as in the query, so a renamed label cannot slip past.
-        const skip = classifyEmailIngestSkip({
-          ...(subject !== undefined ? { subject } : {}),
-          ...(from !== undefined ? { from } : {}),
-          ...(body !== undefined ? { body } : {}),
-          labels: metadataStringArray(item.metadata, 'labels'),
-        }, this.ingestFilterOptions);
+        const skip = this.ingestSkip(item, body);
         if (skip) {
           if (skip === 'otp') this.itemsSkippedOtp += 1;
           else this.itemsSkippedCategory += 1;
@@ -652,6 +655,22 @@ export class GoogleGmailSourceConnector implements SourceConnector {
         requestedPageTokens.clear();
       } else if (!pageToken) break;
     }
+  }
+
+  /** Resume after the last examined message if a request guard stopped inside a page. */
+  interruptedConfirmationCursor(): string | undefined {
+    return this.confirmationPagePrefix && encodeGmailCursor(this.confirmationPagePrefix);
+  }
+
+  private ingestSkip(item: RawItem, body: string | undefined) {
+    const subject = metadataString(item.metadata, 'subject') ?? metadataString(item.metadata, 'title');
+    const from = metadataString(item.metadata, 'from');
+    return classifyEmailIngestSkip({
+      ...(subject !== undefined ? { subject } : {}),
+      ...(from !== undefined ? { from } : {}),
+      ...(body !== undefined ? { body } : {}),
+      labels: metadataStringArray(item.metadata, 'labels'),
+    }, this.ingestFilterOptions);
   }
   /**
    * In-run cache, never a second provider round trip. Listing already fetched
@@ -825,6 +844,7 @@ export class GoogleGmailSourceConnector implements SourceConnector {
       capability: 'gmail.email.sync',
       trustDomain: 'secure_local',
     }), this.credentialHandle);
+    if (this.scope?.confirmStoredItem) await this.verifyConfirmationAccount(session.token);
     return new RestGmailApiClient({
       token: session.token,
       fetch: this.fetchImpl,
@@ -836,6 +856,33 @@ export class GoogleGmailSourceConnector implements SourceConnector {
       // The approval is asked before every HTTP attempt, retries included: a backoff can outlast it.
       ...(this.beforeEachRequest ? { beforeEachAttempt: this.beforeEachRequest } : {}),
     });
+  }
+
+  private async verifyConfirmationAccount(token: string): Promise<void> {
+    const expected = this.confirmationAccountId?.();
+    if (!expected) {
+      throw new SourceAccountChangedError('source_account_unverified', 'Gmail confirmation requires a verified account for the stored mail.');
+    }
+    let refused: unknown;
+    const observed = await fetchProviderAccountId({
+      provider: GMAIL_PROVIDER, accessToken: token,
+      endpoints: { gmail: `${this.apiBaseUrl}/users/me/profile` },
+      fetchImpl: (url, init) => {
+        try {
+          this.beforeEachRequest?.();
+          this.requestBudget?.reserve(this.provenance);
+        } catch (error) {
+          // Keep a local refusal distinguishable from a failed identity request.
+          refused = error;
+          throw error;
+        }
+        return this.fetchImpl(url, init);
+      },
+    }).finally(() => { if (refused !== undefined) throw refused; });
+    if (compareProviderAccounts(expected, observed) !== 'same') {
+      throw new SourceAccountChangedError('source_account_token_mismatch', 'Gmail confirmation could not match the mailbox to the stored mail.');
+    }
+    this.beforeEachRequest?.();
   }
 
   /**
@@ -880,6 +927,21 @@ export class GmailPageTokenRejectedError extends Error {
   }
 }
 
+function gmailHttpStatus(error: unknown): number | undefined {
+  const status = error instanceof Error && /^Gmail API request failed \((\d{3})\)/.exec(error.message)?.[1];
+  return status ? Number(status) : undefined;
+}
+
+async function listGmailMessagePage(client: GmailApiClient, request: GmailListMessagesRequest): Promise<GmailListMessagesResponse> {
+  try {
+    return await client.listMessages(request);
+  } catch (error) {
+    const status = gmailHttpStatus(error);
+    if (request.pageToken && (status === 400 || status === 404)) throw new GmailPageTokenRejectedError();
+    throw error;
+  }
+}
+
 /** Gmail's largest list page. */
 const GMAIL_LABEL_PAGE_SIZE = 500;
 
@@ -909,20 +971,12 @@ export function gmailLabelledMessageSource(getClient: () => Promise<GmailApiClie
         if (!match) return { ids: [] };
         labelId = match.id;
       }
-      let response: GmailListMessagesResponse;
-      try {
-        response = await client.listMessages({
-          maxResults: GMAIL_LABEL_PAGE_SIZE,
-          labelIds: [labelId],
-          includeSpamTrash: true,
-          ...(page.pageToken ? { pageToken: page.pageToken } : {}),
-        });
-      } catch (error) {
-        if (page.pageToken && error instanceof Error && /Gmail API request failed \((?:400|404)\)/.test(error.message)) {
-          throw new GmailPageTokenRejectedError();
-        }
-        throw error;
-      }
+      const response = await listGmailMessagePage(client, {
+        maxResults: GMAIL_LABEL_PAGE_SIZE,
+        labelIds: [labelId],
+        includeSpamTrash: true,
+        ...(page.pageToken ? { pageToken: page.pageToken } : {}),
+      });
       return {
         ids: response.messages.map((message) => message.id).filter((id) => id),
         ...(response.nextPageToken ? { nextPageToken: response.nextPageToken } : {}),
