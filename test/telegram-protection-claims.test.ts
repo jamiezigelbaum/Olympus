@@ -13,6 +13,7 @@ import {
 } from '../src/workers/telegram-messages/index.ts';
 import { compareTelegramVersions, telegramCaptureVersion } from '../src/workers/telegram-messages/record-builder.ts';
 import { forgetSpoolOffsets } from '../src/workers/telegram-messages/spool-lines.ts';
+import { expectHeldThenPersonal } from './helpers/tier-fixtures.ts';
 
 const ACCOUNT = 'telegram.personal';
 const sha256 = (value: string): string => createHash('sha256').update(value).digest('hex');
@@ -83,6 +84,8 @@ function world() {
     return full;
   };
   const identity = (id: string) => ({ provider: 'telegram', accountScope: ACCOUNT, providerItemId: id, providerConversationId: 'chat-1' });
+  const expectHeldBodyThenPersonal = (id: string, text: string) =>
+    expectHeldThenPersonal(set, { ...identity(id), family: 'chat', localItemId: `${ACCOUNT}:chat-1:${id}` }, text);
   const textIn = (store: LocalConnectorStore, id: string): string => store.localContent(`${ACCOUNT}:chat-1:${id}`)?.chunks.join(' ') ?? '';
   /** What a read of the ordinary lane serves of the item: an active row whose ledger copy there is current (or a legacy row). */
   const readableInInternal = (id: string): boolean => {
@@ -92,7 +95,7 @@ function world() {
     return copies.length === 0 || copies.some((copy) => copy.corpusId === INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID && copy.state === 'current');
   };
   return {
-    spoolDir, internal, secureLocal, set, capture, identity, textIn, readableInInternal,
+    spoolDir, internal, secureLocal, set, capture, identity, textIn, readableInInternal, expectHeldBodyThenPersonal,
     handler: (extra: Partial<Parameters<typeof createTelegramConnectorStoreSyncHandler>[0]> = {}) =>
       createTelegramConnectorStoreSyncHandler({ stores: { internal, secureLocal }, spoolDir, tierSet: set as TieredStoreSet, ...extra }),
     close() { internal.close(); secureLocal.close(); },
@@ -124,6 +127,7 @@ describe('retired capture claims', () => {
       expect(w.textIn(w.secureLocal, 'A')).toBe('');
       w.capture('2026-10-24.jsonl', { id: 'A', text: 'markerA a later ordinary edit', at: '2026-10-24T09:00:00Z', trust: 'secure_local' });
       await sync.pull();
+      await w.expectHeldBodyThenPersonal('A', 'markerA a later ordinary edit');
       expect(w.readableInInternal('A')).toBe(true);
       expect(w.textIn(w.internal, 'A')).toContain('later ordinary edit');
     } finally { w.close(); }
@@ -150,6 +154,7 @@ describe('nothing is deleted before its replacement is stored', () => {
       expect(w.readableInInternal('A')).toBe(true);
       expect(w.textIn(w.internal, 'A')).toContain('stored ordinary');
       await sync.pull();
+      await w.expectHeldBodyThenPersonal('A', 'markerA the newer protected text');
       expect(w.textIn(w.internal, 'A')).toContain('newer protected');
       expect(w.readableInInternal('A')).toBe(true);
     } finally {
@@ -199,6 +204,7 @@ describe('captures are ordered by when they were captured', () => {
       writeFileSync(join(w.spoolDir, '2026-10-20.jsonl'), line(a) + line(b) + line({ ...cRecord, trust: 'secure_local', text: 'markerC third, now protected and longer' }));
       const receipt = await sync.pull();
       expect(receipt.counts.spool_cursor_resets).toBeGreaterThan(0);
+      await w.expectHeldBodyThenPersonal('C', 'markerC third, now protected and longer');
       expect(w.readableInInternal('C')).toBe(true);
       expect(w.textIn(w.secureLocal, 'C')).toBe('');
       // The others were read again under the intake rule and stand as they were.
@@ -311,6 +317,28 @@ describe('a seeded run over mixed-domain captures, prunes, recreated files and f
       const syncLegs = w.set.syncLegs.bind(w.set);
       w.set.syncLegs = (...args) => failPass ? Promise.reject(new Error('injected pass failure')) : syncLegs(...args);
       const sync = w.handler({ maxItems: 1 + Math.floor(random() * 3) });
+      const previousVersions = new Map<string, string>();
+      const expectCapturedBodies = async () => {
+        for (const id of ids) {
+          const identity = w.identity(id);
+          const version = w.set.storedItem(identity, compareTelegramVersions)?.version;
+          const previous = previousVersions.get(id);
+          if (version === undefined) {
+            expect(previous).toBeUndefined();
+            continue;
+          }
+          if (previous) expect(compareTelegramVersions(version, previous)).toBeGreaterThanOrEqual(0);
+          const captured = written.find(entry => entry.id === id && entry.at === editTimeOf(version)
+            && version.includes(`~at:${entry.capturedAt}:${String(entry.seq).padStart(16, '0')}:`));
+          expect(captured).toBeDefined();
+          if (w.set.ledger.getCurrent(identity)?.contentPending) {
+            await w.expectHeldBodyThenPersonal(id, captured!.text);
+          }
+          expect(w.textIn(w.internal, id)).toBe(captured!.text);
+          expect(w.textIn(w.secureLocal, id)).toBe('');
+          previousVersions.set(id, version);
+        }
+      };
       try {
         let day = 10;
         for (let step = 0; step < 40; step += 1) {
@@ -334,10 +362,13 @@ describe('a seeded run over mixed-domain captures, prunes, recreated files and f
             await sync.pull().catch(() => undefined);
             failPass = false;
           }
-          expect(w.secureLocal.status().counts.items).toBe(0);
+          await expectCapturedBodies();
         }
         // Each surviving record is judged Personal, regardless of old domain.
-        for (let pull = 0; pull < 8; pull += 1) await sync.pull();
+        for (let pull = 0; pull < 8; pull += 1) {
+          await sync.pull();
+          await expectCapturedBodies();
+        }
         for (const id of ids) {
           const newestLeft = written
             .filter((entry) => entry.id === id && existsSync(join(w.spoolDir, files.get(entry)!)))

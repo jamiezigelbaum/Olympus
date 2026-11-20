@@ -3,6 +3,7 @@
 // (a cloud Gemini-like identity for Public/Personal, a local one for Private),
 // and byte-level snapshots of stored rows, chunks and vectors.
 
+import assert from 'node:assert/strict';
 import { Database } from 'bun:sqlite';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -11,9 +12,10 @@ import type { RawItem, SourceConnector, SourceConnectorListPage } from '../../sr
 import type { SourceExclusionMatcher } from '../../src/core/source-ingestion-exclusions.ts';
 import { buildSourceSensitivity, type SourceTrustDomain } from '../../src/core/source-index/types.ts';
 import { SecretLocationsIndex } from '../../src/workers/classification/secret-locations.ts';
-import type { TierSniffer } from '../../src/workers/classification/tier-classifier.ts';
+import { contentDigestReason, type TierSniffer } from '../../src/workers/classification/tier-classifier.ts';
 import { TierLedger } from '../../src/workers/classification/tier-ledger.ts';
 import { LocalConnectorStore } from '../../src/workers/connector-store/index.ts';
+import { moveTieredItem } from '../../src/workers/connector-store/tier-move.ts';
 import type { ConnectorStorePlacement } from '../../src/workers/connector-store/tier-placement.ts';
 import { TieredStoreSet, tieredStoreSetLedgerPath } from '../../src/workers/connector-store/tiered-store-set.ts';
 import type { SourceEmbeddingInput, SourceEmbeddingProvider } from '../../src/workers/source-index/embeddings.ts';
@@ -31,6 +33,25 @@ export const JUDGED_PERSONAL_SNIFFER: TierSniffer = Object.freeze({
   judge: () => ({ verdict: 'decided' as const, tier: 'private' as const, code: 'ordinary:0.99', origin: 'model' as const }),
 });
 export const PROVIDER = 'fixture';
+
+/** Follow a pending body's exact bytes through a Personal verdict and the resulting move. */
+export async function expectHeldThenPersonal(set: TieredStoreSet, item: RawItem['identity'], expectedText: string): Promise<void> {
+  const chunks = (domain: 'internal' | 'secure_local') =>
+    set.store(domain)?.exportItemCopy(item)?.chunks.map(chunk => chunk.boundedText).join('') ?? '';
+  const record = set.ledger.getCurrent(item);
+  assert.ok(record?.contentPending && record.contentRead);
+  assert.equal(chunks('internal'), '');
+  const heldText = chunks('secure_local');
+  assert.ok(heldText.includes(expectedText));
+  const applied = set.ledger.applySnifferVerdict(item, {
+    pass: 'content', tier: 'private', reason: 'content:sniffer:fixture:ordinary', modelId: 'fixture',
+    contentDigest: contentDigestReason(heldText),
+  }, { placementFor: decision => set.placementFor(decision) });
+  assert.equal(applied?.outcome, 'queued_move');
+  await moveTieredItem({ set, identity: item, expectedGeneration: applied!.record.generation,
+    target: { metadataTier: 'private', contentTier: 'private' }, replaceOwnSupersededCopy: true });
+  assert.equal(chunks('internal'), heldText);
+}
 
 export interface FixtureSpec {
   id: string;

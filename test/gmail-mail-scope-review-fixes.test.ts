@@ -1,6 +1,7 @@
 // Review of PR #76 (critical, 2026-09-23): data loss on approval or narrowing,
 // endless re-reads of a dormant mailbox, "always Private" not enforced, label
 // skips by id, picker budget isolation, no-op saves and the month-end cutoff.
+import { expectHeldThenPersonal } from './helpers/tier-fixtures.ts';
 import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -18,6 +19,7 @@ import {
 import type { CredentialBroker } from '../src/workers/credential-broker/index.ts';
 import type { SourceConnectorListPage, RawItem } from '../src/core/contracts.ts';
 import { SourceScopeApprovalRequiredError } from '../src/core/operation-error.ts';
+import { tierSetForLedger } from '../src/workers/connector-store/tier-set-registry.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { planStoreEmbedding, scopedEmbeddingOptions } from '../src/workers/connector-store/embedding-plan.ts';
 import { automaticTierMoveOptions, automaticTierMovesAllowed } from '../src/workers/connector-store/tier-auto-move.ts';
@@ -195,7 +197,11 @@ describe('no existing embeddings are thrown away by a scope', () => {
 
     await laneFor(stores, client, { scope: { contentAfterMs: NOW.getTime() - 5 * 365 * DAY }, revision: 'rev-5y', internal, secure })
       .pull({ max_items: 50 });
-    expect(stores.internalStore.itemStoredContent(identity('old'))).toMatchObject({ chunkCount: 1 });
+    const item = identity('old');
+    expect(stores.internalStore.itemStoredContent(item)?.chunkCount).toBe(0);
+    expect(stores.secureStore.itemStoredContent(item)?.chunkCount).toBe(1);
+    const set = tierSetForLedger(stores.secureStore.tierLedger()!.dbPath)!;
+    await expectHeldThenPersonal(set, item, 'Body of old.');
   });
 });
 

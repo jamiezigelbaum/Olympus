@@ -326,9 +326,7 @@ export function createFileExtractionRuntime(
 
   const warn = options.warn ?? ((message: string) => console.warn(message));
   const storesByCorpusId = new Map(options.connectorStores.map((store) => [store.corpusId, store]));
-  const tierSetForStore = (store: LocalConnectorStore): TieredStoreSet | undefined => {
-    const configured = options.tierSets?.get(store.corpusId);
-    if (configured) return configured;
+  const registeredTierSetForStore = (store: LocalConnectorStore): TieredStoreSet | undefined => {
     const registered = tierSetForLedger(store.tierLedgerPathInUse());
     return registered?.legSpec(store.trustDomain)?.legacy && registered.store(store.trustDomain) === store
       ? registered : undefined;
@@ -360,7 +358,7 @@ export function createFileExtractionRuntime(
       if (!store) continue;
       const indexes = refs.flatMap((ref, index) => ref.corpusId === config.corpusId ? [index] : []);
       if (!indexes.length) continue;
-      const set = tierSetForStore(store);
+      const set = options.tierSets?.get(config.corpusId);
       const reader = set ? tieredExtractionView(set, { home: store.trustDomain }) : store;
       const matched = reader.itemsMatchingExtractionRefs(indexes.map(index => refs[index]!), config.resolveCandidateFilters?.());
       const scopes = new Set(config.resolveScopes?.() ?? config.scopes);
@@ -406,12 +404,15 @@ export function createFileExtractionRuntime(
       warn(fileExtractionCorpusDropped(config, 'no_source_factory'));
       continue;
     }
-    const tierSet = tierSetForStore(store);
+    const configuredTierSet = options.tierSets?.get(config.corpusId);
+    const tierSet = configuredTierSet ?? registeredTierSetForStore(store);
     // The set's own store for the domain: a leg opened on demand has no store in its spec.
     if (tierSet && tierSet.store(store.trustDomain) !== store) {
       throw new Error(`[file-extraction] corpus=${config.corpusId} tier set does not hold its store.`);
     }
-    const view = tierSet ? tieredExtractionView(tierSet, { home: store.trustDomain }) : undefined;
+    // A set found by ledger is the authority for landing newly extracted text.
+    // The configured corpus still governs candidate discovery and remote reads.
+    const view = configuredTierSet ? tieredExtractionView(configuredTierSet, { home: store.trustDomain }) : undefined;
     itemStores.set(config.corpusId, tierSet
       ? () => TIER_DOMAIN_ORDER.flatMap((domain) => {
           const leg = tierSet.store(domain);

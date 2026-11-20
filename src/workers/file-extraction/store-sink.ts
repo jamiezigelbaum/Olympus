@@ -28,13 +28,13 @@
 import type { ConnectorStoreTierClassification } from '../connector-store/tier-placement.ts';
 import type { RawItem } from '../../core/contracts.ts';
 import { detectSecretFindingKinds } from '../classification/engine.ts';
-import { isImageMediaType, type ItemTierOverride } from '../classification/tier-classifier.ts';
+import { hasCredentialUrl, isImageMediaType, type ItemTierOverride } from '../classification/tier-classifier.ts';
 import { settleUntrackedSecretsCopy } from '../connector-store/secrets-disposition.ts';
 import type { ConnectorStoreItemWriteClaim, ConnectorStoreRepresentationRestoreOptions } from '../connector-store/local-index.ts';
 import { tierSetForLedger } from '../connector-store/tier-set-registry.ts';
 import { TieredStoreSet } from '../connector-store/tiered-store-set.ts';
 import { tieredRepresentationLanding } from './tiered-store-sink.ts';
-import type { MediaJudgment } from '../source-index/media-judge.ts';
+import { imageJudgmentSignal, type MediaJudgment } from '../source-index/media-judge.ts';
 import { SOURCE_EXCLUSION_PATH_METADATA_KEYS } from '../../core/source-ingestion-exclusions.ts';
 import type {
   SourceItemIdentity,
@@ -454,8 +454,9 @@ export function createConnectorStoreExtractionSink(
         };
       }
 
-      if (!route && options.recordContentTier !== false
-        && (!checkedPicture || store.readOnDemand(plan.item.identity.localItemId, plan.item.identity.sourceVersion ?? ''))) {
+      if (!route && options.recordContentTier !== false && store.trustDomain !== 'secure_local'
+        && (!checkedPicture || imageJudgmentSignal(judgment).textDecides
+          || store.readOnDemand(plan.item.identity.localItemId, plan.item.identity.sourceVersion ?? ''))) {
         return { accepted: false, chunksIndexed: 0, chunksAwaitingEmbedding: 0, skippedReason: EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE };
       }
       let landingStore = store;
@@ -595,7 +596,7 @@ function secretsFloorHolds(store: LocalConnectorStore, item: RawItem, text: stri
     if (override.tier === 'secure' || routed) return false;
   }
   if (override?.kind === 'not_secret') return false;
-  return detectSecretFindingKinds(text).length > 0;
+  return detectSecretFindingKinds(text).length > 0 || hasCredentialUrl(text);
 }
 
 /**

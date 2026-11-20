@@ -34,6 +34,8 @@ import {
 import { redactTelegramCaptureSpoolSecrets } from '../src/workers/telegram-messages/capture-spool-connector.ts';
 import { forgetSpoolOffsets } from '../src/workers/telegram-messages/spool-lines.ts';
 import { createLaneTieredStoreSet } from '../src/workers/connector-store/tiered-store-set.ts';
+import { tierSetForLedger } from '../src/workers/connector-store/tier-set-registry.ts';
+import { expectHeldThenPersonal } from './helpers/tier-fixtures.ts';
 
 const ACCOUNT = 'telegram.personal';
 const CAPTURED_AT = '2026-10-20T10:00:00.000Z';
@@ -107,6 +109,13 @@ function stores(spoolDir: string) {
     trustDomain: 'secure_local',
   });
   return { internal, secureLocal, close() { internal.close(); secureLocal.close(); } };
+}
+
+function expectCapturedBodyHeldThenPersonal(store: LocalConnectorStore, id: string, text: string) {
+  return expectHeldThenPersonal(tierSetForLedger(store.tierLedgerPathInUse())!, {
+    family: 'chat', provider: 'telegram', accountScope: ACCOUNT,
+    providerItemId: id, providerConversationId: 'chat-1', localItemId: `${ACCOUNT}:chat-1:${id}`,
+  }, text);
 }
 
 const ids = (result: ReturnType<typeof readTelegramCaptureSpool>): string[] =>
@@ -492,6 +501,7 @@ describe('review fixes, round 2 (Astra, #545)', () => {
       writeFileSync(join(dir, '2026-10-24.jsonl'), versioned({ text: 'A edited again in the ordinary lane', at: '2026-10-24T09:00:00Z' }));
       await sync.pull();
       await sync.pull();
+      await expectCapturedBodyHeldThenPersonal(s.internal, 'A', 'A edited again in the ordinary lane');
       expect(contentOf(s.internal)).toBe('A edited again in the ordinary lane');
       expect(s.internal.searchItems('ordinary', 5)).toHaveLength(1);
     } finally {
@@ -567,6 +577,7 @@ describe('review bot findings (#545)', () => {
       const sync = createTelegramConnectorStoreSyncHandler({ stores: s, spoolDir: dir, maxItems: 2 });
       for (let pull = 0; pull < 6; pull += 1) await sync.pull();
       expect(s.internal.localContent(`${ACCOUNT}:chat-1:C`)?.chunks.join(' ')).toBe('C protected');
+      await expectCapturedBodyHeldThenPersonal(s.internal, 'A', 'A protected');
       expect(s.internal.localContent(`${ACCOUNT}:chat-1:A`)?.chunks.join(' ')).toBe('A protected');
       expect(s.secureLocal.localContent(`${ACCOUNT}:chat-1:A`)).toBeUndefined();
     } finally {

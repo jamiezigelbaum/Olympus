@@ -38,6 +38,7 @@ import {
   PROVIDER,
   CORPORA,
   cloudProvider,
+  expectHeldThenPersonal,
   fixtureConnector,
   identityOf,
   localId,
@@ -270,6 +271,7 @@ describe('P1c: content that lands after listing', () => {
 
     for (const spec of NEW) await lane.sink.accept(request(spec.id, spec.body));
 
+    await expectHeldThenPersonal(lane.set, identityOf('new-integral'), 'quadrants');
     // Reference material: one Personal copy serving names and content.
     expect(lane.ledger.copies(identityOf('new-integral'))).toEqual([
       expect.objectContaining({ corpusId: CORPORA.internal, layers: 'both', state: 'current' }),
@@ -369,6 +371,7 @@ describe('P1c: content that lands after listing', () => {
       expect.objectContaining({ corpusId: CORPORA.secure_local, layers: 'both', state: 'current', embedHold: true }),
     ]);
 
+    await expectHeldThenPersonal(lane.set, identityOf('new-integral'), 'quadrants');
     const cloud = cloudProvider();
     const local = localProvider();
     await lane.stores.internal!.embedChunks({ provider: cloud });
@@ -434,6 +437,7 @@ describe('P1c: status counts a names copy awaiting its text as a file to read', 
 
     for (const spec of NEW) await lane.sink.accept(request(spec.id, spec.body));
 
+    await expectHeldThenPersonal(lane.set, identityOf('new-integral'), 'quadrants');
     // new-scan's text lives in Private now: its names copy here is kept as
     // names only and counted where its text is.
     const after = lane.stores.internal!.status({}).counts;

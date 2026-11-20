@@ -34,7 +34,7 @@ import {
 } from '../src/workers/readwise/tier-set.ts';
 import { createWhatsAppTierLane, WHATSAPP_STORE_PLACEMENT } from '../src/workers/whatsapp/store-sync.ts';
 import { X_BOOKMARKS_SECURE_CORPUS_ID, createXBookmarksTierLane } from '../src/workers/x-bookmarks/tier-set.ts';
-import { cloudProvider, localProvider, snapshotStore } from './helpers/tier-fixtures.ts';
+import { cloudProvider, expectHeldThenPersonal, localProvider, snapshotStore } from './helpers/tier-fixtures.ts';
 import { privacyRuleToTierRule } from '../src/workers/classification/privacy-profile.ts';
 import {
   LocalXBookmarksApiUsageStore,
@@ -231,6 +231,8 @@ describe('P1c Dropbox lane', () => {
     });
     expect((await land('id:integral', 'Integral theory maps quadrants, levels and lines of development.')).accepted).toBe(true);
     expect((await land('id:scan', 'The lab results confirm the diagnosis; patient SSN 123-45-6789 is on file.')).accepted).toBe(true);
+    await expectHeldThenPersonal(lane.set, { family: 'file', provider: 'dropbox', accountScope: 'personal',
+      providerItemId: 'id:integral', localItemId: 'personal:id:integral' }, 'quadrants');
     // Reference material is Personal: searchable (and cloud-embeddable) in the Personal store.
     expect(ids(internal, 'quadrants')).toEqual(['id:integral']);
     // Private content stays Private; its names stay Personal.
@@ -316,6 +318,8 @@ describe('P1c: the owner\'s privacy rules and the shared detectors judge every n
     expect(ids(secure, 'sleep')).toEqual(['id:session']);
     expect(ids(secure, 'board')).toEqual(['id:memo']);
     expect(ids(lane.internal.current(), 'board')).toEqual([]);
+    await expectHeldThenPersonal(lane.set, { family: 'file', provider: 'dropbox', accountScope: 'personal',
+      providerItemId: 'id:book', localItemId: 'personal:id:book' }, 'cartography');
     expect(ids(lane.internal.current(), 'cartography')).toEqual(['id:book']);
 
     const cloud = cloudProvider();

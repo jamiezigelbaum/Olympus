@@ -39,6 +39,7 @@ import {
   contentDigestReason,
   contentHeldForJudgment,
   contentJudgeVerdictReason,
+  isContentJudgeReason,
   maxTier,
   ownerOverrideMatchesDigest,
   ownerOverrideSecretReview,
@@ -1108,21 +1109,30 @@ export class TierLedger {
    */
   applySnifferVerdict(
     identity: TierLedgerIdentity,
-    verdict: {
+    answer: {
       pass: 'metadata' | 'content';
       tier: 'private' | 'secure';
       reason: string;
       modelId: string;
+      /** A fail-safe settlement closes the question without a model verdict. */
+      failSafe?: boolean;
+      /** The complete-text digest carried by the dispatched content question. */
+      contentDigest?: string;
       /** The map revision the question was asked under; a different current one makes the verdict stale. */
       mapRevision?: string;
     },
     options: { placementFor?: (decision: TierDecision) => TierPlacementPlan; questionStillCurrent?: () => boolean } = {},
   ): { outcome: SnifferVerdictOutcome; record: TierLedgerRecord } | undefined {
-    assertTier(verdict.tier);
+    assertTier(answer.tier);
     let outcome: SnifferVerdictOutcome | undefined;
     this.db.transaction(() => {
       const existing = this.readRow(identity);
       if (!existing) return;
+      const reason = answer.pass === 'content' && !answer.reason.startsWith('content:sniffer:')
+        ? `content:sniffer:${answer.modelId}:${answer.reason}`
+        : answer.reason;
+      const failSafe = answer.failSafe === true || (answer.pass === 'content' && !isContentJudgeReason(reason));
+      const verdict = { ...answer, reason, failSafe, tier: failSafe ? 'secure' as const : answer.tier };
       // Checked under the ledger write lock: a newer queued version cannot
       // be settled by an answer to superseded material.
       if (options.questionStillCurrent && !options.questionStillCurrent()) {
@@ -1130,6 +1140,10 @@ export class TierLedger {
         return;
       }
       const question = this.rejudgeQuestion(identity);
+      if (verdict.contentDigest !== undefined && !(question?.decision ?? existing).reasons.includes(verdict.contentDigest)) {
+        outcome = 'stale_question';
+        return;
+      }
       if (question) {
         outcome = this.answerRejudgeQuestion(identity, question, verdict, options);
         return;
@@ -1187,8 +1201,8 @@ export class TierLedger {
           reasons: [
             ...metadataReasons,
             ...contentReasons.filter((reason) => !isOpenSnifferReason(reason, 'content') && !reason.startsWith('content:judge_verdict:')),
-            verdict.reason,
-            ...contentVerdictReceipts(contentReasons, verdict.reason, verdict.tier),
+            reason,
+            ...(!verdict.failSafe ? contentVerdictReceipts(contentReasons, reason, verdict.tier) : []),
           ],
           contentPending: false,
         };
@@ -1221,7 +1235,7 @@ export class TierLedger {
   private answerRejudgeQuestion(
     identity: TierLedgerIdentity,
     question: TierRejudgeQuestion,
-    verdict: { pass: 'metadata' | 'content'; tier: 'private' | 'secure'; reason: string; modelId: string; mapRevision?: string },
+    verdict: { pass: 'metadata' | 'content'; tier: 'private' | 'secure'; reason: string; modelId: string; mapRevision?: string; failSafe?: boolean },
     options: { placementFor?: (decision: TierDecision) => TierPlacementPlan },
   ): SnifferVerdictOutcome {
     const base = question.decision;
@@ -1250,7 +1264,7 @@ export class TierLedger {
       contentTier,
       decidedBy: 'sniffer',
       reasons: [...(verdict.pass === 'metadata' ? settleStoredNamesMark(kept, base.metadataTier, metadataTier) : kept), verdict.reason,
-        ...(verdict.pass === 'content' ? contentVerdictReceipts(kept, verdict.reason, verdict.tier) : [])],
+        ...(verdict.pass === 'content' && !verdict.failSafe ? contentVerdictReceipts(kept, verdict.reason, verdict.tier) : [])],
       metadataPending,
       contentPending,
       state: metadataPending || contentPending ? 'pending' : 'current',
@@ -5947,7 +5961,9 @@ function retainHiddenRaise(
     if (raisedRank <= trustDomainRank(source.trustDomain)) return 'public';
     const planned = nextPlacement && copyServingLayer(nextPlacement.copies, layer);
     const plannedRank = planned ? trustDomainRank(planned.trustDomain) : decisionLayerRank(next, layer);
-    return plannedRank < raisedRank ? TIER_KEYS[raisedRank]! : 'public';
+    if (plannedRank < raisedRank) return TIER_KEYS[raisedRank]!;
+    // A temporary hold on the replacement cannot lower the queued tier of the stored bytes.
+    return layer === 'content' ? queued.contentTier : queued.metadataTier;
   };
   const metadataTier = maxTier(next.metadataTier, floor('metadata'));
   const contentTier = maxTier(maxTier(next.contentTier, floor('content')), metadataTier);

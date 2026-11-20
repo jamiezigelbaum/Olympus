@@ -70,6 +70,7 @@ import {
   hasCredentialUrl,
   contentHeldForJudgment,
   personalContentAuthorized,
+  type ImageJudgmentSignal,
   type TierDecidedBy,
   type TierDecision,
   type TierKey,
@@ -294,7 +295,7 @@ export interface TieredStoreSetRun {
 }
 
 type Plan =
-  | { kind: 'legacy' }
+  | { kind: 'legacy'; reobserveOnly?: true }
   | { kind: 'routed'; writeListedBody?: true; copies: ReadonlyMap<string, TierCopyLayers>; sensitivity: ReadonlyMap<string, SourceSensitivity> }
   | { kind: 'hold'; reason: 'move_queued' | 'content_unread' | 'secrets'; location?: true }
   | { kind: 'delete'; corpora: ReadonlySet<string>; reason: 'provider_deleted' | 'secrets'; location?: true };
@@ -742,11 +743,12 @@ export class TieredStoreSet {
   }
 
   /** Accept a Personal content placement only with authority for the supplied body. */
-  checkedBodyDecision(identity: SourceItemIdentity, decision: TierDecision, text: string): TierDecision {
+  checkedBodyDecision(identity: SourceItemIdentity, decision: TierDecision, text: string, imageJudgment?: ImageJudgmentSignal): TierDecision {
     if (decision.contentPending) return decision;
     const destination = copyServingLayer(this.placementFor(decision).copies, 'content');
     const override = this.ledger.getOverride(identity);
-    return destination?.trustDomain === 'internal' && !personalContentAuthorized(decision, text, override?.kind === 'not_secret', override)
+    return destination?.trustDomain === 'internal'
+      && !personalContentAuthorized(decision, text, override?.kind === 'not_secret', override, imageJudgment)
       ? { ...decision, state: 'pending', contentPending: true } : decision;
   }
 
@@ -1948,6 +1950,7 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
   private routeFor(plan: Plan, corpusId: string, domain: SourceTrustDomain): ConnectorStoreTierRoute {
     switch (plan.kind) {
       case 'legacy':
+        if (plan.reobserveOnly) return { kind: 'elsewhere', reason: 'routed_to_other_tier' };
         return this.set.legSpec(domain)?.legacy === true
           ? { kind: 'legacy' }
           : { kind: 'elsewhere', reason: 'routed_to_other_tier' };
@@ -2030,9 +2033,15 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     const classification = this.classification;
     // Names-only by the owner's choice: the text never arrives, so the names
     // are the whole decision and the item never waits on it.
+    // Re-observing an existing copy can refresh its owner without writing body bytes.
+    const repeatedLegacyBody = !routed && hasRow && text !== undefined && !input.contentFetchFailed && !input.sourceScope
+      && this.set.store(input.legacy.trustDomain)?.repeatsListedCopy(item, text, connector.id);
+    const arrivingBody = text !== undefined && (routed
+      ? !before.reasons.includes(contentDigestReason(text)) && ledger.copies(identity).length > 0
+      : hasRow && !repeatedLegacyBody);
     let decision = decideItemTiers(connector, item, text, classification, ledger, {
       namesOnly,
-      requireContentVerdict: hasRow && !routed,
+      requireContentVerdict: arrivingBody,
       afterFirstImport: ledger.listingCaughtUp(connector.id),
       ...(freshSecretReplacement ? { freshSecretReplacement: true } : {}),
       ...(input.contentFetchFailed ? { contentFetchFailed: true } : {}),
@@ -2051,7 +2060,13 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     }
     this.recordSecretLocation(input, text, decision);
     const contentRead = decision.contentRead && !input.contentFetchFailed;
-    if (!routed && hasRow && contentRead && text !== undefined) {
+    if (repeatedLegacyBody && decision.state === 'current' && decision.decidedBy === 'default'
+      && decision.metadataTier === 'private' && decision.contentTier === 'private'
+      && decision.reasons.includes('content:no_raise') && !ledger.writeIntent(identity)) {
+      this.counts.itemsLegacy += 1;
+      return { kind: 'legacy', reobserveOnly: true };
+    }
+    if ((arrivingBody || (!routed && hasRow)) && contentRead && text !== undefined) {
       decision = this.set.checkedBodyDecision(identity, decision, text);
     }
     if (!routed) {
@@ -2129,6 +2144,16 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     const { identity } = item;
     const { ledger } = this.set;
     const routed = before?.routed === true;
+    // A held input can retry its new body once the old body's move completes.
+    // Leave that move intact only when the names agree and the new body has no higher verdict.
+    if (before?.state === 'moving' && item.holdContentUntilJudged && decision.contentPending && !decision.metadataPending
+      && before.targetMetadataTier === decision.metadataTier && before.targetContentTier === decision.contentTier
+      && decision.reasons.some(reason => reason.startsWith('content:names:') && before.reasons.includes(reason))
+      && decision.reasons.some(reason => reason.startsWith('metadata:names_input:') && before.reasons.includes(reason))
+      && decision.reasons.some(reason => reason.startsWith('content:sha256:') && !before.reasons.includes(reason))) {
+      this.counts.movesQueued += 1;
+      return { kind: 'hold', reason: 'move_queued' };
+    }
     let placement = this.set.placementFor(decision, { contentArrivesLater: deferred });
     const currentCopies = ledger.copies(identity).filter(copy => copy.state === 'current');
     const fromContent = copyServingLayer(currentCopies, 'content');

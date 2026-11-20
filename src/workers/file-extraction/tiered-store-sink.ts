@@ -28,7 +28,7 @@ import {
   type SourceTrustDomain,
 } from '../../core/source-index/types.ts';
 import { detectSecretFindingKinds } from '../classification/engine.ts';
-import { CONTENT_NAMES_ONLY_LIFTED_REASON, CONTENT_NAMES_ONLY_REASON, OWNER_OVERRIDE_SECRET_REVIEW_REASON, arrivalOrderedSniffer, classifyContentTier, heldUntilJudged, maxTier, namesDecidedByOwner, type TierDecision, type TierKey } from '../classification/tier-classifier.ts';
+import { CONTENT_NAMES_ONLY_LIFTED_REASON, CONTENT_NAMES_ONLY_REASON, OWNER_OVERRIDE_SECRET_REVIEW_REASON, arrivalOrderedSniffer, classifyContentTier, contentHeldForJudgment, heldUntilJudged, maxTier, namesDecidedByOwner, type TierDecision, type TierKey } from '../classification/tier-classifier.ts';
 import { copyServingLayer, isFailSafeMissingContentQuestion, placementIsRaise, trustDomainRank, type TierCopy, type TierLedgerRecord, type TierPlacementPlan } from '../classification/tier-ledger.ts';
 import type { ConnectorStoreOwnershipKind, LocalConnectorStore } from '../connector-store/index.ts';
 import { parentNamesContext } from '../connector-store/parent-context.ts';
@@ -215,7 +215,7 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
       // (Private, embedding held) rather than made without them.
       const held = tierClassification?.unavailableReason !== undefined && content.contentTier !== 'secrets';
       const contentPending = content.contentPending || held;
-      const decision: TierDecision = {
+      const decision = set.checkedBodyDecision(plan.item.identity, {
         metadataTier: record.metadataTier,
         contentTier: maxTier(content.contentTier, record.metadataTier),
         decidedBy: content.decidedBy,
@@ -233,7 +233,7 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
         engineVersion: content.engineVersion,
         mapRevision: content.mapRevision,
         snifferId: content.snifferId,
-      };
+      }, request.text, imageJudgment && imageJudgmentSignal(imageJudgment));
 
       if (decision.contentTier === 'secrets') {
         recordSecret(set, plan.item, request.text, {
@@ -309,6 +309,14 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
       // First landing. The names stay exactly where they are.
       const namesStay = placement.copies.some((copy) => copy.corpusId === anchor.corpusId && copy.layers !== 'content');
       if (!namesStay) {
+        if (decision.contentPending && !contentPending) {
+          // A provisional Personal default has no body authority. Stage the
+          // incoming text and its names together in Private on unsplit sets.
+          const route = tieredRepresentationLanding({
+            set, anchor: anchorStore, classification: classificationNow, replaceStoredContent: true,
+          });
+          return sinkFor(anchorStore, route).accept(request);
+        }
         ledger.recordRoutedPlacement(identity, decision, placement);
         return skipped(EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED);
       }
@@ -401,7 +409,7 @@ export function tieredRepresentationLanding(options: {
 }): NonNullable<ConnectorStoreRepresentationRestoreOptions['route']> {
   const { set, anchor } = options;
   const ledger = set.ledger;
-  return ({ item, expectation }) => {
+  return ({ item, expectation, media }) => {
     if (item.content.kind !== 'text') return undefined;
     const { identity } = item;
     const prior = ledger.getCurrent(identity);
@@ -414,8 +422,13 @@ export function tieredRepresentationLanding(options: {
     const connector = options.connector ?? { classificationSignals: () => storedSignals(source) };
     const read = ledger.classificationRead(identity, text);
     const override = read.override;
+    const imageJudgment = media?.judgment ? imageJudgmentSignal(media.judgment) : undefined;
+    const parentContext = classification?.sniffer ? parentNamesContext(set, identity) : undefined;
     let decision = decideItemTiers(connector, item, text, classification, ledger, {
-      requireContentVerdict: true, classificationRead: read,
+      requireContentVerdict: imageJudgment?.verdict !== 'ordinary' || imageJudgment.textDecides === true,
+      classificationRead: read,
+      ...(parentContext ? { parentContext } : {}),
+      ...(imageJudgment ? { imageJudgment } : {}),
     });
     if (decision.contentTier === 'secrets') {
       if (set.openStores().some((store) => {
@@ -444,7 +457,35 @@ export function tieredRepresentationLanding(options: {
       decision = { ...decision, state: 'pending', metadataPending: true, contentPending: true,
         reasons: [...decision.reasons, `content:${classification.unavailableReason}`] };
     }
-    decision = set.checkedBodyDecision(identity, decision, text);
+    decision = set.checkedBodyDecision(identity, decision, text, imageJudgment);
+    const hasLowerCopy = () => set.openStores().some(store =>
+      trustDomainRank(store.trustDomain) < trustDomainRank(anchor.trustDomain) && store.itemPresence(identity).active);
+    // A settled Private body can stay in its only legacy Private row.
+    if (prior && !prior.routed && anchor.trustDomain === 'secure_local'
+      && prior.state !== 'moving' && decision.contentTier === 'secure'
+      && decision.state === 'current' && !contentHeldForJudgment(decision) && !read.secret && !hasLowerCopy()) {
+      const preservedPlacementCurrent = () => {
+        const current = ledger.getCurrent(identity);
+        const now = ledger.classificationRead(identity);
+        return current?.routed === false && current.generation === prior.generation && current.state === prior.state
+          && !now.secret && now.scrubRevision === read.scrubRevision
+          && JSON.stringify(now.override ?? null) === JSON.stringify(override ?? null)
+          && !hasLowerCopy();
+      };
+      return {
+        store: anchor,
+        sensitivity: buildSourceSensitivity({ trustTier: set.restingTierFor(anchor.trustDomain), trustDomain: anchor.trustDomain }),
+        prepare: () => ledger.withMoveBatch(preservedPlacementCurrent),
+        landed: () => {
+          ledger.withMoveBatch(() => {
+            if (!preservedPlacementCurrent()) return;
+            ledger.recordContentDecision(identity, {
+              ...decision, reasons: decision.reasons.filter(reason => reason.startsWith('content:')),
+            });
+          });
+        },
+      };
+    }
     const placement = set.placementFor(decision);
     const contentCopy = copyServingLayer(placement.copies, 'content');
     const store = contentCopy ? set.store(contentCopy.trustDomain, { create: true }) : undefined;

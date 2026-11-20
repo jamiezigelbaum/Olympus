@@ -28,6 +28,7 @@ import {
   contentDigestReason,
   contentNamesReason,
   hasContentJudgeVerdict,
+  isContentJudgeReason,
   namesInputReason,
   OWNER_OVERRIDE_SECRET_REVIEW_REASON,
   OWNER_OVERRIDE_SECRET_CONFIRMED_REASON,
@@ -35,6 +36,7 @@ import {
   arrivalOrderedSniffer,
   conversationOrderedSniffer,
   heldUntilJudged,
+  type ImageJudgmentSignal,
   type OwnerTierRule,
   type TierDecision,
   type TierSniffer,
@@ -209,6 +211,8 @@ export function decideItemTiers(
   extra: {
     namesOnly?: boolean;
     requireContentVerdict?: boolean;
+    parentContext?: string;
+    imageJudgment?: ImageJudgmentSignal;
     contentFetchFailed?: boolean;
     /** The source read a replacement for the Secret body recorded previously. */
     freshSecretReplacement?: true;
@@ -236,9 +240,9 @@ export function decideItemTiers(
     ? secretFencedSniffer(options.sniffer, ledger, item.identity, read, { mayAskSecret: fresh })
     : options?.sniffer;
   const signals = connector.classificationSignals(item);
-  const parentContext = item.identity.parent
+  const parentContext = extra.parentContext ?? (item.identity.parent
     ? options?.parentNamesContext?.(item.identity, item.identity.parent.localItemId)
-    : undefined;
+    : undefined);
   const namesReceipt = contentNamesReason(signals, parentContext);
   // A re-judge can have cached the new body with the store's representation
   // of the names. That verdict is eligible only for this same item with
@@ -285,6 +289,7 @@ export function decideItemTiers(
       ...(extra.namesOnly ? { namesOnly: true } : {}),
       ...(holdUntilJudged ? { holdUntilJudged: true } : {}),
       ...(parentContext ? { parentContext } : {}),
+      ...(extra.imageJudgment ? { imageJudgment: extra.imageJudgment } : {}),
       mimeType: item.mimeType,
       hasNonTextContent: itemHasNonTextContent(item),
       titleIsConversation: item.metadata.titleIsConversation === true,
@@ -339,7 +344,16 @@ export function recordedContentVerdictSniffer(
   const code = recorded.reasons.find((reason) => reason.startsWith(prefix))?.slice(prefix.length);
   if ((tier !== 'private' && tier !== 'secure') || !code || code === 'undecided'
     || isFailSafeMissingContentQuestion(`${prefix}${code}`)) return sniffer;
-  const judgeBacked = hasContentJudgeVerdict(recorded.reasons, tier, contentDigestReason(text));
+  const digest = contentDigestReason(text);
+  const reason = prefix + code;
+  // Pre-binding ledgers stored the decided tier, model reason, names and digest together.
+  const legacyVerdict = recorded.state === 'current' && recorded.decidedBy === 'sniffer'
+    && recorded.reasons.filter(r => r.startsWith('content:sha256:')).length === 1
+    && recorded.reasons.filter(r => r.startsWith('content:names:')).length === 1
+    && recorded.reasons.filter(r => r.startsWith('content:sniffer:')).length === 1
+    && !recorded.reasons.some(r => r.startsWith('content:judge_verdict:'))
+    && isContentJudgeReason(reason);
+  const judgeBacked = legacyVerdict || hasContentJudgeVerdict(recorded.reasons, tier, digest);
   if (tier === 'private' && !judgeBacked) return sniffer;
   const duplicate = judgeBacked && code.startsWith('rule:duplicate_model:');
   const verdict = { tier, code, ...(duplicate ? { rule: 'duplicate_model' } : {}),

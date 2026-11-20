@@ -16069,6 +16069,7 @@ var init_store_sink = __esm(() => {
   init_secrets_disposition();
   init_tiered_store_set();
   init_tiered_store_sink();
+  init_media_judge();
   init_source_ingestion_exclusions();
   init_connector_store2();
 });

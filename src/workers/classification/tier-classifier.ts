@@ -352,16 +352,21 @@ export function contentJudgeVerdictReason(reason: string, tier: TierKey, digest:
   return `content:judge_verdict:${tier}:${createHash('sha256').update(JSON.stringify([reason, digest])).digest('hex')}`;
 }
 
-/** Whether the recorded model answer is bound to this complete-text digest. */
-export function hasContentJudgeVerdict(reasons: readonly string[], tier: TierKey, digest: string): boolean {
-  return reasons.some(reason => reason.startsWith('content:sniffer:')
+/** A content verdict reason, excluding open questions and fail-safe settlements. */
+export function isContentJudgeReason(reason: string): boolean {
+  return reason.startsWith('content:sniffer:')
     && (!reason.includes(':rule:') || reason.includes(':rule:duplicate_model:'))
     && !reason.includes(':fail_safe:')
     && !reason.endsWith(':fail_safe')
     && !reason.includes(':injection:')
     && !reason.endsWith(':undecided')
     && !reason.endsWith(':unresolved:0.00')
-    && !reason.endsWith(':union:decision:failed')
+    && !reason.endsWith(':union:decision:failed');
+}
+
+/** Whether the recorded model answer is bound to this complete-text digest. */
+export function hasContentJudgeVerdict(reasons: readonly string[], tier: TierKey, digest: string): boolean {
+  return reasons.some(reason => isContentJudgeReason(reason)
     && reasons.includes(contentJudgeVerdictReason(reason, tier, digest)));
 }
 
@@ -1302,7 +1307,7 @@ function contentPass(args: {
       const reason = `content:sniffer:${args.sniffer.id}:${recorded.code}`;
       const verdict = withSnifferVerdict(decided, recorded.tier, reason);
       if (recorded.origin === 'model') verdict.reasons.push('content:provenance:model');
-      if (recorded.origin === 'model' || recorded.rule === 'duplicate_model') verdict.reasons.push(
+      if (isContentJudgeReason(reason) && (recorded.origin !== 'rule' || recorded.rule === 'duplicate_model')) verdict.reasons.push(
         contentJudgeVerdictReason(reason, recorded.tier, contentDigestReason(text)));
       if (recorded.rule) verdict.reasons.push(`content:rule:${recorded.rule}`);
       return { ...verdict, reasons: [...verdict.reasons, ...mark], pending: false };
@@ -1337,6 +1342,10 @@ function contentPass(args: {
     ...(args.matchInput.path ? { path: args.matchInput.path } : {}),
   });
   const canAskSniffer = args.sniffer.id !== UNDECIDED_TIER_SNIFFER.id;
+  // A historical source-wide prior can still hold placement while the
+  // sniffer decides the item's own text independently.
+  const retiredPrior = metadata.decidedBy === 'source_prior' && restsOnRetiredSourcePrior(metadata.reasons)
+    && metadata.flags.length === 0 && !metadata.reasons.some(reason => reason.startsWith('metadata:floor:'));
   if (detection.signals.length > 0) {
     decided = maxVerdict(decided, {
       tier: 'secure',
@@ -1362,26 +1371,29 @@ function contentPass(args: {
   ];
   if (canAskSniffer && flags.length === 0 && metadata.ownerDecided !== true) flags.push(CONTENT_READ_SNIFFER_FLAG);
   const reasons = [...decided.reasons];
-  if (flags.length > 0 && tierRank(decided.tier) < tierRank('secure')) {
+  if (flags.length > 0 && (tierRank(decided.tier) < tierRank('secure')
+    || (retiredPrior && canAskSniffer && detection.signals.length === 0))) {
+    const digest = contentDigestReason(text);
     const verdict = args.sniffer.judge({
       pass: 'content',
       priority: args.holdUntilJudged === true ? HELD_UNTIL_JUDGED_PRIORITY
         : recordFlags.length > 0 || metadata.pending ? HELD_RECORD_PRIORITY : 0,
-      flags: args.textOnly && !args.parentContext?.trim()
-        ? [...flags, contentDigestReason(text), contentNamesReason(args.signals, args.parentContext)] : flags,
+      flags: [...flags, digest, contentNamesReason(args.signals, args.parentContext)],
       material: snifferContentMaterial(args.names, snifferExcerpt(text, vocabularyTerms(detection.vocabulary)), args.parentContext),
       materialHash: tierSnifferInputHash('content', args.signals, text, args.parentContext),
       ...(args.textOnly && !args.parentContext?.trim() ? { contentHash: normalizedContentHash(text) } : {}),
       mapRevision: args.mapRevision,
       ...(args.subject ? { subject: args.subject } : {}),
     });
-    if (verdict.verdict === 'decided' && (!held || verdict.tier !== 'private'
-      || verdict.origin === 'model' || verdict.rule === 'duplicate_model')) {
-      decided = withSnifferVerdict(decided, verdict.tier, `content:sniffer:${args.sniffer.id}:${verdict.code}`);
+    const reason = verdict.verdict === 'decided' ? `content:sniffer:${args.sniffer.id}:${verdict.code}` : undefined;
+    // The sniffer interface also accepts direct decisions without provenance.
+    const judged = verdict.verdict === 'decided' && reason !== undefined && isContentJudgeReason(reason)
+      && (verdict.origin !== 'rule' || verdict.rule === 'duplicate_model');
+    if (verdict.verdict === 'decided' && reason !== undefined && (!held || verdict.tier !== 'private' || judged)) {
+      decided = withSnifferVerdict(decided, verdict.tier, reason);
       reasons.splice(0, reasons.length, ...decided.reasons);
       if (verdict.origin === 'model') reasons.push('content:provenance:model');
-      if (verdict.origin === 'model' || verdict.rule === 'duplicate_model' || (textDecides && verdict.origin === undefined)) reasons.push(
-        contentJudgeVerdictReason(`content:sniffer:${args.sniffer.id}:${verdict.code}`, verdict.tier, contentDigestReason(text)));
+      if (judged) reasons.push(contentJudgeVerdictReason(reason, verdict.tier, digest));
       if (verdict.origin === 'rule' && verdict.rule) reasons.push(`content:rule:${verdict.rule}`);
     } else {
       pending = true;

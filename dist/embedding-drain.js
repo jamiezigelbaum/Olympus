@@ -11692,8 +11692,11 @@ function ownerOverrideSecretReview(reasons) {
 function contentJudgeVerdictReason(reason, tier, digest) {
   return `content:judge_verdict:${tier}:${createHash5("sha256").update(JSON.stringify([reason, digest])).digest("hex")}`;
 }
+function isContentJudgeReason(reason) {
+  return reason.startsWith("content:sniffer:") && (!reason.includes(":rule:") || reason.includes(":rule:duplicate_model:")) && !reason.includes(":fail_safe:") && !reason.endsWith(":fail_safe") && !reason.includes(":injection:") && !reason.endsWith(":undecided") && !reason.endsWith(":unresolved:0.00") && !reason.endsWith(":union:decision:failed");
+}
 function hasContentJudgeVerdict(reasons, tier, digest) {
-  return reasons.some((reason) => reason.startsWith("content:sniffer:") && (!reason.includes(":rule:") || reason.includes(":rule:duplicate_model:")) && !reason.includes(":fail_safe:") && !reason.endsWith(":fail_safe") && !reason.includes(":injection:") && !reason.endsWith(":undecided") && !reason.endsWith(":unresolved:0.00") && !reason.endsWith(":union:decision:failed") && reasons.includes(contentJudgeVerdictReason(reason, tier, digest)));
+  return reasons.some((reason) => isContentJudgeReason(reason) && reasons.includes(contentJudgeVerdictReason(reason, tier, digest)));
 }
 function contentNamesReason(names, parentContext) {
   const parts = [names.title, names.path, names.sender, parentContext].map((part) => part?.trim() ?? "");
@@ -11984,6 +11987,10 @@ function classifyContentTier(input, options = {}) {
     contentPending: content.pending || content.tier !== "secrets" && !text.trim() && (input.hasNonTextContent === true || !textOnlyMime(input.mimeType))
   };
 }
+var RETIRED_SOURCE_PRIOR_REASON = "metadata:prior:source_";
+function restsOnRetiredSourcePrior(reasons) {
+  return reasons.some((reason) => reason.startsWith(RETIRED_SOURCE_PRIOR_REASON));
+}
 function namesDecidedByOwner(reasons) {
   return reasons.some((reason) => reason.startsWith("metadata:owner_rule:"));
 }
@@ -12141,7 +12148,7 @@ function contentPass(args) {
       const verdict = withSnifferVerdict(decided, recorded.tier, reason);
       if (recorded.origin === "model")
         verdict.reasons.push("content:provenance:model");
-      if (recorded.origin === "model" || recorded.rule === "duplicate_model")
+      if (isContentJudgeReason(reason) && (recorded.origin !== "rule" || recorded.rule === "duplicate_model"))
         verdict.reasons.push(contentJudgeVerdictReason(reason, recorded.tier, contentDigestReason(text)));
       if (recorded.rule)
         verdict.reasons.push(`content:rule:${recorded.rule}`);
@@ -12170,6 +12177,7 @@ function contentPass(args) {
     ...args.matchInput.path ? { path: args.matchInput.path } : {}
   });
   const canAskSniffer = args.sniffer.id !== UNDECIDED_TIER_SNIFFER.id;
+  const retiredPrior = metadata.decidedBy === "source_prior" && restsOnRetiredSourcePrior(metadata.reasons) && metadata.flags.length === 0 && !metadata.reasons.some((reason) => reason.startsWith("metadata:floor:"));
   if (detection.signals.length > 0) {
     decided = maxVerdict(decided, {
       tier: "secure",
@@ -12188,24 +12196,27 @@ function contentPass(args) {
   if (canAskSniffer && flags.length === 0 && metadata.ownerDecided !== true)
     flags.push(CONTENT_READ_SNIFFER_FLAG);
   const reasons = [...decided.reasons];
-  if (flags.length > 0 && tierRank(decided.tier) < tierRank("secure")) {
+  if (flags.length > 0 && (tierRank(decided.tier) < tierRank("secure") || retiredPrior && canAskSniffer && detection.signals.length === 0)) {
+    const digest = contentDigestReason(text);
     const verdict = args.sniffer.judge({
       pass: "content",
       priority: args.holdUntilJudged === true ? HELD_UNTIL_JUDGED_PRIORITY : recordFlags.length > 0 || metadata.pending ? HELD_RECORD_PRIORITY : 0,
-      flags: args.textOnly && !args.parentContext?.trim() ? [...flags, contentDigestReason(text), contentNamesReason(args.signals, args.parentContext)] : flags,
+      flags: [...flags, digest, contentNamesReason(args.signals, args.parentContext)],
       material: snifferContentMaterial(args.names, snifferExcerpt(text, vocabularyTerms(detection.vocabulary)), args.parentContext),
       materialHash: tierSnifferInputHash("content", args.signals, text, args.parentContext),
       ...args.textOnly && !args.parentContext?.trim() ? { contentHash: normalizedContentHash(text) } : {},
       mapRevision: args.mapRevision,
       ...args.subject ? { subject: args.subject } : {}
     });
-    if (verdict.verdict === "decided" && (!held || verdict.tier !== "private" || verdict.origin === "model" || verdict.rule === "duplicate_model")) {
-      decided = withSnifferVerdict(decided, verdict.tier, `content:sniffer:${args.sniffer.id}:${verdict.code}`);
+    const reason = verdict.verdict === "decided" ? `content:sniffer:${args.sniffer.id}:${verdict.code}` : undefined;
+    const judged = verdict.verdict === "decided" && reason !== undefined && isContentJudgeReason(reason) && (verdict.origin !== "rule" || verdict.rule === "duplicate_model");
+    if (verdict.verdict === "decided" && reason !== undefined && (!held || verdict.tier !== "private" || judged)) {
+      decided = withSnifferVerdict(decided, verdict.tier, reason);
       reasons.splice(0, reasons.length, ...decided.reasons);
       if (verdict.origin === "model")
         reasons.push("content:provenance:model");
-      if (verdict.origin === "model" || verdict.rule === "duplicate_model" || textDecides && verdict.origin === undefined)
-        reasons.push(contentJudgeVerdictReason(`content:sniffer:${args.sniffer.id}:${verdict.code}`, verdict.tier, contentDigestReason(text)));
+      if (judged)
+        reasons.push(contentJudgeVerdictReason(reason, verdict.tier, digest));
       if (verdict.origin === "rule" && verdict.rule)
         reasons.push(`content:rule:${verdict.rule}`);
     } else {
@@ -13060,18 +13071,25 @@ class TierLedger {
     this.writeRow(identity, rowOfDecision(decision), undefined, this.readRow(identity));
     return "updated";
   }
-  applySnifferVerdict(identity, verdict, options = {}) {
-    assertTier(verdict.tier);
+  applySnifferVerdict(identity, answer, options = {}) {
+    assertTier(answer.tier);
     let outcome;
     this.db.transaction(() => {
       const existing = this.readRow(identity);
       if (!existing)
         return;
+      const reason = answer.pass === "content" && !answer.reason.startsWith("content:sniffer:") ? `content:sniffer:${answer.modelId}:${answer.reason}` : answer.reason;
+      const failSafe = answer.failSafe === true || answer.pass === "content" && !isContentJudgeReason(reason);
+      const verdict = { ...answer, reason, failSafe, tier: failSafe ? "secure" : answer.tier };
       if (options.questionStillCurrent && !options.questionStillCurrent()) {
         outcome = "stale_question";
         return;
       }
       const question = this.rejudgeQuestion(identity);
+      if (verdict.contentDigest !== undefined && !(question?.decision ?? existing).reasons.includes(verdict.contentDigest)) {
+        outcome = "stale_question";
+        return;
+      }
       if (question) {
         outcome = this.answerRejudgeQuestion(identity, question, verdict, options);
         return;
@@ -13125,8 +13143,8 @@ class TierLedger {
           reasons: [
             ...metadataReasons,
             ...contentReasons.filter((reason) => !isOpenSnifferReason(reason, "content") && !reason.startsWith("content:judge_verdict:")),
-            verdict.reason,
-            ...contentVerdictReceipts(contentReasons, verdict.reason, verdict.tier)
+            reason,
+            ...!verdict.failSafe ? contentVerdictReceipts(contentReasons, reason, verdict.tier) : []
           ],
           contentPending: false
         };
@@ -13176,7 +13194,7 @@ class TierLedger {
       reasons: [
         ...verdict.pass === "metadata" ? settleStoredNamesMark(kept, base.metadataTier, metadataTier) : kept,
         verdict.reason,
-        ...verdict.pass === "content" ? contentVerdictReceipts(kept, verdict.reason, verdict.tier) : []
+        ...verdict.pass === "content" && !verdict.failSafe ? contentVerdictReceipts(kept, verdict.reason, verdict.tier) : []
       ],
       metadataPending,
       contentPending,
@@ -16238,7 +16256,9 @@ function retainHiddenRaise(existing, next, sources, planner, nextPlacement) {
       return "public";
     const planned = nextPlacement && copyServingLayer(nextPlacement.copies, layer);
     const plannedRank = planned ? trustDomainRank(planned.trustDomain) : decisionLayerRank(next, layer);
-    return plannedRank < raisedRank ? TIER_KEYS[raisedRank] : "public";
+    if (plannedRank < raisedRank)
+      return TIER_KEYS[raisedRank];
+    return layer === "content" ? queued.contentTier : queued.metadataTier;
   };
   const metadataTier = maxTier(next.metadataTier, floor("metadata"));
   const contentTier = maxTier(maxTier(next.contentTier, floor("content")), metadataTier);
@@ -20288,7 +20308,7 @@ function retire(stopped, error) {
 function offThreadReadsSupported(dbPath) {
   return dbPath !== ":memory:" && !dbPath.startsWith("file::memory:") && runtimeHasWorkers();
 }
-function send(reader, message, statementTiming) {
+function send(reader, message, statementTiming, job) {
   if (reader.retired)
     return Promise.reject(new Error("off-thread reader stopped"));
   const id = nextId++;
@@ -20296,7 +20316,11 @@ function send(reader, message, statementTiming) {
     reader.pending.set(id, { resolve, reject, ...statementTiming ? { statementTiming } : {} });
     armLostReplyCheck();
     try {
+      if (job)
+        observer?.(job.store, job.read);
       reader.worker.postMessage({ ...message, id, ...statementTiming ? { measureCpu: true } : {} });
+      if (job)
+        reader.executingStore = job.store;
     } catch (error) {
       reader.pending.delete(id);
       reject(error instanceof Error ? error : new Error(String(error)));
@@ -20654,13 +20678,11 @@ function dispatch() {
       job.running = true;
     }
     reader.job = job;
-    reader.executingStore = job.store;
-    observer?.(job.store, job.read);
     const { sql, params, mode, site } = job.read;
     send(reader, { op: "query", path: job.store, sql, params, mode, ...benchSqlDir && { site: site ?? job.benchSite } }, job.report && ((ms, cpuMs) => {
       job.sqlMs = ms;
       job.cpuMs = cpuMs;
-    })).then((rows) => settle(job, clock2.now() >= job.deadlineAtMs ? { error: new OffThreadReadBusyError } : { rows }), (error) => {
+    }), job).then((rows) => settle(job, clock2.now() >= job.deadlineAtMs ? { error: new OffThreadReadBusyError } : { rows }), (error) => {
       if (error instanceof OffThreadReadLostError && !job.settled && !job.retried) {
         job.retried = true;
         counters.retries += 1;
@@ -21931,7 +21953,7 @@ function decideItemTiers(connector, item, text, options, ledger, extra = {}) {
   const recorded = ledger?.getCurrent(item.identity);
   const fenced = options?.sniffer && ledger && read ? secretFencedSniffer(options.sniffer, ledger, item.identity, read, { mayAskSecret: fresh }) : options?.sniffer;
   const signals = connector.classificationSignals(item);
-  const parentContext = item.identity.parent ? options?.parentNamesContext?.(item.identity, item.identity.parent.localItemId) : undefined;
+  const parentContext = extra.parentContext ?? (item.identity.parent ? options?.parentNamesContext?.(item.identity, item.identity.parent.localItemId) : undefined);
   const namesReceipt = contentNamesReason(signals, parentContext);
   const cacheAware = fenced && {
     id: fenced.id,
@@ -21966,6 +21988,7 @@ function decideItemTiers(connector, item, text, options, ledger, extra = {}) {
     ...extra.namesOnly ? { namesOnly: true } : {},
     ...holdUntilJudged ? { holdUntilJudged: true } : {},
     ...parentContext ? { parentContext } : {},
+    ...extra.imageJudgment ? { imageJudgment: extra.imageJudgment } : {},
     mimeType: item.mimeType,
     hasNonTextContent: itemHasNonTextContent(item),
     titleIsConversation: item.metadata.titleIsConversation === true,
@@ -21998,7 +22021,10 @@ function recordedContentVerdictSniffer(sniffer, recorded, text, names, namesInpu
   const code = recorded.reasons.find((reason) => reason.startsWith(prefix))?.slice(prefix.length);
   if (tier !== "private" && tier !== "secure" || !code || code === "undecided" || isFailSafeMissingContentQuestion(`${prefix}${code}`))
     return sniffer;
-  const judgeBacked = hasContentJudgeVerdict(recorded.reasons, tier, contentDigestReason(text));
+  const digest = contentDigestReason(text);
+  const reason = prefix + code;
+  const legacyVerdict = recorded.state === "current" && recorded.decidedBy === "sniffer" && recorded.reasons.filter((r) => r.startsWith("content:sha256:")).length === 1 && recorded.reasons.filter((r) => r.startsWith("content:names:")).length === 1 && recorded.reasons.filter((r) => r.startsWith("content:sniffer:")).length === 1 && !recorded.reasons.some((r) => r.startsWith("content:judge_verdict:")) && isContentJudgeReason(reason);
+  const judgeBacked = legacyVerdict || hasContentJudgeVerdict(recorded.reasons, tier, digest);
   if (tier === "private" && !judgeBacked)
     return sniffer;
   const duplicate = judgeBacked && code.startsWith("rule:duplicate_model:");
@@ -25803,11 +25829,12 @@ function connectorStoreCurrentEmbeddingRowsQuery(options, ordered, page) {
   const accountScope = normalizeOptionalAccountScope(options.accountScope);
   const selectedFilters = connectorStoreFilterSql(options.filters);
   const metadataOnly = connectorStoreMetadataOnlySql(options.filters, options.onDemandReadsTablePresent);
-  const winnerIdentity = page ? ", c.content_hash AS chunk_content_hash, i.source_version" : "";
+  const winnerIdentity = page ? ", c.content_hash AS chunk_content_hash" : "";
+  const sourceVersion = options.includeSourceVersion ? ", i.source_version" : "";
   if (options.chunkPks) {
     return {
       sql: `
-        SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding${winnerIdentity}
+        SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding${winnerIdentity}${sourceVersion}
         FROM json_each(?) pick
         CROSS JOIN chunk_embeddings emb ON emb.chunk_pk = pick.value AND emb.model_id = ?
         CROSS JOIN chunks c ON c.chunk_pk = emb.chunk_pk
@@ -25833,7 +25860,7 @@ function connectorStoreCurrentEmbeddingRowsQuery(options, ordered, page) {
   }
   return {
     sql: `
-      SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding${winnerIdentity}
+      SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding${winnerIdentity}${sourceVersion}
       ${CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER}
         -- Unary + avoids the model index + repeated whole-model sort (#1242).
         AND ${page ? "+emb.model_id" : "emb.model_id"} = ?
@@ -25867,7 +25894,7 @@ function foldVectorScore(bestByItem, row, queryVector) {
       bestChunkPk: row.chunk_pk,
       bestChunkContentHash: row.chunk_content_hash,
       localItemId: row.local_item_id,
-      sourceVersion: row.source_version
+      sourceVersion: row.source_version ?? null
     });
   }
   return { mismatch: 0, qualified, score };
@@ -25879,6 +25906,7 @@ async function scanVectorPages(read, provider, beforeToken, queryVector, pageOpt
     return { skippedReason: after.skippedReason };
   if (after.token !== beforeToken)
     return { skippedReason: "embedding_authority_changed_during_query" };
+  pageOptions = { ...pageOptions, includeSourceVersion: true };
   if (pageOptions.filters?.metadataOnlyLocatorPathScopes?.length || pageOptions.filters?.metadataOnlySourceScopeFolderKeys?.length) {
     pageOptions = { ...pageOptions, onDemandReadsTablePresent: Boolean(await read({
       mode: "get",
@@ -28459,7 +28487,7 @@ ${parentKey(ref)}`, { ref, origin });
     `).get(item.identity.provider, item.identity.accountScope, normalizeConversationId(item.identity.providerConversationId), item.identity.providerItemId);
     if (!row)
       return;
-    this.rememberItemOwner(row.item_pk, connectorId, ownershipKind, syncRunId, nowIso(), "provider_listing");
+    this.rememberItemOwner(row.item_pk, connectorId, ownershipKind, syncRunId, this.now().toISOString(), "provider_listing");
   }
   tombstoneCopy(identity, options) {
     const syncRunId = `connector-tier-copy-${randomUUID9()}`;
@@ -29774,6 +29802,23 @@ ${parentKey(ref)}`, { ref, origin });
       chunkCount: row.tombstoned === 1 ? 0 : row.chunk_count,
       tombstoned: row.tombstoned === 1
     };
+  }
+  repeatsListedCopy(item, text, connectorId) {
+    if (!this.childItemColumnsPresent)
+      return false;
+    const { identity, metadata } = item;
+    const title = itemTitle(item);
+    const sender = senderMetadataFromRawItem(item);
+    const locator = metadataString2(metadata, "locatorUri") ?? metadataString2(metadata, "pathDisplay") ?? metadataString2(metadata, "url");
+    const chunks = this.db.query(`SELECT c.bounded_text FROM items i JOIN chunks c USING (item_pk)
+      WHERE i.provider = ? AND i.account_scope = ? AND i.normalized_conversation = ? AND i.provider_item_id = ?
+        AND i.tombstoned = 0 AND i.source_version IS ? AND i.title IS ? AND i.search_text IS ?
+        AND i.sender_label IS ? AND i.sender_id IS ? AND i.locator_uri IS ? AND i.mime_type IS ?
+        AND i.parent_local_item_id IS ?
+        AND (i.source_version IS NOT NULL OR EXISTS (
+          SELECT 1 FROM item_owners o WHERE o.item_pk = i.item_pk AND o.connector_id <> ?
+        )) ORDER BY c.chunk_index`).all(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId, identity.sourceVersion ?? null, title ?? null, itemSearchText(item, title) ?? null, sender.senderLabel ?? null, sender.senderId ?? null, locator ?? null, item.mimeType, identity.parent?.localItemId ?? null, connectorId);
+    return chunks.length > 0 && chunks.map((chunk) => chunk.bounded_text).join("") === text.trim();
   }
   itemPresence(identity) {
     const row = this.db.query(`

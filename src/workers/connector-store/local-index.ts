@@ -2535,6 +2535,8 @@ interface ConnectorStoreCurrentEmbeddingRowsOptions {
   accountScope?: string;
   filters?: ConnectorStoreSearchFilters;
   chunkPks?: readonly number[];
+  /** Bind runtime winners to the item version observed while scoring. */
+  includeSourceVersion?: boolean;
   /** Set only after checking sqlite_master on the scan's read snapshot. */
   onDemandReadsTablePresent?: boolean;
   /**
@@ -2574,7 +2576,8 @@ function connectorStoreCurrentEmbeddingRowsQuery(
   const accountScope = normalizeOptionalAccountScope(options.accountScope);
   const selectedFilters = connectorStoreFilterSql(options.filters);
   const metadataOnly = connectorStoreMetadataOnlySql(options.filters, options.onDemandReadsTablePresent);
-  const winnerIdentity = page ? ', c.content_hash AS chunk_content_hash, i.source_version' : '';
+  const winnerIdentity = page ? ', c.content_hash AS chunk_content_hash' : '';
+  const sourceVersion = options.includeSourceVersion ? ', i.source_version' : '';
   if (options.chunkPks) {
     // A re-score names its chunks: the plan must start from that list and
     // seek each chunk's vector by key. Left to the planner, an account scope
@@ -2584,7 +2587,7 @@ function connectorStoreCurrentEmbeddingRowsQuery(
     // 15 Nov). CROSS JOIN fixes SQLite's join order to the order written.
     return {
       sql: `
-        SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding${winnerIdentity}
+        SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding${winnerIdentity}${sourceVersion}
         FROM json_each(?) pick
         CROSS JOIN chunk_embeddings emb ON emb.chunk_pk = pick.value AND emb.model_id = ?
         CROSS JOIN chunks c ON c.chunk_pk = emb.chunk_pk
@@ -2610,7 +2613,7 @@ function connectorStoreCurrentEmbeddingRowsQuery(
   }
   return {
     sql: `
-      SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding${winnerIdentity}
+      SELECT emb.item_pk, emb.chunk_pk, i.local_item_id, emb.embedding${winnerIdentity}${sourceVersion}
       ${CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER}
         -- Unary + avoids the model index + repeated whole-model sort (#1242).
         AND ${page ? '+emb.model_id' : 'emb.model_id'} = ?
@@ -2678,7 +2681,7 @@ type VectorScan =
   }
   | { skippedReason: string };
 
-type VectorScoreRow = { item_pk: number; chunk_pk: number; local_item_id: string; embedding: unknown; chunk_content_hash: string; source_version: string | null };
+type VectorScoreRow = { item_pk: number; chunk_pk: number; local_item_id: string; embedding: unknown; chunk_content_hash: string; source_version?: string | null };
 
 /** Shared exact scoring preserves the winning chunk and deterministic ties. */
 function foldVectorScore(bestByItem: VectorWinners, row: VectorScoreRow, queryVector: readonly number[]): { mismatch: number; qualified: number; score?: number } {
@@ -2691,7 +2694,7 @@ function foldVectorScore(bestByItem: VectorWinners, row: VectorScoreRow, queryVe
     qualified = Number(score >= MIN_VECTOR_SCORE && (!prior || prior.bestCosine < MIN_VECTOR_SCORE));
     bestByItem.set(row.item_pk, {
       bestCosine: score, bestChunkPk: row.chunk_pk, bestChunkContentHash: row.chunk_content_hash,
-      localItemId: row.local_item_id, sourceVersion: row.source_version,
+      localItemId: row.local_item_id, sourceVersion: row.source_version ?? null,
     });
   }
   return { mismatch: 0, qualified, score };
@@ -2722,6 +2725,7 @@ async function scanVectorPages(
   const after = embeddingAuthorityFromRow(await read(authority) as EmbeddingAuthorityRow | null, provider);
   if (after.skippedReason) return { skippedReason: after.skippedReason };
   if (after.token !== beforeToken) return { skippedReason: 'embedding_authority_changed_during_query' };
+  pageOptions = { ...pageOptions, includeSourceVersion: true };
   if (pageOptions.filters?.metadataOnlyLocatorPathScopes?.length || pageOptions.filters?.metadataOnlySourceScopeFolderKeys?.length) {
     pageOptions = { ...pageOptions, onDemandReadsTablePresent: Boolean(await read({ mode: 'get',
       sql: "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'", params: [] })) };
@@ -6857,7 +6861,7 @@ export class LocalConnectorStore {
       item.identity.providerItemId,
     ) as { item_pk: number } | null;
     if (!row) return;
-    this.rememberItemOwner(row.item_pk, connectorId, ownershipKind, syncRunId, nowIso(), 'provider_listing');
+    this.rememberItemOwner(row.item_pk, connectorId, ownershipKind, syncRunId, this.now().toISOString(), 'provider_listing');
   }
 
   /**
@@ -8747,6 +8751,29 @@ export class LocalConnectorStore {
       chunkCount: row.tombstoned === 1 ? 0 : row.chunk_count,
       tombstoned: row.tombstoned === 1,
     };
+  }
+
+  /** Same-version replay or an identical body already kept by another input.
+   * An unversioned listing by its sole owner is a fresh body observation. */
+  repeatsListedCopy(item: RawItem, text: string, connectorId: string): boolean {
+    if (!this.childItemColumnsPresent) return false;
+    const { identity, metadata } = item;
+    const title = itemTitle(item);
+    const sender = senderMetadataFromRawItem(item);
+    const locator = metadataString(metadata, 'locatorUri') ?? metadataString(metadata, 'pathDisplay') ?? metadataString(metadata, 'url');
+    const chunks = this.db.query(`SELECT c.bounded_text FROM items i JOIN chunks c USING (item_pk)
+      WHERE i.provider = ? AND i.account_scope = ? AND i.normalized_conversation = ? AND i.provider_item_id = ?
+        AND i.tombstoned = 0 AND i.source_version IS ? AND i.title IS ? AND i.search_text IS ?
+        AND i.sender_label IS ? AND i.sender_id IS ? AND i.locator_uri IS ? AND i.mime_type IS ?
+        AND i.parent_local_item_id IS ?
+        AND (i.source_version IS NOT NULL OR EXISTS (
+          SELECT 1 FROM item_owners o WHERE o.item_pk = i.item_pk AND o.connector_id <> ?
+        )) ORDER BY c.chunk_index`)
+      .all(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId),
+        identity.providerItemId, identity.sourceVersion ?? null, title ?? null, itemSearchText(item, title) ?? null,
+        sender.senderLabel ?? null, sender.senderId ?? null, locator ?? null, item.mimeType,
+        identity.parent?.localItemId ?? null, connectorId) as Array<{ bounded_text: string }>;
+    return chunks.length > 0 && chunks.map(chunk => chunk.bounded_text).join('') === text.trim();
   }
 
   itemPresence(identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>): ConnectorStoreItemPresence {

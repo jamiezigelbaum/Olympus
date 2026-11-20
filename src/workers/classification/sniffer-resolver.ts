@@ -509,11 +509,15 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
     if (sameQuestion(item.target, item.question) && stillOpen(item.target, item.question, false)
       && !screenQuestion(item.target, item.question)) return;
     const { tier, code } = snifferVerdictTier(verdict, options.lane, item.question.flags);
+    const contentDigest = item.question.pass === 'content'
+      ? item.question.flags.find(flag => flag.startsWith('content:sha256:')) : undefined;
     const applied = item.target.ledger.applySnifferVerdict(item.question, {
       pass: item.question.pass,
       tier,
       reason: `${item.question.pass}:sniffer:${id}:${reused ? 'rule:duplicate_model:' : ''}${code}`,
       modelId: snifferCacheModelId(options.lane),
+      failSafe: verdict.failSafe,
+      ...(contentDigest ? { contentDigest } : {}),
       mapRevision: item.question.mapRevision,
     }, {
       ...(item.target.placementFor ? { placementFor: item.target.placementFor } : {}),
