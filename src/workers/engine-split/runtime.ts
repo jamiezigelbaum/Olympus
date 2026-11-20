@@ -253,7 +253,7 @@ export function createEngineFront(input: {
   let stopped = false;
   const judged = (snapshot: EngineStatusSnapshot, at: number): EngineStatusRead => {
     const read = engineStatusAge(snapshot, at);
-    const written = Date.parse(snapshot.state_at ?? snapshot.written_at);
+    const written = Date.parse(snapshot.written_at);
     if (!read.stale && answering && answering.instance !== snapshot.instance_id && written > answering.at) {
       answering = { instance: snapshot.instance_id, at: written };
     }
@@ -264,12 +264,7 @@ export function createEngineFront(input: {
     const at = now();
     if (stopped || at - lastReadAt < 1_000) return;
     lastReadAt = at;
-    pending = readEngineStatusSnapshotAsync(path).then(async (snapshot) => {
-      if (snapshot?.held_items) {
-        const boot = await readBootProgressAsync(input.env);
-        if (!backgroundBootDone(boot) || boot?.pid !== snapshot.held_items.writer_pid
-          || !(Date.parse(snapshot.held_items.observed_at) >= Date.parse(boot.startedAt))) delete snapshot.held_items;
-      }
+    pending = readEngineStatusSnapshotAsync(path).then((snapshot) => {
       if (stopped) return;
       cached = snapshot;
       if (snapshot && !judged(snapshot, now()).stale) relay?.observeInstance(snapshot.instance_id);

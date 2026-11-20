@@ -844,51 +844,8 @@ export class TierLedgerSchemaError extends Error {
   }
 }
 
-export const TIER_LEDGER_ID_SQL = "SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'";
-
-/** The installed file generation, unchanged by ordinary SQLite writes and checkpoints. */
-export function heldCountFileIdentity(path: string): string | undefined {
-  const file = statSync(path, { bigint: true, throwIfNoEntry: false });
-  return file?.isFile() ? `${file.dev}:${file.ino}:${file.birthtimeNs}` : undefined;
-}
-
-export interface HeldItemCorpus {
-  corpusId: string;
-  /** Null means the whole corpus is selected, as with an imported archive lane. */
-  accountScope: string | null;
-}
-
-export function heldItemCountQuery(corpora: readonly HeldItemCorpus[]): { sql: string; params: string[] } {
-  const scopes = new Map<string | null, string[]>();
-  for (const { corpusId, accountScope } of corpora) {
-    let ids = scopes.get(accountScope);
-    if (!ids) scopes.set(accountScope, ids = []);
-    ids.push(corpusId);
-  }
-  const params: string[] = [];
-  const selected = [...scopes].map(([accountScope, ids]) => {
-    if (accountScope !== null) params.push(accountScope);
-    params.push(JSON.stringify(ids));
-    return `(${accountScope === null ? '' : 't.account_scope = ? AND '}c.corpus_id IN (SELECT value FROM json_each(?)))`;
-  }).join(' OR ');
-  return {
-    sql: `
-      SELECT COUNT(*) AS n FROM tier_items t
-      WHERE t.state IN ('pending', 'moving')
-        AND (t.metadata_pending = 1 OR (t.content_pending = 1 AND t.content_read = 1))
-        AND EXISTS (SELECT 1 FROM tier_copies c
-          WHERE c.provider = t.provider AND c.account_scope = t.account_scope
-            AND c.conversation_key = t.conversation_key AND c.provider_item_id = t.provider_item_id
-            AND (${selected || '0'}))
-    `,
-    params,
-  };
-}
-
 export class TierLedger {
   readonly dbPath: string;
-  /** Identity of the handle opened at mount, for status scope checks without SQLite. */
-  readonly statusMount?: { ledgerId: string; file: string };
   private readonly db: Database;
   private readonly readOnly: boolean;
   private readonly now: () => Date;
@@ -912,7 +869,6 @@ export class TierLedger {
       restrictLedgerFiles(this.dbPath);
     }
     let db: Database | undefined;
-    const openingFile = onDisk ? heldCountFileIdentity(this.dbPath) : undefined;
     try {
       db = new Database(this.dbPath, this.readOnly ? { readonly: true, create: false }
         : options.expectedLedgerId === undefined ? { create: true } : { readwrite: true, create: false });
@@ -921,10 +877,6 @@ export class TierLedger {
         applySqliteMmap(db);
         if (!sqliteSchemaUsable(db, TIER_LEDGER_SQLITE_STORE_ID, TIER_LEDGER_SCHEMA_VERSION)) {
           throw new TierLedgerSchemaError(readSqliteSchemaVersion(db, TIER_LEDGER_SQLITE_STORE_ID));
-        }
-        if (openingFile !== undefined && openingFile === heldCountFileIdentity(this.dbPath)) {
-          const row = db.query(TIER_LEDGER_ID_SQL).get() as { value: string } | null;
-          if (row?.value) this.statusMount = { ledgerId: row.value, file: openingFile };
         }
         this.db = db;
         return;
@@ -952,10 +904,6 @@ export class TierLedger {
       db.exec(`CREATE INDEX IF NOT EXISTS tier_items_override_rows
         ON tier_items (provider, account_scope, conversation_key, provider_item_id) WHERE decided_by = 'override'`);
       if (onDisk) restrictLedgerFiles(this.dbPath);
-      if (openingFile !== undefined && openingFile === heldCountFileIdentity(this.dbPath)) {
-        const row = db.query(TIER_LEDGER_ID_SQL).get() as { value: string } | null;
-        if (row?.value) this.statusMount = { ledgerId: row.value, file: openingFile };
-      }
     } catch (error) {
       if (db) closeSqliteStore(db, this.readOnly || options.expectedLedgerId !== undefined
         ? { checkpoint: false, readOnly: this.readOnly } : undefined);
@@ -2545,7 +2493,7 @@ export class TierLedger {
    * knows the visibility authority was lost and fails closed.
    */
   ledgerId(): string {
-    const row = this.db.query(TIER_LEDGER_ID_SQL).get() as { value: string } | null;
+    const row = this.db.query(`SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'`).get() as { value: string } | null;
     if (!row) throw new Error('Tier ledger has no identity.');
     return row.value;
   }
@@ -4585,8 +4533,15 @@ export class TierLedger {
    */
   heldItemCount(corpusIds: readonly string[]): number {
     if (corpusIds.length === 0) return 0;
-    const { sql, params } = heldItemCountQuery(corpusIds.map(corpusId => ({ corpusId, accountScope: null })));
-    return (this.db.query(sql).get(...params) as { n: number }).n;
+    return (this.db.query(`
+      SELECT COUNT(*) AS n FROM tier_items t
+      WHERE t.state IN ('pending', 'moving')
+        AND (t.metadata_pending = 1 OR (t.content_pending = 1 AND t.content_read = 1))
+        AND EXISTS (SELECT 1 FROM tier_copies c
+          WHERE c.provider = t.provider AND c.account_scope = t.account_scope
+            AND c.conversation_key = t.conversation_key AND c.provider_item_id = t.provider_item_id
+            AND c.corpus_id IN (SELECT value FROM json_each(?)))
+    `).get(JSON.stringify(corpusIds)) as { n: number }).n;
   }
 
   /**

@@ -118,7 +118,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     if (kit.compact()) kit.fullscreen();
     s = {
       screen: 'main', returnKey, loaded: false, loading: true, error: '',
-      description: '', rules: [], intents: [], savedRules: [], answerChoice: null, answerMode: 'local-first',
+      description: '', rules: [], intents: [], savedRules: [], pendingCount: 0, answerChoice: null, answerMode: 'local-first',
       // The saved settings this view started from: the compare-and-swap revision,
       // the saved description, and the owner's confirmation for a save that lowers protection.
       revision: '', savedDescription: '', confirmation: '', confirmedAt: 0, confirmStep: false,
@@ -195,6 +195,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     s.intents = [];
     s.hidden = data.rules.filter((rule: Any) => !validRule(rule));
     s.server = null;
+    s.pendingCount = typeof data.pendingCount === 'number' && isFinite(data.pendingCount) ? Math.max(0, data.pendingCount) : 0;
     if (typeof data.confirmation === 'string' && data.confirmation) {
       s.confirmation = data.confirmation;
       s.confirmedAt = Date.now();

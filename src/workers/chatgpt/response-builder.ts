@@ -323,7 +323,7 @@ export function copyDashboardViewModel(view: DashboardViewModelV1): DashboardVie
   if (view.privacy) {
     out.privacy = {
       configured: view.privacy.configured === true,
-      ...copyPrivacyCount(view.privacy),
+      pendingCount: whole(view.privacy.pendingCount),
       ruleCount: whole(view.privacy.ruleCount),
       ...(typeof view.privacy.judgePerMinute === 'number' && Number.isFinite(view.privacy.judgePerMinute) && view.privacy.judgePerMinute > 0
         ? { judgePerMinute: Math.round(view.privacy.judgePerMinute * 10) / 10 } : {}),
@@ -1293,7 +1293,7 @@ export function privacyToolResult(
     configured: copy.configured,
     description: copy.description,
     ruleCount: copy.rules.length,
-    ...copyPrivacyCount(copy),
+    pendingCount: copy.pendingCount,
   };
   const parts = [
     summary.status === 'saved'
@@ -1303,7 +1303,7 @@ export function privacyToolResult(
         : (summary.configured ? 'The owner has set what is private for them.' : 'The owner has not said yet what is private for them.'),
   ];
   if (summary.ruleCount > 0) parts.push(`${summary.ruleCount} folder, label, sender or chat rule${summary.ruleCount === 1 ? '' : 's'} keep items Private; they are shown to the owner in the Olympus panel.`);
-  if (summary.pendingCount !== undefined && summary.pendingCount > 0) parts.push(`${summary.pendingCount} item${summary.pendingCount === 1 ? ' waits' : 's wait'} for the privacy check on the computer.`);
+  if (summary.pendingCount > 0) parts.push(`${summary.pendingCount} item${summary.pendingCount === 1 ? ' waits' : 's wait'} for the privacy check on the computer.`);
   return {
     content: [{ type: 'text', text: parts.join(' ') }],
     structuredContent: summary as unknown as Record<string, unknown>,
@@ -1314,12 +1314,6 @@ export function privacyToolResult(
 const PRIVACY_RULE_KINDS = new Set(['folder', 'label', 'sender', 'chat']);
 const MAX_PRIVACY_RULES = 100;
 const MAX_PRIVACY_DESCRIPTION = 2_000;
-
-function copyPrivacyCount(value: Pick<PrivacySettings, 'pendingCount' | 'pendingCountObservedAt'>) {
-  if (!finite(value.pendingCount) || value.pendingCount < 0) return {};
-  const observed = iso(value.pendingCountObservedAt);
-  return { pendingCount: whole(value.pendingCount), ...(observed ? { pendingCountObservedAt: observed } : {}) };
-}
 
 function copyPrivacySettings(settings: PrivacySettings): PrivacySettings {
   return {
@@ -1346,7 +1340,7 @@ function copyPrivacySettings(settings: PrivacySettings): PrivacySettings {
     ...(settings.privateAnswerMode && (settings.privateAnswerMode.id === 'custom' || PRIVATE_ANSWER_OPTIONS.some(option => option.id === settings.privateAnswerMode!.id)) ? {
       privateAnswerMode: { id: settings.privateAnswerMode.id, label: settings.privateAnswerMode.id === 'custom' ? 'Custom Private-answer mode' : PRIVACY_PRESET_LABELS[settings.privateAnswerMode.id], options: privateAnswerOptions(totalmem()) },
     } : {}),
-    ...copyPrivacyCount(settings),
+    pendingCount: whole(settings.pendingCount),
     ...(typeof settings.revision === 'string' && settings.revision ? { revision: opaque(settings.revision).slice(0, 64) } : {}),
   };
 }

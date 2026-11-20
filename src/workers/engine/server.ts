@@ -35,7 +35,7 @@ import { privacyChoicePending } from '../../core/first-run-privacy.ts';
 import { LocalModelDiscovery, saveLocalAnswerModel } from '../../core/local-model-discovery.ts';
 import { saveFirstRunPrivacyChoice, savePrivateAnswerMode } from '../../core/first-run-privacy.ts';
 import { createSpoolChangeSubscription } from '../messaging-spool-wake.ts';
-import { declaredConnectorStoreMountPaths, declaredConnectorStoreMounts, resolvedStorePath, retiredPathSettings } from '../../core/source-placement.ts';
+import { declaredConnectorStoreMountPaths, resolvedStorePath, retiredPathSettings } from '../../core/source-placement.ts';
 import { DASHBOARD_PRIVATE_ANSWERS_COPY as PRIVATE_ANSWERS_COPY } from '../dashboard/vocabulary.ts';
 import { anonymousInboxConnectionId, localInboxLabel, askWithAnonymousInbox } from './runtime/local-private-answers.ts';
 import { installWorkerShutdownSignals } from '../../core/worker-shutdown.ts';
@@ -66,8 +66,7 @@ import { environmentWithWorkerSetupEnv, mergeWorkerSetupEnv, readWorkerSetupEnv,
 import { remoteOpenInstructions, resolveServerMode, resolveAgentApprovalHost } from '../../core/remote-open.ts';
 import { loadOrCreateDashboardSessionSecret } from '../../core/dashboard-session-secret.ts';
 import { execFile } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { appendFileSync, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { appendFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -111,7 +110,6 @@ import {
   PLAIN_STATUS_REQUEST,
 } from '../source-index/status.ts';
 import { startPacedStatusRecount, type PacedStatusRecount } from './status-recount.ts';
-import { frontHeldItems, heldCountPlan, startHeldItemStatus, type HeldCountPlan } from './held-item-status.ts';
 import { LOOP_SLOW_SQL_MS, setAskBenchLoopSqlRecorder, slowMainThreadSqlHealth, startMainThreadSqlSiteCount, startSlowMainThreadSqlLog } from '../connector-store/main-thread-sql-trace.ts';
 import {
   dashboardOwnerSessionCheck,
@@ -241,7 +239,7 @@ import { accountRawPath, accountStoreNames, accountStorePath, hasLegacyLayout, l
 import { ARCHIVE_IMPORTS_SOURCE_ID } from '../archive-import/state.ts';
 import { archiveImportFamilies } from '../../core/archive-formats.ts';
 import { captureGrantPathFromEnv } from '../../core/messaging-capture-grant-file.ts';
-import { readUnpairedSources, unpairedSourcesPath, withoutUnpairedLaneHandles } from '../credential-broker/unpaired-sources.ts';
+import { unpairedSourcesPath } from '../credential-broker/unpaired-sources.ts';
 import { createFrontMountChanges } from './runtime/front-mount-changes.ts';
 import { createArchiveExtractionRuntime } from '../archive-import/extraction-runtime.ts';
 import { createArchiveImportsSchedulerSource } from '../archive-import/scheduler-source.ts';
@@ -326,7 +324,7 @@ import {
 import { recordedProviderAccount } from '../../core/provider-account-history.ts';
 import { takeWorkerDataOwnerLock, type HeldDataOwnerLock } from '../../core/data-owner-lock.ts';
 import { exportOlympusData, lifecycleStoreFileOwner } from '../../data-lifecycle.ts';
-import { heldCountFileIdentity, TierLedger, TierLedgerSchemaError, type TierLedgerIdentity } from '../classification/tier-ledger.ts';
+import { TierLedger, TierLedgerSchemaError, type TierLedgerIdentity } from '../classification/tier-ledger.ts';
 import { resolveSecretRefValueSync } from '../../core/secret-store.ts';
 import {
   WorkerBootSecretResolver,
@@ -399,8 +397,6 @@ import {
 } from '../source-ingestion-ledger.ts';
 import {
   handleRegistryPathFromEnv,
-  readConnectedHandleGrantEpoch,
-  readConnectedHandleRegistry,
   type ConnectedCredentialHandle,
 } from '../credential-broker/connected-handles.ts';
 import {
@@ -442,7 +438,7 @@ import {
   gmailImportWait,
 } from '../google-connectors/gmail-import-allowance.ts';
 import type { GmailApiClient } from '../google-connectors/gmail.ts';
-import { DEFAULT_ACCOUNT_SLOT, findRegistryAccount, readSourceRegistry, sourceAccountMovePending, sourceRegistryPath } from '../../core/source-registry.ts';
+import { DEFAULT_ACCOUNT_SLOT, readSourceRegistry, sourceRegistryPath } from '../../core/source-registry.ts';
 import { gmailContentArrivesLater, gmailLaneSyncOptions } from '../google-connectors/gmail-live-sync.ts';
 import {
   GMAIL_ATTACHMENT_EXTRACTION_BATCH_SIZE,
@@ -578,7 +574,6 @@ import {
 import {
   readActiveConnectedHandles,
   selectedSourceCredentialHandle,
-  selectCredentialHandle,
   sourceIndexLaneEnabled,
   sourceIndexLaneAccountDecision,
   sourceIndexLaneStorageDecision,
@@ -967,7 +962,6 @@ export async function main(): Promise<void> {
   // leg, 15 Nov).
   // The split background's paced status recount, once it starts (health shows it).
   let statusRecount: PacedStatusRecount | undefined;
-  let heldItemStatus: ReturnType<typeof startHeldItemStatus> | undefined;
   const standBack = createStandBack({
     reason: () => ownerAskReason(ownerQuestions, () => remoteOwnerBusy(OWNER_QUESTION_RESOURCE)),
   });
@@ -1420,13 +1414,6 @@ export async function main(): Promise<void> {
     tierLedgerProblems.delete(sourceId);
     return true;
   };
-  // Mounted identities are kept with the existing in-memory mount state.
-  const heldSourceByCorpus = new Map<string, string>();
-  const heldStoreFiles = new WeakMap<LocalConnectorStore, string>();
-  const identifyHeldCorpus = (sourceId: string, corpusIds: Iterable<string>): void => {
-    for (const id of corpusIds) heldSourceByCorpus.set(id, sourceId);
-    heldItemStatus?.soon();
-  };
   const tierLanes: Array<{
     ledger: TierLedger;
     secureCorpusId: string;
@@ -1499,7 +1486,6 @@ export async function main(): Promise<void> {
   // P1c: a lane whose tier set its own module builds (Dropbox, Readwise, X,
   // WhatsApp) registers its ledger and its on-demand stores here.
   const adoptTierLane = (input: {
-    sourceId: string;
     ledger: TierLedger;
     /** The lane's Private corpus: its Secrets are located only when it was searched. */
     secureCorpusId: string;
@@ -1507,7 +1493,6 @@ export async function main(): Promise<void> {
     onDemand: readonly OnDemandTierStore[];
     secrets?: SecretLocationsIndex;
   }): void => {
-    identifyHeldCorpus(input.sourceId, input.corpusIds);
     tierLanes.push({
       ledger: input.ledger,
       secureCorpusId: input.secureCorpusId,
@@ -1551,7 +1536,6 @@ export async function main(): Promise<void> {
       ...(input.publicStore ? { publicStore: input.publicStore } : {}),
       onDemand: input.publicStore ? [input.publicStore] : [],
     };
-    identifyHeldCorpus(input.account.sourceId, lane.corpusIds);
     tierLanes.push(lane);
     return lane;
   };
@@ -1656,13 +1640,11 @@ export async function main(): Promise<void> {
   // Per-tier stores (P1c) of a lane that has had one store: that store keeps
   // every existing item, and each new store is created on first need.
   const existingStoreTierSet = (
-    sourceId: string,
     lane: ExistingStoreTierLane,
     input: { store: LocalConnectorStore; secrets?: SecretLocationsIndex },
   ): TieredStoreSet => {
     const newStores = Object.values(lane.newStores).filter((store): store is OnDemandTierStore => store !== undefined);
     adoptTierLane({
-      sourceId,
       ledger: lane.ledger,
       secureCorpusId: lane.set.legSpec('secure_local')!.corpusId,
       corpusIds: [input.store.corpusId, ...newStores.map((store) => store.corpusId)],
@@ -1688,7 +1670,7 @@ export async function main(): Promise<void> {
           resolvedStorePath(READWISE_SOURCE_ID, 'secure_local', process.env),
           READWISE_SECURE_LIBRARY_CORPUS_ID,
         );
-        return existingStoreTierSet(READWISE_SOURCE_ID, createReadwiseTierLane({
+        return existingStoreTierSet(createReadwiseTierLane({
           store,
           env: process.env,
           ...(readwiseEmbeddingProvider ? { embeddingProvider: readwiseEmbeddingProvider } : {}),
@@ -1735,7 +1717,7 @@ export async function main(): Promise<void> {
           onStoreOpened: (opened) => registerTierLegStore(opened, store.corpusId, tierSecureEmbeddingProvider ?? null),
         });
         xBookmarksTierStores = Object.values(lane.newStores).filter((leg): leg is OnDemandTierStore => leg !== undefined);
-        return existingStoreTierSet(X_BOOKMARKS_SOURCE_ID, lane, { store, ...(secrets ? { secrets } : {}) });
+        return existingStoreTierSet(lane, { store, ...(secrets ? { secrets } : {}) });
       },
     });
     xBookmarksConnectorStore = refreshableXBookmarksRuntime?.store;
@@ -2065,7 +2047,6 @@ export async function main(): Promise<void> {
     }
     if (dropboxTierLane && dropboxConnectorStore) {
       adoptTierLane({
-        sourceId: DROPBOX_FILES_SOURCE_ID,
         ledger: dropboxTierLane.ledger,
         secureCorpusId: dropboxConnectorStore.corpusId,
         corpusIds: [dropboxConnectorStore.corpusId, dropboxTierLane.internal.corpusId, dropboxTierLane.public.corpusId],
@@ -2136,7 +2117,6 @@ export async function main(): Promise<void> {
     }
     if (localFilesTierLane && localFilesConnectorStore) {
       adoptTierLane({
-        sourceId: LOCAL_FILES_SOURCE_ID,
         ledger: localFilesTierLane.ledger,
         secureCorpusId: localFilesConnectorStore.corpusId,
         corpusIds: [localFilesConnectorStore.corpusId, localFilesTierLane.internal.corpusId, localFilesTierLane.public.corpusId],
@@ -2251,7 +2231,7 @@ export async function main(): Promise<void> {
           WHATSAPP_PERSONAL_SOURCE_ID,
           WHATSAPP_LIVE_CORPUS_ID,
           () => createWhatsAppConnectorStore(process.env),
-          (store, secretLocations) => existingStoreTierSet(WHATSAPP_PERSONAL_SOURCE_ID, createWhatsAppTierLane({
+          (store, secretLocations) => existingStoreTierSet(createWhatsAppTierLane({
             store,
             env: process.env,
             ...(sourceIndexEmbeddingProvider ? { internalEmbeddingProvider: sourceIndexEmbeddingProvider } : {}),
@@ -2291,7 +2271,7 @@ export async function main(): Promise<void> {
       const store = createWhatsAppConnectorStore(process.env);
       const secrets = openTierSecretLocations({ sourceId: WHATSAPP_PERSONAL_SOURCE_ID }, store.dbPath, WHATSAPP_LIVE_CORPUS_ID);
       registerTierLegStore(store, WHATSAPP_LIVE_CORPUS_ID, tierSecureEmbeddingProvider ?? null);
-      whatsappImportTierSet = existingStoreTierSet(WHATSAPP_PERSONAL_SOURCE_ID, createWhatsAppTierLane({
+      whatsappImportTierSet = existingStoreTierSet(createWhatsAppTierLane({
         store,
         env: process.env,
         ...(sourceIndexEmbeddingProvider ? { internalEmbeddingProvider: sourceIndexEmbeddingProvider } : {}),
@@ -2384,14 +2364,14 @@ export async function main(): Promise<void> {
   const storeAt = (sourceId: string, domain: 'internal' | 'secure_local'): string =>
     resolvedStorePath(sourceId, domain, process.env);
   const sourceMounts = [
-    { id: GMAIL_SOURCE_ID, enabled: gmailConnectorStoreLane.enabled, pending: () => !gmailInternalConnectorStore && gmailConnectorStoreLane.enabled, provider: 'gmail', capability: 'gmail.email.sync', pin: 'OLYMPUS_SOURCE_INDEX_GMAIL_CREDENTIAL_HANDLE', stores: ['internal', 'secure_local'], open: mountGmail },
-    { id: GOOGLE_DRIVE_SOURCE_ID, enabled: googleDriveConnectorStoreLane.enabled, pending: () => !googleDriveInternalConnectorStore && googleDriveConnectorStoreLane.enabled, provider: 'google_drive', capability: 'google_drive.docs.sync', pin: 'OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CREDENTIAL_HANDLE', stores: ['internal', 'secure_local'], open: mountGoogleDrive },
-    { id: DROPBOX_FILES_SOURCE_ID, enabled: dropboxConnectorStoreLane.enabled, pending: () => !dropboxConnectorStore && dropboxConnectorStoreLane.enabled, provider: 'dropbox', capability: 'dropbox.files.sync', pin: 'OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_CREDENTIAL_HANDLE', stores: ['secure_local'], open: mountDropbox },
-    { id: LOCAL_FILES_SOURCE_ID, enabled: localFilesConnectorStoreLane.enabled, pending: () => !localFilesConnectorStore && localFilesConnectorStoreLane.enabled, stores: ['secure_local'], open: mountLocalFiles },
-    { id: WHATSAPP_PERSONAL_SOURCE_ID, enabled: whatsappConnectorStoreLane.enabled, pending: () => !whatsappConnectorStore && whatsappConnectorStoreLane.enabled, provider: 'whatsapp_personal', capability: 'whatsapp.personal.messages.sync', pin: 'OLYMPUS_SOURCE_INDEX_WHATSAPP_CREDENTIAL_HANDLE', stores: ['secure_local'], open: mountWhatsApp },
-    { id: TELEGRAM_MESSAGES_SOURCE_ID, enabled: telegramConnectorStoreLane.enabled, pending: () => !telegramConnectorStores && telegramConnectorStoreLane.enabled, provider: 'telegram', capability: 'telegram.messages.sync', pin: 'OLYMPUS_SOURCE_INDEX_TELEGRAM_CREDENTIAL_HANDLE', stores: ['internal', 'secure_local'], open: mountTelegram },
-    { id: READWISE_SOURCE_ID, enabled: readwiseConnectorStoreLane.enabled, pending: () => !readwiseConnectorStore && readwiseConnectorStoreLane.enabled, provider: 'readwise', capability: 'readwise.sync', pin: 'OLYMPUS_SOURCE_INDEX_READWISE_CREDENTIAL_HANDLE', stores: ['internal'], open: mountReadwise },
-    { id: X_BOOKMARKS_SOURCE_ID, enabled: xBookmarksConnectorStoreLane.enabled, pending: () => !xBookmarksConnectorStore && xBookmarksConnectorStoreLane.enabled, provider: 'x', capability: 'x.bookmarks.sync', pin: 'OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CREDENTIAL_HANDLE', stores: ['internal'], open: mountXBookmarks },
+    { id: GMAIL_SOURCE_ID, pending: () => !gmailInternalConnectorStore && gmailConnectorStoreLane.enabled, provider: 'gmail', capability: 'gmail.email.sync', stores: ['internal', 'secure_local'], open: mountGmail },
+    { id: GOOGLE_DRIVE_SOURCE_ID, pending: () => !googleDriveInternalConnectorStore && googleDriveConnectorStoreLane.enabled, provider: 'google_drive', capability: 'google_drive.docs.sync', stores: ['internal', 'secure_local'], open: mountGoogleDrive },
+    { id: DROPBOX_FILES_SOURCE_ID, pending: () => !dropboxConnectorStore && dropboxConnectorStoreLane.enabled, provider: 'dropbox', capability: 'dropbox.files.sync', stores: ['secure_local'], open: mountDropbox },
+    { id: LOCAL_FILES_SOURCE_ID, pending: () => !localFilesConnectorStore && localFilesConnectorStoreLane.enabled, stores: ['secure_local'], open: mountLocalFiles },
+    { id: WHATSAPP_PERSONAL_SOURCE_ID, pending: () => !whatsappConnectorStore && whatsappConnectorStoreLane.enabled, provider: 'whatsapp_personal', capability: 'whatsapp.personal.messages.sync', stores: ['secure_local'], open: mountWhatsApp },
+    { id: TELEGRAM_MESSAGES_SOURCE_ID, pending: () => !telegramConnectorStores && telegramConnectorStoreLane.enabled, provider: 'telegram', capability: 'telegram.messages.sync', stores: ['internal', 'secure_local'], open: mountTelegram },
+    { id: READWISE_SOURCE_ID, pending: () => !readwiseConnectorStore && readwiseConnectorStoreLane.enabled, provider: 'readwise', capability: 'readwise.sync', stores: ['internal'], open: mountReadwise },
+    { id: X_BOOKMARKS_SOURCE_ID, pending: () => !xBookmarksConnectorStore && xBookmarksConnectorStoreLane.enabled, provider: 'x', capability: 'x.bookmarks.sync', stores: ['internal'], open: mountXBookmarks },
   ] as const;
   const mountSourceLanes = (handles: readonly ConnectedCredentialHandle[], changed?: ReadonlySet<string>): void => {
     if (sourceRuntimeClosed) return;
@@ -3183,21 +3163,13 @@ export async function main(): Promise<void> {
   // scope and principal. Its embedding identity is its own trust domain's: a
   // Public store shares its Personal sibling's cloud identity; a lane's new
   // Private or Personal store is handed the identity for its domain.
-  const rememberHeldStore = (store: LocalConnectorStore): void => {
-    if (engineRole === 'single' || heldStoreFiles.has(store)) return;
-    const file = heldCountFileIdentity(store.dbPath);
-    if (file) heldStoreFiles.set(store, file);
-  };
-  for (const store of connectorStores) rememberHeldStore(store);
   registerTierLegStore = (store, siblingCorpusId, embeddingProvider) => {
-    rememberHeldStore(store);
     frontMountProblems.delete(store.dbPath);
     if (!connectorStores.includes(store)) {
       connectorStores.push(store);
       // A new store shows on the dashboard at the background's next count: the
       // split's front serves that count and never counts a store itself.
       statusRecount?.soon();
-      heldItemStatus?.soon();
       if (engineFront) console.log(`[olympus] front: mounted ${store.corpusId}`);
     }
     probeExtractionEnded(store);
@@ -3269,7 +3241,6 @@ export async function main(): Promise<void> {
     onLane: (lane) => {
       if (tierSecureEmbeddingProvider) lane.set.declarePrivateEmbedder(tierSecureEmbeddingProvider);
       adoptTierLane({
-        sourceId: ARCHIVE_IMPORTS_SOURCE_ID,
         ledger: lane.ledger,
         secureCorpusId: lane.secure.corpusId,
         corpusIds: archiveLaneLegs(lane).map((leg) => leg.corpusId),
@@ -3325,7 +3296,6 @@ export async function main(): Promise<void> {
     onLane: (lane) => {
       if (tierSecureEmbeddingProvider) lane.set.declarePrivateEmbedder(tierSecureEmbeddingProvider);
       adoptTierLane({
-        sourceId: EVERNOTE_SOURCE_ID,
         ledger: lane.ledger,
         secureCorpusId: lane.secure.corpusId,
         corpusIds: [lane.secure.corpusId, lane.internal.corpusId],
@@ -4785,7 +4755,6 @@ export async function main(): Promise<void> {
               refreshPeople();
               // And new counts: the split's background counts them at its next paced turn.
               statusRecount?.soon();
-              heldItemStatus?.soon();
               const status = await sourceIndexStatus.status({ ...PLAIN_STATUS_REQUEST }, { countsMaxAgeMs: STATUS_COUNTS_MAX_AGE_MS });
               sourceIngestionLedger.record(buildSourceIngestionLedgerSnapshot(status, {
                 schedulerStatus,
@@ -6244,124 +6213,30 @@ export async function main(): Promise<void> {
   const { createChatGptHandoffs, createChatGptHandoffHandler, withChatGptHandoffRoutes } = await import('../chatgpt/handoff.ts');
   const { createChatGptSetupBackend, readChatGptPrivacySettings } = await import('../chatgpt/setup-backend.ts');
   const chatgptHandoffs = createChatGptHandoffs();
-  // The split's two roles derive the scope independently from mounted handles
-  // and durable configuration. None of these checks opens a database.
-  const heldSelectionFiles = [
-    sourceRegistryPath(),
-    ...(connectedHandleRegistryPath ? [connectedHandleRegistryPath, unpairedSourcesPath(connectedHandleRegistryPath)] : []),
-    captureGrantPathFromEnv('telegram', process.env),
-    captureGrantPathFromEnv('whatsapp', process.env),
-  ];
-  const heldSelectionRevision = () => JSON.stringify(heldSelectionFiles.map(path => {
-    const file = statSync(path, { bigint: true, throwIfNoEntry: false });
-    return file ? `${file.dev}:${file.ino}:${file.ctimeNs}` : null;
-  }));
-  const currentHeldCountPlan = (): HeldCountPlan | undefined => {
-    try {
-      if (sourceRuntimeClosed || tierLedgerProblems.size || frontMountProblems.size || pendingGovernance.waiting().length) return undefined;
-      const revision = heldSelectionRevision();
-      const registry = readSourceRegistry();
-      const openable = (sourceId: string): boolean => {
-        const entry = findRegistryAccount(registry, sourceId, DEFAULT_ACCOUNT_SLOT);
-        return !entry || (entry.state === 'active' && !sourceAccountMovePending(entry));
-      };
-      const grantEpoch = connectedHandleRegistryPath ? readConnectedHandleGrantEpoch(connectedHandleRegistryPath) : undefined;
-      if (connectedHandleRegistryPath && readUnpairedSources(connectedHandleRegistryPath).status === 'unreadable') return undefined;
-      const handles = connectedHandleRegistryPath
-        ? withoutUnpairedLaneHandles(readConnectedHandleRegistry(connectedHandleRegistryPath).handles, connectedHandleRegistryPath)
-        : [];
-      const mounted = new Map(connectorStores.map(store => [store.corpusId, store]));
-      const mountedSources = new Set(heldSourceByCorpus.values());
-      if (sourceMounts.some(lane => !mountedSources.has(lane.id) && lane.enabled && openable(lane.id)
-        && (sourceHasStores(lane.id) || ('provider' in lane
-          ? activeCredentialHandle(handles, lane) !== undefined
-          : fileSourceScopeAuthority?.policyRef(LOCAL_FILES_SOURCE_ID) !== undefined)))) return undefined;
-      if (openable(EVERNOTE_SOURCE_ID) && !mountedSources.has(EVERNOTE_SOURCE_ID) && sourceHasStores(EVERNOTE_SOURCE_ID)) return undefined;
-      if (openable(ARCHIVE_IMPORTS_SOURCE_ID) && archiveFamilies.some(family => !archiveImports.laneMounted(family)
-        && accountStoreNames(ARCHIVE_IMPORTS_SOURCE_ID, [family]).some(name => {
-          const path = resolvedStorePath(ARCHIVE_IMPORTS_SOURCE_ID, name, process.env);
-          return existsSync(path) || existsSync(tieredStoreSetLedgerPath(path));
-        }))) return undefined;
-      const declared = declaredConnectorStoreMounts();
-      if (declared === 'unreadable' || declared.some(({ sourceId, corpusId }) => openable(sourceId) && !mounted.has(corpusId))) return undefined;
-      if ([...mountedSources, ...declared.filter(({ corpusId }) => mounted.has(corpusId)).map(mount => mount.sourceId)]
-        .some(sourceId => !openable(sourceId))) return undefined;
-
-      const selected = new Map<string, string | null>();
-      for (const lane of sourceMounts) {
-        if (!mountedSources.has(lane.id) || !('provider' in lane)) continue;
-        const pin = process.env[lane.pin]?.trim();
-        const choice = selectCredentialHandle(handles, { ...lane, ...(pin ? { pinnedHandle: pin } : {}) });
-        if (choice.reason === 'ambiguous' || choice.reason === 'pinned_missing') return undefined;
-        const role = choice.handle?.accountRole?.trim();
-        switch (lane.id) {
-          case GMAIL_SOURCE_ID:
-          case GOOGLE_DRIVE_SOURCE_ID:
-            selected.set(lane.id, choice.handle ? role || accountFromGoogleHandle(choice.handle.handle) : null);
-            break;
-          case DROPBOX_FILES_SOURCE_ID:
-            selected.set(lane.id, role || dropboxFilesAccount || 'personal');
-            break;
-          case WHATSAPP_PERSONAL_SOURCE_ID:
-            selected.set(lane.id, WHATSAPP_PERSONAL_ACCOUNT_SCOPE);
-            break;
-          case TELEGRAM_MESSAGES_SOURCE_ID:
-            selected.set(lane.id, telegramConnectorAccountScope);
-            break;
-          default:
-            selected.set(lane.id, sourceIndexAccount?.trim() || role || 'personal');
-        }
-      }
-      selected.set(LOCAL_FILES_SOURCE_ID, LOCAL_FILES_ACCOUNT_SCOPE);
-      if (mountedSources.has(EVERNOTE_SOURCE_ID)) {
-        const handle = fileScopeCredentialHandle(requireFileScopeSource(EVERNOTE_SOURCE_ID));
-        selected.set(EVERNOTE_SOURCE_ID, handle ? handle.accountRole?.trim() || 'personal' : null);
-      }
-
-      const onDemand = new Map(tierLanes.flatMap(lane => lane.onDemand.map(store => [store.corpusId, store] as const)));
-      const selection = createHash('sha256').update(JSON.stringify([revision, grantEpoch])).digest('hex');
-      const plan = heldCountPlan(tierLanes, corpusId => {
-        const store = mounted.get(corpusId);
-        const mount = store ? heldStoreFiles.get(store) : null;
-        const expectedPath = store?.dbPath ?? onDemand.get(corpusId)?.dbPath;
-        if (!expectedPath || mount === undefined || (heldCountFileIdentity(expectedPath) ?? null) !== mount) return undefined;
-        const sourceId = heldSourceByCorpus.get(corpusId);
-        const accountScope = sourceId ? selected.get(sourceId) ?? null
-          : connectorStorePrincipals.get(corpusId)?.accountScope ?? connectorStoreAccountScopes.get(corpusId) ?? null;
-        return { corpusId, accountScope, mount };
-      }, selection);
-      // Configuration can change while its separate files are being read.
-      return revision === heldSelectionRevision()
-        && (!connectedHandleRegistryPath || grantEpoch === readConnectedHandleGrantEpoch(connectedHandleRegistryPath)) ? plan : undefined;
-    } catch {
-      // An unreadable configuration or mount cannot establish a complete scope.
-      return undefined;
-    }
-  };
-  // The unsplit engine keeps its existing one-minute request-side count.
+  // Items held for the privacy check (pending, Private, not embedded), each
+  // item once per tier ledger (heldItemCount). Counts only.
+  // Reused for a minute: each count reads every copy the tier ledgers hold,
+  // and the dashboard's privacy panel asks on every poll (Sparta, 2026-11-05:
+  // about a tenth of the sampled freezes).
   let pendingClassificationCounted: { at: number; total: number } | undefined;
-  const legacyPendingClassificationCount = (): number => {
+  const pendingClassificationCount = (): number => {
     if (pendingClassificationCounted && Date.now() - pendingClassificationCounted.at < 60_000) return pendingClassificationCounted.total;
-    let total = 0;
-    for (const lane of tierLanes) {
-      try {
-        total += lane.ledger.heldItemCount([...lane.corpusIds]);
-      } catch {
-        // Preserve the single-process engine's existing best-effort count.
-      }
-    }
+    const total = countPendingClassification();
     pendingClassificationCounted = { at: Date.now(), total };
     return total;
   };
-  const heldItemCount = engineFront
-    ? () => frontHeldItems(engineFront!.status(), currentHeldCountPlan)
-    : () => {
-        const held = heldItemStatus?.observation();
-        if (held && JSON.stringify(held.scope) === JSON.stringify(currentHeldCountPlan()?.scope)) {
-          return { pendingCount: held.count, pendingCountObservedAt: held.observed_at };
-        }
-      };
-  const pendingClassificationCount = engineRole === 'single' ? legacyPendingClassificationCount : heldItemCount;
+  const countPendingClassification = (): number => {
+    let total = 0;
+    for (const lane of tierLanes) {
+      try {
+        // Each item once, also one recorded Personal-first before #1316.
+        total += lane.ledger.heldItemCount([...lane.corpusIds]);
+      } catch {
+        // An unreadable ledger contributes nothing to a count.
+      }
+    }
+    return total;
+  };
   const chatgptSetup = createChatGptSetupBackend({
     privacyQuestionEngine: createPrivacyQuestionEngine({ runtime: async () => {
       if (!snifferModel || !snifferLane || !snifferEnv.enabled || snifferRuntime.source === 'off') return undefined;
@@ -6376,7 +6251,7 @@ export async function main(): Promise<void> {
           ? localModelActivity.track(snifferResource, snifferModel) : snifferModel).complete(request)),
       } };
     } }),
-    ...(engineRole === 'single' ? { pendingClassificationCount: legacyPendingClassificationCount } : { heldItemCount }),
+    pendingClassificationCount,
     workerFetch: workerFetchInProcess,
     handoffs: chatgptHandoffs,
     publicUrls: remotePublicUrls,
@@ -6622,15 +6497,12 @@ export async function main(): Promise<void> {
       const backlog = tierSnifferBacklog?.();
       const missing = judgeMissing();
       return {
-        configured: settings.configured, ruleCount: settings.rules.length,
-        ...(settings.pendingCount === undefined ? {} : { pendingCount: settings.pendingCount }),
-        ...(settings.pendingCountObservedAt ? { pendingCountObservedAt: settings.pendingCountObservedAt } : {}),
+        configured: settings.configured, pendingCount: settings.pendingCount, ruleCount: settings.rules.length,
         classifierAwaitingApproval: backlog?.awaitingOwnerApproval === true,
         // No judge: every new item waits, held, until one is set up (#1316).
         ...(missing ? { judgeMissing: missing } : {}),
         ...(backlog?.waiting && DASHBOARD_JUDGE_STOP_REASONS.has(backlog.waiting.reason)
-          ? { judgeStopped: backlog.waiting.reason as 'model_not_answering' | 'cloud_stopped' | 'failed',
-            ...(engineFront ? { judgeStoppedAt: backlog.waiting.since } : {}) } : {}),
+          ? { judgeStopped: backlog.waiting.reason as 'model_not_answering' | 'cloud_stopped' | 'failed' } : {}),
         ...((rate) => (rate !== undefined ? { judgePerMinute: rate } : {}))(judgePerMinute()),
         ...(backlog?.awaitingApproval ? { classifierWaiting: { lane: backlog.awaitingApproval.lane, modelId: backlog.awaitingApproval.modelId } } : {}),
       };
@@ -7191,7 +7063,6 @@ export async function main(): Promise<void> {
       ).sources);
       // A source connected or removed shows on the dashboard at the next count, not after the rest.
       statusRecount?.soon();
-      heldItemStatus?.soon();
     };
     // A forwarded owner action runs as the route that served it before, behind
     // the front's authorization: the route's handler checks the body itself.
@@ -7346,7 +7217,6 @@ export async function main(): Promise<void> {
           };
         })(),
         captures: dashboardCaptureRuntime(),
-        ...((held) => held ? { held_items: held } : {})(heldItemStatus?.observation()),
         ...(localUnreadableFiles ? {
           unreadable: Object.fromEntries(sourceCorpusRegistry.definitions('status', fullCorpusDefinitions).flatMap((definition) => {
             const counted = localUnreadableFiles.recheck(definition.corpusId);
@@ -7376,11 +7246,6 @@ export async function main(): Promise<void> {
     commands.markReady();
     finishBootProgress();
     setEngineStep(undefined);
-    heldItemStatus = startHeldItemStatus({
-      plan: () => { pendingGovernance.retry(); return currentHeldCountPlan(); },
-      holds: () => standBack.holds('status'),
-      log: (line) => console.warn(`[held items] ${line}`),
-    });
     // What the dashboard and status show, recounted here on its own pace and
     // kept for the front, which never counts (status-recount.ts).
     const refreshSnapshot = sourceIndexStatus?.refreshSnapshot;
@@ -7491,7 +7356,6 @@ export async function main(): Promise<void> {
     waitingStore?.close();
     waitingStore = undefined;
     fileExtractionRuntime?.close();
-    heldItemStatus?.stop();
     engineBackground?.stop();
     frontMemory?.stop();
     if (frontMountRetry) clearInterval(frontMountRetry);
