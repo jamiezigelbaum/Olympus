@@ -80,6 +80,8 @@ import {
   DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY,
   DASHBOARD_CHATGPT_PRIVACY_JUDGE_OFF_COPY,
   DASHBOARD_CHATGPT_PRIVACY_JUDGE_STOPPED_COPY,
+  DASHBOARD_CHATGPT_PRIVACY_COUNT_COPY,
+  privacyHeldItemsText,
   DASHBOARD_CHATGPT_PRIVACY_NO_JUDGE_COPY,
   DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY,
   DASHBOARD_MANY_UNREADABLE_LABEL,
@@ -205,7 +207,7 @@ export interface ChatGptDashboardOptions {
   embedding?: DashboardViewModelV1['models']['embedding'];
   /** The owner's privacy settings, counts only (olympus_privacy_get). Absent: not reported. */
   privacy?: {
-    configured: boolean; pendingCount: number; ruleCount: number;
+    configured: boolean; pendingCount?: number; pendingCountObservedAt?: string; ruleCount: number;
     /** The privacy check waits for the owner to approve its model (sniffer-service `awaiting_owner_approval`). */
     classifierAwaitingApproval?: boolean;
     /** What waits: its lane and model name (sniffer-service backlog `awaitingApproval`), no item content. */
@@ -226,6 +228,7 @@ export interface ChatGptDashboardOptions {
      * checking is stopped, or its pass failed. Only then do waiting items need the owner.
      */
     judgeStopped?: keyof typeof DASHBOARD_CHATGPT_PRIVACY_JUDGE_STOPPED_COPY.reason;
+    judgeStoppedAt?: string;
   };
   /**
    * The built-in private model (analyst-built-in.ts builtInPrivateModelStatus),
@@ -421,13 +424,12 @@ export function buildChatGptDashboardViewModel(
   // Items waiting for the private model are machine work, In progress on
   // Home. They need the owner only when the check has stopped: then the
   // sentence says exactly why, and the button opens the model to look at.
-  else if (options.privacy?.judgeStopped && options.privacy.pendingCount > 0) {
-    const copy = DASHBOARD_CHATGPT_PRIVACY_JUDGE_STOPPED_COPY;
-    needsYou.push({
+  else if (options.privacy) {
+    const { text, needsModel } = privacyHeldItemsText(options.privacy, DASHBOARD_CHATGPT_PRIVACY_COUNT_COPY, now.getTime());
+    if (needsModel) needsYou.push({
       id: 'privacy:judge_stopped',
-      sentence: copy.sentence.replace('{n}', Math.floor(options.privacy.pendingCount).toLocaleString('en-US'))
-        .replace('{reason}', copy.reason[options.privacy.judgeStopped]),
-      fix: { label: copy.label, tool: DASHBOARD_TOOL_NAME, args: {}, href: openOnComputer(undefined, 'models') },
+      sentence: text,
+      fix: { label: DASHBOARD_CHATGPT_PRIVACY_JUDGE_STOPPED_COPY.label, tool: DASHBOARD_TOOL_NAME, args: {}, href: openOnComputer(undefined, 'models') },
     });
   }
 
@@ -461,8 +463,11 @@ export function buildChatGptDashboardViewModel(
       ? {
           privacy: {
             configured: options.privacy.configured,
-            pendingCount: Math.max(0, Math.floor(options.privacy.pendingCount)),
+            ...(options.privacy.pendingCount === undefined ? {} : { pendingCount: Math.max(0, Math.floor(options.privacy.pendingCount)) }),
+            ...(options.privacy.pendingCountObservedAt ? { pendingCountObservedAt: options.privacy.pendingCountObservedAt } : {}),
             ruleCount: Math.max(0, Math.floor(options.privacy.ruleCount)),
+            ...(options.privacy.judgeStopped ? { judgeStopped: options.privacy.judgeStopped } : {}),
+            ...(options.privacy.judgeStoppedAt ? { judgeStoppedAt: options.privacy.judgeStoppedAt } : {}),
             ...(typeof options.privacy.judgePerMinute === 'number' && Number.isFinite(options.privacy.judgePerMinute) && options.privacy.judgePerMinute > 0
               ? { judgePerMinute: options.privacy.judgePerMinute } : {}),
           },

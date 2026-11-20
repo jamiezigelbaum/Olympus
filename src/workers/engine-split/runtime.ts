@@ -22,7 +22,8 @@ import { clickTraces, PRIVACY_ITEM_SET_PATH, type ClickTrace } from './click-tra
 import { startEngineControlPlane, type EngineControlPlane } from './control-plane.ts';
 import { currentLocalInferencePriority } from '../answer-activity.ts';
 import { createEngineCommandHandler, ENGINE_FORWARDED_ROUTES, EngineCommandLedger, requestToForwarded, type EngineCommandHandlers, type EngineCommandReceipt, type EngineForwardedKind, type EngineForwardedRequest, type EngineForwardedResponse } from './commands.ts';
-import { engineStatusAge, readEngineStatusSnapshotAsync, startEngineStatusPublisher, type EngineStatusRead, type EngineStatusSnapshot } from './snapshot.ts';
+import { engineStatusAge, engineStatusCollectedAt, readEngineStatusSnapshotAsync, startEngineStatusPublisher, type EngineStatusRead, type EngineStatusSnapshot, type HeldCountScope } from './snapshot.ts';
+import { frontHeldItems } from '../engine/held-item-status.ts';
 import { parseOwnerTierItemId } from '../classification/tier-owner-items.ts';
 import type { PendingItemProtection } from '../connector-store/tier-visibility.ts';
 import { DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER } from '../http.ts';
@@ -211,7 +212,10 @@ export interface EngineFront {
   ownerBusy: OwnerBusyRelay;
   /** The background's last status snapshot and its age; refreshed asynchronously at most once a second. */
   status(): EngineStatusRead | undefined;
+  cachedStatus(): EngineStatusRead | undefined;
   refreshStatus(): Promise<void>;
+  /** The held count already matched to the front's mounts and live publisher. */
+  heldItems(): ReturnType<typeof frontHeldItems>;
   /** The last snapshot read, with no disk read and no refresh. */
   cachedSnapshot(): EngineStatusRead['snapshot'] | undefined;
   /** The polled activity, with no disk read or status refresh on the log path. */
@@ -231,6 +235,8 @@ export function createEngineFront(input: {
   authToken: string;
   fetch?: typeof fetch;
   now?: () => number;
+  heldView?: () => { scope: HeldCountScope; changedAt?: number } | undefined;
+  alive?: (pid: number) => boolean;
 }): EngineFront {
   const now = input.now ?? (() => Date.now());
   const fetchBackground = input.fetch ?? createUnixSocketFetch(input.socketPath);
@@ -248,12 +254,14 @@ export function createEngineFront(input: {
   relay = new OwnerBusyRelay(client, (line) => console.warn(line));
   const path = engineStatusSnapshotPath(input.env);
   let cached: EngineStatusSnapshot | undefined;
+  let heldBinding: { local: HeldCountScope; publisher: HeldCountScope; pid: number } | undefined;
+  const alive = input.alive ?? processAlive;
   let lastReadAt = -Infinity;
   let pending: Promise<void> | undefined;
   let stopped = false;
   const judged = (snapshot: EngineStatusSnapshot, at: number): EngineStatusRead => {
     const read = engineStatusAge(snapshot, at);
-    const written = Date.parse(snapshot.written_at);
+    const written = engineStatusCollectedAt(snapshot);
     if (!read.stale && answering && answering.instance !== snapshot.instance_id && written > answering.at) {
       answering = { instance: snapshot.instance_id, at: written };
     }
@@ -264,17 +272,48 @@ export function createEngineFront(input: {
     const at = now();
     if (stopped || at - lastReadAt < 1_000) return;
     lastReadAt = at;
-    pending = readEngineStatusSnapshotAsync(path).then((snapshot) => {
+    pending = readEngineStatusSnapshotAsync(path).then(async (snapshot) => {
+      let binding: typeof heldBinding;
+      if (snapshot?.held_items) {
+        const boot = await readBootProgressAsync(input.env);
+        const held = snapshot.held_items;
+        const local = input.heldView?.();
+        if (local && held.scope?.view === local.scope.view && typeof held.scope.generation === 'string'
+          && (local.changedAt === undefined || engineStatusCollectedAt(snapshot) >= local.changedAt)
+          && backgroundBootDone(boot, alive) && boot?.instanceId === snapshot.instance_id
+          && boot.pid === held.writer_pid && Date.parse(held.observed_at) >= Date.parse(boot.startedAt)) {
+          binding = { local: local.scope, publisher: held.scope, pid: boot.pid };
+        }
+        if (!binding) delete snapshot.held_items;
+      }
       if (stopped) return;
+      heldBinding = binding;
       cached = snapshot;
       if (snapshot && !judged(snapshot, now()).stale) relay?.observeInstance(snapshot.instance_id);
     }).finally(() => { pending = undefined; });
     return pending;
   };
-  const status = (): EngineStatusRead | undefined => {
-    void refreshStatus();
-    return cached ? judged(cached, now()) : undefined;
+  const readableHeld = (): typeof heldBinding => {
+    const local = input.heldView?.()?.scope;
+    const bound = heldBinding;
+    // The cached receipt names an instance and its process. Check the
+    // process still exists even before the next asynchronous status poll.
+    if (stopped || !bound || !local || bound.local !== local
+      || (answering && answering.instance !== cached?.instance_id) || !alive(bound.pid)) return undefined;
+    return bound;
   };
+  const heldItems = () => {
+    const bound = readableHeld();
+    return bound && cached ? frontHeldItems(engineStatusAge(cached, now()), bound.publisher) : undefined;
+  };
+  const cachedStatus = (): EngineStatusRead | undefined => {
+    if (!cached) return undefined;
+    const read = judged(cached, now());
+    if (!cached.held_items || readableHeld()) return read;
+    const { held_items: _held, ...snapshot } = cached;
+    return { ...read, snapshot };
+  };
+  const status = () => { void refreshStatus(); return cachedStatus(); };
   // Notice a background restart even when no page asks for status, so the
   // owner-busy signal reaches the new judge.
   const poll = setInterval(() => { void refreshStatus(); }, 2_000);
@@ -288,7 +327,7 @@ export function createEngineFront(input: {
     const probeMs = 250;
     while (!await probeEngineBackground(fetchBackground, input.authToken, undefined, probeMs, true)) await Bun.sleep(probeMs);
   };
-  return { client, ownerBusy: relay, status, refreshStatus, cachedSnapshot: () => cached, backgroundActivity: () => cached?.activity ?? 'idle', completeModel, backgroundReady,
+  return { client, ownerBusy: relay, status, cachedStatus, refreshStatus, heldItems, cachedSnapshot: () => cached, backgroundActivity: () => cached?.activity ?? 'idle', completeModel, backgroundReady,
     waitForPendingPrivacyRaises, stop: () => { stopped = true; clearInterval(poll); relay?.stop(); } };
 }
 

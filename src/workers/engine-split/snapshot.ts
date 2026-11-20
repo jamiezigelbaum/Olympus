@@ -21,6 +21,20 @@ export const ENGINE_STATUS_PUBLISH_INTERVAL_MS = 3_000;
  */
 export const ENGINE_STATUS_STALE_MS = 30_000;
 
+export interface HeldCountScope {
+  /** A digest of the account selection and backing files both roles must share. */
+  view: string;
+  /** Includes the opened handles and the resolved account scopes. */
+  generation: string;
+}
+
+export interface HeldItemStatus {
+  count: number;
+  observed_at: string;
+  writer_pid: number;
+  scope: HeldCountScope;
+}
+
 export interface EngineStatusSnapshot {
   schema: typeof ENGINE_STATUS_SNAPSHOT_SCHEMA;
   /** Fixed activity word shared with the memory diagnostic; no store reads. */
@@ -62,6 +76,8 @@ export interface EngineStatusSnapshot {
     /** Whether the judge can take imported archive items now (archive-import/dashboard.ts). */
     archive_private_model?: string;
   };
+  /** Items held for privacy judgment, measured on the background's own pace. */
+  held_items?: HeldItemStatus;
   captures: unknown;
   /** Each corpus's last unreadable count (file-extraction/unreadable-files.ts), counted in the background. */
   unreadable?: Record<string, { unreadable: number; blocked: number }>;
@@ -159,9 +175,14 @@ function parseSnapshot(text: string): EngineStatusSnapshot | undefined {
   return snapshot;
 }
 
+/** Unlike the heartbeat, this advances only when the background collects state. */
+export function engineStatusCollectedAt(snapshot: EngineStatusSnapshot): number {
+  return Date.parse(snapshot.state_at ?? snapshot.written_at);
+}
+
 export function engineStatusAge(snapshot: EngineStatusSnapshot, at: number): EngineStatusRead {
   const age = Math.max(0, at - Date.parse(snapshot.written_at));
-  const collected = typeof snapshot.state_at === 'string' ? Date.parse(snapshot.state_at) : Number.NaN;
+  const collected = engineStatusCollectedAt(snapshot);
   return { snapshot, age_ms: age, state_age_ms: Number.isFinite(collected) ? Math.max(0, at - collected) : age, stale: age > ENGINE_STATUS_STALE_MS };
 }
 

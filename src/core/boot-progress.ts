@@ -27,6 +27,8 @@ export type BootPhase = 'starting' | 'backing_up' | 'migrating' | 'done' | 'fail
 export interface BootProgress {
   schema: typeof BOOT_PROGRESS_SCHEMA;
   pid: number;
+  /** The split background command and status instance. */
+  instanceId?: string;
   phase: BootPhase;
   storeId?: string;
   startedAt: string;
@@ -79,6 +81,11 @@ function finishProgress(target: ProgressFile, now: () => number): void {
 /** The worker's boot starts: called once it holds the data-owner lock. */
 export function beginBootProgress(env: LayoutEnv = process.env, now: () => number = Date.now): void {
   current = beginProgress(env, 'boot-progress', now);
+}
+
+/** Include the background instance in the existing ready receipt. */
+export function identifyBootProgressPublisher(instanceId: string): void {
+  if (current) current.progress.instanceId = instanceId;
 }
 
 /** The worker's boot work is done (it listens, or the background is ready). */

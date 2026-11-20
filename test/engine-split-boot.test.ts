@@ -11,6 +11,7 @@ import { connectThisComputerSource } from '../src/core/this-computer.ts';
 import { resolvedStorePath } from '../src/core/source-placement.ts';
 import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/local-index.ts';
+import { tieredStoreSetLedgerPath } from '../src/workers/connector-store/tiered-store-set.ts';
 import { FileSourceScopeAuthority } from '../src/workers/source-scope-runtime.ts';
 import { FIXTURE_PLACEMENT, fixtureConnector } from './helpers/tier-fixtures.ts';
 import { ENGINE_BACKGROUND_ORIGIN } from '../src/core/engine-split.ts';
@@ -18,6 +19,7 @@ import { createUnixSocketFetch, createWorkerFetch, prepareWorkerSocket, workerFr
 import { readEngineStatusSnapshot } from '../src/workers/engine-split/snapshot.ts';
 import { engineStatusSnapshotPath } from '../src/workers/engine-split/runtime.ts';
 import { waitFor } from './helpers/test-clock.ts';
+import { seedHeldLedger } from './helpers/held-item-fixture.ts';
 
 const SERVER = join(import.meta.dir, '..', 'src', 'workers', 'engine', 'server.ts');
 const REPO = join(import.meta.dir, '..');
@@ -168,6 +170,7 @@ describe('the engine split boots as two processes', () => {
     });
     ledger.recordRoutedPlacement({ ...item, providerItemId: 'pending' }, { ...personal, state: 'pending', contentPending: true }, secure);
     seeded.close();
+    seedHeldLedger(tieredStoreSetLedgerPath(storePath), ['secure_local.local.files'], ['this_computer', 'other']).close();
 
     const socketPath = workerFrontSocketPath({ env })!;
     const frontEnv = { ...env, [WORKER_LISTEN_SOCKET_ENV]: socketPath };
@@ -268,5 +271,20 @@ describe('the engine split boots as two processes', () => {
       oldest_since: record.decidedAt, measured_at: expect.any(String),
     });
     expect(front.output()).not.toContain('FrontStoreWriteError');
+    const held = await waitFor(() => readEngineStatusSnapshot(engineStatusSnapshotPath(env))?.snapshot.held_items,
+      { timeoutMs: 12_000, description: 'background held count with judge off' });
+    expect(held.count).toBe(1);
+    type HeldReceipt = { kind: 'held-count'; dashboard?: { pendingCount?: number } };
+    const receipt = await waitFor(() => {
+      front.child.send('held-count');
+      return [...front.messages].find((message): message is HeldReceipt =>
+        typeof message === 'object' && message !== null && (message as HeldReceipt).kind === 'held-count'
+        && (message as HeldReceipt).dashboard?.pendingCount === held.count);
+    }, { timeoutMs: 12_000, intervalMs: 100, description: 'front accepted the background held count' });
+    expect(receipt).toMatchObject({
+      dashboard: { pendingCount: 1, pendingCountObservedAt: held.observed_at, judgeMissing: 'turned_off' },
+      setup: { pendingCount: 1, pendingCountObservedAt: held.observed_at },
+      dashboard_sql: 0, setup_sql: 0, dashboard_fs: 0, setup_fs: 0,
+    });
   }, 180_000);
 });
