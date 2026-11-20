@@ -22,6 +22,7 @@ import {
   knownStorePaths,
   knownTierLedgers,
   locateTierItemByIdentity,
+  storeItemIdentityPredicate,
   withLedgerAt,
   withStore,
   type LocatedItem,
@@ -312,12 +313,7 @@ function recentRows(limit: number, context: TierCliContext, filter?: OwnerTierIt
   for (const record of ordered) {
     const identity = identityOfRecord(record);
     for (const dbPath of stores) {
-      const row = withStore<StoredItemRow | undefined>(dbPath, undefined, (db, columns) => (db.query(`
-        SELECT ${selectColumns(columns)} FROM items
-        WHERE tombstoned = 0 AND provider = ? AND account_scope = ? AND provider_item_id = ?
-          AND COALESCE(provider_conversation_id, '') = ?
-        LIMIT 1
-      `).get(identity.provider, identity.accountScope, identity.providerItemId, identity.providerConversationId ?? '') as StoredItemRow | null) ?? undefined);
+      const row = readStoredRow(dbPath, identity);
       if (row) {
         rows.push(row);
         break;
@@ -330,13 +326,15 @@ function recentRows(limit: number, context: TierCliContext, filter?: OwnerTierIt
 /** The start of the item's stored text (its first chunk), from the first store that holds it; null when none does. */
 function previewOf(identity: TierLedgerIdentity, context: TierCliContext): string | null {
   for (const dbPath of knownStorePaths(context)) {
-    const text = withStore<string | undefined>(dbPath, undefined, (db) => (db.query(`
-      SELECT c.bounded_text AS text FROM items i JOIN chunks c ON c.item_pk = i.item_pk
-      WHERE i.tombstoned = 0 AND i.provider = ? AND i.account_scope = ? AND i.provider_item_id = ?
-        AND COALESCE(i.provider_conversation_id, '') = ?
-      ORDER BY c.chunk_index
-      LIMIT 1
-    `).get(identity.provider, identity.accountScope, identity.providerItemId, identity.providerConversationId ?? '') as { text: string } | null)?.text);
+    const text = withStore(dbPath, undefined, (db, columns) => {
+      const predicate = storeItemIdentityPredicate(identity, columns, 'i.');
+      return db.query<{ text: string }, string[]>(`
+        SELECT c.bounded_text AS text FROM items i JOIN chunks c ON c.item_pk = i.item_pk
+        WHERE ${predicate.sql}
+        ORDER BY c.chunk_index
+        LIMIT 1
+      `).get(...predicate.params)?.text;
+    });
     const trimmed = text?.trim();
     if (trimmed) return trimmed.length > OWNER_ITEM_PREVIEW_MAX ? `${trimmed.slice(0, OWNER_ITEM_PREVIEW_MAX).trimEnd()}…` : trimmed;
   }
@@ -552,12 +550,7 @@ export function setOwnerTierItem(input: OwnerTierItemSetInput, context: OwnerTie
 /** The item's stored names for the result; the identity alone when no store row is readable. */
 function storedRowFor(identity: TierLedgerIdentity, located: readonly LocatedItem[], context: TierCliContext): StoredItemRow {
   for (const dbPath of knownStorePaths(context)) {
-    const row = withStore<StoredItemRow | undefined>(dbPath, undefined, (db, columns) => (db.query(`
-      SELECT ${selectColumns(columns)} FROM items
-      WHERE tombstoned = 0 AND provider = ? AND account_scope = ? AND provider_item_id = ?
-        AND COALESCE(provider_conversation_id, '') = ?
-      LIMIT 1
-    `).get(identity.provider, identity.accountScope, identity.providerItemId, identity.providerConversationId ?? '') as StoredItemRow | null) ?? undefined);
+    const row = readStoredRow(dbPath, identity);
     if (row) return row;
   }
   return {
@@ -571,4 +564,15 @@ function storedRowFor(identity: TierLedgerIdentity, located: readonly LocatedIte
     sender_id: null,
     locator_uri: null,
   };
+}
+
+function readStoredRow(dbPath: string, identity: TierLedgerIdentity): StoredItemRow | undefined {
+  return withStore(dbPath, undefined, (db, columns) => {
+    const predicate = storeItemIdentityPredicate(identity, columns);
+    return db.query<StoredItemRow, string[]>(`
+      SELECT ${selectColumns(columns)} FROM items
+      WHERE ${predicate.sql}
+      LIMIT 1
+    `).get(...predicate.params) ?? undefined;
+  });
 }
