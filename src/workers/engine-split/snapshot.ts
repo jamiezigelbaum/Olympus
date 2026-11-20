@@ -1,4 +1,5 @@
 import type { MemoryActivity } from '../../core/memory-counters.ts';
+import type { HeldItemStatus } from '../engine/held-item-status.ts';
 /**
  * State the background publishes for the front (docs/design/engine-split.md,
  * part 3, "State from background to front"): scheduler status, the judge's
@@ -19,20 +20,6 @@ export const ENGINE_STATUS_PUBLISH_INTERVAL_MS = 3_000;
  * are now: the background stopped publishing or cannot write the file.
  */
 export const ENGINE_STATUS_STALE_MS = 30_000;
-
-export interface HeldCountScope {
-  /** A digest of the account selection and backing files both roles must share. */
-  view: string;
-  /** Includes the opened handles and the resolved account scopes. */
-  generation: string;
-}
-
-export interface HeldItemStatus {
-  count: number;
-  observed_at: string;
-  writer_pid: number;
-  scope: HeldCountScope;
-}
 
 export interface EngineStatusSnapshot {
   schema: typeof ENGINE_STATUS_SNAPSHOT_SCHEMA;
@@ -173,14 +160,9 @@ function parseSnapshot(text: string): EngineStatusSnapshot | undefined {
   return snapshot;
 }
 
-/** Unlike the heartbeat, this advances only when the background collects state. */
-export function engineStatusCollectedAt(snapshot: EngineStatusSnapshot): number {
-  return Date.parse(snapshot.state_at ?? snapshot.written_at);
-}
-
 export function engineStatusAge(snapshot: EngineStatusSnapshot, at: number): EngineStatusRead {
   const age = Math.max(0, at - Date.parse(snapshot.written_at));
-  const collected = engineStatusCollectedAt(snapshot);
+  const collected = typeof snapshot.state_at === 'string' ? Date.parse(snapshot.state_at) : Number.NaN;
   return { snapshot, age_ms: age, state_age_ms: Number.isFinite(collected) ? Math.max(0, at - collected) : age, stale: age > ENGINE_STATUS_STALE_MS };
 }
 

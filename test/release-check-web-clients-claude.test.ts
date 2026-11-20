@@ -13,7 +13,7 @@ import {
 import { chatgptPrivacyProgram, CHATGPT_PRIVACY_TOOLS, CHATGPT_PRIVACY_META_KEY, CHATGPT_PRIVACY_FOLDER_SOURCES } from '../src/workers/dashboard/chatgpt/privacy.ts';
 import { privacyLogic } from '../src/workers/dashboard/shared-privacy-logic.ts';
 import { privacyToolResult } from '../src/workers/chatgpt/response-builder.ts';
-import { DASHBOARD_CHATGPT_PRIVACY_COPY as W, DASHBOARD_CHATGPT_PRIVACY_COUNT_COPY, privacyHeldItemsText } from '../src/workers/dashboard/vocabulary.ts';
+import { DASHBOARD_CHATGPT_PRIVACY_COPY as W } from '../src/workers/dashboard/vocabulary.ts';
 import { REMOTE_SECRET_NOTE } from '../src/core/remote-result.ts';
 import type { PrivacyRuleView } from '../src/workers/chatgpt/dashboard-contract.ts';
 import type { CheckResult } from '../scripts/release-check/report.ts';
@@ -69,7 +69,7 @@ function privacyFrame(options: { missingConfirmation?: boolean; failAddition?: b
   const dashboard = () => { root.replaceChildren(button('Edit', 'privacy:edit', () => privacy.start('privacy:edit')) as any); };
   const program: typeof chatgptPrivacyProgram = new Function('setTimeout', 'clearTimeout', `return (${chatgptPrivacyProgram.toString()})`)(clock.setTimeout, clock.clearTimeout);
   privacy = program({
-    config: { tools: CHATGPT_PRIVACY_TOOLS, metaKey: CHATGPT_PRIVACY_META_KEY, scopeList: 'olympus_scope_list', scopeMetaKey: 'scope', mailSourceId: 'gmail.email', folderSources: CHATGPT_PRIVACY_FOLDER_SOURCES, copy: W, heldCopy: DASHBOARD_CHATGPT_PRIVACY_COUNT_COPY },
+    config: { tools: CHATGPT_PRIVACY_TOOLS, metaKey: CHATGPT_PRIVACY_META_KEY, scopeList: 'olympus_scope_list', scopeMetaKey: 'scope', mailSourceId: 'gmail.email', folderSources: CHATGPT_PRIVACY_FOLDER_SOURCES, copy: W },
     el: (tag, cls, text) => { const el = doc.createElement(tag); el.className = cls ?? ''; el.textContent = text ?? ''; return el as any; },
     add: (parent, ...children) => { for (const child of children) if (child) parent.append(child); return parent; },
     button, fill: (template, values) => template.replace(/\{(\w+)\}/g, (_, key) => String(values[key])), count: String,
@@ -82,7 +82,7 @@ function privacyFrame(options: { missingConfirmation?: boolean; failAddition?: b
       }
       return privacyToolResult({ configured: true, description: '', rules: saved, pendingCount: 0, revision: String(revision) }, name === CHATGPT_PRIVACY_TOOLS.set ? 'saved' : 'current', 'test-confirmation');
     },
-    render, compact: () => false, fullscreen: () => {}, data: () => ({ sources: [] }), heldWords: info => privacyHeldItemsText(info, DASHBOARD_CHATGPT_PRIVACY_COUNT_COPY, Date.now()).text, judgeAction: () => null, picker: null, remember: () => {}, close: dashboard,
+    render, compact: () => false, fullscreen: () => {}, data: () => ({ sources: [] }), picker: null, remember: () => {}, close: dashboard,
   }, privacyLogic);
   dashboard();
   const frame: AppFrame = { evaluate: async <T>(expression: string) => new Function('document', 'Event', `return ${expression}`)(doc, win.Event) as T };

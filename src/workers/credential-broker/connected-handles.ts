@@ -168,7 +168,7 @@ export function assertOneConnectedAccountPerProvider(
   }
 }
 
-export function connectedHandleGrantEpochPath(registryPath: string): string {
+function connectedHandleGrantEpochPath(registryPath: string): string {
   return `${registryPath}.grant-epoch.json`;
 }
 

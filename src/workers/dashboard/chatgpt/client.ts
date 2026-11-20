@@ -26,7 +26,6 @@ import type {
   DASHBOARD_CHATGPT_PAGE_COPY,
   DASHBOARD_COMPUTER_PANEL_COPY,
   DashboardStatusColorToken,
-  privacyHeldItemsText,
 } from '../vocabulary.ts';
 
 export interface ChatGptDashboardClientConfig {
@@ -141,7 +140,6 @@ export function chatgptDashboardClient(
   config: ChatGptDashboardClientConfig,
   pickerProgram?: (kit: ChatGptPickerKit) => ChatGptPicker,
   privacyProgram?: (kit: ChatGptPrivacyKit) => ChatGptPrivacy,
-  heldItemsText?: typeof privacyHeldItemsText,
 ): void {
   const doc = document;
   const root = doc.getElementById('app') as HTMLElement;
@@ -1227,10 +1225,7 @@ export function chatgptDashboardClient(
     items.forEach((item, index) => {
       const key = 'need:' + String(item.id || index);
       // A warm box with an orange edge carries the state, so the row has no dot.
-      const stopped = item.id === 'privacy:judge_stopped' && state.data?.privacy?.judgeStopped;
-      const sentence = stopped ? heldWords(state.data.privacy).text : String(item.sentence || '');
-      const fix = stopped ? privacyJudgeAction(state.data.privacy, key, 'warn') : fixControl(archiveNeedFix(item), key, 'warn', true, itemSource(item));
-      const body = add(el('div', 'need-body'), el('p', 'row-text', sentence), fix);
+      const body = add(el('div', 'need-body'), el('p', 'row-text', String(item.sentence || '')), fixControl(archiveNeedFix(item), key, 'warn', true, itemSource(item)));
       add(list, add(el('li', 'row need'), body));
     });
     return add(section, list);
@@ -2529,20 +2524,6 @@ export function chatgptDashboardClient(
     privacy.start(returnKey);
   }
 
-  function heldWords(info: Any): { text: string; needsModel: boolean } {
-    return heldItemsText?.(info, config.privacy.heldCopy, Date.now())
-      ?? { text: config.privacy.heldCopy.counting, needsModel: false };
-  }
-  function privacyJudgeAction(info: Any, key = 'privacy:check-model', style: 'plain' | 'warn' = 'plain'): HTMLElement | null {
-    if (!heldWords(info).needsModel) return null;
-    const label = config.privacy.heldCopy.stopped.label;
-    const items = Array.isArray(state.data?.needsYou) ? state.data.needsYou : [];
-    if (onComputer() && state.hostLinks.keys) return fixControl({ label, archiveModels: true }, key, style, false);
-    const href = info.judgeModelHref || items.find((item: Any) => item?.id === 'privacy:judge_stopped')?.fix?.href
-      || state.data?.models?.change?.href;
-    return fixControl(href ? { label, href, openHref: true } : { label, archiveModels: true }, key, style, false);
-  }
-
   /**
    * The Privacy row, after Sources. Until privacy is set up its Needs-you item
    * says so and carries the one call to action, so the row then shows only
@@ -2556,7 +2537,7 @@ export function chatgptDashboardClient(
     const pending = typeof info.pendingCount === 'number' && isFinite(info.pendingCount) ? Math.max(0, Math.round(info.pendingCount)) : undefined;
     const asked = (Array.isArray(data.needsYou) ? data.needsYou : [])
       .some((item: Any) => item && item.fix && privacy!.handles(item.fix));
-    if (!configured && !info.judgeStopped && pending !== undefined && (asked || pending === 0)) return null;
+    if (!configured && pending !== undefined && (asked || pending === 0)) return null;
     const section = add(el('section', 'section privacy-row'), el('h2', '', W.section));
     const row = el('li', 'row');
     const text = el('div', 'row-text');
@@ -2565,8 +2546,11 @@ export function chatgptDashboardClient(
       const words = rules === 0 ? W.row.none : rules === 1 ? W.row.one : W.row.many;
       add(text, el('p', '', rules >= 0 ? fill(words, { n: count(rules) }) : W.rowNoCount));
     }
-    add(text, el('p', 'muted', heldWords(info).text));
-    add(row, text, privacyJudgeAction(info));
+    if (pending === undefined) add(text, el('p', 'muted', H.copy.archives.counting));
+    else if (pending > 0) add(text, el('p', 'muted', fill(pending === 1 ? W.dashboardPending.one : W.dashboardPending.many, { n: count(pending) })));
+    const observed = pending !== undefined ? ago(info.pendingCountObservedAt) : '';
+    if (observed) add(text, el('p', 'muted', fill(P.updated, { when: observed })));
+    add(row, text);
     if (configured) {
       const blocked = globalReason();
       const edit = button(W.edit, 'privacy:edit', blocked ? null : () => openPrivacy('privacy:edit'), 'plain');
@@ -2966,18 +2950,19 @@ export function chatgptDashboardClient(
    */
   function privacyPendingRow(data: Any): HTMLElement | null {
     const info = data && data.privacy && typeof data.privacy === 'object' ? data.privacy : null;
-    if (!info || !privacy || (info.configured !== true && !info.judgeStopped && info.pendingCount === undefined)) return null;
+    if (!info || !privacy || info.configured !== true) return null;
     const pending = typeof info.pendingCount === 'number' && isFinite(info.pendingCount) ? Math.max(0, Math.round(info.pendingCount)) : undefined;
-    const words = heldWords(info);
-    if (info.judgeStopped && (Array.isArray(data.needsYou) ? data.needsYou : [])
-      .some((item: Any) => item?.id === 'privacy:judge_stopped')) return null;
-    if (pending === 0 && !info.judgeStopped) return null;
-    const facts = [words.text];
+    if (pending === 0) return null;
+    const W = config.privacy.copy;
+    const facts = [pending === undefined ? H.copy.archives.counting
+      : fill(pending === 1 ? W.dashboardPending.one : W.dashboardPending.many, { n: count(pending) })];
+    const observed = pending !== undefined ? ago(info.pendingCountObservedAt) : '';
+    if (observed) facts.push(fill(P.updated, { when: observed }));
     const rate = typeof info.judgePerMinute === 'number' && isFinite(info.judgePerMinute) && info.judgePerMinute > 0 ? info.judgePerMinute : 0;
-    if (!info.judgeStopped && pending !== undefined && rate > 0) facts.push(fill(P.home.left, { duration: duration(Math.ceil(pending / rate) * 60) }));
+    if (pending !== undefined && rate > 0) facts.push(fill(P.home.left, { duration: duration(Math.ceil(pending / rate) * 60) }));
     const row = add(el('li', 'row home-line'), add(el('div', 'need-body'), el('p', 'row-text', facts.join(' · '))));
     row.setAttribute('data-privacy-pending', pending === undefined ? 'unknown' : String(pending));
-    return add(row, privacyJudgeAction(info));
+    return row;
   }
 
   /**
@@ -3344,8 +3329,6 @@ export function chatgptDashboardClient(
     compact,
     fullscreen: goFullscreen,
     data: () => state.data,
-    heldWords: (info) => heldWords(info).text,
-    judgeAction: privacyJudgeAction,
     picker,
     remember: (rules: number) => {
       state.privacyRules = rules;

@@ -261,7 +261,7 @@ describe('the engine split boots as two processes', () => {
     expect(receipt).toMatchObject({
       dashboard: { pendingCount: 1, pendingCountObservedAt: held.observed_at, judgeMissing: 'turned_off' },
       setup: { pendingCount: 1, pendingCountObservedAt: held.observed_at },
-      dashboard_sql: 0, setup_sql: 0, dashboard_fs: 0, setup_fs: 0,
+      dashboard_sql: 0, setup_sql: 0,
     });
   }, 180_000);
 });

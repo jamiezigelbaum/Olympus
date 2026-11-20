@@ -1,4 +1,3 @@
-import type { PrivacyJudgeStopReason } from '../dashboard/vocabulary.ts';
 import type { PRIVATE_ANSWER_OPTIONS, PrivateAnswerOption } from '../../core/privacy-language.ts';
 /**
  * The ChatGPT dashboard view-model, version 1: `structuredContent` of the
@@ -356,8 +355,6 @@ export interface DashboardViewModelV1 {
    */
   privacy?: {
     configured: boolean; pendingCount?: number; pendingCountObservedAt?: string; ruleCount: number;
-    judgeStopped?: PrivacyJudgeStopReason;
-    judgeStoppedAt?: string;
     /**
      * Contract v1 addition (2026-11-15): how many items a minute the private
      * model has been checking, when measured, so Home can say about how long
@@ -1269,8 +1266,6 @@ export interface PrivacySettings {
   /** Items waiting for the privacy check (held Private, keyword-searchable, not embedded). */
   pendingCount?: number;
   pendingCountObservedAt?: string;
-  judgeStopped?: PrivacyJudgeStopReason;
-  judgeStoppedAt?: string;
   /**
    * olympus_privacy_get only: the panel's confirmation for a save that
    * lowers protection (see PrivacySetInput). In `_meta`, so the model never

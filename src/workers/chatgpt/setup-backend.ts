@@ -79,7 +79,6 @@ export interface ChatGptSetupBackendOptions {
   pendingClassificationCount?: () => number;
   /** The split background's last complete held-item observation. */
   heldItemCount?: () => PrivacyCount | undefined;
-  judgeStop?: () => Pick<PrivacySettings, 'judgeStopped' | 'judgeStoppedAt'>;
   privacyQuestionEngine?: PrivacyQuestionEngine;
   /** Starts a built-in model's install again; false when that model is not built in here. */
   retryModel?: (model: 'embedding' | 'answers' | 'transcription') => boolean;
@@ -135,18 +134,15 @@ export function createChatGptSetupBackend(options: ChatGptSetupBackendOptions): 
       ? validateSovereigntyConfig(JSON.parse(readFileSync(options.sovereignty.path, 'utf8'))) : policy;
     policy = current;
     const policyRevision = createHash('sha256').update(JSON.stringify(current)).digest('hex').slice(0, 16);
-    const count = safeCount(options.heldItemCount ?? options.pendingClassificationCount);
-    const judgeStop = options.judgeStop?.();
     if (isPendingPrivacyPolicy(current)) return {
       configured: false, description: '', rules: [],
-      ...count,
-      ...judgeStop,
+      ...(options.heldItemCount ? safeCount(options.heldItemCount) : options.pendingClassificationCount ? { pendingCount: 0 } : {}),
       revision: privacyRevision(undefined) + '.' + policyRevision,
       privateAnswerChoice: { pending: true, options: privateAnswerOptions(totalmem()) },
     };
-    const settings = readChatGptPrivacySettings(options.env ?? process.env, count);
+    const settings = readChatGptPrivacySettings(options.env ?? process.env, safeCount(options.heldItemCount ?? options.pendingClassificationCount));
     const id = privateAnswerMode(current);
-    return { ...settings, ...judgeStop, revision: settings.revision + '.' + policyRevision, privateAnswerMode: { id, label: id === 'custom' ? 'Custom Private-answer mode' : PRIVACY_PRESET_LABELS[id], options: privateAnswerOptions(totalmem()) } };
+    return { ...settings, revision: settings.revision + '.' + policyRevision, privateAnswerMode: { id, label: id === 'custom' ? 'Custom Private-answer mode' : PRIVACY_PRESET_LABELS[id], options: privateAnswerOptions(totalmem()) } };
   };
 
 

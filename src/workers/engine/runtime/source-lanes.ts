@@ -107,8 +107,6 @@ export function sourceAccountMountable(
   return false;
 }
 
-export const SOURCE_REGISTRY_LANE_DECISION = 'the source registry';
-
 /** A lane's storage decision, switched off when its account may not be mounted. */
 export function sourceIndexLaneAccountDecision(
   decision: SourceIndexLaneDecision,
@@ -117,7 +115,7 @@ export function sourceIndexLaneAccountDecision(
   log: (line: string) => void = console.warn,
 ): SourceIndexLaneDecision {
   if (!decision.enabled || sourceAccountMountable(account, env, log)) return decision;
-  return { ...decision, enabled: false, decidedBy: SOURCE_REGISTRY_LANE_DECISION };
+  return { ...decision, enabled: false, decidedBy: 'the source registry' };
 }
 
 export function sourceIndexLaneStartupLog(label: string, decision: SourceIndexLaneDecision): string {

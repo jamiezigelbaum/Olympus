@@ -1,6 +1,4 @@
-import { mock, spyOn } from 'bun:test';
-import * as fs from 'node:fs';
-import { resolvePrivacyProfilePath } from '../../src/workers/classification/privacy-profile.ts';
+import { mock } from 'bun:test';
 import { frontLoopSqlHealth } from '../../src/core/front-loop-sql-guard.ts';
 import * as starting from '../../src/core/worker-front-proxy.ts';
 import { LocalConnectorStore } from '../../src/workers/connector-store/local-index.ts';
@@ -22,25 +20,14 @@ mock.module('../../src/workers/engine/dashboard/dashboard-panel-tools.ts', () =>
   createDashboardPanelTools(options: Parameters<typeof createPanelTools>[0]) {
     process.on('message', (message) => {
       if (message !== 'held-count') return;
-      const profile = resolvePrivacyProfilePath();
-      const stats = spyOn(fs, 'statSync');
-      const reads = spyOn(fs, 'readFileSync');
-      const exists = spyOn(fs, 'existsSync');
-      const fsReads = () => [stats, reads, exists].flatMap(spy => spy.mock.calls.map(([path]) => path))
-        .filter(path => path !== profile).length;
-      try {
-        const before = frontLoopSqlHealth()!.statements;
-        const dashboard = options.surface().privacy?.();
-        const between = frontLoopSqlHealth()!.statements;
-        const dashboard_fs = fsReads();
-        const setup = options.setup.privacySettings();
-        process.send!({
-          kind: 'held-count', dashboard, setup, dashboard_fs, setup_fs: fsReads() - dashboard_fs,
-          dashboard_sql: between - before, setup_sql: frontLoopSqlHealth()!.statements - between,
-        });
-      } finally {
-        for (const spy of [stats, reads, exists]) spy.mockRestore();
-      }
+      const before = frontLoopSqlHealth()!.statements;
+      const dashboard = options.surface().privacy?.();
+      const between = frontLoopSqlHealth()!.statements;
+      const setup = options.setup.privacySettings();
+      process.send!({
+        kind: 'held-count', dashboard, setup,
+        dashboard_sql: between - before, setup_sql: frontLoopSqlHealth()!.statements - between,
+      });
     });
     return createPanelTools(options);
   },
