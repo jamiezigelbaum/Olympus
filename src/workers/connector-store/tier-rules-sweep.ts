@@ -49,6 +49,7 @@ import { leastPrivateDomain } from './tier-override-settle.ts';
 import { settleRoutedSecrets } from './tier-rejudge.ts';
 import { findInLedger, runPassHere, runPassOffThread, turn, type LoopPass } from './loop-pass.ts';
 import {
+  applicableProviderLabelRules,
   currentTierRulePolicy,
   labelEvidenceItemKey,
   labelSweepHasPolicy,
@@ -109,11 +110,11 @@ export function ownerRuleSweepsComplete(set: TieredStoreSet): boolean {
   const outstanding = raising.filter(rule => isLabelRule(rule) || !stored.done.includes(ruleKey(rule)));
   if (!outstanding.length) return true;
   for (const { provider, accountScope } of ledger.storedAccounts()) {
-    // Only an explicit stored-proof capability replaces this sweep's existing
-    // account-wide prerequisite. Unknown providers keep waiting for a receipt.
-    const usesStoredLabels = connectorLabelCapability(provider)?.proof === 'stored';
-    const applicable = outstanding.filter(rule => (rule.source === undefined || rule.source === provider)
-      && (!isLabelRule(rule) || !usesStoredLabels));
+    const applicable = outstanding.filter(rule => !isLabelRule(rule)
+      && (rule.source === undefined || rule.source === provider));
+    if (connectorLabelCapability(provider)?.proof === 'provider_walk') {
+      applicable.push(...applicableProviderLabelRules(outstanding, provider));
+    }
     if (!applicable.length) continue;
     const labels = readLabelState(ledger.readMeta(labelSweepMetaKey(provider, accountScope)));
     for (const rule of applicable) {

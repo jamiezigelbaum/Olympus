@@ -1,5 +1,5 @@
 import { SNIFFER_NAMES_MAX_CHARS } from '../classification/tier-classifier.ts';
-import { connectorLabelCapability, listedLabelObservation, storedLabelProviders } from '../../core/source-connector-labels.ts';
+import { connectorLabelCapability, legacyCappedTagProviders, listedLabelObservation, storedLabelProviders } from '../../core/source-connector-labels.ts';
 import { changeMemoryActivity, changeMemoryCounter } from '../../core/memory-counters.ts';
 import { embedsOnThisComputer } from '../local-pacing.ts';
 import { EMBEDDING_HOLD_REASONS, type EmbeddingHoldReason } from '../../core/embedding-sweep-idle.ts';
@@ -3193,17 +3193,24 @@ export interface ConnectorStoreLocalContent {
   providerConversationId?: string;
 }
 
+// Case-folded membership in an older capped note cannot distinguish a short list
+// from a truncated list whose spellings collapse. A fresh listing resolves the gap.
+const LEGACY_CAPPED_TAGS = `provider IN (${legacyCappedTagProviders.map(provider => `'${provider}'`).join(', ')})
+  AND CASE WHEN json_valid(classification_labels_json) THEN json_array_length(classification_labels_json) > 0 ELSE 0 END`;
+const RECOVERABLE_LABEL_SET = `(classification_labels_json IS NULL OR (${LEGACY_CAPPED_TAGS}))`;
+const KNOWN_LABEL_SET = `CASE WHEN ${LEGACY_CAPPED_TAGS} THEN 0 WHEN json_valid(classification_labels_json)
+  THEN json_type(classification_labels_json) = 'array' OR json_type(classification_labels_json, '$.labels') = 'array' ELSE 0 END`;
+
 // Also used by the writer's keyed recheck when another connection changed this store.
-const STORED_LABEL_FIELDS = `i.source_version AS version, i.sync_run_id AS run, i.indexed_at AS indexedAt,
-      CASE WHEN i.classification_labels_json IS NULL THEN NULL
-        WHEN json_valid(i.classification_labels_json) THEN CASE WHEN json_type(i.classification_labels_json) = 'array' THEN 'known' ELSE 'null' END
-        ELSE 'null' END AS observed,
+const STORED_LABEL_FIELDS = `CASE WHEN ${LEGACY_CAPPED_TAGS} THEN classification_labels_json END AS legacyObservation, i.source_version AS version, i.sync_run_id AS run, i.indexed_at AS indexedAt,
+      CASE WHEN ${RECOVERABLE_LABEL_SET} THEN NULL
+        WHEN ${KNOWN_LABEL_SET} THEN 'known' ELSE 'null' END AS observed,
       i.title, COALESCE(i.sender_label, i.sender_id) AS sender, i.locator_uri AS locator,
       CASE WHEN json_valid(i.source_scope_folder_keys_json) THEN i.source_scope_folder_keys_json END AS folderKeys,
-      CASE WHEN i.classification_labels_json IS NULL THEN substr(i.search_text, -?1) END AS searchTail,
-      CASE WHEN i.classification_labels_json IS NULL AND i.mime_type LIKE 'text/markdown%' THEN
+      CASE WHEN ${RECOVERABLE_LABEL_SET} THEN substr(i.search_text, -?1) END AS searchTail,
+      CASE WHEN ${RECOVERABLE_LABEL_SET} AND i.mime_type LIKE 'text/markdown%' THEN
         (SELECT substr(c.bounded_text, 1, ?1) FROM chunks c WHERE c.item_pk = i.item_pk AND c.chunk_index = 0) END AS opening,
-      CASE WHEN i.classification_labels_json IS NULL THEN
+      CASE WHEN ${RECOVERABLE_LABEL_SET} THEN
         EXISTS (SELECT 1 FROM item_owners o WHERE o.item_pk = i.item_pk AND o.first_seen_sync_run_id = i.sync_run_id)
         AND NOT EXISTS (SELECT 1 FROM item_owners o WHERE o.item_pk = i.item_pk AND
           (o.first_seen_sync_run_id <> i.sync_run_id OR o.last_seen_sync_run_id <> i.sync_run_id OR o.first_seen_at <> o.last_seen_at))
@@ -3211,6 +3218,7 @@ const STORED_LABEL_FIELDS = `i.source_version AS version, i.sync_run_id AS run, 
       END AS originalListing`;
 
 export interface StoredLabelRow {
+  legacyObservation: string | null;
   itemPk: number;
   provider: string;
   accountScope: string;
@@ -4209,10 +4217,12 @@ export class LocalConnectorStore {
       // each one's 6 minutes to ready (ops#151, 2026-11-12).
       const schemaTarget = options.restoreSchemaVersion ?? CONNECTOR_STORE_SQLITE_SCHEMA_VERSION;
       const migrating = options.readOnly !== true && versionAtOpen < schemaTarget;
+      // Adding the nullable observation and its invalidation trigger changes no existing rows or references.
+      const checkRows = migrating && !(versionAtOpen === 17 && schemaTarget === 18);
       validateCurrentConnectorStoreSchemaBeforeMigration(this.db);
       // The checks that read every row are part of the update; the heartbeat
       // says so while they hold the loop.
-      if (migrating) {
+      if (checkRows) {
         setEngineStep(`checking ${SQLITE_STORE_ID} rows`);
         validateConnectorStoreRows(this.db, `v${versionAtOpen}`);
         setEngineStep(undefined);
@@ -4247,7 +4257,7 @@ export class LocalConnectorStore {
           if (creatingFile) this.db.exec(CONNECTOR_STORE_RECENCY_INDEX_SQL);
           if (this.dbPath !== ':memory:') this.db.exec(`PRAGMA user_version = ${connectorStoreOpenStamp(this.db)}`);
         }
-        if (migrating) {
+        if (checkRows) {
           setEngineStep(`checking ${SQLITE_STORE_ID} rows`);
           validateConnectorStoreRows(this.db, 'v15');
           validateConnectorStoreForeignKeys(this.db);
@@ -6063,15 +6073,10 @@ export class LocalConnectorStore {
       WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
         ${options.onlyTombstoned ? 'AND tombstoned = 1' : ''}`;
     if (this.classificationLabelsPresent && options.observedLabels !== undefined) {
-      // A bodyless listing advances the version without replacing the stored
-      // names. Keep their evidence only if the listing still attests it.
-      // RETURNING sees the row before the invalidation trigger runs.
+      // Write the explicit listing after the version update's invalidation trigger.
       this.db.transaction(() => {
-        const prior = this.db.query(`${update} RETURNING item_pk, classification_labels_json`).get(...params) as
-          { item_pk: number; classification_labels_json: string | null } | null;
-        if (prior) {
-          this.writeLabelObservation(prior.item_pk, prior.classification_labels_json === options.observedLabels ? options.observedLabels : 'null');
-        }
+        const row = this.db.query(`${update} RETURNING item_pk`).get(...params) as { item_pk: number } | null;
+        if (row) this.writeLabelObservation(row.item_pk, options.observedLabels);
       })();
     } else {
       this.db.query(update).run(...params);
@@ -7207,7 +7212,7 @@ export class LocalConnectorStore {
       SELECT item_pk, trust_tier, ${CONNECTOR_STORE_COPY_ITEM_COLUMNS
         .map(column => {
           if (column === 'classification_labels_json') return this.classificationLabelsPresent
-            ? "CASE WHEN json_valid(classification_labels_json) THEN CASE WHEN json_type(classification_labels_json) = 'array' THEN classification_labels_json END END AS classification_labels_json"
+            ? "CASE WHEN json_valid(classification_labels_json) THEN CASE WHEN (json_type(classification_labels_json) = 'array' OR json_type(classification_labels_json, '$.labels') = 'array') THEN classification_labels_json END END AS classification_labels_json"
             : 'NULL AS classification_labels_json';
           return this.childItemColumnsPresent || !CONNECTOR_STORE_CHILD_ITEM_COLUMNS.includes(column)
             ? column : `NULL AS ${column}`;
@@ -12280,6 +12285,7 @@ export class LocalConnectorStore {
           if (route.kind === 'store' && route.sensitivity.trustDomain !== this.trustDomain) {
             throw new Error('A tier route must place an item only in the store that asked.');
           }
+          const listedItem = itemForStorage;
           const routedLayer = route.kind === 'store' ? route.layer : undefined;
           const sensitivity = route.kind === 'store' ? route.sensitivity : legacySensitivity;
           if (route.kind === 'legacy' && itemForStorage.metadata['deleted'] !== true
@@ -12417,7 +12423,7 @@ export class LocalConnectorStore {
               sourceScopeObservation,
               routedLayer && routedLayer !== 'metadata' ? 'content' : undefined,
               options?.ownerObservation !== 'local_write' && routedLayer !== 'content'
-                ? listedLabelObservation(connector, itemForStorage) : undefined,
+                ? listedLabelObservation(connector, listedItem) : undefined,
             );
           } catch (error) {
             if (!(error instanceof ConnectorStoreTierWriteRefusedError)) throw error;
@@ -12687,7 +12693,7 @@ export class LocalConnectorStore {
       ${STORED_LABEL_FIELDS}
       FROM page LEFT JOIN items i ON i.item_pk = page.item_pk AND i.tombstoned = 0
         AND i.provider IN (SELECT value FROM json_each(?4))
-        AND (?5 OR i.classification_labels_json IS NULL OR i.classification_labels_json = 'null') ORDER BY page.item_pk`;
+        AND (?5 OR ${RECOVERABLE_LABEL_SET} OR i.classification_labels_json = 'null') ORDER BY page.item_pk`;
     const params = [SNIFFER_NAMES_MAX_CHARS * 2, after, limit, JSON.stringify(storedLabelProviders), Number(checkKnown)];
     const rows = (offThreadReadsSupported(this.dbPath) ? await readInBackground(this.dbPath, { sql, params, mode: 'all' })
       : this.db.query(sql).all(...params)) as Array<StoredLabelRow & { cursor: number }>;
@@ -12705,15 +12711,15 @@ export class LocalConnectorStore {
   /** Undefined if this store has no active row for the item. */
   hasListedLabels(identity: TierLedgerIdentity): boolean | undefined {
     if (!this.classificationLabelsPresent) return undefined;
-    const row = this.db.query(`SELECT CASE WHEN json_valid(classification_labels_json) THEN json_type(classification_labels_json) = 'array' ELSE 0 END AS known
+    const row = this.db.query(`SELECT ${KNOWN_LABEL_SET} AS known
       FROM items WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ? AND tombstoned = 0`)
       .get(identity.provider, identity.accountScope, identity.providerConversationId ?? '', identity.providerItemId) as { known: number } | null;
     return row ? Boolean(row.known) : undefined;
   }
 
   recordRecoveredLabels(row: StoredLabelRow, labels: string): void {
-    this.db.query('UPDATE items SET classification_labels_json = ? WHERE item_pk = ? AND tombstoned = 0 AND classification_labels_json IS NULL')
-      .run(labels, row.itemPk);
+    this.db.query('UPDATE items SET classification_labels_json = ? WHERE item_pk = ? AND tombstoned = 0 AND classification_labels_json IS ?')
+      .run(labels, row.itemPk, row.legacyObservation);
   }
 
   private writeLabelObservation(itemPk: number, labels: string | undefined): void {

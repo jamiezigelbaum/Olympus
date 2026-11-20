@@ -2261,21 +2261,32 @@ function providerMetadataLabels(provider, metadata) {
     return;
   return telegramContextNames({ metadata });
 }
-function encodeLabelObservation(labels) {
-  return JSON.stringify([...new Set(labels.map((label) => label.trim().toLowerCase()))].sort());
+function encodeLabelObservation(provider, labels) {
+  const values = [...new Set(labels.map((label) => label.trim().toLowerCase()))].sort();
+  return JSON.stringify(connectorLabelCapability(provider)?.legacyTagLimits ? { labels: values } : values);
+}
+function observedLabelValues(provider, raw) {
+  const value = JSON.parse(raw);
+  if (Array.isArray(value) && value.length && connectorLabelCapability(provider)?.legacyTagLimits)
+    return;
+  const labels = Array.isArray(value) ? value : value?.labels;
+  return Array.isArray(labels) && labels.every((label) => typeof label === "string") ? labels : undefined;
 }
 function listedLabelObservation(connector, item) {
-  if (connectorLabelCapability(item.identity.provider)?.proof !== "stored")
+  const capability = connectorLabelCapability(item.identity.provider);
+  if (capability?.proof !== "stored")
     return;
-  return encodeLabelObservation(connector.classificationSignals(item).labels ?? []);
+  if (item.content.kind === "metadata_only" && providerMetadataLabels(item.identity.provider, item.metadata) === undefined)
+    return "null";
+  return encodeLabelObservation(item.identity.provider, connector.classificationSignals(item).labels ?? []);
 }
-var NOTE_TAGS_METADATA_KEY = "tags", GMAIL_LABEL_CAPABILITY, MBOX_LABEL_CAPABILITY, EVERNOTE_LABEL_CAPABILITY, READWISE_LABEL_CAPABILITY, REFLECT_LABEL_CAPABILITY, TELEGRAM_LABEL_CAPABILITY, capabilities, storedLabelProviders, byProvider;
+var NOTE_TAGS_METADATA_KEY = "tags", GMAIL_LABEL_CAPABILITY, MBOX_LABEL_CAPABILITY, EVERNOTE_LABEL_CAPABILITY, READWISE_LABEL_CAPABILITY, REFLECT_LABEL_CAPABILITY, TELEGRAM_LABEL_CAPABILITY, capabilities, storedLabelProviders, legacyCappedTagProviders, byProvider;
 var init_source_connector_labels = __esm(() => {
   GMAIL_LABEL_CAPABILITY = { provider: "gmail", proof: "provider_walk", metadataKey: "labels" };
   MBOX_LABEL_CAPABILITY = { provider: "mbox", proof: "stored", metadataKey: "labels" };
-  EVERNOTE_LABEL_CAPABILITY = { provider: "evernote", proof: "stored", metadataKey: NOTE_TAGS_METADATA_KEY };
-  READWISE_LABEL_CAPABILITY = { provider: "readwise", proof: "stored", metadataKey: NOTE_TAGS_METADATA_KEY };
-  REFLECT_LABEL_CAPABILITY = { provider: "reflect", proof: "stored", metadataKey: NOTE_TAGS_METADATA_KEY };
+  EVERNOTE_LABEL_CAPABILITY = { provider: "evernote", proof: "stored", mutable: true, legacyTagLimits: true, metadataKey: NOTE_TAGS_METADATA_KEY };
+  READWISE_LABEL_CAPABILITY = { provider: "readwise", proof: "stored", mutable: true, metadataKey: NOTE_TAGS_METADATA_KEY };
+  REFLECT_LABEL_CAPABILITY = { provider: "reflect", proof: "stored", legacyTagLimits: true, metadataKey: NOTE_TAGS_METADATA_KEY };
   TELEGRAM_LABEL_CAPABILITY = { provider: "telegram", proof: "stored" };
   capabilities = [
     GMAIL_LABEL_CAPABILITY,
@@ -2286,6 +2297,7 @@ var init_source_connector_labels = __esm(() => {
     TELEGRAM_LABEL_CAPABILITY
   ];
   storedLabelProviders = capabilities.filter((capability) => capability.proof === "stored").map((capability) => capability.provider);
+  legacyCappedTagProviders = capabilities.filter((capability) => ("legacyTagLimits" in capability)).map((capability) => capability.provider);
   byProvider = new Map(capabilities.map((capability) => [capability.provider, capability]));
 });
 
@@ -63384,6 +63396,50 @@ var init_tier_rules = __esm(() => {
 // src/workers/connector-store/tier-move-rule-policy.ts
 import { createHash as createHash31 } from "node:crypto";
 import { resolve as resolve14 } from "node:path";
+function mutableItemLabels(set, provider) {
+  if (!connectorLabelCapability(provider)?.mutable)
+    return false;
+  const stores = set.openStores();
+  return !stores.length || stores.some((store) => !isArchiveCorpusId(store.corpusId, store.trustDomain));
+}
+async function withCurrentMoveLabels(set, identity, target, work) {
+  if (!set.readCurrentLabels || !mutableItemLabels(set, identity.provider))
+    return work();
+  const policy = withTierRuleFence(set, () => currentTierRulePolicy(set));
+  const rules = applicableProviderLabelRules(policy.rules, identity.provider);
+  if (policy.unavailable || !rules.length)
+    return work();
+  const record = set.ledger.getCurrent(identity);
+  if (!record)
+    return work();
+  const wanted = target ?? record;
+  const copies = set.ledger.copies(identity);
+  const sources = copies.filter((copy) => copy.state === "current" || copy.state === "superseded" && copy.supersededByGeneration === record.generation + 1);
+  const destination = set.placementFor({ ...record, ...wanted, state: record.metadataPending || record.contentPending ? "pending" : "current" });
+  const ceiling = loweringCeiling(record, wanted, sources, destination.copies);
+  const override = set.ledger.getOverride(identity);
+  if (!rules.some((rule) => tierRank(rule.tier) > ceiling && (override?.kind !== "tier" || rule.tier === "secrets")))
+    return work();
+  const names = servingNames(set, record);
+  if (!names)
+    return work();
+  const reader = set.readCurrentLabels;
+  const labels = await reader(names.identity);
+  if (!labels || reader !== set.readCurrentLabels)
+    return work();
+  currentLabels.set(set, {
+    identityKey: tierLedgerIdentityKey(identity),
+    revision: policy.revision,
+    generation: record.generation,
+    decidedAt: record.decidedAt,
+    labels
+  });
+  try {
+    return work();
+  } finally {
+    currentLabels.delete(set);
+  }
+}
 function withTierRuleFence(set, work) {
   if (heldPolicyFences.has(set))
     return work();
@@ -63429,9 +63485,7 @@ function servingNames(set, record) {
   const source = servingMetadataCopy(copies, record);
   return source && set.store(source.trustDomain)?.exportItemNames(identity);
 }
-function tierMoveRuleAuthorization(set, record, target, sources, destination) {
-  const policy = currentTierRulePolicy(set);
-  const override = set.ledger.getOverride(tierLedgerIdentityOfRecord(record));
+function loweringCeiling(record, target, sources, destination) {
   let ceiling = Number.POSITIVE_INFINITY;
   for (const layer of ["metadata", "content"]) {
     const from = copyServingLayer(sources, layer);
@@ -63442,6 +63496,12 @@ function tierMoveRuleAuthorization(set, record, target, sources, destination) {
       ceiling = Math.min(ceiling, tierRank(toTier), trustDomainRank(to.trustDomain));
     }
   }
+  return ceiling;
+}
+function tierMoveRuleAuthorization(set, record, target, sources, destination) {
+  const policy = currentTierRulePolicy(set);
+  const override = set.ledger.getOverride(tierLedgerIdentityOfRecord(record));
+  const ceiling = loweringCeiling(record, target, sources, destination);
   const rules = policy.rules.filter((rule) => tierRank(rule.tier) > ceiling && (rule.source === undefined || rule.source === record.provider) && (override?.kind !== "tier" || rule.tier === "secrets"));
   let stored;
   const names = () => stored ??= servingNames(set, record);
@@ -63464,9 +63524,16 @@ function labelRulesWithoutNonmatch(set, record, policy, rules, names = () => ser
     const raw = names()?.columns.classification_labels_json;
     if (typeof raw !== "string")
       return rules;
-    const labels = JSON.parse(raw);
-    if (!Array.isArray(labels) || !labels.every((label) => typeof label === "string"))
+    const stored = observedLabelValues(provider, raw);
+    if (!stored)
       return rules;
+    let labels = stored;
+    if (mutableItemLabels(set, provider)) {
+      const fresh = currentLabels.get(set);
+      if (!fresh || fresh.identityKey !== tierLedgerIdentityKey(tierLedgerIdentityOfRecord(record)) || fresh.revision !== policy.revision || fresh.generation !== record.generation || fresh.decidedAt !== record.decidedAt)
+        return rules;
+      labels = [...stored, ...fresh.labels];
+    }
     return rules.filter((rule) => ownerRuleMatches(rule, { labels }, provider));
   }
   const progress = readLabelState(set.ledger.readMeta(labelSweepMetaKey(provider, accountScope)));
@@ -63524,14 +63591,16 @@ function labelEvidenceItemKey(providerItemId) {
 function digest4(value) {
   return createHash31("sha256").update(JSON.stringify(value)).digest("hex");
 }
-var heldPolicyFences, moveRuleChecks, moveRuleRegistry;
+var currentLabels, heldPolicyFences, moveRuleChecks, moveRuleRegistry;
 var init_tier_move_rule_policy = __esm(() => {
   init_owner_config_read();
+  init_archive_formats();
   init_source_connector_labels();
   init_tier_classifier();
   init_tier_ledger();
   init_tier_rules();
   init_stored_names();
+  currentLabels = new WeakMap;
   heldPolicyFences = new WeakMap;
   moveRuleChecks = {
     override: (a) => !tierMoveOverrideConflict(a.override, a.record, a.target, a.sources, a.destination),
@@ -63591,7 +63660,7 @@ async function moveTieredItem(options) {
       throw new TierLedgerGenerationConflictError;
     return moveToSecrets(options, record.generation);
   }
-  const result = moveTieredItemNow(options);
+  const result = await withCurrentMoveLabels(options.set, options.identity, target, () => moveTieredItemNow(options));
   await flushTierMoveNotes(options.set.ledger, options.timings ? { timings: options.timings } : {});
   return result;
 }
@@ -72449,21 +72518,7 @@ var TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff", DEFAULT_
   JOIN items i ON i.item_pk = emb.item_pk
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
-`, VECTOR_DIGEST_BACKFILL_MAX_ROWS = 128, VECTOR_DIGEST_BACKFILL_MIN_ROWS = 8, VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS = 25, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS = 250, vectorDigestBackfillHold = () => false, VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS = 60000, VECTOR_DIGEST_PAGE_ROWS = 4096, VECTOR_DIGEST_MIN_MARGIN = 0.05, VECTOR_DIGEST_MAX_CANDIDATES = 5000, VECTOR_SCAN_BACKSTOP_GRACE_MS = 250, STORED_LABEL_FIELDS = `i.source_version AS version, i.sync_run_id AS run, i.indexed_at AS indexedAt,
-      CASE WHEN i.classification_labels_json IS NULL THEN NULL
-        WHEN json_valid(i.classification_labels_json) THEN CASE WHEN json_type(i.classification_labels_json) = 'array' THEN 'known' ELSE 'null' END
-        ELSE 'null' END AS observed,
-      i.title, COALESCE(i.sender_label, i.sender_id) AS sender, i.locator_uri AS locator,
-      CASE WHEN json_valid(i.source_scope_folder_keys_json) THEN i.source_scope_folder_keys_json END AS folderKeys,
-      CASE WHEN i.classification_labels_json IS NULL THEN substr(i.search_text, -?1) END AS searchTail,
-      CASE WHEN i.classification_labels_json IS NULL AND i.mime_type LIKE 'text/markdown%' THEN
-        (SELECT substr(c.bounded_text, 1, ?1) FROM chunks c WHERE c.item_pk = i.item_pk AND c.chunk_index = 0) END AS opening,
-      CASE WHEN i.classification_labels_json IS NULL THEN
-        EXISTS (SELECT 1 FROM item_owners o WHERE o.item_pk = i.item_pk AND o.first_seen_sync_run_id = i.sync_run_id)
-        AND NOT EXISTS (SELECT 1 FROM item_owners o WHERE o.item_pk = i.item_pk AND
-          (o.first_seen_sync_run_id <> i.sync_run_id OR o.last_seen_sync_run_id <> i.sync_run_id OR o.first_seen_at <> o.last_seen_at))
-        AND NOT EXISTS (SELECT 1 FROM item_text_versions v WHERE v.item_pk = i.item_pk)
-      END AS originalListing`, PEOPLE_OFF_THREAD_READ_ATTEMPTS = 3, READ_ONLY_MIN_SCHEMA_VERSION = 7, INLINE_CLOSE_SQLITE_STORE = "const closeSqliteStore = (db) => { try { db.exec('PRAGMA wal_checkpoint(TRUNCATE);'); } catch {} db.close(); };", admitRecencyIndexBuild, recencyIndexBuilding = false, RECENCY_INDEX_RETRY_MS = 250, RECENCY_INDEX_BUSY_RETRY_MS = 2000, RECENCY_INDEX_NOT_ADMITTED_RETRY_MS = 30000, RECLAIM_MAX_PAGES_PER_STEP = 128, RECLAIM_CONVERSION_BYTES_PER_MS = 15000, SUPERSEDED_PRUNE_MEDIA_ROWS = 1, grantNotifications, ON_DEMAND_GRANT_EPOCH_CHECK_MS = 250, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_WEIGHT = 0.25, CHAT_RECENCY_PIN_COUNT = 2, CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8, lexicalContentPreference, STORE_LEADER_LATEST_SEAT = 1, LANE_LEADER_SEATS = 3, OWNER_AUTHOR_LABEL = "You", CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", PDF_EXTRACTION_BACKLOG_SQL = `
+`, VECTOR_DIGEST_BACKFILL_MAX_ROWS = 128, VECTOR_DIGEST_BACKFILL_MIN_ROWS = 8, VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS = 25, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS = 250, vectorDigestBackfillHold = () => false, VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS = 60000, VECTOR_DIGEST_PAGE_ROWS = 4096, VECTOR_DIGEST_MIN_MARGIN = 0.05, VECTOR_DIGEST_MAX_CANDIDATES = 5000, VECTOR_SCAN_BACKSTOP_GRACE_MS = 250, LEGACY_CAPPED_TAGS, RECOVERABLE_LABEL_SET, KNOWN_LABEL_SET, STORED_LABEL_FIELDS, PEOPLE_OFF_THREAD_READ_ATTEMPTS = 3, READ_ONLY_MIN_SCHEMA_VERSION = 7, INLINE_CLOSE_SQLITE_STORE = "const closeSqliteStore = (db) => { try { db.exec('PRAGMA wal_checkpoint(TRUNCATE);'); } catch {} db.close(); };", admitRecencyIndexBuild, recencyIndexBuilding = false, RECENCY_INDEX_RETRY_MS = 250, RECENCY_INDEX_BUSY_RETRY_MS = 2000, RECENCY_INDEX_NOT_ADMITTED_RETRY_MS = 30000, RECLAIM_MAX_PAGES_PER_STEP = 128, RECLAIM_CONVERSION_BYTES_PER_MS = 15000, SUPERSEDED_PRUNE_MEDIA_ROWS = 1, grantNotifications, ON_DEMAND_GRANT_EPOCH_CHECK_MS = 250, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_WEIGHT = 0.25, CHAT_RECENCY_PIN_COUNT = 2, CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8, lexicalContentPreference, STORE_LEADER_LATEST_SEAT = 1, LANE_LEADER_SEATS = 3, OWNER_AUTHOR_LABEL = "You", CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", PDF_EXTRACTION_BACKLOG_SQL = `
   SELECT
     SUM(CASE WHEN chars IS NULL THEN 1 ELSE 0 END) AS pending,
     SUM(CASE WHEN chars IS NULL THEN 0 ELSE 1 END) AS extracted,
@@ -72659,6 +72714,25 @@ var init_local_index = __esm(() => {
       this.name = "ConnectorStoreLocatorIdentityIndexNotReadyError";
     }
   };
+  LEGACY_CAPPED_TAGS = `provider IN (${legacyCappedTagProviders.map((provider) => `'${provider}'`).join(", ")})
+  AND CASE WHEN json_valid(classification_labels_json) THEN json_array_length(classification_labels_json) > 0 ELSE 0 END`;
+  RECOVERABLE_LABEL_SET = `(classification_labels_json IS NULL OR (${LEGACY_CAPPED_TAGS}))`;
+  KNOWN_LABEL_SET = `CASE WHEN ${LEGACY_CAPPED_TAGS} THEN 0 WHEN json_valid(classification_labels_json)
+  THEN json_type(classification_labels_json) = 'array' OR json_type(classification_labels_json, '$.labels') = 'array' ELSE 0 END`;
+  STORED_LABEL_FIELDS = `CASE WHEN ${LEGACY_CAPPED_TAGS} THEN classification_labels_json END AS legacyObservation, i.source_version AS version, i.sync_run_id AS run, i.indexed_at AS indexedAt,
+      CASE WHEN ${RECOVERABLE_LABEL_SET} THEN NULL
+        WHEN ${KNOWN_LABEL_SET} THEN 'known' ELSE 'null' END AS observed,
+      i.title, COALESCE(i.sender_label, i.sender_id) AS sender, i.locator_uri AS locator,
+      CASE WHEN json_valid(i.source_scope_folder_keys_json) THEN i.source_scope_folder_keys_json END AS folderKeys,
+      CASE WHEN ${RECOVERABLE_LABEL_SET} THEN substr(i.search_text, -?1) END AS searchTail,
+      CASE WHEN ${RECOVERABLE_LABEL_SET} AND i.mime_type LIKE 'text/markdown%' THEN
+        (SELECT substr(c.bounded_text, 1, ?1) FROM chunks c WHERE c.item_pk = i.item_pk AND c.chunk_index = 0) END AS opening,
+      CASE WHEN ${RECOVERABLE_LABEL_SET} THEN
+        EXISTS (SELECT 1 FROM item_owners o WHERE o.item_pk = i.item_pk AND o.first_seen_sync_run_id = i.sync_run_id)
+        AND NOT EXISTS (SELECT 1 FROM item_owners o WHERE o.item_pk = i.item_pk AND
+          (o.first_seen_sync_run_id <> i.sync_run_id OR o.last_seen_sync_run_id <> i.sync_run_id OR o.first_seen_at <> o.last_seen_at))
+        AND NOT EXISTS (SELECT 1 FROM item_text_versions v WHERE v.item_pk = i.item_pk)
+      END AS originalListing`;
   LocalConnectorStore = class LocalConnectorStore {
     dbPath;
     openedFile;
@@ -72752,8 +72826,9 @@ var init_local_index = __esm(() => {
         const versionAtOpen = readSqliteSchemaVersion(this.db, SQLITE_STORE_ID);
         const schemaTarget = options.restoreSchemaVersion ?? CONNECTOR_STORE_SQLITE_SCHEMA_VERSION;
         const migrating = options.readOnly !== true && versionAtOpen < schemaTarget;
+        const checkRows = migrating && !(versionAtOpen === 17 && schemaTarget === 18);
         validateCurrentConnectorStoreSchemaBeforeMigration(this.db);
-        if (migrating) {
+        if (checkRows) {
           setEngineStep(`checking ${SQLITE_STORE_ID} rows`);
           validateConnectorStoreRows(this.db, `v${versionAtOpen}`);
           setEngineStep(undefined);
@@ -72778,7 +72853,7 @@ var init_local_index = __esm(() => {
             if (this.dbPath !== ":memory:")
               this.db.exec(`PRAGMA user_version = ${connectorStoreOpenStamp(this.db)}`);
           }
-          if (migrating) {
+          if (checkRows) {
             setEngineStep(`checking ${SQLITE_STORE_ID} rows`);
             validateConnectorStoreRows(this.db, "v15");
             validateConnectorStoreForeignKeys(this.db);
@@ -74222,10 +74297,9 @@ var init_local_index = __esm(() => {
         ${options.onlyTombstoned ? "AND tombstoned = 1" : ""}`;
       if (this.classificationLabelsPresent && options.observedLabels !== undefined) {
         this.db.transaction(() => {
-          const prior = this.db.query(`${update} RETURNING item_pk, classification_labels_json`).get(...params);
-          if (prior) {
-            this.writeLabelObservation(prior.item_pk, prior.classification_labels_json === options.observedLabels ? options.observedLabels : "null");
-          }
+          const row = this.db.query(`${update} RETURNING item_pk`).get(...params);
+          if (row)
+            this.writeLabelObservation(row.item_pk, options.observedLabels);
         })();
       } else {
         this.db.query(update).run(...params);
@@ -75035,7 +75109,7 @@ ${parentKey(ref)}`, { ref, origin });
       const row = this.db.query(`
       SELECT item_pk, trust_tier, ${CONNECTOR_STORE_COPY_ITEM_COLUMNS.map((column) => {
         if (column === "classification_labels_json")
-          return this.classificationLabelsPresent ? "CASE WHEN json_valid(classification_labels_json) THEN CASE WHEN json_type(classification_labels_json) = 'array' THEN classification_labels_json END END AS classification_labels_json" : "NULL AS classification_labels_json";
+          return this.classificationLabelsPresent ? "CASE WHEN json_valid(classification_labels_json) THEN CASE WHEN (json_type(classification_labels_json) = 'array' OR json_type(classification_labels_json, '$.labels') = 'array') THEN classification_labels_json END END AS classification_labels_json" : "NULL AS classification_labels_json";
         return this.childItemColumnsPresent || !CONNECTOR_STORE_CHILD_ITEM_COLUMNS.includes(column) ? column : `NULL AS ${column}`;
       }).join(", ")}
       FROM items
@@ -78500,6 +78574,7 @@ ${parentKey(ref)}`, { ref, origin });
             if (route.kind === "store" && route.sensitivity.trustDomain !== this.trustDomain) {
               throw new Error("A tier route must place an item only in the store that asked.");
             }
+            const listedItem = itemForStorage;
             const routedLayer = route.kind === "store" ? route.layer : undefined;
             const sensitivity = route.kind === "store" ? route.sensitivity : legacySensitivity;
             if (route.kind === "legacy" && itemForStorage.metadata["deleted"] !== true && !this.readOnDemand(itemForStorage.identity.localItemId, itemForStorage.identity.sourceVersion ?? "")) {
@@ -78552,7 +78627,7 @@ ${parentKey(ref)}`, { ref, origin });
             const sourceScopeObservation = options?.sourceScopeObservation ? normalizeSourceScopeObservation(options.sourceScopeObservation(itemForStorage)) : undefined;
             let upsert;
             try {
-              upsert = this.upsertItemWithOwner(itemForStorage, sensitivity, connector.id, ownershipKind, syncRunId, options?.ownerObservation ?? "provider_listing", (deferMetadataOnlyContent || itemForStorage.deferredBytes !== undefined) && itemForStorage.content.kind === "metadata_only", false, (deferMetadataOnlyContent || itemForStorage.deferredBytes !== undefined) && itemForStorage.content.kind === "metadata_only", sourceScopeObservation, routedLayer && routedLayer !== "metadata" ? "content" : undefined, options?.ownerObservation !== "local_write" && routedLayer !== "content" ? listedLabelObservation(connector, itemForStorage) : undefined);
+              upsert = this.upsertItemWithOwner(itemForStorage, sensitivity, connector.id, ownershipKind, syncRunId, options?.ownerObservation ?? "provider_listing", (deferMetadataOnlyContent || itemForStorage.deferredBytes !== undefined) && itemForStorage.content.kind === "metadata_only", false, (deferMetadataOnlyContent || itemForStorage.deferredBytes !== undefined) && itemForStorage.content.kind === "metadata_only", sourceScopeObservation, routedLayer && routedLayer !== "metadata" ? "content" : undefined, options?.ownerObservation !== "local_write" && routedLayer !== "content" ? listedLabelObservation(connector, listedItem) : undefined);
             } catch (error) {
               if (!(error instanceof ConnectorStoreTierWriteRefusedError))
                 throw error;
@@ -78716,7 +78791,7 @@ ${parentKey(ref)}`, { ref, origin });
       ${STORED_LABEL_FIELDS}
       FROM page LEFT JOIN items i ON i.item_pk = page.item_pk AND i.tombstoned = 0
         AND i.provider IN (SELECT value FROM json_each(?4))
-        AND (?5 OR i.classification_labels_json IS NULL OR i.classification_labels_json = 'null') ORDER BY page.item_pk`;
+        AND (?5 OR ${RECOVERABLE_LABEL_SET} OR i.classification_labels_json = 'null') ORDER BY page.item_pk`;
       const params = [SNIFFER_NAMES_MAX_CHARS * 2, after, limit, JSON.stringify(storedLabelProviders), Number(checkKnown)];
       const rows = offThreadReadsSupported(this.dbPath) ? await readInBackground(this.dbPath, { sql, params, mode: "all" }) : this.db.query(sql).all(...params);
       return { rows: rows.filter((row) => row.itemPk != null), last: rows.at(-1)?.cursor ?? after, end: rows.length < limit };
@@ -78729,12 +78804,12 @@ ${parentKey(ref)}`, { ref, origin });
     hasListedLabels(identity) {
       if (!this.classificationLabelsPresent)
         return;
-      const row = this.db.query(`SELECT CASE WHEN json_valid(classification_labels_json) THEN json_type(classification_labels_json) = 'array' ELSE 0 END AS known
+      const row = this.db.query(`SELECT ${KNOWN_LABEL_SET} AS known
       FROM items WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ? AND tombstoned = 0`).get(identity.provider, identity.accountScope, identity.providerConversationId ?? "", identity.providerItemId);
       return row ? Boolean(row.known) : undefined;
     }
     recordRecoveredLabels(row, labels) {
-      this.db.query("UPDATE items SET classification_labels_json = ? WHERE item_pk = ? AND tombstoned = 0 AND classification_labels_json IS NULL").run(labels, row.itemPk);
+      this.db.query("UPDATE items SET classification_labels_json = ? WHERE item_pk = ? AND tombstoned = 0 AND classification_labels_json IS ?").run(labels, row.itemPk, row.legacyObservation);
     }
     writeLabelObservation(itemPk, labels) {
       if (this.classificationLabelsPresent && typeof labels === "string") {
@@ -104081,6 +104156,7 @@ class ReadwiseApiClient {
   }
   async exportBooks(request = {}) {
     const params = new URLSearchParams;
+    appendParam(params, "ids", request.bookId);
     appendParam(params, "updatedAfter", request.updatedAfter);
     appendParam(params, "pageCursor", request.pageCursor);
     const query = params.toString();
@@ -104506,6 +104582,28 @@ function createReadwiseSourceConnector(options) {
         folderKeys: [signalText(item.metadata, "category"), signalText(item.metadata, "location")].filter((key) => Boolean(key))
       });
     },
+    async readCurrentLabels(identity) {
+      if (identity.provider !== READWISE_PROVIDER || identity.accountScope !== account)
+        return;
+      const id = identity.providerItemId;
+      await connector.authenticate();
+      if (identity.localItemId === `${account}:document:${id}` && identity.providerConversationId === `document:${id}`) {
+        const page = await client.listReaderDocuments({ documentId: id });
+        const document2 = page.results.find((row) => optionalId(row.id) === id);
+        if (!document2?.tags || typeof document2.tags !== "object")
+          return;
+        return readerTagNames(document2.tags);
+      }
+      const bookId = identity.providerConversationId?.startsWith("document:") && identity.providerConversationId.slice("document:".length);
+      if (!bookId || identity.localItemId !== `${account}:highlight:${id}`)
+        return;
+      const page = await client.exportBooks({ bookId });
+      const book = page.results.find((row) => (optionalId(row.user_book_id) ?? optionalId(row.id)) === bookId);
+      const highlight = Array.isArray(book?.highlights) && book.highlights.find((row) => optionalId(row?.id) === id);
+      if (!highlight || !Array.isArray(highlight.tags) || !(Array.isArray(book?.book_tags) || Array.isArray(book?.tags)))
+        return;
+      return [...tagNames(book.book_tags), ...tagNames(book.tags), ...tagNames(highlight.tags)];
+    },
     requestBudgetStatus: () => requestBudget.status()
   };
   return connector;
@@ -104632,7 +104730,7 @@ function rawItem(input) {
       itemKind: input.itemKind,
       documentId: input.documentId,
       ...input.author ? { author: input.author } : {},
-      ...input.tags.length > 0 ? { tags: input.tags } : {},
+      tags: input.tags,
       ...input.locatorUri ? { locatorUri: input.locatorUri, url: input.locatorUri } : {},
       ...input.authoredAt ? { authoredAt: input.authoredAt } : {},
       ...input.updatedAt ? { updatedAt: input.updatedAt } : {},
@@ -104866,7 +104964,7 @@ function retainedLabels(row, receipt, materials) {
     ...keys.includes("path") && row.locator ? { path: row.locator } : {},
     ...keys.includes("folderKeys") ? { folderKeys: folders } : {}
   };
-  const prove = (labels) => labels && namesInputReason({ ...names, labels }) === receipt ? encodeLabelObservation(labels) : undefined;
+  const prove = (labels) => labels && !(capability.legacyTagLimits && (labels.length >= 100 || labels.some((label) => label.length >= 200))) && namesInputReason({ ...names, labels }) === receipt ? encodeLabelObservation(row.provider, labels) : undefined;
   if (!keys.includes("labels"))
     return prove([]);
   for (const material of materials) {
@@ -104986,7 +105084,7 @@ function refreshListedLabelGap(set, identity) {
     set.ledger.setLabelsUnavailable(identity, set.openStores().some((store) => store.hasListedLabels(identity) === false));
   }
 }
-var PAGE_ROWS = 200, CURSOR = "label_observation_after", DONE = "label_observation_done", lastStoreRead;
+var PAGE_ROWS = 200, CURSOR = "complete_label_observation_after", DONE = "complete_label_observation_done", lastStoreRead;
 var init_tier_label_observations = __esm(() => {
   init_source_connector_labels();
   init_tier_classifier();
@@ -106492,8 +106590,10 @@ function ownerRuleSweepsComplete(set) {
   if (!outstanding.length)
     return true;
   for (const { provider, accountScope } of ledger.storedAccounts()) {
-    const usesStoredLabels = connectorLabelCapability(provider)?.proof === "stored";
-    const applicable = outstanding.filter((rule) => (rule.source === undefined || rule.source === provider) && (!isLabelRule(rule) || !usesStoredLabels));
+    const applicable = outstanding.filter((rule) => !isLabelRule(rule) && (rule.source === undefined || rule.source === provider));
+    if (connectorLabelCapability(provider)?.proof === "provider_walk") {
+      applicable.push(...applicableProviderLabelRules(outstanding, provider));
+    }
     if (!applicable.length)
       continue;
     const labels = readLabelState(ledger.readMeta(labelSweepMetaKey(provider, accountScope)));
@@ -107300,6 +107400,7 @@ function openSetLedger(dbPath) {
 }
 
 class TieredStoreSet {
+  readCurrentLabels;
   setId;
   automaticMoveContext;
   ledger;
@@ -108920,6 +109021,7 @@ function createReadwiseConnectorStoreSyncHandler(options) {
   if (tierSet.legSpec("internal")?.store !== options.store) {
     throw new Error("The Readwise tier set's internal leg must be the lane's own store.");
   }
+  tierSet.readCurrentLabels = (identity) => buildConnector().readCurrentLabels(identity);
   const runLane = async (connector, sync, commitCursor = true) => {
     const run = await tierSet.sync(connector, sync, { commitCursor, embed: false });
     const merged = mergedTieredLaneRun(run, "internal");
@@ -222431,13 +222533,11 @@ function cleanTags(tags) {
   const out = [];
   const seen = new Set;
   for (const tag of tags) {
-    const text = tag.trim().replace(/^#+/, "").trim().slice(0, MAX_TAG_CHARS);
+    const text = tag.trim().replace(/^#+/, "").trim();
     if (text === "" || seen.has(text))
       continue;
     seen.add(text);
     out.push(text);
-    if (out.length >= MAX_TAGS)
-      break;
   }
   return out;
 }
@@ -222501,7 +222601,7 @@ function noteClassificationSignals(item) {
     labels: signalTexts(item.metadata, NOTE_TAGS_METADATA_KEY)
   });
 }
-var NOTE_MAX_RECORD_BYTES, MAX_TAGS = 100, MAX_TAG_CHARS = 200, MAX_TITLE_CHARS = 500, NOTE_FINDINGS;
+var NOTE_MAX_RECORD_BYTES, MAX_TITLE_CHARS = 500, NOTE_FINDINGS;
 var init_note = __esm(() => {
   init_source_connector_labels();
   NOTE_MAX_RECORD_BYTES = 16 * 1024 * 1024;
@@ -222935,6 +223035,7 @@ function createEvernoteSourceConnector(options) {
         mimeType: mime,
         content: { kind: "metadata_only" },
         metadata: Object.freeze({
+          tags: [],
           title: names[index],
           name: names[index],
           mimeType: mime,
@@ -223481,6 +223582,40 @@ function createEvernoteLiveSync(options) {
     ...options.downloadFetch ? { downloadFetch: options.downloadFetch } : {},
     now
   });
+  options.lane.set.readCurrentLabels = async (identity) => {
+    if (identity.provider !== EVERNOTE_PROVIDER || identity.accountScope !== accountScope)
+      return;
+    const id = identity.providerItemId;
+    if (id.includes(CHILD_ITEM_ID_SEPARATOR))
+      return [];
+    const file = readPassFile(passPath);
+    const notebookId = evernoteRecordedNotebookId(evernotePassWithUnfinished(file.record, file.unfinished)?.notes[id]);
+    if (!notebookId || !boundChoice)
+      return;
+    const choice = boundChoice;
+    const allowed = (book) => {
+      choice.assertCurrent();
+      return book.owned && evernoteNotebookGate(choice.gate(), evernoteExclusionMatcher(env))(book) === "ingest";
+    };
+    const live = session("pass");
+    try {
+      await live.open();
+      const book = (await listNotebooks(live)).find((entry) => entry.id === notebookId);
+      if (!book || !allowed(book))
+        return;
+      const members = new Map;
+      await listNotes(live, book.filter, members, now().getTime());
+      if (!members.has(id) || !allowed(book))
+        return;
+      const out = await live.callTool("get_note", { noteId: id });
+      const note = out.data;
+      if (out.isError || note?.id !== id || note.notebookId !== book.id || note.active === false || !allowed(book))
+        return;
+      return Array.isArray(note.tags) && note.tags.every((tag) => typeof tag?.name === "string") ? cleanTags(note.tags.map((tag) => tag.name)) : undefined;
+    } finally {
+      await live.close();
+    }
+  };
   let lastCompletedAt = readPassFile(passPath).status.last_completed_at;
   let running;
   let notebookList;
@@ -223616,6 +223751,7 @@ var init_live_sync3 = __esm(() => {
   init_tiered_store_set();
   init_connected_handles();
   init_connector5();
+  init_note();
   init_listing();
   EVERNOTE_TIER_CORPUS_IDS = Object.freeze({
     secure_local: EVERNOTE_SECURE_CORPUS_ID,
@@ -248648,13 +248784,13 @@ async function storedPersonalLoweringLap(set, after, turn) {
   for (const record of page.records) {
     await turn();
     let rulesReady = true;
-    const queued = withTierRuleFence(set, () => set.ledger.queueStoredPersonalLowering(recordIdentity2(record), (decision, current, copies) => {
+    const queued = await withCurrentMoveLabels(set, recordIdentity2(record), undefined, () => withTierRuleFence(set, () => set.ledger.queueStoredPersonalLowering(recordIdentity2(record), (decision, current, copies) => {
       rulesReady = ownerRuleSweepsComplete(set);
       if (!rulesReady)
         return;
       const plan = set.placementFor(decision);
       return tierMoveRuleAuthorization(set, current, decision, copies, plan.copies) !== undefined ? plan : undefined;
-    }));
+    })));
     if (!rulesReady)
       return { ...retryPage, changed };
     if (queued)
@@ -250247,11 +250383,21 @@ class TierSnifferService {
         this.moveFailures.delete(key);
         this.movesRefusedNow.delete(`${ledgerPath}\x00${tierLedgerIdentityKey(recordIdentity2(record))}`);
       };
+      const liveProviders = new Set(queued.map((record) => record.provider).filter((provider) => mutableItemLabels(set, provider)));
+      if (liveProviders.size) {
+        const rules = withTierRuleFence(set, () => currentTierRulePolicy(set)).rules;
+        for (const provider of liveProviders)
+          if (!applicableProviderLabelRules(rules, provider).length)
+            liveProviders.delete(provider);
+      }
       const batchSize = Math.max(1, Math.min(100, options.lowerBatchSize ?? 25));
       for (let offset = 0;offset < queued.length && budget > 0 && !shouldStop(); ) {
         const pending = [];
         const batchDeadline = Math.min(deadline, this.monotonicNow() + Math.max(0, options.lowerBatchMs ?? DEFAULT_LOWER_MOVE_BATCH_MS));
         for (let n = 0;n < (direction === "raise" ? 1 : batchSize) && offset < queued.length && !shouldStop(); n++) {
+          const next = queued[offset];
+          if (pending.length && liveProviders.has(next.provider))
+            break;
           const record = queued[offset++];
           budget--;
           const identity = recordIdentity2(record);
@@ -250263,8 +250409,10 @@ class TierSnifferService {
             timings,
             expectedGeneration: record.generation
           } });
+          if (liveProviders.has(record.provider))
+            break;
         }
-        if (direction === "raise") {
+        if (direction === "raise" || pending[0] && liveProviders.has(pending[0].record.provider)) {
           for (const { record, move } of pending) {
             try {
               succeeded(record, await moveTieredItem(move));

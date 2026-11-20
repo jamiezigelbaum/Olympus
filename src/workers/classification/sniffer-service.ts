@@ -56,7 +56,7 @@ import {
 import { settleNamesOnlyItemsOffThread } from '../connector-store/tier-names-only-settle.ts';
 import { recoverStoredLabelPage } from '../connector-store/tier-label-observations.ts';
 import { settlePersonalFirstItemsOffThread } from '../connector-store/tier-held-settle.ts';
-import { withTierRuleFence, tierMoveRuleAuthorization } from '../connector-store/tier-move-rule-policy.ts';
+import { applicableProviderLabelRules, currentTierRulePolicy, mutableItemLabels, tierMoveRuleAuthorization, withCurrentMoveLabels, withTierRuleFence } from '../connector-store/tier-move-rule-policy.ts';
 import { ownerRuleSweepsComplete, sweepOwnerRuleRaisesOffThread } from '../connector-store/tier-rules-sweep.ts';
 import { applyOwnerOverridesOffThread } from '../connector-store/tier-override-settle.ts';
 import { retireSecretRedactions, retrySecretSideStoreDebtsOffThread } from '../connector-store/secrets-disposition.ts';
@@ -434,12 +434,12 @@ export async function storedPersonalLoweringLap(
     await turn();
     // A rule may have changed or a provider may have reopened a sweep while we yielded.
     let rulesReady = true;
-    const queued = withTierRuleFence(set, () => set.ledger.queueStoredPersonalLowering(recordIdentity(record), (decision, current, copies) => {
+    const queued = await withCurrentMoveLabels(set, recordIdentity(record), undefined, () => withTierRuleFence(set, () => set.ledger.queueStoredPersonalLowering(recordIdentity(record), (decision, current, copies) => {
       rulesReady = ownerRuleSweepsComplete(set);
       if (!rulesReady) return undefined;
       const plan = set.placementFor(decision);
       return tierMoveRuleAuthorization(set, current, decision, copies, plan.copies) !== undefined ? plan : undefined;
-    }));
+    })));
     if (!rulesReady) return { ...retryPage, changed };
     if (queued) changed = true;
   }
@@ -2348,11 +2348,19 @@ export class TierSnifferService {
         this.moveFailures.delete(key);
         this.movesRefusedNow.delete(`${ledgerPath}\u0000${tierLedgerIdentityKey(recordIdentity(record))}`);
       };
+      // A live label read happens outside the batch's synchronous write transactions.
+      const liveProviders = new Set(queued.map(record => record.provider).filter(provider => mutableItemLabels(set, provider)));
+      if (liveProviders.size) {
+        const rules = withTierRuleFence(set, () => currentTierRulePolicy(set)).rules;
+        for (const provider of liveProviders) if (!applicableProviderLabelRules(rules, provider).length) liveProviders.delete(provider);
+      }
       const batchSize = Math.max(1, Math.min(100, options.lowerBatchSize ?? 25));
       for (let offset = 0; offset < queued.length && budget > 0 && !shouldStop();) {
         const pending: Array<{ record: TierLedgerRecord; move: TierMoveOptions }> = [];
         const batchDeadline = Math.min(deadline, this.monotonicNow() + Math.max(0, options.lowerBatchMs ?? DEFAULT_LOWER_MOVE_BATCH_MS));
         for (let n = 0; n < (direction === 'raise' ? 1 : batchSize) && offset < queued.length && !shouldStop(); n++) {
+          const next = queued[offset]!;
+          if (pending.length && liveProviders.has(next.provider)) break;
           const record = queued[offset++]!;
           budget--;
           const identity = recordIdentity(record);
@@ -2361,8 +2369,9 @@ export class TierSnifferService {
             target: { metadataTier: record.targetMetadataTier!, contentTier: record.targetContentTier! },
             ...automaticTierMoveOptions(set, options), timings, expectedGeneration: record.generation,
           } });
+          if (liveProviders.has(record.provider)) break;
         }
-        if (direction === 'raise') {
+        if (direction === 'raise' || (pending[0] && liveProviders.has(pending[0].record.provider))) {
           for (const { record, move } of pending) {
             try { succeeded(record, await moveTieredItem(move)); }
             catch (error) { failure(record, error); }

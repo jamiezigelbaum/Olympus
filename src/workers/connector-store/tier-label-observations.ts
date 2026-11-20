@@ -14,8 +14,8 @@ import type { StoredLabelRow } from './local-index.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
 
 const PAGE_ROWS = 200;
-const CURSOR = 'label_observation_after';
-const DONE = 'label_observation_done';
+const CURSOR = 'complete_label_observation_after';
+const DONE = 'complete_label_observation_done';
 const lastStoreRead = new WeakMap<TieredStoreSet, string>();
 
 function retainedLabels(row: StoredLabelRow, receipt: string, materials: readonly string[]): string | undefined {
@@ -30,8 +30,9 @@ function retainedLabels(row: StoredLabelRow, receipt: string, materials: readonl
     ...(keys.includes('path') && row.locator ? { path: row.locator } : {}),
     ...(keys.includes('folderKeys') ? { folderKeys: folders } : {}),
   };
-  const prove = (labels: readonly string[] | undefined) => labels && namesInputReason({ ...names, labels }) === receipt
-    ? encodeLabelObservation(labels) : undefined;
+  const prove = (labels: readonly string[] | undefined) => labels && !(capability.legacyTagLimits
+    && (labels.length >= 100 || labels.some(label => label.length >= 200))) && namesInputReason({ ...names, labels }) === receipt
+    ? encodeLabelObservation(row.provider, labels) : undefined;
   if (!keys.includes('labels')) return prove([]);
   // The queued names have title/path/folders first and sender last. A literal
   // separator, truncation, or a question from a later rejudge fails the digest.

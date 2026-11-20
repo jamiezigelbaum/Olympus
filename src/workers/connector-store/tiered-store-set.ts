@@ -309,6 +309,8 @@ interface PlanEntry {
 }
 
 export class TieredStoreSet {
+  /** Active lane reader for labels the provider can change between listings. */
+  readCurrentLabels?: (identity: SourceItemIdentity) => Promise<readonly string[] | undefined>;
   readonly setId: string;
   readonly automaticMoveContext: AutomaticTierMoveContext | undefined;
   readonly ledger: TierLedger;

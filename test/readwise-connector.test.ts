@@ -109,6 +109,23 @@ describe('Readwise thin connector and canonical store', () => {
     });
   });
 
+  test('a live highlight label read includes current book and highlight tags for the exact identity', async () => {
+    const connector = createReadwiseSourceConnector({
+      account: ACCOUNT, credentialBroker: readwiseBroker(),
+      requestBudget: new ReadwiseDailyRequestBudget({ dailyRequestBudget: 10 }),
+      fetch: async url => {
+        expect(new URL(url).searchParams.get('ids')).toBe('book-42');
+        return jsonResponse({ results: [{ user_book_id: 'book-42', book_tags: [{ name: 'Protected' }],
+          highlights: [{ id: 'highlight-7', tags: [{ name: 'Field' }] }] }] });
+      },
+    });
+    const id = { family: 'readwise' as const, provider: 'readwise', accountScope: ACCOUNT,
+      providerItemId: 'highlight-7', providerConversationId: 'document:book-42', localItemId: `${ACCOUNT}:highlight:highlight-7` };
+    expect(await connector.readCurrentLabels(id)).toEqual(['Protected', 'Field']);
+    expect(await connector.readCurrentLabels({ ...id, providerItemId: 'missing', localItemId: `${ACCOUNT}:highlight:missing` })).toBeUndefined();
+    expect(await connector.readCurrentLabels({ ...id, accountScope: 'other' })).toBeUndefined();
+  });
+
   test('a bounded run never reports a truncated export page as done, and resumes inside it', async () => {
     const firstCalls: string[] = [];
     const first = await collectPages(

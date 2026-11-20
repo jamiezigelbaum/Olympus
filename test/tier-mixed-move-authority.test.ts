@@ -273,6 +273,8 @@ test('a label rule added while an Evernote note is moving prevents its Personal 
     source: { async listLabelled() { return { ids: [] }; } },
   })).toMatchObject({ rules: 1, scanned: 0, pending: 0 });
   fixture.ledger.recordRoutedPlacement(identity, target, fixture.set.placementFor(target));
+  await expect(moveTieredItem({ set: fixture.set, identity, target })).rejects.toMatchObject({ code: 'rule_authority' });
+  fixture.set.readCurrentLabels = async id => connector.classificationSignals(await connector.fetchItem(id.localItemId)).labels;
   await moveTieredItem({ set: fixture.set, identity, target });
   expect(fixture.stores.internal!.localContent(localId('orchard'))?.chunks.join('')).toBe(text);
 });

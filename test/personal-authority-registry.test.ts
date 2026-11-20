@@ -8,6 +8,7 @@ import { signalTexts } from '../src/core/classification-signals.ts';
 import type { SourceConnector, RawItem } from '../src/core/contracts.ts';
 import { MEDIA_CACHE_DIR_ENV, mediaCacheDir, releaseMediaCacheFile, writeMediaCacheFile } from '../src/core/media-cache.ts';
 import type { LabelProofByProvider } from '../src/core/source-connector-labels.ts';
+import { parseReflectNote } from '../src/workers/archive-import/reflect/parse.ts';
 import { noteClassificationSignals } from '../src/workers/archive-import/notes/note.ts';
 import { registerInstalledTierClassification } from '../src/workers/classification/installed-tier-classification-registry.ts';
 import {
@@ -99,6 +100,10 @@ describe('Rule authority for lowerings', () => {
       },
       classificationSignals,
     };
+    lane.set.readCurrentLabels = async identity => {
+      const item = items.find(entry => entry.identity.localItemId === identity.localItemId);
+      return item && (classificationSignals(item).labels ?? []);
+    };
     await lane.set.sync(connector, { fetchContent: true, placement: FIXTURE_PLACEMENT }, { embed: false });
     for (const { identity } of items) {
       expect(lane.ledger.getCurrent(identity)).toMatchObject({ contentRead: true, contentPending: true });
@@ -125,6 +130,102 @@ describe('Rule authority for lowerings', () => {
     expect(bodyIn(lane, 'internal', identity)).toBe('');
     expect(bodyIn(lane, 'secure_local', identity)).toBe(body);
   }
+
+  test('Reflect retains a protected tag after the first hundred', async () => {
+    const lane = authorityLane();
+    const tags = [...Array.from({ length: 100 }, (_, i) => `tag-${i}`), label];
+    const parsed = parseReflectNote({ content: body, tags });
+    if (parsed.kind !== 'note') throw new Error('Expected a note');
+    const note = sourceItem('reflect', 'many-tags', { tags: parsed.note.tags });
+    await syncHeld(lane, [note], noteClassificationSignals);
+    settlePersonal(lane, note.identity);
+    lane.saveRules([labelRule]);
+    await expect(lower(lane, note.identity)).rejects.toMatchObject({ code: 'rule_authority' });
+    expectHeld(lane, note.identity);
+  });
+
+  test('a pending Readwise lowering cannot use a listing from before the decision and rule', async () => {
+    const lane = authorityLane();
+    const item = sourceItem('readwise', 'changed-on-server', { tags: [] });
+    await syncHeld(lane, [item], noteClassificationSignals);
+    settlePersonal(lane, item.identity);
+    lane.saveRules([labelRule]);
+    lane.set.readCurrentLabels = async () => [label];
+    await expect(lower(lane, item.identity)).rejects.toMatchObject({ code: 'rule_authority' });
+    expectHeld(lane, item.identity);
+  });
+
+  test('a legacy case-folded note prefix is held and counted until relisted', async () => {
+    const lane = authorityLane(true);
+    const folded = 'orchardnotes';
+    const prefix = Array.from({ length: 100 }, (_, i) => [...folded]
+      .map((c, bit) => (i & (1 << bit)) ? c.toUpperCase() : c).join(''));
+    const item = sourceItem('reflect', 'legacy-prefix', { tags: prefix });
+    const complete = sourceItem('reflect', 'short-legacy-note', { tags: ['Other'] });
+    await syncHeld(lane, [item, complete], noteClassificationSignals);
+    for (const store of lane.set.openStores()) {
+      using db = new Database(store.dbPath);
+      db.query('UPDATE items SET classification_labels_json = ? WHERE provider_item_id = ?')
+        .run(JSON.stringify([folded]), item.identity.providerItemId);
+      db.query('UPDATE items SET classification_labels_json = ? WHERE provider_item_id = ?')
+        .run(JSON.stringify(['other']), complete.identity.providerItemId);
+    }
+    settlePersonal(lane, item.identity);
+    settlePersonal(lane, complete.identity);
+    lane.saveRules([labelRule]);
+    await expect(lower(lane, item.identity)).rejects.toMatchObject({ code: 'rule_authority' });
+    const queue = lane.installed.snifferStoreForLedger(lane.ledger.dbPath);
+    for (const _store of lane.set.openStores()) await recoverStoredLabelPage(lane.set, queue, () => undefined);
+    expect(await lower(lane, complete.identity)).toMatchObject({ outcome: 'moved' });
+    expect(lane.ledger.unavailableLabelCount()).toBe(1);
+  });
+
+  test('a provider answer cannot cross a rule revision or authorize a resumed move', async () => {
+    const lane = authorityLane();
+    const item = sourceItem('readwise', 'changed-during-read', { tags: [] });
+    await syncHeld(lane, [item], noteClassificationSignals);
+    settlePersonal(lane, item.identity);
+    lane.saveRules([labelRule]);
+    lane.set.readCurrentLabels = async () => {
+      lane.saveRules([{ ...labelRule, id: 'revised' }]);
+      return [];
+    };
+    await expect(lower(lane, item.identity)).rejects.toMatchObject({ code: 'rule_authority' });
+    lane.set.readCurrentLabels = async () => [];
+    await verifyPersonalMove(lane, item.identity);
+    lane.set.readCurrentLabels = async () => [label];
+    expect(resumeVerifiedTierMove(lane.set, item.identity)).toBe(false);
+    await expect(lower(lane, item.identity)).rejects.toMatchObject({ code: 'rule_authority' });
+    expectHeld(lane, item.identity);
+  });
+
+  test('a global label rule lets Dropbox repair a stored Personal verdict', async () => {
+    const lane = authorityLane();
+    const item = sourceItem('dropbox', 'outside');
+    await syncHeld(lane, [item]);
+    lane.ledger.recordDecision(item.identity, classifyItemTiers({ signals: { title: 'Picnic' }, text: body },
+      { sniffer: JUDGED_PERSONAL_SNIFFER }));
+    lane.saveRules([labelRule]);
+    expect(await storedPersonalLoweringLap(lane.set, undefined, () => undefined)).toMatchObject({ complete: true, changed: true });
+    expect(await lower(lane, item.identity)).toMatchObject({ outcome: 'moved' });
+  });
+
+  test('a bodyless listing replaces an unknown label observation with its explicit set', async () => {
+    const lane = authorityLane();
+    const item = sourceItem('reflect', 'old-row', { tags: [label] });
+    await syncHeld(lane, [item], noteClassificationSignals);
+    for (const store of lane.set.openStores()) {
+      using db = new Database(store.dbPath);
+      db.run('UPDATE items SET classification_labels_json = NULL');
+    }
+    const listed = { ...item, content: { kind: 'metadata_only' as const }, metadata: { ...item.metadata, tags: [] } };
+    await lane.set.sync({ id: 'authority-fixture', family: 'file', async authenticate() {},
+      async *listItems() { yield { items: [listed], done: true }; }, async fetchItem() { return listed; },
+      classificationSignals: noteClassificationSignals }, { fetchContent: true, placement: FIXTURE_PLACEMENT }, { embed: false });
+    settlePersonal(lane, item.identity);
+    lane.saveRules([labelRule]);
+    expect(await lower(lane, item.identity)).toMatchObject({ outcome: 'moved' });
+  });
 
   type LabelCases = {
     [Provider in keyof LabelProofByProvider]:
@@ -366,7 +467,7 @@ describe('Rule authority for lowerings', () => {
     lane.saveRules([labelRule]);
     const page = () => recoverStoredLabelPage(lane.set, queue, () => undefined, 1);
     const first = lane.set.openStores().find(store => store.exportItemNames(outside.identity))!;
-    const cursor = `label_observation_after:${first.corpusId}`;
+    const cursor = `complete_label_observation_after:${first.corpusId}`;
     expect(await page()).toMatchObject({ changed: true, retired: false });
     expect(lane.ledger.readMeta(cursor)).toBe('1:1');
     const reopened = openTierFixture(lane.dir, { embed: false });

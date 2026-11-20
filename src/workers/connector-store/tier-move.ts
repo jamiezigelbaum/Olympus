@@ -56,7 +56,7 @@ import { settleSecretsCopies, type SecretsDisposition } from './secrets-disposit
 import { jobLedgerPathsToVisit, oweExtractionRereadAfterTierMove } from '../file-extraction/job-names.ts';
 import { defaultStoreTrustTier } from './tier-placement.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
-import { currentTierRulePolicy, tierMoveRuleAuthorization, withTierRuleFence } from './tier-move-rule-policy.ts';
+import { currentTierRulePolicy, tierMoveRuleAuthorization, withCurrentMoveLabels, withTierRuleFence } from './tier-move-rule-policy.ts';
 
 export { TIER_MOVE_CONNECTOR_ID };
 
@@ -209,7 +209,7 @@ export async function moveTieredItem(options: TierMoveOptions): Promise<TierMove
     if (options.expectedGeneration !== undefined && record.generation !== options.expectedGeneration) throw new TierLedgerGenerationConflictError();
     return moveToSecrets(options, record.generation);
   }
-  const result = moveTieredItemNow(options);
+  const result = await withCurrentMoveLabels(options.set, options.identity, target, () => moveTieredItemNow(options));
   await flushTierMoveNotes(options.set.ledger, options.timings ? { timings: options.timings } : {});
   return result;
 }

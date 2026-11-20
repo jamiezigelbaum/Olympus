@@ -6,6 +6,10 @@ interface ConnectorLabelCapability {
   readonly provider: string;
   /** Where the mover gets current label membership for this item. */
   readonly proof: 'stored' | 'provider_walk';
+  /** Live tag membership can change independently of the stored item's names. */
+  readonly mutable?: true;
+  /** Older note imports capped the number and length of their tags. */
+  readonly legacyTagLimits?: true;
   /** Absent when the connector computes labels from its provider context. */
   readonly metadataKey?: string;
 }
@@ -13,9 +17,9 @@ interface ConnectorLabelCapability {
 export const NOTE_TAGS_METADATA_KEY = 'tags';
 export const GMAIL_LABEL_CAPABILITY = { provider: 'gmail', proof: 'provider_walk', metadataKey: 'labels' } as const;
 export const MBOX_LABEL_CAPABILITY = { provider: 'mbox', proof: 'stored', metadataKey: 'labels' } as const;
-export const EVERNOTE_LABEL_CAPABILITY = { provider: 'evernote', proof: 'stored', metadataKey: NOTE_TAGS_METADATA_KEY } as const;
-export const READWISE_LABEL_CAPABILITY = { provider: 'readwise', proof: 'stored', metadataKey: NOTE_TAGS_METADATA_KEY } as const;
-export const REFLECT_LABEL_CAPABILITY = { provider: 'reflect', proof: 'stored', metadataKey: NOTE_TAGS_METADATA_KEY } as const;
+export const EVERNOTE_LABEL_CAPABILITY = { provider: 'evernote', proof: 'stored', mutable: true, legacyTagLimits: true, metadataKey: NOTE_TAGS_METADATA_KEY } as const;
+export const READWISE_LABEL_CAPABILITY = { provider: 'readwise', proof: 'stored', mutable: true, metadataKey: NOTE_TAGS_METADATA_KEY } as const;
+export const REFLECT_LABEL_CAPABILITY = { provider: 'reflect', proof: 'stored', legacyTagLimits: true, metadataKey: NOTE_TAGS_METADATA_KEY } as const;
 export const TELEGRAM_LABEL_CAPABILITY = { provider: 'telegram', proof: 'stored' } as const;
 
 const capabilities = [
@@ -28,6 +32,8 @@ const capabilities = [
 ] as const satisfies readonly ConnectorLabelCapability[];
 
 export const storedLabelProviders = capabilities.filter(capability => capability.proof === 'stored').map(capability => capability.provider);
+
+export const legacyCappedTagProviders = capabilities.filter(capability => 'legacyTagLimits' in capability).map(capability => capability.provider);
 
 export type LabelProofByProvider = {
   [Capability in (typeof capabilities)[number] as Capability['provider']]: Capability['proof'];
@@ -71,12 +77,24 @@ export function providerMetadataLabels(provider: string, metadata: RawItem['meta
   return telegramContextNames({ metadata });
 }
 
-export function encodeLabelObservation(labels: readonly string[]): string {
-  return JSON.stringify([...new Set(labels.map(label => label.trim().toLowerCase()))].sort());
+export function encodeLabelObservation(provider: string, labels: readonly string[]): string {
+  const values = [...new Set(labels.map(label => label.trim().toLowerCase()))].sort();
+  // Older note writers capped tags before case folding. Even a short legacy
+  // array can therefore be a prefix of the actual membership.
+  return JSON.stringify(connectorLabelCapability(provider)?.legacyTagLimits ? { labels: values } : values);
+}
+
+export function observedLabelValues(provider: string, raw: string): string[] | undefined {
+  const value = JSON.parse(raw);
+  if (Array.isArray(value) && value.length && connectorLabelCapability(provider)?.legacyTagLimits) return undefined;
+  const labels: unknown = Array.isArray(value) ? value : value?.labels;
+  return Array.isArray(labels) && labels.every(label => typeof label === 'string') ? labels : undefined;
 }
 
 /** Capture the exact listed signals, including labels computed from item context. */
 export function listedLabelObservation(connector: Pick<SourceConnector, 'classificationSignals'>, item: RawItem): string | undefined {
-  if (connectorLabelCapability(item.identity.provider)?.proof !== 'stored') return undefined;
-  return encodeLabelObservation(connector.classificationSignals(item).labels ?? []);
+  const capability = connectorLabelCapability(item.identity.provider);
+  if (capability?.proof !== 'stored') return undefined;
+  if (item.content.kind === 'metadata_only' && providerMetadataLabels(item.identity.provider, item.metadata) === undefined) return 'null';
+  return encodeLabelObservation(item.identity.provider, connector.classificationSignals(item).labels ?? []);
 }

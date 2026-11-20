@@ -2785,9 +2785,9 @@ var LOOPBACK_HOSTNAMES2 = new Set(["127.0.0.1", "localhost", "[::1]"]);
 var NOTE_TAGS_METADATA_KEY = "tags";
 var GMAIL_LABEL_CAPABILITY = { provider: "gmail", proof: "provider_walk", metadataKey: "labels" };
 var MBOX_LABEL_CAPABILITY = { provider: "mbox", proof: "stored", metadataKey: "labels" };
-var EVERNOTE_LABEL_CAPABILITY = { provider: "evernote", proof: "stored", metadataKey: NOTE_TAGS_METADATA_KEY };
-var READWISE_LABEL_CAPABILITY = { provider: "readwise", proof: "stored", metadataKey: NOTE_TAGS_METADATA_KEY };
-var REFLECT_LABEL_CAPABILITY = { provider: "reflect", proof: "stored", metadataKey: NOTE_TAGS_METADATA_KEY };
+var EVERNOTE_LABEL_CAPABILITY = { provider: "evernote", proof: "stored", mutable: true, legacyTagLimits: true, metadataKey: NOTE_TAGS_METADATA_KEY };
+var READWISE_LABEL_CAPABILITY = { provider: "readwise", proof: "stored", mutable: true, metadataKey: NOTE_TAGS_METADATA_KEY };
+var REFLECT_LABEL_CAPABILITY = { provider: "reflect", proof: "stored", legacyTagLimits: true, metadataKey: NOTE_TAGS_METADATA_KEY };
 var TELEGRAM_LABEL_CAPABILITY = { provider: "telegram", proof: "stored" };
 var capabilities = [
   GMAIL_LABEL_CAPABILITY,
@@ -2798,6 +2798,7 @@ var capabilities = [
   TELEGRAM_LABEL_CAPABILITY
 ];
 var storedLabelProviders = capabilities.filter((capability) => capability.proof === "stored").map((capability) => capability.provider);
+var legacyCappedTagProviders = capabilities.filter((capability) => ("legacyTagLimits" in capability)).map((capability) => capability.provider);
 var byProvider = new Map(capabilities.map((capability) => [capability.provider, capability]));
 
 // src/core/archive-formats.ts

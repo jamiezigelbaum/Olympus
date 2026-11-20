@@ -18,7 +18,7 @@ import {
   sourceInvocationProvenance,
   type SourceInvocationProvenance,
 } from '../../core/invocation-provenance.ts';
-import { buildSourceSensitivity, type SourceSensitivity } from '../../core/source-index/types.ts';
+import { buildSourceSensitivity, type SourceSensitivity, type SourceItemIdentity } from '../../core/source-index/types.ts';
 import {
   createEnvCredentialBroker,
   requireBearerTokenCredentialSession,
@@ -236,6 +236,7 @@ function writeReadwiseRequestBudgetState(
 }
 
 export interface ReadwiseSourceConnector extends SourceConnector {
+  readCurrentLabels(identity: SourceItemIdentity): Promise<readonly string[] | undefined>;
   requestBudgetStatus(): ReadwiseRequestBudgetStatus;
 }
 
@@ -465,6 +466,25 @@ export function createReadwiseSourceConnector(
       });
     },
 
+    async readCurrentLabels(identity) {
+      if (identity.provider !== READWISE_PROVIDER || identity.accountScope !== account) return undefined;
+      const id = identity.providerItemId;
+      await connector.authenticate();
+      if (identity.localItemId === `${account}:document:${id}` && identity.providerConversationId === `document:${id}`) {
+        const page = await client!.listReaderDocuments({ documentId: id });
+        const document = page.results.find(row => optionalId(row.id) === id);
+        if (!document?.tags || typeof document.tags !== 'object') return undefined;
+        return readerTagNames(document.tags);
+      }
+      const bookId = identity.providerConversationId?.startsWith('document:') && identity.providerConversationId.slice('document:'.length);
+      if (!bookId || identity.localItemId !== `${account}:highlight:${id}`) return undefined;
+      const page = await client!.exportBooks({ bookId });
+      const book = page.results.find(row => (optionalId(row.user_book_id) ?? optionalId(row.id)) === bookId);
+      const highlight = Array.isArray(book?.highlights) && book.highlights.find(row => optionalId(row?.id) === id);
+      if (!highlight || !Array.isArray(highlight.tags) || !(Array.isArray(book?.book_tags) || Array.isArray(book?.tags))) return undefined;
+      return [...tagNames(book.book_tags), ...tagNames(book.tags), ...tagNames(highlight.tags)];
+    },
+
     requestBudgetStatus: () => requestBudget.status(),
   };
   return connector;
@@ -633,7 +653,7 @@ function rawItem(input: {
       itemKind: input.itemKind,
       documentId: input.documentId,
       ...(input.author ? { author: input.author } : {}),
-      ...(input.tags.length > 0 ? { tags: input.tags } : {}),
+      tags: input.tags,
       ...(input.locatorUri ? { locatorUri: input.locatorUri, url: input.locatorUri } : {}),
       ...(input.authoredAt ? { authoredAt: input.authoredAt } : {}),
       ...(input.updatedAt ? { updatedAt: input.updatedAt } : {}),

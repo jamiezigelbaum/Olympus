@@ -1033,14 +1033,35 @@ var CONTENT_SCOPE_NAMES_ONLY = "names_only";
 function itemContentKeptNamesOnly(item) {
   return item.metadata[CONTENT_SCOPE_METADATA_KEY] === CONTENT_SCOPE_NAMES_ONLY;
 }
+function signalText(metadata, ...keys) {
+  for (const key of keys) {
+    const value = metadata[key];
+    if (typeof value === "string" && value.trim())
+      return value.trim();
+  }
+  return;
+}
+function signalTexts(metadata, ...keys) {
+  const values = new Set;
+  for (const key of keys) {
+    const value = metadata[key];
+    if (!Array.isArray(value))
+      continue;
+    for (const entry of value) {
+      if (typeof entry === "string" && entry.trim())
+        values.add(entry.trim());
+    }
+  }
+  return [...values];
+}
 
 // src/core/source-connector-labels.ts
 var NOTE_TAGS_METADATA_KEY = "tags";
 var GMAIL_LABEL_CAPABILITY = { provider: "gmail", proof: "provider_walk", metadataKey: "labels" };
 var MBOX_LABEL_CAPABILITY = { provider: "mbox", proof: "stored", metadataKey: "labels" };
-var EVERNOTE_LABEL_CAPABILITY = { provider: "evernote", proof: "stored", metadataKey: NOTE_TAGS_METADATA_KEY };
-var READWISE_LABEL_CAPABILITY = { provider: "readwise", proof: "stored", metadataKey: NOTE_TAGS_METADATA_KEY };
-var REFLECT_LABEL_CAPABILITY = { provider: "reflect", proof: "stored", metadataKey: NOTE_TAGS_METADATA_KEY };
+var EVERNOTE_LABEL_CAPABILITY = { provider: "evernote", proof: "stored", mutable: true, legacyTagLimits: true, metadataKey: NOTE_TAGS_METADATA_KEY };
+var READWISE_LABEL_CAPABILITY = { provider: "readwise", proof: "stored", mutable: true, metadataKey: NOTE_TAGS_METADATA_KEY };
+var REFLECT_LABEL_CAPABILITY = { provider: "reflect", proof: "stored", legacyTagLimits: true, metadataKey: NOTE_TAGS_METADATA_KEY };
 var TELEGRAM_LABEL_CAPABILITY = { provider: "telegram", proof: "stored" };
 var capabilities = [
   GMAIL_LABEL_CAPABILITY,
@@ -1051,17 +1072,59 @@ var capabilities = [
   TELEGRAM_LABEL_CAPABILITY
 ];
 var storedLabelProviders = capabilities.filter((capability) => capability.proof === "stored").map((capability) => capability.provider);
+var legacyCappedTagProviders = capabilities.filter((capability) => ("legacyTagLimits" in capability)).map((capability) => capability.provider);
 var byProvider = new Map(capabilities.map((capability) => [capability.provider, capability]));
 function connectorLabelCapability(provider) {
   return byProvider.get(provider);
 }
-function encodeLabelObservation(labels) {
-  return JSON.stringify([...new Set(labels.map((label) => label.trim().toLowerCase()))].sort());
+function telegramContextNames({ metadata }) {
+  const names = [];
+  const forwardedFrom = signalText(metadata, "forwardedFrom");
+  if (forwardedFrom)
+    names.push(`Forwarded from ${forwardedFrom}`);
+  const attachmentNames = metadata["attachmentNames"];
+  if (Array.isArray(attachmentNames)) {
+    for (const name of attachmentNames) {
+      if (typeof name === "string" && name.trim() && !names.includes(name.trim()))
+        names.push(name.trim());
+    }
+  }
+  return names;
+}
+function providerMetadataLabels(provider, metadata) {
+  const capability = connectorLabelCapability(provider);
+  if (capability?.proof !== "stored")
+    return;
+  if (capability.metadataKey) {
+    const values = metadata[capability.metadataKey];
+    if (!Array.isArray(values))
+      return;
+    if (capability === MBOX_LABEL_CAPABILITY)
+      return values.filter((entry) => typeof entry === "string");
+    return signalTexts(metadata, capability.metadataKey);
+  }
+  if (!Array.isArray(metadata.attachmentNames) && typeof metadata.forwardedFrom !== "string")
+    return;
+  return telegramContextNames({ metadata });
+}
+function encodeLabelObservation(provider, labels) {
+  const values = [...new Set(labels.map((label) => label.trim().toLowerCase()))].sort();
+  return JSON.stringify(connectorLabelCapability(provider)?.legacyTagLimits ? { labels: values } : values);
+}
+function observedLabelValues(provider, raw) {
+  const value = JSON.parse(raw);
+  if (Array.isArray(value) && value.length && connectorLabelCapability(provider)?.legacyTagLimits)
+    return;
+  const labels = Array.isArray(value) ? value : value?.labels;
+  return Array.isArray(labels) && labels.every((label) => typeof label === "string") ? labels : undefined;
 }
 function listedLabelObservation(connector, item) {
-  if (connectorLabelCapability(item.identity.provider)?.proof !== "stored")
+  const capability = connectorLabelCapability(item.identity.provider);
+  if (capability?.proof !== "stored")
     return;
-  return encodeLabelObservation(connector.classificationSignals(item).labels ?? []);
+  if (item.content.kind === "metadata_only" && providerMetadataLabels(item.identity.provider, item.metadata) === undefined)
+    return "null";
+  return encodeLabelObservation(item.identity.provider, connector.classificationSignals(item).labels ?? []);
 }
 
 // src/core/archive-formats.ts
@@ -24601,6 +24664,13 @@ var EMBEDDING_LEDGER_BACKFILL = PUBLIC_RUNTIME_BUILD ? [] : [
 
 // src/workers/connector-store/tier-move-rule-policy.ts
 import { createHash as createHash13 } from "node:crypto";
+var currentLabels = new WeakMap;
+function mutableItemLabels(set, provider) {
+  if (!connectorLabelCapability(provider)?.mutable)
+    return false;
+  const stores = set.openStores();
+  return !stores.length || stores.some((store) => !isArchiveCorpusId(store.corpusId, store.trustDomain));
+}
 var heldPolicyFences = new WeakMap;
 function servingNames(set, record) {
   const identity = tierLedgerIdentityOfRecord(record);
@@ -24641,9 +24711,16 @@ function labelRulesWithoutNonmatch(set, record, policy, rules, names = () => ser
     const raw = names()?.columns.classification_labels_json;
     if (typeof raw !== "string")
       return rules;
-    const labels = JSON.parse(raw);
-    if (!Array.isArray(labels) || !labels.every((label) => typeof label === "string"))
+    const stored = observedLabelValues(provider, raw);
+    if (!stored)
       return rules;
+    let labels = stored;
+    if (mutableItemLabels(set, provider)) {
+      const fresh = currentLabels.get(set);
+      if (!fresh || fresh.identityKey !== tierLedgerIdentityKey(tierLedgerIdentityOfRecord(record)) || fresh.revision !== policy.revision || fresh.generation !== record.generation || fresh.decidedAt !== record.decidedAt)
+        return rules;
+      labels = [...stored, ...fresh.labels];
+    }
     return rules.filter((rule) => ownerRuleMatches(rule, { labels }, provider));
   }
   const progress = readLabelState(set.ledger.readMeta(labelSweepMetaKey(provider, accountScope)));
@@ -26330,16 +26407,20 @@ function embeddingAuthorityFromRow(row, provider) {
   }
   return { token };
 }
-var STORED_LABEL_FIELDS = `i.source_version AS version, i.sync_run_id AS run, i.indexed_at AS indexedAt,
-      CASE WHEN i.classification_labels_json IS NULL THEN NULL
-        WHEN json_valid(i.classification_labels_json) THEN CASE WHEN json_type(i.classification_labels_json) = 'array' THEN 'known' ELSE 'null' END
-        ELSE 'null' END AS observed,
+var LEGACY_CAPPED_TAGS = `provider IN (${legacyCappedTagProviders.map((provider) => `'${provider}'`).join(", ")})
+  AND CASE WHEN json_valid(classification_labels_json) THEN json_array_length(classification_labels_json) > 0 ELSE 0 END`;
+var RECOVERABLE_LABEL_SET = `(classification_labels_json IS NULL OR (${LEGACY_CAPPED_TAGS}))`;
+var KNOWN_LABEL_SET = `CASE WHEN ${LEGACY_CAPPED_TAGS} THEN 0 WHEN json_valid(classification_labels_json)
+  THEN json_type(classification_labels_json) = 'array' OR json_type(classification_labels_json, '$.labels') = 'array' ELSE 0 END`;
+var STORED_LABEL_FIELDS = `CASE WHEN ${LEGACY_CAPPED_TAGS} THEN classification_labels_json END AS legacyObservation, i.source_version AS version, i.sync_run_id AS run, i.indexed_at AS indexedAt,
+      CASE WHEN ${RECOVERABLE_LABEL_SET} THEN NULL
+        WHEN ${KNOWN_LABEL_SET} THEN 'known' ELSE 'null' END AS observed,
       i.title, COALESCE(i.sender_label, i.sender_id) AS sender, i.locator_uri AS locator,
       CASE WHEN json_valid(i.source_scope_folder_keys_json) THEN i.source_scope_folder_keys_json END AS folderKeys,
-      CASE WHEN i.classification_labels_json IS NULL THEN substr(i.search_text, -?1) END AS searchTail,
-      CASE WHEN i.classification_labels_json IS NULL AND i.mime_type LIKE 'text/markdown%' THEN
+      CASE WHEN ${RECOVERABLE_LABEL_SET} THEN substr(i.search_text, -?1) END AS searchTail,
+      CASE WHEN ${RECOVERABLE_LABEL_SET} AND i.mime_type LIKE 'text/markdown%' THEN
         (SELECT substr(c.bounded_text, 1, ?1) FROM chunks c WHERE c.item_pk = i.item_pk AND c.chunk_index = 0) END AS opening,
-      CASE WHEN i.classification_labels_json IS NULL THEN
+      CASE WHEN ${RECOVERABLE_LABEL_SET} THEN
         EXISTS (SELECT 1 FROM item_owners o WHERE o.item_pk = i.item_pk AND o.first_seen_sync_run_id = i.sync_run_id)
         AND NOT EXISTS (SELECT 1 FROM item_owners o WHERE o.item_pk = i.item_pk AND
           (o.first_seen_sync_run_id <> i.sync_run_id OR o.last_seen_sync_run_id <> i.sync_run_id OR o.first_seen_at <> o.last_seen_at))
@@ -26532,8 +26613,9 @@ class LocalConnectorStore {
       const versionAtOpen = readSqliteSchemaVersion(this.db, SQLITE_STORE_ID);
       const schemaTarget = options.restoreSchemaVersion ?? CONNECTOR_STORE_SQLITE_SCHEMA_VERSION;
       const migrating = options.readOnly !== true && versionAtOpen < schemaTarget;
+      const checkRows = migrating && !(versionAtOpen === 17 && schemaTarget === 18);
       validateCurrentConnectorStoreSchemaBeforeMigration(this.db);
-      if (migrating) {
+      if (checkRows) {
         setEngineStep(`checking ${SQLITE_STORE_ID} rows`);
         validateConnectorStoreRows(this.db, `v${versionAtOpen}`);
         setEngineStep(undefined);
@@ -26558,7 +26640,7 @@ class LocalConnectorStore {
           if (this.dbPath !== ":memory:")
             this.db.exec(`PRAGMA user_version = ${connectorStoreOpenStamp(this.db)}`);
         }
-        if (migrating) {
+        if (checkRows) {
           setEngineStep(`checking ${SQLITE_STORE_ID} rows`);
           validateConnectorStoreRows(this.db, "v15");
           validateConnectorStoreForeignKeys(this.db);
@@ -28002,10 +28084,9 @@ class LocalConnectorStore {
         ${options.onlyTombstoned ? "AND tombstoned = 1" : ""}`;
     if (this.classificationLabelsPresent && options.observedLabels !== undefined) {
       this.db.transaction(() => {
-        const prior = this.db.query(`${update} RETURNING item_pk, classification_labels_json`).get(...params);
-        if (prior) {
-          this.writeLabelObservation(prior.item_pk, prior.classification_labels_json === options.observedLabels ? options.observedLabels : "null");
-        }
+        const row = this.db.query(`${update} RETURNING item_pk`).get(...params);
+        if (row)
+          this.writeLabelObservation(row.item_pk, options.observedLabels);
       })();
     } else {
       this.db.query(update).run(...params);
@@ -28815,7 +28896,7 @@ ${parentKey(ref)}`, { ref, origin });
     const row = this.db.query(`
       SELECT item_pk, trust_tier, ${CONNECTOR_STORE_COPY_ITEM_COLUMNS.map((column) => {
       if (column === "classification_labels_json")
-        return this.classificationLabelsPresent ? "CASE WHEN json_valid(classification_labels_json) THEN CASE WHEN json_type(classification_labels_json) = 'array' THEN classification_labels_json END END AS classification_labels_json" : "NULL AS classification_labels_json";
+        return this.classificationLabelsPresent ? "CASE WHEN json_valid(classification_labels_json) THEN CASE WHEN (json_type(classification_labels_json) = 'array' OR json_type(classification_labels_json, '$.labels') = 'array') THEN classification_labels_json END END AS classification_labels_json" : "NULL AS classification_labels_json";
       return this.childItemColumnsPresent || !CONNECTOR_STORE_CHILD_ITEM_COLUMNS.includes(column) ? column : `NULL AS ${column}`;
     }).join(", ")}
       FROM items
@@ -32280,6 +32361,7 @@ ${parentKey(ref)}`, { ref, origin });
           if (route.kind === "store" && route.sensitivity.trustDomain !== this.trustDomain) {
             throw new Error("A tier route must place an item only in the store that asked.");
           }
+          const listedItem = itemForStorage;
           const routedLayer = route.kind === "store" ? route.layer : undefined;
           const sensitivity = route.kind === "store" ? route.sensitivity : legacySensitivity;
           if (route.kind === "legacy" && itemForStorage.metadata["deleted"] !== true && !this.readOnDemand(itemForStorage.identity.localItemId, itemForStorage.identity.sourceVersion ?? "")) {
@@ -32332,7 +32414,7 @@ ${parentKey(ref)}`, { ref, origin });
           const sourceScopeObservation = options?.sourceScopeObservation ? normalizeSourceScopeObservation(options.sourceScopeObservation(itemForStorage)) : undefined;
           let upsert;
           try {
-            upsert = this.upsertItemWithOwner(itemForStorage, sensitivity, connector.id, ownershipKind, syncRunId, options?.ownerObservation ?? "provider_listing", (deferMetadataOnlyContent || itemForStorage.deferredBytes !== undefined) && itemForStorage.content.kind === "metadata_only", false, (deferMetadataOnlyContent || itemForStorage.deferredBytes !== undefined) && itemForStorage.content.kind === "metadata_only", sourceScopeObservation, routedLayer && routedLayer !== "metadata" ? "content" : undefined, options?.ownerObservation !== "local_write" && routedLayer !== "content" ? listedLabelObservation(connector, itemForStorage) : undefined);
+            upsert = this.upsertItemWithOwner(itemForStorage, sensitivity, connector.id, ownershipKind, syncRunId, options?.ownerObservation ?? "provider_listing", (deferMetadataOnlyContent || itemForStorage.deferredBytes !== undefined) && itemForStorage.content.kind === "metadata_only", false, (deferMetadataOnlyContent || itemForStorage.deferredBytes !== undefined) && itemForStorage.content.kind === "metadata_only", sourceScopeObservation, routedLayer && routedLayer !== "metadata" ? "content" : undefined, options?.ownerObservation !== "local_write" && routedLayer !== "content" ? listedLabelObservation(connector, listedItem) : undefined);
           } catch (error) {
             if (!(error instanceof ConnectorStoreTierWriteRefusedError))
               throw error;
@@ -32496,7 +32578,7 @@ ${parentKey(ref)}`, { ref, origin });
       ${STORED_LABEL_FIELDS}
       FROM page LEFT JOIN items i ON i.item_pk = page.item_pk AND i.tombstoned = 0
         AND i.provider IN (SELECT value FROM json_each(?4))
-        AND (?5 OR i.classification_labels_json IS NULL OR i.classification_labels_json = 'null') ORDER BY page.item_pk`;
+        AND (?5 OR ${RECOVERABLE_LABEL_SET} OR i.classification_labels_json = 'null') ORDER BY page.item_pk`;
     const params = [SNIFFER_NAMES_MAX_CHARS * 2, after, limit, JSON.stringify(storedLabelProviders), Number(checkKnown)];
     const rows = offThreadReadsSupported(this.dbPath) ? await readInBackground(this.dbPath, { sql, params, mode: "all" }) : this.db.query(sql).all(...params);
     return { rows: rows.filter((row) => row.itemPk != null), last: rows.at(-1)?.cursor ?? after, end: rows.length < limit };
@@ -32509,12 +32591,12 @@ ${parentKey(ref)}`, { ref, origin });
   hasListedLabels(identity) {
     if (!this.classificationLabelsPresent)
       return;
-    const row = this.db.query(`SELECT CASE WHEN json_valid(classification_labels_json) THEN json_type(classification_labels_json) = 'array' ELSE 0 END AS known
+    const row = this.db.query(`SELECT ${KNOWN_LABEL_SET} AS known
       FROM items WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ? AND tombstoned = 0`).get(identity.provider, identity.accountScope, identity.providerConversationId ?? "", identity.providerItemId);
     return row ? Boolean(row.known) : undefined;
   }
   recordRecoveredLabels(row, labels) {
-    this.db.query("UPDATE items SET classification_labels_json = ? WHERE item_pk = ? AND tombstoned = 0 AND classification_labels_json IS NULL").run(labels, row.itemPk);
+    this.db.query("UPDATE items SET classification_labels_json = ? WHERE item_pk = ? AND tombstoned = 0 AND classification_labels_json IS ?").run(labels, row.itemPk, row.legacyObservation);
   }
   writeLabelObservation(itemPk, labels) {
     if (this.classificationLabelsPresent && typeof labels === "string") {

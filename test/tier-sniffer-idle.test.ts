@@ -172,24 +172,26 @@ test('repair waits for the full stored sweep and the label receipt for every app
   const f = fixture();
   await storedPersonalRows(f, ['outside']);
   const identity = identityOf('outside');
-  const second = { ...identity, accountScope: 'second' };
+  const first = { ...identity, provider: 'gmail' };
+  const second = { ...first, accountScope: 'second' };
   const names = classifyItemTiers({ signals: { title: 'Picnic' }, namesOnly: true });
+  f.ledger.recordDecision(first, names);
   f.ledger.recordDecision(second, names);
   writeOwnerTierRules([
     { id: 'folder', match: { kind: 'pathPrefix', value: '/Elsewhere/' }, tier: 'secure', strength: 'force' },
-    { id: 'label', source: identity.provider, match: { kind: 'label', value: 'Family' }, tier: 'secure', strength: 'force' },
+    { id: 'label', source: first.provider, match: { kind: 'label', value: 'Family' }, tier: 'secure', strength: 'force' },
     { id: 'unrelated', source: 'different-provider', match: { kind: 'label', value: 'Work' }, tier: 'secure', strength: 'force' },
   ], { path: f.rulesPath });
   const repair = () => storedPersonalLoweringLap(f.set, undefined, () => undefined);
   const labels = (accountScope: string) => sweepLabelRuleRaises({
-    set: f.set, provider: identity.provider, accountScope, source: { async listLabelled() { return { ids: [] }; } },
+    set: f.set, provider: first.provider, accountScope, source: { async listLabelled() { return { ids: [] }; } },
   });
   expect(sweepOwnerRuleRaises({ set: f.set, limit: 1 }).complete).toBe(false);
   expect((await labels(identity.accountScope)).pending).toBe(0);
   expect((await labels(second.accountScope)).pending).toBe(0);
   expect(await repair()).toMatchObject({ complete: false });
-  reopenLabelRuleSweep(f.ledger, identity.provider, second.accountScope);
-  expect(sweepOwnerRuleRaises({ set: f.set, limit: 1 }).complete).toBe(true);
+  reopenLabelRuleSweep(f.ledger, first.provider, second.accountScope);
+  expect(sweepOwnerRuleRaises({ set: f.set }).complete).toBe(true);
   expect(await repair()).toMatchObject({ complete: false });
   expect(f.ledger.listMoving()).toEqual([]);
   expect((await labels(second.accountScope)).pending).toBe(0);

@@ -1,10 +1,11 @@
 import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
 import { withOwnerConfigLease } from '../../core/owner-config-read.ts';
-import { connectorLabelCapability } from '../../core/source-connector-labels.ts';
+import { isArchiveCorpusId } from '../../core/archive-formats.ts';
+import { connectorLabelCapability, observedLabelValues } from '../../core/source-connector-labels.ts';
 import { registeredInstalledTierClassification } from '../classification/installed-tier-classification-registry.ts';
 import { ownerRuleMatches, tierRank, type OwnerTierRule, type TierKey, type ItemTierOverride } from '../classification/tier-classifier.ts';
-import { copyServingLayer, labelSweepMetaKey, tierLedgerIdentityOfRecord, tierMoveOverrideConflict, trustDomainRank, type TierCopyPlan, type TierLedgerRecord } from '../classification/tier-ledger.ts';
+import { copyServingLayer, labelSweepMetaKey, tierLedgerIdentityOfRecord, tierLedgerIdentityKey, type TierLedgerIdentity, tierMoveOverrideConflict, trustDomainRank, type TierCopyPlan, type TierLedgerRecord } from '../classification/tier-ledger.ts';
 import { readDecisionRules, OLYMPUS_TIER_RULES_ENV, resolveTierRulesPath, tierRulesFileStamp } from '../classification/tier-rules.ts';
 import { servingMetadataCopy, storedSignals } from './stored-names.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
@@ -19,6 +20,48 @@ export interface TierRulePolicy {
 interface PolicyFence {
   rulesPath?: string;
   policy?: TierRulePolicy;
+}
+
+// A provider answer is available only during the synchronous move or repair that requested it.
+interface CurrentLabels {
+  identityKey: string;
+  revision: string;
+  generation: number;
+  decidedAt: string;
+  labels: readonly string[];
+}
+const currentLabels = new WeakMap<TieredStoreSet, CurrentLabels>();
+
+export function mutableItemLabels(set: TieredStoreSet, provider: string): boolean {
+  if (!connectorLabelCapability(provider)?.mutable) return false;
+  const stores = set.openStores();
+  return !stores.length || stores.some(store => !isArchiveCorpusId(store.corpusId, store.trustDomain));
+}
+
+export async function withCurrentMoveLabels<T>(set: TieredStoreSet, identity: TierLedgerIdentity, target: MoveTarget | undefined, work: () => T): Promise<T> {
+  if (!set.readCurrentLabels || !mutableItemLabels(set, identity.provider)) return work();
+  const policy = withTierRuleFence(set, () => currentTierRulePolicy(set));
+  const rules = applicableProviderLabelRules(policy.rules, identity.provider);
+  if (policy.unavailable || !rules.length) return work();
+  const record = set.ledger.getCurrent(identity);
+  if (!record) return work();
+  const wanted = target ?? record;
+  const copies = set.ledger.copies(identity);
+  const sources = copies.filter(copy => copy.state === 'current' || (copy.state === 'superseded'
+    && copy.supersededByGeneration === record.generation + 1));
+  const destination = set.placementFor({ ...record, ...wanted, state: record.metadataPending || record.contentPending ? 'pending' : 'current' });
+  const ceiling = loweringCeiling(record, wanted, sources, destination.copies);
+  const override = set.ledger.getOverride(identity);
+  if (!rules.some(rule => tierRank(rule.tier) > ceiling
+    && (override?.kind !== 'tier' || rule.tier === 'secrets'))) return work();
+  const names = servingNames(set, record);
+  if (!names) return work();
+  const reader = set.readCurrentLabels;
+  const labels = await reader(names.identity);
+  if (!labels || reader !== set.readCurrentLabels) return work();
+  currentLabels.set(set, { identityKey: tierLedgerIdentityKey(identity), revision: policy.revision,
+    generation: record.generation, decidedAt: record.decidedAt, labels });
+  try { return work(); } finally { currentLabels.delete(set); }
 }
 
 const heldPolicyFences = new WeakMap<TieredStoreSet, PolicyFence>();
@@ -107,12 +150,7 @@ export type MoveRuleAuthorityEntry = keyof typeof moveRuleChecks;
 
 const moveRuleRegistry = Object.values(moveRuleChecks);
 
-/** Current authority for each layer being lowered, including its actual trust domain. */
-export function tierMoveRuleAuthorization(
-  set: TieredStoreSet, record: TierLedgerRecord, target: MoveTarget, sources: MoveCopies, destination: MoveCopies,
-): string | undefined {
-  const policy = currentTierRulePolicy(set);
-  const override = set.ledger.getOverride(tierLedgerIdentityOfRecord(record));
+function loweringCeiling(record: TierLedgerRecord, target: MoveTarget, sources: MoveCopies, destination: MoveCopies): number {
   let ceiling = Number.POSITIVE_INFINITY;
   for (const layer of ['metadata', 'content'] as const) {
     const from = copyServingLayer(sources, layer);
@@ -124,6 +162,16 @@ export function tierMoveRuleAuthorization(
       ceiling = Math.min(ceiling, tierRank(toTier), trustDomainRank(to.trustDomain));
     }
   }
+  return ceiling;
+}
+
+/** Current authority for each layer being lowered, including its actual trust domain. */
+export function tierMoveRuleAuthorization(
+  set: TieredStoreSet, record: TierLedgerRecord, target: MoveTarget, sources: MoveCopies, destination: MoveCopies,
+): string | undefined {
+  const policy = currentTierRulePolicy(set);
+  const override = set.ledger.getOverride(tierLedgerIdentityOfRecord(record));
+  const ceiling = loweringCeiling(record, target, sources, destination);
   const rules = policy.rules.filter(rule => tierRank(rule.tier) > ceiling
     && (rule.source === undefined || rule.source === record.provider)
     && (override?.kind !== 'tier' || rule.tier === 'secrets'));
@@ -152,8 +200,15 @@ export function labelRulesWithoutNonmatch(
   if (capability.proof === 'stored') {
     const raw = names()?.columns.classification_labels_json;
     if (typeof raw !== 'string') return rules;
-    const labels: unknown = JSON.parse(raw);
-    if (!Array.isArray(labels) || !labels.every(label => typeof label === 'string')) return rules;
+    const stored = observedLabelValues(provider, raw);
+    if (!stored) return rules;
+    let labels = stored;
+    if (mutableItemLabels(set, provider)) {
+      const fresh = currentLabels.get(set);
+      if (!fresh || fresh.identityKey !== tierLedgerIdentityKey(tierLedgerIdentityOfRecord(record))
+        || fresh.revision !== policy.revision || fresh.generation !== record.generation || fresh.decidedAt !== record.decidedAt) return rules;
+      labels = [...stored, ...fresh.labels];
+    }
     return rules.filter(rule => ownerRuleMatches(rule, { labels }, provider));
   }
   const progress = readLabelState(set.ledger.readMeta(labelSweepMetaKey(provider, accountScope)));

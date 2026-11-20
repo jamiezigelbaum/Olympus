@@ -8288,13 +8288,20 @@ var init_tier_ledger_path = __esm(() => {
 function connectorLabelCapability(provider) {
   return byProvider.get(provider);
 }
-var NOTE_TAGS_METADATA_KEY = "tags", GMAIL_LABEL_CAPABILITY, MBOX_LABEL_CAPABILITY, EVERNOTE_LABEL_CAPABILITY, READWISE_LABEL_CAPABILITY, REFLECT_LABEL_CAPABILITY, TELEGRAM_LABEL_CAPABILITY, capabilities, storedLabelProviders, byProvider;
+function observedLabelValues(provider, raw) {
+  const value = JSON.parse(raw);
+  if (Array.isArray(value) && value.length && connectorLabelCapability(provider)?.legacyTagLimits)
+    return;
+  const labels = Array.isArray(value) ? value : value?.labels;
+  return Array.isArray(labels) && labels.every((label) => typeof label === "string") ? labels : undefined;
+}
+var NOTE_TAGS_METADATA_KEY = "tags", GMAIL_LABEL_CAPABILITY, MBOX_LABEL_CAPABILITY, EVERNOTE_LABEL_CAPABILITY, READWISE_LABEL_CAPABILITY, REFLECT_LABEL_CAPABILITY, TELEGRAM_LABEL_CAPABILITY, capabilities, storedLabelProviders, legacyCappedTagProviders, byProvider;
 var init_source_connector_labels = __esm(() => {
   GMAIL_LABEL_CAPABILITY = { provider: "gmail", proof: "provider_walk", metadataKey: "labels" };
   MBOX_LABEL_CAPABILITY = { provider: "mbox", proof: "stored", metadataKey: "labels" };
-  EVERNOTE_LABEL_CAPABILITY = { provider: "evernote", proof: "stored", metadataKey: NOTE_TAGS_METADATA_KEY };
-  READWISE_LABEL_CAPABILITY = { provider: "readwise", proof: "stored", metadataKey: NOTE_TAGS_METADATA_KEY };
-  REFLECT_LABEL_CAPABILITY = { provider: "reflect", proof: "stored", metadataKey: NOTE_TAGS_METADATA_KEY };
+  EVERNOTE_LABEL_CAPABILITY = { provider: "evernote", proof: "stored", mutable: true, legacyTagLimits: true, metadataKey: NOTE_TAGS_METADATA_KEY };
+  READWISE_LABEL_CAPABILITY = { provider: "readwise", proof: "stored", mutable: true, metadataKey: NOTE_TAGS_METADATA_KEY };
+  REFLECT_LABEL_CAPABILITY = { provider: "reflect", proof: "stored", legacyTagLimits: true, metadataKey: NOTE_TAGS_METADATA_KEY };
   TELEGRAM_LABEL_CAPABILITY = { provider: "telegram", proof: "stored" };
   capabilities = [
     GMAIL_LABEL_CAPABILITY,
@@ -8305,6 +8312,7 @@ var init_source_connector_labels = __esm(() => {
     TELEGRAM_LABEL_CAPABILITY
   ];
   storedLabelProviders = capabilities.filter((capability) => capability.proof === "stored").map((capability) => capability.provider);
+  legacyCappedTagProviders = capabilities.filter((capability) => ("legacyTagLimits" in capability)).map((capability) => capability.provider);
   byProvider = new Map(capabilities.map((capability) => [capability.provider, capability]));
 });
 
@@ -8544,6 +8552,9 @@ function isArchiveProvider(provider, formats = ARCHIVE_FORMATS) {
 }
 function archiveCorpusId(trustDomain, family) {
   return `${trustDomain}.archive.${family}`;
+}
+function isArchiveCorpusId(corpusId, trustDomain) {
+  return corpusId.startsWith(`${trustDomain}.archive.`);
 }
 function archiveImportFamilies(formats = ARCHIVE_FORMATS) {
   return [...new Set(formats.map((format) => format.family))];
@@ -11250,6 +11261,9 @@ function tierLedgerIdentityOfRecord(record) {
     ...record.conversationKey ? { providerConversationId: record.conversationKey } : {}
   };
 }
+function tierLedgerIdentityKey(identity) {
+  return TIER_LEDGER_IDENTITY_FIELDS.map((field) => identity[field] ?? "").join("\x00");
+}
 function trustDomainRank(domain) {
   return TRUST_DOMAIN_RANK[domain] ?? Number.MAX_SAFE_INTEGER;
 }
@@ -11318,7 +11332,7 @@ var PERSONAL_LOWERING_UNCLAIMED = `rejudge_json IS NULL AND metadata_forced = 0
       EXISTS (SELECT 1 FROM tier_items t WHERE t.provider = c.provider AND t.account_scope = c.account_scope
         AND t.conversation_key = c.conversation_key AND t.provider_item_id = c.provider_item_id AND t.state = 'moving') AS moving`, CORPUS_COPY_FLAGS_PAGE_SQL, CORPUS_INTENT_ID_SQL = "w.provider, w.account_scope, w.conversation_key, w.provider_item_id", CORPUS_INTENT_OTHER_FLAGS_SQL = "0 AS held, 0 AS held_for_judgment, 0 AS metadata_layer, 0 AS metadata_unread, 0 AS moving", CORPUS_INTENT_WITHOUT_COPY_SQL = `w.kind IN ('deletion', 'secret') AND NOT EXISTS (
   SELECT 1 FROM tier_copies c WHERE c.provider = w.provider AND c.account_scope = w.account_scope
-    AND c.conversation_key = w.conversation_key AND c.provider_item_id = w.provider_item_id AND c.corpus_id = ?)`, CORPUS_INTENT_FLAGS_PAGE_SQL, REJUDGE_UNAVAILABLE_RETRY_MS, REJUDGE_UNAVAILABLE_MAX_RETRY_MS, TRUST_DOMAIN_RANK, STALE_EMBED_HOLD_DECIDED;
+    AND c.conversation_key = w.conversation_key AND c.provider_item_id = w.provider_item_id AND c.corpus_id = ?)`, CORPUS_INTENT_FLAGS_PAGE_SQL, REJUDGE_UNAVAILABLE_RETRY_MS, REJUDGE_UNAVAILABLE_MAX_RETRY_MS, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, STALE_EMBED_HOLD_DECIDED;
 var init_tier_ledger = __esm(() => {
   init_operation_error();
   init_sqlite_migrations();
@@ -11347,6 +11361,7 @@ var init_tier_ledger = __esm(() => {
   FROM tier_write_intents w WHERE w.rowid > ? ORDER BY w.rowid LIMIT 500`;
   REJUDGE_UNAVAILABLE_RETRY_MS = 60 * 60 * 1000;
   REJUDGE_UNAVAILABLE_MAX_RETRY_MS = 24 * 60 * 60 * 1000;
+  TIER_LEDGER_IDENTITY_FIELDS = ["provider", "accountScope", "providerConversationId", "providerItemId"];
   TRUST_DOMAIN_RANK = {
     public_safe: 0,
     internal: 1,
@@ -12868,6 +12883,12 @@ var init_tier_rules = __esm(() => {
 
 // src/workers/connector-store/tier-move-rule-policy.ts
 import { createHash as createHash2 } from "node:crypto";
+function mutableItemLabels(set, provider) {
+  if (!connectorLabelCapability(provider)?.mutable)
+    return false;
+  const stores = set.openStores();
+  return !stores.length || stores.some((store) => !isArchiveCorpusId(store.corpusId, store.trustDomain));
+}
 function servingNames(set, record) {
   const identity = tierLedgerIdentityOfRecord(record);
   const copies = set.ledger.copies(identity);
@@ -12890,9 +12911,16 @@ function labelRulesWithoutNonmatch(set, record, policy, rules, names = () => ser
     const raw = names()?.columns.classification_labels_json;
     if (typeof raw !== "string")
       return rules;
-    const labels = JSON.parse(raw);
-    if (!Array.isArray(labels) || !labels.every((label) => typeof label === "string"))
+    const stored = observedLabelValues(provider, raw);
+    if (!stored)
       return rules;
+    let labels = stored;
+    if (mutableItemLabels(set, provider)) {
+      const fresh = currentLabels.get(set);
+      if (!fresh || fresh.identityKey !== tierLedgerIdentityKey(tierLedgerIdentityOfRecord(record)) || fresh.revision !== policy.revision || fresh.generation !== record.generation || fresh.decidedAt !== record.decidedAt)
+        return rules;
+      labels = [...stored, ...fresh.labels];
+    }
     return rules.filter((rule) => ownerRuleMatches(rule, { labels }, provider));
   }
   const progress = readLabelState(set.ledger.readMeta(labelSweepMetaKey(provider, accountScope)));
@@ -12950,14 +12978,16 @@ function labelEvidenceItemKey(providerItemId) {
 function digest(value) {
   return createHash2("sha256").update(JSON.stringify(value)).digest("hex");
 }
-var heldPolicyFences, moveRuleChecks, moveRuleRegistry;
+var currentLabels, heldPolicyFences, moveRuleChecks, moveRuleRegistry;
 var init_tier_move_rule_policy = __esm(() => {
   init_owner_config_read();
+  init_archive_formats();
   init_source_connector_labels();
   init_tier_classifier();
   init_tier_ledger();
   init_tier_rules();
   init_stored_names();
+  currentLabels = new WeakMap;
   heldPolicyFences = new WeakMap;
   moveRuleChecks = {
     override: (a) => !tierMoveOverrideConflict(a.override, a.record, a.target, a.sources, a.destination),
@@ -13043,7 +13073,7 @@ var init_reactions = () => {};
 function connectorStoreContentPreference(vettedVectorItemIds) {
   return (candidate) => candidate.item.chunk?.lane === "keyword" || candidate.laneRanks.has("recency") || candidate.laneRanks.has("vector") && vettedVectorItemIds.has(candidate.item.sourceItem.localItemId);
 }
-var CONCEPT_COUNT_MAX_AGE_MS, CONNECTOR_STORE_CONVERSATION_INDEX = "idx_connector_store_items_conversation_time", CONNECTOR_STORE_CONVERSATION_INDEX_SQL, CONNECTOR_STORE_RECENCY_INDEX = "idx_connector_store_items_recent_live", CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX = "idx_connector_store_items_recent_account_live", RECENCY_LIVE_SQL = "tombstoned IS 0", ACCOUNT_RECENCY_LIVE_SQL = "+tombstoned IS 0", CONNECTOR_STORE_RECENCY_INDEX_SQL, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, CHUNK_MEDIA_RETRY_BASE_MS, CONNECTOR_STORE_FTS_MIGRATION, STATUS_COUNTS_MAX_AGE_MS, TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, lexicalContentPreference, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_V18_ITEM_COLUMNS, LOCAL_RELAXED_STOPWORDS;
+var CONCEPT_COUNT_MAX_AGE_MS, CONNECTOR_STORE_CONVERSATION_INDEX = "idx_connector_store_items_conversation_time", CONNECTOR_STORE_CONVERSATION_INDEX_SQL, CONNECTOR_STORE_RECENCY_INDEX = "idx_connector_store_items_recent_live", CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX = "idx_connector_store_items_recent_account_live", RECENCY_LIVE_SQL = "tombstoned IS 0", ACCOUNT_RECENCY_LIVE_SQL = "+tombstoned IS 0", CONNECTOR_STORE_RECENCY_INDEX_SQL, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, CHUNK_MEDIA_RETRY_BASE_MS, CONNECTOR_STORE_FTS_MIGRATION, STATUS_COUNTS_MAX_AGE_MS, TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, LEGACY_CAPPED_TAGS, RECOVERABLE_LABEL_SET, KNOWN_LABEL_SET, STORED_LABEL_FIELDS, lexicalContentPreference, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_V18_ITEM_COLUMNS, LOCAL_RELAXED_STOPWORDS;
 var init_local_index = __esm(() => {
   init_tier_classifier();
   init_source_connector_labels();
@@ -13159,6 +13189,25 @@ var init_local_index = __esm(() => {
   LAST_SYNC_RUN_SQL = `SELECT * FROM sync_runs
   WHERE connector_id NOT IN ${NON_SYNC_RUN_CONNECTORS_SQL}
   ORDER BY started_at DESC, rowid DESC LIMIT 1`;
+  LEGACY_CAPPED_TAGS = `provider IN (${legacyCappedTagProviders.map((provider) => `'${provider}'`).join(", ")})
+  AND CASE WHEN json_valid(classification_labels_json) THEN json_array_length(classification_labels_json) > 0 ELSE 0 END`;
+  RECOVERABLE_LABEL_SET = `(classification_labels_json IS NULL OR (${LEGACY_CAPPED_TAGS}))`;
+  KNOWN_LABEL_SET = `CASE WHEN ${LEGACY_CAPPED_TAGS} THEN 0 WHEN json_valid(classification_labels_json)
+  THEN json_type(classification_labels_json) = 'array' OR json_type(classification_labels_json, '$.labels') = 'array' ELSE 0 END`;
+  STORED_LABEL_FIELDS = `CASE WHEN ${LEGACY_CAPPED_TAGS} THEN classification_labels_json END AS legacyObservation, i.source_version AS version, i.sync_run_id AS run, i.indexed_at AS indexedAt,
+      CASE WHEN ${RECOVERABLE_LABEL_SET} THEN NULL
+        WHEN ${KNOWN_LABEL_SET} THEN 'known' ELSE 'null' END AS observed,
+      i.title, COALESCE(i.sender_label, i.sender_id) AS sender, i.locator_uri AS locator,
+      CASE WHEN json_valid(i.source_scope_folder_keys_json) THEN i.source_scope_folder_keys_json END AS folderKeys,
+      CASE WHEN ${RECOVERABLE_LABEL_SET} THEN substr(i.search_text, -?1) END AS searchTail,
+      CASE WHEN ${RECOVERABLE_LABEL_SET} AND i.mime_type LIKE 'text/markdown%' THEN
+        (SELECT substr(c.bounded_text, 1, ?1) FROM chunks c WHERE c.item_pk = i.item_pk AND c.chunk_index = 0) END AS opening,
+      CASE WHEN ${RECOVERABLE_LABEL_SET} THEN
+        EXISTS (SELECT 1 FROM item_owners o WHERE o.item_pk = i.item_pk AND o.first_seen_sync_run_id = i.sync_run_id)
+        AND NOT EXISTS (SELECT 1 FROM item_owners o WHERE o.item_pk = i.item_pk AND
+          (o.first_seen_sync_run_id <> i.sync_run_id OR o.last_seen_sync_run_id <> i.sync_run_id OR o.first_seen_at <> o.last_seen_at))
+        AND NOT EXISTS (SELECT 1 FROM item_text_versions v WHERE v.item_pk = i.item_pk)
+      END AS originalListing`;
   lexicalContentPreference = connectorStoreContentPreference(new Set);
   CONNECTOR_STORE_V4_ITEM_COLUMNS = [
     "item_pk",

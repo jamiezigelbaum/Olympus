@@ -78,7 +78,9 @@ import {
   type EvernotePassRecord,
   type EvernoteSourceConnector,
 } from './connector.ts';
-import { listNotebooks, type EvernoteNotebook } from './listing.ts';
+import { CHILD_ITEM_ID_SEPARATOR } from '../../core/child-item-id.ts';
+import { cleanTags } from '../archive-import/notes/note.ts';
+import { listNotes, listNotebooks, type EvernoteNoteHit, type EvernoteNotebook } from './listing.ts';
 
 export const EVERNOTE_SECURE_CORPUS_ID = 'secure_local.evernote.notes';
 export const EVERNOTE_INTERNAL_CORPUS_ID = 'internal.evernote.notes';
@@ -421,6 +423,34 @@ export function createEvernoteLiveSync(options: EvernoteLiveSyncOptions): Everno
     ...(options.downloadFetch ? { downloadFetch: options.downloadFetch } : {}),
     now,
   });
+  options.lane.set.readCurrentLabels = async identity => {
+    if (identity.provider !== EVERNOTE_PROVIDER || identity.accountScope !== accountScope) return undefined;
+    const id = identity.providerItemId;
+    // Attachments have no tag field of their own.
+    if (id.includes(CHILD_ITEM_ID_SEPARATOR)) return [];
+    const file = readPassFile(passPath);
+    const notebookId = evernoteRecordedNotebookId(evernotePassWithUnfinished(file.record, file.unfinished)?.notes[id]);
+    if (!notebookId || !boundChoice) return undefined;
+    const choice = boundChoice;
+    const allowed = (book: EvernoteNotebook) => {
+      choice.assertCurrent();
+      return book.owned && evernoteNotebookGate(choice.gate(), evernoteExclusionMatcher(env))(book) === 'ingest';
+    };
+    const live = session('pass');
+    try {
+      await live.open();
+      const book = (await listNotebooks(live)).find(entry => entry.id === notebookId);
+      if (!book || !allowed(book)) return undefined;
+      const members = new Map<string, EvernoteNoteHit>();
+      await listNotes(live, book.filter, members, now().getTime());
+      if (!members.has(id) || !allowed(book)) return undefined;
+      const out = await live.callTool('get_note', { noteId: id });
+      const note = out.data as { id?: string; notebookId?: string; tags?: Array<{ name: string }>; active?: boolean } | undefined;
+      if (out.isError || note?.id !== id || note.notebookId !== book.id || note.active === false || !allowed(book)) return undefined;
+      return Array.isArray(note.tags) && note.tags.every(tag => typeof tag?.name === 'string')
+        ? cleanTags(note.tags.map(tag => tag.name)) : undefined;
+    } finally { await live.close(); }
+  };
   let lastCompletedAt: string | undefined = readPassFile(passPath).status.last_completed_at;
   // One pass at a time: a manual sync beside the scheduled one waits for it.
   let running: Promise<EvernotePassReceipt> | undefined;
