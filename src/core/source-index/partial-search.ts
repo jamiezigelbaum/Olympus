@@ -28,7 +28,6 @@ export function laneTimeoutGap(corpusId: string): string {
 }
 
 export const KEYWORD_PREPARATION_INCOMPLETE = 'keyword_preparation_incomplete';
-export const SEMANTIC_SEARCH_STARTING = 'search_starting';
 export const STARTUP_SEARCH_GAP = 'Olympus was still starting when you asked, so the search took longer.';
 
 export function promptFitCoverageGap(lane: 'local' | 'cloud', kept: number, shortlisted: number): string {

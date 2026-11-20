@@ -3,7 +3,6 @@ import type {
   RetrievalLaneAudit,
   SourceIndexCandidateId,
 } from './types.ts';
-import type { SEMANTIC_SEARCH_STARTING } from './partial-search.ts';
 
 export type { SourceIndexCandidateId } from './types.ts';
 
@@ -38,7 +37,6 @@ export type SourceIndexHybridUnservableReason =
   | 'embedding_provider_not_allowed'
   | 'no_current_embedding_artifacts'
   | 'embedding_epoch_stale'
-  | typeof SEMANTIC_SEARCH_STARTING
   | 'hybrid_capability_unreported';
 
 export interface SourceIndexRetrievalState {
