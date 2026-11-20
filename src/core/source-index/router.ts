@@ -2,7 +2,7 @@ import { withSourceIndexReadProgress, type SourceIndexReadProgress } from './rea
 import { noteSourceAnswerProgress } from '../source-answer-jobs.ts';
 import { READ_WIDE_MATCH_LIMIT } from '../read-wide.ts';
 import { isSourceIndexLaneBusyError } from './lane-busy.ts';
-import { RECENT_ITEMS_CUT_SHORT, VISIBILITY_CHECK_CUT_SHORT } from './partial-search.ts';
+import { RECENT_ITEMS_CUT_SHORT, SEMANTIC_SEARCH_STARTING, VISIBILITY_CHECK_CUT_SHORT } from './partial-search.ts';
 import { withKeywordRequestScope } from './keyword-context.ts';
 import type {
   RetrievalDegradation,
@@ -228,6 +228,8 @@ export interface SourceIndexCorpusSearchAdapter {
    */
   prepareSemantic?: (query: string, budgetMs: number) => Promise<void>;
   hybridAvailability?: (request: SourceIndexCorpusSearchRequest) => SourceIndexHybridAvailability;
+  // A pending first visibility build, for an accepted Ask that can wait before searching.
+  visibilityStartup?: () => Promise<void> | undefined;
   /**
    * The corpus's nearest semantic neighbours of the query, nearest first,
    * whatever their similarity: no relevance bar vets them, so they are never
@@ -668,6 +670,9 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
         localOnly: corpus.storageProfile.placement === 'local_private',
         state: retrievalState,
       }));
+    }
+    if (corpus.activationMode !== 'lexical_only'
+      || response.laneAudits?.some(audit => audit.skippedReason === SEMANTIC_SEARCH_STARTING)) {
       const semanticLoss = semanticLaneDegradation(corpus.corpusId, retrievalState, response);
       if (semanticLoss) degradations.push(semanticLoss);
     }
@@ -1012,7 +1017,7 @@ function semanticLaneDegradation(
   state: SourceIndexRetrievalState,
   response: SourceIndexCorpusSearchResponse,
 ): RetrievalDegradation | undefined {
-  if (state.health === 'degraded') {
+  if (state.health === 'degraded' && state.reason !== SEMANTIC_SEARCH_STARTING) {
     return {
       laneName: `${corpusId}:semantic`,
       laneType: 'semantic',

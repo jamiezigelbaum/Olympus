@@ -34,6 +34,7 @@
  */
 import { RECENT_ITEMS_CUT_SHORT, semanticSearchTimedOut, STARTUP_SEARCH_GAP } from '../../core/source-index/partial-search.ts';
 import { buildEvidencePackDetailed, type LocalContentProvider, type SecretLocationNote } from '../../core/evidence-pack.ts';
+import { untilAborted } from '../../core/http-timeout.ts';
 import { providerSourceLabel } from '../../core/remote-result.ts';
 import { secretLocationAnswer } from '../../core/secret-location-note.ts';
 import { secretLocationFingerprint } from '../classification/secret-locations.ts';
@@ -177,9 +178,27 @@ export async function answerOnThisComputer(
   const question = input.question.trim();
   if (!question) return { status: 'failed' };
   const request = localAnswerRequest(question, input.selectors);
-  const lanes = options.lanes(request);
+  let lanes = options.lanes(request);
   const corpusIds = sourceAnswerCorpusIds(request);
   const selectedItems = selectedEvidenceItemsFromRequest(request);
+  let waitedForStartup = false;
+  if (request.retrieval_mode === 'hybrid' && selectedItems.length === 0) {
+    for (;;) {
+      const pending = lanes.registry.list().flatMap(corpus => {
+        if (!LOCAL_TRUST_DOMAINS.includes(corpus.trustDomain)
+          || corpus.storageProfile.cloudQueryEligible
+          || (corpusIds && !corpusIds.includes(corpus.corpusId))) return [];
+        const startup = lanes.adapters[corpus.corpusId]?.visibilityStartup?.();
+        return startup ? [startup] : [];
+      });
+      if (pending.length === 0) break;
+      waitedForStartup = true;
+      const ready = Promise.all(pending);
+      await (input.signal ? untilAborted(ready, input.signal) : ready);
+      if (input.stillAuthorized?.() === false) return { status: 'changed' };
+      lanes = options.lanes(request);
+    }
+  }
   const explicitQuery = request.query?.trim();
   const retrievalStartedAt = Date.now();
   const detail = await buildEvidencePackDetailed({
@@ -227,7 +246,8 @@ export async function answerOnThisComputer(
   // Matching Secrets, by location only (no model sees them): said beside the answer, or as the answer.
   const secrets = secretLocationAnswer((detail.secretLocations ?? []).map((location) => ({ where: secretWhere(location) })));
   const secretLocations = (detail.secretLocations ?? []).map(({ source, ref, locator, title }) => ({ source, ref, fingerprint: secretLocationFingerprint({ locator, title }) }));
-  const startupNotes = detail.pack.coverage.extractionGaps.filter(gap => gap === STARTUP_SEARCH_GAP);
+  const startupNotes = waitedForStartup || detail.pack.coverage.extractionGaps.includes(STARTUP_SEARCH_GAP)
+    ? [STARTUP_SEARCH_GAP] : [];
   const coverage = startupNotes.length > 0 ? { unanswered: startupNotes } : {};
   const notFound = (): LocalAnswerResult => (secrets
     ? { status: 'answered', answer: secrets, citations: [], unanswered: startupNotes, leftOut, ...busyField, read: [], secretLocations }

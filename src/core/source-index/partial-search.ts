@@ -28,6 +28,7 @@ export function laneTimeoutGap(corpusId: string): string {
 }
 
 export const KEYWORD_PREPARATION_INCOMPLETE = 'keyword_preparation_incomplete';
+export const SEMANTIC_SEARCH_STARTING = 'search_starting';
 export const STARTUP_SEARCH_GAP = 'Olympus was still starting when you asked, so the search took longer.';
 export const RERANK_FALLBACK_GAP = 'The search could not reorder results by relevance this time because that step did not finish. The best source may be missing, and asking again may help.';
 
