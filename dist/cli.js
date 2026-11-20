@@ -279712,6 +279712,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         for (const ledger of new Set(tierLanes.map((lane) => lane.ledger))) {
           if (standBack.holds("status"))
             break;
+          if (tierSniffer && tierSetForLedger(ledger.dbPath) && tierSniffer.status().waiting?.reason !== "cloud_stopped")
+            continue;
           try {
             await runUnattendedStaleEmbedHoldWalk(ledger, (line) => console.warn(line));
           } catch (error) {

@@ -26,7 +26,6 @@ import { randomUUID } from 'node:crypto';
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { OperationError } from '../../core/operation-error.ts';
-import type { EmbeddingHoldReason } from '../../core/embedding-sweep-idle.ts';
 import type { SourceItemIdentity, SourceTrustDomain, SourceTrustTier } from '../../core/source-index/types.ts';
 import { readSqliteSchemaVersion, runSqliteMigrations, sqliteSchemaUsable, type SqliteMigration } from '../../core/sqlite-migrations.ts';
 import { closeSqliteStore, loopWalAutocheckpointPragma, type SqliteCloseOptions } from '../../core/sqlite-store.ts';
@@ -5594,6 +5593,10 @@ function rowOf(record: TierLedgerRecord): EffectiveRow {
 }
 
 // Recheck the same conditions when writing, since the finder reads a snapshot.
+/** Held-copy reasons as embedding status reports them (core/embedding-sweep-idle.ts lists the same words). */
+export type EmbeddingHoldReason = 'held_for_judgment' | 'held_after_decision' | 'held_while_text_is_unread'
+  | 'held_while_moving' | 'held_for_other_reasons';
+
 const STALE_EMBED_HOLD_DECIDED = `EXISTS (
         SELECT 1 FROM tier_items t
         WHERE t.provider = tier_copies.provider AND t.account_scope = tier_copies.account_scope

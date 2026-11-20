@@ -7296,8 +7296,9 @@ export async function main(): Promise<void> {
             }
             for (const ledger of new Set(tierLanes.map((lane) => lane.ledger))) {
               if (standBack.holds('status')) break;
-              // Runs even where the judge has its own walk: a paused judge (a
-              // spending stop) walks nothing. Unchanged ledgers cost one marker read.
+              // The judge walks its own ledgers, except while a spending stop
+              // pauses it: then this pass takes the walk so holds still settle.
+              if (tierSniffer && tierSetForLedger(ledger.dbPath) && tierSniffer.status().waiting?.reason !== 'cloud_stopped') continue;
               try {
                 await runUnattendedStaleEmbedHoldWalk(ledger, (line) => console.warn(line));
               } catch (error) {
