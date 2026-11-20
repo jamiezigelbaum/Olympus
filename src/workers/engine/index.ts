@@ -3591,10 +3591,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               // serve it (an approved provider with current embeddings), so a
               // content match found semantically is not lost behind lexical
               // title noise. Without embeddings it stays keyword, with no
-              // skipped-lane marker for a lane nobody asked for. A deferred
-              // store lets the adapter report why its vector lane was skipped.
+              // skipped-lane marker for a lane nobody asked for.
               const retrievalMode = searchRequest.retrievalMode
-                ?? (searchEmbeddingProvider && (store.vectorSearchStartup || store.vectorLaneServable(searchEmbeddingProvider.modelId))
+                ?? (searchEmbeddingProvider && store.vectorLaneServable(searchEmbeddingProvider.modelId)
                   ? 'hybrid'
                   : 'keyword');
               const combinedFilters = searchRequest.filters || mandatoryScope?.filters

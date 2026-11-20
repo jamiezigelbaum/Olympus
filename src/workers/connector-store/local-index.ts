@@ -28,7 +28,7 @@ import { CHILD_ITEM_ID_SEPARATOR } from '../../core/child-item-id.ts';
 import { keywordAlternatives, withKeywordAlternatives, keywordExpansionDisabled, withKeywordExpansionDisabled } from '../../core/source-index/keyword-context.ts';
 import { lastKeywordLanguages, storeKeywordLanguages, storeKeywordLanguagesWith } from '../../core/source-index/keyword-languages.ts';
 import { expandSourceIndexKeywords, keywordPrepareWaitMs, withExpandedSourceIndexKeywords } from '../../core/source-index/keyword-expansion.ts';
-import { RECENT_ITEMS_CUT_SHORT, SEMANTIC_SEARCH_STARTING } from '../../core/source-index/partial-search.ts';
+import { RECENT_ITEMS_CUT_SHORT } from '../../core/source-index/partial-search.ts';
 import { CONTROL_PATH_SLICE_MS, controlPathHeadroom, ingestionTurn, type ControlPathHeadroom } from '../control-path-headroom.ts';
 import { BACKGROUND_READS, OffThreadReadBusyError, offThreadReadsSupported, openOffThreadSnapshot, READ_POOL_RESCORE_READERS, readInBackground, readOnPool, releaseOffThreadReads, withOffThreadSnapshot, type StoreRead } from './off-thread-reads.ts';
 // The shared connector ingest spine: ONE generic local store that turns any
@@ -4967,24 +4967,8 @@ export class LocalConnectorStore {
    * front start rebuilt it from the ledger (gate 1, ops#151: about 59 s).
    */
   async keepVisibilityCurrentInTurns(): Promise<void> {
-    const admission = this.vectorSearchAdmission;
     await this.tierHiddenItemPksInTurns();
     if (!this.readOnly) await this.publishVisibility();
-    if (admission && admission === this.vectorSearchAdmission && !this.closedForPoolReads) {
-      this.vectorSearchAdmission = undefined;
-      admission.resolve();
-    }
-  }
-
-  private vectorSearchAdmission: ReturnType<typeof Promise.withResolvers<void>> | undefined;
-
-  /** Called by the split front when it mounts this handle. */
-  deferVectorSearchUntilVisibilityBuilt(): void {
-    this.vectorSearchAdmission ??= Promise.withResolvers<void>();
-  }
-
-  get vectorSearchStartup(): Promise<void> | undefined {
-    return this.vectorSearchAdmission?.promise;
   }
 
   private tierLedgerHiddenState: TierVisibilityMemo | undefined;
@@ -14949,7 +14933,6 @@ export class LocalConnectorStore {
    * at the next search.
    */
   vectorLaneServable(modelId: string): boolean {
-    if (this.vectorSearchAdmission) return false;
     if (this.embeddingCurrencyRebuildPending(modelId)) return false;
     const memo = this.vectorLaneMemo?.get(modelId);
     if (memo !== undefined && Date.now() - memo < SEARCH_VECTOR_LANE_MEMO_MS) return true;
@@ -15056,7 +15039,6 @@ export class LocalConnectorStore {
     laneOptions: { locate?: boolean } = {},
   ): Promise<{ rows: ConnectorStoreScoredSearchRow[]; skippedReason?: string }> {
     assertConnectorStoreEmbeddingProvider(this.trustDomain, provider);
-    if (this.vectorSearchAdmission) return { rows: [], skippedReason: SEMANTIC_SEARCH_STARTING };
     sourceAnswerVectorWork();
     const vectorFilters = normalizeConnectorStoreSearchFilters(filters);
     const trimmed = query.trim();
@@ -17935,17 +17917,6 @@ export function createConnectorStoreCorpusAdapter(
   const { store, embeddingProvider } = options;
   const filters = normalizeConnectorStoreSearchFilters(options.filters);
   const semanticRelevanceBar = normalizeSemanticRelevanceBar(options.semanticRelevanceBar);
-  const startupAudit = (): RetrievalLaneAudit => ({
-    laneName: `${store.corpusId}:connector_store_vector`,
-    laneType: 'semantic',
-    candidateCount: 0,
-    returnedCount: 0,
-    skippedReason: SEMANTIC_SEARCH_STARTING,
-    modelId: embeddingProvider!.modelId,
-    backend: VECTOR_BACKEND,
-    localOnly: true,
-    rawExposed: false,
-  });
   const adapter: SourceIndexCorpusSearchAdapter & ((
     request: SourceIndexCorpusSearchRequest,
     stages?: SourceAnswerTraceAdapterStages,
@@ -17961,8 +17932,6 @@ export function createConnectorStoreCorpusAdapter(
     if (embeddingProvider && useHybrid === 'hybrid') {
       if (store.trustDomain === 'secure_local' && !isApprovedSecureSourceEmbeddingProvider(embeddingProvider)) {
         semanticSkippedReason = 'secure_local_embedding_provider_not_local';
-      } else if (store.vectorSearchStartup) {
-        semanticSkippedReason = SEMANTIC_SEARCH_STARTING;
       } else if (!store.vectorLaneServable(embeddingProvider.modelId)) {
         semanticSkippedReason = 'no_embedding_artifacts';
       }
@@ -17979,10 +17948,6 @@ export function createConnectorStoreCorpusAdapter(
       keywordLane = await revalidateKeywordLane(store, keywordLane);
       markStage?.('keyword_revalidation_ms');
       const rows = keywordLane.rows;
-      const startup = semanticSkippedReason === SEMANTIC_SEARCH_STARTING ? [startupAudit()] : [];
-      const keywordSkip = semanticSkippedReason && startup.length === 0
-        ? { skippedReason: semanticSkippedReason, modelId: embeddingProvider!.modelId }
-        : {};
       let recencyCut = false;
       const recencyRows = await chatRecencyLaneRows(store, options.accountScope, filters, request.deadlineAtMs, () => { recencyCut = true; });
       markStage?.('recency_read_ms');
@@ -18001,8 +17966,10 @@ export function createConnectorStoreCorpusAdapter(
           latencyMs: Date.now() - startedAt,
           laneAudits: [{
             ...connectorStoreKeywordLaneAudit(store.corpusId, rows.length, hits.length),
-            ...keywordSkip,
-          }, ...startup, ...(recencyCut ? [connectorStoreRecencyLaneAudit(store.corpusId, 0, true)] : [])],
+            ...(semanticSkippedReason
+              ? { skippedReason: semanticSkippedReason, modelId: embeddingProvider!.modelId }
+              : {}),
+          }, ...(recencyCut ? [connectorStoreRecencyLaneAudit(store.corpusId, 0, true)] : [])],
           matchCount: keywordLane.matchCount,
           rawExposed: false,
         };
@@ -18046,9 +18013,10 @@ export function createConnectorStoreCorpusAdapter(
         laneAudits: [
           {
             ...connectorStoreKeywordLaneAudit(store.corpusId, rows.length, rows.length),
-            ...keywordSkip,
+            ...(semanticSkippedReason
+              ? { skippedReason: semanticSkippedReason, modelId: embeddingProvider!.modelId }
+              : {}),
           },
-          ...startup,
           connectorStoreRecencyLaneAudit(store.corpusId, recencyRows.length),
         ],
         matchCount: keywordLane.matchCount,
@@ -18084,11 +18052,10 @@ export function createConnectorStoreCorpusAdapter(
         backend: embeddingProvider.backend,
       };
     }
-    const deferred = store.vectorSearchStartup !== undefined;
-    const servable = !deferred && store.vectorLaneServable(embeddingProvider.modelId);
+    const servable = store.vectorLaneServable(embeddingProvider.modelId);
     return {
       servable,
-      ...(!servable ? { reason: deferred ? SEMANTIC_SEARCH_STARTING : 'no_current_embedding_artifacts' as const } : {}),
+      ...(!servable ? { reason: 'no_current_embedding_artifacts' as const } : {}),
       modelId: embeddingProvider.modelId,
       embeddingEpoch: embeddingProvider.epochId,
       backend: embeddingProvider.backend,
@@ -18153,11 +18120,10 @@ export function createConnectorStoreCorpusAdapter(
   const metadataMatches = async (request: SourceIndexCorpusSearchRequest): Promise<SourceIndexCorpusSearchResponse> => {
     const startedAt = Date.now();
     const maxResults = Math.max(1, Math.min(Math.floor(request.maxResults), MAX_SEARCH_RESULTS));
-    const wantsHybrid = embeddingProvider !== undefined
+    const hybrid = embeddingProvider !== undefined
       && (options.retrievalMode ?? 'hybrid') === 'hybrid'
-      && (store.trustDomain !== 'secure_local' || isApprovedSecureSourceEmbeddingProvider(embeddingProvider));
-    const deferred = wantsHybrid && store.vectorSearchStartup !== undefined;
-    const hybrid = wantsHybrid && !deferred && store.vectorLaneServable(embeddingProvider.modelId);
+      && (store.trustDomain !== 'secure_local' || isApprovedSecureSourceEmbeddingProvider(embeddingProvider))
+      && store.vectorLaneServable(embeddingProvider.modelId);
     const ftsOptions = { ...(hybrid ? { prefix: false } : {}), locate: false, onPartialRows: partialKeywordRows(store, request) };
     // The words alone: the same keyword lane a hybrid match runs, without the query embedding.
     const meaningLane = hybrid && request.context.lexicalOnly !== true;
@@ -18170,8 +18136,7 @@ export function createConnectorStoreCorpusAdapter(
     // A semantic lane that should have run and did not (query embedding
     // outage, vectors unreadable or of the wrong width, the deadline): what
     // it would have matched is unknown, and the response says so.
-    const starting = deferred && request.context.lexicalOnly !== true;
-    let incomplete = starting;
+    let incomplete = false;
     if (meaningLane) {
       const bar = semanticRelevanceBarFor(embeddingProvider.modelId, semanticRelevanceBar);
       if (bar !== undefined) {
@@ -18205,7 +18170,6 @@ export function createConnectorStoreCorpusAdapter(
         contentMatchedItems: keywordLane.matchCount.contentMatchedItems + semanticOnly,
       },
       ...(incomplete ? { incomplete: true } : {}),
-      ...(starting ? { laneAudits: [startupAudit()] } : {}),
       rawExposed: false,
     };
   };
@@ -18230,7 +18194,6 @@ export function createConnectorStoreCorpusAdapter(
   };
   expanded.hybridAvailability = adapter.hybridAvailability;
   expanded.semanticNeighbours = adapter.semanticNeighbours;
-  expanded.visibilityStartup = () => store.vectorSearchStartup;
   // A local model that is still starting gets the router's preparation budget
   // to finish before the vector lane runs (#1172). Only when this adapter will
   // run the vector lane for the request, and without reading the store: the
@@ -19198,7 +19161,7 @@ export function createConnectorStoreContentProvider(
   let storeHasVectors: boolean | undefined;
   const queryVector = async (query: string | undefined): Promise<readonly number[] | undefined> => {
     const text = query?.trim();
-    if (!embeddingProvider || !text || store.vectorSearchStartup) return undefined;
+    if (!embeddingProvider || !text) return undefined;
     try {
       storeHasVectors ??= store.vectorLaneServable(embeddingProvider.modelId);
       if (!storeHasVectors) return undefined;
