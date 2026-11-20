@@ -1086,8 +1086,16 @@ describe('freshness: the page re-reads the dashboard while it is visible', () =>
     const now = host.win.document.querySelector('textarea') as unknown as HTMLTextAreaElement;
     expect(now).toBe(area);
     expect([now.selectionStart, now.selectionEnd]).toEqual([3, 8]);
-    await advance(10 * MIN);
-    expect(dashboardCalls(host)).toBe(1);
+    await advance(60_000);
+    expect(dashboardCalls(host)).toBe(2);
+    answer(host, pendingCall(host, 'olympus_dashboard'), { structuredContent: {
+      ...data, privacy: { configured: true, ruleCount: 0, pendingCount: 7, pendingCountObservedAt: ago(2 * MIN) },
+    } });
+    await flush();
+    expect(host.text()).toContain('Items waiting for the private model: 7 (as of 2 min ago)');
+    expect((host.win.document.querySelector('textarea') as unknown as HTMLTextAreaElement) === area).toBe(true);
+    expect([area.selectionStart, area.selectionEnd]).toEqual([3, 8]);
+    expect(host.sent.filter(message => message.method === 'tools/call' && message.params.name === CHATGPT_PRIVACY_TOOLS.get)).toHaveLength(1);
   }));
 
   test('any good dashboard ends a failure streak: a host result, and Try again', withFakeTimers(async () => {

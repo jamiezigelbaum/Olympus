@@ -445,6 +445,7 @@ export const V0_4_PUBLIC_PACKAGE_FILES = [
   'dist/litert-helper.js',
   'dist/secret-scan-worker.js',
   'dist/engine-control-worker.js',
+  'dist/held-item-worker.js',
   'dist/model-worker.js',
   'dist/control-ui/index.js',
   'scripts/telegram-pair.py',

@@ -63,6 +63,7 @@ function isBacklog(value: unknown): value is TierClassificationBacklog {
 export function frontJudgeState(snapshot: Snapshot): {
   backlog: () => TierClassificationBacklog | undefined;
   overPrivate: () => TierOverPrivateStatus;
+  waitingReason: () => 'model_not_answering' | 'cloud_stopped' | 'failed' | undefined;
   busy: () => boolean;
   archivePrivateModel: () => ArchivePrivateModelState;
 } {
@@ -72,6 +73,10 @@ export function frontJudgeState(snapshot: Snapshot): {
       return isBacklog(backlog) ? backlog : undefined;
     },
     overPrivate: () => current(snapshot)?.snapshot.judge.over_private ?? { state: 'counting' },
+    waitingReason: () => {
+      const reason = current(snapshot)?.snapshot.judge.waiting_reason;
+      return reason === 'model_not_answering' || reason === 'cloud_stopped' || reason === 'failed' ? reason : undefined;
+    },
     busy: () => current(snapshot)?.snapshot.judge.busy === true,
     archivePrivateModel: () => (current(snapshot)?.snapshot.judge.archive_private_model as ArchivePrivateModelState | undefined) ?? 'waiting',
   };

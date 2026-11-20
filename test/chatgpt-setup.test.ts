@@ -367,11 +367,11 @@ function fakeBackend(state: FakeBackendState): ChatGptSetupBackend {
     },
     secretLocations() { return SECRET_RULES; },
     privacySettings() {
-      return readChatGptPrivacySettings(state.privacyEnv ?? {}, state.pendingCount ?? 0);
+      return readChatGptPrivacySettings(state.privacyEnv ?? {}, { pendingCount: state.pendingCount ?? 0 });
     },
     savePrivacy(update) {
       writePrivacyProfile(update as Parameters<typeof writePrivacyProfile>[0], { env: state.privacyEnv ?? {} });
-      return readChatGptPrivacySettings(state.privacyEnv ?? {}, state.pendingCount ?? 0);
+      return readChatGptPrivacySettings(state.privacyEnv ?? {}, { pendingCount: state.pendingCount ?? 0 });
     },
     retryModel(model) {
       if (!(state.builtInModels ?? []).includes(model)) return false;

@@ -29,8 +29,8 @@ export function tierStoreDataRoot(storeDbPath: string): string {
 export const tierLedgerIsWithin = pathResolvesWithin;
 
 /** Read the binding without opening a store writable or running migrations. */
-export function readTierSetBinding(storeDbPath: string): TierSetBindingRecord | undefined {
-  const cursor = readStoreBindingCursor(storeDbPath, 'tiered-store-set-binding', 'tiered_store_set_binding');
+export function readTierSetBinding(storeDbPath: string, requireReadable = false): TierSetBindingRecord | undefined {
+  const cursor = readStoreBindingCursor(storeDbPath, 'tiered-store-set-binding', 'tiered_store_set_binding', requireReadable);
   if (!cursor) return undefined;
   const binding = JSON.parse(cursor) as TierSetBindingRecord;
   if (typeof binding.ledgerId !== 'string' || typeof binding.ledgerPath !== 'string') throw new Error('Invalid privacy ledger binding.');

@@ -76,7 +76,7 @@ export interface ChatGptPrivacyKit {
   fullscreen(): void;
   /** The dashboard view model, to know which sources are connected. */
   data(): Any;
-  heldWords(info: Any): string;
+  heldWords(info: Any): { text: string; stop?: string };
   judgeAction(info: Any): HTMLElement | null;
   /** The folder picker, for Add a folder (pick mode). */
   picker: ChatGptPicker | null;
@@ -91,6 +91,8 @@ export interface ChatGptPrivacy {
   start(returnKey: string): void;
   active(): boolean;
   view(): HTMLElement;
+  updateHeld(info: Any): void;
+  tickHeld(): void;
 }
 
 /**
@@ -185,13 +187,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     s.description = typeof data.description === 'string' ? data.description : '';
     s.savedDescription = s.description;
     s.revision = typeof data.revision === 'string' ? data.revision : '';
-    s.held = {
-      pendingCount: data.pendingCount,
-      pendingCountObservedAt: data.pendingCountObservedAt,
-      judgeStopped: data.judgeStopped,
-      judgeStoppedAt: data.judgeStoppedAt,
-      judgeModelHref: data.judgeModelHref,
-    };
+    s.held = data;
     s.answerChoice = data.privateAnswerChoice && data.privateAnswerChoice.pending === true && Array.isArray(data.privateAnswerChoice.options) ? data.privateAnswerChoice
       : data.privateAnswerMode && Array.isArray(data.privateAnswerMode.options) ? data.privateAnswerMode : null;
     if (s.answerChoice && typeof s.answerChoice.id === 'string') s.answerMode = s.answerChoice.id;
@@ -832,9 +828,33 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     return section;
   }
 
-  function heldLine(): HTMLElement | null {
-    return s.held ? add(el('div', 'fsection'),
-      el('p', 'muted', kit.heldWords(s.held)), kit.judgeAction(s.held)) : null;
+  let heldText: HTMLElement | undefined;
+  let heldStop: HTMLElement | undefined;
+  let drawnStop = '';
+  function tickHeld(): void {
+    if (!s || !heldText || !heldStop) return;
+    const info = s.held ?? kit.data()?.privacy ?? {};
+    const words = kit.heldWords(info);
+    if (heldText.textContent !== words.text) heldText.textContent = words.text;
+    const stop = words.stop ? JSON.stringify([words.stop, info.judgeModelHref]) : '';
+    if (stop === drawnStop) return;
+    drawnStop = stop;
+    heldStop.textContent = '';
+    if (words.stop) add(heldStop, el('p', 'muted', words.stop), kit.judgeAction(info));
+  }
+
+  function heldLine(): HTMLElement {
+    heldText = el('p', 'muted');
+    heldStop = el('div', 'actions');
+    drawnStop = '';
+    tickHeld();
+    return add(el('div', 'fsection'), heldText, heldStop);
+  }
+
+  function updateHeld(info: Any): void {
+    if (!s) return;
+    s.held = info;
+    tickHeld();
   }
 
   function mainView(page: HTMLElement): void {
@@ -859,7 +879,6 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       }
       return;
     }
-    add(page, heldLine());
     if (s.answerChoice && !s.answerChoice.pending) {
       add(page, add(el('section', 'fsection'), el('h2', '', 'Private-answer mode'), el('p', '', s.answerChoice.label || 'Custom Private-answer mode'), kit.button('Change', 'privacy:answer:change', () => { s.screen = 'answers'; kit.render('privacy:answer:' + s.answerMode); }, 'plain')));
     }
@@ -1249,12 +1268,10 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
         }, 'plain')));
       add(page, confirm);
     }
-    if (s.screen === 'answers') {
-      answersView(page);
-      if (s.answerChoice?.pending) add(page, heldLine());
-    }
+    if (s.screen === 'answers') answersView(page);
     else if (s.screen !== 'main') sheetView(page);
     else mainView(page);
+    add(page, heldLine());
     return page;
   }
 
@@ -1292,6 +1309,8 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
   return {
     handles,
     start,
+    updateHeld,
+    tickHeld,
     active: () => !!s,
     view,
   };

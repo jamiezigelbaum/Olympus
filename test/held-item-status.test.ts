@@ -1,387 +1,334 @@
 import { afterEach, expect, spyOn, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import * as fs from 'node:fs';
-import { copyFileSync, mkdirSync, mkdtempSync, renameSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { BOOT_PROGRESS_SCHEMA } from '../src/core/boot-progress.ts';
-import { frontLoopSqlHealth, resetFrontLoopSqlGuardForTests, watchFrontLoopSql } from '../src/core/front-loop-sql-guard.ts';
-import { sourceRegistryPath } from '../src/core/source-registry.ts';
 import { sharedDataPath } from '../src/core/olympus-layout.ts';
+import { sourceRegistryPath } from '../src/core/source-registry.ts';
 import { buildChatGptDashboardViewModel } from '../src/workers/chatgpt/dashboard-view-model.ts';
 import { createChatGptHandoffs } from '../src/workers/chatgpt/handoff.ts';
 import { copyDashboardViewModel, privacyToolResult } from '../src/workers/chatgpt/response-builder.ts';
-import { createChatGptSetupBackend, readChatGptPrivacySettings } from '../src/workers/chatgpt/setup-backend.ts';
-import { installMainThreadSqlTrace } from '../src/workers/connector-store/main-thread-sql-trace.ts';
-import type { SourceDashboardViewModel } from '../src/workers/source-dashboard.ts';
-import { heldCountFileIdentity, TierLedger } from '../src/workers/classification/tier-ledger.ts';
+import { createChatGptSetupBackend } from '../src/workers/chatgpt/setup-backend.ts';
+import { BUILT_IN_SNIFFER_LANE } from '../src/workers/classification/built-in-sniffer.ts';
+import { InstalledTierClassification } from '../src/workers/classification/installed-tier-classification.ts';
+import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
+import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
+import { tierLedgerPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
 import { createEngineFront, engineStatusSnapshotPath } from '../src/workers/engine-split/runtime.ts';
-import { ENGINE_STATUS_SNAPSHOT_SCHEMA, engineStatusAge, readEngineStatusSnapshot, writeEngineStatusSnapshot, type EngineStatusSnapshot } from '../src/workers/engine-split/snapshot.ts';
-import { gmailItemAccountScope } from '../src/workers/google-connectors/gmail-archive-target.ts';
-import { selectCredentialHandle, sourceIndexLaneAccountDecision, SOURCE_REGISTRY_LANE_DECISION } from '../src/workers/engine/runtime/source-lanes.ts';
-import { frontHeldItems, heldCountPlan, heldGoogleAccount, heldSourceMountsComplete, measureHeldItems, startHeldItemStatus, type HeldCountPlan } from '../src/workers/engine/held-item-status.ts';
+import { ENGINE_STATUS_SNAPSHOT_SCHEMA, readEngineStatusSnapshot, writeEngineStatusSnapshot, type EngineStatusSnapshot } from '../src/workers/engine-split/snapshot.ts';
+import { countHeldItems } from '../src/workers/engine/held-item-count.ts';
+import { measureHeldItems, startHeldItemStatus, type HeldInventory, type HeldSample } from '../src/workers/engine/held-item-status.ts';
 import { STATUS_RECOUNT_MIN_GAP_MS } from '../src/workers/engine/status-recount.ts';
-import { createTestClock, flushMicrotasks, waitFor } from './helpers/test-clock.ts';
+import { sourceIndexLaneAccountDecision, SOURCE_REGISTRY_LANE_DECISION } from '../src/workers/engine/runtime/source-lanes.ts';
+import type { SourceDashboardViewModel } from '../src/workers/source-dashboard.ts';
+import { seedHeldLedger } from './helpers/held-item-fixture.ts';
+import { createTestClock, flushMicrotasks } from './helpers/test-clock.ts';
 
 const cleanup: Array<() => void> = [];
 afterEach(() => { for (const close of cleanup.splice(0).reverse()) close(); });
-function scratch(): string {
-  const root = mkdtempSync(join(tmpdir(), 'olympus-held-test-'));
-  cleanup.push(() => rmSync(root, { recursive: true, force: true }));
+function scratch() {
+  const root = fs.mkdtempSync('/tmp/olympus-held-test-');
+  cleanup.push(() => fs.rmSync(root, { recursive: true, force: true }));
   return root;
 }
-function snapshot(at: string): EngineStatusSnapshot {
-  return {
-    schema: ENGINE_STATUS_SNAPSHOT_SCHEMA, instance_id: 'fixture', written_at: at,
-    scheduler: null, judge: { backlog: null, pending: null, spending: null }, captures: null,
-  };
+function environment(root: string) {
+  const env = { HOME: root, XDG_DATA_HOME: join(root, 'data'), OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH: join(root, 'handles.json') };
+  for (const [key, value] of Object.entries(env)) {
+    const before = process.env[key];
+    cleanup.push(() => { if (before === undefined) delete process.env[key]; else process.env[key] = before; });
+    process.env[key] = value;
+  }
+  return env;
 }
-function clockPlan(selection: string): HeldCountPlan {
-  return {
-    scope: { view: selection, generation: selection }, jobs: [], ledgers: [], files: new Map(),
-    cursors: () => '[]', mountsCurrent: () => true, current: () => true,
-  };
+const emptyInventory = (): HeldInventory => ({ stores: [], pending: [], mountProblems: [], gmailStores: [] });
+const date = '2026-11-18T00:16:00.000Z';
+const observed = (count: number, observed_at: string, counted_scope: HeldSample['observation']['counted_scope'] = []): HeldSample =>
+  ({ observation: { count, observed_at, counted_scope }, groups: [] });
+const measure = (inventory: HeldInventory, previous?: HeldSample) => measureHeldItems(
+  { inventory, observed_at: date, ...(previous ? { previous } : {}) }, new AbortController().signal, () => {},
+);
+function snapshot(at: string): EngineStatusSnapshot {
+  return { schema: ENGINE_STATUS_SNAPSHOT_SCHEMA, instance_id: 'fixture', written_at: at,
+    scheduler: null, judge: { backlog: null, pending: null, spending: null }, captures: null };
+}
+function storeAt(path: string) {
+  const db = new Database(path);
+  db.exec('CREATE TABLE items (provider TEXT, account_scope TEXT); CREATE TABLE sync_runs (sync_run_id TEXT, connector_id TEXT, cursor TEXT)');
+  cleanup.push(() => db.close());
+  return db;
 }
 
-test('held items are absent until one complete pass and keep their own age across heartbeats', async () => {
+test('the same Gmail handle counts its single retained account across both corpora once and Dropbox excludes its ingestion fallback', async () => {
+  const root = scratch();
+  const env = environment(root);
+  fs.writeFileSync(env.OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH, JSON.stringify({
+    version: 1, handles: [{ handle: 'gmail.work.delegated', provider: 'gmail', connectedAt: date,
+      accountRole: 'work', allowedCapabilities: ['gmail.email.sync'] }],
+  }));
+  const path = join(root, 'count.sqlite');
+  const ledger = seedHeldLedger(path, ['gmail.a', 'gmail.b', 'dropbox'], ['first', 'second', 'fallback', 'work']);
+  cleanup.push(() => ledger.close());
+  // The retained second account has already left the backlog.
+  const db = new Database(path);
+  db.exec("UPDATE tier_items SET metadata_pending = 0 WHERE account_scope = 'second'");
+  db.close();
+
+  const inventory = emptyInventory();
+  const gmail = { credential: { provider: 'gmail', capability: 'gmail.email.sync', pin: 'UNUSED' }, gmail: true } as const;
+  const a = join(root, 'a.sqlite');
+  const b = join(root, 'b.sqlite');
+  const mailA = storeAt(a);
+  const mailB = storeAt(b);
+  inventory.gmailStores = [a, b];
+  inventory.stores.push(
+    { corpusId: 'gmail.a', sourceId: 'gmail.email', dbPath: a, ledgerPath: path, read: gmail },
+    { corpusId: 'gmail.b', sourceId: 'gmail.email', dbPath: b, ledgerPath: path, read: gmail },
+    { corpusId: 'dropbox', sourceId: 'dropbox.files', dbPath: join(root, 'dropbox.sqlite'), ledgerPath: path,
+      read: { credential: { provider: 'dropbox', capability: 'dropbox.files.sync', pin: 'UNUSED' } } },
+  );
+  storeAt(inventory.stores[2]!.dbPath);
+  const fallback = process.env.OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_ACCOUNT;
+  cleanup.push(() => { if (fallback === undefined) delete process.env.OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_ACCOUNT; else process.env.OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_ACCOUNT = fallback; });
+  process.env.OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_ACCOUNT = 'fallback';
+  mailA.exec("INSERT INTO items VALUES ('gmail', 'first')");
+  const first = await measure(inventory);
+  expect(first?.observation).toEqual(observed(1, date, ['gmail.a', 'gmail.b'].map(corpusId => ({ corpusId, accountScope: 'first' }))).observation);
+  mailA.exec('DELETE FROM items');
+  mailB.exec("INSERT INTO items VALUES ('gmail', 'second')");
+  expect((await measure(inventory, first))?.observation)
+    .toEqual(observed(0, date, ['gmail.a', 'gmail.b'].map(corpusId => ({ corpusId, accountScope: 'second' }))).observation);
+  mailA.exec("INSERT INTO items VALUES ('gmail', 'first')");
+  expect((await measure(inventory))?.observation)
+    .toEqual(observed(1, date, ['gmail.a', 'gmail.b'].map(corpusId => ({ corpusId, accountScope: 'work' }))).observation);
+});
+
+test('legacy contributes zero, a missing bound ledger makes the whole sample absent, and recovery measures the same corpus', async () => {
+  const root = scratch();
+  environment(root);
+  const inventory = emptyInventory();
+  expect((await measure(inventory))?.observation).toEqual(observed(0, date).observation);
+  const dbPath = join(root, 'store.sqlite');
+  const db = storeAt(dbPath);
+  const corpus = { corpusId: 'fixture.corpus', accountScope: null };
+  inventory.stores.push({ corpusId: corpus.corpusId, sourceId: 'fixture', dbPath, read: { accountScope: null } });
+  const legacy = await measure(inventory);
+  expect(legacy?.observation).toEqual(observed(0, date).observation);
+  const fallbackPath = tierLedgerPathForStore(dbPath);
+  const ledger = seedHeldLedger(fallbackPath, [corpus.corpusId], ['personal']);
+  cleanup.push(() => ledger.close());
+  expect((await measure(inventory, legacy))?.observation).toEqual(observed(1, date, [corpus]).observation);
+  const future = join(root, 'future.sqlite');
+  db.query('INSERT INTO sync_runs VALUES (?, ?, ?)').run('tiered-store-set-binding', 'tiered_store_set_binding',
+    JSON.stringify({ ledgerPath: future, ledgerId: ledger.ledgerId() }));
+  expect(await measure(inventory)).toBeUndefined();
+  ledger.close();
+  fs.renameSync(fallbackPath, future);
+  expect((await measure(inventory))?.observation).toEqual(observed(1, date, [corpus]).observation);
+});
+
+test('an unreadable registry cannot look like a positively empty disabled inventory', async () => {
+  const env = environment(scratch());
+  const path = sourceRegistryPath(env);
+  fs.mkdirSync(dirname(path), { recursive: true });
+  fs.writeFileSync(path, 'unreadable');
+  const lane = sourceIndexLaneAccountDecision({ enabled: true, envName: 'fixture', decidedBy: 'fixture' },
+    { sourceId: 'local.files' }, env, () => {});
+  expect(lane).toMatchObject({ enabled: false, decidedBy: SOURCE_REGISTRY_LANE_DECISION });
+  expect(await measure(emptyInventory())).toBeUndefined();
+  fs.rmSync(path);
+  expect(await measure({ ...emptyInventory(), pending: [{ id: 'local.files', stores: [], mountBlocked: true }] })).toBeUndefined();
+  expect((await measure(emptyInventory()))?.observation).toEqual(observed(0, date).observation);
+});
+
+test('a delayed count keeps the original date and remains the only job while heartbeats continue', async () => {
   const clock = createTestClock();
   const started = clock.date().toISOString();
-  const pending = Promise.withResolvers<number>();
-  const plan = clockPlan('first');
-  const measure = startHeldItemStatus({ plan: () => plan, holds: () => false, now: clock.now, sleep: clock.sleep, measure: () => pending.promise });
-  cleanup.push(measure.stop);
+  const pending = Promise.withResolvers<HeldSample>();
   const path = join(scratch(), 'status.json');
-  expect(measure.observation()).toBeUndefined();
-  expect(frontHeldItems(engineStatusAge(snapshot(started), clock.now()), plan.scope)).toBeUndefined();
-
-  await clock.advance(91_000);
-  expect(measure.observation()).toBeUndefined();
-  pending.resolve(0);
-  await flushMicrotasks();
-  const held = measure.observation()!;
-  expect(held).toMatchObject({ count: 0, observed_at: started });
-
-  writeEngineStatusSnapshot(path, { ...snapshot(clock.date().toISOString()), heartbeat: 'mtime', held_items: held });
-  for (let beat = 0; beat < 3; beat++) {
-    await clock.advance(3_000);
-    utimesSync(path, clock.date(), clock.date());
-    const read = readEngineStatusSnapshot(path, clock.now);
-    expect(read?.age_ms).toBe(0);
-    expect(frontHeldItems(read, plan.scope)).toEqual({ pendingCount: 0, pendingCountObservedAt: started });
-  }
-  const stale = readEngineStatusSnapshot(path, () => clock.now() + 31_000);
-  expect(frontHeldItems(stale, plan.scope)).toBeUndefined();
-});
-
-test('a changed scope drops late work, and a failed start admits the next paced pass', async () => {
-  const clock = createTestClock();
-  const slow = Promise.withResolvers<number>();
-  let plan = clockPlan('old');
   let calls = 0;
-  const measurement = startHeldItemStatus({
-    plan: () => plan, holds: () => false, now: clock.now, sleep: clock.sleep,
-    measure: () => {
-      calls += 1;
-      if (calls === 1) return slow.promise;
-      if (calls === 2) throw new Error('worker did not start');
-      return Promise.resolve(7);
+  let signal!: AbortSignal;
+  const job = startHeldItemStatus({ inventory: emptyInventory, holds: () => false, now: clock.now, sleep: clock.sleep,
+    measure: (pass, running) => {
+      calls++; signal = running;
+      expect(pass.observed_at).toBe(started);
+      return pending.promise;
     },
   });
-  cleanup.push(measurement.stop);
-  plan = clockPlan('new');
-  slow.resolve(88);
+  cleanup.push(job.stop);
+  for (let beat = 0; beat < 31; beat++) {
+    await clock.advance(3_000);
+    job.soon();
+    writeEngineStatusSnapshot(path, { ...snapshot(clock.date().toISOString()), heartbeat: 'mtime' });
+    fs.utimesSync(path, clock.date(), clock.date());
+    expect(readEngineStatusSnapshot(path, clock.now)?.snapshot.held_items).toBeUndefined();
+    expect(job.observation()).toBeUndefined();
+  }
+  expect(calls).toBe(1);
+  expect(signal.aborted).toBe(false);
+  pending.resolve(observed(0, started));
   await flushMicrotasks();
-  expect(measurement.observation()).toBeUndefined();
-  await clock.advance(STATUS_RECOUNT_MIN_GAP_MS);
-  expect(calls).toBe(2);
-  expect(measurement.observation()).toBeUndefined();
-  await clock.advance(STATUS_RECOUNT_MIN_GAP_MS);
-  expect(measurement.observation()).toMatchObject({ count: 7, scope: plan.scope, observed_at: clock.date().toISOString() });
-  expect(frontHeldItems(engineStatusAge({ ...snapshot(clock.date().toISOString()), held_items: measurement.observation()! }, clock.now()),
-    clockPlan('old').scope)).toBeUndefined();
+  const held = job.observation()!;
+  expect(held).toEqual(observed(0, started).observation);
+  writeEngineStatusSnapshot(path, { ...snapshot(clock.date().toISOString()), heartbeat: 'mtime', held_items: held });
+  await clock.advance(3_000);
+  fs.utimesSync(path, clock.date(), clock.date());
+  expect(readEngineStatusSnapshot(path, clock.now)).toMatchObject({ age_ms: 0, snapshot: { held_items: held } });
 });
 
-test('the counting handle deduplicates corpora, enforces the selected account and rejects a failed ledger', async () => {
-  const root = scratch();
-  const dbPath = join(root, 'held.sqlite');
-  // A minimal ledger image keeps this read-path test independent of disk fsync
-  // during migrations. The split boot fixture also uses the full schema.
-  const db = new Database(':memory:');
-  try {
-    db.exec(`
-      CREATE TABLE tier_ledger_meta (key TEXT, value TEXT);
-      INSERT INTO tier_ledger_meta VALUES ('ledger_id', 'fixture');
-      CREATE TABLE tier_items (provider TEXT, account_scope TEXT, conversation_key TEXT, provider_item_id TEXT,
-        state TEXT, metadata_pending INTEGER, content_pending INTEGER, content_read INTEGER);
-      CREATE TABLE tier_copies (provider TEXT, account_scope TEXT, conversation_key TEXT, provider_item_id TEXT, corpus_id TEXT);
-      INSERT INTO tier_items VALUES ('source', 'selected', '', 'item', 'moving', 0, 1, 1),
-        ('source', 'other', '', 'item', 'pending', 1, 0, 0), ('source', 'selected', '', 'unread', 'pending', 0, 1, 0);
-      INSERT INTO tier_copies VALUES ('source', 'selected', '', 'item', 'secure'), ('source', 'selected', '', 'item', 'internal'),
-        ('source', 'other', '', 'item', 'secure'), ('source', 'selected', '', 'unread', 'secure');
-    `);
-    writeFileSync(dbPath, db.serialize());
-  } finally {
-    db.close();
-  }
-
-  const ledger = {
-    dbPath, statusMount: { file: heldCountFileIdentity(dbPath)!, ledgerId: 'fixture', generation: 'first mount' },
-    onClose: () => () => {}, visibilityChangesSince: () => ({ cursor: 1 }),
-  };
-  const corpus = (corpusId: string) => ({
-    corpusId, file: null, generation: null, accountScope: 'selected', current: () => true, mounted: () => true,
-  });
-  const lanes = [{ ledger, corpusIds: new Set(['secure']) }, { ledger: { ...ledger }, corpusIds: new Set(['internal', 'secure']) }];
-  const plan = heldCountPlan(lanes, corpus, 'selection')!;
-  expect(plan.jobs).toHaveLength(1);
-  expect(plan.jobs[0]?.ledgerId).toBe('fixture');
-  expect(await measureHeldItems(plan)).toBe(1);
-  // The import wrote `selected` before the account connected as `work`.
-  const handle = { handle: 'gmail:account', accountRole: 'work' };
-  const retained = heldGoogleAccount(handle, choice => gmailItemAccountScope(
-    [{ itemAccountScopes: () => ['selected'] }], choice.accountRole!));
-  expect(retained).toBe('selected');
-  const planForScope = (accountScope: string) => heldCountPlan(lanes, id => ({ ...corpus(id), accountScope }), 'selection')!;
-  expect(await measureHeldItems(planForScope(heldGoogleAccount(handle)!))).toBe(0);
-  expect(await measureHeldItems(planForScope(retained!))).toBe(1);
-  // With no eligible handle there is no account predicate we can attest.
-  const choice = selectCredentialHandle([], { provider: 'google_drive', capability: 'google_drive.docs.sync' });
-  const missing = heldGoogleAccount(choice.handle);
-  expect(missing).toBeUndefined();
-  expect(heldCountPlan(lanes, id => missing === undefined ? undefined : { ...corpus(id), accountScope: missing }, 'selection'))
-    .toBeUndefined();
-  const missingPath = join(root, 'missing.sqlite');
-  const failedPlan = {
-    ...plan, jobs: [...plan.jobs, { ...plan.jobs[0]!, path: missingPath }],
-  };
-  expect(heldCountPlan([{ ledger: { ...ledger, dbPath: missingPath }, corpusIds: new Set(['unreadable']) }], corpus, 'selection')).toBeUndefined();
-  const logs: string[] = [];
-  const measurement = startHeldItemStatus({ plan: () => failedPlan, holds: () => false, log: line => logs.push(line) });
-  cleanup.push(measurement.stop);
-  await waitFor(() => logs.some(line => line.includes('status recount failed')));
-  expect(measurement.observation()).toBeUndefined();
-  renameSync(dbPath, join(root, 'removed.sqlite'));
-  // A restored copy has the same ledger ID and a different file generation.
-  copyFileSync(join(root, 'removed.sqlite'), dbPath);
-  expect(heldCountPlan(lanes, corpus, 'selection')).toBeUndefined();
-});
-
-test('a fresh heartbeat from an earlier background boot supplies no held count', async () => {
-  const root = scratch();
-  const env = { HOME: root, XDG_DATA_HOME: join(root, 'data') };
+test('an invalidated scope discards late work, and failure can recover on the next paced pass', async () => {
   const clock = createTestClock();
-  const observed_at = clock.date().toISOString();
-  const plan = clockPlan('scope');
-  const path = engineStatusSnapshotPath(env);
-  mkdirSync(dirname(path), { recursive: true });
-  const held_items = { count: 17, observed_at, writer_pid: process.pid, scope: plan.scope };
-  await clock.advance(2_000);
-  const boot = sharedDataPath('boot-progress', env);
-  mkdirSync(dirname(boot), { recursive: true });
-  writeFileSync(boot, JSON.stringify({
-    schema: BOOT_PROGRESS_SCHEMA, phase: 'done', pid: process.pid,
-    startedAt: clock.date().toISOString(), updatedAt: clock.date().toISOString(),
-  }));
-  writeEngineStatusSnapshot(path, { ...snapshot(clock.date().toISOString()), held_items });
-  const front = createEngineFront({ env, socketPath: join(root, 'unused.sock'), authToken: 'fixture', now: clock.now, heldView: () => ({ scope: plan.scope }) });
-  cleanup.push(front.stop);
-  await front.refreshStatus();
-  expect(front.status()?.stale).toBe(false);
-  expect(front.heldItems()).toBeUndefined();
-});
-
-function emptyView(): SourceDashboardViewModel {
-  return { kind: 'source_dashboard', generated_at: '2026-11-18T00:00:00.000Z', sources: [] } as unknown as SourceDashboardViewModel;
-}
-
-test('a stopped judge still needs the owner when the count is unknown or its zero is older', () => {
-  const stopped = { configured: true, ruleCount: 0, judgeStopped: 'failed', judgeStoppedAt: '2026-11-18T00:01:00.000Z' } as const;
-  const unknown = copyDashboardViewModel(buildChatGptDashboardViewModel(emptyView(), { privacy: stopped }));
-  expect(unknown.privacy).toEqual({ configured: true, ruleCount: 0, judgeStopped: 'failed', judgeStoppedAt: stopped.judgeStoppedAt });
-  expect(unknown.needsYou.find(item => item.id === 'privacy:judge_stopped')?.sentence)
-    .toContain('not known while judging is stopped (its last pass failed)');
-  expect(unknown.needsYou.find(item => item.id === 'privacy:judge_stopped')?.fix.label).toBe('Check the private model');
-
-  const older = { pendingCount: 0, pendingCountObservedAt: '2026-11-18T00:00:00.000Z' };
-  const newer = { pendingCount: 0, pendingCountObservedAt: '2026-11-18T00:02:00.000Z' };
-  const olderZero = copyDashboardViewModel(buildChatGptDashboardViewModel(emptyView(), {
-    now: new Date('2026-11-18T00:03:00.000Z'), privacy: { ...stopped, ...older },
-  }));
-  expect(olderZero.privacy).toMatchObject(older);
-  expect(olderZero.needsYou.find(item => item.id === 'privacy:judge_stopped')?.sentence)
-    .toBe('0 items are waiting (as of 3 min ago) because the privacy check stopped: its last pass failed');
-  const newerZero = buildChatGptDashboardViewModel(emptyView(), { privacy: { ...stopped, ...newer } });
-  expect(newerZero.needsYou.some(item => item.id === 'privacy:judge_stopped')).toBe(false);
-});
-
-
-test('requests read an already bound count without filesystem or SQL work for the count', async () => {
-  const root = scratch();
-  const env = { HOME: root, XDG_DATA_HOME: join(root, 'data'), XDG_CONFIG_HOME: join(root, 'config') };
-  const path = engineStatusSnapshotPath(env);
-  mkdirSync(dirname(path), { recursive: true });
-  const plan = clockPlan('selected');
-  let view: { scope: HeldCountPlan['scope']; changedAt?: number } = { scope: plan.scope };
-  let alive = true;
-  const now = Date.now();
-  const observed = new Date(now - 180_000).toISOString();
-  const current = snapshot(new Date(now).toISOString());
-  const boot = sharedDataPath('boot-progress', env);
-  writeFileSync(boot, JSON.stringify({
-    schema: BOOT_PROGRESS_SCHEMA, phase: 'done', pid: process.pid, instanceId: current.instance_id,
-    startedAt: observed, updatedAt: observed,
-  }));
-  let time = now;
-  const front = createEngineFront({
-    env, socketPath: join(root, 'unused.sock'), authToken: 'fixture', now: () => time,
-    heldView: () => view, alive: () => alive,
-  });
-  cleanup.push(front.stop);
-  const backend = createChatGptSetupBackend({
-    env,
-    heldItemCount: front.heldItems,
-    workerFetch: async () => new Response(),
-    handoffs: createChatGptHandoffs(),
-    publicUrls: () => undefined,
-    sovereignty: { source: 'inline_config', config: { schemaVersion: 1, modelProfiles: {}, routes: {}, retrieval: { trustDomains: {} } } },
-    credentialPresent: () => false,
-    requestReload: () => false,
-  });
-  const unknown = privacyToolResult(backend.privacySettings(), 'current');
-  expect(unknown.structuredContent?.pendingCount).toBeUndefined();
-  expect(unknown.content[0]?.text).toContain('counting.');
-  current.held_items = { count: 0, observed_at: observed, writer_pid: process.pid, scope: plan.scope };
-  writeEngineStatusSnapshot(path, current);
-  await front.refreshStatus();
-
-  // Profile settings have their own file read; isolate the count read in the
-  // two request paths and verify the cached observation does no fs work.
-  const count = () => {
-    const stats = spyOn(fs, 'statSync');
-    const exists = spyOn(fs, 'existsSync');
-    const reads = spyOn(fs, 'readFileSync');
-    const opens = spyOn(fs, 'openSync');
-    try {
-      const value = front.heldItems();
-      for (const spy of [stats, exists, reads, opens]) expect(spy).not.toHaveBeenCalled();
-      return value;
-    } finally {
-      for (const spy of [stats, exists, reads, opens]) spy.mockRestore();
-    }
-  };
-  installMainThreadSqlTrace();
-  watchFrontLoopSql({ mode: 'record' });
-  try {
-    const expected = { pendingCount: 0, pendingCountObservedAt: observed };
-    expect(readChatGptPrivacySettings(env, count())).toMatchObject(expected);
-    const result = privacyToolResult(backend.privacySettings(), 'current');
-    expect(result.structuredContent).toMatchObject(expected);
-    expect(result.content[0]?.text).toContain('0 items wait for the privacy check on the computer (as of 3 min ago).');
-    expect(frontLoopSqlHealth()?.statements).toBe(0);
-
-    // A local reopen of the same file cannot keep the cached binding.
-    time += 2_000;
-    view = { scope: { ...view.scope, generation: 'reopened' }, changedAt: time };
-    expect(count()).toBeUndefined();
-    await front.refreshStatus();
-    expect(count()).toBeUndefined();
-    time += 2_000;
-    writeEngineStatusSnapshot(path, { ...current, state_at: new Date(time).toISOString() });
-    await front.refreshStatus();
-    expect(count()).toEqual(expected);
-    // The previous instance just died, before the poll can read a new snapshot.
-    alive = false;
-    expect(front.status()?.snapshot.held_items).toBeUndefined();
-    expect(count()).toBeUndefined();
-  } finally {
-    resetFrontLoopSqlGuardForTests();
-  }
-});
-
-test('a lane disabled by an unreadable registry still makes a repaired inventory incomplete', () => {
-  const env = { HOME: scratch() };
-  const path = sourceRegistryPath(env);
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, 'unreadable');
-  const decision = sourceIndexLaneAccountDecision({ enabled: true, envName: 'fixture', decidedBy: 'fixture' },
-    { sourceId: 'local.files' }, env, () => {});
-  expect(decision).toMatchObject({ enabled: false, decidedBy: SOURCE_REGISTRY_LANE_DECISION });
-  rmSync(path);
-  const lanes = [{ id: 'local.files', ...decision, mountBlocked: decision.decidedBy === SOURCE_REGISTRY_LANE_DECISION }];
-  const complete = heldSourceMountsComplete(lanes, new Set(), () => true, () => true);
-  expect(complete).toBe(false);
-  expect(heldCountPlan([], () => undefined, 'selection', complete)).toBeUndefined();
-  expect(heldCountPlan([], () => undefined, 'selection', true)?.jobs).toEqual([]);
-});
-
-test('an unchanged visibility cursor keeps the original observation without a second COUNT', async () => {
-  const clock = createTestClock();
-  const plan = clockPlan('scope');
-  let cursor = 4;
-  plan.cursors = () => String(cursor);
+  const slow = Promise.withResolvers<HeldSample>();
+  const inventory = emptyInventory();
   let calls = 0;
-  const job = startHeldItemStatus({
-    plan: () => plan, holds: () => false, now: clock.now, sleep: clock.sleep,
-    measure: async () => ++calls,
+  const job = startHeldItemStatus({ inventory: () => inventory, holds: () => false, now: clock.now, sleep: clock.sleep,
+    measure: async (pass) => {
+      calls++;
+      if (calls === 1) return slow.promise;
+      if (calls === 2) throw new Error('fixture worker failure');
+      expect(pass.inventory.stores[0]?.read).toEqual({ accountScope: 'new' });
+      return observed(7, pass.observed_at);
+    },
   });
   cleanup.push(job.stop);
+  inventory.stores.push({ corpusId: 'fixture', sourceId: 'fixture', dbPath: 'fixture', read: { accountScope: 'new' } });
+  job.invalidate();
+  slow.resolve(observed(9, date));
   await flushMicrotasks();
-  const first = job.observation();
-  expect(first?.count).toBe(1);
+  expect(job.observation()).toBeUndefined();
   await clock.advance(STATUS_RECOUNT_MIN_GAP_MS);
-  expect(calls).toBe(1);
-  expect(job.observation()).toBe(first);
-  cursor++;
-  job.check();
-  await flushMicrotasks();
-  expect(calls).toBe(2);
-  expect(job.observation()).toMatchObject({ count: 2, observed_at: clock.date().toISOString() });
+  expect(calls).toBe(3);
+  expect(job.observation()?.count).toBe(7);
 });
 
-test('closing or stopping the ledger owner terminates a silent worker and drops the observation', async () => {
-  const dbPath = join(scratch(), 'owned.sqlite');
-  const oldRole = process.env.OLYMPUS_WORKER_ENGINE_ROLE;
-  process.env.OLYMPUS_WORKER_ENGINE_ROLE = 'background';
-  cleanup.push(() => {
-    if (oldRole === undefined) delete process.env.OLYMPUS_WORKER_ENGINE_ROLE;
-    else process.env.OLYMPUS_WORKER_ENGINE_ROLE = oldRole;
-  });
+test('an unchanged scope and visibility cursor do not issue a second COUNT or restamp the observation', () => {
+  const root = scratch();
+  environment(root);
+  const dbPath = join(root, 'store.sqlite');
+  storeAt(dbPath);
+  const path = tierLedgerPathForStore(dbPath);
+  const ledger = seedHeldLedger(path, ['fixture'], ['personal']);
+  cleanup.push(() => ledger.close());
+  const inventory = emptyInventory();
+  inventory.stores.push({ corpusId: 'fixture', sourceId: 'fixture', dbPath, read: { accountScope: null } });
+  const sql = spyOn(Database.prototype, 'query');
+  try {
+    const pass = { inventory, observed_at: date };
+    const first = countHeldItems(pass, () => {})!;
+    expect(first.observation).toEqual(observed(1, date, [{ corpusId: 'fixture', accountScope: null }]).observation);
+    const countCalls = () => sql.mock.calls.filter(([query]) => /COUNT\(\*\) AS n FROM tier_items t/.test(query)).length;
+    expect(countCalls()).toBe(1);
+    expect(countHeldItems({ ...pass, previous: first, observed_at: '2026-11-18T00:17:00Z' }, () => {})).toBe(first);
+    expect(countCalls()).toBe(1);
+    const db = new Database(path);
+    try { db.exec("UPDATE tier_items SET state = 'current'"); } finally { db.close(); }
+    expect(countHeldItems({ ...pass, previous: first, observed_at: '2026-11-18T00:18:00Z' }, () => {})?.observation)
+      .toMatchObject({ count: 0, observed_at: '2026-11-18T00:18:00Z' });
+    expect(countCalls()).toBe(2);
+  } finally { sql.mockRestore(); }
+});
+
+test('closing the owner or shutting the writer down cancels its one worker and drops late work', async () => {
+  const path = join(scratch(), 'owned.sqlite');
   let made = 0;
   let terminated = 0;
   class SilentWorker extends EventTarget {
-    onmessage?: (event: { data: number }) => void;
+    onmessage?: (event: { data: HeldSample }) => void;
     constructor() { super(); made++; }
     postMessage() {}
-    terminate() { terminated++; this.onmessage?.({ data: 98 }); }
+    terminate() { terminated++; this.onmessage?.({ data: observed(98, date) }); }
   }
-  const ledger = new TierLedger({ dbPath });
-  const lanes = [{ ledger, corpusIds: new Set(['fixture']) }];
-  const corpus = (corpusId: string) => ({
-    corpusId, accountScope: null, file: null, generation: null, current: () => true, mounted: () => true,
+  const ledger = new TierLedger({ dbPath: path });
+  const run = () => startHeldItemStatus({ inventory: emptyInventory, holds: () => false,
+    measure: (pass, signal, changed) => measureHeldItems(pass, signal, changed, SilentWorker as unknown as typeof Worker),
   });
-  const first = heldCountPlan(lanes, corpus, 'selection')!;
-  const job = startHeldItemStatus({
-    plan: () => heldCountPlan(lanes, corpus, 'selection'), holds: () => false,
-    measure: (plan, signal) => measureHeldItems(plan, signal, SilentWorker as unknown as typeof Worker),
-  });
+  const job = run();
   cleanup.push(job.stop);
+  ledger.onClose(job.closed);
   expect(made).toBe(1);
   ledger.close();
-  expect(first.mountsCurrent()).toBe(false);
   expect(terminated).toBe(1);
   expect(job.observation()).toBeUndefined();
-  const reopened = new TierLedger({ dbPath });
-  cleanup.push(() => reopened.close());
-  const after = heldCountPlan([{ ...lanes[0]!, ledger: reopened }], corpus, 'selection')!;
-  expect(after.scope.view).toBe(first.scope.view);
-  expect(after.scope.generation).not.toBe(first.scope.generation);
-  const second = startHeldItemStatus({
-    plan: () => after, holds: () => false,
-    measure: (plan, signal) => measureHeldItems(plan, signal, SilentWorker as unknown as typeof Worker),
-  });
+  const second = run();
   second.stop();
   await flushMicrotasks();
   expect(made).toBe(2);
   expect(terminated).toBe(2);
   expect(second.observation()).toBeUndefined();
+});
+
+test('the front serves only a valid observation from the current ready writer, with no request-side file read', async () => {
+  const root = scratch();
+  const env = { HOME: root, XDG_DATA_HOME: join(root, 'data') };
+  const clock = createTestClock(Date.parse(date));
+  const path = engineStatusSnapshotPath(env);
+  const boot = sharedDataPath('boot-progress', env);
+  fs.mkdirSync(dirname(boot), { recursive: true });
+  fs.mkdirSync(dirname(path), { recursive: true });
+  let alive = true;
+  const front = createEngineFront({ env, socketPath: join(root, 'unused.sock'), authToken: 'fixture', now: clock.now, alive: () => alive });
+  cleanup.push(front.stop);
+  const backend = createChatGptSetupBackend({
+    env, heldItemCount: front.heldItems, workerFetch: async () => new Response(),
+    handoffs: createChatGptHandoffs(), publicUrls: () => undefined,
+    sovereignty: { source: 'inline_config', config: { schemaVersion: 1, modelProfiles: {}, routes: {}, retrieval: { trustDomains: {} } } },
+    credentialPresent: () => false, requestReload: () => false,
+  });
+  const publish = async (value: Partial<HeldSample['observation']>, writer = 'fixture', startedAt = date) => {
+    await clock.advance(2_000);
+    fs.writeFileSync(boot, JSON.stringify({ schema: BOOT_PROGRESS_SCHEMA, phase: 'done', pid: process.pid,
+      instanceId: writer, startedAt, updatedAt: clock.date().toISOString() }));
+    writeEngineStatusSnapshot(path, { ...snapshot(clock.date().toISOString()), held_items: value as HeldSample['observation'] });
+    await front.refreshStatus();
+  };
+  const current = observed(0, date).observation;
+  await publish(current, 'successor');
+  expect(front.heldItems()).toBeUndefined();
+  await publish(current, 'fixture', new Date(Date.parse(date) + 1_000).toISOString());
+  expect(front.heldItems()).toBeUndefined();
+  await publish({ count: 0 });
+  expect(front.heldItems()).toBeUndefined();
+  await publish({ ...current, count: -1 });
+  expect(front.heldItems()).toBeUndefined();
+  expect(privacyToolResult(backend.privacySettings(), 'current').content[0]?.text).toContain('counting.');
+  await publish(current);
+  const fsSpies = [spyOn(fs, 'statSync'), spyOn(fs, 'existsSync'), spyOn(fs, 'readFileSync'), spyOn(fs, 'openSync')];
+  try {
+    expect(front.heldItems()).toEqual({ pendingCount: 0, pendingCountObservedAt: date });
+    for (const spy of fsSpies) expect(spy).not.toHaveBeenCalled();
+  } finally { for (const spy of fsSpies) spy.mockRestore(); }
+  expect(backend.privacySettings()).toMatchObject({ pendingCount: 0, pendingCountObservedAt: date });
+  alive = false;
+  expect(front.heldItems()).toBeUndefined();
+});
+
+test('the judge action survives a zero sniffer backlog and absent, zero and positive held counts', async () => {
+  const root = scratch();
+  const installed = new InstalledTierClassification({ env: {}, lane: BUILT_IN_SNIFFER_LANE });
+  cleanup.push(() => installed.close());
+  let fail = true;
+  const judge = new TierSnifferService({
+    installed, lane: BUILT_IN_SNIFFER_LANE, autoApproveBuiltIn: true, classificationLedgerPath: join(root, 'judge.jsonl'),
+    model: { async complete() { throw new Error('an empty backlog must not infer'); } },
+    stores: () => { if (fail) throw new Error('fixture pass failure'); return []; },
+  });
+  cleanup.push(() => judge.stop());
+  expect(await judge.runOnce()).toMatchObject({ state: 'failed' });
+  fail = false;
+  expect(judge.backlog()).toMatchObject({ checkingItems: 0 });
+  expect(judge.backlog().waiting).toBeUndefined();
+  expect(judge.actionableStop()).toBe('failed');
+  const view = { generated_at: date, sources: [] } as unknown as SourceDashboardViewModel;
+  const running = { configured: true, ruleCount: 0 };
+  for (const counts of [{}, { pendingCount: 0 }, { pendingCount: 17 }]) {
+    const privacy = { ...running, ...counts, judgeStopped: judge.actionableStop()! };
+    const dashboard = copyDashboardViewModel(buildChatGptDashboardViewModel(view, { privacy }));
+    expect(dashboard.privacy).toMatchObject(privacy);
+    expect(dashboard.needsYou.find(item => item.id === 'privacy:judge_stopped')).toMatchObject({
+      sentence: 'its last pass failed', fix: { label: 'Check the private model' },
+    });
+  }
+  expect(await judge.runOnce()).toMatchObject({ state: 'ran' });
+  expect(judge.actionableStop()).toBeUndefined();
+  const recovered = buildChatGptDashboardViewModel(view, { privacy: running });
+  expect(recovered.needsYou.some(item => item.id === 'privacy:judge_stopped')).toBe(false);
 });

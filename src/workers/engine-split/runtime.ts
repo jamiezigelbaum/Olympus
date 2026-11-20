@@ -22,8 +22,7 @@ import { clickTraces, PRIVACY_ITEM_SET_PATH, type ClickTrace } from './click-tra
 import { startEngineControlPlane, type EngineControlPlane } from './control-plane.ts';
 import { currentLocalInferencePriority } from '../answer-activity.ts';
 import { createEngineCommandHandler, ENGINE_FORWARDED_ROUTES, EngineCommandLedger, requestToForwarded, type EngineCommandHandlers, type EngineCommandReceipt, type EngineForwardedKind, type EngineForwardedRequest, type EngineForwardedResponse } from './commands.ts';
-import { engineStatusAge, engineStatusCollectedAt, readEngineStatusSnapshotAsync, startEngineStatusPublisher, type EngineStatusRead, type EngineStatusSnapshot, type HeldCountScope } from './snapshot.ts';
-import { frontHeldItems } from '../engine/held-item-status.ts';
+import { engineStatusAge, engineStatusCollectedAt, readEngineStatusSnapshotAsync, startEngineStatusPublisher, type EngineStatusRead, type EngineStatusSnapshot } from './snapshot.ts';
 import { parseOwnerTierItemId } from '../classification/tier-owner-items.ts';
 import type { PendingItemProtection } from '../connector-store/tier-visibility.ts';
 import { DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER } from '../http.ts';
@@ -214,8 +213,8 @@ export interface EngineFront {
   status(): EngineStatusRead | undefined;
   cachedStatus(): EngineStatusRead | undefined;
   refreshStatus(): Promise<void>;
-  /** The held count already matched to the front's mounts and live publisher. */
-  heldItems(): ReturnType<typeof frontHeldItems>;
+  /** The held count accepted from the ready writer. */
+  heldItems(): { pendingCount: number; pendingCountObservedAt: string } | undefined;
   /** The last snapshot read, with no disk read and no refresh. */
   cachedSnapshot(): EngineStatusRead['snapshot'] | undefined;
   /** The polled activity, with no disk read or status refresh on the log path. */
@@ -235,7 +234,6 @@ export function createEngineFront(input: {
   authToken: string;
   fetch?: typeof fetch;
   now?: () => number;
-  heldView?: () => { scope: HeldCountScope; changedAt?: number } | undefined;
   alive?: (pid: number) => boolean;
 }): EngineFront {
   const now = input.now ?? (() => Date.now());
@@ -254,7 +252,7 @@ export function createEngineFront(input: {
   relay = new OwnerBusyRelay(client, (line) => console.warn(line));
   const path = engineStatusSnapshotPath(input.env);
   let cached: EngineStatusSnapshot | undefined;
-  let heldBinding: { local: HeldCountScope; publisher: HeldCountScope; pid: number } | undefined;
+  let heldWriter: number | undefined;
   const alive = input.alive ?? processAlive;
   let lastReadAt = -Infinity;
   let pending: Promise<void> | undefined;
@@ -273,45 +271,33 @@ export function createEngineFront(input: {
     if (stopped || at - lastReadAt < 1_000) return;
     lastReadAt = at;
     pending = readEngineStatusSnapshotAsync(path).then(async (snapshot) => {
-      let binding: typeof heldBinding;
+      let writer: number | undefined;
       if (snapshot?.held_items) {
         const boot = await readBootProgressAsync(input.env);
         const held = snapshot.held_items;
-        const local = input.heldView?.();
-        if (local && held.scope?.view === local.scope.view && typeof held.scope.generation === 'string'
-          && (local.changedAt === undefined || engineStatusCollectedAt(snapshot) >= local.changedAt)
-          && backgroundBootDone(boot, alive) && boot?.instanceId === snapshot.instance_id
-          && boot.pid === held.writer_pid && Date.parse(held.observed_at) >= Date.parse(boot.startedAt)) {
-          binding = { local: local.scope, publisher: held.scope, pid: boot.pid };
-        }
-        if (!binding) delete snapshot.held_items;
+        if (boot && backgroundBootDone(boot, alive) && boot.instanceId === snapshot.instance_id
+          && Number.isSafeInteger(held.count) && held.count >= 0 && Array.isArray(held.counted_scope)
+          && typeof held.observed_at === 'string'
+          && Date.parse(held.observed_at) >= Date.parse(boot.startedAt)) writer = boot.pid;
+        else delete snapshot.held_items;
       }
       if (stopped) return;
-      heldBinding = binding;
+      heldWriter = writer;
       cached = snapshot;
       if (snapshot && !judged(snapshot, now()).stale) relay?.observeInstance(snapshot.instance_id);
     }).finally(() => { pending = undefined; });
     return pending;
   };
-  const readableHeld = (): typeof heldBinding => {
-    const local = input.heldView?.()?.scope;
-    const bound = heldBinding;
-    // The cached receipt names an instance and its process. Check the
-    // process still exists even before the next asynchronous status poll.
-    if (stopped || !bound || !local || bound.local !== local
-      || (answering && answering.instance !== cached?.instance_id) || !alive(bound.pid)) return undefined;
-    return bound;
-  };
-  const heldItems = () => {
-    const bound = readableHeld();
-    return bound && cached ? frontHeldItems(engineStatusAge(cached, now()), bound.publisher) : undefined;
-  };
   const cachedStatus = (): EngineStatusRead | undefined => {
     if (!cached) return undefined;
     const read = judged(cached, now());
-    if (!cached.held_items || readableHeld()) return read;
+    if (!cached.held_items || (!stopped && !read.stale && heldWriter !== undefined && alive(heldWriter))) return read;
     const { held_items: _held, ...snapshot } = cached;
     return { ...read, snapshot };
+  };
+  const heldItems = () => {
+    const held = cachedStatus()?.snapshot.held_items;
+    return held && { pendingCount: held.count, pendingCountObservedAt: held.observed_at };
   };
   const status = () => { void refreshStatus(); return cachedStatus(); };
   // Notice a background restart even when no page asks for status, so the

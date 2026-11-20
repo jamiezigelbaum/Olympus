@@ -357,14 +357,12 @@ export interface DashboardViewModelV1 {
   privacy?: {
     configured: boolean; pendingCount?: number; pendingCountObservedAt?: string; ruleCount: number;
     judgeStopped?: PrivacyJudgeStopReason;
-    judgeStoppedAt?: string;
     /**
      * Contract v1 addition (2026-11-15): how many items a minute the private
      * model has been checking, when measured, so Home can say about how long
      * the waiting items take. The waiting items are machine work, In progress
      * on Home, never Needs you.
      */
-    judgePerMinute?: number;
   };
   /**
    * Contract v1 addition (2026-10-10, remote mode): present only when the
@@ -1270,7 +1268,6 @@ export interface PrivacySettings {
   pendingCount?: number;
   pendingCountObservedAt?: string;
   judgeStopped?: PrivacyJudgeStopReason;
-  judgeStoppedAt?: string;
   /**
    * olympus_privacy_get only: the panel's confirmation for a save that
    * lowers protection (see PrivacySetInput). In `_meta`, so the model never

@@ -220,15 +220,12 @@ export interface ChatGptDashboardOptions {
      * or the check is switched off where Olympus runs ('turned_off').
      */
     judgeMissing?: 'no_model' | 'turned_off';
-    /** Items a minute the private model checks, when measured (judge observations). */
-    judgePerMinute?: number;
     /**
      * The privacy check has stopped while items wait, with its plain reason
      * (sniffer-service backlog `waiting`): its model is not answering, cloud
      * checking is stopped, or its pass failed. Only then do waiting items need the owner.
      */
     judgeStopped?: keyof typeof DASHBOARD_CHATGPT_PRIVACY_JUDGE_STOPPED_COPY.reason;
-    judgeStoppedAt?: string;
   };
   /**
    * The built-in private model (analyst-built-in.ts builtInPrivateModelStatus),
@@ -424,11 +421,11 @@ export function buildChatGptDashboardViewModel(
   // Items waiting for the private model are machine work, In progress on
   // Home. They need the owner only when the check has stopped: then the
   // sentence says exactly why, and the button opens the model to look at.
-  else if (options.privacy) {
-    const { text, needsModel } = privacyHeldItemsText(options.privacy, DASHBOARD_CHATGPT_PRIVACY_COUNT_COPY, now.getTime());
-    if (needsModel) needsYou.push({
+  if (options.privacy) {
+    const { stop } = privacyHeldItemsText(options.privacy, DASHBOARD_CHATGPT_PRIVACY_COUNT_COPY, now.getTime());
+    if (stop) needsYou.push({
       id: 'privacy:judge_stopped',
-      sentence: text,
+      sentence: stop,
       fix: { label: DASHBOARD_CHATGPT_PRIVACY_JUDGE_STOPPED_COPY.label, tool: DASHBOARD_TOOL_NAME, args: {}, href: openOnComputer(undefined, 'models') },
     });
   }
@@ -463,13 +460,11 @@ export function buildChatGptDashboardViewModel(
       ? {
           privacy: {
             configured: options.privacy.configured,
-            ...(options.privacy.pendingCount === undefined ? {} : { pendingCount: Math.max(0, Math.floor(options.privacy.pendingCount)) }),
+            ...(Number.isSafeInteger(options.privacy.pendingCount) && options.privacy.pendingCount! >= 0 ? { pendingCount: options.privacy.pendingCount! } : {}),
             ...(options.privacy.pendingCountObservedAt ? { pendingCountObservedAt: options.privacy.pendingCountObservedAt } : {}),
             ruleCount: Math.max(0, Math.floor(options.privacy.ruleCount)),
             ...(options.privacy.judgeStopped ? { judgeStopped: options.privacy.judgeStopped } : {}),
-            ...(options.privacy.judgeStoppedAt ? { judgeStoppedAt: options.privacy.judgeStoppedAt } : {}),
-            ...(typeof options.privacy.judgePerMinute === 'number' && Number.isFinite(options.privacy.judgePerMinute) && options.privacy.judgePerMinute > 0
-              ? { judgePerMinute: options.privacy.judgePerMinute } : {}),
+
           },
         }
       : {}),

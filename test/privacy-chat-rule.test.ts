@@ -62,7 +62,7 @@ test('saving a chat rule writes the shared owner chat rule and leaves other owne
 test('the panel reads a saved chat rule back, so a save that drops it counts as lowering protection', () => {
   const { env } = home();
   writePrivacyProfile({ rules: [doctor] }, { env });
-  const settings = readChatGptPrivacySettings(env, 0);
+  const settings = readChatGptPrivacySettings(env, { pendingCount: 0 });
   expect(settings.rules).toEqual([doctor]);
   const meta = (privacyToolResult(settings, 'current')._meta as Record<string, unknown>)['olympus/privacy'] as { rules: unknown[] };
   expect(meta.rules).toEqual([doctor]);
@@ -78,7 +78,7 @@ test('a chat rule on a Secrets chat never leaves the computer', () => {
   const secrets = loadSecretLocations(env);
   expect(isSecretPrivacyRule(secrets, doctor)).toBe(true);
   expect(isSecretPrivacyRule(secrets, other)).toBe(false);
-  const visible = visiblePrivacy(readChatGptPrivacySettings(env, 0), secrets);
+  const visible = visiblePrivacy(readChatGptPrivacySettings(env, { pendingCount: 0 }), secrets);
   expect(visible.rules).toEqual([other]);
   const meta = JSON.stringify(privacyToolResult(visible, 'current'));
   expect(meta).not.toContain('dr-lee');
@@ -92,7 +92,7 @@ test('a chat held Secrets through a folder-key rule hides its chat rule too', ()
   writePrivacyProfile({ rules: [doctor] }, { env });
   const secrets = loadSecretLocations(env);
   expect(isSecretPrivacyRule(secrets, doctor)).toBe(true);
-  const meta = JSON.stringify(privacyToolResult(visiblePrivacy(readChatGptPrivacySettings(env, 0), secrets), 'current'));
+  const meta = JSON.stringify(privacyToolResult(visiblePrivacy(readChatGptPrivacySettings(env, { pendingCount: 0 }), secrets), 'current'));
   expect(meta).not.toContain('dr-lee');
   expect(meta).not.toContain('Dr. Lee');
 });
