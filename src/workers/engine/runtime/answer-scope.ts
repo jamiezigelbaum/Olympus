@@ -68,10 +68,8 @@ export type ConnectorStoreAnswerScope =
  * `/source/index/search` resolves through the capability codecs and refuses
  * (400 `unsupported_filter` / `invalid_request`) when it cannot honour them.
  * The answer lane fans out instead of refusing, so the same unhonourable state
- * skips the corpus — audited `no_adapter` — rather than searching it whole. A
- * corpus whose family has no codec for a filter is not scoped BY that filter
- * (chat scope does not narrow Dropbox), which is what the legacy per-source
- * adapters did and what the wire contract describes.
+ * skips the corpus. An approved folder bounds the entire answer. A chat
+ * scope narrows only corpora with a chat codec.
  */
 export function connectorStoreAnswerScope(input: {
   store: ConnectorStoreAnswerScopeStore;
@@ -99,7 +97,8 @@ export function connectorStoreAnswerScope(input: {
   let locatorPathScope: string | undefined;
   let scopedConversationId = conversationId;
 
-  if (approvedScopeKey && capabilities?.approvedScope) {
+  if (approvedScopeKey) {
+    if (!capabilities?.approvedScope) return { kind: 'skip', reason: 'approved_scope_key_unsupported' };
     if (!principal) return { kind: 'skip', reason: 'approved_scope_key_no_principal' };
     const resolution = capabilities.approvedScope.resolveLocatorPath(approvedScopeKey, principal);
     if (resolution.kind !== 'path') return { kind: 'skip', reason: 'approved_scope_key_invalid' };

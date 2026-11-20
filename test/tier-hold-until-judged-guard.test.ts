@@ -1,29 +1,18 @@
-// Only an archive import lane may hold content until the private model judges
-// it (docs/design/archive-import.md, "Privacy while an import is judged").
-// The hold is one shared rule: a lane DECLARES it with the lane option
-// `holdContentUntilJudged`, and the shared classifier call sites derive the
-// classifier input (`holdUntilJudged`) from that option or from the hold the
-// stored decision carries. This guard keeps it that way:
-//
-// - the lane option is set (an object property, shorthand, assignment or
-//   string key) only under ARCHIVE_IMPORT_LANE_DIR, apart from its one
-//   declaration and the one pass-through that carries a lane's own option
-//   through the merged inputs, and two item-level exceptions, each held
-//   whichever input listed it (live or imported), so it is never Personal
-//   before its own judgment: a WhatsApp media child, a picture or video
-//   (docs/design/child-items.md, "WhatsApp media"), and a Gmail attachment
-//   child, a file attached to live mail (child-items.md, "Mail attachments");
-// - the classifier input is set only by the shared call sites listed below,
-//   so no connector or format module sets it directly; and
-// - the stored hold reason is spelled out only by the classifier.
-//
-// No archive import lane exists yet: the guard passes with zero lane users.
+// Every child is held at placement. Archive inputs can additionally hold
+// whole items or lanes. Keep those options and the classifier's persisted
+// reason confined to the existing shared paths and connector declarations.
 
+import { Database } from 'bun:sqlite';
 import { Glob } from 'bun';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import ts from 'typescript';
+import { fixtureConnector, fixtureItem, FIXTURE_PLACEMENT, openTierFixture, tempDir } from './helpers/tier-fixtures.ts';
+import { HELD_UNTIL_JUDGED_REASON } from '../src/workers/classification/tier-classifier.ts';
+import { createTieredLaneSet } from '../src/workers/connector-store/tiered-store-set.ts';
+import { createTieredStoreExtractionSink } from '../src/workers/file-extraction/tiered-store-sink.ts';
+import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 
 const repoRoot = join(import.meta.dir, '..');
 
@@ -148,7 +137,79 @@ function read(path: string): string {
   return codeWithoutComments(readFileSync(join(repoRoot, path), 'utf8'));
 }
 
-describe('holding content until judged is an archive import lane\'s choice alone', () => {
+describe('holding child and archive content until judged', () => {
+  test('placement holds a synthetic connector child without an item flag until its own verdict', async () => {
+    const tmp = tempDir('olympus-child-hold-');
+    const f = openTierFixture(tmp.dir, { embed: false });
+    try {
+      const parent = fixtureItem({ id: 'parent', name: 'Plan', text: 'A plan for next week.' });
+      const child = fixtureItem({ id: 'attachment', name: 'Itinerary', text: 'We will visit the Quietorchard on Saturday.' });
+      child.identity.parent = { providerItemId: parent.identity.providerItemId, localItemId: parent.identity.localItemId };
+      const connector = {
+        ...fixtureConnector(() => []),
+        async *listItems() { yield { items: [parent, child], done: true as const }; },
+      };
+      expect(child.holdContentUntilJudged).toBeUndefined();
+      await f.set.sync(connector, { fetchContent: true, placement: FIXTURE_PLACEMENT });
+      expect(f.ledger.getCurrent(child.identity)).toMatchObject({ contentPending: true });
+      expect(f.ledger.copies(child.identity)).toContainEqual(expect.objectContaining({
+        trustDomain: 'secure_local', layers: 'content', embedHold: true,
+      }));
+      expect(f.stores.internal!.searchItems('Quietorchard', 10)).toEqual([]);
+
+      const verdict = f.ledger.applySnifferVerdict(child.identity, {
+        pass: 'content', tier: 'private', reason: 'content:sniffer:fixture:ordinary', modelId: 'fixture',
+      }, { placementFor: decision => f.set.placementFor(decision) });
+      expect(verdict?.outcome).toBe('queued_move');
+      await moveTieredItem({ set: f.set, identity: child.identity, target: { metadataTier: 'private', contentTier: 'private' } });
+      expect(f.stores.internal!.searchItems('Quietorchard', 10).map(hit => hit.sourceItem.providerItemId)).toEqual(['attachment']);
+    } finally {
+      f.close();
+      tmp.cleanup();
+    }
+  });
+
+  test('a child listed before the hold was recorded stays held when its text arrives', async () => {
+    const tmp = tempDir('olympus-existing-child-');
+    const f = openTierFixture(tmp.dir, { embed: false });
+    try {
+      const set = createTieredLaneSet({
+        setId: 'deferred', ledger: f.ledger, contentArrivesLater: true,
+        legs: { internal: { store: f.stores.internal! }, secure_local: { store: f.stores.secure_local!, legacy: true } },
+      });
+      const child = fixtureItem({ id: 'attachment', name: 'Itinerary' });
+      const parent = fixtureItem({ id: 'parent', name: 'Plan', text: 'A plan for next week.' });
+      child.identity.parent = { providerItemId: parent.identity.providerItemId, localItemId: parent.identity.localItemId };
+      await set.sync({
+        ...fixtureConnector(() => []),
+        async *listItems() { yield { items: [parent, child], done: true }; },
+      }, { fetchContent: false, placement: FIXTURE_PLACEMENT });
+
+      // Older listings stored the parent link and the unread decision without the hold reason.
+      const reasons = f.ledger.getCurrent(child.identity)!.reasons.filter(reason => reason !== HELD_UNTIL_JUDGED_REASON);
+      const db = new Database(f.ledger.dbPath);
+      try {
+        db.query('UPDATE tier_items SET reasons_json = ? WHERE provider_item_id = ?').run(JSON.stringify(reasons), child.identity.providerItemId);
+      } finally {
+        db.close();
+      }
+      const sink = createTieredStoreExtractionSink({
+        set, syncConnectorId: 'extraction', ownerConnectorId: 'fixture_lane', ownershipKind: 'observed',
+      });
+      const result = await sink.accept({
+        ref: { ...child.identity, corpusId: f.stores.secure_local!.corpusId, approvedScopeKey: 'fixture:/Files' },
+        text: 'We will visit the Quietorchard on Saturday.', extractorKind: 'local_text', extractorVersion: 'test',
+        fetchedAt: child.fetchedAt,
+      });
+      expect(result).toMatchObject({ accepted: true });
+      expect(f.ledger.getCurrent(child.identity)).toMatchObject({ contentPending: true, contentRead: true });
+      expect(f.stores.internal!.searchItems('Quietorchard', 10)).toEqual([]);
+    } finally {
+      f.close();
+      tmp.cleanup();
+    }
+  });
+
   test('the write detector tells a write from a read', () => {
     for (const written of [
       `const c = { ${LANE_OPTION}: true };`,
@@ -195,7 +256,6 @@ describe('holding content until judged is an archive import lane\'s choice alone
         if (!covered) offenders.push(`${path}: ${code.slice(at, at + 60).split('\n')[0]}`);
       }
     }
-    // Zero lane users is a pass: no archive import lane exists yet.
     expect(offenders).toEqual([]);
   });
 

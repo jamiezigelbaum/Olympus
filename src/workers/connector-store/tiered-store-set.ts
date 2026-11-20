@@ -70,6 +70,7 @@ import {
   maxTier,
   hasCredentialUrl,
   contentHeldForJudgment,
+  heldUntilJudged,
   type TierDecidedBy,
   type TierDecision,
   type TierKey,
@@ -2058,7 +2059,7 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     // a crash at any point leaves a body: the old one before the write, both after it (the old one unserved),
     // and the stale lower row makes the item incomplete, so the same record is read again and finishes the
     // withdrawal. Queuing a move instead would hide the old body and later copy it, never the newer one.
-    const holdsReplacement = routed && contentRead && (item.holdContentUntilJudged === true || contentHeldForJudgment(decision))
+    const holdsReplacement = routed && contentRead && (heldUntilJudged(decision.reasons) || contentHeldForJudgment(decision))
       && decision.contentTier !== 'secrets'
       && ledger.getCurrent(identity)?.state !== 'moving';
     const replacesInPlace = holdsReplacement && currentCopies.length > 0 && placementIsRaise(currentCopies, placement.copies);

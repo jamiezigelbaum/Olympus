@@ -250,11 +250,10 @@ export function decideItemTiers(
   const sniffer = cacheAware && arrivalOrderedSniffer(conversationOrderedSniffer(
     recordedContentVerdictSniffer(cacheAware, recorded, text, namesReceipt), item.metadata,
   ), newArrival);
-  // The lane's hold, the item's own (an item built from an archive record
-  // carries it: contracts.ts, 2.2.0), or the one its stored decision carries
-  // (a store whose recording did not bring the lane's option still holds the
-  // same way, and a later version of a held item stays held until judged).
+  // Every child waits for its own judgment. Record the same hold as an
+  // archive item so later extraction and re-judging inherit it.
   const holdUntilJudged = options?.holdContentUntilJudged === true
+    || item.identity.parent !== undefined
     || item.holdContentUntilJudged === true
     || heldUntilJudged(recorded?.reasons);
   return classifyItemTiers(
