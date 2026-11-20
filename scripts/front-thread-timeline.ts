@@ -1,9 +1,12 @@
 // Linux, same user as the target. The only process data emitted are counters,
-// the main thread's state and kernel wait symbol. Host counters are contextual.
+// the main thread's state and kernel wait symbol, and while it waits, its system
+// call and the kind of file it names (file, socket, pipe; a file's base name only
+// with --fd-names, for fixtures, never on an owner's install). Host counters are contextual.
 // The report describes thread activity up to each log timestamp or marker,
 // excluding epoll idle time. Freeze-frame windows are at least 30 s.
 import { once } from 'node:events';
-import { closeSync, createReadStream, openSync, readSync, type WriteStream } from 'node:fs';
+import { closeSync, createReadStream, openSync, readlinkSync, readSync, type WriteStream } from 'node:fs';
+import { basename } from 'node:path';
 import { open } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { finished } from 'node:stream/promises';
@@ -14,7 +17,7 @@ const LATE_MS = 100;
 const HOST_MS = 200;
 const SUMMARY_MS = 1_000;
 const END_BYTES = 128;
-const USAGE = 'bun scripts/front-thread-timeline.ts --pid PID --out FILE [--interval-ms 20] [--seconds N] [--max-mb 200]\n'
+const USAGE = 'bun scripts/front-thread-timeline.ts --pid PID --out FILE [--interval-ms 20] [--seconds N] [--max-mb 200] [--fd-names]\n'
   + 'bun scripts/front-thread-timeline.ts --summarize FILE [--freezes LOG] [--role front|background|any]\n'
   + '  [--marker END_ISO,MS ...] [--window-ms N]\n'
   + '  Supply --freezes, --marker, or both. Role defaults to front. --window-ms overrides all spans.';
@@ -163,19 +166,48 @@ function pressureDelta(previous: Pressure, current: Pressure): Pressure {
   return { some: delta(previous.some, current.some), full: delta(previous.full, current.full) };
 }
 
+// x86_64 numbers of the calls a loop thread waits in; any other shows as its number.
+const SYSCALLS: Record<number, string> = {
+  0: 'read', 1: 'write', 2: 'open', 3: 'close', 4: 'stat', 5: 'fstat', 6: 'lstat', 7: 'poll', 8: 'lseek', 9: 'mmap',
+  10: 'mprotect', 11: 'munmap', 17: 'pread64', 18: 'pwrite64', 19: 'readv', 20: 'writev', 26: 'msync', 35: 'nanosleep',
+  74: 'fsync', 75: 'fdatasync', 76: 'truncate', 77: 'ftruncate', 82: 'rename', 83: 'mkdir', 84: 'rmdir', 87: 'unlink',
+  202: 'futex', 230: 'clock_nanosleep', 232: 'epoll_wait', 257: 'openat', 262: 'newfstatat', 263: 'unlinkat',
+  264: 'renameat', 281: 'epoll_pwait', 285: 'fallocate', 316: 'renameat2', 332: 'statx',
+};
+// Calls whose first argument is a file descriptor.
+const FD_FIRST = new Set([0, 1, 3, 5, 8, 17, 18, 19, 20, 74, 75, 77, 285]);
+
+/** "write worker.err", "fsync file", "openat": the call a waiting thread is in, from /proc/<pid>/task/<tid>/syscall. */
+export function describeSyscall(text: string | null, fdTarget: (fd: number) => string | null, names: boolean): string | null {
+  if (!text) return null;
+  const fields = text.trim().split(/\s+/);
+  if (fields[0] === 'running' || fields[0] === '-1' || !/^\d+$/.test(fields[0] ?? '')) return null;
+  const nr = Number(fields[0]);
+  const name = SYSCALLS[nr] ?? `syscall ${nr}`;
+  if (!FD_FIRST.has(nr) || fields[1] === undefined) return name;
+  const fd = Number.parseInt(fields[1], 16);
+  const target = Number.isFinite(fd) && fd >= 0 && fd < 1 << 20 ? fdTarget(fd) : null;
+  if (!target) return name;
+  if (target.startsWith('/')) return `${name} ${names ? basename(target) : 'file'}`;
+  return `${name} ${target.replace(/[:\[].*$/, '')}`;
+}
+
 type Thread = ReturnType<typeof parseStat> & {
   runNs: number | null;
   waitNs: number | null;
   timeslices: number | null;
   wchan: string | null;
+  syscall?: string | null;
 };
 
-function createProcReader(pid: number) {
+function createProcReader(pid: number, fdNames = false) {
   const processBase = `/proc/${pid}`;
   const threadBase = `${processBase}/task/${pid}`;
   const stat = new ProcFile(`${threadBase}/stat`);
   const schedstat = new ProcFile(`${threadBase}/schedstat`, true);
   const wchan = new ProcFile(`${threadBase}/wchan`, true);
+  const syscall = new ProcFile(`${threadBase}/syscall`, true);
+  const fdTarget = (fd: number) => { try { return readlinkSync(`${processBase}/fd/${fd}`); } catch { return null; } };
   const status = new ProcFile(`${processBase}/status`, true);
   const cpu = new ProcFile('/proc/pressure/cpu', true);
   const memory = new ProcFile('/proc/pressure/memory', true);
@@ -191,7 +223,11 @@ function createProcReader(pid: number) {
       if (/^[ZXx]$/.test(thread.state)) return null;
       const schedText = schedstat.read(buffer);
       const sched = schedText === null ? { runNs: null, waitNs: null, timeslices: null } : parseSchedstat(schedText);
-      return { ...thread, ...sched, wchan: wchanCode(wchan.read(buffer)) };
+      const channel = wchanCode(wchan.read(buffer));
+      // Only while it waits outside epoll: which call, on what kind of file (lane 1, 20 Nov: the front's frames were
+      // pure computation while it waited in the ext4 journal, so the call itself names the caller).
+      const waiting = (thread.state === 'D' || thread.state === 'S') && !epollIdle(thread.state, channel);
+      return { ...thread, ...sched, wchan: channel, ...(waiting ? { syscall: describeSyscall(syscall.read(buffer), fdTarget, fdNames) } : {}) };
     },
     host(at: Clock) {
       const statusText = status.read(buffer);
@@ -212,7 +248,7 @@ function createProcReader(pid: number) {
       };
     },
     close() {
-      for (const file of [stat, schedstat, wchan, status, cpu, memory, io, vmstat]) file.close();
+      for (const file of [stat, schedstat, wchan, syscall, status, cpu, memory, io, vmstat]) file.close();
     },
   };
 }
@@ -294,10 +330,10 @@ function nextDeadline(deadline: number, step: number, now: number): number {
   return deadline + (1 + Math.floor((now - deadline) / step)) * step;
 }
 
-async function capture(pid: number, path: string, intervalMs: number, seconds: number, maxBytes: number) {
+async function capture(pid: number, path: string, intervalMs: number, seconds: number, maxBytes: number, fdNames = false) {
   if (process.platform !== 'linux') throw new TimelineError('linux_required');
   const output = await TimelineOutput.open(path, maxBytes);
-  const proc = createProcReader(pid);
+  const proc = createProcReader(pid, fdNames);
   let interrupted = false;
   const stop = () => { interrupted = true; };
   process.on('SIGINT', stop);
@@ -472,6 +508,7 @@ export function summarizeFreeze(rows: readonly Observation[], freeze: Freeze) {
   let runningMs = 0, runQueueMs = 0, blockedMajfltMs = 0, blockedBlkioMs = 0, blockedOtherMs = 0;
   let coveredMs = 0, lateTicks = 0, lateMs = 0;
   const waitChannels = new Map<string, number>();
+  const syscalls = new Map<string, number>();
   let block: { endMono: number; wchan: string | null; ms: number; majflt: boolean; blkio: boolean } | undefined;
 
   const flushBlock = () => {
@@ -520,7 +557,9 @@ export function summarizeFreeze(rows: readonly Observation[], freeze: Freeze) {
     if (!adjacent || (sleeping && block?.wchan !== wchan)) flushBlock();
     block ??= { endMono: row.monoMs, wchan, ms: 0, majflt: false, blkio: false };
     block.endMono = row.monoMs;
-    block.ms += Math.max(0, row.spanMs - run - wait) * weight;
+    const slept = Math.max(0, row.spanMs - run - wait) * weight;
+    block.ms += slept;
+    if (row.syscall && slept > 0) syscalls.set(row.syscall, (syscalls.get(row.syscall) ?? 0) + slept);
     // Fault and blkio counters also post on completion, often after the
     // sleeping samples. Attribute a contiguous wait to the observed signal.
     block.majflt ||= row.dMajflt > 0;
@@ -541,6 +580,8 @@ export function summarizeFreeze(rows: readonly Observation[], freeze: Freeze) {
     blockedOtherMs: rounded(blockedOtherMs), topWchan, topWchanMs: rounded(topMs),
     // Every wait channel's milliseconds in the window, largest first (journal waits read as jbd2_log_wait_commit).
     waitChannelsMs: Object.fromEntries([...waitChannels].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([name, ms]) => [name, rounded(ms)])),
+    // The system call (and kind of file) behind those waits, largest first: "write file", "fsync file", "openat".
+    syscallsMs: Object.fromEntries([...syscalls].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([name, ms]) => [name, rounded(ms)])),
     coveredMs, covered_ms: coveredMs, lateTicks, lateMs: rounded(lateMs),
   };
 }
@@ -617,6 +658,7 @@ async function main() {
       role: { type: 'string' },
       'window-ms': { type: 'string' },
       marker: { type: 'string', multiple: true },
+      'fd-names': { type: 'boolean' },
       help: { type: 'boolean' },
     },
   });
@@ -633,7 +675,7 @@ async function main() {
     });
   } else if (pid && out && ![timeline, freezes, values.role, values.marker, windowMs].some((value) => value !== undefined)) {
     await capture(positive(pid, true), out, positive(values['interval-ms'] ?? '20', true),
-      seconds === undefined ? Infinity : positive(seconds), Math.floor(positive(values['max-mb'] ?? '200') * 1024 ** 2));
+      seconds === undefined ? Infinity : positive(seconds), Math.floor(positive(values['max-mb'] ?? '200') * 1024 ** 2), values['fd-names'] === true);
   } else {
     throw new TimelineError('usage');
   }
