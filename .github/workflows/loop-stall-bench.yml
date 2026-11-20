@@ -66,6 +66,9 @@ jobs:
         run: |
           nproc; free -g; df -h / /mnt; cat /proc/swaps
           sudo swapoff -a || true
+          # The thread sampler reads /proc/<pid>/task/<tid>/syscall to name the call a waiting loop thread is in, which
+          # Ubuntu's Yama scope 1 refuses for a process that is not its descendant. This runner is a throwaway VM.
+          echo "ptrace_scope was $(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null)"; sudo sysctl -w kernel.yama.ptrace_scope=0 || true
           sudo mkdir -p "$LS_DIR" && sudo chown "$(id -u):$(id -g)" "$LS_DIR"
       - name: Build the fixture
         env:
