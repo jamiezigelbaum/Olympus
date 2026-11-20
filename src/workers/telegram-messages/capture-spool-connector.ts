@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto';
 import { closeSync, existsSync, lstatSync, openSync, readSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { TELEGRAM_SOURCE_ID } from '../../core/olympus-layout.ts';
+import { TELEGRAM_LABEL_CAPABILITY } from '../../core/source-connector-labels.ts';
 import { resolvedRawPath } from '../../core/source-placement.ts';
 import type {
   RawItem,
@@ -750,7 +751,7 @@ export function telegramMessageItem(input: {
   ]);
   const identity: SourceItemIdentity = {
     family: 'chat',
-    provider: 'telegram',
+    provider: TELEGRAM_LABEL_CAPABILITY.provider,
     accountScope: input.account,
     providerItemId: messageId,
     providerConversationId: input.conversationId,

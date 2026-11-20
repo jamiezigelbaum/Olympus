@@ -371,6 +371,7 @@ export function personalContentAuthorized(
   text: string,
   notSecret: boolean,
   override?: ItemTierOverride,
+  imageJudgment?: ImageJudgmentSignal,
 ): boolean {
   if (!evidence.contentRead || evidence.contentPending) return false;
   const { reasons } = evidence;
@@ -381,8 +382,15 @@ export function personalContentAuthorized(
     && (reasons.includes('override:item:private') || reasons.includes('override:item:public'))) || namesDecidedByOwner(reasons);
   const trivial = reasons.includes('content:text_only') ? trivialContentRule(text) : undefined;
   const trivialSettled = trivial !== undefined && reasons.includes(`content:rule:${trivial}`);
-  if (!ownerDecided && !trivialSettled && !hasContentJudgeVerdict(reasons, 'private', digest)) return false;
-  return (ownerDecided && reasons.includes(OWNER_OVERRIDE_SECRET_CONFIRMED_REASON) && ownerOverrideMatchesDigest(override, digest))
+  const photoReason = reasons.find(reason => reason === IMAGE_ORDINARY_REASON || reason.startsWith(IMAGE_TEXT_DECIDES_REASON_PREFIX));
+  const judgedPersonal = hasContentJudgeVerdict(reasons, 'private', digest);
+  const photoSettled = imageJudgment?.verdict === 'ordinary' && (imageJudgment.textDecides
+    ? photoReason === `${IMAGE_TEXT_DECIDES_REASON_PREFIX}${imageCategoryCode(imageJudgment.category)}` && judgedPersonal
+    : photoReason === IMAGE_ORDINARY_REASON);
+  if (!ownerDecided && !trivialSettled && !(photoReason ? photoSettled : judgedPersonal)) return false;
+  const ownerConfirmed = override?.kind === 'tier' && evidence.decidedBy === 'override'
+    && reasons.includes(`override:item:${override.tier}`) && ownerOverrideMatchesDigest(override, digest);
+  return ownerConfirmed
     || (notSecret && reasons.includes('override:item:not_secret')) || contentSecretReasons(text).length === 0;
 }
 
@@ -1372,7 +1380,7 @@ function contentPass(args: {
       decided = withSnifferVerdict(decided, verdict.tier, `content:sniffer:${args.sniffer.id}:${verdict.code}`);
       reasons.splice(0, reasons.length, ...decided.reasons);
       if (verdict.origin === 'model') reasons.push('content:provenance:model');
-      if (verdict.origin === 'model' || verdict.rule === 'duplicate_model') reasons.push(
+      if (verdict.origin === 'model' || verdict.rule === 'duplicate_model' || (textDecides && verdict.origin === undefined)) reasons.push(
         contentJudgeVerdictReason(`content:sniffer:${args.sniffer.id}:${verdict.code}`, verdict.tier, contentDigestReason(text)));
       if (verdict.origin === 'rule' && verdict.rule) reasons.push(`content:rule:${verdict.rule}`);
     } else {

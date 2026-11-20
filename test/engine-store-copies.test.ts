@@ -191,6 +191,49 @@ describe('the copy of the data an engine install takes', () => {
     }
   });
 
+  test('put-back preserves an unchanged flagged Personal body covered by a legacy override receipt', async () => {
+    const { env } = setup();
+    const personal = {
+      dbPath: resolvedStorePath('google_drive.docs', 'internal', env), corpusId: GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID,
+      family: 'file' as const, trustDomain: 'internal' as const,
+    };
+    const ledgerPath = tieredStoreSetLedgerPath(resolvedStorePath('google_drive.docs', 'secure_local', env));
+    const row = { id: 'owner-kept', name: 'Picnic list', text: 'Pack the picnic basket and ' + '-----BEGIN ' + 'PRIVATE KEY-----' };
+    const { identity } = fixtureItem(row);
+    const override = { kind: 'tier', tier: 'private' } as const;
+    const digest = contentDigestReason(row.text);
+    const ledger = new TierLedger({ dbPath: ledgerPath });
+    const store = new LocalConnectorStore({ ...personal, tierLedger: ledger });
+    try {
+      await store.syncFromConnector(fixtureConnector(() => [row]), { fetchContent: true });
+      const decision = classifyItemTiers({ signals: { title: row.name }, text: row.text }, { override: { ...override, setDigest: digest } });
+      ledger.recordDecision(identity, {
+        ...decision,
+        reasons: decision.reasons.filter(reason => !reason.startsWith('content:owner_override_') && !reason.startsWith('content:secret:')),
+      }, { trustDomain: 'internal', trustTier: 'S3' });
+      ledger.setOverride(identity, override);
+      using snapshotLedger = new Database(ledgerPath);
+      snapshotLedger.query('UPDATE tier_overrides SET override_json = ? WHERE provider_item_id = ?').run(JSON.stringify(override), row.id);
+      expect(ledger.getOverride(identity)).toEqual(override);
+    } finally {
+      store.close();
+      ledger.close();
+    }
+
+    copyEngineStores(env, { log: () => {}, deps: { clones: () => false } });
+    restoreEngineStores(env, { log: () => {} });
+    const restoredLedger = new TierLedger({ dbPath: ledgerPath });
+    const restored = new LocalConnectorStore({ ...personal, tierLedger: restoredLedger });
+    try {
+      expect(restoredLedger.getCurrent(identity)).toMatchObject({ state: 'current', contentTier: 'private' });
+      expect(restored.exportItemCopy(identity)?.chunks.map(chunk => chunk.boundedText).join('')).toBe(row.text);
+      expect(restoredLedger.getOverride(identity)).toEqual({ ...override, setDigest: digest });
+    } finally {
+      restored.close();
+      restoredLedger.close();
+    }
+  });
+
   test('put-back retires a pre-batch receipt for an unjudged body staged in Personal', async () => {
     const { env } = setup();
     const personal = {

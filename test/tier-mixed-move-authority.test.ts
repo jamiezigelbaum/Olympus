@@ -6,6 +6,9 @@ import { classifyItemTiers } from '../src/workers/classification/tier-classifier
 import { tierLedgerIdentityKey } from '../src/workers/classification/tier-ledger.ts';
 import { writeOwnerTierRules } from '../src/workers/classification/tier-rules.ts';
 import { purgeLowerTierContent } from '../src/workers/connector-store/tier-content-purge.ts';
+import { applyOwnerOverrides } from '../src/workers/connector-store/tier-override-settle.ts';
+import { sweepLabelRuleRaises } from '../src/workers/connector-store/tier-rules-sweep.ts';
+import { createEvernoteSourceConnector, EVERNOTE_PROVIDER } from '../src/workers/evernote/connector.ts';
 import { moveTieredItem, moveTieredItemsLowering, retireRestoredTierLowerings, TierMoveContentChangedError } from '../src/workers/connector-store/tier-move.ts';
 import { CORPORA, FIXTURE_PLACEMENT, JUDGED_PERSONAL_SNIFFER, fixtureConnector, identityOf, localId, openTierFixture, tempDir } from './helpers/tier-fixtures.ts';
 
@@ -178,6 +181,33 @@ test('a source edit discards staged bytes after an interruption before the recei
   expect(source.localContent(localId('orchard'))?.chunks.join('')).toBe(edited);
 });
 
+test('restore retires a committed Personal import without a verified move receipt', async () => {
+  const tmp = tempDir();
+  const fixture = openTierFixture(tmp.dir, { embed: false });
+  cleanup.push(() => { fixture.close(); tmp.cleanup(); });
+  const identity = identityOf('orchard');
+  const text = 'Orchard inventory and planting notes.';
+  const target = classifyItemTiers({ signals: { title: 'Inventory' }, text }, { sniffer: JUDGED_PERSONAL_SNIFFER });
+  await fixture.set.sync(fixtureConnector(() => [{ id: identity.providerItemId, name: 'Inventory', text }]),
+    { fetchContent: true, placement: FIXTURE_PLACEMENT });
+  await moveTieredItem({ set: fixture.set, identity, target: { metadataTier: 'secure', contentTier: 'secure' } });
+  fixture.ledger.recordRoutedPlacement(identity, target, fixture.set.placementFor(target));
+  expect(() => moveTieredItemsLowering([{ set: fixture.set, identity, target }], {
+    afterCopiesCommitted() { throw new Error('checkpoint'); },
+  })).toThrow('checkpoint');
+  const key = tierLedgerIdentityKey(identity);
+  expect(fixture.ledger.readMeta(`tier-move-imports:${key}`)).toBeTruthy();
+  expect(fixture.ledger.readMeta(`tier-move-verified:${key}`)).toBeFalsy();
+  expect(fixture.stores.internal!.exportItemCopy(identity)?.chunks.map(chunk => chunk.boundedText).join('')).toBe(text);
+
+  retireRestoredTierLowerings(fixture.set);
+
+  expect(fixture.ledger.readMeta(`tier-move-imports:${key}`)).toBeFalsy();
+  expect(fixture.ledger.getCurrent(identity)).toMatchObject({ state: 'current', contentTier: 'secure', targetContentTier: null });
+  expect(fixture.stores.internal!.exportItemCopy(identity)).toBeUndefined();
+  expect(fixture.stores.secure_local!.localContent(localId('orchard'))?.chunks.join('')).toBe(text);
+});
+
 test('a source-unspecified label rule permits lowerings in a lane without label resolution', async () => {
   const tmp = tempDir();
   const fixture = openTierFixture(tmp.dir, { embed: false });
@@ -194,6 +224,85 @@ test('a source-unspecified label rule permits lowerings in a lane without label 
   fixture.ledger.recordRoutedPlacement(identity, target, fixture.set.placementFor(target));
 
   expect(moveTieredItemsLowering([{ set: fixture.set, identity, target }])[0]).toHaveProperty('result');
+  expect(fixture.stores.internal!.localContent(localId('orchard'))?.chunks.join('')).toBe(text);
+});
+
+test('a label rule added while an Evernote note is moving prevents its Personal flip', async () => {
+  const tmp = tempDir();
+  const fixture = openTierFixture(tmp.dir, { embed: false });
+  cleanup.push(() => { fixture.close(); tmp.cleanup(); });
+  const env = { OLYMPUS_TIER_RULES_PATH: join(tmp.dir, 'tier-rules.json') };
+  configureInstalledTierClassification({ env });
+  const identity = { ...identityOf('orchard'), provider: EVERNOTE_PROVIDER };
+  const text = 'Orchard inventory and planting notes.';
+  const base = fixtureConnector(() => [{ id: identity.providerItemId, name: 'Inventory', text }]);
+  const evernote = createEvernoteSourceConnector({
+    accountScope: identity.accountScope,
+    session() { throw new Error('Unexpected provider request'); },
+  });
+  const tagNote = (item: Awaited<ReturnType<typeof base.fetchItem>>) => ({
+    ...item,
+    identity: { ...item.identity, provider: identity.provider },
+    metadata: { ...item.metadata, tags: ['Garden'] },
+  });
+  const connector = {
+    ...base,
+    async *listItems() {
+      for await (const page of base.listItems()) yield { ...page, items: page.items.map(tagNote) };
+    },
+    async fetchItem(id: string) { return tagNote(await base.fetchItem(id)); },
+    classificationSignals: evernote.classificationSignals,
+  };
+  await fixture.set.sync(connector, { fetchContent: true, placement: FIXTURE_PLACEMENT });
+  await moveTieredItem({ set: fixture.set, identity, target: { metadataTier: 'secure', contentTier: 'secure' } });
+  const rule = { id: 'garden', match: { kind: 'label', value: 'garden' }, tier: 'secure', strength: 'force' } as const;
+  const signals = connector.classificationSignals(await connector.fetchItem(localId('orchard')));
+  expect(classifyItemTiers({ signals, provider: identity.provider, text }, { rules: [rule] }).metadataTier).toBe('secure');
+  const target = classifyItemTiers({ signals, text }, { sniffer: JUDGED_PERSONAL_SNIFFER });
+  fixture.ledger.recordRoutedPlacement(identity, target, fixture.set.placementFor(target));
+
+  await expect(moveTieredItem({
+    set: fixture.set, identity, target, beforeFlip() { writeOwnerTierRules([rule], { env }); },
+  })).rejects.toMatchObject({ code: 'rule_authority' });
+  expect(fixture.stores.internal!.exportItemCopy(identity)).toBeUndefined();
+  expect(fixture.stores.secure_local!.localContent(localId('orchard'))?.chunks.join('')).toBe(text);
+
+  writeOwnerTierRules([{ ...rule, match: { kind: 'label', value: 'Travel' } }], { env });
+  expect(await sweepLabelRuleRaises({
+    set: fixture.set, provider: identity.provider, accountScope: identity.accountScope,
+    source: { async listLabelled() { return { ids: [] }; } },
+  })).toMatchObject({ rules: 1, scanned: 0, pending: 0 });
+  fixture.ledger.recordRoutedPlacement(identity, target, fixture.set.placementFor(target));
+  await moveTieredItem({ set: fixture.set, identity, target });
+  expect(fixture.stores.internal!.localContent(localId('orchard'))?.chunks.join('')).toBe(text);
+});
+
+test('clearing a Private override on a provider without labels restores the prior Personal decision', async () => {
+  const tmp = tempDir();
+  const fixture = openTierFixture(tmp.dir, { embed: false });
+  cleanup.push(() => { fixture.close(); tmp.cleanup(); });
+  const env = { OLYMPUS_TIER_RULES_PATH: join(tmp.dir, 'tier-rules.json') };
+  configureInstalledTierClassification({ env });
+  const identity = identityOf('orchard');
+  const text = 'Orchard inventory and planting notes.';
+  await fixture.set.sync(fixtureConnector(() => [{ id: identity.providerItemId, name: 'Inventory', text }]),
+    { fetchContent: true, placement: FIXTURE_PLACEMENT, tierClassification: { sniffer: JUDGED_PERSONAL_SNIFFER } });
+  const personal = classifyItemTiers({ signals: { title: 'Inventory', path: '/Files/Inventory' }, text },
+    { sniffer: JUDGED_PERSONAL_SNIFFER });
+  if (fixture.ledger.recordRoutedPlacement(identity, personal, fixture.set.placementFor(personal)).outcome === 'queued_move') {
+    await moveTieredItem({ set: fixture.set, identity, target: personal });
+  }
+  fixture.ledger.setOverride(identity, { kind: 'tier', tier: 'secure' });
+  applyOwnerOverrides({ set: fixture.set });
+  await moveTieredItem({ set: fixture.set, identity, target: { metadataTier: 'secure', contentTier: 'secure' } });
+  writeOwnerTierRules([{ id: 'garden', match: { kind: 'label', value: 'garden' }, tier: 'secure', strength: 'force' }], { env });
+
+  fixture.ledger.clearOverride(identity);
+  expect(fixture.ledger.settledDecisionBeforeOverride(identity)).toMatchObject({ metadataTier: 'private', contentTier: 'private' });
+  applyOwnerOverrides({ set: fixture.set });
+
+  expect(fixture.ledger.getCurrent(identity)).toMatchObject({ state: 'moving', targetMetadataTier: 'private', targetContentTier: 'private' });
+  await moveTieredItem({ set: fixture.set, identity, target: { metadataTier: 'private', contentTier: 'private' } });
   expect(fixture.stores.internal!.localContent(localId('orchard'))?.chunks.join('')).toBe(text);
 });
 

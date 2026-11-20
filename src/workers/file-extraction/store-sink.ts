@@ -349,8 +349,9 @@ export function createConnectorStoreExtractionSink(
       // verdict is never taken for ordinary.
       const judgment = plan.media ? (options.mediaJudgment ?? ((sha: string) => store.mediaJudgment(sha)))(plan.media.sha256) : undefined;
       if (plan.media && judgment) plan.media = { ...plan.media, judgment };
-      if (!options.route && (plan.media || isImageMediaType(plan.item.mimeType)) && store.trustDomain !== 'secure_local'
-        && !(options.mediaJudgment && plan.media && judgment?.verdict === 'ordinary')) {
+      const checkedPicture = !!options.mediaJudgment && !!plan.media && judgment?.verdict === 'ordinary';
+      if ((plan.media || isImageMediaType(plan.item.mimeType)) && store.trustDomain !== 'secure_local'
+        && !checkedPicture && !(options.route && options.mediaJudgment)) {
         return {
           accepted: false,
           chunksIndexed: 0,
@@ -453,7 +454,8 @@ export function createConnectorStoreExtractionSink(
         };
       }
 
-      if (!route && options.recordContentTier !== false) {
+      if (!route && options.recordContentTier !== false
+        && (!checkedPicture || store.readOnDemand(plan.item.identity.localItemId, plan.item.identity.sourceVersion ?? ''))) {
         return { accepted: false, chunksIndexed: 0, chunksAwaitingEmbedding: 0, skippedReason: EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE };
       }
       let landingStore = store;

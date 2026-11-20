@@ -34,6 +34,7 @@ import { dirname } from 'node:path';
 import { writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
 import { OperationError } from '../../core/operation-error.ts';
 import { defaultOwnerConfigPath, ownerConfigStamp, readOwnerConfigFile } from '../../core/owner-config-read.ts';
+import { GMAIL_LABEL_CAPABILITY } from '../../core/source-connector-labels.ts';
 import type { OwnerTierRule } from './tier-classifier.ts';
 import { withOwnerTierRulesWriter } from './tier-rules.ts';
 
@@ -62,7 +63,7 @@ const RULE_SOURCES: Readonly<Record<PrivacyRuleKind, Readonly<Record<string, { p
     'evernote.notes': { provider: 'evernote', match: 'folderKey' },
   },
   label: {
-    'gmail.email': { provider: 'gmail', match: 'label' },
+    'gmail.email': { provider: GMAIL_LABEL_CAPABILITY.provider, match: 'label' },
   },
   sender: {
     'gmail.email': { provider: 'gmail', match: 'sender' },
@@ -75,10 +76,6 @@ const RULE_SOURCES: Readonly<Record<PrivacyRuleKind, Readonly<Record<string, { p
     'whatsapp.personal.messages': { provider: 'whatsapp', match: 'chat' },
   },
 };
-
-export function providerSupportsLabelRules(provider: string): boolean {
-  return Object.values(RULE_SOURCES.label).some(source => source.provider === provider);
-}
 
 export type PrivacyRuleSourceId =
   | 'dropbox.files'

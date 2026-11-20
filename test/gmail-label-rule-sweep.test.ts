@@ -34,6 +34,7 @@ import {
 } from '../src/workers/connector-store/index.ts';
 import { sweepOwnerRuleRaises, sweepLabelRuleRaises, LabelPageRejectedError, reopenLabelRuleSweep } from '../src/workers/connector-store/tier-rules-sweep.ts';
 import { moveTieredItem, moveTieredItemsLowering, resumeVerifiedTierMove } from '../src/workers/connector-store/tier-move.ts';
+import { applyOwnerOverrides } from '../src/workers/connector-store/tier-override-settle.ts';
 import { createLaneTieredStoreSet } from '../src/workers/connector-store/tiered-store-set.ts';
 import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
 import type { CredentialBroker } from '../src/workers/credential-broker/index.ts';
@@ -989,4 +990,33 @@ test('a completed label walk distinguishes a match that was already Private from
   expect(moveTieredItemsLowering([move(matched)])[0]).toHaveProperty('error');
   expect(await sweep(ACCOUNT, [])).toMatchObject({ pending: 0 });
   expect(moveTieredItemsLowering([move(matched)])[0]).toHaveProperty('result');
+});
+
+test('an override undo uses the completed label walk for a known nonmatch', async () => {
+  const { lane } = await ingestTwo();
+  const matched = itemIdentity('pruning');
+  const unmatched = itemIdentity('rota');
+  const privateTiers = { metadataTier: 'secure', contentTier: 'secure' } as const;
+  for (const item of [matched, unmatched]) {
+    lane.ledger.setOverride(item, { kind: 'tier', tier: 'secure' });
+  }
+  applyOwnerOverrides({ set: lane.tierSet });
+  for (const item of [matched, unmatched]) {
+    await moveTieredItem({ set: lane.tierSet, identity: item, target: privateTiers });
+  }
+  saveLabelRule();
+  expect(await sweepLabelRuleRaises({
+    set: lane.tierSet, provider: 'gmail', accountScope: ACCOUNT,
+    source: { listLabelled: async () => ({ ids: [matched.providerItemId] }) },
+  })).toMatchObject({ scanned: 1, pending: 0 });
+
+  lane.ledger.clearOverride(unmatched);
+  applyOwnerOverrides({ set: lane.tierSet });
+  expect(lane.ledger.getCurrent(unmatched)).toMatchObject({ state: 'moving', targetMetadataTier: 'private', targetContentTier: 'private' });
+  await moveTieredItem({ set: lane.tierSet, identity: unmatched, target: { metadataTier: 'private', contentTier: 'private' } });
+  expect(lane.internalStore.exportItemCopy(unmatched)?.chunks.length).toBeGreaterThan(0);
+
+  lane.ledger.clearOverride(matched);
+  applyOwnerOverrides({ set: lane.tierSet });
+  expect(lane.ledger.getCurrent(matched)).toMatchObject({ state: 'current', ...privateTiers });
 });

@@ -52,6 +52,7 @@ import { forgetSecretInSideStores, retireSecretRedactions, retrySecretSideStoreD
 import { findInLedger, runPassHere, runPassOffThread, turn, type LoopPass } from './loop-pass.ts';
 import { parentNamesContext } from './parent-context.ts';
 import { storedCopyOf, storedSignals } from './stored-names.ts';
+import { applicableProviderLabelRules, currentTierRulePolicy, labelRulesWithoutNonmatch, withTierRuleFence } from './tier-move-rule-policy.ts';
 import { emptyTierRejudgeReport, rejudgeStoredContent, settleRoutedSecrets } from './tier-rejudge.ts';
 import { reopenLabelRuleSweep } from './tier-rules-sweep.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
@@ -189,8 +190,8 @@ function* applyOwnerOverridesPass(options: ApplyOwnerOverridesOptions): LoopPass
  * what the owner's current rules ask for. A rule added while the override
  * stood skipped the item (tier-rules-sweep.ts leaves overridden items alone
  * and still counts itself done), so it is applied here, in the same write;
- * rules only raise. A label rule cannot be checked from what a store keeps:
- * wherever a raising label rule could apply to the item, it keeps the
+ * rules only raise. A completed label sweep can rule out a match. Wherever
+ * a raising label rule could still apply to the item, it keeps the
  * protection it has now, up to that rule's tier, so it is never exposed before
  * the provider has answered; and the provider account's label rules are made
  * pending again, so the next label sweep asks the provider which stored items
@@ -248,10 +249,9 @@ function restoreClearedOverride(set: TieredStoreSet, record: TierLedgerRecord): 
   const namesChanged = namesReceipt !== undefined && (!exported
     || namesReceipt !== contentNamesReason(stored, parentNamesContext(set, identity)));
   const matched = raising.filter((rule) => rule.match.kind !== 'label' && ownerRuleMatches(rule, stored, record.provider));
-  // Label rules for this item's source: whether the item carries the label is not known here,
-  // so it keeps the protection it has now (up to the rule's tier) and the provider is asked again (below).
-  const labelRules = raising.filter((rule) => rule.match.kind === 'label'
-    && ownerRuleMatches(rule, { labels: [rule.match.value] }, record.provider));
+  const applicableLabels = applicableProviderLabelRules(raising, record.provider);
+  const labelRules = applicableLabels.length > 0 ? withTierRuleFence(set,
+    () => labelRulesWithoutNonmatch(set, record, currentTierRulePolicy(set), applicableLabels)) : applicableLabels;
   const heldNow = maxTier(record.metadataTier, record.contentTier);
   let ruleTier: TierKey = matched.reduce<TierKey>((tier, rule) => maxTier(tier, rule.tier), 'public');
   for (const rule of labelRules) ruleTier = maxTier(ruleTier, minTier(rule.tier, heldNow));

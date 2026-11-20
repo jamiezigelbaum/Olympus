@@ -87,6 +87,7 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
   const sinkFor = (
     store: LocalConnectorStore,
     route?: ConnectorStoreRepresentationRestoreOptions['route'],
+    routed = true,
   ): ExtractionSink =>
     createConnectorStoreExtractionSink({
       store,
@@ -102,7 +103,7 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
       ...(route ? { route } : {}),
       recordContentTier: false,
       secretsFloor: false,
-      mediaJudgment: (sha256: string) => setMediaJudgment(set, sha256),
+      ...(routed ? { mediaJudgment: (sha256: string) => setMediaJudgment(set, sha256) } : {}),
     });
 
   return {
@@ -127,7 +128,7 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
         const route = tieredRepresentationLanding({
           set, anchor: legacy, classification: classificationNow,
         });
-        return sinkFor(legacy, route).accept(request);
+        return sinkFor(legacy, route, recorded?.routed === true).accept(request);
       }
 
       const record = ledger.getCurrent(identity);

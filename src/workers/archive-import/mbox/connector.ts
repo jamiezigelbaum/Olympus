@@ -25,6 +25,7 @@
  */
 import type { Email } from 'postal-mime';
 import type { RawItem, SourceClassificationSignals, SourceConnector, SourceConnectorListOptions, SourceConnectorListPage } from '../../../core/contracts.ts';
+import { MBOX_LABEL_CAPABILITY } from '../../../core/source-connector-labels.ts';
 import {
   ArchiveImportStoppedError,
   registerArchiveFormatConnector,
@@ -307,9 +308,8 @@ export function createMboxArchiveConnector(input: ArchiveConnectorInput): Source
     classificationSignals(item: RawItem): SourceClassificationSignals {
       const subject = typeof item.metadata.subject === 'string' ? item.metadata.subject : undefined;
       const sender = typeof item.metadata.from === 'string' && item.metadata.from ? item.metadata.from : undefined;
-      const labels = Array.isArray(item.metadata.labels)
-        ? item.metadata.labels.filter((label): label is string => typeof label === 'string')
-        : [];
+      const storedLabels = item.metadata[MBOX_LABEL_CAPABILITY.metadataKey];
+      const labels = Array.isArray(storedLabels) ? storedLabels.filter((label): label is string => typeof label === 'string') : [];
       return {
         ...(subject ? { title: subject } : {}),
         ...(sender ? { sender } : {}),

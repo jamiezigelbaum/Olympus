@@ -6,6 +6,7 @@ import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
 import { compactClassificationSignals, signalText, signalTexts } from '../../core/classification-signals.ts';
+import { READWISE_LABEL_CAPABILITY } from '../../core/source-connector-labels.ts';
 import type {
   RawItem,
   SourceClassificationSignals,
@@ -35,7 +36,7 @@ import { READWISE_LIBRARY_CORPUS_ID } from './corpus-adapter.ts';
 
 export const READWISE_CONNECTOR_ID = 'readwise_live';
 export const READWISE_SOURCE_ID = 'readwise.library';
-export const READWISE_PROVIDER = 'readwise';
+export const READWISE_PROVIDER = READWISE_LABEL_CAPABILITY.provider;
 export const READWISE_DAILY_REQUEST_BUDGET_ENV =
   'OLYMPUS_SOURCE_INDEX_READWISE_DAILY_API_REQUEST_BUDGET';
 export const READWISE_DAILY_REQUEST_BUDGET_STATE_PATH_ENV =
@@ -316,7 +317,7 @@ export function createReadwiseSourceConnector(
       if (client) return;
       const session = requireBearerTokenCredentialSession(await broker.issueSession({
         handle: credentialHandle,
-        provider: 'readwise',
+        provider: READWISE_PROVIDER,
         capability: 'readwise.sync',
         trustDomain: 'internal',
         purpose: 'Synchronize Readwise documents and highlights into the shared connector store.',
@@ -458,7 +459,7 @@ export function createReadwiseSourceConnector(
       return compactClassificationSignals({
         title: signalText(item.metadata, 'title'),
         sender: signalText(item.metadata, 'author'),
-        labels: signalTexts(item.metadata, 'tags'),
+        labels: signalTexts(item.metadata, READWISE_LABEL_CAPABILITY.metadataKey),
         folderKeys: [signalText(item.metadata, 'category'), signalText(item.metadata, 'location')]
           .filter((key): key is string => Boolean(key)),
       });

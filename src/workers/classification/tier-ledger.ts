@@ -2225,15 +2225,15 @@ export class TierLedger {
     return row?.digest;
   }
 
-  /** Bind a digestless Personal override to its receipt at set time, or its first observed body. */
-  observeOverrideText(identity: TierLedgerIdentity, text: string): ItemTierOverride | undefined {
+  /** Bind a digestless Personal override to its historical receipt, or to its first observed body when text is supplied. */
+  observeOverrideText(identity: TierLedgerIdentity, text?: string): ItemTierOverride | undefined {
     const row = this.db.query(ITEM_OVERRIDE_SQL).get(...idParams(identity)) as { override_json: string; set_at: string } | null;
     if (!row) return undefined;
     const override = overrideFromJson(row.override_json);
     if (override?.kind !== 'tier' || (override.tier !== 'private' && override.tier !== 'public')
       || override.setDigest !== undefined) return override;
     const setDigest = this.overrideHistoryDigest(identity, row.set_at)
-      ?? override.confirmedDigest ?? (!this.readOnly && text.trim() ? contentDigestReason(text) : undefined);
+      ?? override.confirmedDigest ?? (!this.readOnly && text?.trim() ? contentDigestReason(text) : undefined);
     if (!setDigest) return override;
     const bound = { ...override, setDigest };
     if (this.readOnly) return bound;

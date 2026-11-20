@@ -12,6 +12,7 @@
  */
 import type { SourceConnector } from './contracts.ts';
 import type { ScopeFileReader, ScopeFileVersion, ScopeRoot } from './scope-safe-fs.ts';
+import { EVERNOTE_LABEL_CAPABILITY, MBOX_LABEL_CAPABILITY, REFLECT_LABEL_CAPABILITY } from './source-connector-labels.ts';
 import type { SourceFamily, SourceTrustDomain } from './source-index/types.ts';
 
 /** How many first bytes the probe reads from a file. */
@@ -230,7 +231,7 @@ export const MBOX_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.freeze({
   id: 'mbox',
   label: 'Mail (mbox)',
   family: 'email',
-  provider: 'mbox',
+  provider: MBOX_LABEL_CAPABILITY.provider,
   chooseHint: 'a mail export (an .mbox file from Google Takeout or Thunderbird, or an .mbox folder from Apple Mail)',
   citationLabel: 'Imported mail',
   exportGuide: Object.freeze({
@@ -679,7 +680,7 @@ export const REFLECT_JSON_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.freez
   id: 'reflect-json',
   label: 'Reflect notes (JSON)',
   family: 'note',
-  provider: 'reflect',
+  provider: REFLECT_LABEL_CAPABILITY.provider,
   chooseHint: 'a Reflect export in JSON (the .json file, or the .zip that holds it)',
   citationLabel: 'Reflect',
   sourceCard: Object.freeze({ id: 'reflect.archive', label: 'Reflect' }),
@@ -705,7 +706,7 @@ export const REFLECT_MARKDOWN_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.f
   id: 'reflect-markdown',
   label: 'Reflect notes (Markdown zip)',
   family: 'note',
-  provider: 'reflect',
+  provider: REFLECT_LABEL_CAPABILITY.provider,
   chooseHint: 'a Reflect export as Markdown (the .zip file)',
   citationLabel: 'Reflect',
   sourceCard: Object.freeze({ id: 'reflect.archive', label: 'Reflect' }),
@@ -834,7 +835,7 @@ export const EVERNOTE_ENEX_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.free
   id: 'evernote-enex',
   label: 'Evernote export (.enex)',
   family: 'note',
-  provider: 'evernote',
+  provider: EVERNOTE_LABEL_CAPABILITY.provider,
   chooseHint: 'an Evernote export (the .enex file, or a folder of them)',
   citationLabel: 'Evernote',
   // The live Evernote source's card: one Evernote card shows the connection and lists these imports.

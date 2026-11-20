@@ -8,7 +8,7 @@ import { declaredConnectorStoreMountPaths, hasFolderLayout, placedRosterStores }
 import { DEFAULT_ACCOUNT_SLOT, readSourceRegistry } from './source-registry.ts';
 import { openConnectorStore, openTierLedger, openTierSniffer, restoredConnectorStoreHasBody, storeFileSchemaVersion, type StorageAccount } from './source-storage.ts';
 import {
-  classifyItemTiers, HELD_UNTIL_JUDGED_REASON, maxTier, ownerOverrideSecretReview, personalContentAuthorized,
+  classifyItemTiers, HELD_UNTIL_JUDGED_REASON, isImageMediaType, maxTier, ownerOverrideSecretReview, personalContentAuthorized,
   TIER_CLASSIFIER_VERSION, TIER_MAP_REVISION, type TierDecision, type TierKey,
 } from '../workers/classification/tier-classifier.ts';
 import { TIER_LEDGER_SQLITE_STORE_ID } from '../workers/classification/tier-ledger.ts';
@@ -21,6 +21,7 @@ import { settleSecretsCopies } from '../workers/connector-store/secrets-disposit
 import { storedSignals } from '../workers/connector-store/stored-names.ts';
 import { moveRestoredItemToHold, retireRestoredTierLowerings, TIER_MOVE_CONNECTOR_ID } from '../workers/connector-store/tier-move.ts';
 import { TieredStoreSet, tieredStoreSetLedgerPath, type TieredStoreLegSpec } from '../workers/connector-store/tiered-store-set.ts';
+import { imageJudgmentSignal } from '../workers/source-index/media-judge.ts';
 import type { SourceTrustDomain } from './source-index/types.ts';
 
 // Rollback can create a ledger for a Personal store from before it was
@@ -174,7 +175,8 @@ function placeRestoredBodies(set: TieredStoreSet, personal: LocalConnectorStore,
       const text = item.chunks.map(chunk => chunk.text).join('');
       if (!text.trim()) continue;
       const current = ledger.getCurrent(identity);
-      const override = ledger.getOverride(identity);
+      // A restored body cannot supply the original digest of a legacy override.
+      const override = ledger.observeOverrideText(identity);
       const copies = ledger.copies(identity);
       const copy = copies.find(copy => copy.corpusId === personal.corpusId && copy.layers !== 'metadata');
       if (override?.kind !== 'not_secret' && (override?.tier === 'secrets'
@@ -200,11 +202,12 @@ function placeRestoredBodies(set: TieredStoreSet, personal: LocalConnectorStore,
         && ((current.reasons.includes(HELD_UNTIL_JUDGED_REASON) && current.contentPending) || !!ownerOverrideSecretReview(current.reasons));
       if (current?.routed && !resuming && copy?.state !== 'current') continue;
       const ownerTier = override?.kind === 'tier' ? override.tier : undefined;
+      const photo = isImageMediaType(item.mimeType) ? personal.imageJudgmentForItem(identity) : undefined;
       if (current?.state === 'current' && !current.metadataPending
         && (current.contentTier === 'private' || current.contentTier === 'public')
         && (current.metadataTier === 'private' || current.metadataTier === 'public')
         && ownerTier !== 'secure' && (current.decidedBy !== 'override' || ownerTier !== undefined)
-        && personalContentAuthorized(current, text, override?.kind === 'not_secret', override)) continue;
+        && personalContentAuthorized(current, text, override?.kind === 'not_secret', override, photo && imageJudgmentSignal(photo))) continue;
       const record = set.adoptLegacyItem(identity)!;
       const privateCopy = ledger.copies(identity).find(copy => copy.trustDomain === 'secure_local' && copy.state === 'current' && copy.layers !== 'metadata');
       const privateText = privateCopy && set.store('secure_local')?.exportItemCopy(identity)?.chunks.map(chunk => chunk.boundedText).join('');

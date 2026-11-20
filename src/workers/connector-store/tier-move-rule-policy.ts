@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
 import { withOwnerConfigLease } from '../../core/owner-config-read.ts';
+import { connectorLabelCapability } from '../../core/source-connector-labels.ts';
 import { registeredInstalledTierClassification } from '../classification/installed-tier-classification-registry.ts';
-import { providerSupportsLabelRules } from '../classification/privacy-profile.ts';
 import { ownerRuleMatches, tierRank, type OwnerTierRule, type TierKey } from '../classification/tier-classifier.ts';
 import { copyServingLayer, labelSweepMetaKey, tierLedgerIdentityOfRecord, tierMoveOverrideConflict, trustDomainRank, type TierCopyPlan, type TierLedgerRecord } from '../classification/tier-ledger.ts';
 import { readDecisionRules, OLYMPUS_TIER_RULES_ENV, resolveTierRulesPath, tierRulesFileStamp } from '../classification/tier-rules.ts';
@@ -103,20 +103,33 @@ export function tierMoveRuleAuthorization(
     const signals = storedSignals(names);
     if (storedRules.some((rule) => ownerRuleMatches(rule, signals, record.provider))) return undefined;
   }
-  const labelRules = rules.filter((rule) => rule.match.kind === 'label');
-  if (labelRules.length > 0 && providerSupportsLabelRules(record.provider)) {
-    const { provider, accountScope, providerItemId } = identity;
-    const progress = readLabelState(set.ledger.readMeta(labelSweepMetaKey(provider, accountScope)));
-    if (!labelSweepHasPolicy(progress, policy, provider, accountScope)) return undefined;
-    const itemKey = labelEvidenceItemKey(providerItemId);
-    for (const rule of labelRules) {
-      const key = ruleKey(rule);
-      const walkId = progress.completed?.[key];
-      if (!walkId || !progress.done.includes(key) || progress.walks?.[key]
-        || set.ledger.labelRuleMatched(provider, accountScope, key, walkId, itemKey)) return undefined;
-    }
-  }
+  const labelRules = applicableProviderLabelRules(rules, record.provider);
+  if (labelRulesWithoutNonmatch(set, record, policy, labelRules).length > 0) return undefined;
   return policy.revision;
+}
+
+/** Label membership needs an observation only for providers that publish label signals. */
+export function applicableProviderLabelRules(rules: readonly OwnerTierRule[], provider: string): OwnerTierRule[] {
+  if (!connectorLabelCapability(provider)) return [];
+  return rules.filter(rule => rule.match.kind === 'label'
+    && ownerRuleMatches(rule, { labels: [rule.match.value] }, provider));
+}
+
+/** Keep matches and unresolved rules. A completed walk for this policy and account can prove a nonmatch. */
+export function labelRulesWithoutNonmatch(
+  set: TieredStoreSet, record: TierLedgerRecord, policy: TierRulePolicy, rules: readonly OwnerTierRule[],
+): readonly OwnerTierRule[] {
+  if (rules.length === 0 || policy.unavailable) return rules;
+  const { provider, accountScope, providerItemId } = record;
+  const progress = readLabelState(set.ledger.readMeta(labelSweepMetaKey(provider, accountScope)));
+  if (!labelSweepHasPolicy(progress, policy, provider, accountScope)) return rules;
+  const itemKey = labelEvidenceItemKey(providerItemId);
+  return rules.filter(rule => {
+    const key = ruleKey(rule);
+    const walkId = progress.completed?.[key];
+    return !walkId || !progress.done.includes(key) || !!progress.walks?.[key]
+      || set.ledger.labelRuleMatched(provider, accountScope, key, walkId, itemKey);
+  });
 }
 
 export interface LabelSweepState {

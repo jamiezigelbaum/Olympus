@@ -48,6 +48,7 @@ import type {
 } from '../../core/contracts.ts';
 import { childProviderItemId, CHILD_ITEM_ID_SEPARATOR } from '../../core/child-item-id.ts';
 import { compactClassificationSignals, signalText, signalTexts } from '../../core/classification-signals.ts';
+import { EVERNOTE_LABEL_CAPABILITY } from '../../core/source-connector-labels.ts';
 import { FileExtractionSourceError, type FileExtractionSourceErrorKind } from '../../core/file-extraction-source.ts';
 import { fileMimeTypeFromBytes } from '../../core/file-mime.ts';
 import { isMcpSourceError, type McpSourceErrorKind } from '../../core/mcp-source/errors.ts';
@@ -57,7 +58,7 @@ import { enmlToText } from '../archive-import/evernote/enml.ts';
 import { EvernoteAccountChanged, listNotebooks, listNotes, type EvernoteNoteHit } from './listing.ts';
 
 export const EVERNOTE_SOURCE_ID = 'evernote.notes';
-export const EVERNOTE_PROVIDER = 'evernote';
+export const EVERNOTE_PROVIDER = EVERNOTE_LABEL_CAPABILITY.provider;
 export const EVERNOTE_CONNECTOR_ID = 'evernote_live';
 export const EVERNOTE_MCP_SERVER_URL = 'https://mcp.evernote.com/mcp';
 export const EVERNOTE_MCP_SCOPE = 'read';
@@ -645,7 +646,7 @@ export function createEvernoteSourceConnector(options: EvernoteConnectorOptions)
         title: signalText(item.metadata, 'title'),
         // The notebook's id beside its name: an always-Private notebook rule names the id.
         folderKeys: [...(signalTexts(item.metadata, 'folderKeys') ?? []), ...(notebookId ? [notebookId] : [])],
-        labels: signalTexts(item.metadata, 'tags'),
+        labels: signalTexts(item.metadata, EVERNOTE_LABEL_CAPABILITY.metadataKey),
       });
     },
     lastOutcome: () => outcome,

@@ -50,6 +50,7 @@ import {
   type EmbeddingLedgerEntry,
 } from '../embedding-ledger.ts';
 import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
+import { imageJudgmentSignal } from '../source-index/media-judge.ts';
 import { TIER_MOVE_CONNECTOR_ID, type ConnectorStoreItemCopy } from './local-index.ts';
 import { settleSecretsCopies, type SecretsDisposition } from './secrets-disposition.ts';
 import { jobLedgerPathsToVisit, oweExtractionRereadAfterTierMove } from '../file-extraction/job-names.ts';
@@ -653,27 +654,37 @@ export function resumeVerifiedTierMove(set: TieredStoreSet, identity: TierLedger
 /** Retire uncommitted lowerings while restore has exclusive access to the stores. */
 export function retireRestoredTierLowerings(set: TieredStoreSet): void {
   const { ledger } = set;
-  for (const { key, value } of ledger.metaEntries(TIER_MOVE_VERIFIED_PREFIX)) {
-    const receipt = JSON.parse(value) as VerifiedMove;
-    if (receipt.result) continue;
-    const [provider, accountScope, conversation, providerItemId] = key.slice(TIER_MOVE_VERIFIED_PREFIX.length).split('\0');
-    if (!provider || !accountScope || !providerItemId) throw new Error('Invalid verified tier move identity.');
+  const receipts = new Map(ledger.metaEntries(TIER_MOVE_VERIFIED_PREFIX).map(({ key, value }) =>
+    [key.slice(TIER_MOVE_VERIFIED_PREFIX.length), JSON.parse(value) as VerifiedMove]));
+  const markers = new Map(ledger.metaEntries(TIER_MOVE_IMPORTS_PREFIX).map(({ key, value }) =>
+    [key.slice(TIER_MOVE_IMPORTS_PREFIX.length), JSON.parse(value) as LowerImports]));
+  for (const key of new Set([...receipts.keys(), ...markers.keys()])) {
+    const [provider, accountScope, conversation, providerItemId] = key.split('\0');
+    if (!provider || !accountScope || !providerItemId) throw new Error('Invalid tier move identity.');
     const identity = { provider, accountScope, providerItemId, ...(conversation ? { providerConversationId: conversation } : {}) };
     const current = ledger.getCurrent(identity);
-    if (!current || current.state !== 'moving' || receipt.generation !== current.generation) continue;
-    const imports = plannedLowerImports(receipt.generation, receipt.target, receipt.sources, receipt.placement);
-    if (imports.copies.length === 0 && !tiersLower(current, receipt.target)
-        && loweredCopyLayers(receipt.sources, receipt.placement).length === 0) continue;
+    if (!current) continue;
+    const receipt = receipts.get(key);
+    const verifiedPlan = receipt && !receipt.result && receipt.generation === current.generation
+      ? plannedLowerImports(receipt.generation, receipt.target, receipt.sources, receipt.placement)
+      : undefined;
+    const imports = markers.get(key) ?? verifiedPlan;
+    if (!imports || (imports.copies.length === 0 && !tiersLower(current, imports.target)
+        && loweredCopyLayers(imports.sources, imports.destination).length === 0)) continue;
 
     withTierRuleFence(set, () => ledger.withGenerationFence(identity, current.generation, () => {
-      if (placementIsRaise(receipt.sources, receipt.placement)) {
-        retainAuthorizedRaise(set, identity, current, receipt.target, receipt.sources, receipt.placement, receipt);
-      } else {
-        ledger.abandonMove(identity, { expectedGeneration: current.generation });
+      if (current.state === 'moving' && current.generation === imports.generation
+        && current.targetMetadataTier === imports.target.metadataTier && current.targetContentTier === imports.target.contentTier) {
+        if (placementIsRaise(imports.sources, imports.destination)) {
+          retainAuthorizedRaise(set, identity, current, imports.target, imports.sources, imports.destination,
+            verifiedPlan ? receipt : undefined);
+        } else {
+          ledger.abandonMove(identity, { expectedGeneration: current.generation });
+        }
+        if (verifiedPlan) ledger.writeMeta(purgeReceiptKey(identity), '');
       }
       discardTierMoveImports(ledger, identity, imports);
       settleDiscardedTierMoveImports(set, identity);
-      ledger.writeMeta(key, '');
     }));
   }
 }
@@ -718,13 +729,15 @@ function contentMoveRefusal(
 ): TierMoveContentChangedError | undefined {
   if (destination === 'internal' && copy?.chunks.length === 0) return undefined;
   const text = copy?.chunks.map(chunk => chunk.boundedText).join('');
+  const image = copy?.chunks.find(chunk => chunk.mediaJudgment)?.mediaJudgment;
   const receipts = evidence.reasons.filter(reason => reason.startsWith('content:sha256:'));
   const code = text === undefined ? 'content_no_copy'
     : evidence.contentPending ? 'content_still_pending'
     : receipts.length === 0 ? 'content_no_receipt'
     : receipts.length > 1 ? 'content_several_receipts'
     : receipts[0] !== contentDigestReason(text) ? 'content_receipt_mismatch'
-    : destination === 'internal' && !personalContentAuthorized(evidence, text, override?.kind === 'not_secret', override) ? 'content_no_authority'
+    : destination === 'internal' && !personalContentAuthorized(evidence, text, override?.kind === 'not_secret', override,
+      image && imageJudgmentSignal(image)) ? 'content_no_authority'
     : undefined;
   return code && new TierMoveContentChangedError('Stored content requires a matching settled verdict before moving.', code);
 }
