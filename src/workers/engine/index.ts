@@ -1,4 +1,3 @@
-import { storageAccountForCorpus } from '../../core/source-placement.ts';
 import { scopedEmbeddingOptions } from '../connector-store/embedding-plan.ts';
 import { effectiveItemVerdicts, type TierVisibilityScope } from '../connector-store/tier-visibility.ts';
 import { visibilityHere } from '../connector-store/child-visibility.ts';
@@ -209,7 +208,6 @@ import {
   CONNECTOR_STORE_FILTER_CAPABILITIES,
   assertSourceIndexSearchQuery,
   parseConnectorStoreIndexSearchRequestRecord,
-  requireCurrentFileEmbeddingScope,
 } from './http/connector-store-search-request.ts';
 import {
   type DashboardOAuthAttempt,
@@ -3571,6 +3569,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             const searchConnectorStore = async (store: LocalConnectorStore) => {
               const mandatoryScope = connectorStoreReadScope?.(store);
               if (mandatoryScope?.allowed === false) return undefined;
+              const readScopeSignature = JSON.stringify(mandatoryScope);
               const searchRequest = parseConnectorStoreIndexSearchRequestRecord(
                 // A sibling tier is searched under its own corpus id.
                 store === connectorStore ? record : { ...record, corpus_id: store.corpusId },
@@ -3634,6 +3633,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 store,
                 searchRequest,
                 result,
+                readScopeSignature,
                 scope: {
                   corpusId: store.corpusId,
                   ...(accountScope ? { accountScope } : {}),
@@ -3810,6 +3810,15 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               },
             };
             assertNoRawEmailFields(safeResult);
+            // A query embedding or another tier's search may have awaited
+            // while the account or its approval changed.
+            if (runs.some((run) => JSON.stringify(connectorStoreReadScope?.(run.store)) !== run.readScopeSignature)) {
+              throw new EmailSourceWorkerError(
+                403,
+                'source_index_policy_violation',
+                'The source read scope changed during search. Retry under the current scope.',
+              );
+            }
             return json(safeResult);
           }
           if (!corpusId) {
@@ -3838,21 +3847,6 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           }
           const connectorStore = connectorStoresByCorpusId.get(corpusId);
           if (connectorStore) {
-            const embeddingScope = connectorStore.family === 'file'
-              ? requireCurrentFileEmbeddingScope(connectorStore, connectorStoreReadScope)
-              : undefined;
-            const assertEmbeddingScopeCurrent = embeddingScope
-              ? () => {
-                  const current = requireCurrentFileEmbeddingScope(connectorStore, connectorStoreReadScope);
-                  if (current.signature !== embeddingScope.signature) {
-                    throw new EmailSourceWorkerError(
-                      403,
-                      'source_index_policy_violation',
-                      'The approved file-content scope changed before embedding dispatch; retry under the current approval.',
-                    );
-                  }
-                }
-              : undefined;
             const embeddingProvider = connectorStoreEmbeddingProviders.get(connectorStore.corpusId)
               ?? sourceIndexEmbeddingProvider;
             if (!embeddingProvider) {
@@ -3862,20 +3856,16 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 `Private source worker does not have an embedding provider configured for ${connectorStore.corpusId}.`,
               );
             }
-            const isGmail = storageAccountForCorpus(connectorStore, options.sourceDashboard?.corpusRegistry?.list()).sourceId === 'gmail.email';
-            const mailScope = isGmail ? options.gmailEmbeddingScope?.(connectorStore, embeddingProvider) : undefined;
-            if (isGmail && !mailScope?.allowed) {
-              throw new EmailSourceWorkerError(403, 'source_index_policy_violation', 'The retained mail account could not be verified for embedding.');
+            const scope = options.embeddingScopeFor?.(connectorStore, embeddingProvider);
+            if (!scope?.allowed) {
+              throw new EmailSourceWorkerError(403, 'source_index_policy_violation', 'This store has no current content scope for embedding.');
             }
             const modelId = asOptionalString(record.model_id);
             const maxPendingChunks = asOptionalNumber(record.max_pending_chunks);
             let result: Awaited<ReturnType<typeof connectorStore.embedChunks>>;
             try {
               result = await connectorStore.embedChunks({
-                ...(mailScope?.allowed ? scopedEmbeddingOptions(mailScope, embeddingProvider) : { provider: embeddingProvider }),
-                ...(embeddingScope?.accountScope ? { accountScope: embeddingScope.accountScope } : {}),
-                ...(embeddingScope?.filters ? { filters: embeddingScope.filters } : {}),
-                ...(assertEmbeddingScopeCurrent ? { assertAuthorized: assertEmbeddingScopeCurrent } : {}),
+                ...scopedEmbeddingOptions(scope, embeddingProvider),
                 ...(modelId ? { modelId } : {}),
                 ...(maxPendingChunks !== undefined ? { limit: maxPendingChunks } : {}),
               });

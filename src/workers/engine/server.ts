@@ -290,7 +290,7 @@ import {
 } from '../connector-store/tiered-store-set.ts';
 import { telegramArchiveTarget } from '../telegram-messages/archive-target.ts';
 import { EVERNOTE_SOURCE_ID } from '../evernote/connector.ts';
-import { EVERNOTE_SYNC_CAPABILITY, EVERNOTE_TIER_CORPUS_IDS } from '../evernote/live-sync.ts';
+import { EVERNOTE_SYNC_CAPABILITY } from '../evernote/live-sync.ts';
 import { createEvernoteRuntime } from '../evernote/runtime.ts';
 import {
   READWISE_SECURE_LIBRARY_CORPUS_ID,
@@ -316,6 +316,7 @@ import {
   openConnectorStore,
   openSecretLocations,
   openStoreReadOnlyForClose,
+  storageAccountForCorpus,
   recordAccountPlacement,
   recordProviderAccount,
   type StorageAccount,
@@ -415,10 +416,8 @@ import {
   type SourceScopePolicyRef,
 } from '../source-scope-runtime.ts';
 import {
-  getFileScopeSource,
   listFileScopeSources,
   requireFileScopeSource,
-  type FileScopeSourceDefinition,
 } from '../../core/file-scope-sources.ts';
 import { defaultFileSourceScopeStatePath, fileSourceScopeAllowsContent, fileSourceScopeAllowsMetadata, fileSourceScopeIdForProvider } from '../../core/source-scope-approval.ts';
 import { createGmailMailScopeBrowser, createGmailPickerRequestBudget } from '../google-connectors/gmail-scope-browser.ts';
@@ -561,9 +560,9 @@ import {
   createCloudSourceIndexEmbeddingProviderFromEnv,
   registerConnectorStoreEmbeddingLane,
   storeServedByMeaning,
-  storeEmbeddingScope,
   sourceStoresCouldEmbed,
 } from './runtime/embedding-providers.ts';
+import { createStoreEmbeddingScopeFor, fileScopeCredentialHandle, registeredStoreReadScope } from './runtime/store-scope-policies.ts';
 import { createWorkerSharedBuiltInModel,
   builtInModelWanted, createTierSnifferModel, stopBuiltInModelOnShutdown } from './runtime/judging-models.ts';
 import {
@@ -847,6 +846,7 @@ export async function main(): Promise<void> {
   // Imported archives' stores are served here although they are not yet on
   // the public plugin-config roster (archive-import/store.ts).
   const sourceCorpusRegistry = createSourceCorpusRegistry(withArchiveImportCorpora(olympusConfig.sourceIndex.corpusRegistry));
+  const storeSourceIds = new Map(olympusConfig.sourceIndex.corpusRegistry.corpora.map(({ corpusId, sourceId }) => [corpusId, sourceId]));
   const dropboxIngestionPolicy = loadDropboxIngestionPolicy({
     inlinePolicy: olympusConfig.sourceIndex.ingestionPolicies.dropboxPersonal?.policy,
     policyPath: olympusConfig.sourceIndex.ingestionPolicies.dropboxPersonal?.policyPath,
@@ -1811,6 +1811,9 @@ export async function main(): Promise<void> {
       ? gmailItemAccountScope([gmailInternalConnectorStore, gmailSecureConnectorStore], role)
       : role;
   };
+  function connectorStoreReadScope(store: LocalConnectorStore): ReturnType<typeof registeredConnectorStoreReadScope> {
+    return registeredConnectorStoreReadScope(store);
+  }
   // Read the grant and history locally on each dispatch and commit. An unreadable
   // registry, an ambiguous grant, or replaced store cannot stand in for a disconnect.
   const gmailRetainedAccountScope = (): string | undefined => {
@@ -2084,10 +2087,6 @@ export async function main(): Promise<void> {
     dropboxExtractionView = dropboxTierLane ? tieredExtractionView(dropboxTierLane.set) : undefined;
     if (dropboxConnectorStore) sourceLaneMounted([dropboxConnectorStore]);
   };
-  /** Whether a store is one of the Dropbox lane's tier stores. */
-  const isDropboxTierStore = (store: LocalConnectorStore): boolean => store === dropboxConnectorStore
-    || (dropboxTierLane !== undefined
-      && (store === dropboxTierLane.internal.current() || store === dropboxTierLane.public.current()));
   // Local files: the folders the owner chose on this computer. No credential;
   // the lane exists once the owner connects it and approves folders. Same three
   // per-tier stores, exclusion gate and tier set as Dropbox.
@@ -2165,6 +2164,9 @@ export async function main(): Promise<void> {
   const isLocalFilesTierStore = (store: LocalConnectorStore): boolean => store === localFilesConnectorStore
     || (localFilesTierLane !== undefined
       && (store === localFilesTierLane.internal.current() || store === localFilesTierLane.public.current()));
+  const sourceIdForStore = (store: LocalConnectorStore) => isLocalFilesTierStore(store)
+    ? LOCAL_FILES_SOURCE_ID
+    : storeSourceIds.get(store.corpusId) ?? storageAccountForCorpus(store).sourceId;
   // The watcher and the disk-identity resolver live as long as the worker; the
   // content scope and sync handler are rebuilt whenever the approval changes.
   const localFilesWatchHub = new WatchHub();
@@ -2903,7 +2905,7 @@ export async function main(): Promise<void> {
         }
       : {}),
   };
-  const connectorStoreReadScope = (store: LocalConnectorStore):
+  const registeredConnectorStoreReadScope = (store: LocalConnectorStore):
     { allowed: false } | {
       allowed: true;
       accountScope?: string;
@@ -2911,33 +2913,14 @@ export async function main(): Promise<void> {
       contentAllowed: boolean;
       contentFilters?: import('../connector-store/index.ts').ConnectorStoreSearchFilters;
     } => {
-    const sourceId = isDropboxTierStore(store)
-      ? 'dropbox.files' as const
-      : isLocalFilesTierStore(store)
-        ? LOCAL_FILES_SOURCE_ID
-      : store === googleDriveInternalConnectorStore || store === googleDriveSecureConnectorStore
-        || (store.corpusId === GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID && store === googleDriveTierLane?.publicStore?.current())
-        ? 'google_drive.docs' as const
-      : Object.values(EVERNOTE_TIER_CORPUS_IDS).includes(store.corpusId)
-        ? EVERNOTE_SOURCE_ID
-        : undefined;
+    const sourceId = sourceIdForStore(store);
     if (sourceId === LOCAL_FILES_SOURCE_ID && !localFilesCleanupRecovery?.ready()) return { allowed: false };
-    if (!sourceId) return { allowed: true, contentAllowed: true };
-    const approval = fileSourceScopeAuthority?.snapshot(sourceId);
-    if (!approval || approval.status !== 'approved') return { allowed: false };
-    const metadataScope = fileSourceScopeMetadataFilters(approval);
-    if (!metadataScope.allowed) return { allowed: false };
-    const contentScope = fileSourceScopeContentFilters(approval);
-    const scopeAccount = fileScopeAccount(sourceId);
-    if (!scopeAccount) return { allowed: false };
-    return {
-      allowed: true,
-      accountScope: scopeAccount.accountScope,
-      filters: metadataScope.filters,
-      contentAllowed: contentScope.allowed,
-      ...(contentScope.allowed && contentScope.filters ? { contentFilters: contentScope.filters } : {}),
-    };
+    return registeredStoreReadScope(sourceId, fileSourceScopeAuthority);
   };
+  const embeddingScopeFor = createStoreEmbeddingScopeFor({
+    sourceIdForStore, authority: fileSourceScopeAuthority, readScope: connectorStoreReadScope,
+    gmailRetainedAccountScope, gmailLiveProcessorVerified,
+  });
   const currentExtractionItems = (refs: readonly ExtractionItemRef[]): readonly boolean[] => {
     // One batched check per store for the whole queue; shared by readiness
     // and size stops so obsolete jobs are neither reported nor granted.
@@ -4696,10 +4679,6 @@ export async function main(): Promise<void> {
     // worker's own store registry: every mounted store of the source's corpora
     // (tier legs included, resolved per pass), each planned by the one
     // store-level rule whatever filled it. See withEmbeddingSweep.
-    const scopeRefs = new Map<string, SourceScopePolicyRef>();
-    for (const ref of [currentGmailScopeRef, currentGoogleDriveScopeRef, currentDropboxScopeRef, currentLocalFilesScopeRef]) {
-      if (ref) scopeRefs.set(ref.sourceId, ref);
-    }
     const sweptSources = withEmbeddingSweep(sources, (source) => {
       const corpusIds = new Set(sourceCorpusRegistry.list()
         .filter((corpus) => corpus.sourceId === source.sourceId)
@@ -4707,19 +4686,11 @@ export async function main(): Promise<void> {
       corpusIds.add(source.corpusId);
       const targets = () => connectorStores.flatMap((store) => {
         if (!corpusIds.has(store.corpusId)) return [];
+        const provider = connectorStoreEmbeddingProviders.get(store.corpusId);
         const target = planStoreEmbedding({
-          store,
-          provider: connectorStoreEmbeddingProviders.get(store.corpusId),
+          store, provider,
           servedByMeaning: storeServedByMeaning({ store, sovereigntyEngine, sourceCorpusRegistry, fullCorpusDefinitions }),
-          scope: storeEmbeddingScope({
-            store,
-            sourceId: source.sourceId,
-            scopeRef: scopeRefs.get(source.sourceId),
-            authority: fileSourceScopeAuthority,
-            readScope: connectorStoreReadScope,
-            provider: connectorStoreEmbeddingProviders.get(store.corpusId),
-            gmailRetainedAccountScope, gmailLiveProcessorVerified,
-          }),
+          scope: embeddingScopeFor(store, provider),
         });
         return target ? [target] : [];
       });
@@ -4900,28 +4871,6 @@ export async function main(): Promise<void> {
         : {}),
     };
   };
-  // The credential a registered file source reads, or none for a source that
-  // binds to this computer instead of an account. Function declarations, so
-  // they are hoisted: the connector-store read scope (assembled with the
-  // scheduler, earlier in main) calls them before this point is reached.
-  function fileScopeCredentialHandle(definition: FileScopeSourceDefinition): ConnectedCredentialHandle | undefined {
-    return definition.account === 'this_computer'
-      ? undefined
-      : selectedSourceCredentialHandle({
-          env: process.env,
-          pinEnvName: definition.pinEnvName ?? '',
-          provider: definition.provider as ConnectedCredentialHandle['provider'],
-          capability: definition.credentialCapability!,
-          handles: readActiveConnectedHandles(process.env),
-        });
-  }
-  function fileScopeAccount(sourceId: string): { accountScope: string } | undefined {
-    const definition = getFileScopeSource(sourceId);
-    if (!definition) return undefined;
-    if (definition.account === 'this_computer') return { accountScope: 'this_computer' };
-    const handle = fileScopeCredentialHandle(definition);
-    return handle ? { accountScope: handle.accountRole?.trim() || 'personal' } : undefined;
-  }
   const fileScopeBrowserFor = (sourceId: string): SourceFolderScopeBrowser => {
     const definition = requireFileScopeSource(sourceId);
     const handle = fileScopeCredentialHandle(definition);
@@ -5376,10 +5325,7 @@ export async function main(): Promise<void> {
     connectorStoreAccountScopes,
     connectorStorePrincipals,
     connectorStoreReadScope,
-    gmailEmbeddingScope: (store, provider) => storeEmbeddingScope({
-      store, provider, sourceId: GMAIL_SOURCE_ID, scopeRef: fileSourceScopeAuthority?.mailPolicyRef(),
-      authority: fileSourceScopeAuthority, gmailRetainedAccountScope, gmailLiveProcessorVerified, readScope: connectorStoreReadScope,
-    }),
+    embeddingScopeFor,
     ...(sourceScheduler ? { sourceScheduler } : {}),
     ...(sourceWatchPass
       ? {

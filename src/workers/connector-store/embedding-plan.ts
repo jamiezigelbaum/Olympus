@@ -21,7 +21,9 @@ import type { ConnectorStoreEmbeddingTarget, ConnectorStoreSearchFilters, LocalC
  */
 export const QUEUE_ONLY_METERED_EMBEDDING: Readonly<Record<string, string>> = {};
 
-/** Whether a store embeds every chunk still missing a vector, not only what a sync queued. */
+/**
+ * Whether a store embeds every chunk still missing a vector, not only what a sync queued.
+ */
 export function storeEmbeddingCatchesUp(corpusId: string, provider: Pick<SourceEmbeddingProvider, 'provider' | 'backend'>): boolean {
   // The built-in model costs nothing per item, so no cost decision applies to it.
   if (provider.provider === 'built-in' && provider.backend === 'local') return true;
@@ -40,26 +42,37 @@ export type StoreEmbeddingScope =
     accountScope?: string;
     filters?: ConnectorStoreSearchFilters;
     excludeAllEmbeddingHolds?: true;
-    /** Binds the store's provider to the current approval, so a pass stops when it changes. */
+    assertAuthorized?: () => void;
+    /**
+     * Binds the store's provider to the current approval, so a pass stops when it changes.
+     */
     bind?: (provider: SourceEmbeddingProvider) => SourceEmbeddingProvider;
   };
 
 export interface StoreEmbeddingFacts {
   store: LocalConnectorStore;
-  /** The identity registered for the store's tier; none means keyword-only. */
+  /**
+   * The identity registered for the store's tier; none means keyword-only.
+   */
   provider: SourceEmbeddingProvider | undefined;
-  /** Corpus served hybrid, embedding policy not disabled, tier retrieval not lexical-only. */
+  /**
+   * Corpus served hybrid, embedding policy not disabled, tier retrieval not lexical-only.
+   */
   servedByMeaning: boolean;
   scope: StoreEmbeddingScope;
 }
 
-/** Provider and predicates for every write route, including an explicit embed. */
+/**
+ * Provider and predicates for every write route, including an explicit embed.
+ */
 export function scopedEmbeddingOptions(scope: Extract<StoreEmbeddingScope, { allowed: true }>, provider: SourceEmbeddingProvider) {
   const { allowed: _allowed, bind, ...predicates } = scope;
   return { ...predicates, provider: bind ? bind(provider) : provider };
 }
 
-/** The sweep target for one store, or undefined when the store is not indexed for meaning. */
+/**
+ * The sweep target for one store, or undefined when the store is not indexed for meaning.
+ */
 export function planStoreEmbedding(facts: StoreEmbeddingFacts): ConnectorStoreEmbeddingTarget | undefined {
   const { store, provider, scope } = facts;
   if (!provider || !facts.servedByMeaning) return undefined;
