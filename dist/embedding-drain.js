@@ -222,6 +222,26 @@ import { closeSync as closeSync2, existsSync as existsSync2, mkdirSync as mkdirS
 import { mkdir } from "node:fs/promises";
 import { createRequire as createRequire3 } from "node:module";
 import { dirname as dirname3 } from "node:path";
+
+// src/core/http-timeout.ts
+function untilAborted(work, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      work.catch(() => {
+        return;
+      });
+      reject(signal.reason);
+      return;
+    }
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    work.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
+}
+var NULL_BODY_STATUSES = new Set([101, 204, 205, 304]);
+var DEFAULT_BOUNDED_RESPONSE_LIMIT_BYTES = 64 * 1024;
+
+// src/core/file-lease.ts
 var DEFAULT_OPTIONS = {
   acquireTimeoutMs: 1e4,
   pollIntervalMs: 25
@@ -252,6 +272,7 @@ async function withFileLease(targetPath, callback, options = {}) {
   const owner = await acquireFileLease(targetPath, normalized);
   let stopHeartbeat;
   try {
+    normalized.signal?.throwIfAborted();
     if (normalized.heartbeat)
       stopHeartbeat = startLeaseHeartbeat(targetPath, normalized);
     return await callback(owner);
@@ -314,12 +335,14 @@ class AsyncFileLeaseOwner {
 }
 async function acquireFileLease(targetPath, options) {
   const lockPath = lockPathFor(targetPath);
-  const { timers } = options;
+  const { signal, timers } = options;
+  signal?.throwIfAborted();
   let lastProgressAt = timers.now();
   let lastHeartbeat;
   const deadline = lastProgressAt + options.acquireTimeoutMs;
   await mkdir(dirname3(lockPath), { recursive: true, mode: 448 });
   while (true) {
+    signal?.throwIfAborted();
     const lock = tryKernelLock(lockPath, options.mode);
     if (lock)
       return new AsyncFileLeaseOwner(targetPath, lockPath, lock);
@@ -333,7 +356,8 @@ async function acquireFileLease(targetPath, options) {
         throw new FileLeaseBusyError(targetPath);
     } else if (timers.now() >= deadline)
       throw new FileLeaseBusyError(targetPath);
-    await timers.sleep(options.pollIntervalMs);
+    const delay = timers.sleep(options.pollIntervalMs);
+    await (signal ? untilAborted(delay, signal) : delay);
   }
 }
 function readLeaseHeartbeat(targetPath) {
@@ -449,6 +473,7 @@ function lockPathFor(targetPath) {
 function normalizeOptions(options) {
   return {
     mode: options.mode ?? "exclusive",
+    ...options.signal ? { signal: options.signal } : {},
     acquireTimeoutMs: positiveInteger(options.acquireTimeoutMs, DEFAULT_OPTIONS.acquireTimeoutMs),
     pollIntervalMs: positiveInteger(options.pollIntervalMs, DEFAULT_OPTIONS.pollIntervalMs),
     ...options.heartbeat ? { heartbeat: {
@@ -3190,24 +3215,6 @@ function modelThread() {
 
 // src/workers/source-index/pinned-download.ts
 import { createHash } from "node:crypto";
-
-// src/core/http-timeout.ts
-function untilAborted(work, signal) {
-  return new Promise((resolve, reject) => {
-    if (signal.aborted) {
-      work.catch(() => {
-        return;
-      });
-      reject(signal.reason);
-      return;
-    }
-    const onAbort = () => reject(signal.reason);
-    signal.addEventListener("abort", onAbort, { once: true });
-    work.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
-  });
-}
-var NULL_BODY_STATUSES = new Set([101, 204, 205, 304]);
-var DEFAULT_BOUNDED_RESPONSE_LIMIT_BYTES = 64 * 1024;
 
 // src/workers/control-path-headroom.ts
 import { isMainThread } from "node:worker_threads";
@@ -9956,6 +9963,56 @@ registerBuiltIn({
 var GMAIL_SCOPE_SENDER_SAMPLE = 100;
 var GMAIL_SCOPE_BROWSE_MAX_REQUESTS = 1 + 5 + 2 + GMAIL_SCOPE_SENDER_SAMPLE;
 
+// src/core/provider-account-identity.ts
+var DEFAULT_PROVIDER_IDENTITY_ENDPOINTS = {
+  dropbox: "https://api.dropboxapi.com/2/users/get_current_account",
+  gmail: new URL("users/me/profile", "https://gmail.googleapis.com/gmail/v1/").toString(),
+  google_drive: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress,permissionId)",
+  x: "https://api.x.com/2/users/me",
+  google_tokeninfo: "https://oauth2.googleapis.com/tokeninfo"
+};
+var IDENTITY_RESPONSE_LIMIT_BYTES = 64 * 1024;
+var IMMUTABLE_LABEL_KINDS = ["dbid", "google-sub", "google-perm"];
+var LABEL = /^([a-z-]+):[A-Za-z0-9_-]{1,150}$/;
+function parseProviderAccountId(id) {
+  const labels = new Map;
+  for (const label of id.trim().split(".")) {
+    const kind = LABEL.exec(label)?.[1];
+    if (!kind || kind !== "google" && !IMMUTABLE_LABEL_KINDS.includes(kind))
+      return;
+    if (labels.has(kind))
+      return;
+    labels.set(kind, label);
+  }
+  return labels.size > 0 ? labels : undefined;
+}
+function compareProviderAccounts(recorded, observed) {
+  const a = parseProviderAccountId(recorded);
+  const b = parseProviderAccountId(observed);
+  if (!a || !b)
+    return recorded.trim() === observed.trim() ? "same" : "different";
+  let shared = false;
+  for (const kind of IMMUTABLE_LABEL_KINDS) {
+    const left = a.get(kind);
+    const right = b.get(kind);
+    if (left === undefined || right === undefined)
+      continue;
+    if (left !== right)
+      return "different";
+    shared = true;
+  }
+  if (shared)
+    return "same";
+  if (hasImmutableAccountLabel(recorded))
+    return "unproven";
+  const address = a.get("google");
+  return address !== undefined && address === b.get("google") ? "same" : "different";
+}
+function hasImmutableAccountLabel(id) {
+  const labels = parseProviderAccountId(id);
+  return labels !== undefined && IMMUTABLE_LABEL_KINDS.some((kind) => labels.has(kind));
+}
+
 // src/core/sender-rules.ts
 var MAX_FROM_HEADER_CHARS = 4096;
 var LOCAL_CHAR = /[^\s<>"(),;:@[\]\\]/;
@@ -10550,6 +10607,9 @@ var PROCESS_MINT_IN_FLIGHT = new Map;
 var PROCESS_MINT_FAILURE_BACKOFF = new Map;
 var OAUTH2_TOKEN_RESPONSE_LIMIT_BYTES = 64 * 1024;
 var TOKEN_UNISSUED_STATUSES = new Set([401, 403, 404, 405, 415, 429]);
+
+// src/workers/source-account-guard.ts
+var sourceExclusiveRunners = new Map;
 
 // src/workers/email-source/ingest-filter.ts
 var OTP_SUBJECT = new RegExp([
@@ -13515,6 +13575,41 @@ class TierLedger {
         WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?`).run(...idParams(identity));
       return true;
     })();
+  }
+  *overPrivateCountSteps() {
+    return yield { mode: "all", params: [], sql: `
+      WITH verdicts AS (
+        SELECT provider, account_scope, conversation_key, provider_item_id, decided_at,
+          CASE WHEN state = 'moving' THEN target_metadata_tier ELSE metadata_tier END AS vm,
+          CASE WHEN state = 'moving' THEN target_content_tier ELSE content_tier END AS vc
+        FROM tier_items
+        -- A pending item is held at least Private, regardless of either layer's verdict.
+        WHERE state <> 'pending' AND metadata_pending = 0 AND content_pending = 0
+      ), needs AS (
+        SELECT *,
+          CASE vm WHEN 'secrets' THEN 3 WHEN 'secure' THEN 2 WHEN 'private' THEN 1 ELSE 0 END AS need_m,
+          CASE WHEN vc = 'secrets' OR vm = 'secrets' THEN 3
+               WHEN vc = 'secure' OR vm = 'secure' THEN 2
+               WHEN vc = 'private' OR vm = 'private' THEN 1 ELSE 0 END AS need_c
+        FROM verdicts
+      )
+      SELECT n.provider, COUNT(*) AS items, MIN(n.decided_at) AS oldest_since
+      FROM needs n
+      WHERE EXISTS (
+        SELECT 1 FROM tier_copies c
+        WHERE c.provider = n.provider AND c.account_scope = n.account_scope
+          AND c.conversation_key = n.conversation_key AND c.provider_item_id = n.provider_item_id
+          AND c.copy_state = 'current'
+          AND (
+            (c.layers IN ('metadata', 'both') AND
+              (CASE c.trust_domain WHEN 'secure_local' THEN 2 WHEN 'internal' THEN 1 ELSE 0 END) > n.need_m)
+            OR (c.layers IN ('content', 'both') AND
+              (CASE c.trust_domain WHEN 'secure_local' THEN 2 WHEN 'internal' THEN 1 ELSE 0 END) > n.need_c)
+          )
+      )
+      GROUP BY n.provider
+      ORDER BY n.provider
+    ` };
   }
   counts() {
     const byState = { pending: 0, current: 0, moving: 0 };
@@ -16614,7 +16709,7 @@ function applyStoreTotalsCount(db, count, nowIso, options = {}) {
     const remove = db.query("DELETE FROM store_totals WHERE name = ?");
     names.delete(STORE_TOTALS_WRITES);
     for (const name of names) {
-      const since = (keptNow.get(name) ?? 0) - (keptThen.get(name) ?? 0);
+      const since = options.countIsCurrent ? 0 : (keptNow.get(name) ?? 0) - (keptThen.get(name) ?? 0);
       const exact = (counted.get(name) ?? 0) + since;
       drift += Math.abs((keptNow.get(name) ?? 0) - exact);
       if (exact === 0 && name.startsWith("vectors:"))
@@ -16623,7 +16718,7 @@ function applyStoreTotalsCount(db, count, nowIso, options = {}) {
         write.run(name, exact);
     }
     db.query(`INSERT INTO store_totals_state (id, reconciled_at, drift) VALUES (1, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET reconciled_at = excluded.reconciled_at, drift = excluded.drift`).run(nowIso, options.exact === false ? WALK_OWED_LATER : drift);
+      ON CONFLICT(id) DO UPDATE SET reconciled_at = excluded.reconciled_at, drift = excluded.drift`).run(nowIso, drift);
   })();
   return drift;
 }
@@ -16994,6 +17089,7 @@ class GeminiSourceEmbeddingProvider {
   async embedBatch(inputs, options) {
     const controller = new AbortController;
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    const signal = options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal;
     const budget = { deadlineAtMs: Date.now() + this.timeoutMs, budgetMs: this.timeoutMs };
     try {
       const modelPath = `models/${this.modelId}`;
@@ -17022,7 +17118,7 @@ class GeminiSourceEmbeddingProvider {
         body: JSON.stringify({
           requests
         }),
-        signal: controller.signal
+        signal
       }, budget);
       if (!response.ok) {
         throw new OperationError("source_index_error", `Gemini source embedding endpoint returned HTTP ${response.status}.`, "Check the configured Gemini API key, model, and source-index embedding policy.");
@@ -17182,9 +17278,10 @@ class OpenAICompatibleSourceEmbeddingProvider {
   async embedBatch(inputs, options) {
     const controller = new AbortController;
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    const signal = options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal;
     const budget = { deadlineAtMs: Date.now() + this.timeoutMs, budgetMs: this.timeoutMs };
     try {
-      await this.preflight?.(controller.signal);
+      await this.preflight?.(signal);
       const response = await fetchEmbeddingResponse(this.fetchImpl, this.provider, `${this.baseUrl}/embeddings`, {
         method: "POST",
         headers: this.requestHeaders(),
@@ -17193,7 +17290,7 @@ class OpenAICompatibleSourceEmbeddingProvider {
           input: inputs.map((input) => this.formatInput(input, options.taskType)),
           ...this.sendDimensions ? { dimensions: this.dimension } : {}
         }),
-        signal: controller.signal
+        signal
       }, budget);
       if (!response.ok) {
         throw new OperationError("source_index_error", `${this.provider} source embedding endpoint returned HTTP ${response.status}.`, "Check the configured source-index embedding endpoint, model, and credential.");
@@ -17752,6 +17849,9 @@ function backfillVectorDigests(db, modelId, maxRows = 128) {
   const rows = db.query(query.sql).all(...query.params);
   return applyVectorDigestWindow(db, modelId, state.cursorRowid, rows, maxRows);
 }
+
+// src/workers/source-index/status-count-reuse.ts
+var STORE_UNCHANGED_REUSE_MS = 30 * 60000;
 
 // src/core/sqlite-rows.ts
 function* iterateRows(db, sql, ...params) {
@@ -20070,56 +20170,6 @@ function dispatch() {
   }
 }
 
-// src/core/provider-account-identity.ts
-var DEFAULT_PROVIDER_IDENTITY_ENDPOINTS = {
-  dropbox: "https://api.dropboxapi.com/2/users/get_current_account",
-  gmail: new URL("users/me/profile", "https://gmail.googleapis.com/gmail/v1/").toString(),
-  google_drive: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress,permissionId)",
-  x: "https://api.x.com/2/users/me",
-  google_tokeninfo: "https://oauth2.googleapis.com/tokeninfo"
-};
-var IDENTITY_RESPONSE_LIMIT_BYTES = 64 * 1024;
-var IMMUTABLE_LABEL_KINDS = ["dbid", "google-sub", "google-perm"];
-var LABEL = /^([a-z-]+):[A-Za-z0-9_-]{1,150}$/;
-function parseProviderAccountId(id) {
-  const labels = new Map;
-  for (const label of id.trim().split(".")) {
-    const kind = LABEL.exec(label)?.[1];
-    if (!kind || kind !== "google" && !IMMUTABLE_LABEL_KINDS.includes(kind))
-      return;
-    if (labels.has(kind))
-      return;
-    labels.set(kind, label);
-  }
-  return labels.size > 0 ? labels : undefined;
-}
-function compareProviderAccounts(recorded, observed) {
-  const a = parseProviderAccountId(recorded);
-  const b = parseProviderAccountId(observed);
-  if (!a || !b)
-    return recorded.trim() === observed.trim() ? "same" : "different";
-  let shared = false;
-  for (const kind of IMMUTABLE_LABEL_KINDS) {
-    const left = a.get(kind);
-    const right = b.get(kind);
-    if (left === undefined || right === undefined)
-      continue;
-    if (left !== right)
-      return "different";
-    shared = true;
-  }
-  if (shared)
-    return "same";
-  if (hasImmutableAccountLabel(recorded))
-    return "unproven";
-  const address = a.get("google");
-  return address !== undefined && address === b.get("google") ? "same" : "different";
-}
-function hasImmutableAccountLabel(id) {
-  const labels = parseProviderAccountId(id);
-  return labels !== undefined && IMMUTABLE_LABEL_KINDS.some((kind) => labels.has(kind));
-}
-
 // src/workers/connector-store/local-index.ts
 import { createHash as createHash13, randomUUID as randomUUID9 } from "node:crypto";
 import { closeSync as closeSync11, existsSync as existsSync22, fsyncSync as fsyncSync3, lstatSync as lstatSync9, mkdirSync as mkdirSync13, openSync as openSync11, statSync as statSync13, statfsSync } from "node:fs";
@@ -21701,7 +21751,7 @@ function parentIdentityField(child) {
   return identity ? { identity } : {};
 }
 function childVisibilityUnchanged(lane) {
-  const stores = lane.stores();
+  const stores = [...lane.stores()];
   const ledger = lane.ledger();
   const ledgerMarker = ledger?.changeMarker();
   const markers = stores.map((store) => store.childVisibilityMarker?.());
@@ -21715,6 +21765,12 @@ function parentKey(parent) {
   return [parent.provider, parent.accountScope, parent.parentLocalItemId].join("\x00");
 }
 var HIDDEN = { visible: false, gone: false };
+function parentVerdicts(lane, parents) {
+  return visibilityHere(parentVerdictsSteps(lane, parents));
+}
+function parentVerdictsOffThread(lane, parents) {
+  return visibilityAwaited(() => parentVerdictsSteps(lane, parents), lane);
+}
 function* parentVerdictsSteps(lane, parents) {
   const unique = new Map;
   for (const parent of parents)
@@ -24943,7 +24999,7 @@ function runHiddenStepsHere(steps) {
   }
   return step.value;
 }
-async function runHiddenStepsInTurns(steps) {
+async function runHiddenStepsInTurns(steps, progress) {
   await ingestionTurn();
   let step = steps.next();
   while (!step.done) {
@@ -24955,6 +25011,7 @@ async function runHiddenStepsInTurns(steps) {
       continue;
     }
     step = steps.next(found);
+    progress?.();
   }
   return step.value;
 }
@@ -25088,6 +25145,11 @@ class ConnectorStoreLocatorIdentityIndexNotReadyError extends Error {
 }
 var CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding";
 var CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000;
+async function embeddingStep(work, signal) {
+  signal?.throwIfAborted();
+  const result = work();
+  return signal ? untilAborted(Promise.resolve(result), signal) : result;
+}
 var CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256;
 var CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE = 512;
 var CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
@@ -26297,11 +26359,11 @@ class LocalConnectorStore {
     })();
     return this.tierHiddenCountsRefresh;
   }
-  async tierHiddenItemPksInTurns() {
-    const base = await runHiddenStepsInTurns(this.tierLedgerHiddenSteps());
-    return this.withHiddenChildren(base, await this.hiddenChildItemPksInTurns());
+  async tierHiddenItemPksInTurns(progress) {
+    const base = await runHiddenStepsInTurns(this.tierLedgerHiddenSteps(), progress);
+    return this.withHiddenChildren(base, await this.hiddenChildItemPksInTurns(progress));
   }
-  async hiddenChildItemPksInTurns() {
+  async hiddenChildItemPksInTurns(progress) {
     const steps = this.hiddenChildReadSteps();
     let next = steps.next();
     while (!next.done) {
@@ -26313,6 +26375,7 @@ class LocalConnectorStore {
         continue;
       }
       next = steps.next(result);
+      progress?.();
     }
     return next.value;
   }
@@ -26454,12 +26517,12 @@ class LocalConnectorStore {
       return result;
     }, here) };
   }
-  hiddenChangeFinders(ledger, ledgerAfter, storeAfter) {
+  hiddenChangeFinders(ledger, ledgerAfter, storeAfter, pinCursor = false) {
     const ledgerCursor = ledger.readSteps(hiddenVisibilityFeedReads("tier_visibility_changes")).cursor;
     const storeCursor = this.visibilityFeedPresent ? this.readHere(hiddenVisibilityFeedReads("main.item_visibility_feed")).cursor : 0;
     return {
-      ledger: this.incrementalHiddenFinder(ledger, () => ledger.visibilityChangesSince(ledgerAfter), () => ledgerReadOffThread(ledger, hiddenVisibilityFeedReads("tier_visibility_changes", ledgerAfter, ledgerCursor), BACKGROUND_READS)),
-      store: this.incrementalHiddenFinder(ledger, () => this.itemVisibilityChangesSince(storeAfter), () => this.visibilityFeedPresent ? withOffThreadSnapshot(this.dbPath, async (read) => {
+      ledger: this.incrementalHiddenFinder(ledger, () => pinCursor ? ledger.readSteps(hiddenVisibilityFeedReads("tier_visibility_changes", ledgerAfter, ledgerCursor)) : ledger.visibilityChangesSince(ledgerAfter), () => ledgerReadOffThread(ledger, hiddenVisibilityFeedReads("tier_visibility_changes", ledgerAfter, ledgerCursor), BACKGROUND_READS)),
+      store: this.incrementalHiddenFinder(ledger, () => pinCursor ? this.readHere(hiddenVisibilityFeedReads("main.item_visibility_feed", storeAfter, storeCursor)) : this.itemVisibilityChangesSince(storeAfter), () => this.visibilityFeedPresent ? withOffThreadSnapshot(this.dbPath, async (read) => {
         const steps = hiddenVisibilityFeedReads("main.item_visibility_feed", storeAfter, storeCursor);
         let next = steps.next();
         while (!next.done)
@@ -27393,6 +27456,7 @@ class LocalConnectorStore {
     if (!this.childItemColumnsPresent)
       return [];
     const lane = this.childVisibilityLane();
+    const attachedLane = this.childLane;
     const prior = this.hiddenChildMemo;
     let ledger;
     let stores = [];
@@ -27408,7 +27472,7 @@ class LocalConnectorStore {
       stores = members;
       const same = prior?.ledger === ledger && prior.storeCursors.size === stores.length && stores.every((store) => prior.storeCursors.has(store));
       if (this.hiddenSetIncrementalOffLoop) {
-        const finders = stores.map((store) => [store, store.hiddenChangeFinders(ledger, same ? prior.ledgerCursor : undefined, same ? prior.storeCursors.get(store) : undefined)]);
+        const finders = stores.map((store) => [store, store.hiddenChangeFinders(ledger, same ? prior.ledgerCursor : undefined, same ? prior.storeCursors.get(store) : undefined, true)]);
         const ledgerFinder = finders[0][1].ledger;
         ledgerChanges = yield ledgerFinder;
         for (const [store, finder] of finders)
@@ -27466,7 +27530,7 @@ class LocalConnectorStore {
         const parents = [...affected.values()];
         for (let offset = 0;offset < parents.length; offset += HIDDEN_CHILD_PARENT_SLICE) {
           const slice = parents.slice(offset, offset + HIDDEN_CHILD_PARENT_SLICE);
-          const verdicts = yield* parentVerdictsSteps(lane, slice);
+          const verdicts = yield* visibilityRead(() => parentVerdicts(lane, slice), () => parentVerdictsOffThread(lane, slice));
           for (const [key, value] of yield* this.hiddenChildParentEntriesSteps(lane, slice, verdicts))
             updates.set(key, value);
         }
@@ -27477,7 +27541,7 @@ class LocalConnectorStore {
     let stable = false;
     try {
       const current = lane.stores();
-      stable = lane.ledger() === ledger && this.visibilityLedger() === ledger && current.length === stores.length && stores.every((store) => current.includes(store) && store.visibilityFeedPresent);
+      stable = this.childLane === attachedLane && lane.ledger() === ledger && this.visibilityLedger() === ledger && current.length === stores.length && stores.every((store) => current.includes(store) && store.visibilityFeedPresent);
     } catch {}
     if (!stable) {
       if (full)
@@ -27625,7 +27689,7 @@ ${parentKey(ref)}`, { ref, origin });
           ...group.provider_conversation_id ? { providerConversationId: group.provider_conversation_id } : {}
         })
       }));
-      const verdicts = yield* parentVerdictsSteps(lane, slice);
+      const verdicts = yield* visibilityRead(() => parentVerdicts(lane, slice), () => parentVerdictsOffThread(lane, slice));
       if (entries)
         for (const [key, value] of yield* this.hiddenChildParentEntriesSteps(lane, slice, verdicts))
           entries.set(key, value);
@@ -27728,8 +27792,10 @@ ${parentKey(ref)}`, { ref, origin });
         SELECT item_pk, sync_run_id FROM items
         WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ? AND tombstoned = 0
       `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
-      if (row)
+      if (row) {
         this.rememberItemOwner(row.item_pk, connectorId, "observed", row.sync_run_id, nowIso(), "provider_listing");
+        this.db.query("INSERT INTO store_totals (name, n) VALUES (?, 1) ON CONFLICT(name) DO UPDATE SET n = n + 1").run(STORE_TOTALS_WRITES);
+      }
     })();
   }
   reobserveRoutedCopy(item, connectorId, ownershipKind, syncRunId) {
@@ -28172,7 +28238,7 @@ ${parentKey(ref)}`, { ref, origin });
     this.releaseUnreferencedChunkMedia();
     return result;
   }
-  async judgeUnjudgedMedia(provider, rows, assertAuthorized) {
+  async judgeUnjudgedMedia(provider, rows, assertAuthorized, timing) {
     const judgeId = mediaJudgeId(provider);
     const seen = new Set;
     const images = [];
@@ -28191,12 +28257,16 @@ ${parentKey(ref)}`, { ref, origin });
     }
     let judged = 0;
     for (let offset = 0;offset < images.length; offset += EMBEDDING_BATCH_SIZE) {
+      timing?.progress();
+      if (timing?.holds?.())
+        break;
       const batch = images.slice(offset, offset + EMBEDDING_BATCH_SIZE);
       let judgments;
       try {
-        await assertAuthorized?.();
-        judgments = await judgeMediaImages(provider, batch);
+        await embeddingStep(() => assertAuthorized?.(), timing?.signal);
+        judgments = await embeddingStep(() => judgeMediaImages(provider, batch), timing?.signal);
       } catch {
+        timing?.signal.throwIfAborted();
         return judged;
       }
       this.db.transaction(() => {
@@ -29038,6 +29108,16 @@ ${parentKey(ref)}`, { ref, origin });
     if (!row || row.tombstoned === 1)
       return;
     return { chunkCount: row.chunk_count, ...row.authored_at ? { authoredAt: row.authored_at } : {} };
+  }
+  async unobservedContentCount(provider, account, connectorId) {
+    const sql = `SELECT COUNT(*) AS n FROM items i
+      WHERE i.provider = ? AND i.account_scope = ? AND i.tombstoned = 0 AND i.parent_local_item_id IS NULL
+        AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
+        AND NOT EXISTS (SELECT 1 FROM item_owners o
+          WHERE o.item_pk = i.item_pk AND o.connector_id = ? AND o.ownership_kind = 'observed')`;
+    const params = [provider, account, connectorId];
+    const row = offThreadReadsSupported(this.dbPath) ? await readInBackground(this.dbPath, { sql, params, mode: "get" }) : this.db.query(sql).get(...params);
+    return row.n;
   }
   storedItemState(identity) {
     const row = this.db.query(`
@@ -31972,55 +32052,75 @@ ${parentKey(ref)}`, { ref, origin });
     `).all(modelId, ...params, limit + (failed?.size ?? 0));
     return rows.map((row) => row.local_item_id).filter((localItemId) => !failed?.has(localItemId)).slice(0, limit);
   }
-  async missingEmbeddingItemIdsInTurns(embedder, limit, scope = {}, windowChunks = MISSING_EMBEDDING_CHUNK_WINDOW, checkpoint) {
+  async missingEmbeddingItemIdsInTurns(embedder, limit, scope = {}, windowChunks = MISSING_EMBEDDING_CHUNK_WINDOW, checkpoint, progress) {
     if (limit <= 0)
       return [];
-    await checkpoint?.();
-    const tierHidden = await this.tierHiddenItemPksInTurns();
-    const modelId = embedder.modelId;
-    const accountScope = normalizeOptionalAccountScope(scope.accountScope);
-    const scoped = connectorStoreFilterSql(scope.filters);
-    const failed = this.embeddingFailureState;
-    const allowHeld = this.canEmbedHeld(embedder);
-    const privateTier = this.privateTierEmbeddingFilter(embedder);
-    const offThread = offThreadReadsSupported(this.dbPath);
-    const tierExclusion = offThread ? { filter: "", params: [] } : this.embeddingWorkListExclusionFilter(0, tierHidden, allowHeld);
-    const excluded = offThread ? await embeddingExcludedPksInTurns(tierHidden, allowHeld) : undefined;
-    const filter = `${tierExclusion.filter} ${privateTier.filter} ${accountScope ? "AND i.account_scope = ?" : ""} ${scoped.sql}`;
-    const params = [...tierExclusion.params, ...privateTier.params, ...accountScope ? [accountScope] : [], ...scoped.params];
-    const windowSql = `
-      SELECT MIN(c.chunk_pk) AS first_chunk_pk, i.item_pk AS item_pk, i.local_item_id AS local_item_id
-      FROM chunks c
-      JOIN items i ON i.item_pk = c.item_pk
-      LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
-      WHERE c.chunk_pk > ? AND c.chunk_pk <= ?
-        AND i.tombstoned = 0 AND i.trust_tier <> 'S5'
-        AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
-        ${filter}
-      GROUP BY i.item_pk
-      ORDER BY first_chunk_pk ASC
-    `;
-    const read = this.embeddingSweepRead(offThread);
-    const maxChunkPk = (await read({ sql: "SELECT COALESCE(MAX(chunk_pk), 0) AS n FROM chunks", params: [], mode: "get" })).n;
-    const seen = new Set;
-    const found = [];
-    for (let after = 0;after < maxChunkPk && found.length < limit; after += windowChunks) {
-      if (after > 0)
-        await ingestionTurn();
-      await checkpoint?.();
-      const rows = await read({ sql: windowSql, params: [modelId, after, after + windowChunks, ...params], mode: "all" });
-      for (const row of rows) {
-        if (excluded?.has(row.item_pk) || seen.has(row.item_pk))
-          continue;
-        seen.add(row.item_pk);
-        if (failed?.has(row.local_item_id))
-          continue;
-        found.push(row.local_item_id);
-        if (found.length === limit)
-          break;
+    walk:
+      for (;; ) {
+        await checkpoint?.();
+        const resume = this.embeddingWalkResumeCheck(checkpoint);
+        const tierHidden = await this.tierHiddenItemPksInTurns(progress);
+        const modelId = embedder.modelId;
+        const accountScope = normalizeOptionalAccountScope(scope.accountScope);
+        const scoped = connectorStoreFilterSql(scope.filters);
+        const failed = this.embeddingFailureState;
+        const allowHeld = this.canEmbedHeld(embedder);
+        const privateTier = this.privateTierEmbeddingFilter(embedder);
+        const offThread = offThreadReadsSupported(this.dbPath);
+        const tierExclusion = offThread ? { filter: "", params: [] } : this.embeddingWorkListExclusionFilter(0, tierHidden, allowHeld);
+        const excluded = offThread ? await embeddingExcludedPksInTurns(tierHidden, allowHeld) : undefined;
+        const filter = `${tierExclusion.filter} ${privateTier.filter} ${accountScope ? "AND i.account_scope = ?" : ""} ${scoped.sql}`;
+        const params = [...tierExclusion.params, ...privateTier.params, ...accountScope ? [accountScope] : [], ...scoped.params];
+        const windowSql = `
+        SELECT MIN(c.chunk_pk) AS first_chunk_pk, i.item_pk AS item_pk, i.local_item_id AS local_item_id
+        FROM chunks c
+        JOIN items i ON i.item_pk = c.item_pk
+        LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
+        WHERE c.chunk_pk > ? AND c.chunk_pk <= ?
+          AND i.tombstoned = 0 AND i.trust_tier <> 'S5'
+          AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
+          ${filter}
+        GROUP BY i.item_pk
+        ORDER BY first_chunk_pk ASC
+      `;
+        const read = this.embeddingSweepRead(offThread);
+        const maxChunkPk = (await read({ sql: "SELECT COALESCE(MAX(chunk_pk), 0) AS n FROM chunks", params: [], mode: "get" })).n;
+        const seen = new Set;
+        const found = [];
+        for (let after = 0;after < maxChunkPk && found.length < limit; after += windowChunks) {
+          if (after > 0)
+            await ingestionTurn();
+          if (!await resume())
+            continue walk;
+          const rows = await read({ sql: windowSql, params: [modelId, after, after + windowChunks, ...params], mode: "all" });
+          for (const row of rows) {
+            if (excluded?.has(row.item_pk) || seen.has(row.item_pk))
+              continue;
+            seen.add(row.item_pk);
+            if (failed?.has(row.local_item_id))
+              continue;
+            found.push(row.local_item_id);
+            if (found.length === limit)
+              break;
+          }
+        }
+        return found;
       }
-    }
-    return found;
+  }
+  embeddingWalkResumeCheck(pause) {
+    if (!pause)
+      return () => true;
+    const writes = this.writeSequence();
+    const ledger = this.visibilityLedger();
+    const ledgerMarker = ledger?.changeMarker();
+    const attachedLane = this.childLane;
+    const sameLane = childVisibilityUnchanged(this.childVisibilityLane());
+    return () => {
+      const waiting = pause();
+      if (!waiting)
+        return true;
+      return waiting.then(() => writes !== undefined && this.writeSequence() === writes && !this.fileReplacedOrRemoved() && this.visibilityLedger() === ledger && ledger?.changeMarker() === ledgerMarker && this.childLane === attachedLane && sameLane());
+    };
   }
   embeddingSweepRead(offThread) {
     if (offThread)
@@ -32034,78 +32134,83 @@ ${parentKey(ref)}`, { ref, origin });
   async embeddingSweepInventory(provider, scope = {}, stopAtMs, windowChunks = MISSING_EMBEDDING_CHUNK_WINDOW, pacing) {
     const now = pacing?.now ?? Date.now;
     const started = now();
-    await pacing?.checkpoint();
-    const tier = await this.tierHiddenItemPksInTurns();
-    const hidden = await pkSetInTurns([tier.hidden]);
-    const held = await pkSetInTurns([tier.held]);
-    const heldForJudgment = this.canEmbedHeld(provider) ? await pkSetInTurns([tier.heldForJudgment]) : new Set;
-    const namesOnly = await pkSetInTurns([tier.metadataLayer]);
-    const moving = new Set;
-    let walked = 0;
-    for (const member of this.tierLedgerHiddenMemo?.members.values() ?? []) {
-      if (member.flags.moving)
-        for (const pk of member.pks)
-          moving.add(pk);
-      if (++walked % 2000 === 0)
-        await ingestionTurn();
-    }
-    const tiers = connectorStoreEmbeddableRowTiers(this.trustDomain, provider);
-    const account = normalizeOptionalAccountScope(scope.accountScope);
-    const scoped = connectorStoreFilterSql(scope.filters);
-    const counts = {
-      pending_chunks: 0,
-      eligible_chunks: 0,
-      skipped_held_chunks: 0,
-      skipped_moving_chunks: 0,
-      skipped_hidden_chunks: 0,
-      skipped_metadata_chunks: 0,
-      skipped_failed_chunks: 0,
-      skipped_out_of_scope_chunks: 0,
-      skipped_held_recent_chunks: 0,
-      skipped_out_of_scope_recent_chunks: 0,
-      skipped_private_tier_chunks: 0,
-      skipped_retired_chunks: 0,
-      inventory_complete: 0
-    };
-    const windowSql = `
-      SELECT c.chunk_pk, i.item_pk, i.local_item_id, i.tombstoned, i.trust_tier, i.indexed_at,
-        CASE WHEN 1 = 1 ${account ? "AND i.account_scope = ?" : ""} ${scoped.sql} THEN 1 ELSE 0 END AS in_scope
-      FROM chunks c JOIN items i ON i.item_pk = c.item_pk
-      LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
-      WHERE c.chunk_pk > ? AND c.chunk_pk <= ?
-        AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
-      ORDER BY c.chunk_pk
-    `;
-    const recentSince = new Date(started - 3 * 24 * 60 * 60000).toISOString();
-    const read = this.embeddingSweepRead(offThreadReadsSupported(this.dbPath));
-    const maxChunkPk = (await read({ sql: "SELECT COALESCE(MAX(chunk_pk), 0) AS n FROM chunks", params: [], mode: "get" })).n;
-    let after = 0;
-    for (;after < maxChunkPk; after += windowChunks) {
-      if (after > 0)
-        await ingestionTurn();
-      await pacing?.checkpoint();
-      if (stopAtMs !== undefined && now() >= stopAtMs)
-        break;
-      const rows = await read({
-        sql: windowSql,
-        mode: "all",
-        params: [...account ? [account] : [], ...scoped.params, provider.modelId, after, after + windowChunks]
-      });
-      for (const row of rows) {
-        counts.pending_chunks += 1;
-        const heldBack = held.has(row.item_pk) && !heldForJudgment.has(row.item_pk);
-        const visibilityExcluded = hidden.has(row.item_pk) || namesOnly.has(row.item_pk) || heldBack;
-        const reason = row.tombstoned || row.trust_tier === "S5" ? "skipped_retired_chunks" : moving.has(row.item_pk) && visibilityExcluded ? "skipped_moving_chunks" : hidden.has(row.item_pk) ? "skipped_hidden_chunks" : namesOnly.has(row.item_pk) ? "skipped_metadata_chunks" : heldBack ? "skipped_held_chunks" : tiers && !tiers.includes(row.trust_tier) ? "skipped_private_tier_chunks" : this.embeddingFailureState?.has(row.local_item_id) ? "skipped_failed_chunks" : !row.in_scope ? "skipped_out_of_scope_chunks" : "eligible_chunks";
-        counts[reason] += 1;
-        if ((reason === "skipped_held_chunks" || reason === "skipped_out_of_scope_chunks") && row.indexed_at && row.indexed_at >= recentSince) {
-          counts[reason === "skipped_held_chunks" ? "skipped_held_recent_chunks" : "skipped_out_of_scope_recent_chunks"] += 1;
+    walk:
+      for (;; ) {
+        await pacing?.checkpoint();
+        const resume = this.embeddingWalkResumeCheck(pacing?.checkpoint);
+        const tier = await this.tierHiddenItemPksInTurns(pacing?.progress);
+        const hidden = await pkSetInTurns([tier.hidden]);
+        const held = await pkSetInTurns([tier.held]);
+        const heldForJudgment = this.canEmbedHeld(provider) ? await pkSetInTurns([tier.heldForJudgment]) : new Set;
+        const namesOnly = await pkSetInTurns([tier.metadataLayer]);
+        const moving = new Set;
+        let walked = 0;
+        for (const member of this.tierLedgerHiddenMemo?.members.values() ?? []) {
+          if (member.flags.moving)
+            for (const pk of member.pks)
+              moving.add(pk);
+          if (++walked % 2000 === 0)
+            await ingestionTurn();
         }
+        const tiers = connectorStoreEmbeddableRowTiers(this.trustDomain, provider);
+        const account = normalizeOptionalAccountScope(scope.accountScope);
+        const scoped = connectorStoreFilterSql(scope.filters);
+        const counts = {
+          pending_chunks: 0,
+          eligible_chunks: 0,
+          skipped_held_chunks: 0,
+          skipped_moving_chunks: 0,
+          skipped_hidden_chunks: 0,
+          skipped_metadata_chunks: 0,
+          skipped_failed_chunks: 0,
+          skipped_out_of_scope_chunks: 0,
+          skipped_held_recent_chunks: 0,
+          skipped_out_of_scope_recent_chunks: 0,
+          skipped_private_tier_chunks: 0,
+          skipped_retired_chunks: 0,
+          inventory_complete: 0
+        };
+        const windowSql = `
+        SELECT c.chunk_pk, i.item_pk, i.local_item_id, i.tombstoned, i.trust_tier, i.indexed_at,
+          CASE WHEN 1 = 1 ${account ? "AND i.account_scope = ?" : ""} ${scoped.sql} THEN 1 ELSE 0 END AS in_scope
+        FROM chunks c JOIN items i ON i.item_pk = c.item_pk
+        LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
+        WHERE c.chunk_pk > ? AND c.chunk_pk <= ?
+          AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
+        ORDER BY c.chunk_pk
+      `;
+        const recentSince = new Date(started - 3 * 24 * 60 * 60000).toISOString();
+        const read = this.embeddingSweepRead(offThreadReadsSupported(this.dbPath));
+        const maxChunkPk = (await read({ sql: "SELECT COALESCE(MAX(chunk_pk), 0) AS n FROM chunks", params: [], mode: "get" })).n;
+        let after = 0;
+        for (;after < maxChunkPk; after += windowChunks) {
+          if (after > 0)
+            await ingestionTurn();
+          if (!await resume())
+            continue walk;
+          if (stopAtMs !== undefined && now() >= stopAtMs)
+            break;
+          const rows = await read({
+            sql: windowSql,
+            mode: "all",
+            params: [...account ? [account] : [], ...scoped.params, provider.modelId, after, after + windowChunks]
+          });
+          for (const row of rows) {
+            counts.pending_chunks += 1;
+            const heldBack = held.has(row.item_pk) && !heldForJudgment.has(row.item_pk);
+            const visibilityExcluded = hidden.has(row.item_pk) || namesOnly.has(row.item_pk) || heldBack;
+            const reason = row.tombstoned || row.trust_tier === "S5" ? "skipped_retired_chunks" : moving.has(row.item_pk) && visibilityExcluded ? "skipped_moving_chunks" : hidden.has(row.item_pk) ? "skipped_hidden_chunks" : namesOnly.has(row.item_pk) ? "skipped_metadata_chunks" : heldBack ? "skipped_held_chunks" : tiers && !tiers.includes(row.trust_tier) ? "skipped_private_tier_chunks" : this.embeddingFailureState?.has(row.local_item_id) ? "skipped_failed_chunks" : !row.in_scope ? "skipped_out_of_scope_chunks" : "eligible_chunks";
+            counts[reason] += 1;
+            if ((reason === "skipped_held_chunks" || reason === "skipped_out_of_scope_chunks") && row.indexed_at && row.indexed_at >= recentSince) {
+              counts[reason === "skipped_held_chunks" ? "skipped_held_recent_chunks" : "skipped_out_of_scope_recent_chunks"] += 1;
+            }
+          }
+        }
+        if (after >= maxChunkPk)
+          counts.inventory_complete = 1;
+        counts.inventory_ms = now() - started;
+        return counts;
       }
-    }
-    if (after >= maxChunkPk)
-      counts.inventory_complete = 1;
-    counts.inventory_ms = now() - started;
-    return counts;
   }
   embeddingOwedItemIds(modelId, localItemIds) {
     if (localItemIds.length === 0)
@@ -32313,16 +32418,19 @@ ${parentKey(ref)}`, { ref, origin });
         stallMs: CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS,
         intervalMs: CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS / 4
       },
+      ...options.sweepTiming ? { signal: options.sweepTiming.signal } : {},
       ...this.embeddingLeaseTimers ? { timers: this.embeddingLeaseTimers } : {}
     });
   }
   async embedChunksUnderLease(options) {
+    const { signal, holds, progress } = options.sweepTiming ?? {};
+    const step = (work) => embeddingStep(work, signal);
     const provider = options.provider;
     if (options.modelId && options.modelId !== provider.modelId) {
       throw new Error(`Connector store ${this.corpusId} embedding provider is ${provider.modelId}, ` + `not requested model ${options.modelId}.`);
     }
     assertConnectorStoreEmbeddingProvider(this.trustDomain, provider);
-    await options.assertAuthorized?.();
+    await step(() => options.assertAuthorized?.());
     this.releaseUnreferencedChunkMedia();
     this.reassertChunkMediaHolds();
     sweepMediaCacheThrottled();
@@ -32357,8 +32465,10 @@ ${parentKey(ref)}`, { ref, origin });
     if (priorCounts && (priorCounts.modelId !== provider.modelId || priorCounts.embeddingProvider !== provider.provider || priorCounts.embeddingBackend !== provider.backend || priorCounts.embeddingDimension !== provider.dimension || priorCounts.embeddingEpoch !== provider.epochId)) {
       throw new Error("Connector store embedding journal provider changed.");
     }
-    const tierHidden = await this.tierHiddenItemPksInTurns();
-    const selectedRows = await this.embeddingWorkRows(provider.modelId, options.localItemIds, options.accountScope, options.filters, tierHidden, this.canEmbedHeld(provider), options.sweepTiming?.progress);
+    const tierHidden = await step(() => this.tierHiddenItemPksInTurns(progress));
+    signal?.throwIfAborted();
+    const selection = this.embeddingWorkRows(provider.modelId, options.localItemIds, options.accountScope, options.filters, tierHidden, this.canEmbedHeld(provider), progress);
+    const selectedRows = await (signal ? untilAborted(selection, signal) : selection);
     const embeddableTiers = connectorStoreEmbeddableRowTiers(this.trustDomain, provider);
     const rows = embeddableTiers === undefined ? selectedRows : selectedRows.filter((row) => embeddableTiers.includes(row.trust_tier));
     let privateTierWithheldChunks = 0;
@@ -32379,8 +32489,8 @@ ${parentKey(ref)}`, { ref, origin });
       throw new Error("Connector store embedding journal input changed.");
     }
     if (!(priorJournal && priorCounts) && this.embeddingRebindWouldInvalidateCurrency(provider)) {
-      await options.assertAuthorized?.();
-      await assertEmbeddingProviderCanEmbed(provider);
+      await step(() => options.assertAuthorized?.());
+      await step(() => assertEmbeddingProviderCanEmbed(provider));
     }
     let activeJournalSha256 = priorJournal?.audit_receipt_sha256 ?? undefined;
     let providerEpoch;
@@ -32434,7 +32544,7 @@ ${parentKey(ref)}`, { ref, origin });
     }
     let readsImages;
     if (limit !== undefined && provider.imageSupport && rows.some((row) => row.media_sha256)) {
-      readsImages = await provider.imageSupport();
+      readsImages = await step(() => provider.imageSupport());
     }
     let heldPictures = 0;
     const pending = [];
@@ -32458,16 +32568,21 @@ ${parentKey(ref)}`, { ref, origin });
     const judging = this.mediaJudgmentsPresent && provider.imageSupport && canJudgeMedia(provider) ? provider : undefined;
     const judgedThisPass = new Set;
     let stoppedAtDeadline = false;
+    let pausedForAsk = false;
     for (let offset = 0;offset < pending.length; offset += EMBEDDING_BATCH_SIZE) {
-      options.sweepTiming?.progress();
+      progress?.();
+      if (holds?.()) {
+        pausedForAsk = true;
+        break;
+      }
       if (offset > 0 && options.stopAtMs !== undefined && (options.sweepTiming?.now() ?? Date.now()) >= options.stopAtMs) {
         stoppedAtDeadline = true;
         break;
       }
       let batch = pending.slice(offset, offset + EMBEDDING_BATCH_SIZE);
-      await options.assertAuthorized?.();
+      await step(() => options.assertAuthorized?.());
       if (provider.imageSupport && batch.some((row) => row.media_sha256)) {
-        readsImages ??= await provider.imageSupport();
+        readsImages ??= await step(() => provider.imageSupport());
         const skip = new Set;
         for (const row of batch) {
           if (!row.media_sha256)
@@ -32512,21 +32627,23 @@ ${parentKey(ref)}`, { ref, origin });
       let judgedBatch;
       try {
         if (judgeNow) {
-          const returned = await judging.embedWithImageVectors(inputsFor(batch));
+          const returned = await step(() => judging.embedWithImageVectors(inputsFor(batch)));
           vectors = returned.vectors;
           judgedBatch = new Map;
           const currentJudge = mediaJudgeId(judging);
           const wanted = batch.flatMap((row, index) => row.media_sha256 && returned.imageVectors[index] && !this.mediaJudgmentSettled(row.media_sha256, currentJudge) ? [index] : []);
           if (wanted.length > 0) {
             try {
-              const judgments = await judgeReturnedImageVectors(judging, wanted.map((index) => returned.imageVectors[index]));
+              const judgments = await step(() => judgeReturnedImageVectors(judging, wanted.map((index) => returned.imageVectors[index])));
               wanted.forEach((index, row) => {
                 judgedBatch.set(batch[index].chunk_pk, judgments[row]);
               });
-            } catch {}
+            } catch {
+              signal?.throwIfAborted();
+            }
           }
         } else {
-          vectors = await provider.embed(inputsFor(batch), { taskType: "RETRIEVAL_DOCUMENT" });
+          vectors = await step(() => provider.embed(inputsFor(batch), { taskType: "RETRIEVAL_DOCUMENT", ...signal ? { signal } : {} }));
         }
       } catch (error) {
         if (!(error instanceof SourceEmbeddingInputsFailedError))
@@ -32553,7 +32670,7 @@ ${parentKey(ref)}`, { ref, origin });
         batch = recheck.kept;
         if (batch.length === 0)
           continue;
-        vectors = await provider.embed(inputsFor(batch), { taskType: "RETRIEVAL_DOCUMENT" });
+        vectors = await step(() => provider.embed(inputsFor(batch), { taskType: "RETRIEVAL_DOCUMENT", ...signal ? { signal } : {} }));
       }
       const onDemandItems = this.db.query(`SELECT COUNT(*) AS n FROM items i JOIN on_demand_item_reads r ON r.local_item_id = i.local_item_id
         AND r.source_version = COALESCE(i.source_version, '') WHERE i.item_pk IN (SELECT value FROM json_each(?))`).get(JSON.stringify([...new Set(batch.map((row) => row.item_pk))]));
@@ -32634,10 +32751,10 @@ ${parentKey(ref)}`, { ref, origin });
       staleSkipped += batch.length - written;
     }
     skipped += staleSkipped;
-    if (!stoppedAtDeadline && judging && rows.some((row) => row.media_sha256 && !this.mediaJudgmentSettled(row.media_sha256, mediaJudgeId(judging)))) {
-      readsImages ??= await judging.imageSupport();
+    if (!stoppedAtDeadline && !pausedForAsk && judging && rows.some((row) => row.media_sha256 && !this.mediaJudgmentSettled(row.media_sha256, mediaJudgeId(judging)))) {
+      readsImages ??= await step(() => judging.imageSupport());
       if (readsImages)
-        await this.judgeUnjudgedMedia(judging, rows, options.assertAuthorized);
+        await this.judgeUnjudgedMedia(judging, rows, options.assertAuthorized, options.sweepTiming);
     }
     if (journalId) {
       const completedAt = this.now().toISOString();
@@ -32660,6 +32777,8 @@ ${parentKey(ref)}`, { ref, origin });
     }
     this.clearEmbeddingCurrencyRebuildDebt(provider, providerEpoch);
     const summary = connectorStoreEmbedSummary(this.corpusId, this.trustDomain, provider, rows.length, embedded, skipped);
+    if (pausedForAsk)
+      summary.pausedForAsk = true;
     if (stoppedAtDeadline)
       summary.stoppedAtDeadline = true;
     return privateTierWithheldChunks > 0 ? {
@@ -34103,47 +34222,67 @@ ${parentKey(ref)}`, { ref, origin });
     const value = await this.tierHiddenItemPksInTurns();
     this.tierHiddenCountsMemo = { at: Date.now(), value };
     const key = JSON.stringify(scope ?? null);
-    const counts = this.unreadHoldCounts(await runHiddenStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
     const memos = this.settledUnreadableCountMemo ??= new Map;
+    const stamp = this.settledUnreadableStamp();
+    if (this.reusesSettledUnreadableCount(memos.get(key), stamp))
+      return;
+    const counts = this.unreadHoldCounts(await runHiddenStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
+    if (this.settledUnreadableCountMemo !== memos)
+      return;
     if (memos.size > 32)
       memos.clear();
-    memos.set(key, { at: Date.now(), ...counts });
+    memos.set(key, { at: Date.now(), stamp, ...counts });
+  }
+  settledUnreadableStamp() {
+    try {
+      const visibility = this.visibilityMarker();
+      const writes = this.writeSequence();
+      return visibility === undefined || writes === undefined ? undefined : [visibility, writes];
+    } catch {
+      return;
+    }
+  }
+  reusesSettledUnreadableCount(memo, stamp) {
+    return memo?.stamp !== undefined && stamp !== undefined && memo.stamp[0] === stamp[0] && memo.stamp[1] === stamp[1] && Date.now() - memo.at < STORE_UNCHANGED_REUSE_MS;
   }
   settledUnreadableCount(scope, maxAgeMs) {
     const key = JSON.stringify(scope ?? null);
     const memos = this.settledUnreadableCountMemo ??= new Map;
     const memo = memos.get(key);
+    const stamp = this.settledUnreadableStamp();
+    if (memo && this.reusesSettledUnreadableCount(memo, stamp))
+      return memo;
     if (maxAgeMs > 0 && memo) {
-      if (Date.now() - memo.at >= maxAgeMs)
-        this.refreshSettledUnreadableCountInTurns(key, scope);
+      if (stamp !== undefined || Date.now() - memo.at >= maxAgeMs)
+        this.refreshSettledUnreadableCountInTurns(key, scope, stamp);
       return memo;
     }
     if (offThreadReadsSupported(this.dbPath)) {
-      this.refreshSettledUnreadableCountInTurns(key, scope);
+      this.refreshSettledUnreadableCountInTurns(key, scope, stamp);
       return memo ?? { count: 0, waitingPks: [], policyPks: [] };
     }
     const counts = this.unreadHoldCounts(runHiddenStepsHere(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
     if (memos.size > 32)
       memos.clear();
-    memos.set(key, { at: Date.now(), ...counts });
+    memos.set(key, { at: Date.now(), stamp, ...counts });
     return counts;
   }
   settledUnreadableCountRefresh;
-  refreshSettledUnreadableCountInTurns(key, scope) {
+  refreshSettledUnreadableCountInTurns(key, scope, stamp) {
     const running = this.settledUnreadableCountRefresh ??= new Set;
     if (running.has(key))
       return;
     running.add(key);
-    const prior = this.settledUnreadableCountMemo?.get(key);
+    const memos = this.settledUnreadableCountMemo ??= new Map;
+    const prior = memos.get(key);
     (async () => {
       try {
         const counts = this.unreadHoldCounts(await runHiddenStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
-        const memos = this.settledUnreadableCountMemo ??= new Map;
-        if (memos.get(key) !== prior)
+        if (this.settledUnreadableCountMemo !== memos || memos.get(key) !== prior)
           return;
         if (memos.size > 32)
           memos.clear();
-        memos.set(key, { at: Date.now(), ...counts });
+        memos.set(key, { at: Date.now(), stamp, ...counts });
       } catch {} finally {
         running.delete(key);
       }
@@ -34356,34 +34495,48 @@ ${parentKey(ref)}`, { ref, origin });
         return;
     }
     const pool = offThreadReadsSupported(this.dbPath);
-    const steps = storeTotalsWalkSteps(NON_SYNC_RUN_CONNECTORS_SQL);
-    let step = steps.next();
-    while (!step.done) {
-      await pause?.();
-      if (this.reclaiming || this.closedForPoolReads)
-        return;
-      const query = step.value;
-      let rows;
-      if (pool)
-        rows = await readInBackground(this.dbPath, query);
-      else {
-        await new Promise((resolve) => setImmediate(resolve));
-        const statement = this.db.query(query.sql);
-        rows = query.mode === "get" ? statement.get(...query.params) : statement.all(...query.params);
+    walk:
+      for (;; ) {
+        const writes = this.writeSequence();
+        const steps = storeTotalsWalkSteps(NON_SYNC_RUN_CONNECTORS_SQL);
+        let step = steps.next();
+        while (!step.done) {
+          const waiting = pause?.();
+          if (waiting) {
+            await waiting;
+            if (this.reclaiming || this.closedForPoolReads || this.fileReplacedOrRemoved())
+              return;
+            if (this.writeSequence() !== writes)
+              continue walk;
+          }
+          if (this.reclaiming || this.closedForPoolReads)
+            return;
+          const query = step.value;
+          let rows;
+          if (pool)
+            rows = await readInBackground(this.dbPath, query);
+          else {
+            await new Promise((resolve) => setImmediate(resolve));
+            const statement = this.db.query(query.sql);
+            rows = query.mode === "get" ? statement.get(...query.params) : statement.all(...query.params);
+          }
+          step = steps.next(rows);
+        }
+        if (this.reclaiming || this.closedForPoolReads || this.fileReplacedOrRemoved())
+          return;
+        const { count, quiet } = step.value;
+        const now = this.now();
+        return this.db.transaction(() => {
+          if (!quiet || this.writeSequence() !== writes) {
+            if (totals && totals.walkOwed !== "now")
+              deferStoreTotalsWalk(this.db);
+            this.totalsQuiet = { writes: this.writeSequence(), since: now.getTime() };
+            return totals ? 0 : undefined;
+          }
+          this.totalsQuiet = undefined;
+          return applyStoreTotalsCount(this.db, count, now.toISOString(), { countIsCurrent: true });
+        }).immediate();
       }
-      step = steps.next(rows);
-    }
-    if (this.reclaiming)
-      return;
-    const { count, quiet } = step.value;
-    const now = this.now();
-    let drift = 0;
-    if (!quiet && totals && totals.walkOwed !== "now")
-      deferStoreTotalsWalk(this.db);
-    else
-      drift = applyStoreTotalsCount(this.db, count, now.toISOString(), { exact: quiet });
-    this.totalsQuiet = quiet ? undefined : { writes: this.writeSequence(), since: now.getTime() };
-    return drift;
   }
   embeddingInputHashesChecked = false;
   embeddingInputHashWalk;
@@ -37133,6 +37286,7 @@ var running = new WeakMap;
 var LOWER_CONTENT_REPAIR_INTERVAL_MS = 5 * 60000;
 
 // src/workers/google-connectors/gmail-live-sync.ts
+var GMAIL_CONFIRMATION_RESERVE_REASON = "gmail_confirmation_live_request_reserve";
 var GMAIL_SCOPED_CONNECTOR_PREFIX = `${GMAIL_PROVIDER}.scope.`;
 // src/workers/google-connectors/drive.ts
 var GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID = "internal.drive.docs";
@@ -39110,6 +39264,7 @@ var UTC_DAY_SCOPED_DEGRADED_REASONS = new Set([
   "reconcile_cost_to_finish_guard",
   READWISE_DAILY_REQUEST_GUARD_REASON,
   GMAIL_DAILY_REQUEST_GUARD_REASON,
+  GMAIL_CONFIRMATION_RESERVE_REASON,
   GOOGLE_DRIVE_DAILY_REQUEST_GUARD_REASON
 ]);
 var SCHEDULER_PARK_REASONS = new Set([

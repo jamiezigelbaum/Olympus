@@ -28,6 +28,7 @@ import {
   EMBEDDING_ITEMS_FAILED_REASON,
   EMBEDDING_PROVIDER_UNAVAILABLE_REASON,
   embedPendingChunks,
+  type ConnectorStoreEmbedStoreRun,
   type ConnectorStoreEmbeddingTarget,
   type LocalConnectorStore,
 } from './connector-store/index.ts';
@@ -299,12 +300,14 @@ export interface SourceSchedulerTaskRunResult {
   status: 'progress' | 'idle';
   counts?: Record<string, number>;
   warnings?: string[];
-  /** Ephemeral counts-only sweep receipts. Logged once the actual next run is known, never persisted. */
+  /** Ephemeral sweep counts and reason labels, logged once the actual next run is known. */
   embeddingSweep?: Array<{
     source_index: number;
     store_index: number;
     trust_domain: LocalConnectorStore['trustDomain'];
     family: LocalConnectorStore['family'];
+    wake?: EmbeddingSweepWake;
+    not_resting?: EmbeddingSweepRestBlocker;
     counts: Record<string, number>;
   }>;
   /** Omitted preserves the durable checkpoint; null clears it. */
@@ -1095,7 +1098,8 @@ export class SourceScheduler {
     const runTask = async (state: SchedulerTaskState, at: number): Promise<void> => {
       if (state.running) return;
       if (provenance === 'scheduled'
-        && (state.task.metadataWalkRole === 'maintenance' || state.task.kind === 'watch') && this.askHolds()) {
+        // The Gmail confirmation walk is backlog: it waits out an Ask like maintenance does.
+        && (state.task.metadataWalkRole === 'maintenance' || state.task.kind === 'watch' || isGmailConfirmationTask(state.task)) && this.askHolds()) {
         this.scheduleContinueWake(this.now().getTime() + SOURCE_SCHEDULER_ASK_RECHECK_MS);
         return;
       }
@@ -2197,6 +2201,37 @@ export function embeddingSweepConcurrencyKey(source: Pick<SourceSchedulerSource,
   return `${source.corpusId}.embeddings`;
 }
 
+type EmbeddingSweepKey = Required<Pick<IdleEmbeddingSweep, 'key' | 'writes' | 'visibilityHash'>>;
+type EmbeddingSweepWake = 'none_remembered' | 'writes' | 'visibility' | 'build' | 'expired'
+  | 'queued' | 'deferred' | 'marker_unavailable' | 'key_changed';
+type EmbeddingSweepRestBlocker = 'busy' | 'deferred' | 'stopped_at_deadline' | 'items_attempted'
+  | 'chunks_embedded' | 'items_failed' | 'items_out_of_scope' | 'inventory_incomplete'
+  | 'queued' | 'marker_moved_during_pass' | 'marker_unavailable';
+
+function freshEmbeddingSweep(receipt: IdleEmbeddingSweep, now: number): boolean {
+  return now >= receipt.at && now - receipt.at < EMBEDDING_SWEEP_IDLE_FULL_PASS_MS;
+}
+
+function embeddingSweepWake(
+  store: LocalConnectorStore,
+  receipt: IdleEmbeddingSweep | undefined,
+  current: EmbeddingSweepKey | undefined,
+): EmbeddingSweepWake | undefined {
+  if (!current) return 'marker_unavailable';
+  if (!receipt) return 'none_remembered';
+  if (receipt.key !== current.key) {
+    if (receipt.writes === undefined || receipt.visibilityHash === undefined) return 'key_changed';
+    if (receipt.writes !== current.writes) return 'writes';
+    if (receipt.visibilityHash !== current.visibilityHash) return 'visibility';
+    // For the same slot, the build identifiers are the remaining key inputs.
+    return 'build';
+  }
+  if (!freshEmbeddingSweep(receipt, Date.now())) return 'expired';
+  if (store.queuedEmbeddingItemIds().length > 0) return 'queued';
+  if (store.embeddingDeferredReason() !== undefined) return 'deferred';
+  return undefined;
+}
+
 function embeddingSweepTask(
   source: SourceSchedulerSource,
   targets: () => readonly ConnectorStoreEmbeddingTarget[],
@@ -2224,21 +2259,59 @@ function embeddingSweepTask(
     target.accountScope ?? null, target.filters ?? null,
     target.provider.provider, target.provider.backend, target.provider.dimension, target.provider.configHash,
   ])).digest('hex');
-  const quietKey = (target: ConnectorStoreEmbeddingTarget, slot: string, durable: boolean): string | undefined => {
+  const quietKey = (target: ConnectorStoreEmbeddingTarget, slot: string, durable: boolean): EmbeddingSweepKey | undefined => {
     try {
       const writes = target.store.writeSequence?.();
       if (writes === undefined || !Number.isSafeInteger(writes)) return undefined;
       const visibility = target.store.embeddingSweepVisibilityMarker(target.provider, durable);
       if (visibility === undefined) return undefined;
-      return createHash('sha256').update(JSON.stringify([
+      const key = createHash('sha256').update(JSON.stringify([
         EMBEDDING_SWEEP_BUILD, PUBLIC_RUNTIME_BUILD, slot, writes, visibility,
       ])).digest('hex');
+      return { key, writes, visibilityHash: createHash('sha256').update(visibility).digest('hex').slice(0, 16) };
     } catch {
       console.warn('[olympus:embedding-sweep] idle markers unreadable; walking store');
       return undefined;
     }
   };
-  const fresh = (receipt: IdleEmbeddingSweep, now: number): boolean => now >= receipt.at && now - receipt.at < EMBEDDING_SWEEP_IDLE_FULL_PASS_MS;
+  const remember = async (
+    target: ConnectorStoreEmbeddingTarget,
+    slot: string,
+    before: EmbeddingSweepKey | undefined,
+    run: ConnectorStoreEmbedStoreRun | undefined,
+    deferred: boolean,
+    path: string | undefined,
+    receipts: Map<string, IdleEmbeddingSweep> | undefined,
+  ): Promise<EmbeddingSweepRestBlocker | undefined> => {
+    if (run?.busy) return 'busy';
+    if (deferred || run?.deferredReason !== undefined) return 'deferred';
+    if (run?.stoppedAtDeadline) return 'stopped_at_deadline';
+    if (run && run.itemsAttempted !== 0) return 'items_attempted';
+    if (run && run.chunksEmbedded !== 0) return 'chunks_embedded';
+    if (run && run.itemsFailed !== 0) return 'items_failed';
+    if (run && run.itemsOutOfScope !== 0) return 'items_out_of_scope';
+    if (run?.inventory?.inventory_complete !== 1) return 'inventory_incomplete';
+    const { store } = target;
+    if (store.queuedEmbeddingItemIds().length > 0) return 'queued';
+    if (!before) return 'marker_unavailable';
+    const after = quietKey(target, quietSlot(target), path !== undefined);
+    if (!after) return 'marker_unavailable';
+    if (after.key !== before.key) return 'marker_moved_during_pass';
+
+    const receipt = { ...before, at: Date.now(), inventory: run.inventory };
+    // Failed-item exclusions disappear on restart. Remember those only in memory.
+    if (path && receipts && store.embeddingFailedItemCount() === 0) {
+      for (const [otherSlot, other] of receipts) {
+        if (!freshEmbeddingSweep(other, receipt.at)) receipts.delete(otherSlot);
+      }
+      receipts.set(slot, receipt);
+      await writeEmbeddingSweepIdle(path, receipts);
+    } else {
+      const slots = quiet.get(store) ?? new Map();
+      quiet.set(store, slots.set(slot, receipt));
+    }
+    return undefined;
+  };
   return {
     id: `${source.sourceId}_embeddings`,
     kind: 'embed',
@@ -2259,7 +2332,7 @@ function embeddingSweepTask(
       const passTargets = targets();
       const runs: Awaited<ReturnType<typeof embedPendingChunks>> = [];
       let trickled = false;
-      const restedRuns = new Set<number>();
+      const walks = new Map<number, { wake: EmbeddingSweepWake; not_resting?: EmbeddingSweepRestBlocker }>();
       for (const target of passTargets) {
         await pause?.();
         const paced = tricklingTarget(target);
@@ -2271,6 +2344,8 @@ function embeddingSweepTask(
         const receipts = path ? await readEmbeddingSweepIdle(path) : undefined;
         const keyBefore = idleBackoff ? quietKey(target, slot, path !== undefined) : undefined;
         const rested = quiet.get(store)?.get(slot) ?? receipts?.get(slot);
+        let wake: EmbeddingSweepWake | undefined;
+        const runIndex = runs.length;
         const stalled = Symbol('stalled');
         const controller = new AbortController();
         let reportStall!: () => void;
@@ -2306,11 +2381,9 @@ function embeddingSweepTask(
           // Even an idle receipt requires a current account binding. Waiting
           // for the account runner is itself covered by the watchdog.
           if (guard) await guard(async () => controller.signal.throwIfAborted());
-          if (rested && rested.key === keyBefore && fresh(rested, Date.now())
-            && (!guard || quietKey(target, slot, path !== undefined) === keyBefore)
-            && store.queuedEmbeddingItemIds().length === 0 && store.embeddingDeferredReason() === undefined) {
-            return { kind: 'rested', rested } as const;
-          }
+          // Read the wake reason after the account binding is confirmed.
+          wake = idleBackoff ? embeddingSweepWake(store, rested, guard ? quietKey(target, slot, path !== undefined) : keyBefore) : undefined;
+          if (rested && wake === undefined && (!guard || keyBefore !== undefined)) return { kind: 'rested', rested } as const;
           quiet.get(store)?.delete(slot);
           // Invalidate before walking. A failed pass must not revive an older
           // proof if its in-memory queue or deferral is lost on the next start.
@@ -2329,7 +2402,6 @@ function embeddingSweepTask(
         if (result !== stalled && result.kind === 'rested') {
           runs.push({ corpusId: store.corpusId, itemsAttempted: 0, chunksEmbedded: 0, itemsFailed: 0, itemsOutOfScope: 0,
             inventory: result.rested.inventory });
-          restedRuns.add(runs.length - 1);
           continue;
         }
         if (result !== stalled) {
@@ -2341,28 +2413,10 @@ function embeddingSweepTask(
           const outage = target.store.embeddingDeferredReason();
           runs.push(...embedded.map((run) => run.busy === true && run.deferredReason === undefined && outage !== undefined
             ? { ...run, deferredReason: outage } : run));
-          // Nothing to do and nothing moved while the pass ran: the store rests until a marker moves.
-          const only = embedded.length === 1 ? embedded[0]! : undefined;
-          if (keyBefore !== undefined && only && outage === undefined && only.busy !== true && only.deferredReason === undefined
-            && only.stoppedAtDeadline !== true && only.itemsAttempted === 0 && only.chunksEmbedded === 0 && only.itemsFailed === 0
-            && only.itemsOutOfScope === 0 && only.inventory?.inventory_complete === 1
-            // An item whose embedding failed for good is skipped by every pass and
-            // stays reported as failed: it is not work, so it does not keep the
-            // store walked. A change to it moves the write sequence and wakes the store.
-            && store.queuedEmbeddingItemIds().length === 0 && quietKey(target, quietSlot(target), path !== undefined) === keyBefore) {
-            const receipt = { key: keyBefore, at: Date.now(), inventory: only.inventory };
-            // Failed-item exclusions disappear on restart. Walk then so a
-            // failure can be retried under the new process's provider.
-            if (path && receipts && store.embeddingFailedItemCount() === 0) {
-              for (const [otherSlot, other] of receipts) {
-                if (!fresh(other, receipt.at)) receipts.delete(otherSlot);
-              }
-              receipts.set(slot, receipt);
-              await writeEmbeddingSweepIdle(path, receipts);
-            } else {
-              const slots = quiet.get(store) ?? new Map();
-              quiet.set(store, slots.set(slot, receipt));
-            }
+          if (wake) {
+            const only = embedded.length === 1 ? embedded[0] : undefined;
+            const blocker = await remember(target, slot, keyBefore, only, outage !== undefined, path, receipts);
+            walks.set(runIndex, { wake, ...(blocker ? { not_resting: blocker } : {}) });
           }
           continue;
         }
@@ -2370,6 +2424,7 @@ function embeddingSweepTask(
         runs.push({ corpusId: target.store.corpusId, itemsAttempted: 0, chunksEmbedded: 0, itemsFailed: 0, itemsOutOfScope: 0,
           inventory: { inventory_complete: 0, pass_overran: 1 },
           deferredReason: EMBEDDING_PROVIDER_UNAVAILABLE_REASON });
+        if (wake) walks.set(runIndex, { wake, not_resting: 'deferred' });
       }
       const deferred = runs.filter((run) => run.deferredReason !== undefined).length;
       const counts = {
@@ -2386,6 +2441,7 @@ function embeddingSweepTask(
         store_index: index,
         trust_domain: passTargets[index]!.store.trustDomain,
         family: passTargets[index]!.store.family,
+        ...walks.get(index),
         counts: {
           ...run.inventory,
           whole_store: passTargets[index]!.wholeStore ? 1 : 0,
@@ -2396,7 +2452,7 @@ function embeddingSweepTask(
           skipped_deferred_items: run.deferredReason ? run.itemsAttempted : 0,
           stores_deferred: run.deferredReason ? 1 : 0, stores_lease_busy: run.busy ? 1 : 0,
           stopped_at_deadline: run.stoppedAtDeadline ? 1 : 0,
-          ...(idleBackoff ? { rested: restedRuns.has(index) ? 1 : 0 } : {}),
+          ...(idleBackoff ? { rested: walks.has(index) ? 0 : 1 } : {}),
         },
       }));
       const attemptedAt = Date.parse(context?.attemptedAt ?? '') || Date.now();

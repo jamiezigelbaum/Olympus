@@ -1,6 +1,6 @@
 import { provedReleaseCheck } from './helpers/scripted-search-release.ts';
 import { beginStartupProgress } from '../src/core/startup-progress.ts';
-import { STARTUP_SEARCH_GAP } from '../src/core/source-index/partial-search.ts';
+import { RERANK_FALLBACK_GAP, STARTUP_SEARCH_GAP } from '../src/core/source-index/partial-search.ts';
 // Lane B: the analyst-backed source_answer handler. Proves the contracts path
 // (route -> pack -> Analyst -> release gate) produces the existing Castor-safe
 // wire shape with honest audits, and that the trust postures hold: secure_local
@@ -1824,12 +1824,14 @@ describe('analyst-backed source_answer handler', () => {
   test('the answer trace records a failed rerank, so the fused cut it kept is visible (#1583)', async () => {
     const { analyst } = scriptedAnalyst(citeInternal);
     const trace = createSourceAnswerTrace();
-    await runWithSourceAnswerTrace(trace, () => createAnalystSourceIndexAnswerHandler({
+    const result = await runWithSourceAnswerTrace(trace, () => createAnalystSourceIndexAnswerHandler({
       analyst,
       lanes: () => lanesFixture({ internal: ['note-1', 'note-2'], secure: [] }),
       reranker: { id: 'fixture-rerank', localOnly: true, poolSize: 4, score: async () => { throw new Error('model gone'); } },
     }).answer({ question: 'What do the notes say?' }));
     expect(snapshotSourceAnswerTrace(trace).rerank).toMatchObject({ rerankerId: 'fixture-rerank', outcome: 'failed' });
+    expect(result.answer).toContain(`Coverage notes:\n- ${RERANK_FALLBACK_GAP}`);
+    expect(answerToolResult(result).structuredContent).toMatchObject({ answer: expect.stringContaining(RERANK_FALLBACK_GAP) });
   });
 
   test('the answer trace records a hash of each seat\'s item and the bytes of the prompt each fit built', async () => {

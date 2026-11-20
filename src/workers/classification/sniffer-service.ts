@@ -252,6 +252,8 @@ export interface TierSnifferServiceOptions {
     maxPerPass?: number;
     /** Destinations with newly visible chunks that still need vectors. */
     onEmbeddingNeeded?: (corpora: ReadonlySet<string>) => void;
+    /** Ledgers where this drain moved an item or refused a move. */
+    onPlacementChecked?: (ledgerPaths: ReadonlySet<string>) => void;
     /** Fixed lowering slice override; still capped at 25% of judge + moves. Default adapts to backlog. */
     lowerSliceMs?: number;
     /** Maximum synchronous copy batch. Default 25 items / 25 ms. */
@@ -1901,8 +1903,14 @@ export class TierSnifferService {
         if (this.stopped) return undefined;
         this.movingDirection = direction;
         if (direction === 'lower') this.lowerMovePreempted = false;
-        this.moving = this.runAutoMoves(this.options.autoMoves, this.moveAbort.signal, direction)
-          .finally(() => { this.moving = undefined; this.movingDirection = undefined; });
+        const changedPaths = new Set<string>();
+        const options = this.options.autoMoves;
+        this.moving = this.runAutoMoves(options, this.moveAbort.signal, direction, changedPaths)
+          .finally(() => {
+            this.moving = undefined;
+            this.movingDirection = undefined;
+            if (!this.stopped && changedPaths.size > 0) options.onPlacementChecked?.(changedPaths);
+          });
       }
       return await this.moving;
     } catch (error) {
@@ -2149,6 +2157,7 @@ export class TierSnifferService {
     options: NonNullable<TierSnifferServiceOptions['autoMoves']>,
     signal: AbortSignal,
     direction: 'raise' | 'lower',
+    changedPaths: Set<string>,
   ): Promise<TierAutoMoveReport> {
     const timings = emptyTierMoveTimings();
     const started = this.monotonicNow();
@@ -2204,6 +2213,7 @@ export class TierSnifferService {
         // the same move again (the content check) is one item refused twice.
         const refusedKey = `${ledgerPath}\u0000${tierLedgerIdentityKey(identity)}`;
         if (error instanceof TierMoveRefusedError) {
+          changedPaths.add(ledgerPath);
           this.moveRefusalAttempts += 1;
           this.movesRefusedNow.set(refusedKey, why);
         } else this.movesRefusedNow.delete(refusedKey);
@@ -2243,6 +2253,7 @@ export class TierSnifferService {
         }
       };
       const succeeded = (record: TierLedgerRecord, result: TierMoveResult) => {
+        changedPaths.add(ledgerPath);
         report.moved++;
         for (const destination of result.destinations) {
           if (destination.chunksToEmbed > 0) embeddingCorpora.add(destination.corpusId);
