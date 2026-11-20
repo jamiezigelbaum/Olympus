@@ -63,7 +63,7 @@ export class EngineCommandUnavailableError extends Error {
  * are not what "your change is being applied" is about.
  */
 const OWNER_ACTION_KINDS: ReadonlySet<EngineCommand['kind']> = new Set<EngineCommand['kind']>([
-  'tier_override', 'tier_set_recorded', 'people', 'capture', 'capture_stop', 'delete_source_data', 'storage_registry', 'owner_limits', 'reload', 'export_data',
+  'tier_override', 'tier_set_recorded', 'people', 'capture', 'capture_stop', 'revoke_reads', 'archive_remove', 'delete_source_data', 'storage_registry', 'owner_limits', 'reload', 'export_data',
 ]);
 
 const RETRY_DELAYS_MS = [100, 250, 500, 1_000, 2_000];

@@ -1,6 +1,7 @@
 {
   "_readme": "One-line catches in src/ that carry on with nothing, per file (test/silent-fallback-allowance.test.ts). Counts only go down: a fix waits while the work progresses, or names what was left out (core/limit-stops.ts).",
   "logged_fallbacks": {
+    "src/workers/connector-store/legacy-personal-bodies.ts": "A failed body is counted in walker health and keeps the lap eligible for another scan.",
     "src/workers/email-source/gmail-status-scope.ts": "An unreadable retained mailbox identity pauses indexing and reports a fixed warning. It cannot be interpreted as a disconnected account.",
     "src/workers/engine-split/front-history.ts": "A failed SQLite history open or read leaves Home's current counts available. Log the SQLite code once per interval and retry history on the next render.",
     "src/workers/credential-broker/index.ts": "An unreadable local bearer secret is reported without credential details. The processor receives no offline account proof.",

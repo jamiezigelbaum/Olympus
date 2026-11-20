@@ -11295,7 +11295,7 @@ function loweredCopyLayers(sources, destination) {
     return from && to && trustDomainRank(to.trustDomain) < trustDomainRank(from.trustDomain);
   });
 }
-var PERSONAL_LOWERING_UNCLAIMED = `rejudge_json IS NULL AND metadata_forced = 0
+var LEGACY_PERSONAL_BODIES_HELD = "legacy-personal-bodies:held", LEGACY_PERSONAL_BODIES_JUDGED = "legacy-personal-bodies:judged", LEGACY_PERSONAL_BODIES_CURSOR = "legacy_personal_bodies_cursor_v2", LEGACY_PERSONAL_BODIES_WAITING = "legacy-personal-bodies:waiting", LEGACY_PERSONAL_BODY_PROGRESS_SQL, PERSONAL_LOWERING_UNCLAIMED = `rejudge_json IS NULL AND metadata_forced = 0
   AND metadata_tier <> 'secrets' AND content_tier <> 'secrets'
   AND decided_by NOT IN ('override', 'owner_rule')
   AND instr(reasons_json, '"override:') = 0 AND instr(reasons_json, '"metadata:owner_rule:') = 0
@@ -11340,6 +11340,11 @@ var init_tier_ledger = __esm(() => {
   init_store_write_guard();
   init_tier_classifier();
   init_tier_ledger_path();
+  LEGACY_PERSONAL_BODY_PROGRESS_SQL = `SELECT
+  CAST(COALESCE((SELECT value FROM tier_ledger_meta WHERE key = '${LEGACY_PERSONAL_BODIES_HELD}'), 0) AS INTEGER) AS held,
+  CAST(COALESCE((SELECT value FROM tier_ledger_meta WHERE key = '${LEGACY_PERSONAL_BODIES_JUDGED}'), 0) AS INTEGER) AS judged,
+  MAX(CAST(COALESCE((SELECT value FROM tier_ledger_meta WHERE key = '${LEGACY_PERSONAL_BODIES_WAITING}'), 0) AS INTEGER),
+    COALESCE((SELECT json_extract(NULLIF(value, ''), '$.waiting') FROM tier_ledger_meta WHERE key = '${LEGACY_PERSONAL_BODIES_CURSOR}'), 0)) AS waiting`;
   STORED_PERSONAL_LOWERING = `routed = 1 AND state = 'current' AND content_read = 1
   AND metadata_pending = 0 AND content_pending = 0 AND move_attempts = 0
   AND target_metadata_tier IS NULL AND target_content_tier IS NULL
@@ -11409,7 +11414,6 @@ var init_tier_set_binding = __esm(() => {
   init_tier_ledger();
   init_tier_ledger_path();
 });
-
 // src/workers/local-pacing.ts
 var GO_EASY_IDLE_FULL_SPEED_MS, GO_EASY_LOCAL_WORK_RECENT_MS;
 var init_local_pacing = __esm(() => {
@@ -12503,6 +12507,7 @@ var init_tier_placement = __esm(() => {
   init_tier_classifier();
   init_tier_ledger();
 });
+
 // src/workers/source-index/media-judge.ts
 var MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES, MEDIA_JUDGE_PROMPTS, MEDIA_JUDGE_THRESHOLDS, promptVectorCache;
 var init_media_judge = __esm(() => {
@@ -13073,7 +13078,10 @@ var init_reactions = () => {};
 function connectorStoreContentPreference(vettedVectorItemIds) {
   return (candidate) => candidate.item.chunk?.lane === "keyword" || candidate.laneRanks.has("recency") || candidate.laneRanks.has("vector") && vettedVectorItemIds.has(candidate.item.sourceItem.localItemId);
 }
-var CONCEPT_COUNT_MAX_AGE_MS, CONNECTOR_STORE_CONVERSATION_INDEX = "idx_connector_store_items_conversation_time", CONNECTOR_STORE_CONVERSATION_INDEX_SQL, CONNECTOR_STORE_RECENCY_INDEX = "idx_connector_store_items_recent_live", CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX = "idx_connector_store_items_recent_account_live", RECENCY_LIVE_SQL = "tombstoned IS 0", ACCOUNT_RECENCY_LIVE_SQL = "+tombstoned IS 0", CONNECTOR_STORE_RECENCY_INDEX_SQL, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, CHUNK_MEDIA_RETRY_BASE_MS, CONNECTOR_STORE_FTS_MIGRATION, STATUS_COUNTS_MAX_AGE_MS, TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, LEGACY_CAPPED_TAGS, RECOVERABLE_LABEL_SET, KNOWN_LABEL_SET, STORED_LABEL_FIELDS, lexicalContentPreference, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_V18_ITEM_COLUMNS, LOCAL_RELAXED_STOPWORDS;
+var CONCEPT_COUNT_MAX_AGE_MS, CONNECTOR_STORE_CONVERSATION_INDEX = "idx_connector_store_items_conversation_time", CONNECTOR_STORE_CONVERSATION_INDEX_SQL, CONNECTOR_STORE_RECENCY_INDEX = "idx_connector_store_items_recent_live", CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX = "idx_connector_store_items_recent_account_live", CONNECTOR_STORE_PERSONAL_BODY_INDEX = "idx_connector_store_personal_body_order", RECENCY_LIVE_SQL = "tombstoned IS 0", ACCOUNT_RECENCY_LIVE_SQL = "+tombstoned IS 0", CONNECTOR_STORE_RECENCY_INDEX_SQL, PERSONAL_BODY_DATE_SQL = `COALESCE(
+  CASE WHEN authored_at GLOB '[0-9][0-9][0-9][0-9]-*' THEN julianday(authored_at) END,
+  CASE WHEN updated_at GLOB '[0-9][0-9][0-9][0-9]-*' THEN julianday(updated_at) END,
+  0)`, CONNECTOR_STORE_PERSONAL_BODY_INDEX_SQL, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, CHUNK_MEDIA_RETRY_BASE_MS, CONNECTOR_STORE_FTS_MIGRATION, STATUS_COUNTS_MAX_AGE_MS, TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, LEGACY_CAPPED_TAGS, RECOVERABLE_LABEL_SET, KNOWN_LABEL_SET, STORED_LABEL_FIELDS, lexicalContentPreference, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_V18_ITEM_COLUMNS, LOCAL_RELAXED_STOPWORDS;
 var init_local_index = __esm(() => {
   init_tier_classifier();
   init_source_connector_labels();
@@ -13142,6 +13150,8 @@ var init_local_index = __esm(() => {
   CREATE INDEX IF NOT EXISTS ${CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX}
     ON items(account_scope, COALESCE(authored_at, updated_at, indexed_at)) WHERE ${ACCOUNT_RECENCY_LIVE_SQL};
 `;
+  CONNECTOR_STORE_PERSONAL_BODY_INDEX_SQL = `CREATE INDEX IF NOT EXISTS ${CONNECTOR_STORE_PERSONAL_BODY_INDEX}
+  ON items(${PERSONAL_BODY_DATE_SQL}, item_pk) WHERE ${RECENCY_LIVE_SQL};`;
   READ_RESULT_PROJECTION_LOCATOR_URI = Symbol("connector-store-result-projection-locator-uri");
   CALIBRATED_CONTENT_PREFERENCE_BARS = new Map([
     ["gemini-embedding-2", DEFAULT_SEMANTIC_RELEVANCE_BAR],
@@ -20815,7 +20825,9 @@ var init_vocabulary = __esm(() => {
     dashboardPending: {
       one: "{n} item waiting for the private model",
       many: "{n} items waiting for the private model"
-    }
+    },
+    legacyPersonalWaiting: "Waiting for your embedding choice: {waiting}",
+    legacyPersonalBodies: "Held for a privacy check from earlier builds: {held} · Checked so far: {judged}"
   };
   DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY = {
     sentence: "Tell Olympus what's private for you",
@@ -27768,7 +27780,6 @@ init_source_corpus_registry();
 init_source_placement();
 init_source_registry();
 init_source_storage();
-init_tier_classifier();
 init_tier_ledger();
 init_tier_ledger_path();
 init_tier_set_binding();
@@ -27830,11 +27841,20 @@ init_secret_locations();
 
 // src/core/restore-held-content.ts
 init_local_index();
+
+// src/workers/connector-store/place-personal-body.ts
+init_operation_error();
+init_tier_classifier();
+init_engine();
+init_media_judge();
 init_secrets_disposition();
 init_stored_names();
 init_tier_move();
+init_tier_rejudge();
+
+// src/core/restore-held-content.ts
+init_tier_move();
 init_tiered_store_set();
-init_media_judge();
 
 // src/core/linux-engine-service.ts
 init_file_lease();

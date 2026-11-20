@@ -3221,6 +3221,8 @@ export const DASHBOARD_CHATGPT_PRIVACY_COPY = {
     one: '{n} item waiting for the private model',
     many: '{n} items waiting for the private model',
   },
+  legacyPersonalWaiting: 'Waiting for your embedding choice: {waiting}',
+  legacyPersonalBodies: 'Held for a privacy check from earlier builds: {held} · Checked so far: {judged}',
 } as const;
 
 /**

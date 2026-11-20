@@ -4,6 +4,27 @@ import { createHash, randomUUID } from 'node:crypto';
  * Folder policy and byte acquisition stay behind the runtime's resolver.
  */
 import type { EnqueueExtractionJobsRequest, LocalFileExtractionJobStore } from './job-store.ts';
+import type { LocalConnectorStore } from '../connector-store/index.ts';
+
+// A leg can hold a grant before it holds the item. Decide once for the lane.
+export function revokeOnDemandReads(
+  stores: readonly LocalConnectorStore[],
+  ids: Iterable<string> = new Set(stores.flatMap(store => store.onDemandGrantIds())),
+  keep?: (store: LocalConnectorStore, id: string) => boolean | undefined,
+): number {
+  let revoked = 0;
+  for (const id of ids) {
+    if (keep) {
+      const choices = stores.map(store => keep(store, id));
+      if (choices.includes(true) && !choices.includes(false)) continue;
+    }
+    for (const store of stores) store.revokeOnDemandRead(id);
+    revoked++;
+  }
+  return revoked;
+}
+
+export type SourceReadRevocation = 'disconnect' | 'scope' | 'exclusions';
 
 export interface OnDemandReadRequest {
   itemRef: { corpusId: string; providerItemId: string };
@@ -32,6 +53,8 @@ export type RequestOnDemandRead = (request: OnDemandReadRequest) => Promise<OnDe
 export interface OnDemandReadTarget {
   readableOnRequest: boolean;
   job: EnqueueExtractionJobsRequest;
+  hasGrant(): boolean;
+  hasIndexedContent(): boolean;
   grant(): void;
 }
 
@@ -47,7 +70,7 @@ export async function requestOnDemandRead(request: OnDemandReadRequest, context:
   if (!ref) return { state: 'refused', reason: 'item_not_found' };
   return context.jobs.enqueueOnDemandRead({ ...request, questionId: request.questionId?.trim() || randomUUID(),
     itemRef: { corpusId: ref.corpusId, providerItemId: ref.providerItemId },
-  }, target.job, target.grant, context.limits);
+  }, target.job, target, context.limits);
 }
 
 /**

@@ -7,21 +7,15 @@ import { defaultSourceCorpusRegistryConfig } from './source-corpus-registry.ts';
 import { declaredConnectorStoreMountPaths, hasFolderLayout, placedRosterStores } from './source-placement.ts';
 import { DEFAULT_ACCOUNT_SLOT, readSourceRegistry } from './source-registry.ts';
 import { openConnectorStore, openTierLedger, openTierSniffer, restoredConnectorStoreHasBody, storeFileSchemaVersion, type StorageAccount } from './source-storage.ts';
-import {
-  classifyItemTiers, HELD_UNTIL_JUDGED_REASON, isImageMediaType, maxTier, ownerOverrideSecretReview, personalContentAuthorized,
-  TIER_CLASSIFIER_VERSION, TIER_MAP_REVISION, type TierDecision, type TierKey,
-} from '../workers/classification/tier-classifier.ts';
 import { TIER_LEDGER_SQLITE_STORE_ID } from '../workers/classification/tier-ledger.ts';
 import { tierSnifferPathForLedger } from '../workers/classification/tier-ledger-path.ts';
 import type { TierSnifferStore } from '../workers/classification/sniffer-store.ts';
 import { tierLedgerIsWithin, tierStoreDataRoot } from '../workers/classification/tier-set-binding.ts';
 import { installedTierMigrationLaneSpecs, type TierMigrationLaneSpec, type TierMigrationLegSpec } from '../workers/classification/tier-migration-lanes.ts';
 import { CONNECTOR_STORE_SQLITE_STORE_ID, type LocalConnectorStore } from '../workers/connector-store/local-index.ts';
-import { settleSecretsCopies } from '../workers/connector-store/secrets-disposition.ts';
-import { storedSignals } from '../workers/connector-store/stored-names.ts';
-import { moveRestoredItemToHold, retireRestoredTierLowerings, TIER_MOVE_CONNECTOR_ID } from '../workers/connector-store/tier-move.ts';
+import { placePersonalBody } from '../workers/connector-store/place-personal-body.ts';
+import { retireRestoredTierLowerings } from '../workers/connector-store/tier-move.ts';
 import { TieredStoreSet, tieredStoreSetLedgerPath, type TieredStoreLegSpec } from '../workers/connector-store/tiered-store-set.ts';
-import { imageJudgmentSignal } from '../workers/source-index/media-judge.ts';
 import type { SourceTrustDomain } from './source-index/types.ts';
 
 // Rollback can create a ledger for a Personal store from before it was
@@ -166,89 +160,12 @@ function holdLaneContent(env: LayoutEnv, account: StorageAccount, spec: TierMigr
 }
 
 function placeRestoredBodies(set: TieredStoreSet, personal: LocalConnectorStore, queue: TierSnifferStore | undefined): void {
-  const { ledger } = set;
   let afterItemPk: number | undefined;
   do {
     const page = personal.migrationItemsPage(afterItemPk === undefined ? {} : { afterItemPk });
     for (const item of page.items) {
-      const { identity } = item;
-      const text = item.chunks.map(chunk => chunk.text).join('');
-      if (!text.trim()) continue;
-      const current = ledger.getCurrent(identity);
-      // A restored body cannot supply the original digest of a legacy override.
-      const override = ledger.observeOverrideText(identity);
-      const copies = ledger.copies(identity);
-      const copy = copies.find(copy => copy.corpusId === personal.corpusId && copy.layers !== 'metadata');
-      if (override?.kind !== 'not_secret' && (override?.tier === 'secrets'
-        || current?.metadataTier === 'secrets' || current?.contentTier === 'secrets'
-        || current?.targetMetadataTier === 'secrets' || current?.targetContentTier === 'secrets')) {
-        const record = set.adoptLegacyItem(identity)!;
-        const { copies: hidden } = ledger.flipToSecrets(identity, { expectedGeneration: record.generation });
-        if (!hidden.some(copy => copy.corpusId === personal.corpusId)) {
-          personal.tombstoneCopy(identity, { trustTier: 'S5', connectorId: TIER_MOVE_CONNECTOR_ID });
-          personal.durabilityBarrier();
-        }
-        settleSecretsCopies({
-          ledger, identity, copies: hidden, connectorId: TIER_MOVE_CONNECTOR_ID, restoreQueue: true,
-          storeFor: corpusId => {
-            const domain = set.domainForCorpus(corpusId);
-            return domain && set.store(domain);
-          },
-        });
-        continue;
-      }
-      const resuming = current?.state === 'moving' && copy?.state === 'superseded'
-        && copy.supersededByGeneration === current.generation + 1
-        && ((current.reasons.includes(HELD_UNTIL_JUDGED_REASON) && current.contentPending) || !!ownerOverrideSecretReview(current.reasons));
-      if (current?.routed && !resuming && copy?.state !== 'current') continue;
-      const ownerTier = override?.kind === 'tier' ? override.tier : undefined;
-      const photo = isImageMediaType(item.mimeType) ? personal.imageJudgmentForItem(identity) : undefined;
-      if (current?.state === 'current' && !current.metadataPending
-        && (current.contentTier === 'private' || current.contentTier === 'public')
-        && (current.metadataTier === 'private' || current.metadataTier === 'public')
-        && ownerTier !== 'secure' && (current.decidedBy !== 'override' || ownerTier !== undefined)
-        && personalContentAuthorized(current, text, override?.kind === 'not_secret', override, photo && imageJudgmentSignal(photo))) continue;
-      const record = set.adoptLegacyItem(identity)!;
-      const privateCopy = ledger.copies(identity).find(copy => copy.trustDomain === 'secure_local' && copy.state === 'current' && copy.layers !== 'metadata');
-      const privateText = privateCopy && set.store('secure_local')?.exportItemCopy(identity)?.chunks.map(chunk => chunk.boundedText).join('');
-      if (privateText && privateText !== text) {
-        throw new OperationError('config_error', 'The restored tier stores contain different active bodies for the same item.');
-      }
-      // The restored body replaces any judge question about the previous text.
-      queue?.deleteItemQuestions(identity);
-      const floor = ownerTier === 'secure' ? 'secure' : 'public';
-      const names = ownerTier === 'private' || ownerTier === 'public' ? personal.exportItemNames(identity) : undefined;
-      const scanned = names && override ? classifyItemTiers({ signals: storedSignals(names), text }, { override }) : undefined;
-      const decision: TierDecision = scanned && ownerOverrideSecretReview(scanned.reasons) ? {
-        ...scanned,
-        metadataTier: maxTier(record.metadataTier, scanned.metadataTier),
-      } : {
-        metadataTier: heldTier(floor, record.metadataTier, record.targetMetadataTier),
-        contentTier: heldTier(floor, record.contentTier, record.targetContentTier),
-        decidedBy: 'default',
-        reasons: [
-          ...record.reasons.filter(reason => !reason.startsWith('content:') && !reason.startsWith('override:')),
-          HELD_UNTIL_JUDGED_REASON,
-          'content:sniffer:undecided:undecided',
-        ],
-        state: 'pending',
-        contentRead: true,
-        metadataPending: record.metadataPending,
-        contentPending: true,
-        metadataForced: record.metadataForced && record.decidedBy !== 'override',
-        metadataFlagged: record.metadataFlagged,
-        engineVersion: TIER_CLASSIFIER_VERSION,
-        mapRevision: TIER_MAP_REVISION,
-        snifferId: 'undecided',
-      };
-      const pending = resuming ? record : ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision)).record;
-      moveRestoredItemToHold({ set, identity, decision, expectedGeneration: pending.generation });
+      placePersonalBody(set, personal, { ...item, text: item.chunks.map(chunk => chunk.text).join('') }, queue, 'restore');
     }
     afterItemPk = page.nextAfterItemPk;
   } while (afterItemPk !== undefined);
-}
-
-function heldTier(floor: TierKey, current: TierKey, target: TierKey | null): TierKey {
-  const tier = maxTier(floor, maxTier(current, target ?? current));
-  return tier === 'secrets' ? 'secure' : tier;
 }

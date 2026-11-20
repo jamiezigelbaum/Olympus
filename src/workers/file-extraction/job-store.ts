@@ -1,7 +1,7 @@
 import { sizeHeldItemKey } from '../../core/source-size-limits.ts';
 import { applySqliteMmap } from '../connector-store/sqlite-mmap.ts';
 import { BACKGROUND_READS, offThreadReadsSupported, withOffThreadSnapshot, type StoreRead } from '../connector-store/off-thread-reads.ts';
-import type { OnDemandReadRequest, OnDemandReadResult } from './on-demand-read.ts';
+import type { OnDemandReadRequest, OnDemandReadResult, OnDemandReadTarget } from './on-demand-read.ts';
 /**
  * The generic extraction job side database.
  *
@@ -766,7 +766,7 @@ export class LocalFileExtractionJobStore {
   enqueueOnDemandRead(
     request: OnDemandReadRequest,
     job: EnqueueExtractionJobsRequest,
-    grant: () => void,
+    target: Pick<OnDemandReadTarget, 'hasGrant' | 'hasIndexedContent' | 'grant'>,
     limits = { files: 3, bytes: 25 * 1024 * 1024 },
   ): OnDemandReadResult {
     this.assertWritable('on_demand');
@@ -779,7 +779,8 @@ export class LocalFileExtractionJobStore {
         JOIN extraction_jobs j ON j.job_id = r.job_id
         WHERE r.corpus_id = ? AND r.provider_item_id = ? ORDER BY r.rowid DESC LIMIT 1`).get(request.itemRef.corpusId, request.itemRef.providerItemId) as { status: string; source_version: string | null } | null;
       // Every dedupe is per source version: a newer version is a new read.
-      if (previous && (previous.source_version ?? '') === (job.refs[0]!.sourceVersion ?? '')) {
+      const sameVersion = previous && (previous.source_version ?? '') === (job.refs[0]!.sourceVersion ?? '');
+      if (sameVersion && target.hasGrant()) {
         if (previous.status === 'indexed') return { state: 'reading', etaSeconds: 60, settled: true };
         if (previous.status === 'leased') return { state: 'reading', etaSeconds: 60 };
         if (previous.status === 'queued' || previous.status === 'failed_retryable') return { state: 'queued', etaSeconds: 60 };
@@ -799,8 +800,11 @@ export class LocalFileExtractionJobStore {
         return { state: 'capped', reason: { id: 'on_demand_reads_per_question', limit: limits, used,
           waiting_names_count: waiting.n, resumes: 'never' } };
       }
-      grant();
+      target.grant();
       this.db.query('DELETE FROM on_demand_waiting WHERE corpus_id = ? AND provider_item_id = ?').run(request.itemRef.corpusId, request.itemRef.providerItemId);
+      if (sameVersion && request.requester === 'owner' && previous.status === 'indexed' && target.hasIndexedContent()) {
+        return { state: 'reading', etaSeconds: 60, settled: true };
+      }
       const queued = this.enqueue({ ...job, force: true, priority: 100,
         ...(request.requester !== 'owner' ? { maxBytesPerFile: Math.max(1, bytes) } : {}) });
       const ref = queued.jobRefs[0]!;

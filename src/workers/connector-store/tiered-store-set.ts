@@ -1018,11 +1018,17 @@ export class TieredStoreSet {
    * legacy would make superseded copies visible again.
    */
   private assertLedgerGovernsLegs(): void {
+    const foreign = this.foreignBoundLeg();
+    if (foreign) throw new TierLedgerUnavailableError(foreign.corpusId);
+  }
+
+  /** A stored pass must not adopt items from a leg already governed by another set. */
+  foreignBoundLeg(): LocalConnectorStore | undefined {
     const ledgerId = this.ledger.ledgerId();
     for (const domain of TIER_DOMAIN_ORDER) {
       const store = this.store(domain);
       const binding = store?.tierSetBinding();
-      if (store && binding && binding.ledgerId !== ledgerId) throw new TierLedgerUnavailableError(store.corpusId);
+      if (binding && binding.ledgerId !== ledgerId) return store;
     }
   }
 

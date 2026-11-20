@@ -95,6 +95,7 @@ test('settled ledgers read no background tier item windows on idle ticks', async
     walkers: {
       namesOnly: { reason: 'idle_unchanged', lastResult: 'no_work' },
       personalFirst: { reason: 'retired', lastResult: 'retired' },
+      legacyPersonalBodies: { reason: 'retired', lastResult: 'retired' },
       personalLowerings: { reason: 'idle_unchanged', lastResult: 'no_work' },
       rejudge: { reason: 'idle_unchanged', lastResult: 'no_work' },
       staleEmbedHolds: { reason: 'idle_unchanged', lastResult: 'no_work' },
@@ -261,9 +262,9 @@ test('a prompt input change wakes re-judge on the next tick', async () => {
     fetchContent: true, placement: FIXTURE_PLACEMENT,
   }, { settle: false });
   registerInstalledTierClassification(f.installed);
-  const decision = { ...classifyItemTiers({ signals: {}, text }), decidedBy: 'sniffer' as const, reasons: [
-    `metadata:sniffer:${before}:ordinary:0.99`, `content:sniffer:${before}:ordinary:0.99`,
-  ] };
+  const previousJudge = { id: before, judge: () => ({ verdict: 'decided' as const, tier: 'private' as const, code: 'ordinary:0.99', origin: 'model' as const }) };
+  const decision = classifyItemTiers({ signals: {}, text }, { sniffer: previousJudge });
+  decision.reasons.push(`metadata:sniffer:${before}:ordinary:0.99`);
   f.ledger.recordRoutedPlacement(identity, decision, f.set.placementFor(decision));
   expect(f.ledger.getCurrent(identity)).toMatchObject({ state: 'current', contentRead: true });
   f.ledger.markJudged(identity, { engineVersion: TIER_CLASSIFIER_VERSION, snifferId: before });

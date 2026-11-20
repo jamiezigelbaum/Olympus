@@ -41868,7 +41868,7 @@ function namesOf(signals) {
 function slug(value) {
   return SLUG.test(value) ? value : "invalid";
 }
-var CONTENT_NAMES_ONLY_REASON = "content:names_only", CONTENT_NAMES_ONLY_LIFTED_REASON = "content:names_only_lifted", TIER_CLASSIFIER_VERSION = "2026-10-29.p8", TIER_MAP_REVISION = "none", TIER_KEYS, TIER_RANK, HELD_RECORD_PRIORITY = 10, HELD_UNTIL_JUDGED_PRIORITY = -1, NEW_ARRIVAL_PRIORITY = 50, UNDECIDED_TIER_SNIFFER, SNIFFER_NAMES_MAX_CHARS = 400, SNIFFER_EXCERPT_MAX_CHARS = 1200, CONTENT_READ_SNIFFER_FLAG = "content:read", PERSONAL_FIRST_REASON = "content:personal_first", HELD_UNTIL_JUDGED_REASON = "content:held_until_judged", OWNER_OVERRIDE_SECRET_REVIEW_REASON = "content:owner_override_secret_review", OWNER_OVERRIDE_SECRET_CONFIRMED_REASON = "content:owner_override_secret_confirmed", personalContentAuthority, PARENT_CONTEXT_MARKER = `
+var CONTENT_NAMES_ONLY_REASON = "content:names_only", CONTENT_NAMES_ONLY_LIFTED_REASON = "content:names_only_lifted", TIER_CLASSIFIER_VERSION = "2026-10-29.p8", TIER_MAP_REVISION = "none", TIER_KEYS, TIER_RANK, HELD_RECORD_PRIORITY = 10, HELD_UNTIL_JUDGED_PRIORITY = -1, NEW_ARRIVAL_PRIORITY = 50, UNDECIDED_TIER_SNIFFER, SNIFFER_NAMES_MAX_CHARS = 400, SNIFFER_EXCERPT_MAX_CHARS = 1200, CONTENT_READ_SNIFFER_FLAG = "content:read", PERSONAL_FIRST_REASON = "content:personal_first", HELD_UNTIL_JUDGED_REASON = "content:held_until_judged", LEGACY_PERSONAL_BODY_REASON = "content:legacy_personal_body", OWNER_OVERRIDE_SECRET_REVIEW_REASON = "content:owner_override_secret_review", OWNER_OVERRIDE_SECRET_CONFIRMED_REASON = "content:owner_override_secret_confirmed", personalContentAuthority, PARENT_CONTEXT_MARKER = `
 Parent names (context only): `, PARENT_CONTEXT_MAX_CHARS = 200, NAMES_INPUT_REASON_PREFIX = "metadata:names_input:", NAMES_INPUT_KEYS, FRONT_MATTER_PRIVATE_REASON = "content:rule:front_matter_private", FRONT_MATTER_MAX_LINES = 100, IMAGE_PRIVATE_DEFAULT_REASON = "content:image_private_default", IMAGE_SENSITIVE_REASON_PREFIX = "content:image_sensitive:", IMAGE_ORDINARY_REASON = "content:image_ordinary", IMAGE_TEXT_DECIDES_REASON_PREFIX = "content:image_text_decides:", IMAGE_TEXT_DECIDES_MIN_WORDS = 8, PUBLIC_RETIRED_REASON = "tier:public_retired", RETIRED_SOURCE_PRIOR_REASON = "metadata:prior:source_", SNIFFER_EXCERPT_HEAD_CHARS = 600, SNIFFER_EXCERPT_MAX_FOCUS = 2, SNIFFER_EXCERPT_GAP = " … ", SLUG;
 var init_tier_classifier = __esm(() => {
   init_secret_patterns();
@@ -42425,7 +42425,9 @@ class TierSnifferStore {
   }
   enqueue(question) {
     const materialHash = question.materialHash ?? snifferMaterialHash(question.pass, question.material);
-    const priority = Number.isFinite(question.priority) ? Math.max(HELD_UNTIL_JUDGED_PRIORITY, Math.min(100, Math.floor(question.priority))) : 0;
+    const requestedPriority = Number.isFinite(question.priority) ? Math.max(HELD_UNTIL_JUDGED_PRIORITY, Math.min(100, Math.floor(question.priority))) : 0;
+    const order = question.legacyHoldOrder;
+    const priority = requestedPriority === HELD_UNTIL_JUDGED_PRIORITY && order !== undefined && Number.isSafeInteger(order) && order > 0 ? HELD_UNTIL_JUDGED_PRIORITY - order : requestedPriority;
     const hinted = question.conversationOrder !== undefined;
     const hint = question.conversationOrder === 1 ? 1 : question.conversationOrder === -1 ? -1 : 0;
     return this.db.transaction(() => {
@@ -43040,6 +43042,12 @@ function listMovingRead(options) {
     sql: `
       SELECT * FROM tier_items INDEXED BY tier_items_move_order WHERE state = 'moving'
       ${tierMovingDirectionClause(options.direction)}
+      ${options.legacyHoldsOnly ? `AND instr(reasons_json, '"${LEGACY_PERSONAL_BODY_REASON}"') > 0
+        AND (content_pending = 1 OR instr(reasons_json, '"${OWNER_OVERRIDE_SECRET_REVIEW_REASON}"') > 0)
+        AND EXISTS (SELECT 1 FROM tier_copies c WHERE c.provider = tier_items.provider
+          AND c.account_scope = tier_items.account_scope AND c.conversation_key = tier_items.conversation_key
+          AND c.provider_item_id = tier_items.provider_item_id AND c.trust_domain = 'internal' AND c.layers <> 'metadata'
+          AND c.copy_state = 'superseded' AND c.superseded_by_generation = tier_items.generation + 1)` : ""}
       ORDER BY move_attempts, decided_at, provider, account_scope, provider_item_id, conversation_key
       LIMIT ?
     `,
@@ -44457,6 +44465,46 @@ class TierLedger {
   writeMeta(key, value) {
     this.setMeta(key, value);
   }
+  recordLegacyPersonalHold(identity, decision, plan, digest, guard, retainedBodyCorpusId) {
+    return this.db.transaction(() => {
+      if (retainedBodyCorpusId)
+        this.db.query(`
+        UPDATE tier_copies SET layers = 'both'
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+          AND corpus_id = ? AND trust_domain = 'internal' AND copy_state = 'current' AND layers = 'metadata'
+      `).run(...idParams(identity), retainedBodyCorpusId);
+      const result = this.recordRoutedPlacement(identity, decision, plan, { guard });
+      if (result.outcome !== "queued_move") {
+        if (retainedBodyCorpusId)
+          throw new TierLedgerGenerationConflictError;
+        return result;
+      }
+      for (const copy of result.previousCopies) {
+        if (copy.trustDomain !== "internal" || copy.state !== "current" || copy.layers === "metadata")
+          continue;
+        if (this.supersedeCurrentCopy(identity, copy.corpusId, result.record.generation + 1, result.record.decidedAt)) {
+          result.raise = true;
+        }
+      }
+      const key = legacyPersonalBodyKey(identity);
+      if (result.raise && this.readMeta(key) === undefined) {
+        const order = this.incrementLegacyPersonalProgress(LEGACY_PERSONAL_BODIES_HELD);
+        this.writeMeta(key, JSON.stringify({ digest, order }));
+      }
+      return result;
+    }).immediate();
+  }
+  legacyPersonalBodyHold(identity) {
+    const saved = this.readMeta(legacyPersonalBodyKey(identity));
+    return saved && saved !== "judged" ? JSON.parse(saved) : undefined;
+  }
+  incrementLegacyPersonalProgress(key) {
+    const row = this.db.query(`
+      INSERT INTO tier_ledger_meta (key, value) VALUES (?, '1')
+      ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1 RETURNING value
+    `).get(key);
+    return Number(row.value);
+  }
   recordLabelRuleMatches(provider, accountScope, ruleKey, walkId, itemKeys) {
     if (itemKeys.length === 0)
       return;
@@ -45263,10 +45311,7 @@ class TierLedger {
     for (const copy of sources) {
       if (copy.state !== "current" || !placementIsRaise([copy], destination))
         continue;
-      this.db.query(`
-        UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = ?, updated_at = ?
-        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND corpus_id = ?
-      `).run(generation, now, ...idParams(identity), copy.corpusId);
+      this.supersedeCurrentCopy(identity, copy.corpusId, generation, now);
     }
   }
   retainMoveRaise(identity, options) {
@@ -45482,6 +45527,8 @@ class TierLedger {
     let copies = [];
     this.db.transaction(() => {
       const existing = this.readRow(identity);
+      if (options.guard)
+        this.assertOverrideGuard(identity, existing, options.guard);
       if (!existing || existing.generation !== options.expectedGeneration) {
         throw new TierLedgerGenerationConflictError;
       }
@@ -46070,6 +46117,13 @@ class TierLedger {
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'current'
     `).run(byGeneration, now, ...idParams(identity));
   }
+  supersedeCurrentCopy(identity, corpusId, byGeneration, now) {
+    return this.db.query(`
+      UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = ?, updated_at = ?
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+        AND corpus_id = ? AND copy_state = 'current'
+    `).run(byGeneration, now, ...idParams(identity), corpusId).changes > 0;
+  }
   flipTiers(identity, existing, next) {
     const reasonsJson = JSON.stringify(next.reasons);
     const state = next.state ?? "current";
@@ -46091,6 +46145,16 @@ class TierLedger {
   appendHistory(identity, generation, metadataTier, contentTier, decidedBy, reasonsJson, state, decidedAt) {
     if (metadataTier === "secrets" || contentTier === "secrets")
       this.writeMeta(overrideRestoreKey(identity), "");
+    if (reasonsJson.includes('"content:judge_verdict:')) {
+      const digest = this.legacyPersonalBodyHold(identity)?.digest;
+      if (digest) {
+        const reasons = JSON.parse(reasonsJson);
+        if (hasContentJudgeVerdict(reasons, "private", digest) || hasContentJudgeVerdict(reasons, "secure", digest)) {
+          this.writeMeta(legacyPersonalBodyKey(identity), "judged");
+          this.incrementLegacyPersonalProgress(LEGACY_PERSONAL_BODIES_JUDGED);
+        }
+      }
+    }
     this.db.query(`
       INSERT INTO tier_history (
         provider, account_scope, conversation_key, provider_item_id, generation,
@@ -46104,6 +46168,9 @@ function caughtUpKey(connectorId) {
 }
 function newArrivalKey(identity) {
   return `new_arrival:${tierLedgerIdentityKey(identity)}`;
+}
+function legacyPersonalBodyKey(identity) {
+  return `legacy-personal-body:${tierLedgerIdentityKey(identity)}`;
 }
 function readStoreBindingCursor(storeDbPath, runId, connectorId) {
   if (storeDbPath === ":memory:" || !existsSync25(storeDbPath))
@@ -47249,7 +47316,7 @@ function overrideFromJson(json) {
     return parsed;
   return;
 }
-var TIER_LEDGER_SCHEMA_VERSION = 19, RETIRED_EMBEDDING_CLEARANCE_REASON = "content:sniffer:retired_embedding_clearance:undecided", RETAINED_MOVE_SOURCE_REASON = "content:retained_move_source", TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_safe_unread_relabel_v1", IDENTITY_BATCH = 200, AWAITING_TEXT_WHERE = `routed = 1 AND content_read = 0 AND metadata_pending = 0
+var TIER_LEDGER_SCHEMA_VERSION = 19, RETIRED_EMBEDDING_CLEARANCE_REASON = "content:sniffer:retired_embedding_clearance:undecided", RETAINED_MOVE_SOURCE_REASON = "content:retained_move_source", LEGACY_PERSONAL_BODIES_HELD = "legacy-personal-bodies:held", LEGACY_PERSONAL_BODIES_JUDGED = "legacy-personal-bodies:judged", LEGACY_PERSONAL_BODIES_CURSOR = "legacy_personal_bodies_cursor_v2", LEGACY_PERSONAL_BODIES_WAITING = "legacy-personal-bodies:waiting", LEGACY_PERSONAL_BODY_PROGRESS_SQL, TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_safe_unread_relabel_v1", IDENTITY_BATCH = 200, AWAITING_TEXT_WHERE = `routed = 1 AND content_read = 0 AND metadata_pending = 0
         AND ((state = 'pending' AND content_pending = 1)
           OR (state = 'current' AND EXISTS (SELECT 1 FROM json_each(reasons_json) r
             WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
@@ -47342,6 +47409,11 @@ var init_tier_ledger = __esm(() => {
   init_store_write_guard();
   init_tier_classifier();
   init_tier_ledger_path();
+  LEGACY_PERSONAL_BODY_PROGRESS_SQL = `SELECT
+  CAST(COALESCE((SELECT value FROM tier_ledger_meta WHERE key = '${LEGACY_PERSONAL_BODIES_HELD}'), 0) AS INTEGER) AS held,
+  CAST(COALESCE((SELECT value FROM tier_ledger_meta WHERE key = '${LEGACY_PERSONAL_BODIES_JUDGED}'), 0) AS INTEGER) AS judged,
+  MAX(CAST(COALESCE((SELECT value FROM tier_ledger_meta WHERE key = '${LEGACY_PERSONAL_BODIES_WAITING}'), 0) AS INTEGER),
+    COALESCE((SELECT json_extract(NULLIF(value, ''), '$.waiting') FROM tier_ledger_meta WHERE key = '${LEGACY_PERSONAL_BODIES_CURSOR}'), 0)) AS waiting`;
   STORED_PERSONAL_LOWERING = `routed = 1 AND state = 'current' AND content_read = 1
   AND metadata_pending = 0 AND content_pending = 0 AND move_attempts = 0
   AND target_metadata_tier IS NULL AND target_content_tier IS NULL
@@ -47490,6 +47562,18 @@ var init_tier_set_binding = __esm(() => {
   init_tier_ledger_path();
   tierLedgerIsWithin = pathResolvesWithin;
 });
+
+// src/workers/connector-store/tier-set-registry.ts
+function registerTierSetForLedger(ledgerPath, set) {
+  (tierSets ??= new Map).set(ledgerPath, set);
+}
+function tierSetForLedger(ledgerPath) {
+  return tierSets?.get(ledgerPath);
+}
+function registeredTierSets() {
+  return [...tierSets?.values() ?? []];
+}
+var tierSets;
 
 // src/workers/local-pacing.ts
 import { execFile as execFile2, spawn as spawn3 } from "node:child_process";
@@ -53426,6 +53510,7 @@ class CachedTierSniffer {
           mapRevision,
           ...request.conversationOrder !== undefined ? { conversationOrder: request.conversationOrder } : {},
           flags: request.flags,
+          ...request.legacyHoldOrder !== undefined ? { legacyHoldOrder: request.legacyHoldOrder } : {},
           ...request.priority !== undefined ? { priority: request.priority } : {},
           ...request.stillAsk ? { stillAsk: request.stillAsk } : {}
         });
@@ -58082,18 +58167,6 @@ var init_tier_placement = __esm(() => {
   };
 });
 
-// src/workers/connector-store/tier-set-registry.ts
-function registerTierSetForLedger(ledgerPath, set) {
-  (tierSets ??= new Map).set(ledgerPath, set);
-}
-function tierSetForLedger(ledgerPath) {
-  return tierSets?.get(ledgerPath);
-}
-function registeredTierSets() {
-  return [...tierSets?.values() ?? []];
-}
-var tierSets;
-
 // src/workers/source-index/media-judge.ts
 function imageJudgmentSignal(judgment) {
   return {
@@ -61053,7 +61126,9 @@ function rejudgeStoredContent(set, record, options) {
   const ledger = set.ledger;
   const identity = identityOf(record);
   const read = ledger.classificationRead(identity);
-  if (read.override) {
+  const legacyHold = record.state === "pending" && record.contentPending && record.reasons.includes(LEGACY_PERSONAL_BODY_REASON);
+  const notSecret = legacyHold && read.override?.kind === "not_secret" ? read.override : undefined;
+  if (read.override && !notSecret) {
     if (key)
       ledger.markRejudged(identity, key);
     report.skipped += 1;
@@ -61071,17 +61146,23 @@ function rejudgeStoredContent(set, record, options) {
     return;
   }
   const imageJudgment = exported.chunks.find((chunk) => chunk.mediaJudgment)?.mediaJudgment;
+  const guard = { generation: record.generation, override: read.override };
   const title = columnString(exported.columns["title"]);
   const path = columnString(exported.columns["locator_uri"]);
   const sender = columnString(exported.columns["sender_label"]);
   const mimeType = columnString(exported.columns["mime_type"]);
   const folderKeys = [...storedSignals(exported).folderKeys ?? []];
   let questionNotQueued = false;
+  const legacyHoldOrder = legacyHold ? ledger.legacyPersonalBodyHold(identity)?.order : undefined;
   const counting = options.sniffer && {
     id: options.sniffer.id,
     judge(request) {
       const upgrade = !options.recheck && key && isSnifferUnionUpgrade(record.reasons, key.snifferId);
-      const verdict = options.sniffer.judge(upgrade ? { ...request, priority: HELD_UNTIL_JUDGED_PRIORITY } : request);
+      const verdict = options.sniffer.judge({
+        ...request,
+        ...upgrade ? { priority: HELD_UNTIL_JUDGED_PRIORITY } : {},
+        ...legacyHoldOrder !== undefined ? { legacyHoldOrder } : {}
+      });
       if (verdict.verdict === "undecided" && verdict.queued !== true)
         questionNotQueued = true;
       return verdict;
@@ -61108,6 +61189,7 @@ function rejudgeStoredContent(set, record, options) {
     subject: identity
   }, {
     ...sniffer ? { sniffer } : {},
+    ...notSecret ? { override: notSecret } : {},
     ...options.retirePublic ? { retirePublic: true } : {}
   });
   const decision = {
@@ -61117,6 +61199,8 @@ function rejudgeStoredContent(set, record, options) {
     reasons: [
       ...metadata.reasons,
       ...content.reasons,
+      ...legacyHold ? [LEGACY_PERSONAL_BODY_REASON] : [],
+      ...notSecret && !metadata.reasons.includes("override:item:not_secret") ? ["override:item:not_secret"] : [],
       ...record.reasons.includes(contentDigestReason(text)) ? record.reasons.filter((reason) => reason.startsWith("content:names:") && !content.reasons.includes(reason)) : []
     ],
     state: metadata.metadataPending || content.contentPending ? "pending" : "current",
@@ -61133,7 +61217,7 @@ function rejudgeStoredContent(set, record, options) {
     const settled = settleRoutedSecrets(set, identity, decision, exported, {
       text,
       findingKinds: content.reasons.filter((reason) => reason.startsWith("content:secret:")).map((reason) => reason.slice("content:secret:".length))
-    }, { guard: { generation: record.generation, override: undefined } });
+    }, { guard });
     if (settled)
       report.secrets += 1;
     return;
@@ -61152,7 +61236,7 @@ function rejudgeStoredContent(set, record, options) {
     }, {
       copies: current,
       embedHold: current.some((copy) => copy.embedHold)
-    }, { guard: { generation: record.generation, override: undefined } });
+    }, { guard });
     if (key)
       ledger.markHeldRejudged(ledger.getCurrent(identity), key);
     report.asked += 1;
@@ -61175,7 +61259,7 @@ function rejudgeStoredContent(set, record, options) {
   }
   const recorded = ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), {
     ...autoMoves || options.hideRaises === true ? {} : { queueWithoutHiding: true },
-    guard: { generation: record.generation, override: undefined }
+    guard
   });
   if (key)
     ledger.markRejudged(identity, key);
@@ -63842,7 +63926,9 @@ function stageTieredMove(options, repairSource, loweringOnly = false) {
   if (repairSource && placement.copies.some((copy) => copy.trustDomain !== "secure_local" && !sources.some((source) => source.corpusId === copy.corpusId && layersCover(source.layers, copy.layers)))) {
     throw new TierMoveRefusedError("Repair cannot write a lower destination.", "repair_lower_destination");
   }
-  const raise = !!repairSource || placementIsRaise(sources, placement.copies);
+  const contentDestination = copyServingLayer(placement.copies, "content");
+  const heldPersonal = contentDestination?.trustDomain === "secure_local" && contentHeldForJudgment(record) && record.reasons.includes(LEGACY_PERSONAL_BODY_REASON) ? sources.find((source) => source.trustDomain === "internal" && source.layers !== "metadata") : undefined;
+  const raise = !!(repairSource || heldPersonal) || placementIsRaise(sources, placement.copies);
   if (loweringOnly && raise)
     throw new TierMoveRefusedError("Raises cannot enter a lowering batch.", "raise_in_lowering");
   const exports = new Map;
@@ -63853,8 +63939,7 @@ function stageTieredMove(options, repairSource, loweringOnly = false) {
     }
     return exports.get(copy.corpusId);
   };
-  const contentSource = repairSource ?? copyServingLayer(sources, "content");
-  const contentDestination = copyServingLayer(placement.copies, "content");
+  const contentSource = repairSource ?? heldPersonal ?? copyServingLayer(sources, "content");
   const loweredLayers = loweredCopyLayers(sources, placement.copies);
   const lowering = loweredLayers.length > 0 || tiersLower(record, target) || hasNewLowerLayer(sources, placement.copies);
   const policyRefusal = unavailableLoweringPolicy(set, lowering);
@@ -63965,6 +64050,15 @@ function stageTieredMove(options, repairSource, loweringOnly = false) {
           return policyRefusal ?? authorityRefusal(set, now, target, sources, placement.copies);
         }
         exports.clear();
+        if (now.reasons.includes(LEGACY_PERSONAL_BODY_REASON)) {
+          const bodies = heldPersonal ? sources : sources.filter((copy) => copy.layers !== "metadata");
+          if (bodies.length > 1) {
+            const texts = bodies.map((copy) => exportFrom(copy)?.chunks.map((chunk) => chunk.boundedText).join(""));
+            if (new Set(texts.filter(Boolean)).size > 1) {
+              throw new TierMoveRefusedError("The source stores hold different active bodies for the same item.", "conflicting_legacy_bodies");
+            }
+          }
+        }
         if (contentDestination && needsContentMoveAuthority(contentSource, contentDestination)) {
           const refusal = contentMoveRefusal(decision ?? now, exportFrom(contentSource ?? sources[0]), contentDestination.trustDomain, ledger.getOverride(identity));
           if (refusal) {
@@ -63975,7 +64069,8 @@ function stageTieredMove(options, repairSource, loweringOnly = false) {
         }
         for (const planned of placement.copies) {
           const kept = sources.find((source) => source.corpusId === planned.corpusId);
-          if (kept && layersCover(kept.layers, planned.layers) && !(repairSource && planned.layers !== "metadata")) {
+          const missingHeldBody = heldPersonal && kept && planned.layers !== "metadata" && !exportFrom(kept)?.chunks.length;
+          if (kept && !missingHeldBody && layersCover(kept.layers, planned.layers) && !(repairSource && planned.layers !== "metadata")) {
             const keptChunks = planned.layers === "metadata" ? 0 : exportFrom(kept)?.chunks.length ?? 0;
             destinations.push({
               corpusId: planned.corpusId,
@@ -66052,6 +66147,7 @@ function parseEngineCommandEnvelope(value) {
       }
       return { id, command: { kind, samples } };
     }
+    case "archive_remove":
     case "delete_source_data":
     case "tier_override":
     case "storage_registry":
@@ -66068,6 +66164,13 @@ function parseEngineCommandEnvelope(value) {
       if (frontPid !== undefined && (kind !== "delete_source_data" || !Number.isSafeInteger(frontPid) || frontPid <= 0))
         fail("frontPid is a process id, carried by a delete.");
       return { id, command: { kind, request: forwardedRequest(kind, command.request), ...frontPid !== undefined ? { frontPid } : {} } };
+    }
+    case "revoke_reads": {
+      const { source, reason } = command;
+      if (typeof source === "string" && SOURCE.test(source) && (reason === "disconnect" || reason === "scope" || reason === "exclusions")) {
+        return { id, command: { kind, source, reason } };
+      }
+      throw new EngineCommandError(400, "revoke_reads needs a source and a revocation reason.");
     }
     case "sync_now":
     case "start_approved": {
@@ -66376,6 +66479,7 @@ var init_commands = __esm(() => {
   ENGINE_JUDGE_BOOST_TTL_MS = 15 * 60000;
   ENGINE_JUDGE_NOW_MAX_BUDGET_MS = RELEASE_CHUNK_JUDGE_BUDGET_MS;
   ENGINE_FORWARDED_ROUTES = {
+    archive_remove: ["/dashboard/archive-import/remove"],
     delete_source_data: ["/dashboard/delete-source-data", "/v1/cli/data-delete"],
     tier_override: ["/v1/cli/tier", "/dashboard/privacy/items/set", "/v1/privacy-item/raise", "/dashboard/privacy/judge-check"],
     people: ["/dashboard/people"],
@@ -69333,7 +69437,8 @@ self.onmessage = ({ data: [path, budgetMs, pagesPerStep] }) => {
   }
 };`;
 }
-function connectorRecencyIndexWorkerSource() {
+function connectorRecencyIndexWorkerSource(includePersonalBodyIndex) {
+  const sql = CONNECTOR_STORE_RECENCY_INDEX_SQL + (includePersonalBodyIndex ? CONNECTOR_STORE_PERSONAL_BODY_INDEX_SQL : "");
   return `
 import { Database } from 'bun:sqlite';
 ${INLINE_CLOSE_SQLITE_STORE}
@@ -69342,7 +69447,7 @@ self.onmessage = ({ data: [path] }) => {
   let result;
   try {
     db.exec('PRAGMA busy_timeout = 0; PRAGMA synchronous = NORMAL; PRAGMA wal_autocheckpoint = 0;');
-    db.transaction(() => db.exec(${JSON.stringify(CONNECTOR_STORE_RECENCY_INDEX_SQL)})).immediate();
+    db.transaction(() => db.exec(${JSON.stringify(sql)})).immediate();
     result = { done: true };
   } catch (error) {
     result = { busy: /^SQLITE_(BUSY|LOCKED)(_|$)/.test(error.code) };
@@ -70793,7 +70898,10 @@ function namesOnlyKeptCount(n) {
   return n > 0 ? { namesOnlyKeptChunks: n } : {};
 }
 function migrationFingerprint(contentHash, chunkHashes) {
-  return createHash34("sha256").update(contentHash ?? "").update("\x00").update(String(chunkHashes.length)).update("\x00").update(chunkHashes.join("\x00")).digest("hex");
+  return migrationFingerprintParts(contentHash, chunkHashes.length, chunkHashes.join("\x00"));
+}
+function migrationFingerprintParts(contentHash, count, hashes) {
+  return createHash34("sha256").update(contentHash ?? "").update("\x00").update(String(count)).update("\x00").update(hashes).digest("hex");
 }
 function carryHold(listed, fetched) {
   return listed.holdContentUntilJudged === true && fetched.holdContentUntilJudged !== true ? { ...fetched, holdContentUntilJudged: true } : fetched;
@@ -71989,6 +72097,16 @@ function sameStrings(actual, expected) {
 function sameStringSet(actual, expected) {
   return actual.length === expected.length && expected.every((value) => actual.includes(value));
 }
+function deleteOnDemandGrant(db, localItemId) {
+  const previous = db.query("PRAGMA busy_timeout").get().timeout;
+  db.exec(`PRAGMA busy_timeout = ${Math.min(previous, REVOCATION_WRITE_LIMIT.milliseconds)}`);
+  try {
+    const removed = db.query("DELETE FROM on_demand_item_reads WHERE local_item_id = ?").run(localItemId);
+    return removed.changes > 0;
+  } finally {
+    db.exec(`PRAGMA busy_timeout = ${previous}`);
+  }
+}
 function createOnDemandReads(db) {
   db.exec(`CREATE TABLE IF NOT EXISTS on_demand_item_reads (
     local_item_id TEXT PRIMARY KEY, source_version TEXT NOT NULL, read_on_demand INTEGER NOT NULL DEFAULT 1
@@ -72111,7 +72229,7 @@ function connectorStoreOpenStamp(db) {
   const rows = db.query("SELECT type, name, tbl_name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name").all();
   let hash = connectorStoreOpenShape() >>> 0;
   for (const row of rows) {
-    if (row.type === "index" && (row.name === CONNECTOR_STORE_RECENCY_INDEX || row.name === CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX))
+    if (row.type === "index" && (row.name === CONNECTOR_STORE_RECENCY_INDEX || row.name === CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX || row.name === CONNECTOR_STORE_PERSONAL_BODY_INDEX))
       continue;
     const text = `${row.type}\x00${row.name}\x00${row.tbl_name}\x00${row.sql ?? ""}
 `;
@@ -72512,7 +72630,10 @@ function sqliteJournalSettingsOf(db) {
     wal_autocheckpoint: db.query("PRAGMA wal_autocheckpoint").get().wal_autocheckpoint
   };
 }
-var TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff", DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, KEYWORD_CANDIDATE_SCAN_CAP = 1000, KEYWORD_RANKED_BOUND_MIN = 256, KEYWORD_RANKED_BOUND_MAX = 8192, KEYWORD_RANKED_BOUND_ROWS_PER_ITEM = 8, CONCEPT_COUNT_MAX_AGE_MS, KEYWORD_POPULATION_SQL = "SELECT COUNT(*) AS count FROM items WHERE tombstoned = 0", CONCEPT_COUNT_MEMO_LIMIT = 512, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, VECTOR_VISIBILITY_BATCH_SIZE = 200, VECTOR_VISIBILITY_SLICE_MS = 50, CONNECTOR_STORE_CONVERSATION_INDEX = "idx_connector_store_items_conversation_time", CONNECTOR_STORE_CONVERSATION_INDEX_SQL, CONNECTOR_STORE_RECENCY_INDEX = "idx_connector_store_items_recent_live", CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX = "idx_connector_store_items_recent_account_live", RECENCY_LIVE_SQL = "tombstoned IS 0", ACCOUNT_RECENCY_LIVE_SQL = "+tombstoned IS 0", CONNECTOR_STORE_RECENCY_INDEX_SQL, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 18, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, ITEM_VISIBILITY_FEED_RETENTION = 65536, CONNECTOR_STORE_VISIBILITY_TRIGGERS, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, SEARCH_VECTOR_LANE_MEMO_MS = 60000, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, MISSING_EMBEDDING_CHUNK_WINDOW = 20000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 500, EMBEDDING_WORK_PAGE_ROWS = 5000, VISIBILITY_HOLD_WAITS = 100, VISIBILITY_HOLD_WAIT_MS = 10, PK_SET_SLICE = 20000, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, VISIBILITY_MEMBER_BITS, VISIBILITY_PUBLISH_CHUNK = 4096, VISIBILITY_BACKSTOP_MS = 5000, VISIBILITY_LEASE_MS = 30000, VISIBILITY_RETRY_MIN_MS = 1000, VISIBILITY_RETRY_MAX_MS = 60000, LEDGER_VISIBILITY_FEED_RETENTION = 8192, VISIBILITY_TICK_ITEMS = 256, visibilityWritersByLedger, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_RUN_ID = "restored-source-scope", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE = 512, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff", DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, KEYWORD_CANDIDATE_SCAN_CAP = 1000, KEYWORD_RANKED_BOUND_MIN = 256, KEYWORD_RANKED_BOUND_MAX = 8192, KEYWORD_RANKED_BOUND_ROWS_PER_ITEM = 8, CONCEPT_COUNT_MAX_AGE_MS, KEYWORD_POPULATION_SQL = "SELECT COUNT(*) AS count FROM items WHERE tombstoned = 0", CONCEPT_COUNT_MEMO_LIMIT = 512, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, VECTOR_VISIBILITY_BATCH_SIZE = 200, VECTOR_VISIBILITY_SLICE_MS = 50, CONNECTOR_STORE_CONVERSATION_INDEX = "idx_connector_store_items_conversation_time", CONNECTOR_STORE_CONVERSATION_INDEX_SQL, CONNECTOR_STORE_RECENCY_INDEX = "idx_connector_store_items_recent_live", CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX = "idx_connector_store_items_recent_account_live", CONNECTOR_STORE_PERSONAL_BODY_INDEX = "idx_connector_store_personal_body_order", RECENCY_LIVE_SQL = "tombstoned IS 0", ACCOUNT_RECENCY_LIVE_SQL = "+tombstoned IS 0", CONNECTOR_STORE_RECENCY_INDEX_SQL, PERSONAL_BODY_DATE_SQL = `COALESCE(
+  CASE WHEN authored_at GLOB '[0-9][0-9][0-9][0-9]-*' THEN julianday(authored_at) END,
+  CASE WHEN updated_at GLOB '[0-9][0-9][0-9][0-9]-*' THEN julianday(updated_at) END,
+  0)`, CONNECTOR_STORE_PERSONAL_BODY_INDEX_SQL, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 18, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, ITEM_VISIBILITY_FEED_RETENTION = 65536, CONNECTOR_STORE_VISIBILITY_TRIGGERS, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, SEARCH_VECTOR_LANE_MEMO_MS = 60000, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, MISSING_EMBEDDING_CHUNK_WINDOW = 20000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 500, EMBEDDING_WORK_PAGE_ROWS = 5000, VISIBILITY_HOLD_WAITS = 100, VISIBILITY_HOLD_WAIT_MS = 10, PK_SET_SLICE = 20000, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, VISIBILITY_MEMBER_BITS, VISIBILITY_PUBLISH_CHUNK = 4096, VISIBILITY_BACKSTOP_MS = 5000, VISIBILITY_LEASE_MS = 30000, VISIBILITY_RETRY_MIN_MS = 1000, VISIBILITY_RETRY_MAX_MS = 60000, LEDGER_VISIBILITY_FEED_RETENTION = 8192, VISIBILITY_TICK_ITEMS = 256, visibilityWritersByLedger, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_RUN_ID = "restored-source-scope", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, PERSONAL_BODY_CHUNKS_PER_PAGE = 128, PERSONAL_BODY_WATCH_EVENTS, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE = 512, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
@@ -72619,6 +72740,8 @@ var init_local_index = __esm(() => {
   CREATE INDEX IF NOT EXISTS ${CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX}
     ON items(account_scope, COALESCE(authored_at, updated_at, indexed_at)) WHERE ${ACCOUNT_RECENCY_LIVE_SQL};
 `;
+  CONNECTOR_STORE_PERSONAL_BODY_INDEX_SQL = `CREATE INDEX IF NOT EXISTS ${CONNECTOR_STORE_PERSONAL_BODY_INDEX}
+  ON items(${PERSONAL_BODY_DATE_SQL}, item_pk) WHERE ${RECENCY_LIVE_SQL};`;
   READ_RESULT_PROJECTION_LOCATOR_URI = Symbol("connector-store-result-projection-locator-uri");
   CALIBRATED_CONTENT_PREFERENCE_BARS = new Map([
     ["gemini-embedding-2", DEFAULT_SEMANTIC_RELEVANCE_BAR],
@@ -72714,6 +72837,14 @@ var init_local_index = __esm(() => {
       this.name = "ConnectorStoreLocatorIdentityIndexNotReadyError";
     }
   };
+  PERSONAL_BODY_WATCH_EVENTS = [
+    ["insert", "INSERT ON chunks", "NEW.item_pk"],
+    ["delete", "DELETE ON chunks", "OLD.item_pk"],
+    ["update", "UPDATE OF item_pk, chunk_index, bounded_text, content_hash ON chunks", "OLD.item_pk, NEW.item_pk"],
+    ["item_insert", "INSERT ON items", "NEW.item_pk"],
+    ["item_update", "UPDATE ON items", "OLD.item_pk, NEW.item_pk"],
+    ["item_delete", "DELETE ON items", "OLD.item_pk"]
+  ];
   LEGACY_CAPPED_TAGS = `provider IN (${legacyCappedTagProviders.map((provider) => `'${provider}'`).join(", ")})
   AND CASE WHEN json_valid(classification_labels_json) THEN json_array_length(classification_labels_json) > 0 ELSE 0 END`;
   RECOVERABLE_LABEL_SET = `(classification_labels_json IS NULL OR (${LEGACY_CAPPED_TAGS}))`;
@@ -72765,6 +72896,7 @@ var init_local_index = __esm(() => {
     tierLedgerHandle;
     tierLedgerOwned;
     tierLedgerDisabled;
+    preRoutingLedger;
     boundLedgerHandle;
     embeddingQueueState;
     embeddingFailureState;
@@ -72848,8 +72980,13 @@ var init_local_index = __esm(() => {
           const current = !migrating && !creatingFile && this.db.query("PRAGMA user_version").get().user_version === connectorStoreOpenStamp(this.db);
           if (!current) {
             applyConnectorStoreOpenSchema(this.db);
-            if (creatingFile)
+            if (creatingFile) {
               this.db.exec(CONNECTOR_STORE_RECENCY_INDEX_SQL);
+              if (this.trustDomain === "internal") {
+                this.db.exec(CONNECTOR_STORE_PERSONAL_BODY_INDEX_SQL);
+                this.personalBodyIndexReady = true;
+              }
+            }
             if (this.dbPath !== ":memory:")
               this.db.exec(`PRAGMA user_version = ${connectorStoreOpenStamp(this.db)}`);
           }
@@ -72881,8 +73018,8 @@ var init_local_index = __esm(() => {
           if (model && !vectorDigestState(this.db, model).completed)
             this.scheduleVectorDigestBackfill(model, VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS);
         }
-        if (!this.readOnly && options.restoreSchemaVersion === undefined && !creatingFile && this.db.query("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name IN (?, ?)").get(CONNECTOR_STORE_RECENCY_INDEX, CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX).n < 2) {
-          if (admitRecencyIndexBuild)
+        if (!this.readOnly && options.restoreSchemaVersion === undefined && !creatingFile) {
+          if (!this.recencyIndexesReady() && admitRecencyIndexBuild)
             this.scheduleRecencyIndexBuild();
         }
         reportFrontStoreOpened();
@@ -72894,6 +73031,14 @@ var init_local_index = __esm(() => {
       }
     }
     recencyIndexTimer;
+    personalBodyIndexReady = false;
+    partialPersonalBody;
+    recencyIndexesReady() {
+      const indexes = this.db.query("SELECT name FROM sqlite_master WHERE type = 'index' AND name IN (?, ?, ?)").all(CONNECTOR_STORE_RECENCY_INDEX, CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX, CONNECTOR_STORE_PERSONAL_BODY_INDEX);
+      this.personalBodyIndexReady = indexes.some((index) => index.name === CONNECTOR_STORE_PERSONAL_BODY_INDEX);
+      const recencyIndexes = indexes.length - Number(this.personalBodyIndexReady);
+      return recencyIndexes === 2 && (this.trustDomain !== "internal" || this.personalBodyIndexReady);
+    }
     scheduleRecencyIndexBuild(delayMs = 0) {
       this.recencyIndexTimer = setTimeout(() => {
         this.recencyIndexTimer = undefined;
@@ -72905,7 +73050,7 @@ var init_local_index = __esm(() => {
       const admit = admitRecencyIndexBuild;
       if (!admit || this.closedForPoolReads || this.fileReplacedOrRemoved())
         return;
-      if (this.db.query("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name IN (?, ?)").get(CONNECTOR_STORE_RECENCY_INDEX, CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX).n >= 2)
+      if (this.recencyIndexesReady())
         return;
       if (recencyIndexBuilding || this.reclaimProcess || this.vectorDigestBackfillReading || this.visibilityPublishing || storeReadHasPriority()) {
         this.scheduleRecencyIndexBuild(RECENCY_INDEX_BUSY_RETRY_MS);
@@ -72919,7 +73064,7 @@ var init_local_index = __esm(() => {
             return false;
           assertWritableStoreOpenAllowed("connector store recency index", this.dbPath);
           const buildStarted = Date.now();
-          const child = spawnConnectorStoreMaintenance(this.dbPath, connectorRecencyIndexWorkerSource());
+          const child = spawnConnectorStoreMaintenance(this.dbPath, connectorRecencyIndexWorkerSource(this.trustDomain === "internal"));
           this.reclaimProcess = child;
           child.unref();
           try {
@@ -73066,6 +73211,7 @@ var init_local_index = __esm(() => {
           this.releaseUnreferencedChunkMedia();
         if (this.tierLedgerOwned === true)
           this.tierLedgerHandle?.close();
+        this.preRoutingLedger?.close();
         this.boundLedgerHandle?.close();
         this.boundLedgerHandle = undefined;
       } finally {
@@ -73210,6 +73356,14 @@ var init_local_index = __esm(() => {
         providerItemId: row.provider_item_id,
         ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
       }])[0];
+    }
+    preRoutingLedgerFor(setLedger) {
+      const path = tierLedgerPathForStore(this.dbPath);
+      if (path === ":memory:" || path === setLedger.dbPath)
+        return;
+      if (!this.preRoutingLedger && existsSync39(path))
+        this.preRoutingLedger = new TierLedger({ dbPath: path });
+      return this.preRoutingLedger;
     }
     tierLedger() {
       if (this.tierLedgerDisabled === true)
@@ -75579,7 +75733,135 @@ ${parentKey(ref)}`, { ref, origin });
       });
       return { items, ...rows.length === limit ? { nextAfterItemPk: rows[rows.length - 1].item_pk } : {} };
     }
-    itemMigrationFingerprint(identity) {
+    watchPersonalBody(itemPk) {
+      const token = randomUUID12();
+      return this.db.transaction(() => {
+        this.db.exec("CREATE TABLE IF NOT EXISTS legacy_body_watch (item_pk INTEGER PRIMARY KEY, token TEXT NOT NULL)");
+        for (const [name, event, keys] of PERSONAL_BODY_WATCH_EVENTS) {
+          this.db.exec(`CREATE TRIGGER IF NOT EXISTS legacy_body_watch_${name} AFTER ${event}
+          BEGIN DELETE FROM legacy_body_watch WHERE item_pk IN (${keys}); END`);
+        }
+        this.db.exec("DELETE FROM legacy_body_watch");
+        this.db.query("INSERT INTO legacy_body_watch (item_pk, token) VALUES (?, ?)").run(itemPk, token);
+        return token;
+      }).immediate();
+    }
+    personalBodyWatchCurrent(token) {
+      return this.db.transaction(() => {
+        const triggers = this.db.query("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'trigger' AND name GLOB 'legacy_body_watch_*'").get();
+        return triggers.n === PERSONAL_BODY_WATCH_EVENTS.length && !!this.db.query("SELECT 1 FROM legacy_body_watch WHERE token = ?").get(token);
+      })();
+    }
+    finishPersonalBodyWalk() {
+      this.preRoutingLedger?.close();
+      this.preRoutingLedger = undefined;
+      if (!this.db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'legacy_body_watch'").get())
+        return;
+      this.db.transaction(() => {
+        for (const [name] of PERSONAL_BODY_WATCH_EVENTS)
+          this.db.exec(`DROP TRIGGER IF EXISTS legacy_body_watch_${name}`);
+        this.db.exec("DROP TABLE IF EXISTS legacy_body_watch");
+      }).immediate();
+    }
+    clearOrphanPersonalVectors(identity) {
+      this.db.query(`DELETE FROM chunk_embeddings WHERE item_pk IN (
+      SELECT item_pk FROM items i WHERE provider = ? AND account_scope = ? AND normalized_conversation = ?
+        AND provider_item_id = ? AND tombstoned = 0 AND NOT EXISTS (SELECT 1 FROM chunks WHERE item_pk = i.item_pk)
+    )`).run(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
+    }
+    personalBodyPageFinder(after, limit, chunkLimit = PERSONAL_BODY_CHUNKS_PER_PAGE) {
+      return {
+        here: () => this.readHere(this.personalBodyPageSteps(after, limit, chunkLimit)),
+        offThread: () => this.readStepsInBackground(this.personalBodyPageSteps(after, limit, chunkLimit))
+      };
+    }
+    *personalBodyPageSteps(after, limit, chunkLimit) {
+      if (!this.personalBodyIndexReady) {
+        this.personalBodyIndexReady = Boolean(yield {
+          mode: "get",
+          sql: "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?",
+          params: [CONNECTOR_STORE_PERSONAL_BODY_INDEX]
+        });
+        if (!this.personalBodyIndexReady)
+          return;
+      }
+      const pageSize = Math.max(1, Math.floor(limit));
+      const select = `
+      SELECT item_pk, ${PERSONAL_BODY_DATE_SQL} AS source_date, family, provider, account_scope, provider_item_id,
+        provider_conversation_id, local_item_id, mime_type, content_hash
+      FROM items INDEXED BY ${CONNECTOR_STORE_PERSONAL_BODY_INDEX}
+      WHERE ${RECENCY_LIVE_SQL}`;
+      const order = `ORDER BY ${PERSONAL_BODY_DATE_SQL} DESC, item_pk DESC LIMIT ?`;
+      const sameDate = after ? yield {
+        mode: "all",
+        sql: `${select} AND ${PERSONAL_BODY_DATE_SQL} = ? AND item_pk < ? ORDER BY item_pk DESC LIMIT ?`,
+        params: [after.date, after.itemPk, pageSize]
+      } : [];
+      const older = sameDate.length < pageSize && after?.date !== 0 ? yield {
+        mode: "all",
+        sql: `${select} AND ${PERSONAL_BODY_DATE_SQL} ${after ? "< ?" : ">= 0"} ${order}`,
+        params: after ? [after.date, pageSize - sameDate.length] : [pageSize]
+      } : [];
+      const rows = [...sameDate, ...older];
+      const items = [];
+      let next = after;
+      let remaining = Math.max(1, Math.min(PERSONAL_BODY_CHUNKS_PER_PAGE, Math.floor(chunkLimit)));
+      for (const row of rows) {
+        const saved = this.partialPersonalBody;
+        const prefix = saved?.itemPk === row.item_pk && saved.contentHash === row.content_hash && this.personalBodyWatchCurrent(saved.watch) ? saved : undefined;
+        const part = yield {
+          mode: "get",
+          sql: `WITH slice AS (
+          SELECT chunk_index, bounded_text, content_hash FROM chunks
+          WHERE item_pk = ? AND chunk_index > ? ORDER BY chunk_index LIMIT ?
+        ), body AS (
+          SELECT COUNT(*) AS n, MAX(chunk_index) AS lastChunk,
+            group_concat(bounded_text, '' ORDER BY chunk_index) AS text,
+            group_concat(content_hash, char(0) ORDER BY chunk_index) AS hashes FROM slice
+        ) SELECT body.*, EXISTS(SELECT 1 FROM chunks WHERE item_pk = ? AND chunk_index > body.lastChunk) AS more,
+          CASE WHEN body.n = 0 THEN EXISTS(SELECT 1 FROM chunk_embeddings WHERE item_pk = ?) ELSE 0 END AS orphanVectors FROM body`,
+          params: [row.item_pk, prefix?.lastChunk ?? -1, remaining, row.item_pk, row.item_pk]
+        };
+        const text = (prefix?.text ?? "") + (part.text ?? "");
+        const count = (prefix?.count ?? 0) + part.n;
+        remaining -= part.n;
+        if (part.more) {
+          if (!prefix && next !== after)
+            return { items, next };
+          this.partialPersonalBody = prefix ? { ...prefix, lastChunk: part.lastChunk, count, text } : {
+            itemPk: row.item_pk,
+            contentHash: row.content_hash,
+            watch: this.watchPersonalBody(row.item_pk),
+            lastChunk: -1,
+            count: 0,
+            text: ""
+          };
+          return { items, ...next ? { next } : {}, partial: true };
+        }
+        this.partialPersonalBody = undefined;
+        next = { date: row.source_date, itemPk: row.item_pk };
+        if (count || part.orphanVectors)
+          items.push({
+            ...prefix ? { watch: prefix.watch } : { fingerprint: migrationFingerprintParts(row.content_hash, count, part.hashes ?? "") },
+            identity: {
+              family: row.family,
+              provider: row.provider,
+              accountScope: row.account_scope,
+              providerItemId: row.provider_item_id,
+              localItemId: row.local_item_id,
+              ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
+            },
+            ...row.mime_type ? { mimeType: row.mime_type } : {},
+            text,
+            chunkCount: count
+          });
+        if (!remaining || prefix)
+          return { items, next };
+      }
+      this.partialPersonalBody = undefined;
+      return { items, ...rows.length === pageSize && next ? { next } : {} };
+    }
+    itemMigrationFingerprint(identity, chunkLimit = -1) {
       const row = this.db.query(`
       SELECT item_pk, content_hash FROM items
       WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
@@ -75587,7 +75869,7 @@ ${parentKey(ref)}`, { ref, origin });
     `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
       if (!row)
         return;
-      const hashes = this.db.query("SELECT content_hash FROM chunks WHERE item_pk = ? ORDER BY chunk_index").all(row.item_pk).map((chunk) => chunk.content_hash);
+      const hashes = this.db.query("SELECT content_hash FROM chunks WHERE item_pk = ? ORDER BY chunk_index LIMIT ?").all(row.item_pk, chunkLimit).map((chunk) => chunk.content_hash);
       return migrationFingerprint(row.content_hash, hashes);
     }
     stripImageContentOutsidePrivate(options = {}) {
@@ -76659,16 +76941,20 @@ ${parentKey(ref)}`, { ref, origin });
       ON CONFLICT(local_item_id) DO UPDATE SET source_version = excluded.source_version`).run(localItemId, sourceVersion);
       this.notifyOnDemandGrantChange();
     }
+    revokeDeletedItemReads(id, requireActiveRow = false) {
+      const set = tierSetForLedger(this.tierLedgerPathInUse());
+      const stores = set?.store(this.trustDomain) === this ? set.openStores() : [this];
+      if (requireActiveRow && !stores.some((store) => store.activeLocalItemRow(id)))
+        return;
+      for (const store of stores)
+        store.revokeOnDemandRead(id);
+    }
+    onDemandGrantIds() {
+      return this.db.query("SELECT local_item_id FROM on_demand_item_reads").all().map((row) => row.local_item_id);
+    }
     revokeOnDemandRead(localItemId) {
-      const previous = this.db.query("PRAGMA busy_timeout").get().timeout;
-      this.db.exec(`PRAGMA busy_timeout = ${Math.min(previous, REVOCATION_WRITE_LIMIT.milliseconds)}`);
-      try {
-        const removed = this.db.query("DELETE FROM on_demand_item_reads WHERE local_item_id = ?").run(localItemId);
-        if (removed.changes > 0)
-          this.notifyOnDemandGrantChange();
-      } finally {
-        this.db.exec(`PRAGMA busy_timeout = ${previous}`);
-      }
+      if (deleteOnDemandGrant(this.db, localItemId))
+        this.notifyOnDemandGrantChange();
     }
     onDemandGrantEpoch() {
       if (this.closedForPoolReads || !this.onDemandReadsTablePresent)
@@ -78519,6 +78805,9 @@ ${parentKey(ref)}`, { ref, origin });
             if (itemsSeen % VISIBILITY_TICK_ITEMS === 0)
               this.tickVisibilityWriters();
             await this.controlPath.ingestionTurn();
+            if (item.metadata["deleted"] === true) {
+              this.revokeDeletedItemReads(item.identity.localItemId, item.metadata["deletedIdentityResolved"] === false);
+            }
             const exclusion = this.exclusions.evaluateMetadata(item.metadata);
             if (exclusion.excluded) {
               tallyExclusion(exclusionTally, exclusion);
@@ -78998,6 +79287,7 @@ ${parentKey(ref)}`, { ref, origin });
               deferred.push(localItemId);
               break;
             }
+            this.revokeDeletedItemReads(localItemId);
             this.db.query(`
             UPDATE items
             SET tombstoned = 1, deleted_at = ?, indexed_at = ?, sync_run_id = ?
@@ -79025,7 +79315,7 @@ ${parentKey(ref)}`, { ref, origin });
         const retiredSecrets = [];
         for (const scope of scopes) {
           const rows = currentMembershipAuthority === "provider_account_snapshot" ? this.db.query(`
-            SELECT DISTINCT i.item_pk, i.tombstoned
+            SELECT DISTINCT i.item_pk, i.tombstoned, i.local_item_id
             FROM items i
             WHERE (i.tombstoned = 0 OR i.trust_tier = 'S5')
               AND i.provider = ?
@@ -79046,7 +79336,7 @@ ${parentKey(ref)}`, { ref, origin });
                   AND preservation.ownership_kind = 'preservation'
               )
           `).all(scope.provider, scope.accountScope, syncRunId, snapshotObservedAt ?? "") : this.db.query(`
-            SELECT DISTINCT i.item_pk, i.tombstoned
+            SELECT DISTINCT i.item_pk, i.tombstoned, i.local_item_id
             FROM items i
             JOIN item_owners owner
               ON owner.item_pk = i.item_pk
@@ -79062,6 +79352,7 @@ ${parentKey(ref)}`, { ref, origin });
               )
           `).all(connectorId, syncRunId, scope.provider, scope.accountScope);
           for (const row of rows) {
+            this.revokeDeletedItemReads(row.local_item_id);
             if (row.tombstoned === 1) {
               const located = this.db.query(`
               SELECT family, provider, account_scope, provider_item_id, provider_thread_id,
@@ -97316,7 +97607,8 @@ function readFileSourceScopeApproval(input) {
     accountGeneration: account.generation,
     revision: approval.revision,
     selections: approval.selections,
-    wholeAccount: approval.whole_account
+    wholeAccount: approval.whole_account,
+    ...approval.previous_permissions ? { readChangePending: true } : {}
   };
 }
 function approveFileSourceScope(input) {
@@ -97351,6 +97643,8 @@ function approveFileSourceScope(input) {
     if (!input.wholeAccount && selections.some((selection) => isFileScopeRootKey(definition, selection.key))) {
       throw new OperationError("invalid_request", "Choose Whole account and confirm it explicitly to approve the provider root.");
     }
+    if (current.readChangePending)
+      throw new OperationError("source_index_policy_violation", "The previous folder save still has on-demand reads to revoke.");
     const existing = readState2(input.statePath);
     const approvals = existing.kind === "valid" ? existing.state.approvals.filter((candidate) => candidate.source_id !== input.sourceId) : [];
     const revision = randomUUID19();
@@ -97362,7 +97656,8 @@ function approveFileSourceScope(input) {
       selections,
       whole_account: input.wholeAccount,
       approved_at: (input.now ?? new Date).toISOString(),
-      replaced_revision: input.expectedRevision
+      replaced_revision: input.expectedRevision,
+      ...input.reconcileReads ? { previous_permissions: { selections: current.selections, wholeAccount: current.wholeAccount } } : {}
     });
     const state = { version: 1, approvals };
     lease.commit(() => writePrivateFileAtomicSync(input.statePath, `${JSON.stringify(state, null, 2)}
@@ -97375,6 +97670,23 @@ function approveFileSourceScope(input) {
       selections,
       wholeAccount: input.wholeAccount
     };
+  });
+}
+function reconcileFileScopeReadChange(path, current, apply) {
+  return withFileLeaseSync(path, (lease) => {
+    const read = readState2(path);
+    if (read.kind !== "valid")
+      throw new OperationError("config_error", "The saved folder permissions could not be read.");
+    const saved = read.state.approvals.find((entry) => entry.source_id === current.sourceId);
+    if (!saved || saved.revision !== current.revision)
+      throw new OperationError("source_index_policy_violation", "The folder approval changed during the save.");
+    if (!saved.previous_permissions)
+      return 0;
+    const count = apply({ ...current, ...saved.previous_permissions });
+    delete saved.previous_permissions;
+    lease.commit(() => writePrivateFileAtomicSync(path, `${JSON.stringify(read.state, null, 2)}
+`));
+    return count;
   });
 }
 function assertFileSourceScopeApproved(input) {
@@ -97483,7 +97795,28 @@ function parseApproval(value) {
   const record = value;
   if (typeof record.source_id !== "string" || !isFileSourceScopeId(record.source_id) || typeof record.account_generation !== "string" || !/^[a-f0-9]{64}$/.test(record.account_generation) || typeof record.revision !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(record.revision) || record.status !== "approved" || typeof record.whole_account !== "boolean" || typeof record.approved_at !== "string" || !Number.isFinite(Date.parse(record.approved_at)) || !Array.isArray(record.selections) || record.replaced_revision !== undefined && (typeof record.replaced_revision !== "string" || record.replaced_revision.length > 512))
     throw new Error("approval");
-  const selections = normalizeSelections(record.selections.map((entry) => {
+  const selections = parseSelections(record.selections);
+  let previous;
+  if (record.previous_permissions !== undefined) {
+    const prior = record.previous_permissions;
+    if (!prior || typeof prior.wholeAccount !== "boolean" || !Array.isArray(prior.selections))
+      throw new Error("previous permissions");
+    previous = { selections: parseSelections(prior.selections), wholeAccount: prior.wholeAccount };
+  }
+  return {
+    source_id: record.source_id,
+    account_generation: record.account_generation,
+    revision: record.revision,
+    status: "approved",
+    selections,
+    whole_account: record.whole_account,
+    approved_at: record.approved_at,
+    ...previous ? { previous_permissions: previous } : {},
+    ...typeof record.replaced_revision === "string" ? { replaced_revision: record.replaced_revision } : {}
+  };
+}
+function parseSelections(values) {
+  return normalizeSelections(values.map((entry) => {
     if (!entry || typeof entry !== "object" || Array.isArray(entry))
       throw new Error("selection");
     const selection = entry;
@@ -97498,16 +97831,6 @@ function parseApproval(value) {
       ...ancestorKeys ? { ancestorKeys } : {}
     };
   }));
-  return {
-    source_id: record.source_id,
-    account_generation: record.account_generation,
-    revision: record.revision,
-    status: "approved",
-    selections,
-    whole_account: record.whole_account,
-    approved_at: record.approved_at,
-    ...typeof record.replaced_revision === "string" ? { replaced_revision: record.replaced_revision } : {}
-  };
 }
 var init_source_scope_approval = __esm(() => {
   init_atomic_file();
@@ -100419,7 +100742,9 @@ var init_vocabulary = __esm(() => {
     dashboardPending: {
       one: "{n} item waiting for the private model",
       many: "{n} items waiting for the private model"
-    }
+    },
+    legacyPersonalWaiting: "Waiting for your embedding choice: {waiting}",
+    legacyPersonalBodies: "Held for a privacy check from earlier builds: {held} · Checked so far: {judged}"
   };
   DASHBOARD_CHATGPT_PRIVACY_JUDGE_STOPPED_COPY = {
     sentence: "{n} items are waiting because the privacy check stopped: {reason}",
@@ -107867,12 +108192,17 @@ class TieredStoreSet {
     } catch {}
   }
   assertLedgerGovernsLegs() {
+    const foreign = this.foreignBoundLeg();
+    if (foreign)
+      throw new TierLedgerUnavailableError(foreign.corpusId);
+  }
+  foreignBoundLeg() {
     const ledgerId = this.ledger.ledgerId();
     for (const domain of TIER_DOMAIN_ORDER) {
       const store = this.store(domain);
       const binding = store?.tierSetBinding();
-      if (store && binding && binding.ledgerId !== ledgerId)
-        throw new TierLedgerUnavailableError(store.corpusId);
+      if (binding && binding.ledgerId !== ledgerId)
+        return store;
     }
   }
   domainAtLeast(domain) {
@@ -126013,6 +126343,20 @@ var init_size_limit_stops = __esm(() => {
 
 // src/workers/file-extraction/on-demand-read.ts
 import { createHash as createHash69, randomUUID as randomUUID28 } from "node:crypto";
+function revokeOnDemandReads(stores, ids = new Set(stores.flatMap((store) => store.onDemandGrantIds())), keep) {
+  let revoked = 0;
+  for (const id of ids) {
+    if (keep) {
+      const choices = stores.map((store) => keep(store, id));
+      if (choices.includes(true) && !choices.includes(false))
+        continue;
+    }
+    for (const store of stores)
+      store.revokeOnDemandRead(id);
+    revoked++;
+  }
+  return revoked;
+}
 async function requestOnDemandRead(request, context) {
   if (!["owner", "remote_app", "analyst"].includes(request.requester))
     return { state: "refused", reason: "invalid_requester" };
@@ -126026,7 +126370,7 @@ async function requestOnDemandRead(request, context) {
     ...request,
     questionId: request.questionId?.trim() || randomUUID28(),
     itemRef: { corpusId: ref.corpusId, providerItemId: ref.providerItemId }
-  }, target.job, target.grant, context.limits);
+  }, target.job, target, context.limits);
 }
 async function itemReadOnDemand(read, corpusId, providerItemId) {
   const questionId = `item-read-${createHash69("sha256").update(JSON.stringify([corpusId, providerItemId])).digest("hex").slice(0, 32)}`;
@@ -130573,7 +130917,7 @@ class LocalFileExtractionJobStore {
       }
     }).immediate();
   }
-  enqueueOnDemandRead(request, job, grant, limits = { files: 3, bytes: 25 * 1024 * 1024 }) {
+  enqueueOnDemandRead(request, job, target, limits = { files: 3, bytes: 25 * 1024 * 1024 }) {
     this.assertWritable("on_demand");
     if (!Number.isSafeInteger(limits.files) || limits.files < 1 || !Number.isSafeInteger(limits.bytes) || limits.bytes < 1) {
       throw new TypeError("Invalid on-demand limits.");
@@ -130584,7 +130928,8 @@ class LocalFileExtractionJobStore {
       const previous = this.db.query(`SELECT j.status, j.source_version FROM on_demand_reads r
         JOIN extraction_jobs j ON j.job_id = r.job_id
         WHERE r.corpus_id = ? AND r.provider_item_id = ? ORDER BY r.rowid DESC LIMIT 1`).get(request.itemRef.corpusId, request.itemRef.providerItemId);
-      if (previous && (previous.source_version ?? "") === (job.refs[0].sourceVersion ?? "")) {
+      const sameVersion = previous && (previous.source_version ?? "") === (job.refs[0].sourceVersion ?? "");
+      if (sameVersion && target.hasGrant()) {
         if (previous.status === "indexed")
           return { state: "reading", etaSeconds: 60, settled: true };
         if (previous.status === "leased")
@@ -130610,8 +130955,11 @@ class LocalFileExtractionJobStore {
           resumes: "never"
         } };
       }
-      grant();
+      target.grant();
       this.db.query("DELETE FROM on_demand_waiting WHERE corpus_id = ? AND provider_item_id = ?").run(request.itemRef.corpusId, request.itemRef.providerItemId);
+      if (sameVersion && request.requester === "owner" && previous.status === "indexed" && target.hasIndexedContent()) {
+        return { state: "reading", etaSeconds: 60, settled: true };
+      }
       const queued = this.enqueue({
         ...job,
         force: true,
@@ -140050,7 +140398,10 @@ function createFileExtractionRuntime(options) {
           const lane = roster.find((config) => config.corpusId === read.itemRef.corpusId || itemStores.get(config.corpusId)?.().some((holder) => holder.corpusId === read.itemRef.corpusId));
           if (!lane || !corpora.some((corpus) => corpus.corpusId === lane.corpusId))
             return;
-          for (const holder of itemStores.get(lane.corpusId)?.() ?? []) {
+          const stores = itemStores.get(lane.corpusId);
+          if (!stores)
+            return;
+          for (const holder of stores()) {
             const candidate = holder.onDemandReadCandidate(read.itemRef.providerItemId);
             if (!candidate)
               continue;
@@ -140105,9 +140456,14 @@ function createFileExtractionRuntime(options) {
                 extractorVersion: extractor.versionFor?.(extractionMimeType) ?? extractor.version,
                 policyDecision: "index_allowed"
               },
+              hasIndexedContent: () => stores().some((leg) => {
+                const row = leg.storedItemState(identity);
+                return metadata.sourceVersion && row?.version === metadata.sourceVersion && row.chunkCount > 0 && leg.contentServedNow(identity.localItemId);
+              }),
+              hasGrant: () => holder.currentOnDemandRead(identity.localItemId, metadata.sourceVersion ?? "") && stores().every((leg) => leg.readOnDemand(identity.localItemId, metadata.sourceVersion ?? "")),
               grant: () => {
                 promoted = ref;
-                for (const leg of itemStores.get(lane.corpusId)?.() ?? [])
+                for (const leg of stores())
                   leg.grantOnDemandRead(identity.localItemId, metadata.sourceVersion);
               }
             };
@@ -140115,7 +140471,7 @@ function createFileExtractionRuntime(options) {
           return;
         }
       });
-      if (promoted)
+      if (promoted && result.state === "queued")
         runRead(promoted);
       if (result.settled && judged && !judged()) {
         const { settled: _settled, ...reading } = result;
@@ -144536,10 +144892,12 @@ function backgroundWorkFrom(status, ledger) {
   const embeddingBacklog = embeddingBacklogFromCorpora(status.corpora);
   const laneState = status.embedding_lane?.state ?? (status.corpora.some((corpus) => corpus.embedding_lane?.state === "embedding_lane_disabled") ? "embedding_lane_disabled" : undefined);
   const vlmQueued = ledger?.rows.map((row) => vlmExtractionQueued(row)).filter((value) => value !== undefined);
+  const legacy = status.tier_classification?.legacy_personal_bodies;
   return {
     ...embeddingBacklog ? { embedding_backlog: embeddingBacklog } : {},
     ...laneState ? { embedding_lane_state: laneState } : {},
-    ...vlmQueued?.length ? { vlm_extraction_queued: vlmQueued.reduce((sum, value) => sum + value, 0) } : {}
+    ...vlmQueued?.length ? { vlm_extraction_queued: vlmQueued.reduce((sum, value) => sum + value, 0) } : {},
+    ...legacy ? { legacy_personal_bodies: legacy } : {}
   };
 }
 function withoutCustodialDoubleCount(cards, _corpora) {
@@ -148224,9 +148582,20 @@ function readSourceIngestionExclusionsFile(path) {
         rawRulesById.set(id.trim(), entry);
     }
   }
-  return { path, present: true, document: document2, rawRulesById };
+  const record = raw;
+  if (record.previous_read_rules === undefined)
+    return { path, present: true, document: document2, rawRulesById };
+  const previous = parseSourceIngestionExclusions(record.previous_read_rules, path);
+  const finish = () => {
+    if (readFileSync65(path, "utf8") !== text)
+      throw new OperationError("config_error", "The disposition rules changed during reconciliation.");
+    delete record.previous_read_rules;
+    writePrivateFileAtomicSync(path, `${JSON.stringify(record, null, 2)}
+`);
+  };
+  return { path, present: true, document: document2, rawRulesById, pendingReads: { previous, finish } };
 }
-function serializeSourceIngestionExclusions(document2, rawRulesById = new Map, preserveIds = new Set(rawRulesById.keys())) {
+function serializeSourceIngestionExclusions(document2, rawRulesById = new Map, preserveIds = new Set(rawRulesById.keys()), previousReadRules) {
   const rules = document2.rules.map((rule) => {
     const raw = preserveIds.has(rule.id) ? rawRulesById.get(rule.id) : undefined;
     if (raw !== undefined)
@@ -148241,12 +148610,13 @@ function serializeSourceIngestionExclusions(document2, rawRulesById = new Map, p
       reason: rule.reason
     };
   });
-  return `${JSON.stringify({ schemaVersion: document2.schemaVersion, rules }, null, 2)}
+  const value = { schemaVersion: document2.schemaVersion, rules, ...previousReadRules ? { previous_read_rules: previousReadRules } : {} };
+  return `${JSON.stringify(value, null, 2)}
 `;
 }
 function writeSourceIngestionExclusionsFile(options) {
   const { path } = options;
-  const text = serializeSourceIngestionExclusions(options.document, options.rawRulesById ?? new Map, options.preserveIds ?? new Set((options.rawRulesById ?? new Map).keys()));
+  const text = serializeSourceIngestionExclusions(options.document, options.rawRulesById ?? new Map, options.preserveIds ?? new Set((options.rawRulesById ?? new Map).keys()), options.previousReadRules);
   const reparsed = parseSourceIngestionExclusions(JSON.parse(text), path);
   if (reparsed.schemaVersion !== SOURCE_INGESTION_EXCLUSIONS_SCHEMA_VERSION) {
     throw new OperationError("config_error", "Ingestion dispositions schemaVersion must stay 1.");
@@ -148272,7 +148642,7 @@ function writeSourceIngestionExclusionsFile(options) {
     rule_count: reparsed.rules.length
   };
 }
-function saveSourceDispositions(path, request) {
+function saveSourceDispositions(path, request, options = {}) {
   const file = readSourceIngestionExclusionsFile(path);
   const base = request.document !== undefined ? parseSourceIngestionExclusions(request.document, "submitted ingestion dispositions") : file.document;
   const edits = request.edits ?? [];
@@ -148285,9 +148655,13 @@ function saveSourceDispositions(path, request) {
     return { ...result, noop: true };
   }
   const preserveIds = request.document !== undefined ? new Set : new Set(result.untouched_rule_ids);
+  for (const source of options.reconcileReadsFor ?? []) {
+    createSourceExclusionMatcher(result.rules, source.source_id, { enforceable: source.enforceable });
+  }
   const write = writeSourceIngestionExclusionsFile({
     path,
     document: result.rules,
+    ...options.reconcileReadsFor ? { previousReadRules: file.document } : {},
     rawRulesById: file.rawRulesById,
     preserveIds
   });
@@ -152513,6 +152887,150 @@ var init_tier_migration_lanes = __esm(() => {
   init_secret_locations();
 });
 
+// src/workers/connector-store/place-personal-body.ts
+function placePersonalBody(set, personal, item, queue, mode, walk) {
+  const { ledger } = set;
+  const { identity, text } = item;
+  if (mode === "restore" && !text.trim())
+    return "unchanged";
+  const current = ledger.getCurrent(identity);
+  const previousLedger = walk?.previousLedger;
+  const movesAvailable = walk?.movesAvailable ?? true;
+  const previous = previousLedger?.getCurrent(identity);
+  const readOverride = (source) => movesAvailable ? source.observeOverrideText(identity) : source.getOverride(identity);
+  const override = readOverride(ledger);
+  const effectiveOverride = override ?? (!current?.routed && previousLedger ? readOverride(previousLedger) : undefined);
+  const copies = ledger.copies(identity);
+  const copy = copies.find((copy) => copy.corpusId === personal.corpusId && (mode === "walk" || copy.layers !== "metadata"));
+  if (effectiveOverride?.kind !== "not_secret" && (effectiveOverride?.tier === "secrets" || [current, current?.routed ? undefined : previous].some((record) => record && [
+    record.metadataTier,
+    record.contentTier,
+    record.targetMetadataTier,
+    record.targetContentTier
+  ].includes("secrets")))) {
+    if (!movesAvailable)
+      return "waiting";
+    const record = set.adoptLegacyItem(identity);
+    const { copies: hidden } = ledger.flipToSecrets(identity, {
+      expectedGeneration: record.generation,
+      ...mode === "walk" ? { guard: { generation: record.generation, override } } : {}
+    });
+    const locations = mode === "walk" ? set.secrets() : undefined;
+    if (locations && !locations.get(identity)) {
+      const names = personal.exportItemNames(identity);
+      if (names)
+        recordSecretLocation(locations, { metadataTier: "secrets" }, names, { text, findingKinds: detectSecretFindingKinds(text) });
+    }
+    if (!hidden.some((copy) => copy.corpusId === personal.corpusId)) {
+      personal.tombstoneCopy(identity, { trustTier: "S5", connectorId: TIER_MOVE_CONNECTOR_ID });
+      personal.durabilityBarrier();
+    }
+    settleSecretsCopies({
+      ledger,
+      identity,
+      copies: hidden,
+      connectorId: TIER_MOVE_CONNECTOR_ID,
+      ...mode === "restore" ? { restoreQueue: true } : {},
+      storeFor: (corpusId) => {
+        const domain = set.domainForCorpus(corpusId);
+        return domain && set.store(domain);
+      }
+    });
+    return "secrets";
+  }
+  const resuming = mode === "restore" && current?.state === "moving" && copy?.state === "superseded" && copy.supersededByGeneration === current.generation + 1 && (current.reasons.includes(HELD_UNTIL_JUDGED_REASON) && current.contentPending || !!ownerOverrideSecretReview(current.reasons));
+  if (current?.routed && !resuming && copy?.state !== "current")
+    return "unchanged";
+  const ownerTier = effectiveOverride?.kind === "tier" ? effectiveOverride.tier : undefined;
+  const photo = isImageMediaType(item.mimeType) ? personal.imageJudgmentForItem(identity) : undefined;
+  const image = photo && imageJudgmentSignal(photo);
+  const currentAllowsPersonal = !current || current.state !== "moving" && !current.metadataPending && (current.contentTier === "private" || current.contentTier === "public") && (current.metadataTier === "private" || current.metadataTier === "public");
+  if (currentAllowsPersonal && ownerTier !== "secure" && [current, previous].some((record) => record && exactPersonalReceipt(record, text, effectiveOverride, image)))
+    return "unchanged";
+  if (!movesAvailable)
+    return "waiting";
+  const conflict = () => ledger.copies(identity).some((other) => {
+    if (other.corpusId === personal.corpusId || other.state !== "current" || mode === "restore" && (other.trustDomain !== "secure_local" || other.layers === "metadata"))
+      return false;
+    const otherText = set.store(other.trustDomain)?.exportItemCopy(identity)?.chunks.map((chunk) => chunk.boundedText).join("");
+    return !!otherText && otherText !== text;
+  });
+  let record;
+  if (mode === "restore") {
+    record = set.adoptLegacyItem(identity);
+    if (conflict())
+      throw new OperationError("config_error", "The restored tier stores contain different active bodies for the same item.");
+    queue?.deleteItemQuestions(identity);
+  }
+  const needsNames = mode === "walk" || ownerTier === "private" || ownerTier === "public";
+  const names = needsNames ? personal.exportItemNames(identity) : undefined;
+  const scanned = names ? classifyItemTiers({ signals: storedSignals(names), text }, effectiveOverride ? { override: effectiveOverride } : {}) : undefined;
+  if (mode === "walk" && !names)
+    return "retry";
+  record ??= set.adoptLegacyItem(identity);
+  if (mode === "walk" && names && scanned?.contentTier === "secrets" && !conflict()) {
+    const settled = settleRoutedSecrets(set, identity, { ...scanned, metadataTier: maxTier(record.metadataTier, scanned.metadataTier) }, names, {
+      text,
+      findingKinds: contentSecretFindingKinds(scanned.reasons)
+    }, { guard: { generation: record.generation, override } });
+    return settled ? "secrets" : "retry";
+  }
+  if (mode === "walk")
+    queue?.deleteItemQuestions(identity);
+  const floor = ownerTier === "secure" ? "secure" : "public";
+  const decision = scanned && ownerOverrideSecretReview(scanned.reasons) ? {
+    ...scanned,
+    metadataTier: maxTier(record.metadataTier, scanned.metadataTier)
+  } : {
+    metadataTier: heldTier(floor, record.metadataTier, record.targetMetadataTier),
+    contentTier: heldTier(floor, record.contentTier, record.targetContentTier),
+    decidedBy: "default",
+    reasons: [
+      ...record.reasons.filter((reason) => !reason.startsWith("content:") && !reason.startsWith("override:")),
+      HELD_UNTIL_JUDGED_REASON,
+      "content:sniffer:undecided:undecided"
+    ],
+    state: "pending",
+    contentRead: true,
+    metadataPending: record.metadataPending,
+    contentPending: true,
+    metadataForced: record.metadataForced && record.decidedBy !== "override",
+    metadataFlagged: record.metadataFlagged,
+    engineVersion: TIER_CLASSIFIER_VERSION,
+    mapRevision: TIER_MAP_REVISION,
+    snifferId: "undecided"
+  };
+  const placement = set.placementFor(decision);
+  if (mode === "walk") {
+    const digest = contentDigestReason(text);
+    decision.reasons.push(LEGACY_PERSONAL_BODY_REASON);
+    if (!decision.reasons.includes(digest))
+      decision.reasons.push(digest);
+    const { outcome } = ledger.recordLegacyPersonalHold(identity, decision, placement, digest, { generation: record.generation, override }, copy?.layers === "metadata" ? personal.corpusId : undefined);
+    return outcome === "queued_move" ? "held" : "retry";
+  }
+  const pending = resuming ? record : ledger.recordRoutedPlacement(identity, decision, placement).record;
+  moveRestoredItemToHold({ set, identity, decision, expectedGeneration: pending.generation });
+  return "held";
+}
+function exactPersonalReceipt(record, text, override, image) {
+  return record.state === "current" && !record.metadataPending && (record.contentTier === "private" || record.contentTier === "public") && (record.metadataTier === "private" || record.metadataTier === "public") && (record.decidedBy !== "override" || override?.kind === "tier") && personalContentAuthorized(record, text, override?.kind === "not_secret", override, image);
+}
+function heldTier(floor, current, target) {
+  const tier = maxTier(floor, maxTier(current, target ?? current));
+  return tier === "secrets" ? "secure" : tier;
+}
+var init_place_personal_body = __esm(() => {
+  init_operation_error();
+  init_tier_classifier();
+  init_engine();
+  init_media_judge();
+  init_secrets_disposition();
+  init_stored_names();
+  init_tier_move();
+  init_tier_rejudge();
+});
+
 // src/core/restore-held-content.ts
 import { existsSync as existsSync84, realpathSync as realpathSync20 } from "node:fs";
 import { resolve as resolve27 } from "node:path";
@@ -152669,87 +153187,14 @@ function holdLaneContent(env, account, spec, ledgerPath, ledgerSchema, holdBodie
   }
 }
 function placeRestoredBodies(set, personal, queue) {
-  const { ledger } = set;
   let afterItemPk;
   do {
     const page = personal.migrationItemsPage(afterItemPk === undefined ? {} : { afterItemPk });
     for (const item of page.items) {
-      const { identity } = item;
-      const text = item.chunks.map((chunk) => chunk.text).join("");
-      if (!text.trim())
-        continue;
-      const current = ledger.getCurrent(identity);
-      const override = ledger.observeOverrideText(identity);
-      const copies = ledger.copies(identity);
-      const copy = copies.find((copy) => copy.corpusId === personal.corpusId && copy.layers !== "metadata");
-      if (override?.kind !== "not_secret" && (override?.tier === "secrets" || current?.metadataTier === "secrets" || current?.contentTier === "secrets" || current?.targetMetadataTier === "secrets" || current?.targetContentTier === "secrets")) {
-        const record = set.adoptLegacyItem(identity);
-        const { copies: hidden } = ledger.flipToSecrets(identity, { expectedGeneration: record.generation });
-        if (!hidden.some((copy) => copy.corpusId === personal.corpusId)) {
-          personal.tombstoneCopy(identity, { trustTier: "S5", connectorId: TIER_MOVE_CONNECTOR_ID });
-          personal.durabilityBarrier();
-        }
-        settleSecretsCopies({
-          ledger,
-          identity,
-          copies: hidden,
-          connectorId: TIER_MOVE_CONNECTOR_ID,
-          restoreQueue: true,
-          storeFor: (corpusId) => {
-            const domain = set.domainForCorpus(corpusId);
-            return domain && set.store(domain);
-          }
-        });
-        continue;
-      }
-      const resuming = current?.state === "moving" && copy?.state === "superseded" && copy.supersededByGeneration === current.generation + 1 && (current.reasons.includes(HELD_UNTIL_JUDGED_REASON) && current.contentPending || !!ownerOverrideSecretReview(current.reasons));
-      if (current?.routed && !resuming && copy?.state !== "current")
-        continue;
-      const ownerTier = override?.kind === "tier" ? override.tier : undefined;
-      const photo = isImageMediaType(item.mimeType) ? personal.imageJudgmentForItem(identity) : undefined;
-      if (current?.state === "current" && !current.metadataPending && (current.contentTier === "private" || current.contentTier === "public") && (current.metadataTier === "private" || current.metadataTier === "public") && ownerTier !== "secure" && (current.decidedBy !== "override" || ownerTier !== undefined) && personalContentAuthorized(current, text, override?.kind === "not_secret", override, photo && imageJudgmentSignal(photo)))
-        continue;
-      const record = set.adoptLegacyItem(identity);
-      const privateCopy = ledger.copies(identity).find((copy) => copy.trustDomain === "secure_local" && copy.state === "current" && copy.layers !== "metadata");
-      const privateText = privateCopy && set.store("secure_local")?.exportItemCopy(identity)?.chunks.map((chunk) => chunk.boundedText).join("");
-      if (privateText && privateText !== text) {
-        throw new OperationError("config_error", "The restored tier stores contain different active bodies for the same item.");
-      }
-      queue?.deleteItemQuestions(identity);
-      const floor = ownerTier === "secure" ? "secure" : "public";
-      const names = ownerTier === "private" || ownerTier === "public" ? personal.exportItemNames(identity) : undefined;
-      const scanned = names && override ? classifyItemTiers({ signals: storedSignals(names), text }, { override }) : undefined;
-      const decision = scanned && ownerOverrideSecretReview(scanned.reasons) ? {
-        ...scanned,
-        metadataTier: maxTier(record.metadataTier, scanned.metadataTier)
-      } : {
-        metadataTier: heldTier(floor, record.metadataTier, record.targetMetadataTier),
-        contentTier: heldTier(floor, record.contentTier, record.targetContentTier),
-        decidedBy: "default",
-        reasons: [
-          ...record.reasons.filter((reason) => !reason.startsWith("content:") && !reason.startsWith("override:")),
-          HELD_UNTIL_JUDGED_REASON,
-          "content:sniffer:undecided:undecided"
-        ],
-        state: "pending",
-        contentRead: true,
-        metadataPending: record.metadataPending,
-        contentPending: true,
-        metadataForced: record.metadataForced && record.decidedBy !== "override",
-        metadataFlagged: record.metadataFlagged,
-        engineVersion: TIER_CLASSIFIER_VERSION,
-        mapRevision: TIER_MAP_REVISION,
-        snifferId: "undecided"
-      };
-      const pending = resuming ? record : ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision)).record;
-      moveRestoredItemToHold({ set, identity, decision, expectedGeneration: pending.generation });
+      placePersonalBody(set, personal, { ...item, text: item.chunks.map((chunk) => chunk.text).join("") }, queue, "restore");
     }
     afterItemPk = page.nextAfterItemPk;
   } while (afterItemPk !== undefined);
-}
-function heldTier(floor, current, target) {
-  const tier = maxTier(floor, maxTier(current, target ?? current));
-  return tier === "secrets" ? "secure" : tier;
 }
 var INITIAL_RESTORED_LEDGER_SCHEMA = 12;
 var init_restore_held_content = __esm(() => {
@@ -152760,17 +153205,14 @@ var init_restore_held_content = __esm(() => {
   init_source_placement();
   init_source_registry();
   init_source_storage();
-  init_tier_classifier();
   init_tier_ledger();
   init_tier_ledger_path();
   init_tier_set_binding();
   init_tier_migration_lanes();
   init_local_index();
-  init_secrets_disposition();
-  init_stored_names();
+  init_place_personal_body();
   init_tier_move();
   init_tiered_store_set();
-  init_media_judge();
 });
 
 // src/core/engine-store-copies.ts
@@ -170293,8 +170735,42 @@ function runTierSet(args, context = {}, expected) {
     results: applyTierSet(items, override, context)
   };
 }
+function revokeLocatedRead(item, context) {
+  if (!item.localItemId)
+    return;
+  const set = context.standalone ? undefined : tierSetForLedger(item.ledgerPath);
+  if (set) {
+    revokeOnDemandReads(set.openStores(), [item.localItemId]);
+    return;
+  }
+  const paths = new Set(item.storePaths);
+  const owner = lifecycleStoreFileOwner(lifecycleEnv(context));
+  for (const path of item.storePaths ?? []) {
+    const source = owner(path);
+    if (source)
+      for (const sibling of lifecycleAccountFiles(source, context).stores)
+        paths.add(sibling);
+  }
+  for (const path of paths) {
+    if (!existsSync96(path))
+      continue;
+    assertWritableStoreOpenAllowed("on-demand read revocation", path);
+    const db = new Database28(path, { readwrite: true, create: false });
+    try {
+      db.exec(`PRAGMA busy_timeout = ${REVOCATION_WRITE_LIMIT.milliseconds}`);
+      if (db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='on_demand_item_reads'").get()) {
+        deleteOnDemandGrant(db, item.localItemId);
+      }
+    } finally {
+      closeSqliteStore(db, { checkpoint: false });
+    }
+  }
+}
 function applyTierSet(items, override, context = {}) {
   return items.map((item) => withLedgerAt(item.ledgerPath, context.now, (ledger) => {
+    if (override !== "clear" && override.kind === "tier" && (override.tier === "secure" || override.tier === "secrets")) {
+      revokeLocatedRead(item, context);
+    }
     if (override === "clear") {
       const cleared = ledger.clearOverride(item.identity);
       return { cleared, note: "The next sync re-decides this item without the override." };
@@ -170681,6 +171157,7 @@ var init_tier_cli = __esm(() => {
   init_connected_handles();
   init_operation_error();
   init_store_write_guard();
+  init_waiting_private_questions();
   init_sqlite_store();
   init_classification_ledger();
   init_sniffer();
@@ -170692,6 +171169,7 @@ var init_tier_cli = __esm(() => {
   init_tier_ledger_path();
   init_tier_set_binding();
   init_local_index();
+  init_on_demand_read();
   init_secrets_disposition();
   init_tiered_store_set();
   init_tier_rules();
@@ -198266,6 +198744,260 @@ var init_worker_responses = __esm(() => {
   };
 });
 
+// src/workers/engine/runtime/on-demand-revocation.ts
+function revokeSourceOnDemandReads(sourceStores, reason, scope, rules) {
+  const stores = [...new Set(sourceStores.flatMap((store) => {
+    const set = tierSetForLedger(store.tierLedgerPathInUse());
+    return set?.store(store.trustDomain) === store ? set.openStores() : [store];
+  }))];
+  if (reason === "disconnect")
+    return revokeOnDemandReads(stores);
+  if (reason === "exclusions") {
+    if (!rules)
+      return 0;
+    return revokeOnDemandReads(stores, undefined, (store, id) => {
+      const row = store.activeLocalItemRow(id);
+      if (!row)
+        return;
+      const metadata = store.itemMetadataSnapshot({ ...row.identity, family: store.family, localItemId: id });
+      const facts = { ...metadata, path: row.locatorUri, folderAncestorIds: row.sourceScope?.folderKeys };
+      const next = rules.after.evaluateItem(facts);
+      if (next.disposition === "admit" || next.readOnDemand)
+        return true;
+      const prior = rules.before.evaluateItem(facts);
+      return next.disposition === prior.disposition && next.readOnDemand === prior.readOnDemand;
+    });
+  }
+  if (!scope)
+    throw new Error("Folder permissions are unavailable.");
+  const after = scope.authority.snapshot(scope.source);
+  if (!after.readChangePending) {
+    if (stores.length && after.status !== "approved")
+      throw new Error("Folder permissions are unavailable.");
+    return 0;
+  }
+  return reconcileFileScopeReadChange(scope.authority.statePath, after, (before) => {
+    if (before.wholeAccount === after.wholeAccount && JSON.stringify(before.selections) === JSON.stringify(after.selections))
+      return 0;
+    const previous = folderAccess(before);
+    const current = folderAccess(after);
+    return revokeOnDemandReads(stores, undefined, (store, id) => {
+      if (!store.activeLocalItemRow(id))
+        return;
+      const access = current(store, id);
+      return access === "read" || access === "names" && previous(store, id) === "names";
+    });
+  });
+}
+function folderAccess(approval) {
+  const match = (scope) => {
+    if (!scope.allowed)
+      return () => false;
+    const { sourceScopeRevision: _revision, ...folders } = scope.filters ?? {};
+    return (store, id) => store.itemMatchesSearchFilters(id, undefined, folders);
+  };
+  const content = match(fileSourceScopeContentFilters(approval));
+  const onDemand = match(fileSourceScopeOnDemandFilters(approval));
+  const metadata = match(fileSourceScopeMetadataFilters(approval));
+  return (store, id) => {
+    if (content(store, id) || onDemand(store, id))
+      return "read";
+    return metadata(store, id) ? "names" : "excluded";
+  };
+}
+var init_on_demand_revocation = __esm(() => {
+  init_source_scope_approval();
+  init_on_demand_read();
+  init_source_scope_runtime();
+});
+
+// src/workers/engine/runtime/ingestion-dispositions.ts
+import { existsSync as existsSync111 } from "node:fs";
+function dispositionReadChange(sourceId, env) {
+  const source = INGESTION_DISPOSITION_SOURCES.find((entry) => entry.account.sourceId === sourceId);
+  if (!source)
+    return;
+  return dispositionReadMatchers(readSourceIngestionExclusionsFile(resolveSourceIngestionExclusionsPath(env)), source.sourceId, source.enforceable);
+}
+function dispositionReadMatchers(file, id, enforceable) {
+  if (!file.pendingReads)
+    return;
+  const after = createSourceExclusionMatcher(file.document, id, { enforceable });
+  let before;
+  try {
+    before = createSourceExclusionMatcher(file.pendingReads.previous, id, { enforceable });
+  } catch (error) {
+    if (!(error instanceof OperationError) || error.code !== "config_error")
+      throw error;
+    before = createSourceExclusionMatcher(undefined);
+  }
+  if (!after.active || JSON.stringify(before.criteria) === JSON.stringify(after.criteria))
+    return;
+  return { before, after };
+}
+function storedExclusionDebtReader(handles) {
+  let walked;
+  return () => {
+    if (walked)
+      return walked;
+    const total = {
+      excluded: { items: 0, unevaluable: 0 },
+      metadataOnlyContent: { items: 0, unevaluable: 0 }
+    };
+    for (const handle of handles) {
+      const debt = handle.exclusionDebtPresent();
+      total.excluded.items += debt.excluded.items;
+      total.excluded.unevaluable += debt.excluded.unevaluable;
+      total.metadataOnlyContent.items += debt.metadataOnlyContent.items;
+      total.metadataOnlyContent.unevaluable += debt.metadataOnlyContent.unevaluable;
+    }
+    walked = total;
+    return total;
+  };
+}
+function openIngestionDispositionsRuntime(env = process.env, options = {}) {
+  const opened = [];
+  const sources = [];
+  for (const definition of INGESTION_DISPOSITION_SOURCES) {
+    let stores = [];
+    const handles = [];
+    const readDebt = storedExclusionDebtReader(handles);
+    try {
+      stores = definition.stores(env);
+      const matcher = definition.matcher(env);
+      const present = stores.filter((store) => existsSync111(store.dbPath));
+      let openedAll = false;
+      const openStores = () => {
+        if (openedAll)
+          return handles;
+        for (const store of present) {
+          const handle = openConnectorStore(definition.account, {
+            dbPath: store.dbPath,
+            corpusId: store.corpusId,
+            family: "file",
+            trustDomain: store.trustDomain,
+            exclusions: matcher,
+            readOnly: true
+          }, env);
+          handles.push(handle);
+          opened.push(handle);
+        }
+        openedAll = true;
+        return handles;
+      };
+      if (options.lazyStores !== true)
+        openStores();
+      sources.push({
+        source_id: definition.sourceId,
+        label: definition.label,
+        corpus_ids: stores.map((store) => store.corpusId),
+        enforceable: definition.enforceable,
+        matcher,
+        store_present: present.length > 0,
+        ...present.length > 0 ? {
+          items: function* () {
+            for (const handle of openStores())
+              yield* handle.itemLocatorCensus();
+          },
+          excludedItemsPresent: () => {
+            openStores();
+            return readDebt().excluded;
+          },
+          metadataOnlyContentPresent: () => {
+            openStores();
+            return readDebt().metadataOnlyContent;
+          }
+        } : {}
+      });
+    } catch (error) {
+      for (const handle of handles) {
+        const index = opened.indexOf(handle);
+        if (index >= 0)
+          opened.splice(index, 1);
+        try {
+          handle.close();
+        } catch {}
+      }
+      sources.push({
+        source_id: definition.sourceId,
+        label: definition.label,
+        corpus_ids: stores.map((store) => store.corpusId),
+        enforceable: definition.enforceable,
+        matcher: createSourceExclusionMatcherFromPrefixes([]),
+        store_present: false,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
+  return {
+    sources,
+    close: () => {
+      for (const handle of opened.reverse()) {
+        try {
+          handle.close();
+        } catch {}
+      }
+    }
+  };
+}
+var INGESTION_DISPOSITION_SOURCES;
+var init_ingestion_dispositions = __esm(() => {
+  init_operation_error();
+  init_source_placement();
+  init_google_connectors();
+  init_dropbox_files();
+  init_scope();
+  init_store2();
+  init_source_ingestion_exclusions();
+  init_source_dispositions();
+  init_source_storage();
+  INGESTION_DISPOSITION_SOURCES = [
+    {
+      sourceId: DROPBOX_INGESTION_EXCLUSION_SOURCE,
+      account: { sourceId: DROPBOX_FILES_SOURCE_ID },
+      label: "Dropbox",
+      enforceable: DROPBOX_ENFORCEABLE_EXCLUSION_CRITERIA,
+      matcher: (env) => dropboxIngestionExclusionMatcher(env),
+      stores: (env) => [{
+        dbPath: resolvedStorePath(DROPBOX_FILES_SOURCE_ID, "secure_local", env),
+        corpusId: DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID,
+        trustDomain: "secure_local"
+      }]
+    },
+    {
+      sourceId: LOCAL_FILES_INGESTION_EXCLUSION_SOURCE,
+      account: { sourceId: LOCAL_FILES_SOURCE_ID },
+      label: "Files on this computer",
+      enforceable: LOCAL_FILES_ENFORCEABLE_EXCLUSION_CRITERIA,
+      matcher: (env) => localFilesIngestionExclusionMatcher(env),
+      stores: (env) => [{
+        dbPath: resolvedStorePath(LOCAL_FILES_SOURCE_ID, "secure_local", env),
+        corpusId: LOCAL_FILES_CORPUS_ID,
+        trustDomain: "secure_local"
+      }]
+    },
+    {
+      sourceId: GOOGLE_DRIVE_INGESTION_EXCLUSION_SOURCE,
+      account: { sourceId: GOOGLE_DRIVE_SOURCE_ID },
+      label: "Google Drive",
+      enforceable: GOOGLE_DRIVE_ENFORCEABLE_EXCLUSION_CRITERIA,
+      matcher: (env) => googleDriveIngestionExclusionMatcher(env),
+      stores: (env) => [
+        {
+          dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, "internal", env),
+          corpusId: GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID,
+          trustDomain: "internal"
+        },
+        {
+          dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, "secure_local", env),
+          corpusId: GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID,
+          trustDomain: "secure_local"
+        }
+      ]
+    }
+  ];
+});
+
 // src/workers/connector-store/embedding-plan.ts
 function storeEmbeddingCatchesUp(corpusId, provider) {
   if (provider.provider === "built-in" && provider.backend === "local")
@@ -204423,8 +205155,9 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const W = config.privacy.copy;
     const configured = info.configured === true;
     const pending = typeof info.pendingCount === "number" && isFinite(info.pendingCount) ? Math.max(0, Math.round(info.pendingCount)) : 0;
+    const earlier = legacyPersonalProgressText(info);
     const asked = (Array.isArray(data.needsYou) ? data.needsYou : []).some((item) => item && item.fix && privacy.handles(item.fix));
-    if (!configured && (asked || !pending))
+    if (!configured && !earlier && (asked || !pending))
       return null;
     const section = add(el("section", "section privacy-row"), el("h2", "", W.section));
     const row = el("li", "row");
@@ -204436,6 +205169,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     }
     if (pending > 0)
       add(text, el("p", "muted", fill(pending === 1 ? W.dashboardPending.one : W.dashboardPending.many, { n: count(pending) })));
+    if (earlier)
+      add(text, el("p", "muted", earlier));
     add(row, text);
     if (configured) {
       const blocked = globalReason();
@@ -204746,9 +205481,25 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const dot = el("span", "dot tone-" + (needs > 0 ? "warn" : running ? "run" : "good"));
     dot.setAttribute("aria-hidden", "true");
     const text = add(el("div", "row-text"), el("p", "home-title", title), el("p", "muted", facts.join(" · ")));
+    const earlier = legacyPersonalProgressText(data.privacy);
+    if (earlier)
+      add(text, el("p", "muted", earlier));
     const card = add(el("section", "home-status"), dot, text);
     card.setAttribute("data-home-status", needs > 0 ? "needs" : running ? "running" : "ok");
     return card;
+  }
+  function legacyPersonalProgressText(info) {
+    const progress = info?.legacyPersonalBodies;
+    if (!progress)
+      return;
+    const parts = [];
+    if (progress.held > 0 && isFinite(progress.held) && isFinite(progress.judged)) {
+      parts.push(fill(config.privacy.copy.legacyPersonalBodies, { held: count(progress.held), judged: count(progress.judged) }));
+    }
+    if (progress.waiting > 0 && isFinite(progress.waiting)) {
+      parts.push(fill(config.privacy.copy.legacyPersonalWaiting, { waiting: count(progress.waiting) }));
+    }
+    return parts.join(" · ") || undefined;
   }
   function openModels(inPlace) {
     const href = onComputer() ? state.hostLinks.keys : "";
@@ -207516,6 +208267,7 @@ function chatgptPickerProgram(kit) {
       add(summary, el("p", "reason strong", fill(Q.capReached, { max: kit.count(MAX_RULES) })));
     add(footer, summary);
     add(footer, saveRow(canSaveFolders(), p.whole || anyChosen() ? Q.saveFolders : Q.saveNoStart, saveFolders, p.whole && !p.wholeConfirmed ? wholeWord("needConfirm") : !anyChosen() && !p.edited ? Q.needChoice : ""));
+    add(footer, el("p", "reason", "Searches already started may still send evidence to their configured model and return an answer."));
     return footer;
   }
   function foldersView(page) {
@@ -211152,7 +211904,7 @@ var init_top_nav = __esm(() => {
 
 // src/workers/archive-import/staging.ts
 import { randomBytes as randomBytes35 } from "node:crypto";
-import { existsSync as existsSync111, mkdirSync as mkdirSync71, readdirSync as readdirSync32, realpathSync as realpathSync25, renameSync as renameSync26, rmSync as rmSync45, statSync as statSync47, statfsSync as statfsSync6, utimesSync } from "node:fs";
+import { existsSync as existsSync112, mkdirSync as mkdirSync71, readdirSync as readdirSync32, realpathSync as realpathSync25, renameSync as renameSync26, rmSync as rmSync45, statSync as statSync47, statfsSync as statfsSync6, utimesSync } from "node:fs";
 import { open as open7, rm as rm11 } from "node:fs/promises";
 import { sep as sep25, join as join141, resolve as resolve33 } from "node:path";
 function sanitizeUploadPath(raw) {
@@ -211373,7 +212125,7 @@ function createArchiveUploads(options) {
         await handle.close().catch(() => {
           return;
         });
-      if (created && existsSync111(target))
+      if (created && existsSync112(target))
         rmSync45(target, { force: true });
       found.paths.delete(key);
       found.partials.delete(key);
@@ -211422,7 +212174,7 @@ function createArchiveUploads(options) {
       if (typeof uploadId !== "string" || !ID3.test(uploadId))
         return false;
       const found = sessions.get(uploadId);
-      const dir = found?.dir ?? (existsSync111(options.root) ? join141(stagingRoot(), uploadId) : undefined);
+      const dir = found?.dir ?? (existsSync112(options.root) ? join141(stagingRoot(), uploadId) : undefined);
       if (!dir)
         return false;
       if (keep?.(dir)) {
@@ -211469,14 +212221,14 @@ function createArchiveUploads(options) {
       if (typeof uploadId !== "string" || !ID3.test(uploadId))
         return;
       const found = sessions.get(uploadId);
-      const dir = found?.dir ?? (existsSync111(options.root) ? join141(stagingRoot(), uploadId) : undefined);
+      const dir = found?.dir ?? (existsSync112(options.root) ? join141(stagingRoot(), uploadId) : undefined);
       if (!dir || keep?.(dir))
         return;
       sessions.delete(uploadId);
       rmSync45(dir, { recursive: true, force: true });
     },
     sweep(needed) {
-      if (!rootPath && !existsSync111(options.root))
+      if (!rootPath && !existsSync112(options.root))
         return;
       let root;
       try {
@@ -217299,7 +218051,7 @@ var init_locations = __esm(() => {
 // src/workers/local-files/volume-identity.ts
 import { createHash as createHash101 } from "node:crypto";
 import { execFileSync as execFileSync7 } from "node:child_process";
-import { existsSync as existsSync112, lstatSync as lstatSync53, readFileSync as readFileSync103, readdirSync as readdirSync33, realpathSync as realpathSync26 } from "node:fs";
+import { existsSync as existsSync113, lstatSync as lstatSync53, readFileSync as readFileSync103, readdirSync as readdirSync33, realpathSync as realpathSync26 } from "node:fs";
 import { homedir as homedir45 } from "node:os";
 
 class VolumeResolver {
@@ -217486,7 +218238,7 @@ function defaultUuidsByDevice() {
   const result = new Map;
   const dir = "/dev/disk/by-uuid";
   try {
-    if (!existsSync112(dir))
+    if (!existsSync113(dir))
       return result;
     for (const name of readdirSync33(dir)) {
       try {
@@ -217584,7 +218336,7 @@ var init_volume_identity = __esm(() => {
 });
 
 // src/workers/backup-service.ts
-import { existsSync as existsSync113, mkdirSync as mkdirSync72, readFileSync as readFileSync104, readdirSync as readdirSync34, rmSync as rmSync46, statSync as statSync48 } from "node:fs";
+import { existsSync as existsSync114, mkdirSync as mkdirSync72, readFileSync as readFileSync104, readdirSync as readdirSync34, rmSync as rmSync46, statSync as statSync48 } from "node:fs";
 import { dirname as dirname109, join as join142 } from "node:path";
 function defaultBackupServicePaths(env = process.env) {
   return {
@@ -217800,7 +218552,7 @@ function createBackupService(options) {
       } catch {
         throw new OperationError("invalid_params", "That backup file is no longer there. Choose it again.");
       }
-      if (existsSync113(join142(options.paths.staging, PENDING_RESTORE)))
+      if (existsSync114(join142(options.paths.staging, PENDING_RESTORE)))
         return status();
       const staging = backupStagingDir(options.env);
       try {
@@ -218138,7 +218890,7 @@ var init_source_scope_browser = __esm(() => {
 });
 
 // src/workers/local-files/mac-permissions.ts
-import { existsSync as existsSync114, mkdirSync as mkdirSync73, opendirSync, readFileSync as readFileSync105 } from "node:fs";
+import { existsSync as existsSync115, mkdirSync as mkdirSync73, opendirSync, readFileSync as readFileSync105 } from "node:fs";
 import { opendir } from "node:fs/promises";
 import { dirname as dirname110, join as join143 } from "node:path";
 function folderAccessMemoryPath() {
@@ -218365,7 +219117,7 @@ class MacPermissions {
     if (this.memory && !this.memoryPath)
       return this.memory;
     let loaded = {};
-    if (this.memoryPath && existsSync114(this.memoryPath)) {
+    if (this.memoryPath && existsSync115(this.memoryPath)) {
       try {
         const parsed = JSON.parse(readFileSync105(this.memoryPath, "utf8"));
         if (parsed && typeof parsed === "object")
@@ -218417,7 +219169,7 @@ var init_mac_permissions = __esm(() => {
 
 // src/workers/local-files/mac-settings.ts
 import { spawn as spawn15 } from "node:child_process";
-import { existsSync as existsSync115 } from "node:fs";
+import { existsSync as existsSync116 } from "node:fs";
 import { homedir as homedir46 } from "node:os";
 import { join as join144 } from "node:path";
 function helperAppPathForHome(home = homedir46()) {
@@ -218428,7 +219180,7 @@ function revealHelperAndOpenFullDiskAccess(deps = {}) {
     spawn15(command, args, { stdio: "ignore", detached: true }).unref();
   });
   const helper = deps.helperApp ?? helperAppPathForHome();
-  if ((deps.exists ?? existsSync115)(helper))
+  if ((deps.exists ?? existsSync116)(helper))
     run("/usr/bin/open", ["-R", helper]);
   run("/usr/bin/open", [FULL_DISK_ACCESS_URL]);
 }
@@ -223386,7 +224138,7 @@ var init_connector5 = __esm(() => {
 });
 
 // src/workers/evernote/live-sync.ts
-import { existsSync as existsSync116, mkdirSync as mkdirSync74, readFileSync as readFileSync106 } from "node:fs";
+import { existsSync as existsSync117, mkdirSync as mkdirSync74, readFileSync as readFileSync106 } from "node:fs";
 import { dirname as dirname112 } from "node:path";
 function evernoteExclusionMatcher(env = process.env) {
   return createSourceExclusionMatcher(loadSourceIngestionExclusions({ env }), EVERNOTE_SOURCE_ID, {
@@ -223439,7 +224191,7 @@ function createEvernoteTierLane(options = {}) {
   return { set, ledger, secure, internal };
 }
 function readPassFile(path) {
-  if (!existsSync116(path))
+  if (!existsSync117(path))
     return { version: 1, status: {} };
   try {
     const parsed = JSON.parse(readFileSync106(path, "utf8"));
@@ -223458,7 +224210,7 @@ function writePassFile(path, file) {
 }
 function evernotePassStatus(env = process.env) {
   const path = resolvedRawPath(EVERNOTE_SOURCE_ID, "evernote-pass.json", env);
-  if (!existsSync116(path))
+  if (!existsSync117(path))
     return;
   return readPassFile(path).status;
 }
@@ -223734,7 +224486,7 @@ function createEvernoteLiveSync(options) {
     bindNotebookChoice: (choice) => {
       boundChoice = choice;
     },
-    status: () => existsSync116(passPath) ? readPassFile(passPath).status : undefined,
+    status: () => existsSync117(passPath) ? readPassFile(passPath).status : undefined,
     lastStoreRunCompletedAt: () => lastCompletedAt
   };
 }
@@ -226313,6 +227065,13 @@ function createEmailSourceWorker(options = {}) {
   const sourceScheduler = options.sourceScheduler;
   const sourceWatch = options.sourceWatch;
   const sourceDashboard = options.sourceDashboard;
+  const revokeSourceReads = (source, reason, rules) => {
+    if (options.revokeSourceReads)
+      return options.revokeSourceReads(source, reason);
+    const stores = connectorStores.filter((store) => storageAccountForCorpus(store).sourceId === source);
+    const approval = reason === "scope" ? { authority: new FileSourceScopeAuthority({ registryPath: sourceDashboard?.registryPath ?? defaultHandleRegistryPath() }), source } : undefined;
+    return revokeSourceOnDemandReads(stores, reason, approval, rules);
+  };
   const settingsProposal = sourceDashboard ? settingsProposalHolderFor(sourceDashboard) : undefined;
   const credentialDegradations = options.credentialDegradations;
   const credentialReadiness = options.credentialReadiness;
@@ -226753,39 +227512,67 @@ function createEmailSourceWorker(options = {}) {
             if (!accountGeneration || !expectedRevision) {
               throw new EmailSourceWorkerError(400, "invalid_request", "account_generation and expected_scope_revision are required.");
             }
-            return json(await sourceDashboard.fileSourceScopes.approveAndStart({
-              sourceId,
-              accountGeneration,
-              expectedRevision,
-              selections: parseSourceScopeSelections(postBody.selections),
-              wholeAccount: postBody.whole_account === true,
-              explicitWholeAccountConfirmation: postBody.explicit_whole_account_confirmation === true
-            }));
-          }
-          const runtime = await sourceDashboard.ingestionDispositions();
-          try {
-            const rulesPath = resolveSourceIngestionExclusionsPath(process.env, runtime.rulesPath);
-            const save = saveSourceDispositions(rulesPath, parseSourceDispositionsSave(postBody, runtime.sources));
-            return json({
-              ok: true,
-              kind: "source_dispositions_save",
-              result: {
-                changed: save.changed,
-                noop: save.noop,
-                applied: save.applied,
-                refused: save.refused,
-                untouched_rule_ids: save.untouched_rule_ids,
-                ...save.write ? { write: save.write } : {}
-              },
-              policy: {
-                writes_config_only: true,
-                deletes_store_content: false,
-                runs_purge_or_strip: false
-              }
+            const scopes = sourceDashboard.fileSourceScopes;
+            return await withDashboardGrantMutation(async () => {
+              const authority = new FileSourceScopeAuthority({ registryPath: sourceDashboard.registryPath ?? defaultHandleRegistryPath() });
+              if (authority.snapshot(sourceId).readChangePending)
+                await revokeSourceReads(sourceId, "scope");
+              const result = await scopes.approveAndStart({
+                sourceId,
+                accountGeneration,
+                expectedRevision,
+                selections: parseSourceScopeSelections(postBody.selections),
+                wholeAccount: postBody.whole_account === true,
+                explicitWholeAccountConfirmation: postBody.explicit_whole_account_confirmation === true
+              });
+              await revokeSourceReads(sourceId, "scope");
+              return json(result);
             });
-          } finally {
-            runtime.close?.();
           }
+          return await withDashboardGrantMutation(async () => {
+            const runtime = await sourceDashboard.ingestionDispositions();
+            try {
+              const rulesPath = resolveSourceIngestionExclusionsPath(process.env, runtime.rulesPath);
+              const edits = parseSourceDispositionsSave(postBody, runtime.sources);
+              const reconcile = async () => {
+                const file = readSourceIngestionExclusionsFile(rulesPath);
+                if (!file.pendingReads)
+                  return 0;
+                let revoked = 0;
+                for (const source of runtime.sources) {
+                  const rules = dispositionReadMatchers(file, source.source_id, source.enforceable);
+                  if (!rules)
+                    continue;
+                  const id = listFileScopeSources().find((entry) => entry.dispositionSourceId === source.source_id)?.sourceId ?? source.source_id;
+                  revoked += await revokeSourceReads(id, "exclusions", rules);
+                }
+                file.pendingReads.finish();
+                return revoked;
+              };
+              let revoked = await reconcile();
+              const save = saveSourceDispositions(rulesPath, edits, { reconcileReadsFor: runtime.sources });
+              revoked += await reconcile();
+              return json({
+                ok: true,
+                kind: "source_dispositions_save",
+                result: {
+                  changed: save.changed,
+                  noop: save.noop,
+                  applied: save.applied,
+                  refused: save.refused,
+                  untouched_rule_ids: save.untouched_rule_ids,
+                  ...save.write ? { write: save.write } : {}
+                },
+                policy: {
+                  writes_config_only: revoked === 0,
+                  deletes_store_content: false,
+                  runs_purge_or_strip: false
+                }
+              });
+            } finally {
+              runtime.close?.();
+            }
+          });
         }
         if (request.method === "GET" && (url.pathname === "/dashboard" || url.pathname === "/dashboard.json")) {
           const page = url.pathname === "/dashboard.json" ? "json" : dashboardHtmlRoutePage(url);
@@ -227727,17 +228514,25 @@ function createEmailSourceWorker(options = {}) {
               if (localFilesBusy())
                 throw busyError();
               const registryPath = sourceDashboard.registryPath ?? defaultHandleRegistryPath();
-              const wasConnected = disconnectThisComputerSource(registryPath, "local.files");
-              if (!wasConnected) {
+              const connection = readThisComputerHandles(registryPath).find((handle) => handle.handle === "local.files.this_computer");
+              if (!connection || !disconnectThisComputerSource(registryPath, "local.files")) {
                 throw new EmailSourceWorkerError(409, "source_not_connected", "This source is not connected.");
               }
-              if (sourceScheduler && sourceDashboard.refreshSchedulerSources) {
-                const nextSources = await sourceDashboard.refreshSchedulerSources();
-                if (localFilesBusy()) {
-                  connectThisComputerSource(registryPath, "local.files");
-                  throw busyError();
+              let schedulingChanged = false;
+              try {
+                if (sourceScheduler && sourceDashboard.refreshSchedulerSources) {
+                  const nextSources = await sourceDashboard.refreshSchedulerSources();
+                  if (localFilesBusy())
+                    throw busyError();
+                  sourceScheduler.updateSources(nextSources);
+                  schedulingChanged = true;
                 }
-                sourceScheduler.updateSources(nextSources);
+                await revokeSourceReads("local.files", "disconnect");
+              } catch (error) {
+                connectThisComputerSource(registryPath, "local.files", new Date(connection.connectedAt));
+                if (schedulingChanged)
+                  await refreshDashboardSchedulerSources();
+                throw error;
               }
               return json({
                 ok: true,
@@ -227793,6 +228588,8 @@ function createEmailSourceWorker(options = {}) {
                   }
                 }
               }
+              for (const id of plan.sourceIds)
+                await revokeSourceReads(id, "disconnect");
               const secretStore = dashboardSecretStore(sourceDashboard);
               try {
                 for (const key of plan.credentialKeys)
@@ -227905,6 +228702,8 @@ function createEmailSourceWorker(options = {}) {
                 }
                 sourceScheduler.updateSources(nextSources);
               }
+              for (const id of selectedSourceIds)
+                await revokeSourceReads(id, "disconnect");
               const plannedPaths = removalPlan.plan.targets.map((target) => target.path);
               const leasedRecord = readUnpairedSources(registryPath);
               if (leasedRecord.status === "unreadable") {
@@ -228135,7 +228934,7 @@ function createEmailSourceWorker(options = {}) {
               if (record.acknowledge !== true) {
                 throw new EmailSourceWorkerError(400, "remove_confirmation_required", "Confirm that Remove deletes everything Olympus made from this archive, and leaves the file itself where it is.");
               }
-              return json(archiveId !== undefined ? archiveImports.remove(archiveId) : archiveImports.approveRemoval(requestId));
+              return json(await (archiveId !== undefined ? archiveImports.remove(archiveId) : archiveImports.approveRemoval(requestId)));
             });
           }
           throw new EmailSourceWorkerError(404, "not_found", "No such archive route.");
@@ -229171,6 +229970,11 @@ function readBusySentence(action, engineState) {
   return `This source is finishing a read. Retry ${action} after the current read completes.` + (age !== undefined && age > 0 ? ` Olympus is busy: it last reported ${age} s ago.` : "");
 }
 var init_engine2 = __esm(() => {
+  init_on_demand_revocation();
+  init_ingestion_dispositions();
+  init_source_placement();
+  init_source_scope_runtime();
+  init_file_scope_sources();
   init_router();
   init_embedding_plan();
   init_tier_visibility();
@@ -229747,7 +230551,7 @@ var init_query_planner = __esm(() => {
 
 // src/workers/local-files/watch-hub.ts
 import { createRequire as createRequire8 } from "node:module";
-import { existsSync as existsSync117, readFileSync as readFileSync110 } from "node:fs";
+import { existsSync as existsSync118, readFileSync as readFileSync110 } from "node:fs";
 import { dirname as dirname116, join as join150 } from "node:path";
 function watchIgnoreGlobs(context, extra = []) {
   const home = context.home;
@@ -229834,7 +230638,7 @@ class WatchHub {
   }
   async eventsSince(root, snapshotPath, ignore = []) {
     const watcher = await this.watcherOrHistoryError();
-    if (!existsSync117(snapshotPath))
+    if (!existsSync118(snapshotPath))
       throw new WatchHistoryUnavailableError("the snapshot is gone");
     try {
       return await watcher.getEventsSince(root, snapshotPath, { ignore: [...ignore] });
@@ -229964,7 +230768,7 @@ async function loadParcelWatcher(extraDirs = []) {
   const dirs = [...extraDirs, ...process.env.OLYMPUS_NATIVE_MODULES_DIR ? [process.env.OLYMPUS_NATIVE_MODULES_DIR] : []];
   for (const dir of dirs) {
     const candidate = join150(dir, "node_modules");
-    if (!existsSync117(join150(candidate, "@parcel", "watcher")))
+    if (!existsSync118(join150(candidate, "@parcel", "watcher")))
       continue;
     try {
       const requireFrom = createRequire8(join150(dirname116(candidate), "package.json"));
@@ -243118,7 +243922,7 @@ var init_start = __esm(() => {
 });
 
 // src/workers/archive-import/runtime.ts
-import { existsSync as existsSync118 } from "node:fs";
+import { existsSync as existsSync119 } from "node:fs";
 function createArchiveImportRuntime(options = {}) {
   registerArchiveFormatConnectors();
   const env = options.env ?? process.env;
@@ -243164,9 +243968,9 @@ function createArchiveImportRuntime(options = {}) {
     }
   };
   const hasData = (family) => {
-    if (archiveConnectorStoreDbPaths([family], env).some((path) => existsSync118(path)))
+    if (archiveConnectorStoreDbPaths([family], env).some((path) => existsSync119(path)))
       return true;
-    if (writableStoreOpensForbidden() && !existsSync118(tieredStoreSetLedgerPath(archiveConnectorStoreDbPath("secure_local", family, env))))
+    if (writableStoreOpensForbidden() && !existsSync119(tieredStoreSetLedgerPath(archiveConnectorStoreDbPath("secure_local", family, env))))
       return false;
     try {
       return state.list().some((record) => record.family === family);
@@ -243199,7 +244003,7 @@ function createArchiveImportRuntime(options = {}) {
     laneMounted: (family) => lanes.has(family),
     openWaitingQuestions: () => {
       const path = options.waitingQuestionsDbPath ?? waitingPrivateQuestionsDbPath(resolveRemoteConnectionsDbPath(env));
-      return existsSync118(path) ? openWaitingPrivateQuestionStore(path) : undefined;
+      return existsSync119(path) ? openWaitingPrivateQuestionStore(path) : undefined;
     },
     start: (path) => startArchiveImport({ state, path }),
     subscribeWork: (wake) => {
@@ -243558,8 +244362,468 @@ var init_agent = __esm(() => {
   };
 });
 
+// src/workers/archive-import/sync.ts
+import { createHash as createHash114 } from "node:crypto";
+function tally(values) {
+  return Object.values(values).reduce((total, value) => total + value, 0);
+}
+function receiptOf(record, input) {
+  const sum = (pick) => input.legs.reduce((total, leg) => total + pick(leg), 0);
+  const changed = sum((leg) => leg.itemsChanged);
+  const withoutDigest = {
+    kind: ARCHIVE_IMPORT_RECEIPT_KIND,
+    status: changed > 0 ? "progress" : "idle",
+    counts: {
+      items_seen: input.legs[0]?.itemsSeen ?? 0,
+      items_indexed: sum((leg) => leg.itemsIndexed),
+      items_changed: changed,
+      items_rejected: sum((leg) => leg.itemsRejected),
+      traversal_complete: Number(input.complete),
+      import_stopped: Number(input.stopped),
+      gaps: record ? tally(record.findings.gaps) : 0,
+      skipped: record ? tally(record.findings.skipped) : 0,
+      ...input.tiered ?? {}
+    },
+    ...input.warnings.length > 0 ? { warnings: [...new Set(input.warnings)] } : {},
+    policy: { counts_only: true, raw_source_exposed: false, source_text_returned: false }
+  };
+  return {
+    ...withoutDigest,
+    receipt_sha256: createHash114("sha256").update(JSON.stringify(withoutDigest)).digest("hex")
+  };
+}
+function stopFrom(error, at) {
+  return {
+    code: error.code,
+    message: error.message,
+    ...error.relPath ? { rel_path: error.relPath } : {},
+    at
+  };
+}
+function fileStop(error, relPath) {
+  if (!(error instanceof ScopeSafeError))
+    return error;
+  if (error.code === "not_found") {
+    return new ArchiveImportStoppedError("file_missing", "A file of this archive is no longer there.", relPath);
+  }
+  if (error.code === "changed" || error.code === "escape" || error.code === "not_regular") {
+    return new ArchiveImportStoppedError("file_changed", "A file of this archive changed since the import started.", relPath);
+  }
+  return new ArchiveImportStoppedError("file_unreadable", "A file of this archive could not be read.", relPath, { cause: error });
+}
+function changeSinceApproval(root, record, at) {
+  try {
+    root.statRelative("");
+  } catch (error) {
+    const missing = error instanceof ScopeSafeError && error.code === "not_found" || error?.code === "ENOENT";
+    return missing ? { code: "file_missing", message: "The folder that holds this archive is no longer there.", at } : { code: "root_changed", message: "The folder that holds this archive was replaced.", at };
+  }
+  const check = verifyArchiveManifest(root, record.files);
+  return check.ok ? undefined : stopFrom(check, at);
+}
+async function digestArchiveFiles(root, files, shouldContinue) {
+  const digests = [];
+  for (const file of files) {
+    const steps = archiveFileDigestSteps(root, file);
+    try {
+      for (;; ) {
+        const step = steps.next();
+        if (step.done) {
+          digests.push(step.value);
+          break;
+        }
+        if (!shouldContinue()) {
+          steps.return("");
+          return;
+        }
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+    } catch (error) {
+      throw fileStop(error, file.rel_path);
+    }
+  }
+  return digests;
+}
+function repeatedIndexes(items, holds, seen) {
+  const repeated = [];
+  items.forEach((item, index) => {
+    if (seen.has(item.identity.localItemId) || holds(item.identity))
+      repeated.push(index);
+    seen.add(item.identity.localItemId);
+  });
+  return repeated;
+}
+function observeListing(connector, pending, flush, complete, repeats) {
+  let completed = false;
+  const seenThisPass = new Set;
+  let earliest;
+  let latest;
+  const wrapped = Object.create(connector);
+  wrapped.listItems = (options) => {
+    const pages = connector.listItems(options);
+    return async function* () {
+      for await (const page of pages) {
+        for (const item of page.items) {
+          const authoredAt = item.metadata.authoredAt;
+          if (typeof authoredAt !== "string" || !Number.isFinite(Date.parse(authoredAt)))
+            continue;
+          if (!earliest || authoredAt < earliest)
+            earliest = authoredAt;
+          if (!latest || authoredAt > latest)
+            latest = authoredAt;
+        }
+        if (repeats) {
+          const repeated = repeatedIndexes(page.items, repeats.holds, seenThisPass);
+          const where = repeats.positions();
+          if (where && where.length === page.items.length) {
+            repeats.add(repeated.length, { repeatedAt: repeated.map((index) => where[index]), through: where[where.length - 1] });
+          } else {
+            repeats.add(repeated.length);
+          }
+        }
+        flush();
+        if (page.done) {
+          if (!await complete())
+            return;
+          completed = true;
+        }
+        yield page;
+      }
+      flush();
+    }();
+  };
+  return {
+    connector: wrapped,
+    completed: () => completed,
+    dates: () => ({ ...earliest ? { earliest } : {}, ...latest ? { latest } : {} })
+  };
+}
+function waitForActiveArchivePulls(archiveId) {
+  const pulls = activePulls.get(archiveId);
+  return pulls && Promise.allSettled(pulls);
+}
+async function pullArchiveImport(options) {
+  const now = options.now ?? (() => new Date);
+  const record = options.state.get(options.archiveId);
+  const idle = (current, warnings = [], stopped = false) => ({
+    receipt: receiptOf(current, { legs: [], complete: current?.status === "imported", stopped, warnings }),
+    continueSoon: false,
+    ...current ? { record: current } : {}
+  });
+  if (!record || record.status !== "importing")
+    return idle(record);
+  const stop = (reason) => {
+    const stoppedRecord = options.state.update(record.archive_id, (entry) => {
+      if (entry.status !== "importing")
+        return false;
+      entry.status = "stopped";
+      entry.stop = reason;
+    });
+    return idle(stoppedRecord, stoppedRecord?.status === "stopped" ? ["archive_import_stopped"] : [], stoppedRecord?.status === "stopped");
+  };
+  const format = getArchiveFormat(record.format);
+  if (record.target) {
+    const target = (options.targets ?? archiveSourceTargets).forSource(record.target.source_id);
+    if (!target || !format || !target.formats.includes(record.format) || format.family !== record.family || format.provider !== record.provider) {
+      return stop({ code: "source_unavailable", message: "This build does not read this export into its source.", at: now().toISOString() });
+    }
+    const pass = () => runPass(options, record, {
+      stop,
+      idle,
+      now,
+      format,
+      sink: () => {
+        let account;
+        try {
+          if (record.target.owner_confirmed === true && !sameImportAccount(record.target.confirmed_account, importAccountIdentity(record.target.source_id, options.state.env))) {
+            return { code: "account_changed", message: "The account this source holds now is not the one you said this export belongs to.", at: now().toISOString() };
+          }
+          if (importAccountIdentity(record.target.source_id, options.state.env) === undefined) {
+            return { code: "source_unavailable", message: "This source's account is gone, so nothing more was imported.", at: now().toISOString() };
+          }
+          const resolved = resolveImportAccount(record.target.source_id, record.target.import_account_id, {
+            env: options.state.env,
+            ...record.target.owner_confirmed === true ? { ownerConfirmed: true } : {}
+          });
+          if (resolved.match !== "same" && resolved.match !== "new" || !resolved.account) {
+            return { code: "account_changed", message: "The account this source holds now is not the one this export belongs to.", at: now().toISOString() };
+          }
+          account = resolved.account;
+        } catch (error) {
+          if (error instanceof SourceStorageUnavailableError) {
+            return { code: "source_unavailable", message: "This source is being deleted or moved, so nothing more was imported.", at: now().toISOString() };
+          }
+          throw error;
+        }
+        const lane = target.lane(account, options.state.env);
+        return {
+          set: lane.set,
+          syncOptions: lane.sync,
+          input: true,
+          connector: (input, hooks) => {
+            const bound = bindInputToFiles(target.input(input), record.manifest_sha256);
+            if (!lane.connector.forInput)
+              throw new Error("The source's connector has no way to read an archive.");
+            return holdingItems(lane.connector.forInput(observingIntake(bound, hooks.observeIntake)));
+          }
+        };
+      }
+    });
+    return target.exclusive ? target.exclusive(pass) : pass();
+  }
+  const lane = options.lane;
+  if (!lane)
+    throw new Error("An import that stays under Archives needs its family's stores.");
+  if (record.family !== lane.family)
+    throw new Error("This archive belongs to another family's stores.");
+  const factory = (options.connectorFactory ?? archiveFormatConnector)(record.format);
+  if (!format || !factory || format.family !== record.family || format.provider !== record.provider) {
+    return stop({ code: "format_unavailable", message: "This build does not read this archive's format.", at: now().toISOString() });
+  }
+  const pass = runPass(options, record, {
+    stop,
+    idle,
+    now,
+    format,
+    sink: () => ({
+      set: lane.set,
+      syncOptions: {
+        placement: ARCHIVE_STORE_PLACEMENT,
+        fetchContent: true,
+        deferMetadataOnlyContent: true
+      },
+      input: false,
+      connector: (input) => factory(input)
+    })
+  });
+  const active = activePulls.get(record.archive_id) ?? new Set;
+  activePulls.set(record.archive_id, active);
+  active.add(pass);
+  try {
+    return await pass;
+  } finally {
+    active.delete(pass);
+    if (!active.size)
+      activePulls.delete(record.archive_id);
+  }
+}
+async function runPass(options, record, context) {
+  const { stop, now, format } = context;
+  const picked = context.sink();
+  if ("code" in picked)
+    return stop(picked);
+  const sink = picked;
+  let root;
+  try {
+    root = ScopeRoot.open(record.root_path);
+  } catch (error) {
+    const missing = error instanceof ScopeSafeError && error.code === "not_found";
+    return stop({
+      code: missing ? "file_missing" : "root_changed",
+      message: missing ? "The folder that holds this archive is no longer there." : "The folder that holds this archive could not be opened as approved.",
+      at: now().toISOString()
+    });
+  }
+  try {
+    if (root.identity.dev !== record.root_identity.dev || root.identity.ino !== record.root_identity.ino) {
+      return stop({ code: "root_changed", message: "The folder that holds this archive was replaced.", at: now().toISOString() });
+    }
+    const check = verifyArchiveManifest(root, record.files);
+    if (!check.ok)
+      return stop(stopFrom(check, now().toISOString()));
+    const pending = [];
+    let position;
+    let repeated = 0;
+    let itemPositions;
+    let repeatedAt = [];
+    let listedThrough;
+    const flush = () => {
+      const moved = position;
+      position = undefined;
+      const repeats = repeated;
+      repeated = 0;
+      const items = repeatedAt.length > 0 || listedThrough ? { repeatedAt, ...listedThrough ? { through: listedThrough } : {} } : undefined;
+      repeatedAt = [];
+      listedThrough = undefined;
+      if (pending.length === 0 && !moved && !items)
+        return;
+      const batch = pending.splice(0, pending.length);
+      options.state.recordFindings(record.archive_id, batch, moved, repeats, items);
+    };
+    const connectorId = archiveConnectorId(record.archive_id);
+    const shouldContinue = options.shouldContinue ?? (() => true);
+    let providerWait;
+    let providerWaitMinimum;
+    const connector = sink.connector({
+      archiveId: record.archive_id,
+      connectorId,
+      accountScope: record.archive_id,
+      format,
+      root,
+      files: archiveFileEntries(record.files),
+      manifestSha256: record.manifest_sha256,
+      report: (finding) => {
+        pending.push(finding);
+      },
+      reportPosition: (next) => {
+        position = next;
+      },
+      reportItemPositions: (positions) => {
+        itemPositions = positions;
+      },
+      waitForProvider: (reason, detail) => {
+        providerWait = reason;
+        providerWaitMinimum = detail?.minimum;
+      },
+      shouldContinue,
+      ...options.media ? { media: archiveMediaAccess({ bindings: options.media, archiveId: record.archive_id, root, chosenRelPath: record.chosen_rel_path }) } : {},
+      ...options.maxBytesPerListing !== undefined ? { maxBytesPerListing: options.maxBytesPerListing } : {},
+      ...options.pageSize !== undefined ? { pageSize: options.pageSize } : {}
+    }, {
+      observeIntake: (outcomes) => {
+        const told = itemPositions;
+        itemPositions = undefined;
+        options.state.recordIntake(record.archive_id, outcomes, told);
+      }
+    });
+    const completion = {};
+    const observed = observeListing(connector, pending, flush, async () => {
+      const digests = await digestArchiveFiles(root, record.files, shouldContinue);
+      if (!digests)
+        return false;
+      if (options.media) {
+        const media = await verifyArchiveMediaBindings({ bindings: options.media, archiveId: record.archive_id, root, shouldContinue });
+        if (!media)
+          return false;
+        if (!media.ok)
+          throw new ArchiveImportStoppedError(media.code, media.message, media.relPath);
+      }
+      completion.digests = digests;
+      return true;
+    }, sink.input ? undefined : {
+      holds: (identity) => sink.set.anyLegHasRow(identity),
+      positions: () => {
+        const told = itemPositions;
+        itemPositions = undefined;
+        return told;
+      },
+      add: (count, at) => {
+        if (at) {
+          repeatedAt.push(...at.repeatedAt);
+          if (at.through)
+            listedThrough = at.through;
+        } else {
+          repeated += count;
+        }
+      }
+    });
+    const set = sink.set;
+    set.store("secure_local", { create: true });
+    const cursor = set.committedCursor(connectorId)?.cursor ?? undefined;
+    let run;
+    try {
+      run = await set.sync(observed.connector, {
+        ...sink.syncOptions,
+        maxItems: Math.max(1, options.maxItems ?? ARCHIVE_IMPORT_MAX_ITEMS_PER_PASS),
+        ...cursor ? { cursor } : {}
+      });
+    } catch (error) {
+      if (error instanceof ArchiveImportStoppedError) {
+        flush();
+        return stop(stopFrom(error, now().toISOString()));
+      }
+      throw error;
+    }
+    const refused = TIER_DOMAIN_ORDER.reduce((sum, domain) => sum + (run.byDomain[domain]?.sync.itemsRejected ?? 0), 0);
+    if (refused > 0) {
+      const readTo = options.state.get(record.archive_id)?.read_position;
+      pending.push({ kind: ARCHIVE_COMMON_FINDINGS.itemRefused, class: "gap", fileIndex: position?.fileIndex ?? readTo?.file_index ?? 0, offset: position?.offset ?? readTo?.offset ?? 0, count: refused });
+    }
+    flush();
+    const legs = TIER_DOMAIN_ORDER.flatMap((domain) => run.byDomain[domain] ? [run.byDomain[domain].sync] : []);
+    const waiting = run.routing.itemsUnstored;
+    const complete = observed.completed() && legs.length > 0 && legs.every((leg) => leg.traversalComplete) && waiting === 0;
+    const dates = observed.dates();
+    const final = {};
+    let mediaChange;
+    let mediaChecked = true;
+    if (complete && completion.digests && options.media) {
+      const media = await verifyArchiveMediaBindings({ bindings: options.media, archiveId: record.archive_id, root, shouldContinue });
+      if (!media)
+        mediaChecked = false;
+      else if (!media.ok)
+        mediaChange = stopFrom(media, now().toISOString());
+    }
+    const updated = options.state.update(record.archive_id, (entry) => {
+      if (providerWait !== undefined) {
+        entry.waiting = { reason: providerWait, at: now().toISOString(), ...providerWaitMinimum !== undefined ? { minimum: providerWaitMinimum } : {} };
+      } else {
+        delete entry.waiting;
+      }
+      if (dates.earliest && dates.latest) {
+        entry.date_range = {
+          earliest: entry.date_range && entry.date_range.earliest < dates.earliest ? entry.date_range.earliest : dates.earliest,
+          latest: entry.date_range && entry.date_range.latest > dates.latest ? entry.date_range.latest : dates.latest
+        };
+      }
+      const digests = completion.digests;
+      if (complete && digests && mediaChecked && entry.status === "importing" && entry.manifest_sha256 === record.manifest_sha256) {
+        const changed = changeSinceApproval(root, record, now().toISOString()) ?? mediaChange;
+        if (changed) {
+          final.stop = changed;
+          entry.status = "stopped";
+          entry.stop = changed;
+          return;
+        }
+        entry.status = "imported";
+        entry.completed_at = now().toISOString();
+        entry.files.forEach((file, index) => {
+          file.sha256 = digests[index];
+        });
+      }
+    });
+    if (final.stop)
+      return context.idle(updated, ["archive_import_stopped"], true);
+    return {
+      receipt: receiptOf(updated, {
+        legs,
+        tiered: tieredLaneReceiptCounts({
+          ...run.byDomain.public_safe ? { public: run.byDomain.public_safe } : {},
+          routing: run.routing
+        }),
+        complete,
+        stopped: false,
+        warnings: [
+          ...legs.flatMap((leg) => leg.gaps),
+          ...waiting > 0 ? [`archive_items_waiting: ${waiting} item(s) are in the middle of a tier move and are read again once it is done.`] : [],
+          ...providerWait !== undefined ? [`archive_import_waiting_for_provider: ${providerWait}`] : []
+        ]
+      }),
+      continueSoon: !complete && waiting === 0 && providerWait === undefined,
+      ...updated ? { record: updated } : {}
+    };
+  } finally {
+    root.close();
+  }
+}
+var ARCHIVE_IMPORT_RECEIPT_KIND = "archive_import_pull_receipt", ARCHIVE_IMPORT_MAX_ITEMS_PER_PASS = 2000, activePulls;
+var init_sync = __esm(() => {
+  init_archive_formats();
+  init_archive_formats();
+  init_scope_safe_fs();
+  init_source_storage();
+  init_tiered_store_set();
+  init_source_input();
+  init_source_targets();
+  init_media_bindings();
+  init_manifest3();
+  init_state();
+  init_store();
+  activePulls = new Map;
+});
+
 // src/workers/archive-import/removal.ts
-import { existsSync as existsSync119 } from "node:fs";
+import { existsSync as existsSync120 } from "node:fs";
 function requestArchiveRemoval(state, archiveId, now = () => new Date) {
   return state.update(archiveId, (record) => {
     if (record.status === "removing" || record.target)
@@ -243593,7 +244857,7 @@ function deleteWaitingAnswers(options, input) {
 }
 function deleteJudgeQuestions(lane, provider, accountScope) {
   const path = tierSnifferPathForLedger(lane.ledger.dbPath);
-  if (path !== ":memory:" && !existsSync119(path))
+  if (path !== ":memory:" && !existsSync120(path))
     return 0;
   const sniffer = openTierSniffer({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID2 }, { dbPath: path });
   try {
@@ -243601,6 +244865,13 @@ function deleteJudgeQuestions(lane, provider, accountScope) {
   } finally {
     sniffer.close();
   }
+}
+function withdrawArchiveReads(lane, record) {
+  const stores = archiveLaneStores(lane);
+  const prefix = record.archive_id + ":";
+  const ids = new Set(stores.flatMap((store) => store.onDemandGrantIds().filter((id) => id.startsWith(prefix))));
+  revokeOnDemandReads(stores, ids);
+  return lane.ledger.withdrawAccountScope(record.provider, record.archive_id);
 }
 async function runArchiveRemoval(options) {
   const record = options.state.get(options.archiveId);
@@ -243614,12 +244885,12 @@ async function runArchiveRemoval(options) {
   const lane = options.lane;
   const corpusIds = archiveLaneLegs(lane).map((leg) => leg.corpusId);
   const counts = emptyCounts2();
+  const withdrawn = withdrawArchiveReads(lane, record);
+  counts.decisions_removed += withdrawn.items;
+  counts.copies_hidden += withdrawn.copies;
   archiveContinuations.dropArchive(record.archive_id);
   counts.extraction_ledgers_cleared += runForgetAccountScopeSteps({ source_id: ARCHIVE_IMPORTS_SOURCE_ID2, slot: "1", corpus_ids: corpusIds }, [accountScope], { env: lane.env }, { dryRun: false }).length;
   counts.media_bindings_removed += options.media?.forgetArchive(accountScope) ?? 0;
-  const withdrawn = lane.ledger.withdrawAccountScope(provider, accountScope);
-  counts.decisions_removed += withdrawn.items;
-  counts.copies_hidden += withdrawn.copies;
   counts.questions_removed += deleteJudgeQuestions(lane, provider, accountScope);
   counts.answers_removed += deleteWaitingAnswers(options, { provider, accountScope, corpusIds });
   const connectorId = archiveConnectorId(record.archive_id);
@@ -243653,6 +244924,7 @@ var init_removal = __esm(() => {
   init_source_storage();
   init_tier_ledger_path();
   init_continuation_cache();
+  init_on_demand_read();
   init_lane();
   init_state();
   init_store();
@@ -244278,18 +245550,30 @@ function createArchiveImportDashboard(options) {
       }
       return { ok: false, code: "unknown_archive", message: ARCHIVE_APPROVE_COPY.unknown_archive };
     }
-    if (record.status === "removing")
+    if (record.status === "removing" && record.visibility_withdrawn)
       return { ok: false, code: "already_removing", message: ARCHIVE_APPROVE_COPY.already_removing };
     if (record.target)
       return { ok: false, code: "part_of_source", message: ARCHIVE_APPROVE_COPY.part_of_source };
     requestArchiveRemoval(state, archiveId, options.now);
-    for (const request of requests.list()) {
-      if (request.archive_id === archiveId)
-        requests.remove(request.request_id);
-    }
-    refresh();
-    wakeScheduler();
-    return { ok: true };
+    const finish = () => {
+      try {
+        for (const lane of options.runtime.existingLanes(new Set([record.family])))
+          withdrawArchiveReads(lane, record);
+        state.update(archiveId, (entry) => {
+          entry.visibility_withdrawn = true;
+        });
+        for (const request of requests.list()) {
+          if (request.archive_id === archiveId)
+            requests.remove(request.request_id);
+        }
+      } finally {
+        refresh();
+        wakeScheduler();
+      }
+      return { ok: true };
+    };
+    const active = waitForActiveArchivePulls(archiveId);
+    return active ? active.then(finish) : finish();
   };
   const listing = (shownHere) => {
     const model = options.privateModel();
@@ -244424,7 +245708,8 @@ function createArchiveImportDashboard(options) {
       if (blocked && !blocked.ok)
         return { ok: false, code: blocked.code, message: blocked.message };
       const result = removeNow(request.archive_id);
-      requests.remove(requestId);
+      if (!(result instanceof Promise) && !result.ok)
+        requests.remove(requestId);
       return result;
     },
     view() {
@@ -244607,6 +245892,7 @@ var init_dashboard2 = __esm(() => {
   init_agent();
   init_source_scheduler();
   init_manifest3();
+  init_sync();
   init_removal();
   init_olympus_layout();
   init_staging();
@@ -244888,451 +246174,6 @@ var init_extraction_runtime = __esm(() => {
   init_store();
   init_extraction_source3();
   init_lane();
-});
-
-// src/workers/archive-import/sync.ts
-import { createHash as createHash114 } from "node:crypto";
-function tally(values) {
-  return Object.values(values).reduce((total, value) => total + value, 0);
-}
-function receiptOf(record, input) {
-  const sum = (pick) => input.legs.reduce((total, leg) => total + pick(leg), 0);
-  const changed = sum((leg) => leg.itemsChanged);
-  const withoutDigest = {
-    kind: ARCHIVE_IMPORT_RECEIPT_KIND,
-    status: changed > 0 ? "progress" : "idle",
-    counts: {
-      items_seen: input.legs[0]?.itemsSeen ?? 0,
-      items_indexed: sum((leg) => leg.itemsIndexed),
-      items_changed: changed,
-      items_rejected: sum((leg) => leg.itemsRejected),
-      traversal_complete: Number(input.complete),
-      import_stopped: Number(input.stopped),
-      gaps: record ? tally(record.findings.gaps) : 0,
-      skipped: record ? tally(record.findings.skipped) : 0,
-      ...input.tiered ?? {}
-    },
-    ...input.warnings.length > 0 ? { warnings: [...new Set(input.warnings)] } : {},
-    policy: { counts_only: true, raw_source_exposed: false, source_text_returned: false }
-  };
-  return {
-    ...withoutDigest,
-    receipt_sha256: createHash114("sha256").update(JSON.stringify(withoutDigest)).digest("hex")
-  };
-}
-function stopFrom(error, at) {
-  return {
-    code: error.code,
-    message: error.message,
-    ...error.relPath ? { rel_path: error.relPath } : {},
-    at
-  };
-}
-function fileStop(error, relPath) {
-  if (!(error instanceof ScopeSafeError))
-    return error;
-  if (error.code === "not_found") {
-    return new ArchiveImportStoppedError("file_missing", "A file of this archive is no longer there.", relPath);
-  }
-  if (error.code === "changed" || error.code === "escape" || error.code === "not_regular") {
-    return new ArchiveImportStoppedError("file_changed", "A file of this archive changed since the import started.", relPath);
-  }
-  return new ArchiveImportStoppedError("file_unreadable", "A file of this archive could not be read.", relPath, { cause: error });
-}
-function changeSinceApproval(root, record, at) {
-  try {
-    root.statRelative("");
-  } catch (error) {
-    const missing = error instanceof ScopeSafeError && error.code === "not_found" || error?.code === "ENOENT";
-    return missing ? { code: "file_missing", message: "The folder that holds this archive is no longer there.", at } : { code: "root_changed", message: "The folder that holds this archive was replaced.", at };
-  }
-  const check = verifyArchiveManifest(root, record.files);
-  return check.ok ? undefined : stopFrom(check, at);
-}
-async function digestArchiveFiles(root, files, shouldContinue) {
-  const digests = [];
-  for (const file of files) {
-    const steps = archiveFileDigestSteps(root, file);
-    try {
-      for (;; ) {
-        const step = steps.next();
-        if (step.done) {
-          digests.push(step.value);
-          break;
-        }
-        if (!shouldContinue()) {
-          steps.return("");
-          return;
-        }
-        await new Promise((resolve) => setImmediate(resolve));
-      }
-    } catch (error) {
-      throw fileStop(error, file.rel_path);
-    }
-  }
-  return digests;
-}
-function repeatedIndexes(items, holds, seen) {
-  const repeated = [];
-  items.forEach((item, index) => {
-    if (seen.has(item.identity.localItemId) || holds(item.identity))
-      repeated.push(index);
-    seen.add(item.identity.localItemId);
-  });
-  return repeated;
-}
-function observeListing(connector, pending, flush, complete, repeats) {
-  let completed = false;
-  const seenThisPass = new Set;
-  let earliest;
-  let latest;
-  const wrapped = Object.create(connector);
-  wrapped.listItems = (options) => {
-    const pages = connector.listItems(options);
-    return async function* () {
-      for await (const page of pages) {
-        for (const item of page.items) {
-          const authoredAt = item.metadata.authoredAt;
-          if (typeof authoredAt !== "string" || !Number.isFinite(Date.parse(authoredAt)))
-            continue;
-          if (!earliest || authoredAt < earliest)
-            earliest = authoredAt;
-          if (!latest || authoredAt > latest)
-            latest = authoredAt;
-        }
-        if (repeats) {
-          const repeated = repeatedIndexes(page.items, repeats.holds, seenThisPass);
-          const where = repeats.positions();
-          if (where && where.length === page.items.length) {
-            repeats.add(repeated.length, { repeatedAt: repeated.map((index) => where[index]), through: where[where.length - 1] });
-          } else {
-            repeats.add(repeated.length);
-          }
-        }
-        flush();
-        if (page.done) {
-          if (!await complete())
-            return;
-          completed = true;
-        }
-        yield page;
-      }
-      flush();
-    }();
-  };
-  return {
-    connector: wrapped,
-    completed: () => completed,
-    dates: () => ({ ...earliest ? { earliest } : {}, ...latest ? { latest } : {} })
-  };
-}
-async function pullArchiveImport(options) {
-  const now = options.now ?? (() => new Date);
-  const record = options.state.get(options.archiveId);
-  const idle = (current, warnings = [], stopped = false) => ({
-    receipt: receiptOf(current, { legs: [], complete: current?.status === "imported", stopped, warnings }),
-    continueSoon: false,
-    ...current ? { record: current } : {}
-  });
-  if (!record || record.status !== "importing")
-    return idle(record);
-  const stop = (reason) => {
-    const stoppedRecord = options.state.update(record.archive_id, (entry) => {
-      if (entry.status !== "importing")
-        return false;
-      entry.status = "stopped";
-      entry.stop = reason;
-    });
-    return idle(stoppedRecord, stoppedRecord?.status === "stopped" ? ["archive_import_stopped"] : [], stoppedRecord?.status === "stopped");
-  };
-  const format = getArchiveFormat(record.format);
-  if (record.target) {
-    const target = (options.targets ?? archiveSourceTargets).forSource(record.target.source_id);
-    if (!target || !format || !target.formats.includes(record.format) || format.family !== record.family || format.provider !== record.provider) {
-      return stop({ code: "source_unavailable", message: "This build does not read this export into its source.", at: now().toISOString() });
-    }
-    const pass = () => runPass(options, record, {
-      stop,
-      idle,
-      now,
-      format,
-      sink: () => {
-        let account;
-        try {
-          if (record.target.owner_confirmed === true && !sameImportAccount(record.target.confirmed_account, importAccountIdentity(record.target.source_id, options.state.env))) {
-            return { code: "account_changed", message: "The account this source holds now is not the one you said this export belongs to.", at: now().toISOString() };
-          }
-          if (importAccountIdentity(record.target.source_id, options.state.env) === undefined) {
-            return { code: "source_unavailable", message: "This source's account is gone, so nothing more was imported.", at: now().toISOString() };
-          }
-          const resolved = resolveImportAccount(record.target.source_id, record.target.import_account_id, {
-            env: options.state.env,
-            ...record.target.owner_confirmed === true ? { ownerConfirmed: true } : {}
-          });
-          if (resolved.match !== "same" && resolved.match !== "new" || !resolved.account) {
-            return { code: "account_changed", message: "The account this source holds now is not the one this export belongs to.", at: now().toISOString() };
-          }
-          account = resolved.account;
-        } catch (error) {
-          if (error instanceof SourceStorageUnavailableError) {
-            return { code: "source_unavailable", message: "This source is being deleted or moved, so nothing more was imported.", at: now().toISOString() };
-          }
-          throw error;
-        }
-        const lane = target.lane(account, options.state.env);
-        return {
-          set: lane.set,
-          syncOptions: lane.sync,
-          input: true,
-          connector: (input, hooks) => {
-            const bound = bindInputToFiles(target.input(input), record.manifest_sha256);
-            if (!lane.connector.forInput)
-              throw new Error("The source's connector has no way to read an archive.");
-            return holdingItems(lane.connector.forInput(observingIntake(bound, hooks.observeIntake)));
-          }
-        };
-      }
-    });
-    return target.exclusive ? target.exclusive(pass) : pass();
-  }
-  const lane = options.lane;
-  if (!lane)
-    throw new Error("An import that stays under Archives needs its family's stores.");
-  if (record.family !== lane.family)
-    throw new Error("This archive belongs to another family's stores.");
-  const factory = (options.connectorFactory ?? archiveFormatConnector)(record.format);
-  if (!format || !factory || format.family !== record.family || format.provider !== record.provider) {
-    return stop({ code: "format_unavailable", message: "This build does not read this archive's format.", at: now().toISOString() });
-  }
-  return runPass(options, record, {
-    stop,
-    idle,
-    now,
-    format,
-    sink: () => ({
-      set: lane.set,
-      syncOptions: {
-        placement: ARCHIVE_STORE_PLACEMENT,
-        fetchContent: true,
-        deferMetadataOnlyContent: true
-      },
-      input: false,
-      connector: (input) => factory(input)
-    })
-  });
-}
-async function runPass(options, record, context) {
-  const { stop, now, format } = context;
-  const picked = context.sink();
-  if ("code" in picked)
-    return stop(picked);
-  const sink = picked;
-  let root;
-  try {
-    root = ScopeRoot.open(record.root_path);
-  } catch (error) {
-    const missing = error instanceof ScopeSafeError && error.code === "not_found";
-    return stop({
-      code: missing ? "file_missing" : "root_changed",
-      message: missing ? "The folder that holds this archive is no longer there." : "The folder that holds this archive could not be opened as approved.",
-      at: now().toISOString()
-    });
-  }
-  try {
-    if (root.identity.dev !== record.root_identity.dev || root.identity.ino !== record.root_identity.ino) {
-      return stop({ code: "root_changed", message: "The folder that holds this archive was replaced.", at: now().toISOString() });
-    }
-    const check = verifyArchiveManifest(root, record.files);
-    if (!check.ok)
-      return stop(stopFrom(check, now().toISOString()));
-    const pending = [];
-    let position;
-    let repeated = 0;
-    let itemPositions;
-    let repeatedAt = [];
-    let listedThrough;
-    const flush = () => {
-      const moved = position;
-      position = undefined;
-      const repeats = repeated;
-      repeated = 0;
-      const items = repeatedAt.length > 0 || listedThrough ? { repeatedAt, ...listedThrough ? { through: listedThrough } : {} } : undefined;
-      repeatedAt = [];
-      listedThrough = undefined;
-      if (pending.length === 0 && !moved && !items)
-        return;
-      const batch = pending.splice(0, pending.length);
-      options.state.recordFindings(record.archive_id, batch, moved, repeats, items);
-    };
-    const connectorId = archiveConnectorId(record.archive_id);
-    const shouldContinue = options.shouldContinue ?? (() => true);
-    let providerWait;
-    let providerWaitMinimum;
-    const connector = sink.connector({
-      archiveId: record.archive_id,
-      connectorId,
-      accountScope: record.archive_id,
-      format,
-      root,
-      files: archiveFileEntries(record.files),
-      manifestSha256: record.manifest_sha256,
-      report: (finding) => {
-        pending.push(finding);
-      },
-      reportPosition: (next) => {
-        position = next;
-      },
-      reportItemPositions: (positions) => {
-        itemPositions = positions;
-      },
-      waitForProvider: (reason, detail) => {
-        providerWait = reason;
-        providerWaitMinimum = detail?.minimum;
-      },
-      shouldContinue,
-      ...options.media ? { media: archiveMediaAccess({ bindings: options.media, archiveId: record.archive_id, root, chosenRelPath: record.chosen_rel_path }) } : {},
-      ...options.maxBytesPerListing !== undefined ? { maxBytesPerListing: options.maxBytesPerListing } : {},
-      ...options.pageSize !== undefined ? { pageSize: options.pageSize } : {}
-    }, {
-      observeIntake: (outcomes) => {
-        const told = itemPositions;
-        itemPositions = undefined;
-        options.state.recordIntake(record.archive_id, outcomes, told);
-      }
-    });
-    const completion = {};
-    const observed = observeListing(connector, pending, flush, async () => {
-      const digests = await digestArchiveFiles(root, record.files, shouldContinue);
-      if (!digests)
-        return false;
-      if (options.media) {
-        const media = await verifyArchiveMediaBindings({ bindings: options.media, archiveId: record.archive_id, root, shouldContinue });
-        if (!media)
-          return false;
-        if (!media.ok)
-          throw new ArchiveImportStoppedError(media.code, media.message, media.relPath);
-      }
-      completion.digests = digests;
-      return true;
-    }, sink.input ? undefined : {
-      holds: (identity) => sink.set.anyLegHasRow(identity),
-      positions: () => {
-        const told = itemPositions;
-        itemPositions = undefined;
-        return told;
-      },
-      add: (count, at) => {
-        if (at) {
-          repeatedAt.push(...at.repeatedAt);
-          if (at.through)
-            listedThrough = at.through;
-        } else {
-          repeated += count;
-        }
-      }
-    });
-    const set = sink.set;
-    set.store("secure_local", { create: true });
-    const cursor = set.committedCursor(connectorId)?.cursor ?? undefined;
-    let run;
-    try {
-      run = await set.sync(observed.connector, {
-        ...sink.syncOptions,
-        maxItems: Math.max(1, options.maxItems ?? ARCHIVE_IMPORT_MAX_ITEMS_PER_PASS),
-        ...cursor ? { cursor } : {}
-      });
-    } catch (error) {
-      if (error instanceof ArchiveImportStoppedError) {
-        flush();
-        return stop(stopFrom(error, now().toISOString()));
-      }
-      throw error;
-    }
-    const refused = TIER_DOMAIN_ORDER.reduce((sum, domain) => sum + (run.byDomain[domain]?.sync.itemsRejected ?? 0), 0);
-    if (refused > 0) {
-      const readTo = options.state.get(record.archive_id)?.read_position;
-      pending.push({ kind: ARCHIVE_COMMON_FINDINGS.itemRefused, class: "gap", fileIndex: position?.fileIndex ?? readTo?.file_index ?? 0, offset: position?.offset ?? readTo?.offset ?? 0, count: refused });
-    }
-    flush();
-    const legs = TIER_DOMAIN_ORDER.flatMap((domain) => run.byDomain[domain] ? [run.byDomain[domain].sync] : []);
-    const waiting = run.routing.itemsUnstored;
-    const complete = observed.completed() && legs.length > 0 && legs.every((leg) => leg.traversalComplete) && waiting === 0;
-    const dates = observed.dates();
-    const final = {};
-    let mediaChange;
-    let mediaChecked = true;
-    if (complete && completion.digests && options.media) {
-      const media = await verifyArchiveMediaBindings({ bindings: options.media, archiveId: record.archive_id, root, shouldContinue });
-      if (!media)
-        mediaChecked = false;
-      else if (!media.ok)
-        mediaChange = stopFrom(media, now().toISOString());
-    }
-    const updated = options.state.update(record.archive_id, (entry) => {
-      if (providerWait !== undefined) {
-        entry.waiting = { reason: providerWait, at: now().toISOString(), ...providerWaitMinimum !== undefined ? { minimum: providerWaitMinimum } : {} };
-      } else {
-        delete entry.waiting;
-      }
-      if (dates.earliest && dates.latest) {
-        entry.date_range = {
-          earliest: entry.date_range && entry.date_range.earliest < dates.earliest ? entry.date_range.earliest : dates.earliest,
-          latest: entry.date_range && entry.date_range.latest > dates.latest ? entry.date_range.latest : dates.latest
-        };
-      }
-      const digests = completion.digests;
-      if (complete && digests && mediaChecked && entry.status === "importing" && entry.manifest_sha256 === record.manifest_sha256) {
-        const changed = changeSinceApproval(root, record, now().toISOString()) ?? mediaChange;
-        if (changed) {
-          final.stop = changed;
-          entry.status = "stopped";
-          entry.stop = changed;
-          return;
-        }
-        entry.status = "imported";
-        entry.completed_at = now().toISOString();
-        entry.files.forEach((file, index) => {
-          file.sha256 = digests[index];
-        });
-      }
-    });
-    if (final.stop)
-      return context.idle(updated, ["archive_import_stopped"], true);
-    return {
-      receipt: receiptOf(updated, {
-        legs,
-        tiered: tieredLaneReceiptCounts({
-          ...run.byDomain.public_safe ? { public: run.byDomain.public_safe } : {},
-          routing: run.routing
-        }),
-        complete,
-        stopped: false,
-        warnings: [
-          ...legs.flatMap((leg) => leg.gaps),
-          ...waiting > 0 ? [`archive_items_waiting: ${waiting} item(s) are in the middle of a tier move and are read again once it is done.`] : [],
-          ...providerWait !== undefined ? [`archive_import_waiting_for_provider: ${providerWait}`] : []
-        ]
-      }),
-      continueSoon: !complete && waiting === 0 && providerWait === undefined,
-      ...updated ? { record: updated } : {}
-    };
-  } finally {
-    root.close();
-  }
-}
-var ARCHIVE_IMPORT_RECEIPT_KIND = "archive_import_pull_receipt", ARCHIVE_IMPORT_MAX_ITEMS_PER_PASS = 2000;
-var init_sync = __esm(() => {
-  init_archive_formats();
-  init_archive_formats();
-  init_scope_safe_fs();
-  init_source_storage();
-  init_tiered_store_set();
-  init_source_input();
-  init_source_targets();
-  init_media_bindings();
-  init_manifest3();
-  init_state();
-  init_store();
 });
 
 // src/workers/archive-import/scheduler-source.ts
@@ -246555,7 +247396,7 @@ var init_gmail_status_scope = __esm(() => {
 });
 
 // src/workers/evernote/runtime.ts
-import { existsSync as existsSync120 } from "node:fs";
+import { existsSync as existsSync121 } from "node:fs";
 function createEvernoteRuntime(options) {
   const env = options.env ?? process.env;
   const now = options.now ?? (() => new Date);
@@ -246574,7 +247415,7 @@ function createEvernoteRuntime(options) {
   const existingLane = (openStores = true) => {
     if (lane)
       return lane;
-    if (!existsSync120(resolvedStorePath(EVERNOTE_SOURCE_ID, "secure_local", env)))
+    if (!existsSync121(resolvedStorePath(EVERNOTE_SOURCE_ID, "secure_local", env)))
       return;
     const opened = openLane();
     if (openStores) {
@@ -247461,7 +248302,7 @@ var init_export_zone = __esm(() => {
 
 // src/workers/whatsapp/archive-input.ts
 import { createHash as createHash115 } from "node:crypto";
-import { existsSync as existsSync121 } from "node:fs";
+import { existsSync as existsSync122 } from "node:fs";
 import { posix as posix8 } from "node:path";
 function hash2(value) {
   return createHash115("sha256").update(value).digest("hex").slice(0, 24);
@@ -247551,7 +248392,7 @@ function createWhatsAppExportInput(options) {
     records(listing = {}) {
       return async function* () {
         const decoded = decodeCursor3(listing.cursor);
-        if (existsSync121(options.spoolDir) && !catchUpWhatsAppSpoolIndex(options.spoolDir, options.liveIndexBudgetBytes ?? LIVE_INDEX_BYTES)) {
+        if (existsSync122(options.spoolDir) && !catchUpWhatsAppSpoolIndex(options.spoolDir, options.liveIndexBudgetBytes ?? LIVE_INDEX_BYTES)) {
           yield { records: [], ...listing.cursor !== undefined ? { nextCursor: listing.cursor } : {}, done: false };
           return;
         }
@@ -248721,15 +249562,114 @@ var init_installed_tier_classification = __esm(() => {
   };
 });
 
+// src/workers/connector-store/legacy-personal-bodies.ts
+function settleLegacyPersonalBodiesOffThread(options) {
+  return runPassOffThread(walk(options), { family: "legacy-personal-bodies", ...options.turn ? { turn: options.turn } : {} });
+}
+function* walk({ set, queue, limit = LEGACY_PERSONAL_BODY_PAGE_SIZE, chunkLimit = PERSONAL_BODY_CHUNKS_PER_PAGE, movesAvailable = () => true }) {
+  const { ledger } = set;
+  const report = { checked: 0, held: 0, secrets: 0, failed: 0, retired: false, waitingForMoves: false };
+  if (ledger.readMeta(DONE3) === "1")
+    return { ...report, retired: true };
+  const personal = set.store("internal");
+  const saved = ledger.readMeta(LEGACY_PERSONAL_BODIES_CURSOR);
+  const canMove = movesAvailable();
+  const last = saved ? JSON.parse(saved) : undefined;
+  const checkpoint = (last?.canMove ?? true) === canMove ? last : undefined;
+  let waiting = checkpoint?.waiting ?? 0;
+  let dirty = checkpoint?.dirty ?? false;
+  if (personal) {
+    if (set.foreignBoundLeg())
+      return { ...report, failed: 1 };
+    const marker = personal.changeMarker();
+    const page = yield* find(personal.personalBodyPageFinder(checkpoint?.after, Math.min(limit, LEGACY_PERSONAL_BODY_PAGE_SIZE), chunkLimit));
+    if (!page)
+      return report;
+    const previousLedger = page.items.length ? personal.preRoutingLedgerFor(ledger) : undefined;
+    const placement = { movesAvailable: canMove, ...previousLedger ? { previousLedger } : {} };
+    for (const item of page.items) {
+      yield* turn();
+      report.checked++;
+      if (canMove && secretScanReusable(item.text)) {
+        yield* find({ here: () => {
+          return;
+        }, offThread: () => scanSecretsAhead(item.text) });
+      }
+      if (movesAvailable() !== canMove)
+        return report;
+      const current = item.watch ? personal.personalBodyWatchCurrent(item.watch) : personal.changeMarker() === marker || personal.itemMigrationFingerprint(item.identity, item.chunkCount + 1) === item.fingerprint;
+      if (!current) {
+        dirty = true;
+        continue;
+      }
+      try {
+        if (item.chunkCount === 0) {
+          if (canMove)
+            personal.clearOrphanPersonalVectors(item.identity);
+          else
+            waiting++;
+          continue;
+        }
+        const disposition = placePersonalBody(set, personal, item, queue, "walk", placement);
+        if (disposition === "held")
+          report.held++;
+        if (disposition === "secrets")
+          report.secrets++;
+        if (disposition === "waiting")
+          waiting++;
+        if (disposition === "retry")
+          report.failed++;
+      } catch {
+        report.failed++;
+      }
+    }
+    dirty ||= report.held + report.secrets + report.failed > 0;
+    if (page.next || page.partial) {
+      ledger.writeSettleProgress(LEGACY_PERSONAL_BODIES_CURSOR, JSON.stringify({ after: page.next, dirty, canMove, waiting }));
+      return report;
+    }
+  }
+  ledger.writeSettleProgress(LEGACY_PERSONAL_BODIES_WAITING, String(waiting));
+  ledger.writeSettleProgress(LEGACY_PERSONAL_BODIES_CURSOR, "");
+  if (!dirty) {
+    personal?.finishPersonalBodyWalk();
+    if (waiting)
+      report.waitingForMoves = true;
+    else {
+      ledger.writeSettleProgress(DONE3, "1");
+      report.retired = true;
+    }
+  }
+  return report;
+}
+var DONE3 = "legacy_personal_bodies_done_v2", LEGACY_PERSONAL_BODY_PAGE_SIZE = 25;
+var init_legacy_personal_bodies = __esm(() => {
+  init_tier_ledger();
+  init_engine();
+  init_secret_scan_off_thread();
+  init_loop_pass();
+  init_local_index();
+  init_place_personal_body();
+});
+
 // src/workers/classification/sniffer-service.ts
 import { Database as Database30 } from "bun:sqlite";
-import { existsSync as existsSync122, rmSync as rmSync48 } from "node:fs";
+import { existsSync as existsSync123, rmSync as rmSync48 } from "node:fs";
 import { basename as basename25 } from "node:path";
 function unrefTimer(timer) {
   timer?.unref?.();
 }
 function emptyBacklogCounts() {
   return { checkingItems: 0, remainingQuestions: 0, pendingItems: 0, pendingWithoutQuestion: 0, oldestPendingAgeMs: 0 };
+}
+function addLegacyPersonalProgress(counts, progress) {
+  if (!progress.held && !progress.waiting)
+    return;
+  const total = counts.legacyPersonalBodies ??= { held: 0, judged: 0 };
+  total.held += progress.held;
+  total.judged += progress.judged;
+  if (progress.waiting)
+    total.waiting = (total.waiting ?? 0) + progress.waiting;
 }
 function newStoredWalk(now) {
   return { active: false, status: { lastRanAt: new Date(now).toISOString(), reason: "working" } };
@@ -249132,7 +250072,7 @@ class TierSnifferService {
         }
       }
       const path = tierSnifferPathForLedger(ledgerPath);
-      const hasQueue = existsSync122(path);
+      const hasQueue = existsSync123(path);
       if (hasQueue)
         db.query("ATTACH DATABASE ? AS queue").run(path);
       return { db, hasQueue };
@@ -249162,16 +250102,16 @@ class TierSnifferService {
     return rows;
   }
   roughBacklog() {
-    let pendingItems = 0;
-    let remainingQuestions = 0;
+    const counts = emptyBacklogCounts();
     for (const ledgerPath of this.ledgerPaths()) {
       const opened = this.openBacklogLedger(ledgerPath);
       if (!opened)
         continue;
       try {
-        pendingItems += opened.db.query(`SELECT COUNT(*) AS n FROM tier_items WHERE state = 'pending'`).get().n;
+        counts.pendingItems += opened.db.query(`SELECT COUNT(*) AS n FROM tier_items WHERE state = 'pending'`).get().n;
         if (opened.hasQueue)
-          remainingQuestions += opened.db.query("SELECT COUNT(*) AS n FROM queue.sniffer_questions").get().n;
+          counts.remainingQuestions += opened.db.query("SELECT COUNT(*) AS n FROM queue.sniffer_questions").get().n;
+        addLegacyPersonalProgress(counts, opened.db.query(LEGACY_PERSONAL_BODY_PROGRESS_SQL).get());
         this.noteReadable(ledgerPath);
       } catch {
         this.noteUnreadable(ledgerPath, "its privacy ledger");
@@ -249179,7 +250119,8 @@ class TierSnifferService {
         opened.db.close();
       }
     }
-    return { checkingItems: Math.max(pendingItems, remainingQuestions ? 1 : 0), remainingQuestions, pendingItems, pendingWithoutQuestion: 0, oldestPendingAgeMs: 0 };
+    counts.checkingItems = Math.max(counts.pendingItems, counts.remainingQuestions ? 1 : 0);
+    return counts;
   }
   countBacklogNow() {
     const counts = emptyBacklogCounts();
@@ -249191,6 +250132,7 @@ class TierSnifferService {
         this.addPendingSlice(counts, opened, undefined);
         if (opened.hasQueue)
           this.addQuestionSlice(counts, opened.db, undefined);
+        addLegacyPersonalProgress(counts, opened.db.query(LEGACY_PERSONAL_BODY_PROGRESS_SQL).get());
         this.noteReadable(ledgerPath);
       } catch {
         this.noteUnreadable(ledgerPath, "its privacy ledger");
@@ -249203,9 +250145,14 @@ class TierSnifferService {
   async countBacklogOffThread() {
     const ledgers = this.ledgerPaths().map((path) => {
       const queue = tierSnifferPathForLedger(path);
-      return { path, expectedId: this.boundLedgerIds.get(path) ?? null, queue: existsSync122(queue) ? queue : null };
+      return { path, expectedId: this.boundLedgerIds.get(path) ?? null, queue: existsSync123(queue) ? queue : null };
     });
-    const sql = { pendingQueued: pendingCountSql(true), pendingAlone: pendingCountSql(false), questions: questionCountSql() };
+    const sql = {
+      pendingQueued: pendingCountSql(true),
+      pendingAlone: pendingCountSql(false),
+      questions: questionCountSql(),
+      legacyPersonalBodies: LEGACY_PERSONAL_BODY_PROGRESS_SQL
+    };
     const results = await runBacklogCountWorker({ ledgers, sql });
     if (!results || this.stopped)
       return;
@@ -249221,6 +250168,7 @@ class TierSnifferService {
       counts.pendingWithoutQuestion += result.missing ?? 0;
       counts.checkingItems += result.n + (result.other ?? 0);
       counts.remainingQuestions += result.questions;
+      addLegacyPersonalProgress(counts, result.legacyPersonalBodies);
       if (result.oldest)
         counts.oldestPendingAgeMs = Math.max(counts.oldestPendingAgeMs, this.clockMs() - Date.parse(result.oldest));
     }
@@ -249265,6 +250213,7 @@ class TierSnifferService {
               return;
           }
         }
+        addLegacyPersonalProgress(counts, opened.db.query(LEGACY_PERSONAL_BODY_PROGRESS_SQL).get());
         this.noteReadable(ledgerPath);
       } catch {
         this.noteUnreadable(ledgerPath, "its privacy ledger");
@@ -249624,17 +250573,22 @@ class TierSnifferService {
       try {
         const binding = store.tierSetBinding?.();
         const bound = store.tierSetLedgerPath ? store.tierSetLedgerPath() : binding?.ledgerPath;
-        if (bound && bound !== ":memory:" && existsSync122(bound)) {
+        if (bound && bound !== ":memory:" && existsSync123(bound)) {
           paths.add(bound);
           if (binding?.ledgerId)
             this.boundLedgerIds.set(bound, binding.ledgerId);
+        }
+        if (!binding) {
+          const path = store.tierLedgerPathInUse?.();
+          if (path && path !== ":memory:" && tierSetForLedger(path) && existsSync123(path))
+            paths.add(path);
         }
         this.noteReadable(store.dbPath);
       } catch {
         this.noteUnreadable(store.dbPath, "which privacy ledger the store is bound to");
       }
       const own = tierLedgerPathForStore(store.dbPath);
-      if (existsSync122(own))
+      if (existsSync123(own))
         paths.add(own);
     }
     return [...paths];
@@ -249964,7 +250918,8 @@ class TierSnifferService {
               continue;
             const classification = set?.classification();
             const retiredClearance = row.reasons.includes(RETIRED_EMBEDDING_CLEARANCE_REASON);
-            if (set && row.contentRead && row.contentPending && !row.metadataPending && (row.contentTier === "private" || row.contentTier === "public" || retiredClearance && row.contentTier === "secure") && classification?.sniffer && !classification.unavailableReason) {
+            const legacyHold = row.contentPending && row.reasons.includes(LEGACY_PERSONAL_BODY_REASON);
+            if (set && row.contentRead && row.contentPending && !row.metadataPending && (row.contentTier === "private" || row.contentTier === "public" || (retiredClearance || legacyHold) && row.contentTier === "secure") && classification?.sniffer && !classification.unavailableReason) {
               if (!allowReask)
                 continue;
               rejudgeStoredContent(set, row, {
@@ -249977,12 +250932,12 @@ class TierSnifferService {
               if (ledger.getCurrent(identity)?.state !== "pending" || queue.questionFor(identity, "metadata") || queue.questionFor(identity, "content"))
                 continue;
             }
-            if (retiredClearance)
+            if (retiredClearance || legacyHold && !missingMetadata)
               continue;
             const planner = tierSetPlannerForLedger(ledgerPath);
             if (ledger.settleMissingQuestions(row, {
               missingMetadata,
-              missingContent: missingContent && !waitingForText,
+              missingContent: missingContent && !waitingForText && !legacyHold,
               snifferId: snifferId(this.options.lane, snifferPromptVersions(this.options.ownerContext?.()).cache),
               stillMissing: () => (!missingMetadata || !queue.questionFor(identity, "metadata")) && (!missingContent || !queue.questionFor(identity, "content")),
               ...planner ? { placementFor: planner } : {}
@@ -250025,9 +250980,10 @@ class TierSnifferService {
         return false;
       try {
         const set = tierSetForLedger(path);
-        if (!set || !setEmbedsWithBuiltInOnly(set))
+        if (!set)
           continue;
-        for (const record of set.ledger.listMoving({ limit: budget, direction: "raise" }).filter(isAutoMoveCandidate)) {
+        const builtInOnly = this.options.autoMoves.localEmbeddingsOnly() && setEmbedsWithBuiltInOnly(set);
+        for (const record of set.ledger.listMoving({ limit: budget, direction: "raise", legacyHoldsOnly: !builtInOnly }).filter(isAutoMoveCandidate)) {
           budget--;
           if (!this.moveFailures.has(`${path}\x00${tierLedgerIdentityKey(recordIdentity2(record))}\x00${record.generation}`))
             return true;
@@ -250040,7 +250996,7 @@ class TierSnifferService {
   }
   async drainMoves(direction = "raise") {
     try {
-      if (!this.options.autoMoves || this.stopped || !this.options.autoMoves.localEmbeddingsOnly())
+      if (!this.options.autoMoves || this.stopped || direction === "lower" && !this.options.autoMoves.localEmbeddingsOnly())
         return;
       if (this.moving && this.movingDirection !== direction) {
         if (direction === "raise") {
@@ -250194,6 +251150,18 @@ class TierSnifferService {
       });
       await this.runStoredWalker(set, "labelObservations", JSON.stringify(set.openStores().map((store) => store.corpusId)), () => recoverStoredLabelPage(set, this.options.installed.snifferStoreForLedger(ledgerPath), turn));
       this.storedWalks.get(ledgerPath).labelsUnavailable = set.ledger.unavailableLabelCount();
+      const movesAvailable = () => !!this.options.autoMoves?.localEmbeddingsOnly() && (this.options.autoMoves.maxPerPass ?? 25) > 0;
+      await this.runStoredWalker(set, "legacyPersonalBodies", movesAvailable() ? undefined : this.storedWalkInputs(set, true), async () => {
+        const page = await settleLegacyPersonalBodiesOffThread({
+          set,
+          queue: this.options.installed.snifferStoreForLedger(ledgerPath),
+          turn,
+          movesAvailable
+        });
+        if (page.held > 0)
+          this.options.log?.(`Olympus tier hold: ${page.held} item(s) from earlier builds held for judgment, moves to Private queued.`);
+        return { retired: page.retired, complete: page.retired || page.waitingForMoves, changed: page.held + page.secrets > 0, failed: page.failed > 0 };
+      });
       await this.runStoredWalker(set, "personalLowerings", this.storedWalkInputs(set, true), async (after) => {
         const page = await storedPersonalLoweringLap(set, after, turn);
         if (page.changed)
@@ -250279,6 +251247,7 @@ class TierSnifferService {
     return automaticTierMovesAllowed(set, options);
   }
   async runAutoMoves(options, signal, direction, changedPaths) {
+    const recoveryOnly = !options.localEmbeddingsOnly();
     const timings = emptyTierMoveTimings();
     const started = this.monotonicNow();
     const paths = this.ledgerPaths();
@@ -250296,7 +251265,7 @@ class TierSnifferService {
     const requestedMs = options.lowerSliceMs ?? adaptiveMs;
     const sliceMs = Math.min(capMs, Math.max(0, Number.isFinite(requestedMs) ? requestedMs : adaptiveMs));
     const deadline = started + sliceMs;
-    const shouldStop = () => signal.aborted || direction === "lower" && (this.monotonicNow() >= deadline || this.lowerMovePreempted || this.yieldNow());
+    const shouldStop = () => signal.aborted || !recoveryOnly && !options.localEmbeddingsOnly() || direction === "lower" && (this.monotonicNow() >= deadline || this.lowerMovePreempted || this.yieldNow());
     const report = { moved: 0, failed: 0, notEligible: 0, timings };
     const embeddingCorpora = new Set;
     const staleAfterMs = Math.max(0, options.staleAfterMs ?? DEFAULT_STALE_MOVE_MS);
@@ -250311,13 +251280,17 @@ class TierSnifferService {
         continue;
       if (set.openStores().some((store) => store.reclaiming))
         continue;
-      const queued = (await ledgerReadOffThread(set.ledger, set.ledger.listMovingSteps({ limit: budget, direction }))).filter(isAutoMoveCandidate);
+      const builtInOnly = !recoveryOnly && setEmbedsWithBuiltInOnly(set);
+      const legacyHoldsOnly = direction === "raise" && !builtInOnly;
+      const queued = (await ledgerReadOffThread(set.ledger, set.ledger.listMovingSteps({ limit: budget, direction, legacyHoldsOnly }))).filter(isAutoMoveCandidate);
       if (set.openStores().some((store) => store.reclaiming))
         continue;
-      if (!setEmbedsWithBuiltInOnly(set)) {
+      if (!builtInOnly && direction === "lower") {
         report.notEligible += queued.length;
         continue;
       }
+      if (recoveryOnly && (!queued.length || set.foreignBoundLeg()))
+        continue;
       const deferRetry = (identity, generation) => {
         try {
           set.ledger.recordMoveFailure(identity, { expectedGeneration: generation });
@@ -250376,7 +251349,7 @@ class TierSnifferService {
         changedPaths.add(ledgerPath);
         report.moved++;
         for (const destination of result.destinations) {
-          if (destination.chunksToEmbed > 0)
+          if (!recoveryOnly && destination.chunksToEmbed > 0)
             embeddingCorpora.add(destination.corpusId);
         }
         const key = `${ledgerPath}\x00${tierLedgerIdentityKey(recordIdentity2(record))}\x00${record.generation}`;
@@ -250405,7 +251378,13 @@ class TierSnifferService {
             set,
             identity,
             target: { metadataTier: record.targetMetadataTier, contentTier: record.targetContentTier },
-            ...automaticTierMoveOptions(set, options),
+            ...builtInOnly ? automaticTierMoveOptions(set, options) : {
+              embeddingLedger: {
+                path: options.embeddingLedgerPath,
+                approvedBy: "system-automatic",
+                why: "Moved held text to Private without copying historical vectors."
+              }
+            },
             timings,
             expectedGeneration: record.generation
           } });
@@ -250456,7 +251435,7 @@ class TierSnifferService {
         this.lastIdleLowerLogMs = this.clockMs();
       this.options.log?.(`Olympus tier sniffer: ${report.moved} automatic tier move(s), ${report.failed} failed` + `${report.failedBy ? ` (${Object.entries(report.failedBy).map(([why, n]) => `${why} ×${n}`).join(", ")})` : ""}` + `${report.abandoned ? `, ${report.abandoned} stale move(s) given up (back where they were)` : ""}` + `${report.staleRaises ? `, ${report.staleRaises} stale raise(s) kept hidden and queued` : ""}` + `${report.retiredAbsent ? `, ${report.retiredAbsent} stale raise(s) of items no store holds forgotten` : ""}; direction=${direction} elapsed_ms=${Math.round(report.elapsedMs)} ` + (direction === "lower" ? `backlog=${backlog} slice_ms=${Math.round(sliceMs)} ` : "") + Object.entries(timings).map(([step, ms]) => `${step.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`)}=${Math.round(ms)}`).join(" ") + ".");
     }
-    return report;
+    return recoveryOnly && !didWork ? undefined : report;
   }
   settleStaleMove(set, record, report) {
     try {
@@ -250547,9 +251526,9 @@ function moveFailureName(error) {
   return /^[a-z][a-z ]{0,39}$/.test(error.message) ? error.message : "Error";
 }
 function checkpointRetiredLedger(path) {
-  if (!existsSync122(`${path}-wal`))
+  if (!existsSync123(`${path}-wal`))
     return true;
-  if (!existsSync122(path))
+  if (!existsSync123(path))
     return false;
   let db;
   try {
@@ -250622,7 +251601,8 @@ self.onmessage = ({ data }) => {
       if (ledger.queue) db.query('ATTACH DATABASE ? AS queue').run(ledger.queue);
       const pending = db.query(ledger.queue ? data.sql.pendingQueued : data.sql.pendingAlone).get();
       const questions = ledger.queue ? db.query(data.sql.questions).get() : { n: 0, other: 0 };
-      out.push({ n: pending.n, missing: pending.missing, oldest: pending.oldest, questions: questions.n, other: questions.other });
+      const legacyPersonalBodies = db.query(data.sql.legacyPersonalBodies).get();
+      out.push({ n: pending.n, missing: pending.missing, oldest: pending.oldest, questions: questions.n, other: questions.other, legacyPersonalBodies });
     } catch {
       out.push({ unreadable: ledger.path });
     } finally { try { db?.close(); } catch {} }
@@ -250639,6 +251619,7 @@ var init_sniffer_service = __esm(() => {
   init_engine_heartbeat();
   init_tier_auto_move();
   init_built_in_sniffer();
+  init_tier_classifier();
   init_sniffer();
   init_sniffer_resolver();
   init_boot_progress();
@@ -250646,6 +251627,7 @@ var init_sniffer_service = __esm(() => {
   init_tier_rejudge();
   init_tier_names_only_settle();
   init_tier_label_observations();
+  init_legacy_personal_bodies();
   init_tier_held_settle();
   init_tier_move_rule_policy();
   init_tier_rules_sweep();
@@ -250990,6 +251972,8 @@ var init_client5 = __esm(() => {
     "people",
     "capture",
     "capture_stop",
+    "revoke_reads",
+    "archive_remove",
     "delete_source_data",
     "storage_registry",
     "owner_limits",
@@ -251106,14 +252090,14 @@ var ENGINE_STATUS_SNAPSHOT_SCHEMA = "olympus.engine.background-status.v1", ENGIN
 var init_snapshot = () => {};
 
 // src/workers/engine-split/control-plane.ts
-import { existsSync as existsSync123 } from "node:fs";
+import { existsSync as existsSync124 } from "node:fs";
 import { dirname as dirname118, join as join153 } from "node:path";
 import { fileURLToPath as fileURLToPath14 } from "node:url";
 function controlWorkerPath() {
   const here = dirname118(fileURLToPath14(import.meta.url));
   for (const name of ["engine-control-worker.js", "control-worker.ts"]) {
     const candidate = join153(here, name);
-    if (existsSync123(candidate))
+    if (existsSync124(candidate))
       return candidate;
   }
   return;
@@ -252108,7 +253092,7 @@ var init_front_scheduler = __esm(() => {
 
 // src/workers/engine-split/front-history.ts
 import { SQLiteError as SQLiteError2 } from "bun:sqlite";
-import { existsSync as existsSync124 } from "node:fs";
+import { existsSync as existsSync125 } from "node:fs";
 function openWritableDashboardHistory(path = defaultSourceDashboardHistoryDbPath()) {
   assertWritableStoreOpenAllowed("dashboard history", path);
   return new SqliteSourceDashboardHistory(path);
@@ -252133,7 +253117,7 @@ function createFrontDashboardHistory(input) {
   let lastReadWarning = Number.NEGATIVE_INFINITY;
   const read = (query) => {
     try {
-      if (!reader && existsSync124(input.path))
+      if (!reader && existsSync125(input.path))
         reader = openReadOnlyDashboardHistory(input.path);
       return reader && query(reader);
     } catch (error) {
@@ -253242,7 +254226,7 @@ var init_source_account_migration = __esm(() => {
 });
 
 // src/workers/engine/runtime/boot-storage.ts
-import { existsSync as existsSync125 } from "node:fs";
+import { existsSync as existsSync126 } from "node:fs";
 function reportRehomedChatOverrides(lane, result) {
   if (result.rehomed === 0 && result.orphaned === 0)
     return;
@@ -253250,7 +254234,7 @@ function reportRehomedChatOverrides(lane, result) {
 }
 function openPeopleIndexOrUndefined(options = {}) {
   const dbPath = peopleIndexPath(process.env);
-  if (options.readOnly && !existsSync125(dbPath))
+  if (options.readOnly && !existsSync126(dbPath))
     return;
   try {
     return new LocalPeopleIndex({ dbPath, ...options.readOnly ? { readOnly: true } : {} });
@@ -255369,7 +256353,7 @@ var init_private_analysts = __esm(() => {
 });
 
 // src/workers/engine/runtime/connector-mounts.ts
-import { existsSync as existsSync126 } from "node:fs";
+import { existsSync as existsSync127 } from "node:fs";
 import { isAbsolute as isAbsolute43 } from "node:path";
 function createConnectorStoreMountDiscovery(raw, options) {
   const retryBaseMs = 5000;
@@ -255404,7 +256388,7 @@ function createConnectorStoreMountDiscovery(raw, options) {
     const absent = [];
     for (const declaration of candidates) {
       const placed = hasFolderLayout(storageAccountForCorpus(declaration, registeredCorpora).sourceId);
-      if (byCorpus.has(declaration.corpusId) || !placed && (!declaration.dbPath || existsSync126(declaration.dbPath)))
+      if (byCorpus.has(declaration.corpusId) || !placed && (!declaration.dbPath || existsSync127(declaration.dbPath)))
         ready.push(declaration);
       else
         absent.push(declaration);
@@ -255489,7 +256473,7 @@ function mountConnectorStoreDeclarations(declarations, options) {
         throw new Error("Connector store entries require dbPath, corpusId, family, trustDomain.");
       if (collidingStore)
         assertConnectorStoreMountIdentity(declaration, collidingStore);
-      if (options.existingOnly && !collidingStore && !existsSync126(declaration.dbPath))
+      if (options.existingOnly && !collidingStore && !existsSync127(declaration.dbPath))
         continue;
       const pathOwnerCorpusId = ownerCorpusIdByDbPath.get(declaration.dbPath);
       if (pathOwnerCorpusId !== undefined && pathOwnerCorpusId !== declaration.corpusId) {
@@ -255702,169 +256686,6 @@ var init_answer_scope = __esm(() => {
     [{ family: "file", provider: "dropbox" }, { approvedScope: DROPBOX_APPROVED_SCOPE_FILTER_CODEC }],
     [{ family: "file", provider: LOCAL_FILES_PROVIDER }, { approvedScope: LOCAL_FILES_APPROVED_SCOPE_FILTER_CODEC }]
   ]);
-});
-
-// src/workers/engine/runtime/ingestion-dispositions.ts
-import { existsSync as existsSync127 } from "node:fs";
-function storedExclusionDebtReader(handles) {
-  let walked;
-  return () => {
-    if (walked)
-      return walked;
-    const total = {
-      excluded: { items: 0, unevaluable: 0 },
-      metadataOnlyContent: { items: 0, unevaluable: 0 }
-    };
-    for (const handle of handles) {
-      const debt = handle.exclusionDebtPresent();
-      total.excluded.items += debt.excluded.items;
-      total.excluded.unevaluable += debt.excluded.unevaluable;
-      total.metadataOnlyContent.items += debt.metadataOnlyContent.items;
-      total.metadataOnlyContent.unevaluable += debt.metadataOnlyContent.unevaluable;
-    }
-    walked = total;
-    return total;
-  };
-}
-function openIngestionDispositionsRuntime(env = process.env, options = {}) {
-  const opened = [];
-  const sources = [];
-  for (const definition of INGESTION_DISPOSITION_SOURCES) {
-    let stores = [];
-    const handles = [];
-    const readDebt = storedExclusionDebtReader(handles);
-    try {
-      stores = definition.stores(env);
-      const matcher = definition.matcher(env);
-      const present = stores.filter((store) => existsSync127(store.dbPath));
-      let openedAll = false;
-      const openStores = () => {
-        if (openedAll)
-          return handles;
-        for (const store of present) {
-          const handle = openConnectorStore(definition.account, {
-            dbPath: store.dbPath,
-            corpusId: store.corpusId,
-            family: "file",
-            trustDomain: store.trustDomain,
-            exclusions: matcher,
-            readOnly: true
-          }, env);
-          handles.push(handle);
-          opened.push(handle);
-        }
-        openedAll = true;
-        return handles;
-      };
-      if (options.lazyStores !== true)
-        openStores();
-      sources.push({
-        source_id: definition.sourceId,
-        label: definition.label,
-        corpus_ids: stores.map((store) => store.corpusId),
-        enforceable: definition.enforceable,
-        matcher,
-        store_present: present.length > 0,
-        ...present.length > 0 ? {
-          items: function* () {
-            for (const handle of openStores())
-              yield* handle.itemLocatorCensus();
-          },
-          excludedItemsPresent: () => {
-            openStores();
-            return readDebt().excluded;
-          },
-          metadataOnlyContentPresent: () => {
-            openStores();
-            return readDebt().metadataOnlyContent;
-          }
-        } : {}
-      });
-    } catch (error) {
-      for (const handle of handles) {
-        const index = opened.indexOf(handle);
-        if (index >= 0)
-          opened.splice(index, 1);
-        try {
-          handle.close();
-        } catch {}
-      }
-      sources.push({
-        source_id: definition.sourceId,
-        label: definition.label,
-        corpus_ids: stores.map((store) => store.corpusId),
-        enforceable: definition.enforceable,
-        matcher: createSourceExclusionMatcherFromPrefixes([]),
-        store_present: false,
-        error: error instanceof Error ? error.message : String(error)
-      });
-    }
-  }
-  return {
-    sources,
-    close: () => {
-      for (const handle of opened.reverse()) {
-        try {
-          handle.close();
-        } catch {}
-      }
-    }
-  };
-}
-var INGESTION_DISPOSITION_SOURCES;
-var init_ingestion_dispositions = __esm(() => {
-  init_source_placement();
-  init_google_connectors();
-  init_dropbox_files();
-  init_scope();
-  init_store2();
-  init_source_ingestion_exclusions();
-  init_source_storage();
-  INGESTION_DISPOSITION_SOURCES = [
-    {
-      sourceId: DROPBOX_INGESTION_EXCLUSION_SOURCE,
-      account: { sourceId: DROPBOX_FILES_SOURCE_ID },
-      label: "Dropbox",
-      enforceable: DROPBOX_ENFORCEABLE_EXCLUSION_CRITERIA,
-      matcher: (env) => dropboxIngestionExclusionMatcher(env),
-      stores: (env) => [{
-        dbPath: resolvedStorePath(DROPBOX_FILES_SOURCE_ID, "secure_local", env),
-        corpusId: DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID,
-        trustDomain: "secure_local"
-      }]
-    },
-    {
-      sourceId: LOCAL_FILES_INGESTION_EXCLUSION_SOURCE,
-      account: { sourceId: LOCAL_FILES_SOURCE_ID },
-      label: "Files on this computer",
-      enforceable: LOCAL_FILES_ENFORCEABLE_EXCLUSION_CRITERIA,
-      matcher: (env) => localFilesIngestionExclusionMatcher(env),
-      stores: (env) => [{
-        dbPath: resolvedStorePath(LOCAL_FILES_SOURCE_ID, "secure_local", env),
-        corpusId: LOCAL_FILES_CORPUS_ID,
-        trustDomain: "secure_local"
-      }]
-    },
-    {
-      sourceId: GOOGLE_DRIVE_INGESTION_EXCLUSION_SOURCE,
-      account: { sourceId: GOOGLE_DRIVE_SOURCE_ID },
-      label: "Google Drive",
-      enforceable: GOOGLE_DRIVE_ENFORCEABLE_EXCLUSION_CRITERIA,
-      matcher: (env) => googleDriveIngestionExclusionMatcher(env),
-      stores: (env) => [
-        {
-          dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, "internal", env),
-          corpusId: GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID,
-          trustDomain: "internal"
-        },
-        {
-          dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, "secure_local", env),
-          corpusId: GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID,
-          trustDomain: "secure_local"
-        }
-      ]
-    }
-  ];
 });
 
 // src/workers/connector-store/ask-bench-sql.ts
@@ -256729,6 +257550,7 @@ function buildChatGptDashboardViewModel(view, options = {}) {
         configured: options.privacy.configured,
         pendingCount: Math.max(0, Math.floor(options.privacy.pendingCount)),
         ruleCount: Math.max(0, Math.floor(options.privacy.ruleCount)),
+        ...view.background_work?.legacy_personal_bodies ? { legacyPersonalBodies: view.background_work.legacy_personal_bodies } : {},
         ...typeof options.privacy.judgePerMinute === "number" && Number.isFinite(options.privacy.judgePerMinute) && options.privacy.judgePerMinute > 0 ? { judgePerMinute: options.privacy.judgePerMinute } : {}
       }
     } : {},
@@ -260161,6 +260983,13 @@ function copyDashboardViewModel(view) {
       configured: view.privacy.configured === true,
       pendingCount: whole(view.privacy.pendingCount),
       ruleCount: whole(view.privacy.ruleCount),
+      ...view.privacy.legacyPersonalBodies ? {
+        legacyPersonalBodies: {
+          held: whole(view.privacy.legacyPersonalBodies.held),
+          judged: whole(view.privacy.legacyPersonalBodies.judged),
+          ...view.privacy.legacyPersonalBodies.waiting ? { waiting: whole(view.privacy.legacyPersonalBodies.waiting) } : {}
+        }
+      } : {},
       ...typeof view.privacy.judgePerMinute === "number" && Number.isFinite(view.privacy.judgePerMinute) && view.privacy.judgePerMinute > 0 ? { judgePerMinute: Math.round(view.privacy.judgePerMinute * 10) / 10 } : {}
     };
   }
@@ -261711,7 +262540,7 @@ async function scopeSet(backend, args) {
     const wholeAccount = args.whole_account_selected === true;
     if (wholeAccount && args.confirm_whole_account !== true)
       throw new ChatGptSurfaceError("confirm_whole_account");
-    const submitted = parseSelections(args.selections ?? []);
+    const submitted = parseSelections2(args.selections ?? []);
     const kept = backend.savedFolderSelections(sourceId).filter((selection) => isSecretFolder(secrets, selection.key, selection.ancestor_keys));
     const selections = [
       ...submitted.filter((selection) => !isSecretFolder(secrets, selection.key, selection.ancestor_keys)),
@@ -261812,7 +262641,7 @@ function parseDraft(value) {
     throw new ChatGptSurfaceError("invalid_params");
   }
 }
-function parseSelections(value) {
+function parseSelections2(value) {
   if (!Array.isArray(value) || value.length > 100)
     throw new ChatGptSurfaceError("invalid_params");
   return value.map((entry) => {
@@ -280782,6 +281611,7 @@ ${key}`;
         awaiting_owner_approval: backlog.awaitingOwnerApproval,
         ...backlog.waiting ? { waiting_reason: backlog.waiting.reason, waiting_label: backlog.waiting.label, waiting_since: backlog.waiting.since } : {},
         ...backlog.storedWalks?.length ? { stored_walks: backlog.storedWalks } : {},
+        ...backlog.legacyPersonalBodies ? { legacy_personal_bodies: backlog.legacyPersonalBodies } : {},
         over_private: tierOverPrivate()
       } : undefined;
     },
@@ -281340,6 +282170,34 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       ...googleDriveRequestBudget ? { googleDriveRequestBudget } : {}
     });
   };
+  const applySourceReadRevocation = (source, reason) => {
+    const stores = connectorStores.filter((store) => sourceIdForStore(store) === source);
+    const opened = [];
+    try {
+      const names = accountStoreNames(source);
+      for (const corpus of defaultSourceCorpusRegistryConfig().corpora) {
+        if (corpus.sourceId !== source || !names.includes(corpus.trustDomain))
+          continue;
+        const dbPath = resolvedStorePath(source, corpus.trustDomain, process.env);
+        if (stores.some((store) => store.dbPath === dbPath) || !existsSync129(dbPath))
+          continue;
+        opened.push(openConnectorStore({ sourceId: source }, { ...corpus, dbPath }));
+      }
+      return revokeSourceOnDemandReads([...stores, ...opened], reason, reason === "scope" && fileSourceScopeAuthority ? { authority: fileSourceScopeAuthority, source } : undefined, reason === "exclusions" ? dispositionReadChange(source, process.env) : undefined);
+    } finally {
+      for (const store of opened)
+        store.close();
+    }
+  };
+  const revokeSourceReads = async (source, reason) => {
+    if (!engineFront)
+      return applySourceReadRevocation(source, reason);
+    const receipt = await engineFront.client.send({ kind: "revoke_reads", source, reason }, { timeoutMs: OWNER_ACTION_WAIT_MS });
+    if (receipt.state !== "done" || typeof receipt.result !== "number") {
+      throw new OperationError("source_index_error", "The background engine could not finish revoking on-demand reads. Retry the action.");
+    }
+    return receipt.result;
+  };
   const fileSourceScopes = fileSourceScopeAuthority ? {
     summaries: () => [...listFileScopeSources().map(({ sourceId, dispositionSourceId, label }) => {
       const snapshot = fileSourceScopeAuthority.snapshot(sourceId);
@@ -281495,6 +282353,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       }
       const verifiedSelections = await browser2.validateSelections(selections);
       const approval = fileSourceScopeAuthority.approve({
+        reconcileReads: true,
         sourceId: input.sourceId,
         accountGeneration: input.accountGeneration,
         expectedRevision: input.expectedRevision,
@@ -281722,6 +282581,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     } : {},
     connectorStores,
     refreshConnectorStores: () => mountConfiguredSourceStores(),
+    revokeSourceReads,
     connectorStoreTierSiblings: (corpusId) => [
       ...tierLanes.find((lane) => lane.corpusIds.has(corpusId))?.corpusIds ?? []
     ].filter((sibling) => sibling !== corpusId),
@@ -283217,6 +284077,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         built_in_serving_pid: servingModelPid?.()
       }) } : {},
       handlers: {
+        revoke_reads: ({ source, reason }) => applySourceReadRevocation(source, reason),
         model_prepare: () => {
           if (workerBuiltInModel)
             workerBuiltInModel.model.prepare();
@@ -283308,6 +284169,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
             deleteFromFront = undefined;
           }
         },
+        archive_remove: ({ request }) => runForwarded(request),
         tier_override: ({ request }) => runForwarded(request),
         storage_registry: ({ request }) => runForwarded(request),
         capture: ({ request }) => runForwarded(request),
@@ -283806,6 +284668,7 @@ var init_server5 = __esm(async () => {
   init_private_analysts();
   init_connector_mounts();
   init_answer_scope();
+  init_on_demand_revocation();
   init_ingestion_dispositions();
   workerLaunch = {};
   FRONT_MOUNT_FAILURE_RETRY_MS = 5 * 60000;

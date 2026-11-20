@@ -159,7 +159,7 @@ import {
   isStandaloneEngineProcess,
   validateSovereigntyConfig,
 } from '../../core/sovereignty.ts';
-import { createSourceCorpusRegistry } from '../../core/source-corpus-registry.ts';
+import { createSourceCorpusRegistry, defaultSourceCorpusRegistryConfig } from '../../core/source-corpus-registry.ts';
 import {
   dropboxPolicyFullExtractionScopeKeys,
   dropboxPolicyApprovedScopeKeys,
@@ -604,7 +604,8 @@ import {
 } from './runtime/private-analysts.ts';
 import { createConnectorStoreMountDiscovery, mergeConnectorStores, type ConnectorStoreMount } from './runtime/connector-mounts.ts';
 import { connectorStoreAnswerScope, googleFilePage } from './runtime/answer-scope.ts';
-import { openIngestionDispositionsRuntime } from './runtime/ingestion-dispositions.ts';
+import { revokeSourceOnDemandReads } from './runtime/on-demand-revocation.ts';
+import { dispositionReadChange, openIngestionDispositionsRuntime } from './runtime/ingestion-dispositions.ts';
 
 /** How this process was launched; set only by startWorkerWithLaunch from the validated entry point. */
 let workerLaunch: WorkerLaunch = {};
@@ -4088,6 +4089,7 @@ export async function main(): Promise<void> {
                 ? { waiting_reason: backlog.waiting.reason, waiting_label: backlog.waiting.label, waiting_since: backlog.waiting.since }
                 : {}),
               ...(backlog.storedWalks?.length ? { stored_walks: backlog.storedWalks } : {}),
+              ...(backlog.legacyPersonalBodies ? { legacy_personal_bodies: backlog.legacyPersonalBodies } : {}),
               over_private: tierOverPrivate(),
             }
           : undefined;
@@ -4888,6 +4890,31 @@ export async function main(): Promise<void> {
       ...(googleDriveRequestBudget ? { googleDriveRequestBudget } : {}),
     });
   };
+  const applySourceReadRevocation = (source: string, reason: Parameters<typeof revokeSourceOnDemandReads>[1]) => {
+    const stores = connectorStores.filter(store => sourceIdForStore(store) === source);
+    const opened: LocalConnectorStore[] = [];
+    try {
+      // A disabled lane can still hold grants from its last run.
+      const names = accountStoreNames(source);
+      for (const corpus of defaultSourceCorpusRegistryConfig().corpora) {
+        if (corpus.sourceId !== source || !names.includes(corpus.trustDomain)) continue;
+        const dbPath = resolvedStorePath(source, corpus.trustDomain, process.env);
+        if (stores.some(store => store.dbPath === dbPath) || !existsSync(dbPath)) continue;
+        opened.push(openConnectorStore({ sourceId: source }, { ...corpus, dbPath }));
+      }
+      return revokeSourceOnDemandReads([...stores, ...opened], reason,
+        reason === 'scope' && fileSourceScopeAuthority ? { authority: fileSourceScopeAuthority, source } : undefined,
+        reason === 'exclusions' ? dispositionReadChange(source, process.env) : undefined);
+    } finally { for (const store of opened) store.close(); }
+  };
+  const revokeSourceReads = async (source: string, reason: Parameters<typeof applySourceReadRevocation>[1]) => {
+    if (!engineFront) return applySourceReadRevocation(source, reason);
+    const receipt = await engineFront.client.send({ kind: 'revoke_reads', source, reason }, { timeoutMs: OWNER_ACTION_WAIT_MS });
+    if (receipt.state !== 'done' || typeof receipt.result !== 'number') {
+      throw new OperationError('source_index_error', 'The background engine could not finish revoking on-demand reads. Retry the action.');
+    }
+    return receipt.result;
+  };
   const fileSourceScopes = fileSourceScopeAuthority ? {
     summaries: () => [...listFileScopeSources().map(({ sourceId, dispositionSourceId, label }) => {
       const snapshot = fileSourceScopeAuthority.snapshot(sourceId);
@@ -5072,6 +5099,7 @@ export async function main(): Promise<void> {
       }
       const verifiedSelections = await browser.validateSelections(selections);
       const approval = fileSourceScopeAuthority.approve({
+        reconcileReads: true,
         sourceId: input.sourceId,
         accountGeneration: input.accountGeneration,
         expectedRevision: input.expectedRevision,
@@ -5321,6 +5349,7 @@ export async function main(): Promise<void> {
       : {}),
     connectorStores,
     refreshConnectorStores: () => mountConfiguredSourceStores(),
+    revokeSourceReads,
     connectorStoreTierSiblings: (corpusId: string) => [
       ...(tierLanes.find((lane) => lane.corpusIds.has(corpusId))?.corpusIds ?? []),
     ].filter((sibling) => sibling !== corpusId),
@@ -7080,6 +7109,7 @@ export async function main(): Promise<void> {
         built_in_serving_pid: servingModelPid?.(),
       }) } : {}),
       handlers: {
+        revoke_reads: ({ source, reason }) => applySourceReadRevocation(source, reason),
         model_prepare: () => {
           if (workerBuiltInModel) void workerBuiltInModel.model.prepare();
           return { preparing: workerBuiltInModel !== undefined };
@@ -7165,6 +7195,7 @@ export async function main(): Promise<void> {
           try { return await runForwarded(request); }
           finally { deleteFromFront = undefined; }
         },
+        archive_remove: ({ request }) => runForwarded(request),
         tier_override: ({ request }) => runForwarded(request),
         storage_registry: ({ request }) => runForwarded(request),
         capture: ({ request }) => runForwarded(request),

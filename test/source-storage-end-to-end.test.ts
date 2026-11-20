@@ -861,7 +861,31 @@ import { createHash } from 'node:crypto';
   test('a pre-folder install: the boot moves every account, the worker serves the moved stores, and Delete takes exactly one folder and its rows', async () => {
     const env = freshHome();
     const stores = await seedPreFolderInstall(env);
-    const items = Object.fromEntries(Object.entries(stores).map(([key, path]) => [key, snapshotStore(path).items.length]));
+    const migratedStores = Object.entries(stores).map(([key, path]) => {
+      const [sourceId, tier] = key.split('/');
+      const name = tier ?? (['dropbox.files', 'local.files'].includes(sourceId!) ? 'secure_local' : 'internal');
+      return { path: join(accountFolder({ source_id: sourceId!, slot: '1' }, env), 'stores', name + '.sqlite'),
+        ids: snapshotStore(path).items.map(row => row.local_item_id) };
+    });
+    // Check the physical migration at the handoff to the privacy service. From
+    // its first pass onward a legacy body may legitimately occupy another tier.
+    const preload = join(env.HOME!, 'observe-migrated-stores.ts');
+    const snapshot = join(env.HOME!, 'migrated-ids.json');
+    writeFileSync(preload, `
+      import { Database } from 'bun:sqlite';
+      import { writeFileSync } from 'node:fs';
+      import { TierSnifferService } from ${JSON.stringify(join(REPO, 'src/workers/classification/sniffer-service.ts'))};
+      const start = TierSnifferService.prototype.start;
+      TierSnifferService.prototype.start = function () {
+        const rows = ${JSON.stringify(migratedStores.map(store => store.path))}.map(path => {
+          const db = new Database(path, { readonly: true });
+          try { return db.query('SELECT local_item_id FROM items ORDER BY local_item_id').values().flat(); }
+          finally { db.close(); }
+        });
+        writeFileSync(${JSON.stringify(snapshot)}, JSON.stringify(rows));
+        return start.call(this);
+      };
+    `);
     const layout: ForgetLayout = { env, handleRegistryPath: join(env.XDG_CONFIG_HOME!, 'olympus', 'handles.json') };
     seedAllFiles(layout);
     // The deleted source's Secrets redaction claims name its tier ledger by id, as the seeds give it.
@@ -877,7 +901,7 @@ import { createHash } from 'node:crypto';
       .filter((file) => file.area === 'raw')
       .map((file) => (file.folderPath ? accountFolderEntry(telegram, file.folderPath, env) : accountRawPath(telegram, file.name as AccountRawName, env)));
     expect(telegramTargets.length).toBeGreaterThan(2);
-    const first = await boot(env);
+    const first = await boot(env, preload);
     try {
       const output = first.output();
       expect(output, listening(first)).toContain('worker listening');
@@ -917,11 +941,12 @@ import { createHash } from 'node:crypto';
       expect(legacyLeft(sourceId, env), sourceId).toEqual([]);
       expect(lstatSync(accountFolder({ source_id: sourceId, slot: '1' }, env)).isDirectory(), sourceId).toBe(true);
     }
-    for (const [key, count] of Object.entries(items)) {
-      const [sourceId, tier] = key.includes('/') ? key.split('/') : [key, undefined];
-      const name = tier ?? (['dropbox.files', 'local.files'].includes(sourceId!) ? 'secure_local' : 'internal');
-      expect(snapshotStore(resolvedStorePath(sourceId!, name, env)).items.length, key).toBe(count);
-    }
+    expect(JSON.parse(readFileSync(snapshot, 'utf8'))).toEqual(migratedStores.map(store => store.ids));
+    // The original Private row and its body survive any later hold in this account.
+    const privateRows = snapshotStore(resolvedStorePath('dropbox.files', 'secure_local', env));
+    expect(privateRows.chunks.map(row => row.bounded_text)).toContain(SPECS[1]!.text);
+    const personalRows = snapshotStore(resolvedStorePath('dropbox.files', 'internal', env));
+    expect([...personalRows.chunks, ...privateRows.chunks].map(row => row.bounded_text)).toContain(SPECS[0]!.text);
     const registry = readSourceRegistry(env);
     for (const sourceId of MOVED_SOURCES) {
       expect(registry.accounts.find((account) => account.source_id === sourceId), sourceId).toMatchObject({ layout: 'folder', state: 'active' });

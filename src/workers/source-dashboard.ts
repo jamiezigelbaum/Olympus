@@ -385,6 +385,7 @@ export interface DashboardBackgroundWork {
   embedding_backlog?: DashboardEmbeddingBacklog;
   embedding_lane_state?: 'enabled' | 'embedding_lane_disabled';
   vlm_extraction_queued?: number;
+  legacy_personal_bodies?: NonNullable<SourceIndexStatusResult['tier_classification']>['legacy_personal_bodies'];
 }
 
 /** Chunk-level embedding parity. `chunks` is always > 0, so it is a safe denominator. */
@@ -3513,10 +3514,12 @@ function backgroundWorkFrom(
   const vlmQueued = ledger?.rows
     .map((row) => vlmExtractionQueued(row))
     .filter((value): value is number => value !== undefined);
+  const legacy = status.tier_classification?.legacy_personal_bodies;
   return {
     ...(embeddingBacklog ? { embedding_backlog: embeddingBacklog } : {}),
     ...(laneState ? { embedding_lane_state: laneState } : {}),
     ...(vlmQueued?.length ? { vlm_extraction_queued: vlmQueued.reduce((sum, value) => sum + value, 0) } : {}),
+    ...(legacy ? { legacy_personal_bodies: legacy } : {}),
   };
 }
 
