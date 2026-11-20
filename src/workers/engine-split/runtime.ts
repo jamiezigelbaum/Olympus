@@ -212,6 +212,8 @@ export interface EngineFront {
   /** The background's last status snapshot and its age; refreshed asynchronously at most once a second. */
   status(): EngineStatusRead | undefined;
   refreshStatus(): Promise<void>;
+  /** The last verified model server, if still alive. Never waits for the background. */
+  servingModelPid(): number | undefined;
   /** The last snapshot read, with no disk read and no refresh. */
   cachedSnapshot(): EngineStatusRead['snapshot'] | undefined;
   /** The polled activity, with no disk read or status refresh on the log path. */
@@ -231,6 +233,7 @@ export function createEngineFront(input: {
   authToken: string;
   fetch?: typeof fetch;
   now?: () => number;
+  processAlive?: (pid: number) => boolean;
 }): EngineFront {
   const now = input.now ?? (() => Date.now());
   const fetchBackground = input.fetch ?? createUnixSocketFetch(input.socketPath);
@@ -279,7 +282,11 @@ export function createEngineFront(input: {
   // owner-busy signal reaches the new judge.
   const poll = setInterval(() => { void refreshStatus(); }, 2_000);
   poll.unref?.();
-  const completeModel = (request: AnalystModelRequest) => completeModelInBackground(fetchBackground, input.authToken, request);
+  // A forwarded completion can beat the next snapshot. Use its verified PID
+  // until a newer collection from the background supersedes it.
+  let completedServer: { pid: number; at: number } | undefined;
+  const completeModel = (request: AnalystModelRequest) => completeModelInBackground(fetchBackground, input.authToken, request,
+    pid => { completedServer = { pid, at: now() }; });
   // Busy is not unreachable: the background's receipt and heartbeat say it is up.
   const backgroundReady = async () => backgroundBootDone(await readBootProgressAsync(input.env));
   const waitForPendingPrivacyRaises = async () => {
@@ -288,7 +295,16 @@ export function createEngineFront(input: {
     const probeMs = 250;
     while (!await probeEngineBackground(fetchBackground, input.authToken, undefined, probeMs, true)) await Bun.sleep(probeMs);
   };
-  return { client, ownerBusy: relay, status, refreshStatus, cachedSnapshot: () => cached, backgroundActivity: () => cached?.activity ?? 'idle', completeModel, backgroundReady,
+  const servingModelPid = () => {
+    const read = status();
+    if (read && completedServer && (read.stale || Date.parse(read.snapshot.state_at ?? read.snapshot.written_at) > completedServer.at)) {
+      completedServer = undefined;
+    }
+    const pid = completedServer?.pid ?? (read && !read.stale ? read.snapshot.built_in_serving_pid : undefined);
+    // An idle exit can precede the next published snapshot.
+    return pid && pid > 0 && Number.isSafeInteger(pid) && (input.processAlive ?? processAlive)(pid) ? pid : undefined;
+  };
+  return { client, ownerBusy: relay, status, refreshStatus, servingModelPid, cachedSnapshot: () => cached, backgroundActivity: () => cached?.activity ?? 'idle', completeModel, backgroundReady,
     waitForPendingPrivacyRaises, stop: () => { stopped = true; clearInterval(poll); relay?.stop(); } };
 }
 
@@ -626,6 +642,7 @@ export async function completeModelInBackground(
   fetchBackground: typeof fetch,
   authToken: string,
   request: AnalystModelRequest,
+  onServingPid?: (pid: number) => void,
 ): Promise<AnalystModelCompletion> {
   const { signal, ...body } = request;
   let response: Response;
@@ -641,7 +658,11 @@ export async function completeModelInBackground(
     throw new OperationError('argus_unreachable', 'The built-in private model is not answering: the background engine is not reachable.', 'Try again in a moment.');
   }
   const payload = await response.json().catch(() => undefined) as Record<string, unknown> | undefined;
-  if (response.ok && payload && typeof payload.text === 'string' && typeof payload.modelId === 'string') return payload as unknown as AnalystModelCompletion;
+  if (response.ok && payload && typeof payload.text === 'string' && typeof payload.modelId === 'string') {
+    const { built_in_serving_pid: pid, ...completion } = payload;
+    if (typeof pid === 'number') onServingPid?.(pid);
+    return completion as unknown as AnalystModelCompletion;
+  }
   const typed = payload?.operation_error as { error?: unknown; message?: unknown; suggestion?: unknown } | undefined;
   if (typed && typeof typed.error === 'string' && typeof typed.message === 'string') {
     throw new OperationError(typed.error as OperationErrorCode, typed.message, typeof typed.suggestion === 'string' ? typed.suggestion : undefined);

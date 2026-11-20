@@ -1,3 +1,4 @@
+import type { KeywordPreparation } from '../../core/source-index/keyword-expansion.ts';
 import type { EvidenceRerankAudit } from '../../core/evidence-reranker.ts';
 import type { AnalystEvidenceFormat } from '../../core/analyst.ts';
 import type { LocalAnalystPromptBudget } from './local-analyst-window.ts';
@@ -177,6 +178,7 @@ export interface SourceAnswerTraceQueryTiming {
 export interface SourceAnswerTraceQueryStages {
   prepare_ms: number;
   prepare_keywords_max_ms: number;
+  keyword_model?: KeywordPreparation['keyword_model'];
   prepare_semantic_max_ms: number;
   lanes_ms: number;
   after_lanes_ms: number;
@@ -646,6 +648,7 @@ export function copyQueryStages(stages: SourceAnswerTraceQueryStages): SourceAns
   return {
     prepare_ms: nonNegativeMs(stages.prepare_ms),
     prepare_keywords_max_ms: nonNegativeMs(stages.prepare_keywords_max_ms),
+    ...(stages.keyword_model && { keyword_model: stages.keyword_model }),
     prepare_semantic_max_ms: nonNegativeMs(stages.prepare_semantic_max_ms),
     lanes_ms: nonNegativeMs(stages.lanes_ms),
     after_lanes_ms: nonNegativeMs(stages.after_lanes_ms),

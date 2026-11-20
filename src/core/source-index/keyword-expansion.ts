@@ -24,12 +24,16 @@ export function keywordPrepareWaitMs(): number {
   const set = Number(process.env.OLYMPUS_KEYWORD_PREPARE_WAIT_MS);
   return Number.isFinite(set) && set > 0 ? set : KEYWORD_PREPARE_WAIT_MS;
 }
-interface Expander { model?: AnalystModel; available(): boolean; owner?: true; down?: true }
+export interface KeywordPreparation {
+  incomplete: boolean;
+  keyword_model?: 'ready' | 'cold' | 'slow' | 'unavailable';
+}
+interface Expander { model?: AnalystModel; available(): boolean; serverReady?(): boolean; }
 async function expansionModel(): Promise<Expander | undefined> {
   if (ownerKeywordExpansionEnabled() && ownerKeywordModel) {
     const chosen = await ownerKeywordModel().catch((): 'unavailable' => 'unavailable');
-    if (chosen === 'unavailable') return { available: () => false, down: true };
-    if (chosen) return { model: chosen, available: () => true, owner: true };
+    if (chosen === 'unavailable') return { available: () => false };
+    if (chosen) return { model: chosen, available: () => true };
   }
   return registeredBuiltInPrivateModel();
 }
@@ -74,13 +78,14 @@ export async function expandSourceIndexKeywords(
   query: string,
   profile: KeywordLanguageProfile,
   owner?: object,
-  options: { waitMs?: number; status?: { incomplete: boolean } } = {},
+  options: { waitMs?: number; status?: KeywordPreparation } = {},
 ): Promise<KeywordExpansionMap> {
   if (keywordExpansionDisabled()) return EMPTY;
   const pinned = requestKeywordAlternatives(owner, query);
   if (pinned) return pinned;
+  const builtIn = await expansionModel();
   if (options.waitMs === undefined) {
-    const alternatives = await expandCachedSourceIndexKeywords(query, profile, cachedKeywordExpansion());
+    const alternatives = await expandCachedSourceIndexKeywords(query, profile, builtIn, cachedKeywordExpansion());
     pinKeywordAlternatives(owner, query, alternatives);
     return alternatives;
   }
@@ -90,47 +95,44 @@ export async function expandSourceIndexKeywords(
   const once: KeywordLanguageProfile = typeof profile === 'function'
     ? () => (read ??= Promise.resolve(profile()).then((value) => (languages = value)))
     : profile;
-  const full = expandCachedSourceIndexKeywords(query, once, cachedKeywordExpansion());
-  full.catch(() => {});
-  const builtIn = await expansionModel();
+  const status = options.status ?? { incomplete: false };
+  const waitMs = options.waitMs;
   const lastMs = builtIn?.model ? lastTranslationMs.get(builtIn.model) : undefined;
-  const waitMs = options.waitMs ?? 0;
   const oldestRunning = builtIn?.model ? Math.min(...(runningTranslations.get(builtIn.model) ?? [])) : Infinity;
-  if ((lastMs !== undefined && lastMs > waitMs) || Date.now() - oldestRunning > waitMs) {
-    // A finished translation of this question is still used; otherwise the static equivalents.
-    // A profile the store already holds settles within a turn; a slow read is not waited for.
-    // The same turn lets a translation that has just come back be stored before it is looked up.
-    await new Promise<void>((resolve) => { setImmediate(resolve); });
-    const cached = { missing: false };
-    const alternatives = await expandCachedSourceIndexKeywords(query, languages ?? [], cached);
-    if (options.status) options.status.incomplete = cached.missing || languages === undefined || failedTranslations.has(alternatives);
-    pinKeywordAlternatives(owner, query, alternatives);
-    return alternatives;
-  }
+  const slow = (lastMs !== undefined && lastMs > waitMs) || Date.now() - oldestRunning > waitMs;
+  if (!builtIn?.available()) status.keyword_model = 'unavailable';
+  else if (builtIn.serverReady?.() === false) status.keyword_model = 'cold';
+  else status.keyword_model = slow ? 'slow' : 'ready';
+
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const waited = await Promise.race([
-    full.then((value) => ({ value })),
-    new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), Math.max(0, options.waitMs ?? 0)); }),
-  ]);
+  let onCold: (() => void) | undefined;
+  const patience = new Promise<undefined>((resolve) => {
+    // Let an already cached profile/translation settle before looking it up.
+    const nextTurn = () => { setImmediate(resolve, undefined); };
+    if (status.keyword_model === 'ready') {
+      timer = setTimeout(() => resolve(undefined), Math.max(0, waitMs));
+      onCold = () => { status.keyword_model = 'cold'; nextTurn(); };
+    } else nextTurn();
+  });
+  const full = expandCachedSourceIndexKeywords(query, once, builtIn, cachedKeywordExpansion(), onCold);
+  const waited = await Promise.race([full, patience]);
   clearTimeout(timer);
-  if (!waited && options.status) options.status.incomplete = true;
-  // Not translated in time: this request uses what is cached, else the static equivalents.
-  const alternatives = waited
-    ? waited.value
-    : await expandCachedSourceIndexKeywords(query, languages ?? [], { missing: false });
-  if (options.status && failedTranslations.has(alternatives)) options.status.incomplete = true;
+  const cached = { missing: false };
+  const alternatives = waited ?? await expandCachedSourceIndexKeywords(query, languages ?? [], builtIn, cached);
+  if (!waited && (status.keyword_model === 'ready' || cached.missing || languages === undefined)) status.incomplete = true;
+  if (failedTranslations.has(alternatives)) status.incomplete = true;
   pinKeywordAlternatives(owner, query, alternatives);
   return alternatives;
 }
 
-async function expandCachedSourceIndexKeywords(query: string, profile: KeywordLanguageProfile, cachedOnly?: CachedKeywordExpansion): Promise<KeywordExpansionMap> {
-  const builtIn = await expansionModel();
+async function expandCachedSourceIndexKeywords(query: string, profile: KeywordLanguageProfile, builtIn: Expander | undefined,
+  cachedOnly?: CachedKeywordExpansion, onCold?: () => void): Promise<KeywordExpansionMap> {
   if (!query.trim() || query.length > 8000) return EMPTY;
   const sources = sourceIndexFtsTermGroups(query).map(group => group[0]!).filter(term => !/\p{N}/u.test(term));
   const vocabulary = equivalents as Record<string, Record<string, string[]>>;
   const keyOf = (word: string) => stemmer(word.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase());
   const concepts = sources.map(source => Object.values(vocabulary).find(row => Object.values(row).some(words => words.some(word => !word.includes(' ') && keyOf(word) === keyOf(source)))));
-  if (!builtIn?.available() && !concepts.some(Boolean)) return builtIn?.down ? failedCopy(EMPTY) : EMPTY;
+  if (!builtIn?.available() && !concepts.some(Boolean)) return builtIn ? failedCopy(EMPTY) : EMPTY;
   const detectedLanguage = sourceIndexQueryLanguage(query);
   const knownLanguages = concepts.every(Boolean) && concepts.length > 0
     ? Object.keys(concepts[0]!).filter(language => concepts.every((row,index) => row?.[language]?.some(word => !word.includes(' ') && keyOf(word) === keyOf(sources[index]!))))
@@ -147,9 +149,9 @@ async function expandCachedSourceIndexKeywords(query: string, profile: KeywordLa
   }))]));
   const fallback = parseKeywordExpansion(JSON.stringify(seeded),sources,languages);
   if (concepts.every(Boolean)) return fallback;
-  // The owner's model is set up but down: the static word list is used, and the search says so.
-  if (builtIn?.down) return failedCopy(fallback);
-  const expander = builtIn?.available() ? builtIn.model : undefined;
+  // A configured but unavailable translator leaves a gap for the uncovered words.
+  if (!builtIn?.available()) return builtIn ? failedCopy(fallback) : fallback;
+  const expander = builtIn.model;
   if (!expander) return fallback;
   let cache = caches.get(expander);
   if (!cache) { cache = new Map(); caches.set(expander, cache); }
@@ -161,13 +163,17 @@ async function expandCachedSourceIndexKeywords(query: string, profile: KeywordLa
     cachedOnly.missing = true;
     return fallback;
   }
+  // The server may have stopped while this store was reading its languages.
+  const cold = builtIn?.serverReady?.() === false;
+  if (cold) onCold?.();
   if (existing && existing.expires > Date.now()) return existing.pending;
   // The model's speed is timed on its own call, never on a store that shares
   // a finished call (that would read as instant and bring the wait back). A
   // call that fails says nothing quicker than the last one that finished.
   let callStartedAt: number | undefined;
   const pending = translate();
-  if (callStartedAt !== undefined) {
+  // Startup is not a sample of how long translation takes on a serving model.
+  if (!cold && callStartedAt !== undefined) {
     const model = expander;
     const startedAt = callStartedAt;
     let running = runningTranslations.get(model);
@@ -194,8 +200,8 @@ async function expandCachedSourceIndexKeywords(query: string, profile: KeywordLa
     if (!shared) { shared = { seen: new Set(), calls: new Map() }; sharedCalls.set(expander!, shared); }
     for (const language of languages) shared.seen.add(language);
     for (const [callKey, call] of shared.calls) {
-      if (call.query === query && languages.every(language => call.languages.includes(language))) return call.pending;
       if (call.expires <= Date.now()) shared.calls.delete(callKey);
+      else if (call.query === query && languages.every(language => call.languages.includes(language))) return call.pending;
     }
     const union = [...shared.seen].filter(code => !sourceLanguages.includes(code)).sort();
     const asked = union.length <= MAX_LANGUAGES ? union : languages;

@@ -49117,6 +49117,7 @@ function copyQueryStages(stages) {
   return {
     prepare_ms: nonNegativeMs(stages.prepare_ms),
     prepare_keywords_max_ms: nonNegativeMs(stages.prepare_keywords_max_ms),
+    ...stages.keyword_model && { keyword_model: stages.keyword_model },
     prepare_semantic_max_ms: nonNegativeMs(stages.prepare_semantic_max_ms),
     lanes_ms: nonNegativeMs(stages.lanes_ms),
     after_lanes_ms: nonNegativeMs(stages.after_lanes_ms)
@@ -53044,9 +53045,9 @@ async function expansionModel() {
   if (ownerKeywordExpansionEnabled() && ownerKeywordModel) {
     const chosen = await ownerKeywordModel().catch(() => "unavailable");
     if (chosen === "unavailable")
-      return { available: () => false, down: true };
+      return { available: () => false };
     if (chosen)
-      return { model: chosen, available: () => true, owner: true };
+      return { model: chosen, available: () => true };
   }
   return registeredBuiltInPrivateModel();
 }
@@ -53056,49 +53057,54 @@ async function expandSourceIndexKeywords(query, profile, owner, options = {}) {
   const pinned = requestKeywordAlternatives(owner, query);
   if (pinned)
     return pinned;
+  const builtIn = await expansionModel();
   if (options.waitMs === undefined) {
-    const alternatives = await expandCachedSourceIndexKeywords(query, profile, cachedKeywordExpansion());
+    const alternatives = await expandCachedSourceIndexKeywords(query, profile, builtIn, cachedKeywordExpansion());
     pinKeywordAlternatives(owner, query, alternatives);
     return alternatives;
   }
   let languages = typeof profile === "function" ? undefined : profile;
   let read;
   const once = typeof profile === "function" ? () => read ??= Promise.resolve(profile()).then((value) => languages = value) : profile;
-  const full = expandCachedSourceIndexKeywords(query, once, cachedKeywordExpansion());
-  full.catch(() => {});
-  const builtIn = await expansionModel();
+  const status = options.status ?? { incomplete: false };
+  const waitMs = options.waitMs;
   const lastMs = builtIn?.model ? lastTranslationMs.get(builtIn.model) : undefined;
-  const waitMs = options.waitMs ?? 0;
   const oldestRunning = builtIn?.model ? Math.min(...runningTranslations.get(builtIn.model) ?? []) : Infinity;
-  if (lastMs !== undefined && lastMs > waitMs || Date.now() - oldestRunning > waitMs) {
-    await new Promise((resolve) => {
-      setImmediate(resolve);
-    });
-    const cached = { missing: false };
-    const alternatives = await expandCachedSourceIndexKeywords(query, languages ?? [], cached);
-    if (options.status)
-      options.status.incomplete = cached.missing || languages === undefined || failedTranslations.has(alternatives);
-    pinKeywordAlternatives(owner, query, alternatives);
-    return alternatives;
-  }
+  const slow = lastMs !== undefined && lastMs > waitMs || Date.now() - oldestRunning > waitMs;
+  if (!builtIn?.available())
+    status.keyword_model = "unavailable";
+  else if (builtIn.serverReady?.() === false)
+    status.keyword_model = "cold";
+  else
+    status.keyword_model = slow ? "slow" : "ready";
   let timer;
-  const waited = await Promise.race([
-    full.then((value) => ({ value })),
-    new Promise((resolve) => {
-      timer = setTimeout(() => resolve(undefined), Math.max(0, options.waitMs ?? 0));
-    })
-  ]);
+  let onCold;
+  const patience = new Promise((resolve) => {
+    const nextTurn = () => {
+      setImmediate(resolve, undefined);
+    };
+    if (status.keyword_model === "ready") {
+      timer = setTimeout(() => resolve(undefined), Math.max(0, waitMs));
+      onCold = () => {
+        status.keyword_model = "cold";
+        nextTurn();
+      };
+    } else
+      nextTurn();
+  });
+  const full = expandCachedSourceIndexKeywords(query, once, builtIn, cachedKeywordExpansion(), onCold);
+  const waited = await Promise.race([full, patience]);
   clearTimeout(timer);
-  if (!waited && options.status)
-    options.status.incomplete = true;
-  const alternatives = waited ? waited.value : await expandCachedSourceIndexKeywords(query, languages ?? [], { missing: false });
-  if (options.status && failedTranslations.has(alternatives))
-    options.status.incomplete = true;
+  const cached = { missing: false };
+  const alternatives = waited ?? await expandCachedSourceIndexKeywords(query, languages ?? [], builtIn, cached);
+  if (!waited && (status.keyword_model === "ready" || cached.missing || languages === undefined))
+    status.incomplete = true;
+  if (failedTranslations.has(alternatives))
+    status.incomplete = true;
   pinKeywordAlternatives(owner, query, alternatives);
   return alternatives;
 }
-async function expandCachedSourceIndexKeywords(query, profile, cachedOnly) {
-  const builtIn = await expansionModel();
+async function expandCachedSourceIndexKeywords(query, profile, builtIn, cachedOnly, onCold) {
   if (!query.trim() || query.length > 8000)
     return EMPTY2;
   const sources = sourceIndexFtsTermGroups(query).map((group) => group[0]).filter((term) => !/\p{N}/u.test(term));
@@ -53106,7 +53112,7 @@ async function expandCachedSourceIndexKeywords(query, profile, cachedOnly) {
   const keyOf = (word) => stemmer(word.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase());
   const concepts = sources.map((source) => Object.values(vocabulary).find((row) => Object.values(row).some((words) => words.some((word) => !word.includes(" ") && keyOf(word) === keyOf(source)))));
   if (!builtIn?.available() && !concepts.some(Boolean))
-    return builtIn?.down ? failedCopy(EMPTY2) : EMPTY2;
+    return builtIn ? failedCopy(EMPTY2) : EMPTY2;
   const detectedLanguage = sourceIndexQueryLanguage(query);
   const knownLanguages = concepts.every(Boolean) && concepts.length > 0 ? Object.keys(concepts[0]).filter((language) => concepts.every((row, index) => row?.[language]?.some((word) => !word.includes(" ") && keyOf(word) === keyOf(sources[index])))) : [];
   const sourceLanguages = detectedLanguage === "und" ? knownLanguages : [detectedLanguage];
@@ -53125,9 +53131,9 @@ async function expandCachedSourceIndexKeywords(query, profile, cachedOnly) {
   const fallback = parseKeywordExpansion(JSON.stringify(seeded), sources, languages);
   if (concepts.every(Boolean))
     return fallback;
-  if (builtIn?.down)
-    return failedCopy(fallback);
-  const expander = builtIn?.available() ? builtIn.model : undefined;
+  if (!builtIn?.available())
+    return builtIn ? failedCopy(fallback) : fallback;
+  const expander = builtIn.model;
   if (!expander)
     return fallback;
   let cache = caches2.get(expander);
@@ -53143,11 +53149,14 @@ async function expandCachedSourceIndexKeywords(query, profile, cachedOnly) {
     cachedOnly.missing = true;
     return fallback;
   }
+  const cold = builtIn?.serverReady?.() === false;
+  if (cold)
+    onCold?.();
   if (existing && existing.expires > Date.now())
     return existing.pending;
   let callStartedAt;
   const pending = translate();
-  if (callStartedAt !== undefined) {
+  if (!cold && callStartedAt !== undefined) {
     const model = expander;
     const startedAt = callStartedAt;
     let running = runningTranslations.get(model);
@@ -53182,10 +53191,10 @@ async function expandCachedSourceIndexKeywords(query, profile, cachedOnly) {
     for (const language of languages)
       shared.seen.add(language);
     for (const [callKey, call] of shared.calls) {
-      if (call.query === query && languages.every((language) => call.languages.includes(language)))
-        return call.pending;
       if (call.expires <= Date.now())
         shared.calls.delete(callKey);
+      else if (call.query === query && languages.every((language) => call.languages.includes(language)))
+        return call.pending;
     }
     const union = [...shared.seen].filter((code) => !sourceLanguages.includes(code)).sort();
     const asked = union.length <= MAX_LANGUAGES ? union : languages;
@@ -107575,6 +107584,7 @@ function createBuiltInAnalystModel(options = {}) {
   let installed;
   let installing;
   let server;
+  let verifiedServerPid;
   let snifferEndpoint;
   let snifferModel;
   const snifferLane = {
@@ -107623,7 +107633,11 @@ function createBuiltInAnalystModel(options = {}) {
     status() {
       return readBuiltInReasoningStatus(spec, env);
     },
+    servingPid() {
+      return server?.pid === verifiedServerPid ? verifiedServerPid : undefined;
+    },
     async stop() {
+      verifiedServerPid = undefined;
       await server?.stop();
     },
     installedRuntime() {
@@ -107651,6 +107665,7 @@ function createBuiltInAnalystModel(options = {}) {
         if (!handle.pid)
           reportBuiltInReasoningState({ model: spec, env }, "loading");
         endpoint = await handle.ensureRunning(request.signal);
+        verifiedServerPid = handle.pid;
         reportBuiltInReasoningState({ model: spec, env }, "ready");
       } catch (error) {
         if (request.signal?.aborted)
@@ -108494,6 +108509,7 @@ async function routePreparedSourceIndexSearch(options) {
   ]));
   const semanticPrepareBudgetMs = options.semanticPrepareBudgetMs ?? DEFAULT_SEMANTIC_PREPARE_BUDGET_MS;
   let prepareKeywordsMaxMs = 0;
+  let keywordModel;
   let prepareSemanticMaxMs = 0;
   const timed = async (run) => {
     const started = Date.now();
@@ -108509,6 +108525,9 @@ async function routePreparedSourceIndexSearch(options) {
     const [keywordsMs, semanticMs] = await Promise.all([
       timed(async () => {
         const prepared = await adapter.prepareKeywords?.(request.query).catch(() => ({ incomplete: true }));
+        if (prepared?.keyword_model && (!keywordModel || keywordModel === "ready" || prepared.keyword_model === "cold")) {
+          keywordModel = prepared.keyword_model;
+        }
         if (prepared?.incomplete)
           degradations.push({ laneName: `${corpus.corpusId}:keywords`, laneType: "keyword", reason: "lane_timeout", detail: "keyword_preparation_incomplete", occurrences: 1 });
       }),
@@ -108691,6 +108710,7 @@ async function routePreparedSourceIndexSearch(options) {
   recordSourceAnswerQueryStages({
     prepare_ms: lanesStartedAt - prepareStartedAt,
     prepare_keywords_max_ms: prepareKeywordsMaxMs,
+    ...keywordModel && { keyword_model: keywordModel },
     prepare_semantic_max_ms: prepareSemanticMaxMs,
     lanes_ms: lanesSettledAt - lanesStartedAt,
     after_lanes_ms: Date.now() - lanesSettledAt
@@ -248169,18 +248189,30 @@ function createEngineFront(input) {
     refreshStatus();
   }, 2000);
   poll.unref?.();
-  const completeModel = (request) => completeModelInBackground(fetchBackground, input.authToken, request);
+  let completedServer;
+  const completeModel = (request) => completeModelInBackground(fetchBackground, input.authToken, request, (pid) => {
+    completedServer = { pid, at: now() };
+  });
   const backgroundReady = async () => backgroundBootDone(await readBootProgressAsync(input.env));
   const waitForPendingPrivacyRaises = async () => {
     const probeMs = 250;
     while (!await probeEngineBackground(fetchBackground, input.authToken, undefined, probeMs, true))
       await Bun.sleep(probeMs);
   };
+  const servingModelPid = () => {
+    const read = status();
+    if (read && completedServer && (read.stale || Date.parse(read.snapshot.state_at ?? read.snapshot.written_at) > completedServer.at)) {
+      completedServer = undefined;
+    }
+    const pid = completedServer?.pid ?? (read && !read.stale ? read.snapshot.built_in_serving_pid : undefined);
+    return pid && pid > 0 && Number.isSafeInteger(pid) && (input.processAlive ?? processAlive2)(pid) ? pid : undefined;
+  };
   return {
     client,
     ownerBusy: relay,
     status,
     refreshStatus,
+    servingModelPid,
     cachedSnapshot: () => cached,
     backgroundActivity: () => cached?.activity ?? "idle",
     completeModel,
@@ -248429,7 +248461,7 @@ function restartAfterFront(input) {
   });
   return true;
 }
-async function completeModelInBackground(fetchBackground, authToken, request) {
+async function completeModelInBackground(fetchBackground, authToken, request, onServingPid) {
   const { signal, ...body } = request;
   let response;
   try {
@@ -248447,8 +248479,12 @@ async function completeModelInBackground(fetchBackground, authToken, request) {
   const payload = await response.json().catch(() => {
     return;
   });
-  if (response.ok && payload && typeof payload.text === "string" && typeof payload.modelId === "string")
-    return payload;
+  if (response.ok && payload && typeof payload.text === "string" && typeof payload.modelId === "string") {
+    const { built_in_serving_pid: pid, ...completion } = payload;
+    if (typeof pid === "number")
+      onServingPid?.(pid);
+    return completion;
+  }
   const typed = payload?.operation_error;
   if (typed && typeof typed.error === "string" && typeof typed.message === "string") {
     throw new OperationError(typed.error, typed.message, typeof typed.suggestion === "string" ? typed.suggestion : undefined);
@@ -250954,6 +250990,7 @@ function frontBuiltInModel(base, background, nowMs = Date.now) {
         background.prepare();
     },
     async stop() {},
+    servingPid: () => background.servingPid(),
     complete: (request) => background.complete(request)
   };
   if (installed())
@@ -274940,6 +274977,7 @@ async function main() {
   }
   const workerBuiltInModel = !builtInModelWanted(sovereigntyEngine, process.env) ? undefined : createWorkerSharedBuiltInModel(process.env, engineFront ? {
     complete: (request) => engineFront.completeModel(request),
+    servingPid: () => engineFront.servingModelPid(),
     prepare: () => {
       engineFront.client.post({ kind: "model_prepare" }).catch(() => {
         return;
@@ -274954,7 +274992,12 @@ async function main() {
       return;
     return "unavailable" in route ? "unavailable" : route.model;
   });
-  registerBuiltInPrivateModel(workerBuiltInModel ? { cacheModelId: `${workerBuiltInModel.model.spec.modelId}:${workerBuiltInModel.model.spec.revision}:${workerBuiltInModel.model.spec.file.sha256}`, model: workerBuiltInModel.model, available: workerBuiltInModel.available, startIfIdle: workerBuiltInModel.startIfIdle } : undefined);
+  const servingModelPid = workerBuiltInModel?.model.servingPid;
+  registerBuiltInPrivateModel(workerBuiltInModel ? {
+    ...workerBuiltInModel,
+    cacheModelId: `${workerBuiltInModel.model.spec.modelId}:${workerBuiltInModel.model.spec.revision}:${workerBuiltInModel.model.spec.file.sha256}`,
+    serverReady: () => servingModelPid?.() !== undefined
+  } : undefined);
   const judgeSpending = new JudgeSpending(judgeSpendingPath(process.env));
   let localWorkPending = () => false;
   const localPacer = new LocalWorkPacer({
@@ -279826,7 +279869,10 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       authToken,
       ...process.env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID || process.env[ENGINE_BACKGROUND_INSTANCE_ENV] ? { instanceId: process.env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID || process.env[ENGINE_BACKGROUND_INSTANCE_ENV] } : {},
       log: (line) => console.warn(line),
-      ...answerBuiltInModel ? { modelComplete: (request) => answerBuiltInModel.complete(request) } : {},
+      ...answerBuiltInModel ? { modelComplete: async (request) => ({
+        ...await answerBuiltInModel.complete(request),
+        built_in_serving_pid: servingModelPid?.()
+      }) } : {},
       handlers: {
         model_prepare: () => {
           if (workerBuiltInModel)
@@ -279950,6 +279996,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       instanceId: commands.instanceId,
       collect: () => ({
         activity: statusMemoryActivity(tierSniffer?.passRunning ?? false, statusRecount?.health().counting ?? false),
+        built_in_serving_pid: servingModelPid?.(),
         scheduler: sourceScheduler?.status() ?? null,
         judge: (() => {
           const backlog = tierSniffer?.backlog();

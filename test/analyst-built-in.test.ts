@@ -214,7 +214,14 @@ Bun.serve({ hostname: '127.0.0.1', port: Number(at('--port')), fetch(request) {
       { ...launch, serverPath: script, gpu: false, idleShutdownSeconds: 1, startupTimeoutMs: 15_000 },
       { env: { ...process.env, OLYMPUS_WORKER_AUTH_TOKEN: 'worker-secret', VENICE_API_KEY: 'venice-secret' } },
     );
+    const model = createBuiltInAnalystModel({ model: QWEN35_4B, env: { OLYMPUS_BUILT_IN_REASONING_DIR: dir },
+      install: async () => ({ modelPath: '/fixture.gguf', serverPath: script, gpu: false }), createServer: () => handle,
+    });
     try {
+      await model.prepare();
+      expect(model.servingPid?.()).toBeUndefined();
+      await model.complete({ system: 's', prompt: 'p', localOnly: true });
+      expect(model.servingPid?.()).toBe(handle.pid);
       const endpoint = await handle.ensureRunning();
       expect(endpoint.baseUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
       const denied = await fetch(`${endpoint.baseUrl}/v1/chat/completions`, { method: 'POST' });
@@ -229,6 +236,7 @@ Bun.serve({ hostname: '127.0.0.1', port: Number(at('--port')), fetch(request) {
       handle.touch();
       await new Promise((resolve) => setTimeout(resolve, 1_600));
       expect(handle.pid).toBeUndefined();
+      expect(model.servingPid?.()).toBeUndefined();
     } finally {
       await handle.stop();
     }

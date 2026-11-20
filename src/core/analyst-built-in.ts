@@ -94,6 +94,8 @@ export interface BuiltInAnalystModel extends AnalystModel {
   /** Downloads and verifies the model and server if needed. Never throws. */
   prepare(): Promise<void>;
   status(): BuiltInReasoningStatus;
+  /** PID of the current server after its endpoint passed the readiness check. */
+  servingPid?(): number | undefined;
   /** Stops the model server process (it restarts on the next request). */
   stop(): Promise<void>;
   /**
@@ -190,6 +192,7 @@ export function createBuiltInAnalystModel(options: BuiltInAnalystModelOptions = 
   let installed: InstalledBuiltInReasoning | undefined;
   let installing: Promise<InstalledBuiltInReasoning> | undefined;
   let server: LlamaServerHandle | undefined;
+  let verifiedServerPid: number | undefined;
   let snifferEndpoint: { baseUrl: string; token: string } | undefined;
   let snifferModel: SnifferModel | undefined;
   const snifferLane: SnifferLane = {
@@ -244,7 +247,11 @@ export function createBuiltInAnalystModel(options: BuiltInAnalystModelOptions = 
     status() {
       return readBuiltInReasoningStatus(spec, env);
     },
+    servingPid() {
+      return server?.pid === verifiedServerPid ? verifiedServerPid : undefined;
+    },
     async stop() {
+      verifiedServerPid = undefined;
       await server?.stop();
     },
     installedRuntime() {
@@ -275,6 +282,7 @@ export function createBuiltInAnalystModel(options: BuiltInAnalystModelOptions = 
       try {
         if (!handle.pid) reportBuiltInReasoningState({ model: spec, env }, 'loading');
         endpoint = await handle.ensureRunning(request.signal);
+        verifiedServerPid = handle.pid;
         reportBuiltInReasoningState({ model: spec, env }, 'ready');
       } catch (error) {
         if (request.signal?.aborted) throw error;

@@ -3,6 +3,7 @@ import { noteSourceAnswerProgress } from '../source-answer-jobs.ts';
 import { READ_WIDE_MATCH_LIMIT } from '../read-wide.ts';
 import { isSourceIndexLaneBusyError } from './lane-busy.ts';
 import { RECENT_ITEMS_CUT_SHORT, VISIBILITY_CHECK_CUT_SHORT } from './partial-search.ts';
+import type { KeywordPreparation } from './keyword-expansion.ts';
 import { withKeywordRequestScope } from './keyword-context.ts';
 import type {
   RetrievalDegradation,
@@ -216,7 +217,7 @@ export interface SourceIndexRoutedMatchCount extends SourceIndexCorpusMatchCount
 export interface SourceIndexCorpusSearchAdapter {
   (request: SourceIndexCorpusSearchRequest): SourceIndexCorpusSearchResponse | Promise<SourceIndexCorpusSearchResponse>;
   // Optional local-only preparation before lane deadlines start.
-  prepareKeywords?: (query: string) => Promise<void | { incomplete: boolean }>;
+  prepareKeywords?: (query: string) => Promise<void | KeywordPreparation>;
   /**
    * Optional: get the query's embedding ready before lane deadlines start, so
    * a local embedding model that is still starting (the first question after
@@ -535,6 +536,7 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
   // corpus prepares both at once: one after the other, every lane waited for
   // the sum of the two model waits (#1305).
   let prepareKeywordsMaxMs = 0;
+  let keywordModel: KeywordPreparation['keyword_model'];
   let prepareSemanticMaxMs = 0;
   const timed = async (run: () => Promise<void> | undefined): Promise<number> => {
     const started = Date.now();
@@ -552,7 +554,11 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
       && retrievalStates.get(corpus.corpusId)!.hybridServable;
     const [keywordsMs, semanticMs] = await Promise.all([
       timed(async () => {
-        const prepared = await adapter.prepareKeywords?.(request.query).catch(() => ({ incomplete: true }));
+        const prepared = await adapter.prepareKeywords?.(request.query).catch((): KeywordPreparation => ({ incomplete: true }));
+        // Record a skip even if another corpus subsequently sees the server ready.
+        if (prepared?.keyword_model && (!keywordModel || keywordModel === 'ready' || prepared.keyword_model === 'cold')) {
+          keywordModel = prepared.keyword_model;
+        }
         if (prepared?.incomplete) degradations.push({ laneName: `${corpus.corpusId}:keywords`, laneType: 'keyword', reason: 'lane_timeout', detail: 'keyword_preparation_incomplete', occurrences: 1 });
       }),
       semantic ? timed(() => adapter.prepareSemantic!(request.query, semanticPrepareBudgetMs)) : Promise.resolve(0),
@@ -734,6 +740,7 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
   recordSourceAnswerQueryStages({
     prepare_ms: lanesStartedAt - prepareStartedAt,
     prepare_keywords_max_ms: prepareKeywordsMaxMs,
+    ...(keywordModel && { keyword_model: keywordModel }),
     prepare_semantic_max_ms: prepareSemanticMaxMs,
     lanes_ms: lanesSettledAt - lanesStartedAt,
     after_lanes_ms: Date.now() - lanesSettledAt,

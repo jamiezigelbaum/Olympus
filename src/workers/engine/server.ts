@@ -870,6 +870,7 @@ export async function main(): Promise<void> {
   // server per computer); the front's completions run there (judging-models.ts).
   const workerBuiltInModel = !builtInModelWanted(sovereigntyEngine, process.env) ? undefined : createWorkerSharedBuiltInModel(process.env, engineFront ? {
     complete: (request) => engineFront!.completeModel(request),
+    servingPid: () => engineFront!.servingModelPid(),
     prepare: () => { void engineFront!.client.post({ kind: 'model_prepare' }).catch(() => undefined); },
   } : undefined);
   const answerBuiltInModel = workerBuiltInModel
@@ -883,8 +884,13 @@ export async function main(): Promise<void> {
     if (!route) return undefined;
     return 'unavailable' in route ? 'unavailable' : route.model;
   });
+  const servingModelPid = workerBuiltInModel?.model.servingPid;
   registerBuiltInPrivateModel(workerBuiltInModel
-    ? { cacheModelId: `${workerBuiltInModel.model.spec.modelId}:${workerBuiltInModel.model.spec.revision}:${workerBuiltInModel.model.spec.file.sha256}`, model: workerBuiltInModel.model, available: workerBuiltInModel.available, startIfIdle: workerBuiltInModel.startIfIdle }
+    ? {
+      ...workerBuiltInModel,
+      cacheModelId: `${workerBuiltInModel.model.spec.modelId}:${workerBuiltInModel.model.spec.revision}:${workerBuiltInModel.model.spec.file.sha256}`,
+      serverReady: () => servingModelPid?.() !== undefined,
+    }
     : undefined);
   // Four-tier classification inputs for every lane: the owner's map, tier
   // rules, their own words about privacy, and the privacy-safe sniffer. The
@@ -7095,7 +7101,10 @@ export async function main(): Promise<void> {
       log: (line) => console.warn(line),
       // The front's built-in model completions, tracked like this process's
       // own answers so the judge steps aside for them on the one server.
-      ...(answerBuiltInModel ? { modelComplete: (request: AnalystModelRequest) => answerBuiltInModel.complete(request) } : {}),
+      ...(answerBuiltInModel ? { modelComplete: async (request: AnalystModelRequest) => ({
+        ...await answerBuiltInModel.complete(request),
+        built_in_serving_pid: servingModelPid?.(),
+      }) } : {}),
       handlers: {
         model_prepare: () => {
           if (workerBuiltInModel) void workerBuiltInModel.model.prepare();
@@ -7219,6 +7228,7 @@ export async function main(): Promise<void> {
       instanceId: commands.instanceId,
       collect: () => ({
         activity: statusMemoryActivity(tierSniffer?.passRunning ?? false, statusRecount?.health().counting ?? false),
+        built_in_serving_pid: servingModelPid?.(),
         scheduler: sourceScheduler?.status() ?? null,
         judge: (() => {
           const backlog = tierSniffer?.backlog();
