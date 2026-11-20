@@ -76,7 +76,7 @@ import type {
   LocalContentProvider,
   LocalContentRequest,
 } from '../../core/evidence-pack.ts';
-import { OperationError } from '../../core/operation-error.ts';
+import { OperationError, SOURCE_SCOPE_APPROVAL_REQUIRED, SourceScopeApprovalRequiredError } from '../../core/operation-error.ts';
 import { itemContentKeptNamesOnly } from '../../core/classification-signals.ts';
 import {
   isMediaCachePath,
@@ -2273,6 +2273,7 @@ export async function embedPendingChunks(
     // A stable, complete zero-pending inventory replaces the work-list walk.
     const noMissingVectors = run.inventory?.inventory_complete === 1 && run.inventory.pending_chunks === 0
       && inventoryWrites !== undefined && store.writeSequence() === inventoryWrites && !store.fileReplacedOrRemoved();
+    let exhausted = !target.wholeStore || noMissingVectors;
     if (target.wholeStore && queuedIds.size < options.maxItems && !noMissingVectors
       && !run.busy && !run.deferredReason && !run.stoppedAtDeadline) {
       if (budgetSpent()) {
@@ -2280,11 +2281,15 @@ export async function embedPendingChunks(
       } else {
         const missing = (await store.missingEmbeddingItemIdsInTurns(target.provider, options.maxItems - queuedIds.size, target))
           .filter((id) => !queuedIds.has(id));
+        exhausted = missing.length === 0;
         if (missing.length) await dispatch({ provider: target.provider, localItemIds: missing });
       }
     }
     if (run.deferredReason) store.setEmbeddingDeferral(run.deferredReason);
-    else if (answered) store.setEmbeddingDeferral(undefined);
+    else if (answered || (exhausted && !run.busy && !run.stoppedAtDeadline
+      && store.embeddingDeferredReason() === SOURCE_SCOPE_APPROVAL_REQUIRED && !store.queuedEmbeddingGroups(1).length)) {
+      store.setEmbeddingDeferral(undefined);
+    }
   }
   return runs;
 }
@@ -2304,10 +2309,14 @@ async function embedItemsIsolated(
   localItemIds: readonly string[],
   scope: Pick<ConnectorStoreEmbedOptions, 'accountScope' | 'filters' | 'assertAuthorized' | 'assertSweepBindingCurrent' | 'stopAtMs' | 'shouldStop' | 'onBatchWritten'> = {},
 ): Promise<{ chunksEmbedded: number; itemsFailed: number; deferredReason?: string; busy?: boolean; stoppedAtDeadline?: boolean }> {
+  let chunksEmbedded = 0;
   try {
     const embed = await store.embedChunks({
       provider, localItemIds: [...localItemIds],
-      ...(scope.onBatchWritten ? { onBatchWritten: scope.onBatchWritten } : {}),
+      onBatchWritten(itemPks) {
+        chunksEmbedded += itemPks.length;
+        scope.onBatchWritten?.(itemPks);
+      },
       ...(scope.accountScope ? { accountScope: scope.accountScope } : {}),
       ...(scope.filters ? { filters: scope.filters } : {}),
       ...(scope.assertAuthorized ? { assertAuthorized: scope.assertAuthorized } : {}),
@@ -2321,23 +2330,22 @@ async function embedItemsIsolated(
     store.completeQueuedEmbedding(localItemIds);
     return { chunksEmbedded: embed.chunksEmbedded, itemsFailed: 0 };
   } catch (error) {
-    if (error instanceof FileLeaseBusyError) return { chunksEmbedded: 0, itemsFailed: 0, busy: true };
+    if (error instanceof FileLeaseBusyError) return { chunksEmbedded, itemsFailed: 0, busy: true };
     // An expired approval applies to the whole dispatch. Marking individual
     // items failed would hide their debt even after a fresh approval.
-    if (error instanceof OperationError && error.code === 'source_index_policy_violation') {
-      return { chunksEmbedded: 0, itemsFailed: 0, deferredReason: error.code };
+    if (error instanceof SourceScopeApprovalRequiredError) {
+      return { chunksEmbedded, itemsFailed: 0, deferredReason: SOURCE_SCOPE_APPROVAL_REQUIRED };
     }
     if (error instanceof TransientSourceEmbeddingError) {
-      return { chunksEmbedded: 0, itemsFailed: 0, deferredReason: connectorStoreEmbeddingDeferredReason(error) };
+      return { chunksEmbedded, itemsFailed: 0, deferredReason: connectorStoreEmbeddingDeferredReason(error) };
     }
     if (localItemIds.length === 1) {
       store.markEmbeddingFailed(localItemIds[0]!, embeddingFailureKind(error));
       console.warn(
         `[olympus:connector-store] embedding_item_skipped corpus_id=${store.corpusId} error_kind=${embeddingFailureKind(error)}`,
       );
-      return { chunksEmbedded: 0, itemsFailed: 1 };
+      return { chunksEmbedded, itemsFailed: 1 };
     }
-    let chunksEmbedded = 0;
     let itemsFailed = 0;
     for (const [index, localItemId] of localItemIds.entries()) {
       // One budget for the whole retry: each item's first batch always runs,

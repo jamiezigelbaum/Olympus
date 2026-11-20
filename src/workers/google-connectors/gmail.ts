@@ -166,11 +166,15 @@ export interface GmailConnectorScope {
   ownerTierRules?: readonly OwnerTierRule[];
   /**
    * Whether Olympus already holds this message (in either Gmail store). Held
-   * mail is never re-observed under a scope; see listItems.
+   * bodies are kept in place while their scope can be checked afresh.
    */
   storedItem?: (providerItemId: string) => GmailStoredItem | undefined;
+  /** An ordinary content listing encountered retained mail without this approval. */
+  queueScopeConfirmation?: (providerItemId: string) => void;
   /** A resumable confirmation walk. The store checks each retained copy's text. */
   confirmStoredItem?: (item: RawItem, passesIngestFilter: (text: string) => boolean) => void;
+  /** Remove a listed id from the pending work once its fresh check has completed. */
+  finishScopeConfirmation?: (id: string) => void;
 }
 
 export interface GmailStoredItem {
@@ -475,19 +479,8 @@ export class GoogleGmailSourceConnector implements SourceConnector {
         const stored = this.scope?.storedItem?.(message.id);
         if (confirmation) {
           if (!stored?.needsScopeObservation) continue;
-          this.beforeEachRequest?.();
           messagesFetched += 1;
-          this.providerRequests += 1;
-          const metadata = await client.getMessage(message.id, { format: 'metadata', metadataHeaders: GMAIL_METADATA_HEADERS })
-            .catch(error => {
-              // A message can disappear after listing. Only messages.list can reject its cursor.
-              if (gmailHttpStatus(error) === 404) return undefined;
-              throw error;
-            });
-          if (metadata?.id === message.id && gmailMessageInScope(metadata, this.scope!)) {
-            const item = gmailMessageItem(gmailMailRecordFromMessage(metadata, { metadataOnly: true }), this.account);
-            confirmation(item, text => !this.ingestSkip(item, text));
-          }
+          await this.confirmRetainedMessage(message.id);
           continue;
         }
         // Keep immutable stored bodies and their vectors. The content leg
@@ -497,6 +490,7 @@ export class GoogleGmailSourceConnector implements SourceConnector {
           // sender's Date header, which can say anything (a spam dated 2036
           // would park every later query past all real mail). The traversal's
           // own start bounds the next pass instead; see `startedMs`.
+          if (!metadataLeg && stored.needsScopeObservation) this.scope?.queueScopeConfirmation?.(message.id);
           this.itemsSkippedStored += 1;
           continue;
         }
@@ -630,6 +624,52 @@ export class GoogleGmailSourceConnector implements SourceConnector {
         // own token history while the shared page budget remains in force.
         requestedPageTokens.clear();
       } else if (!pageToken) break;
+    }
+  }
+
+  /** Both the walk and later listings use a confirmation connector with its verified mailbox and reserved budget. */
+  async confirmRetainedMessage(id: string, laterListing?: { pageToken?: string }): Promise<string | undefined> {
+    const scope = this.scope;
+    if (!scope?.confirmStoredItem) throw new Error('Gmail retained mail requires a confirmation scope.');
+    this.beforeEachRequest?.();
+    const client = await this.clientForRequest();
+    const readMetadata = async () => {
+      this.beforeEachRequest?.();
+      this.providerRequests += 1;
+      const message = await client.getMessage(id, { format: 'metadata', metadataHeaders: GMAIL_METADATA_HEADERS })
+        .catch(error => {
+          // Mail can disappear between the listing and this read.
+          if (gmailHttpStatus(error) === 404) return undefined;
+          throw error;
+        });
+      this.beforeEachRequest?.();
+      return message?.id === id && gmailMessageInScope(message, scope) ? message : undefined;
+    };
+    let metadata = await readMetadata();
+    if (metadata && laterListing && this.query) {
+      // Arbitrary operator queries (e.g. is:starred) can stop matching while
+      // the id waits. Ask for this message under the current scoped query,
+      // one page per turn if duplicate Message-IDs or receipt times exist.
+      const term = gmailMessageSearchTerm(metadata);
+      const query = term && this.scopedQuery(term);
+      if (query) {
+        this.providerRequests++;
+        const page = await listGmailMessagePage(client, { query, maxResults: DEFAULT_GMAIL_PAGE_SIZE, ...laterListing });
+        this.beforeEachRequest?.();
+        if (page.messages.some(message => message.id === id)) {
+          // Match the walk's order: fresh labels and sender after the listing.
+          metadata = await readMetadata();
+        } else {
+          if (page.nextPageToken) return page.nextPageToken;
+          metadata = undefined;
+        }
+      } else metadata = undefined;
+    }
+    if (metadata) {
+      const item = gmailMessageItem(gmailMailRecordFromMessage(metadata, { metadataOnly: true }), this.account);
+      scope.confirmStoredItem(item, text => !this.ingestSkip(item, text));
+    } else {
+      scope.finishScopeConfirmation?.(id);
     }
   }
 
@@ -1408,6 +1448,16 @@ export function gmailMailRecordFromMessage(
     ...(!metadataOnly && gmailTextComplete(message.payload) ? { textComplete: true } : {}),
     attachments: gmailAttachments(message.id, message.payload, false, children),
   };
+}
+
+/** A bounded search for one retained message, including mail with no usable Message-ID. */
+function gmailMessageSearchTerm(message: GmailMessage): string | undefined {
+  const messageId = bareMessageId(headersFromPart(message.payload).get('message-id'));
+  if (messageId && /^[^\s"()<>{}\\]{1,500}$/.test(messageId)) return `rfc822msgid:"${messageId}"`;
+  const received = internalDateNumber({ internalDate: message.internalDate });
+  if (received === undefined) return undefined;
+  const second = Math.floor(received / 1_000);
+  return `after:${second - 1} before:${second + 1}`;
 }
 
 /** The Message-ID header without its angle brackets. */

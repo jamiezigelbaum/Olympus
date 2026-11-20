@@ -12,6 +12,9 @@ import { embedPendingChunks, LocalConnectorStore } from '../src/workers/connecto
 import type { SourceEmbeddingInput, SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 import { EMBEDDING_SWEEP_MAX_ITEMS, EMBEDDING_SWEEP_MAX_ITEMS_ENV, embeddingSweepMaxItems, withEmbeddingSweep, type SourceSchedulerSource } from '../src/workers/source-scheduler.ts';
 
+import { SOURCE_SCOPE_APPROVAL_REQUIRED, SourceScopeApprovalRequiredError } from '../src/core/operation-error.ts';
+import { assertVeniceEmbeddingModelAllowed } from '../src/core/venice-models.ts';
+
 const ACCOUNT = 'personal';
 // About 4,000 characters a chunk: 100 chunks, four batches of 32 and one of 4.
 const LONG_TEXT = Array.from({ length: 100 }, (_, index) => `section ${index} ${'word '.repeat(790)}`).join('\n\n');
@@ -185,4 +188,59 @@ describe('embedding pass time budget', () => {
       store.close();
     }
   });
+});
+
+test.each(['queue', 'missing'])('a refused second batch retains the first 32 committed chunks in the %s receipt', async path => {
+  const item = rawItem('long', 'a'.repeat(32 * 4000 + 1));
+  const store = await storeWith([item]);
+  const model = slowProvider(0);
+  let calls = 0;
+  let approved = true;
+  const provider = { ...model,
+    async embed(batch: SourceEmbeddingInput[]) {
+      if (++calls === 2) approved = false;
+      return batch.map(() => [1, 0]);
+    },
+    assertBindingCurrent() {
+      if (!approved) throw new SourceScopeApprovalRequiredError('Approval expired');
+    },
+  };
+  try {
+    if (path === 'queue') store.queueEmbedding([item.identity.localItemId], provider);
+    const target = { store, provider, wholeStore: true };
+    const source = withEmbeddingSweep([lane()], () => () => [target])[0]!;
+    const sweep = source.tasks.at(-1)!;
+    expect(await sweep.run()).toMatchObject({ counts: { chunks_embedded: 32, items_failed: 0 },
+      retryAt: { degradedReason: SOURCE_SCOPE_APPROVAL_REQUIRED } });
+    expect(source.embeddingDeferredReason?.()).toBe(SOURCE_SCOPE_APPROVAL_REQUIRED);
+    expect(store.embeddingBacklogEstimate(provider.modelId).missingChunks).toBe(1);
+    // A renewed scope excludes the only owed item. A clean idle pass clears the old deferral.
+    await embedPendingChunks([{ ...target, accountScope: 'different-account' }], { maxItems: 32 });
+    expect(source.embeddingDeferredReason?.()).toBeUndefined();
+    approved = true;
+    expect(await sweep.run()).toMatchObject({ counts: { chunks_embedded: 1, items_failed: 0 } });
+  } finally {
+    store.close();
+  }
+});
+
+test('a model-policy denial on a Personal file is reported once and stays out of the retry queue', async () => {
+  const item = rawItem('note', 'Personal note');
+  const store = await storeWith([item]);
+  let calls = 0;
+  const provider = { ...slowProvider(0), async embed(): Promise<number[][]> {
+    calls++;
+    await assertVeniceEmbeddingModelAllowed('denied-model', async () => undefined);
+    return [];
+  } };
+  try {
+    store.queueEmbedding([item.identity.localItemId], provider);
+    const sweep = () => embedPendingChunks([{ store, provider, wholeStore: true }], { maxItems: 32 });
+    expect((await sweep())[0]).toMatchObject({ itemsFailed: 1, chunksEmbedded: 0 });
+    expect(store.embeddingDeferredReason()).toBeUndefined();
+    expect((await sweep())[0]).toMatchObject({ itemsAttempted: 0 });
+    expect(calls).toBe(1);
+  } finally {
+    store.close();
+  }
 });
