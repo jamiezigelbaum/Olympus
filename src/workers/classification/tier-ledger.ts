@@ -5549,6 +5549,21 @@ const STALE_EMBED_HOLD_DECIDED = `EXISTS (
           AND t.state = 'current' AND t.metadata_pending = 0 AND t.content_pending = 0
           AND t.metadata_tier <> 'secrets' AND t.content_tier <> 'secrets'
           AND t.target_metadata_tier IS NULL AND t.target_content_tier IS NULL
+          -- A re-judgment still open on this decision keeps the hold.
+          AND NOT (t.rejudge_json IS NOT NULL
+            AND json_extract(t.rejudge_json, '$.generation') = t.generation
+            AND json_extract(t.rejudge_json, '$.decidedAt') = t.decided_at
+            AND json_extract(t.rejudge_json, '$.reasonsJson') = t.reasons_json
+            AND json_extract(t.rejudge_json, '$.decidedBy') = t.decided_by)
+          -- The store must be at least as private as the verdict for each layer
+          -- the copy serves (same ranks as the tier exposure count).
+          AND (tier_copies.layers NOT IN ('content', 'both')
+            OR (CASE tier_copies.trust_domain WHEN 'secure_local' THEN 2 WHEN 'internal' THEN 1 ELSE 0 END)
+              >= (CASE WHEN t.content_tier = 'secure' OR t.metadata_tier = 'secure' THEN 2
+                       WHEN t.content_tier = 'private' OR t.metadata_tier = 'private' THEN 1 ELSE 0 END))
+          AND (tier_copies.layers NOT IN ('metadata', 'both')
+            OR (CASE tier_copies.trust_domain WHEN 'secure_local' THEN 2 WHEN 'internal' THEN 1 ELSE 0 END)
+              >= (CASE t.metadata_tier WHEN 'secure' THEN 2 WHEN 'private' THEN 1 ELSE 0 END))
       ) AND NOT EXISTS (
         SELECT 1 FROM tier_overrides o
         WHERE o.provider = tier_copies.provider AND o.account_scope = tier_copies.account_scope

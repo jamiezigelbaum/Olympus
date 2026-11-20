@@ -536,6 +536,35 @@ describe('embedding holds follow the decision through a move', () => {
     }
   });
 
+  test('release keeps the hold on a copy in a store less private than a raised verdict', () => {
+    const store = ledger();
+    try {
+      store.recordRoutedPlacement(ITEM, decision(), whole(INTERNAL, true));
+      const page = store.readSteps(store.staleEmbedHoldSteps(undefined, 10));
+      expect(page.rowIds).toHaveLength(1);
+      store.recordDecision(ITEM, decision({ metadataTier: 'secure', contentTier: 'secure' }));
+      expect(store.settleStaleEmbedHoldRows(page.rowIds)).toBe(0);
+      expect(store.copies(ITEM)[0]?.embedHold).toBe(true);
+    } finally {
+      store.close();
+    }
+  });
+
+  test('release keeps the hold while a re-judgment of the decision is open', () => {
+    const store = ledger();
+    try {
+      store.recordRoutedPlacement(ITEM, decision(), whole(INTERNAL, true));
+      const page = store.readSteps(store.staleEmbedHoldSteps(undefined, 10));
+      const row = store.getCurrent(ITEM)!;
+      expect(store.openRejudgeQuestion(ITEM, { expectedGeneration: row.generation,
+        decision: { ...row, state: 'pending', decidedBy: 'sniffer', contentPending: true }, keepVisible: false })).toBe(true);
+      expect(store.settleStaleEmbedHoldRows(page.rowIds)).toBe(0);
+      expect(store.copies(ITEM)[0]?.embedHold).toBe(true);
+    } finally {
+      store.close();
+    }
+  });
+
   test('release rechecks decisions and Secret overrides after finding held copies', () => {
     const store = ledger();
     try {
