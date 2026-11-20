@@ -10,7 +10,6 @@ import { registeredTierSets } from './tier-set-registry.ts';
 import { withMainThreadSqlTiming } from './main-thread-sql-trace.ts';
 import { find, ledgerFinderAfterHold, runPassHere, runPassOffThread, turn, type LoopPass, type LoopPassWrap } from './loop-pass.ts';
 import { ingestionTurn } from '../control-path-headroom.ts';
-import type { BackgroundWalkPause } from '../engine/stand-back.ts';
 import { withIdleStoreReclaim } from '../../core/store-reclaim-admission.ts';
 import { SUPERSEDED_SWEEP_SLICE_MS, TIER_DOMAIN_ORDER } from './tiered-store-set.ts';
 
@@ -404,7 +403,6 @@ export function startSupersededSweepTicker(options: {
   active?: () => boolean;
   holds?: () => boolean;
   canReclaim?: () => boolean;
-  pause?: BackgroundWalkPause;
   reclaimStore?: ReclaimStore;
   intervalMs?: number;
   ownerQuestionEndedAt?: () => number | undefined;
@@ -458,7 +456,7 @@ export function startSupersededSweepTicker(options: {
         reclaim(set);
         return;
       }
-      const complete = set.sweepSupersededSlice(options.pause ? { pause: options.pause } : undefined);
+      const complete = set.sweepSupersededSlice();
       if (typeof complete === 'boolean') {
         if (complete) afterPrune(set);
         return;

@@ -246,10 +246,9 @@ export interface StoreTotalsCount {
  * Set each total to the exact count plus what the triggers added since that
  * count's snapshot (kept now minus kept then). Exact whenever the triggers
  * ran over that interval; one short write on the writer. Returns the drift
- * it put right (the sum of each total's difference). A walked count whose
- * sequence was checked in the enclosing write transaction is already current.
+ * it put right (the sum of each total's difference).
  */
-export function applyStoreTotalsCount(db: Database, count: StoreTotalsCount, nowIso: string, options: { countIsCurrent?: boolean } = {}): number {
+export function applyStoreTotalsCount(db: Database, count: StoreTotalsCount, nowIso: string, options: { exact?: boolean } = {}): number {
   const counted = new Map<string, number>([
     ['items', Number(count.items)],
     ['tombstoned_items', Number(count.tombstoned_items)],
@@ -262,19 +261,22 @@ export function applyStoreTotalsCount(db: Database, count: StoreTotalsCount, now
   db.transaction(() => {
     const keptNow = new Map((db.query('SELECT name, n FROM store_totals').all() as Array<{ name: string; n: number }>)
       .map((row) => [row.name, Number(row.n)]));
+    // Two repairs can count the same quiet store. A previous repair's correction
+    // is not a trigger delta when no source writes occurred since the snapshot.
+    const writesChanged = keptNow.get(STORE_TOTALS_WRITES) !== keptThen.get(STORE_TOTALS_WRITES);
     const names = new Set([...counted.keys(), ...keptThen.keys(), ...keptNow.keys()]);
     const write = db.query('INSERT INTO store_totals (name, n) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET n = excluded.n');
     const remove = db.query('DELETE FROM store_totals WHERE name = ?');
     names.delete(STORE_TOTALS_WRITES);
     for (const name of names) {
-      const since = options.countIsCurrent ? 0 : (keptNow.get(name) ?? 0) - (keptThen.get(name) ?? 0);
+      const since = writesChanged ? (keptNow.get(name) ?? 0) - (keptThen.get(name) ?? 0) : 0;
       const exact = (counted.get(name) ?? 0) + since;
       drift += Math.abs((keptNow.get(name) ?? 0) - exact);
       if (exact === 0 && name.startsWith('vectors:')) remove.run(name);
       else write.run(name, exact);
     }
     db.query(`INSERT INTO store_totals_state (id, reconciled_at, drift) VALUES (1, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET reconciled_at = excluded.reconciled_at, drift = excluded.drift`).run(nowIso, drift);
+      ON CONFLICT(id) DO UPDATE SET reconciled_at = excluded.reconciled_at, drift = excluded.drift`).run(nowIso, options.exact === false ? WALK_OWED_LATER : drift);
   })();
   return drift;
 }

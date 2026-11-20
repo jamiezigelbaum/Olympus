@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { dirname } from 'node:path';
@@ -162,7 +162,7 @@ export async function holdSharedFileLease(targetPath: string, signal?: AbortSign
 /** Probe an existing lease with a single attempt. An unused lease needs no file. */
 export function fileLeaseHeld(targetPath: string): boolean {
   const path = lockPathFor(targetPath);
-  if (!existsSync(path)) return false;
+  if (!readUnlessMissing(() => statSync(path))) return false;
   const lock = tryKernelLock(path, 'exclusive');
   if (!lock) return true;
   lock.release();
@@ -267,7 +267,11 @@ async function acquireFileLease(
 }
 
 function readLeaseHeartbeat(targetPath: string): string | undefined {
-  try { return readFileSync(`${targetPath}.lock`, 'utf8'); }
+  return readUnlessMissing(() => readFileSync(`${targetPath}.lock`, 'utf8'));
+}
+
+function readUnlessMissing<T>(read: () => T): T | undefined {
+  try { return read(); }
   catch (error) {
     if (isNodeErrorWithCode(error, 'ENOENT')) return undefined;
     throw error;

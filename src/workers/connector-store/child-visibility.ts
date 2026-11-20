@@ -44,7 +44,6 @@
 
 import { tierLedgerIdentityKey, type TierLedger, type TierLedgerIdentity, type LedgerRead, type TierVisibilityReads, type TierCopy } from '../classification/tier-ledger.ts';
 import { currentSourceAnswerTrace } from '../source-index/answer-latency-trace.ts';
-import type { BackgroundWalkPause } from '../engine/stand-back.ts';
 import { offThreadReadsSupported, releaseOffThreadReads, withOffThreadSnapshot, type ReadPoolLane } from './off-thread-reads.ts';
 
 /** One visibility read, shared by synchronous readers and the awaiting Ask path. */
@@ -255,12 +254,11 @@ export async function ledgerReadOffThread<T>(ledger: TierLedger, steps: Generato
  * STALE_EMBED_HOLDS_SETTLED): found a page at a time on the read worker, set
  * by key here, then marked so no later boot looks again. Returns how many.
  */
-export async function settleStaleEmbedHolds(ledger: TierLedger, pageSize = 500, pause?: BackgroundWalkPause): Promise<number> {
+export async function settleStaleEmbedHolds(ledger: TierLedger, pageSize = 500): Promise<number> {
   if (ledger.staleEmbedHoldsSettled()) return 0;
   let settled = 0;
   let after: { corpusId: string; rowId: number } | undefined;
   for (;;) {
-    await pause?.();
     const page = await ledgerReadOffThread(ledger, ledger.staleEmbedHoldSteps(after, pageSize), { lane: 'background' });
     settled += ledger.settleStaleEmbedHoldRows(page.rowIds);
     if (!page.next) break;

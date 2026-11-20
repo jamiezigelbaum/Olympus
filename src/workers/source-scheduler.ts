@@ -288,12 +288,7 @@ export interface SourceSchedulerTask {
    * work already waiting in that lane). Never awaited; a throw is ignored.
    */
   atStart?(): void;
-  /** A sweep can release the source guard at its read-only pause points. */
-  allowsPausing?: boolean;
-  run(
-    context?: SourceSchedulerTaskRunContext,
-    guard?: <T>(work: () => Promise<T>) => Promise<T>,
-  ): Promise<SourceSchedulerTaskRunResult>;
+  run(context?: SourceSchedulerTaskRunContext): Promise<SourceSchedulerTaskRunResult>;
 }
 
 export interface SourceSchedulerTaskRunResult {
@@ -1113,14 +1108,9 @@ export class SourceScheduler {
     };
     await Promise.all([...groups.entries()].map(async ([concurrencyKey, group]) => {
       if (this.busyConcurrencyKeys.has(concurrencyKey)) return;
-      const follow = new Map<SchedulerTaskState, number>();
-      const defersToOwnKey = (state: SchedulerTaskState): boolean =>
-        provenance === 'scheduled' && state.task.allowsPausing === true
-        && taskConcurrencyKey(state.source, state.task) !== concurrencyKey;
       this.busyConcurrencyKeys.add(concurrencyKey);
       try {
         for (const state of group) {
-          if (defersToOwnKey(state)) { follow.set(state, dueAt); continue; }
           await runTask(state, dueAt);
         }
         // Work this group made due while it held the key (a backlog
@@ -1145,7 +1135,6 @@ export class SourceScheduler {
               || (sources.has(state.source) && state.task.kind === 'embed'))
             && state.nextRunAt <= now);
           for (const state of due) {
-            if (defersToOwnKey(state)) { follow.set(state, state.nextRunAt); continue; }
             if (state.running) continue;
             const ownKey = taskConcurrencyKey(state.source, state.task);
             if (ownKey !== concurrencyKey) {
@@ -1161,18 +1150,6 @@ export class SourceScheduler {
         }
       } finally {
         this.busyConcurrencyKeys.delete(concurrencyKey);
-      }
-      // A parked sweep must leave its source's turn free for an operator
-      // sync. Run it after the listing, on the sweep's independent turn.
-      for (const [state, at] of follow) {
-        const ownKey = taskConcurrencyKey(state.source, state.task);
-        if (state.running || this.busyConcurrencyKeys.has(ownKey)) continue;
-        this.busyConcurrencyKeys.add(ownKey);
-        try {
-          await runTask(state, at);
-        } finally {
-          this.busyConcurrencyKeys.delete(ownKey);
-        }
       }
     }));
   }
@@ -2114,7 +2091,7 @@ export const EMBEDDING_SWEEP_MAX_ITEMS = 32;
 /**
  * Raises the bound for a fast embedder (a GPU helper on another machine), where
  * 32 items take about a second and the pause between passes would set the pace.
- * The active-time budget still bounds new batches in a long pass.
+ * The store deadline still ends a long pass.
  */
 export const EMBEDDING_SWEEP_MAX_ITEMS_ENV = 'OLYMPUS_EMBEDDING_SWEEP_MAX_ITEMS';
 /** The whole selection's text is in memory at once, before the deadline can apply. */
@@ -2127,9 +2104,12 @@ export function embeddingSweepMaxItems(env: Record<string, string | undefined> =
     : EMBEDDING_SWEEP_MAX_ITEMS;
 }
 /**
- * The silence limit for one store in a sweep. A store that stops reporting
- * progress is cancelled and deferred so the scheduler can move on.
- * Half this interval is the active-time budget for starting new batches.
+ * The longest one store's part of a sweep pass may take. A pass holds its
+ * source's exclusive turn (source-account-guard.ts), so one that never ended
+ * held every later sync and extraction of the source behind it (Sparta,
+ * 2026-11-04: Dropbox's store pulls and extraction stopped for hours). Past
+ * this the pass gives the turn back and the store reads as deferred; the
+ * store's own embedding lease keeps a second pass off the same chunks.
  */
 export const EMBEDDING_SWEEP_STORE_DEADLINE_MS = 10 * 60_000;
 const EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60_000;
@@ -2178,9 +2158,9 @@ export function withEmbeddingSweep(
     trickle?: (target: ConnectorStoreEmbeddingTarget) => boolean;
     /** Called after a target embedded at least one chunk (the power assertion, local-pacing.ts). */
     onProgress?: (target: ConnectorStoreEmbeddingTarget) => void;
-    /** Parks scheduled sweeps at read-only checkpoints and before guarded embedding groups. */
+    /** Admit each scheduled store before its sweep and deadline begin. */
     pauseForAsk?: BackgroundWalkPause;
-    /** Releases the embedding lease and account guard before parking between batches. */
+    /** Stops the next embedding batch while an owner Ask has priority. */
     holdForAsk?: () => boolean;
   } = {},
 ): SourceSchedulerSource[] {
@@ -2243,6 +2223,9 @@ function embeddingSweepTask(
   holdForAsk?: () => boolean,
 ): SourceSchedulerTask {
   const maxItems = embeddingSweepMaxItems();
+  const askHolds = (): boolean => {
+    try { return holdForAsk?.() === true; } catch { return false; }
+  };
   const tricklingTarget = (target: ConnectorStoreEmbeddingTarget): boolean => {
     try { return trickle?.(target) === true; } catch { return false; }
   };
@@ -2316,7 +2299,6 @@ function embeddingSweepTask(
     id: `${source.sourceId}_embeddings`,
     kind: 'embed',
     writer: true,
-    allowsPausing: pauseForAsk !== undefined,
     // Its own turn, not the source's: embedding reads only stores (a store
     // another writer holds answers busy), never the provider, so nothing it
     // touches needs the source's serialized access. Under the source's key it
@@ -2325,16 +2307,14 @@ function embeddingSweepTask(
     concurrencyKey: embeddingSweepConcurrencyKey(source),
     intervalMs: EMBEDDING_SWEEP_INTERVAL_MS,
     freshnessThresholdMs: EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS,
-    run: async (context?: SourceSchedulerTaskRunContext, guard?: <T>(work: () => Promise<T>) => Promise<T>) => {
-      const operator = context?.provenance === 'operator';
-      const pause = operator ? undefined : pauseForAsk;
-      const holds = pause ? holdForAsk : undefined;
+    run: async (context?: SourceSchedulerTaskRunContext) => {
       const passTargets = targets();
       const runs: Awaited<ReturnType<typeof embedPendingChunks>> = [];
       let trickled = false;
-      const walks = new Map<number, { wake: EmbeddingSweepWake; not_resting?: EmbeddingSweepRestBlocker }>();
+      const walks = new Map<number, { rested: 0 | 1; wake?: EmbeddingSweepWake; not_resting?: EmbeddingSweepRestBlocker }>();
       for (const target of passTargets) {
-        await pause?.();
+        if (context?.provenance !== 'operator') await pauseForAsk?.();
+        const runIndex = runs.length;
         const paced = tricklingTarget(target);
         trickled ||= paced;
         const store = target.store;
@@ -2344,79 +2324,45 @@ function embeddingSweepTask(
         const receipts = path ? await readEmbeddingSweepIdle(path) : undefined;
         const keyBefore = idleBackoff ? quietKey(target, slot, path !== undefined) : undefined;
         const rested = quiet.get(store)?.get(slot) ?? receipts?.get(slot);
-        let wake: EmbeddingSweepWake | undefined;
-        const runIndex = runs.length;
-        const stalled = Symbol('stalled');
-        const controller = new AbortController();
-        let reportStall!: () => void;
-        const stall = new Promise<typeof stalled>((resolve) => {
-          reportStall = () => {
-            resolve(stalled);
-            controller.abort(new Error('Embedding sweep stopped reporting progress'));
-          };
-        });
-        let timer: ReturnType<typeof setTimeout> | undefined;
-        let observing = true;
-        const arm = () => { if (observing) timer = setTimeout(reportStall, deadlineMs); };
-        let pausedMs = 0;
-        const progress = () => { if (observing) timer?.refresh(); };
-        const checkpoint = () => {
-          controller.signal.throwIfAborted();
-          const waiting = pause?.();
-          if (!waiting) { progress(); return; }
-          const pausedAt = Date.now();
-          clearTimeout(timer);
-          return waiting.finally(() => {
-            pausedMs += Math.max(0, Date.now() - pausedAt);
-            controller.signal.throwIfAborted();
-            arm();
-          });
-        };
-        // The soft budget bounds new batches, in active time. The outer
-        // watchdog observes silence between milestones and sleeps during
-        // stand-back, so neither a long progressing walk nor an Ask is an
-        // outage. A silent provider still gives the scheduler its turn back.
-        const stopAtMs = Date.now() + Math.floor(deadlineMs / 2);
-        const work = async () => {
-          // Even an idle receipt requires a current account binding. Waiting
-          // for the account runner is itself covered by the watchdog.
-          if (guard) await guard(async () => controller.signal.throwIfAborted());
-          // Read the wake reason after the account binding is confirmed.
-          wake = idleBackoff ? embeddingSweepWake(store, rested, guard ? quietKey(target, slot, path !== undefined) : keyBefore) : undefined;
-          if (rested && wake === undefined && (!guard || keyBefore !== undefined)) return { kind: 'rested', rested } as const;
-          quiet.get(store)?.delete(slot);
-          // Invalidate before walking. A failed pass must not revive an older
-          // proof if its in-memory queue or deferral is lost on the next start.
-          if (path && receipts?.delete(slot)) await writeEmbeddingSweepIdle(path, receipts);
-          controller.signal.throwIfAborted();
-          const embedded = await embedPendingChunks([target], {
-            maxItems: paced ? GO_EASY_TRICKLE_EMBED_ITEMS : maxItems,
-            stopAtMs, diagnostics: true,
-            pacing: { now: () => Date.now() - pausedMs, progress, checkpoint, signal: controller.signal, ...(holds ? { holds } : {}) },
-            ...(guard ? { guard } : {}),
-          });
-          return { kind: 'embedded', embedded } as const;
-        };
-        arm();
-        const result = await Promise.race([work(), stall]).finally(() => { observing = false; clearTimeout(timer); });
-        if (result !== stalled && result.kind === 'rested') {
+        const wake = idleBackoff ? embeddingSweepWake(store, rested, keyBefore) : undefined;
+        if (idleBackoff && rested && wake === undefined) {
+          walks.set(runIndex, { rested: 1 });
           runs.push({ corpusId: store.corpusId, itemsAttempted: 0, chunksEmbedded: 0, itemsFailed: 0, itemsOutOfScope: 0,
-            inventory: result.rested.inventory });
+            inventory: rested.inventory });
           continue;
         }
-        if (result !== stalled) {
-          const { embedded } = result;
-          // A busy store keeps its prior outage until an embedding pass answers.
-          if (embedded.some((run) => run.chunksEmbedded > 0)) {
+        const walked = { rested: 0 as const, ...(wake ? { wake } : {}) };
+        walks.set(runIndex, walked);
+        quiet.get(store)?.delete(slot);
+        // Invalidate before walking. A failed pass must not revive an older
+        // proof if its in-memory queue or deferral is lost on the next start.
+        if (path && receipts?.delete(slot)) await writeEmbeddingSweepIdle(path, receipts);
+        const overran = Symbol('overran');
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        // The pass stops starting batches at half the deadline, so a store
+        // whose 32 items hold thousands of chunks ends in time and continues
+        // next pass, instead of overrunning and backing off as if the
+        // provider were down (Sparta, 2026-11-06: 94 overruns, 70 of them
+        // Dropbox, whose Private store then embedded nothing for an hour).
+        const stopAtMs = Date.now() + Math.floor(deadlineMs / 2);
+        const result = await Promise.race([
+          embedPendingChunks([target], { maxItems: paced ? GO_EASY_TRICKLE_EMBED_ITEMS : maxItems, stopAtMs, diagnostics: true, ...(holdForAsk ? { shouldStop: askHolds } : {}) }),
+          new Promise<typeof overran>((resolve) => { timer = setTimeout(() => resolve(overran), deadlineMs); }),
+        ]).finally(() => clearTimeout(timer));
+        if (result !== overran) {
+          // The abandoned call of an earlier overrun still holds the store's
+          // lease, so this pass answers busy: the store's outage stands until
+          // an embedding pass answers (embedPendingChunks clears it then).
+          if (result.some((run) => run.chunksEmbedded > 0)) {
             try { onProgress?.(target); } catch { /* best effort */ }
           }
           const outage = target.store.embeddingDeferredReason();
-          runs.push(...embedded.map((run) => run.busy === true && run.deferredReason === undefined && outage !== undefined
+          runs.push(...result.map((run) => run.busy === true && run.deferredReason === undefined && outage !== undefined
             ? { ...run, deferredReason: outage } : run));
           if (wake) {
-            const only = embedded.length === 1 ? embedded[0] : undefined;
+            const only = result.length === 1 ? result[0] : undefined;
             const blocker = await remember(target, slot, keyBefore, only, outage !== undefined, path, receipts);
-            walks.set(runIndex, { wake, ...(blocker ? { not_resting: blocker } : {}) });
+            if (blocker) walks.set(runIndex, { ...walked, not_resting: blocker });
           }
           continue;
         }
@@ -2424,7 +2370,7 @@ function embeddingSweepTask(
         runs.push({ corpusId: target.store.corpusId, itemsAttempted: 0, chunksEmbedded: 0, itemsFailed: 0, itemsOutOfScope: 0,
           inventory: { inventory_complete: 0, pass_overran: 1 },
           deferredReason: EMBEDDING_PROVIDER_UNAVAILABLE_REASON });
-        if (wake) walks.set(runIndex, { wake, not_resting: 'deferred' });
+        walks.set(runIndex, { ...walked, not_resting: 'deferred' });
       }
       const deferred = runs.filter((run) => run.deferredReason !== undefined).length;
       const counts = {
@@ -2436,30 +2382,36 @@ function embeddingSweepTask(
         stores_busy: runs.filter((run) => run.busy === true).length,
       };
       const status: SourceSchedulerTaskRunResult['status'] = counts.chunks_embedded > 0 ? 'progress' : 'idle';
-      const embeddingSweep: NonNullable<SourceSchedulerTaskRunResult['embeddingSweep']> = runs.map((run, index) => ({
-        source_index: sourceIndex,
-        store_index: index,
-        trust_domain: passTargets[index]!.store.trustDomain,
-        family: passTargets[index]!.store.family,
-        ...walks.get(index),
-        counts: {
-          ...run.inventory,
-          whole_store: passTargets[index]!.wholeStore ? 1 : 0,
-          queued_items: passTargets[index]!.store.queuedEmbeddingItemIds().length,
-          items_attempted: run.itemsAttempted, chunks_embedded: run.chunksEmbedded,
-          items_failed: run.itemsFailed, skipped_out_of_scope_items: run.itemsOutOfScope,
-          skipped_lease_busy_items: run.busy ? run.itemsAttempted : 0,
-          skipped_deferred_items: run.deferredReason ? run.itemsAttempted : 0,
-          stores_deferred: run.deferredReason ? 1 : 0, stores_lease_busy: run.busy ? 1 : 0,
-          stopped_at_deadline: run.stoppedAtDeadline ? 1 : 0,
-          ...(idleBackoff ? { rested: walks.has(index) ? 0 : 1 } : {}),
-        },
-      }));
+      const embeddingSweep: NonNullable<SourceSchedulerTaskRunResult['embeddingSweep']> = runs.map((run, index) => {
+        const { rested, ...reason } = walks.get(index)!;
+        return {
+          source_index: sourceIndex,
+          store_index: index,
+          trust_domain: passTargets[index]!.store.trustDomain,
+          family: passTargets[index]!.store.family,
+          ...reason,
+          counts: {
+            ...run.inventory,
+            whole_store: passTargets[index]!.wholeStore ? 1 : 0,
+            queued_items: passTargets[index]!.store.queuedEmbeddingItemIds().length,
+            items_attempted: run.itemsAttempted, chunks_embedded: run.chunksEmbedded,
+            items_failed: run.itemsFailed, skipped_out_of_scope_items: run.itemsOutOfScope,
+            skipped_lease_busy_items: run.busy ? run.itemsAttempted : 0,
+            skipped_deferred_items: run.deferredReason ? run.itemsAttempted : 0,
+            stores_deferred: run.deferredReason ? 1 : 0, stores_lease_busy: run.busy ? 1 : 0,
+            stopped_at_deadline: run.stoppedAtDeadline ? 1 : 0,
+            rested,
+          },
+        };
+      });
       const attemptedAt = Date.parse(context?.attemptedAt ?? '') || Date.now();
       if (deferred === 0) {
         // A store that filled its bound has more owed: a backlog drains pass after pass, not one bound a minute.
-        const more = !trickled && runs.some((run) => run.busy !== true && run.chunksEmbedded > 0
-          && (run.itemsAttempted >= maxItems || run.stoppedAtDeadline === true));
+        // A pass the owner's Ask stopped continues soon after it is answered
+        // (the scheduler holds new runs until then).
+        const heldForAsk = holdForAsk !== undefined && runs.some((run) => run.stoppedAtDeadline === true) && askHolds();
+        const more = heldForAsk || (!trickled && runs.some((run) => run.busy !== true && run.chunksEmbedded > 0
+          && (run.itemsAttempted >= maxItems || run.stoppedAtDeadline === true)));
         if (counts.items_failed === 0) return { status, counts, embeddingSweep, ...(more ? { continueSoon: true } : {}) };
         // Skipped items are surfaced, not retried. A backlog still drains pass
         // after pass: one failed item, ever, once held every later pass of the

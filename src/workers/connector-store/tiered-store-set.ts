@@ -45,7 +45,6 @@
 import { writableStoreOpensForbidden } from '../../core/store-write-guard.ts';
 import { sourceExclusionFactsFromMetadata } from '../../core/source-ingestion-exclusions.ts';
 import { ingestionTurn } from '../control-path-headroom.ts';
-import type { BackgroundWalkPause } from '../engine/stand-back.ts';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import type {
@@ -643,13 +642,12 @@ export class TieredStoreSet {
    * engine background's adaptive ticker takes them (startSupersededSweepTicker) and never while an owner question is in flight. True once
    * the sweep is done for this ledger.
    */
-  sweepSupersededSlice(options: { embeddingLedger?: TierMoveOptions['embeddingLedger']; pause?: BackgroundWalkPause } = {}): boolean | Promise<boolean> {
+  sweepSupersededSlice(options: { embeddingLedger?: TierMoveOptions['embeddingLedger'] } = {}): boolean | Promise<boolean> {
     if (writableStoreOpensForbidden()) return true;
     // Its candidates are found on the ledger's read worker, with a turn
     // between the items it prunes (loop-stall step-back, family 5).
     return sweepAutomaticSupersededCopiesInTurns(this, { budgetMs: SUPERSEDED_SWEEP_SLICE_MS,
       ...(options.embeddingLedger ? { embeddingLedger: options.embeddingLedger } : {}),
-      ...(options.pause ? { turn: async () => { await ingestionTurn(); await options.pause?.(); } } : {}),
     }).then((report) => report.complete, () => false);
   }
 

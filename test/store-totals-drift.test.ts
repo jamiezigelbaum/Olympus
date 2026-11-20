@@ -172,23 +172,6 @@ describe('the totals walk', () => {
     } finally { query.mockRestore(); store.close(); ledger.close(); }
   });
 
-  test('the first totals repair restarts when an item is tombstoned during a pause', async () => {
-    const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: CORPUS_ID, family: 'file', trustDomain: 'secure_local' });
-    const db = (store as unknown as { db: Database }).db;
-    let checkpoints = 0;
-    try {
-      await store.syncFromConnector(connector([file('a.txt', 'alpha')]), { fetchContent: true });
-      expect(store.totals()).toBeUndefined();
-      await store.reconcileTotals({ background: true, pause: () => {
-        if (++checkpoints !== 2) return;
-        db.exec('UPDATE items SET tombstoned = 1 WHERE item_pk = 1');
-        return Promise.resolve();
-      } });
-      expect(withoutStamp(store.totals())).toEqual(recount(store));
-      expect(store.totals()).toMatchObject({ items: 0, tombstonedItems: 1 });
-    } finally { store.close(); }
-  });
-
   test('two quiet repairs install the same count even though the first fixes drift', async () => {
     const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: CORPUS_ID, family: 'file', trustDomain: 'secure_local' });
     const db = (store as unknown as { db: Database }).db;

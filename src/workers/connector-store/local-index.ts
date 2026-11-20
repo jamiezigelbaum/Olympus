@@ -1,4 +1,3 @@
-import { untilAborted } from '../../core/http-timeout.ts';
 import { changeMemoryActivity, changeMemoryCounter } from '../../core/memory-counters.ts';
 import { trackSqliteStoreMemory, untrackSqliteStoreMemory } from '../engine-split/sqlite-memory.ts';
 import { noteSourceIndexReadProgress } from '../../core/source-index/read-progress.ts';
@@ -31,7 +30,6 @@ import { expandSourceIndexKeywords, keywordPrepareWaitMs, withExpandedSourceInde
 import { RECENT_ITEMS_CUT_SHORT } from '../../core/source-index/partial-search.ts';
 import { CONTROL_PATH_SLICE_MS, controlPathHeadroom, ingestionTurn, type ControlPathHeadroom } from '../control-path-headroom.ts';
 import { BACKGROUND_READS, OffThreadReadBusyError, offThreadReadsSupported, openOffThreadSnapshot, READ_POOL_RESCORE_READERS, readInBackground, readOnPool, releaseOffThreadReads, withOffThreadSnapshot, type StoreRead } from './off-thread-reads.ts';
-import type { BackgroundWalkPause } from '../engine/stand-back.ts';
 // The shared connector ingest spine: ONE generic local store that turns any
 // Contract 1 SourceConnector into a searchable, analyst-served corpus with
 // zero new storage code.
@@ -142,7 +140,6 @@ import {
   VisibilityChangedError,
   parentVerdictsOffThread,
   CHILD_PARENT_CHAIN_LIMIT,
-  childVisibilityUnchanged,
   hiddenChildKeysSteps,
   ledgerVisibilityOffThread,
   ledgerVisibilityHere,
@@ -1219,7 +1216,7 @@ function runHiddenStepsHere<T>(steps: Generator<HiddenStep, T, unknown>): T {
 }
 
 /** runStepsInTurns for a build with finders: each finder runs on the read worker. */
-async function runHiddenStepsInTurns<T>(steps: Generator<HiddenStep, T, unknown>, progress?: () => void): Promise<T> {
+async function runHiddenStepsInTurns<T>(steps: Generator<HiddenStep, T, unknown>): Promise<T> {
   await ingestionTurn();
   let step = steps.next();
   while (!step.done) {
@@ -1227,7 +1224,6 @@ async function runHiddenStepsInTurns<T>(steps: Generator<HiddenStep, T, unknown>
     try { found = step.value ? await step.value.find.offThread() : await ingestionTurn(); }
     catch (error) { step = steps.throw(error); continue; }
     step = steps.next(found);
-    progress?.();
   }
   return step.value;
 }
@@ -2039,8 +2035,11 @@ export interface ConnectorStoreEmbedOptions {
    * first batch always runs, so every pass makes progress. Not with a journal.
    */
   stopAtMs?: number;
-  /** The scheduler measures its budget in active time and observes forward progress. */
-  sweepTiming?: Omit<EmbeddingSweepPacing, 'checkpoint'>;
+  /**
+   * Polled before each batch after the first, like `stopAtMs`: true stops the
+   * pass the same way (the owner's Ask is running). Not with a journal.
+   */
+  shouldStop?: () => boolean;
   /** Durable idempotency key for a maintenance page's embedding phase. */
   journalId?: string;
   /** Monotonic owner generation used to fence a superseded maintenance run. */
@@ -2067,7 +2066,6 @@ export interface ConnectorStoreEmbedSummary {
   chunksSkipped: number;
   /** Set when the pass reached `stopAtMs` with chunks still owed. Counts only. */
   stoppedAtDeadline?: true;
-  pausedForAsk?: true;
   /**
    * Set when the embedding provider stopped answering part-way (a transient
    * outage or timeout that outlived its own retries). What was embedded before
@@ -2165,14 +2163,6 @@ export interface ConnectorStoreEmbedStoreRun {
   inventory?: Record<string, number>;
 }
 
-type EmbeddingSweepPacing = {
-  now: () => number;
-  checkpoint: BackgroundWalkPause;
-  progress: () => void;
-  signal: AbortSignal;
-  holds?: () => boolean;
-};
-
 /**
  * The source-neutral embedding sweep, one bounded pass over each target:
  *
@@ -2196,17 +2186,10 @@ export async function embedPendingChunks(
   targets: readonly ConnectorStoreEmbeddingTarget[],
   // stopAtMs: no batch starts after it (the first always runs). Items count
   // badly as work: one long file can hold more chunks than a pass has time for.
-  options: {
-    maxItems: number;
-    stopAtMs?: number;
-    diagnostics?: boolean;
-    pacing?: EmbeddingSweepPacing;
-    guard?: <T>(work: () => Promise<T>) => Promise<T>;
-  },
+  // shouldStop: polled with stopAtMs, and before the first batch too (the owner's Ask).
+  options: { maxItems: number; stopAtMs?: number; diagnostics?: boolean; shouldStop?: () => boolean },
 ): Promise<ConnectorStoreEmbedStoreRun[]> {
   const runs: ConnectorStoreEmbedStoreRun[] = [];
-  const { pacing, guard } = options;
-  const now = pacing?.now ?? Date.now;
   for (const target of targets) {
     const { store } = target;
     const run: ConnectorStoreEmbedStoreRun = {
@@ -2218,20 +2201,15 @@ export async function embedPendingChunks(
     };
     runs.push(run);
     const inventoryWrites = options.diagnostics && target.wholeStore === true ? store.writeSequence() : undefined;
-    if (options.diagnostics) run.inventory = await store.embeddingSweepInventory(target.provider, target, options.stopAtMs, undefined, pacing);
-    await pacing?.checkpoint();
-    const selectGroups = () => {
-      pacing?.signal.throwIfAborted();
-      return store.queuedEmbeddingGroups(options.maxItems).filter((group) => {
-        // A store that catches up never replays a queue left under another
-        // identity (the owner changed the tier's model): its items are missing
-        // vectors on the current one and are picked up below instead.
-        if (target.wholeStore !== true || sameEmbeddingIdentity(group.provider, target.provider)) return true;
-        store.completeQueuedEmbedding(group.localItemIds);
-        return false;
-      });
-    };
-    const groups = guard ? await guard(async () => selectGroups()) : selectGroups();
+    if (options.diagnostics) run.inventory = await store.embeddingSweepInventory(target.provider, target, options.stopAtMs);
+    const groups = store.queuedEmbeddingGroups(options.maxItems).filter((group) => {
+      // A store that catches up never replays a queue left under another
+      // identity (the owner changed the tier's model): its items are missing
+      // vectors on the current one and are picked up below instead.
+      if (target.wholeStore !== true || sameEmbeddingIdentity(group.provider, target.provider)) return true;
+      store.completeQueuedEmbedding(group.localItemIds);
+      return false;
+    });
     const queued = groups.reduce((sum, group) => sum + group.localItemIds.length, 0);
     // The inventory tests vector currency over a superset of the work list.
     // A complete zero-pending inventory can stand in for the list's walk
@@ -2241,50 +2219,29 @@ export async function embedPendingChunks(
       && inventoryWrites !== undefined && store.writeSequence() === inventoryWrites && !store.fileReplacedOrRemoved();
     if (target.wholeStore === true && queued < options.maxItems && !noMissingVectors) {
       const queuedIds = new Set(groups.flatMap((group) => group.localItemIds));
-      const missing = (await store.missingEmbeddingItemIdsInTurns(target.provider, options.maxItems - queued, target, undefined, pacing?.checkpoint, pacing?.progress))
+      const missing = (await store.missingEmbeddingItemIdsInTurns(target.provider, options.maxItems - queued, target))
         .filter((localItemId) => !queuedIds.has(localItemId));
       if (missing.length > 0) groups.push({ provider: target.provider, localItemIds: missing });
     }
     let answered = false;
-    for (let index = 0; index < groups.length;) {
-      const group = groups[index]!;
-      await pacing?.checkpoint();
-      pacing?.signal.throwIfAborted();
-      if (answered && options.stopAtMs !== undefined && now() >= options.stopAtMs) {
+    for (const group of groups) {
+      if ((answered && options.stopAtMs !== undefined && Date.now() >= options.stopAtMs) || options.shouldStop?.() === true) {
         run.stoppedAtDeadline = true;
         break;
       }
-      // Neither the source account guard nor the store's embedding lease is
-      // held while parked. Both serve foreground and forwarded operations.
-      const embed = async () => {
-        pacing?.signal.throwIfAborted();
-        pacing?.progress();
-        try {
-          group.provider.assertBindingCurrent?.();
-          await embeddingStep(() => target.assertAuthorized?.(), pacing?.signal);
-        } catch {
-          pacing?.signal.throwIfAborted();
-          store.completeQueuedEmbedding(group.localItemIds);
-          return undefined;
-        }
-        return embedItemsIsolated(store, group.provider, group.localItemIds, {
-          ...target,
-          ...(options.stopAtMs !== undefined ? { stopAtMs: options.stopAtMs } : {}),
-          ...(pacing ? { sweepTiming: pacing } : {}),
-        });
-      };
-      const outcome = guard ? await guard(embed) : await embed();
-      if (outcome?.pausedForAsk) {
-        run.chunksEmbedded += outcome.chunksEmbedded;
-        run.itemsFailed += outcome.itemsFailed;
-        answered ||= outcome.chunksEmbedded > 0;
-        continue;
-      }
-      index += 1;
-      if (!outcome) {
+      try {
+        group.provider.assertBindingCurrent?.();
+        await target.assertAuthorized?.();
+      } catch {
+        store.completeQueuedEmbedding(group.localItemIds);
         run.itemsOutOfScope += group.localItemIds.length;
         continue;
       }
+      const outcome = await embedItemsIsolated(store, group.provider, group.localItemIds, {
+        ...target,
+        ...(options.stopAtMs !== undefined ? { stopAtMs: options.stopAtMs } : {}),
+        ...(options.shouldStop ? { shouldStop: options.shouldStop } : {}),
+      });
       run.itemsAttempted += group.localItemIds.length;
       run.chunksEmbedded += outcome.chunksEmbedded;
       run.itemsFailed += outcome.itemsFailed;
@@ -2308,13 +2265,6 @@ export async function embedPendingChunks(
   return runs;
 }
 
-/** Stop waiting for an external step even when it cannot cancel its own promise. */
-async function embeddingStep<T>(work: () => T | Promise<T>, signal?: AbortSignal): Promise<T> {
-  signal?.throwIfAborted();
-  const result = work();
-  return signal ? untilAborted(Promise.resolve(result), signal) : result;
-}
-
 function sameEmbeddingIdentity(a: SourceEmbeddingProvider, b: SourceEmbeddingProvider): boolean {
   return a.provider === b.provider && a.backend === b.backend && a.modelId === b.modelId && a.epochId === b.epochId;
 }
@@ -2328,8 +2278,8 @@ async function embedItemsIsolated(
   store: LocalConnectorStore,
   provider: SourceEmbeddingProvider,
   localItemIds: readonly string[],
-  scope: Pick<ConnectorStoreEmbedOptions, 'accountScope' | 'filters' | 'assertAuthorized' | 'stopAtMs' | 'sweepTiming'> = {},
-): Promise<{ chunksEmbedded: number; itemsFailed: number; deferredReason?: string; busy?: boolean; stoppedAtDeadline?: boolean; pausedForAsk?: boolean }> {
+  scope: Pick<ConnectorStoreEmbedOptions, 'accountScope' | 'filters' | 'assertAuthorized' | 'stopAtMs' | 'shouldStop'> = {},
+): Promise<{ chunksEmbedded: number; itemsFailed: number; deferredReason?: string; busy?: boolean; stoppedAtDeadline?: boolean }> {
   try {
     const embed = await store.embedChunks({
       provider, localItemIds: [...localItemIds],
@@ -2337,16 +2287,14 @@ async function embedItemsIsolated(
       ...(scope.filters ? { filters: scope.filters } : {}),
       ...(scope.assertAuthorized ? { assertAuthorized: scope.assertAuthorized } : {}),
       ...(scope.stopAtMs !== undefined ? { stopAtMs: scope.stopAtMs } : {}),
-      ...(scope.sweepTiming ? { sweepTiming: scope.sweepTiming } : {}),
+      ...(scope.shouldStop ? { shouldStop: scope.shouldStop } : {}),
     });
     // Stopped part-way, the items stay queued: the next pass skips the chunks
     // that already hold a current vector and embeds the rest.
-    if (embed.pausedForAsk) return { chunksEmbedded: embed.chunksEmbedded, itemsFailed: 0, pausedForAsk: true };
     if (embed.stoppedAtDeadline) return { chunksEmbedded: embed.chunksEmbedded, itemsFailed: 0, stoppedAtDeadline: true };
     store.completeQueuedEmbedding(localItemIds);
     return { chunksEmbedded: embed.chunksEmbedded, itemsFailed: 0 };
   } catch (error) {
-    scope.sweepTiming?.signal.throwIfAborted();
     if (error instanceof FileLeaseBusyError) return { chunksEmbedded: 0, itemsFailed: 0, busy: true };
     if (error instanceof TransientSourceEmbeddingError) {
       return { chunksEmbedded: 0, itemsFailed: 0, deferredReason: connectorStoreEmbeddingDeferredReason(error) };
@@ -2363,13 +2311,13 @@ async function embedItemsIsolated(
     for (const [index, localItemId] of localItemIds.entries()) {
       // One budget for the whole retry: each item's first batch always runs,
       // so without this check every item past the deadline would still run.
-      if (index > 0 && scope.stopAtMs !== undefined && (scope.sweepTiming?.now() ?? Date.now()) >= scope.stopAtMs) {
+      if (index > 0 && ((scope.stopAtMs !== undefined && Date.now() >= scope.stopAtMs) || scope.shouldStop?.() === true)) {
         return { chunksEmbedded, itemsFailed, stoppedAtDeadline: true };
       }
       const single = await embedItemsIsolated(store, provider, [localItemId], scope);
       chunksEmbedded += single.chunksEmbedded;
       itemsFailed += single.itemsFailed;
-      if (single.busy || single.deferredReason || single.stoppedAtDeadline || single.pausedForAsk) return { ...single, chunksEmbedded, itemsFailed };
+      if (single.busy || single.deferredReason || single.stoppedAtDeadline) return { ...single, chunksEmbedded, itemsFailed };
     }
     return { chunksEmbedded, itemsFailed };
   }
@@ -4960,13 +4908,13 @@ export class LocalConnectorStore {
    * set is current as of the start of the build; a copy hidden after that is
    * caught by the embedding batch recheck right before dispatch.
    */
-  private async tierHiddenItemPksInTurns(progress?: () => void): Promise<TierLedgerHiddenItemPks> {
-    const base = await runHiddenStepsInTurns(this.tierLedgerHiddenSteps(), progress);
+  private async tierHiddenItemPksInTurns(): Promise<TierLedgerHiddenItemPks> {
+    const base = await runHiddenStepsInTurns(this.tierLedgerHiddenSteps());
     // Keep the counts' start-of-build semantics during continuous intake.
     // Search and embedding recheck served rows; requiring the whole lane to
     // stay unchanged across this full scan would prevent its memo ever filling.
     // Not voided on a change: this set keeps its start-of-build semantics (above).
-    return this.withHiddenChildren(base, await this.hiddenChildItemPksInTurns(progress));
+    return this.withHiddenChildren(base, await this.hiddenChildItemPksInTurns());
   }
 
   /**
@@ -4984,7 +4932,7 @@ export class LocalConnectorStore {
    * memo it leaves (installed at the start-of-build cursors) makes the next
    * build incremental.
    */
-  private async hiddenChildItemPksInTurns(progress?: () => void): Promise<number[]> {
+  private async hiddenChildItemPksInTurns(): Promise<number[]> {
     const steps = this.hiddenChildReadSteps();
     let next = steps.next();
     while (!next.done) {
@@ -4992,7 +4940,6 @@ export class LocalConnectorStore {
       try { result = await visibilityStepAwaited(next.value); }
       catch (error) { next = steps.throw(error); continue; }
       next = steps.next(result);
-      progress?.();
     }
     return next.value;
   }
@@ -7457,7 +7404,6 @@ export class LocalConnectorStore {
     provider: Parameters<typeof judgeMediaImages>[0],
     rows: ReadonlyArray<{ media_path: string | null; media_sha256: string | null }>,
     assertAuthorized: (() => void | Promise<void>) | undefined,
-    timing?: ConnectorStoreEmbedOptions['sweepTiming'],
   ): Promise<number> {
     const judgeId = mediaJudgeId(provider);
     const seen = new Set<string>();
@@ -7473,15 +7419,12 @@ export class LocalConnectorStore {
     }
     let judged = 0;
     for (let offset = 0; offset < images.length; offset += EMBEDDING_BATCH_SIZE) {
-      timing?.progress();
-      if (timing?.holds?.()) break;
       const batch = images.slice(offset, offset + EMBEDDING_BATCH_SIZE);
       let judgments: MediaJudgment[];
       try {
-        await embeddingStep(() => assertAuthorized?.(), timing?.signal);
-        judgments = await embeddingStep(() => judgeMediaImages(provider, batch), timing?.signal);
+        await assertAuthorized?.();
+        judgments = await judgeMediaImages(provider, batch);
       } catch {
-        timing?.signal.throwIfAborted();
         // Held (the encoder is not running), an engine fault, or a lost
         // approval: nothing is recorded, and a later pass tries again.
         return judged;
@@ -13499,80 +13442,56 @@ export class LocalConnectorStore {
     limit: number,
     scope: Pick<ConnectorStoreEmbedOptions, 'accountScope' | 'filters'> = {},
     windowChunks = MISSING_EMBEDDING_CHUNK_WINDOW,
-    checkpoint?: BackgroundWalkPause,
-    progress?: () => void,
   ): Promise<string[]> {
     if (limit <= 0) return [];
-    walk: for (;;) {
-      await checkpoint?.();
-      const resume = this.embeddingWalkResumeCheck(checkpoint);
-      const tierHidden = await this.tierHiddenItemPksInTurns(progress);
-      // The same list as missingEmbeddingItemIds (items in order of their first
-      // chunk), read one window of chunk pks at a time with a turn between.
-      // One query over every chunk held the background for 1.5-2.7 s on each
-      // sweep once most chunks were embedded (Sparta, rc.17, 15 Nov 2026), and
-      // a window held it about 500 ms on rc.19.
-      const modelId = embedder.modelId;
-      const accountScope = normalizeOptionalAccountScope(scope.accountScope);
-      const scoped = connectorStoreFilterSql(scope.filters);
-      const failed = this.embeddingFailureState;
-      const allowHeld = this.canEmbedHeld(embedder);
-      const privateTier = this.privateTierEmbeddingFilter(embedder);
-      const offThread = offThreadReadsSupported(this.dbPath);
-      // On the read worker the tier ledger's exclusions apply here, from the
-      // hidden-copy set: the worker's connection has none of this one's temp tables.
-      const tierExclusion = offThread ? { filter: '', params: [] as string[] } : this.embeddingWorkListExclusionFilter(0, tierHidden, allowHeld);
-      const excluded = offThread ? await embeddingExcludedPksInTurns(tierHidden, allowHeld) : undefined;
-      const filter = `${tierExclusion.filter} ${privateTier.filter} ${accountScope ? 'AND i.account_scope = ?' : ''} ${scoped.sql}`;
-      const params = [...tierExclusion.params, ...privateTier.params, ...(accountScope ? [accountScope] : []), ...scoped.params];
-      const windowSql = `
-        SELECT MIN(c.chunk_pk) AS first_chunk_pk, i.item_pk AS item_pk, i.local_item_id AS local_item_id
-        FROM chunks c
-        JOIN items i ON i.item_pk = c.item_pk
-        LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
-        WHERE c.chunk_pk > ? AND c.chunk_pk <= ?
-          AND i.tombstoned = 0 AND i.trust_tier <> 'S5'
-          AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
-          ${filter}
-        GROUP BY i.item_pk
-        ORDER BY first_chunk_pk ASC
-      `;
-      const read = this.embeddingSweepRead(offThread);
-      const maxChunkPk = (await read({ sql: 'SELECT COALESCE(MAX(chunk_pk), 0) AS n FROM chunks', params: [], mode: 'get' }) as { n: number }).n;
-      // An item already listed from an earlier chunk keeps that place.
-      const seen = new Set<number>();
-      const found: string[] = [];
-      for (let after = 0; after < maxChunkPk && found.length < limit; after += windowChunks) {
-        if (after > 0) await ingestionTurn();
-        if (!await resume()) continue walk;
-        const rows = await read({ sql: windowSql, params: [modelId, after, after + windowChunks, ...params], mode: 'all' }) as Array<{ item_pk: number; local_item_id: string }>;
-        for (const row of rows) {
-          if (excluded?.has(row.item_pk) || seen.has(row.item_pk)) continue;
-          seen.add(row.item_pk);
-          if (failed?.has(row.local_item_id)) continue;
-          found.push(row.local_item_id);
-          if (found.length === limit) break;
-        }
+    const tierHidden = await this.tierHiddenItemPksInTurns();
+    // The same list as missingEmbeddingItemIds (items in order of their first
+    // chunk), read one window of chunk pks at a time with a turn between.
+    // One query over every chunk held the background for 1.5-2.7 s on each
+    // sweep once most chunks were embedded (Sparta, rc.17, 15 Nov 2026), and
+    // a window held it about 500 ms on rc.19.
+    const modelId = embedder.modelId;
+    const accountScope = normalizeOptionalAccountScope(scope.accountScope);
+    const scoped = connectorStoreFilterSql(scope.filters);
+    const failed = this.embeddingFailureState;
+    const allowHeld = this.canEmbedHeld(embedder);
+    const privateTier = this.privateTierEmbeddingFilter(embedder);
+    const offThread = offThreadReadsSupported(this.dbPath);
+    // On the read worker the tier ledger's exclusions apply here, from the
+    // hidden-copy set: the worker's connection has none of this one's temp tables.
+    const tierExclusion = offThread ? { filter: '', params: [] as string[] } : this.embeddingWorkListExclusionFilter(0, tierHidden, allowHeld);
+    const excluded = offThread ? await embeddingExcludedPksInTurns(tierHidden, allowHeld) : undefined;
+    const filter = `${tierExclusion.filter} ${privateTier.filter} ${accountScope ? 'AND i.account_scope = ?' : ''} ${scoped.sql}`;
+    const params = [...tierExclusion.params, ...privateTier.params, ...(accountScope ? [accountScope] : []), ...scoped.params];
+    const windowSql = `
+      SELECT MIN(c.chunk_pk) AS first_chunk_pk, i.item_pk AS item_pk, i.local_item_id AS local_item_id
+      FROM chunks c
+      JOIN items i ON i.item_pk = c.item_pk
+      LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
+      WHERE c.chunk_pk > ? AND c.chunk_pk <= ?
+        AND i.tombstoned = 0 AND i.trust_tier <> 'S5'
+        AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
+        ${filter}
+      GROUP BY i.item_pk
+      ORDER BY first_chunk_pk ASC
+    `;
+    const read = this.embeddingSweepRead(offThread);
+    const maxChunkPk = (await read({ sql: 'SELECT COALESCE(MAX(chunk_pk), 0) AS n FROM chunks', params: [], mode: 'get' }) as { n: number }).n;
+    // An item already listed from an earlier chunk keeps that place.
+    const seen = new Set<number>();
+    const found: string[] = [];
+    for (let after = 0; after < maxChunkPk && found.length < limit; after += windowChunks) {
+      if (after > 0) await ingestionTurn();
+      const rows = await read({ sql: windowSql, params: [modelId, after, after + windowChunks, ...params], mode: 'all' }) as Array<{ item_pk: number; local_item_id: string }>;
+      for (const row of rows) {
+        if (excluded?.has(row.item_pk) || seen.has(row.item_pk)) continue;
+        seen.add(row.item_pk);
+        if (failed?.has(row.local_item_id)) continue;
+        found.push(row.local_item_id);
+        if (found.length === limit) break;
       }
-      return found;
     }
-  }
-
-  /** Captures the dependencies before reading the visibility projection. */
-  private embeddingWalkResumeCheck(pause?: BackgroundWalkPause): () => Promise<boolean> | true {
-    if (!pause) return () => true;
-    const writes = this.writeSequence();
-    const ledger = this.visibilityLedger();
-    const ledgerMarker = ledger?.changeMarker();
-    const attachedLane = this.childLane;
-    const sameLane = childVisibilityUnchanged(this.childVisibilityLane());
-    return () => {
-      const waiting = pause();
-      if (!waiting) return true;
-      return waiting.then(() => writes !== undefined && this.writeSequence() === writes
-        && !this.fileReplacedOrRemoved() && this.visibilityLedger() === ledger
-        && ledger?.changeMarker() === ledgerMarker && this.childLane === attachedLane && sameLane());
-    };
+    return found;
   }
 
   /**
@@ -13603,81 +13522,74 @@ export class LocalConnectorStore {
     scope: Pick<ConnectorStoreEmbedOptions, 'accountScope' | 'filters'> = {},
     stopAtMs?: number,
     windowChunks = MISSING_EMBEDDING_CHUNK_WINDOW,
-    pacing?: Pick<EmbeddingSweepPacing, 'checkpoint' | 'now'> & Partial<Pick<EmbeddingSweepPacing, 'progress'>>,
   ): Promise<Record<string, number>> {
-    const now = pacing?.now ?? Date.now;
-    const started = now();
-    walk: for (;;) {
-      await pacing?.checkpoint();
-        const resume = this.embeddingWalkResumeCheck(pacing?.checkpoint);
-      const tier = await this.tierHiddenItemPksInTurns(pacing?.progress);
-      const hidden = await pkSetInTurns([tier.hidden]);
-      const held = await pkSetInTurns([tier.held]);
-      const heldForJudgment = this.canEmbedHeld(provider) ? await pkSetInTurns([tier.heldForJudgment]) : new Set<number>();
-      const namesOnly = await pkSetInTurns([tier.metadataLayer]);
-      const moving = new Set<number>();
-      let walked = 0;
-      for (const member of this.tierLedgerHiddenMemo?.members.values() ?? []) {
-        if (member.flags.moving) for (const pk of member.pks) moving.add(pk);
-        if (++walked % 2_000 === 0) await ingestionTurn();
-      }
-      const tiers = connectorStoreEmbeddableRowTiers(this.trustDomain, provider);
-      const account = normalizeOptionalAccountScope(scope.accountScope);
-      const scoped = connectorStoreFilterSql(scope.filters);
-      const counts: Record<string, number> = {
-        pending_chunks: 0, eligible_chunks: 0, skipped_held_chunks: 0,
-        skipped_moving_chunks: 0, skipped_hidden_chunks: 0, skipped_metadata_chunks: 0,
-        skipped_failed_chunks: 0, skipped_out_of_scope_chunks: 0,
-        // Of the held and out-of-scope chunks, those whose item was indexed in the
-        // last three days: new items that are not becoming searchable show here.
-        skipped_held_recent_chunks: 0, skipped_out_of_scope_recent_chunks: 0,
-        skipped_private_tier_chunks: 0, skipped_retired_chunks: 0, inventory_complete: 0,
-      };
-      // Only chunks that owe a vector come back: the rest count for nothing.
-      const windowSql = `
-        SELECT c.chunk_pk, i.item_pk, i.local_item_id, i.tombstoned, i.trust_tier, i.indexed_at,
-          CASE WHEN 1 = 1 ${account ? 'AND i.account_scope = ?' : ''} ${scoped.sql} THEN 1 ELSE 0 END AS in_scope
-        FROM chunks c JOIN items i ON i.item_pk = c.item_pk
-        LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
-        WHERE c.chunk_pk > ? AND c.chunk_pk <= ?
-          AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
-        ORDER BY c.chunk_pk
-      `;
-      const recentSince = new Date(started - 3 * 24 * 60 * 60_000).toISOString();
-      const read = this.embeddingSweepRead(offThreadReadsSupported(this.dbPath));
-      const maxChunkPk = (await read({ sql: 'SELECT COALESCE(MAX(chunk_pk), 0) AS n FROM chunks', params: [], mode: 'get' }) as { n: number }).n;
-      let after = 0;
-      for (; after < maxChunkPk; after += windowChunks) {
-        if (after > 0) await ingestionTurn();
-        if (!await resume()) continue walk;
-        if (stopAtMs !== undefined && now() >= stopAtMs) break;
-        const rows = await read({ sql: windowSql, mode: 'all',
-          params: [...(account ? [account] : []), ...scoped.params, provider.modelId, after, after + windowChunks] }) as Array<{
-          chunk_pk: number; item_pk: number; local_item_id: string; tombstoned: number; trust_tier: SourceTrustTier; indexed_at: string | null; in_scope: number;
-        }>;
-        for (const row of rows) {
-          counts.pending_chunks! += 1;
-          const heldBack = held.has(row.item_pk) && !heldForJudgment.has(row.item_pk);
-          const visibilityExcluded = hidden.has(row.item_pk) || namesOnly.has(row.item_pk) || heldBack;
-          // Disjoint reasons, with retirement and visibility preceding policy.
-          const reason = row.tombstoned || row.trust_tier === 'S5' ? 'skipped_retired_chunks'
-            : moving.has(row.item_pk) && visibilityExcluded ? 'skipped_moving_chunks'
-            : hidden.has(row.item_pk) ? 'skipped_hidden_chunks'
-            : namesOnly.has(row.item_pk) ? 'skipped_metadata_chunks'
-            : heldBack ? 'skipped_held_chunks'
-            : tiers && !tiers.includes(row.trust_tier) ? 'skipped_private_tier_chunks'
-            : this.embeddingFailureState?.has(row.local_item_id) ? 'skipped_failed_chunks'
-            : !row.in_scope ? 'skipped_out_of_scope_chunks' : 'eligible_chunks';
-          counts[reason]! += 1;
-          if ((reason === 'skipped_held_chunks' || reason === 'skipped_out_of_scope_chunks') && row.indexed_at && row.indexed_at >= recentSince) {
-            counts[reason === 'skipped_held_chunks' ? 'skipped_held_recent_chunks' : 'skipped_out_of_scope_recent_chunks']! += 1;
-          }
+    const started = Date.now();
+    const tier = await this.tierHiddenItemPksInTurns();
+    const hidden = await pkSetInTurns([tier.hidden]);
+    const held = await pkSetInTurns([tier.held]);
+    const heldForJudgment = this.canEmbedHeld(provider) ? await pkSetInTurns([tier.heldForJudgment]) : new Set<number>();
+    const namesOnly = await pkSetInTurns([tier.metadataLayer]);
+    const moving = new Set<number>();
+    let walked = 0;
+    for (const member of this.tierLedgerHiddenMemo?.members.values() ?? []) {
+      if (member.flags.moving) for (const pk of member.pks) moving.add(pk);
+      if (++walked % 2_000 === 0) await ingestionTurn();
+    }
+    const tiers = connectorStoreEmbeddableRowTiers(this.trustDomain, provider);
+    const account = normalizeOptionalAccountScope(scope.accountScope);
+    const scoped = connectorStoreFilterSql(scope.filters);
+    const counts: Record<string, number> = {
+      pending_chunks: 0, eligible_chunks: 0, skipped_held_chunks: 0,
+      skipped_moving_chunks: 0, skipped_hidden_chunks: 0, skipped_metadata_chunks: 0,
+      skipped_failed_chunks: 0, skipped_out_of_scope_chunks: 0,
+      // Of the held and out-of-scope chunks, those whose item was indexed in the
+      // last three days: new items that are not becoming searchable show here.
+      skipped_held_recent_chunks: 0, skipped_out_of_scope_recent_chunks: 0,
+      skipped_private_tier_chunks: 0, skipped_retired_chunks: 0, inventory_complete: 0,
+    };
+    // Only chunks that owe a vector come back: the rest count for nothing.
+    const windowSql = `
+      SELECT c.chunk_pk, i.item_pk, i.local_item_id, i.tombstoned, i.trust_tier, i.indexed_at,
+        CASE WHEN 1 = 1 ${account ? 'AND i.account_scope = ?' : ''} ${scoped.sql} THEN 1 ELSE 0 END AS in_scope
+      FROM chunks c JOIN items i ON i.item_pk = c.item_pk
+      LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
+      WHERE c.chunk_pk > ? AND c.chunk_pk <= ?
+        AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
+      ORDER BY c.chunk_pk
+    `;
+    const recentSince = new Date(started - 3 * 24 * 60 * 60_000).toISOString();
+    const read = this.embeddingSweepRead(offThreadReadsSupported(this.dbPath));
+    const maxChunkPk = (await read({ sql: 'SELECT COALESCE(MAX(chunk_pk), 0) AS n FROM chunks', params: [], mode: 'get' }) as { n: number }).n;
+    let after = 0;
+    while (stopAtMs === undefined || Date.now() < stopAtMs) {
+      if (after >= maxChunkPk) { counts.inventory_complete = 1; break; }
+      if (after > 0) await ingestionTurn();
+      const rows = await read({ sql: windowSql, mode: 'all',
+        params: [...(account ? [account] : []), ...scoped.params, provider.modelId, after, after + windowChunks] }) as Array<{
+        chunk_pk: number; item_pk: number; local_item_id: string; tombstoned: number; trust_tier: SourceTrustTier; indexed_at: string | null; in_scope: number;
+      }>;
+      for (const row of rows) {
+        counts.pending_chunks! += 1;
+        const heldBack = held.has(row.item_pk) && !heldForJudgment.has(row.item_pk);
+        const visibilityExcluded = hidden.has(row.item_pk) || namesOnly.has(row.item_pk) || heldBack;
+        // Disjoint reasons, with retirement and visibility preceding policy.
+        const reason = row.tombstoned || row.trust_tier === 'S5' ? 'skipped_retired_chunks'
+          : moving.has(row.item_pk) && visibilityExcluded ? 'skipped_moving_chunks'
+          : hidden.has(row.item_pk) ? 'skipped_hidden_chunks'
+          : namesOnly.has(row.item_pk) ? 'skipped_metadata_chunks'
+          : heldBack ? 'skipped_held_chunks'
+          : tiers && !tiers.includes(row.trust_tier) ? 'skipped_private_tier_chunks'
+          : this.embeddingFailureState?.has(row.local_item_id) ? 'skipped_failed_chunks'
+          : !row.in_scope ? 'skipped_out_of_scope_chunks' : 'eligible_chunks';
+        counts[reason]! += 1;
+        if ((reason === 'skipped_held_chunks' || reason === 'skipped_out_of_scope_chunks') && row.indexed_at && row.indexed_at >= recentSince) {
+          counts[reason === 'skipped_held_chunks' ? 'skipped_held_recent_chunks' : 'skipped_out_of_scope_recent_chunks']! += 1;
         }
       }
-      if (after >= maxChunkPk) counts.inventory_complete = 1;
-      counts.inventory_ms = now() - started;
-      return counts;
+      after += windowChunks;
     }
+    counts.inventory_ms = Date.now() - started;
+    return counts;
   }
 
   /**
@@ -14024,15 +13936,12 @@ export class LocalConnectorStore {
           stallMs: CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS,
           intervalMs: CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS / 4,
         },
-        ...(options.sweepTiming ? { signal: options.sweepTiming.signal } : {}),
         ...(this.embeddingLeaseTimers ? { timers: this.embeddingLeaseTimers } : {}),
       },
     );
   }
 
   private async embedChunksUnderLease(options: ConnectorStoreEmbedOptions): Promise<ConnectorStoreEmbedSummary> {
-    const { signal, holds, progress } = options.sweepTiming ?? {};
-    const step = <T>(work: () => T | Promise<T>) => embeddingStep(work, signal);
     const provider = options.provider;
     if (options.modelId && options.modelId !== provider.modelId) {
       throw new Error(
@@ -14041,7 +13950,7 @@ export class LocalConnectorStore {
       );
     }
     assertConnectorStoreEmbeddingProvider(this.trustDomain, provider);
-    await step(() => options.assertAuthorized?.());
+    await options.assertAuthorized?.();
     // Media no chunk here references any more is released before an embed
     // pass, and copies nothing holds are swept (at most hourly), so the
     // regular drain also keeps the media cache tidy.
@@ -14109,22 +14018,19 @@ export class LocalConnectorStore {
     }
     // Built in turns: a pass over a store that is being written would
     // otherwise rebuild it synchronously on every call (Sparta, 2026-11-04).
-    const tierHidden = await step(() => this.tierHiddenItemPksInTurns(progress));
+    const tierHidden = await this.tierHiddenItemPksInTurns();
     // Read on the read thread where the store allows it, without the text
     // (fetched by key for each batch) and with each chunk's current vector
     // hash: a whole-store pass held the loop 41 s on lane 6's fixture
     // reading every chunk's text, then asked for each vector one at a time.
-    signal?.throwIfAborted();
-    const selection = this.embeddingWorkRows(
+    const selectedRows = await this.embeddingWorkRows(
       provider.modelId,
       options.localItemIds,
       options.accountScope,
       options.filters,
       tierHidden,
       this.canEmbedHeld(provider),
-      progress,
     );
-    const selectedRows = await (signal ? untilAborted(selection, signal) : selection);
     // A row that is Private by its own stored tier (or carries a tier the
     // store does not recognise) never reaches an embedder that is not approved
     // for Private content, whatever the store's domain. It stays unembedded,
@@ -14171,8 +14077,8 @@ export class LocalConnectorStore {
     // transaction, so a raced authority change at worst skips one probe.
     if (!(priorJournal && priorCounts)
       && this.embeddingRebindWouldInvalidateCurrency(provider)) {
-      await step(() => options.assertAuthorized?.());
-      await step(() => assertEmbeddingProviderCanEmbed(provider));
+      await options.assertAuthorized?.();
+      await assertEmbeddingProviderCanEmbed(provider);
     }
     let activeJournalSha256 = priorJournal?.audit_receipt_sha256 ?? undefined;
     let providerEpoch!: number;
@@ -14275,7 +14181,7 @@ export class LocalConnectorStore {
     // window: a store whose backlog starts with photos still embeds its text.
     let readsImages: boolean | undefined;
     if (limit !== undefined && provider.imageSupport && rows.some((row) => row.media_sha256)) {
-      readsImages = await step(() => provider.imageSupport!());
+      readsImages = await provider.imageSupport();
     }
     let heldPictures = 0;
     const pending: typeof rows = [];
@@ -14312,19 +14218,13 @@ export class LocalConnectorStore {
     // picture are one try, not several.
     const judgedThisPass = new Set<string>();
     let stoppedAtDeadline = false;
-    let pausedForAsk = false;
     for (let offset = 0; offset < pending.length; offset += EMBEDDING_BATCH_SIZE) {
-      progress?.();
-      if (holds?.()) {
-        pausedForAsk = true;
-        break;
-      }
-      if (offset > 0 && options.stopAtMs !== undefined && (options.sweepTiming?.now() ?? Date.now()) >= options.stopAtMs) {
+      if (offset > 0 && ((options.stopAtMs !== undefined && Date.now() >= options.stopAtMs) || options.shouldStop?.() === true)) {
         stoppedAtDeadline = true;
         break;
       }
       let batch = pending.slice(offset, offset + EMBEDDING_BATCH_SIZE);
-      await step(() => options.assertAuthorized?.());
+      await options.assertAuthorized?.();
       // Pictures, for a provider whose model reads them (one that does not
       // embeds a photo's text and ignores the picture). A chunk is never
       // embedded as text alone under an input hash that names its picture:
@@ -14339,7 +14239,7 @@ export class LocalConnectorStore {
       // An engine fault is not a picture failure: the provider throws it and
       // this pass stops with nothing recorded.
       if (provider.imageSupport && batch.some((row) => row.media_sha256)) {
-        readsImages ??= await step(() => provider.imageSupport!());
+        readsImages ??= await provider.imageSupport();
         const skip = new Set<(typeof batch)[number]>();
         for (const row of batch) {
           if (!row.media_sha256) continue;
@@ -14389,7 +14289,7 @@ export class LocalConnectorStore {
       let judgedBatch: Map<number, MediaJudgment> | undefined;
       try {
         if (judgeNow) {
-          const returned = await step(() => judging!.embedWithImageVectors!(inputsFor(batch)));
+          const returned = await judging!.embedWithImageVectors!(inputsFor(batch));
           vectors = returned.vectors;
           judgedBatch = new Map();
           // Only pictures that need judging now: a settled verdict, or an
@@ -14399,19 +14299,18 @@ export class LocalConnectorStore {
             && !this.mediaJudgmentSettled(row.media_sha256, currentJudge) ? [index] : []));
           if (wanted.length > 0) {
             try {
-              const judgments = await step(() => judgeReturnedImageVectors(judging!, wanted.map((index) => returned.imageVectors[index])));
+              const judgments = await judgeReturnedImageVectors(judging!, wanted.map((index) => returned.imageVectors[index]));
               wanted.forEach((index, row) => {
                 // Recorded whatever the verdict: an unjudged one is the
                 // picture's first try, and waits out its back-off.
                 judgedBatch!.set(batch[index]!.chunk_pk, judgments[row]!);
               });
             } catch {
-              signal?.throwIfAborted();
               // The descriptions could not be embedded: judged on a later pass.
             }
           }
         } else {
-          vectors = await step(() => provider.embed(inputsFor(batch), { taskType: 'RETRIEVAL_DOCUMENT', ...(signal ? { signal } : {}) }));
+          vectors = await provider.embed(inputsFor(batch), { taskType: 'RETRIEVAL_DOCUMENT' });
         }
       } catch (error) {
         if (!(error instanceof SourceEmbeddingInputsFailedError)) throw error;
@@ -14434,7 +14333,7 @@ export class LocalConnectorStore {
         staleSkipped += recheck.notVisible + recheck.privateTier;
         batch = recheck.kept;
         if (batch.length === 0) continue;
-        vectors = await step(() => provider.embed(inputsFor(batch), { taskType: 'RETRIEVAL_DOCUMENT', ...(signal ? { signal } : {}) }));
+        vectors = await provider.embed(inputsFor(batch), { taskType: 'RETRIEVAL_DOCUMENT' });
       }
       const onDemandItems = this.db.query(`SELECT COUNT(*) AS n FROM items i JOIN on_demand_item_reads r ON r.local_item_id = i.local_item_id
         AND r.source_version = COALESCE(i.source_version, '') WHERE i.item_pk IN (SELECT value FROM json_each(?))`)
@@ -14548,9 +14447,9 @@ export class LocalConnectorStore {
       staleSkipped += batch.length - written;
     }
     skipped += staleSkipped;
-    if (!stoppedAtDeadline && !pausedForAsk && judging && rows.some((row) => row.media_sha256 && !this.mediaJudgmentSettled(row.media_sha256, mediaJudgeId(judging)))) {
-      readsImages ??= await step(() => judging.imageSupport!());
-      if (readsImages) await this.judgeUnjudgedMedia(judging, rows, options.assertAuthorized, options.sweepTiming);
+    if (!stoppedAtDeadline && judging && rows.some((row) => row.media_sha256 && !this.mediaJudgmentSettled(row.media_sha256, mediaJudgeId(judging)))) {
+      readsImages ??= await judging.imageSupport!();
+      if (readsImages) await this.judgeUnjudgedMedia(judging, rows, options.assertAuthorized);
     }
     if (journalId) {
       const completedAt = this.now().toISOString();
@@ -14597,7 +14496,6 @@ export class LocalConnectorStore {
       embedded,
       skipped,
     );
-    if (pausedForAsk) summary.pausedForAsk = true;
     if (stoppedAtDeadline) summary.stoppedAtDeadline = true;
     return privateTierWithheldChunks > 0
       ? {
@@ -15401,7 +15299,6 @@ export class LocalConnectorStore {
     filters?: ConnectorStoreSearchFilters,
     tierHidden?: TierLedgerHiddenItemPks,
     allowHeld = false,
-    progress?: () => void,
   ): Promise<EmbeddingWorkRow[]> {
     if (!offThreadReadsSupported(this.dbPath)) {
       return this.embeddingSourceRows(localItemIds, accountScope, filters, tierHidden, allowHeld)
@@ -15450,7 +15347,6 @@ export class LocalConnectorStore {
       media_path: string | null; media_sha256: string | null; current_hash: string | null };
     const rows: WorkRow[] = [];
     for (let after = 0; ;) {
-      progress?.();
       const page = await readInBackground(this.dbPath, { sql, params: [...params, after], mode: 'all' }) as WorkRow[];
       for (const row of page) rows.push(row);
       if (page.length < EMBEDDING_WORK_PAGE_ROWS) break;
@@ -17231,7 +17127,7 @@ export class LocalConnectorStore {
    * walk later. Returns the drift, or undefined when no walk ran, while
    * maintenance owns the writer, or for a read-only open.
    */
-  async reconcileTotals({ background = false, pause }: { background?: boolean; pause?: BackgroundWalkPause } = {}): Promise<number | undefined> {
+  async reconcileTotals({ background = false }: { background?: boolean } = {}): Promise<number | undefined> {
     if (this.readOnly || this.reclaiming) return undefined;
     const installed = storeTotalsInstalled(this.db);
     if (!installed) createStoreTotals(this.db, NON_SYNC_RUN_CONNECTORS_SQL);
@@ -17248,44 +17144,30 @@ export class LocalConnectorStore {
       if (now - this.totalsQuiet.since < STORE_TOTALS_QUIET_MS) return undefined;
     }
     const pool = offThreadReadsSupported(this.dbPath);
-    walk: for (;;) {
-      const writes = this.writeSequence();
-      const steps = storeTotalsWalkSteps(NON_SYNC_RUN_CONNECTORS_SQL);
-      let step = steps.next();
-      while (!step.done) {
-        const waiting = pause?.();
-        if (waiting) {
-          await waiting;
-          if (this.reclaiming || this.closedForPoolReads || this.fileReplacedOrRemoved()) return undefined;
-          if (this.writeSequence() !== writes) continue walk;
-        }
-        if (this.reclaiming || this.closedForPoolReads) return undefined;
-        const query = step.value;
-        let rows: unknown;
-        if (pool) rows = await readInBackground(this.dbPath, query);
-        else {
-          // Here, a page per turn: the loop's other work runs between pages.
-          await new Promise((resolve) => setImmediate(resolve));
-          const statement = this.db.query(query.sql);
-          rows = query.mode === 'get' ? statement.get(...(query.params as never[])) : statement.all(...(query.params as never[]));
-        }
-        step = steps.next(rows);
+    const steps = storeTotalsWalkSteps(NON_SYNC_RUN_CONNECTORS_SQL);
+    let step = steps.next();
+    while (!step.done) {
+      const query = step.value;
+      let rows: unknown;
+      if (pool) rows = await readInBackground(this.dbPath, query);
+      else {
+        // Here, a page per turn: the loop's other work runs between pages.
+        await new Promise((resolve) => setImmediate(resolve));
+        const statement = this.db.query(query.sql);
+        rows = query.mode === 'get' ? statement.get(...(query.params as never[])) : statement.all(...(query.params as never[]));
       }
-      if (this.reclaiming || this.closedForPoolReads || this.fileReplacedOrRemoved()) return undefined;
-      const { count, quiet } = step.value;
-      const now = this.now();
-      return this.db.transaction(() => {
-        // Keep the sampled count and its write sequence together through
-        // installation, including on the first fill where no baseline exists.
-        if (!quiet || this.writeSequence() !== writes) {
-          if (totals && totals.walkOwed !== 'now') deferStoreTotalsWalk(this.db);
-          this.totalsQuiet = { writes: this.writeSequence(), since: now.getTime() };
-          return totals ? 0 : undefined;
-        }
-        this.totalsQuiet = undefined;
-        return applyStoreTotalsCount(this.db, count, now.toISOString(), { countIsCurrent: true });
-      }).immediate();
+      step = steps.next(rows);
     }
+    if (this.reclaiming) return undefined;
+    const { count, quiet } = step.value;
+    const now = this.now();
+    // A mixed snapshot could double-count a write already seen by a page.
+    // Keep filled totals until a quiet walk can replace them exactly.
+    let drift = 0;
+    if (!quiet && totals && totals.walkOwed !== 'now') deferStoreTotalsWalk(this.db);
+    else drift = applyStoreTotalsCount(this.db, count, now.toISOString(), { exact: quiet });
+    this.totalsQuiet = quiet ? undefined : { writes: this.writeSequence(), since: now.getTime() };
+    return drift;
   }
 
   private embeddingInputHashesChecked = false;
@@ -17303,15 +17185,13 @@ export class LocalConnectorStore {
    * held a background read for 10 s on a cold store and its UPDATE held the
    * loop for as many rows (loop-stall gate, 16 Nov), so a page is 2,000.
    */
-  async repairEmbeddingInputHashes(pageKeys = 2_000, pages = 50, pause?: BackgroundWalkPause): Promise<number> {
+  async repairEmbeddingInputHashes(pageKeys = 2_000, pages = 50): Promise<number> {
     if (this.readOnly || this.reclaiming || this.embeddingInputHashesChecked) return 0;
     const pool = offThreadReadsSupported(this.dbPath);
     const read = async (sql: string, params: number[]): Promise<unknown> => (pool
       ? readInBackground(this.dbPath, { sql, params, mode: 'all' })
       : this.db.query(sql).all(...params));
     if (!this.embeddingInputHashWalk) {
-      await pause?.();
-      if (this.reclaiming || this.closedForPoolReads) return 0;
       const [row] = await read('SELECT MAX(chunk_pk) AS last FROM chunks', []) as Array<{ last: number | null }>;
       this.embeddingInputHashWalk = { after: 0, last: Number(row?.last ?? 0) };
     }
@@ -17319,8 +17199,6 @@ export class LocalConnectorStore {
     const set = this.db.query('UPDATE chunks SET embedding_input_hash = content_hash WHERE chunk_pk = ? AND embedding_input_hash IS NULL');
     let changed = 0;
     for (let page = 0; page < pages && walk.after < walk.last; page += 1) {
-      await pause?.();
-      if (this.reclaiming || this.closedForPoolReads) break;
       const hi = Math.min(walk.after + pageKeys, walk.last);
       const rows = await read('SELECT chunk_pk FROM chunks WHERE chunk_pk > ? AND chunk_pk <= ? AND embedding_input_hash IS NULL', [walk.after, hi]) as Array<{ chunk_pk: number }>;
       if (this.reclaiming) break;

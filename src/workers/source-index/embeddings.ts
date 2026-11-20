@@ -52,7 +52,7 @@ export interface SourceEmbeddingProvider {
   configHash: string;
   epochId: string;
   backend: SourceEmbeddingBackend;
-  embed(inputs: SourceEmbeddingInput[], options: { taskType: SourceEmbeddingTaskType; signal?: AbortSignal }): Promise<number[][]>;
+  embed(inputs: SourceEmbeddingInput[], options: { taskType: SourceEmbeddingTaskType }): Promise<number[][]>;
   /**
    * Throws when the approval this provider was bound to is no longer current
    * (scopeBoundEmbeddingProvider). An unbound provider has none. The embedding
@@ -514,15 +514,14 @@ export class GeminiSourceEmbeddingProvider implements SourceEmbeddingProvider {
     }));
   }
 
-  async embed(inputs: SourceEmbeddingInput[], options: { taskType: SourceEmbeddingTaskType; signal?: AbortSignal }): Promise<number[][]> {
+  async embed(inputs: SourceEmbeddingInput[], options: { taskType: SourceEmbeddingTaskType }): Promise<number[][]> {
     if (inputs.length === 0) return [];
     return withMemoryPayload('embed', () => this.embedBatch(inputs, options));
   }
 
-  private async embedBatch(inputs: SourceEmbeddingInput[], options: { taskType: SourceEmbeddingTaskType; signal?: AbortSignal }): Promise<number[][]> {
+  private async embedBatch(inputs: SourceEmbeddingInput[], options: { taskType: SourceEmbeddingTaskType }): Promise<number[][]> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
-    const signal = options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal;
     const budget = { deadlineAtMs: Date.now() + this.timeoutMs, budgetMs: this.timeoutMs };
     try {
       const modelPath = `models/${this.modelId}`;
@@ -551,7 +550,7 @@ export class GeminiSourceEmbeddingProvider implements SourceEmbeddingProvider {
         body: JSON.stringify({
           requests,
         }),
-        signal,
+        signal: controller.signal,
       }, budget);
       if (!response.ok) {
         throw new OperationError(
@@ -711,18 +710,17 @@ export class OpenAICompatibleSourceEmbeddingProvider implements SourceEmbeddingP
     }));
   }
 
-  async embed(inputs: SourceEmbeddingInput[], options: { taskType: SourceEmbeddingTaskType; signal?: AbortSignal }): Promise<number[][]> {
+  async embed(inputs: SourceEmbeddingInput[], options: { taskType: SourceEmbeddingTaskType }): Promise<number[][]> {
     if (inputs.length === 0) return [];
     return withMemoryPayload('embed', () => this.embedBatch(inputs, options));
   }
 
-  private async embedBatch(inputs: SourceEmbeddingInput[], options: { taskType: SourceEmbeddingTaskType; signal?: AbortSignal }): Promise<number[][]> {
+  private async embedBatch(inputs: SourceEmbeddingInput[], options: { taskType: SourceEmbeddingTaskType }): Promise<number[][]> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
-    const signal = options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal;
     const budget = { deadlineAtMs: Date.now() + this.timeoutMs, budgetMs: this.timeoutMs };
     try {
-      await this.preflight?.(signal);
+      await this.preflight?.(controller.signal);
       const response = await fetchEmbeddingResponse(this.fetchImpl, this.provider, `${this.baseUrl}/embeddings`, {
         method: 'POST',
         headers: this.requestHeaders(),
@@ -731,7 +729,7 @@ export class OpenAICompatibleSourceEmbeddingProvider implements SourceEmbeddingP
           input: inputs.map((input) => this.formatInput(input, options.taskType)),
           ...(this.sendDimensions ? { dimensions: this.dimension } : {}),
         }),
-        signal,
+        signal: controller.signal,
       }, budget);
       if (!response.ok) {
         throw new OperationError(

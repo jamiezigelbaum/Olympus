@@ -6851,12 +6851,10 @@ export async function main(): Promise<void> {
   if (!engineFront) await reconcileCaptures();
   const captureTick = setInterval(() => { if (!engineFront) void reconcileCaptures(); }, 10_000);
   captureTick.unref?.();
-  // A running prune slice parks between items. Reclaim has its own reader
-  // priority and starts only when the owner is idle.
+  // Admit one bounded prune slice at a time. Reclaim starts only while the owner is idle.
   const stopSupersededSweep = startSupersededSweepTicker({
     active: () => !engineFront,
     holds: () => standBack.holds('prune'),
-    pause: () => standBack.pause('prune'),
     canReclaim: () => !ownerQuestions.busy && !frontOwnerBusy(),
     ownerQuestionEndedAt: () => Math.max(ownerQuestions.lastEndedAt ?? 0, remoteOwnerMarks.lastEndedAt(OWNER_QUESTION_RESOURCE) ?? 0),
     // Ingest first: a conversion starts only in a quiet window and stops when a task comes due.
@@ -7288,7 +7286,7 @@ export async function main(): Promise<void> {
             for (const store of connectorStores) {
               await pause();
               try {
-                const drift = await store.reconcileTotals({ background: true, pause });
+                const drift = await store.reconcileTotals({ background: true });
                 if (drift) console.warn(`[olympus] store totals: ${store.corpusId} adjusted by ${drift}.`);
               } catch (error) {
                 console.warn(`[olympus] store totals: ${store.corpusId} count failed (${error instanceof Error ? error.message : String(error)}); tried again next pass.`);
@@ -7298,7 +7296,7 @@ export async function main(): Promise<void> {
               await pause();
               changeMemoryActivity('embedding_repair', 1);
               try {
-                const set = await store.repairEmbeddingInputHashes(undefined, undefined, pause);
+                const set = await store.repairEmbeddingInputHashes();
                 if (set) console.warn(`[olympus] ${store.corpusId}: set the embedding input hash on ${set} chunks that had none.`);
               } catch (error) {
                 console.warn(`[olympus] ${store.corpusId}: embedding input hash repair failed (${error instanceof Error ? error.message : String(error)}); tried again next pass.`);
@@ -7310,7 +7308,7 @@ export async function main(): Promise<void> {
               await pause();
               changeMemoryActivity('embedding_settlement', 1);
               try {
-                const settled = await settleStaleEmbedHolds(ledger, undefined, pause);
+                const settled = await settleStaleEmbedHolds(ledger);
                 if (settled) console.warn(`[olympus] tier ledger: released ${settled} decided copies an older build left held.`);
               } catch (error) {
                 console.warn(`[olympus] tier ledger: settling held copies failed (${error instanceof Error ? error.message : String(error)}); tried again next pass.`);

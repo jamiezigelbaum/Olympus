@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { holdOwnerAsk, ownerAskHeld } from '../src/core/owner-ask-admission.ts';
+import { createOwnerAskProbe, holdOwnerAsk, ownerAskHeld } from '../src/core/owner-ask-admission.ts';
 import { sharedDataPath } from '../src/core/olympus-layout.ts';
 import { withFileLease } from '../src/core/file-lease.ts';
 import { ownerAskReason } from '../src/workers/engine/stand-back.ts';
@@ -49,6 +49,22 @@ test('an owner question signals across processes with no command delivery and th
     tmp.cleanup();
   }
 }, 15_000);
+
+test('only a missing lease is idle without a probe failure', () => {
+  const tmp = tempDir('olympus-owner-ask-lookup-');
+  const env = { HOME: tmp.dir, XDG_DATA_HOME: tmp.dir };
+  const dir = sharedDataPath('engine-run', env);
+  let failures = 0;
+  const probe = () => createOwnerAskProbe({ env, onFailure: () => { failures++; } })();
+  try {
+    expect(probe()).toBe(false);
+    expect(failures).toBe(0);
+    mkdirSync(join(dir, '..'), { recursive: true });
+    writeFileSync(dir, 'not a directory');
+    expect(probe()).toBe(false);
+    expect(failures).toBe(1);
+  } finally { tmp.cleanup(); }
+});
 
 test('an unusable lock file leaves the Ask and its command signal intact, and probing is safe', async () => {
   const tmp = tempDir('olympus-owner-ask-broken-');
