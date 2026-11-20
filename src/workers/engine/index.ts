@@ -25,6 +25,8 @@ import { privacyBacklogCoverageNote, withCoverageNote } from '../../core/privacy
 import {
   type ReleaseManifest,
   answerReleaseWithheldReasonOffThread,
+  releaseGrantsChanged,
+  ANSWER_RELEASE_UNVERIFIED,
   createReleaseManifestSink,
   runWithReleaseManifestSink,
   recordReleaseManifest,
@@ -679,7 +681,8 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 ? await answerReleaseWithheldReasonOffThread(entry.manifests, options.sourceAnswerReleaseCheck)
                 : 'Olympus withheld this answer because the engine cannot check its current privacy classification. Update Olympus, then ask again.';
           pruneReleaseTickets();
-          return json({ ...(reason ? { withheld: reason } : { allowed: true }) });
+          const withheld = reason ?? (entry && releaseGrantsChanged(entry.manifests) ? ANSWER_RELEASE_UNVERIFIED : undefined);
+          return json({ ...(withheld ? { withheld } : { allowed: true }) });
         }
 
         if (request.method === 'POST' && url.pathname === `${basePath}/source/answer`) {

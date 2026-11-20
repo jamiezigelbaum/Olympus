@@ -6135,7 +6135,8 @@ export async function main(): Promise<void> {
   const { createRemotePrivateParts } = await import('../../core/remote-private-part.ts');
   const remotePrivateParts = createRemotePrivateParts({
     probe: (request, timeoutMs) => withStoreReadPriority(() => (sourceAnswerLanes
-      ? probePrivateMatch({ lanes: sourceAnswerLanes, request: request as unknown as SourceIndexAnswerRequest, timeoutMs, distinguishSecret: true })
+      ? probePrivateMatch({ lanes: sourceAnswerLanes, request: request as unknown as SourceIndexAnswerRequest,
+          timeoutMs, distinguishSecret: true, deferGrantCheck: true })
       : Promise.resolve('unknown' as const))),
     store: waitingQuestionStore,
     isActive: connectionActive,

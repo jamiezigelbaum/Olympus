@@ -118,7 +118,7 @@ import {
 } from '../classification/tier-ledger.ts';
 import { arrivalOrderedSniffer, conversationOrderedSniffer, itemHasNonTextContent, classifyContentTier, heldUntilJudged, isImageMediaType, namesDecidedByOwner, ownerRuleMatches, type OwnerTierRule } from '../classification/tier-classifier.ts';
 import type { SourceItemReadResult, SourceItemReadRefusal } from '../../core/source-item-read.ts';
-import { checkReleaseChunks, chunkCoverageNote, RELEASE_CHUNK_JUDGE_BUDGET_MS, type ReleaseCheck, type ReleaseInput, type ReleaseInputVerdict } from '../../core/release-manifest.ts';
+import { recordReleaseManifest, checkReleaseChunks, chunkCoverageNote, RELEASE_CHUNK_JUDGE_BUDGET_MS, type ReleaseCheck, type ReleaseInput, type ReleaseInputVerdict } from '../../core/release-manifest.ts';
 import { currentRemoteReadAccess } from '../remote-access-recheck.ts';
 import { screenedSecretLocator } from '../classification/secret-locations.ts';
 import { assertStoreTierLedgerCanOpen, findTierSetLedger } from '../classification/tier-set-binding.ts';
@@ -224,6 +224,7 @@ import {
   DEFER_SEARCH_DELIVERY,
   SEARCH_GRANT_DELIVERY,
   SEARCH_GRANT_MATCH,
+  SEARCH_GRANT_RECEIPT,
   type SourceIndexCorpusSearchAdapter,
   type SourceIndexCorpusSearchRequest,
   type SourceIndexCorpusMatchCount,
@@ -9428,6 +9429,17 @@ export class LocalConnectorStore {
       .get(localItemId) as { source_version: string; acquired_epoch: number } | null) ?? undefined;
   }
 
+  captureOnDemandRead(localItemId: string, sourceVersion: string | undefined, inScope: () => boolean): (() => boolean) | undefined {
+    const epoch = this.onDemandGrantEpoch();
+    const grant = this.currentOnDemandGrant(localItemId);
+    if (!grant || (sourceVersion !== undefined && sourceVersion !== grant.source_version) || !inScope()) return undefined;
+    return () => {
+      if (epoch !== undefined && epoch === this.onDemandGrantEpoch()) return true;
+      const current = this.currentOnDemandGrant(localItemId);
+      return current?.source_version === grant.source_version && current.acquired_epoch === grant.acquired_epoch && inScope();
+    };
+  }
+
   observeOnDemandRead(localItemId: string, sourceVersion: string | undefined, controller: AbortController): OnDemandGrantWork | undefined {
     const epoch = this.onDemandGrantEpoch();
     const grant = this.currentOnDemandGrant(localItemId);
@@ -16013,17 +16025,19 @@ export class LocalConnectorStore {
 
   /** Resolve the serving layer for the bounded set of matched item versions. */
   searchGrantLayers(
-    hits: readonly SourceIndexSearchHit[], filters: ConnectorStoreSearchFilters | undefined,
+    hits: readonly SourceIndexSearchHit[], filters: ConnectorStoreSearchFilters | undefined, startGrantEpoch?: number,
   ): ReadonlyMap<SourceIndexSearchHit, 'metadata' | 'content'> {
     if (this.closedForPoolReads) return new Map();
-    const metadataOnly = connectorStoreMetadataOnlySql(filters, this.onDemandReadsTablePresent);
+    const metadataOnly = connectorStoreMetadataOnlySql(filters, this.onDemandReadsTablePresent, startGrantEpoch);
+    const scoped = connectorStoreFilterSql(filters);
     const read: StoreRead = {
       mode: 'all',
       sql: `SELECT candidate.key AS idx, ${metadataOnly.sql} AS names_only
         FROM json_each(?) candidate CROSS JOIN items i
         WHERE ${FTS_CANDIDATE_IDENTITY_SQL}
-          AND i.tombstoned = 0`,
-      params: [...metadataOnly.params, JSON.stringify(hits.map(hit => hit.sourceItem))],
+          AND i.tombstoned = 0
+          ${scoped.sql}`,
+      params: [...metadataOnly.params, JSON.stringify(hits.map(hit => hit.sourceItem)), ...scoped.params],
     };
     const allowed = visibilityHere(this.visibilityStoreRead(read)) as Array<{ idx: number; names_only: number }>;
     return new Map(allowed.map(row => [hits[row.idx]!, row.names_only ? 'metadata' : 'content']));
@@ -16934,6 +16948,7 @@ export class LocalConnectorStore {
     const ledger = this.governingTierLedger();
     let generation: number | undefined;
     let initialOverride: string | undefined;
+    let granted: (() => boolean) | undefined;
     const gate = (): SourceItemReadRefusal | undefined => {
       if (currentRemoteReadAccess() !== 'active') return 'not_in_scope';
       const scope = options.scope?.();
@@ -16952,14 +16967,21 @@ export class LocalConnectorStore {
       if (this.contentHeldPrivate(localItemId)) return 'content_private';
       // A version-bound on-demand grant lifts the names-only layer only; the
       // metadata scope above still applies, as in the extraction scope guard.
-      if (!this.readOnDemand(localItemId) && (scope?.contentAllowed === false || this.metadataOnlyRuleForLocator(now.locatorUri) !== undefined
-        || (scope?.contentFilters && !this.itemMatchesSearchFilters(localItemId, scope.accountScope, scope.contentFilters)))) return 'names_only';
+      if (scope?.contentAllowed === false || this.metadataOnlyRuleForLocator(now.locatorUri) !== undefined
+        || (scope?.contentFilters && !this.itemMatchesSearchFilters(localItemId, scope.accountScope, scope.contentFilters))) {
+        granted ??= this.captureOnDemandRead(localItemId, undefined, () => true);
+        if (!granted?.()) return 'names_only';
+      }
       if (!this.contentServedNow(localItemId, true)) return 'extraction_pending';
       return undefined;
     };
     const initial = gate(); if (initial) return refuse(initial);
     generation = ledger!.getCurrent(identity)!.generation;
     initialOverride = JSON.stringify(ledger!.getOverride(identity));
+    if (granted) recordReleaseManifest({
+      inputs: [], grants: [{ current: () => granted!() && gate() === undefined }],
+      constraints: { secureDerivativeDefault: 'approval', includeSecureLocalContent: false },
+    });
     const readChunks = () => this.db.query(`SELECT c.bounded_text AS text, c.content_hash AS hash
       FROM chunks c JOIN items i ON i.item_pk = c.item_pk
       WHERE i.local_item_id = ? AND i.tombstoned = 0 ORDER BY c.chunk_index`).all(localItemId) as Array<{ text: string; hash: string }>;
@@ -18358,7 +18380,7 @@ function withSearchGrantDelivery(
     ...response,
     [SEARCH_GRANT_DELIVERY]: {
       checkIfChanged: hits => request.startGrantEpoch !== undefined && request.startGrantEpoch === store.onDemandGrantEpoch()
-        ? undefined : store.searchGrantLayers(hits, filters),
+        ? undefined : store.searchGrantLayers(hits, filters, request.startGrantEpoch),
       matches: matches.map(row => ({
         sourceItem: row.sourceItem,
         candidateId: `${store.corpusId}:${row.sourceItem.localItemId}`,
@@ -19717,12 +19739,11 @@ export function createConnectorStoreContentProvider(
       if (!localItemId) return undefined;
       const contentInScope = options.contentAllowed !== false
         && store.itemMatchesSearchFilters(localItemId, options.accountScope, options.filters);
-      const needsGrant = !contentInScope && options.metadataFilters !== undefined;
-      const startEpoch = needsGrant ? store.onDemandGrantEpoch() : undefined;
-      const sourceVersion = request.provenance.sourceItem.sourceVersion;
-      const granted = needsGrant && store.currentOnDemandRead(localItemId, sourceVersion)
-        && store.itemMatchesSearchFilters(localItemId, options.accountScope, options.metadataFilters);
-      if (!contentInScope && !granted) {
+      if (!contentInScope && options.metadataFilters !== undefined) {
+        releaseGranted = store.captureOnDemandRead(localItemId, request.provenance.sourceItem.sourceVersion,
+          () => store.itemMatchesSearchFilters(localItemId, options.accountScope, options.metadataFilters));
+      }
+      if (!contentInScope && !releaseGranted) {
         if (!options.metadataFilters
           || !store.itemMatchesSearchFilters(localItemId, options.accountScope, options.metadataFilters)) {
           return undefined;
@@ -19747,10 +19768,6 @@ export function createConnectorStoreContentProvider(
           coverageGaps: [CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP],
           ...(names.locatorUri ? { locatorUri: names.locatorUri } : {}),
         };
-      }
-      if (granted) {
-        releaseGranted = () => (startEpoch !== undefined && startEpoch === store.onDemandGrantEpoch())
-          || store.currentOnDemandRead(localItemId, sourceVersion ?? '');
       }
       const anchorChunkIndex = request.provenance.chunk?.chunkIndex;
       const anchorLane = request.provenance.chunk?.span?.lane;
@@ -19793,7 +19810,8 @@ export function createConnectorStoreContentProvider(
         ...(content.locatorUri ? { locatorUri: content.locatorUri } : {}),
       };
       }, store);
-      return releaseGranted && !releaseGranted() ? undefined : result;
+      if (!result || !releaseGranted) return result;
+      return releaseGranted() ? { ...result, [SEARCH_GRANT_RECEIPT]: { current: releaseGranted } } : undefined;
     },
   };
 }
@@ -21565,11 +21583,12 @@ const FTS_CANDIDATE_IDENTITY_SQL = `i.local_item_id = json_extract(candidate.val
 function connectorStoreMetadataOnlySql(
   filters: ConnectorStoreSearchFilters | undefined,
   onDemandReadsTablePresent = false,
-): { sql: string; params: string[] } {
+  startGrantEpoch?: number,
+): { sql: string; params: Array<string | number> } {
   const normalized = normalizeConnectorStoreSearchFilters(filters);
   if (!normalized) return { sql: '', params: [] };
   const metadataOnly: string[] = [];
-  const params: string[] = [];
+  const params: Array<string | number> = [];
   for (const locatorPath of normalized.metadataOnlyLocatorPathScopes ?? []) {
     if (locatorPath === '/') {
       metadataOnly.push("i.locator_uri LIKE '/%' ESCAPE '\\'");
@@ -21587,10 +21606,15 @@ function connectorStoreMetadataOnlySql(
   }
   if (metadataOnly.length === 0) return { sql: '', params: [] };
   // Read-only stores may predate the grant table. Never name it in their SQL.
+  const sameAcquisition = onDemandReadsTablePresent && startGrantEpoch !== undefined
+    ? 'AND COALESCE((SELECT epoch FROM on_demand_grant_acquisitions a WHERE a.local_item_id = on_demand.local_item_id), 0) <= ?'
+    : '';
+  if (onDemandReadsTablePresent && startGrantEpoch !== undefined) params.push(startGrantEpoch);
   const notGranted = onDemandReadsTablePresent ? ` AND NOT EXISTS (
     SELECT 1 FROM on_demand_item_reads on_demand
     WHERE on_demand.local_item_id = i.local_item_id
       AND on_demand.source_version = COALESCE(i.source_version, '')
+      ${sameAcquisition}
   )` : '';
   return { sql: `((${metadataOnly.join(' OR ')})${notGranted})`, params };
 }
@@ -21599,7 +21623,7 @@ function connectorStoreFtsScopeSql(
   filters: ConnectorStoreSearchFilters | undefined,
   onDemandReadsTablePresent: boolean,
   chunkColumn = 'connector_store_fts.chunk_pk',
-): { sql: string; params: string[] } {
+): { sql: string; params: Array<string | number> } {
   const contentRow = `(
     ${chunkColumn} IS NOT NULL
     OR NOT EXISTS (SELECT 1 FROM chunks scope_chunk WHERE scope_chunk.item_pk = i.item_pk)

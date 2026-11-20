@@ -57,9 +57,14 @@ import {
   withReservedRecencySeats,
 } from './source-index/retrieval.ts';
 import {
+  SEARCH_GRANT_RECEIPT,
+  refreshRoutedSearchGrants,
   resolveLaneTimeoutMs,
   routeSourceIndexSearch,
   routedHitCandidateId,
+  routedSearchGrantCounts,
+  type SearchGrantCount,
+  type SearchGrantReceipt,
   type SeatingLane,
   type SourceIndexRoutedCorpusTiming,
   type SourceIndexRoutedMatchCount,
@@ -134,6 +139,13 @@ export interface LocalContentBlock {
   // lane, lives on the internal pack, and reaches Castor only through the
   // gated answer's evidence/citations.
   locatorUri?: string;
+  [SEARCH_GRANT_RECEIPT]?: SearchGrantReceipt;
+}
+
+const evidenceSearchGrants = new WeakMap<object, readonly SearchGrantReceipt[]>();
+
+export function evidenceSearchGrant(provenance: object): readonly SearchGrantReceipt[] {
+  return evidenceSearchGrants.get(provenance) ?? [];
 }
 
 export interface LocalContentProvider {
@@ -307,6 +319,8 @@ export interface EvidencePackBuildDetail {
   // How long each corpus search took and whether it beat the lane deadline,
   // across every routed run of this build. Counts only.
   corpusTimings?: readonly SourceIndexRoutedCorpusTiming[];
+  searchGrantCounts?: readonly SearchGrantCount[];
+  deniedSearchGrants?: readonly (readonly SearchGrantReceipt[])[];
   // Kept beside the frozen EvidencePack contract. This is counts-only policy
   // state used to distinguish an ordinary empty search from evidence that was
   // deliberately removed before model dispatch.
@@ -401,20 +415,12 @@ async function buildPreparedEvidencePackDetailed(
   const routed = input.selectedItems?.length
     ? selectedItemsToRoutedSlice(input)
     : await runRoutedSearches(observed, retrievalLimit, input.poolAllocation ?? (reranker ? { storeDepth: RERANK_POOL_STORE_DEPTH, semanticSeats: rerankPoolSemanticSeats() } : undefined));
-  // A build can fan out more than once (the literal query plus planner
-  // expansions), and each routed run judged its hits against its own ledger
-  // snapshot. One more pass over the merged hits puts the whole pack on ONE
-  // snapshot, so a move that flipped between two runs cannot put both copies
-  // of an item in the pack.
-  const visibleHits = input.visibilityGate && !input.selectedItems?.length
-    ? await applySourceIndexVisibilityGate(input.visibilityGate, routed.hits)
-    : routed.hits;
   // Routed order is the pack order. A recency word in the question does not
   // re-sort it: newest-first over the whole pool undid store turn and the
   // reserved leader seats, and buried a store's best match past what a local
   // Analyst reads (2026-11-11). Every seat carries its date.
   const storeScores = new Map<string, Array<number | undefined>>();
-  for (const hit of visibleHits) {
+  for (const hit of routed.hits) {
     const scores = storeScores.get(hit.corpusId) ?? [];
     scores.push(hit.score);
     storeScores.set(hit.corpusId, scores);
@@ -422,8 +428,7 @@ async function buildPreparedEvidencePackDetailed(
   let wide = readWide && [...storeScores.values()].some(scoresHaveNoLeader)
     && [...storeScores.values()].every(scores => scores.length < 3 || scoresHaveNoLeader(scores));
   // The ordinary draw remains a prefix. A clear leader keeps exactly that cut.
-  const routedHits = input.selectedItems?.length ? routed.hits
-    : readWide && !reranker && !wide ? visibleHits.slice(0, input.maxResults) : visibleHits;
+  const routedHits = readWide && !reranker && !wide ? routed.hits.slice(0, input.maxResults) : routed.hits;
 
   const candidates: EvidenceCandidate[] = [];
   const candidateCorpusIds: string[] = [];
@@ -461,6 +466,7 @@ async function buildPreparedEvidencePackDetailed(
   let policyDeniedCandidates = 0;
   const namesOnlyCandidateIndexes: number[] = [];
   const contentPrivateCandidateIndexes: number[] = [];
+  const deniedSearchGrants: SearchGrantReceipt[][] = [];
   let unreadCandidates = 0;
   // An exclusion rebuild is judged by what it keeps, not by what the router
   // met: every secure candidate and every secure-inclusive count is left out
@@ -567,6 +573,8 @@ async function buildPreparedEvidencePackDetailed(
 
   for (const { hit, provenance, provider, content, policyDenied } of hydrated) {
     if (policyDenied) {
+      const receipt = hit[SEARCH_GRANT_RECEIPT];
+      if (receipt) deniedSearchGrants.push([receipt]);
       encounteredSecureLocal = true;
       policyDeniedCandidates += 1;
       const gap = `${hit.corpusId} ${SOURCE_MODEL_POLICY_GAP_SUFFIX}`;
@@ -582,12 +590,14 @@ async function buildPreparedEvidencePackDetailed(
     const sensitivity = sensitivityOf({ hit, provenance, provider, content, policyDenied });
     assertNoTrustDomainDowngrade(hit, sensitivity);
 
+    const hitGrant = hit[SEARCH_GRANT_RECEIPT];
+    const contentGrant = content?.[SEARCH_GRANT_RECEIPT];
     const enrichedProvenance = content?.locatorUri && !provenance.citation?.uri
       ? {
           ...provenance,
           citation: { ...provenance.citation, uri: content.locatorUri },
         }
-      : provenance;
+      : hitGrant || contentGrant ? { ...provenance } : provenance;
 
     const chunks = content?.chunks ?? [];
     const candidate: EvidenceCandidate = {
@@ -602,6 +612,9 @@ async function buildPreparedEvidencePackDetailed(
       ...(hit.score !== undefined ? { score: hit.score } : {}),
     };
     bindReleaseChunks(candidate.provenance, chunks, content?.chunkHashes ?? []);
+    if (hitGrant || contentGrant) {
+      evidenceSearchGrants.set(candidate.provenance, [...(hitGrant ? [hitGrant] : []), ...(contentGrant ? [contentGrant] : [])]);
+    }
     // A provider is expected to throw the typed denial before hydration. If
     // it instead returns S5 content, that is an invariant failure: hard-stop
     // the entire build rather than misreporting it as an extraction miss.
@@ -668,7 +681,12 @@ async function buildPreparedEvidencePackDetailed(
     // A corpus without an adapter is one this request leaves out (owner's read scope, request scope).
     domainOf: (corpusId) => (Object.hasOwn(input.adapters, corpusId) ? input.registry.get(corpusId)?.trustDomain : undefined),
   });
-  labelled.candidates.forEach((candidate, index) => copyReleaseChunks(candidates[index]!.provenance, candidate.provenance));
+  labelled.candidates.forEach((candidate, index) => {
+    const original = candidates[index]!.provenance;
+    copyReleaseChunks(original, candidate.provenance);
+    const grants = evidenceSearchGrants.get(original);
+    if (grants) evidenceSearchGrants.set(candidate.provenance, grants);
+  });
 
   const builtAt = (input.now ?? (() => new Date()))().toISOString();
   const laneAudits = policyDeniedCandidates > 0
@@ -693,6 +711,8 @@ async function buildPreparedEvidencePackDetailed(
     // dropping it would re-hide exactly what this list exists to show.
     degradations: routed.degradations,
     ...(routed.corpusTimings && routed.corpusTimings.length > 0 ? { corpusTimings: routed.corpusTimings } : {}),
+    ...(routed.searchGrantCounts?.length ? { searchGrantCounts: routed.searchGrantCounts } : {}),
+    ...(deniedSearchGrants.length ? { deniedSearchGrants } : {}),
     policyDeniedCandidates,
     policyDeniedCoverageGaps,
     corpusReadabilityGaps,
@@ -867,7 +887,31 @@ type RoutedSearchSlice = Pick<
   SourceIndexRoutedSearchResponse,
   'hits' | 'searchedCorpora' | 'skippedCorpora' | 'laneAudits' | 'degradations' | 'matchCounts'
   | 'encounteredSecureLocal' | 'secureLaneAudits'
-> & Partial<Pick<SourceIndexRoutedSearchResponse, 'corpusTimings' | 'recencySeats' | 'semanticSeats' | 'matchingCandidateIds'>>;
+> & Partial<Pick<SourceIndexRoutedSearchResponse, 'corpusTimings' | 'recencySeats' | 'semanticSeats' | 'matchingCandidateIds'>> & {
+  searchGrantCounts?: readonly SearchGrantCount[];
+};
+
+function routedSlice(run: SourceIndexRoutedSearchResponse): RoutedSearchSlice {
+  const searchGrantCounts = routedSearchGrantCounts(run);
+  return searchGrantCounts.length ? { ...run, searchGrantCounts } : run;
+}
+
+async function settleRoutedRuns(
+  input: BuildEvidencePackInput,
+  runs: readonly SourceIndexRoutedSearchResponse[],
+  merge: (runs: readonly SourceIndexRoutedSearchResponse[]) => RoutedSearchSlice,
+): Promise<RoutedSearchSlice> {
+  if (!input.visibilityGate) return merge(runs.map(refreshRoutedSearchGrants));
+  // The runs judged tier visibility on separate snapshots. Check their
+  // merged cut on one snapshot, then resolve grants after that last await.
+  const prepared = merge(runs);
+  const visibleHits = await applySourceIndexVisibilityGate(input.visibilityGate, prepared.hits);
+  const current = runs.map(refreshRoutedSearchGrants);
+  if (current.every((run, index) => run === runs[index])) return { ...prepared, hits: visibleHits };
+  const settled = merge(current);
+  const visible = new Set(visibleHits);
+  return { ...settled, hits: settled.hits.filter(hit => visible.has(hit)) };
+}
 
 function selectedItemsToRoutedSlice(input: BuildEvidencePackInput): RoutedSearchSlice {
   const hits: SourceIndexRoutedSearchHit[] = [];
@@ -972,11 +1016,12 @@ async function runRoutedSearches(
 
   const laneTimeoutMs = resolveLaneTimeoutMs(input.laneTimeoutMs);
   const literalRun = await runRoutedSearch(input, literalQuery, 1, retrievalLimit, laneTimeoutMs, poolAllocation);
-  if (!pendingPlan) return literalRun;
+  const literalOnly = () => settleRoutedRuns(input, [literalRun], runs => routedSlice(runs[0]!));
+  if (!pendingPlan) return literalOnly();
 
   if (isStrongLiteralRun(literalRun, input.maxResults)) {
     recordSourceAnswerQueryPlannerDisposition('ignored_after_strong_literal');
-    return literalRun;
+    return literalOnly();
   }
 
   const settled = await pendingPlan.settle();
@@ -984,13 +1029,22 @@ async function runRoutedSearches(
   if (settled.failed) recordSourceAnswerQueryPlannerDisposition('failed');
 
   const expansions = expansionQueries(literalQuery, settled.queries);
-  if (expansions.length === 0) return literalRun;
+  if (expansions.length === 0) return literalOnly();
 
-  const runs: SourceIndexRoutedSearchResponse[] = [literalRun];
+  const completed: SourceIndexRoutedSearchResponse[] = [literalRun];
   for (const query of expansions) {
-    runs.push(await runRoutedSearch(input, query, runs.length + 1, retrievalLimit, laneTimeoutMs, poolAllocation));
+    completed.push(await runRoutedSearch(input, query, completed.length + 1, retrievalLimit, laneTimeoutMs, poolAllocation));
   }
-  if (runs.length === 1) return literalRun;
+  return settleRoutedRuns(input, completed, runs => mergeRoutedRuns(input, runs, retrievalLimit, poolAllocation?.semanticSeats ?? 0));
+}
+
+function mergeRoutedRuns(
+  input: BuildEvidencePackInput,
+  runs: readonly SourceIndexRoutedSearchResponse[],
+  retrievalLimit: number,
+  semanticSeats: number,
+): RoutedSearchSlice {
+  const literal = routedSlice(runs[0]!);
 
   const drawRuns = readWideEnabled() ? runs.map(run => {
     const semantic = new Set((run.semanticSeats ?? []).map(seat => routedHitCandidateId(seat.hit)));
@@ -1001,12 +1055,12 @@ async function runRoutedSearches(
   const { degradations: budgetDegradations } = recency;
   // The runs' semantic seats sit past the fused cut, so they are seated again
   // after it, best margin first, as each run seated them.
-  const fused = withRunSemanticSeats(recency.hits, runs, poolAllocation?.semanticSeats ?? 0);
+  const fused = withRunSemanticSeats(recency.hits, runs, semanticSeats);
 
   return {
     hits: fused,
     ...(readWideEnabled() ? { matchingCandidateIds: [...new Set(runs.flatMap(run => run.matchingCandidateIds ?? []))] } : {}),
-    searchedCorpora: literalRun.searchedCorpora,
+    searchedCorpora: literal.searchedCorpora,
     // Coverage of WHICH corpora were eligible comes from run 1 (eligibility
     // depends on the context, not the query text). What each run LOST does
     // not: an expansion query that blew a corpus's deadline lost that corpus
@@ -1019,7 +1073,8 @@ async function runRoutedSearches(
     corpusTimings: runs.flatMap((run) => [...(run.corpusTimings ?? [])]),
     // The literal question's counts, not a merge across planner rephrasings:
     // the breadth reported is for what the owner asked.
-    ...(literalRun.matchCounts ? { matchCounts: literalRun.matchCounts } : {}),
+    ...(literal.matchCounts ? { matchCounts: literal.matchCounts } : {}),
+    ...(literal.searchGrantCounts ? { searchGrantCounts: literal.searchGrantCounts } : {}),
     // Every run of this build, expansions included: what any of them met.
     encounteredSecureLocal: runs.some((run) => run.encounteredSecureLocal),
     ...(recency.recencySeats > 0 ? { recencySeats: recency.recencySeats } : {}),

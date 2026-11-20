@@ -31,6 +31,7 @@ import {
   remoteDeclaredParams,
   remoteErrorOutput,
   remoteRetryAfterSeconds,
+  releaseRemoteAnswerGrants,
   remoteOperationOutputOffThread,
   remoteOperationOutput,
   withRemotePrivateNote,
@@ -224,6 +225,7 @@ async function callTool(request: Request, name: string, options: RemoteOpenApiHa
     let output = privatePart ? await release() : approved;
     const afterFinalRelease = currentAccess(authorized);
     if (afterFinalRelease !== 'active') return refused(afterFinalRelease);
+    output = runWithReleaseCapture(capture, () => releaseRemoteAnswerGrants(output, manifests.manifests));
     if (operation.name === 'source_item_read') output = remoteOperationOutput(operation.name, result, {
       ...(ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {}), releaseManifests: manifests.manifests,
     });

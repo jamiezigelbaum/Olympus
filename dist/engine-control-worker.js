@@ -343,12 +343,229 @@ function runAtLocalInferencePriority(priority, work) {
 }
 var DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
 
-// src/core/release-manifest.ts
+// src/core/source-index/read-progress.ts
 import { AsyncLocalStorage as AsyncLocalStorage2 } from "async_hooks";
-var RELEASE_CHUNK_JUDGE_BUDGET_MS = 8000;
-var chunkProvenance = new WeakMap;
-var storage = new AsyncLocalStorage2;
-var withheldAnswers = new WeakSet;
+var progress = new AsyncLocalStorage2;
+
+// src/core/source-answer-jobs.ts
+import { AsyncLocalStorage as AsyncLocalStorage3 } from "async_hooks";
+
+// src/core/secret-patterns.ts
+var PROSE_WORDS = new Set([
+  "above",
+  "again",
+  "below",
+  "cannot",
+  "change",
+  "changed",
+  "characters",
+  "choose",
+  "click",
+  "contact",
+  "enter",
+  "expired",
+  "expires",
+  "forgot",
+  "forgotten",
+  "guideline",
+  "guidelines",
+  "hidden",
+  "incorrect",
+  "information",
+  "instruction",
+  "instructions",
+  "invalid",
+  "least",
+  "letters",
+  "link",
+  "manager",
+  "maximum",
+  "min",
+  "minimum",
+  "must",
+  "need",
+  "needed",
+  "needs",
+  "number",
+  "numbers",
+  "optional",
+  "please",
+  "policies",
+  "policy",
+  "protected",
+  "provide",
+  "provided",
+  "required",
+  "requirements",
+  "reset",
+  "retry",
+  "see",
+  "send",
+  "sent",
+  "setting",
+  "settings",
+  "shared",
+  "should",
+  "shown",
+  "sign",
+  "strength",
+  "symbols",
+  "unchanged",
+  "use",
+  "used",
+  "using",
+  "via"
+]);
+var CREDENTIAL_KEYS = [
+  { pattern: String.raw`api[_ -]?key`, legacy: true },
+  { pattern: String.raw`access[_ -]?token`, legacy: true },
+  { pattern: String.raw`refresh[_ -]?token`, legacy: true },
+  { pattern: String.raw`client[_ -]?secret`, legacy: true },
+  { pattern: "password", legacy: true },
+  { pattern: String.raw`pass(?:wd|phrase|code)|(?<![a-z])pass|pwd` },
+  { pattern: String.raw`secret[_ -]?(?:access[_ -]?)?key(?:[_-]?base)?` },
+  { pattern: String.raw`private[_ -]?key` },
+  { pattern: "secret" },
+  { pattern: String.raw`token(?!s)` },
+  { pattern: "sig", urlOnly: true }
+];
+var CREDENTIAL_KEY_WORDS = CREDENTIAL_KEYS.filter((key) => !key.urlOnly).map((key) => key.pattern).join("|");
+var LEGACY_KEY_WORDS = CREDENTIAL_KEYS.filter((key) => key.legacy).map((key) => key.pattern).join("|");
+var CREDENTIAL_QUERY_KEY = new RegExp(`^(?:${CREDENTIAL_KEYS.map((key) => key.pattern).join("|")})$`, "i");
+var PLACEHOLDER_WORDS = new RegExp([
+  String.raw`(?:^|[^a-z])your[_ .-]?[a-z_ -]{0,16}(?:api|secret|token|key|pass|password|client|value|here)`,
+  String.raw`(?:^|[^a-z])my[_ .-](?:api|secret|token|key|pass|password|client)`,
+  String.raw`(?:^|[^a-z])(?:example|dummy|todo|fixme)(?:[^a-z]|$)`,
+  "placeholder",
+  "redacted",
+  "changeme",
+  "change[_-]me",
+  "replace[_-]?me",
+  "insert[_-]?(?:your|here|key|token)",
+  "[_-]here$",
+  "^n/a$",
+  "not[_ -]?set",
+  "^unset$"
+].join("|"), "i");
+var BARE_LITERALS = new Set([
+  "password",
+  "passwd",
+  "passphrase",
+  "secret",
+  "token",
+  "apikey",
+  "api_key",
+  "api-key",
+  "string",
+  "null",
+  "none",
+  "nil",
+  "undefined",
+  "true",
+  "false",
+  "empty",
+  "hidden",
+  "masked",
+  "required",
+  "optional",
+  "changeme",
+  "enabled",
+  "disabled",
+  "encrypted",
+  "hashed",
+  "unknown",
+  "tbd",
+  "pending",
+  "missing"
+]);
+var COMMON_OBJECTS = new Set([
+  "user",
+  "users",
+  "body",
+  "data",
+  "form",
+  "state",
+  "props",
+  "creds",
+  "credentials",
+  "account",
+  "profile",
+  "session",
+  "auth",
+  "db",
+  "app",
+  "json",
+  "response",
+  "res",
+  "row",
+  "record",
+  "item",
+  "model"
+]);
+var STRONG_QUALIFIERS = new Set([
+  "client",
+  "app",
+  "api",
+  "access",
+  "refresh",
+  "auth",
+  "bearer",
+  "id",
+  "session",
+  "bot",
+  "oauth",
+  "webhook",
+  "signing",
+  "jwt",
+  "service",
+  "personal",
+  "consumer",
+  "shared",
+  "encryption",
+  "master",
+  "admin",
+  "root",
+  "user",
+  "db",
+  "database",
+  "wifi",
+  "email",
+  "login"
+]);
+var ENV_KEY_WORDS = CREDENTIAL_KEY_WORDS;
+var ENV_CREDENTIAL_KEY = new RegExp(ENV_KEY_WORDS, "i");
+var KEYWORD = `(?<kw>${CREDENTIAL_KEY_WORDS})`;
+var SEPARATOR = String.raw`["'\x60*_]{0,3}[ \t]*(?::=|=>|[:=])[*_]{0,2}[ \t]*(?<nl>\r?\n[ \t]*)?`;
+var VALUE = String.raw`(?:"(?<dq>(?:[^"\\\n\r]|\\.)*)"|'(?<sq>(?:[^'\\\n\r]|\\.)*)'|\x60(?<bq>[^\x60\n\r]*)\x60|(?<uv>[^\s"'\x60]+))`;
+var CREDENTIAL_ASSIGNMENT = new RegExp(`${KEYWORD}${SEPARATOR}${VALUE}`, "gi");
+var ENV_ASSIGNMENT = new RegExp(String.raw`(?<![A-Za-z0-9_.?&/%+=-])(?=(?:--)?[A-Za-z0-9_.-]*?(?:${ENV_KEY_WORDS}))(?<ek>(?:--)?[A-Za-z_][A-Za-z0-9_.-]*)[ \t]*=(?![=~>])[ \t]*${VALUE}`, "gi");
+var BLOCK_SCALAR = new RegExp(String.raw`${KEYWORD}["'\x60]{0,2}[ \t]*:[ \t]*[|>](?:[+-][1-9]?|[1-9][+-]?)?[ \t]*(?:#[^\r\n]*)?\r?\n(?:[ \t]*\r?\n)*(?<ind>[ \t]+)(?<bv>[^ \t\r\n][^\r\n]*)`, "gi");
+var LABELLED_PASSPHRASE = new RegExp(String.raw`^[ \t>*\u2022-]*(?:[A-Za-z0-9 _.-]{0,30}?)pass(?:word|phrase|code)["'\x60*_]{0,3}[ \t]*(?::=|[:=])[*_]{0,2}[ \t]*(?<mv>[^\s][^\n\r]{5,159})$`, "gim");
+var RECOVERY_CODE_LABEL = new RegExp(String.raw`(?<![A-Za-z0-9])(?:recovery|backup)(?:[ \t_-]+(?:verification|security|login|sign[ -]?in|2fa|mfa|two[ -]factor|account))?[ \t_-]+(?:codes?|keys?)["'\x60*_]{0,3}[ \t]*(?:[:=]|(?<![A-Za-z])(?:is|are)(?![A-Za-z])[ \t]*:?)[*_]{0,2}[ \t]*(?<rest>[^\r\n]{0,200})`, "gi");
+var LEGACY_CREDENTIAL_ASSIGNMENT = new RegExp(String.raw`\b(${LEGACY_KEY_WORDS})\b\s*[:=]\s*['"]?[^'"\s]{12,}`, "gi");
+
+// src/core/source-answer-jobs.ts
+var SOURCE_ANSWER_JOB_TTL_MS = 15 * 60000;
+var SOURCE_ANSWER_JOB_IDLE_MS = 5 * 60000;
+var SOURCE_ANSWER_MAX_RESULT_BYTES = 2 * 1024 * 1024;
+var progressSink = new AsyncLocalStorage3;
+
+// src/core/read-wide.ts
+var matchingProvenances = new WeakSet;
+var wideProvenances = new WeakSet;
+
+// src/core/source-index/partial-search.ts
+var SEMANTIC_TIMEOUT_REASONS = new Set(["vector_scan_deadline_exceeded", "vector_scan_store_busy"]);
+
+// src/core/source-index/keyword-context.ts
+import { AsyncLocalStorage as AsyncLocalStorage4 } from "async_hooks";
+var context = new AsyncLocalStorage4;
+var disabled = new AsyncLocalStorage4;
+var cachedOnly = new AsyncLocalStorage4;
+var requestContext = new AsyncLocalStorage4;
+
+// src/workers/source-index/answer-latency-trace.ts
+import { AsyncLocalStorage as AsyncLocalStorage5 } from "async_hooks";
 
 // src/core/olympus-layout.ts
 import { homedir as homedir3 } from "os";
@@ -446,6 +663,78 @@ function legacyWhatsAppStateDir(env) {
 function whatsappStateDirs() {
   return { resolved: legacyWhatsAppStateDir, default: (env) => join4(legacyCaptureDataRoot(env), "whatsapp-live") };
 }
+
+// src/workers/source-index/answer-latency-trace.ts
+var poolSqlSites = new WeakMap;
+var storage = new AsyncLocalStorage5;
+var queryStorage = new AsyncLocalStorage5;
+var laneStorage = new AsyncLocalStorage5;
+var CONTENT_FREE_ERROR_CLASSES = new Set([
+  "AbortError",
+  "AnalystUnavailable",
+  "AnalystCircuitOpen",
+  "EmailSourceWorkerError",
+  "Error",
+  "LocalTrustProviderMismatch",
+  "OperationError",
+  "RangeError",
+  "SourceModelPolicyDeniedError",
+  "SecureEvidencePolicySkip",
+  "SecureAnalystPoolE2EEGateError",
+  "SyntaxError",
+  "TrustedAnalystTimeoutError",
+  "TypeError"
+]);
+
+// src/core/source-index/router.ts
+var DEFER_SEARCH_DELIVERY = Symbol("defer search delivery");
+var SEARCH_GRANT_MATCH = Symbol("search grant match");
+var SEARCH_GRANT_DELIVERY = Symbol("search grant delivery");
+var SEARCH_GRANT_RECEIPT = Symbol("search grant receipt");
+var FORBIDDEN_ROUTER_RESULT_KEYS = new Set([
+  "body",
+  "bodies",
+  "content",
+  "contents",
+  "message",
+  "messages",
+  "raw",
+  "raw_packet",
+  "rawPacket",
+  "raw_source",
+  "rawSource",
+  "sanitized_text",
+  "sanitizedText",
+  "snippet",
+  "snippets",
+  "source_text",
+  "sourceText",
+  "raw_source_text",
+  "rawSourceText",
+  "text",
+  "access_token",
+  "accessToken",
+  "api_key",
+  "apiKey",
+  "approved_scope_key",
+  "approvedScopeKey",
+  "refresh_token",
+  "refreshToken",
+  "token"
+]);
+var NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS = new Set([...FORBIDDEN_ROUTER_RESULT_KEYS].map(normalizeRouterResultKey));
+var deliveredSearchGrants = new WeakMap;
+var routedSearchGrantScopes = new WeakMap;
+function normalizeRouterResultKey(key) {
+  return key.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+// src/core/release-manifest.ts
+import { AsyncLocalStorage as AsyncLocalStorage6 } from "async_hooks";
+var RELEASE_CHUNK_JUDGE_BUDGET_MS = 8000;
+var chunkProvenance = new WeakMap;
+var storage2 = new AsyncLocalStorage6;
+var withheldAnswers = new WeakSet;
 
 // src/core/engine-split.ts
 var ENGINE_READY_PATH = "/engine/ready";

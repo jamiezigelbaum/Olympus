@@ -2,7 +2,9 @@ import { OperationError } from '../../core/operation-error.ts';
 import { answerModelRequiredResult } from '../answer-model-required.ts';
 import { appClientCopy, type McpAppClient } from '../../../connect-relay/shared/mcp-app-client.ts';
 import { createReleaseCapture, notePrivateQuestion, recordAppRequest, runWithReleaseCapture, sourceAnswerQuestion } from '../../core/app-release-capture.ts';
-import { createReleaseManifestSink, runWithReleaseManifestSink, answerReleaseWithheldReasonOffThread, ANSWER_RELEASE_UNVERIFIED, withheldSourceAnswer } from '../../core/release-manifest.ts';
+import { evidenceSearchGrant } from '../../core/evidence-pack.ts';
+import { revokedSearchGrants } from '../../core/source-index/router.ts';
+import { prepareSearchEvidenceRelease, releaseSearchGrants, releaseGrantsChanged, createReleaseManifestSink, runWithReleaseManifestSink, answerReleaseWithheldReasonOffThread, ANSWER_RELEASE_UNVERIFIED, withheldSourceAnswer } from '../../core/release-manifest.ts';
 /**
  * The MCP surface ChatGPT reaches through the relay: Olympus's search and
  * answer tools, the dashboard tool and its MCP Apps resource, and the setup
@@ -468,7 +470,14 @@ export async function callChatGptTool(
 ): Promise<ChatGptToolResult> {
   const manifests = createReleaseManifestSink();
   const capture = createReleaseCapture();
-  const result = await runWithReleaseCapture(capture, () => runWithReleaseManifestSink(manifests, () => runChatGptTool(name, args, ctx, options, signal, detachedContext)));
+  let search: { raw: Record<string, unknown>; options: SearchResultOptions; privateOptions: () => SearchResultOptions } | undefined;
+  const prepareSearch: PrepareSearch = (raw, options, privateOptions) => {
+    if (raw && typeof raw === 'object' && 'evidence' in raw && Array.isArray(raw.evidence)) {
+      search = { raw: raw as Record<string, unknown>, options, privateOptions };
+    }
+    return searchToolResult(raw, options);
+  };
+  let result = await runWithReleaseCapture(capture, () => runWithReleaseManifestSink(manifests, () => runChatGptTool(name, args, ctx, options, prepareSearch, signal, detachedContext)));
   // What ChatGPT received, for the owner's local list (core/app-release-capture.ts).
   const record = (final: ChatGptToolResult, withheldAfter = false): ChatGptToolResult => {
     recordChatGptRequest(name, args, ctx, final, capture, withheldAfter);
@@ -476,12 +485,27 @@ export async function callChatGptTool(
   };
   // The Private probe may finish after evidence hydration. Recheck again
   // after that await, immediately before the tool result leaves the surface.
-  if (name === SEARCH_TOOL_NAME && Array.isArray(result.structuredContent?.evidence)
-      && result.structuredContent.evidence.length > 0) {
-    const reason = ctx.releaseCheck
-      ? await answerReleaseWithheldReasonOffThread(manifests.manifests, ctx.releaseCheck, 'personal', { chunks: true })
-      : ANSWER_RELEASE_UNVERIFIED;
-    if (reason) return record(searchToolResult({ evidence: [], withheld: result.structuredContent.evidence.length, notes: [reason] }, { pendingPrivacyItems: ctx.pendingPrivacyItems?.() }), true);
+  let withheldAfter = false;
+  if (search) {
+    const hasEvidence = Array.isArray(result.structuredContent?.evidence) && result.structuredContent.evidence.length > 0;
+    let raw = search.raw;
+    if (hasEvidence && manifests.manifests.some(manifest => manifest.inputs.some(input => input.grants?.length))) {
+      const release = await prepareSearchEvidenceRelease(raw, manifests.manifests, ctx.releaseCheck);
+      const checked = release();
+      raw = checked.raw;
+      withheldAfter = checked.withheldAfter && Array.isArray(raw.evidence) && raw.evidence.length === 0;
+    } else {
+      const reason = hasEvidence && (ctx.releaseCheck
+        ? await answerReleaseWithheldReasonOffThread(manifests.manifests, ctx.releaseCheck, 'personal', { chunks: true })
+        : ANSWER_RELEASE_UNVERIFIED);
+      raw = releaseSearchGrants(raw, manifests.manifests);
+      if (reason) {
+        raw = { evidence: [], withheld: Array.isArray(raw.evidence) ? raw.evidence.length : 0 };
+        withheldAfter = true;
+      }
+    }
+    const { options: formatOptions, privateOptions } = search;
+    result = runWithReleaseCapture(capture, () => searchToolResult(raw, { ...formatOptions, ...privateOptions() }));
   }
   if ((name === 'source_answer' || name === 'source_answer_result')
       && (result.structuredContent as { status?: string } | undefined)?.status === 'answered'
@@ -489,10 +513,13 @@ export async function callChatGptTool(
     const reason = ctx.releaseCheck
       ? await answerReleaseWithheldReasonOffThread(manifests.manifests, ctx.releaseCheck, 'personal', { chunks: true })
       : ANSWER_RELEASE_UNVERIFIED;
-    if (reason) return record(withPrivateAnswerOutcome(answerToolResult(withheldSourceAnswer(reason), { pendingPrivacyItems: ctx.pendingPrivacyItems?.() })), true);
+    if (reason || releaseGrantsChanged(manifests.manifests)) return record(withPrivateAnswerOutcome(answerToolResult(withheldSourceAnswer(reason ?? ANSWER_RELEASE_UNVERIFIED), { pendingPrivacyItems: ctx.pendingPrivacyItems?.() })), true);
   }
-  return record(forClaude(name, PANEL_TOOL_NAMES.has(name) ? withPrivateAnswerOutcome(result) : result, options.appClient));
+  return record(forClaude(name, PANEL_TOOL_NAMES.has(name) ? withPrivateAnswerOutcome(result) : result, options.appClient), withheldAfter);
 }
+
+type SearchResultOptions = NonNullable<Parameters<typeof searchToolResult>[1]>;
+type PrepareSearch = (raw: unknown, options: SearchResultOptions, privateOptions: () => SearchResultOptions) => ChatGptToolResult;
 
 /**
  * Lines only Claude's model gets, because Claude differs from ChatGPT in two ways:
@@ -554,6 +581,7 @@ async function runChatGptTool(
   args: Record<string, unknown>,
   ctx: OperationContext,
   options: ChatGptSurfaceOptions,
+  prepareSearch: PrepareSearch,
   signal?: AbortSignal,
   /**
    * A context for work that outlives this request (the private answer's
@@ -602,19 +630,22 @@ async function runChatGptTool(
         // the job is created as this result is built, so its id is valid
         // only once ChatGPT can see it. The question waits on the computer
         // from this moment, whether or not a panel claims the job.
-        const match = normalizeProbe(probed);
-        const waiting = match.count > 0 ? recordWaiting(ticket, question, detail, options) : undefined;
-        const privateMatch = match.count > 0
-          ? beginPrivateAnswer({ question, match, refresh: privateRefresh(question, probe, later, options), caller: privateCaller(ctx), detail, waiting }, options)
-          : late.timedOut ? beginCheckingPrivateAnswer({ question, match, refresh: privateRefresh(question, probe, later, options), caller: privateCaller(ctx), detail, late }, options) : undefined;
-        const resultOptions = { pendingPrivacyItems: ctx.pendingPrivacyItems?.(), ...(privateMatch ? { privateMatch } : late.timedOut ? { privateCheckPending: true } : {}) };
-        const result = searchToolResult(raw, resultOptions);
+        const privateOptions = (): SearchResultOptions => {
+          const match = normalizeProbe(probed);
+          const pending = { question, match, refresh: privateRefresh(question, probe, later, options), caller: privateCaller(ctx), detail };
+          const privateMatch = match.count > 0
+            ? beginPrivateAnswer({ ...pending, waiting: recordWaiting(ticket, question, detail, options) }, options)
+            : late.timedOut ? beginCheckingPrivateAnswer({ ...pending, late }, options) : undefined;
+          return privateMatch ? { privateMatch } : late.timedOut ? { privateCheckPending: true } : {};
+        };
+        const resultOptions = { pendingPrivacyItems: ctx.pendingPrivacyItems?.() };
+        const result = prepareSearch(raw, resultOptions, privateOptions);
         // A new install's first question: say nothing is connected rather
         // than "no evidence in N searched sources" (zigelbot fresh install,
         // 2026-10-04). Best effort: an unreadable dashboard keeps the result.
-        if (!privateMatch && (result.structuredContent as { status?: string } | undefined)?.status === 'none') {
+        if (normalizeProbe(probed).count === 0 && !late.timedOut && result.structuredContent?.status === 'none') {
           const sources = await dashboardViewModel(options, signal).then((view) => view.sources, () => undefined);
-          if (sources && sources.every((source) => source.status === 'Off')) return searchToolResult(raw, { ...resultOptions, noSourcesConnected: true });
+          if (sources && sources.every((source) => source.status === 'Off')) return prepareSearch(raw, { ...resultOptions, noSourcesConnected: true }, privateOptions);
         }
         return result;
       }
@@ -718,7 +749,14 @@ function normalizeProbe(value: boolean | number | PrivateMatchProbeResult): Priv
   if (value === true) return { count: 1, evidence: [] };
   if (typeof value === 'number') return { count: Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0, evidence: [] };
   if (value && typeof value === 'object' && Number.isFinite(value.count)) {
-    return { count: Math.max(0, Math.floor(value.count)), evidence: Array.isArray(value.evidence) ? value.evidence : [],
+    const evidence = Array.isArray(value.evidence) ? value.evidence : [];
+    const dependencies = evidence.map(item => item?.provenance && typeof item.provenance === 'object' ? evidenceSearchGrant(item.provenance) : []);
+    const revoked = revokedSearchGrants(dependencies.flat());
+    const kept = evidence.filter((_item, index) => !dependencies[index]!.some(grant => revoked.has(grant)));
+    const isMatch = (item: PrivateEvidenceItem) => item?.neighbour !== true;
+    const lostMatches = evidence.filter(isMatch).length - kept.filter(isMatch).length;
+    const count = Math.max(value.secretMatch ? 1 : 0, Math.floor(value.count) - lostMatches);
+    return { count, evidence: lostMatches > 0 && !kept.some(isMatch) ? [] : kept,
       ...(value.secretMatch === true ? { secretMatch: true } : {}),
       ...(value.searchedDuringStartup === true ? { searchedDuringStartup: true } : {}),
     };

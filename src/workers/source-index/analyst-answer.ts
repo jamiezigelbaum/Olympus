@@ -46,6 +46,7 @@ import { partialSearchCoverageNotes, promptFitCoverageGap, RERANK_FALLBACK_GAP, 
 import { OPENCLAW_DEFAULT_MODEL_LABEL, OPENCLAW_INFER_MAX_PROMPT_BYTES } from '../../core/analyst-openclaw-infer.ts';
 import {
   buildEvidencePackDetailed,
+  evidenceSearchGrant,
   clipChunksToUtf8Bytes,
   utf8ByteLength,
   hasTemporalIntent,
@@ -69,16 +70,19 @@ import {
   type StructuredEvidenceFact,
 } from '../../core/opsec.ts';
 import { parentLabelReleaseInputs, type ParentLabelResolver } from '../../core/parent-label.ts';
-import { answerReleaseWithheldReasonOffThread, recordReleaseManifest, checkReleaseChunks, chunkCoverageNote, releaseCandidateHashes, releasedTextDigest, releasePassageHashes, type ChunkReleaseResult, type ReleaseCheck, type ReleaseConstraints, type ReleaseInput } from '../../core/release-manifest.ts';
+import { releaseGrantsChanged, ANSWER_RELEASE_UNVERIFIED, type SearchCoverageGrant, answerReleaseWithheldReasonOffThread, recordReleaseManifest, checkReleaseChunks, chunkCoverageNote, releaseCandidateHashes, releasedTextDigest, releasePassageHashes, type ChunkReleaseResult, type ReleaseCheck, type ReleaseConstraints, type ReleaseInput } from '../../core/release-manifest.ts';
 import { secretLocationCoverageNote } from '../../core/secret-location-note.ts';
 import { buildFollowUp, searchCutShort, weakSearch, type FollowUpCandidate, type SourceAnswerFollowUp } from '../../core/follow-up.ts';
 import { sourceLabel, remoteDeepReadFields } from '../../core/remote-result.ts';
 import { canonicalSourceCorpusId } from '../../core/source-corpus-registry.ts';
 import type { SourceIndexCorpusRegistry } from '../../core/source-index/corpus.ts';
 import { withCachedKeywordExpansion, type CachedKeywordExpansion } from '../../core/source-index/keyword-context.ts';
+import { currentPrivateMatch, type PrivateMatchProbe, type PrivateMatchVerdict } from '../../core/remote-private-part.ts';
 import {
   routeSourceIndexSearch,
   applySourceIndexVisibilityGate,
+  refreshRoutedSearchGrants,
+  SEARCH_GRANT_RECEIPT,
   type SourceIndexCorpusSearchAdapter,
   type SourceIndexRoutedSearchHit,
   type SourceIndexRouterAdapterMap,
@@ -601,6 +605,7 @@ export function createAnalystSourceIndexAnswerHandler(
       }
       let pack = detail.pack;
       const analyzedInputs: ReleaseInput[] = [];
+      const analyzedCounts: NonNullable<EvidencePackBuildDetail['searchGrantCounts']>[number][] = [];
       const chunkHoldNotes = new Set<string>();
       // Leg fitting is keyed by the candidates of the pack actually analyzed,
       // so a rebuilt pack (the private-outage fallback below) is fitted and its
@@ -655,11 +660,17 @@ export function createAnalystSourceIndexAnswerHandler(
               if (note) chunkHoldNotes.add(note);
             }
             await assertDispatchAllowed(analysisDetail);
+            const dispatchInputs = dispatchPack.candidates.map(candidate => candidateReleaseInput(candidate,
+              candidateCorpus.get(candidate) ?? analysisDetail.candidateCorpusIds[analysisDetail.pack.candidates.findIndex(original => original.provenance === candidate.provenance)] ?? ''));
+            const counts = analysisDetail.searchGrantCounts?.filter(count => dispatchPack.coverage.matchCounts?.some(row => row.corpusId === count.corpusId));
+            if (releaseGrantsChanged([{ inputs: dispatchInputs, grantCounts: counts, constraints: releaseConstraints }])) {
+              throw new OperationError('source_index_policy_violation', ANSWER_RELEASE_UNVERIFIED);
+            }
             const result = await analyst.analyze(dispatchPack, analyzeOptions);
             // Only a leg that answered can shape the answer: a failed Private
             // route must not hold back the ordinary fallback that replaced it.
-            analyzedInputs.push(...dispatchPack.candidates.map(candidate => candidateReleaseInput(candidate,
-              candidateCorpus.get(candidate) ?? analysisDetail.candidateCorpusIds[analysisDetail.pack.candidates.findIndex(original => original.provenance === candidate.provenance)] ?? '')));
+            analyzedInputs.push(...dispatchInputs);
+            if (counts) analyzedCounts.push(...counts);
             return result;
           },
         });
@@ -864,7 +875,7 @@ export function createAnalystSourceIndexAnswerHandler(
         ...unreadableMatchedReleaseInputs(detail, releaseSecureContent),
         ...parentLabelReleaseInputs(detail.parentLabelDependencies ?? []),
         ...(followUp?.names ?? []),
-      ], constraints: releaseConstraints });
+      ], ...(analyzedCounts.length ? { grantCounts: analyzedCounts } : {}), constraints: releaseConstraints });
       return {
         answer: deepReadNotice ? `${answer}\n\n${deepReadNotice}` : answer,
         ...(deepRead.job ? { deep_read: deepRead.job } : {}),
@@ -1045,11 +1056,13 @@ function releaseInputs(detail: EvidencePackBuildDetail): ReleaseInput[] {
 
 function candidateReleaseInput(candidate: EvidenceCandidate, corpusId: string, options: { holdUnmapped: boolean } = { holdUnmapped: true }): ReleaseInput {
   const item = candidate.provenance.sourceItem;
+  const grants = evidenceSearchGrant(candidate.provenance);
   const namesOnly = candidate.chunks.length === 0 && !candidate.tables?.length && !candidate.facts?.length;
   return {
     corpusId, provider: item.provider, accountScope: item.accountScope ?? '', providerItemId: item.providerItemId,
     ...(item.providerConversationId ? { providerConversationId: item.providerConversationId } : {}),
     privateAtAnswer: isSecureSensitivity(candidate),
+    ...(grants.length ? { grants } : {}),
     ...(namesOnly ? { layer: 'names' as const } : { chunkHashes: releaseCandidateHashes(candidate, options) }),
   };
 }
@@ -3315,7 +3328,27 @@ export async function searchReleasedEvidence(input: {
   // may stay Personal): it is just not listed as evidence. It is still
   // counted in coverage.content_private_items.
   const contentPrivate = new Set(detail.contentPrivateCandidateIndexes ?? []);
+  const namesOnly = new Set(detail.namesOnlyCandidateIndexes ?? []);
+  const contributions: SearchCoverageGrant[] = (detail.deniedSearchGrants ?? []).map(grants => ({
+    grants, counter: 'unreadable_items', withheld: 0, heldPassages: 0,
+  }));
+  const evidenceContributions = new Map<ReleasedEvidenceItem, SearchCoverageGrant>();
   detail.pack.candidates.forEach((candidate, index) => {
+    const grants = evidenceSearchGrant(candidate.provenance);
+    let contribution: SearchCoverageGrant | undefined;
+    if (grants.length) {
+      const corpusId = detail.candidateCorpusIds[index] ?? '';
+      const chunkInput = candidateReleaseInput(candidate, corpusId, { holdUnmapped: false });
+      const heldPassages = chunkInput.layer === 'names' ? 0 :
+        Math.max(1, chunkInput.chunkHashes?.length ?? 0) - (remotePack.report.allowed[index]?.length ?? 0);
+      contribution = {
+        grants, withheld: heldPassages, heldPassages,
+        ...(!isReadWidePack(detail.pack) || isReadWideMatch(candidate) ? { corpusId } : {}),
+        counter: contentPrivate.has(index) ? 'content_private_items' : namesOnly.has(index) ? 'names_only_items'
+          : !candidate.chunks.length ? 'unreadable_items' : undefined,
+      };
+      contributions.push(contribution);
+    }
     if (contentPrivate.has(index)) return;
     const permitted = permittedCandidates.get(candidate.provenance);
     if (!permitted) return;
@@ -3325,6 +3358,7 @@ export async function searchReleasedEvidence(input: {
     if (isSecureSensitivity(candidate)
       || (candidate.trustDomain !== 'public_safe' && candidate.trustDomain !== 'internal')) {
       withheld += 1;
+      if (contribution) contribution.withheld += 1;
       return;
     }
     const corpusId = detail.candidateCorpusIds[index] ?? 'unknown';
@@ -3351,6 +3385,7 @@ export async function searchReleasedEvidence(input: {
     });
     if (decision.decision !== 'allow') {
       withheld += 1;
+      if (contribution) contribution.withheld += 1;
       return;
     }
     identities.push({ ...candidateReleaseInput(candidate, corpusId), ...(excerpt ? { releasedTextDigest: releasedTextDigest(excerpt) } : {}) });
@@ -3374,10 +3409,18 @@ export async function searchReleasedEvidence(input: {
       ...(excerpt ? { excerpt } : {}),
       ...(fact.sourceInstructionFlags.length > 0 ? { source_instructions_flagged: true as const } : {}),
     }));
+    if (contribution) evidenceContributions.set(evidence[evidence.length - 1]!, contribution);
   });
   const released = input.releaseCheck ? await recheckReleasedEvidence(evidence, identities, input.releaseCheck) : { evidence, withheld: 0 };
+  const releasedItems = new Set(released.evidence);
+  for (const [item, contribution] of evidenceContributions) {
+    if (!releasedItems.has(item)) contribution.withheld += 1;
+  }
   recordReleaseManifest({
-    inputs: identities.filter((_, index) => released.evidence.includes(evidence[index]!)),
+    grantCounts: detail.searchGrantCounts,
+    searchCoverage: { candidates: contributions, countCorpora: (detail.pack.coverage.matchCounts ?? []).map(count => count.corpusId),
+      heldPassages: remotePack.report.withheldPassages, heldDocuments: remotePack.report.withheldDocuments },
+    inputs: identities.filter((_, index) => releasedItems.has(evidence[index]!)),
     constraints: { secureDerivativeDefault: 'approval', includeSecureLocalContent: false },
   });
   withheld += released.withheld;
@@ -3608,16 +3651,25 @@ async function privateNeighbours(
  * timeout or any failure. A caller must never treat
  * `unknown` as a match. The verdict goes only to the local waiting record.
  */
-export async function probePrivateMatch(input: {
+interface PrivateMatchRequest {
   lanes: (request: SourceIndexAnswerRequest, mode?: 'private_search') => AnalystAnswerLanes;
   request: SourceIndexAnswerRequest;
   timeoutMs: number;
   distinguishSecret?: boolean;
-}): Promise<'match' | 'secret_match' | 'no_match' | 'unknown'> {
+}
+
+export function probePrivateMatch(input: PrivateMatchRequest & { deferGrantCheck: true }): Promise<PrivateMatchProbe>;
+export function probePrivateMatch(input: PrivateMatchRequest): Promise<PrivateMatchVerdict>;
+export async function probePrivateMatch(input: PrivateMatchRequest & { deferGrantCheck?: true }): Promise<PrivateMatchProbe> {
+  const proof = await probePrivateMatchWithGrants(input);
+  return input.deferGrantCheck ? proof : currentPrivateMatch(proof);
+}
+
+async function probePrivateMatchWithGrants(input: PrivateMatchRequest): Promise<PrivateMatchProbe> {
   const question = typeof input.request.question === 'string' ? input.request.question.trim() : '';
   if (!question) return 'no_match';
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const run = async (): Promise<'match' | 'secret_match' | 'no_match' | 'unknown'> => {
+  const run = async (): Promise<PrivateMatchProbe> => {
     const request: SourceIndexAnswerRequest = {
       ...input.request,
       question,
@@ -3678,7 +3730,12 @@ export async function probePrivateMatch(input: {
       ...(lanes.visibilityGate ? { visibilityGate: lanes.visibilityGate } : {}),
       laneTimeoutMs: input.timeoutMs,
     });
-    const matched = (result: Awaited<ReturnType<typeof search>>) => result.hits.some((hit) => hit.trustDomain === 'secure_local');
+    const matchProof = (result: Awaited<ReturnType<typeof search>>): PrivateMatchProbe | undefined => {
+      const hits = result.hits.filter(hit => hit.trustDomain === 'secure_local');
+      if (!hits.length) return undefined;
+      if (hits.some(hit => !hit[SEARCH_GRANT_RECEIPT])) return 'match';
+      return () => refreshRoutedSearchGrants(result).hits.some(hit => hit.trustDomain === 'secure_local') ? 'match' : 'no_match';
+    };
     // A match is the one verdict a first, cheaper stage can give, so the stages
     // go from the cheapest, and none waits on the local model. The model is
     // busy with the sniffer or an answer, or slow on a CPU-only computer, and
@@ -3698,15 +3755,18 @@ export async function probePrivateMatch(input: {
     if (request.retrieval_mode === 'hybrid') {
       const lexical = await withCachedKeywordExpansion(translation, () => search({ lexicalOnly: true }));
       if (secretVerdict(lexical)) return input.distinguishSecret ? 'secret_match' : 'match';
-      if (matched(lexical)) return 'match';
+      const match = matchProof(lexical);
+      if (match) return match;
     }
     let routed = await withCachedKeywordExpansion(translation, () => search({}));
     if (secretVerdict(routed)) return input.distinguishSecret ? 'secret_match' : 'match';
-    if (matched(routed)) return 'match';
+    const match = matchProof(routed);
+    if (match) return match;
     if (translation.missing) {
       routed = await search({});
       if (secretVerdict(routed)) return input.distinguishSecret ? 'secret_match' : 'match';
-      if (matched(routed)) return 'match';
+      const translatedMatch = matchProof(routed);
+      if (translatedMatch) return translatedMatch;
     }
     // A Private corpus in scope that was not searched, or searched with a lane
     // that should have run and did not, is not a "no".

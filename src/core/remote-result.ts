@@ -37,7 +37,7 @@ import { boundedLogErrorMessage, logErrorOrigin } from './log-redaction.ts';
 import { OperationError, type OperationErrorCode } from './operation-error.ts';
 import { secretLabelsInText } from './opsec.ts';
 import { citationTitleWithParent, PARENT_LABEL_MAX_CHARS } from './parent-label.ts';
-import { checkReleaseChunks, passagesWithheldAtReleasableTiers, privateInputReleaseAllowed, type ReleaseCheck, type ReleaseInput, type ReleaseInputVerdict, type ReleaseManifest } from './release-manifest.ts';
+import { releaseGrantsChanged, checkReleaseChunks, passagesWithheldAtReleasableTiers, privateInputReleaseAllowed, type ReleaseCheck, type ReleaseInput, type ReleaseInputVerdict, type ReleaseManifest } from './release-manifest.ts';
 import { withoutSecretLocationCoverageNotes } from './secret-location-note.ts';
 import { privacyBacklogCoverageNote } from './privacy-backlog-coverage.ts';
 import { parseFollowUp } from './follow-up.ts';
@@ -378,6 +378,7 @@ export function remoteOperationOutput(
       // Two families: a handed-off source_answer or a handed-off ask_anonymously.
       return pending ?? (isAnonymousAnswerResult(raw) ? anonymousAnswerOutput(raw) : sourceAnswerOutput(raw, options));
     case 'source_item_read': {
+      if (releaseGrantsChanged(options.releaseManifests ?? [])) throw new OperationError('not_personal', 'Invalid read handle.');
       const result = parseSourceItemReadResult(raw);
       if (result.pages.length > 0) {
         const inputs = (options.releaseManifests ?? []).flatMap(manifest => manifest.inputs);
@@ -535,6 +536,12 @@ export function remotePrivateNote(answerId?: string, secretMatch = false): strin
   return secretMatch ? `${pointer} ${REMOTE_SECRET_NOTE}` : pointer;
 }
 
+/** A completed derivative may contain an uncited match or an aggregate count. */
+export function releaseRemoteAnswerGrants(output: Record<string, unknown>, manifests: readonly ReleaseManifest[]): Record<string, unknown> {
+  return output.kind === 'source_answer' && output.status === 'answered' && releaseGrantsChanged(manifests)
+    ? withheldAnswer(REMOTE_ANSWER_UNVERIFIED) : output;
+}
+
 function withheldAnswer(message: string, heldBack = 0): Record<string, unknown> {
   noteReleasedItems([], heldBack, true);
   return { kind: 'source_answer', status: 'withheld', answer: message, citations: [] };
@@ -562,6 +569,7 @@ function recheckRelease(
   let verdicts: readonly ReleaseInputVerdict[];
   let postureNow: 'allow' | 'approval';
   try {
+    if (releaseGrantsChanged(manifests)) return { withhold: REMOTE_ANSWER_UNVERIFIED };
     verdicts = check.inputs(inputs.map(({ input }) => input));
     if (verdicts.length !== inputs.length) throw new Error('release check returned the wrong number of verdicts');
     postureNow = check.secureDerivativeDefault();

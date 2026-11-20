@@ -18,6 +18,7 @@ import { createReleaseManifestSink, runWithReleaseManifestSink } from '../core/r
 import {
   remoteDeclaredParams,
   remoteErrorOutput,
+  releaseRemoteAnswerGrants,
   remoteOperationOutputOffThread,
   remoteOperationOutput,
   withRemotePrivateNote,
@@ -173,6 +174,7 @@ async function handleRemoteCallTool(
     const afterFinalRelease = currentAccess(authorized);
     if (afterFinalRelease !== 'active') return refusedAccess(afterFinalRelease);
     // No await may separate this raw-text privacy check from serialization.
+    output = runWithReleaseCapture(capture, () => releaseRemoteAnswerGrants(output, manifests.manifests));
     if (operation.name === 'source_item_read') output = remoteOperationOutput(operation.name, result, {
       ...(ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {}), releaseManifests: manifests.manifests,
     });

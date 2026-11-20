@@ -39,7 +39,7 @@ import type { OperationCaller } from '../core/operation-caller.ts';
 import { OperationError } from '../core/operations.ts';
 import type { RemotePrivatePart } from '../core/remote-private-part.ts';
 import { remoteErrorOutput, remotePrivateNote } from '../core/remote-result.ts';
-import { recheckSearchEvidence, createReleaseManifestSink, runWithReleaseManifestSink, type ReleaseCheck } from '../core/release-manifest.ts';
+import { prepareSearchEvidenceRelease, createReleaseManifestSink, runWithReleaseManifestSink, type ReleaseCheck } from '../core/release-manifest.ts';
 import type { McpCallToolResult, McpListedTool, McpServerExtension } from '../mcp/server.ts';
 import { SEARCH_TOOL_NAME } from './chatgpt/dashboard-contract.ts';
 import { searchToolResult } from './chatgpt/response-builder.ts';
@@ -184,7 +184,8 @@ async function runSearch(
   let result = buildResult(raw);
   let withheldAfter = false;
   let note: string | undefined;
-  if (privateCall) {
+  const recordPrivateSearch = await privateCall?.prepareSearch?.();
+  if (privateCall && !recordPrivateSearch) {
     // The probe may still be running: wait for its verdict (it is bounded) and record, then check
     // the connection and the tiers once more, because that wait is time the search did not have.
     const recorded = await privateCall.settle(raw, undefined);
@@ -192,15 +193,16 @@ async function runSearch(
     if (afterWait !== 'active') return refusedAccess(afterWait);
     if (recorded) note = remotePrivateNote(privateCall.answerId, privateCall.secretMatch);
   }
-  const checked = await recheckSearchEvidence(raw as Record<string, unknown>, manifests.manifests, context.releaseCheck);
+  const release = await prepareSearchEvidenceRelease(raw as Record<string, unknown>, manifests.manifests, context.releaseCheck);
+  // Both the connection and any item grants can change during the release judgment.
+  const afterRelease = currentAccess(authorized);
+  if (afterRelease !== 'active') return refusedAccess(afterRelease);
+  const checked = release();
+  if (recordPrivateSearch?.()) note = remotePrivateNote(privateCall?.answerId, privateCall?.secretMatch);
   if (checked.withheldAfter) {
-    // Rebuild capture from only what is actually leaving the computer.
     result = buildResult(checked.raw);
     withheldAfter = Array.isArray(checked.raw.evidence) && checked.raw.evidence.length === 0;
   }
-  // The release judgment can await the pool or judge; recheck the connection afterward.
-  const afterRelease = currentAccess(authorized);
-  if (afterRelease !== 'active') return refusedAccess(afterRelease);
   // Issue only for the final, released evidence. Raw identities never leave.
   const evidence = result.structuredContent?.evidence;
   if (context.issueReadHandle && Array.isArray(evidence)) {

@@ -7792,10 +7792,135 @@ var init_opsec = __esm(() => {
   init_types();
 });
 
-// src/core/release-manifest.ts
+// src/core/source-index/read-progress.ts
 import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
+var progress;
+var init_read_progress = __esm(() => {
+  progress = new AsyncLocalStorage2;
+});
+
+// src/core/read-wide.ts
+var matchingProvenances, wideProvenances;
+var init_read_wide = __esm(() => {
+  matchingProvenances = new WeakSet;
+  wideProvenances = new WeakSet;
+});
+// src/core/source-index/partial-search.ts
+function keywordPreparationGap(corpusId) {
+  return `${KEYWORDS_PREFIX}${corpusId}; this answer uses the available keyword equivalents, so matches in other languages may be missing.`;
+}
+function recentItemsTimeoutGap(corpusId) {
+  return `${RECENT_PREFIX}${corpusId}; its newest items may be missing from this search. Ask again in a moment.`;
+}
+function visibilityCheckTimeoutGap(corpusId) {
+  return `${UNCHECKED_PREFIX}${corpusId}; they were left out of this search. Ask again in a moment.`;
+}
+var SEMANTIC_TIMEOUT_REASONS, KEYWORD_PREPARATION_INCOMPLETE = "keyword_preparation_incomplete", KEYWORDS_PREFIX = "Keyword preparation unfinished for ", RECENT_ITEMS_CUT_SHORT = "recent_items_cut_short", RECENT_PREFIX = "Ran out of time reading the newest items in ", VISIBILITY_CHECK_CUT_SHORT = "visibility_check_cut_short", UNCHECKED_PREFIX = "Ran out of time checking the privacy of matches in ";
+var init_partial_search = __esm(() => {
+  SEMANTIC_TIMEOUT_REASONS = new Set(["vector_scan_deadline_exceeded", "vector_scan_store_busy"]);
+});
+
+// src/core/source-index/keyword-context.ts
+import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
+var context, disabled, cachedOnly, requestContext;
+var init_keyword_context = __esm(() => {
+  context = new AsyncLocalStorage3;
+  disabled = new AsyncLocalStorage3;
+  cachedOnly = new AsyncLocalStorage3;
+  requestContext = new AsyncLocalStorage3;
+});
+// src/core/store-reclaim-admission.ts
+var init_store_reclaim_admission = __esm(() => {
+  init_file_lease();
+  init_olympus_layout();
+});
+
+// src/workers/source-index/answer-latency-trace.ts
+import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
+var poolSqlSites, storage, queryStorage, laneStorage, CONTENT_FREE_ERROR_CLASSES;
+var init_answer_latency_trace = __esm(() => {
+  init_source_answer_jobs();
+  init_store_reclaim_admission();
+  poolSqlSites = new WeakMap;
+  storage = new AsyncLocalStorage4;
+  queryStorage = new AsyncLocalStorage4;
+  laneStorage = new AsyncLocalStorage4;
+  CONTENT_FREE_ERROR_CLASSES = new Set([
+    "AbortError",
+    "AnalystUnavailable",
+    "AnalystCircuitOpen",
+    "EmailSourceWorkerError",
+    "Error",
+    "LocalTrustProviderMismatch",
+    "OperationError",
+    "RangeError",
+    "SourceModelPolicyDeniedError",
+    "SecureEvidencePolicySkip",
+    "SecureAnalystPoolE2EEGateError",
+    "SyntaxError",
+    "TrustedAnalystTimeoutError",
+    "TypeError"
+  ]);
+});
+
+// src/core/source-index/router.ts
+function normalizeRouterResultKey(key) {
+  return key.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+var DEFER_SEARCH_DELIVERY, SEARCH_GRANT_MATCH, SEARCH_GRANT_DELIVERY, SEARCH_GRANT_RECEIPT, FORBIDDEN_ROUTER_RESULT_KEYS, NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS, deliveredSearchGrants, routedSearchGrantScopes;
+var init_router = __esm(() => {
+  init_read_progress();
+  init_source_answer_jobs();
+  init_read_wide();
+  init_partial_search();
+  init_keyword_context();
+  init_types();
+  init_answer_latency_trace();
+  DEFER_SEARCH_DELIVERY = Symbol("defer search delivery");
+  SEARCH_GRANT_MATCH = Symbol("search grant match");
+  SEARCH_GRANT_DELIVERY = Symbol("search grant delivery");
+  SEARCH_GRANT_RECEIPT = Symbol("search grant receipt");
+  FORBIDDEN_ROUTER_RESULT_KEYS = new Set([
+    "body",
+    "bodies",
+    "content",
+    "contents",
+    "message",
+    "messages",
+    "raw",
+    "raw_packet",
+    "rawPacket",
+    "raw_source",
+    "rawSource",
+    "sanitized_text",
+    "sanitizedText",
+    "snippet",
+    "snippets",
+    "source_text",
+    "sourceText",
+    "raw_source_text",
+    "rawSourceText",
+    "text",
+    "access_token",
+    "accessToken",
+    "api_key",
+    "apiKey",
+    "approved_scope_key",
+    "approvedScopeKey",
+    "refresh_token",
+    "refreshToken",
+    "token"
+  ]);
+  NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS = new Set([...FORBIDDEN_ROUTER_RESULT_KEYS].map(normalizeRouterResultKey));
+  deliveredSearchGrants = new WeakMap;
+  routedSearchGrantScopes = new WeakMap;
+});
+
+// src/core/release-manifest.ts
+import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
 function recordReleaseManifest(manifest) {
-  storage.getStore()?.manifests.push({
+  storage2.getStore()?.manifests.push({
+    ...manifest,
     inputs: manifest.inputs.map((input) => ({ ...input, ...input.chunkHashes ? { chunkHashes: [...input.chunkHashes] } : {} })),
     constraints: { ...manifest.constraints }
   });
@@ -7808,15 +7933,16 @@ function withheldSourceAnswer(reason) {
   withheldAnswers.add(result);
   return result;
 }
-var chunkProvenance, storage, ANSWER_RELEASE_UNVERIFIED = "Olympus withheld this answer because its current privacy classification could not be verified.", withheldAnswers;
+var chunkProvenance, storage2, ANSWER_RELEASE_UNVERIFIED = "Olympus withheld this answer because its current privacy classification could not be verified.", withheldAnswers;
 var init_release_manifest = __esm(() => {
+  init_router();
   chunkProvenance = new WeakMap;
-  storage = new AsyncLocalStorage2;
+  storage2 = new AsyncLocalStorage5;
   withheldAnswers = new WeakSet;
 });
 
 // src/core/source-answer-jobs.ts
-import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
 function noteSourceAnswerProgress(stage) {
   progressSink.getStore()?.(stage);
 }
@@ -7829,11 +7955,11 @@ var init_source_answer_jobs = __esm(() => {
   SOURCE_ANSWER_JOB_TTL_MS = 15 * 60000;
   SOURCE_ANSWER_JOB_IDLE_MS = 5 * 60000;
   SOURCE_ANSWER_MAX_RESULT_BYTES = 2 * 1024 * 1024;
-  progressSink = new AsyncLocalStorage3;
+  progressSink = new AsyncLocalStorage6;
 });
 
 // src/core/model-stream.ts
-import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
 async function fetchStreamingModel(fetchImpl, url, init, model, idleMs = MODEL_IDLE_TIMEOUT_MS) {
   const controller = new AbortController;
   let timer;
@@ -7857,7 +7983,7 @@ async function fetchStreamingModel(fetchImpl, url, init, model, idleMs = MODEL_I
   else
     init.signal?.addEventListener("abort", follow, { once: true });
   arm();
-  progress.getStore()?.(model);
+  progress2.getStore()?.(model);
   let reader;
   let lastNote = -Infinity;
   const token = () => {
@@ -7932,7 +8058,7 @@ async function fetchStreamingModel(fetchImpl, url, init, model, idleMs = MODEL_I
       addMemoryPayloadBytes(next.value.byteLength);
       if (next.value.byteLength) {
         arm();
-        progress.getStore()?.(model);
+        progress2.getStore()?.(model);
       }
       const text = decoder.decode(next.value, { stream: true });
       if (!sse) {
@@ -7984,12 +8110,12 @@ async function fetchStreamingModel(fetchImpl, url, init, model, idleMs = MODEL_I
       reader.cancel().catch(() => {});
   }
 }
-var MODEL_IDLE_TIMEOUT_MS = 60000, progress, ModelStreamError, ModelIdleError;
+var MODEL_IDLE_TIMEOUT_MS = 60000, progress2, ModelStreamError, ModelIdleError;
 var init_model_stream = __esm(() => {
   init_memory_counters();
   init_model_transport();
   init_source_answer_jobs();
-  progress = new AsyncLocalStorage4;
+  progress2 = new AsyncLocalStorage7;
   ModelStreamError = class ModelStreamError extends Error {
     model;
     constructor(model) {
@@ -9123,127 +9249,6 @@ function isExecutableFile(path) {
   }
 }
 var init_openclaw_executable = () => {};
-
-// src/core/source-index/read-progress.ts
-import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
-var progress2;
-var init_read_progress = __esm(() => {
-  progress2 = new AsyncLocalStorage5;
-});
-
-// src/core/read-wide.ts
-var matchingProvenances, wideProvenances;
-var init_read_wide = __esm(() => {
-  matchingProvenances = new WeakSet;
-  wideProvenances = new WeakSet;
-});
-// src/core/source-index/partial-search.ts
-function keywordPreparationGap(corpusId) {
-  return `${KEYWORDS_PREFIX}${corpusId}; this answer uses the available keyword equivalents, so matches in other languages may be missing.`;
-}
-function recentItemsTimeoutGap(corpusId) {
-  return `${RECENT_PREFIX}${corpusId}; its newest items may be missing from this search. Ask again in a moment.`;
-}
-function visibilityCheckTimeoutGap(corpusId) {
-  return `${UNCHECKED_PREFIX}${corpusId}; they were left out of this search. Ask again in a moment.`;
-}
-var SEMANTIC_TIMEOUT_REASONS, KEYWORD_PREPARATION_INCOMPLETE = "keyword_preparation_incomplete", KEYWORDS_PREFIX = "Keyword preparation unfinished for ", RECENT_ITEMS_CUT_SHORT = "recent_items_cut_short", RECENT_PREFIX = "Ran out of time reading the newest items in ", VISIBILITY_CHECK_CUT_SHORT = "visibility_check_cut_short", UNCHECKED_PREFIX = "Ran out of time checking the privacy of matches in ";
-var init_partial_search = __esm(() => {
-  SEMANTIC_TIMEOUT_REASONS = new Set(["vector_scan_deadline_exceeded", "vector_scan_store_busy"]);
-});
-
-// src/core/source-index/keyword-context.ts
-import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
-var context, disabled, cachedOnly, requestContext;
-var init_keyword_context = __esm(() => {
-  context = new AsyncLocalStorage6;
-  disabled = new AsyncLocalStorage6;
-  cachedOnly = new AsyncLocalStorage6;
-  requestContext = new AsyncLocalStorage6;
-});
-// src/core/store-reclaim-admission.ts
-var init_store_reclaim_admission = __esm(() => {
-  init_file_lease();
-  init_olympus_layout();
-});
-
-// src/workers/source-index/answer-latency-trace.ts
-import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
-var poolSqlSites, storage2, queryStorage, laneStorage, CONTENT_FREE_ERROR_CLASSES;
-var init_answer_latency_trace = __esm(() => {
-  init_source_answer_jobs();
-  init_store_reclaim_admission();
-  poolSqlSites = new WeakMap;
-  storage2 = new AsyncLocalStorage7;
-  queryStorage = new AsyncLocalStorage7;
-  laneStorage = new AsyncLocalStorage7;
-  CONTENT_FREE_ERROR_CLASSES = new Set([
-    "AbortError",
-    "AnalystUnavailable",
-    "AnalystCircuitOpen",
-    "EmailSourceWorkerError",
-    "Error",
-    "LocalTrustProviderMismatch",
-    "OperationError",
-    "RangeError",
-    "SourceModelPolicyDeniedError",
-    "SecureEvidencePolicySkip",
-    "SecureAnalystPoolE2EEGateError",
-    "SyntaxError",
-    "TrustedAnalystTimeoutError",
-    "TypeError"
-  ]);
-});
-
-// src/core/source-index/router.ts
-function normalizeRouterResultKey(key) {
-  return key.toLowerCase().replace(/[^a-z0-9]+/g, "");
-}
-var DEFER_SEARCH_DELIVERY, SEARCH_GRANT_MATCH, SEARCH_GRANT_DELIVERY, FORBIDDEN_ROUTER_RESULT_KEYS, NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS;
-var init_router = __esm(() => {
-  init_read_progress();
-  init_source_answer_jobs();
-  init_read_wide();
-  init_partial_search();
-  init_keyword_context();
-  init_types();
-  init_answer_latency_trace();
-  DEFER_SEARCH_DELIVERY = Symbol("defer search delivery");
-  SEARCH_GRANT_MATCH = Symbol("search grant match");
-  SEARCH_GRANT_DELIVERY = Symbol("search grant delivery");
-  FORBIDDEN_ROUTER_RESULT_KEYS = new Set([
-    "body",
-    "bodies",
-    "content",
-    "contents",
-    "message",
-    "messages",
-    "raw",
-    "raw_packet",
-    "rawPacket",
-    "raw_source",
-    "rawSource",
-    "sanitized_text",
-    "sanitizedText",
-    "snippet",
-    "snippets",
-    "source_text",
-    "sourceText",
-    "raw_source_text",
-    "rawSourceText",
-    "text",
-    "access_token",
-    "accessToken",
-    "api_key",
-    "apiKey",
-    "approved_scope_key",
-    "approvedScopeKey",
-    "refresh_token",
-    "refreshToken",
-    "token"
-  ]);
-  NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS = new Set([...FORBIDDEN_ROUTER_RESULT_KEYS].map(normalizeRouterResultKey));
-});
 
 // src/workers/dashboard/backup-paths.ts
 var init_backup_paths = () => {};
@@ -20722,7 +20727,7 @@ var init_analyst_openclaw_infer = __esm(() => {
 });
 
 // src/core/evidence-pack.ts
-var utf82, CUT_SHORT_LANES;
+var evidenceSearchGrants, utf82, CUT_SHORT_LANES;
 var init_evidence_pack = __esm(() => {
   init_read_wide();
   init_keyword_context();
@@ -20737,12 +20742,27 @@ var init_evidence_pack = __esm(() => {
   init_router();
   init_types();
   init_answer_latency_trace();
+  evidenceSearchGrants = new WeakMap;
   utf82 = new TextEncoder;
   CUT_SHORT_LANES = new Map([
     [KEYWORD_PREPARATION_INCOMPLETE, { suffix: ":keywords", gap: keywordPreparationGap }],
     [RECENT_ITEMS_CUT_SHORT, { suffix: ":recency", gap: recentItemsTimeoutGap }],
     [VISIBILITY_CHECK_CUT_SHORT, { suffix: ":visibility", gap: visibilityCheckTimeoutGap }]
   ]);
+});
+
+// src/core/remote-private-part.ts
+var PROBED, DEFAULT_HANDOFF_TTL_MS;
+var init_remote_private_part = __esm(() => {
+  init_remote_result();
+  init_waiting_private_questions();
+  PROBED = new Set([
+    "approval_required",
+    "withheld",
+    "excluded_by_policy",
+    "route_unavailable"
+  ]);
+  DEFAULT_HANDOFF_TTL_MS = 35 * 60000;
 });
 
 // src/core/deep-read-refused.ts
@@ -20775,6 +20795,7 @@ var init_analyst_answer = __esm(() => {
   init_remote_result();
   init_source_corpus_registry();
   init_keyword_context();
+  init_remote_private_part();
   init_router();
   init_deep_read_trigger();
   init_source_model_policy();

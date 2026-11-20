@@ -97,6 +97,7 @@ export interface SourceIndexCorpusSearchRequest {
 export const DEFER_SEARCH_DELIVERY = Symbol('defer search delivery');
 export const SEARCH_GRANT_MATCH = Symbol('search grant match');
 export const SEARCH_GRANT_DELIVERY = Symbol('search grant delivery');
+export const SEARCH_GRANT_RECEIPT = Symbol('search grant receipt');
 
 export interface SourceIndexSearchHit {
   sourceItem: SourceItemIdentity;
@@ -185,12 +186,75 @@ export interface SourceIndexCorpusSearchResponse {
    * neighbours they are never matches and never counted.
    */
   semanticRows?: { hits: readonly SourceIndexSearchHit[]; bar: number };
-  [SEARCH_GRANT_DELIVERY]?: {
-    // An unchanged store epoch needs no per-item grant lookup.
-    checkIfChanged: (hits: readonly SourceIndexSearchHit[]) => ReadonlyMap<SourceIndexSearchHit, 'metadata' | 'content'> | undefined;
-    matches: readonly SourceIndexSearchHit[];
-  };
+  [SEARCH_GRANT_DELIVERY]?: SearchGrantDelivery;
   rawExposed: false;
+}
+
+interface SearchGrantDelivery {
+  // An unchanged store epoch needs no per-item grant lookup.
+  checkIfChanged: CheckSearchGrants;
+  matches: readonly SourceIndexSearchHit[];
+}
+
+type CheckSearchGrants = (hits: readonly SourceIndexSearchHit[]) => ReadonlyMap<SourceIndexSearchHit, 'metadata' | 'content'> | undefined;
+
+// The checker captures the store and its starting grant epoch. The hit binds
+// that check to the local item and source version read by this search.
+interface RoutedMatchGrantReceipt {
+  checkIfChanged: CheckSearchGrants;
+  hit: SourceIndexSearchHit;
+  metadataMatch?: { trustTier?: SourceTrustTier };
+}
+
+export type SearchGrantReceipt = RoutedMatchGrantReceipt | { current: () => boolean };
+
+export interface SearchGrantCount {
+  corpusId: string;
+  matchedItems: number;
+  grants: readonly RoutedMatchGrantReceipt[];
+}
+
+export type RevokedSearchGrants = ReadonlyMap<SearchGrantReceipt, 'metadata' | undefined>;
+
+export function revokedSearchGrants(receipts: readonly SearchGrantReceipt[]): RevokedSearchGrants {
+  const revoked = new Map<SearchGrantReceipt, 'metadata' | undefined>();
+  const batches = new Map<CheckSearchGrants, RoutedMatchGrantReceipt[]>();
+  for (const receipt of new Set(receipts)) {
+    if ('current' in receipt) {
+      if (!receipt.current()) revoked.set(receipt, undefined);
+      continue;
+    }
+    const batch = batches.get(receipt.checkIfChanged) ?? [];
+    batch.push(receipt);
+    batches.set(receipt.checkIfChanged, batch);
+  }
+  for (const [check, batch] of batches) {
+    const visible = check(batch.map(receipt => receipt.hit));
+    if (!visible) continue;
+    for (const receipt of batch) {
+      const layer = visible.get(receipt.hit);
+      if (layer !== 'content') revoked.set(receipt, layer);
+    }
+  }
+  return revoked;
+}
+
+export function searchGrantCountLosses(
+  counts: readonly SearchGrantCount[], revoked: RevokedSearchGrants,
+): ReadonlyMap<string, { matchedItems: number; contentMatchedItems: number; secureMatchedItems: number }> {
+  const losses = new Map<string, { matchedItems: number; contentMatchedItems: number; secureMatchedItems: number }>();
+  for (const { corpusId, grants } of counts) {
+    const removed = grants.filter(receipt => revoked.has(receipt));
+    if (removed.length === 0) continue;
+    const fallbackOf = (receipt: RoutedMatchGrantReceipt) => revoked.get(receipt) === 'metadata' ? receipt.metadataMatch : undefined;
+    const isSecureHit = (hit: { trustTier?: SourceTrustTier } | undefined) => hit?.trustTier !== undefined && isSecureTrustTier(hit.trustTier);
+    losses.set(corpusId, {
+      matchedItems: removed.filter(receipt => !fallbackOf(receipt)).length,
+      contentMatchedItems: removed.length,
+      secureMatchedItems: removed.filter(receipt => isSecureHit(receipt.hit) && !isSecureHit(fallbackOf(receipt))).length,
+    });
+  }
+  return losses;
 }
 
 export interface SourceIndexStoreRelevance {
@@ -284,6 +348,7 @@ export interface SourceIndexRoutedSearchHit extends SourceIndexSearchHit {
   servingLayer?: 'metadata' | 'content';
   corpusId: string;
   trustDomain: SourceTrustDomain;
+  [SEARCH_GRANT_RECEIPT]?: SearchGrantReceipt;
 }
 
 export interface SourceIndexSkippedCorpus {
@@ -490,10 +555,13 @@ function distinctSearchMatches(hits: readonly SourceIndexSearchHit[]): SourceInd
   return [...matches.values()];
 }
 
+const deliveredSearchGrants = new WeakMap<SourceIndexCorpusSearchResponse, SearchGrantDelivery>();
+
 // Resolve grant-dependent results against the current item versions in one corpus.
 export function deliverCorpusSearch(
   responses: readonly SourceIndexCorpusSearchResponse[],
   maxPartialResults?: number,
+  retainGrants = false,
 ): SourceIndexCorpusSearchResponse {
   const first = responses[0]!;
   const delivery = first[SEARCH_GRANT_DELIVERY] ?? responses.find(response => response[SEARCH_GRANT_DELIVERY])?.[SEARCH_GRANT_DELIVERY];
@@ -511,19 +579,18 @@ export function deliverCorpusSearch(
     return fallback ? [fallback] : [];
   });
   const retained = current(hits, true);
-  const matchCount = delivery && (partial || grantMatches.some(hit => !keep(hit))) ? (() => {
-    const matches = distinctSearchMatches(current(grantMatches, true));
-    return {
-      matchedItems: matches.length,
-      contentMatchedItems: matches.filter(hit => hit[SEARCH_GRANT_MATCH]).length,
-      secureMatchedItems: matches.filter(hit => hit.trustTier !== undefined && isSecureTrustTier(hit.trustTier)).length,
-      saturated: partial || first.matchCount?.saturated === true,
-    };
-  })() : first.matchCount;
+  const recount = delivery && (partial || grantMatches.some(hit => !keep(hit)));
+  const matches = recount || (delivery && retainGrants) ? distinctSearchMatches(current(grantMatches, true)) : [];
+  const matchCount = recount ? {
+    matchedItems: matches.length,
+    contentMatchedItems: matches.filter(hit => hit[SEARCH_GRANT_MATCH]).length,
+    secureMatchedItems: matches.filter(hit => hit.trustTier !== undefined && isSecureTrustTier(hit.trustTier)).length,
+    saturated: partial || first.matchCount?.saturated === true,
+  } : first.matchCount;
   // Lane aggregates may include candidates outside the returned cut. Only
   // the original epoch authorizes those counts and relevance scores.
   const { [SEARCH_GRANT_DELIVERY]: _delivery, laneAudits, storeRelevance, ...response } = first;
-  return {
+  const delivered = {
     ...response,
     ...(!visible && laneAudits ? { laneAudits } : {}),
     ...(!visible && storeRelevance ? { storeRelevance } : {}),
@@ -533,15 +600,89 @@ export function deliverCorpusSearch(
     ...(first.semanticNeighbourHits ? { semanticNeighbourHits: current(first.semanticNeighbourHits, false) } : {}),
     ...(first.semanticRows ? { semanticRows: { ...first.semanticRows, hits: current(first.semanticRows.hits, false) } } : {}),
   };
+  if (delivery && retainGrants) deliveredSearchGrants.set(delivered, { checkIfChanged: delivery.checkIfChanged, matches });
+  return delivered;
 }
 
 function poolHitKey(hit: SourceIndexSearchHit): string {
   return `${hit.sourceItem.providerItemId}\u0000${hit.sourceItem.localItemId ?? ''}`;
 }
 
-function routeHit(hit: SourceIndexSearchHit, corpus: SourceIndexCorpusDefinition): SourceIndexRoutedSearchHit {
+function receiptFor(hit: SourceIndexSearchHit, delivery: SearchGrantDelivery | undefined): RoutedMatchGrantReceipt | undefined {
+  const match = hit[SEARCH_GRANT_MATCH];
+  if (!delivery || !match) return undefined;
+  const { sourceItem, trustTier } = hit;
+  return {
+    checkIfChanged: delivery.checkIfChanged,
+    hit: { sourceItem, ...(trustTier !== undefined ? { trustTier } : {}), rawExposed: false },
+    ...(match.metadataFallback ? { metadataMatch: match.metadataFallback.trustTier === undefined ? {} : { trustTier: match.metadataFallback.trustTier } } : {}),
+  };
+}
+
+function routeHit(hit: SourceIndexSearchHit, corpus: SourceIndexCorpusDefinition, delivery?: SearchGrantDelivery): SourceIndexRoutedSearchHit {
   const { [SEARCH_GRANT_MATCH]: _grant, ...candidate } = hit;
-  return { ...candidate, corpusId: corpus.corpusId, trustDomain: corpus.trustDomain };
+  const receipt = receiptFor(hit, delivery);
+  return { ...candidate, corpusId: corpus.corpusId, trustDomain: corpus.trustDomain, ...(receipt ? { [SEARCH_GRANT_RECEIPT]: receipt } : {}) };
+}
+
+interface RoutedSearchGrantScope {
+  count: SearchGrantCount | undefined;
+  matches: readonly SourceIndexRoutedSearchHit[];
+  auditGrants: readonly SearchGrantReceipt[];
+  audits: readonly RetrievalLaneAudit[];
+}
+
+const routedSearchGrantScopes = new WeakMap<SourceIndexRoutedSearchResponse, readonly RoutedSearchGrantScope[]>();
+
+export function routedSearchGrantCounts(response: SourceIndexRoutedSearchResponse): SearchGrantCount[] {
+  return (routedSearchGrantScopes.get(response) ?? []).flatMap(scope => scope.count ? [scope.count] : []);
+}
+
+// Keep the returned cut, breadth, read-wide membership, and audits on the same grant judgment.
+export function refreshRoutedSearchGrants(response: SourceIndexRoutedSearchResponse): SourceIndexRoutedSearchResponse {
+  const scopes = routedSearchGrantScopes.get(response);
+  if (!scopes) return response;
+  const receiptOf = (hit: SourceIndexRoutedSearchHit) => hit[SEARCH_GRANT_RECEIPT];
+  const hits = [...response.hits, ...(response.semanticSeats ?? []).map(seat => seat.hit)];
+  const receipts = [...hits.map(receiptOf), ...scopes.flatMap(scope => [
+    ...(scope.count?.grants ?? []), ...scope.matches.map(receiptOf), ...scope.auditGrants,
+  ])].filter((receipt): receipt is SearchGrantReceipt => receipt !== undefined);
+  const revoked = revokedSearchGrants(receipts);
+  if (revoked.size === 0) return response;
+  const keep = (hit: SourceIndexRoutedSearchHit) => {
+    const receipt = receiptOf(hit);
+    return !receipt || !revoked.has(receipt);
+  };
+  const revokedIds = new Set(scopes.flatMap(scope => scope.matches.filter(hit => !keep(hit)).map(routedHitCandidateId)));
+  const invalidAudits = new Set(scopes.flatMap(scope => scope.auditGrants.some(grant => revoked.has(grant)) ? scope.audits : []));
+  const losses = searchGrantCountLosses(routedSearchGrantCounts(response), revoked);
+  const refreshed = {
+    ...response,
+    hits: response.hits.filter(keep),
+    ...(response.semanticSeats ? { semanticSeats: response.semanticSeats.filter(seat => keep(seat.hit)) } : {}),
+    ...(response.matchingCandidateIds ? { matchingCandidateIds: response.matchingCandidateIds.filter(id => !revokedIds.has(id)) } : {}),
+    ...(response.matchCounts ? { matchCounts: response.matchCounts.map(count => {
+      const loss = losses.get(count.corpusId);
+      return !loss ? count : {
+        ...count,
+        matchedItems: Math.max(0, count.matchedItems - loss.matchedItems),
+        contentMatchedItems: Math.max(0, count.contentMatchedItems - loss.contentMatchedItems),
+        ...(count.secureMatchedItems !== undefined ? { secureMatchedItems: Math.max(0, count.secureMatchedItems - loss.secureMatchedItems) } : {}),
+      };
+    }) } : {}),
+    laneAudits: response.laneAudits.filter(audit => !invalidAudits.has(audit)),
+    secureLaneAudits: response.secureLaneAudits.filter(audit => !invalidAudits.has(audit)),
+  };
+  routedSearchGrantScopes.set(refreshed, scopes.map(scope => ({
+    ...scope,
+    ...(scope.count ? { count: {
+      ...scope.count,
+      matchedItems: Math.max(0, scope.count.matchedItems - (losses.get(scope.count.corpusId)?.matchedItems ?? 0)),
+      grants: scope.count.grants.filter(grant => !revoked.has(grant)),
+    } } : {}),
+    matches: scope.matches.filter(keep),
+  })));
+  return refreshed;
 }
 
 export async function routeSourceIndexSearch(options: RouteSourceIndexSearchOptions): Promise<SourceIndexRoutedSearchResponse> {
@@ -558,6 +699,7 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
   const corpusTimings: SourceIndexRoutedCorpusTiming[] = [];
   const lanes: Array<{ name: string; items: SourceIndexRoutedSearchHit[]; relevance?: SourceIndexStoreRelevance; semantic?: SemanticPoolSeat[] }> = [];
   const matchCounts: SourceIndexRoutedMatchCount[] = [];
+  const grantScopes: RoutedSearchGrantScope[] = [];
   const incompleteCorpora: string[] = [];
   let encounteredSecureLocal = false;
   const secureLaneAudits: RetrievalLaneAudit[] = [];
@@ -725,15 +867,15 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
       if (responses.length === 0) continue;
       incompleteCorpora.push(corpus.corpusId);
     }
-    const response = deliverCorpusSearch(responses, outcome.kind === 'timeout' ? maxResults : undefined);
+    const response = deliverCorpusSearch(responses, outcome.kind === 'timeout' ? maxResults : undefined, true);
     assertSafeCorpusSearchResponse(response);
+    const delivery = deliveredSearchGrants.get(response);
     const rejected = visibilityRejected.get(corpus.corpusId);
     const visible = (hit: SourceIndexSearchHit) => !rejected?.has(hit);
     const matches = response.hits.filter(visible);
+    const routedMatches = matches.map(hit => routeHit(hit, corpus, delivery));
     if (request.readWide) {
-      for (const hit of matches) {
-        matchingIds.add(routedHitCandidateId(routeHit(hit, corpus)));
-      }
+      for (const hit of routedMatches) matchingIds.add(routedHitCandidateId(hit));
     }
     if (outcome.kind === 'response') corpusTimings.push({
       corpusId: corpus.corpusId,
@@ -780,14 +922,29 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
       && (response.hits.length < depth || responses.some(row => row[SEARCH_GRANT_DELIVERY]))
       ? (response.semanticNeighbourHits ?? []).filter(hit => visible(hit) && !seen.has(poolHitKey(hit))).slice(0, depth - matches.length)
       : [];
+    if (delivery) {
+      const receiptsFor = (hits: readonly SourceIndexSearchHit[]) => hits.flatMap(hit => {
+        const receipt = receiptFor(hit, delivery);
+        return receipt ? [receipt] : [];
+      });
+      const countGrants = receiptsFor(delivery.matches);
+      grantScopes.push({
+        count: response.matchCount ? { corpusId: corpus.corpusId, matchedItems: response.matchCount.matchedItems, grants: countGrants } : undefined,
+        matches: request.readWide ? routedMatches : [],
+        auditGrants: [...countGrants, ...receiptsFor([
+          ...response.hits, ...(response.semanticNeighbourHits ?? []), ...(response.semanticRows?.hits ?? []),
+        ])],
+        audits: response.laneAudits ?? [],
+      });
+    }
     lanes.push({
       name: corpus.corpusId,
       ...(response.storeRelevance ? { relevance: response.storeRelevance } : {}),
       ...(request.readWide ? { matchingIds } : {}),
-      items: [...matches, ...neighbours].map(hit => routeHit(hit, corpus)),
+      items: [...routedMatches, ...neighbours.map(hit => routeHit(hit, corpus, delivery))],
       ...(request.poolAllocation?.semanticSeats && response.semanticRows?.hits.length
         ? { semantic: response.semanticRows.hits.filter(visible).map((hit) => ({
-            hit: routeHit(hit, corpus),
+            hit: routeHit(hit, corpus, delivery),
             margin: (hit.score ?? Number.NEGATIVE_INFINITY) - response.semanticRows!.bar,
           })) }
         : {}),
@@ -815,6 +972,7 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
     latencyMs: Date.now() - startedAt,
     rawExposed: false,
   };
+  if (grantScopes.length > 0) routedSearchGrantScopes.set(result, grantScopes);
   assertSafeRoutedSearchResponse(result);
   recordSourceAnswerQueryStages({
     prepare_ms: lanesStartedAt - prepareStartedAt,

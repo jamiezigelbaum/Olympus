@@ -6585,7 +6585,7 @@ function unquoteEnvValue(value) {
 }
 
 // src/core/model-stream.ts
-import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
 
 // src/core/zkapi-consult-settings.ts
 import { readFileSync as readFileSync11, statSync as statSync7 } from "node:fs";
@@ -6886,7 +6886,7 @@ function isFetchRedirectRefusal(error) {
 }
 
 // src/core/source-answer-jobs.ts
-import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
 
 // node_modules/entities/dist/esm/decode-codepoint.js
 var _a;
@@ -8009,8 +8009,289 @@ var SHARED_SECRET_PATTERNS = [
   }
 ];
 
-// src/core/release-manifest.ts
+// src/core/source-index/read-progress.ts
 import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
+var progress = new AsyncLocalStorage2;
+function noteSourceIndexReadProgress() {
+  const report = progress.getStore();
+  if (!report)
+    return;
+  report();
+}
+function currentSourceIndexReadProgress() {
+  return progress.getStore();
+}
+
+// src/core/read-wide.ts
+var matchingProvenances = new WeakSet;
+var wideProvenances = new WeakSet;
+
+// src/core/source-index/lane-busy.ts
+var SOURCE_INDEX_LANE_BUSY_CODE = "source_index_lane_busy";
+
+// src/core/source-index/partial-search.ts
+var SEMANTIC_TIMEOUT_REASONS = new Set(["vector_scan_deadline_exceeded", "vector_scan_store_busy"]);
+
+// src/core/source-index/keyword-context.ts
+import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
+var context = new AsyncLocalStorage3;
+var disabled = new AsyncLocalStorage3;
+function keywordExpansionDisabled() {
+  return disabled.getStore() === true;
+}
+var cachedOnly = new AsyncLocalStorage3;
+var requestContext = new AsyncLocalStorage3;
+function keywordAlternatives(query) {
+  if (keywordExpansionDisabled())
+    return;
+  const current = context.getStore();
+  return current?.query === query ? current.alternatives : undefined;
+}
+function withKeywordAlternatives(query, alternatives, run) {
+  return context.run({ query, alternatives }, run);
+}
+
+// src/workers/source-index/answer-latency-trace.ts
+import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
+import { createHash as createHash3, randomUUID as randomUUID5 } from "node:crypto";
+
+// src/core/store-reclaim-admission.ts
+import { join as join15 } from "node:path";
+import { closeSync as closeSync7, openSync as openSync7, futimesSync, statSync as statSync8 } from "node:fs";
+var probe = { acquireTimeoutMs: 1, pollIntervalMs: 1 };
+var target = (name) => join15(sharedDataPath("engine-run"), `store-reclaim-${name}`);
+function storeReadHasPriority() {
+  try {
+    return withFileLeaseSync(target("readers"), () => false, probe);
+  } catch (error) {
+    if (error instanceof FileLeaseBusyError)
+      return true;
+    throw error;
+  }
+}
+function storeOwnerIdleMs(now = Date.now()) {
+  try {
+    return Math.max(0, now - statSync8(target("last-ask")).mtimeMs);
+  } catch (error) {
+    if (error.code === "ENOENT")
+      return Number.POSITIVE_INFINITY;
+    throw error;
+  }
+}
+
+// src/workers/source-index/answer-latency-trace.ts
+var POOL_SQL_SITE_CHARS = 120;
+var poolSqlSites = new WeakMap;
+function poolSqlSite(sql) {
+  const shape = sql.replace(/'(?:[^']|'')*'|"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]*\]|--[^\r\n]*|\/\*[\s\S]*?\*\//g, (token) => token.startsWith("--") || token.startsWith("/*") ? " " : "?").replace(/\b(?:0x[\da-f]+|\d+(?:\.\d+)?(?:e[+-]?\d+)?)\b/gi, "N").replace(/\s+/g, " ").trim();
+  const hash = createHash3("sha256").update(shape).digest("hex").slice(0, 16);
+  const prefix = shape.replace(/\(\s*(?:\?|N)(?:\s*,\s*(?:\?|N))+\s*\)/g, "(…)");
+  return `${prefix.slice(0, POOL_SQL_SITE_CHARS)} #${hash}`;
+}
+var SLOW_MAIN_THREAD_SQL_MS = 250;
+var SLOW_MAIN_THREAD_SQL_KEPT = 20;
+var SITE_TALLY_MS = 25;
+var storage = new AsyncLocalStorage4;
+var queryStorage = new AsyncLocalStorage4;
+var laneStorage = new AsyncLocalStorage4;
+function poolReads(query, corpusId) {
+  let reads = query.poolByCorpus.get(corpusId);
+  if (!reads) {
+    reads = {
+      reads: 0,
+      queue_wait_ms: 0,
+      queue_wait_max_ms: 0,
+      run_ms: 0,
+      run_max_ms: 0,
+      sql_ms: 0,
+      sql_max_ms: 0,
+      snapshot_reads: 0,
+      snapshot_sql_ms: 0,
+      refused: 0,
+      dropped_queued: 0,
+      past_deadline_running: 0,
+      errors: 0
+    };
+    query.poolByCorpus.set(corpusId, reads);
+  }
+  return reads;
+}
+function sourceAnswerVectorWork() {
+  const query = queryStorage.getStore();
+  const corpusId = laneStorage.getStore();
+  if (!query || corpusId === undefined)
+    return;
+  return poolReads(query, corpusId).vector_work ??= {
+    digest_pages_read: 0,
+    digest_rows_scanned: 0,
+    full_vectors_rescored: 0,
+    digest_unpack_score_ms: 0
+  };
+}
+function beginSourceAnswerConceptCounts() {
+  const query = queryStorage.getStore();
+  const corpusId = laneStorage.getStore();
+  if (!query || corpusId === undefined)
+    return;
+  const passes = poolReads(query, corpusId).keyword_concept_counts ??= [];
+  const pass = [];
+  passes.push(pass);
+  return pass;
+}
+function beginSourceAnswerPoolRead(statement, label) {
+  const query = queryStorage.getStore();
+  const corpusId = laneStorage.getStore();
+  if (!query || corpusId === undefined)
+    return;
+  let site = query.sqlShapes.get(statement);
+  if (site === undefined) {
+    site = poolSqlSite(statement);
+    query.sqlShapes.set(statement, site);
+  }
+  const key = label ? `${label}\x00${site}` : site;
+  return ({ queueWaitMs, runMs, sqlMs, cpuMs, outcome, snapshot }) => {
+    const reads = poolReads(query, corpusId);
+    if (sqlMs !== undefined) {
+      reads.thread_cpu_available = reads.thread_cpu_available === true || cpuMs !== undefined;
+    }
+    const wait = unroundedMs(queueWaitMs);
+    const ran = unroundedMs(runMs);
+    reads.reads += 1;
+    reads.queue_wait_ms += wait;
+    reads.queue_wait_max_ms = Math.max(reads.queue_wait_max_ms, wait);
+    reads.run_ms += ran;
+    reads.run_max_ms = Math.max(reads.run_max_ms, ran);
+    const sql = unroundedMs(sqlMs ?? 0);
+    reads.sql_ms += sql;
+    reads.sql_max_ms = Math.max(reads.sql_max_ms, sql);
+    if (snapshot) {
+      reads.snapshot_reads += 1;
+      reads.snapshot_sql_ms += sql;
+    }
+    let sites = poolSqlSites.get(reads);
+    if (!sites)
+      poolSqlSites.set(reads, sites = new Map);
+    const entry = sites.get(key) ?? { site, ...label ? { label } : {}, reads: 0, sql_ms: 0, sql_max_ms: 0 };
+    entry.reads += 1;
+    entry.sql_ms += sql;
+    entry.sql_max_ms = Math.max(entry.sql_max_ms, sql);
+    if (cpuMs !== undefined) {
+      const cpu = unroundedMs(cpuMs);
+      entry.sql_cpu_ms = (entry.sql_cpu_ms ?? 0) + cpu;
+      entry.sql_cpu_max_ms = Math.max(entry.sql_cpu_max_ms ?? 0, cpu);
+    }
+    sites.set(key, entry);
+    if (outcome === "refused")
+      reads.refused += 1;
+    else if (outcome === "dropped_queued")
+      reads.dropped_queued += 1;
+    else if (outcome === "past_deadline_running")
+      reads.past_deadline_running += 1;
+    else if (outcome === "error")
+      reads.errors += 1;
+  };
+}
+var CONTENT_FREE_ERROR_CLASSES = new Set([
+  "AbortError",
+  "AnalystUnavailable",
+  "AnalystCircuitOpen",
+  "EmailSourceWorkerError",
+  "Error",
+  "LocalTrustProviderMismatch",
+  "OperationError",
+  "RangeError",
+  "SourceModelPolicyDeniedError",
+  "SecureEvidencePolicySkip",
+  "SecureAnalystPoolE2EEGateError",
+  "SyntaxError",
+  "TrustedAnalystTimeoutError",
+  "TypeError"
+]);
+function currentSourceAnswerTrace() {
+  return storage.getStore();
+}
+function sourceAnswerTraceActive() {
+  return storage.getStore() !== undefined;
+}
+function recordSourceAnswerMainThreadSql(elapsedMs, site) {
+  const trace = currentSourceAnswerTrace();
+  if (!trace)
+    return;
+  const ms = unroundedMs(elapsedMs);
+  const sql = trace.mainThreadSql;
+  sql.statements += 1;
+  sql.total_ms += ms;
+  sql.max_ms = Math.max(sql.max_ms, ms);
+  if (ms < SITE_TALLY_MS)
+    return;
+  const where = site();
+  const tally = sql.by_site.find((entry) => entry.site === where);
+  if (tally) {
+    tally.statements += 1;
+    tally.ms += ms;
+  } else {
+    sql.by_site.push({ site: where, statements: 1, ms });
+  }
+  if (ms < SLOW_MAIN_THREAD_SQL_MS)
+    return;
+  sql.slow.push({ ms: nonNegativeMs(ms), site: where });
+  if (sql.slow.length > SLOW_MAIN_THREAD_SQL_KEPT) {
+    sql.slow.sort((left, right) => right.ms - left.ms);
+    sql.slow.length = SLOW_MAIN_THREAD_SQL_KEPT;
+  }
+}
+function unroundedMs(value) {
+  return Number.isFinite(value) ? Math.max(0, value) : 0;
+}
+function nonNegativeMs(value) {
+  return Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
+}
+
+// src/core/source-index/router.ts
+var DEFER_SEARCH_DELIVERY = Symbol("defer search delivery");
+var SEARCH_GRANT_MATCH = Symbol("search grant match");
+var SEARCH_GRANT_DELIVERY = Symbol("search grant delivery");
+var SEARCH_GRANT_RECEIPT = Symbol("search grant receipt");
+var FORBIDDEN_ROUTER_RESULT_KEYS = new Set([
+  "body",
+  "bodies",
+  "content",
+  "contents",
+  "message",
+  "messages",
+  "raw",
+  "raw_packet",
+  "rawPacket",
+  "raw_source",
+  "rawSource",
+  "sanitized_text",
+  "sanitizedText",
+  "snippet",
+  "snippets",
+  "source_text",
+  "sourceText",
+  "raw_source_text",
+  "rawSourceText",
+  "text",
+  "access_token",
+  "accessToken",
+  "api_key",
+  "apiKey",
+  "approved_scope_key",
+  "approvedScopeKey",
+  "refresh_token",
+  "refreshToken",
+  "token"
+]);
+var NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS = new Set([...FORBIDDEN_ROUTER_RESULT_KEYS].map(normalizeRouterResultKey));
+var deliveredSearchGrants = new WeakMap;
+var routedSearchGrantScopes = new WeakMap;
+function normalizeRouterResultKey(key) {
+  return key.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+// src/core/release-manifest.ts
+import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
 var RELEASE_CHUNK_JUDGE_BUDGET_MS = 8000;
 function chunkCoverageNote(result) {
   return result.withheldPassages > 0 ? `${result.withheldPassages} passages from ${result.withheldDocuments} documents are still being checked for privacy and weren't shared. Ask again in a minute.` : undefined;
@@ -8028,24 +8309,27 @@ async function checkReleaseChunks(check, inputs, options) {
   };
 }
 var chunkProvenance = new WeakMap;
-var storage = new AsyncLocalStorage2;
+var storage2 = new AsyncLocalStorage5;
+function recordReleaseManifest(manifest) {
+  storage2.getStore()?.manifests.push({
+    ...manifest,
+    inputs: manifest.inputs.map((input) => ({ ...input, ...input.chunkHashes ? { chunkHashes: [...input.chunkHashes] } : {} })),
+    constraints: { ...manifest.constraints }
+  });
+}
 var withheldAnswers = new WeakSet;
 
 // src/core/source-answer-jobs.ts
 var SOURCE_ANSWER_JOB_TTL_MS = 15 * 60000;
 var SOURCE_ANSWER_JOB_IDLE_MS = 5 * 60000;
 var SOURCE_ANSWER_MAX_RESULT_BYTES = 2 * 1024 * 1024;
-var progressSink = new AsyncLocalStorage3;
+var progressSink = new AsyncLocalStorage6;
 
 // src/core/model-stream.ts
-var progress = new AsyncLocalStorage4;
-
-// src/core/read-wide.ts
-var matchingProvenances = new WeakSet;
-var wideProvenances = new WeakSet;
+var progress2 = new AsyncLocalStorage7;
 
 // src/core/analyst.ts
-import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage8 } from "node:async_hooks";
 
 // node_modules/n-gram/index.js
 var bigram = nGram(2);
@@ -8431,25 +8715,6 @@ var stopwords_iso_default = {
   yo: ["a", "an", "bá", "bí", "bẹ̀rẹ̀", "fún", "fẹ́", "gbogbo", "inú", "jù", "jẹ", "jẹ́", "kan", "kì", "kí", "kò", "láti", "lè", "lọ", "mi", "mo", "máa", "mọ̀", "ni", "náà", "ní", "nígbà", "nítorí", "nǹkan", "o", "padà", "pé", "púpọ̀", "pẹ̀lú", "rẹ̀", "sì", "sí", "sínú", "ṣ", "ti", "tí", "wà", "wá", "wọn", "wọ́n", "yìí", "àti", "àwọn", "é", "í", "òun", "ó", "ń", "ńlá", "ṣe", "ṣé", "ṣùgbọ́n", "ẹmọ́", "ọjọ́", "ọ̀pọ̀lọpọ̀"],
   zu: ["futhi", "kahle", "kakhulu", "kanye", "khona", "kodwa", "kungani", "kusho", "la", "lakhe", "lapho", "mina", "ngesikhathi", "nje", "phansi", "phezulu", "u", "ukuba", "ukuthi", "ukuze", "uma", "wahamba", "wakhe", "wami", "wase", "wathi", "yakhe", "zakhe", "zonke"]
 };
-
-// src/core/source-index/keyword-context.ts
-import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
-var context = new AsyncLocalStorage5;
-var disabled = new AsyncLocalStorage5;
-function keywordExpansionDisabled() {
-  return disabled.getStore() === true;
-}
-var cachedOnly = new AsyncLocalStorage5;
-var requestContext = new AsyncLocalStorage5;
-function keywordAlternatives(query) {
-  if (keywordExpansionDisabled())
-    return;
-  const current = context.getStore();
-  return current?.query === query ? current.alternatives : undefined;
-}
-function withKeywordAlternatives(query, alternatives, run) {
-  return context.run({ query, alternatives }, run);
-}
 
 // src/core/source-index/keyword-stopwords.ts
 var EMPTY = new Set;
@@ -9127,14 +9392,11 @@ function compactPassageWhitespace(text) {
   });
 }
 
-// src/core/source-index/partial-search.ts
-var SEMANTIC_TIMEOUT_REASONS = new Set(["vector_scan_deadline_exceeded", "vector_scan_store_busy"]);
-
 // src/core/evidence-versions.ts
 var DOCUMENT_FAMILIES = new Set(["file", "note"]);
 
 // src/core/analyst.ts
-var analystAbortSignalStorage = new AsyncLocalStorage6;
+var analystAbortSignalStorage = new AsyncLocalStorage8;
 var CONFLICT_RULE = "- If items give different values for the same thing, give each value with its item's name and date; never pick one silently.";
 var CLAIM_RULE = `Each citation's "claim" is one sentence copied word for word from "answer": the sentence that item supports. One citation per sentence and item.`;
 var ANALYST_SYSTEM = [
@@ -9418,9 +9680,9 @@ import {
   rmSync as rmSync5,
   writeFileSync as writeFileSync5
 } from "node:fs";
-import { randomUUID as randomUUID5 } from "node:crypto";
+import { randomUUID as randomUUID6 } from "node:crypto";
 import { homedir as homedir8 } from "node:os";
-import { dirname as dirname12, isAbsolute as isAbsolute8, join as join15 } from "node:path";
+import { dirname as dirname12, isAbsolute as isAbsolute8, join as join16 } from "node:path";
 
 // src/core/venice-models.ts
 var VENICE_MODEL_ALIASES = Object.freeze({
@@ -9547,8 +9809,8 @@ var MAX_FUTURE_CLOCK_SKEW_MS = 5 * 60 * 1000;
 var REFRESH_GATES = new Map;
 function defaultVeniceModelCatalogCachePath(env = process.env, homeDir = homedir8(), type = "text") {
   const configuredRoot = env.XDG_CACHE_HOME?.trim();
-  const cacheRoot = configuredRoot && isAbsolute8(configuredRoot) ? configuredRoot : join15(homeDir, ".cache");
-  return join15(cacheRoot, "olympus", type === "embedding" ? "venice-embedding-model-catalog-v1.json" : "venice-model-catalog-v1.json");
+  const cacheRoot = configuredRoot && isAbsolute8(configuredRoot) ? configuredRoot : join16(homeDir, ".cache");
+  return join16(cacheRoot, "olympus", type === "embedding" ? "venice-embedding-model-catalog-v1.json" : "venice-model-catalog-v1.json");
 }
 function createVenicePrivacyCategoryResolver(input) {
   const options = input.catalog ?? {};
@@ -9752,7 +10014,7 @@ function readCatalogCache(path, type) {
   return { fetchedAtMs, type, models: Object.freeze(models) };
 }
 function writeCatalogCache(path, catalog) {
-  const tempPath = `${path}.${process.pid}.${randomUUID5()}.tmp`;
+  const tempPath = `${path}.${process.pid}.${randomUUID6()}.tmp`;
   try {
     mkdirSync7(dirname12(path), { recursive: true, mode: 448 });
     const models = Object.fromEntries(Object.entries(catalog.models).sort(([a], [b]) => a.localeCompare(b)));
@@ -9860,8 +10122,8 @@ var BUILT_IN_EMBEDDING_MODEL_ID = BUILT_IN_EMBEDDING_ENV_DEFAULT_MODEL.modelId;
 
 // src/workers/source-index/embeddings.ts
 import { Buffer as Buffer2 } from "node:buffer";
-import { AsyncLocalStorage as AsyncLocalStorage7 } from "node:async_hooks";
-import { createHash as createHash3 } from "node:crypto";
+import { AsyncLocalStorage as AsyncLocalStorage9 } from "node:async_hooks";
+import { createHash as createHash4 } from "node:crypto";
 import { lookup as lookup2 } from "node:dns/promises";
 import { request as httpsRequest } from "node:https";
 import { isIP as isIP2 } from "node:net";
@@ -10000,7 +10262,7 @@ function contaminatedEmbeddingEpoch(modelId, epochId) {
 }
 
 // src/workers/source-index/embeddings.ts
-var priorityQueryEmbedding = new AsyncLocalStorage7;
+var priorityQueryEmbedding = new AsyncLocalStorage9;
 function priorityQueryEmbeddingRequested() {
   return priorityQueryEmbedding.getStore() === true;
 }
@@ -10812,36 +11074,36 @@ function normalizeOutputDimensionality(value) {
   return value;
 }
 function hashString(value) {
-  return createHash3("sha256").update(value).digest("hex");
+  return createHash4("sha256").update(value).digest("hex");
 }
 
 // src/workers/source-index/built-in-embedding/provider.ts
 import { isMainThread as isMainThread5 } from "node:worker_threads";
-import { createHash as createHash5 } from "node:crypto";
+import { createHash as createHash6 } from "node:crypto";
 import { readFileSync as readFileSync16 } from "node:fs";
 import { availableParallelism } from "node:os";
-import { dirname as dirname16, join as join20 } from "node:path";
+import { dirname as dirname16, join as join21 } from "node:path";
 
 // src/core/media-cache.ts
-import { createHash as createHash4, randomUUID as randomUUID6 } from "node:crypto";
+import { createHash as createHash5, randomUUID as randomUUID7 } from "node:crypto";
 import {
   chmodSync as chmodSync3,
-  closeSync as closeSync7,
+  closeSync as closeSync8,
   existsSync as existsSync12,
   fsyncSync as fsyncSync2,
   mkdirSync as mkdirSync8,
   lstatSync as lstatSync6,
-  openSync as openSync7,
+  openSync as openSync8,
   readFileSync as readFileSync13,
   readdirSync,
   realpathSync as realpathSync5,
   renameSync as renameSync5,
   rmSync as rmSync6,
   rmdirSync,
-  statSync as statSync9,
+  statSync as statSync10,
   writeFileSync as writeFileSync6
 } from "node:fs";
-import { basename as basename4, dirname as dirname14, isAbsolute as isAbsolute10, join as join17, resolve as resolve7 } from "node:path";
+import { basename as basename4, dirname as dirname14, isAbsolute as isAbsolute10, join as join18, resolve as resolve7 } from "node:path";
 
 // src/core/remote-access.ts
 import { isAbsolute as raIsAbsolute, join as raJoin } from "node:path";
@@ -10884,8 +11146,8 @@ function olympusDataDir(env = process.env) {
 }
 
 // src/core/store-identity.ts
-import { existsSync as existsSync11, realpathSync as realpathSync4, statSync as statSync8 } from "node:fs";
-import { basename as basename3, dirname as dirname13, isAbsolute as isAbsolute9, join as join16, relative as relative5, resolve as resolve6, sep as sep5 } from "node:path";
+import { existsSync as existsSync11, realpathSync as realpathSync4, statSync as statSync9 } from "node:fs";
+import { basename as basename3, dirname as dirname13, isAbsolute as isAbsolute9, join as join17, relative as relative5, resolve as resolve6, sep as sep5 } from "node:path";
 var LAYOUTS2 = ["folder", "legacy"];
 function layoutPath(identity, layout, env) {
   if (layout === "legacy" && identity.slot !== DEFAULT_ACCOUNT_SLOT)
@@ -10905,7 +11167,7 @@ function storePathKey(path) {
   try {
     real = realpathSync4(folder);
   } catch {}
-  return join16(real, basename3(path));
+  return join17(real, basename3(path));
 }
 function registryKey(env = process.env) {
   const path = sourceRegistryPath(env);
@@ -10913,7 +11175,7 @@ function registryKey(env = process.env) {
   try {
     folder = realpathSync4.native(folder);
   } catch {}
-  return join16(folder, basename3(path));
+  return join17(folder, basename3(path));
 }
 function matchStore(sourceId, slot, dbPath, names, env) {
   const wanted = storePathKey(dbPath);
@@ -11004,7 +11266,7 @@ function storePlacementView(env = process.env) {
     try {
       roots.add(resolve6(accountFoldersRoot(env)));
       if (root !== undefined)
-        roots.add(join16(realpathSync4(root), ACCOUNT_FOLDERS_DIR));
+        roots.add(join17(realpathSync4(root), ACCOUNT_FOLDERS_DIR));
     } catch {}
     return [...roots];
   };
@@ -11095,7 +11357,7 @@ function isEarlier(held, current) {
 }
 function isMissing(path) {
   try {
-    statSync8(path);
+    statSync9(path);
     return false;
   } catch (error) {
     const code = error?.code;
@@ -11165,7 +11427,7 @@ function releaseMediaCacheFile(path, sha256, holder, dir) {
   try {
     const refs = refsDir(path);
     for (const name of markerNames(holder))
-      rmSync6(join17(refs, name), { force: true });
+      rmSync6(join18(refs, name), { force: true });
     const remaining = existsSync12(refs) ? readdirSync(refs) : [];
     if (remaining.length > 0)
       return false;
@@ -11183,7 +11445,7 @@ function sweepMediaCache(dir, options = {}) {
   const placement = storePlacementView(options.env ?? process.env);
   const old = (path) => {
     try {
-      return now - statSync9(path).mtimeMs > maxAgeMs;
+      return now - statSync10(path).mtimeMs > maxAgeMs;
     } catch {
       return false;
     }
@@ -11196,7 +11458,7 @@ function sweepMediaCache(dir, options = {}) {
     return 0;
   }
   for (const name of entries) {
-    const path = join17(dir, name);
+    const path = join18(dir, name);
     try {
       if (name.startsWith(".") && name.endsWith(".tmp")) {
         if (old(path))
@@ -11208,7 +11470,7 @@ function sweepMediaCache(dir, options = {}) {
       const refs = refsDir(path);
       if (existsSync12(refs)) {
         for (const marker of readdirSync(refs)) {
-          const markerPath = join17(refs, marker);
+          const markerPath = join18(refs, marker);
           const gone = marker.startsWith("staging-") || marker.endsWith(".tmp") ? old(markerPath) : marker.startsWith(STORE_MARKER_PREFIX) ? storeHolderGone(markerPath, placement) : holderGone(markerPath, marker, placement);
           if (gone)
             rmSync6(markerPath, { force: true });
@@ -11232,30 +11494,30 @@ function addMarker(path, holder) {
     addStoreMarker(refs, holder);
     return;
   }
-  const marker = join17(refs, holderName(holder));
+  const marker = join18(refs, holderName(holder));
   const name = mediaHolderName(holder);
   if (readMarker(marker) !== name)
     writeFileSync6(marker, name, { mode: 384 });
   const legacy = legacyHolderName(holder);
   if (legacy)
-    rmSync6(join17(refs, legacy), { force: true });
+    rmSync6(join18(refs, legacy), { force: true });
 }
 function addStoreMarker(refs, holder) {
-  const marker = join17(refs, storeMarkerName(holder));
+  const marker = join18(refs, storeMarkerName(holder));
   const text = storeMarkerText(holder);
   if (readMarker(marker) !== text)
     writePrivateFileAtomicSync(marker, text);
   else
     flushMarker(marker, refs);
   for (const name of pathMarkerNames(holder))
-    rmSync6(join17(refs, name), { force: true });
+    rmSync6(join18(refs, name), { force: true });
 }
 function flushMarker(marker, refs) {
-  const descriptor = openSync7(marker, "r");
+  const descriptor = openSync8(marker, "r");
   try {
     fsyncSync2(descriptor);
   } finally {
-    closeSync7(descriptor);
+    closeSync8(descriptor);
   }
   syncDirectorySync(refs);
 }
@@ -11317,10 +11579,10 @@ function parseStoreMarker(text) {
   }
 }
 function refsDir(path) {
-  return join17(dirname14(path), `${basename4(path)}.refs`);
+  return join18(dirname14(path), `${basename4(path)}.refs`);
 }
 function holderDigest(name) {
-  return createHash4("sha256").update(name).digest("hex").slice(0, 32);
+  return createHash5("sha256").update(name).digest("hex").slice(0, 32);
 }
 function holderName(holder) {
   const digest = holderDigest(mediaHolderName(holder));
@@ -11349,9 +11611,9 @@ function ensureOwnerOnlyDir(dir) {
 // src/workers/source-index/built-in-embedding/litert-runtime.ts
 import { isMainThread as isMainThread4 } from "node:worker_threads";
 import { execFileSync as execFileSync2, spawn } from "node:child_process";
-import { closeSync as closeSync8, constants as constants5, existsSync as existsSync13, fstatSync as fstatSync2, openSync as openSync8, readdirSync as readdirSync2, readFileSync as readFileSync14, statSync as statSync10 } from "node:fs";
+import { closeSync as closeSync9, constants as constants5, existsSync as existsSync13, fstatSync as fstatSync2, openSync as openSync9, readdirSync as readdirSync2, readFileSync as readFileSync14, statSync as statSync11 } from "node:fs";
 import { homedir as homedir9 } from "node:os";
-import { delimiter as delimiter2, dirname as dirname15, isAbsolute as isAbsolute11, join as join18 } from "node:path";
+import { delimiter as delimiter2, dirname as dirname15, isAbsolute as isAbsolute11, join as join19 } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 
@@ -11707,13 +11969,13 @@ function linuxGpuAvailable(deviceDirectory = "/dev/dri") {
         return false;
       let fd;
       try {
-        fd = openSync8(join18(deviceDirectory, name), constants5.O_RDWR | constants5.O_NONBLOCK);
+        fd = openSync9(join19(deviceDirectory, name), constants5.O_RDWR | constants5.O_NONBLOCK);
         return fstatSync2(fd).isCharacterDevice();
       } catch {
         return false;
       } finally {
         if (fd !== undefined)
-          closeSync8(fd);
+          closeSync9(fd);
       }
     });
   } catch {
@@ -11723,7 +11985,7 @@ function linuxGpuAvailable(deviceDirectory = "/dev/dri") {
 function helperPath() {
   const here = dirname15(fileURLToPath2(import.meta.url));
   for (const name of ["litert-helper.js", "litert-helper.ts"]) {
-    const candidate = join18(here, name);
+    const candidate = join19(here, name);
     if (existsSync13(candidate))
       return candidate;
   }
@@ -11733,15 +11995,15 @@ function resolveBun() {
   const bunName = process.platform === "win32" ? "bun.exe" : "bun";
   const candidates = [
     process.versions.bun ? process.execPath : undefined,
-    process.env.BUN_INSTALL ? join18(process.env.BUN_INSTALL, "bin", bunName) : undefined,
-    ...(process.env.PATH ?? "").split(delimiter2).filter(Boolean).map((directory) => join18(directory, bunName)),
-    join18(homedir9(), ".bun", "bin", bunName)
+    process.env.BUN_INSTALL ? join19(process.env.BUN_INSTALL, "bin", bunName) : undefined,
+    ...(process.env.PATH ?? "").split(delimiter2).filter(Boolean).map((directory) => join19(directory, bunName)),
+    join19(homedir9(), ".bun", "bin", bunName)
   ];
   for (const candidate of candidates) {
     if (!candidate || !isAbsolute11(candidate))
       continue;
     try {
-      if (statSync10(candidate).isFile())
+      if (statSync11(candidate).isFile())
         return candidate;
     } catch {}
   }
@@ -11865,7 +12127,7 @@ class RemoteLiteRtEmbedder {
 // src/workers/source-index/built-in-embedding/runtime.ts
 import { realpathSync as realpathSync6 } from "node:fs";
 import { createRequire as createRequire5 } from "node:module";
-import { join as join19, sep as sep6 } from "node:path";
+import { join as join20, sep as sep6 } from "node:path";
 function onnxRuntimeFromDirectory(runtimeDir) {
   return {
     async createSession(modelPath, options) {
@@ -11915,9 +12177,9 @@ function requireOnnxRuntimeFromPack(runtimeDir) {
   const missing = () => new Error(`The ONNX Runtime pack is not installed in ${runtimeDir}.`);
   let root;
   let resolved;
-  const requireFromPack = createRequire5(join19(runtimeDir, "olympus-runtime.json"));
+  const requireFromPack = createRequire5(join20(runtimeDir, "olympus-runtime.json"));
   try {
-    root = realpathSync6(join19(runtimeDir, "node_modules"));
+    root = realpathSync6(join20(runtimeDir, "node_modules"));
     resolved = realpathSync6(requireFromPack.resolve("onnxruntime-node"));
   } catch {
     throw missing();
@@ -12189,7 +12451,7 @@ class BuiltInSourceEmbeddingProvider {
       backend: this.backend,
       ...options.epochId ? { epochOverride: options.epochId } : {}
     });
-    this.configHash = createHash5("sha256").update(JSON.stringify({
+    this.configHash = createHash6("sha256").update(JSON.stringify({
       provider: this.provider,
       model: this.modelId,
       repository: this.spec.repository,
@@ -12320,7 +12582,7 @@ class BuiltInSourceEmbeddingProvider {
         const settings = {
           library: installed.libraryPath,
           model: installed.modelPath,
-          cacheDir: join20(dirname16(installed.modelPath), "cache"),
+          cacheDir: join21(dirname16(installed.modelPath), "cache"),
           threads: this.threads,
           device: this.device,
           maxInputTokens: this.spec.maxTokens,
@@ -12752,10 +13014,10 @@ var GENERIC_MIME_TYPES = new Set([
 ]);
 
 // src/workers/file-extraction/extractors/command-runner.ts
-import { AsyncLocalStorage as AsyncLocalStorage8 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage10 } from "node:async_hooks";
 import { execFile, spawn as spawn2 } from "node:child_process";
 import { promisify } from "node:util";
-var activeExtraction = new AsyncLocalStorage8;
+var activeExtraction = new AsyncLocalStorage10;
 var execFileAsync = promisify(execFile);
 var resolvedCommands = new Map;
 
@@ -13185,10 +13447,10 @@ var ADDITIONAL_DOCUMENT_MIME_TYPES = new Set([
 ]);
 
 // src/workers/classification/engine.ts
-import { createHash as createHash7 } from "node:crypto";
+import { createHash as createHash8 } from "node:crypto";
 
 // src/workers/dropbox-files/content-policy.ts
-import { createHash as createHash6 } from "node:crypto";
+import { createHash as createHash7 } from "node:crypto";
 var DROPBOX_CONTENT_POLICY_CLASSIFIER_KIND = "dropbox_deterministic_content_policy";
 var DROPBOX_CONTENT_POLICY_CLASSIFIER_VERSION = "2026-10-13";
 var REVIEW_PATTERNS = [
@@ -13285,7 +13547,7 @@ function dedupeFindings(findings) {
   return unique;
 }
 function hashFinding(type, matchedText) {
-  return createHash6("sha256").update(type).update("\x00").update(matchedText).digest("hex");
+  return createHash7("sha256").update(type).update("\x00").update(matchedText).digest("hex");
 }
 
 // src/workers/classification/engine.ts
@@ -13396,7 +13658,7 @@ function secretScanReusable(text) {
   return text.length >= SECRET_SCAN_MEMO_MIN_CHARS;
 }
 function secretScanMemoKey(text) {
-  return secretScanReusable(text) ? createHash7("sha256").update(text).digest("hex") : undefined;
+  return secretScanReusable(text) ? createHash8("sha256").update(text).digest("hex") : undefined;
 }
 function rememberScan(key, kinds) {
   secretScanMemo ??= new Map;
@@ -13797,25 +14059,12 @@ function untrackSqliteStoreMemory(db) {
   byDatabase.delete(db);
 }
 
-// src/core/source-index/read-progress.ts
-import { AsyncLocalStorage as AsyncLocalStorage9 } from "node:async_hooks";
-var progress2 = new AsyncLocalStorage9;
-function noteSourceIndexReadProgress() {
-  const report = progress2.getStore();
-  if (!report)
-    return;
-  report();
-}
-function currentSourceIndexReadProgress() {
-  return progress2.getStore();
-}
-
 // src/core/source-size-limits.ts
-import { createHash as createHash8 } from "node:crypto";
+import { createHash as createHash9 } from "node:crypto";
 
 // src/core/boot-progress.ts
 import { existsSync as existsSync14, lstatSync as lstatSync7, mkdirSync as mkdirSync9, readdirSync as readdirSync3, readFileSync as readFileSync17, realpathSync as realpathSync7, rmSync as rmSync7 } from "node:fs";
-import { basename as basename5, dirname as dirname17, isAbsolute as isAbsolute12, join as join21, resolve as resolve8 } from "node:path";
+import { basename as basename5, dirname as dirname17, isAbsolute as isAbsolute12, join as join22, resolve as resolve8 } from "node:path";
 var WRITE_INTERVAL_MS = 1000;
 var current2;
 var front;
@@ -14144,7 +14393,7 @@ registerLimit({ id: "dropbox.max_file_bytes", kind: "size", scope: "extraction",
 registerLimit({ id: "local_files.max_file_bytes", kind: "size", scope: "extraction", label: "Local file size", unit: "bytes", continue: "raise" });
 registerLimit({ id: "telegram.media_quota", kind: "size", scope: "extraction", label: "Telegram media read size", unit: "bytes", continue: "raise" });
 function sizeHeldItemKey(ref) {
-  return createHash8("sha256").update(JSON.stringify([ref.provider, ref.accountScope, ref.providerItemId, ref.localItemId ?? "", ref.sourceVersion ?? "", ref.contentHash ?? ""])).digest("hex");
+  return createHash9("sha256").update(JSON.stringify([ref.provider, ref.accountScope, ref.providerItemId, ref.localItemId ?? "", ref.sourceVersion ?? "", ref.contentHash ?? ""])).digest("hex");
 }
 
 // src/workers/connector-store/sqlite-mmap.ts
@@ -14582,202 +14831,6 @@ function noteFrontLoopStatement(dbPath, site) {
   if (state.unlisted.length < UNLISTED_KEPT)
     state.unlisted.push(at);
   state.log(`[olympus] front loop sql: unlisted site ${at}`);
-}
-
-// src/workers/source-index/answer-latency-trace.ts
-import { AsyncLocalStorage as AsyncLocalStorage10 } from "node:async_hooks";
-import { createHash as createHash9, randomUUID as randomUUID7 } from "node:crypto";
-
-// src/core/store-reclaim-admission.ts
-import { join as join22 } from "node:path";
-import { closeSync as closeSync9, openSync as openSync9, futimesSync, statSync as statSync11 } from "node:fs";
-var probe = { acquireTimeoutMs: 1, pollIntervalMs: 1 };
-var target = (name) => join22(sharedDataPath("engine-run"), `store-reclaim-${name}`);
-function storeReadHasPriority() {
-  try {
-    return withFileLeaseSync(target("readers"), () => false, probe);
-  } catch (error) {
-    if (error instanceof FileLeaseBusyError)
-      return true;
-    throw error;
-  }
-}
-function storeOwnerIdleMs(now = Date.now()) {
-  try {
-    return Math.max(0, now - statSync11(target("last-ask")).mtimeMs);
-  } catch (error) {
-    if (error.code === "ENOENT")
-      return Number.POSITIVE_INFINITY;
-    throw error;
-  }
-}
-
-// src/workers/source-index/answer-latency-trace.ts
-var POOL_SQL_SITE_CHARS = 120;
-var poolSqlSites = new WeakMap;
-function poolSqlSite(sql) {
-  const shape = sql.replace(/'(?:[^']|'')*'|"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]*\]|--[^\r\n]*|\/\*[\s\S]*?\*\//g, (token) => token.startsWith("--") || token.startsWith("/*") ? " " : "?").replace(/\b(?:0x[\da-f]+|\d+(?:\.\d+)?(?:e[+-]?\d+)?)\b/gi, "N").replace(/\s+/g, " ").trim();
-  const hash = createHash9("sha256").update(shape).digest("hex").slice(0, 16);
-  const prefix = shape.replace(/\(\s*(?:\?|N)(?:\s*,\s*(?:\?|N))+\s*\)/g, "(…)");
-  return `${prefix.slice(0, POOL_SQL_SITE_CHARS)} #${hash}`;
-}
-var SLOW_MAIN_THREAD_SQL_MS = 250;
-var SLOW_MAIN_THREAD_SQL_KEPT = 20;
-var SITE_TALLY_MS = 25;
-var storage2 = new AsyncLocalStorage10;
-var queryStorage = new AsyncLocalStorage10;
-var laneStorage = new AsyncLocalStorage10;
-function poolReads(query, corpusId) {
-  let reads = query.poolByCorpus.get(corpusId);
-  if (!reads) {
-    reads = {
-      reads: 0,
-      queue_wait_ms: 0,
-      queue_wait_max_ms: 0,
-      run_ms: 0,
-      run_max_ms: 0,
-      sql_ms: 0,
-      sql_max_ms: 0,
-      snapshot_reads: 0,
-      snapshot_sql_ms: 0,
-      refused: 0,
-      dropped_queued: 0,
-      past_deadline_running: 0,
-      errors: 0
-    };
-    query.poolByCorpus.set(corpusId, reads);
-  }
-  return reads;
-}
-function sourceAnswerVectorWork() {
-  const query = queryStorage.getStore();
-  const corpusId = laneStorage.getStore();
-  if (!query || corpusId === undefined)
-    return;
-  return poolReads(query, corpusId).vector_work ??= {
-    digest_pages_read: 0,
-    digest_rows_scanned: 0,
-    full_vectors_rescored: 0,
-    digest_unpack_score_ms: 0
-  };
-}
-function beginSourceAnswerConceptCounts() {
-  const query = queryStorage.getStore();
-  const corpusId = laneStorage.getStore();
-  if (!query || corpusId === undefined)
-    return;
-  const passes = poolReads(query, corpusId).keyword_concept_counts ??= [];
-  const pass = [];
-  passes.push(pass);
-  return pass;
-}
-function beginSourceAnswerPoolRead(statement, label) {
-  const query = queryStorage.getStore();
-  const corpusId = laneStorage.getStore();
-  if (!query || corpusId === undefined)
-    return;
-  let site = query.sqlShapes.get(statement);
-  if (site === undefined) {
-    site = poolSqlSite(statement);
-    query.sqlShapes.set(statement, site);
-  }
-  const key = label ? `${label}\x00${site}` : site;
-  return ({ queueWaitMs, runMs, sqlMs, cpuMs, outcome, snapshot }) => {
-    const reads = poolReads(query, corpusId);
-    if (sqlMs !== undefined) {
-      reads.thread_cpu_available = reads.thread_cpu_available === true || cpuMs !== undefined;
-    }
-    const wait = unroundedMs(queueWaitMs);
-    const ran = unroundedMs(runMs);
-    reads.reads += 1;
-    reads.queue_wait_ms += wait;
-    reads.queue_wait_max_ms = Math.max(reads.queue_wait_max_ms, wait);
-    reads.run_ms += ran;
-    reads.run_max_ms = Math.max(reads.run_max_ms, ran);
-    const sql = unroundedMs(sqlMs ?? 0);
-    reads.sql_ms += sql;
-    reads.sql_max_ms = Math.max(reads.sql_max_ms, sql);
-    if (snapshot) {
-      reads.snapshot_reads += 1;
-      reads.snapshot_sql_ms += sql;
-    }
-    let sites = poolSqlSites.get(reads);
-    if (!sites)
-      poolSqlSites.set(reads, sites = new Map);
-    const entry = sites.get(key) ?? { site, ...label ? { label } : {}, reads: 0, sql_ms: 0, sql_max_ms: 0 };
-    entry.reads += 1;
-    entry.sql_ms += sql;
-    entry.sql_max_ms = Math.max(entry.sql_max_ms, sql);
-    if (cpuMs !== undefined) {
-      const cpu = unroundedMs(cpuMs);
-      entry.sql_cpu_ms = (entry.sql_cpu_ms ?? 0) + cpu;
-      entry.sql_cpu_max_ms = Math.max(entry.sql_cpu_max_ms ?? 0, cpu);
-    }
-    sites.set(key, entry);
-    if (outcome === "refused")
-      reads.refused += 1;
-    else if (outcome === "dropped_queued")
-      reads.dropped_queued += 1;
-    else if (outcome === "past_deadline_running")
-      reads.past_deadline_running += 1;
-    else if (outcome === "error")
-      reads.errors += 1;
-  };
-}
-var CONTENT_FREE_ERROR_CLASSES = new Set([
-  "AbortError",
-  "AnalystUnavailable",
-  "AnalystCircuitOpen",
-  "EmailSourceWorkerError",
-  "Error",
-  "LocalTrustProviderMismatch",
-  "OperationError",
-  "RangeError",
-  "SourceModelPolicyDeniedError",
-  "SecureEvidencePolicySkip",
-  "SecureAnalystPoolE2EEGateError",
-  "SyntaxError",
-  "TrustedAnalystTimeoutError",
-  "TypeError"
-]);
-function currentSourceAnswerTrace() {
-  return storage2.getStore();
-}
-function sourceAnswerTraceActive() {
-  return storage2.getStore() !== undefined;
-}
-function recordSourceAnswerMainThreadSql(elapsedMs, site) {
-  const trace = currentSourceAnswerTrace();
-  if (!trace)
-    return;
-  const ms = unroundedMs(elapsedMs);
-  const sql = trace.mainThreadSql;
-  sql.statements += 1;
-  sql.total_ms += ms;
-  sql.max_ms = Math.max(sql.max_ms, ms);
-  if (ms < SITE_TALLY_MS)
-    return;
-  const where = site();
-  const tally = sql.by_site.find((entry) => entry.site === where);
-  if (tally) {
-    tally.statements += 1;
-    tally.ms += ms;
-  } else {
-    sql.by_site.push({ site: where, statements: 1, ms });
-  }
-  if (ms < SLOW_MAIN_THREAD_SQL_MS)
-    return;
-  sql.slow.push({ ms: nonNegativeMs(ms), site: where });
-  if (sql.slow.length > SLOW_MAIN_THREAD_SQL_KEPT) {
-    sql.slow.sort((left, right) => right.ms - left.ms);
-    sql.slow.length = SLOW_MAIN_THREAD_SQL_KEPT;
-  }
-}
-function unroundedMs(value) {
-  return Number.isFinite(value) ? Math.max(0, value) : 0;
-}
-function nonNegativeMs(value) {
-  return Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
 }
 
 // src/workers/connector-store/main-thread-sql-trace.ts
@@ -17240,9 +17293,6 @@ function errorFromBoundary(message, name, frame, where) {
     at ${frame ?? "unknown"} (${where})`;
   return error;
 }
-
-// src/core/source-index/lane-busy.ts
-var SOURCE_INDEX_LANE_BUSY_CODE = "source_index_lane_busy";
 
 // src/workers/connector-store/off-thread-reads.ts
 var READ_POOL_SIZE = 1;
@@ -24936,46 +24986,6 @@ function compareStrings(left, right) {
   return left < right ? -1 : 1;
 }
 
-// src/core/source-index/router.ts
-var DEFER_SEARCH_DELIVERY = Symbol("defer search delivery");
-var SEARCH_GRANT_MATCH = Symbol("search grant match");
-var SEARCH_GRANT_DELIVERY = Symbol("search grant delivery");
-var FORBIDDEN_ROUTER_RESULT_KEYS = new Set([
-  "body",
-  "bodies",
-  "content",
-  "contents",
-  "message",
-  "messages",
-  "raw",
-  "raw_packet",
-  "rawPacket",
-  "raw_source",
-  "rawSource",
-  "sanitized_text",
-  "sanitizedText",
-  "snippet",
-  "snippets",
-  "source_text",
-  "sourceText",
-  "raw_source_text",
-  "rawSourceText",
-  "text",
-  "access_token",
-  "accessToken",
-  "api_key",
-  "apiKey",
-  "approved_scope_key",
-  "approvedScopeKey",
-  "refresh_token",
-  "refreshToken",
-  "token"
-]);
-var NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS = new Set([...FORBIDDEN_ROUTER_RESULT_KEYS].map(normalizeRouterResultKey));
-function normalizeRouterResultKey(key) {
-  return key.toLowerCase().replace(/[^a-z0-9]+/g, "");
-}
-
 // src/workers/connector-store/local-index.ts
 var TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff";
 var DEFAULT_MAX_CHUNK_CHARS = 4000;
@@ -30092,6 +30102,18 @@ ${parentKey(ref)}`, { ref, origin });
       AND COALESCE(i.source_version, '') = r.source_version
       WHERE r.local_item_id = ? AND i.tombstoned = 0 LIMIT 1`).get(localItemId) ?? undefined;
   }
+  captureOnDemandRead(localItemId, sourceVersion, inScope) {
+    const epoch = this.onDemandGrantEpoch();
+    const grant = this.currentOnDemandGrant(localItemId);
+    if (!grant || sourceVersion !== undefined && sourceVersion !== grant.source_version || !inScope())
+      return;
+    return () => {
+      if (epoch !== undefined && epoch === this.onDemandGrantEpoch())
+        return true;
+      const current = this.currentOnDemandGrant(localItemId);
+      return current?.source_version === grant.source_version && current.acquired_epoch === grant.acquired_epoch && inScope();
+    };
+  }
   observeOnDemandRead(localItemId, sourceVersion, controller) {
     const epoch = this.onDemandGrantEpoch();
     const grant = this.currentOnDemandGrant(localItemId);
@@ -34173,17 +34195,19 @@ ${parentKey(ref)}`, { ref, origin });
   *stillVisibleSearchRowsSteps(rows) {
     return yield* this.tierVisibleRowsSteps(rows, (row) => row.sourceItem, (row) => connectorStoreRowHasContent(row) ? "content" : "metadata");
   }
-  searchGrantLayers(hits, filters) {
+  searchGrantLayers(hits, filters, startGrantEpoch) {
     if (this.closedForPoolReads)
       return new Map;
-    const metadataOnly = connectorStoreMetadataOnlySql(filters, this.onDemandReadsTablePresent);
+    const metadataOnly = connectorStoreMetadataOnlySql(filters, this.onDemandReadsTablePresent, startGrantEpoch);
+    const scoped = connectorStoreFilterSql(filters);
     const read = {
       mode: "all",
       sql: `SELECT candidate.key AS idx, ${metadataOnly.sql} AS names_only
         FROM json_each(?) candidate CROSS JOIN items i
         WHERE ${FTS_CANDIDATE_IDENTITY_SQL}
-          AND i.tombstoned = 0`,
-      params: [...metadataOnly.params, JSON.stringify(hits.map((hit) => hit.sourceItem))]
+          AND i.tombstoned = 0
+          ${scoped.sql}`,
+      params: [...metadataOnly.params, JSON.stringify(hits.map((hit) => hit.sourceItem)), ...scoped.params]
     };
     const allowed = visibilityHere(this.visibilityStoreRead(read));
     return new Map(allowed.map((row) => [hits[row.idx], row.names_only ? "metadata" : "content"]));
@@ -34832,6 +34856,7 @@ ${parentKey(ref)}`, { ref, origin });
     const ledger = this.governingTierLedger();
     let generation;
     let initialOverride;
+    let granted;
     const gate = () => {
       if (currentRemoteReadAccess() !== "active")
         return "not_in_scope";
@@ -34853,8 +34878,11 @@ ${parentKey(ref)}`, { ref, origin });
         return "held_until_judged";
       if (this.contentHeldPrivate(localItemId))
         return "content_private";
-      if (!this.readOnDemand(localItemId) && (scope?.contentAllowed === false || this.metadataOnlyRuleForLocator(now.locatorUri) !== undefined || scope?.contentFilters && !this.itemMatchesSearchFilters(localItemId, scope.accountScope, scope.contentFilters)))
-        return "names_only";
+      if (scope?.contentAllowed === false || this.metadataOnlyRuleForLocator(now.locatorUri) !== undefined || scope?.contentFilters && !this.itemMatchesSearchFilters(localItemId, scope.accountScope, scope.contentFilters)) {
+        granted ??= this.captureOnDemandRead(localItemId, undefined, () => true);
+        if (!granted?.())
+          return "names_only";
+      }
       if (!this.contentServedNow(localItemId, true))
         return "extraction_pending";
       return;
@@ -34864,6 +34892,12 @@ ${parentKey(ref)}`, { ref, origin });
       return refuse(initial);
     generation = ledger.getCurrent(identity).generation;
     initialOverride = JSON.stringify(ledger.getOverride(identity));
+    if (granted)
+      recordReleaseManifest({
+        inputs: [],
+        grants: [{ current: () => granted() && gate() === undefined }],
+        constraints: { secureDerivativeDefault: "approval", includeSecureLocalContent: false }
+      });
     const readChunks = () => this.db.query(`SELECT c.bounded_text AS text, c.content_hash AS hash
       FROM chunks c JOIN items i ON i.item_pk = c.item_pk
       WHERE i.local_item_id = ? AND i.tombstoned = 0 ORDER BY c.chunk_index`).all(localItemId);
@@ -36746,7 +36780,7 @@ var FTS_CANDIDATE_IDENTITY_SQL = `i.local_item_id = json_extract(candidate.value
           AND i.provider_item_id = json_extract(candidate.value, '$.providerItemId')
           AND i.normalized_conversation = COALESCE(json_extract(candidate.value, '$.providerConversationId'), '')
           AND COALESCE(i.source_version, '') = COALESCE(json_extract(candidate.value, '$.sourceVersion'), '')`;
-function connectorStoreMetadataOnlySql(filters, onDemandReadsTablePresent = false) {
+function connectorStoreMetadataOnlySql(filters, onDemandReadsTablePresent = false, startGrantEpoch) {
   const normalized = normalizeConnectorStoreSearchFilters(filters);
   if (!normalized)
     return { sql: "", params: [] };
@@ -36769,10 +36803,14 @@ function connectorStoreMetadataOnlySql(filters, onDemandReadsTablePresent = fals
   }
   if (metadataOnly.length === 0)
     return { sql: "", params: [] };
+  const sameAcquisition = onDemandReadsTablePresent && startGrantEpoch !== undefined ? "AND COALESCE((SELECT epoch FROM on_demand_grant_acquisitions a WHERE a.local_item_id = on_demand.local_item_id), 0) <= ?" : "";
+  if (onDemandReadsTablePresent && startGrantEpoch !== undefined)
+    params.push(startGrantEpoch);
   const notGranted = onDemandReadsTablePresent ? ` AND NOT EXISTS (
     SELECT 1 FROM on_demand_item_reads on_demand
     WHERE on_demand.local_item_id = i.local_item_id
       AND on_demand.source_version = COALESCE(i.source_version, '')
+      ${sameAcquisition}
   )` : "";
   return { sql: `((${metadataOnly.join(" OR ")})${notGranted})`, params };
 }

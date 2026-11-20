@@ -69,6 +69,11 @@ export type RemotePrivateOutcome =
   | 'route_unavailable'
   | 'none';
 export type PrivateMatchVerdict = 'match' | 'secret_match' | 'no_match' | 'unknown';
+export type PrivateMatchProbe = PrivateMatchVerdict | (() => PrivateMatchVerdict);
+
+export function currentPrivateMatch(probe: PrivateMatchProbe): PrivateMatchVerdict {
+  return typeof probe === 'function' ? probe() : probe;
+}
 
 /** What the surface knows about the call, beyond its arguments. */
 export interface RemotePrivatePartContext {
@@ -103,6 +108,8 @@ export interface RemotePrivatePartCall {
   /** The waiting question at the generation this call recorded (what each AI app received). */
   readonly answerRef?: PrivateQuestionRef | undefined;
   readonly secretMatch?: boolean | undefined;
+  /** Wait for the search probe and defer its record until the result is released. */
+  prepareSearch?(): Promise<() => boolean>;
   /**
    * Settles the call's raw result, given the remote output it releases:
    * records a waiting question when the outcome and the probe say so. True
@@ -189,7 +196,7 @@ export function remotePrivateOutcome(
 
 export interface RemotePrivatePartsOptions {
   /** The local metadata-only probe over the request's own selectors. */
-  probe: (request: Record<string, unknown>, timeoutMs: number) => Promise<PrivateMatchVerdict>;
+  probe: (request: Record<string, unknown>, timeoutMs: number) => Promise<PrivateMatchProbe>;
   /** The waiting-question store (opened lazily); undefined records nothing. */
   store: () => Pick<WaitingQuestionStore, 'ticket' | 'record' | 'unchecked' | 'settleUnchecked' | 'revokeConnection' | 'reconcileConnections'> | undefined;
   /**
@@ -273,7 +280,7 @@ export function createRemotePrivateParts(options: RemotePrivatePartsOptions): Re
     }
   };
 
-  const probe = async (request: Record<string, unknown>, timeoutMs: number): Promise<PrivateMatchVerdict> => {
+  const probe = async (request: Record<string, unknown>, timeoutMs: number): Promise<PrivateMatchProbe> => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([
@@ -307,7 +314,7 @@ export function createRemotePrivateParts(options: RemotePrivatePartsOptions): Re
       const selectors = normalizeWaitingSelectors(args);
       if (!question || !selectors) return false;
       if (!activeNow(ticket.connectionId)) return false;
-      const verdict = await probe({ ...selectors, question }, probeTimeoutMs);
+      const verdict = currentPrivateMatch(await probe({ ...selectors, question }, probeTimeoutMs));
       if (verdict === 'no_match' || closed) return false;
       return recordVerdict(ticket, question, selectors, verdict, recordedId);
     } catch {
@@ -325,23 +332,24 @@ export function createRemotePrivateParts(options: RemotePrivatePartsOptions): Re
     ticket: WaitingQuestionTicket,
     question: string,
     selectors: NonNullable<ReturnType<typeof normalizeWaitingSelectors>>,
-    verdict: 'match' | 'secret_match' | 'unknown',
+    probe: PrivateMatchProbe,
     recordedId?: (ref: PrivateQuestionRef, secretMatch: boolean) => void,
   ): boolean => {
-    let recorded = false;
     try {
+      const verdict = currentPrivateMatch(probe);
+      if (verdict === 'no_match') return false;
       const ref = options.store()?.record(ticket, {
         question,
         surface: 'remote',
         state: verdict === 'unknown' ? 'unchecked' : 'waiting',
         selectors,
       });
-      recorded = ref !== undefined;
       if (ref) recordedId?.({ id: ref.id, generation: ref.generation }, verdict === 'secret_match');
+      return verdict !== 'unknown' && ref !== undefined;
     } catch {
       console.warn('[olympus:remote] waiting private question not recorded reason=store_unavailable');
+      return false;
     }
-    return verdict !== 'unknown' && recorded;
   };
 
   /**
@@ -359,25 +367,27 @@ export function createRemotePrivateParts(options: RemotePrivatePartsOptions): Re
     let answerRef: PrivateQuestionRef | undefined;
     let secretMatch = false;
     // Never left unhandled: when the search fails, or is cancelled, nothing reads this.
-    const verdict: Promise<PrivateMatchVerdict | undefined> = (async () => {
+    const verdict: Promise<PrivateMatchProbe | undefined> = (async () => {
       if (closed || signal?.aborted || !ticket || !question || !selectors) return undefined;
       if (!activeNow(ticket.connectionId)) return undefined;
       return probe({ ...selectors, question }, probeTimeoutMs);
     })().catch(() => undefined);
+    const prepareSearch = async () => {
+      const found = await untilCancelled(verdict, signal);
+      return () => {
+        if (found === undefined || signal?.aborted || closed || !ticket || !selectors || !activeNow(ticket.connectionId)) return false;
+        return recordVerdict(ticket, question, selectors, found, (ref, secret) => { answerRef = ref; secretMatch = secret; });
+      };
+    };
     return {
       get answerId() { return answerRef?.id; },
       get answerRef() { return answerRef; },
       get secretMatch() { return secretMatch; },
+      prepareSearch,
       async settle() {
         try {
-          const found = await untilCancelled(verdict, signal);
-          // The cancellation is read in the turn that records, so a verdict that lands
-          // after it (or a wait it cut short) writes nothing.
-          if (signal?.aborted) return false;
-          if (found === undefined || found === 'no_match' || closed || !ticket || !selectors) return false;
-          // The probe may have waited: a connection revoked meanwhile records nothing.
-          if (!activeNow(ticket.connectionId)) return false;
-          return recordVerdict(ticket, question, selectors, found, (ref, secret) => { answerRef = ref; secretMatch = secret; });
+          const commit = await prepareSearch();
+          return commit();
         } catch {
           return false;
         }
@@ -474,14 +484,15 @@ export function createRemotePrivateParts(options: RemotePrivatePartsOptions): Re
         counts.still += 1;
         continue;
       }
-      const verdict = await probe({ ...record.selectors, question: record.question }, retryProbeTimeoutMs);
+      const probed = await probe({ ...record.selectors, question: record.question }, retryProbeTimeoutMs);
       if (closed) break;
-      if (verdict === 'unknown') {
-        counts.still += 1;
-        continue;
-      }
       const ref: WaitingQuestionRef = { id: record.id, generation: record.generation, connectionId: record.connectionId };
       try {
+        const verdict = currentPrivateMatch(probed);
+        if (verdict === 'unknown') {
+          counts.still += 1;
+          continue;
+        }
         if (store.settleUnchecked(ref, verdict === 'secret_match' ? 'match' : verdict)) {
           if (verdict !== 'no_match') counts.matched += 1;
           else counts.cleared += 1;

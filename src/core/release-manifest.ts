@@ -21,6 +21,7 @@
  * worker keeps content-free manifests behind opaque tickets for stdio's
  * trusted local transport and delayed collection.
  */
+import { revokedSearchGrants, searchGrantCountLosses, type SearchGrantReceipt, type SearchGrantCount } from './source-index/router.ts';
 import { createHash } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 
@@ -48,6 +49,7 @@ export interface ReleaseInput {
    * or fact) adds an unproved marker, which no judgment ever allows.
    */
   chunkHashes?: readonly string[];
+  grants?: readonly SearchGrantReceipt[];
   /** Search only: the digest of the excerpt this input's proved passages made, bound to the hit that carries it. */
   releasedTextDigest?: string;
   /**
@@ -66,7 +68,24 @@ export interface ReleaseConstraints {
   includeSecureLocalContent: boolean;
 }
 
+/** The contribution of a grant-dependent match to the search's aggregate counts. */
+export interface SearchCoverageGrant {
+  grants: readonly SearchGrantReceipt[];
+  corpusId?: string;
+  counter?: 'unreadable_items' | 'names_only_items' | 'content_private_items' | undefined;
+  withheld: number;
+  heldPassages: number;
+}
+
 export interface ReleaseManifest {
+  grants?: readonly SearchGrantReceipt[];
+  grantCounts?: readonly SearchGrantCount[] | undefined;
+  searchCoverage?: {
+    candidates: readonly SearchCoverageGrant[];
+    countCorpora: readonly string[];
+    heldPassages: number;
+    heldDocuments: number;
+  };
   inputs: readonly ReleaseInput[];
   constraints: ReleaseConstraints;
 }
@@ -153,17 +172,74 @@ export function passagesWithheldAtReleasableTiers(
   }, 0);
 }
 
-/** Revalidate each search hit independently after a delayed probe or privacy judgment. */
-export async function recheckSearchEvidence(
-  raw: Record<string, unknown>, manifests: readonly ReleaseManifest[], check: ReleaseCheck | undefined,
-): Promise<{ raw: Record<string, unknown>; withheldAfter: boolean }> {
-  const evidence = Array.isArray(raw.evidence) ? raw.evidence : [];
-  if (!evidence.length) return { raw, withheldAfter: false };
+function inputMatchesHit(input: ReleaseInput, hit: Record<string, unknown>): boolean {
+  return input.dependency !== 'parent_label'
+    && input.corpusId === hit.corpus_id && input.provider === hit.provider
+    && input.accountScope === (hit.account_scope ?? '') && input.providerItemId === hit.provider_item_id
+    && input.providerConversationId === hit.provider_conversation_id;
+}
+
+export function releaseGrantsChanged(manifests: readonly ReleaseManifest[]): boolean {
+  return revokedSearchGrants(manifests.flatMap(m => [
+    ...(m.grants ?? []), ...m.inputs.flatMap(input => input.grants ?? []), ...(m.grantCounts ?? []).flatMap(count => count.grants),
+  ])).size > 0;
+}
+
+/** Synchronous projection of the search immediately before formatting for the caller. */
+export function releaseSearchGrants(raw: Record<string, unknown>, manifests: readonly ReleaseManifest[]): Record<string, unknown> {
+  const counts = manifests.flatMap(m => m.grantCounts ?? []);
+  const candidates = manifests.flatMap(m => m.searchCoverage?.candidates ?? []);
+  const inputs = manifests.flatMap(m => m.inputs);
+  const revoked = revokedSearchGrants([
+    ...counts.flatMap(count => count.grants), ...candidates.flatMap(c => c.grants),
+    ...inputs.flatMap(input => input.grants ?? []),
+  ]);
+  if (!revoked.size) return raw;
+  const lost = (grants?: readonly SearchGrantReceipt[]) => grants?.some(grant => revoked.has(grant));
+  const lostInputs = inputs.filter(input => lost(input.grants));
+  const evidence = Array.isArray(raw.evidence) ? raw.evidence.filter(hit =>
+    !lostInputs.some(input => hit && inputMatchesHit(input, hit))) : [];
+  const coverage = { ...raw.coverage as Record<string, unknown> };
+  const subtract = (value: unknown, loss: number) => Math.max(0, (typeof value === 'number' ? value : 0) - loss);
+  const removed = candidates.filter(c => lost(c.grants));
+  for (const candidate of removed) {
+    if (candidate.counter) coverage[candidate.counter] = subtract(coverage[candidate.counter], 1);
+  }
+  const losses = searchGrantCountLosses(counts, revoked);
+  const search = manifests.find(m => m.searchCoverage)?.searchCoverage;
+  if (search && Array.isArray(coverage.matches)) {
+    coverage.matches = coverage.matches.map((row, index) => {
+      const corpusId = search.countCorpora[index];
+      if (!corpusId) return row;
+      const inEvidence = subtract(row.in_evidence, removed.filter(candidate => candidate.corpusId === corpusId).length);
+      const breadth = counts.find(count => count.corpusId === corpusId)?.matchedItems ?? row.matched_items;
+      const matched = subtract(breadth, losses.get(corpusId)?.matchedItems ?? 0);
+      return { ...row, in_evidence: inEvidence, matched_items: Math.max(inEvidence, matched) };
+    });
+  }
+  if (search && Array.isArray(coverage.cut_short)) {
+    const prior = chunkCoverageNote({ withheldPassages: search.heldPassages, withheldDocuments: search.heldDocuments });
+    const next = chunkCoverageNote({ withheldPassages: subtract(search.heldPassages, removed.reduce((n, c) => n + c.heldPassages, 0)),
+      withheldDocuments: subtract(search.heldDocuments, removed.filter(c => c.heldPassages > 0).length) });
+    if (prior && prior !== next) coverage.cut_short = coverage.cut_short.flatMap(note => {
+      if (note !== prior) return [note];
+      return next ? [next] : [];
+    });
+  }
+  return { ...raw, evidence, coverage, withheld: subtract(raw.withheld, removed.reduce((n, c) => n + c.withheld, 0)) };
+}
+
+type SearchRelease = { raw: Record<string, unknown>; withheldAfter: boolean };
+
+/** Collect asynchronous privacy proofs, then check grants when the caller formats the result. */
+export async function prepareSearchEvidenceRelease(
+  original: Record<string, unknown>, manifests: readonly ReleaseManifest[], check: ReleaseCheck | undefined,
+): Promise<() => SearchRelease> {
   const inputs = manifests.flatMap(manifest => manifest.inputs);
   let report: ChunkReleaseResult | undefined;
   let verdicts: readonly ReleaseInputVerdict[] = [];
   try {
-    if (check && manifests.length) {
+    if (check && manifests.length && Array.isArray(original.evidence) && original.evidence.length) {
       report = await checkReleaseChunks(check, inputs);
       // Judging can raise a whole item; read tiers after it finishes.
       verdicts = await (check.inputsOffThread?.(inputs) ?? check.inputs(inputs));
@@ -184,32 +260,45 @@ export async function recheckSearchEvidence(
     const hashes = new Set(input.chunkHashes ?? []);
     return Math.max(1, hashes.size) - [...hashes].filter(hash => report?.allowed[index]?.includes(hash)).length;
   };
-  const parentsCleared = inputs.every((input, index) => input.dependency !== 'parent_label' || cleared(index));
-  // Passages counted by the judge report, plus each hit dropped for another reason (tier, identity, text).
-  let droppedOtherwise = 0;
-  const kept = evidence.filter(value => {
-    if (!value || typeof value !== 'object') { droppedOtherwise += 1; return false; }
-    const hit = value as Record<string, unknown>;
-    const matches = inputs.flatMap((input, index) => input.dependency !== 'parent_label'
-      && input.corpusId === hit.corpus_id && input.provider === hit.provider
-      && input.accountScope === hit.account_scope && input.providerItemId === hit.provider_item_id
-      && input.providerConversationId === hit.provider_conversation_id ? [index] : []);
-    // Text leaves only as the excerpt a content input's proved passages made; a names-only hit carries none.
-    const textBound = hit.excerpt === undefined || hit.excerpt === '' || (typeof hit.excerpt === 'string'
-      && matches.some(index => inputs[index]!.layer !== 'names' && inputs[index]!.releasedTextDigest === releasedTextDigest(hit.excerpt as string)));
-    if (parentsCleared && matches.length > 0 && matches.every(cleared) && textBound) return true;
-    if (!report || !matches.some(index => held(index) > 0)) droppedOtherwise += 1;
-    return false;
-  });
-  const dropped = evidence.length - kept.length;
-  if (!dropped) return { raw, withheldAfter: false };
-  const coverage = raw.coverage && typeof raw.coverage === 'object' ? raw.coverage as Record<string, unknown> : {};
-  const note = report && chunkCoverageNote(report);
-  const priorNotes = Array.isArray(coverage.cut_short) ? coverage.cut_short : [];
-  const withheld = typeof raw.withheld === 'number' && Number.isFinite(raw.withheld) ? Math.max(0, raw.withheld) : 0;
-  return { raw: { ...raw, evidence: kept, withheld: withheld + (report?.withheldPassages ?? 0) + droppedOtherwise,
-    ...(note ? { coverage: { ...coverage, cut_short: [...new Set([...priorNotes, note])] } } : {}),
-  }, withheldAfter: true };
+  return () => {
+    const raw = releaseSearchGrants(original, manifests);
+    const evidence = Array.isArray(raw.evidence) ? raw.evidence : [];
+    const parentsCleared = inputs.every((input, index) => input.dependency !== 'parent_label' || cleared(index));
+    // Passages counted by the judge report, plus each hit dropped for another reason (tier, identity, text).
+    let droppedOtherwise = 0;
+    const kept = evidence.filter(value => {
+      if (!value || typeof value !== 'object') { droppedOtherwise += 1; return false; }
+      const hit = value as Record<string, unknown>;
+      const matches = inputs.flatMap((input, index) => inputMatchesHit(input, hit) ? [index] : []);
+      // Text leaves only as the excerpt a content input's proved passages made; a names-only hit carries none.
+      const textBound = hit.excerpt === undefined || hit.excerpt === '' || (typeof hit.excerpt === 'string'
+        && matches.some(index => inputs[index]!.layer !== 'names' && inputs[index]!.releasedTextDigest === releasedTextDigest(hit.excerpt as string)));
+      if (parentsCleared && matches.length > 0 && matches.every(cleared) && textBound) return true;
+      if (!report || !matches.some(index => held(index) > 0)) droppedOtherwise += 1;
+      return false;
+    });
+    const dropped = evidence.length - kept.length;
+    if (!dropped) return { raw, withheldAfter: raw !== original };
+    const coverage = raw.coverage && typeof raw.coverage === 'object' ? raw.coverage as Record<string, unknown> : {};
+    const retainedInputs = raw === original ? inputs : inputs.filter(input => input.dependency === 'parent_label'
+      || evidence.some(hit => hit && inputMatchesHit(input, hit)));
+    const releaseReport = report && retainedInputs.length !== inputs.length ? {
+      withheldPassages: retainedInputs.reduce((sum, input) => sum + held(inputs.indexOf(input)), 0),
+      withheldDocuments: retainedInputs.filter(input => held(inputs.indexOf(input)) > 0).length,
+    } : report;
+    const note = releaseReport && chunkCoverageNote(releaseReport);
+    const priorNotes = Array.isArray(coverage.cut_short) ? coverage.cut_short : [];
+    const withheld = typeof raw.withheld === 'number' && Number.isFinite(raw.withheld) ? Math.max(0, raw.withheld) : 0;
+    return { raw: { ...raw, evidence: kept, withheld: withheld + (releaseReport?.withheldPassages ?? 0) + droppedOtherwise,
+      ...(note ? { coverage: { ...coverage, cut_short: [...new Set([...priorNotes, note])] } } : {}),
+    }, withheldAfter: true };
+  };
+}
+
+export async function recheckSearchEvidence(
+  raw: Record<string, unknown>, manifests: readonly ReleaseManifest[], check: ReleaseCheck | undefined,
+): Promise<SearchRelease> {
+  return (await prepareSearchEvidenceRelease(raw, manifests, check))();
 }
 
 // Internal provenance survives prompt fitting (which keeps provenance identity).
@@ -274,6 +363,7 @@ export function currentReleaseManifestSink(): ReleaseManifestSink | undefined {
 /** Records a manifest in the current sink; a no-op outside one. */
 export function recordReleaseManifest(manifest: ReleaseManifest): void {
   storage.getStore()?.manifests.push({
+    ...manifest,
     inputs: manifest.inputs.map((input) => ({ ...input, ...(input.chunkHashes ? { chunkHashes: [...input.chunkHashes] } : {}) })),
     constraints: { ...manifest.constraints },
   });

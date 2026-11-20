@@ -20,6 +20,7 @@ import { buildSourceIndexCorpusRegistry, defineSourceIndexCorpus } from '../src/
 import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
 import { assertSqliteSchemaCanOpen } from '../src/core/sqlite-migrations.ts';
 import { createAnalystSourceIndexAnswerHandler } from '../src/workers/source-index/analyst-answer.ts';
+import { buildEvidencePackDetailed } from '../src/core/evidence-pack.ts';
 import { LocalConnectorStore, createConnectorStoreContentProvider, createConnectorStoreCorpusAdapter, defineConnectorCorpus } from '../src/workers/connector-store/index.ts';
 import { fixtureConnector, JUDGED_PERSONAL_SNIFFER } from './helpers/tier-fixtures.ts';
 import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
@@ -885,6 +886,44 @@ describe('read on demand', () => {
     expect((await direct()).hits).toEqual([]);
   });
 
+  test.each(['expansion', 'merged visibility check', 'expansion with a replacement grant'] as const)('the pack withdraws a literal body hit, counts, and audits revoked during %s', async phase => {
+    const { store, filters, request, revoke } = await searchableGrantFixture();
+    const adapter = createConnectorStoreCorpusAdapter({ store, filters });
+    const contentProvider = createConnectorStoreContentProvider({ store, contentAllowed: false, metadataFilters: {} });
+    const priorReadWide = process.env.OLYMPUS_READ_WIDE;
+    process.env.OLYMPUS_READ_WIDE = '1';
+    cleanup.push(() => {
+      if (priorReadWide === undefined) delete process.env.OLYMPUS_READ_WIDE;
+      else process.env.OLYMPUS_READ_WIDE = priorReadWide;
+    });
+    const queries: string[] = [];
+    let visibilityChecks = 0;
+    const detail = await buildEvidencePackDetailed({
+      question: request.query,
+      maxResults: 3,
+      searchContext: request.context,
+      registry: buildSourceIndexCorpusRegistry([request.corpus]),
+      adapters: { [store.corpusId]: async input => {
+        queries.push(input.query);
+        if (phase !== 'merged visibility check' && input.query !== request.query) {
+          revoke();
+          if (phase === 'expansion with a replacement grant') store.grantOnDemandRead('personal:report', 'v1');
+        }
+        return adapter(input);
+      } },
+      contentProviders: { [store.corpusId]: contentProvider },
+      queryPlanner: async () => ['unrelatedquery'],
+      visibilityGate: hits => {
+        if (++visibilityChecks === 3 && phase === 'merged visibility check') revoke();
+        return hits;
+      },
+    });
+    expect(queries).toEqual([request.query, 'unrelatedquery']);
+    expect(detail.pack.candidates).toEqual([]);
+    expect(detail.pack.coverage.matchCounts?.[0]).toMatchObject({ matchedItems: 0, contentMatchedItems: 0, inEvidence: 0 });
+    expect(detail.laneAudits.some(audit => audit.candidateCount > 0 || audit.returnedCount > 0)).toBe(false);
+  });
+
   test.each(['keyword', 'hybrid'] as const)('routed %s hits, readWide IDs and audit counts withdraw a revoked body match', async retrievalMode => {
     const { store, filters, request, revoke } = await searchableGrantFixture();
     const provider: SourceEmbeddingProvider = { provider: 'built-in', backend: 'local', modelId: 'audit-epoch',
@@ -925,7 +964,7 @@ describe('read on demand', () => {
     } finally { db.close(); }
   });
 
-  test('a passage read withdraws its body when the grant changes during query embedding', async () => {
+  test.each(['revoked', 'replaced'] as const)('a passage read withdraws its body when the grant is %s during query embedding', async change => {
     const { store, filters, request, revoke } = await searchableGrantFixture();
     const embeddingProvider: SourceEmbeddingProvider = { provider: 'built-in', backend: 'local', modelId: 'read-epoch',
       dimension: 2, configHash: '1', epochId: '1', async embed(inputs) { return inputs.map(() => [1, 0]); } };
@@ -935,8 +974,55 @@ describe('read on demand', () => {
     const read = () => content.fetchLocalContent({ provenance: hits[0]!.provenance!, trustDomain: store.trustDomain,
       query: request.query, maxChars: 1000 });
     expect((await read())?.chunks).toEqual(['quartzneedle']);
-    spyOn(embeddingProvider, 'embed').mockImplementationOnce(async () => { revoke(); return [[1, 0]]; });
+    spyOn(embeddingProvider, 'embed').mockImplementationOnce(async () => {
+      revoke();
+      if (change === 'replaced') store.grantOnDemandRead('personal:report', 'v1');
+      return [[1, 0]];
+    });
     expect((await read())?.chunks ?? []).toEqual([]);
+  });
+
+  test('moving a granted item outside approved folders withdraws its hits, counts and readWide IDs', async () => {
+    const { store, request, filters } = await searchableGrantFixture();
+    const db = new Database(store.dbPath);
+    cleanup.push(() => db.close());
+    const response = await routeSourceIndexSearch({
+      registry: buildSourceIndexCorpusRegistry([request.corpus]),
+      adapters: { [store.corpusId]: createConnectorStoreCorpusAdapter({
+        store, filters: { ...filters, locatorPathScopes: ['/Files'] },
+      }) },
+      visibilityGate: hits => {
+        expect(hits).toHaveLength(1);
+        db.run("UPDATE items SET locator_uri = '/unapproved/orchard.txt' WHERE provider_item_id = 'report'");
+        expect(store.currentOnDemandRead('personal:report', 'v1')).toBe(true);
+        return [...hits];
+      },
+      request: { ...request, readWide: true },
+    });
+    expect(response.hits).toEqual([]);
+    expect(response.matchingCandidateIds).toEqual([]);
+    expect(response.matchCounts?.[0]).toMatchObject({ matchedItems: 0, contentMatchedItems: 0 });
+  });
+
+  test('moving a granted item outside approved folders during query embedding withdraws its passage', async () => {
+    const { store, request, filters } = await searchableGrantFixture();
+    const db = new Database(store.dbPath);
+    cleanup.push(() => db.close());
+    const embeddingProvider: SourceEmbeddingProvider = { provider: 'built-in', backend: 'local', modelId: 'read-scope',
+      dimension: 2, configHash: '1', epochId: '1', async embed(inputs) { return inputs.map(() => [1, 0]); } };
+    await store.embedChunks({ provider: embeddingProvider });
+    const metadataFilters = { locatorPathScopes: ['/Files'] };
+    const { hits } = await createConnectorStoreCorpusAdapter({ store, filters: { ...filters, ...metadataFilters } })(request);
+    const content = createConnectorStoreContentProvider({ store, contentAllowed: false, metadataFilters, embeddingProvider });
+    const read = () => content.fetchLocalContent({ provenance: hits[0]!.provenance!, trustDomain: store.trustDomain,
+      query: request.query, maxChars: 1000 });
+    expect((await read())?.chunks).toEqual(['quartzneedle']);
+    spyOn(embeddingProvider, 'embed').mockImplementationOnce(async () => {
+      db.run("UPDATE items SET locator_uri = '/unapproved/orchard.txt' WHERE provider_item_id = 'report'");
+      expect(store.currentOnDemandRead('personal:report', 'v1')).toBe(true);
+      return [[1, 0]];
+    });
+    expect(await read()).toBeUndefined();
   });
 
   test('revocation uses its registered commit wait', async () => {

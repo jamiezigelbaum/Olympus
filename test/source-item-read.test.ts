@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { LocalConnectorStore } from '../src/workers/connector-store/local-index.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import type { OwnerTierRule } from '../src/workers/classification/tier-classifier.ts';
-import type { ReleaseCheck, ReleaseInput } from '../src/core/release-manifest.ts';
+import { createReleaseManifestSink, runWithReleaseManifestSink, type ReleaseCheck, type ReleaseInput } from '../src/core/release-manifest.ts';
 import { registerInstalledTierClassification } from '../src/workers/classification/installed-tier-classification-registry.ts';
 import { fixtureConnector, fixtureItem, tempDir } from './helpers/tier-fixtures.ts';
 import { defaultConfig } from '../src/core/config.ts';
@@ -390,4 +390,17 @@ test('a version-bound on-demand grant lifts names-only scope but not the metadat
   refused(await f.read(undefined, { scope: () => ({ ...namesOnly(), filters: { provider: 'other' } }) }), 'not_in_scope');
   f.db.exec(`UPDATE on_demand_item_reads SET source_version = 'stale'`);
   refused(await f.read(undefined, { scope: namesOnly }), 'names_only');
+});
+
+test('a granted page read is refused when its grant is revoked after the worker returns', async () => {
+  const f = await fixture('Personal orchard text.');
+  f.store.grantOnDemandRead(f.item.identity.localItemId, f.item.identity.sourceVersion);
+  const email = client(f, () => ({ allowed: true, contentAllowed: false }));
+  const sink = createReleaseManifestSink();
+  const raw = await runWithReleaseManifestSink(sink, () => email.sourceItemRead({ selectedItem: selected(f) }));
+  expect(raw.pages).toHaveLength(1);
+  f.store.revokeOnDemandRead(f.item.identity.localItemId);
+  const { remoteOperationOutput } = await import('../src/core/remote-result.ts');
+  expect(() => remoteOperationOutput('source_item_read', raw, { releaseCheck: f.check, releaseManifests: sink.manifests }))
+    .toThrow(expect.objectContaining({ code: 'not_personal' }));
 });

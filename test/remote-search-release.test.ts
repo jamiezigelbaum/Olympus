@@ -6,16 +6,21 @@
 
 import { readFileSync } from 'node:fs';
 import { callChatGptTool } from '../src/workers/chatgpt/mcp-surface.ts';
+import { PRIVATE_ANSWER_META_KEY } from '../src/workers/chatgpt/private-answer-contract.ts';
+import type { PrivateAnswerJobs } from '../src/workers/chatgpt/private-answer-jobs.ts';
 import type { OperationContext } from '../src/core/operations.ts';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';
-import type { ReleaseCheck } from '../src/core/release-manifest.ts';
+import { createReleaseManifestSink, prepareSearchEvidenceRelease, runWithReleaseManifestSink, type ReleaseCheck } from '../src/core/release-manifest.ts';
 import type { TierSniffer } from '../src/workers/classification/tier-classifier.ts';
 import { searchToolResult } from '../src/workers/chatgpt/response-builder.ts';
 import { createConnectorStoreContentProvider, createConnectorStoreCorpusAdapter, defineConnectorCorpus } from '../src/workers/connector-store/index.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { createReleaseTierCheck, createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
-import { searchReleasedEvidence } from '../src/workers/source-index/analyst-answer.ts';
+import { probePrivateMatch, searchPrivateEvidence, searchReleasedEvidence } from '../src/workers/source-index/analyst-answer.ts';
+import { createRemotePrivateParts } from '../src/core/remote-private-part.ts';
+import { REMOTE_SECRET_NOTE } from '../src/core/remote-result.ts';
+import { remoteSearchExtension } from '../src/workers/remote-search.ts';
 import { CORPORA, FIXTURE_PLACEMENT, fixtureConnector, identityOf, openTierFixture, tempDir } from './helpers/tier-fixtures.ts';
 import { JUDGED_PERSONAL_SNIFFER } from './helpers/tier-fixtures.ts';
 import { registerInstalledTierClassification } from '../src/workers/classification/installed-tier-classification-registry.ts';
@@ -28,7 +33,7 @@ afterEach(() => {
   while (cleanups.length > 0) cleanups.pop()!();
 });
 
-async function gardenLane(sniffer: TierSniffer = JUDGED_PERSONAL_SNIFFER) {
+async function gardenLane(sniffer: TierSniffer = JUDGED_PERSONAL_SNIFFER, namesOnly = false) {
   // These short fixtures already have whole-item judgments. No new window
   // record or model call is needed to exercise the later tier-change race.
   registerInstalledTierClassification({ forLedger: () => ({ sniffer, releaseJudge: {
@@ -42,20 +47,25 @@ async function gardenLane(sniffer: TierSniffer = JUDGED_PERSONAL_SNIFFER) {
     fixture.close();
     cleanup();
   });
-  await fixture.set.sync(fixtureConnector(() => [{ id: 'garden', name: 'garden-notes.txt', text: SENTENCE }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+  const items = [{ id: 'garden', name: 'garden-notes.txt', text: SENTENCE }];
+  if (namesOnly) items.push({ id: 'field', name: 'field-notes.txt', text: 'Violet turnips grow beside the shed.' });
+  await fixture.set.sync(fixtureConnector(() => items), { fetchContent: true, placement: FIXTURE_PLACEMENT });
   // Every content read waits here until the test lets it go.
   let pause: Promise<void> | undefined;
   let reading: (() => void) | undefined;
   const readStarted = new Promise<void>((resolve) => { reading = resolve; });
+  if (namesOnly) {
+    for (const id of ['garden', 'field']) fixture.stores.internal!.grantOnDemandRead(`personal:${id}`, 'v1');
+  }
   const lanes = () => {
     const stores = fixture.set.openStores();
     return {
       registry: buildSourceIndexCorpusRegistry(stores.map((store) => defineConnectorCorpus({
         corpusId: store.corpusId, family: store.family, trustDomain: store.trustDomain,
       }))),
-      adapters: Object.fromEntries(stores.map((store) => [store.corpusId, createConnectorStoreCorpusAdapter({ store })])),
+      adapters: Object.fromEntries(stores.map((store) => [store.corpusId, createConnectorStoreCorpusAdapter({ store, ...(namesOnly ? { filters: { metadataOnlyLocatorPathScopes: ['/Files'] } } : {}) })])),
       contentProviders: Object.fromEntries(stores.map((store) => {
-        const provider = createConnectorStoreContentProvider({ store });
+        const provider = createConnectorStoreContentProvider({ store, ...(namesOnly ? { contentAllowed: false, metadataFilters: { locatorPathScope: '/Files' } } : {}) });
         return [store.corpusId, {
           ...provider,
           contentServable: provider.contentServable.bind(provider),
@@ -234,4 +244,134 @@ test.each(['sync', 'pool'] as const)('ChatGPT final search check withholds on a 
   expect(JSON.stringify(result)).not.toContain(SENTENCE);
   expect(JSON.stringify(result)).not.toContain('garden-notes');
   expect(result.structuredContent?.notes).toEqual(["Olympus held back some matching items under the owner's privacy rules."]);
+});
+
+test('ChatGPT drops a revoked body match and renumbers the surviving evidence after its Private probe', async () => {
+  const lane = await gardenLane(JUDGED_PERSONAL_SNIFFER, true);
+  const searched = Promise.withResolvers<string[]>();
+  const probe = Promise.withResolvers<void>();
+  const searching = callChatGptTool('olympus_search', { question: 'violet turnips' }, { releaseCheck: lane.releaseCheck } as OperationContext, {
+    dashboardView: async () => { throw new Error('unused'); },
+    async evidenceSearch(input) {
+      const raw = await searchReleasedEvidence({ lanes: lane.lanes, question: input.question, releaseCheck: lane.releaseCheck });
+      searched.resolve(raw.evidence.map(item => item.provider_item_id).sort());
+      return raw;
+    },
+    async privateMatchProbe() {
+      await probe.promise;
+      return { count: 0, evidence: [] };
+    },
+  });
+  expect(await searched.promise).toEqual(['field', 'garden']);
+  lane.fixture.stores.internal!.revokeOnDemandRead('personal:garden');
+  probe.resolve();
+  const result = await searching;
+  expect(result.structuredContent?.evidence).toEqual([
+    expect.objectContaining({ id: 'E1', title: 'field-notes.txt', excerpt: 'Violet turnips grow beside the shed.' }),
+  ]);
+  expect(JSON.stringify(result)).not.toContain('garden');
+  expect(JSON.stringify(result)).not.toContain('[E2]');
+});
+
+test('final release removes a revoked breadth match outside the selected evidence', async () => {
+  const lane = await gardenLane(JUDGED_PERSONAL_SNIFFER, true);
+  const sink = createReleaseManifestSink();
+  const raw = await runWithReleaseManifestSink(sink, () => searchReleasedEvidence({
+    lanes: lane.lanes, question: 'violet turnips', maxResults: 1, releaseCheck: lane.releaseCheck,
+  }));
+  expect(raw.evidence).toHaveLength(1);
+  expect(raw.coverage.matches).toContainEqual(expect.objectContaining({ matched_items: 2, in_evidence: 1 }));
+  const finish = await prepareSearchEvidenceRelease({ ...raw }, sink.manifests, lane.releaseCheck);
+  const selected = raw.evidence[0]!.provider_item_id;
+  lane.fixture.stores.internal!.revokeOnDemandRead(selected === 'garden' ? 'personal:field' : 'personal:garden');
+  const released = finish().raw;
+  expect(released.evidence).toEqual(raw.evidence);
+  expect(released.coverage).toMatchObject({ matches: expect.arrayContaining([expect.objectContaining({ matched_items: 1, in_evidence: 1 })]) });
+});
+
+async function privateProbeLane() {
+  const lane = await gardenLane(JUDGED_PERSONAL_SNIFFER, true);
+  await moveTieredItem({ set: lane.fixture.set, identity: identityOf('field'), target: { metadataTier: 'secure', contentTier: 'secure' } });
+  const store = lane.fixture.stores.secure_local!;
+  store.grantOnDemandRead('personal:field', 'v1');
+  const checking = Promise.withResolvers<void>();
+  const finished = Promise.withResolvers<void>();
+  const releaseCheck: ReleaseCheck = {
+    ...lane.releaseCheck,
+    async chunks(inputs, options) {
+      checking.resolve();
+      await finished.promise;
+      return lane.releaseCheck.chunks!(inputs, options);
+    },
+  };
+  return { ...lane, store, checking, finished, finalReleaseCheck: releaseCheck };
+}
+
+test.each([false, true])('ChatGPT releases a Private match count only while its body grant holds (Secret match %s)', async secretMatch => {
+  const lane = await privateProbeLane();
+  const question = 'violet turnips';
+  const panelEvidence: number[] = [];
+  const searching = callChatGptTool('olympus_search', { question }, { releaseCheck: lane.finalReleaseCheck } as OperationContext, {
+    dashboardView: async () => { throw new Error('unused'); },
+    evidenceSearch: input => searchReleasedEvidence({ lanes: lane.lanes, question: input.question, releaseCheck: lane.releaseCheck }),
+    async privateMatchProbe() {
+      const { matched, candidates } = await searchPrivateEvidence({ lanes: lane.lanes, question });
+      expect(matched).toBe(1);
+      expect(candidates[0]?.provenance.sourceItem?.providerItemId).toBe('field');
+      return { count: matched, evidence: candidates as unknown as Record<string, unknown>[], ...(secretMatch ? { secretMatch: true as const } : {}) };
+    },
+    privateAnswers: {
+      begin(input: Parameters<PrivateAnswerJobs['begin']>[0]) {
+        panelEvidence.push(input.evidence.length);
+        return { panelState: 'no_model', count: input.count };
+      },
+    } as PrivateAnswerJobs,
+  });
+  await lane.checking.promise;
+  lane.store.revokeOnDemandRead('personal:field');
+  lane.finished.resolve();
+  const result = await searching;
+  expect(JSON.stringify(result)).toContain(SENTENCE);
+  const panel = (result._meta as Record<string, unknown> | undefined)?.[PRIVATE_ANSWER_META_KEY];
+  if (secretMatch) {
+    expect(panel).toMatchObject({ count: 1 });
+    expect(JSON.stringify(result)).toContain(REMOTE_SECRET_NOTE);
+    expect(panelEvidence).toEqual([0]);
+  } else {
+    expect(panel).toMatchObject({ count: 0 });
+    expect(panel).not.toHaveProperty('jobId');
+    expect(panelEvidence).toEqual([]);
+  }
+});
+
+test('remote search drops a grant-derived Private note and waiting record when the grant is revoked during final checks', async () => {
+  const lane = await privateProbeLane();
+  const question = 'violet turnips';
+  let recorded = 0;
+  const remote = createRemotePrivateParts({
+    probe: (_request, timeoutMs) => probePrivateMatch({
+      lanes: lane.lanes, request: { question }, timeoutMs, deferGrantCheck: true,
+    }),
+    store: () => ({
+      ticket: connectionId => ({ connectionId, revocation: 0 }),
+      record: () => { recorded += 1; return { id: 'question', generation: 1, connectionId: 'agent' }; },
+      unchecked: () => [],
+      settleUnchecked: () => false,
+      revokeConnection: () => 0,
+      reconcileConnections: () => 0,
+    }),
+  });
+  cleanups.push(() => remote.close());
+  const extension = remoteSearchExtension({
+    evidenceSearch: input => searchReleasedEvidence({ lanes: lane.lanes, question: input.question, releaseCheck: lane.releaseCheck }),
+  }, () => 'active', { privatePart: remote.forConnection('agent'), releaseCheck: lane.finalReleaseCheck });
+  const searching = extension.call!({ params: { name: 'olympus_search', arguments: { question } } },
+    async () => { throw new Error('unused'); });
+  await lane.checking.promise;
+  lane.store.revokeOnDemandRead('personal:field');
+  lane.finished.resolve();
+  const result = await searching;
+  expect(JSON.stringify(result)).toContain(SENTENCE);
+  expect(result.structuredContent).not.toHaveProperty('private_note');
+  expect(recorded).toBe(0);
 });

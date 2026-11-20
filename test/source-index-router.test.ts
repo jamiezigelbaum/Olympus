@@ -7,12 +7,39 @@ import {
   type SourceIndexCorpusDefinition,
 } from '../src/core/source-index/corpus.ts';
 import {
+  SEARCH_GRANT_DELIVERY,
+  SEARCH_GRANT_MATCH,
+  refreshRoutedSearchGrants,
   routeSourceIndexSearch,
   type SourceIndexCorpusSearchAdapter,
   type SourceIndexCorpusSearchResponse,
 } from '../src/core/source-index/router.ts';
 
 describe('source-index policy-aware router', () => {
+  test('a revoked uncleared semantic neighbour cannot remain in lane audits', async () => {
+    const corpus = defineSourceIndexCorpus({ corpusId: 'internal.files', family: 'file', trustDomain: 'internal' });
+    let revoked = false;
+    const result = await routeSourceIndexSearch({
+      registry: buildSourceIndexCorpusRegistry([corpus]),
+      adapters: { [corpus.corpusId]: () => ({
+        hits: [],
+        semanticNeighbourHits: [{
+          sourceItem: { family: 'file', provider: 'fixture', accountScope: 'one', providerItemId: 'doc', localItemId: 'doc' },
+          rawExposed: false,
+          [SEARCH_GRANT_MATCH]: {},
+        }],
+        laneAudits: [{ laneName: 'semantic', laneType: 'semantic', candidateCount: 1, returnedCount: 0, localOnly: true, rawExposed: false }],
+        latencyMs: 0,
+        rawExposed: false,
+        [SEARCH_GRANT_DELIVERY]: { matches: [], checkIfChanged: () => revoked ? new Map() : undefined },
+      }) },
+      request: { query: 'question', maxResults: 1, context: { allowedTrustDomains: ['internal'] } },
+    });
+    expect(result.laneAudits).toContainEqual(expect.objectContaining({ laneName: 'semantic', candidateCount: 1 }));
+    revoked = true;
+    expect(refreshRoutedSearchGrants(result).laneAudits.some(audit => audit.laneName === 'semantic')).toBe(false);
+  });
+
   test('late-fuses only allowed trust-domain corpora', async () => {
     const corpora = fixtureCorpora();
     const registry = buildSourceIndexCorpusRegistry(corpora);
