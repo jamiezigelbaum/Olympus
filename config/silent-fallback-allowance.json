@@ -156,7 +156,7 @@
     "src/workers/cli-operations.ts": 2,
     "src/workers/connector-store/capture-spool-secrets.ts": 1,
     "src/workers/connector-store/local-index.ts": 26,
-    "src/workers/connector-store/off-thread-reads.ts": 8,
+    "src/workers/connector-store/off-thread-reads.ts": 7,
     "src/workers/connector-store/parent-label.ts": 1,
     "src/workers/connector-store/secrets-disposition.ts": 4,
     "src/workers/connector-store/spool-file-identity.ts": 2,

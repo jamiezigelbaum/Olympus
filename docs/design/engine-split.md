@@ -313,6 +313,13 @@ the cause).
   fails `test/engine-split-boot.test.ts` and the loop-stall gate. The
   product never throws. Whether the front ends up holding no SQLite
   handle at all is decided with the database review after 1.5.
+- **SQLite file mapping.** The map defaults to off across the engine,
+  including the front, background and their workers. On a 14-store,
+  1.15 million-item benchmark under a 4.8 GB memory cap, gathering evidence
+  for an Ask took 24 to 26.5 s with the map and 2.8 to 5.8 s without it
+  (one took 15.5 s). Under memory pressure, a page fault on a mapped file
+  costs more than the read() copy. `OLYMPUS_SQLITE_MMAP=on` enables the map
+  on Linux, and `OLYMPUS_SQLITE_MMAP=off` explicitly disables it.
 - **Stores the front keeps writing.** Its own files stay its own: remote
   connections, waiting private questions, answer jobs, dashboard
   sessions, settings files. Nothing else writes them.
