@@ -247,7 +247,8 @@ describe('a held item stays held', () => {
     // Their bytes are read later, so their names rest where a child's names do; the parent's text is held.
     expect(h.ledgerRecord('arch-parent')?.reasons).toContain(HELD_UNTIL_JUDGED_REASON);
     expect(h.ledgerRecord(fixtureChildId('arch-parent', 'one'))?.reasons).toContain(HELD_UNTIL_JUDGED_REASON);
-    expect(h.ledgerRecord(fixtureChildId('live-parent', 'one'))?.reasons ?? []).not.toContain(HELD_UNTIL_JUDGED_REASON);
+    // Every child is held until judged, a live parent's too (A9: one shared rule at placement).
+    expect(h.ledgerRecord(fixtureChildId('live-parent', 'one'))?.reasons).toContain(HELD_UNTIL_JUDGED_REASON);
     expect(h.ids()).toEqual([
       'arch-parent', fixtureChildId('arch-parent', 'one'), 'live-parent', fixtureChildId('live-parent', 'one'),
     ].sort());

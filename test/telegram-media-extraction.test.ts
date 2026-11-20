@@ -59,9 +59,24 @@ describe('Telegram media are read on their own', () => {
     await h.live.pull();
     expect(h.textOf('-1000001', '1000#child:media')).toBe('');
 
-    const counts = await readMedia(h);
-    expect(counts.candidates).toBe(1);
-    expect(counts.indexed).toBe(1);
+    // A live child is held until judged, like an export's (A9): the first read reaches the judge by queuing the
+    // move and lands nothing; the judge's move carries it, and the next pass lands it on the child.
+    const first = await readMedia(h);
+    expect(first).toMatchObject({ candidates: 1, indexed: 0, queued: 1 });
+    expect(h.textOf('-1000001', '1000#child:media')).toBe('');
+    const { set } = h.live.archiveTarget().lane({ provider: 'telegram', accountScope: ACCOUNT } as never, h.env);
+    const identity = { provider: 'telegram', accountScope: ACCOUNT, providerItemId: '1000#child:media', providerConversationId: '-1000001' };
+    const record = set.ledger.getCurrent(identity)!;
+    expect(record).toMatchObject({ state: 'moving' });
+    await moveTieredItem({
+      set,
+      identity: { ...identity, family: 'chat', localItemId: `${ACCOUNT}:-1000001:1000#child:media` },
+      target: { metadataTier: record.targetMetadataTier!, contentTier: record.targetContentTier! },
+      vectorIdentities: {},
+      replaceOwnSupersededCopy: true,
+    });
+    const second = await readMedia(h);
+    expect(second.indexed).toBe(1);
     expect(h.textOf('-1000001', '1000#child:media')).toContain('fixturequayword');
     // The message keeps its own text; the file's text is the child's.
     expect(h.textOf('-1000001', '1000')).not.toContain('fixturequayword');
