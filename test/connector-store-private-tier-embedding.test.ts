@@ -287,6 +287,40 @@ describe('a row Private by its own tier is withheld from an embedder not approve
     }
   });
 
+  test('cached status keeps its priced backlog when a tier-ineligible chunk lands', async () => {
+    const store = await internalStore([]);
+    const cloud = capturingProvider('cloud', 'gemini');
+    try {
+      await store.reconcileTotals();
+      const status = createSourceIndexStatusHandler({
+        corpusDefinitions: [defineConnectorCorpus({
+          corpusId: store.corpusId, family: store.family, trustDomain: store.trustDomain, activationMode: 'hybrid_primary',
+        })],
+        connectorStores: [store], snapshotRole: 'writer',
+        retrievalAvailability: {
+          [store.corpusId]: { servable: false, modelId: cloud.modelId, backend: cloud.backend, provider: cloud.provider },
+        },
+      });
+      const snapshot = { countsMaxAgeMs: 300_000 };
+      const request = { corpus_id: store.corpusId };
+      const first = (await status.refreshSnapshot!(request, snapshot)).corpora[0]!;
+      const privateRows = FIXTURES.filter((fixture) => fixture.tier === 'S4');
+      await store.syncFromConnector(connector(privateRows), { fetchContent: true, placement: placementFor(privateRows) });
+      expect(await store.missingEmbeddingItemIdsInTurns(cloud, 10)).toEqual([]);
+      const cached = (await status.status(request, snapshot)).corpora[0]!;
+      expect(first.embedding_parity).toMatchObject({ backlog_estimate: { missing_chunks: 0 }, refresh_needed: false });
+      expect(cached).toMatchObject({
+        totals: { chunks: 1 }, embedding_parity: { backlog_estimate: { missing_chunks: 0 }, refresh_needed: false },
+      });
+      const refreshed = (await status.refreshSnapshot!(request, snapshot)).corpora[0]!;
+      expect(refreshed.embedding_parity).toMatchObject({
+        backlog_estimate: { missing_chunks: 0 }, refresh_needed: false, private_tier_withheld: { chunks: 1 },
+      });
+    } finally {
+      store.close();
+    }
+  });
+
   test('a row that turns Private while an earlier batch is out is not sent in a later batch', async () => {
     // 33 rows: the store embeds in batches of 32, so row 33 is in the second.
     const rows: Fixture[] = Array.from({ length: 33 }, (_, index) => ({

@@ -10,15 +10,24 @@ import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/c
 import { buildSourceSensitivity, type SourceTrustDomain, type SourceTrustTier } from '../src/core/source-index/types.ts';
 import { defaultConfig } from '../src/core/config.ts';
 import { DirectHttpEmailTransport, EmailClient } from '../src/core/email.ts';
+import { JUDGED_PERSONAL_SNIFFER } from './helpers/tier-fixtures.ts';
+import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { createEmailSourceWorker } from '../src/workers/engine/index.ts';
+import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 
 const ACCOUNT = 'personal';
 const INTERNAL = 'internal.fixture.files';
 const SECURE = 'secure_local.fixture.files';
 const S4_TITLE = 'orchard-ledger-private.md';
 
-interface Fixture { id: string; name: string; text: string; tier: SourceTrustTier }
+interface Fixture {
+  id: string;
+  name: string;
+  text: string;
+  tier: SourceTrustTier;
+  parentId?: string;
+}
 
 function connector(fixtures: readonly Fixture[]): SourceConnector {
   const items = fixtures.map((fixture): RawItem => ({
@@ -29,6 +38,12 @@ function connector(fixtures: readonly Fixture[]): SourceConnector {
       providerItemId: fixture.id,
       localItemId: `${ACCOUNT}:${fixture.id}`,
       sourceVersion: `${fixture.id}:v1`,
+      ...(fixture.parentId ? {
+        parent: {
+          providerItemId: fixture.parentId,
+          localItemId: `${ACCOUNT}:${fixture.parentId}`,
+        },
+      } : {}),
     },
     mimeType: 'text/markdown',
     content: { kind: 'text', text: fixture.text },
@@ -59,11 +74,13 @@ async function store(
   corpusId: string,
   trustDomain: SourceTrustDomain,
   fixtures: readonly Fixture[],
+  tierLedger: TierLedger | null = null,
 ): Promise<LocalConnectorStore> {
-  const opened = new LocalConnectorStore({ dbPath: ':memory:', corpusId, family: 'file', trustDomain, tierLedger: null });
+  const opened = new LocalConnectorStore({ dbPath: ':memory:', corpusId, family: 'file', trustDomain, tierLedger });
   const tiers = new Map(fixtures.map((fixture) => [`${ACCOUNT}:${fixture.id}`, fixture.tier]));
   await opened.syncFromConnector(connector(fixtures), {
     fetchContent: true,
+    ...(tierLedger ? { tierClassification: { sniffer: JUDGED_PERSONAL_SNIFFER } } : {}),
     placement: (item: RawItem) => buildSourceSensitivity({
       trustTier: tiers.get(item.identity.localItemId)!,
       trustDomain,
@@ -126,7 +143,7 @@ describe('source_index_search and rows Private by their own tier', () => {
     }
   });
 
-  test('a search across tiers that reads a Private store returns the S4 row under local_only', async () => {
+  test('legacy requests across tiers withhold Private names and an explicit Private probe can read them', async () => {
     const internal = await store(INTERNAL, 'internal', INTERNAL_FIXTURES);
     const secure = await store(SECURE, 'secure_local', [
       { id: 'deed', name: 'orchard-deed.md', text: 'Orchard deed held privately.', tier: 'S4' },
@@ -137,12 +154,94 @@ describe('source_index_search and rows Private by their own tier', () => {
         connectorStoreTierSiblings: (corpusId) => [INTERNAL, SECURE].filter((sibling) => sibling !== corpusId),
       });
       const result = await search(worker, { query: 'orchard', corpus_id: INTERNAL });
-      expect(JSON.stringify(result.hits)).toContain(S4_TITLE);
-      expect(result.audit).not.toHaveProperty('private_tier_withheld');
-      expect(result.policy).toMatchObject({ local_only: true, trust_domain: 'secure_local' });
+      expect(JSON.stringify(result.hits)).not.toContain(S4_TITLE);
+      expect(result.hits.map((hit: any) => hit.sourceItem.providerItemId)).toEqual(['plan']);
+      expect(result.audit.private_tier_withheld).toBe(2);
+      const probe = await search(worker, {
+        query: 'orchard', corpus_id: SECURE, all_tiers: false, include_private_names: true,
+      });
+      expect(probe.hits.map((hit: any) => hit.sourceItem.providerItemId)).toEqual(['deed']);
+      expect(probe.audit).not.toHaveProperty('private_tier_withheld');
+      expect(probe.policy).toMatchObject({ local_only: true, trust_domain: 'secure_local' });
     } finally {
       internal.close();
       secure.close();
+    }
+  });
+
+  test.each(['legacy placement', 'owner names verdict'] as const)('a Personal child omits every copy of its Private parent’s identifiers (%s)', async mode => {
+    const ledger = mode === 'owner names verdict' ? new TierLedger({ dbPath: ':memory:' }) : null;
+    const parentId = 'private-parent-marker';
+    const childId = `attachment-of-${parentId}-document`;
+    const internal = await store(INTERNAL, 'internal', [
+      { id: parentId, name: 'a private contract', text: 'Restricted figures', tier: ledger ? 'S3' : 'S4' },
+      { id: childId, name: 'orchard attachment', text: 'Orchard pruning dates', tier: 'S3', parentId },
+    ], ledger);
+    try {
+      const worker = createEmailSourceWorker({ connectorStores: [internal] });
+      const find = () => search(worker, { query: 'orchard', corpus_id: INTERNAL, personal_names_only: true });
+      if (ledger) {
+        expect((await find()).hits[0].selected_item.provider_item_id).toBe(childId);
+        ledger.setOverride({ provider: 'fixture', accountScope: ACCOUNT, providerItemId: parentId }, { kind: 'tier', tier: 'secure' });
+      }
+      const result = await find();
+      expect(result.hits).toHaveLength(1);
+      expect(result.hits[0].provenance.citation.title).toBe('orchard attachment');
+      expect(result.hits[0]).not.toHaveProperty('selected_item');
+      expect(result.hits[0].sourceItem).not.toHaveProperty('providerItemId');
+      expect(result.hits[0].sourceItem).not.toHaveProperty('localItemId');
+      expect(JSON.stringify(result)).not.toContain(parentId);
+    } finally {
+      internal.close();
+      ledger?.close();
+    }
+  });
+
+  test('a withheld top-ranked hit leaves room for the next eligible match', async () => {
+    const internal = await store(INTERNAL, 'internal', [
+      ...Array.from({ length: 55 }, (_, index): Fixture => ({
+        id: `private-${index}`, name: 'orchard', text: 'orchard', tier: 'S4',
+      })),
+      { id: 'personal-second', name: 'planting notes', text: 'The orchard pruning plan concerns apple trees.', tier: 'S3' },
+    ]);
+    try {
+      const worker = createEmailSourceWorker({ connectorStores: [internal] });
+      const result = await search(worker, {
+        query: 'orchard', corpus_id: INTERNAL, personal_names_only: true, max_results: 1,
+      });
+      expect(result.hits.map((hit: any) => hit.sourceItem.providerItemId)).toEqual(['personal-second']);
+      expect(result.audit.private_tier_withheld).toBe(55);
+    } finally {
+      internal.close();
+    }
+  });
+
+  test('a hybrid search refills its semantic lane from matches below withheld winners', async () => {
+    const ledger = new TierLedger({ dbPath: ':memory:' });
+    const privateIds = Array.from({ length: 55 }, (_, index) => `private-${index}`);
+    const internal = await store(INTERNAL, 'internal', [
+      ...privateIds.map((id): Fixture => ({ id, name: 'restricted', text: 'financial figures', tier: 'S3' })),
+      { id: 'personal', name: 'planting notes', text: 'growing apples', tier: 'S3' },
+    ], ledger);
+    const provider: SourceEmbeddingProvider = {
+      provider: 'built-in', backend: 'local', modelId: 'fixture-search-vectors', epochId: '1', configHash: 'fixture', dimension: 2,
+      async embed(inputs) { return inputs.map(input => input.text.includes('growing apples') ? [0.95, 0.31] : [1, 0]); },
+    };
+    try {
+      expect((await internal.embedChunks({ provider })).chunksEmbedded).toBe(56);
+      for (const providerItemId of privateIds) {
+        ledger.setOverride({ provider: 'fixture', accountScope: ACCOUNT, providerItemId }, { kind: 'tier', tier: 'secure' });
+      }
+      const worker = createEmailSourceWorker({
+        connectorStores: [internal], connectorStoreEmbeddingProviders: new Map([[INTERNAL, provider]]),
+      });
+      const find = () => search(worker, { query: 'orchard', corpus_id: INTERNAL, max_results: 1, retrieval_mode: 'hybrid' });
+      expect((await find()).hits.map((hit: any) => hit.sourceItem.providerItemId)).toEqual(['personal']);
+      expect(internal.backfillVectorDigest(provider.modelId, 100).completed).toBe(true);
+      expect((await find()).hits.map((hit: any) => hit.sourceItem.providerItemId)).toEqual(['personal']);
+    } finally {
+      internal.close();
+      ledger.close();
     }
   });
 

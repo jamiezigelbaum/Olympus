@@ -145,6 +145,7 @@ describe('Telegram connector-store operational surfaces', () => {
         corpus_id: PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
         query: 'protected',
         account: ACCOUNT,
+        include_private_names: true,
       });
 
       expect(internalQuery.hits).toHaveLength(1);

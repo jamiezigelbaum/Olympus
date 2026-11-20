@@ -68701,7 +68701,7 @@ function foldVectorScore(bestByItem, row, queryVector) {
   }
   return { mismatch: 0, qualified, score };
 }
-async function scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, pageSize, resultLimit, sideReaders) {
+async function scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, pageSize, resultLimit, sideReaders, eligiblePks) {
   const authority = embeddingAuthorityRead(provider);
   const after = embeddingAuthorityFromRow(await read(authority), provider);
   if (after.skippedReason)
@@ -68720,7 +68720,7 @@ async function scanVectorPages(read, provider, beforeToken, queryVector, pageOpt
   const digestTable = !vectorDigestSearchDisabled() && await read({ mode: "get", sql: "SELECT 1 FROM sqlite_master WHERE name = 'chunk_vector_digest_meta'", params: [] });
   const digestReady = digestTable && await read({ mode: "get", sql: "SELECT 1 FROM chunk_vector_digest_meta WHERE model_id = ? AND completed = 1", params: [pageOptions.modelId] });
   if (digestReady) {
-    const scanned = await scanDigestPages(read, queryVector, pageOptions, deadlineAtMs, resultLimit, VECTOR_DIGEST_MAX_CANDIDATES, sideReaders);
+    const scanned = await scanDigestPages(read, queryVector, pageOptions, deadlineAtMs, resultLimit, VECTOR_DIGEST_MAX_CANDIDATES, sideReaders, eligiblePks);
     return "skippedReason" in scanned ? scanned : { ...scanned, onDemandReadsTablePresent };
   }
   const bestByItem = new Map;
@@ -68766,7 +68766,7 @@ function nextVectorDigestBackfillRows(rows, turnMs) {
     return Math.min(VECTOR_DIGEST_BACKFILL_MAX_ROWS, rows * 2);
   return rows;
 }
-async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit, maxCandidates = VECTOR_DIGEST_MAX_CANDIDATES, sideReaders) {
+async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit, maxCandidates = VECTOR_DIGEST_MAX_CANDIDATES, sideReaders, eligiblePks) {
   const work = sourceAnswerVectorWork();
   const heap = new VectorDigestHeap;
   const query = encodeVectorDigest(queryVector);
@@ -68853,7 +68853,9 @@ async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit, 
         const page = connectorStoreCurrentEmbeddingPageQuery({ ...options, chunkPks: pagePks }, 0, pagePks.length);
         return (readers?.[lane] ?? read)({ mode: "all", site: "vector_digest_rescore", ...page });
       }));
-      const rows = pages.flat();
+      const candidates = pages.flat();
+      const eligible = eligiblePks?.([...new Set(candidates.map((row) => row.item_pk))], options.onDemandReadsTablePresent === true);
+      const rows = eligible ? candidates.filter((row) => eligible.has(row.item_pk)) : candidates;
       const mismatchesBeforePage = dimensionMismatches;
       for (const [index, row] of rows.entries()) {
         if ((index & 31) === 0 && expired()) {
@@ -68926,7 +68928,7 @@ function connectorStoreVectorDigestPageQuery(options, afterChunkPk, limit = VECT
     ]
   };
 }
-async function scanVectorPagesOnPool(dbPath, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, resultLimit) {
+async function scanVectorPagesOnPool(dbPath, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, resultLimit, eligiblePks) {
   const side = [];
   const sideReaders = async () => {
     const opened = await Promise.all(Array.from({ length: READ_POOL_RESCORE_READERS }, () => openOffThreadSnapshot(dbPath, { lane: "rescore", noWait: true }).catch(() => {
@@ -68937,7 +68939,7 @@ async function scanVectorPagesOnPool(dbPath, provider, beforeToken, queryVector,
         side.push(reader);
     return side.map((reader) => reader.read);
   };
-  const scan = withOffThreadSnapshot(dbPath, (read) => scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE, resultLimit, sideReaders), { lane: "scan" }).finally(() => Promise.all(side.map((reader) => reader.close()))).catch((error) => {
+  const scan = withOffThreadSnapshot(dbPath, (read) => scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE, resultLimit, sideReaders, eligiblePks), { lane: "scan" }).finally(() => Promise.all(side.map((reader) => reader.close()))).catch((error) => {
     if (error instanceof OffThreadReadBusyError)
       return { skippedReason: "vector_scan_store_busy" };
     throw error;
@@ -69220,12 +69222,13 @@ function searchGrantIdentityKey(identity) {
     identity.sourceVersion
   ]);
 }
-async function withVectorMetadataFallbacks(store, request, rows, accountScope, filters) {
+async function withVectorMetadataFallbacks(store, request, rows, accountScope, filters, searchEligibility) {
   if (!usesSearchGrants(filters) || rows.length === 0)
     return [...rows];
   const metadata = await store.searchItemsDetailedOffThread(request.query, MAX_SEARCH_RESULTS, accountScope, filters, {
     prefix: false,
     locate: false,
+    searchEligibility,
     metadataCandidates: rows.map((row) => row.sourceItem)
   }, request.deadlineAtMs !== undefined ? { deadlineAtMs: request.deadlineAtMs } : {});
   const byVersion = new Map(metadata.rows.map((row) => [searchGrantIdentityKey(row.sourceItem), row]));
@@ -69266,18 +69269,19 @@ function createConnectorStoreCorpusAdapter(options) {
     if (!embeddingProvider || useHybrid !== "hybrid" || semanticSkippedReason)
       return (async () => {
         const markStage = startStoreStageClock(stages);
+        const { searchEligibility } = options;
         const emitPartial = partialKeywordRows(store, request, filters, options.resultProjector);
-        let keywordLane = await connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters, { onPartialRows: emitPartial }, request.deadlineAtMs);
+        let keywordLane = await connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters, { searchEligibility, onPartialRows: emitPartial }, request.deadlineAtMs);
         markStage?.("keyword_lane_ms");
-        keywordLane = await relaxEmptyLocalKeywordLane(store, request.query, request.maxResults, options.accountScope, filters, keywordLane, options.localKeywordFallback, {}, request.deadlineAtMs);
+        keywordLane = await relaxEmptyLocalKeywordLane(store, request.query, request.maxResults, options.accountScope, filters, keywordLane, options.localKeywordFallback, { searchEligibility }, request.deadlineAtMs);
         publishKeywordLane(emitPartial, keywordLane.rows);
         markStage?.("keyword_relaxation_ms");
         let recencyCut = false;
         const recencyRows = await chatRecencyLaneRows(store, options.accountScope, filters, request.deadlineAtMs, () => {
           recencyCut = true;
-        });
+        }, searchEligibility);
         markStage?.("recency_read_ms");
-        keywordLane = (await refreshSearchTierVisibility(store, keywordLane, [])).keyword;
+        keywordLane = (await refreshSearchTierVisibility(store, keywordLane, [], searchEligibility)).keyword;
         markStage?.("keyword_revalidation_ms");
         const rows = keywordLane.rows;
         if (recencyRows.length === 0) {
@@ -69337,7 +69341,7 @@ function createConnectorStoreCorpusAdapter(options) {
         markStage?.("finalize_ms");
         return withSearchGrantDelivery(store, filters, request, response, keywordLane.allRows);
       })();
-    return hybridConnectorStoreSearch(store, embeddingProvider, request, startedAt, stages, options.accountScope, filters, semanticRelevanceBar, options.resultProjector, options.localKeywordFallback);
+    return hybridConnectorStoreSearch(store, embeddingProvider, request, startedAt, stages, options.accountScope, filters, semanticRelevanceBar, options.resultProjector, options.localKeywordFallback, options.searchEligibility);
   };
   adapter.hybridAvailability = () => {
     if (!embeddingProvider) {
@@ -69368,7 +69372,7 @@ function createConnectorStoreCorpusAdapter(options) {
       return { hits: [], latencyMs: Date.now() - startedAt, matchCount: none, rawExposed: false };
     }
     const maxResults = Math.max(1, Math.min(Math.floor(request.maxResults), MAX_SEARCH_RESULTS));
-    const lane = await store.vectorSearchLane(request.query, embeddingProvider, maxResults, options.accountScope, filters, request.deadlineAtMs);
+    const lane = await store.vectorSearchLane(request.query, embeddingProvider, maxResults, options.accountScope, filters, request.deadlineAtMs, { searchEligibility: options.searchEligibility });
     const response = {
       hits: lane.rows.map((row) => connectorStoreHitFromRow(store, row, row.bestCosine, options.resultProjector, filters?.locatorPathScope)),
       latencyMs: Date.now() - startedAt,
@@ -69392,8 +69396,9 @@ function createConnectorStoreCorpusAdapter(options) {
     const startedAt = Date.now();
     const maxResults = Math.max(1, Math.min(Math.floor(request.maxResults), MAX_SEARCH_RESULTS));
     const hybrid = embeddingProvider !== undefined && (options.retrievalMode ?? "hybrid") === "hybrid" && (store.trustDomain !== "secure_local" || isApprovedSecureSourceEmbeddingProvider(embeddingProvider)) && store.vectorLaneServable(embeddingProvider.modelId);
+    const { searchEligibility } = options;
     const emitPartial = partialKeywordRows(store, request, filters);
-    const ftsOptions = { ...hybrid ? { prefix: false } : {}, locate: false, onPartialRows: emitPartial };
+    const ftsOptions = { ...hybrid ? { prefix: false } : {}, locate: false, searchEligibility, onPartialRows: emitPartial };
     const meaningLane = hybrid && request.context.lexicalOnly !== true;
     const readKeywordLane = await relaxEmptyLocalKeywordLane(store, request.query, maxResults, options.accountScope, filters, await connectorStoreKeywordLaneRows(store, request.query, maxResults, options.accountScope, filters, ftsOptions, request.deadlineAtMs), options.localKeywordFallback, ftsOptions, request.deadlineAtMs);
     publishKeywordLane(emitPartial, readKeywordLane.rows);
@@ -69402,16 +69407,16 @@ function createConnectorStoreCorpusAdapter(options) {
     if (meaningLane) {
       const bar = semanticRelevanceBarFor(embeddingProvider.modelId, semanticRelevanceBar);
       if (bar !== undefined) {
-        const lane = await store.vectorSearchLane(request.query, embeddingProvider, maxResults, options.accountScope, filters, request.deadlineAtMs, { locate: false });
+        const lane = await store.vectorSearchLane(request.query, embeddingProvider, maxResults, options.accountScope, filters, request.deadlineAtMs, { locate: false, searchEligibility });
         if (lane.skippedReason !== undefined)
           incomplete = true;
         const rows = lane.rows.filter((row) => row.bestCosine >= bar);
-        const matches = await withVectorMetadataFallbacks(store, request, rows, options.accountScope, filters);
+        const matches = await withVectorMetadataFallbacks(store, request, rows, options.accountScope, filters, searchEligibility);
         semanticRows.push(...matches);
         publishPartialRows(store, request, matches, filters, (row) => -row.rank, undefined, "vector");
       }
     }
-    const { keyword: keywordLane, vectors } = await refreshSearchTierVisibility(store, readKeywordLane, semanticRows);
+    const { keyword: keywordLane, vectors } = await refreshSearchTierVisibility(store, readKeywordLane, semanticRows, searchEligibility);
     const visibleSemanticRows = vectors.filter((row) => !keywordLane.matchedItemIds.has(row.sourceItem.localItemId));
     const rows = [...keywordLane.rows, ...visibleSemanticRows];
     const semanticOnly = visibleSemanticRows.length;
@@ -69447,11 +69452,12 @@ function createConnectorStoreCorpusAdapter(options) {
   }
   return expanded;
 }
-async function chatRecencyLaneRows(store, accountScope, filters, deadlineAtMs, onCutShort) {
+async function chatRecencyLaneRows(store, accountScope, filters, deadlineAtMs, onCutShort, searchEligibility) {
   if (store.family !== "chat")
     return [];
   const rows = await store.recentItemsOffThread(CHAT_RECENCY_LANE_LIMIT, accountScope, filters, deadlineAtMs, onCutShort);
-  return rows.map((row) => ({ ...row, contentMatched: true }));
+  const eligible = searchEligibility?.(rows);
+  return (eligible ? rows.filter((_, index) => eligible[index]) : rows).map((row) => ({ ...row, contentMatched: true }));
 }
 function connectorStoreHitFromRow(store, row, score, resultProjector, locatorPathScope) {
   let locatorRead = false;
@@ -69527,7 +69533,7 @@ function startStoreStageClock(stages) {
     startedAt = now;
   };
 }
-async function hybridConnectorStoreSearch(store, provider, request, startedAt, stages, accountScope, filters, semanticRelevanceBar, resultProjector, localKeywordFallback) {
+async function hybridConnectorStoreSearch(store, provider, request, startedAt, stages, accountScope, filters, semanticRelevanceBar, resultProjector, localKeywordFallback, searchEligibility) {
   const maxResults = Math.max(1, Math.min(Math.floor(request.maxResults), MAX_SEARCH_RESULTS));
   const laneLimit = Math.min(maxResults * 6, MAX_SEARCH_RESULTS);
   const markStage = startStoreStageClock(stages);
@@ -69535,8 +69541,8 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, s
   const keywordWork = (async () => {
     const laneStartedAt = stages ? performance.now() : 0;
     const keywordStartedAt = Date.now();
-    const lane = await connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false, onPartialRows: emitPartial }, request.deadlineAtMs);
-    const baseline = keywordAlternatives(request.query)?.size ? lane.baseline ?? await withKeywordExpansionDisabled(() => connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false }, request.deadlineAtMs)) : undefined;
+    const lane = await connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false, searchEligibility, onPartialRows: emitPartial }, request.deadlineAtMs);
+    const baseline = keywordAlternatives(request.query)?.size ? lane.baseline ?? await withKeywordExpansionDisabled(() => connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false, searchEligibility }, request.deadlineAtMs)) : undefined;
     publishKeywordLane(emitPartial, lane.rows);
     if (stages)
       stages.keyword_lane_ms = performance.now() - laneStartedAt;
@@ -69545,10 +69551,10 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, s
   const vectorWork = (async () => {
     const laneStartedAt = stages ? performance.now() : 0;
     const vectorStartedAt = Date.now();
-    const lane = await store.vectorSearchLane(request.query, provider, laneLimit, accountScope, filters, request.deadlineAtMs);
+    const lane = await store.vectorSearchLane(request.query, provider, laneLimit, accountScope, filters, request.deadlineAtMs, { searchEligibility });
     const bar = semanticRelevanceBarFor(provider.modelId, semanticRelevanceBar);
     const vetted = bar === undefined ? [] : lane.rows.filter((row) => row.bestCosine >= bar);
-    const rows = await withVectorMetadataFallbacks(store, request, vetted, accountScope, filters);
+    const rows = await withVectorMetadataFallbacks(store, request, vetted, accountScope, filters, searchEligibility);
     publishPartialRows(store, request, rows, filters, (row) => row.bestCosine, resultProjector, "vector");
     const byVersion = new Map(rows.map((row) => [searchGrantIdentityKey(row.sourceItem), row]));
     if (stages)
@@ -69580,7 +69586,7 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, s
   }
   markStage?.("post_join_setup_ms");
   const relaxStartedAt = Date.now();
-  keywordLane = await relaxEmptyLocalKeywordLane(store, request.query, laneLimit, accountScope, filters, keywordLane, localKeywordFallback, {}, request.deadlineAtMs);
+  keywordLane = await relaxEmptyLocalKeywordLane(store, request.query, laneLimit, accountScope, filters, keywordLane, localKeywordFallback, { searchEligibility }, request.deadlineAtMs);
   if (keywordLane !== keywordResult.lane)
     publishKeywordLane(emitPartial, keywordLane.rows);
   keywordElapsedMs += Date.now() - relaxStartedAt;
@@ -69588,9 +69594,9 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, s
   let recencyCut = false;
   const recencyRows = await chatRecencyLaneRows(store, accountScope, filters, request.deadlineAtMs, () => {
     recencyCut = true;
-  });
+  }, searchEligibility);
   markStage?.("recency_read_ms");
-  const checked = await refreshSearchTierVisibility(store, keywordLane, vectorLane.rows);
+  const checked = await refreshSearchTierVisibility(store, keywordLane, vectorLane.rows, searchEligibility);
   keywordLane = checked.keyword;
   markStage?.("keyword_revalidation_ms");
   const scoredVectorRows = checked.vectors;
@@ -69799,9 +69805,11 @@ function keywordExpansionChangesSearch(query, ftsOptions) {
   const shape = () => JSON.stringify([toFtsQuery(query, ftsOptions), sourceIndexFtsTermGroups(query), sourceIndexTopicTokens(query)]);
   return shape() !== withKeywordExpansionDisabled(shape);
 }
-async function refreshSearchTierVisibility(store, lane, vectors) {
+async function refreshSearchTierVisibility(store, lane, vectors, searchEligibility) {
   const candidates = [...lane.allRows, ...vectors];
-  const visible = new Set(await store.stillVisibleSearchRowsOffThread(candidates));
+  const current = await store.stillVisibleSearchRowsOffThread(candidates);
+  const eligible = searchEligibility?.(current);
+  const visible = new Set(eligible ? current.filter((_, index) => eligible[index]) : current);
   if (visible.size === candidates.length)
     return { keyword: lane, vectors: [...vectors] };
   const retained = lane.allRows.filter((row) => visible.has(row));
@@ -74101,6 +74109,51 @@ var init_local_index = __esm(() => {
         stores: () => [this]
       };
     }
+    childrenWithWithheldSearchIdentifiers(identities, includePrivateNames) {
+      const withheld = new Set;
+      let pending = [...this.parentLinksOf(identities)].map(([child, parent]) => ({ child, parent }));
+      if (pending.length === 0)
+        return withheld;
+      const lane = this.childVisibilityLane();
+      const ledger = lane.ledger();
+      const stores = lane.stores();
+      const scopes = ledger ? [{ ledger, corpusIds: new Set(stores.map((store) => store.corpusId)) }] : [];
+      for (let depth = 0;pending.length > 0 && depth < CHILD_PARENT_CHAIN_LIMIT; depth += 1) {
+        const refs = [...new Map(pending.map(({ parent }) => [parentKey(parent), parent])).values()];
+        const rows = stores.flatMap((store) => store.parentStandings(refs).filter((row) => row.active).map((row) => ({ ...row, corpusId: store.corpusId })));
+        const verdicts = visibilityHere(effectiveItemVerdicts(() => scopes, rows.map((row) => ({
+          ...row.identity,
+          corpusId: row.corpusId,
+          privateAtAnswer: false,
+          layer: "names"
+        }))));
+        const allowed = new Map;
+        const denied = new Set;
+        rows.forEach((row, index) => {
+          const key = parentKey(row);
+          const verdict = verdicts[index];
+          const canRelease = !row.secret && !verdict.gone && !verdict.pendingDeletion && (verdict.tier === "public_or_personal" || verdict.tier === "private" && includePrivateNames || verdict.tier === "legacy" && (row.legacyPrivateNames === false || includePrivateNames));
+          const previous = allowed.get(key);
+          if (!canRelease || previous && previous.grandparentLocalItemId !== row.grandparentLocalItemId) {
+            denied.add(key);
+          } else {
+            allowed.set(key, row);
+          }
+        });
+        pending = pending.flatMap(({ child, parent }) => {
+          const key = parentKey(parent);
+          const row = denied.has(key) ? undefined : allowed.get(key);
+          if (!row)
+            withheld.add(child);
+          if (!row?.grandparentLocalItemId)
+            return [];
+          return [{ child, parent: { provider: row.provider, accountScope: row.accountScope, parentLocalItemId: row.grandparentLocalItemId } }];
+        });
+      }
+      for (const { child } of pending)
+        withheld.add(child);
+      return withheld;
+    }
     hasChildItems() {
       if (!this.childItemColumnsPresent)
         return false;
@@ -74202,6 +74255,7 @@ var init_local_index = __esm(() => {
             },
             active: row.tombstoned === 0,
             secret: row.trust_tier === "S5",
+            legacyPrivateNames: isSecureSensitivity({ trustDomain: this.trustDomain, trustTier: trustTierFromRow(row.trust_tier) }),
             ...row.parent_local_item_id ? { grandparentLocalItemId: row.parent_local_item_id } : {}
           });
         }
@@ -79246,24 +79300,29 @@ ${parentKey(ref)}`, { ref, origin });
     async embeddingBacklogEstimateOffThread(modelId, embedder, scope, options = {}) {
       if (!offThreadReadsSupported(this.dbPath))
         return this.embeddingBacklogEstimate(modelId, embedder, scope, options);
-      const tierExclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0, undefined, false, false);
+      const tierExclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0, undefined, scope?.embedding?.includeHeldForJudgment, false);
       const excluded = tierExclusion.params.length > 0 ? JSON.parse(tierExclusion.params[0]) : [];
       const privateTier = embedder ? this.privateTierEmbeddingFilter(embedder) : { filter: "", params: [] };
-      const scoped = statusScopeContentFilter(scope);
+      const scoped = statusScopeContentFilter(scope?.embedding ?? scope);
+      const failed = this.embeddingFailureExclusionFilter();
       const sql = `
       SELECT COUNT(*) AS missing, COALESCE(SUM(LENGTH(c.bounded_text)), 0) AS chars
       FROM items i
       CROSS JOIN chunks c ON c.item_pk = i.item_pk
       LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
-      WHERE i.item_pk > ? AND i.item_pk <= ? AND i.tombstoned = 0
+      WHERE i.item_pk > ? AND i.item_pk <= ? AND i.tombstoned = 0 AND i.trust_tier <> 'S5'
         AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
-        ${tierExclusion.filter} ${privateTier.filter} ${scoped.filter}
+        ${tierExclusion.filter} ${privateTier.filter} ${scoped.filter} ${failed.filter}
     `;
       let missingChunks = 0;
       let chars = 0;
       await this.walkItemKeys(async (lo, hi) => {
         const page = excluded.length > 0 ? [JSON.stringify(excluded.filter((pk) => pk > lo && pk <= hi))] : [];
-        const row = await readInBackground(this.dbPath, { sql, params: [modelId, lo, hi, ...page, ...privateTier.params, ...scoped.params], mode: "get" });
+        const row = await readInBackground(this.dbPath, {
+          sql,
+          params: [modelId, lo, hi, ...page, ...privateTier.params, ...scoped.params, ...failed.params],
+          mode: "get"
+        });
         missingChunks += Number(row.missing);
         chars += Number(row.chars);
       });
@@ -79275,19 +79334,24 @@ ${parentKey(ref)}`, { ref, origin });
         await page(lo, Math.min(lo + statusPageKeys, end));
     }
     embeddingBacklogRead(modelId, embedder, scope, options, connectionLocal) {
-      const tierExclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0, undefined, false, connectionLocal);
+      const tierExclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0, undefined, scope?.embedding?.includeHeldForJudgment, connectionLocal);
       const privateTier = embedder ? this.privateTierEmbeddingFilter(embedder) : { filter: "", params: [] };
-      const scoped = statusScopeContentFilter(scope);
-      const filter = `${tierExclusion.filter} ${privateTier.filter} ${scoped.filter}`;
-      return { mode: "get", params: [modelId, ...tierExclusion.params, ...privateTier.params, ...scoped.params], sql: `
+      const scoped = statusScopeContentFilter(scope?.embedding ?? scope);
+      const failed = this.embeddingFailureExclusionFilter();
+      const filter = `${tierExclusion.filter} ${privateTier.filter} ${scoped.filter} ${failed.filter}`;
+      return { mode: "get", params: [modelId, ...tierExclusion.params, ...privateTier.params, ...scoped.params, ...failed.params], sql: `
       SELECT COUNT(*) AS missing, COALESCE(SUM(LENGTH(c.bounded_text)), 0) AS chars
       FROM chunks c
       JOIN items i ON i.item_pk = c.item_pk
       LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
-      WHERE i.tombstoned = 0
+      WHERE i.tombstoned = 0 AND i.trust_tier <> 'S5'
         AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
         ${filter}
     ` };
+    }
+    embeddingFailureExclusionFilter() {
+      const failed = this.embeddingFailureState;
+      return failed?.size ? { filter: "AND i.local_item_id NOT IN (SELECT value FROM json_each(?))", params: [JSON.stringify([...failed.keys()])] } : { filter: "", params: [] };
     }
     pdfExtractionBacklog() {
       return pdfBacklogFromRow(this.db.query(PDF_EXTRACTION_BACKLOG_SQL).get());
@@ -79401,7 +79465,7 @@ ${parentKey(ref)}`, { ref, origin });
       if (tiers === undefined)
         return { items: 0, chunks: 0, reason };
       const tierExclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0);
-      const scoped = statusScopeContentFilter(scope);
+      const scoped = statusScopeContentFilter(scope?.embedding ?? scope);
       const filter = `${tierExclusion.filter} ${scoped.filter}`;
       const params = [...tierExclusion.params, ...scoped.params];
       const row = this.db.query(`
@@ -79409,7 +79473,7 @@ ${parentKey(ref)}`, { ref, origin });
       FROM chunks c
       JOIN items i ON i.item_pk = c.item_pk
       LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
-      WHERE i.tombstoned = 0
+      WHERE i.tombstoned = 0 AND i.trust_tier <> 'S5'
         AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
         AND i.trust_tier NOT IN (SELECT value FROM json_each(?))
         ${filter}
@@ -80100,7 +80164,8 @@ ${parentKey(ref)}`, { ref, origin });
         ...accountScope !== undefined ? { accountScope } : {},
         ...vectorFilters ? { filters: vectorFilters } : {},
         ...deadlineAtMs !== undefined ? { deadlineAtMs } : {},
-        locate: laneOptions.locate !== false
+        locate: laneOptions.locate !== false,
+        searchEligibility: laneOptions.searchEligibility
       });
     }
     async scoreVectorLaneSnapshot(input) {
@@ -80126,7 +80191,8 @@ ${parentKey(ref)}`, { ref, origin });
       const excludedItemPks = this.vectorScanExcludedItemPks();
       if (excludedItemPks)
         pageOptions.excludedItemPks = excludedItemPks;
-      const scanned = offThreadReadsSupported(this.dbPath) ? await scanVectorPagesOnPool(this.dbPath, provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit) : await this.scanVectorPagesInThread(provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit);
+      const eligiblePks = input.searchEligibility ? (pks, onDemandReadsTablePresent) => this.visibleVectorItemPks(pks, selectedAccount, filters, onDemandReadsTablePresent, input.searchEligibility) : undefined;
+      const scanned = offThreadReadsSupported(this.dbPath) ? await scanVectorPagesOnPool(this.dbPath, provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit, eligiblePks) : await this.scanVectorPagesInThread(provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit, eligiblePks);
       if ("skippedReason" in scanned)
         return { rows: [], skippedReason: scanned.skippedReason };
       const { bestByItem, dimensionMismatches, onDemandReadsTablePresent } = scanned;
@@ -80146,13 +80212,13 @@ ${parentKey(ref)}`, { ref, origin });
           if (visibleInBatch.length === 0) {
             const batch = candidates.slice(candidateOffset, candidateOffset + VECTOR_VISIBILITY_BATCH_SIZE);
             candidateOffset += batch.length;
-            const visible = this.visibleVectorItemPks(batch.map(([itemPk]) => itemPk), selectedAccount, filters, onDemandReadsTablePresent);
+            const visible = this.visibleVectorItemPks(batch.map(([itemPk]) => itemPk), selectedAccount, filters, onDemandReadsTablePresent, input.searchEligibility);
             visibleInBatch = batch.filter(([itemPk]) => visible.has(itemPk));
           }
           rankedItems.push(...visibleInBatch.splice(0, limit - rankedItems.length));
           continue;
         }
-        const stillVisible = this.visibleVectorItemPks(rankedItems.map(([itemPk]) => itemPk), selectedAccount, filters, onDemandReadsTablePresent);
+        const stillVisible = this.visibleVectorItemPks(rankedItems.map(([itemPk]) => itemPk), selectedAccount, filters, onDemandReadsTablePresent, input.searchEligibility);
         rankedItems = rankedItems.filter(([itemPk]) => stillVisible.has(itemPk));
         if (!canFill())
           break;
@@ -80209,7 +80275,7 @@ ${parentKey(ref)}`, { ref, origin });
       return { has: (itemPk) => excluded.has(itemPk) || hiddenChildren.has(itemPk) };
     }
     vectorScanExclusion;
-    async scanVectorPagesInThread(provider, beforeToken, queryVector, pageOptions, deadlineAtMs, resultLimit) {
+    async scanVectorPagesInThread(provider, beforeToken, queryVector, pageOptions, deadlineAtMs, resultLimit, eligiblePks) {
       const scanDb = this.dbPath === ":memory:" ? this.db : new Database9(this.dbPath, { readonly: true, create: false, strict: true });
       const ownsScanDb = scanDb !== this.db;
       try {
@@ -80222,7 +80288,7 @@ ${parentKey(ref)}`, { ref, origin });
           const params = query.params;
           return query.mode === "all" ? statement.all(...params) : statement.get(...params);
         };
-        return await scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE, resultLimit);
+        return await scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE, resultLimit, undefined, eligiblePks);
       } finally {
         try {
           scanDb.exec("ROLLBACK;");
@@ -80356,23 +80422,28 @@ ${parentKey(ref)}`, { ref, origin });
       ORDER BY c.chunk_pk ASC
     `).all(...selectedLocalItemIds ?? [], ...tierExclusion.params, ...selectedAccount ? [selectedAccount] : [], ...selectedFilters.params);
     }
-    visibleVectorItemPks(itemPks, accountScope, filters, onDemandReadsTablePresent = false) {
+    visibleVectorItemPks(itemPks, accountScope, filters, onDemandReadsTablePresent = false, searchEligibility) {
       const visible = new Set;
       const selectedFilters = connectorStoreFilterSql(filters);
       const metadataOnly = connectorStoreMetadataOnlySql(filters, onDemandReadsTablePresent);
       for (let offset = 0;offset < itemPks.length; offset += VECTOR_VISIBILITY_BATCH_SIZE) {
         const batch = itemPks.slice(offset, offset + VECTOR_VISIBILITY_BATCH_SIZE);
-        const rows = this.db.query(`SELECT i.item_pk, i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id
+        const rows = this.db.query(`SELECT i.item_pk, i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id, i.trust_tier
         FROM items i WHERE i.item_pk IN (${batch.map(() => "?").join(",")}) AND i.tombstoned = 0
         ${accountScope ? "AND i.account_scope = ?" : ""} ${selectedFilters.sql}
         ${metadataOnly.sql ? `AND NOT ${metadataOnly.sql}` : ""}`).all(...batch, ...accountScope ? [accountScope] : [], ...selectedFilters.params, ...metadataOnly.params);
-        for (const row of this.tierVisibleRows(rows, (row) => ({
+        const identityOf = (row) => ({
           provider: row.provider,
           accountScope: row.account_scope,
           providerItemId: row.provider_item_id,
           ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
-        }), () => "content", false, (copies) => !copies.some((copy) => copy.corpusId === this.corpusId && copy.state === "current" && copy.embedHold)))
-          visible.add(row.item_pk);
+        });
+        const current = this.tierVisibleRows(rows, identityOf, () => "content", false, (copies) => !copies.some((copy) => copy.corpusId === this.corpusId && copy.state === "current" && copy.embedHold));
+        const eligible = searchEligibility?.(current.map((row) => ({ sourceItem: identityOf(row), trustTier: trustTierFromRow(row.trust_tier) })));
+        current.forEach((row, index) => {
+          if (!eligible || eligible[index])
+            visible.add(row.item_pk);
+        });
       }
       return visible;
     }
@@ -80653,12 +80724,17 @@ ${parentKey(ref)}`, { ref, origin });
             return weights.total > 0 && matched / weights.total >= RARE_CONCEPT_WEIGHT_SHARE;
           });
         }
-        const visible = yield* this.tierVisibleRowsSteps(signalled, (row) => ({
+        const current = yield* this.tierVisibleRowsSteps(signalled, (row) => ({
           provider: row.provider,
           accountScope: row.account_scope,
           providerItemId: row.provider_item_id,
           ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
         }), (row) => row.chunk_pk === null || row.chunk_pk === undefined ? "metadata" : "content");
+        const eligible = ftsOptions.searchEligibility?.(current.map((row) => ({
+          sourceItem: sourceItemFromRow(row),
+          trustTier: trustTierFromRow(row.trust_tier)
+        })));
+        const visible = eligible ? current.filter((_, index) => eligible[index]) : current;
         selected.push(...visible);
         if (ftsOptions.prepareGrantFallbacks && visible.length > 0) {
           const pageBodies = visible.filter((row) => row.chunk_pk != null);
@@ -81648,7 +81724,8 @@ ${parentKey(ref)}`, { ref, origin });
       const accountScope = normalizeOptionalAccountScope(scope?.accountScope);
       const itemFilters = connectorStoreFilterSql(scope?.itemFilters);
       const contentFilters = connectorStoreFilterSql(scope?.contentFilters);
-      const kept = this.totals();
+      const embedding = scope?.embedding;
+      const kept = embedding?.accountScope || embedding?.contentFilters || embedding?.contentAllowed === false ? undefined : this.totals();
       const countedTotals = kept ? storeTotalsFromRows(yield { sql: "SELECT name, n FROM store_totals", params: [], mode: "all" }, kept.reconciledAt) : undefined;
       const currentTier = this.tierHiddenItemPks({ countsMaxAgeMs: options.countsMaxAgeMs ?? 0 });
       const tier = {
@@ -81659,7 +81736,9 @@ ${parentKey(ref)}`, { ref, origin });
         metadataLayerContentUnread: currentTier.metadataLayerContentUnread.slice()
       };
       const hiddenNotIn = tier.hidden.length > 0 ? "AND i.item_pk NOT IN (SELECT value FROM json_each(?))" : "";
-      const heldNotIn = tier.held.length > 0 ? "AND i.item_pk NOT IN (SELECT value FROM json_each(?))" : "";
+      const heldForJudgment = scope?.embedding?.includeHeldForJudgment ? new Set(tier.heldForJudgment) : undefined;
+      const held = heldForJudgment ? tier.held.filter((pk) => !heldForJudgment.has(pk)) : tier.held;
+      const heldNotIn = held.length > 0 ? "AND i.item_pk NOT IN (SELECT value FROM json_each(?))" : "";
       const namesOnlyWithText = tier.metadataLayer.length > 0 ? (yield { sql: `
           SELECT j.value AS pk FROM json_each(?) j
           WHERE EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = j.value)
@@ -81679,7 +81758,9 @@ ${parentKey(ref)}`, { ref, origin });
       ${accountScope ? "AND i.account_scope = ?" : ""}
       ${contentFilters.sql}
       ${hiddenNotIn}`;
-      const parityWhere = `${contentWhere}
+      const embeddingFilter = statusScopeContentFilter(scope?.embedding ?? scope);
+      const parityWhere = `AND i.trust_tier <> 'S5' ${embeddingFilter.filter}
+      ${hiddenNotIn} ${namesOnlyNotIn}
       ${heldNotIn}`;
       const unreadHolds = this.settledUnreadableCount(scope, options.countsMaxAgeMs ?? 0);
       const policyHolds = new Set(unreadHolds.policyPks);
@@ -81702,7 +81783,12 @@ ${parentKey(ref)}`, { ref, origin });
           ...pageList(tier.hidden, lo, hi),
           ...pageList(namesOnlyWithText, lo, hi)
         ];
-        const parityParams = [...contentParams, ...pageList(tier.held, lo, hi)];
+        const parityParams = [
+          ...embeddingFilter.params,
+          ...pageList(tier.hidden, lo, hi),
+          ...pageList(namesOnlyWithText, lo, hi),
+          ...pageList(held, lo, hi)
+        ];
         const fileScopeParams = [
           ...accountScope ? [accountScope] : [],
           ...contentFilters.params,
@@ -81711,7 +81797,7 @@ ${parentKey(ref)}`, { ref, origin });
         ];
         return { itemParams, contentParams, parityParams, fileScopeParams };
       };
-      const fileScoped = policyHolds.size > 0 || scope !== undefined && !(scope.contentNotBefore !== undefined && Object.entries(scope).every(([key, value]) => key === "contentNotBefore" || value === undefined));
+      const fileScoped = policyHolds.size > 0 || Object.entries(scope ?? {}).some(([key, value]) => key !== "contentNotBefore" && key !== "embedding" && value !== undefined);
       const contentNotBeforeMs = scope?.contentNotBefore === undefined ? Number.NaN : Date.parse(scope.contentNotBefore);
       const outsideWindowSql = Number.isFinite(contentNotBeforeMs) ? `(COALESCE(julianday(i.authored_at) < julianday(?), 0) = 1
           AND NOT EXISTS (SELECT 1 FROM chunks oc WHERE oc.item_pk = i.item_pk))` : undefined;
@@ -81861,7 +81947,7 @@ ${parentKey(ref)}`, { ref, origin });
           SELECT DISTINCT emb.model_id
           FROM items i
           CROSS JOIN chunk_embeddings emb ON emb.item_pk = i.item_pk
-          WHERE i.item_pk > ? AND i.item_pk <= ? AND i.tombstoned = 0 ${contentWhere}
+          WHERE i.item_pk > ? AND i.item_pk <= ? AND i.tombstoned = 0 ${parityWhere}
         ) m
       `, params: [
           lo,
@@ -81872,7 +81958,7 @@ ${parentKey(ref)}`, { ref, origin });
           ...parityParams,
           lo,
           hi,
-          ...contentParams
+          ...parityParams
         ], mode: "all" };
         for (const row of pageByModel) {
           const total = modelTotals.get(row.model_id) ?? { embedded_chunks: 0, items_embedded: 0 };
@@ -108716,7 +108802,9 @@ var init_filter_capabilities = __esm(() => {
     "after",
     "before",
     "trust_domain",
-    "all_tiers"
+    "all_tiers",
+    "personal_names_only",
+    "include_private_names"
   ];
   CONNECTOR_STORE_DECLARED_FILTER_FIELDS = [
     "approved_scope_key",
@@ -142357,7 +142445,8 @@ function createSourceIndexStatusHandler(options = {}) {
           availability.backend ?? null,
           availability.provider ?? null
         ],
-        statusScope ?? null
+        statusScope ?? null,
+        store?.embeddingFailedItemCount?.() ?? 0
       ]);
       const cached = maxAgeMs > 0 ? cache.get(cacheKey) : undefined;
       if (cached && snapshot.countsMaxAgeMs !== 0 && cached.counted === counted && nowMs() - cached.recordedAtMs <= maxAgeMs)
@@ -142668,17 +142757,12 @@ function bringCountsForward(corpus, live) {
     const total = floor(parity.chunks + chunks);
     const embedded = Math.min(total, floor(parity.embedded_chunks + vectors));
     const missing = parity.required ? floor(parity.missing_chunks + chunks - vectors) : 0;
-    const withheld = parity.private_tier_withheld?.chunks ?? 0;
     return {
       ...parity,
       chunks: total,
       embedded_chunks: embedded,
       missing_chunks: missing,
-      refresh_needed: parity.required && missing > withheld,
-      ...parity.backlog_estimate ? { backlog_estimate: {
-        ...parity.backlog_estimate,
-        missing_chunks: Math.min(missing, floor(parity.backlog_estimate.missing_chunks + chunks - vectors))
-      } } : {}
+      refresh_needed: parity.backlog_estimate ? parity.refresh_needed : parity.required && missing > 0
     };
   })();
   return {
@@ -142725,7 +142809,7 @@ function withRetrievalEnforcementStatus(corpus, status, hybridAvailability) {
   const chunks = counts?.chunks ?? 0;
   const retrieval = counts !== undefined && chunks === 0 && assessed.reason === "no_current_embedding_artifacts" ? { ...assessed, servableMode: "hybrid", health: "ready", reason: undefined } : assessed;
   const noCurrentArtifacts = retrieval.reason === "no_current_embedding_artifacts";
-  const embeddedChunks = noCurrentArtifacts ? 0 : counts?.embedded_chunks ?? 0;
+  const embeddedChunks = noCurrentArtifacts && hybridAvailability?.modelId === undefined ? 0 : counts?.embedded_chunks ?? 0;
   const currentCounts = counts !== undefined && noCurrentArtifacts && ITEMS_EMBEDDED_COUNT_KEY in counts ? { counts: { ...counts, [ITEMS_EMBEDDED_COUNT_KEY]: 0 } } : {};
   const embeddingRequired = corpus.embeddingPolicy !== "disabled" && corpus.activationMode !== "lexical_only";
   return {
@@ -142754,17 +142838,16 @@ function withEmbeddingBacklogEstimate(status, store, modelId, availability, scop
   if (!parity?.required)
     return status;
   const embedder = availability.backend !== undefined && availability.provider !== undefined ? { modelId, provider: availability.provider, backend: availability.backend } : undefined;
-  const backlog = reused(countsMaxAgeMs, ["embedding-backlog", store.corpusId, modelId, embedder ?? null, scope ?? null], () => store.embeddingBacklogEstimate(modelId, embedder, scope, { countsMaxAgeMs }), typeof store.embeddingBacklogEstimateOffThread === "function" ? { read: () => store.embeddingBacklogEstimateOffThread(modelId, embedder, scope, { countsMaxAgeMs }), empty: { missingChunks: 0, estimatedTokens: 0 } } : undefined);
+  const failedCount = store.embeddingFailedItemCount?.() ?? 0;
+  const backlog = reused(countsMaxAgeMs, ["embedding-backlog", store.corpusId, modelId, embedder ?? null, scope ?? null, failedCount], () => store.embeddingBacklogEstimate(modelId, embedder, scope, { countsMaxAgeMs }), typeof store.embeddingBacklogEstimateOffThread === "function" ? { read: () => store.embeddingBacklogEstimateOffThread(modelId, embedder, scope, { countsMaxAgeMs }), empty: { missingChunks: 0, estimatedTokens: 0 } } : undefined);
   const withheld = embedder ? reused(countsMaxAgeMs, ["private-withheld", store.corpusId, embedder, scope ?? null], () => store.privateTierEmbeddingWithheld(embedder, scope, { countsMaxAgeMs })) : undefined;
   const { source } = embeddingModelEstimate(modelId);
   return {
     ...status,
     embedding_parity: {
       ...parity,
-      ...withheld && withheld.chunks > 0 ? {
-        refresh_needed: parity.refresh_needed && parity.missing_chunks > withheld.chunks,
-        private_tier_withheld: { chunks: withheld.chunks, reason: withheld.reason }
-      } : {},
+      refresh_needed: backlog.missingChunks > 0,
+      ...withheld && withheld.chunks > 0 ? { private_tier_withheld: { chunks: withheld.chunks, reason: withheld.reason } } : {},
       backlog_estimate: {
         model_id: modelId,
         missing_chunks: backlog.missingChunks,
@@ -150009,50 +150092,74 @@ class EmailClient {
       });
     return result;
   }
-  async sourceIndexSearch(options) {
+  async requestSourceIndexSearch(body) {
     if (!isSourceIndexReadSurfaceEnabled(this.config)) {
       throw new OperationError("source_index_not_enabled", "Source-index search is disabled.", "Enable sourceIndex.enabled to turn on the source read surface.");
     }
     if (!this.config.email.enabled) {
       throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using source-index search.");
     }
-    const corpusId = canonicalSourceCorpusId(options.corpusId);
-    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/search`, {
+    const data = asRecord15(await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/search`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        query: options.query,
-        corpus_id: corpusId,
-        ...options.retrievalMode ? { retrieval_mode: options.retrievalMode } : {},
-        ...options.account ? { account: options.account } : {},
-        ...options.folderId ? { folder_id: options.folderId } : {},
-        ...options.folderName ? { folder_name: options.folderName } : {},
-        ...options.approvedScopeKey ? { approved_scope_key: options.approvedScopeKey } : {},
-        ...options.chatScope ? { chat_scope: options.chatScope } : {},
-        ...options.trustDomain ? { trust_domain: options.trustDomain } : {},
-        ...options.conversationId ? { conversation_id: options.conversationId } : {},
-        ...options.senderId ? { sender_id: options.senderId } : {},
-        ...options.senderLabel ? { sender_label: options.senderLabel } : {},
-        ...options.authoredAfter ? { authored_after: options.authoredAfter } : {},
-        ...options.authoredBefore ? { authored_before: options.authoredBefore } : {},
-        ...options.participantId ? { participant_id: options.participantId } : {},
-        ...options.after ? { after: options.after } : {},
-        ...options.before ? { before: options.before } : {},
-        ...options.includeDeleted !== undefined ? { include_deleted: options.includeDeleted } : {},
-        ...options.attachmentType ? { attachment_type: options.attachmentType } : {},
-        ...options.maxResults !== undefined ? { max_results: options.maxResults } : {},
-        ...options.includeLocators !== undefined ? { include_locators: options.includeLocators } : {},
-        ...options.allTiers !== undefined ? { all_tiers: options.allTiers } : {}
-      })
-    });
-    const data = asRecord15(response);
+      body: JSON.stringify(body)
+    }));
     assertNoRawEmailFields(data);
     assertNoSourceIndexOperationalLeakFields(data);
+    return data;
+  }
+  async sourceIndexSearch(options, audience = "calling_model") {
+    const corpusId = canonicalSourceCorpusId(options.corpusId);
+    const data = await this.requestSourceIndexSearch({
+      query: options.query,
+      corpus_id: corpusId,
+      ...audience === "private_answer" ? { include_private_names: true } : { personal_names_only: true },
+      ...options.retrievalMode ? { retrieval_mode: options.retrievalMode } : {},
+      ...options.account ? { account: options.account } : {},
+      ...options.folderId ? { folder_id: options.folderId } : {},
+      ...options.folderName ? { folder_name: options.folderName } : {},
+      ...options.approvedScopeKey ? { approved_scope_key: options.approvedScopeKey } : {},
+      ...options.chatScope ? { chat_scope: options.chatScope } : {},
+      ...options.trustDomain ? { trust_domain: options.trustDomain } : {},
+      ...options.conversationId ? { conversation_id: options.conversationId } : {},
+      ...options.senderId ? { sender_id: options.senderId } : {},
+      ...options.senderLabel ? { sender_label: options.senderLabel } : {},
+      ...options.authoredAfter ? { authored_after: options.authoredAfter } : {},
+      ...options.authoredBefore ? { authored_before: options.authoredBefore } : {},
+      ...options.participantId ? { participant_id: options.participantId } : {},
+      ...options.after ? { after: options.after } : {},
+      ...options.before ? { before: options.before } : {},
+      ...options.includeDeleted !== undefined ? { include_deleted: options.includeDeleted } : {},
+      ...options.attachmentType ? { attachment_type: options.attachmentType } : {},
+      ...options.maxResults !== undefined ? { max_results: options.maxResults } : {},
+      ...options.includeLocators !== undefined ? { include_locators: options.includeLocators } : {},
+      ...options.allTiers !== undefined ? { all_tiers: options.allTiers } : {}
+    });
     return parseSourceIndexSearchResult(data, {
       config: this.config,
       requestedCorpusId: corpusId,
       includeLocators: options.includeLocators === true
     });
+  }
+  async sourceIndexSearchMany(corpusIds, options) {
+    if (!corpusIds.length)
+      throw new OperationError("invalid_params", "No source is configured for search.");
+    const response = await this.requestSourceIndexSearch({
+      query: options.query,
+      corpus_ids: corpusIds,
+      personal_names_only: true,
+      retrieval_mode: options.retrievalMode,
+      max_results: options.maxResults,
+      include_locators: options.includeLocators
+    });
+    if (!Array.isArray(response.results) || response.results.length !== corpusIds.length) {
+      throw new OperationError("email_error", "The worker did not return a search result for each requested source.");
+    }
+    return response.results.flatMap((value, index) => value === null ? [] : [parseSourceIndexSearchResult(asRecord15(value), {
+      config: this.config,
+      requestedCorpusId: corpusIds[index],
+      includeLocators: options.includeLocators === true
+    })]);
   }
   async sourceWatchCreate(options) {
     this.requireSourceWatchSurface();
@@ -166591,18 +166698,14 @@ async function searchEverySource(ctx, query, params) {
   for (const corpus of publicSourceCorpusRegistry(ctx.config).list("search"))
     if (!bySource.has(corpus.sourceId))
       bySource.set(corpus.sourceId, corpus.corpusId);
-  const settled = await Promise.allSettled([...bySource.values()].map((corpusId) => ctx.email.sourceIndexSearch({
+  const results = await ctx.email.sourceIndexSearchMany([...bySource.values()], {
     query,
-    corpusId,
     ...retrievalMode !== undefined ? { retrievalMode } : {},
     ...maxResults !== undefined ? { maxResults } : {},
     ...includeLocators !== undefined ? { includeLocators } : {}
-  })));
-  const results = settled.flatMap((outcome) => outcome.status === "fulfilled" ? [outcome.value] : []);
-  if (results.length === 0) {
-    const failed = settled.find((outcome) => outcome.status === "rejected");
-    throw failed?.reason ?? new OperationError("invalid_params", "No source is configured for search.");
-  }
+  });
+  if (!results.length)
+    throw new OperationError("email_error", "No source could be searched this time.");
   const limit = maxResults ?? Math.max(...results.map((result) => result.hits.length), 0);
   const hits = [];
   for (let rank = 0;hits.length < limit && results.some((result) => result.hits.length > rank); rank += 1) {
@@ -166613,7 +166716,7 @@ async function searchEverySource(ctx, query, params) {
   const domains = results.map((result) => result.policy.trust_domain);
   const secretLocations = results.flatMap((result) => result.secret_locations ?? []);
   const notes = [...new Set(results.flatMap((result) => result.coverage_notes ?? []))];
-  const unsearched = settled.length - results.length;
+  const unsearched = bySource.size - results.length;
   return {
     kind: "source_index_search",
     corpus_id: results[0].corpus_id,
@@ -228010,11 +228113,26 @@ function createEmailSourceWorker(options = {}) {
           }
         }
         if (request.method === "POST" && url.pathname === `${basePath}/source/index/search`) {
-          const record = await parseObjectBody(request);
+          const { corpus_ids: corpusIds, ...record } = await parseObjectBody(request);
           assertSourceIndexSearchQuery(record.query);
-          const corpusId = canonicalRequestCorpusId(record);
-          const connectorStore = corpusId ? connectorStoresByCorpusId.get(corpusId) : undefined;
-          if (connectorStore) {
+          if (record.personal_names_only !== undefined && record.personal_names_only !== true) {
+            throw new EmailSourceWorkerError(400, "invalid_request", "personal_names_only must be true when provided.");
+          }
+          if (record.include_private_names !== undefined && (record.include_private_names !== true || record.personal_names_only === true || corpusIds !== undefined)) {
+            throw new EmailSourceWorkerError(400, "invalid_request", "include_private_names is only available for a single Private search.");
+          }
+          const personalNamesOnly = record.include_private_names !== true;
+          const prepare = async (record) => {
+            const corpusId = canonicalRequestCorpusId(record);
+            const connectorStore = corpusId ? connectorStoresByCorpusId.get(corpusId) : undefined;
+            if (!corpusId) {
+              throw new EmailSourceWorkerError(400, "invalid_request", `corpus_id must be one of: ${sourceIndexSearchCorpusIds(connectorStores).join(", ")}.`);
+            }
+            if (!connectorStore)
+              throw new EmailSourceWorkerError(501, "source_index_search_not_supported", `The connector store for ${corpusId} is not mounted.`);
+            if (!personalNamesOnly && connectorStore.trustDomain !== "secure_local") {
+              throw new EmailSourceWorkerError(400, "invalid_request", "include_private_names requires a Private corpus.");
+            }
             const searchConnectorStore = async (store) => {
               const mandatoryScope = connectorStoreReadScope?.(store);
               if (mandatoryScope?.allowed === false)
@@ -228028,9 +228146,24 @@ function createEmailSourceWorker(options = {}) {
                 ...searchRequest.filters,
                 ...mandatoryScope?.filters
               }) : undefined;
+              const privateMatches = new Set;
               const adapter = createConnectorStoreCorpusAdapter({
                 store,
                 retrievalMode,
+                ...personalNamesOnly ? {
+                  searchEligibility(rows) {
+                    const tiers = store.effectiveItemTiers(rows.map((row) => row.sourceItem), "names");
+                    return rows.map((row, index) => {
+                      const tier = tiers[index];
+                      if (tier === "secret" || tier === "unknown" || row.trustTier === "S5")
+                        return false;
+                      if (tier === "public_or_personal" || tier === "legacy" && !isSecureSensitivity({ trustDomain: store.trustDomain, trustTier: row.trustTier }))
+                        return true;
+                      privateMatches.add(tierLedgerIdentityKey(row.sourceItem));
+                      return false;
+                    });
+                  }
+                } : {},
                 ...mandatoryScope?.allowed === true && mandatoryScope.accountScope ? { accountScope: mandatoryScope.accountScope } : searchRequest.accountScope ? { accountScope: searchRequest.accountScope } : {},
                 ...combinedFilters ? { filters: combinedFilters } : {},
                 ...searchRequest.resultProjector ? { resultProjector: searchRequest.resultProjector } : {},
@@ -228055,6 +228188,7 @@ function createEmailSourceWorker(options = {}) {
                 store,
                 searchRequest,
                 result,
+                privateMatches,
                 readScopeSignature,
                 scope: {
                   corpusId: store.corpusId,
@@ -228089,120 +228223,171 @@ function createEmailSourceWorker(options = {}) {
               }]);
             })));
             const tagged = [...taggedByHit.values()];
-            const visible = new Set(options.sourceIndexVisibilityGate ? options.sourceIndexVisibilityGate(tagged) : tagged);
-            const verdictScopes = new Map;
-            const unreadCorpora = new Set;
-            for (const { store } of runs) {
-              try {
-                const ledger = store.governingTierLedger();
-                if (!ledger)
-                  continue;
-                const scope = verdictScopes.get(ledger.dbPath);
-                if (scope)
-                  scope.corpusIds.add(store.corpusId);
-                else
-                  verdictScopes.set(ledger.dbPath, { ledger, corpusIds: new Set([store.corpusId]) });
-              } catch {
-                unreadCorpora.add(store.corpusId);
+            return () => {
+              const visible = new Set(options.sourceIndexVisibilityGate ? options.sourceIndexVisibilityGate(tagged) : tagged);
+              const verdictScopes = new Map;
+              const unreadCorpora = new Set;
+              for (const { store } of runs) {
+                try {
+                  const ledger = store.governingTierLedger();
+                  if (!ledger)
+                    continue;
+                  const scope = verdictScopes.get(ledger.dbPath);
+                  if (scope)
+                    scope.corpusIds.add(store.corpusId);
+                  else
+                    verdictScopes.set(ledger.dbPath, { ledger, corpusIds: new Set([store.corpusId]) });
+                } catch {
+                  unreadCorpora.add(store.corpusId);
+                }
               }
-            }
-            const privateNames = new Set;
-            const hiddenNames = new Set(tagged.filter((hit) => unreadCorpora.has(hit.corpusId)));
-            for (const scope of verdictScopes.values()) {
-              const governed = tagged.filter((hit) => scope.corpusIds.has(hit.corpusId));
-              try {
-                const verdicts = visibilityHere(effectiveItemVerdicts(() => [scope], governed.map((hit) => ({
-                  ...hit.sourceItem,
-                  corpusId: hit.corpusId,
-                  privateAtAnswer: false,
-                  layer: "names"
-                }))));
-                governed.forEach((hit, index) => {
-                  const verdict = verdicts[index];
-                  if (verdict.tier === "secret" || verdict.tier === "unknown" || verdict.pendingDeletion)
+              const privateNames = new Set(tagged.filter((hit) => hit.trustTier === undefined || isSecureSensitivity({ trustDomain: hit.trustDomain, trustTier: hit.trustTier })));
+              const hiddenNames = new Set(tagged.filter((hit) => unreadCorpora.has(hit.corpusId)));
+              for (const scope of verdictScopes.values()) {
+                const governed = tagged.filter((hit) => scope.corpusIds.has(hit.corpusId));
+                try {
+                  const verdicts = visibilityHere(effectiveItemVerdicts(() => [scope], governed.map((hit) => ({
+                    ...hit.sourceItem,
+                    corpusId: hit.corpusId,
+                    privateAtAnswer: false,
+                    layer: "names"
+                  }))));
+                  governed.forEach((hit, index) => {
+                    const verdict = verdicts[index];
+                    if (verdict.tier === "secret" || verdict.tier === "unknown" || verdict.pendingDeletion || personalNamesOnly && verdict.gone)
+                      hiddenNames.add(hit);
+                    else if (verdict.tier === "private")
+                      privateNames.add(hit);
+                    else if (personalNamesOnly && verdict.tier === "public_or_personal" && hit.trustTier !== undefined && hit.trustTier !== "S5")
+                      privateNames.delete(hit);
+                  });
+                } catch {
+                  for (const hit of governed)
                     hiddenNames.add(hit);
-                  else if (verdict.tier === "private")
-                    privateNames.add(hit);
-                });
-              } catch {
-                for (const hit of governed)
-                  hiddenNames.add(hit);
+                }
               }
-            }
-            const hitIsPrivate = (hit) => privateNames.has(hit) || hit.trustTier === undefined || isSecureSensitivity({ trustDomain: hit.trustDomain, trustTier: hit.trustTier });
-            const searchedSecureLocal = runs.some((run) => run.store.trustDomain === "secure_local");
-            const secretLocations = tiered ? options.secretLocationSearch?.(searchRequest.query, runs.map((run) => run.scope)) ?? [] : [];
-            const pendingPrivacy = readPendingPrivacyItems(options);
-            const released = runs.map((run) => deliverCorpusSearch([run.result]));
-            let privateTierWithheld = 0;
-            const perRun = released.map((result) => result.hits.flatMap((hit) => {
-              const taggedHit = taggedByHit.get(hit);
-              if (!visible.has(taggedHit) || hiddenNames.has(taggedHit))
-                return [];
-              if (!searchedSecureLocal && hitIsPrivate(taggedHit)) {
-                privateTierWithheld += 1;
-                return [];
+              const searchedSecureLocal = runs.some((run) => run.store.trustDomain === "secure_local");
+              const secretLocations = tiered ? options.secretLocationSearch?.(searchRequest.query, runs.map((run) => run.scope)) ?? [] : [];
+              const pendingPrivacy = readPendingPrivacyItems(options);
+              const released = runs.map((run) => deliverCorpusSearch([run.result]));
+              const withheld = new Set(runs.flatMap((run) => [...run.privateMatches]));
+              const perRun = released.map((result) => result.hits.flatMap((hit) => {
+                const taggedHit = taggedByHit.get(hit);
+                if (!visible.has(taggedHit) || hiddenNames.has(taggedHit))
+                  return [];
+                if ((personalNamesOnly || !searchedSecureLocal) && privateNames.has(taggedHit)) {
+                  withheld.add(tierLedgerIdentityKey(taggedHit.sourceItem));
+                  return [];
+                }
+                return [taggedHit];
+              }));
+              const merged = [];
+              for (let rank = 0;merged.length < searchRequest.maxResults && perRun.some((hits) => hits.length > rank); rank += 1) {
+                for (const hits of perRun) {
+                  const hit = hits[rank];
+                  if (hit && merged.length < searchRequest.maxResults)
+                    merged.push(hit);
+                }
               }
-              return [taggedHit];
-            }));
-            const merged = [];
-            for (let rank = 0;merged.length < searchRequest.maxResults && perRun.some((hits) => hits.length > rank); rank += 1) {
-              for (const hits of perRun) {
-                const hit = hits[rank];
-                if (hit && merged.length < searchRequest.maxResults)
-                  merged.push(hit);
+              const hits = merged;
+              const withheldChildIdentifiers = new Set;
+              for (const { store } of runs) {
+                const governed = hits.filter((hit) => hit.corpusId === store.corpusId);
+                if (governed.length === 0)
+                  continue;
+                try {
+                  const children = store.childrenWithWithheldSearchIdentifiers(governed.map((hit) => hit.sourceItem), !personalNamesOnly);
+                  for (const hit of governed) {
+                    if (children.has(tierLedgerIdentityKey(hit.sourceItem)))
+                      withheldChildIdentifiers.add(hit);
+                  }
+                } catch {
+                  for (const hit of governed)
+                    withheldChildIdentifiers.add(hit);
+                }
               }
-            }
-            const hits = tiered ? merged : perRun[0];
-            const locatorsExposed = hits.some((hit) => Object.prototype.hasOwnProperty.call(hit, "locator"));
-            const safeResult = {
-              kind: "source_index_search",
-              corpus_id: connectorStore.corpusId,
-              retrieval_source: "local_index",
-              hits: hits.map(({ corpusId: hitCorpusId, trustDomain: _hitTrustDomain, trustTier: _hitTrustTier, keywordLeader: _hitKeywordLeader, newestInStore: _hitNewestInStore, pinAppended: _hitPinAppended, ...hit }) => addSelectedItemToSearchHit(hitCorpusId, hit)),
-              ...secretLocations.length > 0 ? {
-                secret_locations: secretLocations.map((location) => ({
-                  source: location.source,
-                  ref: location.ref,
-                  ...location.locator ? { locator: location.locator } : {},
-                  ...location.title ? { title: location.title } : {},
-                  finding_kinds: [...location.findingKinds]
-                }))
-              } : {},
-              audit: {
-                request_id: `${connectorStore.corpusId}:connector-store-search`,
+              const releasedHits = hits.map((rankedHit) => {
+                const { corpusId: hitCorpusId, trustDomain: _hitTrustDomain, trustTier: _hitTrustTier, keywordLeader: _hitKeywordLeader, newestInStore: _hitNewestInStore, pinAppended: _hitPinAppended, ...hit } = rankedHit;
+                if (!withheldChildIdentifiers.has(rankedHit))
+                  return addSelectedItemToSearchHit(hitCorpusId, hit);
+                const { family, provider, accountScope } = hit.sourceItem;
+                const title = hit.provenance?.citation?.title;
+                const sourceItem = { family, provider, accountScope };
+                return {
+                  sourceItem,
+                  provenance: { sourceItem, citation: { sourceLabel: provider, ...title ? { title } : {} } },
+                  score: hit.score,
+                  rawExposed: false
+                };
+              });
+              const locatorsExposed = releasedHits.some((hit) => Object.prototype.hasOwnProperty.call(hit, "locator"));
+              const safeResult = {
+                kind: "source_index_search",
+                corpus_id: connectorStore.corpusId,
                 retrieval_source: "local_index",
-                queries_attempted: runs.length,
-                metadata_hits: hits.length,
-                items_returned: hits.length,
-                latency_ms: runs.reduce((total, run) => total + run.result.latencyMs, 0),
-                ...tiered ? { searched_corpora: runs.map((run) => run.store.corpusId) } : {},
-                ...searchRequest.explicitEmptyChatScope ? {} : { lane_audits: released.flatMap((result) => result.laneAudits ?? []) },
-                raw_source_exposed: false,
-                source_text_returned: false,
-                ...searchRequest.locatorsRequested ? { locators_requested: true } : {},
-                ...privateTierWithheld > 0 ? { private_tier_withheld: privateTierWithheld } : {},
-                ...pendingPrivacy !== undefined && pendingPrivacy > 0 ? { pending_privacy_items: pendingPrivacy } : {}
-              },
-              policy: {
-                raw_source_exposed: false,
-                source_text_returned: false,
-                source_packets_exposed: false,
-                local_only: searchRequest.explicitEmptyChatScope || searchedSecureLocal || hits.some(hitIsPrivate),
-                trust_domain: mostPrivateTrustDomain(runs.map((run) => run.store.trustDomain)),
-                ...locatorsExposed ? { locators_exposed: true, locator_release: "explicit_request" } : {}
+                hits: releasedHits,
+                ...secretLocations.length > 0 ? {
+                  secret_locations: secretLocations.map((location) => ({
+                    source: location.source,
+                    ref: location.ref,
+                    ...location.locator ? { locator: location.locator } : {},
+                    ...location.title ? { title: location.title } : {},
+                    finding_kinds: [...location.findingKinds]
+                  }))
+                } : {},
+                audit: {
+                  request_id: `${connectorStore.corpusId}:connector-store-search`,
+                  retrieval_source: "local_index",
+                  queries_attempted: runs.length,
+                  metadata_hits: hits.length,
+                  items_returned: hits.length,
+                  latency_ms: runs.reduce((total, run) => total + run.result.latencyMs, 0),
+                  ...tiered ? { searched_corpora: runs.map((run) => run.store.corpusId) } : {},
+                  ...searchRequest.explicitEmptyChatScope ? {} : { lane_audits: released.flatMap((result) => result.laneAudits ?? []) },
+                  raw_source_exposed: false,
+                  source_text_returned: false,
+                  ...searchRequest.locatorsRequested ? { locators_requested: true } : {},
+                  ...withheld.size > 0 ? { private_tier_withheld: withheld.size } : {},
+                  ...pendingPrivacy !== undefined && pendingPrivacy > 0 ? { pending_privacy_items: pendingPrivacy } : {}
+                },
+                policy: {
+                  raw_source_exposed: false,
+                  source_text_returned: false,
+                  source_packets_exposed: false,
+                  local_only: searchRequest.explicitEmptyChatScope || searchedSecureLocal || hits.some((hit) => privateNames.has(hit)),
+                  trust_domain: mostPrivateTrustDomain(runs.map((run) => run.store.trustDomain)),
+                  ...locatorsExposed ? { locators_exposed: true, locator_release: "explicit_request" } : {}
+                }
+              };
+              assertNoRawEmailFields(safeResult);
+              if (runs.some((run) => JSON.stringify(connectorStoreReadScope?.(run.store)) !== run.readScopeSignature)) {
+                throw new EmailSourceWorkerError(403, "source_index_policy_violation", "The source read scope changed during search. Retry under the current scope.");
               }
+              return safeResult;
             };
-            assertNoRawEmailFields(safeResult);
-            if (runs.some((run) => JSON.stringify(connectorStoreReadScope?.(run.store)) !== run.readScopeSignature)) {
-              throw new EmailSourceWorkerError(403, "source_index_policy_violation", "The source read scope changed during search. Retry under the current scope.");
+          };
+          if (corpusIds === undefined)
+            return json((await prepare(record))());
+          if (record.corpus_id !== undefined || !Array.isArray(corpusIds) || !corpusIds.length || !corpusIds.every((id) => typeof id === "string" && id.trim()) || new Set(corpusIds).size !== corpusIds.length) {
+            throw new EmailSourceWorkerError(400, "invalid_request", "Supply distinct corpus_ids for a multi-source search.");
+          }
+          const prepared = await Promise.allSettled(corpusIds.map((corpus_id) => prepare({ ...record, corpus_id })));
+          let firstFailure;
+          const results = prepared.map((outcome) => {
+            if (outcome.status === "rejected") {
+              firstFailure ??= outcome.reason;
+            } else {
+              try {
+                return outcome.value();
+              } catch (error) {
+                firstFailure ??= error;
+              }
             }
-            return json(safeResult);
-          }
-          if (!corpusId) {
-            throw new EmailSourceWorkerError(400, "invalid_request", `corpus_id must be one of: ${sourceIndexSearchCorpusIds(connectorStores).join(", ")}.`);
-          }
-          throw new EmailSourceWorkerError(501, "source_index_search_not_supported", `The connector store for ${corpusId} is not mounted.`);
+            return null;
+          });
+          if (results.every((result) => result === null))
+            throw firstFailure;
+          return json({ results });
         }
         if (request.method === "POST" && url.pathname === `${basePath}/source/index/embed`) {
           const record = await parseObjectBody(request);
@@ -228557,6 +228742,7 @@ var init_engine2 = __esm(() => {
   init_embedding_plan();
   init_tier_visibility();
   init_child_visibility();
+  init_tier_ledger();
   init_remote_access_recheck();
   init_selected_items();
   init_deep_read_jobs();
@@ -245814,16 +246000,6 @@ var init_gmail_archive_target = __esm(() => {
 });
 
 // src/workers/email-source/gmail-status-scope.ts
-function contentWindow(contentAfter) {
-  return contentAfter ? { contentNotBefore: contentAfter } : {};
-}
-function gmailInternalStoreStatusScope(authority) {
-  const approval = authority?.mailSnapshot();
-  if (approval?.status !== "approved")
-    return;
-  const window2 = contentWindow(approval.mailScope?.contentAfter);
-  return window2.contentNotBefore ? window2 : undefined;
-}
 function gmailRetainedAccountMatches(input) {
   const { handle, binding, historyAccountId } = input;
   if (!handle)
@@ -245876,20 +246052,21 @@ function gmailEmbeddingPopulation(input) {
     observedConnectorIdPrefix: GMAIL_IMPORT_CONNECTOR_PREFIX
   } };
 }
-function gmailPrivateStoreStatusScope(input) {
-  const accountScope = input.gmailRetainedAccountScope();
-  if (!accountScope)
+function gmailReadCountScope(domain, population, ref, authority) {
+  if (domain === "public_safe")
+    return {};
+  const contentAfter = ref && authority?.assertCurrentMail(ref).mailScope.contentAfter;
+  const window2 = contentAfter ? { contentNotBefore: contentAfter } : {};
+  if (domain !== "secure_local")
+    return window2;
+  if (population.contentAllowed === false)
     return { itemsAllowed: false, contentAllowed: false };
-  const ref = input.handle ? input.authority?.mailPolicyRef() : undefined;
-  const approval = ref ? input.authority.assertCurrentMail(ref) : undefined;
-  const population = gmailEmbeddingPopulation({ ...input, accountScope, ref, privateStore: true });
-  const { filters } = population;
   return {
-    accountScope,
+    ...window2,
     contentAllowed: true,
-    ...filters ? { itemFilters: filters, contentFilters: filters } : {},
-    ...ref ? { scopeRevision: ref.revision } : {},
-    ...contentWindow(approval?.mailScope.contentAfter)
+    ...population.accountScope ? { accountScope: population.accountScope } : {},
+    ...population.contentFilters ? { itemFilters: population.contentFilters, contentFilters: population.contentFilters } : {},
+    ...ref ? { scopeRevision: ref.revision } : {}
   };
 }
 function gmailStoreEmbeddingScope(deps) {
@@ -253410,6 +253587,15 @@ function storeEmbeddingScope(input) {
     }
   };
 }
+function embeddingCountScope(store, provider, scope) {
+  if (!scope.allowed)
+    return { contentAllowed: false };
+  return {
+    ...scope.accountScope ? { accountScope: scope.accountScope } : {},
+    ...scope.filters ? { contentFilters: scope.filters } : {},
+    ...!scope.excludeAllEmbeddingHolds && store.canEmbedHeld(provider) ? { includeHeldForJudgment: true } : {}
+  };
+}
 var init_embedding_scope = __esm(() => {
   init_operation_error();
   init_source_scope_runtime();
@@ -253567,13 +253753,43 @@ function registeredStoreReadScope(sourceId, authority) {
     ...content.allowed && content.filters ? { contentFilters: content.filters } : {}
   };
 }
-function createStoreEmbeddingScopeFor(input) {
-  const policies = new Map([[GMAIL_SOURCE_ID, gmailStoreEmbeddingScope(input)]]);
-  return (store, provider) => {
+function createStoreScopes(input) {
+  const policies = new Map([[GMAIL_SOURCE_ID, {
+    embedding: gmailStoreEmbeddingScope(input),
+    ref: () => input.authority?.mailPolicyRef(),
+    readCounts: gmailReadCountScope
+  }]]);
+  function resolve(store, provider, readScope) {
     const sourceId = input.sourceIdForStore(store);
-    const policy = policies.get(sourceId) ?? (getFileScopeSource(sourceId) ? "approval" : "open");
-    const scopeRef = policy === "approval" ? input.authority?.policyRef(sourceId) : sourceId === GMAIL_SOURCE_ID ? input.authority?.mailPolicyRef() : undefined;
-    return storeEmbeddingScope({ store, provider, policy, scopeRef, authority: input.authority, readScope: input.readScope });
+    const published = policies.get(sourceId);
+    const ref = published?.ref();
+    const policy = published?.embedding ?? (getFileScopeSource(sourceId) ? "approval" : "open");
+    const scopeRef = policy === "approval" ? input.authority?.policyRef(sourceId) : ref;
+    const scope = storeEmbeddingScope({ store, provider, policy, scopeRef, authority: input.authority, readScope });
+    return { scope, published, ref };
+  }
+  return {
+    embeddingScopeFor: (store, provider) => resolve(store, provider, input.readScope).scope,
+    statusScopeFor(store, provider) {
+      const read = input.readScope(store);
+      const { scope, published, ref } = resolve(store, provider, () => read);
+      const embedding = embeddingCountScope(store, provider, scope);
+      const counts = published ? published.readCounts(store.trustDomain, embedding, ref, input.authority) : readCountScope(read);
+      return { ...counts, embedding };
+    }
+  };
+}
+function readCountScope(read) {
+  if (!read.allowed)
+    return { itemsAllowed: false, contentAllowed: false };
+  if (read.contentAllowed && !read.filters && !read.contentFilters)
+    return {};
+  return {
+    ...read.filters?.sourceScopeRevision ? { scopeRevision: read.filters.sourceScopeRevision } : {},
+    ...read.accountScope ? { accountScope: read.accountScope } : {},
+    ...read.filters ? { itemFilters: read.filters } : {},
+    ...read.contentAllowed !== undefined ? { contentAllowed: read.contentAllowed } : {},
+    ...read.contentFilters ? { contentFilters: read.contentFilters } : {}
   };
 }
 var init_store_scope_policies = __esm(() => {
@@ -261877,7 +262093,7 @@ async function defaultPrivateMatchProbe(question, ctx) {
   const none = { count: 0, evidence: [] };
   if (corpora.length === 0)
     return none;
-  const searches = corpora.map((corpus) => ctx.email.sourceIndexSearch({ query, corpusId: corpus.corpusId, maxResults: PROBE_HITS_PER_CORPUS, allTiers: false }).then((result) => (Array.isArray(result.hits) ? result.hits : []).filter((hit) => typeof hit === "object" && hit !== null && !Array.isArray(hit)), () => []));
+  const searches = corpora.map((corpus) => ctx.email.sourceIndexSearch({ query, corpusId: corpus.corpusId, maxResults: PROBE_HITS_PER_CORPUS, allTiers: false }, "private_answer").then((result) => (Array.isArray(result.hits) ? result.hits : []).filter((hit) => typeof hit === "object" && hit !== null && !Array.isArray(hit)), () => []));
   const perCorpus = await Promise.all(searches);
   const evidence = perCorpus.flat();
   return { count: evidence.length, evidence };
@@ -279199,7 +279415,7 @@ ${key}`;
       return { allowed: false };
     return registeredStoreReadScope(sourceId, fileSourceScopeAuthority);
   };
-  const embeddingScopeFor = createStoreEmbeddingScopeFor({
+  const { embeddingScopeFor, statusScopeFor } = createStoreScopes({
     sourceIdForStore,
     authority: fileSourceScopeAuthority,
     readScope: connectorStoreReadScope,
@@ -279372,37 +279588,7 @@ ${key}`;
   };
   for (const mount of configuredConnectorStoreMounts)
     adoptConfiguredPrincipal(mount);
-  const connectorStoreStatusScope = (store) => {
-    if (store === gmailSecureConnectorStore) {
-      const handle = selectedSourceCredentialHandle({
-        env: process.env,
-        pinEnvName: "OLYMPUS_SOURCE_INDEX_GMAIL_CREDENTIAL_HANDLE",
-        provider: "gmail",
-        capability: "gmail.email.sync",
-        handles: readActiveConnectedHandles(process.env)
-      });
-      return gmailPrivateStoreStatusScope({
-        authority: fileSourceScopeAuthority,
-        handle,
-        provider: connectorStoreEmbeddingProviders.get(store.corpusId),
-        gmailRetainedAccountScope
-      });
-    }
-    if (store === gmailInternalConnectorStore)
-      return gmailInternalStoreStatusScope(fileSourceScopeAuthority);
-    const readScope = connectorStoreReadScope(store);
-    if (!readScope.allowed)
-      return { itemsAllowed: false, contentAllowed: false };
-    if (readScope.contentAllowed && !readScope.filters && !readScope.contentFilters)
-      return;
-    return {
-      ...readScope.filters?.sourceScopeRevision ? { scopeRevision: readScope.filters.sourceScopeRevision } : {},
-      ...readScope.accountScope ? { accountScope: readScope.accountScope } : {},
-      ...readScope.filters ? { itemFilters: readScope.filters } : {},
-      contentAllowed: readScope.contentAllowed,
-      ...readScope.contentFilters ? { contentFilters: readScope.contentFilters } : {}
-    };
-  };
+  const connectorStoreStatusScope = (store) => statusScopeFor(store, connectorStoreEmbeddingProviders.get(store.corpusId));
   const secureEmbeddingProfile = sovereigntyEngine.resolveEmbeddingProfile("secure_local");
   const secureEmbeddingCloudApproved = secureEmbeddingProfile?.profile.provider === "venice" && secureEmbeddingProfile.profile.trust === "encrypted_cloud";
   const fullCorpusDefinitions = [

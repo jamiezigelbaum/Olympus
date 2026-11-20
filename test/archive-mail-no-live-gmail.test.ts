@@ -1,6 +1,7 @@
 // Off-device processors retain the previous approval and archive rules.
 // Only an on-device processor can index all eligible retained mail.
 
+import { createStoreScopes } from '../src/workers/engine/runtime/store-scope-policies.ts';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -17,7 +18,7 @@ import { planStoreEmbedding } from '../src/workers/connector-store/embedding-pla
 import { storeEmbeddingScope } from '../src/workers/connector-store/embedding-scope.ts';
 import type { FileSourceScopeAuthority, SourceScopePolicyRef } from '../src/workers/source-scope-runtime.ts';
 import type { SourceEmbeddingInput, SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
-import { gmailPrivateStoreStatusScope, gmailStoreEmbeddingScope } from '../src/workers/email-source/gmail-status-scope.ts';
+import { gmailStoreEmbeddingScope } from '../src/workers/email-source/gmail-status-scope.ts';
 import {
   createSourceIndexEmbeddingProviderFromSovereignty,
   loadSourceWorkerSovereignty,
@@ -98,8 +99,12 @@ async function privateStore(): Promise<LocalConnectorStore> {
 describe('imported Gmail history with no live connection', () => {
   test('the Private store counts only imports for an off-device processor without an approval', async () => {
     const store = await privateStore();
-    expect(gmailPrivateStoreStatusScope({ authority: undefined, handle: undefined, gmailRetainedAccountScope: () => undefined })).toEqual({ itemsAllowed: false, contentAllowed: false });
-    const scope = gmailPrivateStoreStatusScope({ authority: undefined, handle: undefined, gmailRetainedAccountScope: () => 'personal' });
+    const statusScope = (account?: string) => createStoreScopes({
+      authority: undefined, sourceIdForStore: () => 'gmail.email', readScope: () => ({ allowed: true }),
+      gmailRetainedAccountScope: () => account,
+    }).statusScopeFor(store, undefined);
+    expect(statusScope()).toMatchObject({ itemsAllowed: false, contentAllowed: false, embedding: { contentAllowed: false } });
+    const scope = statusScope('personal');
     expect(store.status(scope).counts.items).toBe(1);
     expect(store.itemMatchesSearchFilters('personal:imported', 'personal', scope.itemFilters!)).toBe(true);
     expect(store.itemMatchesSearchFilters('personal:live', 'personal', scope.itemFilters!)).toBe(false);

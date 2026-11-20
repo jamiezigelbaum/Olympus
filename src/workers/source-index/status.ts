@@ -772,6 +772,7 @@ export function createSourceIndexStatusHandler(
             availability.provider ?? null,
           ],
           statusScope ?? null,
+          store?.embeddingFailedItemCount?.() ?? 0,
         ]);
         // The readiness cache and the store recount have separate lifetimes.
         // A newer store count must reach the dashboard even while its
@@ -1156,8 +1157,8 @@ function connectorStoreStatus(
  * serving model, and the embedding parity built from them. A reused count
  * otherwise showed finished embedding as still waiting for up to its reuse
  * window (lane 6 run 43777041779: "embedded 1, missing 2" minutes after both
- * chunks were embedded). Deltas only: the scope and tier filtering of the
- * count stays, and the next recount replaces the estimate with a count.
+ * chunks were embedded). The priced backlog and its refresh flag stay at
+ * the last scoped count, since totals carry no embedding eligibility.
  */
 export function bringCountsForward(corpus: SourceIndexConnectorStoreStatus, live: SourceIndexStoreTotals): SourceIndexConnectorStoreStatus {
   const at = corpus.totals_at_count;
@@ -1180,15 +1181,12 @@ export function bringCountsForward(corpus: SourceIndexConnectorStoreStatus, live
     const total = floor(parity.chunks + chunks);
     const embedded = Math.min(total, floor(parity.embedded_chunks + vectors));
     const missing = parity.required ? floor(parity.missing_chunks + chunks - vectors) : 0;
-    const withheld = parity.private_tier_withheld?.chunks ?? 0;
     return {
       ...parity,
       chunks: total,
       embedded_chunks: embedded,
       missing_chunks: missing,
-      refresh_needed: parity.required && missing > withheld,
-      ...(parity.backlog_estimate ? { backlog_estimate: { ...parity.backlog_estimate,
-        missing_chunks: Math.min(missing, floor(parity.backlog_estimate.missing_chunks + chunks - vectors)) } } : {}),
+      refresh_needed: parity.backlog_estimate ? parity.refresh_needed : parity.required && missing > 0,
     };
   })();
   return {
@@ -1252,12 +1250,12 @@ function withRetrievalEnforcementStatus<T extends SourceIndexStatusCorpus>(
     ? { ...assessed, servableMode: 'hybrid' as const, health: 'ready' as const, reason: undefined }
     : assessed;
   const noCurrentArtifacts = retrieval.reason === 'no_current_embedding_artifacts';
-  const embeddedChunks = noCurrentArtifacts
+  // The selected model may hold current vectors for rows still awaiting
+  // judgment. Store parity counts the vectors, while retrieval keeps them held.
+  const embeddedChunks = noCurrentArtifacts && hybridAvailability?.modelId === undefined
     ? 0
     : counts?.embedded_chunks ?? 0;
-  // The per-item count the dashboard divides in files follows the same rule
-  // as the chunk count: with no artifacts on the serving model, nothing is
-  // embedded for answering purposes, whatever hash parity the store holds.
+  // Vectors awaiting judgment still cannot serve items for answering.
   const currentCounts = counts !== undefined && noCurrentArtifacts && ITEMS_EMBEDDED_COUNT_KEY in counts
     ? { counts: { ...counts, [ITEMS_EMBEDDED_COUNT_KEY]: 0 } }
     : {};
@@ -1307,7 +1305,9 @@ function withEmbeddingBacklogEstimate<T extends SourceIndexStatusCorpus>(
     ? { modelId, provider: availability.provider, backend: availability.backend as SourceEmbeddingBackend }
     : undefined;
   // The same scoped population as the parity counts above (store.status(scope)).
-  const backlog = reused(countsMaxAgeMs, ['embedding-backlog', store.corpusId, modelId, embedder ?? null, scope ?? null],
+  // Failed items are an in-process exclusion that changes without a store write.
+  const failedCount = store.embeddingFailedItemCount?.() ?? 0;
+  const backlog = reused(countsMaxAgeMs, ['embedding-backlog', store.corpusId, modelId, embedder ?? null, scope ?? null, failedCount],
     () => store.embeddingBacklogEstimate(modelId, embedder, scope, { countsMaxAgeMs }),
     typeof store.embeddingBacklogEstimateOffThread === 'function'
       ? { read: () => store.embeddingBacklogEstimateOffThread(modelId, embedder, scope, { countsMaxAgeMs }), empty: { missingChunks: 0, estimatedTokens: 0 } }
@@ -1321,11 +1321,9 @@ function withEmbeddingBacklogEstimate<T extends SourceIndexStatusCorpus>(
     ...status,
     embedding_parity: {
       ...parity,
+      refresh_needed: backlog.missingChunks > 0,
       ...(withheld && withheld.chunks > 0
-        ? {
-            refresh_needed: parity.refresh_needed && parity.missing_chunks > withheld.chunks,
-            private_tier_withheld: { chunks: withheld.chunks, reason: withheld.reason },
-          }
+        ? { private_tier_withheld: { chunks: withheld.chunks, reason: withheld.reason } }
         : {}),
       backlog_estimate: {
         model_id: modelId,

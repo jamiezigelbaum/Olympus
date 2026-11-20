@@ -117,12 +117,17 @@ async function search(fx: TierFixture, store: LocalConnectorStore, allTiers = fa
   const corpusIds = new Set(Object.values(CORPORA));
   const worker = createEmailSourceWorker({
     connectorStores: [store, fx.stores.secure_local!],
-    connectorStoreTierSiblings: () => [CORPORA.secure_local],
+    // As the engine wires it: every other corpus of the same tier lane.
+    connectorStoreTierSiblings: (corpusId: string) => [...corpusIds].filter((sibling) => sibling !== corpusId),
     sourceIndexVisibilityGate: createTierVisibilityGate(() => [{ ledger: fx.ledger, corpusIds }]),
   });
   const response = await worker.fetch(new Request('http://worker.test/v1/source/index/search', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ corpus_id: store.corpusId, query: 'orchard', all_tiers: allTiers }),
+    // The Private path asks for Private names explicitly from a Private corpus (the private_answer audience);
+    // an ordinary all-tiers search gets Personal names only, as an older client's request does.
+    body: JSON.stringify(allTiers
+      ? { corpus_id: CORPORA.secure_local, query: 'orchard', all_tiers: true, include_private_names: true }
+      : { corpus_id: store.corpusId, query: 'orchard', all_tiers: allTiers }),
   }));
   expect(response.status).toBe(200);
   return await response.json() as { hits: unknown[]; policy: { local_only: boolean } };

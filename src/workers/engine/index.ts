@@ -2,6 +2,7 @@ import { deliverCorpusSearch, DEFER_SEARCH_DELIVERY, SEARCH_GRANT_MATCH } from '
 import { scopedEmbeddingOptions } from '../connector-store/embedding-plan.ts';
 import { effectiveItemVerdicts, type TierVisibilityScope } from '../connector-store/tier-visibility.ts';
 import { visibilityHere } from '../connector-store/child-visibility.ts';
+import { tierLedgerIdentityKey } from '../classification/tier-ledger.ts';
 import { currentRemoteReadAccess } from '../remote-access-recheck.ts';
 import { sourceItemReadSelectedItem, sourceItemReadPage } from '../../core/source-index/selected-items.ts';
 import { DeepReadRefused } from './runtime/deep-read-jobs.ts';
@@ -3564,11 +3565,33 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
         }
 
         if (request.method === 'POST' && url.pathname === `${basePath}/source/index/search`) {
-          const record = await parseObjectBody(request);
+          const { corpus_ids: corpusIds, ...record } = await parseObjectBody(request);
           assertSourceIndexSearchQuery(record.query);
-          const corpusId = canonicalRequestCorpusId(record);
-          const connectorStore = corpusId ? connectorStoresByCorpusId.get(corpusId) : undefined;
-          if (connectorStore) {
+          if (record.personal_names_only !== undefined && record.personal_names_only !== true) {
+            throw new EmailSourceWorkerError(400, 'invalid_request', 'personal_names_only must be true when provided.');
+          }
+          if (record.include_private_names !== undefined && (record.include_private_names !== true || record.personal_names_only === true || corpusIds !== undefined)) {
+            throw new EmailSourceWorkerError(400, 'invalid_request', 'include_private_names is only available for a single Private search.');
+          }
+          const personalNamesOnly = record.include_private_names !== true;
+          const prepare = async (record: Record<string, unknown>) => {
+            const corpusId = canonicalRequestCorpusId(record);
+            const connectorStore = corpusId ? connectorStoresByCorpusId.get(corpusId) : undefined;
+            if (!corpusId) {
+              throw new EmailSourceWorkerError(
+                400,
+                'invalid_request',
+                `corpus_id must be one of: ${sourceIndexSearchCorpusIds(connectorStores).join(', ')}.`,
+              );
+            }
+            if (!connectorStore) throw new EmailSourceWorkerError(
+              501,
+              'source_index_search_not_supported',
+              `The connector store for ${corpusId} is not mounted.`,
+            );
+            if (!personalNamesOnly && connectorStore.trustDomain !== 'secure_local') {
+              throw new EmailSourceWorkerError(400, 'invalid_request', 'include_private_names requires a Private corpus.');
+            }
             const searchConnectorStore = async (store: LocalConnectorStore) => {
               const mandatoryScope = connectorStoreReadScope?.(store);
               if (mandatoryScope?.allowed === false) return undefined;
@@ -3606,9 +3629,23 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                     ...mandatoryScope?.filters,
                   })
                 : undefined;
+              const privateMatches = new Set<string>();
               const adapter = createConnectorStoreCorpusAdapter({
                 store,
                 retrievalMode,
+                ...(personalNamesOnly ? {
+                  searchEligibility(rows) {
+                    const tiers = store.effectiveItemTiers(rows.map(row => row.sourceItem), 'names');
+                    return rows.map((row, index) => {
+                      const tier = tiers[index];
+                      if (tier === 'secret' || tier === 'unknown' || row.trustTier === 'S5') return false;
+                      if (tier === 'public_or_personal'
+                        || (tier === 'legacy' && !isSecureSensitivity({ trustDomain: store.trustDomain, trustTier: row.trustTier }))) return true;
+                      privateMatches.add(tierLedgerIdentityKey(row.sourceItem));
+                      return false;
+                    });
+                  },
+                } : {}),
                 ...(mandatoryScope?.allowed === true && mandatoryScope.accountScope
                   ? { accountScope: mandatoryScope.accountScope }
                   : searchRequest.accountScope ? { accountScope: searchRequest.accountScope } : {}),
@@ -3637,6 +3674,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 store,
                 searchRequest,
                 result,
+                privateMatches,
                 readScopeSignature,
                 scope: {
                   corpusId: store.corpusId,
@@ -3682,165 +3720,198 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               }] as const);
             })));
             const tagged = [...taggedByHit.values()];
-            // One tier-ledger snapshot judges every tier's hits together, and
-            // a single pinned corpus (`all_tiers: false`) too: an item whose
-            // copy here is no longer current (re-tiered, Secret) is never
-            // returned, whatever the store's own filter says.
-            const visible = new Set(options.sourceIndexVisibilityGate
-              ? options.sourceIndexVisibilityGate(tagged)
-              : tagged);
-            const verdictScopes = new Map<string, TierVisibilityScope & { corpusIds: Set<string> }>();
-            const unreadCorpora = new Set<string>();
-            for (const { store } of runs) {
-              try {
-                const ledger = store.governingTierLedger();
-                if (!ledger) continue;
-                const scope = verdictScopes.get(ledger.dbPath);
-                if (scope) scope.corpusIds.add(store.corpusId);
-                else verdictScopes.set(ledger.dbPath, { ledger, corpusIds: new Set([store.corpusId]) });
-              } catch {
-                unreadCorpora.add(store.corpusId);
+            // A cross-source search defers every names, grant and scope check until all ranked reads settle.
+            return () => {
+              // One tier-ledger snapshot judges every tier's hits together, and
+              // a single pinned corpus (`all_tiers: false`) too: an item whose
+              // copy here is no longer current (re-tiered, Secret) is never
+              // returned, whatever the store's own filter says.
+              const visible = new Set(options.sourceIndexVisibilityGate
+                ? options.sourceIndexVisibilityGate(tagged)
+                : tagged);
+              const verdictScopes = new Map<string, TierVisibilityScope & { corpusIds: Set<string> }>();
+              const unreadCorpora = new Set<string>();
+              for (const { store } of runs) {
+                try {
+                  const ledger = store.governingTierLedger();
+                  if (!ledger) continue;
+                  const scope = verdictScopes.get(ledger.dbPath);
+                  if (scope) scope.corpusIds.add(store.corpusId);
+                  else verdictScopes.set(ledger.dbPath, { ledger, corpusIds: new Set([store.corpusId]) });
+                } catch {
+                  unreadCorpora.add(store.corpusId);
+                }
               }
-            }
-            const privateNames = new Set<(typeof tagged)[number]>();
-            // Secret, pending deletion and unverified names are withheld from every caller.
-            const hiddenNames = new Set(tagged.filter(hit => unreadCorpora.has(hit.corpusId)));
-            for (const scope of verdictScopes.values()) {
-              const governed = tagged.filter(hit => scope.corpusIds.has(hit.corpusId));
-              try {
-                const verdicts = visibilityHere(effectiveItemVerdicts(() => [scope], governed.map(hit => ({
-                  ...hit.sourceItem, corpusId: hit.corpusId, privateAtAnswer: false, layer: 'names' as const,
-                }))));
-                governed.forEach((hit, index) => {
-                  const verdict = verdicts[index]!;
-                  if (verdict.tier === 'secret' || verdict.tier === 'unknown' || verdict.pendingDeletion) hiddenNames.add(hit);
-                  else if (verdict.tier === 'private') privateNames.add(hit);
-                });
-              } catch {
-                // Only this ledger's names fail closed; other corpora keep their verdicts.
-                for (const hit of governed) hiddenNames.add(hit);
+              // Legacy hits without a names verdict keep their stored sensitivity.
+              const privateNames = new Set(tagged.filter(hit => hit.trustTier === undefined
+                || isSecureSensitivity({ trustDomain: hit.trustDomain, trustTier: hit.trustTier })));
+              // Secret, pending deletion and unverified names are withheld from every caller.
+              const hiddenNames = new Set(tagged.filter(hit => unreadCorpora.has(hit.corpusId)));
+              for (const scope of verdictScopes.values()) {
+                const governed = tagged.filter(hit => scope.corpusIds.has(hit.corpusId));
+                try {
+                  const verdicts = visibilityHere(effectiveItemVerdicts(() => [scope], governed.map(hit => ({
+                    ...hit.sourceItem, corpusId: hit.corpusId, privateAtAnswer: false, layer: 'names' as const,
+                  }))));
+                  governed.forEach((hit, index) => {
+                    const verdict = verdicts[index]!;
+                    if (verdict.tier === 'secret' || verdict.tier === 'unknown' || verdict.pendingDeletion
+                      || (personalNamesOnly && verdict.gone)) hiddenNames.add(hit);
+                    else if (verdict.tier === 'private') privateNames.add(hit);
+                    // A whole item can live in Private solely because of its body.
+                    else if (personalNamesOnly && verdict.tier === 'public_or_personal'
+                      && hit.trustTier !== undefined && hit.trustTier !== 'S5') privateNames.delete(hit);
+                  });
+                } catch {
+                  // Only this ledger's names fail closed; other corpora keep their verdicts.
+                  for (const hit of governed) hiddenNames.add(hit);
+                }
               }
-            }
-            // Names are at least as private as their ledger verdict and the
-            // existing stored sensitivity. A hit with no tier is Private too
-            // (every connector-store hit carries one).
-            const hitIsPrivate = (hit: (typeof tagged)[number]): boolean => privateNames.has(hit) || hit.trustTier === undefined
-              || isSecureSensitivity({ trustDomain: hit.trustDomain, trustTier: hit.trustTier });
-            // A search that read no secure_local store did not ask for Private
-            // results, so a Personal store's row that is Private by its own
-            // tier (an S4 row a lane placed there) is withheld from it, as
-            // olympus_search withholds it: counted, never listed. A search
-            // that did read a secure_local store already returns Private
-            // titles under local_only, and returns this one the same way.
-            const searchedSecureLocal = runs.some((run) => run.store.trustDomain === 'secure_local');
-            const secretLocations = tiered
-              ? options.secretLocationSearch?.(searchRequest.query, runs.map((run) => run.scope)) ?? []
-              : [];
-            const pendingPrivacy = readPendingPrivacyItems(options);
-            const released = runs.map(run => deliverCorpusSearch([run.result]));
-            let privateTierWithheld = 0;
-            const perRun = released.map(result => result.hits.flatMap(hit => {
-              const taggedHit = taggedByHit.get(hit)!;
-              if (!visible.has(taggedHit) || hiddenNames.has(taggedHit)) return [];
-              if (!searchedSecureLocal && hitIsPrivate(taggedHit)) {
-                privateTierWithheld += 1;
-                return [];
+              const searchedSecureLocal = runs.some((run) => run.store.trustDomain === 'secure_local');
+              const secretLocations = tiered
+                ? options.secretLocationSearch?.(searchRequest.query, runs.map((run) => run.scope)) ?? []
+                : [];
+              const pendingPrivacy = readPendingPrivacyItems(options);
+              const released = runs.map(run => deliverCorpusSearch([run.result]));
+              const withheld = new Set(runs.flatMap(run => [...run.privateMatches]));
+              const perRun = released.map(result => result.hits.flatMap(hit => {
+                const taggedHit = taggedByHit.get(hit)!;
+                if (!visible.has(taggedHit) || hiddenNames.has(taggedHit)) return [];
+                if ((personalNamesOnly || !searchedSecureLocal) && privateNames.has(taggedHit)) {
+                  withheld.add(tierLedgerIdentityKey(taggedHit.sourceItem));
+                  return [];
+                }
+                return [taggedHit];
+              }));
+              // Round-robin across tiers, so a full page from one tier cannot
+              // starve another, then the request's own bound.
+              const merged: typeof tagged = [];
+              for (let rank = 0; merged.length < searchRequest.maxResults && perRun.some((hits) => hits.length > rank); rank += 1) {
+                for (const hits of perRun) {
+                  const hit = hits[rank];
+                  if (hit && merged.length < searchRequest.maxResults) merged.push(hit);
+                }
               }
-              return [taggedHit];
-            }));
-            // Round-robin across tiers, so a full page from one tier cannot
-            // starve another, then the request's own bound.
-            const merged: typeof tagged = [];
-            for (let rank = 0; merged.length < searchRequest.maxResults && perRun.some((hits) => hits.length > rank); rank += 1) {
-              for (const hits of perRun) {
-                const hit = hits[rank];
-                if (hit && merged.length < searchRequest.maxResults) merged.push(hit);
-              }
-            }
-            const hits = tiered ? merged : perRun[0]!;
-            const locatorsExposed = hits.some((hit) => (
-              Object.prototype.hasOwnProperty.call(hit, 'locator')
-            ));
-            const safeResult = {
-              kind: 'source_index_search',
-              corpus_id: connectorStore.corpusId,
-              retrieval_source: 'local_index',
-              // A hit's own tier is retrieval-internal (router.ts): not returned.
-              hits: hits.map(({ corpusId: hitCorpusId, trustDomain: _hitTrustDomain, trustTier: _hitTrustTier, keywordLeader: _hitKeywordLeader, newestInStore: _hitNewestInStore, pinAppended: _hitPinAppended, ...hit }) => (
-                addSelectedItemToSearchHit(hitCorpusId, hit)
-              )),
-              ...(secretLocations.length > 0
-                ? {
-                    // Location only, beside the hits: never content.
-                    secret_locations: secretLocations.map((location) => ({
-                      source: location.source,
-                      ref: location.ref,
-                      ...(location.locator ? { locator: location.locator } : {}),
-                      ...(location.title ? { title: location.title } : {}),
-                      finding_kinds: [...location.findingKinds],
-                    })),
+              const hits = merged;
+              const withheldChildIdentifiers = new Set<typeof hits[number]>();
+              for (const { store } of runs) {
+                const governed = hits.filter(hit => hit.corpusId === store.corpusId);
+                if (governed.length === 0) continue;
+                try {
+                  const children = store.childrenWithWithheldSearchIdentifiers(governed.map(hit => hit.sourceItem), !personalNamesOnly);
+                  for (const hit of governed) {
+                    if (children.has(tierLedgerIdentityKey(hit.sourceItem))) withheldChildIdentifiers.add(hit);
                   }
-                : {}),
-              audit: {
-                request_id: `${connectorStore.corpusId}:connector-store-search`,
+                } catch {
+                  // If parent names cannot be checked, only release the hit's own title.
+                  for (const hit of governed) withheldChildIdentifiers.add(hit);
+                }
+              }
+              const releasedHits = hits.map((rankedHit) => {
+                const { corpusId: hitCorpusId, trustDomain: _hitTrustDomain, trustTier: _hitTrustTier, keywordLeader: _hitKeywordLeader, newestInStore: _hitNewestInStore, pinAppended: _hitPinAppended, ...hit } = rankedHit;
+                if (!withheldChildIdentifiers.has(rankedHit)) return addSelectedItemToSearchHit(hitCorpusId, hit);
+                const { family, provider, accountScope } = hit.sourceItem;
+                const title = hit.provenance?.citation?.title;
+                const sourceItem = { family, provider, accountScope };
+                return {
+                  sourceItem,
+                  provenance: { sourceItem, citation: { sourceLabel: provider, ...(title ? { title } : {}) } },
+                  score: hit.score,
+                  rawExposed: false,
+                };
+              });
+              const locatorsExposed = releasedHits.some((hit) => (
+                Object.prototype.hasOwnProperty.call(hit, 'locator')
+              ));
+              const safeResult = {
+                kind: 'source_index_search',
+                corpus_id: connectorStore.corpusId,
                 retrieval_source: 'local_index',
-                queries_attempted: runs.length,
-                metadata_hits: hits.length,
-                items_returned: hits.length,
-                latency_ms: runs.reduce((total, run) => total + run.result.latencyMs, 0),
-                ...(tiered ? { searched_corpora: runs.map((run) => run.store.corpusId) } : {}),
-                ...(searchRequest.explicitEmptyChatScope
-                  ? {}
-                  : { lane_audits: released.flatMap(result => result.laneAudits ?? []) }),
-                raw_source_exposed: false,
-                source_text_returned: false,
-                ...(searchRequest.locatorsRequested ? { locators_requested: true } : {}),
-                ...(privateTierWithheld > 0 ? { private_tier_withheld: privateTierWithheld } : {}),
-                // A count only (local callers alone reach this route): the
-                // plugin turns it into the local privacy-backlog note.
-                ...(pendingPrivacy !== undefined && pendingPrivacy > 0 ? { pending_privacy_items: pendingPrivacy } : {}),
-              },
-              policy: {
-                raw_source_exposed: false,
-                source_text_returned: false,
-                source_packets_exposed: false,
-                // Decided from the hits' own sensitivity before their tier is
-                // stripped, not from store domains alone.
-                local_only: searchRequest.explicitEmptyChatScope
-                  || searchedSecureLocal
-                  || hits.some(hitIsPrivate),
-                // The most private tier this search read, not the named
-                // corpus's: a tiered result may carry Private hits.
-                trust_domain: mostPrivateTrustDomain(runs.map((run) => run.store.trustDomain)),
-                ...(locatorsExposed
-                  ? { locators_exposed: true, locator_release: 'explicit_request' as const }
+                // A hit's own tier is retrieval-internal (router.ts): not returned.
+                hits: releasedHits,
+                ...(secretLocations.length > 0
+                  ? {
+                      // Location only, beside the hits: never content.
+                      secret_locations: secretLocations.map((location) => ({
+                        source: location.source,
+                        ref: location.ref,
+                        ...(location.locator ? { locator: location.locator } : {}),
+                        ...(location.title ? { title: location.title } : {}),
+                        finding_kinds: [...location.findingKinds],
+                      })),
+                    }
                   : {}),
-              },
+                audit: {
+                  request_id: `${connectorStore.corpusId}:connector-store-search`,
+                  retrieval_source: 'local_index',
+                  queries_attempted: runs.length,
+                  metadata_hits: hits.length,
+                  items_returned: hits.length,
+                  latency_ms: runs.reduce((total, run) => total + run.result.latencyMs, 0),
+                  ...(tiered ? { searched_corpora: runs.map((run) => run.store.corpusId) } : {}),
+                  ...(searchRequest.explicitEmptyChatScope
+                    ? {}
+                    : { lane_audits: released.flatMap(result => result.laneAudits ?? []) }),
+                  raw_source_exposed: false,
+                  source_text_returned: false,
+                  ...(searchRequest.locatorsRequested ? { locators_requested: true } : {}),
+                  ...(withheld.size > 0 ? { private_tier_withheld: withheld.size } : {}),
+                  // A count only (local callers alone reach this route): the
+                  // plugin turns it into the local privacy-backlog note.
+                  ...(pendingPrivacy !== undefined && pendingPrivacy > 0 ? { pending_privacy_items: pendingPrivacy } : {}),
+                },
+                policy: {
+                  raw_source_exposed: false,
+                  source_text_returned: false,
+                  source_packets_exposed: false,
+                  // Decided from the hits' own sensitivity before their tier is
+                  // stripped, not from store domains alone.
+                  local_only: searchRequest.explicitEmptyChatScope
+                    || searchedSecureLocal
+                    || hits.some(hit => privateNames.has(hit)),
+                  // The most private tier this search read, not the named
+                  // corpus's: a tiered result may carry Private hits.
+                  trust_domain: mostPrivateTrustDomain(runs.map((run) => run.store.trustDomain)),
+                  ...(locatorsExposed
+                    ? { locators_exposed: true, locator_release: 'explicit_request' as const }
+                    : {}),
+                },
+              };
+              assertNoRawEmailFields(safeResult);
+              // A query embedding or another tier's search may have awaited
+              // while the account or its approval changed.
+              if (runs.some((run) => JSON.stringify(connectorStoreReadScope?.(run.store)) !== run.readScopeSignature)) {
+                throw new EmailSourceWorkerError(
+                  403,
+                  'source_index_policy_violation',
+                  'The source read scope changed during search. Retry under the current scope.',
+                );
+              }
+              return safeResult;
             };
-            assertNoRawEmailFields(safeResult);
-            // A query embedding or another tier's search may have awaited
-            // while the account or its approval changed.
-            if (runs.some((run) => JSON.stringify(connectorStoreReadScope?.(run.store)) !== run.readScopeSignature)) {
-              throw new EmailSourceWorkerError(
-                403,
-                'source_index_policy_violation',
-                'The source read scope changed during search. Retry under the current scope.',
-              );
+          };
+          if (corpusIds === undefined) return json((await prepare(record))());
+          if (record.corpus_id !== undefined || !Array.isArray(corpusIds) || !corpusIds.length
+            || !corpusIds.every(id => typeof id === 'string' && id.trim()) || new Set(corpusIds).size !== corpusIds.length) {
+            throw new EmailSourceWorkerError(400, 'invalid_request', 'Supply distinct corpus_ids for a multi-source search.');
+          }
+          const prepared = await Promise.allSettled(corpusIds.map(corpus_id => prepare({ ...record, corpus_id })));
+          // Each release runs synchronously on this turn, before any results leave the worker.
+          let firstFailure: unknown;
+          const results = prepared.map(outcome => {
+            if (outcome.status === 'rejected') {
+              firstFailure ??= outcome.reason;
+            } else {
+              try {
+                return outcome.value();
+              } catch (error) {
+                firstFailure ??= error;
+              }
             }
-            return json(safeResult);
-          }
-          if (!corpusId) {
-            throw new EmailSourceWorkerError(
-              400,
-              'invalid_request',
-              `corpus_id must be one of: ${sourceIndexSearchCorpusIds(connectorStores).join(', ')}.`,
-            );
-          }
-          throw new EmailSourceWorkerError(
-            501,
-            'source_index_search_not_supported',
-            `The connector store for ${corpusId} is not mounted.`,
-          );
+            return null;
+          });
+          if (results.every(result => result === null)) throw firstFailure;
+          return json({ results });
         }
 
         if (request.method === 'POST' && url.pathname === `${basePath}/source/index/embed`) {
