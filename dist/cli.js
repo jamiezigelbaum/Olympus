@@ -166117,6 +166117,26 @@ function knownStorePaths(context) {
   const paths = context.storePaths ?? lifecycleStorePaths(context);
   return [...new Set(paths)].filter((path) => path !== ":memory:" && existsSync94(path));
 }
+function storeItemColumns(db) {
+  return new Set(db.query("PRAGMA table_xinfo(items)").all().map((column) => column.name));
+}
+function storeItemIdentityPredicate(identity, columns, prefix = "") {
+  const keyed = columns.has("normalized_conversation");
+  const conversation = normalizeConversationId(identity.providerConversationId);
+  return {
+    sql: `${prefix}tombstoned = 0 AND ${prefix}provider = ? AND ${prefix}account_scope = ? AND ${prefix}provider_item_id = ?
+      AND COALESCE(${prefix}provider_conversation_id, '') = ?${keyed ? ` AND ${prefix}normalized_conversation = ?` : ""}`,
+    params: [identity.provider, identity.accountScope, identity.providerItemId, conversation, ...keyed ? [conversation] : []]
+  };
+}
+function matchStoreIdentity(db, identity) {
+  const predicate = storeItemIdentityPredicate(identity, storeItemColumns(db));
+  return db.query(`
+    SELECT provider, family, account_scope, provider_item_id, provider_conversation_id, local_item_id FROM items
+    WHERE ${predicate.sql}
+    LIMIT 5
+  `).all(...predicate.params);
+}
 function matchStore2(dbPath, needle) {
   const db = new Database28(dbPath, { readonly: true });
   try {
@@ -166125,12 +166145,7 @@ function matchStore2(dbPath, needle) {
         SELECT provider, family, account_scope, provider_item_id, provider_conversation_id, local_item_id FROM items
         WHERE tombstoned = 0 AND (LOWER(locator_uri) = LOWER(?) OR provider_item_id = ?)
         LIMIT 5
-      `).all(needle.locator, needle.locator) : db.query(`
-        SELECT provider, family, account_scope, provider_item_id, provider_conversation_id, local_item_id FROM items
-        WHERE tombstoned = 0 AND provider = ? AND account_scope = ? AND provider_item_id = ?
-          AND COALESCE(provider_conversation_id, '') = ?
-        LIMIT 5
-      `).all(needle.identity.provider, needle.identity.accountScope, needle.identity.providerItemId, needle.identity.providerConversationId ?? "");
+      `).all(needle.locator, needle.locator) : matchStoreIdentity(db, needle.identity);
     if (rows.length === 0)
       return [];
     const bound = storeBoundLedger(db, dbPath);
@@ -166247,7 +166262,7 @@ function withStore(dbPath, fallback, run) {
   try {
     db = new Database28(dbPath, { readonly: true });
     db.exec("PRAGMA busy_timeout = 10000;");
-    const columns = new Set(db.query("PRAGMA table_info(items)").all().map((column) => column.name));
+    const columns = storeItemColumns(db);
     if (!columns.has("provider_item_id"))
       return fallback;
     return run(db, columns);
@@ -186936,12 +186951,7 @@ function recentRows(limit, context, filter, before, beforeItem) {
   for (const record of ordered) {
     const identity = identityOfRecord2(record);
     for (const dbPath of stores) {
-      const row = withStore(dbPath, undefined, (db, columns) => db.query(`
-        SELECT ${selectColumns(columns)} FROM items
-        WHERE tombstoned = 0 AND provider = ? AND account_scope = ? AND provider_item_id = ?
-          AND COALESCE(provider_conversation_id, '') = ?
-        LIMIT 1
-      `).get(identity.provider, identity.accountScope, identity.providerItemId, identity.providerConversationId ?? "") ?? undefined);
+      const row = readStoredRow(dbPath, identity);
       if (row) {
         rows.push(row);
         break;
@@ -186952,13 +186962,15 @@ function recentRows(limit, context, filter, before, beforeItem) {
 }
 function previewOf(identity, context) {
   for (const dbPath of knownStorePaths(context)) {
-    const text = withStore(dbPath, undefined, (db) => db.query(`
-      SELECT c.bounded_text AS text FROM items i JOIN chunks c ON c.item_pk = i.item_pk
-      WHERE i.tombstoned = 0 AND i.provider = ? AND i.account_scope = ? AND i.provider_item_id = ?
-        AND COALESCE(i.provider_conversation_id, '') = ?
-      ORDER BY c.chunk_index
-      LIMIT 1
-    `).get(identity.provider, identity.accountScope, identity.providerItemId, identity.providerConversationId ?? "")?.text);
+    const text = withStore(dbPath, undefined, (db, columns) => {
+      const predicate = storeItemIdentityPredicate(identity, columns, "i.");
+      return db.query(`
+        SELECT c.bounded_text AS text FROM items i JOIN chunks c ON c.item_pk = i.item_pk
+        WHERE ${predicate.sql}
+        ORDER BY c.chunk_index
+        LIMIT 1
+      `).get(...predicate.params)?.text;
+    });
     const trimmed = text?.trim();
     if (trimmed)
       return trimmed.length > OWNER_ITEM_PREVIEW_MAX ? `${trimmed.slice(0, OWNER_ITEM_PREVIEW_MAX).trimEnd()}…` : trimmed;
@@ -187145,12 +187157,7 @@ function setOwnerTierItem(input, context = {}) {
 }
 function storedRowFor(identity, located, context) {
   for (const dbPath of knownStorePaths(context)) {
-    const row = withStore(dbPath, undefined, (db, columns) => db.query(`
-      SELECT ${selectColumns(columns)} FROM items
-      WHERE tombstoned = 0 AND provider = ? AND account_scope = ? AND provider_item_id = ?
-        AND COALESCE(provider_conversation_id, '') = ?
-      LIMIT 1
-    `).get(identity.provider, identity.accountScope, identity.providerItemId, identity.providerConversationId ?? "") ?? undefined);
+    const row = readStoredRow(dbPath, identity);
     if (row)
       return row;
   }
@@ -187165,6 +187172,16 @@ function storedRowFor(identity, located, context) {
     sender_id: null,
     locator_uri: null
   };
+}
+function readStoredRow(dbPath, identity) {
+  return withStore(dbPath, undefined, (db, columns) => {
+    const predicate = storeItemIdentityPredicate(identity, columns);
+    return db.query(`
+      SELECT ${selectColumns(columns)} FROM items
+      WHERE ${predicate.sql}
+      LIMIT 1
+    `).get(...predicate.params) ?? undefined;
+  });
 }
 var OWNER_ITEM_DEFAULT_LIMIT = 20, OWNER_ITEM_MAX_LIMIT = 50, OWNER_ITEM_QUERY_MAX = 200, OWNER_ITEM_PREVIEW_MAX = 600, ITEM_ID_PREFIX = "oti_";
 var init_tier_owner_items = __esm(() => {

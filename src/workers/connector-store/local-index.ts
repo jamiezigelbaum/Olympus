@@ -21418,7 +21418,7 @@ function normalizeSenderMetadata(
   };
 }
 
-function normalizeConversationId(value: string | undefined): string {
+export function normalizeConversationId(value: string | undefined): string {
   return value ?? '';
 }
 
