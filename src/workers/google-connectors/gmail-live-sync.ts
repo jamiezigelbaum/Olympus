@@ -27,6 +27,7 @@ import {
   type ConnectorStoreSyncSummary,
   type LocalConnectorStore,
 } from '../connector-store/index.ts';
+import { verifiedObservationConnectorId } from '../connector-store/local-index.ts';
 import {
   createLaneTieredStoreSet,
   tieredLaneReceiptCounts,
@@ -83,8 +84,8 @@ function gmailConfirmationReserve(dailyLimit: number): number {
 
 const CHECKPOINT_PREFIX = 'gmp1:';
 const MAX_CHECKPOINT_CHARS = 16_384;
-// The older Private-only walk must replay from the head to see Personal copies.
-const CONFIRMATION_SCOPE_PREFIX = 'private-confirmation-v2:';
+// Both earlier walks could accept a message without checking its body.
+const CONFIRMATION_SCOPE_PREFIX = 'private-confirmation-v3:';
 /**
  * The connector's own hard ceiling. The reconcile task passes no maxItems to
  * the spine — that is what makes the traversal a snapshot candidate — but the
@@ -307,8 +308,7 @@ export function createGmailConnectorStoreSyncHandler(
   const env = options.env ?? process.env;
   const config = options.config ?? defaultGmailLiveSyncConfig(env);
   const account = options.account?.trim() || accountFromGoogleHandle(options.credentialHandle);
-  const connectorId = gmailCursorConnectorId(account, options.scopeApproval);
-  const scopeTag = options.scopeApproval ? connectorId.slice(GMAIL_SCOPED_CONNECTOR_PREFIX.length) : undefined;
+  const { connectorId, previousId, scopeTag } = gmailScopeKeys(account, options.scopeApproval);
   if (options.secureEmbeddingProvider && !isApprovedSecureSourceEmbeddingProvider(options.secureEmbeddingProvider)) {
     throw new Error('Gmail secure_local embeddings require a local/private or approved Venice embedding provider.');
   }
@@ -323,8 +323,15 @@ export function createGmailConnectorStoreSyncHandler(
   // current approval's owner to retained content in either tier. Confirming
   // Personal mail lets that owner travel with the body if the judge raises it.
   const stores = [options.internalStore, options.secureStore];
-  const lacksCurrentOwner = (store: LocalConnectorStore, identity: RawItem['identity']) =>
-    !store.itemOwnerPresent(identity, connectorId, 'observed');
+  const needsConfirmation = (store: LocalConnectorStore, identity: RawItem['identity']) => {
+    if (store.itemOwnerPresent(identity, connectorId, 'observed')) return false;
+    if (!store.itemMatchesSearchFilters(identity.localItemId, account, { provider: GMAIL_PROVIDER, observedConnectorId: connectorId })) return true;
+    // Ordinary ingestion already passed. Carry its permission across future
+    // tier moves, which replace the original run links, without a metadata GET.
+    options.assertScopeCurrent?.();
+    store.observeStoredItemOwner(identity, connectorId);
+    return false;
+  };
   const storedItem = (providerItemId: string, confirming = false) => {
     const identity = { family: 'email' as const, provider: GMAIL_PROVIDER, accountScope: account, providerItemId, localItemId: `${account}:${providerItemId}` };
     const copies = stores.flatMap(store => {
@@ -335,7 +342,7 @@ export function createGmailConnectorStoreSyncHandler(
     return {
       hasContent: copies.some(({ content }) => content.chunkCount > 0),
       ...(confirming
-        && copies.some(({ store, content }) => content.chunkCount > 0 && lacksCurrentOwner(store, identity))
+        && copies.some(({ store, content }) => content.chunkCount > 0 && needsConfirmation(store, identity))
         ? { needsScopeObservation: true } : {}),
     };
   };
@@ -374,7 +381,7 @@ export function createGmailConnectorStoreSyncHandler(
     });
 
   const tierSet = options.tierSet ?? createLaneTieredStoreSet({
-    setId: connectorId,
+    setId: previousId,
     internalStore: options.internalStore,
     secureStore: options.secureStore,
     ...(options.publicStore
@@ -435,6 +442,9 @@ export function createGmailConnectorStoreSyncHandler(
     // its first pass and replays it to the other legs, routes each NEW message
     // by its recorded tiers, and leaves every existing message on the lane's
     // own placement. Its resume point commits only after every leg did.
+    if (previousId !== connectorId && !tierSet.ledger.listingCaughtUp(connectorId) && tierSet.ledger.listingCaughtUp(previousId)) {
+      tierSet.ledger.markListingCaughtUp(connectorId);
+    }
     const traversal = scopedTraversal(input.connector, connectorId, options.assertScopeCurrent);
     const sync = {
       fetchContent: true,
@@ -493,12 +503,12 @@ export function createGmailConnectorStoreSyncHandler(
               let observed = false;
               // A tier move may have changed which copy holds the text while the GET was in flight.
               for (const store of stores) {
-                if (!lacksCurrentOwner(store, item.identity)) continue;
+                if (!needsConfirmation(store, item.identity)) continue;
                 const text = store.releaseItemChunks(item.identity)?.chunks.map(chunk => chunk.text).join('');
                 if (!text?.trim() || !passesIngestFilter(text)) continue;
                 options.assertScopeCurrent?.();
                 store.observeStoredItemOwner(item.identity, connectorId);
-                if (!lacksCurrentOwner(store, item.identity)) observed = true;
+                if (store.itemOwnerPresent(item.identity, connectorId, 'observed')) observed = true;
               }
               if (observed) confirmed++;
             },
@@ -564,8 +574,11 @@ export function createGmailConnectorStoreSyncHandler(
       // a run committed. Before a set has committed one, fall back to the LAST
       // leg's own completed run: legs ran in order, so it is never ahead of a
       // window an earlier leg missed (the first leg's row can be).
+      // Upgrading the ownership proof preserves the ordinary traversal's watermark.
       const headStoreCursor = tierSet.committedCursor(connectorId)?.cursor
-        ?? options.secureStore.lastCompletedSyncRun(connectorId)?.cursor;
+        ?? (options.scopeApproval ? tierSet.committedCursor(previousId)?.cursor : undefined)
+        ?? options.secureStore.lastCompletedSyncRun(connectorId)?.cursor
+        ?? (options.scopeApproval ? options.secureStore.lastCompletedSyncRun(previousId)?.cursor : undefined);
       let headResume = resume.head ?? (isGmailConnectorCursor(headStoreCursor) ? headStoreCursor : undefined);
       if (resume.headRejected) warnings.push(GMAIL_RESUME_REJECTED_WARNING);
       const provenance = sourceInvocationProvenance(request.provenance);
@@ -792,12 +805,17 @@ export function gmailCursorConnectorId(
   account: string,
   scope: { generation: string; revision: string } | undefined,
 ): string {
-  if (!scope) return GMAIL_PROVIDER;
-  const digest = createHash('sha256')
+  return gmailScopeKeys(account, scope).connectorId;
+}
+
+function gmailScopeKeys(account: string, scope: { generation: string; revision: string } | undefined) {
+  if (!scope) return { connectorId: GMAIL_PROVIDER, previousId: GMAIL_PROVIDER, scopeTag: undefined };
+  const scopeTag = createHash('sha256')
     .update(`${account}\u0000${scope.generation}\u0000${scope.revision}`)
     .digest('hex')
     .slice(0, 24);
-  return `${GMAIL_SCOPED_CONNECTOR_PREFIX}${digest}`;
+  const previousId = GMAIL_SCOPED_CONNECTOR_PREFIX + scopeTag;
+  return { connectorId: verifiedObservationConnectorId(previousId), previousId, scopeTag };
 }
 
 interface DecodedGmailCheckpoint extends GmailCheckpointEnvelope {

@@ -505,7 +505,7 @@ export interface SourceSchedulerTaskStatus {
   /** Computer dashboard only; never persisted in scheduler state. */
   missing_scope_path?: string;
   /** Short maintenance hold, never persisted as a failure or provider deferral. */
-  wait_reason?: 'store_reclaim';
+  wait_reason?: 'store_reclaim' | 'owner_ask';
   id: string;
   kind: SourceSchedulerTaskKind;
   metadata_walk_role?: SourceSchedulerTask['metadataWalkRole'];
@@ -530,7 +530,7 @@ export interface SourceSchedulerTaskStatus {
 }
 
 interface SchedulerTaskState {
-  waitReason?: 'store_reclaim';
+  waitReason?: SourceSchedulerTaskStatus['wait_reason'];
   task: SourceSchedulerTask;
   source: SourceSchedulerSource;
   running: boolean;
@@ -1095,9 +1095,11 @@ export class SourceScheduler {
       if (provenance === 'scheduled'
         // The Gmail confirmation walk is backlog: it waits out an Ask like maintenance does.
         && (state.task.metadataWalkRole === 'maintenance' || state.task.kind === 'watch' || isGmailConfirmationTask(state.task)) && this.askHolds()) {
+        if (isGmailConfirmationTask(state.task)) state.waitReason = 'owner_ask';
         this.scheduleContinueWake(this.now().getTime() + SOURCE_SCHEDULER_ASK_RECHECK_MS);
         return;
       }
+      if (state.waitReason === 'owner_ask') delete state.waitReason;
       state.running = true;
       try {
         await this.runTaskSharingThread(state, at, provenance);

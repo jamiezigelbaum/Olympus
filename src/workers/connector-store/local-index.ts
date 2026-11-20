@@ -8609,12 +8609,12 @@ export class LocalConnectorStore {
 
   /** Counts retained parent copies still lacking a listing observation, for a paused confirmation walk. */
   async unobservedContentCount(provider: string, account: string, connectorId: string): Promise<number> {
+    const owner = observedOwnerPredicate(connectorId);
     const sql = `SELECT COUNT(*) AS n FROM items i
       WHERE i.provider = ? AND i.account_scope = ? AND i.tombstoned = 0 AND i.parent_local_item_id IS NULL
         AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
-        AND NOT EXISTS (SELECT 1 FROM item_owners o
-          WHERE o.item_pk = i.item_pk AND o.connector_id = ? AND o.ownership_kind = 'observed')`;
-    const params = [provider, account, connectorId];
+        AND NOT ${owner.sql}`;
+    const params = [provider, account, ...owner.params];
     const row = (offThreadReadsSupported(this.dbPath)
       ? await readInBackground(this.dbPath, { sql, params, mode: 'get' })
       : this.db.query(sql).get(...params)) as { n: number };
@@ -20842,6 +20842,41 @@ export function identityRowsSql(extraSql: string): string {
     `;
 }
 
+// A new observation namespace admits earlier ordinary ingestion only when its
+// origin is provable. Tier moves copy the keys but replace the run links. A
+// sole inherited owner still proves ingestion: confirmation could only add a
+// second key to an already-owned copy, and a move carries *all* its owners.
+const VERIFIED_OBSERVATION_PREFIX = 'verified-observation.v1:';
+
+export function verifiedObservationConnectorId(previousId: string): string {
+  return VERIFIED_OBSERVATION_PREFIX + previousId;
+}
+
+function observedOwnerPredicate(exact?: string, prefix?: string): { sql: string; params: string[] } {
+  const keys: string[] = [];
+  const params: string[] = [];
+  if (exact) {
+    keys.push('o.connector_id = ?');
+    params.push(exact);
+    if (exact.startsWith(VERIFIED_OBSERVATION_PREFIX)) {
+      keys.push(`(o.connector_id = ? AND EXISTS (
+        SELECT 1 FROM sync_runs r
+        WHERE r.sync_run_id IN (o.first_seen_sync_run_id, o.last_seen_sync_run_id)
+          AND (r.connector_id = o.connector_id OR (r.connector_id = ? AND NOT EXISTS (
+            SELECT 1 FROM item_owners other WHERE other.item_pk = o.item_pk AND other.connector_id <> o.connector_id
+          )))
+      ))`);
+      params.push(exact.slice(VERIFIED_OBSERVATION_PREFIX.length), TIER_MOVE_CONNECTOR_ID);
+    }
+  }
+  if (prefix) {
+    keys.push('substr(o.connector_id, 1, length(?)) = ?');
+    params.push(prefix, prefix);
+  }
+  return { sql: `EXISTS (SELECT 1 FROM item_owners o WHERE o.item_pk = i.item_pk
+    AND o.ownership_kind = 'observed' AND (${keys.join(' OR ')}))`, params };
+}
+
 function connectorStoreFilterSql(filters: ConnectorStoreSearchFilters | undefined): {
   sql: string;
   params: Array<string>;
@@ -20854,15 +20889,10 @@ function connectorStoreFilterSql(filters: ConnectorStoreSearchFilters | undefine
     clauses.push('AND i.provider = ?');
     params.push(normalized.provider);
   }
-  if (normalized.observedConnectorId && normalized.observedConnectorIdPrefix) {
-    clauses.push("AND EXISTS (SELECT 1 FROM item_owners scope_owner WHERE scope_owner.item_pk = i.item_pk AND (scope_owner.connector_id = ? OR substr(scope_owner.connector_id, 1, length(?)) = ?) AND scope_owner.ownership_kind = 'observed')");
-    params.push(normalized.observedConnectorId, normalized.observedConnectorIdPrefix, normalized.observedConnectorIdPrefix);
-  } else if (normalized.observedConnectorId) {
-    clauses.push("AND EXISTS (SELECT 1 FROM item_owners scope_owner WHERE scope_owner.item_pk = i.item_pk AND scope_owner.connector_id = ? AND scope_owner.ownership_kind = 'observed')");
-    params.push(normalized.observedConnectorId);
-  } else if (normalized.observedConnectorIdPrefix) {
-    clauses.push("AND EXISTS (SELECT 1 FROM item_owners scope_owner WHERE scope_owner.item_pk = i.item_pk AND substr(scope_owner.connector_id, 1, length(?)) = ? AND scope_owner.ownership_kind = 'observed')");
-    params.push(normalized.observedConnectorIdPrefix, normalized.observedConnectorIdPrefix);
+  if (normalized.observedConnectorId || normalized.observedConnectorIdPrefix) {
+    const owner = observedOwnerPredicate(normalized.observedConnectorId, normalized.observedConnectorIdPrefix);
+    clauses.push(`AND ${owner.sql}`);
+    params.push(...owner.params);
   }
   if (normalized.sourceScopeGeneration) {
     clauses.push('AND i.source_scope_generation = ?');
