@@ -43,6 +43,7 @@ import {
   type TierDecision,
   type TierKey,
 } from './tier-classifier.ts';
+import { tierSetPlannerForLedger } from './installed-tier-classification-registry.ts';
 import { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore } from './tier-ledger-path.ts';
 
 export { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore };
@@ -354,6 +355,30 @@ const AWAITING_TEXT_WHERE = `routed = 1 AND content_read = 0 AND metadata_pendin
               OR r.value GLOB 'content:sniffer:*:fail_safe:unread')))`;
 const PERSONAL_FIRST_WHERE = `routed = 1 AND content_pending = 1
         AND EXISTS (SELECT 1 FROM json_each(reasons_json) r WHERE r.value = ?)`;
+// The same predicates run on the read pool and again by primary key under the writer lock.
+const PERSONAL_LOWERING_UNCLAIMED = `rejudge_json IS NULL AND metadata_forced = 0
+  AND metadata_tier <> 'secrets' AND content_tier <> 'secrets'
+  AND decided_by NOT IN ('override', 'owner_rule')
+  AND instr(reasons_json, '"override:') = 0 AND instr(reasons_json, '"metadata:owner_rule:') = 0
+  AND NOT EXISTS (SELECT 1 FROM tier_overrides o WHERE (o.provider, o.account_scope, o.conversation_key, o.provider_item_id)
+    = (i.provider, i.account_scope, i.conversation_key, i.provider_item_id))
+  AND NOT EXISTS (SELECT 1 FROM tier_copies c WHERE (c.provider, c.account_scope, c.conversation_key, c.provider_item_id)
+    = (i.provider, i.account_scope, i.conversation_key, i.provider_item_id) AND c.copy_state = 'staged')
+  AND NOT EXISTS (SELECT 1 FROM tier_write_intents w WHERE (w.provider, w.account_scope, w.conversation_key, w.provider_item_id)
+    = (i.provider, i.account_scope, i.conversation_key, i.provider_item_id))`;
+const STORED_PERSONAL_LOWERING = `routed = 1 AND state = 'current' AND content_read = 1
+  AND metadata_pending = 0 AND content_pending = 0 AND move_attempts = 0
+  AND target_metadata_tier IS NULL AND target_content_tier IS NULL
+  AND metadata_tier IN ('public','private') AND content_tier IN ('public','private')
+  AND decided_by IN ('default','sniffer') AND instr(reasons_json, '"content:sniffer:') > 0
+  AND ${PERSONAL_LOWERING_UNCLAIMED}
+  -- A refused or abandoned move may still have zero counted failures. Its
+  -- next attempt belongs to a fresh judgment, not a replay of this receipt.
+  AND (SELECT h.decided_by FROM tier_history h WHERE (h.provider, h.account_scope, h.conversation_key, h.provider_item_id)
+    = (i.provider, i.account_scope, i.conversation_key, i.provider_item_id) ORDER BY h.history_pk DESC LIMIT 1) IS NOT 'rollback'
+  AND EXISTS (SELECT 1 FROM tier_copies c WHERE (c.provider, c.account_scope, c.conversation_key, c.provider_item_id)
+    = (i.provider, i.account_scope, i.conversation_key, i.provider_item_id)
+    AND c.copy_state = 'current' AND c.layers IN ('content','both') AND c.trust_domain = 'secure_local')`;
 export const PERSONAL_FIRST_SETTLE_CURSOR = 'personal_first_settle_after';
 export const PERSONAL_FIRST_SETTLE_DONE = 'personal_first_settle_done';
 
@@ -388,7 +413,7 @@ function* windowSteps(
           SELECT * FROM tier_items ${keyAfter}
           ORDER BY provider, account_scope, conversation_key, provider_item_id
           LIMIT ?
-        )
+        ) AS i
         WHERE ${where}
         ORDER BY provider, account_scope, conversation_key, provider_item_id
         LIMIT ?
@@ -639,7 +664,7 @@ function corpusVisibilityFromRows(rows: CorpusVisibilityRow[]): TierCorpusVisibi
     metadataLayer: !!row.metadata_layer, metadataLayerContentUnread: !!row.metadata_unread, moving: !!row.moving }));
 }
 
-export type TierLedgerRecordOutcome = 'inserted' | 'updated' | 'unchanged' | 'held_moving';
+export type TierLedgerRecordOutcome = 'inserted' | 'updated' | 'unchanged' | 'held_moving' | 'queued_move' | 'needs_placement';
 
 /** Which layer(s) of an item a store copy is searchable for. */
 export type TierCopyLayers = 'metadata' | 'content' | 'both';
@@ -1223,7 +1248,18 @@ export class TierLedger {
   ): TierLedgerRecordOutcome {
     // A routed item's stored placement is its copy rows, owned by the router;
     // a legacy-path observation of it must not relabel them.
-    if (existing?.routed) stored = undefined;
+    if (existing?.routed) {
+      stored = undefined;
+      if (judgedPersonal(next)) {
+        // A store can observe the same item outside a routed listing, including
+        // a late extraction. Never replace an owner's decision or an active write.
+        if (!this.db.query(`SELECT 1 FROM tier_items i WHERE provider = ? AND account_scope = ?
+          AND conversation_key = ? AND provider_item_id = ? AND ${PERSONAL_LOWERING_UNCLAIMED}`).get(...idParams(identity))) return 'unchanged';
+        if (holdSnifferLowering(existing, next)) return 'unchanged';
+        const outcome = this.queuePersonalPlacement(identity, existing, next, tierSetPlannerForLedger(this.dbPath));
+        if (outcome) return outcome;
+      }
+    }
     const decidedAt = this.now().toISOString();
     const reasonsJson = JSON.stringify(next.reasons);
     const state: TierLedgerState = next.metadataPending || next.contentPending ? 'pending' : 'current';
@@ -1897,6 +1933,50 @@ export class TierLedger {
   /** `listPersonalFirstWindow`'s reads, for a read worker (loop-pass.ts). */
   listPersonalFirstWindowSteps(options: { limit?: number; after?: TierLedgerIdentity; examine?: number } = {}): Generator<LedgerRead, TierLedgerWindow, unknown> {
     return windowSteps(PERSONAL_FIRST_WHERE, [PERSONAL_FIRST_REASON], options);
+  }
+
+  storedPersonalLoweringSteps(options: { limit: number; after?: TierLedgerIdentity }): Generator<LedgerRead, TierLedgerWindow, unknown> {
+    return windowSteps(STORED_PERSONAL_LOWERING, [], { ...options, examine: WINDOW_SLICE_ROWS });
+  }
+
+  queueStoredPersonalLowering(identity: TierLedgerIdentity, placementFor: (decision: TierDecision) => TierPlacementPlan): boolean {
+    return this.db.transaction(() => {
+      const row = this.db.query(`SELECT * FROM tier_items i WHERE provider = ? AND account_scope = ?
+        AND conversation_key = ? AND provider_item_id = ? AND ${STORED_PERSONAL_LOWERING}`).get(...idParams(identity)) as TierItemRow | null;
+      if (!row) return false;
+      const record = recordFromRow(row);
+      if (!judgedPersonal(record) || record.reasons.filter(reason => reason.startsWith('content:sha256:')).length !== 1) return false;
+      return this.queuePersonalPlacement(identity, record, record, placementFor, true) === 'queued_move';
+    })();
+  }
+
+  /** Called inside the decision transaction. The mover owns every store write and receipt check. */
+  private queuePersonalPlacement(
+    identity: TierLedgerIdentity, existing: TierLedgerRecord, next: EffectiveRow,
+    placementFor: ((decision: TierDecision) => TierPlacementPlan) | undefined, loweringOnly = false,
+  ): 'queued_move' | 'needs_placement' | undefined {
+    const copies = this.copies(identity).filter(copy => copy.state === 'current');
+    const source = copyServingLayer(copies, 'content');
+    if (!source || trustDomainRank(source.trustDomain) <= tierRank(maxTier(next.contentTier, next.metadataTier))) return;
+    const decision = decisionOfRow(next);
+    let raise = false;
+    if (placementFor) {
+      const plan = placementFor(decision);
+      const destination = copyServingLayer(plan.copies, 'content');
+      if (!destination || trustDomainRank(destination.trustDomain) >= trustDomainRank(source.trustDomain)) return;
+      raise = placementIsRaise(copies, plan.copies);
+    } else {
+      // A standalone leg can recognize a held split: this item's own names
+      // already occupy the target tier for both layers. For other layouts
+      // only the mounted set can decide whether this is a lowering or a raise.
+      const names = copyServingLayer(copies, 'metadata');
+      if (next.metadataTier !== next.contentTier || !names || trustDomainRank(names.trustDomain) !== tierRank(next.contentTier)) {
+        return 'needs_placement';
+      }
+    }
+    if (loweringOnly && raise) return;
+    this.queueMoveRow(identity, existing, decision, { hide: raise, decidedAt: this.now().toISOString() });
+    return 'queued_move';
   }
 
   /** Items waiting on an unanswered sniffer question, oldest first. */
@@ -5554,6 +5634,17 @@ export function holdSnifferLowering(
   return process.env.OLYMPUS_TIER_SNIFFER_HOLD_LOWERING === '1'
     && current.state === 'current' && current.contentTier === 'secure' && next.contentTier !== 'secrets'
     && (next.contentTier === 'private' || (current.metadataTier === 'secure' && next.metadataTier === 'private'));
+}
+
+function judgedPersonal(row: EffectiveRow): boolean {
+  return row.contentRead && !row.contentPending && !row.metadataPending && !row.metadataForced
+    && tierRank(maxTier(row.metadataTier, row.contentTier)) <= tierRank('private')
+    && row.decidedBy !== 'owner_rule' && row.decidedBy !== 'override'
+    && row.reasons.some(reason => reason.startsWith('content:sniffer:'))
+    && !row.reasons.some(reason => reason.startsWith('metadata:owner_rule:') || reason.startsWith('override:')
+      || reason.includes(':fail_safe:') || reason.includes(':record_held:') || reason.endsWith(':unresolved:0.00')
+      || reason.endsWith(':injection:classifier_instruction:0.00') || reason.endsWith(':union:decision:failed')
+      || isOpenSnifferReason(reason, 'content'));
 }
 
 /** A settled row as the classifier decision the P1b router takes. */

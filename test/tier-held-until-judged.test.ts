@@ -376,6 +376,30 @@ test('an edit of a cleared Personal item is held with its new text, and the old 
   expect(f.stores.internal.searchItems('Quietnewmarker', 10)).toEqual([]);
 });
 
+test.each(['secure_local', 'internal'] as const)('a later %s listing that judges held text Personal queues its lowering', async legacyDomain => {
+  const f = lane({ ...HOLD, sniffer: waiting });
+  const spec = { id: 'listed-again', name: 'Picnic list', text: ORDINARY, legacyDomain };
+  const identity = identityOf(spec.id);
+  await syncOne(f, spec);
+  expect(f.ledger.getCurrent(identity)).toMatchObject({ routed: true, state: 'pending', contentPending: true });
+  expect(f.ledger.copies(identity)).toContainEqual(expect.objectContaining({
+    trustDomain: 'secure_local', layers: 'content', state: 'current', embedHold: true,
+  }));
+
+  // A standalone observation can also bring a newly judged edit.
+  const text = legacyDomain === 'secure_local' ? ORDINARY : 'Bring oranges to the revised picnic.';
+  await f.stores.secure_local.syncFromConnector(fixtureConnector(() => [{ ...spec, text, version: 'v2' }]), {
+    fetchContent: true, placement: FIXTURE_PLACEMENT, tierClassification: { ...HOLD, sniffer: JUDGED_PERSONAL_SNIFFER },
+  });
+  const row = f.ledger.getCurrent(identity)!;
+  expect(row).toMatchObject({ decidedBy: 'default', contentRead: true, contentPending: false });
+  expect(row.reasons.filter(reason => reason.startsWith('content:sha256:'))).toHaveLength(1);
+  expect(row.reasons).toContain(`content:sniffer:${JUDGED_PERSONAL_SNIFFER.id}:ordinary:0.99`);
+  expect(row).toMatchObject({ state: 'moving', targetContentTier: 'private', targetMetadataTier: 'private' });
+  await moveTieredItem({ set: f.set, identity, target: { contentTier: 'private', metadataTier: 'private' } });
+  expect(f.stores.internal.localContent(localId(spec.id))?.chunks.join('')).toBe(text);
+});
+
 test('a Personal verdict moves the content down; a Private verdict keeps it in Private', async () => {
   const f = lane({ ...HOLD, sniffer: waiting });
   await f.set.sync(fixtureConnector(() => [
