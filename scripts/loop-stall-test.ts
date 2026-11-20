@@ -720,7 +720,7 @@ function readVmstat(): Record<string, number> {
  */
 function startThreadTimeline(pid: number, out: string): { stop(): Promise<void> } | undefined {
   if (process.platform !== 'linux') return undefined;
-  const child = Bun.spawn([process.execPath, join(import.meta.dir, 'front-thread-timeline.ts'), '--pid', String(pid), '--out', out, '--seconds', '14400'], { stdout: 'ignore', stderr: 'ignore' });
+  const child = Bun.spawn([process.execPath, join(import.meta.dir, 'front-thread-timeline.ts'), '--pid', String(pid), '--out', out, '--seconds', '14400', '--fd-names'], { stdout: 'ignore', stderr: 'ignore' });
   return { stop: async () => { child.kill('SIGTERM'); await child.exited; } };
 }
 
@@ -1486,7 +1486,7 @@ measureEngine(process.env.OLYMPUS_WORKER_ENGINE_ROLE, process.env.OLYMPUS_LOOP_S
     const gap = startup.gaps?.longest;
     const thread = startup.front_thread;
     const detail = thread && typeof thread === 'object'
-      ? `running ${thread.runningMs} ms, run queue ${thread.runQueueMs} ms, page faults ${thread.blockedMajfltMs} ms, block IO ${thread.blockedBlkioMs} ms, other waits ${thread.blockedOtherMs} ms, wait channels ${JSON.stringify(thread.waitChannelsMs)}`
+      ? `running ${thread.runningMs} ms, run queue ${thread.runQueueMs} ms, page faults ${thread.blockedMajfltMs} ms, block IO ${thread.blockedBlkioMs} ms, other waits ${thread.blockedOtherMs} ms, wait channels ${JSON.stringify(thread.waitChannelsMs)}${(thread as any).syscallsMs && Object.keys((thread as any).syscallsMs).length ? `, in calls ${JSON.stringify((thread as any).syscallsMs)}` : ''}`
       : thread ?? 'no thread window';
     console.log(`cold-start: ${startup.verdict} — longest ${gap?.ms ?? 0} ms${gap ? ` (${gap.page})` : ''}; ${detail}; READY ${startup.ready_ms} ms from spawn`);
     const searches = startup.searches;
