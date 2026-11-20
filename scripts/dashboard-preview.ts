@@ -2013,6 +2013,8 @@ export function previewDashboardToolResult(state: string, indexFasterOn: boolean
         }),
         ...(state === 'local-files-needs-permission' ? { permissionSettings: [{ sourceId: 'local.files', url: FILES_AND_FOLDERS_URL }] } : {}),
         ...(waitingPrivateQuestions > 0 ? { waitingPrivateQuestions } : {}),
+        // PREVIEW_OVERRIDE_REVIEW=1: a Personal override whose changed text holds a possible secret.
+        ...(process.env.PREVIEW_OVERRIDE_REVIEW ? { overrideReviewKinds: ['api_secret_token'] } : {}),
         ...(previewArchivesMeta(state) ? { archives: previewSplitArchives(previewArchivesMeta(state)!).archives } : {}),
         ...(previewArchivesMeta(state) && previewSplitArchives(previewArchivesMeta(state)!).cards.some((card) => card.archives.length > 0)
           ? { archiveCards: previewSplitArchives(previewArchivesMeta(state)!).cards.filter((card) => card.archives.length > 0) } : {}),
@@ -2057,9 +2059,16 @@ export function previewWaitingQuestions(count: number, state = '') {
 interface PreviewPrivacyItem {
   item_id: string; source: string; family: string; title: string; sender: string | null; location: string | null;
   tier: string; names_tier: string; decided_by: string; owner_set: boolean; judge_reason: string | null; decided_at: string;
-  preview: string; judge: string;
+  preview: string; judge: string; override_review?: { kinds: string[]; digest: string };
 }
 function previewPrivacyItemsFixture(): PreviewPrivacyItem[] {
+  const items = previewPrivacyItemsBase();
+  // PREVIEW_OVERRIDE_REVIEW=1: the flat message, marked Personal by the owner, changed and may hold a secret.
+  const flat = items.find((item) => item.item_id === 'oti_preview_flat');
+  if (process.env.PREVIEW_OVERRIDE_REVIEW && flat) flat.override_review = { kinds: ['api_secret_token'], digest: 'a'.repeat(64) };
+  return items;
+}
+function previewPrivacyItemsBase(): PreviewPrivacyItem[] {
   const item = (id: string, source: string, family: string, title: string, sender: string | null, location: string | null, tier: string, judge_reason: string | null, decided_at: string, preview: string, owner?: string): PreviewPrivacyItem => ({
     item_id: `oti_preview_${id}`, source, family, title, sender, location, tier: owner ?? tier, names_tier: 'Personal',
     decided_by: owner ? 'override' : 'sniffer', owner_set: owner !== undefined, judge_reason: owner ? null : judge_reason, decided_at, preview, judge: tier,
@@ -2085,7 +2094,7 @@ function previewPrivacyItemsAction(path: string, body: Record<string, unknown>):
     const filter = body.filter;
     const found = words
       ? previewPrivacyItems.filter((item) => [item.title, item.sender ?? '', item.location ?? ''].some((field) => field.toLowerCase().includes(words)))
-      : previewPrivacyItems.filter((item) => filter === 'changed' ? item.owner_set : filter === 'personal' ? item.tier === 'Personal' : filter === 'private' ? item.tier === 'Private' : true);
+      : previewPrivacyItems.filter((item) => filter === 'override_review' ? !!item.override_review : filter === 'changed' ? item.owner_set : filter === 'personal' ? item.tier === 'Personal' : filter === 'private' ? item.tier === 'Private' : true);
     // The mockup's counts, as a large install would show them.
     const counts = { personal: 47_006, private: 1_204, changed: previewPrivacyItems.filter((item) => item.owner_set).length };
     return Response.json({ ok: true, items: found.map(shown), counts });
