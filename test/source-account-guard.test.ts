@@ -22,7 +22,8 @@ import {
 } from '../src/workers/source-account-guard.ts';
 import { withEmbeddingSweep, type SourceSchedulerSource } from '../src/workers/source-scheduler.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
-import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
+import { TransientSourceEmbeddingError, type SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
+import { waitFor } from './helpers/test-clock.ts';
 import { DropboxApiMetadataClient } from '../src/workers/dropbox-files/provider-client.ts';
 import { readFileSync } from 'node:fs';
 import { FileLeaseBusyError } from '../src/core/file-lease.ts';
@@ -333,7 +334,8 @@ describe('the account guard', () => {
       async embed() { return new Promise<number[][]>(() => undefined); },
     };
     let deferred: string | undefined;
-    let embedChunks: () => Promise<unknown> = () => new Promise(() => undefined);
+    let providerFailed!: (reason: Error) => void;
+    let embedChunks: () => Promise<unknown> = () => new Promise((_, reject) => { providerFailed = reject; });
     const hanging = {
       corpusId: 'secure_local.dropbox.files',
       queuedEmbeddingGroups: () => [{ provider, localItemIds: ['stuck'] }],
@@ -349,17 +351,22 @@ describe('the account guard', () => {
     const [guarded] = guardAccountBoundLanes([swept!], new Map([['dropbox.files', guard]]));
     const sweep = guarded!.tasks.find((task) => task.id === 'dropbox.files_embeddings')!;
     const pass = await sweep.run();
-    expect(pass.retryAt?.degradedReason).toBe('embedding_provider_unavailable');
-    expect(pass.counts).toMatchObject({ stores_deferred: 1, chunks_embedded: 0 });
-    // The source's next task gets its turn.
+    expect(pass.retryAt).toBeUndefined();
+    expect(pass.counts).toMatchObject({ stores_overran: 1, stores_deferred: 0, chunks_embedded: 0 });
+    expect(deferred).toBeUndefined();
+    // The next account task runs while the original call is still in flight.
     expect(await guard.run!(async () => 'ran')).toBe('ran');
-    // The store itself records the outage, so sync status shows it too.
-    expect(deferred).toBe('embedding_provider_unavailable');
-    // The abandoned call still holds the lease: the next pass answers busy, and the outage stands.
     embedChunks = async () => { throw new FileLeaseBusyError('/store'); };
     const busy = await sweep.run();
-    expect(busy.retryAt?.degradedReason).toBe('embedding_provider_unavailable');
-    expect(deferred).toBe('embedding_provider_unavailable');
+    expect(busy.retryAt).toBeUndefined();
+    expect(busy.counts).toMatchObject({ stores_busy: 1, stores_deferred: 0 });
+    // An actual provider failure, even after the watchdog, records the outage.
+    providerFailed(new TransientSourceEmbeddingError('built-in', 'timeout', 1, 1_000));
+    await waitFor(() => deferred !== undefined, { description: 'late provider failure to reach the store' });
+    expect(deferred).toBe('embedding_provider_unavailable:timeout');
+    const duringOutage = await sweep.run();
+    expect(duringOutage.retryAt?.degradedReason).toBe('embedding_provider_unavailable');
+    expect(duringOutage.counts).toMatchObject({ stores_busy: 1, stores_deferred: 1 });
     // A pass that answers clears it.
     embedChunks = async () => ({ chunksEmbedded: 1 });
     const answered = await sweep.run();

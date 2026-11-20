@@ -14,6 +14,7 @@ import {
   type PeopleSenderObservation,
 } from '../src/core/people-index.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
+import { createOwnerQuestionActivity } from '../src/workers/engine/runtime/source-answer-lanes.ts';
 import { createTestClock } from './helpers/test-clock.ts';
 import { FIXTURE_PLACEMENT, fixtureConnector, fixtureItem, identityOf, openTierFixture, tempDir, type FixtureSpec } from './helpers/tier-fixtures.ts';
 
@@ -266,6 +267,43 @@ describe('people index refresh reads only what changed (#1305)', () => {
     expect(refresher.relink()).toHaveLength(1);
     expect([mail.state.reads, chat.state.reads]).toEqual([1, 1]);
   });
+
+  for (const marker of ['changed', 'unreadable'] as const) {
+    test(`a relink withdraws a stale sender during an Ask and unrelated writes (marker ${marker})`, async () => {
+      const clock = createTestClock();
+      const index = new LocalPeopleIndex({ dbPath: ':memory:' });
+      cleanups.push(() => index.close());
+      const mail = countingStore('mail', 'quinn');
+      const chat = countingStore('chat', 'ravi');
+      let visibility = 'v1';
+      // The unreadable case also covers a cached read at the same unreadable marker.
+      mail.store.visibilityMarker = () => {
+        if (marker === 'unreadable') throw new Error('visibility marker unavailable');
+        return visibility;
+      };
+      const refresher = new PeopleIndexRefresher(index, () => [mail.store, chat.store], { now: clock.now });
+      await refresher.refresh();
+      expect(index.citationName('mail', 'quinn@example.com')?.displayName).toBe('quinn');
+
+      const ask = createOwnerQuestionActivity();
+      await ask.runVisible(async () => {
+        mail.state.observations = [];
+        visibility = 'v2';
+        chat.state.observations[0]!.itemCount += 1;
+        refresher.relink();
+        expect(index.citationName('mail', 'quinn@example.com')).toBeUndefined();
+        expect(index.citationName('chat', 'ravi@example.com')?.displayName).toBe('ravi');
+        expect([mail.state.reads, chat.state.reads]).toEqual([1, 1]);
+
+        chat.state.syncRun = 'run-2';
+        await clock.advance(PEOPLE_INDEX_MIN_REBUILD_MS);
+        expect(await refresher.refreshIfChanged()).toBe(true);
+        expect(index.citationName('mail', 'quinn@example.com')).toBeUndefined();
+        expect(index.citationName('chat', 'ravi@example.com')?.displayName).toBe('ravi');
+        expect(ask.busy).toBe(true);
+      });
+    });
+  }
 
   test('the worker no longer forces a rebuild on a timer after startup', () => {
     const server = readFileSync(new URL('../src/workers/engine/server.ts', import.meta.url), 'utf8');

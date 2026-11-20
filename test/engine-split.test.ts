@@ -334,6 +334,32 @@ describe('the owner-busy signal across the split', () => {
 });
 
 describe('owner busy stays current through a long owner call', () => {
+  test('a lost idle retries its sequence on the existing renewal tick', async () => {
+    const clock = createTestClock();
+    const marks = new OwnerBusyMarks({ now: clock.now });
+    const sent: EngineCommand[] = [];
+    let loseIdle = true;
+    const relay = new OwnerBusyRelay({
+      post: async (command) => {
+        sent.push(command);
+        if (command.kind === 'owner_idle' && loseIdle) throw new Error('background unavailable');
+        if (command.kind === 'owner_busy' || command.kind === 'owner_idle') marks.apply(command);
+        return { id: 'x', state: 'done', instance_id: 'b' };
+      },
+    }, () => {}, {
+      setInterval: clock.setInterval, clearInterval: timer => clock.clearInterval(timer as never),
+    });
+    relay.busy('owner_question');
+    relay.idle('owner_question');
+    expect(marks.busy('owner_question')).toBe(true);
+    loseIdle = false;
+    await clock.advance(3 * 60_000);
+    expect(sent.at(-1)).toEqual(sent[1]);
+    expect(marks.busy('owner_question')).toBe(false);
+    expect(marks.lastEndedAt('owner_question')).toBe(clock.now());
+    expect(clock.pendingTimers()).toBe(0);
+  });
+
   test('the front says busy again every three minutes while the call runs, and stops when it ends', async () => {
     const clock = createTestClock();
     const sent: EngineCommand[] = [];

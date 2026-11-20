@@ -1,5 +1,13 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
+import { defaultConfig } from '../src/core/config.ts';
+import type { OperationContext } from '../src/core/operations.ts';
+import { createReleaseManifestSink, recordReleaseManifest, runWithReleaseManifestSink } from '../src/core/release-manifest.ts';
+import { SourceAnswerJobRegistry } from '../src/core/source-answer-jobs.ts';
+import { callChatGptTool } from '../src/workers/chatgpt/mcp-surface.ts';
+import { generatePanelKeyPair } from '../src/workers/chatgpt/private-answer-crypto.ts';
+import { PrivateAnswerJobs } from '../src/workers/chatgpt/private-answer-jobs.ts';
+import { createStandBack, STAND_BACK_MAX_MS } from '../src/workers/engine/stand-back.ts';
 import { buildSourceIndexCorpusRegistry, defineSourceIndexCorpus } from '../src/core/source-index/corpus.ts';
 import { createOwnerQuestionActivity, createSourceAnswerLanes, OWNER_QUESTION_RESOURCE } from '../src/workers/engine/runtime/source-answer-lanes.ts';
 import { OwnerBusyRelay } from '../src/workers/engine-split/client.ts';
@@ -9,7 +17,7 @@ import { startSupersededSweepTicker, SUPERSEDED_SWEEP_TICK_MS, SUPERSEDED_SWEEP_
 import type { TieredStoreSet } from '../src/workers/connector-store/tiered-store-set.ts';
 import { createAnalystSourceIndexAnswerHandler, searchReleasedEvidence } from '../src/workers/source-index/analyst-answer.ts';
 import { createAnalyst } from '../src/core/analyst.ts';
-import { createTestClock } from './helpers/test-clock.ts';
+import { createTestClock, flushMicrotasks, waitFor } from './helpers/test-clock.ts';
 import { provedReleaseCheck } from './helpers/scripted-search-release.ts';
 
 function deferred() {
@@ -326,10 +334,10 @@ describe('owner questions pause the superseded-copy sweep', () => {
     expect(server).toContain('ownerQuestions.run(() => answerActivity.run(() => analystSourceAnswer.answer(request, local), kind), kind)');
     expect(server).toContain('ownerQuestions.run(() => answerActivity.run(() => local.answer(input)))');
     expect(server.match(/ownerQuestions.run\(\(\) => searchReleasedEvidence\(/g)).toHaveLength(2);
-    expect(server).toContain('ownerQuestions.run(() => searchPrivateEvidence(');
-    expect(server).toContain('active: () => !engineFront && !ownerQuestions.busy && !remoteOwnerBusy(OWNER_QUESTION_RESOURCE)');
+    expect(server.includes("holds: (set) => standBack.holds('prune', set)")).toBe(true);
     // A claimed Private panel answer holds a question lease until it settles.
-    expect(server).toMatch(/activity: \{\s*begin: \(\) => \{\s*const releaseAnswer = answerActivity\.begin\(\);\s*const releaseQuestion = ownerQuestions\.begin\(\);/);
+    // Precompute after a match uses only the separate model activity.
+    expect(server).toMatch(/activity: \{\s*begin: \(\) => answerActivity\.begin\(\),\s*beginClaim: \(\) => \{\s*const releaseQuestion = ownerQuestions\.begin\(\);\s*const releaseAnswer = answerActivity\.begin\(\);/);
   });
 
   test('a claimed panel job holds the lease until its release, and a second release does nothing', async () => {
@@ -351,4 +359,190 @@ describe('owner questions pause the superseded-copy sweep', () => {
       expect(kinds(w.sent)).toEqual(['owner_busy', 'owner_idle']);
     } finally { w.close(); }
   });
+
+  test('a panel claim marks owner activity when it attaches to a running precompute', async () => {
+    const w = world();
+    const computing = deferred();
+    const finishModel = deferred();
+    let calls = 0;
+    const jobs = new PrivateAnswerJobs({
+      installId: () => 'a'.repeat(32),
+      precompute: true,
+      claimHoldMs: 0,
+      eligible: async (items) => items.map(() => true),
+      log: () => {},
+      activity: { begin: () => {}, beginClaim: w.questions.begin, end: () => {} },
+      model: () => ({
+        status: () => ({ state: 'ready' }),
+        answerPrivately: async () => {
+          calls++;
+          computing.resolve();
+          await finishModel.promise;
+          return { answer: 'Private fixture', citations: [] };
+        },
+      }),
+    });
+    const evidence = [{ trust_domain: 'secure_local', sourceItem: { provider: 'fixture', accountScope: 'owner', localItemId: 'one' } }];
+    try {
+      const { jobId } = jobs.begin({ question: 'Private question', count: 1, evidence, refresh: async () => evidence });
+      await computing.promise;
+      expect(w.questions.busy).toBe(false);
+      expect(w.sent).toHaveLength(0);
+      const panel = await generatePanelKeyPair();
+      expect((await jobs.claim(jobId!, panel.publicKey)).status).toBe(202);
+      expect(w.questions.busy).toBe(true);
+      expect(kinds(w.sent)).toEqual(['owner_busy']);
+      finishModel.resolve();
+      await waitFor(() => !w.questions.busy, { description: 'the panel claim releases owner activity when it is sealed' });
+      expect((await jobs.claim(jobId!, panel.publicKey)).body.status).toBe('ready');
+      expect(calls).toBe(1);
+      expect(kinds(w.sent)).toEqual(['owner_busy', 'owner_idle']);
+    } finally {
+      finishModel.resolve();
+      w.close();
+    }
+  });
+});
+
+for (const tool of ['olympus_search', 'source_answer'] as const) {
+  test(`${tool} stays busy while the owner is waiting for the Private probe`, async () => {
+    const w = world();
+    const checked = deferred();
+    const personalDone = deferred();
+    const late = deferred();
+    const finishPersonal = () => w.questions.run(async () => {
+      w.factory({ question: 'Personal retrieval' });
+      personalDone.resolve();
+      return { status: 'working', job_id: 'saj_fixture', elapsed_ms: 0 };
+    });
+    const config = defaultConfig();
+    config.sourceIndex.enabled = true;
+    const ctx = { config, email: { sourceAnswer: finishPersonal } } as unknown as OperationContext;
+    let detached: Promise<void> | undefined;
+    try {
+      const response = callChatGptTool(tool, { question: 'What do my sources say?' }, ctx, {
+        withOwnerQuestion: w.questions.runVisible,
+        evidenceSearch: async () => { await finishPersonal(); return { evidence: [] }; },
+        dashboardView: async () => ({ sources: [] }) as never,
+        privateMatchProbe: async () => {
+          detached = late.promise.then(() => w.questions.run(async () => { w.factory({ question: 'Detached continuation' }); }));
+          await checked.promise;
+          return 0;
+        },
+      });
+      await personalDone.promise;
+      await flushMicrotasks();
+      expect(w.questions.busy).toBe(true);
+      expect(w.marks.busy(OWNER_QUESTION_RESOURCE)).toBe(true);
+      expect(kinds(w.sent)).toEqual(['owner_busy']);
+      checked.resolve();
+      const result = await response;
+      expect(result.isError).not.toBe(true);
+      if (tool === 'source_answer') expect(result.structuredContent).toMatchObject({ status: 'working' });
+      expect(w.questions.busy).toBe(false);
+      expect(kinds(w.sent)).toEqual(['owner_busy', 'owner_idle']);
+      late.resolve();
+      await detached;
+      expect(kinds(w.sent)).toEqual(['owner_busy', 'owner_idle']);
+    } finally {
+      checked.resolve();
+      late.resolve();
+      w.close();
+    }
+  });
+}
+
+test('source_answer_result stays busy through collection and the final release check', async () => {
+  const w = world();
+  const answerDone = deferred();
+  const checkingRelease = deferred();
+  const releaseDone = deferred();
+  const sourceAnswerJobs = { registry: new SourceAnswerJobRegistry({ limits: { handoffMs: 0 } }), owner: 'owner' };
+  const config = defaultConfig();
+  config.sourceIndex.enabled = true;
+  const ctx = {
+    config,
+    sourceAnswerJobs,
+    email: {},
+    releaseCheck: {
+      ...provedReleaseCheck,
+      inputsOffThread: async () => {
+        checkingRelease.resolve();
+        await releaseDone.promise;
+        return [{ tier: 'public_or_personal', gone: false }];
+      },
+    },
+  } as unknown as OperationContext;
+  const answer = { answer: 'A collected answer', evidence: [] };
+  try {
+    const job = await runWithReleaseManifestSink(createReleaseManifestSink(), () => sourceAnswerJobs.registry.run(sourceAnswerJobs, async () => {
+      await answerDone.promise;
+      recordReleaseManifest({
+        inputs: [{ corpusId: 'internal.fixture', provider: 'test', accountScope: 'owner', providerItemId: 'one', privateAtAnswer: false, chunkHashes: ['one-chunk'] }],
+        constraints: { secureDerivativeDefault: 'allow', includeSecureLocalContent: false },
+      });
+      return answer;
+    }));
+    if (!('job_id' in job)) throw new Error('expected a handed-off answer');
+    const response = callChatGptTool('source_answer_result', { job_id: job.job_id }, ctx, {
+      withOwnerQuestion: w.questions.runVisible,
+      dashboardView: async () => { throw new Error('Collection does not render the dashboard'); },
+    });
+    expect(w.questions.busy).toBe(true);
+    expect(kinds(w.sent)).toEqual(['owner_busy']);
+    answerDone.resolve();
+    await checkingRelease.promise;
+    expect(w.marks.busy(OWNER_QUESTION_RESOURCE)).toBe(true);
+    expect(kinds(w.sent)).toEqual(['owner_busy']);
+    releaseDone.resolve();
+    expect((await response).structuredContent).toMatchObject({ status: 'answered', answer: answer.answer });
+    expect(w.questions.busy).toBe(false);
+    expect(kinds(w.sent)).toEqual(['owner_busy', 'owner_idle']);
+  } finally {
+    answerDone.resolve();
+    releaseDone.resolve();
+    w.close();
+  }
+});
+
+test('the prune ticker gets a slice while the front continues to signal an Ask', async () => {
+  const clock = createTestClock();
+  let asking = true;
+  const standBack = createStandBack({ reason: () => asking ? 'question in the front' : undefined, now: clock.now, log: () => {} });
+  let slices = 0;
+  let reclaimReads = 0;
+  const set = {
+    sweepSupersededSlice: () => { slices++; return true; },
+    ledger: { readMeta: () => { reclaimReads++; return '{"done":true}'; } },
+  } as unknown as TieredStoreSet;
+  const stop = startSupersededSweepTicker({
+    now: clock.now,
+    intervalMs: SUPERSEDED_SWEEP_TICK_MS,
+    holds: (pending) => standBack.holds('prune', pending),
+    idle: () => !asking,
+    canReclaim: (pending) => !standBack.holds('reclaim', pending),
+    sets: () => [set],
+    every: (tick, ms) => {
+      const timer = clock.setInterval(tick, ms);
+      return () => clock.clearInterval(timer);
+    },
+  });
+  try {
+    await clock.advance(SUPERSEDED_SWEEP_TICK_MS + STAND_BACK_MAX_MS - 1);
+    expect(slices).toBe(0);
+    expect(standBack.counts().prune?.held_count).toBe(1);
+    expect(standBack.counts().reclaim).toBeUndefined();
+    await clock.advance(1);
+    expect(slices).toBe(1);
+    expect(standBack.counts().prune?.bound_reached).toBe(1);
+    expect(standBack.counts().reclaim?.held_count).toBe(1);
+    await clock.advance(STAND_BACK_MAX_MS);
+    expect(reclaimReads).toBe(0);
+    asking = false;
+    await clock.advance(SUPERSEDED_SWEEP_TICK_MS);
+    await waitFor(() => reclaimReads === 1, { description: 'the idle reclaim checks its ledger' });
+    expect(reclaimReads).toBe(1);
+    expect(standBack.counts().reclaim?.held_count).toBe(0);
+    expect(slices).toBe(1);
+  } finally { stop(); }
 });

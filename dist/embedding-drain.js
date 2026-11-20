@@ -12,7 +12,7 @@ if (typeof globalThis.Bun !== "undefined") {
 }
 
 // src/core/source-placement.ts
-import { accessSync, constants as constants2, lstatSync as lstatSync3, statSync } from "node:fs";
+import { accessSync, constants as constants2, lstatSync as lstatSync3, statSync as statSync2 } from "node:fs";
 import { isAbsolute as isAbsolute5, join as join6, relative as relative4, resolve as resolve4, sep as sep4 } from "node:path";
 
 // src/core/olympus-layout.ts
@@ -218,10 +218,30 @@ import { dirname as dirname4, isAbsolute as isAbsolute3, join as join3, relative
 // src/core/file-lease.ts
 import { execFileSync } from "node:child_process";
 import { randomUUID as randomUUID2 } from "node:crypto";
-import { closeSync as closeSync2, existsSync as existsSync2, mkdirSync as mkdirSync2, openSync as openSync2, readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "node:fs";
+import { closeSync as closeSync2, existsSync as existsSync2, mkdirSync as mkdirSync2, openSync as openSync2, readFileSync as readFileSync2, statSync, writeFileSync as writeFileSync2 } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { createRequire as createRequire3 } from "node:module";
 import { dirname as dirname3 } from "node:path";
+
+// src/core/http-timeout.ts
+function untilAborted(work, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      work.catch(() => {
+        return;
+      });
+      reject(signal.reason);
+      return;
+    }
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    work.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
+}
+var NULL_BODY_STATUSES = new Set([101, 204, 205, 304]);
+var DEFAULT_BOUNDED_RESPONSE_LIMIT_BYTES = 64 * 1024;
+
+// src/core/file-lease.ts
 var DEFAULT_OPTIONS = {
   acquireTimeoutMs: 1e4,
   pollIntervalMs: 25
@@ -252,6 +272,7 @@ async function withFileLease(targetPath, callback, options = {}) {
   const owner = await acquireFileLease(targetPath, normalized);
   let stopHeartbeat;
   try {
+    normalized.signal?.throwIfAborted();
     if (normalized.heartbeat)
       stopHeartbeat = startLeaseHeartbeat(targetPath, normalized);
     return await callback(owner);
@@ -314,12 +335,14 @@ class AsyncFileLeaseOwner {
 }
 async function acquireFileLease(targetPath, options) {
   const lockPath = lockPathFor(targetPath);
-  const { timers } = options;
+  const { signal, timers } = options;
+  signal?.throwIfAborted();
   let lastProgressAt = timers.now();
   let lastHeartbeat;
   const deadline = lastProgressAt + options.acquireTimeoutMs;
   await mkdir(dirname3(lockPath), { recursive: true, mode: 448 });
   while (true) {
+    signal?.throwIfAborted();
     const lock = tryKernelLock(lockPath, options.mode);
     if (lock)
       return new AsyncFileLeaseOwner(targetPath, lockPath, lock);
@@ -333,12 +356,16 @@ async function acquireFileLease(targetPath, options) {
         throw new FileLeaseBusyError(targetPath);
     } else if (timers.now() >= deadline)
       throw new FileLeaseBusyError(targetPath);
-    await timers.sleep(options.pollIntervalMs);
+    const delay = timers.sleep(options.pollIntervalMs);
+    await (signal ? untilAborted(delay, signal) : delay);
   }
 }
 function readLeaseHeartbeat(targetPath) {
+  return readUnlessMissing(() => readFileSync2(`${targetPath}.lock`, "utf8"));
+}
+function readUnlessMissing(read) {
   try {
-    return readFileSync2(`${targetPath}.lock`, "utf8");
+    return read();
   } catch (error) {
     if (isNodeErrorWithCode(error, "ENOENT"))
       return;
@@ -449,6 +476,7 @@ function lockPathFor(targetPath) {
 function normalizeOptions(options) {
   return {
     mode: options.mode ?? "exclusive",
+    ...options.signal ? { signal: options.signal } : {},
     acquireTimeoutMs: positiveInteger(options.acquireTimeoutMs, DEFAULT_OPTIONS.acquireTimeoutMs),
     pollIntervalMs: positiveInteger(options.pollIntervalMs, DEFAULT_OPTIONS.pollIntervalMs),
     ...options.heartbeat ? { heartbeat: {
@@ -2361,7 +2389,7 @@ function dataRootState(env) {
   }
   try {
     const link = lstatSync3(root);
-    const target = link.isSymbolicLink() ? statSync(root) : link;
+    const target = link.isSymbolicLink() ? statSync2(root) : link;
     if (!target.isDirectory())
       return "unreadable";
     accessSync(root, constants2.R_OK | constants2.X_OK);
@@ -2415,7 +2443,7 @@ import { homedir as homedir6 } from "node:os";
 import { isAbsolute as isAbsolutePath2, join as join13, resolve as resolve5 } from "node:path";
 
 // src/core/owner-config-read.ts
-import { chmodSync, linkSync, readFileSync as readFileSync5, statSync as statSync2, lstatSync as lstatSync4 } from "node:fs";
+import { chmodSync, linkSync, readFileSync as readFileSync5, statSync as statSync3, lstatSync as lstatSync4 } from "node:fs";
 import { randomUUID as randomUUID3 } from "node:crypto";
 import { homedir as homedir5 } from "node:os";
 import { dirname as dirname7, join as join7 } from "node:path";
@@ -2486,7 +2514,7 @@ function defaultSovereigntyConfigPath(env = process.env) {
 function readOwnerConfigFile(path) {
   let before;
   try {
-    before = statSync2(path);
+    before = statSync3(path);
   } catch (error) {
     return error.code === "ENOENT" ? { status: "missing" } : { status: "refused", reason: "unreadable", stamp: "unreadable" };
   }
@@ -2502,7 +2530,7 @@ function readOwnerConfigFile(path) {
   }
   let after;
   try {
-    after = statSync2(path);
+    after = statSync3(path);
   } catch {
     return { status: "refused", reason: "torn_read", stamp };
   }
@@ -2527,7 +2555,7 @@ import { join as join12 } from "node:path";
 import { isMainThread as isMainThread3 } from "node:worker_threads";
 
 // src/workers/file-extraction/extractors/image-preparers.ts
-import { accessSync as accessSync2, constants as fsConstants, existsSync as existsSync4, readFileSync as readFileSync6, statSync as statSync3 } from "node:fs";
+import { accessSync as accessSync2, constants as fsConstants, existsSync as existsSync4, readFileSync as readFileSync6, statSync as statSync4 } from "node:fs";
 import { delimiter, join as join8 } from "node:path";
 
 // src/workers/file-extraction/extractors/jpeg-metadata.ts
@@ -2699,7 +2727,7 @@ class PreparedOutputError extends Error {
 }
 function readPreparedOutput(path) {
   try {
-    const info = statSync3(path);
+    const info = statSync4(path);
     if (!info.isFile() || info.size === 0 || info.size > MAX_PREPARED_BYTES)
       throw new PreparedOutputError;
     return new Uint8Array(readFileSync6(path));
@@ -2802,7 +2830,7 @@ function findExecutable(name, searchPath = process.env.PATH) {
       continue;
     const candidate = join8(directory, name);
     try {
-      if (!statSync3(candidate).isFile())
+      if (!statSync4(candidate).isFile())
         continue;
       accessSync2(candidate, fsConstants.X_OK);
       return candidate;
@@ -3191,24 +3219,6 @@ function modelThread() {
 // src/workers/source-index/pinned-download.ts
 import { createHash } from "node:crypto";
 
-// src/core/http-timeout.ts
-function untilAborted(work, signal) {
-  return new Promise((resolve, reject) => {
-    if (signal.aborted) {
-      work.catch(() => {
-        return;
-      });
-      reject(signal.reason);
-      return;
-    }
-    const onAbort = () => reject(signal.reason);
-    signal.addEventListener("abort", onAbort, { once: true });
-    work.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
-  });
-}
-var NULL_BODY_STATUSES = new Set([101, 204, 205, 304]);
-var DEFAULT_BOUNDED_RESPONSE_LIMIT_BYTES = 64 * 1024;
-
 // src/workers/control-path-headroom.ts
 import { isMainThread } from "node:worker_threads";
 
@@ -3485,7 +3495,7 @@ function ingestionTurn() {
 }
 
 // src/workers/source-index/pinned-download.ts
-import { closeSync as closeSync4, createReadStream, existsSync as existsSync6, openSync as openSync4, renameSync as renameSync2, rmSync as rmSync2, statSync as statSync4, writeSync } from "node:fs";
+import { closeSync as closeSync4, createReadStream, existsSync as existsSync6, openSync as openSync4, renameSync as renameSync2, rmSync as rmSync2, statSync as statSync5, writeSync } from "node:fs";
 var REQUEST_BYTES = 256 * 1024 ** 2;
 var WRITE_SLICE_BYTES = 64 * 1024;
 var READ_RETRIES = 3;
@@ -3518,7 +3528,7 @@ async function downloadPinnedFile(options) {
   };
   try {
     if (existsSync6(partial)) {
-      const size = statSync4(partial).size;
+      const size = statSync5(partial).size;
       if (size > 0 && size < expectedBytes) {
         await hashPartial(partial, hash, options.verifyStallMs);
         received = size;
@@ -3691,7 +3701,7 @@ import {
   readFileSync as readFileSync7,
   renameSync as renameSync3,
   rmSync as rmSync3,
-  statSync as statSync5,
+  statSync as statSync6,
   writeFileSync as writeFileSync3,
   writeSync as writeSync2
 } from "node:fs";
@@ -4221,7 +4231,7 @@ async function verifyModelFiles(dir, files, reporter, useCache = true) {
     verifiedThisProcess ??= new Set;
     if (useCache && verifiedThisProcess.has(key))
       continue;
-    const size = statSync5(path).size;
+    const size = statSync6(path).size;
     const digest = size === file.bytes ? await sha256File(path) : undefined;
     if (digest !== file.sha256) {
       rmSync3(path, { force: true });
@@ -4379,7 +4389,7 @@ function lockIsStale(lockPath) {
     return false;
   } catch {
     try {
-      return Date.now() - statSync5(lockPath).mtimeMs > STALE_LOCK_MS;
+      return Date.now() - statSync6(lockPath).mtimeMs > STALE_LOCK_MS;
     } catch {
       return true;
     }
@@ -6491,7 +6501,7 @@ function isPromiseLike(value) {
 }
 
 // src/core/worker-auth.ts
-import { constants as constants4, readFileSync as readFileSync10, statSync as statSync6 } from "node:fs";
+import { constants as constants4, readFileSync as readFileSync10, statSync as statSync7 } from "node:fs";
 import { homedir as homedir7 } from "node:os";
 import { join as join14 } from "node:path";
 function workerAuthTokenFromConfig(config, options = {}) {
@@ -6516,7 +6526,7 @@ function workerAuthTokenFromSetupEnv(options = {}) {
 function readWorkerSetupEnv(options = {}) {
   const path = workerSetupEnvPath(options);
   try {
-    const stat = statSync6(path, { bigint: true });
+    const stat = statSync7(path, { bigint: true });
     if (!stat.isFile() || (stat.mode & 0o077n) !== 0n)
       return;
     return parseWorkerSetupEnv(readFileSync10(path, "utf8"));
@@ -6570,7 +6580,7 @@ function unquoteEnvValue(value) {
 import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
 
 // src/core/zkapi-consult-settings.ts
-import { readFileSync as readFileSync11, statSync as statSync7 } from "node:fs";
+import { readFileSync as readFileSync11, statSync as statSync8 } from "node:fs";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 var ZKAPI_DAEMON_DEFAULT_PORT = 8787;
@@ -6622,7 +6632,7 @@ function refreshZkapiPortsFromPolicyFile(env = process.env) {
   }
   let stamp;
   try {
-    const stat = statSync7(path);
+    const stat = statSync8(path);
     stamp = `${path}:${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
   } catch (error) {
     if (error.code === "ENOENT") {
@@ -12470,7 +12480,7 @@ import { createHash as createHash5, randomUUID as randomUUID6 } from "node:crypt
 
 // src/core/store-reclaim-admission.ts
 import { join as join17 } from "node:path";
-import { closeSync as closeSync7, openSync as openSync7, futimesSync, statSync as statSync8 } from "node:fs";
+import { closeSync as closeSync7, openSync as openSync7, futimesSync, statSync as statSync9 } from "node:fs";
 var probe = { acquireTimeoutMs: 1, pollIntervalMs: 1 };
 var target = (name) => join17(sharedDataPath("engine-run"), `store-reclaim-${name}`);
 function storeReadHasPriority() {
@@ -12484,7 +12494,7 @@ function storeReadHasPriority() {
 }
 function storeOwnerIdleMs(now = Date.now()) {
   try {
-    return Math.max(0, now - statSync8(target("last-ask")).mtimeMs);
+    return Math.max(0, now - statSync9(target("last-ask")).mtimeMs);
   } catch (error) {
     if (error.code === "ENOENT")
       return Number.POSITIVE_INFINITY;
@@ -16107,7 +16117,7 @@ function dispatch() {
 
 // src/workers/connector-store/local-index.ts
 import { createHash as createHash13, randomUUID as randomUUID9 } from "node:crypto";
-import { closeSync as closeSync11, existsSync as existsSync22, fsyncSync as fsyncSync3, lstatSync as lstatSync9, mkdirSync as mkdirSync13, openSync as openSync11, statSync as statSync13, statfsSync } from "node:fs";
+import { closeSync as closeSync11, existsSync as existsSync22, fsyncSync as fsyncSync3, lstatSync as lstatSync9, mkdirSync as mkdirSync13, openSync as openSync11, statSync as statSync14, statfsSync } from "node:fs";
 import { open as openFile } from "node:fs/promises";
 import { basename as basename7, dirname as dirname23 } from "node:path";
 import { Database as Database6 } from "bun:sqlite";
@@ -16128,7 +16138,7 @@ import {
   renameSync as renameSync5,
   rmSync as rmSync7,
   rmdirSync,
-  statSync as statSync10,
+  statSync as statSync11,
   writeFileSync as writeFileSync6
 } from "node:fs";
 import { basename as basename5, dirname as dirname16, isAbsolute as isAbsolute11, join as join19, resolve as resolve8 } from "node:path";
@@ -16174,7 +16184,7 @@ function olympusDataDir(env = process.env) {
 }
 
 // src/core/store-identity.ts
-import { existsSync as existsSync15, realpathSync as realpathSync5, statSync as statSync9 } from "node:fs";
+import { existsSync as existsSync15, realpathSync as realpathSync5, statSync as statSync10 } from "node:fs";
 import { basename as basename4, dirname as dirname15, isAbsolute as isAbsolute10, join as join18, relative as relative5, resolve as resolve7, sep as sep5 } from "node:path";
 var LAYOUTS2 = ["folder", "legacy"];
 function layoutPath(identity, layout, env) {
@@ -16385,7 +16395,7 @@ function isEarlier(held, current) {
 }
 function isMissing(path) {
   try {
-    statSync9(path);
+    statSync10(path);
     return false;
   } catch (error) {
     const code = error?.code;
@@ -16473,7 +16483,7 @@ function sweepMediaCache(dir, options = {}) {
   const placement = storePlacementView(options.env ?? process.env);
   const old = (path) => {
     try {
-      return now - statSync10(path).mtimeMs > maxAgeMs;
+      return now - statSync11(path).mtimeMs > maxAgeMs;
     } catch {
       return false;
     }
@@ -16639,7 +16649,7 @@ function ensureOwnerOnlyDir(dir) {
 // src/workers/classification/tier-ledger.ts
 import { Database as Database4 } from "bun:sqlite";
 import { randomUUID as randomUUID8 } from "node:crypto";
-import { chmodSync as chmodSync5, closeSync as closeSync9, existsSync as existsSync17, mkdirSync as mkdirSync11, openSync as openSync9, statSync as statSync11 } from "node:fs";
+import { chmodSync as chmodSync5, closeSync as closeSync9, existsSync as existsSync17, mkdirSync as mkdirSync11, openSync as openSync9, statSync as statSync12 } from "node:fs";
 import { dirname as dirname17 } from "node:path";
 var TIER_LEDGER_SCHEMA_VERSION = 17;
 var RETIRED_EMBEDDING_CLEARANCE_REASON = "content:sniffer:retired_embedding_clearance:undecided";
@@ -19752,7 +19762,7 @@ function isSqliteBusy2(error) {
 }
 function hasUnmergedWrites(dbPath) {
   try {
-    if (statSync11(`${dbPath}-wal`).size > 0)
+    if (statSync12(`${dbPath}-wal`).size > 0)
       return true;
   } catch {}
   return existsSync17(`${dbPath}-journal`);
@@ -21830,7 +21840,7 @@ function parentIdentityField(child) {
   return identity ? { identity } : {};
 }
 function childVisibilityUnchanged(lane) {
-  const stores = lane.stores();
+  const stores = [...lane.stores()];
   const ledger = lane.ledger();
   const ledgerMarker = ledger?.changeMarker();
   const markers = stores.map((store) => store.childVisibilityMarker?.());
@@ -21844,6 +21854,12 @@ function parentKey(parent) {
   return [parent.provider, parent.accountScope, parent.parentLocalItemId].join("\x00");
 }
 var HIDDEN = { visible: false, gone: false };
+function parentVerdicts(lane, parents) {
+  return visibilityHere(parentVerdictsSteps(lane, parents));
+}
+function parentVerdictsOffThread(lane, parents) {
+  return visibilityAwaited(() => parentVerdictsSteps(lane, parents), lane);
+}
 function* parentVerdictsSteps(lane, parents) {
   const unique = new Map;
   for (const parent of parents)
@@ -22537,7 +22553,7 @@ import { dirname as dirname22, join as join24 } from "node:path";
 // src/workers/source-index/built-in-embedding/litert-runtime.ts
 import { isMainThread as isMainThread5 } from "node:worker_threads";
 import { execFileSync as execFileSync2, spawn } from "node:child_process";
-import { closeSync as closeSync10, constants as constants5, existsSync as existsSync21, fstatSync as fstatSync2, openSync as openSync10, readdirSync as readdirSync3, readFileSync as readFileSync15, statSync as statSync12 } from "node:fs";
+import { closeSync as closeSync10, constants as constants5, existsSync as existsSync21, fstatSync as fstatSync2, openSync as openSync10, readdirSync as readdirSync3, readFileSync as readFileSync15, statSync as statSync13 } from "node:fs";
 import { homedir as homedir10 } from "node:os";
 import { delimiter as delimiter2, dirname as dirname21, isAbsolute as isAbsolute14, join as join22 } from "node:path";
 import { createInterface } from "node:readline";
@@ -22929,7 +22945,7 @@ function resolveBun() {
     if (!candidate || !isAbsolute14(candidate))
       continue;
     try {
-      if (statSync12(candidate).isFile())
+      if (statSync13(candidate).isFile())
         return candidate;
     } catch {}
   }
@@ -25357,6 +25373,7 @@ var VECTOR_DIGEST_BACKFILL_MAX_ROWS = 128;
 var VECTOR_DIGEST_BACKFILL_MIN_ROWS = 8;
 var VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS = 25;
 var VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS = 250;
+var clearDigestHold;
 var vectorDigestBackfillHold = () => false;
 var VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS = 60000;
 function nextVectorDigestBackfillRows(rows, turnMs) {
@@ -25677,6 +25694,7 @@ function spawnConnectorStoreMaintenance(dbPath, source, args = []) {
     env: { ...process.env, SQLITE_TMPDIR: dirname23(dbPath), TMPDIR: dirname23(dbPath) }
   });
 }
+var clearRecencyHold;
 var admitRecencyIndexBuild;
 var recencyIndexBuilding = false;
 var RECENCY_INDEX_RETRY_MS = 250;
@@ -25838,10 +25856,14 @@ class LocalConnectorStore {
   }
   async buildRecencyIndex() {
     const admit = admitRecencyIndexBuild;
-    if (!admit || this.closedForPoolReads || this.fileReplacedOrRemoved())
+    if (!admit || this.closedForPoolReads || this.fileReplacedOrRemoved()) {
+      clearRecencyHold?.(this);
       return;
-    if (this.db.query("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name IN (?, ?)").get(CONNECTOR_STORE_RECENCY_INDEX, CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX).n >= 2)
+    }
+    if (this.db.query("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name IN (?, ?)").get(CONNECTOR_STORE_RECENCY_INDEX, CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX).n >= 2) {
+      clearRecencyHold?.(this);
       return;
+    }
     if (recencyIndexBuilding || this.reclaimProcess || this.vectorDigestBackfillReading || this.visibilityPublishing || storeReadHasPriority()) {
       this.scheduleRecencyIndexBuild(RECENCY_INDEX_BUSY_RETRY_MS);
       return;
@@ -25876,7 +25898,7 @@ class LocalConnectorStore {
       }, () => {
         preempted = true;
         this.reclaimProcess?.kill("SIGKILL");
-      });
+      }, this);
       if (!complete && !this.closedForPoolReads) {
         this.scheduleRecencyIndexBuild(complete === undefined ? RECENCY_INDEX_NOT_ADMITTED_RETRY_MS : RECENCY_INDEX_RETRY_MS);
       }
@@ -25905,7 +25927,7 @@ class LocalConnectorStore {
         return;
       let held = false;
       try {
-        held = vectorDigestBackfillHold();
+        held = !this.reclaimProcess && vectorDigestBackfillHold(this);
       } catch {
         held = false;
       }
@@ -25994,6 +26016,8 @@ class LocalConnectorStore {
     this.reclaimProcess?.kill("SIGKILL");
     clearTimeout(this.recencyIndexTimer);
     clearTimeout(this.vectorDigestBackfillTimer);
+    clearDigestHold?.(this);
+    clearRecencyHold?.(this);
     this.stopVisibilityPublisher();
     try {
       if (!this.readOnly && !reclaiming)
@@ -26023,7 +26047,7 @@ class LocalConnectorStore {
     try {
       if (this.db.query("PRAGMA auto_vacuum").get().auto_vacuum !== 0)
         return 0;
-      return Math.ceil(statSync13(this.dbPath).size / RECLAIM_CONVERSION_BYTES_PER_MS);
+      return Math.ceil(statSync14(this.dbPath).size / RECLAIM_CONVERSION_BYTES_PER_MS);
     } catch {
       return 0;
     }
@@ -26035,7 +26059,7 @@ class LocalConnectorStore {
       pages: this.db.query("PRAGMA page_count").get().page_count,
       free: this.db.query("PRAGMA freelist_count").get().freelist_count,
       pageBytes: this.db.query("PRAGMA page_size").get().page_size,
-      bytes: statSync13(this.dbPath).size
+      bytes: statSync14(this.dbPath).size
     };
   }
   async reclaimFreePages(budgetMs, options = {}) {
@@ -26045,7 +26069,7 @@ class LocalConnectorStore {
     if (converting) {
       if (this.reclaimKilledAttempts >= 3 && storeOwnerIdleMs(this.now().getTime()) < 10 * 60000)
         return;
-      const neededBytes = 2 * statSync13(this.dbPath).size + 1024 ** 3;
+      const neededBytes = 2 * statSync14(this.dbPath).size + 1024 ** 3;
       const disk = (options.statfs ?? statfsSync)(dirname23(this.dbPath));
       const availableBytes = Number(disk.bavail) * Number(disk.bsize);
       if (!Number.isFinite(availableBytes) || availableBytes < neededBytes) {
@@ -26592,12 +26616,12 @@ class LocalConnectorStore {
       return result;
     }, here) };
   }
-  hiddenChangeFinders(ledger, ledgerAfter, storeAfter) {
+  hiddenChangeFinders(ledger, ledgerAfter, storeAfter, pinCursor = false) {
     const ledgerCursor = ledger.readSteps(hiddenVisibilityFeedReads("tier_visibility_changes")).cursor;
     const storeCursor = this.visibilityFeedPresent ? this.readHere(hiddenVisibilityFeedReads("main.item_visibility_feed")).cursor : 0;
     return {
-      ledger: this.incrementalHiddenFinder(ledger, () => ledger.visibilityChangesSince(ledgerAfter), () => ledgerReadOffThread(ledger, hiddenVisibilityFeedReads("tier_visibility_changes", ledgerAfter, ledgerCursor), BACKGROUND_READS)),
-      store: this.incrementalHiddenFinder(ledger, () => this.itemVisibilityChangesSince(storeAfter), () => this.visibilityFeedPresent ? withOffThreadSnapshot(this.dbPath, async (read) => {
+      ledger: this.incrementalHiddenFinder(ledger, () => pinCursor ? ledger.readSteps(hiddenVisibilityFeedReads("tier_visibility_changes", ledgerAfter, ledgerCursor)) : ledger.visibilityChangesSince(ledgerAfter), () => ledgerReadOffThread(ledger, hiddenVisibilityFeedReads("tier_visibility_changes", ledgerAfter, ledgerCursor), BACKGROUND_READS)),
+      store: this.incrementalHiddenFinder(ledger, () => pinCursor ? this.readHere(hiddenVisibilityFeedReads("main.item_visibility_feed", storeAfter, storeCursor)) : this.itemVisibilityChangesSince(storeAfter), () => this.visibilityFeedPresent ? withOffThreadSnapshot(this.dbPath, async (read) => {
         const steps = hiddenVisibilityFeedReads("main.item_visibility_feed", storeAfter, storeCursor);
         let next = steps.next();
         while (!next.done)
@@ -27531,6 +27555,7 @@ class LocalConnectorStore {
     if (!this.childItemColumnsPresent)
       return [];
     const lane = this.childVisibilityLane();
+    const attachedLane = this.childLane;
     const prior = this.hiddenChildMemo;
     let ledger;
     let stores = [];
@@ -27538,7 +27563,7 @@ class LocalConnectorStore {
     const storeChanges = new Map;
     try {
       ledger = lane.ledger();
-      const members = lane.stores();
+      const members = [...lane.stores()];
       if (!ledger || this.visibilityLedger() !== ledger || !members.includes(this) || !members.every((store) => store instanceof LocalConnectorStore && store.visibilityFeedPresent)) {
         this.hiddenChildMemo = undefined;
         return yield* this.hiddenChildFullReadSteps();
@@ -27546,7 +27571,7 @@ class LocalConnectorStore {
       stores = members;
       const same = prior?.ledger === ledger && prior.storeCursors.size === stores.length && stores.every((store) => prior.storeCursors.has(store));
       if (this.hiddenSetIncrementalOffLoop) {
-        const finders = stores.map((store) => [store, store.hiddenChangeFinders(ledger, same ? prior.ledgerCursor : undefined, same ? prior.storeCursors.get(store) : undefined)]);
+        const finders = stores.map((store) => [store, store.hiddenChangeFinders(ledger, same ? prior.ledgerCursor : undefined, same ? prior.storeCursors.get(store) : undefined, true)]);
         const ledgerFinder = finders[0][1].ledger;
         ledgerChanges = yield ledgerFinder;
         for (const [store, finder] of finders)
@@ -27604,7 +27629,7 @@ class LocalConnectorStore {
         const parents = [...affected.values()];
         for (let offset = 0;offset < parents.length; offset += HIDDEN_CHILD_PARENT_SLICE) {
           const slice = parents.slice(offset, offset + HIDDEN_CHILD_PARENT_SLICE);
-          const verdicts = yield* parentVerdictsSteps(lane, slice);
+          const verdicts = yield* visibilityRead(() => parentVerdicts(lane, slice), () => parentVerdictsOffThread(lane, slice));
           for (const [key, value] of yield* this.hiddenChildParentEntriesSteps(lane, slice, verdicts))
             updates.set(key, value);
         }
@@ -27615,7 +27640,7 @@ class LocalConnectorStore {
     let stable = false;
     try {
       const current = lane.stores();
-      stable = lane.ledger() === ledger && this.visibilityLedger() === ledger && current.length === stores.length && stores.every((store) => current.includes(store) && store.visibilityFeedPresent);
+      stable = this.childLane === attachedLane && lane.ledger() === ledger && this.visibilityLedger() === ledger && current.length === stores.length && stores.every((store) => current.includes(store) && store.visibilityFeedPresent);
     } catch {}
     if (!stable) {
       if (full)
@@ -27763,7 +27788,7 @@ ${parentKey(ref)}`, { ref, origin });
           ...group.provider_conversation_id ? { providerConversationId: group.provider_conversation_id } : {}
         })
       }));
-      const verdicts = yield* parentVerdictsSteps(lane, slice);
+      const verdicts = yield* visibilityRead(() => parentVerdicts(lane, slice), () => parentVerdictsOffThread(lane, slice));
       if (entries)
         for (const [key, value] of yield* this.hiddenChildParentEntriesSteps(lane, slice, verdicts))
           entries.set(key, value);
@@ -30445,8 +30470,8 @@ ${parentKey(ref)}`, { ref, origin });
       throw new Error("Connector store trust reconciliation requires two distinct stores.");
     }
     if (this.dbPath !== ":memory:" && options.stricter.dbPath !== ":memory:") {
-      const looserFile = statSync13(this.dbPath);
-      const stricterFile = statSync13(options.stricter.dbPath);
+      const looserFile = statSync14(this.dbPath);
+      const stricterFile = statSync14(options.stricter.dbPath);
       if (looserFile.dev === stricterFile.dev && looserFile.ino === stricterFile.ino) {
         throw new Error("Connector store trust reconciliation refuses one database as both stores.");
       }
@@ -37308,7 +37333,7 @@ function fileIdentity(path) {
   if (path === ":memory:" || path === "")
     return;
   try {
-    const stat = statSync13(path, { bigint: true });
+    const stat = statSync14(path, { bigint: true });
     return stat.isFile() ? { dev: stat.dev, ino: stat.ino, birthtimeNs: stat.birthtimeNs } : undefined;
   } catch {
     return;

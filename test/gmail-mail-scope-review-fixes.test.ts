@@ -940,7 +940,7 @@ test.each(['live', 'ask'] as const)('a multi-page confirmation yields at a page 
   expect(reads.slice(-2)).toEqual(['metadata:two', 'metadata:three']);
 });
 
-test('live mail and confirmation resume in the existing 15-second scheduler share during a continuous Ask', async () => {
+test('live mail keeps arriving during a continuous Ask; confirmation resumes in the 15-second share', async () => {
   const start = NOW.getTime();
   const clock = createTestClock(start);
   const stores = fileStores(tempDir());
@@ -973,7 +973,8 @@ test('live mail and confirmation resume in the existing 15-second scheduler shar
   expect((await tick(0)).wait_reason).toBe('owner_ask');
   mails.push(message('live', start + 1_000));
   expect((await tick(30_000)).wait_reason).toBe('owner_ask');
-  expect(stores.internalStore.itemStoredContent(identity('live'))).toBeUndefined();
+  // Live intake is never held for an Ask; only the confirmation walk waits.
+  expect(stores.internalStore.itemStoredContent(identity('live'))?.chunkCount).toBe(1);
   expect((await tick(59_999)).wait_reason).toBe('owner_ask');
   expect(reads).toEqual([]);
   const share = await tick(60_000);

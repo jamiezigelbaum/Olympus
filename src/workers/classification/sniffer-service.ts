@@ -609,6 +609,7 @@ export class TierSnifferService {
   private heldBackSinceMs: number | undefined;
   /** This pass is an arrival's bounded turn: it asks one new arrival and does not give way. */
   private arrivalTurn = false;
+  private yieldAfterCall = false;
   private backlogRefresh: Promise<void> | undefined;
   private waiting: TierSnifferWaiting | undefined;
   /** When each queued move (ledger, item, generation) first failed in this process. */
@@ -720,20 +721,20 @@ export class TierSnifferService {
   }
 
   /**
-   * An answer needs the private pool (the worker calls this when answers in
-   * flight go from 0 to 1, and when an answer is queued behind a running
-   * call): abort the sniffer's in-flight call at once. The pass stops as
-   * `preempted`; nothing is counted against any item, and the sniffer never
-   * records anything in the answer pool's breakers.
+   * Give the next model turn to an answer. The worker uses after_call so
+   * an issued judgment can finish and apply its verdict. Explicit immediate
+   * preemption still aborts the pass without charging the item a failure.
    */
-  preempt(): void {
+  preempt(when: 'now' | 'after_call' = 'now'): void {
     // The owner's own answer ends a fair turn too, lowering slice included:
     // only other answers are outlasted, never the owner (#1030 review).
     this.fairTurn = false;
     this.yieldingSinceMs = undefined;
     // An arrival's turn is one short call: it finishes, then the pass ends.
     if (this.arrivalTurn) return;
-    this.abort?.abort();
+    // A request for the next model turn leaves every issued call to settle.
+    if (when === 'after_call') this.yieldAfterCall = this.running;
+    else this.abort?.abort();
   }
 
   /**
@@ -1185,6 +1186,7 @@ export class TierSnifferService {
       this.running = false;
     }
     const generation = ++this.passGeneration;
+    this.yieldAfterCall = false;
     this.arrivalTurn = this.arrivalTurnDue();
     if (this.arrivalTurn) this.heldBackSinceMs = undefined;
     this.running = true;
@@ -1380,7 +1382,7 @@ export class TierSnifferService {
   private yieldNow(): boolean {
     if (this.breakerOpen()) { this.lastYieldReason = 'breaker'; return true; }
     if (this.running && this.arrivalTurn) return false;
-    const held = this.holdsBack();
+    const held = (this.running && this.yieldAfterCall) || this.holdsBack();
     if (this.running) this.heldBackSinceMs = held ? this.heldBackSinceMs ?? this.clockMs() : undefined;
     return held;
   }

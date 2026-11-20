@@ -300,7 +300,8 @@ export async function attachEngineFixture(stores: LocalConnectorStore[], role: s
       const judge = guarded('judge', async () => { await service!.runOnce(); counts.judge_passes++; });
       // Uses the product pacer in addition to the engine's own status snapshot
       // recount, ensuring every changed fixture store reaches prepareStatusCounts.
-      const recount = startPacedStatusRecount({ holds: () => stopped, recount: async () => {
+      const recount = startPacedStatusRecount({ recount: async () => {
+        if (stopped) return false;
         counts.recounts_started++; report();
         try {
           for (const store of mounted) { await store.prepareStatusCounts(); await store.statusOffThread(); }

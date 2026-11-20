@@ -8,9 +8,8 @@
  * The front never waits on the background to answer a page: callers that
  * only need the wake delivered use `post` (receipt only).
  *
- * OwnerBusyRelay carries owner-busy signals for questions and shared local models
- * (`localModelActivity.onBusy → tierSniffer.preempt()`, server.ts) across the
- * split, and sends it again when a new background instance appears.
+ * OwnerBusyRelay carries owner-busy signals for questions and shared local
+ * models across the split, and renews them while they are active.
  */
 import { ENGINE_BACKGROUND_ORIGIN, ENGINE_COMMANDS_PATH } from '../../core/engine-split.ts';
 import { randomUUID } from 'node:crypto';
@@ -233,6 +232,7 @@ export class EngineCommandClient {
  */
 export class OwnerBusyRelay {
   private readonly busyResources = new Set<string>();
+  private readonly pendingIdle = new Map<string, Extract<EngineCommand, { kind: 'owner_idle' }>>();
   /** This front process, and the count of busy/idle changes it has sent. */
   private readonly front: string;
   private seq = 0;
@@ -261,18 +261,21 @@ export class OwnerBusyRelay {
 
   busy(resource: string): void {
     this.busyResources.add(resource);
-    this.deliver('owner_busy', resource);
+    this.pendingIdle.delete(resource);
+    this.sendBusy(resource);
     if (this.renewal === undefined) {
       this.renewal = this.setTimer(() => {
-        for (const busy of this.busyResources) this.deliver('owner_busy', busy);
+        for (const busy of this.busyResources) this.sendBusy(busy);
+        for (const idle of this.pendingIdle.values()) this.deliver(idle);
       }, this.renewEveryMs);
     }
   }
 
   idle(resource: string): void {
     if (!this.busyResources.delete(resource)) return;
-    this.deliver('owner_idle', resource);
-    if (this.busyResources.size === 0) this.stopRenewal();
+    const command = { kind: 'owner_idle', resource, front: this.front, seq: ++this.seq } as const;
+    this.pendingIdle.set(resource, command);
+    this.deliver(command);
   }
 
   /** Each background instance id the front sees (command answers, the status snapshot). */
@@ -281,7 +284,7 @@ export class OwnerBusyRelay {
     const restarted = this.instanceId !== undefined;
     this.instanceId = instanceId;
     if (!restarted) return;
-    for (const resource of this.busyResources) this.deliver('owner_busy', resource);
+    for (const resource of this.busyResources) this.sendBusy(resource);
   }
 
   stop(): void {
@@ -298,9 +301,17 @@ export class OwnerBusyRelay {
     return this.busyResources.has(resource);
   }
 
-  private deliver(kind: 'owner_busy' | 'owner_idle', resource: string): void {
-    const command: EngineCommand = { kind, resource, front: this.front, seq: ++this.seq };
-    void this.client.post(command, { timeoutMs: 30_000 }).catch(() => {
+  private sendBusy(resource: string): void {
+    this.deliver({ kind: 'owner_busy', resource, front: this.front, seq: ++this.seq });
+  }
+
+  private deliver(command: Extract<EngineCommand, { kind: 'owner_busy' | 'owner_idle' }>): void {
+    void this.client.post(command, { timeoutMs: 30_000 }).then(() => {
+      if (command.kind === 'owner_idle' && this.pendingIdle.get(command.resource) === command) {
+        this.pendingIdle.delete(command.resource);
+        if (this.busyResources.size === 0 && this.pendingIdle.size === 0) this.stopRenewal();
+      }
+    }).catch(() => {
       this.log(`[engine-split] ${command.kind} could not reach the background engine; it is sent again when the background is back.`);
     });
   }

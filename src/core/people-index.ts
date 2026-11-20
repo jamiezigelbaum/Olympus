@@ -1254,15 +1254,20 @@ export class PeopleIndexRefresher {
   }
 
   /**
-   * Link again from the senders already read, without reading any store: an
-   * owner's correction or contact card applies at once. Undefined before the
-   * first rebuild has read anything.
+   * Apply an owner's correction or contact card from cached sender reads
+   * whose store fingerprints are still current. Undefined before the first
+   * rebuild has read anything.
    */
   relink(): PeoplePerson[] | undefined {
     if (this.lastRefreshAt === undefined) return undefined;
     const stores = this.stores();
-    const current = new Set(authoredStores(stores));
-    const observations = [...this.observed].filter(([store]) => current.has(store)).flatMap(([, entry]) => entry.observations);
+    const current = authoredStores(stores);
+    const parts = fingerprintParts(current);
+    const observations = current.flatMap((store, position) => {
+      const part = parts[position]!;
+      const entry = this.observed.get(store);
+      return entry?.part === part && !part.endsWith(UNREADABLE_VISIBILITY) ? entry.observations : [];
+    });
     return linkStores(this.index, stores, observations);
   }
 

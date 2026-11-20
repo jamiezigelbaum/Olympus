@@ -139,7 +139,7 @@ import {
   visibilityAwaited,
   judgedAwaited,
   VisibilityChangedError,
-  parentVerdictsSteps,
+  parentVerdictsOffThread,
   CHILD_PARENT_CHAIN_LIMIT,
   hiddenChildKeysSteps,
   ledgerVisibilityOffThread,
@@ -2190,7 +2190,7 @@ export async function embedPendingChunks(
   targets: readonly ConnectorStoreEmbeddingTarget[],
   // stopAtMs: no batch starts after it (the first always runs). Items count
   // badly as work: one long file can hold more chunks than a pass has time for.
-  // shouldStop: polled with stopAtMs, and before the first batch too (the owner's Ask).
+  // shouldStop: lets a caller stop dispatching independently deferrable work.
   options: {
     maxItems: number; stopAtMs?: number; diagnostics?: boolean; shouldStop?: () => boolean;
     /** Lets a scheduler that reaches its hard deadline report already committed queue work. */
@@ -2720,8 +2720,10 @@ const VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS = 250;
  * which background answers keep busy too, so a backfill on a busy install
  * never finished and its store stayed on the slow exact scan.
  */
-let vectorDigestBackfillHold: () => boolean = () => false;
-export function setVectorDigestBackfillHold(hold?: () => boolean): void {
+let clearDigestHold: ((store: LocalConnectorStore) => void) | undefined;
+let vectorDigestBackfillHold: (store: LocalConnectorStore) => boolean = () => false;
+export function setVectorDigestBackfillHold(hold?: (store: LocalConnectorStore) => boolean, clear?: (store: LocalConnectorStore) => void): void {
+  clearDigestHold = clear;
   vectorDigestBackfillHold = hold ?? (() => false);
 }
 /**
@@ -3873,10 +3875,11 @@ function spawnConnectorStoreMaintenance(dbPath: string, source: string, args: re
   });
 }
 
-type RecencyIndexAdmission = (work: () => Promise<boolean>, preempt: () => void) => Promise<boolean | undefined>;
+type RecencyIndexAdmission = (work: () => Promise<boolean>, preempt: () => void, store: LocalConnectorStore) => Promise<boolean | undefined>;
 // No admission, no build: only the engine's background role installs one, so a
 // command-line open or a test never starts a child that takes a live store's
 // write lock outside the engine's coordination.
+let clearRecencyHold: ((store: LocalConnectorStore) => void) | undefined;
 let admitRecencyIndexBuild: RecencyIndexAdmission | undefined;
 let recencyIndexBuilding = false;
 /** After a build that lost the write lock or was stopped for ingest. */
@@ -3887,7 +3890,8 @@ const RECENCY_INDEX_BUSY_RETRY_MS = 2_000;
 const RECENCY_INDEX_NOT_ADMITTED_RETRY_MS = 30_000;
 
 /** The engine uses the same ingest admission as store reclaim for this write lock. */
-export function setConnectorStoreRecencyIndexAdmission(admit?: RecencyIndexAdmission): void {
+export function setConnectorStoreRecencyIndexAdmission(admit?: RecencyIndexAdmission, clear?: (store: LocalConnectorStore) => void): void {
+  clearRecencyHold = clear;
   admitRecencyIndexBuild = admit;
 }
 
@@ -4159,10 +4163,16 @@ export class LocalConnectorStore {
 
   private async buildRecencyIndex(): Promise<void> {
     const admit = admitRecencyIndexBuild;
-    if (!admit || this.closedForPoolReads || this.fileReplacedOrRemoved()) return;
+    if (!admit || this.closedForPoolReads || this.fileReplacedOrRemoved()) {
+      clearRecencyHold?.(this);
+      return;
+    }
     // Another process (the background role, seen from the front) may have built them since.
     if ((this.db.query("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name IN (?, ?)")
-      .get(CONNECTOR_STORE_RECENCY_INDEX, CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX) as { n: number }).n >= 2) return;
+      .get(CONNECTOR_STORE_RECENCY_INDEX, CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX) as { n: number }).n >= 2) {
+      clearRecencyHold?.(this);
+      return;
+    }
     if (recencyIndexBuilding || this.reclaimProcess || this.vectorDigestBackfillReading || this.visibilityPublishing || storeReadHasPriority()) {
       this.scheduleRecencyIndexBuild(RECENCY_INDEX_BUSY_RETRY_MS);
       return;
@@ -4194,7 +4204,7 @@ export class LocalConnectorStore {
       }, () => {
         preempted = true;
         this.reclaimProcess?.kill('SIGKILL');
-      });
+      }, this);
       if (!complete && !this.closedForPoolReads) {
         this.scheduleRecencyIndexBuild(complete === undefined ? RECENCY_INDEX_NOT_ADMITTED_RETRY_MS : RECENCY_INDEX_RETRY_MS);
       }
@@ -4226,7 +4236,7 @@ export class LocalConnectorStore {
       if (!model) return;
       // The owner's Ask goes first, for at most the stand-back's bound.
       let held = false;
-      try { held = vectorDigestBackfillHold(); } catch { held = false; }
+      try { held = !this.reclaimProcess && vectorDigestBackfillHold(this); } catch { held = false; }
       if (this.reclaimProcess || held) { this.scheduleVectorDigestBackfill(undefined, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS); return; }
       if (offThreadReadsSupported(this.dbPath)) { void this.backfillVectorDigestTurnOnPool(model); return; }
       try {
@@ -4312,6 +4322,8 @@ export class LocalConnectorStore {
     this.reclaimProcess?.kill('SIGKILL');
     clearTimeout(this.recencyIndexTimer);
     clearTimeout(this.vectorDigestBackfillTimer);
+    clearDigestHold?.(this);
+    clearRecencyHold?.(this);
     this.stopVisibilityPublisher();
     try {
       // SIGKILL releases the worker's write lock asynchronously. Media cleanup
@@ -5166,16 +5178,20 @@ export class LocalConnectorStore {
   }
 
   /** Capture both cursors before yielding either feed, as the original build does. */
-  private hiddenChangeFinders(ledger: TierLedger, ledgerAfter?: number, storeAfter?: number): {
+  private hiddenChangeFinders(ledger: TierLedger, ledgerAfter?: number, storeAfter?: number, pinCursor = false): {
     ledger: LoopFinder<VisibilityChanges>; store: LoopFinder<VisibilityChanges>;
   } {
     const ledgerCursor = ledger.readSteps(hiddenVisibilityFeedReads('tier_visibility_changes')).cursor;
     const storeCursor = this.visibilityFeedPresent
       ? this.readHere(hiddenVisibilityFeedReads('main.item_visibility_feed')).cursor : 0;
     return {
-      ledger: this.incrementalHiddenFinder(ledger, () => ledger.visibilityChangesSince(ledgerAfter),
+      ledger: this.incrementalHiddenFinder(ledger, () => pinCursor
+        ? ledger.readSteps(hiddenVisibilityFeedReads('tier_visibility_changes', ledgerAfter, ledgerCursor))
+        : ledger.visibilityChangesSince(ledgerAfter),
         () => ledgerReadOffThread(ledger, hiddenVisibilityFeedReads('tier_visibility_changes', ledgerAfter, ledgerCursor), BACKGROUND_READS)),
-      store: this.incrementalHiddenFinder(ledger, () => this.itemVisibilityChangesSince(storeAfter),
+      store: this.incrementalHiddenFinder(ledger, () => pinCursor
+        ? this.readHere(hiddenVisibilityFeedReads('main.item_visibility_feed', storeAfter, storeCursor))
+        : this.itemVisibilityChangesSince(storeAfter),
         () => this.visibilityFeedPresent
           ? withOffThreadSnapshot(this.dbPath, async read => {
             const steps = hiddenVisibilityFeedReads('main.item_visibility_feed', storeAfter, storeCursor);
@@ -6365,6 +6381,7 @@ export class LocalConnectorStore {
   private *hiddenChildReadSteps(): Generator<VisibilityRead, number[], unknown> {
     if (!this.childItemColumnsPresent) return [];
     const lane = this.childVisibilityLane();
+    const attachedLane = this.childLane;
     const prior = this.hiddenChildMemo;
     let ledger: TierLedger | undefined;
     let stores: LocalConnectorStore[] = [];
@@ -6372,7 +6389,7 @@ export class LocalConnectorStore {
     const storeChanges = new Map<LocalConnectorStore, { cursor: number; identities?: TierLedgerIdentity[] }>();
     try {
       ledger = lane.ledger();
-      const members = lane.stores();
+      const members = [...lane.stores()];
       if (!ledger || this.visibilityLedger() !== ledger
         || !members.includes(this) || !members.every(store => store instanceof LocalConnectorStore && store.visibilityFeedPresent)) {
         this.hiddenChildMemo = undefined;
@@ -6385,7 +6402,7 @@ export class LocalConnectorStore {
         // All lane cursors precede every awaited feed read, including those
         // of other stores (a parent can live on any leg).
         const finders = stores.map(store => [store, store.hiddenChangeFinders(ledger!,
-          same ? prior.ledgerCursor : undefined, same ? prior.storeCursors.get(store) : undefined)] as const);
+          same ? prior.ledgerCursor : undefined, same ? prior.storeCursors.get(store) : undefined, true)] as const);
         const ledgerFinder = finders[0]![1].ledger;
         ledgerChanges = (yield ledgerFinder) as VisibilityChanges;
         for (const [store, finder] of finders) storeChanges.set(store, (yield finder.store) as VisibilityChanges);
@@ -6441,7 +6458,10 @@ export class LocalConnectorStore {
         const parents = [...affected.values()];
         for (let offset = 0; offset < parents.length; offset += HIDDEN_CHILD_PARENT_SLICE) {
           const slice = parents.slice(offset, offset + HIDDEN_CHILD_PARENT_SLICE);
-          const verdicts = yield* parentVerdictsSteps(lane, slice);
+          const verdicts = yield* visibilityRead(
+            () => parentVerdicts(lane, slice),
+            () => parentVerdictsOffThread(lane, slice),
+          );
           for (const [key, value] of yield* this.hiddenChildParentEntriesSteps(lane, slice, verdicts)) updates.set(key, value);
         }
       }
@@ -6458,7 +6478,7 @@ export class LocalConnectorStore {
     let stable = false;
     try {
       const current = lane.stores();
-      stable = lane.ledger() === ledger && this.visibilityLedger() === ledger
+      stable = this.childLane === attachedLane && lane.ledger() === ledger && this.visibilityLedger() === ledger
         && current.length === stores.length && stores.every(store => current.includes(store)
           && store.visibilityFeedPresent);
     } catch { /* An unverifiable build is never installed. */ }
@@ -6604,7 +6624,10 @@ export class LocalConnectorStore {
           ...(group.provider_conversation_id ? { providerConversationId: group.provider_conversation_id } : {}),
         }),
       }));
-      const verdicts = yield* parentVerdictsSteps(lane, slice);
+      const verdicts = yield* visibilityRead(
+        () => parentVerdicts(lane, slice),
+        () => parentVerdictsOffThread(lane, slice),
+      );
       if (entries) for (const [key, value] of yield* this.hiddenChildParentEntriesSteps(lane, slice, verdicts)) entries.set(key, value);
       for (const parent of slice) if (verdicts.get(parentKey(parent))?.visible !== true) hiddenParents.push(parent);
       if (window.length < HIDDEN_CHILD_PARENT_SLICE) break;

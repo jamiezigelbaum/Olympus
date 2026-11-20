@@ -47,7 +47,7 @@ import { currentAccess, refusedAccess, type RemoteAccessAuthorization } from './
 
 export interface RemoteSearchOptions {
   /** The released Public and Personal evidence for a question (the same search ChatGPT's olympus_search runs). */
-  evidenceSearch: (input: { question: string; limit?: number }, signal?: AbortSignal) => Promise<unknown>;
+  evidenceSearch: (input: { question: string; limit?: number }, signal?: AbortSignal, caller?: OperationCaller) => Promise<unknown>;
   /** Whether an answer model is set up on the computer, so source_answer can work. Absent counts as yes. */
   answerModelAvailable?: () => boolean;
 }
@@ -161,7 +161,7 @@ async function runSearch(
   const manifests = createReleaseManifestSink();
   let raw: unknown;
   try {
-    raw = await runWithReleaseManifestSink(manifests, () => options.evidenceSearch({ question, ...(limit ? { limit } : {}) }, signal));
+    raw = await runWithReleaseManifestSink(manifests, () => options.evidenceSearch({ question, ...(limit ? { limit } : {}) }, signal, context.caller));
   } catch (error) {
     return errorResult(remoteErrorOutput(error));
   }

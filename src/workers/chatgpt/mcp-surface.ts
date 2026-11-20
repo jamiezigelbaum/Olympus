@@ -65,6 +65,8 @@ import {
 import { CHATGPT_ZKAPI_TOOL_ACCOUNT_SENTENCE } from './zkapi-copy.ts';
 
 export interface ChatGptSurfaceOptions {
+  /** The lifetime of an interactive tool call, including the Private probe wait. */
+  withOwnerQuestion?: <T>(work: () => Promise<T>) => Promise<T>;
   limitStops?: () => readonly import('../../core/limit-stops.ts').LimitStop[];
   /** Host presentation only; absent preserves the ChatGPT wire format. */
   appClient?: McpAppClient;
@@ -466,32 +468,37 @@ export async function callChatGptTool(
   signal?: AbortSignal,
   detachedContext?: () => OperationContext,
 ): Promise<ChatGptToolResult> {
-  const manifests = createReleaseManifestSink();
-  const capture = createReleaseCapture();
-  const result = await runWithReleaseCapture(capture, () => runWithReleaseManifestSink(manifests, () => runChatGptTool(name, args, ctx, options, signal, detachedContext)));
-  // What ChatGPT received, for the owner's local list (core/app-release-capture.ts).
-  const record = (final: ChatGptToolResult, withheldAfter = false): ChatGptToolResult => {
-    recordChatGptRequest(name, args, ctx, final, capture, withheldAfter);
-    return final;
+  const run = async () => {
+    const manifests = createReleaseManifestSink();
+    const capture = createReleaseCapture();
+    const result = await runWithReleaseCapture(capture, () => runWithReleaseManifestSink(manifests, () => runChatGptTool(name, args, ctx, options, signal, detachedContext)));
+    // What ChatGPT received, for the owner's local list (core/app-release-capture.ts).
+    const record = (final: ChatGptToolResult, withheldAfter = false): ChatGptToolResult => {
+      recordChatGptRequest(name, args, ctx, final, capture, withheldAfter);
+      return final;
+    };
+    // The Private probe may finish after evidence hydration. Recheck again
+    // after that await, immediately before the tool result leaves the surface.
+    if (name === SEARCH_TOOL_NAME && Array.isArray(result.structuredContent?.evidence)
+        && result.structuredContent.evidence.length > 0) {
+      const reason = ctx.releaseCheck
+        ? await answerReleaseWithheldReasonOffThread(manifests.manifests, ctx.releaseCheck, 'personal', { chunks: true })
+        : ANSWER_RELEASE_UNVERIFIED;
+      if (reason) return record(searchToolResult({ evidence: [], withheld: result.structuredContent.evidence.length, notes: [reason] }, { pendingPrivacyItems: ctx.pendingPrivacyItems?.() }), true);
+    }
+    if ((name === 'source_answer' || name === 'source_answer_result')
+        && (result.structuredContent as { status?: string } | undefined)?.status === 'answered'
+        && !(result.structuredContent && 'anonymous' in result.structuredContent)) {
+      const reason = ctx.releaseCheck
+        ? await answerReleaseWithheldReasonOffThread(manifests.manifests, ctx.releaseCheck, 'personal', { chunks: true })
+        : ANSWER_RELEASE_UNVERIFIED;
+      if (reason) return record(withPrivateAnswerOutcome(answerToolResult(withheldSourceAnswer(reason), { pendingPrivacyItems: ctx.pendingPrivacyItems?.() })), true);
+    }
+    return record(forClaude(name, PANEL_TOOL_NAMES.has(name) ? withPrivateAnswerOutcome(result) : result, options.appClient));
   };
-  // The Private probe may finish after evidence hydration. Recheck again
-  // after that await, immediately before the tool result leaves the surface.
-  if (name === SEARCH_TOOL_NAME && Array.isArray(result.structuredContent?.evidence)
-      && result.structuredContent.evidence.length > 0) {
-    const reason = ctx.releaseCheck
-      ? await answerReleaseWithheldReasonOffThread(manifests.manifests, ctx.releaseCheck, 'personal', { chunks: true })
-      : ANSWER_RELEASE_UNVERIFIED;
-    if (reason) return record(searchToolResult({ evidence: [], withheld: result.structuredContent.evidence.length, notes: [reason] }, { pendingPrivacyItems: ctx.pendingPrivacyItems?.() }), true);
-  }
-  if ((name === 'source_answer' || name === 'source_answer_result')
-      && (result.structuredContent as { status?: string } | undefined)?.status === 'answered'
-      && !(result.structuredContent && 'anonymous' in result.structuredContent)) {
-    const reason = ctx.releaseCheck
-      ? await answerReleaseWithheldReasonOffThread(manifests.manifests, ctx.releaseCheck, 'personal', { chunks: true })
-      : ANSWER_RELEASE_UNVERIFIED;
-    if (reason) return record(withPrivateAnswerOutcome(answerToolResult(withheldSourceAnswer(reason), { pendingPrivacyItems: ctx.pendingPrivacyItems?.() })), true);
-  }
-  return record(forClaude(name, PANEL_TOOL_NAMES.has(name) ? withPrivateAnswerOutcome(result) : result, options.appClient));
+  return options.withOwnerQuestion && (name === SEARCH_TOOL_NAME || name === SOURCE_ANSWER_TOOL.name || name === SOURCE_ANSWER_RESULT_TOOL.name)
+    ? options.withOwnerQuestion(run)
+    : run();
 }
 
 /**

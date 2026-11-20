@@ -13,8 +13,10 @@ import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { defineDropboxFilesCorpus } from '../src/workers/dropbox-files/index.ts';
 import { flushMicrotasks } from './helpers/test-clock.ts';
 import { DASHBOARD_STATUS_REQUEST, STORE_STATUS_REUSE_MS, bringCountsForward, createSourceIndexStatusHandler, type SourceIndexConnectorStoreStatus } from '../src/workers/source-index/status.ts';
-import { STATUS_RECOUNT_MIN_GAP_MS, STATUS_RECOUNT_PACE_FACTOR, startPacedStatusRecount } from '../src/workers/engine/status-recount.ts';
-import { createTestClock, waitFor } from './helpers/test-clock.ts';
+import { createStatusRecountPass, STATUS_RECOUNT_MIN_GAP_MS, STATUS_RECOUNT_PACE_FACTOR, startPacedStatusRecount } from '../src/workers/engine/status-recount.ts';
+import { createStandBack } from '../src/workers/engine/stand-back.ts';
+import { backgroundOwnerAskAdmission, ENGINE_STATUS_SNAPSHOT_SCHEMA, ENGINE_STATUS_STALE_MS, engineStatusAge } from '../src/workers/engine-split/snapshot.ts';
+import { createTestClock, waitFor, type TestClock } from './helpers/test-clock.ts';
 
 const CORPUS_ID = 'secure_local.dropbox.files';
 const SNAPSHOT = { countsMaxAgeMs: 300_000 };
@@ -301,6 +303,10 @@ describe('live totals beside kept counts', () => {
       const background = createSourceIndexStatusHandler({ corpusDefinitions: [defineDropboxFilesCorpus()], connectorStores: [store], nowMs: () => now, snapshotRole: 'writer' });
       const first = await background.refreshSnapshot!({ ...DASHBOARD_STATUS_REQUEST }, SNAPSHOT);
       expect(first.corpora.find(corpus => corpus.corpus_id === CORPUS_ID)).toMatchObject({ counts: { items_with_text: 0 } });
+      // A corpus-specific status may not have a dedicated recount. The
+      // writer can serve the already counted corpus during a hold.
+      expect((await background.status({ ...DASHBOARD_STATUS_REQUEST, corpus_id: CORPUS_ID }, SNAPSHOT)).corpora)
+        .toMatchObject([{ corpus_id: CORPUS_ID, counts: { items_with_text: 0 } }]);
       await store.syncFromConnector(connector([file('a.txt', 'alpha')]), { fetchContent: true });
       now += 30_000;
       const updated = await background.refreshSnapshot!({ ...DASHBOARD_STATUS_REQUEST }, SNAPSHOT);
@@ -334,16 +340,24 @@ test('finished embedding shows at once: the parity follows the live vectors on t
 });
 
 describe("the background's paced status recount", () => {
+  const scheduleAt = (clock: TestClock) => (callback: () => void, ms: number) => {
+    const timer = clock.setTimeout(callback, ms);
+    return () => clock.clearTimeout(timer);
+  };
+
   test('rests several times as long as each recount took, stands back for the owner, and reports it', async () => {
     const clock = createTestClock();
     let held = false;
     const starts: number[] = [];
     const lines: string[] = [];
     const recount = startPacedStatusRecount({
-      holds: () => held,
       // Each recount takes 20 s of the clock: the rest is then 5 x 20 s, not the 30 s floor.
-      recount: async () => { starts.push(clock.now()); await clock.sleep(20_000); },
-      sleep: (ms) => clock.sleep(ms),
+      recount: async () => {
+        if (held) return false;
+        starts.push(clock.now());
+        await clock.sleep(20_000);
+      },
+      schedule: scheduleAt(clock),
       now: () => clock.now(),
       log: (line) => lines.push(line),
     });
@@ -357,16 +371,97 @@ describe("the background's paced status recount", () => {
       await clock.advance(STATUS_RECOUNT_PACE_FACTOR * 20_000 - 1);
       expect(starts.length).toBe(1);
       expect(recount.health().age_ms).toBe(STATUS_RECOUNT_PACE_FACTOR * 20_000 - 1);
-      // The owner asks: the next recount waits for the hold to end.
+      // The owner asks: successive dispatches return and leave the count due.
       held = true;
       await clock.advance(60_000);
       expect(starts.length).toBe(1);
       held = false;
-      await clock.advance(5_000);
+      expect(recount.health()).toMatchObject({ runs: 1, failures: 0, counting: false });
+      await clock.advance(STATUS_RECOUNT_MIN_GAP_MS);
       expect(starts.length).toBe(2);
       expect(starts[1]! - t0).toBeGreaterThan(20_000 + STATUS_RECOUNT_PACE_FACTOR * 20_000);
       expect(STATUS_RECOUNT_MIN_GAP_MS).toBeLessThan(STATUS_RECOUNT_PACE_FACTOR * 20_000);
     } finally { recount.stop(); }
+  });
+
+  test('a held refresh serves its last complete count with current admission and true ages', async () => {
+    const clock = createTestClock();
+    let asking = true;
+    const standBack = createStandBack({ reason: () => asking ? 'question in the front' : undefined, now: clock.now, log: () => {} });
+    let collectedAt = clock.now();
+    let collectedCounts = standBack.counts();
+    const admission = () => backgroundOwnerAskAdmission(engineStatusAge({
+      schema: ENGINE_STATUS_SNAPSHOT_SCHEMA, instance_id: 'fixture',
+      written_at: clock.date().toISOString(), state_at: new Date(collectedAt).toISOString(),
+      scheduler: null, judge: { backlog: null, pending: null, spending: null }, captures: null,
+      stand_back: collectedCounts, owner_ask_probe_failures: 2,
+    }, clock.now()));
+    const handler = createSourceIndexStatusHandler({ snapshotRole: 'writer', corpusDefinitions: [], nowMs: clock.now, ownerAskAdmission: admission });
+    expect(await within(handler.status({ include_items: false }, SNAPSHOT))).toMatchObject({ counting: true, stand_back: {} });
+    const original = await handler.refreshSnapshot!({ include_items: false }, SNAPSHOT);
+    const starts: number[] = [];
+    const pass = createStatusRecountPass(key => standBack.holds('status', key), key => standBack.clear('status', key));
+    const recount = startPacedStatusRecount({
+      recount: () => pass([{ key: 'snapshot:plain', run: async () => {
+        starts.push(clock.now());
+        await clock.sleep(4_000);
+        await handler.refreshSnapshot!({ include_items: false }, SNAPSHOT);
+      } }]),
+      schedule: scheduleAt(clock),
+      now: clock.now,
+    });
+    try {
+      await clock.advance(STATUS_RECOUNT_MIN_GAP_MS);
+      collectedAt = clock.now();
+      collectedCounts = standBack.counts();
+      await clock.advance(1_000);
+      expect(starts).toHaveLength(0);
+      expect(recount.health()).toMatchObject({ runs: 0, failures: 0, counting: false });
+      expect(await within(handler.status({ include_items: false }, SNAPSHOT))).toMatchObject({
+        generated_at: original.generated_at,
+        snapshot_age_ms: STATUS_RECOUNT_MIN_GAP_MS + 1_000,
+        background_state_age_ms: 1_000,
+        owner_ask_probe_failures: 2,
+        stand_back: { status: {
+          work_kind: 'status', reason: 'question in the front', wait_reason: 'owner_ask',
+          held_count: 1, holds: 1, held_ms: STATUS_RECOUNT_MIN_GAP_MS, bound_reached: 0,
+        } },
+      });
+      await clock.advance(STATUS_RECOUNT_MIN_GAP_MS + 3_000);
+      expect(starts).toHaveLength(1);
+      expect(recount.health()).toMatchObject({ runs: 1, failures: 0, last_ms: 4_000, age_ms: 0 });
+      expect(await handler.status({ include_items: false }, SNAPSHOT)).toMatchObject({
+        stand_back: 'unavailable',
+        background_state_age_ms: ENGINE_STATUS_STALE_MS + 4_000,
+        snapshot_age_ms: 0,
+      });
+      asking = false;
+      await clock.advance(STATUS_RECOUNT_MIN_GAP_MS - 1);
+      expect(starts).toHaveLength(1);
+      await clock.advance(1);
+      expect(starts).toHaveLength(2);
+    } finally { recount.stop(); }
+  });
+
+  test('the next unserved store or snapshot resumes ahead of completed work', async () => {
+    let allowed = 'totals:first';
+    const ran: string[] = [];
+    const removed: string[] = [];
+    const pass = createStatusRecountPass(key => key !== allowed, key => removed.push(key));
+    const units = ['totals:first', 'totals:second', 'snapshot:plain', 'snapshot:dashboard'].map(key => ({
+      key, run: async () => { ran.push(key); },
+    }));
+    for (const { key } of units) {
+      allowed = key;
+      expect(await pass(units)).toBe(true);
+    }
+    expect(ran).toEqual(units.map(unit => unit.key));
+    expect(await pass(units)).toBe(false);
+    // On a roster change, the departed unit is no longer pending.
+    allowed = 'totals:second';
+    expect(await pass(units.slice(1))).toBe(true);
+    expect(removed).toEqual(['totals:first']);
+    expect(ran.at(-1)).toBe('totals:second');
   });
 
   test('a change counts again without the idle floor, but never sooner than the pace allows', async () => {
@@ -374,9 +469,8 @@ describe("the background's paced status recount", () => {
     let took = 1_000;
     const starts: number[] = [];
     const recount = startPacedStatusRecount({
-      holds: () => false,
       recount: async () => { starts.push(clock.now()); await clock.sleep(took); },
-      sleep: (ms) => clock.sleep(ms),
+      schedule: scheduleAt(clock),
       now: () => clock.now(),
     });
     try {
