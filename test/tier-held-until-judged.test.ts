@@ -11,6 +11,7 @@ import { afterEach, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { join } from 'node:path';
 import { SecretLocationsIndex } from '../src/workers/classification/secret-locations.ts';
+import { storedPersonalLoweringLap } from '../src/workers/classification/sniffer-service.ts';
 import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts';
 import {
   HELD_RECORD_PRIORITY,
@@ -391,6 +392,39 @@ test('an edit of a cleared Personal item is held with its new text, and the old 
   expect(f.stores.secure_local.localContent(localId('edited'))?.chunks.join(' ')).toContain('Quietnewmarker');
   expect(f.stores.internal.searchItems('Quietoldmarker', 10)).toEqual([]);
   expect(f.stores.internal.searchItems('Quietnewmarker', 10)).toEqual([]);
+});
+
+test.each(['secure_local', 'internal'] as const)('the repair walker queues a lowering after the %s re-list judges held text Personal', async legacyDomain => {
+  const f = lane({ ...HOLD, sniffer: waiting });
+  const spec = { id: 'listed-again', name: 'Picnic list', text: ORDINARY, legacyDomain };
+  const identity = identityOf(spec.id);
+  await syncOne(f, spec);
+  expect(f.ledger.getCurrent(identity)).toMatchObject({ routed: true, state: 'pending', contentPending: true });
+  expect(f.ledger.copies(identity)).toContainEqual(expect.objectContaining({
+    trustDomain: 'secure_local', layers: 'content', state: 'current', embedHold: true,
+  }));
+
+  // A standalone observation can also bring a newly judged edit.
+  const text = legacyDomain === 'secure_local' ? ORDINARY : 'Bring oranges to the revised picnic.';
+  await f.stores.secure_local.syncFromConnector(fixtureConnector(() => [{ ...spec, text, version: 'v2' }]), {
+    fetchContent: true, placement: FIXTURE_PLACEMENT, tierClassification: { ...HOLD, sniffer: JUDGED_PERSONAL_SNIFFER },
+  });
+  const row = f.ledger.getCurrent(identity)!;
+  expect(row).toMatchObject({ decidedBy: 'default', contentRead: true, contentPending: false });
+  expect(row.reasons.filter(reason => reason.startsWith('content:sha256:'))).toHaveLength(1);
+  expect(row.reasons).toContain(`content:sniffer:${JUDGED_PERSONAL_SNIFFER.id}:ordinary:0.99`);
+  expect(row.state).toBe('current');
+  expect(await storedPersonalLoweringLap(f.set, undefined, () => undefined)).toMatchObject({ changed: true });
+  expect(f.ledger.getCurrent(identity)).toMatchObject({ state: 'moving', targetContentTier: 'private', targetMetadataTier: 'private' });
+  const move = moveTieredItem({ set: f.set, identity, target: { contentTier: 'private', metadataTier: 'private' } });
+  if (legacyDomain === 'internal') {
+    // This legacy listing removed the Private body. The mover must refuse the stale source.
+    await expect(move).rejects.toMatchObject({ code: 'content_no_copy' });
+    expect(f.stores.internal.localContent(localId(spec.id))?.chunks ?? []).toEqual([]);
+  } else {
+    await move;
+    expect(f.stores.internal.localContent(localId(spec.id))?.chunks.join('')).toBe(text);
+  }
 });
 
 test('a Personal verdict moves the content down; a Private verdict keeps it in Private', async () => {

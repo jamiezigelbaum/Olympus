@@ -96,6 +96,28 @@ interface SweepState {
   } | undefined;
 }
 
+/** A lowering waits for all applicable raising rules, including provider-only label walks. */
+export function ownerRuleSweepsComplete(set: TieredStoreSet): boolean {
+  const classification = set.classification();
+  if (!classification || classification.unavailableReason) return false;
+  const raising = (classification.rules ?? []).filter(isRaisingRule);
+  if (!raising.length) return true;
+  const ledger = set.ledger;
+  const stored = readState(ledger.readMeta(SWEEP_META_KEY));
+  const outstanding = raising.filter(rule => isLabelRule(rule) || !stored.done.includes(ruleKey(rule)));
+  if (!outstanding.length) return true;
+  for (const { provider, accountScope } of ledger.storedAccounts()) {
+    const applicable = outstanding.filter(rule => rule.source === undefined || rule.source === provider);
+    if (!applicable.length) continue;
+    const labels = readLabelState(ledger.readMeta(labelSweepMetaKey(provider, accountScope)));
+    for (const rule of applicable) {
+      const key = ruleKey(rule);
+      if (!isLabelRule(rule) || !labels.done.includes(key) || labels.walks?.[key]) return false;
+    }
+  }
+  return true;
+}
+
 /** The sweep on its caller's connection (a direct caller, not the engine's loop). */
 export function sweepOwnerRuleRaises(options: { set: TieredStoreSet; limit?: number }): TierRulesSweepReport {
   return runPassHere(ownerRuleRaisesPass(options));
@@ -404,6 +426,8 @@ export async function sweepLabelRuleRaises(options: {
     let pageToken = resumed?.pageToken;
     let deferred = resumed?.deferred === true;
     report.rules += 1;
+    // A recheck is pending while the provider request is in flight, including its first page.
+    if (done.delete(key)) save();
     let finished = false;
     if (!applyCurrent(() => {
       done.delete(key);

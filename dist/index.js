@@ -11060,7 +11060,16 @@ var init_sniffer_store = __esm(() => {
   init_tier_ledger_path();
 });
 // src/workers/classification/tier-ledger.ts
-var RELABEL_UNREAD_WHERE = `content_read = 0 AND instr(reasons_json, ':fail_safe:missing_question"') > 0
+var PERSONAL_LOWERING_UNCLAIMED = `rejudge_json IS NULL AND metadata_forced = 0
+  AND metadata_tier <> 'secrets' AND content_tier <> 'secrets'
+  AND decided_by NOT IN ('override', 'owner_rule')
+  AND instr(reasons_json, '"override:') = 0 AND instr(reasons_json, '"metadata:owner_rule:') = 0
+  AND NOT EXISTS (SELECT 1 FROM tier_overrides o WHERE (o.provider, o.account_scope, o.conversation_key, o.provider_item_id)
+    = (i.provider, i.account_scope, i.conversation_key, i.provider_item_id))
+  AND NOT EXISTS (SELECT 1 FROM tier_copies c WHERE (c.provider, c.account_scope, c.conversation_key, c.provider_item_id)
+    = (i.provider, i.account_scope, i.conversation_key, i.provider_item_id) AND c.copy_state = 'staged')
+  AND NOT EXISTS (SELECT 1 FROM tier_write_intents w WHERE (w.provider, w.account_scope, w.conversation_key, w.provider_item_id)
+    = (i.provider, i.account_scope, i.conversation_key, i.provider_item_id))`, STORED_PERSONAL_LOWERING, RELABEL_UNREAD_WHERE = `content_read = 0 AND instr(reasons_json, ':fail_safe:missing_question"') > 0
           AND EXISTS (SELECT 1 FROM json_each(reasons_json) r WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question')`, RELABEL_UNREAD_CANDIDATES_SQL, CORPUS_VISIBILITY_FLAGS_SQL = `c.provider, c.account_scope, c.conversation_key, c.provider_item_id,
       c.copy_state <> 'current' OR EXISTS (SELECT 1 FROM tier_write_intents w
         WHERE w.provider = c.provider AND w.account_scope = c.account_scope
@@ -11096,6 +11105,19 @@ var init_tier_ledger = __esm(() => {
   init_store_write_guard();
   init_tier_classifier();
   init_tier_ledger_path();
+  STORED_PERSONAL_LOWERING = `routed = 1 AND state = 'current' AND content_read = 1
+  AND metadata_pending = 0 AND content_pending = 0 AND move_attempts = 0
+  AND target_metadata_tier IS NULL AND target_content_tier IS NULL
+  AND metadata_tier IN ('public','private') AND content_tier IN ('public','private')
+  AND decided_by IN ('default','sniffer') AND instr(reasons_json, '"content:sniffer:') > 0
+  AND ${PERSONAL_LOWERING_UNCLAIMED}
+  -- A refused or abandoned move may still have zero counted failures. Its
+  -- next attempt belongs to a fresh judgment, not a replay of this receipt.
+  AND (SELECT h.decided_by FROM tier_history h WHERE (h.provider, h.account_scope, h.conversation_key, h.provider_item_id)
+    = (i.provider, i.account_scope, i.conversation_key, i.provider_item_id) ORDER BY h.history_pk DESC LIMIT 1) IS NOT 'rollback'
+  AND EXISTS (SELECT 1 FROM tier_copies c WHERE (c.provider, c.account_scope, c.conversation_key, c.provider_item_id)
+    = (i.provider, i.account_scope, i.conversation_key, i.provider_item_id)
+    AND c.copy_state = 'current' AND c.layers IN ('content','both') AND c.trust_domain = 'secure_local')`;
   RELABEL_UNREAD_CANDIDATES_SQL = `SELECT rowid FROM tier_items WHERE ${RELABEL_UNREAD_WHERE} LIMIT ?`;
   CORPUS_COPY_FLAGS_PAGE_SQL = `SELECT c.rowid AS row_id, ${CORPUS_VISIBILITY_FLAGS_SQL} FROM tier_copies c
   INDEXED BY tier_copies_visibility_walk WHERE c.corpus_id = ? AND c.rowid > ? ORDER BY c.rowid LIMIT 500`;

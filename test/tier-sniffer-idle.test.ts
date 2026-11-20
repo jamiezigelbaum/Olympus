@@ -4,21 +4,22 @@ import { join } from 'node:path';
 import { BUILT_IN_SNIFFER_LANE } from '../src/workers/classification/built-in-sniffer.ts';
 import { InstalledTierClassification } from '../src/workers/classification/installed-tier-classification.ts';
 import { registerInstalledTierClassification } from '../src/workers/classification/installed-tier-classification-registry.ts';
-import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
+import { storedPersonalLoweringLap, TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
 import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts';
 import { snifferId, snifferPromptVersions } from '../src/workers/classification/sniffer.ts';
 import { classifyItemTiers, PERSONAL_FIRST_REASON, TIER_CLASSIFIER_VERSION } from '../src/workers/classification/tier-classifier.ts';
 import { PERSONAL_FIRST_SETTLE_DONE, TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { writeOwnerTierRules } from '../src/workers/classification/tier-rules.ts';
 import { TieredStoreSet } from '../src/workers/connector-store/tiered-store-set.ts';
+import { reopenLabelRuleSweep, sweepLabelRuleRaises, sweepOwnerRuleRaises } from '../src/workers/connector-store/tier-rules-sweep.ts';
 import { settlePersonalFirstItems } from '../src/workers/connector-store/tier-held-settle.ts';
 import { createTestClock } from './helpers/test-clock.ts';
-import { FIXTURE_PLACEMENT, fixtureConnector, identityOf, openTierFixture, tempDir } from './helpers/tier-fixtures.ts';
+import { FIXTURE_PLACEMENT, JUDGED_PERSONAL_SNIFFER, fixtureConnector, identityOf, localId, openTierFixture, tempDir } from './helpers/tier-fixtures.ts';
 
 const cleanup: Array<() => void> = [];
 afterEach(() => { for (const close of cleanup.splice(0).reverse()) close(); });
 
-function fixture() {
+function fixture(autoMoves = false) {
   const tmp = tempDir('tier-sniffer-idle-');
   const clock = createTestClock();
   const f = openTierFixture(tmp.dir, { embed: false, now: clock.date });
@@ -39,6 +40,7 @@ function fixture() {
   const service = new TierSnifferService({
     installed, lane: BUILT_IN_SNIFFER_LANE, now: clock.date, ownerContext,
     stores: () => set.openStores(), classificationLedgerPath: join(tmp.dir, 'classification.jsonl'),
+    ...(autoMoves ? { autoMoves: { embeddingLedgerPath: join(tmp.dir, 'embedding.jsonl'), localEmbeddingsOnly: () => true } } : {}),
     autoApproveBuiltIn: true, ingestionTurn: () => undefined,
     model: { async complete() {
       return { modelId: 'test-judge', text: '{"verdicts":[{"i":1,"tier":"personal","category":"ordinary","confidence":0.99,"ownRecord":false,"privateKind":"none"}]}' };
@@ -58,7 +60,7 @@ function fixture() {
       spyOn(f.ledger, 'listAwaitingTextWindowSteps'), spyOn(f.ledger, 'listPersonalFirstWindowSteps'),
       spyOn(f.ledger, 'rejudgeCandidatePageSteps'), spyOn(f.ledger, 'listRoutedSteps'),
       spyOn(f.ledger, 'listRoutedOverridesSteps'), spyOn(f.ledger, 'listClearedOverrideRowsSteps'),
-      spyOn(f.ledger, 'staleEmbedHoldSteps'),
+      spyOn(f.ledger, 'staleEmbedHoldSteps'), spyOn(f.ledger, 'storedPersonalLoweringSteps'),
     ],
   };
 }
@@ -93,10 +95,106 @@ test('settled ledgers read no background tier item windows on idle ticks', async
     walkers: {
       namesOnly: { reason: 'idle_unchanged', lastResult: 'no_work' },
       personalFirst: { reason: 'retired', lastResult: 'retired' },
+      personalLowerings: { reason: 'idle_unchanged', lastResult: 'no_work' },
       rejudge: { reason: 'idle_unchanged', lastResult: 'no_work' },
       staleEmbedHolds: { reason: 'idle_unchanged', lastResult: 'no_work' },
     },
   });
+});
+
+// Recreate the old writer's durable decision, keeping the actual held store copies.
+async function storedPersonalRows(f: Fixture, ids: string[]) {
+  const text = 'Bring bananas to the picnic.';
+  await f.set.sync(fixtureConnector(() => ids.map(id => ({ id, name: 'Picnic list', text }))), {
+    fetchContent: true, placement: FIXTURE_PLACEMENT, tierClassification: { holdContentUntilJudged: true },
+  }, { settle: false });
+  const decision = classifyItemTiers({ signals: { title: 'Picnic list' }, text, holdUntilJudged: true }, { sniffer: JUDGED_PERSONAL_SNIFFER });
+  const db = new Database(f.ledger.dbPath);
+  try {
+    const update = db.query("UPDATE tier_items SET state = 'current', content_pending = 0, reasons_json = ? WHERE provider_item_id = ?");
+    for (const id of ids) {
+      expect(f.ledger.copies(identityOf(id))).toContainEqual(expect.objectContaining({ layers: 'content', trustDomain: 'secure_local', embedHold: true }));
+      update.run(JSON.stringify(decision.reasons), id);
+    }
+  } finally { db.close(); }
+  return text;
+}
+
+test('repair resumes after its page, even after stale holds clear, and the normal drain moves the judged bytes', async () => {
+  const f = fixture(true);
+  const ids = ['a-held', 'b-held'];
+  const text = await storedPersonalRows(f, ids);
+  const steps = f.ledger.storedPersonalLoweringSteps.bind(f.ledger);
+  spyOn(f.ledger, 'storedPersonalLoweringSteps').mockImplementation(options => steps({ ...options, limit: 1 }));
+  // These are settled decisions. The existing question donor can be absent.
+  for (const id of ids) {
+    const identity = identityOf(id);
+    f.installed.snifferStoreForLedger(f.ledger.dbPath).deleteQuestion(identity, 'content');
+    f.ledger.markJudged(identity, { engineVersion: TIER_CLASSIFIER_VERSION, snifferId: f.set.classification()!.sniffer!.id });
+  }
+  for (const id of ids) {
+    const tick = await f.tick();
+    expect(tick.state === 'ran' && tick.report.calls).toBe(0);
+    expect(tick.state === 'ran' && tick.autoMoves?.moved).toBe(1);
+    expect(f.ledger.copies(identityOf(id))).toEqual([expect.objectContaining({ trustDomain: 'internal', layers: 'both', embedHold: false })]);
+    expect(f.stores.internal!.localContent(localId(id))?.chunks.join('')).toBe(text);
+  }
+});
+
+test('a repair page rechecks overrides, open questions, write intents and verdict evidence on the writer', async () => {
+  const f = fixture();
+  const ids = ['override', 'owner-rule', 'pending', 'moving', 'secret', 'rejudge', 'intent', 'staged', 'mixed', 'fail-safe', 'two-receipts', 'unchanged'];
+  await storedPersonalRows(f, ids);
+  const page = f.ledger.readSteps(f.ledger.storedPersonalLoweringSteps({ limit: 100 }));
+  expect(page.records).toHaveLength(ids.length);
+  f.ledger.setOverride(identityOf('override'), { kind: 'not_secret' });
+  const db = new Database(f.ledger.dbPath);
+  try {
+    for (const [id, reason] of [['owner-rule', 'metadata:owner_rule:sender:fixture:prior'], ['fail-safe', 'content:sniffer:model:unresolved:0.00'],
+      ['two-receipts', 'content:sha256:other']] as const) {
+      db.query("UPDATE tier_items SET reasons_json = json_insert(reasons_json, '$[#]', ?) WHERE provider_item_id = ?").run(reason, id);
+    }
+    db.exec("UPDATE tier_items SET content_pending = 1, state = 'pending' WHERE provider_item_id = 'pending'");
+    db.exec("UPDATE tier_items SET state = 'moving', target_content_tier = 'secure', target_metadata_tier = 'secure' WHERE provider_item_id = 'moving'");
+    db.exec("UPDATE tier_items SET content_tier = 'secrets' WHERE provider_item_id = 'secret'");
+    db.exec("UPDATE tier_copies SET copy_state = 'staged' WHERE provider_item_id = 'staged' AND layers = 'metadata'");
+    // The plan brings both layers to Personal: names would rise from Public as the body comes down.
+    db.exec("UPDATE tier_copies SET trust_domain = 'public_safe' WHERE provider_item_id = 'mixed' AND layers = 'metadata'");
+    db.exec("UPDATE tier_items SET rejudge_json = '{}' WHERE provider_item_id = 'rejudge'");
+  } finally { db.close(); }
+  f.ledger.putWriteIntent({ identity: identityOf('intent'), kind: 'deletion', version: 'v2', connectorId: 'fixture' });
+  const queued = page.records.filter(row => f.ledger.queueStoredPersonalLowering(identityOf(row.providerItemId), decision => f.set.placementFor(decision)));
+  expect(queued.map(row => row.providerItemId)).toEqual(['unchanged']);
+  expect(f.ledger.listMoving({ direction: 'raise' }).map(row => row.providerItemId)).toEqual(['moving']);
+});
+
+test('repair waits for the full stored sweep and the label receipt for every applicable account in the ledger', async () => {
+  const f = fixture();
+  await storedPersonalRows(f, ['outside']);
+  const identity = identityOf('outside');
+  const second = { ...identity, accountScope: 'second' };
+  const names = classifyItemTiers({ signals: { title: 'Picnic' }, namesOnly: true });
+  f.ledger.recordDecision(second, names);
+  writeOwnerTierRules([
+    { id: 'folder', match: { kind: 'pathPrefix', value: '/Elsewhere/' }, tier: 'secure', strength: 'force' },
+    { id: 'label', source: identity.provider, match: { kind: 'label', value: 'Family' }, tier: 'secure', strength: 'force' },
+    { id: 'unrelated', source: 'different-provider', match: { kind: 'label', value: 'Work' }, tier: 'secure', strength: 'force' },
+  ], { path: f.rulesPath });
+  const repair = () => storedPersonalLoweringLap(f.set, undefined, () => undefined);
+  const labels = (accountScope: string) => sweepLabelRuleRaises({
+    set: f.set, provider: identity.provider, accountScope, source: { async listLabelled() { return { ids: [] }; } },
+  });
+  expect(sweepOwnerRuleRaises({ set: f.set, limit: 1 }).complete).toBe(false);
+  expect((await labels(identity.accountScope)).pending).toBe(0);
+  expect((await labels(second.accountScope)).pending).toBe(0);
+  expect(await repair()).toMatchObject({ complete: false });
+  reopenLabelRuleSweep(f.ledger, identity.provider, second.accountScope);
+  expect(sweepOwnerRuleRaises({ set: f.set, limit: 1 }).complete).toBe(true);
+  expect(await repair()).toMatchObject({ complete: false });
+  expect(f.ledger.listMoving()).toEqual([]);
+  expect((await labels(second.accountScope)).pending).toBe(0);
+  expect(await repair()).toMatchObject({ complete: true, changed: true });
+  expect(f.ledger.listMoving({ direction: 'lower' }).map(row => row.providerItemId)).toEqual(['outside']);
 });
 
 test('a new decided hold wakes the release walk on the next tick', async () => {

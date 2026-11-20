@@ -18171,6 +18171,29 @@ var AWAITING_TEXT_WHERE = `routed = 1 AND content_read = 0 AND metadata_pending 
               OR r.value GLOB 'content:sniffer:*:fail_safe:unread')))`;
 var PERSONAL_FIRST_WHERE = `routed = 1 AND content_pending = 1
         AND EXISTS (SELECT 1 FROM json_each(reasons_json) r WHERE r.value = ?)`;
+var PERSONAL_LOWERING_UNCLAIMED = `rejudge_json IS NULL AND metadata_forced = 0
+  AND metadata_tier <> 'secrets' AND content_tier <> 'secrets'
+  AND decided_by NOT IN ('override', 'owner_rule')
+  AND instr(reasons_json, '"override:') = 0 AND instr(reasons_json, '"metadata:owner_rule:') = 0
+  AND NOT EXISTS (SELECT 1 FROM tier_overrides o WHERE (o.provider, o.account_scope, o.conversation_key, o.provider_item_id)
+    = (i.provider, i.account_scope, i.conversation_key, i.provider_item_id))
+  AND NOT EXISTS (SELECT 1 FROM tier_copies c WHERE (c.provider, c.account_scope, c.conversation_key, c.provider_item_id)
+    = (i.provider, i.account_scope, i.conversation_key, i.provider_item_id) AND c.copy_state = 'staged')
+  AND NOT EXISTS (SELECT 1 FROM tier_write_intents w WHERE (w.provider, w.account_scope, w.conversation_key, w.provider_item_id)
+    = (i.provider, i.account_scope, i.conversation_key, i.provider_item_id))`;
+var STORED_PERSONAL_LOWERING = `routed = 1 AND state = 'current' AND content_read = 1
+  AND metadata_pending = 0 AND content_pending = 0 AND move_attempts = 0
+  AND target_metadata_tier IS NULL AND target_content_tier IS NULL
+  AND metadata_tier IN ('public','private') AND content_tier IN ('public','private')
+  AND decided_by IN ('default','sniffer') AND instr(reasons_json, '"content:sniffer:') > 0
+  AND ${PERSONAL_LOWERING_UNCLAIMED}
+  -- A refused or abandoned move may still have zero counted failures. Its
+  -- next attempt belongs to a fresh judgment, not a replay of this receipt.
+  AND (SELECT h.decided_by FROM tier_history h WHERE (h.provider, h.account_scope, h.conversation_key, h.provider_item_id)
+    = (i.provider, i.account_scope, i.conversation_key, i.provider_item_id) ORDER BY h.history_pk DESC LIMIT 1) IS NOT 'rollback'
+  AND EXISTS (SELECT 1 FROM tier_copies c WHERE (c.provider, c.account_scope, c.conversation_key, c.provider_item_id)
+    = (i.provider, i.account_scope, i.conversation_key, i.provider_item_id)
+    AND c.copy_state = 'current' AND c.layers IN ('content','both') AND c.trust_domain = 'secure_local')`;
 var PERSONAL_FIRST_SETTLE_CURSOR = "personal_first_settle_after";
 var PERSONAL_FIRST_SETTLE_DONE = "personal_first_settle_done";
 var WINDOW_SLICE_ROWS = 2000;
@@ -18190,7 +18213,7 @@ function* windowSteps(where, params, options) {
           SELECT * FROM tier_items ${keyAfter}
           ORDER BY provider, account_scope, conversation_key, provider_item_id
           LIMIT ?
-        )
+        ) AS i
         WHERE ${where}
         ORDER BY provider, account_scope, conversation_key, provider_item_id
         LIMIT ?
@@ -19185,6 +19208,31 @@ class TierLedger {
   listPersonalFirstWindowSteps(options = {}) {
     return windowSteps(PERSONAL_FIRST_WHERE, [PERSONAL_FIRST_REASON], options);
   }
+  storedPersonalLoweringSteps(options) {
+    return windowSteps(STORED_PERSONAL_LOWERING, [], { ...options, examine: WINDOW_SLICE_ROWS });
+  }
+  queueStoredPersonalLowering(identity, placementFor) {
+    return this.db.transaction(() => {
+      const row = this.db.query(`SELECT * FROM tier_items i WHERE provider = ? AND account_scope = ?
+        AND conversation_key = ? AND provider_item_id = ? AND ${STORED_PERSONAL_LOWERING}`).get(...idParams(identity));
+      if (!row)
+        return false;
+      const record = recordFromRow(row);
+      if (!judgedPersonal(record) || record.reasons.filter((reason) => reason.startsWith("content:sha256:")).length !== 1)
+        return false;
+      const decision = decisionOfRow(record);
+      const plan = placementFor(decision);
+      if (!plan)
+        return false;
+      const copies = this.copies(identity).filter((copy) => copy.state === "current");
+      const source = copyServingLayer(copies, "content");
+      const target = copyServingLayer(plan.copies, "content");
+      if (!source || !target || trustDomainRank(target.trustDomain) >= trustDomainRank(source.trustDomain) || placementIsRaise(copies, plan.copies))
+        return false;
+      this.queueMoveRow(identity, record, decision, { hide: false, decidedAt: this.now().toISOString() });
+      return true;
+    })();
+  }
   listPending(options = {}) {
     const limit = Math.max(1, Math.min(options.limit ?? 500, 5000));
     const rows = options.after ? this.db.query(`
@@ -19723,6 +19771,16 @@ class TierLedger {
       return await work();
     } finally {
       this.db.exec("COMMIT");
+    }
+  }
+  *storedAccounts() {
+    const first = this.db.query("SELECT provider, account_scope AS accountScope FROM tier_items WHERE provider >= '' ORDER BY provider, account_scope LIMIT 1");
+    const next = this.db.query(`SELECT provider, account_scope AS accountScope FROM tier_items
+      WHERE (provider, account_scope) > (?, ?) ORDER BY provider, account_scope LIMIT 1`);
+    let account = first.get();
+    while (account) {
+      yield account;
+      account = next.get(account.provider, account.accountScope);
     }
   }
   readMeta(key) {
@@ -21760,6 +21818,9 @@ function settledSnifferRejudgeCause(row, cause, id) {
 }
 function holdSnifferLowering(current, next) {
   return process.env.OLYMPUS_TIER_SNIFFER_HOLD_LOWERING === "1" && current.state === "current" && current.contentTier === "secure" && next.contentTier !== "secrets" && (next.contentTier === "private" || current.metadataTier === "secure" && next.metadataTier === "private");
+}
+function judgedPersonal(row) {
+  return row.contentRead && !row.contentPending && !row.metadataPending && !row.metadataForced && tierRank(maxTier(row.metadataTier, row.contentTier)) <= tierRank("private") && row.decidedBy !== "owner_rule" && row.decidedBy !== "override" && row.reasons.some((reason) => reason.startsWith("content:sniffer:")) && !row.reasons.some((reason) => reason.startsWith("metadata:owner_rule:") || reason.startsWith("override:") || reason.includes(":fail_safe:") || reason.includes(":record_held:") || reason.endsWith(":unresolved:0.00") || reason.endsWith(":injection:classifier_instruction:0.00") || reason.endsWith(":union:decision:failed") || isOpenSnifferReason(reason, "content"));
 }
 function decisionOfRow(row) {
   const pending = row.metadataPending || row.contentPending;
