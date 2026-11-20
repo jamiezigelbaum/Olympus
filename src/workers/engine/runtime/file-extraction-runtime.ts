@@ -654,7 +654,9 @@ export function createFileExtractionRuntime(
           const lane = roster.find((config) => config.corpusId === read.itemRef.corpusId
             || itemStores.get(config.corpusId)?.().some((holder) => holder.corpusId === read.itemRef.corpusId));
           if (!lane || !corpora.some((corpus) => corpus.corpusId === lane.corpusId)) return undefined;
-          for (const holder of itemStores.get(lane.corpusId)?.() ?? []) {
+          const stores = itemStores.get(lane.corpusId);
+          if (!stores) return undefined;
+          for (const holder of stores()) {
             const candidate = holder.onDemandReadCandidate(read.itemRef.providerItemId);
             if (!candidate) continue;
             const { identity, metadata } = candidate;
@@ -701,16 +703,22 @@ export function createFileExtractionRuntime(
               readableOnRequest: policy?.readableOnRequest ?? candidate.readableOnRequest,
               job: { refs: [ref], extractorKind: extractor.kind, extractorVersion: extractor.versionFor?.(extractionMimeType) ?? extractor.version,
                 policyDecision: 'index_allowed' as const },
+              hasIndexedContent: () => stores().some(leg => {
+                const row = leg.storedItemState(identity);
+                return metadata.sourceVersion && row?.version === metadata.sourceVersion && row.chunkCount > 0 && leg.contentServedNow(identity.localItemId);
+              }),
+              hasGrant: () => holder.currentOnDemandRead(identity.localItemId, metadata.sourceVersion ?? '')
+                && stores().every(leg => leg.readOnDemand(identity.localItemId, metadata.sourceVersion ?? '')),
               grant: () => {
                 promoted = ref;
-                for (const leg of itemStores.get(lane.corpusId)?.() ?? []) leg.grantOnDemandRead(identity.localItemId, metadata.sourceVersion);
+                for (const leg of stores()) leg.grantOnDemandRead(identity.localItemId, metadata.sourceVersion);
               },
             };
           }
           return undefined;
         },
       });
-      if (promoted) runRead(promoted);
+      if (promoted && result.state === 'queued') runRead(promoted);
       // Read but not yet judged is still being read as far as a question can
       // tell: its content is held out of answers until the judge decides.
       if (result.settled && judged && !judged()) {

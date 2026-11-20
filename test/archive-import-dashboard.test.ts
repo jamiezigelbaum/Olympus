@@ -12,7 +12,7 @@
 
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import { createTestClock } from './helpers/test-clock.ts';
-import { ownerLocalMint } from './helpers/owner-local-mint.ts';
+import { ownerLocalMint, postAsLocalOwner } from './helpers/owner-local-mint.ts';
 import { Database } from 'bun:sqlite';
 import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -989,6 +989,48 @@ describe('the dashboard routes', () => {
 });
 
 describe('one archive from the picker to a cited answer and back out', () => {
+  test('Remove waits for a pass already writing its page, and a fresh search misses before cleanup', async () => {
+    const f = fixture();
+    const started = await approveStaged(f.dashboard, f.write('Mail.mbox', mbox([mail(0, { subject: 'lighthouse rota' })])));
+    if (!started.ok || started.status !== 'started') throw new Error('expected a start');
+    const lane = f.runtime.lane('email');
+    const sync = lane.set.sync.bind(lane.set);
+    const writing = Promise.withResolvers<void>();
+    const resume = Promise.withResolvers<void>();
+    const paused = spyOn(lane.set, 'sync').mockImplementationOnce(async (...args) => {
+      writing.resolve();
+      await resume.promise;
+      return sync(...args);
+    });
+    const pull = pullArchiveImport({ state: f.runtime.state, lane, archiveId: started.archive_id });
+    await writing.promise;
+    const worker = createEmailSourceWorker({
+      connectorStores: lane.set.openStores(), sourceDashboard: {
+        sovereigntyEngine: createSovereigntyEngine(buildEnvBridgeSovereigntyConfig({})), archiveImports: f.dashboard,
+      },
+    });
+    let acknowledged = false;
+    const removal = postAsLocalOwner(worker, '/dashboard/archive-import/remove', { archive_id: started.archive_id, acknowledge: true })
+      .then(response => { acknowledged = true; return response; });
+    try {
+      await until(() => f.runtime.state.get(started.archive_id)?.status === 'removing');
+      expect(acknowledged).toBe(false);
+    } finally {
+      resume.resolve();
+      await pull;
+      paused.mockRestore();
+    }
+    expect(await (await removal).json()).toEqual({ ok: true });
+    const reader = createEmailSourceWorker({ connectorStores: lane.set.openStores() });
+    for (const store of lane.set.openStores()) {
+      const search = await reader.fetch(new Request('http://worker.test/v1/source/index/search', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ corpus_id: store.corpusId, query: 'lighthouse rota' }),
+      }));
+      expect(await search.json()).toMatchObject({ hits: [] });
+    }
+  });
+
   test('approve, import, find it in search cited as imported mail, remove', async () => {
     const f = fixture();
     const path = f.write('Takeout.mbox', mbox([
@@ -1002,18 +1044,24 @@ describe('one archive from the picker to a cited answer and back out', () => {
 
     // The worker's own search route, over the archive's stores, finds it.
     const lane = f.runtime.lane('email');
-    const worker = createEmailSourceWorker({ connectorStores: lane.set.openStores() });
-    const hits: Array<Record<string, any>> = [];
-    for (const store of lane.set.openStores()) {
-      const response = await worker.fetch(new Request('http://worker.test/v1/source/index/search', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: 'lighthouse keeper rota', corpus_id: store.corpusId, retrieval_mode: 'keyword', max_results: 5 }),
-      }));
-      expect(response.status).toBe(200);
-      const body = await response.json() as { hits?: Array<Record<string, any>> };
-      hits.push(...(body.hits ?? []).map((hit) => ({ ...hit, corpus: store.corpusId, trust: store.trustDomain })));
-    }
+    const worker = createEmailSourceWorker({ connectorStores: lane.set.openStores(), sourceDashboard: {
+      sovereigntyEngine: createSovereigntyEngine(buildEnvBridgeSovereigntyConfig({})), archiveImports: f.dashboard,
+    } });
+    const search = async () => {
+      const hits: Array<Record<string, any>> = [];
+      for (const store of lane.set.openStores()) {
+        const response = await worker.fetch(new Request('http://worker.test/v1/source/index/search', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: 'lighthouse keeper rota', corpus_id: store.corpusId, retrieval_mode: 'keyword', max_results: 5 }),
+        }));
+        expect(response.status).toBe(200);
+        const body = await response.json() as { hits?: Array<Record<string, any>> };
+        hits.push(...(body.hits ?? []).map((hit) => ({ ...hit, corpus: store.corpusId, trust: store.trustDomain })));
+      }
+      return hits;
+    };
+    const hits = await search();
     // The Archives row, from the engine's own status over these stores: one
     // archive imported, and its listing done (no "Finding items" left).
     const corpusRegistry = createSourceCorpusRegistry(withArchiveImportCorpora());
@@ -1046,8 +1094,14 @@ describe('one archive from the picker to a cited answer and back out', () => {
     });
     expect((cited.structuredContent as { evidence: Array<{ source: string }> }).evidence[0]!.source).toBe('Imported mail');
 
-    // Remove: everything derived from it goes, the file stays.
-    expect(f.dashboard.remove(started.archive_id)).toEqual({ ok: true });
+    // Removal acknowledges revocation even before the scheduler purges the rows.
+    const id = hit!.sourceItem.localItemId as string;
+    for (const store of lane.set.openStores()) store.grantOnDemandRead(id, 'v1');
+    const removed = await postAsLocalOwner(worker, '/dashboard/archive-import/remove', { archive_id: started.archive_id, acknowledge: true });
+    expect(removed.status).toBe(200);
+    expect(await removed.json()).toEqual({ ok: true });
+    for (const store of lane.set.openStores()) expect(store.readOnDemand(id, 'v1')).toBe(false);
+    expect(await search()).toEqual([]);
     let removal = await runArchiveRemoval({ state: f.runtime.state, lane, archiveId: started.archive_id });
     for (let run = 0; run < 20 && removal.kind === 'progress'; run += 1) {
       removal = await runArchiveRemoval({ state: f.runtime.state, lane, archiveId: started.archive_id });

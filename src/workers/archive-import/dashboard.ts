@@ -38,7 +38,8 @@ import type { ArchiveSourceTarget } from './source-targets.ts';
 import { createArchiveImportAgent, type ArchiveImportAgent } from './agent.ts';
 import { SCHEDULER_SOURCE_IDS } from '../source-scheduler.ts';
 import { archiveFileDigestSteps, findProbableCopies, verifyArchiveManifest } from './manifest.ts';
-import { requestArchiveRemoval } from './removal.ts';
+import { waitForActiveArchivePulls } from './sync.ts';
+import { requestArchiveRemoval, withdrawArchiveReads } from './removal.ts';
 import { archiveStateSiblingPath } from '../../core/olympus-layout.ts';
 import { ArchiveUploadError, createArchiveUploads, type ArchiveUploads, type ArchiveUploadStatus } from './staging.ts';
 import type { ArchiveImportRuntime } from './runtime.ts';
@@ -150,7 +151,7 @@ export interface ArchiveImportDashboard {
   approve(request: ({ uploadId: string; sourceId?: string } | { requestId: string }) & ArchiveAccountAnswer): Promise<ArchiveApproveResult>;
   readonly upload: ArchiveImportUploads;
   decline(requestId: string): ArchiveSimpleResult;
-  remove(archiveId: string): ArchiveSimpleResult;
+  remove(archiveId: string): ArchiveSimpleResult | Promise<ArchiveSimpleResult>;
   /**
    * Stops an import that is an input of a source. What it imported so far
    * stays in the source; approving the same export again picks it up where it
@@ -161,7 +162,7 @@ export interface ArchiveImportDashboard {
    * The person's approval of an agent's request to remove an archive: the
    * same removal Remove runs, for the archive the request names.
    */
-  approveRemoval(requestId: string): ArchiveSimpleResult;
+  approveRemoval(requestId: string): ArchiveSimpleResult | Promise<ArchiveSimpleResult>;
   view(): ComputerArchivesMeta;
   /**
    * The imports that joined a source, grouped by the source's card: each with
@@ -1014,7 +1015,7 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
    * hands the scheduler its removal task. The one place anything is removed
    * (Remove on an archive, and the approval of an agent's request).
    */
-  const removeNow = (archiveId: string): ArchiveSimpleResult => {
+  const removeNow = (archiveId: string): ArchiveSimpleResult | Promise<ArchiveSimpleResult> => {
     const record = state.get(archiveId);
     if (!record) {
       for (const request of requests.list()) {
@@ -1022,17 +1023,26 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
       }
       return { ok: false, code: 'unknown_archive', message: ARCHIVE_APPROVE_COPY.unknown_archive };
     }
-    if (record.status === 'removing') return { ok: false, code: 'already_removing', message: ARCHIVE_APPROVE_COPY.already_removing };
+    if (record.status === 'removing' && record.visibility_withdrawn) return { ok: false, code: 'already_removing', message: ARCHIVE_APPROVE_COPY.already_removing };
     // An input of a source has no Remove of its own: its items are the source's, deleted with the source.
     if (record.target) return { ok: false, code: 'part_of_source', message: ARCHIVE_APPROVE_COPY.part_of_source };
     requestArchiveRemoval(state, archiveId, options.now);
-    // A finished check pointing at it, and any request to remove it, say nothing true any more.
-    for (const request of requests.list()) {
-      if (request.archive_id === archiveId) requests.remove(request.request_id);
-    }
-    refresh();
-    wakeScheduler();
-    return { ok: true };
+    const finish = (): ArchiveSimpleResult => {
+      try {
+        for (const lane of options.runtime.existingLanes(new Set([record.family]))) withdrawArchiveReads(lane, record);
+        state.update(archiveId, entry => { entry.visibility_withdrawn = true; });
+        // A finished check pointing at it, and any request to remove it, say nothing true any more.
+        for (const request of requests.list()) {
+          if (request.archive_id === archiveId) requests.remove(request.request_id);
+        }
+      } finally {
+        refresh();
+        wakeScheduler();
+      }
+      return { ok: true };
+    };
+    const active = waitForActiveArchivePulls(archiveId);
+    return active ? active.then(finish) : finish();
   };
 
   // The Archives list and its requests. The dashboard shows the imports that are its own (`shownHere`): one that joined a source
@@ -1173,8 +1183,7 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
       const blocked = notRunning();
       if (blocked && !blocked.ok) return { ok: false, code: blocked.code, message: blocked.message };
       const result = removeNow(request.archive_id);
-      // Answered either way: the request does not stay for an archive that cannot be removed again.
-      requests.remove(requestId);
+      if (!(result instanceof Promise) && !result.ok) requests.remove(requestId);
       return result;
     },
 

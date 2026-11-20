@@ -1,4 +1,5 @@
 import { changeMemoryActivity, changeMemoryCounter } from '../../core/memory-counters.ts';
+import { tierSetForLedger } from './tier-set-registry.ts';
 import { embedsOnThisComputer } from '../local-pacing.ts';
 import { EMBEDDING_HOLD_REASONS, type EmbeddingHoldReason } from '../../core/embedding-sweep-idle.ts';
 import { trackSqliteStoreMemory, untrackSqliteStoreMemory } from '../engine-split/sqlite-memory.ts';
@@ -9609,15 +9610,20 @@ export class LocalConnectorStore {
     this.notifyOnDemandGrantChange();
   }
 
+  private revokeDeletedItemReads(id: string, requireActiveRow = false): void {
+    const set = tierSetForLedger(this.tierLedgerPathInUse());
+    const stores = set?.store(this.trustDomain) === this ? set.openStores() : [this];
+    if (requireActiveRow && !stores.some(store => store.activeLocalItemRow(id))) return;
+    for (const store of stores) store.revokeOnDemandRead(id);
+  }
+
+  onDemandGrantIds(): string[] {
+    return this.db.query<{ local_item_id: string }, []>('SELECT local_item_id FROM on_demand_item_reads')
+      .all().map(row => row.local_item_id);
+  }
+
   revokeOnDemandRead(localItemId: string): void {
-    const previous = (this.db.query('PRAGMA busy_timeout').get() as { timeout: number }).timeout;
-    this.db.exec(`PRAGMA busy_timeout = ${Math.min(previous, REVOCATION_WRITE_LIMIT.milliseconds)}`);
-    try {
-      const removed = this.db.query('DELETE FROM on_demand_item_reads WHERE local_item_id = ?').run(localItemId);
-      if (removed.changes > 0) this.notifyOnDemandGrantChange();
-    } finally {
-      this.db.exec(`PRAGMA busy_timeout = ${previous}`);
-    }
+    if (deleteOnDemandGrant(this.db, localItemId)) this.notifyOnDemandGrantChange();
   }
 
   onDemandGrantEpoch(): number | undefined {
@@ -12348,6 +12354,10 @@ export class LocalConnectorStore {
           // deleted, rejected, or indexed — shares the same fairness bound.
           await this.controlPath.ingestionTurn();
 
+          if (item.metadata['deleted'] === true) {
+            this.revokeDeletedItemReads(item.identity.localItemId, item.metadata['deletedIdentityResolved'] === false);
+          }
+
           // FIRST, before content is fetched, before classification, before
           // any scope or allowlist is consulted. Enforcing here is what makes
           // the saving real rather than cosmetic: an excluded item costs one
@@ -13194,6 +13204,7 @@ export class LocalConnectorStore {
             deferred.push(localItemId);
             break;
           }
+          this.revokeDeletedItemReads(localItemId);
           this.db.query(`
             UPDATE items
             SET tombstoned = 1, deleted_at = ?, indexed_at = ?, sync_run_id = ?
@@ -13236,7 +13247,7 @@ export class LocalConnectorStore {
       for (const scope of scopes) {
       const rows = currentMembershipAuthority === 'provider_account_snapshot'
         ? this.db.query(`
-            SELECT DISTINCT i.item_pk, i.tombstoned
+            SELECT DISTINCT i.item_pk, i.tombstoned, i.local_item_id
             FROM items i
             WHERE (i.tombstoned = 0 OR i.trust_tier = 'S5')
               AND i.provider = ?
@@ -13261,9 +13272,9 @@ export class LocalConnectorStore {
             scope.accountScope,
             syncRunId,
             snapshotObservedAt ?? '',
-          ) as Array<{ item_pk: number; tombstoned: number }>
+          ) as Array<{ item_pk: number; tombstoned: number; local_item_id: string }>
         : this.db.query(`
-            SELECT DISTINCT i.item_pk, i.tombstoned
+            SELECT DISTINCT i.item_pk, i.tombstoned, i.local_item_id
             FROM items i
             JOIN item_owners owner
               ON owner.item_pk = i.item_pk
@@ -13277,9 +13288,10 @@ export class LocalConnectorStore {
                 WHERE preservation.item_pk = i.item_pk
                   AND preservation.ownership_kind = 'preservation'
               )
-          `).all(connectorId, syncRunId, scope.provider, scope.accountScope) as Array<{ item_pk: number; tombstoned: number }>;
+          `).all(connectorId, syncRunId, scope.provider, scope.accountScope) as Array<{ item_pk: number; tombstoned: number; local_item_id: string }>;
 
         for (const row of rows) {
+          this.revokeDeletedItemReads(row.local_item_id);
           // A Secret kept as a location only that the provider no longer lists: it is deleted like any
           // other item, so the location row becomes an ordinary tombstone (and is not counted as one).
           if (row.tombstoned === 1) {
@@ -22806,6 +22818,17 @@ function sameStringSet(actual: readonly string[], expected: readonly string[]): 
 const ON_DEMAND_GRANT_EPOCH_TRIGGERS = [
   'on_demand_grant_delete', 'on_demand_grant_update', 'on_demand_item_delete', 'on_demand_item_update', 'on_demand_grant_insert',
 ] as const;
+
+export function deleteOnDemandGrant(db: Database, localItemId: string): boolean {
+  const previous = (db.query('PRAGMA busy_timeout').get() as { timeout: number }).timeout;
+  db.exec(`PRAGMA busy_timeout = ${Math.min(previous, REVOCATION_WRITE_LIMIT.milliseconds)}`);
+  try {
+    const removed = db.query('DELETE FROM on_demand_item_reads WHERE local_item_id = ?').run(localItemId);
+    return removed.changes > 0;
+  } finally {
+    db.exec(`PRAGMA busy_timeout = ${previous}`);
+  }
+}
 
 function createOnDemandReads(db: Database): void {
   db.exec(`CREATE TABLE IF NOT EXISTS on_demand_item_reads (

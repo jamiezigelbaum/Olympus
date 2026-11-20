@@ -60,7 +60,10 @@ export interface FileSourceScopeApprovalSnapshot {
    * written, and callers must not redo that save's side effects.
    */
   replayed?: true;
+  readChangePending?: true;
 }
+
+type FolderPermissions = Pick<FileSourceScopeApprovalSnapshot, 'selections' | 'wholeAccount'>;
 
 interface PersistedFileSourceScopeApproval {
   source_id: FileSourceScopeId;
@@ -72,6 +75,8 @@ interface PersistedFileSourceScopeApproval {
   approved_at: string;
   /** The revision this approval replaced: what its save was sent with. */
   replaced_revision?: string;
+  /** Previous permissions, retained until the lane writer finishes this save. */
+  previous_permissions?: FolderPermissions;
 }
 
 interface PersistedFileSourceScopeState {
@@ -213,6 +218,7 @@ export function readFileSourceScopeApproval(input: {
     revision: approval.revision,
     selections: approval.selections,
     wholeAccount: approval.whole_account,
+    ...(approval.previous_permissions ? { readChangePending: true } : {}),
   };
 }
 
@@ -225,6 +231,7 @@ export function approveFileSourceScope(input: {
   selections: readonly FileSourceScopeSelection[];
   wholeAccount: boolean;
   explicitWholeAccountConfirmation: boolean;
+  reconcileReads?: boolean;
   now?: Date;
 }): FileSourceScopeApprovalSnapshot {
   return withFileLeaseSync(input.statePath, (lease) => {
@@ -266,6 +273,7 @@ export function approveFileSourceScope(input: {
     if (!input.wholeAccount && selections.some((selection) => isFileScopeRootKey(definition, selection.key))) {
       throw new OperationError('invalid_request', 'Choose Whole account and confirm it explicitly to approve the provider root.');
     }
+    if (current.readChangePending) throw new OperationError('source_index_policy_violation', 'The previous folder save still has on-demand reads to revoke.');
     const existing = readState(input.statePath);
     const approvals = existing.kind === 'valid'
       ? existing.state.approvals.filter((candidate) => candidate.source_id !== input.sourceId)
@@ -280,6 +288,7 @@ export function approveFileSourceScope(input: {
       whole_account: input.wholeAccount,
       approved_at: (input.now ?? new Date()).toISOString(),
       replaced_revision: input.expectedRevision,
+      ...(input.reconcileReads ? { previous_permissions: { selections: current.selections, wholeAccount: current.wholeAccount } } : {}),
     });
     const state: PersistedFileSourceScopeState = { version: 1, approvals };
     lease.commit(() => writePrivateFileAtomicSync(input.statePath, `${JSON.stringify(state, null, 2)}\n`));
@@ -291,6 +300,24 @@ export function approveFileSourceScope(input: {
       selections,
       wholeAccount: input.wholeAccount,
     };
+  });
+}
+
+/** A failed store write leaves the original transition available to a retry. */
+export function reconcileFileScopeReadChange(
+  path: string, current: FileSourceScopeApprovalSnapshot,
+  apply: (previous: FileSourceScopeApprovalSnapshot) => number,
+): number {
+  return withFileLeaseSync(path, lease => {
+    const read = readState(path);
+    if (read.kind !== 'valid') throw new OperationError('config_error', 'The saved folder permissions could not be read.');
+    const saved = read.state.approvals.find(entry => entry.source_id === current.sourceId);
+    if (!saved || saved.revision !== current.revision) throw new OperationError('source_index_policy_violation', 'The folder approval changed during the save.');
+    if (!saved.previous_permissions) return 0;
+    const count = apply({ ...current, ...saved.previous_permissions });
+    delete saved.previous_permissions;
+    lease.commit(() => writePrivateFileAtomicSync(path, `${JSON.stringify(read.state, null, 2)}\n`));
+    return count;
   });
 }
 
@@ -463,7 +490,28 @@ function parseApproval(value: unknown): PersistedFileSourceScopeApproval {
     || (record.replaced_revision !== undefined
       && (typeof record.replaced_revision !== 'string' || record.replaced_revision.length > 512))
   ) throw new Error('approval');
-  const selections = normalizeSelections(record.selections.map((entry) => {
+  const selections = parseSelections(record.selections);
+  let previous: FolderPermissions | undefined;
+  if (record.previous_permissions !== undefined) {
+    const prior = record.previous_permissions as Partial<FolderPermissions> | null;
+    if (!prior || typeof prior.wholeAccount !== 'boolean' || !Array.isArray(prior.selections)) throw new Error('previous permissions');
+    previous = { selections: parseSelections(prior.selections), wholeAccount: prior.wholeAccount };
+  }
+  return {
+    source_id: record.source_id,
+    account_generation: record.account_generation,
+    revision: record.revision,
+    status: 'approved',
+    selections,
+    whole_account: record.whole_account,
+    approved_at: record.approved_at,
+    ...(previous ? { previous_permissions: previous } : {}),
+    ...(typeof record.replaced_revision === 'string' ? { replaced_revision: record.replaced_revision } : {}),
+  };
+}
+
+function parseSelections(values: unknown[]): FileSourceScopeSelection[] {
+  return normalizeSelections(values.map((entry) => {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new Error('selection');
     const selection = entry as Record<string, unknown>;
     if (typeof selection.key !== 'string' || typeof selection.state !== 'string') throw new Error('selection');
@@ -476,14 +524,4 @@ function parseApproval(value: unknown): PersistedFileSourceScopeApproval {
       ...(ancestorKeys ? { ancestorKeys: ancestorKeys as string[] } : {}),
     };
   }));
-  return {
-    source_id: record.source_id,
-    account_generation: record.account_generation,
-    revision: record.revision,
-    status: 'approved',
-    selections,
-    whole_account: record.whole_account,
-    approved_at: record.approved_at,
-    ...(typeof record.replaced_revision === 'string' ? { replaced_revision: record.replaced_revision } : {}),
-  };
 }

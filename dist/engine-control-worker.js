@@ -757,6 +757,7 @@ var ENGINE_JUDGE_BOOST_MAX_IDS = 20;
 var ENGINE_JUDGE_BOOST_TTL_MS = 15 * 60000;
 var ENGINE_JUDGE_NOW_MAX_BUDGET_MS = RELEASE_CHUNK_JUDGE_BUDGET_MS;
 var ENGINE_FORWARDED_ROUTES = {
+  archive_remove: ["/dashboard/archive-import/remove"],
   delete_source_data: ["/dashboard/delete-source-data", "/v1/cli/data-delete"],
   tier_override: ["/v1/cli/tier", "/dashboard/privacy/items/set", "/v1/privacy-item/raise", "/dashboard/privacy/judge-check"],
   people: ["/dashboard/people"],
@@ -897,6 +898,7 @@ function parseEngineCommandEnvelope(value) {
       }
       return { id, command: { kind, samples } };
     }
+    case "archive_remove":
     case "delete_source_data":
     case "tier_override":
     case "storage_registry":
@@ -913,6 +915,13 @@ function parseEngineCommandEnvelope(value) {
       if (frontPid !== undefined && (kind !== "delete_source_data" || !Number.isSafeInteger(frontPid) || frontPid <= 0))
         fail("frontPid is a process id, carried by a delete.");
       return { id, command: { kind, request: forwardedRequest(kind, command.request), ...frontPid !== undefined ? { frontPid } : {} } };
+    }
+    case "revoke_reads": {
+      const { source, reason } = command;
+      if (typeof source === "string" && SOURCE.test(source) && (reason === "disconnect" || reason === "scope" || reason === "exclusions")) {
+        return { id, command: { kind, source, reason } };
+      }
+      throw new EngineCommandError(400, "revoke_reads needs a source and a revocation reason.");
     }
     case "sync_now":
     case "start_approved": {

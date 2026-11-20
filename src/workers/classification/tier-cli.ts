@@ -18,11 +18,12 @@ import { approveClassifier, revokeClassifier } from '../classification-ledger.ts
 
 import { Database, SQLiteError } from 'bun:sqlite';
 import { existsSync } from 'node:fs';
-import { lifecycleStorePaths, type LifecyclePathContext } from '../../data-lifecycle.ts';
+import { lifecycleAccountFiles, lifecycleEnv, lifecycleStoreFileOwner, lifecycleStorePaths, type LifecyclePathContext } from '../../data-lifecycle.ts';
 import { defaultMailSourceScopeStatePath, readMailSourceScopeApproval } from '../../core/mail-source-scope.ts';
 import { handleRegistryPathFromEnv, readConnectedHandleRegistry } from '../credential-broker/connected-handles.ts';
 import { OperationError } from '../../core/operation-error.ts';
-import { writableStoreOpensForbidden } from '../../core/store-write-guard.ts';
+import { assertWritableStoreOpenAllowed, writableStoreOpensForbidden } from '../../core/store-write-guard.ts';
+import { REVOCATION_WRITE_LIMIT } from '../../core/waiting-private-questions.ts';
 import { closeSqliteStore } from '../../core/sqlite-store.ts';
 import type { SourceFamily } from '../../core/source-index/types.ts';
 import {
@@ -40,7 +41,9 @@ import { classifyItemTiers, contentDigestReason, type ItemTierOverride, type Own
 import { TierLedger, TierLedgerSchemaError, copyServingLayer, tierLedgerIdentityKey, type TierLedgerIdentity, type TierRecheckScope } from './tier-ledger.ts';
 import { tierLedgerPathForStore, tierSnifferPathForLedger } from './tier-ledger-path.ts';
 import { findTierSetLedger } from './tier-set-binding.ts';
-import { normalizeConversationId, TIER_SET_BINDING_CONNECTOR_ID, TIER_SET_BINDING_RUN_ID } from '../connector-store/local-index.ts';
+import { deleteOnDemandGrant, normalizeConversationId, TIER_SET_BINDING_CONNECTOR_ID, TIER_SET_BINDING_RUN_ID } from '../connector-store/local-index.ts';
+import { tierSetForLedger } from '../connector-store/tier-set-registry.ts';
+import { revokeOnDemandReads } from '../file-extraction/on-demand-read.ts';
 import { forgetSecretInSideStores } from '../connector-store/secrets-disposition.ts';
 import { TIER_KEY_TRUST_DOMAIN } from '../connector-store/tiered-store-set.ts';
 import {
@@ -520,6 +523,34 @@ export function runTierSet(args: readonly string[], context: TierCliContext = {}
   };
 }
 
+function revokeLocatedRead(item: LocatedItem, context: TierCliContext): void {
+  if (!item.localItemId) return;
+  const set = context.standalone ? undefined : tierSetForLedger(item.ledgerPath);
+  if (set) {
+    revokeOnDemandReads(set.openStores(), [item.localItemId]);
+    return;
+  }
+  // Without a mounted lane, the account inventory also names legs that
+  // received the grant before the item itself ever landed there.
+  const paths = new Set(item.storePaths);
+  const owner = lifecycleStoreFileOwner(lifecycleEnv(context));
+  for (const path of item.storePaths ?? []) {
+    const source = owner(path);
+    if (source) for (const sibling of lifecycleAccountFiles(source, context).stores) paths.add(sibling);
+  }
+  for (const path of paths) {
+    if (!existsSync(path)) continue;
+    assertWritableStoreOpenAllowed('on-demand read revocation', path);
+    const db = new Database(path, { readwrite: true, create: false });
+    try {
+      db.exec(`PRAGMA busy_timeout = ${REVOCATION_WRITE_LIMIT.milliseconds}`);
+      if (db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='on_demand_item_reads'").get()) {
+        deleteOnDemandGrant(db, item.localItemId);
+      }
+    } finally { closeSqliteStore(db, { checkpoint: false }); }
+  }
+}
+
 /**
  * Save (or clear) the owner's override on located items, in every ledger that
  * decides them, and apply it as far as one ledger write can: the `tier set`
@@ -532,6 +563,9 @@ export function applyTierSet(
   context: TierCliContext = {},
 ): Array<Record<string, unknown>> {
   return items.map((item) => withLedgerAt(item.ledgerPath, context.now, (ledger) => {
+    if (override !== 'clear' && override.kind === 'tier' && (override.tier === 'secure' || override.tier === 'secrets')) {
+      revokeLocatedRead(item, context);
+    }
     if (override === 'clear') {
       const cleared = ledger.clearOverride(item.identity);
       return { cleared, note: 'The next sync re-decides this item without the override.' };

@@ -47362,6 +47362,18 @@ var init_tier_set_binding = __esm(() => {
   tierLedgerIsWithin = pathResolvesWithin;
 });
 
+// src/workers/connector-store/tier-set-registry.ts
+function registerTierSetForLedger(ledgerPath, set) {
+  (tierSets ??= new Map).set(ledgerPath, set);
+}
+function tierSetForLedger(ledgerPath) {
+  return tierSets?.get(ledgerPath);
+}
+function registeredTierSets() {
+  return [...tierSets?.values() ?? []];
+}
+var tierSets;
+
 // src/workers/local-pacing.ts
 import { execFile as execFile2, spawn as spawn3 } from "node:child_process";
 import { existsSync as existsSync27, readdirSync as readdirSync5, readFileSync as readFileSync30 } from "node:fs";
@@ -58008,18 +58020,6 @@ var init_tier_placement = __esm(() => {
   };
 });
 
-// src/workers/connector-store/tier-set-registry.ts
-function registerTierSetForLedger(ledgerPath, set) {
-  (tierSets ??= new Map).set(ledgerPath, set);
-}
-function tierSetForLedger(ledgerPath) {
-  return tierSets?.get(ledgerPath);
-}
-function registeredTierSets() {
-  return [...tierSets?.values() ?? []];
-}
-var tierSets;
-
 // src/workers/source-index/media-judge.ts
 function imageJudgmentSignal(judgment) {
   return {
@@ -65926,6 +65926,7 @@ function parseEngineCommandEnvelope(value) {
       }
       return { id, command: { kind, samples } };
     }
+    case "archive_remove":
     case "delete_source_data":
     case "tier_override":
     case "storage_registry":
@@ -65942,6 +65943,13 @@ function parseEngineCommandEnvelope(value) {
       if (frontPid !== undefined && (kind !== "delete_source_data" || !Number.isSafeInteger(frontPid) || frontPid <= 0))
         fail("frontPid is a process id, carried by a delete.");
       return { id, command: { kind, request: forwardedRequest(kind, command.request), ...frontPid !== undefined ? { frontPid } : {} } };
+    }
+    case "revoke_reads": {
+      const { source, reason } = command;
+      if (typeof source === "string" && SOURCE.test(source) && (reason === "disconnect" || reason === "scope" || reason === "exclusions")) {
+        return { id, command: { kind, source, reason } };
+      }
+      throw new EngineCommandError(400, "revoke_reads needs a source and a revocation reason.");
     }
     case "sync_now":
     case "start_approved": {
@@ -66250,6 +66258,7 @@ var init_commands = __esm(() => {
   ENGINE_JUDGE_BOOST_TTL_MS = 15 * 60000;
   ENGINE_JUDGE_NOW_MAX_BUDGET_MS = RELEASE_CHUNK_JUDGE_BUDGET_MS;
   ENGINE_FORWARDED_ROUTES = {
+    archive_remove: ["/dashboard/archive-import/remove"],
     delete_source_data: ["/dashboard/delete-source-data", "/v1/cli/data-delete"],
     tier_override: ["/v1/cli/tier", "/dashboard/privacy/items/set", "/v1/privacy-item/raise", "/dashboard/privacy/judge-check"],
     people: ["/dashboard/people"],
@@ -71862,6 +71871,16 @@ function sameStrings(actual, expected) {
 function sameStringSet(actual, expected) {
   return actual.length === expected.length && expected.every((value) => actual.includes(value));
 }
+function deleteOnDemandGrant(db, localItemId) {
+  const previous = db.query("PRAGMA busy_timeout").get().timeout;
+  db.exec(`PRAGMA busy_timeout = ${Math.min(previous, REVOCATION_WRITE_LIMIT.milliseconds)}`);
+  try {
+    const removed = db.query("DELETE FROM on_demand_item_reads WHERE local_item_id = ?").run(localItemId);
+    return removed.changes > 0;
+  } finally {
+    db.exec(`PRAGMA busy_timeout = ${previous}`);
+  }
+}
 function createOnDemandReads(db) {
   db.exec(`CREATE TABLE IF NOT EXISTS on_demand_item_reads (
     local_item_id TEXT PRIMARY KEY, source_version TEXT NOT NULL, read_on_demand INTEGER NOT NULL DEFAULT 1
@@ -76645,16 +76664,20 @@ ${parentKey(ref)}`, { ref, origin });
       ON CONFLICT(local_item_id) DO UPDATE SET source_version = excluded.source_version`).run(localItemId, sourceVersion);
       this.notifyOnDemandGrantChange();
     }
+    revokeDeletedItemReads(id, requireActiveRow = false) {
+      const set = tierSetForLedger(this.tierLedgerPathInUse());
+      const stores = set?.store(this.trustDomain) === this ? set.openStores() : [this];
+      if (requireActiveRow && !stores.some((store) => store.activeLocalItemRow(id)))
+        return;
+      for (const store of stores)
+        store.revokeOnDemandRead(id);
+    }
+    onDemandGrantIds() {
+      return this.db.query("SELECT local_item_id FROM on_demand_item_reads").all().map((row) => row.local_item_id);
+    }
     revokeOnDemandRead(localItemId) {
-      const previous = this.db.query("PRAGMA busy_timeout").get().timeout;
-      this.db.exec(`PRAGMA busy_timeout = ${Math.min(previous, REVOCATION_WRITE_LIMIT.milliseconds)}`);
-      try {
-        const removed = this.db.query("DELETE FROM on_demand_item_reads WHERE local_item_id = ?").run(localItemId);
-        if (removed.changes > 0)
-          this.notifyOnDemandGrantChange();
-      } finally {
-        this.db.exec(`PRAGMA busy_timeout = ${previous}`);
-      }
+      if (deleteOnDemandGrant(this.db, localItemId))
+        this.notifyOnDemandGrantChange();
     }
     onDemandGrantEpoch() {
       if (this.closedForPoolReads || !this.onDemandReadsTablePresent)
@@ -78505,6 +78528,9 @@ ${parentKey(ref)}`, { ref, origin });
             if (itemsSeen % VISIBILITY_TICK_ITEMS === 0)
               this.tickVisibilityWriters();
             await this.controlPath.ingestionTurn();
+            if (item.metadata["deleted"] === true) {
+              this.revokeDeletedItemReads(item.identity.localItemId, item.metadata["deletedIdentityResolved"] === false);
+            }
             const exclusion = this.exclusions.evaluateMetadata(item.metadata);
             if (exclusion.excluded) {
               tallyExclusion(exclusionTally, exclusion);
@@ -78946,6 +78972,7 @@ ${parentKey(ref)}`, { ref, origin });
               deferred.push(localItemId);
               break;
             }
+            this.revokeDeletedItemReads(localItemId);
             this.db.query(`
             UPDATE items
             SET tombstoned = 1, deleted_at = ?, indexed_at = ?, sync_run_id = ?
@@ -78973,7 +79000,7 @@ ${parentKey(ref)}`, { ref, origin });
         const retiredSecrets = [];
         for (const scope of scopes) {
           const rows = currentMembershipAuthority === "provider_account_snapshot" ? this.db.query(`
-            SELECT DISTINCT i.item_pk, i.tombstoned
+            SELECT DISTINCT i.item_pk, i.tombstoned, i.local_item_id
             FROM items i
             WHERE (i.tombstoned = 0 OR i.trust_tier = 'S5')
               AND i.provider = ?
@@ -78994,7 +79021,7 @@ ${parentKey(ref)}`, { ref, origin });
                   AND preservation.ownership_kind = 'preservation'
               )
           `).all(scope.provider, scope.accountScope, syncRunId, snapshotObservedAt ?? "") : this.db.query(`
-            SELECT DISTINCT i.item_pk, i.tombstoned
+            SELECT DISTINCT i.item_pk, i.tombstoned, i.local_item_id
             FROM items i
             JOIN item_owners owner
               ON owner.item_pk = i.item_pk
@@ -79010,6 +79037,7 @@ ${parentKey(ref)}`, { ref, origin });
               )
           `).all(connectorId, syncRunId, scope.provider, scope.accountScope);
           for (const row of rows) {
+            this.revokeDeletedItemReads(row.local_item_id);
             if (row.tombstoned === 1) {
               const located = this.db.query(`
               SELECT family, provider, account_scope, provider_item_id, provider_thread_id,
@@ -97262,7 +97290,8 @@ function readFileSourceScopeApproval(input) {
     accountGeneration: account.generation,
     revision: approval.revision,
     selections: approval.selections,
-    wholeAccount: approval.whole_account
+    wholeAccount: approval.whole_account,
+    ...approval.previous_permissions ? { readChangePending: true } : {}
   };
 }
 function approveFileSourceScope(input) {
@@ -97297,6 +97326,8 @@ function approveFileSourceScope(input) {
     if (!input.wholeAccount && selections.some((selection) => isFileScopeRootKey(definition, selection.key))) {
       throw new OperationError("invalid_request", "Choose Whole account and confirm it explicitly to approve the provider root.");
     }
+    if (current.readChangePending)
+      throw new OperationError("source_index_policy_violation", "The previous folder save still has on-demand reads to revoke.");
     const existing = readState2(input.statePath);
     const approvals = existing.kind === "valid" ? existing.state.approvals.filter((candidate) => candidate.source_id !== input.sourceId) : [];
     const revision = randomUUID19();
@@ -97308,7 +97339,8 @@ function approveFileSourceScope(input) {
       selections,
       whole_account: input.wholeAccount,
       approved_at: (input.now ?? new Date).toISOString(),
-      replaced_revision: input.expectedRevision
+      replaced_revision: input.expectedRevision,
+      ...input.reconcileReads ? { previous_permissions: { selections: current.selections, wholeAccount: current.wholeAccount } } : {}
     });
     const state = { version: 1, approvals };
     lease.commit(() => writePrivateFileAtomicSync(input.statePath, `${JSON.stringify(state, null, 2)}
@@ -97321,6 +97353,23 @@ function approveFileSourceScope(input) {
       selections,
       wholeAccount: input.wholeAccount
     };
+  });
+}
+function reconcileFileScopeReadChange(path, current, apply) {
+  return withFileLeaseSync(path, (lease) => {
+    const read = readState2(path);
+    if (read.kind !== "valid")
+      throw new OperationError("config_error", "The saved folder permissions could not be read.");
+    const saved = read.state.approvals.find((entry) => entry.source_id === current.sourceId);
+    if (!saved || saved.revision !== current.revision)
+      throw new OperationError("source_index_policy_violation", "The folder approval changed during the save.");
+    if (!saved.previous_permissions)
+      return 0;
+    const count = apply({ ...current, ...saved.previous_permissions });
+    delete saved.previous_permissions;
+    lease.commit(() => writePrivateFileAtomicSync(path, `${JSON.stringify(read.state, null, 2)}
+`));
+    return count;
   });
 }
 function assertFileSourceScopeApproved(input) {
@@ -97429,7 +97478,28 @@ function parseApproval(value) {
   const record = value;
   if (typeof record.source_id !== "string" || !isFileSourceScopeId(record.source_id) || typeof record.account_generation !== "string" || !/^[a-f0-9]{64}$/.test(record.account_generation) || typeof record.revision !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(record.revision) || record.status !== "approved" || typeof record.whole_account !== "boolean" || typeof record.approved_at !== "string" || !Number.isFinite(Date.parse(record.approved_at)) || !Array.isArray(record.selections) || record.replaced_revision !== undefined && (typeof record.replaced_revision !== "string" || record.replaced_revision.length > 512))
     throw new Error("approval");
-  const selections = normalizeSelections(record.selections.map((entry) => {
+  const selections = parseSelections(record.selections);
+  let previous;
+  if (record.previous_permissions !== undefined) {
+    const prior = record.previous_permissions;
+    if (!prior || typeof prior.wholeAccount !== "boolean" || !Array.isArray(prior.selections))
+      throw new Error("previous permissions");
+    previous = { selections: parseSelections(prior.selections), wholeAccount: prior.wholeAccount };
+  }
+  return {
+    source_id: record.source_id,
+    account_generation: record.account_generation,
+    revision: record.revision,
+    status: "approved",
+    selections,
+    whole_account: record.whole_account,
+    approved_at: record.approved_at,
+    ...previous ? { previous_permissions: previous } : {},
+    ...typeof record.replaced_revision === "string" ? { replaced_revision: record.replaced_revision } : {}
+  };
+}
+function parseSelections(values) {
+  return normalizeSelections(values.map((entry) => {
     if (!entry || typeof entry !== "object" || Array.isArray(entry))
       throw new Error("selection");
     const selection = entry;
@@ -97444,16 +97514,6 @@ function parseApproval(value) {
       ...ancestorKeys ? { ancestorKeys } : {}
     };
   }));
-  return {
-    source_id: record.source_id,
-    account_generation: record.account_generation,
-    revision: record.revision,
-    status: "approved",
-    selections,
-    whole_account: record.whole_account,
-    approved_at: record.approved_at,
-    ...typeof record.replaced_revision === "string" ? { replaced_revision: record.replaced_revision } : {}
-  };
 }
 var init_source_scope_approval = __esm(() => {
   init_atomic_file();
@@ -125774,6 +125834,20 @@ var init_size_limit_stops = __esm(() => {
 
 // src/workers/file-extraction/on-demand-read.ts
 import { createHash as createHash69, randomUUID as randomUUID28 } from "node:crypto";
+function revokeOnDemandReads(stores, ids = new Set(stores.flatMap((store) => store.onDemandGrantIds())), keep) {
+  let revoked = 0;
+  for (const id of ids) {
+    if (keep) {
+      const choices = stores.map((store) => keep(store, id));
+      if (choices.includes(true) && !choices.includes(false))
+        continue;
+    }
+    for (const store of stores)
+      store.revokeOnDemandRead(id);
+    revoked++;
+  }
+  return revoked;
+}
 async function requestOnDemandRead(request, context) {
   if (!["owner", "remote_app", "analyst"].includes(request.requester))
     return { state: "refused", reason: "invalid_requester" };
@@ -125787,7 +125861,7 @@ async function requestOnDemandRead(request, context) {
     ...request,
     questionId: request.questionId?.trim() || randomUUID28(),
     itemRef: { corpusId: ref.corpusId, providerItemId: ref.providerItemId }
-  }, target.job, target.grant, context.limits);
+  }, target.job, target, context.limits);
 }
 async function itemReadOnDemand(read, corpusId, providerItemId) {
   const questionId = `item-read-${createHash69("sha256").update(JSON.stringify([corpusId, providerItemId])).digest("hex").slice(0, 32)}`;
@@ -130334,7 +130408,7 @@ class LocalFileExtractionJobStore {
       }
     }).immediate();
   }
-  enqueueOnDemandRead(request, job, grant, limits = { files: 3, bytes: 25 * 1024 * 1024 }) {
+  enqueueOnDemandRead(request, job, target, limits = { files: 3, bytes: 25 * 1024 * 1024 }) {
     this.assertWritable("on_demand");
     if (!Number.isSafeInteger(limits.files) || limits.files < 1 || !Number.isSafeInteger(limits.bytes) || limits.bytes < 1) {
       throw new TypeError("Invalid on-demand limits.");
@@ -130345,7 +130419,8 @@ class LocalFileExtractionJobStore {
       const previous = this.db.query(`SELECT j.status, j.source_version FROM on_demand_reads r
         JOIN extraction_jobs j ON j.job_id = r.job_id
         WHERE r.corpus_id = ? AND r.provider_item_id = ? ORDER BY r.rowid DESC LIMIT 1`).get(request.itemRef.corpusId, request.itemRef.providerItemId);
-      if (previous && (previous.source_version ?? "") === (job.refs[0].sourceVersion ?? "")) {
+      const sameVersion = previous && (previous.source_version ?? "") === (job.refs[0].sourceVersion ?? "");
+      if (sameVersion && target.hasGrant()) {
         if (previous.status === "indexed")
           return { state: "reading", etaSeconds: 60, settled: true };
         if (previous.status === "leased")
@@ -130371,8 +130446,11 @@ class LocalFileExtractionJobStore {
           resumes: "never"
         } };
       }
-      grant();
+      target.grant();
       this.db.query("DELETE FROM on_demand_waiting WHERE corpus_id = ? AND provider_item_id = ?").run(request.itemRef.corpusId, request.itemRef.providerItemId);
+      if (sameVersion && request.requester === "owner" && previous.status === "indexed" && target.hasIndexedContent()) {
+        return { state: "reading", etaSeconds: 60, settled: true };
+      }
       const queued = this.enqueue({
         ...job,
         force: true,
@@ -139811,7 +139889,10 @@ function createFileExtractionRuntime(options) {
           const lane = roster.find((config) => config.corpusId === read.itemRef.corpusId || itemStores.get(config.corpusId)?.().some((holder) => holder.corpusId === read.itemRef.corpusId));
           if (!lane || !corpora.some((corpus) => corpus.corpusId === lane.corpusId))
             return;
-          for (const holder of itemStores.get(lane.corpusId)?.() ?? []) {
+          const stores = itemStores.get(lane.corpusId);
+          if (!stores)
+            return;
+          for (const holder of stores()) {
             const candidate = holder.onDemandReadCandidate(read.itemRef.providerItemId);
             if (!candidate)
               continue;
@@ -139866,9 +139947,14 @@ function createFileExtractionRuntime(options) {
                 extractorVersion: extractor.versionFor?.(extractionMimeType) ?? extractor.version,
                 policyDecision: "index_allowed"
               },
+              hasIndexedContent: () => stores().some((leg) => {
+                const row = leg.storedItemState(identity);
+                return metadata.sourceVersion && row?.version === metadata.sourceVersion && row.chunkCount > 0 && leg.contentServedNow(identity.localItemId);
+              }),
+              hasGrant: () => holder.currentOnDemandRead(identity.localItemId, metadata.sourceVersion ?? "") && stores().every((leg) => leg.readOnDemand(identity.localItemId, metadata.sourceVersion ?? "")),
               grant: () => {
                 promoted = ref;
-                for (const leg of itemStores.get(lane.corpusId)?.() ?? [])
+                for (const leg of stores())
                   leg.grantOnDemandRead(identity.localItemId, metadata.sourceVersion);
               }
             };
@@ -139876,7 +139962,7 @@ function createFileExtractionRuntime(options) {
           return;
         }
       });
-      if (promoted)
+      if (promoted && result.state === "queued")
         runRead(promoted);
       if (result.settled && judged && !judged()) {
         const { settled: _settled, ...reading } = result;
@@ -147987,9 +148073,20 @@ function readSourceIngestionExclusionsFile(path) {
         rawRulesById.set(id.trim(), entry);
     }
   }
-  return { path, present: true, document: document2, rawRulesById };
+  const record = raw;
+  if (record.previous_read_rules === undefined)
+    return { path, present: true, document: document2, rawRulesById };
+  const previous = parseSourceIngestionExclusions(record.previous_read_rules, path);
+  const finish = () => {
+    if (readFileSync65(path, "utf8") !== text)
+      throw new OperationError("config_error", "The disposition rules changed during reconciliation.");
+    delete record.previous_read_rules;
+    writePrivateFileAtomicSync(path, `${JSON.stringify(record, null, 2)}
+`);
+  };
+  return { path, present: true, document: document2, rawRulesById, pendingReads: { previous, finish } };
 }
-function serializeSourceIngestionExclusions(document2, rawRulesById = new Map, preserveIds = new Set(rawRulesById.keys())) {
+function serializeSourceIngestionExclusions(document2, rawRulesById = new Map, preserveIds = new Set(rawRulesById.keys()), previousReadRules) {
   const rules = document2.rules.map((rule) => {
     const raw = preserveIds.has(rule.id) ? rawRulesById.get(rule.id) : undefined;
     if (raw !== undefined)
@@ -148004,12 +148101,13 @@ function serializeSourceIngestionExclusions(document2, rawRulesById = new Map, p
       reason: rule.reason
     };
   });
-  return `${JSON.stringify({ schemaVersion: document2.schemaVersion, rules }, null, 2)}
+  const value = { schemaVersion: document2.schemaVersion, rules, ...previousReadRules ? { previous_read_rules: previousReadRules } : {} };
+  return `${JSON.stringify(value, null, 2)}
 `;
 }
 function writeSourceIngestionExclusionsFile(options) {
   const { path } = options;
-  const text = serializeSourceIngestionExclusions(options.document, options.rawRulesById ?? new Map, options.preserveIds ?? new Set((options.rawRulesById ?? new Map).keys()));
+  const text = serializeSourceIngestionExclusions(options.document, options.rawRulesById ?? new Map, options.preserveIds ?? new Set((options.rawRulesById ?? new Map).keys()), options.previousReadRules);
   const reparsed = parseSourceIngestionExclusions(JSON.parse(text), path);
   if (reparsed.schemaVersion !== SOURCE_INGESTION_EXCLUSIONS_SCHEMA_VERSION) {
     throw new OperationError("config_error", "Ingestion dispositions schemaVersion must stay 1.");
@@ -148035,7 +148133,7 @@ function writeSourceIngestionExclusionsFile(options) {
     rule_count: reparsed.rules.length
   };
 }
-function saveSourceDispositions(path, request) {
+function saveSourceDispositions(path, request, options = {}) {
   const file = readSourceIngestionExclusionsFile(path);
   const base = request.document !== undefined ? parseSourceIngestionExclusions(request.document, "submitted ingestion dispositions") : file.document;
   const edits = request.edits ?? [];
@@ -148048,9 +148146,13 @@ function saveSourceDispositions(path, request) {
     return { ...result, noop: true };
   }
   const preserveIds = request.document !== undefined ? new Set : new Set(result.untouched_rule_ids);
+  for (const source of options.reconcileReadsFor ?? []) {
+    createSourceExclusionMatcher(result.rules, source.source_id, { enforceable: source.enforceable });
+  }
   const write = writeSourceIngestionExclusionsFile({
     path,
     document: result.rules,
+    ...options.reconcileReadsFor ? { previousReadRules: file.document } : {},
     rawRulesById: file.rawRulesById,
     preserveIds
   });
@@ -170121,8 +170223,42 @@ function runTierSet(args, context = {}, expected) {
     results: applyTierSet(items, override, context)
   };
 }
+function revokeLocatedRead(item, context) {
+  if (!item.localItemId)
+    return;
+  const set = context.standalone ? undefined : tierSetForLedger(item.ledgerPath);
+  if (set) {
+    revokeOnDemandReads(set.openStores(), [item.localItemId]);
+    return;
+  }
+  const paths = new Set(item.storePaths);
+  const owner = lifecycleStoreFileOwner(lifecycleEnv(context));
+  for (const path of item.storePaths ?? []) {
+    const source = owner(path);
+    if (source)
+      for (const sibling of lifecycleAccountFiles(source, context).stores)
+        paths.add(sibling);
+  }
+  for (const path of paths) {
+    if (!existsSync96(path))
+      continue;
+    assertWritableStoreOpenAllowed("on-demand read revocation", path);
+    const db = new Database28(path, { readwrite: true, create: false });
+    try {
+      db.exec(`PRAGMA busy_timeout = ${REVOCATION_WRITE_LIMIT.milliseconds}`);
+      if (db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='on_demand_item_reads'").get()) {
+        deleteOnDemandGrant(db, item.localItemId);
+      }
+    } finally {
+      closeSqliteStore(db, { checkpoint: false });
+    }
+  }
+}
 function applyTierSet(items, override, context = {}) {
   return items.map((item) => withLedgerAt(item.ledgerPath, context.now, (ledger) => {
+    if (override !== "clear" && override.kind === "tier" && (override.tier === "secure" || override.tier === "secrets")) {
+      revokeLocatedRead(item, context);
+    }
     if (override === "clear") {
       const cleared = ledger.clearOverride(item.identity);
       return { cleared, note: "The next sync re-decides this item without the override." };
@@ -170509,6 +170645,7 @@ var init_tier_cli = __esm(() => {
   init_connected_handles();
   init_operation_error();
   init_store_write_guard();
+  init_waiting_private_questions();
   init_sqlite_store();
   init_classification_ledger();
   init_sniffer();
@@ -170520,6 +170657,7 @@ var init_tier_cli = __esm(() => {
   init_tier_ledger_path();
   init_tier_set_binding();
   init_local_index();
+  init_on_demand_read();
   init_secrets_disposition();
   init_tiered_store_set();
   init_tier_rules();
@@ -198094,6 +198232,260 @@ var init_worker_responses = __esm(() => {
   };
 });
 
+// src/workers/engine/runtime/on-demand-revocation.ts
+function revokeSourceOnDemandReads(sourceStores, reason, scope, rules) {
+  const stores = [...new Set(sourceStores.flatMap((store) => {
+    const set = tierSetForLedger(store.tierLedgerPathInUse());
+    return set?.store(store.trustDomain) === store ? set.openStores() : [store];
+  }))];
+  if (reason === "disconnect")
+    return revokeOnDemandReads(stores);
+  if (reason === "exclusions") {
+    if (!rules)
+      return 0;
+    return revokeOnDemandReads(stores, undefined, (store, id) => {
+      const row = store.activeLocalItemRow(id);
+      if (!row)
+        return;
+      const metadata = store.itemMetadataSnapshot({ ...row.identity, family: store.family, localItemId: id });
+      const facts = { ...metadata, path: row.locatorUri, folderAncestorIds: row.sourceScope?.folderKeys };
+      const next = rules.after.evaluateItem(facts);
+      if (next.disposition === "admit" || next.readOnDemand)
+        return true;
+      const prior = rules.before.evaluateItem(facts);
+      return next.disposition === prior.disposition && next.readOnDemand === prior.readOnDemand;
+    });
+  }
+  if (!scope)
+    throw new Error("Folder permissions are unavailable.");
+  const after = scope.authority.snapshot(scope.source);
+  if (!after.readChangePending) {
+    if (stores.length && after.status !== "approved")
+      throw new Error("Folder permissions are unavailable.");
+    return 0;
+  }
+  return reconcileFileScopeReadChange(scope.authority.statePath, after, (before) => {
+    if (before.wholeAccount === after.wholeAccount && JSON.stringify(before.selections) === JSON.stringify(after.selections))
+      return 0;
+    const previous = folderAccess(before);
+    const current = folderAccess(after);
+    return revokeOnDemandReads(stores, undefined, (store, id) => {
+      if (!store.activeLocalItemRow(id))
+        return;
+      const access = current(store, id);
+      return access === "read" || access === "names" && previous(store, id) === "names";
+    });
+  });
+}
+function folderAccess(approval) {
+  const match = (scope) => {
+    if (!scope.allowed)
+      return () => false;
+    const { sourceScopeRevision: _revision, ...folders } = scope.filters ?? {};
+    return (store, id) => store.itemMatchesSearchFilters(id, undefined, folders);
+  };
+  const content = match(fileSourceScopeContentFilters(approval));
+  const onDemand = match(fileSourceScopeOnDemandFilters(approval));
+  const metadata = match(fileSourceScopeMetadataFilters(approval));
+  return (store, id) => {
+    if (content(store, id) || onDemand(store, id))
+      return "read";
+    return metadata(store, id) ? "names" : "excluded";
+  };
+}
+var init_on_demand_revocation = __esm(() => {
+  init_source_scope_approval();
+  init_on_demand_read();
+  init_source_scope_runtime();
+});
+
+// src/workers/engine/runtime/ingestion-dispositions.ts
+import { existsSync as existsSync111 } from "node:fs";
+function dispositionReadChange(sourceId, env) {
+  const source = INGESTION_DISPOSITION_SOURCES.find((entry) => entry.account.sourceId === sourceId);
+  if (!source)
+    return;
+  return dispositionReadMatchers(readSourceIngestionExclusionsFile(resolveSourceIngestionExclusionsPath(env)), source.sourceId, source.enforceable);
+}
+function dispositionReadMatchers(file, id, enforceable) {
+  if (!file.pendingReads)
+    return;
+  const after = createSourceExclusionMatcher(file.document, id, { enforceable });
+  let before;
+  try {
+    before = createSourceExclusionMatcher(file.pendingReads.previous, id, { enforceable });
+  } catch (error) {
+    if (!(error instanceof OperationError) || error.code !== "config_error")
+      throw error;
+    before = createSourceExclusionMatcher(undefined);
+  }
+  if (!after.active || JSON.stringify(before.criteria) === JSON.stringify(after.criteria))
+    return;
+  return { before, after };
+}
+function storedExclusionDebtReader(handles) {
+  let walked;
+  return () => {
+    if (walked)
+      return walked;
+    const total = {
+      excluded: { items: 0, unevaluable: 0 },
+      metadataOnlyContent: { items: 0, unevaluable: 0 }
+    };
+    for (const handle of handles) {
+      const debt = handle.exclusionDebtPresent();
+      total.excluded.items += debt.excluded.items;
+      total.excluded.unevaluable += debt.excluded.unevaluable;
+      total.metadataOnlyContent.items += debt.metadataOnlyContent.items;
+      total.metadataOnlyContent.unevaluable += debt.metadataOnlyContent.unevaluable;
+    }
+    walked = total;
+    return total;
+  };
+}
+function openIngestionDispositionsRuntime(env = process.env, options = {}) {
+  const opened = [];
+  const sources = [];
+  for (const definition of INGESTION_DISPOSITION_SOURCES) {
+    let stores = [];
+    const handles = [];
+    const readDebt = storedExclusionDebtReader(handles);
+    try {
+      stores = definition.stores(env);
+      const matcher = definition.matcher(env);
+      const present = stores.filter((store) => existsSync111(store.dbPath));
+      let openedAll = false;
+      const openStores = () => {
+        if (openedAll)
+          return handles;
+        for (const store of present) {
+          const handle = openConnectorStore(definition.account, {
+            dbPath: store.dbPath,
+            corpusId: store.corpusId,
+            family: "file",
+            trustDomain: store.trustDomain,
+            exclusions: matcher,
+            readOnly: true
+          }, env);
+          handles.push(handle);
+          opened.push(handle);
+        }
+        openedAll = true;
+        return handles;
+      };
+      if (options.lazyStores !== true)
+        openStores();
+      sources.push({
+        source_id: definition.sourceId,
+        label: definition.label,
+        corpus_ids: stores.map((store) => store.corpusId),
+        enforceable: definition.enforceable,
+        matcher,
+        store_present: present.length > 0,
+        ...present.length > 0 ? {
+          items: function* () {
+            for (const handle of openStores())
+              yield* handle.itemLocatorCensus();
+          },
+          excludedItemsPresent: () => {
+            openStores();
+            return readDebt().excluded;
+          },
+          metadataOnlyContentPresent: () => {
+            openStores();
+            return readDebt().metadataOnlyContent;
+          }
+        } : {}
+      });
+    } catch (error) {
+      for (const handle of handles) {
+        const index = opened.indexOf(handle);
+        if (index >= 0)
+          opened.splice(index, 1);
+        try {
+          handle.close();
+        } catch {}
+      }
+      sources.push({
+        source_id: definition.sourceId,
+        label: definition.label,
+        corpus_ids: stores.map((store) => store.corpusId),
+        enforceable: definition.enforceable,
+        matcher: createSourceExclusionMatcherFromPrefixes([]),
+        store_present: false,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
+  return {
+    sources,
+    close: () => {
+      for (const handle of opened.reverse()) {
+        try {
+          handle.close();
+        } catch {}
+      }
+    }
+  };
+}
+var INGESTION_DISPOSITION_SOURCES;
+var init_ingestion_dispositions = __esm(() => {
+  init_operation_error();
+  init_source_placement();
+  init_google_connectors();
+  init_dropbox_files();
+  init_scope();
+  init_store2();
+  init_source_ingestion_exclusions();
+  init_source_dispositions();
+  init_source_storage();
+  INGESTION_DISPOSITION_SOURCES = [
+    {
+      sourceId: DROPBOX_INGESTION_EXCLUSION_SOURCE,
+      account: { sourceId: DROPBOX_FILES_SOURCE_ID },
+      label: "Dropbox",
+      enforceable: DROPBOX_ENFORCEABLE_EXCLUSION_CRITERIA,
+      matcher: (env) => dropboxIngestionExclusionMatcher(env),
+      stores: (env) => [{
+        dbPath: resolvedStorePath(DROPBOX_FILES_SOURCE_ID, "secure_local", env),
+        corpusId: DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID,
+        trustDomain: "secure_local"
+      }]
+    },
+    {
+      sourceId: LOCAL_FILES_INGESTION_EXCLUSION_SOURCE,
+      account: { sourceId: LOCAL_FILES_SOURCE_ID },
+      label: "Files on this computer",
+      enforceable: LOCAL_FILES_ENFORCEABLE_EXCLUSION_CRITERIA,
+      matcher: (env) => localFilesIngestionExclusionMatcher(env),
+      stores: (env) => [{
+        dbPath: resolvedStorePath(LOCAL_FILES_SOURCE_ID, "secure_local", env),
+        corpusId: LOCAL_FILES_CORPUS_ID,
+        trustDomain: "secure_local"
+      }]
+    },
+    {
+      sourceId: GOOGLE_DRIVE_INGESTION_EXCLUSION_SOURCE,
+      account: { sourceId: GOOGLE_DRIVE_SOURCE_ID },
+      label: "Google Drive",
+      enforceable: GOOGLE_DRIVE_ENFORCEABLE_EXCLUSION_CRITERIA,
+      matcher: (env) => googleDriveIngestionExclusionMatcher(env),
+      stores: (env) => [
+        {
+          dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, "internal", env),
+          corpusId: GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID,
+          trustDomain: "internal"
+        },
+        {
+          dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, "secure_local", env),
+          corpusId: GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID,
+          trustDomain: "secure_local"
+        }
+      ]
+    }
+  ];
+});
+
 // src/workers/connector-store/embedding-plan.ts
 function storeEmbeddingCatchesUp(corpusId, provider) {
   if (provider.provider === "built-in" && provider.backend === "local")
@@ -207356,6 +207748,7 @@ function chatgptPickerProgram(kit) {
       add(summary, el("p", "reason strong", fill(Q.capReached, { max: kit.count(MAX_RULES) })));
     add(footer, summary);
     add(footer, saveRow(canSaveFolders(), p.whole || anyChosen() ? Q.saveFolders : Q.saveNoStart, saveFolders, p.whole && !p.wholeConfirmed ? wholeWord("needConfirm") : !anyChosen() && !p.edited ? Q.needChoice : ""));
+    add(footer, el("p", "reason", "Searches already started may still send evidence to their configured model and return an answer."));
     return footer;
   }
   function foldersView(page) {
@@ -210992,7 +211385,7 @@ var init_top_nav = __esm(() => {
 
 // src/workers/archive-import/staging.ts
 import { randomBytes as randomBytes35 } from "node:crypto";
-import { existsSync as existsSync111, mkdirSync as mkdirSync71, readdirSync as readdirSync32, realpathSync as realpathSync25, renameSync as renameSync26, rmSync as rmSync45, statSync as statSync47, statfsSync as statfsSync6, utimesSync } from "node:fs";
+import { existsSync as existsSync112, mkdirSync as mkdirSync71, readdirSync as readdirSync32, realpathSync as realpathSync25, renameSync as renameSync26, rmSync as rmSync45, statSync as statSync47, statfsSync as statfsSync6, utimesSync } from "node:fs";
 import { open as open7, rm as rm11 } from "node:fs/promises";
 import { sep as sep25, join as join141, resolve as resolve33 } from "node:path";
 function sanitizeUploadPath(raw) {
@@ -211213,7 +211606,7 @@ function createArchiveUploads(options) {
         await handle.close().catch(() => {
           return;
         });
-      if (created && existsSync111(target))
+      if (created && existsSync112(target))
         rmSync45(target, { force: true });
       found.paths.delete(key);
       found.partials.delete(key);
@@ -211262,7 +211655,7 @@ function createArchiveUploads(options) {
       if (typeof uploadId !== "string" || !ID3.test(uploadId))
         return false;
       const found = sessions.get(uploadId);
-      const dir = found?.dir ?? (existsSync111(options.root) ? join141(stagingRoot(), uploadId) : undefined);
+      const dir = found?.dir ?? (existsSync112(options.root) ? join141(stagingRoot(), uploadId) : undefined);
       if (!dir)
         return false;
       if (keep?.(dir)) {
@@ -211309,14 +211702,14 @@ function createArchiveUploads(options) {
       if (typeof uploadId !== "string" || !ID3.test(uploadId))
         return;
       const found = sessions.get(uploadId);
-      const dir = found?.dir ?? (existsSync111(options.root) ? join141(stagingRoot(), uploadId) : undefined);
+      const dir = found?.dir ?? (existsSync112(options.root) ? join141(stagingRoot(), uploadId) : undefined);
       if (!dir || keep?.(dir))
         return;
       sessions.delete(uploadId);
       rmSync45(dir, { recursive: true, force: true });
     },
     sweep(needed) {
-      if (!rootPath && !existsSync111(options.root))
+      if (!rootPath && !existsSync112(options.root))
         return;
       let root;
       try {
@@ -217139,7 +217532,7 @@ var init_locations = __esm(() => {
 // src/workers/local-files/volume-identity.ts
 import { createHash as createHash101 } from "node:crypto";
 import { execFileSync as execFileSync7 } from "node:child_process";
-import { existsSync as existsSync112, lstatSync as lstatSync53, readFileSync as readFileSync103, readdirSync as readdirSync33, realpathSync as realpathSync26 } from "node:fs";
+import { existsSync as existsSync113, lstatSync as lstatSync53, readFileSync as readFileSync103, readdirSync as readdirSync33, realpathSync as realpathSync26 } from "node:fs";
 import { homedir as homedir45 } from "node:os";
 
 class VolumeResolver {
@@ -217326,7 +217719,7 @@ function defaultUuidsByDevice() {
   const result = new Map;
   const dir = "/dev/disk/by-uuid";
   try {
-    if (!existsSync112(dir))
+    if (!existsSync113(dir))
       return result;
     for (const name of readdirSync33(dir)) {
       try {
@@ -217424,7 +217817,7 @@ var init_volume_identity = __esm(() => {
 });
 
 // src/workers/backup-service.ts
-import { existsSync as existsSync113, mkdirSync as mkdirSync72, readFileSync as readFileSync104, readdirSync as readdirSync34, rmSync as rmSync46, statSync as statSync48 } from "node:fs";
+import { existsSync as existsSync114, mkdirSync as mkdirSync72, readFileSync as readFileSync104, readdirSync as readdirSync34, rmSync as rmSync46, statSync as statSync48 } from "node:fs";
 import { dirname as dirname109, join as join142 } from "node:path";
 function defaultBackupServicePaths(env = process.env) {
   return {
@@ -217640,7 +218033,7 @@ function createBackupService(options) {
       } catch {
         throw new OperationError("invalid_params", "That backup file is no longer there. Choose it again.");
       }
-      if (existsSync113(join142(options.paths.staging, PENDING_RESTORE)))
+      if (existsSync114(join142(options.paths.staging, PENDING_RESTORE)))
         return status();
       const staging = backupStagingDir(options.env);
       try {
@@ -217978,7 +218371,7 @@ var init_source_scope_browser = __esm(() => {
 });
 
 // src/workers/local-files/mac-permissions.ts
-import { existsSync as existsSync114, mkdirSync as mkdirSync73, opendirSync, readFileSync as readFileSync105 } from "node:fs";
+import { existsSync as existsSync115, mkdirSync as mkdirSync73, opendirSync, readFileSync as readFileSync105 } from "node:fs";
 import { opendir } from "node:fs/promises";
 import { dirname as dirname110, join as join143 } from "node:path";
 function folderAccessMemoryPath() {
@@ -218205,7 +218598,7 @@ class MacPermissions {
     if (this.memory && !this.memoryPath)
       return this.memory;
     let loaded = {};
-    if (this.memoryPath && existsSync114(this.memoryPath)) {
+    if (this.memoryPath && existsSync115(this.memoryPath)) {
       try {
         const parsed = JSON.parse(readFileSync105(this.memoryPath, "utf8"));
         if (parsed && typeof parsed === "object")
@@ -218257,7 +218650,7 @@ var init_mac_permissions = __esm(() => {
 
 // src/workers/local-files/mac-settings.ts
 import { spawn as spawn15 } from "node:child_process";
-import { existsSync as existsSync115 } from "node:fs";
+import { existsSync as existsSync116 } from "node:fs";
 import { homedir as homedir46 } from "node:os";
 import { join as join144 } from "node:path";
 function helperAppPathForHome(home = homedir46()) {
@@ -218268,7 +218661,7 @@ function revealHelperAndOpenFullDiskAccess(deps = {}) {
     spawn15(command, args, { stdio: "ignore", detached: true }).unref();
   });
   const helper = deps.helperApp ?? helperAppPathForHome();
-  if ((deps.exists ?? existsSync115)(helper))
+  if ((deps.exists ?? existsSync116)(helper))
     run("/usr/bin/open", ["-R", helper]);
   run("/usr/bin/open", [FULL_DISK_ACCESS_URL]);
 }
@@ -223227,7 +223620,7 @@ var init_connector5 = __esm(() => {
 });
 
 // src/workers/evernote/live-sync.ts
-import { existsSync as existsSync116, mkdirSync as mkdirSync74, readFileSync as readFileSync106 } from "node:fs";
+import { existsSync as existsSync117, mkdirSync as mkdirSync74, readFileSync as readFileSync106 } from "node:fs";
 import { dirname as dirname112 } from "node:path";
 function evernoteExclusionMatcher(env = process.env) {
   return createSourceExclusionMatcher(loadSourceIngestionExclusions({ env }), EVERNOTE_SOURCE_ID, {
@@ -223280,7 +223673,7 @@ function createEvernoteTierLane(options = {}) {
   return { set, ledger, secure, internal };
 }
 function readPassFile(path) {
-  if (!existsSync116(path))
+  if (!existsSync117(path))
     return { version: 1, status: {} };
   try {
     const parsed = JSON.parse(readFileSync106(path, "utf8"));
@@ -223299,7 +223692,7 @@ function writePassFile(path, file) {
 }
 function evernotePassStatus(env = process.env) {
   const path = resolvedRawPath(EVERNOTE_SOURCE_ID, "evernote-pass.json", env);
-  if (!existsSync116(path))
+  if (!existsSync117(path))
     return;
   return readPassFile(path).status;
 }
@@ -223541,7 +223934,7 @@ function createEvernoteLiveSync(options) {
     bindNotebookChoice: (choice) => {
       boundChoice = choice;
     },
-    status: () => existsSync116(passPath) ? readPassFile(passPath).status : undefined,
+    status: () => existsSync117(passPath) ? readPassFile(passPath).status : undefined,
     lastStoreRunCompletedAt: () => lastCompletedAt
   };
 }
@@ -226119,6 +226512,13 @@ function createEmailSourceWorker(options = {}) {
   const sourceScheduler = options.sourceScheduler;
   const sourceWatch = options.sourceWatch;
   const sourceDashboard = options.sourceDashboard;
+  const revokeSourceReads = (source, reason, rules) => {
+    if (options.revokeSourceReads)
+      return options.revokeSourceReads(source, reason);
+    const stores = connectorStores.filter((store) => storageAccountForCorpus(store).sourceId === source);
+    const approval = reason === "scope" ? { authority: new FileSourceScopeAuthority({ registryPath: sourceDashboard?.registryPath ?? defaultHandleRegistryPath() }), source } : undefined;
+    return revokeSourceOnDemandReads(stores, reason, approval, rules);
+  };
   const settingsProposal = sourceDashboard ? settingsProposalHolderFor(sourceDashboard) : undefined;
   const credentialDegradations = options.credentialDegradations;
   const credentialReadiness = options.credentialReadiness;
@@ -226559,39 +226959,67 @@ function createEmailSourceWorker(options = {}) {
             if (!accountGeneration || !expectedRevision) {
               throw new EmailSourceWorkerError(400, "invalid_request", "account_generation and expected_scope_revision are required.");
             }
-            return json(await sourceDashboard.fileSourceScopes.approveAndStart({
-              sourceId,
-              accountGeneration,
-              expectedRevision,
-              selections: parseSourceScopeSelections(postBody.selections),
-              wholeAccount: postBody.whole_account === true,
-              explicitWholeAccountConfirmation: postBody.explicit_whole_account_confirmation === true
-            }));
-          }
-          const runtime = await sourceDashboard.ingestionDispositions();
-          try {
-            const rulesPath = resolveSourceIngestionExclusionsPath(process.env, runtime.rulesPath);
-            const save = saveSourceDispositions(rulesPath, parseSourceDispositionsSave(postBody, runtime.sources));
-            return json({
-              ok: true,
-              kind: "source_dispositions_save",
-              result: {
-                changed: save.changed,
-                noop: save.noop,
-                applied: save.applied,
-                refused: save.refused,
-                untouched_rule_ids: save.untouched_rule_ids,
-                ...save.write ? { write: save.write } : {}
-              },
-              policy: {
-                writes_config_only: true,
-                deletes_store_content: false,
-                runs_purge_or_strip: false
-              }
+            const scopes = sourceDashboard.fileSourceScopes;
+            return await withDashboardGrantMutation(async () => {
+              const authority = new FileSourceScopeAuthority({ registryPath: sourceDashboard.registryPath ?? defaultHandleRegistryPath() });
+              if (authority.snapshot(sourceId).readChangePending)
+                await revokeSourceReads(sourceId, "scope");
+              const result = await scopes.approveAndStart({
+                sourceId,
+                accountGeneration,
+                expectedRevision,
+                selections: parseSourceScopeSelections(postBody.selections),
+                wholeAccount: postBody.whole_account === true,
+                explicitWholeAccountConfirmation: postBody.explicit_whole_account_confirmation === true
+              });
+              await revokeSourceReads(sourceId, "scope");
+              return json(result);
             });
-          } finally {
-            runtime.close?.();
           }
+          return await withDashboardGrantMutation(async () => {
+            const runtime = await sourceDashboard.ingestionDispositions();
+            try {
+              const rulesPath = resolveSourceIngestionExclusionsPath(process.env, runtime.rulesPath);
+              const edits = parseSourceDispositionsSave(postBody, runtime.sources);
+              const reconcile = async () => {
+                const file = readSourceIngestionExclusionsFile(rulesPath);
+                if (!file.pendingReads)
+                  return 0;
+                let revoked = 0;
+                for (const source of runtime.sources) {
+                  const rules = dispositionReadMatchers(file, source.source_id, source.enforceable);
+                  if (!rules)
+                    continue;
+                  const id = listFileScopeSources().find((entry) => entry.dispositionSourceId === source.source_id)?.sourceId ?? source.source_id;
+                  revoked += await revokeSourceReads(id, "exclusions", rules);
+                }
+                file.pendingReads.finish();
+                return revoked;
+              };
+              let revoked = await reconcile();
+              const save = saveSourceDispositions(rulesPath, edits, { reconcileReadsFor: runtime.sources });
+              revoked += await reconcile();
+              return json({
+                ok: true,
+                kind: "source_dispositions_save",
+                result: {
+                  changed: save.changed,
+                  noop: save.noop,
+                  applied: save.applied,
+                  refused: save.refused,
+                  untouched_rule_ids: save.untouched_rule_ids,
+                  ...save.write ? { write: save.write } : {}
+                },
+                policy: {
+                  writes_config_only: revoked === 0,
+                  deletes_store_content: false,
+                  runs_purge_or_strip: false
+                }
+              });
+            } finally {
+              runtime.close?.();
+            }
+          });
         }
         if (request.method === "GET" && (url.pathname === "/dashboard" || url.pathname === "/dashboard.json")) {
           const page = url.pathname === "/dashboard.json" ? "json" : dashboardHtmlRoutePage(url);
@@ -227533,17 +227961,25 @@ function createEmailSourceWorker(options = {}) {
               if (localFilesBusy())
                 throw busyError();
               const registryPath = sourceDashboard.registryPath ?? defaultHandleRegistryPath();
-              const wasConnected = disconnectThisComputerSource(registryPath, "local.files");
-              if (!wasConnected) {
+              const connection = readThisComputerHandles(registryPath).find((handle) => handle.handle === "local.files.this_computer");
+              if (!connection || !disconnectThisComputerSource(registryPath, "local.files")) {
                 throw new EmailSourceWorkerError(409, "source_not_connected", "This source is not connected.");
               }
-              if (sourceScheduler && sourceDashboard.refreshSchedulerSources) {
-                const nextSources = await sourceDashboard.refreshSchedulerSources();
-                if (localFilesBusy()) {
-                  connectThisComputerSource(registryPath, "local.files");
-                  throw busyError();
+              let schedulingChanged = false;
+              try {
+                if (sourceScheduler && sourceDashboard.refreshSchedulerSources) {
+                  const nextSources = await sourceDashboard.refreshSchedulerSources();
+                  if (localFilesBusy())
+                    throw busyError();
+                  sourceScheduler.updateSources(nextSources);
+                  schedulingChanged = true;
                 }
-                sourceScheduler.updateSources(nextSources);
+                await revokeSourceReads("local.files", "disconnect");
+              } catch (error) {
+                connectThisComputerSource(registryPath, "local.files", new Date(connection.connectedAt));
+                if (schedulingChanged)
+                  await refreshDashboardSchedulerSources();
+                throw error;
               }
               return json({
                 ok: true,
@@ -227599,6 +228035,8 @@ function createEmailSourceWorker(options = {}) {
                   }
                 }
               }
+              for (const id of plan.sourceIds)
+                await revokeSourceReads(id, "disconnect");
               const secretStore = dashboardSecretStore(sourceDashboard);
               try {
                 for (const key of plan.credentialKeys)
@@ -227711,6 +228149,8 @@ function createEmailSourceWorker(options = {}) {
                 }
                 sourceScheduler.updateSources(nextSources);
               }
+              for (const id of selectedSourceIds)
+                await revokeSourceReads(id, "disconnect");
               const plannedPaths = removalPlan.plan.targets.map((target) => target.path);
               const leasedRecord = readUnpairedSources(registryPath);
               if (leasedRecord.status === "unreadable") {
@@ -227941,7 +228381,7 @@ function createEmailSourceWorker(options = {}) {
               if (record.acknowledge !== true) {
                 throw new EmailSourceWorkerError(400, "remove_confirmation_required", "Confirm that Remove deletes everything Olympus made from this archive, and leaves the file itself where it is.");
               }
-              return json(archiveId !== undefined ? archiveImports.remove(archiveId) : archiveImports.approveRemoval(requestId));
+              return json(await (archiveId !== undefined ? archiveImports.remove(archiveId) : archiveImports.approveRemoval(requestId)));
             });
           }
           throw new EmailSourceWorkerError(404, "not_found", "No such archive route.");
@@ -228977,6 +229417,11 @@ function readBusySentence(action, engineState) {
   return `This source is finishing a read. Retry ${action} after the current read completes.` + (age !== undefined && age > 0 ? ` Olympus is busy: it last reported ${age} s ago.` : "");
 }
 var init_engine2 = __esm(() => {
+  init_on_demand_revocation();
+  init_ingestion_dispositions();
+  init_source_placement();
+  init_source_scope_runtime();
+  init_file_scope_sources();
   init_router();
   init_embedding_plan();
   init_tier_visibility();
@@ -229553,7 +229998,7 @@ var init_query_planner = __esm(() => {
 
 // src/workers/local-files/watch-hub.ts
 import { createRequire as createRequire8 } from "node:module";
-import { existsSync as existsSync117, readFileSync as readFileSync110 } from "node:fs";
+import { existsSync as existsSync118, readFileSync as readFileSync110 } from "node:fs";
 import { dirname as dirname116, join as join150 } from "node:path";
 function watchIgnoreGlobs(context, extra = []) {
   const home = context.home;
@@ -229640,7 +230085,7 @@ class WatchHub {
   }
   async eventsSince(root, snapshotPath, ignore = []) {
     const watcher = await this.watcherOrHistoryError();
-    if (!existsSync117(snapshotPath))
+    if (!existsSync118(snapshotPath))
       throw new WatchHistoryUnavailableError("the snapshot is gone");
     try {
       return await watcher.getEventsSince(root, snapshotPath, { ignore: [...ignore] });
@@ -229770,7 +230215,7 @@ async function loadParcelWatcher(extraDirs = []) {
   const dirs = [...extraDirs, ...process.env.OLYMPUS_NATIVE_MODULES_DIR ? [process.env.OLYMPUS_NATIVE_MODULES_DIR] : []];
   for (const dir of dirs) {
     const candidate = join150(dir, "node_modules");
-    if (!existsSync117(join150(candidate, "@parcel", "watcher")))
+    if (!existsSync118(join150(candidate, "@parcel", "watcher")))
       continue;
     try {
       const requireFrom = createRequire8(join150(dirname116(candidate), "package.json"));
@@ -242925,7 +243370,7 @@ var init_start = __esm(() => {
 });
 
 // src/workers/archive-import/runtime.ts
-import { existsSync as existsSync118 } from "node:fs";
+import { existsSync as existsSync119 } from "node:fs";
 function createArchiveImportRuntime(options = {}) {
   registerArchiveFormatConnectors();
   const env = options.env ?? process.env;
@@ -242971,9 +243416,9 @@ function createArchiveImportRuntime(options = {}) {
     }
   };
   const hasData = (family) => {
-    if (archiveConnectorStoreDbPaths([family], env).some((path) => existsSync118(path)))
+    if (archiveConnectorStoreDbPaths([family], env).some((path) => existsSync119(path)))
       return true;
-    if (writableStoreOpensForbidden() && !existsSync118(tieredStoreSetLedgerPath(archiveConnectorStoreDbPath("secure_local", family, env))))
+    if (writableStoreOpensForbidden() && !existsSync119(tieredStoreSetLedgerPath(archiveConnectorStoreDbPath("secure_local", family, env))))
       return false;
     try {
       return state.list().some((record) => record.family === family);
@@ -243006,7 +243451,7 @@ function createArchiveImportRuntime(options = {}) {
     laneMounted: (family) => lanes.has(family),
     openWaitingQuestions: () => {
       const path = options.waitingQuestionsDbPath ?? waitingPrivateQuestionsDbPath(resolveRemoteConnectionsDbPath(env));
-      return existsSync118(path) ? openWaitingPrivateQuestionStore(path) : undefined;
+      return existsSync119(path) ? openWaitingPrivateQuestionStore(path) : undefined;
     },
     start: (path) => startArchiveImport({ state, path }),
     subscribeWork: (wake) => {
@@ -243365,8 +243810,468 @@ var init_agent = __esm(() => {
   };
 });
 
+// src/workers/archive-import/sync.ts
+import { createHash as createHash114 } from "node:crypto";
+function tally(values) {
+  return Object.values(values).reduce((total, value) => total + value, 0);
+}
+function receiptOf(record, input) {
+  const sum = (pick) => input.legs.reduce((total, leg) => total + pick(leg), 0);
+  const changed = sum((leg) => leg.itemsChanged);
+  const withoutDigest = {
+    kind: ARCHIVE_IMPORT_RECEIPT_KIND,
+    status: changed > 0 ? "progress" : "idle",
+    counts: {
+      items_seen: input.legs[0]?.itemsSeen ?? 0,
+      items_indexed: sum((leg) => leg.itemsIndexed),
+      items_changed: changed,
+      items_rejected: sum((leg) => leg.itemsRejected),
+      traversal_complete: Number(input.complete),
+      import_stopped: Number(input.stopped),
+      gaps: record ? tally(record.findings.gaps) : 0,
+      skipped: record ? tally(record.findings.skipped) : 0,
+      ...input.tiered ?? {}
+    },
+    ...input.warnings.length > 0 ? { warnings: [...new Set(input.warnings)] } : {},
+    policy: { counts_only: true, raw_source_exposed: false, source_text_returned: false }
+  };
+  return {
+    ...withoutDigest,
+    receipt_sha256: createHash114("sha256").update(JSON.stringify(withoutDigest)).digest("hex")
+  };
+}
+function stopFrom(error, at) {
+  return {
+    code: error.code,
+    message: error.message,
+    ...error.relPath ? { rel_path: error.relPath } : {},
+    at
+  };
+}
+function fileStop(error, relPath) {
+  if (!(error instanceof ScopeSafeError))
+    return error;
+  if (error.code === "not_found") {
+    return new ArchiveImportStoppedError("file_missing", "A file of this archive is no longer there.", relPath);
+  }
+  if (error.code === "changed" || error.code === "escape" || error.code === "not_regular") {
+    return new ArchiveImportStoppedError("file_changed", "A file of this archive changed since the import started.", relPath);
+  }
+  return new ArchiveImportStoppedError("file_unreadable", "A file of this archive could not be read.", relPath, { cause: error });
+}
+function changeSinceApproval(root, record, at) {
+  try {
+    root.statRelative("");
+  } catch (error) {
+    const missing = error instanceof ScopeSafeError && error.code === "not_found" || error?.code === "ENOENT";
+    return missing ? { code: "file_missing", message: "The folder that holds this archive is no longer there.", at } : { code: "root_changed", message: "The folder that holds this archive was replaced.", at };
+  }
+  const check = verifyArchiveManifest(root, record.files);
+  return check.ok ? undefined : stopFrom(check, at);
+}
+async function digestArchiveFiles(root, files, shouldContinue) {
+  const digests = [];
+  for (const file of files) {
+    const steps = archiveFileDigestSteps(root, file);
+    try {
+      for (;; ) {
+        const step = steps.next();
+        if (step.done) {
+          digests.push(step.value);
+          break;
+        }
+        if (!shouldContinue()) {
+          steps.return("");
+          return;
+        }
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+    } catch (error) {
+      throw fileStop(error, file.rel_path);
+    }
+  }
+  return digests;
+}
+function repeatedIndexes(items, holds, seen) {
+  const repeated = [];
+  items.forEach((item, index) => {
+    if (seen.has(item.identity.localItemId) || holds(item.identity))
+      repeated.push(index);
+    seen.add(item.identity.localItemId);
+  });
+  return repeated;
+}
+function observeListing(connector, pending, flush, complete, repeats) {
+  let completed = false;
+  const seenThisPass = new Set;
+  let earliest;
+  let latest;
+  const wrapped = Object.create(connector);
+  wrapped.listItems = (options) => {
+    const pages = connector.listItems(options);
+    return async function* () {
+      for await (const page of pages) {
+        for (const item of page.items) {
+          const authoredAt = item.metadata.authoredAt;
+          if (typeof authoredAt !== "string" || !Number.isFinite(Date.parse(authoredAt)))
+            continue;
+          if (!earliest || authoredAt < earliest)
+            earliest = authoredAt;
+          if (!latest || authoredAt > latest)
+            latest = authoredAt;
+        }
+        if (repeats) {
+          const repeated = repeatedIndexes(page.items, repeats.holds, seenThisPass);
+          const where = repeats.positions();
+          if (where && where.length === page.items.length) {
+            repeats.add(repeated.length, { repeatedAt: repeated.map((index) => where[index]), through: where[where.length - 1] });
+          } else {
+            repeats.add(repeated.length);
+          }
+        }
+        flush();
+        if (page.done) {
+          if (!await complete())
+            return;
+          completed = true;
+        }
+        yield page;
+      }
+      flush();
+    }();
+  };
+  return {
+    connector: wrapped,
+    completed: () => completed,
+    dates: () => ({ ...earliest ? { earliest } : {}, ...latest ? { latest } : {} })
+  };
+}
+function waitForActiveArchivePulls(archiveId) {
+  const pulls = activePulls.get(archiveId);
+  return pulls && Promise.allSettled(pulls);
+}
+async function pullArchiveImport(options) {
+  const now = options.now ?? (() => new Date);
+  const record = options.state.get(options.archiveId);
+  const idle = (current, warnings = [], stopped = false) => ({
+    receipt: receiptOf(current, { legs: [], complete: current?.status === "imported", stopped, warnings }),
+    continueSoon: false,
+    ...current ? { record: current } : {}
+  });
+  if (!record || record.status !== "importing")
+    return idle(record);
+  const stop = (reason) => {
+    const stoppedRecord = options.state.update(record.archive_id, (entry) => {
+      if (entry.status !== "importing")
+        return false;
+      entry.status = "stopped";
+      entry.stop = reason;
+    });
+    return idle(stoppedRecord, stoppedRecord?.status === "stopped" ? ["archive_import_stopped"] : [], stoppedRecord?.status === "stopped");
+  };
+  const format = getArchiveFormat(record.format);
+  if (record.target) {
+    const target = (options.targets ?? archiveSourceTargets).forSource(record.target.source_id);
+    if (!target || !format || !target.formats.includes(record.format) || format.family !== record.family || format.provider !== record.provider) {
+      return stop({ code: "source_unavailable", message: "This build does not read this export into its source.", at: now().toISOString() });
+    }
+    const pass = () => runPass(options, record, {
+      stop,
+      idle,
+      now,
+      format,
+      sink: () => {
+        let account;
+        try {
+          if (record.target.owner_confirmed === true && !sameImportAccount(record.target.confirmed_account, importAccountIdentity(record.target.source_id, options.state.env))) {
+            return { code: "account_changed", message: "The account this source holds now is not the one you said this export belongs to.", at: now().toISOString() };
+          }
+          if (importAccountIdentity(record.target.source_id, options.state.env) === undefined) {
+            return { code: "source_unavailable", message: "This source's account is gone, so nothing more was imported.", at: now().toISOString() };
+          }
+          const resolved = resolveImportAccount(record.target.source_id, record.target.import_account_id, {
+            env: options.state.env,
+            ...record.target.owner_confirmed === true ? { ownerConfirmed: true } : {}
+          });
+          if (resolved.match !== "same" && resolved.match !== "new" || !resolved.account) {
+            return { code: "account_changed", message: "The account this source holds now is not the one this export belongs to.", at: now().toISOString() };
+          }
+          account = resolved.account;
+        } catch (error) {
+          if (error instanceof SourceStorageUnavailableError) {
+            return { code: "source_unavailable", message: "This source is being deleted or moved, so nothing more was imported.", at: now().toISOString() };
+          }
+          throw error;
+        }
+        const lane = target.lane(account, options.state.env);
+        return {
+          set: lane.set,
+          syncOptions: lane.sync,
+          input: true,
+          connector: (input, hooks) => {
+            const bound = bindInputToFiles(target.input(input), record.manifest_sha256);
+            if (!lane.connector.forInput)
+              throw new Error("The source's connector has no way to read an archive.");
+            return holdingItems(lane.connector.forInput(observingIntake(bound, hooks.observeIntake)));
+          }
+        };
+      }
+    });
+    return target.exclusive ? target.exclusive(pass) : pass();
+  }
+  const lane = options.lane;
+  if (!lane)
+    throw new Error("An import that stays under Archives needs its family's stores.");
+  if (record.family !== lane.family)
+    throw new Error("This archive belongs to another family's stores.");
+  const factory = (options.connectorFactory ?? archiveFormatConnector)(record.format);
+  if (!format || !factory || format.family !== record.family || format.provider !== record.provider) {
+    return stop({ code: "format_unavailable", message: "This build does not read this archive's format.", at: now().toISOString() });
+  }
+  const pass = runPass(options, record, {
+    stop,
+    idle,
+    now,
+    format,
+    sink: () => ({
+      set: lane.set,
+      syncOptions: {
+        placement: ARCHIVE_STORE_PLACEMENT,
+        fetchContent: true,
+        deferMetadataOnlyContent: true
+      },
+      input: false,
+      connector: (input) => factory(input)
+    })
+  });
+  const active = activePulls.get(record.archive_id) ?? new Set;
+  activePulls.set(record.archive_id, active);
+  active.add(pass);
+  try {
+    return await pass;
+  } finally {
+    active.delete(pass);
+    if (!active.size)
+      activePulls.delete(record.archive_id);
+  }
+}
+async function runPass(options, record, context) {
+  const { stop, now, format } = context;
+  const picked = context.sink();
+  if ("code" in picked)
+    return stop(picked);
+  const sink = picked;
+  let root;
+  try {
+    root = ScopeRoot.open(record.root_path);
+  } catch (error) {
+    const missing = error instanceof ScopeSafeError && error.code === "not_found";
+    return stop({
+      code: missing ? "file_missing" : "root_changed",
+      message: missing ? "The folder that holds this archive is no longer there." : "The folder that holds this archive could not be opened as approved.",
+      at: now().toISOString()
+    });
+  }
+  try {
+    if (root.identity.dev !== record.root_identity.dev || root.identity.ino !== record.root_identity.ino) {
+      return stop({ code: "root_changed", message: "The folder that holds this archive was replaced.", at: now().toISOString() });
+    }
+    const check = verifyArchiveManifest(root, record.files);
+    if (!check.ok)
+      return stop(stopFrom(check, now().toISOString()));
+    const pending = [];
+    let position;
+    let repeated = 0;
+    let itemPositions;
+    let repeatedAt = [];
+    let listedThrough;
+    const flush = () => {
+      const moved = position;
+      position = undefined;
+      const repeats = repeated;
+      repeated = 0;
+      const items = repeatedAt.length > 0 || listedThrough ? { repeatedAt, ...listedThrough ? { through: listedThrough } : {} } : undefined;
+      repeatedAt = [];
+      listedThrough = undefined;
+      if (pending.length === 0 && !moved && !items)
+        return;
+      const batch = pending.splice(0, pending.length);
+      options.state.recordFindings(record.archive_id, batch, moved, repeats, items);
+    };
+    const connectorId = archiveConnectorId(record.archive_id);
+    const shouldContinue = options.shouldContinue ?? (() => true);
+    let providerWait;
+    let providerWaitMinimum;
+    const connector = sink.connector({
+      archiveId: record.archive_id,
+      connectorId,
+      accountScope: record.archive_id,
+      format,
+      root,
+      files: archiveFileEntries(record.files),
+      manifestSha256: record.manifest_sha256,
+      report: (finding) => {
+        pending.push(finding);
+      },
+      reportPosition: (next) => {
+        position = next;
+      },
+      reportItemPositions: (positions) => {
+        itemPositions = positions;
+      },
+      waitForProvider: (reason, detail) => {
+        providerWait = reason;
+        providerWaitMinimum = detail?.minimum;
+      },
+      shouldContinue,
+      ...options.media ? { media: archiveMediaAccess({ bindings: options.media, archiveId: record.archive_id, root, chosenRelPath: record.chosen_rel_path }) } : {},
+      ...options.maxBytesPerListing !== undefined ? { maxBytesPerListing: options.maxBytesPerListing } : {},
+      ...options.pageSize !== undefined ? { pageSize: options.pageSize } : {}
+    }, {
+      observeIntake: (outcomes) => {
+        const told = itemPositions;
+        itemPositions = undefined;
+        options.state.recordIntake(record.archive_id, outcomes, told);
+      }
+    });
+    const completion = {};
+    const observed = observeListing(connector, pending, flush, async () => {
+      const digests = await digestArchiveFiles(root, record.files, shouldContinue);
+      if (!digests)
+        return false;
+      if (options.media) {
+        const media = await verifyArchiveMediaBindings({ bindings: options.media, archiveId: record.archive_id, root, shouldContinue });
+        if (!media)
+          return false;
+        if (!media.ok)
+          throw new ArchiveImportStoppedError(media.code, media.message, media.relPath);
+      }
+      completion.digests = digests;
+      return true;
+    }, sink.input ? undefined : {
+      holds: (identity) => sink.set.anyLegHasRow(identity),
+      positions: () => {
+        const told = itemPositions;
+        itemPositions = undefined;
+        return told;
+      },
+      add: (count, at) => {
+        if (at) {
+          repeatedAt.push(...at.repeatedAt);
+          if (at.through)
+            listedThrough = at.through;
+        } else {
+          repeated += count;
+        }
+      }
+    });
+    const set = sink.set;
+    set.store("secure_local", { create: true });
+    const cursor = set.committedCursor(connectorId)?.cursor ?? undefined;
+    let run;
+    try {
+      run = await set.sync(observed.connector, {
+        ...sink.syncOptions,
+        maxItems: Math.max(1, options.maxItems ?? ARCHIVE_IMPORT_MAX_ITEMS_PER_PASS),
+        ...cursor ? { cursor } : {}
+      });
+    } catch (error) {
+      if (error instanceof ArchiveImportStoppedError) {
+        flush();
+        return stop(stopFrom(error, now().toISOString()));
+      }
+      throw error;
+    }
+    const refused = TIER_DOMAIN_ORDER.reduce((sum, domain) => sum + (run.byDomain[domain]?.sync.itemsRejected ?? 0), 0);
+    if (refused > 0) {
+      const readTo = options.state.get(record.archive_id)?.read_position;
+      pending.push({ kind: ARCHIVE_COMMON_FINDINGS.itemRefused, class: "gap", fileIndex: position?.fileIndex ?? readTo?.file_index ?? 0, offset: position?.offset ?? readTo?.offset ?? 0, count: refused });
+    }
+    flush();
+    const legs = TIER_DOMAIN_ORDER.flatMap((domain) => run.byDomain[domain] ? [run.byDomain[domain].sync] : []);
+    const waiting = run.routing.itemsUnstored;
+    const complete = observed.completed() && legs.length > 0 && legs.every((leg) => leg.traversalComplete) && waiting === 0;
+    const dates = observed.dates();
+    const final = {};
+    let mediaChange;
+    let mediaChecked = true;
+    if (complete && completion.digests && options.media) {
+      const media = await verifyArchiveMediaBindings({ bindings: options.media, archiveId: record.archive_id, root, shouldContinue });
+      if (!media)
+        mediaChecked = false;
+      else if (!media.ok)
+        mediaChange = stopFrom(media, now().toISOString());
+    }
+    const updated = options.state.update(record.archive_id, (entry) => {
+      if (providerWait !== undefined) {
+        entry.waiting = { reason: providerWait, at: now().toISOString(), ...providerWaitMinimum !== undefined ? { minimum: providerWaitMinimum } : {} };
+      } else {
+        delete entry.waiting;
+      }
+      if (dates.earliest && dates.latest) {
+        entry.date_range = {
+          earliest: entry.date_range && entry.date_range.earliest < dates.earliest ? entry.date_range.earliest : dates.earliest,
+          latest: entry.date_range && entry.date_range.latest > dates.latest ? entry.date_range.latest : dates.latest
+        };
+      }
+      const digests = completion.digests;
+      if (complete && digests && mediaChecked && entry.status === "importing" && entry.manifest_sha256 === record.manifest_sha256) {
+        const changed = changeSinceApproval(root, record, now().toISOString()) ?? mediaChange;
+        if (changed) {
+          final.stop = changed;
+          entry.status = "stopped";
+          entry.stop = changed;
+          return;
+        }
+        entry.status = "imported";
+        entry.completed_at = now().toISOString();
+        entry.files.forEach((file, index) => {
+          file.sha256 = digests[index];
+        });
+      }
+    });
+    if (final.stop)
+      return context.idle(updated, ["archive_import_stopped"], true);
+    return {
+      receipt: receiptOf(updated, {
+        legs,
+        tiered: tieredLaneReceiptCounts({
+          ...run.byDomain.public_safe ? { public: run.byDomain.public_safe } : {},
+          routing: run.routing
+        }),
+        complete,
+        stopped: false,
+        warnings: [
+          ...legs.flatMap((leg) => leg.gaps),
+          ...waiting > 0 ? [`archive_items_waiting: ${waiting} item(s) are in the middle of a tier move and are read again once it is done.`] : [],
+          ...providerWait !== undefined ? [`archive_import_waiting_for_provider: ${providerWait}`] : []
+        ]
+      }),
+      continueSoon: !complete && waiting === 0 && providerWait === undefined,
+      ...updated ? { record: updated } : {}
+    };
+  } finally {
+    root.close();
+  }
+}
+var ARCHIVE_IMPORT_RECEIPT_KIND = "archive_import_pull_receipt", ARCHIVE_IMPORT_MAX_ITEMS_PER_PASS = 2000, activePulls;
+var init_sync = __esm(() => {
+  init_archive_formats();
+  init_archive_formats();
+  init_scope_safe_fs();
+  init_source_storage();
+  init_tiered_store_set();
+  init_source_input();
+  init_source_targets();
+  init_media_bindings();
+  init_manifest3();
+  init_state();
+  init_store();
+  activePulls = new Map;
+});
+
 // src/workers/archive-import/removal.ts
-import { existsSync as existsSync119 } from "node:fs";
+import { existsSync as existsSync120 } from "node:fs";
 function requestArchiveRemoval(state, archiveId, now = () => new Date) {
   return state.update(archiveId, (record) => {
     if (record.status === "removing" || record.target)
@@ -243400,7 +244305,7 @@ function deleteWaitingAnswers(options, input) {
 }
 function deleteJudgeQuestions(lane, provider, accountScope) {
   const path = tierSnifferPathForLedger(lane.ledger.dbPath);
-  if (path !== ":memory:" && !existsSync119(path))
+  if (path !== ":memory:" && !existsSync120(path))
     return 0;
   const sniffer = openTierSniffer({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID2 }, { dbPath: path });
   try {
@@ -243408,6 +244313,13 @@ function deleteJudgeQuestions(lane, provider, accountScope) {
   } finally {
     sniffer.close();
   }
+}
+function withdrawArchiveReads(lane, record) {
+  const stores = archiveLaneStores(lane);
+  const prefix = record.archive_id + ":";
+  const ids = new Set(stores.flatMap((store) => store.onDemandGrantIds().filter((id) => id.startsWith(prefix))));
+  revokeOnDemandReads(stores, ids);
+  return lane.ledger.withdrawAccountScope(record.provider, record.archive_id);
 }
 async function runArchiveRemoval(options) {
   const record = options.state.get(options.archiveId);
@@ -243421,12 +244333,12 @@ async function runArchiveRemoval(options) {
   const lane = options.lane;
   const corpusIds = archiveLaneLegs(lane).map((leg) => leg.corpusId);
   const counts = emptyCounts2();
+  const withdrawn = withdrawArchiveReads(lane, record);
+  counts.decisions_removed += withdrawn.items;
+  counts.copies_hidden += withdrawn.copies;
   archiveContinuations.dropArchive(record.archive_id);
   counts.extraction_ledgers_cleared += runForgetAccountScopeSteps({ source_id: ARCHIVE_IMPORTS_SOURCE_ID2, slot: "1", corpus_ids: corpusIds }, [accountScope], { env: lane.env }, { dryRun: false }).length;
   counts.media_bindings_removed += options.media?.forgetArchive(accountScope) ?? 0;
-  const withdrawn = lane.ledger.withdrawAccountScope(provider, accountScope);
-  counts.decisions_removed += withdrawn.items;
-  counts.copies_hidden += withdrawn.copies;
   counts.questions_removed += deleteJudgeQuestions(lane, provider, accountScope);
   counts.answers_removed += deleteWaitingAnswers(options, { provider, accountScope, corpusIds });
   const connectorId = archiveConnectorId(record.archive_id);
@@ -243460,6 +244372,7 @@ var init_removal = __esm(() => {
   init_source_storage();
   init_tier_ledger_path();
   init_continuation_cache();
+  init_on_demand_read();
   init_lane();
   init_state();
   init_store();
@@ -244085,18 +244998,30 @@ function createArchiveImportDashboard(options) {
       }
       return { ok: false, code: "unknown_archive", message: ARCHIVE_APPROVE_COPY.unknown_archive };
     }
-    if (record.status === "removing")
+    if (record.status === "removing" && record.visibility_withdrawn)
       return { ok: false, code: "already_removing", message: ARCHIVE_APPROVE_COPY.already_removing };
     if (record.target)
       return { ok: false, code: "part_of_source", message: ARCHIVE_APPROVE_COPY.part_of_source };
     requestArchiveRemoval(state, archiveId, options.now);
-    for (const request of requests.list()) {
-      if (request.archive_id === archiveId)
-        requests.remove(request.request_id);
-    }
-    refresh();
-    wakeScheduler();
-    return { ok: true };
+    const finish = () => {
+      try {
+        for (const lane of options.runtime.existingLanes(new Set([record.family])))
+          withdrawArchiveReads(lane, record);
+        state.update(archiveId, (entry) => {
+          entry.visibility_withdrawn = true;
+        });
+        for (const request of requests.list()) {
+          if (request.archive_id === archiveId)
+            requests.remove(request.request_id);
+        }
+      } finally {
+        refresh();
+        wakeScheduler();
+      }
+      return { ok: true };
+    };
+    const active = waitForActiveArchivePulls(archiveId);
+    return active ? active.then(finish) : finish();
   };
   const listing = (shownHere) => {
     const model = options.privateModel();
@@ -244231,7 +245156,8 @@ function createArchiveImportDashboard(options) {
       if (blocked && !blocked.ok)
         return { ok: false, code: blocked.code, message: blocked.message };
       const result = removeNow(request.archive_id);
-      requests.remove(requestId);
+      if (!(result instanceof Promise) && !result.ok)
+        requests.remove(requestId);
       return result;
     },
     view() {
@@ -244414,6 +245340,7 @@ var init_dashboard2 = __esm(() => {
   init_agent();
   init_source_scheduler();
   init_manifest3();
+  init_sync();
   init_removal();
   init_olympus_layout();
   init_staging();
@@ -244695,451 +245622,6 @@ var init_extraction_runtime = __esm(() => {
   init_store();
   init_extraction_source3();
   init_lane();
-});
-
-// src/workers/archive-import/sync.ts
-import { createHash as createHash114 } from "node:crypto";
-function tally(values) {
-  return Object.values(values).reduce((total, value) => total + value, 0);
-}
-function receiptOf(record, input) {
-  const sum = (pick) => input.legs.reduce((total, leg) => total + pick(leg), 0);
-  const changed = sum((leg) => leg.itemsChanged);
-  const withoutDigest = {
-    kind: ARCHIVE_IMPORT_RECEIPT_KIND,
-    status: changed > 0 ? "progress" : "idle",
-    counts: {
-      items_seen: input.legs[0]?.itemsSeen ?? 0,
-      items_indexed: sum((leg) => leg.itemsIndexed),
-      items_changed: changed,
-      items_rejected: sum((leg) => leg.itemsRejected),
-      traversal_complete: Number(input.complete),
-      import_stopped: Number(input.stopped),
-      gaps: record ? tally(record.findings.gaps) : 0,
-      skipped: record ? tally(record.findings.skipped) : 0,
-      ...input.tiered ?? {}
-    },
-    ...input.warnings.length > 0 ? { warnings: [...new Set(input.warnings)] } : {},
-    policy: { counts_only: true, raw_source_exposed: false, source_text_returned: false }
-  };
-  return {
-    ...withoutDigest,
-    receipt_sha256: createHash114("sha256").update(JSON.stringify(withoutDigest)).digest("hex")
-  };
-}
-function stopFrom(error, at) {
-  return {
-    code: error.code,
-    message: error.message,
-    ...error.relPath ? { rel_path: error.relPath } : {},
-    at
-  };
-}
-function fileStop(error, relPath) {
-  if (!(error instanceof ScopeSafeError))
-    return error;
-  if (error.code === "not_found") {
-    return new ArchiveImportStoppedError("file_missing", "A file of this archive is no longer there.", relPath);
-  }
-  if (error.code === "changed" || error.code === "escape" || error.code === "not_regular") {
-    return new ArchiveImportStoppedError("file_changed", "A file of this archive changed since the import started.", relPath);
-  }
-  return new ArchiveImportStoppedError("file_unreadable", "A file of this archive could not be read.", relPath, { cause: error });
-}
-function changeSinceApproval(root, record, at) {
-  try {
-    root.statRelative("");
-  } catch (error) {
-    const missing = error instanceof ScopeSafeError && error.code === "not_found" || error?.code === "ENOENT";
-    return missing ? { code: "file_missing", message: "The folder that holds this archive is no longer there.", at } : { code: "root_changed", message: "The folder that holds this archive was replaced.", at };
-  }
-  const check = verifyArchiveManifest(root, record.files);
-  return check.ok ? undefined : stopFrom(check, at);
-}
-async function digestArchiveFiles(root, files, shouldContinue) {
-  const digests = [];
-  for (const file of files) {
-    const steps = archiveFileDigestSteps(root, file);
-    try {
-      for (;; ) {
-        const step = steps.next();
-        if (step.done) {
-          digests.push(step.value);
-          break;
-        }
-        if (!shouldContinue()) {
-          steps.return("");
-          return;
-        }
-        await new Promise((resolve) => setImmediate(resolve));
-      }
-    } catch (error) {
-      throw fileStop(error, file.rel_path);
-    }
-  }
-  return digests;
-}
-function repeatedIndexes(items, holds, seen) {
-  const repeated = [];
-  items.forEach((item, index) => {
-    if (seen.has(item.identity.localItemId) || holds(item.identity))
-      repeated.push(index);
-    seen.add(item.identity.localItemId);
-  });
-  return repeated;
-}
-function observeListing(connector, pending, flush, complete, repeats) {
-  let completed = false;
-  const seenThisPass = new Set;
-  let earliest;
-  let latest;
-  const wrapped = Object.create(connector);
-  wrapped.listItems = (options) => {
-    const pages = connector.listItems(options);
-    return async function* () {
-      for await (const page of pages) {
-        for (const item of page.items) {
-          const authoredAt = item.metadata.authoredAt;
-          if (typeof authoredAt !== "string" || !Number.isFinite(Date.parse(authoredAt)))
-            continue;
-          if (!earliest || authoredAt < earliest)
-            earliest = authoredAt;
-          if (!latest || authoredAt > latest)
-            latest = authoredAt;
-        }
-        if (repeats) {
-          const repeated = repeatedIndexes(page.items, repeats.holds, seenThisPass);
-          const where = repeats.positions();
-          if (where && where.length === page.items.length) {
-            repeats.add(repeated.length, { repeatedAt: repeated.map((index) => where[index]), through: where[where.length - 1] });
-          } else {
-            repeats.add(repeated.length);
-          }
-        }
-        flush();
-        if (page.done) {
-          if (!await complete())
-            return;
-          completed = true;
-        }
-        yield page;
-      }
-      flush();
-    }();
-  };
-  return {
-    connector: wrapped,
-    completed: () => completed,
-    dates: () => ({ ...earliest ? { earliest } : {}, ...latest ? { latest } : {} })
-  };
-}
-async function pullArchiveImport(options) {
-  const now = options.now ?? (() => new Date);
-  const record = options.state.get(options.archiveId);
-  const idle = (current, warnings = [], stopped = false) => ({
-    receipt: receiptOf(current, { legs: [], complete: current?.status === "imported", stopped, warnings }),
-    continueSoon: false,
-    ...current ? { record: current } : {}
-  });
-  if (!record || record.status !== "importing")
-    return idle(record);
-  const stop = (reason) => {
-    const stoppedRecord = options.state.update(record.archive_id, (entry) => {
-      if (entry.status !== "importing")
-        return false;
-      entry.status = "stopped";
-      entry.stop = reason;
-    });
-    return idle(stoppedRecord, stoppedRecord?.status === "stopped" ? ["archive_import_stopped"] : [], stoppedRecord?.status === "stopped");
-  };
-  const format = getArchiveFormat(record.format);
-  if (record.target) {
-    const target = (options.targets ?? archiveSourceTargets).forSource(record.target.source_id);
-    if (!target || !format || !target.formats.includes(record.format) || format.family !== record.family || format.provider !== record.provider) {
-      return stop({ code: "source_unavailable", message: "This build does not read this export into its source.", at: now().toISOString() });
-    }
-    const pass = () => runPass(options, record, {
-      stop,
-      idle,
-      now,
-      format,
-      sink: () => {
-        let account;
-        try {
-          if (record.target.owner_confirmed === true && !sameImportAccount(record.target.confirmed_account, importAccountIdentity(record.target.source_id, options.state.env))) {
-            return { code: "account_changed", message: "The account this source holds now is not the one you said this export belongs to.", at: now().toISOString() };
-          }
-          if (importAccountIdentity(record.target.source_id, options.state.env) === undefined) {
-            return { code: "source_unavailable", message: "This source's account is gone, so nothing more was imported.", at: now().toISOString() };
-          }
-          const resolved = resolveImportAccount(record.target.source_id, record.target.import_account_id, {
-            env: options.state.env,
-            ...record.target.owner_confirmed === true ? { ownerConfirmed: true } : {}
-          });
-          if (resolved.match !== "same" && resolved.match !== "new" || !resolved.account) {
-            return { code: "account_changed", message: "The account this source holds now is not the one this export belongs to.", at: now().toISOString() };
-          }
-          account = resolved.account;
-        } catch (error) {
-          if (error instanceof SourceStorageUnavailableError) {
-            return { code: "source_unavailable", message: "This source is being deleted or moved, so nothing more was imported.", at: now().toISOString() };
-          }
-          throw error;
-        }
-        const lane = target.lane(account, options.state.env);
-        return {
-          set: lane.set,
-          syncOptions: lane.sync,
-          input: true,
-          connector: (input, hooks) => {
-            const bound = bindInputToFiles(target.input(input), record.manifest_sha256);
-            if (!lane.connector.forInput)
-              throw new Error("The source's connector has no way to read an archive.");
-            return holdingItems(lane.connector.forInput(observingIntake(bound, hooks.observeIntake)));
-          }
-        };
-      }
-    });
-    return target.exclusive ? target.exclusive(pass) : pass();
-  }
-  const lane = options.lane;
-  if (!lane)
-    throw new Error("An import that stays under Archives needs its family's stores.");
-  if (record.family !== lane.family)
-    throw new Error("This archive belongs to another family's stores.");
-  const factory = (options.connectorFactory ?? archiveFormatConnector)(record.format);
-  if (!format || !factory || format.family !== record.family || format.provider !== record.provider) {
-    return stop({ code: "format_unavailable", message: "This build does not read this archive's format.", at: now().toISOString() });
-  }
-  return runPass(options, record, {
-    stop,
-    idle,
-    now,
-    format,
-    sink: () => ({
-      set: lane.set,
-      syncOptions: {
-        placement: ARCHIVE_STORE_PLACEMENT,
-        fetchContent: true,
-        deferMetadataOnlyContent: true
-      },
-      input: false,
-      connector: (input) => factory(input)
-    })
-  });
-}
-async function runPass(options, record, context) {
-  const { stop, now, format } = context;
-  const picked = context.sink();
-  if ("code" in picked)
-    return stop(picked);
-  const sink = picked;
-  let root;
-  try {
-    root = ScopeRoot.open(record.root_path);
-  } catch (error) {
-    const missing = error instanceof ScopeSafeError && error.code === "not_found";
-    return stop({
-      code: missing ? "file_missing" : "root_changed",
-      message: missing ? "The folder that holds this archive is no longer there." : "The folder that holds this archive could not be opened as approved.",
-      at: now().toISOString()
-    });
-  }
-  try {
-    if (root.identity.dev !== record.root_identity.dev || root.identity.ino !== record.root_identity.ino) {
-      return stop({ code: "root_changed", message: "The folder that holds this archive was replaced.", at: now().toISOString() });
-    }
-    const check = verifyArchiveManifest(root, record.files);
-    if (!check.ok)
-      return stop(stopFrom(check, now().toISOString()));
-    const pending = [];
-    let position;
-    let repeated = 0;
-    let itemPositions;
-    let repeatedAt = [];
-    let listedThrough;
-    const flush = () => {
-      const moved = position;
-      position = undefined;
-      const repeats = repeated;
-      repeated = 0;
-      const items = repeatedAt.length > 0 || listedThrough ? { repeatedAt, ...listedThrough ? { through: listedThrough } : {} } : undefined;
-      repeatedAt = [];
-      listedThrough = undefined;
-      if (pending.length === 0 && !moved && !items)
-        return;
-      const batch = pending.splice(0, pending.length);
-      options.state.recordFindings(record.archive_id, batch, moved, repeats, items);
-    };
-    const connectorId = archiveConnectorId(record.archive_id);
-    const shouldContinue = options.shouldContinue ?? (() => true);
-    let providerWait;
-    let providerWaitMinimum;
-    const connector = sink.connector({
-      archiveId: record.archive_id,
-      connectorId,
-      accountScope: record.archive_id,
-      format,
-      root,
-      files: archiveFileEntries(record.files),
-      manifestSha256: record.manifest_sha256,
-      report: (finding) => {
-        pending.push(finding);
-      },
-      reportPosition: (next) => {
-        position = next;
-      },
-      reportItemPositions: (positions) => {
-        itemPositions = positions;
-      },
-      waitForProvider: (reason, detail) => {
-        providerWait = reason;
-        providerWaitMinimum = detail?.minimum;
-      },
-      shouldContinue,
-      ...options.media ? { media: archiveMediaAccess({ bindings: options.media, archiveId: record.archive_id, root, chosenRelPath: record.chosen_rel_path }) } : {},
-      ...options.maxBytesPerListing !== undefined ? { maxBytesPerListing: options.maxBytesPerListing } : {},
-      ...options.pageSize !== undefined ? { pageSize: options.pageSize } : {}
-    }, {
-      observeIntake: (outcomes) => {
-        const told = itemPositions;
-        itemPositions = undefined;
-        options.state.recordIntake(record.archive_id, outcomes, told);
-      }
-    });
-    const completion = {};
-    const observed = observeListing(connector, pending, flush, async () => {
-      const digests = await digestArchiveFiles(root, record.files, shouldContinue);
-      if (!digests)
-        return false;
-      if (options.media) {
-        const media = await verifyArchiveMediaBindings({ bindings: options.media, archiveId: record.archive_id, root, shouldContinue });
-        if (!media)
-          return false;
-        if (!media.ok)
-          throw new ArchiveImportStoppedError(media.code, media.message, media.relPath);
-      }
-      completion.digests = digests;
-      return true;
-    }, sink.input ? undefined : {
-      holds: (identity) => sink.set.anyLegHasRow(identity),
-      positions: () => {
-        const told = itemPositions;
-        itemPositions = undefined;
-        return told;
-      },
-      add: (count, at) => {
-        if (at) {
-          repeatedAt.push(...at.repeatedAt);
-          if (at.through)
-            listedThrough = at.through;
-        } else {
-          repeated += count;
-        }
-      }
-    });
-    const set = sink.set;
-    set.store("secure_local", { create: true });
-    const cursor = set.committedCursor(connectorId)?.cursor ?? undefined;
-    let run;
-    try {
-      run = await set.sync(observed.connector, {
-        ...sink.syncOptions,
-        maxItems: Math.max(1, options.maxItems ?? ARCHIVE_IMPORT_MAX_ITEMS_PER_PASS),
-        ...cursor ? { cursor } : {}
-      });
-    } catch (error) {
-      if (error instanceof ArchiveImportStoppedError) {
-        flush();
-        return stop(stopFrom(error, now().toISOString()));
-      }
-      throw error;
-    }
-    const refused = TIER_DOMAIN_ORDER.reduce((sum, domain) => sum + (run.byDomain[domain]?.sync.itemsRejected ?? 0), 0);
-    if (refused > 0) {
-      const readTo = options.state.get(record.archive_id)?.read_position;
-      pending.push({ kind: ARCHIVE_COMMON_FINDINGS.itemRefused, class: "gap", fileIndex: position?.fileIndex ?? readTo?.file_index ?? 0, offset: position?.offset ?? readTo?.offset ?? 0, count: refused });
-    }
-    flush();
-    const legs = TIER_DOMAIN_ORDER.flatMap((domain) => run.byDomain[domain] ? [run.byDomain[domain].sync] : []);
-    const waiting = run.routing.itemsUnstored;
-    const complete = observed.completed() && legs.length > 0 && legs.every((leg) => leg.traversalComplete) && waiting === 0;
-    const dates = observed.dates();
-    const final = {};
-    let mediaChange;
-    let mediaChecked = true;
-    if (complete && completion.digests && options.media) {
-      const media = await verifyArchiveMediaBindings({ bindings: options.media, archiveId: record.archive_id, root, shouldContinue });
-      if (!media)
-        mediaChecked = false;
-      else if (!media.ok)
-        mediaChange = stopFrom(media, now().toISOString());
-    }
-    const updated = options.state.update(record.archive_id, (entry) => {
-      if (providerWait !== undefined) {
-        entry.waiting = { reason: providerWait, at: now().toISOString(), ...providerWaitMinimum !== undefined ? { minimum: providerWaitMinimum } : {} };
-      } else {
-        delete entry.waiting;
-      }
-      if (dates.earliest && dates.latest) {
-        entry.date_range = {
-          earliest: entry.date_range && entry.date_range.earliest < dates.earliest ? entry.date_range.earliest : dates.earliest,
-          latest: entry.date_range && entry.date_range.latest > dates.latest ? entry.date_range.latest : dates.latest
-        };
-      }
-      const digests = completion.digests;
-      if (complete && digests && mediaChecked && entry.status === "importing" && entry.manifest_sha256 === record.manifest_sha256) {
-        const changed = changeSinceApproval(root, record, now().toISOString()) ?? mediaChange;
-        if (changed) {
-          final.stop = changed;
-          entry.status = "stopped";
-          entry.stop = changed;
-          return;
-        }
-        entry.status = "imported";
-        entry.completed_at = now().toISOString();
-        entry.files.forEach((file, index) => {
-          file.sha256 = digests[index];
-        });
-      }
-    });
-    if (final.stop)
-      return context.idle(updated, ["archive_import_stopped"], true);
-    return {
-      receipt: receiptOf(updated, {
-        legs,
-        tiered: tieredLaneReceiptCounts({
-          ...run.byDomain.public_safe ? { public: run.byDomain.public_safe } : {},
-          routing: run.routing
-        }),
-        complete,
-        stopped: false,
-        warnings: [
-          ...legs.flatMap((leg) => leg.gaps),
-          ...waiting > 0 ? [`archive_items_waiting: ${waiting} item(s) are in the middle of a tier move and are read again once it is done.`] : [],
-          ...providerWait !== undefined ? [`archive_import_waiting_for_provider: ${providerWait}`] : []
-        ]
-      }),
-      continueSoon: !complete && waiting === 0 && providerWait === undefined,
-      ...updated ? { record: updated } : {}
-    };
-  } finally {
-    root.close();
-  }
-}
-var ARCHIVE_IMPORT_RECEIPT_KIND = "archive_import_pull_receipt", ARCHIVE_IMPORT_MAX_ITEMS_PER_PASS = 2000;
-var init_sync = __esm(() => {
-  init_archive_formats();
-  init_archive_formats();
-  init_scope_safe_fs();
-  init_source_storage();
-  init_tiered_store_set();
-  init_source_input();
-  init_source_targets();
-  init_media_bindings();
-  init_manifest3();
-  init_state();
-  init_store();
 });
 
 // src/workers/archive-import/scheduler-source.ts
@@ -246362,7 +246844,7 @@ var init_gmail_status_scope = __esm(() => {
 });
 
 // src/workers/evernote/runtime.ts
-import { existsSync as existsSync120 } from "node:fs";
+import { existsSync as existsSync121 } from "node:fs";
 function createEvernoteRuntime(options) {
   const env = options.env ?? process.env;
   const now = options.now ?? (() => new Date);
@@ -246381,7 +246863,7 @@ function createEvernoteRuntime(options) {
   const existingLane = (openStores = true) => {
     if (lane)
       return lane;
-    if (!existsSync120(resolvedStorePath(EVERNOTE_SOURCE_ID, "secure_local", env)))
+    if (!existsSync121(resolvedStorePath(EVERNOTE_SOURCE_ID, "secure_local", env)))
       return;
     const opened = openLane();
     if (openStores) {
@@ -247268,7 +247750,7 @@ var init_export_zone = __esm(() => {
 
 // src/workers/whatsapp/archive-input.ts
 import { createHash as createHash115 } from "node:crypto";
-import { existsSync as existsSync121 } from "node:fs";
+import { existsSync as existsSync122 } from "node:fs";
 import { posix as posix8 } from "node:path";
 function hash2(value) {
   return createHash115("sha256").update(value).digest("hex").slice(0, 24);
@@ -247358,7 +247840,7 @@ function createWhatsAppExportInput(options) {
     records(listing = {}) {
       return async function* () {
         const decoded = decodeCursor3(listing.cursor);
-        if (existsSync121(options.spoolDir) && !catchUpWhatsAppSpoolIndex(options.spoolDir, options.liveIndexBudgetBytes ?? LIVE_INDEX_BYTES)) {
+        if (existsSync122(options.spoolDir) && !catchUpWhatsAppSpoolIndex(options.spoolDir, options.liveIndexBudgetBytes ?? LIVE_INDEX_BYTES)) {
           yield { records: [], ...listing.cursor !== undefined ? { nextCursor: listing.cursor } : {}, done: false };
           return;
         }
@@ -248605,7 +249087,7 @@ var init_legacy_personal_bodies = __esm(() => {
 
 // src/workers/classification/sniffer-service.ts
 import { Database as Database30 } from "bun:sqlite";
-import { existsSync as existsSync122, rmSync as rmSync48 } from "node:fs";
+import { existsSync as existsSync123, rmSync as rmSync48 } from "node:fs";
 import { basename as basename25 } from "node:path";
 function unrefTimer(timer) {
   timer?.unref?.();
@@ -249014,7 +249496,7 @@ class TierSnifferService {
         }
       }
       const path = tierSnifferPathForLedger(ledgerPath);
-      const hasQueue = existsSync122(path);
+      const hasQueue = existsSync123(path);
       if (hasQueue)
         db.query("ATTACH DATABASE ? AS queue").run(path);
       return { db, hasQueue };
@@ -249087,7 +249569,7 @@ class TierSnifferService {
   async countBacklogOffThread() {
     const ledgers = this.ledgerPaths().map((path) => {
       const queue = tierSnifferPathForLedger(path);
-      return { path, expectedId: this.boundLedgerIds.get(path) ?? null, queue: existsSync122(queue) ? queue : null };
+      return { path, expectedId: this.boundLedgerIds.get(path) ?? null, queue: existsSync123(queue) ? queue : null };
     });
     const sql = {
       pendingQueued: pendingCountSql(true),
@@ -249515,14 +249997,14 @@ class TierSnifferService {
       try {
         const binding = store.tierSetBinding?.();
         const bound = store.tierSetLedgerPath ? store.tierSetLedgerPath() : binding?.ledgerPath;
-        if (bound && bound !== ":memory:" && existsSync122(bound)) {
+        if (bound && bound !== ":memory:" && existsSync123(bound)) {
           paths.add(bound);
           if (binding?.ledgerId)
             this.boundLedgerIds.set(bound, binding.ledgerId);
         }
         if (!binding) {
           const path = store.tierLedgerPathInUse?.();
-          if (path && path !== ":memory:" && tierSetForLedger(path) && existsSync122(path))
+          if (path && path !== ":memory:" && tierSetForLedger(path) && existsSync123(path))
             paths.add(path);
         }
         this.noteReadable(store.dbPath);
@@ -249530,7 +250012,7 @@ class TierSnifferService {
         this.noteUnreadable(store.dbPath, "which privacy ledger the store is bound to");
       }
       const own = tierLedgerPathForStore(store.dbPath);
-      if (existsSync122(own))
+      if (existsSync123(own))
         paths.add(own);
     }
     return [...paths];
@@ -250455,9 +250937,9 @@ function moveFailureName(error) {
   return /^[a-z][a-z ]{0,39}$/.test(error.message) ? error.message : "Error";
 }
 function checkpointRetiredLedger(path) {
-  if (!existsSync122(`${path}-wal`))
+  if (!existsSync123(`${path}-wal`))
     return true;
-  if (!existsSync122(path))
+  if (!existsSync123(path))
     return false;
   let db;
   try {
@@ -250899,6 +251381,8 @@ var init_client5 = __esm(() => {
     "people",
     "capture",
     "capture_stop",
+    "revoke_reads",
+    "archive_remove",
     "delete_source_data",
     "storage_registry",
     "owner_limits",
@@ -251015,14 +251499,14 @@ var ENGINE_STATUS_SNAPSHOT_SCHEMA = "olympus.engine.background-status.v1", ENGIN
 var init_snapshot = () => {};
 
 // src/workers/engine-split/control-plane.ts
-import { existsSync as existsSync123 } from "node:fs";
+import { existsSync as existsSync124 } from "node:fs";
 import { dirname as dirname118, join as join153 } from "node:path";
 import { fileURLToPath as fileURLToPath14 } from "node:url";
 function controlWorkerPath() {
   const here = dirname118(fileURLToPath14(import.meta.url));
   for (const name of ["engine-control-worker.js", "control-worker.ts"]) {
     const candidate = join153(here, name);
-    if (existsSync123(candidate))
+    if (existsSync124(candidate))
       return candidate;
   }
   return;
@@ -252017,7 +252501,7 @@ var init_front_scheduler = __esm(() => {
 
 // src/workers/engine-split/front-history.ts
 import { SQLiteError as SQLiteError2 } from "bun:sqlite";
-import { existsSync as existsSync124 } from "node:fs";
+import { existsSync as existsSync125 } from "node:fs";
 function openWritableDashboardHistory(path = defaultSourceDashboardHistoryDbPath()) {
   assertWritableStoreOpenAllowed("dashboard history", path);
   return new SqliteSourceDashboardHistory(path);
@@ -252042,7 +252526,7 @@ function createFrontDashboardHistory(input) {
   let lastReadWarning = Number.NEGATIVE_INFINITY;
   const read = (query) => {
     try {
-      if (!reader && existsSync124(input.path))
+      if (!reader && existsSync125(input.path))
         reader = openReadOnlyDashboardHistory(input.path);
       return reader && query(reader);
     } catch (error) {
@@ -253151,7 +253635,7 @@ var init_source_account_migration = __esm(() => {
 });
 
 // src/workers/engine/runtime/boot-storage.ts
-import { existsSync as existsSync125 } from "node:fs";
+import { existsSync as existsSync126 } from "node:fs";
 function reportRehomedChatOverrides(lane, result) {
   if (result.rehomed === 0 && result.orphaned === 0)
     return;
@@ -253159,7 +253643,7 @@ function reportRehomedChatOverrides(lane, result) {
 }
 function openPeopleIndexOrUndefined(options = {}) {
   const dbPath = peopleIndexPath(process.env);
-  if (options.readOnly && !existsSync125(dbPath))
+  if (options.readOnly && !existsSync126(dbPath))
     return;
   try {
     return new LocalPeopleIndex({ dbPath, ...options.readOnly ? { readOnly: true } : {} });
@@ -255278,7 +255762,7 @@ var init_private_analysts = __esm(() => {
 });
 
 // src/workers/engine/runtime/connector-mounts.ts
-import { existsSync as existsSync126 } from "node:fs";
+import { existsSync as existsSync127 } from "node:fs";
 import { isAbsolute as isAbsolute43 } from "node:path";
 function createConnectorStoreMountDiscovery(raw, options) {
   const retryBaseMs = 5000;
@@ -255313,7 +255797,7 @@ function createConnectorStoreMountDiscovery(raw, options) {
     const absent = [];
     for (const declaration of candidates) {
       const placed = hasFolderLayout(storageAccountForCorpus(declaration, registeredCorpora).sourceId);
-      if (byCorpus.has(declaration.corpusId) || !placed && (!declaration.dbPath || existsSync126(declaration.dbPath)))
+      if (byCorpus.has(declaration.corpusId) || !placed && (!declaration.dbPath || existsSync127(declaration.dbPath)))
         ready.push(declaration);
       else
         absent.push(declaration);
@@ -255398,7 +255882,7 @@ function mountConnectorStoreDeclarations(declarations, options) {
         throw new Error("Connector store entries require dbPath, corpusId, family, trustDomain.");
       if (collidingStore)
         assertConnectorStoreMountIdentity(declaration, collidingStore);
-      if (options.existingOnly && !collidingStore && !existsSync126(declaration.dbPath))
+      if (options.existingOnly && !collidingStore && !existsSync127(declaration.dbPath))
         continue;
       const pathOwnerCorpusId = ownerCorpusIdByDbPath.get(declaration.dbPath);
       if (pathOwnerCorpusId !== undefined && pathOwnerCorpusId !== declaration.corpusId) {
@@ -255611,169 +256095,6 @@ var init_answer_scope = __esm(() => {
     [{ family: "file", provider: "dropbox" }, { approvedScope: DROPBOX_APPROVED_SCOPE_FILTER_CODEC }],
     [{ family: "file", provider: LOCAL_FILES_PROVIDER }, { approvedScope: LOCAL_FILES_APPROVED_SCOPE_FILTER_CODEC }]
   ]);
-});
-
-// src/workers/engine/runtime/ingestion-dispositions.ts
-import { existsSync as existsSync127 } from "node:fs";
-function storedExclusionDebtReader(handles) {
-  let walked;
-  return () => {
-    if (walked)
-      return walked;
-    const total = {
-      excluded: { items: 0, unevaluable: 0 },
-      metadataOnlyContent: { items: 0, unevaluable: 0 }
-    };
-    for (const handle of handles) {
-      const debt = handle.exclusionDebtPresent();
-      total.excluded.items += debt.excluded.items;
-      total.excluded.unevaluable += debt.excluded.unevaluable;
-      total.metadataOnlyContent.items += debt.metadataOnlyContent.items;
-      total.metadataOnlyContent.unevaluable += debt.metadataOnlyContent.unevaluable;
-    }
-    walked = total;
-    return total;
-  };
-}
-function openIngestionDispositionsRuntime(env = process.env, options = {}) {
-  const opened = [];
-  const sources = [];
-  for (const definition of INGESTION_DISPOSITION_SOURCES) {
-    let stores = [];
-    const handles = [];
-    const readDebt = storedExclusionDebtReader(handles);
-    try {
-      stores = definition.stores(env);
-      const matcher = definition.matcher(env);
-      const present = stores.filter((store) => existsSync127(store.dbPath));
-      let openedAll = false;
-      const openStores = () => {
-        if (openedAll)
-          return handles;
-        for (const store of present) {
-          const handle = openConnectorStore(definition.account, {
-            dbPath: store.dbPath,
-            corpusId: store.corpusId,
-            family: "file",
-            trustDomain: store.trustDomain,
-            exclusions: matcher,
-            readOnly: true
-          }, env);
-          handles.push(handle);
-          opened.push(handle);
-        }
-        openedAll = true;
-        return handles;
-      };
-      if (options.lazyStores !== true)
-        openStores();
-      sources.push({
-        source_id: definition.sourceId,
-        label: definition.label,
-        corpus_ids: stores.map((store) => store.corpusId),
-        enforceable: definition.enforceable,
-        matcher,
-        store_present: present.length > 0,
-        ...present.length > 0 ? {
-          items: function* () {
-            for (const handle of openStores())
-              yield* handle.itemLocatorCensus();
-          },
-          excludedItemsPresent: () => {
-            openStores();
-            return readDebt().excluded;
-          },
-          metadataOnlyContentPresent: () => {
-            openStores();
-            return readDebt().metadataOnlyContent;
-          }
-        } : {}
-      });
-    } catch (error) {
-      for (const handle of handles) {
-        const index = opened.indexOf(handle);
-        if (index >= 0)
-          opened.splice(index, 1);
-        try {
-          handle.close();
-        } catch {}
-      }
-      sources.push({
-        source_id: definition.sourceId,
-        label: definition.label,
-        corpus_ids: stores.map((store) => store.corpusId),
-        enforceable: definition.enforceable,
-        matcher: createSourceExclusionMatcherFromPrefixes([]),
-        store_present: false,
-        error: error instanceof Error ? error.message : String(error)
-      });
-    }
-  }
-  return {
-    sources,
-    close: () => {
-      for (const handle of opened.reverse()) {
-        try {
-          handle.close();
-        } catch {}
-      }
-    }
-  };
-}
-var INGESTION_DISPOSITION_SOURCES;
-var init_ingestion_dispositions = __esm(() => {
-  init_source_placement();
-  init_google_connectors();
-  init_dropbox_files();
-  init_scope();
-  init_store2();
-  init_source_ingestion_exclusions();
-  init_source_storage();
-  INGESTION_DISPOSITION_SOURCES = [
-    {
-      sourceId: DROPBOX_INGESTION_EXCLUSION_SOURCE,
-      account: { sourceId: DROPBOX_FILES_SOURCE_ID },
-      label: "Dropbox",
-      enforceable: DROPBOX_ENFORCEABLE_EXCLUSION_CRITERIA,
-      matcher: (env) => dropboxIngestionExclusionMatcher(env),
-      stores: (env) => [{
-        dbPath: resolvedStorePath(DROPBOX_FILES_SOURCE_ID, "secure_local", env),
-        corpusId: DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID,
-        trustDomain: "secure_local"
-      }]
-    },
-    {
-      sourceId: LOCAL_FILES_INGESTION_EXCLUSION_SOURCE,
-      account: { sourceId: LOCAL_FILES_SOURCE_ID },
-      label: "Files on this computer",
-      enforceable: LOCAL_FILES_ENFORCEABLE_EXCLUSION_CRITERIA,
-      matcher: (env) => localFilesIngestionExclusionMatcher(env),
-      stores: (env) => [{
-        dbPath: resolvedStorePath(LOCAL_FILES_SOURCE_ID, "secure_local", env),
-        corpusId: LOCAL_FILES_CORPUS_ID,
-        trustDomain: "secure_local"
-      }]
-    },
-    {
-      sourceId: GOOGLE_DRIVE_INGESTION_EXCLUSION_SOURCE,
-      account: { sourceId: GOOGLE_DRIVE_SOURCE_ID },
-      label: "Google Drive",
-      enforceable: GOOGLE_DRIVE_ENFORCEABLE_EXCLUSION_CRITERIA,
-      matcher: (env) => googleDriveIngestionExclusionMatcher(env),
-      stores: (env) => [
-        {
-          dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, "internal", env),
-          corpusId: GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID,
-          trustDomain: "internal"
-        },
-        {
-          dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, "secure_local", env),
-          corpusId: GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID,
-          trustDomain: "secure_local"
-        }
-      ]
-    }
-  ];
 });
 
 // src/workers/connector-store/ask-bench-sql.ts
@@ -261619,7 +261940,7 @@ async function scopeSet(backend, args) {
     const wholeAccount = args.whole_account_selected === true;
     if (wholeAccount && args.confirm_whole_account !== true)
       throw new ChatGptSurfaceError("confirm_whole_account");
-    const submitted = parseSelections(args.selections ?? []);
+    const submitted = parseSelections2(args.selections ?? []);
     const kept = backend.savedFolderSelections(sourceId).filter((selection) => isSecretFolder(secrets, selection.key, selection.ancestor_keys));
     const selections = [
       ...submitted.filter((selection) => !isSecretFolder(secrets, selection.key, selection.ancestor_keys)),
@@ -261720,7 +262041,7 @@ function parseDraft(value) {
     throw new ChatGptSurfaceError("invalid_params");
   }
 }
-function parseSelections(value) {
+function parseSelections2(value) {
   if (!Array.isArray(value) || value.length > 100)
     throw new ChatGptSurfaceError("invalid_params");
   return value.map((entry) => {
@@ -281249,6 +281570,34 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       ...googleDriveRequestBudget ? { googleDriveRequestBudget } : {}
     });
   };
+  const applySourceReadRevocation = (source, reason) => {
+    const stores = connectorStores.filter((store) => sourceIdForStore(store) === source);
+    const opened = [];
+    try {
+      const names = accountStoreNames(source);
+      for (const corpus of defaultSourceCorpusRegistryConfig().corpora) {
+        if (corpus.sourceId !== source || !names.includes(corpus.trustDomain))
+          continue;
+        const dbPath = resolvedStorePath(source, corpus.trustDomain, process.env);
+        if (stores.some((store) => store.dbPath === dbPath) || !existsSync129(dbPath))
+          continue;
+        opened.push(openConnectorStore({ sourceId: source }, { ...corpus, dbPath }));
+      }
+      return revokeSourceOnDemandReads([...stores, ...opened], reason, reason === "scope" && fileSourceScopeAuthority ? { authority: fileSourceScopeAuthority, source } : undefined, reason === "exclusions" ? dispositionReadChange(source, process.env) : undefined);
+    } finally {
+      for (const store of opened)
+        store.close();
+    }
+  };
+  const revokeSourceReads = async (source, reason) => {
+    if (!engineFront)
+      return applySourceReadRevocation(source, reason);
+    const receipt = await engineFront.client.send({ kind: "revoke_reads", source, reason }, { timeoutMs: OWNER_ACTION_WAIT_MS });
+    if (receipt.state !== "done" || typeof receipt.result !== "number") {
+      throw new OperationError("source_index_error", "The background engine could not finish revoking on-demand reads. Retry the action.");
+    }
+    return receipt.result;
+  };
   const fileSourceScopes = fileSourceScopeAuthority ? {
     summaries: () => [...listFileScopeSources().map(({ sourceId, dispositionSourceId, label }) => {
       const snapshot = fileSourceScopeAuthority.snapshot(sourceId);
@@ -281404,6 +281753,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       }
       const verifiedSelections = await browser2.validateSelections(selections);
       const approval = fileSourceScopeAuthority.approve({
+        reconcileReads: true,
         sourceId: input.sourceId,
         accountGeneration: input.accountGeneration,
         expectedRevision: input.expectedRevision,
@@ -281631,6 +281981,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     } : {},
     connectorStores,
     refreshConnectorStores: () => mountConfiguredSourceStores(),
+    revokeSourceReads,
     connectorStoreTierSiblings: (corpusId) => [
       ...tierLanes.find((lane) => lane.corpusIds.has(corpusId))?.corpusIds ?? []
     ].filter((sibling) => sibling !== corpusId),
@@ -283125,6 +283476,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         built_in_serving_pid: servingModelPid?.()
       }) } : {},
       handlers: {
+        revoke_reads: ({ source, reason }) => applySourceReadRevocation(source, reason),
         model_prepare: () => {
           if (workerBuiltInModel)
             workerBuiltInModel.model.prepare();
@@ -283216,6 +283568,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
             deleteFromFront = undefined;
           }
         },
+        archive_remove: ({ request }) => runForwarded(request),
         tier_override: ({ request }) => runForwarded(request),
         storage_registry: ({ request }) => runForwarded(request),
         capture: ({ request }) => runForwarded(request),
@@ -283714,6 +284067,7 @@ var init_server5 = __esm(async () => {
   init_private_analysts();
   init_connector_mounts();
   init_answer_scope();
+  init_on_demand_revocation();
   init_ingestion_dispositions();
   workerLaunch = {};
   FRONT_MOUNT_FAILURE_RETRY_MS = 5 * 60000;
