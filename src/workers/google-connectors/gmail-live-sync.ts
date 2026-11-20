@@ -44,6 +44,7 @@ import {
   type SourceEmbeddingProvider,
 } from '../source-index/embeddings.ts';
 import { accountFromGoogleHandle } from './classification.ts';
+import { GMAIL_IMPORT_CONNECTOR_PREFIX } from './gmail-archive-target.ts';
 import { GMAIL_OWN_ID_PREFIX, gmailMailItems } from './gmail-mail-record.ts';
 import {
   GMAIL_PROVIDER,
@@ -212,10 +213,12 @@ export interface GmailConnectorStoreSyncHandler {
   backfillChildren?(request?: { max_items?: number; provenance?: SourceInvocationProvenance }): Promise<{ listed: number; examined: number; done: boolean }>;
 }
 
+export type GmailConfirmationYieldReason = 'owner_ask' | 'live_pull_due';
+
 interface GmailConfirmationRequest {
   max_items?: number;
   checkpoint?: string;
-  shouldYield?: () => boolean;
+  yieldReason?: () => GmailConfirmationYieldReason | undefined;
 }
 
 interface GmailConfirmationResult {
@@ -223,6 +226,7 @@ interface GmailConfirmationResult {
   confirmedTotal: number;
   done: boolean;
   checkpoint: string | null;
+  waitReason?: GmailConfirmationYieldReason;
   hold?: { error: GoogleRequestBudgetError; remaining: number };
   cursorRejected?: true;
 }
@@ -484,8 +488,9 @@ export function createGmailConnectorStoreSyncHandler(
         }
         let head = saved.head;
         options.assertScopeCurrent?.();
-        if (request.shouldYield?.()) {
-          return { confirmed: 0, confirmedTotal: confirmedBefore, done: false, checkpoint: request.checkpoint ?? null };
+        let waitReason = request.yieldReason?.();
+        if (waitReason) {
+          return { confirmed: 0, confirmedTotal: confirmedBefore, done: false, waitReason, checkpoint: request.checkpoint ?? null };
         }
         let confirmed = 0;
         const maxItems = boundedMaxItems(request.max_items, config.storePullMaxItems);
@@ -521,7 +526,10 @@ export function createGmailConnectorStoreSyncHandler(
           for await (const page of connector.listItems({ limit: maxItems, ...(head ? { cursor: head } : {}) })) {
             done = page.done;
             head = done ? complete : page.nextCursor ?? head;
-            if (!done && request.shouldYield?.()) break;
+            if (!done) {
+              waitReason = request.yieldReason?.();
+              if (waitReason) break;
+            }
           }
         } catch (error) {
           if (error instanceof GoogleRequestBudgetError) {
@@ -535,13 +543,14 @@ export function createGmailConnectorStoreSyncHandler(
           } else throw error;
         }
         const remaining = refusal
-          ? (await Promise.all(stores.map(store => store.unobservedContentCount(GMAIL_PROVIDER, account, connectorId))))
+          ? (await Promise.all(stores.map(store => store.unobservedContentCount(GMAIL_PROVIDER, account, connectorId, GMAIL_IMPORT_CONNECTOR_PREFIX))))
             .reduce((sum, count) => sum + count, 0)
           : undefined;
         options.assertScopeCurrent?.();
         const confirmedTotal = confirmedBefore + confirmed;
         const checkpoint = encodeCheckpoint({ ...(head ? { head } : {}), scope: confirmationScope, confirmed: confirmedTotal });
         return { confirmed, confirmedTotal, done, checkpoint,
+          ...(waitReason ? { waitReason } : {}),
           ...(refusal && remaining !== undefined ? { hold: { error: refusal, remaining } } : {}),
           ...(cursorRejected ? { cursorRejected } : {}),
         };

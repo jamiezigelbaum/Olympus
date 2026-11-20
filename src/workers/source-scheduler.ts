@@ -32,7 +32,7 @@ import {
   type ConnectorStoreEmbeddingTarget,
   type LocalConnectorStore,
 } from './connector-store/index.ts';
-import { GMAIL_CONFIRMATION_RESERVE_REASON } from './google-connectors/gmail-live-sync.ts';
+import { GMAIL_CONFIRMATION_RESERVE_REASON, type GmailConfirmationYieldReason } from './google-connectors/gmail-live-sync.ts';
 import {
   GMAIL_DAILY_REQUEST_GUARD_REASON,
   GMAIL_RESUME_REJECTED_WARNING,
@@ -253,7 +253,7 @@ export interface SourceSchedulerTaskRunContext {
   degradedReason?: string;
   provenance?: SourceSchedulerRunProvenance;
   /** Gmail confirmation checks this at provider page boundaries. */
-  yieldGmailConfirmation?: () => boolean;
+  yieldGmailConfirmation?: () => GmailConfirmationYieldReason | undefined;
 }
 
 export interface SourceSchedulerTask {
@@ -292,6 +292,7 @@ export interface SourceSchedulerTask {
 }
 
 export interface SourceSchedulerTaskRunResult {
+  gmailConfirmationWaitReason?: GmailConfirmationYieldReason;
   status: 'progress' | 'idle';
   counts?: Record<string, number>;
   warnings?: string[];
@@ -505,7 +506,7 @@ export interface SourceSchedulerTaskStatus {
   /** Computer dashboard only; never persisted in scheduler state. */
   missing_scope_path?: string;
   /** Short maintenance hold, never persisted as a failure or provider deferral. */
-  wait_reason?: 'store_reclaim' | 'owner_ask';
+  wait_reason?: 'store_reclaim' | GmailConfirmationYieldReason;
   id: string;
   kind: SourceSchedulerTaskKind;
   metadata_walk_role?: SourceSchedulerTask['metadataWalkRole'];
@@ -1101,7 +1102,7 @@ export class SourceScheduler {
         this.scheduleContinueWake(this.now().getTime() + SOURCE_SCHEDULER_ASK_RECHECK_MS);
         return;
       }
-      if (state.waitReason === 'owner_ask') delete state.waitReason;
+      if (isGmailConfirmationTask(state.task)) delete state.waitReason;
       state.running = true;
       try {
         await this.runTaskSharingThread(state, at, provenance);
@@ -1310,6 +1311,7 @@ export class SourceScheduler {
       }
       state.nextRunAt = nextRunAt;
       state.retryNotBeforeAt = retryAt ? nextRunAt : undefined;
+      if (result.gmailConfirmationWaitReason) state.waitReason = result.gmailConfirmationWaitReason;
       state.embeddingSweep = result.embeddingSweep;
       for (const { counts, ...store } of result.embeddingSweep ?? []) {
         console.info(`[olympus:embedding-sweep] ${JSON.stringify({
@@ -1455,10 +1457,13 @@ export class SourceScheduler {
           // byte-identical to what tasks received before provenance existed,
           // and the X adapter reads a missing marker as scheduled (R62).
           ...(provenance === 'operator' ? { provenance } : {}),
-          ...(isGmailConfirmationTask(task) ? { yieldGmailConfirmation: () => this.askHolds()
-            || this.states.some(sibling => sibling.source.sourceId === state.source.sourceId
+          ...(isGmailConfirmationTask(task) ? { yieldGmailConfirmation: () => {
+            if (this.askHolds()) return 'owner_ask';
+            const liveDue = this.states.some(sibling => sibling.source.sourceId === state.source.sourceId
               && sibling.source.corpusId === state.source.corpusId
-              && sibling.task.metadataWalkRole === 'primary' && sibling.nextRunAt <= this.now().getTime()) } : {}),
+              && sibling.task.metadataWalkRole === 'primary' && sibling.nextRunAt <= this.now().getTime());
+            return liveDue ? 'live_pull_due' : undefined;
+          } } : {}),
           ...(state.checkpoint ? { checkpoint: state.checkpoint } : {}),
           ...(state.lastSuccessAt ? { lastSuccessAt: state.lastSuccessAt } : {}),
           effectiveIntervalMs: state.effectiveIntervalMs ?? taskIntervalMs(state.source, task),
@@ -2735,7 +2740,7 @@ export function createGmailConnectorStoreSchedulerSource(input: {
             const result = await input.sync!.confirmPrivateScope!({
               max_items: liveConfig.storePullMaxItems,
               ...(context?.checkpoint ? { checkpoint: context.checkpoint } : {}),
-              ...(context?.yieldGmailConfirmation ? { shouldYield: context.yieldGmailConfirmation } : {}),
+              ...(context?.yieldGmailConfirmation ? { yieldReason: context.yieldGmailConfirmation } : {}),
             });
             const hold = result.hold;
             return {
@@ -2753,6 +2758,7 @@ export function createGmailConnectorStoreSchedulerSource(input: {
                 } : {}),
               },
               checkpoint: result.checkpoint,
+              ...(result.waitReason ? { gmailConfirmationWaitReason: result.waitReason } : {}),
               ...(result.cursorRejected ? { warnings: [GMAIL_RESUME_REJECTED_WARNING] } : {}),
               ...(hold ? { retryAt: { at: hold.error.retryAt, degradedReason: gmailConfirmationHoldReason(hold.error) } }
                 : !result.done ? { continueSoon: true } : {}),

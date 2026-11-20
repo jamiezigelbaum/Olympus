@@ -8612,9 +8612,9 @@ export class LocalConnectorStore {
     return { chunkCount: row.chunk_count, ...(row.authored_at ? { authoredAt: row.authored_at } : {}) };
   }
 
-  /** Counts retained parent copies still lacking a listing observation, for a paused confirmation walk. */
-  async unobservedContentCount(provider: string, account: string, connectorId: string): Promise<number> {
-    const owner = observedOwnerPredicate(connectorId);
+  /** Counts retained parent copies without an accepted observed owner, for a paused confirmation walk. */
+  async unobservedContentCount(provider: string, account: string, connectorId: string, connectorIdPrefix: string): Promise<number> {
+    const owner = observedOwnerPredicate(connectorId, connectorIdPrefix);
     const sql = `SELECT COUNT(*) AS n FROM items i
       WHERE i.provider = ? AND i.account_scope = ? AND i.tombstoned = 0 AND i.parent_local_item_id IS NULL
         AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
