@@ -133,7 +133,10 @@ async function run(command: string[], env: Record<string, string> = {}): Promise
 /** CI's static job: the type check over src, test, scripts and eval (plus exchange and the relay), then dist up to date. */
 async function runStatic(): Promise<boolean> {
   const heap = { NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --max-old-space-size=6144`.trim() };
-  return (await run(['bun', 'run', 'typecheck'], heap)) && run(['bun', 'run', 'dist:check']);
+  // Then the release artifact, as the static job builds it: its staging guard reads the bundled dist, so a source
+  // change can break the package without touching the builder (9df567dd: an API path read as a home directory).
+  return (await run(['bun', 'run', 'typecheck'], heap)) && (await run(['bun', 'run', 'dist:check']))
+    && run(['bun', 'scripts/release-artifact-ci.ts']);
 }
 
 const started = Date.now();
