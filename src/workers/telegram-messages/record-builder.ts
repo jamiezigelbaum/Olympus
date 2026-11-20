@@ -4,6 +4,8 @@
 // same way. The live lanes and an export input differ only in where their
 // records come from.
 
+import { telegramContextNames } from '../../core/source-connector-labels.ts';
+export { telegramContextNames };
 import { compactClassificationSignals, signalText } from '../../core/classification-signals.ts';
 import type { RawItem, SourceClassificationSignals, SourceConnectorFetchOptions } from '../../core/contracts.ts';
 import type { SourceRecordBuilder } from '../../core/source-inputs.ts';
@@ -88,24 +90,6 @@ export function telegramClassificationSignals(
     // Every name the item adds to its search context beside the chat and the sender is judged with them.
     labels: telegramContextNames(item),
   });
-}
-
-/**
- * The names in an item's search context that are neither its chat nor its
- * sender: who a forward came from, and the names of its attachments. They
- * reach search and embedding input, so they are judged as the item's names.
- */
-export function telegramContextNames(item: RawItem): string[] {
-  const names: string[] = [];
-  const forwardedFrom = signalText(item.metadata, 'forwardedFrom');
-  if (forwardedFrom) names.push(`Forwarded from ${forwardedFrom}`);
-  const attachmentNames = item.metadata['attachmentNames'];
-  if (Array.isArray(attachmentNames)) {
-    for (const name of attachmentNames) {
-      if (typeof name === 'string' && name.trim() && !names.includes(name.trim())) names.push(name.trim());
-    }
-  }
-  return names;
 }
 
 /** A record and the items it yields: the message, then its children. */

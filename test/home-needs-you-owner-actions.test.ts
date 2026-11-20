@@ -72,6 +72,15 @@ describe('Needs you is only what the owner can do', () => {
     expect(home([dropbox()], { privacy: { ...privacy, pendingCount: 0, judgeStopped: 'failed' } }).needsYou).toEqual([]);
   });
 
+  test('missing label evidence has a counted owner action until the items are listed again', () => {
+    const notice = (labelsUnavailable: number) => home([], { privacy: { ...privacy, labelsUnavailable } })
+      .needsYou.find(item => item.id === 'privacy:labels_unavailable');
+    expect(notice(0)).toBeUndefined();
+    expect(notice(1)?.sentence).toBe("1 item can't be checked against your label rules. It would need to be listed again.");
+    expect(notice(12)?.sentence).toBe("12 items can't be checked against your label rules. They would need to be listed again.");
+    expect(ownerAction(notice(12)?.fix)).toBe(true);
+  });
+
   test('every kind that reaches Needs you names an owner action with its target', () => {
     const producers: Array<[string, ReturnType<typeof home>]> = [
       ['privacy setup', home([dropbox()], { privacy: { ...privacy, configured: false } })],

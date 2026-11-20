@@ -27,7 +27,7 @@ import { chmodSync, closeSync, existsSync, mkdirSync, openSync, statSync } from 
 import { dirname } from 'node:path';
 import { OperationError } from '../../core/operation-error.ts';
 import type { SourceItemIdentity, SourceTrustDomain, SourceTrustTier } from '../../core/source-index/types.ts';
-import { readSqliteSchemaVersion, runSqliteMigrations, sqliteSchemaUsable, type SqliteMigration } from '../../core/sqlite-migrations.ts';
+import { additiveMigration, readSqliteSchemaVersion, runSqliteMigrations, sqliteSchemaUsable, type SqliteMigration } from '../../core/sqlite-migrations.ts';
 import { closeSqliteStore, loopWalAutocheckpointPragma, type SqliteCloseOptions } from '../../core/sqlite-store.ts';
 import { assertWritableStoreOpenAllowed } from '../../core/store-write-guard.ts';
 import { tierSetPlannerForLedger } from './installed-tier-classification-registry.ts';
@@ -53,7 +53,7 @@ import {
 import { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore } from './tier-ledger-path.ts';
 
 export { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore };
-export const TIER_LEDGER_SCHEMA_VERSION = 18;
+export const TIER_LEDGER_SCHEMA_VERSION = 19;
 export const RETIRED_EMBEDDING_CLEARANCE_REASON = 'content:sniffer:retired_embedding_clearance:undecided';
 export const RETAINED_MOVE_SOURCE_REASON = 'content:retained_move_source';
 
@@ -2143,6 +2143,7 @@ export class TierLedger {
       if (!current || current.state !== 'pending' || JSON.stringify(current) !== JSON.stringify(record)
         || this.getOverride(identity)?.kind === 'tier') return false;
       this.deleteCopies(identity);
+      this.setLabelsUnavailable(identity, false);
       this.db.query(`DELETE FROM tier_items
         WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?`).run(...idParams(identity));
       return true;
@@ -2166,6 +2167,7 @@ export class TierLedger {
       if (!existing || existing.state !== 'moving' || existing.generation !== options.expectedGeneration
         || this.getOverride(identity)?.kind === 'tier') return false;
       this.deleteCopies(identity);
+      this.setLabelsUnavailable(identity, false);
       this.writeMeta(`tier-move-verified:${tierLedgerIdentityKey(identity)}`, '');
       this.db.query(`DELETE FROM tier_items
         WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?`).run(...idParams(identity));
@@ -2828,6 +2830,36 @@ export class TierLedger {
     this.db.query(`
       DELETE FROM tier_label_rule_matches WHERE provider = ? AND account_scope = ? AND rule_key = ? AND walk_id <> ?
     `).run(provider, accountScope, ruleKey, walkId);
+  }
+
+  unavailableLabelCount(): number {
+    return Number(this.readMeta('labels_unavailable_count') ?? 0);
+  }
+
+  setLabelsUnavailable(identity: TierLedgerIdentity, unavailable: boolean): void {
+    if (!unavailable && !this.unavailableLabelCount()) return;
+    this.db.transaction(() => {
+      const delta = unavailable
+        ? this.db.query('INSERT OR IGNORE INTO tier_label_gaps (provider, account_scope, conversation_key, provider_item_id) VALUES (?, ?, ?, ?)').run(...idParams(identity)).changes
+        : -this.db.query(`DELETE FROM tier_label_gaps WHERE provider = ? AND account_scope = ?
+            AND conversation_key = ? AND provider_item_id = ?`).run(...idParams(identity)).changes;
+      if (delta) this.writeMeta('labels_unavailable_count', String(this.unavailableLabelCount() + delta));
+    })();
+  }
+
+  /** A rejudge from partial names can create a new receipt. Require the first decision's receipt as well. */
+  *firstListingNamesReceipts(items: readonly TierLedgerIdentity[]): Generator<LedgerRead, Map<string, string>, unknown> {
+    const receipts = new Map<string, string>();
+    if (!items.length) return receipts;
+    const rows = (yield { sql: `SELECT k.key AS idx, (SELECT reasons_json FROM tier_history WHERE
+      (provider,account_scope,conversation_key,provider_item_id) = (k.value ->> '$.provider', k.value ->> '$.accountScope',
+        COALESCE(k.value ->> '$.providerConversationId', ''), k.value ->> '$.providerItemId')
+      ORDER BY history_pk LIMIT 1) AS reasons FROM json_each(?) k`, params: [JSON.stringify(items)], mode: 'all' }) as Array<{ idx: number; reasons: string | null }>;
+    for (const row of rows) {
+      const receipt = row.reasons && (JSON.parse(row.reasons) as string[]).find(reason => reason.startsWith(NAMES_INPUT_REASON_PREFIX));
+      if (receipt) receipts.set(tierLedgerIdentityKey(items[row.idx]!), receipt);
+    }
+    return receipts;
   }
 
   /** A walk's own checkpoint does not invalidate a judge's clean lap. */
@@ -4562,6 +4594,7 @@ export class TierLedger {
     this.db.transaction(() => {
       removed = this.copies(identity);
       this.deleteCopies(identity);
+      this.setLabelsUnavailable(identity, false);
     })();
     return removed;
   }
@@ -5131,6 +5164,11 @@ export class TierLedger {
         'tier_label_rule_matches',
       ]) {
         this.db.query(`DELETE FROM ${table} WHERE provider = ? AND account_scope = ?`).run(provider, accountScope);
+      }
+      const gaps = this.unavailableLabelCount();
+      if (gaps) {
+        const removed = this.db.query('DELETE FROM tier_label_gaps WHERE provider = ? AND account_scope = ?').run(provider, accountScope).changes;
+        if (removed) this.writeMeta('labels_unavailable_count', String(gaps - removed));
       }
       this.db.query('DELETE FROM tier_ledger_meta WHERE key = ?').run(labelSweepMetaKey(provider, accountScope));
       return { items, copies };
@@ -6826,7 +6864,7 @@ function tierLedgerMigrations(): SqliteMigration[] {
       },
     },
     {
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 18,
       name: 'provider_label_rule_matches',
       up(db) {
         db.exec(`
@@ -6841,6 +6879,11 @@ function tierLedgerMigrations(): SqliteMigration[] {
         `);
       },
     },
+    additiveMigration(19, 'uncheckable_label_items', [
+      `CREATE TABLE IF NOT EXISTS tier_label_gaps (
+        provider TEXT NOT NULL, account_scope TEXT NOT NULL, conversation_key TEXT NOT NULL, provider_item_id TEXT NOT NULL,
+        PRIMARY KEY(provider, account_scope, conversation_key, provider_item_id)) WITHOUT ROWID`,
+    ]),
   ];
 }
 

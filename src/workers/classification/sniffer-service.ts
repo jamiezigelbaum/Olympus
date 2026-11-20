@@ -54,6 +54,7 @@ import {
   type TierRejudgeReport,
 } from '../connector-store/tier-rejudge.ts';
 import { settleNamesOnlyItemsOffThread } from '../connector-store/tier-names-only-settle.ts';
+import { recoverStoredLabelPage } from '../connector-store/tier-label-observations.ts';
 import { settlePersonalFirstItemsOffThread } from '../connector-store/tier-held-settle.ts';
 import { withTierRuleFence, tierMoveRuleAuthorization } from '../connector-store/tier-move-rule-policy.ts';
 import { ownerRuleSweepsComplete, sweepOwnerRuleRaisesOffThread } from '../connector-store/tier-rules-sweep.ts';
@@ -348,7 +349,7 @@ const BACKLOG_REFRESH_MS = 60_000;
 const BACKLOG_SLICE_ROWS = 5_000;
 const STORED_WALK_BACKSTOP_MS = 60 * 60_000;
 
-type StoredWalker = 'ownerOverrides' | 'ownerRules' | 'imageContent' | 'mediaJudgments' | 'namesOnly' | 'personalFirst' | 'rejudge' | 'staleEmbedHolds' | 'personalLowerings';
+type StoredWalker = 'ownerOverrides' | 'ownerRules' | 'imageContent' | 'mediaJudgments' | 'namesOnly' | 'personalFirst' | 'labelObservations' | 'rejudge' | 'staleEmbedHolds' | 'personalLowerings';
 type StoredWalkResult = 'no_work' | 'changed' | 'more_rows' | 'read_failed' | 'inputs_unavailable' | 'queue_full' | 'retired';
 interface StoredWalkStatus {
   lastRanAt: string;
@@ -360,6 +361,7 @@ interface StoredWalkState {
   status: StoredWalkStatus;
   active: boolean;
   clean?: { inputs: string; at: number } | undefined;
+  retiredInputs?: string | undefined;
   lap?: { inputs: string | undefined } | undefined;
   after?: TierLedgerIdentity | undefined;
 }
@@ -402,7 +404,7 @@ async function runStoredWalk(
     walk.status.lastResult = page.retired ? 'retired'
       : page.failed ? 'read_failed'
       : page.blocked ?? (page.changed ? 'changed' : page.complete === false ? 'more_rows' : inputs === undefined ? 'inputs_unavailable' : 'no_work');
-    if (page.retired) walk.status.reason = 'retired';
+    if (page.retired) { walk.status.reason = 'retired'; walk.retiredInputs = inputs; }
     else if (page.complete !== false && lap.inputs !== undefined) {
       walk.clean = { inputs: lap.inputs, at: clockMs() };
       walk.status.reason = 'idle_unchanged';
@@ -465,6 +467,7 @@ export async function runUnattendedStaleEmbedHoldWalk(ledger: TierLedger, log: (
 export interface TierClassificationBacklog {
   /** Background walks, by ledger. No stored item content or filesystem paths. */
   storedWalks?: Array<{ ledger: string; walkers: Partial<Record<StoredWalker | 'lowerContentRepair', StoredWalkStatus>> }>;
+  labelsUnavailable?: number;
   /** Union of pending ledger items and items with open questions, including re-judges. */
   checkingItems: number;
   /** Questions still to ask (an item can have a names and an excerpt question). */
@@ -651,7 +654,7 @@ export class TierSnifferService {
   private readonly ledgers = new Map<string, TierLedger>();
   /** The id each bound set ledger must have, by the path it was found at: a file there with another id is not read. */
   private readonly boundLedgerIds = new Map<string, string>();
-  private readonly storedWalks = new Map<string, { set: TieredStoreSet; walks: Map<StoredWalker, StoredWalkState> }>();
+  private readonly storedWalks = new Map<string, { set: TieredStoreSet; walks: Map<StoredWalker, StoredWalkState>; labelsUnavailable?: number }>();
   private readonly mediaJudgmentCursors = new WeakMap<TieredStoreSet, Map<LocalConnectorStore, string | null>>();
   /** Skip-only diagnostics sample a scanned window at most once per minute. */
   private lastBuiltinPromptSkipLogMs = -Infinity;
@@ -856,7 +859,9 @@ export class TierSnifferService {
   private backlogFrom(counts: BacklogCounts): Omit<TierClassificationBacklog, 'lowerMovesQueued'> {
     const { checkingItems, remainingQuestions, pendingWithoutQuestion, oldestPendingAgeMs } = counts;
     const now = this.clockMs();
-    const storedWalks = [...this.storedWalks.values()].map(({ set, walks }) => {
+    let labelsUnavailable = 0;
+    const storedWalks = [...this.storedWalks.values()].map(({ set, walks, labelsUnavailable: gaps }) => {
+      labelsUnavailable += gaps ?? 0;
       const repair = set.lowerContentRepairHealth();
       const walkers = Object.fromEntries([...walks].map(([name, walk]) => [name, {
         ...walk.status,
@@ -866,6 +871,7 @@ export class TierSnifferService {
     });
     return {
       ...counts,
+      ...(labelsUnavailable ? { labelsUnavailable } : {}),
       ...(storedWalks.length ? { storedWalks } : {}),
       summary: checkingItems === 0
         ? (this.unreadable.size > 0 ? `No items counted as waiting.${this.unreadableNote()}` : 'No items waiting for classification.')
@@ -2061,7 +2067,7 @@ export class TierSnifferService {
       this.storedWalks.set(path, entry);
     }
     let walk = entry.walks.get(name);
-    if (!walk) {
+    if (!walk || (name === 'labelObservations' && walk.status.reason === 'retired' && walk.retiredInputs !== inputs)) {
       walk = newStoredWalk(this.clockMs());
       entry.walks.set(name, walk);
     }
@@ -2132,6 +2138,9 @@ export class TierSnifferService {
         }
         return { retired: held.retired, complete: held.retired, changed: held.settled > 0, failed: held.failed > 0 };
       });
+      await this.runStoredWalker(set, 'labelObservations', JSON.stringify(set.openStores().map(store => store.corpusId)), () =>
+        recoverStoredLabelPage(set, this.options.installed.snifferStoreForLedger(ledgerPath), turn));
+      this.storedWalks.get(ledgerPath)!.labelsUnavailable = set.ledger.unavailableLabelCount();
       await this.runStoredWalker(set, 'personalLowerings', this.storedWalkInputs(set, true), async after => {
         const page = await storedPersonalLoweringLap(set, after, turn);
         if (page.changed) this.forgetLowerMoves();

@@ -6,7 +6,7 @@ import { registeredInstalledTierClassification } from '../classification/install
 import { ownerRuleMatches, tierRank, type OwnerTierRule, type TierKey, type ItemTierOverride } from '../classification/tier-classifier.ts';
 import { copyServingLayer, labelSweepMetaKey, tierLedgerIdentityOfRecord, tierMoveOverrideConflict, trustDomainRank, type TierCopyPlan, type TierLedgerRecord } from '../classification/tier-ledger.ts';
 import { readDecisionRules, OLYMPUS_TIER_RULES_ENV, resolveTierRulesPath, tierRulesFileStamp } from '../classification/tier-rules.ts';
-import { storedSignals } from './stored-names.ts';
+import { servingMetadataCopy, storedSignals } from './stored-names.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
 
 export interface TierRulePolicy {
@@ -82,9 +82,7 @@ interface RuleAuthority {
 function servingNames(set: TieredStoreSet, record: TierLedgerRecord) {
   const identity = tierLedgerIdentityOfRecord(record);
   const copies = set.ledger.copies(identity);
-  const source = copyServingLayer(copies.filter(copy => copy.state === 'current'), 'metadata')
-    ?? (record.state === 'moving' ? copyServingLayer(copies.filter(copy => copy.state === 'superseded'
-      && copy.supersededByGeneration === record.generation + 1), 'metadata') : undefined);
+  const source = servingMetadataCopy(copies, record);
   return source && set.store(source.trustDomain)?.exportItemNames(identity);
 }
 

@@ -3,9 +3,16 @@
 // context): the copy that serves them, and the classifier's input from it.
 
 import type { SourceClassificationSignals } from '../../core/contracts.ts';
-import { copyServingLayer, type TierCopy, type TierLedgerIdentity } from '../classification/tier-ledger.ts';
+import { copyServingLayer, type TierCopy, type TierLedgerIdentity, type TierLedgerRecord } from '../classification/tier-ledger.ts';
 import type { ConnectorStoreItemCopy, ConnectorStoreItemNames, LocalConnectorStore } from './local-index.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
+
+/** The active names, including the hidden source of an unfinished raise. */
+export function servingMetadataCopy(copies: readonly TierCopy[], record: TierLedgerRecord | undefined) {
+  return copyServingLayer(copies.filter(copy => copy.state === 'current'), 'metadata')
+    ?? (record?.state === 'moving' ? copyServingLayer(copies.filter(copy => copy.state === 'superseded'
+      && copy.supersededByGeneration === record.generation + 1), 'metadata') : undefined);
+}
 
 /**
  * The item's stored names: from the copy serving them, else any other (a

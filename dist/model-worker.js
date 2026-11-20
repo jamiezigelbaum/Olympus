@@ -2797,6 +2797,7 @@ var capabilities = [
   REFLECT_LABEL_CAPABILITY,
   TELEGRAM_LABEL_CAPABILITY
 ];
+var storedLabelProviders = capabilities.filter((capability) => capability.proof === "stored").map((capability) => capability.provider);
 var byProvider = new Map(capabilities.map((capability) => [capability.provider, capability]));
 
 // src/core/archive-formats.ts

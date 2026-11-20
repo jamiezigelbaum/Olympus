@@ -15,7 +15,7 @@ import {
 } from '../src/workers/classification/installed-tier-classification.ts';
 import type { SnifferLane } from '../src/workers/classification/sniffer-lane.ts';
 import { runSnifferPass } from '../src/workers/classification/sniffer-resolver.ts';
-import { storedPersonalLoweringLap } from '../src/workers/classification/sniffer-service.ts';
+import { storedPersonalLoweringLap, TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
 import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts';
 import { CachedTierSniffer } from '../src/workers/classification/sniffer.ts';
 import {
@@ -25,6 +25,7 @@ import {
 } from '../src/workers/classification/tier-classifier.ts';
 import { TierLedgerGenerationConflictError, tierLedgerIdentityKey } from '../src/workers/classification/tier-ledger.ts';
 import { writeOwnerTierRules } from '../src/workers/classification/tier-rules.ts';
+import { recoverStoredLabelPage } from '../src/workers/connector-store/tier-label-observations.ts';
 import { applyMediaJudgments } from '../src/workers/connector-store/tier-media-judgment-sweep.ts';
 import type { MoveRuleAuthorityEntry } from '../src/workers/connector-store/tier-move-rule-policy.ts';
 import { moveTieredItem, resumeVerifiedTierMove } from '../src/workers/connector-store/tier-move.ts';
@@ -60,14 +61,14 @@ describe('Rule authority for lowerings', () => {
     id: 'orchard-label', match: { kind: 'label', value: 'orchard notes' }, tier: 'secure', strength: 'force',
   } as const;
 
-  function authorityLane() {
+  function authorityLane(withQueue = false) {
     const tmp = tempDir('olympus-personal-rule-authority-');
     const path = join(tmp.dir, 'tier-rules.json');
     const env = { OLYMPUS_TIER_RULES_PATH: path };
-    configureInstalledTierClassification({ env });
+    const installed = configureInstalledTierClassification({ env, ...(withQueue ? { lane: modelLane } : {}) });
     const lane = openTierFixture(tmp.dir, { embed: false });
     cleanups.push(() => { lane.close(); tmp.cleanup(); });
-    return { ...lane, path, env, saveRules: (rules: readonly OwnerTierRule[]) => writeOwnerTierRules([...rules], { env }) };
+    return { ...lane, installed, path, env, saveRules: (rules: readonly OwnerTierRule[]) => writeOwnerTierRules([...rules], { env }) };
   }
 
   type AuthorityLane = ReturnType<typeof authorityLane>;
@@ -341,6 +342,85 @@ describe('Rule authority for lowerings', () => {
 
     await expect(lower(lane, item.identity)).rejects.toMatchObject({ code: 'rule_authority' });
     expectHeld(lane, item.identity);
+  });
+
+  test('archive labels recover from retained names in resumable pages; lost names stay visible until relisted', async () => {
+    const lane = authorityLane(true);
+    const outside = sourceItem('mbox', 'outside', { labels: ['Picnic mail'] });
+    const inside = sourceItem('telegram', 'inside', {
+      attachmentNames: [label], forwardedFrom: 'Archive sender',
+      searchText: [body, label, 'Forwarded from Archive sender', 'Picnic'].join('\n'),
+    });
+    const missing = sourceItem('mbox', 'missing', { labels: ['Discarded label'] });
+    const mail = labelCases.mbox.signals;
+    await syncHeld(lane, [outside, missing], mail);
+    await syncHeld(lane, [inside], telegramClassificationSignals);
+    const queue = lane.installed.snifferStoreForLedger(lane.ledger.dbPath);
+    queue.deleteItemQuestions(missing.identity);
+    queue.deleteItemQuestions(inside.identity); // Telegram kept the context on its own row.
+    for (const path of [lane.paths.internal, lane.paths.secure_local]) {
+      using db = new Database(path);
+      db.run('UPDATE items SET classification_labels_json = NULL');
+    }
+    for (const item of [outside, inside, missing]) settlePersonal(lane, item.identity);
+    lane.saveRules([labelRule]);
+    const page = () => recoverStoredLabelPage(lane.set, queue, () => undefined, 1);
+    const first = lane.set.openStores().find(store => store.exportItemNames(outside.identity))!;
+    const cursor = `label_observation_after:${first.corpusId}`;
+    expect(await page()).toMatchObject({ changed: true, retired: false });
+    expect(lane.ledger.readMeta(cursor)).toBe('1:1');
+    const reopened = openTierFixture(lane.dir, { embed: false });
+    try {
+      expect(await recoverStoredLabelPage(reopened.set, queue, () => undefined, 1)).toMatchObject({ changed: true, retired: false });
+      expect(reopened.ledger.readMeta(cursor)).toBe('1:2');
+    } finally {
+      reopened.close();
+    }
+    let retired = false;
+    for (let i = 0; i < 20 && !retired; i++) retired = (await page()).retired;
+    expect(retired).toBe(true);
+    expect(lane.ledger.readMeta('labels_unavailable_count')).toBe('1');
+    for (const [item, labels] of [[outside, ['picnic mail']], [inside, ['forwarded from archive sender', 'orchard notes']]] as const) {
+      expect(lane.stores.secure_local!.exportItemNames(item.identity)?.columns.classification_labels_json).toBe(JSON.stringify(labels));
+    }
+    await expect(lower(lane, outside.identity)).resolves.toMatchObject({ outcome: 'moved' });
+    for (const item of [inside, missing]) {
+      await expect(lower(lane, item.identity)).rejects.toMatchObject({ code: 'rule_authority' });
+      expectHeld(lane, item.identity);
+    }
+    const listed = { ...missing, identity: { ...missing.identity, sourceVersion: 'v2' } };
+    await lane.set.sync({ id: 'authority-fixture', family: 'file', async authenticate() {},
+      async *listItems() { yield { items: [listed], done: true }; }, async fetchItem() { return listed; },
+      classificationSignals: mail }, { fetchContent: true, placement: FIXTURE_PLACEMENT }, { embed: false });
+    expect(lane.ledger.readMeta('labels_unavailable_count')).toBe('0');
+  });
+
+  test('a stored item older than its tier ledger is counted once across both legs', async () => {
+    const lane = authorityLane();
+    const item = sourceItem('mbox', 'old-mail', { labels: ['Original'] });
+    await syncHeld(lane, [item], labelCases.mbox.signals);
+    for (const store of lane.set.openStores()) {
+      using db = new Database(store.dbPath);
+      db.run('UPDATE items SET classification_labels_json = NULL');
+    }
+    using db = new Database(lane.ledger.dbPath);
+    db.run('DELETE FROM tier_items');
+    db.run('DELETE FROM tier_copies');
+    const queue = lane.installed.snifferStoreForLedger(lane.ledger.dbPath);
+    let retired = false;
+    for (let i = 0; i < 10 && !retired; i++) retired = (await recoverStoredLabelPage(lane.set, queue, () => undefined)).retired;
+    expect(retired).toBe(true);
+    const service = new TierSnifferService({
+      installed: lane.installed, lane: modelLane, modelAvailable: () => false,
+      model: { async complete() { throw new Error('The observation pass does not need a model.'); } },
+      stores: () => lane.set.openStores(), classificationLedgerPath: join(lane.dir, 'classification.jsonl'),
+    });
+    try {
+      await service.runOnce();
+      expect(service.backlog().labelsUnavailable).toBe(1);
+    } finally {
+      await service.stop();
+    }
   });
 
   async function verifyPersonalMove(lane: AuthorityLane, identity: RawItem['identity']) {

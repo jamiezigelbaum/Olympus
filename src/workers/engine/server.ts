@@ -6476,6 +6476,7 @@ export async function main(): Promise<void> {
       const missing = judgeMissing();
       return {
         configured: settings.configured, pendingCount: settings.pendingCount, ruleCount: settings.rules.length,
+        labelsUnavailable: backlog?.labelsUnavailable ?? 0,
         classifierAwaitingApproval: backlog?.awaitingOwnerApproval === true,
         // No judge: every new item waits, held, until one is set up (#1316).
         ...(missing ? { judgeMissing: missing } : {}),

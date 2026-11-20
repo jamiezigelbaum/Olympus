@@ -19,7 +19,8 @@ import { runSqliteMigrations, type SqliteMigration } from '../../core/sqlite-mig
 import { closeSqliteStore, loopWalAutocheckpointPragma, type SqliteCloseOptions } from '../../core/sqlite-store.ts';
 import { assertWritableStoreOpenAllowed } from '../../core/store-write-guard.ts';
 import { iterateRows } from '../../core/sqlite-rows.ts';
-import { HELD_UNTIL_JUDGED_PRIORITY, NEW_ARRIVAL_PRIORITY, type TierSnifferSubject } from './tier-classifier.ts';
+import type { LedgerRead } from './tier-ledger.ts';
+import { HELD_UNTIL_JUDGED_PRIORITY, SNIFFER_NAMES_MAX_CHARS, NEW_ARRIVAL_PRIORITY, type TierSnifferSubject } from './tier-classifier.ts';
 import { TIER_SNIFFER_SQLITE_STORE_ID } from './tier-ledger-path.ts';
 
 export const TIER_SNIFFER_SCHEMA_VERSION = 8;
@@ -387,6 +388,29 @@ export class TierSnifferStore {
   arrivalContentQuestions(limit = 20): SnifferQuestion[] {
     return (this.db.query(`SELECT * FROM sniffer_questions WHERE priority >= ${NEW_ARRIVAL_PRIORITY} AND pass = 'content'
       ORDER BY priority DESC LIMIT ?`).all(Math.max(1, Math.trunc(limit))) as QuestionRow[]).map(questionFromRow);
+  }
+
+  /** Only the retained names of unanswered questions. The recovery pass verifies them against the listing digest. */
+  async retainedQuestionNames(items: readonly TierSnifferSubject[], read?: (query: LedgerRead) => Promise<unknown>): Promise<Map<string, string[]>> {
+    const names = new Map<string, string[]>();
+    if (!items.length) return names;
+    const sql = `SELECT k.key AS idx, q.pass, substr(q.material, 1, ?) AS material FROM json_each(?) k CROSS JOIN sniffer_questions q
+      WHERE (q.provider, q.account_scope, q.conversation_key, q.provider_item_id) = (k.value ->> '$.provider',
+        k.value ->> '$.accountScope', COALESCE(k.value ->> '$.providerConversationId', ''), k.value ->> '$.providerItemId')
+      ORDER BY q.pass`;
+    const params = [SNIFFER_NAMES_MAX_CHARS + 'Names: '.length, JSON.stringify(items)];
+    const rows = (read ? await read({ sql, params, mode: 'all' })
+      : this.db.query(sql).all(...params)) as Array<{ idx: number; pass: string; material: string }>;
+    for (const row of rows) {
+      const value = row.pass === 'metadata' ? row.material : row.material.match(/^Names: ([^\n]+)/)?.[1];
+      if (value) {
+        const key = snifferSubjectKey(items[row.idx]!);
+        const candidates = names.get(key) ?? [];
+        candidates.push(value);
+        names.set(key, candidates);
+      }
+    }
+    return names;
   }
 
   questionFor(subject: TierSnifferSubject, pass: SnifferPass): SnifferQuestion | undefined {

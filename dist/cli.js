@@ -2173,16 +2173,103 @@ var init_tier_ledger_path = __esm(() => {
   init_olympus_layout();
 });
 
+// src/core/classification-signals.ts
+function namesOnlyContentScopeMetadata() {
+  return { [CONTENT_SCOPE_METADATA_KEY]: CONTENT_SCOPE_NAMES_ONLY };
+}
+function itemContentKeptNamesOnly(item) {
+  return item.metadata[CONTENT_SCOPE_METADATA_KEY] === CONTENT_SCOPE_NAMES_ONLY;
+}
+function signalText(metadata, ...keys) {
+  for (const key of keys) {
+    const value = metadata[key];
+    if (typeof value === "string" && value.trim())
+      return value.trim();
+  }
+  return;
+}
+function signalTexts(metadata, ...keys) {
+  const values = new Set;
+  for (const key of keys) {
+    const value = metadata[key];
+    if (!Array.isArray(value))
+      continue;
+    for (const entry of value) {
+      if (typeof entry === "string" && entry.trim())
+        values.add(entry.trim());
+    }
+  }
+  return [...values];
+}
+function compactClassificationSignals(signals) {
+  const out = {};
+  if (signals.floor)
+    out.floor = signals.floor;
+  if (signals.prior)
+    out.prior = signals.prior;
+  if (signals.sharing)
+    out.sharing = signals.sharing;
+  if (signals.title?.trim())
+    out.title = signals.title.trim();
+  if (signals.path?.trim())
+    out.path = signals.path.trim();
+  if (signals.folderKeys && signals.folderKeys.length > 0)
+    out.folderKeys = [...signals.folderKeys];
+  if (signals.sender?.trim())
+    out.sender = signals.sender.trim();
+  if (signals.recipients && signals.recipients.length > 0)
+    out.recipients = [...signals.recipients];
+  if (signals.labels && signals.labels.length > 0)
+    out.labels = [...signals.labels];
+  if (signals.conversationKind)
+    out.conversationKind = signals.conversationKind;
+  return out;
+}
+var CONTENT_SCOPE_METADATA_KEY = "contentScope", CONTENT_SCOPE_NAMES_ONLY = "names_only";
+
 // src/core/source-connector-labels.ts
 function connectorLabelCapability(provider) {
   return byProvider.get(provider);
 }
+function telegramContextNames({ metadata }) {
+  const names = [];
+  const forwardedFrom = signalText(metadata, "forwardedFrom");
+  if (forwardedFrom)
+    names.push(`Forwarded from ${forwardedFrom}`);
+  const attachmentNames = metadata["attachmentNames"];
+  if (Array.isArray(attachmentNames)) {
+    for (const name of attachmentNames) {
+      if (typeof name === "string" && name.trim() && !names.includes(name.trim()))
+        names.push(name.trim());
+    }
+  }
+  return names;
+}
+function providerMetadataLabels(provider, metadata) {
+  const capability = connectorLabelCapability(provider);
+  if (capability?.proof !== "stored")
+    return;
+  if (capability.metadataKey) {
+    const values = metadata[capability.metadataKey];
+    if (!Array.isArray(values))
+      return;
+    if (capability === MBOX_LABEL_CAPABILITY)
+      return values.filter((entry) => typeof entry === "string");
+    return signalTexts(metadata, capability.metadataKey);
+  }
+  if (!Array.isArray(metadata.attachmentNames) && typeof metadata.forwardedFrom !== "string")
+    return;
+  return telegramContextNames({ metadata });
+}
+function encodeLabelObservation(labels) {
+  return JSON.stringify([...new Set(labels.map((label) => label.trim().toLowerCase()))].sort());
+}
 function listedLabelObservation(connector, item) {
   if (connectorLabelCapability(item.identity.provider)?.proof !== "stored")
     return;
-  return JSON.stringify([...new Set((connector.classificationSignals(item).labels ?? []).map((label) => label.trim().toLowerCase()))].sort());
+  return encodeLabelObservation(connector.classificationSignals(item).labels ?? []);
 }
-var NOTE_TAGS_METADATA_KEY = "tags", GMAIL_LABEL_CAPABILITY, MBOX_LABEL_CAPABILITY, EVERNOTE_LABEL_CAPABILITY, READWISE_LABEL_CAPABILITY, REFLECT_LABEL_CAPABILITY, TELEGRAM_LABEL_CAPABILITY, capabilities, byProvider;
+var NOTE_TAGS_METADATA_KEY = "tags", GMAIL_LABEL_CAPABILITY, MBOX_LABEL_CAPABILITY, EVERNOTE_LABEL_CAPABILITY, READWISE_LABEL_CAPABILITY, REFLECT_LABEL_CAPABILITY, TELEGRAM_LABEL_CAPABILITY, capabilities, storedLabelProviders, byProvider;
 var init_source_connector_labels = __esm(() => {
   GMAIL_LABEL_CAPABILITY = { provider: "gmail", proof: "provider_walk", metadataKey: "labels" };
   MBOX_LABEL_CAPABILITY = { provider: "mbox", proof: "stored", metadataKey: "labels" };
@@ -2198,6 +2285,7 @@ var init_source_connector_labels = __esm(() => {
     REFLECT_LABEL_CAPABILITY,
     TELEGRAM_LABEL_CAPABILITY
   ];
+  storedLabelProviders = capabilities.filter((capability) => capability.proof === "stored").map((capability) => capability.provider);
   byProvider = new Map(capabilities.map((capability) => [capability.provider, capability]));
 });
 
@@ -42370,6 +42458,27 @@ class TierSnifferStore {
     return this.db.query(`SELECT * FROM sniffer_questions WHERE priority >= ${NEW_ARRIVAL_PRIORITY} AND pass = 'content'
       ORDER BY priority DESC LIMIT ?`).all(Math.max(1, Math.trunc(limit))).map(questionFromRow);
   }
+  async retainedQuestionNames(items, read) {
+    const names = new Map;
+    if (!items.length)
+      return names;
+    const sql = `SELECT k.key AS idx, q.pass, substr(q.material, 1, ?) AS material FROM json_each(?) k CROSS JOIN sniffer_questions q
+      WHERE (q.provider, q.account_scope, q.conversation_key, q.provider_item_id) = (k.value ->> '$.provider',
+        k.value ->> '$.accountScope', COALESCE(k.value ->> '$.providerConversationId', ''), k.value ->> '$.providerItemId')
+      ORDER BY q.pass`;
+    const params = [SNIFFER_NAMES_MAX_CHARS + "Names: ".length, JSON.stringify(items)];
+    const rows = read ? await read({ sql, params, mode: "all" }) : this.db.query(sql).all(...params);
+    for (const row of rows) {
+      const value = row.pass === "metadata" ? row.material : row.material.match(/^Names: ([^\n]+)/)?.[1];
+      if (value) {
+        const key = snifferSubjectKey(items[row.idx]);
+        const candidates = names.get(key) ?? [];
+        candidates.push(value);
+        names.set(key, candidates);
+      }
+    }
+    return names;
+  }
   questionFor(subject, pass) {
     const row = this.db.query(`
       SELECT * FROM sniffer_questions
@@ -43864,6 +43973,7 @@ class TierLedger {
       if (!current || current.state !== "pending" || JSON.stringify(current) !== JSON.stringify(record) || this.getOverride(identity)?.kind === "tier")
         return false;
       this.deleteCopies(identity);
+      this.setLabelsUnavailable(identity, false);
       this.db.query(`DELETE FROM tier_items
         WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?`).run(...idParams(identity));
       return true;
@@ -43875,6 +43985,7 @@ class TierLedger {
       if (!existing || existing.state !== "moving" || existing.generation !== options.expectedGeneration || this.getOverride(identity)?.kind === "tier")
         return false;
       this.deleteCopies(identity);
+      this.setLabelsUnavailable(identity, false);
       this.writeMeta(`tier-move-verified:${tierLedgerIdentityKey(identity)}`, "");
       this.db.query(`DELETE FROM tier_items
         WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?`).run(...idParams(identity));
@@ -44353,6 +44464,34 @@ class TierLedger {
     this.db.query(`
       DELETE FROM tier_label_rule_matches WHERE provider = ? AND account_scope = ? AND rule_key = ? AND walk_id <> ?
     `).run(provider, accountScope, ruleKey, walkId);
+  }
+  unavailableLabelCount() {
+    return Number(this.readMeta("labels_unavailable_count") ?? 0);
+  }
+  setLabelsUnavailable(identity, unavailable) {
+    if (!unavailable && !this.unavailableLabelCount())
+      return;
+    this.db.transaction(() => {
+      const delta = unavailable ? this.db.query("INSERT OR IGNORE INTO tier_label_gaps (provider, account_scope, conversation_key, provider_item_id) VALUES (?, ?, ?, ?)").run(...idParams(identity)).changes : -this.db.query(`DELETE FROM tier_label_gaps WHERE provider = ? AND account_scope = ?
+            AND conversation_key = ? AND provider_item_id = ?`).run(...idParams(identity)).changes;
+      if (delta)
+        this.writeMeta("labels_unavailable_count", String(this.unavailableLabelCount() + delta));
+    })();
+  }
+  *firstListingNamesReceipts(items) {
+    const receipts = new Map;
+    if (!items.length)
+      return receipts;
+    const rows = yield { sql: `SELECT k.key AS idx, (SELECT reasons_json FROM tier_history WHERE
+      (provider,account_scope,conversation_key,provider_item_id) = (k.value ->> '$.provider', k.value ->> '$.accountScope',
+        COALESCE(k.value ->> '$.providerConversationId', ''), k.value ->> '$.providerItemId')
+      ORDER BY history_pk LIMIT 1) AS reasons FROM json_each(?) k`, params: [JSON.stringify(items)], mode: "all" };
+    for (const row of rows) {
+      const receipt = row.reasons && JSON.parse(row.reasons).find((reason) => reason.startsWith(NAMES_INPUT_REASON_PREFIX));
+      if (receipt)
+        receipts.set(tierLedgerIdentityKey(items[row.idx]), receipt);
+    }
+    return receipts;
   }
   writeSettleProgress(key, value) {
     if ((this.readMeta(key) ?? "") === value)
@@ -45492,6 +45631,7 @@ class TierLedger {
     this.db.transaction(() => {
       removed = this.copies(identity);
       this.deleteCopies(identity);
+      this.setLabelsUnavailable(identity, false);
     })();
     return removed;
   }
@@ -45881,6 +46021,12 @@ class TierLedger {
         "tier_label_rule_matches"
       ]) {
         this.db.query(`DELETE FROM ${table} WHERE provider = ? AND account_scope = ?`).run(provider, accountScope);
+      }
+      const gaps = this.unavailableLabelCount();
+      if (gaps) {
+        const removed = this.db.query("DELETE FROM tier_label_gaps WHERE provider = ? AND account_scope = ?").run(provider, accountScope).changes;
+        if (removed)
+          this.writeMeta("labels_unavailable_count", String(gaps - removed));
       }
       this.db.query("DELETE FROM tier_ledger_meta WHERE key = ?").run(labelSweepMetaKey(provider, accountScope));
       return { items, copies };
@@ -47061,7 +47207,7 @@ function tierLedgerMigrations() {
       }
     },
     {
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 18,
       name: "provider_label_rule_matches",
       up(db) {
         db.exec(`
@@ -47075,7 +47221,12 @@ function tierLedgerMigrations() {
           ) WITHOUT ROWID
         `);
       }
-    }
+    },
+    additiveMigration(19, "uncheckable_label_items", [
+      `CREATE TABLE IF NOT EXISTS tier_label_gaps (
+        provider TEXT NOT NULL, account_scope TEXT NOT NULL, conversation_key TEXT NOT NULL, provider_item_id TEXT NOT NULL,
+        PRIMARY KEY(provider, account_scope, conversation_key, provider_item_id)) WITHOUT ROWID`
+    ])
   ];
 }
 function overrideFromJson(json) {
@@ -47086,7 +47237,7 @@ function overrideFromJson(json) {
     return parsed;
   return;
 }
-var TIER_LEDGER_SCHEMA_VERSION = 18, RETIRED_EMBEDDING_CLEARANCE_REASON = "content:sniffer:retired_embedding_clearance:undecided", RETAINED_MOVE_SOURCE_REASON = "content:retained_move_source", TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_safe_unread_relabel_v1", IDENTITY_BATCH = 200, AWAITING_TEXT_WHERE = `routed = 1 AND content_read = 0 AND metadata_pending = 0
+var TIER_LEDGER_SCHEMA_VERSION = 19, RETIRED_EMBEDDING_CLEARANCE_REASON = "content:sniffer:retired_embedding_clearance:undecided", RETAINED_MOVE_SOURCE_REASON = "content:retained_move_source", TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_safe_unread_relabel_v1", IDENTITY_BATCH = 200, AWAITING_TEXT_WHERE = `routed = 1 AND content_read = 0 AND metadata_pending = 0
         AND ((state = 'pending' AND content_pending = 1)
           OR (state = 'current' AND EXISTS (SELECT 1 FROM json_each(reasons_json) r
             WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
@@ -55058,60 +55209,6 @@ var init_off_thread_reads = __esm(() => {
   releases = new Map;
 });
 
-// src/core/classification-signals.ts
-function namesOnlyContentScopeMetadata() {
-  return { [CONTENT_SCOPE_METADATA_KEY]: CONTENT_SCOPE_NAMES_ONLY };
-}
-function itemContentKeptNamesOnly(item) {
-  return item.metadata[CONTENT_SCOPE_METADATA_KEY] === CONTENT_SCOPE_NAMES_ONLY;
-}
-function signalText(metadata, ...keys) {
-  for (const key of keys) {
-    const value = metadata[key];
-    if (typeof value === "string" && value.trim())
-      return value.trim();
-  }
-  return;
-}
-function signalTexts(metadata, ...keys) {
-  const values = new Set;
-  for (const key of keys) {
-    const value = metadata[key];
-    if (!Array.isArray(value))
-      continue;
-    for (const entry of value) {
-      if (typeof entry === "string" && entry.trim())
-        values.add(entry.trim());
-    }
-  }
-  return [...values];
-}
-function compactClassificationSignals(signals) {
-  const out = {};
-  if (signals.floor)
-    out.floor = signals.floor;
-  if (signals.prior)
-    out.prior = signals.prior;
-  if (signals.sharing)
-    out.sharing = signals.sharing;
-  if (signals.title?.trim())
-    out.title = signals.title.trim();
-  if (signals.path?.trim())
-    out.path = signals.path.trim();
-  if (signals.folderKeys && signals.folderKeys.length > 0)
-    out.folderKeys = [...signals.folderKeys];
-  if (signals.sender?.trim())
-    out.sender = signals.sender.trim();
-  if (signals.recipients && signals.recipients.length > 0)
-    out.recipients = [...signals.recipients];
-  if (signals.labels && signals.labels.length > 0)
-    out.labels = [...signals.labels];
-  if (signals.conversationKind)
-    out.conversationKind = signals.conversationKind;
-  return out;
-}
-var CONTENT_SCOPE_METADATA_KEY = "contentScope", CONTENT_SCOPE_NAMES_ONLY = "names_only";
-
 // connect-relay/shared/directory-tools.ts
 function isDirectoryTool(name) {
   return typeof name === "string" && DIRECTORY_TOOLS.has(name);
@@ -58113,6 +58210,9 @@ var init_media_judge = __esm(() => {
 });
 
 // src/workers/connector-store/stored-names.ts
+function servingMetadataCopy(copies, record) {
+  return copyServingLayer(copies.filter((copy) => copy.state === "current"), "metadata") ?? (record?.state === "moving" ? copyServingLayer(copies.filter((copy) => copy.state === "superseded" && copy.supersededByGeneration === record.generation + 1), "metadata") : undefined);
+}
 function storedCopyOf(set, identity, copies) {
   return firstStored(set, copies, (store) => store.exportItemNames(identity));
 }
@@ -63326,7 +63426,7 @@ function currentTierRulePolicy(set) {
 function servingNames(set, record) {
   const identity = tierLedgerIdentityOfRecord(record);
   const copies = set.ledger.copies(identity);
-  const source = copyServingLayer(copies.filter((copy) => copy.state === "current"), "metadata") ?? (record.state === "moving" ? copyServingLayer(copies.filter((copy) => copy.state === "superseded" && copy.supersededByGeneration === record.generation + 1), "metadata") : undefined);
+  const source = servingMetadataCopy(copies, record);
   return source && set.store(source.trustDomain)?.exportItemNames(identity);
 }
 function tierMoveRuleAuthorization(set, record, target, sources, destination) {
@@ -72349,7 +72449,21 @@ var TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff", DEFAULT_
   JOIN items i ON i.item_pk = emb.item_pk
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
-`, VECTOR_DIGEST_BACKFILL_MAX_ROWS = 128, VECTOR_DIGEST_BACKFILL_MIN_ROWS = 8, VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS = 25, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS = 250, vectorDigestBackfillHold = () => false, VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS = 60000, VECTOR_DIGEST_PAGE_ROWS = 4096, VECTOR_DIGEST_MIN_MARGIN = 0.05, VECTOR_DIGEST_MAX_CANDIDATES = 5000, VECTOR_SCAN_BACKSTOP_GRACE_MS = 250, PEOPLE_OFF_THREAD_READ_ATTEMPTS = 3, READ_ONLY_MIN_SCHEMA_VERSION = 7, INLINE_CLOSE_SQLITE_STORE = "const closeSqliteStore = (db) => { try { db.exec('PRAGMA wal_checkpoint(TRUNCATE);'); } catch {} db.close(); };", admitRecencyIndexBuild, recencyIndexBuilding = false, RECENCY_INDEX_RETRY_MS = 250, RECENCY_INDEX_BUSY_RETRY_MS = 2000, RECENCY_INDEX_NOT_ADMITTED_RETRY_MS = 30000, RECLAIM_MAX_PAGES_PER_STEP = 128, RECLAIM_CONVERSION_BYTES_PER_MS = 15000, SUPERSEDED_PRUNE_MEDIA_ROWS = 1, grantNotifications, ON_DEMAND_GRANT_EPOCH_CHECK_MS = 250, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_WEIGHT = 0.25, CHAT_RECENCY_PIN_COUNT = 2, CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8, lexicalContentPreference, STORE_LEADER_LATEST_SEAT = 1, LANE_LEADER_SEATS = 3, OWNER_AUTHOR_LABEL = "You", CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", PDF_EXTRACTION_BACKLOG_SQL = `
+`, VECTOR_DIGEST_BACKFILL_MAX_ROWS = 128, VECTOR_DIGEST_BACKFILL_MIN_ROWS = 8, VECTOR_DIGEST_BACKFILL_TURN_TARGET_MS = 25, VECTOR_DIGEST_BACKFILL_ASK_BACKOFF_MS = 250, vectorDigestBackfillHold = () => false, VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS = 60000, VECTOR_DIGEST_PAGE_ROWS = 4096, VECTOR_DIGEST_MIN_MARGIN = 0.05, VECTOR_DIGEST_MAX_CANDIDATES = 5000, VECTOR_SCAN_BACKSTOP_GRACE_MS = 250, STORED_LABEL_FIELDS = `i.source_version AS version, i.sync_run_id AS run, i.indexed_at AS indexedAt,
+      CASE WHEN i.classification_labels_json IS NULL THEN NULL
+        WHEN json_valid(i.classification_labels_json) THEN CASE WHEN json_type(i.classification_labels_json) = 'array' THEN 'known' ELSE 'null' END
+        ELSE 'null' END AS observed,
+      i.title, COALESCE(i.sender_label, i.sender_id) AS sender, i.locator_uri AS locator,
+      CASE WHEN json_valid(i.source_scope_folder_keys_json) THEN i.source_scope_folder_keys_json END AS folderKeys,
+      CASE WHEN i.classification_labels_json IS NULL THEN substr(i.search_text, -?1) END AS searchTail,
+      CASE WHEN i.classification_labels_json IS NULL AND i.mime_type LIKE 'text/markdown%' THEN
+        (SELECT substr(c.bounded_text, 1, ?1) FROM chunks c WHERE c.item_pk = i.item_pk AND c.chunk_index = 0) END AS opening,
+      CASE WHEN i.classification_labels_json IS NULL THEN
+        EXISTS (SELECT 1 FROM item_owners o WHERE o.item_pk = i.item_pk AND o.first_seen_sync_run_id = i.sync_run_id)
+        AND NOT EXISTS (SELECT 1 FROM item_owners o WHERE o.item_pk = i.item_pk AND
+          (o.first_seen_sync_run_id <> i.sync_run_id OR o.last_seen_sync_run_id <> i.sync_run_id OR o.first_seen_at <> o.last_seen_at))
+        AND NOT EXISTS (SELECT 1 FROM item_text_versions v WHERE v.item_pk = i.item_pk)
+      END AS originalListing`, PEOPLE_OFF_THREAD_READ_ATTEMPTS = 3, READ_ONLY_MIN_SCHEMA_VERSION = 7, INLINE_CLOSE_SQLITE_STORE = "const closeSqliteStore = (db) => { try { db.exec('PRAGMA wal_checkpoint(TRUNCATE);'); } catch {} db.close(); };", admitRecencyIndexBuild, recencyIndexBuilding = false, RECENCY_INDEX_RETRY_MS = 250, RECENCY_INDEX_BUSY_RETRY_MS = 2000, RECENCY_INDEX_NOT_ADMITTED_RETRY_MS = 30000, RECLAIM_MAX_PAGES_PER_STEP = 128, RECLAIM_CONVERSION_BYTES_PER_MS = 15000, SUPERSEDED_PRUNE_MEDIA_ROWS = 1, grantNotifications, ON_DEMAND_GRANT_EPOCH_CHECK_MS = 250, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_WEIGHT = 0.25, CHAT_RECENCY_PIN_COUNT = 2, CONNECTOR_STORE_VECTOR_SCAN_PAGES_PER_YIELD = 8, lexicalContentPreference, STORE_LEADER_LATEST_SEAT = 1, LANE_LEADER_SEATS = 3, OWNER_AUTHOR_LABEL = "You", CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", PDF_EXTRACTION_BACKLOG_SQL = `
   SELECT
     SUM(CASE WHEN chars IS NULL THEN 1 ELSE 0 END) AS pending,
     SUM(CASE WHEN chars IS NULL THEN 0 ELSE 1 END) AS extracted,
@@ -72383,6 +72497,7 @@ var TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff", DEFAULT_
           AND i.normalized_conversation = COALESCE(json_extract(candidate.value, '$.providerConversationId'), '')
           AND COALESCE(i.source_version, '') = COALESCE(json_extract(candidate.value, '$.sourceVersion'), '')`, MAX_PERSON_SENDER_IDENTITIES = 500, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_V18_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, ON_DEMAND_GRANT_EPOCH_TRIGGERS, openShape, PEOPLE_SENDER_PREDICATE = `((i.sender_id IS NOT NULL AND TRIM(i.sender_id) <> '') OR (i.sender_label IS NOT NULL AND TRIM(i.sender_label) <> ''))`, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
+  init_tier_classifier();
   init_source_connector_labels();
   init_memory_counters();
   init_local_pacing();
@@ -74108,8 +74223,8 @@ var init_local_index = __esm(() => {
       if (this.classificationLabelsPresent && options.observedLabels !== undefined) {
         this.db.transaction(() => {
           const prior = this.db.query(`${update} RETURNING item_pk, classification_labels_json`).get(...params);
-          if (prior && prior.classification_labels_json === options.observedLabels) {
-            this.writeLabelObservation(prior.item_pk, options.observedLabels);
+          if (prior) {
+            this.writeLabelObservation(prior.item_pk, prior.classification_labels_json === options.observedLabels ? options.observedLabels : "null");
           }
         })();
       } else {
@@ -74920,7 +75035,7 @@ ${parentKey(ref)}`, { ref, origin });
       const row = this.db.query(`
       SELECT item_pk, trust_tier, ${CONNECTOR_STORE_COPY_ITEM_COLUMNS.map((column) => {
         if (column === "classification_labels_json")
-          return this.classificationLabelsPresent ? "CASE WHEN json_valid(classification_labels_json) THEN classification_labels_json END AS classification_labels_json" : "NULL AS classification_labels_json";
+          return this.classificationLabelsPresent ? "CASE WHEN json_valid(classification_labels_json) THEN CASE WHEN json_type(classification_labels_json) = 'array' THEN classification_labels_json END END AS classification_labels_json" : "NULL AS classification_labels_json";
         return this.childItemColumnsPresent || !CONNECTOR_STORE_CHILD_ITEM_COLUMNS.includes(column) ? column : `NULL AS ${column}`;
       }).join(", ")}
       FROM items
@@ -78591,6 +78706,35 @@ ${parentKey(ref)}`, { ref, origin });
           storage: "local_sqlite"
         }
       };
+    }
+    async storedLabelPage(after, limit, checkKnown) {
+      if (!this.classificationLabelsPresent)
+        return { rows: [], last: after, end: true };
+      const sql = `WITH page AS MATERIALIZED (SELECT item_pk FROM items WHERE item_pk > ?2 ORDER BY item_pk LIMIT ?3)
+      SELECT page.item_pk AS cursor, i.item_pk AS itemPk, i.provider, i.account_scope AS accountScope,
+      i.normalized_conversation AS providerConversationId, i.provider_item_id AS providerItemId,
+      ${STORED_LABEL_FIELDS}
+      FROM page LEFT JOIN items i ON i.item_pk = page.item_pk AND i.tombstoned = 0
+        AND i.provider IN (SELECT value FROM json_each(?4))
+        AND (?5 OR i.classification_labels_json IS NULL OR i.classification_labels_json = 'null') ORDER BY page.item_pk`;
+      const params = [SNIFFER_NAMES_MAX_CHARS * 2, after, limit, JSON.stringify(storedLabelProviders), Number(checkKnown)];
+      const rows = offThreadReadsSupported(this.dbPath) ? await readInBackground(this.dbPath, { sql, params, mode: "all" }) : this.db.query(sql).all(...params);
+      return { rows: rows.filter((row) => row.itemPk != null), last: rows.at(-1)?.cursor ?? after, end: rows.length < limit };
+    }
+    labelRowUnchanged(row) {
+      const current = this.db.query(`SELECT ${STORED_LABEL_FIELDS} FROM items i WHERE i.item_pk = ?2 AND i.tombstoned = 0
+      AND i.provider = ?3 AND i.account_scope = ?4 AND i.normalized_conversation = ?5 AND i.provider_item_id = ?6`).get(SNIFFER_NAMES_MAX_CHARS * 2, row.itemPk, row.provider, row.accountScope, row.providerConversationId, row.providerItemId);
+      return current !== null && Object.keys(current).every((key) => current[key] === row[key]);
+    }
+    hasListedLabels(identity) {
+      if (!this.classificationLabelsPresent)
+        return;
+      const row = this.db.query(`SELECT CASE WHEN json_valid(classification_labels_json) THEN json_type(classification_labels_json) = 'array' ELSE 0 END AS known
+      FROM items WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ? AND tombstoned = 0`).get(identity.provider, identity.accountScope, identity.providerConversationId ?? "", identity.providerItemId);
+      return row ? Boolean(row.known) : undefined;
+    }
+    recordRecoveredLabels(row, labels) {
+      this.db.query("UPDATE items SET classification_labels_json = ? WHERE item_pk = ? AND tombstoned = 0 AND classification_labels_json IS NULL").run(labels, row.itemPk);
     }
     writeLabelObservation(itemPk, labels) {
       if (this.classificationLabelsPresent && typeof labels === "string") {
@@ -104708,6 +104852,152 @@ var init_live_control = __esm(() => {
   READWISE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
 });
 
+// src/workers/connector-store/tier-label-observations.ts
+function retainedLabels(row, receipt, materials) {
+  const capability = connectorLabelCapability(row.provider);
+  const keys = receipt.slice(NAMES_INPUT_REASON_PREFIX.length).split(":")[0].split(",");
+  const folderKeys = JSON.parse(row.folderKeys ?? "[]");
+  if (!Array.isArray(folderKeys) || !folderKeys.every((key) => typeof key === "string"))
+    return;
+  const folders = [...folderKeys, ...row.providerConversationId ? [row.providerConversationId] : []];
+  const names = {
+    ...keys.includes("title") && row.title ? { title: row.title } : {},
+    ...keys.includes("sender") && row.sender ? { sender: row.sender } : {},
+    ...keys.includes("path") && row.locator ? { path: row.locator } : {},
+    ...keys.includes("folderKeys") ? { folderKeys: folders } : {}
+  };
+  const prove = (labels) => labels && namesInputReason({ ...names, labels }) === receipt ? encodeLabelObservation(labels) : undefined;
+  if (!keys.includes("labels"))
+    return prove([]);
+  for (const material of materials) {
+    const parts = material.split(" | ");
+    const prefix = [names.title, names.path, ...snifferFolderKeyNames(names.folderKeys)].filter(Boolean).length;
+    const labels = parts.slice(prefix, names.sender ? -1 : undefined);
+    const observed = prove(providerMetadataLabels(row.provider, capability.metadataKey ? { [capability.metadataKey]: labels } : { attachmentNames: labels }));
+    if (observed)
+      return observed;
+  }
+  if (capability.metadataKey && row.opening) {
+    const tags = row.opening.split(`
+`).find((line) => line.startsWith("Tags: "))?.slice("Tags: ".length).split(", ");
+    const observed = prove(providerMetadataLabels(row.provider, { [capability.metadataKey]: tags }));
+    if (observed)
+      return observed;
+  }
+  const lines = row.searchTail?.split(`
+`) ?? [];
+  if (!capability.metadataKey) {
+    if (lines.at(-1)?.startsWith("Reactions: "))
+      lines.pop();
+    if (lines.at(-1) === row.title)
+      lines.pop();
+    if (lines.at(-1) === row.sender)
+      lines.pop();
+  }
+  const forward = !capability.metadataKey && lines.at(-1)?.startsWith("Forwarded from ") ? lines.pop().slice("Forwarded from ".length) : undefined;
+  for (let start = lines.length;start >= 0; start--) {
+    const values = lines.slice(start);
+    const observed = prove(providerMetadataLabels(row.provider, capability.metadataKey ? { [capability.metadataKey]: values } : { forwardedFrom: forward, attachmentNames: values }));
+    if (observed)
+      return observed;
+  }
+  return;
+}
+async function recoverStoredLabelPage(set, sniffer, turn, limit = PAGE_ROWS) {
+  const ledger = set.ledger;
+  const stores = set.openStores();
+  const pending = stores.filter((leg) => ledger.readMeta(`${DONE}:${leg.corpusId}`) !== "1");
+  const previous = pending.findIndex((leg) => leg.corpusId === lastStoreRead.get(set));
+  const store = pending[previous + 1] ?? pending[0];
+  if (!store)
+    return { retired: true, changed: false, complete: true };
+  lastStoreRead.set(set, store.corpusId);
+  const cursorKey = `${CURSOR}:${store.corpusId}`;
+  const saved = ledger.readMeta(cursorKey) ?? "";
+  const after = Number(saved.slice(2)) || 0;
+  const marker = store.changeMarker();
+  const page = await store.storedLabelPage(after, Math.min(PAGE_ROWS, Math.max(1, limit)), ledger.unavailableLabelCount() > 0);
+  const original = page.rows.filter((row) => row.originalListing && row.observed === null);
+  const subjects = original.map(({ provider, accountScope, providerConversationId, providerItemId }) => ({ provider, accountScope, providerConversationId, providerItemId }));
+  const [receipts, materials] = await Promise.all([
+    ledgerReadOffThread(ledger, ledger.firstListingNamesReceipts(subjects), { lane: "background" }),
+    sniffer.retainedQuestionNames(subjects, offThreadReadsSupported(sniffer.dbPath) ? (query) => readInBackground(sniffer.dbPath, query) : undefined)
+  ]);
+  const observations = new Map;
+  for (const row of original) {
+    await turn();
+    const receipt = receipts.get(tierLedgerIdentityKey(row));
+    const labels = receipt && retainedLabels(row, receipt, materials.get(snifferSubjectKey(row)) ?? []);
+    if (labels)
+      observations.set(row, labels);
+  }
+  await turn();
+  let changed = false;
+  let deferred = false;
+  const gaps = ledger.unavailableLabelCount();
+  const hasWork = page.rows.some((row) => row.observed !== "known") || gaps > 0 && page.rows.length > 0;
+  if (hasWork)
+    ledger.withMoveBatch(() => store.withItemCopyBatch(() => {
+      const storeChanged = marker !== store.changeMarker();
+      for (const row of page.rows) {
+        if (storeChanged && !store.labelRowUnchanged(row) || ledger.writeIntent(row)) {
+          deferred = true;
+          continue;
+        }
+        const record = ledger.getCurrent(row);
+        if (record?.contentTier === "secrets" || record?.metadataTier === "secrets") {
+          ledger.setLabelsUnavailable(row, false);
+          continue;
+        }
+        const source = servingMetadataCopy(ledger.copies(row), record);
+        let known = row.observed === "known";
+        if (row.observed === null) {
+          const receipt = receipts.get(tierLedgerIdentityKey(row));
+          const labels = receipt && record?.reasons.includes(receipt) ? observations.get(row) : undefined;
+          store.recordRecoveredLabels(row, labels ?? "null");
+          known = labels !== undefined;
+          changed = true;
+        }
+        if (!source || source.corpusId === store.corpusId)
+          ledger.setLabelsUnavailable(row, !known);
+      }
+    }));
+  const dirty = saved.startsWith("1:") || changed || deferred;
+  ledger.writeSettleProgress(cursorKey, page.end ? "" : `${Number(dirty)}:${page.last}`);
+  if (changed)
+    ledger.writeMeta("label_observations_changed_after", `${store.corpusId}:${page.last}`);
+  if (page.end && !dirty)
+    ledger.writeSettleProgress(`${DONE}:${store.corpusId}`, "1");
+  const retired = page.end && !dirty && stores.every((leg) => ledger.readMeta(`${DONE}:${leg.corpusId}`) === "1");
+  return { retired, complete: retired, changed };
+}
+function refreshListedLabelGap(set, identity) {
+  const record = set.ledger.getCurrent(identity);
+  if (record?.contentTier === "secrets" || record?.targetContentTier === "secrets") {
+    set.ledger.setLabelsUnavailable(identity, false);
+    return;
+  }
+  const source = servingMetadataCopy(set.ledger.copies(identity), record);
+  if (source) {
+    const known = set.store(source.trustDomain)?.hasListedLabels(identity);
+    if (known !== undefined)
+      set.ledger.setLabelsUnavailable(identity, !known);
+  } else {
+    set.ledger.setLabelsUnavailable(identity, set.openStores().some((store) => store.hasListedLabels(identity) === false));
+  }
+}
+var PAGE_ROWS = 200, CURSOR = "label_observation_after", DONE = "label_observation_done", lastStoreRead;
+var init_tier_label_observations = __esm(() => {
+  init_source_connector_labels();
+  init_tier_classifier();
+  init_sniffer_store();
+  init_tier_ledger();
+  init_off_thread_reads();
+  init_child_visibility();
+  init_stored_names();
+  lastStoreRead = new WeakMap;
+});
+
 // src/workers/connector-store/tier-names-only-settle.ts
 function settleNamesOnlyItemsOffThread(options) {
   return runPassOffThread(namesOnlySettlePass(options), { family: "names-only-settle", ...options.turn ? { turn: options.turn } : {} });
@@ -104896,9 +105186,9 @@ function purgeLowerTierContent(set, options = {}) {
   };
   const receiptsComplete = resumePage(VERIFIED, RECEIPT_CURSOR, (identity) => resumeVerifiedTierMove(set, identity, note));
   const importsComplete = resumePage(TIER_MOVE_IMPORTS_PREFIX, IMPORT_CURSOR, (identity) => settleDiscardedTierMoveImports(set, identity));
-  if (options.maintenance && set.ledger.readMeta(DONE) === "1")
+  if (options.maintenance && set.ledger.readMeta(DONE2) === "1")
     return { ...report, complete: receiptsComplete && importsComplete };
-  const raw = set.ledger.readMeta(CURSOR);
+  const raw = set.ledger.readMeta(CURSOR2);
   const after = raw ? JSON.parse(raw) : undefined;
   const stores = ["public_safe", "internal"].flatMap((domain) => {
     const store = set.store(domain);
@@ -105041,7 +105331,7 @@ function purgeLowerTierContent(set, options = {}) {
   if (remaining > 0) {
     const last = page.at(-1);
     const finished = page.length < remaining || !last;
-    set.ledger.writeSettleProgress(CURSOR, finished ? "" : JSON.stringify({
+    set.ledger.writeSettleProgress(CURSOR2, finished ? "" : JSON.stringify({
       provider: last.provider,
       accountScope: last.accountScope,
       providerItemId: last.providerItemId,
@@ -105050,7 +105340,7 @@ function purgeLowerTierContent(set, options = {}) {
     if (finished) {
       const historyComplete = set.ledger.readMeta(FAILED) !== "1";
       report.complete = historyComplete && receiptsComplete && importsComplete;
-      set.ledger.writeSettleProgress(DONE, historyComplete ? "1" : "");
+      set.ledger.writeSettleProgress(DONE2, historyComplete ? "1" : "");
       set.ledger.writeSettleProgress(FAILED, "");
     }
   }
@@ -105067,7 +105357,7 @@ function compareContentVersions(a, b) {
     return Math.sign(aTime - bTime);
   return;
 }
-var CURSOR = "lower-content-purge-cursor-v2", DONE = "lower-content-purge-done-v2", FAILED = "lower-content-purge-failed-v2", VERIFIED = "tier-move-verified:", RECEIPT_CURSOR = "lower-content-purge-receipt-cursor-v2", IMPORT_CURSOR = "lower-content-purge-import-cursor", LOWER_CONTENT_PURGE_BATCH = 200;
+var CURSOR2 = "lower-content-purge-cursor-v2", DONE2 = "lower-content-purge-done-v2", FAILED = "lower-content-purge-failed-v2", VERIFIED = "tier-move-verified:", RECEIPT_CURSOR = "lower-content-purge-receipt-cursor-v2", IMPORT_CURSOR = "lower-content-purge-import-cursor", LOWER_CONTENT_PURGE_BATCH = 200;
 var init_tier_content_purge = __esm(() => {
   init_tier_ledger();
   init_embedding_ledger();
@@ -108066,8 +108356,20 @@ class TieredRoutingRun {
     }
     if (cleared.length > 0)
       await barrier();
-    for (const identity of cleared)
+    const hadLabelGaps = this.set.ledger.unavailableLabelCount() > 0;
+    for (const identity of cleared) {
       this.set.ledger.clearWriteIntent(identity);
+      if ((hadLabelGaps || this.namesAdvance.has(identityKey(identity))) && connectorLabelCapability(identity.provider)?.proof === "stored")
+        refreshListedLabelGap(this.set, identity);
+    }
+    if (hadLabelGaps) {
+      for (const { plan, identity } of this.plans.values()) {
+        if (plan.kind === "legacy" && connectorLabelCapability(identity.provider)?.proof === "stored") {
+          await ingestionTurn();
+          refreshListedLabelGap(this.set, identity);
+        }
+      }
+    }
     for (const move of this.cachedLowerings.values()) {
       await ingestionTurn();
       const context = this.set.automaticMoveContext;
@@ -108558,6 +108860,7 @@ async function parentsNoStoreHolds(stores, parents) {
 }
 var LOWER_CONTENT_REPAIR_INTERVAL_MS, SUPERSEDED_SWEEP_SLICE_MS = 100, TIER_DOMAIN_ORDER, TIER_KEY_TRUST_DOMAIN, SECRET_LOCATION_DOMAIN = "secure_local";
 var init_tiered_store_set = __esm(() => {
+  init_tier_label_observations();
   init_source_connector_labels();
   init_store_write_guard();
   init_source_ingestion_exclusions();
@@ -123110,20 +123413,6 @@ function telegramClassificationSignals(item) {
     labels: telegramContextNames(item)
   });
 }
-function telegramContextNames(item) {
-  const names = [];
-  const forwardedFrom = signalText(item.metadata, "forwardedFrom");
-  if (forwardedFrom)
-    names.push(`Forwarded from ${forwardedFrom}`);
-  const attachmentNames = item.metadata["attachmentNames"];
-  if (Array.isArray(attachmentNames)) {
-    for (const name of attachmentNames) {
-      if (typeof name === "string" && name.trim() && !names.includes(name.trim()))
-        names.push(name.trim());
-    }
-  }
-  return names;
-}
 function telegramRecordBuilder(options) {
   const itemsOf = (entry) => [entry.record.capturedItem.item, ...entry.children ?? []];
   return {
@@ -123145,6 +123434,7 @@ function telegramRecordBuilder(options) {
 }
 var VERSION_TIME, CAPTURE_MARK = "~at:";
 var init_record_builder = __esm(() => {
+  init_source_connector_labels();
   init_capture_spool_connector();
   VERSION_TIME = /(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))(?::r[0-9a-f]{1,64})?$/;
 });
@@ -128514,7 +128804,7 @@ function positionFromCursor(cursor) {
   const text = cursor?.trim();
   if (text === undefined || text === "")
     return;
-  const found = CURSOR2.exec(text);
+  const found = CURSOR3.exec(text);
   if (found) {
     return {
       file: found[1],
@@ -128530,10 +128820,10 @@ function positionFromCursor(cursor) {
   throw new Error("WhatsApp live spool cursors look like <fileName>:<lineCount>.");
 }
 function isWhatsAppSpoolCursor(cursor) {
-  return CURSOR2.test(cursor) || LEGACY_CURSOR.test(cursor);
+  return CURSOR3.test(cursor) || LEGACY_CURSOR.test(cursor);
 }
 function whatsAppSpoolLineCursor(cursor) {
-  const found = CURSOR2.exec(cursor) ?? LEGACY_CURSOR.exec(cursor);
+  const found = CURSOR3.exec(cursor) ?? LEGACY_CURSOR.exec(cursor);
   return found ? `${found[1]}:${found[2]}` : undefined;
 }
 function recordIdentity(message, account) {
@@ -128993,7 +129283,7 @@ function optionalStringRecord(value) {
 function nowIso3() {
   return new Date().toISOString();
 }
-var WHATSAPP_LIVE_CONNECTOR_ID = "whatsapp-live", CONNECTOR_ID2, PROVIDER = "whatsapp", TEXT_MIME_TYPE = "text/plain", DEFAULT_ACCOUNT = "personal", DEFAULT_PAGE_LIMIT3 = 500, MAX_PAGE_LIMIT3 = 2000, WHATSAPP_SECRET_REDACTED_FLOOR_BASIS = "capture:secret_redacted", DEFAULT_PASS_BYTE_BUDGET, TARGET_READ_CHUNK_BYTES, WHATSAPP_MEDIA_WAITING_STATUS = "waiting_for_disk", CHILD_MEDIA_TYPES, WHATSAPP_FETCHED_MEDIA_TYPES, WHATSAPP_STATUS_CHAT_LABEL = "Status updates", CURSOR2, LEGACY_CURSOR, MEDIA_TEMP, OLDER_MEDIA_TEMP, MEDIA_TEMP_MAX_AGE_MS, MEDIA_TEMP_DEPTH = 2, currentBootNonce;
+var WHATSAPP_LIVE_CONNECTOR_ID = "whatsapp-live", CONNECTOR_ID2, PROVIDER = "whatsapp", TEXT_MIME_TYPE = "text/plain", DEFAULT_ACCOUNT = "personal", DEFAULT_PAGE_LIMIT3 = 500, MAX_PAGE_LIMIT3 = 2000, WHATSAPP_SECRET_REDACTED_FLOOR_BASIS = "capture:secret_redacted", DEFAULT_PASS_BYTE_BUDGET, TARGET_READ_CHUNK_BYTES, WHATSAPP_MEDIA_WAITING_STATUS = "waiting_for_disk", CHILD_MEDIA_TYPES, WHATSAPP_FETCHED_MEDIA_TYPES, WHATSAPP_STATUS_CHAT_LABEL = "Status updates", CURSOR3, LEGACY_CURSOR, MEDIA_TEMP, OLDER_MEDIA_TEMP, MEDIA_TEMP_MAX_AGE_MS, MEDIA_TEMP_DEPTH = 2, currentBootNonce;
 var init_live_connector = __esm(() => {
   init_source_inputs();
   init_capture_spool_secrets();
@@ -129008,7 +129298,7 @@ var init_live_connector = __esm(() => {
   TARGET_READ_CHUNK_BYTES = 4 * 1024;
   CHILD_MEDIA_TYPES = new Set(["image", "video", "video_note"]);
   WHATSAPP_FETCHED_MEDIA_TYPES = new Set([...CHILD_MEDIA_TYPES, "audio"]);
-  CURSOR2 = /^(.+):(\d+)@(\d+)(s?)(?:~r([0-9a-f.]+))?$/u;
+  CURSOR3 = /^(.+):(\d+)@(\d+)(s?)(?:~r([0-9a-f.]+))?$/u;
   LEGACY_CURSOR = /^(.+):(\d+)$/u;
   MEDIA_TEMP = /^\.olympus-media-(\d+)-([0-9a-f]{8})-(.+)-[^-]+\.tmp$/u;
   OLDER_MEDIA_TEMP = /^\.(?:audio-|olympus-media-).*\.tmp$/u;
@@ -238705,8 +238995,7 @@ function createMboxArchiveConnector(input) {
     classificationSignals(item) {
       const subject = typeof item.metadata.subject === "string" ? item.metadata.subject : undefined;
       const sender = typeof item.metadata.from === "string" && item.metadata.from ? item.metadata.from : undefined;
-      const storedLabels = item.metadata[MBOX_LABEL_CAPABILITY.metadataKey];
-      const labels = Array.isArray(storedLabels) ? storedLabels.filter((label) => typeof label === "string") : [];
+      const labels = providerMetadataLabels(item.identity.provider, item.metadata) ?? [];
       return {
         ...subject ? { title: subject } : {},
         ...sender ? { sender } : {},
@@ -248330,9 +248619,10 @@ async function runStoredWalk(walk, inputs, readPage, clockMs) {
     if (page.changed || page.failed)
       lap.inputs = undefined;
     walk.status.lastResult = page.retired ? "retired" : page.failed ? "read_failed" : page.blocked ?? (page.changed ? "changed" : page.complete === false ? "more_rows" : inputs === undefined ? "inputs_unavailable" : "no_work");
-    if (page.retired)
+    if (page.retired) {
       walk.status.reason = "retired";
-    else if (page.complete !== false && lap.inputs !== undefined) {
+      walk.retiredInputs = inputs;
+    } else if (page.complete !== false && lap.inputs !== undefined) {
       walk.clean = { inputs: lap.inputs, at: clockMs() };
       walk.status.reason = "idle_unchanged";
     } else
@@ -248621,7 +248911,9 @@ class TierSnifferService {
   backlogFrom(counts) {
     const { checkingItems, remainingQuestions, pendingWithoutQuestion, oldestPendingAgeMs } = counts;
     const now = this.clockMs();
-    const storedWalks = [...this.storedWalks.values()].map(({ set, walks }) => {
+    let labelsUnavailable = 0;
+    const storedWalks = [...this.storedWalks.values()].map(({ set, walks, labelsUnavailable: gaps }) => {
+      labelsUnavailable += gaps ?? 0;
       const repair = set.lowerContentRepairHealth();
       const walkers = Object.fromEntries([...walks].map(([name, walk]) => [name, {
         ...walk.status,
@@ -248631,6 +248923,7 @@ class TierSnifferService {
     });
     return {
       ...counts,
+      ...labelsUnavailable ? { labelsUnavailable } : {},
       ...storedWalks.length ? { storedWalks } : {},
       summary: checkingItems === 0 ? this.unreadable.size > 0 ? `No items counted as waiting.${this.unreadableNote()}` : "No items waiting for classification." : `Checking ${checkingItems} item${checkingItems === 1 ? "" : "s"}, about ${remainingQuestions} question${remainingQuestions === 1 ? "" : "s"} remaining.` + (pendingWithoutQuestion > 0 ? ` ${pendingWithoutQuestion} pending item(s) have no question.` : "") + (oldestPendingAgeMs >= 3600000 ? ` Oldest pending item: ${Math.floor(oldestPendingAgeMs / 60000)} minutes.` : "") + (this.waiting ? ` Nothing asked now: ${this.waiting.label}.` : "") + this.unreadableNote(),
       ...this.movesRefusedNow.size > 0 ? { movesRefused: this.movesRefused() } : {},
@@ -249689,7 +249982,7 @@ class TierSnifferService {
       this.storedWalks.set(path, entry);
     }
     let walk = entry.walks.get(name);
-    if (!walk) {
+    if (!walk || name === "labelObservations" && walk.status.reason === "retired" && walk.retiredInputs !== inputs) {
       walk = newStoredWalk(this.clockMs());
       entry.walks.set(name, walk);
     }
@@ -249763,6 +250056,8 @@ class TierSnifferService {
         }
         return { retired: held.retired, complete: held.retired, changed: held.settled > 0, failed: held.failed > 0 };
       });
+      await this.runStoredWalker(set, "labelObservations", JSON.stringify(set.openStores().map((store) => store.corpusId)), () => recoverStoredLabelPage(set, this.options.installed.snifferStoreForLedger(ledgerPath), turn));
+      this.storedWalks.get(ledgerPath).labelsUnavailable = set.ledger.unavailableLabelCount();
       await this.runStoredWalker(set, "personalLowerings", this.storedWalkInputs(set, true), async (after) => {
         const page = await storedPersonalLoweringLap(set, after, turn);
         if (page.changed)
@@ -250202,6 +250497,7 @@ var init_sniffer_service = __esm(() => {
   init_tier_ledger_path();
   init_tier_rejudge();
   init_tier_names_only_settle();
+  init_tier_label_observations();
   init_tier_held_settle();
   init_tier_move_rule_policy();
   init_tier_rules_sweep();
@@ -256229,6 +256525,14 @@ function buildChatGptDashboardViewModel(view, options = {}) {
       id: "privacy:setup",
       sentence: DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY.sentence,
       fix: { label: DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY.label, tool: PRIVACY_GET_TOOL_NAME, args: {} }
+    });
+  }
+  const unavailable = options.privacy?.labelsUnavailable ?? 0;
+  if (unavailable > 0) {
+    needsYou.push({
+      id: "privacy:labels_unavailable",
+      sentence: unavailable === 1 ? "1 item can't be checked against your label rules. It would need to be listed again." : `${unavailable.toLocaleString("en-US")} items can't be checked against your label rules. They would need to be listed again.`,
+      fix: helpLinkFix("Review sources", openOnComputer(undefined, "connect"))
     });
   }
   if (options.privacy?.classifierAwaitingApproval)
@@ -282235,6 +282539,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         configured: settings.configured,
         pendingCount: settings.pendingCount,
         ruleCount: settings.rules.length,
+        labelsUnavailable: backlog?.labelsUnavailable ?? 0,
         classifierAwaitingApproval: backlog?.awaitingOwnerApproval === true,
         ...missing ? { judgeMissing: missing } : {},
         ...backlog?.waiting && DASHBOARD_JUDGE_STOP_REASONS.has(backlog.waiting.reason) ? { judgeStopped: backlog.waiting.reason } : {},

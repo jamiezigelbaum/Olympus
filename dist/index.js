@@ -8284,12 +8284,11 @@ var TIER_LEDGER_FILE_SUFFIX = ".tier-ledger.sqlite", SECRET_LOCATIONS_FILE_SUFFI
 var init_tier_ledger_path = __esm(() => {
   init_olympus_layout();
 });
-
 // src/core/source-connector-labels.ts
 function connectorLabelCapability(provider) {
   return byProvider.get(provider);
 }
-var NOTE_TAGS_METADATA_KEY = "tags", GMAIL_LABEL_CAPABILITY, MBOX_LABEL_CAPABILITY, EVERNOTE_LABEL_CAPABILITY, READWISE_LABEL_CAPABILITY, REFLECT_LABEL_CAPABILITY, TELEGRAM_LABEL_CAPABILITY, capabilities, byProvider;
+var NOTE_TAGS_METADATA_KEY = "tags", GMAIL_LABEL_CAPABILITY, MBOX_LABEL_CAPABILITY, EVERNOTE_LABEL_CAPABILITY, READWISE_LABEL_CAPABILITY, REFLECT_LABEL_CAPABILITY, TELEGRAM_LABEL_CAPABILITY, capabilities, storedLabelProviders, byProvider;
 var init_source_connector_labels = __esm(() => {
   GMAIL_LABEL_CAPABILITY = { provider: "gmail", proof: "provider_walk", metadataKey: "labels" };
   MBOX_LABEL_CAPABILITY = { provider: "mbox", proof: "stored", metadataKey: "labels" };
@@ -8305,6 +8304,7 @@ var init_source_connector_labels = __esm(() => {
     REFLECT_LABEL_CAPABILITY,
     TELEGRAM_LABEL_CAPABILITY
   ];
+  storedLabelProviders = capabilities.filter((capability) => capability.proof === "stored").map((capability) => capability.provider);
   byProvider = new Map(capabilities.map((capability) => [capability.provider, capability]));
 });
 
@@ -12452,6 +12452,7 @@ var init_provider_account_identity = __esm(() => {
   };
   IDENTITY_RESPONSE_LIMIT_BYTES = 64 * 1024;
 });
+
 // src/core/store-identity.ts
 var init_store_identity = __esm(() => {
   init_archive_formats();
@@ -12507,6 +12508,9 @@ var init_media_judge = __esm(() => {
 });
 
 // src/workers/connector-store/stored-names.ts
+function servingMetadataCopy(copies, record) {
+  return copyServingLayer(copies.filter((copy) => copy.state === "current"), "metadata") ?? (record?.state === "moving" ? copyServingLayer(copies.filter((copy) => copy.state === "superseded" && copy.supersededByGeneration === record.generation + 1), "metadata") : undefined);
+}
 function storedSignals(copy) {
   const text = (value) => typeof value === "string" && value.trim() ? value.trim() : undefined;
   const title = text(copy.columns["title"]);
@@ -12867,7 +12871,7 @@ import { createHash as createHash2 } from "node:crypto";
 function servingNames(set, record) {
   const identity = tierLedgerIdentityOfRecord(record);
   const copies = set.ledger.copies(identity);
-  const source = copyServingLayer(copies.filter((copy) => copy.state === "current"), "metadata") ?? (record.state === "moving" ? copyServingLayer(copies.filter((copy) => copy.state === "superseded" && copy.supersededByGeneration === record.generation + 1), "metadata") : undefined);
+  const source = servingMetadataCopy(copies, record);
   return source && set.store(source.trustDomain)?.exportItemNames(identity);
 }
 function applicableProviderLabelRules(rules, provider) {
@@ -13041,6 +13045,7 @@ function connectorStoreContentPreference(vettedVectorItemIds) {
 }
 var CONCEPT_COUNT_MAX_AGE_MS, CONNECTOR_STORE_CONVERSATION_INDEX = "idx_connector_store_items_conversation_time", CONNECTOR_STORE_CONVERSATION_INDEX_SQL, CONNECTOR_STORE_RECENCY_INDEX = "idx_connector_store_items_recent_live", CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX = "idx_connector_store_items_recent_account_live", RECENCY_LIVE_SQL = "tombstoned IS 0", ACCOUNT_RECENCY_LIVE_SQL = "+tombstoned IS 0", CONNECTOR_STORE_RECENCY_INDEX_SQL, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, CHUNK_MEDIA_RETRY_BASE_MS, CONNECTOR_STORE_FTS_MIGRATION, STATUS_COUNTS_MAX_AGE_MS, TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, lexicalContentPreference, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_V18_ITEM_COLUMNS, LOCAL_RELAXED_STOPWORDS;
 var init_local_index = __esm(() => {
+  init_tier_classifier();
   init_source_connector_labels();
   init_memory_counters();
   init_local_pacing();
@@ -14018,6 +14023,19 @@ var init_mail_source_scope = __esm(() => {
   GMAIL_SCOPE_BROWSE_MAX_REQUESTS = 1 + 5 + 2 + GMAIL_SCOPE_SENDER_SAMPLE;
 });
 
+// src/workers/connector-store/tier-label-observations.ts
+var lastStoreRead;
+var init_tier_label_observations = __esm(() => {
+  init_source_connector_labels();
+  init_tier_classifier();
+  init_sniffer_store();
+  init_tier_ledger();
+  init_off_thread_reads();
+  init_child_visibility();
+  init_stored_names();
+  lastStoreRead = new WeakMap;
+});
+
 // src/workers/connector-store/tier-names-only-settle.ts
 var init_tier_names_only_settle = __esm(() => {
   init_tier_classifier();
@@ -14135,6 +14153,7 @@ var init_tier_secrets_floor_sweep = __esm(() => {
 // src/workers/connector-store/tiered-store-set.ts
 var LOWER_CONTENT_REPAIR_INTERVAL_MS;
 var init_tiered_store_set = __esm(() => {
+  init_tier_label_observations();
   init_source_connector_labels();
   init_store_write_guard();
   init_source_ingestion_exclusions();
@@ -14516,6 +14535,7 @@ var init_message = __esm(() => {
 
 // src/workers/telegram-messages/record-builder.ts
 var init_record_builder = __esm(() => {
+  init_source_connector_labels();
   init_capture_spool_connector();
 });
 

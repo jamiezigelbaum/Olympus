@@ -1,4 +1,5 @@
-import { listedLabelObservation } from '../../core/source-connector-labels.ts';
+import { refreshListedLabelGap } from './tier-label-observations.ts';
+import { connectorLabelCapability, listedLabelObservation } from '../../core/source-connector-labels.ts';
 // The shared per-tier store capability (design
 // docs/design/per-item-four-tier-classification.md, section 3.2).
 //
@@ -1934,7 +1935,19 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
       cleared.push(identity);
     }
     if (cleared.length > 0) await barrier();
-    for (const identity of cleared) this.set.ledger.clearWriteIntent(identity);
+    const hadLabelGaps = this.set.ledger.unavailableLabelCount() > 0;
+    for (const identity of cleared) {
+      this.set.ledger.clearWriteIntent(identity);
+      if ((hadLabelGaps || this.namesAdvance.has(identityKey(identity))) && connectorLabelCapability(identity.provider)?.proof === 'stored') refreshListedLabelGap(this.set, identity);
+    }
+    if (hadLabelGaps) {
+      for (const { plan, identity } of this.plans.values()) {
+        if (plan.kind === 'legacy' && connectorLabelCapability(identity.provider)?.proof === 'stored') {
+          await ingestionTurn();
+          refreshListedLabelGap(this.set, identity);
+        }
+      }
+    }
     for (const move of this.cachedLowerings.values()) {
       await ingestionTurn();
       const context = this.set.automaticMoveContext;

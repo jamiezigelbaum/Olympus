@@ -2,6 +2,7 @@
 // the thin connector that turns each message into an item. Synthetic mail
 // built here, never a real export.
 
+import { Database } from 'bun:sqlite';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
 import { appendFileSync, mkdtempSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
@@ -13,6 +14,9 @@ import {
   MBOX_ARCHIVE_FORMAT,
   type ArchiveImportFinding,
 } from '../src/core/archive-formats.ts';
+import { recoverStoredLabelPage } from '../src/workers/connector-store/tier-label-observations.ts';
+import { clearInstalledTierClassification, configureInstalledTierClassification } from '../src/workers/classification/installed-tier-classification.ts';
+import { FIXTURE_PLACEMENT, openTierFixture } from './helpers/tier-fixtures.ts';
 import { ScopeRoot } from '../src/core/scope-safe-fs.ts';
 import { archiveFileEntries, archiveManifestSha256, buildArchiveManifest } from '../src/workers/archive-import/manifest.ts';
 import { MBOX_FINDINGS, createMboxArchiveConnector } from '../src/workers/archive-import/mbox/connector.ts';
@@ -172,6 +176,31 @@ function textOf(item: RawItem): string {
 }
 
 describe('mbox connector', () => {
+  test('the stored classifier input recovers the labels after the mail archive is gone', async () => {
+    const file = mailFile('Inbox.mbox', mbox([mail({ subject: 'Lunch', body: 'Bring apples to lunch.',
+      headers: ['X-Gmail-Labels: Inbox,Picnic'] })]));
+    const { connector } = connectorFor(file.dir, 'Inbox.mbox');
+    const { items: [item] } = await listAll(connector);
+    const fixture = openTierFixture(file.dir, { family: 'email', embed: false });
+    cleanups.push(() => fixture.close(), clearInstalledTierClassification);
+    const installed = configureInstalledTierClassification({ env: { OLYMPUS_TIER_RULES_PATH: join(file.dir, 'rules.json') },
+      lane: { kind: 'local', modelId: 'archive-judge',
+        profile: { provider: 'local-openai-compatible' } } });
+    await fixture.set.sync(connector, { fetchContent: true, placement: FIXTURE_PLACEMENT }, { embed: false });
+    unlinkSync(file.path);
+    for (const store of fixture.set.openStores()) {
+      using db = new Database(store.dbPath);
+      db.run('UPDATE items SET classification_labels_json = NULL');
+    }
+    const queue = installed.snifferStoreForLedger(fixture.ledger.dbPath);
+    let retired = false;
+    for (let i = 0; i < 10 && !retired; i++) retired = (await recoverStoredLabelPage(fixture.set, queue, () => undefined)).retired;
+    expect(retired).toBe(true);
+    const stored = fixture.set.openStores().flatMap(store => store.exportItemNames(item!.identity) ?? []);
+    expect(stored.length).toBeGreaterThan(0);
+    for (const row of stored) expect(row.columns.classification_labels_json).toBe('["inbox","picnic"]');
+  });
+
   test('one Message-ID with two different bodies is two items; the same message twice is one identity', async () => {
     const first = mail({ id: 'dup@example.invalid', subject: 'Same id', body: 'first version' });
     const second = mail({ id: 'dup@example.invalid', subject: 'Same id', body: 'second version' });

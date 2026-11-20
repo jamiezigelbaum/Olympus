@@ -208,6 +208,7 @@ export interface ChatGptDashboardOptions {
     configured: boolean; pendingCount: number; ruleCount: number;
     /** The privacy check waits for the owner to approve its model (sniffer-service `awaiting_owner_approval`). */
     classifierAwaitingApproval?: boolean;
+    labelsUnavailable?: number;
     /** What waits: its lane and model name (sniffer-service backlog `awaitingApproval`), no item content. */
     classifierWaiting?: { lane: 'local' | 'venice' | 'tinfoil'; modelId: string };
     /** The computer's own unlocked dashboard, which may approve a local model in place (dashboard-panel-tools.ts). */
@@ -403,6 +404,16 @@ export function buildChatGptDashboardViewModel(
       id: 'privacy:setup',
       sentence: DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY.sentence,
       fix: { label: DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY.label, tool: PRIVACY_GET_TOOL_NAME, args: {} },
+    });
+  }
+
+  const unavailable = options.privacy?.labelsUnavailable ?? 0;
+  if (unavailable > 0) {
+    needsYou.push({
+      id: 'privacy:labels_unavailable',
+      sentence: unavailable === 1 ? "1 item can't be checked against your label rules. It would need to be listed again."
+        : `${unavailable.toLocaleString('en-US')} items can't be checked against your label rules. They would need to be listed again.`,
+      fix: helpLinkFix('Review sources', openOnComputer(undefined, 'connect')),
     });
   }
 

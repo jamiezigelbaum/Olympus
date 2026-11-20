@@ -1,4 +1,5 @@
-import { connectorLabelCapability, listedLabelObservation } from '../../core/source-connector-labels.ts';
+import { SNIFFER_NAMES_MAX_CHARS } from '../classification/tier-classifier.ts';
+import { connectorLabelCapability, listedLabelObservation, storedLabelProviders } from '../../core/source-connector-labels.ts';
 import { changeMemoryActivity, changeMemoryCounter } from '../../core/memory-counters.ts';
 import { embedsOnThisComputer } from '../local-pacing.ts';
 import { EMBEDDING_HOLD_REASONS, type EmbeddingHoldReason } from '../../core/embedding-sweep-idle.ts';
@@ -3192,6 +3193,42 @@ export interface ConnectorStoreLocalContent {
   providerConversationId?: string;
 }
 
+// Also used by the writer's keyed recheck when another connection changed this store.
+const STORED_LABEL_FIELDS = `i.source_version AS version, i.sync_run_id AS run, i.indexed_at AS indexedAt,
+      CASE WHEN i.classification_labels_json IS NULL THEN NULL
+        WHEN json_valid(i.classification_labels_json) THEN CASE WHEN json_type(i.classification_labels_json) = 'array' THEN 'known' ELSE 'null' END
+        ELSE 'null' END AS observed,
+      i.title, COALESCE(i.sender_label, i.sender_id) AS sender, i.locator_uri AS locator,
+      CASE WHEN json_valid(i.source_scope_folder_keys_json) THEN i.source_scope_folder_keys_json END AS folderKeys,
+      CASE WHEN i.classification_labels_json IS NULL THEN substr(i.search_text, -?1) END AS searchTail,
+      CASE WHEN i.classification_labels_json IS NULL AND i.mime_type LIKE 'text/markdown%' THEN
+        (SELECT substr(c.bounded_text, 1, ?1) FROM chunks c WHERE c.item_pk = i.item_pk AND c.chunk_index = 0) END AS opening,
+      CASE WHEN i.classification_labels_json IS NULL THEN
+        EXISTS (SELECT 1 FROM item_owners o WHERE o.item_pk = i.item_pk AND o.first_seen_sync_run_id = i.sync_run_id)
+        AND NOT EXISTS (SELECT 1 FROM item_owners o WHERE o.item_pk = i.item_pk AND
+          (o.first_seen_sync_run_id <> i.sync_run_id OR o.last_seen_sync_run_id <> i.sync_run_id OR o.first_seen_at <> o.last_seen_at))
+        AND NOT EXISTS (SELECT 1 FROM item_text_versions v WHERE v.item_pk = i.item_pk)
+      END AS originalListing`;
+
+export interface StoredLabelRow {
+  itemPk: number;
+  provider: string;
+  accountScope: string;
+  providerItemId: string;
+  providerConversationId: string;
+  observed: string | null;
+  version: string | null;
+  run: string;
+  indexedAt: string;
+  originalListing: number | null;
+  title: string | null;
+  sender: string | null;
+  locator: string | null;
+  searchTail: string | null;
+  opening: string | null;
+  folderKeys: string | null;
+}
+
 export interface ConnectorStoreItemPresence {
   active: boolean;
   sourceVersion?: string;
@@ -6032,8 +6069,8 @@ export class LocalConnectorStore {
       this.db.transaction(() => {
         const prior = this.db.query(`${update} RETURNING item_pk, classification_labels_json`).get(...params) as
           { item_pk: number; classification_labels_json: string | null } | null;
-        if (prior && prior.classification_labels_json === options.observedLabels) {
-          this.writeLabelObservation(prior.item_pk, options.observedLabels);
+        if (prior) {
+          this.writeLabelObservation(prior.item_pk, prior.classification_labels_json === options.observedLabels ? options.observedLabels : 'null');
         }
       })();
     } else {
@@ -7170,7 +7207,7 @@ export class LocalConnectorStore {
       SELECT item_pk, trust_tier, ${CONNECTOR_STORE_COPY_ITEM_COLUMNS
         .map(column => {
           if (column === 'classification_labels_json') return this.classificationLabelsPresent
-            ? 'CASE WHEN json_valid(classification_labels_json) THEN classification_labels_json END AS classification_labels_json'
+            ? "CASE WHEN json_valid(classification_labels_json) THEN CASE WHEN json_type(classification_labels_json) = 'array' THEN classification_labels_json END END AS classification_labels_json"
             : 'NULL AS classification_labels_json';
           return this.childItemColumnsPresent || !CONNECTOR_STORE_CHILD_ITEM_COLUMNS.includes(column)
             ? column : `NULL AS ${column}`;
@@ -12639,6 +12676,44 @@ export class LocalConnectorStore {
         storage: 'local_sqlite',
       },
     };
+  }
+
+  /** Page by primary key before filtering, so even a store with one old row at the end costs one page per tick. */
+  async storedLabelPage(after: number, limit: number, checkKnown: boolean): Promise<{ rows: StoredLabelRow[]; last: number; end: boolean }> {
+    if (!this.classificationLabelsPresent) return { rows: [], last: after, end: true };
+    const sql = `WITH page AS MATERIALIZED (SELECT item_pk FROM items WHERE item_pk > ?2 ORDER BY item_pk LIMIT ?3)
+      SELECT page.item_pk AS cursor, i.item_pk AS itemPk, i.provider, i.account_scope AS accountScope,
+      i.normalized_conversation AS providerConversationId, i.provider_item_id AS providerItemId,
+      ${STORED_LABEL_FIELDS}
+      FROM page LEFT JOIN items i ON i.item_pk = page.item_pk AND i.tombstoned = 0
+        AND i.provider IN (SELECT value FROM json_each(?4))
+        AND (?5 OR i.classification_labels_json IS NULL OR i.classification_labels_json = 'null') ORDER BY page.item_pk`;
+    const params = [SNIFFER_NAMES_MAX_CHARS * 2, after, limit, JSON.stringify(storedLabelProviders), Number(checkKnown)];
+    const rows = (offThreadReadsSupported(this.dbPath) ? await readInBackground(this.dbPath, { sql, params, mode: 'all' })
+      : this.db.query(sql).all(...params)) as Array<StoredLabelRow & { cursor: number }>;
+    return { rows: rows.filter(row => row.itemPk != null), last: rows.at(-1)?.cursor ?? after, end: rows.length < limit };
+  }
+
+  /** Called with the write lock. Unrelated writes must not starve recovery of a quiet archive row. */
+  labelRowUnchanged(row: StoredLabelRow): boolean {
+    const current = this.db.query(`SELECT ${STORED_LABEL_FIELDS} FROM items i WHERE i.item_pk = ?2 AND i.tombstoned = 0
+      AND i.provider = ?3 AND i.account_scope = ?4 AND i.normalized_conversation = ?5 AND i.provider_item_id = ?6`)
+      .get(SNIFFER_NAMES_MAX_CHARS * 2, row.itemPk, row.provider, row.accountScope, row.providerConversationId, row.providerItemId) as Partial<StoredLabelRow> | null;
+    return current !== null && (Object.keys(current) as Array<keyof StoredLabelRow>).every(key => current[key] === row[key]);
+  }
+
+  /** Undefined if this store has no active row for the item. */
+  hasListedLabels(identity: TierLedgerIdentity): boolean | undefined {
+    if (!this.classificationLabelsPresent) return undefined;
+    const row = this.db.query(`SELECT CASE WHEN json_valid(classification_labels_json) THEN json_type(classification_labels_json) = 'array' ELSE 0 END AS known
+      FROM items WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ? AND tombstoned = 0`)
+      .get(identity.provider, identity.accountScope, identity.providerConversationId ?? '', identity.providerItemId) as { known: number } | null;
+    return row ? Boolean(row.known) : undefined;
+  }
+
+  recordRecoveredLabels(row: StoredLabelRow, labels: string): void {
+    this.db.query('UPDATE items SET classification_labels_json = ? WHERE item_pk = ? AND tombstoned = 0 AND classification_labels_json IS NULL')
+      .run(labels, row.itemPk);
   }
 
   private writeLabelObservation(itemPk: number, labels: string | undefined): void {
