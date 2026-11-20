@@ -843,6 +843,61 @@ describe('native OpenClaw plugin adapter', () => {
     });
   }
 
+  test('all-sources search rechecks names after the slowest source finishes', async () => {
+    const privateCorpora = searchCorpora.filter(corpus => corpus.trustDomain === 'secure_local');
+    const corpora = [privateCorpora[0]!, privateCorpora.find(corpus => corpus.sourceId !== privateCorpora[0]!.sourceId)!];
+    const ledger = new TierLedger({ dbPath: ':memory:' });
+    const stores = corpora.map(corpus => new LocalConnectorStore({ ...corpus, dbPath: ':memory:', tierLedger: ledger }));
+    const titles = ['Orchard early harvest', 'Orchard late harvest'];
+    try {
+      const items = corpora.map(({ family, provider }, index): RawItem => ({
+        identity: { family, provider, accountScope: 'personal', providerItemId: `orchard-id-${index}`, localItemId: `orchard-local-${index}` },
+        metadata: { title: titles[index]! }, content: { kind: 'text', text: 'Confidential body marker with SSN 123-45-6789.' }, mimeType: 'text/plain', fetchedAt: '2026-11-01T00:00:00Z',
+      }));
+      for (const [index, store] of stores.entries()) {
+        const item = items[index]!;
+        await store.syncFromConnector({
+          id: item.identity.provider, family: item.identity.family, async authenticate() {},
+          async *listItems() { yield { items: [item], done: true }; },
+          async fetchItem() { return item; },
+          classificationSignals() { return { title: titles[index]! }; },
+        }, { fetchContent: true, tierClassification: {} });
+      }
+      const slow = stores[1]!;
+      const read = slow.searchItemsDetailedOffThread.bind(slow);
+      slow.searchItemsDetailedOffThread = async (...args) => {
+        // Let the in-memory fast source finish all its reads on this turn.
+        await new Promise<void>(resolve => setImmediate(resolve));
+        ledger.setOverride(items[0]!.identity, { kind: 'tier', tier: 'secure' });
+        return read(...args);
+      };
+      const worker = createEmailSourceWorker({ connectorStores: stores });
+      globalThis.fetch = (async (input, init) => worker.fetch(new Request(input, init))) as typeof fetch;
+      const tools = new Map<string, NativeTool>();
+      plugin.register({
+        pluginConfig: {
+          email: { enabled: true, baseUrl: workerTestOrigin },
+          sourceIndex: { enabled: true, corpusRegistry: { schemaVersion: 1, corpora } },
+        },
+        registerTool(tool) { tools.set(tool.name, tool); },
+      });
+      const result = await tools.get('source_index_search')!.execute('search', { query: 'orchard', max_results: 5 }) as {
+        content: Array<{ text: string }>; details: unknown;
+      };
+      expect(ledger.getOverride(items[0]!.identity)).toEqual({ kind: 'tier', tier: 'secure' });
+      for (const output of [result.content[0]!.text, JSON.stringify(result.details)]) {
+        expect(output).toContain(titles[1]!);
+        expect(output).not.toContain(titles[0]!);
+        expect(output).not.toContain(items[0]!.identity.providerItemId);
+        expect(output).not.toContain(items[0]!.identity.localItemId);
+      }
+      expect(result.details).toMatchObject({ audit: { items_returned: 1, metadata_hits: 1 } });
+    } finally {
+      stores.forEach(store => store.close());
+      ledger.close();
+    }
+  });
+
   test('uses nested argus plugin config for tool execution', async () => {
     const calls: Array<{ url: string; body: string | undefined }> = [];
     globalThis.fetch = (async (url, init) => {

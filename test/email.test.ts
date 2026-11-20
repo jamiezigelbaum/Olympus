@@ -1363,6 +1363,12 @@ describe('EmailClient', () => {
       attachment_type: 'file',
       max_results: 5,
     });
+    await client.sourceIndexSearch({ corpusId: 'secure_local.telegram.messages', query: 'surface' }, 'private_answer');
+    expect(await requests[1]?.json()).toEqual({
+      include_private_names: true,
+      query: 'surface',
+      corpus_id: 'secure_local.telegram.protected.messages',
+    });
   });
 });
 

@@ -344,8 +344,9 @@ test('finished embedding shows at once: the parity follows the live vectors on t
   // Lane 6 run 43777041779: both remaining chunks embedded right after the count.
   const live = { items: 3, tombstoned_items: 0, chunks: 3, sync_runs: 1, vectors_by_model: { m1: 3, old: 3 }, reconciled_at: 'x' };
   const shown = bringCountsForward(counted, live);
-  expect(shown.embedding_parity).toMatchObject({ chunks: 3, embedded_chunks: 3, missing_chunks: 0, refresh_needed: false });
-  expect(shown.embedding_parity!.backlog_estimate!.missing_chunks).toBe(0);
+  expect(shown.embedding_parity).toMatchObject({ chunks: 3, embedded_chunks: 3, missing_chunks: 0 });
+  // Live totals track vector progress, but are not scoped to eligible rows.
+  expect(shown.embedding_parity!.backlog_estimate).toEqual(counted.embedding_parity!.backlog_estimate);
   expect(shown.counts.embedded_chunks).toBe(3);
   // Another model's vectors never count for the serving one; nothing moved, nothing changes.
   expect(bringCountsForward(counted, { ...live, vectors_by_model: { m1: 1, old: 9 } })).toBe(counted);

@@ -1050,18 +1050,13 @@ async function searchEverySource(ctx: OperationContext, query: string, params: R
   const includeLocators = optionalBoolean(params.include_locators, 'include_locators');
   const bySource = new Map<string, string>();
   for (const corpus of publicSourceCorpusRegistry(ctx.config).list('search')) if (!bySource.has(corpus.sourceId)) bySource.set(corpus.sourceId, corpus.corpusId);
-  const settled = await Promise.allSettled([...bySource.values()].map((corpusId) => ctx.email.sourceIndexSearch({
+  const results = await ctx.email.sourceIndexSearchMany([...bySource.values()], {
     query,
-    corpusId: corpusId as SourceIndexSearchCorpusId,
     ...(retrievalMode !== undefined ? { retrievalMode } : {}),
     ...(maxResults !== undefined ? { maxResults } : {}),
     ...(includeLocators !== undefined ? { includeLocators } : {}),
-  })));
-  const results = settled.flatMap((outcome) => (outcome.status === 'fulfilled' ? [outcome.value] : []));
-  if (results.length === 0) {
-    const failed = settled.find((outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected');
-    throw failed?.reason ?? new OperationError('invalid_params', 'No source is configured for search.');
-  }
+  });
+  if (!results.length) throw new OperationError('email_error', 'No source could be searched this time.');
   const limit = maxResults ?? Math.max(...results.map((result) => result.hits.length), 0);
   const hits: unknown[] = [];
   for (let rank = 0; hits.length < limit && results.some((result) => result.hits.length > rank); rank += 1) {
@@ -1070,7 +1065,7 @@ async function searchEverySource(ctx: OperationContext, query: string, params: R
   const domains = results.map((result) => result.policy.trust_domain);
   const secretLocations = results.flatMap((result) => result.secret_locations ?? []);
   const notes = [...new Set(results.flatMap((result) => result.coverage_notes ?? []))];
-  const unsearched = settled.length - results.length;
+  const unsearched = bySource.size - results.length;
   return {
     kind: 'source_index_search',
     corpus_id: results[0]!.corpus_id,

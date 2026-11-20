@@ -2464,6 +2464,11 @@ export interface ConnectorStoreScoredSearchRow extends ConnectorStoreSearchRow {
   bestCosine: number;
 }
 
+/** Additional caller-specific release eligibility, applied before lane limits. */
+export type ConnectorStoreSearchEligibility = (
+  rows: readonly { sourceItem: TierLedgerIdentity; trustTier: SourceTrustTier }[],
+) => readonly boolean[];
+
 /**
  * How much of a keyword query each row matched: the query's distinct
  * concepts (a term with its synonyms is one concept) and, per row (by local
@@ -2476,6 +2481,7 @@ export interface ConnectorStoreKeywordFtsOptions {
   locate?: boolean;
   relaxed?: boolean;
   privatePrecision?: boolean;
+  searchEligibility?: ConnectorStoreSearchEligibility | undefined;
   /** One lane's item-level group answers; stays on this thread, never sent to the read pool. */
   conceptHitMemo?: ConnectorStoreConceptHitMemo;
   // A tier-checked prefix, before remaining reads or chunk location finish.
@@ -2683,6 +2689,8 @@ function foldVectorScore(bestByItem: VectorWinners, row: VectorScoreRow, queryVe
   return { mismatch: 0, qualified, score };
 }
 
+type EligibleVectorItemPks = (pks: readonly number[], onDemandReadsTablePresent: boolean) => ReadonlySet<number>;
+
 /**
  * The exact-vector scan: re-checks the embedding authority, then walks the
  * model's current vectors in keyset pages, keeping each item's best chunk.
@@ -2703,6 +2711,7 @@ async function scanVectorPages(
   pageSize: number,
   resultLimit: number,
   sideReaders?: () => Promise<ReadonlyArray<(query: StoreRead) => Promise<unknown>>>,
+  eligiblePks?: EligibleVectorItemPks,
 ): Promise<VectorScan> {
   const authority = embeddingAuthorityRead(provider);
   const after = embeddingAuthorityFromRow(await read(authority) as EmbeddingAuthorityRow | null, provider);
@@ -2719,7 +2728,7 @@ async function scanVectorPages(
   const digestTable = !vectorDigestSearchDisabled() && await read({ mode: 'get', sql: "SELECT 1 FROM sqlite_master WHERE name = 'chunk_vector_digest_meta'", params: [] });
   const digestReady = digestTable && await read({ mode: 'get', sql: 'SELECT 1 FROM chunk_vector_digest_meta WHERE model_id = ? AND completed = 1', params: [pageOptions.modelId] });
   if (digestReady) {
-    const scanned = await scanDigestPages(read, queryVector, pageOptions, deadlineAtMs, resultLimit, VECTOR_DIGEST_MAX_CANDIDATES, sideReaders);
+    const scanned = await scanDigestPages(read, queryVector, pageOptions, deadlineAtMs, resultLimit, VECTOR_DIGEST_MAX_CANDIDATES, sideReaders, eligiblePks);
     return 'skippedReason' in scanned ? scanned : { ...scanned, onDemandReadsTablePresent };
   }
   const bestByItem: VectorWinners = new Map();
@@ -2810,6 +2819,7 @@ export async function scanDigestPages(
    * the ledger check after ranking has the final say, as for every winner.
    */
   sideReaders?: () => Promise<ReadonlyArray<(query: StoreRead) => Promise<unknown>>>,
+  eligiblePks?: EligibleVectorItemPks,
 ): Promise<VectorScan> {
   const work = sourceAnswerVectorWork();
   const heap = new VectorDigestHeap();
@@ -2865,8 +2875,8 @@ export async function scanDigestPages(
   // seen so far (never less than the floor), could still beat the K-th best
   // exact item. A count-only stop missed items the exact scan ranks highly
   // but the 256-dimension digest ranks a few hundred chunks down (#1529).
-  // Ledger visibility is checked once, on the ranked winners, by the lane's
-  // final step; batches of 20x the limit leave it a deep list.
+  // The lane rechecks its ranked winners after scoring. A caller with an
+  // additional release filter must also apply it before winners count here.
   let underestimate = VECTOR_DIGEST_MIN_MARGIN;
   let candidates = 0;
   let qualifiedItems = 0;
@@ -2904,7 +2914,9 @@ export async function scanDigestPages(
         const page = connectorStoreCurrentEmbeddingPageQuery({ ...options, chunkPks: pagePks }, 0, pagePks.length);
         return (readers?.[lane] ?? read)({ mode: 'all', site: 'vector_digest_rescore', ...page }) as Promise<VectorScoreRow[]>;
       }));
-      const rows = pages.flat();
+      const candidates = pages.flat();
+      const eligible = eligiblePks?.([...new Set(candidates.map(row => row.item_pk))], options.onDemandReadsTablePresent === true);
+      const rows = eligible ? candidates.filter(row => eligible.has(row.item_pk)) : candidates;
       const mismatchesBeforePage = dimensionMismatches;
       for (const [index, row] of rows.entries()) {
         if ((index & 31) === 0 && expired()) {
@@ -3014,6 +3026,7 @@ async function scanVectorPagesOnPool(
   pageOptions: ConnectorStoreCurrentEmbeddingRowsOptions,
   deadlineAtMs: number | undefined,
   resultLimit: number,
+  eligiblePks?: EligibleVectorItemPks,
 ): Promise<VectorScan> {
   // Side readers for the re-score, opened on first need and only on free
   // workers: a store whose re-score workers are all in use reads one page
@@ -3026,7 +3039,7 @@ async function scanVectorPagesOnPool(
     return side.map((reader) => reader.read);
   };
   const scan = withOffThreadSnapshot(dbPath, (read) => scanVectorPages(
-    read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE, resultLimit, sideReaders,
+    read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE, resultLimit, sideReaders, eligiblePks,
   // Its own worker of the store: the scan never queues behind keyword reads.
   ), { lane: 'scan' }).finally(() => Promise.all(side.map((reader) => reader.close()))).catch((error: unknown): VectorScan => {
     if (error instanceof OffThreadReadBusyError) return { skippedReason: 'vector_scan_store_busy' };
@@ -6166,6 +6179,51 @@ export class LocalConnectorStore {
     };
   }
 
+  /** A child's provider and local ids can incorporate the ids of its ancestors. */
+  childrenWithWithheldSearchIdentifiers(identities: readonly ChildProbe[], includePrivateNames: boolean): Set<string> {
+    const withheld = new Set<string>();
+    let pending = [...this.parentLinksOf(identities)].map(([child, parent]) => ({ child, parent }));
+    if (pending.length === 0) return withheld;
+    const lane = this.childVisibilityLane();
+    const ledger = lane.ledger();
+    const stores = lane.stores();
+    const scopes = ledger ? [{ ledger, corpusIds: new Set(stores.map(store => store.corpusId)) }] : [];
+    for (let depth = 0; pending.length > 0 && depth < CHILD_PARENT_CHAIN_LIMIT; depth += 1) {
+      const refs = [...new Map(pending.map(({ parent }) => [parentKey(parent), parent])).values()];
+      const rows = stores.flatMap(store => store.parentStandings(refs)
+        .filter(row => row.active)
+        .map(row => ({ ...row, corpusId: store.corpusId })));
+      const verdicts = visibilityHere(effectiveItemVerdicts(() => scopes, rows.map(row => ({
+        ...row.identity, corpusId: row.corpusId, privateAtAnswer: false, layer: 'names' as const,
+      }))));
+      const allowed = new Map<string, typeof rows[number]>();
+      const denied = new Set<string>();
+      rows.forEach((row, index) => {
+        const key = parentKey(row);
+        const verdict = verdicts[index]!;
+        const canRelease = !row.secret && !verdict.gone && !verdict.pendingDeletion
+          && (verdict.tier === 'public_or_personal'
+          || (verdict.tier === 'private' && includePrivateNames)
+          || (verdict.tier === 'legacy' && (row.legacyPrivateNames === false || includePrivateNames)));
+        const previous = allowed.get(key);
+        if (!canRelease || (previous && previous.grandparentLocalItemId !== row.grandparentLocalItemId)) {
+          denied.add(key);
+        } else {
+          allowed.set(key, row);
+        }
+      });
+      pending = pending.flatMap(({ child, parent }) => {
+        const key = parentKey(parent);
+        const row = denied.has(key) ? undefined : allowed.get(key);
+        if (!row) withheld.add(child);
+        if (!row?.grandparentLocalItemId) return [];
+        return [{ child, parent: { provider: row.provider, accountScope: row.accountScope, parentLocalItemId: row.grandparentLocalItemId } }];
+      });
+    }
+    for (const { child } of pending) withheld.add(child);
+    return withheld;
+  }
+
   /** Whether any item here came inside another. */
   hasChildItems(): boolean {
     if (!this.childItemColumnsPresent) return false;
@@ -6307,6 +6365,7 @@ export class LocalConnectorStore {
           },
           active: row.tombstoned === 0,
           secret: row.trust_tier === 'S5',
+          legacyPrivateNames: isSecureSensitivity({ trustDomain: this.trustDomain, trustTier: trustTierFromRow(row.trust_tier) }),
           ...(row.parent_local_item_id ? { grandparentLocalItemId: row.parent_local_item_id } : {}),
         });
       }
@@ -13713,7 +13772,8 @@ export class LocalConnectorStore {
   /**
    * The chunks still waiting for a vector on `modelId`, and a token estimate of
    * embedding them (characters / 4, the estimate every planner here uses).
-   * A scoped count uses the same held-row eligibility as the sweep.
+   * A scoped count uses the same held-row eligibility and failed-item
+   * exclusion as the sweep.
    */
   embeddingBacklogEstimate(
     modelId: string,
@@ -13746,6 +13806,7 @@ export class LocalConnectorStore {
     const excluded = tierExclusion.params.length > 0 ? JSON.parse(tierExclusion.params[0]!) as number[] : [];
     const privateTier = embedder ? this.privateTierEmbeddingFilter(embedder) : { filter: '', params: [] };
     const scoped = statusScopeContentFilter(scope?.embedding ?? scope);
+    const failed = this.embeddingFailureExclusionFilter();
     const sql = `
       SELECT COUNT(*) AS missing, COALESCE(SUM(LENGTH(c.bounded_text)), 0) AS chars
       FROM items i
@@ -13753,13 +13814,15 @@ export class LocalConnectorStore {
       LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
       WHERE i.item_pk > ? AND i.item_pk <= ? AND i.tombstoned = 0 AND i.trust_tier <> 'S5'
         AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
-        ${tierExclusion.filter} ${privateTier.filter} ${scoped.filter}
+        ${tierExclusion.filter} ${privateTier.filter} ${scoped.filter} ${failed.filter}
     `;
     let missingChunks = 0;
     let chars = 0;
     await this.walkItemKeys(async (lo, hi) => {
       const page = excluded.length > 0 ? [JSON.stringify(excluded.filter((pk) => pk > lo && pk <= hi))] : [];
-      const row = await readInBackground(this.dbPath, { sql, params: [modelId, lo, hi, ...page, ...privateTier.params, ...scoped.params], mode: 'get' }) as { missing: number; chars: number };
+      const row = await readInBackground(this.dbPath, {
+        sql, params: [modelId, lo, hi, ...page, ...privateTier.params, ...scoped.params, ...failed.params], mode: 'get',
+      }) as { missing: number; chars: number };
       missingChunks += Number(row.missing);
       chars += Number(row.chars);
     });
@@ -13782,8 +13845,9 @@ export class LocalConnectorStore {
     const tierExclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0, undefined, scope?.embedding?.includeHeldForJudgment, connectionLocal);
     const privateTier = embedder ? this.privateTierEmbeddingFilter(embedder) : { filter: '', params: [] };
     const scoped = statusScopeContentFilter(scope?.embedding ?? scope);
-    const filter = `${tierExclusion.filter} ${privateTier.filter} ${scoped.filter}`;
-    return { mode: 'get', params: [modelId, ...tierExclusion.params, ...privateTier.params, ...scoped.params], sql: `
+    const failed = this.embeddingFailureExclusionFilter();
+    const filter = `${tierExclusion.filter} ${privateTier.filter} ${scoped.filter} ${failed.filter}`;
+    return { mode: 'get', params: [modelId, ...tierExclusion.params, ...privateTier.params, ...scoped.params, ...failed.params], sql: `
       SELECT COUNT(*) AS missing, COALESCE(SUM(LENGTH(c.bounded_text)), 0) AS chars
       FROM chunks c
       JOIN items i ON i.item_pk = c.item_pk
@@ -13792,6 +13856,13 @@ export class LocalConnectorStore {
         AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
         ${filter}
     ` };
+  }
+
+  private embeddingFailureExclusionFilter(): { filter: string; params: string[] } {
+    const failed = this.embeddingFailureState;
+    return failed?.size
+      ? { filter: 'AND i.local_item_id NOT IN (SELECT value FROM json_each(?))', params: [JSON.stringify([...failed.keys()])] }
+      : { filter: '', params: [] };
   }
 
   /**
@@ -15148,7 +15219,7 @@ export class LocalConnectorStore {
     deadlineAtMs?: number,
     // locate: false is the metadata-only mode: no chunk text is read to place
     // the match, and the row says only that its text matched.
-    laneOptions: { locate?: boolean } = {},
+    laneOptions: { locate?: boolean; searchEligibility?: ConnectorStoreSearchEligibility | undefined } = {},
   ): Promise<{ rows: ConnectorStoreScoredSearchRow[]; skippedReason?: string }> {
     assertConnectorStoreEmbeddingProvider(this.trustDomain, provider);
     sourceAnswerVectorWork();
@@ -15190,6 +15261,7 @@ export class LocalConnectorStore {
       ...(vectorFilters ? { filters: vectorFilters } : {}),
       ...(deadlineAtMs !== undefined ? { deadlineAtMs } : {}),
       locate: laneOptions.locate !== false,
+      searchEligibility: laneOptions.searchEligibility,
     });
   }
 
@@ -15216,6 +15288,7 @@ export class LocalConnectorStore {
     filters?: ConnectorStoreSearchFilters;
     deadlineAtMs?: number;
     locate: boolean;
+    searchEligibility?: ConnectorStoreSearchEligibility | undefined;
   }): Promise<{ rows: ConnectorStoreScoredSearchRow[]; skippedReason?: string }> {
     const { provider, queryVector, maxResults, accountScope, filters, deadlineAtMs } = input;
     if (connectorStoreVectorDeadlineExpired(deadlineAtMs)) {
@@ -15230,6 +15303,10 @@ export class LocalConnectorStore {
     };
     const excludedItemPks = this.vectorScanExcludedItemPks();
     if (excludedItemPks) pageOptions.excludedItemPks = excludedItemPks;
+    // Digest search also needs to count eligible winners before its ranked cut.
+    const eligiblePks: EligibleVectorItemPks | undefined = input.searchEligibility
+      ? (pks, onDemandReadsTablePresent) => this.visibleVectorItemPks(pks, selectedAccount, filters, onDemandReadsTablePresent, input.searchEligibility)
+      : undefined;
     // One pass. When the hidden set is ready, the scan skips items the store
     // already knows it will not serve. The live ledger check below stays the
     // authority for each winner. (A post-ranking filter that
@@ -15239,8 +15316,8 @@ export class LocalConnectorStore {
     // snapshot (#1305): run on the request thread they held it for tens of
     // seconds on a large store, and every other lane and request waited.
     const scanned = offThreadReadsSupported(this.dbPath)
-      ? await scanVectorPagesOnPool(this.dbPath, provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit)
-      : await this.scanVectorPagesInThread(provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit);
+      ? await scanVectorPagesOnPool(this.dbPath, provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit, eligiblePks)
+      : await this.scanVectorPagesInThread(provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit, eligiblePks);
     if ('skippedReason' in scanned) return { rows: [], skippedReason: scanned.skippedReason };
     const { bestByItem, dimensionMismatches, onDemandReadsTablePresent } = scanned;
     // Ties break on item_pk, explicitly: exactly-equal cosines are common in
@@ -15264,14 +15341,14 @@ export class LocalConnectorStore {
         if (visibleInBatch.length === 0) {
           const batch = candidates.slice(candidateOffset, candidateOffset + VECTOR_VISIBILITY_BATCH_SIZE);
           candidateOffset += batch.length;
-          const visible = this.visibleVectorItemPks(batch.map(([itemPk]) => itemPk), selectedAccount, filters, onDemandReadsTablePresent);
+          const visible = this.visibleVectorItemPks(batch.map(([itemPk]) => itemPk), selectedAccount, filters, onDemandReadsTablePresent, input.searchEligibility);
           visibleInBatch = batch.filter(([itemPk]) => visible.has(itemPk));
         }
         // Keep the rest of this batch in rank order for a refill after the recheck.
         rankedItems.push(...visibleInBatch.splice(0, limit - rankedItems.length));
         continue;
       }
-      const stillVisible = this.visibleVectorItemPks(rankedItems.map(([itemPk]) => itemPk), selectedAccount, filters, onDemandReadsTablePresent);
+      const stillVisible = this.visibleVectorItemPks(rankedItems.map(([itemPk]) => itemPk), selectedAccount, filters, onDemandReadsTablePresent, input.searchEligibility);
       rankedItems = rankedItems.filter(([itemPk]) => stillVisible.has(itemPk));
       if (!canFill()) break;
     }
@@ -15361,6 +15438,7 @@ export class LocalConnectorStore {
     pageOptions: ConnectorStoreCurrentEmbeddingRowsOptions,
     deadlineAtMs: number | undefined,
     resultLimit: number,
+    eligiblePks?: EligibleVectorItemPks,
   ): Promise<VectorScan> {
     const scanDb = this.dbPath === ':memory:'
       ? this.db
@@ -15376,7 +15454,7 @@ export class LocalConnectorStore {
         const params = query.params as Array<string | number | null>;
         return query.mode === 'all' ? statement.all(...params) : statement.get(...params);
       };
-      return await scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE, resultLimit);
+      return await scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE, resultLimit, undefined, eligiblePks);
     } finally {
       try {
         scanDb.exec('ROLLBACK;');
@@ -15583,27 +15661,31 @@ export class LocalConnectorStore {
   // keep candidate validation below SQLite's bind-variable ceiling.
   private visibleVectorItemPks(
     itemPks: readonly number[], accountScope?: string, filters?: ConnectorStoreSearchFilters, onDemandReadsTablePresent = false,
+    searchEligibility?: ConnectorStoreSearchEligibility,
   ): Set<number> {
     const visible = new Set<number>();
     const selectedFilters = connectorStoreFilterSql(filters);
     const metadataOnly = connectorStoreMetadataOnlySql(filters, onDemandReadsTablePresent);
     for (let offset = 0; offset < itemPks.length; offset += VECTOR_VISIBILITY_BATCH_SIZE) {
       const batch = itemPks.slice(offset, offset + VECTOR_VISIBILITY_BATCH_SIZE);
-      const rows = this.db.query(`SELECT i.item_pk, i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id
+      const rows = this.db.query(`SELECT i.item_pk, i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id, i.trust_tier
         FROM items i WHERE i.item_pk IN (${batch.map(() => '?').join(',')}) AND i.tombstoned = 0
         ${accountScope ? 'AND i.account_scope = ?' : ''} ${selectedFilters.sql}
         ${metadataOnly.sql ? `AND NOT ${metadataOnly.sql}` : ''}`)
         .all(...batch, ...(accountScope ? [accountScope] : []), ...selectedFilters.params, ...metadataOnly.params) as Array<{
-          item_pk: number; provider: string; account_scope: string; provider_item_id: string; provider_conversation_id: string | null;
+          item_pk: number; provider: string; account_scope: string; provider_item_id: string; provider_conversation_id: string | null; trust_tier: string;
         }>;
       // Embedding admission never releases a vector to search: the copy's
       // hold must clear, even though lexical/Private reads may already serve it.
       // One ledger read serves both checks, and an unreadable ledger hides the batch.
-      for (const row of this.tierVisibleRows(rows, row => ({
+      const identityOf = (row: typeof rows[number]) => ({
         provider: row.provider, accountScope: row.account_scope, providerItemId: row.provider_item_id,
         ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
-      }), () => 'content', false, copies => !copies.some(copy => copy.corpusId === this.corpusId
-        && copy.state === 'current' && copy.embedHold))) visible.add(row.item_pk);
+      });
+      const current = this.tierVisibleRows(rows, identityOf, () => 'content', false, copies => !copies.some(copy => copy.corpusId === this.corpusId
+        && copy.state === 'current' && copy.embedHold));
+      const eligible = searchEligibility?.(current.map(row => ({ sourceItem: identityOf(row), trustTier: trustTierFromRow(row.trust_tier) })));
+      current.forEach((row, index) => { if (!eligible || eligible[index]) visible.add(row.item_pk); });
     }
     return visible;
   }
@@ -16029,7 +16111,7 @@ export class LocalConnectorStore {
           return weights.total > 0 && matched / weights.total >= RARE_CONCEPT_WEIGHT_SHARE;
         });
       }
-      const visible = yield* this.tierVisibleRowsSteps(
+      const current = yield* this.tierVisibleRowsSteps(
         signalled,
         (row) => ({
           provider: row.provider,
@@ -16041,6 +16123,11 @@ export class LocalConnectorStore {
         // layer (they are seasoned with the names, as they always were).
         (row) => (row.chunk_pk === null || row.chunk_pk === undefined ? 'metadata' : 'content'),
       );
+      const eligible = ftsOptions.searchEligibility?.(current.map(row => ({
+        sourceItem: sourceItemFromRow(row),
+        trustTier: trustTierFromRow(row.trust_tier),
+      })));
+      const visible = eligible ? current.filter((_, index) => eligible[index]) : current;
       selected.push(...visible);
       if (visible.length > 0) ftsOptions.onPartialRows?.(selected.slice(0, limit).map(searchRowFromItemRow));
       // Only rows the tier filter hid earn another page. A page it hid nothing
@@ -18006,6 +18093,7 @@ export interface ConnectorStoreCorpusAdapterOptions {
   accountScope?: string;
   /** Message/store metadata filters applied in SQL in every retrieval lane. */
   filters?: ConnectorStoreSearchFilters;
+  searchEligibility?: ConnectorStoreSearchEligibility;
   /** Optional declared projection applied only to final eligible hits. */
   resultProjector?: ConnectorStoreResultProjector;
   /** Time seams for waiting on a starting embedding model; tests pass a test clock. */
@@ -18063,17 +18151,18 @@ export function createConnectorStoreCorpusAdapter(
 
     if (!embeddingProvider || useHybrid !== 'hybrid' || semanticSkippedReason) return (async (): Promise<SourceIndexCorpusSearchResponse> => {
       const markStage = startStoreStageClock(stages);
+      const { searchEligibility } = options;
       let keywordLane = await connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters,
-        { onPartialRows: partialKeywordRows(store, request, options.resultProjector, filters?.locatorPathScope) }, request.deadlineAtMs);
+        { searchEligibility, onPartialRows: partialKeywordRows(store, request, options.resultProjector, filters?.locatorPathScope) }, request.deadlineAtMs);
       markStage?.('keyword_lane_ms');
       keywordLane = await relaxEmptyLocalKeywordLane(store, request.query, request.maxResults, options.accountScope, filters,
-        keywordLane, options.localKeywordFallback, {}, request.deadlineAtMs);
+        keywordLane, options.localKeywordFallback, { searchEligibility }, request.deadlineAtMs);
       markStage?.('keyword_relaxation_ms');
       keywordLane = await revalidateKeywordLane(store, keywordLane);
       markStage?.('keyword_revalidation_ms');
       const rows = keywordLane.rows;
       let recencyCut = false;
-      const recencyRows = await chatRecencyLaneRows(store, options.accountScope, filters, request.deadlineAtMs, () => { recencyCut = true; });
+      const recencyRows = await chatRecencyLaneRows(store, options.accountScope, filters, request.deadlineAtMs, () => { recencyCut = true; }, searchEligibility);
       markStage?.('recency_read_ms');
       if (recencyRows.length === 0) {
         const hits = withKeywordLeaderSignals(rows.map((row) => connectorStoreHitFromRow(
@@ -18161,6 +18250,7 @@ export function createConnectorStoreCorpusAdapter(
       semanticRelevanceBar,
       options.resultProjector,
       options.localKeywordFallback,
+      options.searchEligibility,
     );
   };
   adapter.hybridAvailability = () => {
@@ -18354,6 +18444,7 @@ async function chatRecencyLaneRows(
   filters?: ConnectorStoreSearchFilters,
   deadlineAtMs?: number,
   onCutShort?: () => void,
+  searchEligibility?: ConnectorStoreSearchEligibility,
 ): Promise<ConnectorStoreSearchRow[]> {
   if (store.family !== 'chat') return [];
   // Full lane depth regardless of maxResults: the lane feeds FUSION, not the
@@ -18363,7 +18454,9 @@ async function chatRecencyLaneRows(
   // without one, it held the whole lane past the router's cut and the keyword
   // rows already read were dropped with it (#1305). Busy, it is left out and
   // its audit says so, so the answer names the source (#1460).
-  return store.recentItemsOffThread(CHAT_RECENCY_LANE_LIMIT, accountScope, filters, deadlineAtMs, onCutShort);
+  const rows = await store.recentItemsOffThread(CHAT_RECENCY_LANE_LIMIT, accountScope, filters, deadlineAtMs, onCutShort);
+  const eligible = searchEligibility?.(rows);
+  return eligible ? rows.filter((_, index) => eligible[index]) : rows;
 }
 
 function connectorStoreHitFromRow(
@@ -18481,6 +18574,7 @@ async function hybridConnectorStoreSearch(
   semanticRelevanceBar?: number,
   resultProjector?: ConnectorStoreResultProjector,
   localKeywordFallback?: boolean | 'private_search',
+  searchEligibility?: ConnectorStoreSearchEligibility,
 ): Promise<SourceIndexCorpusSearchResponse> {
   const maxResults = Math.max(1, Math.min(Math.floor(request.maxResults), MAX_SEARCH_RESULTS));
   // Over-fetch each lane (the same posture as the Dropbox hybrid lane) so
@@ -18495,9 +18589,9 @@ async function hybridConnectorStoreSearch(
   const keywordWork = (async () => {
     const laneStartedAt = stages ? performance.now() : 0;
     const keywordStartedAt = Date.now();
-    const lane = await connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false, onPartialRows: partialKeywordRows(store, request, resultProjector, filters?.locatorPathScope) }, request.deadlineAtMs);
+    const lane = await connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false, searchEligibility, onPartialRows: partialKeywordRows(store, request, resultProjector, filters?.locatorPathScope) }, request.deadlineAtMs);
     const baseline = keywordAlternatives(request.query)?.size
-      ? lane.baseline ?? await withKeywordExpansionDisabled(() => connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, {prefix:false}, request.deadlineAtMs))
+      ? lane.baseline ?? await withKeywordExpansionDisabled(() => connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false, searchEligibility }, request.deadlineAtMs))
       : undefined;
     partialKeywordRows(store, request, resultProjector, filters?.locatorPathScope)(lane.rows);
     if (stages) stages.keyword_lane_ms = performance.now() - laneStartedAt;
@@ -18513,6 +18607,7 @@ async function hybridConnectorStoreSearch(
       accountScope,
       filters,
       request.deadlineAtMs,
+      { searchEligibility },
     );
     const bar = semanticRelevanceBarFor(provider.modelId, semanticRelevanceBar);
     const rows = bar === undefined ? lane.rows : lane.rows.filter(row => row.bestCosine >= bar);
@@ -18557,7 +18652,7 @@ async function hybridConnectorStoreSearch(
   markStage?.('post_join_setup_ms');
   // The relaxed retry also counts toward the existing keyword lane audit.
   const relaxStartedAt = Date.now();
-  keywordLane = await relaxEmptyLocalKeywordLane(store, request.query, laneLimit, accountScope, filters, keywordLane, localKeywordFallback, {}, request.deadlineAtMs);
+  keywordLane = await relaxEmptyLocalKeywordLane(store, request.query, laneLimit, accountScope, filters, keywordLane, localKeywordFallback, { searchEligibility }, request.deadlineAtMs);
   keywordElapsedMs += Date.now() - relaxStartedAt;
   markStage?.('keyword_relaxation_ms');
   // Every candidate is checked again after the last read, right before fusion emits hits and counts (#1079).
@@ -18573,7 +18668,7 @@ async function hybridConnectorStoreSearch(
     : undefined;
   let recencyCut = false;
   markStage?.('vector_summary_ms');
-  const recencyRows = await chatRecencyLaneRows(store, accountScope, filters, request.deadlineAtMs, () => { recencyCut = true; });
+  const recencyRows = await chatRecencyLaneRows(store, accountScope, filters, request.deadlineAtMs, () => { recencyCut = true; }, searchEligibility);
   markStage?.('recency_read_ms');
   const contentBar = relevanceBar ?? CALIBRATED_CONTENT_PREFERENCE_BARS.get(provider.modelId);
   const vettedVectorItemIds = new Set(contentBar === undefined
@@ -18943,7 +19038,7 @@ async function relaxEmptyLocalKeywordLane(
   filters: ConnectorStoreSearchFilters | undefined,
   strict: ConnectorStoreKeywordLane,
   enabled: boolean | 'private_search' | undefined,
-  ftsOptions: { prefix?: boolean; locate?: boolean } = {},
+  ftsOptions: Pick<ConnectorStoreKeywordFtsOptions, 'prefix' | 'locate' | 'searchEligibility'> = {},
   deadlineAtMs?: number,
 ): Promise<ConnectorStoreKeywordLane> {
   if (!enabled || strict.rows.length > 0) return strict;
