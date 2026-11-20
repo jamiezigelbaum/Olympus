@@ -581,7 +581,7 @@ describe('embedding holds follow the decision through a move', () => {
       const page = store.readSteps(store.staleEmbedHoldSteps(undefined, 10));
       const row = store.getCurrent(ITEM)!;
       expect(store.openRejudgeQuestion(ITEM, { expectedGeneration: row.generation,
-        decision: { ...row, state: 'pending', decidedBy: 'sniffer', contentPending: true }, keepVisible: false })).toBe(true);
+        decision: { ...row, state: 'pending', decidedBy: 'sniffer', snifferId: 'test', contentPending: true }, keepVisible: false })).toBe(true);
       expect(store.settleStaleEmbedHoldRows(page.rowIds)).toBe(0);
       expect(store.copies(ITEM)[0]?.embedHold).toBe(true);
     } finally {
