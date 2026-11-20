@@ -18112,7 +18112,8 @@ var init_filter_capabilities = __esm(() => {
     "before",
     "trust_domain",
     "all_tiers",
-    "personal_names_only"
+    "personal_names_only",
+    "include_private_names"
   ];
   CONNECTOR_STORE_DECLARED_FILTER_FIELDS = [
     "approved_scope_key",
@@ -24523,51 +24524,74 @@ class EmailClient {
       });
     return result;
   }
-  async sourceIndexSearch(options, audience = "calling_model") {
+  async requestSourceIndexSearch(body) {
     if (!isSourceIndexReadSurfaceEnabled(this.config)) {
       throw new OperationError("source_index_not_enabled", "Source-index search is disabled.", "Enable sourceIndex.enabled to turn on the source read surface.");
     }
     if (!this.config.email.enabled) {
       throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using source-index search.");
     }
-    const corpusId = canonicalSourceCorpusId(options.corpusId);
-    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/search`, {
+    const data = asRecord8(await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/search`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        query: options.query,
-        corpus_id: corpusId,
-        ...audience === "calling_model" ? { personal_names_only: true } : {},
-        ...options.retrievalMode ? { retrieval_mode: options.retrievalMode } : {},
-        ...options.account ? { account: options.account } : {},
-        ...options.folderId ? { folder_id: options.folderId } : {},
-        ...options.folderName ? { folder_name: options.folderName } : {},
-        ...options.approvedScopeKey ? { approved_scope_key: options.approvedScopeKey } : {},
-        ...options.chatScope ? { chat_scope: options.chatScope } : {},
-        ...options.trustDomain ? { trust_domain: options.trustDomain } : {},
-        ...options.conversationId ? { conversation_id: options.conversationId } : {},
-        ...options.senderId ? { sender_id: options.senderId } : {},
-        ...options.senderLabel ? { sender_label: options.senderLabel } : {},
-        ...options.authoredAfter ? { authored_after: options.authoredAfter } : {},
-        ...options.authoredBefore ? { authored_before: options.authoredBefore } : {},
-        ...options.participantId ? { participant_id: options.participantId } : {},
-        ...options.after ? { after: options.after } : {},
-        ...options.before ? { before: options.before } : {},
-        ...options.includeDeleted !== undefined ? { include_deleted: options.includeDeleted } : {},
-        ...options.attachmentType ? { attachment_type: options.attachmentType } : {},
-        ...options.maxResults !== undefined ? { max_results: options.maxResults } : {},
-        ...options.includeLocators !== undefined ? { include_locators: options.includeLocators } : {},
-        ...options.allTiers !== undefined ? { all_tiers: options.allTiers } : {}
-      })
-    });
-    const data = asRecord8(response);
+      body: JSON.stringify(body)
+    }));
     assertNoRawEmailFields(data);
     assertNoSourceIndexOperationalLeakFields(data);
+    return data;
+  }
+  async sourceIndexSearch(options, audience = "calling_model") {
+    const corpusId = canonicalSourceCorpusId(options.corpusId);
+    const data = await this.requestSourceIndexSearch({
+      query: options.query,
+      corpus_id: corpusId,
+      ...audience === "private_answer" ? { include_private_names: true } : { personal_names_only: true },
+      ...options.retrievalMode ? { retrieval_mode: options.retrievalMode } : {},
+      ...options.account ? { account: options.account } : {},
+      ...options.folderId ? { folder_id: options.folderId } : {},
+      ...options.folderName ? { folder_name: options.folderName } : {},
+      ...options.approvedScopeKey ? { approved_scope_key: options.approvedScopeKey } : {},
+      ...options.chatScope ? { chat_scope: options.chatScope } : {},
+      ...options.trustDomain ? { trust_domain: options.trustDomain } : {},
+      ...options.conversationId ? { conversation_id: options.conversationId } : {},
+      ...options.senderId ? { sender_id: options.senderId } : {},
+      ...options.senderLabel ? { sender_label: options.senderLabel } : {},
+      ...options.authoredAfter ? { authored_after: options.authoredAfter } : {},
+      ...options.authoredBefore ? { authored_before: options.authoredBefore } : {},
+      ...options.participantId ? { participant_id: options.participantId } : {},
+      ...options.after ? { after: options.after } : {},
+      ...options.before ? { before: options.before } : {},
+      ...options.includeDeleted !== undefined ? { include_deleted: options.includeDeleted } : {},
+      ...options.attachmentType ? { attachment_type: options.attachmentType } : {},
+      ...options.maxResults !== undefined ? { max_results: options.maxResults } : {},
+      ...options.includeLocators !== undefined ? { include_locators: options.includeLocators } : {},
+      ...options.allTiers !== undefined ? { all_tiers: options.allTiers } : {}
+    });
     return parseSourceIndexSearchResult(data, {
       config: this.config,
       requestedCorpusId: corpusId,
       includeLocators: options.includeLocators === true
     });
+  }
+  async sourceIndexSearchMany(corpusIds, options) {
+    if (!corpusIds.length)
+      throw new OperationError("invalid_params", "No source is configured for search.");
+    const response = await this.requestSourceIndexSearch({
+      query: options.query,
+      corpus_ids: corpusIds,
+      personal_names_only: true,
+      retrieval_mode: options.retrievalMode,
+      max_results: options.maxResults,
+      include_locators: options.includeLocators
+    });
+    if (!Array.isArray(response.results) || response.results.length !== corpusIds.length) {
+      throw new OperationError("email_error", "The worker did not return a search result for each requested source.");
+    }
+    return response.results.flatMap((value, index) => value === null ? [] : [parseSourceIndexSearchResult(asRecord8(value), {
+      config: this.config,
+      requestedCorpusId: corpusIds[index],
+      includeLocators: options.includeLocators === true
+    })]);
   }
   async sourceWatchCreate(options) {
     this.requireSourceWatchSurface();
@@ -32470,18 +32494,14 @@ async function searchEverySource(ctx, query, params) {
   for (const corpus of publicSourceCorpusRegistry(ctx.config).list("search"))
     if (!bySource.has(corpus.sourceId))
       bySource.set(corpus.sourceId, corpus.corpusId);
-  const settled = await Promise.allSettled([...bySource.values()].map((corpusId) => ctx.email.sourceIndexSearch({
+  const results = await ctx.email.sourceIndexSearchMany([...bySource.values()], {
     query,
-    corpusId,
     ...retrievalMode !== undefined ? { retrievalMode } : {},
     ...maxResults !== undefined ? { maxResults } : {},
     ...includeLocators !== undefined ? { includeLocators } : {}
-  })));
-  const results = settled.flatMap((outcome) => outcome.status === "fulfilled" ? [outcome.value] : []);
-  if (results.length === 0) {
-    const failed = settled.find((outcome) => outcome.status === "rejected");
-    throw failed?.reason ?? new OperationError("invalid_params", "No source is configured for search.");
-  }
+  });
+  if (!results.length)
+    throw new OperationError("email_error", "No source could be searched this time.");
   const limit = maxResults ?? Math.max(...results.map((result) => result.hits.length), 0);
   const hits = [];
   for (let rank = 0;hits.length < limit && results.some((result) => result.hits.length > rank); rank += 1) {
@@ -32492,7 +32512,7 @@ async function searchEverySource(ctx, query, params) {
   const domains = results.map((result) => result.policy.trust_domain);
   const secretLocations = results.flatMap((result) => result.secret_locations ?? []);
   const notes = [...new Set(results.flatMap((result) => result.coverage_notes ?? []))];
-  const unsearched = settled.length - results.length;
+  const unsearched = bySource.size - results.length;
   return {
     kind: "source_index_search",
     corpus_id: results[0].corpus_id,

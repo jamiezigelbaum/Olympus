@@ -66669,7 +66669,7 @@ function foldVectorScore(bestByItem, row, queryVector) {
   }
   return { mismatch: 0, qualified, score };
 }
-async function scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, pageSize, resultLimit, sideReaders) {
+async function scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, pageSize, resultLimit, sideReaders, eligiblePks) {
   const authority = embeddingAuthorityRead(provider);
   const after = embeddingAuthorityFromRow(await read(authority), provider);
   if (after.skippedReason)
@@ -66687,7 +66687,7 @@ async function scanVectorPages(read, provider, beforeToken, queryVector, pageOpt
   const digestTable = !vectorDigestSearchDisabled() && await read({ mode: "get", sql: "SELECT 1 FROM sqlite_master WHERE name = 'chunk_vector_digest_meta'", params: [] });
   const digestReady = digestTable && await read({ mode: "get", sql: "SELECT 1 FROM chunk_vector_digest_meta WHERE model_id = ? AND completed = 1", params: [pageOptions.modelId] });
   if (digestReady) {
-    const scanned = await scanDigestPages(read, queryVector, pageOptions, deadlineAtMs, resultLimit, VECTOR_DIGEST_MAX_CANDIDATES, sideReaders);
+    const scanned = await scanDigestPages(read, queryVector, pageOptions, deadlineAtMs, resultLimit, VECTOR_DIGEST_MAX_CANDIDATES, sideReaders, eligiblePks);
     return "skippedReason" in scanned ? scanned : { ...scanned, onDemandReadsTablePresent };
   }
   const bestByItem = new Map;
@@ -66733,7 +66733,7 @@ function nextVectorDigestBackfillRows(rows, turnMs) {
     return Math.min(VECTOR_DIGEST_BACKFILL_MAX_ROWS, rows * 2);
   return rows;
 }
-async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit, maxCandidates = VECTOR_DIGEST_MAX_CANDIDATES, sideReaders) {
+async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit, maxCandidates = VECTOR_DIGEST_MAX_CANDIDATES, sideReaders, eligiblePks) {
   const work = sourceAnswerVectorWork();
   const heap = new VectorDigestHeap;
   const query = encodeVectorDigest(queryVector);
@@ -66820,7 +66820,9 @@ async function scanDigestPages(read, queryVector, options, deadlineAtMs, limit, 
         const page = connectorStoreCurrentEmbeddingPageQuery({ ...options, chunkPks: pagePks }, 0, pagePks.length);
         return (readers?.[lane] ?? read)({ mode: "all", site: "vector_digest_rescore", ...page });
       }));
-      const rows = pages.flat();
+      const candidates = pages.flat();
+      const eligible = eligiblePks?.([...new Set(candidates.map((row) => row.item_pk))], options.onDemandReadsTablePresent === true);
+      const rows = eligible ? candidates.filter((row) => eligible.has(row.item_pk)) : candidates;
       const mismatchesBeforePage = dimensionMismatches;
       for (const [index, row] of rows.entries()) {
         if ((index & 31) === 0 && expired()) {
@@ -66893,7 +66895,7 @@ function connectorStoreVectorDigestPageQuery(options, afterChunkPk, limit = VECT
     ]
   };
 }
-async function scanVectorPagesOnPool(dbPath, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, resultLimit) {
+async function scanVectorPagesOnPool(dbPath, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, resultLimit, eligiblePks) {
   const side = [];
   const sideReaders = async () => {
     const opened = await Promise.all(Array.from({ length: READ_POOL_RESCORE_READERS }, () => openOffThreadSnapshot(dbPath, { lane: "rescore", noWait: true }).catch(() => {
@@ -66904,7 +66906,7 @@ async function scanVectorPagesOnPool(dbPath, provider, beforeToken, queryVector,
         side.push(reader);
     return side.map((reader) => reader.read);
   };
-  const scan = withOffThreadSnapshot(dbPath, (read) => scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE, resultLimit, sideReaders), { lane: "scan" }).finally(() => Promise.all(side.map((reader) => reader.close()))).catch((error) => {
+  const scan = withOffThreadSnapshot(dbPath, (read) => scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_POOL_PAGE_SIZE, resultLimit, sideReaders, eligiblePks), { lane: "scan" }).finally(() => Promise.all(side.map((reader) => reader.close()))).catch((error) => {
     if (error instanceof OffThreadReadBusyError)
       return { skippedReason: "vector_scan_store_busy" };
     throw error;
@@ -67160,9 +67162,10 @@ function createConnectorStoreCorpusAdapter(options) {
     if (!embeddingProvider || useHybrid !== "hybrid" || semanticSkippedReason)
       return (async () => {
         const markStage = startStoreStageClock(stages);
-        let keywordLane = await connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters, { onPartialRows: partialKeywordRows(store, request, options.resultProjector, filters?.locatorPathScope) }, request.deadlineAtMs);
+        const { searchEligibility } = options;
+        let keywordLane = await connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters, { searchEligibility, onPartialRows: partialKeywordRows(store, request, options.resultProjector, filters?.locatorPathScope) }, request.deadlineAtMs);
         markStage?.("keyword_lane_ms");
-        keywordLane = await relaxEmptyLocalKeywordLane(store, request.query, request.maxResults, options.accountScope, filters, keywordLane, options.localKeywordFallback, {}, request.deadlineAtMs);
+        keywordLane = await relaxEmptyLocalKeywordLane(store, request.query, request.maxResults, options.accountScope, filters, keywordLane, options.localKeywordFallback, { searchEligibility }, request.deadlineAtMs);
         markStage?.("keyword_relaxation_ms");
         keywordLane = await revalidateKeywordLane(store, keywordLane);
         markStage?.("keyword_revalidation_ms");
@@ -67170,7 +67173,7 @@ function createConnectorStoreCorpusAdapter(options) {
         let recencyCut = false;
         const recencyRows = await chatRecencyLaneRows(store, options.accountScope, filters, request.deadlineAtMs, () => {
           recencyCut = true;
-        });
+        }, searchEligibility);
         markStage?.("recency_read_ms");
         if (recencyRows.length === 0) {
           const hits = withKeywordLeaderSignals(rows.map((row) => connectorStoreHitFromRow(store, row, -row.rank, options.resultProjector, filters?.locatorPathScope)), keywordLane);
@@ -67229,7 +67232,7 @@ function createConnectorStoreCorpusAdapter(options) {
         markStage?.("finalize_ms");
         return response;
       })();
-    return hybridConnectorStoreSearch(store, embeddingProvider, request, startedAt, stages, options.accountScope, filters, semanticRelevanceBar, options.resultProjector, options.localKeywordFallback);
+    return hybridConnectorStoreSearch(store, embeddingProvider, request, startedAt, stages, options.accountScope, filters, semanticRelevanceBar, options.resultProjector, options.localKeywordFallback, options.searchEligibility);
   };
   adapter.hybridAvailability = () => {
     if (!embeddingProvider) {
@@ -67344,10 +67347,12 @@ function createConnectorStoreCorpusAdapter(options) {
   }
   return expanded;
 }
-async function chatRecencyLaneRows(store, accountScope, filters, deadlineAtMs, onCutShort) {
+async function chatRecencyLaneRows(store, accountScope, filters, deadlineAtMs, onCutShort, searchEligibility) {
   if (store.family !== "chat")
     return [];
-  return store.recentItemsOffThread(CHAT_RECENCY_LANE_LIMIT, accountScope, filters, deadlineAtMs, onCutShort);
+  const rows = await store.recentItemsOffThread(CHAT_RECENCY_LANE_LIMIT, accountScope, filters, deadlineAtMs, onCutShort);
+  const eligible = searchEligibility?.(rows);
+  return eligible ? rows.filter((_, index) => eligible[index]) : rows;
 }
 function connectorStoreHitFromRow(store, row, score, resultProjector, locatorPathScope) {
   let locatorRead = false;
@@ -67422,15 +67427,15 @@ function startStoreStageClock(stages) {
     startedAt = now;
   };
 }
-async function hybridConnectorStoreSearch(store, provider, request, startedAt, stages, accountScope, filters, semanticRelevanceBar, resultProjector, localKeywordFallback) {
+async function hybridConnectorStoreSearch(store, provider, request, startedAt, stages, accountScope, filters, semanticRelevanceBar, resultProjector, localKeywordFallback, searchEligibility) {
   const maxResults = Math.max(1, Math.min(Math.floor(request.maxResults), MAX_SEARCH_RESULTS));
   const laneLimit = Math.min(maxResults * 6, MAX_SEARCH_RESULTS);
   const markStage = startStoreStageClock(stages);
   const keywordWork = (async () => {
     const laneStartedAt = stages ? performance.now() : 0;
     const keywordStartedAt = Date.now();
-    const lane = await connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false, onPartialRows: partialKeywordRows(store, request, resultProjector, filters?.locatorPathScope) }, request.deadlineAtMs);
-    const baseline = keywordAlternatives(request.query)?.size ? lane.baseline ?? await withKeywordExpansionDisabled(() => connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false }, request.deadlineAtMs)) : undefined;
+    const lane = await connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false, searchEligibility, onPartialRows: partialKeywordRows(store, request, resultProjector, filters?.locatorPathScope) }, request.deadlineAtMs);
+    const baseline = keywordAlternatives(request.query)?.size ? lane.baseline ?? await withKeywordExpansionDisabled(() => connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false, searchEligibility }, request.deadlineAtMs)) : undefined;
     partialKeywordRows(store, request, resultProjector, filters?.locatorPathScope)(lane.rows);
     if (stages)
       stages.keyword_lane_ms = performance.now() - laneStartedAt;
@@ -67439,7 +67444,7 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, s
   const vectorWork = (async () => {
     const laneStartedAt = stages ? performance.now() : 0;
     const vectorStartedAt = Date.now();
-    const lane = await store.vectorSearchLane(request.query, provider, laneLimit, accountScope, filters, request.deadlineAtMs);
+    const lane = await store.vectorSearchLane(request.query, provider, laneLimit, accountScope, filters, request.deadlineAtMs, { searchEligibility });
     const bar = semanticRelevanceBarFor(provider.modelId, semanticRelevanceBar);
     const rows = bar === undefined ? lane.rows : lane.rows.filter((row) => row.bestCosine >= bar);
     request.onPartialResponse?.({
@@ -67476,7 +67481,7 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, s
   }
   markStage?.("post_join_setup_ms");
   const relaxStartedAt = Date.now();
-  keywordLane = await relaxEmptyLocalKeywordLane(store, request.query, laneLimit, accountScope, filters, keywordLane, localKeywordFallback, {}, request.deadlineAtMs);
+  keywordLane = await relaxEmptyLocalKeywordLane(store, request.query, laneLimit, accountScope, filters, keywordLane, localKeywordFallback, { searchEligibility }, request.deadlineAtMs);
   keywordElapsedMs += Date.now() - relaxStartedAt;
   markStage?.("keyword_relaxation_ms");
   keywordLane = await revalidateKeywordLane(store, keywordLane);
@@ -67491,7 +67496,7 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, s
   markStage?.("vector_summary_ms");
   const recencyRows = await chatRecencyLaneRows(store, accountScope, filters, request.deadlineAtMs, () => {
     recencyCut = true;
-  });
+  }, searchEligibility);
   markStage?.("recency_read_ms");
   const contentBar = relevanceBar ?? CALIBRATED_CONTENT_PREFERENCE_BARS.get(provider.modelId);
   const vettedVectorItemIds = new Set(contentBar === undefined ? [] : vectorRows.filter((row) => row.bestCosine >= contentBar).map((row) => row.sourceItem.localItemId));
@@ -71891,6 +71896,51 @@ var init_local_index = __esm(() => {
         stores: () => [this]
       };
     }
+    childrenWithWithheldSearchIdentifiers(identities, includePrivateNames) {
+      const withheld = new Set;
+      let pending = [...this.parentLinksOf(identities)].map(([child, parent]) => ({ child, parent }));
+      if (pending.length === 0)
+        return withheld;
+      const lane = this.childVisibilityLane();
+      const ledger = lane.ledger();
+      const stores = lane.stores();
+      const scopes = ledger ? [{ ledger, corpusIds: new Set(stores.map((store) => store.corpusId)) }] : [];
+      for (let depth = 0;pending.length > 0 && depth < CHILD_PARENT_CHAIN_LIMIT; depth += 1) {
+        const refs = [...new Map(pending.map(({ parent }) => [parentKey(parent), parent])).values()];
+        const rows = stores.flatMap((store) => store.parentStandings(refs).filter((row) => row.active).map((row) => ({ ...row, corpusId: store.corpusId })));
+        const verdicts = visibilityHere(effectiveItemVerdicts(() => scopes, rows.map((row) => ({
+          ...row.identity,
+          corpusId: row.corpusId,
+          privateAtAnswer: false,
+          layer: "names"
+        }))));
+        const allowed = new Map;
+        const denied = new Set;
+        rows.forEach((row, index) => {
+          const key = parentKey(row);
+          const verdict = verdicts[index];
+          const canRelease = !row.secret && !verdict.gone && !verdict.pendingDeletion && (verdict.tier === "public_or_personal" || verdict.tier === "private" && includePrivateNames || verdict.tier === "legacy" && (row.legacyPrivateNames === false || includePrivateNames));
+          const previous = allowed.get(key);
+          if (!canRelease || previous && previous.grandparentLocalItemId !== row.grandparentLocalItemId) {
+            denied.add(key);
+          } else {
+            allowed.set(key, row);
+          }
+        });
+        pending = pending.flatMap(({ child, parent }) => {
+          const key = parentKey(parent);
+          const row = denied.has(key) ? undefined : allowed.get(key);
+          if (!row)
+            withheld.add(child);
+          if (!row?.grandparentLocalItemId)
+            return [];
+          return [{ child, parent: { provider: row.provider, accountScope: row.accountScope, parentLocalItemId: row.grandparentLocalItemId } }];
+        });
+      }
+      for (const { child } of pending)
+        withheld.add(child);
+      return withheld;
+    }
     hasChildItems() {
       if (!this.childItemColumnsPresent)
         return false;
@@ -71992,6 +72042,7 @@ var init_local_index = __esm(() => {
             },
             active: row.tombstoned === 0,
             secret: row.trust_tier === "S5",
+            legacyPrivateNames: isSecureSensitivity({ trustDomain: this.trustDomain, trustTier: trustTierFromRow(row.trust_tier) }),
             ...row.parent_local_item_id ? { grandparentLocalItemId: row.parent_local_item_id } : {}
           });
         }
@@ -76853,6 +76904,7 @@ ${parentKey(ref)}`, { ref, origin });
       const excluded = tierExclusion.params.length > 0 ? JSON.parse(tierExclusion.params[0]) : [];
       const privateTier = embedder ? this.privateTierEmbeddingFilter(embedder) : { filter: "", params: [] };
       const scoped = statusScopeContentFilter(scope?.embedding ?? scope);
+      const failed = this.embeddingFailureExclusionFilter();
       const sql = `
       SELECT COUNT(*) AS missing, COALESCE(SUM(LENGTH(c.bounded_text)), 0) AS chars
       FROM items i
@@ -76860,13 +76912,17 @@ ${parentKey(ref)}`, { ref, origin });
       LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
       WHERE i.item_pk > ? AND i.item_pk <= ? AND i.tombstoned = 0 AND i.trust_tier <> 'S5'
         AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
-        ${tierExclusion.filter} ${privateTier.filter} ${scoped.filter}
+        ${tierExclusion.filter} ${privateTier.filter} ${scoped.filter} ${failed.filter}
     `;
       let missingChunks = 0;
       let chars = 0;
       await this.walkItemKeys(async (lo, hi) => {
         const page = excluded.length > 0 ? [JSON.stringify(excluded.filter((pk) => pk > lo && pk <= hi))] : [];
-        const row = await readInBackground(this.dbPath, { sql, params: [modelId, lo, hi, ...page, ...privateTier.params, ...scoped.params], mode: "get" });
+        const row = await readInBackground(this.dbPath, {
+          sql,
+          params: [modelId, lo, hi, ...page, ...privateTier.params, ...scoped.params, ...failed.params],
+          mode: "get"
+        });
         missingChunks += Number(row.missing);
         chars += Number(row.chars);
       });
@@ -76881,8 +76937,9 @@ ${parentKey(ref)}`, { ref, origin });
       const tierExclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0, undefined, scope?.embedding?.includeHeldForJudgment, connectionLocal);
       const privateTier = embedder ? this.privateTierEmbeddingFilter(embedder) : { filter: "", params: [] };
       const scoped = statusScopeContentFilter(scope?.embedding ?? scope);
-      const filter = `${tierExclusion.filter} ${privateTier.filter} ${scoped.filter}`;
-      return { mode: "get", params: [modelId, ...tierExclusion.params, ...privateTier.params, ...scoped.params], sql: `
+      const failed = this.embeddingFailureExclusionFilter();
+      const filter = `${tierExclusion.filter} ${privateTier.filter} ${scoped.filter} ${failed.filter}`;
+      return { mode: "get", params: [modelId, ...tierExclusion.params, ...privateTier.params, ...scoped.params, ...failed.params], sql: `
       SELECT COUNT(*) AS missing, COALESCE(SUM(LENGTH(c.bounded_text)), 0) AS chars
       FROM chunks c
       JOIN items i ON i.item_pk = c.item_pk
@@ -76891,6 +76948,10 @@ ${parentKey(ref)}`, { ref, origin });
         AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
         ${filter}
     ` };
+    }
+    embeddingFailureExclusionFilter() {
+      const failed = this.embeddingFailureState;
+      return failed?.size ? { filter: "AND i.local_item_id NOT IN (SELECT value FROM json_each(?))", params: [JSON.stringify([...failed.keys()])] } : { filter: "", params: [] };
     }
     pdfExtractionBacklog() {
       return pdfBacklogFromRow(this.db.query(PDF_EXTRACTION_BACKLOG_SQL).get());
@@ -77703,7 +77764,8 @@ ${parentKey(ref)}`, { ref, origin });
         ...accountScope !== undefined ? { accountScope } : {},
         ...vectorFilters ? { filters: vectorFilters } : {},
         ...deadlineAtMs !== undefined ? { deadlineAtMs } : {},
-        locate: laneOptions.locate !== false
+        locate: laneOptions.locate !== false,
+        searchEligibility: laneOptions.searchEligibility
       });
     }
     async scoreVectorLaneSnapshot(input) {
@@ -77729,7 +77791,8 @@ ${parentKey(ref)}`, { ref, origin });
       const excludedItemPks = this.vectorScanExcludedItemPks();
       if (excludedItemPks)
         pageOptions.excludedItemPks = excludedItemPks;
-      const scanned = offThreadReadsSupported(this.dbPath) ? await scanVectorPagesOnPool(this.dbPath, provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit) : await this.scanVectorPagesInThread(provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit);
+      const eligiblePks = input.searchEligibility ? (pks, onDemandReadsTablePresent) => this.visibleVectorItemPks(pks, selectedAccount, filters, onDemandReadsTablePresent, input.searchEligibility) : undefined;
+      const scanned = offThreadReadsSupported(this.dbPath) ? await scanVectorPagesOnPool(this.dbPath, provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit, eligiblePks) : await this.scanVectorPagesInThread(provider, input.beforeToken, queryVector, pageOptions, deadlineAtMs, limit, eligiblePks);
       if ("skippedReason" in scanned)
         return { rows: [], skippedReason: scanned.skippedReason };
       const { bestByItem, dimensionMismatches, onDemandReadsTablePresent } = scanned;
@@ -77749,13 +77812,13 @@ ${parentKey(ref)}`, { ref, origin });
           if (visibleInBatch.length === 0) {
             const batch = candidates.slice(candidateOffset, candidateOffset + VECTOR_VISIBILITY_BATCH_SIZE);
             candidateOffset += batch.length;
-            const visible = this.visibleVectorItemPks(batch.map(([itemPk]) => itemPk), selectedAccount, filters, onDemandReadsTablePresent);
+            const visible = this.visibleVectorItemPks(batch.map(([itemPk]) => itemPk), selectedAccount, filters, onDemandReadsTablePresent, input.searchEligibility);
             visibleInBatch = batch.filter(([itemPk]) => visible.has(itemPk));
           }
           rankedItems.push(...visibleInBatch.splice(0, limit - rankedItems.length));
           continue;
         }
-        const stillVisible = this.visibleVectorItemPks(rankedItems.map(([itemPk]) => itemPk), selectedAccount, filters, onDemandReadsTablePresent);
+        const stillVisible = this.visibleVectorItemPks(rankedItems.map(([itemPk]) => itemPk), selectedAccount, filters, onDemandReadsTablePresent, input.searchEligibility);
         rankedItems = rankedItems.filter(([itemPk]) => stillVisible.has(itemPk));
         if (!canFill())
           break;
@@ -77812,7 +77875,7 @@ ${parentKey(ref)}`, { ref, origin });
       return { has: (itemPk) => excluded.has(itemPk) || hiddenChildren.has(itemPk) };
     }
     vectorScanExclusion;
-    async scanVectorPagesInThread(provider, beforeToken, queryVector, pageOptions, deadlineAtMs, resultLimit) {
+    async scanVectorPagesInThread(provider, beforeToken, queryVector, pageOptions, deadlineAtMs, resultLimit, eligiblePks) {
       const scanDb = this.dbPath === ":memory:" ? this.db : new Database9(this.dbPath, { readonly: true, create: false, strict: true });
       const ownsScanDb = scanDb !== this.db;
       try {
@@ -77825,7 +77888,7 @@ ${parentKey(ref)}`, { ref, origin });
           const params = query.params;
           return query.mode === "all" ? statement.all(...params) : statement.get(...params);
         };
-        return await scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE, resultLimit);
+        return await scanVectorPages(read, provider, beforeToken, queryVector, pageOptions, deadlineAtMs, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE, resultLimit, undefined, eligiblePks);
       } finally {
         try {
           scanDb.exec("ROLLBACK;");
@@ -77959,23 +78022,28 @@ ${parentKey(ref)}`, { ref, origin });
       ORDER BY c.chunk_pk ASC
     `).all(...selectedLocalItemIds ?? [], ...tierExclusion.params, ...selectedAccount ? [selectedAccount] : [], ...selectedFilters.params);
     }
-    visibleVectorItemPks(itemPks, accountScope, filters, onDemandReadsTablePresent = false) {
+    visibleVectorItemPks(itemPks, accountScope, filters, onDemandReadsTablePresent = false, searchEligibility) {
       const visible = new Set;
       const selectedFilters = connectorStoreFilterSql(filters);
       const metadataOnly = connectorStoreMetadataOnlySql(filters, onDemandReadsTablePresent);
       for (let offset = 0;offset < itemPks.length; offset += VECTOR_VISIBILITY_BATCH_SIZE) {
         const batch = itemPks.slice(offset, offset + VECTOR_VISIBILITY_BATCH_SIZE);
-        const rows = this.db.query(`SELECT i.item_pk, i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id
+        const rows = this.db.query(`SELECT i.item_pk, i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id, i.trust_tier
         FROM items i WHERE i.item_pk IN (${batch.map(() => "?").join(",")}) AND i.tombstoned = 0
         ${accountScope ? "AND i.account_scope = ?" : ""} ${selectedFilters.sql}
         ${metadataOnly.sql ? `AND NOT ${metadataOnly.sql}` : ""}`).all(...batch, ...accountScope ? [accountScope] : [], ...selectedFilters.params, ...metadataOnly.params);
-        for (const row of this.tierVisibleRows(rows, (row) => ({
+        const identityOf = (row) => ({
           provider: row.provider,
           accountScope: row.account_scope,
           providerItemId: row.provider_item_id,
           ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
-        }), () => "content", false, (copies) => !copies.some((copy) => copy.corpusId === this.corpusId && copy.state === "current" && copy.embedHold)))
-          visible.add(row.item_pk);
+        });
+        const current = this.tierVisibleRows(rows, identityOf, () => "content", false, (copies) => !copies.some((copy) => copy.corpusId === this.corpusId && copy.state === "current" && copy.embedHold));
+        const eligible = searchEligibility?.(current.map((row) => ({ sourceItem: identityOf(row), trustTier: trustTierFromRow(row.trust_tier) })));
+        current.forEach((row, index) => {
+          if (!eligible || eligible[index])
+            visible.add(row.item_pk);
+        });
       }
       return visible;
     }
@@ -78236,12 +78304,17 @@ ${parentKey(ref)}`, { ref, origin });
             return weights.total > 0 && matched / weights.total >= RARE_CONCEPT_WEIGHT_SHARE;
           });
         }
-        const visible = yield* this.tierVisibleRowsSteps(signalled, (row) => ({
+        const current = yield* this.tierVisibleRowsSteps(signalled, (row) => ({
           provider: row.provider,
           accountScope: row.account_scope,
           providerItemId: row.provider_item_id,
           ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
         }), (row) => row.chunk_pk === null || row.chunk_pk === undefined ? "metadata" : "content");
+        const eligible = ftsOptions.searchEligibility?.(current.map((row) => ({
+          sourceItem: sourceItemFromRow(row),
+          trustTier: trustTierFromRow(row.trust_tier)
+        })));
+        const visible = eligible ? current.filter((_, index) => eligible[index]) : current;
         selected.push(...visible);
         if (visible.length > 0)
           ftsOptions.onPartialRows?.(selected.slice(0, limit).map(searchRowFromItemRow));
@@ -106059,7 +106132,8 @@ var init_filter_capabilities = __esm(() => {
     "before",
     "trust_domain",
     "all_tiers",
-    "personal_names_only"
+    "personal_names_only",
+    "include_private_names"
   ];
   CONNECTOR_STORE_DECLARED_FILTER_FIELDS = [
     "approved_scope_key",
@@ -140081,7 +140155,8 @@ function createSourceIndexStatusHandler(options = {}) {
           availability.backend ?? null,
           availability.provider ?? null
         ],
-        statusScope ?? null
+        statusScope ?? null,
+        store?.embeddingFailedItemCount?.() ?? 0
       ]);
       const cached = maxAgeMs > 0 ? cache.get(cacheKey) : undefined;
       if (cached && snapshot.countsMaxAgeMs !== 0 && cached.counted === counted && nowMs() - cached.recordedAtMs <= maxAgeMs)
@@ -140392,17 +140467,12 @@ function bringCountsForward(corpus, live) {
     const total = floor(parity.chunks + chunks);
     const embedded = Math.min(total, floor(parity.embedded_chunks + vectors));
     const missing = parity.required ? floor(parity.missing_chunks + chunks - vectors) : 0;
-    const withheld = parity.private_tier_withheld?.chunks ?? 0;
     return {
       ...parity,
       chunks: total,
       embedded_chunks: embedded,
       missing_chunks: missing,
-      refresh_needed: parity.required && missing > withheld,
-      ...parity.backlog_estimate ? { backlog_estimate: {
-        ...parity.backlog_estimate,
-        missing_chunks: Math.min(missing, floor(parity.backlog_estimate.missing_chunks + chunks - vectors))
-      } } : {}
+      refresh_needed: parity.backlog_estimate ? parity.refresh_needed : parity.required && missing > 0
     };
   })();
   return {
@@ -140449,7 +140519,7 @@ function withRetrievalEnforcementStatus(corpus, status, hybridAvailability) {
   const chunks = counts?.chunks ?? 0;
   const retrieval = counts !== undefined && chunks === 0 && assessed.reason === "no_current_embedding_artifacts" ? { ...assessed, servableMode: "hybrid", health: "ready", reason: undefined } : assessed;
   const noCurrentArtifacts = retrieval.reason === "no_current_embedding_artifacts";
-  const embeddedChunks = noCurrentArtifacts ? 0 : counts?.embedded_chunks ?? 0;
+  const embeddedChunks = noCurrentArtifacts && hybridAvailability?.modelId === undefined ? 0 : counts?.embedded_chunks ?? 0;
   const currentCounts = counts !== undefined && noCurrentArtifacts && ITEMS_EMBEDDED_COUNT_KEY in counts ? { counts: { ...counts, [ITEMS_EMBEDDED_COUNT_KEY]: 0 } } : {};
   const embeddingRequired = corpus.embeddingPolicy !== "disabled" && corpus.activationMode !== "lexical_only";
   return {
@@ -140478,17 +140548,16 @@ function withEmbeddingBacklogEstimate(status, store, modelId, availability, scop
   if (!parity?.required)
     return status;
   const embedder = availability.backend !== undefined && availability.provider !== undefined ? { modelId, provider: availability.provider, backend: availability.backend } : undefined;
-  const backlog = reused(countsMaxAgeMs, ["embedding-backlog", store.corpusId, modelId, embedder ?? null, scope ?? null], () => store.embeddingBacklogEstimate(modelId, embedder, scope, { countsMaxAgeMs }), typeof store.embeddingBacklogEstimateOffThread === "function" ? { read: () => store.embeddingBacklogEstimateOffThread(modelId, embedder, scope, { countsMaxAgeMs }), empty: { missingChunks: 0, estimatedTokens: 0 } } : undefined);
+  const failedCount = store.embeddingFailedItemCount?.() ?? 0;
+  const backlog = reused(countsMaxAgeMs, ["embedding-backlog", store.corpusId, modelId, embedder ?? null, scope ?? null, failedCount], () => store.embeddingBacklogEstimate(modelId, embedder, scope, { countsMaxAgeMs }), typeof store.embeddingBacklogEstimateOffThread === "function" ? { read: () => store.embeddingBacklogEstimateOffThread(modelId, embedder, scope, { countsMaxAgeMs }), empty: { missingChunks: 0, estimatedTokens: 0 } } : undefined);
   const withheld = embedder ? reused(countsMaxAgeMs, ["private-withheld", store.corpusId, embedder, scope ?? null], () => store.privateTierEmbeddingWithheld(embedder, scope, { countsMaxAgeMs })) : undefined;
   const { source } = embeddingModelEstimate(modelId);
   return {
     ...status,
     embedding_parity: {
       ...parity,
-      ...withheld && withheld.chunks > 0 ? {
-        refresh_needed: parity.refresh_needed && parity.missing_chunks > withheld.chunks,
-        private_tier_withheld: { chunks: withheld.chunks, reason: withheld.reason }
-      } : {},
+      refresh_needed: backlog.missingChunks > 0,
+      ...withheld && withheld.chunks > 0 ? { private_tier_withheld: { chunks: withheld.chunks, reason: withheld.reason } } : {},
       backlog_estimate: {
         model_id: modelId,
         missing_chunks: backlog.missingChunks,
@@ -147939,51 +148008,74 @@ class EmailClient {
       });
     return result;
   }
-  async sourceIndexSearch(options, audience = "calling_model") {
+  async requestSourceIndexSearch(body) {
     if (!isSourceIndexReadSurfaceEnabled(this.config)) {
       throw new OperationError("source_index_not_enabled", "Source-index search is disabled.", "Enable sourceIndex.enabled to turn on the source read surface.");
     }
     if (!this.config.email.enabled) {
       throw new OperationError("email_not_configured", "Private source worker is disabled.", "Run olympus setup, then olympus worker install, to bring the private source worker up before using source-index search.");
     }
-    const corpusId = canonicalSourceCorpusId(options.corpusId);
-    const response = await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/search`, {
+    const data = asRecord15(await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/search`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        query: options.query,
-        corpus_id: corpusId,
-        ...audience === "calling_model" ? { personal_names_only: true } : {},
-        ...options.retrievalMode ? { retrieval_mode: options.retrievalMode } : {},
-        ...options.account ? { account: options.account } : {},
-        ...options.folderId ? { folder_id: options.folderId } : {},
-        ...options.folderName ? { folder_name: options.folderName } : {},
-        ...options.approvedScopeKey ? { approved_scope_key: options.approvedScopeKey } : {},
-        ...options.chatScope ? { chat_scope: options.chatScope } : {},
-        ...options.trustDomain ? { trust_domain: options.trustDomain } : {},
-        ...options.conversationId ? { conversation_id: options.conversationId } : {},
-        ...options.senderId ? { sender_id: options.senderId } : {},
-        ...options.senderLabel ? { sender_label: options.senderLabel } : {},
-        ...options.authoredAfter ? { authored_after: options.authoredAfter } : {},
-        ...options.authoredBefore ? { authored_before: options.authoredBefore } : {},
-        ...options.participantId ? { participant_id: options.participantId } : {},
-        ...options.after ? { after: options.after } : {},
-        ...options.before ? { before: options.before } : {},
-        ...options.includeDeleted !== undefined ? { include_deleted: options.includeDeleted } : {},
-        ...options.attachmentType ? { attachment_type: options.attachmentType } : {},
-        ...options.maxResults !== undefined ? { max_results: options.maxResults } : {},
-        ...options.includeLocators !== undefined ? { include_locators: options.includeLocators } : {},
-        ...options.allTiers !== undefined ? { all_tiers: options.allTiers } : {}
-      })
-    });
-    const data = asRecord15(response);
+      body: JSON.stringify(body)
+    }));
     assertNoRawEmailFields(data);
     assertNoSourceIndexOperationalLeakFields(data);
+    return data;
+  }
+  async sourceIndexSearch(options, audience = "calling_model") {
+    const corpusId = canonicalSourceCorpusId(options.corpusId);
+    const data = await this.requestSourceIndexSearch({
+      query: options.query,
+      corpus_id: corpusId,
+      ...audience === "private_answer" ? { include_private_names: true } : { personal_names_only: true },
+      ...options.retrievalMode ? { retrieval_mode: options.retrievalMode } : {},
+      ...options.account ? { account: options.account } : {},
+      ...options.folderId ? { folder_id: options.folderId } : {},
+      ...options.folderName ? { folder_name: options.folderName } : {},
+      ...options.approvedScopeKey ? { approved_scope_key: options.approvedScopeKey } : {},
+      ...options.chatScope ? { chat_scope: options.chatScope } : {},
+      ...options.trustDomain ? { trust_domain: options.trustDomain } : {},
+      ...options.conversationId ? { conversation_id: options.conversationId } : {},
+      ...options.senderId ? { sender_id: options.senderId } : {},
+      ...options.senderLabel ? { sender_label: options.senderLabel } : {},
+      ...options.authoredAfter ? { authored_after: options.authoredAfter } : {},
+      ...options.authoredBefore ? { authored_before: options.authoredBefore } : {},
+      ...options.participantId ? { participant_id: options.participantId } : {},
+      ...options.after ? { after: options.after } : {},
+      ...options.before ? { before: options.before } : {},
+      ...options.includeDeleted !== undefined ? { include_deleted: options.includeDeleted } : {},
+      ...options.attachmentType ? { attachment_type: options.attachmentType } : {},
+      ...options.maxResults !== undefined ? { max_results: options.maxResults } : {},
+      ...options.includeLocators !== undefined ? { include_locators: options.includeLocators } : {},
+      ...options.allTiers !== undefined ? { all_tiers: options.allTiers } : {}
+    });
     return parseSourceIndexSearchResult(data, {
       config: this.config,
       requestedCorpusId: corpusId,
       includeLocators: options.includeLocators === true
     });
+  }
+  async sourceIndexSearchMany(corpusIds, options) {
+    if (!corpusIds.length)
+      throw new OperationError("invalid_params", "No source is configured for search.");
+    const response = await this.requestSourceIndexSearch({
+      query: options.query,
+      corpus_ids: corpusIds,
+      personal_names_only: true,
+      retrieval_mode: options.retrievalMode,
+      max_results: options.maxResults,
+      include_locators: options.includeLocators
+    });
+    if (!Array.isArray(response.results) || response.results.length !== corpusIds.length) {
+      throw new OperationError("email_error", "The worker did not return a search result for each requested source.");
+    }
+    return response.results.flatMap((value, index) => value === null ? [] : [parseSourceIndexSearchResult(asRecord15(value), {
+      config: this.config,
+      requestedCorpusId: corpusIds[index],
+      includeLocators: options.includeLocators === true
+    })]);
   }
   async sourceWatchCreate(options) {
     this.requireSourceWatchSurface();
@@ -163463,18 +163555,14 @@ async function searchEverySource(ctx, query, params) {
   for (const corpus of publicSourceCorpusRegistry(ctx.config).list("search"))
     if (!bySource.has(corpus.sourceId))
       bySource.set(corpus.sourceId, corpus.corpusId);
-  const settled = await Promise.allSettled([...bySource.values()].map((corpusId) => ctx.email.sourceIndexSearch({
+  const results = await ctx.email.sourceIndexSearchMany([...bySource.values()], {
     query,
-    corpusId,
     ...retrievalMode !== undefined ? { retrievalMode } : {},
     ...maxResults !== undefined ? { maxResults } : {},
     ...includeLocators !== undefined ? { includeLocators } : {}
-  })));
-  const results = settled.flatMap((outcome) => outcome.status === "fulfilled" ? [outcome.value] : []);
-  if (results.length === 0) {
-    const failed = settled.find((outcome) => outcome.status === "rejected");
-    throw failed?.reason ?? new OperationError("invalid_params", "No source is configured for search.");
-  }
+  });
+  if (!results.length)
+    throw new OperationError("email_error", "No source could be searched this time.");
   const limit = maxResults ?? Math.max(...results.map((result) => result.hits.length), 0);
   const hits = [];
   for (let rank = 0;hits.length < limit && results.some((result) => result.hits.length > rank); rank += 1) {
@@ -163485,7 +163573,7 @@ async function searchEverySource(ctx, query, params) {
   const domains = results.map((result) => result.policy.trust_domain);
   const secretLocations = results.flatMap((result) => result.secret_locations ?? []);
   const notes = [...new Set(results.flatMap((result) => result.coverage_notes ?? []))];
-  const unsearched = settled.length - results.length;
+  const unsearched = bySource.size - results.length;
   return {
     kind: "source_index_search",
     corpus_id: results[0].corpus_id,
@@ -225457,15 +225545,26 @@ function createEmailSourceWorker(options = {}) {
           }
         }
         if (request.method === "POST" && url.pathname === `${basePath}/source/index/search`) {
-          const record = await parseObjectBody(request);
+          const { corpus_ids: corpusIds, ...record } = await parseObjectBody(request);
           assertSourceIndexSearchQuery(record.query);
-          const personalNamesOnly = record.personal_names_only !== undefined;
-          if (personalNamesOnly && record.personal_names_only !== true) {
+          if (record.personal_names_only !== undefined && record.personal_names_only !== true) {
             throw new EmailSourceWorkerError(400, "invalid_request", "personal_names_only must be true when provided.");
           }
-          const corpusId = canonicalRequestCorpusId(record);
-          const connectorStore = corpusId ? connectorStoresByCorpusId.get(corpusId) : undefined;
-          if (connectorStore) {
+          if (record.include_private_names !== undefined && (record.include_private_names !== true || record.personal_names_only === true || corpusIds !== undefined)) {
+            throw new EmailSourceWorkerError(400, "invalid_request", "include_private_names is only available for a single Private search.");
+          }
+          const personalNamesOnly = record.include_private_names !== true;
+          const prepare = async (record) => {
+            const corpusId = canonicalRequestCorpusId(record);
+            const connectorStore = corpusId ? connectorStoresByCorpusId.get(corpusId) : undefined;
+            if (!corpusId) {
+              throw new EmailSourceWorkerError(400, "invalid_request", `corpus_id must be one of: ${sourceIndexSearchCorpusIds(connectorStores).join(", ")}.`);
+            }
+            if (!connectorStore)
+              throw new EmailSourceWorkerError(501, "source_index_search_not_supported", `The connector store for ${corpusId} is not mounted.`);
+            if (!personalNamesOnly && connectorStore.trustDomain !== "secure_local") {
+              throw new EmailSourceWorkerError(400, "invalid_request", "include_private_names requires a Private corpus.");
+            }
             const searchConnectorStore = async (store) => {
               const mandatoryScope = connectorStoreReadScope?.(store);
               if (mandatoryScope?.allowed === false)
@@ -225479,9 +225578,24 @@ function createEmailSourceWorker(options = {}) {
                 ...searchRequest.filters,
                 ...mandatoryScope?.filters
               }) : undefined;
+              const privateMatches = new Set;
               const adapter = createConnectorStoreCorpusAdapter({
                 store,
                 retrievalMode,
+                ...personalNamesOnly ? {
+                  searchEligibility(rows) {
+                    const tiers = store.effectiveItemTiers(rows.map((row) => row.sourceItem), "names");
+                    return rows.map((row, index) => {
+                      const tier = tiers[index];
+                      if (tier === "secret" || tier === "unknown" || row.trustTier === "S5")
+                        return false;
+                      if (tier === "public_or_personal" || tier === "legacy" && !isSecureSensitivity({ trustDomain: store.trustDomain, trustTier: row.trustTier }))
+                        return true;
+                      privateMatches.add(tierLedgerIdentityKey(row.sourceItem));
+                      return false;
+                    });
+                  }
+                } : {},
                 ...mandatoryScope?.allowed === true && mandatoryScope.accountScope ? { accountScope: mandatoryScope.accountScope } : searchRequest.accountScope ? { accountScope: searchRequest.accountScope } : {},
                 ...combinedFilters ? { filters: combinedFilters } : {},
                 ...searchRequest.resultProjector ? { resultProjector: searchRequest.resultProjector } : {},
@@ -225505,6 +225619,7 @@ function createEmailSourceWorker(options = {}) {
                 store,
                 searchRequest,
                 result,
+                privateMatches,
                 readScopeSignature,
                 scope: {
                   corpusId: store.corpusId,
@@ -225535,121 +225650,171 @@ function createEmailSourceWorker(options = {}) {
               corpusId: run.store.corpusId,
               trustDomain: run.store.trustDomain
             })));
-            const visible = new Set(options.sourceIndexVisibilityGate ? options.sourceIndexVisibilityGate(tagged) : tagged);
-            const verdictScopes = new Map;
-            const unreadCorpora = new Set;
-            for (const { store } of runs) {
-              try {
-                const ledger = store.governingTierLedger();
-                if (!ledger)
-                  continue;
-                const scope = verdictScopes.get(ledger.dbPath);
-                if (scope)
-                  scope.corpusIds.add(store.corpusId);
-                else
-                  verdictScopes.set(ledger.dbPath, { ledger, corpusIds: new Set([store.corpusId]) });
-              } catch {
-                unreadCorpora.add(store.corpusId);
+            return () => {
+              const visible = new Set(options.sourceIndexVisibilityGate ? options.sourceIndexVisibilityGate(tagged) : tagged);
+              const verdictScopes = new Map;
+              const unreadCorpora = new Set;
+              for (const { store } of runs) {
+                try {
+                  const ledger = store.governingTierLedger();
+                  if (!ledger)
+                    continue;
+                  const scope = verdictScopes.get(ledger.dbPath);
+                  if (scope)
+                    scope.corpusIds.add(store.corpusId);
+                  else
+                    verdictScopes.set(ledger.dbPath, { ledger, corpusIds: new Set([store.corpusId]) });
+                } catch {
+                  unreadCorpora.add(store.corpusId);
+                }
               }
-            }
-            const privateNames = new Set(tagged.filter((hit) => hit.trustTier === undefined || isSecureSensitivity({ trustDomain: hit.trustDomain, trustTier: hit.trustTier })));
-            const hiddenNames = new Set(tagged.filter((hit) => unreadCorpora.has(hit.corpusId)));
-            for (const scope of verdictScopes.values()) {
-              const governed = tagged.filter((hit) => scope.corpusIds.has(hit.corpusId));
-              try {
-                const verdicts = visibilityHere(effectiveItemVerdicts(() => [scope], governed.map((hit) => ({
-                  ...hit.sourceItem,
-                  corpusId: hit.corpusId,
-                  privateAtAnswer: false,
-                  layer: "names"
-                }))));
-                governed.forEach((hit, index) => {
-                  const verdict = verdicts[index];
-                  if (verdict.tier === "secret" || verdict.tier === "unknown" || verdict.pendingDeletion || personalNamesOnly && verdict.gone)
+              const privateNames = new Set(tagged.filter((hit) => hit.trustTier === undefined || isSecureSensitivity({ trustDomain: hit.trustDomain, trustTier: hit.trustTier })));
+              const hiddenNames = new Set(tagged.filter((hit) => unreadCorpora.has(hit.corpusId)));
+              for (const scope of verdictScopes.values()) {
+                const governed = tagged.filter((hit) => scope.corpusIds.has(hit.corpusId));
+                try {
+                  const verdicts = visibilityHere(effectiveItemVerdicts(() => [scope], governed.map((hit) => ({
+                    ...hit.sourceItem,
+                    corpusId: hit.corpusId,
+                    privateAtAnswer: false,
+                    layer: "names"
+                  }))));
+                  governed.forEach((hit, index) => {
+                    const verdict = verdicts[index];
+                    if (verdict.tier === "secret" || verdict.tier === "unknown" || verdict.pendingDeletion || personalNamesOnly && verdict.gone)
+                      hiddenNames.add(hit);
+                    else if (verdict.tier === "private")
+                      privateNames.add(hit);
+                    else if (personalNamesOnly && verdict.tier === "public_or_personal" && hit.trustTier !== undefined && hit.trustTier !== "S5")
+                      privateNames.delete(hit);
+                  });
+                } catch {
+                  for (const hit of governed)
                     hiddenNames.add(hit);
-                  else if (verdict.tier === "private")
-                    privateNames.add(hit);
-                  else if (personalNamesOnly && verdict.tier === "public_or_personal" && hit.trustTier !== undefined && hit.trustTier !== "S5")
-                    privateNames.delete(hit);
-                });
-              } catch {
-                for (const hit of governed)
-                  hiddenNames.add(hit);
+                }
               }
-            }
-            const searchedSecureLocal = runs.some((run) => run.store.trustDomain === "secure_local");
-            let privateTierWithheld = 0;
-            for (const hit of hiddenNames)
-              visible.delete(hit);
-            if (personalNamesOnly || !searchedSecureLocal) {
-              for (const hit of visible) {
-                if (!privateNames.has(hit))
-                  continue;
+              const searchedSecureLocal = runs.some((run) => run.store.trustDomain === "secure_local");
+              const withheld = new Set(runs.flatMap((run) => [...run.privateMatches]));
+              for (const hit of hiddenNames)
                 visible.delete(hit);
-                privateTierWithheld += 1;
+              if (personalNamesOnly || !searchedSecureLocal) {
+                for (const hit of visible) {
+                  if (!privateNames.has(hit))
+                    continue;
+                  visible.delete(hit);
+                  withheld.add(tierLedgerIdentityKey(hit.sourceItem));
+                }
               }
-            }
-            const perRun = runs.map((run) => tagged.filter((hit) => hit.corpusId === run.store.corpusId && visible.has(hit)));
-            const merged = [];
-            for (let rank = 0;merged.length < searchRequest.maxResults && perRun.some((hits) => hits.length > rank); rank += 1) {
-              for (const hits of perRun) {
-                const hit = hits[rank];
-                if (hit && merged.length < searchRequest.maxResults)
-                  merged.push(hit);
+              const perRun = runs.map((run) => tagged.filter((hit) => hit.corpusId === run.store.corpusId && visible.has(hit)));
+              const merged = [];
+              for (let rank = 0;merged.length < searchRequest.maxResults && perRun.some((hits) => hits.length > rank); rank += 1) {
+                for (const hits of perRun) {
+                  const hit = hits[rank];
+                  if (hit && merged.length < searchRequest.maxResults)
+                    merged.push(hit);
+                }
               }
-            }
-            const hits = tiered ? merged : tagged.filter((hit) => visible.has(hit));
-            const secretLocations = tiered ? options.secretLocationSearch?.(searchRequest.query, runs.map((run) => run.scope)) ?? [] : [];
-            const locatorsExposed = hits.some((hit) => Object.prototype.hasOwnProperty.call(hit, "locator"));
-            const pendingPrivacy = readPendingPrivacyItems(options);
-            const safeResult = {
-              kind: "source_index_search",
-              corpus_id: connectorStore.corpusId,
-              retrieval_source: "local_index",
-              hits: hits.map(({ corpusId: hitCorpusId, trustDomain: _hitTrustDomain, trustTier: _hitTrustTier, keywordLeader: _hitKeywordLeader, newestInStore: _hitNewestInStore, pinAppended: _hitPinAppended, ...hit }) => addSelectedItemToSearchHit(hitCorpusId, hit)),
-              ...secretLocations.length > 0 ? {
-                secret_locations: secretLocations.map((location) => ({
-                  source: location.source,
-                  ref: location.ref,
-                  ...location.locator ? { locator: location.locator } : {},
-                  ...location.title ? { title: location.title } : {},
-                  finding_kinds: [...location.findingKinds]
-                }))
-              } : {},
-              audit: {
-                request_id: `${connectorStore.corpusId}:connector-store-search`,
+              const hits = merged;
+              const secretLocations = tiered ? options.secretLocationSearch?.(searchRequest.query, runs.map((run) => run.scope)) ?? [] : [];
+              const withheldChildIdentifiers = new Set;
+              for (const { store } of runs) {
+                const governed = hits.filter((hit) => hit.corpusId === store.corpusId);
+                if (governed.length === 0)
+                  continue;
+                try {
+                  const children = store.childrenWithWithheldSearchIdentifiers(governed.map((hit) => hit.sourceItem), !personalNamesOnly);
+                  for (const hit of governed) {
+                    if (children.has(tierLedgerIdentityKey(hit.sourceItem)))
+                      withheldChildIdentifiers.add(hit);
+                  }
+                } catch {
+                  for (const hit of governed)
+                    withheldChildIdentifiers.add(hit);
+                }
+              }
+              const releasedHits = hits.map((rankedHit) => {
+                const { corpusId: hitCorpusId, trustDomain: _hitTrustDomain, trustTier: _hitTrustTier, keywordLeader: _hitKeywordLeader, newestInStore: _hitNewestInStore, pinAppended: _hitPinAppended, ...hit } = rankedHit;
+                if (!withheldChildIdentifiers.has(rankedHit))
+                  return addSelectedItemToSearchHit(hitCorpusId, hit);
+                const { family, provider, accountScope } = hit.sourceItem;
+                const title = hit.provenance?.citation?.title;
+                const sourceItem = { family, provider, accountScope };
+                return {
+                  sourceItem,
+                  provenance: { sourceItem, citation: { sourceLabel: provider, ...title ? { title } : {} } },
+                  score: hit.score,
+                  rawExposed: false
+                };
+              });
+              const locatorsExposed = releasedHits.some((hit) => Object.prototype.hasOwnProperty.call(hit, "locator"));
+              const pendingPrivacy = readPendingPrivacyItems(options);
+              const safeResult = {
+                kind: "source_index_search",
+                corpus_id: connectorStore.corpusId,
                 retrieval_source: "local_index",
-                queries_attempted: runs.length,
-                metadata_hits: hits.length,
-                items_returned: hits.length,
-                latency_ms: runs.reduce((total, run) => total + run.result.latencyMs, 0),
-                ...tiered ? { searched_corpora: runs.map((run) => run.store.corpusId) } : {},
-                ...searchRequest.explicitEmptyChatScope ? {} : { lane_audits: runs.flatMap((run) => run.result.laneAudits ?? []) },
-                raw_source_exposed: false,
-                source_text_returned: false,
-                ...searchRequest.locatorsRequested ? { locators_requested: true } : {},
-                ...privateTierWithheld > 0 ? { private_tier_withheld: privateTierWithheld } : {},
-                ...pendingPrivacy !== undefined && pendingPrivacy > 0 ? { pending_privacy_items: pendingPrivacy } : {}
-              },
-              policy: {
-                raw_source_exposed: false,
-                source_text_returned: false,
-                source_packets_exposed: false,
-                local_only: searchRequest.explicitEmptyChatScope || searchedSecureLocal || hits.some((hit) => privateNames.has(hit)),
-                trust_domain: mostPrivateTrustDomain(runs.map((run) => run.store.trustDomain)),
-                ...locatorsExposed ? { locators_exposed: true, locator_release: "explicit_request" } : {}
+                hits: releasedHits,
+                ...secretLocations.length > 0 ? {
+                  secret_locations: secretLocations.map((location) => ({
+                    source: location.source,
+                    ref: location.ref,
+                    ...location.locator ? { locator: location.locator } : {},
+                    ...location.title ? { title: location.title } : {},
+                    finding_kinds: [...location.findingKinds]
+                  }))
+                } : {},
+                audit: {
+                  request_id: `${connectorStore.corpusId}:connector-store-search`,
+                  retrieval_source: "local_index",
+                  queries_attempted: runs.length,
+                  metadata_hits: hits.length,
+                  items_returned: hits.length,
+                  latency_ms: runs.reduce((total, run) => total + run.result.latencyMs, 0),
+                  ...tiered ? { searched_corpora: runs.map((run) => run.store.corpusId) } : {},
+                  ...searchRequest.explicitEmptyChatScope ? {} : { lane_audits: runs.flatMap((run) => run.result.laneAudits ?? []) },
+                  raw_source_exposed: false,
+                  source_text_returned: false,
+                  ...searchRequest.locatorsRequested ? { locators_requested: true } : {},
+                  ...withheld.size > 0 ? { private_tier_withheld: withheld.size } : {},
+                  ...pendingPrivacy !== undefined && pendingPrivacy > 0 ? { pending_privacy_items: pendingPrivacy } : {}
+                },
+                policy: {
+                  raw_source_exposed: false,
+                  source_text_returned: false,
+                  source_packets_exposed: false,
+                  local_only: searchRequest.explicitEmptyChatScope || searchedSecureLocal || hits.some((hit) => privateNames.has(hit)),
+                  trust_domain: mostPrivateTrustDomain(runs.map((run) => run.store.trustDomain)),
+                  ...locatorsExposed ? { locators_exposed: true, locator_release: "explicit_request" } : {}
+                }
+              };
+              assertNoRawEmailFields(safeResult);
+              if (runs.some((run) => JSON.stringify(connectorStoreReadScope?.(run.store)) !== run.readScopeSignature)) {
+                throw new EmailSourceWorkerError(403, "source_index_policy_violation", "The source read scope changed during search. Retry under the current scope.");
               }
+              return safeResult;
             };
-            assertNoRawEmailFields(safeResult);
-            if (runs.some((run) => JSON.stringify(connectorStoreReadScope?.(run.store)) !== run.readScopeSignature)) {
-              throw new EmailSourceWorkerError(403, "source_index_policy_violation", "The source read scope changed during search. Retry under the current scope.");
+          };
+          if (corpusIds === undefined)
+            return json((await prepare(record))());
+          if (record.corpus_id !== undefined || !Array.isArray(corpusIds) || !corpusIds.length || !corpusIds.every((id) => typeof id === "string" && id.trim()) || new Set(corpusIds).size !== corpusIds.length) {
+            throw new EmailSourceWorkerError(400, "invalid_request", "Supply distinct corpus_ids for a multi-source search.");
+          }
+          const prepared = await Promise.allSettled(corpusIds.map((corpus_id) => prepare({ ...record, corpus_id })));
+          let firstFailure;
+          const results = prepared.map((outcome) => {
+            if (outcome.status === "rejected") {
+              firstFailure ??= outcome.reason;
+            } else {
+              try {
+                return outcome.value();
+              } catch (error) {
+                firstFailure ??= error;
+              }
             }
-            return json(safeResult);
-          }
-          if (!corpusId) {
-            throw new EmailSourceWorkerError(400, "invalid_request", `corpus_id must be one of: ${sourceIndexSearchCorpusIds(connectorStores).join(", ")}.`);
-          }
-          throw new EmailSourceWorkerError(501, "source_index_search_not_supported", `The connector store for ${corpusId} is not mounted.`);
+            return null;
+          });
+          if (results.every((result) => result === null))
+            throw firstFailure;
+          return json({ results });
         }
         if (request.method === "POST" && url.pathname === `${basePath}/source/index/embed`) {
           const record = await parseObjectBody(request);
@@ -226003,6 +226168,7 @@ var init_engine2 = __esm(() => {
   init_embedding_plan();
   init_tier_visibility();
   init_child_visibility();
+  init_tier_ledger();
   init_remote_access_recheck();
   init_selected_items();
   init_deep_read_jobs();
