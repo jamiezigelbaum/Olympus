@@ -1065,6 +1065,8 @@ describe('a prepared picture through runner, sink and store', () => {
     seeded.close();
     const db = new Database(dbPath);
     db.exec(`
+      DROP TRIGGER connector_store_invalidate_label_observation;
+      ALTER TABLE items DROP COLUMN classification_labels_json;
       DROP INDEX IF EXISTS idx_connector_store_items_parent;
       ALTER TABLE items DROP COLUMN parent_local_item_id;
       ALTER TABLE items DROP COLUMN deferred_locator;
@@ -1086,7 +1088,7 @@ describe('a prepared picture through runner, sink and store', () => {
     const check = new Database(dbPath, { readonly: true });
     try {
       const version = check.query("SELECT version FROM schema_version WHERE store_id = 'connector-store'").get() as { version: number };
-      expect(version.version).toBe(17);
+      expect(version.version).toBe(18);
       const columns = (check.query('PRAGMA table_info(chunks)').all() as Array<{ name: string }>).map((column) => column.name);
       expect(columns).toContain('media_path');
       expect(columns).toContain('media_sha256');

@@ -250,6 +250,8 @@ test('v15 migration leaves vectors intact, creates an empty projection, and resu
     old.exec('PRAGMA synchronous=OFF; PRAGMA journal_mode=WAL');
     old.exec(`DROP TRIGGER connector_store_vector_digest_account; DROP TRIGGER connector_store_vector_digest_delete;
       DROP TABLE chunk_vector_digest; DROP TABLE chunk_vector_digest_meta;
+      DROP TRIGGER connector_store_invalidate_label_observation;
+      ALTER TABLE items DROP COLUMN classification_labels_json;
       UPDATE schema_version SET version = 15 WHERE store_id = 'connector-store';`);
     old.close();
     store = open(path);

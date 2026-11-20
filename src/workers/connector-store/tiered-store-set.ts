@@ -1,3 +1,4 @@
+import { listedLabelObservation } from '../../core/source-connector-labels.ts';
 // The shared per-tier store capability (design
 // docs/design/per-item-four-tier-classification.md, section 3.2).
 //
@@ -899,7 +900,7 @@ export class TieredStoreSet {
     await run.finalize();
     // The only gate for moving on: what the input accepted is read back through the stores, and the set's resume
     // point passes only the pages whose every item is there as accepted.
-    run.counts.itemsUnstored += this.unstoredAccepted(traversal.accepted(), (item) => run.plannedKind(item), (item) => run.alreadyOwed(item));
+    run.counts.itemsUnstored += this.unstoredAccepted(traversal.accepted(), (item) => run.plannedKind(connector, item), (item) => run.alreadyOwed(item));
     const cursor = legRuns[0]?.sync.cursor;
     // A pass that is not a resume point (a reconcile from the start of the
     // listing) must not overwrite the incremental lane's committed position.
@@ -1790,7 +1791,7 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
   /** The items whose write intent (ledger.withWriteIntent) this run wrote: cleared, last, once every leg has been written. */
   private readonly intents: Map<string, SourceItemIdentity>;
   /** A names-only version move behind a body this run writes: done when the intent is cleared. */
-  private readonly namesAdvance: Map<string, SourceItemIdentity>;
+  private readonly namesAdvance: Map<string, { identity: SourceItemIdentity; observedLabels?: string }>;
   /** Items whose accepted record says the body is empty: their stored text goes, in every leg, before the version moves. */
   private readonly emptied: Map<string, SourceItemIdentity>;
   /** Items whose same-version record only repeated what an earlier run still owes: nothing to hold the cursor for. */
@@ -1836,8 +1837,8 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
   }
 
   /** What the run planned for an item's version, if it routed it at all. */
-  plannedKind(item: RawItem): Plan['kind'] | undefined {
-    return this.plans.get(planKey(item))?.plan.kind ?? this.versionPlans.get(versionKey(item));
+  plannedKind(connector: SourceConnector, item: RawItem): Plan['kind'] | undefined {
+    return this.plans.get(planKey(connector, item))?.plan.kind ?? this.versionPlans.get(versionKey(item));
   }
 
   async route(input: ConnectorStoreTierRouteInput): Promise<ConnectorStoreTierRoute> {
@@ -1846,7 +1847,7 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     // A plan is made once per item VERSION per run: a later version of the same item in one listing is
     // classified and routed on its own verdict (a key added in an edit makes it a Secret), never on the
     // earlier version's placement.
-    const key = planKey(input.item);
+    const key = planKey(input.connector, input.item);
     let entry = this.plans.get(key);
     if (!entry) {
       entry = { plan: this.classifyAndPlan(input), identity: input.item.identity, handedOff: false };
@@ -1924,11 +1925,12 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
       // An edit that empties the body replaces it: the old text goes from every leg while the intent still owes
       // the write, so a cut here is repeated by the record's replay.
       if (this.emptied.has(key)) for (const domain of TIER_DOMAIN_ORDER) this.set.store(domain)?.stripCopyContent(identity);
-      const moveTo = intent?.kind === 'advance' ? identity : this.namesAdvance.get(key);
+      const advance = this.namesAdvance.get(key);
+      const moveTo = intent?.kind === 'advance' ? identity : advance?.identity;
       // Every leg has its write: what is left is the version move, which an `advance` intent redoes if cut off here
       // (the intent never owes a version below the rows).
       if (moveTo && intent && intent.kind !== 'advance') this.set.ledger.putWriteIntent({ identity: intent.identity, version: moveTo.sourceVersion, kind: 'advance', connectorId: intent.connectorId } as TierWriteIntent);
-      if (moveTo) for (const domain of TIER_DOMAIN_ORDER) this.set.store(domain)?.advanceItemVersion(moveTo);
+      if (moveTo) for (const domain of TIER_DOMAIN_ORDER) this.set.store(domain)?.advanceItemVersion(moveTo, advance);
       cleared.push(identity);
     }
     if (cleared.length > 0) await barrier();
@@ -2089,6 +2091,8 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
         // body's own record finishes it.
         const key = identityKey(identity);
         const owed = ledger.writeIntent(identity);
+        const observedLabels = listedLabelObservation(connector, item);
+        const advance = { identity, ...(observedLabels !== undefined ? { observedLabels } : {}) };
         // A record whose body is authoritatively empty (the source said so; blank text is "unread" only to the
         // classifier) replaces the stored text, unlike a record that has no body to give.
         const emptied = text !== undefined && text.trim() === '' && item.content.kind !== 'metadata_only' && !input.contentFetchFailed;
@@ -2098,17 +2102,18 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
           }, undefined,
             typeof item.metadata['contentVersion'] === 'string' && item.metadata['contentVersion'] !== identity.sourceVersion ? item.metadata['contentVersion'] : undefined);
           this.emptied.set(key, identity);
-          this.namesAdvance.set(key, identity);
+          this.namesAdvance.set(key, advance);
           return { kind: 'hold', reason: 'content_unread' };
         }
         if (owed?.kind === 'content' || owed?.kind === 'names') {
           // A write still owed to a leg: this run's own lands in the legs first, and the version moves with the
           // clearing of its intent. An earlier run's stays put and the item is not moved on past it (the record
           // is not accepted); a record of the very version it owes adds nothing and is simply passed.
-          if (this.intents.has(key)) this.namesAdvance.set(key, identity);
+          if (this.intents.has(key)) this.namesAdvance.set(key, advance);
           else if (owed.version === identity.sourceVersion) this.owedAlready.add(key);
           return { kind: 'hold', reason: 'content_unread' };
         }
+        this.namesAdvance.set(key, advance);
         const observed = this.writeIntent(connector.id, identity, 'advance',
           () => before?.state === 'moving' ? ledger.recordDecision(identity, decision, undefined,
             input.contentFetchFailed ? { contentFetchOwed: true } : undefined) : undefined,
@@ -2486,7 +2491,7 @@ function identityKey(identity: Pick<SourceItemIdentity, 'provider' | 'accountSco
  * were classified. A record of the same version with another body is judged again, never placed by the plan of
  * the one before it.
  */
-function planKey(item: RawItem): string {
+function planKey(connector: Pick<SourceConnector, 'classificationSignals'>, item: RawItem): string {
   const judged = createHash('sha256')
     .update(JSON.stringify([
       item.content.kind,
@@ -2494,6 +2499,7 @@ function planKey(item: RawItem): string {
       stringMetadata(item, ['title', 'name', 'subject']) ?? '',
       stringMetadata(item, ['locatorUri', 'pathDisplay', 'url']) ?? '',
       item.metadata['deleted'] === true,
+      listedLabelObservation(connector, item),
     ]))
     .digest('hex');
   return `${identityKey(item.identity)}\u0000${item.identity.sourceVersion ?? ''}\u0000${judged}`;

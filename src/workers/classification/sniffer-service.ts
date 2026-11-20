@@ -55,6 +55,7 @@ import {
 } from '../connector-store/tier-rejudge.ts';
 import { settleNamesOnlyItemsOffThread } from '../connector-store/tier-names-only-settle.ts';
 import { settlePersonalFirstItemsOffThread } from '../connector-store/tier-held-settle.ts';
+import { withTierRuleFence, tierMoveRuleAuthorization } from '../connector-store/tier-move-rule-policy.ts';
 import { ownerRuleSweepsComplete, sweepOwnerRuleRaisesOffThread } from '../connector-store/tier-rules-sweep.ts';
 import { applyOwnerOverridesOffThread } from '../connector-store/tier-override-settle.ts';
 import { retireSecretRedactions, retrySecretSideStoreDebtsOffThread } from '../connector-store/secrets-disposition.ts';
@@ -431,10 +432,12 @@ export async function storedPersonalLoweringLap(
     await turn();
     // A rule may have changed or a provider may have reopened a sweep while we yielded.
     let rulesReady = true;
-    const queued = set.ledger.queueStoredPersonalLowering(recordIdentity(record), decision => {
+    const queued = withTierRuleFence(set, () => set.ledger.queueStoredPersonalLowering(recordIdentity(record), (decision, current, copies) => {
       rulesReady = ownerRuleSweepsComplete(set);
-      return rulesReady ? set.placementFor(decision) : undefined;
-    });
+      if (!rulesReady) return undefined;
+      const plan = set.placementFor(decision);
+      return tierMoveRuleAuthorization(set, current, decision, copies, plan.copies) !== undefined ? plan : undefined;
+    }));
     if (!rulesReady) return { ...retryPage, changed };
     if (queued) changed = true;
   }

@@ -153,7 +153,7 @@ describe('the previous release opens a store the next one changed additively', (
     const reader = open(true);
     reader.close();
     const db = new Database(dbPath, { readonly: true });
-    expect(readSqliteSchemaVersion(db, 'connector-store')).toBe(18);
+    expect(readSqliteSchemaVersion(db, 'connector-store')).toBe(19);
     db.close();
   });
 

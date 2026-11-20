@@ -17,7 +17,8 @@
 // (a bounded list in the ledger) until the rule can act on it.
 //
 // What a store keeps is what is matched: the title, a path-shaped locator,
-// the stored scope and chat keys, and the sender. Labels are not kept, and a
+// the stored scope and chat keys, and the sender. The mover can also use a label snapshot for a provider
+// that lists labels with the item. For mutable server labels a
 // mailbox provider never lists an item it already holds again, so a label rule
 // cannot wait for "the next listing": the provider's own lane applies it by
 // asking which items carry the label (sweepLabelRuleRaises, below). That pass
@@ -25,6 +26,7 @@
 // for every page; the stored-names pass above never completes one.
 
 import { randomUUID } from 'node:crypto';
+import { connectorLabelCapability } from '../../core/source-connector-labels.ts';
 import {
   classifyItemTiers,
   maxTier,
@@ -107,7 +109,11 @@ export function ownerRuleSweepsComplete(set: TieredStoreSet): boolean {
   const outstanding = raising.filter(rule => isLabelRule(rule) || !stored.done.includes(ruleKey(rule)));
   if (!outstanding.length) return true;
   for (const { provider, accountScope } of ledger.storedAccounts()) {
-    const applicable = outstanding.filter(rule => rule.source === undefined || rule.source === provider);
+    // Only an explicit stored-proof capability replaces this sweep's existing
+    // account-wide prerequisite. Unknown providers keep waiting for a receipt.
+    const usesStoredLabels = connectorLabelCapability(provider)?.proof === 'stored';
+    const applicable = outstanding.filter(rule => (rule.source === undefined || rule.source === provider)
+      && (!isLabelRule(rule) || !usesStoredLabels));
     if (!applicable.length) continue;
     const labels = readLabelState(ledger.readMeta(labelSweepMetaKey(provider, accountScope)));
     for (const rule of applicable) {
@@ -136,8 +142,8 @@ function* ownerRuleRaisesPass(options: { set: TieredStoreSet; limit?: number }):
   // nothing is judged from rules that cannot be trusted.
   if (!classification || classification.unavailableReason) return report;
   const ledger = set.ledger;
-  // Label rules are not decidable from what a store keeps: they never count
-  // as swept here (sweepLabelRuleRaises owns them).
+  // This sweep records completion for field rules. Per-item label proof
+  // does not complete a provider walk.
   const raising = (classification.rules ?? []).filter((rule) => isRaisingRule(rule) && !isLabelRule(rule));
   const keyed = new Map(raising.map((rule) => [ruleKey(rule), rule]));
   const state = readState(ledger.readMeta(SWEEP_META_KEY));

@@ -138,7 +138,7 @@ test('the bounded recency reads preserve order, filters, and neighbouring conver
     expect(indexes.map((index) => indexSql(db, index))).toEqual([undefined, undefined]);
     const openStamp = db.query<{ user_version: number }, []>('PRAGMA user_version').get()!.user_version;
     const schemaVersion = (connection: Database) => connection.query("SELECT version FROM schema_version WHERE store_id = 'connector-store'").get();
-    expect(schemaVersion(db)).toEqual({ version: 17 });
+    expect(schemaVersion(db)).toEqual({ version: 18 });
 
     // Ingest preempts the first build. An existing writer owns the WAL write
     // lock during the next attempt. The build defers and the
@@ -153,7 +153,7 @@ test('the bounded recency reads preserve order, filters, and neighbouring conver
     expect(indexes.map((index) => indexSql(built, index))).toEqual(ddl);
     expect(built.query('PRAGMA user_version').get()).toEqual({ user_version: openStamp });
     expect(connectorStoreOpenStamp(built)).toBe(openStamp);
-    expect(schemaVersion(built)).toEqual({ version: 17 });
+    expect(schemaVersion(built)).toEqual({ version: 18 });
     for (const [i, read] of reads.entries()) {
       const details = plan(built, read);
       if (i === 0) expect(details).toContain(`SCAN i USING INDEX ${GLOBAL_INDEX}`);

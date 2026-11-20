@@ -80,6 +80,8 @@ describe('Readwise thin connector and canonical store', () => {
         text: 'Reader one private marker',
       },
     });
+    expect(connector.classificationSignals(items[0]!).labels).toEqual(['Garden plans', 'spring']);
+    expect(connector.classificationSignals(items[1]!).labels).toEqual(['orchard', 'Garden plans']);
     const highlight = items.find((item) => item.identity.providerItemId === 'highlight-7');
     expect(highlight).toMatchObject({
       identity: {
@@ -449,8 +451,10 @@ function paginatedReadwiseFetch(
         count: 2,
         nextPageCursor: 'reader-cursor-2',
         results: [
-          { id: 'reader-1', title: 'Reader one', summary: 'Reader one private marker' },
-          { id: 'reader-2', title: 'Reader two', summary: 'Reader two private marker' },
+          { id: 'reader-1', title: 'Reader one', summary: 'Reader one private marker',
+            tags: { 'garden-plans': { name: 'Garden plans', type: 'manual', created: 1760000000000 }, spring: {} } },
+          { id: 'reader-2', title: 'Reader two', summary: 'Reader two private marker',
+            tags: ['orchard', { name: 'Garden plans' }, 'orchard'] },
         ],
       });
     }

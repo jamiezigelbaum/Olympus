@@ -513,7 +513,7 @@ function rawItemFromReaderDocument(
   const documentId = providerItemId;
   const title = optionalString(document.title) ?? `Readwise document ${providerItemId}`;
   const author = optionalString(document.author);
-  const tags = tagNames(document.tags);
+  const tags = readerTagNames(document.tags);
   const sourceUrl = optionalString(document.source_url) ?? optionalString(document.url);
   const readwiseUrl = optionalString(document.readwise_url);
   const locatorUri = sourceUrl ?? readwiseUrl;
@@ -791,6 +791,13 @@ function optionalId(value: unknown): string | undefined {
 
 function optionalString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function readerTagNames(value: unknown): string[] {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return tagNames(value);
+  // Reader returns a map keyed by tag. Use the display name when available.
+  return dedupeStrings(Object.entries(value).map(([key, tag]) =>
+    tag && typeof tag === 'object' ? optionalString((tag as Record<string, unknown>).name) ?? key : key));
 }
 
 function tagNames(value: unknown): string[] {

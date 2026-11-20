@@ -25,7 +25,7 @@
 import { createHash } from 'node:crypto';
 import type { SourceItemIdentity, SourceTrustDomain } from '../../core/source-index/types.ts';
 import { detectSecretFindingKinds } from '../classification/engine.ts';
-import { contentDigestReason, contentHeldForJudgment, maxTier, personalContentAuthorized, tierRank, type ItemTierOverride, type TierDecision, type TierKey } from '../classification/tier-classifier.ts';
+import { contentDigestReason, contentReceiptRefusal, contentHeldForJudgment, maxTier, personalContentAuthorized, tierRank, type ItemTierOverride, type TierDecision, type TierKey } from '../classification/tier-classifier.ts';
 import {
   copyServingLayer,
   loweredCopyLayers,
@@ -730,15 +730,11 @@ function contentMoveRefusal(
   if (destination === 'internal' && copy?.chunks.length === 0) return undefined;
   const text = copy?.chunks.map(chunk => chunk.boundedText).join('');
   const image = copy?.chunks.find(chunk => chunk.mediaJudgment)?.mediaJudgment;
-  const receipts = evidence.reasons.filter(reason => reason.startsWith('content:sha256:'));
   const code = text === undefined ? 'content_no_copy'
     : evidence.contentPending ? 'content_still_pending'
-    : receipts.length === 0 ? 'content_no_receipt'
-    : receipts.length > 1 ? 'content_several_receipts'
-    : receipts[0] !== contentDigestReason(text) ? 'content_receipt_mismatch'
-    : destination === 'internal' && !personalContentAuthorized(evidence, text, override?.kind === 'not_secret', override,
-      image && imageJudgmentSignal(image)) ? 'content_no_authority'
-    : undefined;
+    : contentReceiptRefusal(evidence.reasons, contentDigestReason(text))
+      ?? (destination === 'internal' && !personalContentAuthorized(evidence, text, override?.kind === 'not_secret', override,
+        image && imageJudgmentSignal(image)) ? 'content_no_authority' : undefined);
   return code && new TierMoveContentChangedError('Stored content requires a matching settled verdict before moving.', code);
 }
 

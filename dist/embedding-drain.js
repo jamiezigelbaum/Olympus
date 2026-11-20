@@ -1029,12 +1029,12 @@ function tierSnifferPathForStore(storeDbPath) {
 
 // src/core/source-connector-labels.ts
 var NOTE_TAGS_METADATA_KEY = "tags";
-var GMAIL_LABEL_CAPABILITY = { provider: "gmail", metadataKey: "labels" };
-var MBOX_LABEL_CAPABILITY = { provider: "mbox", metadataKey: "labels" };
-var EVERNOTE_LABEL_CAPABILITY = { provider: "evernote", metadataKey: NOTE_TAGS_METADATA_KEY };
-var READWISE_LABEL_CAPABILITY = { provider: "readwise", metadataKey: NOTE_TAGS_METADATA_KEY };
-var REFLECT_LABEL_CAPABILITY = { provider: "reflect", metadataKey: NOTE_TAGS_METADATA_KEY };
-var TELEGRAM_LABEL_CAPABILITY = { provider: "telegram" };
+var GMAIL_LABEL_CAPABILITY = { provider: "gmail", proof: "provider_walk", metadataKey: "labels" };
+var MBOX_LABEL_CAPABILITY = { provider: "mbox", proof: "stored", metadataKey: "labels" };
+var EVERNOTE_LABEL_CAPABILITY = { provider: "evernote", proof: "stored", metadataKey: NOTE_TAGS_METADATA_KEY };
+var READWISE_LABEL_CAPABILITY = { provider: "readwise", proof: "stored", metadataKey: NOTE_TAGS_METADATA_KEY };
+var REFLECT_LABEL_CAPABILITY = { provider: "reflect", proof: "stored", metadataKey: NOTE_TAGS_METADATA_KEY };
+var TELEGRAM_LABEL_CAPABILITY = { provider: "telegram", proof: "stored" };
 var capabilities = [
   GMAIL_LABEL_CAPABILITY,
   MBOX_LABEL_CAPABILITY,
@@ -1044,6 +1044,14 @@ var capabilities = [
   TELEGRAM_LABEL_CAPABILITY
 ];
 var byProvider = new Map(capabilities.map((capability) => [capability.provider, capability]));
+function connectorLabelCapability(provider) {
+  return byProvider.get(provider);
+}
+function listedLabelObservation(connector, item) {
+  if (connectorLabelCapability(item.identity.provider)?.proof !== "stored")
+    return;
+  return JSON.stringify([...new Set((connector.classificationSignals(item).labels ?? []).map((label) => label.trim().toLowerCase()))].sort());
+}
 
 // src/core/archive-formats.ts
 var FROM_LINE = [70, 114, 111, 109, 32];
@@ -2423,7 +2431,7 @@ function withSqliteFiles(path) {
 }
 
 // scripts/source-embedding-drain.ts
-import { createHash as createHash14 } from "node:crypto";
+import { createHash as createHash15 } from "node:crypto";
 import { existsSync as existsSync23, lstatSync as lstatSync10, mkdirSync as mkdirSync14, writeFileSync as writeFileSync7 } from "node:fs";
 import { dirname as dirname24, isAbsolute as isAbsolute15 } from "node:path";
 
@@ -18002,7 +18010,7 @@ function hasImmutableAccountLabel(id) {
 }
 
 // src/workers/connector-store/local-index.ts
-import { createHash as createHash13, randomUUID as randomUUID9 } from "node:crypto";
+import { createHash as createHash14, randomUUID as randomUUID9 } from "node:crypto";
 import { closeSync as closeSync11, existsSync as existsSync22, fsyncSync as fsyncSync3, lstatSync as lstatSync9, mkdirSync as mkdirSync13, openSync as openSync11, statSync as statSync13, statfsSync } from "node:fs";
 import { open as openFile } from "node:fs/promises";
 import { basename as basename7, dirname as dirname23, resolve as resolve10 } from "node:path";
@@ -19221,10 +19229,10 @@ class TierLedger {
       if (!judgedPersonal(record) || record.reasons.filter((reason) => reason.startsWith("content:sha256:")).length !== 1)
         return false;
       const decision = decisionOfRow(record);
-      const plan = placementFor(decision);
+      const copies = this.copies(identity).filter((copy) => copy.state === "current");
+      const plan = placementFor(decision, record, copies);
       if (!plan)
         return false;
-      const copies = this.copies(identity).filter((copy) => copy.state === "current");
       const source = copyServingLayer(copies, "content");
       const target = copyServingLayer(plan.copies, "content");
       if (!source || !target || trustDomainRank(target.trustDomain) >= trustDomainRank(source.trustDomain) || placementIsRaise(copies, plan.copies))
@@ -23475,6 +23483,34 @@ async function judgeReturnedImageVectors(provider, vectors, thresholds = MEDIA_J
   return vectors.map((vector) => judgeImageVector(vector, prompts, judgeId, thresholds));
 }
 
+// src/workers/connector-store/stored-names.ts
+function storedSignals(copy) {
+  const text = (value) => typeof value === "string" && value.trim() ? value.trim() : undefined;
+  const title = text(copy.columns["title"]);
+  const locator = text(copy.columns["locator_uri"]);
+  const path = locator?.startsWith("/") ? locator : undefined;
+  const sender = text(copy.columns["sender_label"]) ?? text(copy.columns["sender_id"]);
+  let folderKeys = [];
+  const keysJson = text(copy.columns["source_scope_folder_keys_json"]);
+  if (keysJson) {
+    try {
+      const parsed = JSON.parse(keysJson);
+      if (Array.isArray(parsed))
+        folderKeys = parsed.filter((key) => typeof key === "string");
+    } catch {
+      folderKeys = [];
+    }
+  }
+  if (copy.identity.providerConversationId)
+    folderKeys.push(copy.identity.providerConversationId);
+  return {
+    ...title ? { title } : {},
+    ...path ? { path } : {},
+    ...folderKeys.length > 0 ? { folderKeys } : {},
+    ...sender ? { sender } : {}
+  };
+}
+
 // src/workers/connector-store/child-visibility.ts
 function* visibilityRead(here, offThread) {
   return yield { here, offThread };
@@ -24496,7 +24532,107 @@ var EMBEDDING_LEDGER_BACKFILL = PUBLIC_RUNTIME_BUILD ? [] : [
 ];
 
 // src/workers/connector-store/tier-move-rule-policy.ts
+import { createHash as createHash13 } from "node:crypto";
 var heldPolicyFences = new WeakMap;
+function servingNames(set, record) {
+  const identity = tierLedgerIdentityOfRecord(record);
+  const copies = set.ledger.copies(identity);
+  const source = copyServingLayer(copies.filter((copy) => copy.state === "current"), "metadata") ?? (record.state === "moving" ? copyServingLayer(copies.filter((copy) => copy.state === "superseded" && copy.supersededByGeneration === record.generation + 1), "metadata") : undefined);
+  return source && set.store(source.trustDomain)?.exportItemNames(identity);
+}
+var moveRuleChecks = {
+  override: (a) => !tierMoveOverrideConflict(a.override, a.record, a.target, a.sources, a.destination),
+  policy: (a) => !Number.isFinite(a.ceiling) || !a.policy.unavailable,
+  publicTier: (a) => !a.policy.retirePublic || a.ceiling >= tierRank("private"),
+  storedFields: (a) => {
+    const rules = a.rules.filter((rule) => rule.match.kind !== "label");
+    if (!rules.length)
+      return true;
+    const names = a.names();
+    if (!names)
+      return false;
+    const signals = storedSignals(names);
+    return !rules.some((rule) => ownerRuleMatches(rule, signals, a.record.provider));
+  },
+  labels: (a) => labelRulesWithoutNonmatch(a.set, a.record, a.policy, applicableProviderLabelRules(a.rules, a.record.provider), a.names).length === 0
+};
+var moveRuleRegistry = Object.values(moveRuleChecks);
+function applicableProviderLabelRules(rules, provider) {
+  if (!connectorLabelCapability(provider))
+    return [];
+  return rules.filter((rule) => rule.match.kind === "label" && ownerRuleMatches(rule, { labels: [rule.match.value] }, provider));
+}
+function labelRulesWithoutNonmatch(set, record, policy, rules, names = () => servingNames(set, record)) {
+  if (rules.length === 0 || policy.unavailable)
+    return rules;
+  const { provider, accountScope, providerItemId } = record;
+  const capability = connectorLabelCapability(provider);
+  if (!capability)
+    return rules;
+  if (capability.proof === "stored") {
+    const raw = names()?.columns.classification_labels_json;
+    if (typeof raw !== "string")
+      return rules;
+    const labels = JSON.parse(raw);
+    if (!Array.isArray(labels) || !labels.every((label) => typeof label === "string"))
+      return rules;
+    return rules.filter((rule) => ownerRuleMatches(rule, { labels }, provider));
+  }
+  const progress = readLabelState(set.ledger.readMeta(labelSweepMetaKey(provider, accountScope)));
+  if (!labelSweepHasPolicy(progress, policy, provider, accountScope))
+    return rules;
+  const itemKey = labelEvidenceItemKey(providerItemId);
+  return rules.filter((rule) => {
+    const key = ruleKey(rule);
+    const walkId = progress.completed?.[key];
+    return !walkId || !progress.done.includes(key) || !!progress.walks?.[key] || set.ledger.labelRuleMatched(provider, accountScope, key, walkId, itemKey);
+  });
+}
+function labelSweepHasPolicy(state, policy, provider, accountScope) {
+  return state.revision === policy.revision && state.provider === provider && state.accountScope === accountScope;
+}
+function readLabelState(raw) {
+  if (!raw)
+    return { done: [] };
+  try {
+    const parsed = JSON.parse(raw);
+    const walks = {};
+    for (const [key, walk] of Object.entries(parsed.walks ?? {})) {
+      if (walk && isWalkId(walk.id)) {
+        walks[key] = {
+          id: walk.id,
+          ...typeof walk.pageToken === "string" && walk.pageToken ? { pageToken: walk.pageToken } : {},
+          ...walk.deferred === true ? { deferred: true } : {}
+        };
+      }
+    }
+    const completed = Object.fromEntries(Object.entries(parsed.completed ?? {}).filter(([, id]) => isWalkId(id)));
+    const strings = (value) => Array.isArray(value) ? value.filter((key) => typeof key === "string") : [];
+    return {
+      ...typeof parsed.revision === "string" ? { revision: parsed.revision } : {},
+      ...typeof parsed.provider === "string" ? { provider: parsed.provider } : {},
+      ...typeof parsed.accountScope === "string" ? { accountScope: parsed.accountScope } : {},
+      done: strings(parsed.done),
+      completed,
+      walks,
+      order: strings(parsed.order)
+    };
+  } catch {
+    return { done: [] };
+  }
+}
+function isWalkId(value) {
+  return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
+}
+function ruleKey(rule) {
+  return digest([rule.id, rule.source ?? "", rule.match.kind, rule.match.value, rule.tier, rule.strength]).slice(0, 24);
+}
+function labelEvidenceItemKey(providerItemId) {
+  return digest(providerItemId);
+}
+function digest(value) {
+  return createHash13("sha256").update(JSON.stringify(value)).digest("hex");
+}
 
 // src/workers/answer-activity.ts
 var DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
@@ -25088,7 +25224,7 @@ var CONTAINER_MIME_TYPES = Object.freeze([
 ]);
 var CONTAINER_MIME_TYPES_SQL = CONTAINER_MIME_TYPES.map((type) => `'${type}'`).join(", ");
 var SQLITE_STORE_ID = "connector-store";
-var CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 17;
+var CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 18;
 var IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only";
 var CHUNK_MEDIA_RETRY_BASE_MS = 60 * 60000;
 var CHUNK_MEDIA_MAX_ATTEMPTS = 3;
@@ -25241,6 +25377,9 @@ function connectorStoreMigrations() {
     additiveMigration(17, "connector_store_on_demand_grant_epoch", [
       "CREATE TABLE IF NOT EXISTS on_demand_grant_epoch (id INTEGER PRIMARY KEY CHECK (id = 1), epoch INTEGER NOT NULL)",
       "CREATE TABLE IF NOT EXISTS on_demand_grant_acquisitions (local_item_id TEXT PRIMARY KEY, epoch INTEGER NOT NULL)"
+    ]),
+    additiveMigration(18, "connector_store_classification_labels", [
+      "ALTER TABLE items ADD COLUMN classification_labels_json TEXT"
     ])
   ];
 }
@@ -26233,6 +26372,7 @@ class LocalConnectorStore {
   exclusions;
   reactionsColumnPresent = false;
   childItemColumnsPresent = false;
+  classificationLabelsPresent = false;
   childLane;
   chunkMediaColumnsPresent = false;
   imageMediaReadsPresent = false;
@@ -26348,7 +26488,9 @@ class LocalConnectorStore {
         WHERE (type = 'table' AND name IN ('item_visibility_feed', 'tier_visibility_members', 'tier_visibility_state'))
           OR (type = 'trigger' AND name IN (SELECT value FROM json_each(?)))`).get(JSON.stringify(CONNECTOR_STORE_VISIBILITY_TRIGGERS)).present === 3 + CONNECTOR_STORE_VISIBILITY_TRIGGERS.length;
       this.reactionsColumnPresent = tableColumns(this.db, "items", false).includes("reactions_json");
-      this.childItemColumnsPresent = tableColumns(this.db, "items", false).includes("parent_local_item_id");
+      const itemColumns = tableColumns(this.db, "items", false);
+      this.childItemColumnsPresent = itemColumns.includes("parent_local_item_id");
+      this.classificationLabelsPresent = itemColumns.includes("classification_labels_json");
       this.chunkMediaColumnsPresent = tableColumns(this.db, "chunks", false).includes("media_sha256");
       this.imageMediaReadsPresent = this.db.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'image_media_reads'").get() !== null;
       this.onDemandReadsTablePresent = !this.readOnly || this.db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'on_demand_item_reads'").get() !== null;
@@ -27763,13 +27905,28 @@ class LocalConnectorStore {
     `).all(identity.provider, identity.accountScope, identity.providerItemId).map((row) => row.provider_conversation_id);
   }
   advanceItemVersion(identity, options = {}) {
-    if (identity.sourceVersion === undefined)
+    if (identity.sourceVersion === undefined && (options.onlyTombstoned || connectorLabelCapability(identity.provider)?.proof !== "stored"))
       return;
-    this.db.query(`
-      UPDATE items SET source_version = ?
+    const params = [
+      identity.sourceVersion ?? null,
+      identity.provider,
+      identity.accountScope,
+      normalizeConversationId(identity.providerConversationId),
+      identity.providerItemId
+    ];
+    const update = `UPDATE items SET source_version = COALESCE(?, source_version)
       WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
-        ${options.onlyTombstoned === true ? "AND tombstoned = 1" : ""}
-    `).run(identity.sourceVersion, identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
+        ${options.onlyTombstoned ? "AND tombstoned = 1" : ""}`;
+    if (this.classificationLabelsPresent && options.observedLabels !== undefined) {
+      this.db.transaction(() => {
+        const prior = this.db.query(`${update} RETURNING item_pk, classification_labels_json`).get(...params);
+        if (prior && prior.classification_labels_json === options.observedLabels) {
+          this.writeLabelObservation(prior.item_pk, options.observedLabels);
+        }
+      })();
+    } else {
+      this.db.query(update).run(...params);
+    }
   }
   hasItemRow(identity) {
     return this.db.query(`
@@ -28573,14 +28730,18 @@ ${parentKey(ref)}`, { ref, origin });
   }
   itemNamesRow(identity) {
     const row = this.db.query(`
-      SELECT item_pk, trust_tier, ${CONNECTOR_STORE_COPY_ITEM_COLUMNS.map((column) => this.childItemColumnsPresent || !CONNECTOR_STORE_CHILD_ITEM_COLUMNS.includes(column) ? column : `NULL AS ${column}`).join(", ")}
+      SELECT item_pk, trust_tier, ${CONNECTOR_STORE_COPY_ITEM_COLUMNS.map((column) => {
+      if (column === "classification_labels_json")
+        return this.classificationLabelsPresent ? "CASE WHEN json_valid(classification_labels_json) THEN classification_labels_json END AS classification_labels_json" : "NULL AS classification_labels_json";
+      return this.childItemColumnsPresent || !CONNECTOR_STORE_CHILD_ITEM_COLUMNS.includes(column) ? column : `NULL AS ${column}`;
+    }).join(", ")}
       FROM items
       WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
         AND tombstoned = 0
     `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
     if (!row)
       return;
-    const columns = Object.fromEntries(CONNECTOR_STORE_COPY_ITEM_COLUMNS.map((column) => [column, row[column] ?? null]));
+    const columns = Object.fromEntries(CONNECTOR_STORE_COPY_ITEM_COLUMNS.filter((column) => column !== "classification_labels_json" || row[column] != null).map((column) => [column, row[column] ?? null]));
     const optional = (column) => columns[column] === null || columns[column] === undefined ? undefined : String(columns[column]);
     const names = {
       identity: {
@@ -28671,19 +28832,21 @@ ${parentKey(ref)}`, { ref, origin });
           items_indexed, started_at, completed_at
         ) VALUES (?, ?, ?, 'completed', NULL, 1, 1, ?, ?)
       `).run(syncRunId, this.corpusId, options.syncConnectorId, now, now);
-      const columnList = CONNECTOR_STORE_COPY_ITEM_COLUMNS.join(", ");
-      const updates = CONNECTOR_STORE_COPY_ITEM_COLUMNS.filter((column) => column !== "provider" && column !== "account_scope" && column !== "provider_item_id").map((column) => `${column} = excluded.${column}`).join(", ");
+      const rowColumns = CONNECTOR_STORE_COPY_ITEM_COLUMNS.filter((column) => column !== "classification_labels_json");
+      const columnList = rowColumns.join(", ");
+      const updates = rowColumns.filter((column) => column !== "provider" && column !== "account_scope" && column !== "provider_item_id").map((column) => `${column} = excluded.${column}`).join(", ");
       this.db.query(`
         INSERT INTO items (${columnList}, indexed_at, trust_tier, tombstoned, deleted_at, sync_run_id)
-        VALUES (${CONNECTOR_STORE_COPY_ITEM_COLUMNS.map(() => "?").join(", ")}, ?, ?, 0, NULL, ?)
+        VALUES (${rowColumns.map(() => "?").join(", ")}, ?, ?, 0, NULL, ?)
         ON CONFLICT(provider, account_scope, normalized_conversation, provider_item_id) DO UPDATE SET
           ${updates}, indexed_at = excluded.indexed_at, trust_tier = excluded.trust_tier,
           tombstoned = 0, deleted_at = NULL, sync_run_id = excluded.sync_run_id
-      `).run(...CONNECTOR_STORE_COPY_ITEM_COLUMNS.map((column) => copy.columns[column] ?? null), now, sensitivity.trustTier, syncRunId);
+      `).run(...rowColumns.map((column) => copy.columns[column] ?? null), now, sensitivity.trustTier, syncRunId);
       const itemPk = this.db.query(`
         SELECT item_pk FROM items
         WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
       `).get(copy.identity.provider, copy.identity.accountScope, normalizeConversationId(copy.identity.providerConversationId), copy.identity.providerItemId).item_pk;
+      this.writeLabelObservation(itemPk, copy.columns.classification_labels_json);
       for (const owner of copy.owners) {
         this.db.query(`
           INSERT INTO item_owners (
@@ -30501,7 +30664,7 @@ ${parentKey(ref)}`, { ref, origin });
         embeddingsComplete: false
       };
     }
-    const chunkTextCoherent = chunkRows.every((chunk) => createHash13("sha256").update(chunk.bounded_text).digest("hex") === chunk.content_hash);
+    const chunkTextCoherent = chunkRows.every((chunk) => createHash14("sha256").update(chunk.bounded_text).digest("hex") === chunk.content_hash);
     if (!chunkTextCoherent) {
       return {
         chunksIndexed: 0,
@@ -31488,8 +31651,8 @@ ${parentKey(ref)}`, { ref, origin });
       itemsUnchanged: 0,
       itemsMissing: 0
     };
-    const inputDigest = createHash13("sha256");
-    const outputDigest = createHash13("sha256");
+    const inputDigest = createHash14("sha256");
+    const outputDigest = createHash14("sha256");
     const select = this.db.query(`
       SELECT item_pk, sender_id, sender_label, sender_is_owner
       FROM items
@@ -31566,8 +31729,8 @@ ${parentKey(ref)}`, { ref, origin });
       ftsRowsRefreshed: 0,
       chunkEmbeddingInputsInvalidated: 0
     };
-    const inputDigest = createHash13("sha256");
-    const outputDigest = createHash13("sha256");
+    const inputDigest = createHash14("sha256");
+    const outputDigest = createHash14("sha256");
     let lastItemPk = startAfter;
     let hasMore = false;
     while (maxItems === undefined || counts.itemsScanned < maxItems) {
@@ -32086,7 +32249,7 @@ ${parentKey(ref)}`, { ref, origin });
           const sourceScopeObservation = options?.sourceScopeObservation ? normalizeSourceScopeObservation(options.sourceScopeObservation(itemForStorage)) : undefined;
           let upsert;
           try {
-            upsert = this.upsertItemWithOwner(itemForStorage, sensitivity, connector.id, ownershipKind, syncRunId, options?.ownerObservation ?? "provider_listing", (deferMetadataOnlyContent || itemForStorage.deferredBytes !== undefined) && itemForStorage.content.kind === "metadata_only", false, (deferMetadataOnlyContent || itemForStorage.deferredBytes !== undefined) && itemForStorage.content.kind === "metadata_only", sourceScopeObservation, routedLayer && routedLayer !== "metadata" ? "content" : undefined);
+            upsert = this.upsertItemWithOwner(itemForStorage, sensitivity, connector.id, ownershipKind, syncRunId, options?.ownerObservation ?? "provider_listing", (deferMetadataOnlyContent || itemForStorage.deferredBytes !== undefined) && itemForStorage.content.kind === "metadata_only", false, (deferMetadataOnlyContent || itemForStorage.deferredBytes !== undefined) && itemForStorage.content.kind === "metadata_only", sourceScopeObservation, routedLayer && routedLayer !== "metadata" ? "content" : undefined, options?.ownerObservation !== "local_write" && routedLayer !== "content" ? listedLabelObservation(connector, itemForStorage) : undefined);
           } catch (error) {
             if (!(error instanceof ConnectorStoreTierWriteRefusedError))
               throw error;
@@ -32241,6 +32404,11 @@ ${parentKey(ref)}`, { ref, origin });
       }
     };
   }
+  writeLabelObservation(itemPk, labels) {
+    if (this.classificationLabelsPresent && typeof labels === "string") {
+      this.db.query("UPDATE items SET classification_labels_json = ? WHERE item_pk = ?").run(labels, itemPk);
+    }
+  }
   upsertItem(item, sensitivity, syncRunId, preserveStoredSearchText = false, preserveStoredSearchTextOwnedFacets = false, preserveStoredContentHash = false, sourceScopeObservation) {
     const exclusion = this.exclusions.evaluateMetadata(item.metadata);
     if (exclusion.excluded)
@@ -32353,12 +32521,15 @@ ${parentKey(ref)}`, { ref, origin });
       return false;
     }
   }
-  upsertItemWithOwner(item, sensitivity, connectorId, ownershipKind, syncRunId, observation, preserveStoredSearchText = false, preserveStoredSearchTextOwnedFacets = false, preserveStoredContentHash = false, sourceScopeObservation, requiredLayer = textFromRawItem(item) === undefined ? "metadata" : "content") {
+  upsertItemWithOwner(item, sensitivity, connectorId, ownershipKind, syncRunId, observation, preserveStoredSearchText = false, preserveStoredSearchTextOwnedFacets = false, preserveStoredContentHash = false, sourceScopeObservation, requiredLayer = textFromRawItem(item) === undefined ? "metadata" : "content", observedLabels) {
     const tierLedgerForWrite = this.visibilityLedger();
     const written = this.db.transaction(() => {
       if (!this.tierWriteAllowed(item.identity, requiredLayer, tierLedgerForWrite))
         throw new ConnectorStoreTierWriteRefusedError;
+      const previous = observation === "local_write" && this.classificationLabelsPresent && connectorLabelCapability(item.identity.provider)?.proof === "stored" ? this.exportItemNames(item.identity) : undefined;
+      const labels = observedLabels ?? (previous && previous.identity.sourceVersion === item.identity.sourceVersion ? previous.columns.classification_labels_json : undefined);
       const upsert = this.upsertItem(item, sensitivity, syncRunId, preserveStoredSearchText, preserveStoredSearchTextOwnedFacets, preserveStoredContentHash, sourceScopeObservation);
+      this.writeLabelObservation(upsert.itemPk, labels);
       this.rememberItemOwner(upsert.itemPk, connectorId, ownershipKind, syncRunId, this.now().toISOString(), observation);
       const missingScopeMetadataRow = sourceScopeObservation !== undefined && !this.db.query(`
           SELECT 1 AS present FROM connector_store_fts_rows
@@ -36091,7 +36262,7 @@ function connectorStoreEmbeddingSelectionSha256(localItemIds) {
   return hashString2(JSON.stringify(normalized ? [...normalized].sort() : null));
 }
 function connectorStoreEmbeddingInputSha256(rows) {
-  const digest = createHash13("sha256");
+  const digest = createHash14("sha256");
   for (const row of rows)
     digest.update(`${row.chunk_pk}\x00${row.content_hash}
 `);
@@ -36236,7 +36407,8 @@ var CONNECTOR_STORE_COPY_ITEM_COLUMNS = [
   "parent_local_item_id",
   "deferred_locator",
   "bytes_available",
-  "size_bytes"
+  "size_bytes",
+  "classification_labels_json"
 ];
 var CONNECTOR_STORE_CHILD_ITEM_COLUMNS = [
   "parent_local_item_id",
@@ -36258,7 +36430,7 @@ function namesOnlyKeptCount(n) {
   return n > 0 ? { namesOnlyKeptChunks: n } : {};
 }
 function migrationFingerprint(contentHash, chunkHashes) {
-  return createHash13("sha256").update(contentHash ?? "").update("\x00").update(String(chunkHashes.length)).update("\x00").update(chunkHashes.join("\x00")).digest("hex");
+  return createHash14("sha256").update(contentHash ?? "").update("\x00").update(String(chunkHashes.length)).update("\x00").update(chunkHashes.join("\x00")).digest("hex");
 }
 function carryHold(listed, fetched) {
   return listed.holdContentUntilJudged === true && fetched.holdContentUntilJudged !== true ? { ...fetched, holdContentUntilJudged: true } : fetched;
@@ -37413,6 +37585,7 @@ var CONNECTOR_STORE_V15_ITEM_COLUMNS = [
   "bytes_available",
   "size_bytes"
 ];
+var CONNECTOR_STORE_V18_ITEM_COLUMNS = [...CONNECTOR_STORE_V15_ITEM_COLUMNS, "classification_labels_json"];
 var CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS = [
   "item_pk",
   "claim_scope",
@@ -37461,7 +37634,7 @@ function validateCurrentConnectorStoreSchemaBeforeMigration(db) {
     validateConnectorStoreV12Schema(db, "v14", CONNECTOR_STORE_V13_CHUNK_COLUMNS);
   }
   if (version >= 15) {
-    validateConnectorStoreV12Schema(db, "v15", CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS);
+    validateConnectorStoreV12Schema(db, "v15", CONNECTOR_STORE_V13_CHUNK_COLUMNS, version >= 18 ? CONNECTOR_STORE_V18_ITEM_COLUMNS : CONNECTOR_STORE_V15_ITEM_COLUMNS);
     assertIndexColumns(db, "idx_connector_store_items_parent", ["parent_local_item_id"], "v15");
   }
   if (version >= 16)
@@ -37495,7 +37668,9 @@ function validateVectorDigestSchema(db) {
   assertTriggerExists(db, "connector_store_vector_digest_account", "v16");
 }
 function validateConnectorStoreSchema(db, version = CONNECTOR_STORE_SQLITE_SCHEMA_VERSION) {
-  validateConnectorStoreV12Schema(db, "v15", CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS);
+  validateConnectorStoreV12Schema(db, "v15", CONNECTOR_STORE_V13_CHUNK_COLUMNS, version >= 18 ? CONNECTOR_STORE_V18_ITEM_COLUMNS : CONNECTOR_STORE_V15_ITEM_COLUMNS);
+  if (version >= 18)
+    assertTriggerExists(db, "connector_store_invalidate_label_observation", "v18");
   if (version >= 16)
     validateVectorDigestSchema(db);
   if (version >= 17) {
@@ -37712,6 +37887,12 @@ function applyConnectorStoreOpenSchema(db, version = CONNECTOR_STORE_SQLITE_SCHE
   createOnDemandReads(db);
   if (version >= 17)
     createOnDemandGrantEpoch(db);
+  if (version >= 18) {
+    db.exec(`CREATE TRIGGER IF NOT EXISTS connector_store_invalidate_label_observation
+      AFTER UPDATE OF sync_run_id, source_version, tombstoned, title ON items
+      WHEN OLD.classification_labels_json IS NOT NULL
+      BEGIN UPDATE items SET classification_labels_json = NULL WHERE item_pk = NEW.item_pk; END`);
+  }
   validateConnectorStoreSchema(db, version);
 }
 var openShape;
@@ -38183,7 +38364,7 @@ function requireNonEmpty2(value, label) {
   return text;
 }
 function hashString2(value) {
-  return createHash13("sha256").update(value).digest("hex");
+  return createHash14("sha256").update(value).digest("hex");
 }
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
@@ -39337,7 +39518,7 @@ async function runSourceEmbeddingDrain(options) {
         }
       }
       consecutiveFailures = Math.max(...laneConsecutiveFailures);
-      scopeReport.errors.push(createHash14("sha256").update(message).digest("hex"));
+      scopeReport.errors.push(createHash15("sha256").update(message).digest("hex"));
       consecutiveIdleScopeChecks = 0;
       emitProgress();
       if (!isolatedLanes[item.laneIndex] && errorBackoffMs > 0) {
@@ -39667,7 +39848,7 @@ function normalizeOptionalList(values) {
   return [...new Set((values ?? []).map((value) => value.trim()).filter(Boolean))];
 }
 function hashScope(scope) {
-  return createHash14("sha256").update(scope).digest("hex").slice(0, 16);
+  return createHash15("sha256").update(scope).digest("hex").slice(0, 16);
 }
 function sum(items, value) {
   return items.reduce((total, item) => total + value(item), 0);

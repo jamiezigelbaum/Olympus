@@ -2009,7 +2009,9 @@ export class TierLedger {
     return windowSteps(STORED_PERSONAL_LOWERING, [], { ...options, examine: WINDOW_SLICE_ROWS });
   }
 
-  queueStoredPersonalLowering(identity: TierLedgerIdentity, placementFor: (decision: TierDecision) => TierPlacementPlan | undefined): boolean {
+  queueStoredPersonalLowering(identity: TierLedgerIdentity,
+    placementFor: (decision: TierDecision, record: TierLedgerRecord, copies: TierCopy[]) => TierPlacementPlan | undefined,
+  ): boolean {
     return this.db.transaction(() => {
       const row = this.db.query(`SELECT * FROM tier_items i WHERE provider = ? AND account_scope = ?
         AND conversation_key = ? AND provider_item_id = ? AND ${STORED_PERSONAL_LOWERING}`).get(...idParams(identity)) as TierItemRow | null;
@@ -2017,9 +2019,9 @@ export class TierLedger {
       const record = recordFromRow(row);
       if (!judgedPersonal(record) || record.reasons.filter(reason => reason.startsWith('content:sha256:')).length !== 1) return false;
       const decision = decisionOfRow(record);
-      const plan = placementFor(decision);
-      if (!plan) return false;
       const copies = this.copies(identity).filter(copy => copy.state === 'current');
+      const plan = placementFor(decision, record, copies);
+      if (!plan) return false;
       const source = copyServingLayer(copies, 'content');
       const target = copyServingLayer(plan.copies, 'content');
       if (!source || !target || trustDomainRank(target.trustDomain) >= trustDomainRank(source.trustDomain)

@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { withOwnerConfigLease } from '../../core/owner-config-read.ts';
 import { connectorLabelCapability } from '../../core/source-connector-labels.ts';
 import { registeredInstalledTierClassification } from '../classification/installed-tier-classification-registry.ts';
-import { ownerRuleMatches, tierRank, type OwnerTierRule, type TierKey } from '../classification/tier-classifier.ts';
+import { ownerRuleMatches, tierRank, type OwnerTierRule, type TierKey, type ItemTierOverride } from '../classification/tier-classifier.ts';
 import { copyServingLayer, labelSweepMetaKey, tierLedgerIdentityOfRecord, tierMoveOverrideConflict, trustDomainRank, type TierCopyPlan, type TierLedgerRecord } from '../classification/tier-ledger.ts';
 import { readDecisionRules, OLYMPUS_TIER_RULES_ENV, resolveTierRulesPath, tierRulesFileStamp } from '../classification/tier-rules.ts';
 import { storedSignals } from './stored-names.ts';
@@ -63,18 +63,58 @@ export function currentTierRulePolicy(set: TieredStoreSet): TierRulePolicy {
   return fence.policy;
 }
 
+type MoveTarget = { metadataTier: TierKey; contentTier: TierKey };
+type MoveCopies = readonly Pick<TierCopyPlan, 'trustDomain' | 'layers'>[];
+
+interface RuleAuthority {
+  set: TieredStoreSet;
+  record: TierLedgerRecord;
+  target: MoveTarget;
+  sources: MoveCopies;
+  destination: MoveCopies;
+  override: ItemTierOverride | undefined;
+  policy: TierRulePolicy;
+  ceiling: number;
+  rules: readonly OwnerTierRule[];
+  names: () => ReturnType<typeof servingNames>;
+}
+
+function servingNames(set: TieredStoreSet, record: TierLedgerRecord) {
+  const identity = tierLedgerIdentityOfRecord(record);
+  const copies = set.ledger.copies(identity);
+  const source = copyServingLayer(copies.filter(copy => copy.state === 'current'), 'metadata')
+    ?? (record.state === 'moving' ? copyServingLayer(copies.filter(copy => copy.state === 'superseded'
+      && copy.supersededByGeneration === record.generation + 1), 'metadata') : undefined);
+  return source && set.store(source.trustDomain)?.exportItemNames(identity);
+}
+
+// Each applicable check must authorize the move. Read the names only for rules that need them.
+const moveRuleChecks = {
+  override: (a) => !tierMoveOverrideConflict(a.override, a.record, a.target, a.sources, a.destination),
+  policy: (a) => !Number.isFinite(a.ceiling) || !a.policy.unavailable,
+  publicTier: (a) => !a.policy.retirePublic || a.ceiling >= tierRank('private'),
+  storedFields: (a) => {
+    const rules = a.rules.filter(rule => rule.match.kind !== 'label');
+    if (!rules.length) return true;
+    const names = a.names();
+    if (!names) return false;
+    const signals = storedSignals(names);
+    return !rules.some(rule => ownerRuleMatches(rule, signals, a.record.provider));
+  },
+  labels: (a) => labelRulesWithoutNonmatch(a.set, a.record, a.policy,
+    applicableProviderLabelRules(a.rules, a.record.provider), a.names).length === 0,
+} satisfies Record<string, (authority: RuleAuthority) => boolean>;
+
+export type MoveRuleAuthorityEntry = keyof typeof moveRuleChecks;
+
+const moveRuleRegistry = Object.values(moveRuleChecks);
+
 /** Current authority for each layer being lowered, including its actual trust domain. */
 export function tierMoveRuleAuthorization(
-  set: TieredStoreSet,
-  record: TierLedgerRecord,
-  target: { metadataTier: TierKey; contentTier: TierKey },
-  sources: readonly Pick<TierCopyPlan, 'trustDomain' | 'layers'>[],
-  destination: readonly Pick<TierCopyPlan, 'trustDomain' | 'layers'>[],
+  set: TieredStoreSet, record: TierLedgerRecord, target: MoveTarget, sources: MoveCopies, destination: MoveCopies,
 ): string | undefined {
   const policy = currentTierRulePolicy(set);
-  const identity = tierLedgerIdentityOfRecord(record);
-  const override = set.ledger.getOverride(identity);
-  if (tierMoveOverrideConflict(override, record, target, sources, destination)) return undefined;
+  const override = set.ledger.getOverride(tierLedgerIdentityOfRecord(record));
   let ceiling = Number.POSITIVE_INFINITY;
   for (const layer of ['metadata', 'content'] as const) {
     const from = copyServingLayer(sources, layer);
@@ -86,26 +126,13 @@ export function tierMoveRuleAuthorization(
       ceiling = Math.min(ceiling, tierRank(toTier), trustDomainRank(to.trustDomain));
     }
   }
-  if (!Number.isFinite(ceiling)) return policy.revision;
-  if (policy.unavailable || (policy.retirePublic && ceiling < tierRank('private'))) return undefined;
-  const rules = policy.rules.filter((rule) => tierRank(rule.tier) > ceiling
+  const rules = policy.rules.filter(rule => tierRank(rule.tier) > ceiling
     && (rule.source === undefined || rule.source === record.provider)
     && (override?.kind !== 'tier' || rule.tier === 'secrets'));
-  if (rules.length === 0) return policy.revision;
-  const storedRules = rules.filter((rule) => rule.match.kind !== 'label');
-  if (storedRules.length > 0) {
-    const copies = set.ledger.copies(identity);
-    const source = copyServingLayer(copies.filter((copy) => copy.state === 'current'), 'metadata')
-      ?? (record.state === 'moving' ? copyServingLayer(copies.filter((copy) => copy.state === 'superseded'
-        && copy.supersededByGeneration === record.generation + 1), 'metadata') : undefined);
-    const names = source && set.store(source.trustDomain)?.exportItemNames(identity);
-    if (!names) return undefined;
-    const signals = storedSignals(names);
-    if (storedRules.some((rule) => ownerRuleMatches(rule, signals, record.provider))) return undefined;
-  }
-  const labelRules = applicableProviderLabelRules(rules, record.provider);
-  if (labelRulesWithoutNonmatch(set, record, policy, labelRules).length > 0) return undefined;
-  return policy.revision;
+  let stored: ReturnType<typeof servingNames>;
+  const names = () => stored ??= servingNames(set, record);
+  const authority = { set, record, target, sources, destination, override, policy, ceiling, rules, names };
+  return moveRuleRegistry.every(check => check(authority)) ? policy.revision : undefined;
 }
 
 /** Label membership needs an observation only for providers that publish label signals. */
@@ -115,12 +142,22 @@ export function applicableProviderLabelRules(rules: readonly OwnerTierRule[], pr
     && ownerRuleMatches(rule, { labels: [rule.match.value] }, provider));
 }
 
-/** Keep matches and unresolved rules. A completed walk for this policy and account can prove a nonmatch. */
+/** Keep matches and unresolved rules. A missing observation is never an empty label set. */
 export function labelRulesWithoutNonmatch(
   set: TieredStoreSet, record: TierLedgerRecord, policy: TierRulePolicy, rules: readonly OwnerTierRule[],
+  names = () => servingNames(set, record),
 ): readonly OwnerTierRule[] {
   if (rules.length === 0 || policy.unavailable) return rules;
   const { provider, accountScope, providerItemId } = record;
+  const capability = connectorLabelCapability(provider);
+  if (!capability) return rules;
+  if (capability.proof === 'stored') {
+    const raw = names()?.columns.classification_labels_json;
+    if (typeof raw !== 'string') return rules;
+    const labels: unknown = JSON.parse(raw);
+    if (!Array.isArray(labels) || !labels.every(label => typeof label === 'string')) return rules;
+    return rules.filter(rule => ownerRuleMatches(rule, { labels }, provider));
+  }
   const progress = readLabelState(set.ledger.readMeta(labelSweepMetaKey(provider, accountScope)));
   if (!labelSweepHasPolicy(progress, policy, provider, accountScope)) return rules;
   const itemKey = labelEvidenceItemKey(providerItemId);
