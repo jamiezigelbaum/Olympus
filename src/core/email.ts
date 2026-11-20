@@ -17,7 +17,6 @@ import {
 } from './source-watch.ts';
 import { withWorkerAuthHeader, workerAuthTokenProvider } from './worker-auth.ts';
 import { privacyBacklogCoverageNote } from './privacy-backlog-coverage.ts';
-import { SEMANTIC_SEARCH_STARTING, semanticStartupGap } from './source-index/partial-search.ts';
 
 export type EmailFetch = (url: string, init: RequestInit) => Promise<Response>;
 export interface EmailTransportRequestOptions {
@@ -349,8 +348,9 @@ export interface SourceIndexSearchResult {
   hits: unknown[];
   secret_locations?: SourceSecretLocation[];
   /**
-   * Fixed sentences about what this search could not cover yet, built from
-   * worker counts and lane audits. Never item metadata.
+   * Fixed sentences about what this search could not cover yet: today only
+   * the privacy-backlog note (core/privacy-backlog-coverage.ts), built here
+   * from the worker's count. Never item metadata.
    */
   coverage_notes?: string[];
   audit: {
@@ -1212,17 +1212,11 @@ function hasUniqueJsonObjectMembers(input: string): boolean {
   }
 }
 
-function optionalRecord(value: unknown): Record<string, unknown> | undefined {
-  return value && typeof value === 'object' && !Array.isArray(value)
-    ? value as Record<string, unknown> : undefined;
-}
-
 function asRecord(value: unknown): Record<string, unknown> {
-  const record = optionalRecord(value);
-  if (!record) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new OperationError('email_error', 'Private email lane response was not a JSON object.');
   }
-  return record;
+  return value as Record<string, unknown>;
 }
 
 function requiredString(value: unknown, name: string): string {
@@ -1284,12 +1278,7 @@ function parseSourceIndexAnswerResult(value: Record<string, unknown>): SourceInd
     audit: {
       searched_corpora: audit.searched_corpora.filter((corpus): corpus is string => typeof corpus === 'string'),
       skipped_corpora: audit.skipped_corpora,
-      lane_audits: audit.lane_audits.map(lane => {
-        const entry = optionalRecord(lane);
-        const state = optionalRecord(entry?.retrievalState);
-        if (state?.reason === SEMANTIC_SEARCH_STARTING) return { ...entry, skippedReason: undefined, retrievalState: { ...state, reason: undefined } };
-        return entry?.skippedReason === SEMANTIC_SEARCH_STARTING ? { ...entry, skippedReason: undefined } : lane;
-      }),
+      lane_audits: audit.lane_audits,
       ...(selfHeal ? { self_heal: selfHeal } : {}),
       ...(answerSynthesis ? { answer_synthesis: answerSynthesis } : {}),
       latency_ms: requiredNumber(audit.latency_ms, 'audit.latency_ms'),
@@ -1618,21 +1607,13 @@ function parseSourceIndexSearchResult(value: Record<string, unknown>, context: {
   const searchedCorpora = Array.isArray(audit.searched_corpora)
     ? audit.searched_corpora.filter((corpus): corpus is string => typeof corpus === 'string')
     : undefined;
-  const startupLanes = new Set((Array.isArray(audit.lane_audits) ? audit.lane_audits : [])
-    .flatMap(audit => {
-      const lane = optionalRecord(audit);
-      return lane?.laneType === 'semantic' && lane.skippedReason === SEMANTIC_SEARCH_STARTING ? [lane.laneName] : [];
-    }));
-  const coverageNotes = tierCorpora.flatMap(({ corpusId: id }) =>
-    startupLanes.has(`${id}:connector_store_vector`) ? [semanticStartupGap(id)] : []);
-  if (privacyNote) coverageNotes.push(privacyNote);
   return {
     kind: 'source_index_search',
     corpus_id: corpusId,
     retrieval_source: 'local_index',
     hits: value.hits,
     ...(secretLocations ? { secret_locations: secretLocations } : {}),
-    ...(coverageNotes.length ? { coverage_notes: coverageNotes } : {}),
+    ...(privacyNote ? { coverage_notes: [privacyNote] } : {}),
     audit: {
       ...(searchedCorpora ? { searched_corpora: searchedCorpora } : {}),
       request_id: requiredString(audit.request_id, 'audit.request_id'),
@@ -1643,8 +1624,7 @@ function parseSourceIndexSearchResult(value: Record<string, unknown>, context: {
       ...(typeof audit.keyword_candidates === 'number' ? { keyword_candidates: audit.keyword_candidates } : {}),
       ...(typeof audit.vector_candidates === 'number' ? { vector_candidates: audit.vector_candidates } : {}),
       ...(typeof audit.fused_candidates === 'number' ? { fused_candidates: audit.fused_candidates } : {}),
-      ...(typeof audit.semantic_skipped_reason === 'string' && audit.semantic_skipped_reason !== SEMANTIC_SEARCH_STARTING
-        ? { semantic_skipped_reason: audit.semantic_skipped_reason } : {}),
+      ...(typeof audit.semantic_skipped_reason === 'string' ? { semantic_skipped_reason: audit.semantic_skipped_reason } : {}),
       ...(typeof audit.embedding_model_id === 'string' ? { embedding_model_id: audit.embedding_model_id } : {}),
       ...(typeof audit.embedding_epoch === 'string' ? { embedding_epoch: audit.embedding_epoch } : {}),
       ...(typeof audit.vector_backend === 'string' ? { vector_backend: audit.vector_backend } : {}),

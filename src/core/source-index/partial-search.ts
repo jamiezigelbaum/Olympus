@@ -32,16 +32,6 @@ export const SEMANTIC_SEARCH_STARTING = 'search_starting';
 export const STARTUP_SEARCH_GAP = 'Olympus was still starting when you asked, so the search took longer.';
 export const RERANK_FALLBACK_GAP = 'The search could not reorder results by relevance this time because that step did not finish. The best source may be missing, and asking again may help.';
 
-export function semanticStartupGap(corpusId: string): string {
-  return `${corpusId}: search by meaning is still starting; only keyword matches were searched, so related items may be missing.`;
-}
-
-/** Preserve the fixed note even when a keyword timeout also left this corpus incomplete. */
-export function semanticStartupCoverageNotes(coverage: Pick<Parameters<typeof timedOutCorpora>[0], 'searchedCorpora' | 'extractionGaps'>): string[] {
-  const gaps = new Set(coverage.extractionGaps);
-  return [...new Set(coverage.searchedCorpora)].sort().map(semanticStartupGap).filter(gap => gaps.has(gap));
-}
-
 export function promptFitCoverageGap(lane: 'local' | 'cloud', kept: number, shortlisted: number): string {
   const model = lane === 'local' ? 'private' : 'cloud';
   return `The ${model} model read ${kept} of the ${shortlisted} shortlisted sources. The rest did not fit in its prompt.`;
@@ -121,7 +111,6 @@ export function partialSearchCoverageNotes(coverage: Parameters<typeof timedOutC
     ...partlySearched.map(semanticTimeoutGap),
     ...newestMissed.map(recentItemsTimeoutGap),
     ...unchecked.map(visibilityCheckTimeoutGap),
-    ...semanticStartupCoverageNotes(coverage),
     ...[...new Set(coverage.extractionGaps.map(gap => gapCorpus(KEYWORDS_PREFIX, gap)).filter((id): id is string => id !== undefined))].map(keywordPreparationGap),
     ...(coverage.extractionGaps.includes(RERANK_FALLBACK_GAP) ? [RERANK_FALLBACK_GAP] : []),
   ];

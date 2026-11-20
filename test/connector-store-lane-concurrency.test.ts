@@ -8,7 +8,6 @@
 import { afterEach, expect, test } from 'bun:test';
 import { join } from 'node:path';
 import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';
-import { SEMANTIC_SEARCH_STARTING } from '../src/core/source-index/partial-search.ts';
 import { routeSourceIndexSearch } from '../src/core/source-index/router.ts';
 import {
   LocalConnectorStore,
@@ -156,35 +155,4 @@ test('a store keeps tier-checked keyword rows when a later read becomes silent',
   const response = await result;
   expect(response.hits.map(hit => hit.sourceItem.providerItemId)).toEqual(['row']);
   expect(response.skippedCorpora).toContainEqual({ corpusId: store.corpusId, trustDomain: store.trustDomain, reason: 'lane_timeout' });
-});
-
-test('a timed-out keyword prefix retains its deferred semantic lane audit', async () => {
-  const { dir, cleanup } = tempDir('olympus-partial-deferred-');
-  const store = new LocalConnectorStore({ dbPath: join(dir, 'fixture.sqlite'), corpusId: 'internal.fixture.rows', family: 'file', trustDomain: 'internal', tierLedger: null });
-  cleanups.push(cleanup, () => store.close());
-  await store.syncFromConnector(fixtureConnector(() => [
-    { id: 'row', name: 'orchard.txt', text: 'orchard harvest' },
-  ]), { fetchContent: true });
-  store.deferVectorSearchUntilVisibilityBuilt();
-  const search = store.searchItemsDetailedOffThread;
-  const waiting = Promise.withResolvers<void>();
-  store.searchItemsDetailedOffThread = async function (...args: Parameters<typeof search>) {
-    await search.apply(store, args);
-    waiting.resolve();
-    return new Promise(() => {});
-  };
-  const clock = createTestClock();
-  const result = routeSourceIndexSearch({
-    registry: buildSourceIndexCorpusRegistry([defineConnectorCorpus({ corpusId: store.corpusId, family: store.family, trustDomain: store.trustDomain })]),
-    laneClock: clock,
-    adapters: { [store.corpusId]: createConnectorStoreCorpusAdapter({ store, embeddingProvider: new RecordingProvider('built-in', 'partial-model', 'local') }) },
-    request: { query: 'orchard', maxResults: 5, context: { allowedTrustDomains: [store.trustDomain] } },
-  });
-  await waiting.promise;
-  await clock.advance(60_000);
-  const response = await result;
-  expect(response.hits.map(hit => hit.sourceItem.providerItemId)).toEqual(['row']);
-  expect(response.skippedCorpora).toContainEqual(expect.objectContaining({ corpusId: store.corpusId, reason: 'lane_timeout' }));
-  expect(response.laneAudits).toContainEqual(expect.objectContaining({ laneType: 'semantic', skippedReason: SEMANTIC_SEARCH_STARTING }));
-  expect(response.degradations).toContainEqual(expect.objectContaining({ reason: 'semantic_lane_skipped', detail: SEMANTIC_SEARCH_STARTING }));
 });

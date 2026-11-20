@@ -228,7 +228,7 @@ export interface SourceIndexCorpusSearchAdapter {
    */
   prepareSemantic?: (query: string, budgetMs: number) => Promise<void>;
   hybridAvailability?: (request: SourceIndexCorpusSearchRequest) => SourceIndexHybridAvailability;
-  // A first visibility build worth waiting for. Settles on success, failure, or retirement.
+  // A pending first visibility build, for an accepted Ask that can wait before searching.
   visibilityStartup?: () => Promise<void> | undefined;
   /**
    * The corpus's nearest semantic neighbours of the query, nearest first,
@@ -583,11 +583,7 @@ async function routePreparedSourceIndexSearch(options: RouteSourceIndexSearchOpt
           hits.set(key(hit), hit);
           if (request.readWide) matchingIds.add(routedHitCandidateId({ ...hit, corpusId: corpus.corpusId, trustDomain: corpus.trustDomain }));
         }
-        const laneAudits = response.laneAudits ?? partial?.laneAudits;
-        partial = {
-          hits: [...hits.values()].slice(0, corpusRequest.maxResults), latencyMs: response.latencyMs,
-          ...(laneAudits ? { laneAudits } : {}), incomplete: true, rawExposed: false,
-        };
+        partial = { hits: [...hits.values()].slice(0, corpusRequest.maxResults), latencyMs: response.latencyMs, incomplete: true, rawExposed: false };
       },
     };
     const retrievalState = retrievalStates.get(corpus.corpusId)!.state;

@@ -490,7 +490,7 @@ import { resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
 import { controlPathHeadroom, ingestionTurn, serializeDiagnosticWrites, startCpuSampleLog } from '../control-path-headroom.ts';
 import { setEngineStep, startEngineHeartbeat } from '../../core/engine-heartbeat.ts';
 import { withdrawBootProgress, beginBootProgress, beginFrontProgress, failFrontProgress, finishBootProgress, finishFrontProgress, reportBootStep, reportFrontStep } from '../../core/boot-progress.ts';
-import { beginStartupProgress } from '../../core/startup-progress.ts';
+import { beginStartupProgress, startupProgress } from '../../core/startup-progress.ts';
 import { ENGINE_BACKGROUND_INSTANCE_ENV, engineRoleFromEnv } from '../../core/engine-split.ts';
 import { forbidWritableStoreOpens } from '../../core/store-write-guard.ts';
 import { frontLoopSqlHealth, watchFrontLoopSql } from '../../core/front-loop-sql-guard.ts';
@@ -2550,7 +2550,7 @@ export async function main(): Promise<void> {
           console.warn(`[olympus] ${engineRole}: a store's hidden-copy set could not be built yet: ${error instanceof Error ? error.message : String(error)}`);
           continue;
         }
-        if (!store.vectorSearchDeferred) progress?.storeReady(index);
+        progress?.storeReady(index);
       }
     } finally {
       progress?.finish();
@@ -5961,13 +5961,12 @@ export async function main(): Promise<void> {
     localPrivateAnswers = createLocalPrivateAnswers({
       destinations, ...(veniceAnswer ? { veniceAnswer } : {}),
       ...(engineFront ? { startup: () => {
-        // Count the current roster. A failed handle is no longer a source
-        // Ask waits for, and must not be counted as ready for vector search.
-        const stores = connectorStores.filter(store => !store.vectorSearchDeferred || store.vectorSearchStartup);
-        const total = stores.length;
-        const done = stores.filter(store => !store.vectorSearchStartup).length;
+        const total = connectorStores.length;
+        const done = connectorStores.filter(store => !store.vectorSearchStartup).length;
         if (done === total) return undefined;
-        return { stores_done: done, stores_total: total };
+        const progress = startupProgress();
+        return progress?.stores_total === total && progress.stores_done === done
+          ? progress : { stores_done: done, stores_total: total };
       } } : {}),
       localConnectionId: '@local:You',
       anonymousAsk: localAnonymousAsk,

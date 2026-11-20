@@ -3594,7 +3594,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               // skipped-lane marker for a lane nobody asked for. A deferred
               // store lets the adapter report why its vector lane was skipped.
               const retrievalMode = searchRequest.retrievalMode
-                ?? (searchEmbeddingProvider && (store.vectorSearchDeferred || store.vectorLaneServable(searchEmbeddingProvider.modelId))
+                ?? (searchEmbeddingProvider && (store.vectorSearchStartup || store.vectorLaneServable(searchEmbeddingProvider.modelId))
                   ? 'hybrid'
                   : 'keyword');
               const combinedFilters = searchRequest.filters || mandatoryScope?.filters

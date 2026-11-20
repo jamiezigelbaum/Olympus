@@ -1330,11 +1330,6 @@ interface HiddenChildParent {
   hidden: boolean;
 }
 
-interface HiddenChildBuild {
-  current?: () => boolean;
-  unavailable?: boolean;
-}
-
 interface HiddenChildMemo {
   ledger: TierLedger;
   ledgerCursor: number;
@@ -4310,7 +4305,6 @@ export class LocalConnectorStore {
       // The read pool's connections to this file go with the store, and so
       // do its waiting queries.
       this.closedForPoolReads = true;
-      this.finishVectorSearchWait();
       if (offThreadReadsSupported(this.dbPath)) releaseOffThreadReads(this.dbPath);
       closeSqliteStore(this.db, this.readOnly ? { checkpoint: false, readOnly: true }
         : buildingRecencyIndex ? { checkpoint: false } : undefined);
@@ -4919,13 +4913,13 @@ export class LocalConnectorStore {
    * set is current as of the start of the build; a copy hidden after that is
    * caught by the embedding batch recheck right before dispatch.
    */
-  private async tierHiddenItemPksInTurns(childBuild?: HiddenChildBuild): Promise<TierLedgerHiddenItemPks> {
+  private async tierHiddenItemPksInTurns(): Promise<TierLedgerHiddenItemPks> {
     const base = await runHiddenStepsInTurns(this.tierLedgerHiddenSteps());
     // Keep the counts' start-of-build semantics during continuous intake.
     // Search and embedding recheck served rows; requiring the whole lane to
     // stay unchanged across this full scan would prevent its memo ever filling.
     // Not voided on a change: this set keeps its start-of-build semantics (above).
-    return this.withHiddenChildren(base, await this.hiddenChildItemPksInTurns(childBuild));
+    return this.withHiddenChildren(base, await this.hiddenChildItemPksInTurns());
   }
 
   /**
@@ -4943,8 +4937,8 @@ export class LocalConnectorStore {
    * memo it leaves (installed at the start-of-build cursors) makes the next
    * build incremental.
    */
-  private async hiddenChildItemPksInTurns(build?: HiddenChildBuild): Promise<number[]> {
-    const steps = this.hiddenChildReadSteps(build);
+  private async hiddenChildItemPksInTurns(): Promise<number[]> {
+    const steps = this.hiddenChildReadSteps();
     let next = steps.next();
     while (!next.done) {
       let result: unknown;
@@ -4974,45 +4968,23 @@ export class LocalConnectorStore {
    */
   async keepVisibilityCurrentInTurns(): Promise<void> {
     const admission = this.vectorSearchAdmission;
-    const childBuild: HiddenChildBuild | undefined = admission ? {} : undefined;
-    let completed = false;
-    try {
-      await this.tierHiddenItemPksInTurns(childBuild);
-      if (!this.readOnly) await this.publishVisibility();
-      if (admission && admission === this.vectorSearchAdmission && !this.closedForPoolReads) {
-        if (childBuild?.current?.()) {
-          this.finishVectorSearchWait();
-          this.vectorSearchAdmission = undefined;
-        } else if (childBuild?.unavailable) {
-          this.finishVectorSearchWait();
-        }
-      }
-      completed = true;
-    } finally {
-      if (!completed && admission === this.vectorSearchAdmission) this.finishVectorSearchWait();
+    await this.tierHiddenItemPksInTurns();
+    if (!this.readOnly) await this.publishVisibility();
+    if (admission && admission === this.vectorSearchAdmission && !this.closedForPoolReads) {
+      this.vectorSearchAdmission = undefined;
+      admission.resolve();
     }
   }
 
-  private vectorSearchAdmission: { waiter?: ReturnType<typeof Promise.withResolvers<void>> } | undefined;
-
-  private finishVectorSearchWait(): void {
-    const admission = this.vectorSearchAdmission;
-    admission?.waiter?.resolve();
-    if (admission) delete admission.waiter;
-  }
+  private vectorSearchAdmission: ReturnType<typeof Promise.withResolvers<void>> | undefined;
 
   /** Called by the split front when it mounts this handle. */
   deferVectorSearchUntilVisibilityBuilt(): void {
-    this.vectorSearchAdmission ??= { waiter: Promise.withResolvers<void>() };
+    this.vectorSearchAdmission ??= Promise.withResolvers<void>();
   }
 
-  get vectorSearchDeferred(): boolean {
-    return this.vectorSearchAdmission !== undefined;
-  }
-
-  /** A failed build leaves vectors deferred but clears the wait for Ask. */
   get vectorSearchStartup(): Promise<void> | undefined {
-    return this.vectorSearchAdmission?.waiter?.promise;
+    return this.vectorSearchAdmission?.promise;
   }
 
   private tierLedgerHiddenState: TierVisibilityMemo | undefined;
@@ -6386,12 +6358,8 @@ export class LocalConnectorStore {
    * Both runners use this memo. A missing feed or changed lane rebuilds using
    * the original parent walk; a yielded build never publishes a stale stamp.
    */
-  private *hiddenChildReadSteps(build?: HiddenChildBuild): Generator<VisibilityRead, number[], unknown> {
-    if (!this.childItemColumnsPresent) {
-      if (build) build.current = () => true;
-      return [];
-    }
-    const configuredLane = this.childLane;
+  private *hiddenChildReadSteps(): Generator<VisibilityRead, number[], unknown> {
+    if (!this.childItemColumnsPresent) return [];
     const lane = this.childVisibilityLane();
     const prior = this.hiddenChildMemo;
     let ledger: TierLedger | undefined;
@@ -6403,7 +6371,6 @@ export class LocalConnectorStore {
       const members = lane.stores();
       if (!ledger || this.visibilityLedger() !== ledger
         || !members.includes(this) || !members.every(store => store instanceof LocalConnectorStore && store.visibilityFeedPresent)) {
-        if (build) build.unavailable = true;
         this.hiddenChildMemo = undefined;
         return yield* this.hiddenChildFullReadSteps();
       }
@@ -6418,13 +6385,12 @@ export class LocalConnectorStore {
         const ledgerFinder = finders[0]![1].ledger;
         ledgerChanges = (yield ledgerFinder) as VisibilityChanges;
         for (const [store, finder] of finders) storeChanges.set(store, (yield finder.store) as VisibilityChanges);
-        if (this.hiddenChildMemo !== prior) return yield* this.hiddenChildReadSteps(build);
+        if (this.hiddenChildMemo !== prior) return yield* this.hiddenChildReadSteps();
       } else {
         ledgerChanges = ledger.visibilityChangesSince(same ? prior.ledgerCursor : undefined);
         for (const store of stores) storeChanges.set(store, store.itemVisibilityChangesSince(same ? prior.storeCursors.get(store) : undefined));
       }
     } catch {
-      if (build) build.unavailable = true;
       this.hiddenChildMemo = undefined;
       return yield* this.hiddenChildFullReadSteps();
     }
@@ -6478,7 +6444,7 @@ export class LocalConnectorStore {
     }
     // Another reader may have advanced the shared memo while this one awaited
     // SQL. Redo against that reader's state, never overwrite it with this delta.
-    if (this.hiddenChildMemo !== expected) return yield* this.hiddenChildReadSteps(build);
+    if (this.hiddenChildMemo !== expected) return yield* this.hiddenChildReadSteps();
     // Installed when the lane is still the one it was built for, even if
     // changes landed while it was built: the memo keeps the cursors read
     // before any of its reads, so the next build replays those changes. A
@@ -6532,19 +6498,8 @@ export class LocalConnectorStore {
       }
       if (entry.hidden) memo.hiddenParents.set(key, [...entry.children.values()].flat());
     }
-    const installed = { ...memo, ledgerCursor: ledgerChanges.cursor,
+    this.hiddenChildMemo = { ...memo, ledgerCursor: ledgerChanges.cursor,
       storeCursors: new Map(stores.map(store => [store, storeChanges.get(store)!.cursor])) };
-    this.hiddenChildMemo = installed;
-    if (build) {
-      const tierLedger = this.tierLedgerHandle;
-      const boundLedger = this.boundLedgerHandle;
-      build.current = () => {
-        if (this.childLane !== configuredLane || this.tierLedgerHandle !== tierLedger || this.boundLedgerHandle !== boundLedger) return false;
-        const current = lane.stores();
-        return this.hiddenChildMemo === installed && current.length === stores.length
-          && stores.every(store => current.includes(store) && !store.closedForPoolReads);
-      };
-    }
     return [...memo.hiddenParents.values()].flat();
   }
 
@@ -14994,7 +14949,7 @@ export class LocalConnectorStore {
    * at the next search.
    */
   vectorLaneServable(modelId: string): boolean {
-    if (this.vectorSearchDeferred) return false;
+    if (this.vectorSearchAdmission) return false;
     if (this.embeddingCurrencyRebuildPending(modelId)) return false;
     const memo = this.vectorLaneMemo?.get(modelId);
     if (memo !== undefined && Date.now() - memo < SEARCH_VECTOR_LANE_MEMO_MS) return true;
@@ -15101,7 +15056,7 @@ export class LocalConnectorStore {
     laneOptions: { locate?: boolean } = {},
   ): Promise<{ rows: ConnectorStoreScoredSearchRow[]; skippedReason?: string }> {
     assertConnectorStoreEmbeddingProvider(this.trustDomain, provider);
-    if (this.vectorSearchDeferred) return { rows: [], skippedReason: SEMANTIC_SEARCH_STARTING };
+    if (this.vectorSearchAdmission) return { rows: [], skippedReason: SEMANTIC_SEARCH_STARTING };
     sourceAnswerVectorWork();
     const vectorFilters = normalizeConnectorStoreSearchFilters(filters);
     const trimmed = query.trim();
@@ -17967,12 +17922,10 @@ function partialKeywordRows(
   request: SourceIndexCorpusSearchRequest,
   projector?: ConnectorStoreResultProjector,
   locatorPathScope?: ConnectorStoreSearchFilters['locatorPathScope'],
-  laneAudits?: readonly RetrievalLaneAudit[],
 ): (rows: readonly ConnectorStoreSearchRow[]) => void {
   return rows => request.onPartialResponse?.({
     hits: rows.slice(0, request.maxResults).map(row => connectorStoreHitFromRow(store, row, -row.rank, projector, locatorPathScope)),
     latencyMs: 0, incomplete: true, rawExposed: false,
-    ...(laneAudits?.length ? { laneAudits } : {}),
   });
 }
 
@@ -18008,7 +17961,7 @@ export function createConnectorStoreCorpusAdapter(
     if (embeddingProvider && useHybrid === 'hybrid') {
       if (store.trustDomain === 'secure_local' && !isApprovedSecureSourceEmbeddingProvider(embeddingProvider)) {
         semanticSkippedReason = 'secure_local_embedding_provider_not_local';
-      } else if (store.vectorSearchDeferred) {
+      } else if (store.vectorSearchStartup) {
         semanticSkippedReason = SEMANTIC_SEARCH_STARTING;
       } else if (!store.vectorLaneServable(embeddingProvider.modelId)) {
         semanticSkippedReason = 'no_embedding_artifacts';
@@ -18017,9 +17970,8 @@ export function createConnectorStoreCorpusAdapter(
 
     if (!embeddingProvider || useHybrid !== 'hybrid' || semanticSkippedReason) return (async (): Promise<SourceIndexCorpusSearchResponse> => {
       const markStage = startStoreStageClock(stages);
-      const startup = semanticSkippedReason === SEMANTIC_SEARCH_STARTING ? [startupAudit()] : [];
       let keywordLane = await connectorStoreKeywordLaneRows(store, request.query, request.maxResults, options.accountScope, filters,
-        { onPartialRows: partialKeywordRows(store, request, options.resultProjector, filters?.locatorPathScope, startup) }, request.deadlineAtMs);
+        { onPartialRows: partialKeywordRows(store, request, options.resultProjector, filters?.locatorPathScope) }, request.deadlineAtMs);
       markStage?.('keyword_lane_ms');
       keywordLane = await relaxEmptyLocalKeywordLane(store, request.query, request.maxResults, options.accountScope, filters,
         keywordLane, options.localKeywordFallback, {}, request.deadlineAtMs);
@@ -18027,6 +17979,7 @@ export function createConnectorStoreCorpusAdapter(
       keywordLane = await revalidateKeywordLane(store, keywordLane);
       markStage?.('keyword_revalidation_ms');
       const rows = keywordLane.rows;
+      const startup = semanticSkippedReason === SEMANTIC_SEARCH_STARTING ? [startupAudit()] : [];
       const keywordSkip = semanticSkippedReason && startup.length === 0
         ? { skippedReason: semanticSkippedReason, modelId: embeddingProvider!.modelId }
         : {};
@@ -18131,7 +18084,7 @@ export function createConnectorStoreCorpusAdapter(
         backend: embeddingProvider.backend,
       };
     }
-    const deferred = store.vectorSearchDeferred;
+    const deferred = store.vectorSearchStartup !== undefined;
     const servable = !deferred && store.vectorLaneServable(embeddingProvider.modelId);
     return {
       servable,
@@ -18203,13 +18156,9 @@ export function createConnectorStoreCorpusAdapter(
     const wantsHybrid = embeddingProvider !== undefined
       && (options.retrievalMode ?? 'hybrid') === 'hybrid'
       && (store.trustDomain !== 'secure_local' || isApprovedSecureSourceEmbeddingProvider(embeddingProvider));
-    const deferred = wantsHybrid && store.vectorSearchDeferred;
+    const deferred = wantsHybrid && store.vectorSearchStartup !== undefined;
     const hybrid = wantsHybrid && !deferred && store.vectorLaneServable(embeddingProvider.modelId);
-    const starting = deferred && request.context.lexicalOnly !== true;
-    const ftsOptions = {
-      ...(hybrid ? { prefix: false } : {}), locate: false,
-      onPartialRows: partialKeywordRows(store, request, undefined, undefined, starting ? [startupAudit()] : undefined),
-    };
+    const ftsOptions = { ...(hybrid ? { prefix: false } : {}), locate: false, onPartialRows: partialKeywordRows(store, request) };
     // The words alone: the same keyword lane a hybrid match runs, without the query embedding.
     const meaningLane = hybrid && request.context.lexicalOnly !== true;
     const readKeywordLane = await relaxEmptyLocalKeywordLane(
@@ -18221,6 +18170,7 @@ export function createConnectorStoreCorpusAdapter(
     // A semantic lane that should have run and did not (query embedding
     // outage, vectors unreadable or of the wrong width, the deadline): what
     // it would have matched is unknown, and the response says so.
+    const starting = deferred && request.context.lexicalOnly !== true;
     let incomplete = starting;
     if (meaningLane) {
       const bar = semanticRelevanceBarFor(embeddingProvider.modelId, semanticRelevanceBar);
@@ -18280,10 +18230,7 @@ export function createConnectorStoreCorpusAdapter(
   };
   expanded.hybridAvailability = adapter.hybridAvailability;
   expanded.semanticNeighbours = adapter.semanticNeighbours;
-  if (embeddingProvider?.backend === 'local' && options.retrievalMode !== 'keyword'
-    && (store.trustDomain !== 'secure_local' || isApprovedSecureSourceEmbeddingProvider(embeddingProvider))) {
-    expanded.visibilityStartup = () => store.vectorSearchStartup;
-  }
+  expanded.visibilityStartup = () => store.vectorSearchStartup;
   // A local model that is still starting gets the router's preparation budget
   // to finish before the vector lane runs (#1172). Only when this adapter will
   // run the vector lane for the request, and without reading the store: the
@@ -19251,7 +19198,7 @@ export function createConnectorStoreContentProvider(
   let storeHasVectors: boolean | undefined;
   const queryVector = async (query: string | undefined): Promise<readonly number[] | undefined> => {
     const text = query?.trim();
-    if (!embeddingProvider || !text || store.vectorSearchDeferred) return undefined;
+    if (!embeddingProvider || !text || store.vectorSearchStartup) return undefined;
     try {
       storeHasVectors ??= store.vectorLaneServable(embeddingProvider.modelId);
       if (!storeHasVectors) return undefined;

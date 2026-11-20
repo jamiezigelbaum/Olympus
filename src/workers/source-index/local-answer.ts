@@ -32,7 +32,7 @@
  * can reach the output: the items read and the other versions the answer's
  * version note names (the model's `used`).
  */
-import { RECENT_ITEMS_CUT_SHORT, semanticSearchTimedOut, semanticStartupCoverageNotes, STARTUP_SEARCH_GAP } from '../../core/source-index/partial-search.ts';
+import { RECENT_ITEMS_CUT_SHORT, semanticSearchTimedOut, STARTUP_SEARCH_GAP } from '../../core/source-index/partial-search.ts';
 import { buildEvidencePackDetailed, type LocalContentProvider, type SecretLocationNote } from '../../core/evidence-pack.ts';
 import { untilAborted } from '../../core/http-timeout.ts';
 import { providerSourceLabel } from '../../core/remote-result.ts';
@@ -193,10 +193,8 @@ export async function answerOnThisComputer(
       });
       if (pending.length === 0) break;
       waitedForStartup = true;
-      // A settled handle may have been replaced. Re-select before waiting
-      // again so a retired mount can never pin the Ask to its old lanes.
-      const changed = Promise.race(pending);
-      await (input.signal ? untilAborted(changed, input.signal) : changed);
+      const ready = Promise.all(pending);
+      await (input.signal ? untilAborted(ready, input.signal) : ready);
       if (input.stillAuthorized?.() === false) return { status: 'changed' };
       lanes = options.lanes(request);
     }
@@ -248,8 +246,8 @@ export async function answerOnThisComputer(
   // Matching Secrets, by location only (no model sees them): said beside the answer, or as the answer.
   const secrets = secretLocationAnswer((detail.secretLocations ?? []).map((location) => ({ where: secretWhere(location) })));
   const secretLocations = (detail.secretLocations ?? []).map(({ source, ref, locator, title }) => ({ source, ref, fingerprint: secretLocationFingerprint({ locator, title }) }));
-  const startupNotes = semanticStartupCoverageNotes(detail.pack.coverage);
-  if (waitedForStartup || detail.pack.coverage.extractionGaps.includes(STARTUP_SEARCH_GAP)) startupNotes.unshift(STARTUP_SEARCH_GAP);
+  const startupNotes = waitedForStartup || detail.pack.coverage.extractionGaps.includes(STARTUP_SEARCH_GAP)
+    ? [STARTUP_SEARCH_GAP] : [];
   const coverage = startupNotes.length > 0 ? { unanswered: startupNotes } : {};
   const notFound = (): LocalAnswerResult => (secrets
     ? { status: 'answered', answer: secrets, citations: [], unanswered: startupNotes, leftOut, ...busyField, read: [], secretLocations }
@@ -312,7 +310,7 @@ export async function answerOnThisComputer(
     answer: secrets ? `${result.answer}\n\n${secrets}` : result.answer,
     citations: result.citations,
     // A source a limit stopped may be missing new items: said beside the answer.
-    unanswered: [...startupNotes, ...((result.unanswered ?? []).filter(note => !startupNotes.includes(note))), ...(detail.limitStopGaps ?? [])],
+    unanswered: [...startupNotes, ...(result.unanswered ?? []), ...(detail.limitStopGaps ?? [])],
     leftOut,
     ...busyField,
     read,

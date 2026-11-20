@@ -56,7 +56,7 @@ function tempDir(): string {
 }
 
 /** A loopback worker; with `marks`, an engine from before syncing that marks each /mcp answer's credential surface. */
-function fakeWorker(marks?: 'chatgpt' | 'remote', result: Record<string, unknown> = { from: 'engine' }): { url: string; paths: string[] } {
+function fakeWorker(marks?: 'chatgpt' | 'remote'): { url: string; paths: string[] } {
   const paths: string[] = [];
   const server = Bun.serve({
     hostname: '127.0.0.1',
@@ -67,7 +67,7 @@ function fakeWorker(marks?: 'chatgpt' | 'remote', result: Record<string, unknown
       const headers: Record<string, string> = marks && path === '/mcp'
         ? { [AUTHENTICATED_RESPONSE_HEADER]: '1', [SURFACE_RESPONSE_HEADER]: marks }
         : {};
-      return Response.json({ jsonrpc: '2.0', id: 1, result }, { headers });
+      return Response.json({ jsonrpc: '2.0', id: 1, result: { from: 'engine' } }, { headers });
     },
   });
   cleanups.push(() => server.stop(true));
@@ -89,11 +89,11 @@ async function makeRelay(surfaceMap = new SurfaceMap()): Promise<RelayHandle> {
 async function connectInstall(
   relay: RelayHandle,
   surfaces: () => Promise<readonly SurfaceEntry[] | undefined>,
-  options: { marks?: 'chatgpt' | 'remote'; identity?: InstallIdentity; result?: Record<string, unknown> } = {},
+  options: { marks?: 'chatgpt' | 'remote'; identity?: InstallIdentity } = {},
 ) {
   const statuses: RelayClientStatus[] = [];
   const identity = options.identity ?? loadOrCreateIdentity(tempDir());
-  const worker = fakeWorker(options.marks, options.result);
+  const worker = fakeWorker(options.marks);
   const client = new RelayClient({
     relayHost: PUBLIC_HOST,
     relayUrl: `ws://127.0.0.1:${relay.port}/v2/connect`,
@@ -143,21 +143,6 @@ async function toolNames(relay: RelayHandle, token: string, path = '/mcp'): Prom
 
 const chatgptNames = chatgptSurface.tools.map((tool) => tool.name);
 const remoteNames = remoteSurface.tools.map((tool) => tool.name);
-
-test('relay /mcp forwards the engine search coverage note in both result fields', async () => {
-  const relay = await makeRelay();
-  const note = 'internal.fixture: search by meaning is still starting; only keyword matches were searched, so related items may be missing.';
-  const result = {
-    content: [{ type: 'text', text: note }],
-    structuredContent: { evidence: [], notes: [note] },
-  };
-  const { identity, worker } = await connectInstall(relay, async () => [], { marks: 'remote', result });
-  const response = await post(relay, mintCredential('access', identity.installId),
-    rpc('tools/call', { name: 'olympus_search', arguments: { question: 'orchard' } }));
-  expect(response.status).toBe(200);
-  expect(await response.json()).toMatchObject({ result });
-  expect(worker.paths).toContain('/mcp');
-});
 
 function mappedSurfaces(map: SurfaceMap, installId: string): Record<string, string> {
   const install = map.snapshot().find((item) => item.installId === installId);

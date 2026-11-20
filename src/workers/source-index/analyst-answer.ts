@@ -42,7 +42,7 @@ import { namesOnlyCoverageNote } from '../../core/names-only-coverage.ts';
 import { runWithLocalInferenceGuard } from '../answer-activity.ts';
 import type { Analyst, AnalystCitation, AnalystOptions, AnalystResult, EvidenceCandidate, EvidencePack } from '../../core/contracts.ts';
 import { analystEvidenceFormat, analystPromptBytes, currentAnalystAbortSignal, noEvidenceAnalystResult, runWithAnalystAbortSignal, withPromptBudget, type AnalystEvidenceFormat } from '../../core/analyst.ts';
-import { partialSearchCoverageNotes, promptFitCoverageGap, RERANK_FALLBACK_GAP, semanticStartupCoverageNotes, STARTUP_SEARCH_GAP } from '../../core/source-index/partial-search.ts';
+import { partialSearchCoverageNotes, promptFitCoverageGap, RERANK_FALLBACK_GAP, STARTUP_SEARCH_GAP } from '../../core/source-index/partial-search.ts';
 import { OPENCLAW_DEFAULT_MODEL_LABEL, OPENCLAW_INFER_MAX_PROMPT_BYTES } from '../../core/analyst-openclaw-infer.ts';
 import {
   buildEvidencePackDetailed,
@@ -2555,7 +2555,6 @@ export function releaseAnalystAnswer(input: AnalystReleaseInput): AnalystRelease
   const safeUnsupportedGaps = [
     ...safeUnsupportedCoverageGaps(input.detail.pack, nonPublicPack),
     ...startupNotes,
-    ...semanticStartupCoverageNotes(input.detail.pack.coverage),
     ...(input.onDemandNotes ?? []),
     ...(input.detail.pack.coverage.extractionGaps.includes(RERANK_FALLBACK_GAP) ? [RERANK_FALLBACK_GAP] : []),
   ];
@@ -2828,8 +2827,7 @@ function isSourceExtractionGap(gap: string): boolean {
 }
 
 function safeUnsupportedCoverageGaps(pack: EvidencePack, nonPublicPack: boolean): string[] {
-  const fixedStartupNotes = new Set(semanticStartupCoverageNotes(pack.coverage));
-  const gaps = pack.coverage.extractionGaps.filter((gap) => isSourceExtractionGap(gap) && !fixedStartupNotes.has(gap));
+  const gaps = pack.coverage.extractionGaps.filter(isSourceExtractionGap);
   if (gaps.length === 0) {
     // The safe-unsupported release factually released zero citable evidence.
     // Carry a mechanical, corpus-ids-only coverage note so the honest
