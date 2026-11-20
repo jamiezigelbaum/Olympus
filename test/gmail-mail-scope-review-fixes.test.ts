@@ -438,6 +438,123 @@ test('TRASH on the first full GET admits neither the message nor its attachment'
   }
 });
 
+test.each(['restored to Inbox', 'still in Trash'] as const)('retained mail %s after a completed v3 upgrade walk', async state => {
+  const f = await retainedPersonalMail({ legacyUnscoped: true });
+  const ref = f.approve();
+  const approval = { generation: ref.accountGeneration, revision: ref.revision };
+  const item = identity(f.mail.id);
+  const oldId = 'verified-observation.v1:' + legacyOwnerId(approval);
+  const oldScope = 'private-confirmation-v3:' + oldId;
+  f.internalStore.observeStoredItemOwner(item, oldId);
+  const oldDone = encodeGmailStoreCheckpoint({ scope: oldScope, head: oldScope + ':done', confirmed: 1 })!;
+  expect(f.internalStore.copyContentState(item)).toMatchObject({ vectors: 1 });
+  f.mail.labelIds = ['TRASH'];
+  const upgraded = await f.lane(ref).confirmPrivateScope!({ checkpoint: oldDone });
+  expect(upgraded).toMatchObject({ confirmed: 0, done: true });
+  await f.move();
+  expect(await f.privateSweep(ref).run()).toMatchObject({ counts: { chunks_embedded: 0 } });
+  const restored = state === 'restored to Inbox';
+  if (restored) f.mail.labelIds = ['INBOX'];
+  await f.lane(ref).pull();
+  // Reconcile encounters the retained message even if it is older than the live watermark.
+  await f.lane(ref).reconcile();
+  const lists = f.client.queries.length;
+  const reads = f.client.formats.length;
+  const standing = await f.lane(ref).confirmPrivateScope!({ checkpoint: upgraded.checkpoint! });
+  expect(standing).toMatchObject({ confirmed: Number(restored), confirmedTotal: Number(restored), done: true });
+  expect(f.client.queries).toHaveLength(lists);
+  expect(f.client.formats.slice(reads)).toEqual(['metadata']);
+  expect(f.secureStore.itemOwnerPresent(item, gmailCursorConnectorId('personal', approval), 'observed')).toBe(restored);
+  expect(await f.privateSweep(ref).run()).toMatchObject({ counts: { chunks_embedded: Number(restored) } });
+  expect(f.secureStore.copyContentState(item)).toMatchObject({ vectors: Number(restored) });
+  expect(f.inputs).toHaveLength(Number(restored));
+  expect(await f.lane(ref).confirmPrivateScope!({ checkpoint: standing.checkpoint! })).toMatchObject({ confirmed: 0, done: true });
+  expect(f.client.queries).toHaveLength(lists);
+  expect(f.client.formats.slice(reads)).toEqual(['metadata']);
+});
+
+test('a live pull queues restored mail under a done checkpoint and the reserve carries a bounded remainder across passes', async () => {
+  const stores = fileStores(tempDir());
+  const mail = Array.from({ length: 35 }, (_, i) => message('message-' + i, NOW.getTime()));
+  const client = fakeClient(mail);
+  const common = { ...stores, account: 'personal', apiClient: client, credentialBroker: OFFLINE_BROKER, env: {}, now: () => NOW.getTime() };
+  await createGmailConnectorStoreSyncHandler(common).pull();
+  let day = NOW;
+  const budget = new GoogleDailyRequestBudget({ provider: 'Gmail', dailyRequestBudget: 5_000, now: () => day });
+  const ref = { generation: 'mailbox', revision: 'approved' };
+  const create = () => createGmailConnectorStoreSyncHandler({ ...common, scope: {}, scopeApproval: ref, requestBudget: budget });
+  // A real scoped Gmail listing omits Trash during the walk. All return later in one live listing.
+  const list = client.listMessages;
+  client.listMessages = async () => ({ messages: [] });
+  const complete = await create().confirmPrivateScope!();
+  client.listMessages = list;
+  await create().pull();
+  const lists = client.queries.length;
+  const reads = client.formats.length;
+  while (budget.status().requests < 4_499) budget.reserve();
+  const first = await create().confirmPrivateScope!({ checkpoint: complete.checkpoint! });
+  expect(first).toMatchObject({ done: true, confirmedTotal: 1, hold: { error: { reason: 'request_reserve' } } });
+  expect(budget.status().requests).toBe(4_500);
+  day = new Date(NOW.getTime() + DAY);
+  const next = await create().confirmPrivateScope!({ checkpoint: first.checkpoint! });
+  expect(next).toMatchObject({ done: true, backlog: true, confirmed: 32, confirmedTotal: 33 });
+  const last = await create().confirmPrivateScope!({ checkpoint: next.checkpoint! });
+  expect(last).toMatchObject({ done: true, confirmed: 2, confirmedTotal: 35 });
+  expect(last.backlog).toBeUndefined();
+  expect(client.formats.slice(reads)).toEqual(Array(35).fill('metadata'));
+  expect(client.queries).toHaveLength(lists);
+});
+
+test('a queued id must still match the operator query when confirmed', async () => {
+  const f = await retainedPersonalMail({ legacyUnscoped: true });
+  const ref = f.approve();
+  const lane = f.lane(ref, { OLYMPUS_SOURCE_INDEX_GMAIL_QUERY: 'is:starred' });
+  const mail = f.mail;
+  mail.payload!.headers!.push({ name: 'Message-ID', value: '<sample@example.com>' });
+  let starred = false;
+  const list = f.client.listMessages;
+  f.client.listMessages = async request => {
+    expect(request.query).toContain('(is:starred)');
+    return starred ? list(request) : { messages: [] };
+  };
+  const done = await lane.confirmPrivateScope!();
+  starred = true;
+  await lane.reconcile();
+  starred = false;
+  const targeted = spyOn(f.client, 'listMessages');
+  try {
+    const refused = await lane.confirmPrivateScope!({ checkpoint: done.checkpoint! });
+    expect(refused).toMatchObject({ done: true, confirmedTotal: 0 });
+    expect(targeted).toHaveBeenCalledTimes(1);
+    expect(targeted.mock.calls[0]![0].query).toContain('rfc822msgid:"sample@example.com"');
+    const owner = gmailCursorConnectorId('personal', { generation: ref.accountGeneration, revision: ref.revision });
+    expect(f.internalStore.itemOwnerPresent(identity(mail.id), owner, 'observed')).toBe(false);
+    starred = true;
+    await lane.reconcile();
+    expect(await lane.confirmPrivateScope!({ checkpoint: refused.checkpoint! })).toMatchObject({ confirmed: 1, done: true });
+  } finally {
+    targeted.mockRestore();
+  }
+});
+
+test('a retained copy hidden during confirmation waits until its body is readable', async () => {
+  const f = await retainedPersonalMail({ legacyUnscoped: true });
+  const lane = f.lane(f.approve());
+  f.mail.labelIds = ['TRASH'];
+  const done = await lane.confirmPrivateScope!();
+  f.mail.labelIds = ['INBOX'];
+  await lane.reconcile();
+  const lists = f.client.queries.length;
+  const hidden = spyOn(f.internalStore, 'releaseItemChunks').mockReturnValue(undefined);
+  try {
+    expect(await lane.confirmPrivateScope!({ checkpoint: done.checkpoint! })).toMatchObject({ done: true, confirmedTotal: 0 });
+  } finally {
+    hidden.mockRestore();
+  }
+  expect(await lane.confirmPrivateScope!({ checkpoint: done.checkpoint! })).toMatchObject({ done: true, confirmedTotal: 1 });
+  expect(f.client.queries).toHaveLength(lists);
+});
+
 test('a legacy ordinary run cannot approve Promotions for a Private sweep', async () => {
   const f = await retainedPersonalMail({ legacyUnscoped: true });
   const ref = f.approve();
@@ -504,6 +621,16 @@ test.each(['backlog', 'queue'])('revocation inside the Private embedder rolls ba
   expect(f.inputs.join('')).toContain('Body of retained');
   expect(f.secureStore.copyContentState(identity(f.mail.id))).toMatchObject({ chunks: 1, vectors: 0 });
   f.privateProvider.embed = embed;
+  const narrower = f.approve([{ id: 'Label_work', name: 'Work' }]);
+  f.mail.labelIds = ['Label_work'];
+  await f.lane(narrower).confirmPrivateScope!();
+  const idle = f.privateSweep(narrower);
+  for (let pass = 0; pass < 2; pass++) {
+    const result = await idle.run();
+    expect(result.counts).toMatchObject({ chunks_embedded: 0, items_queued: 0, stores_deferred: 0 });
+    expect(result.retryAt?.degradedReason).toBeUndefined();
+    expect(f.secureStore.embeddingDeferredReason()).toBeUndefined();
+  }
   const renewed = f.approve();
   await f.lane(renewed).confirmPrivateScope!();
   expect(await f.privateSweep(renewed).run()).toMatchObject({ counts: { chunks_embedded: 1 } });

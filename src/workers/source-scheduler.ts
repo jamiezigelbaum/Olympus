@@ -1,3 +1,4 @@
+import { SOURCE_SCOPE_APPROVAL_REQUIRED } from '../core/operation-error.ts';
 import { changeMemoryCounter } from '../core/memory-counters.ts';
 import { SOURCE_RATE_LIMITED } from '../core/provider-rate-limits.ts';
 import { ReadwiseApiError } from './readwise/api.ts';
@@ -2202,11 +2203,14 @@ export function withEmbeddingSweep(
     return {
       ...source,
       tasks: [...source.tasks, embeddingSweepTask(source, targets, options.storeDeadlineMs, sourceIndex, options.trickle, options.onProgress, options.holdForAsk)],
-      embeddingDeferredReason: () => targets().some((target) => target.store.embeddingDeferredReason() !== undefined)
-        ? EMBEDDING_PROVIDER_UNAVAILABLE_REASON
-        : undefined,
+      embeddingDeferredReason: () => sweepDeferralReason(targets().map(target => target.store.embeddingDeferredReason())),
     };
   });
+}
+
+function sweepDeferralReason(reasons: Array<string | undefined>): string | undefined {
+  if (reasons.some(reason => reason !== undefined && reason !== SOURCE_SCOPE_APPROVAL_REQUIRED)) return EMBEDDING_PROVIDER_UNAVAILABLE_REASON;
+  return reasons.includes(SOURCE_SCOPE_APPROVAL_REQUIRED) ? SOURCE_SCOPE_APPROVAL_REQUIRED : undefined;
 }
 
 export function embeddingSweepConcurrencyKey(source: Pick<SourceSchedulerSource, 'corpusId'>): string {
@@ -2457,6 +2461,7 @@ function embeddingSweepTask(
       // A pass that embedded anything has a provider that answers: one store's
       // outage must not back off the stores that are making progress, nor hold
       // off the wake the next sync sends.
+      const degradedReason = sweepDeferralReason(runs.map(run => run.deferredReason))!;
       if (counts.chunks_embedded > 0) {
         return {
           status,
@@ -2464,7 +2469,7 @@ function embeddingSweepTask(
           embeddingSweep,
           retryAt: {
             at: new Date(attemptedAt + EMBEDDING_SWEEP_INTERVAL_MS).toISOString(),
-            degradedReason: EMBEDDING_PROVIDER_UNAVAILABLE_REASON,
+            degradedReason,
           },
         };
       }
@@ -2480,7 +2485,7 @@ function embeddingSweepTask(
         retryAt: {
           at: new Date(attemptedAt + backoffMs).toISOString(),
           effectiveIntervalMs: backoffMs,
-          degradedReason: EMBEDDING_PROVIDER_UNAVAILABLE_REASON,
+          degradedReason,
         },
       };
     },
@@ -2777,7 +2782,7 @@ export function createGmailConnectorStoreSchedulerSource(input: {
               ...(result.waitReason ? { gmailConfirmationWaitReason: result.waitReason } : {}),
               ...(result.cursorRejected ? { warnings: [GMAIL_RESUME_REJECTED_WARNING] } : {}),
               ...(hold ? { retryAt: { at: hold.error.retryAt, degradedReason: gmailConfirmationHoldReason(hold.error) } }
-                : !result.done ? { continueSoon: true } : {}),
+                : !result.done || result.backlog ? { continueSoon: true } : {}),
             };
           } catch (error) { throw gmailSchedulerFailure(error); }
         },

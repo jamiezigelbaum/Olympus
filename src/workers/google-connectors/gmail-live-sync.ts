@@ -46,6 +46,7 @@ import { accountFromGoogleHandle } from './classification.ts';
 import { GMAIL_IMPORT_CONNECTOR_PREFIX } from './gmail-archive-target.ts';
 import { GMAIL_OWN_ID_PREFIX, gmailMailItems } from './gmail-mail-record.ts';
 import {
+  GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS,
   GMAIL_PROVIDER,
   GMAIL_PUBLIC_CONNECTOR_CORPUS_ID,
   GmailPageTokenRejectedError,
@@ -224,6 +225,7 @@ interface GmailConfirmationRequest {
 interface GmailConfirmationResult {
   confirmed: number;
   confirmedTotal: number;
+  backlog?: boolean;
   done: boolean;
   checkpoint: string | null;
   waitReason?: GmailConfirmationYieldReason;
@@ -353,7 +355,21 @@ export function createGmailConnectorStoreSyncHandler(
         ? { needsScopeObservation: true } : {}),
     };
   };
-  const scope = options.scope ? { ...options.scope, storedItem } : undefined;
+  // An entry is only a request for a fresh GET. Never treat a listing or an old
+  // approval's pending entry as evidence that the retained body may be embedded.
+  const pendingPrefix = `gmail.confirm-retained.${encodeURIComponent(account)}:`;
+  const queueScopeConfirmation = (id: string) => {
+    options.assertScopeCurrent?.();
+    const key = pendingPrefix + id;
+    // Re-listing must not reset a pending provider page for this approval.
+    if (tierSet.ledger.readMeta(key)?.split('\n', 1)[0] !== connectorId) tierSet.ledger.writeMeta(key, connectorId);
+  };
+  const finishScopeConfirmation = (id: string) => tierSet.ledger.deleteMeta(pendingPrefix + id);
+  const scope = options.scope ? {
+    ...options.scope,
+    storedItem: (id: string) => storedItem(id, !!options.scopeApproval),
+    ...(options.scopeApproval ? { queueScopeConfirmation } : {}),
+  } : undefined;
   const buildConnector = (overrides: {
     maxMessages?: number;
     query?: string;
@@ -486,17 +502,26 @@ export function createGmailConnectorStoreSyncHandler(
         const complete = `${confirmationScope}:done`;
         const saved = decodeCheckpoint(request.checkpoint, confirmationScope);
         const confirmedBefore = saved.confirmed ?? 0;
-        if (request.checkpoint === complete || saved.head === complete) {
+        const walkDone = request.checkpoint === complete || saved.head === complete;
+        const maxItems = boundedMaxItems(request.max_items, config.storePullMaxItems);
+        const batchSize = Math.min(maxItems, GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS);
+        // Rotate through keys so an excluded message repeatedly re-listed near
+        // the head cannot crowd older pending work out of a bounded pass.
+        const rotationKey = `gmail.confirm-after.${account}`;
+        const after = walkDone ? tierSet.ledger.readMeta(rotationKey) : undefined;
+        let pending = walkDone ? tierSet.ledger.metaEntries(pendingPrefix, { limit: batchSize, ...(after ? { after } : {}) }) : [];
+        if (walkDone && !pending.length && after) pending = tierSet.ledger.metaEntries(pendingPrefix, { limit: batchSize });
+        if (walkDone && !pending.length) {
           return { confirmed: 0, confirmedTotal: confirmedBefore, done: true, checkpoint: request.checkpoint! };
         }
         let head = saved.head;
         options.assertScopeCurrent?.();
         let waitReason = request.yieldReason?.('start');
         if (waitReason) {
-          return { confirmed: 0, confirmedTotal: confirmedBefore, done: false, waitReason, checkpoint: request.checkpoint ?? null };
+          return { confirmed: 0, confirmedTotal: confirmedBefore, done: walkDone, backlog: true, waitReason, checkpoint: request.checkpoint ?? null };
         }
         let confirmed = 0;
-        const maxItems = boundedMaxItems(request.max_items, config.storePullMaxItems);
+        let waitingForText = 0;
         const budget = options.requestBudget;
         const connector = buildConnector({
           maxMessages: maxItems,
@@ -507,13 +532,20 @@ export function createGmailConnectorStoreSyncHandler(
           scope: {
             ...scope,
             storedItem: id => storedItem(id, true),
+            finishScopeConfirmation,
             confirmStoredItem: (item, passesIngestFilter) => {
               let observed = false;
+              let unreadable = false;
               // A tier move may have changed which copy holds the text while the GET was in flight.
               for (const store of stores) {
                 if (store.itemOwnerPresent(item.identity, connectorId, 'observed')) continue;
-                const text = store.releaseItemChunks(item.identity)?.chunks.map(chunk => chunk.text).join('');
-                if (!text?.trim() || !passesIngestFilter(text)) continue;
+                const copy = store.releaseItemChunks(item.identity);
+                if (!copy) {
+                  if (store.itemStoredContent(item.identity)?.chunkCount) unreadable = true;
+                  continue;
+                }
+                const text = copy.chunks.map(chunk => chunk.text).join('');
+                if (!text.trim() || !passesIngestFilter(text)) continue;
                 // Renew the parts first so an interrupted page still owes the parent.
                 if (!observed && options.build?.children) confirmLegacyParts(item.identity);
                 options.assertScopeCurrent?.();
@@ -521,27 +553,65 @@ export function createGmailConnectorStoreSyncHandler(
                 if (store.itemOwnerPresent(item.identity, connectorId, 'observed')) observed = true;
               }
               if (observed) confirmed++;
+              if (unreadable) {
+                queueScopeConfirmation(item.identity.providerItemId);
+                waitingForText++;
+              } else finishScopeConfirmation(item.identity.providerItemId);
             },
           },
         });
-        let done = false;
+        let done = walkDone;
+        let backlog = false;
+        let pendingKey: string | undefined;
         let refusal: GoogleRequestBudgetError | undefined;
         let cursorRejected: true | undefined;
         try {
-          for await (const page of connector.listItems({ limit: maxItems, ...(head ? { cursor: head } : {}) })) {
-            done = page.done;
-            head = done ? complete : page.nextCursor ?? head;
-            if (!done) {
-              waitReason = request.yieldReason?.('page');
-              if (waitReason) break;
+          if (walkDone) {
+            for (const entry of pending) {
+              const id = entry.key.slice(pendingPrefix.length);
+              const [owner, pageToken] = entry.value.split('\n');
+              if (owner === connectorId && tierSet.ledger.getCurrent({
+                provider: GMAIL_PROVIDER, accountScope: account, providerItemId: id,
+              })?.state === 'moving') {
+                waitingForText++;
+                continue;
+              }
+              if (owner !== connectorId || !storedItem(id, true)?.needsScopeObservation) {
+                finishScopeConfirmation(id);
+                continue;
+              }
+              pendingKey = entry.key;
+              const next = await connector.confirmRetainedMessage(id, pageToken ? { pageToken } : {});
+              if (next) tierSet.ledger.writeMeta(entry.key, connectorId + '\n' + next);
+              pendingKey = undefined;
             }
+            const more = tierSet.ledger.metaEntries(pendingPrefix, { limit: 1 }).length > 0;
+            if (more) tierSet.ledger.writeMeta(rotationKey, pending.at(-1)!.key);
+            else if (after) tierSet.ledger.deleteMeta(rotationKey);
+            // A hidden copy waits for the ordinary interval. It must not spend
+            // the reserve in a tight loop while a tier move keeps it hidden.
+            backlog = more && waitingForText < pending.length;
+          } else {
+            for await (const page of connector.listItems({ limit: maxItems, ...(head ? { cursor: head } : {}) })) {
+              done = page.done;
+              head = done ? complete : page.nextCursor ?? head;
+              if (!done) {
+                waitReason = request.yieldReason?.('page');
+                if (waitReason) break;
+              }
+            }
+            if (done) backlog = tierSet.ledger.metaEntries(pendingPrefix, { limit: 1 }).length > 0;
           }
         } catch (error) {
           if (error instanceof GoogleRequestBudgetError) {
             refusal = error;
             head = connector.interruptedConfirmationCursor() ?? head;
           }
-          else if (head && isRejectedCursorError(error)) {
+          else if (pendingKey && error instanceof GmailPageTokenRejectedError) {
+            // Restart only this message's query, leaving the mailbox walk complete.
+            tierSet.ledger.writeMeta(pendingKey, connectorId);
+            backlog = true;
+          } else if (!walkDone && head && isRejectedCursorError(error)) {
             // Replay skips durable confirmations. Keep the cumulative count.
             head = undefined;
             cursorRejected = true;
@@ -553,8 +623,10 @@ export function createGmailConnectorStoreSyncHandler(
           : undefined;
         options.assertScopeCurrent?.();
         const confirmedTotal = confirmedBefore + confirmed;
-        const checkpoint = encodeCheckpoint({ ...(head ? { head } : {}), scope: confirmationScope, confirmed: confirmedTotal });
-        return { confirmed, confirmedTotal, done, checkpoint,
+        const checkpoint = walkDone && !confirmed ? request.checkpoint! : encodeCheckpoint({
+          ...(done ? { head: complete } : head ? { head } : {}), scope: confirmationScope, confirmed: confirmedTotal,
+        });
+        return { confirmed, confirmedTotal, done, checkpoint, ...(backlog ? { backlog } : {}),
           ...(waitReason ? { waitReason } : {}),
           ...(refusal && remaining !== undefined ? { hold: { error: refusal, remaining } } : {}),
           ...(cursorRejected ? { cursorRejected } : {}),
