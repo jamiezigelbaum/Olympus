@@ -49402,6 +49402,12 @@ function installMainThreadSqlTrace() {
     };
   }
 }
+function busyAfter(error, started) {
+  if (error instanceof Error && /database is locked|SQLITE_BUSY/i.test(error.message) && !/ after \d+ ms$/.test(error.message)) {
+    error.message += ` after ${Math.round(performance.now() - started)} ms`;
+  }
+  return error;
+}
 function timeStatement(statement) {
   const held = statement;
   if (!statement || held[TIMED])
@@ -49418,12 +49424,20 @@ function timeStatement(statement) {
       if (siteCounts)
         countSite();
       const answer = sourceAnswerTraceActive();
-      if (!answer && !sliceTiming && !slowLog)
-        return call.apply(this, args);
+      if (!answer && !sliceTiming && !slowLog) {
+        const at = performance.now();
+        try {
+          return call.apply(this, args);
+        } catch (error) {
+          throw busyAfter(error, at);
+        }
+      }
       const before = benchSql?.sample();
       const started = performance.now();
       try {
         return call.apply(this, args);
+      } catch (error) {
+        throw busyAfter(error, started);
       } finally {
         const ms = performance.now() - started;
         if (before)
