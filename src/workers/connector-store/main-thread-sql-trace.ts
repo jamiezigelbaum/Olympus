@@ -78,6 +78,14 @@ export function installMainThreadSqlTrace(): void {
   }
 }
 
+/** A busy error says how long SQLite waited: 0 ms means the busy handler never ran (lane 1, 20 Nov 2026). */
+function busyAfter(error: unknown, started: number): unknown {
+  if (error instanceof Error && /database is locked|SQLITE_BUSY/i.test(error.message) && !/ after \d+ ms$/.test(error.message)) {
+    error.message += ` after ${Math.round(performance.now() - started)} ms`;
+  }
+  return error;
+}
+
 function timeStatement<T>(statement: T): T {
   const held = statement as unknown as Record<string, unknown>;
   if (!statement || held[TIMED]) return statement;
@@ -89,11 +97,16 @@ function timeStatement<T>(statement: T): T {
       if (frontLoopSqlWatched()) noteFrontLoopStatement((held[DB] as Database | undefined)?.filename, sourceSite);
       if (siteCounts) countSite();
       const answer = sourceAnswerTraceActive();
-      if (!answer && !sliceTiming && !slowLog) return call.apply(this, args);
+      if (!answer && !sliceTiming && !slowLog) {
+        const at = performance.now();
+        try { return call.apply(this, args); } catch (error) { throw busyAfter(error, at); }
+      }
       const before = benchSql?.sample();
       const started = performance.now();
       try {
         return call.apply(this, args);
+      } catch (error) {
+        throw busyAfter(error, started);
       } finally {
         const ms = performance.now() - started;
         if (before) benchSql?.record(before, ms, (held[DB] as Database | undefined)?.filename ?? '', slowSite);

@@ -380,7 +380,7 @@ describe('Gmail\'s item scope and approved scope', () => {
         mailPolicyRef: () => ({ kind: 'mail', accountGeneration: 'g1', revision: 'r1' }) as never,
         assertCurrentMail: () => ({ mailScope: {} }) as never,
       },
-      handle: { accountRole: 'personal' },
+      handle: { accountRole: 'personal' }, gmailRetainedAccountScope: () => 'personal',
     });
     if (!('itemFilters' in scope) || !scope.itemFilters) throw new Error('expected filters');
     expect(scope.itemFilters).toMatchObject({ observedConnectorIdPrefix: 'archive.' });

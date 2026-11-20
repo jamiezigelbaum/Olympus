@@ -17,10 +17,8 @@ import {
   type LoadSovereigntyOptions,
 } from '../../../core/sovereignty.ts';
 import { createSourceCorpusRegistry } from '../../../core/source-corpus-registry.ts';
-import { OperationError } from '../../../core/operation-error.ts';
-import {
-  gmailCursorConnectorId,
-} from '../../google-connectors/index.ts';
+import { OperationError, SourceScopeApprovalRequiredError } from '../../../core/operation-error.ts';
+import { gmailEmbeddingPopulation } from '../../email-source/gmail-status-scope.ts';
 import {
   type LocalConnectorStore,
   type ConnectorStoreSearchFilters,
@@ -53,12 +51,9 @@ import {
   FileSourceScopeAuthority,
   isMailSourceScopePolicyRef,
   scopeBoundEmbeddingProvider,
+  checkedEmbeddingProvider,
   type SourceScopePolicyRef,
 } from '../../source-scope-runtime.ts';
-import {
-  GMAIL_IMPORT_CONNECTOR_PREFIX,
-  GMAIL_IMPORTED_FILTERS,
-} from '../../google-connectors/gmail-archive-target.ts';
 import { type StoreEmbeddingScope } from '../../connector-store/embedding-plan.ts';
 import { parseOptionalTimeoutSeconds, firstNonEmptyEnv, resolveSecretRefSync, bootSecretOptions } from './environment.ts';
 
@@ -295,17 +290,7 @@ const SCOPE_APPROVED_SOURCE_IDS: ReadonlySet<string> = new Set([
   SCHEDULER_SOURCE_IDS.gmail, SCHEDULER_SOURCE_IDS.googleDrive, SCHEDULER_SOURCE_IDS.dropbox, SCHEDULER_SOURCE_IDS.localFiles,
 ]);
 
-/**
- * What a store's embedding may read now, from the scope authority: the same
- * population the store's status counts as owed. Shared with startup-wiring tests.
- *   - Gmail with no current mail approval: only what its imports brought,
- *     which the owner approved one by one. Live approval governs live reads.
- *   - Gmail's Private store under an approval: the approval's observations
- *     and the imports'.
- *   - A file source's store: the approved folders' content scope.
- * Every scoped store's provider is bound to the approval, so a pass stops
- * the moment it changes. Other stores carry no scope.
- */
+/** Scope for queued and missing vectors, selected for the actual processor. */
 export function storeEmbeddingScope(input: {
   store: LocalConnectorStore;
   sourceId: string;
@@ -314,38 +299,35 @@ export function storeEmbeddingScope(input: {
   readScope: (store: LocalConnectorStore) => { allowed: false } | {
     allowed: true; contentAllowed: boolean; accountScope?: string; contentFilters?: ConnectorStoreSearchFilters;
   };
-  gmailAccountScope?: string | undefined;
-  /** The account scope Gmail's imported mail is kept under. */
-  gmailImportAccountScope?: string | undefined;
+  provider?: SourceEmbeddingProvider | undefined;
+  gmailRetainedAccountScope?: () => string | undefined;
+  gmailLiveProcessorVerified?: () => boolean;
 }): StoreEmbeddingScope {
   const { store, sourceId, scopeRef: ref, authority } = input;
   if (!SCOPE_APPROVED_SOURCE_IDS.has(sourceId)) return { allowed: true };
-  if (sourceId === SCHEDULER_SOURCE_IDS.gmail && (!ref || !authority)) {
-    if (!input.gmailImportAccountScope) return { allowed: false };
-    return { allowed: true, accountScope: input.gmailImportAccountScope, filters: GMAIL_IMPORTED_FILTERS };
-  }
-  if (!ref || !authority) return { allowed: false };
-  const bind = (provider: SourceEmbeddingProvider) => scopeBoundEmbeddingProvider(provider, authority, ref);
-  if (isMailSourceScopePolicyRef(ref)) {
-    // A superseded approval leaves only the queue; the next build carries the new one.
-    try {
-      authority.assertCurrentMail(ref);
-    } catch {
-      return { allowed: false };
-    }
-    if (store.trustDomain !== 'secure_local') return { allowed: true, bind };
-    const accountScope = input.gmailAccountScope?.trim() || 'personal';
+  if (sourceId === SCHEDULER_SOURCE_IDS.gmail) {
+    const account = input.gmailRetainedAccountScope;
+    const accountScope = account?.();
+    if (!account || !accountScope) return { allowed: false, skipQueue: true };
+    if (ref && (!isMailSourceScopePolicyRef(ref) || !authority)) return { allowed: false, skipQueue: true };
+    const population = gmailEmbeddingPopulation({
+      provider: input.provider, accountScope, ref, privateStore: store.trustDomain === 'secure_local',
+    });
     return {
-      allowed: true,
-      bind,
-      accountScope,
-      filters: {
-        provider: 'gmail',
-        observedConnectorId: gmailCursorConnectorId(accountScope, { generation: ref.accountGeneration, revision: ref.revision }),
-        observedConnectorIdPrefix: GMAIL_IMPORT_CONNECTOR_PREFIX,
+      ...population, allowed: true,
+      bind(provider) {
+        if (provider !== input.provider) throw new SourceScopeApprovalRequiredError('The selected mail processor changed before embedding.');
+        return checkedEmbeddingProvider(provider, () => {
+          if (account() !== accountScope) throw new SourceScopeApprovalRequiredError('The retained mail belongs to another or unverified account.');
+          if (!ref || population.excludeAllEmbeddingHolds) return;
+          authority!.assertCurrentMail(ref);
+          if (!input.gmailLiveProcessorVerified?.()) throw new SourceScopeApprovalRequiredError('The connected Gmail credential is awaiting account verification.');
+        });
       },
     };
   }
+  if (!ref || !authority) return { allowed: false };
+  const bind = (provider: SourceEmbeddingProvider) => scopeBoundEmbeddingProvider(provider, authority, ref);
   const scope = input.readScope(store);
   if (!scope.allowed || !scope.contentAllowed) return { allowed: false };
   return {

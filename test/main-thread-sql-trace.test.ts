@@ -1,6 +1,9 @@
 // The Ask trace names synchronous SQLite that holds the request thread (#1305).
 import { Database } from 'bun:sqlite';
 import { expect, test } from 'bun:test';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { installMainThreadSqlTrace, withMainThreadSqlTiming } from '../src/workers/connector-store/main-thread-sql-trace.ts';
 import {
   createSourceAnswerTrace,
@@ -83,4 +86,21 @@ test('a synchronous sweep scope measures statements and exec, then restores the 
     holdThread(db, 200_000);
     expect(timing.maxStatementMs).toBe(before);
   } finally { db.close(); }
+});
+
+test('a busy write says how long SQLite waited, so a 0 ms busy is told from a timed-out wait', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'busy-'));
+  const path = join(dir, 'b.db');
+  const holder = new Database(path); const writer = new Database(path);
+  try {
+    holder.exec('PRAGMA journal_mode = WAL; CREATE TABLE t (x)');
+    writer.exec('PRAGMA busy_timeout = 150');
+    holder.exec('BEGIN IMMEDIATE');
+    let message = '';
+    try { writer.query('INSERT INTO t VALUES (1)').run(); } catch (error) { message = (error as Error).message; }
+    expect(message).toMatch(/database is locked after (\d+) ms$/);
+    expect(Number(/after (\d+) ms$/.exec(message)![1])).toBeGreaterThanOrEqual(100);
+  } finally {
+    holder.exec('ROLLBACK'); holder.close(); writer.close(); rmSync(dir, { recursive: true, force: true });
+  }
 });

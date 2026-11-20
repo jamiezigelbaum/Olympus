@@ -129,6 +129,7 @@ export interface ChatGptSetupBackend {
     draft: OlympusMailScopeDraft;
     labels: Array<{ id: string; name: string; system: boolean }>;
     categories: Array<{ category: string; messages_total?: number }>;
+    operatorExclusions?: MailScopeList['operator_exclusions'];
     senderSuggestions: Array<{ sender: string; sample_messages: number }>;
     estimate?: { content_messages: number; metadata_messages: number; total_messages: number };
   }>;
@@ -863,6 +864,7 @@ function mailList(browse: Awaited<ReturnType<ChatGptSetupBackend['browseMail']>>
     draft: withoutSecretMailChoices(browse.draft, secrets),
     labels: browse.labels.filter((label) => !isSecretLabel(secrets, label.id)),
     categories: browse.categories as MailScopeList['categories'],
+    ...(browse.operatorExclusions ? { operator_exclusions: browse.operatorExclusions } : {}),
     sender_suggestions: browse.senderSuggestions.filter((entry) => !isSecretSender(secrets, entry.sender)),
     ...(browse.estimate ? { estimate: browse.estimate } : {}),
   };

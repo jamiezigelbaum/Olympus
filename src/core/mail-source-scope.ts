@@ -18,7 +18,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { writePrivateFileAtomicSync } from './atomic-file.ts';
 import { withFileLeaseSync } from './file-lease.ts';
-import { OperationError } from './operation-error.ts';
+import { OperationError, SourceScopeApprovalRequiredError } from './operation-error.ts';
 import {
   connectedSourceScopeAccountGeneration,
   type SourceScopeConnectedHandleRegistry,
@@ -356,7 +356,7 @@ export function assertMailSourceScopeApproved(input: {
     || (input.expectedAccountGeneration !== undefined && approval.accountGeneration !== input.expectedAccountGeneration)
     || (input.expectedRevision !== undefined && approval.revision !== input.expectedRevision)
   ) {
-    throw new OperationError('source_index_policy_violation', 'Mail scope approval is required for this connected mailbox.');
+    throw new SourceScopeApprovalRequiredError('Mail scope approval is required for this connected mailbox.');
   }
   return approval as MailSourceScopeApprovalSnapshot & { status: 'approved'; mailScope: MailScopeSelection; accountGeneration: string };
 }

@@ -224,6 +224,9 @@ export function createChatGptSetupBackend(options: ChatGptSetupBackendOptions): 
         draft: result.draft as OlympusMailScopeDraft,
         labels: Array.isArray(data.labels) ? data.labels as Array<{ id: string; name: string; system: boolean }> : [],
         categories: Array.isArray(data.categories) ? data.categories as Array<{ category: string; messages_total?: number }> : [],
+        ...(data.operator_exclusions && typeof data.operator_exclusions === 'object'
+          ? { operatorExclusions: data.operator_exclusions as NonNullable<Awaited<ReturnType<ChatGptSetupBackend['browseMail']>>['operatorExclusions']> }
+          : {}),
         senderSuggestions: Array.isArray(data.sender_suggestions)
           ? data.sender_suggestions as Array<{ sender: string; sample_messages: number }>
           : [],

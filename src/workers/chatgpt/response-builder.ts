@@ -1456,6 +1456,15 @@ function copyScopeList(list: ScopeList): ScopeList {
     })),
     sender_suggestions: (list.sender_suggestions ?? []).slice(0, 50).map((entry) => ({ sender: text(entry.sender), sample_messages: whole(entry.sample_messages) })),
   };
+  if (list.operator_exclusions) {
+    const exclusions = list.operator_exclusions;
+    out.operator_exclusions = {
+      gmail_query: exclusions.gmail_query === true,
+      categories: (exclusions.categories ?? []).filter(category => MAIL_CATEGORIES.has(category)),
+      other_labels: exclusions.other_labels === true,
+      verification_codes: exclusions.verification_codes === true,
+    };
+  }
   if (list.estimate) {
     out.estimate = {
       content_messages: whole(list.estimate.content_messages),

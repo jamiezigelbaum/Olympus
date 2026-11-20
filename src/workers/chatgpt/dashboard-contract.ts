@@ -1082,6 +1082,7 @@ export interface MailScopeList {
   /** Labels the person may skip. */
   labels: Array<{ id: string; name: string; system: boolean }>;
   categories: Array<{ category: MailCategory; messages_total?: number }>;
+  operator_exclusions?: { gmail_query: boolean; categories: MailCategory[]; other_labels: boolean; verification_codes: boolean };
   /** Frequent senders in a sample, to mark Private or skip. */
   sender_suggestions: Array<{ sender: string; sample_messages: number }>;
   /** Gmail's own estimate for this draft: full-content and metadata-only messages. */
