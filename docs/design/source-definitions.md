@@ -1,7 +1,7 @@
 # Source definitions: one declaration per source, one gate for every read
 
-Status: DRAFT v2 (20 Nov 2026), revised after independent reviews by Codex
-Astra and Gemini Neon. Awaiting Jamie's approval. Written by the 1.5
+Status: APPROVED by Jamie 20 Nov 2026 16:07Z (v2, revised after independent reviews by Codex
+Astra and Gemini Neon). Written by the 1.5
 plan owner at Jamie's request after the source-specific audit of main
 `d9cf10eb` (olympus-ops run 44736179620). Reviewers: Gemini Neon and Codex
 Astra, independently. Code read at `d9cf10eb`.
