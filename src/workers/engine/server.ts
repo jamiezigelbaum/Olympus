@@ -278,7 +278,7 @@ import { createOwnerQuestionActivity, createSourceAnswerLanes, OWNER_QUESTION_RE
 import type { ConnectorStoreStatusScope } from '../connector-store/local-index.ts';
 import { setConnectorStoreRecencyIndexAdmission, setVectorDigestBackfillHold } from '../connector-store/local-index.ts';
 import type { ExtractionUnreadableItem } from '../file-extraction/job-store.ts';
-import { gmailInternalStoreStatusScope, gmailPrivateStoreStatusScope } from '../email-source/gmail-status-scope.ts';
+import { gmailInternalStoreStatusScope, gmailPrivateStoreStatusScope, readGmailRetainedAccountScope } from '../email-source/gmail-status-scope.ts';
 import {
   TIER_DOMAIN_ORDER,
   onDemandTierStore,
@@ -344,7 +344,7 @@ import { LocalWorkPacer, embedsOnThisComputer, systemIdlePowerProbe } from '../l
 import { builtInEmbeddingModel } from '../source-index/built-in-embedding/manifest.ts';
 import {
   createGmailConnectorStoreSchedulerSource,
-  createGmailImportedHistorySchedulerSource,
+  createGmailRetainedHistorySchedulerSource,
   fileExtractionSchedulerTask,
   createGoogleDriveConnectorStoreSchedulerSource,
   createCanonicalDropboxSchedulerSource,
@@ -516,6 +516,7 @@ import { engineRssRestartsFrom, startEngineRssRestart } from '../engine-split/rs
 import { createFrontScheduler } from '../engine-split/front-scheduler.ts';
 import { createFrontDashboardHistory, openWritableDashboardHistory } from '../engine-split/front-history.ts';
 import { tierSetForLedger } from '../connector-store/tier-set-registry.ts';
+import { sqliteMmapPolicy } from '../connector-store/sqlite-mmap.ts';
 import { startSupersededSweepTicker } from '../connector-store/tier-auto-prune-sweep.ts';
 import { withStoreReadPriority } from '../../core/store-reclaim-admission.ts';
 import { createStandBack, ownerAskReason } from './stand-back.ts';
@@ -665,6 +666,8 @@ export async function main(): Promise<void> {
   // split's front (core/engine-split.ts) takes no lock: its background holds it.
   dataOwnerLock = takeWorkerDataOwnerLock(process.env, { engineRole: engineRoleFromEnv(process.env) });
   const engineRole = engineRoleFromEnv(process.env);
+  const { enabled: sqliteMmapOn, reason: sqliteMmapReason } = sqliteMmapPolicy();
+  console.log(`[olympus] engine ${engineRole} SQLite file map ${sqliteMmapOn ? 'on' : 'off'} (${sqliteMmapReason})`);
   const askBench = process.env.NODE_ENV === 'test' && process.env.OLYMPUS_ASK_BENCH === '1';
   if (askBench && process.env.OLYMPUS_ASK_BENCH_SQL_DIR) {
     const dir = process.env.OLYMPUS_ASK_BENCH_SQL_DIR;
@@ -867,6 +870,7 @@ export async function main(): Promise<void> {
   // server per computer); the front's completions run there (judging-models.ts).
   const workerBuiltInModel = !builtInModelWanted(sovereigntyEngine, process.env) ? undefined : createWorkerSharedBuiltInModel(process.env, engineFront ? {
     complete: (request) => engineFront!.completeModel(request),
+    servingPid: () => engineFront!.servingModelPid(),
     prepare: () => { void engineFront!.client.post({ kind: 'model_prepare' }).catch(() => undefined); },
   } : undefined);
   const answerBuiltInModel = workerBuiltInModel
@@ -880,8 +884,13 @@ export async function main(): Promise<void> {
     if (!route) return undefined;
     return 'unavailable' in route ? 'unavailable' : route.model;
   });
+  const servingModelPid = workerBuiltInModel?.model.servingPid;
   registerBuiltInPrivateModel(workerBuiltInModel
-    ? { cacheModelId: `${workerBuiltInModel.model.spec.modelId}:${workerBuiltInModel.model.spec.revision}:${workerBuiltInModel.model.spec.file.sha256}`, model: workerBuiltInModel.model, available: workerBuiltInModel.available, startIfIdle: workerBuiltInModel.startIfIdle }
+    ? {
+      ...workerBuiltInModel,
+      cacheModelId: `${workerBuiltInModel.model.spec.modelId}:${workerBuiltInModel.model.spec.revision}:${workerBuiltInModel.model.spec.file.sha256}`,
+      serverReady: () => servingModelPid?.() !== undefined,
+    }
     : undefined);
   // Four-tier classification inputs for every lane: the owner's map, tier
   // rules, their own words about privacy, and the privacy-safe sniffer. The
@@ -1802,6 +1811,18 @@ export async function main(): Promise<void> {
       ? gmailItemAccountScope([gmailInternalConnectorStore, gmailSecureConnectorStore], role)
       : role;
   };
+  // Read the grant and history locally on each dispatch and commit. An unreadable
+  // registry, an ambiguous grant, or replaced store cannot stand in for a disconnect.
+  const gmailRetainedAccountScope = (): string | undefined => {
+    if (!connectedHandleRegistryPath || gmailInternalConnectorStore?.fileReplacedOrRemoved()
+      || gmailSecureConnectorStore?.fileReplacedOrRemoved() || gmailTierLane?.publicStore?.current()?.fileReplacedOrRemoved()) return undefined;
+    return readGmailRetainedAccountScope({
+      registryPath: connectedHandleRegistryPath, historyAccountId: () => recordedProviderAccount({ sourceId: GMAIL_SOURCE_ID }),
+      currentGrantVerified: gmailLiveProcessorVerified, itemScope: gmailItemScopeFor,
+    });
+  };
+  let liveGmailGuard: SourceAccountGuard | undefined;
+  const gmailLiveProcessorVerified = () => liveGmailGuard?.hasVerifiedCurrentAccount?.() === true;
   // An mbox export of a Gmail account is an input of the Gmail connector
   // (docs/design/archive-live-one-dataset.md, step 6): its mail joins the
   // Gmail stores, matched by Gmail's own ids, under the account it proves and
@@ -3107,9 +3128,7 @@ export async function main(): Promise<void> {
       });
       return gmailPrivateStoreStatusScope({
         authority: fileSourceScopeAuthority,
-        handle: handle ? { accountRole: gmailItemScopeFor(handle) } : undefined,
-        // Mail an import brought in counts whether or not live Gmail is connected and approved.
-        importAccountScope: gmailItemScopeFor(handle),
+        handle, provider: connectorStoreEmbeddingProviders.get(store.corpusId), gmailRetainedAccountScope,
       });
     }
     if (store === gmailInternalConnectorStore) return gmailInternalStoreStatusScope(fileSourceScopeAuthority);
@@ -3528,7 +3547,6 @@ export async function main(): Promise<void> {
       requestBudget: gmailRequestBudget,
       scope: gmailConnectorScopeFromApproval(approval),
       scopeApproval: { generation: scopeRef.accountGeneration, revision: scopeRef.revision },
-      confirmationRegistryPath: connectedHandleRegistryPath ?? fileSourceScopeAuthority.registryPath,
       assertScopeCurrent: () => {
         fileSourceScopeAuthority.assertCurrentMail(scopeRef);
       },
@@ -4627,19 +4645,16 @@ export async function main(): Promise<void> {
           freshnessThresholdHours: olympusConfig.worker.scheduler.freshnessThresholdHours, tasks: [] });
       }
     }
-    // Gmail with no live lane (not connected, or no mail approval) whose stores hold mail an import brought in: a
-    // source with no sync of its own, so the embedding sweep and the private meaning backfill below still drain
-    // the imported history. Live approval governs live reads, not the account's own stores.
-    // Only mail an import brought in counts: kept live mail waits for its own lane's approval.
-    let gmailImportedHistory: SourceSchedulerSource | undefined;
-    if (!sources.some((source) => source.sourceId === SCHEDULER_SOURCE_IDS.gmail) && gmailInternalConnectorStore && gmailSecureConnectorStore
-      && gmailHoldsImportedHistory([gmailInternalConnectorStore, gmailSecureConnectorStore, gmailTierLane?.publicStore?.current()])) {
-      gmailImportedHistory = createGmailImportedHistorySchedulerSource({ config: olympusConfig });
-      sources.push(gmailImportedHistory);
+    // Register retained index work after disconnect. Only an existing live lane or
+    // independently imported attachments get an extraction task.
+    const gmailStores = [gmailInternalConnectorStore, gmailSecureConnectorStore, gmailTierLane?.publicStore?.current()];
+    const liveGmail = sources.some((source) => source.sourceId === SCHEDULER_SOURCE_IDS.gmail);
+    if (!liveGmail && gmailStores.some((store) => store?.holdsAnyItem())) {
+      sources.push(createGmailRetainedHistorySchedulerSource({ config: olympusConfig }));
     }
-    // Gmail's attachment children are read by its source (live, or the one with no sync of its own).
     const gmailSourceAt = sources.findIndex((source) => source.sourceId === SCHEDULER_SOURCE_IDS.gmail);
-    const attachmentRunner = gmailSourceAt >= 0 ? gmailAttachmentRuntime()?.runner : undefined;
+    const attachmentRunner = gmailSourceAt >= 0 && (liveGmail || gmailHoldsImportedHistory(gmailStores))
+      ? gmailAttachmentRuntime()?.runner : undefined;
     if (gmailSourceAt >= 0 && attachmentRunner) {
       const gmailSource = sources[gmailSourceAt]!;
       sources[gmailSourceAt] = {
@@ -4652,6 +4667,13 @@ export async function main(): Promise<void> {
           batchSize: GMAIL_ATTACHMENT_EXTRACTION_BATCH_SIZE,
         }))],
       };
+    }
+    // Acquisition uses the token guard, which can call Gmail. The sweep added
+    // below reads only the retained account and rechecks it at dispatch and commit.
+    liveGmailGuard = laneGuards.get(GMAIL_SOURCE_ID);
+    if (gmailSourceAt >= 0 && liveGmailGuard) {
+      sources[gmailSourceAt] = guardAccountBoundLanes([sources[gmailSourceAt]!], laneGuards)[0]!;
+      laneGuards.delete(GMAIL_SOURCE_ID);
     }
     // Telegram's media children are read by its source.
     const telegramSourceAt = sources.findIndex((source) => source.sourceId === SCHEDULER_SOURCE_IDS.telegram);
@@ -4695,8 +4717,8 @@ export async function main(): Promise<void> {
             scopeRef: scopeRefs.get(source.sourceId),
             authority: fileSourceScopeAuthority,
             readScope: connectorStoreReadScope,
-            gmailAccountScope: currentGmailHandle ? gmailItemScopeFor(currentGmailHandle) : undefined,
-            gmailImportAccountScope: gmailItemScopeFor(currentGmailHandle),
+            provider: connectorStoreEmbeddingProviders.get(store.corpusId),
+            gmailRetainedAccountScope, gmailLiveProcessorVerified,
           }),
         });
         return target ? [target] : [];
@@ -5354,6 +5376,10 @@ export async function main(): Promise<void> {
     connectorStoreAccountScopes,
     connectorStorePrincipals,
     connectorStoreReadScope,
+    gmailEmbeddingScope: (store, provider) => storeEmbeddingScope({
+      store, provider, sourceId: GMAIL_SOURCE_ID, scopeRef: fileSourceScopeAuthority?.mailPolicyRef(),
+      authority: fileSourceScopeAuthority, gmailRetainedAccountScope, gmailLiveProcessorVerified, readScope: connectorStoreReadScope,
+    }),
     ...(sourceScheduler ? { sourceScheduler } : {}),
     ...(sourceWatchPass
       ? {
@@ -7092,7 +7118,10 @@ export async function main(): Promise<void> {
       log: (line) => console.warn(line),
       // The front's built-in model completions, tracked like this process's
       // own answers so the judge steps aside for them on the one server.
-      ...(answerBuiltInModel ? { modelComplete: (request: AnalystModelRequest) => answerBuiltInModel.complete(request) } : {}),
+      ...(answerBuiltInModel ? { modelComplete: async (request: AnalystModelRequest) => ({
+        ...await answerBuiltInModel.complete(request),
+        built_in_serving_pid: servingModelPid?.(),
+      }) } : {}),
       handlers: {
         model_prepare: () => {
           if (workerBuiltInModel) void workerBuiltInModel.model.prepare();
@@ -7216,6 +7245,7 @@ export async function main(): Promise<void> {
       instanceId: commands.instanceId,
       collect: () => ({
         activity: statusMemoryActivity(tierSniffer?.passRunning ?? false, statusRecount?.health().counting ?? false),
+        built_in_serving_pid: servingModelPid?.(),
         scheduler: sourceScheduler?.status() ?? null,
         judge: (() => {
           const backlog = tierSniffer?.backlog();

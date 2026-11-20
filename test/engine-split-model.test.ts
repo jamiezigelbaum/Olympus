@@ -7,7 +7,7 @@ import { expect, test } from 'bun:test';
 import type { AnalystModelRequest } from '../src/core/analyst.ts';
 import { OperationError } from '../src/core/operation-error.ts';
 import { createEngineCommandHandler, EngineCommandLedger, parseEngineCommandEnvelope } from '../src/workers/engine-split/commands.ts';
-import { completeModelInBackground } from '../src/workers/engine-split/runtime.ts';
+import { completeModelInBackground, createEngineFront } from '../src/workers/engine-split/runtime.ts';
 import { currentLocalInferencePriority, runBackgroundInference, runClassificationInference } from '../src/workers/answer-activity.ts';
 
 const TOKEN = 'engine-split-model-token';
@@ -33,6 +33,24 @@ test('a front completion runs on the background model with the same request and 
   expect(seen).toHaveLength(1);
   expect(seen[0]).toMatchObject({ system: 'sys', prompt: 'evidence', localOnly: true, maxOutputChars: 900, responseSchema: { type: 'object' } });
   expect(seen[0]!.signal).toBeInstanceOf(AbortSignal);
+});
+
+test('the next front Ask sees a completed start and its subsequent exit before any status publication', async () => {
+  const servingPid = 1234;
+  let alive = true;
+  const front = createEngineFront({ env: process.env, socketPath: 'fixture.sock', authToken: TOKEN,
+    processAlive: pid => alive && pid === servingPid,
+    fetch: background(async () => ({ text: 'ok', modelId: 'fixture', built_in_serving_pid: servingPid })),
+  });
+  try {
+    expect(front.servingModelPid()).toBeUndefined();
+    expect(await front.completeModel({ system: 's', prompt: 'p', localOnly: true })).toEqual({ text: 'ok', modelId: 'fixture' });
+    expect(front.servingModelPid()).toBe(servingPid);
+    alive = false;
+    expect(front.servingModelPid()).toBeUndefined();
+  } finally {
+    front.stop();
+  }
 });
 
 test('the model\'s typed refusal reaches the front as the same error it raises in one process', async () => {

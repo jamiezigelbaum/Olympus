@@ -21,7 +21,9 @@ export const FRESH_LEG = 'canary-test-omarchy-fresh';
 export const quote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
 // sudo keeps the caller's cwd; zig's 0700 home makes every olyfresh child spawn fail with EACCES.
 export const asFresh = (script: string): string => `sudo -n -u olyfresh env HOME=/home/olyfresh XDG_CONFIG_HOME=/home/olyfresh/.config XDG_DATA_HOME=/home/olyfresh/.local/share XDG_STATE_HOME=/home/olyfresh/.local/state XDG_RUNTIME_DIR=/run/user/$(id -u olyfresh) DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u olyfresh)/bus bash -c ${quote(`cd "$HOME" || exit 1\n${script}`)}`;
-export const freshMachine = (machine: Machine): Machine => ({ ...machine, exec: (script, options) => machine.exec(asFresh(script), options) });
+// The olyfresh account is a throwaway: its home is emptied at the start of every run (below), so steps that need a
+// throwaway machine (limits) may run there, while the laptop's own account stays the transport only.
+export const freshMachine = (machine: Machine): Machine => ({ ...machine, disposable: true, exec: (script, options) => machine.exec(asFresh(script), options) });
 
 export interface ConsentSnapshot { url: string; text: string; password: boolean; accounts: number; signedOut: boolean }
 /** Only consent may be automated. No password, account switching or authentication challenge is answered. */

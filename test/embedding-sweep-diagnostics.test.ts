@@ -165,6 +165,23 @@ test('pending judgments embed early under the shared local identity and idle is 
   expect(f.ledger.getCurrent(identityOf('synthetic-id'))?.contentPending).toBe(true);
 });
 
+test('retained-content maintenance leaves judgment holds in place even with the shared local identity', async () => {
+  const f = await fixture();
+  const scope = { provider: f.provider, excludeAllEmbeddingHolds: true } as const;
+  const target = { store: f.store, wholeStore: true, ...scope };
+  expect(f.store.queuedEmbeddingItemIds()).toEqual([localId('synthetic-id')]);
+  const [queuedPass] = await embedPendingChunks([target], { maxItems: 32, diagnostics: true });
+  expect(queuedPass).toMatchObject({
+    chunksEmbedded: 0, queued_first_items: 0,
+    inventory: { pending_chunks: 1, eligible_chunks: 0, skipped_held_chunks: 1, held_for_judgment_chunks: 1 },
+  });
+  const [missingPass] = await embedPendingChunks([target], { maxItems: 32 });
+  expect(missingPass).toMatchObject({ chunksEmbedded: 0, itemsAttempted: 0 });
+  expect(await f.store.embedChunks(scope)).toMatchObject({ chunksEmbedded: 0 });
+  expect(f.provider.inputs).toHaveLength(0);
+  expect(f.ledger.getCurrent(identityOf('synthetic-id'))?.contentPending).toBe(true);
+});
+
 test('per-store sweep receipts count held items and chunks by reason', async () => {
   const f = await fixture({ empty: true });
   const ids = ['for-judgment', 'decided', 'unread', 'moving'];

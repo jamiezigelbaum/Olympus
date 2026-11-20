@@ -11089,8 +11089,25 @@ function sizeHeldItemKey(ref) {
 
 // src/workers/connector-store/sqlite-mmap.ts
 var SQLITE_MMAP_BYTES = 2147418112;
+function sqliteMmapPolicy(env = process.env) {
+  const setting = env.OLYMPUS_SQLITE_MMAP;
+  if (setting === "off")
+    return { enabled: false, reason: "OLYMPUS_SQLITE_MMAP=off" };
+  if (process.platform !== "linux")
+    return { enabled: false, reason: "Linux only" };
+  if (setting === "on")
+    return { enabled: true, reason: "OLYMPUS_SQLITE_MMAP=on" };
+  return { enabled: false, reason: "default" };
+}
 function sqliteMmapEnabled(env = process.env) {
-  return process.platform === "linux" && env.OLYMPUS_SQLITE_MMAP !== "off";
+  return sqliteMmapPolicy(env).enabled;
+}
+function sqliteMmapWorkerSource(source) {
+  const pragma = sqliteMmapEnabled() ? `
+    try { db.exec('PRAGMA mmap_size = ${SQLITE_MMAP_BYTES}'); }
+    catch { console.warn('[olympus] SQLite worker could not enable the file map.'); }
+  ` : "";
+  return source.replace("/*olympus-mmap-pragma*/", pragma);
 }
 function applySqliteMmap(db, env = process.env) {
   if (!sqliteMmapEnabled(env))
@@ -12710,6 +12727,12 @@ function installMainThreadSqlTrace() {
     };
   }
 }
+function busyAfter(error, started) {
+  if (error instanceof Error && /database is locked|SQLITE_BUSY/i.test(error.message) && !/ after \d+ ms$/.test(error.message)) {
+    error.message += ` after ${Math.round(performance.now() - started)} ms`;
+  }
+  return error;
+}
 function timeStatement(statement) {
   const held = statement;
   if (!statement || held[TIMED])
@@ -12726,12 +12749,20 @@ function timeStatement(statement) {
       if (siteCounts)
         countSite();
       const answer = sourceAnswerTraceActive();
-      if (!answer && !sliceTiming && !slowLog)
-        return call.apply(this, args);
+      if (!answer && !sliceTiming && !slowLog) {
+        const at = performance.now();
+        try {
+          return call.apply(this, args);
+        } catch (error) {
+          throw busyAfter(error, at);
+        }
+      }
       const before = benchSql?.sample();
       const started = performance.now();
       try {
         return call.apply(this, args);
+      } catch (error) {
+        throw busyAfter(error, started);
       } finally {
         const ms = performance.now() - started;
         if (before)
@@ -15431,8 +15462,6 @@ var clock2 = REAL_CLOCK;
 var observer;
 var observeSnapshots = false;
 var workerFactory = (url) => new Worker(url);
-var MMAP_PRAGMA_SLOT = "/*olympus-mmap-pragma*/";
-var mmapPragma = () => sqliteMmapEnabled() ? `try { db.exec('PRAGMA mmap_size = ${SQLITE_MMAP_BYTES}'); } catch {}` : "";
 var benchSqlDir;
 function instrumentBenchWorker(source, dir, store) {
   const module = new URL("./ask-bench-sql.ts", import.meta.url).href;
@@ -15614,7 +15643,7 @@ function startThread(store, lane = "shared") {
   if (threads.filter((reader) => reader.store === store && reader.lane === lane).length >= limit || !runtimeHasWorkers())
     return;
   try {
-    const source = WORKER_SOURCE.replace(MMAP_PRAGMA_SLOT, mmapPragma());
+    const source = sqliteMmapWorkerSource(WORKER_SOURCE);
     const url = URL.createObjectURL(new Blob([benchSqlDir ? instrumentBenchWorker(source, benchSqlDir, store) : source], { type: "application/javascript" }));
     const worker = workerFactory(url);
     worker.unref?.();
@@ -25058,6 +25087,16 @@ var VISIBILITY_HOLD_WAIT_MS = 10;
 function visibilityFlagged(row) {
   return row.moving || row.hidden || row.held || row.heldForJudgment || row.metadataLayer || row.metadataLayerContentUnread;
 }
+function describeSyncRunBusy(db, site, startedAt, error) {
+  const code = String(error?.code ?? "");
+  if (process.env.OLYMPUS_SQLITE_BUSY_DIAGNOSTIC !== "1" || !code.startsWith("SQLITE_BUSY") || !(error instanceof Error))
+    return;
+  let timeout = "unknown";
+  try {
+    timeout = String(db.query("PRAGMA busy_timeout").get().timeout);
+  } catch {}
+  error.message += ` (sync_runs ${site}: ${code} after ${Math.round(performance.now() - startedAt)} ms, in_transaction=${db.inTransaction}, busy_timeout=${timeout})`;
+}
 function runHiddenStepsHere(steps) {
   let step = steps.next();
   while (!step.done) {
@@ -31205,12 +31244,18 @@ ${parentKey(ref)}`, { ref, origin });
     await connector.authenticate();
     const syncRunId = `connector-sync-${randomUUID9()}`;
     const startedAt = nowIso();
-    this.db.query(`
-      INSERT INTO sync_runs (
-        sync_run_id, corpus_id, connector_id, status, cursor, items_seen,
-        items_indexed, started_at, audit_receipt_sha256
-      ) VALUES (?, ?, ?, 'running', ?, 0, 0, ?, ?)
-    `).run(syncRunId, this.corpusId, connector.id, options?.cursor ?? null, startedAt, auditReceiptSha256 ?? null);
+    const startWriteAt = performance.now();
+    try {
+      this.db.query(`
+        INSERT INTO sync_runs (
+          sync_run_id, corpus_id, connector_id, status, cursor, items_seen,
+          items_indexed, started_at, audit_receipt_sha256
+        ) VALUES (?, ?, ?, 'running', ?, 0, 0, ?, ?)
+      `).run(syncRunId, this.corpusId, connector.id, options?.cursor ?? null, startedAt, auditReceiptSha256 ?? null);
+    } catch (error) {
+      describeSyncRunBusy(this.db, "start", startWriteAt, error);
+      throw error;
+    }
     let itemsSeen = 0;
     let itemsIndexed = 0;
     let itemsChanged = 0;
@@ -31452,11 +31497,17 @@ ${parentKey(ref)}`, { ref, origin });
         }
       }
     } catch (error) {
-      this.db.query(`
-        UPDATE sync_runs
-        SET status = 'failed', cursor = ?, items_seen = ?, items_indexed = ?, completed_at = ?, error = ?
-        WHERE sync_run_id = ?
-      `).run(checkpoint ?? null, itemsSeen, itemsIndexed, nowIso(), errorMessage(error), syncRunId);
+      const failedWriteAt = performance.now();
+      try {
+        this.db.query(`
+          UPDATE sync_runs
+          SET status = 'failed', cursor = ?, items_seen = ?, items_indexed = ?, completed_at = ?, error = ?
+          WHERE sync_run_id = ?
+        `).run(checkpoint ?? null, itemsSeen, itemsIndexed, nowIso(), errorMessage(error), syncRunId);
+      } catch (failedWriteError) {
+        describeSyncRunBusy(this.db, "failed", failedWriteAt, failedWriteError);
+        throw failedWriteError;
+      }
       throw error;
     }
     this.db.query(`

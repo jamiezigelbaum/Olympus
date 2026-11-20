@@ -38,6 +38,8 @@ export interface BuiltInPrivateModel {
    * against any item.
    */
   available(): boolean;
+  /** Whether a completion can use an already serving llama-server. */
+  serverReady?(): boolean;
   /**
    * Start the first-time download when none has started yet (never blocks,
    * never restarts a failed one). The sniffer service calls it while the

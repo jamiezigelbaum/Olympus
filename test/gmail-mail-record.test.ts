@@ -255,6 +255,34 @@ describe('live listing with attachments as children', () => {
     expect(ids).toEqual([messages[0]!.id, ...[1, 2, 3, 4, 5].map((at) => `${messages[0]!.id}#child:${at}`)]);
   });
 
+  test('a split parent that no longer matches the operator query supplies no further children', async () => {
+    const message = withAttachments(4, 5);
+    let starred = true;
+    const requests: string[] = [];
+    const mailbox: GmailApiClient = {
+      async listMessages({ query }) {
+        expect(query).toContain('is:starred');
+        return { messages: starred ? [{ id: message.id }] : [] };
+      },
+      async getMessage(_id, options) {
+        requests.push(options?.format ?? 'full');
+        return { ...message, historyId: starred ? '10' : '11', labelIds: starred ? ['STARRED'] : [] };
+      },
+    };
+    const reader = new GoogleGmailSourceConnector({ apiClient: mailbox, credentialBroker: OFFLINE_BROKER,
+      build: { children: true }, query: 'is:starred', scope: {} });
+    let cursor: string | undefined;
+    for await (const page of reader.listItems({ limit: 2 })) {
+      expect(page.items).toHaveLength(2);
+      cursor = page.nextCursor;
+    }
+    expect(cursor).toBeDefined();
+    starred = false;
+    requests.length = 0;
+    for await (const page of reader.listItems({ cursor: cursor!, limit: 2 })) expect(page.items).toHaveLength(0);
+    expect(requests).toEqual(['metadata']);
+  });
+
   test('an attachment\'s bytes are read by its locator, inline or by attachment id', async () => {
     const message = withAttachments(5, 1);
     const requests: string[] = [];

@@ -34,11 +34,12 @@ export function storeEmbeddingCatchesUp(corpusId: string, provider: Pick<SourceE
  * the queue, whose groups each carry the scope binding they were queued under.
  */
 export type StoreEmbeddingScope =
-  | { allowed: false }
+  | { allowed: false; skipQueue?: true }
   | {
     allowed: true;
     accountScope?: string;
     filters?: ConnectorStoreSearchFilters;
+    excludeAllEmbeddingHolds?: true;
     /** Binds the store's provider to the current approval, so a pass stops when it changes. */
     bind?: (provider: SourceEmbeddingProvider) => SourceEmbeddingProvider;
   };
@@ -52,18 +53,22 @@ export interface StoreEmbeddingFacts {
   scope: StoreEmbeddingScope;
 }
 
+/** Provider and predicates for every write route, including an explicit embed. */
+export function scopedEmbeddingOptions(scope: Extract<StoreEmbeddingScope, { allowed: true }>, provider: SourceEmbeddingProvider) {
+  const { allowed: _allowed, bind, ...predicates } = scope;
+  return { ...predicates, provider: bind ? bind(provider) : provider };
+}
+
 /** The sweep target for one store, or undefined when the store is not indexed for meaning. */
 export function planStoreEmbedding(facts: StoreEmbeddingFacts): ConnectorStoreEmbeddingTarget | undefined {
   const { store, provider, scope } = facts;
   if (!provider || !facts.servedByMeaning) return undefined;
   // The store refuses such a provider too; planning none keeps it out of the sweep's counts.
   if (store.trustDomain === 'secure_local' && !isApprovedSecureSourceEmbeddingProvider(provider)) return undefined;
-  if (!scope.allowed) return { store, provider };
+  if (!scope.allowed) return scope.skipQueue ? undefined : { store, provider };
   return {
     store,
-    provider: scope.bind ? scope.bind(provider) : provider,
+    ...scopedEmbeddingOptions(scope, provider),
     wholeStore: storeEmbeddingCatchesUp(store.corpusId, provider),
-    ...(scope.accountScope ? { accountScope: scope.accountScope } : {}),
-    ...(scope.filters ? { filters: scope.filters } : {}),
   };
 }

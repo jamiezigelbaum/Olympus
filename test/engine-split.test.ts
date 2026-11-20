@@ -1053,11 +1053,12 @@ describe('state the front shows from the snapshot', () => {
       const publisher = startEngineStatusPublisher({
         path: engineStatusSnapshotPath(env), instanceId: 'background-1', now: clock.date,
         setInterval: clock.setInterval, clearInterval: (timer) => clock.clearInterval(timer as never),
-        collect: () => ({ activity: 'judging', scheduler: null, judge: { backlog: null, pending: null, spending: null }, captures: {} }),
+        collect: () => ({ built_in_serving_pid: process.pid, activity: 'judging', scheduler: null, judge: { backlog: null, pending: null, spending: null }, captures: {} }),
       });
       await front.client.post({ kind: 'archive_changed' });
       await front.refreshStatus();
       expect(front.status()).toMatchObject({ stale: false });
+      expect(front.servingModelPid()).toBe(process.pid);
       const snapshotPath = engineStatusSnapshotPath(env);
       renameSync(snapshotPath, `${snapshotPath}.held`);
       try { expect(front.backgroundActivity()).toBe('judging'); }
@@ -1066,6 +1067,7 @@ describe('state the front shows from the snapshot', () => {
       fetchImpl = answer('background-2');
       await front.client.post({ kind: 'archive_changed' });
       expect(front.status()).toMatchObject({ stale: true });
+      expect(front.servingModelPid()).toBeUndefined();
       publisher.stop();
       // The other way round: the background that answered restarts, and its
       // successor publishes before any command answers. Its fresh snapshots are current.
