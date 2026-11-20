@@ -15839,6 +15839,7 @@ function contentHeldForJudgment(decision) {
   return decision.contentPending || decision.reasons?.includes(OWNER_OVERRIDE_SECRET_REVIEW_REASON) === true;
 }
 var HELD_UNTIL_JUDGED_REASON = "content:held_until_judged";
+var LEGACY_PERSONAL_BODY_REASON = "content:legacy_personal_body";
 function heldUntilJudged(reasons) {
   return reasons?.includes(HELD_UNTIL_JUDGED_REASON) === true;
 }
@@ -18254,6 +18255,8 @@ function listMovingRead(options) {
     sql: `
       SELECT * FROM tier_items INDEXED BY tier_items_move_order WHERE state = 'moving'
       ${tierMovingDirectionClause(options.direction)}
+      ${options.legacyHoldsOnly ? `AND instr(reasons_json, '"${LEGACY_PERSONAL_BODY_REASON}"') > 0
+        AND (content_pending = 1 OR instr(reasons_json, '"${OWNER_OVERRIDE_SECRET_REVIEW_REASON}"') > 0)` : ""}
       ORDER BY move_attempts, decided_at, provider, account_scope, provider_item_id, conversation_key
       LIMIT ?
     `,
@@ -19799,18 +19802,25 @@ class TierLedger {
   writeMeta(key, value) {
     this.setMeta(key, value);
   }
-  recordLegacyPersonalHold(identity, decision, plan, digest, guard) {
+  recordLegacyPersonalHold(identity, decision, plan, digest, guard, retainedBodyCorpusId) {
     return this.db.transaction(() => {
+      if (retainedBodyCorpusId)
+        this.db.query(`
+        UPDATE tier_copies SET layers = 'both'
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+          AND corpus_id = ? AND trust_domain = 'internal' AND copy_state = 'current' AND layers = 'metadata'
+      `).run(...idParams(identity), retainedBodyCorpusId);
       const result = this.recordRoutedPlacement(identity, decision, plan, { guard });
-      if (result.outcome !== "queued_move")
+      if (result.outcome !== "queued_move") {
+        if (retainedBodyCorpusId)
+          throw new TierLedgerGenerationConflictError;
         return result;
-      if (!result.raise) {
-        for (const copy of result.previousCopies) {
-          if (copy.trustDomain !== "internal" || copy.state !== "current" || copy.layers === "metadata")
-            continue;
-          if (this.supersedeCurrentCopy(identity, copy.corpusId, result.record.generation + 1, result.record.decidedAt)) {
-            result.raise = true;
-          }
+      }
+      for (const copy of result.previousCopies) {
+        if (copy.trustDomain !== "internal" || copy.state !== "current" || copy.layers === "metadata")
+          continue;
+        if (this.supersedeCurrentCopy(identity, copy.corpusId, result.record.generation + 1, result.record.decidedAt)) {
+          result.raise = true;
         }
       }
       const key = legacyPersonalBodyKey(identity);
@@ -25807,6 +25817,15 @@ class ConnectorStoreLocatorIdentityIndexNotReadyError extends Error {
     this.name = "ConnectorStoreLocatorIdentityIndexNotReadyError";
   }
 }
+var PERSONAL_BODY_CHUNKS_PER_PAGE = 128;
+var PERSONAL_BODY_WATCH_EVENTS = [
+  ["insert", "INSERT ON chunks", "NEW.item_pk"],
+  ["delete", "DELETE ON chunks", "OLD.item_pk"],
+  ["update", "UPDATE OF item_pk, chunk_index, bounded_text, content_hash ON chunks", "OLD.item_pk, NEW.item_pk"],
+  ["item_insert", "INSERT ON items", "NEW.item_pk"],
+  ["item_update", "UPDATE ON items", "OLD.item_pk, NEW.item_pk"],
+  ["item_delete", "DELETE ON items", "OLD.item_pk"]
+];
 var CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding";
 var CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000;
 var CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256;
@@ -26315,6 +26334,7 @@ class LocalConnectorStore {
   tierLedgerHandle;
   tierLedgerOwned;
   tierLedgerDisabled;
+  preRoutingLedger;
   boundLedgerHandle;
   embeddingQueueState;
   embeddingFailureState;
@@ -26447,6 +26467,7 @@ class LocalConnectorStore {
   }
   recencyIndexTimer;
   personalBodyIndexReady = false;
+  partialPersonalBody;
   recencyIndexesReady() {
     const indexes = this.db.query("SELECT name FROM sqlite_master WHERE type = 'index' AND name IN (?, ?, ?)").all(CONNECTOR_STORE_RECENCY_INDEX, CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX, CONNECTOR_STORE_PERSONAL_BODY_INDEX);
     this.personalBodyIndexReady = indexes.some((index) => index.name === CONNECTOR_STORE_PERSONAL_BODY_INDEX);
@@ -26625,6 +26646,7 @@ class LocalConnectorStore {
         this.releaseUnreferencedChunkMedia();
       if (this.tierLedgerOwned === true)
         this.tierLedgerHandle?.close();
+      this.preRoutingLedger?.close();
       this.boundLedgerHandle?.close();
       this.boundLedgerHandle = undefined;
     } finally {
@@ -26769,6 +26791,14 @@ class LocalConnectorStore {
       providerItemId: row.provider_item_id,
       ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
     }])[0];
+  }
+  preRoutingLedgerFor(setLedger) {
+    const path = tierLedgerPathForStore(this.dbPath);
+    if (path === ":memory:" || path === setLedger.dbPath)
+      return;
+    if (!this.preRoutingLedger && existsSync22(path))
+      this.preRoutingLedger = new TierLedger({ dbPath: path });
+    return this.preRoutingLedger;
   }
   tierLedger() {
     if (this.tierLedgerDisabled === true)
@@ -29118,13 +29148,49 @@ ${parentKey(ref)}`, { ref, origin });
     });
     return { items, ...rows.length === limit ? { nextAfterItemPk: rows[rows.length - 1].item_pk } : {} };
   }
-  personalBodyPageFinder(after, limit) {
+  watchPersonalBody(itemPk) {
+    const token = randomUUID9();
+    return this.db.transaction(() => {
+      this.db.exec("CREATE TABLE IF NOT EXISTS legacy_body_watch (item_pk INTEGER PRIMARY KEY, token TEXT NOT NULL)");
+      for (const [name, event, keys] of PERSONAL_BODY_WATCH_EVENTS) {
+        this.db.exec(`CREATE TRIGGER IF NOT EXISTS legacy_body_watch_${name} AFTER ${event}
+          BEGIN DELETE FROM legacy_body_watch WHERE item_pk IN (${keys}); END`);
+      }
+      this.db.exec("DELETE FROM legacy_body_watch");
+      this.db.query("INSERT INTO legacy_body_watch VALUES (?, ?)").run(itemPk, token);
+      return token;
+    }).immediate();
+  }
+  personalBodyWatchCurrent(token) {
+    return this.db.transaction(() => {
+      const triggers = this.db.query("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'trigger' AND name GLOB 'legacy_body_watch_*'").get();
+      return triggers.n === PERSONAL_BODY_WATCH_EVENTS.length && !!this.db.query("SELECT 1 FROM legacy_body_watch WHERE token = ?").get(token);
+    })();
+  }
+  finishPersonalBodyWalk() {
+    this.preRoutingLedger?.close();
+    this.preRoutingLedger = undefined;
+    if (!this.db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'legacy_body_watch'").get())
+      return;
+    this.db.transaction(() => {
+      for (const [name] of PERSONAL_BODY_WATCH_EVENTS)
+        this.db.exec(`DROP TRIGGER IF EXISTS legacy_body_watch_${name}`);
+      this.db.exec("DROP TABLE IF EXISTS legacy_body_watch");
+    }).immediate();
+  }
+  clearOrphanPersonalVectors(identity) {
+    this.db.query(`DELETE FROM chunk_embeddings WHERE item_pk IN (
+      SELECT item_pk FROM items i WHERE provider = ? AND account_scope = ? AND normalized_conversation = ?
+        AND provider_item_id = ? AND tombstoned = 0 AND NOT EXISTS (SELECT 1 FROM chunks WHERE item_pk = i.item_pk)
+    )`).run(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
+  }
+  personalBodyPageFinder(after, limit, chunkLimit = PERSONAL_BODY_CHUNKS_PER_PAGE) {
     return {
-      here: () => this.readHere(this.personalBodyPageSteps(after, limit)),
-      offThread: () => this.readStepsInBackground(this.personalBodyPageSteps(after, limit))
+      here: () => this.readHere(this.personalBodyPageSteps(after, limit, chunkLimit)),
+      offThread: () => this.readStepsInBackground(this.personalBodyPageSteps(after, limit, chunkLimit))
     };
   }
-  *personalBodyPageSteps(after, limit) {
+  *personalBodyPageSteps(after, limit, chunkLimit) {
     if (!this.personalBodyIndexReady) {
       this.personalBodyIndexReady = Boolean(yield {
         mode: "get",
@@ -29152,46 +29218,65 @@ ${parentKey(ref)}`, { ref, origin });
       params: after ? [after.date, pageSize - sameDate.length] : [pageSize]
     } : [];
     const rows = [...sameDate, ...older];
-    if (rows.length === 0)
-      return { items: [] };
-    const chunks = yield {
-      mode: "all",
-      sql: `SELECT item_pk, bounded_text, content_hash FROM chunks
-        WHERE item_pk IN (SELECT value FROM json_each(?)) ORDER BY item_pk, chunk_index`,
-      params: [JSON.stringify(rows.map((row) => row.item_pk))]
-    };
-    const byItem = new Map;
-    for (const chunk of chunks) {
-      const parts = byItem.get(chunk.item_pk) ?? [];
-      parts.push(chunk);
-      byItem.set(chunk.item_pk, parts);
-    }
     const items = [];
+    let next = after;
+    let remaining = Math.max(1, Math.min(PERSONAL_BODY_CHUNKS_PER_PAGE, Math.floor(chunkLimit)));
     for (const row of rows) {
-      const parts = byItem.get(row.item_pk);
-      if (!parts)
-        continue;
-      const text = parts.map((part) => part.bounded_text).join("");
-      if (!text.trim())
-        continue;
-      items.push({
-        identity: {
-          family: row.family,
-          provider: row.provider,
-          accountScope: row.account_scope,
-          providerItemId: row.provider_item_id,
-          localItemId: row.local_item_id,
-          ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
-        },
-        ...row.mime_type ? { mimeType: row.mime_type } : {},
-        text,
-        fingerprint: migrationFingerprint(row.content_hash, parts.map((part) => part.content_hash))
-      });
+      const saved = this.partialPersonalBody;
+      const prefix = saved?.itemPk === row.item_pk && saved.contentHash === row.content_hash && this.personalBodyWatchCurrent(saved.watch) ? saved : undefined;
+      const part = yield {
+        mode: "get",
+        sql: `WITH slice AS (
+          SELECT chunk_index, bounded_text, content_hash FROM chunks
+          WHERE item_pk = ? AND chunk_index > ? ORDER BY chunk_index LIMIT ?
+        ), body AS (
+          SELECT COUNT(*) AS n, MAX(chunk_index) AS lastChunk,
+            group_concat(bounded_text, '' ORDER BY chunk_index) AS text,
+            group_concat(content_hash, char(0) ORDER BY chunk_index) AS hashes FROM slice
+        ) SELECT body.*, EXISTS(SELECT 1 FROM chunks WHERE item_pk = ? AND chunk_index > body.lastChunk) AS more,
+          CASE WHEN body.n = 0 THEN EXISTS(SELECT 1 FROM chunk_embeddings WHERE item_pk = ?) ELSE 0 END AS orphanVectors FROM body`,
+        params: [row.item_pk, prefix?.lastChunk ?? -1, remaining, row.item_pk, row.item_pk]
+      };
+      const text = (prefix?.text ?? "") + (part.text ?? "");
+      const count = (prefix?.count ?? 0) + part.n;
+      remaining -= part.n;
+      if (part.more) {
+        if (!prefix && next !== after)
+          return { items, next };
+        this.partialPersonalBody = prefix ? { ...prefix, lastChunk: part.lastChunk, count, text } : {
+          itemPk: row.item_pk,
+          contentHash: row.content_hash,
+          watch: this.watchPersonalBody(row.item_pk),
+          lastChunk: -1,
+          count: 0,
+          text: ""
+        };
+        return { items, ...next ? { next } : {}, partial: true };
+      }
+      this.partialPersonalBody = undefined;
+      next = { date: row.source_date, itemPk: row.item_pk };
+      if (count || part.orphanVectors)
+        items.push({
+          ...prefix ? { watch: prefix.watch } : { fingerprint: migrationFingerprintParts(row.content_hash, count, part.hashes ?? "") },
+          identity: {
+            family: row.family,
+            provider: row.provider,
+            accountScope: row.account_scope,
+            providerItemId: row.provider_item_id,
+            localItemId: row.local_item_id,
+            ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
+          },
+          ...row.mime_type ? { mimeType: row.mime_type } : {},
+          text,
+          chunkCount: count
+        });
+      if (!remaining || prefix)
+        return { items, next };
     }
-    const last = rows.at(-1);
-    return { items, ...rows.length === pageSize ? { next: { date: last.source_date, itemPk: last.item_pk } } : {} };
+    this.partialPersonalBody = undefined;
+    return { items, ...rows.length === pageSize && next ? { next } : {} };
   }
-  itemMigrationFingerprint(identity) {
+  itemMigrationFingerprint(identity, chunkLimit = -1) {
     const row = this.db.query(`
       SELECT item_pk, content_hash FROM items
       WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
@@ -29199,7 +29284,7 @@ ${parentKey(ref)}`, { ref, origin });
     `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
     if (!row)
       return;
-    const hashes = this.db.query("SELECT content_hash FROM chunks WHERE item_pk = ? ORDER BY chunk_index").all(row.item_pk).map((chunk) => chunk.content_hash);
+    const hashes = this.db.query("SELECT content_hash FROM chunks WHERE item_pk = ? ORDER BY chunk_index LIMIT ?").all(row.item_pk, chunkLimit).map((chunk) => chunk.content_hash);
     return migrationFingerprint(row.content_hash, hashes);
   }
   stripImageContentOutsidePrivate(options = {}) {
@@ -36410,7 +36495,10 @@ function namesOnlyKeptCount(n) {
   return n > 0 ? { namesOnlyKeptChunks: n } : {};
 }
 function migrationFingerprint(contentHash, chunkHashes) {
-  return createHash13("sha256").update(contentHash ?? "").update("\x00").update(String(chunkHashes.length)).update("\x00").update(chunkHashes.join("\x00")).digest("hex");
+  return migrationFingerprintParts(contentHash, chunkHashes.length, chunkHashes.join("\x00"));
+}
+function migrationFingerprintParts(contentHash, count, hashes) {
+  return createHash13("sha256").update(contentHash ?? "").update("\x00").update(String(count)).update("\x00").update(hashes).digest("hex");
 }
 function carryHold(listed, fetched) {
   return listed.holdContentUntilJudged === true && fetched.holdContentUntilJudged !== true ? { ...fetched, holdContentUntilJudged: true } : fetched;

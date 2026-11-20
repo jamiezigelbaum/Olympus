@@ -1,36 +1,36 @@
-# Earlier-build Personal body repair
+# Legacy Personal body repair
 
-The tier sniffer now finds stored text without waiting for the source to list it again. Restore and the background walker use the same per-item placement rule. An exact, authorized Personal body stays in place. The walker screens unjudged text for Secrets and sends a detected Secret through the existing location and cleanup path. For other unjudged bodies, one ledger transaction hides the Personal copy, records the hold, and queues the move.
+The walker visits the newest stored items first. A held body remains available to the local Private answer path while the judge is unavailable. When the judge becomes available, the dashboard advances from a hold to a completed check without a new source listing.
 
-The mover transfers eligible bodies to Private. The local answer path can find and cite them there while judgment is pending. A Personal verdict bound to the complete text, plus the normal Secret and move checks, returns the body to Personal. The dashboard reports cumulative holds and completed body verdicts. Repeated observations of the same hold or verdict count once.
+## Review findings
 
-The walk starts with the newest source date, uses descending insertion order for ties and undated items, and saves its position across ticks and restarts. The question queue preserves discovery order among these holds. Existing priorities for live arrivals, owner requests, and aged questions still apply.
+1. **Existing authorization.** Before placing a live item, the walker checks the set ledger and the ledger beside the Personal store. Both use the full item identity, including the conversation. An exact Personal receipt still applies when the set ledger has only names. A changed body takes the normal Secret check and hold path. The tests cover both ledger locations, a routed names-only record and an edit after judgment.
+2. **Historical cloud vectors.** A held body can move to Private even when the set records a cloud embedder or one is configured. The mover verifies the Private copy before purging the old Personal content and vectors. This matches its existing raise behavior. This exception carries no vector-copy or superseded-copy replacement authority. The cloud fixture reaches Private, loses its old vectors and receives an automatic judgment. Ordinary lowerings retain their embedding policy. When automatic moves are disabled, the walker defers a new hold.
+3. **Retained content.** Physical chunks identify a body even when its routed Personal copy serves only names. The ledger records the physical source and hides it in the same transaction. A move that cannot queue rolls back the layer change. A names-only Private stub receives the verified text. The mover refuses to overwrite conflicting active bodies. A vector left without any chunks is removed after the writer rechecks for chunks, preserving the item's names. A new walk checkpoint revisits rows that the first implementation could have skipped.
+4. **Bounded discovery.** Each tick examines up to 25 item keys and reads up to 128 text chunks per set. The background SQLite reader seeks by item and chunk index and returns ordered, concatenated slices. An oversized item spans ticks. The walker keeps the unfinished text in memory and checkpoints the last completed item. A content-free watch in the store detects edits from other connections. Unrelated writes allow the read to continue, and a restart rereads the unfinished item. The watch table and triggers are removed when the walk retires. Classification and the verified move still operate on a complete item.
+5. **Restore order.** Restore checks for conflicting copies, deletes questions about earlier bytes, then reads names for a Personal override. An injected names-read failure proves the obsolete question is already gone.
 
-## Move authority
+## Cost of one lap
 
-A hold immediately removes the old body from Personal keyword and vector results. Physical transfer, Private retrieval and automatic judgment depend on the existing mover accepting the move. The historical X recovery fixture reaches Private automatically with built-in local embeddings. A second run exercises the existing restriction on a set with a recorded cloud embedding provider. In that case the transfer stays queued and the body cannot answer through Private yet. The built-in local embedding fixture exercises physical Personal vector removal, Private citation and automatic return.
+Two local SQLite fixtures each held 100,000 active items with the same short, one-chunk text, exact judge receipts, one ordering date and no overrides. The production walker ran to retirement, with its background reader and checkpoint writes enabled.
 
-When two active copies of the same item contain different bodies, the Personal copy is hidden. The mover preserves both versions and reports the conflict.
+| Receipt location | Items checked | Ticks | Background finder SELECTs | Elapsed |
+| --- | ---: | ---: | ---: | ---: |
+| Set ledger | 100,000 | 4,001 | 104,001 | 14.6 s |
+| Personal store's own ledger | 100,000 | 4,001 | 104,001 | 28.7 s |
+
+Each run completed 4,000 full pages and one empty end probe with zero holds, Secrets dispositions or failures. The reader issued 100,000 bounded chunk queries and 4,001 keyset queries. A page crossing a date boundary can need a second keyset query. Ledger lookups, including sidecar receipts and overrides, are additional to the finder count and included in elapsed time. The timings exclude seeding and use back-to-back ticks while other local checks were running. Large documents add ticks according to their chunk counts. A lap that changes placement is followed by a clean lap before retirement.
 
 ## Local verification
 
+All five reported regressions failed on the starting checkout before the production changes. Additional fixtures exercise replacement between slices, unrelated concurrent writes, restart, vector-only remnants and an empty Private destination.
+
 | Check | Result |
 | --- | --- |
-| Typecheck, including exchange and connect-relay | Passed |
-| Repository guards | All 32 passed |
-| Build | Passed, including generated bundles and relay dashboard assets |
-| New earlier-build settlement tests | 12 passed |
-| Held-until-judged tests | 23 passed |
-| Engine store copy and restore tests | 12 passed |
-| X bookmark content recovery tests | 11 passed |
-| Tier sniffer idle tests | 14 passed |
+| `bun run typecheck` | Passed, including exchange and connect-relay |
+| `bun run guards` | All 32 passed |
+| `bun run build` | Passed |
+| First-round focused tests plus the mover visibility and Gmail rule-sweep suites | 1,393 passed, 0 failed, 1 skipped across 60 files |
+| Legacy Personal body settlement suite, included above | 21 passed |
 
-Across 58 focused test files, 1,338 tests passed and one opt-in real-model paraphrase test skipped. The Private citation test exercised the public local answer path, its visibility and release checks, and a fixture model. The new repair test failed on the starting checkout while the embedded row was still searchable in Personal. Tests used disposable home directories. The macOS restore suite used the native system copy utility.
-
-## Expected cost for 100,000 active Personal items
-
-Each tick examines at most **25 item keys per set** and yields between body candidates. A page uses one or two indexed keyset reads and one batched chunk read if it found keys. It reads complete text and chunk hashes without reading vectors. The query-plan tests verify index seeks at the start, across dates, and across equal-date ties.
-
-For a fixed 100,000-row store, a full traversal takes **4,000 full pages and one empty end probe**. That is **8,001–12,001 page-finder SELECTs**, depending on date ties, plus index-readiness checks. A store upgraded without the ordering index builds it once through the existing background index worker.
-
-For a clean store with 100,000 authorized text bodies and no overrides or images, budget another **500,000 point reads**. Each body takes two store reads to recheck its fingerprint and three ledger reads for its decision, override and copies. Page checkpoint and binding reads are additional. Processing time also scales with total text bytes. Adoptions, holds, Secrets cleanup, moves and model judgments add work only for affected items. A traversal that changed anything is followed by a clean traversal before the done marker retires the walker. These are query-count estimates. No 100,000-item timing benchmark was run.
+Each focused file ran locally in its own Bun process with a fresh temporary home. The Private answer test exercised retrieval, release checks and citation with a fixture model. The skipped test requires an opt-in real built-in model for a paraphrase search.

@@ -101,6 +101,17 @@ test('Personal body pages seek through source-date ties before reaching undated 
     const last = (await store.personalBodyPageFinder(third.next, 2).offThread())!;
     expect(last.items.map((item) => item.identity.providerItemId)).toEqual(['m4']);
     expect(last.next).toBeUndefined();
+    // The read worker returns already grouped text. Each slice seeks the
+    // chunk index and stops at its budget before aggregating.
+    const slices = reads.filter(read => read.sql.includes('FROM chunks'));
+    expect(slices.length).toBeGreaterThan(0);
+    for (const slice of slices) {
+      expect(plan(db, slice)).toContainEqual(expect.stringMatching(/SEARCH chunks USING INDEX .*item_pk=.*chunk_index>/));
+      expect(slice.sql).toMatch(/ORDER BY chunk_index LIMIT \?/);
+      const group = db.query(slice.sql).get(...slice.params as SQLQueryBindings[]);
+      expect(group).toHaveProperty('text');
+      expect(group).toHaveProperty('n');
+    }
     const orderReads = reads.filter(read => read.sql.includes(`INDEXED BY ${PERSONAL_BODY_INDEX}`));
     expect(orderReads.length).toBeGreaterThan(1);
     const firstPlan = plan(db, orderReads[0]!);

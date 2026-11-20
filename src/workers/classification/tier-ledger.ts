@@ -32,6 +32,7 @@ import { closeSqliteStore, loopWalAutocheckpointPragma, type SqliteCloseOptions 
 import { assertWritableStoreOpenAllowed } from '../../core/store-write-guard.ts';
 import { tierSetPlannerForLedger } from './installed-tier-classification-registry.ts';
 import {
+  LEGACY_PERSONAL_BODY_REASON,
   NAMES_INPUT_REASON_PREFIX,
   OWNER_OVERRIDE_SECRET_REVIEW_REASON,
   PERSONAL_FIRST_REASON,
@@ -462,12 +463,16 @@ function* windowSteps(
   return lastEnd ? { records, resumeAfter: identityOfRow(lastEnd) } : { records };
 }
 
-function listMovingRead(options: { limit?: number; direction?: 'raise' | 'lower' }): LedgerRead {
+interface MovingPageOptions { limit?: number; direction?: 'raise' | 'lower'; legacyHoldsOnly?: boolean }
+
+function listMovingRead(options: MovingPageOptions): LedgerRead {
   const limit = Math.max(1, Math.min(options.limit ?? 100, 5_000));
   return {
     sql: `
       SELECT * FROM tier_items INDEXED BY tier_items_move_order WHERE state = 'moving'
       ${tierMovingDirectionClause(options.direction)}
+      ${options.legacyHoldsOnly ? `AND instr(reasons_json, '"${LEGACY_PERSONAL_BODY_REASON}"') > 0
+        AND (content_pending = 1 OR instr(reasons_json, '"${OWNER_OVERRIDE_SECRET_REVIEW_REASON}"') > 0)` : ''}
       ORDER BY move_attempts, decided_at, provider, account_scope, provider_item_id, conversation_key
       LIMIT ?
     `,
@@ -1533,13 +1538,13 @@ export class TierLedger {
    * failing goes to the back of the queue, so it never holds the head of a
    * bounded page while moves behind it could land.
    */
-  listMoving(options: { limit?: number; direction?: 'raise' | 'lower' } = {}): TierLedgerRecord[] {
+  listMoving(options: MovingPageOptions = {}): TierLedgerRecord[] {
     const read = listMovingRead(options);
     return (this.db.query(read.sql).all(...read.params as never[]) as TierItemRow[]).map(recordFromRow);
   }
 
   /** `listMoving`'s read, for a read worker (loop-pass.ts). */
-  *listMovingSteps(options: { limit?: number; direction?: 'raise' | 'lower' } = {}): Generator<LedgerRead, TierLedgerRecord[], unknown> {
+  *listMovingSteps(options: MovingPageOptions = {}): Generator<LedgerRead, TierLedgerRecord[], unknown> {
     return ((yield listMovingRead(options)) as TierItemRow[]).map(recordFromRow);
   }
 
@@ -2820,20 +2825,27 @@ export class TierLedger {
   /** Count a newly held body in the same transaction that hides its Personal copy. */
   recordLegacyPersonalHold(
     identity: TierLedgerIdentity, decision: TierDecision, plan: TierPlacementPlan, digest: string,
-    guard: TierOwnerOverrideGuard,
+    guard: TierOwnerOverrideGuard, retainedBodyCorpusId?: string,
   ): ReturnType<TierLedger['recordRoutedPlacement']> {
     return this.db.transaction(() => {
+      // Record the observed physical content as a move source and hide it in
+      // this same transaction. No reader may see the widened content layer.
+      if (retainedBodyCorpusId) this.db.query(`
+        UPDATE tier_copies SET layers = 'both'
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+          AND corpus_id = ? AND trust_domain = 'internal' AND copy_state = 'current' AND layers = 'metadata'
+      `).run(...idParams(identity), retainedBodyCorpusId);
       const result = this.recordRoutedPlacement(identity, decision, plan, { guard });
-      if (result.outcome !== 'queued_move') return result;
-      if (!result.raise) {
-        // A legacy duplicate can give both stores the content layer. The
-        // first copy can already be Private, but the Personal body must
-        // still disappear while the mover verifies both copies.
-        for (const copy of result.previousCopies) {
-          if (copy.trustDomain !== 'internal' || copy.state !== 'current' || copy.layers === 'metadata') continue;
-          if (this.supersedeCurrentCopy(identity, copy.corpusId, result.record.generation + 1, result.record.decidedAt)) {
-            result.raise = true;
-          }
+      if (result.outcome !== 'queued_move') {
+        if (retainedBodyCorpusId) throw new TierLedgerGenerationConflictError();
+        return result;
+      }
+      // Duplicate content layers can make another store the first source.
+      // Hide the physical Personal body even when a different layer raised.
+      for (const copy of result.previousCopies) {
+        if (copy.trustDomain !== 'internal' || copy.state !== 'current' || copy.layers === 'metadata') continue;
+        if (this.supersedeCurrentCopy(identity, copy.corpusId, result.record.generation + 1, result.record.decidedAt)) {
+          result.raise = true;
         }
       }
       const key = legacyPersonalBodyKey(identity);

@@ -1692,16 +1692,30 @@ export interface PersonalBodyCursor {
   itemPk: number;
 }
 
-export interface PersonalBodyCandidate {
+// A normal page carries up to 25 items. Even one long document must yield
+// after this many stored chunks (normally 4,000 characters each).
+export const PERSONAL_BODY_CHUNKS_PER_PAGE = 128;
+
+const PERSONAL_BODY_WATCH_EVENTS = [
+  ['insert', 'INSERT ON chunks', 'NEW.item_pk'],
+  ['delete', 'DELETE ON chunks', 'OLD.item_pk'],
+  ['update', 'UPDATE OF item_pk, chunk_index, bounded_text, content_hash ON chunks', 'OLD.item_pk, NEW.item_pk'],
+  ['item_insert', 'INSERT ON items', 'NEW.item_pk'],
+  ['item_update', 'UPDATE ON items', 'OLD.item_pk, NEW.item_pk'],
+  ['item_delete', 'DELETE ON items', 'OLD.item_pk'],
+] as const;
+
+export type PersonalBodyCandidate = ({ watch: string; fingerprint?: never } | { watch?: never; fingerprint: string }) & {
+  chunkCount: number;
   identity: SourceItemIdentity;
   mimeType?: string;
   text: string;
-  fingerprint: string;
-}
+};
 
 interface PersonalBodyPage {
   items: PersonalBodyCandidate[];
   next?: PersonalBodyCursor;
+  partial?: true;
 }
 
 interface PersonalBodyRow {
@@ -4103,6 +4117,7 @@ export class LocalConnectorStore {
   private tierLedgerHandle: TierLedger | undefined;
   private tierLedgerOwned: boolean | undefined;
   private tierLedgerDisabled: boolean | undefined;
+  private preRoutingLedger: TierLedger | undefined;
   private boundLedgerHandle: TierLedger | undefined;
   /**
    * Items a sync handed to this store's embedding sweep instead of embedding
@@ -4307,6 +4322,10 @@ export class LocalConnectorStore {
 
   private recencyIndexTimer: ReturnType<typeof setTimeout> | undefined;
   private personalBodyIndexReady = false;
+  // Keep an unfinished body in memory only. The durable cursor always points
+  // before it, so closing the store simply restarts that item.
+  private partialPersonalBody?: { itemPk: number; contentHash: string | null; lastChunk: number;
+    count: number; text: string; watch: string } | undefined;
 
   private recencyIndexesReady(): boolean {
     const indexes = this.db.query("SELECT name FROM sqlite_master WHERE type = 'index' AND name IN (?, ?, ?)")
@@ -4485,6 +4504,7 @@ export class LocalConnectorStore {
       // can retry on a later close; close must not race it with another write.
       if (!this.readOnly && !reclaiming) this.releaseUnreferencedChunkMedia();
       if (this.tierLedgerOwned === true) this.tierLedgerHandle?.close();
+      this.preRoutingLedger?.close();
       this.boundLedgerHandle?.close();
       this.boundLedgerHandle = undefined;
     } finally {
@@ -4642,6 +4662,14 @@ export class LocalConnectorStore {
       provider: row.provider, accountScope: row.account_scope, providerItemId: row.provider_item_id,
       ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
     }])[0]!;
+  }
+
+  /** A live tier set can have inherited items decided beside this store before routing. */
+  preRoutingLedgerFor(setLedger: TierLedger): TierLedger | undefined {
+    const path = tierLedgerPathForStore(this.dbPath);
+    if (path === ':memory:' || path === setLedger.dbPath) return undefined;
+    if (!this.preRoutingLedger && existsSync(path)) this.preRoutingLedger = new TierLedger({ dbPath: path });
+    return this.preRoutingLedger;
   }
 
   /** The ledger this store records tier decisions in, opening the default one on first use. */
@@ -7821,19 +7849,64 @@ export class LocalConnectorStore {
     return { items, ...(rows.length === limit ? { nextAfterItemPk: rows[rows.length - 1]!.item_pk } : {}) };
   }
 
+  // An oversized body spans snapshots. Watch just that item's writes, from
+  // every connection, until its final slice has been placed. These temporary
+  // repair objects live in main so other writers invalidate the same token.
+  // They carry no content and are removed before the walker retires.
+  private watchPersonalBody(itemPk: number): string {
+    const token = randomUUID();
+    return this.db.transaction(() => {
+      this.db.exec('CREATE TABLE IF NOT EXISTS legacy_body_watch (item_pk INTEGER PRIMARY KEY, token TEXT NOT NULL)');
+      for (const [name, event, keys] of PERSONAL_BODY_WATCH_EVENTS) {
+        this.db.exec(`CREATE TRIGGER IF NOT EXISTS legacy_body_watch_${name} AFTER ${event}
+          BEGIN DELETE FROM legacy_body_watch WHERE item_pk IN (${keys}); END`);
+      }
+      this.db.exec('DELETE FROM legacy_body_watch');
+      this.db.query('INSERT INTO legacy_body_watch VALUES (?, ?)').run(itemPk, token);
+      return token;
+    }).immediate();
+  }
+
+  personalBodyWatchCurrent(token: string): boolean {
+    return this.db.transaction(() => {
+      const triggers = this.db.query("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'trigger' AND name GLOB 'legacy_body_watch_*'")
+        .get() as { n: number };
+      return triggers.n === PERSONAL_BODY_WATCH_EVENTS.length
+        && !!this.db.query('SELECT 1 FROM legacy_body_watch WHERE token = ?').get(token);
+    })();
+  }
+
+  finishPersonalBodyWalk(): void {
+    this.preRoutingLedger?.close();
+    this.preRoutingLedger = undefined;
+    if (!this.db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'legacy_body_watch'").get()) return;
+    this.db.transaction(() => {
+      for (const [name] of PERSONAL_BODY_WATCH_EVENTS) this.db.exec(`DROP TRIGGER IF EXISTS legacy_body_watch_${name}`);
+      this.db.exec('DROP TABLE IF EXISTS legacy_body_watch');
+    }).immediate();
+  }
+
+  /** Vector-only remnants have no text to classify. Never remove a newly written body or its vectors. */
+  clearOrphanPersonalVectors(identity: SourceItemIdentity): void {
+    this.db.query(`DELETE FROM chunk_embeddings WHERE item_pk IN (
+      SELECT item_pk FROM items i WHERE provider = ? AND account_scope = ? AND normalized_conversation = ?
+        AND provider_item_id = ? AND tombstoned = 0 AND NOT EXISTS (SELECT 1 FROM chunks WHERE item_pk = i.item_pk)
+    )`).run(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
+  }
+
   /**
    * The one-time Personal body walk. Advance by the last item examined even
    * when the page has no text. On an older store, the recency-index worker
    * builds the order index before the first page so a lap never sorts the store.
    */
-  personalBodyPageFinder(after: PersonalBodyCursor | undefined, limit: number): LoopFinder<PersonalBodyPage | undefined> {
+  personalBodyPageFinder(after: PersonalBodyCursor | undefined, limit: number, chunkLimit = PERSONAL_BODY_CHUNKS_PER_PAGE): LoopFinder<PersonalBodyPage | undefined> {
     return {
-      here: () => this.readHere(this.personalBodyPageSteps(after, limit)),
-      offThread: () => this.readStepsInBackground(this.personalBodyPageSteps(after, limit)),
+      here: () => this.readHere(this.personalBodyPageSteps(after, limit, chunkLimit)),
+      offThread: () => this.readStepsInBackground(this.personalBodyPageSteps(after, limit, chunkLimit)),
     };
   }
 
-  private *personalBodyPageSteps(after: PersonalBodyCursor | undefined, limit: number): Generator<StoreRead, PersonalBodyPage | undefined, unknown> {
+  private *personalBodyPageSteps(after: PersonalBodyCursor | undefined, limit: number, chunkLimit: number): Generator<StoreRead, PersonalBodyPage | undefined, unknown> {
     if (!this.personalBodyIndexReady) {
       this.personalBodyIndexReady = Boolean(yield {
         mode: 'get',
@@ -7862,26 +7935,45 @@ export class LocalConnectorStore {
       params: after ? [after.date, pageSize - sameDate.length] : [pageSize],
     }) as PersonalBodyRow[] : [];
     const rows = [...sameDate, ...older];
-    if (rows.length === 0) return { items: [] };
-    const chunks = (yield {
-      mode: 'all',
-      sql: `SELECT item_pk, bounded_text, content_hash FROM chunks
-        WHERE item_pk IN (SELECT value FROM json_each(?)) ORDER BY item_pk, chunk_index`,
-      params: [JSON.stringify(rows.map(row => row.item_pk))],
-    }) as Array<{ item_pk: number; bounded_text: string; content_hash: string }>;
-    const byItem = new Map<number, typeof chunks>();
-    for (const chunk of chunks) {
-      const parts = byItem.get(chunk.item_pk) ?? [];
-      parts.push(chunk);
-      byItem.set(chunk.item_pk, parts);
-    }
     const items: PersonalBodyCandidate[] = [];
+    let next = after;
+    let remaining = Math.max(1, Math.min(PERSONAL_BODY_CHUNKS_PER_PAGE, Math.floor(chunkLimit)));
     for (const row of rows) {
-      const parts = byItem.get(row.item_pk);
-      if (!parts) continue;
-      const text = parts.map(part => part.bounded_text).join('');
-      if (!text.trim()) continue;
-      items.push({
+      const saved = this.partialPersonalBody;
+      const prefix = saved?.itemPk === row.item_pk && saved.contentHash === row.content_hash
+        && this.personalBodyWatchCurrent(saved.watch) ? saved : undefined;
+      // Both the bounded read and concatenation run on the background SQL
+      // worker. The final EXISTS probes only the next index key.
+      const part = (yield {
+        mode: 'get',
+        sql: `WITH slice AS (
+          SELECT chunk_index, bounded_text, content_hash FROM chunks
+          WHERE item_pk = ? AND chunk_index > ? ORDER BY chunk_index LIMIT ?
+        ), body AS (
+          SELECT COUNT(*) AS n, MAX(chunk_index) AS lastChunk,
+            group_concat(bounded_text, '' ORDER BY chunk_index) AS text,
+            group_concat(content_hash, char(0) ORDER BY chunk_index) AS hashes FROM slice
+        ) SELECT body.*, EXISTS(SELECT 1 FROM chunks WHERE item_pk = ? AND chunk_index > body.lastChunk) AS more,
+          CASE WHEN body.n = 0 THEN EXISTS(SELECT 1 FROM chunk_embeddings WHERE item_pk = ?) ELSE 0 END AS orphanVectors FROM body`,
+        params: [row.item_pk, prefix?.lastChunk ?? -1, remaining, row.item_pk, row.item_pk],
+      }) as { n: number; lastChunk: number; text: string | null; hashes: string | null; more: number; orphanVectors: number };
+      const text = (prefix?.text ?? '') + (part.text ?? '');
+      const count = (prefix?.count ?? 0) + part.n;
+      remaining -= part.n;
+      if (part.more) {
+        // Give the item a full page before installing a cross-tick watch.
+        if (!prefix && next !== after) return { items, next: next! };
+        // The first snapshot predates the watch. Start again under the token.
+        this.partialPersonalBody = prefix ? { ...prefix, lastChunk: part.lastChunk, count, text } : {
+          itemPk: row.item_pk, contentHash: row.content_hash, watch: this.watchPersonalBody(row.item_pk),
+          lastChunk: -1, count: 0, text: '',
+        };
+        return { items, ...(next ? { next } : {}), partial: true };
+      }
+      this.partialPersonalBody = undefined;
+      next = { date: row.source_date, itemPk: row.item_pk };
+      if (count || part.orphanVectors) items.push({
+        ...(prefix ? { watch: prefix.watch } : { fingerprint: migrationFingerprintParts(row.content_hash, count, part.hashes ?? '') }),
         identity: {
           family: row.family,
           provider: row.provider,
@@ -7891,12 +7983,12 @@ export class LocalConnectorStore {
           ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
         },
         ...(row.mime_type ? { mimeType: row.mime_type } : {}),
-        text,
-        fingerprint: migrationFingerprint(row.content_hash, parts.map(part => part.content_hash)),
+        text, chunkCount: count,
       });
+      if (!remaining || prefix) return { items, next };
     }
-    const last = rows.at(-1)!;
-    return { items, ...(rows.length === pageSize ? { next: { date: last.source_date, itemPk: last.item_pk } } : {}) };
+    this.partialPersonalBody = undefined;
+    return { items, ...(rows.length === pageSize && next ? { next } : {}) };
   }
 
   /**
@@ -7906,6 +7998,7 @@ export class LocalConnectorStore {
    */
   itemMigrationFingerprint(
     identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>,
+    chunkLimit = -1,
   ): string | undefined {
     const row = this.db.query(`
       SELECT item_pk, content_hash FROM items
@@ -7918,8 +8011,8 @@ export class LocalConnectorStore {
       identity.providerItemId,
     ) as { item_pk: number; content_hash: string | null } | null;
     if (!row) return undefined;
-    const hashes = (this.db.query('SELECT content_hash FROM chunks WHERE item_pk = ? ORDER BY chunk_index')
-      .all(row.item_pk) as Array<{ content_hash: string }>).map((chunk) => chunk.content_hash);
+    const hashes = (this.db.query('SELECT content_hash FROM chunks WHERE item_pk = ? ORDER BY chunk_index LIMIT ?')
+      .all(row.item_pk, chunkLimit) as Array<{ content_hash: string }>).map((chunk) => chunk.content_hash);
     return migrationFingerprint(row.content_hash, hashes);
   }
 
@@ -20786,12 +20879,16 @@ function namesOnlyKeptCount(n: number): { namesOnlyKeptChunks?: number } {
 
 /** Content-free fingerprint of an item's stored text: its content hash and its chunks' hashes. */
 function migrationFingerprint(contentHash: string | null, chunkHashes: readonly string[]): string {
+  return migrationFingerprintParts(contentHash, chunkHashes.length, chunkHashes.join('\u0000'));
+}
+
+function migrationFingerprintParts(contentHash: string | null, count: number, hashes: string): string {
   return createHash('sha256')
     .update(contentHash ?? '')
     .update('\u0000')
-    .update(String(chunkHashes.length))
+    .update(String(count))
     .update('\u0000')
-    .update(chunkHashes.join('\u0000'))
+    .update(hashes)
     .digest('hex');
 }
 

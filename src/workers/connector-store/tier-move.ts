@@ -413,7 +413,11 @@ function stageTieredMove(options: TierMoveOptions, repairSource?: TierCopy, lowe
     && !sources.some(source => source.corpusId === copy.corpusId && layersCover(source.layers, copy.layers)))) {
     throw new TierMoveRefusedError('Repair cannot write a lower destination.', 'repair_lower_destination');
   }
-  const raise = !!repairSource || placementIsRaise(sources, placement.copies);
+  const contentDestination = copyServingLayer(placement.copies, 'content');
+  const heldPersonal = contentDestination?.trustDomain === 'secure_local' && contentHeldForJudgment(record)
+    && record.reasons.includes(LEGACY_PERSONAL_BODY_REASON)
+    ? sources.find(source => source.trustDomain === 'internal' && source.layers !== 'metadata') : undefined;
+  const raise = !!(repairSource || heldPersonal) || placementIsRaise(sources, placement.copies);
   if (loweringOnly && raise) throw new TierMoveRefusedError('Raises cannot enter a lowering batch.', 'raise_in_lowering');
   const exports = new Map<string, ConnectorStoreItemCopy | undefined>();
   const exportFrom = (copy: Pick<TierCopy, 'corpusId'>): ConnectorStoreItemCopy | undefined => {
@@ -423,8 +427,7 @@ function stageTieredMove(options: TierMoveOptions, repairSource?: TierCopy, lowe
     }
     return exports.get(copy.corpusId);
   };
-  const contentSource = repairSource ?? copyServingLayer(sources, 'content');
-  const contentDestination = copyServingLayer(placement.copies, 'content');
+  const contentSource = repairSource ?? heldPersonal ?? copyServingLayer(sources, 'content');
   const loweredLayers = loweredCopyLayers(sources, placement.copies);
   const lowering = loweredLayers.length > 0 || tiersLower(record, target) || hasNewLowerLayer(sources, placement.copies);
   const policyRefusal = unavailableLoweringPolicy(set, lowering);
@@ -537,7 +540,7 @@ function stageTieredMove(options: TierMoveOptions, repairSource?: TierCopy, lowe
         }
         exports.clear();
         if (now.reasons.includes(LEGACY_PERSONAL_BODY_REASON)) {
-          const bodies = sources.filter(copy => copy.layers !== 'metadata');
+          const bodies = heldPersonal ? sources : sources.filter(copy => copy.layers !== 'metadata');
           if (bodies.length > 1) {
             const texts = bodies.map(copy => exportFrom(copy)?.chunks.map(chunk => chunk.boundedText).join(''));
             if (new Set(texts.filter(Boolean)).size > 1) {
@@ -555,7 +558,8 @@ function stageTieredMove(options: TierMoveOptions, repairSource?: TierCopy, lowe
         }
         for (const planned of placement.copies) {
           const kept = sources.find((source) => source.corpusId === planned.corpusId);
-          if (kept && layersCover(kept.layers, planned.layers)
+          const missingHeldBody = heldPersonal && kept && planned.layers !== 'metadata' && !exportFrom(kept)?.chunks.length;
+          if (kept && !missingHeldBody && layersCover(kept.layers, planned.layers)
             && !(repairSource && planned.layers !== 'metadata')) {
             const keptChunks = planned.layers === 'metadata' ? 0 : (exportFrom(kept)?.chunks.length ?? 0);
             destinations.push({

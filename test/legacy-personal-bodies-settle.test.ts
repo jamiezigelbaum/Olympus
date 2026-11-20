@@ -1,3 +1,4 @@
+import { Database } from 'bun:sqlite';
 import { afterEach, expect, test } from 'bun:test';
 import { join } from 'node:path';
 import type { RawItem } from '../src/core/contracts.ts';
@@ -7,6 +8,8 @@ import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
 import { BUILT_IN_SNIFFER_LANE } from '../src/workers/classification/built-in-sniffer.ts';
 import { InstalledTierClassification } from '../src/workers/classification/installed-tier-classification.ts';
 import { registerInstalledTierClassification } from '../src/workers/classification/installed-tier-classification-registry.ts';
+import { tierLedgerPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
+import { placePersonalBody } from '../src/workers/connector-store/place-personal-body.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
 import { HELD_UNTIL_JUDGED_REASON, classifyItemTiers, contentDigestReason } from '../src/workers/classification/tier-classifier.ts';
@@ -31,7 +34,7 @@ import {
 const cleanups: Array<() => void> = [];
 afterEach(() => { for (const cleanup of cleanups.splice(0).reverse()) cleanup(); });
 
-function fixture(tmp = tempDir('olympus-legacy-personal-'), options: { maxCallsPerPass?: number; onlyPersonalMounted?: boolean } = {}) {
+function fixture(tmp = tempDir('olympus-legacy-personal-'), options: { maxCallsPerPass?: number; onlyPersonalMounted?: boolean; localEmbeddingsOnly?: boolean } = {}) {
   const f = openTierFixture(tmp.dir);
   const logs: string[] = [];
   const installed = new InstalledTierClassification({
@@ -45,7 +48,7 @@ function fixture(tmp = tempDir('olympus-legacy-personal-'), options: { maxCallsP
     lane: BUILT_IN_SNIFFER_LANE,
     stores: () => options.onlyPersonalMounted ? [f.stores.internal!] : f.set.openStores(),
     classificationLedgerPath: join(tmp.dir, 'classification.jsonl'),
-    autoMoves: { embeddingLedgerPath: join(tmp.dir, 'embedding.jsonl'), localEmbeddingsOnly: () => true },
+    autoMoves: { embeddingLedgerPath: join(tmp.dir, 'embedding.jsonl'), localEmbeddingsOnly: () => options.localEmbeddingsOnly ?? true },
     autoApproveBuiltIn: true,
     ingestionTurn: () => undefined,
     ...(options.maxCallsPerPass ? { maxCallsPerPass: options.maxCallsPerPass } : {}),
@@ -217,7 +220,7 @@ function restoreLegacyRepresentation(store: LocalConnectorStore, raw: RawItem, t
   expect(restored.counts.itemsRestored).toBe(1);
 }
 
-test.each(['local', 'cloud'] as const)('the old recovery writer’s S1 X bookmark embedded by %s is found without a re-list', async backend => {
+test.each(['local', 'historical cloud', 'configured cloud'] as const)('the old recovery writer’s S1 X bookmark embedded by %s is found without a re-list', async backend => {
   const tmp = tempDir('olympus-legacy-personal-');
   const personalOptions = {
     dbPath: join(tmp.dir, 'x-internal.sqlite'), family: 'x', trustDomain: 'internal',
@@ -234,10 +237,10 @@ test.each(['local', 'cloud'] as const)('the old recovery writer’s S1 X bookmar
   }), { fetchContent: true, placement });
   const raw = xBookmarkRawItemFromPost({ ...source, text }, ACCOUNT, [], fetchedAt);
   restoreLegacyRepresentation(legacy, raw, text, 'x_bookmarks_content_recovery', X_BOOKMARKS_LIVE_CONNECTOR_ID);
-  const embedder = new RecordingProvider(backend === 'local' ? BUILT_IN_EMBEDDING_PROVIDER : 'historical-x-embedder', 'old-embedder', backend);
+  const embedder = new RecordingProvider(backend === 'local' ? BUILT_IN_EMBEDDING_PROVIDER : 'historical-x-embedder', 'old-embedder', backend === 'local' ? 'local' : 'cloud');
   expect((await legacy.embedChunks({ provider: embedder })).chunksEmbedded).toBe(1);
   expect(await legacy.vectorSearchItems('recoveryorchardmarker', embedder, 10)).toHaveLength(1);
-  const f = fixture(tmp);
+  const f = fixture(tmp, { localEmbeddingsOnly: backend !== 'configured cloud' });
   const personal = new LocalConnectorStore({ ...personalOptions, tierLedger: f.ledger });
   const secure = new LocalConnectorStore({
     dbPath: join(f.dir, 'x-private.sqlite'), family: 'x', trustDomain: 'secure_local',
@@ -261,15 +264,16 @@ test.each(['local', 'cloud'] as const)('the old recovery writer’s S1 X bookmar
   expect(await personal.vectorSearchItems('recoveryorchardmarker', embedder, 10)).toEqual([]);
   expect(secure.exportItemCopy(raw.identity)).toBeUndefined();
   expect(f.ledger.getCurrent(raw.identity)).toMatchObject({ state: 'moving', contentPending: true });
-  // The ordinary auto-mover honors its built-in-only embedding authority.
   expect((await f.service.runOnce()).state).toBe('model_unavailable');
-  if (backend === 'cloud') {
-    expect(f.ledger.getCurrent(raw.identity)).toMatchObject({ state: 'moving', contentPending: true });
-    expect(secure.exportItemCopy(raw.identity)).toBeUndefined();
-  } else {
-    expect(f.ledger.getCurrent(raw.identity)).toMatchObject({ state: 'pending', contentPending: true });
-    expect(secure.exportItemCopy(raw.identity)?.chunks.map(chunk => chunk.boundedText).join('')).toBe(text);
-    expect(snapshotStore(personal.dbPath).vectors).toEqual([]);
+  expect(f.ledger.getCurrent(raw.identity)).toMatchObject({ state: 'pending', contentPending: true });
+  expect(secure.exportItemCopy(raw.identity)?.chunks.map(chunk => chunk.boundedText).join('')).toBe(text);
+  expect(snapshotStore(personal.dbPath).vectors).toEqual([]);
+  if (backend !== 'local') {
+    expect(snapshotStore(secure.dbPath).vectors).toEqual([]);
+    f.enableJudge();
+    for (let tick = 0; tick < 3 && f.ledger.getCurrent(raw.identity)?.contentPending; tick++) await f.service.runOnce();
+    expect(f.ledger.getCurrent(raw.identity)).toMatchObject({ contentPending: false,
+      reasons: expect.arrayContaining([contentDigestReason(text)]) });
   }
 });
 
@@ -427,4 +431,155 @@ test('a walker cannot adopt a Personal store already bound to another ledger', a
   } finally {
     other.close();
   }
+});
+
+test('a judge receipt beside the pre-routing Personal store authorizes only its exact text', async () => {
+  const tmp = tempDir('olympus-legacy-personal-');
+  const rows = ['authorized', 'names-only', 'routed-names', 'edited'].map(id => ({ id, name: 'Picnic notes', text: BODY }));
+  await seedLegacy(tmp.dir, rows);
+  const historical = new TierLedger({ dbPath: tierLedgerPathForStore(storePaths(tmp.dir).internal) });
+  try {
+    for (const row of rows) {
+      const decision = classifyItemTiers({ signals: { title: row.name }, text: row.id === 'edited' ? 'Previous text.' : BODY },
+        { sniffer: JUDGED_PERSONAL_SNIFFER });
+      historical.recordDecision(identityOf(row.id), decision, { trustDomain: 'internal', trustTier: 'S1' });
+    }
+  } finally { historical.close(); }
+  const f = fixture(tmp);
+  f.ledger.recordDecision(identityOf('names-only'), classifyItemTiers({ signals: { title: 'Picnic notes' }, namesOnly: true }),
+    { trustDomain: 'internal', trustTier: 'S1' });
+  const routedNames = identityOf('routed-names');
+  f.ledger.recordRoutedPlacement(routedNames, classifyItemTiers({ signals: { title: 'Picnic notes' }, namesOnly: true }),
+    { copies: [{ corpusId: f.stores.internal!.corpusId, trustDomain: 'internal', layers: 'metadata' }], embedHold: false });
+  await f.service.runOnce();
+  expect(f.stores.internal!.searchItems(MARKER, 10).map(hit => hit.sourceItem.providerItemId).sort()).toEqual(['authorized', 'names-only']);
+  expect(f.ledger.getCurrent(identityOf('authorized'))?.contentPending).toBeFalsy();
+  expect(f.stores.secure_local!.exportItemCopy(routedNames)).toBeUndefined();
+  expect(f.ledger.copies(routedNames)).toMatchObject([{ layers: 'metadata', state: 'current' }]);
+  expect(f.stores.secure_local!.exportItemCopy(identityOf('edited'))?.chunks[0]?.boundedText).toBe(BODY);
+});
+
+test.each([false, true])('retained Personal chunks and vectors move from a names-only copy (Private stub %s)', async privateStub => {
+  const tmp = tempDir('olympus-legacy-personal-');
+  const row = { id: 'retained', name: 'Picnic notes', text: BODY };
+  await seedLegacy(tmp.dir, [row], new RecordingProvider(BUILT_IN_EMBEDDING_PROVIDER, 'fixture', 'local'));
+  const f = fixture(tmp);
+  const personal = f.stores.internal!;
+  const identity = identityOf(row.id);
+  personal.bindTierSet(f.ledger);
+  const names = classifyItemTiers({ signals: { title: row.name } });
+  const secure = f.stores.secure_local!;
+  if (privateStub) await secure.syncFromConnector(fixtureConnector(() => [{ id: row.id, name: row.name }]), { fetchContent: false });
+  f.ledger.recordRoutedPlacement(identity, names, { copies: [
+    { corpusId: personal.corpusId, trustDomain: 'internal', layers: 'metadata' },
+    ...(privateStub ? [{ corpusId: secure.corpusId, trustDomain: 'secure_local' as const, layers: 'content' as const }] : []),
+  ], embedHold: false });
+  const queue = f.installed.snifferStoreForLedger(f.ledger.dbPath);
+  expect(await settleLegacyPersonalBodiesOffThread({ set: f.set, queue })).toMatchObject({ checked: 1, held: 1 });
+  await f.service.runOnce();
+  expect(f.stores.secure_local!.exportItemCopy(identity)?.chunks[0]?.boundedText).toBe(BODY);
+  expect(personal.exportItemCopy(identity)?.chunks ?? []).toEqual([]);
+  expect(snapshotStore(personal.dbPath).vectors).toEqual([]);
+});
+
+test('restore removes an obsolete question before reading names for an override', async () => {
+  const tmp = tempDir('olympus-legacy-personal-');
+  const row = { id: 'override', name: 'Picnic notes', text: BODY };
+  await seedLegacy(tmp.dir, [row]);
+  const f = fixture(tmp);
+  const personal = f.stores.internal!;
+  const { identity } = fixtureItem(row);
+  f.ledger.setOverride(identity, { kind: 'tier', tier: 'private' });
+  const queue = f.installed.snifferStoreForLedger(f.ledger.dbPath);
+  queue.enqueue({ subject: identity, pass: 'content', material: 'Earlier body', flags: [], mapRevision: 'none' });
+  personal.exportItemNames = () => { throw new Error('fixture names unavailable'); };
+  expect(() => placePersonalBody(f.set, personal, { identity, text: BODY }, queue, 'restore')).toThrow('fixture names unavailable');
+  expect(queue.questionFor(identity, 'content')).toBeUndefined();
+});
+
+test('a tick reads a bounded slice of a large body and never places a prefix', async () => {
+  const tmp = tempDir('olympus-legacy-personal-');
+  const large = 'orchard '.repeat(3000) + 'secret tail -----BEGIN ' + 'PRIVATE KEY-----';
+  await seedLegacy(tmp.dir, [{ id: 'older', name: 'Picnic notes', text: BODY }, { id: 'large', name: 'Large note', text: large }]);
+  const f = fixture(tmp);
+  const queue = f.installed.snifferStoreForLedger(f.ledger.dbPath);
+  const lap = () => settleLegacyPersonalBodiesOffThread({ set: f.set, queue, chunkLimit: 2 });
+  expect(await lap()).toMatchObject({ checked: 0, held: 0, retired: false });
+  expect(f.ledger.getCurrent(identityOf('large'))).toBeUndefined();
+  expect(f.ledger.getCurrent(identityOf('older'))).toBeUndefined();
+  const writer = new Database(f.stores.internal!.dbPath);
+  cleanups.push(() => writer.close());
+  let secrets = 0;
+  let held = 0;
+  for (let tick = 0; tick < 8 && !held; tick++) {
+    writer.query("UPDATE items SET title = ? WHERE provider_item_id = 'older'").run(`Other notes ${tick}`);
+    const page = await lap();
+    secrets += page.secrets;
+    held += page.held;
+  }
+  expect(secrets).toBe(1);
+  expect(held).toBe(1);
+  expect(f.ledger.getCurrent(identityOf('large'))?.contentTier).toBe('secrets');
+});
+
+test('a large body edited between slices is checked from its new first chunk', async () => {
+  const tmp = tempDir('olympus-legacy-personal-');
+  const text = BODY.repeat(140);
+  const row = { id: 'large-edit', name: 'Picnic notes', text };
+  await seedLegacy(tmp.dir, [row]);
+  const f = fixture(tmp);
+  const queue = f.installed.snifferStoreForLedger(f.ledger.dbPath);
+  const step = () => settleLegacyPersonalBodiesOffThread({ set: f.set, queue, chunkLimit: 1 });
+  expect((await step()).checked).toBe(0);
+  expect((await step()).checked).toBe(0);
+  const db = new Database(f.stores.internal!.dbPath);
+  try {
+    const replacement = 'Changed prefix -----BEGIN ' + 'PRIVATE KEY-----';
+    db.query('UPDATE chunks SET bounded_text = ?, content_hash = ? WHERE chunk_index = 0').run(replacement, connectorStoreHashString(replacement));
+    let secrets = 0;
+    let retired = false;
+    for (let tick = 0; tick < 12 && !retired; tick++) {
+      const page = await step();
+      expect(page.held).toBe(0);
+      secrets += page.secrets;
+      retired = page.retired;
+    }
+    expect(secrets).toBe(1);
+    expect(retired).toBe(true);
+    expect(db.query("SELECT name FROM sqlite_master WHERE name GLOB 'legacy_body_watch*'").all()).toEqual([]);
+  } finally { db.close(); }
+});
+
+test('a retained orphan vector has no bytes to judge and is cleared without losing the names', async () => {
+  const tmp = tempDir('olympus-legacy-personal-');
+  const row = { id: 'orphan-vector', name: 'Picnic notes', text: BODY };
+  await seedLegacy(tmp.dir, [row], new RecordingProvider(BUILT_IN_EMBEDDING_PROVIDER, 'fixture', 'local'));
+  const f = fixture(tmp);
+  const personal = f.stores.internal!;
+  const identity = identityOf(row.id);
+  const names = classifyItemTiers({ signals: { title: row.name }, namesOnly: true });
+  f.ledger.recordRoutedPlacement(identity, names, { copies: [{ corpusId: personal.corpusId, trustDomain: 'internal', layers: 'metadata' }], embedHold: false });
+  const db = new Database(personal.dbPath);
+  try { db.exec('PRAGMA foreign_keys = OFF; DELETE FROM chunks'); } finally { db.close(); }
+  expect(snapshotStore(personal.dbPath).vectors).toHaveLength(1);
+  await f.service.runOnce();
+  expect(snapshotStore(personal.dbPath).vectors).toEqual([]);
+  expect(personal.exportItemNames(identity)?.columns.title).toBe(row.name);
+});
+
+test('a fresh store handle resumes before an unfinished body after restart', async () => {
+  const tmp = tempDir('olympus-legacy-personal-');
+  const text = BODY.repeat(150);
+  await seedLegacy(tmp.dir, [{ id: 'restart', name: 'Picnic notes', text }]);
+  const f = fixture(tmp);
+  const queue = f.installed.snifferStoreForLedger(f.ledger.dbPath);
+  const step = (set: TieredStoreSet) => settleLegacyPersonalBodiesOffThread({ set, queue, chunkLimit: 1 });
+  expect((await step(f.set)).checked).toBe(0);
+  expect((await step(f.set)).checked).toBe(0);
+  const reopened = openTierFixture(tmp.dir);
+  cleanups.push(() => reopened.close());
+  let held = 0;
+  for (let tick = 0; tick < 8 && !held; tick++) held += (await step(reopened.set)).held;
+  expect(held).toBe(1);
+  expect(reopened.ledger.getCurrent(identityOf('restart'))?.reasons).toContain(contentDigestReason(text));
 });

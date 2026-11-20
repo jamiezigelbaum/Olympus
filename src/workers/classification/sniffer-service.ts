@@ -252,6 +252,7 @@ export interface TierSnifferServiceOptions {
    * every configured embedding is the built-in local model AND every store of
    * the item's set embeds with it (free, nothing leaves the Mac). Otherwise
    * the move stays queued for the owner-approved `olympus tier migrate` path.
+   * A legacy hold may still raise its text to Private without copying vectors.
    */
   autoMoves?: AutomaticTierMoveContext & {
     maxPerPass?: number;
@@ -1989,8 +1990,9 @@ export class TierSnifferService {
       if (budget === 0) return false;
       try {
         const set = tierSetForLedger(path);
-        if (!set || !setEmbedsWithBuiltInOnly(set)) continue;
-        for (const record of set.ledger.listMoving({ limit: budget, direction: 'raise' }).filter(isAutoMoveCandidate)) {
+        if (!set) continue;
+        const builtInOnly = this.options.autoMoves!.localEmbeddingsOnly() && setEmbedsWithBuiltInOnly(set);
+        for (const record of set.ledger.listMoving({ limit: budget, direction: 'raise', legacyHoldsOnly: !builtInOnly }).filter(isAutoMoveCandidate)) {
           budget--;
           if (!this.moveFailures.has(`${path}\u0000${tierLedgerIdentityKey(recordIdentity(record))}\u0000${record.generation}`)) return true;
         }
@@ -2002,7 +2004,7 @@ export class TierSnifferService {
 
   private async drainMoves(direction: 'raise' | 'lower' = 'raise'): Promise<TierAutoMoveReport | undefined> {
     try {
-      if (!this.options.autoMoves || this.stopped || !this.options.autoMoves.localEmbeddingsOnly()) return undefined;
+      if (!this.options.autoMoves || this.stopped || (direction === 'lower' && !this.options.autoMoves.localEmbeddingsOnly())) return undefined;
       if (this.moving && this.movingDirection !== direction) {
         if (direction === 'raise') {
           // The idle timer also asks for raises. Only real queued raises may
@@ -2157,6 +2159,7 @@ export class TierSnifferService {
       await this.runStoredWalker(set, 'legacyPersonalBodies', undefined, async () => {
         const page = await settleLegacyPersonalBodiesOffThread({
           set, queue: this.options.installed.snifferStoreForLedger(ledgerPath), turn,
+          movesAvailable: !!this.options.autoMoves && (this.options.autoMoves.maxPerPass ?? 25) > 0,
         });
         if (page.held > 0) this.options.log?.(`Olympus tier hold: ${page.held} item(s) from earlier builds held for judgment, moves to Private queued.`);
         return { retired: page.retired, complete: page.retired, changed: page.held + page.secrets > 0, failed: page.failed > 0 };
@@ -2295,10 +2298,17 @@ export class TierSnifferService {
       // queued for the next pass.
       if (set.openStores().some(store => store.reclaiming)) continue;
       // Found on the ledger's read worker; each move re-checks its generation as it lands.
-      const queued = (await ledgerReadOffThread(set.ledger, set.ledger.listMovingSteps({ limit: budget, direction })))
-        .filter(isAutoMoveCandidate);
+      const page = (legacyHoldsOnly = false) => ledgerReadOffThread(set.ledger,
+        set.ledger.listMovingSteps({ limit: budget, direction, legacyHoldsOnly }));
+      let queued = (await page()).filter(isAutoMoveCandidate);
       if (set.openStores().some(store => store.reclaiming)) continue;
-      if (!setEmbedsWithBuiltInOnly(set)) { report.notEligible += queued.length; continue; }
+      const builtInOnly = options.localEmbeddingsOnly() && setEmbedsWithBuiltInOnly(set);
+      if (!builtInOnly && queued.length) {
+        if (direction === 'lower') { report.notEligible += queued.length; continue; }
+        // Filter before LIMIT so an unrelated ineligible raise cannot strand a hold.
+        queued = (await page(true)).filter(isAutoMoveCandidate);
+        if (set.openStores().some(store => store.reclaiming)) continue;
+      }
       // Reorder retries within a bounded page while their generation is queued.
       const deferRetry = (identity: TierLedgerIdentity, generation: number) => {
         try {
@@ -2379,7 +2389,10 @@ export class TierSnifferService {
           pending.push({ record, move: {
             set, identity,
             target: { metadataTier: record.targetMetadataTier!, contentTier: record.targetContentTier! },
-            ...automaticTierMoveOptions(set, options), timings, expectedGeneration: record.generation,
+            ...(builtInOnly ? automaticTierMoveOptions(set, options) : {
+              embeddingLedger: { path: options.embeddingLedgerPath, approvedBy: 'system-automatic',
+                why: 'Moved held text to Private without copying historical vectors.' },
+            }), timings, expectedGeneration: record.generation,
           } });
         }
         if (direction === 'raise') {
