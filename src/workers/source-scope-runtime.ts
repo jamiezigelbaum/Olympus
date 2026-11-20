@@ -185,6 +185,7 @@ export class FileSourceScopeAuthority {
     selections: readonly FileSourceScopeSelection[];
     wholeAccount: boolean;
     explicitWholeAccountConfirmation: boolean;
+    reconcileReads?: boolean;
   }): FileSourceScopeApprovalSnapshot {
     return approveFileSourceScope({
       ...input,

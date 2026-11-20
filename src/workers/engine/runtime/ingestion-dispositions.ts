@@ -1,3 +1,4 @@
+import { OperationError } from '../../../core/operation-error.ts';
 import { resolvedStorePath } from '../../../core/source-placement.ts';
 import { existsSync } from 'node:fs';
 import {
@@ -25,11 +26,12 @@ import {
   localFilesIngestionExclusionMatcher,
 } from '../../local-files/store.ts';
 import {
+  createSourceExclusionMatcher,
   createSourceExclusionMatcherFromPrefixes,
   type SourceExclusionCriterionKind,
   type SourceExclusionMatcher,
 } from '../../../core/source-ingestion-exclusions.ts';
-import type { SourceDispositionsSource } from '../../source-dispositions.ts';
+import { readSourceIngestionExclusionsFile, resolveSourceIngestionExclusionsPath, type SourceDispositionsSource } from '../../source-dispositions.ts';
 import type { SourceDispositionItem } from '../../../core/source-disposition-tree.ts';
 import {
   type LocalConnectorStore,
@@ -120,8 +122,26 @@ const INGESTION_DISPOSITION_SOURCES: ReadonlyArray<{
   },
 ];
 
-export function dispositionMatcher(sourceId: string, env: Record<string, string | undefined>): SourceExclusionMatcher | undefined {
-  return INGESTION_DISPOSITION_SOURCES.find(source => source.account.sourceId === sourceId)?.matcher(env);
+export function dispositionReadChange(sourceId: string, env: Record<string, string | undefined>) {
+  const source = INGESTION_DISPOSITION_SOURCES.find(entry => entry.account.sourceId === sourceId);
+  if (!source) return undefined;
+  return dispositionReadMatchers(readSourceIngestionExclusionsFile(resolveSourceIngestionExclusionsPath(env)), source.sourceId, source.enforceable);
+}
+
+export function dispositionReadMatchers(file: ReturnType<typeof readSourceIngestionExclusionsFile>, id: string, enforceable: readonly SourceExclusionCriterionKind[]) {
+  if (!file.pendingReads) return undefined;
+  const after = createSourceExclusionMatcher(file.document, id, { enforceable });
+  // A hand-edited policy may have been refused for this source. Its replacement
+  // can still remove grants wherever it restricts reads.
+  let before: SourceExclusionMatcher;
+  try {
+    before = createSourceExclusionMatcher(file.pendingReads.previous, id, { enforceable });
+  } catch (error) {
+    if (!(error instanceof OperationError) || error.code !== 'config_error') throw error;
+    before = createSourceExclusionMatcher(undefined);
+  }
+  if (!after.active || JSON.stringify(before.criteria) === JSON.stringify(after.criteria)) return undefined;
+  return { before, after };
 }
 
 /**

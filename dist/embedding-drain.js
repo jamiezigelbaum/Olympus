@@ -13752,6 +13752,12 @@ function stripDataUrlPrefix(dataUrl) {
   return dataUrl.replace(/^data:[^,]+,/, "");
 }
 
+// src/workers/connector-store/tier-set-registry.ts
+var tierSets;
+function tierSetForLedger(ledgerPath) {
+  return tierSets?.get(ledgerPath);
+}
+
 // src/workers/local-pacing.ts
 var GO_EASY_IDLE_FULL_SPEED_MS = 5 * 60000;
 var GO_EASY_LOCAL_WORK_RECENT_MS = 3 * 60000;
@@ -30119,6 +30125,14 @@ ${parentKey(ref)}`, { ref, origin });
       ON CONFLICT(local_item_id) DO UPDATE SET source_version = excluded.source_version`).run(localItemId, sourceVersion);
     this.notifyOnDemandGrantChange();
   }
+  revokeDeletedItemReads(id, requireActiveRow = false) {
+    const set = tierSetForLedger(this.tierLedgerPathInUse());
+    const stores = set?.store(this.trustDomain) === this ? set.openStores() : [this];
+    if (requireActiveRow && !stores.some((store) => store.activeLocalItemRow(id)))
+      return;
+    for (const store of stores)
+      store.revokeOnDemandRead(id);
+  }
   onDemandGrantIds() {
     return this.db.query("SELECT local_item_id FROM on_demand_item_reads").all().map((row) => row.local_item_id);
   }
@@ -31975,6 +31989,9 @@ ${parentKey(ref)}`, { ref, origin });
           if (itemsSeen % VISIBILITY_TICK_ITEMS === 0)
             this.tickVisibilityWriters();
           await this.controlPath.ingestionTurn();
+          if (item.metadata["deleted"] === true) {
+            this.revokeDeletedItemReads(item.identity.localItemId, item.metadata["deletedIdentityResolved"] === false);
+          }
           const exclusion = this.exclusions.evaluateMetadata(item.metadata);
           if (exclusion.excluded) {
             tallyExclusion(exclusionTally, exclusion);
@@ -32416,6 +32433,7 @@ ${parentKey(ref)}`, { ref, origin });
             deferred.push(localItemId);
             break;
           }
+          this.revokeDeletedItemReads(localItemId);
           this.db.query(`
             UPDATE items
             SET tombstoned = 1, deleted_at = ?, indexed_at = ?, sync_run_id = ?
@@ -32443,7 +32461,7 @@ ${parentKey(ref)}`, { ref, origin });
       const retiredSecrets = [];
       for (const scope of scopes) {
         const rows = currentMembershipAuthority === "provider_account_snapshot" ? this.db.query(`
-            SELECT DISTINCT i.item_pk, i.tombstoned
+            SELECT DISTINCT i.item_pk, i.tombstoned, i.local_item_id
             FROM items i
             WHERE (i.tombstoned = 0 OR i.trust_tier = 'S5')
               AND i.provider = ?
@@ -32464,7 +32482,7 @@ ${parentKey(ref)}`, { ref, origin });
                   AND preservation.ownership_kind = 'preservation'
               )
           `).all(scope.provider, scope.accountScope, syncRunId, snapshotObservedAt ?? "") : this.db.query(`
-            SELECT DISTINCT i.item_pk, i.tombstoned
+            SELECT DISTINCT i.item_pk, i.tombstoned, i.local_item_id
             FROM items i
             JOIN item_owners owner
               ON owner.item_pk = i.item_pk
@@ -32480,6 +32498,7 @@ ${parentKey(ref)}`, { ref, origin });
               )
           `).all(connectorId, syncRunId, scope.provider, scope.accountScope);
         for (const row of rows) {
+          this.revokeDeletedItemReads(row.local_item_id);
           if (row.tombstoned === 1) {
             const located = this.db.query(`
               SELECT family, provider, account_scope, provider_item_id, provider_thread_id,

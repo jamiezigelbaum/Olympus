@@ -1,5 +1,5 @@
 import { revokeSourceOnDemandReads } from './runtime/on-demand-revocation.ts';
-import { createSourceExclusionMatcher, type SourceExclusionMatcher } from '../../core/source-ingestion-exclusions.ts';
+import { dispositionReadMatchers } from './runtime/ingestion-dispositions.ts';
 import type { SourceReadRevocation } from '../file-extraction/on-demand-read.ts';
 import { storageAccountForCorpus } from '../../core/source-placement.ts';
 import { FileSourceScopeAuthority } from '../source-scope-runtime.ts';
@@ -157,7 +157,7 @@ import {
   dashboardManualSyncOutcome,
 } from '../source-dashboard.ts';
 import { readCredentialHealthReport, defaultCredentialHealthReportPath } from '../credential-health.ts';
-import { resolveSourceIngestionExclusionsPath, saveSourceDispositions } from '../source-dispositions.ts';
+import { readSourceIngestionExclusionsFile, resolveSourceIngestionExclusionsPath, saveSourceDispositions } from '../source-dispositions.ts';
 import { buildSourceIngestionLedgerSnapshot } from '../source-ingestion-ledger.ts';
 import {
   defaultHandleRegistryPath,
@@ -424,13 +424,13 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
   const sourceScheduler = options.sourceScheduler;
   const sourceWatch = options.sourceWatch;
   const sourceDashboard = options.sourceDashboard;
-  const revokeSourceReads = (source: string, reason: SourceReadRevocation, matcher?: SourceExclusionMatcher) => {
+  const revokeSourceReads = (source: string, reason: SourceReadRevocation, rules?: ReturnType<typeof dispositionReadMatchers>) => {
     if (options.revokeSourceReads) return options.revokeSourceReads(source, reason);
     const stores = connectorStores.filter(store => storageAccountForCorpus(store).sourceId === source);
     const approval = reason === 'scope'
-      ? new FileSourceScopeAuthority({ registryPath: sourceDashboard?.registryPath ?? defaultHandleRegistryPath() }).snapshot(source)
+      ? { authority: new FileSourceScopeAuthority({ registryPath: sourceDashboard?.registryPath ?? defaultHandleRegistryPath() }), source }
       : undefined;
-    return revokeSourceOnDemandReads(stores, reason, approval, matcher);
+    return revokeSourceOnDemandReads(stores, reason, approval, rules);
   };
   const settingsProposal = sourceDashboard ? settingsProposalHolderFor(sourceDashboard) : undefined;
   const credentialDegradations = options.credentialDegradations;
@@ -1021,6 +1021,8 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             }
             const scopes = sourceDashboard.fileSourceScopes;
             return await withDashboardGrantMutation(async () => {
+              const authority = new FileSourceScopeAuthority({ registryPath: sourceDashboard.registryPath ?? defaultHandleRegistryPath() });
+              if (authority.snapshot(sourceId).readChangePending) await revokeSourceReads(sourceId, 'scope');
               const result = await scopes.approveAndStart({
                 sourceId, accountGeneration, expectedRevision,
                 selections: parseSourceScopeSelections(postBody.selections),
@@ -1031,38 +1033,48 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               return json(result);
             });
           }
-          const runtime = await sourceDashboard.ingestionDispositions();
-          try {
-            const rulesPath = resolveSourceIngestionExclusionsPath(process.env, runtime.rulesPath);
-            const edits = parseSourceDispositionsSave(postBody, runtime.sources);
-            const save = saveSourceDispositions(rulesPath, edits);
-            let revoked = 0;
-            for (const source of runtime.sources) {
-              if (edits.document === undefined && edits.source && edits.source !== source.source_id) continue;
-              const id = listFileScopeSources().find(entry => entry.dispositionSourceId === source.source_id)?.sourceId ?? source.source_id;
-              const matcher = createSourceExclusionMatcher(save.rules, source.source_id, { enforceable: source.enforceable });
-              revoked += await revokeSourceReads(id, 'exclusions', matcher);
+          return await withDashboardGrantMutation(async () => {
+            const runtime = await sourceDashboard.ingestionDispositions!();
+            try {
+              const rulesPath = resolveSourceIngestionExclusionsPath(process.env, runtime.rulesPath);
+              const edits = parseSourceDispositionsSave(postBody, runtime.sources);
+              const reconcile = async () => {
+                const file = readSourceIngestionExclusionsFile(rulesPath);
+                if (!file.pendingReads) return 0;
+                let revoked = 0;
+                for (const source of runtime.sources) {
+                  const rules = dispositionReadMatchers(file, source.source_id, source.enforceable);
+                  if (!rules) continue;
+                  const id = listFileScopeSources().find(entry => entry.dispositionSourceId === source.source_id)?.sourceId ?? source.source_id;
+                  revoked += await revokeSourceReads(id, 'exclusions', rules);
+                }
+                file.pendingReads.finish();
+                return revoked;
+              };
+              let revoked = await reconcile();
+              const save = saveSourceDispositions(rulesPath, edits, { reconcileReadsFor: runtime.sources });
+              revoked += await reconcile();
+              return json({
+                ok: true,
+                kind: 'source_dispositions_save',
+                result: {
+                  changed: save.changed,
+                  noop: save.noop,
+                  applied: save.applied,
+                  refused: save.refused,
+                  untouched_rule_ids: save.untouched_rule_ids,
+                  ...(save.write ? { write: save.write } : {}),
+                },
+                policy: {
+                  writes_config_only: revoked === 0,
+                  deletes_store_content: false,
+                  runs_purge_or_strip: false,
+                },
+              });
+            } finally {
+              runtime.close?.();
             }
-            return json({
-              ok: true,
-              kind: 'source_dispositions_save',
-              result: {
-                changed: save.changed,
-                noop: save.noop,
-                applied: save.applied,
-                refused: save.refused,
-                untouched_rule_ids: save.untouched_rule_ids,
-                ...(save.write ? { write: save.write } : {}),
-              },
-              policy: {
-                writes_config_only: revoked === 0,
-                deletes_store_content: false,
-                runs_purge_or_strip: false,
-              },
-            });
-          } finally {
-            runtime.close?.();
-          }
+          });
         }
 
 
@@ -2351,21 +2363,23 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             );
             if (localFilesBusy()) throw busyError();
             const registryPath = sourceDashboard.registryPath ?? defaultHandleRegistryPath();
-            await revokeSourceReads('local.files', 'disconnect');
-            const wasConnected = disconnectThisComputerSource(registryPath, 'local.files');
-            if (!wasConnected) {
+            const connection = readThisComputerHandles(registryPath).find(handle => handle.handle === 'local.files.this_computer');
+            if (!connection || !disconnectThisComputerSource(registryPath, 'local.files')) {
               throw new EmailSourceWorkerError(409, 'source_not_connected', 'This source is not connected.');
             }
-            if (sourceScheduler && sourceDashboard.refreshSchedulerSources) {
-              const nextSources = await sourceDashboard.refreshSchedulerSources();
-              // A read that started while the rebuild was awaited: put the
-              // connection back (folder choices live with the machine id, which
-              // Disconnect keeps) and refuse, as above.
-              if (localFilesBusy()) {
-                connectThisComputerSource(registryPath, 'local.files');
-                throw busyError();
+            let schedulingChanged = false;
+            try {
+              if (sourceScheduler && sourceDashboard.refreshSchedulerSources) {
+                const nextSources = await sourceDashboard.refreshSchedulerSources();
+                if (localFilesBusy()) throw busyError();
+                sourceScheduler.updateSources(nextSources);
+                schedulingChanged = true;
               }
-              sourceScheduler.updateSources(nextSources);
+              await revokeSourceReads('local.files', 'disconnect');
+            } catch (error) {
+              connectThisComputerSource(registryPath, 'local.files', new Date(connection.connectedAt));
+              if (schedulingChanged) await refreshDashboardSchedulerSources();
+              throw error;
             }
             return json({
               ok: true,
@@ -3009,7 +3023,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                   'Confirm that Remove deletes everything Olympus made from this archive, and leaves the file itself where it is.',
                 );
               }
-              return json(archiveId !== undefined ? archiveImports.remove(archiveId) : archiveImports.approveRemoval(requestId!));
+              return json(await (archiveId !== undefined ? archiveImports.remove(archiveId) : archiveImports.approveRemoval(requestId!)));
             });
           }
           throw new EmailSourceWorkerError(404, 'not_found', 'No such archive route.');

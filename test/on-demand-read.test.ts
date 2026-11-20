@@ -43,6 +43,7 @@ function fixture() {
   let jobs = new LocalFileExtractionJobStore(path);
   cleanup.push(() => { jobs.close(); rmSync(dir, { recursive: true, force: true }); });
   let grants = 0;
+  const granted = new Set<string>();
   const context = {
     get jobs() { return jobs; },
     resolve: (request: OnDemandReadRequest) => ({
@@ -51,7 +52,9 @@ function fixture() {
         refs: [{ ...request.itemRef, provider: 'fixture', accountScope: 'one', approvedScopeKey: 'scope', localItemId: request.itemRef.providerItemId, sizeBytes: 8 }],
         extractorKind: 'local_text', extractorVersion: 'v1',
       },
-      grant: () => { grants++; },
+      hasIndexedContent: () => false,
+      hasGrant: () => granted.has(request.itemRef.providerItemId),
+      grant: () => { grants++; granted.add(request.itemRef.providerItemId); },
     }),
     limits: { files: 3, bytes: 25 },
   };
@@ -406,7 +409,8 @@ describe('read on demand', () => {
     const context = { jobs, limits: { files: 3, bytes: 25 }, resolve: (request: OnDemandReadRequest) => ({
       readableOnRequest: true,
       job: { refs: [{ ...request.itemRef, ...lane, localItemId: 'scan', sizeBytes: 8 }], extractorKind: 'local_text', extractorVersion: 'v1' },
-      grant: () => {},
+      hasIndexedContent: () => false,
+      hasGrant: () => true, grant: () => {},
     }) };
     expect(await requestOnDemandRead(req('scan'), context)).toMatchObject({ state: 'queued' });
     expect((await runner.run({ ...lane, providerItemIds: ['scan'], limit: 1, reclassify: false })).counts.metadata_only).toBe(1);

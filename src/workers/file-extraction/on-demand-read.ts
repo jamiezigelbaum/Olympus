@@ -53,6 +53,8 @@ export type RequestOnDemandRead = (request: OnDemandReadRequest) => Promise<OnDe
 export interface OnDemandReadTarget {
   readableOnRequest: boolean;
   job: EnqueueExtractionJobsRequest;
+  hasGrant(): boolean;
+  hasIndexedContent(): boolean;
   grant(): void;
 }
 
@@ -68,7 +70,7 @@ export async function requestOnDemandRead(request: OnDemandReadRequest, context:
   if (!ref) return { state: 'refused', reason: 'item_not_found' };
   return context.jobs.enqueueOnDemandRead({ ...request, questionId: request.questionId?.trim() || randomUUID(),
     itemRef: { corpusId: ref.corpusId, providerItemId: ref.providerItemId },
-  }, target.job, target.grant, context.limits);
+  }, target.job, target, context.limits);
 }
 
 /**

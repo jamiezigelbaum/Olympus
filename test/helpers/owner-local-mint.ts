@@ -1,5 +1,5 @@
 import { recordRequestPeer } from '../../src/core/request-peer.ts';
-import { DASHBOARD_LOCAL_CONTROL_SESSION_PATH } from '../../src/workers/http.ts';
+import { DASHBOARD_LOCAL_CONTROL_SESSION_PATH, withWorkerBearerAuth } from '../../src/workers/http.ts';
 
 /**
  * The local mint as the owner's browser makes it on any platform: the browser
@@ -43,4 +43,17 @@ export async function ownerUnlockKey(
   }));
   if (minted.status !== 200) throw new Error(`the owner's control session answered ${minted.status}`);
   return (await minted.json() as { unlock_key: string }).unlock_key;
+}
+
+export async function postAsLocalOwner(worker: { fetch(request: Request): Promise<Response> }, path: string, body: unknown) {
+  const origin = 'http://127.0.0.1:17777';
+  const token = 'fixture-owner-token';
+  const guarded = withWorkerBearerAuth(request => worker.fetch(request), { authToken: token });
+  const mint = await ownerLocalMint(guarded, origin, token);
+  return guarded(new Request(origin + path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: mint.headers.get('Set-Cookie')!.split(';')[0]!,
+      'X-Olympus-CSRF': (await mint.json() as { csrf_token: string }).csrf_token },
+    body: JSON.stringify(body),
+  }));
 }

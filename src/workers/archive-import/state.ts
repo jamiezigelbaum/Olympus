@@ -149,6 +149,7 @@ export interface ArchiveImportRecord {
   updated_at: string;
   completed_at?: string;
   removal_started_at?: string;
+  visibility_withdrawn?: true;
   findings: ArchiveImportFindings;
   /**
    * Earliest and latest item dates seen.

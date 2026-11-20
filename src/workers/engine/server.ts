@@ -605,7 +605,7 @@ import {
 import { createConnectorStoreMountDiscovery, mergeConnectorStores, type ConnectorStoreMount } from './runtime/connector-mounts.ts';
 import { connectorStoreAnswerScope, googleFilePage } from './runtime/answer-scope.ts';
 import { revokeSourceOnDemandReads } from './runtime/on-demand-revocation.ts';
-import { dispositionMatcher, openIngestionDispositionsRuntime } from './runtime/ingestion-dispositions.ts';
+import { dispositionReadChange, openIngestionDispositionsRuntime } from './runtime/ingestion-dispositions.ts';
 
 /** How this process was launched; set only by startWorkerWithLaunch from the validated entry point. */
 let workerLaunch: WorkerLaunch = {};
@@ -4902,8 +4902,8 @@ export async function main(): Promise<void> {
         opened.push(openConnectorStore({ sourceId: source }, { ...corpus, dbPath }));
       }
       return revokeSourceOnDemandReads([...stores, ...opened], reason,
-        reason === 'scope' ? fileSourceScopeAuthority?.snapshot(source) : undefined,
-        reason === 'exclusions' ? dispositionMatcher(source, process.env) : undefined);
+        reason === 'scope' && fileSourceScopeAuthority ? { authority: fileSourceScopeAuthority, source } : undefined,
+        reason === 'exclusions' ? dispositionReadChange(source, process.env) : undefined);
     } finally { for (const store of opened) store.close(); }
   };
   const revokeSourceReads = async (source: string, reason: Parameters<typeof applySourceReadRevocation>[1]) => {
@@ -5098,6 +5098,7 @@ export async function main(): Promise<void> {
       }
       const verifiedSelections = await browser.validateSelections(selections);
       const approval = fileSourceScopeAuthority.approve({
+        reconcileReads: true,
         sourceId: input.sourceId,
         accountGeneration: input.accountGeneration,
         expectedRevision: input.expectedRevision,

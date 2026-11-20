@@ -11168,7 +11168,6 @@ var init_tier_set_binding = __esm(() => {
   init_tier_ledger();
   init_tier_ledger_path();
 });
-
 // src/workers/local-pacing.ts
 var GO_EASY_IDLE_FULL_SPEED_MS, GO_EASY_LOCAL_WORK_RECENT_MS;
 var init_local_pacing = __esm(() => {
@@ -12261,6 +12260,7 @@ var init_tier_placement = __esm(() => {
   init_tier_classifier();
   init_tier_ledger();
 });
+
 // src/workers/source-index/media-judge.ts
 var MEDIA_JUDGE_TEXT_DECIDED_CATEGORIES, MEDIA_JUDGE_PROMPTS, MEDIA_JUDGE_THRESHOLDS, promptVectorCache;
 var init_media_judge = __esm(() => {

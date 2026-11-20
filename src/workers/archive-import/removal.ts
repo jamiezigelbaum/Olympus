@@ -154,11 +154,12 @@ function deleteJudgeQuestions(lane: ArchiveTierLane, provider: string, accountSc
   }
 }
 
-export function revokeArchiveReads(lane: ArchiveTierLane, archiveId: string): void {
+export function withdrawArchiveReads(lane: ArchiveTierLane, record: ArchiveImportRecord) {
   const stores = archiveLaneStores(lane);
-  const prefix = archiveId + ':';
+  const prefix = record.archive_id + ':';
   const ids = new Set(stores.flatMap(store => store.onDemandGrantIds().filter(id => id.startsWith(prefix))));
   revokeOnDemandReads(stores, ids);
+  return lane.ledger.withdrawAccountScope(record.provider, record.archive_id);
 }
 
 export async function runArchiveRemoval(options: ArchiveRemovalOptions): Promise<ArchiveRemovalOutcome> {
@@ -173,7 +174,9 @@ export async function runArchiveRemoval(options: ArchiveRemovalOptions): Promise
   const lane = options.lane;
   const corpusIds = archiveLaneLegs(lane).map((leg) => leg.corpusId);
   const counts = emptyCounts();
-  revokeArchiveReads(lane, accountScope);
+  const withdrawn = withdrawArchiveReads(lane, record);
+  counts.decisions_removed += withdrawn.items;
+  counts.copies_hidden += withdrawn.copies;
 
   // An inflater parked for a member of this archive has nothing left to serve.
   archiveContinuations.dropArchive(record.archive_id);
@@ -189,10 +192,6 @@ export async function runArchiveRemoval(options: ArchiveRemovalOptions): Promise
   ).length;
   counts.media_bindings_removed += options.media?.forgetArchive(accountScope) ?? 0;
 
-  // Hidden everywhere, and out of every later pass's reach.
-  const withdrawn = lane.ledger.withdrawAccountScope(provider, accountScope);
-  counts.decisions_removed += withdrawn.items;
-  counts.copies_hidden += withdrawn.copies;
   counts.questions_removed += deleteJudgeQuestions(lane, provider, accountScope);
   // 3: answers that read these items.
   counts.answers_removed += deleteWaitingAnswers(options, { provider, accountScope, corpusIds });
