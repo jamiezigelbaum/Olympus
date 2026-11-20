@@ -1,69 +1,132 @@
+import { createHash } from 'node:crypto';
+import { stat } from 'node:fs/promises';
 import { heldCountFileIdentity, heldItemCountQuery, TIER_LEDGER_ID_SQL, type HeldItemCorpus, type TierLedger } from '../classification/tier-ledger.ts';
-import type { EngineStatusRead } from '../engine-split/snapshot.ts';
+import { accountFromGoogleHandle } from '../google-connectors/classification.ts';
+import type { EngineStatusRead, HeldCountScope, HeldItemStatus } from '../engine-split/snapshot.ts';
 import { startPacedStatusRecount } from './status-recount.ts';
 
-export interface HeldCountLedger {
-  ledgerId: string;
-  file: string;
-  corpora: Array<HeldItemCorpus & { mount: string | null }>;
-}
-
-export interface HeldCountScope {
-  /** Revision of the account selection and placement records. */
-  selection: string;
-  ledgers: HeldCountLedger[];
-}
-
-export interface HeldItemStatus {
-  count: number;
-  observed_at: string;
-  writer_pid: number;
-  scope: HeldCountScope;
-}
+type LedgerOwner = Pick<TierLedger, 'dbPath' | 'statusMount' | 'onClose' | 'visibilityChangesSince'>;
+type Corpus = HeldItemCorpus & {
+  file: string | null;
+  path?: string;
+  generation: string | null;
+  /** The selection shared by both roles, when the writer resolves a retained item scope. */
+  selection?: string;
+  current: () => boolean;
+  mounted: () => boolean;
+};
 
 export interface HeldCountPlan {
   scope: HeldCountScope;
-  paths: string[];
+  jobs: Array<{ path: string; file: string; ledgerId: string; sql: string; params: string[] }>;
+  ledgers: LedgerOwner[];
+  files: ReadonlyMap<string, string | null>;
+  cursors(): string;
+  mountsCurrent(): boolean;
+  current(): boolean;
+}
+
+const digest = (data: unknown) => createHash('sha256').update(JSON.stringify(data)).digest('hex');
+
+export function heldGoogleAccount(
+  handle: { handle: string; accountRole?: string } | undefined,
+  retainedScope?: (handle: { handle: string; accountRole?: string }) => string,
+): string | undefined {
+  if (!handle) return undefined;
+  return retainedScope?.(handle) ?? (handle.accountRole?.trim() || accountFromGoogleHandle(handle.handle));
+}
+
+export function heldSourceMountsComplete<Lane extends { id: string; enabled: boolean; mountBlocked?: boolean }>(
+  lanes: readonly Lane[],
+  mounted: ReadonlySet<string>,
+  openable: (sourceId: string) => boolean,
+  hasInventory: (lane: Lane) => boolean,
+): boolean {
+  // Repairing the registry does not re-enable a lane disabled at boot.
+  return !lanes.some(lane => openable(lane.id)
+    && (lane.mountBlocked || (lane.enabled && !mounted.has(lane.id) && hasInventory(lane))));
+}
+
+/** Check the actual mounted paths on the front's existing asynchronous mount tick. */
+export async function heldCountFilesCurrent(files: HeldCountPlan['files']): Promise<boolean> {
+  const matched = await Promise.all([...files].map(async ([path, expected]) => {
+    try {
+      const file = await stat(path, { bigint: true });
+      return file.isFile() && `${file.dev}:${file.ino}:${file.birthtimeNs}` === expected;
+    } catch (error) {
+      return expected === null && (error as NodeJS.ErrnoException).code === 'ENOENT';
+    }
+  }));
+  return matched.every(Boolean);
 }
 
 export function heldCountPlan(
-  lanes: readonly { ledger: Pick<TierLedger, 'dbPath' | 'statusMount'>; corpusIds: ReadonlySet<string> }[],
-  corpus: (id: string) => HeldCountLedger['corpora'][number] | undefined,
+  lanes: readonly { ledger: LedgerOwner; corpusIds: ReadonlySet<string> }[],
+  corpus: (id: string) => Corpus | undefined,
   selection: string,
+  emptyInstall = false,
 ): HeldCountPlan | undefined {
-  const groups = new Map<string, { path: string; scope: HeldCountLedger; corpora: Set<string> }>();
+  if (!lanes.length && !emptyInstall) return undefined;
+  const groups = new Map<string, {
+    ledger: LedgerOwner; ledgerId: string; mounts: Set<string>; corpora: Map<string, Corpus>;
+  }>();
+  const checks: Array<() => boolean> = [];
+  const files = new Map<string, string | null>();
+  const mountsCurrent: Array<() => boolean> = [];
   for (const { ledger, corpusIds } of lanes) {
     const mount = ledger.statusMount;
-    if (!mount || heldCountFileIdentity(ledger.dbPath) !== mount.file) return undefined;
+    if (!mount || heldCountFileIdentity(ledger.dbPath) !== mount.file || !corpusIds.size) return undefined;
+    files.set(ledger.dbPath, mount.file);
+    mountsCurrent.push(() => ledger.statusMount?.generation === mount.generation);
+    checks.push(() => heldCountFileIdentity(ledger.dbPath) === mount.file);
     let group = groups.get(mount.file);
     if (!group) {
-      group = { path: ledger.dbPath, scope: { ...mount, corpora: [] }, corpora: new Set() };
+      group = { ledger, ledgerId: mount.ledgerId, mounts: new Set(), corpora: new Map() };
       groups.set(mount.file, group);
     }
-    if (group.scope.ledgerId !== mount.ledgerId) return undefined;
+    if (group.ledgerId !== mount.ledgerId) return undefined;
+    group.mounts.add(mount.generation);
     for (const id of corpusIds) {
       if (group.corpora.has(id)) continue;
       const selected = corpus(id);
       if (!selected) return undefined;
-      group.corpora.add(id);
-      group.scope.corpora.push(selected);
+      group.corpora.set(id, selected);
+      if (selected.path) files.set(selected.path, selected.file);
+      checks.push(selected.current);
+      mountsCurrent.push(selected.mounted);
     }
   }
-  const ordered = [...groups.values()].sort((a, b) => a.scope.file.localeCompare(b.scope.file));
-  for (const { scope } of ordered) scope.corpora.sort((a, b) => a.corpusId.localeCompare(b.corpusId));
-  return { scope: { selection, ledgers: ordered.map(group => group.scope) }, paths: ordered.map(group => group.path) };
+  const ordered = [...groups].sort(([a], [b]) => a.localeCompare(b)).map(([file, group]) => ({
+    ...group, file, corpora: [...group.corpora.values()].sort((a, b) => a.corpusId.localeCompare(b.corpusId)),
+  }));
+  const view = digest([selection, ordered.map(({ file, ledgerId, corpora }) => [
+    file, ledgerId, corpora.map(c => [c.corpusId, c.file, c.selection ?? c.accountScope]),
+  ])]);
+  const generation = digest([view, ordered.map(({ mounts, corpora }) => [
+    [...mounts].sort(), corpora.map(c => [c.generation, c.accountScope]),
+  ])]);
+  return {
+    scope: { view, generation },
+    jobs: ordered.map(({ ledger, file, ledgerId, corpora }) => ({
+      path: ledger.dbPath, file, ledgerId, ...heldItemCountQuery(corpora),
+    })),
+    ledgers: [...new Set(lanes.map(lane => lane.ledger))],
+    files,
+    cursors: () => JSON.stringify(ordered.map(({ ledger }) => ledger.visibilityChangesSince().cursor)),
+    mountsCurrent: () => mountsCurrent.every(check => check()),
+    current: () => mountsCurrent.every(check => check()) && checks.every(check => check()),
+  };
 }
 
-/** Both privacy callers consume the same completed observation. Scope and paths stay inside the engine. */
-export function frontHeldItems(read: EngineStatusRead | undefined, expected: () => HeldCountPlan | undefined): {
-  pendingCount: number;
-  pendingCountObservedAt: string;
-} | undefined {
+/** The front's request reads only the observation already accepted for its mounted view. */
+export function frontHeldItems(
+  read: EngineStatusRead | undefined,
+  expected: HeldCountScope | undefined,
+): { pendingCount: number; pendingCountObservedAt: string } | undefined {
   const held = read?.snapshot.held_items;
-  if (!held || read?.stale || !Number.isSafeInteger(held.count) || held.count < 0
-    || !Number.isFinite(Date.parse(held.observed_at))) return undefined;
-  const plan = expected();
-  if (!plan || JSON.stringify(plan.scope) !== JSON.stringify(held.scope)) return undefined;
+  if (!held || read?.stale || !expected || held.scope?.view !== expected.view
+    || held.scope.generation !== expected.generation || !Number.isSafeInteger(held.count)
+    || held.count < 0 || !Number.isFinite(Date.parse(held.observed_at))) return undefined;
   return { pendingCount: held.count, pendingCountObservedAt: held.observed_at };
 }
 
@@ -72,40 +135,84 @@ export function startHeldItemStatus(options: {
   holds: () => boolean;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
-  measure?: (plan: HeldCountPlan) => Promise<number>;
+  measure?: (plan: HeldCountPlan, signal: AbortSignal) => Promise<number>;
   log?: (line: string) => void;
 }) {
   const now = options.now ?? Date.now;
   const measure = options.measure ?? measureHeldItems;
+  let stopped = false;
+  let active: AbortController | undefined;
+  let mounted: HeldCountPlan | undefined;
+  let releases: Array<() => void> = [];
+  let lastCursor: string | undefined;
+  let checkedCursor: string | undefined;
   let held: HeldItemStatus | undefined;
+  const clear = () => {
+    active?.abort();
+    mounted = held = undefined;
+    lastCursor = checkedCursor = undefined;
+    for (const release of releases.splice(0)) release();
+  };
+  const wake = () => pace.soon();
+  const invalidate = () => { clear(); wake(); };
   const pace = startPacedStatusRecount({
     holds: options.holds,
     now,
     ...(options.sleep ? { sleep: options.sleep } : {}),
     ...(options.log ? { log: options.log } : {}),
     recount: async () => {
-      const observed_at = new Date(now()).toISOString();
       const plan = options.plan();
-      if (JSON.stringify(held?.scope) !== JSON.stringify(plan?.scope)) held = undefined;
-      if (!plan) return;
+      if (mounted?.scope.generation !== plan?.scope.generation) clear();
+      if (!plan || !plan.current()) { clear(); return; }
+      if (!mounted) {
+        mounted = plan;
+        releases = plan.ledgers.map(ledger => ledger.onClose(invalidate));
+      }
+      const controller = new AbortController();
+      active = controller;
       try {
-        const count = await measure(plan);
-        if (JSON.stringify(plan) !== JSON.stringify(options.plan())) {
-          held = undefined;
-          return;
-        }
+        const cursor = plan.cursors();
+        checkedCursor = cursor;
+        if (held && lastCursor === cursor) return;
+        const observed_at = new Date(now()).toISOString();
+        const count = await measure(plan, controller.signal);
+        if (stopped || controller.signal.aborted) return;
+        const current = plan.current() ? options.plan() : undefined;
+        if (stopped || controller.signal.aborted) return;
+        if (plan.scope.generation !== current?.scope.generation) { clear(); return; }
+        lastCursor = cursor;
         held = { count, observed_at, writer_pid: process.pid, scope: plan.scope };
       } catch (error) {
-        held = undefined;
+        if (controller.signal.aborted) return;
+        clear();
         throw error;
+      } finally {
+        if (active === controller) active = undefined;
       }
     },
   });
-  return { observation: () => held, soon: pace.soon, stop: pace.stop };
+  return {
+    observation: () => held,
+    /** Check the visibility feed at the background's existing status heartbeat. */
+    check: () => {
+      if (!mounted) return;
+      try {
+        if (!mounted.current()) { invalidate(); return; }
+        const cursor = mounted.cursors();
+        if (checkedCursor !== cursor) { checkedCursor = cursor; wake(); }
+      } catch {
+        // An unreadable feed cannot validate an observation.
+        invalidate();
+      }
+    },
+    soon: wake,
+    invalidate,
+    stop: () => { stopped = true; clear(); pace.stop(); },
+  };
 }
 
-// A background-owned thread reads each ledger once. It cannot delay status
-// collection or the background command loop, and a slow SQLite read finishes.
+// A background-owned thread reads each ledger once. A slow SQLite read
+// finishes unless the owner closes the ledger or shuts down.
 const HELD_COUNT_WORKER = `
 import { Database } from 'bun:sqlite';
 import { statSync } from 'node:fs';
@@ -133,23 +240,28 @@ self.onmessage = ({ data }) => {
     }
     postMessage(count);
   } catch {
-    // The main process publishes absence for any failed ledger, never a partial sum.
+    // The owner publishes absence for any failed ledger.
     postMessage(null);
   }
 };
 `;
 
-export async function measureHeldItems(plan: HeldCountPlan): Promise<number> {
-  if (plan.scope.ledgers.length === 0) return 0;
-  const jobs = plan.scope.ledgers.map(({ ledgerId, file, corpora }, index) => ({
-    path: plan.paths[index], ledgerId, file, ...heldItemCountQuery(corpora),
-  }));
+export async function measureHeldItems(plan: HeldCountPlan, signal?: AbortSignal, WorkerType = Worker): Promise<number> {
+  signal?.throwIfAborted();
+  if (plan.jobs.length === 0) return 0;
   const url = URL.createObjectURL(new Blob([HELD_COUNT_WORKER], { type: 'text/javascript' }));
   let worker: Worker | undefined;
+  let cancel: (() => void) | undefined;
   try {
     return await new Promise<number>((resolve, reject) => {
-      worker = new Worker(url);
+      worker = new WorkerType(url);
       const failed = () => reject(new Error('Held-item count unavailable'));
+      cancel = () => {
+        reject(signal?.reason);
+        worker?.terminate();
+        worker = undefined;
+      };
+      signal?.addEventListener('abort', cancel, { once: true });
       worker.addEventListener('close', failed, { once: true });
       worker.onmessageerror = failed;
       worker.onerror = (event) => { event.preventDefault(); failed(); };
@@ -157,9 +269,10 @@ export async function measureHeldItems(plan: HeldCountPlan): Promise<number> {
         if (Number.isSafeInteger(data) && data >= 0) resolve(data as number);
         else failed();
       };
-      worker.postMessage(jobs);
+      worker.postMessage(plan.jobs);
     });
   } finally {
+    if (cancel) signal?.removeEventListener('abort', cancel);
     worker?.terminate();
     URL.revokeObjectURL(url);
   }

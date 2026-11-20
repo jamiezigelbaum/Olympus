@@ -80,6 +80,8 @@ import {
   DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY,
   DASHBOARD_CHATGPT_PRIVACY_JUDGE_OFF_COPY,
   DASHBOARD_CHATGPT_PRIVACY_JUDGE_STOPPED_COPY,
+  DASHBOARD_CHATGPT_PRIVACY_COUNT_COPY,
+  privacyHeldItemsText,
   DASHBOARD_CHATGPT_PRIVACY_NO_JUDGE_COPY,
   DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY,
   DASHBOARD_MANY_UNREADABLE_LABEL,
@@ -422,18 +424,12 @@ export function buildChatGptDashboardViewModel(
   // Items waiting for the private model are machine work, In progress on
   // Home. They need the owner only when the check has stopped: then the
   // sentence says exactly why, and the button opens the model to look at.
-  else if (options.privacy?.judgeStopped && (options.privacy.pendingCount === undefined
-    || options.privacy.pendingCount > 0 || (options.privacy.judgeStoppedAt !== undefined
-      && Date.parse(options.privacy.judgeStoppedAt) > Date.parse(options.privacy.pendingCountObservedAt ?? '')))) {
-    const pending = options.privacy.pendingCount;
-    const copy = DASHBOARD_CHATGPT_PRIVACY_JUDGE_STOPPED_COPY;
-    needsYou.push({
+  else if (options.privacy) {
+    const { text, needsModel } = privacyHeldItemsText(options.privacy, DASHBOARD_CHATGPT_PRIVACY_COUNT_COPY, now.getTime());
+    if (needsModel) needsYou.push({
       id: 'privacy:judge_stopped',
-      sentence: pending !== undefined && pending > 0
-        ? copy.sentence.replace('{n}', Math.floor(pending).toLocaleString('en-US'))
-          .replace('{reason}', copy.reason[options.privacy.judgeStopped])
-        : DASHBOARD_ARCHIVE_COPY.counting,
-      fix: { label: copy.label, tool: DASHBOARD_TOOL_NAME, args: {}, href: openOnComputer(undefined, 'models') },
+      sentence: text,
+      fix: { label: DASHBOARD_CHATGPT_PRIVACY_JUDGE_STOPPED_COPY.label, tool: DASHBOARD_TOOL_NAME, args: {}, href: openOnComputer(undefined, 'models') },
     });
   }
 
@@ -470,6 +466,8 @@ export function buildChatGptDashboardViewModel(
             ...(options.privacy.pendingCount === undefined ? {} : { pendingCount: Math.max(0, Math.floor(options.privacy.pendingCount)) }),
             ...(options.privacy.pendingCountObservedAt ? { pendingCountObservedAt: options.privacy.pendingCountObservedAt } : {}),
             ruleCount: Math.max(0, Math.floor(options.privacy.ruleCount)),
+            ...(options.privacy.judgeStopped ? { judgeStopped: options.privacy.judgeStopped } : {}),
+            ...(options.privacy.judgeStoppedAt ? { judgeStoppedAt: options.privacy.judgeStoppedAt } : {}),
             ...(typeof options.privacy.judgePerMinute === 'number' && Number.isFinite(options.privacy.judgePerMinute) && options.privacy.judgePerMinute > 0
               ? { judgePerMinute: options.privacy.judgePerMinute } : {}),
           },

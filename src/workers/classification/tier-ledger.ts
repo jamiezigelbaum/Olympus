@@ -25,6 +25,7 @@ import { Database } from 'bun:sqlite';
 import { randomUUID } from 'node:crypto';
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { engineRoleFromEnv } from '../../core/engine-split.ts';
 import { OperationError } from '../../core/operation-error.ts';
 import type { SourceItemIdentity, SourceTrustDomain, SourceTrustTier } from '../../core/source-index/types.ts';
 import { readSqliteSchemaVersion, runSqliteMigrations, sqliteSchemaUsable, type SqliteMigration } from '../../core/sqlite-migrations.ts';
@@ -848,8 +849,13 @@ export const TIER_LEDGER_ID_SQL = "SELECT value FROM tier_ledger_meta WHERE key 
 
 /** The installed file generation, unchanged by ordinary SQLite writes and checkpoints. */
 export function heldCountFileIdentity(path: string): string | undefined {
-  const file = statSync(path, { bigint: true, throwIfNoEntry: false });
-  return file?.isFile() ? `${file.dev}:${file.ino}:${file.birthtimeNs}` : undefined;
+  try {
+    const file = statSync(path, { bigint: true, throwIfNoEntry: false });
+    return file?.isFile() ? `${file.dev}:${file.ino}:${file.birthtimeNs}` : undefined;
+  } catch {
+    // Status cannot establish which file is mounted.
+    return undefined;
+  }
 }
 
 export interface HeldItemCorpus {
@@ -888,7 +894,8 @@ export function heldItemCountQuery(corpora: readonly HeldItemCorpus[]): { sql: s
 export class TierLedger {
   readonly dbPath: string;
   /** Identity of the handle opened at mount, for status scope checks without SQLite. */
-  readonly statusMount?: { ledgerId: string; file: string };
+  private heldMount: { ledgerId: string; file: string; generation: string } | undefined;
+  get statusMount() { return this.heldMount; }
   private readonly db: Database;
   private readonly readOnly: boolean;
   private readonly now: () => Date;
@@ -912,7 +919,7 @@ export class TierLedger {
       restrictLedgerFiles(this.dbPath);
     }
     let db: Database | undefined;
-    const openingFile = onDisk ? heldCountFileIdentity(this.dbPath) : undefined;
+    const openingFile = onDisk && engineRoleFromEnv() !== 'single' ? heldCountFileIdentity(this.dbPath) : undefined;
     try {
       db = new Database(this.dbPath, this.readOnly ? { readonly: true, create: false }
         : options.expectedLedgerId === undefined ? { create: true } : { readwrite: true, create: false });
@@ -922,10 +929,7 @@ export class TierLedger {
         if (!sqliteSchemaUsable(db, TIER_LEDGER_SQLITE_STORE_ID, TIER_LEDGER_SCHEMA_VERSION)) {
           throw new TierLedgerSchemaError(readSqliteSchemaVersion(db, TIER_LEDGER_SQLITE_STORE_ID));
         }
-        if (openingFile !== undefined && openingFile === heldCountFileIdentity(this.dbPath)) {
-          const row = db.query(TIER_LEDGER_ID_SQL).get() as { value: string } | null;
-          if (row?.value) this.statusMount = { ledgerId: row.value, file: openingFile };
-        }
+        this.heldMount = this.readStatusMount(db, openingFile);
         this.db = db;
         return;
       }
@@ -952,16 +956,29 @@ export class TierLedger {
       db.exec(`CREATE INDEX IF NOT EXISTS tier_items_override_rows
         ON tier_items (provider, account_scope, conversation_key, provider_item_id) WHERE decided_by = 'override'`);
       if (onDisk) restrictLedgerFiles(this.dbPath);
-      if (openingFile !== undefined && openingFile === heldCountFileIdentity(this.dbPath)) {
-        const row = db.query(TIER_LEDGER_ID_SQL).get() as { value: string } | null;
-        if (row?.value) this.statusMount = { ledgerId: row.value, file: openingFile };
-      }
+      this.heldMount = this.readStatusMount(db, openingFile);
     } catch (error) {
       if (db) closeSqliteStore(db, this.readOnly || options.expectedLedgerId !== undefined
         ? { checkpoint: false, readOnly: this.readOnly } : undefined);
       throw error;
     }
     this.db = db;
+  }
+
+  private readStatusMount(db: Database, file: string | undefined): TierLedger['statusMount'] {
+    if (file === undefined) return undefined;
+    try {
+      const row = db.query(TIER_LEDGER_ID_SQL).get() as { value?: string } | null;
+      if (row?.value && file === heldCountFileIdentity(this.dbPath)) {
+        // Device and inode fence the pathname across the open; birth time is
+        // optional (zero on some filesystems). The opened handle's nonce fences
+        // reopens of the same inode, including reopens after an offline restore.
+        return { ledgerId: row.value, file, generation: randomUUID() };
+      }
+    } catch {
+      // A status metadata failure cannot make the ledger unusable.
+    }
+    return undefined;
   }
 
   /** Preflight existing files read-only, before chmod, WAL setup or a writable open. */
@@ -983,14 +1000,15 @@ export class TierLedger {
   }
 
   close(options?: SqliteCloseOptions): void {
+    this.heldMount = undefined;
     try {
-      closeSqliteStore(this.db, this.readOnly ? { checkpoint: false, readOnly: true } : options);
-    } finally {
       const listeners = this.closeListeners ?? [];
       this.closeListeners = undefined;
       for (const listener of listeners) {
         try { listener(); } catch { /* a listener's failure never fails the close */ }
       }
+      closeSqliteStore(this.db, this.readOnly ? { checkpoint: false, readOnly: true } : options);
+    } finally {
       if (!this.readOnly && this.dbPath !== ':memory:') restrictLedgerFiles(this.dbPath);
     }
   }
@@ -2845,11 +2863,13 @@ export class TierLedger {
   }
 
   /** Hears this ledger close, once (for a reader of its file elsewhere to let go). */
-  onClose(listener: () => void): void {
-    (this.closeListeners ??= []).push(listener);
+  onClose(listener: () => void): () => void {
+    const listeners = this.closeListeners ??= new Set();
+    listeners.add(listener);
+    return () => { listeners.delete(listener); };
   }
 
-  private closeListeners: Array<() => void> | undefined;
+  private closeListeners: Set<() => void> | undefined;
 
   /** Runs a read generator on this connection, in one transaction. */
   readSteps<T>(steps: Generator<LedgerRead, T, unknown>): T {

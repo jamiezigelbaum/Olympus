@@ -18,7 +18,7 @@
  * folder or label), and leave only as the arguments of the privacy save. They
  * are never written to widget state, model context, the page URL or logs.
  */
-import type { DASHBOARD_CHATGPT_PRIVACY_COPY } from '../vocabulary.ts';
+import type { DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_COUNT_COPY } from '../vocabulary.ts';
 import type { ChatGptPicker } from './picker.ts';
 import { PRIVACY_GET_TOOL_NAME, PRIVACY_META_KEY, PRIVACY_SET_TOOL_NAME, PRIVACY_QUESTIONS_TOOL_NAME, PRIVACY_CHECK_TOOL_NAME } from '../../chatgpt/dashboard-contract.ts';
 import type { privacyLogic } from '../shared-privacy-logic.ts';
@@ -55,6 +55,7 @@ export interface ChatGptPrivacyConfig {
   mailSourceId: string;
   folderSources: Record<string, string>;
   copy: typeof DASHBOARD_CHATGPT_PRIVACY_COPY;
+  heldCopy: typeof DASHBOARD_CHATGPT_PRIVACY_COUNT_COPY;
 }
 
 // Loose shapes: the program validates what it reads instead of trusting a type.
@@ -75,6 +76,8 @@ export interface ChatGptPrivacyKit {
   fullscreen(): void;
   /** The dashboard view model, to know which sources are connected. */
   data(): Any;
+  heldWords(info: Any): string;
+  judgeAction(info: Any): HTMLElement | null;
   /** The folder picker, for Add a folder (pick mode). */
   picker: ChatGptPicker | null;
   /** Remember how many rules are saved (a count only), for the dashboard's Privacy row. */
@@ -182,6 +185,13 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     s.description = typeof data.description === 'string' ? data.description : '';
     s.savedDescription = s.description;
     s.revision = typeof data.revision === 'string' ? data.revision : '';
+    s.held = {
+      pendingCount: data.pendingCount,
+      pendingCountObservedAt: data.pendingCountObservedAt,
+      judgeStopped: data.judgeStopped,
+      judgeStoppedAt: data.judgeStoppedAt,
+      judgeModelHref: data.judgeModelHref,
+    };
     s.answerChoice = data.privateAnswerChoice && data.privateAnswerChoice.pending === true && Array.isArray(data.privateAnswerChoice.options) ? data.privateAnswerChoice
       : data.privateAnswerMode && Array.isArray(data.privateAnswerMode.options) ? data.privateAnswerMode : null;
     if (s.answerChoice && typeof s.answerChoice.id === 'string') s.answerMode = s.answerChoice.id;
@@ -822,6 +832,11 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     return section;
   }
 
+  function heldLine(): HTMLElement | null {
+    return s.held ? add(el('div', 'fsection'),
+      el('p', 'muted', kit.heldWords(s.held)), kit.judgeAction(s.held)) : null;
+  }
+
   function mainView(page: HTMLElement): void {
     const title = el('h1', '', W.title);
     title.setAttribute('tabindex', '-1');
@@ -844,6 +859,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       }
       return;
     }
+    add(page, heldLine());
     if (s.answerChoice && !s.answerChoice.pending) {
       add(page, add(el('section', 'fsection'), el('h2', '', 'Private-answer mode'), el('p', '', s.answerChoice.label || 'Custom Private-answer mode'), kit.button('Change', 'privacy:answer:change', () => { s.screen = 'answers'; kit.render('privacy:answer:' + s.answerMode); }, 'plain')));
     }
@@ -1233,7 +1249,10 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
         }, 'plain')));
       add(page, confirm);
     }
-    if (s.screen === 'answers') answersView(page);
+    if (s.screen === 'answers') {
+      answersView(page);
+      if (s.answerChoice?.pending) add(page, heldLine());
+    }
     else if (s.screen !== 'main') sheetView(page);
     else mainView(page);
     return page;

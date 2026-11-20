@@ -1,3 +1,4 @@
+import { openPageUrl } from '../../core/open-targets.ts';
 import { limitStopReference, registeredLimits } from '../../core/limit-stops.ts';
 import { appClientCopy, type McpAppClient } from '../../../connect-relay/shared/mcp-app-client.ts';
 import { sourceSupportDetails } from '../dashboard/source-failure.ts';
@@ -103,6 +104,8 @@ import {
   DASHBOARD_CHATGPT_VOCABULARY,
   DASHBOARD_FAILURE_REF,
   DASHBOARD_UNREADABLE_REASON_CODES,
+  DASHBOARD_CHATGPT_PRIVACY_COUNT_COPY,
+  privacyHeldItemsText,
   dashboardManualSyncBusyLine,
   dashboardManualSyncPendingLine,
   dashboardManualSyncTooSoonLine,
@@ -324,6 +327,7 @@ export function copyDashboardViewModel(view: DashboardViewModelV1): DashboardVie
     out.privacy = {
       configured: view.privacy.configured === true,
       ...copyPrivacyCount(view.privacy),
+      ...copyJudgeStop(view.privacy),
       ruleCount: whole(view.privacy.ruleCount),
       ...(typeof view.privacy.judgePerMinute === 'number' && Number.isFinite(view.privacy.judgePerMinute) && view.privacy.judgePerMinute > 0
         ? { judgePerMinute: Math.round(view.privacy.judgePerMinute * 10) / 10 } : {}),
@@ -1303,11 +1307,16 @@ export function privacyToolResult(
         : (summary.configured ? 'The owner has set what is private for them.' : 'The owner has not said yet what is private for them.'),
   ];
   if (summary.ruleCount > 0) parts.push(`${summary.ruleCount} folder, label, sender or chat rule${summary.ruleCount === 1 ? '' : 's'} keep items Private; they are shown to the owner in the Olympus panel.`);
-  if (summary.pendingCount !== undefined && summary.pendingCount > 0) parts.push(`${summary.pendingCount} item${summary.pendingCount === 1 ? ' waits' : 's wait'} for the privacy check on the computer.`);
+  parts.push(privacyHeldItemsText(copy, DASHBOARD_CHATGPT_PRIVACY_COUNT_COPY, Date.now(), 'tool').text + '.');
+  const panel = {
+    ...copy,
+    ...(copy.judgeStopped ? { judgeModelHref: openPageUrl({ kind: 'fix', section: 'models' }) } : {}),
+    ...(confirmation ? { confirmation } : {}),
+  };
   return {
     content: [{ type: 'text', text: parts.join(' ') }],
     structuredContent: summary as unknown as Record<string, unknown>,
-    _meta: { [PRIVACY_META_KEY]: confirmation ? { ...copy, confirmation } : copy },
+    _meta: { [PRIVACY_META_KEY]: panel },
   };
 }
 
@@ -1319,6 +1328,12 @@ function copyPrivacyCount(value: Pick<PrivacySettings, 'pendingCount' | 'pending
   if (!finite(value.pendingCount) || value.pendingCount < 0) return {};
   const observed = iso(value.pendingCountObservedAt);
   return { pendingCount: whole(value.pendingCount), ...(observed ? { pendingCountObservedAt: observed } : {}) };
+}
+
+function copyJudgeStop(value: Pick<PrivacySettings, 'judgeStopped' | 'judgeStoppedAt'>) {
+  if (!value.judgeStopped || !Object.hasOwn(DASHBOARD_CHATGPT_PRIVACY_COUNT_COPY.stopped.reason, value.judgeStopped)) return {};
+  const at = iso(value.judgeStoppedAt);
+  return { judgeStopped: value.judgeStopped, ...(at ? { judgeStoppedAt: at } : {}) };
 }
 
 function copyPrivacySettings(settings: PrivacySettings): PrivacySettings {
@@ -1347,6 +1362,7 @@ function copyPrivacySettings(settings: PrivacySettings): PrivacySettings {
       privateAnswerMode: { id: settings.privateAnswerMode.id, label: settings.privateAnswerMode.id === 'custom' ? 'Custom Private-answer mode' : PRIVACY_PRESET_LABELS[settings.privateAnswerMode.id], options: privateAnswerOptions(totalmem()) },
     } : {}),
     ...copyPrivacyCount(settings),
+    ...copyJudgeStop(settings),
     ...(typeof settings.revision === 'string' && settings.revision ? { revision: opaque(settings.revision).slice(0, 64) } : {}),
   };
 }

@@ -14,7 +14,7 @@ export function seedHeldLedger(path: string, corpora: readonly string[], account
             generation, decided_by, reasons_json, engine_version, map_revision, state, metadata_pending, decided_at)
           SELECT 'local_files', ?2, value, 'file', 'private', 'private', 1, 'fixture', '[]', 'fixture', 'fixture',
             'pending', 1, '2026-11-18T00:00:00Z' FROM items
-        `).run(account, items);
+        `).run(items, account);
         for (const corpus of corpora) db.query(`
           INSERT INTO tier_copies (provider, account_scope, provider_item_id, corpus_id,
             trust_domain, layers, copy_state, generation, updated_at)
