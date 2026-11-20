@@ -36050,21 +36050,21 @@ function serializeDiagnosticWrites(onError) {
     tail = tail.then(write).catch(onError);
   };
 }
-async function startCpuSampleLog(env = process.env) {
+async function startCpuSampleLog(env = process.env, loadProfiler = () => import("bun:jsc")) {
   const configured = env[CPU_SAMPLE_LOG_ENV]?.trim();
   if (configured === "off")
     return;
   const path = configured || undefined;
   const role = env.OLYMPUS_WORKER_ENGINE_ROLE?.trim() || "single";
-  const jsc = await import("bun:jsc");
-  if (!jsc.startSamplingProfiler || !jsc.samplingProfilerStackTraces)
-    return;
+  const jsc = await loadProfiler();
+  const sampling = Boolean(path && jsc.startSamplingProfiler && jsc.samplingProfilerStackTraces);
   const { appendFileSync } = await import("node:fs");
   const queue = role === "front" && path ? serializeDiagnosticWrites(reportWriteFailure) : undefined;
   function reportWriteFailure(error) {
     console.error(`[olympus:control-path] cpu sample log failed: ${error instanceof Error ? error.name : "error"}`);
   }
-  jsc.startSamplingProfiler();
+  if (sampling)
+    jsc.startSamplingProfiler();
   let stalls = [];
   let lastTick = performance.now();
   const lag = setInterval(() => {
@@ -36085,7 +36085,7 @@ async function startCpuSampleLog(env = process.env) {
       const spinUntil = performance.now() + 3;
       while (performance.now() < spinUntil) {}
       const anchorMs = performance.now();
-      const sampled = jsc.samplingProfilerStackTraces();
+      const sampled = sampling ? jsc.samplingProfilerStackTraces() : { traces: [], sources: [] };
       const traces = sampled.traces ?? [];
       const newest = traces.reduce((max, trace) => Math.max(max, trace.timestamp ?? -Infinity), -Infinity);
       const offsetS = Number.isFinite(newest) ? newest - anchorMs / 1000 : 0;
@@ -36116,7 +36116,7 @@ async function startCpuSampleLog(env = process.env) {
   };
   const timer = setInterval(flush, CPU_SAMPLE_FLUSH_MS);
   timer.unref?.();
-  if (path)
+  if (sampling)
     console.error(`[olympus:control-path] sampling CPU to ${CPU_SAMPLE_LOG_ENV}`);
   return () => {
     clearInterval(timer);

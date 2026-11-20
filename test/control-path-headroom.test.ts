@@ -178,3 +178,29 @@ describe('a measuring run lists every call site that runs a statement on the loo
     db.close();
   });
 });
+
+// The profiler's signals cut SQLite's busy-wait sleeps short while SQLite counts
+// them in full: with it on, a 10 s busy_timeout is spent in about 150 ms.
+describe('the sampling profiler is a diagnostic, never on by default', () => {
+  const fake = () => {
+    const calls = { started: 0 };
+    return { calls, load: async () => ({ startSamplingProfiler: () => { calls.started++; }, samplingProfilerStackTraces: () => ({ traces: [], sources: [] }) }) };
+  };
+  test('an engine with no sample file never starts it', async () => {
+    const { startCpuSampleLog } = await import('../src/workers/control-path-headroom.ts');
+    const { calls, load } = fake();
+    const stop = await startCpuSampleLog({}, load);
+    stop?.();
+    expect(stop).toBeDefined();
+    expect(calls.started).toBe(0);
+  });
+  test('naming a sample file starts it, and off stops everything', async () => {
+    const { startCpuSampleLog } = await import('../src/workers/control-path-headroom.ts');
+    const named = fake();
+    (await startCpuSampleLog({ OLYMPUS_CPU_SAMPLE_LOG: '/dev/null' }, named.load))?.();
+    expect(named.calls.started).toBe(1);
+    const off = fake();
+    expect(await startCpuSampleLog({ OLYMPUS_CPU_SAMPLE_LOG: 'off' }, off.load)).toBeUndefined();
+    expect(off.calls.started).toBe(0);
+  });
+});
