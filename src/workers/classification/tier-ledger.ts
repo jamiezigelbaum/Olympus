@@ -755,6 +755,8 @@ export interface TierLedgerOptions {
   dbPath: string;
   /** Inspection only: no migrations, repairs, permissions or checkpoint on close. */
   readOnly?: boolean;
+  /** An offline put-back writes at the schema the previous engine knows. */
+  restoreSchemaVersion?: number;
   /** Permit a query-only handle if SQLite cannot read a clean WAL-less file. */
   allowWalLessRead?: boolean;
   /** Match the binding on the writer handle before preparing its schema. */
@@ -910,7 +912,15 @@ export class TierLedger {
       // truncates a WAL that grew while reads held it (6 GB, 16 Nov) once it resets.
       db.exec('PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA journal_size_limit = 67108864;' + loopWalAutocheckpointPragma(this.dbPath, 'tier-ledger'));
       applySqliteMmap(db);
-      runSqliteMigrations(db, TIER_LEDGER_SQLITE_STORE_ID, tierLedgerMigrations());
+      const restoredVersion = options.restoreSchemaVersion;
+      if (restoredVersion !== undefined) {
+        const actual = readSqliteSchemaVersion(db, TIER_LEDGER_SQLITE_STORE_ID);
+        if (restoredVersion < 12 || restoredVersion > TIER_LEDGER_SCHEMA_VERSION || (actual !== 0 && actual !== restoredVersion)) {
+          throw new Error('The tier ledger cannot be written at its restored schema.');
+        }
+      }
+      runSqliteMigrations(db, TIER_LEDGER_SQLITE_STORE_ID, tierLedgerMigrations()
+        .filter(migration => restoredVersion === undefined || migration.version <= restoredVersion));
       // The owner's overridden items, for the cleared-override search
       // (listClearedOverrideRows). An index only, with no schema version:
       // an older build opens the file as before and ignores it.

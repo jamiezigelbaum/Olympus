@@ -94,6 +94,7 @@ import { createTieredStoreExtractionSink } from '../../file-extraction/tiered-st
 import { connectorStoreExtractionCandidateReader } from '../../connector-store/extraction-candidate-reader.ts';
 import { tieredExtractionView, type TieredExtractionView } from '../../connector-store/tiered-extraction.ts';
 import { TIER_DOMAIN_ORDER, type TieredStoreSet } from '../../connector-store/tiered-store-set.ts';
+import { tierSetForLedger } from '../../connector-store/tier-set-registry.ts';
 import type {
   ExtractionItemRef,
   ExtractorRegistryConfig,
@@ -193,8 +194,7 @@ export interface FileExtractionRuntimeOptions {
    * listing (TieredStoreSetOptions.contentArrivesLater or
    * contentArrivesLaterFor), keyed by the lane's own corpus. Such a corpus
    * reads candidates, locators and egress tiers across the set, and its sink
-   * lands each routed item's text in the store its content tier decides. Its
-   * existing items take the plain path. A lane with several stores of its own
+   * lands each item's text in the store its content tier decides. A lane with several stores of its own
    * maps each of their corpora to the same set; each lists its own store
    * (tieredExtractionView `home`).
    */
@@ -326,6 +326,13 @@ export function createFileExtractionRuntime(
 
   const warn = options.warn ?? ((message: string) => console.warn(message));
   const storesByCorpusId = new Map(options.connectorStores.map((store) => [store.corpusId, store]));
+  const tierSetForStore = (store: LocalConnectorStore): TieredStoreSet | undefined => {
+    const configured = options.tierSets?.get(store.corpusId);
+    if (configured) return configured;
+    const registered = tierSetForLedger(store.tierLedgerPathInUse());
+    return registered?.legSpec(store.trustDomain)?.legacy && registered.store(store.trustDomain) === store
+      ? registered : undefined;
+  };
   const sourceFactories = options.sourceFactories ?? new Map([
     ...defaultSourceFactories(
       env,
@@ -353,7 +360,7 @@ export function createFileExtractionRuntime(
       if (!store) continue;
       const indexes = refs.flatMap((ref, index) => ref.corpusId === config.corpusId ? [index] : []);
       if (!indexes.length) continue;
-      const set = options.tierSets?.get(config.corpusId);
+      const set = tierSetForStore(store);
       const reader = set ? tieredExtractionView(set, { home: store.trustDomain }) : store;
       const matched = reader.itemsMatchingExtractionRefs(indexes.map(index => refs[index]!), config.resolveCandidateFilters?.());
       const scopes = new Set(config.resolveScopes?.() ?? config.scopes);
@@ -399,7 +406,7 @@ export function createFileExtractionRuntime(
       warn(fileExtractionCorpusDropped(config, 'no_source_factory'));
       continue;
     }
-    const tierSet = options.tierSets?.get(config.corpusId);
+    const tierSet = tierSetForStore(store);
     // The set's own store for the domain: a leg opened on demand has no store in its spec.
     if (tierSet && tierSet.store(store.trustDomain) !== store) {
       throw new Error(`[file-extraction] corpus=${config.corpusId} tier set does not hold its store.`);

@@ -511,28 +511,27 @@ describe('extraction factory store sink', () => {
     // Deliberate: a mismatched family or an expectation that does not match its
     // item is a defect, and turning it into a categorical skip would leave the
     // lane reporting orderly progress while indexing nothing.
-    const failing = {
-      family: 'file',
-      trustDomain: 'secure_local',
-      itemMetadataSnapshot: () => ({ sourceVersion: SEEDED_SOURCE_VERSION }),
-      restoreItemRepresentations: () => {
+    const store = await seededStore();
+    try {
+      store.restoreItemRepresentations = () => {
         throw new Error('Representation restore item family does not match the connector store.');
-      },
-    } as unknown as LocalConnectorStore;
-
-    await expect(sinkFor(failing).accept(requestFor('Body text hitting a real defect.')))
-      .rejects.toThrow('family does not match');
+      };
+      await expect(sinkFor(store).accept(requestFor('Body text hitting a real defect.')))
+        .rejects.toThrow('family does not match');
+    } finally {
+      store.close();
+    }
   });
 
   test('the sink does not embed', async () => {
     const store = await seededStore();
     try {
-      await sinkFor(store).accept(requestFor('Body text that stays un-embedded.'));
-      const counts = store.status().counts;
-      // The chunk assertion keeps this honest: zero embedded chunks proves
-      // nothing if no chunk was written in the first place.
-      expect(counts.chunks).toBe(1);
-      expect(counts.embeddedChunks).toBe(0);
+      const result = await sinkFor(store).accept(requestFor('Body text that stays un-embedded.'));
+      expect(result.accepted).toBe(true);
+      const { identity } = seededItem();
+      expect(store.exportItemCopy(identity)?.chunks).toHaveLength(1);
+      expect(store.tierLedger()?.copies(identity)[0]?.embedHold).toBe(true);
+      expect(store.status().counts.embeddedChunks).toBe(0);
     } finally {
       store.close();
     }

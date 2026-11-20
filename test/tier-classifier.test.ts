@@ -2,7 +2,7 @@
 // docs/design/per-item-four-tier-classification.md, section 2.2).
 //
 // Pins the precedence the owner approved: raises beat lowers; Secrets beat
-// every rule; a per-item override beats Secrets; prior versus force; Public
+// owner rules; per-item tier overrides; prior versus force; Public
 // only on positive evidence; metadata defaults to Personal; content only
 // raises; reasons are content-free.
 
@@ -11,6 +11,7 @@ import type { SourceClassificationSignals } from '../src/core/contracts.ts';
 import {
   SNIFFER_EXCERPT_MAX_CHARS,
   TIER_MAP_REVISION,
+  classifyContentTier,
   classifyItemTiers,
   type OwnerTierRule,
   type TierClassificationOptions,
@@ -158,13 +159,29 @@ describe('Secrets', () => {
 });
 
 describe('per-item owner override', () => {
-  test('a tier override is final, even over Secrets', () => {
+  test('a Private tier override fixes both layers', () => {
     const decision = classify({ title: `key ${AWS_KEY}` }, `aws ${AWS_KEY}`, {
-      override: { kind: 'tier', tier: 'private' },
+      override: { kind: 'tier', tier: 'secure' },
     });
-    expect(decision.metadataTier).toBe('private');
-    expect(decision.contentTier).toBe('private');
+    expect(decision.metadataTier).toBe('secure');
+    expect(decision.contentTier).toBe('secure');
     expect(decision.decidedBy).toBe('override');
+  });
+
+  test.each(['private', 'public'] as const)('Secret findings beat a sticky %s override on a replacement body', (tier) => {
+    const options = { override: { kind: 'tier', tier } } as const;
+    const clean = classify({ title: 'Notes' }, BENIGN, options);
+    expect(clean).toMatchObject({ contentTier: tier, decidedBy: 'override' });
+
+    const text = `aws ${AWS_KEY}`;
+    const listing = classify({ title: 'Notes' }, text, options);
+    const extraction = classifyContentTier({
+      text, metadataTier: clean.metadataTier, metadataForced: clean.metadataForced, metadataFlagged: clean.metadataFlagged,
+    }, options);
+    for (const decision of [listing, extraction]) {
+      expect(decision).toMatchObject({ contentTier: 'secrets', decidedBy: 'secret_detector' });
+      expect(decision.reasons).toContain('content:secret:aws_access_key_id');
+    }
   });
 
   test('"not a secret" sends the item back through normal classification', () => {

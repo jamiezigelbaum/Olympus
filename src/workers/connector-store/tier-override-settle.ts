@@ -27,7 +27,6 @@
 
 import {
   classifyItemTiers,
-  contentDigestReason,
   contentNamesReason,
   heldUntilJudged,
   maxTier,
@@ -333,11 +332,15 @@ function applyOne(
 ): void {
   const ledger = set.ledger;
   const identity = identityOf(record);
-  // Exactly the decision a listing makes for an overridden item. The owner's
-  // tier wins; a lane hold is kept in the reasons for the passes after it.
+  const lowerOverride = tier === 'private' || tier === 'public';
+  const source = copyServingLayer(ledger.copies(identity).filter(copy => copy.state === 'current'), 'content');
+  const stored = lowerOverride && source ? set.store(source.trustDomain)?.exportItemCopy(identity) : undefined;
+  const text = stored?.chunks.length ? stored.chunks.map(chunk => chunk.boundedText).join('') : undefined;
+  if (lowerOverride && record.contentTier === 'secrets' && !text?.trim()) return;
   const holdUntilJudged = set.holdsContentUntilJudged() || heldUntilJudged(record.reasons);
   const decision: TierDecision = classifyItemTiers(
-    { signals: {}, provider: record.provider, subject: identity, ...(holdUntilJudged ? { holdUntilJudged: true } : {}) },
+    { signals: {}, provider: record.provider, subject: identity, ...(text !== undefined ? { text } : {}),
+      ...(holdUntilJudged ? { holdUntilJudged: true } : {}) },
     { override: { kind: 'tier', tier }, ...(retirePublic ? { retirePublic: true } : {}) },
   );
   const secrets = decision.contentTier === 'secrets';
@@ -353,13 +356,15 @@ function applyOne(
   }
   const atTiers = record.metadataTier === decision.metadataTier && record.contentTier === decision.contentTier;
   if (atTiers && record.state !== 'moving') {
-    if (!secrets && record.decidedBy === 'override') return;
+    if (!secrets && record.decidedBy === 'override' && !record.contentPending) return;
     if (secrets && !secretsCopiesLeft(set, identity)) return;
   }
   if (secrets) {
-    const exported = storedCopy(set, identity);
+    const exported = stored ?? storedCopy(set, identity);
     if (exported) {
-      if (settleRoutedSecrets(set, identity, decision, exported, { findingKinds: ['owner_marked_secret'] }, { guard })) report.secrets += 1;
+      const findingKinds = decision.reasons.filter(reason => reason.startsWith('content:secret:'))
+        .map(reason => reason.slice('content:secret:'.length));
+      if (settleRoutedSecrets(set, identity, decision, exported, { findingKinds, ...(text !== undefined ? { text } : {}) }, { guard })) report.secrets += 1;
       return;
     }
     // No stored copy to read the location from: hidden all the same, and
@@ -374,14 +379,6 @@ function applyOne(
     return;
   }
   const placement = set.placementFor(decision);
-  const source = copyServingLayer(ledger.copies(identity).filter(copy => copy.state === 'current'), 'content');
-  const destination = copyServingLayer(placement.copies, 'content');
-  if (source && destination && trustDomainRank(destination.trustDomain) < trustDomainRank(source.trustDomain)) {
-    // The owner authorizes this item's stored body. Bind that exact snapshot
-    // too: no re-list is needed, and a later changed body cannot borrow it.
-    const exported = set.store(source.trustDomain)?.exportItemCopy(identity);
-    if (exported) decision.reasons.push(contentDigestReason(exported.chunks.map(chunk => chunk.boundedText).join('')));
-  }
   // A Secret whose copies were tombstoned has nothing to move: its new
   // placement is recorded afresh (served once its next listing writes it).
   const recorded = ledger.recordRoutedPlacement(identity, decision, placement, {

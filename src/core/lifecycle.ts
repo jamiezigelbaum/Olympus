@@ -13,11 +13,9 @@ import {
   writePrivateFileAtomicSync,
 } from './atomic-file.ts';
 import { bootProgressLine, readBootProgress, readFrontProgress, type BootProgress } from './boot-progress.ts';
-import { putDataRootBack, snapshotDataRoot } from './data-root-snapshot.ts';
 import { engineHeartbeatBeating, engineHeartbeatLine, readEngineHeartbeat, startupCapMs, type EngineHeartbeat } from './engine-heartbeat.ts';
 import { olympusStoreBytes } from './upgrade-store-copies.ts';
-import { putBackManifest } from './put-back-manifest.ts';
-import { commitEngineStores, withStoppedEngine } from './engine-store-copies.ts';
+import { commitEngineStores, copyEngineStores, restoreEngineStores } from './engine-store-copies.ts';
 import { prepareWorkerUpgradeArtifact, type PreparedWorkerUpgradeArtifact } from './lifecycle-artifact.ts';
 import { acquireLifecycleMutationLock } from './lifecycle-lock.ts';
 import { OperationError } from './operation-error.ts';
@@ -728,14 +726,7 @@ function rollbackTransaction(
   // copies taken before, so the previous version can open them (#1494).
   // Under the engine locks: a service manager that reports the worker stopped has not proved its process gone.
   const restored = intent.touchServiceManager
-    ? withStoppedEngine(lifecycleEnv(options), 'put back', () => {
-      // The install log keeps what the put-back worked from, before and after, so a failed rollback explains itself.
-      const log = options.progressLine ?? ((line: string) => process.stderr.write(`${line}\n`));
-      log(putBackManifest(lifecycleEnv(options), 'before put-back'));
-      const back = putDataRootBack(lifecycleEnv(options));
-      log(putBackManifest(lifecycleEnv(options), 'after put-back'));
-      return back;
-    })
+    ? restoreEngineStores(lifecycleEnv(options), options.progressLine ? { log: options.progressLine } : {})
     : [];
   restoreManagedFile(options.homeDir, transaction.unit_path, paths.unitBackup, transaction.previous_unit_present, transaction.previous_unit_sha256);
   restoreManagedFile(options.homeDir, transaction.env_path, paths.envBackup, transaction.previous_env_present, transaction.previous_env_sha256);
@@ -804,9 +795,7 @@ function copyStoresForUpgrade(
   }
   try {
     // The whole data root is set aside until the upgrade commits or rolls back (core/data-root-snapshot.ts).
-    withStoppedEngine(lifecycleEnv(options), 'copied', () => {
-      snapshotDataRoot(lifecycleEnv(options), { log: progressLine });
-    });
+    copyEngineStores(lifecycleEnv(options), { log: progressLine });
   } finally {
     hold?.release();
   }

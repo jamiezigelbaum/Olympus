@@ -83,6 +83,7 @@ import { searchReleasedEvidence } from '../src/workers/source-index/analyst-answ
 import { TieredStoreSet, tieredStoreSetLedgerPath } from '../src/workers/connector-store/tiered-store-set.ts';
 import {
   CORPORA,
+  JUDGED_PERSONAL_SNIFFER,
   cloudProvider,
   fixtureConnector,
   identityOf as fixtureIdentityOf,
@@ -1085,7 +1086,8 @@ describe('12c. owner overrides under interleaving, round 2 (review of PR #255)',
     await fx.set.sync(fixtureConnector(() => [{ id: 'd1', name: 'notes.txt', text: 'Plain notes about the spring beds.' }]), { fetchContent: true });
     const d1 = fixtureIdentityOf('d1');
     const judged = (metadataTier: 'private' | 'secure', contentTier: 'private' | 'secure'): TierDecision => ({
-      ...classifyItemTiers({ signals: { title: 'notes.txt' }, text: 'Plain notes about the spring beds.' }),
+      ...classifyItemTiers({ signals: { title: 'notes.txt' }, text: 'Plain notes about the spring beds.' },
+        { sniffer: JUDGED_PERSONAL_SNIFFER }),
       metadataTier, contentTier, decidedBy: 'sniffer', state: 'current',
       contentRead: true, contentPending: false, metadataPending: false,
     });
@@ -1162,9 +1164,11 @@ describe('12c. owner overrides under interleaving, round 2 (review of PR #255)',
     // Personal: the names rise (so the move hides its sources), the content lowers.
     fx.ledger.setOverride(d1, { kind: 'tier', tier: 'private' });
     expect(applyOwnerOverrides({ set: fx.set })).toMatchObject({ raised: 1 });
+    const queued = fx.ledger.getCurrent(d1)!;
     fx.ledger.clearOverride(d1);
-    await expect(moveTieredItem({ set: fx.set, identity: d1, target: { metadataTier: 'private', contentTier: 'private' } }))
-      .rejects.toBeInstanceOf(TierLedgerGenerationConflictError);
+    await expect(moveTieredItem({
+      set: fx.set, identity: d1, target: { metadataTier: 'private', contentTier: 'private' }, expectedGeneration: queued.generation,
+    })).rejects.toBeInstanceOf(TierLedgerGenerationConflictError);
     expect(currentCopies(fx.ledger, d1)).not.toContain(CORPORA.internal);
   });
 });

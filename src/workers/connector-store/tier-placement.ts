@@ -27,6 +27,7 @@ import {
   itemHasNonTextContent,
   contentDigestReason,
   contentNamesReason,
+  hasContentJudgeVerdict,
   namesInputReason,
   tierSnifferInputHash,
   arrivalOrderedSniffer,
@@ -205,6 +206,7 @@ export function decideItemTiers(
   ledger: TierLedger | undefined,
   extra: {
     namesOnly?: boolean;
+    requireContentVerdict?: boolean;
     contentFetchFailed?: boolean;
     /** The names the current content copy gives a re-judge, read only on a cache miss. */
     storedContentNames?: () => { title?: string; path?: string; sender?: string } | undefined;
@@ -261,7 +263,8 @@ export function decideItemTiers(
   // carries it: contracts.ts, 2.2.0), or the one its stored decision carries
   // (a store whose recording did not bring the lane's option still holds the
   // same way, and a later version of a held item stays held until judged).
-  const holdUntilJudged = options?.holdContentUntilJudged === true
+  const holdUntilJudged = extra.requireContentVerdict === true
+    || options?.holdContentUntilJudged === true
     || item.holdContentUntilJudged === true
     || heldUntilJudged(recorded?.reasons);
   return classifyItemTiers(
@@ -318,11 +321,16 @@ export function recordedContentVerdictSniffer(
   const code = recorded.reasons.find((reason) => reason.startsWith(prefix))?.slice(prefix.length);
   if ((tier !== 'private' && tier !== 'secure') || !code || code === 'undecided'
     || isFailSafeMissingContentQuestion(`${prefix}${code}`)) return sniffer;
+  const judgeBacked = hasContentJudgeVerdict(recorded.reasons, tier, contentDigestReason(text));
+  if (tier === 'private' && !judgeBacked) return sniffer;
+  const duplicate = judgeBacked && code.startsWith('rule:duplicate_model:');
+  const verdict = { tier, code, ...(duplicate ? { rule: 'duplicate_model' } : {}),
+    ...(judgeBacked ? { origin: duplicate ? 'rule' as const : 'model' as const } : {}) };
   return {
     id: sniffer.id,
-    recordedContentVerdict: { tier, code, mapRevision: recorded.mapRevision },
+    recordedContentVerdict: { ...verdict, mapRevision: recorded.mapRevision },
     judge: (request) => request.pass === 'content' && (request.mapRevision ?? 'none') === recorded.mapRevision
-      ? { verdict: 'decided', tier, code }
+      ? { verdict: 'decided', ...verdict }
       : sniffer.judge(request),
   };
 }

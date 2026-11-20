@@ -74,8 +74,8 @@ interface SnapshotPair { live: string; snapshot: string }
 interface FailedRoot { live: string; failed: string; at: string }
 interface UpdateRecord {
   schema: typeof RECORD_SCHEMA;
-  /** `cloning` until every clone is whole: a clone a crash cut short is then known to be ours and incomplete. */
-  in_flight?: { started_at: string; state: 'cloning' | 'ready'; roots: SnapshotPair[] };
+  /** `cloning` until the copies are whole, then `ready`. A `restoring` put-back is retried until its restored stores are ready. */
+  in_flight?: { started_at: string; state: 'cloning' | 'ready' | 'restoring'; roots: SnapshotPair[] };
   failed: FailedRoot[];
   /** Copies a committed update (or a forget) is removing: the removal finishes before anything else runs. */
   removing?: string[];
@@ -138,7 +138,8 @@ function readRecord(env: LayoutEnv): UpdateRecord {
     }
     if (roots.length > 0 && roots[0]!.live !== root) throw unreadable(`does not start with the data root ${root}`);
     // Records written before the cloning state was added are from builds that wrote them only once every clone was whole.
-    record.in_flight = { started_at: flight.started_at, state: flight.state === 'cloning' ? 'cloning' : 'ready', roots };
+    const state = flight.state === 'cloning' || flight.state === 'restoring' ? flight.state : 'ready';
+    record.in_flight = { started_at: flight.started_at, state, roots };
   }
   for (const entry of Array.isArray(parsed.failed) ? parsed.failed : []) {
     if (!absolute(entry?.live) || !absolute(entry.failed) || !isFailedPathOf(entry.failed, entry.live)) throw unreadable('names a kept copy not named as this update names them');
@@ -163,7 +164,7 @@ function writeRecord(env: LayoutEnv, record: UpdateRecord): void {
 /** When the update in flight started, or undefined when none is. */
 export function updateInFlightSince(env: LayoutEnv): string | undefined {
   const flight = readRecord(env).in_flight;
-  return flight?.state === 'ready' ? flight.started_at : undefined;
+  return flight && flight.state !== 'cloning' ? flight.started_at : undefined;
 }
 
 function inside(path: string, root: string): boolean {
@@ -425,12 +426,20 @@ function finishRemoving(env: LayoutEnv, record: UpdateRecord): void {
  * children, proves that no process has a file under the root or the folders outside it open, checks for room, then clones
  * each. Throws, changing nothing that stays, when it cannot.
  */
-export function snapshotDataRoot(env: LayoutEnv, options: { log?: (line: string) => void; deps?: DataRootDeps } = {}): void {
+export function snapshotDataRoot(env: LayoutEnv, options: { log?: (line: string) => void; deps?: DataRootDeps; afterRestore?: () => void } = {}): void {
   const deps = options.deps ?? {};
   const log = options.log ?? (() => {});
   const root = olympusDataRoot(env);
-  const record = readRecord(env);
+  let record = readRecord(env);
   finishRemoving(env, record);
+  const earlier = record.in_flight;
+  // Older put-backs left a ready record between the two renames.
+  const interrupted = earlier?.state === 'ready'
+    && earlier.roots.some(pair => existsSync(pair.snapshot) && holdsOnlyLocks(pair.live, env));
+  if (earlier?.state === 'restoring' || interrupted) {
+    for (const line of putDataRootBack(env, options)) log(line);
+    record = readRecord(env);
+  }
   const flight = record.in_flight;
   if (flight?.state === 'cloning') {
     // A crash while cloning: the update never ran, and these copies are this module's own, incomplete.
@@ -444,13 +453,6 @@ export function snapshotDataRoot(env: LayoutEnv, options: { log?: (line: string)
     const startedMs = Date.parse(flight.started_at);
     for (const pair of flight.roots) {
       if (!existsSync(pair.snapshot)) continue;
-      if (holdsOnlyLocks(pair.live, env)) {
-        // A put-back cut short between its renames: the failed root is aside, and taking the locks for this step made the
-        // root again, empty but for them.
-        swapIn(pair, failedRootPathOf(pair.live, startedMs), env);
-        log(`Finished putting ${pair.live} back as it was before the update of ${flight.started_at}.`);
-        continue;
-      }
       // A copy an earlier update took that nothing put back or removed is older than the data here, which a version has
       // used since. It is kept with the failed roots, named in the log, until the next update that succeeds.
       const kept = failedRootPathOf(pair.live, startedMs);
@@ -514,7 +516,7 @@ export function snapshotDataRoot(env: LayoutEnv, options: { log?: (line: string)
  * failed folder is renamed aside and its clone renamed back. Model files move back into the restored root. Safe to run
  * again after it was cut short. Returns what the owner is told, or [] when no update was in flight.
  */
-export function putDataRootBack(env: LayoutEnv, options: { deps?: DataRootDeps } = {}): string[] {
+export function putDataRootBack(env: LayoutEnv, options: { deps?: DataRootDeps; afterRestore?: () => void } = {}): string[] {
   const record = readRecord(env);
   finishRemoving(env, record);
   const flight = record.in_flight;
@@ -531,6 +533,10 @@ export function putDataRootBack(env: LayoutEnv, options: { deps?: DataRootDeps }
   }
   const startedMs = Date.parse(flight.started_at);
   proveNoHolders(flight.roots.map((pair) => pair.live).filter(existsSync).map(realOrSelf), 'a process of the new version still has Olympus data open, so it was not put back', options.deps ?? {});
+  if (flight.state !== 'restoring') {
+    flight.state = 'restoring';
+    writeRecord(env, record);
+  }
   const kept: FailedRoot[] = [];
   for (const pair of flight.roots) {
     const failed = failedRootPathOf(pair.live, startedMs);
@@ -546,6 +552,7 @@ export function putDataRootBack(env: LayoutEnv, options: { deps?: DataRootDeps }
     }
     if (existsSync(failed)) kept.push({ live: pair.live, failed, at: flight.started_at });
   }
+  options.afterRestore?.();
   writeRecord(env, { schema: RECORD_SCHEMA, failed: [...record.failed.filter((entry) => !kept.some((now) => now.failed === entry.failed)), ...kept] });
   if (kept.length === 0) return ['The Olympus data was put back as it was before the update.'];
   return [

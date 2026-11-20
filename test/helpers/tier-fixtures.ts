@@ -28,7 +28,7 @@ export const ACCOUNT = 'personal';
  */
 export const JUDGED_PERSONAL_SNIFFER: TierSniffer = Object.freeze({
   id: 'fixture-judged-personal',
-  judge: () => ({ verdict: 'decided' as const, tier: 'private' as const, code: 'ordinary:0.99' }),
+  judge: () => ({ verdict: 'decided' as const, tier: 'private' as const, code: 'ordinary:0.99', origin: 'model' as const }),
 });
 export const PROVIDER = 'fixture';
 

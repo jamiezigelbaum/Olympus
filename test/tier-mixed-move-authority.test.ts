@@ -6,7 +6,7 @@ import { tierLedgerIdentityKey } from '../src/workers/classification/tier-ledger
 import { writeOwnerTierRules } from '../src/workers/classification/tier-rules.ts';
 import { purgeLowerTierContent } from '../src/workers/connector-store/tier-content-purge.ts';
 import { moveTieredItem, moveTieredItemsLowering, TierMoveContentChangedError } from '../src/workers/connector-store/tier-move.ts';
-import { CORPORA, FIXTURE_PLACEMENT, fixtureConnector, identityOf, localId, openTierFixture, tempDir } from './helpers/tier-fixtures.ts';
+import { CORPORA, FIXTURE_PLACEMENT, JUDGED_PERSONAL_SNIFFER, fixtureConnector, identityOf, localId, openTierFixture, tempDir } from './helpers/tier-fixtures.ts';
 
 const cleanup: Array<() => void> = [];
 afterEach(() => {
@@ -82,7 +82,7 @@ test('a previously abandoned import is discarded when its policy no longer permi
   const env = { OLYMPUS_TIER_RULES_PATH: join(tmp.dir, 'tier-rules.json') };
   const identity = identityOf('orchard');
   const text = 'Orchard inventory and planting notes.';
-  const target = classifyItemTiers({ signals: { title: 'Inventory' }, text });
+  const target = classifyItemTiers({ signals: { title: 'Inventory' }, text }, { sniffer: JUDGED_PERSONAL_SNIFFER });
   await fixture.set.sync(fixtureConnector(() => [{ id: identity.providerItemId, name: 'Inventory', text }]),
     { fetchContent: true, placement: FIXTURE_PLACEMENT });
   await moveTieredItem({
@@ -116,7 +116,7 @@ test('a source edit discards staged bytes after an interruption before the recei
   const identity = identityOf('orchard');
   const text = 'Orchard inventory and planting notes.';
   const edited = 'Updated orchard inventory.';
-  const target = classifyItemTiers({ signals: { title: 'Inventory' }, text });
+  const target = classifyItemTiers({ signals: { title: 'Inventory' }, text }, { sniffer: JUDGED_PERSONAL_SNIFFER });
   await fixture.set.sync(fixtureConnector(() => [{ id: identity.providerItemId, name: 'Inventory', text }]),
     { fetchContent: true, placement: FIXTURE_PLACEMENT });
   await moveTieredItem({

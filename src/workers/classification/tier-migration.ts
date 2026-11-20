@@ -65,7 +65,6 @@ import { detectSecretFindingKinds } from './engine.ts';
 import {
   TIER_CLASSIFIER_VERSION,
   classifyItemTiers,
-  heldUntilJudged,
   type OwnerTierRule,
   type TierDecision,
   type TierKey,
@@ -711,10 +710,6 @@ export async function planTierMigration(options: TierMigrationPlanOptions): Prom
           const sniffer = laneSniffer ? secretFencedSniffer(laneSniffer, ledger, item.identity, read) : undefined;
           // A photo's picture judgment, when the photo judge made one here.
           const imageJudgment = item.mimeType ? store.imageJudgmentForItem(item.identity) : undefined;
-          // A lane that holds content until judged holds a legacy item's too:
-          // the plan never proposes its unjudged body for a less private store.
-          const holdUntilJudged = set.holdsContentUntilJudged()
-            || heldUntilJudged(ledger.getCurrent(item.identity)?.reasons);
           const decision = classifyItemTiers(
             {
               signals: signalsFromStoredItem(item),
@@ -726,7 +721,7 @@ export async function planTierMigration(options: TierMigrationPlanOptions): Prom
               hasNonTextContent: true,
               ...(read.secret ? { heldSecret: true } : {}),
               ...(item.mimeType ? { mimeType: item.mimeType } : {}),
-              ...(holdUntilJudged ? { holdUntilJudged: true } : {}),
+              holdUntilJudged: true,
               ...(imageJudgment ? { imageJudgment: imageJudgmentSignal(imageJudgment) } : {}),
               subject: item.identity,
             },

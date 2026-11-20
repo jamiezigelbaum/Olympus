@@ -14083,6 +14083,9 @@ function contentDigestReason(text) {
 function contentJudgeVerdictReason(reason, tier, digest) {
   return `content:judge_verdict:${tier}:${createHash8("sha256").update(JSON.stringify([reason, digest])).digest("hex")}`;
 }
+function hasContentJudgeVerdict(reasons, tier, digest) {
+  return reasons.some((reason) => reason.startsWith("content:sniffer:") && (!reason.includes(":rule:") || reason.includes(":rule:duplicate_model:")) && !reason.includes(":fail_safe:") && !reason.endsWith(":fail_safe") && !reason.includes(":injection:") && !reason.endsWith(":undecided") && !reason.endsWith(":unresolved:0.00") && !reason.endsWith(":union:decision:failed") && reasons.includes(contentJudgeVerdictReason(reason, tier, digest)));
+}
 function contentNamesReason(names, parentContext) {
   const parts = [names.title, names.path, names.sender, parentContext].map((part) => part?.trim() ?? "");
   return `content:names:${createHash8("sha256").update(JSON.stringify(parts)).digest("hex").slice(0, 16)}`;
@@ -14213,16 +14216,20 @@ function classifyItemTiersWithPublic(input, options) {
   const text = input.text;
   const holdUntilJudged = input.holdUntilJudged === true;
   if (options.override?.kind === "tier") {
+    const tier = options.override.tier;
+    const personal = tier === "private" || tier === "public";
+    const findings = text !== undefined && personal ? contentSecretReasons(text) : [];
+    const stillUnread = personal && input.heldSecret === true && !text?.trim();
     return {
       ...base,
-      metadataTier: options.override.tier,
-      contentTier: options.override.tier,
-      decidedBy: "override",
-      reasons: [`override:item:${options.override.tier}`, ...heldMark(holdUntilJudged, options.override.tier)],
-      state: "current",
-      contentRead: true,
+      metadataTier: tier,
+      contentTier: findings.length > 0 ? "secrets" : tier,
+      decidedBy: findings.length > 0 ? "secret_detector" : "override",
+      reasons: findings.length > 0 ? findings : [`override:item:${tier}`, ...heldMark(holdUntilJudged, tier)],
+      state: stillUnread ? "pending" : "current",
+      contentRead: !stillUnread,
       metadataPending: false,
-      contentPending: false,
+      contentPending: stillUnread,
       metadataForced: true,
       metadataFlagged: false
     };
@@ -14291,6 +14298,10 @@ function classifyContentTier(input, options = {}) {
   const holdUntilJudged = input.holdUntilJudged === true;
   if (options.override?.kind === "tier") {
     const tier = options.retirePublic && options.override.tier === "public" ? "private" : options.override.tier;
+    const lower = tier === "private" || tier === "public";
+    const findings = lower ? contentSecretReasons(input.text) : [];
+    if (findings.length > 0)
+      return { ...base, contentTier: "secrets", decidedBy: "secret_detector", reasons: findings, contentPending: false };
     return {
       ...base,
       contentTier: tier,
@@ -14302,7 +14313,7 @@ function classifyContentTier(input, options = {}) {
         contentDigestReason(input.text),
         contentNamesReason(input, input.parentContext)
       ],
-      contentPending: false
+      contentPending: lower && input.heldSecret === true && !input.text.trim()
     };
   }
   const text = input.text;
@@ -14465,6 +14476,7 @@ function contentPass(args) {
     return { tier: "secrets", decidedBy: metadata.decidedBy, reasons: [], pending: false };
   }
   const mark = heldMark(args.holdUntilJudged === true, metadata.tier);
+  const held = args.holdUntilJudged === true && metadata.ownerDecided !== true && metadata.ownerRule === undefined;
   if (text === undefined || !text.trim() && (!args.textOnly || args.heldSecret)) {
     return {
       tier: metadata.tier,
@@ -14474,14 +14486,12 @@ function contentPass(args) {
     };
   }
   if (!args.secretsCleared) {
-    const secretKinds = detectSecretFindingKinds(text);
-    if (hasCredentialUrl(text) && !secretKinds.includes("credential_assignment"))
-      secretKinds.push("credential_assignment");
-    if (secretKinds.length > 0) {
+    const reasons = contentSecretReasons(text);
+    if (reasons.length > 0) {
       return {
         tier: "secrets",
         decidedBy: "secret_detector",
-        reasons: secretKinds.map((kind) => `content:secret:${kind}`),
+        reasons,
         pending: false
       };
     }
@@ -14499,7 +14509,7 @@ function contentPass(args) {
   if (args.image && !imageOrdinary) {
     return { tier: maxTier(metadata.tier, "secure"), decidedBy: "default", reasons: [IMAGE_PRIVATE_DEFAULT_REASON, ...mark], pending: false };
   }
-  if (metadata.forced) {
+  if (metadata.forced && (!held || tierRank(metadata.tier) >= tierRank("secure"))) {
     return { tier: metadata.tier, decidedBy: metadata.decidedBy, reasons: [...mark], pending: false };
   }
   let decided = { tier: metadata.tier, decidedBy: metadata.decidedBy, reasons: [] };
@@ -14514,7 +14524,14 @@ function contentPass(args) {
   if (isBareShareLink(text)) {
     const recorded = args.sniffer.recordedContentVerdict;
     if (recorded && recorded.mapRevision === args.mapRevision) {
-      const verdict = withSnifferVerdict(decided, recorded.tier, `content:sniffer:${args.sniffer.id}:${recorded.code}`);
+      const reason = `content:sniffer:${args.sniffer.id}:${recorded.code}`;
+      const verdict = withSnifferVerdict(decided, recorded.tier, reason);
+      if (recorded.origin === "model")
+        verdict.reasons.push("content:provenance:model");
+      if (recorded.origin === "model" || recorded.rule === "duplicate_model")
+        verdict.reasons.push(contentJudgeVerdictReason(reason, recorded.tier, contentDigestReason(text)));
+      if (recorded.rule)
+        verdict.reasons.push(`content:rule:${recorded.rule}`);
       return { ...verdict, reasons: [...verdict.reasons, ...mark], pending: false };
     }
     return {
@@ -14548,7 +14565,6 @@ function contentPass(args) {
     });
   }
   const recordFlags = [...ownRecordSignals(text, args.matchInput), ...textDecides ? ["image_document"] : []];
-  const held = args.holdUntilJudged === true && metadata.ownerDecided !== true;
   let pending = false;
   const flags = [
     ...metadata.flags,
@@ -14570,11 +14586,13 @@ function contentPass(args) {
       mapRevision: args.mapRevision,
       ...args.subject ? { subject: args.subject } : {}
     });
-    if (verdict.verdict === "decided") {
+    if (verdict.verdict === "decided" && (!held || verdict.tier !== "private" || verdict.origin === "model" || verdict.rule === "duplicate_model")) {
       decided = withSnifferVerdict(decided, verdict.tier, `content:sniffer:${args.sniffer.id}:${verdict.code}`);
       reasons.splice(0, reasons.length, ...decided.reasons);
       if (verdict.origin === "model")
-        reasons.push("content:provenance:model", contentJudgeVerdictReason(`content:sniffer:${args.sniffer.id}:${verdict.code}`, verdict.tier, contentDigestReason(text)));
+        reasons.push("content:provenance:model");
+      if (verdict.origin === "model" || verdict.rule === "duplicate_model")
+        reasons.push(contentJudgeVerdictReason(`content:sniffer:${args.sniffer.id}:${verdict.code}`, verdict.tier, contentDigestReason(text)));
       if (verdict.origin === "rule" && verdict.rule)
         reasons.push(`content:rule:${verdict.rule}`);
     } else {
@@ -14593,6 +14611,12 @@ function contentPass(args) {
   }
   reasons.push(...mark);
   return { tier: decided.tier, decidedBy: decided.decidedBy, reasons: [...new Set(reasons)], pending };
+}
+function contentSecretReasons(text) {
+  const kinds = detectSecretFindingKinds(text);
+  if (hasCredentialUrl(text) && !kinds.includes("credential_assignment"))
+    kinds.push("credential_assignment");
+  return kinds.map((kind) => `content:secret:${kind}`);
 }
 function heldMark(holdUntilJudged, tier) {
   return holdUntilJudged && tier !== "secrets" ? [HELD_UNTIL_JUDGED_REASON] : [];
@@ -14788,9 +14812,11 @@ class TierSnifferStore {
     const previousUmask = onDisk ? process.umask(63) : undefined;
     let db;
     try {
-      db = new Database3(this.dbPath, { create: true });
-      db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA journal_size_limit = 67108864;" + loopWalAutocheckpointPragma(this.dbPath));
-      runSqliteMigrations(db, TIER_SNIFFER_SQLITE_STORE_ID, snifferMigrations());
+      db = new Database3(this.dbPath, options.restoreQueue ? { readwrite: true, create: false } : { create: true });
+      const synchronous = options.restoreQueue ? "FULL" : "NORMAL";
+      db.exec(`PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA synchronous = ${synchronous}; PRAGMA journal_size_limit = 67108864;` + loopWalAutocheckpointPragma(this.dbPath));
+      if (!options.restoreQueue)
+        runSqliteMigrations(db, TIER_SNIFFER_SQLITE_STORE_ID, snifferMigrations());
       if (onDisk)
         restrictFiles(this.dbPath);
     } catch (error) {
@@ -17149,7 +17175,14 @@ class TierLedger {
       }
       db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA journal_size_limit = 67108864;" + loopWalAutocheckpointPragma(this.dbPath, "tier-ledger"));
       applySqliteMmap(db);
-      runSqliteMigrations(db, TIER_LEDGER_SQLITE_STORE_ID, tierLedgerMigrations());
+      const restoredVersion = options.restoreSchemaVersion;
+      if (restoredVersion !== undefined) {
+        const actual = readSqliteSchemaVersion(db, TIER_LEDGER_SQLITE_STORE_ID);
+        if (restoredVersion < 12 || restoredVersion > TIER_LEDGER_SCHEMA_VERSION || actual !== 0 && actual !== restoredVersion) {
+          throw new Error("The tier ledger cannot be written at its restored schema.");
+        }
+      }
+      runSqliteMigrations(db, TIER_LEDGER_SQLITE_STORE_ID, tierLedgerMigrations().filter((migration) => restoredVersion === undefined || migration.version <= restoredVersion));
       db.exec(`CREATE INDEX IF NOT EXISTS tier_items_override_rows
         ON tier_items (provider, account_scope, conversation_key, provider_item_id) WHERE decided_by = 'override'`);
       if (onDisk)
@@ -21739,7 +21772,7 @@ function decideItemTiers(connector, item, text, options, ledger, extra = {}) {
   if (newArrival && text === undefined)
     ledger?.markNewArrival(item.identity);
   const sniffer = cacheAware && arrivalOrderedSniffer(conversationOrderedSniffer(recordedContentVerdictSniffer(cacheAware, recorded, text, namesReceipt, namesInputReason(signals, parentContext)), item.metadata), newArrival);
-  const holdUntilJudged = options?.holdContentUntilJudged === true || item.holdContentUntilJudged === true || heldUntilJudged(recorded?.reasons);
+  const holdUntilJudged = extra.requireContentVerdict === true || options?.holdContentUntilJudged === true || item.holdContentUntilJudged === true || heldUntilJudged(recorded?.reasons);
   return classifyItemTiers({
     signals,
     locators: ["locatorUri", "url", "pathDisplay"].map((key) => item.metadata[key]).filter((value) => typeof value === "string"),
@@ -21772,10 +21805,20 @@ function recordedContentVerdictSniffer(sniffer, recorded, text, names, namesInpu
   const code = recorded.reasons.find((reason) => reason.startsWith(prefix))?.slice(prefix.length);
   if (tier !== "private" && tier !== "secure" || !code || code === "undecided" || isFailSafeMissingContentQuestion(`${prefix}${code}`))
     return sniffer;
+  const judgeBacked = hasContentJudgeVerdict(recorded.reasons, tier, contentDigestReason(text));
+  if (tier === "private" && !judgeBacked)
+    return sniffer;
+  const duplicate = judgeBacked && code.startsWith("rule:duplicate_model:");
+  const verdict = {
+    tier,
+    code,
+    ...duplicate ? { rule: "duplicate_model" } : {},
+    ...judgeBacked ? { origin: duplicate ? "rule" : "model" } : {}
+  };
   return {
     id: sniffer.id,
-    recordedContentVerdict: { tier, code, mapRevision: recorded.mapRevision },
-    judge: (request) => request.pass === "content" && (request.mapRevision ?? "none") === recorded.mapRevision ? { verdict: "decided", tier, code } : sniffer.judge(request)
+    recordedContentVerdict: { ...verdict, mapRevision: recorded.mapRevision },
+    judge: (request) => request.pass === "content" && (request.mapRevision ?? "none") === recorded.mapRevision ? { verdict: "decided", ...verdict } : sniffer.judge(request)
   };
 }
 function secretFencedSniffer(sniffer, ledger, identity, read, options = {}) {
@@ -22669,7 +22712,7 @@ function forgetSecretInSideStores(options) {
   const snifferPath = tierSnifferPathForLedger(ledger.dbPath);
   if (snifferPath !== ":memory:" && existsSync20(snifferPath)) {
     try {
-      const sniffer = new TierSnifferStore({ dbPath: snifferPath });
+      const sniffer = new TierSnifferStore({ dbPath: snifferPath, ...options.restoreQueue ? { restoreQueue: true } : {} });
       try {
         result.snifferQuestions = sniffer.deleteItemQuestions({
           provider: identity.provider,
@@ -26044,7 +26087,8 @@ class LocalConnectorStore {
       applySqliteMmap(this.db);
       assertSqliteSchemaCanOpen(this.db, SQLITE_STORE_ID, CONNECTOR_STORE_SQLITE_SCHEMA_VERSION);
       const versionAtOpen = readSqliteSchemaVersion(this.db, SQLITE_STORE_ID);
-      const migrating = options.readOnly !== true && versionAtOpen < CONNECTOR_STORE_SQLITE_SCHEMA_VERSION;
+      const schemaTarget = options.restoreSchemaVersion ?? CONNECTOR_STORE_SQLITE_SCHEMA_VERSION;
+      const migrating = options.readOnly !== true && versionAtOpen < schemaTarget;
       validateCurrentConnectorStoreSchemaBeforeMigration(this.db);
       if (migrating) {
         setEngineStep(`checking ${SQLITE_STORE_ID} rows`);
@@ -26056,6 +26100,12 @@ class LocalConnectorStore {
         if (version < READ_ONLY_MIN_SCHEMA_VERSION) {
           throw new Error("Connector store read-only mode requires the v7 filter schema or newer.");
         }
+      } else if (options.restoreSchemaVersion !== undefined) {
+        if (schemaTarget < 15 || schemaTarget > CONNECTOR_STORE_SQLITE_SCHEMA_VERSION || !creatingFile && versionAtOpen !== schemaTarget) {
+          throw new Error("The connector store cannot be written at its restored schema.");
+        }
+        if (creatingFile)
+          applyConnectorStoreOpenSchema(this.db, schemaTarget);
       } else {
         const current = !migrating && !creatingFile && this.db.query("PRAGMA user_version").get().user_version === connectorStoreOpenStamp(this.db);
         if (!current) {
@@ -26085,12 +26135,12 @@ class LocalConnectorStore {
       this.itemTextVersionsPresent = this.db.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'item_text_versions'").get() !== null;
       const judgmentColumns = this.db.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'media_judgments'").get() !== null ? tableColumns(this.db, "media_judgments", false) : [];
       this.mediaJudgmentsPresent = CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS.every((column) => judgmentColumns.includes(column));
-      if (!this.readOnly) {
+      if (!this.readOnly && options.restoreSchemaVersion === undefined) {
         const model = this.db.query("SELECT model_id FROM chunk_embeddings ORDER BY rowid DESC LIMIT 1").get()?.model_id;
         if (model && !vectorDigestState(this.db, model).completed)
           this.scheduleVectorDigestBackfill(model, VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS);
       }
-      if (!this.readOnly && !creatingFile && this.db.query("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name IN (?, ?)").get(CONNECTOR_STORE_RECENCY_INDEX, CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX).n < 2) {
+      if (!this.readOnly && options.restoreSchemaVersion === undefined && !creatingFile && this.db.query("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name IN (?, ?)").get(CONNECTOR_STORE_RECENCY_INDEX, CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX).n < 2) {
         if (admitRecencyIndexBuild)
           this.scheduleRecencyIndexBuild();
       }
@@ -30292,6 +30342,7 @@ ${parentKey(ref)}`, { ref, origin });
       seenIdentities.add(key);
     }
     const tierLedgerForWrite = this.visibilityLedger();
+    const landed = [];
     const summary = this.db.transaction(() => {
       const syncRunId = `connector-representation-restore-${randomUUID9()}`;
       const startedAt = this.now().toISOString();
@@ -30314,7 +30365,7 @@ ${parentKey(ref)}`, { ref, origin });
       const skippedProviderItemIds = [];
       for (const record of options.items) {
         const item = record.item;
-        if (!this.tierWriteAllowed(item.identity, "content", tierLedgerForWrite)) {
+        if (!this.tierWriteAllowed(item.identity, options.route ? "metadata" : "content", tierLedgerForWrite)) {
           itemsMetadataOnly += 1;
           skippedProviderItemIds.push(item.identity.providerItemId);
           continue;
@@ -30335,10 +30386,11 @@ ${parentKey(ref)}`, { ref, origin });
             COUNT(*) AS matching_provider_id_rows,
             SUM(CASE WHEN normalized_conversation = ? THEN 1 ELSE 0 END) AS exact_identity_rows,
             MIN(CASE WHEN normalized_conversation = ? THEN item_pk END) AS item_pk,
-            MIN(CASE WHEN normalized_conversation = ? THEN tombstoned END) AS tombstoned
+            MIN(CASE WHEN normalized_conversation = ? THEN tombstoned END) AS tombstoned,
+            MIN(CASE WHEN normalized_conversation = ? THEN source_version END) AS source_version
           FROM items
           WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
-        `).get(normalizeConversationId(item.identity.providerConversationId), normalizeConversationId(item.identity.providerConversationId), normalizeConversationId(item.identity.providerConversationId), item.identity.provider, item.identity.accountScope, item.identity.providerItemId);
+        `).get(normalizeConversationId(item.identity.providerConversationId), normalizeConversationId(item.identity.providerConversationId), normalizeConversationId(item.identity.providerConversationId), normalizeConversationId(item.identity.providerConversationId), item.identity.provider, item.identity.accountScope, item.identity.providerItemId);
         if (identityAmbiguous(item.identity, existing)) {
           throw new Error("Representation restore refused because a targeted identity matches multiple store rows.");
         }
@@ -30368,16 +30420,70 @@ ${parentKey(ref)}`, { ref, origin });
           skippedProviderItemIds.push(item.identity.providerItemId);
           continue;
         }
+        const expectedVersion = record.expectedStoredSourceVersion !== undefined ? record.expectedStoredSourceVersion : item.identity.sourceVersion;
+        const route = options.route && (expectedVersion === undefined || existing.source_version === expectedVersion) ? options.route(record) : undefined;
+        if (options.route && (!route || ("refused" in route))) {
+          if (route && "refused" in route)
+            landed.push(route.refused);
+          itemsMetadataOnly += 1;
+          skippedProviderItemIds.push(item.identity.providerItemId);
+          continue;
+        }
+        const landing = route && "store" in route ? route : undefined;
+        if (landing && landing.store !== this) {
+          const placed = landing.store.withItemCopyWriteFence(item.identity, () => {
+            if (!landing.prepare())
+              return;
+            return landing.store.restoreItemRepresentations({
+              items: [record],
+              syncConnectorId,
+              ownerConnectorId,
+              ownershipKind: options.ownershipKind,
+              classify: () => landing.sensitivity,
+              ...writeClaim ? { writeClaim } : {},
+              ...options.maxChunkChars !== undefined ? { maxChunkChars: options.maxChunkChars } : {},
+              ...options.preserveStoredSearchText ? { preserveStoredSearchText: true } : {},
+              ...options.preserveStoredSearchTextOwnedFacets ? { preserveStoredSearchTextOwnedFacets: true } : {}
+            });
+          });
+          if (!placed) {
+            itemsMetadataOnly += 1;
+            skippedProviderItemIds.push(item.identity.providerItemId);
+            continue;
+          }
+          const { counts } = placed;
+          itemsRestored += counts.itemsRestored;
+          itemsUnchanged += counts.itemsUnchanged;
+          itemsExcluded += counts.itemsExcluded;
+          itemsMetadataOnly += counts.itemsMetadataOnly;
+          itemsSkippedTombstoned += counts.itemsSkippedTombstoned;
+          itemsSkippedStaleClaim += counts.itemsSkippedStaleClaim;
+          chunksAwaitingEmbedding += counts.chunksAwaitingEmbedding;
+          if (counts.itemsRestored > 0)
+            restoredProviderItemIds.push(item.identity.providerItemId);
+          if (counts.itemsRestored + counts.itemsUnchanged > 0)
+            landed.push(landing.landed);
+          else
+            skippedProviderItemIds.push(item.identity.providerItemId);
+          continue;
+        }
+        if (landing && !landing.prepare()) {
+          itemsMetadataOnly += 1;
+          skippedProviderItemIds.push(item.identity.providerItemId);
+          continue;
+        }
         if (this.itemRepresentationCoverage(record.expectation).complete) {
           if (this.imageMediaReadsPresent && isImageMediaType(item.mimeType) && this.imageFormatReadsPictures(item.mimeType)) {
             this.db.query("INSERT OR REPLACE INTO image_media_reads (item_pk, read_at) VALUES (?, ?)").run(existing.item_pk, this.now().toISOString());
           }
           this.clearItemTextVersion(existing.item_pk);
           itemsUnchanged += 1;
+          if (landing)
+            landed.push(landing.landed);
           continue;
         }
-        const sensitivity = options.classify(item);
-        if (sensitivity.trustDomain !== this.trustDomain || sensitivity.trustTier === "S5") {
+        const sensitivity = landing?.sensitivity ?? options.classify?.(item);
+        if (!sensitivity || sensitivity.trustDomain !== this.trustDomain || sensitivity.trustTier === "S5") {
           throw new Error("Representation restore item classification is not eligible for this store.");
         }
         const upsert = this.upsertItemWithOwner(item, sensitivity, ownerConnectorId, options.ownershipKind, syncRunId, "local_write", options.preserveStoredSearchText === true, options.preserveStoredSearchTextOwnedFacets === true);
@@ -30399,6 +30505,8 @@ ${parentKey(ref)}`, { ref, origin });
         `).get(upsert.itemPk).count;
         itemsRestored += 1;
         restoredProviderItemIds.push(item.identity.providerItemId);
+        if (landing)
+          landed.push(landing.landed);
       }
       const completedAt = this.now().toISOString();
       this.db.query(`
@@ -30423,6 +30531,8 @@ ${parentKey(ref)}`, { ref, origin });
         skippedProviderItemIds: skippedProviderItemIds.sort()
       };
     }).immediate();
+    for (const commit of landed)
+      commit();
     for (const record of options.items) {
       if (record.media && summary.restoredProviderItemIds.includes(record.item.identity.providerItemId)) {
         retainMediaCacheFile(record.media.path, record.media.sha256, this.mediaHolder);
@@ -30820,6 +30930,14 @@ ${parentKey(ref)}`, { ref, origin });
         accepted_at = excluded.accepted_at
     `).run(itemPk, claim.scope, claim.authority, claim.ordinal, claim.holder, claim.generation, this.now().toISOString());
     return true;
+  }
+  hasNewerItemWriteClaim(identity, claim) {
+    return this.db.query(`
+      SELECT 1 FROM item_write_claims w
+      JOIN items i ON i.item_pk = w.item_pk
+      WHERE i.provider = ? AND i.account_scope = ? AND i.normalized_conversation = ?
+        AND i.provider_item_id = ? AND w.claim_scope = ? AND w.claim_authority = ? AND w.claim_ordinal > ?
+    `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId, claim.scope, claim.authority, claim.ordinal) !== null;
   }
   purgeExcludedItems(options) {
     try {
@@ -31545,7 +31663,7 @@ ${parentKey(ref)}`, { ref, origin });
             tallyExclusion(metadataOnlyTally, exclusion);
           let itemForStorage = item;
           let contentFetchFailed = false;
-          if (!metadataOnly && !deferMetadataOnlyContent && item.deferredBytes === undefined && classification && fetchContent && item.content.kind === "metadata_only") {
+          if (!metadataOnly && !deferMetadataOnlyContent && item.deferredBytes === undefined && (classification || tierRouting) && fetchContent && item.content.kind === "metadata_only") {
             try {
               itemForStorage = carryHold(item, await connector.fetchItem(item.identity.localItemId));
               consecutiveContentFetchFailures = 0;
@@ -31652,7 +31770,7 @@ ${parentKey(ref)}`, { ref, origin });
           itemsIndexed += 1;
           let itemChanged = upsert.contentChanged;
           let ftsContentChanged = false;
-          if (fetchContent && !contentFetchFailed && !metadataOnly && routedLayer !== "metadata" && (!(deferMetadataOnlyContent || itemForStorage.deferredBytes !== undefined) || itemForStorage.content.kind !== "metadata_only")) {
+          if ((fetchContent || route.kind === "store" && route.writeListedBody && itemForStorage.content.kind !== "metadata_only") && !contentFetchFailed && !metadataOnly && routedLayer !== "metadata" && !(tierRouting && itemForStorage.content.kind === "metadata_only") && (!(deferMetadataOnlyContent || itemForStorage.deferredBytes !== undefined) || itemForStorage.content.kind !== "metadata_only")) {
             const indexed = await this.indexItemContent(connector, (fetched) => routedLayer !== undefined ? sensitivity : classifyConnectorStoreItem(fetched, classification, placement, this.trustDomain), (fetched, fetchedSensitivity) => routedLayer !== undefined ? undefined : this.recordTierDecision(connector, fetched, fetchedSensitivity, tierClassification, tierRun, itemContentKeptNamesOnly(fetched)), itemForStorage, upsert.itemPk, maxChunkChars, gaps, () => {
               consecutiveContentFetchFailures += 1;
               assertContentFetchFailureBudget(consecutiveContentFetchFailures);
@@ -36991,9 +37109,10 @@ function validateVectorDigestSchema(db) {
   assertTriggerExists(db, "connector_store_vector_digest_delete", "v16");
   assertTriggerExists(db, "connector_store_vector_digest_account", "v16");
 }
-function validateConnectorStoreSchema(db) {
+function validateConnectorStoreSchema(db, version = CONNECTOR_STORE_SQLITE_SCHEMA_VERSION) {
   validateConnectorStoreV12Schema(db, "v15", CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS);
-  validateVectorDigestSchema(db);
+  if (version >= 16)
+    validateVectorDigestSchema(db);
   assertIndexColumns(db, "idx_connector_store_items_parent", ["parent_local_item_id"], "v15");
   assertExactTableColumns(db, "chunk_media_releases", ["media_sha256", "media_path"], false, "v13");
   assertExactTableColumns(db, "chunk_media_failures", ["media_sha256", "reason", "failed_at", "attempts"], false, "v13");
@@ -37127,10 +37246,10 @@ function sameStrings(actual, expected) {
 function sameStringSet(actual, expected) {
   return actual.length === expected.length && expected.every((value) => actual.includes(value));
 }
-function applyConnectorStoreOpenSchema(db) {
+function applyConnectorStoreOpenSchema(db, version = CONNECTOR_STORE_SQLITE_SCHEMA_VERSION) {
   refuseUnversionedConnectorStoreSchema(db);
   LocalConnectorStore.migrateSchema(db);
-  runSqliteMigrations(db, SQLITE_STORE_ID, connectorStoreMigrations());
+  runSqliteMigrations(db, SQLITE_STORE_ID, connectorStoreMigrations().filter((migration) => migration.version <= version));
   createConnectorStoreChunkMediaReleases(db);
   createConnectorStoreMediaJudgments(db);
   createConnectorStoreItemTextVersions(db);
@@ -37140,7 +37259,7 @@ function applyConnectorStoreOpenSchema(db) {
   db.exec(`CREATE TABLE IF NOT EXISTS on_demand_item_reads (
     local_item_id TEXT PRIMARY KEY, source_version TEXT NOT NULL, read_on_demand INTEGER NOT NULL DEFAULT 1
   );`);
-  validateConnectorStoreSchema(db);
+  validateConnectorStoreSchema(db, version);
 }
 var openShape;
 function connectorStoreOpenShape() {

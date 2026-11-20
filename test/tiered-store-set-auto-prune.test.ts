@@ -14,12 +14,12 @@ import { createSourceAnswerTrace, runWithSourceAnswerTrace } from '../src/worker
 import { readEmbeddingLedger } from '../src/workers/embedding-ledger.ts';
 import { createTestClock, flushMicrotasks, waitFor } from './helpers/test-clock.ts';
 import { createOwnerQuestionActivity } from '../src/workers/engine/runtime/source-answer-lanes.ts';
-import { CORPORA, FIXTURE_PLACEMENT, fixtureConnector, identityOf, localId, openTierFixture, tempDir } from './helpers/tier-fixtures.ts';
+import { CORPORA, FIXTURE_PLACEMENT, JUDGED_PERSONAL_SNIFFER, fixtureConnector, identityOf, localId, openTierFixture, tempDir } from './helpers/tier-fixtures.ts';
 
 const cleanup: Array<() => void> = [];
 afterEach(() => { for (const close of cleanup.splice(0).reverse()) close(); });
 const text = 'Orchard inventory for winter.';
-const low = classifyItemTiers({ signals: { title: 'Orchard' }, text });
+const low = classifyItemTiers({ signals: { title: 'Orchard' }, text }, { sniffer: JUDGED_PERSONAL_SNIFFER });
 const high = { ...low, metadataTier: 'secure' as const, contentTier: 'secure' as const };
 async function fixture() {
   const tmp = tempDir('auto-prune-sweep-');

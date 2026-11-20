@@ -64,6 +64,16 @@ export function xBookmarksTestTierSet(store: LocalConnectorStore, options: Perso
   return once(store, () => createXBookmarksTierLane({ store, env, ...(embeddingProvider ? { embeddingProvider } : {}) }).set);
 }
 
+export function xBookmarksRecoveryTestTierSet(store: LocalConnectorStore, options: { pending?: boolean } = {}): TieredStoreSet {
+  return once(store, () => createXBookmarksTierLane({
+    store, env: homeBeside(store),
+    ...(options.pending ? {} : { tierClassification: { sniffer: {
+      id: 'recovery-test-judge',
+      judge: () => ({ verdict: 'decided', tier: 'private', code: 'ordinary', origin: 'model' }),
+    } } }),
+  }).set);
+}
+
 export function whatsappTestTierSet(store: LocalConnectorStore, env: Env = homeBeside(store)): TieredStoreSet {
   return once(store, () => createWhatsAppTierLane({ store, env }).set);
 }

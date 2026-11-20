@@ -21,7 +21,13 @@ import { createAnalystSourceIndexAnswerHandler } from '../src/workers/source-ind
 import { LocalConnectorStore, createConnectorStoreContentProvider, createConnectorStoreCorpusAdapter, defineConnectorCorpus } from '../src/workers/connector-store/index.ts';
 import { fixtureConnector, JUDGED_PERSONAL_SNIFFER } from './helpers/tier-fixtures.ts';
 import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
-import { createConnectorStoreExtractionSink } from '../src/workers/file-extraction/store-sink.ts';
+import { createTieredStoreExtractionSink } from '../src/workers/file-extraction/tiered-store-sink.ts';
+import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
+import { createLaneTieredStoreSet } from '../src/workers/connector-store/tiered-store-set.ts';
+import { CachedTierSniffer } from '../src/workers/classification/sniffer.ts';
+import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts';
+import { runSnifferPass } from '../src/workers/classification/sniffer-resolver.ts';
+import type { SnifferLane } from '../src/workers/classification/sniffer-lane.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 import { Database } from 'bun:sqlite';
 import { GoogleDriveExtractionSource, GOOGLE_DRIVE_EXTRACTION_SCOPE_KEY } from '../src/workers/google-connectors/drive-extraction-source.ts';
@@ -51,6 +57,47 @@ function fixture() {
 }
 const req = (id = 'item', requester: OnDemandReadRequest['requester'] = 'analyst', questionId = 'q1'): OnDemandReadRequest => ({ itemRef: { corpusId: 'internal.fixture.files', providerItemId: id }, requester, questionId });
 
+const ON_DEMAND_JUDGE: SnifferLane = {
+  kind: 'local', modelId: 'on-demand-judge', profileId: 'test-local-judge',
+  profile: { provider: 'local-openai-compatible', trust: 'local', baseUrl: 'http://127.0.0.1:1/v1', model: 'on-demand-judge' },
+};
+
+function onDemandTierSet(dir: string, store: LocalConnectorStore, exclusions?: ReturnType<typeof createSourceExclusionMatcher>) {
+  const privateStore = new LocalConnectorStore({
+    dbPath: join(dir, 'private.sqlite'),
+    corpusId: store.corpusId.replace(/^internal\./, 'secure_local.'),
+    family: store.family,
+    trustDomain: 'secure_local',
+    ...(exclusions ? { exclusions } : {}),
+  });
+  const sniffer = new TierSnifferStore({ dbPath: join(dir, 'sniffer.sqlite') });
+  const set = createLaneTieredStoreSet({
+    setId: store.corpusId, internalStore: store, secureStore: privateStore,
+    tierClassification: { sniffer: new CachedTierSniffer(sniffer, ON_DEMAND_JUDGE) },
+  });
+  cleanup.push(() => { sniffer.close(); privateStore.close(); });
+
+  async function settlePersonal(item: RawItem) {
+    const report = await runSnifferPass({
+      targets: [{ ledger: set.ledger, sniffer,
+        placementFor: (decision) => set.placementFor(decision),
+        onDemandRead: () => store.readOnDemand(item.identity.localItemId, item.identity.sourceVersion),
+      }],
+      lane: ON_DEMAND_JUDGE,
+      model: { async complete() {
+        return { modelId: ON_DEMAND_JUDGE.modelId, text: JSON.stringify({
+          verdicts: [{ i: 1, tier: 'personal', category: 'ordinary', confidence: 0.99, ownRecord: false, privateKind: 'none' }],
+        }) };
+      } },
+    });
+    expect(report.resolvedPersonal).toBe(1);
+    expect(set.ledger.getCurrent(item.identity)).toMatchObject({ state: 'moving', targetContentTier: 'private' });
+    await moveTieredItem({ set, identity: item.identity, target: { metadataTier: 'private', contentTier: 'private' } });
+  }
+
+  return { set, privateStore, settlePersonal };
+}
+
 async function driveFixture(limits: { files: number; bytes: number }, ids = ['a']) {
   const dir = mkdtempSync(join(tmpdir(), 'on-demand-drive-'));
   const corpusId = GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID;
@@ -63,6 +110,7 @@ async function driveFixture(limits: { files: number; bytes: number }, ids = ['a'
   let runtime: ReturnType<typeof createFileExtractionRuntime>;
   let db: Database | undefined;
   cleanup.push(() => { runtime?.close(); db?.close(); store.close(); rmSync(dir, { recursive: true, force: true }); });
+  const tiered = onDemandTierSet(dir, store, exclusions);
   const items: RawItem[] = ids.map(id => ({
     identity: { family: 'file', provider: GOOGLE_DRIVE_PROVIDER, accountScope: 'personal', providerItemId: id, localItemId: `personal:${id}`, sourceVersion: 'v1' },
     mimeType: `application/vnd.google-apps.${id === 'sheet' ? 'spreadsheet' : id === 'slides' ? 'presentation' : 'document'}`,
@@ -94,7 +142,7 @@ async function driveFixture(limits: { files: number; bytes: number }, ids = ['a'
   });
   const job = (id: string) => db!.query('SELECT status, mime_type FROM extraction_jobs WHERE provider_item_id = ?').get(id) as { status: string; mime_type: string } | null;
   const used = () => db!.query("SELECT COUNT(*) AS files, SUM(reserved_bytes) AS bytes FROM on_demand_reads WHERE requester != 'owner'").get() as { files: number; bytes: number };
-  return { store, runtime: runtime!, items, text, size, urls, read, job, used };
+  return { store, runtime: runtime!, items, text, size, urls, read, job, used, ...tiered };
 }
 
 describe('read on demand', () => {
@@ -341,6 +389,7 @@ describe('read on demand', () => {
     const store = new LocalConnectorStore({ dbPath: join(dir, 'store.sqlite'), corpusId, family: 'file', trustDomain: 'internal', exclusions });
     let runtime: ReturnType<typeof createFileExtractionRuntime>;
     cleanup.push(() => { runtime?.close(); store.close(); rmSync(dir, { recursive: true, force: true }); });
+    onDemandTierSet(dir, store, exclusions);
     const item: RawItem = { identity: { family: 'file', provider: 'fixture', accountScope: 'one', providerItemId: 'a', localItemId: 'a', sourceVersion: 'v1' }, mimeType: 'text/plain', content: { kind: 'metadata_only' }, metadata: { name: 'a.txt', pathDisplay: '/Selected/a.txt', sizeBytes: 12 }, fetchedAt: '2026-11-12T00:00:00Z' };
     await store.syncFromConnector({ id: 'fixture', family: 'file', async authenticate() {}, async *listItems() { yield { items: [item], done: true }; }, async fetchItem() { throw new Error('No fetch at listing'); }, classificationSignals() { return {}; } }, { fetchContent: false, placement: { trustTier: 'S2', trustDomain: 'internal' } });
     expect(store.activeLocalItemRow('a')).toBeDefined();
@@ -390,10 +439,8 @@ describe('read on demand', () => {
       expect(timing.mock.calls.some(([line]) => String(line).includes(`[olympus:on-demand] step=${step} count=1 ms=`))).toBe(true);
     }
     expect(timing.mock.calls.some(([line]) => String(line).includes('step=judge'))).toBe(false);
-    expect(f.store.recordExtractedContentTier({ ...item, content: { kind: 'text', text: f.text } }, f.text, {
-      holdContentUntilJudged: true,
-      sniffer: { id: 'test-judge', judge: () => ({ verdict: 'decided', tier: 'private', code: 'ordinary:0.99' }) },
-    })).toBe(true);
+    expect(f.privateStore.exportItemCopy(item.identity)?.chunks[0]?.boundedText).toBe(f.text);
+    await f.settlePersonal(item);
     expect(timing.mock.calls.some(([line]) => String(line).includes('[olympus:on-demand] step=judge count=1 ms='))).toBe(true);
     expect(f.store.contentServedNow(item.identity.localItemId)).toBe(true);
     expect(f.store.localContent(item.identity.localItemId)?.chunks).toEqual([f.text]);
@@ -444,26 +491,29 @@ describe('read on demand', () => {
     const dir = mkdtempSync(join(tmpdir(), 'on-demand-hold-'));
     const store = new LocalConnectorStore({ dbPath: join(dir, 'store.sqlite'), corpusId: 'internal.fixture.files', family: 'file', trustDomain: 'internal' });
     cleanup.push(() => { store.close(); rmSync(dir, { recursive: true, force: true }); });
+    const { set, settlePersonal } = onDemandTierSet(dir, store);
     const item: RawItem = { identity: { family: 'file', provider: 'fixture', accountScope: 'one', providerItemId: 'a', localItemId: 'a', sourceVersion: 'v1' }, mimeType: 'text/plain', content: { kind: 'metadata_only' }, metadata: { name: 'a.txt', locatorUri: '/Names/a.txt', scopeContentDenied: true }, fetchedAt: '2026-11-12T00:00:00Z' };
     const connector: SourceConnector = { id: 'fixture', family: 'file', async authenticate() {}, async *listItems() { yield { items: [item], done: true }; }, async fetchItem() { return item; }, classificationSignals() { return {}; } };
     await store.syncFromConnector(connector, { fetchContent: false, placement: { trustTier: 'S2', trustDomain: 'internal' }, tierClassification: { holdContentUntilJudged: true } });
     store.grantOnDemandRead('a', 'v1');
-    const sink = createConnectorStoreExtractionSink({ store, syncConnectorId: 'extraction', ownerConnectorId: 'fixture', ownershipKind: 'observed', classify: () => buildSourceSensitivity({ trustTier: 'S2', trustDomain: 'internal' }), tierClassification: { holdContentUntilJudged: true } });
+    const sink = createTieredStoreExtractionSink({ set, home: 'internal', syncConnectorId: 'extraction', ownerConnectorId: 'fixture', ownershipKind: 'observed' });
     await sink.accept({ ref: { corpusId: store.corpusId, provider: 'fixture', accountScope: 'one', approvedScopeKey: 'scope', providerItemId: 'a', localItemId: 'a', sourceVersion: 'v1' }, text: 'Unjudged confidential contents', extractorKind: 'local_text', extractorVersion: 'v1', fetchedAt: '2026-11-12T00:01:00Z' });
     expect(store.tierLedger()!.getCurrent(item.identity)?.contentPending).toBe(true);
     expect(store.localContent('a')?.chunks ?? []).toEqual([]);
     expect(store.contentServedNow('a')).toBe(false);
     expect(store.itemMetadataSnapshot(item.identity)?.read_on_demand).toBe(true);
-    const decision = classifyContentTier({ text: 'Unjudged confidential contents', metadataTier: 'private', metadataForced: false, metadataFlagged: false, holdUntilJudged: true }, {
-      sniffer: { id: 'test-judge', judge: () => ({ verdict: 'decided', tier: 'private', code: 'ordinary:0.99' }) },
-    });
-    store.tierLedger()!.recordContentDecision(item.identity, decision);
+    await settlePersonal(item);
     expect(store.contentServedNow('a')).toBe(true);
     expect(store.localContent('a')?.chunks).toEqual(['Unjudged confidential contents']);
     const privateDecision = classifyContentTier({ text: 'Unjudged confidential contents', metadataTier: 'private', metadataForced: false, metadataFlagged: false, holdUntilJudged: true }, {
       sniffer: { id: 'test-judge', judge: () => ({ verdict: 'decided', tier: 'secure', code: 'sensitive:0.99' }) },
     });
-    store.tierLedger()!.recordContentDecision(item.identity, privateDecision);
+    const privatePlacement = {
+      ...privateDecision, metadataTier: 'private' as const, metadataPending: false,
+      metadataForced: false, metadataFlagged: false, contentRead: true, state: 'current' as const,
+    };
+    expect(set.ledger.recordRoutedPlacement(item.identity, privatePlacement, set.placementFor(privatePlacement)).outcome).toBe('queued_move');
+    await moveTieredItem({ set, identity: item.identity, target: { metadataTier: 'private', contentTier: 'secure' } });
     expect(store.contentServedNow('a')).toBe(false);
     expect(store.localContent('a')?.chunks ?? []).toEqual([]);
     expect(store.readOnDemand('a', 'v2')).toBe(false);
@@ -635,7 +685,7 @@ describe('read on demand', () => {
     for (const item of items.filter(item => item.identity.localItemId !== 'held')) {
       store.tierLedger()!.recordContentDecision(item.identity, classifyContentTier({
         text: 'quartzneedle body contents', metadataTier: 'private', metadataForced: false, metadataFlagged: false, holdUntilJudged: true,
-      }, { sniffer: { id: 'test-judge', judge: () => ({ verdict: 'decided', tier: 'private', code: 'ordinary:0.99' }) } }));
+      }, { sniffer: JUDGED_PERSONAL_SNIFFER }));
     }
     await store.embedChunks({ provider });
     store.grantOnDemandRead('current', 'v2');

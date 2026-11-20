@@ -22,7 +22,7 @@ import {
   TieredStoreSet,
   tieredStoreSetLedgerPath,
 } from '../src/workers/connector-store/tiered-store-set.ts';
-import { EXTRACTION_SINK_SKIPPED_SECRETS } from '../src/workers/file-extraction/store-sink.ts';
+import { EXTRACTION_SINK_SKIPPED_CLAIM_SUPERSEDED, EXTRACTION_SINK_SKIPPED_SECRETS } from '../src/workers/file-extraction/store-sink.ts';
 import { createTieredStoreExtractionSink } from '../src/workers/file-extraction/tiered-store-sink.ts';
 import type { ExtractionSinkRequest } from '../src/workers/file-extraction/types.ts';
 import {
@@ -232,6 +232,51 @@ describe('a lane where only pictures arrive later', () => {
     expect(chunkText(stores.internal, 'photo-both')).not.toContain('BOARDING PASS');
   });
 
+  test('legacy Personal extraction holds newly read text in Private until judged', async () => {
+    const { set, ledger, stores } = openSet();
+    const id = 'legacy-scan';
+    MIME[id] = 'application/pdf';
+    await stores.internal!.syncFromConnector(lane([{ id, name: 'legacy-scan.pdf' }]), {
+      fetchContent: false, placement: FIXTURE_PLACEMENT,
+    });
+    const text = 'A long document about growing winter vegetables on the balcony.';
+    const sink = createTieredStoreExtractionSink({
+      set,
+      home: 'internal',
+      syncConnectorId: 'extraction',
+      ownerConnectorId: 'fixture-connector',
+      ownershipKind: 'observed',
+    });
+
+    expect((await sink.accept(request(CORPORA.internal, id, text))).accepted).toBe(true);
+    expect(chunkText(stores.internal, id)).toBe('');
+    expect(chunkText(stores.secure_local, id)).toBe(text);
+    expect(ledger.getCurrent(identityOf(id))?.contentPending).toBe(true);
+    expect(ledger.copies(identityOf(id))).toContainEqual(expect.objectContaining({
+      trustDomain: 'secure_local', embedHold: true,
+    }));
+  });
+
+  test('legacy extraction preserves a newer revision in the destination store', async () => {
+    const { set, ledger, stores } = openSet();
+    const id = 'legacy-newer';
+    MIME[id] = 'application/pdf';
+    const spec = { id, name: 'legacy-newer.pdf' };
+    await stores.internal!.syncFromConnector(lane([spec]), { fetchContent: false, placement: FIXTURE_PLACEMENT });
+    await stores.secure_local!.syncFromConnector(lane([{
+      ...spec, version: 'v2', legacyDomain: 'secure_local', text: 'The newer document already stored privately.',
+    }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    const sink = createTieredStoreExtractionSink({
+      set, home: 'internal', syncConnectorId: 'extraction',
+      ownerConnectorId: 'fixture-connector', ownershipKind: 'observed',
+    });
+
+    expect((await sink.accept(request(CORPORA.internal, id, 'An extraction of the older revision.'))).accepted).toBe(false);
+    expect(chunkText(stores.internal, id)).toBe('');
+    expect(chunkText(stores.secure_local, id)).toBe('The newer document already stored privately.');
+    expect(ledger.isRouted(identityOf(id))).toBe(false);
+  });
+
   test('an unrouted item held by both stores whose text is Secret is settled in both, location kept', async () => {
     const { set, stores } = openSet();
     const key = ['sk', '_live_', 'k9Xp2LmQ7vRt4WzY8bNc3HdF'].join('');
@@ -272,15 +317,14 @@ describe('a lane where only pictures arrive later', () => {
       ownershipKind: 'observed',
     });
     const claim = (ordinal: number) => ({ jobId: `job-${ordinal}`, leaseToken: `lease-${ordinal}`, grantAuthority: 'queue-a', grantOrdinal: ordinal });
-    // The newer generation lands clean text in the Personal store.
+    // The newer generation lands clean text held in the Private store.
     const newer = await sinkHome('internal').accept({ ...request(CORPORA.internal, 'notes-raced', 'The newer clean notes.'), claim: claim(2) });
     expect(newer.accepted).toBe(true);
-    // An older generation, never accepted by the Private store, reads Secret text there.
+    // A delayed older generation cannot change the decision or the held copy.
     const older = await sinkHome('secure_local').accept({ ...request(CORPORA.secure_local, 'notes-raced', `api_key: ${key}`), claim: claim(1) });
-    expect(older.skippedReason).toBe(EXTRACTION_SINK_SKIPPED_SECRETS);
-    expect(chunkText(stores.secure_local, 'notes-raced')).toBe('');
-    // The other store's newer copy is judged by its own accepted grant and stays.
-    expect(chunkText(stores.internal, 'notes-raced')).toContain('newer clean notes');
+    expect(older.skippedReason).toBe(EXTRACTION_SINK_SKIPPED_CLAIM_SUPERSEDED);
+    expect(chunkText(stores.secure_local, 'notes-raced')).toContain('newer clean notes');
+    expect(chunkText(stores.internal, 'notes-raced')).toBe('');
   });
 
   test('without an item, a decision whose text has not landed is placed as one arriving later', () => {

@@ -522,39 +522,52 @@ describe('the extraction job ledger keeps no name of an item that becomes Secret
     expect(jobs.get(again!)?.ref.name).toBeUndefined();
   });
 
-  test('an unchanged file restored by a lower tier is read again once its copy is back: its indexed job keeps its name and stores artifacts', async () => {
+  test('an unchanged file restored by a Personal override is read again once its copy is back: its indexed job keeps its name and stores artifacts', async () => {
     const dir = workspace('olympus-secret-side-jobs-');
     const fx = fixture(dir);
     const jobs = jobStore(dir);
-    fx.ledger.setOverride(identityOf('keys'), { kind: 'not_secret' });
-    await fx.set.sync(fixtureConnector(() => [KEYS]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
-    const [job] = jobs.enqueue({ refs: [ref(KEYS)], extractorKind: 'text', extractorVersion: 'v1' }).jobRefs.map((entry) => entry.jobId);
-    const sheet = { artifactKind: 'sheet' as const, structuralRef: { kind: 'sheet' as const, sheet: 'deploy keys' }, chars: 40 };
+    await fx.set.sync(fixtureConnector(() => [GARDEN]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    const [job] = jobs.enqueue({ refs: [ref(GARDEN)], extractorKind: 'text', extractorVersion: 'v1' }).jobRefs.map((entry) => entry.jobId);
+    const sheet = { artifactKind: 'sheet' as const, structuralRef: { kind: 'sheet' as const, sheet: 'garden plan' }, chars: 40 };
     jobs.lease({ ...LANE_KEY, workerId: 'worker-1' });
     jobs.record({ jobId: job!, status: 'indexed', derivations: [sheet] });
-    fx.ledger.setOverride(identityOf('keys'), { kind: 'tier', tier: 'secrets' });
+    fx.ledger.setOverride(identityOf('garden'), { kind: 'tier', tier: 'secrets' });
     expect(applyOwnerOverrides({ set: fx.set })).toMatchObject({ secrets: 1 });
-    expect(jobs.artifacts(LANE_KEY.corpusId, fixtureLocalId(KEYS))).toEqual([]);
+    expect(jobs.artifacts(LANE_KEY.corpusId, fixtureLocalId(GARDEN))).toEqual([]);
 
-    // Restored by a lower tier through the worker's pass, before any listing:
-    // nothing to move, so no move is queued that could never land.
-    fx.ledger.setOverride(identityOf('keys'), { kind: 'tier', tier: 'private' });
+    // The body is read and screened when the next listing brings it back.
+    fx.ledger.setOverride(identityOf('garden'), { kind: 'tier', tier: 'private' });
     applyOwnerOverrides({ set: fx.set });
-    expect(fx.ledger.getCurrent(identityOf('keys'))).toMatchObject({ state: 'current', contentTier: 'private' });
+    expect(fx.ledger.getCurrent(identityOf('garden'))).toMatchObject({ state: 'current', contentTier: 'secrets' });
     expect(fx.ledger.listMoving()).toEqual([]);
     // Not leasable yet: no restored copy exists for it to land in.
     expect(jobs.get(job!)).toMatchObject({ status: 'indexed' });
     expect(jobs.lease({ ...LANE_KEY, workerId: 'worker-1' }).leasedJobs).toEqual([]);
     // The unchanged listing writes the copy; its plan pass enqueues the same
     // ref: the same job, named again and queued to be read again.
-    await fx.set.sync(fixtureConnector(() => [KEYS]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
-    expect(fx.stores.internal!.itemPresence(identityOf('keys')).active).toBe(true);
-    const [same] = jobs.enqueue({ refs: [ref(KEYS)], extractorKind: 'text', extractorVersion: 'v1' }).jobRefs.map((entry) => entry.jobId);
+    await fx.set.sync(fixtureConnector(() => [GARDEN]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    expect(fx.stores.internal!.itemPresence(identityOf('garden')).active).toBe(true);
+    const [same] = jobs.enqueue({ refs: [ref(GARDEN)], extractorKind: 'text', extractorVersion: 'v1' }).jobRefs.map((entry) => entry.jobId);
     expect(same).toBe(job);
-    expect(jobs.get(job!)).toMatchObject({ status: 'queued', ref: { name: KEYS.name } });
+    expect(jobs.get(job!)).toMatchObject({ status: 'queued', ref: { name: GARDEN.name } });
     const [lease] = jobs.lease({ ...LANE_KEY, workerId: 'worker-1' }).leasedJobs;
     expect(lease?.jobId).toBe(job);
     expect(jobs.record({ jobId: job!, status: 'indexed', leaseToken: lease!.leaseToken, derivations: [sheet] }).artifactsRecorded).toBe(1);
+  });
+
+  test('a Personal override keeps a body with a Secret finding out of Personal search after re-listing', async () => {
+    const dir = workspace('olympus-secret-side-jobs-');
+    const fx = fixture(dir);
+    const row = { ...GARDEN, text: `The old orchard marker came next to a credential ${FAKE_AWS_KEY}.` };
+    const sync = () => fx.set.sync(fixtureConnector(() => [row]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    await sync();
+    const identity = identityOf('garden');
+    expect(fx.ledger.getCurrent(identity)?.contentTier).toBe('secrets');
+    fx.ledger.setOverride(identity, { kind: 'tier', tier: 'private' });
+    applyOwnerOverrides({ set: fx.set });
+    await sync();
+    expect(fx.ledger.getCurrent(identity)?.contentTier).toBe('secrets');
+    expect(fx.stores.internal?.searchItems('orchard', 10) ?? []).toEqual([]);
   });
 
   for (const restoreBeforeRecord of [false, true]) for (const errorKind of ['store_item_secrets', 'store_item_not_eligible', 'source_scope_superseded', 'egress_policy_trust_tier']) {

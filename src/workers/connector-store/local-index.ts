@@ -387,6 +387,7 @@ export const CONTAINER_MIME_TYPES: readonly string[] = Object.freeze([
 const CONTAINER_MIME_TYPES_SQL = CONTAINER_MIME_TYPES.map((type) => `'${type}'`).join(', ');
 const VECTOR_BACKEND = 'exact_scan';
 const SQLITE_STORE_ID = 'connector-store';
+export { SQLITE_STORE_ID as CONNECTOR_STORE_SQLITE_STORE_ID };
 const CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 16;
 /** The `sync_runs` connector id of a strip of picture content outside Private stores. */
 export const IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = 'olympus_image_content_private_only';
@@ -843,6 +844,8 @@ export interface LocalConnectorStoreOptions {
   trustDomain: SourceTrustDomain;
   /** Opens an existing store without migrations, WAL changes, or writes. */
   readOnly?: boolean;
+  /** An offline put-back writes copies at the schema the previous engine knows. */
+  restoreSchemaVersion?: number;
   /**
    * Which still-image formats this machine reads for media search: a yes or
    * no for every format, or a list. Defaults to the machine's own per-format
@@ -1555,8 +1558,7 @@ export type ConnectorStoreOwnershipKind = 'observed' | 'preservation';
  * What one leg of a tiered store set does with one listed item (design
  * docs/design/per-item-four-tier-classification.md, sections 2 and 3.2).
  *
- * - `legacy`: the lane's own placement, byte-for-byte the P1a path. Every item
- *   stored before P1b, and every item whose content was not read, takes it.
+ * - `legacy`: the lane's existing placement for an unrouted item observed without its body.
  * - `store`: this store holds the item for `layer`, at `sensitivity`. A
  *   `metadata` layer is stored without content.
  * - `elsewhere`: another store holds it (or nothing does: Secrets). This store
@@ -1570,7 +1572,7 @@ export type ConnectorStoreOwnershipKind = 'observed' | 'preservation';
  */
 export type ConnectorStoreTierRoute =
   | { kind: 'legacy' }
-  | { kind: 'store'; sensitivity: SourceSensitivity; layer: 'both' | 'metadata' | 'content' }
+  | { kind: 'store'; sensitivity: SourceSensitivity; layer: 'both' | 'metadata' | 'content'; writeListedBody?: true }
   | { kind: 'elsewhere'; reason: 'routed_to_other_tier' | 'secrets' | 'move_queued' | 'content_unread' }
   | { kind: 'delete'; reason: 'provider_deleted' | 'secrets'; keepLocation?: true };
 
@@ -3271,6 +3273,8 @@ export interface ConnectorStoreItemRepresentationCoverage {
 export interface ConnectorStoreRepresentationRestoreItem {
   item: RawItem;
   expectation: ConnectorStoreItemRepresentationExpectation;
+  /** Source row version when preparing the restore, including a missing version. */
+  expectedStoredSourceVersion?: string | null;
   /**
    * Media the item's content is also searched by, attached to its first
    * chunk (docs/design/photo-embeddings.md). Its digest must match the
@@ -3333,7 +3337,7 @@ export interface ConnectorStoreRepresentationRestoreOptions {
   syncConnectorId: string;
   ownerConnectorId: string;
   ownershipKind: ConnectorStoreOwnershipKind;
-  classify: (item: RawItem) => SourceSensitivity;
+  classify?: (item: RawItem) => SourceSensitivity;
   skipOwner?: {
     connectorId: string;
     ownershipKind: ConnectorStoreOwnershipKind;
@@ -3345,6 +3349,8 @@ export interface ConnectorStoreRepresentationRestoreOptions {
    * write exactly as they were.
    */
   writeClaim?: ConnectorStoreItemWriteClaim;
+  /** Select a landing after the existing row, policy and claim are checked. */
+  route?: (record: ConnectorStoreRepresentationRestoreItem) => ConnectorStoreRepresentationLanding | undefined;
   maxChunkChars?: number;
   /**
    * Keep existing newline-delimited search facets while merging metadata
@@ -3360,6 +3366,13 @@ export interface ConnectorStoreRepresentationRestoreOptions {
    */
   preserveStoredSearchTextOwnedFacets?: boolean;
 }
+
+export type ConnectorStoreRepresentationLanding = {
+  store: LocalConnectorStore;
+  sensitivity: SourceSensitivity;
+  prepare: () => boolean;
+  landed: () => void;
+} | { refused: () => void };
 
 export interface ConnectorStoreRepresentationRestoreSummary {
   syncRunId: string;
@@ -4067,7 +4080,8 @@ export class LocalConnectorStore {
       // foreign key) run only when this open migrates: on Sparta they read
       // about 22 GB per plain restart across both engine processes, most of
       // each one's 6 minutes to ready (ops#151, 2026-11-12).
-      const migrating = options.readOnly !== true && versionAtOpen < CONNECTOR_STORE_SQLITE_SCHEMA_VERSION;
+      const schemaTarget = options.restoreSchemaVersion ?? CONNECTOR_STORE_SQLITE_SCHEMA_VERSION;
+      const migrating = options.readOnly !== true && versionAtOpen < schemaTarget;
       validateCurrentConnectorStoreSchemaBeforeMigration(this.db);
       // The checks that read every row are part of the update; the heartbeat
       // says so while they hold the loop.
@@ -4083,6 +4097,12 @@ export class LocalConnectorStore {
         if (version < READ_ONLY_MIN_SCHEMA_VERSION) {
           throw new Error('Connector store read-only mode requires the v7 filter schema or newer.');
         }
+      } else if (options.restoreSchemaVersion !== undefined) {
+        if (schemaTarget < 15 || schemaTarget > CONNECTOR_STORE_SQLITE_SCHEMA_VERSION
+          || (!creatingFile && versionAtOpen !== schemaTarget)) {
+          throw new Error('The connector store cannot be written at its restored schema.');
+        }
+        if (creatingFile) applyConnectorStoreOpenSchema(this.db, schemaTarget);
       } else {
         // Fast path: a store this build's schema code already brought fully
         // up to date runs no DDL and no backfill at open. Its user_version
@@ -4135,11 +4155,11 @@ export class LocalConnectorStore {
       this.mediaJudgmentsPresent = CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS.every((column) => judgmentColumns.includes(column));
       // Only a store that holds vectors without a complete digest starts a
       // backfill timer at open; an empty or finished store keeps none pending.
-      if (!this.readOnly) {
+      if (!this.readOnly && options.restoreSchemaVersion === undefined) {
         const model = (this.db.query('SELECT model_id FROM chunk_embeddings ORDER BY rowid DESC LIMIT 1').get() as { model_id: string } | null)?.model_id;
         if (model && !vectorDigestState(this.db, model).completed) this.scheduleVectorDigestBackfill(model, VECTOR_DIGEST_BACKFILL_OPEN_DELAY_MS);
       }
-      if (!this.readOnly && !creatingFile && (this.db.query(
+      if (!this.readOnly && options.restoreSchemaVersion === undefined && !creatingFile && (this.db.query(
         "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name IN (?, ?)",
       ).get(CONNECTOR_STORE_RECENCY_INDEX, CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX) as { n: number }).n < 2) {
         if (admitRecencyIndexBuild) this.scheduleRecencyIndexBuild();
@@ -9968,6 +9988,7 @@ export class LocalConnectorStore {
     // Opening a ledger can settle its schema/holds: do that before acquiring
     // the source writer, then only read the captured ledger under the lock.
     const tierLedgerForWrite = this.visibilityLedger();
+    const landed: Array<() => void> = [];
     const summary = this.db.transaction((): ConnectorStoreRepresentationRestoreSummary => {
       const syncRunId = `connector-representation-restore-${randomUUID()}`;
       const startedAt = this.now().toISOString();
@@ -10000,7 +10021,7 @@ export class LocalConnectorStore {
 
       for (const record of options.items) {
         const item = record.item;
-        if (!this.tierWriteAllowed(item.identity, 'content', tierLedgerForWrite)) {
+        if (!this.tierWriteAllowed(item.identity, options.route ? 'metadata' : 'content', tierLedgerForWrite)) {
           itemsMetadataOnly += 1;
           skippedProviderItemIds.push(item.identity.providerItemId);
           continue;
@@ -10031,10 +10052,12 @@ export class LocalConnectorStore {
             COUNT(*) AS matching_provider_id_rows,
             SUM(CASE WHEN normalized_conversation = ? THEN 1 ELSE 0 END) AS exact_identity_rows,
             MIN(CASE WHEN normalized_conversation = ? THEN item_pk END) AS item_pk,
-            MIN(CASE WHEN normalized_conversation = ? THEN tombstoned END) AS tombstoned
+            MIN(CASE WHEN normalized_conversation = ? THEN tombstoned END) AS tombstoned,
+            MIN(CASE WHEN normalized_conversation = ? THEN source_version END) AS source_version
           FROM items
           WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
         `).get(
+          normalizeConversationId(item.identity.providerConversationId),
           normalizeConversationId(item.identity.providerConversationId),
           normalizeConversationId(item.identity.providerConversationId),
           normalizeConversationId(item.identity.providerConversationId),
@@ -10046,6 +10069,7 @@ export class LocalConnectorStore {
           exact_identity_rows: number;
           item_pk: number | null;
           tombstoned: number | null;
+          source_version: string | null;
         };
         if (identityAmbiguous(item.identity, existing)) {
           throw new Error(
@@ -10097,6 +10121,55 @@ export class LocalConnectorStore {
           continue;
         }
 
+        const expectedVersion = record.expectedStoredSourceVersion !== undefined
+          ? record.expectedStoredSourceVersion : item.identity.sourceVersion;
+        const route = options.route && (expectedVersion === undefined || existing.source_version === expectedVersion)
+          ? options.route(record) : undefined;
+        if (options.route && (!route || 'refused' in route)) {
+          if (route && 'refused' in route) landed.push(route.refused);
+          itemsMetadataOnly += 1;
+          skippedProviderItemIds.push(item.identity.providerItemId);
+          continue;
+        }
+        const landing = route && 'store' in route ? route : undefined;
+        if (landing && landing.store !== this) {
+          const placed = landing.store.withItemCopyWriteFence(item.identity, () => {
+            if (!landing.prepare()) return undefined;
+            return landing.store.restoreItemRepresentations({
+              items: [record],
+              syncConnectorId,
+              ownerConnectorId,
+              ownershipKind: options.ownershipKind,
+              classify: () => landing.sensitivity,
+              ...(writeClaim ? { writeClaim } : {}),
+              ...(options.maxChunkChars !== undefined ? { maxChunkChars: options.maxChunkChars } : {}),
+              ...(options.preserveStoredSearchText ? { preserveStoredSearchText: true } : {}),
+              ...(options.preserveStoredSearchTextOwnedFacets ? { preserveStoredSearchTextOwnedFacets: true } : {}),
+            });
+          });
+          if (!placed) {
+            itemsMetadataOnly += 1;
+            skippedProviderItemIds.push(item.identity.providerItemId);
+            continue;
+          }
+          const { counts } = placed;
+          itemsRestored += counts.itemsRestored;
+          itemsUnchanged += counts.itemsUnchanged;
+          itemsExcluded += counts.itemsExcluded;
+          itemsMetadataOnly += counts.itemsMetadataOnly;
+          itemsSkippedTombstoned += counts.itemsSkippedTombstoned;
+          itemsSkippedStaleClaim += counts.itemsSkippedStaleClaim;
+          chunksAwaitingEmbedding += counts.chunksAwaitingEmbedding;
+          if (counts.itemsRestored > 0) restoredProviderItemIds.push(item.identity.providerItemId);
+          if (counts.itemsRestored + counts.itemsUnchanged > 0) landed.push(landing.landed);
+          else skippedProviderItemIds.push(item.identity.providerItemId);
+          continue;
+        }
+        if (landing && !landing.prepare()) {
+          itemsMetadataOnly += 1;
+          skippedProviderItemIds.push(item.identity.providerItemId);
+          continue;
+        }
         if (this.itemRepresentationCoverage(record.expectation).complete) {
           // Read again with nothing new (a tiny picture's same text): still a
           // reading, so the image is not listed for one more.
@@ -10107,11 +10180,12 @@ export class LocalConnectorStore {
           // Complete means the stored chunks already are this version's.
           this.clearItemTextVersion(existing.item_pk);
           itemsUnchanged += 1;
+          if (landing) landed.push(landing.landed);
           continue;
         }
 
-        const sensitivity = options.classify(item);
-        if (sensitivity.trustDomain !== this.trustDomain || sensitivity.trustTier === 'S5') {
+        const sensitivity = landing?.sensitivity ?? options.classify?.(item);
+        if (!sensitivity || sensitivity.trustDomain !== this.trustDomain || sensitivity.trustTier === 'S5') {
           throw new Error('Representation restore item classification is not eligible for this store.');
         }
         const upsert = this.upsertItemWithOwner(
@@ -10146,6 +10220,7 @@ export class LocalConnectorStore {
         `).get(upsert.itemPk) as { count: number }).count;
         itemsRestored += 1;
         restoredProviderItemIds.push(item.identity.providerItemId);
+        if (landing) landed.push(landing.landed);
       }
 
       const completedAt = this.now().toISOString();
@@ -10172,6 +10247,7 @@ export class LocalConnectorStore {
         skippedProviderItemIds: skippedProviderItemIds.sort(),
       };
     }).immediate();
+    for (const commit of landed) commit();
     // References are taken once the content is committed: a rolled-back
     // restore leaves no marker behind. The extraction's own staging hold
     // keeps the file until then.
@@ -10814,6 +10890,17 @@ export class LocalConnectorStore {
       this.now().toISOString(),
     );
     return true;
+  }
+
+  /** Check a deciding sink against the grant that wrote an item's current representation. */
+  hasNewerItemWriteClaim(identity: SourceItemIdentity, claim: ConnectorStoreItemWriteClaim): boolean {
+    return this.db.query(`
+      SELECT 1 FROM item_write_claims w
+      JOIN items i ON i.item_pk = w.item_pk
+      WHERE i.provider = ? AND i.account_scope = ? AND i.normalized_conversation = ?
+        AND i.provider_item_id = ? AND w.claim_scope = ? AND w.claim_authority = ? AND w.claim_ordinal > ?
+    `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId),
+      identity.providerItemId, claim.scope, claim.authority, claim.ordinal) !== null;
   }
 
   /**
@@ -11872,7 +11959,7 @@ export class LocalConnectorStore {
           if (
             !metadataOnly
             && !deferMetadataOnlyContent && item.deferredBytes === undefined
-            && classification
+            && (classification || tierRouting)
             && fetchContent
             && item.content.kind === 'metadata_only'
           ) {
@@ -11894,8 +11981,7 @@ export class LocalConnectorStore {
           // storing or embedding content. The four-tier decision is recorded
           // beside it and does not change it (phase P1a).
           const legacySensitivity = classifyConnectorStoreItem(itemForStorage, classification, placement, this.trustDomain);
-          // A tiered store set routes NEW items by their recorded tiers; every
-          // other item gets `legacy` and takes exactly the P1a path below.
+          // Route the body that will be indexed, including a body fetched from a listing stub.
           const route: ConnectorStoreTierRoute = tierRouting
             ? await tierRouting.route({
               store: this,
@@ -12085,10 +12171,11 @@ export class LocalConnectorStore {
 
           let ftsContentChanged = false;
           if (
-            fetchContent
+            (fetchContent || (route.kind === 'store' && route.writeListedBody && itemForStorage.content.kind !== 'metadata_only'))
             && !contentFetchFailed
             && !metadataOnly
             && routedLayer !== 'metadata'
+            && !(tierRouting && itemForStorage.content.kind === 'metadata_only')
             && (!(deferMetadataOnlyContent || itemForStorage.deferredBytes !== undefined) || itemForStorage.content.kind !== 'metadata_only')
           ) {
             const indexed = await this.indexItemContent(
@@ -21912,9 +21999,9 @@ function validateVectorDigestSchema(db: Database): void {
   assertTriggerExists(db, 'connector_store_vector_digest_account', 'v16');
 }
 
-function validateConnectorStoreSchema(db: Database): void {
+function validateConnectorStoreSchema(db: Database, version = CONNECTOR_STORE_SQLITE_SCHEMA_VERSION): void {
   validateConnectorStoreV12Schema(db, 'v15', CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS);
-  validateVectorDigestSchema(db);
+  if (version >= 16) validateVectorDigestSchema(db);
   assertIndexColumns(db, 'idx_connector_store_items_parent', ['parent_local_item_id'], 'v15');
   assertExactTableColumns(db, 'chunk_media_releases', ['media_sha256', 'media_path'], false, 'v13');
   assertExactTableColumns(db, 'chunk_media_failures', ['media_sha256', 'reason', 'failed_at', 'attempts'], false, 'v13');
@@ -22166,10 +22253,10 @@ function sameStringSet(actual: readonly string[], expected: readonly string[]): 
 }
 
 /** Everything an open that is not on the fast path runs to bring a store to this build's schema, idempotently. */
-function applyConnectorStoreOpenSchema(db: Database): void {
+function applyConnectorStoreOpenSchema(db: Database, version = CONNECTOR_STORE_SQLITE_SCHEMA_VERSION): void {
   refuseUnversionedConnectorStoreSchema(db);
   LocalConnectorStore.migrateSchema(db);
-  runSqliteMigrations(db, SQLITE_STORE_ID, connectorStoreMigrations());
+  runSqliteMigrations(db, SQLITE_STORE_ID, connectorStoreMigrations().filter(migration => migration.version <= version));
   createConnectorStoreChunkMediaReleases(db);
   createConnectorStoreMediaJudgments(db);
   createConnectorStoreItemTextVersions(db);
@@ -22179,7 +22266,7 @@ function applyConnectorStoreOpenSchema(db: Database): void {
   db.exec(`CREATE TABLE IF NOT EXISTS on_demand_item_reads (
     local_item_id TEXT PRIMARY KEY, source_version TEXT NOT NULL, read_on_demand INTEGER NOT NULL DEFAULT 1
   );`);
-  validateConnectorStoreSchema(db);
+  validateConnectorStoreSchema(db, version);
 }
 
 let openShape: number | undefined;

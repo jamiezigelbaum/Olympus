@@ -24,7 +24,7 @@ import {
   configureInstalledTierClassification,
 } from '../src/workers/classification/installed-tier-classification.ts';
 import { writePrivacyProfile } from '../src/workers/classification/privacy-profile.ts';
-import { classifyItemTiers, contentDigestReason, type OwnerTierRule, type TierDecision, type TierSniffer } from '../src/workers/classification/tier-classifier.ts';
+import { classifyItemTiers, type OwnerTierRule, type TierDecision, type TierSniffer } from '../src/workers/classification/tier-classifier.ts';
 import { writeOwnerTierRules } from '../src/workers/classification/tier-rules.ts';
 import {
   createConnectorStoreContentProvider,
@@ -895,7 +895,7 @@ test('a completed label walk distinguishes a match that was already Private from
   const move = (item: typeof matched) => ({ set: lane.tierSet, identity: item, target });
   for (const item of [matched, unmatched]) {
     const body = lane.secureStore.exportItemCopy(item)!.chunks.map((chunk) => chunk.boundedText).join('');
-    const judged = { ...decision, reasons: [...decision.reasons, contentDigestReason(body)] };
+    const judged = classifyItemTiers({ signals: {}, text: body }, { sniffer: JUDGED_PERSONAL_SNIFFER });
     expect(lane.ledger.recordRoutedPlacement(item, judged, lane.tierSet.placementFor(judged)).outcome).toBe('queued_move');
   }
   const [kept, lowered] = moveTieredItemsLowering([move(matched), move(unmatched)]);

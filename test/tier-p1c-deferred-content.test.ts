@@ -108,6 +108,7 @@ async function populateLegacy(dir: string): Promise<void> {
     await secure.syncFromConnector(fixtureConnector(() => listing(LEGACY)), { fetchContent: false, placement: SECURE_PLACEMENT });
     const sink = createConnectorStoreExtractionSink({
       store: secure,
+      recordContentTier: false,
       classify: () => buildSourceSensitivity({ trustTier: 'S4', trustDomain: 'secure_local' }),
       syncConnectorId: 'extraction',
       ownerConnectorId: 'fixture-connector',

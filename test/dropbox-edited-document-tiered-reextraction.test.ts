@@ -54,8 +54,8 @@ const HEALTH_RECORD = /glucose/i;
 const SNIFFER: TierSniffer = {
   id: 'fixture-sniffer',
   judge: (request) => HEALTH_RECORD.test(request.material ?? '')
-    ? { verdict: 'decided', tier: 'secure', code: 'private' }
-    : { verdict: 'decided', tier: 'private', code: 'ordinary' },
+    ? { verdict: 'decided', tier: 'secure', code: 'private', origin: 'model' }
+    : { verdict: 'decided', tier: 'private', code: 'ordinary', origin: 'model' },
 };
 
 // Built at runtime: the repository refuses literal credential patterns.

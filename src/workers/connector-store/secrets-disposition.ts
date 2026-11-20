@@ -84,6 +84,8 @@ export function settleSecretsCopies(options: {
   storeFor: (corpusId: string) => LocalConnectorStore | undefined;
   connectorId: string;
   disposition?: SecretsDisposition;
+  /** Delete questions at the restored queue's schema while the previous engine is stopped. */
+  restoreQueue?: true;
 }): SettledSecretsCopies {
   const disposition = options.disposition ?? secretsDisposition();
   const chunks: Record<string, number> = {};
@@ -105,7 +107,10 @@ export function settleSecretsCopies(options: {
     }
   }
   // Whichever way the copies go, the side stores forget the item now.
-  const sideStores = forgetSecretInSideStores({ ledger: options.ledger, identity });
+  const sideStores = forgetSecretInSideStores({
+    ledger: options.ledger, identity,
+    ...(options.restoreQueue ? { restoreQueue: true } : {}),
+  });
   if (disposition === 'tombstone_now') {
     // The tombstones are durable before the ledger (FULL) forgets the copies:
     // a store (NORMAL) rolled back by a power cut never shows a copyless row.
@@ -144,6 +149,7 @@ export function forgetSecretInSideStores(options: {
    * the retirement.
    */
   onlyWhileOwed?: boolean;
+  restoreQueue?: true;
 }): ForgottenSecretSideStores {
   const result: ForgottenSecretSideStores = { snifferQuestions: 0, extractionJobNames: 0, appReleaseTitles: 0, failed: 0, notDurable: 0 };
   const { identity, ledger } = options;
@@ -174,7 +180,7 @@ export function forgetSecretInSideStores(options: {
   const snifferPath = tierSnifferPathForLedger(ledger.dbPath);
   if (snifferPath !== ':memory:' && existsSync(snifferPath)) {
     try {
-      const sniffer = new TierSnifferStore({ dbPath: snifferPath });
+      const sniffer = new TierSnifferStore({ dbPath: snifferPath, ...(options.restoreQueue ? { restoreQueue: true } : {}) });
       try {
         result.snifferQuestions = sniffer.deleteItemQuestions({
           provider: identity.provider,

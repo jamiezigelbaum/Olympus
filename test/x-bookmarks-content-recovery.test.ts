@@ -27,6 +27,8 @@ import {
   type XBookmarkContentLookupClient,
 } from '../src/workers/x-bookmarks/index.ts';
 
+import { xBookmarksRecoveryTestTierSet } from './helpers/lane-tier-sets.ts';
+
 const ACCOUNT = 'personal';
 
 describe('X bookmark content recovery', () => {
@@ -195,6 +197,7 @@ describe('X bookmark content recovery', () => {
       };
       const handler = createXBookmarksContentRecoveryHandler({
         store,
+        tierSet: xBookmarksRecoveryTestTierSet(store),
         usageStore: usage,
         reconcileStateStore: reconcileState,
         embeddingProvider,
@@ -355,6 +358,7 @@ describe('X bookmark content recovery', () => {
 
       const receipt = await createXBookmarksContentRecoveryHandler({
         store,
+        tierSet: xBookmarksRecoveryTestTierSet(store),
         usageStore: usage,
         reconcileStateStore: reconcileState,
         sourceClient: {
@@ -482,6 +486,7 @@ describe('X bookmark content recovery', () => {
 
       const receipt = await createXBookmarksContentRecoveryHandler({
         store,
+        tierSet: xBookmarksRecoveryTestTierSet(store),
         usageStore: usage,
         reconcileStateStore: reconcileState,
         sourceClient: {
@@ -639,6 +644,7 @@ describe('X bookmark content recovery', () => {
       let replacementGeneration = 0;
       const receipt = await createXBookmarksContentRecoveryHandler({
         store,
+        tierSet: xBookmarksRecoveryTestTierSet(store),
         usageStore: usage,
         reconcileStateStore: reconcileState,
         sourceClient: {
@@ -760,6 +766,7 @@ describe('X bookmark content recovery', () => {
 
       const receipt = await createXBookmarksContentRecoveryHandler({
         store,
+        tierSet: xBookmarksRecoveryTestTierSet(store),
         usageStore: usage,
         sourceClient: {
           async fetchPostsByIds() {
@@ -856,6 +863,7 @@ describe('X bookmark content recovery', () => {
       const attemptedAt = new Date('2026-07-30T12:00:00.000Z');
       const result = await createXBookmarksContentRecoveryHandler({
         store,
+        tierSet: xBookmarksRecoveryTestTierSet(store),
         usageStore: usage,
         credentialBroker: {
           async issueSession() {
@@ -919,6 +927,7 @@ describe('X bookmark content recovery', () => {
         }
         const receipt = await createXBookmarksContentRecoveryHandler({
           store,
+          tierSet: xBookmarksRecoveryTestTierSet(store),
           usageStore: usage,
           account: ACCOUNT,
           userId: 'provider-user-1',
@@ -1103,6 +1112,7 @@ describe('X bookmark content recovery', () => {
       };
       const handler = createXBookmarksContentRecoveryHandler({
         store,
+        tierSet: xBookmarksRecoveryTestTierSet(store),
         usageStore: usage,
         sourceClient: {
           async fetchPostsByIds() {

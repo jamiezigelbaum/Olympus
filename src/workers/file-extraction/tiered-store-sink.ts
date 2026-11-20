@@ -8,9 +8,8 @@
  *
  * Two kinds of item reach it:
  *
- *   - A LEGACY item (stored before per-tier routing, never routed) takes the
- *     plain store sink over the lane's own store, byte-for-byte the path it
- *     always took. Nothing about it moves.
+ *   - An unrouted item gets a placement for newly read text
+ *     before the representation is written.
  *   - A ROUTED item has its names in its metadata tier's store. Its text is
  *     judged here (pass 2 of the shared classifier, which can only raise the
  *     metadata tier) and lands in the CONTENT tier's store: the same store,
@@ -30,12 +29,13 @@ import {
 } from '../../core/source-index/types.ts';
 import { detectSecretFindingKinds } from '../classification/engine.ts';
 import { CONTENT_NAMES_ONLY_LIFTED_REASON, CONTENT_NAMES_ONLY_REASON, arrivalOrderedSniffer, classifyContentTier, heldUntilJudged, maxTier, namesDecidedByOwner, type TierDecision, type TierKey } from '../classification/tier-classifier.ts';
-import { copyServingLayer, isFailSafeMissingContentQuestion, placementIsRaise, trustDomainRank, type TierCopy, type TierPlacementPlan } from '../classification/tier-ledger.ts';
+import { copyServingLayer, isFailSafeMissingContentQuestion, placementIsRaise, trustDomainRank, type TierCopy, type TierLedgerRecord, type TierPlacementPlan } from '../classification/tier-ledger.ts';
 import type { ConnectorStoreOwnershipKind, LocalConnectorStore } from '../connector-store/index.ts';
 import { parentNamesContext } from '../connector-store/parent-context.ts';
-import { secretFencedSniffer, type ConnectorStoreTierClassification } from '../connector-store/tier-placement.ts';
+import { decideItemTiers, secretFencedSniffer, type ConnectorStoreTierClassification } from '../connector-store/tier-placement.ts';
+import type { ConnectorStoreRepresentationRestoreOptions } from '../connector-store/local-index.ts';
 import { imageJudgmentSignal, type MediaJudgment } from '../source-index/media-judge.ts';
-import { settleSecretsCopies, settleUntrackedSecretsCopy } from '../connector-store/secrets-disposition.ts';
+import { settleSecretsCopies } from '../connector-store/secrets-disposition.ts';
 import {
   TIER_DOMAIN_ORDER,
   TIER_KEY_TRUST_DOMAIN,
@@ -43,9 +43,11 @@ import {
   type TieredStoreSet,
 } from '../connector-store/tiered-store-set.ts';
 import {
+  EXTRACTION_SINK_SKIPPED_CLAIM_SUPERSEDED,
   EXTRACTION_SINK_SKIPPED_ITEM_MISSING,
   EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE,
   EXTRACTION_SINK_SKIPPED_SECRETS,
+  EXTRACTION_SINK_SKIPPED_SOURCE_VERSION_STALE,
   EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED,
   createConnectorStoreExtractionSink,
   extractionWriteClaim,
@@ -81,20 +83,13 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
   // names at listing: the set's own classification unless one is given,
   // resolved per landing so an edited map or rules file applies at once.
   const classificationNow = (): ConnectorStoreTierClassification | undefined => options.tierClassification ?? set.classification();
-  // `contentRulesRan`: the landing has judged the text with the content rules
-  // (classifyContentTier), so the sink may let an ordinary picture rest
-  // outside Private. A legacy landing runs no rules, so it never may.
   const sinkFor = (
     store: LocalConnectorStore,
-    recordContentTier: boolean,
-    tierClassification: ConnectorStoreTierClassification | undefined,
-    contentRulesRan: boolean,
+    route?: ConnectorStoreRepresentationRestoreOptions['route'],
   ): ExtractionSink =>
     createConnectorStoreExtractionSink({
       store,
       classify: (item: RawItem) => buildSourceSensitivity({
-        // The row's OWN stored tier, read live, as the plain sink always did;
-        // a row written moments ago for this landing rests at its leg's tier.
         trustTier: store.activeLocalItemRow(item.identity.localItemId)?.trustTier
           ?? set.restingTierFor(store.trustDomain),
         trustDomain: store.trustDomain,
@@ -103,12 +98,10 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
       ownerConnectorId: options.ownerConnectorId,
       ownershipKind: options.ownershipKind,
       ...(options.claims ? { claims: options.claims } : {}),
-      ...(tierClassification ? { tierClassification } : {}),
-      ...(recordContentTier ? {} : { recordContentTier: false }),
-      // A routed landing has judged the text already (classifyContentTier)
-      // and settles Secrets through the ledger; a legacy one has not.
-      ...(contentRulesRan ? { secretsFloor: false } : {}),
-      ...(contentRulesRan ? { mediaJudgment: (sha256: string) => setMediaJudgment(set, sha256) } : {}),
+      ...(route ? { route } : {}),
+      recordContentTier: false,
+      secretsFloor: false,
+      mediaJudgment: (sha256: string) => setMediaJudgment(set, sha256),
     });
 
   return {
@@ -124,39 +117,15 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
           && candidate.providerItemId === ref.providerItemId);
       const identity = stored ?? { provider: ref.provider, accountScope: ref.accountScope, providerItemId: ref.providerItemId };
       const ledger = set.ledger;
-      if (!ledger.isRouted(identity)) {
-        const legacy = legacyStoreFor(set, ref.localItemId, options.home);
+      const recorded = ledger.getCurrent(identity);
+      if (!recorded?.routed || representationLandingDue(recorded)) {
+        const retry = recorded?.routed ? ledger.copies(identity).find((copy) => copy.state === 'current' && copy.layers === 'metadata') : undefined;
+        const legacy = retry ? set.store(retry.trustDomain) : legacyStoreFor(set, ref.localItemId, options.home);
         if (!legacy) return skipped(EXTRACTION_SINK_SKIPPED_ITEM_MISSING);
-        // Read before the landing: a Secret's row keeps no names afterwards.
-        const legacyPlan = planExtractionSinkWrite(legacy, request);
-        const legacyScope = legacy.activeLocalItemRow(ref.localItemId)?.sourceScope;
-        const result = await sinkFor(legacy, true, classificationNow(), false).accept(request);
-        if (result.skippedReason === EXTRACTION_SINK_SKIPPED_SECRETS && !('skippedReason' in legacyPlan)) {
-          // The plain sink settled its own store's copy. Another legacy leg
-          // may hold the same item, and no ledger row hides an unrouted copy,
-          // so every one of them is settled the same way, each fenced by its
-          // own store's accepted grant so an older generation never removes
-          // a newer one's copy; the location is recorded where the set keeps
-          // Secrets locations.
-          const writeClaim = extractionWriteClaim(request);
-          for (const domain of TIER_DOMAIN_ORDER) {
-            const other = set.legSpec(domain)?.legacy === true ? set.store(domain) : undefined;
-            if (!other || other === legacy) continue;
-            settleUntrackedSecretsCopy({
-              store: other,
-              identity: legacyPlan.item.identity,
-              connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID,
-              metadata: legacyPlan.item.metadata,
-              ...(writeClaim ? { writeClaim } : {}),
-            });
-          }
-          const names = ledger.getCurrent(identity)?.metadataTier;
-          recordSecret(set, legacyPlan.item, request.text, {
-            namesReleasable: names === 'public' || names === 'private',
-            sourceScope: legacyScope,
-          });
-        }
-        return result;
+        const route = tieredRepresentationLanding({
+          set, anchor: legacy, classification: classificationNow,
+        });
+        return sinkFor(legacy, route).accept(request);
       }
 
       // Before anything else is read: the sniffer fence keys off this.
@@ -170,6 +139,16 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
       if (!anchor || !anchorStore) return skipped(EXTRACTION_SINK_SKIPPED_ITEM_MISSING);
       const plan = planExtractionSinkWrite(anchorStore, request);
       if ('skippedReason' in plan) return skipped(plan.skippedReason);
+
+      const writeClaim = extractionWriteClaim(request);
+      if (request.claim && options.claims && !options.claims.holdsExtractionClaim(request.claim)
+        || writeClaim && current.some((copy) => set.store(copy.trustDomain)?.hasNewerItemWriteClaim(plan.item.identity, writeClaim))) {
+        return skipped(EXTRACTION_SINK_SKIPPED_CLAIM_SUPERSEDED);
+      }
+      const currentVersion = anchorStore.itemMetadataSnapshot(plan.item.identity)?.sourceVersion;
+      if (plan.item.identity.sourceVersion && currentVersion && plan.item.identity.sourceVersion !== currentVersion) {
+        return skipped(EXTRACTION_SINK_SKIPPED_SOURCE_VERSION_STALE);
+      }
 
       const tierClassification = classificationNow();
       const override = read.override;
@@ -307,13 +286,13 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
             const restingDomain = resting ? set.domainForCorpus(resting.corpusId) : undefined;
             const restingStore = restingDomain ? set.store(restingDomain) : undefined;
             if (!restingStore) return skipped(EXTRACTION_SINK_SKIPPED_ITEM_MISSING);
-            const replaced = await sinkFor(restingStore, false, tierClassification, true).accept(request);
+            const replaced = await sinkFor(restingStore).accept(request);
             if (!replaced.accepted) return replaced;
           }
           ledger.recordRoutedPlacement(identity, decision, placement);
           return skipped(EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED);
         }
-        const result = await sinkFor(contentStore, false, tierClassification, true).accept(request);
+        const result = await sinkFor(contentStore).accept(request);
         if (result.accepted) ledger.recordRoutedPlacement(identity, decision, placement);
         return result;
       }
@@ -388,11 +367,137 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
           },
         );
       }
-      const result = await sinkFor(contentStore, false, tierClassification, true).accept(request);
+      const result = await sinkFor(contentStore).accept(request);
       if (!result.accepted) return result;
       ledger.landExtractedContent(identity, decision, placement, { expectedGeneration: landingGeneration });
       return result;
     },
+  };
+}
+
+// An interrupted landing retains the receipt for the text its writer owes.
+export function representationLandingDue(record: TierLedgerRecord): boolean {
+  return record.routed && record.state === 'pending' && !record.contentRead
+    && record.reasons.some((reason) => reason.startsWith('content:sha256:'));
+}
+
+// Place newly read text under the existing representation write fence.
+export function tieredRepresentationLanding(options: {
+  set: TieredStoreSet;
+  anchor: LocalConnectorStore;
+  connector?: Pick<SourceConnector, 'classificationSignals'>;
+  replaceStoredContent?: boolean;
+  classification?: () => ConnectorStoreTierClassification | undefined;
+}): NonNullable<ConnectorStoreRepresentationRestoreOptions['route']> {
+  const { set, anchor } = options;
+  const ledger = set.ledger;
+  return ({ item, expectation }) => {
+    if (item.content.kind !== 'text') return undefined;
+    const { identity } = item;
+    const prior = ledger.getCurrent(identity);
+    if (prior?.routed && !representationLandingDue(prior)
+      && (!options.replaceStoredContent || prior.state === 'moving')) return undefined;
+    const classification = options.classification?.() ?? set.classification();
+    const override = ledger.getOverride(identity);
+    const text = item.content.text;
+    const source = anchor.exportItemCopy(identity);
+    if (!source) return undefined;
+    const connector = options.connector ?? {
+      classificationSignals: (item: RawItem) => {
+        const title = stringMetadata(item, ['title', 'name', 'subject']);
+        const path = stringMetadata(item, ['locatorUri', 'pathDisplay']);
+        const sender = source.columns.sender_label;
+        const folderKeys = JSON.parse(String(source.columns.source_scope_folder_keys_json ?? '[]')) as string[];
+        return {
+          ...(title ? { title } : {}), ...(path ? { path } : {}),
+          ...(typeof sender === 'string' ? { sender } : {}), folderKeys,
+        };
+      },
+    };
+    let decision = decideItemTiers(connector, item, text, classification, ledger, { requireContentVerdict: true });
+    if (decision.contentTier === 'secrets') {
+      if (set.openStores().some((store) => {
+        const copy = store.itemMetadataSnapshot(identity);
+        return copy !== undefined && copy.sourceVersion !== source.identity.sourceVersion;
+      })) return undefined;
+      const adopted = set.adoptLegacyItem(identity);
+      if (!adopted?.routed) return undefined;
+      const { previousCopies } = ledger.recordRoutedPlacement(identity, decision, { copies: [], embedHold: false });
+      return { refused: () => {
+        recordSecret(set, item, text, {
+          namesReleasable: decision.metadataTier === 'public' || decision.metadataTier === 'private',
+          sourceScope: anchor.activeLocalItemRow(identity.localItemId)?.sourceScope,
+        });
+        settleSecretsCopies({
+          ledger, identity, copies: previousCopies,
+          storeFor: (corpusId) => {
+            const domain = set.domainForCorpus(corpusId);
+            return domain ? set.store(domain) : undefined;
+          },
+          connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID,
+        });
+      } };
+    }
+    if (classification?.unavailableReason) {
+      decision = { ...decision, state: 'pending', metadataPending: true, contentPending: true,
+        reasons: [...decision.reasons, `content:${classification.unavailableReason}`] };
+    }
+    decision = set.checkedBodyDecision(identity, decision, text);
+    const placement = set.placementFor(decision);
+    const contentCopy = copyServingLayer(placement.copies, 'content');
+    const store = contentCopy ? set.store(contentCopy.trustDomain, { create: true }) : undefined;
+    if (!contentCopy || !store) return undefined;
+
+    let prepared: TierLedgerRecord | undefined;
+    return {
+      store,
+      sensitivity: buildSourceSensitivity({
+        trustTier: set.restingTierFor(store.trustDomain), trustDomain: store.trustDomain,
+      }),
+      prepare: () => {
+        const destinationRow = store.itemMetadataSnapshot(identity);
+        if (destinationRow && destinationRow.sourceVersion !== source.identity.sourceVersion
+          && !(prior && representationLandingDue(prior) && store.itemRepresentationCoverage(expectation).complete)) return false;
+        const adopted = set.adoptLegacyItem(identity);
+        if (!adopted?.routed) return false;
+
+        // The source serves names while a separate destination is staged.
+        prepared = ledger.recordRoutedPlacement(identity, {
+          ...decision, state: 'pending', contentRead: false, contentPending: true,
+          contentTier: store.trustDomain === 'secure_local' ? 'secure' : store.trustDomain === 'internal' ? 'private' : 'public',
+        }, {
+          copies: [{ corpusId: anchor.corpusId, trustDomain: anchor.trustDomain, layers: 'metadata' }],
+          embedHold: placement.embedHold,
+        }, { staleCopiesGone: true, guard: { generation: adopted.generation, override } }).record;
+        if (store !== anchor) {
+          store.bindTierSet(ledger);
+          ledger.stageLandingCopy(identity, contentCopy, { expectedGeneration: prepared.generation, embedHold: placement.embedHold });
+          if (anchor.readOnDemand(identity.localItemId, identity.sourceVersion ?? '')) {
+            store.grantOnDemandRead(identity.localItemId, identity.sourceVersion);
+          }
+        }
+        for (const copy of placement.copies) {
+          const destination = set.store(copy.trustDomain, { create: true })!;
+          destination.bindTierSet(ledger);
+          if (!destination.itemPresence(identity).active) {
+            destination.importItemCopy(source, {
+              trustTier: set.restingTierFor(copy.trustDomain),
+              syncConnectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID,
+              layers: 'metadata',
+            });
+          }
+        }
+        return true;
+      },
+      landed: () => {
+        store.withItemCopyWriteFence(identity, () => {
+          if (!prepared || !store.itemRepresentationCoverage(expectation).complete) return;
+          ledger.recordRoutedPlacement(identity, decision, placement, {
+            staleCopiesGone: true, guard: { generation: prepared.generation, override },
+          });
+        });
+      },
+    };
   };
 }
 

@@ -6,7 +6,7 @@ import { writeOwnerTierRules } from '../src/workers/classification/tier-rules.ts
 import { configureInstalledTierClassification, clearInstalledTierClassification } from '../src/workers/classification/installed-tier-classification.ts';
 import { moveTieredItem, TierMoveRefusedError } from '../src/workers/connector-store/tier-move.ts';
 import { TieredStoreSet, tieredStoreSetLedgerPath } from '../src/workers/connector-store/tiered-store-set.ts';
-import { CORPORA, FIXTURE_PLACEMENT, fixtureConnector, identityOf, localId, openTierFixture, tempDir } from './helpers/tier-fixtures.ts';
+import { CORPORA, FIXTURE_PLACEMENT, JUDGED_PERSONAL_SNIFFER, fixtureConnector, identityOf, localId, openTierFixture, tempDir } from './helpers/tier-fixtures.ts';
 
 const cleanups: Array<() => void> = [];
 afterEach(() => { for (const close of cleanups.splice(0)) close(); });
@@ -33,10 +33,11 @@ function lane(sniffer?: TierSniffer) {
 }
 
 test('a downward move refuses old Private chunks and a re-fetch can release only the newly judged body', async () => {
-  const f = lane();
+  const f = lane(JUDGED_PERSONAL_SNIFFER);
   await f.sync(oldBody);
+  await moveTieredItem({ set: f.set, identity, target: { metadataTier: 'secure', contentTier: 'secure' } });
   // Crash between recording the new verdict and storing the edited body.
-  const decision = classifyItemTiers({ signals: { title: 'Notes' }, text: newBody });
+  const decision = classifyItemTiers({ signals: { title: 'Notes' }, text: newBody }, { sniffer: JUDGED_PERSONAL_SNIFFER });
   expect(f.ledger.recordRoutedPlacement(identity, decision, f.set.placementFor(decision)).outcome).toBe('queued_move');
   await expect(moveTieredItem({ set: f.set, identity, target })).rejects.toBeInstanceOf(TierMoveRefusedError);
   expect(f.stores.internal!.exportItemCopy(identity)?.chunks ?? []).toEqual([]);
@@ -48,7 +49,7 @@ test('a downward move refuses old Private chunks and a re-fetch can release only
 });
 
 test('a sync lowering an edited item retains the judged new body for its downward move', async () => {
-  const f = lane();
+  const f = lane(JUDGED_PERSONAL_SNIFFER);
   await f.sync(oldBody);
   await f.sync(newBody);
   await moveTieredItem({ set: f.set, identity, target });
@@ -61,11 +62,22 @@ test('a downward move with matching multi-chunk content proceeds', async () => {
   const text = `  ${'Ordinary orchard notes. '.repeat(800)}  `;
   await f.sync(text);
   await moveTieredItem({ set: f.set, identity, target: { metadataTier: 'secure', contentTier: 'secure' } });
-  const decision = classifyItemTiers({ signals: { title: 'Notes' }, text });
+  const decision = classifyItemTiers({ signals: { title: 'Notes' }, text }, { sniffer: JUDGED_PERSONAL_SNIFFER });
   f.ledger.recordRoutedPlacement(identity, decision, f.set.placementFor(decision));
   const moved = await moveTieredItem({ set: f.set, identity, target });
   expect(moved.outcome).toBe('moved');
   expect(f.stores.internal!.localContent(localId('edited'))?.chunks.join('')).toBe(text.trim());
+});
+
+test('a lowering to Personal refuses the matching digest of an unjudged body', async () => {
+  const f = lane();
+  await f.sync(newBody);
+  await moveTieredItem({ set: f.set, identity, target: { metadataTier: 'secure', contentTier: 'secure' } });
+  const decision = classifyItemTiers({ signals: { title: 'Notes' }, text: newBody });
+  expect(decision).toMatchObject({ decidedBy: 'default', contentPending: false });
+  await expect(moveTieredItem({ set: f.set, identity, decision })).rejects.toBeInstanceOf(TierMoveRefusedError);
+  expect(f.stores.internal!.localContent(localId('edited'))?.chunks ?? []).toEqual([]);
+  expect(f.stores.secure_local!.localContent(localId('edited'))?.chunks.join('')).toBe(newBody);
 });
 
 test('a background Personal verdict releases the edited held body, never the prior Private body', async () => {
@@ -158,7 +170,7 @@ test('a mixed move retains the serving Private body when a rule changes before p
   const item = identityOf(spec.id, spec.conversation);
   await f.set.sync(fixtureConnector(() => [spec]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
   await moveTieredItem({ set: f.set, identity: item, target: { metadataTier: 'public', contentTier: 'secure' } });
-  const decision = classifyItemTiers({ signals: { title: spec.name }, text: newBody });
+  const decision = classifyItemTiers({ signals: { title: spec.name }, text: newBody }, { sniffer: JUDGED_PERSONAL_SNIFFER });
   const env = { OLYMPUS_TIER_RULES_PATH: join(tmp.dir, 'rules.json') };
   configureInstalledTierClassification({ env });
   expect(f.ledger.recordRoutedPlacement(item, decision, f.set.placementFor(decision)).outcome).toBe('queued_move');
