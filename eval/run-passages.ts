@@ -1,4 +1,4 @@
-import { resolveLocalAnalystWindow, localAnalystPromptBudget } from '../src/workers/source-index/local-analyst-window.ts';
+import { resolveLocalAnalystWindow, localAnalystPromptBudget, type LocalAnalystPromptBudget } from '../src/workers/source-index/local-analyst-window.ts';
 import { maxTokensForChars } from '../src/core/analyst-delphi.ts';
 import { DEFAULT_ANALYST_MAX_OUTPUT_CHARS } from '../src/core/analyst.ts';
 import { triggerDeepRead } from '../src/workers/source-index/deep-read-trigger.ts';
@@ -186,6 +186,8 @@ export function followUpCheck(detail: EvidencePackBuildDetail, citations: number
 export interface PassageReceipt {
   schema: 3; rule: typeof PASSAGE_MATCH_RULE; gitSha: string; split: EvalSplit;
   setId: string; maxResults: number; ks: number[];
+  /** Prompt bytes the fit used and where the size came from (an override, the model's window, or the fallback). */
+  promptBytes?: number; promptBudgetSource?: LocalAnalystPromptBudget['source'];
   /** The reranker's id (its model folder's name), or 'off'. */
   reranker: string;
   /** The per-store depth of the reranker's strength-drawn pool; absent with the reranker off. */
@@ -360,7 +362,7 @@ function grouped(rows: readonly PassageRow[], ks: readonly number[], groups: (ro
 }
 
 export async function runPassageEval(input: {
-  dataset: EvalDataset; split?: EvalSplit; maxResults: number; promptBytes?: number; rerankPoolStoreDepth?: number;
+  dataset: EvalDataset; split?: EvalSplit; maxResults: number; promptBytes?: number; promptBudgetSource?: LocalAnalystPromptBudget['source']; rerankPoolStoreDepth?: number;
   storeCounts: readonly EvalStoreCount[]; skippedStores?: readonly EvalSkippedStore[]; gitSha: string;
   /** The pack, and each store search's returned item ids in order (EvalStoreSearch) when recorded. */
   buildPack: (question: EvalQuestion) => Promise<EvidencePackBuildDetail & { storeSearches?: readonly EvalStoreSearch[] }>;
@@ -581,6 +583,7 @@ export async function runPassageEval(input: {
     // Identity includes only ids and structural labels; never hashes private text.
     setId: createHash('sha256').update(JSON.stringify(questions.map(q => [q.id, q.shape]).sort((a, b) => a[0]!.localeCompare(b[0]!)))).digest('hex'),
     maxResults: input.maxResults, ks, reranker: rerankerId ?? 'off',
+    ...(input.promptBytes !== undefined ? { promptBytes: input.promptBytes, ...(input.promptBudgetSource ? { promptBudgetSource: input.promptBudgetSource } : {}) } : {}),
     ...(rerankerId && input.rerankPoolStoreDepth !== undefined ? { rerankPoolStoreDepth: input.rerankPoolStoreDepth, semanticPoolSeats: rerankPoolSemanticSeats(), semanticRowsPerStore: semanticRowsPerStore() } : {}),
     ...(conversationWindowPerSide() > 0 ? { conversationWindow: conversationWindowPerSide() } : {}),
     storeCounts: input.storeCounts, skippedStores: input.skippedStores ?? [],
@@ -834,7 +837,14 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
   validatePassageDataset(dataset);
   const maxResults = positiveInteger(values.get('--max-results') ?? process.env.OLYMPUS_EVAL_MAX_RESULTS, 5);
   const maxCharsPerCandidate = positiveInteger(values.get('--max-chars-per-candidate') ?? process.env.OLYMPUS_EVAL_MAX_CHARS_PER_CANDIDATE, DEFAULT_MAX_CHARS_PER_CANDIDATE);
-  const promptBytes = provider === 'local' ? positiveInteger(values.get('--prompt-bytes') ?? process.env.OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_PROMPT_BYTES, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES) : undefined;
+  // An explicit size wins; otherwise the budget is the product's own choice,
+  // resolved below from the analyst's window (config contextTokens, manifest
+  // or the server), so a run without an override measures what an owner gets.
+  const promptBytesOverride = values.get('--prompt-bytes') ?? process.env.OLYMPUS_SOURCE_INDEX_LOCAL_ANALYST_PROMPT_BYTES;
+  let promptBudget: LocalAnalystPromptBudget | undefined = provider === 'local'
+    ? (promptBytesOverride?.trim() ? { bytes: positiveInteger(promptBytesOverride, DEFAULT_LOCAL_ANALYST_PROMPT_BYTES), source: 'env' } : { bytes: DEFAULT_LOCAL_ANALYST_PROMPT_BYTES, source: 'fallback' })
+    : undefined;
+  let promptBytes = promptBudget?.bytes;
   enter('open_data_root');
   const opened = openEvalDataRoot(isolation);
   // Conversation windows need their index, which no open creates; on an eval
@@ -849,6 +859,18 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
   const cleanups: Array<() => void> = [];
   try {
     const config = loadConfig();
+    if (provider === 'local') {
+      if (!promptBytesOverride?.trim()) {
+        const budgetLane = process.env.OLYMPUS_SOURCE_INDEX_ANALYST_LANE?.trim() ? parseLane(process.env.OLYMPUS_SOURCE_INDEX_ANALYST_LANE) : undefined;
+        const budgetProfile = process.env.OLYMPUS_SOURCE_INDEX_ANALYST_PROFILE?.trim() ? parseModelProfile(process.env.OLYMPUS_SOURCE_INDEX_ANALYST_PROFILE) : 'source_answer';
+        const answerEndpoint = budgetLane ? config.argus.lanes[budgetLane] : config.argus.modelProfiles[budgetProfile];
+        const answerWindow = await resolveLocalAnalystWindow({ model: answerEndpoint.model, baseUrl: answerEndpoint.baseUrl,
+          ...(answerEndpoint.contextTokens !== undefined ? { contextTokens: answerEndpoint.contextTokens } : {}) });
+        promptBudget = localAnalystPromptBudget(undefined, answerWindow, maxTokensForChars(DEFAULT_ANALYST_MAX_OUTPUT_CHARS));
+        promptBytes = promptBudget.bytes;
+      }
+      console.error(`[passage-eval] prompt budget ${promptBudget!.bytes} bytes (source ${promptBudget!.source})`);
+    }
     let answer: AnswerFn | undefined;
     let deepReadJobs: DeepReadJobs | undefined;
     let answerArms: Array<{ name: string; answer: AnswerFn }> | undefined;
@@ -970,6 +992,7 @@ export async function main(argv = process.argv.slice(2), stage?: EvalStage): Pro
     const receipt = await runPassageEval({ dataset, split, maxResults, storeCounts: opened.storeCounts, skippedStores: opened.skipped,
       gitSha: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
       ...(promptBytes !== undefined ? { promptBytes } : {}),
+      ...(promptBudget ? { promptBudgetSource: promptBudget.source } : {}),
       ...(reranker ? { rerankPoolStoreDepth: RERANK_POOL_STORE_DEPTH } : {}),
       buildPack: async q => {
         searches = [];

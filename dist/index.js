@@ -16311,6 +16311,12 @@ var init_off_thread_reads = __esm(() => {
 
 // src/core/embedding-cost-estimates.ts
 var init_embedding_cost_estimates = () => {};
+
+// src/workers/source-index/status-count-reuse.ts
+var STORE_UNCHANGED_REUSE_MS;
+var init_status_count_reuse = __esm(() => {
+  STORE_UNCHANGED_REUSE_MS = 30 * 60000;
+});
 // src/core/file-scope-sources.ts
 function registerFileScopeSource(definition) {
   const { sourceId, provider } = definition;
@@ -16686,6 +16692,36 @@ var init_tier_set_binding = __esm(() => {
   init_olympus_layout();
   init_tier_ledger();
   init_tier_ledger_path();
+});
+
+// src/core/embedding-sweep-idle.ts
+var EMBEDDING_HOLD_REASONS, INVENTORY_FIELDS;
+var init_embedding_sweep_idle = __esm(() => {
+  init_atomic_file();
+  EMBEDDING_HOLD_REASONS = [
+    "held_for_judgment",
+    "held_after_decision",
+    "held_while_text_is_unread",
+    "held_while_moving",
+    "held_for_other_reasons"
+  ];
+  INVENTORY_FIELDS = [
+    "pending_chunks",
+    "eligible_chunks",
+    "skipped_held_chunks",
+    "skipped_moving_chunks",
+    "skipped_hidden_chunks",
+    "skipped_metadata_chunks",
+    "skipped_failed_chunks",
+    "skipped_out_of_scope_chunks",
+    "skipped_held_recent_chunks",
+    "skipped_out_of_scope_recent_chunks",
+    "skipped_private_tier_chunks",
+    "skipped_retired_chunks",
+    "inventory_complete",
+    "inventory_ms",
+    ...EMBEDDING_HOLD_REASONS.flatMap((reason) => [`${reason}_chunks`, `${reason}_items`])
+  ];
 });
 
 // src/workers/engine-split/sqlite-memory.ts
@@ -17266,6 +17302,8 @@ var init_parent_context = __esm(() => {
 var askReads, releasing;
 var init_child_visibility = __esm(() => {
   init_tier_ledger();
+  init_memory_counters();
+  init_control_path_headroom();
   init_answer_latency_trace();
   init_off_thread_reads();
   askReads = new WeakMap;
@@ -17622,11 +17660,13 @@ function connectorStoreContentPreference(vettedVectorItemIds) {
 var CONCEPT_COUNT_MAX_AGE_MS, CONNECTOR_STORE_CONVERSATION_INDEX = "idx_connector_store_items_conversation_time", CONNECTOR_STORE_CONVERSATION_INDEX_SQL, CONNECTOR_STORE_RECENCY_INDEX = "idx_connector_store_items_recent_live", CONNECTOR_STORE_ACCOUNT_RECENCY_INDEX = "idx_connector_store_items_recent_account_live", RECENCY_LIVE_SQL = "tombstoned IS 0", ACCOUNT_RECENCY_LIVE_SQL = "+tombstoned IS 0", CONNECTOR_STORE_RECENCY_INDEX_SQL, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, CHUNK_MEDIA_RETRY_BASE_MS, CONNECTOR_STORE_FTS_MIGRATION, STATUS_COUNTS_MAX_AGE_MS, TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", RESTORED_SCOPE_CONNECTOR_ID = "olympus_restored_scope", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, LAST_SYNC_RUN_SQL, lexicalContentPreference, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, LOCAL_RELAXED_STOPWORDS;
 var init_local_index = __esm(() => {
   init_memory_counters();
+  init_embedding_sweep_idle();
   init_sqlite_memory();
   init_read_progress();
   init_source_size_limits();
   init_store_totals();
   init_vector_digest();
+  init_status_count_reuse();
   init_boot_progress();
   init_evidence_reranker();
   init_engine_heartbeat();
@@ -20954,13 +20994,14 @@ var init_telegram_messages = __esm(() => {
 });
 
 // src/workers/source-index/status.ts
-var DASHBOARD_READINESS_LEDGER_MAX_AGE_MS = 120000, PLAIN_STATUS_REQUEST, DASHBOARD_STATUS_REQUEST, STORE_STATUS_REUSE_MS, STORE_UNCHANGED_REUSE_MS;
+var DASHBOARD_READINESS_LEDGER_MAX_AGE_MS = 120000, PLAIN_STATUS_REQUEST, DASHBOARD_STATUS_REQUEST, STORE_STATUS_REUSE_MS;
 var init_status = __esm(() => {
   init_off_thread_reads();
   init_corpus();
   init_embedding_cost_estimates();
   init_source_corpus_registry();
   init_answer_ready_coverage();
+  init_status_count_reuse();
   init_corpora();
   init_readwise();
   init_x_bookmarks();
@@ -20979,7 +21020,6 @@ var init_status = __esm(() => {
     readiness_ledger_max_age_ms: DASHBOARD_READINESS_LEDGER_MAX_AGE_MS
   });
   STORE_STATUS_REUSE_MS = 5 * 60000;
-  STORE_UNCHANGED_REUSE_MS = 60 * 60000;
 });
 
 // src/core/public-source-capabilities.ts
@@ -21465,11 +21505,6 @@ var init_request_log = __esm(() => {
 // src/core/connection-requests.ts
 var init_connection_requests = __esm(() => {
   init_request_log();
-});
-
-// src/core/embedding-sweep-idle.ts
-var init_embedding_sweep_idle = __esm(() => {
-  init_atomic_file();
 });
 
 // src/core/pairing-session-paths.ts

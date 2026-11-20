@@ -4,16 +4,19 @@ import {
   type LocalContentProvider,
 } from '../src/core/evidence-pack.ts';
 import {
+  DEFAULT_RERANK_STALL_MS,
   rerankCandidates,
   rerankPoolSize,
   MAX_RERANK_POOL_SIZE,
   type EvidenceReranker,
   type RerankTimers,
 } from '../src/core/evidence-reranker.ts';
+import { RERANK_FALLBACK_GAP } from '../src/core/source-index/partial-search.ts';
 import { buildSourceIndexCorpusRegistry, defineSourceIndexCorpus } from '../src/core/source-index/corpus.ts';
 import type { SourceIndexCorpusSearchAdapter } from '../src/core/source-index/router.ts';
 import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
 import { createCrossEncoderReranker } from '../src/workers/source-index/built-in-reranker.ts';
+import { releaseAnalystAnswer } from '../src/workers/source-index/analyst-answer.ts';
 import { WordPieceTokenizer } from '../src/workers/source-index/built-in-embedding/wordpiece.ts';
 import type { EmbeddingBatch } from '../src/workers/source-index/built-in-embedding/runtime.ts';
 import { SourceModelPolicyDeniedError } from '../src/core/source-model-policy.ts';
@@ -205,6 +208,38 @@ describe('buildEvidencePackDetailed with a reranker', () => {
     expect(detail.pack.candidates).toHaveLength(3);
     expect(packIds(detail)[0]).toBe('doc-9');
     expect(detail.rerank).toMatchObject({ rerankerId: 'fixture-overlap', outcome: 'applied', scored: 10, kept: 3, promoted: 1 });
+    expect(detail.pack.coverage.extractionGaps).not.toContain(RERANK_FALLBACK_GAP);
+  });
+
+  test.each(['timed_out', 'failed'] as const)('releases a coverage note when reranking is %s', async (outcome) => {
+    const started = Promise.withResolvers<void>();
+    const reranker: EvidenceReranker = {
+      id: 'fixture-fallback', localOnly: true, poolSize: 10,
+      async score() {
+        started.resolve();
+        if (outcome === 'failed') throw new Error('fixture model failed');
+        return new Promise(() => {});
+      },
+    };
+    const rerankTimers = timers();
+    const pending = buildEvidencePackDetailed({ ...packInput(reranker, []), rerankTimers });
+    await started.promise;
+    if (outcome === 'timed_out') await rerankTimers.clock.advance(DEFAULT_RERANK_STALL_MS);
+    const detail = await pending;
+    expect(detail.rerank?.outcome).toBe(outcome);
+    expect(packIds(detail)).toEqual(['doc-0', 'doc-1', 'doc-2']);
+    expect(detail.pack.coverage.extractionGaps).toContain(RERANK_FALLBACK_GAP);
+    const released = releaseAnalystAnswer({
+      detail,
+      result: {
+        answer: 'The note is available.',
+        citations: [{ provenance: detail.pack.candidates[0]!.provenance, claim: 'The note is available.' }],
+        unanswered: [],
+      },
+      releaseSecureContent: false,
+    });
+    expect(released.unanswered).toEqual([RERANK_FALLBACK_GAP]);
+    expect(released.answer).toContain(`Coverage notes:\n- ${RERANK_FALLBACK_GAP}`);
   });
 
   test('S5 content anywhere in the pool hard-stops the build before the reranker reads any text', async () => {

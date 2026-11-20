@@ -12317,7 +12317,7 @@ import { Database } from "bun:sqlite";
 import { randomUUID as randomUUID6 } from "node:crypto";
 import { chmodSync as chmodSync3, closeSync as closeSync7, existsSync as existsSync13, mkdirSync as mkdirSync9, openSync as openSync7, statSync as statSync8 } from "node:fs";
 import { dirname as dirname14 } from "node:path";
-var TIER_LEDGER_SCHEMA_VERSION = 16;
+var TIER_LEDGER_SCHEMA_VERSION = 17;
 var RETIRED_EMBEDDING_CLEARANCE_REASON = "content:sniffer:retired_embedding_clearance:undecided";
 function isFailSafeMissingContentQuestion(reason) {
   return reason.startsWith("content:sniffer:") && (reason.endsWith(":fail_safe:missing_question") || reason.endsWith(":fail_safe:unread"));
@@ -13516,6 +13516,41 @@ class TierLedger {
       return true;
     })();
   }
+  *overPrivateCountSteps() {
+    return yield { mode: "all", params: [], sql: `
+      WITH verdicts AS (
+        SELECT provider, account_scope, conversation_key, provider_item_id, decided_at,
+          CASE WHEN state = 'moving' THEN target_metadata_tier ELSE metadata_tier END AS vm,
+          CASE WHEN state = 'moving' THEN target_content_tier ELSE content_tier END AS vc
+        FROM tier_items
+        -- A pending item is held at least Private, regardless of either layer's verdict.
+        WHERE state <> 'pending' AND metadata_pending = 0 AND content_pending = 0
+      ), needs AS (
+        SELECT *,
+          CASE vm WHEN 'secrets' THEN 3 WHEN 'secure' THEN 2 WHEN 'private' THEN 1 ELSE 0 END AS need_m,
+          CASE WHEN vc = 'secrets' OR vm = 'secrets' THEN 3
+               WHEN vc = 'secure' OR vm = 'secure' THEN 2
+               WHEN vc = 'private' OR vm = 'private' THEN 1 ELSE 0 END AS need_c
+        FROM verdicts
+      )
+      SELECT n.provider, COUNT(*) AS items, MIN(n.decided_at) AS oldest_since
+      FROM needs n
+      WHERE EXISTS (
+        SELECT 1 FROM tier_copies c
+        WHERE c.provider = n.provider AND c.account_scope = n.account_scope
+          AND c.conversation_key = n.conversation_key AND c.provider_item_id = n.provider_item_id
+          AND c.copy_state = 'current'
+          AND (
+            (c.layers IN ('metadata', 'both') AND
+              (CASE c.trust_domain WHEN 'secure_local' THEN 2 WHEN 'internal' THEN 1 ELSE 0 END) > n.need_m)
+            OR (c.layers IN ('content', 'both') AND
+              (CASE c.trust_domain WHEN 'secure_local' THEN 2 WHEN 'internal' THEN 1 ELSE 0 END) > n.need_c)
+          )
+      )
+      GROUP BY n.provider
+      ORDER BY n.provider
+    ` };
+  }
   counts() {
     const byState = { pending: 0, current: 0, moving: 0 };
     const byContentTier = { public: 0, private: 0, secure: 0, secrets: 0 };
@@ -13744,6 +13779,9 @@ class TierLedger {
           move_attempts = 0, owner_prior_json = NULL
         WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
       `).run(state, staleFlip, prior.decidedBy, reasonsJson, prior.engineVersion, prior.mapRevision, decidedAt, ...decisionFlags(prior), ...idParams(identity));
+      if (state === "current" && copies.some((copy) => copy.state === "current" && copy.embedHold)) {
+        this.releaseDecidedEmbedHolds(identity, decidedAt);
+      }
       this.appendHistory(identity, staleFlip, existing.metadataTier, existing.contentTier, prior.decidedBy, reasonsJson, state, decidedAt);
       return "cancelled";
     }
@@ -14639,6 +14677,10 @@ class TierLedger {
           WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
         `).run(decision.contentRead ? 1 : 0, decision.metadataPending ? 1 : 0, decision.contentPending ? 1 : 0, decision.metadataForced ? 1 : 0, decision.metadataFlagged ? 1 : 0, decision.engineVersion, decision.mapRevision, pending ? "pending" : "current", ...idParams(identity));
       }
+      const finalDecision = options.decision ?? existing;
+      if (options.embedHold !== false && !finalDecision.metadataPending && !finalDecision.contentPending) {
+        this.releaseDecidedEmbedHolds(identity, now);
+      }
     })();
     return this.getCurrent(identity);
   }
@@ -14692,6 +14734,8 @@ class TierLedger {
         reasons: existing.reasons,
         decidedAt: now
       });
+      if (!existing.metadataPending && !existing.contentPending)
+        this.releaseDecidedEmbedHolds(identity, now);
     })();
     return this.getCurrent(identity);
   }
@@ -14720,6 +14764,9 @@ class TierLedger {
         UPDATE tier_items SET state = ?, target_metadata_tier = NULL, target_content_tier = NULL
         WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND generation = ?
       `).run(state, ...idParams(identity), existing.generation);
+      if (state === "current" && copies.some((copy) => copy.state === "current" && copy.embedHold)) {
+        this.releaseDecidedEmbedHolds(identity, now);
+      }
       this.appendHistory(identity, existing.generation, existing.metadataTier, existing.contentTier, "rollback", JSON.stringify(existing.reasons), state, now);
     })();
     return this.getCurrent(identity);
@@ -14971,15 +15018,26 @@ class TierLedger {
     const version = this.db.query("PRAGMA data_version").get();
     return `${version.data_version}:${row.changes - (options.ignoreSettleProgress ? this.settleProgressChanges : 0)}`;
   }
-  visibilityChangesSince(after) {
+  visibilityChangesSince(after, scope) {
     return this.db.transaction(() => {
-      const bounds = this.db.query("SELECT (SELECT MIN(seq) FROM tier_visibility_changes) AS first, (SELECT MAX(seq) FROM tier_visibility_changes) AS last").get();
-      const cursor = bounds.last ?? 0;
-      if (after === undefined || after > cursor || bounds.first !== null && after < bounds.first - 1)
+      const bounds = this.db.query(`SELECT (SELECT MIN(seq) FROM tier_visibility_changes) AS first,
+        (SELECT seq FROM sqlite_sequence WHERE name = 'tier_visibility_changes') AS issued`).get();
+      const cursor = bounds.issued ?? 0;
+      if (after === undefined || after > cursor || after < (bounds.first ?? cursor + 1) - 1 || scope && cursor - after > scope.maxEntries)
         return { cursor };
-      const rows = this.db.query(`SELECT DISTINCT provider, account_scope, conversation_key, provider_item_id
+      if (after === cursor)
+        return { cursor, identities: [] };
+      const rows = this.db.query(`SELECT DISTINCT provider, account_scope, conversation_key, provider_item_id,
+        ${scope ? "corpus_id, affects, seq" : "NULL AS corpus_id, 1 AS affects, NULL AS seq"}
         FROM tier_visibility_changes WHERE seq > ?`).all(after);
-      return { cursor, identities: rows.map(identityFromRow) };
+      if (scope && rows.length !== cursor - after)
+        return { cursor };
+      const relevant = scope ? rows.filter((row) => row.affects === 1) : rows;
+      return {
+        cursor,
+        identities: relevant.map(identityFromRow),
+        ...scope ? { corpusChanged: relevant.some((row) => row.corpus_id === scope.corpusId) } : {}
+      };
     })();
   }
   *corpusVisibilityPages(corpusId, identities) {
@@ -15043,9 +15101,6 @@ class TierLedger {
       wal_autocheckpoint: this.db.query("PRAGMA wal_autocheckpoint").get().wal_autocheckpoint
     };
   }
-  staleEmbedHoldsSettled() {
-    return this.db.query("SELECT 1 FROM tier_ledger_meta WHERE key = ?").get(STALE_EMBED_HOLDS_SETTLED) !== null;
-  }
   *staleEmbedHoldSteps(after, limit) {
     const rowIds = [];
     let corpusId = after?.corpusId;
@@ -15075,18 +15130,41 @@ class TierLedger {
       rowId = 0;
     }
   }
+  *embeddingHoldReasonSteps(corpusId, after) {
+    const rows = yield {
+      sql: `SELECT tier_copies.rowid AS row_id, tier_copies.provider, tier_copies.account_scope,
+          tier_copies.conversation_key, tier_copies.provider_item_id,
+          CASE
+            WHEN t.state = 'moving' THEN 'held_while_moving'
+            WHEN ${STALE_EMBED_HOLD_DECIDED} THEN 'held_after_decision'
+            WHEN t.content_read = 0 THEN 'held_while_text_is_unread'
+            WHEN t.state = 'pending' OR t.metadata_pending = 1 OR t.content_pending = 1 THEN 'held_for_judgment'
+            ELSE 'held_for_other_reasons'
+          END AS reason
+        FROM tier_copies LEFT JOIN tier_items t USING (provider, account_scope, conversation_key, provider_item_id)
+        WHERE corpus_id = ? AND copy_state = 'current' AND embed_hold = 1 AND tier_copies.rowid > ?
+        ORDER BY tier_copies.rowid LIMIT 500`,
+      params: [corpusId, after],
+      mode: "all"
+    };
+    return rows.map((row) => ({ rowId: row.row_id, key: tierLedgerIdentityKey(identityFromRow(row)), reason: row.reason }));
+  }
   settleStaleEmbedHoldRows(rowIds) {
     if (this.readOnly || rowIds.length === 0)
       return 0;
-    return this.db.query(`
+    const released = this.db.query(`
       UPDATE tier_copies SET embed_hold = 0, updated_at = ?
       WHERE rowid IN (SELECT value FROM json_each(?)) AND copy_state = 'current' AND embed_hold = 1 AND ${STALE_EMBED_HOLD_DECIDED}
-    `).run(this.now().toISOString(), JSON.stringify(rowIds)).changes;
+      RETURNING rowid
+    `).all(this.now().toISOString(), JSON.stringify(rowIds));
+    return released.length;
   }
-  markStaleEmbedHoldsSettled() {
-    if (this.readOnly)
-      return;
-    this.db.query("INSERT OR REPLACE INTO tier_ledger_meta (key, value) VALUES (?, ?)").run(STALE_EMBED_HOLDS_SETTLED, this.now().toISOString());
+  releaseDecidedEmbedHolds(identity, now) {
+    this.db.query(`
+      UPDATE tier_copies SET embed_hold = 0, updated_at = ?
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+        AND copy_state = 'current' AND embed_hold = 1 AND ${STALE_EMBED_HOLD_DECIDED}
+    `).run(now, ...idParams(identity));
   }
   *corpusCopyIdentitiesSteps(corpusId, filter, pageSize = 5000) {
     const query = this.db.query(`
@@ -15743,12 +15821,38 @@ function rowOf(record) {
     metadataFlagged: record.metadataFlagged
   };
 }
-var STALE_EMBED_HOLDS_SETTLED = "settled:stale_embed_holds:v1";
 var STALE_EMBED_HOLD_DECIDED = `EXISTS (
         SELECT 1 FROM tier_items t
         WHERE t.provider = tier_copies.provider AND t.account_scope = tier_copies.account_scope
           AND t.conversation_key = tier_copies.conversation_key AND t.provider_item_id = tier_copies.provider_item_id
           AND t.state = 'current' AND t.metadata_pending = 0 AND t.content_pending = 0
+          AND t.metadata_tier <> 'secrets' AND t.content_tier <> 'secrets'
+          AND t.target_metadata_tier IS NULL AND t.target_content_tier IS NULL
+          -- A re-judgment still open on this decision keeps the hold.
+          AND NOT (t.rejudge_json IS NOT NULL
+            AND json_extract(t.rejudge_json, '$.generation') = t.generation
+            AND json_extract(t.rejudge_json, '$.decidedAt') = t.decided_at
+            AND json_extract(t.rejudge_json, '$.reasonsJson') = t.reasons_json
+            AND json_extract(t.rejudge_json, '$.decidedBy') = t.decided_by)
+          -- The store must be at least as private as the verdict for each layer
+          -- the copy serves (same ranks as the tier exposure count).
+          AND (tier_copies.layers NOT IN ('content', 'both')
+            OR (CASE tier_copies.trust_domain WHEN 'secure_local' THEN 2 WHEN 'internal' THEN 1 ELSE 0 END)
+              >= (CASE WHEN t.content_tier = 'secure' OR t.metadata_tier = 'secure' THEN 2
+                       WHEN t.content_tier = 'private' OR t.metadata_tier = 'private' THEN 1 ELSE 0 END))
+          AND (tier_copies.layers NOT IN ('metadata', 'both')
+            OR (CASE tier_copies.trust_domain WHEN 'secure_local' THEN 2 WHEN 'internal' THEN 1 ELSE 0 END)
+              >= (CASE t.metadata_tier WHEN 'secure' THEN 2 WHEN 'private' THEN 1 ELSE 0 END))
+      ) AND NOT EXISTS (
+        SELECT 1 FROM tier_overrides o
+        WHERE o.provider = tier_copies.provider AND o.account_scope = tier_copies.account_scope
+          AND o.conversation_key = tier_copies.conversation_key AND o.provider_item_id = tier_copies.provider_item_id
+          AND json_extract(o.override_json, '$.kind') = 'tier' AND json_extract(o.override_json, '$.tier') = 'secrets'
+      ) AND NOT EXISTS (
+        SELECT 1 FROM tier_write_intents w
+        WHERE w.provider = tier_copies.provider AND w.account_scope = tier_copies.account_scope
+          AND w.conversation_key = tier_copies.conversation_key AND w.provider_item_id = tier_copies.provider_item_id
+          AND w.kind IN ('secret', 'deletion')
       )`;
 var TIER_RECHECK_META_PREFIX = "recheck:";
 function recheckRequestKey(scope) {
@@ -16297,12 +16401,46 @@ function tierLedgerMigrations() {
       }
     },
     {
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 16,
       name: "superseded_copy_walk",
       up(db) {
         db.exec(`CREATE INDEX IF NOT EXISTS tier_copies_superseded_walk
           ON tier_copies (provider, account_scope, conversation_key, provider_item_id)
           WHERE copy_state = 'superseded';`);
+      }
+    },
+    {
+      version: TIER_LEDGER_SCHEMA_VERSION,
+      name: "visibility_feed_copy_corpus",
+      up(db) {
+        if (!db.query("SELECT 1 FROM pragma_table_info('tier_visibility_changes') WHERE name = 'corpus_id'").get()) {
+          db.exec(`
+            ALTER TABLE tier_visibility_changes ADD COLUMN corpus_id TEXT;
+            ALTER TABLE tier_visibility_changes ADD COLUMN affects INTEGER NOT NULL DEFAULT 1;
+          `);
+        }
+        for (const [table, columns] of [
+          ["tier_copies", "copy_state, embed_hold, layers, corpus_id, trust_domain"],
+          ["tier_items", "state, routed, content_read, metadata_pending, content_pending, metadata_tier, content_tier, target_metadata_tier, target_content_tier"],
+          ["tier_overrides", "override_json"]
+        ]) {
+          const updated = `${columns}, provider, account_scope, conversation_key, provider_item_id`;
+          const changed = updated.split(", ").map((column) => `OLD.${column} IS NOT NEW.${column}`).join(" OR ");
+          const note = (row, affects = "1") => `
+            INSERT INTO tier_visibility_changes (provider, account_scope, conversation_key, provider_item_id, corpus_id, affects)
+            VALUES (${row}.provider, ${row}.account_scope, ${row}.conversation_key, ${row}.provider_item_id,
+              ${table === "tier_copies" ? `${row}.corpus_id` : "NULL"}, ${affects});
+            DELETE FROM tier_visibility_changes WHERE seq <= (SELECT MAX(seq) - 8192 FROM tier_visibility_changes);`;
+          db.exec(`
+            DROP TRIGGER IF EXISTS ${table}_visibility_insert;
+            DROP TRIGGER IF EXISTS ${table}_visibility_delete;
+            DROP TRIGGER IF EXISTS ${table}_visibility_update;
+            CREATE TRIGGER ${table}_visibility_insert AFTER INSERT ON ${table} BEGIN ${note("NEW")} END;
+            CREATE TRIGGER ${table}_visibility_delete AFTER DELETE ON ${table} BEGIN ${note("OLD")} END;
+            CREATE TRIGGER ${table}_visibility_update AFTER UPDATE OF ${updated} ON ${table}
+              BEGIN ${note("OLD", changed)} ${note("NEW", changed)} END;
+          `);
+        }
       }
     }
   ];
@@ -16315,6 +16453,32 @@ function overrideFromJson(json) {
     return parsed;
   return;
 }
+
+// src/core/embedding-sweep-idle.ts
+var EMBEDDING_HOLD_REASONS = [
+  "held_for_judgment",
+  "held_after_decision",
+  "held_while_text_is_unread",
+  "held_while_moving",
+  "held_for_other_reasons"
+];
+var INVENTORY_FIELDS = [
+  "pending_chunks",
+  "eligible_chunks",
+  "skipped_held_chunks",
+  "skipped_moving_chunks",
+  "skipped_hidden_chunks",
+  "skipped_metadata_chunks",
+  "skipped_failed_chunks",
+  "skipped_out_of_scope_chunks",
+  "skipped_held_recent_chunks",
+  "skipped_out_of_scope_recent_chunks",
+  "skipped_private_tier_chunks",
+  "skipped_retired_chunks",
+  "inventory_complete",
+  "inventory_ms",
+  ...EMBEDDING_HOLD_REASONS.flatMap((reason) => [`${reason}_chunks`, `${reason}_items`])
+];
 
 // src/workers/engine-split/sqlite-memory.ts
 var stores = new Set;
@@ -17707,6 +17871,9 @@ function backfillVectorDigests(db, modelId, maxRows = 128) {
   const rows = db.query(query.sql).all(...query.params);
   return applyVectorDigestWindow(db, modelId, state.cursorRowid, rows, maxRows);
 }
+
+// src/workers/source-index/status-count-reuse.ts
+var STORE_UNCHANGED_REUSE_MS = 30 * 60000;
 
 // src/core/sqlite-rows.ts
 function* iterateRows(db, sql, ...params) {
@@ -21567,13 +21734,15 @@ function askReadMemo(owner, kind, marker) {
     kinds.set(kind, memo = { marker, rows: new Map });
   return memo;
 }
-async function memoVisibilityItems(owner, kind, marker, items, keyOf, read) {
+async function memoVisibilityItems(owner, kind, marker, items, keyOf, read, writesHeld) {
   const asked = new Map(items.map((item) => [keyOf(item), item]));
+  if (writesHeld?.())
+    throw new VisibilityChangedError;
   const before = marker();
   const memo = askReadMemo(owner, kind, before);
   const missing = [...asked].filter(([key]) => !memo?.rows.has(key)).map(([, item]) => item);
   const fresh = missing.length > 0 ? await read(missing) : new Map;
-  if (marker() !== before)
+  if (marker() !== before || writesHeld?.())
     throw new VisibilityChangedError;
   if (memo)
     for (const item of missing)
@@ -21588,7 +21757,7 @@ async function memoVisibilityItems(owner, kind, marker, items, keyOf, read) {
 }
 var ASK_LEDGER_READS = { perRead: true };
 function itemStatesOffThread(ledger, identities) {
-  return memoVisibilityItems(ledger, "states", () => ledger.changeMarker(), identities, tierLedgerIdentityKey, (missing) => ledgerReadOffThread(ledger, ledger.itemStatesSteps(missing), ASK_LEDGER_READS));
+  return memoVisibilityItems(ledger, "states", () => ledger.changeMarker(), identities, tierLedgerIdentityKey, (missing) => ledgerReadOffThread(ledger, ledger.itemStatesSteps(missing), ASK_LEDGER_READS), () => ledger.writesHeld());
 }
 function* itemSecretSteps(ledger, identity) {
   const key = tierLedgerIdentityKey(identity);
@@ -21597,7 +21766,7 @@ function* itemSecretSteps(ledger, identity) {
     for (const item of missing)
       rows.set(tierLedgerIdentityKey(item), await ledgerReadOffThread(ledger, ledger.itemIsSecretSteps(item), ASK_LEDGER_READS));
     return rows;
-  }));
+  }, () => ledger.writesHeld()));
   return rows.get(key) === true;
 }
 function visibilityRows(identities, read) {
@@ -21622,7 +21791,7 @@ function ledgerVisibilityHere(ledger, identities, options = {}) {
   return visibilityFromRows(memoVisibilityItemsHere(ledger, options.personalFirst ? "visibility-personal-first" : "visibility", () => ledger.changeMarker(), identities, tierLedgerIdentityKey, (missing) => visibilityRows(missing, ledger.readSteps(ledger.visibilityReadSteps(missing, options)))));
 }
 async function ledgerVisibilityOffThread(ledger, identities, options = {}) {
-  const rows = await memoVisibilityItems(ledger, options.personalFirst ? "visibility-personal-first" : "visibility", () => ledger.changeMarker(), identities, tierLedgerIdentityKey, async (missing) => visibilityRows(missing, await ledgerReadOffThread(ledger, ledger.visibilityReadSteps(missing, options), ASK_LEDGER_READS)));
+  const rows = await memoVisibilityItems(ledger, options.personalFirst ? "visibility-personal-first" : "visibility", () => ledger.changeMarker(), identities, tierLedgerIdentityKey, async (missing) => visibilityRows(missing, await ledgerReadOffThread(ledger, ledger.visibilityReadSteps(missing, options), ASK_LEDGER_READS)), () => ledger.writesHeld());
   return visibilityFromRows(rows);
 }
 var releasing = new WeakSet;
@@ -24849,15 +25018,15 @@ function* hiddenVisibilityFeedReads(table, after, startCursor) {
   const store = table === "main.item_visibility_feed";
   const bounds = yield {
     sql: `SELECT (SELECT MIN(seq) FROM ${table}) AS first,
-    (SELECT MAX(seq) FROM ${table}) AS last${store ? ", (SELECT seq FROM main.sqlite_sequence WHERE name = 'item_visibility_feed') AS issued" : ""}`,
+    (SELECT seq FROM main.sqlite_sequence WHERE name = '${store ? "item_visibility_feed" : "tier_visibility_changes"}') AS issued`,
     params: [],
     mode: "get"
   };
-  const latest = bounds.last ?? bounds.issued ?? 0;
+  const latest = bounds.issued ?? 0;
   if (startCursor !== undefined && latest < startCursor)
     throw new VisibilityChangedError;
   const cursor = startCursor ?? latest;
-  if (after === undefined || after > cursor || bounds.first !== null && after < bounds.first - 1 || store && bounds.first === null && after < latest)
+  if (after === undefined || after > cursor || bounds.first !== null && after < bounds.first - 1 || bounds.first === null && after < latest)
     return { cursor };
   const identities = new Map;
   for (let seq = after;seq < cursor; ) {
@@ -26249,10 +26418,12 @@ class LocalConnectorStore {
   tierHiddenCountsMemo;
   tierHiddenCountsRefresh;
   refreshTierHiddenCountsInTurns() {
+    const prior = this.tierHiddenCountsMemo;
     this.tierHiddenCountsRefresh ??= (async () => {
       try {
         const value = await this.tierHiddenItemPksInTurns();
-        this.tierHiddenCountsMemo = { at: Date.now(), value };
+        if (this.tierHiddenCountsMemo === prior)
+          this.tierHiddenCountsMemo = { at: Date.now(), value };
       } catch {} finally {
         this.tierHiddenCountsRefresh = undefined;
       }
@@ -26331,18 +26502,22 @@ class LocalConnectorStore {
     this.db.exec("CREATE TEMP TABLE tier_visibility_pks (flag TEXT, item_pk INTEGER, PRIMARY KEY (flag, item_pk));");
     this.visibilityJournal = true;
   }
-  itemVisibilityChangesSince(after) {
+  itemVisibilityChangesSince(after, maxEntries = Infinity) {
     if (!this.visibilityFeedPresent)
       return { cursor: 0, identities: [] };
     return this.db.transaction(() => {
       const bounds = this.db.query(`SELECT (SELECT MIN(seq) FROM main.item_visibility_feed) AS first,
-        (SELECT MAX(seq) FROM main.item_visibility_feed) AS last,
         (SELECT seq FROM main.sqlite_sequence WHERE name = 'item_visibility_feed') AS issued`).get();
-      const cursor = bounds.last ?? bounds.issued ?? 0;
-      if (after === undefined || after > cursor || bounds.first !== null && after < bounds.first - 1 || bounds.first === null && after < cursor)
+      const cursor = bounds.issued ?? 0;
+      if (after === undefined || after > cursor || bounds.first !== null && after < bounds.first - 1 || bounds.first === null && after < cursor || cursor - after > maxEntries)
         return { cursor };
-      const rows = this.db.query(`SELECT DISTINCT provider, account_scope, conversation_key, provider_item_id
+      if (after === cursor)
+        return { cursor, identities: [] };
+      const bounded = Number.isFinite(maxEntries);
+      const rows = this.db.query(`SELECT DISTINCT provider, account_scope, conversation_key, provider_item_id, ${bounded ? "seq" : "NULL"}
         FROM main.item_visibility_feed WHERE seq > ?`).all(after);
+      if (bounded && rows.length !== cursor - after)
+        return { cursor };
       return { cursor, identities: rows.map((row) => ({
         provider: row.provider,
         accountScope: row.account_scope,
@@ -26560,7 +26735,7 @@ class LocalConnectorStore {
   ledgerIdOf(ledger) {
     try {
       const id = ledger.ledgerId();
-      return id === undefined ? undefined : `v2:${id}`;
+      return id === undefined ? undefined : `v3:${id}`;
     } catch {
       return;
     }
@@ -27174,7 +27349,7 @@ class LocalConnectorStore {
     return memoVisibilityItemsHere(this, "parentLinksOf", () => this.childVisibilityMarker(), identities, tierLedgerIdentityKey, (missing) => this.readHere(this.parentLinksOfSteps(missing)));
   }
   parentLinksOfOffThread(identities) {
-    return memoVisibilityItems(this, "parentLinksOf", () => this.childVisibilityMarker(), identities, tierLedgerIdentityKey, (missing) => this.readOffThread(this.parentLinksOfSteps(missing)));
+    return memoVisibilityItems(this, "parentLinksOf", () => this.childVisibilityMarker(), identities, tierLedgerIdentityKey, (missing) => this.readOffThread(this.parentLinksOfSteps(missing)), () => this.db.inTransaction);
   }
   childVisibilityMarker() {
     if (this.visibilityFeedPresent)
@@ -27227,7 +27402,7 @@ class LocalConnectorStore {
   async parentStandingsOffThread(parents) {
     const rows = await memoVisibilityItems(this, "parentStandings", () => this.childVisibilityMarker(), parents, parentKey, async (missing) => {
       return this.parentStandingGroups(await this.readOffThread(this.parentStandingsSteps(missing)));
-    });
+    }, () => this.db.inTransaction);
     return [...rows.values()].flat();
   }
   parentStandingGroups(rows) {
@@ -27276,7 +27451,7 @@ class LocalConnectorStore {
     return memoVisibilityItemsHere(this, "itemStandings", () => this.childVisibilityMarker(), identities, tierLedgerIdentityKey, (missing) => this.readHere(this.itemStandingsSteps(missing)));
   }
   itemStandingsOffThread(identities) {
-    return memoVisibilityItems(this, "itemStandings", () => this.childVisibilityMarker(), identities, tierLedgerIdentityKey, (missing) => this.readOffThread(this.itemStandingsSteps(missing)));
+    return memoVisibilityItems(this, "itemStandings", () => this.childVisibilityMarker(), identities, tierLedgerIdentityKey, (missing) => this.readOffThread(this.itemStandingsSteps(missing)), () => this.db.inTransaction);
   }
   *itemStandingsSteps(identities) {
     const out = new Map;
@@ -28687,12 +28862,63 @@ ${parentKey(ref)}`, { ref, origin });
     }
   }
   peopleNames;
+  visibilityStamp;
+  visibilityEpoch;
   visibilityMarker() {
+    try {
+      return this.readVisibilityMarker();
+    } catch {
+      this.visibilityStamp = undefined;
+      return this.visibilityEpoch = randomUUID9();
+    }
+  }
+  readVisibilityMarker() {
+    const prior = this.visibilityStamp;
     const ledger = this.visibilityLedger();
-    const ledgerCursor = ledger ? ledger.visibilityChangesSince().cursor : 0;
-    const storeCursor = this.visibilityJournal ? String(this.itemVisibilityChangesSince().cursor) : `v${this.db.query("PRAGMA data_version").get().data_version}`;
-    const laneStores = this.childVisibilityLane().stores();
-    return JSON.stringify([ledgerCursor, storeCursor, laneStores.map((store) => [store.corpusId, store.childVisibilityMarker?.()])]);
+    const ledgerId = ledger?.ledgerId();
+    const limit = 128;
+    const delta = ledger?.visibilityChangesSince(prior?.ledger === ledger ? prior?.cursor : undefined, { corpusId: this.corpusId, maxEntries: limit }) ?? { cursor: 0, identities: [] };
+    const own = this.childVisibilityMarker();
+    const lane = this.childVisibilityLane();
+    const children = this.hasChildItems();
+    if (children && lane.ledger() !== ledger) {
+      this.visibilityStamp = undefined;
+      return this.visibilityEpoch = randomUUID9();
+    }
+    const siblings = new Map(children ? lane.stores().filter((store) => store !== this).map((store) => {
+      const marker = store.childVisibilityMarker?.() ?? randomUUID9();
+      return [store, store instanceof LocalConnectorStore && !store.visibilityFeedPresent ? `${store.visibilityOwner}:${marker}` : marker];
+    }) : []);
+    const memo = this.hiddenChildMemo;
+    const knownParents = memo && memo.ledger === ledger && memo.storeCursors.size === siblings.size + 1 && String(memo.storeCursors.get(this)) === own && [...siblings].every(([store]) => store instanceof LocalConnectorStore && String(memo.storeCursors.get(store)) === prior?.siblings.get(store)) ? memo.dependents : undefined;
+    const sameLane = prior !== undefined && prior.siblings.size === siblings.size && [...siblings.keys()].every((store) => prior.siblings.has(store));
+    const movedSiblings = !sameLane || [...siblings].some(([store, marker]) => {
+      const before = prior.siblings.get(store);
+      if (marker === before)
+        return false;
+      if (!knownParents || !(store instanceof LocalConnectorStore) || !store.visibilityFeedPresent)
+        return true;
+      const changed = store.itemVisibilityChangesSince(Number(before), limit).identities;
+      if (changed === undefined)
+        return true;
+      const standings = store.itemStandings(changed);
+      return changed.some((id) => {
+        const key = tierLedgerIdentityKey(id);
+        const row = standings.get(key);
+        return !row || knownParents.has(`i:${key}`) || knownParents.has(`p:${parentKey(row)}`);
+      });
+    });
+    const ids = delta.identities;
+    const ledgerMoved = !prior || prior.ledger !== ledger || prior.cursor !== delta.cursor && (ids === undefined || delta.corpusChanged === true || ids.length > 0 && children && (!knownParents || movedSiblings) || ids.some((id) => knownParents?.has(`i:${tierLedgerIdentityKey(id)}`)) || this.itemRowsForIdentities(ids, (id) => normalizeConversationId(id.providerConversationId)).length > 0 || [...ledger.copiesForMany(ids).values()].some((copies) => copies.some((copy) => copy.corpusId === this.corpusId)));
+    const replaced = prior && (prior.ledger !== ledger && prior.ledgerId === ledgerId || delta.cursor < prior.cursor || this.visibilityFeedPresent && Number(own) < Number(prior.own) || [...siblings].some(([store, marker]) => Number(marker) < Number(prior.siblings.get(store))));
+    if (replaced || prior && !sameLane)
+      this.visibilityEpoch = randomUUID9();
+    if (!this.visibilityFeedPresent)
+      this.visibilityEpoch ??= this.visibilityOwner;
+    const relevant = ledgerMoved ? delta.cursor : prior.relevant;
+    const relevantSiblings = movedSiblings ? [...siblings].map(([store, marker]) => JSON.stringify([store.corpusId, marker])).sort() : prior.relevantSiblings;
+    this.visibilityStamp = { ledger, ledgerId, cursor: delta.cursor, relevant, own, siblings, relevantSiblings };
+    return JSON.stringify([ledgerId, relevant, own, relevantSiblings, this.visibilityEpoch]);
   }
   embeddingSweepVisibilityMarker(provider, durable) {
     const allowHeld = this.canEmbedHeld(provider);
@@ -31936,6 +32162,35 @@ ${parentKey(ref)}`, { ref, origin });
       return query.mode === "get" ? statement.get(...query.params) : statement.all(...query.params);
     };
   }
+  async countEmbeddingHolds(visibility, counts, read, stopAtMs) {
+    const { ledger, members } = visibility;
+    let after = 0;
+    while (stopAtMs === undefined || Date.now() < stopAtMs) {
+      const page = await ledgerReadOffThread(ledger, ledger.embeddingHoldReasonSteps(this.corpusId, after), BACKGROUND_READS);
+      if (page.length === 0)
+        break;
+      const reasons = new Map;
+      for (const { key, reason } of page)
+        for (const pk of members.get(key)?.pks ?? [])
+          reasons.set(pk, reason);
+      if (reasons.size) {
+        const rows = await read({
+          sql: `SELECT i.item_pk, (SELECT COUNT(*) FROM chunks c WHERE c.item_pk = i.item_pk) AS chunks
+            FROM json_each(?) ids CROSS JOIN items i ON i.item_pk = ids.value
+            WHERE i.tombstoned = 0 AND i.trust_tier <> 'S5'`,
+          params: [JSON.stringify([...reasons.keys()])],
+          mode: "all"
+        });
+        for (const row of rows) {
+          const reason = reasons.get(row.item_pk);
+          counts[`${reason}_chunks`] += row.chunks;
+          counts[`${reason}_items`] += 1;
+        }
+      }
+      after = page[page.length - 1].rowId;
+      await ingestionTurn();
+    }
+  }
   async embeddingSweepInventory(provider, scope = {}, stopAtMs, windowChunks = MISSING_EMBEDDING_CHUNK_WINDOW) {
     const started = Date.now();
     const tier = await this.tierHiddenItemPksInTurns();
@@ -31945,7 +32200,8 @@ ${parentKey(ref)}`, { ref, origin });
     const namesOnly = await pkSetInTurns([tier.metadataLayer]);
     const moving = new Set;
     let walked = 0;
-    for (const member of this.tierLedgerHiddenMemo?.members.values() ?? []) {
+    const visibility = this.tierLedgerHiddenMemo;
+    for (const member of visibility?.members.values() ?? []) {
       if (member.flags.moving)
         for (const pk of member.pks)
           moving.add(pk);
@@ -31970,6 +32226,13 @@ ${parentKey(ref)}`, { ref, origin });
       skipped_retired_chunks: 0,
       inventory_complete: 0
     };
+    for (const reason of EMBEDDING_HOLD_REASONS) {
+      counts[`${reason}_chunks`] = 0;
+      counts[`${reason}_items`] = 0;
+    }
+    const read = this.embeddingSweepRead(offThreadReadsSupported(this.dbPath));
+    if (visibility && held.size)
+      await this.countEmbeddingHolds(visibility, counts, read, stopAtMs);
     const windowSql = `
       SELECT c.chunk_pk, i.item_pk, i.local_item_id, i.tombstoned, i.trust_tier, i.indexed_at,
         CASE WHEN 1 = 1 ${account ? "AND i.account_scope = ?" : ""} ${scoped.sql} THEN 1 ELSE 0 END AS in_scope
@@ -31980,7 +32243,6 @@ ${parentKey(ref)}`, { ref, origin });
       ORDER BY c.chunk_pk
     `;
     const recentSince = new Date(started - 3 * 24 * 60 * 60000).toISOString();
-    const read = this.embeddingSweepRead(offThreadReadsSupported(this.dbPath));
     const maxChunkPk = (await read({ sql: "SELECT COALESCE(MAX(chunk_pk), 0) AS n FROM chunks", params: [], mode: "get" })).n;
     let after = 0;
     while (stopAtMs === undefined || Date.now() < stopAtMs) {
@@ -33998,48 +34260,70 @@ ${parentKey(ref)}`, { ref, origin });
     return !current || current.dev !== this.openedFile.dev || current.ino !== this.openedFile.ino || current.birthtimeNs !== this.openedFile.birthtimeNs;
   }
   async prepareStatusCounts(scope) {
-    await this.refreshTierHiddenCountsInTurns();
+    const value = await this.tierHiddenItemPksInTurns();
+    this.tierHiddenCountsMemo = { at: Date.now(), value };
     const key = JSON.stringify(scope ?? null);
+    const memos = this.settledUnreadableCountMemo ??= new Map;
+    const stamp = this.settledUnreadableStamp();
+    if (this.reusesSettledUnreadableCount(memos.get(key), stamp))
+      return;
+    const counts = this.unreadHoldCounts(await runHiddenStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
+    if (this.settledUnreadableCountMemo !== memos)
+      return;
+    if (memos.size > 32)
+      memos.clear();
+    memos.set(key, { at: Date.now(), stamp, ...counts });
+  }
+  settledUnreadableStamp() {
     try {
-      const counts = this.unreadHoldCounts(await runHiddenStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
-      const memos = this.settledUnreadableCountMemo ??= new Map;
-      if (memos.size > 32)
-        memos.clear();
-      memos.set(key, { at: Date.now(), ...counts });
-    } catch {}
+      const visibility = this.visibilityMarker();
+      const writes = this.writeSequence();
+      return visibility === undefined || writes === undefined ? undefined : [visibility, writes];
+    } catch {
+      return;
+    }
+  }
+  reusesSettledUnreadableCount(memo, stamp) {
+    return memo?.stamp !== undefined && stamp !== undefined && memo.stamp[0] === stamp[0] && memo.stamp[1] === stamp[1] && Date.now() - memo.at < STORE_UNCHANGED_REUSE_MS;
   }
   settledUnreadableCount(scope, maxAgeMs) {
     const key = JSON.stringify(scope ?? null);
     const memos = this.settledUnreadableCountMemo ??= new Map;
     const memo = memos.get(key);
+    const stamp = this.settledUnreadableStamp();
+    if (memo && this.reusesSettledUnreadableCount(memo, stamp))
+      return memo;
     if (maxAgeMs > 0 && memo) {
-      if (Date.now() - memo.at >= maxAgeMs)
-        this.refreshSettledUnreadableCountInTurns(key, scope);
+      if (stamp !== undefined || Date.now() - memo.at >= maxAgeMs)
+        this.refreshSettledUnreadableCountInTurns(key, scope, stamp);
       return memo;
     }
     if (offThreadReadsSupported(this.dbPath)) {
-      this.refreshSettledUnreadableCountInTurns(key, scope);
+      this.refreshSettledUnreadableCountInTurns(key, scope, stamp);
       return memo ?? { count: 0, waitingPks: [], policyPks: [] };
     }
     const counts = this.unreadHoldCounts(runHiddenStepsHere(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
     if (memos.size > 32)
       memos.clear();
-    memos.set(key, { at: Date.now(), ...counts });
+    memos.set(key, { at: Date.now(), stamp, ...counts });
     return counts;
   }
   settledUnreadableCountRefresh;
-  refreshSettledUnreadableCountInTurns(key, scope) {
+  refreshSettledUnreadableCountInTurns(key, scope, stamp) {
     const running = this.settledUnreadableCountRefresh ??= new Set;
     if (running.has(key))
       return;
     running.add(key);
+    const memos = this.settledUnreadableCountMemo ??= new Map;
+    const prior = memos.get(key);
     (async () => {
       try {
         const counts = this.unreadHoldCounts(await runHiddenStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true, includeUnsettled: true })));
-        const memos = this.settledUnreadableCountMemo ??= new Map;
+        if (this.settledUnreadableCountMemo !== memos || memos.get(key) !== prior)
+          return;
         if (memos.size > 32)
           memos.clear();
-        memos.set(key, { at: Date.now(), ...counts });
+        memos.set(key, { at: Date.now(), stamp, ...counts });
       } catch {} finally {
         running.delete(key);
       }

@@ -42,7 +42,7 @@ import { namesOnlyCoverageNote } from '../../core/names-only-coverage.ts';
 import { runWithLocalInferenceGuard } from '../answer-activity.ts';
 import type { Analyst, AnalystCitation, AnalystOptions, AnalystResult, EvidenceCandidate, EvidencePack } from '../../core/contracts.ts';
 import { analystEvidenceFormat, analystPromptBytes, currentAnalystAbortSignal, noEvidenceAnalystResult, runWithAnalystAbortSignal, withPromptBudget, type AnalystEvidenceFormat } from '../../core/analyst.ts';
-import { promptFitCoverageGap, STARTUP_SEARCH_GAP, timedOutCoverageNotes } from '../../core/source-index/partial-search.ts';
+import { partialSearchCoverageNotes, promptFitCoverageGap, RERANK_FALLBACK_GAP, STARTUP_SEARCH_GAP } from '../../core/source-index/partial-search.ts';
 import { OPENCLAW_DEFAULT_MODEL_LABEL, OPENCLAW_INFER_MAX_PROMPT_BYTES } from '../../core/analyst-openclaw-infer.ts';
 import {
   buildEvidencePackDetailed,
@@ -827,7 +827,7 @@ export function createAnalystSourceIndexAnswerHandler(
       const readContent = new Set(detail.pack.candidates.filter((candidate) => candidate.chunks.length > 0).map((candidate) => itemKey(candidate.provenance.sourceItem)));
       const readingOnly = stillReading > 0 && !analystResult.citations.some((citation) => readContent.has(itemKey(citation.provenance.sourceItem)));
       const fitNote = promptFitNotes.get(analystResult);
-      const readingNotes = fitNote && releasedNotes.includes(fitNote) ? [...onDemandNotes, fitNote] : onDemandNotes;
+      const readingNotes = [...onDemandNotes, ...releasedNotes.filter((note) => note === fitNote || note === RERANK_FALLBACK_GAP)];
       const answer = stillReading === 0
         ? heldAnswer
         : [onDemandReadingCoverageNote(stillReading), ...(readingOnly ? readingNotes : [heldAnswer])].join('\n\n');
@@ -2543,17 +2543,21 @@ export function releaseAnalystAnswer(input: AnalystReleaseInput): AnalystRelease
         ? corpusReadabilityCoverageNotes(input.detail)
         : []),
       ...secureLocalExclusionCoverageNotes(input.detail),
-      // A source cut short for time is named even when the other gaps are
-      // folded into a count: the corpus name is no content, and a cut search
-      // must never read as a full one (#1305).
-      ...timedOutCoverageNotes(input.detail.pack.coverage),
+      // Search steps that did not finish are safe to name even when gaps
+      // involving source content are folded into a count (#1305).
+      ...partialSearchCoverageNotes(input.detail.pack.coverage),
       ...classificationCoverageNotes(input.detail),
       ...secretLocationCoverageNotes(input.detail),
     ],
   );
   const safeUnsupportedAnswer = WITHHELD_ANSWERS.noAnswerInText;
   const unsupportedNoContent = uncitedNonPublicAnswer && isUnsupportedNoContentAnswer(input.result);
-  const safeUnsupportedGaps = [...safeUnsupportedCoverageGaps(input.detail.pack, nonPublicPack), ...startupNotes, ...(input.onDemandNotes ?? [])];
+  const safeUnsupportedGaps = [
+    ...safeUnsupportedCoverageGaps(input.detail.pack, nonPublicPack),
+    ...startupNotes,
+    ...(input.onDemandNotes ?? []),
+    ...(input.detail.pack.coverage.extractionGaps.includes(RERANK_FALLBACK_GAP) ? [RERANK_FALLBACK_GAP] : []),
+  ];
   const safeUnsupportedDraft = composeReleasedAnswer(safeUnsupportedAnswer, safeUnsupportedGaps);
   const finalDraftAnswer = composeReleasedAnswer(
     unsupportedNoContent ? safeUnsupportedDraft : plainTrustWords(input.result.answer),
@@ -2799,8 +2803,10 @@ function sanitizeReleasedCoverageNotes(
 ): string[] {
   if (unanswered.length === 0) return [];
   if (!nonPublicPack) return [...unanswered];
+  const contentGaps = unanswered.filter((gap) => gap.trim() !== RERANK_FALLBACK_GAP);
+  if (contentGaps.length === 0) return [];
   const categories = new Set<string>(['coverage']);
-  if (detail.pack.coverage.extractionGaps.some((gap) => gap !== STARTUP_SEARCH_GAP && gap.trim().length > 0)) {
+  if (detail.pack.coverage.extractionGaps.some(isSourceExtractionGap)) {
     categories.add('extraction/readability');
   }
   if ((detail.corpusReadabilityGaps ?? []).some(
@@ -2810,14 +2816,18 @@ function sanitizeReleasedCoverageNotes(
   }
   const categoryText = [...categories].sort().join(' and ');
   return [
-    `${unanswered.length} non-public ${categoryText} gap${unanswered.length === 1 ? '' : 's'} ` +
+    `${contentGaps.length} non-public ${categoryText} gap${contentGaps.length === 1 ? '' : 's'} ` +
     'affected this answer; ' +
     'raw filenames, paths, and source content were withheld.',
   ];
 }
 
+function isSourceExtractionGap(gap: string): boolean {
+  return gap !== STARTUP_SEARCH_GAP && gap !== RERANK_FALLBACK_GAP && gap.trim().length > 0;
+}
+
 function safeUnsupportedCoverageGaps(pack: EvidencePack, nonPublicPack: boolean): string[] {
-  const gaps = pack.coverage.extractionGaps.filter((gap) => gap !== STARTUP_SEARCH_GAP && gap.trim().length > 0);
+  const gaps = pack.coverage.extractionGaps.filter(isSourceExtractionGap);
   if (gaps.length === 0) {
     // The safe-unsupported release factually released zero citable evidence.
     // Carry a mechanical, corpus-ids-only coverage note so the honest
@@ -3094,7 +3104,7 @@ function unreadableMatchedReleaseInputs(detail: EvidencePackBuildDetail, release
 }
 
 function unreadableMatchedCandidateIndexes(detail: EvidencePackBuildDetail): number[] {
-  if (!detail.pack.coverage.extractionGaps.some(gap => gap !== STARTUP_SEARCH_GAP)) return [];
+  if (!detail.pack.coverage.extractionGaps.some(isSourceExtractionGap)) return [];
   // Contents tiered Private are not unreadable: they are answered from their
   // Private copy, and a name-only copy adds nothing as evidence.
   const contentPrivate = new Set(detail.contentPrivateCandidateIndexes ?? []);
@@ -3371,7 +3381,7 @@ export async function searchReleasedEvidence(input: {
   });
   withheld += released.withheld;
   const coverage = detail.pack.coverage;
-  const cutShort = timedOutCoverageNotes(coverage);
+  const cutShort = partialSearchCoverageNotes(coverage);
   const heldPassages = chunkCoverageNote(remotePack.report);
   if (heldPassages) cutShort.push(heldPassages);
   return {

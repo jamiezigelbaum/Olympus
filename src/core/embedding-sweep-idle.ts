@@ -4,6 +4,9 @@ import { writePrivateFileAtomic } from './atomic-file.ts';
 
 export interface IdleEmbeddingSweep {
   key: string;
+  /** Optional for receipts saved before wake diagnostics. */
+  writes?: number;
+  visibilityHash?: string;
   at: number;
   inventory: Record<string, number>;
 }
@@ -47,8 +50,10 @@ export async function readEmbeddingSweepIdle(path: string): Promise<Map<string, 
 
 function isIdleSweep(value: unknown): value is IdleEmbeddingSweep {
   if (!value || typeof value !== 'object') return false;
-  const { key, at, inventory } = value as Partial<IdleEmbeddingSweep>;
+  const { key, writes, visibilityHash, at, inventory } = value as Partial<IdleEmbeddingSweep>;
   return typeof key === 'string' && /^[a-f0-9]{64}$/.test(key)
+    && (writes === undefined || Number.isSafeInteger(writes))
+    && (visibilityHash === undefined || (typeof visibilityHash === 'string' && /^[a-f0-9]{16}$/.test(visibilityHash)))
     && typeof at === 'number' && Number.isSafeInteger(at) && at > 0
     && inventory?.inventory_complete === 1 && inventory.skipped_failed_chunks === 0
     && Object.keys(inventory).length === INVENTORY_FIELDS.length

@@ -482,6 +482,7 @@ import {
 } from '../answer-activity.ts';
 import { privacyOwnerContext } from '../classification/privacy-profile.ts';
 import { runUnattendedStaleEmbedHoldWalk, TierSnifferService, tierSnifferServiceEnv } from '../classification/sniffer-service.ts';
+import { TierOverPrivateMonitor, type TierOverPrivateStatus } from '../classification/tier-over-private.ts';
 import { SNIFFER_MAX_CONCURRENT_CALLS, completeAfterSlot } from '../classification/sniffer-resolver.ts';
 import { approveClassifier, resolveClassificationLedgerPath, readClassificationLedger, isClassifierApproved } from '../classification-ledger.ts';
 import { resolveTierMigrationPaths, tierMigrationStatusSummary } from '../classification/tier-migration.ts';
@@ -980,6 +981,7 @@ export async function main(): Promise<void> {
   // Set once the sniffer runs: its backlog, for the status surface.
   let classificationBusy = () => false;
   let tierSnifferBacklog: (() => ReturnType<TierSnifferService['backlog']>) | undefined;
+  let tierOverPrivate: () => TierOverPrivateStatus = () => ({ state: 'counting' });
   // Set once the sniffer is built: whether it can judge imported items now.
   let archivePrivateModelState: () => ArchivePrivateModelState = () => 'waiting';
   const connector = createEmailSourceConnectorFromEnv();
@@ -1596,6 +1598,10 @@ export async function main(): Promise<void> {
     corpusIds: lane.corpusIds,
     stores: () => connectorStores.filter((store) => lane.corpusIds.has(store.corpusId)),
   }));
+  const overPrivate = engineFront ? undefined : new TierOverPrivateMonitor(
+    () => tierScopes().map(scope => scope.ledger),
+    line => console.warn(line),
+  );
   // A query's matches still waiting for their privacy judgment are judged next (#1062).
   // The judge runs in the background in the split: raise its boosts there.
   const raiseJudgeBoosts = engineFront ? frontJudgeBoost(engineFront.client) : (identities: Parameters<typeof judgeBoosts.raise>[0]) => judgeBoosts.raise(identities);
@@ -4081,6 +4087,8 @@ export async function main(): Promise<void> {
               ...(backlog.waiting
                 ? { waiting_reason: backlog.waiting.reason, waiting_label: backlog.waiting.label, waiting_since: backlog.waiting.since }
                 : {}),
+              ...(backlog.storedWalks?.length ? { stored_walks: backlog.storedWalks } : {}),
+              over_private: tierOverPrivate(),
             }
           : undefined;
       },
@@ -6672,6 +6680,7 @@ export async function main(): Promise<void> {
       const windowNotices = localPromptBudgets.map(localAnalystWindowNotice).filter(notice => notice !== undefined);
       return Response.json({
         ...await response.json() as object,
+        tier_classification: { over_private: tierOverPrivate() },
         ...(windowNotices.length ? { degraded_conditions: windowNotices } : {}),
         ...(rerankOutcomes ? {
           rerank_outcomes: rerankOutcomes,
@@ -6942,6 +6951,7 @@ export async function main(): Promise<void> {
         ...(snifferRuntime.source === 'built_in' ? { autoApproveBuiltIn: true } : {}),
         autoMoves: {
           ...automaticMoveContext,
+          onPlacementChecked: (paths) => { void overPrivate?.refresh(paths); },
           // A sweep may have visited the destination while the item was held
           // or moving. Wake its source once the new copy is visible.
           onEmbeddingNeeded: (corpora) => {
@@ -7013,18 +7023,26 @@ export async function main(): Promise<void> {
   }, 2_000) : undefined;
   frontMountRetry?.unref?.();
   // Keeps each store's set current, and saved by a writer; see keepVisibilityCurrent.
-  if (!engineFront) void keepVisibilityCurrent('after start');
-  const visibilityRefresh = setInterval(() => { void keepVisibilityCurrent('refresh'); }, VISIBILITY_REFRESH_MS);
+  if (!engineFront) {
+    void keepVisibilityCurrent('after start');
+    void overPrivate?.refresh();
+  }
+  const visibilityRefresh = setInterval(() => {
+    void keepVisibilityCurrent('refresh');
+    void overPrivate?.refresh();
+  }, VISIBILITY_REFRESH_MS);
   visibilityRefresh.unref?.();
   if (engineFront) {
     // The judge runs in the background: the front shows what it last published.
     const judge = frontJudgeState(() => engineFront!.status());
     classificationBusy = judge.busy;
     tierSnifferBacklog = judge.backlog as typeof tierSnifferBacklog;
+    tierOverPrivate = judge.overPrivate;
     archivePrivateModelState = judge.archivePrivateModel;
   } else {
     classificationBusy = () => tierSniffer?.hasPriority ?? false;
     tierSnifferBacklog = tierSniffer ? () => tierSniffer.backlog() : undefined;
+    if (overPrivate) tierOverPrivate = () => overPrivate.status();
     archivePrivateModelState = () => archivePrivateModelFromSniffer(tierSniffer);
   }
   tierSniffer?.start();
@@ -7209,6 +7227,7 @@ export async function main(): Promise<void> {
           const backlog = tierSniffer?.backlog();
           return {
             backlog: backlog ?? null,
+            over_private: tierOverPrivate(),
             pending: backlog?.pendingItems ?? null,
             spending: judgeSpending.status(),
             busy: tierSniffer?.hasPriority ?? false,
@@ -7286,7 +7305,7 @@ export async function main(): Promise<void> {
               }
             }
             for (const request of [PLAIN_STATUS_REQUEST, DASHBOARD_STATUS_REQUEST]) {
-              await refreshSnapshot({ ...request }, { countsMaxAgeMs: STATUS_COUNTS_MAX_AGE_MS });
+              await refreshSnapshot({ ...request }, { countsMaxAgeMs: STATUS_COUNTS_MAX_AGE_MS, reuseCounts: true });
             }
           },
           log: (line) => console.warn(line),

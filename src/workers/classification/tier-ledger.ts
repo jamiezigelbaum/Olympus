@@ -47,7 +47,7 @@ import {
 import { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore } from './tier-ledger-path.ts';
 
 export { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore };
-export const TIER_LEDGER_SCHEMA_VERSION = 16;
+export const TIER_LEDGER_SCHEMA_VERSION = 17;
 export const RETIRED_EMBEDDING_CLEARANCE_REASON = 'content:sniffer:retired_embedding_clearance:undecided';
 
 /** A scrub's start: the revision it took and the item's generation then. */
@@ -57,6 +57,12 @@ export interface SecretScrubMark {
 }
 
 export type TierLedgerState = 'pending' | 'current' | 'moving';
+
+export interface TierLedgerOverPrivateCount {
+  provider: string;
+  items: number;
+  oldest_since: string;
+}
 
 /**
  * An item's ledger identity. The conversation is part of it: chat providers
@@ -2034,6 +2040,43 @@ export class TierLedger {
         WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?`).run(...idParams(identity));
       return true;
     })();
+  }
+
+  /** Count each item once even if several of its current copies qualify. */
+  *overPrivateCountSteps(): Generator<LedgerRead, TierLedgerOverPrivateCount[], unknown> {
+    return (yield { mode: 'all', params: [], sql: `
+      WITH verdicts AS (
+        SELECT provider, account_scope, conversation_key, provider_item_id, decided_at,
+          CASE WHEN state = 'moving' THEN target_metadata_tier ELSE metadata_tier END AS vm,
+          CASE WHEN state = 'moving' THEN target_content_tier ELSE content_tier END AS vc
+        FROM tier_items
+        -- A pending item is held at least Private, regardless of either layer's verdict.
+        WHERE state <> 'pending' AND metadata_pending = 0 AND content_pending = 0
+      ), needs AS (
+        SELECT *,
+          CASE vm WHEN 'secrets' THEN 3 WHEN 'secure' THEN 2 WHEN 'private' THEN 1 ELSE 0 END AS need_m,
+          CASE WHEN vc = 'secrets' OR vm = 'secrets' THEN 3
+               WHEN vc = 'secure' OR vm = 'secure' THEN 2
+               WHEN vc = 'private' OR vm = 'private' THEN 1 ELSE 0 END AS need_c
+        FROM verdicts
+      )
+      SELECT n.provider, COUNT(*) AS items, MIN(n.decided_at) AS oldest_since
+      FROM needs n
+      WHERE EXISTS (
+        SELECT 1 FROM tier_copies c
+        WHERE c.provider = n.provider AND c.account_scope = n.account_scope
+          AND c.conversation_key = n.conversation_key AND c.provider_item_id = n.provider_item_id
+          AND c.copy_state = 'current'
+          AND (
+            (c.layers IN ('metadata', 'both') AND
+              (CASE c.trust_domain WHEN 'secure_local' THEN 2 WHEN 'internal' THEN 1 ELSE 0 END) > n.need_m)
+            OR (c.layers IN ('content', 'both') AND
+              (CASE c.trust_domain WHEN 'secure_local' THEN 2 WHEN 'internal' THEN 1 ELSE 0 END) > n.need_c)
+          )
+      )
+      GROUP BY n.provider
+      ORDER BY n.provider
+    ` }) as TierLedgerOverPrivateCount[];
   }
 
   /** Content-free counts for status surfaces. */
@@ -4330,15 +4373,24 @@ export class TierLedger {
    * transaction. A reader that fell behind retention must rebuild; it may
    * never treat a gap as evidence that its old visible set is current.
    */
-  visibilityChangesSince(after?: number): { cursor: number; identities?: TierLedgerIdentity[] } {
+  visibilityChangesSince(after?: number, scope?: { corpusId: string; maxEntries: number }): {
+    cursor: number; identities?: TierLedgerIdentity[]; corpusChanged?: boolean;
+  } {
     return this.db.transaction(() => {
-      const bounds = this.db.query('SELECT (SELECT MIN(seq) FROM tier_visibility_changes) AS first, (SELECT MAX(seq) FROM tier_visibility_changes) AS last')
-        .get() as { first: number | null; last: number | null };
-      const cursor = bounds.last ?? 0;
-      if (after === undefined || after > cursor || (bounds.first !== null && after < bounds.first - 1)) return { cursor };
-      const rows = this.db.query(`SELECT DISTINCT provider, account_scope, conversation_key, provider_item_id
-        FROM tier_visibility_changes WHERE seq > ?`).all(after) as TierIdentityRow[];
-      return { cursor, identities: rows.map(identityFromRow) };
+      const bounds = this.db.query(`SELECT (SELECT MIN(seq) FROM tier_visibility_changes) AS first,
+        (SELECT seq FROM sqlite_sequence WHERE name = 'tier_visibility_changes') AS issued`)
+        .get() as { first: number | null; issued: number | null };
+      const cursor = bounds.issued ?? 0;
+      if (after === undefined || after > cursor || after < (bounds.first ?? cursor + 1) - 1
+        || (scope && cursor - after > scope.maxEntries)) return { cursor };
+      if (after === cursor) return { cursor, identities: [] };
+      const rows = this.db.query(`SELECT DISTINCT provider, account_scope, conversation_key, provider_item_id,
+        ${scope ? 'corpus_id, affects, seq' : 'NULL AS corpus_id, 1 AS affects, NULL AS seq'}
+        FROM tier_visibility_changes WHERE seq > ?`).all(after) as Array<TierIdentityRow & { corpus_id: string | null; affects: number }>;
+      if (scope && rows.length !== cursor - after) return { cursor };
+      const relevant = scope ? rows.filter(row => row.affects === 1) : rows;
+      return { cursor, identities: relevant.map(identityFromRow),
+        ...(scope ? { corpusChanged: relevant.some(row => row.corpus_id === scope.corpusId) } : {}) };
     })();
   }
 
@@ -6220,7 +6272,7 @@ function tierLedgerMigrations(): SqliteMigration[] {
       },
     },
     {
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 16,
       name: 'superseded_copy_walk',
       up(db) {
         // The superseded-copy sweep pages identities that still hold a
@@ -6230,6 +6282,43 @@ function tierLedgerMigrations(): SqliteMigration[] {
         db.exec(`CREATE INDEX IF NOT EXISTS tier_copies_superseded_walk
           ON tier_copies (provider, account_scope, conversation_key, provider_item_id)
           WHERE copy_state = 'superseded';`);
+      },
+    },
+    {
+      version: TIER_LEDGER_SCHEMA_VERSION,
+      name: 'visibility_feed_copy_corpus',
+      up(db) {
+        if (!db.query("SELECT 1 FROM pragma_table_info('tier_visibility_changes') WHERE name = 'corpus_id'").get()) {
+          db.exec(`
+            ALTER TABLE tier_visibility_changes ADD COLUMN corpus_id TEXT;
+            ALTER TABLE tier_visibility_changes ADD COLUMN affects INTEGER NOT NULL DEFAULT 1;
+          `);
+        }
+        // A moving copy counts even before a local row exists. Preserve the
+        // old corpus on delete and relocation so its marker can see it leave.
+        for (const [table, columns] of [
+          ['tier_copies', 'copy_state, embed_hold, layers, corpus_id, trust_domain'],
+          ['tier_items', 'state, routed, content_read, metadata_pending, content_pending, metadata_tier, content_tier, target_metadata_tier, target_content_tier'],
+          ['tier_overrides', 'override_json'],
+        ] as const) {
+          const updated = `${columns}, provider, account_scope, conversation_key, provider_item_id`;
+          const changed = updated.split(', ').map(column => `OLD.${column} IS NOT NEW.${column}`).join(' OR ');
+          // Keep the full feed's cursor semantics for existing readers.
+          const note = (row: 'NEW' | 'OLD', affects = '1') => `
+            INSERT INTO tier_visibility_changes (provider, account_scope, conversation_key, provider_item_id, corpus_id, affects)
+            VALUES (${row}.provider, ${row}.account_scope, ${row}.conversation_key, ${row}.provider_item_id,
+              ${table === 'tier_copies' ? `${row}.corpus_id` : 'NULL'}, ${affects});
+            DELETE FROM tier_visibility_changes WHERE seq <= (SELECT MAX(seq) - 8192 FROM tier_visibility_changes);`;
+          db.exec(`
+            DROP TRIGGER IF EXISTS ${table}_visibility_insert;
+            DROP TRIGGER IF EXISTS ${table}_visibility_delete;
+            DROP TRIGGER IF EXISTS ${table}_visibility_update;
+            CREATE TRIGGER ${table}_visibility_insert AFTER INSERT ON ${table} BEGIN ${note('NEW')} END;
+            CREATE TRIGGER ${table}_visibility_delete AFTER DELETE ON ${table} BEGIN ${note('OLD')} END;
+            CREATE TRIGGER ${table}_visibility_update AFTER UPDATE OF ${updated} ON ${table}
+              BEGIN ${note('OLD', changed)} ${note('NEW', changed)} END;
+          `);
+        }
       },
     },
   ];
