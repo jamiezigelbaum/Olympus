@@ -50,7 +50,7 @@ import { createRemotePrivateParts } from '../src/core/remote-private-part.ts';
 import { buildSourceIndexCorpusRegistry, defineSourceIndexCorpus } from '../src/core/source-index/corpus.ts';
 import { routeSourceIndexSearch } from '../src/core/source-index/router.ts';
 import { buildEvidencePackDetailed, semanticLaneSkippedGap } from '../src/core/evidence-pack.ts';
-import { SEMANTIC_SEARCH_STARTING, STARTUP_SEARCH_GAP } from '../src/core/source-index/partial-search.ts';
+import { SEMANTIC_SEARCH_STARTING, semanticStartupGap, STARTUP_SEARCH_GAP } from '../src/core/source-index/partial-search.ts';
 import { beginStartupProgress, startupWaitingLine, type StartupProgress } from '../src/core/startup-progress.ts';
 import { createSovereigntyEngine, loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 import { openWaitingPrivateQuestionStore, type WaitingQuestionStore } from '../src/core/waiting-private-questions.ts';
@@ -324,6 +324,7 @@ async function localFixture(options: {
   limits?: Partial<PanelAnswerLimits>;
   duringSynthesis?: (fixture: TierFixture) => Promise<void>;
   keywordOnly?: boolean;
+  mountedStores?: (fixture: TierFixture) => LocalConnectorStore[];
   meaningEmbeddings?: boolean;
   realEmbeddings?: boolean;
   /** Both stores hold the built-in model's vectors and are searched with it. */
@@ -349,7 +350,7 @@ async function localFixture(options: {
     await fixture.stores.internal!.embedChunks({ provider: options.oneModel ? builtIn.vectors : fixture.cloud });
   }
   const lanes = createSourceAnswerLanes({
-    stores: () => fixture.set.openStores(),
+    stores: () => options.mountedStores?.(fixture) ?? fixture.set.openStores(),
     registry: () => buildSourceIndexCorpusRegistry([
       ...fixture.set.openStores().map((store) => defineConnectorCorpus({ corpusId: store.corpusId, family: store.family, trustDomain: store.trustDomain })),
       // Searchable only by a cloud query, and registered with no store here.
@@ -470,7 +471,8 @@ describe('split front vector admission', () => {
     try {
       await expect(privateStore.keepVisibilityCurrentInTurns()).rejects.toThrow('fixture build failed');
       await personalStore.keepVisibilityCurrentInTurns();
-      expect(privateStore.vectorSearchStartup).toBeDefined();
+      expect(privateStore.vectorSearchStartup).toBeUndefined();
+      expect(privateStore.vectorSearchDeferred).toBe(true);
       expect(privateStore.vectorLaneServable(local.builtIn.provider.modelId)).toBe(false);
       expect(personalStore.vectorSearchStartup).toBeUndefined();
       expect(personalStore.vectorLaneServable(local.fixture.cloud.modelId)).toBe(true);
@@ -513,6 +515,97 @@ describe('split front vector admission', () => {
       },
     });
     expect(store.list().questions).toHaveLength(1);
+  });
+
+  test('retirement wakes the Ask to reselect current handles while another original build is still pending', async () => {
+    let mounted: LocalConnectorStore[] | undefined;
+    let selections = 0;
+    const local = await localFixture({ oneModel: true, mountedStores: fixture => {
+      selections += 1;
+      return mounted ?? fixture.set.openStores();
+    } });
+    const personal = local.fixture.stores.internal!;
+    const original = openReader(local.fixture.stores.secure_local!);
+    const replacement = openReader(original);
+    original.deferVectorSearchUntilVisibilityBuilt();
+    replacement.deferVectorSearchUntilVisibilityBuilt();
+    personal.deferVectorSearchUntilVisibilityBuilt();
+    mounted = [personal, original];
+    const pending = local.answer({ question: 'When does the orchard flat lease end?' });
+    expect(selections).toBe(1);
+    mounted = [personal, replacement];
+    original.close();
+    await waitFor(() => selections >= 2);
+    expect(local.stub.requests).toEqual([]);
+    await personal.keepVisibilityCurrentInTurns();
+    await waitFor(() => selections >= 3);
+    expect(local.stub.requests).toEqual([]);
+    await replacement.keepVisibilityCurrentInTurns();
+    expect(await pending).toMatchObject({ status: 'answered', unanswered: [STARTUP_SEARCH_GAP] });
+  });
+
+  test('an actual build failure releases Ask on keywords and later requests can use the same interactive slot', async () => {
+    const local = await localFixture({ meaningEmbeddings: true });
+    const source = local.fixture.stores.secure_local!;
+    source.deferVectorSearchUntilVisibilityBuilt();
+    const failed = spyOn(source as unknown as { hiddenChildItemPksInTurns(): Promise<number[]> }, 'hiddenChildItemPksInTurns')
+      .mockRejectedValue(new Error('fixture build failed'));
+    const store = waitingStore();
+    const controller = createLocalPrivateAnswers({
+      localConnectionId: '@local:You', answer: local.answer, eligible: local.eligible, store: () => store,
+      startup: () => source.vectorSearchStartup ? { stores_done: 0, stores_total: 1 } : undefined,
+    });
+    cleanups.push(() => controller.close(), () => failed.mockRestore());
+    const ask = () => controller.handle({ action: 'ask', question: 'When does the orchard flat lease end?' }, 'session:owner');
+    const pending = ask();
+    expect((await ask()).status).toBe(429);
+    expect(local.stub.requests).toEqual([]);
+    await expect(source.keepVisibilityCurrentInTurns()).rejects.toThrow('fixture build failed');
+    expect(await pending).toMatchObject({
+      status: 200, body: { status: 'answered', unanswered: [STARTUP_SEARCH_GAP, semanticStartupGap(source.corpusId)] },
+    });
+    await expect(source.keepVisibilityCurrentInTurns()).rejects.toThrow('fixture build failed');
+    expect(await ask()).toMatchObject({
+      status: 200, body: { status: 'answered', unanswered: [semanticStartupGap(source.corpusId)] },
+    });
+    expect(source.vectorSearchDeferred).toBe(true);
+    expect((await controller.handle({ action: 'list' }, 'session:owner')).body.startup).toBeUndefined();
+  });
+
+  test('a keyword-only adapter is searchable without waiting for its pending visibility build', async () => {
+    const local = await localFixture({ keywordOnly: true });
+    const source = local.fixture.stores.secure_local!;
+    source.deferVectorSearchUntilVisibilityBuilt();
+    const startup = source.vectorSearchStartup;
+    expect(await local.answer({ question: 'When does the orchard flat lease end?' }))
+      .toMatchObject({ status: 'answered', unanswered: [] });
+    expect(source.vectorSearchStartup).toBe(startup);
+    expect(source.vectorSearchDeferred).toBe(true);
+  });
+
+  test('membership changing during the child build keeps vectors deferred until the next build installs', async () => {
+    const local = await localFixture();
+    const source = local.fixture.stores.secure_local!;
+    const reader = openReader(source);
+    const sibling = local.fixture.stores.internal!;
+    let members = [reader];
+    reader.useChildVisibility({
+      ledger: () => reader.governingTierLedger(),
+      stores: () => {
+        queueMicrotask(() => { members = [reader, sibling]; });
+        return members;
+      },
+    });
+    reader.deferVectorSearchUntilVisibilityBuilt();
+    const startup = reader.vectorSearchStartup;
+    await reader.keepVisibilityCurrentInTurns();
+    expect(members).toEqual([reader, sibling]);
+    expect(reader.vectorSearchStartup).toBe(startup);
+    expect(reader.vectorLaneServable(local.builtIn.provider.modelId)).toBe(false);
+    await reader.keepVisibilityCurrentInTurns();
+    await startup;
+    expect(reader.vectorSearchDeferred).toBe(false);
+    expect(reader.vectorLaneServable(local.builtIn.provider.modelId)).toBe(true);
   });
 });
 

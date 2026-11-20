@@ -1,6 +1,6 @@
 import { provedReleaseCheck } from './helpers/scripted-search-release.ts';
 import { beginStartupProgress } from '../src/core/startup-progress.ts';
-import { RERANK_FALLBACK_GAP, STARTUP_SEARCH_GAP } from '../src/core/source-index/partial-search.ts';
+import { RERANK_FALLBACK_GAP, SEMANTIC_SEARCH_STARTING, semanticStartupGap, STARTUP_SEARCH_GAP } from '../src/core/source-index/partial-search.ts';
 // Lane B: the analyst-backed source_answer handler. Proves the contracts path
 // (route -> pack -> Analyst -> release gate) produces the existing Castor-safe
 // wire shape with honest audits, and that the trust postures hold: secure_local
@@ -3806,6 +3806,30 @@ test('unfinished keyword preparation is named in the released answer and coverag
   expect(result.answer).toContain(`Keyword preparation unfinished for ${INTERNAL}`);
   expect(calls[0]?.pack.coverage.extractionGaps.some(gap => gap.includes(`Keyword preparation unfinished for ${INTERNAL}`))).toBe(true);
   expect(result.audit.retrieval_degradations).toContainEqual(expect.objectContaining({ lane_name: `${INTERNAL}:keywords`, detail: 'keyword_preparation_incomplete' }));
+});
+
+test.each([true, false])('a non-public Analyst answer keeps the startup coverage note (cites evidence: %s)', async (cited) => {
+  const lanes = lanesFixture({ internal: ['ready'] });
+  const adapter = lanes.adapters[INTERNAL]!;
+  lanes.adapters = { ...lanes.adapters, [INTERNAL]: async request => ({
+    ...await adapter(request),
+    laneAudits: [{
+      laneName: `${INTERNAL}:connector_store_vector`, laneType: 'semantic',
+      candidateCount: 0, returnedCount: 0, skippedReason: SEMANTIC_SEARCH_STARTING, localOnly: true, rawExposed: false,
+    }],
+  }) };
+  const { analyst, calls } = scriptedAnalyst(cited
+    ? citingFirstCandidate('Available evidence.', 'Available evidence.')
+    : () => ({ answer: 'No evidence supports an answer.', citations: [], unanswered: [] }));
+  const result = await createAnalystSourceIndexAnswerHandler({ analyst, lanes: () => lanes })
+    .answer({ question: 'fixture', include_internal: true, corpus_id: INTERNAL });
+  const note = semanticStartupGap(INTERNAL);
+  expect(calls[0]?.pack.coverage.extractionGaps).toContain(note);
+  expect(result.answer.split(note)).toHaveLength(2);
+  expect(result.answer).not.toContain(SEMANTIC_SEARCH_STARTING);
+  expect(result.audit.retrieval_degradations).toContainEqual(expect.objectContaining({
+    lane_name: `${INTERNAL}:semantic`, reason: 'semantic_lane_skipped', detail: SEMANTIC_SEARCH_STARTING,
+  }));
 });
 
 test('a search started during startup keeps one coverage note after startup finishes', async () => {
