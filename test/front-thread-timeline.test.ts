@@ -97,7 +97,10 @@ test('a real thread blocked in a read on its stdin is named while it waits', asy
     // Some hosts (a hardened ptrace scope) refuse /proc/<pid>/syscall; the sampler then records no call, and there is
     // nothing to observe here.
     const readable = await waitFor(() => { try { return readFileSync(syscallFile, 'utf8').startsWith('0 ') ? 'yes' : null; } catch (error) { return (error as NodeJS.ErrnoException).code === 'ENOENT' ? null : 'no'; } }, { timeoutMs: 5_000 });
-    if (readable === 'no') { console.log(`front-thread-timeline: ${syscallFile} is not readable here; skipped`); return; }
+    // The sampler is a sibling of the reader, not its parent, and Yama's ptrace scope 1 (Ubuntu, GitHub runners)
+    // refuses a sibling's read of that file, so check from a sibling as well.
+    const sibling = Bun.spawnSync(['cat', syscallFile], { stdout: 'ignore', stderr: 'ignore' }).exitCode === 0;
+    if (readable === 'no' || !sibling) { console.log(`front-thread-timeline: ${syscallFile} is not readable by a sibling here; skipped`); return; }
     const out = join(dir, 'timeline.jsonl');
     const run = Bun.spawnSync([process.execPath, join(import.meta.dir, '..', 'scripts', 'front-thread-timeline.ts'), '--pid', String(reader.pid), '--out', out, '--seconds', '0.5', '--interval-ms', '50']);
     expect(run.exitCode).toBe(0);
