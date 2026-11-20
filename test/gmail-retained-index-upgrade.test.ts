@@ -1,3 +1,4 @@
+import { createStoreScopes } from '../src/workers/engine/runtime/store-scope-policies.ts';
 import { Database } from 'bun:sqlite';
 import { afterEach, expect, spyOn, test } from 'bun:test';
 import { createHash } from 'node:crypto';
@@ -19,7 +20,7 @@ import { createLaneTieredStoreSet } from '../src/workers/connector-store/tiered-
 import { createReleaseTierCheck, createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
 import { readConnectedHandleRegistry, writeConnectedHandleRegistry, type ConnectedCredentialHandle } from '../src/workers/credential-broker/connected-handles.ts';
 import type { CredentialBroker } from '../src/workers/credential-broker/index.ts';
-import { gmailPrivateStoreStatusScope, gmailStoreEmbeddingScope, readGmailRetainedAccountScope } from '../src/workers/email-source/gmail-status-scope.ts';
+import { gmailStoreEmbeddingScope, readGmailRetainedAccountScope } from '../src/workers/email-source/gmail-status-scope.ts';
 import { createLocalAnswerPath } from '../src/workers/engine/runtime/local-private-answers.ts';
 import { createSourceAnswerLanes } from '../src/workers/engine/runtime/source-answer-lanes.ts';
 import { createGmailConnectorStoreSyncHandler, GMAIL_INTERNAL_CONNECTOR_CORPUS_ID, GMAIL_SECURE_CONNECTOR_CORPUS_ID } from '../src/workers/google-connectors/index.ts';
@@ -109,7 +110,6 @@ async function upgradeFixture(options: { matching?: boolean; archiveOverlap?: bo
     handle: 'gmail.personal', provider: 'gmail', accountRole: 'personal', trustDomain: 'secure_local',
     allowedCapabilities: ['gmail.email.sync'], scopes: ['openid'], connectedAt: NOW, providerAccountId: MAILBOX,
   };
-  const readHandle = () => readConnectedHandleRegistry(registryPath).handles[0];
   writeConnectedHandleRegistry({ version: 1, handles: [originalHandle] }, registryPath);
   const open = () => {
     const internalStore = new LocalConnectorStore({ dbPath: internalPath, corpusId: GMAIL_INTERNAL_CONNECTOR_CORPUS_ID, family: 'email', trustDomain: 'internal' });
@@ -262,9 +262,10 @@ async function upgradeFixture(options: { matching?: boolean; archiveOverlap?: bo
       scheduler.stop();
     }
   };
-  const dashboardStatus = () => store.statusOffThread(gmailPrivateStoreStatusScope({
-    authority: runtime.authority, handle: readHandle(), provider: privateProvider, gmailRetainedAccountScope: retainedAccountScope,
-  }));
+  const { statusScopeFor } = createStoreScopes({
+    authority: runtime.authority, sourceIdForStore: () => 'gmail.email', readScope, gmailRetainedAccountScope: retainedAccountScope,
+  });
+  const dashboardStatus = () => store.statusOffThread(statusScopeFor(store, privateProvider));
   const corpora = new Set(runtime.set.openStores().map(leg => leg.corpusId));
   const visibilityScopes = () => [{ ledger: runtime.set.ledger, corpusIds: corpora }];
   const lanes = createSourceAnswerLanes({

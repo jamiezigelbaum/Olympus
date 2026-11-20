@@ -1,11 +1,3 @@
-// What each Gmail store's status counts, given the approved mail scope.
-//
-// Mail older than the approved window is kept as names only on purpose (the
-// connector reads its subject, sender and date and never its body), so such a
-// row is not owed reading. Both Gmail stores can hold one: the Personal store
-// by default, the Private store when the owner's always-Private senders or a
-// sensitive subject route it there. Each store's status therefore carries the
-// window, and the source-neutral status machinery does the rest.
 import type { ConnectorStoreStatusScope } from '../connector-store/local-index.ts';
 import { readConnectedHandleRegistry, type ConnectedCredentialHandle } from '../credential-broker/connected-handles.ts';
 import { gmailCursorConnectorIds } from '../google-connectors/index.ts';
@@ -17,25 +9,6 @@ import { embedsOnThisComputer } from '../local-pacing.ts';
 import type { SourceEmbeddingScopePolicy } from '../connector-store/embedding-scope.ts';
 import { SourceScopeApprovalRequiredError } from '../../core/operation-error.ts';
 import { checkedEmbeddingProvider, isMailSourceScopePolicyRef, type FileSourceScopeAuthority, type MailSourceScopePolicyRef } from '../source-scope-runtime.ts';
-
-/** `{ contentNotBefore }` when the approval names a window, else nothing ("everything" has none). */
-function contentWindow(contentAfter: string | undefined): Pick<ConnectorStoreStatusScope, 'contentNotBefore'> {
-  return contentAfter ? { contentNotBefore: contentAfter } : {};
-}
-
-/**
- * The Personal (internal) Gmail store counts every row it holds, so its scope
- * carries only the window. No approved mail scope, no window: undefined, and
- * the store is counted exactly as before.
- */
-export function gmailInternalStoreStatusScope(
-  authority: Pick<FileSourceScopeAuthority, 'mailSnapshot'> | undefined,
-): ConnectorStoreStatusScope | undefined {
-  const approval = authority?.mailSnapshot();
-  if (approval?.status !== 'approved') return undefined;
-  const window = contentWindow(approval.mailScope?.contentAfter);
-  return window.contentNotBefore ? window : undefined;
-}
 
 /** Indexing reads the local account record. Connecting a role never proves who owns its history. */
 export function gmailRetainedAccountMatches(input: {
@@ -80,7 +53,7 @@ export function readGmailRetainedAccountScope(input: {
 }
 
 /** HTTP "local" and the built-in model with a remote helper both leave this device. */
-export function gmailEmbeddingPopulation(input: {
+function gmailEmbeddingPopulation(input: {
   provider?: SourceEmbeddingProvider | undefined;
   accountScope: string;
   ref: MailSourceScopePolicyRef | undefined;
@@ -101,24 +74,21 @@ export function gmailEmbeddingPopulation(input: {
   } };
 }
 
-/** Count the same retained population the selected Private processor may index. */
-export function gmailPrivateStoreStatusScope(input: {
-  authority: Pick<FileSourceScopeAuthority, 'mailPolicyRef' | 'assertCurrentMail'> | undefined;
-  handle: Pick<ConnectedCredentialHandle, 'accountRole'> | undefined;
-  provider?: SourceEmbeddingProvider | undefined;
-  gmailRetainedAccountScope: () => string | undefined;
-}): ConnectorStoreStatusScope {
-  const accountScope = input.gmailRetainedAccountScope();
-  if (!accountScope) return { itemsAllowed: false, contentAllowed: false };
-  const ref = input.handle ? input.authority?.mailPolicyRef() : undefined;
-  const approval = ref ? input.authority!.assertCurrentMail(ref) : undefined;
-  const population = gmailEmbeddingPopulation({ ...input, accountScope, ref, privateStore: true });
-  const { filters } = population;
+/** Item visibility and the names-only window apply to reading and extraction as well as status. */
+export function gmailReadCountScope(
+  domain: string, population: NonNullable<ConnectorStoreStatusScope['embedding']>, ref: MailSourceScopePolicyRef | undefined,
+  authority: FileSourceScopeAuthority | undefined,
+): ConnectorStoreStatusScope {
+  if (domain === 'public_safe') return {};
+  const contentAfter = ref && authority?.assertCurrentMail(ref).mailScope.contentAfter;
+  const window = contentAfter ? { contentNotBefore: contentAfter } : {};
+  if (domain !== 'secure_local') return window;
+  if (population.contentAllowed === false) return { itemsAllowed: false, contentAllowed: false };
   return {
-    accountScope, contentAllowed: true,
-    ...(filters ? { itemFilters: filters, contentFilters: filters } : {}),
+    ...window, contentAllowed: true,
+    ...(population.accountScope ? { accountScope: population.accountScope } : {}),
+    ...(population.contentFilters ? { itemFilters: population.contentFilters, contentFilters: population.contentFilters } : {}),
     ...(ref ? { scopeRevision: ref.revision } : {}),
-    ...contentWindow(approval?.mailScope.contentAfter),
   };
 }
 

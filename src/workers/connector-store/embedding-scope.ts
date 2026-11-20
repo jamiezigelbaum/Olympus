@@ -2,7 +2,7 @@ import { SourceScopeApprovalRequiredError } from '../../core/operation-error.ts'
 import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
 import { scopeBoundEmbeddingProvider, type FileSourceScopeAuthority, type SourceScopePolicyRef } from '../source-scope-runtime.ts';
 import type { StoreEmbeddingScope } from './embedding-plan.ts';
-import { normalizeConnectorStoreSearchFilters, type ConnectorStoreSearchFilters, type LocalConnectorStore } from './local-index.ts';
+import { normalizeConnectorStoreSearchFilters, type ConnectorStoreSearchFilters, type ConnectorStoreStatusScope, type LocalConnectorStore } from './local-index.ts';
 
 interface ScopeInput {
   store: LocalConnectorStore;
@@ -15,7 +15,11 @@ export type SourceEmbeddingScopePolicy = (input: ScopeInput) => StoreEmbeddingSc
 export type EmbeddingPolicy = 'open' | 'approval' | SourceEmbeddingScopePolicy;
 
 export type EmbeddingReadScope = (store: LocalConnectorStore) => { allowed: false } | {
-  allowed: true; contentAllowed?: boolean; accountScope?: string; contentFilters?: ConnectorStoreSearchFilters;
+  allowed: true;
+  contentAllowed?: boolean;
+  accountScope?: string;
+  filters?: ConnectorStoreSearchFilters;
+  contentFilters?: ConnectorStoreSearchFilters;
 };
 
 function approvedContentScope(store: LocalConnectorStore, readScope: EmbeddingReadScope) {
@@ -51,5 +55,17 @@ export function storeEmbeddingScope(input: ScopeInput & {
         throw new SourceScopeApprovalRequiredError('The approved content scope changed before embedding.');
       }
     },
+  };
+}
+
+// Only serializable population predicates belong in status snapshot keys.
+export function embeddingCountScope(
+  store: LocalConnectorStore, provider: SourceEmbeddingProvider | undefined, scope: StoreEmbeddingScope,
+): NonNullable<ConnectorStoreStatusScope['embedding']> {
+  if (!scope.allowed) return { contentAllowed: false };
+  return {
+    ...(scope.accountScope ? { accountScope: scope.accountScope } : {}),
+    ...(scope.filters ? { contentFilters: scope.filters } : {}),
+    ...(!scope.excludeAllEmbeddingHolds && store.canEmbedHeld(provider) ? { includeHeldForJudgment: true } : {}),
   };
 }

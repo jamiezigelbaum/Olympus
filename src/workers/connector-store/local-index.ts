@@ -1967,6 +1967,10 @@ export interface ConnectorStoreStatus {
 }
 
 export interface ConnectorStoreStatusScope {
+  /** The sweep's population. Item visibility and extraction keep their own read scope. */
+  embedding?: Pick<ConnectorStoreStatusScope, 'accountScope' | 'contentAllowed' | 'contentFilters'> & {
+    includeHeldForJudgment?: boolean;
+  };
   scopeRevision?: string;
   accountScope?: string;
   itemsAllowed?: boolean;
@@ -4635,7 +4639,7 @@ export class LocalConnectorStore {
     this.personalEmbeddingProvider = provider;
   }
 
-  private canEmbedHeld(provider: Partial<ConnectorStoreEmbeddingAuthorityIdentity> | undefined): boolean {
+  canEmbedHeld(provider: Partial<ConnectorStoreEmbeddingAuthorityIdentity> | undefined): boolean {
     if (this.trustDomain !== 'secure_local' || !provider || provider.backend !== 'local'
       || !isApprovedSecureSourceEmbeddingProvider(provider as SourceEmbeddingProvider)) return false;
     try {
@@ -13709,9 +13713,7 @@ export class LocalConnectorStore {
   /**
    * The chunks still waiting for a vector on `modelId`, and a token estimate of
    * embedding them (characters / 4, the estimate every planner here uses).
-   * Serving counts keep pending judgments excluded, even if local embedding
-   * may work ahead of judging. With the embedder named, rows
-   * it may not receive (Private by their own tier) are not a backlog it owes.
+   * A scoped count uses the same held-row eligibility as the sweep.
    */
   embeddingBacklogEstimate(
     modelId: string,
@@ -13740,16 +13742,16 @@ export class LocalConnectorStore {
     if (!offThreadReadsSupported(this.dbPath)) return this.embeddingBacklogEstimate(modelId, embedder, scope, options);
     // A page of item keys per read, each a seek; the excluded items go a
     // page's worth at a time too (plan thread, 16 Nov).
-    const tierExclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0, undefined, false, false);
+    const tierExclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0, undefined, scope?.embedding?.includeHeldForJudgment, false);
     const excluded = tierExclusion.params.length > 0 ? JSON.parse(tierExclusion.params[0]!) as number[] : [];
     const privateTier = embedder ? this.privateTierEmbeddingFilter(embedder) : { filter: '', params: [] };
-    const scoped = statusScopeContentFilter(scope);
+    const scoped = statusScopeContentFilter(scope?.embedding ?? scope);
     const sql = `
       SELECT COUNT(*) AS missing, COALESCE(SUM(LENGTH(c.bounded_text)), 0) AS chars
       FROM items i
       CROSS JOIN chunks c ON c.item_pk = i.item_pk
       LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
-      WHERE i.item_pk > ? AND i.item_pk <= ? AND i.tombstoned = 0
+      WHERE i.item_pk > ? AND i.item_pk <= ? AND i.tombstoned = 0 AND i.trust_tier <> 'S5'
         AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
         ${tierExclusion.filter} ${privateTier.filter} ${scoped.filter}
     `;
@@ -13777,16 +13779,16 @@ export class LocalConnectorStore {
     options: { countsMaxAgeMs?: number },
     connectionLocal: boolean,
   ): StoreRead {
-    const tierExclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0, undefined, false, connectionLocal);
+    const tierExclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0, undefined, scope?.embedding?.includeHeldForJudgment, connectionLocal);
     const privateTier = embedder ? this.privateTierEmbeddingFilter(embedder) : { filter: '', params: [] };
-    const scoped = statusScopeContentFilter(scope);
+    const scoped = statusScopeContentFilter(scope?.embedding ?? scope);
     const filter = `${tierExclusion.filter} ${privateTier.filter} ${scoped.filter}`;
     return { mode: 'get', params: [modelId, ...tierExclusion.params, ...privateTier.params, ...scoped.params], sql: `
       SELECT COUNT(*) AS missing, COALESCE(SUM(LENGTH(c.bounded_text)), 0) AS chars
       FROM chunks c
       JOIN items i ON i.item_pk = c.item_pk
       LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
-      WHERE i.tombstoned = 0
+      WHERE i.tombstoned = 0 AND i.trust_tier <> 'S5'
         AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
         ${filter}
     ` };
@@ -13979,7 +13981,7 @@ export class LocalConnectorStore {
     const tiers = connectorStoreEmbeddableRowTiers(this.trustDomain, embedder);
     if (tiers === undefined) return { items: 0, chunks: 0, reason };
     const tierExclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0);
-    const scoped = statusScopeContentFilter(scope);
+    const scoped = statusScopeContentFilter(scope?.embedding ?? scope);
     const filter = `${tierExclusion.filter} ${scoped.filter}`;
     const params = [...tierExclusion.params, ...scoped.params];
     const row = this.db.query(`
@@ -13987,7 +13989,7 @@ export class LocalConnectorStore {
       FROM chunks c
       JOIN items i ON i.item_pk = c.item_pk
       LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
-      WHERE i.tombstoned = 0
+      WHERE i.tombstoned = 0 AND i.trust_tier <> 'S5'
         AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
         AND i.trust_tier NOT IN (SELECT value FROM json_each(?))
         ${filter}
@@ -17375,7 +17377,11 @@ export class LocalConnectorStore {
     const contentFilters = connectorStoreFilterSql(scope?.contentFilters);
     // The kept totals in this count's own snapshot (one small read), so a
     // reused count can be brought forward by exactly what was written since.
-    const kept = this.totals();
+    // Whole-store deltas cannot advance counts restricted to selected rows.
+    // Keep those as counted until the next scoped recount.
+    const embedding = scope?.embedding;
+    const kept = embedding?.accountScope || embedding?.contentFilters || embedding?.contentAllowed === false
+      ? undefined : this.totals();
     const countedTotals = kept
       ? storeTotalsFromRows((yield { sql: 'SELECT name, n FROM store_totals', params: [], mode: 'all' }) as Array<{ name: string; n: number }>, kept.reconciledAt)
       : undefined;
@@ -17398,7 +17404,9 @@ export class LocalConnectorStore {
       : '';
     // Status statements also run on a separate read connection. Pass their
     // snapshot as data; connection-local membership is only for local reads.
-    const heldNotIn = tier.held.length > 0
+    const heldForJudgment = scope?.embedding?.includeHeldForJudgment ? new Set(tier.heldForJudgment) : undefined;
+    const held = heldForJudgment ? tier.held.filter(pk => !heldForJudgment.has(pk)) : tier.held;
+    const heldNotIn = held.length > 0
       ? 'AND i.item_pk NOT IN (SELECT value FROM json_each(?))' : '';
     // Every query that excludes names-only copies counts chunks or vectors, so
     // only names-only items that still hold a chunk or a vector can change its
@@ -17428,7 +17436,9 @@ export class LocalConnectorStore {
       ${accountScope ? 'AND i.account_scope = ?' : ''}
       ${contentFilters.sql}
       ${hiddenNotIn}`;
-    const parityWhere = `${contentWhere}
+    const embeddingFilter = statusScopeContentFilter(scope?.embedding ?? scope);
+    const parityWhere = `AND i.trust_tier <> 'S5' ${embeddingFilter.filter}
+      ${hiddenNotIn} ${namesOnlyNotIn}
       ${heldNotIn}`;
     // Which files the scope asks to be read. A names copy whose text no copy
     // holds yet is still waiting to be read, so it counts here even though it
@@ -17461,7 +17471,8 @@ export class LocalConnectorStore {
         ...pageList(tier.hidden, lo, hi),
         ...pageList(namesOnlyWithText, lo, hi),
       ];
-      const parityParams = [...contentParams, ...pageList(tier.held, lo, hi)];
+      const parityParams = [...embeddingFilter.params, ...pageList(tier.hidden, lo, hi),
+        ...pageList(namesOnlyWithText, lo, hi), ...pageList(held, lo, hi)];
       const fileScopeParams = [
         ...(accountScope ? [accountScope] : []),
         ...contentFilters.params,
@@ -17473,8 +17484,8 @@ export class LocalConnectorStore {
     // A scope that says only "older than this is names only" narrows no
     // population, so it must not switch on the file-scope counts below: those
     // belong to a store whose scope picks WHICH files to read.
-    const fileScoped = policyHolds.size > 0 || (scope !== undefined && !(scope.contentNotBefore !== undefined
-      && Object.entries(scope).every(([key, value]) => key === 'contentNotBefore' || value === undefined)));
+    const fileScoped = policyHolds.size > 0 || Object.entries(scope ?? {})
+      .some(([key, value]) => key !== 'contentNotBefore' && key !== 'embedding' && value !== undefined);
     // Rows dated before the window that hold no text. julianday reads any ISO
     // form (Z, fractional seconds, offsets), and COALESCE keeps an unparseable
     // date a plain "not outside" instead of a NULL that NOT would swallow.
@@ -17629,12 +17640,12 @@ export class LocalConnectorStore {
           SELECT DISTINCT emb.model_id
           FROM items i
           CROSS JOIN chunk_embeddings emb ON emb.item_pk = i.item_pk
-          WHERE i.item_pk > ? AND i.item_pk <= ? AND i.tombstoned = 0 ${contentWhere}
+          WHERE i.item_pk > ? AND i.item_pk <= ? AND i.tombstoned = 0 ${parityWhere}
         ) m
       `, params: [
         lo, hi, ...parityParams,
         lo, hi, ...parityParams,
-        lo, hi, ...contentParams,
+        lo, hi, ...parityParams,
       ], mode: 'all' }) as Array<{ model_id: string; embedded_chunks: number; items_embedded: number }>;
       for (const row of pageByModel) {
         const total = modelTotals.get(row.model_id) ?? { embedded_chunks: 0, items_embedded: 0 };

@@ -1,3 +1,5 @@
+import { FileSourceScopeAuthority } from '../src/workers/source-scope-runtime.ts';
+import { createStoreScopes } from '../src/workers/engine/runtime/store-scope-policies.ts';
 import { AsyncResource } from 'node:async_hooks';
 import { ownerLimits } from '../src/core/owner-limits.ts';
 import { createTestClock } from './helpers/test-clock.ts';
@@ -37,7 +39,6 @@ import {
 import { GoogleDailyRequestBudget } from '../src/workers/google-connectors/request-budget.ts';
 import { dashboardImportAttentionSentence } from '../src/workers/dashboard/vocabulary.ts';
 import { gapSentence } from '../scripts/release-check/archive-leg.ts';
-import { gmailPrivateStoreStatusScope } from '../src/workers/email-source/gmail-status-scope.ts';
 import { GoogleRequestBudgetError } from '../src/workers/google-connectors/request-budget.ts';
 import { ACCOUNT, gmailArchiveHarness } from './support/gmail-archive-harness.ts';
 import { OWNER_ADDRESS, apiMessage, mail, takeoutMbox } from './support/archive-fixtures-gmail.ts';
@@ -375,13 +376,14 @@ describe('Gmail\'s item scope and approved scope', () => {
     cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
     const store = new LocalConnectorStore({ dbPath: join(dir, 's.sqlite'), corpusId: 'secure_local.email.private', family: 'email', trustDomain: 'secure_local' });
     cleanups.push(() => store.close());
-    const scope = gmailPrivateStoreStatusScope({
-      authority: {
-        mailPolicyRef: () => ({ kind: 'mail', accountGeneration: 'g1', revision: 'r1' }) as never,
-        assertCurrentMail: () => ({ mailScope: {} }) as never,
-      },
-      handle: { accountRole: 'personal' }, gmailRetainedAccountScope: () => 'personal',
-    });
+    const scope = createStoreScopes({
+      sourceIdForStore: () => 'gmail.email', readScope: () => ({ allowed: true }),
+      authority: Object.assign(new FileSourceScopeAuthority({ registryPath: join(dir, 'handles.json') }), {
+        mailPolicyRef: () => ({ sourceId: 'gmail.email', accountGeneration: 'g1', revision: 'r1' }),
+        assertCurrentMail: () => ({ mailScope: {} }),
+      }),
+      gmailRetainedAccountScope: () => 'personal',
+    }).statusScopeFor(store, undefined);
     if (!('itemFilters' in scope) || !scope.itemFilters) throw new Error('expected filters');
     expect(scope.itemFilters).toMatchObject({ observedConnectorIdPrefix: 'archive.' });
     const imported = { family: 'email' as const, provider: 'gmail', accountScope: 'personal', providerItemId: 'm1', localItemId: 'personal:m1' };

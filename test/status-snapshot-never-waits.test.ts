@@ -293,6 +293,28 @@ describe('live totals beside kept counts', () => {
     }
   });
 
+  test('a write outside the embedding population never increases a cached backlog', async () => {
+    const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: CORPUS_ID, family: 'file', trustDomain: 'secure_local' });
+    try {
+      await store.reconcileTotals();
+      const inside = file('inside.txt', 'inside body');
+      await store.syncFromConnector(connector([inside]), { fetchContent: true });
+      const handler = createSourceIndexStatusHandler({
+        corpusDefinitions: [defineDropboxFilesCorpus()], connectorStores: [store],
+        connectorStoreStatusScope: () => ({ embedding: { accountScope: inside.identity.accountScope } }),
+        retrievalAvailability: { [CORPUS_ID]: { servable: true, modelId: 'test', backend: 'local', provider: 'built-in' } },
+      });
+      const status = () => handler.status({}, SNAPSHOT);
+      const parity = { missing_chunks: 1, backlog_estimate: { missing_chunks: 1 } };
+      expect((await status()).corpora[0]?.embedding_parity).toMatchObject(parity);
+      const other = file('other.txt', 'different account');
+      await store.syncFromConnector(connector([{ ...other, identity: { ...other.identity, accountScope: 'other' } }]), { fetchContent: true });
+      expect((await status()).corpora[0]).toMatchObject({ totals: { chunks: 2 }, embedding_parity: parity });
+    } finally {
+      store.close();
+    }
+  });
+
   test('a newer store recount replaces dashboard counts during the readiness cache window', async () => {
     const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: CORPUS_ID, family: 'file', trustDomain: 'secure_local' });
     let now = 1_000_000;
