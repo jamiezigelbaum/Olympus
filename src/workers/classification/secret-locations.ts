@@ -31,6 +31,9 @@ import type { SourceItemIdentity } from '../../core/source-index/types.ts';
 import { runSqliteMigrations, type SqliteMigration } from '../../core/sqlite-migrations.ts';
 import { closeSqliteStore } from '../../core/sqlite-store.ts';
 import { assertWritableStoreOpenAllowed } from '../../core/store-write-guard.ts';
+import type { SearchAncestorPlan } from '../connector-store/index.ts';
+import { hiddenProbesByParentIdentity } from '../connector-store/child-visibility.ts';
+import type { TierLedger } from './tier-ledger.ts';
 import { detectSecretFindingKinds } from './engine.ts';
 import { hasCredentialUrl } from './tier-classifier.ts';
 
@@ -132,6 +135,38 @@ export interface SecretLocationScope {
   };
 }
 
+/** The admitted stores of this Secret's tier lane, with each store's own read scope. */
+export interface SecretLocationParentScope {
+  plans: readonly SearchAncestorPlan[];
+  ledger: TierLedger | undefined;
+  includePrivateNames: boolean;
+}
+
+// Screen the same location for matching, display and later fingerprint revalidation.
+// A Secret child need not have a row in the store that owns this index.
+function screenParents(locations: readonly SecretLocation[], parents: SecretLocationParentScope): SecretLocation[] {
+  const [first] = parents.plans;
+  if (!first || !locations.length) return [];
+  const identities = locations.map((location): SecretLocationIdentity => ({
+    provider: location.source, accountScope: location.accountScope, providerItemId: location.providerItemId,
+    ...(location.conversationKey ? { providerConversationId: location.conversationKey } : {}),
+  }));
+  const lane = { ledger: () => parents.ledger, stores: () => parents.plans.map(plan => plan.store) };
+  try {
+    const hidden = hiddenProbesByParentIdentity(lane, identities);
+    const withheld = first.store.childrenWithWithheldSearchIdentifiers(
+      identities, parents.includePrivateNames, id => parents.plans.find(plan => plan.store.corpusId === id), lane,
+    );
+    return locations.flatMap((location, index) => {
+      const identity = identities[index]!;
+      if (hidden.has(identity)) return [];
+      return [withheld.has(identity) ? { ...location, locator: null } : location];
+    });
+  } catch {
+    return [];
+  }
+}
+
 export class SecretLocationsIndex {
   readonly dbPath: string;
   private readonly db: Database;
@@ -182,7 +217,7 @@ export class SecretLocationsIndex {
     const contentHash = input.text !== undefined
       ? createHash('sha256').update(input.text, 'utf8').digest('hex')
       : null;
-    const existing = this.get(input.identity);
+    const existing = this.#storedLocation(input.identity);
     if (existing
       && existing.locator === locator
       && existing.title === title
@@ -255,7 +290,17 @@ export class SecretLocationsIndex {
       .run(provider, accountScope).changes;
   }
 
-  get(identity: SecretLocationIdentity): SecretLocation | undefined {
+  /** Classification and presence checks never need the stored names or identifiers. */
+  get(identity: SecretLocationIdentity): Pick<SecretLocation, 'contentHash' | 'findingKinds'> | undefined {
+    const row = this.db.query(`
+      SELECT content_hash, finding_kinds_json FROM secret_locations
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).get(identity.provider, identity.accountScope, identity.providerConversationId ?? '', identity.providerItemId) as
+      Pick<SecretLocationRow, 'content_hash' | 'finding_kinds_json'> | null;
+    return row ? { contentHash: row.content_hash, findingKinds: JSON.parse(row.finding_kinds_json) as string[] } : undefined;
+  }
+
+  #storedLocation(identity: SecretLocationIdentity): SecretLocation | undefined {
     const row = this.db.query(`
       SELECT * FROM secret_locations
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
@@ -271,19 +316,17 @@ export class SecretLocationsIndex {
   recheck(
     expected: import('../../core/evidence-pack.ts').SavedSecretLocation,
     scope: SecretLocationScope,
-    options: { hide?: (identities: readonly SecretLocationIdentity[]) => ReadonlySet<SecretLocationIdentity> } = {},
+    parents: SecretLocationParentScope,
   ): boolean {
     const rows = this.db.query(`SELECT * FROM secret_locations ${scope.accountScope ? 'WHERE account_scope = ?' : ''}`)
       .all(...(scope.accountScope ? [scope.accountScope] : [])) as SecretLocationRow[];
     for (const row of rows) {
       const location = locationFromRow(row);
       if (location.source !== expected.source || secretLocationRef(location) !== expected.ref || !secretLocationWithinScope(location, scope)) continue;
-      const identity: SecretLocationIdentity = {
-        provider: location.source, accountScope: location.accountScope, providerItemId: location.providerItemId,
-        ...(location.conversationKey ? { providerConversationId: location.conversationKey } : {}),
-      };
-      try { if (options.hide?.([identity]).has(identity)) return false; } catch { return false; }
-      return secretLocationFingerprint({ locator: location.namesReleasable ? location.locator : null, title: location.namesReleasable ? location.title : null }) === expected.fingerprint;
+      const [screened] = screenParents([location], parents);
+      return !!screened && secretLocationFingerprint({
+        locator: screened.namesReleasable ? screened.locator : null, title: screened.title,
+      }) === expected.fingerprint;
     }
     return false;
   }
@@ -298,22 +341,12 @@ export class SecretLocationsIndex {
   search(
     query: string,
     scope: SecretLocationScope,
-    options: {
-      limit?: number;
-      /** Neither match nor release these items' parent-derived locators. */
-      withholdLocators?: (identities: readonly SecretLocationIdentity[]) => ReadonlySet<SecretLocationIdentity>;
-      /**
-       * Told the identities of the matches before the best are taken, and
-       * names those that must not be shown (a child item whose parent is not
-       * served: its location is its name). An item it names does not count
-       * toward `limit`. A throw hides every match.
-       */
-      hide?: (identities: readonly SecretLocationIdentity[]) => ReadonlySet<SecretLocationIdentity>;
-    } = {},
+    parents: SecretLocationParentScope,
+    maxResults = 10,
   ): SecretLocationMatch[] {
     const readings = secretLocationQueryReadings(query);
     if (readings.length === 0) return [];
-    const limit = Math.max(1, Math.min(options.limit ?? 10, 100));
+    const limit = Math.max(1, Math.min(maxResults, 100));
     const rows = this.db.query(`
       SELECT * FROM secret_locations
       ${scope.accountScope ? 'WHERE account_scope = ?' : ''}
@@ -329,38 +362,11 @@ export class SecretLocationsIndex {
       }
       return best;
     };
-    const scored: Array<{ location: SecretLocation; score: number }> = [];
-    for (const row of rows) {
-      const location = locationFromRow(row);
-      if (!secretLocationWithinScope(location, scope)) continue;
-      const score = scoreLocation(location);
-      if (score > 0) scored.push({ location, score });
-    }
-    const identities = scored.map(({ location }): SecretLocationIdentity => ({
-      provider: location.source,
-      accountScope: location.accountScope,
-      providerItemId: location.providerItemId,
-      ...(location.conversationKey ? { providerConversationId: location.conversationKey } : {}),
-    }));
-    let hidden: ReadonlySet<SecretLocationIdentity> = new Set();
-    if (scored.length > 0) {
-      try {
-        if (options.hide) hidden = options.hide(identities);
-        if (options.withholdLocators) {
-          const withheld = options.withholdLocators(identities);
-          scored.forEach((match, index) => {
-            if (match.location.locator && withheld.has(identities[index]!)) {
-              match.location.locator = null;
-              match.score = scoreLocation(match.location);
-            }
-          });
-        }
-      } catch {
-        return [];
-      }
-    }
-    return scored
-      .filter((match, index) => match.score > 0 && !hidden.has(identities[index]!))
+    // Batch-check only plausible matches, then rank using only the screened names.
+    const matches = rows.map(locationFromRow).filter(location => secretLocationWithinScope(location, scope) && scoreLocation(location) > 0);
+    return screenParents(matches, parents)
+      .map(location => ({ location, score: scoreLocation(location) }))
+      .filter(match => match.score > 0)
       .sort((left, right) => right.score - left.score || right.location.detectedAt.localeCompare(left.location.detectedAt))
       .slice(0, limit)
       .map(({ location }) => ({

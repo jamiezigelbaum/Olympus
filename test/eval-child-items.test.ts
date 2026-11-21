@@ -115,10 +115,10 @@ async function world(options: { parentNamesPrivate?: boolean } = {}) {
     answerScope: () => ({ kind: 'search' }),
     accountScope: () => undefined,
     visibilityGate: createTierVisibilityGate(() => [{ ledger: lane.ledger, corpusIds: corpora }]),
-    parentLabels: createParentLabelResolver({
+    parentLabels: planFor => createParentLabelResolver({
       stores: () => archiveLaneStores(lane),
       scopes: () => [{ ledger: lane.ledger, corpusIds: corpora }],
-    }),
+    }, planFor),
   });
   return { archiveId, lanes };
 }

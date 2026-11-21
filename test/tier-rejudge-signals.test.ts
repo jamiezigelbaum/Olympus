@@ -14,7 +14,7 @@ import { classifyItemTiers, tierSnifferInputHash, type TierSnifferRequest } from
 import { emptyTierRejudgeReport, rejudgeStoredContent, settleRoutedSecrets, settleLegacySecrets } from '../src/workers/connector-store/tier-rejudge.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { storedSignals } from '../src/workers/connector-store/stored-names.ts';
-import { FIXTURE_PLACEMENT, JUDGED_PERSONAL_SNIFFER, fixtureConnector, identityOf, localId, openLegStore, openTierFixture, storePaths, tempDir } from './helpers/tier-fixtures.ts';
+import { storedSecretLocation, FIXTURE_PLACEMENT, JUDGED_PERSONAL_SNIFFER, fixtureConnector, identityOf, localId, openLegStore, openTierFixture, storePaths, tempDir } from './helpers/tier-fixtures.ts';
 
 const cleanup: Array<() => void> = [];
 afterEach(() => { for (const close of cleanup.splice(0)) close(); });
@@ -57,7 +57,7 @@ for (const [pass, otherState, otherLayers] of [
   try {
     expect(await service.runOnce()).toMatchObject({ state: 'ran', report: { secretRefused: 1 } });
     const servingDomain = pass === 'metadata' ? 'internal' : 'secure_local';
-    expect(f.secrets.get(identity)).toMatchObject({
+    expect(storedSecretLocation(f.secrets, identity)).toMatchObject({
       locator: `https://example.test/${servingDomain}`, title: null,
       folderKeys: [`${servingDomain}-folder`], scopeGeneration: `${servingDomain}-generation`,
       scopeRevision: `${servingDomain}-revision`,
@@ -232,7 +232,7 @@ for (const locator of [
   const exported = { ...stored, columns: { ...stored.columns, locator_uri: locator } };
   const decision = { ...classifyItemTiers({ signals: { title: 'Notes' }, text }), contentTier: 'secrets' as const };
   expect(settleRoutedSecrets(f.set, identity, decision, exported, { findingKinds: ['sniffer_secret_refusal'] })).toBe(true);
-  expect(f.secrets.get(identity)?.locator).toBe(locator === 'https://example.test/report' ? locator : null);
+  expect(storedSecretLocation(f.secrets, identity)?.locator).toBe(locator === 'https://example.test/report' ? locator : null);
   expect(f.ledger.copies(identity)).toEqual([]);
   expect(f.stores.secure_local!.exportItemCopy(identity)).toBeUndefined();
   expect(f.stores.internal!.localContent(localId('record'))).toBeUndefined();
@@ -273,7 +273,7 @@ for (const locator of ['https://example.test/notes', 'https://example.test/?%61c
       expect(await service.runOnce()).toMatchObject({ state: 'ran', report: { secretRefused: 1 } });
       expect(store.searchItems('Orchard', 10)).toEqual([]);
       expect(store.localContent(localId('record'))).toBeUndefined();
-      expect(f.secrets.get(identity)).toMatchObject({ locator: locator.includes('%') ? null : locator, findingKinds: ['sniffer_secret_refusal'] });
+      expect(storedSecretLocation(f.secrets, identity)).toMatchObject({ locator: locator.includes('%') ? null : locator, findingKinds: ['sniffer_secret_refusal'] });
       expect(f.ledger.getCurrent(identity)).toMatchObject({ contentTier: 'secrets', contentPending: false });
       expect(queue.counts().questions).toBe(0);
       expect(calls).toBe(0);
@@ -350,7 +350,7 @@ test(`routed secret cleanup retries after ${failure} and service restart`, async
     expect(f.ledger.copies(identity)).toEqual([]);
     expect(store.itemStoredContent(identity)?.chunkCount ?? 0).toBe(0);
     expect(queue().counts().questions).toBe(0);
-    expect(f.secrets.get(identity)).toMatchObject({
+    expect(storedSecretLocation(f.secrets, identity)).toMatchObject({
       locator: failure === 'record-credential-locator' ? null : locator,
       title: null, findingKinds: ['sniffer_secret_refusal'],
       folderKeys: ['notes-folder'], scopeGeneration: 'generation', scopeRevision: 'revision',
@@ -423,7 +423,7 @@ test(`legacy full-body screening before resolving a clean excerpt: ${scenario}`,
       expect(f.ledger.getCurrent(identity)).toMatchObject({ state: 'current', contentTier: 'secrets', contentPending: false });
       expect(store.searchItems('Orchard', 10)).toEqual([]);
       expect(store.localContent(localId('record'))).toBeUndefined();
-      expect(f.secrets.get(identity)).toMatchObject({ title: null, findingKinds: ['sniffer_secret_refusal'] });
+      expect(storedSecretLocation(f.secrets, identity)).toMatchObject({ title: null, findingKinds: ['sniffer_secret_refusal'] });
       expect(queue.counts().questions).toBe(0);
       expect(calls).toBe(scenario === 'changed-during-model' ? 1 : 0);
     }

@@ -12,7 +12,7 @@ import { createReleaseTierCheck } from '../src/workers/connector-store/tier-visi
 import { afterEach, expect, test } from 'bun:test';
 import { PERSONAL_FIRST_REASON, classifyItemTiers, classifyContentTier, contentHeldForJudgment, type TierSniffer, type TierSnifferRequest } from '../src/workers/classification/tier-classifier.ts';
 import { TieredStoreSet } from '../src/workers/connector-store/tiered-store-set.ts';
-import { ACCOUNT, CORPORA, FIXTURE_PLACEMENT, PROVIDER, fixtureConnector, identityOf, localId, openTierFixture, tempDir } from './helpers/tier-fixtures.ts';
+import { storedSecretLocation, ACCOUNT, CORPORA, FIXTURE_PLACEMENT, PROVIDER, fixtureConnector, identityOf, localId, openTierFixture, tempDir } from './helpers/tier-fixtures.ts';
 
 const requests: TierSnifferRequest[] = [];
 const waiting: TierSniffer = { id: 'fixture-waiting', judge(request) { requests.push(request); return { verdict: 'undecided', queued: true }; } };
@@ -140,7 +140,7 @@ for (const locator of [
   await f.set.sync(connector, { fetchContent: false, placement: FIXTURE_PLACEMENT });
   expect(f.stores.internal!.searchItems('Orchid', 10)).toEqual([]);
   expect(f.ledger.copies(identityOf('url'))).toEqual([]);
-  expect(f.secrets.get(identityOf('url'))).toMatchObject({ locator: null, findingKinds: ['credential_assignment'] });
+  expect(storedSecretLocation(f.secrets, identityOf('url'))).toMatchObject({ locator: null, findingKinds: ['credential_assignment'] });
 });
 
 for (const prefix of ['', 'Ordinary background. '.repeat(200)]) test('encoded credential URL anywhere in a body settles as Secrets before storage', async () => {

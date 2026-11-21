@@ -23355,6 +23355,394 @@ function currentRemoteReadAccess() {
   return authorized ? currentAccess(authorized) : "active";
 }
 
+// src/workers/connector-store/child-visibility.ts
+function* visibilityRead(here, offThread) {
+  return yield { here, offThread };
+}
+function visibilityHere(steps) {
+  let next = steps.next();
+  while (!next.done) {
+    let result;
+    try {
+      result = next.value.here();
+    } catch (error) {
+      next = steps.throw(error);
+      continue;
+    }
+    next = steps.next(result);
+  }
+  return next.value;
+}
+
+class VisibilityChangedError extends Error {
+  constructor() {
+    super("Visibility changed during read");
+    this.name = "VisibilityChangedError";
+  }
+}
+async function visibilityOffThread(steps, lane, options = {}) {
+  const unchanged = lane ? childVisibilityUnchanged(lane) : undefined;
+  let changed = false;
+  let next = steps.next();
+  while (!next.done) {
+    let result;
+    try {
+      result = await next.value.offThread();
+    } catch (error) {
+      if (error instanceof VisibilityChangedError)
+        changed = true;
+      next = steps.throw(error);
+      continue;
+    }
+    next = steps.next(result);
+  }
+  if (changed && options.voidOnChange !== false || unchanged && !unchanged())
+    throw new VisibilityChangedError;
+  return next.value;
+}
+var VISIBILITY_CHANGE_RETRIES = 3;
+async function judgedAwaited(attempt, here) {
+  for (let tries = 0;tries < VISIBILITY_CHANGE_RETRIES; tries += 1) {
+    try {
+      return await attempt();
+    } catch (error) {
+      if (!(error instanceof VisibilityChangedError))
+        throw error;
+    }
+  }
+  return here();
+}
+function visibilityAwaited(make, lane) {
+  return judgedAwaited(() => visibilityOffThread(make(), lane), () => visibilityHere(make()));
+}
+var askReads = new WeakMap;
+function memoVisibilityItemsHere(owner, kind, marker, items, keyOf, read) {
+  const asked = new Map(items.map((item) => [keyOf(item), item]));
+  const before = marker();
+  const memo = askReadMemo(owner, kind, before);
+  const missing = [...asked].filter(([key]) => !memo?.rows.has(key)).map(([, item]) => item);
+  const fresh = missing.length > 0 ? read(missing) : new Map;
+  if (memo)
+    for (const item of missing)
+      memo.rows.set(keyOf(item), fresh.get(keyOf(item)));
+  const out = new Map;
+  for (const key of asked.keys()) {
+    const row = memo ? memo.rows.get(key) : fresh.get(key);
+    if (row !== undefined)
+      out.set(key, row);
+  }
+  return out;
+}
+function askReadMemo(owner, kind, marker) {
+  const trace = currentSourceAnswerTrace();
+  if (!trace)
+    return;
+  let owners = askReads.get(trace);
+  if (!owners)
+    askReads.set(trace, owners = new Map);
+  let kinds = owners.get(owner);
+  if (!kinds)
+    owners.set(owner, kinds = new Map);
+  let memo = kinds.get(kind);
+  if (memo?.marker !== marker)
+    kinds.set(kind, memo = { marker, rows: new Map });
+  return memo;
+}
+async function memoVisibilityItems(owner, kind, marker, items, keyOf, read, writesHeld) {
+  const asked = new Map(items.map((item) => [keyOf(item), item]));
+  if (writesHeld?.())
+    throw new VisibilityChangedError;
+  const before = marker();
+  const memo = askReadMemo(owner, kind, before);
+  const missing = [...asked].filter(([key]) => !memo?.rows.has(key)).map(([, item]) => item);
+  const fresh = missing.length > 0 ? await read(missing) : new Map;
+  if (marker() !== before || writesHeld?.())
+    throw new VisibilityChangedError;
+  if (memo)
+    for (const item of missing)
+      memo.rows.set(keyOf(item), fresh.get(keyOf(item)));
+  const out = new Map;
+  for (const key of asked.keys()) {
+    const row = memo ? memo.rows.get(key) : fresh.get(key);
+    if (row !== undefined)
+      out.set(key, row);
+  }
+  return out;
+}
+var ASK_LEDGER_READS = { perRead: true };
+function itemStatesOffThread(ledger, identities) {
+  return memoVisibilityItems(ledger, "states", () => ledger.changeMarker(), identities, tierLedgerIdentityKey, (missing) => ledgerReadOffThread(ledger, ledger.itemStatesSteps(missing), ASK_LEDGER_READS), () => ledger.writesHeld());
+}
+function* itemSecretSteps(ledger, identity) {
+  const key = tierLedgerIdentityKey(identity);
+  const rows = yield* visibilityRead(() => memoVisibilityItemsHere(ledger, "secret", () => ledger.changeMarker(), [identity], tierLedgerIdentityKey, (missing) => new Map(missing.map((item) => [tierLedgerIdentityKey(item), ledger.itemIsSecret(item)]))), () => memoVisibilityItems(ledger, "secret", () => ledger.changeMarker(), [identity], tierLedgerIdentityKey, async (missing) => {
+    const rows = new Map;
+    for (const item of missing)
+      rows.set(tierLedgerIdentityKey(item), await ledgerReadOffThread(ledger, ledger.itemIsSecretSteps(item), ASK_LEDGER_READS));
+    return rows;
+  }, () => ledger.writesHeld()));
+  return rows.get(key) === true;
+}
+function visibilityRows(identities, read) {
+  return new Map(identities.map((identity) => {
+    const key = tierLedgerIdentityKey(identity);
+    return [key, { copies: read.copies.get(key), hiddenWithoutCopies: read.hiddenWithoutCopies.has(key), waiting: read.personalFirstWaiting.has(key) }];
+  }));
+}
+function visibilityFromRows(rows) {
+  const result = { copies: new Map, hiddenWithoutCopies: new Set, personalFirstWaiting: new Set };
+  for (const [key, row] of rows) {
+    if (row.copies)
+      result.copies.set(key, row.copies);
+    if (row.hiddenWithoutCopies)
+      result.hiddenWithoutCopies.add(key);
+    if (row.waiting)
+      result.personalFirstWaiting.add(key);
+  }
+  return result;
+}
+function ledgerVisibilityHere(ledger, identities, options = {}) {
+  return visibilityFromRows(memoVisibilityItemsHere(ledger, options.personalFirst ? "visibility-personal-first" : "visibility", () => ledger.changeMarker(), identities, tierLedgerIdentityKey, (missing) => visibilityRows(missing, ledger.readSteps(ledger.visibilityReadSteps(missing, options)))));
+}
+async function ledgerVisibilityOffThread(ledger, identities, options = {}) {
+  const rows = await memoVisibilityItems(ledger, options.personalFirst ? "visibility-personal-first" : "visibility", () => ledger.changeMarker(), identities, tierLedgerIdentityKey, async (missing) => visibilityRows(missing, await ledgerReadOffThread(ledger, ledger.visibilityReadSteps(missing, options), ASK_LEDGER_READS)), () => ledger.writesHeld());
+  return visibilityFromRows(rows);
+}
+var releasing = new WeakSet;
+async function ledgerReadOffThread(ledger, steps, options = {}) {
+  if (!offThreadReadsSupported(ledger.dbPath))
+    return ledger.readSteps(steps);
+  if (!releasing.has(ledger)) {
+    releasing.add(ledger);
+    ledger.onClose(() => releaseOffThreadReads(ledger.dbPath));
+  }
+  return withOffThreadSnapshot(ledger.dbPath, async (read) => {
+    let next = steps.next();
+    while (!next.done)
+      next = steps.next(await read(next.value));
+    return next.value;
+  }, options);
+}
+function parentIdentityOf(child) {
+  const cut = child.providerItemId.lastIndexOf(CHILD_ITEM_ID_SEPARATOR);
+  if (cut <= 0)
+    return;
+  return {
+    provider: child.provider,
+    accountScope: child.accountScope,
+    providerItemId: child.providerItemId.slice(0, cut),
+    ...child.providerConversationId ? { providerConversationId: child.providerConversationId } : {}
+  };
+}
+function parentIdentityField(child) {
+  const identity = parentIdentityOf(child);
+  return identity ? { identity } : {};
+}
+var searchStores;
+function searchVisibilityScoped() {
+  return searchStores?.getStore() !== undefined;
+}
+function childVisibilityStores(lane) {
+  const allowed = searchStores?.getStore();
+  const stores = lane.stores();
+  return allowed ? stores.filter(allowed) : stores;
+}
+function childVisibilityUnchanged(lane) {
+  const stores = childVisibilityStores(lane);
+  const ledger = lane.ledger();
+  const ledgerMarker = ledger?.changeMarker();
+  const markers = stores.map((store) => store.childVisibilityMarker?.());
+  return () => {
+    const current = childVisibilityStores(lane);
+    return lane.ledger() === ledger && ledger?.changeMarker() === ledgerMarker && current.length === stores.length && current.every((store, index) => store === stores[index] && store.childVisibilityMarker?.() === markers[index]);
+  };
+}
+var CHILD_PARENT_CHAIN_LIMIT = 8;
+function parentKey(parent) {
+  return [parent.provider, parent.accountScope, parent.parentLocalItemId].join("\x00");
+}
+var HIDDEN = { visible: false, gone: false };
+function* parentVerdictsSteps(lane, parents) {
+  const unique = new Map;
+  for (const parent of parents)
+    unique.set(parentKey(parent), parent);
+  try {
+    return yield* judge(lane, [...unique.values()], 0);
+  } catch {
+    return new Map([...unique.keys()].map((key) => [key, HIDDEN]));
+  }
+}
+function* judge(lane, parents, depth) {
+  const verdicts = new Map;
+  if (parents.length === 0)
+    return verdicts;
+  if (depth >= CHILD_PARENT_CHAIN_LIMIT) {
+    for (const parent of parents)
+      verdicts.set(parentKey(parent), HIDDEN);
+    return verdicts;
+  }
+  const rows = new Map;
+  for (const store of childVisibilityStores(lane)) {
+    for (const row of yield* visibilityRead(() => store.parentStandings(parents), () => store.parentStandingsOffThread?.(parents) ?? Promise.resolve(store.parentStandings(parents)))) {
+      const key = parentKey(row);
+      const list = rows.get(key) ?? [];
+      list.push({ ...row, corpusId: store.corpusId });
+      rows.set(key, list);
+    }
+  }
+  const ledger = lane.ledger();
+  const identities = new Map;
+  for (const list of rows.values()) {
+    for (const row of list)
+      identities.set(tierLedgerIdentityKey(row.identity), row.identity);
+  }
+  for (const parent of parents) {
+    if (!rows.has(parentKey(parent)) && parent.identity)
+      identities.set(tierLedgerIdentityKey(parent.identity), parent.identity);
+  }
+  const states = ledger && identities.size > 0 ? yield* visibilityRead(() => memoVisibilityItemsHere(ledger, "states", () => ledger.changeMarker(), [...identities.values()], tierLedgerIdentityKey, (missing) => ledger.itemStatesForMany(missing)), () => itemStatesOffThread(ledger, [...identities.values()])) : undefined;
+  const climbing = new Map;
+  for (const parent of parents) {
+    const key = parentKey(parent);
+    const list = rows.get(key) ?? [];
+    const identity = list[0]?.identity;
+    const knownIdentity = identity ?? parent.identity;
+    const state = knownIdentity && states?.get(tierLedgerIdentityKey(knownIdentity));
+    if (state?.hidingIntent === "deletion") {
+      verdicts.set(key, HIDDEN);
+      continue;
+    }
+    const active = list.filter((row) => row.active);
+    const locations = list.filter((row) => row.secret);
+    if (locations.length > 0) {
+      const above = locations.find((row) => row.grandparentLocalItemId !== undefined);
+      if (above)
+        climbing.set(key, { provider: parent.provider, accountScope: parent.accountScope, parentLocalItemId: above.grandparentLocalItemId });
+      verdicts.set(key, { visible: true, gone: false });
+      continue;
+    }
+    if (!identity) {
+      if (state?.hidingIntent === "secret" || ledger && parent.identity && (yield* itemSecretSteps(ledger, parent.identity))) {
+        verdicts.set(key, HIDDEN);
+      } else {
+        verdicts.set(key, { visible: false, gone: true });
+      }
+      continue;
+    }
+    let visible;
+    if (!ledger) {
+      visible = active.length > 0;
+    } else {
+      const copies = state?.copies ?? [];
+      visible = copies.length === 0 ? state?.record?.routed !== true && active.length > 0 : copies.some((copy) => copy.state === "current" && active.some((row) => row.corpusId === copy.corpusId));
+      if (!visible && active.length > 0 && (state?.hidingIntent === "secret" || (yield* itemSecretSteps(ledger, identity))))
+        visible = true;
+    }
+    if (visible) {
+      const above = active.find((row) => row.grandparentLocalItemId !== undefined);
+      if (above)
+        climbing.set(key, { provider: parent.provider, accountScope: parent.accountScope, parentLocalItemId: above.grandparentLocalItemId });
+      verdicts.set(key, { visible: true, gone: false });
+    } else {
+      verdicts.set(key, { visible: false, gone: active.length === 0 });
+    }
+  }
+  if (climbing.size > 0) {
+    const above = yield* judge(lane, [...climbing.values()], depth + 1);
+    for (const [key, grandparent] of climbing) {
+      if (above.get(parentKey(grandparent))?.visible !== true)
+        verdicts.set(key, HIDDEN);
+    }
+  }
+  return verdicts;
+}
+function* itemVerdictsSteps(lane, items) {
+  const asked = new Map;
+  for (const item of items)
+    asked.set(tierLedgerIdentityKey(item), item);
+  const out = new Map;
+  if (asked.size === 0)
+    return out;
+  try {
+    const refs = new Map;
+    const refKeyOf = new Map;
+    for (const store of childVisibilityStores(lane)) {
+      for (const [key, row] of yield* visibilityRead(() => store.itemStandings([...asked.values()]), () => store.itemStandingsOffThread?.([...asked.values()]) ?? Promise.resolve(store.itemStandings([...asked.values()])))) {
+        const ref = {
+          provider: row.provider,
+          accountScope: row.accountScope,
+          parentLocalItemId: row.parentLocalItemId,
+          identity: row.identity
+        };
+        refs.set(parentKey(ref), ref);
+        refKeyOf.set(key, parentKey(ref));
+      }
+    }
+    for (const [key, item] of asked) {
+      if (refKeyOf.has(key))
+        continue;
+      const ref = {
+        provider: item.provider,
+        accountScope: item.accountScope,
+        parentLocalItemId: `identity:${key}`,
+        identity: {
+          provider: item.provider,
+          accountScope: item.accountScope,
+          providerItemId: item.providerItemId,
+          ...item.providerConversationId ? { providerConversationId: item.providerConversationId } : {}
+        }
+      };
+      refs.set(parentKey(ref), ref);
+      refKeyOf.set(key, parentKey(ref));
+    }
+    const verdicts = yield* parentVerdictsSteps(lane, [...refs.values()]);
+    for (const [key, refKey] of refKeyOf)
+      out.set(key, verdicts.get(refKey) ?? HIDDEN);
+  } catch {
+    for (const key of asked.keys())
+      out.set(key, HIDDEN);
+  }
+  return out;
+}
+function* childrenWithHiddenParentsSteps(lane, children) {
+  const hidden = new Set;
+  if (children.length === 0)
+    return hidden;
+  const verdicts = yield* parentVerdictsSteps(lane, children.map((child) => child.parent));
+  for (const child of children) {
+    if (verdicts.get(parentKey(child.parent))?.visible !== true)
+      hidden.add(child.key);
+  }
+  return hidden;
+}
+function* childLinksSteps(lane, probes) {
+  const found = new Map;
+  let remaining = probes;
+  for (const store of childVisibilityStores(lane)) {
+    if (remaining.length === 0)
+      break;
+    const asked = remaining;
+    for (const [key, parent] of yield* visibilityRead(() => store.parentLinksOf(asked), () => store.parentLinksOfOffThread?.(asked) ?? Promise.resolve(store.parentLinksOf(asked))))
+      found.set(key, parent);
+    remaining = remaining.filter((probe) => !found.has(tierLedgerIdentityKey(probe)));
+  }
+  return [...found].map(([key, parent]) => ({ key, parent }));
+}
+function hiddenChildKeys(lane, probes) {
+  return visibilityHere(hiddenChildKeysSteps(lane, probes));
+}
+function* hiddenChildKeysSteps(lane, probes) {
+  if (probes.length === 0)
+    return new Set;
+  let links;
+  try {
+    links = yield* childLinksSteps(lane, probes);
+  } catch {
+    return new Set(probes.map((probe) => tierLedgerIdentityKey(probe)));
+  }
+  return yield* childrenWithHiddenParentsSteps(lane, links);
+}
+
 // src/workers/classification/secret-locations.ts
 function screenedSecretLocator(locator) {
   return locator?.trim() && !hasCredentialUrl(locator) && detectSecretFindingKinds(locator).length === 0 ? locator.trim().slice(0, 1000) : null;
@@ -23755,394 +24143,6 @@ function storedSignals(copy) {
     ...folderKeys.length > 0 ? { folderKeys } : {},
     ...sender ? { sender } : {}
   };
-}
-
-// src/workers/connector-store/child-visibility.ts
-function* visibilityRead(here, offThread) {
-  return yield { here, offThread };
-}
-function visibilityHere(steps) {
-  let next = steps.next();
-  while (!next.done) {
-    let result;
-    try {
-      result = next.value.here();
-    } catch (error) {
-      next = steps.throw(error);
-      continue;
-    }
-    next = steps.next(result);
-  }
-  return next.value;
-}
-
-class VisibilityChangedError extends Error {
-  constructor() {
-    super("Visibility changed during read");
-    this.name = "VisibilityChangedError";
-  }
-}
-async function visibilityOffThread(steps, lane, options = {}) {
-  const unchanged = lane ? childVisibilityUnchanged(lane) : undefined;
-  let changed = false;
-  let next = steps.next();
-  while (!next.done) {
-    let result;
-    try {
-      result = await next.value.offThread();
-    } catch (error) {
-      if (error instanceof VisibilityChangedError)
-        changed = true;
-      next = steps.throw(error);
-      continue;
-    }
-    next = steps.next(result);
-  }
-  if (changed && options.voidOnChange !== false || unchanged && !unchanged())
-    throw new VisibilityChangedError;
-  return next.value;
-}
-var VISIBILITY_CHANGE_RETRIES = 3;
-async function judgedAwaited(attempt, here) {
-  for (let tries = 0;tries < VISIBILITY_CHANGE_RETRIES; tries += 1) {
-    try {
-      return await attempt();
-    } catch (error) {
-      if (!(error instanceof VisibilityChangedError))
-        throw error;
-    }
-  }
-  return here();
-}
-function visibilityAwaited(make, lane) {
-  return judgedAwaited(() => visibilityOffThread(make(), lane), () => visibilityHere(make()));
-}
-var askReads = new WeakMap;
-function memoVisibilityItemsHere(owner, kind, marker, items, keyOf, read) {
-  const asked = new Map(items.map((item) => [keyOf(item), item]));
-  const before = marker();
-  const memo = askReadMemo(owner, kind, before);
-  const missing = [...asked].filter(([key]) => !memo?.rows.has(key)).map(([, item]) => item);
-  const fresh = missing.length > 0 ? read(missing) : new Map;
-  if (memo)
-    for (const item of missing)
-      memo.rows.set(keyOf(item), fresh.get(keyOf(item)));
-  const out = new Map;
-  for (const key of asked.keys()) {
-    const row = memo ? memo.rows.get(key) : fresh.get(key);
-    if (row !== undefined)
-      out.set(key, row);
-  }
-  return out;
-}
-function askReadMemo(owner, kind, marker) {
-  const trace = currentSourceAnswerTrace();
-  if (!trace)
-    return;
-  let owners = askReads.get(trace);
-  if (!owners)
-    askReads.set(trace, owners = new Map);
-  let kinds = owners.get(owner);
-  if (!kinds)
-    owners.set(owner, kinds = new Map);
-  let memo = kinds.get(kind);
-  if (memo?.marker !== marker)
-    kinds.set(kind, memo = { marker, rows: new Map });
-  return memo;
-}
-async function memoVisibilityItems(owner, kind, marker, items, keyOf, read, writesHeld) {
-  const asked = new Map(items.map((item) => [keyOf(item), item]));
-  if (writesHeld?.())
-    throw new VisibilityChangedError;
-  const before = marker();
-  const memo = askReadMemo(owner, kind, before);
-  const missing = [...asked].filter(([key]) => !memo?.rows.has(key)).map(([, item]) => item);
-  const fresh = missing.length > 0 ? await read(missing) : new Map;
-  if (marker() !== before || writesHeld?.())
-    throw new VisibilityChangedError;
-  if (memo)
-    for (const item of missing)
-      memo.rows.set(keyOf(item), fresh.get(keyOf(item)));
-  const out = new Map;
-  for (const key of asked.keys()) {
-    const row = memo ? memo.rows.get(key) : fresh.get(key);
-    if (row !== undefined)
-      out.set(key, row);
-  }
-  return out;
-}
-var ASK_LEDGER_READS = { perRead: true };
-function itemStatesOffThread(ledger, identities) {
-  return memoVisibilityItems(ledger, "states", () => ledger.changeMarker(), identities, tierLedgerIdentityKey, (missing) => ledgerReadOffThread(ledger, ledger.itemStatesSteps(missing), ASK_LEDGER_READS), () => ledger.writesHeld());
-}
-function* itemSecretSteps(ledger, identity) {
-  const key = tierLedgerIdentityKey(identity);
-  const rows = yield* visibilityRead(() => memoVisibilityItemsHere(ledger, "secret", () => ledger.changeMarker(), [identity], tierLedgerIdentityKey, (missing) => new Map(missing.map((item) => [tierLedgerIdentityKey(item), ledger.itemIsSecret(item)]))), () => memoVisibilityItems(ledger, "secret", () => ledger.changeMarker(), [identity], tierLedgerIdentityKey, async (missing) => {
-    const rows = new Map;
-    for (const item of missing)
-      rows.set(tierLedgerIdentityKey(item), await ledgerReadOffThread(ledger, ledger.itemIsSecretSteps(item), ASK_LEDGER_READS));
-    return rows;
-  }, () => ledger.writesHeld()));
-  return rows.get(key) === true;
-}
-function visibilityRows(identities, read) {
-  return new Map(identities.map((identity) => {
-    const key = tierLedgerIdentityKey(identity);
-    return [key, { copies: read.copies.get(key), hiddenWithoutCopies: read.hiddenWithoutCopies.has(key), waiting: read.personalFirstWaiting.has(key) }];
-  }));
-}
-function visibilityFromRows(rows) {
-  const result = { copies: new Map, hiddenWithoutCopies: new Set, personalFirstWaiting: new Set };
-  for (const [key, row] of rows) {
-    if (row.copies)
-      result.copies.set(key, row.copies);
-    if (row.hiddenWithoutCopies)
-      result.hiddenWithoutCopies.add(key);
-    if (row.waiting)
-      result.personalFirstWaiting.add(key);
-  }
-  return result;
-}
-function ledgerVisibilityHere(ledger, identities, options = {}) {
-  return visibilityFromRows(memoVisibilityItemsHere(ledger, options.personalFirst ? "visibility-personal-first" : "visibility", () => ledger.changeMarker(), identities, tierLedgerIdentityKey, (missing) => visibilityRows(missing, ledger.readSteps(ledger.visibilityReadSteps(missing, options)))));
-}
-async function ledgerVisibilityOffThread(ledger, identities, options = {}) {
-  const rows = await memoVisibilityItems(ledger, options.personalFirst ? "visibility-personal-first" : "visibility", () => ledger.changeMarker(), identities, tierLedgerIdentityKey, async (missing) => visibilityRows(missing, await ledgerReadOffThread(ledger, ledger.visibilityReadSteps(missing, options), ASK_LEDGER_READS)), () => ledger.writesHeld());
-  return visibilityFromRows(rows);
-}
-var releasing = new WeakSet;
-async function ledgerReadOffThread(ledger, steps, options = {}) {
-  if (!offThreadReadsSupported(ledger.dbPath))
-    return ledger.readSteps(steps);
-  if (!releasing.has(ledger)) {
-    releasing.add(ledger);
-    ledger.onClose(() => releaseOffThreadReads(ledger.dbPath));
-  }
-  return withOffThreadSnapshot(ledger.dbPath, async (read) => {
-    let next = steps.next();
-    while (!next.done)
-      next = steps.next(await read(next.value));
-    return next.value;
-  }, options);
-}
-function parentIdentityOf(child) {
-  const cut = child.providerItemId.lastIndexOf(CHILD_ITEM_ID_SEPARATOR);
-  if (cut <= 0)
-    return;
-  return {
-    provider: child.provider,
-    accountScope: child.accountScope,
-    providerItemId: child.providerItemId.slice(0, cut),
-    ...child.providerConversationId ? { providerConversationId: child.providerConversationId } : {}
-  };
-}
-function parentIdentityField(child) {
-  const identity = parentIdentityOf(child);
-  return identity ? { identity } : {};
-}
-var searchStores;
-function searchVisibilityScoped() {
-  return searchStores?.getStore() !== undefined;
-}
-function childVisibilityStores(lane) {
-  const allowed = searchStores?.getStore();
-  const stores = lane.stores();
-  return allowed ? stores.filter(allowed) : stores;
-}
-function childVisibilityUnchanged(lane) {
-  const stores = childVisibilityStores(lane);
-  const ledger = lane.ledger();
-  const ledgerMarker = ledger?.changeMarker();
-  const markers = stores.map((store) => store.childVisibilityMarker?.());
-  return () => {
-    const current = childVisibilityStores(lane);
-    return lane.ledger() === ledger && ledger?.changeMarker() === ledgerMarker && current.length === stores.length && current.every((store, index) => store === stores[index] && store.childVisibilityMarker?.() === markers[index]);
-  };
-}
-var CHILD_PARENT_CHAIN_LIMIT = 8;
-function parentKey(parent) {
-  return [parent.provider, parent.accountScope, parent.parentLocalItemId].join("\x00");
-}
-var HIDDEN = { visible: false, gone: false };
-function* parentVerdictsSteps(lane, parents) {
-  const unique = new Map;
-  for (const parent of parents)
-    unique.set(parentKey(parent), parent);
-  try {
-    return yield* judge(lane, [...unique.values()], 0);
-  } catch {
-    return new Map([...unique.keys()].map((key) => [key, HIDDEN]));
-  }
-}
-function* judge(lane, parents, depth) {
-  const verdicts = new Map;
-  if (parents.length === 0)
-    return verdicts;
-  if (depth >= CHILD_PARENT_CHAIN_LIMIT) {
-    for (const parent of parents)
-      verdicts.set(parentKey(parent), HIDDEN);
-    return verdicts;
-  }
-  const rows = new Map;
-  for (const store of childVisibilityStores(lane)) {
-    for (const row of yield* visibilityRead(() => store.parentStandings(parents), () => store.parentStandingsOffThread?.(parents) ?? Promise.resolve(store.parentStandings(parents)))) {
-      const key = parentKey(row);
-      const list = rows.get(key) ?? [];
-      list.push({ ...row, corpusId: store.corpusId });
-      rows.set(key, list);
-    }
-  }
-  const ledger = lane.ledger();
-  const identities = new Map;
-  for (const list of rows.values()) {
-    for (const row of list)
-      identities.set(tierLedgerIdentityKey(row.identity), row.identity);
-  }
-  for (const parent of parents) {
-    if (!rows.has(parentKey(parent)) && parent.identity)
-      identities.set(tierLedgerIdentityKey(parent.identity), parent.identity);
-  }
-  const states = ledger && identities.size > 0 ? yield* visibilityRead(() => memoVisibilityItemsHere(ledger, "states", () => ledger.changeMarker(), [...identities.values()], tierLedgerIdentityKey, (missing) => ledger.itemStatesForMany(missing)), () => itemStatesOffThread(ledger, [...identities.values()])) : undefined;
-  const climbing = new Map;
-  for (const parent of parents) {
-    const key = parentKey(parent);
-    const list = rows.get(key) ?? [];
-    const identity = list[0]?.identity;
-    const knownIdentity = identity ?? parent.identity;
-    const state = knownIdentity && states?.get(tierLedgerIdentityKey(knownIdentity));
-    if (state?.hidingIntent === "deletion") {
-      verdicts.set(key, HIDDEN);
-      continue;
-    }
-    const active = list.filter((row) => row.active);
-    const locations = list.filter((row) => row.secret);
-    if (locations.length > 0) {
-      const above = locations.find((row) => row.grandparentLocalItemId !== undefined);
-      if (above)
-        climbing.set(key, { provider: parent.provider, accountScope: parent.accountScope, parentLocalItemId: above.grandparentLocalItemId });
-      verdicts.set(key, { visible: true, gone: false });
-      continue;
-    }
-    if (!identity) {
-      if (state?.hidingIntent === "secret" || ledger && parent.identity && (yield* itemSecretSteps(ledger, parent.identity))) {
-        verdicts.set(key, HIDDEN);
-      } else {
-        verdicts.set(key, { visible: false, gone: true });
-      }
-      continue;
-    }
-    let visible;
-    if (!ledger) {
-      visible = active.length > 0;
-    } else {
-      const copies = state?.copies ?? [];
-      visible = copies.length === 0 ? state?.record?.routed !== true && active.length > 0 : copies.some((copy) => copy.state === "current" && active.some((row) => row.corpusId === copy.corpusId));
-      if (!visible && active.length > 0 && (state?.hidingIntent === "secret" || (yield* itemSecretSteps(ledger, identity))))
-        visible = true;
-    }
-    if (visible) {
-      const above = active.find((row) => row.grandparentLocalItemId !== undefined);
-      if (above)
-        climbing.set(key, { provider: parent.provider, accountScope: parent.accountScope, parentLocalItemId: above.grandparentLocalItemId });
-      verdicts.set(key, { visible: true, gone: false });
-    } else {
-      verdicts.set(key, { visible: false, gone: active.length === 0 });
-    }
-  }
-  if (climbing.size > 0) {
-    const above = yield* judge(lane, [...climbing.values()], depth + 1);
-    for (const [key, grandparent] of climbing) {
-      if (above.get(parentKey(grandparent))?.visible !== true)
-        verdicts.set(key, HIDDEN);
-    }
-  }
-  return verdicts;
-}
-function* itemVerdictsSteps(lane, items) {
-  const asked = new Map;
-  for (const item of items)
-    asked.set(tierLedgerIdentityKey(item), item);
-  const out = new Map;
-  if (asked.size === 0)
-    return out;
-  try {
-    const refs = new Map;
-    const refKeyOf = new Map;
-    for (const store of childVisibilityStores(lane)) {
-      for (const [key, row] of yield* visibilityRead(() => store.itemStandings([...asked.values()]), () => store.itemStandingsOffThread?.([...asked.values()]) ?? Promise.resolve(store.itemStandings([...asked.values()])))) {
-        const ref = {
-          provider: row.provider,
-          accountScope: row.accountScope,
-          parentLocalItemId: row.parentLocalItemId,
-          identity: row.identity
-        };
-        refs.set(parentKey(ref), ref);
-        refKeyOf.set(key, parentKey(ref));
-      }
-    }
-    for (const [key, item] of asked) {
-      if (refKeyOf.has(key))
-        continue;
-      const ref = {
-        provider: item.provider,
-        accountScope: item.accountScope,
-        parentLocalItemId: `identity:${key}`,
-        identity: {
-          provider: item.provider,
-          accountScope: item.accountScope,
-          providerItemId: item.providerItemId,
-          ...item.providerConversationId ? { providerConversationId: item.providerConversationId } : {}
-        }
-      };
-      refs.set(parentKey(ref), ref);
-      refKeyOf.set(key, parentKey(ref));
-    }
-    const verdicts = yield* parentVerdictsSteps(lane, [...refs.values()]);
-    for (const [key, refKey] of refKeyOf)
-      out.set(key, verdicts.get(refKey) ?? HIDDEN);
-  } catch {
-    for (const key of asked.keys())
-      out.set(key, HIDDEN);
-  }
-  return out;
-}
-function* childrenWithHiddenParentsSteps(lane, children) {
-  const hidden = new Set;
-  if (children.length === 0)
-    return hidden;
-  const verdicts = yield* parentVerdictsSteps(lane, children.map((child) => child.parent));
-  for (const child of children) {
-    if (verdicts.get(parentKey(child.parent))?.visible !== true)
-      hidden.add(child.key);
-  }
-  return hidden;
-}
-function* childLinksSteps(lane, probes) {
-  const found = new Map;
-  let remaining = probes;
-  for (const store of childVisibilityStores(lane)) {
-    if (remaining.length === 0)
-      break;
-    const asked = remaining;
-    for (const [key, parent] of yield* visibilityRead(() => store.parentLinksOf(asked), () => store.parentLinksOfOffThread?.(asked) ?? Promise.resolve(store.parentLinksOf(asked))))
-      found.set(key, parent);
-    remaining = remaining.filter((probe) => !found.has(tierLedgerIdentityKey(probe)));
-  }
-  return [...found].map(([key, parent]) => ({ key, parent }));
-}
-function hiddenChildKeys(lane, probes) {
-  return visibilityHere(hiddenChildKeysSteps(lane, probes));
-}
-function* hiddenChildKeysSteps(lane, probes) {
-  if (probes.length === 0)
-    return new Set;
-  let links;
-  try {
-    links = yield* childLinksSteps(lane, probes);
-  } catch {
-    return new Set(probes.map((probe) => tierLedgerIdentityKey(probe)));
-  }
-  return yield* childrenWithHiddenParentsSteps(lane, links);
 }
 
 // src/workers/connector-store/loop-pass.ts

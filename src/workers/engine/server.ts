@@ -300,9 +300,11 @@ import {
   X_BOOKMARKS_SECURE_CORPUS_ID,
   createXBookmarksTierLane,
 } from '../x-bookmarks/tier-set.ts';
+import type { SearchAncestorPlanFor } from '../connector-store/index.ts';
 import { createParentLabelResolver } from '../connector-store/parent-label.ts';
 import { createUnreadableLocators } from '../connector-store/unreadable-locators.ts';
-import { type ChildVisibilityLane, hiddenProbesByParentIdentity, ledgerReadOffThread } from '../connector-store/child-visibility.ts';
+import { createTierSecretLocations } from './runtime/tier-secret-locations.ts';
+import { ledgerReadOffThread } from '../connector-store/child-visibility.ts';
 import { sqliteFilesHealth, startSqliteWalSampler } from './sqlite-wal-sampler.ts';
 import { BACKGROUND_READS, readPoolDiagnostics, readPoolMemoryCounts, sampleReadPoolMemory, setAskBenchReadPoolSqlDir } from '../connector-store/off-thread-reads.ts';
 import { startSqliteCheckpointer } from './sqlite-checkpointer.ts';
@@ -310,7 +312,7 @@ import { setSqliteCheckpointsOffLoop, sqliteFilesForOffLoopCheckpoints } from '.
 import { tierSnifferPathForLedger } from '../classification/tier-ledger-path.ts';
 import { createPendingGovernance, createPendingItemProtection, createReleaseTierCheck, createTierVisibilityGate, type TierVisibilityScope } from '../connector-store/tier-visibility.ts';
 import { judgeBoosts } from '../classification/judge-boost.ts';
-import { secretLocationsPathForStore, type SecretLocationIdentity, type SecretLocationsIndex } from '../classification/secret-locations.ts';
+import { secretLocationsPathForStore, type SecretLocationsIndex } from '../classification/secret-locations.ts';
 import {
   enableSourceRegistryAdoption,
   openConnectorStore,
@@ -1554,50 +1556,7 @@ export async function main(): Promise<void> {
     tierLanes.push(lane);
     return lane;
   };
-  // A lane's Secrets are located only when its Private (secure_local) corpus
-  // was actually searched — which is what include_secure_local, corpus
-  // selection and a file source's scope approval decide — and only within the
-  // account and filters that search ran under.
-  const tierSecretLocations = (
-    query: string,
-    searched: ReadonlyArray<{ corpusId: string; accountScope?: string; filters?: ConnectorStoreSearchFilters }>,
-    withholdLocators?: (corpusId: string, identities: readonly SecretLocationIdentity[], lane: ChildVisibilityLane) => ReadonlySet<SecretLocationIdentity>,
-  ) => tierLanes.flatMap((lane) => {
-    const scope = searched.find((entry) => entry.corpusId === lane.secureCorpusId);
-    if (!scope || !lane.secrets) return [];
-    const parents = {
-      ledger: () => lane.ledger,
-      stores: () => connectorStores.filter(store => lane.corpusIds.has(store.corpusId)),
-    };
-    try {
-      return lane.secrets.search(query, {
-        ...(scope.accountScope ? { accountScope: scope.accountScope } : {}),
-        ...(scope.filters ? { filters: scope.filters } : {}),
-      }, {
-        limit: 5,
-        ...(withholdLocators ? { withholdLocators: ids => withholdLocators(lane.secureCorpusId, ids, parents) } : {}),
-        // A Secret child's location is its name: it is shown only while its parent is.
-        hide: (identities) => hiddenProbesByParentIdentity(parents, identities),
-      });
-    } catch {
-      return [];
-    }
-  });
-  const checkTierSecretLocations = (
-    locations: readonly import('../../core/evidence-pack.ts').SavedSecretLocation[],
-    searched: ReadonlyArray<{ corpusId: string; accountScope?: string; filters?: ConnectorStoreSearchFilters }>,
-  ): boolean => locations.every((location) => tierLanes.some((lane) => {
-    const scope = searched.find((entry) => entry.corpusId === lane.secureCorpusId);
-    if (!scope || !lane.secrets) return false;
-    try {
-      return lane.secrets.recheck(location, scope, {
-        hide: (identities) => hiddenProbesByParentIdentity({
-          ledger: () => lane.ledger,
-          stores: () => connectorStores.filter((store) => lane.corpusIds.has(store.corpusId)),
-        }, identities),
-      });
-    } catch { return false; }
-  }));
+  const tierSecretLocations = createTierSecretLocations(tierLanes);
   // Each lane's ledger, its corpora and its stores that exist now: the stores
   // let a child item be judged by its parent where the gate and the release
   // check read (tier-visibility.ts).
@@ -1635,10 +1594,16 @@ export async function main(): Promise<void> {
   const pendingItemProtection = engineFront ? createPendingItemProtection() : undefined;
   const tierVisibilityGate = createTierVisibilityGate(tierScopes, (identities) => raiseJudgeBoosts(identities), pendingItemProtection);
   // A child item's parent: its names, judged against the ledger that governs its lane (answers and the unreadable list).
-  const parentLabelResolver = createParentLabelResolver({
+  const ownerAncestorPlan: SearchAncestorPlanFor = id => {
+    const store = connectorStores.find(store => store.corpusId === id);
+    if (!store) return undefined;
+    const scope = connectorStoreReadScope(store);
+    return scope.allowed ? { store, ancestorScope: scope } : undefined;
+  };
+  const parentLabels = (planFor: SearchAncestorPlanFor) => createParentLabelResolver({
     stores: () => connectorStores,
     scopes: tierScopes,
-  });
+  }, planFor);
   const onDemandCorpusAbsent = (corpusId: string): boolean => {
     for (const lane of tierLanes) {
       const store = lane.onDemand.find((candidate) => candidate.corpusId === corpusId);
@@ -3866,9 +3831,9 @@ export async function main(): Promise<void> {
           semanticRelevanceBar: (store) => (store.corpusId === X_BOOKMARKS_CORPUS_ID ? xBookmarksSemanticRelevanceBar : undefined),
           visibilityGate: tierVisibilityGate,
           // A child item's citation names its parent when the parent's names may go where the child goes.
-          parentLabels: parentLabelResolver,
-          secretLocations: tierSecretLocations,
-          checkSecretLocations: checkTierSecretLocations,
+          parentLabels,
+          secretLocations: tierSecretLocations.search,
+          checkSecretLocations: tierSecretLocations.recheck,
           heldItems: (corpusId) => tierLanes.find((candidate) => candidate.corpusIds.has(corpusId))?.ledger.corpusHeldCopyCount(corpusId) ?? 0,
         }),
       });
@@ -3913,7 +3878,8 @@ export async function main(): Promise<void> {
   const unreadableLocators = createUnreadableLocators({
     stores: () => connectorStores,
     lanes: () => tierLanes,
-    parentLabels: parentLabelResolver,
+    parentLabels: parentLabels(ownerAncestorPlan),
+    planFor: ownerAncestorPlan,
   });
   const locateUnreadableItem = unreadableLocators.locate;
   // A file that came inside another item names it (label and route) in the computer's own list.
@@ -5333,7 +5299,7 @@ export async function main(): Promise<void> {
       ...(tierLanes.find((lane) => lane.corpusIds.has(corpusId))?.corpusIds ?? []),
     ].filter((sibling) => sibling !== corpusId),
     sourceIndexVisibilityGate: tierVisibilityGate,
-    secretLocationSearch: tierSecretLocations,
+    secretLocationSearch: tierSecretLocations.search,
     connectorStoreEmbeddingProviders,
     connectorStoreAccountScopes,
     connectorStorePrincipals,

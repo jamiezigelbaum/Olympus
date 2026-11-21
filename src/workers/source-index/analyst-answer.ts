@@ -518,7 +518,6 @@ export function createAnalystSourceIndexAnswerHandler(
           evidenceByteBudget,
           ...(options.laneTimeoutMs !== undefined ? { laneTimeoutMs: options.laneTimeoutMs } : {}),
           ...(activeLanes.visibilityGate ? { visibilityGate: activeLanes.visibilityGate } : {}),
-          ...(activeLanes.secretLocations ? { secretLocations: activeLanes.secretLocations } : {}),
           ...(activeLanes.classificationCoverage ? { classificationCoverage: activeLanes.classificationCoverage } : {}),
           ...(activeLanes.parentLabels ? { parentLabels: activeLanes.parentLabels } : {}),
         });
@@ -812,6 +811,10 @@ export function createAnalystSourceIndexAnswerHandler(
       } = routedAnalysis;
       const analystMs = Date.now() - analystStartedAt;
 
+      const deepRead = await triggerDeepRead(detail, analystResult, options.deepRead?.());
+      // Locations never enter the model. Look them up once, after the last await,
+      // so a scope revoked during synthesis cannot release an earlier locator.
+      if (lanes.secretLocations) detail = { ...detail, secretLocations: lanes.secretLocations(request.query?.trim() || question, pack.coverage.searchedCorpora) };
       const releaseGateStartedAt = Date.now();
       const { decision, facts, opsec, answer: releasedAnswer, unanswered: releasedNotes } = releaseAnalystAnswer({
         detail,
@@ -836,7 +839,6 @@ export function createAnalystSourceIndexAnswerHandler(
       recordSourceAnswerReleaseDecision(decision.decision);
 
       const released = decision.decision === 'allow' || decision.decision === 'redact';
-      const deepRead = await triggerDeepRead(detail, analystResult, options.deepRead?.());
       // A withheld answer withholds the unread item's title too; the private
       // job still runs, and its handle and content-free notice can be returned.
       const deepReadNotice = released ? deepRead.notice : deepRead.notice

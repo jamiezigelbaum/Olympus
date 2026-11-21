@@ -20,6 +20,8 @@ import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { tieredStoreSetLedgerPath } from '../src/workers/connector-store/tiered-store-set.ts';
 import { STORE_UNCHANGED_REUSE_MS } from '../src/workers/source-index/status.ts';
 import {
+  storedSecretLocation,
+  standaloneSecretParents,
   ACCOUNT,
   CORPORA,
   FIXTURE_PLACEMENT,
@@ -374,7 +376,7 @@ describe('Secrets and moves', () => {
 
 describe('D2: Secret locations are scoped, and Private names are never released', () => {
   function index(): SecretLocationsIndex {
-    const secrets = new SecretLocationsIndex({ dbPath: ':memory:' });
+    const secrets = new SecretLocationsIndex({ dbPath: `${workspace()}/locations.sqlite` });
     cleanups.push(() => secrets.close());
     secrets.record({
       identity: { provider: 'files', accountScope: 'work', providerItemId: 'a' },
@@ -398,27 +400,31 @@ describe('D2: Secret locations are scoped, and Private names are never released'
 
   test('account, approved folder and path scopes, and the conversation, confine a search', () => {
     const secrets = index();
-    expect(secrets.search('aws key', { accountScope: 'work' }).map((match) => match.title)).toEqual(['env.txt']);
-    expect(secrets.search('aws key', { accountScope: 'personal' })).toEqual([]);
+    const parents = standaloneSecretParents();
+    cleanups.push(parents.close);
+    expect(secrets.search('aws key', { accountScope: 'work' }, parents).map((match) => match.title)).toEqual(['env.txt']);
+    expect(secrets.search('aws key', { accountScope: 'personal' }, parents)).toEqual([]);
     const approved = { sourceScopeGeneration: 'g1', sourceScopeRevision: 'r1', sourceScopeFolderAnyKeys: ['folder-deploy'] };
-    expect(secrets.search('aws', { filters: approved })).toHaveLength(1);
-    expect(secrets.search('aws', { filters: { ...approved, sourceScopeRevision: 'r2' } })).toEqual([]);
-    expect(secrets.search('aws', { filters: { ...approved, sourceScopeFolderAnyKeys: ['folder-other'] } })).toEqual([]);
-    expect(secrets.search('aws', { filters: { locatorPathScopes: ['/Work'] } })).toHaveLength(1);
-    expect(secrets.search('aws', { filters: { locatorPathExcludedScopes: ['/Work/Deploy'] } })).toEqual([]);
-    expect(secrets.search('credential', { filters: { conversationId: 'chat-b' } })).toHaveLength(1);
-    expect(secrets.search('credential', { filters: { conversationId: 'chat-a' } })).toEqual([]);
+    expect(secrets.search('aws', { filters: approved }, parents)).toHaveLength(1);
+    expect(secrets.search('aws', { filters: { ...approved, sourceScopeRevision: 'r2' } }, parents)).toEqual([]);
+    expect(secrets.search('aws', { filters: { ...approved, sourceScopeFolderAnyKeys: ['folder-other'] } }, parents)).toEqual([]);
+    expect(secrets.search('aws', { filters: { locatorPathScopes: ['/Work'] } }, parents)).toHaveLength(1);
+    expect(secrets.search('aws', { filters: { locatorPathExcludedScopes: ['/Work/Deploy'] } }, parents)).toEqual([]);
+    expect(secrets.search('credential', { filters: { conversationId: 'chat-b' } }, parents)).toHaveLength(1);
+    expect(secrets.search('credential', { filters: { conversationId: 'chat-a' } }, parents)).toEqual([]);
     // A filter the index holds no fact for excludes everything, fail closed.
-    expect(secrets.search('aws', { filters: { senderId: 'someone' } })).toEqual([]);
-    expect(secrets.search('aws', { filters: { authoredAfter: '2026-01-01' } })).toEqual([]);
+    expect(secrets.search('aws', { filters: { senderId: 'someone' } }, parents)).toEqual([]);
+    expect(secrets.search('aws', { filters: { authoredAfter: '2026-01-01' } }, parents)).toEqual([]);
   });
 
   test('a Private-metadata Secret is located by an opaque reference: no title, no locator, not findable by name', () => {
     const secrets = index();
-    const [match] = secrets.search('credential', {});
+    const parents = standaloneSecretParents();
+    cleanups.push(parents.close);
+    const [match] = secrets.search('credential', {}, parents);
     expect(match).toMatchObject({ source: 'chat', title: null, locator: null, findingKinds: ['credential_assignment'] });
     expect(match!.ref).toMatch(/^secret:[0-9a-f]{16}$/);
-    expect(secrets.search('therapist', {})).toEqual([]);
-    expect(secrets.get({ provider: 'chat', accountScope: 'personal', providerConversationId: 'chat-b', providerItemId: '7' })?.title).toBeNull();
+    expect(secrets.search('therapist', {}, parents)).toEqual([]);
+    expect(storedSecretLocation(secrets, { provider: 'chat', accountScope: 'personal', providerConversationId: 'chat-b', providerItemId: '7' })?.title).toBeNull();
   });
 });

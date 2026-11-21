@@ -4,7 +4,7 @@ import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.
 import { createConnectorStoreCorpusAdapter, createConnectorStoreContentProvider, defineConnectorCorpus } from '../src/workers/connector-store/index.ts';
 import { searchPrivateEvidence } from '../src/workers/source-index/analyst-answer.ts';
 import { SecretLocationsIndex } from '../src/workers/classification/secret-locations.ts';
-import { fixtureConnector, identityOf, openTierFixture, tempDir, FIXTURE_PLACEMENT } from './helpers/tier-fixtures.ts';
+import { storedSecretLocation, fixtureSecretParents, standaloneSecretParents, fixtureConnector, identityOf, openTierFixture, tempDir, FIXTURE_PLACEMENT } from './helpers/tier-fixtures.ts';
 
 test('release-check medical and Personal questions never surface the router Secret', async () => {
   const { dir, cleanup } = tempDir('release-retrieval-');
@@ -21,14 +21,14 @@ test('release-check medical and Personal questions never surface the router Secr
       registry: buildSourceIndexCorpusRegistry(stores.map(store => defineConnectorCorpus({ corpusId: store.corpusId, family: store.family, trustDomain: store.trustDomain }))),
       adapters: Object.fromEntries(stores.map(store => [store.corpusId, createConnectorStoreCorpusAdapter({ store })])),
       contentProviders: Object.fromEntries(stores.map(store => [store.corpusId, createConnectorStoreContentProvider({ store })])),
-      secretLocations: (query: string, searched: readonly string[]) => searched.includes(fixture.stores.secure_local!.corpusId) ? fixture.secrets.search(query, {}) : [],
+      secretLocations: (query: string, searched: readonly string[]) => searched.includes(fixture.stores.secure_local!.corpusId) ? fixture.secrets.search(query, {}, fixtureSecretParents(stores.filter(store => searched.includes(store.corpusId)), fixture.ledger)) : [],
     });
     for (const locator of [undefined, '/backup/Olympus/records/vault']) {
       // Exercise a Secret whose harmless name was judged Personal separately.
       // A whole-item Secret override above withholds the name too, which would
       // make a negative relevance assertion pass without testing the matcher.
       const identity = identityOf('router-password');
-      const router = fixture.secrets.get(identity)!;
+      const router = storedSecretLocation(fixture.secrets, identity)!;
       const effectiveLocator = locator ?? router.locator;
       fixture.secrets.record({ identity, ...(effectiveLocator ? { locator: effectiveLocator } : {}),
         title: FIXTURE_ITEMS.find(item => item.key === 'router-password')!.document.title,
@@ -48,6 +48,7 @@ test('release-check medical and Personal questions never surface the router Secr
 // backup directory. Paths are searchable, but shared request words or the
 // substring "up" in "backup" must not announce an unrelated Secret.
 test('Secret locations require topic overlap on complete words', () => {
+  const parents = standaloneSecretParents();
   const index = new SecretLocationsIndex({ dbPath: ':memory:' });
   const item = FIXTURE_ITEMS.find(item => item.key === 'router-password')!;
   try {
@@ -57,25 +58,26 @@ test('Secret locations require topic overlap on complete words', () => {
       locator: '/backup/Olympus/records/vault', findingKinds: ['owner_marked_secret'],
     });
     const medical = SUITE_QUESTIONS.find(question => question.kind === 'private')!;
-    expect(index.search(medical.text, {})).toEqual([]);
+    expect(index.search(medical.text, {}, parents)).toEqual([]);
     for (const question of SUITE_QUESTIONS.filter(question => question.kind !== 'secret')) {
-      expect({ question: question.id, matches: index.search(question.text, {}) }).toEqual({ question: question.id, matches: [] });
+      expect({ question: question.id, matches: index.search(question.text, {}, parents) }).toEqual({ question: question.id, matches: [] });
     }
-    expect(index.search(item.document.title, {})).toHaveLength(1);
-    expect(index.search('vault', {})).toHaveLength(1);
-    expect(index.search('home network', {})).toHaveLength(1);
-    expect(index.search('home network credentials archive', {})).toHaveLength(1);
-    expect(index.search('home inspection contractor appointment', {})).toEqual([]);
-    expect(index.search('record', {})).toEqual([]);
-    expect(index.search('Use my Olympus records', {})).toEqual([]);
-    expect(index.search('up', {})).toEqual([]);
-  } finally { index.close(); }
+    expect(index.search(item.document.title, {}, parents)).toHaveLength(1);
+    expect(index.search('vault', {}, parents)).toHaveLength(1);
+    expect(index.search('home network', {}, parents)).toHaveLength(1);
+    expect(index.search('home network credentials archive', {}, parents)).toHaveLength(1);
+    expect(index.search('home inspection contractor appointment', {}, parents)).toEqual([]);
+    expect(index.search('record', {}, parents)).toEqual([]);
+    expect(index.search('Use my Olympus records', {}, parents)).toEqual([]);
+    expect(index.search('up', {}, parents)).toEqual([]);
+  } finally { parents.close(); index.close(); }
 });
 
 // #1321: the release check's Wi-Fi question missed a Secret file named
 // home-wifi.txt. Spelling ("Wi-Fi") and the kind of Secret ("password" for a
 // credential) now count; unrelated Secrets still stay quiet.
 test('a Secret is found by its spelling variants and by the everyday word for its kind', () => {
+  const parents = standaloneSecretParents();
   const index = new SecretLocationsIndex({ dbPath: ':memory:' });
   try {
     index.record({
@@ -88,7 +90,7 @@ test('a Secret is found by its spelling variants and by the everyday word for it
       title: 'deploy.env', namesReleasable: true,
       locator: '/Code/deploy.env', findingKinds: ['api_secret_token'],
     });
-    const found = (query: string) => index.search(query, {}).map((match) => match.locator);
+    const found = (query: string) => index.search(query, {}, parents).map((match) => match.locator);
     for (const query of ['what is my home Wi-Fi password?', 'Search Olympus: what is my home Wi-Fi password?', 'wifi password', 'home Wi-Fi password', 'home-wifi', 'Wi‑Fi']) {
       expect({ query, found: found(query) }).toEqual({ query, found: ['/Documents/home-wifi.txt'] });
     }
@@ -105,10 +107,11 @@ test('a Secret is found by its spelling variants and by the everyday word for it
     for (const query of ['my bank password', 'garden hose length', 'wi', 'office printer password reset']) {
       expect({ query, found: found(query) }).toEqual({ query, found: [] });
     }
-  } finally { index.close(); }
+  } finally { parents.close(); index.close(); }
 });
 
 test('a withheld name stays unsearchable, joined or split', () => {
+  const parents = standaloneSecretParents();
   const index = new SecretLocationsIndex({ dbPath: ':memory:' });
   try {
     index.record({
@@ -116,7 +119,7 @@ test('a withheld name stays unsearchable, joined or split', () => {
       title: 'Note', namesReleasable: false,
       locator: '/Private/home-wifi.txt', findingKinds: ['credential_assignment'],
     });
-    expect(index.search('home wifi', {})).toEqual([]);
-    expect(index.search('home-wifi', {})).toEqual([]);
-  } finally { index.close(); }
+    expect(index.search('home wifi', {}, parents)).toEqual([]);
+    expect(index.search('home-wifi', {}, parents)).toEqual([]);
+  } finally { parents.close(); index.close(); }
 });

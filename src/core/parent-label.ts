@@ -70,7 +70,7 @@ export interface ParentLabelRequest {
  * (Secrets, names not final, hidden, gone). A resolver that throws gives no
  * labels.
  */
-export type ParentLabelResolver = (requests: readonly ParentLabelRequest[]) => ReadonlyArray<ParentNames | undefined>;
+export type ParentLabelResolver = (requests: readonly ParentLabelRequest[], corpusAllowed?: (id: string) => boolean) => ReadonlyArray<ParentNames | undefined>;
 
 /**
  * The request's scope the label must stay inside.
@@ -223,7 +223,7 @@ export function applyParentLabels(
     parents = resolver(candidates.map((candidate, index) => ({
       corpusId: corpusIds[index] ?? '',
       sourceItem: candidate.provenance.sourceItem,
-    })));
+    })), id => namesCorpusInScope(id, scope));
   } catch {
     return unchanged;
   }

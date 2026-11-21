@@ -9,6 +9,7 @@
 // finished after a crash, ends the same way. Expected results are the stores'
 // own content read before the move, not what the migration reports.
 
+import { createTierSecretLocations } from '../src/workers/engine/runtime/tier-secret-locations.ts';
 import { Database } from 'bun:sqlite';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
@@ -122,9 +123,7 @@ async function search(tiered: TierFixture, query: string): Promise<Record<string
     connectorStores: tiered.set.openStores(),
     connectorStoreTierSiblings: (corpusId) => [...corpusIds].filter((sibling) => sibling !== corpusId),
     sourceIndexVisibilityGate: createTierVisibilityGate(() => [{ ledger: tiered.ledger, corpusIds }]),
-    secretLocationSearch: (text, searched) => (
-      searched.some((scope) => scope.corpusId === CORPORA.secure_local) ? tiered.secrets.search(text, {}) : []
-    ),
+    secretLocationSearch: createTierSecretLocations([{ ledger: tiered.ledger, secrets: tiered.secrets, secureCorpusId: CORPORA.secure_local, corpusIds }]).search,
   });
   const response = await worker.fetch(new Request('http://worker.test/v1/source/index/search', {
     method: 'POST',

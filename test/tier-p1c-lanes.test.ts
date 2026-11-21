@@ -34,7 +34,7 @@ import {
 } from '../src/workers/readwise/tier-set.ts';
 import { createWhatsAppTierLane, WHATSAPP_STORE_PLACEMENT } from '../src/workers/whatsapp/store-sync.ts';
 import { X_BOOKMARKS_SECURE_CORPUS_ID, createXBookmarksTierLane } from '../src/workers/x-bookmarks/tier-set.ts';
-import { cloudProvider, expectHeldThenPersonal, localProvider, snapshotStore } from './helpers/tier-fixtures.ts';
+import { fixtureSecretParents, cloudProvider, expectHeldThenPersonal, localProvider, snapshotStore } from './helpers/tier-fixtures.ts';
 import { privacyRuleToTierRule } from '../src/workers/classification/privacy-profile.ts';
 import {
   LocalXBookmarksApiUsageStore,
@@ -452,7 +452,7 @@ describe('P1c Readwise and X lanes', () => {
     // Secrets: nowhere; location only.
     expect(ids(store, 'deploy')).toEqual([]);
     expect(ids(secure, 'deploy')).toEqual([]);
-    expect(secrets.search('Snippet', {}, { limit: 5 }).length).toBe(1);
+    expect(secrets.search('Snippet', {}, fixtureSecretParents(lane.set.openStores(), lane.ledger), 5).length).toBe(1);
   });
 
   test('X keeps its Private store beside the internal one, created on first need', () => {

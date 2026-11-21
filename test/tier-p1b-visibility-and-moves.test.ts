@@ -20,6 +20,7 @@ import { classifyItemTiers } from '../src/workers/classification/tier-classifier
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
 import {
+  storedSecretLocation,
   CORPORA,
   FIXTURE_PLACEMENT,
   JUDGED_PERSONAL_SNIFFER,
@@ -193,7 +194,7 @@ describe('P1b move primitive', () => {
       expect(snapshot.vectors).toEqual([]);
     }
     expect(fixture.ledger.copies(identityOf('garden'))).toEqual([]);
-    expect(fixture.secrets.get(identityOf('garden'))).toMatchObject({ title: 'garden-plan.txt', findingKinds: ['owner_marked_secret'] });
+    expect(storedSecretLocation(fixture.secrets, identityOf('garden'))).toMatchObject({ title: 'garden-plan.txt', findingKinds: ['owner_marked_secret'] });
     const ledger = await readEmbeddingLedger(ledgerPath(fixture));
     expect(ledger.entries[0]).toMatchObject({ kind: 'invalidation', status: 'complete' });
   });

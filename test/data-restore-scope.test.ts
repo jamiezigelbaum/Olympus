@@ -3,6 +3,7 @@
 // even for the same account, so without a carry-over every restored item stayed
 // hidden until a traversal listed it again. The carry-over never widens the
 // folders: an item outside the approved ones stays hidden.
+import { fixtureSecretParents } from './helpers/tier-fixtures.ts';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -16,7 +17,7 @@ import {
   type FileSourceScopeApprovalSnapshot,
 } from '../src/core/source-scope-approval.ts';
 import { exportOlympusData, lifecycleHandleRegistryPath } from '../src/data-lifecycle.ts';
-import { SecretLocationsIndex, secretLocationWithinScope } from '../src/workers/classification/secret-locations.ts';
+import { SecretLocationsIndex } from '../src/workers/classification/secret-locations.ts';
 import { secretLocationsPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
 import { restoreOlympusData } from '../src/data-restore.ts';
 import {
@@ -64,13 +65,11 @@ function file(id: string, path: string, text: string): RawItem {
 const SECRETS = [['id:s1', '/work/keys.txt'], ['id:s2', '/home/keys.txt']] as const;
 
 /** The Secrets whose location a read under `approval` may name. */
-function visibleSecrets(index: SecretLocationsIndex, approval: FileSourceScopeApprovalSnapshot): string[] {
+function visibleSecrets(index: SecretLocationsIndex, store: LocalConnectorStore, approval: FileSourceScopeApprovalSnapshot): Array<string | null> {
   const scope = fileSourceScopeContentFilters(approval);
   if (!scope.allowed) return [];
-  return SECRETS
-    .map(([id]) => index.get({ provider: 'dropbox', accountScope: 'personal', providerItemId: id })!)
-    .filter((location) => secretLocationWithinScope(location, { accountScope: 'personal', ...(scope.filters ? { filters: scope.filters } : {}) }))
-    .map((location) => location.locator ?? '')
+  return index.search('keys', { accountScope: 'personal', ...scope }, fixtureSecretParents([store]))
+    .map(location => location.locator)
     .sort();
 }
 
@@ -99,7 +98,7 @@ async function backUpAndRestore(dir: string, accountId: string): Promise<string>
     for (const [id, locator] of SECRETS) {
       secrets.record({
         identity: { provider: 'dropbox', accountScope: 'personal', providerItemId: id },
-        locator,
+        locator, namesReleasable: true,
         scopeGeneration: OLD_GENERATION,
         scopeRevision: OLD_REVISION,
         findingKinds: ['api_key'],
@@ -202,9 +201,9 @@ describe('restored folder scope', () => {
       const secrets = new SecretLocationsIndex({ dbPath: secretLocationsPathForStore(storePath) });
       try {
         const narrower = approve(join(dir, 'scopes.json'), 'account-1', ['/work']);
-        expect(visibleSecrets(secrets, narrower)).toEqual([]);
+        expect(visibleSecrets(secrets, store, narrower)).toEqual([]);
         rebindRestoredFileScope({ approval: narrower, providerAccountId: 'account-1', sets: [{ stores: [store], secretLocations: secrets }] });
-        expect(visibleSecrets(secrets, narrower)).toEqual(['/work/keys.txt']);
+        expect(visibleSecrets(secrets, store, narrower)).toEqual(['/work/keys.txt']);
         // Another account's approval carries none over.
         const other = approve(join(dir, 'other.json'), 'account-2', ['/work', '/home']);
         expect(rebindRestoredFileScope({ approval: other, providerAccountId: 'account-2', sets: [{ stores: [store], secretLocations: secrets }] })).toBe(0);

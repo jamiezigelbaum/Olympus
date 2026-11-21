@@ -25,7 +25,7 @@ import {
 import type { SourceClassificationTier } from '../../core/contracts.ts';
 import { copyServingLayer, itemNamesHeldForJudgment, type TierLedgerIdentity } from '../classification/tier-ledger.ts';
 import type { UnreadableParent } from '../file-extraction/unreadable-files.ts';
-import type { LocalConnectorStore } from './local-index.ts';
+import type { LocalConnectorStore, SearchAncestorPlanFor } from './local-index.ts';
 import type { TierVisibilityScope } from './tier-visibility.ts';
 
 export interface ParentLabelSources {
@@ -46,13 +46,13 @@ const LEDGER_TIER: Readonly<Record<Exclude<SourceClassificationTier, 'secrets'>,
 };
 const RANK: Readonly<Record<ParentNamesTier, number>> = { public: 0, personal: 1, private: 2 };
 
-export function createParentLabelResolver(sources: ParentLabelSources): ParentLabelResolver {
-  return (requests) => {
-    const stores = sources.stores();
+export function createParentLabelResolver(sources: ParentLabelSources, planFor: SearchAncestorPlanFor): ParentLabelResolver {
+  return (requests, corpusAllowed) => {
+    const stores = sources.stores().filter(store => !corpusAllowed || corpusAllowed(store.corpusId));
     const scopes = sources.scopes();
     return requests.map((request) => {
       try {
-        return resolveOne(request, stores, scopes);
+        return resolveOne(request, stores, scopes, planFor);
       } catch {
         return undefined;
       }
@@ -64,10 +64,12 @@ function resolveOne(
   request: ParentLabelRequest,
   stores: readonly LocalConnectorStore[],
   scopes: readonly TierVisibilityScope[],
+  planFor: SearchAncestorPlanFor,
 ): ParentNames | undefined {
   const scope = scopes.find((candidate) => candidate.corpusIds.has(request.corpusId));
   // The parent sits in the child's own lane: the stores its ledger governs, else the child's own store.
-  const lane = stores.filter((store) => (scope ? scope.corpusIds.has(store.corpusId) : store.corpusId === request.corpusId));
+  const lane = stores.filter(store => (scope ? scope.corpusIds.has(store.corpusId) : store.corpusId === request.corpusId)
+    && planFor(store.corpusId)?.store === store);
   if (lane.length === 0) return undefined;
 
   const child = request.sourceItem;
@@ -128,7 +130,9 @@ function resolveOne(
     tier = decided && RANK[decided] > RANK[corpusTier] ? decided : corpusTier;
     namesStore = rowStore;
   }
-  if (!namesStore) return undefined;
+  if (!namesStore || namesStore.childrenWithWithheldSearchIdentifiers([child], true, planFor, {
+    stores: () => lane, ledger: () => scope?.ledger,
+  }).has(child)) return undefined;
 
   const names = namesStore.itemNames(parent);
   if (!names) return undefined;

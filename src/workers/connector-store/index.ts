@@ -41,6 +41,7 @@ export {
   type ConnectorStoreContentProviderOptions,
   type ConnectorStoreCorpusAdapterOptions,
   type SearchAncestorPlan,
+  type SearchAncestorPlanFor,
   searchAncestorScope,
   type ConnectorStoreExclusionCounts,
   type ConnectorStorePurgeSummary,

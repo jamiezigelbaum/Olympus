@@ -17,6 +17,7 @@ import { createTierVisibilityGate } from '../src/workers/connector-store/tier-vi
 import { releaseAnalystAnswer } from '../src/workers/source-index/analyst-answer.ts';
 import { createSourceIndexStatusHandler } from '../src/workers/source-index/status.ts';
 import {
+  fixtureSecretParents,
   CORPORA,
   FIXTURE_PLACEMENT,
   fixtureConnector,
@@ -63,7 +64,7 @@ function lanes(tiered: TierFixture) {
     visibilityGate: createTierVisibilityGate(() => [{ ledger: tiered.ledger, corpusIds: new Set(Object.values(CORPORA)) }]),
     // As the runtime does: only when the source's Private corpus was searched.
     secretLocations: (query: string, searched: readonly string[]) => (
-      searched.includes(CORPORA.secure_local) ? tiered.secrets.search(query, {}) : []
+      searched.includes(CORPORA.secure_local) ? tiered.secrets.search(query, {}, fixtureSecretParents(stores.filter(store => searched.includes(store.corpusId)), tiered.ledger)) : []
     ),
     classificationCoverage: (searched: readonly string[]) => searched.map((corpusId) => ({
       corpusId,

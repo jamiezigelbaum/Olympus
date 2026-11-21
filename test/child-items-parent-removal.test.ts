@@ -12,6 +12,7 @@
 // Secret (judged on its own words, its children on theirs), takes nothing with
 // it.
 
+import { fixtureAncestorPlans } from './helpers/tier-fixtures.ts';
 import { Database } from 'bun:sqlite';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -285,7 +286,7 @@ describe('a child is hidden the moment its parent is, on every read path', () =>
 
   test('a deleted parent gives no label to its child\'s citation', async () => {
     const { lane, identityOf } = await importAndRead();
-    const resolve = createParentLabelResolver({ stores: () => lane.set.openStores(), scopes: () => [scopeOf(lane)] });
+    const resolve = createParentLabelResolver({ stores: () => lane.set.openStores(), scopes: () => [scopeOf(lane)] }, fixtureAncestorPlans(() => lane.set.openStores()));
     const namesStore = lane.set.openStores().find((store) => store.trustDomain === 'internal')!;
     const request = { corpusId: namesStore.corpusId, sourceItem: identityOf(M1_CHILDREN[0]!) };
     expect(resolve([request])[0]).toBeDefined();
@@ -368,7 +369,7 @@ describe('what is not a deletion takes nothing with it', () => {
     expect(liveRows(h, archiveId, M1_CHILDREN).length).toBeGreaterThan(0);
     for (const id of M1_CHILDREN) expect(liveCopies(lane.ledger.copies(identityOf(id))).length).toBeGreaterThan(0);
     // Its names give no label to a citation.
-    const resolve = createParentLabelResolver({ stores: () => lane.set.openStores(), scopes: () => [scopeOf(lane)] });
+    const resolve = createParentLabelResolver({ stores: () => lane.set.openStores(), scopes: () => [scopeOf(lane)] }, fixtureAncestorPlans(() => lane.set.openStores()));
     const namesStore = lane.set.openStores().find((store) => store.trustDomain === 'internal')!;
     expect(resolve([{ corpusId: namesStore.corpusId, sourceItem: identityOf(M1_CHILDREN[0]!) }])[0]).toBeUndefined();
   });
