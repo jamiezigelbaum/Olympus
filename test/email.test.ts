@@ -866,6 +866,24 @@ describe('EmailClient', () => {
     const selection = { selected_item: { corpus_id: secure } };
 
     test.each([
+      { resultId: secure, hitId: secure, searched: [secure], error: 'different corpus than requested' },
+      { resultId: internal, hitId: secure, searched: [internal], error: 'hit outside its searched corpora' },
+      { resultId: internal, hitId: secure, searched: [internal, secure], error: 'outside the requested searchable corpora' },
+    ])('all-sources search rejects a sibling substituted in a result slot: $error', async ({ resultId, hitId, searched, error }) => {
+      const config = defaultConfig();
+      config.email.enabled = true;
+      config.sourceIndex.corpusRegistry.corpora = config.sourceIndex.corpusRegistry.corpora.filter(c => [internal, secure].includes(c.corpusId));
+      const client = new EmailClient(config, new DirectHttpEmailTransport(async () => jsonResponse({
+        results: [{
+          kind: 'source_index_search', corpus_id: resultId, hits: [{ ...child, corpus_id: hitId }],
+          audit: { searched_corpora: searched },
+        }, null],
+        audit: { skipped_corpora: [secure] },
+      })));
+      await expect(client.sourceIndexSearchMany({ query: 'title' })).rejects.toThrow(error);
+    });
+
+    test.each([
       { reason: 'opted-out tier in the audit', searched: [internal, secure], hit: { ...child, corpus_id: secure } },
       { reason: 'unrequested tier in a pinned search', searched: [internal, secure], hit: { ...child, corpus_id: secure }, pinned: true },
       { reason: 'opted-out selected hit', searched: [internal], hit: { ...selection, corpus_id: secure } },

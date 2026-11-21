@@ -1,3 +1,4 @@
+export const DEFAULT_SOURCE_INDEX_SEARCH_MAX_RESULTS = 10;
 export const SOURCE_FAMILIES = ['email', 'file', 'chat', 'calendar', 'note', 'task', 'readwise', 'x'] as const;
 export const SOURCE_TRUST_TIERS = ['S0', 'S1', 'S2', 'S3', 'S4', 'S4+', 'S5'] as const;
 export const SOURCE_TRUST_DOMAINS = ['public_safe', 'internal', 'secure_local'] as const;

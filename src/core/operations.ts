@@ -7,6 +7,7 @@ import { EmailClient, type SourceAnswerSelectedItemOption, type SourceIndexSearc
 import { defaultConfig, type OlympusConfig } from './config.ts';
 import { resolveLane, resolveModelProfile } from './config.ts';
 import { OperationError, sourceAnswerJobNotFound } from './operation-error.ts';
+import { DEFAULT_SOURCE_INDEX_SEARCH_MAX_RESULTS } from './source-index/types.ts';
 import { optionalSourceAnswerSelectedItems, sourceItemReadSelectedItem, sourceItemReadPage } from './source-index/selected-items.ts';
 import {
   createPublicSourceCorpusRegistry,
@@ -1035,12 +1036,10 @@ export function operationToolSchema(
 const SOURCE_SPECIFIC_SEARCH_PARAMS = ['account', 'folder_id', 'folder_name', 'approved_scope_key', 'chat_scope', 'trust_domain',
   'conversation_id', 'sender_id', 'sender_label', 'participant_id', 'attachment_type', 'all_tiers'] as const;
 
-/**
- * source_index_search without corpus_id: every configured source, one search
- * per source (each covers that source's tiers), hits interleaved by rank. An
- * agent that does not know the store ids still gets a search, not a refusal.
- */
-async function searchEverySource(ctx: OperationContext, query: string, params: Record<string, unknown>): Promise<SourceIndexSearchResult & { corpus_ids: string[] }> {
+/** Interleave hits by rank across the explicitly searched corpora. */
+async function searchEverySource(ctx: OperationContext, query: string, params: Record<string, unknown>): Promise<
+  Omit<SourceIndexSearchResult, 'corpus_id'> & { corpus_id?: string; corpus_ids: string[]; audit: { skipped_corpora: string[] } }
+> {
   const narrowed = SOURCE_SPECIFIC_SEARCH_PARAMS.filter((name) => params[name] !== undefined);
   if (narrowed.length > 0) {
     throw new OperationError('invalid_params', `${narrowed.join(', ')} ${narrowed.length === 1 ? 'needs' : 'need'} corpus_id: name the source to narrow.`);
@@ -1048,50 +1047,43 @@ async function searchEverySource(ctx: OperationContext, query: string, params: R
   const retrievalMode = optionalRetrievalMode(params.retrieval_mode);
   const maxResults = optionalNumber(params.max_results, 'max_results');
   const includeLocators = optionalBoolean(params.include_locators, 'include_locators');
-  const bySource = new Map<string, string>();
-  // One request per source. The worker chooses the first tier both registries allow.
-  for (const corpus of publicSourceCorpusRegistry(ctx.config).list('search')) {
-    if (!bySource.has(corpus.sourceId)) bySource.set(corpus.sourceId, corpus.corpusId);
-  }
-  const results = await ctx.email.sourceIndexSearchMany([...bySource.values()], {
+  const { results, skipped, failed } = await ctx.email.sourceIndexSearchMany({
     query,
     ...(retrievalMode !== undefined ? { retrievalMode } : {}),
     ...(maxResults !== undefined ? { maxResults } : {}),
     ...(includeLocators !== undefined ? { includeLocators } : {}),
   });
-  if (!results.length) throw new OperationError('email_error', 'No source could be searched this time.');
-  const limit = maxResults ?? Math.max(...results.map((result) => result.hits.length), 0);
+  const limit = maxResults ?? DEFAULT_SOURCE_INDEX_SEARCH_MAX_RESULTS;
   const hits: unknown[] = [];
   for (let rank = 0; hits.length < limit && results.some((result) => result.hits.length > rank); rank += 1) {
     for (const result of results) if (result.hits[rank] !== undefined && hits.length < limit) hits.push(result.hits[rank]);
   }
   const domains = results.map((result) => result.policy.trust_domain);
-  const secretLocations = results.flatMap((result) => result.secret_locations ?? []);
   const notes = [...new Set(results.flatMap((result) => result.coverage_notes ?? []))];
-  const unsearched = bySource.size - results.length;
+  if (failed) notes.push(`${failed} ${failed === 1 ? 'corpus was' : 'corpora were'} not searched this time.`);
   return {
     kind: 'source_index_search',
-    corpus_id: results[0]!.corpus_id,
+    ...(results.length ? { corpus_id: results[0]!.corpus_id } : {}),
     corpus_ids: results.map((result) => result.corpus_id),
     retrieval_source: 'local_index',
     hits,
-    ...(secretLocations.length > 0 ? { secret_locations: secretLocations } : {}),
-    ...(notes.length > 0 || unsearched > 0
-      ? { coverage_notes: [...notes, ...(unsearched > 0 ? [`${unsearched} source${unsearched === 1 ? ' was' : 's were'} not searched this time.`] : [])] }
-      : {}),
+    ...(notes.length ? { coverage_notes: notes } : {}),
     audit: {
       request_id: 'all-sources:connector-store-search',
       retrieval_source: 'local_index',
       queries_attempted: results.reduce((total, result) => total + result.audit.queries_attempted, 0),
-      searched_corpora: results.flatMap((result) => result.audit.searched_corpora ?? [result.corpus_id]),
+      searched_corpora: results.map(result => result.corpus_id),
+      skipped_corpora: skipped,
       metadata_hits: hits.length,
       items_returned: hits.length,
-      latency_ms: Math.max(...results.map((result) => result.audit.latency_ms)),
+      latency_ms: Math.max(0, ...results.map((result) => result.audit.latency_ms)),
       raw_source_exposed: false,
       source_text_returned: false,
     },
     policy: {
-      ...results[0]!.policy,
+      raw_source_exposed: false,
+      source_text_returned: false,
+      source_packets_exposed: false,
       local_only: results.some((result) => result.policy.local_only),
       trust_domain: domains.includes('secure_local') ? 'secure_local' : domains.includes('internal') ? 'internal' : 'public_safe',
       ...(results.some((result) => result.policy.locators_exposed) ? { locators_exposed: true, locator_release: 'explicit_request' as const } : {}),

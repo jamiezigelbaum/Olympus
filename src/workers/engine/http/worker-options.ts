@@ -179,7 +179,7 @@ export interface EmailSourceWorkerOptions {
   dropboxIngestionPolicy?: SourceIngestionPolicy;
   connectorStores?: LocalConnectorStore[];
   /** Discover stores that ingestion created after boot; never creates an absent store. */
-  refreshConnectorStores?: () => void;
+  refreshConnectorStores?: (only?: ReadonlySet<string>) => void;
   /** Corpora enabled for search in the worker registry. */
   searchableCorpusIds?: ReadonlySet<string>;
   /**

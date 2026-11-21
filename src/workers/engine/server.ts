@@ -519,7 +519,7 @@ import { tierSetForLedger } from '../connector-store/tier-set-registry.ts';
 import { sqliteMmapPolicy } from '../connector-store/sqlite-mmap.ts';
 import { startSupersededSweepTicker } from '../connector-store/tier-auto-prune-sweep.ts';
 import { withStoreReadPriority } from '../../core/store-reclaim-admission.ts';
-import { createStandBack, ownerAskReason } from './stand-back.ts';
+import { createStandBack, ownerAskReason, ownerIdleWindow } from './stand-back.ts';
 import { remoteAccessFromStatus, type DashboardAgentConnectionsBackend } from '../agent-connections.ts';
 import { applyPendingRestoreAtBoot, createBackupService, defaultBackupServicePaths } from '../backup-service.ts';
 import { createDashboardRemoteAccessControl, createGatewayRemoteAccessConfigWriter, createStandaloneRemoteAccessControl, createDashboardEngineRestart } from '../remote-access-control.ts';
@@ -976,6 +976,7 @@ export async function main(): Promise<void> {
   let statusRecount: PacedStatusRecount | undefined;
   const standBack = createStandBack({
     reason: () => ownerAskReason(ownerQuestions, () => remoteOwnerBusy(OWNER_QUESTION_RESOURCE)),
+    idleWindow: () => ownerIdleWindow(ownerQuestions, remoteOwnerMarks.busySince(OWNER_QUESTION_RESOURCE), remoteOwnerMarks.lastEndedAt(OWNER_QUESTION_RESOURCE)),
   });
   setVectorDigestBackfillHold(() => standBack.holds('digest'));
   let recencyIndexMaintenanceReady = false;
@@ -5322,7 +5323,7 @@ export async function main(): Promise<void> {
         }
       : {}),
     connectorStores,
-    refreshConnectorStores: () => mountConfiguredSourceStores(),
+    refreshConnectorStores: mountConfiguredSourceStores,
     revokeSourceReads,
     searchableCorpusIds: new Set(sourceCorpusRegistry.ids('search')),
     connectorStoreTierSiblings: (corpusId: string) => [
@@ -6930,9 +6931,10 @@ export async function main(): Promise<void> {
         ...(snifferEnv.maxCallsPerDay !== undefined ? { maxCallsPerDay: snifferEnv.maxCallsPerDay } : snifferLane.kind === 'local' || !judgeSpending.status().uncapped ? { maxCallsPerDay: Number.MAX_SAFE_INTEGER } : {}),
         // Its own parallel calls are not answers: only someone else's call holds it back.
         answersInFlight: () => snifferResource !== undefined && (localModelActivity.busyExcept(snifferResource, 'tier_sniffer') || remoteOwnerBusy(snifferResource)),
-        ownerInFlight: () => standBack.holds('judge') || (snifferResource !== undefined && (localModelActivity.ownerInFlight(snifferResource) || remoteOwnerBusy(snifferResource))),
+        ownerAskTurn: () => standBack.turn('judge'),
+        ownerInFlight: () => snifferResource !== undefined && (localModelActivity.ownerInFlight(snifferResource) || remoteOwnerBusy(snifferResource)),
         // A ready Inbox question stops the pass, so its answer runs, then classification resumes.
-        shouldYield: () => chunkJudgmentsInFlight > 0 || (localPrivateAnswers?.overdue() ?? false) || standBack.holds('judge'),
+        shouldYield: () => chunkJudgmentsInFlight > 0 || (localPrivateAnswers?.overdue() ?? false),
         // The service applies it to the built-in judge only, never Venice or a remote judge.
         pacing: localPacer,
         breakerOpen: () => secureAnalystPoolState.isBreakerOpen('secure_local', snifferLane.profileId),
@@ -7164,9 +7166,8 @@ export async function main(): Promise<void> {
         // A stale change (older than the last applied for that resource) changes nothing.
         owner_busy: (change) => {
           if (!remoteOwnerMarks.apply(change)) return { busy: remoteOwnerMarks.busy(change.resource), stale: true };
-          // An owner question preempts the judge only while it stands back:
-          // within its guaranteed share the call it is making finishes.
-          if (change.resource === snifferResource || (change.resource === OWNER_QUESTION_RESOURCE && standBack.holds('judge'))) tierSniffer?.preempt();
+          if (change.resource === snifferResource) tierSniffer?.preempt();
+          else if (change.resource === OWNER_QUESTION_RESOURCE) tierSniffer?.preempt('question');
           return { busy: true };
         },
         owner_idle: (change) => {

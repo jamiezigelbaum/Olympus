@@ -25,7 +25,11 @@ export interface StandBackCounts {
   reason?: string;
 }
 
+export type StandBackTurn = 'idle' | 'hold' | 'share';
+
 export interface StandBack {
+  /** Whether work may start now, including its guaranteed share. */
+  turn(work: StandBackWork): StandBackTurn;
   /** True while `work` should start nothing new. */
   holds(work: StandBackWork): boolean;
   /** Per kind of work, for health; only kinds that ever stood back. */
@@ -43,9 +47,20 @@ export function ownerAskReason(local: { readonly busy: boolean }, frontBusy: () 
   return frontBusy() ? 'question in the front' : undefined;
 }
 
+/** Both question sources were idle from the latest end until the first still-open Ask. */
+export function ownerIdleWindow(
+  local: { readonly busySince: number | undefined; readonly lastEndedAt: number | undefined },
+  frontBusySince: number | undefined, frontLastEndedAt: number | undefined,
+): { since: number; until: number } {
+  return { since: Math.max(local.lastEndedAt ?? -Infinity, frontLastEndedAt ?? -Infinity),
+    until: Math.min(local.busySince ?? Infinity, frontBusySince ?? Infinity) };
+}
+
 export function createStandBack(options: {
   /** Why the owner is busy now, or undefined when not. */
   reason: () => string | undefined;
+  /** The latest idle interval established by the question sources' transitions. */
+  idleWindow?: () => { since: number; until: number };
   now?: () => number;
   log?: (line: string) => void;
   maxMs?: number;
@@ -55,50 +70,68 @@ export function createStandBack(options: {
   const log = options.log ?? ((line: string) => console.log(line));
   const maxMs = options.maxMs ?? STAND_BACK_MAX_MS;
   const shareMs = options.shareMs ?? STAND_BACK_SHARE_MS;
-  const states = new Map<StandBackWork, { since?: number | undefined; shareUntil?: number | undefined; reason?: string | undefined; counts: Omit<StandBackCounts, 'holding' | 'reason'> }>();
+  const states = new Map<StandBackWork, {
+    waitSince?: number;
+    heldSince?: number;
+    shareUntil?: number;
+    reason?: string;
+    counts: Omit<StandBackCounts, 'holding' | 'reason'>;
+  }>();
   const seconds = (ms: number) => Math.round(ms / 1_000);
+
+  function turn(work: StandBackWork): StandBackTurn {
+    const at = now();
+    let state = states.get(work);
+    if (state?.shareUntil !== undefined && at < state.shareUntil) return 'share';
+
+    let reason: string | undefined;
+    try { reason = options.reason(); } catch { reason = undefined; }
+    if (!state) {
+      if (!reason) return 'idle';
+      states.set(work, state = { counts: { holds: 0, held_ms: 0, bound_reached: 0 } });
+    }
+
+    // A short idle gap lets work resume immediately, but only a full idle
+    // share satisfies the wait. Count actual holds separately for health.
+    if (state.waitSince !== undefined) {
+      const idle = options.idleWindow?.();
+      if (idle && Math.min(at, idle.until) - Math.max(state.waitSince, idle.since) >= shareMs) delete state.waitSince;
+    }
+    const waitedMs = state.waitSince === undefined ? 0 : at - state.waitSince;
+    const bound = state.waitSince !== undefined && waitedMs >= maxMs;
+    if (state.heldSince !== undefined && (!reason || bound)) {
+      const heldMs = at - state.heldSince;
+      state.counts.held_ms += heldMs;
+      if (!bound) log(`Olympus engine: ${work} resumes after standing back ${seconds(heldMs)} s (${state.reason}).`);
+      delete state.heldSince;
+    }
+    if (bound) {
+      state.counts.bound_reached += 1;
+      log(`Olympus engine: ${work} reached the bound ${seconds(waitedMs)} s after first standing back (${state.reason}); runs ${seconds(shareMs)} s before standing back again.`);
+      delete state.waitSince;
+      state.shareUntil = at + shareMs;
+      return 'share';
+    }
+    if (!reason) return 'idle';
+    state.waitSince ??= at;
+    if (state.heldSince === undefined) {
+      state.heldSince = at;
+      state.reason = reason;
+      state.counts.holds += 1;
+      log(`Olympus engine: ${work} stands back for the owner's Ask (${reason}).`);
+    }
+    return 'hold';
+  }
   return {
-    holds(work) {
-      const at = now();
-      let reason: string | undefined;
-      try { reason = options.reason(); } catch { reason = undefined; }
-      let state = states.get(work);
-      if (!reason) {
-        if (state?.since !== undefined) {
-          state.counts.held_ms += at - state.since;
-          log(`Olympus engine: ${work} resumes after standing back ${seconds(at - state.since)} s (${state.reason}).`);
-          state.since = undefined;
-        }
-        if (state) state.shareUntil = undefined;
-        return false;
-      }
-      if (!state) states.set(work, state = { counts: { holds: 0, held_ms: 0, bound_reached: 0 } });
-      if (state.shareUntil !== undefined && at < state.shareUntil) return false;
-      state.shareUntil = undefined;
-      if (state.since === undefined) {
-        state.since = at;
-        state.reason = reason;
-        state.counts.holds += 1;
-        log(`Olympus engine: ${work} stands back for the owner's Ask (${reason}).`);
-        return true;
-      }
-      if (at - state.since >= maxMs) {
-        state.counts.held_ms += at - state.since;
-        state.counts.bound_reached += 1;
-        log(`Olympus engine: ${work} stood back ${seconds(at - state.since)} s (${state.reason}); runs ${seconds(shareMs)} s before standing back again.`);
-        state.since = undefined;
-        state.shareUntil = at + shareMs;
-        return false;
-      }
-      return true;
-    },
+    turn,
+    holds: work => turn(work) === 'hold',
     counts() {
       const at = now();
       return Object.fromEntries([...states].map(([work, state]) => [work, {
         ...state.counts,
-        held_ms: state.counts.held_ms + (state.since !== undefined ? at - state.since : 0),
-        holding: state.since !== undefined,
-        ...(state.since !== undefined && state.reason ? { reason: state.reason } : {}),
+        held_ms: state.counts.held_ms + (state.heldSince !== undefined ? at - state.heldSince : 0),
+        holding: state.heldSince !== undefined,
+        ...(state.heldSince !== undefined && state.reason ? { reason: state.reason } : {}),
       }]));
     },
   };

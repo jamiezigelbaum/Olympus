@@ -324,7 +324,12 @@ describe('source storage, end to end on this host', () => {
     test(`a declared store ingested after boot is discovered by ${read} with the scheduler off`, async () => {
       const env: Env = { ...freshHome(), OLYMPUS_WORKER_SCHEDULER_ENABLED: 'false' };
       const path = join(env.HOME!, 'late-reflect.sqlite');
-      env.OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON = JSON.stringify([{ dbPath: path, corpusId: 'secure_local.reflect.notes', family: 'note', trustDomain: 'secure_local' }]);
+      const corpus = { corpusId: 'secure_local.reflect.notes', family: 'note', trustDomain: 'secure_local' };
+      env.OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON = JSON.stringify([{ dbPath: path, ...corpus }]);
+      env.OLYMPUS_SOURCE_INDEX_CORPUS_REGISTRY_PATH = join(env.HOME!, 'corpora.json');
+      put(env.OLYMPUS_SOURCE_INDEX_CORPUS_REGISTRY_PATH, JSON.stringify({
+        schemaVersion: 2, corpora: [{ ...corpus, sourceId: 'reflect.notes', provider: 'reflect', capabilities: ['search', 'status'] }],
+      }));
       const worker = await boot(env);
       try {
         expect(worker.output(), listening(worker)).toContain('worker listening');
@@ -332,7 +337,7 @@ describe('source storage, end to end on this host', () => {
         expect(existsSync(path)).toBe(false);
         await writeStore(path, 'secure_local.reflect.notes', 'note', 'secure_local');
         if (read === 'status') expect((await ask(env, worker, '/v1/source/index/status', {})).status).toBe(200);
-        const search = await ask(env, worker, '/v1/source/index/search', { query: 'orchard', corpus_id: 'secure_local.reflect.notes' });
+        const search = await ask(env, worker, '/v1/source/index/search', { query: 'orchard', corpus_id: corpus.corpusId, include_private_names: true });
         expect(search.status, JSON.stringify(search.json)).toBe(200);
         expect(search.json.hits).toEqual(expect.arrayContaining([expect.objectContaining({ selected_item: expect.objectContaining({ title: 'orchard-lab.txt' }) })]));
       } finally { await worker.stop(); }
@@ -691,7 +696,7 @@ import { createHash } from 'node:crypto';
         await Bun.sleep(100);
       }
       expect(text, `${worker.errors()}\n${worker.output()}`).toContain('zephyrdropbox');
-      const search = await ask(env, worker, '/v1/source/index/search', { query: 'zephyrdropbox', corpus_id: 'secure_local.dropbox.files' });
+      const search = await ask(env, worker, '/v1/source/index/search', { query: 'zephyrdropbox', corpus_id: 'secure_local.dropbox.files', include_private_names: true });
       expect(search.status, JSON.stringify(search.json)).toBe(200);
       expect(search.json.hits).toEqual(expect.arrayContaining([expect.objectContaining({ selected_item: expect.objectContaining({ title: 'harbour.txt' }) })]));
       expect(TierLedger.readLedgerId(tierLedgerPathForStore(securePath))).toBeDefined();
@@ -758,14 +763,15 @@ import { createHash } from 'node:crypto';
       // SQLite file while the worker is still constructing it. Wait at the
       // public read boundary before taking strict storage snapshots.
       const deadline = Date.now() + 30_000;
-      const searchInput = { query: 'zephyrtide', corpus_id: 'secure_local.local.files', approved_scope_key: `local_files.this_computer:${folder}` };
+      // Unjudged names are held Private: the Private route asks for them, as email.ts does for a Private answer.
+      const searchInput = { query: 'zephyrtide', corpus_id: 'secure_local.local.files', approved_scope_key: `local_files.this_computer:${folder}`, include_private_names: true };
       let search = await ask(env, worker, '/v1/source/index/search', searchInput);
       while ((!Array.isArray(search.json.hits) || search.json.hits.length === 0) && Date.now() < deadline) {
         await Bun.sleep(100);
         search = await ask(env, worker, '/v1/source/index/search', searchInput);
       }
       expect(search.status, JSON.stringify(search.json)).toBe(200);
-      // No judge on this host yet, so the file's text waits in Private (#1316); its names are Personal.
+      // No judge on this host yet, so the file's text and names wait in Private (#1316).
       expect(search.json.hits, `${worker.errors()}\n${worker.output()}`).toEqual(expect.arrayContaining([expect.objectContaining({ selected_item: expect.objectContaining({ title: 'harbour.txt', corpus_id: 'secure_local.local.files' }) })]));
       expect(JSON.stringify(snapshotStore(securePath).chunks)).toContain('zephyrtide');
       expect(JSON.stringify(snapshotStore(internalPath).chunks)).not.toContain('zephyrtide');

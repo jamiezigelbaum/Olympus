@@ -836,7 +836,7 @@ export class EmailClient {
     return result;
   }
 
-  private async requestSourceIndexSearch(body: Record<string, unknown>, searchCorpora: readonly SourceCorpusConfig[]): Promise<Record<string, unknown>> {
+  private async requestSourceIndexSearch(body: Record<string, unknown>): Promise<Record<string, unknown>> {
     if (!isSourceIndexReadSurfaceEnabled(this.config)) {
       throw new OperationError(
         'source_index_not_enabled',
@@ -856,7 +856,7 @@ export class EmailClient {
     const data = asRecord(await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/search`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...body, tier_corpus_ids: searchCorpora.map(corpus => corpus.corpusId) }),
+      body: JSON.stringify(body),
     }));
     assertNoRawEmailFields(data);
     assertNoSourceIndexOperationalLeakFields(data);
@@ -873,6 +873,7 @@ export class EmailClient {
     const data = await this.requestSourceIndexSearch({
       query: options.query,
       corpus_id: corpusId,
+      tier_corpus_ids: searchCorpora.map(corpus => corpus.corpusId),
       // Tool results go straight to the calling model, including searches of a named Private store.
       ...(audience === 'private_answer' ? { include_private_names: true } : { personal_names_only: true }),
       ...(options.retrievalMode ? { retrieval_mode: options.retrievalMode } : {}),
@@ -895,7 +896,7 @@ export class EmailClient {
       ...(options.maxResults !== undefined ? { max_results: options.maxResults } : {}),
       ...(options.includeLocators !== undefined ? { include_locators: options.includeLocators } : {}),
       ...(options.allTiers !== undefined ? { all_tiers: options.allTiers } : {}),
-    }, searchCorpora);
+    });
     return parseSourceIndexSearchResult(data, {
       searchCorpora,
       requestedCorpusId: corpusId,
@@ -904,27 +905,37 @@ export class EmailClient {
   }
 
   /** The worker holds every source's hits until all reads finish, then releases their current names together. */
-  async sourceIndexSearchMany(corpusIds: string[], options: Pick<SourceIndexSearchOptions,
-    'query' | 'retrievalMode' | 'maxResults' | 'includeLocators'>): Promise<SourceIndexSearchResult[]> {
-    if (!corpusIds.length) throw new OperationError('invalid_params', 'No source is configured for search.');
+  async sourceIndexSearchMany(options: Pick<SourceIndexSearchOptions,
+    'query' | 'retrievalMode' | 'maxResults' | 'includeLocators'>) {
     const searchCorpora = createPublicSourceCorpusRegistry(this.config.sourceIndex.corpusRegistry).list('search');
+    if (!searchCorpora.length) throw new OperationError('invalid_params', 'No source is configured for search.');
     const response = await this.requestSourceIndexSearch({
       query: options.query,
-      corpus_ids: corpusIds,
+      corpus_ids: searchCorpora.map(corpus => corpus.corpusId),
       personal_names_only: true,
       retrieval_mode: options.retrievalMode,
       max_results: options.maxResults,
       include_locators: options.includeLocators,
-    }, searchCorpora);
-    if (!Array.isArray(response.results) || response.results.length !== corpusIds.length) {
-      throw new OperationError('email_error', 'The worker did not return a search result for each requested source.');
+    });
+    const slots = response.results;
+    if (!Array.isArray(slots) || slots.length !== searchCorpora.length) {
+      throw new OperationError('email_error', 'The worker did not return a search result for each requested corpus.');
     }
-    return response.results.flatMap((value, index) => value === null ? [] : [parseSourceIndexSearchResult(asRecord(value), {
-      searchCorpora,
-      requestedCorpusId: corpusIds[index]!,
-      allowSiblingRepresentative: true,
-      includeLocators: options.includeLocators === true,
-    })]);
+    const skipped = asRecord(response.audit).skipped_corpora;
+    const missing = new Set(searchCorpora.filter((_, i) => slots[i] === null).map(corpus => corpus.corpusId));
+    if (!Array.isArray(skipped) || !skipped.every((id): id is string => missing.delete(id))) {
+      throw new OperationError('email_error', 'The worker reported invalid skipped corpora.');
+    }
+    const results = slots.flatMap((value, index) => {
+      if (value === null) return [];
+      const corpus = searchCorpora[index]!;
+      return [parseSourceIndexSearchResult(asRecord(value), {
+        searchCorpora: [corpus],
+        requestedCorpusId: corpus.corpusId,
+        includeLocators: options.includeLocators === true,
+      })];
+    });
+    return { results, skipped, failed: missing.size };
   }
 
   async sourceWatchCreate(options: SourceWatchCreateOptions): Promise<SourceWatchResult> {
@@ -1531,7 +1542,6 @@ function parseSourceIndexStatusResult(value: Record<string, unknown>): SourceInd
 function parseSourceIndexSearchResult(value: Record<string, unknown>, context: {
   searchCorpora: readonly SourceCorpusConfig[];
   requestedCorpusId: string;
-  allowSiblingRepresentative?: boolean;
   includeLocators: boolean;
 }): SourceIndexSearchResult {
   if (value.kind !== 'source_index_search') {
@@ -1543,10 +1553,7 @@ function parseSourceIndexSearchResult(value: Record<string, unknown>, context: {
   const corpusId = value.corpus_id;
   const corpus = context.searchCorpora.find((entry) => entry.corpusId === corpusId);
   if (corpusId !== context.requestedCorpusId) {
-    const requested = context.searchCorpora.find(entry => entry.corpusId === context.requestedCorpusId);
-    if (!context.allowSiblingRepresentative || !requested || requested.sourceId !== corpus?.sourceId) {
-      throw new OperationError('email_error', 'source index search returned a different corpus than requested.');
-    }
+    throw new OperationError('email_error', 'source index search returned a different corpus than requested.');
   }
   if (!corpus) {
     throw new OperationError('email_error', 'source index search returned an unsupported corpus.');

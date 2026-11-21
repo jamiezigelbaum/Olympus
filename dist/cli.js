@@ -3199,7 +3199,7 @@ function assertCloudEmbeddingApproval(profile, approved) {
     throw new Error("Cloud embeddings require explicit corpus policy approval.");
   }
 }
-var SOURCE_FAMILIES, SOURCE_TRUST_TIERS, SOURCE_TRUST_DOMAINS;
+var DEFAULT_SOURCE_INDEX_SEARCH_MAX_RESULTS = 10, SOURCE_FAMILIES, SOURCE_TRUST_TIERS, SOURCE_TRUST_DOMAINS;
 var init_types = __esm(() => {
   SOURCE_FAMILIES = ["email", "file", "chat", "calendar", "note", "task", "readwise", "x"];
   SOURCE_TRUST_TIERS = ["S0", "S1", "S2", "S3", "S4", "S4+", "S5"];
@@ -151151,7 +151151,7 @@ class EmailClient {
       });
     return result;
   }
-  async requestSourceIndexSearch(body, searchCorpora) {
+  async requestSourceIndexSearch(body) {
     if (!isSourceIndexReadSurfaceEnabled(this.config)) {
       throw new OperationError("source_index_not_enabled", "Source-index search is disabled.", "Enable sourceIndex.enabled to turn on the source read surface.");
     }
@@ -151161,7 +151161,7 @@ class EmailClient {
     const data = asRecord15(await this.transport.requestJson(`${this.config.email.baseUrl}/source/index/search`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...body, tier_corpus_ids: searchCorpora.map((corpus) => corpus.corpusId) })
+      body: JSON.stringify(body)
     }));
     assertNoRawEmailFields(data);
     assertNoSourceIndexOperationalLeakFields(data);
@@ -151173,6 +151173,7 @@ class EmailClient {
     const data = await this.requestSourceIndexSearch({
       query: options.query,
       corpus_id: corpusId,
+      tier_corpus_ids: searchCorpora.map((corpus) => corpus.corpusId),
       ...audience === "private_answer" ? { include_private_names: true } : { personal_names_only: true },
       ...options.retrievalMode ? { retrieval_mode: options.retrievalMode } : {},
       ...options.account ? { account: options.account } : {},
@@ -151194,34 +151195,45 @@ class EmailClient {
       ...options.maxResults !== undefined ? { max_results: options.maxResults } : {},
       ...options.includeLocators !== undefined ? { include_locators: options.includeLocators } : {},
       ...options.allTiers !== undefined ? { all_tiers: options.allTiers } : {}
-    }, searchCorpora);
+    });
     return parseSourceIndexSearchResult(data, {
       searchCorpora,
       requestedCorpusId: corpusId,
       includeLocators: options.includeLocators === true
     });
   }
-  async sourceIndexSearchMany(corpusIds, options) {
-    if (!corpusIds.length)
-      throw new OperationError("invalid_params", "No source is configured for search.");
+  async sourceIndexSearchMany(options) {
     const searchCorpora = createPublicSourceCorpusRegistry(this.config.sourceIndex.corpusRegistry).list("search");
+    if (!searchCorpora.length)
+      throw new OperationError("invalid_params", "No source is configured for search.");
     const response = await this.requestSourceIndexSearch({
       query: options.query,
-      corpus_ids: corpusIds,
+      corpus_ids: searchCorpora.map((corpus) => corpus.corpusId),
       personal_names_only: true,
       retrieval_mode: options.retrievalMode,
       max_results: options.maxResults,
       include_locators: options.includeLocators
-    }, searchCorpora);
-    if (!Array.isArray(response.results) || response.results.length !== corpusIds.length) {
-      throw new OperationError("email_error", "The worker did not return a search result for each requested source.");
+    });
+    const slots = response.results;
+    if (!Array.isArray(slots) || slots.length !== searchCorpora.length) {
+      throw new OperationError("email_error", "The worker did not return a search result for each requested corpus.");
     }
-    return response.results.flatMap((value, index) => value === null ? [] : [parseSourceIndexSearchResult(asRecord15(value), {
-      searchCorpora,
-      requestedCorpusId: corpusIds[index],
-      allowSiblingRepresentative: true,
-      includeLocators: options.includeLocators === true
-    })]);
+    const skipped = asRecord15(response.audit).skipped_corpora;
+    const missing = new Set(searchCorpora.filter((_, i) => slots[i] === null).map((corpus) => corpus.corpusId));
+    if (!Array.isArray(skipped) || !skipped.every((id) => missing.delete(id))) {
+      throw new OperationError("email_error", "The worker reported invalid skipped corpora.");
+    }
+    const results = slots.flatMap((value, index) => {
+      if (value === null)
+        return [];
+      const corpus = searchCorpora[index];
+      return [parseSourceIndexSearchResult(asRecord15(value), {
+        searchCorpora: [corpus],
+        requestedCorpusId: corpus.corpusId,
+        includeLocators: options.includeLocators === true
+      })];
+    });
+    return { results, skipped, failed: missing.size };
   }
   async sourceWatchCreate(options) {
     this.requireSourceWatchSurface();
@@ -151713,10 +151725,7 @@ function parseSourceIndexSearchResult(value, context) {
   const corpusId = value.corpus_id;
   const corpus = context.searchCorpora.find((entry) => entry.corpusId === corpusId);
   if (corpusId !== context.requestedCorpusId) {
-    const requested = context.searchCorpora.find((entry) => entry.corpusId === context.requestedCorpusId);
-    if (!context.allowSiblingRepresentative || !requested || requested.sourceId !== corpus?.sourceId) {
-      throw new OperationError("email_error", "source index search returned a different corpus than requested.");
-    }
+    throw new OperationError("email_error", "source index search returned a different corpus than requested.");
   }
   if (!corpus) {
     throw new OperationError("email_error", "source index search returned an unsupported corpus.");
@@ -167953,20 +167962,13 @@ async function searchEverySource(ctx, query, params) {
   const retrievalMode = optionalRetrievalMode2(params.retrieval_mode);
   const maxResults = optionalNumber4(params.max_results, "max_results");
   const includeLocators = optionalBoolean2(params.include_locators, "include_locators");
-  const bySource = new Map;
-  for (const corpus of publicSourceCorpusRegistry(ctx.config).list("search")) {
-    if (!bySource.has(corpus.sourceId))
-      bySource.set(corpus.sourceId, corpus.corpusId);
-  }
-  const results = await ctx.email.sourceIndexSearchMany([...bySource.values()], {
+  const { results, skipped, failed } = await ctx.email.sourceIndexSearchMany({
     query,
     ...retrievalMode !== undefined ? { retrievalMode } : {},
     ...maxResults !== undefined ? { maxResults } : {},
     ...includeLocators !== undefined ? { includeLocators } : {}
   });
-  if (!results.length)
-    throw new OperationError("email_error", "No source could be searched this time.");
-  const limit = maxResults ?? Math.max(...results.map((result) => result.hits.length), 0);
+  const limit = maxResults ?? DEFAULT_SOURCE_INDEX_SEARCH_MAX_RESULTS;
   const hits = [];
   for (let rank = 0;hits.length < limit && results.some((result) => result.hits.length > rank); rank += 1) {
     for (const result of results)
@@ -167974,30 +167976,32 @@ async function searchEverySource(ctx, query, params) {
         hits.push(result.hits[rank]);
   }
   const domains = results.map((result) => result.policy.trust_domain);
-  const secretLocations = results.flatMap((result) => result.secret_locations ?? []);
   const notes = [...new Set(results.flatMap((result) => result.coverage_notes ?? []))];
-  const unsearched = bySource.size - results.length;
+  if (failed)
+    notes.push(`${failed} ${failed === 1 ? "corpus was" : "corpora were"} not searched this time.`);
   return {
     kind: "source_index_search",
-    corpus_id: results[0].corpus_id,
+    ...results.length ? { corpus_id: results[0].corpus_id } : {},
     corpus_ids: results.map((result) => result.corpus_id),
     retrieval_source: "local_index",
     hits,
-    ...secretLocations.length > 0 ? { secret_locations: secretLocations } : {},
-    ...notes.length > 0 || unsearched > 0 ? { coverage_notes: [...notes, ...unsearched > 0 ? [`${unsearched} source${unsearched === 1 ? " was" : "s were"} not searched this time.`] : []] } : {},
+    ...notes.length ? { coverage_notes: notes } : {},
     audit: {
       request_id: "all-sources:connector-store-search",
       retrieval_source: "local_index",
       queries_attempted: results.reduce((total, result) => total + result.audit.queries_attempted, 0),
-      searched_corpora: results.flatMap((result) => result.audit.searched_corpora ?? [result.corpus_id]),
+      searched_corpora: results.map((result) => result.corpus_id),
+      skipped_corpora: skipped,
       metadata_hits: hits.length,
       items_returned: hits.length,
-      latency_ms: Math.max(...results.map((result) => result.audit.latency_ms)),
+      latency_ms: Math.max(0, ...results.map((result) => result.audit.latency_ms)),
       raw_source_exposed: false,
       source_text_returned: false
     },
     policy: {
-      ...results[0].policy,
+      raw_source_exposed: false,
+      source_text_returned: false,
+      source_packets_exposed: false,
       local_only: results.some((result) => result.policy.local_only),
       trust_domain: domains.includes("secure_local") ? "secure_local" : domains.includes("internal") ? "internal" : "public_safe",
       ...results.some((result) => result.policy.locators_exposed) ? { locators_exposed: true, locator_release: "explicit_request" } : {}
@@ -168180,6 +168184,7 @@ var init_operations = __esm(() => {
   init_config2();
   init_config2();
   init_operation_error();
+  init_types();
   init_selected_items();
   init_source_corpus_registry();
   init_venice_models();
@@ -172650,6 +172655,7 @@ async function runSnifferPass(options) {
     while (pending.length > 0 && report.stoppedBy === undefined) {
       const turnStarted = monotonicNow();
       let turnCallMs = 0;
+      let releaseCall;
       try {
         const aged = pending.filter((item) => options.lane.kind !== "venice" && dispatches % 5 === 4 && item.target.sniffer.clockMs() - Date.parse(item.question.queuedAt) >= 5 * 60000).sort((a, b) => a.question.queuedAt.localeCompare(b.question.queuedAt) || a.question.sequence - b.question.sequence);
         const raisedNext = aged.length === 0 ? pending.find((item) => boosts.has(item.question)) : undefined;
@@ -172695,11 +172701,12 @@ async function runSnifferPass(options) {
           }
         }
         const batch = [group];
-        const stop = report.calls > 0 && options.trickle?.() === true ? "pass_budget" : stopReason(options, report, maxCallsPerPass, monotonicNow() >= deadline);
-        if (stop) {
-          report.stoppedBy = stop;
+        const admission = report.calls > 0 && options.trickle?.() === true ? "pass_budget" : admitCall(options, report, maxCallsPerPass, monotonicNow() >= deadline);
+        if (typeof admission === "string") {
+          report.stoppedBy = admission;
           return;
         }
+        releaseCall = admission;
         assertSnifferProfileAllowed(options.lane.profileId, options.lane.profile);
         const prompt = buildSnifferBatchPrompt(pass, batch.map((group, index) => ({ i: index + 1, material: snifferMaterialForModel(group[0].question.material) })), options.ownerContext);
         next.target.sniffer.recordDispatch();
@@ -172794,6 +172801,7 @@ async function runSnifferPass(options) {
           return;
         }
       } finally {
+        releaseCall?.();
         report.timing.dispatchMs += Math.max(0, monotonicNow() - turnStarted - turnCallMs);
       }
     }
@@ -172830,16 +172838,21 @@ function openPasses(row) {
     passes.push("content");
   return passes;
 }
-function stopReason(options, report, maxCallsPerPass, timeUp) {
+function admitCall(options, report, maxCallsPerPass, timeUp) {
   if (options.signal?.aborted)
     return "aborted";
   if (report.calls >= maxCallsPerPass || timeUp)
     return "pass_budget";
   if (options.shouldYield?.())
     return "yield";
-  if (options.budget && !options.budget.tryConsume(options.lane.snifferMode === "decision"))
+  const release = options.acquireCall?.();
+  if (release === false)
+    return "yield";
+  if (options.budget && !options.budget.tryConsume(options.lane.snifferMode === "decision")) {
+    release?.();
     return "daily_budget";
-  return;
+  }
+  return release;
 }
 function finish(report, monotonicNow, passStarted) {
   report.estimatedOutputTokens = Math.ceil(report.responseChars / 4);
@@ -221056,7 +221069,7 @@ function parseConnectorStoreIndexSearchRequestRecord(record, store, defaultAccou
   }
   return {
     query: record.query,
-    maxResults: maxResults ?? 10,
+    maxResults: maxResults ?? DEFAULT_SOURCE_INDEX_SEARCH_MAX_RESULTS,
     ...retrievalMode !== undefined ? { retrievalMode } : {},
     ...accountScope ? { accountScope } : {},
     ...chatScopeResolution?.kind === "title" && !chatScopeResolution.resolved ? { explicitEmptyChatScope: true } : {},
@@ -221099,6 +221112,7 @@ function asOptionalExactNarrowingString(record, key) {
 }
 var CONNECTOR_STORE_FILTER_CAPABILITIES;
 var init_connector_store_search_request = __esm(() => {
+  init_types();
   init_x_bookmarks();
   init_approved_scope_filter2();
   init_locator_result_projector2();
@@ -229778,22 +229792,7 @@ function createEmailSourceWorker(options = {}) {
             throw new EmailSourceWorkerError(400, "invalid_request", "include_private_names is only available for a single Private search.");
           }
           const personalNamesOnly = record.include_private_names !== true;
-          const prepare = async (record) => {
-            const corpusId = canonicalRequestCorpusId(record);
-            if (!corpusId) {
-              throw new EmailSourceWorkerError(400, "invalid_request", `corpus_id must be one of: ${sourceIndexSearchCorpusIds(connectorStores).join(", ")}.`);
-            }
-            const connectorStore = connectorStoresByCorpusId.get(corpusId);
-            const siblingIds = record.all_tiers === false || record.trust_domain !== undefined ? [] : options.connectorStoreTierSiblings?.(corpusId) ?? [];
-            const searchableIds = [...new Set([corpusId, ...siblingIds])].filter(canSearch);
-            if (!searchableIds.length) {
-              throw new EmailSourceWorkerError(403, "source_index_policy_violation", "This corpus is not enabled for search.");
-            }
-            if (canSearch(corpusId) && !connectorStore)
-              throw new EmailSourceWorkerError(501, "source_index_search_not_supported", `The connector store for ${corpusId} is not mounted.`);
-            if (!personalNamesOnly && connectorStore?.trustDomain !== "secure_local") {
-              throw new EmailSourceWorkerError(400, "invalid_request", "include_private_names requires a Private corpus.");
-            }
+          const prepare = async (corpusId, ids, mounted = connectorStoresByCorpusId) => {
             const searchConnectorStore = async (store) => {
               const mandatoryScope = connectorStoreReadScope?.(store);
               if (mandatoryScope?.allowed === false)
@@ -229859,14 +229858,14 @@ function createEmailSourceWorker(options = {}) {
               };
             };
             const runs = [];
-            for (const id of searchableIds) {
-              const store = connectorStoresByCorpusId.get(id);
+            for (const id of ids) {
+              const store = mounted.get(id);
               if (!store)
                 continue;
               const run = await searchConnectorStore(store);
               if (run)
                 runs.push(run);
-              else if (id === corpusId)
+              else if (store.corpusId === corpusId)
                 break;
             }
             const primary = runs[0];
@@ -229985,7 +229984,7 @@ function createEmailSourceWorker(options = {}) {
               const locatorsExposed = releasedHits.some((hit) => Object.prototype.hasOwnProperty.call(hit, "locator"));
               const safeResult = {
                 kind: "source_index_search",
-                corpus_id: corpusIds === undefined ? corpusId : primary.store.corpusId,
+                corpus_id: corpusId,
                 retrieval_source: "local_index",
                 hits: releasedHits,
                 ...secretLocations.length > 0 ? {
@@ -230028,17 +230027,42 @@ function createEmailSourceWorker(options = {}) {
               return safeResult;
             };
           };
-          if (corpusIds === undefined)
-            return json((await prepare(record))());
+          if (corpusIds === undefined) {
+            const corpusId = canonicalRequestCorpusId(record);
+            if (!corpusId) {
+              throw new EmailSourceWorkerError(400, "invalid_request", `corpus_id must be one of: ${sourceIndexSearchCorpusIds(connectorStores).join(", ")}.`);
+            }
+            const connectorStore = connectorStoresByCorpusId.get(corpusId);
+            const siblingIds = record.all_tiers === false || record.trust_domain !== undefined ? [] : options.connectorStoreTierSiblings?.(corpusId) ?? [];
+            const searchableIds = [...new Set([corpusId, ...siblingIds])].filter(canSearch);
+            if (!searchableIds.length) {
+              throw new EmailSourceWorkerError(403, "source_index_policy_violation", "This corpus is not enabled for search.");
+            }
+            if (canSearch(corpusId) && !connectorStore)
+              throw new EmailSourceWorkerError(501, "source_index_search_not_supported", `The connector store for ${corpusId} is not mounted.`);
+            if (!personalNamesOnly && connectorStore?.trustDomain !== "secure_local") {
+              throw new EmailSourceWorkerError(400, "invalid_request", "include_private_names requires a Private corpus.");
+            }
+            return json((await prepare(corpusId, searchableIds))());
+          }
           if (record.corpus_id !== undefined || !Array.isArray(corpusIds) || !corpusIds.length || !corpusIds.every((id) => typeof id === "string" && id.trim()) || new Set(corpusIds).size !== corpusIds.length) {
             throw new EmailSourceWorkerError(400, "invalid_request", "Supply distinct corpus_ids for a multi-source search.");
           }
-          const prepared = await Promise.allSettled(corpusIds.map((corpus_id) => prepare({ ...record, corpus_id })));
+          const eligible = new Set(corpusIds.filter(canSearch));
+          options.refreshConnectorStores?.(eligible);
+          const mounted = new Map(connectorStores.map((store) => [store.corpusId, store]));
+          const skipped = [];
+          const prepared = await Promise.allSettled(corpusIds.map((id) => {
+            if (eligible.has(id) && mounted.has(id))
+              return prepare(id, [id], mounted);
+            skipped.push(id);
+            return null;
+          }));
           let firstFailure;
           const results = prepared.map((outcome) => {
             if (outcome.status === "rejected") {
               firstFailure ??= outcome.reason;
-            } else {
+            } else if (outcome.value) {
               try {
                 return outcome.value();
               } catch (error) {
@@ -230047,9 +230071,9 @@ function createEmailSourceWorker(options = {}) {
             }
             return null;
           });
-          if (results.every((result) => result === null))
+          if (skipped.length < corpusIds.length && results.every((result) => result === null))
             throw firstFailure;
-          return json({ results });
+          return json({ results, audit: { skipped_corpora: skipped } });
         }
         if (request.method === "POST" && url.pathname === `${basePath}/source/index/embed`) {
           const record = await parseObjectBody(request);
@@ -246818,7 +246842,14 @@ import { AsyncLocalStorage as AsyncLocalStorage16 } from "node:async_hooks";
 function createOwnerQuestionActivity(relay, now = Date.now) {
   const context = new AsyncLocalStorage16;
   let inFlight = 0;
+  let startedAt;
   let lastEndedAt;
+  const acquire = () => {
+    if (++inFlight === 1) {
+      startedAt = now();
+      relay?.busy(OWNER_QUESTION_RESOURCE);
+    }
+  };
   const release = () => {
     if (--inFlight === 0) {
       lastEndedAt = now();
@@ -246826,6 +246857,9 @@ function createOwnerQuestionActivity(relay, now = Date.now) {
     }
   };
   return {
+    get busySince() {
+      return inFlight > 0 ? startedAt : undefined;
+    },
     get lastEndedAt() {
       return lastEndedAt;
     },
@@ -246837,12 +246871,10 @@ function createOwnerQuestionActivity(relay, now = Date.now) {
       if (!scope || scope.active || scope.settled)
         return;
       scope.active = true;
-      if (++inFlight === 1)
-        relay?.busy(OWNER_QUESTION_RESOURCE);
+      acquire();
     },
     begin() {
-      if (++inFlight === 1)
-        relay?.busy(OWNER_QUESTION_RESOURCE);
+      acquire();
       let released = false;
       return () => {
         if (released)
@@ -250296,6 +250328,7 @@ class TierSnifferService {
   };
   heldBackSinceMs;
   arrivalTurn = false;
+  dispatch = { inFlight: 0, protected: false };
   backlogRefresh;
   waiting;
   moveFailures = new Map;
@@ -250405,11 +250438,13 @@ class TierSnifferService {
     if (!this.running)
       this.closeLedgers();
   }
-  preempt() {
+  preempt(reason = "model") {
+    if (this.dispatch.protected)
+      return;
+    if ((reason === "question" || this.options.lane?.kind !== "local") && this.options.ownerAskTurn?.() === "share")
+      return;
     this.fairTurn = false;
     this.yieldingSinceMs = undefined;
-    if (this.arrivalTurn)
-      return;
     this.abort?.abort();
   }
   backlog() {
@@ -250752,7 +250787,7 @@ class TierSnifferService {
     if (!this.running && this.continuation === undefined)
       return false;
     try {
-      return this.options.shouldYield?.() !== true;
+      return this.options.shouldYield?.() !== true && (this.dispatch.protected || this.options.ownerAskTurn?.() !== "hold");
     } catch {
       return true;
     }
@@ -250822,6 +250857,7 @@ class TierSnifferService {
       this.running = false;
     }
     const generation = ++this.passGeneration;
+    this.dispatch = { inFlight: 0, protected: false };
     this.arrivalTurn = this.arrivalTurnDue();
     if (this.arrivalTurn)
       this.heldBackSinceMs = undefined;
@@ -250990,17 +251026,36 @@ class TierSnifferService {
       return;
     }
   }
-  yieldNow() {
+  yieldNow(turn = this.dispatch.protected ? "hold" : this.options.ownerAskTurn?.()) {
     if (this.breakerOpen()) {
       this.lastYieldReason = "breaker";
       return true;
     }
-    if (this.running && this.arrivalTurn)
+    if (this.running && this.arrivalTurn && turn !== "hold" && turn !== "share")
       return false;
-    const held = this.holdsBack();
+    const held = this.holdsBack(turn);
     if (this.running)
       this.heldBackSinceMs = held ? this.heldBackSinceMs ?? this.clockMs() : undefined;
     return held;
+  }
+  acquireCall() {
+    const dispatch = this.dispatch;
+    if (dispatch.protected)
+      return false;
+    const turn = this.options.ownerAskTurn?.();
+    if (this.yieldNow(turn))
+      return false;
+    const protect = this.arrivalTurn || turn === "share" && this.options.lane?.kind === "local";
+    if (protect && dispatch.inFlight > 0)
+      return false;
+    dispatch.inFlight++;
+    if (protect)
+      dispatch.protected = true;
+    return () => {
+      dispatch.inFlight--;
+      if (protect)
+        dispatch.protected = false;
+    };
   }
   isOnDemandRead(question) {
     return this.options.stores().some((store) => {
@@ -251029,8 +251084,8 @@ class TierSnifferService {
       return false;
     }
   }
-  holdsBack() {
-    let busy = this.answering();
+  holdsBack(turn) {
+    let busy = turn === "hold" || turn !== "share" && this.answering();
     this.lastYieldReason = busy ? "answer" : undefined;
     if (!busy) {
       try {
@@ -251041,14 +251096,14 @@ class TierSnifferService {
       if (busy)
         this.lastYieldReason = "caller";
     }
-    if (!this.running)
+    if (!this.running || turn === "share")
       return busy;
     if (!busy) {
       if (!this.fairTurn)
         this.yieldingSinceMs = undefined;
       return false;
     }
-    if (this.ownerAnswering()) {
+    if (turn === "hold" || this.ownerAnswering()) {
       this.lastYieldReason = "owner_answer";
       this.fairTurn = false;
       this.yieldingSinceMs = undefined;
@@ -251356,7 +251411,7 @@ class TierSnifferService {
       ...this.arrivalTurn ? { arrivalsOnly: true } : {},
       passTimeMs: this.options.passTimeMs,
       ...this.options.monotonicNow ? { monotonicNow: this.options.monotonicNow } : {},
-      shouldYield: () => this.yieldNow(),
+      acquireCall: () => this.acquireCall(),
       onProgress: this.progress,
       ...this.options.pacing && isBuiltInLane(lane) ? { trickle: () => this.trickle() } : {},
       signal
@@ -253244,11 +253299,14 @@ class OwnerBusyMarks {
     const last = this.marks.get(change.resource);
     if (last && last.front === change.front && change.seq <= last.seq)
       return false;
+    const at = this.now();
+    const wasBusy = last !== undefined && last.busyUntil > at;
     this.marks.set(change.resource, {
       front: change.front,
       seq: change.seq,
-      busyUntil: change.kind === "owner_busy" ? this.now() + this.lapseMs : 0,
-      endedAt: change.kind === "owner_idle" ? this.now() : last?.endedAt
+      busyUntil: change.kind === "owner_busy" ? at + this.lapseMs : 0,
+      startedAt: wasBusy ? last.startedAt : at,
+      endedAt: change.kind === "owner_idle" ? at : this.lastEndedAt(change.resource)
     });
     return true;
   }
@@ -253257,6 +253315,10 @@ class OwnerBusyMarks {
     if (mark && mark.busyUntil > 0 && mark.busyUntil <= this.now())
       return Math.max(mark.endedAt ?? 0, mark.busyUntil);
     return mark?.endedAt;
+  }
+  busySince(resource) {
+    const mark = this.marks.get(resource);
+    return mark && mark.busyUntil > this.now() ? mark.startedAt : undefined;
   }
   busy(resource) {
     return (this.marks.get(resource)?.busyUntil ?? 0) > this.now();
@@ -253710,6 +253772,12 @@ function ownerAskReason(local, frontBusy) {
     return "question in this process";
   return frontBusy() ? "question in the front" : undefined;
 }
+function ownerIdleWindow(local, frontBusySince, frontLastEndedAt) {
+  return {
+    since: Math.max(local.lastEndedAt ?? -Infinity, frontLastEndedAt ?? -Infinity),
+    until: Math.min(local.busySince ?? Infinity, frontBusySince ?? Infinity)
+  };
+}
 function createStandBack(options) {
   const now = options.now ?? Date.now;
   const log = options.log ?? ((line) => console.log(line));
@@ -253717,55 +253785,64 @@ function createStandBack(options) {
   const shareMs = options.shareMs ?? STAND_BACK_SHARE_MS;
   const states = new Map;
   const seconds = (ms) => Math.round(ms / 1000);
+  function turn(work) {
+    const at = now();
+    let state = states.get(work);
+    if (state?.shareUntil !== undefined && at < state.shareUntil)
+      return "share";
+    let reason;
+    try {
+      reason = options.reason();
+    } catch {
+      reason = undefined;
+    }
+    if (!state) {
+      if (!reason)
+        return "idle";
+      states.set(work, state = { counts: { holds: 0, held_ms: 0, bound_reached: 0 } });
+    }
+    if (state.waitSince !== undefined) {
+      const idle = options.idleWindow?.();
+      if (idle && Math.min(at, idle.until) - Math.max(state.waitSince, idle.since) >= shareMs)
+        delete state.waitSince;
+    }
+    const waitedMs = state.waitSince === undefined ? 0 : at - state.waitSince;
+    const bound = state.waitSince !== undefined && waitedMs >= maxMs;
+    if (state.heldSince !== undefined && (!reason || bound)) {
+      const heldMs = at - state.heldSince;
+      state.counts.held_ms += heldMs;
+      if (!bound)
+        log(`Olympus engine: ${work} resumes after standing back ${seconds(heldMs)} s (${state.reason}).`);
+      delete state.heldSince;
+    }
+    if (bound) {
+      state.counts.bound_reached += 1;
+      log(`Olympus engine: ${work} reached the bound ${seconds(waitedMs)} s after first standing back (${state.reason}); runs ${seconds(shareMs)} s before standing back again.`);
+      delete state.waitSince;
+      state.shareUntil = at + shareMs;
+      return "share";
+    }
+    if (!reason)
+      return "idle";
+    state.waitSince ??= at;
+    if (state.heldSince === undefined) {
+      state.heldSince = at;
+      state.reason = reason;
+      state.counts.holds += 1;
+      log(`Olympus engine: ${work} stands back for the owner's Ask (${reason}).`);
+    }
+    return "hold";
+  }
   return {
-    holds(work) {
-      const at = now();
-      let reason;
-      try {
-        reason = options.reason();
-      } catch {
-        reason = undefined;
-      }
-      let state = states.get(work);
-      if (!reason) {
-        if (state?.since !== undefined) {
-          state.counts.held_ms += at - state.since;
-          log(`Olympus engine: ${work} resumes after standing back ${seconds(at - state.since)} s (${state.reason}).`);
-          state.since = undefined;
-        }
-        if (state)
-          state.shareUntil = undefined;
-        return false;
-      }
-      if (!state)
-        states.set(work, state = { counts: { holds: 0, held_ms: 0, bound_reached: 0 } });
-      if (state.shareUntil !== undefined && at < state.shareUntil)
-        return false;
-      state.shareUntil = undefined;
-      if (state.since === undefined) {
-        state.since = at;
-        state.reason = reason;
-        state.counts.holds += 1;
-        log(`Olympus engine: ${work} stands back for the owner's Ask (${reason}).`);
-        return true;
-      }
-      if (at - state.since >= maxMs) {
-        state.counts.held_ms += at - state.since;
-        state.counts.bound_reached += 1;
-        log(`Olympus engine: ${work} stood back ${seconds(at - state.since)} s (${state.reason}); runs ${seconds(shareMs)} s before standing back again.`);
-        state.since = undefined;
-        state.shareUntil = at + shareMs;
-        return false;
-      }
-      return true;
-    },
+    turn,
+    holds: (work) => turn(work) === "hold",
     counts() {
       const at = now();
       return Object.fromEntries([...states].map(([work, state]) => [work, {
         ...state.counts,
-        held_ms: state.counts.held_ms + (state.since !== undefined ? at - state.since : 0),
-        holding: state.since !== undefined,
-        ...state.since !== undefined && state.reason ? { reason: state.reason } : {}
+        held_ms: state.counts.held_ms + (state.heldSince !== undefined ? at - state.heldSince : 0),
+        holding: state.heldSince !== undefined,
+        ...state.heldSince !== undefined && state.reason ? { reason: state.reason } : {}
       }]));
     }
   };
@@ -279823,7 +279900,8 @@ async function main() {
   const remoteOwnerBusy = (resource) => remoteOwnerMarks.busy(resource);
   let statusRecount;
   const standBack = createStandBack({
-    reason: () => ownerAskReason(ownerQuestions, () => remoteOwnerBusy(OWNER_QUESTION_RESOURCE))
+    reason: () => ownerAskReason(ownerQuestions, () => remoteOwnerBusy(OWNER_QUESTION_RESOURCE)),
+    idleWindow: () => ownerIdleWindow(ownerQuestions, remoteOwnerMarks.busySince(OWNER_QUESTION_RESOURCE), remoteOwnerMarks.lastEndedAt(OWNER_QUESTION_RESOURCE))
   });
   setVectorDigestBackfillHold(() => standBack.holds("digest"));
   let recencyIndexMaintenanceReady = false;
@@ -283140,7 +283218,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       }
     } : {},
     connectorStores,
-    refreshConnectorStores: () => mountConfiguredSourceStores(),
+    refreshConnectorStores: mountConfiguredSourceStores,
     revokeSourceReads,
     searchableCorpusIds: new Set(sourceCorpusRegistry.ids("search")),
     connectorStoreTierSiblings: (corpusId) => [
@@ -284492,8 +284570,9 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     ...snifferEnv.concurrentCalls !== undefined ? { concurrentCalls: snifferEnv.concurrentCalls } : snifferLane.kind === "tinfoil" ? { concurrentCalls: 4 } : snifferLane.kind === "venice" ? { concurrentCalls: DEFAULT_VENICE_JUDGE_CONCURRENT_CALLS } : {},
     ...snifferEnv.maxCallsPerDay !== undefined ? { maxCallsPerDay: snifferEnv.maxCallsPerDay } : snifferLane.kind === "local" || !judgeSpending.status().uncapped ? { maxCallsPerDay: Number.MAX_SAFE_INTEGER } : {},
     answersInFlight: () => snifferResource !== undefined && (localModelActivity.busyExcept(snifferResource, "tier_sniffer") || remoteOwnerBusy(snifferResource)),
-    ownerInFlight: () => standBack.holds("judge") || snifferResource !== undefined && (localModelActivity.ownerInFlight(snifferResource) || remoteOwnerBusy(snifferResource)),
-    shouldYield: () => chunkJudgmentsInFlight > 0 || (localPrivateAnswers?.overdue() ?? false) || standBack.holds("judge"),
+    ownerAskTurn: () => standBack.turn("judge"),
+    ownerInFlight: () => snifferResource !== undefined && (localModelActivity.ownerInFlight(snifferResource) || remoteOwnerBusy(snifferResource)),
+    shouldYield: () => chunkJudgmentsInFlight > 0 || (localPrivateAnswers?.overdue() ?? false),
     pacing: localPacer,
     breakerOpen: () => secureAnalystPoolState.isBreakerOpen("secure_local", snifferLane.profileId),
     log: (line) => console.log(line),
@@ -284720,8 +284799,10 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         owner_busy: (change) => {
           if (!remoteOwnerMarks.apply(change))
             return { busy: remoteOwnerMarks.busy(change.resource), stale: true };
-          if (change.resource === snifferResource || change.resource === OWNER_QUESTION_RESOURCE && standBack.holds("judge"))
+          if (change.resource === snifferResource)
             tierSniffer?.preempt();
+          else if (change.resource === OWNER_QUESTION_RESOURCE)
+            tierSniffer?.preempt("question");
           return { busy: true };
         },
         owner_idle: (change) => {

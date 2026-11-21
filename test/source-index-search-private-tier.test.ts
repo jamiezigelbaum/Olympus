@@ -172,8 +172,8 @@ describe('source_index_search and rows Private by their own tier', () => {
   });
 
   test.each([
-    ['caller', 'first'], ['worker', 'first'], ['caller', 'sibling'], ['worker', 'sibling'],
-  ])('all-sources search honors the %s opt-out on the %s tier', async (authority, position) => {
+    ['caller', 'first'], ['worker', 'first'], ['caller', 'sibling'], ['worker', 'sibling'], ['unmounted', 'first'],
+  ])('all-sources search honors %s availability on the %s tier', async (authority, position) => {
     const config = defaultConfig();
     const internalId = 'internal.drive.docs';
     const secureId = 'secure_local.drive.docs';
@@ -194,23 +194,43 @@ describe('source_index_search and rows Private by their own tier', () => {
         { selected_item: { provider_item_id: 'deed', title: 'orchard-deed.md' } },
       ]);
       const reads: string[] = [];
+      const siblingLookups: string[] = [];
+      const refreshes: string[][] = [];
       const worker = createEmailSourceWorker({
-        connectorStores: [internal, secure],
-        connectorStoreTierSiblings: id => [internalId, secureId].filter(sibling => sibling !== id),
+        refreshConnectorStores: ids => { if (ids) refreshes.push([...ids]); },
+        connectorStores: authority === 'unmounted' ? [secure] : [internal, secure],
+        connectorStoreTierSiblings: id => {
+          siblingLookups.push(id);
+          return [internalId, secureId].filter(sibling => sibling !== id);
+        },
         searchableCorpusIds: new Set(authority === 'worker' ? [allowed] : [internalId, secureId]),
         connectorStoreReadScope: holder => { reads.push(holder.corpusId); return { allowed: true }; },
       });
+      const requests: unknown[] = [];
       const context = createInProcessOperationContext({
-        config, sourceIndexReadEnabled: true, workerFetch: worker.fetch,
+        config, sourceIndexReadEnabled: true,
+        workerFetch: async request => {
+          requests.push(await request.clone().json());
+          return worker.fetch(request);
+        },
         caller: { surface: 'remote', displayName: 'fixture' },
       });
       const operation = findOperationByName('source_index_search')!;
       const result = await operation.handler(context, { query: 'orchard' });
+      expect(requests).toEqual([{
+        query: 'orchard', personal_names_only: true, corpus_ids: authority === 'caller' ? [allowed] : [internalId, secureId],
+      }]);
+      expect(siblingLookups).toEqual([]);
+      expect(refreshes).toEqual([authority === 'unmounted' ? [internalId, secureId] : [allowed]]);
       expect(result).toMatchObject({
         corpus_id: allowed, corpus_ids: [allowed],
-        audit: { searched_corpora: [allowed], queries_attempted: 1, items_returned: 1 },
+        audit: {
+          searched_corpora: [allowed], skipped_corpora: authority === 'caller' ? [] : [optedOut],
+          queries_attempted: 1, items_returned: 1,
+        },
         hits: [expectedHit],
       });
+      expect(result).not.toHaveProperty('coverage_notes');
       expect(await operation.handler(context, { query: 'orchard', corpus_id: authority === 'worker' ? optedOut : allowed })).toMatchObject({
         audit: { queries_attempted: 1, items_returned: 1 },
         hits: [expectedHit],
@@ -225,6 +245,45 @@ describe('source_index_search and rows Private by their own tier', () => {
       secure.close();
       ledger.close();
     }
+  });
+
+  test('the default all-sources page can return a hit from each requested tier', async () => {
+    const config = defaultConfig();
+    const ids = ['internal.drive.docs', 'secure_local.drive.docs'] as const;
+    config.sourceIndex.corpusRegistry.corpora = config.sourceIndex.corpusRegistry.corpora.filter(c => ids.some(id => id === c.corpusId));
+    const ledger = new TierLedger({ dbPath: ':memory:' });
+    const personal = await store(ids[0], 'internal', [INTERNAL_FIXTURES[0]!]);
+    const secure = await store(ids[1], 'secure_local', [{ id: 'deed', name: 'orchard-deed.md', text: 'Orchard deed.', tier: 'S4' }], ledger);
+    try {
+      const context = createInProcessOperationContext({
+        config, sourceIndexReadEnabled: true, workerFetch: createEmailSourceWorker({ connectorStores: [personal, secure] }).fetch,
+        caller: { surface: 'remote', displayName: 'fixture' },
+      });
+      expect(await findOperationByName('source_index_search')!.handler(context, { query: 'orchard' })).toMatchObject({
+        hits: ids.map(corpus_id => ({ corpus_id, selected_item: { corpus_id } })),
+        audit: { searched_corpora: [...ids], skipped_corpora: [], queries_attempted: 2, items_returned: 2 },
+      });
+    } finally {
+      personal.close();
+      secure.close();
+      ledger.close();
+    }
+  });
+
+  test('an entirely unmounted search returns empty hits and accounts for every requested corpus', async () => {
+    const config = defaultConfig();
+    const ids = ['internal.drive.docs', 'secure_local.drive.docs'];
+    config.sourceIndex.corpusRegistry.corpora = config.sourceIndex.corpusRegistry.corpora.filter(c => ids.includes(c.corpusId));
+    const context = createInProcessOperationContext({
+      config, sourceIndexReadEnabled: true, workerFetch: createEmailSourceWorker({ connectorStores: [] }).fetch,
+      caller: { surface: 'remote', displayName: 'fixture' },
+    });
+    const result = await findOperationByName('source_index_search')!.handler(context, { query: 'orchard' });
+    expect(result).toMatchObject({
+      corpus_ids: [], hits: [], audit: { searched_corpora: [], skipped_corpora: ids, queries_attempted: 0, latency_ms: 0 },
+    });
+    expect(result).not.toHaveProperty('corpus_id');
+    expect(result).not.toHaveProperty('coverage_notes');
   });
 
   test.each(['legacy placement', 'owner names verdict'] as const)('a Personal child omits every copy of its Private parent’s identifiers (%s)', async mode => {
