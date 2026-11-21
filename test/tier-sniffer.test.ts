@@ -34,6 +34,7 @@ import {
 } from '../src/workers/classification/sniffer-lane.ts';
 import { SnifferCallBudget, runSnifferPass } from '../src/workers/classification/sniffer-resolver.ts';
 import { BUILT_IN_SNIFFER_LANE, resolveTierSnifferRuntime } from '../src/workers/classification/built-in-sniffer.ts';
+import { createStandBack, STAND_BACK_MAX_MS, STAND_BACK_SHARE_MS } from '../src/workers/engine/stand-back.ts';
 import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
 import { archivePrivateModelFromSniffer } from '../src/workers/archive-import/dashboard.ts';
 import { TierSnifferStore, snifferMaterialHash } from '../src/workers/classification/sniffer-store.ts';
@@ -837,6 +838,56 @@ describe('bounds and the owner-approval gate', () => {
       expect(await service.runOnce()).toMatchObject({ state: 'ran', report: { calls: 0 } });
       service.stop();
     } finally {
+      installed.close();
+      ledger.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('pending questions get a judge call within 75 s while short owner gaps and model contention continue', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-tier-sniffer-share-'));
+    const installed = new InstalledTierClassification({ env: {}, lane: LOCAL_LANE });
+    const ledger = new TierLedger({ dbPath: join(dir, 'store.tier-ledger.sqlite') });
+    const clock = createTestClock(0);
+    const ownerBusy = () => clock.now() % 1_800 < 1_500;
+    const standBack = createStandBack({
+      now: clock.now, reason: () => ownerBusy() ? 'question in the front' : undefined, log: () => {},
+    });
+    const model = spyModel((request, items) => {
+      // Another owner question starts on the same resource during the call.
+      clock.set(clock.now() - clock.now() % 1_800 + 1_800);
+      service.preempt();
+      request.signal?.throwIfAborted();
+      return verdictsFor(items, { tier: 'private', category: 'health', confidence: 0.95 });
+    });
+    const classificationLedgerPath = join(dir, 'classification-ledger.jsonl');
+    const service = new TierSnifferService({
+      installed, lane: LOCAL_LANE, model, now: clock.date, classificationLedgerPath,
+      stores: () => [{ dbPath: join(dir, 'store.sqlite') }],
+      ownerAskTurn: () => standBack.turn('judge'), answersInFlight: () => true, ownerInFlight: ownerBusy,
+    });
+    try {
+      await appendClassificationLedgerEntry(classificationLedgerPath, {
+        recorded_at: clock.date().toISOString(), kind: 'classifier_model_decision', what: 'Approved the fixture sniffer.',
+        model_id: LOCAL_LANE.modelId, prompt_version: SNIFFER_PROMPT_VERSION, lane: LOCAL_LANE.kind, profile_id: LOCAL_LANE.profileId,
+        approved_by: 'owner', status: 'complete',
+      });
+      for (let n = 1; n <= 4; n++) recordFlagged(ledger, installed.snifferStoreForLedger(ledger.dbPath), n, `trip plan ${n}`);
+      for (let start = 0; start < STAND_BACK_MAX_MS + STAND_BACK_SHARE_MS; start += 1_800) {
+        for (const at of [start, start + 1_500]) {
+          clock.set(at);
+          const tick = await service.runOnce();
+          if (model.requests.length) {
+            expect(tick).toMatchObject({ state: 'ran', report: { failedCalls: 0, verdictsApplied: 4 } });
+            expect(clock.now()).toBeLessThanOrEqual(STAND_BACK_MAX_MS + STAND_BACK_SHARE_MS);
+            return;
+          }
+          expect(tick).toMatchObject({ state: 'ran', report: { calls: 0, stoppedBy: 'yield' } });
+        }
+      }
+      throw new Error('No judge call within the first share');
+    } finally {
+      service.stop();
       installed.close();
       ledger.close();
       rmSync(dir, { recursive: true, force: true });

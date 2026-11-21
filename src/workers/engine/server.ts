@@ -6944,9 +6944,10 @@ export async function main(): Promise<void> {
         ...(snifferEnv.maxCallsPerDay !== undefined ? { maxCallsPerDay: snifferEnv.maxCallsPerDay } : snifferLane.kind === 'local' || !judgeSpending.status().uncapped ? { maxCallsPerDay: Number.MAX_SAFE_INTEGER } : {}),
         // Its own parallel calls are not answers: only someone else's call holds it back.
         answersInFlight: () => snifferResource !== undefined && (localModelActivity.busyExcept(snifferResource, 'tier_sniffer') || remoteOwnerBusy(snifferResource)),
-        ownerInFlight: () => standBack.holds('judge') || (snifferResource !== undefined && (localModelActivity.ownerInFlight(snifferResource) || remoteOwnerBusy(snifferResource))),
+        ownerAskTurn: () => standBack.turn('judge'),
+        ownerInFlight: () => snifferResource !== undefined && (localModelActivity.ownerInFlight(snifferResource) || remoteOwnerBusy(snifferResource)),
         // A ready Inbox question stops the pass, so its answer runs, then classification resumes.
-        shouldYield: () => chunkJudgmentsInFlight > 0 || (localPrivateAnswers?.overdue() ?? false) || standBack.holds('judge'),
+        shouldYield: () => chunkJudgmentsInFlight > 0 || (localPrivateAnswers?.overdue() ?? false),
         // The service applies it to the built-in judge only, never Venice or a remote judge.
         pacing: localPacer,
         breakerOpen: () => secureAnalystPoolState.isBreakerOpen('secure_local', snifferLane.profileId),

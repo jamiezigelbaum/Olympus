@@ -1,3 +1,4 @@
+import type { StandBackTurn } from '../engine/stand-back.ts';
 import type { SnifferQuestion } from './sniffer-store.ts';
 import { emptyTierMoveTimings, moveTieredItemsLowering, flushTierMoveNotes, type TierMoveOptions, type TierMoveResult } from '../connector-store/tier-move.ts';
 import { controlPathHeadroom, ingestionTurn } from '../control-path-headroom.ts';
@@ -205,6 +206,8 @@ export interface TierSnifferServiceOptions {
   concurrentCalls?: number;
   passTimeMs?: number;
   maxCallsPerDay?: number;
+  /** Shared owner Ask scheduling decision, including the protected background share. */
+  ownerAskTurn?: () => StandBackTurn;
   /** Any other reason to yield the private pool (the pass also yields to `answersInFlight` and `breakerOpen`). */
   shouldYield?: () => boolean;
   /**
@@ -775,8 +778,8 @@ export class TierSnifferService {
    * records anything in the answer pool's breakers.
    */
   preempt(): void {
-    // The owner's own answer ends a fair turn too, lowering slice included:
-    // only other answers are outlasted, never the owner (#1030 review).
+    if (this.options.ownerAskTurn?.() === 'share') return;
+    // Outside the protected share, owner calls end a fair turn against other answers.
     this.fairTurn = false;
     this.yieldingSinceMs = undefined;
     // An arrival's turn is one short call: it finishes, then the pass ends.
@@ -1164,7 +1167,9 @@ export class TierSnifferService {
   get hasPriority(): boolean {
     if (!this.running && this.continuation === undefined) return false;
     try {
-      return this.options.shouldYield?.() !== true;
+      const turn = this.options.ownerAskTurn?.();
+      if (turn === 'share') return true;
+      return turn !== 'hold' && this.options.shouldYield?.() !== true;
     } catch {
       return true;
     }
@@ -1480,7 +1485,9 @@ export class TierSnifferService {
   }
 
   private holdsBack(): boolean {
-    let busy = this.answering();
+    const turn = this.options.ownerAskTurn?.();
+    if (turn === 'share') { this.lastYieldReason = undefined; return false; }
+    let busy = turn === 'hold' || this.answering();
     this.lastYieldReason = busy ? 'answer' : undefined;
     if (!busy) {
       try {
@@ -1498,7 +1505,7 @@ export class TierSnifferService {
     }
     // A long owner call still running ends a turn and holds the wait at its
     // start, as preempt() does when that call begins (#1031).
-    if (this.ownerAnswering()) {
+    if (turn === 'hold' || this.ownerAnswering()) {
       this.lastYieldReason = 'owner_answer';
       this.fairTurn = false;
       this.yieldingSinceMs = undefined;

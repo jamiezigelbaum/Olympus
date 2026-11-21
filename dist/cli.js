@@ -249909,6 +249909,8 @@ class TierSnifferService {
       this.closeLedgers();
   }
   preempt() {
+    if (this.options.ownerAskTurn?.() === "share")
+      return;
     this.fairTurn = false;
     this.yieldingSinceMs = undefined;
     if (this.arrivalTurn)
@@ -250255,7 +250257,10 @@ class TierSnifferService {
     if (!this.running && this.continuation === undefined)
       return false;
     try {
-      return this.options.shouldYield?.() !== true;
+      const turn = this.options.ownerAskTurn?.();
+      if (turn === "share")
+        return true;
+      return turn !== "hold" && this.options.shouldYield?.() !== true;
     } catch {
       return true;
     }
@@ -250531,7 +250536,12 @@ class TierSnifferService {
     }
   }
   holdsBack() {
-    let busy = this.answering();
+    const turn = this.options.ownerAskTurn?.();
+    if (turn === "share") {
+      this.lastYieldReason = undefined;
+      return false;
+    }
+    let busy = turn === "hold" || this.answering();
     this.lastYieldReason = busy ? "answer" : undefined;
     if (!busy) {
       try {
@@ -250549,7 +250559,7 @@ class TierSnifferService {
         this.yieldingSinceMs = undefined;
       return false;
     }
-    if (this.ownerAnswering()) {
+    if (turn === "hold" || this.ownerAnswering()) {
       this.lastYieldReason = "owner_answer";
       this.fairTurn = false;
       this.yieldingSinceMs = undefined;
@@ -253166,55 +253176,65 @@ function createStandBack(options) {
   const shareMs = options.shareMs ?? STAND_BACK_SHARE_MS;
   const states = new Map;
   const seconds = (ms) => Math.round(ms / 1000);
+  function turn(work) {
+    const at = now();
+    let state = states.get(work);
+    if (state?.shareUntil !== undefined && at < state.shareUntil)
+      return "share";
+    let reason;
+    try {
+      reason = options.reason();
+    } catch {
+      reason = undefined;
+    }
+    if (!state) {
+      if (!reason)
+        return "idle";
+      states.set(work, state = { counts: { holds: 0, held_ms: 0, bound_reached: 0 } });
+    }
+    if (state.idleSince !== undefined && at - state.idleSince >= shareMs)
+      delete state.waitSince;
+    const waitedMs = state.waitSince === undefined ? 0 : at - state.waitSince;
+    const bound = state.waitSince !== undefined && waitedMs >= maxMs;
+    if (state.heldSince !== undefined && (!reason || bound)) {
+      const heldMs = at - state.heldSince;
+      state.counts.held_ms += heldMs;
+      if (!bound)
+        log(`Olympus engine: ${work} resumes after standing back ${seconds(heldMs)} s (${state.reason}).`);
+      delete state.heldSince;
+    }
+    if (bound) {
+      state.counts.bound_reached += 1;
+      log(`Olympus engine: ${work} reached the bound ${seconds(waitedMs)} s after first standing back (${state.reason}); runs ${seconds(shareMs)} s before standing back again.`);
+      delete state.waitSince;
+      delete state.idleSince;
+      state.shareUntil = at + shareMs;
+      return "share";
+    }
+    if (!reason) {
+      state.idleSince ??= at;
+      return "idle";
+    }
+    delete state.idleSince;
+    state.waitSince ??= at;
+    if (state.heldSince === undefined) {
+      state.heldSince = at;
+      state.reason = reason;
+      state.counts.holds += 1;
+      log(`Olympus engine: ${work} stands back for the owner's Ask (${reason}).`);
+    }
+    return "hold";
+  }
   return {
-    holds(work) {
-      const at = now();
-      let reason;
-      try {
-        reason = options.reason();
-      } catch {
-        reason = undefined;
-      }
-      let state = states.get(work);
-      if (!reason) {
-        if (state?.since !== undefined) {
-          state.counts.held_ms += at - state.since;
-          log(`Olympus engine: ${work} resumes after standing back ${seconds(at - state.since)} s (${state.reason}).`);
-          state.since = undefined;
-        }
-        if (state)
-          state.shareUntil = undefined;
-        return false;
-      }
-      if (!state)
-        states.set(work, state = { counts: { holds: 0, held_ms: 0, bound_reached: 0 } });
-      if (state.shareUntil !== undefined && at < state.shareUntil)
-        return false;
-      state.shareUntil = undefined;
-      if (state.since === undefined) {
-        state.since = at;
-        state.reason = reason;
-        state.counts.holds += 1;
-        log(`Olympus engine: ${work} stands back for the owner's Ask (${reason}).`);
-        return true;
-      }
-      if (at - state.since >= maxMs) {
-        state.counts.held_ms += at - state.since;
-        state.counts.bound_reached += 1;
-        log(`Olympus engine: ${work} stood back ${seconds(at - state.since)} s (${state.reason}); runs ${seconds(shareMs)} s before standing back again.`);
-        state.since = undefined;
-        state.shareUntil = at + shareMs;
-        return false;
-      }
-      return true;
-    },
+    turn,
+    holds: (work) => turn(work) === "hold",
     counts() {
       const at = now();
       return Object.fromEntries([...states].map(([work, state]) => [work, {
         ...state.counts,
-        held_ms: state.counts.held_ms + (state.since !== undefined ? at - state.since : 0),
-        holding: state.since !== undefined,
-        ...state.since !== undefined && state.reason ? { reason: state.reason } : {}
+        held_ms: state.counts.held_ms + (state.heldSince !== undefined ? at - state.heldSince : 0),
+        holding: state.heldSince !== undefined,
+        ...state.heldSince !== undefined && state.reason ? { reason: state.reason } : {}
       }]));
     }
   };
@@ -283921,8 +283941,9 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     ...snifferEnv.concurrentCalls !== undefined ? { concurrentCalls: snifferEnv.concurrentCalls } : snifferLane.kind === "tinfoil" ? { concurrentCalls: 4 } : snifferLane.kind === "venice" ? { concurrentCalls: DEFAULT_VENICE_JUDGE_CONCURRENT_CALLS } : {},
     ...snifferEnv.maxCallsPerDay !== undefined ? { maxCallsPerDay: snifferEnv.maxCallsPerDay } : snifferLane.kind === "local" || !judgeSpending.status().uncapped ? { maxCallsPerDay: Number.MAX_SAFE_INTEGER } : {},
     answersInFlight: () => snifferResource !== undefined && (localModelActivity.busyExcept(snifferResource, "tier_sniffer") || remoteOwnerBusy(snifferResource)),
-    ownerInFlight: () => standBack.holds("judge") || snifferResource !== undefined && (localModelActivity.ownerInFlight(snifferResource) || remoteOwnerBusy(snifferResource)),
-    shouldYield: () => chunkJudgmentsInFlight > 0 || (localPrivateAnswers?.overdue() ?? false) || standBack.holds("judge"),
+    ownerAskTurn: () => standBack.turn("judge"),
+    ownerInFlight: () => snifferResource !== undefined && (localModelActivity.ownerInFlight(snifferResource) || remoteOwnerBusy(snifferResource)),
+    shouldYield: () => chunkJudgmentsInFlight > 0 || (localPrivateAnswers?.overdue() ?? false),
     pacing: localPacer,
     breakerOpen: () => secureAnalystPoolState.isBreakerOpen("secure_local", snifferLane.profileId),
     log: (line) => console.log(line),

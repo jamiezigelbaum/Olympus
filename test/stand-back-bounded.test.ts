@@ -5,7 +5,7 @@
 import { describe, expect, test } from 'bun:test';
 import { storeReadHasPriority, withStoreReadPriority } from '../src/core/store-reclaim-admission.ts';
 import { createStandBack, ownerAskReason, STAND_BACK_MAX_MS, STAND_BACK_SHARE_MS } from '../src/workers/engine/stand-back.ts';
-import { waitFor } from './helpers/test-clock.ts';
+import { createTestClock, waitFor } from './helpers/test-clock.ts';
 
 describe('stand-back for the owner\'s Ask', () => {
   test('a ten-minute background lease plus an owner asking every 10 s still leaves imports their share', async () => {
@@ -43,6 +43,50 @@ describe('stand-back for the owner\'s Ask', () => {
       releaseLease?.();
       await lease;
     }
+  });
+
+  test('each kind gets a full uninterrupted share every 75 s across five minutes of short idle gaps', () => {
+    const clock = createTestClock(0);
+    const standBack = createStandBack({
+      now: clock.now, reason: () => clock.now() % 1_800 < 1_500 ? 'question in the front' : undefined, log: () => {},
+    });
+    const window = STAND_BACK_MAX_MS + STAND_BACK_SHARE_MS;
+    for (let start = 0; start < 300_000; start += window) {
+      const kinds = ['import', 'embed', 'judge', 'digest', 'status'] as const;
+      const run = new Map<string, number>();
+      const longest = new Map<string, number>();
+      for (let at = start; at < start + window; at += 100) {
+        clock.set(at);
+        for (const kind of kinds) {
+          const duration = standBack.holds(kind) ? 0 : (run.get(kind) ?? 0) + 100;
+          run.set(kind, duration);
+          longest.set(kind, Math.max(longest.get(kind) ?? 0, duration));
+        }
+      }
+      for (const kind of kinds) expect(longest.get(kind)).toBeGreaterThanOrEqual(STAND_BACK_SHARE_MS);
+    }
+  });
+
+  test('idle resumes immediately and a full idle share gives the next Ask its full bound', () => {
+    const clock = createTestClock(0);
+    let busy = false;
+    const standBack = createStandBack({ now: clock.now, reason: () => busy ? 'question in the front' : undefined, log: () => {} });
+    expect(standBack.holds('judge')).toBe(false);
+    busy = true;
+    expect(standBack.holds('judge')).toBe(true);
+    clock.set(STAND_BACK_MAX_MS - 1);
+    busy = false;
+    expect(standBack.holds('judge')).toBe(false);
+    expect(standBack.counts().judge).toMatchObject({ holding: false, held_ms: STAND_BACK_MAX_MS - 1 });
+    const nextAsk = clock.now() + STAND_BACK_SHARE_MS;
+    clock.set(nextAsk);
+    busy = true;
+    expect(standBack.holds('judge')).toBe(true);
+    clock.set(nextAsk + STAND_BACK_MAX_MS - 1);
+    expect(standBack.holds('judge')).toBe(true);
+    clock.set(nextAsk + STAND_BACK_MAX_MS);
+    expect(standBack.holds('judge')).toBe(false);
+    expect(standBack.counts().judge).toMatchObject({ holds: 2, bound_reached: 1 });
   });
 
   test('each kind of work keeps its own bound', () => {
