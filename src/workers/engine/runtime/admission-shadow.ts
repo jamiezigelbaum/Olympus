@@ -8,7 +8,7 @@ import type { StoreEmbeddingScope } from '../../connector-store/embedding-plan.t
 import type { EmbeddingReadScope } from '../../connector-store/embedding-scope.ts';
 import type { ConnectorStoreSearchFilters, ConnectorStoreStatusScope } from '../../connector-store/local-index.ts';
 
-type Stage = 'search' | 'answer' | 'extract' | 'embed' | 'manual_embed' | 'count' | 'backlog';
+type ScopeStage = 'search' | 'extract' | 'embed' | 'manual_embed' | 'count' | 'backlog';
 interface Population {
   admitted: boolean;
   accountScope?: string | undefined;
@@ -37,7 +37,7 @@ function population(verdict: AdmissionVerdict, provider: string): Population {
 
 export interface AdmissionDisagreement {
   corpusId: string;
-  stage: Stage;
+  stage: ScopeStage | ReadStage;
   layer: AdmissionContext['layer'];
   serving: boolean;
   shadow: boolean;
@@ -60,11 +60,14 @@ export function compareAdmissionScopes(input: {
   status: ConnectorStoreStatusScope;
   // The shared extraction queue's content check, when this corpus participates.
   extractionRead?: ReturnType<EmbeddingReadScope>;
+  // Optional observations from completed reads. Ask has its own adapter and
+  // hydration boundaries, so a search scope alone says nothing about its rows.
+  reads?: readonly AdmissionReadObservation[];
 }, log: (event: AdmissionDisagreement) => void = event => console.warn(JSON.stringify({ event: 'admission_disagreement', ...event }))): void {
   const { corpus, definition, read, status } = input;
   const facts = mountedStoreFacts(corpus, definition, input.ready);
-  function compare(stage: Stage, layer: AdmissionContext['layer'], serving: Population) {
-    const processing = stage !== 'search' && stage !== 'answer' && stage !== 'extract';
+  function compare(stage: ScopeStage, layer: AdmissionContext['layer'], serving: Population) {
+    const processing = stage !== 'search' && stage !== 'extract';
     const verdict = evaluate({
       caller: 'owner', account: input.account, authority: processing ? input.processingAuthority : input.readAuthority,
       purpose: stage === 'backlog' || stage === 'manual_embed' ? 'embed' : stage, layer,
@@ -91,7 +94,6 @@ export function compareAdmissionScopes(input: {
     const actual = read.allowed ? { admitted: layer === 'names' || read.contentAllowed === true, accountScope: read.accountScope,
       filters: layer === 'names' ? read.filters : read.contentFilters } : { admitted: false };
     compare('search', layer, actual);
-    compare('answer', layer, actual);
     compare('count', layer, { admitted: status.itemsAllowed !== false && (layer === 'names' || status.contentAllowed !== false),
       accountScope: status.accountScope, filters: layer === 'names' ? status.itemFilters : status.contentFilters,
       contentAfter: layer === 'content' ? status.contentNotBefore : undefined });
@@ -108,4 +110,35 @@ export function compareAdmissionScopes(input: {
   const backlog = status.embedding;
   compare('backlog', 'content', { admitted: backlog?.contentAllowed !== false, accountScope: backlog?.accountScope,
     filters: backlog?.contentFilters, held: backlog?.includeHeldForJudgment });
+  for (const read of input.reads ?? []) compareAdmissionRead({ ...read, corpusId: corpus.corpusId }, log);
+}
+
+export type ReadStage = 'search' | 'answer' | 'deep_read' | 'preview' | 'people_index';
+
+// Compare one fixture member at the delivery boundary. Identity travels with
+// each value, so swapped titles/passages cannot pass by matching a bag of text.
+// Never put the compared identities, names or passages in a diagnostic.
+export interface AdmissionReadValue {
+  identity: string;
+  value: string | null;
+}
+
+interface AdmissionReadObservation {
+  stage: ReadStage;
+  layer: AdmissionContext['layer'];
+  serving: readonly AdmissionReadValue[];
+  shadow: readonly AdmissionReadValue[];
+  reason: string;
+}
+
+export function compareAdmissionRead(input: AdmissionReadObservation & { corpusId: string },
+  log: (event: AdmissionDisagreement) => void): void {
+  const { corpusId, stage, layer, serving, shadow, reason } = input;
+  const keys = (rows: readonly AdmissionReadValue[]) => rows.map(row => row.identity).sort();
+  const values = (rows: readonly AdmissionReadValue[]) => rows.map(row => JSON.stringify([row.identity, row.value])).sort();
+  const differingConstraints: string[] = [];
+  if (!isDeepStrictEqual(keys(serving), keys(shadow))) differingConstraints.push('identity');
+  if (!isDeepStrictEqual(values(serving), values(shadow))) differingConstraints.push(layer === 'names' ? 'name' : 'text');
+  if (differingConstraints.length) log({ corpusId, stage, layer, reason, serving: serving.length > 0,
+    shadow: shadow.length > 0, differingConstraints });
 }

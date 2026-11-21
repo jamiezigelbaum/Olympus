@@ -1,20 +1,25 @@
 import { afterEach, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { appendFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { admitsSearchName, evaluate, mountedStoreFacts, type AdmissionContext } from '../src/core/admission.ts';
 import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
+import { compareProviderAccounts } from '../src/core/provider-account-identity.ts';
 import { listFileScopeSources } from '../src/core/file-scope-sources.ts';
 import { defaultMailScopeSelection, MAIL_SOURCE_SCOPE_CAPABILITY } from '../src/core/mail-source-scope.ts';
 import { mountedStoreSources } from '../src/core/olympus-layout.ts';
 import { createSourceCorpusRegistry, type SourceCorpusConfig } from '../src/core/source-corpus-registry.ts';
 import { connectThisComputerSource, disconnectThisComputerSource, readThisComputerHandles } from '../src/core/this-computer.ts';
 import { withArchiveImportCorpora } from '../src/workers/archive-import/store.ts';
+import { listedItems, fixtureLanes } from './helpers/admission-fixture.ts';
+import { LocalPeopleIndex, PEOPLE_INDEX_MIN_REBUILD_MS, PeopleIndexRefresher } from '../src/core/people-index.ts';
+import { readDeepReadSet } from '../src/workers/engine/runtime/deep-read-jobs.ts';
+import { getOwnerTierItem, ownerTierItemId, parseOwnerTierItemId } from '../src/workers/classification/tier-owner-items.ts';
+import type { SourceIndexSearchHit } from '../src/core/source-index/router.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 import { writeConnectedHandleRegistry, type ConnectedCredentialHandle } from '../src/workers/credential-broker/connected-handles.ts';
 import { readGmailRetainedAccountScope } from '../src/workers/email-source/gmail-status-scope.ts';
-import { compareAdmissionScopes, type AdmissionDisagreement } from '../src/workers/engine/runtime/admission-shadow.ts';
+import { compareAdmissionRead, compareAdmissionScopes, type AdmissionReadValue, type ReadStage, type AdmissionDisagreement } from '../src/workers/engine/runtime/admission-shadow.ts';
 import { corpusAdmissions, sourceAdmissionDefinitions } from '../src/core/source-admission-definitions.ts';
 import { createStoreEmbeddingScopeFor, createStoreScopes, registeredStoreReadScope } from '../src/workers/engine/runtime/store-scope-policies.ts';
 import {
@@ -86,8 +91,17 @@ const fileHomes = fileExtractionCorporaRoster({
     resolveCredentialHandle: () => undefined, resolveAccountScope: () => accountScope },
 });
 
-function fixture(corpus: SourceCorpusConfig, store: LocalConnectorStore, destination?: 'device') {
-  const dir = mkdtempSync(join(tmpdir(), 'olympus-admission-parity-'));
+// Google can rename a mailbox or reassign its address to a different subject.
+// Dropbox's account id and an Evernote account label compare whole.
+function fixtureOwner(provider: string, state: 'original' | 'same' | 'changed' = 'original') {
+  if (provider === 'gmail' || provider === 'google_drive') {
+    return `google-sub:${state === 'changed' ? 'second' : 'first'}.google:${state === 'same' ? 'renamed' : 'original'}`;
+  }
+  return `${provider === 'dropbox' ? 'dbid:' : 'account-'}${state === 'changed' ? 'second' : 'first'}`;
+}
+
+function fixture(corpus: SourceCorpusConfig, store: LocalConnectorStore, destination?: 'device', archiveOnly = false) {
+  const dir = mkdtempSync(join('/tmp', 'olympus-admission-parity-'));
   scratch.push(dir);
   const registryPath = join(dir, 'handles.json');
   const definition = folderSources.find(({ sourceId }) => sourceId === corpus.sourceId);
@@ -99,7 +113,7 @@ function fixture(corpus: SourceCorpusConfig, store: LocalConnectorStore, destina
     allowedCapabilities: [credentials.credentialCapability],
     scopes: [],
     accountRole: accountScope,
-    providerAccountId: `owner-${credentials.provider}`,
+    providerAccountId: fixtureOwner(credentials.provider),
     connectedAt,
   } : undefined;
   const historyOwner = handle?.providerAccountId;
@@ -107,7 +121,7 @@ function fixture(corpus: SourceCorpusConfig, store: LocalConnectorStore, destina
   process.env[registryEnv] = registryPath;
   const writeHandle = (connected: boolean) =>
     writeConnectedHandleRegistry({ version: 1, handles: connected && handle ? [handle] : [] }, registryPath);
-  writeHandle(true);
+  writeHandle(!archiveOnly);
   if (definition?.account === 'this_computer') connectThisComputerSource(registryPath, definition.sourceId, new Date(connectedAt));
   const authority = new FileSourceScopeAuthority({ registryPath, statePath: join(dir, 'approval.json') });
   const logs: AdmissionDisagreement[] = [];
@@ -122,13 +136,13 @@ function fixture(corpus: SourceCorpusConfig, store: LocalConnectorStore, destina
   };
   const serving = createStoreScopes(input);
   const offlineScope = createStoreEmbeddingScopeFor(input);
-  let connected = true;
+  let connected = !archiveOnly;
   const provider: SourceEmbeddingProvider = {
     provider: 'built-in', backend: 'local', modelId: 'fixture', configHash: 'fixture', epochId: 'fixture', dimension: 1,
     runsOnThisComputer: () => destination === 'device', async embed() { throw new Error('scope setup must not embed'); },
   };
   return {
-    logs, authority,
+    logs, authority, readScope,
     approve(state: 'ingest' | 'metadata_only' = 'ingest') {
       if (definition) {
         const current = authority.snapshot(corpus.sourceId);
@@ -170,12 +184,7 @@ function fixture(corpus: SourceCorpusConfig, store: LocalConnectorStore, destina
     blockRecovery() { ready = false; },
     statusScope: () => serving.statusScopeFor(store, provider),
     embeddingScope: () => serving.embeddingScopeFor(store, provider),
-    run() {
-      const search = readScope();
-      const answer = search;
-      const status = serving.statusScopeFor(store, provider);
-      const embedding = serving.embeddingScopeFor(store, provider);
-      const manual = offlineScope(store, provider);
+    observation() {
       const approval = definition && authority.snapshot(corpus.sourceId);
       const computer = definition?.account === 'this_computer' ? readThisComputerHandles(registryPath)[0] : undefined;
       const owner = computer?.providerAccountId ?? historyOwner;
@@ -190,28 +199,40 @@ function fixture(corpus: SourceCorpusConfig, store: LocalConnectorStore, destina
       const mail = isMail ? authority.mailSnapshot() : undefined;
       const observed = mail?.status === 'approved' && mail.accountGeneration
         ? gmailCursorConnectorIds(accountScope, { generation: mail.accountGeneration, revision: mail.revision }) : undefined;
-      const processingAuthority = mail ? {
+      const processingAuthority: AdmissionContext['authority'] = mail ? {
         epoch: mail.revision, accountScope, approved: mail.status === 'approved',
         owner: { id: connected ? handle?.providerAccountId : owner },
         ownershipUnproven: connected && !handle?.providerAccountId,
         ...(observed ? { observedUnder: observed.connectorId, previousObservedUnder: observed.previousId } : {}),
         ...(mail.mailScope?.contentAfter ? { contentAfter: mail.mailScope.contentAfter } : {}),
       } : readAuthority;
+      return { ready, account: { id: owner }, readAuthority, processingAuthority };
+    },
+    run() {
+      const search = readScope();
+      const status = serving.statusScopeFor(store, provider);
+      const embedding = serving.embeddingScopeFor(store, provider);
+      const manual = offlineScope(store, provider);
       compareAdmissionScopes({
-        corpus, definition: registration, ready, account: { id: owner }, readAuthority, processingAuthority,
+        corpus, definition: registration, ...this.observation(),
         destination: destination ?? 'private_cloud', canEmbedHeld: store.canEmbedHeld(provider),
         read: search, scheduled: embedding, manual, status,
         ...(fileHomes.some(home => home.corpusId === corpus.corpusId) ? { extractionRead: search } : {}),
       }, event => logs.push(event));
-      return { search, answer, status, embedding, manual };
+      return { search, status, embedding, manual };
     },
   };
+}
+
+function formatGap({ scenario, stage, layer, serving, shadow, reason, differingConstraints }: AdmissionDisagreement & { scenario: string }) {
+  return `${scenario} | ${stage}/${layer} | serving=${serving} shadow=${shadow} | ${reason} | ${differingConstraints.join(', ')}`;
 }
 
 const roster = [...corpusRoster, ...configuredMounts];
 test('each registered corpus has exactly one definition with the same owner', () => {
   expect(declarations.flatMap(source => source.corpora.map(id => [id, source.sourceId])).sort())
     .toEqual(roster.map(c => [c.corpusId, c.sourceId]).sort());
+  for (const id of Object.keys(KNOWN_PARITY_GAPS)) expect(roster.some(c => c.corpusId === id)).toBe(true);
   for (const source of folderSources) expect(declarations.some(d => d.sourceId === source.sourceId)).toBe(true);
 });
 
@@ -219,7 +240,7 @@ import KNOWN_PARITY_GAPS_JSON from './fixtures/admission-parity-known-gaps.json'
 const KNOWN_PARITY_GAPS = KNOWN_PARITY_GAPS_JSON as Record<string, string[]>;
 
 for (const corpus of roster) {
-  test(`${corpus.corpusId} agrees on read, scheduled and manual embedding, status and backlog`, () => {
+  test(`${corpus.corpusId} matches the admission parity ledger`, async () => {
     const f = fixture(corpus, open(corpus));
     const findings = [];
     for (const scenario of ['no approval', 'approved scope', 'revoked'] as const) {
@@ -236,10 +257,18 @@ for (const corpus of roster) {
       f.run();
       findings.push(...f.logs.map(event => ({ scenario: 'approved without a durable owner', ...event })));
     }
-    const lines = findings.map(({ scenario, stage, layer, serving, shadow, reason, differingConstraints }) =>
-      `${scenario} | ${stage}/${layer} | serving=${serving} shadow=${shadow} | ${reason} | ${differingConstraints.join(', ')}`);
+    if (corpus.corpusId === GMAIL_SECURE_CONNECTOR_CORPUS_ID) {
+      const retained = fixture(corpus, open(corpus), 'device');
+      retained.approve();
+      for (const [scenario, owner] of [['changed mailbox', fixtureOwner(corpus.provider, 'changed')], ['unproven mailbox', undefined]] as const) {
+        retained.reconnect(owner);
+        expect(retained.run().manual.allowed).toBe(false);
+        findings.push(...retained.logs.splice(0).map(event => ({ scenario, ...event })));
+      }
+    }
+    const lines = findings.map(formatGap);
+    lines.push(...await readParity(corpus));
     if (process.env.ADMISSION_PARITY_DUMP) {
-      const { appendFileSync } = require('node:fs') as typeof import('node:fs');
       appendFileSync(process.env.ADMISSION_PARITY_DUMP, `${JSON.stringify([corpus.corpusId, lines])}\n`);
     }
     // Known disagreements are the remaining per-source decisions in serving
@@ -257,7 +286,6 @@ test('local file cleanup recovery fails closed under a saved scope', () => {
   f.blockRecovery();
   expect(f.run()).toEqual({
     search: { allowed: false },
-    answer: { allowed: false },
     status: { itemsAllowed: false, contentAllowed: false, embedding: { contentAllowed: false } },
     embedding: { allowed: false, skipQueue: true },
     manual: { allowed: false, skipQueue: true },
@@ -354,26 +382,11 @@ test('A3: retained live and imported mail are in both the on-device embedding sc
     store.itemMatchesSearchFilters(`${accountScope}:${id}`, backlog.accountScope, backlog.contentFilters),
   ])).toEqual([[true, true], [true, true]]);
   expect(f.logs).toEqual([]);
-  f.reconnect(`owner-${mount.provider}`);
+  f.reconnect(fixtureOwner(mount.provider, 'same'));
   expect(f.authority.mailPolicyRef()).toBeUndefined();
   expect(f.authority.mailSnapshot().accountGeneration).not.toBe(ref.accountGeneration);
   expect(f.run().embedding.allowed).toBe(true);
   expect(f.logs).toEqual([]);
-});
-
-test.each([['different owner', 'different-owner'], ['unproven owner', undefined]] as const)(
-  'retained mail under a reconnected mailbox (%s)', (_scenario, owner) => {
-  const mount = corpusRoster.find(c => c.corpusId === GMAIL_SECURE_CONNECTOR_CORPUS_ID)!;
-  const f = fixture(mount, open(mount), 'device');
-  f.approve();
-  f.reconnect(owner);
-  expect(f.run().manual.allowed).toBe(false);
-  // Known gap, deferred to 1.6 (olympus-ops#236): serving still reads the
-  // Private mail store for Search and Ask after a different or unproven
-  // mailbox reconnects; the definition denies. Only those reads may differ.
-  const reason = owner === undefined ? 'account_unproven' : 'account_mismatch';
-  expect([...new Set(f.logs.map(event => `${event.stage}/${event.layer} serving=${event.serving} shadow=${event.shadow} ${event.reason}`))].sort())
-    .toEqual(['answer/content', 'answer/names', 'search/content', 'search/names'].map(stage => `${stage} serving=true shadow=false ${reason}`));
 });
 
 test('owner imports and privileged purposes are independent of a live folder approval', () => {
@@ -413,7 +426,7 @@ test('a remote scope is bound to its account and epoch, and privilege bypasses o
 });
 
 test('every extraction home matches the file, attachment, media and archive rosters', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'olympus-extraction-roster-'));
+  const dir = mkdtempSync(join('/tmp', 'olympus-extraction-roster-'));
   scratch.push(dir);
   const env = { HOME: dir, XDG_DATA_HOME: dir, OPENCLAW_STATE_DIR: dir };
   const evernote = createEvernoteRuntime({
@@ -556,10 +569,250 @@ test('parity detects changed values under identical filter keys without logging 
     destination: 'device', canEmbedHeld: false, read: { ...scope, contentAllowed: true, contentFilters: filters },
     scheduled: scope, manual: scope, status: { accountScope, itemFilters: filters, contentFilters: filters,
       embedding: { accountScope, contentFilters: filters } },
+    reads: [{ stage: 'answer', layer: 'content', serving: [], shadow: [{ identity: owner.id, value: 'passage' }], reason: 'retained' }],
   }, event => events.push(event));
-  expect(events).toHaveLength(9);
-  for (const event of events) expect(event.differingConstraints).toEqual(['sourceScopeFolderAnyKeys']);
+  expect(events).toHaveLength(8);
+  for (const event of events.slice(0, -1)) expect(event.differingConstraints).toEqual(['sourceScopeFolderAnyKeys']);
+  expect(events.at(-1)).toMatchObject({ stage: 'answer', differingConstraints: ['identity', 'text'] });
   for (const value of [owner.id, accountScope, ...filters.sourceScopeFolderAnyKeys, authority.selections[0]!.key]) {
     expect(JSON.stringify(events)).not.toContain(value);
+  }
+});
+
+type ReadFixture = ReturnType<typeof fixture>;
+
+interface Specimen {
+  raw: RawItem;
+  title: string;
+  text: string;
+  sender: string;
+  senderId: string;
+  folder: string;
+  observation: string;
+  provenance: 'live' | 'owner_import';
+  generation?: string;
+  revision?: string;
+}
+
+async function seedMember(c: SourceCorpusConfig, store: LocalConnectorStore, f: ReadFixture, folder: string,
+  provenance: Specimen['provenance'] = 'live', id = folder): Promise<Specimen> {
+  const { readAuthority, processingAuthority } = f.observation();
+  const account = readAuthority.accountScope ?? accountScope;
+  const title = `Orchard ${id}`;
+  const text = `The orchard passage belonging to ${id}.`;
+  const sender = `Sender ${id}`;
+  const senderId = `author-${id}`;
+  const raw: RawItem = {
+    identity: { family: c.family, provider: c.provider, accountScope: account, providerItemId: id, localItemId: `${account}:${id}`,
+      ...(c.family === 'chat' || c.family === 'email' ? { providerConversationId: 'fixture-thread' } : {}) },
+    mimeType: 'text/plain', content: { kind: 'text', text }, fetchedAt: connectedAt,
+    metadata: { title, pathDisplay: `/${folder}/document`, senderId, senderLabel: sender },
+  };
+  const observation = provenance === 'owner_import' ? 'archive.fixture' : processingAuthority.observedUnder ?? 'fixture';
+  const generation = readAuthority.generation;
+  const revision = readAuthority.epoch;
+  await store.syncFromConnector(listedItems(observation, [raw]), {
+    fetchContent: true, tierClassification: { sniffer: JUDGED_PERSONAL_SNIFFER },
+    ...(generation ? { sourceScopeObservation: () => ({ accountGeneration: generation, scopeRevision: revision, folderKeys: [folder] }) } : {}),
+  });
+  return { raw, text, title, sender, senderId, folder, observation, provenance, ...(generation ? { generation, revision } : {}) };
+}
+
+type Identity = Pick<RawItem['identity'], 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>;
+function memberKey(identity: Identity): string {
+  return JSON.stringify([identity.provider, identity.accountScope, identity.providerConversationId ?? '', identity.providerItemId]);
+}
+
+// Apply the shadow verdict to the seed manifest, independently of the serving
+// SQL, content provider and returned hits. A request folder bounds the whole Ask.
+function expectedMember(c: SourceCorpusConfig, f: ReadFixture, member: Specimen, stage: ReadStage,
+  layer: AdmissionContext['layer'], narrow: boolean) {
+  const def = declarations.find(d => d.sourceId === c.sourceId)!;
+  const observation = f.observation();
+  const authority: AdmissionContext['authority'] = def.liveScope ? observation.processingAuthority : observation.readAuthority;
+  const verdict = evaluate({
+    caller: 'owner', purpose: stage, destination: 'device', layer, account: observation.account, authority,
+    ...(narrow ? { requestScope: { matcher: 'path_prefix', value: '/selected' } as const } : {}),
+  }, { ...mountedStoreFacts(c, def, observation.ready), item: { tier: 'S3', provenance: member.provenance } });
+  if (!verdict.admitted) return { visible: false, reason: verdict.reason };
+  const scope = verdict.scope;
+  const key = scope?.matcher === 'path_prefix' ? `/${member.folder}` : member.folder;
+  const visible = (!scope?.request || key === scope.request.value)
+    && (!scope?.accountScope || member.raw.identity.accountScope === scope.accountScope)
+    && (!scope?.generation || scope.generation === member.generation)
+    && (!scope?.revision || scope.revision === member.revision)
+    && (!scope?.include || scope.include.includes(key)) && !scope?.exclude?.includes(key)
+    && (!(scope?.observedUnder || scope?.importPrefix) || member.observation === scope?.observedUnder
+      || member.observation === scope?.previousObservedUnder || (!!scope?.importPrefix && member.observation.startsWith(scope.importPrefix)));
+  return { visible, reason: visible ? verdict.reason : `outside_${verdict.reason}` };
+}
+
+async function readParity(c: SourceCorpusConfig, archiveOnly = false): Promise<string[]> {
+  const dir = mkdtempSync('/tmp/olympus-admission-rows-');
+  scratch.push(dir);
+  const dbPath = join(dir, 'items.sqlite');
+  const store = new LocalConnectorStore({ dbPath, corpusId: c.corpusId, family: c.family, trustDomain: c.trustDomain });
+  stores.push(store);
+  const f = fixture(c, store, 'device', archiveOnly);
+  const def = declarations.find(d => d.sourceId === c.sourceId)!;
+  const providerFolder = folderSources.some(s => s.sourceId === c.sourceId && s.account === 'provider_account');
+  const identityMatrix = (c.trustDomain === 'internal' || c.corpusId === GMAIL_SECURE_CONNECTOR_CORPUS_ID) && (def.liveScope || providerFolder);
+  if (!archiveOnly) f.approve();
+  const members = [await seedMember(c, store, f, 'selected', archiveOnly ? 'owner_import' : def.provenance)];
+  if (def.selection && !archiveOnly) {
+    members.push(await seedMember(c, store, f, 'names'), await seedMember(c, store, f, 'skipped'));
+  }
+  if (c.family === 'chat' && !archiveOnly) members.push(await seedMember(c, store, f, 'reply', def.provenance));
+  const principal = { provider: c.provider, accountScope: members[0]!.raw.identity.accountScope };
+  const lanesFor = fixtureLanes([store], f.readScope, () => principal);
+  const worker = createEmailSourceWorker({ connectorStores: [store], connectorStoreReadScope: f.readScope,
+    connectorStorePrincipals: new Map([[c.corpusId, principal]]) });
+  const index = new LocalPeopleIndex({ dbPath: join(dir, 'people.sqlite') });
+  let refreshTime = 0;
+  const people = new PeopleIndexRefresher(index, () => [store], { now: () => refreshTime });
+  const gaps: string[] = [];
+  async function sample(scenario: string, narrow = false, requestedAccount?: string) {
+    const query = 'orchard';
+    const lanes = lanesFor({ question: query, ...(requestedAccount ? { account: requestedAccount } : {}),
+      ...(narrow ? { approved_scope_key: `${c.provider}.${principal.accountScope}:/selected` } : {}) });
+    const adapter = lanes.adapters[c.corpusId];
+    const ask = adapter ? (await adapter({ query, corpus: lanes.registry.get(c.corpusId)!, maxResults: 20,
+      context: { allowedTrustDomains: [c.trustDomain] } })).hits : [];
+    const thread = members[0]!.raw.identity.providerConversationId;
+    const deepLanes = () => lanesFor({ question: '', retrieval_mode: 'hybrid' }, 'private_search');
+    const readSet = (id: RawItem['identity']) => readDeepReadSet({ whole: thread ? 'conversation' : 'item',
+      selected_item: { provider: id.provider, account_scope: id.accountScope, provider_item_id: id.providerItemId,
+        local_item_id: id.localItemId, corpus_id: c.corpusId, ...(thread ? { provider_conversation_id: thread } : {}) } },
+    () => [store], deepLanes);
+    const conversation = thread && !narrow ? await readSet(members[0]!.raw.identity) : undefined;
+    const allKeys = new Set(members.map(m => memberKey(m.raw.identity)));
+    const checkHits = (hits: readonly SourceIndexSearchHit[]) => {
+      for (const hit of hits) expect(allKeys.has(memberKey(hit.sourceItem))).toBe(true);
+    };
+    checkHits(ask);
+    for (const candidate of conversation?.candidates ?? []) expect(allKeys.has(memberKey(candidate.provenance.sourceItem))).toBe(true);
+    let hits: SourceIndexSearchHit[] = [];
+    let identities: ReturnType<typeof index.list> = [];
+    if (!narrow) {
+      const res = await worker.fetch(new Request('http://worker.test/v1/source/index/search', {
+        method: 'POST', body: JSON.stringify({ corpus_id: c.corpusId, query, retrieval_mode: 'keyword', all_tiers: false,
+          ...(c.trustDomain === 'secure_local' ? { include_private_names: true } : {}) }),
+      }));
+      if (res.status === 403) expect((await res.json()).error.code).toBe('source_index_policy_violation');
+      else {
+        expect(res.status).toBe(200);
+        hits = (await res.json()).hits;
+        checkHits(hits);
+      }
+      refreshTime += PEOPLE_INDEX_MIN_REBUILD_MS;
+      await people.refreshIfChanged();
+      identities = index.list();
+      for (const person of identities) for (const id of person.identities) {
+        expect(members.some(m => m.senderId === id.senderId && c.provider === id.provider)).toBe(true);
+      }
+    }
+    for (const member of members) {
+      const id = member.raw.identity;
+      const key = memberKey(id);
+      const compare = (stage: ReadStage, layer: AdmissionContext['layer'], actual: AdmissionReadValue[], value: string, identity = key) => {
+        const { visible: admitted, reason } = expectedMember(c, f, member, stage, layer, narrow);
+        const matchesAccount = requestedAccount === undefined || requestedAccount === id.accountScope;
+        const visible = admitted && matchesAccount && (stage !== 'people_index' || c.family === 'email' || c.family === 'chat');
+        const log = (event: AdmissionDisagreement) => gaps.push(formatGap({ ...event, scenario: `${scenario} (${id.providerItemId})` }));
+        compareAdmissionRead({ corpusId: c.corpusId, stage, layer, serving: actual,
+          shadow: visible ? [{ identity, value }] : [], reason }, log);
+        // A known extra row must not mask a second copy or someone else's
+        // name or text returned under that same identity.
+        if (!visible && actual.length > 0) {
+          compareAdmissionRead({ corpusId: c.corpusId, stage, layer, serving: actual,
+            shadow: [{ identity, value }], reason: 'returned_value' }, log);
+        }
+        // G2 distinguishes durable ownership from a new grant generation. Keep
+        // this compatibility assertion beside G0 even where G0 and serving agree.
+        if (scenario === 'same owner reapproved' && def.selection && (member.folder === 'selected' || (member.folder === 'names' && layer === 'names'))
+          && stage !== 'people_index' && !visible) {
+          compareAdmissionRead({ corpusId: c.corpusId, stage, layer, serving: actual,
+            shadow: [{ identity, value }], reason: 'same_owner_history' }, log);
+        }
+      };
+      const names = (hits: readonly SourceIndexSearchHit[]) => hits.filter(hit => memberKey(hit.sourceItem) === key)
+        .map(hit => ({ identity: memberKey(hit.sourceItem), value: hit.provenance?.citation?.title ?? null }));
+      compare('answer', 'names', names(ask), member.title);
+      const chunks: AdmissionReadValue[] = [];
+      for (const hit of ask.filter(hit => memberKey(hit.sourceItem) === key)) {
+        const content = await lanes.contentProviders[c.corpusId]?.fetchLocalContent({
+          provenance: hit.provenance ?? { sourceItem: hit.sourceItem }, trustDomain: c.trustDomain, maxChars: 2048,
+        });
+        for (const value of content?.chunks ?? []) chunks.push({ identity: memberKey(hit.sourceItem), value });
+      }
+      compare('answer', 'content', chunks, member.text);
+      if (narrow) continue;
+      compare('search', 'names', names(hits), member.title);
+      const item = getOwnerTierItem(ownerTierItemId(id), { storePaths: [dbPath] }, { withPreview: true });
+      const previewKey = item && memberKey(parseOwnerTierItemId(item.item_id));
+      compare('preview', 'names', item ? [{ identity: previewKey!, value: item.title }] : [], member.title);
+      compare('preview', 'content', item?.preview ? [{ identity: previewKey!, value: item.preview }] : [], member.text);
+      const deep = conversation ?? await readSet(id);
+      const candidates = conversation ? deep.candidates.filter(candidate => memberKey(candidate.provenance.sourceItem) === key) : deep.candidates;
+      compare('deep_read', 'content', candidates.flatMap(candidate => candidate.chunks.map(value =>
+        ({ identity: memberKey(candidate.provenance.sourceItem), value }))), member.text);
+      const senderKey = (provider: string, senderId: string) => JSON.stringify([provider, senderId]);
+      compare('people_index', 'names', identities.flatMap(person => person.identities.filter(i => i.senderId === member.senderId)
+        .map(i => ({ identity: senderKey(i.provider, i.senderId!), value: person.displayName }))),
+        member.sender, senderKey(c.provider, member.senderId));
+    }
+  }
+  try {
+    if (archiveOnly) {
+      await sample('archive only');
+      return gaps;
+    }
+    await sample('approved rows');
+    await sample('folder Ask', true);
+    if (def.selection === 'path_prefix') await sample('folder Ask with conflicting account', true, 'other-account');
+    if (def.requiresRecovery) {
+      f.blockRecovery();
+      await sample('recovery pending');
+    }
+    if (identityMatrix) {
+      f.revoke();
+      await sample('disconnected history');
+      f.reconnect(fixtureOwner(c.provider, 'same'));
+      f.approve();
+      const fresh = f.observation();
+      expect(compareProviderAccounts(fresh.account.id!, fresh.processingAuthority.owner!.id!)).toBe('same');
+      const stamp = def.liveScope ? fresh.processingAuthority.observedUnder : fresh.readAuthority.generation;
+      expect(stamp).toBeDefined();
+      expect(stamp).not.toBe(def.liveScope ? members[0]!.observation : members[0]!.generation);
+      await sample('same owner reapproved');
+      f.reconnect(fixtureOwner(c.provider, 'changed'));
+      f.approve();
+      await sample('changed owner');
+    }
+    if (identityMatrix || providerFolder) {
+      f.reconnect();
+      f.approve();
+      // A stale generation alone hides the old files. Also exercise data
+      // observed under today's valid approval with no proven account id.
+      if (providerFolder) members.push(await seedMember(c, store, f, 'selected', 'live', 'current'));
+      await sample('unproven owner');
+    }
+  } finally { index.close(); worker.close(); }
+  if (identityMatrix) gaps.push(...await readParity(c, true));
+  return gaps;
+}
+
+test('equal populations with swapped names or text remain visible without logging either value', () => {
+  const shadow = [{ identity: 'fixture-a', value: 'first value' }, { identity: 'fixture-b', value: 'second value' }];
+  const serving = shadow.map((row, i) => ({ ...row, value: shadow[1 - i]!.value }));
+  const events: AdmissionDisagreement[] = [];
+  for (const layer of ['names', 'content'] as const) {
+    compareAdmissionRead({ corpusId: 'example', stage: 'answer', layer, serving, shadow, reason: 'retained' }, e => events.push(e));
+    compareAdmissionRead({ corpusId: 'example', stage: 'answer', layer, serving: [...shadow].reverse(), shadow, reason: 'retained' }, e => events.push(e));
+  }
+  expect(events.map(e => e.differingConstraints)).toEqual([['name'], ['text']]);
+  for (const row of shadow) {
+    expect(JSON.stringify(events)).not.toContain(row.identity);
+    expect(JSON.stringify(events)).not.toContain(row.value);
   }
 });
