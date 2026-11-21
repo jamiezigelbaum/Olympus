@@ -3630,16 +3630,18 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 `corpus_id must be one of: ${sourceIndexSearchCorpusIds(connectorStores).join(', ')}.`,
               );
             }
-            if (!canSearch(corpusId)) {
+            const connectorStore = connectorStoresByCorpusId.get(corpusId);
+            const siblingIds = record.all_tiers === false || record.trust_domain !== undefined
+              ? []
+              : options.connectorStoreTierSiblings?.(corpusId) ?? [];
+            const searchableIds = [...new Set([corpusId, ...siblingIds])].filter(canSearch);
+            if (!searchableIds.length) {
               throw new EmailSourceWorkerError(403, 'source_index_policy_violation', 'This corpus is not enabled for search.');
             }
-            const connectorStore = connectorStoresByCorpusId.get(corpusId);
-            if (!connectorStore) throw new EmailSourceWorkerError(
-              501,
-              'source_index_search_not_supported',
-              `The connector store for ${corpusId} is not mounted.`,
+            if (canSearch(corpusId) && !connectorStore) throw new EmailSourceWorkerError(
+              501, 'source_index_search_not_supported', `The connector store for ${corpusId} is not mounted.`,
             );
-            if (!personalNamesOnly && connectorStore.trustDomain !== 'secure_local') {
+            if (!personalNamesOnly && connectorStore?.trustDomain !== 'secure_local') {
               throw new EmailSourceWorkerError(400, 'invalid_request', 'include_private_names requires a Private corpus.');
             }
             const searchConnectorStore = async (store: LocalConnectorStore) => {
@@ -3648,7 +3650,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               const readScopeSignature = JSON.stringify(mandatoryScope);
               const searchRequest = parseConnectorStoreIndexSearchRequestRecord(
                 // A sibling tier is searched under its own corpus id.
-                store === connectorStore ? record : { ...record, corpus_id: store.corpusId },
+                { ...record, corpus_id: store.corpusId },
                 store,
                 connectorStoreAccountScopes.get(store.corpusId),
                 store.family === 'chat'
@@ -3733,7 +3735,15 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 },
               };
             };
-            const primary = await searchConnectorStore(connectorStore);
+            const runs: Array<NonNullable<Awaited<ReturnType<typeof searchConnectorStore>>>> = [];
+            for (const id of searchableIds) {
+              const store = connectorStoresByCorpusId.get(id);
+              if (!store) continue; // A sibling can be mounted on demand.
+              const run = await searchConnectorStore(store);
+              if (run) runs.push(run);
+              else if (id === corpusId) break;
+            }
+            const primary = runs[0];
             if (!primary) {
               throw new EmailSourceWorkerError(
                 403,
@@ -3742,27 +3752,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               );
             }
             const searchRequest = primary.searchRequest;
-            // Every tier of the named source (design section 5), unless the
-            // caller pinned this one corpus with `all_tiers: false`. A sibling
-            // that does not exist yet (an on-demand Public store) or whose
-            // scope is not approved is simply not searched.
-            // An explicit trust_domain is a single-corpus consistency check,
-            // so it pins the search as `all_tiers: false` does.
-            const siblings = record.all_tiers === false || record.trust_domain !== undefined
-              ? []
-              : (options.connectorStoreTierSiblings?.(connectorStore.corpusId) ?? [])
-                .filter(canSearch)
-                .flatMap((siblingCorpusId) => {
-                  const sibling = connectorStoresByCorpusId.get(siblingCorpusId);
-                  return sibling && sibling !== connectorStore ? [sibling] : [];
-                });
-            const siblingRuns: Array<NonNullable<Awaited<ReturnType<typeof searchConnectorStore>>>> = [];
-            for (const sibling of siblings) {
-              const run = await searchConnectorStore(sibling);
-              if (run) siblingRuns.push(run);
-            }
-            const runs = [primary, ...siblingRuns];
-            const tiered = siblingRuns.length > 0;
+            const tiered = runs.length > 1;
             // The body and its independent title match may have different visibility.
             const taggedByHit = new Map(runs.flatMap(run => run.result.hits.flatMap(hit => {
               const fallback = hit[SEARCH_GRANT_MATCH]?.metadataFallback;
@@ -3860,11 +3850,12 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               }
               const releasedHits = hits.map((rankedHit) => {
                 const { corpusId: hitCorpusId, trustDomain: _hitTrustDomain, trustTier: _hitTrustTier, keywordLeader: _hitKeywordLeader, newestInStore: _hitNewestInStore, pinAppended: _hitPinAppended, ...hit } = rankedHit;
-                if (!withheldChildIdentifiers.has(rankedHit)) return addSelectedItemToSearchHit(hitCorpusId, hit);
+                if (!withheldChildIdentifiers.has(rankedHit)) return addSelectedItemToSearchHit(hitCorpusId, { ...hit, corpus_id: hitCorpusId });
                 const { family, provider, accountScope } = hit.sourceItem;
                 const title = hit.provenance?.citation?.title;
                 const sourceItem = { family, provider, accountScope };
                 return {
+                  corpus_id: hitCorpusId,
                   sourceItem,
                   provenance: { sourceItem, citation: { sourceLabel: provider, ...(title ? { title } : {}) } },
                   score: hit.score,
@@ -3876,7 +3867,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               ));
               const safeResult = {
                 kind: 'source_index_search',
-                corpus_id: connectorStore.corpusId,
+                corpus_id: corpusIds === undefined ? corpusId : primary.store.corpusId,
                 retrieval_source: 'local_index',
                 // A hit's own tier is retrieval-internal (router.ts): not returned.
                 hits: releasedHits,
@@ -3893,13 +3884,13 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                     }
                   : {}),
                 audit: {
-                  request_id: `${connectorStore.corpusId}:connector-store-search`,
+                  request_id: `${primary.store.corpusId}:connector-store-search`,
                   retrieval_source: 'local_index',
                   queries_attempted: runs.length,
                   metadata_hits: hits.length,
                   items_returned: hits.length,
                   latency_ms: runs.reduce((total, run) => total + run.result.latencyMs, 0),
-                  ...(tiered ? { searched_corpora: runs.map((run) => run.store.corpusId) } : {}),
+                  ...(tiered || primary.store.corpusId !== corpusId ? { searched_corpora: runs.map((run) => run.store.corpusId) } : {}),
                   ...(searchRequest.explicitEmptyChatScope
                     ? {}
                     : { lane_audits: released.flatMap(result => result.laneAudits ?? []) }),

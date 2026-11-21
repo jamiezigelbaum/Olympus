@@ -1049,7 +1049,10 @@ async function searchEverySource(ctx: OperationContext, query: string, params: R
   const maxResults = optionalNumber(params.max_results, 'max_results');
   const includeLocators = optionalBoolean(params.include_locators, 'include_locators');
   const bySource = new Map<string, string>();
-  for (const corpus of publicSourceCorpusRegistry(ctx.config).list('search')) if (!bySource.has(corpus.sourceId)) bySource.set(corpus.sourceId, corpus.corpusId);
+  // One request per source. The worker chooses the first tier both registries allow.
+  for (const corpus of publicSourceCorpusRegistry(ctx.config).list('search')) {
+    if (!bySource.has(corpus.sourceId)) bySource.set(corpus.sourceId, corpus.corpusId);
+  }
   const results = await ctx.email.sourceIndexSearchMany([...bySource.values()], {
     query,
     ...(retrievalMode !== undefined ? { retrievalMode } : {}),
